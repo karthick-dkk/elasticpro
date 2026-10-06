@@ -1,0 +1,14 @@
+{
+  "why": "How a server with these roles is named: <client>-<base>-<n>. Roles::serverBase (PHP) and EpClientForm.serverBase (the form's preview) must both give these.",
+  "cases": [
+    { "roles": ["aiml"], "base": "AIML" },
+    { "roles": ["es_data_hot"], "base": "ES-Data-Hot" },
+    { "roles": ["es_data", "parser", "engine"], "base": "ES-Data-Parser-Engine" },
+    { "roles": ["engine", "parser", "es_data"], "base": "ES-Data-Parser-Engine" },
+    { "roles": ["es_data_hot", "es_coord"], "base": "ES-Data-Hot-Coord" },
+    { "roles": ["es_data_warm", "es_master"], "base": "ES-Data-Warm-Master" },
+    { "roles": ["engine", "ueba", "aiml"], "base": "Engine-UEBA-AIML" },
+    { "roles": ["parser", "s3_parser"], "base": "Parser-S3-Parser" },
+    { "roles": ["single_node"], "base": "Single-Node" }
+  ]
+}

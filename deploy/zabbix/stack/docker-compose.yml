@@ -1,0 +1,156 @@
+# Zabbix 7.0 LTS, sized for a small shared host, with the ElasticPro module mounted.
+#
+#   cd deploy/zabbix/stack
+#   ./setup.sh            # secrets, TLS, then `docker compose up -d`
+#
+# Memory is capped on every container. The host this was written for also runs
+# Elasticsearch and two other stacks in under 4 GB, and an uncapped Postgres or PHP pool
+# growing into the OOM killer takes out whatever else is on the box, not just Zabbix.
+name: zabbix
+
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: zabbix
+      POSTGRES_DB: zabbix
+      POSTGRES_PASSWORD_FILE: /run/secrets/db_password
+    secrets: [db_password]
+    # Small on purpose: shared_buffers default is 128 MB, which on this host is memory
+    # Elasticsearch is using.
+    command: ["postgres", "-c", "shared_buffers=48MB", "-c", "max_connections=60",
+              "-c", "work_mem=2MB", "-c", "maintenance_work_mem=32MB", "-c", "effective_cache_size=128MB"]
+    volumes: [db-data:/var/lib/postgresql/data]
+    networks: [zbx]
+    mem_limit: 320m
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U zabbix -d zabbix"]
+      interval: 10s
+      retries: 12
+
+  server:
+    image: zabbix/zabbix-server-pgsql:alpine-7.0-latest
+    restart: unless-stopped
+    depends_on:
+      db: { condition: service_healthy }
+    environment:
+      DB_SERVER_HOST: db
+      POSTGRES_USER: zabbix
+      POSTGRES_DB: zabbix
+      POSTGRES_PASSWORD_FILE: /run/secrets/db_password
+      ZBX_CACHESIZE: 32M
+      ZBX_HISTORYCACHESIZE: 16M
+      ZBX_HISTORYINDEXCACHESIZE: 4M
+      ZBX_TRENDCACHESIZE: 4M
+      ZBX_VALUECACHESIZE: 32M
+      ZBX_STARTPOLLERS: "3"
+      ZBX_STARTPOLLERSUNREACHABLE: "1"
+      ZBX_STARTPINGERS: "1"
+      ZBX_STARTDISCOVERERS: "1"
+      ZBX_STARTHTTPPOLLERS: "1"
+      ZBX_STARTPREPROCESSORS: "2"
+      ZBX_STARTTRAPPERS: "3"
+      # Vault macros ({$ELASTICSEARCH.PASSWORD} as a "Vault secret") resolve here, on the
+      # server, with a read-only token — see ../../vault/setup.sh.
+      # Scheduled reports (Cluster Management's weekly client report): the server asks the web
+      # service below to render a dashboard as PDF, then mails it.
+      ZBX_STARTREPORTWRITERS: "1"
+      ZBX_WEBSERVICEURL: http://web-service:10053/report
+      ZBX_VAULT: HashiCorp
+      ZBX_VAULTURL: http://vault:8200
+    # VAULT_TOKEN, from a 0600 file rather than this file.
+    env_file: [./secrets/zabbix-vault.env]
+    secrets: [db_password]
+    # Agents report here.
+    ports: ["10051:10051"]
+    # ssh.run items (the Windows jump host template) sign in with this key pair, made by
+    # ../jump-sim/setup.sh. Read-only: the server only reads it.
+    volumes: ["ssh-keys:/var/lib/zabbix/ssh_keys:ro"]
+    networks: [zbx, vault_net]
+    mem_limit: 384m
+
+  # Renders dashboards to PDF for scheduled reports; only the server may ask it. It opens the
+  # frontend at Administration → General → Other → Frontend URL (http://web:8080/ here).
+  web-service:
+    image: zabbix/zabbix-web-service:alpine-7.0-latest
+    restart: unless-stopped
+    environment:
+      ZBX_ALLOWEDIP: server
+    networks: [zbx]
+    mem_limit: 384m
+
+  web:
+    image: zabbix/zabbix-web-nginx-pgsql:alpine-7.0-latest
+    restart: unless-stopped
+    depends_on:
+      db: { condition: service_healthy }
+    environment:
+      ZBX_SERVER_HOST: server
+      DB_SERVER_HOST: db
+      POSTGRES_USER: zabbix
+      POSTGRES_DB: zabbix
+      POSTGRES_PASSWORD_FILE: /run/secrets/db_password
+      ZBX_SERVER_NAME: Zabbix
+      PHP_TZ: ${TZ:-UTC}
+      PHP_FPM_PM: ondemand
+      PHP_FPM_PM_MAX_CHILDREN: "6"
+      # The Clients page and report widgets keep roles, column settings and backups here.
+      EP_DATA_DIR: /var/lib/zabbix/elasticpro
+      # Host Inventory (separate repo: zabbix-host-inventory) keeps its data beside ours.
+      HOST_INVENTORY_DATA_DIR: /var/lib/zabbix/host-inventory
+    secrets: [db_password]
+    # HTTPS only. The image turns TLS on when the three files below exist.
+    ports: ["${ZBX_HTTPS_PORT:-9443}:8443"]
+    volumes:
+      - ./tls/ssl.crt:/etc/ssl/nginx/ssl.crt:ro
+      - ./tls/ssl.key:/etc/ssl/nginx/ssl.key:ro
+      - ./tls/dhparam.pem:/etc/ssl/nginx/dhparam.pem:ro
+      - ../module/elasticpro:/usr/share/zabbix/modules/elasticpro:ro
+      - ../module/ep_capacity:/usr/share/zabbix/modules/ep_capacity:ro
+      - ../module/ep_volume:/usr/share/zabbix/modules/ep_volume:ro
+      - ../module/ep_resources:/usr/share/zabbix/modules/ep_resources:ro
+      - ../module/ep_clients:/usr/share/zabbix/modules/ep_clients:ro
+      # Copied in from the zabbix-host-inventory repo (see its README). Absent, this is an
+      # empty folder with no manifest.json, which Zabbix skips.
+      - ../module/host_inventory:/usr/share/zabbix/modules/host_inventory:ro
+      # Empty and owned by zabbix in the image, so the new volume starts owned by zabbix too.
+      - ep-data:/var/lib/zabbix
+    # `ep_sso` is shared with the ElasticPro core alone — see ../compose.sso.yml.
+    networks: [zbx, ep_sso]
+    mem_limit: 256m
+
+  # Zabbix agent 2 for the machine this runs on, so Linux metrics for it reach the fleet
+  # view. Host PID and network namespaces, so it measures the machine rather than its own
+  # container. Passive checks only, and only from the Docker networks the server is on.
+  agent:
+    image: zabbix/zabbix-agent2:alpine-7.0-latest
+    restart: unless-stopped
+    network_mode: host
+    pid: host
+    environment:
+      ZBX_HOSTNAME: ${ZBX_AGENT_HOSTNAME:-zabbix-agent}
+      ZBX_SERVER_HOST: "172.16.0.0/12"
+      ZBX_PASSIVE_ALLOW: "true"
+      ZBX_ACTIVE_ALLOW: "false"
+    # The machine's own file systems, read-only, so disk discovery sees them (as /hostfs, /hostfs/boot
+    # …) and not only the few files Docker bind-mounts into the container. rslave: mounts made on the
+    # host later show up too. Read-only, and the agent runs as the zabbix user.
+    volumes: ["/:/hostfs:ro,rslave"]
+    mem_limit: 64m
+
+volumes:
+  db-data:
+  ep-data:
+  ssh-keys:
+
+networks:
+  zbx: {}
+  ep_sso:
+    external: true
+  vault_net:
+    external: true
+
+secrets:
+  db_password:
+    file: ./secrets/db_password

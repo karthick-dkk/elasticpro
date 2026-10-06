@@ -1,0 +1,38 @@
+# Signing in from Zabbix, the server-managed way. Layered over the hosted stack.
+#
+# This overlay is optional: an admin can pair from Config → Zabbix instead, and
+# the core keeps the secret in its data dir (docs/HANDBOOK.md, "Zabbix connection"). When
+# this overlay IS used, its secret wins and Config → Zabbix shows it as managed by server
+# config (pairing from the UI is then off). nginx now forwards /sso/zabbix and
+# /zabbix/pair itself (signed, rate-limited, X-Real-IP), so the ep_sso network below is
+# one way for the module to reach the core, no longer the only one.
+#
+#   docker network create ep_sso            # once; shared with the Zabbix frontend only
+#   openssl rand -hex 32 > secrets/zabbix_sso_secret && chmod 640 secrets/zabbix_sso_secret
+#   docker compose -f docker-compose.yml -f zabbix/compose.sso.yml up -d core
+#
+# Two things change for the core and nothing else:
+#
+# * It holds the shared secret. The Zabbix module signs every sign-in request with it; a
+#   request that does not verify is refused. Mounted as a file, never an environment
+#   value, so it is not in `docker inspect` output.
+# * It joins `ep_sso`, a network with exactly one other member: the Zabbix frontend. That
+#   is how the module reaches /sso/zabbix without going through nginx. The frontend
+#   does not join `internal`, so it cannot see the database.
+services:
+  core:
+    environment:
+      ELASTICPRO_ZABBIX_SSO_SECRET_FILE: /run/secrets/zabbix_sso_secret
+    secrets: [zabbix_sso_secret]
+    networks:
+      internal: {}
+      ep_sso:
+        aliases: [ep-core]
+
+networks:
+  ep_sso:
+    external: true
+
+secrets:
+  zabbix_sso_secret:
+    file: ./secrets/zabbix_sso_secret

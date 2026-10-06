@@ -1,0 +1,151 @@
+# ElasticPro, hosted. One exposed port: nginx on 443.
+#
+#   cp .env.example .env            # then edit
+#   docker compose up -d --build
+#
+# Signing in is the app's own job now — the first run creates the account `elasticpro` with
+# a random password: `docker compose exec core cat /app/data/initial-admin-password`. Edge
+# authentication is optional: make-htpasswd.sh and the htpasswd mount are still here so
+# re-enabling auth_basic in nginx.conf is a two-line change, not a rebuild.
+# The core is reachable ONLY through nginx. Never publish port 8765.
+services:
+  core:
+    # Defaults to a locally built image, so `docker compose up --build` works on a clone
+    # with no registry access at all. Set ELASTICPRO_IMAGE to a published tag —
+    # karthickdk02/elasticpro-core:0.1.0 — and compose pulls it instead, which is
+    # what turns a twenty-minute Rust build on a small server into a download.
+    image: ${ELASTICPRO_IMAGE:-elasticpro-core:latest}
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    restart: unless-stopped
+    # The core runs as uid 999; ./config is created by whoever ran the installer. Rather
+    # than chowning the directory to a uid from inside the image — which needs root on the
+    # host, and root is exactly what a `curl | bash` install cannot ask for — the container
+    # is given the host user's group as a supplementary one. The directory is already
+    # group-writable because its owner made it, so nothing has to be granted.
+    group_add:
+      - "${ELASTICPRO_GID:-1000}"
+    environment:
+      ELASTICPRO_BIND: 0.0.0.0
+      ELASTICPRO_DATA_DIR: /app/data
+      ELASTICPRO_CONFIG: /app/config/config_cluster.json
+      RUST_LOG: info,audit=info
+      # Fleet at Scale (100-300 clusters). Defaults match the plan's decisions; see
+      # README.md / PRODUCTION.md ("Scaling to a large fleet") for what each one trades
+      # off. All three are read by the core itself — this only sets what a fresh .env
+      # does not override.
+      ELASTICPRO_POLL_HEALTH_SECS: ${ELASTICPRO_POLL_HEALTH_SECS:-180}
+      ELASTICPRO_POLL_CONCURRENCY: ${ELASTICPRO_POLL_CONCURRENCY:-16}
+      ELASTICPRO_CACHE_MB: ${ELASTICPRO_CACHE_MB:-256}
+    volumes:
+      # Writable, because adding a cluster from the Config page is the normal way to set
+      # this up and a fresh install has no other way to do it — the read-only mount it
+      # replaced turned "Add cluster" into "Read-only file system (os error 30)".
+      #
+      # It is not a hole: CONFIG_WRITE is admin-only (auth.rs), the core already holds
+      # these credentials in memory, and the directory is owned by the container's uid
+      # with the host user's group, so both can edit it. Secrets in it stay sealed.
+      - ./config:/app/config           # config_cluster.json, secrets sealed
+      - core-data:/app/data            # pins.json — trust decisions
+      - ${SSH_KEYS_DIR:-./ssh}:/app/ssh:ro   # jump-host keys, read-only
+      # Only ./secrets/redis, never the whole ./secrets directory — the core has no
+      # business being able to read secrets/db_password. Empty (the `cache` profile is
+      # not in use) is fine: compose creates it, the file below is simply absent, and the
+      # entrypoint below leaves ELASTICPRO_REDIS_URL unset. Redis is optional at run time; the
+      # core's own disk cache ($ELASTICPRO_DATA_DIR/cache) works with no Redis at all.
+      - ./secrets/redis:/run/elasticpro-secrets:ro
+    # A bounded core is a core that fails loudly (OOM-killed, restarted, visible in
+    # `docker compose ps`) instead of taking the host down with it — the failure mode the
+    # unbounded scheduler work in Fleet at Scale is sized against, not a tuned ceiling.
+    # ELASTICPRO_MEM_LIMIT: lower it (512m, with ELASTICPRO_CACHE_MB=64) on a host shared with the Zabbix
+    # stack and Elasticsearch — see zabbix/README.md, "One host, both stacks".
+    mem_limit: ${ELASTICPRO_MEM_LIMIT:-1g}
+    # No change to the image's own ENTRYPOINT: this only builds ELASTICPRO_REDIS_URL from the
+    # redis_password secret file when it exists, because compose has no built-in way to
+    # turn a secret file into part of an env var's value. If a future core release reads
+    # an ELASTICPRO_REDIS_URL_FILE directly (the *_FILE convention the Vault/Zabbix secrets
+    # already use — see hcvault.rs), this override can be dropped in favour of that.
+    entrypoint: ["sh", "-c", "if [ -s /run/elasticpro-secrets/redis_password ]; then pw=$$(sed -e 's|%|%25|g' -e 's|/|%2F|g' -e 's|@|%40|g' -e 's|:|%3A|g' -e 's|?|%3F|g' -e 's|#|%23|g' /run/elasticpro-secrets/redis_password); export ELASTICPRO_REDIS_URL=\"redis://:$${pw}@redis:6379/0\"; fi; exec elasticpro-bridge /app/ui 8765"]
+    networks: [internal]
+    logging:
+      driver: json-file
+      options: { max-size: "50m", max-file: "10" }
+
+  # Optional L2 cache shared across restarts (and, if you ever run more than the one
+  # supported core replica, across replicas). The core works fully without it — the disk
+  # cache under $ELASTICPRO_DATA_DIR/cache survives a core restart on its own; Redis mainly
+  # saves the re-warm time and gives a second replica something to share. Off by default:
+  # `docker compose --profile cache up -d` after making secrets/redis/redis_password
+  # (`openssl rand -hex 32 > secrets/redis/redis_password`). Hex, not base64: the password
+  # goes into a redis:// URL, and base64's "/" ends the authority there — half of those
+  # passwords left the core logging "Redis URL did not parse" and quietly caching in
+  # memory and on disk instead. The core's entrypoint percent-encodes what it reads, so
+  # a password already in place keeps working.
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    profiles: ["cache"]
+    volumes:
+      - ./secrets/redis:/run/elasticpro-secrets:ro
+    # The same supplementary group the core is given, for the same reason: the password
+    # file belongs to whoever installed this, and 0640 beats making it world-readable.
+    group_add:
+      - "${ELASTICPRO_GID:-1000}"
+    entrypoint: ["sh", "-c", "if [ ! -s /run/elasticpro-secrets/redis_password ]; then echo 'redis: /run/elasticpro-secrets/redis_password is missing or empty - see README.md (Redis, optional)' >&2; exit 1; fi; exec redis-server --maxmemory 512mb --maxmemory-policy noeviction --save \"\" --appendonly no --requirepass \"$$(cat /run/elasticpro-secrets/redis_password)\""]
+    networks: [internal]
+    # No published ports (no `ports:` key) and no top-level `secrets:` mount — only the
+    # cluster reachable on the internal compose network can ever see this password.
+    mem_limit: 640m
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a \"$$(cat /run/elasticpro-secrets/redis_password)\" --no-auth-warning ping | grep -q PONG"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    logging:
+      driver: json-file
+      options: { max-size: "50m", max-file: "10" }
+
+  nginx:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    depends_on: [core]
+    ports:
+      - "${LISTEN:-443}:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      # Unused while nginx.conf has no auth_basic; kept so turning it back on is a
+      # config change rather than a compose change.
+      - ./nginx/htpasswd:/etc/nginx/htpasswd:ro
+      - ./tls:/etc/nginx/tls:ro         # fullchain.pem + privkey.pem
+    networks: [internal]
+    logging:
+      driver: json-file
+      options: { max-size: "50m", max-file: "10" }
+
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: elasticpro
+      POSTGRES_USER: elasticpro
+      POSTGRES_PASSWORD_FILE: /run/secrets/db_password
+    secrets: [db_password]
+    volumes:
+      - db-data:/var/lib/postgresql/data
+      - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    networks: [internal]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U elasticpro"]
+      interval: 10s
+
+secrets:
+  db_password:
+    file: ./secrets/db_password
+
+volumes:
+  core-data:
+  db-data:
+
+networks:
+  internal:

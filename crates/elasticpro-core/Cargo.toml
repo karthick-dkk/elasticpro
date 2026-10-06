@@ -1,0 +1,77 @@
+[package]
+name = "elasticpro-core"
+version.workspace = true
+edition.workspace = true
+description = "ElasticPro desktop core: read-only ES transport, TLS pinning, SSH jump-host tunnels"
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "elasticpro-bridge"
+path = "src/bin/bridge.rs"
+required-features = ["bridge"]
+
+[features]
+default = ["vault"]
+vault = ["dep:keyring"]
+bridge = ["dep:axum", "dep:tower-http", "dep:redis", "dep:futures-util"]
+
+[dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "sync", "time", "macros", "fs"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "socks", "json", "gzip"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+rustls-native-certs = "0.8"
+webpki-roots = "0.26"
+rustls-pki-types = "1"
+x509-parser = "0.16"
+sha2 = "0.10"
+aes-gcm = "0.10"
+pbkdf2 = { version = "0.12", default-features = false, features = ["hmac"] }
+hmac = "0.12"
+russh = { version = "0.63", default-features = false, features = ["ring", "rsa", "flate2", "legacy-ed25519-pkcs8-parser"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+base64 = "0.22"
+regex = "1"
+thiserror = "2"
+tracing = "0.1"
+# "json": the hosted bridge writes structured audit lines a log collector can parse.
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+parking_lot = "0.12"
+dirs = "6"
+hex = "0.4"
+rand = "0.8"
+keyring = { version = "3", optional = true }
+axum = { version = "0.8", optional = true }
+tower-http = { version = "0.6", optional = true, features = ["fs", "cors"] }
+# The fleet cache's disk copy of a large dataset is gzipped.
+flate2 = "1"
+# Hosted only: the fleet cache writes through to Redis when ELASTICPRO_REDIS_URL is set. Behind
+# the `bridge` feature so the desktop build does not carry a Redis client it never uses.
+redis = { version = "1", optional = true, default-features = false, features = ["tokio-comp"] }
+# The /events stream in the bridge binary.
+futures-util = { version = "0.3", optional = true }
+
+[dev-dependencies]
+# A real TLS server on loopback, so the trust-on-first-use and pin-mismatch paths are
+# exercised through an actual handshake rather than a mocked verifier.
+rcgen = "0.13"
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+
+# One credential-store backend per platform. Without a target-specific feature keyring
+# compiles but has no store to talk to, which is how Linux behaved before.
+[target.'cfg(target_os = "windows")'.dependencies]
+keyring = { version = "3", optional = true, features = ["windows-native"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { version = "3", optional = true, features = ["apple-native"] }
+
+# linux-keyutils: pure Rust, no system library. Secret Service would persist across a
+# reboot, but it links libdbus, which would make libdbus-1-dev a build requirement for
+# anyone compiling on Linux — too much to ask for an opt-in convenience. The credential
+# lives in the kernel session keyring instead, so it lasts the login session; the
+# encrypted config file remains the way to keep a secret across restarts.
+[target.'cfg(target_os = "linux")'.dependencies]
+keyring = { version = "3", optional = true, features = ["linux-native"] }

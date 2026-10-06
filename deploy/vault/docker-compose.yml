@@ -1,0 +1,58 @@
+# Vault for the Elasticsearch passwords ElasticPro and Zabbix both need.
+#
+#   docker network create vault_net
+#   docker compose up -d
+#   ./setup.sh             # once: init, KV engine, policies, AppRole, Zabbix token
+#
+# Who can reach it: the Zabbix server and the ElasticPro core, over `vault_net`, and an
+# administrator on this host at 127.0.0.1:8200 (ssh -L 8200:127.0.0.1:8200 for the UI).
+name: vault
+
+services:
+  vault:
+    image: hashicorp/vault:1.18
+    restart: unless-stopped
+    # Just "server": the image entrypoint adds -config=/vault/config (which holds vault.hcl),
+    # drops to the vault user and owns /vault/file. Naming the file again loads it twice —
+    # two listeners on one port.
+    command: ["server"]
+    cap_add: [IPC_LOCK]
+    environment:
+      VAULT_ADDR: http://127.0.0.1:8200
+    volumes:
+      - ./vault.hcl:/vault/config/vault.hcl:ro
+      - vault-data:/vault/file
+    ports: ["127.0.0.1:8200:8200"]
+    networks: [vault_net]
+    mem_limit: 256m
+
+  # TEST ONLY. Unseals Vault after a restart with a key kept on this host, so a VM reboot
+  # does not quietly break every password lookup. That puts the key beside the data it
+  # protects, which is exactly what sealing exists to prevent — in production use
+  # auto-unseal (a cloud KMS or a Transit Vault) and delete this service.
+  unsealer:
+    image: hashicorp/vault:1.18
+    restart: unless-stopped
+    depends_on: [vault]
+    environment:
+      VAULT_ADDR: http://vault:8200
+    volumes:
+      - ./secrets/unseal_key:/run/secrets/unseal_key:ro
+    entrypoint: ["sh", "-c"]
+    command:
+      - |
+        while true; do
+          if [ -s /run/secrets/unseal_key ] && vault status -format=json 2>/dev/null | grep -q '"sealed": true'; then
+            vault operator unseal "$$(cat /run/secrets/unseal_key)" >/dev/null && echo "unsealed"
+          fi
+          sleep 15
+        done
+    networks: [vault_net]
+    mem_limit: 64m
+
+volumes:
+  vault-data:
+
+networks:
+  vault_net:
+    external: true

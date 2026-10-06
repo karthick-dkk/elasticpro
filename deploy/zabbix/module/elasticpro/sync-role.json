@@ -1,0 +1,10 @@
+{
+    "_comment": "The one definition of ElasticPro's Zabbix API identity. Read by setup/zbx_api_user.py and by the module's pairing (lib/Pairing.php). Change it here only.",
+    "roleName": "ElasticPro sync",
+    "roleType": 3,
+    "userName": "elasticpro-sync",
+    "noFrontendGroup": "No access to the frontend",
+    "scriptTokenName": "elasticpro",
+    "pairedTokenPrefix": "elasticpro-paired-",
+    "methods": ["host.get", "template.get", "usergroup.get", "usermacro.get", "hostgroup.get", "item.get"]
+}

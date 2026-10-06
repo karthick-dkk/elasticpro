@@ -1,0 +1,49 @@
+# Evaluate the ElasticPro automation rules and write the document Zabbix polls.
+#
+#   install -m644 elasticpro-scrape.{service,timer} /etc/systemd/system/
+#   systemctl daemon-reload && systemctl enable --now elasticpro-scrape.timer
+#
+# Read-only by construction: the rules return descriptions of work, never perform it.
+[Unit]
+Description=ElasticPro automation scrape
+Documentation=file:///opt/elasticpro/deploy/zabbix/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=elasticpro
+Group=elasticpro
+WorkingDirectory=/opt/elasticpro
+
+# --config must be readable by this user and must not hold sealed (enc:v1:) secrets,
+# which only a person at the keyboard can unlock. The scrape says so rather than
+# reporting every cluster unreachable.
+# --auth-user is always passed, not only when it is required. The bridge decides whether
+# to demand it from its BIND address, not the client's: a bridge on 0.0.0.0 rejects even a
+# loopback request that has no X-Auth-User. On a loopback-only bridge the name is ignored
+# except in the audit log, where attributing the scrape to itself is what you want anyway.
+# A bridge with accounts (bound beyond loopback) wants an API token: Accounts → API tokens,
+# role "user", the secret on one line in a root-only file. systemd hands it over as a
+# credential, so it is never in the unit or the environment. Uncomment both lines:
+#LoadCredential=elasticpro-token:/etc/elasticpro/scraper_token
+#Environment=ELASTICPRO_TOKEN_FILE=%d/elasticpro-token
+# --memory carries the last index listing to the next run, so --indices-every can keep a
+# cluster's full index list to one fetch per half hour however often the timer fires.
+ExecStart=/usr/bin/node /opt/elasticpro/tools/elasticpro-scrape.mjs \
+  --config /etc/elasticpro/clusters.yaml \
+  --bridge http://127.0.0.1:8765 \
+  --auth-user elasticpro-scrape \
+  --memory /var/lib/elasticpro/automation-memory.json --indices-every 30 \
+  --out /var/lib/elasticpro/automation.json
+
+# It reads Elasticsearch and writes one file. Nothing else is needed.
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+ReadWritePaths=/var/lib/elasticpro
+CapabilityBoundingSet=

@@ -1,0 +1,21 @@
+# cargo-audit configuration (also read by rustsec/audit-check in CI).
+#
+# Advisories are ignored here ONLY when there is no fixed version to move to and the
+# reason is written down. Every entry is a standing debt, not a dismissal: when a patch
+# lands, delete the line and take the upgrade. Anything ignored here is also disclosed
+# in SECURITY.md, so it is visible to someone reading the repo rather than buried in CI.
+
+[advisories]
+ignore = [
+    # RUSTSEC-2023-0071 — "Marvin Attack": a timing sidechannel in the `rsa` crate that
+    # can leak a private key to an attacker able to measure many private-key operations
+    # precisely.
+    #
+    # No patched release exists (RustCrypto/RSA#626 is still open), so there is nothing
+    # to upgrade to. It reaches us through russh's "rsa" feature, which is what lets the
+    # app authenticate to a jump host with an id_rsa key — support the handbook documents
+    # and that plenty of jump hosts still require. Dropping the feature would remove that.
+    #
+    # Revisit when RustCrypto/RSA ships a fix, or if RSA jump-host keys stop being needed.
+    "RUSTSEC-2023-0071",
+]

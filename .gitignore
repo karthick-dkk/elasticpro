@@ -1,0 +1,51 @@
+# Rust
+/target/
+**/*.rs.bk
+
+# Cross-build output (tools/build-windows-cross.sh)
+/dist/
+
+# Tauri
+/src-tauri/target/
+/src-tauri/gen/
+
+# Runtime data written beside the exe in portable mode
+/data/*
+!/data/README.txt
+/WebView2Runtime/*
+!/WebView2Runtime/PUT-RUNTIME-HERE.txt
+
+# Operator config — may hold credentials. Never commit.
+config_cluster.json
+clusters.yaml
+!/lab/clusters.yaml
+!/lab/clusters-nocred.yaml
+!/ui/clusters.example.yaml
+pins.json
+
+# Editors / tooling
+/.serena/
+.DS_Store
+.idea/
+.vscode/
+.gstack/
+node_modules/
+
+# Deploy secrets written by the setup scripts (Vault init, tokens, TLS keys). Never commit.
+/deploy/secrets/
+/deploy/vault/secrets/
+/deploy/zabbix/stack/secrets/
+/deploy/zabbix/stack/tls/
+/deploy/zabbix/module/elasticpro/config.php
+
+# Copied in from the zabbix-host-inventory repo at install time; not ours to track.
+deploy/zabbix/module/host_inventory/
+
+# Release artifacts belong in GitHub Releases, not the tree: a binary tracked beside its
+# own source drifts behind it. These three are what a local `tools/build-windows-cross.sh
+# --install` drops at the repo root, and previous-releases/ is where that script moves the
+# build it replaces; CI builds the packages people actually install.
+/*.exe
+/WebView2Loader.dll
+/SHA256SUMS.txt
+/previous-releases/

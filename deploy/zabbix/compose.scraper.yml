@@ -1,0 +1,65 @@
+# Adds the automation scrape to the hosted stack.
+#
+#   docker compose -f docker-compose.yml -f zabbix/compose.scraper.yml up -d
+#
+# The scraper talks to the core over the internal network — the core is still never
+# published — and writes one JSON file to a volume nginx serves. See README.md for the one
+# nginx location this needs, and give that location its own auth_basic: the server block
+# has none any more, so without it the fleet's index names are public.
+#
+# The API token (Accounts → API tokens, role "user" — the scrape reads indices and
+# snapshots, so "guest" is not enough) is a file, secrets/scraper_token, mounted as a Docker
+# secret: never an environment value, so not in `docker inspect`. The same file serves
+# compose.plan.yml. Upgrading from ELASTICPRO_TOKEN in deploy/.env: put its value in that file
+# (one line, chmod 640) and remove it from .env.
+services:
+  scraper:
+    image: node:22-alpine
+    restart: unless-stopped
+    depends_on: [core]
+    environment:
+      # The floor is five minutes: proving an index is safe to delete means listing every
+      # snapshot in every repository, and indices are dated by day.
+      ELASTICPRO_INTERVAL: "300"
+      ELASTICPRO_TOKEN_FILE: /run/secrets/scraper_token
+    secrets: [scraper_token]
+    volumes:
+      - ../ui:/app/ui:ro
+      - ../tools:/app/tools:ro
+      - ./config:/app/config:ro
+      - scrape-state:/app/state
+    # `|| true` because a failed scrape must not stop the loop: the staleness trigger in
+    # the Zabbix template is what reports a scraper that has genuinely stopped.
+    # --memory keeps the index list between runs; --indices-every 30 re-lists a cluster's
+    # indices at most every half hour instead of every run.
+    command:
+      - sh
+      - -c
+      - |
+        while true; do
+          node /app/tools/elasticpro-scrape.mjs \
+            --config /app/config/config_cluster.json \
+            --bridge http://core:8765 \
+            --auth-user scraper \
+            --memory /app/state/memory.json --indices-every 30 \
+            --out /app/state/automation.json || true
+          sleep "$$ELASTICPRO_INTERVAL"
+        done
+    networks: [internal]
+    mem_limit: 192m
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+  # Compose appends override volumes to the base list, so this adds the mount without
+  # restating nginx's own.
+  nginx:
+    volumes:
+      - scrape-state:/usr/share/nginx/state:ro
+
+volumes:
+  scrape-state:
+
+secrets:
+  scraper_token:
+    file: ./secrets/scraper_token

@@ -1,0 +1,31 @@
+/* Client resources widget: sections over their columns (as the Volume report), values centred,
+   the client fixed on the left. */
+.ep-res-toolbar { display: flex; align-items: center; gap: 8px; justify-content: flex-end; padding: 0 0 6px; }
+.ep-res-count { margin-right: auto; opacity: .75; }
+.ep-res-scroll { overflow-x: auto; }
+.ep-res-table { white-space: nowrap; font-variant-numeric: tabular-nums; }
+/* The frozen first column must hide what scrolls under it in every Zabbix theme: rows and row
+   groups pass the table's own (theme) background down to it, instead of staying transparent. */
+.ep-res-table thead, .ep-res-table tbody, .ep-res-table tr { background: inherit; }
+.ep-res-table th, .ep-res-table td { text-align: center; }
+.ep-res-table .ep-res-first { position: sticky; left: 0; z-index: 1; text-align: left; background: inherit; font-weight: bold; }
+.ep-res-table thead .ep-res-first { z-index: 2; }
+.ep-res-table th.ep-res-group { font-weight: bold; }
+.ep-res-table .ep-res-start { border-left: 2px solid rgba(128, 128, 128, .45); }
+.ep-res-table td .ep-res-sub { opacity: .8; font-size: 11px; }
+/* Used: yellow at {$EP.USAGE.WARN} (80), red at {$EP.USAGE.HIGH} (90). */
+.ep-res-table td.ep-warn { background: #ffd54f; color: #1f1f1f; }
+.ep-res-table td.ep-high { background: #e53935; color: #fff; }
+/* Allocated below requested (or below purchased): outlined, marked, the request in the tooltip. */
+.ep-res-table td.ep-short { outline: 2px dashed #e53935; outline-offset: -3px; font-weight: bold; }
+.ep-res-table td.ep-short::after { content: ' \25BC'; color: #e53935; }
+.ep-res-table td.ep-high.ep-short::after { color: #fff; }
+/* A request nobody entered. */
+.ep-res-table td.ep-unset { opacity: .55; font-style: italic; }
+/* The empty state, in view at the left rather than centred across a very wide table. */
+.ep-empty { text-align: left; padding: 14px 4px; }
+/* The expand column, and the type pills. */
+.ep-res-table .ep-res-toggle { width: 22px; padding: 0 2px; }
+.ep-pill { display: inline-block; padding: 1px 7px; border-radius: 10px; font-size: 11px; font-weight: bold; }
+.ep-res-table td.ep-di { color: #0d47a1; } .ep-res-table td.ep-op { color: #4527a0; }
+.ep-res-toolbar select { font: inherit; padding: 3px 4px; }

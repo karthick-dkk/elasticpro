@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ElasticPro</title>
+  <link rel="icon" href="icons/icon32.png">
+  <link rel="stylesheet" href="css/app.css?v=2">
+  <!-- Inside Zabbix the theme is Zabbix's. Stamped here, before the first paint, from what
+       js/core/embed.js stored for this tab — otherwise each Zabbix page load flashed this
+       app's own saved theme first. Only a stored value is read; the mapping lives there. -->
+  <script>try { var t = new URLSearchParams(location.search).get('embed') === '1' && sessionStorage.getItem('elasticpro.embedTheme'); if (t) document.documentElement.setAttribute('data-theme', t); } catch (e) {}</script>
+</head>
+<body>
+  <div id="root"></div>
+  <script src="vendor/js-yaml.min.js"></script>
+  <script type="module" src="js/app.js"></script>
+</body>
+</html>

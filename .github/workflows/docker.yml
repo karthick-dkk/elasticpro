@@ -1,0 +1,195 @@
+name: docker
+
+# The hosted core, published to Docker Hub on every release tag.
+#
+# Its own workflow rather than another job in build.yml: that file owns the release and
+# its assets, and a registry outage or a rotated token should not fail the release that
+# already succeeded. Same v* trigger, independently re-runnable.
+#
+# Needs two repository secrets (Settings → Secrets and variables → Actions):
+#   DOCKERHUB_USERNAME   the Docker Hub account that owns the image
+#   DOCKERHUB_TOKEN      an access token with Read/Write — not the account password
+on:
+  push:
+    # Both shapes. Tags here are v-prefixed by convention, but a tag cut without the v
+    # once matched nothing and built nothing — and a release that looks created while
+    # producing no assets is a worse failure than a rejected tag.
+    tags: ['v*', '[0-9]*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Version to publish, e.g. 0.2.0-test (workflow_dispatch only)'
+        required: false
+
+env:
+  IMAGE: karthickdk02/elasticpro-core
+
+concurrency:
+  group: docker-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # One native runner per architecture. Not QEMU: an emulated arm64 build of this profile
+  # (lto = true, codegen-units = 1, with ring and russh) runs 60-120 minutes and is a
+  # known source of OOM and flake. Public repositories get ubuntu-24.04-arm for free, so
+  # both legs are native and take about the same time as each other.
+  #
+  # arm64 is not optional here. The server this is actually deployed to is aarch64, and
+  # without an arm64 image its install compiles the core from source on the target — a
+  # twenty-minute build on a 4 GB box that is already running something else.
+  image:
+    name: ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: amd64, runner: ubuntu-24.04,     platform: linux/amd64 }
+          - { arch: arm64, runner: ubuntu-24.04-arm, platform: linux/arm64 }
+    steps:
+      - uses: actions/checkout@v4
+
+      # Fail here, with a sentence, rather than forty lines later inside docker login.
+      # Through env, not interpolation: a value substituted straight into a run block is
+      # pasted into the script before the shell ever sees it, so anything shell-special
+      # in it changes what runs.
+      - name: check the credentials exist
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          if [ -z "$DOCKERHUB_USERNAME" ] || [ -z "$DOCKERHUB_TOKEN" ]; then
+            echo "::error::DOCKERHUB_USERNAME and DOCKERHUB_TOKEN are not set on this repository."
+            echo "::error::Settings → Secrets and variables → Actions. The token needs Read/Write."
+            exit 1
+          fi
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # Pushed by digest, untagged. Tagging happens once, in the merge job, so the tag
+      # never points at a half-published pair — either both architectures are there or
+      # the tag was never moved.
+      - name: build and push by digest
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/Dockerfile
+          platforms: ${{ matrix.platform }}
+          # The Dockerfile caps jobs at 2 for small servers; a runner can use its cores.
+          build-args: CARGO_BUILD_JOBS=4
+          provenance: false
+          cache-from: type=gha,scope=${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.arch }}
+          outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
+
+      - name: export the digest
+        run: |
+          mkdir -p /tmp/digests
+          digest="${{ steps.build.outputs.digest }}"
+          touch "/tmp/digests/${digest#sha256:}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: digest-${{ matrix.arch }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  # The tags, applied to a manifest list over both digests.
+  manifest:
+    needs: image
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      # Worked out once and put in the environment. It used to be re-derived in each of
+      # the three steps below, which is two more places for the rule to drift. First step
+      # in the job, so a dispatch with nothing to publish fails before the registry is
+      # touched at all — same reason the image job checks its credentials up front.
+      - name: work out the version being published
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          version="$INPUT_TAG"
+          # On a tag push the ref name is the version. On a dispatch from a branch it is
+          # the branch name, and falling back to that published "elasticpro-core:main"
+          # and moved :latest onto it — which the hosted install then pulled as if it
+          # were a release. A dispatch has to say what it is publishing.
+          if [ -z "$version" ]; then
+            if [ "$GITHUB_REF_TYPE" != tag ]; then
+              echo "::error::dispatched from $GITHUB_REF_NAME, which is not a tag, and no 'tag' input was given — there is no version to publish"
+              exit 1
+            fi
+            version="$GITHUB_REF_NAME"
+          fi
+          # A Docker tag never carries the leading v, whichever of the two it came from.
+          echo "VERSION=${version#v}" >> "$GITHUB_ENV"
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: /tmp/digests
+          pattern: digest-*
+          merge-multiple: true
+
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: tag the manifest list
+        run: |
+          set -euo pipefail
+          version="$VERSION"
+
+          tags="-t ${IMAGE}:${version}"
+          # A hyphen in the tag means a pre-release — the same rule build.yml uses to
+          # decide GitHub's prerelease flag. :latest must not follow a beta.
+          case "$version" in
+            *-*) echo "pre-release $version — not moving :latest" ;;
+            *)   tags="$tags -t ${IMAGE}:latest" ;;
+          esac
+
+          cd /tmp/digests
+          # shellcheck disable=SC2046
+          docker buildx imagetools create $tags $(printf "${IMAGE}@sha256:%s " *)
+
+      - name: prove both architectures are in it
+        run: |
+          set -euo pipefail
+          version="$VERSION"
+          docker buildx imagetools inspect "${IMAGE}:${version}"
+          # An image that resolves for only one architecture is the failure this whole
+          # two-runner arrangement exists to prevent, so it is checked rather than assumed.
+          #
+          # Parsed, not grepped. The first version of this matched "architecture":"amd64"
+          # against --raw output that is pretty-printed with a space after the colon, so a
+          # perfectly good manifest list failed the check — a false alarm on a successful
+          # publish, which is worse than no check at all.
+          raw=$(docker buildx imagetools inspect "${IMAGE}:${version}" --raw)
+          for arch in amd64 arm64; do
+            echo "$raw" | jq -e --arg a "$arch" \
+              '.manifests[]?.platform | select(.os == "linux" and .architecture == $a)' >/dev/null \
+              || { echo "::error::${IMAGE}:${version} has no linux/$arch"; exit 1; }
+          done
+          echo "✓ ${IMAGE}:${version} carries linux/amd64 and linux/arm64"
+
+      - name: summary
+        run: |
+          version="$VERSION"
+          {
+            echo "### Published"
+            echo ""
+            echo '```'
+            echo "docker pull ${IMAGE}:${version}"
+            echo '```'
+            echo ""
+            echo "linux/amd64 and linux/arm64."
+          } >> "$GITHUB_STEP_SUMMARY"

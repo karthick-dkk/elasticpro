@@ -1,0 +1,25 @@
+<?php declare(strict_types = 1);
+
+/**
+ * ElasticPro <-> Zabbix, managed on the server. Optional: without this file, a Super admin
+ * pairs the module under Administration -> ElasticPro and the settings live in the Zabbix
+ * database. When this file exists, every key set in it WINS over the stored settings (the
+ * settings page shows those fields read-only). Copy to config.php (same directory) and fill in.
+ * config.php holds a secret: keep it out of version control, readable by the web server only.
+ */
+return [
+	// Where THIS Zabbix server reaches the ElasticPro core. On the Docker deployment,
+	// the shared internal network — /sso/ is not reachable through nginx from outside.
+	'core_url' => 'http://ep-core:8765',
+
+	// Where the VISITOR'S BROWSER loads ElasticPro — the address people already use.
+	// Its nginx must allow this Zabbix origin in `frame-ancestors`.
+	'public_url' => 'https://elasticpro.example.com',
+
+	// Same value as ELASTICPRO_ZABBIX_SSO_SECRET on the core. At least 32 characters:
+	//     openssl rand -hex 32
+	'module_secret' => '',
+
+	// Only relevant when core_url is https. Turn off for a self-signed test certificate only.
+	'verify_tls' => true,
+];

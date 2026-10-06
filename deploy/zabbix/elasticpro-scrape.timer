@@ -1,0 +1,17 @@
+# Five minutes is a deliberate floor: the scrape lists every snapshot in every repository
+# to prove an index is safe to delete, which is the expensive half of the work. Polling
+# harder buys nothing — indices are dated by day.
+[Unit]
+Description=Run the ElasticPro automation scrape periodically
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+# Spread the load if several hosts run this against the same clusters.
+RandomizedDelaySec=30s
+# A missed run after downtime should catch up rather than wait for the next slot; the
+# staleness trigger in the Zabbix template is what notices if it never does.
+Persistent=true
+
+[Install]
+WantedBy=timers.target

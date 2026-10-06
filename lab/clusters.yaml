@@ -1,0 +1,25 @@
+version: 1
+credentials:
+  username: elastic
+  password: "pw"
+defaults:
+  readOnly: true
+  autoRefresh: false
+  logIndexPattern: "logstash-*"
+jump_hosts:
+  jumpwin:
+    host: 127.0.0.1
+    port: 2222
+    user: jump
+    keyFile: /tmp/lab/client_ed25519
+clusters:
+  - name: prod-direct
+    url: https://127.0.0.1:9470/c1
+    tags: [di]
+  - name: dr-via-jump
+    url: https://127.0.0.1:9470/c2
+    via: jumpwin
+    tags: [onprem]
+  - name: acme-via-jump
+    url: https://127.0.0.1:9470/c3
+    via: jumpwin

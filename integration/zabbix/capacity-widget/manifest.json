@@ -1,0 +1,39 @@
+{
+	"manifest_version": 2.0,
+	"id": "ep_capacity",
+	"type": "widget",
+	"name": "ElasticPro client capacity",
+	"namespace": "EpCapacity",
+	"version": "2.0",
+	"author": "ElasticPro",
+	"description": "One row per client master host: purchased, requested, allocated and used \u2014 ES storage, CPU and memory for ES nodes, parsers and forwarders, forwarder storage and log delay. Usage coloured at 80 % and 90 %, allocations below the request highlighted, CSV and Excel export.",
+	"widget": {
+		"js_class": "WidgetEpCapacity",
+		"size": {
+			"width": 72,
+			"height": 8
+		},
+		"refresh_rate": 60
+	},
+	"actions": {
+		"widget.ep_capacity.view": {
+			"class": "WidgetView"
+		},
+		"widget.ep_capacity.columns": {
+			"class": "ColumnsSave",
+			"layout": "layout.json"
+		}
+	},
+	"assets": {
+		"js": [
+			"ep-xlsx.js",
+			"ep-export.js",
+			"ep-columns.js",
+			"class.widget.js"
+		],
+		"css": [
+			"ep-widget.css",
+			"widget.css"
+		]
+	}
+}

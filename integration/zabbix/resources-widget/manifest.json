@@ -1,0 +1,39 @@
+{
+	"manifest_version": 2.0,
+	"id": "ep_resources",
+	"type": "widget",
+	"name": "ElasticPro client resources",
+	"namespace": "EpResources",
+	"version": "2.0",
+	"author": "ElasticPro",
+	"description": "One row per client: requested, allocated and used \u2014 servers, CPU, memory, disk \u2014 per family (ES, Parser, Forwarder, Engine \u2026) or per role, ES storage and log delay; each client expands into its servers. Columns renamed, hidden and reordered in the Columns dialog; a Type filter; CSV and Excel export with a Servers sheet.",
+	"widget": {
+		"js_class": "WidgetEpResources",
+		"size": {
+			"width": 72,
+			"height": 8
+		},
+		"refresh_rate": 60
+	},
+	"actions": {
+		"widget.ep_resources.view": {
+			"class": "WidgetView"
+		},
+		"widget.ep_resources.columns": {
+			"class": "ColumnsSave",
+			"layout": "layout.json"
+		}
+	},
+	"assets": {
+		"js": [
+			"ep-xlsx.js",
+			"ep-export.js",
+			"ep-columns.js",
+			"class.widget.js"
+		],
+		"css": [
+			"ep-widget.css",
+			"widget.css"
+		]
+	}
+}

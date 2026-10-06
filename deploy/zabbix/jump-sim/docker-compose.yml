@@ -1,0 +1,36 @@
+# Simulated Windows jump host, the fixture cluster behind it, and a mail catcher. Test use only.
+#
+#   ./setup.sh            # once: prints the Zabbix server's public key into ./authorized_keys
+#   docker compose up -d --build
+#
+# The Zabbix server reaches the jump host as "ep-jump-sim" on the zbx network; the cluster
+# is on a network only the jump host shares, as it would be behind a real jump host.
+services:
+  jump:
+    build: .
+    container_name: ep-jump-sim
+    restart: unless-stopped
+    volumes: ["./authorized_keys:/authorized_keys:ro"]
+    networks: [zbx, behind]
+    mem_limit: 64m
+  es:
+    image: node:22-alpine
+    restart: unless-stopped
+    environment: { MOCK_BIND: 0.0.0.0 }
+    command: ["node", "/mock/mock-es.mjs"]
+    volumes: ["../../../tools/mock-es.mjs:/mock/mock-es.mjs:ro"]
+    networks:
+      behind: { aliases: [es-behind-jump] }
+    mem_limit: 128m
+  # Catches the mail Zabbix sends (DL alerts, weekly reports) for a look at http://<vm>:8025.
+  # Zabbix needs an Email media type pointing at mail:1025 to use it.
+  mail:
+    image: axllent/mailpit:v1.20
+    restart: unless-stopped
+    networks:
+      zbx: { aliases: [mailpit] }
+    ports: ["127.0.0.1:8025:8025"]
+    mem_limit: 64m
+networks:
+  zbx: { external: true, name: zabbix_zbx }
+  behind: {}

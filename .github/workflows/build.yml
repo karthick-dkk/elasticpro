@@ -1,0 +1,346 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+    # See docker.yml: a tag cut without the v prefix silently produced an empty release.
+    tags: ['v*', '[0-9]*']
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+# Creating a release and uploading assets needs write access to contents. When a
+# repository's default GITHUB_TOKEN is read-only — which it is here — every release
+# call comes back 403 and the build looks like it failed after succeeding.
+permissions:
+  contents: write
+
+# Three tag pushes left five build runs competing for the same runners. Supersede
+# rather than pile up.
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # One definition of the version every asset name in this workflow uses. The portable
+  # job and the Zabbix job each used to work it out for themselves — one from Cargo.toml,
+  # the other from the tag — so a tag pushed before the version bump landed produced a
+  # release whose Windows zip and Zabbix tarball disagreed about which build they were.
+  # Worked out once here, read by name everywhere else, and a disagreement between the
+  # tag and Cargo.toml stops the run before it burns an hour of runner time.
+  version:
+    name: version
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.pick.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      # Through env, not interpolation into the script — see docker.yml.
+      - id: pick
+        env:
+          TAG: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
+        run: |
+          set -euo pipefail
+          # The same expression tools/zabbix-modules-tarball.sh uses, so the tool and the
+          # workflow cannot read the manifest differently.
+          cargo_version=$(sed -n 's/^version *= *"\(.*\)".*/\1/p' Cargo.toml | head -1)
+          [ -n "$cargo_version" ] || {
+            echo "::error::no version line in the workspace Cargo.toml"; exit 1; }
+
+          # A branch push or a pull request releases nothing, so Cargo.toml is the whole
+          # answer and the version only names the uploaded build artifacts.
+          if [ -z "$TAG" ]; then
+            echo "version=$cargo_version" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # A tag may carry a pre-release identifier that the app version cannot (the MSI
+          # target rejects one), so only the part in front of the first hyphen has to
+          # agree with Cargo.toml; the rest belongs to the tag alone.
+          want=${TAG#v}
+          [ "${want%%-*}" = "$cargo_version" ] || {
+            echo "::error::tag $TAG does not match the workspace version $cargo_version — bump Cargo.toml and Cargo.lock, or move the tag"
+            exit 1
+          }
+          echo "version=$want" >> "$GITHUB_OUTPUT"
+
+  # Installers and app bundles, one runner per platform. fail-fast is off so a platform
+  # that breaks does not hide the state of the other three.
+  bundle:
+    name: ${{ matrix.label }}
+    needs: version
+    runs-on: ${{ matrix.os }}
+    # Long enough for a cold Rust build, short enough that an unsatisfiable runner
+    # label surfaces as a failure instead of an indefinite queue.
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # macos-13 was retired as a runner label; a job asking for a label that does
+          # not exist queues forever instead of failing, which stalled every build run.
+          # macos-15-intel is the current Intel image.
+          - { os: windows-latest,  label: windows-x64, args: '' }
+          - { os: macos-14,        label: macos-arm64, args: '--target aarch64-apple-darwin' }
+          - { os: macos-15-intel,  label: macos-x64,   args: '--target x86_64-apple-darwin' }
+          - { os: ubuntu-22.04,    label: linux-x64,   args: '' }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.os == 'macos-14' && 'aarch64-apple-darwin' || (matrix.os == 'macos-15-intel' && 'x86_64-apple-darwin' || '') }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.label }}
+
+      # Tauri renders through WebKitGTK on Linux; nothing is needed on Windows or macOS.
+      - name: linux webkit dependencies
+        if: matrix.os == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev \
+            libayatana-appindicator3-dev librsvg2-dev patchelf
+
+      # On a v* tag this creates the release (first job to finish) and uploads its
+      # bundles to it; the other platforms then upload to the same release. On a
+      # branch push tagName is empty, so it only builds — no release is made.
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          # "is this a tag push", not "does the tag start with v" — otherwise widening the
+          # trigger just burns a runner and still makes no release.
+          tagName: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
+          # The app version comes from the workspace Cargo.toml and cannot carry a
+          # pre-release identifier (the MSI target rejects it). The tag can, so the tag
+          # names the release; the version job checks the two agree.
+          releaseName: ElasticPro ${{ github.ref_name }}
+          releaseBody: |
+            Multi-cluster Elasticsearch dashboard — direct or through an SSH jump host.
+
+            See [CHANGELOG.md](https://github.com/karthick-dkk/elasticpro/blob/main/CHANGELOG.md)
+            for what changed, and the [README](https://github.com/karthick-dkk/elasticpro#downloads)
+            for which package to take.
+
+            **The binaries are not code-signed.** Windows SmartScreen: *More info → Run anyway*.
+            macOS Gatekeeper: right-click → *Open*, or
+            `xattr -dr com.apple.quarantine "/Applications/ElasticPro.app"`.
+          releaseDraft: false
+          # A tag with a hyphen in it — v0.2.0-beta — is a pre-release. Marking it as one
+          # keeps it off the "Latest release" badge, which is the whole point of cutting it.
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          args: ${{ matrix.args }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ElasticPro-${{ matrix.label }}
+          path: |
+            target/release/bundle/**/*
+            target/*/release/bundle/**/*
+          if-no-files-found: warn
+
+  # The portable Windows folder — one exe beside its loader, no installer and no admin
+  # rights. tauri-action does not produce this, and it is what the handbook deploys.
+  portable:
+    name: windows portable
+    needs: version
+    # A cold release build plus clippy on a Windows runner; long enough for both, short
+    # enough that a stuck runner fails instead of queueing all day.
+    timeout-minutes: 60
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: win-portable
+
+      - name: clippy (whole workspace, incl. the Tauri shell)
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: build
+        run: cargo build --release -p elasticpro
+
+      - name: package portable folder
+        shell: pwsh
+        # Through env, not interpolation into the script — see docker.yml.
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          # GitHub runs pwsh with $ErrorActionPreference at its default of Continue, so a
+          # Copy-Item that cannot find its source only writes a red line and the step
+          # still reports success — which is how a zip went out with a file missing from
+          # it. Everything below is a step that must not be skipped silently.
+          $ErrorActionPreference = 'Stop'
+          $ver = $env:VERSION
+          $exe = "elasticpro-$ver.exe"
+          $d = "dist/ElasticPro-portable-win64"
+          New-Item -ItemType Directory -Force -Path "$d/data","$d/WebView2Runtime" | Out-Null
+          Copy-Item target/release/elasticpro.exe "$d/$exe"
+          # WebView2Loader.dll ships with the webview2-com-sys crate source. This used to
+          # fall back to a copy at the repo root, but that copy was a committed build
+          # output and has been deleted — and falling back to a file that is not there
+          # built a portable folder with no loader beside the exe, which uploads and
+          # releases perfectly and then refuses to start on the operator's machine.
+          $loader = Get-ChildItem -Recurse -Filter WebView2Loader.dll `
+                      -Path "$env:USERPROFILE/.cargo/registry/src" |
+                    Where-Object { $_.FullName -match 'x64' } | Select-Object -First 1
+          if (-not $loader) {
+            Write-Output "::error::no x64 WebView2Loader.dll under ~/.cargo/registry/src. The webview2-com-sys crate carries it, so either this build never pulled that crate or the crate stopped shipping the DLL."
+            exit 1
+          }
+          Copy-Item $loader.FullName $d/
+          Copy-Item ui/clusters.example.yaml $d/
+          (Get-Content tools/PORTABLE-README.txt) `
+            -replace 'elasticpro-<ver>\.exe', $exe -replace 'elasticpro\.exe', $exe `
+            -replace '^ElasticPro [0-9][0-9.]* -', "ElasticPro $ver -" |
+            Set-Content "$d/README.txt"
+          New-Item -ItemType File -Force -Path "$d/portable" | Out-Null
+          Set-Content "$d/WebView2Runtime/PUT-RUNTIME-HERE.txt" `
+            'Unpack Microsoft WebView2 Fixed Version Runtime (x64) here - see ..\README.txt. Not needed on Windows 10/11 or Server 2019+.'
+          Set-Content "$d/data/README.txt" 'created on first run'
+          Get-FileHash "$d/$exe","$d/WebView2Loader.dll" -Algorithm SHA256 |
+            ForEach-Object { "$($_.Hash.ToLower())  $(Split-Path $_.Path -Leaf)" } |
+            Set-Content "$d/SHA256SUMS.txt"
+          Compress-Archive -Path $d -DestinationPath "dist/ElasticPro-$ver-portable-win64.zip" -Force
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ElasticPro-portable-win64
+          path: dist/*.zip
+          if-no-files-found: error
+
+      - name: attach the portable zip to the release
+        if: github.ref_type == 'tag'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.zip
+
+  # The Zabbix frontend modules as one archive, for deploy/zabbix/zabbix-modules-install.sh.
+  # Built by the same tool a local install uses (tools/zabbix-modules-tarball.sh), so a
+  # downloaded release and `--from-dir <checkout>` put the same bytes in Zabbix. Built on
+  # every push so a broken tool shows up before a tag; attached to the release on a tag.
+  zabbix-modules:
+    name: zabbix modules
+    needs: version
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      # Syntax always; shellcheck (preinstalled on the runner) for errors only.
+      - name: check the installer
+        run: |
+          bash -n deploy/zabbix/zabbix-modules-install.sh
+          bash -n tools/install.sh
+          python3 tools/check-zabbix-templates.py
+          bash -n tools/zabbix-modules-tarball.sh
+          shellcheck -S error deploy/zabbix/zabbix-modules-install.sh tools/zabbix-modules-tarball.sh tools/install.sh
+
+      # The version comes from the version job, so the tarball and the Windows zip in the
+      # same release always carry the same number. Through env, not interpolation into the
+      # script — see docker.yml.
+      - name: build the archive
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          tools/zabbix-modules-tarball.sh --version "$VERSION" --out dist
+          cp deploy/zabbix/zabbix-modules-install.sh dist/
+          # The product's own installer, so both are fetched the same way — from the
+          # release rather than from whatever is on main at the time.
+          cp tools/install.sh dist/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: zabbix-modules
+          path: dist/*
+          if-no-files-found: error
+
+      - name: attach the Zabbix modules to the release
+        if: github.ref_type == 'tag'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/elasticpro-zabbix-modules-*.tar.gz
+            dist/elasticpro-zabbix-modules-*.tar.gz.sha256
+            dist/zabbix-modules-install.sh
+            dist/install.sh
+
+  # Two things no single producer job can do: say whether the release ended up carrying
+  # every package, and publish one checksum list covering all of them.
+  #
+  # Both became necessary when the Windows build stopped being committed to the tree.
+  # SECURITY.md tells people to check SHA256SUMS.txt before running an unsigned binary,
+  # and that file only ever existed at the repo root — so a download from the release had
+  # nothing to verify against. And a platform leg that fails is reported as a failed job,
+  # while the release it was meant to fill still reads as complete to whoever opens the
+  # Releases page; naming the missing asset is the only way that shows up.
+  #
+  # always(), so a release that is short an asset says which one instead of this job being
+  # skipped along with the leg that failed.
+  release-assets:
+    name: release checksums
+    needs: [bundle, portable, zabbix-modules]
+    if: ${{ always() && github.ref_type == 'tag' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      # No checkout: gh talks to the release over the API and nothing here reads the tree.
+      - name: check the release is complete, then publish its checksums
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          # This job runs even when a producer failed, so the release may not exist at all.
+          # Say that in one line rather than letting gh fail with "release not found".
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 || {
+            echo "::error::no release for $TAG — the bundle job creates it and did not get that far"
+            exit 1
+          }
+          mkdir -p assets
+          # Not fatal on its own: an empty release makes this exit non-zero, and the
+          # check below is what names what is missing.
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --dir assets --clobber || true
+          # A re-run would otherwise hash the list it published last time into the new one.
+          rm -f assets/SHA256SUMS.txt
+          cd assets
+
+          # What a complete release looks like. These are the suffixes tools/install.sh
+          # matches on to pick its download, so a missing one is a platform that cannot be
+          # installed rather than a cosmetic gap.
+          missing=()
+          for pat in '*-portable-win64.zip' '*_x64_en-US.msi' '*_x64-setup.exe' \
+                     '*_aarch64.dmg' '*_x64.dmg' \
+                     '*_amd64.AppImage' '*_amd64.deb' '*.x86_64.rpm' \
+                     'elasticpro-zabbix-modules-*.tar.gz' \
+                     'elasticpro-zabbix-modules-*.tar.gz.sha256' \
+                     'zabbix-modules-install.sh' 'install.sh'; do
+            # shellcheck disable=SC2086
+            set -- $pat
+            [ -e "$1" ] || missing+=("$pat")
+          done
+          if [ ${#missing[@]} -gt 0 ]; then
+            for m in "${missing[@]}"; do echo "::error::release $TAG has no $m"; done
+            echo "::error::a producer job above failed, or a bundle target changed its file name — do not announce this release"
+            exit 1
+          fi
+
+          # One line per asset, in the format sha256sum -c reads, so verifying a download
+          # is `sha256sum --ignore-missing -c SHA256SUMS.txt` and nothing more.
+          sha256sum -- * > ../SHA256SUMS.txt
+          cat ../SHA256SUMS.txt
+          gh release upload "$TAG" ../SHA256SUMS.txt --repo "$GITHUB_REPOSITORY" --clobber
+
+          {
+            echo "### Release $TAG"
+            echo ""
+            echo '```'
+            cat ../SHA256SUMS.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -1,0 +1,31 @@
+/* Shared by the ElasticPro report widgets: the Columns dialog and the expand rows. */
+.ep-modal-shade { position: fixed; inset: 0; background: rgba(0, 0, 0, .45); z-index: 1000; display: flex; align-items: center; justify-content: center; padding: 16px; }
+.ep-modal { background: #fff; color: #1f2c33; border-radius: 3px; width: min(640px, 100%); max-height: 88vh; display: flex; flex-direction: column; padding: 14px 16px; gap: 10px; box-shadow: 0 8px 28px rgba(0, 0, 0, .3); font: 12px Arial, Tahoma, sans-serif; }
+[theme="dark-theme"] .ep-modal, [theme="hc-dark"] .ep-modal { background: #2b2b2b; color: #f2f2f2; }
+.ep-modal h3 { margin: 0; font-size: 15px; }
+.ep-modal-list { overflow: auto; border: 1px solid rgba(128, 128, 128, .3); }
+.ep-modal-list table { width: 100%; border-collapse: collapse; }
+.ep-modal-list th, .ep-modal-list td { padding: 4px 6px; border-bottom: 1px solid rgba(128, 128, 128, .2); text-align: left; }
+.ep-modal-list input[type="text"] { width: 100%; box-sizing: border-box; }
+.ep-modal-families { display: flex; flex-wrap: wrap; gap: 6px 14px; align-items: center; }
+.ep-modal-note { flex-basis: 100%; opacity: .7; }
+.ep-modal-bar { display: flex; gap: 8px; align-items: center; }
+.ep-modal-msg { margin-right: auto; color: #c62828; }
+.ep-sub > td { background: rgba(128, 128, 128, .06); padding: 0 !important; }
+.ep-expand { cursor: pointer; background: none; border: 0; font-size: 13px; padding: 0 4px; color: inherit; }
+/* A client's servers: held to the part of the report on screen (ep-columns.js sets the width),
+   so on a report of a hundred columns they are still one page, not stretched across all of it. */
+.ep-servers-wrap { position: sticky; left: 0; box-sizing: border-box; padding: 4px 12px 10px 36px; max-width: 100vw; }
+.ep-servers { width: 100%; border-collapse: collapse; }
+.ep-servers th { font-weight: normal; opacity: .75; text-align: center; padding: 6px 10px; border-bottom: 1px solid rgba(128, 128, 128, .25); white-space: nowrap; }
+.ep-servers td { padding: 6px 10px; text-align: center; border-bottom: 1px solid rgba(128, 128, 128, .15); white-space: nowrap; }
+.ep-servers th:nth-child(-n+3), .ep-servers td:nth-child(-n+3) { text-align: left; }
+.ep-servers td:nth-child(3) { font-family: ui-monospace, Menlo, Consolas, "Liberation Mono", monospace; font-size: 12px; }
+.ep-servers td.ep-warn, .ep-servers td.ep-high { font-weight: bold; }
+.ep-st-up, .ep-st-down, .ep-st-unknown { font-weight: bold; font-size: 11px; }
+.ep-st-up span, .ep-st-down span, .ep-st-unknown span { display: inline-block; padding: 1px 8px; border-radius: 4px; }
+.ep-st-up span { color: #2e7d32; background: rgba(46, 125, 50, .14); } .ep-st-down span { color: #c62828; background: rgba(198, 40, 40, .14); } .ep-st-unknown span { color: #c62828; background: rgba(198, 40, 40, .08); }
+.ep-servers .ep-svc { font-size: 11px; font-style: italic; opacity: .8; border: 1px solid rgba(128, 128, 128, .35); border-radius: 999px; padding: 0 6px; }
+.ep-servers .ep-mark { font-size: 11px; font-weight: bold; color: #0a66d6; background: rgba(10, 102, 214, .12); border-radius: 999px; padding: 0 6px; }
+.ep-servers .ep-disk-line { white-space: nowrap; text-align: left; }
+.ep-servers .ep-disk-line .ep-mount { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 11.5px; opacity: .8; display: inline-block; min-width: 48px; }

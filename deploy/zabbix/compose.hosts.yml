@@ -1,0 +1,46 @@
+# Clusters from Zabbix hosts, passwords from Vault. Layered over the hosted stack and
+# compose.sso.yml:
+#
+#   COMPOSE_FILE=docker-compose.yml:zabbix/compose.sso.yml:zabbix/compose.hosts.yml
+#
+# The core asks the Zabbix API (over ep_sso, which the Zabbix frontend is already on)
+# which hosts carry the cluster template, and Vault (over vault_net) for the passwords
+# their Vault macros name. Every credential here is a file, not an environment value.
+services:
+  core:
+    environment:
+      ELASTICPRO_ZABBIX_API_URL: http://zabbix-web-1:8080/api_jsonrpc.php
+      ELASTICPRO_ZABBIX_API_TOKEN_FILE: /run/secrets/zabbix_api_token
+      # Change this if your Zabbix names the cluster template something else.
+      ELASTICPRO_ZABBIX_CLUSTER_TEMPLATE: "Elasticsearch Cluster by HTTP EP"
+      ELASTICPRO_ZABBIX_SYNC_SECS: "300"
+      ELASTICPRO_VAULT_ADDR: http://vault:8200
+      ELASTICPRO_VAULT_ROLE_ID_FILE: /run/secrets/vault_role_id
+      ELASTICPRO_VAULT_SECRET_ID_FILE: /run/secrets/vault_secret_id
+      # Used only when the config turns on zabbix.createHosts. A separate Zabbix token and a
+      # write-only Vault AppRole, so the sync that runs every few minutes can only read.
+      ELASTICPRO_ZABBIX_API_WRITE_TOKEN_FILE: /run/secrets/zabbix_api_write_token
+      ELASTICPRO_VAULT_WRITE_ROLE_ID_FILE: /run/secrets/vault_write_role_id
+      ELASTICPRO_VAULT_WRITE_SECRET_ID_FILE: /run/secrets/vault_write_secret_id
+    secrets: [zabbix_api_token, vault_role_id, vault_secret_id,
+              zabbix_api_write_token, vault_write_role_id, vault_write_secret_id]
+    networks:
+      vault_net: {}
+
+networks:
+  vault_net:
+    external: true
+
+secrets:
+  zabbix_api_token:
+    file: ./secrets/zabbix_api_token
+  vault_role_id:
+    file: ./secrets/vault_role_id
+  vault_secret_id:
+    file: ./secrets/vault_secret_id
+  zabbix_api_write_token:
+    file: ./secrets/zabbix_api_write_token
+  vault_write_role_id:
+    file: ./secrets/vault_write_role_id
+  vault_write_secret_id:
+    file: ./secrets/vault_write_secret_id

@@ -1,0 +1,19 @@
+/* Volume report widget: sections over their columns, every value centred, the cluster fixed. */
+.ep-vol-toolbar { display: flex; align-items: center; gap: 8px; justify-content: flex-end; padding: 0 0 6px; }
+.ep-vol-count { margin-right: auto; opacity: .75; }
+.ep-vol-scroll { overflow-x: auto; }
+.ep-vol-table { white-space: nowrap; }
+/* The frozen first column must hide what scrolls under it in every Zabbix theme: rows and row
+   groups pass the table's own (theme) background down to it, instead of staying transparent. */
+.ep-vol-table thead, .ep-vol-table tbody, .ep-vol-table tr { background: inherit; }
+.ep-vol-table th, .ep-vol-table td { text-align: center; }
+.ep-vol-table .ep-vol-first { position: sticky; left: 0; z-index: 1; text-align: left; background: inherit; font-weight: bold; }
+.ep-vol-table thead .ep-vol-first { z-index: 2; }
+.ep-vol-table th.ep-vol-group { font-weight: bold; }
+.ep-vol-table .ep-vol-start { border-left: 2px solid rgba(128, 128, 128, .45); }
+/* What the client plan template's triggers alarm on. */
+.ep-vol-table td.ep-warn { background: #ffd54f; color: #1f1f1f; }
+.ep-vol-table td.ep-high { background: #e53935; color: #fff; }
+.ep-vol-table tr.ep-vol-unreachable td { opacity: .55; }
+/* The empty state, in view at the left rather than centred across a very wide table. */
+.ep-empty { text-align: left; padding: 14px 4px; }

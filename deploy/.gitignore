@@ -1,0 +1,11 @@
+# Never commit these.
+.env
+nginx/htpasswd
+secrets/*
+!secrets/.gitkeep
+tls/*
+!tls/.gitkeep
+ssh/*
+!ssh/.gitkeep
+config/*
+!config/.gitkeep

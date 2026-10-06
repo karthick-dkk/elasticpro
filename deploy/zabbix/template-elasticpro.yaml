@@ -1,0 +1,324 @@
+# Zabbix 7.0 template for the ElasticPro automation scrape.
+#
+# Import: Data collection -> Templates -> Import. Then link it to a host and set the
+# macros below. The host needs no Zabbix agent — every value comes from one HTTP request
+# to the JSON document tools/elasticpro-scrape.mjs writes.
+#
+# See deploy/zabbix/README.md for how to produce and serve that document.
+zabbix_export:
+  version: '7.0'
+  template_groups:
+    - uuid: a4d66365396d4f7fb44b205013911a63
+      name: 'Templates/Applications'
+  templates:
+    - uuid: 4e13d776c1f34a84aafe8898934b5654
+      template: 'ElasticPro automation'
+      name: 'ElasticPro automation'
+      description: |
+        Polls the automation rules ElasticPro evaluates against every configured
+        Elasticsearch cluster: what they propose, what they deliberately held back, and
+        whether the scrape is still running at all.
+
+        The rules never write. A proposal is work for a person to run in the app, behind
+        its own confirmation and its two-gate write guard.
+      groups:
+        - name: 'Templates/Applications'
+      macros:
+        - macro: '{$ELASTICPRO.URL}'
+          value: 'https://elasticpro.internal/automation.json'
+          description: 'Where the scrape document is served.'
+        - macro: '{$ELASTICPRO.USER}'
+          value: 'zabbix'
+          description: 'HTTP basic user; the hosted stack is behind an auth gate.'
+        - macro: '{$ELASTICPRO.PASSWORD}'
+          type: SECRET_TEXT
+          value: ''
+          description: 'HTTP basic password for {$ELASTICPRO.USER}.'
+        - macro: '{$ELASTICPRO.STALE}'
+          value: '30m'
+          description: 'Alert if the scrape has not run within this long.'
+      items:
+        - uuid: 69d2693b93cb49e19301f25a7650ab23
+          name: 'Automation: scrape document'
+          type: HTTP_AGENT
+          key: elasticpro.state
+          delay: 5m
+          history: '0'
+          trends: '0'
+          value_type: TEXT
+          url: '{$ELASTICPRO.URL}'
+          http_proxy: ''
+          follow_redirects: 'NO'
+          retrieve_mode: BODY
+          timeout: 30s
+          authtype: BASIC
+          username: '{$ELASTICPRO.USER}'
+          password: '{$ELASTICPRO.PASSWORD}'
+          description: |
+            The whole document, fetched once. Every other item derives from this one, so
+            polling costs a single request no matter how many clusters and rules exist.
+        - uuid: 4f35ea8e8a764b82930ddad0c7b24254
+          name: 'Automation: scrape succeeded'
+          type: DEPENDENT
+          key: elasticpro.ok
+          delay: '0'
+          value_type: UNSIGNED
+          description: 'Whether the last scrape completed with every cluster reachable and no rule crashing.'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - '$.ok'
+            - type: BOOL_TO_DECIMAL
+              parameters:
+                - ''
+          master_item:
+            key: elasticpro.state
+        - uuid: d1df72ec8ee14eb0841b6e239a802ce1
+          name: 'Automation: last scrape time'
+          type: DEPENDENT
+          key: elasticpro.epoch
+          delay: '0'
+          value_type: UNSIGNED
+          units: unixtime
+          description: 'When the scrape ran. A scraper that has died looks exactly like a healthy fleet, so this is what proves it is alive.'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - '$.generatedEpoch'
+          master_item:
+            key: elasticpro.state
+        - uuid: 794a6af7a559493e82d4104efdc23a1e
+          name: 'Automation: proposals waiting'
+          type: DEPENDENT
+          key: elasticpro.proposed
+          delay: '0'
+          value_type: UNSIGNED
+          description: 'Actions the rules propose across the fleet, waiting for a person to review and run.'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - '$.totals.proposed'
+          master_item:
+            key: elasticpro.state
+        - uuid: 8b243024a26848bdb142f43fd04f9951
+          name: 'Automation: held back'
+          type: DEPENDENT
+          key: elasticpro.held
+          delay: '0'
+          value_type: UNSIGNED
+          description: 'What the rules refused to propose. An index past retention with no good snapshot lands here — the case you most need to know about.'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - '$.totals.held'
+          master_item:
+            key: elasticpro.state
+        - uuid: 6563c3d69b6b4d3487f3ef44856197f0
+          name: 'Automation: reclaimable space'
+          type: DEPENDENT
+          key: elasticpro.freed
+          delay: '0'
+          value_type: UNSIGNED
+          units: B
+          description: 'Disk that would be freed if every current proposal were run.'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - '$.totals.freedBytes'
+          master_item:
+            key: elasticpro.state
+        - uuid: 289dab67a46a4d87ae2b0abbfb22fb91
+          name: 'Automation: rules in error'
+          type: DEPENDENT
+          key: elasticpro.errors
+          delay: '0'
+          value_type: UNSIGNED
+          description: 'Rules that threw while evaluating. Usually a malformed rule in clusters.yaml.'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - '$.totals.errors'
+          master_item:
+            key: elasticpro.state
+        - uuid: 4f76882b32f642869c95e14b5207a7b8
+          name: 'Automation: unreachable clusters'
+          type: DEPENDENT
+          key: elasticpro.unreachable
+          delay: '0'
+          value_type: UNSIGNED
+          description: 'Configured clusters the scrape could not reach.'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - '$.totals.unreachable'
+          master_item:
+            key: elasticpro.state
+        - uuid: 27c2b362dcc644b7be1b7357144437d5
+          name: 'Automation: problems'
+          type: DEPENDENT
+          key: elasticpro.problems
+          delay: '0'
+          value_type: TEXT
+          description: 'Anything that stopped the scrape being complete, such as sealed credentials it cannot unlock.'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - '$.problems'
+          master_item:
+            key: elasticpro.state
+      discovery_rules:
+        - uuid: 5802f30dd58b4252ba2f1355dbf0f02e
+          name: 'Cluster discovery'
+          type: DEPENDENT
+          key: elasticpro.discovery.clusters
+          delay: '0'
+          description: 'One set of items per configured cluster.'
+          item_prototypes:
+            - uuid: 0b743f3949db4166b291e44252f42c5e
+              name: 'Cluster {#CLUSTER.NAME}: reachable'
+              type: DEPENDENT
+              key: 'elasticpro.cluster.reachable[{#CLUSTER.ID}]'
+              delay: '0'
+              value_type: UNSIGNED
+              preprocessing:
+                - type: JSONPATH
+                  parameters:
+                    - '$.clusters[?(@.id=="{#CLUSTER.ID}")].reachable.first()'
+                - type: BOOL_TO_DECIMAL
+                  parameters:
+                    - ''
+              master_item:
+                key: elasticpro.state
+            - uuid: af2ccbc1df9445e1be95413d0851fa2e
+              name: 'Cluster {#CLUSTER.NAME}: proposals waiting'
+              type: DEPENDENT
+              key: 'elasticpro.cluster.proposed[{#CLUSTER.ID}]'
+              delay: '0'
+              value_type: UNSIGNED
+              preprocessing:
+                - type: JSONPATH
+                  parameters:
+                    - '$.clusters[?(@.id=="{#CLUSTER.ID}")].proposed.first()'
+              master_item:
+                key: elasticpro.state
+            - uuid: 155c8b3722ab43bd88c5c968fd544f47
+              name: 'Cluster {#CLUSTER.NAME}: held back'
+              type: DEPENDENT
+              key: 'elasticpro.cluster.held[{#CLUSTER.ID}]'
+              delay: '0'
+              value_type: UNSIGNED
+              preprocessing:
+                - type: JSONPATH
+                  parameters:
+                    - '$.clusters[?(@.id=="{#CLUSTER.ID}")].held.first()'
+              master_item:
+                key: elasticpro.state
+            - uuid: 1b3c17a8f24f42b3b4c28530bacaad67
+              name: 'Cluster {#CLUSTER.NAME}: health'
+              type: DEPENDENT
+              key: 'elasticpro.cluster.health[{#CLUSTER.ID}]'
+              delay: '0'
+              value_type: CHAR
+              preprocessing:
+                - type: JSONPATH
+                  parameters:
+                    - '$.clusters[?(@.id=="{#CLUSTER.ID}")].health.first()'
+              master_item:
+                key: elasticpro.state
+          trigger_prototypes:
+            - uuid: ce9e986fbf9648e0b4f11b6d0cadd33a
+              expression: 'last(/ElasticPro automation/elasticpro.cluster.reachable[{#CLUSTER.ID}])=0'
+              name: 'ElasticPro: {#CLUSTER.NAME} is unreachable'
+              priority: HIGH
+              description: 'The scrape could not reach this cluster, so none of its rules were evaluated.'
+            - uuid: 5f9eccf4e4a54808bb61d99650b5d92b
+              expression: 'last(/ElasticPro automation/elasticpro.cluster.health[{#CLUSTER.ID}])="red"'
+              name: 'ElasticPro: {#CLUSTER.NAME} is red'
+              priority: DISASTER
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - '$.discovery.clusters'
+          master_item:
+            key: elasticpro.state
+
+        - uuid: 2ffd741ceb814ed1b66940033b8999d8
+          name: 'Rule discovery'
+          type: DEPENDENT
+          key: elasticpro.discovery.rules
+          delay: '0'
+          description: 'One set of items per rule per cluster, built-in and user-written alike.'
+          item_prototypes:
+            - uuid: 35e4bf388e9a4ff280d322cd6e517021
+              name: '{#CLUSTER.NAME} / {#RULE.TITLE}: proposed'
+              type: DEPENDENT
+              key: 'elasticpro.rule.proposed[{#CLUSTER.ID},{#RULE.ID}]'
+              delay: '0'
+              value_type: UNSIGNED
+              preprocessing:
+                - type: JSONPATH
+                  parameters:
+                    - '$.clusters[?(@.id=="{#CLUSTER.ID}")].rules[?(@.id=="{#RULE.ID}")].proposed.first()'
+              master_item:
+                key: elasticpro.state
+            - uuid: 8e107653b39f40b7ac9627920234bf60
+              name: '{#CLUSTER.NAME} / {#RULE.TITLE}: held back'
+              type: DEPENDENT
+              key: 'elasticpro.rule.held[{#CLUSTER.ID},{#RULE.ID}]'
+              delay: '0'
+              value_type: UNSIGNED
+              preprocessing:
+                - type: JSONPATH
+                  parameters:
+                    - '$.clusters[?(@.id=="{#CLUSTER.ID}")].rules[?(@.id=="{#RULE.ID}")].held.first()'
+              master_item:
+                key: elasticpro.state
+            - uuid: ab2a1a6e6a074ddc9e6e5307ce48ce67
+              name: '{#CLUSTER.NAME} / {#RULE.TITLE}: detail'
+              type: DEPENDENT
+              key: 'elasticpro.rule.detail[{#CLUSTER.ID},{#RULE.ID}]'
+              delay: '0'
+              value_type: TEXT
+              preprocessing:
+                - type: JSONPATH
+                  parameters:
+                    - '$.clusters[?(@.id=="{#CLUSTER.ID}")].rules[?(@.id=="{#RULE.ID}")].detail.first()'
+              master_item:
+                key: elasticpro.state
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - '$.discovery.rules'
+          master_item:
+            key: elasticpro.state
+  triggers:
+    - uuid: 2c88a75f0a0b45f18c5b5a8441d36f0a
+      expression: 'fuzzytime(/ElasticPro automation/elasticpro.epoch,{$ELASTICPRO.STALE})=0'
+      name: 'ElasticPro: the automation scrape has stopped running'
+      priority: HIGH
+      description: |
+        No fresh scrape within {$ELASTICPRO.STALE}. Every other item on this template is
+        now reporting the last thing it saw, which will look like a healthy fleet
+        however bad things get. Fix this trigger before trusting any of the others.
+    - uuid: d708a0179f9e4b618d4fbf6f6328f5b7
+      expression: 'last(/ElasticPro automation/elasticpro.unreachable)>0'
+      name: 'ElasticPro: a cluster could not be reached by the scrape'
+      priority: AVERAGE
+    - uuid: 7fb0388a0a92449f8e7568a9a37d4ca3
+      expression: 'last(/ElasticPro automation/elasticpro.errors)>0'
+      name: 'ElasticPro: a rule failed to evaluate'
+      priority: AVERAGE
+      description: 'Usually a malformed automation in clusters.yaml. The rule detail item names it.'
+    - uuid: f9f17cea94664a2f987552f0067e7b6d
+      expression: 'last(/ElasticPro automation/elasticpro.held)>0'
+      name: 'ElasticPro: automation held work back'
+      priority: WARNING
+      description: |
+        A rule matched indices it then refused to propose — most often an index past
+        its retention with no proved snapshot. That is the case worth a human looking
+        at it, which is why it alerts rather than staying silent.
+    - uuid: fc2022b05f294ab3bb7fc6e3697ec2cc
+      expression: 'last(/ElasticPro automation/elasticpro.proposed)>0'
+      name: 'ElasticPro: automation has work waiting for review'
+      priority: INFO
+      description: 'Proposals are waiting in the app. Nothing runs until a person runs it.'

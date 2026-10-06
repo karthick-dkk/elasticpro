@@ -1,0 +1,65 @@
+# The client storage plan, pushed to each cluster's Zabbix host every minute.
+#
+#   COMPOSE_FILE=...:zabbix/compose.plan.yml
+#
+# Reads through the core with an API token (role "user") and sends to the Zabbix server's
+# trapper port over the Zabbix network. The token is a file, secrets/scraper_token (written by
+# setup/zbx_phase34.py, or by hand: the secret from Accounts → API tokens, on one line, 0640) —
+# mounted as a Docker secret, never an environment value, so it is not in `docker inspect`.
+# Upgrading from a secrets/scraper.env: `sed -n 's/^ELASTICPRO_TOKEN=//p' secrets/scraper.env >
+# secrets/scraper_token && chmod 640 secrets/scraper_token`.
+#
+# Repository sizes are cached between runs, so only new snapshots cost a request; the memory
+# file carries master, disk capacity, the last log-delay reading and the last index listing to
+# the next run. Runs every minute so alert states are current, but the expensive calls are
+# throttled on their own: log delay every 15 minutes, the index list every 30 (--indices-every;
+# the same list the Indices page asks for, per cluster).
+services:
+  plan-scraper:
+    image: node:22-alpine
+    restart: unless-stopped
+    depends_on: [core]
+    environment:
+      # Every minute: alert states ride along, and a problem should not wait five.
+      ELASTICPRO_INTERVAL: "60"
+      ELASTICPRO_TOKEN_FILE: /run/secrets/scraper_token
+      # The stack in zabbix/stack is compose project "zabbix": its server container is
+      # zabbix-server-1 on the zabbix_zbx network. Another Zabbix: its server's address.
+      ZABBIX_TRAPPER: "zabbix-server-1:10051"
+    secrets: [scraper_token]
+    volumes:
+      - ${ELASTICPRO_UI_DIR:-../ui}:/app/ui:ro
+      - ${ELASTICPRO_TOOLS_DIR:-../tools}:/app/tools:ro
+      - ./config:/app/config:ro
+      - plan-state:/app/state
+    command:
+      - sh
+      - -c
+      - |
+        while true; do
+          node /app/tools/elasticpro-scrape.mjs \
+            --config /app/config/config_cluster.json \
+            --bridge http://core:8765 \
+            --measure-repos --repo-cache /app/state/repo-cache.json \
+            --memory /app/state/memory.json --delay-every 15 --indices-every 30 \
+            --send "$$ZABBIX_TRAPPER" \
+            --out /app/state/plan.json || true
+          sleep "$$ELASTICPRO_INTERVAL"
+        done
+    networks: [internal, zabbix]
+    mem_limit: 192m
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+volumes:
+  plan-state:
+
+networks:
+  zabbix:
+    external: true
+    name: zabbix_zbx
+
+secrets:
+  scraper_token:
+    file: ./secrets/scraper_token

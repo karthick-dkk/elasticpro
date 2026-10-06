@@ -1,0 +1,39 @@
+{
+	"manifest_version": 2.0,
+	"id": "ep_volume",
+	"type": "widget",
+	"name": "ElasticPro volume report",
+	"namespace": "EpVolume",
+	"version": "2.0",
+	"author": "ElasticPro",
+	"description": "The Volume report's client plan, one row per cluster host, laid out as in ElasticPro: volume per day, live storage and backup storage. Columns come from the ElasticPro client plan template. CSV and Excel export.",
+	"widget": {
+		"js_class": "WidgetEpVolume",
+		"size": {
+			"width": 72,
+			"height": 8
+		},
+		"refresh_rate": 300
+	},
+	"actions": {
+		"widget.ep_volume.view": {
+			"class": "WidgetView"
+		},
+		"widget.ep_volume.columns": {
+			"class": "ColumnsSave",
+			"layout": "layout.json"
+		}
+	},
+	"assets": {
+		"js": [
+			"ep-xlsx.js",
+			"ep-export.js",
+			"ep-columns.js",
+			"class.widget.js"
+		],
+		"css": [
+			"ep-widget.css",
+			"widget.css"
+		]
+	}
+}

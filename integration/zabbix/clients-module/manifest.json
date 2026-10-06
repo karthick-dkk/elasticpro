@@ -1,0 +1,82 @@
+{
+	"manifest_version": 2.0,
+	"id": "ep_clients",
+	"name": "ElasticPro clients",
+	"namespace": "EpClients",
+	"version": "2.0",
+	"author": "ElasticPro",
+	"description": "ElasticPro \u2192 Clients: add, edit, import (CSV) and remove clients and their hosts, named <client>-<Role>-<n>; families and roles (ES, Parser, Forwarder, Engine \u2026); a backup before every change, newest three kept. Hosts made by hand are reused as they are; only hosts this page made are ever deleted.",
+	"actions": {
+		"ep.clients.list": {
+			"class": "ClientList",
+			"view": "ep.clients.list",
+			"layout": "layout.htmlpage"
+		},
+		"ep.clients.edit": {
+			"class": "ClientEdit",
+			"view": "ep.clients.edit",
+			"layout": "layout.htmlpage"
+		},
+		"ep.clients.save": {
+			"class": "ClientSave",
+			"view": "ep.clients.edit",
+			"layout": "layout.htmlpage"
+		},
+		"ep.clients.remove": {
+			"class": "ClientRemove"
+		},
+		"ep.clients.csv.template": {
+			"class": "CsvTemplate",
+			"layout": "layout.export"
+		},
+		"ep.clients.csv.export": {
+			"class": "CsvExport",
+			"layout": "layout.export"
+		},
+		"ep.clients.import": {
+			"class": "ImportUpload",
+			"view": "ep.clients.import",
+			"layout": "layout.htmlpage"
+		},
+		"ep.clients.import.apply": {
+			"class": "ImportApply"
+		},
+		"ep.clients.backups": {
+			"class": "BackupList",
+			"view": "ep.clients.backups",
+			"layout": "layout.htmlpage"
+		},
+		"ep.clients.backup.restore": {
+			"class": "BackupRestore"
+		},
+		"ep.clients.backup.download": {
+			"class": "BackupDownload",
+			"layout": "layout.export"
+		},
+		"ep.clients.roles": {
+			"class": "RoleList",
+			"view": "ep.clients.roles",
+			"layout": "layout.htmlpage"
+		},
+		"ep.clients.role.save": {
+			"class": "RoleSave"
+		},
+		"ep.clients.template.install": {
+			"class": "TemplateInstall"
+		},
+		"ep.clients.hosts": {
+			"class": "HostSearch",
+			"layout": "layout.json"
+		},
+		"ep.clients.status": {
+			"class": "ClientStatus"
+		},
+		"ep.clients.recreate": {
+			"class": "ClientRecreate"
+		},
+		"ep.clients.test": {
+			"class": "TestConnection",
+			"layout": "layout.json"
+		}
+	}
+}

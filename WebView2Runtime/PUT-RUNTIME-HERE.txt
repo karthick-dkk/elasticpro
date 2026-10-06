@@ -1,0 +1,1 @@
+Unpack Microsoft WebView2 Fixed Version Runtime (x64) here - see ..\README.txt. Not needed on Windows 10/11 or Server 2019+.

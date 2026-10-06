@@ -1,0 +1,130 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  core:
+    name: core — test & clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: core
+      - name: cargo test
+        run: cargo test -p elasticpro-core --features bridge
+      - name: cargo clippy
+        run: cargo clippy -p elasticpro-core --features bridge --all-targets
+
+  ui:
+    name: ui — syntax & render
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: bridge
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      # The UI ships unbundled ES modules straight to the WebView — nothing else would
+      # catch a syntax error or a mistyped import before an operator hits a blank page.
+      - name: parse modules and resolve imports
+        run: node tools/check-ui.mjs
+
+      # Most of the unit suite is pure arithmetic — delay classification, trend, pattern
+      # detection — with no bridge and no fixture, which is why the fine-grained cases
+      # actually get written. A few of them build DOM nodes (a chart, an empty state, the
+      # redraw that has to keep its scroll position) and need a document to build into.
+      #
+      # jsdom is installed here rather than further down because these run first. It used
+      # to be installed only before the render step, so the DOM-building tests failed on
+      # main while passing on every machine that happened to have it already.
+      - name: install jsdom
+        run: npm install --no-save --no-fund --no-audit jsdom
+
+      - name: unit tests
+        run: node tools/unit-check.mjs
+
+      # Static checks cannot see a call to something that was never imported at all.
+      # Rendering every page against the real core does — and it has to render pages with
+      # data in them, or every page just draws "No cluster selected" and proves nothing.
+      - name: build the dev bridge
+        run: cargo build -p elasticpro-core --features bridge --bin elasticpro-bridge
+
+      # Hosted mode is a security boundary: a request without the proxy's identity header
+      # must be refused, and every write must be audited under the user's name. Checked
+      # black-box against the real binary.
+      - name: hosted-mode contract
+        run: tools/hosted-check.sh
+
+      - name: render every page, then drive the ones with behaviour
+        run: |
+          node tools/mock-es.mjs 9299 &
+          until curl -sf http://127.0.0.1:9299/_cluster/health >/dev/null; do sleep 1; done
+
+          ./target/debug/elasticpro-bridge ui 8765 &
+          until curl -sf -X POST http://127.0.0.1:8765/bridge \
+            -H 'content-type: application/json' -d '{"type":"PING"}' >/dev/null; do sleep 1; done
+
+          node tools/render-check.mjs --config tools/render-fixture.json
+
+          # Drawing a page is not using it. A view behind a select that nothing selects,
+          # an export nothing clicks, a panel whose folded state is decided on the second
+          # render — all of those draw perfectly and are all still wrong, and two shipped
+          # bugs came out of exactly that gap. So this presses things.
+          #
+          # Same step as the render check rather than the next one: both need the mock
+          # cluster and the bridge, and a background process surviving from one step into
+          # another is not something to build a check on.
+          node tools/behaviour-check.mjs --config tools/render-fixture.json
+
+  # The Linux deployment is a Dockerfile and a compose stack, and nothing else in CI
+  # touches either — a broken build or a hole in the auth gate would have been found by
+  # whoever deployed it next. This builds the image and runs the trial, which asserts the
+  # four properties the deployment exists for: 401 without credentials, the UI and the
+  # bridge over TLS with them, a write audited under the signed-in user's name, and the
+  # core with no host port binding and unreachable from outside the compose network.
+  hosted:
+    name: hosted stack — image & compose trial
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - name: build the image and trial the stack
+        run: deploy/trial.sh
+      - name: what the containers logged
+        if: always()
+        run: docker compose -f deploy/docker-compose.yml logs --tail 60
+      - name: stop
+        if: always()
+        run: docker compose -f deploy/docker-compose.yml down -v
+
+  audit:
+    name: dependency advisories
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      # cargo audit is run directly rather than through rustsec/audit-check, because that
+      # action takes its exclusions as a workflow input and ignores .cargo/audit.toml.
+      # Running the tool itself keeps one file as the source of truth for what is accepted
+      # and why, and makes a local `cargo audit` agree with CI exactly.
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+      - name: cargo audit
+        run: cargo audit

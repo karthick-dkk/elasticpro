@@ -1,0 +1,27 @@
+{
+    "manifest_version": 2.0,
+    "id": "elasticpro",
+    "name": "ElasticPro",
+    "version": "1.0.0",
+    "namespace": "ElasticPro",
+    "author": "ElasticPro",
+    "url": "https://github.com/karthick-dkk/elasticpro",
+    "description": "Opens ElasticPro inside Zabbix, signed in as the Zabbix user. Zabbix Users see only the clusters mapped to their user groups, Zabbix Admins every cluster with write access, Super admins everything.",
+    "actions": {
+        "elasticpro.overview":   { "class": "View", "view": "elasticpro.embed", "layout": "layout.htmlpage" },
+        "elasticpro.alerts":     { "class": "View", "view": "elasticpro.embed", "layout": "layout.htmlpage" },
+        "elasticpro.indices":    { "class": "View", "view": "elasticpro.embed", "layout": "layout.htmlpage" },
+        "elasticpro.shards":     { "class": "View", "view": "elasticpro.embed", "layout": "layout.htmlpage" },
+        "elasticpro.logs":       { "class": "View", "view": "elasticpro.embed", "layout": "layout.htmlpage" },
+        "elasticpro.snapshots":  { "class": "View", "view": "elasticpro.embed", "layout": "layout.htmlpage" },
+        "elasticpro.volume":     { "class": "View", "view": "elasticpro.embed", "layout": "layout.htmlpage" },
+        "elasticpro.console":    { "class": "View", "view": "elasticpro.embed", "layout": "layout.htmlpage" },
+        "elasticpro.automation": { "class": "View", "view": "elasticpro.embed", "layout": "layout.htmlpage" },
+        "elasticpro.accounts":   { "class": "View", "view": "elasticpro.embed", "layout": "layout.htmlpage" },
+        "elasticpro.settings":   { "class": "View", "view": "elasticpro.embed", "layout": "layout.htmlpage" },
+        "elasticpro.troubleshoot": { "class": "View", "view": "elasticpro.embed", "layout": "layout.htmlpage" },
+        "elasticpro.link.edit":   { "class": "LinkEdit", "view": "elasticpro.link.edit", "layout": "layout.htmlpage" },
+        "elasticpro.link.update": { "class": "LinkUpdate" }
+    },
+    "config": {}
+}

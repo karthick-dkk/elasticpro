@@ -1,0 +1,16 @@
+# Keep the build context small and free of anything secret or built.
+target
+dist
+node_modules
+previous-releases
+*.exe
+*.dll
+.git
+.serena
+deploy/config
+deploy/secrets
+deploy/tls
+deploy/ssh
+deploy/nginx/htpasswd
+deploy/.env
+docs/screenshots

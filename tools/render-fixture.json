@@ -1,0 +1,32 @@
+{
+  "version": 2,
+  "credentials": {
+    "username": "elastic",
+    "password": "not-a-real-password"
+  },
+  "defaults": {
+    "readOnly": true,
+    "autoRefresh": false,
+    "logIndexPattern": "logstash-*"
+  },
+  "clusters": [
+    {
+      "name": "mock-prod",
+      "url": "http://127.0.0.1:9299",
+      "tags": [
+        "prod"
+      ],
+      "liveRetention": "30d",
+      "snapshotRetention": "6M"
+    },
+    {
+      "name": "mock-lab",
+      "url": "http://127.0.0.1:9299",
+      "tags": [
+        "lab"
+      ],
+      "liveRetention": "30d",
+      "snapshotRetention": "6M"
+    }
+  ]
+}

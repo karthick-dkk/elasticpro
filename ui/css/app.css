@@ -1,0 +1,950 @@
+/* ElasticPro - design tokens.
+   Light values live on bare :root; dark is re-declared under both the OS media
+   query and the [data-theme="dark"] stamp so the in-app toggle wins either way. */
+:root {
+  color-scheme: light;
+
+  --surface-0: #f4f4f1;
+  --surface-1: #fcfcfb;
+  --surface-2: #eeedea;
+  --surface-3: #e3e2de;
+  --border:    #d8d7d2;
+  --border-strong: #bab9b3;
+
+  --text-primary:   #0b0b0b;
+  --text-secondary: #52514e;
+  --text-muted:     #7a7973;
+  --text-invert:    #ffffff;
+
+  /* Darkened from #2a78d6, which read 4.30:1 as link text on a card and 4.42:1
+     behind a white button label — both under AA. Same blue, one step down. */
+  --accent:      #1d63b4;
+  --accent-soft: #e8f0fd;
+  /* What a label sitting ON the accent is coloured. Themed, because whether
+     white or near-black wins depends entirely on how light the accent is. */
+  --on-accent:   #ffffff;
+
+  /* categorical (light steps) */
+  --series-1: #2a78d6; --series-2: #eb6834; --series-3: #1baf7a; --series-4: #eda100;
+  --series-5: #e87ba4; --series-6: #008300; --series-7: #4a3aa7; --series-8: #e34948;
+
+  /* sequential blue ramp */
+  --seq-100: #cde2fb; --seq-250: #86b6ef; --seq-400: #3987e5; --seq-550: #1c5cab; --seq-700: #0d366b;
+
+  /* Status FILLS - the colour of the thing itself: bars, dots, borders. Tuned to read on
+     a dark surface, not themed. */
+  --good: #0ca30c; --warning: #fab219; --serious: #ec835a; --critical: #d03b3b;
+  --good-bg: #e6f5e6; --warning-bg: #fdf3dc; --critical-bg: #fae6e6; --serious-bg: #fceee7;
+  /* Status INKS - the same status rendered as TEXT on its own -bg. A fill colour and a
+     text colour have different jobs, and #fab219 on #fdf3dc is 1.48:1 - a warning pill
+     nobody can read. Inks are themed, because ink must contrast with what it sits on. */
+  --good-ink: #0a7a0a; --warning-ink: #8a5300; --serious-ink: #a03c14; --critical-ink: #b02525;
+
+  --grid: #e6e5e1;
+  --shadow: 0 1px 2px rgba(11,11,11,.06), 0 8px 24px rgba(11,11,11,.06);
+  --radius: 10px;
+  --radius-sm: 6px;
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+  --sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --surface-0: #131312;
+    --surface-1: #1a1a19;
+    --surface-2: #222221;
+    --surface-3: #2c2c2a;
+    --border:    #383835;
+    --border-strong: #4d4d49;
+    --text-primary:   #ffffff;
+    --text-secondary: #c3c2b7;
+    --text-muted:     #8f8e85;
+    --text-invert:    #0b0b0b;
+    --accent:      #3987e5;
+    --accent-soft: #16283f;
+  --on-accent: #0b0b0b;
+    --series-1: #3987e5; --series-2: #d95926; --series-3: #199e70; --series-4: #c98500;
+    --series-5: #d55181; --series-6: #008300; --series-7: #9085e9; --series-8: #e66767;
+    --seq-100: #184f95; --seq-250: #256abf; --seq-400: #3987e5; --seq-550: #86b6ef; --seq-700: #cde2fb;
+    --good-bg: #122a12; --warning-bg: #3a2f10; --critical-bg: #3a1717; --serious-bg: #3a2418;
+    --good-ink: var(--good); --warning-ink: #f5c451; --serious-ink: var(--serious); --critical-ink: #ef6a6a;
+    --grid: #2b2b29;
+    --shadow: 0 1px 2px rgba(0,0,0,.4), 0 8px 24px rgba(0,0,0,.35);
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --surface-0: #131312;
+  --surface-1: #1a1a19;
+  --surface-2: #222221;
+  --surface-3: #2c2c2a;
+  --border:    #383835;
+  --border-strong: #4d4d49;
+  --text-primary:   #ffffff;
+  --text-secondary: #c3c2b7;
+  --text-muted:     #8f8e85;
+  --text-invert:    #0b0b0b;
+  --accent:      #3987e5;
+  --accent-soft: #16283f;
+  --on-accent: #0b0b0b;
+  --series-1: #3987e5; --series-2: #d95926; --series-3: #199e70; --series-4: #c98500;
+  --series-5: #d55181; --series-6: #008300; --series-7: #9085e9; --series-8: #e66767;
+  --seq-100: #184f95; --seq-250: #256abf; --seq-400: #3987e5; --seq-550: #86b6ef; --seq-700: #cde2fb;
+  --good-bg: #122a12; --warning-bg: #3a2f10; --critical-bg: #3a1717; --serious-bg: #3a2418;
+  --good-ink: var(--good); --warning-ink: #f5c451; --serious-ink: var(--serious); --critical-ink: #ef6a6a;
+  --grid: #2b2b29;
+  --shadow: 0 1px 2px rgba(0,0,0,.4), 0 8px 24px rgba(0,0,0,.35);
+}
+
+/* Dark blue — for long sessions.
+   Two things make a dark theme tiring rather than restful, and this avoids both: a pure
+   black ground, which maximises the luminance step to any lit pixel, and pure white
+   text, which haloes against it. So the ground is a deep navy and the brightest text
+   stops short of white. The accent is desaturated for the same reason — a saturated blue
+   on navy vibrates at the edges.
+
+   Note on blue light: this is a blue-TINTED theme, which is not the same as a
+   blue-REDUCED one. If the goal is less blue emission after dark, a warm/amber theme is
+   the thing that does it, and the OS night-shift setting does it better than any palette
+   here can. What this buys is lower overall luminance and softer contrast. */
+:root[data-theme="dark-blue"] {
+  color-scheme: dark;
+  --surface-0: #0c1322;
+  --surface-1: #111a2c;
+  --surface-2: #18243c;
+  --surface-3: #212f4c;
+  --border:    #25334e;
+  --border-strong: #3c4f74;
+  --text-primary:   #dde5f2;
+  --text-secondary: #aab8cf;
+  --text-muted:     #8090a8;
+  --text-invert:    #0a111f;
+  --accent:      #5c9ef6;
+  --accent-soft: #14294a;
+  --on-accent: #0a111f;
+  --series-1: #5c9ef6; --series-2: #e3794a; --series-3: #35b58c; --series-4: #d9a43c;
+  --series-5: #dd7aa6; --series-6: #46b04a; --series-7: #9b8ef0; --series-8: #ea7070;
+  --seq-100: #17325c; --seq-250: #24518f; --seq-400: #3d7fd4; --seq-550: #79aaea; --seq-700: #c6ddf8;
+  --good-bg: #10281f; --warning-bg: #322a12; --critical-bg: #331a20; --serious-bg: #33241a;
+  --good-ink: #52c78a; --warning-ink: #e8bf5f; --serious-ink: #ef9a72; --critical-ink: #f07b83;
+  --grid: #1d2a42;
+  --shadow: 0 1px 2px rgba(0,0,0,.45), 0 8px 24px rgba(0,0,0,.4);
+}
+
+/* Warm — the low-blue one.
+   Dark blue is a blue-TINTED theme; this is the blue-REDUCED one. Every surface and
+   every text colour is pulled toward amber, and the accent is amber rather than blue,
+   because a blue accent is the single largest lit area on most screens here and would
+   undo the point. Summed across the surfaces and body text, this emits roughly a third
+   less blue than the dark theme and forty percent less than dark blue.
+
+   It is still not a substitute for the OS night-shift setting, which filters the whole
+   display including images and other apps. What a palette can do is not fight it. */
+:root[data-theme="warm"] {
+  color-scheme: dark;
+  --surface-0: #16120c;
+  --surface-1: #1e1811;
+  --surface-2: #282017;
+  --surface-3: #342a1e;
+  --border:    #372d20;
+  --border-strong: #54452f;
+  --text-primary:   #f2e6d2;
+  --text-secondary: #cbb99c;
+  --text-muted:     #9d8c73;
+  --text-invert:    #16120c;
+  --accent:      #e3a44e;
+  --accent-soft: #3a2a12;
+  --on-accent:   #16120c;
+  /* Categorical steps, kept apart by hue without reaching for blue. */
+  --series-1: #e3a44e; --series-2: #e07a4a; --series-3: #8fbf6a; --series-4: #d9b64a;
+  --series-5: #dd8f8f; --series-6: #7fae5a; --series-7: #c08fa8; --series-8: #ea8570;
+  /* The sequential ramp is amber here rather than blue — it is a ramp, not a brand. */
+  --seq-100: #3d2e14; --seq-250: #6b5220; --seq-400: #a67c2e; --seq-550: #d1a552; --seq-700: #f0d49a;
+  --good-bg: #14240f; --warning-bg: #2e2410; --critical-bg: #2e1813; --serious-bg: #2e2014;
+  --good-ink: #6fbf73; --warning-ink: #e8c168; --serious-ink: #eda179; --critical-ink: #f08a7a;
+  --grid: #2b2318;
+  --shadow: 0 1px 2px rgba(0,0,0,.5), 0 8px 24px rgba(0,0,0,.42);
+}
+
+/* The console's resize grip. Wide enough to grab, quiet enough to ignore. */
+.split-handle {
+  align-self: stretch; border-radius: 3px; cursor: col-resize; background: transparent;
+  border-left: 1px solid var(--border); border-right: 1px solid transparent;
+}
+.split-handle:hover, .split-handle:active { background: var(--accent-soft); border-left-color: var(--accent); }
+@media (max-width: 900px) { .split-handle { display: none; } }
+
+/* Search matches in the REST console. Every hit is marked; the one you are on is marked
+   differently, because "which of these am I on" must be answerable without scrolling. */
+.json mark, pre mark { background: color-mix(in srgb, var(--warning) 45%, transparent); color: inherit; border-radius: 2px; }
+.json mark.on, pre mark.on {
+  background: var(--accent); color: var(--on-accent);
+  outline: 1px solid var(--accent); border-radius: 2px;
+}
+
+* { box-sizing: border-box; }
+html, body { height: 100%; }
+body {
+  margin: 0; font-family: var(--sans); font-size: 13.5px; line-height: 1.5;
+  background: var(--surface-0); color: var(--text-primary);
+  -webkit-font-smoothing: antialiased;
+}
+a { color: var(--accent); }
+button, input, select, textarea { font: inherit; color: inherit; }
+[hidden] { display: none !important; }
+
+/* ---------------------------------- shell --------------------------------- */
+/* Navigation sits across the top: a wide table gets the whole window, and the
+   nine pages read as one row of tabs instead of a column competing for width. */
+.app { display: flex; flex-direction: column; min-height: 100vh; }
+
+/* No box of its own. A sticky element sticks only inside its parent, and this wrapper is
+   exactly as tall as the topbar, the tabs and the status strip — so .head-fix used to
+   scroll away with it after the first hundred pixels. With the wrapper out of the box
+   tree, .head-fix and the strip are children of .app, which is as tall as the page. */
+.header { display: contents; }
+
+/* The part of the header that actually stays put while a page scrolls: the topbar and the
+   tabs. The status strip (config name, fleet health, request counts) is a sibling AFTER
+   this, not inside it, so it scrolls away underneath instead of holding a permanent band
+   of every page hostage — see renderShell() in app.js. Fully opaque, unlike the old
+   `.header`'s translucent blur: a table's rows scrolling past behind a see-through header
+   read as the header being broken, not as depth. */
+.head-fix {
+  position: sticky; top: 0; z-index: 20;
+  background: var(--surface-0); border-bottom: 1px solid var(--border);
+}
+
+/* Wraps whenever the row runs out of width, rather than at a chosen breakpoint. It used
+   to wrap only below 900px, and every control added to this row moved the real limit:
+   the health pill and the notification bell together pushed "sign out" 22px past the
+   right edge at 1024px, giving the whole page a horizontal scrollbar. Wrapping costs
+   nothing while everything fits. */
+.topbar {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  padding: 8px 16px; min-height: 46px;
+}
+.topbar h1 { font-size: 14px; margin: 0; font-weight: 650; letter-spacing: -.01em; white-space: nowrap; }
+.topbar .spacer { flex: 1; }
+
+.brand { display: flex; align-items: center; gap: 8px; padding: 0 8px 0 0; margin-right: 2px;
+         border-right: 1px solid var(--border); }
+.brand img { width: 22px; height: 22px; border-radius: 6px; }
+.brand b { font-size: 13.5px; letter-spacing: -.01em; white-space: nowrap; }
+.brand span { font-size: 10px; color: var(--text-muted); display: block; font-weight: 400; max-width: 130px;
+              overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* --- horizontal tabs --- */
+.nav {
+  display: flex; align-items: stretch; gap: 2px; padding: 0 12px;
+  overflow-x: auto; scrollbar-width: thin;
+}
+.nav button {
+  display: inline-flex; align-items: center; gap: 7px; white-space: nowrap;
+  padding: 7px 11px 8px; border: 0; border-bottom: 2px solid transparent;
+  background: transparent; cursor: pointer; color: var(--text-secondary); font-size: 12.5px;
+  font-family: inherit; border-radius: var(--radius-sm) var(--radius-sm) 0 0;
+}
+.nav button:hover { background: var(--surface-2); color: var(--text-primary); }
+.nav button[aria-current="page"] {
+  color: var(--accent); font-weight: 640; border-bottom-color: var(--accent);
+  background: var(--accent-soft);
+}
+.nav .ico { opacity: .9; }
+/* ------------------------------ in-page section tabs ------------------------------ */
+/* A page with several unrelated jobs gets its own tab bar, in the window's own idiom so
+   it reads as navigation. Slightly smaller than the top tabs, and it sits on a rule, so
+   it is clearly subordinate to them rather than a second row of equals. */
+.subnav {
+  display: flex; align-items: stretch; gap: 2px; flex-wrap: wrap;
+  border-bottom: 1px solid var(--border);
+}
+.subnav button {
+  display: inline-flex; align-items: center; gap: 6px; white-space: nowrap;
+  padding: 6px 10px 7px; border: 0; border-bottom: 2px solid transparent;
+  background: transparent; cursor: pointer; color: var(--text-secondary); font-size: 12px;
+  font-family: inherit; border-radius: var(--radius-sm) var(--radius-sm) 0 0;
+}
+.subnav button:hover { background: var(--surface-2); color: var(--text-primary); }
+.subnav button[aria-current="page"] {
+  color: var(--accent); font-weight: 640; border-bottom-color: var(--accent);
+  background: var(--accent-soft);
+}
+.subnav .ico { opacity: .9; }
+
+/* A vertical rule before Config, where the divider used to be. */
+.nav-sep { width: 1px; background: var(--border); margin: 8px 7px; flex: none; }
+
+/* Status that used to live in the sidebar foot, now a strip under the tabs. */
+.status-strip {
+  display: flex; flex-wrap: wrap; gap: 4px 14px; align-items: center;
+  padding: 5px 16px; border-top: 1px solid var(--border);
+  font-size: 11px; color: var(--text-muted); background: var(--surface-1);
+}
+.status-strip .row { display: inline-flex; gap: 5px; align-items: center; }
+.status-strip .row b { color: var(--text-secondary); font-weight: 600; }
+/* Pushes the credits to the far end without collapsing the strip when it wraps. */
+.status-strip .strip-spacer { flex: 1 1 auto; min-width: 0; }
+
+/* ------------------------------- credits (mini) ------------------------------ */
+/* Quieter than the live state it sits beside: this is provenance, not a reading. */
+.credits { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 5px; color: var(--text-muted); }
+.credits .sep { opacity: .5; }
+.credits a.ext, .credits .linkish {
+  color: var(--text-secondary); text-decoration: none;
+  border-bottom: 1px solid transparent; border-radius: 2px;
+}
+.credits a.ext:hover, .credits .linkish:hover {
+  color: var(--accent); border-bottom-color: currentColor;
+}
+/* A button that reads as a link — the About dialog is in-app, so it is not an <a>. */
+.credits .linkish {
+  background: none; border: 0; padding: 0; margin: 0; cursor: pointer;
+  font: inherit; color: var(--text-secondary);
+}
+.credits a.ext:focus-visible, .credits .linkish:focus-visible {
+  outline: 2px solid var(--accent); outline-offset: 2px; border-bottom-color: transparent;
+}
+
+.main { min-width: 0; display: flex; flex-direction: column; flex: 1; }
+.page { padding: 16px; max-width: 1900px; width: 100%; margin: 0 auto; }
+
+/* Below 1200px the tabs no longer fit in one row without crowding the topbar controls
+   beside them; they wrap onto a second line instead of scrolling sideways, where a tab
+   past the fold is easy to miss entirely. */
+@media (max-width: 1200px) {
+  .nav { flex-wrap: wrap; overflow-x: visible; }
+}
+
+@media (max-width: 900px) {
+  .brand span { display: none; }
+}
+
+/* --------------------------------- controls -------------------------------- */
+.btn {
+  display: inline-flex; align-items: center; gap: 6px; padding: 6px 11px;
+  border: 1px solid var(--border-strong); background: var(--surface-1); color: var(--text-primary);
+  border-radius: var(--radius-sm); cursor: pointer; font-size: 12.5px; white-space: nowrap;
+}
+.btn:hover { background: var(--surface-2); }
+/* Pressed. On a dashboard where a click starts a multi-second call, the press-down frame is
+   the only instant feedback there is, and nothing in the app had one. */
+.btn:not(.primary):not(.danger):active, .nav button:active, .menu-pop button:active { background: var(--surface-3); }
+.btn.primary:active { background: color-mix(in srgb, var(--accent) 88%, #000); }
+.btn.danger:active  { background: color-mix(in srgb, var(--critical) 14%, transparent); }
+
+/* One focus ring, for everything that can be reached by keyboard. Inputs keep their own
+   border+shadow treatment above; everything else gets an outline, which follows the
+   element's border-radius and works on a `tr` and a `th` where box-shadow does not.
+   Before this, the focus appearance of every button in the app was whatever the browser
+   happened to draw. */
+.btn:focus-visible,
+.nav button:focus-visible,
+.menu-pop button:focus-visible,
+.card > header:focus-visible,
+table.tbl th.sortable:focus-visible,
+table.tbl tbody tr:focus-visible,
+.sheet thead th:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+.btn:disabled { opacity: .5; cursor: not-allowed; }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); font-weight: 600; }
+.btn.primary:hover { filter: brightness(1.08); }
+.btn.danger { color: var(--critical); border-color: var(--critical); background: transparent; }
+.btn.ghost { border-color: transparent; background: transparent; color: var(--text-secondary); }
+.btn.ghost:hover { background: var(--surface-2); }
+.btn.sm { padding: 3px 8px; font-size: 11.5px; }
+
+input[type="text"], input[type="search"], input[type="date"], input[type="datetime-local"],
+input[type="number"], select, textarea {
+  background: var(--surface-1); border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm); padding: 6px 9px; outline: none;
+}
+input:focus, select:focus, textarea:focus { border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent); }
+label.field { display: flex; flex-direction: column; gap: 3px; font-size: 11px; color: var(--text-muted); }
+.toolbar { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 10px; margin-bottom: 14px; }
+/* Inputs, selects and buttons come out 31, 29 and 25px tall. Bottom-aligned in a row that
+   stacks a label above each one, those three heights push the labels to three different
+   baselines and the filter row reads as ragged. One height, so the labels line up. */
+.toolbar label.field > input,
+.toolbar label.field > select,
+.toolbar label.field > button { height: 30px; }
+
+/* ---------------------------------- cards ---------------------------------- */
+.card {
+  background: var(--surface-1); border: 1px solid var(--border);
+  border-radius: var(--radius); box-shadow: var(--shadow); overflow: hidden;
+}
+.card > header {
+  display: flex; align-items: center; gap: 8px; padding: 11px 14px;
+  border-bottom: 1px solid var(--border); background: var(--surface-1);
+}
+.card > header h2 { font-size: 13px; margin: 0; font-weight: 650; }
+/* A collapsible card's header is clickable, so it has to look like it under the pointer. */
+.card > header[role="button"]:hover { background: var(--surface-2); }
+.card > header .sub { font-size: 11px; color: var(--text-muted); font-weight: 400; }
+.card > .body { padding: 14px; }
+.grid { display: grid; gap: 14px; }
+/* A grid stretches its items to the tallest row by default. For a folded card that means
+   an empty bordered box as tall as whatever sits beside it, which reads as a chart that
+   failed to draw. Cards take their natural height; stat tiles (div.stat) still stretch,
+   which is what keeps a row of them even. */
+.grid > .card { align-self: start; }
+.grid.c2 { grid-template-columns: repeat(auto-fit, minmax(420px, 1fr)); }
+.grid.c3 { grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); }
+.grid.c4 { grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); }
+/* A fixed-width companion beside something that wants the rest of the row: a chart that
+   is 150px wide however much space it is given, next to a card that always has more to
+   say. auto-fit would give each half the row and leave the chart swimming in its own
+   column with dead space under its shorter neighbour. Stacks when there is no room to
+   put them side by side. */
+.grid.aside { grid-template-columns: minmax(250px, 330px) 1fr; }
+@media (max-width: 860px) { .grid.aside { grid-template-columns: 1fr; } }
+
+/* stat tile: the hero number wears text ink, not a series color */
+.stat { padding: 12px 14px; background: var(--surface-1); border: 1px solid var(--border); border-radius: var(--radius); }
+.stat .k { font-size: 10.5px; text-transform: uppercase; letter-spacing: .06em; color: var(--text-muted); }
+.stat .v { font-size: 22px; font-weight: 660; letter-spacing: -.02em; margin-top: 2px; font-variant-numeric: tabular-nums; }
+.stat .d { font-size: 11px; color: var(--text-secondary); margin-top: 2px; }
+.stat.bad { border-color: color-mix(in srgb, var(--critical) 55%, var(--border)); }
+.stat.bad .v { color: var(--critical); }
+.stat .d.names { overflow-wrap: anywhere; }
+.stat .top-errs { display: grid; gap: 3px; margin-top: 4px; font-size: 11.5px; }
+.stat .top-errs > div { display: flex; align-items: baseline; gap: 6px; min-width: 0; }
+.stat .top-errs .t { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.stat .top-errs .dot { flex: none; width: 7px; height: 7px; border-radius: 50%; transform: translateY(-1px); }
+.stat .top-errs .dot.crit { background: var(--critical); }
+.stat .top-errs .dot.warn { background: var(--warning); }
+
+/* --------------------------------- status ---------------------------------- */
+.pill {
+  display: inline-flex; align-items: center; gap: 5px; padding: 1px 8px 1px 6px;
+  border-radius: 999px; font-size: 11px; font-weight: 600; border: 1px solid transparent;
+  white-space: nowrap;
+}
+.pill .dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; flex: none; }
+.pill.green  { color: var(--good-ink);     background: var(--good-bg);     border-color: color-mix(in srgb, var(--good) 35%, transparent); }
+.pill.yellow { color: var(--warning-ink);  background: var(--warning-bg);  border-color: color-mix(in srgb, var(--warning) 45%, transparent); }
+.pill.orange { color: var(--serious-ink);  background: var(--serious-bg);  border-color: color-mix(in srgb, var(--serious) 45%, transparent); }
+.pill.red    { color: var(--critical-ink); background: var(--critical-bg); border-color: color-mix(in srgb, var(--critical) 35%, transparent); }
+.pill.grey   { color: var(--text-secondary); background: var(--surface-2); border-color: var(--border); }
+
+/* --------------------------------- tables ---------------------------------- */
+.tbl-wrap { overflow-x: auto; }
+table.tbl { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+table.tbl th {
+  text-align: left; font-weight: 600; font-size: 11px; letter-spacing: .03em;
+  text-transform: uppercase; color: var(--text-muted); padding: 8px 10px;
+  border-bottom: 1px solid var(--border); position: sticky; top: 0; background: var(--surface-1); z-index: 1;
+}
+table.tbl th.sortable { cursor: pointer; user-select: none; }
+table.tbl th.sortable:hover { color: var(--text-primary); }
+table.tbl td { padding: 7px 10px; border-bottom: 1px solid var(--grid); vertical-align: middle; }
+table.tbl tbody tr:hover td { background: var(--surface-2); }
+/* A number and its unit are one token. Left to wrap, a narrow column breaks "143 GB"
+   into "143" over "GB", and "3 (3 data)" into "3 (3" over "data)" — the value and what
+   it measures end up on different lines. Numeric cells never wrap; the table already
+   scrolls inside .tbl-wrap if a column needs the room. */
+table.tbl td.num, table.tbl th.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+table.tbl td.mono, .mono { font-family: var(--mono); font-size: 12px; }
+/* Label/value rows (Config): the label is a fixed column and the value sits right beside
+   it, left-aligned — a percentage label column left short values floating mid-page. */
+table.tbl tr.kv td { text-align: left; }
+table.tbl tr.kv td.k { width: 240px; white-space: nowrap; color: var(--text-muted); font-size: 11.5px; }
+table.tbl tr.kv td.v { font-size: 12px; word-break: break-all; }
+@media (max-width: 700px) { table.tbl tr.kv td.k { width: 40%; white-space: normal; } }
+.tbl-empty { padding: 26px; text-align: center; color: var(--text-muted); }
+/* An empty state that has something to say: the reason reads as text rather than as a
+   muted aside, the evidence stays quiet under it, and the actions sit where a button is
+   expected. Less padding than the bare form — there is content here to fill it. */
+.tbl-empty.rich { padding: 20px 16px; display: grid; gap: 7px; justify-items: center; }
+.tbl-empty.rich .why { color: var(--text-secondary); font-size: 12.5px; max-width: 54ch; }
+.tbl-empty.rich .detail { font-size: 11px; color: var(--text-muted); max-width: 60ch; word-break: break-word; }
+.tbl-empty.rich .acts { display: flex; gap: 6px; flex-wrap: wrap; justify-content: center; margin-top: 2px; }
+
+/* ------------------------- Clusters page summary table ---------------------- */
+/* At a hundred-odd rows the table used to be taller than the window, which put its own
+   horizontal scrollbar below the fold — the one control you need to see the columns that
+   do not fit gets hidden by the very overflow it exists to fix. Boxing it to the space
+   actually left under the sticky header keeps that scrollbar, and the sticky <th> row
+   sticking to the TOP OF THIS BOX rather than the page, on screen at all times. The
+   estimate below is generous on purpose: a box a little short of the window is much less
+   wrong than one that quietly grows past it. */
+.cluster-tbl-scroll { max-height: calc(100vh - 260px); min-height: 220px; overflow: auto; }
+.cluster-tbl-scroll table.tbl th { top: 0; }
+
+/* JDK, SLM and the request count are read occasionally, not at a glance, and are the
+   first three columns to make the table wider than a laptop screen. Below 1500px they
+   fold into the row's own "Details" panel (see detail() in overview.js) instead of
+   forcing a horizontal scroll just to read Health or Disk usage. */
+@media (max-width: 1500px) {
+  .cluster-tbl-scroll table.tbl th:nth-child(3), .cluster-tbl-scroll table.tbl td:nth-child(3),
+  .cluster-tbl-scroll table.tbl th:nth-child(9), .cluster-tbl-scroll table.tbl td:nth-child(9),
+  .cluster-tbl-scroll table.tbl th:nth-child(13), .cluster-tbl-scroll table.tbl td:nth-child(13) {
+    display: none;
+  }
+}
+
+/* One cluster's block on a page that shows the whole fleet (Snapshots, …). Off screen, the
+   browser skips its style and layout and reserves an estimated height instead, so a page of
+   a hundred-odd blocks costs roughly what the few on screen cost. `auto` remembers the real
+   height once a block has been seen, so the scrollbar settles rather than jumping. */
+.lazy-block { content-visibility: auto; contain-intrinsic-size: auto 560px; }
+
+/* ---------------------------------- misc ----------------------------------- */
+.muted { color: var(--text-muted); }
+.sec { color: var(--text-secondary); }
+.nowrap { white-space: nowrap; }
+.trunc { max-width: 340px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bar-mini { height: 6px; border-radius: 3px; background: var(--surface-3); overflow: hidden; min-width: 60px; }
+.bar-mini > i { display: block; height: 100%; border-radius: 3px; }
+.banner {
+  display: flex; gap: 10px; align-items: flex-start; padding: 11px 13px; border-radius: var(--radius);
+  border: 1px solid var(--border); background: var(--surface-2); margin-bottom: 14px; font-size: 12.5px;
+}
+.banner.warn { border-color: color-mix(in srgb, var(--warning) 50%, transparent); background: var(--warning-bg); }
+.banner.err  { border-color: color-mix(in srgb, var(--critical) 45%, transparent); background: var(--critical-bg); }
+.banner .ttl { font-weight: 650; }
+.banner .acts { margin-left: auto; display: flex; gap: 6px; }
+.spin { width: 13px; height: 13px; border: 2px solid var(--border-strong); border-top-color: var(--accent);
+  border-radius: 50%; animation: sp .7s linear infinite; display: inline-block; }
+@keyframes sp { to { transform: rotate(360deg); } }
+pre.json {
+  margin: 0; font-family: var(--mono); font-size: 12px; line-height: 1.55; white-space: pre;
+  overflow: auto; padding: 12px; background: var(--surface-2); border-radius: var(--radius-sm);
+  max-height: 62vh;
+}
+.j-key { color: var(--series-1); } .j-str { color: var(--series-3); }
+.j-num { color: var(--series-2); } .j-bool { color: var(--series-7); } .j-null { color: var(--text-muted); }
+
+/* --------------------------------- charts ---------------------------------- */
+.chart { position: relative; }
+.chart svg { display: block; width: 100%; overflow: visible; }
+.chart .axis text { font-size: 10px; fill: var(--text-muted); }
+.chart .grid-line { stroke: var(--grid); stroke-width: 1; }
+.chart .lbl { font-size: 11px; fill: var(--text-secondary); }
+.chart .val { font-size: 11px; fill: var(--text-primary); font-variant-numeric: tabular-nums; }
+.legend { display: flex; flex-wrap: wrap; gap: 10px 16px; margin-top: 10px; font-size: 11.5px; color: var(--text-secondary); }
+.legend i { width: 9px; height: 9px; border-radius: 2px; display: inline-block; margin-right: 6px; }
+.tip {
+  position: fixed; z-index: 60; pointer-events: none; background: var(--surface-1);
+  border: 1px solid var(--border-strong); border-radius: var(--radius-sm); box-shadow: var(--shadow);
+  padding: 7px 9px; font-size: 11.5px; max-width: 280px;
+}
+.tip b { display: block; margin-bottom: 3px; font-size: 12px; }
+.tip .r { display: flex; gap: 10px; justify-content: space-between; }
+
+/* ------------------------------- setup screen ------------------------------ */
+/* ------------------------------ the sign-in screen --------------------------- */
+/*
+ * Drawn rather than photographed. The content policy allows 'self' and data: only, so a
+ * stock image would have to ship inside the app — and this build is 752 KB of UI in a
+ * portable zip somebody copies to a USB stick. Gradients and one tiny SVG cost nothing,
+ * follow the theme instead of fighting it, and stay sharp on any display.
+ *
+ * Three layers: a dot grid for texture, two wide accent washes for depth, and the page
+ * colour underneath so the whole thing still resolves to something readable if a layer
+ * fails to paint.
+ */
+body.auth-bg { min-height: 100vh; background: var(--surface-0); }
+body.auth-bg .app { display: none; }
+
+.auth-split { display: grid; grid-template-columns: 1.05fr 1fr; min-height: 100vh; }
+
+/* ---- left: the brand panel ---------------------------------------------------
+ * One image, the left half of the supplied mock-up, cropped at the seam so the form
+ * it drew on the right is not underneath the real one. 65 KB at 704x900 — it is a
+ * decorative panel, not a diagram anybody has to read, so it is cropped by `cover`
+ * on narrow windows and hidden entirely below 900px.
+ *
+ * The gradient underneath is not decoration: it is what shows if the file is missing
+ * or still loading, so the panel is never a white rectangle beside a dark form.
+ */
+.auth-brand {
+  background-color: #0a1f42;
+  background-image: linear-gradient(155deg, #0d2a55 0%, #0a1f42 46%, #07162f 100%);
+  position: relative;
+}
+.auth-brand::after {
+  content: ""; position: absolute; inset: 0;
+  background: url("../img/login-brand.jpg") no-repeat center / cover;
+}
+
+/* ---- right: the form ---------------------------------------------------------- */
+.auth-form { display: grid; place-items: center; padding: 5vh 24px; background: var(--surface-0); }
+.auth-form .setup { max-width: 400px; width: 100%; margin: 0; }
+.auth-form .setup > .card {
+  border-color: var(--border-strong);
+  box-shadow: 0 18px 48px -26px rgb(0 0 0 / .4), 0 2px 8px -4px rgb(0 0 0 / .16);
+}
+.auth-form .banner { background: color-mix(in srgb, var(--surface-1) 82%, transparent); }
+
+/* Below this the brand panel is a wall between the reader and the form. */
+@media (max-width: 900px) {
+  .auth-split { grid-template-columns: 1fr; }
+  .auth-brand { display: none; }
+  .auth-form { padding: 8vh 20px; }
+}
+
+.setup { max-width: 760px; margin: 6vh auto; padding: 0 18px; }
+.setup h2 { font-size: 20px; margin: 0 0 4px; letter-spacing: -.02em; }
+.steps { counter-reset: s; display: grid; gap: 10px; margin: 16px 0; }
+.steps li { list-style: none; display: flex; gap: 11px; align-items: flex-start; }
+.steps li::before {
+  counter-increment: s; content: counter(s); flex: none; width: 21px; height: 21px; border-radius: 50%;
+  background: var(--accent-soft); color: var(--accent); font-size: 11px; font-weight: 700;
+  display: grid; place-items: center; margin-top: 1px;
+}
+code.inline { font-family: var(--mono); font-size: 12px; background: var(--surface-2); padding: 1px 5px; border-radius: 4px; }
+details.disc > summary { cursor: pointer; font-size: 12px; color: var(--text-secondary); padding: 4px 0; }
+
+/* --------------------------------- popup ----------------------------------- */
+body.popup { width: 330px; background: var(--surface-1); }
+.popup .p-head { display: flex; align-items: center; gap: 8px; padding: 11px 12px; border-bottom: 1px solid var(--border); }
+.popup .p-list { max-height: 330px; overflow: auto; }
+.popup .p-row { display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-bottom: 1px solid var(--grid); }
+.popup .p-row .nm { font-weight: 600; font-size: 12.5px; }
+.popup .p-row .u { font-size: 10.5px; color: var(--text-muted); }
+.popup .p-foot { padding: 10px 12px; display: flex; gap: 8px; }
+
+/* ------------------------------ credential modal --------------------------- */
+.modal-overlay {
+  position: fixed; inset: 0; z-index: 100; display: grid; place-items: center; padding: 20px;
+  background: color-mix(in srgb, #0b0b0b 55%, transparent); backdrop-filter: blur(2px);
+}
+.modal {
+  width: min(560px, 100%); max-height: 90vh; overflow: auto;
+  background: var(--surface-1); border: 1px solid var(--border-strong);
+  border-radius: 12px; box-shadow: 0 12px 48px rgba(0,0,0,.35);
+}
+.modal-head { display: flex; gap: 12px; align-items: flex-start; padding: 16px 18px 12px; border-bottom: 1px solid var(--border); }
+.modal-head h2 { margin: 0; font-size: 15px; letter-spacing: -.01em; }
+.modal-head .sub { margin: 4px 0 0; font-size: 12.5px; color: var(--text-secondary); line-height: 1.5; }
+.modal-head button { margin-left: auto; font-size: 18px; line-height: 1; padding: 2px 7px; }
+.modal-body { padding: 14px 18px; display: grid; gap: 12px; }
+.modal-foot { display: flex; align-items: center; gap: 8px; padding: 12px 18px 16px; border-top: 1px solid var(--border); }
+
+.seg { display: flex; gap: 4px; background: var(--surface-2); padding: 3px; border-radius: 8px; }
+.seg .btn { flex: 1; justify-content: center; border-color: transparent; background: transparent; }
+.seg .btn.primary { border-color: var(--accent); }
+
+.cd-targets { border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 9px 11px; background: var(--surface-2); }
+.cd-row { display: flex; gap: 8px; align-items: center; padding: 3px 0; font-size: 12.5px; min-width: 0; }
+.cd-row .trunc { max-width: 260px; }
+.cd-note { font-size: 11.5px; color: var(--text-secondary); line-height: 1.55; border-left: 2px solid var(--accent); padding-left: 10px; }
+
+/* ------------------------------ row action menu ---------------------------- */
+/* Destructive actions live behind this rather than sitting in the row, where a
+   mis-click deletes an index. */
+.menu-pop {
+  position: fixed; z-index: 60; min-width: 178px; padding: 4px;
+  background: var(--surface-1); border: 1px solid var(--border);
+  border-radius: var(--radius); box-shadow: 0 10px 30px rgba(0,0,0,.34);
+}
+.menu-pop button {
+  display: flex; align-items: center; gap: 8px; width: 100%; text-align: left;
+  padding: 6px 9px; border: 0; background: transparent; border-radius: var(--radius-sm);
+  cursor: pointer; color: var(--text-primary); font-size: 12.5px; font-family: inherit;
+}
+.menu-pop button:hover:not(:disabled) { background: var(--surface-2); }
+.menu-pop button:disabled { opacity: .45; cursor: not-allowed; }
+.menu-pop button.danger { color: var(--critical); }
+.menu-pop button .ico { width: 15px; flex: none; text-align: center; font-size: 13px; }
+.menu-pop .sep { height: 1px; margin: 4px 2px; background: var(--border); }
+.menu-pop .hint { padding: 2px 9px 6px; font-size: 10.5px; color: var(--text-muted); }
+.btn.menu-trigger { padding: 3px 7px; font-size: 13px; line-height: 1.1; }
+
+/* --------------------------- compact page density -------------------------- */
+/* Alerts, Indices and Snapshots show long tables; at the default density they
+   push the useful rows below the fold. */
+.dense .card > .body { padding: 9px 10px; }
+.dense .card > header { padding: 7px 10px; }
+.dense .stat { padding: 7px 10px; }
+.dense .stat .v { font-size: 16px; }
+.dense .stat .k { font-size: 9.5px; }
+.dense .stat .d { font-size: 10px; }
+.dense .tbl th, .dense .tbl td { padding: 4px 8px; font-size: 12px; }
+.dense .toolbar { gap: 7px; margin-bottom: 9px; }
+.dense .grid { gap: 8px; }
+.dense .banner { padding: 8px 10px; }
+.dense .pill { padding: 0 5px; font-size: 10.5px; }
+.dense h2 { font-size: 13px; }
+
+/* ------------------------------- ack / comments ---------------------------- */
+.ack-row { opacity: .62; }
+.note {
+  border-left: 2px solid var(--border); padding: 3px 0 3px 8px; margin-top: 4px;
+  font-size: 11.5px; color: var(--text-secondary);
+}
+.note b { color: var(--text-primary); font-weight: 600; }
+.note .when { color: var(--text-muted); font-size: 10.5px; margin-left: 5px; }
+
+/* ------------------------------ spreadsheet grid --------------------------- */
+/* The volume report read as a spreadsheet: one row per cluster, every parameter a
+   column, the cluster column and the header pinned while the rest scrolls. */
+.sheet-wrap { overflow: auto; max-height: 74vh; border: 1px solid var(--border); border-radius: var(--radius); }
+.sheet { border-collapse: separate; border-spacing: 0; font-size: 12px; width: max-content; min-width: 100%; }
+.sheet th, .sheet td {
+  border-right: 1px solid var(--border); border-bottom: 1px solid var(--border);
+  padding: 5px 9px; white-space: nowrap;
+}
+.sheet thead th {
+  position: sticky; top: 0; z-index: 3; background: var(--surface-2);
+  font-weight: 620; font-size: 11px; color: var(--text-secondary);
+  text-align: left; vertical-align: bottom; border-bottom: 2px solid var(--border-strong);
+}
+.sheet thead th .unit { display: block; font-weight: 400; color: var(--text-muted); font-size: 10px; }
+/* Each column explains itself, but only when asked. Thirty-odd permanent "i" marks would
+   be noise across a header that is already dense, so the mark appears on the column the
+   pointer is over — and stays while its panel is open, since the pointer has to leave the
+   header to reach it. Reserved width, so nothing shifts when it appears. */
+.sheet thead th .colinfo {
+  display: inline-flex; align-items: center; justify-content: center;
+  position: relative;
+  width: 13px; height: 13px; margin-left: 4px; padding: 0; vertical-align: -2px;
+  border: 1px solid var(--border-strong); border-radius: 50%; background: transparent;
+  color: var(--text-muted); font-size: 9px; font-weight: 700; font-style: italic;
+  line-height: 1; cursor: help; opacity: 0; transition: opacity .08s;
+}
+/* The mark stays 13px so it does not crowd a dense header, but a 13px hit target fails
+   WCAG 2.2 SC 2.5.8 (24x24) and it is the only route to per-column help in a 36-column
+   sheet. An invisible overlay gives it a real target without changing the layout. */
+.sheet thead th .colinfo::after {
+  content: ''; position: absolute; left: 50%; top: 50%;
+  width: 24px; height: 24px; transform: translate(-50%, -50%);
+}
+.sheet thead th:hover .colinfo, .sheet thead th .colinfo.on, .sheet thead th .colinfo:focus-visible { opacity: 1; }
+.sheet thead th .colinfo:hover, .sheet thead th .colinfo.on {
+  color: var(--accent); border-color: var(--accent); background: var(--accent-soft);
+}
+.sheet tbody tr:nth-child(even) td { background: color-mix(in srgb, var(--surface-1) 55%, transparent); }
+.sheet tbody tr:hover td { background: var(--accent-soft); }
+/* first column pinned */
+.sheet th.stick, .sheet td.stick {
+  position: sticky; left: 0; z-index: 2; background: var(--surface-1);
+  border-right: 2px solid var(--border-strong); font-weight: 640;
+}
+.sheet thead th.stick { z-index: 4; background: var(--surface-2); }
+.sheet tbody tr:nth-child(even) td.stick { background: color-mix(in srgb, var(--surface-2) 70%, var(--surface-1)); }
+.sheet tbody tr:hover td.stick { background: var(--accent-soft); }
+.sheet td.num { text-align: right; font-variant-numeric: tabular-nums; }
+.sheet td.yes { color: var(--good-ink); font-weight: 620; }
+.sheet td.no  { color: var(--critical-ink); font-weight: 620; }
+.sheet td.unknown { color: var(--text-muted); }
+.sheet .group-head th {
+  background: var(--surface-0); color: var(--text-muted); font-size: 10px;
+  text-transform: uppercase; letter-spacing: .06em; text-align: center;
+  border-bottom: 1px solid var(--border);
+}
+/* A section's first column: the divider runs from its label down through every row, so
+   which section a column belongs to is visible wherever you are in the sheet. */
+.sheet .gstart { border-left: 2px solid var(--border-strong); }
+/* Centred on the visible part of its section — see bandCentred() in pages/volume.js —
+   so a section scrolled halfway or running past the edge still has its name over the
+   columns you can see. The dividers (.gstart) mark exactly where each section begins. */
+.sheet .group-head th .glabel { display: inline-block; will-change: transform; }
+/* The pinned part of the first band reads as one band with the cell beside it: the
+   label is left-aligned over the frozen column, and the divider between the two halves
+   is dropped so it does not look like an extra group. */
+.sheet .group-head th.stick { text-align: center; border-right: 0; background: var(--surface-0); }
+
+/* --------------------------------- popover --------------------------------- */
+/* Anchored panel for things that were inline rows and should not be: the notes on an
+   alert, for one. Same anchoring as the row menu, but it holds arbitrary content and
+   stays open while you type in it. */
+.pop {
+  position: fixed; z-index: 70; min-width: 300px; max-width: 460px;
+  background: var(--surface-1); border: 1px solid var(--border-strong);
+  border-radius: var(--radius); box-shadow: 0 12px 34px rgba(0,0,0,.40);
+  display: flex; flex-direction: column; max-height: 70vh;
+}
+.pop > header {
+  display: flex; align-items: center; gap: 8px; padding: 8px 10px;
+  border-bottom: 1px solid var(--border); font-size: 12.5px; font-weight: 640;
+}
+.pop > header .sub { font-weight: 400; font-size: 11px; color: var(--text-muted); }
+.pop > header button { margin-left: auto; }
+.pop > .body { padding: 9px 10px; overflow: auto; display: grid; gap: 7px; }
+.pop > .foot { padding: 8px 10px; border-top: 1px solid var(--border); display: flex; gap: 6px; }
+
+/* A short-lived confirmation, so an action that closes its own panel still says it
+   happened. Fades itself out; never needs dismissing, and the bell keeps a copy. */
+/* Top right, just under the pinned header (toast() measures it and sets `top`), newest on
+   top: column-reverse keeps the DOM oldest-first, so capping still drops the oldest. */
+.toast-wrap { position: fixed; z-index: 1000; right: 16px; top: 64px;
+              display: flex; flex-direction: column-reverse; align-items: flex-end; gap: 8px;
+              pointer-events: none; width: min(420px, calc(100vw - 32px)); }
+/* The wrapper ignores the pointer so a notice never swallows a click meant for the page
+   under it; the notices themselves stay clickable (a click dismisses). */
+.toast-wrap > * { pointer-events: auto; }
+/* Each notice is its own row in a column — static, never positioned — so two can only
+   ever sit one above the other. Opaque, so one never shows through another. */
+.toast {
+  position: static; flex: none; display: flex; align-items: flex-start; gap: 9px;
+  width: 100%; box-sizing: border-box;
+  background: var(--surface-1); border: 1px solid var(--border-strong); border-left-width: 4px;
+  border-radius: var(--radius); box-shadow: 0 10px 28px rgba(0,0,0,.34);
+  padding: 9px 12px; font-size: 12.5px; line-height: 1.4; color: var(--text-primary);
+  overflow-wrap: anywhere; animation: toast-in .16s ease-out;
+}
+.toast-x { flex: none; margin: -3px -5px 0 2px; width: 22px; height: 22px; border: 0; border-radius: 4px;
+  background: transparent; color: var(--text-muted); font-size: 16px; line-height: 1; cursor: pointer; }
+.toast-x:hover { background: var(--surface-2); color: var(--text-primary); }
+.toast-ico { flex: none; width: 18px; height: 18px; border-radius: 50%; display: grid; place-items: center;
+             font-size: 11px; font-weight: 700; color: #fff; margin-top: 1px; }
+.toast-msg { flex: 1; min-width: 0; }
+.toast.ok   { border-color: color-mix(in srgb, var(--good) 45%, var(--border-strong)); border-left-color: var(--good);
+              background: color-mix(in srgb, var(--good) 12%, var(--surface-1)); }
+.toast.ok .toast-ico   { background: var(--good); }
+.toast.err  { border-color: color-mix(in srgb, var(--critical) 45%, var(--border-strong)); border-left-color: var(--critical);
+              background: color-mix(in srgb, var(--critical) 12%, var(--surface-1)); }
+.toast.err .toast-ico  { background: var(--critical); }
+.toast.warn { border-color: color-mix(in srgb, var(--warning) 45%, var(--border-strong)); border-left-color: var(--warning);
+              background: color-mix(in srgb, var(--warning) 12%, var(--surface-1)); }
+.toast.warn .toast-ico { background: var(--warning); color: #1a1a1a; }
+.toast.out  { opacity: 0; transform: translateX(12px); transition: opacity .25s, transform .25s; }
+@keyframes toast-in { from { opacity: 0; transform: translateX(16px); } to { opacity: 1; transform: none; } }
+
+/* Reduced motion. The spinner is an infinite rotation that runs through every refresh
+   cycle, which is exactly the kind of movement this query exists to stop. Transitions
+   become instant rather than disappearing, so state changes still register. */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* Segmented control — Indices/Summary, Live/Snapshot.
+   Selection is stated with aria-pressed rather than a "primary" class: it is a toggle
+   group, not two independent buttons, and the screen-reader answer and the visual one
+   then come from the same attribute instead of being kept in step by hand. The explicit
+   colours are why this rule exists at all — relying on .btn.primary left the selected
+   tab with an accent border and unchanged text, which read as unselected-but-focused. */
+.seg { display: inline-flex; gap: 0; }
+.seg .btn { border-radius: 0; margin-left: -1px; }
+.seg .btn:first-child { border-top-left-radius: 6px; border-bottom-left-radius: 6px; margin-left: 0; }
+.seg .btn:last-child { border-top-right-radius: 6px; border-bottom-right-radius: 6px; }
+.seg .btn[aria-pressed="true"] {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--on-accent);
+  font-weight: 600;
+  position: relative;   /* keep the selected edge above its neighbour's border */
+  z-index: 1;
+}
+.seg .btn[aria-pressed="true"]:hover { filter: brightness(1.08); }
+.seg .btn[aria-pressed="false"] { color: var(--text-secondary); }
+.seg .btn[aria-pressed="false"]:hover { background: var(--surface-2); color: var(--text); }
+
+/* Freshness — "fetched N ago" + Refresh. Muted by default; a stale reading is marked
+   rather than left to be inferred from a timestamp nobody reads. */
+.freshness { display: inline-flex; align-items: center; gap: 8px; font-size: 11.5px; }
+.freshness .stale { color: var(--warning); }
+
+/* ------------------------------ inside Zabbix ------------------------------ */
+/* Zabbix shows who is signed in and its menu opens the main pages, so the logo and the page
+   title would say something twice. The tab row stays: Alerts, Nodes & shards, Live logs,
+   Volume report, Automation and Accounts are reached from it, as when the app runs alone. */
+.embedded .topbar .brand,
+.embedded .topbar > h1 { display: none; }
+
+.sheet.fit th.fit-cluster { text-align: right; position: static; }
+
+/* Compact columns. A heading wraps onto two or three short lines instead of setting the
+   column's width — "Current live storage store upto" was what made the sheet so wide.
+   Values stay on one line; the table still scrolls sideways when it has to. */
+.sheet { font-size: 11.5px; }
+.sheet th, .sheet td { padding: 3px 7px; }
+.sheet thead tr:not(.group-head) th { white-space: normal; min-width: 64px; max-width: 108px; line-height: 1.25; }
+.sheet thead tr:not(.group-head) th.stick { max-width: 150px; }
+.sheet tbody td { max-width: 190px; overflow: hidden; text-overflow: ellipsis; }
+
+/* Volume reports: values centred in every table, headings with them. The first column —
+   the cluster's name, or a figure's label — stays left, so the names line up. */
+.vol-report table td, .vol-report table thead tr:not(.group-head) th { text-align: center; }
+.vol-report table td:first-child, .vol-report table thead tr:not(.group-head) th:first-child { text-align: left; }
+.vol-report table td.num { text-align: center; }
+
+/* ------------------------------- notification bell ------------------------------ */
+.bell { position: relative; font-size: 14px; padding-inline: 8px; }
+.bell .bell-count { position: absolute; top: -5px; right: -5px; min-width: 16px; height: 16px; padding: 0 4px;
+  border-radius: 8px; background: var(--critical); color: #fff; font-size: 10px; font-weight: 700;
+  line-height: 16px; text-align: center; box-sizing: border-box; }
+.notif-list { display: grid; gap: 6px; max-height: min(60vh, 460px); overflow: auto; min-width: 340px; }
+.notif { display: flex; gap: 9px; align-items: flex-start; padding: 7px 8px; border-radius: var(--radius);
+  border-left: 3px solid var(--border-strong); background: var(--surface-2); }
+.notif.ok  { border-left-color: var(--good); }
+.notif.ok .toast-ico  { background: var(--good); }
+.notif.err { border-left-color: var(--critical); }
+.notif.err .toast-ico { background: var(--critical); }
+.notif.warn { border-left-color: var(--warning); }
+.notif.warn .toast-ico { background: var(--warning); color: #1a1a1a; }
+.notif-body { min-width: 0; flex: 1; }
+.notif-msg { font-size: 12px; overflow-wrap: anywhere; }
+.notif-at { font-size: 10.5px; color: var(--text-muted); margin-top: 2px; }
+
+/* Task cards: a title, what it acts on, where, and a running state that stays until done. */
+.toast.rich { align-items: flex-start; }
+.toast-body { flex: 1; min-width: 0; display: grid; gap: 2px; }
+.toast.rich .toast-msg { font-weight: 650; }
+.toast-detail { font-size: 11.5px; color: var(--text-secondary); overflow-wrap: anywhere; }
+.toast-meta { font-size: 10.5px; color: var(--text-muted); margin-top: 2px; }
+.toast.run { border-color: color-mix(in srgb, var(--accent) 45%, var(--border-strong)); border-left-color: var(--accent);
+             background: color-mix(in srgb, var(--accent) 10%, var(--surface-1)); }
+.toast-ico.spin, .notif .toast-ico.spin { background: transparent; border: 2px solid color-mix(in srgb, var(--accent) 30%, transparent);
+  border-top-color: var(--accent); animation: toast-spin .8s linear infinite; box-sizing: border-box; }
+@keyframes toast-spin { to { transform: rotate(360deg); } }
+.notif.run { border-left-color: var(--accent); }
+.notif-detail { font-size: 11px; color: var(--text-secondary); overflow-wrap: anywhere; }
+
+/* ------------------------------- table pager -------------------------------- */
+.pager { display: flex; align-items: center; gap: 10px 14px; flex-wrap: wrap; padding: 9px 10px 4px; font-size: 12px; }
+.pager-pos { font-variant-numeric: tabular-nums; }
+.pager-size { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; }
+.pager-size select { padding: 2px 6px; font-size: 12px; }
+.pager-controls { margin-left: auto; display: inline-flex; align-items: center; gap: 4px; flex-wrap: wrap; }
+.pager-nums { display: inline-flex; align-items: center; gap: 3px; flex-wrap: wrap; }
+.pager-num { min-width: 30px; justify-content: center; font-variant-numeric: tabular-nums; }
+.pager-num[aria-current="page"] { background: var(--accent); border-color: var(--accent); color: var(--on-accent); font-weight: 650; cursor: default; }
+.pager-gap { padding: 0 3px; }
+.pager-page { padding: 0 6px; }
+
+/* ---------------------- snapshot evidence (audit) panel --------------------- */
+/* Head and foot stay put; the header block stays in view; only the index table scrolls,
+   under its own sticky column heads. */
+.modal.evidence { height: min(88vh, 920px); max-height: 88vh; display: flex; flex-direction: column; overflow: hidden; }
+.modal.evidence .modal-head, .modal.evidence .modal-foot { flex: none; }
+.modal.evidence .modal-body { flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 10px; overflow: hidden; }
+.modal.evidence .ev-table { flex: 1; min-height: 120px; overflow: auto; border: 1px solid var(--border); border-radius: var(--radius-sm); }
+.modal.evidence .ev-table table.tbl th { top: 0; }
+.modal.evidence .ev-table table.tbl td { padding: 5px 10px; }
+.modal.evidence .modal-foot { flex-wrap: wrap; }
+.ev-head { flex: none; display: grid; gap: 6px; padding: 12px 14px; border-radius: var(--radius-sm);
+  background: var(--surface-2); border: 1px solid var(--border); }
+.ev-cluster { font-size: 19px; font-weight: 700; letter-spacing: -.01em; color: var(--text-primary); overflow-wrap: anywhere; }
+.ev-title { display: flex; align-items: center; flex-wrap: wrap; gap: 2px; font-size: 13px; color: var(--text-primary); overflow-wrap: anywhere; }
+.ev-kv { display: grid; grid-template-columns: max-content 1fr; gap: 3px 14px; margin: 4px 0 0; font-size: 12px; }
+.ev-kv dt { color: var(--text-muted); white-space: nowrap; }
+.ev-kv dd { margin: 0; color: var(--text-primary); font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+@media (max-width: 700px) { .ev-kv { grid-template-columns: 1fr; } .ev-kv dt { margin-top: 4px; } }
+
+/* Evidence as a right-hand drawer: full height, the page still visible on the left, the
+   cluster, the snapshot facts and the index list in one column you read top to bottom. */
+.modal-overlay.drawer-overlay { place-items: stretch end; padding: 0; }
+.modal.drawer { height: 100vh; max-height: 100vh; width: min(860px, 100vw) !important; border-radius: 0;
+  border-width: 0 0 0 1px; animation: drawer-in .18s ease-out; }
+.modal.evidence.drawer { height: 100vh; max-height: 100vh; }
+@keyframes drawer-in { from { transform: translateX(40px); opacity: 0; } to { transform: none; opacity: 1; } }
+.ev-band { display: grid; gap: 2px; padding: 10px 14px; margin: -2px 0 6px; border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--accent) 14%, var(--surface-1));
+  border: 1px solid color-mix(in srgb, var(--accent) 40%, var(--border)); border-left: 4px solid var(--accent); }
+.ev-band-k { font-size: 10.5px; text-transform: uppercase; letter-spacing: .08em; color: var(--accent); font-weight: 650; }
+.ev-band .ev-cluster { font-size: 21px; }
+.ev-url { font-size: 12px; color: var(--text-secondary); overflow-wrap: anywhere; }
+.ev-kv.two { grid-template-columns: max-content 1fr max-content 1fr; }
+@media (max-width: 760px) { .ev-kv.two { grid-template-columns: max-content 1fr; } }

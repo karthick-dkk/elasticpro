@@ -1,0 +1,6 @@
+version: 1
+jump_hosts:
+  jumpwin: { host: 127.0.0.1, port: 2222, user: jump, keyFile: /tmp/lab/client_enc }
+clusters:
+  - { name: prod-direct, url: "https://127.0.0.1:9470/c1" }
+  - { name: dr-via-jump, url: "https://127.0.0.1:9470/c2", via: jumpwin }

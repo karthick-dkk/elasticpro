@@ -1,0 +1,22 @@
+/* Client capacity widget. Colours hold in Zabbix's light and dark themes alike. */
+.ep-cap-toolbar { display: flex; align-items: center; gap: 8px; justify-content: flex-end; padding: 0 0 6px; }
+.ep-cap-count { margin-right: auto; opacity: .75; }
+.ep-cap-scroll { overflow-x: auto; }
+.ep-cap-table { white-space: nowrap; }
+/* The frozen first column must hide what scrolls under it in every Zabbix theme: rows and row
+   groups pass the table's own (theme) background down to it, instead of staying transparent. */
+.ep-cap-table thead, .ep-cap-table tbody, .ep-cap-table tr { background: inherit; }
+.ep-cap-table th, .ep-cap-table td { text-align: center; }
+.ep-cap-table .ep-cap-first { position: sticky; left: 0; z-index: 1; text-align: left; background: inherit; font-weight: bold; }
+.ep-cap-table thead .ep-cap-first { z-index: 2; }
+/* Usage: yellow at {$EP.USAGE.WARN} (80), red at {$EP.USAGE.HIGH} (90). */
+.ep-cap-table td.ep-warn { background: #ffd54f; color: #1f1f1f; }
+.ep-cap-table td.ep-high { background: #e53935; color: #fff; }
+/* Allocated below what was requested: outlined, with a marker, and the request in the tooltip. */
+.ep-cap-table td.ep-short { outline: 2px dashed #e53935; outline-offset: -3px; font-weight: bold; }
+.ep-cap-table td.ep-short::after { content: ' \25BC'; color: #e53935; }
+.ep-cap-table td.ep-high.ep-short::after { color: #fff; }
+/* A request nobody entered. */
+.ep-cap-table td.ep-unset { opacity: .55; font-style: italic; }
+/* The empty state, in view at the left rather than centred across a very wide table. */
+.ep-empty { text-align: left; padding: 14px 4px; }
