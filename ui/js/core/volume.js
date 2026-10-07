@@ -150,8 +150,26 @@ export function dailyVolume(indices, cluster = {}) {
 
 const div = (a, b) => (b > 0 ? a / b : null);
 
-/** The headroom a report row was actually built with — see volumeSettings(). */
-const headroomPct = (r) => (r && r.vol && r.vol.settings ? r.vol.settings.headroomPercent : VOLUME_DEFAULTS.headroomPercent);
+/**
+ * The headroom a report row was actually built with — see volumeSettings().
+ *
+ * Exported because the capacity page needs the same figure for its own labels, and the
+ * alternative has already failed twice. First, three headings on that page said "+30%"
+ * outright, so a cluster provisioning for 50% was shown a correct buffered figure under a
+ * heading that contradicted it. The fix for that then grew a second copy of this accessor
+ * in ui/js/pages/volume.js, which is exactly the drift this codebase has suffered three
+ * times before: one definition per quantity, so the grid note, the CSV note and the page
+ * heading cannot come to disagree about what "the headroom in force" means.
+ *
+ * Read back off the report rather than recomputed from the cluster config, because
+ * volumeSettings() clamps what the YAML says — re-reading volumeHeadroomPercent here would
+ * recompute the quantity and could legitimately differ from the number bufferedGB was
+ * actually multiplied by. The VOLUME_DEFAULTS fallback is deliberate: the page's deleted
+ * copy read r.vol.settings unguarded and threw a TypeError on anything short of a full
+ * volumeReport() result, which takes the whole render down rather than labelling one cell
+ * with the default it would have been sized against anyway.
+ */
+export const headroomPct = (r) => (r && r.vol && r.vol.settings ? r.vol.settings.headroomPercent : VOLUME_DEFAULTS.headroomPercent);
 
 /**
  * Everything the volume report shows for one cluster.

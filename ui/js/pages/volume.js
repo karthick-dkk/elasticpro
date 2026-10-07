@@ -8,7 +8,7 @@ import { state, clusters, activeClusters, client, refreshAll, fetchIndices, ensu
 import { runBounded } from '../core/fleet.js';
 import { card, collapsible, pill, table, empty, snapshotStatusByKey } from './common.js';
 import { hbarList, capacityChart, usageMeter } from '../lib/charts.js';
-import { volumeReport, reportRows, SHEET_COLUMNS, CLIENT_COLUMNS, sheetCell, gb, days as fmtDays, yesNo, measureRepoBytes } from '../core/volume.js';
+import { volumeReport, reportRows, SHEET_COLUMNS, CLIENT_COLUMNS, sheetCell, gb, days as fmtDays, yesNo, measureRepoBytes, headroomPct } from '../core/volume.js';
 import { navigateTo } from '../core/intent.js';
 import { popover } from '../ui/menu.js';
 import { repoSizeCache } from '../lib/idb.js';
@@ -150,6 +150,11 @@ function draw() {
 /* ------------------------------- fleet overview ------------------------------- */
 
 function fleetTable(reports) {
+  // The buffered column's heading names the headroom its figures were built with. That is
+  // per cluster, so a selection whose clusters disagree cannot have one number in the
+  // heading; it then says "+ buffer" and every cell names its own percentage on hover.
+  const pcts = [...new Set(reports.map(headroomPct))];
+  const bufferHead = pcts.length === 1 ? `+${pcts[0]}%` : '+ buffer';
   const trs = reports.map((r) => {
     const risk = r.liveRetentionMet === false ? 'red'
       : r.liveSufficientDays !== null && r.liveSufficientDays < 14 ? 'yellow' : 'green';
@@ -159,7 +164,9 @@ function fleetTable(reports) {
       // No index list yet (it is still on its way from the core): the per-day figure is
       // unknown, and 0 GB/day would read as a cluster that ingests nothing.
       state.indices.has(r.cluster.id) ? h('td.num', gb(r.perDayGB)) : h('td.num', h('span.muted', { title: 'The index list has not arrived yet' }, 'Loading…')),
-      state.indices.has(r.cluster.id) ? h('td.num', gb(r.bufferedGB)) : h('td.num', h('span.muted', '–')),
+      state.indices.has(r.cluster.id)
+        ? h('td.num', { title: `the daily figure plus ${headroomPct(r)}% headroom` }, gb(r.bufferedGB))
+        : h('td.num', h('span.muted', '–')),
       h('td.num', gb(r.liveTotalGB)),
       h('td.num', r.livePct === null ? '–' : `${r.livePct.toFixed(1)}%`),
       h('td.num', h('span', { style: { color: risk === 'red' ? 'var(--critical)' : risk === 'yellow' ? 'var(--warning)' : 'inherit' } },
@@ -177,7 +184,7 @@ function fleetTable(reports) {
     // slipped. Marking one side only is the bug — table() aligns whatever it is told.
     table(['Cluster',
            { label: 'Per day', num: true },
-           { label: '+30%', num: true },
+           { label: bufferHead, num: true },
            { label: 'Live total', num: true },
            { label: 'Used', num: true },
            { label: 'Lasts', num: true },
@@ -257,8 +264,9 @@ function backupFitChart(r) {
     r.requiredSnapshotGB === null
       ? null
       : { label: `Retention policy (${r.snapshotRetention.label})`, value: r.requiredSnapshotGB,
-          sub: `(per day + 30%) × ${r.snapshotRetention.days} days — an upper bound, snapshots are incremental` },
-    { label: '365 days of backups', value: r.required365GB, sub: '(per day + 30%) × 365 — an upper bound' },
+          sub: `(per day + ${headroomPct(r)}%) × ${r.snapshotRetention.days} days — an upper bound, snapshots are incremental` },
+    { label: '365 days of backups', value: r.required365GB,
+      sub: `(per day + ${headroomPct(r)}%) × 365 — an upper bound` },
   ].filter(Boolean);
   if (!needs.length) return empty('Nothing to compare yet.');
   // The capacity is the repository's total size, which only the config knows. Without it

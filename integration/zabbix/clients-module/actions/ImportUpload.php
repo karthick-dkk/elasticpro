@@ -70,7 +70,24 @@ class ImportUpload extends Base {
 		// Checking a file changes nothing, so it does not use up one of the three.
 		$work = array_filter($plan['rows'], fn($r) => $r['status'] === 'new' && !$r['warnings']);
 		if ($work) {
-			$data['backup'] = $this->backup('Import '.$data['file']);
+			// Backups::take() refuses outright, by throwing, when it finds no clients while the
+			// backups already kept hold some: the clients are found by a template name and a host
+			// tag that both changed when the product was renamed, so reading zero of them is far
+			// likelier to be a lookup that missed than a site whose clients have all gone. It also
+			// throws when the data folder cannot be written. Caught here because it was not — this
+			// was the one caller of backup() with no try/catch around it, so the refusal left the
+			// controller as an uncaught exception and Zabbix answered with a fatal-error page, which
+			// is the one place the operator could not read the worded reason for it. Either way
+			// there is no backup, so the import stops here with the reason in the plan's errors and
+			// nothing is applied, exactly as the not-writable branch above does.
+			try {
+				$data['backup'] = $this->backup('Import '.$data['file']);
+			}
+			catch (Exception $e) {
+				$data['stage'] = 'errors';
+				$data['plan']['errors'][] = $e->getMessage();
+				return $data;
+			}
 		}
 
 		$spec = $this->spec();

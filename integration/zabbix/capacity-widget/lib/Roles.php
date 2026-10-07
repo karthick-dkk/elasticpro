@@ -367,9 +367,55 @@ class Roles {
 		return null;
 	}
 
-	/** The master host macro a role's figure lives in: {$EP.ES_DATA_HOT.CPU.REQUESTED}. */
+	/* ------------------------------- the two macro generations -------------------------------
+	 *
+	 * A role's figures live in macros on the client's master host. Before the product was renamed
+	 * from ElasticVue Pro to ElasticPro they were spelled {$EVP.<ROLE>.…}; the rename swapped the
+	 * prefix and nothing else. The production master hosts still carry the old spelling and no
+	 * migration is planned, so a read has to try both: with today's name alone, the edit form read
+	 * nothing, opened on the master template's shipped defaults, and the first Save wrote those
+	 * zeroes over every requested figure the client really had.
+	 *
+	 * ClientSpec carries the same new-else-legacy helper for the macros it owns. The duplication is
+	 * deliberate and cannot be removed: sync-assets.mjs copies this file into all four modules and
+	 * rewrites its namespace, and three of those modules (the capacity, volume and resources
+	 * widgets) have no ClientSpec at all, so a reference to it would not resolve there. The two
+	 * copies must keep the same rule — today's name wins, the legacy name is only a fallback.
+	 */
+
+	/** Today's prefix for a role's macros. The only prefix that is ever written. */
+	public const MACRO_PREFIX = '{$EP.';
+	/** Legacy value, kept for recognition: the same prefix before the rename. Never written. */
+	public const LEGACY_MACRO_PREFIX = '{$EVP.';
+
+	/**
+	 * The master host macro a role's figure lives in: {$EP.ES_DATA_HOT.CPU.REQUESTED}. Today's
+	 * name, which is the one that gets written; legacyMacro() is its pre-rename twin.
+	 */
 	public static function macro(string $roleId, string $what): string {
-		return '{$EP.'.strtoupper($roleId).'.'.$what.'}';
+		return self::MACRO_PREFIX.strtoupper($roleId).'.'.$what.'}';
+	}
+
+	/** The pre-rename spelling of the same macro: {$EVP.ES_DATA_HOT.CPU.REQUESTED}. Read only. */
+	public static function legacyMacro(string $roleId, string $what): string {
+		return self::LEGACY_MACRO_PREFIX.strtoupper($roleId).'.'.$what.'}';
+	}
+
+	/**
+	 * A role figure's value out of a host's macros: today's name first, the pre-rename name
+	 * second, null when the host carries neither. Today's wins where a host has both, so a host
+	 * part-migrated by hand follows whatever was set last.
+	 *
+	 * Null means the host does not say, which a caller must not confuse with 0 or the empty
+	 * string: writing a zero over a figure that was merely unreadable is the loss this guards.
+	 */
+	public static function macroValue(array $macros, string $roleId, string $what): ?string {
+		foreach ([self::macro($roleId, $what), self::legacyMacro($roleId, $what)] as $name) {
+			if (array_key_exists($name, $macros)) {
+				return (string) $macros[$name];
+			}
+		}
+		return null;
 	}
 
 	/**
@@ -379,7 +425,10 @@ class Roles {
 	public static function diskMounts(array $macros, string $roleId): array {
 		$out = ['/'];
 		for ($n = 2; $n <= self::DISK_SLOTS; $n++) {
-			$m = trim((string) ($macros[self::macro($roleId, 'DISK'.$n.'.FS')] ?? ''));
+			// Both generations: a master host from before the rename keeps these mounts under
+			// {$EVP.<ROLE>.DISK<n>.FS}, and a role whose mounts read as none has its extra disks
+			// measured nowhere — the disk the client actually bought stops being reported.
+			$m = trim((string) (self::macroValue($macros, $roleId, 'DISK'.$n.'.FS') ?? ''));
 			if ($m !== '' && !in_array($m, $out, true)) {
 				$out[] = $m;
 			}

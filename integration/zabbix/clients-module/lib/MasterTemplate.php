@@ -19,6 +19,18 @@ namespace Modules\EpClients\Lib;
 class MasterTemplate {
 
 	public const NAME = 'ElasticPro client master';
+
+	/**
+	 * The name this template had before the product was renamed. A legacy value, kept only so
+	 * that an install written by an earlier release can be recognised — nothing writes it.
+	 *
+	 * It is here rather than private to TemplateInstaller because more than one place resolves
+	 * clients through this template name, and the old name must mean the same thing in all of
+	 * them: a production Zabbix still carries it on every client's master host, and there will
+	 * be no migration, so this constant is permanent.
+	 */
+	public const LEGACY_NAME = 'ElasticVue Pro client master';
+
 	private const GB = 1073741824;
 
 	private const RES_LABEL = ['servers' => 'servers', 'cpu' => 'CPU', 'mem' => 'memory', 'disk' => 'disk'];
@@ -33,7 +45,24 @@ class MasterTemplate {
 	}
 
 	public static function uuid(string $what): string {
-		$h = hash('sha256', 'elasticpro-client-master/'.$what);
+		return self::uuidFrom('elasticpro-client-master/'.$what);
+	}
+
+	/**
+	 * The uuid an earlier release gave the same $what. The product name is hashed into every
+	 * uuid, so the rename changed all of them: the templates on a live install carry these,
+	 * and Zabbix therefore treats the imported template as a different object entirely.
+	 *
+	 * 'espro-client-master/' is a legacy value kept for recognition only. Nothing writes a uuid
+	 * from it; it is here so that a template merely *named* like ours can be told from one this
+	 * module actually wrote, before anyone is advised to take a template off a host.
+	 */
+	public static function legacyUuid(string $what): string {
+		return self::uuidFrom('espro-client-master/'.$what);
+	}
+
+	private static function uuidFrom(string $seed): string {
+		$h = hash('sha256', $seed);
 		return substr($h, 0, 12).'4'.substr($h, 13, 3).'89ab'[hexdec($h[16]) % 4].substr($h, 17, 15);
 	}
 

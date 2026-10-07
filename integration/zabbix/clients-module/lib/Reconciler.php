@@ -23,6 +23,9 @@ use Exception;
  * role and one ep-service per role or extra service, and inv:<name> tags for its attributes —
  * the groundwork of host inventory. Macros are written one at a time: a host's other macros, and
  * secret values, stay as they were.
+ *
+ * Everything this class reads is read in both generations of the names (see "the old generation"
+ * below) and written in the current one only.
  */
 class Reconciler {
 
@@ -38,6 +41,69 @@ class Reconciler {
 	public const ULM_TEMPLATE = 'ElasticPro log archive S3';
 	/** Tags this page writes; everything else on a host is left as it is. */
 	private const OWN_TAGS = ['ep-client', 'ep-kind', 'ep-role', 'ep-service', 'ep-status', 'client', 'role'];
+	/**
+	 * Neither spelling of the already-off marker is in OWN_TAGS, and neither may be added.
+	 *
+	 * ep-was-off and evp-was-off look like tags this page owns — they carry its prefix, and
+	 * ownTags() would derive the old spelling from the new one as it does for ep-status — but
+	 * they belong to Lifecycle, which strips both spellings itself before writing one back, so
+	 * there is no stale pair here for tags() to clean. Stripping them would instead destroy the
+	 * one thing they are for: Lifecycle::enable() reads both spellings to decide which hosts were
+	 * already Not monitored before the client was disabled, and leaves exactly those off. tags()
+	 * runs on every save, including a save of a disabled client, so adding either name here would
+	 * wipe that record and the next Enable would switch on machines an operator had deliberately
+	 * left off. ep-status is the opposite case and is in OWN_TAGS: this page writes it, so it has
+	 * to take both spellings off first.
+	 */
+
+	/** The prefix of this page's own tags, and so of every tag it writes. */
+	public const TAG_PREFIX = 'ep-';
+	/** The macro the Elasticsearch password is kept in, on the cluster and log archive hosts. */
+	public const ES_PASSWORD_MACRO = '{$ELASTICSEARCH.PASSWORD}';
+
+	/* ---------------------------------- the old generation ----------------------------------
+	 *
+	 * The product was renamed from ElasticVue Pro to ElasticPro, and this module's tags, template
+	 * names and managed-by marker were renamed with it. The production Zabbix — seven clients and
+	 * some forty hosts — still carries the old values, and no migration is going to be run, so
+	 * they are recognised for good. They are matched, never written: every host a save touches
+	 * comes out on the current generation, which is why tags() strips both spellings of its own
+	 * tags and writes one set back.
+	 *
+	 * Reading only the current names was not a cosmetic fault. clients() matched no master host,
+	 * so Cluster Management listed no clients at all — and Backups::take() walks that same list
+	 * and keeps the last three, so three saves of an empty list would have destroyed every backup
+	 * of the seven live clients. isManaged() said no, so the first save of a live client would
+	 * have un-managed it, after which remove() leaves its hosts behind. clientGroups() came back
+	 * empty, so every host looked unowned and the guard that keeps one client's server out of
+	 * another client's hands never fired.
+	 */
+
+	/** Legacy value, kept for recognition: how a host this page made was marked before the rename. */
+	public const LEGACY_MANAGED = ['tag' => 'managed-by', 'value' => 'elasticvue-clients'];
+	/** Legacy value, kept for recognition: the group every master host is in on the live install. */
+	public const LEGACY_MASTERS_GROUP = 'ElasticVue clients';
+	/**
+	 * Legacy values, kept for recognition: the master template's name before the rename. The
+	 * first is the name 2.7.x wrote; the second is the spelling reported on the live install.
+	 * Both are matched — a name matched one too many costs a filter value, and the name missed is
+	 * the one that shows an operator zero clients.
+	 */
+	public const LEGACY_MASTER_TEMPLATES = [MasterTemplate::LEGACY_NAME, 'ElasticVue client master'];
+	/** Legacy value, kept for recognition: the log archive template's name before the rename. */
+	public const LEGACY_ULM_TEMPLATE = 'ElasticVue Pro log archive S3';
+	/** Legacy prefix, kept for recognition: ep-client and the rest were evp-client and the rest. */
+	public const LEGACY_TAG_PREFIX = 'evp-';
+	/**
+	 * Legacy value, kept for recognition: the name Roles::DEFAULT_CLUSTER_TEMPLATE shipped with
+	 * before the rename, which is the name the live install's cluster hosts carry.
+	 *
+	 * The cluster template's name is a setting (Roles::clusterTemplate()), so a site may have
+	 * pointed the Roles page at this spelling on purpose — in which case it is current, not
+	 * legacy, and esClusterTemplates() must not list it twice. It is matched when a cluster host
+	 * is being recognised and never linked: apply() links Roles::clusterTemplate() alone.
+	 */
+	public const LEGACY_CLUSTER_TEMPLATE = 'Elasticsearch Cluster by HTTP EVP';
 
 	/** @var ClientSpec */
 	private $spec;
@@ -75,6 +141,78 @@ class Reconciler {
 
 	public static function agentTemplate(): string {
 		return Roles::defaultTemplate();
+	}
+
+	/** The old generation's spelling of one of this page's own tags: ep-role was evp-role. */
+	public static function legacyTag(string $tag): string {
+		return strpos($tag, self::TAG_PREFIX) === 0
+			? self::LEGACY_TAG_PREFIX.substr($tag, strlen(self::TAG_PREFIX))
+			: $tag;
+	}
+
+	/** Both generations of the master template's name. */
+	public static function masterTemplates(): array {
+		return array_merge([MasterTemplate::NAME], self::LEGACY_MASTER_TEMPLATES);
+	}
+
+	/** Both generations of the log archive template's name. */
+	public static function ulmTemplates(): array {
+		return [self::ULM_TEMPLATE, self::LEGACY_ULM_TEMPLATE];
+	}
+
+	/**
+	 * Both generations of the Elasticsearch template's name: whatever the Roles page says, and
+	 * the spelling the pre-rename release shipped. array_unique, because a site that pointed the
+	 * Roles page at the old name has one name, not two.
+	 *
+	 * For recognising a host, never for linking one. A reader that knew only the current name saw
+	 * no cluster host on a pre-rename client at all: Cluster Management's list of "Elasticsearch
+	 * clusters with no client yet" came back empty, and current() reported the client as having
+	 * no cluster host, which is what sent a save into the create branch for a host that already
+	 * existed.
+	 */
+	public static function esClusterTemplates(): array {
+		return array_values(array_unique([Roles::clusterTemplate(), self::LEGACY_CLUSTER_TEMPLATE]));
+	}
+
+	/**
+	 * Every template name that marks a host as a client's cluster host, in both generations:
+	 * the Elasticsearch template for a cluster asked over HTTP, the jump host template for one
+	 * asked through SSH. current() recognises a cluster host by any of them.
+	 */
+	public static function clusterHostTemplates(): array {
+		return array_merge(self::esClusterTemplates(), [JumpTemplate::NAME, JumpTemplate::LEGACY_NAME]);
+	}
+
+	/**
+	 * A host.get tag filter for a kind of host under either generation. The two names have to be
+	 * OR'd by hand: unless its evaltype says otherwise, host.get wants every tag name it is given
+	 * at once, so the default would have asked for a host carrying ep-kind and evp-kind both —
+	 * none does, and the filter would have matched nothing at all.
+	 */
+	public static function kindFilter(string $kind): array {
+		return [
+			['tag' => self::TAG_PREFIX.'kind', 'value' => $kind, 'operator' => TAG_OPERATOR_EQUAL],
+			['tag' => self::LEGACY_TAG_PREFIX.'kind', 'value' => $kind, 'operator' => TAG_OPERATOR_EQUAL]
+		];
+	}
+
+	/**
+	 * Every client's master host, under either generation: by the master template, or — when the
+	 * templates cannot be read at all, as they cannot by a Zabbix Admin who may read only hosts —
+	 * by the master host's own kind tag. $options is a host.get, less the selection made here.
+	 *
+	 * One definition, because two callers ask Zabbix the same question and a disagreement between
+	 * them is what lets a host look unowned: ClientState::clients() lists the clients, and
+	 * clientGroups() names their host groups for the guard that keeps one client's server out of
+	 * another client's hands.
+	 */
+	public static function masterHosts(array $options): array {
+		$tpl = API::Template()->get(['output' => ['templateid'], 'filter' => ['host' => self::masterTemplates()]]);
+		if ($tpl) {
+			return API::Host()->get(['templateids' => array_column($tpl, 'templateid')] + $options) ?: [];
+		}
+		return API::Host()->get(['tags' => self::kindFilter('master'), 'evaltype' => TAG_EVAL_TYPE_OR] + $options) ?: [];
 	}
 
 	/**
@@ -155,10 +293,17 @@ class Reconciler {
 		return array_values(array_unique(array_merge([], ...array_values(array_map(fn($s) => $s['roles'], $client['servers'])))));
 	}
 
+	/**
+	 * Whether this page made the host, under either generation of the marker: a client saved
+	 * before the rename is still this page's, and a host that is not recognised as managed is one
+	 * the first save un-manages for good — after that remove() and a merge both refuse it.
+	 */
 	public static function isManaged(array $host): bool {
 		foreach ($host['tags'] ?? [] as $tag) {
-			if ($tag['tag'] === self::MANAGED['tag'] && $tag['value'] === self::MANAGED['value']) {
-				return true;
+			foreach ([self::MANAGED, self::LEGACY_MANAGED] as $marker) {
+				if ($tag['tag'] === $marker['tag'] && $tag['value'] === $marker['value']) {
+					return true;
+				}
 			}
 		}
 		return false;
@@ -166,6 +311,30 @@ class Reconciler {
 
 	public static function hasTemplate(array $host, string $template): bool {
 		return in_array($template, array_column($host['parentTemplates'] ?? [], 'host'), true);
+	}
+
+	/** Whether a host has any of these templates — one of ours under either of its names. */
+	public static function hasAnyTemplate(array $host, array $templates): bool {
+		return (bool) array_intersect($templates, array_column($host['parentTemplates'] ?? [], 'host'));
+	}
+
+	/**
+	 * Whether this host already keeps the Elasticsearch password in Zabbix. Zabbix never gives a
+	 * Secret text macro's value back through the API, to anyone, so no form can read the password
+	 * to show it or to compare it: whether one is there is the only question that can be
+	 * answered, and it is the question the edit form and problems() were each asking inline.
+	 *
+	 * Needs a host read with selectMacros. A Vault macro is deliberately not one of these: in
+	 * vault mode the password is not in Zabbix at all, so switching such a client to zabbix mode
+	 * does ask for it once.
+	 */
+	public static function hasStoredPassword(?array $host): bool {
+		foreach ($host['macros'] ?? [] as $m) {
+			if ($m['macro'] === self::ES_PASSWORD_MACRO && (int) $m['type'] === ZBX_MACRO_TYPE_SECRET) {
+				return true;
+			}
+		}
+		return false;
 	}
 
 	public static function groupNames(array $host): array {
@@ -181,14 +350,22 @@ class Reconciler {
 		return null;
 	}
 
-	/** Tag values of one name on a host. */
+	/**
+	 * Tag values of one name on a host and, for one of this page's own tags, of its old spelling
+	 * as well: the live Zabbix was never migrated, so its hosts carry evp-client where this page
+	 * now writes ep-client, and a reader that looked only for the new name saw an unowned host
+	 * with no roles.
+	 */
 	public static function tagValues(array $host, string $tag): array {
-		return array_values(array_map(fn($t) => $t['value'], array_filter($host['tags'] ?? [], fn($t) => $t['tag'] === $tag)));
+		$names = [$tag, self::legacyTag($tag)];
+		return array_values(array_unique(array_map(fn($t) => $t['value'],
+			array_filter($host['tags'] ?? [], fn($t) => in_array($t['tag'], $names, true)))));
 	}
 
 	/**
-	 * What a host is by its ep-kind tag, when it shows no templates at all — as it does to a
-	 * Zabbix Admin who may read hosts but not templates. Otherwise null: templates decide.
+	 * What a host is by its ep-kind tag (or the evp-kind one a host from before the rename has),
+	 * when it shows no templates at all — as it does to a Zabbix Admin who may read hosts but not
+	 * templates. Otherwise null: templates decide.
 	 */
 	public static function kindWithoutTemplates(array $host): ?string {
 		return empty($host['parentTemplates']) ? (self::tagValues($host, 'ep-kind')[0] ?? null) : null;
@@ -204,10 +381,15 @@ class Reconciler {
 		$hosts = $this->hostsIn($gid);
 		$out = ['groupid' => $gid, 'master' => null, 'cluster' => null, 'ulm' => null, 'machines' => [], 'roles' => [], 'unassigned' => [], 'shared' => []];
 		foreach ($hosts as $host) {
-			if (self::hasTemplate($host, MasterTemplate::NAME) || self::kindWithoutTemplates($host) === 'master') {
+			if (self::hasAnyTemplate($host, self::masterTemplates()) || self::kindWithoutTemplates($host) === 'master') {
 				$out['master'] = $host;
 			}
-			elseif ($out['cluster'] === null && (self::hasTemplate($host, Roles::clusterTemplate()) || self::hasTemplate($host, JumpTemplate::NAME)
+			// Both generations, as the master host above and the log archive host below are read:
+			// a pre-rename cluster host recognised as absent is the one failure that gets as far
+			// as writing. apply() would take the create branch and ask for <client>-ES-Cluster,
+			// a name the rename did not change, so Zabbix refuses the create — after the master
+			// host has been retagged and relinked, which no rollback here can undo.
+			elseif ($out['cluster'] === null && (self::hasAnyTemplate($host, self::clusterHostTemplates())
 					|| self::kindWithoutTemplates($host) === 'cluster')) {
 				$out['cluster'] = $host;
 			}
@@ -216,7 +398,7 @@ class Reconciler {
 			if (in_array($host['hostid'], [$out['master']['hostid'] ?? null, $out['cluster']['hostid'] ?? null], true)) {
 				continue;
 			}
-			if ($out['ulm'] === null && (self::hasTemplate($host, self::ULM_TEMPLATE) || self::kindWithoutTemplates($host) === 'archive')) {
+			if ($out['ulm'] === null && (self::hasAnyTemplate($host, self::ulmTemplates()) || self::kindWithoutTemplates($host) === 'archive')) {
 				$out['ulm'] = $host;
 			}
 		}
@@ -284,16 +466,20 @@ class Reconciler {
 		return $out;
 	}
 
-	/** Host groups named after a client: every group a client's master host is in, but the masters' own. */
+	/**
+	 * Host groups named after a client: every group a client's master host is in, but the masters'
+	 * own — under either name, or the old masters' group would itself be read as a client called
+	 * "ElasticVue clients" and every master host would look like one of its servers.
+	 *
+	 * This list is the guard that stops taking a host on from absorbing another client's server,
+	 * so an empty one is not a safe answer: it goes through masterHosts(), which falls back to
+	 * the kind tag when the templates cannot be read.
+	 */
 	public function clientGroups(): array {
-		$tpl = API::Template()->get(['output' => ['templateid'], 'filter' => ['host' => MasterTemplate::NAME]]);
-		if (!$tpl) {
-			return [];
-		}
 		$out = [];
-		foreach (API::Host()->get(['output' => ['hostid'], 'templateids' => [$tpl[0]['templateid']], 'selectHostGroups' => ['name']]) as $h) {
-			foreach ($h['hostgroups'] as $g) {
-				if ($g['name'] !== self::MASTERS_GROUP) {
+		foreach (self::masterHosts(['output' => ['hostid'], 'selectHostGroups' => ['name']]) as $h) {
+			foreach ($h['hostgroups'] ?? [] as $g) {
+				if ($g['name'] !== self::MASTERS_GROUP && $g['name'] !== self::LEGACY_MASTERS_GROUP) {
 					$out[$g['name']] = true;
 				}
 			}
@@ -377,15 +563,31 @@ class Reconciler {
 	 */
 	public function problems(array $client, array $now): array {
 		$out = $this->sharedProblems($client, $now);
+		// Refuse before anything is written, not after. A master host that still carries the
+		// pre-rename {$EVP.…} macros holds this client's real settings - requested CPU, memory
+		// and disk per role, client type, jump-host fields, the lead and the cluster DL. Reading
+		// them is handled elsewhere, but a gap anywhere in that chain means the form opened on
+		// shipped defaults, and saving would write those defaults over the real values, record
+		// the destroyed version as the backup, and have the alert routing conclude the client no
+		// longer wants alerts and delete its action, DL group, DL account and weekly report.
+		// None of that is recoverable from this module, so the save stops here and names what to
+		// run instead. A false positive costs a refused save; a false negative costs the client.
+		if (($now['master'] ?? null) !== null) {
+			$legacy = ClientSpec::legacyMacrosIn($this->macros($now['master']['hostid']));
+			if ($legacy) {
+				$shown = array_slice($legacy, 0, 4);
+				$out[] = _s('This client still stores its settings under the previous names (%1$s%2$s). '
+					.'Saving now would overwrite them with defaults. Run the migration first: '
+					.'python3 setup/zbx_rename.py --apply', implode(', ', $shown),
+					count($legacy) > count($shown) ? _s(' and %1$d more', count($legacy) - count($shown)) : '');
+			}
+		}
 		if ($client['es'] !== null && $client['fields']['es_password_mode'] === 'zabbix' && $client['es_password'] === '') {
 			foreach ([['cluster', _('cluster')], ['ulm', _('log archive')]] as [$k, $label]) {
 				if ($k === 'ulm' && !$this->spec->wantsUlm($client)) {
 					continue;
 				}
-				$host = $now[$k];
-				$has = $host !== null && in_array((string) ZBX_MACRO_TYPE_SECRET,
-					array_map(fn($m) => (string) $m['type'], array_filter($host['macros'] ?? [], fn($m) => $m['macro'] === '{$ELASTICSEARCH.PASSWORD}')), true);
-				if (!$has) {
+				if (!self::hasStoredPassword($now[$k])) {
 					$out[] = _s('Enter the Elasticsearch password: the %1$s host has none kept in Zabbix yet.', $label);
 				}
 			}
@@ -415,7 +617,89 @@ class Reconciler {
 		catch (Exception $e) {
 			$out[] = $e->getMessage();
 		}
+		// The pre-flight: apply() has no transaction and no rollback, so a refusal it runs into
+		// halfway through leaves the client half-written. Both of these ask Zabbix only.
+		$out = array_merge($out, $this->nameClashes($client, $now), $this->legacyJumpClash($client, $now));
 		return array_values(array_unique($out));
+	}
+
+	/**
+	 * Names apply() would create that a host in Zabbix already has.
+	 *
+	 * This is the half-written save that was actually reached. The master, cluster and log
+	 * archive hosts are named after the client — <client>-Master, <client>-ES-Cluster,
+	 * <client>-ULM — and the rename did not change those names, so a client whose hosts
+	 * current() fails to recognise still has them under exactly the names apply() would ask
+	 * Zabbix to create. host.create is refused and api() throws; by then apply() has already
+	 * renamed, relinked and retagged the master host and written its macros over the defaults
+	 * the form was showing. Refusing before the first write costs the operator a message, and
+	 * tells them which host to point this page at.
+	 *
+	 * Both the technical and the visible name are asked for, because create() gives a new host
+	 * the same string for both and Zabbix refuses a collision on either.
+	 *
+	 * The servers are not covered: their names carry a number this page hands out
+	 * (ClientSpec::machineName), and the number is chosen while applying.
+	 */
+	private function nameClashes(array $client, array $now): array {
+		$wanted = [];
+		if ($now['master'] === null) {
+			$wanted[ClientSpec::masterName($client['name'])] = [_('master'), 'master'];
+		}
+		if ($client['es'] !== null && $now['cluster'] === null) {
+			$wanted[ClientSpec::clusterName($client['name'])] = [_('cluster'), 'cluster'];
+		}
+		if ($this->spec->wantsUlm($client) && $now['ulm'] === null) {
+			$wanted[ClientSpec::ulmName($client['name'])] = [_('log archive'), 'archive'];
+		}
+		if (!$wanted) {
+			return [];
+		}
+		$names = array_keys($wanted);
+		$found = [];
+		foreach ([['host' => $names], ['name' => $names]] as $filter) {
+			foreach (API::Host()->get(['output' => ['hostid', 'host', 'name'], 'filter' => $filter]) as $host) {
+				$found[$host['hostid']] = $host;
+			}
+		}
+		$out = [];
+		foreach ($found as $host) {
+			[$label, $kind] = $wanted[$host['host']] ?? $wanted[$host['name']] ?? [_('client'), ''];
+			$out[] = _s('Nothing was saved. A host called "%1$s" already exists, but this page did not recognise it as the %2$s host of client "%3$s", so saving it would ask Zabbix to create that host a second time — and Zabbix would refuse, in the middle of the save, after the other hosts had been written. Put it in host group "%3$s" in Data collection → Hosts; if it is already there, give it the tag %4$s: %5$s so this page can tell what it is. Then save again.',
+				$host['host'], $label, $client['name'], self::TAG_PREFIX.'kind', $kind);
+		}
+		return $out;
+	}
+
+	/**
+	 * The one template collision that is certain, refused before anything is written: a cluster
+	 * host still linked to the pre-rename jump host template, on a client that is asked through
+	 * a jump host.
+	 *
+	 * Both generations of that template carry the same item keys on purpose — see
+	 * JumpTemplate::LEGACY_NAME — so Zabbix will not let one host carry both, and apply() links
+	 * the current one without unlinking the old one: it only knows how to unlink the current
+	 * generation's other transport. The link is refused in the middle of the save, after the
+	 * master host has been written.
+	 *
+	 * This page will not unlink it on the operator's behalf. Unlinking is the safe half of that
+	 * operation, but which generation of items the host should keep afterwards, and whether the
+	 * leftovers are disabled or cleared, is a decision about item history that nothing here can
+	 * give back once it has been made wrongly; TemplateInstaller::legacyCollision() spells out
+	 * the procedure. Refusing leaves the client exactly as it is.
+	 */
+	private function legacyJumpClash(array $client, array $now): array {
+		// Asked of the HOST, not of the form. Whether this client is monitored through a jump
+		// host is read from {$EP.MONITORED.BY}, which is unreadable on a host that still carries
+		// the pre-rename macros - so throughJump() returns the shipped default and this guard
+		// would stay silent in exactly the case it was written for: a legacy jump-host client
+		// whose save then fails half way, after the master host has been written. The template
+		// on the host is the fact that matters, and it is readable whatever the macros say.
+		if ($now['cluster'] === null || !self::hasTemplate($now['cluster'], JumpTemplate::LEGACY_NAME)) {
+			return [];
+		}
+		return [_s('Nothing was saved. "%1$s" is still linked to "%2$s", the jump host template from before the rename, whose item keys are the ones "%3$s" uses as well — Zabbix refuses to link both to one host, and it would refuse in the middle of the save, after the master host had been written. In Data collection → Hosts → "%1$s" → Templates, unlink "%2$s" — "Unlink", never "Unlink and clear", which deletes those items and every value they hold; unlinking leaves them on the host with their history, and the current template takes over the ones whose keys it shares. Then save again.',
+			$now['cluster']['host'], JumpTemplate::LEGACY_NAME, JumpTemplate::NAME)];
 	}
 
 	/**
@@ -702,10 +986,33 @@ class Reconciler {
 		return array_map(fn($id) => ['templateid' => $id], array_values(array_unique($ids)));
 	}
 
-	/** A host's tags with this page's replaced: the others it has stay. */
+	/**
+	 * Every spelling of the tags this page owns: the names it writes and, for each, the old
+	 * generation's. tags() takes them all off and writes the current ones back, so a client made
+	 * before the rename ends up with one ep-kind rather than an ep-kind beside its evp-kind.
+	 */
+	private static function ownTags(): array {
+		$out = self::OWN_TAGS;
+		foreach (self::OWN_TAGS as $tag) {
+			if (self::legacyTag($tag) !== $tag) {
+				$out[] = self::legacyTag($tag);
+			}
+		}
+		// Nothing is added beyond the two spellings of OWN_TAGS: see the note beside OWN_TAGS on
+		// why the already-off marker is Lifecycle's and must not be stripped here.
+		return array_values(array_unique($out));
+	}
+
+	/**
+	 * A host's tags with this page's replaced: the others it has stay. A host recognised as this
+	 * page's under either generation comes out carrying managed-by: elasticpro-clients — $managed
+	 * is isManaged(), which matches the old marker too, and the old marker is dropped here with
+	 * the new one because both go by the same tag name. A host made by hand still gets none.
+	 */
 	private function tags(array $have, string $client, string $kind, bool $managed): array {
 		// inv: tags belong to Host Inventory: kept, whoever set them.
-		$out = array_values(array_filter($have, fn($t) => !in_array($t['tag'], self::OWN_TAGS, true) && !($t['tag'] === self::MANAGED['tag'])));
+		$own = self::ownTags();
+		$out = array_values(array_filter($have, fn($t) => !in_array($t['tag'], $own, true) && !($t['tag'] === self::MANAGED['tag'])));
 		if ($managed) {
 			$out[] = self::MANAGED;
 		}

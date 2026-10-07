@@ -22,6 +22,41 @@ class ClientSpec {
 	public const PURCHASED_BY = ['storage', 'devices'];
 	public const JUMP_TLS = ['verify', 'ca', 'none'];
 
+	/* ------------------------------- the two macro generations -------------------------------
+	 *
+	 * Every macro of this module's own carries the {$EP.…} prefix. Before the product was renamed
+	 * from ElasticVue Pro to ElasticPro each of them was spelled {$EVP.…}, and the rename was a
+	 * plain textual swap of that prefix: the rename commit was re-read macro by macro for this
+	 * change and no macro was given a different name, so the two spellings map one to one. The
+	 * macros that never named the product — {$ES.URL}, {$ES.USERNAME}, {$ES.PASSWORD.PATH},
+	 * {$ULM.…}, {$AGENT.PORT}, {$ES.VOLUME.CUS.PURCHASED} — were not touched and have no second
+	 * spelling at all.
+	 *
+	 * The production Zabbix holds seven clients whose master hosts still carry the {$EVP.…}
+	 * spelling, and no migration is planned. Reading only today's names was not a cosmetic fault.
+	 * ClientState::formFor() found none of those macros, so the edit form opened on the master
+	 * template's shipped defaults, and the first Save wrote those defaults over the client's real
+	 * configuration: its ES URL, its jump host, its contract end, every requested figure. In the
+	 * same request the backup recorded the destroyed version, and AlertRouting — reading the same
+	 * just-defaulted macros — concluded the client no longer wanted alerts and deleted its trigger
+	 * action, its DL user group, its DL user with that user's Email media, its scheduled report
+	 * and its dashboard.
+	 *
+	 * So: read both generations, write only the new one. macroFields() deliberately keeps
+	 * returning today's names alone, because its other callers write with them (masterMacros()),
+	 * look them up among the master template's defaults (defaults()) or search them in reverse
+	 * (masterValue()) — handing any of those a legacy name would write the old generation straight
+	 * back. The fallback therefore lives in the read helpers under "macros" below, not in the map.
+	 */
+
+	/** Today's prefix for every macro this module owns. The only prefix that is ever written. */
+	public const MACRO_PREFIX = '{$EP.';
+	/**
+	 * Legacy value, kept for recognition: the same prefix before the rename. It is matched on the
+	 * read path and never written, so a host a save touches comes out on today's generation.
+	 */
+	public const LEGACY_MACRO_PREFIX = '{$EVP.';
+
 	/** curl.exe's certificate options for a jump host client: none (check with the trust store), --cacert, or -k. */
 	public static function curlTls(string $mode, string $ca): string {
 		return $mode === 'none' ? '-k' : ($mode === 'ca' && $ca !== '' ? '--cacert "'.$ca.'"' : '');
@@ -107,12 +142,40 @@ class ClientSpec {
 		return $this->roles;
 	}
 
-	/** Field name => master macro, for every field the master host keeps. */
+	/**
+	 * Field name => master macro, for every field the master host keeps — today's names only.
+	 *
+	 * It stays single-generation on purpose: masterMacros() keys the macros it writes off this
+	 * map, defaults() looks each name up among the master template's defaults and masterValue()
+	 * searches it in reverse, so a legacy name returned here would be written straight back onto a
+	 * host. Reading a host of either generation is macroValue() and canonicalMacros()' job, and
+	 * legacyMacroFields() below is the same map in the old spelling for anything that needs it.
+	 */
 	public function macroFields(): array {
 		$out = ['type' => '{$EP.CLIENT.TYPE}'] + self::FIELDS;
 		foreach (Roles::allRoles($this->roles) as $r) {
 			foreach (self::ROLE_FIELDS as $suffix => $what) {
 				$out[$r['id'].'_'.$suffix] = Roles::macro($r['id'], $what);
+			}
+		}
+		return $out;
+	}
+
+	/**
+	 * The same map in the pre-rename spelling: field name => {$EVP.…} macro, for the fields that
+	 * have a legacy name. Fields whose macro never named the product ({$ES.URL}, {$ULM.…}) are
+	 * left out, because they are spelled the same in both generations and listing them twice would
+	 * suggest there is a second place to look.
+	 *
+	 * Kept beside macroFields() so the two generations are readable side by side and a reviewer can
+	 * see that nothing was dropped. It is for reading and reporting only; nothing writes from it.
+	 */
+	public function legacyMacroFields(): array {
+		$out = [];
+		foreach ($this->macroFields() as $field => $macro) {
+			$legacy = self::legacyMacro($macro);
+			if ($legacy !== null) {
+				$out[$field] = $legacy;
 			}
 		}
 		return $out;
@@ -562,7 +625,118 @@ class ClientSpec {
 
 	/* ------------------------------------ macros ------------------------------------ */
 
-	/** The master host's macros: macro => [value, type]. Family mounts follow the roles in use. */
+	/**
+	 * The pre-rename spelling of a macro name, or null when it has none. Only macros carrying this
+	 * module's own prefix were renamed, so asking about {$ES.URL} or {$ULM.S3.BUCKET} returns null
+	 * and a caller never looks up a legacy name that could not exist — which keeps the fallback
+	 * from inventing a second place to read a macro that only ever had one.
+	 */
+	public static function legacyMacro(string $macro): ?string {
+		return strncmp($macro, self::MACRO_PREFIX, strlen(self::MACRO_PREFIX)) === 0
+			? self::LEGACY_MACRO_PREFIX.substr($macro, strlen(self::MACRO_PREFIX))
+			: null;
+	}
+
+	/**
+	 * One macro's value out of a host's macros: today's name first, the pre-rename name second,
+	 * null when the host says nothing under either. Today's wins where a host carries both, so a
+	 * host half-way through a migration done by hand follows whatever was set last — the same rule
+	 * AlertRouting::canonical() applies, and the two must keep agreeing.
+	 *
+	 * Null means "this host does not say", which is not the same as the empty string. A caller
+	 * that cannot tell the two apart writes a blank over a value it merely failed to read, which
+	 * is the failure this whole block exists to stop.
+	 */
+	public static function macroOf(array $macros, string $macro): ?string {
+		if (array_key_exists($macro, $macros)) {
+			return (string) $macros[$macro];
+		}
+		$legacy = self::legacyMacro($macro);
+		return $legacy !== null && array_key_exists($legacy, $macros) ? (string) $macros[$legacy] : null;
+	}
+
+	/**
+	 * One form field's value out of a master host's macros, under either generation; null when the
+	 * host says nothing about that field, or when the field keeps no macro at all. This is the
+	 * form-facing half of macroOf(): it saves every caller from repeating the field => macro
+	 * lookup and then the new-else-legacy choice, which is where a missed field becomes silent
+	 * data loss.
+	 */
+	public function macroValue(array $macros, string $field): ?string {
+		$macro = $this->macroFields()[$field] ?? null;
+		return $macro !== null ? self::macroOf($macros, $macro) : null;
+	}
+
+	/**
+	 * A host's macros with every pre-rename name also present under today's name, today's winning.
+	 *
+	 * One call puts a legacy master host's whole configuration into today's terms, which is what a
+	 * reader that loops over macroFields() needs: ClientState::formFor() keeps its loop and reads
+	 * the canonical array instead of the raw one, and the ROOTDISK.FS mount it reads straight from
+	 * Roles::macro() comes along for free. It is deliberately a superset — nothing is dropped — so
+	 * a caller that still wants to know what the host really carries can look at the raw array.
+	 */
+	public static function canonicalMacros(array $macros): array {
+		$out = $macros;
+		foreach ($macros as $macro => $value) {
+			if (strncmp($macro, self::LEGACY_MACRO_PREFIX, strlen(self::LEGACY_MACRO_PREFIX)) === 0) {
+				$today = self::MACRO_PREFIX.substr($macro, strlen(self::LEGACY_MACRO_PREFIX));
+				$out[$today] = $out[$today] ?? $value;
+			}
+		}
+		return $out;
+	}
+
+	/**
+	 * The pre-rename macro names a host actually carries, sorted. Empty for a host of today's
+	 * generation.
+	 *
+	 * This is the safety net: a field whose fallback was missed is invisible, so rather than trust
+	 * that every field was covered, a caller can ask whether this host is of the old generation at
+	 * all and refuse to write it. It is a blanket scan of the prefix rather than a check against a
+	 * known list of names, and that is the point — a list can be short by exactly the field nobody
+	 * thought of, and a save that goes ahead on an unrecognised legacy macro destroys a value that
+	 * Zabbix cannot give back. The names are returned, not just a count, so the operator can be
+	 * told which macros stopped the save.
+	 *
+	 * It expects a master host's macros, where every {$EVP.…} name is one of this module's own.
+	 * The one way it can say yes about a host that is not legacy is a roles.json whose family
+	 * macroPrefix is literally EVP — allowed by Roles::validate(), used by no shipped family, and
+	 * on the cluster host rather than the master host. That costs a refused save, never a lost one.
+	 */
+	public static function legacyMacrosIn(array $macros): array {
+		$out = [];
+		foreach (array_keys($macros) as $macro) {
+			if (strncmp((string) $macro, self::LEGACY_MACRO_PREFIX, strlen(self::LEGACY_MACRO_PREFIX)) === 0) {
+				$out[] = (string) $macro;
+			}
+		}
+		sort($out, SORT_NATURAL);
+		return $out;
+	}
+
+	/**
+	 * Whether a master host's macros are of the pre-rename generation — true when it carries any
+	 * {$EVP.…} macro. Meant for the one question a caller has to ask before writing: may this
+	 * client be saved at all? See legacyMacrosIn(), which names them.
+	 */
+	public static function hasLegacyMacros(array $macros): bool {
+		foreach (array_keys($macros) as $macro) {
+			if (strncmp((string) $macro, self::LEGACY_MACRO_PREFIX, strlen(self::LEGACY_MACRO_PREFIX)) === 0) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	/**
+	 * The master host's macros: macro => [value, type]. Family mounts follow the roles in use.
+	 *
+	 * A write path: every name here is today's, never the pre-rename spelling, so a host this
+	 * touches comes out on the current generation. Note that it writes a value for every field of
+	 * the form — which is why a form that was filled from a host whose macros could not be read
+	 * destroys that host's settings, and why hasLegacyMacros() exists to stop that save.
+	 */
 	public function masterMacros(array $client): array {
 		$out = ['{$GRP.CLIENT}' => [$client['name'], 0]];
 		foreach ($this->macroFields() as $field => $macro) {

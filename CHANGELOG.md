@@ -1,5 +1,66 @@
 # Changelog
 
+## 0.3.0
+
+**An install that still carries the pre-rename identifiers now works, and can be migrated.**
+
+The rename in 0.2.0 changed the Zabbix module ids, host tags, template names and macros. An
+install created before it keeps the old ones, and until this release the modules could not see
+them: Cluster Management listed no clients at all, and the paths that could see a client would
+have overwritten it. Two things ship together.
+
+*Recognition.* The modules read both generations and write only the current one — client
+discovery, the managed-by tag, host tags, the master and log-archive templates, the cluster and
+jump-host templates, the lifecycle status, maintenance windows and the alert routing. Every old
+value sits behind a named `LEGACY_*` constant so it can be audited; nothing writes one.
+
+*Refusal.* A client's real settings — requested CPU, memory and disk per role, client type,
+jump-host fields, the lead, the cluster DL — live in macros on its master host. Saving a client
+whose macros are still of the old generation would have written shipped defaults over them,
+recorded the destroyed version as the backup, and had the alert routing conclude the client no
+longer wanted alerts and delete its action, DL group, DL account and weekly report. The form now
+reads both generations, and the save is refused outright until the macros are migrated, naming
+them and the command to run. The jump-host guard that warns about the two incompatible templates
+now decides from the template on the host rather than from a macro it cannot read.
+
+*Migration.* `deploy/zabbix/setup/zbx_rename.py` grew from the macro-and-Vault pass into a full
+migration: host groups, host tags, alert objects, dashboard widget types, maintenance windows and
+the master-template relink, each behind its own flag, dry-run by default, idempotent, and
+scopeable to one client where that is meaningful. Every destructive API method is denied
+structurally rather than by convention — `templateids_clear`, `configuration.import`,
+`item.delete`, `template.delete`, `host.delete`, `history.clear` and the rest are on a deny list,
+payloads are scanned recursively before the method is dispatched, and any write not on the
+allow-list raises.
+
+Item history is never deleted. Nor is data that was never collected: before renaming anything the
+script scans every field of every enabled item, discovery rule, item prototype and trigger, and
+refuses to rename a macro that any of them names. That matters more than it sounds — the
+device-count item carries macros in its URL and POST body, not in a calculated-item formula, so a
+scan that looked only at formulas would have stopped it collecting and said nothing. The relink
+is additive (`host.massadd` only); unlinking the old template is left to a person, in a window,
+with "Unlink, never Unlink and clear" printed per host.
+
+**Real-world end-to-end tests.** A new `e2e.test.php` — 198 assertions covering read-only tokens,
+a Zabbix Admin who cannot read templates (which must not be read as "no templates exist"),
+refusals part-way through a save, hostnames that differ from technical names and names at the
+length cap, client names where one is a prefix of another, hosts sharing an IP with and without
+the merge tick, objects existing under both generations at once, disabled hosts and the
+was-off marker, CSV round-trips, short imports that must not delete, and master hosts still on
+the old macros.
+
+**Fixes.** Picking an option in a segmented control no longer scrolls the page to the top — a
+visually hidden radio still takes focus, and it was positioned at the container origin rather
+than under its label. The host picker's row cap applied before filtering, which made search
+close to useless on a large install; it is raised, and hosts that are not monitored are marked
+rather than hidden, because hiding one made the form promise a new host and then adopt that very
+host on save. The volume report no longer writes "+30%" when the configured headroom is
+something else, and the window, top-days and headroom settings are editable in the cluster
+editor.
+
+**Plan.** `docs/STANDALONE-ZABBIX-PLAN.md` traces every figure in the five modules to its real
+source and sets out what standalone operation would cost.
+
+
 ## 0.2.3
 
 **The Zabbix modules now create the cluster template themselves.** Until this release nothing

@@ -27,7 +27,7 @@ silently reusing someone else's VM.
 | `zbx_phase34.py` | `elasticpro-provision` (host creation only), client-plan template linked to cluster hosts, the scraper's ElasticPro token → `../secrets/scraper_token` (a Docker secret for `compose.plan.yml`; an older `scraper.env` is carried over), this VM as a Linux host |
 | `zbx_dashboard.py` | the "ElasticPro — Fleet" dashboard |
 | `zbx_hosts_check.py`, `zbx_e2e.py` | end-to-end checks: sign in as a Zabbix user, open the module, see what that user gets |
-| `zbx_rename.py` | upgrades only: renames the macros a Zabbix set up under the previous product name still carries, and reports everything a script must not rename. Dry run unless `--apply` — see "Upgrading from the previous name" |
+| `zbx_rename.py` | upgrades only: migrates a Zabbix set up under the previous product name — macros, Vault paths, host tags, the masters host group, the per-client alert objects, blank dashboard widgets, a live maintenance, and linking the current master template. Dry run unless `--apply`, and every phase is named separately — see "Upgrading from the previous name" and "Migrating off the previous names" |
 
 Vault comes first: `../../vault/setup.sh`, then `stack/setup.sh` (secrets, TLS, networks,
 `up -d`). Run `stack/setup.sh` as root (or with sudo) — the Zabbix images run as uid 1997 /
@@ -109,12 +109,47 @@ than errors — so walk the five sections below once per install.
 
 ```bash
 python3 setup/zbx_rename.py            # what it would change, and what is left for a person
-python3 setup/zbx_rename.py --apply    # rename the macros
+python3 setup/zbx_rename.py --apply    # rename the macros (all but the ones a formula names —
+                                       # see "Macros in formulas" below)
 ```
 
 It needs no `--host`: nothing it writes contains an address. `--zabbix-url`/`$ZBX_URL` and
 `--accounts`/`$ZBX_ACCOUNTS` behave as in every other script here. Run it as often as you
 like — the second run finds nothing to rename.
+
+It now also *migrates* the rest, one phase at a time. With no phase flag it reports on
+everything, and `--apply` renames the macros and nothing else. Name a phase and only that
+phase may write — including `--rewrite-vault-path`, which used to be a special case that
+reset the phase set and so renamed every macro on the install as well, unannounced. It now
+means the Vault phase and only the Vault phase.
+
+One class of macro the macro phase deliberately does **not** rename, and which phases `--client`
+scopes, are below the table.
+
+| flag | phase | what it changes |
+|---|---|---|
+| *(none)* | — | report on everything; `--apply` does the macro phase only, as before (the Vault-path phase has always needed `--rewrite-vault-path` of its own) |
+| `--apply` | — | the only thing that writes. Necessary for every phase, sufficient for none of the new ones |
+| `--macros` | macros | `{$EVP.` → `{$EP.`, `{$ESPRO.` → `{$ELASTICPRO.` on hosts, templates and globally — **except** a macro that an enabled calculated item's formula or an enabled trigger's expression still names. See "Macros in formulas" below |
+| `--vault`, `--rewrite-vault-path` | vault | `<mount>/elasticvue/…` → `<mount>/elasticpro/…`. Needs `--rewrite-vault-path` to write, whichever way the phase was named. On its own it now means **this phase only** |
+| `--groups` | groups | host group `ElasticVue clients` → `ElasticPro clients` |
+| `--tags` | tags | `managed-by: elasticvue-clients` → `elasticpro-clients`, and every `evp-*` tag → `ep-*`, in one `host.update` per host |
+| `--alerts` | alerts | per client: user group, `evp-dl-<client>` account, trigger action, weekly report and report dashboard, all `ElasticVue: ` → `ElasticPro: ` |
+| `--dashboards`, `--widgets` | widgets | dashboard widgets of type `evp_resources` / `evp_capacity` / `evp_volume` → `ep_*`. Gated on the three new modules being registered **and** enabled |
+| `--maintenance` | maintenance | a live Zabbix maintenance `ElasticVue: <client>` → `ElasticPro: <client>` |
+| `--templates`, `--relink` | relink | links `ElasticPro client master` to each master host. Unlinks nothing. Also needs `--accept-history-restart` |
+| `--disable-legacy-items` | (relink) | with the relink phase: sets to Disabled the items and triggers the host **inherits from the legacy template this phase just relinked**, matched by each object's parent id and never by its key prefix. Status only — nothing is deleted and re-enabling undoes it. It is also what releases the macro phase's formula lock |
+| `--accept-history-restart` | (relink) | the second hand-made decision the relink needs: the `ep.*` series starts empty |
+| `--datadir` | datadir | prints the filesystem move. Never writes, with or without `--apply` |
+| `--all` | all of them | every phase. Still needs `--apply` to write, and the relink still needs its own two flags |
+| `--phase <name>` | one | the same, by name, repeatable: `--phase alerts --phase widgets`, or `--phase all` |
+| `--client <name>` | — | repeatable; scopes the **tags, alerts, widgets, maintenance and relink** phases to one client. The macros, vault, groups, modules and datadir phases are install-wide and say so on every run: a global or template macro belongs to no single client, the Vault phase walks every host's macro values, and the host group and the data folder are one object each |
+
+`--client` scoped four phases and silently ignored the fifth: an operator proving `--tags` on
+one client of seven had the tags of all forty-two hosts rewritten. It scopes the tags phase
+now, by the host's `ep-client` / `evp-client` tag. A host that carries neither cannot be
+attributed to a client, so a scoped run leaves it alone and names it in the summary — run the
+phase without `--client` to migrate those.
 
 ### Macros — required
 
@@ -131,6 +166,48 @@ value (both macros are left alone — say which one is current and delete the ot
 pair where either side is Secret text (the API will not return the value, so nothing can
 compare them). A macro that names the old product but is none of ours — your own
 `{$EVPFOO}` — is listed and left exactly as it is.
+
+#### Macros in formulas — what this phase will not rename, and why
+
+A Zabbix **calculated** item's formula is text, and the master template's "requested" items are
+calculated items whose entire formula is a macro: `ep.devices.purchased` is
+`{$EP.DEVICES.PURCHASED}`, and each role's figures are `{$EP.<ROLE>.CPU.REQUESTED}` and its kind
+(`MasterTemplate::baseItems()`, `roleItems()`). On the legacy generation of those items the
+formula names `{$EVP.…}`. Rename the macro and the formula names a macro that no longer exists:
+Zabbix makes the item **unsupported**, and every capacity and shortfall figure on every client
+stops being collected — not stale, not wrong, simply never recorded — for as long as the rest of
+the migration takes. There is no backfill for a value that was never collected. Trigger
+expressions carry macros too: the legacy client-plan template's `nodata()` trigger names
+`{$ESPRO.PLAN.STALE}`.
+
+So the phase refuses exactly one class of macro: **one whose name appears in the formula of an
+enabled calculated item, or in the expression of an enabled trigger, on any host.** It renames
+everything else, which is most of them — `{$EVP.DL}`, `{$EVP.LEAD}`, `{$EVP.CONTRACT.END}`,
+`{$EVP.CLIENT.STATUS}`, the jump-host set — so Cluster Management's empty fields are fixed on the
+first run. Each refused macro is printed with the items and triggers holding it.
+
+Leaving the *template's* macros alone and renaming only the host's would not have worked: the
+host macro is the one carrying the client's real purchased figure and the template's is the
+`0 = not set` default underneath it, so the formula would go on resolving and start reporting
+**zero**. A guess rendered as a measurement is worse than a refusal.
+
+The way through is to stop those objects first, which is why the runbook below puts the relink
+before the second macro run:
+
+```bash
+python3 setup/zbx_rename.py --apply --macros     # everything but the formula macros
+python3 setup/zbx_rename.py --apply --templates --accept-history-restart --disable-legacy-items
+python3 setup/zbx_rename.py --apply --macros     # now the formula macros too
+```
+
+A disabled object holds no lock. If the list names an object that is **not** one of the master
+template's — a trigger of your own, or a legacy template this script never relinks — nothing here
+will disable it: turn it off yourself, or leave that macro on its old name. Both generations are
+read by the code either way.
+
+The check fails closed. If the calculated items and triggers cannot be read at all, the phase
+renames **nothing** and says so, because an empty scan and a scan this user was not allowed look
+exactly alike.
 
 ### The frontend modules — required
 
@@ -194,6 +271,11 @@ python3 setup/zbx_rename.py --apply --rewrite-vault-path
 That order is the whole point of the separate flag: Zabbix reads the path the macro names, so
 a macro moved before its secret is a macro pointing at nothing.
 
+`--rewrite-vault-path` on its own now runs the Vault phase and nothing else. It used to reset
+the phase set, so this command — documented here, in a section about secret paths — also renamed
+every `{$EVP.*}` and `{$ESPRO.*}` macro on the install, which is not what anyone reading this
+page had asked for. Run `--apply --macros` when you want the macros.
+
 ### Names that are not the script's to change
 
 The module and these scripts create objects named after the product — the `ElasticPro client
@@ -203,6 +285,9 @@ client that wants its problems mailed. After the upgrade the code looks for the 
 does not find them, and makes a second set beside the old one. Two alert actions mean two
 mails, so look at the list `zbx_rename.py` prints and delete the old half once you are
 satisfied the new half is live.
+
+`--apply --alerts` does the five per-client objects for every client at once, instead of
+waiting for seven saves — see "Migrating off the previous names" below.
 
 The four generated templates are the awkward ones: their uuids come from a hash of the product
 name, so **Cluster Management → Write master template** creates new templates rather than
@@ -225,3 +310,153 @@ names themselves carry the marker too (`Elasticsearch Cluster by HTTP EP` and fr
 your Zabbix still calls them by the old names, point the scripts and the core at them with
 `ELASTICPRO_ZABBIX_CLUSTER_TEMPLATE` rather than renaming anything, and give the core the same
 value or it syncs nothing.
+
+## Migrating off the previous names
+
+The modules recognise both generations, so an un-migrated Zabbix works and nothing here is
+urgent. This is for retiring the old names once and for all. `zbx_rename.py` does it in
+phases; run one, look at it, come back for the next.
+
+Read a plan first, always. Every phase prints, per object, what it is, its current value, its
+new value, and whether it is skipped as already migrated. Nothing is written without `--apply`.
+
+```bash
+python3 setup/zbx_rename.py --all                   # the whole plan, writes nothing
+```
+
+### The order, and why it is this order
+
+```bash
+# 0. always runs: the client census, and a twin report (see below)
+# 1. the modules, by hand — Administration → General → Modules. Nothing below needs it
+#    except the widgets phase, which refuses to run until the three new modules are
+#    registered AND enabled.
+python3 setup/zbx_rename.py --apply --macros        # 2. the macros — all but the ones a
+                                                    #    formula names; step 10 finishes them
+python3 setup/zbx_rename.py --apply --rewrite-vault-path   # 3. the Vault paths — read the
+                                                    #    order warning above first
+python3 setup/zbx_rename.py --apply --groups        # 4. the masters host group
+python3 setup/zbx_rename.py --apply --tags          # 5. host tags
+python3 setup/zbx_rename.py --apply --alerts        # 6. the per-client alert objects
+python3 setup/zbx_rename.py --apply --dashboards    # 7. the blank report widgets
+python3 setup/zbx_rename.py --apply --maintenance   # 8. a live maintenance
+python3 setup/zbx_rename.py --apply --templates --accept-history-restart --disable-legacy-items
+                                                    # 9. the master template — maintenance window
+python3 setup/zbx_rename.py --apply --macros        # 10. the formula macros, now that step 9
+                                                    #     has turned their items off
+python3 setup/zbx_rename.py --datadir               # 11. the data folder, by hand, last
+```
+
+**Steps 2 and 10 are the same command, and step 2 does not finish the job.** It renames every
+macro the pages read for a *value* and leaves the ones a calculated item's formula or a trigger's
+expression still names, because renaming one of those stops the client's capacity collection
+dead. Step 9 disables those items and triggers, which releases them; step 10 is the same command
+run again, and this time there is nothing left for it to refuse. It is safe to run step 2 as
+often as you like in between. See "Macros in formulas" above.
+
+**The refusal is in the script, not in this file** — it is checked against the live install on
+every run, so following these steps in the wrong order gets you a refusal rather than a broken
+item. What it rests on is the scan being complete: the script locks a macro when any *enabled*
+item, discovery rule, item prototype or trigger on a host names it, reading every field of each
+rather than a list of field names, so a Zabbix field that expands macros cannot be missed by
+going out of date. Two things are outside it by construction — an object that is disabled when
+the scan runs and enabled afterwards, and anything outside Zabbix that reads these macros through
+the API. Neither is reachable by following these steps, but neither is the script's to promise.
+
+**Step 5 (`--tags`) has no deadline**, and an older version of this file said it did. The claim
+was that `Lifecycle::WAS_OFF` had no legacy spelling, so **Clients → Enable** could not see an
+`evp-was-off` and would switch back on a host that had been Not monitored before its client was
+disabled. `Lifecycle::enable()` tests `ep-was-off` and `evp-was-off` both, and `ownTags()` strips
+all four spellings before writing one set back, so Enable turns back on only what Disable turned
+off. The phase lists the hosts carrying `evp-was-off`, and nothing about them is urgent. Use
+Enable whenever you like.
+
+**Step 5 writes each host's whole tag set in one call**, on purpose. Zabbix replaces a tag set
+wholesale; adding the `ep-*` tags and then removing the `evp-*` ones leaves a window where an
+interrupted run has a host with *neither* `managed-by` value, `Reconciler::isManaged()` says no,
+and the next save un-manages that host for good. Prove it on one client first with
+`--client <name>`.
+
+**Step 9 (`--templates`) is the only one that wants a maintenance window**, and only because
+of what you do by hand afterwards (unlinking). The phase itself is additive.
+
+### What needs a human, and what the script refuses
+
+* **The five frontend modules.** No API renames a registered module — Zabbix keys it on the id
+  in its `manifest.json`. Four steps, printed on every run.
+* **The data folder** `/var/lib/elasticvue-zabbix` → `/var/lib/elasticpro-zabbix`. There is no
+  API method that moves a file, and the script may be running on a different machine from the
+  frontend. `--datadir` prints the exact steps. Do it **last**, with the frontend stopped, with
+  `mv` and never `cp`: a partial copy leaves one `.json` in the new folder, `Store::holds_data()`
+  then prefers the new folder over the real one, `read()` hands back default roles, and
+  `Roles::hash()` no longer matches the live master template — every client then reads as
+  "outdated" and a save would rewrite the roles.
+* **Taking the legacy master template off a host.** Data collection → Hosts → the host →
+  Templates → **Unlink**, never "Unlink and clear". The script prints the line per host and
+  refuses the call shape entirely.
+* **Twins.** A release before the compatibility layer saw nothing under the current names and
+  built a second object beside the live one. Host group, user group, user, action, report and
+  maintenance names are unique in Zabbix, so a rename onto a name that already exists fails
+  outright: the pair is reported and refused, and the script deletes neither half. If you clear
+  a stale twin by hand, the order is **trigger action, then the user, then the user group** —
+  Zabbix refuses to delete a user group an action still sends to, and a user an action names.
+* **A legacy-named template the uuid says is not ours.** `MasterTemplate::uuid()` hashes the
+  product name, so a uuid is the only honest way to tell a template this module wrote from one
+  of the site's own that merely shares the name. One that does not match is reported and never
+  touched.
+* **Anything that could delete item history** is refused structurally, not warned about, and
+  there is no flag that turns the refusal off: `host.massremove` in any form, any payload
+  carrying `templateids_clear` or `templates_clear`, `host.update` with a `templates` array
+  (it *replaces* the link list, so one template missed is silently unlinked and its items are
+  stranded at host level), `template.update` renaming a legacy template to a current name,
+  `template.delete`, `item.delete`, `trigger.delete`, `configuration.import`, `history.clear`,
+  `trend.clear`, `housekeeping.update`, and every other delete.
+
+### Item history: what survives, what does not
+
+**No path carries history across the rename.** The rename changed every item key the master
+template generates — `evp.es.storage.used` became `ep.es.storage.used`, and so on for all of
+them — and in Zabbix an item is identified by `(hostid, key_)` with history and trends keyed on
+`itemid`. A new key on the same host is a new item with empty history. The two generations'
+key sets have no member in common; the script checks that before it links anything and aborts
+if it is ever untrue.
+
+So the relink is honest about the cost, and asks twice for it: `--apply --templates` is not
+enough on its own, it also needs `--accept-history-restart`.
+
+* The `ep.*` series **begins at the instant of linking**. Graphs, the template dashboard, the
+  Client capacity report and the shortfall triggers see nothing before that moment.
+* The `evp.*` values **are not deleted**. They stay under their own keys, reachable on the
+  master host's *Latest data* and through the legacy template's graphs, until the Zabbix
+  server's own housekeeping retention expires them. They are not reachable anywhere in the
+  ElasticPro UI — the compatibility layer recognises names, groups, tags, macros and widget
+  ids, not old item keys. **If months of capacity or log-delay values matter, export them
+  before retention takes them.** The script prints the number of items on an old key in its
+  preflight, before anything is applied, so the figure is on screen first.
+* The relink **unlinks nothing**, so both generations sit on the master host. Their trigger
+  *names* are identical and their expressions differ, so every shortfall trigger fires twice,
+  to the client's DL. `--disable-legacy-items` sets the legacy inherited items and triggers to
+  Disabled — status is the one field editable on an inherited object, it deletes nothing, and
+  re-enabling undoes it. That is the only part of the migration that fixes the operational
+  harm rather than a name.
+* **The legacy "requested" figures keep collecting until you stop them.** Their formulas name
+  `{$EVP.<ROLE>.…}`, and the macro phase refuses to rename a macro a formula still names, so
+  phase 2 does not make them unsupported — an earlier version of this script did exactly that,
+  silently, and froze every client's capacity figures for the length of the migration. They stop
+  when `--disable-legacy-items` turns them off, in a window you picked, which is also what frees
+  the macro phase to finish (step 10 above).
+* **The relink does not light up log delay.** `ep.delay.*` reads `elasticpro.delay[…]` and
+  production cluster hosts still push `espro.delay[…]`: those items stay empty until the new
+  delay template is imported and the scraper pushes the new key.
+
+### What is irreversible
+
+| | |
+|---|---|
+| **Item history and trends** | Only ever lost by "Unlink and clear", by deleting an item or a template, or by a `configuration.import` aimed at the old generation. The script refuses all of them, with no override. Nothing in `Store`'s backups holds item values |
+| **Collection that stopped** | A value that was never collected cannot be backfilled from anything, which is why the macro phase will not rename a macro an enabled calculated item's formula or an enabled trigger's expression still names, and why `--disable-legacy-items` is scoped to the objects inherited from the template it relinked rather than to a key prefix |
+| **`evp-was-off`** | Reversible, and an earlier version of this file said otherwise. `Lifecycle::enable()` reads `ep-was-off` and `evp-was-off` both, so **Clients → Enable** turns back on only what Disable turned off, migrated or not |
+| **Everything else** | Reversible. Every write the script makes is a rename, a tag set, a widget type, a template link or a status — all of them undone by making the opposite change |
+
+A rename is also cheap to re-run: every phase compares what is there with what it wants, so a
+second run reports "already migrated — skipped" and sends nothing.

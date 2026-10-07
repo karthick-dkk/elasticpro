@@ -20,14 +20,16 @@ class ClientState {
 		$this->rec = $rec;
 	}
 
-	/** Every client (a master host carrying the template), by name. */
+	/**
+	 * Every client (a master host carrying the template), by name. Reconciler::masterHosts() does
+	 * the looking: it reads both generations of the master template's name and of the kind tag,
+	 * and falls back to the tag for a Zabbix Admin who may read hosts but not templates. One
+	 * definition, shared with Reconciler::clientGroups() — this list is also what a backup keeps,
+	 * and a backup taken from a list that came back empty prunes the real ones away.
+	 */
 	public function clients(): array {
-		$tpl = API::Template()->get(['output' => ['templateid'], 'filter' => ['host' => MasterTemplate::NAME]]);
-		// A Zabbix Admin may read the hosts but not the templates: then the master hosts by their tag.
-		$masters = $tpl ? API::Host()->get(['output' => ['hostid', 'host'], 'templateids' => [$tpl[0]['templateid']]])
-			: API::Host()->get(['output' => ['hostid', 'host'], 'tags' => [['tag' => 'ep-kind', 'value' => 'master', 'operator' => TAG_OPERATOR_EQUAL]]]);
 		$out = [];
-		foreach ($masters ?: [] as $master) {
+		foreach (Reconciler::masterHosts(['output' => ['hostid', 'host']]) as $master) {
 			$m = $this->rec->macros($master['hostid']);
 			$name = ($m['{$GRP.CLIENT}'] ?? '') !== '' ? $m['{$GRP.CLIENT}'] : preg_replace('/(-Master| master)$/', '', $master['host']);
 			$out[$name] = ['name' => $name, 'masterid' => $master['hostid'], 'macros' => $m];
@@ -36,14 +38,27 @@ class ClientState {
 		return $out;
 	}
 
-	/** Elasticsearch cluster hosts that belong to no client yet, each with the client name it suggests. */
+	/**
+	 * Elasticsearch cluster hosts that belong to no client yet, each with the client name it
+	 * suggests. A host is a candidate by its Elasticsearch template, and a client already added
+	 * is recognised by name through clients(), which reads both generations.
+	 *
+	 * It reads no tag of this module's — but that is not the same as needing no old spelling, as
+	 * this docblock used to claim. The template name is generation-dependent too: the one the
+	 * pre-rename release shipped was 'Elasticsearch Cluster by HTTP EVP', so on the live install
+	 * a lookup of the current name alone matched no template, the early return fired, and
+	 * "Elasticsearch clusters with no client yet" was silently empty — an operator adding a
+	 * client there would have been told Zabbix held no cluster at all. Reconciler
+	 * ::esClusterTemplates() is the one definition of both spellings; host.get takes every
+	 * template id found and matches a host linked to any of them.
+	 */
 	public function candidates(array $clients): array {
-		$tpl = API::Template()->get(['output' => ['templateid'], 'filter' => ['host' => Reconciler::clusterTemplates()[0]]]);
+		$tpl = API::Template()->get(['output' => ['templateid'], 'filter' => ['host' => Reconciler::esClusterTemplates()]]);
 		if (!$tpl) {
 			return [];
 		}
 		$out = [];
-		foreach (API::Host()->get(['output' => ['hostid', 'host'], 'templateids' => [$tpl[0]['templateid']]]) as $host) {
+		foreach (API::Host()->get(['output' => ['hostid', 'host'], 'templateids' => array_column($tpl, 'templateid')]) as $host) {
 			$m = $this->rec->macros($host['hostid']);
 			$name = ($m['{$GRP.CLIENT}'] ?? '') !== '' ? $m['{$GRP.CLIENT}'] : preg_replace('/(-ES-Cluster| cluster)$/', '', $host['host']);
 			if (!isset($clients[$name])) {
@@ -71,7 +86,14 @@ class ClientState {
 		$now = $this->rec->current($client);
 
 		if ($now['master'] !== null) {
-			$m = $this->rec->macros($now['master']['hostid']);
+			// Folded forward before anything reads it. A client's real settings live in macros on
+			// its master host, and every one of them was {$EVP.…} before the rename. Reading the
+			// raw array against today's names finds nothing on a host that predates the rename, so
+			// the form would open on shipped defaults and the first Save would write those defaults
+			// over the real values - and the backup taken in the same request would record the
+			// destroyed version. canonicalMacros() returns today's spelling for both generations,
+			// today's winning where a host somehow carries both.
+			$m = ClientSpec::canonicalMacros($this->rec->macros($now['master']['hostid']));
 			foreach ($this->spec->macroFields() as $field => $macro) {
 				if (array_key_exists($macro, $m)) {
 					$form[$field] = $m[$macro];
@@ -87,10 +109,10 @@ class ClientState {
 			$form['es_url'] = self::urlFrom($m);
 			$form['es_user'] = $m['{$ELASTICSEARCH.USERNAME}'] ?? $form['es_user'];
 			$form['purchased'] = $m['{$ES.VOLUME.CUS.PURCHASED}'] ?? $form['purchased'];
-			foreach ($now['cluster']['macros'] ?? [] as $cm) {
-				if ($cm['macro'] === '{$ELASTICSEARCH.PASSWORD}' && (int) $cm['type'] === ZBX_MACRO_TYPE_SECRET) {
-					$form['es_password_mode'] = 'zabbix';
-				}
+			// Zabbix never gives a secret macro's value back, so the form shows the mode, not the
+			// password: one is already kept there.
+			if (Reconciler::hasStoredPassword($now['cluster'])) {
+				$form['es_password_mode'] = 'zabbix';
 			}
 		}
 		if ($form['ulm_bucket'] === ClientSpec::UNSET_BUCKET) {

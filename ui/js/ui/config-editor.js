@@ -160,11 +160,39 @@ export async function unlockSealed({ quiet = false } = {}) {
 }
 
 /* ------------------------------------------------------------------ editors */
+
+/**
+ * A per-cluster setting as the config file spells it.
+ *
+ * normalize() in core/config.js accepts camelCase and snake_case for the same key, so an
+ * editor that read only one spelling would show an empty field for a cluster whose value
+ * is written the other way — and then save that emptiness as "no change".
+ */
+function written(c, camel, snake) {
+  if (c[camel] !== null && c[camel] !== undefined) return c[camel];
+  if (c[snake] !== null && c[snake] !== undefined) return c[snake];
+  return '';
+}
+
+/**
+ * The three volume knobs: field id, both spellings of the key, the label the error
+ * message uses, and the range. One list, so the fields, the validation and the removal
+ * on an emptied field cannot fall out of step.
+ */
+const VOLUME_FIELDS = [
+  { id: 'ce-volwin',  key: 'volumeWindowDays',      snake: 'volume_window_days',      label: 'Volume window', min: 1, max: 90 },
+  { id: 'ce-voltop',  key: 'volumeTopDays',         snake: 'volume_top_days',         label: 'Heaviest days counted', min: 1, max: 90 },
+  { id: 'ce-volhead', key: 'volumeHeadroomPercent', snake: 'volume_headroom_percent', label: 'Planning headroom', min: 0, max: 200 },
+];
+
 export async function editCluster(existing = null) {
   const r = raw();
   if (!r) return false;
   const jumps = jumpHostList(r).map(([id]) => id);
   const c = existing || {};
+  // What this cluster inherits when a field is left empty, so the hints can name the
+  // figure actually in force rather than the built-in one.
+  const d = { ...cfg.DEFAULTS, ...r.defaults };
   const cred = c.username || c.apiKey || c.bearer ? 'own' : 'shared';
   const body = [
     h('div', { style: { display: 'grid', gridTemplateColumns: '1fr 2fr', gap: '10px' } },
@@ -185,6 +213,22 @@ export async function editCluster(existing = null) {
         'Total size of the snapshot repository. Elasticsearch cannot report it, so the volume report ' +
         'says "not set" until you do. 2TB, 500GB, or a bare number of GB.'),
       field('Note', text('ce-note', c.note || ''))),
+    // How this cluster's daily-ingest figure is derived, and the headroom every "needed"
+    // number on the volume report is sized with. They were in the config schema with no
+    // way to set them short of hand-editing the file.
+    h('div', { style: { display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '10px' } },
+      field('Volume window (days)',
+        text('ce-volwin', written(c, 'volumeWindowDays', 'volume_window_days'),
+          { mono: true, placeholder: String(d.volumeWindowDays) }),
+        `How many complete days the daily figure is measured over; today is never counted. 1–90, empty uses ${d.volumeWindowDays}.`),
+      field('Heaviest days counted',
+        text('ce-voltop', written(c, 'volumeTopDays', 'volume_top_days'),
+          { mono: true, placeholder: String(d.volumeTopDays) }),
+        `The daily figure is the mean of this many heaviest days in that window: 1 sizes against the peak day, the whole window is a plain mean. Empty uses ${d.volumeTopDays}.`),
+      field('Planning headroom (%)',
+        text('ce-volhead', written(c, 'volumeHeadroomPercent', 'volume_headroom_percent'),
+          { mono: true, placeholder: String(d.volumeHeadroomPercent) }),
+        `Added to the daily figure before it is multiplied out into every disk and backup requirement. 0–200, empty uses ${d.volumeHeadroomPercent}%.`)),
     h('details.disc', { open: cred === 'own' },
       h('summary', 'Credential for this cluster only (optional)'),
       h('div', { style: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px', padding: '8px 0 2px' } },
@@ -224,6 +268,28 @@ export async function editCluster(existing = null) {
           if (!cap) delete next.backupCapacity;
           else if (!parseSize(cap)) return ctx.msg('backupCapacity: use a form like 2TB, 500GB or a bare number of GB.');
           else next.backupCapacity = cap;
+          // Empty means "inherit defaults:", so the key is removed rather than written
+          // as a number nobody asked for. Both spellings go: normalize() reads either, so
+          // a leftover snake_case key would win back the value just cleared.
+          for (const f of VOLUME_FIELDS) {
+            const v = val(f.id).trim();
+            delete next[f.snake];
+            if (!v) { delete next[f.key]; continue; }
+            const n = Number(v);
+            if (!Number.isInteger(n) || n < f.min || n > f.max) {
+              return ctx.msg(`${f.label}: a whole number from ${f.min} to ${f.max}.`);
+            }
+            next[f.key] = n;
+          }
+          // More heaviest days than the window holds silently means "the whole window"
+          // (volumeSettings clamps it), and what gets saved should be what was asked for.
+          // The effective figures are compared, not the typed ones: either field may be
+          // empty and inheriting a default that makes the pair contradictory.
+          const effWin = Number(next.volumeWindowDays ?? d.volumeWindowDays);
+          const effTop = Number(next.volumeTopDays ?? d.volumeTopDays);
+          if (Number.isFinite(effWin) && Number.isFinite(effTop) && effTop > effWin) {
+            return ctx.msg(`Heaviest days counted (${effTop}) cannot be more than the volume window (${effWin} days).`);
+          }
           const cu = val('ce-cu').trim(), cp = val('ce-cp');
           if (cu) {
             next.username = cu;

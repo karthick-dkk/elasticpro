@@ -284,7 +284,8 @@ $js = [
 		'giveRole' => _('Give a role'),
 		'takenBy' => _('%s is already a server of client %c. An IP belongs to one client only.'),
 		'takeOn' => _('In Zabbix as "%h" — it is taken on, with its history, and named'),
-		'serverOf' => _('server of %c'), 'inZabbix' => _('in Zabbix'), 'noMatch' => _('Not in Zabbix — it will be created.')
+		'serverOf' => _('server of %c'), 'inZabbix' => _('in Zabbix'), 'noMatch' => _('Not in Zabbix — it will be created.'),
+		'notMonitored' => _('not monitored')
 	]
 ];
 
@@ -366,7 +367,14 @@ $js = [
 	.ep-f .ep-hint, .ep-f .ep-inline-hint, .ep-f .ep-count { color: var(--ep-muted); font-size: 12px; font-weight: normal; }
 	.ep-f .ep-inline { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
 	.ep-f .ep-seg { display: inline-flex; background: var(--ep-chip); border-radius: 7px; padding: 2px; }
-	.ep-f .ep-seg input { position: absolute; opacity: 0; pointer-events: none; }
+	/* A segmented control is a radio hidden under its label, and a hidden control still takes
+	   focus: clicking the label focuses the radio, and the browser then scrolls that radio into
+	   view. While the radio was position: absolute it was not where its label is, so picking
+	   "Zabbix secret" halfway down this form scrolled the page away from it — to the top, as
+	   reported. It is clipped where it sits instead, and the 1px it now occupies in the row is
+	   taken back by the negative right margin, so the control looks exactly as it did. */
+	.ep-f .ep-seg input { flex: 0 0 auto; width: 1px; height: 1px; min-width: 0; margin: 0 -1px 0 0; padding: 0;
+		border: 0; background: none; appearance: none; clip-path: inset(50%); opacity: 0; pointer-events: none; }
 	.ep-f .ep-seg label { padding: 4px 14px; border-radius: 5px; cursor: pointer; color: inherit; }
 	.ep-f .ep-seg input:checked + label { background: var(--ep-card); box-shadow: 0 1px 2px rgba(0, 0, 0, .18); font-weight: 600; }
 	.ep-f .ep-seg input:focus-visible + label { outline: 2px solid var(--ep-accent); }
@@ -407,6 +415,11 @@ $js = [
 	.ep-f .ep-suggest button[disabled] { cursor: not-allowed; opacity: .55; }
 	.ep-f .ep-suggest .ep-ip { font-size: 12px; }
 	.ep-f .ep-suggest .ep-owner { color: var(--ep-muted); font-size: 11.5px; }
+	/* A host that is in Zabbix but Not monitored can still be adopted, so the row stays pickable
+	   and says so instead of being left out — hiding it would make the sheet promise a new host
+	   and then adopt this one anyway. An implicit fourth grid column, so rows without it are unchanged. */
+	.ep-f .ep-suggest .ep-off { font-size: 11px; font-weight: 600; color: var(--ep-warn); white-space: nowrap;
+		background: color-mix(in srgb, var(--ep-warn) 16%, transparent); padding: 1px 7px; border-radius: 5px; align-self: center; }
 	.ep-f .ep-suggest .ep-none { padding: 6px 8px; color: var(--ep-muted); }
 	.ep-f #ep-s-notes { width: 100%; max-width: 560px; }
 	.ep-f .ep-chip-row { display: grid; grid-template-columns: 90px minmax(0, 1fr); gap: 8px; align-items: start; margin: 2px 0; }

@@ -6,8 +6,8 @@ use API;
 
 /**
  * Is each part of a client working? Read from what Zabbix already has — item states, errors and
- * last values, interface availability — so a rejected password or an agent that never answered
- * shows on the list the day it happens. Only the checks that apply to a client are counted.
+ * last values, interface availability, host status — so a rejected password or an agent that never
+ * answered shows on the list the day it happens. Only the checks that apply to a client are counted.
  */
 class SetupChecks {
 
@@ -81,6 +81,19 @@ class SetupChecks {
 					$avail === 1 ? $up++ : $down[] = $h['name'];
 				}
 				$checks[] = [_('Agents answer'), $down ? false : true, $down ? _s('%1$s of %2$s answer; not: %3$s', $up, count($servers), implode(', ', array_slice($down, 0, 3))) : ''];
+
+				// A server taken on while its Zabbix host was Not monitored collects nothing and raises
+				// nothing, and the agent check above does not say why: a disabled host's interface
+				// availability is reset to unknown, so it is counted among the ones that do not answer
+				// and the operator goes looking for a network or agent fault that is not there. Not
+				// asked of a client that is disabled or decommissioned, where every host being Not
+				// monitored is the whole point of the status.
+				if (Lifecycle::statusOf($m) === 'active') {
+					$off = array_values(array_map(fn($h) => $h['name'],
+						array_filter($servers, fn($h) => (int) ($h['status'] ?? 0) === HOST_STATUS_NOT_MONITORED)));
+					$checks[] = [_('Servers are monitored'), $off ? false : true,
+						$off ? _s('%1$s of %2$s are Not monitored in Zabbix: %3$s', count($off), count($servers), implode(', ', array_slice($off, 0, 3))) : ''];
+				}
 			}
 			if ($now['ulm'] !== null) {
 				$u = $items[$now['ulm']['hostid']] ?? [];

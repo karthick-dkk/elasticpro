@@ -23,6 +23,26 @@ class JumpTemplate {
 	public const NAME = 'ElasticPro Elasticsearch via SSH jump host';
 	public const VERSION = '3';
 
+	/**
+	 * Legacy value, kept for recognition: this template's name before the product was renamed
+	 * from ElasticVue Pro to ElasticPro. The production Zabbix still carries it, and there will
+	 * be no migration, so it is permanent.
+	 *
+	 * It is matched, never written. Reconciler::current() missing it was not cosmetic: a
+	 * pre-rename client behind a jump host was then recognised as having no cluster host at all,
+	 * so saving it took the create branch and asked Zabbix for a host called
+	 * <client>-ES-Cluster — a name the rename did not change, so one already existed, the create
+	 * was refused, and the save threw after the master host had already been retagged and
+	 * relinked, leaving the client half-converted with no way back.
+	 *
+	 * Note for anyone linking this template to a host: the item keys of both generations are the
+	 * same on purpose (es.cluster.status, es.nodes.fs.total_in_bytes and the rest are the HTTP
+	 * templates', so a client moved onto a jump host keeps its history), so Zabbix will not let
+	 * one host carry both at once. The old one has to be unlinked first — "Unlink", never
+	 * "Unlink and clear", which would delete the items and every value they hold.
+	 */
+	public const LEGACY_NAME = 'ElasticVue Pro Elasticsearch via SSH jump host';
+
 	/** The ssh.run keys: one session each. */
 	public const FAST = 'ssh.run[ep.fast,{$WJ.HOST},{$WJ.PORT},UTF-8]';
 	public const SLOW = 'ssh.run[ep.slow,{$WJ.HOST},{$WJ.PORT},UTF-8]';
@@ -105,6 +125,14 @@ class JumpTemplate {
 
 	/** The log archive check's Elasticsearch half, through the jump host, for a client's ULM host. */
 	public const ULM_NAME = 'ElasticPro log archive ES via SSH jump host';
+	/**
+	 * Legacy value, kept for recognition: the log archive half's name before the rename. Matched
+	 * only, like LEGACY_NAME, and for the same reason — the live install was never migrated. Its
+	 * two ssh.run keys did change with the rename (evp.ulm.days became ep.ulm.days), so the two
+	 * generations of this one do not collide on a host; the figures read from them do not carry
+	 * across either, which is why the old one is left alone rather than cleared.
+	 */
+	public const LEGACY_ULM_NAME = 'ElasticVue Pro log archive ES via SSH jump host';
 	public const ULM_DAYS = 'ssh.run[ep.ulm.days,{$WJ.HOST},{$WJ.PORT},UTF-8]';
 	public const ULM_TAGS = 'ssh.run[ep.ulm.tags,{$WJ.HOST},{$WJ.PORT},UTF-8]';
 

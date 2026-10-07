@@ -9,6 +9,21 @@
     { "roles": ["es_data_warm", "es_master"], "base": "ES-Data-Warm-Master" },
     { "roles": ["engine", "ueba", "aiml"], "base": "Engine-UEBA-AIML" },
     { "roles": ["parser", "s3_parser"], "base": "Parser-S3-Parser" },
-    { "roles": ["single_node"], "base": "Single-Node" }
+    { "roles": ["single_node"], "base": "Single-Node" },
+
+    { "roles": ["s3_parser"], "base": "S3-Parser",
+      "note": "S3-Parser alone keeps its own first word: the family word is dropped only when the parts already hold it." },
+    { "roles": ["ueba", "aiml"], "base": "UEBA-AIML",
+      "note": "Role order, not the order the roles were ticked in." },
+    { "roles": ["forwarder", "engine"], "base": "Forwarder-Engine",
+      "note": "Two families on one server, each short name one word, so nothing is dropped." },
+    { "roles": ["es_data", "es_master"], "base": "ES-Data-Master",
+      "note": "ES is written once. Without that the name would read ES-Data-ES-Master." },
+    { "roles": ["es_master", "parser"], "base": "ES-Master-Parser",
+      "note": "The ES family word survives when it is the first part: there is nothing before it to repeat." },
+    { "roles": ["es_coord", "es_data", "es_data_warm"], "base": "ES-Data-Data-Warm-Coord",
+      "note": "Data repeats on purpose: only the FIRST word of a short name is dropped, and dropping more would make ES-Data and ES-Data-Warm the same name." },
+    { "roles": ["es_data", "es_data_hot", "es_data_warm", "es_coord", "es_master", "parser", "s3_parser", "forwarder", "engine", "ueba", "aiml"], "base": "ES-Data-Data-Hot-Data-Warm-Coord-Master-Parser-S3-Parser-Forwarder-Engine-UEBA-AIML",
+      "note": "Every role that may share a server, on one server: the widest base the shipped roles can make, 83 characters. A host name is <client>-<base>-<n>, and Zabbix allows 128, so a client name of 41 characters or fewer always fits. test/e2e.test.php holds that bound." }
   ]
 }

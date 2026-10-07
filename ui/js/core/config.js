@@ -205,6 +205,17 @@ export function normalize(raw, sourceName = 'clusters.yaml') {
       liveRetention: c.liveRetention || c.live_retention || defaults.liveRetention || '',
       snapshotRetention: c.snapshotRetention || c.snapshot_retention || defaults.snapshotRetention || '',
       backupCapacity: c.backupCapacity || c.backup_capacity || defaults.backupCapacity || '',
+      // How the daily-ingest figure is derived for this cluster, with the file's
+      // `defaults:` behind it. volumeSettings() in core/volume.js reads these three off
+      // the cluster object and nowhere else, so until they were carried here a window,
+      // a topDays or a headroom written in the file changed nothing at all: every report
+      // sized itself against the built-in 3-of-7 and 30%, and the Volume page's labels
+      // disagreed with the setting the operator had edited. Nothing is clamped or
+      // defaulted here — volumeSettings() is the one definition of what these mean.
+      volumeWindowDays: normNum(c.volumeWindowDays, c.volume_window_days, defaults.volumeWindowDays),
+      volumeTopDays: normNum(c.volumeTopDays, c.volume_top_days, defaults.volumeTopDays),
+      volumeHeadroomPercent: normNum(c.volumeHeadroomPercent, c.volume_headroom_percent,
+        defaults.volumeHeadroomPercent),
       // Zabbix user groups whose members may see this cluster. Only a Zabbix User's
       // account is limited by it; the core enforces it, this only carries it there.
       zabbixGroups: normFields(c.zabbixGroups || c.zabbix_groups),
@@ -229,6 +240,24 @@ function normDelayFields(v, defaults) {
     eventTime: normFields(d.eventTime || d.event_time || defaults.eventTime),
     metadata: normFields(d.metadata || defaults.metadata),
   };
+}
+
+/**
+ * The first of these values that is a usable number — the cluster's own, then the file's
+ * `defaults:`.
+ *
+ * `undefined` when none of them is, rather than a number invented here: what a missing
+ * volume setting means is defined once, by volumeSettings() in core/volume.js, and a
+ * second copy of those figures in this file is exactly how one quantity came to have two
+ * definitions before.
+ */
+function normNum(...vals) {
+  for (const v of vals) {
+    if (v === null || v === undefined || v === '') continue;
+    const n = Number(v);
+    if (Number.isFinite(n)) return n;
+  }
+  return undefined;
 }
 
 function normFields(v) {

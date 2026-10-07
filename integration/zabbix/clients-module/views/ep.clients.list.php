@@ -383,7 +383,12 @@ $controls = $ro ? new CList() : (new CList())
 	.ep-dialog .ep-drow { display: grid; grid-template-columns: 120px minmax(0, 1fr); gap: 10px; align-items: center; margin: 8px 0; }
 	.ep-dialog .ep-drow > input[type=text], .ep-dialog .ep-drow > input[type=datetime-local] { grid-column: 2; border-radius: 6px; padding: 5px 8px; height: auto; }
 	.ep-dialog .ep-seg { display: inline-flex; background: rgba(128, 128, 128, .15); border-radius: 7px; padding: 2px; justify-self: start; }
-	.ep-dialog .ep-seg input { position: absolute; opacity: 0; pointer-events: none; }
+	/* The maintenance dialog's segmented controls are the same radio-hidden-under-its-label pattern
+	   as the edit form's, and are clipped in place for the same reason: a hidden radio still takes
+	   focus when its label is clicked, and while it was positioned absolutely it was not where that
+	   label is, so the browser scrolled somewhere else to bring it into view. */
+	.ep-dialog .ep-seg input { flex: 0 0 auto; width: 1px; height: 1px; min-width: 0; margin: 0 -1px 0 0; padding: 0;
+		border: 0; background: none; appearance: none; clip-path: inset(50%); opacity: 0; pointer-events: none; }
 	.ep-dialog .ep-seg label { padding: 4px 12px; border-radius: 5px; cursor: pointer; }
 	.ep-dialog .ep-seg input:checked + label { background: #fff; box-shadow: 0 1px 2px rgba(0, 0, 0, .18); font-weight: 600; color: #1c1d21; }
 	.ep-dialog .ep-sub { color: #6b7380; font-size: 12px; }
