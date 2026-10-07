@@ -38,9 +38,19 @@ FROM alpine:3.22
 # `upgrade` first, for the same reason the Debian base needed it: the base tag is only
 # rebuilt periodically, so between rebuilds it carries packages Alpine has already fixed.
 # Without this line the image ships zlib 1.3.2-r0 and CVE-2026-85091 with it.
+# uid pinned to 999, which is what every release up to this one ran as. Not cosmetic:
+# /app/data is a volume that survives the upgrade, its files are 0600 owned by 999, and
+# `adduser -S` without -u picks the first free system id — 100 on this base. An image
+# running as 100 cannot read a volume written by 999, so the core finds no accounts, no
+# notification store and no cache, and seeds a fresh admin as though this were a new
+# install. That is silent data loss on upgrade.
+#
+# The uid alone is pinned, not a matching gid: 0600 grants nothing to the group, so only
+# the owner id decides whether the old files can be read, and gid 999 is already `ping`
+# on Alpine. The user lands in `nogroup`, which is what it had before this was pinned.
 RUN apk --no-cache upgrade \
   && apk add --no-cache ca-certificates \
-  && adduser -S -H -h /app -s /sbin/nologin elasticpro
+  && adduser -u 999 -S -H -h /app -s /sbin/nologin elasticpro
 WORKDIR /app
 COPY --from=build /src/target/release/elasticpro-bridge /usr/local/bin/elasticpro-bridge
 COPY ui ./ui

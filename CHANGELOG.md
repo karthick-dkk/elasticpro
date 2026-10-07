@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.2.2
+
+Fixes silent data loss when upgrading to 0.2.x. **Anyone who has already deployed 0.2.0 or
+0.2.1 over an earlier install should go straight to this one.**
+
+Moving the core onto Alpine in 0.2.0 changed the uid it runs as. Every release before it ran
+as uid 999; `adduser -S` without an explicit id picks the first free system id, which on this
+base is 100. `/app/data` is a volume that survives an upgrade and its files are mode 0600
+owned by 999, so the new core could not read any of them. It found no accounts, no
+notification store and no fleet cache, and seeded a fresh admin as though it were a new
+install — while the real data sat intact in the volume, unreadable.
+
+Nothing was destroyed by this: the directory is not group- or world-writable either, so the
+affected versions could not overwrite what they could not read. Upgrading to 0.2.2 restores
+access to the original files, accounts included.
+
+The uid alone is pinned, not a matching gid. 0600 grants nothing to the group, so only the
+owner id decides readability, and gid 999 is already `ping` on Alpine — trying to claim it
+fails the build outright.
+
+
 ## 0.2.1
 
 Fixes the hosted install, which 0.2.0 broke on any host that cannot reach Alpine's package
