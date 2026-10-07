@@ -15,6 +15,11 @@ import http from 'node:http';
 
 const port = Number(process.argv[2]) || 9299;
 const bind = process.env.MOCK_BIND || '127.0.0.1';
+// Identity, so several instances can stand in for a fleet rather than for one cluster.
+// Without this every instance calls itself "mock" with uuid "mock-uuid", and anything
+// that keys clusters by uuid — which the fleet cache does — treats ten of them as one.
+const clusterName = process.env.MOCK_CLUSTER_NAME || 'mock';
+const clusterUuid = process.env.MOCK_CLUSTER_UUID || `${clusterName}-uuid`;
 const DAY = 86400000;
 
 const index = (name, size, status = 'open', health = 'green') => ({
@@ -97,7 +102,7 @@ function catProject(url, rows) {
 }
 
 const routes = [
-  [(u) => u === '/', () => ({ cluster_name: 'mock', cluster_uuid: 'mock-uuid',
+  [(u) => u === '/', () => ({ cluster_name: clusterName, cluster_uuid: clusterUuid,
     version: { number: '8.13.4', lucene_version: '9.10.0' } })],
   [(u) => u.startsWith('/_cluster/health'), () => ({ status: 'yellow', number_of_nodes: 3,
     number_of_data_nodes: 3, active_shards: 40, active_primary_shards: 20, unassigned_shards: 2,

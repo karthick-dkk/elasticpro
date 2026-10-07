@@ -1,5 +1,45 @@
 # Changelog
 
+## 0.2.3
+
+**The Zabbix modules now create the cluster template themselves.** Until this release nothing
+did. The core finds clusters by template name — a Zabbix host linked to that template *is* a
+cluster, and its macros say where it is — but the template itself came from an export each
+site happened to have. A fresh install could pair correctly and then fail every sync with
+`no template named "Elasticsearch Cluster by HTTP EP" in Zabbix`, pointing at a file the
+operator did not have and this repository never shipped.
+
+The Clients module writes it now, through the same Zabbix API it already uses for the master,
+devices and jump-host templates, so there is no YAML to import by hand. Its name comes from
+the same setting the core searches on, so the two cannot drift apart. It carries every macro
+the core reads, each present but empty with a description, so they appear in the host's macro
+list as soon as it is linked — empty rather than guessed, because a default of `localhost:9200`
+would let a half-configured host point confidently at the wrong cluster instead of failing
+visibly. It collects nothing on purpose: ElasticPro polls the cluster directly, so items here
+would ask the same questions twice and bill the cluster twice for the answer.
+
+A missing cluster template now reads as `missing` on the Clients page, and the sync error names
+the way out instead of only stating the absence.
+
+**The credentials dialog.** Four fixes, all of which showed up on an eleven-cluster fleet:
+
+- With eleven clusters the list pushed **Connect off the bottom of the screen** — the primary
+  action could only be reached by scrolling past the whole list. The head and footer are pinned
+  now and the list scrolls inside itself.
+- It auto-closed only when *every* cluster succeeded, so one cluster needing a different
+  credential left it open with no sign anything had worked — and the only way out said
+  **Cancel**, implying the credential had been discarded when it had already been applied. It
+  now says how many accepted it, and the button reads **Done** once results are in.
+- On the hosted edition it offered to store the credential in "the Windows Credential Manager",
+  directly above a note saying it is kept on the server. The OS-vault option is desktop-only.
+- Four type scales in one dialog (12.5px rows, 11.5px note, 11px inline URLs, under a 13.5px
+  body) are now two.
+
+**`tools/mock-es.mjs`** takes `MOCK_CLUSTER_NAME` and `MOCK_CLUSTER_UUID`, so several instances
+can stand in for a fleet. Without it every instance called itself `mock` with uuid `mock-uuid`,
+and anything keying clusters by uuid — the fleet cache does — treated ten of them as one.
+
+
 ## 0.2.2
 
 Fixes silent data loss when upgrading to 0.2.x. **Anyone who has already deployed 0.2.0 or

@@ -96,7 +96,7 @@ export function showCredentialDialog(reason = 'manual') {
   const overlay = h('div.modal-overlay', {
     onclick: (e) => { if (e.target === overlay && !ui.busy) close(); },
   });
-  const dialog = h('div.modal', { role: 'dialog', 'aria-modal': 'true', 'aria-label': 'Elasticsearch credentials' });
+  const dialog = h('div.modal.creds', { role: 'dialog', 'aria-modal': 'true', 'aria-label': 'Elasticsearch credentials' });
   overlay.append(dialog);
   document.body.append(overlay);
   document.addEventListener('keydown', onKey);
@@ -159,6 +159,14 @@ export function showCredentialDialog(reason = 'manual') {
     results.sort((a, b) => Number(a.ok) - Number(b.ok));
     ui.results = results;
     ui.busy = false;
+    // A fleet rarely shares one credential: ten clusters may take it and the eleventh
+    // refuse. Without this the dialog just stops, every row has to be read to work out
+    // whether anything worked, and the outcome looks like failure when it mostly was not.
+    const okCount = results.filter((r) => r.ok).length;
+    ui.summary = okCount === results.length ? null
+      : okCount === 0 ? 'No cluster accepted this credential.'
+      : `${okCount} of ${results.length} clusters accepted it. The rest need a different one — `
+        + 'this dialog stays open so you can try another, and what already connected stays connected.';
     draw();
 
     if (results.every((r) => r.ok)) {
@@ -239,9 +247,13 @@ export function showCredentialDialog(reason = 'manual') {
             : (ui.overrideAll ? clusters() : targets).map((c) => h('div.cd-row',
                 h('span.pill.grey', h('i.dot'), 'pending'),
                 h('span', { style: { fontWeight: 600 } }, c.name),
-                h('span.mono.muted.trunc', { style: { fontSize: '11px' } }, c.url))))),
+                h('span.mono.muted.trunc', c.url))))),
 
-        ui.vault
+        // `ui.vault && !ui.hosted`: the OS vault belongs to the desktop build. On hosted this
+        // rendered "Stores it in the Windows Credential Manager" immediately above the note
+        // below saying the credential is kept on the server — two contradictory sentences,
+        // one of them false, on a Linux deployment with no Windows anything.
+        ui.vault && !ui.hosted
           ? h('label', { style: { display: 'flex', gap: '8px', alignItems: 'flex-start', fontSize: '12px', marginTop: '2px' } },
               h('input', { type: 'checkbox', checked: ui.remember, style: { marginTop: '2px' },
                 onchange: (e) => { ui.remember = e.target.checked; } }),
@@ -249,6 +261,8 @@ export function showCredentialDialog(reason = 'manual') {
                 h('div.muted', { style: { fontSize: '11.5px' } },
                   'Stores it in the Windows Credential Manager (your account only), so the next start signs in without asking. Untick to remove a remembered one.')))
           : null,
+
+        ui.summary ? h('div.banner.warn', { style: { margin: 0 } }, ui.summary) : null,
 
         ui.error ? h('div.banner.err', { style: { margin: 0 } }, ui.error) : null,
 
@@ -271,7 +285,12 @@ export function showCredentialDialog(reason = 'manual') {
           ? h('button.btn.ghost', { onclick: anonymous, disabled: ui.busy, title: 'For clusters with security disabled' }, 'Continue without credentials')
           : null,
         h('div', { style: { marginLeft: 'auto', display: 'flex', gap: '8px' } },
-          h('button.btn', { onclick: () => !ui.busy && close(), disabled: ui.busy }, 'Cancel'),
+          // "Cancel" once results are on screen would be untrue: the credential has already
+          // been applied to everything that accepted it, and closing keeps that. The dialog
+          // only auto-closes when every cluster succeeded, so a mixed result leaves the
+          // person looking for a way out — and the only one offered said it undid their work.
+          h('button.btn', { onclick: () => !ui.busy && close(), disabled: ui.busy },
+            ui.results ? 'Done' : 'Cancel'),
           h('button.btn.primary', { onclick: connect, disabled: ui.busy },
             ui.busy ? h('span', h('span.spin'), ' Connecting…')
               : `Connect ${ui.overrideAll ? clusters().length : targets.length} cluster${(ui.overrideAll ? clusters().length : targets.length) === 1 ? '' : 's'}`))));

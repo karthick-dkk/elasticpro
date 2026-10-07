@@ -500,7 +500,16 @@ impl Zabbix {
         let empty = vec![];
         let tpls = tpls.as_array().unwrap_or(&empty);
         if !tpls.iter().any(|t| t["host"].as_str() == Some(self.template.as_str())) {
-            return Err(format!("no template named {:?} in Zabbix", self.template));
+            // Name the way out. This is what a correctly paired, correctly tokened install
+            // reports when nobody has created the cluster template yet, and on its own it
+            // reads like a bug in the pairing rather than one missing object.
+            return Err(format!(
+                "no template named {:?} in Zabbix. The Clients module writes it — open \
+                 Cluster Management in Zabbix and use \"Write master template\". If your \
+                 clusters already sit on a template with a different name, point this at it \
+                 instead: Config \u{2192} Zabbix in ElasticPro, or ELASTICPRO_ZABBIX_CLUSTER_TEMPLATE \
+                 on the server",
+                self.template));
         }
         let globals = self.call("usermacro.get", json!({ "globalmacro": true, "output": ["macro", "value", "type"] })).await?;
         let ugs = self.call("usergroup.get", json!({ "output": ["name", "users_status"], "selectHostGroupRights": "extend" })).await?;

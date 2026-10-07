@@ -2,7 +2,7 @@
 
 namespace Modules\EpClients\Actions;
 
-foreach (['Store', 'Roles', 'ColumnSettings', 'Forecast', 'ClientTypes', 'MasterTemplate', 'DevicesTemplate', 'JumpTemplate', 'ClientSpec', 'Reconciler', 'Lifecycle', 'Registry', 'History', 'ClientState', 'Csv', 'Backups', 'TemplateInstaller', 'Importer', 'AlertRouting'] as $lib) {
+foreach (['Store', 'Roles', 'ColumnSettings', 'Forecast', 'ClientTypes', 'MasterTemplate', 'ClusterTemplate', 'DevicesTemplate', 'JumpTemplate', 'ClientSpec', 'Reconciler', 'Lifecycle', 'Registry', 'History', 'ClientState', 'Csv', 'Backups', 'TemplateInstaller', 'Importer', 'AlertRouting'] as $lib) {
 	require_once __DIR__.'/../lib/'.$lib.'.php';
 }
 

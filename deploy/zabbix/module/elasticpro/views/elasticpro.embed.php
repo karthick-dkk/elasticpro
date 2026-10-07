@@ -60,9 +60,23 @@ if ($data['public_url'] !== '') {
 			try { recent = JSON.parse(sessionStorage.getItem(key) || '[]').filter(function (t) { return now - t < 60000; }); } catch (_) {}
 			if (recent.length >= 3) {
 				var box = document.querySelector('.ep-wrap');
+				/* Name the likely cause. The old wording said only that it had retried
+				   three times and to read the server log, which is true and useless: the
+				   one condition that actually produces this loop is the two sides no
+				   longer sharing a pairing secret — reinstall either half and the module
+				   still believes it is paired, because its secret lives in the Zabbix
+				   database while the core keeps its own in its data directory. That is a
+				   permanent state no amount of reloading fixes, so say what to do. */
 				if (box) box.innerHTML = '<div class="ep-error"><b>ElasticPro could not keep you signed in.</b><br>'
-					+ 'It asked Zabbix to sign you in again three times in a minute. Reload this page to try again; '
-					+ 'if it keeps happening, the ElasticPro server log says why.</div>';
+					+ 'It asked Zabbix to sign you in again three times in a minute, so it stopped retrying.<br><br>'
+					+ 'This almost always means Zabbix and ElasticPro no longer share a pairing secret — '
+					+ 'which happens when either side is reinstalled or its data reset, because Zabbix keeps '
+					+ 'the secret in its database and ElasticPro keeps its half in its data directory. '
+					+ 'Reloading will not fix that: a Zabbix Super admin has to re-pair the two under '
+					+ '<b>Administration \u2192 ElasticPro</b>.<br><br>'
+					+ 'The ElasticPro server log gives the exact reason on <code>/sso/zabbix</code> — '
+					+ '<code>not_configured</code> (ElasticPro has no secret), <code>bad_signature</code> '
+					+ '(the two secrets differ) or <code>stale</code> (the clocks disagree).</div>';
 				return;
 			}
 			recent.push(now);
