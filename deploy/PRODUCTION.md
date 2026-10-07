@@ -101,7 +101,7 @@ Docker stack (`deploy/zabbix/stack`): the compose file mounts an `ssh-keys` volu
 
 ```bash
 docker compose up -d server          # creates the volume
-docker run --rm -v zabbix_ssh-keys:/k alpine:3.20 sh -c '
+docker run --rm -v zabbix_ssh-keys:/k alpine:3.22 sh -c '
   apk add --no-cache openssh-keygen >/dev/null
   [ -f /k/id_ed25519 ] || ssh-keygen -q -t ed25519 -N "" -C zabbix-server -f /k/id_ed25519
   chown -R 1997:1995 /k && chmod 700 /k && chmod 600 /k/id_ed25519 && chmod 644 /k/id_ed25519.pub

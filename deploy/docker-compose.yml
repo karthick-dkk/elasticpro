@@ -83,7 +83,7 @@ services:
   # memory and on disk instead. The core's entrypoint percent-encodes what it reads, so
   # a password already in place keeps working.
   redis:
-    image: redis:7-alpine
+    image: redis:8-alpine
     restart: unless-stopped
     profiles: ["cache"]
     volumes:
@@ -107,7 +107,7 @@ services:
       options: { max-size: "50m", max-file: "10" }
 
   nginx:
-    image: nginx:1.27-alpine
+    image: nginx:1.30-alpine
     restart: unless-stopped
     depends_on: [core]
     ports:

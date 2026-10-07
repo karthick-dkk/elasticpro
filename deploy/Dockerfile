@@ -19,7 +19,13 @@ ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS}
 RUN cargo build --release --locked -p elasticpro-core --features bridge --bin elasticpro-bridge
 
 FROM debian:bookworm-slim
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl \
+# `upgrade` before `install`, not just `install`: the base tag floats, but it is only
+# rebuilt periodically, so between rebuilds it carries packages with published fixes
+# already in the Debian archive. A scan of the bare base found four CRITICAL and three
+# HIGH advisories against perl-base alone, every one of them fixed by an upgrade that
+# costs nothing here. Without this line those ship in the image.
+RUN apt-get update && apt-get upgrade -y \
+  && apt-get install -y --no-install-recommends ca-certificates curl \
   && rm -rf /var/lib/apt/lists/* \
   && useradd --system --home /app --shell /usr/sbin/nologin elasticpro
 WORKDIR /app

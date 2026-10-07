@@ -42,3 +42,39 @@ family) and an unsoundness in `glib` — the latter reached only through the Lin
 the Windows one. These are warnings, not vulnerabilities. The accepted advisory is listed in
 [`.cargo/audit.toml`](.cargo/audit.toml) with the same reasoning, so nothing is suppressed
 silently.
+
+**Container images.** The hosted deployment runs four images besides the core. They were
+scanned with Trivy (`--severity CRITICAL,HIGH`) on 2026-10-07 and pinned to what that scan
+found clean:
+
+| image | why this pin |
+|---|---|
+| `nginx:1.30-alpine` | 1.27-alpine carried two CRITICAL OpenSSL advisories (CVE-2026-31789) and four HIGH. 1.30 is the current stable line: 0 CRITICAL. |
+| `redis:8-alpine` | 7-alpine carried four HIGH OpenSSL advisories; 8-alpine scans clean. The cache uses only `GET`, `SET … EX`, `DEL`, `SCAN` and `PUBLISH`, which are unchanged across the major. |
+| `postgres:16-alpine` | **Deliberately not upgraded.** 16, 17 and 18-alpine all report the same one CRITICAL and 21 HIGH, every one of them in the Go standard library inside the bundled `gosu` helper rather than in PostgreSQL. `gosu` runs once at container start to drop root and never touches network input, and moving a major would mean a dump and restore for no reduction in findings. PostgreSQL itself is 16.15, the current patch of a supported line. |
+| `node:22-alpine` | Used only by the optional scraper and plan jobs. Its HIGH findings are all in the dependencies npm bundles (`brace-expansion`, `tar`, `undici`, `ip-address`); the container runs `node <script>.mjs` and never invokes npm, so they are not reachable. 24-alpine reports eight rather than eleven and eliminates none of them, so the LTS line is kept. |
+
+The core image's own base is `debian:bookworm-slim`, which is rebuilt only periodically and
+so lags the Debian archive. `deploy/Dockerfile` runs `apt-get upgrade` before installing, which
+is what clears it — without that line the published image carried four CRITICAL and three HIGH
+advisories against `perl-base` alone.
+
+`deploy/vault/` is optional and pins `hashicorp/vault:2.1`; 1.18 reported four CRITICAL and
+eighty HIGH. Upgrading a Vault that already holds data is a major-version migration, not a tag
+swap — snapshot first and follow HashiCorp's guide.
+
+**What the core image scans at.** After the `apt-get upgrade` above, `elasticpro-core:0.1.0`
+reports **nothing with a fix available** — the fixable count is zero. What remains is one
+CRITICAL and sixty-one HIGH advisories that Debian has not shipped patches for, which is the
+ordinary state of any Debian-based image. The CRITICAL is
+[CVE-2023-45853](https://nvd.nist.gov/vuln/detail/CVE-2023-45853) in `zlib1g`, marked
+`will_not_fix` by Debian: the overflow is in MiniZip, a contrib utility in the zlib source
+tree that Debian's `zlib1g` does not build or ship, so the vulnerable function is not in the
+library. For comparison, the last release of the previous name scanned at four CRITICAL and
+sixty-six HIGH with eight of them fixable.
+
+Re-run the check yourself with:
+
+```
+trivy image --scanners vuln --severity CRITICAL,HIGH karthickdk02/elasticpro-core:0.1.0
+```

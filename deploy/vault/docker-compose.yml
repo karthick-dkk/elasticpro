@@ -10,7 +10,12 @@ name: vault
 
 services:
   vault:
-    image: hashicorp/vault:1.18
+    # 2.x, not 1.18: a scan of the 1.18 image found 4 CRITICAL and 80 HIGH advisories
+    # (Go stdlib, grpc, OpenSSL), against 0 CRITICAL and 2 HIGH on 2.1.
+    # This is a MAJOR upgrade. On a Vault that already holds data do not simply swap
+    # the tag - take a snapshot and follow HashiCorp's upgrade guide, which requires
+    # stepping through intermediate versions. For a new deployment, start here.
+    image: hashicorp/vault:2.1
     restart: unless-stopped
     # Just "server": the image entrypoint adds -config=/vault/config (which holds vault.hcl),
     # drops to the vault user and owns /vault/file. Naming the file again loads it twice —
@@ -31,7 +36,7 @@ services:
   # protects, which is exactly what sealing exists to prevent — in production use
   # auto-unseal (a cloud KMS or a Transit Vault) and delete this service.
   unsealer:
-    image: hashicorp/vault:1.18
+    image: hashicorp/vault:2.1
     restart: unless-stopped
     depends_on: [vault]
     environment:

@@ -6,7 +6,7 @@ set -e
 cd "$(dirname "$0")"
 vol=zabbix_ssh-keys
 docker volume inspect "$vol" >/dev/null 2>&1 || docker volume create "$vol" >/dev/null
-docker run --rm -v "$vol":/k alpine:3.20 sh -c '
+docker run --rm -v "$vol":/k alpine:3.22 sh -c '
   apk add --no-cache openssh-keygen >/dev/null
   [ -f /k/id_ed25519 ] || ssh-keygen -q -t ed25519 -N "" -C zabbix-server -f /k/id_ed25519
   chown -R 1997:1995 /k && chmod 700 /k && chmod 600 /k/id_ed25519 && chmod 644 /k/id_ed25519.pub
