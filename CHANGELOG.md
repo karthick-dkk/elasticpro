@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.2.1
+
+Fixes the hosted install, which 0.2.0 broke on any host that cannot reach Alpine's package
+CDN from inside a build container.
+
+0.2.0 had `docker compose` build nginx, PostgreSQL and Redis from the one-line hardening
+layers in `deploy/images/`. That works on a developer machine and fails on a server: the
+first host it was tried on could not resolve DNS from the Docker bridge, `apk upgrade`
+exited 99, and the install stopped there with no stack running. Pulling a finished image
+has no such dependency, so the three are now built and published by CI alongside the core:
+
+```
+karthickdk02/elasticpro-nginx:0.2.1
+karthickdk02/elasticpro-postgres:0.2.1
+karthickdk02/elasticpro-redis:0.2.1
+```
+
+all three linux/amd64 and linux/arm64, and all three still scanning clean at every
+severity. The Dockerfiles stay in `deploy/images/` so the images can be reproduced, and
+each service takes an override (`ELASTICPRO_NGINX_IMAGE`, `ELASTICPRO_DB_IMAGE`,
+`ELASTICPRO_REDIS_IMAGE`) for anyone who would rather build or mirror them.
+
+
 ## 0.2.0
 
 No known vulnerabilities. Every image the hosted stack runs now scans clean with Trivy at

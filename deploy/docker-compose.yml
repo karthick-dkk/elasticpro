@@ -83,12 +83,9 @@ services:
   # memory and on disk instead. The core's entrypoint percent-encodes what it reads, so
   # a password already in place keeps working.
   redis:
-    # Built here like nginx and db: the official image lags Alpine's published fixes
-    # between rebuilds. deploy/images/redis.Dockerfile is one `apk upgrade` on top of it.
-    image: elasticpro-redis:${ELASTICPRO_VERSION:-local}
-    build:
-      context: ./images
-      dockerfile: redis.Dockerfile
+    # One `apk upgrade` over redis:8-alpine, which clears the last zlib advisory.
+    # Pulled rather than built, for the reason given on nginx above.
+    image: ${ELASTICPRO_REDIS_IMAGE:-karthickdk02/elasticpro-redis:0.2.1}
     restart: unless-stopped
     profiles: ["cache"]
     volumes:
@@ -112,13 +109,15 @@ services:
       options: { max-size: "50m", max-file: "10" }
 
   nginx:
-    # Built here rather than pulled: the official image lags Alpine's published fixes
-    # between its periodic rebuilds, and deploy/images/nginx.Dockerfile is one `apk
-    # upgrade` on top of it. That is the difference between two HIGH advisories and none.
-    image: elasticpro-nginx:${ELASTICPRO_VERSION:-local}
-    build:
-      context: ./images
-      dockerfile: nginx.Dockerfile
+    # One `apk upgrade` over nginx:1.30-alpine, which is the difference between two HIGH
+    # advisories and none; built and published by .github/workflows/docker.yml from
+    # images/nginx.Dockerfile, which is kept here so the image can be reproduced.
+    #
+    # Pulled, not built. A `build:` here made the hosted install reach Alpine's CDN from
+    # inside a build container, and on a host whose Docker bridge could not resolve DNS the
+    # install died there. Build it yourself with:
+    #   docker build -t elasticpro-nginx:local -f images/nginx.Dockerfile images
+    image: ${ELASTICPRO_NGINX_IMAGE:-karthickdk02/elasticpro-nginx:0.2.1}
     restart: unless-stopped
     depends_on: [core]
     ports:
@@ -135,15 +134,12 @@ services:
       options: { max-size: "50m", max-file: "10" }
 
   db:
-    # Built here for the same reason as nginx, plus one more: every advisory against
-    # postgres:16-alpine is in the bundled `gosu`, a static Go binary no package manager
-    # can patch. deploy/images/postgres.Dockerfile swaps it for su-exec and flattens the
-    # result so the old binary is not left behind in a lower layer. PostgreSQL itself is
-    # untouched and still 16.15.
-    image: elasticpro-postgres:${ELASTICPRO_VERSION:-local}
-    build:
-      context: ./images
-      dockerfile: postgres.Dockerfile
+    # Every advisory against postgres:16-alpine is in the bundled `gosu`, a static Go
+    # binary no package manager can patch; images/postgres.Dockerfile swaps it for su-exec
+    # and flattens the result so the old binary is not left behind in a lower layer.
+    # PostgreSQL itself is untouched and still 16.15. Pulled rather than built, for the
+    # reason given on nginx above.
+    image: ${ELASTICPRO_DB_IMAGE:-karthickdk02/elasticpro-postgres:0.2.1}
     restart: unless-stopped
     environment:
       POSTGRES_DB: elasticpro

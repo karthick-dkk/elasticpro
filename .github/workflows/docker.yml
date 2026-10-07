@@ -103,6 +103,96 @@ jobs:
           retention-days: 1
 
   # The tags, applied to a manifest list over both digests.
+  # nginx, PostgreSQL and Redis, each a thin layer over the official image (deploy/images/).
+  #
+  # These are published rather than built by `docker compose` on the target, and that is a
+  # correction rather than a preference: with a `build:` section the hosted install has to
+  # reach Alpine's CDN from inside a build container, and on the first machine it was tried
+  # the Docker bridge could not resolve DNS, so `apk upgrade` failed and the whole install
+  # stopped. Pulling a finished image has no such dependency.
+  #
+  # QEMU rather than two native runners, unlike the core: the only emulated step is one
+  # `apk upgrade` per image. There is no compilation here, and buildkit does the flattening
+  # COPY natively, so emulation costs seconds instead of the hour it would cost the core.
+  support-images:
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: nginx,    dockerfile: nginx.Dockerfile,    repo: elasticpro-nginx }
+          - { name: postgres, dockerfile: postgres.Dockerfile, repo: elasticpro-postgres }
+          - { name: redis,    dockerfile: redis.Dockerfile,    repo: elasticpro-redis }
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: check the credentials exist
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          if [ -z "$DOCKERHUB_USERNAME" ] || [ -z "$DOCKERHUB_TOKEN" ]; then
+            echo "::error::DOCKERHUB_USERNAME and DOCKERHUB_TOKEN are not set on this repository."
+            exit 1
+          fi
+
+      - name: work out the version being published
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          version="$INPUT_TAG"
+          if [ -z "$version" ]; then
+            if [ "$GITHUB_REF_TYPE" != tag ]; then
+              echo "::error::dispatched from $GITHUB_REF_NAME, which is not a tag, and no 'tag' input was given"
+              exit 1
+            fi
+            version="$GITHUB_REF_NAME"
+          fi
+          echo "VERSION=${version#v}" >> "$GITHUB_ENV"
+
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: work out the tags
+        run: |
+          set -euo pipefail
+          repo="karthickdk02/${{ matrix.repo }}"
+          tags="${repo}:${VERSION}"
+          # Same rule as the core: :latest never follows a pre-release.
+          case "$VERSION" in
+            *-*) echo "pre-release $VERSION — not moving :latest" ;;
+            *)   tags="${tags},${repo}:latest" ;;
+          esac
+          echo "TAGS=$tags" >> "$GITHUB_ENV"
+          echo "REPO=$repo" >> "$GITHUB_ENV"
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: ./deploy/images
+          file: ./deploy/images/${{ matrix.dockerfile }}
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ env.TAGS }}
+          provenance: false
+
+      - name: prove both architectures are in it
+        run: |
+          set -euo pipefail
+          raw=$(docker buildx imagetools inspect "${REPO}:${VERSION}" --raw)
+          for arch in amd64 arm64; do
+            echo "$raw" | jq -e --arg a "$arch" \
+              '.manifests[]?.platform | select(.os == "linux" and .architecture == $a)' >/dev/null \
+              || { echo "::error::${REPO}:${VERSION} has no linux/$arch"; exit 1; }
+          done
+          echo "✓ ${REPO}:${VERSION} carries linux/amd64 and linux/arm64"
+
   manifest:
     needs: image
     runs-on: ubuntu-24.04
