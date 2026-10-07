@@ -1,5 +1,37 @@
 # Changelog
 
+## 0.2.0
+
+No known vulnerabilities. Every image the hosted stack runs now scans clean with Trivy at
+every severity, against a cold cache — core, nginx, PostgreSQL and Redis alike. For
+comparison, 0.1.0's core image scanned at one CRITICAL and sixty-one HIGH.
+
+Getting there was not a matter of bumping tags, so the reasoning is written down in
+[SECURITY.md](SECURITY.md) rather than only in commit messages:
+
+- **The core runs on Alpine and musl instead of Debian.** The Debian base still carried one
+  CRITICAL and sixty-one HIGH *after* `apt-get upgrade`, none of them with a fix available —
+  advisories Debian has not patched, which no amount of care in a Dockerfile removes. The
+  crypto is `ring` throughout, so there is no OpenSSL to link and the change is a recompile
+  rather than a port. The image fell from 191 MB to 38 MB. `curl` is gone, because it drags
+  libcurl and OpenSSL back in; the healthcheck posts the same probe with busybox `wget`.
+- **PostgreSQL ships as a flattened image.** Every advisory against `postgres:16-alpine` was
+  in the bundled `gosu`, a static Go binary no package manager can patch — and 17-alpine and
+  18-alpine carry the identical set, so a database major would not have helped. `gosu` is
+  replaced by `su-exec`, and the result is flattened into one layer, because deleting a file
+  leaves it in the layer below where a scanner still finds it. PostgreSQL itself is untouched
+  and still 16.15.
+- **nginx, PostgreSQL and Redis are built from one-line layers over the official images**
+  (`deploy/images/`), because upstream rebuilds lag the fixes their own distributions have
+  already published. nginx moves from 1.27-alpine, which carried two CRITICAL OpenSSL
+  advisories, to 1.30-alpine; Redis from 7-alpine to 8-alpine.
+- `deploy/vault/` moves from `hashicorp/vault:1.18` (4 CRITICAL / 80 HIGH) to 2.1. Upgrading
+  a Vault that already holds data is a migration, not a tag swap — see the note in the file.
+
+`cargo audit` was already clean, and its one documented suppression was re-checked against
+upstream rather than taken on trust.
+
+
 ## 0.1.0
 
 First public release. ElasticPro is a multi-cluster Elasticsearch dashboard — a portable

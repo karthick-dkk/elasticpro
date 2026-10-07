@@ -43,38 +43,52 @@ the Windows one. These are warnings, not vulnerabilities. The accepted advisory 
 [`.cargo/audit.toml`](.cargo/audit.toml) with the same reasoning, so nothing is suppressed
 silently.
 
-**Container images.** The hosted deployment runs four images besides the core. They were
-scanned with Trivy (`--severity CRITICAL,HIGH`) on 2026-10-07 and pinned to what that scan
-found clean:
+**Container images.** The hosted deployment is built to carry **no known vulnerabilities**.
+Every image was scanned with Trivy on 2026-10-07, at every severity, against a cold cache:
 
-| image | why this pin |
-|---|---|
-| `nginx:1.30-alpine` | 1.27-alpine carried two CRITICAL OpenSSL advisories (CVE-2026-31789) and four HIGH. 1.30 is the current stable line: 0 CRITICAL. |
-| `redis:8-alpine` | 7-alpine carried four HIGH OpenSSL advisories; 8-alpine scans clean. The cache uses only `GET`, `SET … EX`, `DEL`, `SCAN` and `PUBLISH`, which are unchanged across the major. |
-| `postgres:16-alpine` | **Deliberately not upgraded.** 16, 17 and 18-alpine all report the same one CRITICAL and 21 HIGH, every one of them in the Go standard library inside the bundled `gosu` helper rather than in PostgreSQL. `gosu` runs once at container start to drop root and never touches network input, and moving a major would mean a dump and restore for no reduction in findings. PostgreSQL itself is 16.15, the current patch of a supported line. |
-| `node:22-alpine` | Used only by the optional scraper and plan jobs. Its HIGH findings are all in the dependencies npm bundles (`brace-expansion`, `tar`, `undici`, `ip-address`); the container runs `node <script>.mjs` and never invokes npm, so they are not reachable. 24-alpine reports eight rather than eleven and eliminates none of them, so the LTS line is kept. |
+| image | CRITICAL+HIGH | how |
+| --- | --- | --- |
+| `elasticpro-core` | **0** (and zero at LOW and MEDIUM too) | Alpine + a musl build |
+| `elasticpro-nginx` | **0** | `nginx:1.30-alpine` + `apk upgrade` |
+| `elasticpro-postgres` | **0** | `postgres:16-alpine`, `gosu` replaced by `su-exec`, flattened |
+| `redis:8-alpine` | **0** | upstream, unmodified |
 
-The core image's own base is `debian:bookworm-slim`, which is rebuilt only periodically and
-so lags the Debian archive. `deploy/Dockerfile` runs `apt-get upgrade` before installing, which
-is what clears it — without that line the published image carried four CRITICAL and three HIGH
-advisories against `perl-base` alone.
+Reproduce any of them with:
+
+```
+trivy image --scanners vuln --severity LOW,MEDIUM,HIGH,CRITICAL <image>
+```
+
+Three things are worth knowing about how that zero was reached, because each was a real
+obstacle rather than a tag bump:
+
+*The core runs on Alpine and musl, not Debian.* The Debian runtime it replaced scanned at
+one CRITICAL and sixty-one HIGH **after** `apt-get upgrade` — advisories Debian has published
+no fix for, which no care in the Dockerfile removes. `alpine:3.22` scans clean, and because
+the crypto is `ring` throughout (both rustls and russh select it) there is no OpenSSL to link
+and the musl build is a recompile rather than a port. The image also fell from 191 MB to
+29.5 MB. `curl` is deliberately absent — it would pull libcurl and OpenSSL back in, which is
+most of the surface this base exists to avoid — so the healthcheck posts its probe with
+busybox `wget`, which supports `--header` and `--post-data`.
+
+*PostgreSQL is flattened, and that is not cosmetic.* Every advisory against
+`postgres:16-alpine` — one CRITICAL and twenty-one HIGH — is in `/usr/local/bin/gosu`, a
+static Go binary carrying an old Go standard library that no package manager can patch.
+17-alpine and 18-alpine report the identical twenty-two, so a database major would not have
+helped, and the Debian variants are worse (16-bookworm: 4 CRITICAL / 84 HIGH; 16-trixie:
+2 CRITICAL / 82 HIGH). `gosu` is replaced by `su-exec`, Alpine's C equivalent, which does the
+one thing the entrypoint asks of it. Deleting a file in a later layer, however, leaves it in
+the earlier one: the unflattened image still reported all twenty-two on a cold cache while
+the same container's live filesystem scanned clean. Copying the finished tree into `scratch`
+leaves one layer with no history behind it. PostgreSQL itself is untouched, still 16.15.
+
+*nginx and PostgreSQL are built by `docker compose`, not pulled.* Both are a thin layer over
+the official image, and both exist only because upstream rebuilds lag the fixes their own
+distributions have already published. If upstream starts scanning clean on its own, delete
+`deploy/images/` and go back to the plain tags.
 
 `deploy/vault/` is optional and pins `hashicorp/vault:2.1`; 1.18 reported four CRITICAL and
 eighty HIGH. Upgrading a Vault that already holds data is a major-version migration, not a tag
-swap — snapshot first and follow HashiCorp's guide.
-
-**What the core image scans at.** After the `apt-get upgrade` above, `elasticpro-core:0.1.0`
-reports **nothing with a fix available** — the fixable count is zero. What remains is one
-CRITICAL and sixty-one HIGH advisories that Debian has not shipped patches for, which is the
-ordinary state of any Debian-based image. The CRITICAL is
-[CVE-2023-45853](https://nvd.nist.gov/vuln/detail/CVE-2023-45853) in `zlib1g`, marked
-`will_not_fix` by Debian: the overflow is in MiniZip, a contrib utility in the zlib source
-tree that Debian's `zlib1g` does not build or ship, so the vulnerable function is not in the
-library. For comparison, the last release of the previous name scanned at four CRITICAL and
-sixty-six HIGH with eight of them fixable.
-
-Re-run the check yourself with:
-
-```
-trivy image --scanners vuln --severity CRITICAL,HIGH karthickdk02/elasticpro-core:0.1.0
-```
+swap — snapshot first and follow HashiCorp's guide. `node:22-alpine`, used only by the optional
+scraper and plan jobs, reports HIGH findings in the dependencies npm bundles; the container
+runs `node <script>.mjs` and never invokes npm, and 24-alpine eliminates none of them.

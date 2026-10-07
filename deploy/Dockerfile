@@ -1,6 +1,18 @@
 # ElasticPro — hosted core. Two stages: build the Rust bridge, then ship only the
 # binary and the static UI on a minimal image.
-FROM rust:1-bookworm AS build
+#
+# Alpine/musl rather than Debian, for one reason: vulnerability count. The Debian
+# runtime this replaced scanned at 1 CRITICAL and 61 HIGH even after `apt-get upgrade`,
+# none of them with a fix available — they are advisories against base packages that
+# Debian has not patched, and no amount of care in this file removes them. alpine:3.22
+# scans clean, and a musl build needs nothing from the runtime but certificates, so the
+# finished image carries almost no OS surface at all. The crypto is `ring` throughout
+# (rustls and russh both select it here), so there is no OpenSSL to link against and the
+# musl build is a straight recompile rather than a port.
+FROM rust:1-alpine AS build
+# ring compiles C and assembly; musl-dev gives the linker its libc. Nothing else is
+# needed — no OpenSSL, no pkg-config, no cmake.
+RUN apk add --no-cache build-base musl-dev
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
@@ -18,24 +30,26 @@ ARG CARGO_BUILD_JOBS=2
 ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS}
 RUN cargo build --release --locked -p elasticpro-core --features bridge --bin elasticpro-bridge
 
-FROM debian:bookworm-slim
-# `upgrade` before `install`, not just `install`: the base tag floats, but it is only
-# rebuilt periodically, so between rebuilds it carries packages with published fixes
-# already in the Debian archive. A scan of the bare base found four CRITICAL and three
-# HIGH advisories against perl-base alone, every one of them fixed by an upgrade that
-# costs nothing here. Without this line those ship in the image.
-RUN apt-get update && apt-get upgrade -y \
-  && apt-get install -y --no-install-recommends ca-certificates curl \
-  && rm -rf /var/lib/apt/lists/* \
-  && useradd --system --home /app --shell /usr/sbin/nologin elasticpro
+FROM alpine:3.22
+# ca-certificates only: rustls-native-certs reads the system trust store, and nothing
+# else in the image needs a package. Deliberately no curl — it would pull libcurl and
+# OpenSSL back in, which is most of the CVE surface this base exists to avoid. The
+# healthcheck below uses busybox wget, which speaks enough HTTP to POST the same probe.
+# `upgrade` first, for the same reason the Debian base needed it: the base tag is only
+# rebuilt periodically, so between rebuilds it carries packages Alpine has already fixed.
+# Without this line the image ships zlib 1.3.2-r0 and CVE-2026-85091 with it.
+RUN apk --no-cache upgrade \
+  && apk add --no-cache ca-certificates \
+  && adduser -S -H -h /app -s /sbin/nologin elasticpro
 WORKDIR /app
 COPY --from=build /src/target/release/elasticpro-bridge /usr/local/bin/elasticpro-bridge
 COPY ui ./ui
-RUN mkdir -p /app/data && chown -R elasticpro:elasticpro /app
+RUN mkdir -p /app/data && chown -R elasticpro /app
 USER elasticpro
 # Hosted mode: bind the compose network, not loopback. nginx is the only way in.
 ENV ELASTICPRO_BIND=0.0.0.0 ELASTICPRO_DATA_DIR=/app/data RUST_LOG=info
 EXPOSE 8765
-HEALTHCHECK --interval=30s --timeout=5s CMD curl -sf -X POST http://127.0.0.1:8765/bridge \
-  -H 'content-type: application/json' -H 'x-auth-user: healthcheck' -d '{"type":"PING"}' >/dev/null || exit 1
+HEALTHCHECK --interval=30s --timeout=5s CMD wget -q -O /dev/null -T 4 \
+  --header='content-type: application/json' --header='x-auth-user: healthcheck' \
+  --post-data='{"type":"PING"}' http://127.0.0.1:8765/bridge || exit 1
 ENTRYPOINT ["elasticpro-bridge", "/app/ui", "8765"]
