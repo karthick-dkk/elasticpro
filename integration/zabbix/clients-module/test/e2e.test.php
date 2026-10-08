@@ -1548,6 +1548,29 @@ namespace Modules\EpClients\Test {
 	check('the extra names are recognised but never written',
 		in_array('An older cluster name', Reconciler::esClusterTemplates(), true) && ClusterTemplate::name() === 'ACME cluster');
 
+	// Regression: ISSUE-001 — an extra name equal to the mapped name was hidden from the form.
+	// Found by /qa on 2026-10-08. The form posts back what it shows, so the next Save dropped
+	// the hidden name from the store, and moving the slot away then lost it for good.
+	// Report: .gstack/qa-reports/qa-report-192-168-64-13-2026-10-08.md
+	Roles::saveTemplateNames(['cluster' => 'ACME cluster', 'cluster_also' => 'ACME cluster']);
+	$row = TemplateMap::rows()['cluster'];
+	check('an extra name equal to the mapped name is still shown, so a Save cannot drop it',
+		array_column($row['aliases'], 'name') === ['ACME cluster'], $row['aliases']);
+	check('and the store still holds it', Roles::templateAliases()['cluster'] === ['ACME cluster']);
+	check('recognition lists it once, not twice',
+		count(array_keys(Reconciler::esClusterTemplates(), 'ACME cluster', true)) === 1,
+		Reconciler::esClusterTemplates());
+	// What the form round-trip does: post back exactly the names the page displayed.
+	Roles::saveTemplateNames(['cluster' => 'ACME cluster',
+		'cluster_also' => implode("\n", array_column(TemplateMap::rows()['cluster']['aliases'], 'name'))]);
+	check('a Save that changes nothing keeps the extra name',
+		Roles::templateAliases()['cluster'] === ['ACME cluster'], Roles::templateAliases()['cluster']);
+	// And moving the slot away must leave the name still recognised.
+	Roles::saveTemplateNames(['cluster_also' => 'ACME cluster']);
+	check('moving the slot away leaves the extra name recognised',
+		in_array('ACME cluster', Reconciler::esClusterTemplates(), true));
+	Roles::saveTemplateNames([]);
+
 	$choices = TemplateMap::choices();
 	check('the picker offers the template names this Zabbix has, sorted',
 		in_array('ACME cluster', $choices['names'], true) === false || $choices['names'] === array_values($choices['names']));

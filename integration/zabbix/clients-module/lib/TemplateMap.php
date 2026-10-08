@@ -100,13 +100,19 @@ class TemplateMap {
 		return '';
 	}
 
-	/** One entry per extra name: whether Zabbix has it and how many hosts carry it. */
+	/**
+	 * One entry per extra name: whether Zabbix has it and how many hosts carry it.
+	 *
+	 * Every stored name is listed, including one that happens to equal the mapped name. Hiding
+	 * that one looked tidy and destroyed configuration: the form posts back what it shows, so an
+	 * alias left out here was dropped from the store by the very next Save — and because the
+	 * slot could be moved away again afterwards, the name was gone for good. Display and store
+	 * have to agree. A name that is both the mapped name and an extra one is merely redundant;
+	 * Roles::templateNamesFor() returns it once.
+	 */
 	private static function aliasRows(array $aliases, string $name, array $have): array {
 		$out = [];
 		foreach ($aliases as $a) {
-			if ($a === $name) {
-				continue;
-			}
 			$out[] = ['name' => $a, 'found' => isset($have[$a]), 'hosts' => $have[$a]['hosts'] ?? 0];
 		}
 		return $out;
