@@ -1257,6 +1257,8 @@ if selected("alerts"):
 # re-sent verbatim with nothing but `type` substituted, and a key this script does not know how
 # to re-send means the whole dashboard is refused rather than sent incomplete.
 # ---------------------------------------------------------------------------------------------
+# "sortorder" stays known even though it is no longer requested: a Zabbix that returns it
+# anyway must not make the whole dashboard unsendable, and re-sending it is harmless.
 PAGE_KEYS = {"dashboard_pageid", "name", "display_period", "sortorder", "widgets"}
 # "reference" is a Zabbix 7.0 widget property (widgets that feed each other name one), so it is
 # round-tripped like every other field rather than treated as unknown — without it every single
@@ -1280,9 +1282,13 @@ if selected("widgets"):
                  f"four module steps above first, then run this phase")
     else:
         try:
+            # No "sortorder" here: Zabbix 7.0's dashboard.get rejects it as a selectPages field
+            # ("value must be one of dashboard_pageid, name, display_period, widgets"), and asking
+            # for it failed the whole phase against a real install. Page order is the order of the
+            # array, which is what dashboard.update reads back, so nothing is lost by not asking.
             boards = call("dashboard.get", {"output": ["dashboardid", "name", "display_period", "auto_start"],
                                             "selectPages": ["dashboard_pageid", "name", "display_period",
-                                                            "sortorder", "widgets"]})
+                                                            "widgets"]})
         except RuntimeError as e:
             boards = []
             refuse(f"dashboard widgets: the dashboards could not be read ({e}) — nothing was changed")

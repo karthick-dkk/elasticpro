@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.3.1
+
+The migration's dashboard phase could never run. `dashboard.get` on Zabbix 7.0 rejects
+`sortorder` as a `selectPages` field — "value must be one of dashboard_pageid, name,
+display_period, widgets" — so the call raised, the phase refused itself, and it reported that
+the dashboards could not be read. Page order is the order of the array, which is what
+`dashboard.update` reads back, so nothing is lost by not asking for it.
+
+Found by running the migration against a real Zabbix rather than the stub the phase was built
+against; the stub accepted the field. With it fixed, the phase correctly identifies the widgets
+whose module ids no longer exist and would otherwise render blank.
+
+
 ## 0.3.0
 
 **An install that still carries the pre-rename identifiers now works, and can be migrated.**

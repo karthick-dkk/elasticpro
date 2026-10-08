@@ -85,7 +85,7 @@ services:
   redis:
     # One `apk upgrade` over redis:8-alpine, which clears the last zlib advisory.
     # Pulled rather than built, for the reason given on nginx above.
-    image: ${ELASTICPRO_REDIS_IMAGE:-karthickdk02/elasticpro-redis:0.3.0}
+    image: ${ELASTICPRO_REDIS_IMAGE:-karthickdk02/elasticpro-redis:0.3.1}
     restart: unless-stopped
     profiles: ["cache"]
     volumes:
@@ -117,7 +117,7 @@ services:
     # inside a build container, and on a host whose Docker bridge could not resolve DNS the
     # install died there. Build it yourself with:
     #   docker build -t elasticpro-nginx:local -f images/nginx.Dockerfile images
-    image: ${ELASTICPRO_NGINX_IMAGE:-karthickdk02/elasticpro-nginx:0.3.0}
+    image: ${ELASTICPRO_NGINX_IMAGE:-karthickdk02/elasticpro-nginx:0.3.1}
     restart: unless-stopped
     depends_on: [core]
     ports:
@@ -139,7 +139,7 @@ services:
     # and flattens the result so the old binary is not left behind in a lower layer.
     # PostgreSQL itself is untouched and still 16.15. Pulled rather than built, for the
     # reason given on nginx above.
-    image: ${ELASTICPRO_DB_IMAGE:-karthickdk02/elasticpro-postgres:0.3.0}
+    image: ${ELASTICPRO_DB_IMAGE:-karthickdk02/elasticpro-postgres:0.3.1}
     restart: unless-stopped
     environment:
       POSTGRES_DB: elasticpro
