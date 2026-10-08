@@ -25,6 +25,31 @@ namespace {
 	}
 	class CControllerResponseData { public $data; public function __construct($d) { $this->data = $d; } }
 	class CCsrfTokenHelper { public static function get($a) { return 'token:'.$a; } }
+	/**
+	 * Just enough of Zabbix's HTML classes for Bars to build its markup: a tag with classes,
+	 * attributes and nested children. Only what Bars uses — this is not a second renderer.
+	 */
+	class CTag {
+		protected $tag; protected $items = []; protected $classes = []; protected $attrs = [];
+		public function __construct($tag = 'div', $ignored = true, $items = null) {
+			$this->tag = $tag;
+			if ($items !== null) { $this->items = is_array($items) ? $items : [$items]; }
+		}
+		public function addClass($c) { if ($c !== null && $c !== '') { $this->classes[] = $c; } return $this; }
+		public function setAttribute($k, $v) { $this->attrs[$k] = $v; return $this; }
+		public function toString() {
+			$a = '';
+			foreach ($this->classes as $c) { $a .= ''; }
+			if ($this->classes) { $a .= ' class="'.implode(' ', $this->classes).'"'; }
+			foreach ($this->attrs as $k => $v) { $a .= ' '.$k.'="'.$v.'"'; }
+			$inner = '';
+			foreach ($this->items as $i) { $inner .= is_object($i) ? $i->toString() : (string) $i; }
+			return '<'.$this->tag.$a.'>'.$inner.'</'.$this->tag.'>';
+		}
+		public function __toString() { return $this->toString(); }
+	}
+	class CDiv extends CTag { public function __construct($items = null) { parent::__construct('div', true, $items); } }
+	class CSpan extends CTag { public function __construct($items = null) { parent::__construct('span', true, $items); } }
 
 	/** The fake Zabbix: two client master hosts, karthi (DI) with two machines and acme (On-Prem) with none measured. */
 	class FakeApi {
@@ -84,9 +109,12 @@ namespace {
 	}
 }
 namespace Modules\EpResources\Test {
+	// Bars owns the default Display style the view action reads; it is a shared file, copied
+	// into this widget's lib by sync-assets.mjs.
+	require __DIR__.'/../lib/Bars.php';
 	require __DIR__.'/../actions/WidgetView.php';
 	use Modules\EpResources\Actions\WidgetView;
-	use Modules\EpResources\Lib\{ColumnSettings, Roles};
+	use Modules\EpResources\Lib\{Bars, ColumnSettings, Roles};
 
 	$failed = 0; $passed = 0;
 	function check(string $what, bool $ok, $detail = null): void {
@@ -169,10 +197,34 @@ namespace Modules\EpResources\Test {
 	check('a new family appears as its own columns', col($d, 'f.soar.cpu.requested') !== null && in_array('SOAR memory', array_column($d['columns'], 'group'), true));
 
 	// This widget's copy of the shared Roles: the same neutral defaults, the same override file.
-	check('the template names default to the neutral ones', Roles::templateNames() === ['agent' => 'Linux by Zabbix agent -EP', 'cluster' => 'Elasticsearch Cluster by HTTP EP'], Roles::templateNames());
+	check('every template slot defaults to the name ElasticPro ships',
+		Roles::templateNames() === array_map(fn($slot) => $slot[0], Roles::TEMPLATE_SLOTS), Roles::templateNames());
 	Roles::saveTemplateNames(['agent' => 'Linux by Zabbix agent -ACME']);
 	check('a name set in the settings reaches the widget too', Roles::defaultTemplate() === 'Linux by Zabbix agent -ACME');
 	Roles::saveTemplateNames([]);
+
+	// The bars: the same figure the colour came from, and nothing at all when there is no figure.
+	check('no bar is drawn for a value Elasticsearch did not report',
+		Bars::cell('—', null, 'under') === '—');
+	check('numbers only draws the value and nothing else', Bars::cell('62 %', 62.0, 'none') === '62 %');
+	check('an unknown style is treated as numbers only, never as a guess',
+		Bars::cell('62 %', 62.0, 'nonsense') === '62 %');
+	$under = Bars::cell('62 %', 62.0, 'under')->toString();
+	check('the bar under the value is drawn to the percentage given',
+		str_contains($under, 'ep-bar-under') && str_contains($under, 'width:62%'), $under);
+	check('and the value is still there to read', str_contains($under, '62 %'));
+	$inCell = Bars::cell('91 %', 91.0, 'cell')->toString();
+	check('the in-cell bar is the same figure', str_contains($inCell, 'ep-bar-incell') && str_contains($inCell, 'width:91%'));
+	$segs = Bars::cell('50 %', 50.0, 'segments')->toString();
+	check('segments light half the blocks at half', substr_count($segs, 'ep-seg-on') === 6, substr_count($segs, 'ep-seg-on'));
+	check('segments light none at nought and all at a hundred',
+		substr_count(Bars::cell('0 %', 0.0, 'segments')->toString(), 'ep-seg-on') === 0
+		&& substr_count(Bars::cell('100 %', 100.0, 'segments')->toString(), 'ep-seg-on') === 12);
+	check('a figure over a hundred per cent fills the bar and no more',
+		str_contains(Bars::cell('140 %', 140.0, 'under')->toString(), 'width:100%'));
+	check('a negative figure draws an empty bar, not a backwards one',
+		str_contains(Bars::cell('-5 %', -5.0, 'under')->toString(), 'width:0%'));
+	check('the default style is one the widget offers', in_array(Bars::DEFAULT_STYLE, Bars::STYLES, true));
 
 	\FakeApi::$template = false;
 	$d = run();

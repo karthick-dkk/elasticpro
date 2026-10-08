@@ -10,7 +10,7 @@ use API,
 	CControllerDashboardWidgetView,
 	CControllerResponseData,
 	CCsrfTokenHelper;
-use Modules\EpResources\Lib\{ColumnSettings, Roles};
+use Modules\EpResources\Lib\{Bars, ColumnSettings, Roles};
 
 /**
  * Client resources: one row per client master host; per family (or per role, where the Columns
@@ -36,6 +36,7 @@ class WidgetView extends CControllerDashboardWidgetView {
 		$data = [
 			'name' => $this->getInput('name', $this->widget->getDefaultName()),
 			'columns' => $columns,
+			'bars' => $this->fields_values['bars'] ?? Bars::DEFAULT_STYLE,
 			'rows' => [],
 			'export' => null,
 			'error' => null,
@@ -192,7 +193,7 @@ class WidgetView extends CControllerDashboardWidgetView {
 
 	/** One cell: [what the table shows, what the export gets]. */
 	private function cell(array $c, array $client, array $values, array $units, float $warn, float $high): array {
-		$cell = ['text' => '—', 'sub' => '', 'class' => '', 'hint' => ''];
+		$cell = ['text' => '—', 'sub' => '', 'class' => '', 'hint' => '', 'bar' => null];
 		switch ($c['source'] ?? 'item') {
 			case 'client':
 				return [['text' => $client['name'], 'sub' => $client['badge']] + $cell, $client['name']];
@@ -213,6 +214,8 @@ class WidgetView extends CControllerDashboardWidgetView {
 		$usage = !empty($c['usage']) ? $value : (isset($c['usageKey']) ? ($values[$c['usageKey']] ?? null) : null);
 		if ($usage !== null) {
 			$cell['class'] = self::usageClass($usage, $warn, $high);
+			// Same figure as the colour. Null stays null: no bar for something not reported.
+			$cell['bar'] = max(0.0, min(100.0, (float) $usage));
 			if (isset($c['usageKey']) && $value !== null) {
 				$cell['sub'] = '('.round($usage).' %)';
 			}

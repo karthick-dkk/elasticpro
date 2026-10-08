@@ -54,10 +54,10 @@ class TemplateInstaller {
 		// at all, so a site that gets no further than this still has a working sync.
 		self::import(ClusterTemplate::export(), ClusterTemplate::name());
 		// The devices template next: the master template's figures read its item.
-		self::import(DevicesTemplate::export(), DevicesTemplate::NAME);
-		self::import(JumpTemplate::export(), JumpTemplate::NAME);
-		self::import(JumpTemplate::ulmExport(), JumpTemplate::ULM_NAME);
-		self::import((new MasterTemplate($roles))->export(), MasterTemplate::NAME);
+		self::import(DevicesTemplate::export(), DevicesTemplate::name());
+		self::import(JumpTemplate::export(), JumpTemplate::name());
+		self::import(JumpTemplate::ulmExport(), JumpTemplate::ulmName());
+		self::import((new MasterTemplate($roles))->export(), MasterTemplate::name());
 	}
 
 	private static function import(array $export, string $name): void {
@@ -74,7 +74,7 @@ class TemplateInstaller {
 
 	/** The names install() writes. A legacy name that is also one of these is not a leftover. */
 	private static function currentNames(): array {
-		return [MasterTemplate::NAME, DevicesTemplate::NAME, JumpTemplate::NAME, JumpTemplate::ULM_NAME, ClusterTemplate::name()];
+		return [MasterTemplate::name(), DevicesTemplate::name(), JumpTemplate::name(), JumpTemplate::ulmName(), ClusterTemplate::name()];
 	}
 
 	/**
@@ -100,7 +100,7 @@ class TemplateInstaller {
 		// carry a template that is not in the install, so when none of them is here, neither
 		// the install nor any host has one.
 		$tpls = API::Template()->get(['output' => ['templateid', 'host'],
-			'filter' => ['host' => array_merge([MasterTemplate::NAME, DevicesTemplate::NAME, JumpTemplate::NAME, ClusterTemplate::name()], $legacy)],
+			'filter' => ['host' => array_merge(self::currentNames(), $legacy)],
 			'selectMacros' => ['macro', 'value']]);
 		$by = [];
 		foreach ($tpls as $t) {
@@ -118,12 +118,12 @@ class TemplateInstaller {
 		}
 		// The cluster template counts as missing too: without it the core finds no clusters
 		// at all, which is a louder failure than an out-of-date master template.
-		if (!isset($by[MasterTemplate::NAME]) || !isset($by[ClusterTemplate::name()])) {
+		if (!isset($by[MasterTemplate::name()]) || !isset($by[ClusterTemplate::name()])) {
 			return 'missing';
 		}
-		$current = ($by[MasterTemplate::NAME]['{$EP.ROLES.HASH}'] ?? '') === Roles::hash($roles)
-			&& ($by[DevicesTemplate::NAME]['{$EP.DEVICES.VERSION}'] ?? '') === DevicesTemplate::VERSION
-			&& ($by[JumpTemplate::NAME]['{$EP.JUMP.VERSION}'] ?? '') === JumpTemplate::VERSION
+		$current = ($by[MasterTemplate::name()]['{$EP.ROLES.HASH}'] ?? '') === Roles::hash($roles)
+			&& ($by[DevicesTemplate::name()]['{$EP.DEVICES.VERSION}'] ?? '') === DevicesTemplate::VERSION
+			&& ($by[JumpTemplate::name()]['{$EP.JUMP.VERSION}'] ?? '') === JumpTemplate::VERSION
 			&& ($by[ClusterTemplate::name()]['{$EP.CLUSTER.VERSION}'] ?? '') === ClusterTemplate::VERSION;
 		return $current ? 'current' : 'outdated';
 	}
