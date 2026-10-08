@@ -33,12 +33,16 @@ class Reconciler {
 	public const MASTERS_GROUP = 'ElasticPro clients';
 	public const CLUSTER_GROUP = 'Elasticsearch clusters';
 	public const ULM_GROUP = 'Log archive';
-	/** Ours, which the page writes; only the Elasticsearch one is a name a site may have changed. */
-	public const OWN_CLUSTER_TEMPLATES = ['ElasticPro client plan', 'ElasticPro alerts', 'ElasticPro log delay',
-		DevicesTemplate::NAME];
+	/**
+	 * Ours, which the page links to a cluster host. Every one of them is a name a site may have
+	 * changed: they are slots in Roles::TEMPLATE_SLOTS, read through ownClusterTemplates()
+	 * rather than listed here, because until the mapping existed only the Elasticsearch one
+	 * could be pointed elsewhere and the other three were spelled out in PHP.
+	 */
+	public const OWN_CLUSTER_SLOTS = ['plan', 'alerts', 'delay', 'devices'];
 	/** Through a jump host, these replace the HTTP ones on the cluster host. */
-	public const JUMP_CLUSTER_TEMPLATES = [JumpTemplate::NAME, 'ElasticPro client plan', 'ElasticPro alerts', 'ElasticPro log delay'];
-	public const ULM_TEMPLATE = 'ElasticPro log archive S3';
+	public const JUMP_CLUSTER_SLOTS = ['jump', 'plan', 'alerts', 'delay'];
+	public const ULM_TEMPLATE = Roles::TEMPLATE_SLOTS['ulm'][0];
 	/** Tags this page writes; everything else on a host is left as it is. */
 	private const OWN_TAGS = ['ep-client', 'ep-kind', 'ep-role', 'ep-service', 'ep-status', 'client', 'role'];
 	/**
@@ -136,7 +140,22 @@ class Reconciler {
 	 * Zabbix that calls them something else is pointed at them on the Roles page.
 	 */
 	public static function clusterTemplates(): array {
-		return array_merge([Roles::clusterTemplate()], self::OWN_CLUSTER_TEMPLATES);
+		return array_merge([Roles::clusterTemplate()], self::ownClusterTemplates());
+	}
+
+	/** The names of the templates this page links to a cluster host asked over HTTP. */
+	public static function ownClusterTemplates(): array {
+		return array_map(fn($slot) => Roles::templateName($slot), self::OWN_CLUSTER_SLOTS);
+	}
+
+	/** The same, for a cluster reached through a jump host. */
+	public static function jumpClusterTemplates(): array {
+		return array_map(fn($slot) => Roles::templateName($slot), self::JUMP_CLUSTER_SLOTS);
+	}
+
+	/** The log archive template's name as mapped. */
+	public static function ulmTemplate(): string {
+		return Roles::templateName('ulm');
 	}
 
 	public static function agentTemplate(): string {
@@ -150,14 +169,17 @@ class Reconciler {
 			: $tag;
 	}
 
-	/** Both generations of the master template's name. */
+	/**
+	 * Every name the master template is recognised by: as mapped, the extra names the Roles page
+	 * was told to also recognise, the shipped name, and both pre-rename spellings.
+	 */
 	public static function masterTemplates(): array {
-		return array_merge([MasterTemplate::NAME], self::LEGACY_MASTER_TEMPLATES);
+		return Roles::templateNamesFor('master', self::LEGACY_MASTER_TEMPLATES);
 	}
 
-	/** Both generations of the log archive template's name. */
+	/** Every name the log archive template is recognised by. */
 	public static function ulmTemplates(): array {
-		return [self::ULM_TEMPLATE, self::LEGACY_ULM_TEMPLATE];
+		return Roles::templateNamesFor('ulm', [self::LEGACY_ULM_TEMPLATE]);
 	}
 
 	/**
@@ -172,7 +194,7 @@ class Reconciler {
 	 * existed.
 	 */
 	public static function esClusterTemplates(): array {
-		return array_values(array_unique([Roles::clusterTemplate(), self::LEGACY_CLUSTER_TEMPLATE]));
+		return Roles::templateNamesFor('cluster', [self::LEGACY_CLUSTER_TEMPLATE]);
 	}
 
 	/**
@@ -181,7 +203,8 @@ class Reconciler {
 	 * asked through SSH. current() recognises a cluster host by any of them.
 	 */
 	public static function clusterHostTemplates(): array {
-		return array_merge(self::esClusterTemplates(), [JumpTemplate::NAME, JumpTemplate::LEGACY_NAME]);
+		return array_values(array_unique(array_merge(self::esClusterTemplates(),
+			Roles::templateNamesFor('jump', [JumpTemplate::LEGACY_NAME]))));
 	}
 
 	/**
@@ -221,8 +244,8 @@ class Reconciler {
 	 * for a client that has a bucket — without it, a Zabbix with no log archive could add no client.
 	 */
 	public function templateIds(array $extra = [], bool $ulm = true): array {
-		$names = array_values(array_unique(array_merge([MasterTemplate::NAME], self::clusterTemplates(), self::JUMP_CLUSTER_TEMPLATES,
-			$ulm ? [self::ULM_TEMPLATE] : [], [JumpTemplate::ULM_NAME, self::agentTemplate()], $extra)));
+		$names = array_values(array_unique(array_merge([MasterTemplate::name()], self::clusterTemplates(), self::jumpClusterTemplates(),
+			$ulm ? [self::ulmTemplate()] : [], [JumpTemplate::ulmName(), self::agentTemplate()], $extra)));
 		$found = array_column(API::Template()->get(['output' => ['templateid', 'host'], 'filter' => ['host' => $names]]), 'templateid', 'host');
 		$missing = array_diff($names, array_keys($found));
 		if ($missing) {
@@ -237,7 +260,7 @@ class Reconciler {
 	 * never said that the log archive template is not in this repository at all.
 	 */
 	public static function missingTemplatesMessage(array $missing): string {
-		$written = [MasterTemplate::NAME, DevicesTemplate::NAME, JumpTemplate::NAME, JumpTemplate::ULM_NAME];
+		$written = [MasterTemplate::name(), DevicesTemplate::name(), JumpTemplate::name(), JumpTemplate::ulmName()];
 		$button = array_values(array_intersect($missing, $written));
 		$archive = in_array(self::ULM_TEMPLATE, $missing, true);
 		$import = array_values(array_diff($missing, $written, [self::ULM_TEMPLATE]));
@@ -699,7 +722,7 @@ class Reconciler {
 			return [];
 		}
 		return [_s('Nothing was saved. "%1$s" is still linked to "%2$s", the jump host template from before the rename, whose item keys are the ones "%3$s" uses as well — Zabbix refuses to link both to one host, and it would refuse in the middle of the save, after the master host had been written. In Data collection → Hosts → "%1$s" → Templates, unlink "%2$s" — "Unlink", never "Unlink and clear", which deletes those items and every value they hold; unlinking leaves them on the host with their history, and the current template takes over the ones whose keys it shares. Then save again.',
-			$now['cluster']['host'], JumpTemplate::LEGACY_NAME, JumpTemplate::NAME)];
+			$now['cluster']['host'], JumpTemplate::LEGACY_NAME, JumpTemplate::name())];
 	}
 
 	/**
@@ -751,13 +774,13 @@ class Reconciler {
 		$masters_gid = $this->groupId(self::MASTERS_GROUP, true);
 		if ($now['master'] === null) {
 			$hostid = $this->create(['host' => ClientSpec::masterName($name), 'groups' => $this->g([$masters_gid, $gid]),
-				'templates' => $this->t([$tpl[MasterTemplate::NAME]]), 'tags' => $this->tags([], $name, 'master', true)]);
+				'templates' => $this->t([$tpl[MasterTemplate::name()]]), 'tags' => $this->tags([], $name, 'master', true)]);
 			$this->done[] = _s('Created "%1$s".', ClientSpec::masterName($name));
 		}
 		else {
 			$hostid = $now['master']['hostid'];
 			$this->rename($now['master'], ClientSpec::masterName($name));
-			$this->link($hostid, [$tpl[MasterTemplate::NAME]], [$masters_gid, $gid]);
+			$this->link($hostid, [$tpl[MasterTemplate::name()]], [$masters_gid, $gid]);
 			$this->retag($now['master'], $this->tags($now['master']['tags'] ?? [], $name, 'master', self::isManaged($now['master'])));
 		}
 		$this->setMacros($hostid, $this->spec->masterMacros($client));
@@ -766,11 +789,11 @@ class Reconciler {
 		if ($client['es'] !== null) {
 			$jump = $this->spec->throughJump($client);
 			$cluster = self::clusterTemplates();
-			$templates = array_map(fn($x) => $tpl[$x], $jump ? self::JUMP_CLUSTER_TEMPLATES : $cluster);
+			$templates = array_map(fn($x) => $tpl[$x], $jump ? self::jumpClusterTemplates() : $cluster);
 			// The other way's templates, unlinked (not cleared) on a switch: items of the keys both
 			// share keep their history when the new template takes them over.
-			$other = array_map(fn($x) => $tpl[$x], array_diff($jump ? $cluster : self::JUMP_CLUSTER_TEMPLATES,
-				$jump ? self::JUMP_CLUSTER_TEMPLATES : $cluster));
+			$other = array_map(fn($x) => $tpl[$x], array_diff($jump ? $cluster : self::jumpClusterTemplates(),
+				$jump ? self::jumpClusterTemplates() : $cluster));
 			$groups = [$gid, $this->groupId(self::CLUSTER_GROUP, true)];
 			if ($now['cluster'] === null) {
 				$hostid = $this->create(['host' => ClientSpec::clusterName($name), 'groups' => $this->g($groups), 'templates' => $this->t($templates),
@@ -799,8 +822,8 @@ class Reconciler {
 		// Log archive host, when there is a bucket; removed when there no longer is one.
 		if ($this->spec->wantsUlm($client)) {
 			$groups = [$gid, $this->groupId(self::ULM_GROUP, true)];
-			$jumpUlm = $this->spec->throughJump($client) && isset($tpl[JumpTemplate::ULM_NAME]);
-			$ulmTpls = array_merge([$tpl[self::ULM_TEMPLATE]], $jumpUlm ? [$tpl[JumpTemplate::ULM_NAME]] : []);
+			$jumpUlm = $this->spec->throughJump($client) && isset($tpl[JumpTemplate::ulmName()]);
+			$ulmTpls = array_merge([$tpl[self::ulmTemplate()]], $jumpUlm ? [$tpl[JumpTemplate::ulmName()]] : []);
 			if ($now['ulm'] === null) {
 				$hostid = $this->create(['host' => ClientSpec::ulmName($name), 'groups' => $this->g($groups),
 					'templates' => $this->t($ulmTpls), 'tags' => $this->tags([], $name, 'archive', true)] + $monitor);
@@ -811,8 +834,8 @@ class Reconciler {
 				$this->rename($now['ulm'], ClientSpec::ulmName($name));
 				$this->link($now['ulm']['hostid'], $ulmTpls, $groups);
 				// Back to direct: the SSH items go with the template (cleared: nothing else reads them).
-				if (!$jumpUlm && isset($tpl[JumpTemplate::ULM_NAME]) && self::hasTemplate($now['ulm'], JumpTemplate::ULM_NAME)) {
-					$this->api(API::Host()->massRemove(['hostids' => [$now['ulm']['hostid']], 'templateids_clear' => [$tpl[JumpTemplate::ULM_NAME]]]), _('unlink the jump host log archive template'));
+				if (!$jumpUlm && isset($tpl[JumpTemplate::ulmName()]) && self::hasTemplate($now['ulm'], JumpTemplate::ulmName())) {
+					$this->api(API::Host()->massRemove(['hostids' => [$now['ulm']['hostid']], 'templateids_clear' => [$tpl[JumpTemplate::ulmName()]]]), _('unlink the jump host log archive template'));
 				}
 				$this->monitor($now['ulm'], $monitor);
 				$this->retag($now['ulm'], $this->tags($now['ulm']['tags'] ?? [], $name, 'archive', self::isManaged($now['ulm'])));

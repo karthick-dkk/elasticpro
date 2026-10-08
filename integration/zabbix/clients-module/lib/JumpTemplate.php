@@ -20,7 +20,12 @@ namespace Modules\EpClients\Lib;
  */
 class JumpTemplate {
 
-	public const NAME = 'ElasticPro Elasticsearch via SSH jump host';
+	public const NAME = Roles::TEMPLATE_SLOTS['jump'][0];
+
+	/** The name this template is installed and linked under; see MasterTemplate::name(). */
+	public static function name(): string {
+		return Roles::templateName('jump');
+	}
 	public const VERSION = '3';
 
 	/**
@@ -124,7 +129,12 @@ class JumpTemplate {
 	}
 
 	/** The log archive check's Elasticsearch half, through the jump host, for a client's ULM host. */
-	public const ULM_NAME = 'ElasticPro log archive ES via SSH jump host';
+	public const ULM_NAME = Roles::TEMPLATE_SLOTS['jump_ulm'][0];
+
+	/** The name the log archive jump template is installed and linked under. */
+	public static function ulmName(): string {
+		return Roles::templateName('jump_ulm');
+	}
 	/**
 	 * Legacy value, kept for recognition: the log archive half's name before the rename. Matched
 	 * only, like LEGACY_NAME, and for the same reason — the live install was never migrated. Its

@@ -39,7 +39,9 @@ else {
 	foreach ($data['rows'] as $row) {
 		$cols = [];
 		foreach ($row['cells'] as $i => $cell) {
-			$col = (new CCol($cell['text']))->addClass($cell['class'] !== '' ? $cell['class'] : null);
+			$col = (new CCol(\Modules\EpCapacity\Lib\Bars::cell($cell['text'], $cell['bar'] ?? null, $data['bars'] ?? 'under', $cell['class'])))
+				->addClass($cell['class'] !== '' ? $cell['class'] : null)
+				->addClass(($cell['bar'] ?? null) !== null && ($data['bars'] ?? 'under') !== 'none' ? 'ep-barcell' : null);
 			if ($i === 0) {
 				$col->addClass('ep-cap-first');
 			}

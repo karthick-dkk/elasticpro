@@ -38,6 +38,36 @@ class Roles {
 	/** The Elasticsearch template the cluster host is linked to. */
 	public const DEFAULT_CLUSTER_TEMPLATE = 'Elasticsearch Cluster by HTTP EP';
 
+	/**
+	 * Every template this module names, as slot => [shipped name, whether install() writes it].
+	 *
+	 * One definition. templateNames(), templateAliases(), saveTemplateNames() and the mapping
+	 * table on the Roles page all iterate this, so a slot added here is stored, validated and
+	 * offered in the UI without a second list to keep in step — which is how the cluster
+	 * template came to be settable while the other nine stayed hardcoded in PHP.
+	 *
+	 * 'writes' matters for what a mapping does. For a slot this module writes, install() imports
+	 * the template under the mapped name, and because the uuid is seeded from a fixed string and
+	 * not from the name, Zabbix matches ours by uuid and renames it. For a slot it only looks
+	 * for, the mapping is recognition alone and nothing is written.
+	 */
+	public const TEMPLATE_SLOTS = [
+		'cluster' => [self::DEFAULT_CLUSTER_TEMPLATE, true],
+		'agent' => [self::DEFAULT_TEMPLATE, false],
+		'master' => ['ElasticPro client master', true],
+		'devices' => ['ElasticPro cluster devices', true],
+		'jump' => ['ElasticPro Elasticsearch via SSH jump host', true],
+		'jump_ulm' => ['ElasticPro log archive ES via SSH jump host', true],
+		'ulm' => ['ElasticPro log archive S3', false],
+		'plan' => ['ElasticPro client plan', false],
+		'alerts' => ['ElasticPro alerts', false],
+		'delay' => ['ElasticPro log delay', false]
+	];
+
+	/** How many extra names one slot may be told to recognise, and how long each may be. */
+	public const MAX_ALIASES = 8;
+	public const MAX_NAME = 128;
+
 	/** Disks per role: / always, and up to four more mounts (an ES data disk …). */
 	public const DISK_SLOTS = 5;
 
@@ -284,41 +314,121 @@ class Roles {
 	}
 
 	/**
-	 * The template names this Zabbix uses, from templates.json in the data folder:
-	 *   { "agent": "Linux by Zabbix agent -X", "cluster": "Elasticsearch Cluster by HTTP X" }
+	 * The template names this Zabbix uses, from templates.json in the data folder — one entry per
+	 * TEMPLATE_SLOTS key, plus "<slot>_also" for the extra names of templateAliases():
+	 *   { "cluster": "Elasticsearch Cluster by HTTP X", "cluster_also": "the old name" }
 	 * A Zabbix whose templates are called something else — a site's own names, or the names an
 	 * earlier release shipped — is pointed at them here rather than by editing PHP. A name left
-	 * out or left empty means the default above.
+	 * out or left empty means the shipped name in TEMPLATE_SLOTS.
+	 *
+	 * The two keys an earlier release stored, agent and cluster, are slots here under the same
+	 * names, so a templates.json written before this read back unchanged.
 	 */
 	public static function templateNames(): array {
 		$saved = Store::read(self::TEMPLATES_FILE, []);
-		$name = function (string $key, string $fallback) use ($saved): string {
-			$v = trim((string) ($saved[$key] ?? ''));
-			return $v !== '' && strlen($v) <= 128 ? $v : $fallback;
-		};
-		return ['agent' => $name('agent', self::DEFAULT_TEMPLATE), 'cluster' => $name('cluster', self::DEFAULT_CLUSTER_TEMPLATE)];
+		$out = [];
+		foreach (self::TEMPLATE_SLOTS as $slot => [$shipped, $writes]) {
+			$v = trim((string) ($saved[$slot] ?? ''));
+			$out[$slot] = $v !== '' && strlen($v) <= self::MAX_NAME ? $v : $shipped;
+		}
+		return $out;
+	}
+
+	/**
+	 * Extra names a slot answers to, recognised and never written: the spelling already on this
+	 * Zabbix's hosts while new ones are to get the mapped name.
+	 *
+	 * This is the half of a mapping that a single name cannot express. Pointing the cluster slot
+	 * at an older spelling makes every cluster host made from now on carry that older spelling
+	 * too; naming it here instead leaves the mapped name authoritative and still finds the hosts
+	 * that predate it.
+	 */
+	public static function templateAliases(): array {
+		$saved = Store::read(self::TEMPLATES_FILE, []);
+		$out = [];
+		foreach (self::TEMPLATE_SLOTS as $slot => $_) {
+			$out[$slot] = self::splitNames((string) ($saved[$slot.'_also'] ?? ''));
+		}
+		return $out;
+	}
+
+	/** A newline- or comma-separated list of template names, trimmed, de-duplicated and capped. */
+	public static function splitNames(string $raw): array {
+		$out = [];
+		foreach (preg_split('/[\r\n,]+/', $raw) ?: [] as $n) {
+			$n = trim($n);
+			if ($n !== '' && strlen($n) <= self::MAX_NAME && !in_array($n, $out, true)) {
+				$out[] = $n;
+			}
+		}
+		return array_slice($out, 0, self::MAX_ALIASES);
+	}
+
+	/** The name a slot is mapped to — what gets linked, and written for a slot install() writes. */
+	public static function templateName(string $slot): string {
+		return self::templateNames()[$slot] ?? '';
+	}
+
+	/**
+	 * Every name a slot is recognised by: the mapped one first, then the extra names, then the
+	 * shipped one. Readers that merely identify a host or a template use this; writers use
+	 * templateName() alone, so a name listed here is never linked or imported.
+	 *
+	 * The shipped name stays in the list because clearing a mapping must not orphan the hosts
+	 * that were made while it was set, and because a site that maps a slot to its own spelling
+	 * still has ours installed next to it until it says otherwise.
+	 */
+	public static function templateNamesFor(string $slot, array $legacy = []): array {
+		$names = array_merge([self::templateName($slot)], self::templateAliases()[$slot] ?? [],
+			[self::TEMPLATE_SLOTS[$slot][0] ?? ''], $legacy);
+		return array_values(array_unique(array_filter($names, fn($n) => trim((string) $n) !== '')));
 	}
 
 	/** The template a server gets when its roles name none. */
 	public static function defaultTemplate(): string {
-		return self::templateNames()['agent'];
+		return self::templateName('agent');
 	}
 
 	/** The Elasticsearch template the cluster host is linked to. */
 	public static function clusterTemplate(): string {
-		return self::templateNames()['cluster'];
+		return self::templateName('cluster');
 	}
 
-	/** Template names as typed; a blank one is removed, so the default applies again. */
+	/**
+	 * The mapping as typed. A blank name is removed, so the shipped name applies again; a slot
+	 * that is not in TEMPLATE_SLOTS is refused rather than stored and silently ignored.
+	 *
+	 * Two slots this module WRITES may not share a name: Zabbix keeps hosts and templates in one
+	 * namespace where a name is unique, so the second import could never succeed — and without
+	 * this check it failed at install() time, long after the operator left the page, naming a
+	 * template they had not touched.
+	 *
+	 * Slots it only looks for are not checked, and neither are a role's templates. Nothing is
+	 * created for those: one template may be pointed at by as many slots and as many roles as a
+	 * site likes, and a server in two roles that name it is linked to it once.
+	 */
 	public static function saveTemplateNames(array $in): array {
 		$clean = [];
-		foreach (['agent', 'cluster'] as $k) {
-			$v = trim((string) ($in[$k] ?? ''));
+		$seen = [];
+		foreach (self::TEMPLATE_SLOTS as $slot => [$shipped, $writes]) {
+			$v = trim((string) ($in[$slot] ?? ''));
 			if ($v !== '') {
-				if (strlen($v) > 128) {
-					throw new \InvalidArgumentException(sprintf('The %s template name is too long.', $k));
+				if (strlen($v) > self::MAX_NAME) {
+					throw new \InvalidArgumentException(sprintf('The %s template name is longer than %d characters.', $slot, self::MAX_NAME));
 				}
-				$clean[$k] = $v;
+				$clean[$slot] = $v;
+			}
+			if ($writes) {
+				$effective = $clean[$slot] ?? $shipped;
+				if (isset($seen[$effective])) {
+					throw new \InvalidArgumentException(sprintf('The %s and %s templates would both be called "%s". Zabbix allows one object per name, and this page writes both.',
+						$seen[$effective], $slot, $effective));
+				}
+				$seen[$effective] = $slot;
+			}
+			$also = self::splitNames((string) ($in[$slot.'_also'] ?? ''));
+			if ($also) {
+				$clean[$slot.'_also'] = implode("\n", $also);
 			}
 		}
 		Store::write(self::TEMPLATES_FILE, $clean);

@@ -19,10 +19,10 @@ namespace {
 	function _n($a, $b, $n) { return str_replace('%1$s', (string) $n, $n == 1 ? $a : $b); }
 }
 namespace Modules\EpClients\Test {
-	foreach (['Store', 'Roles', 'ColumnSettings', 'Forecast', 'ClientTypes', 'MasterTemplate', 'DevicesTemplate', 'JumpTemplate', 'ClientSpec', 'Csv', 'Backups', 'Reconciler', 'Lifecycle', 'Registry', 'History', 'SetupChecks', 'AlertRouting'] as $lib) {
+	foreach (['Store', 'Roles', 'ColumnSettings', 'Forecast', 'ClientTypes', 'MasterTemplate', 'DevicesTemplate', 'JumpTemplate', 'ClusterTemplate', 'ClientSpec', 'Csv', 'Backups', 'Reconciler', 'Lifecycle', 'Registry', 'History', 'SetupChecks', 'AlertRouting'] as $lib) {
 		require __DIR__.'/../lib/'.$lib.'.php';
 	}
-	use Modules\EpClients\Lib\{AlertRouting, Backups, ClientSpec, ColumnSettings, Csv, DevicesTemplate, Forecast, History, JumpTemplate, Lifecycle, MasterTemplate, Reconciler, Registry, Roles, SetupChecks, Store};
+	use Modules\EpClients\Lib\{AlertRouting, Backups, ClientSpec, ClusterTemplate, ColumnSettings, Csv, DevicesTemplate, Forecast, History, JumpTemplate, Lifecycle, MasterTemplate, Reconciler, Registry, Roles, SetupChecks, Store};
 
 	$failed = 0; $passed = 0;
 	function check(string $what, bool $ok, $detail = null): void {
@@ -93,8 +93,12 @@ namespace Modules\EpClients\Test {
 
 	// A Zabbix that calls the templates something else is pointed at them in templates.json,
 	// not in PHP.
-	check('the names default to the neutral ones', Roles::templateNames() === ['agent' => 'Linux by Zabbix agent -EP', 'cluster' => 'Elasticsearch Cluster by HTTP EP']
+	$shipped = array_map(fn($slot) => $slot[0], Roles::TEMPLATE_SLOTS);
+	check('every slot defaults to the name ElasticPro ships', Roles::templateNames() === $shipped
 		&& Roles::defaultTemplate() === Roles::DEFAULT_TEMPLATE && Roles::clusterTemplate() === Roles::DEFAULT_CLUSTER_TEMPLATE, Roles::templateNames());
+	check('the slot table covers every template the page writes or looks for',
+		array_keys(Roles::TEMPLATE_SLOTS) === ['cluster', 'agent', 'master', 'devices', 'jump', 'jump_ulm', 'ulm', 'plan', 'alerts', 'delay']);
+	check('no slot starts out mapped', Roles::templateAliases() === array_map(fn($x) => [], Roles::TEMPLATE_SLOTS));
 	Roles::saveTemplateNames(['agent' => 'Linux by Zabbix agent -ACME', 'cluster' => '']);
 	check('a name set in the settings is used', Roles::defaultTemplate() === 'Linux by Zabbix agent -ACME' && is_file($dir.'/templates.json'));
 	check('one left empty keeps its default', Roles::clusterTemplate() === Roles::DEFAULT_CLUSTER_TEMPLATE);
@@ -105,7 +109,57 @@ namespace Modules\EpClients\Test {
 	try { Roles::saveTemplateNames(['agent' => str_repeat('x', 200)]); } catch (\InvalidArgumentException $e) { $long = true; }
 	check('a template name too long is refused here too', $long);
 	Roles::saveTemplateNames([]);
-	check('clearing both brings the defaults back', Roles::templateNames() === ['agent' => Roles::DEFAULT_TEMPLATE, 'cluster' => Roles::DEFAULT_CLUSTER_TEMPLATE]);
+	check('clearing every row brings the shipped names back', Roles::templateNames() === $shipped);
+
+	// The mapping's point: a template this Zabbix calls something else is found under that name,
+	// and the readers that recognise a host follow the mapping rather than a name in PHP.
+	Roles::saveTemplateNames(['master' => 'ACME client master', 'cluster' => 'ACME ES cluster',
+		'cluster_also' => "Elasticsearch Cluster by HTTP OLD\nElasticsearch Cluster by HTTP OLD\n , ",
+		'plan' => 'ACME plan']);
+	check('a mapped name is the one that gets written and linked', MasterTemplate::name() === 'ACME client master'
+		&& ClusterTemplate::name() === 'ACME ES cluster' && Roles::templateName('plan') === 'ACME plan');
+	check('an unmapped slot keeps its shipped name', DevicesTemplate::name() === Roles::TEMPLATE_SLOTS['devices'][0]);
+	check('extra names are de-duplicated and the blanks dropped',
+		Roles::templateAliases()['cluster'] === ['Elasticsearch Cluster by HTTP OLD']);
+	check('recognition takes the mapped name, the extra names, the shipped one and the legacy one',
+		Reconciler::esClusterTemplates() === ['ACME ES cluster', 'Elasticsearch Cluster by HTTP OLD',
+			Roles::TEMPLATE_SLOTS['cluster'][0], Reconciler::LEGACY_CLUSTER_TEMPLATE], Reconciler::esClusterTemplates());
+	check('the master template is recognised by the mapped name and both old spellings',
+		Reconciler::masterTemplates() === array_merge(['ACME client master', Roles::TEMPLATE_SLOTS['master'][0]],
+			Reconciler::LEGACY_MASTER_TEMPLATES), Reconciler::masterTemplates());
+	check('the templates linked to a cluster host follow the mapping',
+		Reconciler::clusterTemplates() === ['ACME ES cluster', 'ACME plan', Roles::TEMPLATE_SLOTS['alerts'][0],
+			Roles::TEMPLATE_SLOTS['delay'][0], Roles::TEMPLATE_SLOTS['devices'][0]], Reconciler::clusterTemplates());
+	check('a writer never uses an extra name', !in_array('Elasticsearch Cluster by HTTP OLD',
+		[MasterTemplate::name(), ClusterTemplate::name(), DevicesTemplate::name(), JumpTemplate::name(), JumpTemplate::ulmName()], true));
+	// Zabbix keeps hosts and templates in one namespace where a name is unique, so two slots
+	// mapped to one name could never both be written; it is refused here, not at install time.
+	$clash = false;
+	try { Roles::saveTemplateNames(['master' => 'Same', 'devices' => 'Same']); }
+	catch (\InvalidArgumentException $e) { $clash = str_contains($e->getMessage(), 'one object per name'); }
+	check('two WRITTEN slots mapped to the same name are refused', $clash);
+	$clashShipped = false;
+	try { Roles::saveTemplateNames(['master' => Roles::TEMPLATE_SLOTS['devices'][0]]); }
+	catch (\InvalidArgumentException $e) { $clashShipped = true; }
+	check('mapping a written slot onto another written slot\'s shipped name is refused too', $clashShipped);
+	// Nothing is created for a slot this page only looks for, so sharing one template between
+	// two of them is allowed — as it is between roles.
+	$shared = true;
+	try { Roles::saveTemplateNames(['plan' => 'One combined template', 'alerts' => 'One combined template']); }
+	catch (\InvalidArgumentException $e) { $shared = false; }
+	check('two look-for slots may share one template', $shared
+		&& Roles::templateName('plan') === 'One combined template' && Roles::templateName('alerts') === 'One combined template');
+	// The same template on several roles: templatesOf() returns it once for a server in both.
+	$twoRoles = $roles;
+	$twoRoles['families'][0]['roles'][0]['templates'] = ['Shared by roles'];
+	$twoRoles['families'][1]['roles'][0]['templates'] = ['Shared by roles'];
+	check('one template may be given to several roles, and a server gets it once',
+		Roles::templatesOf($twoRoles, [$twoRoles['families'][0]['roles'][0]['id'], $twoRoles['families'][1]['roles'][0]['id']]) === ['Shared by roles']);
+	$tooMany = Roles::splitNames(implode("\n", array_map(fn($i) => 'n'.$i, range(1, 20))));
+	check('the extra names are capped', count($tooMany) === Roles::MAX_ALIASES);
+	Roles::saveTemplateNames([]);
+	check('and clearing it all restores every shipped name', Roles::templateNames() === $shipped
+		&& Roles::templateAliases() === array_map(fn($x) => [], Roles::TEMPLATE_SLOTS));
 
 	// Roles saved before the macro prefix had this name carry none; it is the family id in capitals.
 	$noPrefix = $roles; unset($noPrefix['families'][1]['macroPrefix']);

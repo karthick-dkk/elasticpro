@@ -1,5 +1,54 @@
 # Changelog
 
+## 0.4.0
+
+**Templates are mapped on the Roles page, and chosen rather than typed.**
+
+Cluster Management named ten Zabbix templates. Two of them — the Elasticsearch cluster
+template and the Linux agent one — could be pointed somewhere else from the Roles page; the
+other eight were spelled out in PHP, so a Zabbix that called any of them something else could
+not be made to work without editing the source. All ten are now slots in one table
+(`Roles::TEMPLATE_SLOTS`), and the table is what the store, the save path and the page all
+read, so a slot added there needs no second list kept in step.
+
+Each row is picked from this Zabbix's own templates, never typed: a searchable select for the
+slot, and Zabbix's template picker for a role's templates and for the extra names a slot
+should also answer to. Nothing is spelled by hand, so a name cannot be a space out of place
+and silently match nothing.
+
+Each row also says what was found: how many hosts carry that template, whether this page
+wrote it, or that no template answers to the name. One case is refused outright — mapping a
+template this page *writes* onto a name another template already owns. `configuration.import`
+matches by uuid and will not take a name belonging to another object, so that mapping fails
+permanently; it used to fail at install time, long after the operator had left the page,
+naming a template they had never touched.
+
+A slot may also be given extra names, recognised and never written. That is the half a single
+name cannot express: pointing a slot at an older spelling would make everything created from
+then on carry the older spelling too, where naming it here leaves the mapped name
+authoritative and still finds the hosts that predate it.
+
+Two slots this page writes may not share a name, because Zabbix keeps hosts and templates in
+one namespace where a name is unique. Slots it only looks for may share one, and so may any
+number of roles: a server in two roles that name the same template is linked to it once.
+
+A stored template name that this Zabbix no longer has is kept and shown beside the picker
+rather than dropped. The picker works in template ids and cannot hold such a name, so without
+this, opening a role and pressing Save would have quietly discarded a template that had merely
+been renamed elsewhere.
+
+**Bars on the numbers.**
+
+Client capacity and Client resources draw a bar beside any figure that has a usage percentage
+behind it, under a new Display setting: bar under the value (the default), bar in the cell,
+segments, or numbers only. The bar is CSS — one element per cell, no chart library, no SVG, no
+canvas, no per-cell JavaScript — so a table costs very nearly what it cost before.
+
+The bar is drawn from the same figure the cell's colour was chosen from, and the thresholds
+stay the per-client `{$EP.USAGE.WARN}` and `{$EP.USAGE.HIGH}` macros, so the colour and the bar
+cannot tell different stories. A figure Elasticsearch did not report draws no bar at all: a bar
+of zero length reads as nought per cent, which is a measurement nobody made.
+
 ## 0.3.1
 
 The migration's dashboard phase could never run. `dashboard.get` on Zabbix 7.0 rejects

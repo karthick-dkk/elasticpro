@@ -22,7 +22,7 @@ class TestConnection extends Base {
 		$now = $rec->current(trim((string) $this->getInput('client')));
 		$checks = [];
 		if ($now['cluster'] !== null) {
-			$jump = Reconciler::hasTemplate($now['cluster'], JumpTemplate::NAME);
+			$jump = Reconciler::hasTemplate($now['cluster'], JumpTemplate::name());
 			$keys = $jump ? [JumpTemplate::FAST => _('SSH to the jump host and curl.exe'), 'ep.wj.problem[fast]' => _('Elasticsearch answers through it'), 'es.cluster.status' => _('Cluster health')]
 				: ['es.cluster.get_health' => _('Elasticsearch answers over HTTP')];
 			foreach (API::Item()->get(['output' => ['itemid', 'key_'], 'hostids' => [$now['cluster']['hostid']], 'filter' => ['key_' => array_keys($keys)]]) as $it) {

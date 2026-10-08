@@ -6,4 +6,5 @@
 
 (new CWidgetFormView($data))
 	->addField(new CWidgetFieldMultiSelectGroupView($data['fields']['groupids']))
+	->addField(new CWidgetFieldSelectView($data['fields']['bars']))
 	->show();
