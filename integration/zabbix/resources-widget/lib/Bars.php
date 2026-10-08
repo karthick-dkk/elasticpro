@@ -22,15 +22,47 @@ use CTag;
  */
 class Bars {
 
-	/** The styles the widget's Display setting offers. 'none' draws the value and nothing else. */
+	/**
+	 * The styles the widget's Display setting offers, in the order it offers them. 'none' draws
+	 * the value and nothing else.
+	 *
+	 * The POSITION is what a widget stores. Zabbix validates a CWidgetFieldSelect as an integer
+	 * — a field offering these as strings is refused outright with "an integer is expected", and
+	 * the widget then renders nothing at all — so the setting holds the index and styleOf()
+	 * turns it back into the name the drawing code uses. Keeping both in this one list is what
+	 * stops the stored number and the name drifting apart; append to it, never reorder it.
+	 */
 	public const STYLES = ['under', 'cell', 'segments', 'none'];
 
-	/**
-	 * Bars under the value: the most legible down a column, because every bar starts at the
-	 * same left edge. It lives here beside STYLES rather than on each widget's form, so the
-	 * default and the list of styles cannot drift apart.
-	 */
+	/** Bars under the value: the most legible down a column, every bar from the same left edge. */
 	public const DEFAULT_STYLE = 'under';
+
+	/** What a widget stores when its Display setting has never been touched. */
+	public const DEFAULT_VALUE = 0;
+
+	/**
+	 * The style name for what a widget stored. An unknown value — a setting saved by a later
+	 * release, or a hand-edited dashboard — falls back to the default rather than drawing
+	 * nothing, because the figures matter more than the decoration.
+	 */
+	public static function styleOf($stored): string {
+		if (is_string($stored) && in_array($stored, self::STYLES, true)) {
+			return $stored;
+		}
+		return is_numeric($stored) && isset(self::STYLES[(int) $stored])
+			? self::STYLES[(int) $stored]
+			: self::DEFAULT_STYLE;
+	}
+
+	/** value => label for the widget form's Display select. */
+	public static function options(): array {
+		return [
+			0 => _('Bar under the value'),
+			1 => _('Bar in the cell'),
+			2 => _('Segments'),
+			3 => _('Numbers only')
+		];
+	}
 
 	/** How many lit-or-unlit blocks the segmented style draws. */
 	private const SEGMENTS = 12;

@@ -36,7 +36,7 @@ class WidgetView extends CControllerDashboardWidgetView {
 		$data = [
 			'name' => $this->getInput('name', $this->widget->getDefaultName()),
 			'columns' => $columns,
-			'bars' => $this->fields_values['bars'] ?? Bars::DEFAULT_STYLE,
+			'bars' => Bars::styleOf($this->fields_values['bars'] ?? Bars::DEFAULT_VALUE),
 			'rows' => [],
 			'export' => null,
 			'error' => null,

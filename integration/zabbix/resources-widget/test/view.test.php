@@ -226,6 +226,21 @@ namespace Modules\EpResources\Test {
 		str_contains(Bars::cell('-5 %', -5.0, 'under')->toString(), 'width:0%'));
 	check('the default style is one the widget offers', in_array(Bars::DEFAULT_STYLE, Bars::STYLES, true));
 
+	// Zabbix validates a CWidgetFieldSelect as an integer: a field offering the styles as
+	// strings is refused with "an integer is expected" and the widget then renders nothing at
+	// all. The setting therefore stores the position in STYLES, and styleOf() turns it back.
+	check('what the widget stores is an integer position', Bars::options() === [0 => 'Bar under the value',
+		1 => 'Bar in the cell', 2 => 'Segments', 3 => 'Numbers only'], Bars::options());
+	check('every option maps to a style', array_keys(Bars::options()) === array_keys(Bars::STYLES));
+	check('the stored integer becomes the style', Bars::styleOf(0) === 'under' && Bars::styleOf(1) === 'cell'
+		&& Bars::styleOf(2) === 'segments' && Bars::styleOf(3) === 'none');
+	check('the default value is the default style', Bars::styleOf(Bars::DEFAULT_VALUE) === Bars::DEFAULT_STYLE);
+	check('a value from some later release falls back to the default rather than drawing nothing',
+		Bars::styleOf(99) === Bars::DEFAULT_STYLE && Bars::styleOf(null) === Bars::DEFAULT_STYLE
+		&& Bars::styleOf('') === Bars::DEFAULT_STYLE);
+	check('a style name is still accepted, so a stored name is never mistaken for position 0',
+		Bars::styleOf('segments') === 'segments');
+
 	\FakeApi::$template = false;
 	$d = run();
 	check('no template: says where to write it', strpos((string) $d['error'], 'ElasticPro → Clients') !== false);

@@ -13,22 +13,12 @@ use Zabbix\Widgets\Fields\{CWidgetFieldMultiSelectGroup, CWidgetFieldSelect};
  */
 class WidgetForm extends CWidgetForm {
 
-	/** The default lives with the styles, in Bars, so the two cannot drift apart. */
-	public const BARS_DEFAULT = Bars::DEFAULT_STYLE;
-
-	/** How a value with a usage percentage behind it is drawn. */
-	public static function barStyles(): array {
-		return [
-			'under' => _('Bar under the value'),
-			'cell' => _('Bar in the cell'),
-			'segments' => _('Segments'),
-			'none' => _('Numbers only')
-		];
-	}
+	/** The Display setting stores the position in Bars::STYLES; Zabbix wants an integer here. */
+	public const BARS_DEFAULT = Bars::DEFAULT_VALUE;
 
 	public function addFields(): self {
 		return $this
 			->addField(new CWidgetFieldMultiSelectGroup('groupids', _('Host groups')))
-			->addField((new CWidgetFieldSelect('bars', _('Display'), self::barStyles()))->setDefault(self::BARS_DEFAULT));
+			->addField((new CWidgetFieldSelect('bars', _('Display'), Bars::options()))->setDefault(self::BARS_DEFAULT));
 	}
 }
