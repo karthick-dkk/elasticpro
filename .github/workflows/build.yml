@@ -60,14 +60,10 @@ jobs:
             exit 0
           fi
 
-          # A tag may carry a pre-release identifier that the app version cannot (the MSI
-          # target rejects one), so only the part in front of the first hyphen has to
-          # agree with Cargo.toml; the rest belongs to the tag alone.
-          want=${TAG#v}
-          [ "${want%%-*}" = "$cargo_version" ] || {
-            echo "::error::tag $TAG does not match the workspace version $cargo_version — bump Cargo.toml and Cargo.lock, or move the tag"
-            exit 1
-          }
+          # tools/version.sh owns the comparison, so this workflow, docker.yml and the
+          # pull-request check cannot drift apart on what "matching" means. It prints the
+          # tag's version (pre-release identifier included) or fails naming the mismatch.
+          want=$(tools/version.sh --tag "$TAG") || exit 1
           echo "version=$want" >> "$GITHUB_OUTPUT"
 
   # Installers and app bundles, one runner per platform. fail-fast is off so a platform

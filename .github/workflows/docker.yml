@@ -151,17 +151,9 @@ jobs:
             fi
             version="$GITHUB_REF_NAME"
           fi
-          # The tag has to agree with the workspace version, exactly as build.yml
-          # requires. Without this an image published as 0.3.2 from a tree saying 0.4.0
-          # carries code it is not named after, and :latest then moves onto it — build.yml
-          # refused that release and this workflow published it anyway. Only the part in
-          # front of the first hyphen has to match, so a pre-release tag still works.
-          cargo_version=$(sed -n 's/^version *= *"\(.*\)".*/\1/p' Cargo.toml | head -1)
-          want=${version#v}
-          if [ -n "$cargo_version" ] && [ "${want%%-*}" != "$cargo_version" ]; then
-            echo "::error::tag $version does not match the workspace version $cargo_version — bump Cargo.toml and Cargo.lock, or move the tag"
-            exit 1
-          fi
+          # tools/version.sh owns the comparison; build.yml and the pull-request check
+          # call the same script, so they cannot disagree about what matching means.
+          tools/version.sh --tag "$version" > /dev/null || exit 1
           echo "VERSION=${version#v}" >> "$GITHUB_ENV"
 
       - uses: docker/setup-qemu-action@v3
@@ -209,6 +201,8 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
+      # The version check below reads Cargo.toml; this job had no checkout.
+      - uses: actions/checkout@v4
       # Worked out once and put in the environment. It used to be re-derived in each of
       # the three steps below, which is two more places for the rule to drift. First step
       # in the job, so a dispatch with nothing to publish fails before the registry is
@@ -231,17 +225,11 @@ jobs:
             version="$GITHUB_REF_NAME"
           fi
           # A Docker tag never carries the leading v, whichever of the two it came from.
-          # The tag has to agree with the workspace version, exactly as build.yml
-          # requires. Without this an image published as 0.3.2 from a tree saying 0.4.0
-          # carries code it is not named after, and :latest then moves onto it — build.yml
-          # refused that release and this workflow published it anyway. Only the part in
-          # front of the first hyphen has to match, so a pre-release tag still works.
-          cargo_version=$(sed -n 's/^version *= *"\(.*\)".*/\1/p' Cargo.toml | head -1)
-          want=${version#v}
-          if [ -n "$cargo_version" ] && [ "${want%%-*}" != "$cargo_version" ]; then
-            echo "::error::tag $version does not match the workspace version $cargo_version — bump Cargo.toml and Cargo.lock, or move the tag"
-            exit 1
-          fi
+          # This job applies the version tag to the core image, so the check belongs
+          # here: the image job above pushes by digest and names no version at all.
+          # It needs the checkout this job now has — without one there is no
+          # Cargo.toml to read, which broke the v0.3.3 manifest with exit 2.
+          tools/version.sh --tag "$version" > /dev/null || exit 1
           echo "VERSION=${version#v}" >> "$GITHUB_ENV"
 
       - uses: actions/download-artifact@v4

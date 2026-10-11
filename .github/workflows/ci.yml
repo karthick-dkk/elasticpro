@@ -28,10 +28,15 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: core
-      # The release build uses --locked, and the workspace has two members: a version bump
-      # that patches one of them in Cargo.lock and not the other fails there with exit 101,
-      # long after the pull request looked green. This costs a second and catches it here.
-      # It is not a substitute for the Windows clippy in build.yml, which only runs on a tag.
+      # The version lives in Cargo.toml, in Cargo.lock once per workspace member, in the
+      # compose image pins and in the CHANGELOG heading. Each has broken a release on its
+      # own — a half-bumped lock (exit 101), pins on images the tag had not published, and
+      # a tag that disagreed with the source, which skipped every asset job and shipped a
+      # release with nothing in it. One script owns all four; this fails the pull request
+      # instead of the release.
+      - name: the version agrees with itself
+        run: tools/version.sh --check
+      # Belt and braces: --check reads the lock, this proves cargo accepts it.
       - name: Cargo.lock is in step with the workspace
         run: cargo metadata --locked --format-version 1 > /dev/null
       - name: cargo test
