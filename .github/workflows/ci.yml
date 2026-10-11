@@ -6,6 +6,12 @@ on:
   pull_request:
   workflow_dispatch:
 
+# build.yml and docker.yml already do this; this one did not, so pushing three times to a
+# branch left three full validation runs racing each other for runners.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -D warnings
@@ -22,6 +28,12 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: core
+      # The release build uses --locked, and the workspace has two members: a version bump
+      # that patches one of them in Cargo.lock and not the other fails there with exit 101,
+      # long after the pull request looked green. This costs a second and catches it here.
+      # It is not a substitute for the Windows clippy in build.yml, which only runs on a tag.
+      - name: Cargo.lock is in step with the workspace
+        run: cargo metadata --locked --format-version 1 > /dev/null
       - name: cargo test
         run: cargo test -p elasticpro-core --features bridge
       - name: cargo clippy
