@@ -71,6 +71,18 @@ export function trackTask(o) {
 /** A 404 while waiting means "not there yet", not "failed". */
 const notYet = (e) => e && e.res && e.res.status === 404;
 
+/**
+ * A `_cat` endpoint asked with `format=json` answers a list of rows. When something else
+ * comes back, say which endpoint misbehaved rather than letting the next `.map` throw:
+ * the poller reports the error it caught, and "rows.map is not a function" tells an
+ * operator nothing about their cluster. Thrown, not swallowed, so the five-miss give-up
+ * below still applies instead of polling a broken endpoint for ever.
+ */
+export const rowsOf = (v, what) => {
+  if (Array.isArray(v)) return v;
+  throw new Error(`the cluster did not answer ${what} with a list of rows`);
+};
+
 /* ----------------------------------- pollers ----------------------------------- */
 
 /** A restore is complete when every shard of every restored index has recovered. */
@@ -81,6 +93,7 @@ export function restorePoll(cluster, names) {
     try {
       rows = await cl.json('GET', `/_cat/recovery/${names.map(encodeURIComponent).join(',')}?format=json&h=index,shard,stage,type`);
     } catch (e) { if (notYet(e)) return { detail: 'waiting for the indices to be created' }; throw e; }
+    rows = rowsOf(rows, '/_cat/recovery');
     const seen = new Set(rows.map((r) => r.index));
     const done = rows.filter((r) => r.stage === 'done').length;
     const missing = names.filter((n) => !seen.has(n));
@@ -115,7 +128,7 @@ export function shardMovePoll(cluster, moves) {
   const cl = client(cluster.id);
   const indices = [...new Set(moves.map((m) => m.index))];
   return async () => {
-    const rows = await cl.json('GET', `/_cat/shards/${indices.map(encodeURIComponent).join(',')}?format=json&h=index,shard,prirep,state,node`);
+    const rows = rowsOf(await cl.json('GET', `/_cat/shards/${indices.map(encodeURIComponent).join(',')}?format=json&h=index,shard,prirep,state,node`), '/_cat/shards');
     const landed = moves.filter((m) => rows.some((r) => r.index === m.index && String(r.shard) === String(m.shard)
       && r.state === 'STARTED' && r.node === m.to));
     const moving = rows.filter((r) => r.state === 'RELOCATING' || r.state === 'INITIALIZING').length;

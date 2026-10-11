@@ -163,6 +163,15 @@ const routes = [
     return { indices: ['logstash-acme-2026.09.09'], fields };
   }],
   [(u) => u.startsWith('/_cat/indices'), () => INDICES],
+  // /_cat/recovery, which restorePoll watches after a restore. Without a route here the
+  // catch-all answered {acknowledged:true} — an object, not a list of shards — and the
+  // poller died with "rows.map is not a function" after five tries. Every shard reports
+  // done, so a restore watched against this fixture completes rather than hanging.
+  [(u) => u.startsWith('/_cat/recovery'), ({ url }) => {
+    const names = decodeURIComponent((url.split('?')[0].split('/_cat/recovery/')[1] || '')).split(',').filter(Boolean);
+    return names.flatMap((index) => [0, 1].map((shard) => ({
+      index, shard: String(shard), stage: 'done', type: 'snapshot' })));
+  }],
   [(u) => u.startsWith('/_cat/shards'), () => ([
     { index: 'logstash-acme-2026.09.09', shard: '0', prirep: 'p', state: 'STARTED', node: 'node-1', store: '2500000000' },
     { index: 'logstash-acme-2026.09.09', shard: '0', prirep: 'r', state: 'STARTED', node: 'node-2', store: '2500000000' },
