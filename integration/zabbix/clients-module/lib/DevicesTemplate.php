@@ -39,7 +39,7 @@ class DevicesTemplate {
 		.'"aggs":{"devices":{"cardinality":{"field":"{$EP.DEVICE.FIELD}","precision_threshold":40000}}}}';
 
 	public static function export(): array {
-		$T = self::NAME;
+		$T = self::name();
 		$body = self::QUERY;
 		return ['zabbix_export' => [
 			'version' => '7.0',
@@ -178,7 +178,7 @@ class DevicesTemplate {
 
 
 	private static function extras(): array {
-		$T = self::NAME;
+		$T = self::name();
 		$js = fn($k) => ['js', self::js($k)];
 		$out = [];
 

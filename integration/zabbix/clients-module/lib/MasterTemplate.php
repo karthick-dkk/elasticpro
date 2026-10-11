@@ -173,8 +173,8 @@ class MasterTemplate {
 
 		$template = [
 			'uuid' => self::uuid('template'),
-			'template' => self::NAME,
-			'name' => self::NAME,
+			'template' => self::name(),
+			'name' => self::name(),
 			'description' => 'One master host per client, made and kept by the Clients page (ElasticPro menu). Requested, allocated and used per role and per family, ES storage and ElasticPro\'s log delay. Written by the Clients page from its roles — edit roles there, not here.',
 			'vendor' => ['name' => 'ElasticPro', 'version' => '7.0-3'],
 			'groups' => [['name' => 'Templates/Applications']],
@@ -328,7 +328,7 @@ class MasterTemplate {
 	/* ------------------------------------ alerts ------------------------------------ */
 
 	private function triggers(): array {
-		$T = self::NAME;
+		$T = self::name();
 		$out = [];
 		$short = function(string $id, string $what, string $req, string $alloc, string $word = 'requested') use ($T): array {
 			return [
@@ -374,7 +374,7 @@ class MasterTemplate {
 		foreach ($defs as [$name, $keys]) {
 			$items = [];
 			foreach ($keys as $i => $key) {
-				$items[] = ['sortorder' => (string) $i, 'color' => $colors[$i % count($colors)], 'item' => ['host' => self::NAME, 'key' => $key]];
+				$items[] = ['sortorder' => (string) $i, 'color' => $colors[$i % count($colors)], 'item' => ['host' => self::name(), 'key' => $key]];
 			}
 			$out[] = ['uuid' => self::uuid('graph/'.$name), 'name' => $name, 'graph_items' => $items];
 		}
@@ -385,7 +385,7 @@ class MasterTemplate {
 
 	private function tile(string $key, int $x, int $y, int $w, string $label, bool $usage = false, int $decimals = 0): array {
 		$fields = [
-			['type' => 'ITEM', 'name' => 'itemid.0', 'value' => ['host' => self::NAME, 'key' => $key]],
+			['type' => 'ITEM', 'name' => 'itemid.0', 'value' => ['host' => self::name(), 'key' => $key]],
 			['type' => 'INTEGER', 'name' => 'decimal_places', 'value' => (string) $decimals],
 			['type' => 'INTEGER', 'name' => 'show.0', 'value' => '1'],
 			['type' => 'INTEGER', 'name' => 'show.1', 'value' => '2'],
@@ -407,7 +407,7 @@ class MasterTemplate {
 
 	private function graphWidget(string $graph, int $x, int $y, int $w): array {
 		return ['type' => 'graph', 'name' => $graph, 'x' => (string) $x, 'y' => (string) $y, 'width' => (string) $w, 'height' => '5',
-			'fields' => [['type' => 'GRAPH', 'name' => 'graphid.0', 'value' => ['host' => self::NAME, 'name' => $graph]]]];
+			'fields' => [['type' => 'GRAPH', 'name' => 'graphid.0', 'value' => ['host' => self::name(), 'name' => $graph]]]];
 	}
 
 	private function dashboard(): array {

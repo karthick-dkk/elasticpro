@@ -167,7 +167,7 @@ class JumpTemplate {
 	 * behind a jump host: the check reads these answers from the Zabbix API ({$ULM.ES.VIA} = zabbix).
 	 */
 	public static function ulmExport(): array {
-		$T = self::ULM_NAME;
+		$T = self::ulmName();
 		$items = [
 			self::ssh(self::ULM_DAYS, 'Log archive: which tag, branch and day Elasticsearch holds (through the jump host)', self::ulmSearch(self::ULM_DAYS_QUERY), '1h'),
 			self::ssh(self::ULM_TAGS, 'Log archive: tag1 values logged (through the jump host)', self::ulmSearch(self::ULM_TAGS_QUERY), '1d')
@@ -206,7 +206,7 @@ class JumpTemplate {
 	}
 
 	public static function export(): array {
-		$T = self::NAME;
+		$T = self::name();
 		$F = self::FAST_PATHS;
 		$S = self::SLOW_PATHS;
 		$js = fn($k) => ['js', DevicesTemplate::js($k)];
