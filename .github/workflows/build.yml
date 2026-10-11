@@ -1,11 +1,14 @@
 name: build
 
+# Release only. Every job here produces a release artifact — the bundle, the portable
+# zip, the Zabbix module tarball, the release itself — and none of them is consumed until
+# a tag is cut. Running them on every pull request and again on every push to main cost
+# about six minutes a time to build things nobody downloads. Code validation lives in
+# ci.yml, which still runs on both.
 on:
   push:
-    branches: [main]
     # See docker.yml: a tag cut without the v prefix silently produced an empty release.
     tags: ['v*', '[0-9]*']
-  pull_request:
   workflow_dispatch:
 
 env:
