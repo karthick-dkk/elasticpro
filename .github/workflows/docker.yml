@@ -201,6 +201,8 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
+      # The version check below reads Cargo.toml; this job had no checkout.
+      - uses: actions/checkout@v4
       # Worked out once and put in the environment. It used to be re-derived in each of
       # the three steps below, which is two more places for the rule to drift. First step
       # in the job, so a dispatch with nothing to publish fails before the registry is
@@ -223,8 +225,10 @@ jobs:
             version="$GITHUB_REF_NAME"
           fi
           # A Docker tag never carries the leading v, whichever of the two it came from.
-          # tools/version.sh owns the comparison; build.yml and the pull-request check
-          # call the same script, so they cannot disagree about what matching means.
+          # This job applies the version tag to the core image, so the check belongs
+          # here: the image job above pushes by digest and names no version at all.
+          # It needs the checkout this job now has — without one there is no
+          # Cargo.toml to read, which broke the v0.3.3 manifest with exit 2.
           tools/version.sh --tag "$version" > /dev/null || exit 1
           echo "VERSION=${version#v}" >> "$GITHUB_ENV"
 
