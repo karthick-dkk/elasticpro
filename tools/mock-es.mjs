@@ -101,6 +101,15 @@ function catProject(url, rows) {
   return rows.map((r) => Object.fromEntries(want.filter((k) => k in r).map((k) => [k, r[k]])));
 }
 
+// Snapshots deleted during this run. Writes are no-ops here (see the handler below), which
+// is fine for most of them — but a delete that answers 200 and changes nothing makes the app
+// look broken: the page re-reads after the write, the cluster still lists the snapshot, and
+// the operator deletes it again. That has been reported as a product bug. Deleting is the one
+// write this fixture honours. In memory only: restarting the mock brings both snapshots back,
+// which the index checks below rely on.
+const deletedSnapshots = new Set();
+const snapshotsLeft = (list) => list.filter((s) => !deletedSnapshots.has(s.snapshot));
+
 const routes = [
   [(u) => u === '/', () => ({ cluster_name: clusterName, cluster_uuid: clusterUuid,
     version: { number: '8.13.4', lucene_version: '9.10.0' } })],
@@ -170,7 +179,7 @@ const routes = [
       'unassigned.reason': 'NODE_LEFT', node: null, store: '0' }])],
   [(u) => u.startsWith('/_cat/snapshots'), () => SNAPSHOTS],
   [(u) => u.startsWith('/_cat/aliases'), () => ([{ alias: 'logstash', index: 'logstash-acme-2026.09.09', is_write_index: 'true' }])],
-  [(u) => /^\/_snapshot\/[^/]+\//.test(u), () => ({ snapshots: [
+  [(u) => /^\/_snapshot\/[^/]+\//.test(u), () => ({ snapshots: snapshotsLeft([
     // A good copy of every logstash index — but NOT of metrics-2026.09, which is therefore
     // "not in any snapshot" and must be ticked on purpose before it can be deleted.
     { snapshot: 'daily-1', state: 'SUCCESS',
@@ -187,7 +196,7 @@ const routes = [
       start_time_in_millis: Date.now() - 90000000, end_time_in_millis: Date.now() - 89700000,
       start_time: new Date(Date.now() - 90000000).toISOString(), end_time: new Date(Date.now() - 89700000).toISOString(),
       duration_in_millis: 300000, version: '8.13.4', include_global_state: false },
-  ] })],
+  ]) })],
   [(u) => u === '/_snapshot' || u.startsWith('/_snapshot?'), () => ({
     daily: { type: 'fs', settings: { location: '/mnt/backups', compress: true } } })],
   [(u) => u.startsWith('/_slm/status'), () => ({ operation_mode: 'RUNNING' })],
@@ -383,7 +392,16 @@ http.createServer((req, res) => {
     const url = req.url;
     res.setHeader('content-type', 'application/json');
     if (req.method !== 'GET' && req.method !== 'HEAD' && !url.includes('_search') && !url.includes('_bulk')) {
-      return res.end(JSON.stringify({ acknowledged: true }));   // fixture: writes are no-ops
+      // DELETE /_snapshot/<repo>/<name>[,<name>...] really removes them from the listing, so
+      // "deleted it and it is still there" means the app, not the fixture. Everything else
+      // stays a no-op.
+      const del = req.method === 'DELETE' && /^\/_snapshot\/[^/]+\/[^/?]+/.exec(url.split('?')[0]);
+      if (del) {
+        for (const name of del[0].split('/')[3].split(',')) {
+          if (name && name !== '_all') { deletedSnapshots.add(decodeURIComponent(name)); }
+        }
+      }
+      return res.end(JSON.stringify({ acknowledged: true }));   // fixture: other writes are no-ops
     }
     const hit = routes.find(([match]) => match(url));
     res.end(JSON.stringify(hit ? hit[1]({ body, url }) : { acknowledged: true, url }));
