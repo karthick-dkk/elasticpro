@@ -119,7 +119,15 @@ services:
     #   docker build -t elasticpro-nginx:local -f images/nginx.Dockerfile images
     image: ${ELASTICPRO_NGINX_IMAGE:-karthickdk02/elasticpro-nginx:0.3.3}
     restart: unless-stopped
-    depends_on: [core]
+    depends_on:
+      core:
+        condition: service_started
+        # Restart the edge whenever core is replaced. nginx resolves its upstream once,
+        # at startup, so recreating core on its own — which is exactly what bumping
+        # ELASTICPRO_IMAGE in .env does — leaves nginx proxying to the address the old
+        # container had and answering 502 to everything until someone restarts it by
+        # hand. Seen on the 0.3.3 upgrade: core moved to 172.19.0.4 and nginx held .3.
+        restart: true
     ports:
       - "${LISTEN:-443}:443"
     volumes:
