@@ -18,7 +18,17 @@ namespace Modules\EpClients\Lib;
  */
 class MasterTemplate {
 
-	public const NAME = 'ElasticPro client master';
+	public const NAME = Roles::TEMPLATE_SLOTS['master'][0];
+
+	/**
+	 * The name this template is installed and linked under: the mapping on the Roles page, or
+	 * NAME when that slot is unmapped. uuid() is seeded from a fixed string and never from this,
+	 * so a site that renames the slot keeps the same template object — Zabbix matches ours by
+	 * uuid and renames it rather than making a second one.
+	 */
+	public static function name(): string {
+		return Roles::templateName('master');
+	}
 
 	/**
 	 * The name this template had before the product was renamed. A legacy value, kept only so

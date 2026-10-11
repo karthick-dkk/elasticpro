@@ -72,8 +72,10 @@ foreach ($data['rows'] as $n => $row) {
 		: ''))->addClass('ep-res-toggle'));
 	foreach ($row['cells'] as $i => $cell) {
 		$content = $cell['sub'] !== '' ? [$cell['text'], ' ', (new CSpan($cell['sub']))->addClass('ep-res-sub')] : $cell['text'];
+		$content = \Modules\EpResources\Lib\Bars::cell($content, $cell['bar'] ?? null, $data['bars'] ?? 'under', $cell['class']);
 		$td = (new CTag('td', true, $i === 0 ? new CTag('b', true, $content) : $content))
 			->addClass($cell['class'] !== '' ? $cell['class'] : null)
+			->addClass(($cell['bar'] ?? null) !== null && ($data['bars'] ?? 'under') !== 'none' ? 'ep-barcell' : null)
 			->addClass($i === 0 ? 'ep-res-first' : null)
 			->addClass(in_array($i, $starts, true) ? 'ep-res-start' : null);
 		if ($cell['hint'] !== '') {

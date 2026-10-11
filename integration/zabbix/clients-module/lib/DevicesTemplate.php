@@ -19,7 +19,12 @@ namespace Modules\EpClients\Lib;
  */
 class DevicesTemplate {
 
-	public const NAME = 'ElasticPro cluster devices';
+	public const NAME = Roles::TEMPLATE_SLOTS['devices'][0];
+
+	/** The name this template is installed and linked under; see MasterTemplate::name(). */
+	public static function name(): string {
+		return Roles::templateName('devices');
+	}
 	public const KEY = 'ep.es.devices.seen';
 	/** Raised when the template changes, so the Clients page offers to write it again. */
 	public const VERSION = '2';

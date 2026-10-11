@@ -4,7 +4,7 @@ namespace Modules\EpClients\Actions;
 
 use API;
 use CControllerResponseData;
-use Modules\EpClients\Lib\{Roles, Store, TemplateInstaller};
+use Modules\EpClients\Lib\{Roles, Store, TemplateInstaller, TemplateMap};
 
 /** Families and their roles, with how many machines each has across every client. */
 class RoleList extends Base {
@@ -31,6 +31,9 @@ class RoleList extends Base {
 			'family' => (string) $this->getInput('family', ''),
 			'template' => TemplateInstaller::status($roles),
 			'templates' => Roles::templateNames(),
+			'aliases' => Roles::templateAliases(),
+			'map' => TemplateMap::rows(),
+			'choices' => TemplateMap::choices(),
 			'store_ok' => Store::writable(),
 			'store_dir' => Store::dir()
 		]);

@@ -17,7 +17,7 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 export const SHARED = ['ep-xlsx.js', 'ep-export.js', 'ep-columns.js'];
 export const SHARED_CSS = ['ep-widget.css'];
 export const WIDGETS = ['capacity-widget', 'volume-widget', 'resources-widget'];
-export const SHARED_PHP = ['Store.php', 'Roles.php', 'ColumnSettings.php', 'Forecast.php', 'ClientTypes.php'];
+export const SHARED_PHP = ['Store.php', 'Roles.php', 'ColumnSettings.php', 'Forecast.php', 'ClientTypes.php', 'Bars.php'];
 export const SHARED_ACTIONS = { 'ColumnsSave.php': ['resources-widget', 'capacity-widget', 'volume-widget'] };
 export const PHP_MODULES = { 'clients-module': 'EpClients', 'resources-widget': 'EpResources', 'capacity-widget': 'EpCapacity', 'volume-widget': 'EpVolume' };
 

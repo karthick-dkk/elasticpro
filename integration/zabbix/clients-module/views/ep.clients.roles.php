@@ -64,6 +64,37 @@ $form = (new CForm('post', $url('ep.clients.role.save')))->addVar(CSRF_TOKEN_NAM
 $grid = new CFormGrid();
 $field = fn(string $label, string $name, string $value, string $hint = '', bool $ro = false) => [new CLabel($label, 'r-'.$name),
 	new CFormField([(new CTextBox($name, $value, $ro))->setId('r-'.$name)->setWidth(ZBX_TEXTAREA_STANDARD_WIDTH), $hint !== '' ? (new CDiv($hint))->addClass('ep-hint') : null])];
+
+/**
+ * Zabbix's own template picker, so a template is chosen and never typed. The same template may
+ * be picked for as many roles as you like: Roles::templatesOf() already returns each one once,
+ * so a server in two roles that name the same template is linked to it a single time.
+ *
+ * $missing are stored names this Zabbix has not got. The picker works in template ids and
+ * cannot hold them, so they ride along in a hidden field and are shown underneath — without
+ * that, opening a role and pressing Save would quietly drop a template that had merely been
+ * renamed outside this page.
+ */
+$templatePicker = function (string $name, string $formId, array $known, array $missing, string $hint = '') {
+	$ms = (new CMultiSelect([
+		'name' => $name.'[]',
+		'object_name' => 'templates',
+		'data' => $known,
+		'popup' => ['parameters' => [
+			'srctbl' => 'templates', 'srcfld1' => 'hostid', 'dstfrm' => $formId, 'dstfld1' => $name.'_'
+		]]
+	]))->setId($name.'_')->setWidth(ZBX_TEXTAREA_STANDARD_WIDTH);
+	$items = [$ms];
+	if ($missing) {
+		$items[] = (new CDiv(_s('Kept as they are, because this Zabbix has no template by these names: %1$s', implode(', ', $missing))))
+			->addClass('ep-hint')->addClass('ep-keep');
+		$items[] = new CVar($name.'_keep', implode("\n", $missing));
+	}
+	if ($hint !== '') {
+		$items[] = (new CDiv($hint))->addClass('ep-hint');
+	}
+	return [new CLabel(_('Templates'), $name.'_'), new CFormField($items)];
+};
 if ($editing !== null) {
 	$form->addVar('op', $editing['kind'] === 'family' ? 'edit_family' : 'edit_role')->addVar('id', $editing['id']);
 	$grid->addItem([(new CTag('h4', true, _s('Edit %1$s', $editing['label']))), new CFormField('')])
@@ -73,7 +104,9 @@ if ($editing !== null) {
 	}
 	$grid->addItem($field(_('Host group'), 'group', $editing['group'], _('Machines are moved at each client\'s next save.')));
 	if ($editing['kind'] === 'role') {
-		$grid->addItem($field(_('Templates'), 'templates', implode(', ', (array) ($editing['templates'] ?? [])), _s('Templates new servers of this role get, comma-separated. Empty: %1$s. Existing servers gain them at the client\'s next save; nothing is unlinked.', $data['templates']['agent'])));
+		$pick = \Modules\EpClients\Lib\TemplateMap::pick((array) ($editing['templates'] ?? []));
+		$grid->addItem($templatePicker('templates', 'ep-role-form', $pick['known'], $pick['missing'],
+			_s('Templates new servers of this role get. Empty: %1$s. One template may be given to as many roles as you like. Existing servers gain them at the client\'s next save; nothing is unlinked.', $data['templates']['agent'])));
 	}
 }
 elseif ($data['family'] !== '') {
@@ -83,7 +116,8 @@ elseif ($data['family'] !== '') {
 		->addItem($field(_('Id'), 'id', '', _('lower-case, e.g. aiml — used in item keys and CSV columns; cannot be changed later.')))
 		->addItem($field(_('In host names'), 'short', '', _('e.g. AIML → example-AIML-1')))
 		->addItem($field(_('Host group'), 'group', '', _('Created if it does not exist.')))
-		->addItem($field(_('Templates'), 'templates', '', _s('Templates new servers of this role get, comma-separated. Empty: %1$s. Existing servers gain them at the client\'s next save; nothing is unlinked.', $data['templates']['agent'])));
+		->addItem($templatePicker('templates', 'ep-role-form', [], [],
+			_s('Templates new servers of this role get. Empty: %1$s. One template may be given to as many roles as you like.', $data['templates']['agent'])));
 }
 else {
 	$form->addVar('op', 'add_family');
@@ -98,18 +132,101 @@ $grid->addItem([new CLabel(''), new CFormField([new CSubmit('save', $editing !==
 	$editing !== null || $data['family'] !== '' ? new CRedirectButton(_('Cancel'), $url('ep.clients.roles')) : null])]);
 $page->addItem($form->addItem($grid));
 
-// Template names. A Zabbix whose templates are called something else — a site's own names, or
-// the ones an earlier release shipped — is pointed at them here instead of in PHP.
+// Template mapping. A Zabbix whose templates are called something else — a site's own names, or
+// the ones an earlier release shipped — is pointed at them here instead of in PHP. Every name is
+// looked up as the page is drawn, so a name that matches nothing says so here rather than
+// failing silently later; see TemplateMap.
+$slotLabels = [
+	'cluster' => _('Elasticsearch cluster'),
+	'agent' => _('Linux agent'),
+	'master' => _('Client master'),
+	'devices' => _('Cluster devices'),
+	'jump' => _('Elasticsearch via SSH jump host'),
+	'jump_ulm' => _('Log archive via SSH jump host'),
+	'ulm' => _('Log archive (S3)'),
+	'plan' => _('Client plan'),
+	'alerts' => _('Alerts'),
+	'delay' => _('Log delay')
+];
 $tplForm = (new CForm('post', $url('ep.clients.role.save')))->addVar(CSRF_TOKEN_NAME, CCsrfTokenHelper::get('ep.clients.role.save'))
 	->addVar('op', 'set_templates')->setId('ep-template-form');
-$tplGrid = (new CFormGrid())
-	->addItem([(new CTag('h4', true, _('Template names'))), new CFormField('')])
-	->addItem($field(_('Elasticsearch cluster'), 'cluster_template', $data['templates']['cluster'],
-		_s('The template the cluster host is linked to. Empty: %1$s.', \Modules\EpClients\Lib\Roles::DEFAULT_CLUSTER_TEMPLATE)))
-	->addItem($field(_('Linux agent'), 'agent_template', $data['templates']['agent'],
-		_s('The template a server gets when its role names none. Empty: %1$s.', \Modules\EpClients\Lib\Roles::DEFAULT_TEMPLATE)))
-	->addItem([new CLabel(''), new CFormField(new CSubmit('save', _('Save')))]);
-$page->addItem($tplForm->addItem($tplGrid))->show();
+$tplForm->addItem(new CTag('h4', true, _('Template mapping')));
+$tplForm->addItem((new CDiv(_('What each template this page uses is called on this Zabbix. Leave a row empty to use the name ElasticPro ships. "Also recognise" names extra spellings that are found but never written — use it when hosts already carry an older name and new ones should get the mapped one.')))->addClass('ep-soft'));
+if (!$data['choices']['complete']) {
+	$tplForm->addItem((new CDiv(_s('The picker lists the first %1$s template names only; this Zabbix has more. A name not offered can still be typed.',
+		\Modules\EpClients\Lib\TemplateMap::PICK_LIMIT)))->addClass('ep-hint'));
+}
+$tbl = (new CTableInfo())->setHeader([_('Template'), _('Name on this Zabbix'), _('Also recognise'), _('Found')]);
+foreach ($data['map'] as $slot => $row) {
+	$label = $slotLabels[$slot] ?? $slot;
+	// Chosen, never typed. The list is every template on this Zabbix, plus the name ElasticPro
+	// ships for this slot — which for a slot the Clients page writes may not exist yet, and is
+	// the one name that has to be offerable before it does.
+	$opts = $data['choices']['names'];
+	if (!in_array($row['shipped'], $opts, true)) {
+		$opts[] = $row['shipped'];
+	}
+	// A name already mapped that this Zabbix no longer has stays on the list, or opening this
+	// page and pressing Save would silently repoint the slot at something else.
+	if ($row['mapped'] && !in_array($row['name'], $opts, true)) {
+		$opts[] = $row['name'];
+	}
+	sort($opts, SORT_NATURAL | SORT_FLAG_CASE);
+	$choices = [$row['shipped'] => _s('%1$s  (the name ElasticPro ships)', $row['shipped'])];
+	foreach ($opts as $o) {
+		if ($o !== $row['shipped']) {
+			$choices[$o] = $o;
+		}
+	}
+	$name = (new CSelect($slot.'_template'))
+		->setId('tpl-'.$slot)
+		->setValue($row['name'])
+		->addOptions(CSelect::createOptionsFromArray($choices))
+		->setWidth(360);
+	$aliasPick = \Modules\EpClients\Lib\TemplateMap::pick(array_column($row['aliases'], 'name'));
+	$also = [(new CMultiSelect([
+		'name' => $slot.'_also[]',
+		'object_name' => 'templates',
+		'data' => $aliasPick['known'],
+		'popup' => ['parameters' => [
+			'srctbl' => 'templates', 'srcfld1' => 'hostid', 'dstfrm' => 'ep-template-form', 'dstfld1' => $slot.'_also_'
+		]]
+	]))->setId($slot.'_also_')->setWidth(240)];
+	if ($aliasPick['missing']) {
+		$also[] = (new CDiv(_s('kept: %1$s', implode(', ', $aliasPick['missing']))))->addClass('ep-hint');
+		$also[] = new CVar($slot.'_also_keep', implode("\n", $aliasPick['missing']));
+	}
+	// What Zabbix has, said plainly: a template this page writes and Zabbix has not got yet is
+	// not a fault, so it reads as pending rather than missing.
+	if ($row['found']) {
+		$state = (new CSpan(_n('%1$s host', '%1$s hosts', $row['hosts'])))->addClass($row['ours'] === false && $row['writes'] ? 'red' : 'green');
+		$note = $row['ours'] === false ? _('not written by this page') : ($row['writes'] ? _('written by this page') : '');
+	}
+	elseif ($row['writes']) {
+		$state = (new CSpan(_('not installed yet')))->addClass('grey');
+		$note = _('the Clients page writes it under this name');
+	}
+	else {
+		$state = (new CSpan(_('no such template')))->addClass('red');
+		$note = '';
+	}
+	$cell = [$state];
+	if ($note !== '') {
+		$cell[] = (new CDiv($note))->addClass('ep-hint');
+	}
+	foreach ($row['aliases'] as $a) {
+		if (!$a['found']) {
+			$cell[] = (new CDiv(_s('"%1$s" is not on this Zabbix', $a['name'])))->addClass('ep-hint');
+		}
+	}
+	if ($row['problem'] !== '') {
+		$cell[] = (new CDiv($row['problem']))->addClass('msg-warning')->addClass('ep-box');
+	}
+	$tbl->addRow([[new CSpan($label), (new CDiv($row['shipped']))->addClass('ep-hint')], $name, $also, $cell]);
+}
+$tplForm->addItem($tbl);
+$tplForm->addItem((new CDiv(new CSubmit('save', _('Save mapping'))))->addClass('ep-indent'));
+$page->addItem($tplForm)->show();
 ?>
 <style>
 	.ep-inline { display: inline; } .ep-inline .btn-link { padding: 0; }

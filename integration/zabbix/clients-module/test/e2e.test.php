@@ -419,8 +419,20 @@ namespace {
 			foreach (self::$templates as $id => $t) {
 				$rec = ['templateid' => (string) $id, 'host' => $t['host'], 'uuid' => $t['uuid']];
 				if (isset($p['filter']) && !self::matchFilter($rec, (array) $p['filter'])) { continue; }
+				// selectHosts, because the mapping table counts the hosts carrying each template
+				// and a stub that always answered none would have passed a count that never works.
+				if (isset($p['selectHosts'])) {
+					$rec['hosts'] = [];
+					foreach (self::$hosts as $hid => $h) {
+						foreach ((array) ($h['parentTemplates'] ?? []) as $pt) {
+							if ((string) ($pt['templateid'] ?? '') === (string) $id) { $rec['hosts'][] = ['hostid' => (string) $hid]; }
+						}
+					}
+				}
 				$out[] = $rec;
 			}
+			if (($p['sortfield'] ?? '') === 'host') { usort($out, fn($a, $b) => strcmp($a['host'], $b['host'])); }
+			if (isset($p['limit'])) { $out = array_slice($out, 0, (int) $p['limit']); }
 			return $out;
 		}
 
@@ -536,10 +548,10 @@ namespace {
 	}
 }
 namespace Modules\EpClients\Test {
-	foreach (['Store', 'Roles', 'ColumnSettings', 'Forecast', 'ClientTypes', 'MasterTemplate', 'DevicesTemplate', 'JumpTemplate', 'ClusterTemplate', 'ClientSpec', 'Csv', 'Backups', 'Reconciler', 'Lifecycle', 'Registry', 'History', 'SetupChecks', 'AlertRouting', 'ClientState', 'Importer', 'TemplateInstaller'] as $lib) {
+	foreach (['Store', 'Roles', 'ColumnSettings', 'Forecast', 'ClientTypes', 'MasterTemplate', 'DevicesTemplate', 'JumpTemplate', 'ClusterTemplate', 'ClientSpec', 'Csv', 'Backups', 'Reconciler', 'Lifecycle', 'Registry', 'History', 'SetupChecks', 'AlertRouting', 'ClientState', 'Importer', 'TemplateInstaller', 'TemplateMap'] as $lib) {
 		require __DIR__.'/../lib/'.$lib.'.php';
 	}
-	use Modules\EpClients\Lib\{AlertRouting, Backups, ClientSpec, ClientState, Csv, Importer, JumpTemplate, Lifecycle, MasterTemplate, Reconciler, Roles, SetupChecks, Store, TemplateInstaller};
+	use Modules\EpClients\Lib\{AlertRouting, Backups, ClientSpec, ClientState, Csv, Importer, JumpTemplate, Lifecycle, MasterTemplate, Reconciler, Roles, SetupChecks, Store, TemplateInstaller, TemplateMap, ClusterTemplate, DevicesTemplate};
 
 	$failed = 0; $passed = 0; $scene = '';
 	function check(string $what, bool $ok, $detail = null): void {
@@ -568,7 +580,7 @@ namespace Modules\EpClients\Test {
 	 * written out here, so renaming a template cannot leave this fixture quietly wrong.
 	 */
 	$allTemplates = array_values(array_unique(array_merge([MasterTemplate::NAME], Reconciler::clusterTemplates(),
-		Reconciler::JUMP_CLUSTER_TEMPLATES, [Reconciler::ULM_TEMPLATE, JumpTemplate::ULM_NAME, Reconciler::agentTemplate()])));
+		Reconciler::jumpClusterTemplates(), [Reconciler::ULM_TEMPLATE, JumpTemplate::ULM_NAME, Reconciler::agentTemplate()])));
 
 	$begin = function (string $name) use ($allTemplates): void {
 		global $scene;
@@ -1482,6 +1494,88 @@ namespace Modules\EpClients\Test {
 		&& $collisions[0]['template'] === MasterTemplate::LEGACY_NAME && count($collisions[0]['hosts']) === 1, $collisions);
 	check('and it says the host is on today\'s template as well', $collisions[0]['hosts'][0]['also_current'] === true);
 	check('and that this page wrote it, so it is safe to say unlink', $collisions[0]['written_here'] === true);
+
+	/* ---------------- the template mapping, against what Zabbix really has ---------------- */
+	// The mapping's job is to make a naming problem visible on the page instead of letting it
+	// fail silently later, so what matters is what each row reports about this Zabbix.
+	$scene = 'template mapping';
+	Roles::saveTemplateNames([]);
+	$rows = TemplateMap::rows();
+	check('every slot gets a row', array_keys($rows) === array_keys(Roles::TEMPLATE_SLOTS), array_keys($rows));
+	check('an unmapped row shows the shipped name and is not marked mapped',
+		$rows['master']['name'] === Roles::TEMPLATE_SLOTS['master'][0] && $rows['master']['mapped'] === false);
+
+	// A template this page wrote: recognised as ours by uuid, not by its name.
+	\Zbx::addTemplate('ACME master', MasterTemplate::uuid('template'));
+	Roles::saveTemplateNames(['master' => 'ACME master']);
+	$row = TemplateMap::rows()['master'];
+	check('a mapped name that exists and carries our uuid is reported as ours',
+		$row['found'] === true && $row['ours'] === true && $row['problem'] === '', $row);
+
+	// The same name owned by a template this page did not write is the one mapping that cannot
+	// work: configuration.import matches by uuid and refuses a name that belongs to another
+	// object, so the page has to say so before the operator leaves it.
+	\Zbx::addTemplate('Someone elses template', 'ffffffffffffffffffffffffffffffff');
+	Roles::saveTemplateNames(['master' => 'Someone elses template']);
+	$row = TemplateMap::rows()['master'];
+	check('a written slot mapped onto a foreign template is refused in words',
+		$row['found'] === true && $row['ours'] === false && str_contains($row['problem'], 'already exists'), $row);
+	check('and the sentence names the template, so it can be found in Zabbix',
+		str_contains($row['problem'], 'Someone elses template'), $row['problem']);
+
+	// A slot this page only looks for: a name nothing answers to finds nothing, which is the
+	// exact failure an operator cannot see from the form alone.
+	Roles::saveTemplateNames(['plan' => 'No such plan template']);
+	$row = TemplateMap::rows()['plan'];
+	check('a look-for slot mapped to a name Zabbix has not got says so',
+		$row['found'] === false && str_contains($row['problem'], 'No template on this Zabbix is called'), $row);
+	check('and names the name that found nothing', str_contains($row['problem'], 'No such plan template'), $row['problem']);
+
+	// The same absence on a slot this page writes is the normal state before install, so it is
+	// reported as pending and not as a fault — a column that cried wolf would stop being read.
+	Roles::saveTemplateNames(['devices' => 'Devices template not installed yet']);
+	$row = TemplateMap::rows()['devices'];
+	check('a written slot Zabbix has not got yet is not called a problem',
+		$row['found'] === false && $row['problem'] === '', $row);
+
+	// The extra names, which are recognised and never written.
+	Roles::saveTemplateNames(['cluster' => 'ACME cluster', 'cluster_also' => "An older cluster name\nAnother missing one"]);
+	\Zbx::addTemplate('An older cluster name');
+	$row = TemplateMap::rows()['cluster'];
+	check('an extra name that exists is listed without complaint',
+		count($row['aliases']) === 2 && $row['aliases'][0]['found'] === true, $row['aliases']);
+	check('an extra name nothing answers to is flagged', $row['aliases'][1]['found'] === false);
+	check('the extra names are recognised but never written',
+		in_array('An older cluster name', Reconciler::esClusterTemplates(), true) && ClusterTemplate::name() === 'ACME cluster');
+
+	// Regression: ISSUE-001 — an extra name equal to the mapped name was hidden from the form.
+	// Found by /qa on 2026-10-08. The form posts back what it shows, so the next Save dropped
+	// the hidden name from the store, and moving the slot away then lost it for good.
+	// Report: .gstack/qa-reports/qa-report-192-168-64-13-2026-10-08.md
+	Roles::saveTemplateNames(['cluster' => 'ACME cluster', 'cluster_also' => 'ACME cluster']);
+	$row = TemplateMap::rows()['cluster'];
+	check('an extra name equal to the mapped name is still shown, so a Save cannot drop it',
+		array_column($row['aliases'], 'name') === ['ACME cluster'], $row['aliases']);
+	check('and the store still holds it', Roles::templateAliases()['cluster'] === ['ACME cluster']);
+	check('recognition lists it once, not twice',
+		count(array_keys(Reconciler::esClusterTemplates(), 'ACME cluster', true)) === 1,
+		Reconciler::esClusterTemplates());
+	// What the form round-trip does: post back exactly the names the page displayed.
+	Roles::saveTemplateNames(['cluster' => 'ACME cluster',
+		'cluster_also' => implode("\n", array_column(TemplateMap::rows()['cluster']['aliases'], 'name'))]);
+	check('a Save that changes nothing keeps the extra name',
+		Roles::templateAliases()['cluster'] === ['ACME cluster'], Roles::templateAliases()['cluster']);
+	// And moving the slot away must leave the name still recognised.
+	Roles::saveTemplateNames(['cluster_also' => 'ACME cluster']);
+	check('moving the slot away leaves the extra name recognised',
+		in_array('ACME cluster', Reconciler::esClusterTemplates(), true));
+	Roles::saveTemplateNames([]);
+
+	$choices = TemplateMap::choices();
+	check('the picker offers the template names this Zabbix has, sorted',
+		in_array('ACME cluster', $choices['names'], true) === false || $choices['names'] === array_values($choices['names']));
+	check('and says whether it listed them all', is_bool($choices['complete']));
+	Roles::saveTemplateNames([]);
 
 	/* ---------------- tidy up ---------------- */
 	foreach (glob($dir.'/backups/*.json') ?: [] as $f) { unlink($f); }

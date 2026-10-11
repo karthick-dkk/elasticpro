@@ -10,7 +10,7 @@ use API,
 	CControllerDashboardWidgetView,
 	CControllerResponseData,
 	CCsrfTokenHelper;
-use Modules\EpCapacity\Lib\{ColumnSettings, Forecast};
+use Modules\EpCapacity\Lib\{Bars, ColumnSettings, Forecast};
 
 /**
  * The capacity table: one row per client master host, the columns columns.json lists — the
@@ -35,6 +35,7 @@ class WidgetView extends CControllerDashboardWidgetView {
 		$data = [
 			'name' => $this->getInput('name', $this->widget->getDefaultName()),
 			'columns' => $columns,
+			'bars' => Bars::styleOf($this->fields_values['bars'] ?? Bars::DEFAULT_VALUE),
 			'rows' => [],
 			'export' => null,
 			'error' => null,
@@ -126,7 +127,7 @@ class WidgetView extends CControllerDashboardWidgetView {
 			$cells = [];
 			$export = [];
 			foreach ($columns as $column) {
-				$cell = ['text' => '—', 'class' => '', 'hint' => ''];
+				$cell = ['text' => '—', 'class' => '', 'hint' => '', 'bar' => null];
 
 				if (($column['source'] ?? '') === 'host') {
 					$cell['text'] = $client.(($m['{$EP.CLIENT.STATUS}'] ?? 'active') === 'disabled' ? ' ('._('disabled').')' : '');
@@ -174,6 +175,10 @@ class WidgetView extends CControllerDashboardWidgetView {
 						elseif ($usage >= $warn) {
 							$cell['class'] = 'ep-warn';
 						}
+						// The bar is the same figure the colour came from, so the two cannot
+						// disagree; a figure Elasticsearch did not report leaves bar null and
+						// draws nothing, because a bar of zero length reads as nought per cent.
+						$cell['bar'] = max(0.0, min(100.0, (float) $usage));
 						if (array_key_exists('usageKey', $column)) {
 							$cell['hint'] = _s('%1$s%% used', round($usage, 1));
 						}

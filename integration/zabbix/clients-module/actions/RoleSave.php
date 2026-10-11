@@ -7,7 +7,7 @@ use CControllerResponseRedirect;
 use CMessageHelper;
 use CUrl;
 use Exception;
-use Modules\EpClients\Lib\{Roles, TemplateInstaller};
+use Modules\EpClients\Lib\{Roles, TemplateInstaller, TemplateMap};
 
 /**
  * Add, change, move or remove a family or a role. After a backup, the roles are saved and the
@@ -19,9 +19,36 @@ class RoleSave extends Base {
 	protected function checkInput(): bool {
 		return $this->validateInput([
 			'op' => 'required|in add_family,add_role,edit_family,edit_role,remove,up,down,set_templates',
-			'id' => 'string', 'family' => 'string', 'label' => 'string', 'short' => 'string', 'group' => 'string', 'macroPrefix' => 'string', 'templates' => 'string',
-			'agent_template' => 'string', 'cluster_template' => 'string'
-		]);
+			'id' => 'string', 'family' => 'string', 'label' => 'string', 'short' => 'string', 'group' => 'string', 'macroPrefix' => 'string',
+			'templates' => 'array', 'templates_keep' => 'string'
+		] + self::templateFields());
+	}
+
+	/**
+	 * One group of fields per Roles::TEMPLATE_SLOTS key: the chosen name from the select, the
+	 * extra names as template ids from the picker, and the ids' keep-list — names this Zabbix
+	 * has not got, which the picker cannot carry and a save must not drop.
+	 */
+	private static function templateFields(): array {
+		$out = [];
+		foreach (array_keys(Roles::TEMPLATE_SLOTS) as $slot) {
+			$out[$slot.'_template'] = 'string';
+			$out[$slot.'_also'] = 'array';
+			$out[$slot.'_also_keep'] = 'string';
+		}
+		return $out;
+	}
+
+	/**
+	 * The template names a picker and its keep-list stand for: the ids resolved to today's
+	 * names, plus the stored names this Zabbix has not got, each once.
+	 */
+	private function picked(string $field): array {
+		$names = array_merge(
+			TemplateMap::namesOf((array) $this->getInput($field, [])),
+			Roles::splitNames((string) $this->getInput($field.'_keep', ''))
+		);
+		return array_values(array_unique(array_filter($names, fn($n) => trim($n) !== '')));
 	}
 
 	protected function doAction(): void {
@@ -33,18 +60,28 @@ class RoleSave extends Base {
 		// it skips the backup-and-reinstall below.
 		if ($op === 'set_templates') {
 			try {
-				Roles::saveTemplateNames(['agent' => $in('agent_template'), 'cluster' => $in('cluster_template')]);
-				CMessageHelper::setSuccessTitle(_('Template names saved'));
+				$map = [];
+				foreach (array_keys(Roles::TEMPLATE_SLOTS) as $slot) {
+					// The select offers the shipped name as its first option; storing it would
+					// pin the slot to today's spelling, so it is stored as "unmapped" instead.
+					$chosen = $in($slot.'_template');
+					$map[$slot] = $chosen === (Roles::TEMPLATE_SLOTS[$slot][0] ?? '') ? '' : $chosen;
+					$map[$slot.'_also'] = implode("\n", $this->picked($slot.'_also'));
+				}
+				Roles::saveTemplateNames($map);
+				CMessageHelper::setSuccessTitle(_('Template mapping saved'));
 			}
 			catch (Exception $e) {
-				CMessageHelper::setErrorTitle(_('Template names not changed'));
+				CMessageHelper::setErrorTitle(_('Template mapping not changed'));
 				CMessageHelper::addError($e->getMessage());
 			}
 			$this->setResponse(new CControllerResponseRedirect((new CUrl('zabbix.php'))->setArgument('action', 'ep.clients.roles')));
 			return;
 		}
 		// Templates, comma-separated; none means the Linux agent template named in the settings.
-		$templates = array_values(array_filter(array_map('trim', explode(',', $in('templates'))), fn($t) => $t !== ''));
+		// Chosen in the picker, never typed; the same template may be picked for several roles,
+		// and Roles::templatesOf() already returns each one once per server.
+		$templates = $this->picked('templates');
 		try {
 			switch ($op) {
 				case 'add_family':
