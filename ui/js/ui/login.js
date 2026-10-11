@@ -57,10 +57,14 @@ export function loginScreen(root, { bootstrap = false, mode: startMode = null, h
     // form: "the link expired" and "the secrets differ" call for different fixes.
     let error = notice || '';
     let mode = startMode || (bootstrap ? 'bootstrap' : 'login');
+    // The name as last typed. draw() rebuilds the whole panel on every refusal, and a
+    // fresh input is empty: the person then re-typed their name for a password mistake.
+    let typed = '';
 
     const submit = async () => {
       if (busy) return;
       const name = (document.getElementById('login-name') || {}).value || '';
+      typed = name;
       const password = (document.getElementById('login-pw') || {}).value || '';
       const confirm = (document.getElementById('login-pw2') || {}).value || '';
 
@@ -146,7 +150,7 @@ export function loginScreen(root, { bootstrap = false, mode: startMode = null, h
           changing ? null : h('label.field',
             h('span', 'User name'),
             h('input#login-name', {
-              type: 'text', autocomplete: 'username', autofocus: true,
+              type: 'text', value: typed, autocomplete: 'username', autofocus: true,
               spellcheck: 'false', autocapitalize: 'none', onkeydown: onKey,
             })),
           h('label.field', { style: { marginTop: '10px' } },
