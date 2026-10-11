@@ -124,6 +124,9 @@ services:
       - "${LISTEN:-443}:443"
     volumes:
       - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      # Addresses exempt from rate limiting (the Zabbix frontend). nginx will not start
+      # if this is missing, so it ships empty rather than being optional.
+      - ./nginx/rate-exempt.conf:/etc/nginx/rate-exempt.conf:ro
       # Unused while nginx.conf has no auth_basic; kept so turning it back on is a
       # config change rather than a compose change.
       - ./nginx/htpasswd:/etc/nginx/htpasswd:ro
