@@ -155,6 +155,44 @@ namespace Modules\EpClients\Test {
 	$twoRoles['families'][1]['roles'][0]['templates'] = ['Shared by roles'];
 	check('one template may be given to several roles, and a server gets it once',
 		Roles::templatesOf($twoRoles, [$twoRoles['families'][0]['roles'][0]['id'], $twoRoles['families'][1]['roles'][0]['id']]) === ['Shared by roles']);
+	// Regression: the exports hardcoded self::NAME while install() and status() used the
+	// mapped name, so mapping master, devices, jump or jump_ulm wrote a template under one
+	// name and then looked for it under another — "Write master template" wrote the wrong
+	// one, status() stayed 'missing' forever and every client save threw. cluster was the
+	// only writable slot that worked, because ClusterTemplate::export() already asked
+	// name(). Every internal reference counts too: a trigger expression, a graph item and a
+	// dashboard widget all name the template they live on, and Zabbix rejects an import
+	// whose references do not resolve.
+	Roles::saveTemplateNames(['master' => 'ACME master', 'devices' => 'ACME devices',
+		'jump' => 'ACME jump', 'jump_ulm' => 'ACME jump ulm', 'cluster' => 'ACME cluster']);
+	$exports = [
+		'master' => [(new MasterTemplate($roles))->export(), 'ACME master', Roles::TEMPLATE_SLOTS['master'][0]],
+		'devices' => [DevicesTemplate::export(), 'ACME devices', Roles::TEMPLATE_SLOTS['devices'][0]],
+		'jump' => [JumpTemplate::export(), 'ACME jump', Roles::TEMPLATE_SLOTS['jump'][0]],
+		'jump_ulm' => [JumpTemplate::ulmExport(), 'ACME jump ulm', Roles::TEMPLATE_SLOTS['jump_ulm'][0]],
+		'cluster' => [ClusterTemplate::export(), 'ACME cluster', Roles::TEMPLATE_SLOTS['cluster'][0]],
+	];
+	foreach ($exports as $slot => [$ex, $mapped, $shippedName]) {
+		$tpl = $ex['zabbix_export']['templates'][0] ?? [];
+		check("the $slot export is written under the mapped name",
+			($tpl['template'] ?? null) === $mapped, $tpl['template'] ?? null);
+		// Every reference inside the export has to move with it. A trigger expression names
+		// the template it reads from as /<template>/<key>, and a graph or dashboard item
+		// names it as a "host". Left on the shipped name they point at a template that will
+		// not exist, and Zabbix refuses the import. (The visible "name" field is a separate
+		// descriptive string and is deliberately not asserted here.)
+		$json = json_encode($ex);
+		check("the $slot export references no template but the mapped one",
+			strpos($json, '/'.$shippedName.'/') === false
+			&& strpos($json, '"host":"'.$shippedName.'"') === false, $slot);
+	}
+	Roles::saveTemplateNames([]);
+	foreach (['master' => MasterTemplate::NAME, 'devices' => DevicesTemplate::NAME,
+			'jump' => JumpTemplate::NAME, 'jump_ulm' => JumpTemplate::ULM_NAME] as $slot => $shippedFallback) {
+		check("the $slot export falls back to the shipped name when unmapped",
+			Roles::templateName($slot) === $shippedFallback);
+	}
+
 	$tooMany = Roles::splitNames(implode("\n", array_map(fn($i) => 'n'.$i, range(1, 20))));
 	check('the extra names are capped', count($tooMany) === Roles::MAX_ALIASES);
 	Roles::saveTemplateNames([]);
