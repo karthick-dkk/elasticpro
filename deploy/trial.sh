@@ -15,6 +15,20 @@ fail=0; ok(){ echo "  ✓ $1"; }; bad(){ echo "  ✗ $1"; fail=1; }
 # fresh clone — and in CI — none of them exist. Make throwaway ones; never overwrite.
 ./trial-setup.sh
 
+# The three support images are pinned in docker-compose.yml to the version being
+# released, but they are only pushed to the registry by docker.yml, which runs on the
+# release tag. Between the commit that bumps the pin and the tag that publishes the
+# images, the pinned tag does not exist — so this trial, which runs on every push, failed
+# with "manifest for karthickdk02/elasticpro-nginx:0.4.0 not found" and then reported
+# that the core was not running. The trial is here to prove the stack comes up and the
+# four properties below hold, not to pin a support image to a digest, so it runs them at
+# :latest — which docker.yml moves on every non-pre-release tag and is therefore always
+# resolvable. The core itself is still built from this checkout, which is the thing under
+# test.
+export ELASTICPRO_NGINX_IMAGE=${ELASTICPRO_NGINX_IMAGE:-karthickdk02/elasticpro-nginx:latest}
+export ELASTICPRO_REDIS_IMAGE=${ELASTICPRO_REDIS_IMAGE:-karthickdk02/elasticpro-redis:latest}
+export ELASTICPRO_DB_IMAGE=${ELASTICPRO_DB_IMAGE:-karthickdk02/elasticpro-postgres:latest}
+
 docker compose build core 2>&1 | tail -2
 docker compose up -d 2>&1 | tail -3
 
