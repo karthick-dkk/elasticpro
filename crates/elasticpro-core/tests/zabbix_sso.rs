@@ -55,9 +55,9 @@ async fn session_for(c: &Arc<Core>, user: &str, ty: i64, groups: &[&str]) -> (St
 
 /// An admin session, past the shipped password.
 async fn admin(c: &Arc<Core>) -> String {
-    let res = c.handle(json!({ "type": "LOGIN", "name": "elasticpro", "password": support::first_password(c) })).await;
+    let res = c.handle(json!({ "type": "LOGIN", "name": "Admin", "password": elasticpro_core::auth::DEFAULT_PASSWORD })).await;
     let s = res["session"].as_str().unwrap().to_string();
-    let ch = c.handle(json!({ "type": "USER_SET_PASSWORD", "session": s, "name": "elasticpro",
+    let ch = c.handle(json!({ "type": "USER_SET_PASSWORD", "session": s, "name": "Admin",
                               "password": "correct-horse-battery" })).await;
     assert_eq!(ch["ok"], json!(true));
     s
@@ -268,7 +268,7 @@ async fn a_zabbix_account_has_no_password_here() {
 
 #[tokio::test]
 async fn an_account_marked_as_zabbixs_is_closed_to_passwords_even_one_that_matches() {
-    // The random password makes this unreachable in normal use. It is reachable when the
+    // Nothing the message API does makes this state. It is reachable when the
     // accounts file is edited or migrated: an account that had a password here, now marked
     // as Zabbix's. Zabbix decides who that is; a password here must not be a second say.
     let dir = TempDir::new("zbx-marked");

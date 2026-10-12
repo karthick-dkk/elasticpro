@@ -422,37 +422,28 @@ impl std::fmt::Display for AuthError {
 /// nobody writes it on a sticky note.
 pub const MIN_PASSWORD: usize = 10;
 
-/// The account a fresh install starts with.
+/// The account a fresh install starts with, and the password it opens with.
 ///
-/// Its password is made for this install alone (see [`seed_first_account`]): a password
-/// that ships in the source is one anybody can type, and whoever reached the sign-in page
-/// before the administrator did could take the account. The account is still created with
-/// `must_change` set, and a session holding it can do nothing at all except replace it.
-pub const DEFAULT_USER: &str = "elasticpro";
+/// Both ship in the source, as Zabbix's own `Admin`/`zabbix` do: whoever installs the app
+/// knows the way in without reading a log or a file inside a volume. The cost is the
+/// obvious one — until the password is changed, anyone who reaches the sign-in page has
+/// the account — so the core says so on every start it still opens, and the Accounts page
+/// is where the administrator changes it, whenever they choose. It is not forced: an
+/// account made `must_change` can do nothing but replace its password, and the point of a
+/// known default is to be usable at once.
+///
+/// [`INITIAL_PASSWORD_ENV`] names a file to take the first password from instead, for an
+/// install that must never open with the shipped one.
+pub const DEFAULT_USER: &str = "Admin";
+/// Shorter than [`MIN_PASSWORD`] on purpose: it is the one password the store accepts
+/// without the check, because it is the one everybody is expected to replace. It can never
+/// be *set* — `set_password` holds a new password to the minimum.
+pub const DEFAULT_PASSWORD: &str = "elastic";
 
-/// The file in the data directory that holds the first password until it is changed.
-/// Written 0600, once, on the start that creates the account; removed as soon as the
-/// account's password is changed.
-pub const INITIAL_PASSWORD_FILE: &str = "initial-admin-password";
-
-/// Names a file to take the first password from instead of generating one. A file and
+/// Names a file to take the first password from instead of the shipped one. A file and
 /// never the password itself: an environment variable shows up in `docker inspect`,
 /// `/proc/<pid>/environ` and every child process.
 pub const INITIAL_PASSWORD_ENV: &str = "ELASTICPRO_INITIAL_ADMIN_PASSWORD_FILE";
-
-/// No 0/O, 1/l/I: the password is read off a terminal and typed by hand.
-const INITIAL_ALPHABET: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789";
-/// 24 characters of a 57-letter alphabet, about 140 bits.
-const INITIAL_LEN: usize = 24;
-
-/// A fresh first password, from the operating system's CSPRNG.
-pub fn generate_initial_password() -> String {
-    use rand::Rng;
-    let mut rng = rand::rngs::OsRng;
-    (0..INITIAL_LEN)
-        .map(|_| INITIAL_ALPHABET[rng.gen_range(0..INITIAL_ALPHABET.len())] as char)
-        .collect()
-}
 
 /// The password in an operator's override file: its first line, line ending dropped,
 /// held to the same minimum as any password change.
@@ -464,41 +455,12 @@ pub fn read_initial_password_file(path: &std::path::Path) -> Result<String, Auth
     Ok(pw)
 }
 
-/// Write `password` to `path` readable by the owner only, by temp file and rename so a
-/// crash never leaves half a password or a copy with looser permissions.
-fn write_secret_file(path: &std::path::Path, password: &str) -> std::io::Result<()> {
-    use std::io::Write;
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir)?;
-    }
-    let tmp = path.with_extension("tmp");
-    let _ = std::fs::remove_file(&tmp);
-    let mut opts = std::fs::OpenOptions::new();
-    opts.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        opts.mode(0o600);
-    }
-    let mut f = opts.open(&tmp)?;
-    f.write_all(password.as_bytes())?;
-    f.write_all(b"\n")?;
-    f.sync_all()?;
-    drop(f);
-    std::fs::rename(&tmp, path)
-}
-
 /// What [`seed_first_account`] did, for the caller to log.
 #[derive(Debug)]
 pub struct Seeded {
-    /// The password, when it was generated here. `None` when it came from the operator's
-    /// file — they already have it, and it is not ours to print.
-    pub generated: Option<String>,
-    /// Where the generated password was written, when it was.
-    pub written_to: Option<PathBuf>,
-    /// Why the generated password could not be written to the data directory.
-    pub write_error: Option<String>,
-    /// Why the operator's override file was not used (a random password was made instead).
+    /// The password came from the operator's [`INITIAL_PASSWORD_ENV`] file, not the source.
+    pub from_override: bool,
+    /// Why the operator's override file was not used (the shipped password was used instead).
     pub override_error: Option<String>,
     /// Why the accounts file could not be saved (the account exists for this run only).
     pub save_error: Option<String>,
@@ -506,56 +468,33 @@ pub struct Seeded {
 
 /// Create the first account when there are none; `None` when accounts already exist.
 ///
-/// `password_file`: where to leave a generated password (`None` = memory only, log it
-/// only). `override_file`: the operator's [`INITIAL_PASSWORD_ENV`] file, if set.
-///
-/// An override that cannot be used falls back to a generated password rather than to no
-/// account at all: an empty accounts store offers `BOOTSTRAP_ADMIN` to whoever asks first,
-/// which is the very race this replaces.
-pub fn seed_first_account(users: &UserStore, password_file: Option<&std::path::Path>,
-                          override_file: Option<&std::path::Path>) -> Option<Seeded> {
+/// `override_file`: the operator's [`INITIAL_PASSWORD_ENV`] file, if set. One that cannot
+/// be used falls back to the shipped password rather than to no account at all: an empty
+/// accounts store offers `BOOTSTRAP_ADMIN` to whoever asks first, which is the very race
+/// this replaces.
+pub fn seed_first_account(users: &UserStore, override_file: Option<&std::path::Path>) -> Option<Seeded> {
     if !users.is_empty() {
         return None;
     }
-    let mut out = Seeded { generated: None, written_to: None, write_error: None, override_error: None, save_error: None };
-    let from_operator = match override_file.map(read_initial_password_file) {
-        Some(Ok(pw)) => Some(pw),
-        Some(Err(e)) => {
-            out.override_error = Some(e.to_string());
-            None
-        }
-        None => None,
-    };
-    let password = match from_operator {
-        Some(pw) => pw,
-        None => {
-            let pw = generate_initial_password();
-            out.generated = Some(pw.clone());
+    let mut out = Seeded { from_override: false, override_error: None, save_error: None };
+    let password = match override_file.map(read_initial_password_file) {
+        Some(Ok(pw)) => {
+            out.from_override = true;
             pw
         }
+        Some(Err(e)) => {
+            out.override_error = Some(e.to_string());
+            DEFAULT_PASSWORD.to_string()
+        }
+        None => DEFAULT_PASSWORD.to_string(),
     };
-    if let Err(e) = users.add_inner(DEFAULT_USER, &password, Role::Admin, true, false) {
+    if let Err(e) = users.add_inner(DEFAULT_USER, &password, Role::Admin, false, false) {
         if users.is_empty() {
             return None;
         }
         out.save_error = Some(e.to_string());
     }
-    if let (Some(pw), Some(path)) = (&out.generated, password_file) {
-        match write_secret_file(path, pw) {
-            Ok(()) => out.written_to = Some(path.to_path_buf()),
-            Err(e) => out.write_error = Some(format!("cannot write {}: {e}", path.display())),
-        }
-    }
     Some(out)
-}
-
-/// Remove the first-password file once it no longer opens anything: the account's
-/// password was changed, or the account is gone. True when a file was removed.
-pub fn retire_initial_password_file(users: &UserStore, path: Option<&std::path::Path>) -> bool {
-    match path {
-        Some(p) if p.exists() && !users.default_unchanged() => std::fs::remove_file(p).is_ok(),
-        _ => false,
-    }
 }
 
 fn check_password(p: &str) -> Result<(), AuthError> {
@@ -604,9 +543,18 @@ impl UserStore {
         self.accounts.read().clone()
     }
 
-    /// True while the shipped account still has the shipped password.
+    /// True while the shipped account still opens with the shipped password — the state
+    /// every start warns about. A real verification, so it costs one key derivation.
     pub fn default_unchanged(&self) -> bool {
-        self.accounts.read().iter().any(|a| a.name == DEFAULT_USER && a.must_change)
+        self.verify(DEFAULT_USER, DEFAULT_PASSWORD).is_ok()
+    }
+
+    /// An account that must change its password before it can do anything else. Only
+    /// tests reach this: nothing an operator does creates one any more, and the fence
+    /// (`must_change_password`) still has to be proven through the message API.
+    #[doc(hidden)]
+    pub fn add_must_change(&self, name: &str, password: &str, role: Role) -> Result<(), AuthError> {
+        self.add_inner(name, password, role, true, true)
     }
 
     pub fn count_admins(&self) -> usize {
@@ -1166,74 +1114,52 @@ mod tests {
     }
 
     #[test]
-    fn each_install_gets_its_own_first_password() {
-        let (a, b) = (store(), store());
-        let pa = seed_first_account(&a, None, None).unwrap().generated.unwrap();
-        let pb = seed_first_account(&b, None, None).unwrap().generated.unwrap();
-        assert_ne!(pa, pb, "two installs must not share a first password");
-        for p in [&pa, &pb] {
-            assert_eq!(p.chars().count(), INITIAL_LEN);
-            assert!(p.bytes().all(|c| INITIAL_ALPHABET.contains(&c)), "outside the alphabet: {p}");
-        }
-        let acct = a.verify(DEFAULT_USER, &pa).unwrap();
-        assert!(acct.must_change && acct.role == Role::Admin);
+    fn a_fresh_store_opens_with_the_shipped_account_and_is_seeded_once() {
+        let a = store();
+        let seeded = seed_first_account(&a, None).unwrap();
+        assert!(!seeded.from_override && seeded.override_error.is_none());
+        let acct = a.verify(DEFAULT_USER, DEFAULT_PASSWORD).unwrap();
+        assert!(acct.role == Role::Admin && !acct.must_change, "usable at once, not fenced");
+        assert!(a.default_unchanged());
         assert_eq!(a.verify(DEFAULT_USER, "loginme").unwrap_err(), AuthError::BadCredentials);
         // Only ever the first account: a store with accounts is left alone.
-        assert!(seed_first_account(&a, None, None).is_none());
+        assert!(seed_first_account(&a, None).is_none());
         assert_eq!(a.list().len(), 1);
+        // The shipped password is below the minimum on purpose, so it cannot be chosen
+        // again once replaced.
+        assert!(DEFAULT_PASSWORD.chars().count() < MIN_PASSWORD);
+        assert!(matches!(a.set_password(DEFAULT_USER, DEFAULT_PASSWORD), Err(AuthError::Weak(_))));
+        a.set_password(DEFAULT_USER, "a-real-password-now").unwrap();
+        assert!(!a.default_unchanged());
+        assert_eq!(a.verify(DEFAULT_USER, DEFAULT_PASSWORD).unwrap_err(), AuthError::BadCredentials);
     }
 
     #[test]
-    fn the_first_password_is_written_owner_only_and_retired_after_the_change() {
-        let dir = scratch();
-        let file = dir.join(INITIAL_PASSWORD_FILE);
-        let s = UserStore::open_with_rounds(Some(dir.join("users.json")), 1);
-        let seeded = seed_first_account(&s, Some(&file), None).unwrap();
-        let pw = seeded.generated.unwrap();
-        assert_eq!(seeded.written_to.as_deref(), Some(file.as_path()));
-        assert_eq!(std::fs::read_to_string(&file).unwrap().trim_end(), pw);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mode = std::fs::metadata(&file).unwrap().permissions().mode() & 0o777;
-            assert_eq!(mode, 0o600, "mode {mode:o}");
-        }
-        assert!(!dir.join("initial-admin-password.tmp").exists());
-        // Still the live password: the file stays.
-        assert!(!retire_initial_password_file(&s, Some(&file)));
-        assert!(file.exists());
-        s.set_password(DEFAULT_USER, "a-real-password-now").unwrap();
-        assert!(retire_initial_password_file(&s, Some(&file)));
-        assert!(!file.exists());
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn an_operator_file_sets_the_first_password_and_is_not_copied() {
+    fn an_operator_file_sets_the_first_password_instead() {
         let dir = scratch();
         let over = dir.join("pw");
         std::fs::write(&over, "operator-chosen-pass\n").unwrap();
-        let file = dir.join(INITIAL_PASSWORD_FILE);
         let s = store();
-        let seeded = seed_first_account(&s, Some(&file), Some(&over)).unwrap();
-        assert!(seeded.generated.is_none() && seeded.override_error.is_none());
-        assert!(!file.exists(), "the operator already has it; no second copy");
-        assert!(s.verify(DEFAULT_USER, "operator-chosen-pass").unwrap().must_change);
+        let seeded = seed_first_account(&s, Some(&over)).unwrap();
+        assert!(seeded.from_override && seeded.override_error.is_none());
+        assert!(!s.verify(DEFAULT_USER, "operator-chosen-pass").unwrap().must_change);
+        assert!(s.verify(DEFAULT_USER, DEFAULT_PASSWORD).is_err(), "the shipped password must not also open it");
+        assert!(!s.default_unchanged());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn a_short_operator_file_is_refused_and_a_random_password_used_instead() {
+    fn a_short_operator_file_is_refused_and_the_shipped_password_used_instead() {
         let dir = scratch();
         let over = dir.join("pw");
         std::fs::write(&over, "short\n").unwrap();
         assert!(matches!(read_initial_password_file(&over), Err(AuthError::Weak(_))));
         let s = store();
-        let seeded = seed_first_account(&s, None, Some(&over)).unwrap();
+        let seeded = seed_first_account(&s, Some(&over)).unwrap();
+        assert!(!seeded.from_override);
         assert!(seeded.override_error.as_deref().unwrap().contains("at least"));
-        let pw = seeded.generated.expect("never an empty store");
         assert!(s.verify(DEFAULT_USER, "short").is_err());
-        assert!(s.verify(DEFAULT_USER, &pw).is_ok());
+        assert!(s.verify(DEFAULT_USER, DEFAULT_PASSWORD).is_ok(), "never an empty store");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

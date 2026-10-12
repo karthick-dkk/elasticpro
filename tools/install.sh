@@ -403,12 +403,10 @@ if [ "$MODE" = hosted ]; then
   fi
   info "The certificate is self-signed and lasts 30 days, so your browser will warn once"
   info "and it will expire — replace deploy/tls/ before anyone relies on this."
-  # The first account is made here with a password of its own, rather than left for the
-  # first visitor to name — whoever reached the page first would otherwise have become
-  # the administrator.
-  info "Sign in as  elasticpro  with the password from:"
-  info "  docker compose exec core cat /app/data/initial-admin-password"
-  info "It is in the log above too, and you are asked to change it at that first sign-in."
+  # The first account is made on first start rather than left for the first visitor to
+  # name — whoever reached the page first would otherwise have become the administrator.
+  info "Sign in as  Admin  with the password  elastic  and change it on the Accounts page:"
+  info "until you do, anyone who reaches the sign-in page has the account."
   say ""
   info "For production, see deploy/PRODUCTION.md. In short:"
   info "  • a real certificate in deploy/tls/ (this one lasts 30 days)"

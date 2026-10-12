@@ -26,9 +26,9 @@ fn core(dir: &TempDir, server: ServerZbx) -> Arc<Core> {
 }
 
 async fn admin(c: &Arc<Core>) -> String {
-    let res = c.handle(json!({ "type": "LOGIN", "name": "elasticpro", "password": support::first_password(c) })).await;
+    let res = c.handle(json!({ "type": "LOGIN", "name": "Admin", "password": elasticpro_core::auth::DEFAULT_PASSWORD })).await;
     let s = res["session"].as_str().expect("a session").to_string();
-    let ch = c.handle(json!({ "type": "USER_SET_PASSWORD", "session": s, "name": "elasticpro", "password": PASSWORD })).await;
+    let ch = c.handle(json!({ "type": "USER_SET_PASSWORD", "session": s, "name": "Admin", "password": PASSWORD })).await;
     assert_eq!(ch["ok"], json!(true), "{ch}");
     s
 }
@@ -140,13 +140,13 @@ async fn the_store_is_private_and_written_whole() {
     let g = send(&c2, &s2, json!({ "type": "ZABBIX_LINK_GET" })).await;
     assert_eq!(g["zabbixUrl"], json!("https://zbx.example.com"));
     assert_eq!(g["apiToken"]["set"], json!(true));
-    assert_eq!(g["apiToken"]["by"], json!("elasticpro"));
+    assert_eq!(g["apiToken"]["by"], json!("Admin"));
     assert_eq!(g["allowedSources"], json!(["10.0.0.0/24"]));
     assert_no_secret(&g, &[TOKEN]);
 }
 
 async fn admin_again(c: &Arc<Core>) -> String {
-    let res = c.handle(json!({ "type": "LOGIN", "name": "elasticpro", "password": PASSWORD })).await;
+    let res = c.handle(json!({ "type": "LOGIN", "name": "Admin", "password": PASSWORD })).await;
     res["session"].as_str().expect("a session").to_string()
 }
 
@@ -174,7 +174,7 @@ async fn set_validates_and_refuses_what_it_does_not_own() {
     // Every refusal is on the record, with who tried.
     let g = send(&c, &s, json!({ "type": "ZABBIX_LINK_GET" })).await;
     let evs = g["events"].as_array().unwrap();
-    assert!(evs.iter().all(|e| e["ok"] == json!(false) && e["by"] == json!("elasticpro") && e["action"] == json!("set")), "{g}");
+    assert!(evs.iter().all(|e| e["ok"] == json!(false) && e["by"] == json!("Admin") && e["action"] == json!("set")), "{g}");
     assert!(evs.len() >= 9, "{g}");
     // With the lab switch, http is fine, and turning the switch off again is refused while
     // an http address is stored.
@@ -265,7 +265,7 @@ async fn only_an_admin_reaches_the_link() {
     assert!(g["pending"].is_null());
     // The admin's change is on the record, by name.
     let r = send(&c, &a, json!({ "type": "ZABBIX_LINK_SET", "syncSecs": 60 })).await;
-    assert_eq!(r["events"][0]["by"], json!("elasticpro"));
+    assert_eq!(r["events"][0]["by"], json!("Admin"));
     assert_eq!(r["events"][0]["detail"], json!("changed syncSecs"));
     assert_eq!(r["changed"], json!(["syncSecs"]));
 }
@@ -294,7 +294,7 @@ async fn pairing_happy_path_then_sign_in_and_sync() {
     assert!(secret.len() >= 43, "32 random bytes");
     assert!(code["exp"].as_u64().unwrap() >= now() + PAIR_TTL_SECS - 5);
     let g = send(&c, &s, json!({ "type": "ZABBIX_LINK_GET" })).await;
-    assert_eq!(g["pending"]["by"], json!("elasticpro"));
+    assert_eq!(g["pending"]["by"], json!("Admin"));
     assert_eq!(g["paired"], json!(false));
     assert_no_secret(&g, &[&secret]);
 
@@ -307,7 +307,7 @@ async fn pairing_happy_path_then_sign_in_and_sync() {
 
     let g = send(&c, &s, json!({ "type": "ZABBIX_LINK_GET" })).await;
     assert_eq!(g["paired"], json!(true), "{g}");
-    assert_eq!(g["pairedBy"], json!("elasticpro"));
+    assert_eq!(g["pairedBy"], json!("Admin"));
     assert_eq!(g["zabbixVersion"], json!("7.0.5"));
     assert_eq!(g["apiUrl"], json!(api));
     assert_eq!(g["apiToken"]["set"], json!(true));
@@ -351,7 +351,7 @@ async fn pairing_happy_path_then_sign_in_and_sync() {
     assert_eq!(c2.frame_ancestors(), "'none'");
     let on_disk = String::from_utf8(std::fs::read(dir.join("zabbix-link.json")).unwrap()).unwrap();
     assert!(!on_disk.contains(&secret) && !on_disk.contains(TOKEN), "unpair removes both from the file");
-    assert!(r["events"].as_array().unwrap().iter().any(|e| e["action"] == json!("unpair") && e["by"] == json!("elasticpro")));
+    assert!(r["events"].as_array().unwrap().iter().any(|e| e["action"] == json!("unpair") && e["by"] == json!("Admin")));
 }
 
 #[tokio::test]

@@ -177,18 +177,7 @@ The module uses this as *this Zabbix's address* when it pairs. ElasticPro only a
 
 ## Step 4 — ElasticPro: enter the Zabbix URL and make a pairing code
 
-**4a. Sign in as an ElasticPro administrator.** If this ElasticPro has never been signed in to, it has one account, `elasticpro`, with a password generated for this install alone. Read it on the ElasticPro host:
-
-```bash
-cd <deploy-dir>     # the folder that holds ElasticPro's docker-compose.yml
-docker compose exec core cat /app/data/initial-admin-password
-```
-
-The core also logged the same password once, on the start that created the account: `docker compose logs core | grep "created the first one"`.
-
-Open `https://<elasticpro-host>/` and sign in with that user name and password.
-
-ElasticPro then asks for a new password (at least 10 characters). Nothing else works until you set it. Once it is set, `initial-admin-password` is deleted; the old password no longer opens anything.
+**4a. Sign in as an ElasticPro administrator.** If this ElasticPro has never been signed in to, it has one account, `Admin`, with the password `elastic` — the same on every install. Open `https://<elasticpro-host>/`, sign in with it, and change the password on the Accounts page (at least 10 characters) before anyone else reaches the page: until you do, anyone who can load the page has the account, and the core says so in its log on every start. An install whose administrator already changed it, or that was given its own first password through `ELASTICPRO_INITIAL_ADMIN_PASSWORD_FILE`, signs in with that instead.
 
 > Open ElasticPro at the address **the Zabbix web host** can reach (`https://<elasticpro-host>`), not through `localhost` or an SSH tunnel. The address in your browser bar is the one the pairing code tells Zabbix to call back.
 {.is-warning}

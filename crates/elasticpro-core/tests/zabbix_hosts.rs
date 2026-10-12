@@ -179,9 +179,9 @@ async fn zabbix_hosts_become_clusters() {
 
     // --- Zabbix wins over a primed cluster with the same id
     let other = TestServer::start().await;
-    let local = c.handle(json!({ "type": "LOGIN", "name": "elasticpro", "password": support::first_password(&c) })).await;
+    let local = c.handle(json!({ "type": "LOGIN", "name": "Admin", "password": elasticpro_core::auth::DEFAULT_PASSWORD })).await;
     let ls = local["session"].as_str().unwrap().to_string();
-    c.handle(json!({ "type": "USER_SET_PASSWORD", "session": ls, "name": "elasticpro", "password": "correct-horse-battery" })).await;
+    c.handle(json!({ "type": "USER_SET_PASSWORD", "session": ls, "name": "Admin", "password": "correct-horse-battery" })).await;
     c.handle(json!({ "type": "PRIME", "session": ls, "clusters": [
         { "id": "zbx-vm-1-cluster", "url": other.url(), "authHeader": "Basic b3RoZXI6b3RoZXI=" }] })).await;
     c.handle(json!({ "type": "ES", "session": admin, "clusterId": "zbx-vm-1-cluster", "method": "GET", "path": "/" })).await;

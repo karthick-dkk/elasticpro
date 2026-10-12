@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.3.4
+
+**A fresh install signs in as `Admin` / `elastic`.**
+
+The first account used to get a password made for that install alone, left in a file inside
+the volume and forced to change at first sign-in. It is now the same on every install — `Admin`,
+password `elastic`, like Zabbix's own `Admin`/`zabbix` — and usable at once: change it on the
+Accounts page whenever you choose. Until it is changed, anyone who reaches the sign-in page has
+the account, and the core warns on every start it still opens with the shipped password. The
+shipped password is below the 10-character minimum on purpose, so once replaced it cannot be
+chosen again. `ELASTICPRO_INITIAL_ADMIN_PASSWORD_FILE` still starts the account with a password of
+your own; the `initial-admin-password` file is gone. Installs that already have accounts are not
+touched — they keep the accounts they have, under whatever name.
+
+A refused sign-in no longer empties the user-name field.
+
 ## 0.3.3
 
 **Templates are mapped on the Roles page, and chosen rather than typed.**

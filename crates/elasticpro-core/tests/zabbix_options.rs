@@ -13,9 +13,9 @@ use std::sync::{Arc, Mutex};
 use support::{TempDir, TestServer};
 
 async fn admin(c: &Arc<Core>) -> String {
-    let r = c.handle(json!({ "type": "LOGIN", "name": "elasticpro", "password": support::first_password(c) })).await;
+    let r = c.handle(json!({ "type": "LOGIN", "name": "Admin", "password": elasticpro_core::auth::DEFAULT_PASSWORD })).await;
     let s = r["session"].as_str().unwrap().to_string();
-    c.handle(json!({ "type": "USER_SET_PASSWORD", "session": s, "name": "elasticpro", "password": "correct-horse-battery" })).await;
+    c.handle(json!({ "type": "USER_SET_PASSWORD", "session": s, "name": "Admin", "password": "correct-horse-battery" })).await;
     s
 }
 

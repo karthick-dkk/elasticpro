@@ -16,9 +16,9 @@
  * users.json to start again" tells an attacker the filename and tells a legitimate user
  * nothing they can act on from a browser.
  *
- * The first password is made per install and left in the data directory and the server
- * log on first start instead, where an operator can read it and a visitor cannot. The roles are for the administrator
- * assigning them, on the Accounts page, behind a session.
+ * The shipped account (`Admin`, documented in deploy/README.md) is for the administrator
+ * to replace from the Accounts page; this screen does not name it. The roles are for the
+ * administrator assigning them, on the Accounts page, behind a session.
  */
 
 import { h, mount } from '../lib/dom.js';
@@ -100,9 +100,9 @@ export function loginScreen(root, { bootstrap = false, mode: startMode = null, h
       if (res && res.ok && res.session) {
         setSession(res.session);
         const who = res.caller || { name: name.trim(), role: 'admin' };
-        // The shipped password gets you exactly this screen. The core refuses everything
-        // else until it changes, so sending them on to a dashboard that cannot load
-        // would only look broken.
+        // An account that must change its password gets exactly this screen. The core
+        // refuses everything else until it changes, so sending them on to a dashboard
+        // that cannot load would only look broken.
         if (who.mustChange) {
           hint = who; mode = 'change'; error = '';
           return draw();

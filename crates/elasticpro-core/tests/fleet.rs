@@ -307,9 +307,9 @@ async fn a_guest_gets_health_and_nodes_and_nothing_else() {
 async fn an_events_ticket_works_once_and_follows_the_session() {
     let dir = TempDir::new("fleet-ticket");
     let c = Core::new_with_rounds(Some(dir.0.clone()), Edition::Hosted, 1);
-    let login = c.handle(json!({ "type": "LOGIN", "name": "elasticpro", "password": support::first_password(&c) })).await;
+    let login = c.handle(json!({ "type": "LOGIN", "name": "Admin", "password": elasticpro_core::auth::DEFAULT_PASSWORD })).await;
     let s = login["session"].as_str().unwrap().to_string();
-    c.handle(json!({ "type": "USER_SET_PASSWORD", "session": s, "name": "elasticpro", "password": "correct-horse-battery" })).await;
+    c.handle(json!({ "type": "USER_SET_PASSWORD", "session": s, "name": "Admin", "password": "correct-horse-battery" })).await;
 
     let t = c.handle(json!({ "type": "EVENTS_TICKET", "session": s })).await;
     assert_eq!(t["ok"], json!(true), "{t}");
@@ -317,7 +317,7 @@ async fn an_events_ticket_works_once_and_follows_the_session() {
     let owner: EventsOwner = c.redeem_events_ticket(ticket).expect("first use");
     assert!(c.redeem_events_ticket(ticket).is_none(), "a ticket is single-use");
     assert!(matches!(owner.reauth, Reauth::Session(_)));
-    assert_eq!(c.events_revalidate(&owner).flatten().map(|c| c.name), Some("elasticpro".into()));
+    assert_eq!(c.events_revalidate(&owner).flatten().map(|c| c.name), Some("Admin".into()));
 
     c.handle(json!({ "type": "LOGOUT", "session": s })).await;
     assert!(c.events_revalidate(&owner).is_none(), "signed out: the stream must close");

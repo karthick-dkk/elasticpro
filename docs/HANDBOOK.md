@@ -249,8 +249,8 @@ the oldest go. The owner is always the caller — a signed-in session's user, a 
 API token's `token:…` name, or `local` on the portable build — and is never read from the
 message, so nobody sees or clears anyone else's. These are not writes to a cluster: no
 `WRITE_UNLOCK`, no read-only guard. Without a session on an edition with accounts they
-answer `unauthenticated`, like every other message; an account still on its first
-(per-install, `<data dir>/initial-admin-password`) password gets `must_change_password`.
+answer `unauthenticated`, like every other message; an account marked as having to change
+its password gets `must_change_password`.
 
 | Message | Role | Answer |
 |---|---|---|

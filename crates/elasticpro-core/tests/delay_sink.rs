@@ -49,15 +49,15 @@ const PASSWORD: &str = "correct-horse-battery";
 /// Sign in to a core whose account has already had its forced change done — what the
 /// second process in the restart test sees.
 async fn sign_in(c: &Arc<Core>) -> String {
-    let res = c.handle(json!({ "type": "LOGIN", "name": "elasticpro", "password": PASSWORD })).await;
+    let res = c.handle(json!({ "type": "LOGIN", "name": "Admin", "password": PASSWORD })).await;
     res["session"].as_str().expect("a session").to_string()
 }
 
 async fn admin(c: &Arc<Core>) -> String {
-    let res = c.handle(json!({ "type": "LOGIN", "name": "elasticpro", "password": support::first_password(c) })).await;
+    let res = c.handle(json!({ "type": "LOGIN", "name": "Admin", "password": elasticpro_core::auth::DEFAULT_PASSWORD })).await;
     let s = res["session"].as_str().expect("a session").to_string();
     let ch = c
-        .handle(json!({ "type": "USER_SET_PASSWORD", "session": &s, "name": "elasticpro", "password": PASSWORD }))
+        .handle(json!({ "type": "USER_SET_PASSWORD", "session": &s, "name": "Admin", "password": PASSWORD }))
         .await;
     assert_eq!(ch["ok"], json!(true), "{ch}");
     s

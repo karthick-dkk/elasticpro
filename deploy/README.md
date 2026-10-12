@@ -54,21 +54,18 @@ docker compose logs -f
 Open `https://<server>/`, sign in, and pick `/app/config/config_cluster.json` when the app
 asks for a config.
 
-**First sign-in.** A fresh install has one account, `elasticpro`, with a password generated
-for this install alone. Read it with either of:
-
-```bash
-docker compose exec core cat /app/data/initial-admin-password   # 0600, in the core-data volume
-docker compose logs core | grep "created the first one"          # the same password, logged once
-```
-
-The app then makes you set a real password (at least 10 characters) before anything else
-works, and deletes `initial-admin-password` as soon as you have. To choose the first password
-yourself instead, put it in a file, mount it into the core and point
-`ELASTICPRO_INITIAL_ADMIN_PASSWORD_FILE` at it before the first start — a file, never the password in
-an environment variable; the same 10-character minimum applies, and a file that is too short is
-refused (a random password is generated instead and the log says why). An install that already
-has accounts is not changed by any of this. Jump-host key paths in the config should be `/app/ssh/<file>`.
+**First sign-in.** A fresh install has one account, **`Admin`**, password **`elastic`** — the
+same on every install, like Zabbix's own `Admin`/`zabbix`. Change it on the Accounts page
+whenever you choose (at least 10 characters); until you do, anyone who reaches the sign-in page
+has the account, and the core says so in its log on every start. To start with a password of
+your own instead, put it in a file, mount it into the core and point
+`ELASTICPRO_INITIAL_ADMIN_PASSWORD_FILE` at it before the first start — a file, never the password
+in an environment variable; the 10-character minimum applies, and a file that is too short is
+refused (the shipped password is used instead and the log says why). An install that already
+has accounts is not changed by any of this: it keeps the accounts it has, whatever they are
+called. To go back to `Admin`/`elastic` on such an install, stop the core, remove `users.json`
+from the `core-data` volume and start it again — every account goes with it.
+Jump-host key paths in the config should be `/app/ssh/<file>`.
 
 ## Logs — everything, in one place
 

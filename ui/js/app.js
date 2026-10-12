@@ -709,7 +709,7 @@ async function gateOnAuth() {
   let st;
   try { st = await authState(); } catch (_) { return; }
   if (!st.required) { me = null; return; }
-  // A live session that is still on the shipped password goes to the change screen, not
+  // A live session that must still change its password goes to the change screen, not
   // to a dashboard the core will refuse to fill.
   if (st.caller && !st.caller.mustChange) { me = st.caller; return; }
   // Inside Zabbix there is no ElasticPro password to type: the person signed in to Zabbix.

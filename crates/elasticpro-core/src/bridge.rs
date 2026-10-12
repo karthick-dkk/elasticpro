@@ -225,10 +225,6 @@ struct PrimeMsg {
 /// non-admin looking at "not primed" until an admin happens to open the app.
 const PRIMED_FILE: &str = "primed.json";
 
-/// The first account's password before every install got its own. Kept only to warn an
-/// existing install that has still not changed it; nothing is ever created with it.
-const LEGACY_SHIPPED_PASSWORD: &str = "loginme";
-
 /// Keys whose values are credentials, wherever they appear in a config. Compared
 /// case-insensitively, at every depth. `CONFIG_VIEW` drops them; an admin still reads
 /// the file itself.
@@ -330,31 +326,23 @@ impl Core {
             data_dir.as_ref().filter(|_| edition.uses_accounts()).map(|d| d.join(name))
         };
         let users = UserStore::open_with_rounds(auth_path("users.json"), rounds);
-        let first_pw_file = auth_path(auth::INITIAL_PASSWORD_FILE);
         // A fresh install gets the first account rather than an empty state and a
-        // bootstrap screen, with a password made for this install alone. It is created
-        // must_change, so it is a way in and nothing more.
+        // bootstrap screen. It opens with the shipped password until the administrator
+        // changes it, and every start it still does says so.
         if edition.uses_accounts() {
             let override_file = std::env::var_os(auth::INITIAL_PASSWORD_ENV)
                 .filter(|v| !v.is_empty())
                 .map(PathBuf::from);
-            if let Some(seeded) = auth::seed_first_account(&users, first_pw_file.as_deref(), override_file.as_deref()) {
+            if let Some(seeded) = auth::seed_first_account(&users, override_file.as_deref()) {
                 Core::log_seeded(&seeded, override_file.as_deref());
-            } else {
-                if auth::retire_initial_password_file(&users, first_pw_file.as_deref()) {
-                    tracing::info!("removed {}: the first password has been changed", auth::INITIAL_PASSWORD_FILE);
-                }
-                // An install from before per-install passwords whose first account was
-                // never signed in to still opens with the password that shipped in the
-                // source. Left as it is — nothing here rewrites an existing accounts
-                // file — but said out loud on every start until someone changes it.
-                if users.default_unchanged() && users.verify(auth::DEFAULT_USER, LEGACY_SHIPPED_PASSWORD).is_ok() {
-                    tracing::warn!(
-                        user = auth::DEFAULT_USER,
-                        "the first account still has the password older versions shipped with; \
-                         sign in and change it now — anyone who reaches the sign-in page can use it"
-                    );
-                }
+            } else if users.default_unchanged() {
+                // Nothing here rewrites an existing accounts file; it is said out loud
+                // on every start instead, until someone changes it.
+                tracing::warn!(
+                    user = auth::DEFAULT_USER,
+                    "the first account still has the shipped password; anyone who reaches the \
+                     sign-in page can use it — sign in and set your own on the Accounts page"
+                );
             }
         }
         let tokens = TokenStore::open(auth_path("tokens.json"));
@@ -516,53 +504,42 @@ impl Core {
         self.data_dir.as_deref()
     }
 
-    /// The file holding the first password until it is changed; accounts editions only.
-    fn initial_password_file(&self) -> Option<PathBuf> {
-        self.data_dir.as_ref().filter(|_| self.edition.uses_accounts()).map(|d| d.join(auth::INITIAL_PASSWORD_FILE))
-    }
-
     /// The one startup line that announces the first account. Its wording ("created the
-    /// first one") is what the docs tell operators to grep for.
-    ///
-    /// The log, not the sign-in page: whoever can read this already has the server;
-    /// whoever loads the page has not. It is printed once, on the start that creates the
-    /// account.
+    /// first one") is what the docs tell operators to grep for. Printed once, on the start
+    /// that creates the account.
     fn log_seeded(s: &auth::Seeded, override_file: Option<&std::path::Path>) {
         if let Some(why) = &s.override_error {
             tracing::error!(
-                "{} not used ({why}); a random first password was generated instead",
+                "{} not used ({why}); the account was created with the shipped password instead",
                 auth::INITIAL_PASSWORD_ENV
             );
         }
         if let Some(why) = &s.save_error {
             tracing::error!("the first account could not be saved and lasts only until restart: {why}");
         }
-        if let Some(why) = &s.write_error {
-            tracing::error!("{why} — the first password is in this log only");
-        }
-        match (&s.generated, &s.written_to) {
-            (Some(pw), Some(file)) => tracing::warn!(
-                user = auth::DEFAULT_USER,
-                password = %pw,
-                file = %file.display(),
-                "no accounts existed: created the first one. Sign in with this password (also in \
-                 the file named here, removed once you change it) and set a real password — \
-                 nothing else works until you do."
-            ),
-            (Some(pw), None) => tracing::warn!(
-                user = auth::DEFAULT_USER,
-                password = %pw,
-                "no accounts existed: created the first one. Sign in with this password and set a \
-                 real password — nothing else works until you do."
-            ),
-            (None, _) => tracing::warn!(
+        if s.from_override {
+            tracing::warn!(
                 user = auth::DEFAULT_USER,
                 from = %override_file.map(|p| p.display().to_string()).unwrap_or_default(),
-                "no accounts existed: created the first one, with the password from {}. Sign in and \
-                 set a real password — nothing else works until you do.",
+                "no accounts existed: created the first one, with the password from {}",
                 auth::INITIAL_PASSWORD_ENV
-            ),
+            );
+        } else {
+            tracing::warn!(
+                user = auth::DEFAULT_USER,
+                password = auth::DEFAULT_PASSWORD,
+                "no accounts existed: created the first one, with the shipped password. Anyone \
+                 who reaches the sign-in page can use it until it is changed — sign in and set \
+                 your own on the Accounts page"
+            );
         }
+    }
+
+    /// The account store, for tests that need an account the message API cannot make
+    /// (one marked `must_change`).
+    #[doc(hidden)]
+    pub fn users_for_tests(&self) -> &UserStore {
+        &self.users
     }
 
     /// True when accounts apply but none exist yet, so the app must ask for a first admin
@@ -1124,8 +1101,6 @@ impl Core {
                     // idle timeout on an account that no longer exists.
                     self.sessions.end_all_for(&name);
                     tracing::info!(target: "audit", user = %me, subject = %name, "account removed");
-                    // Removing the first account also retires its first password.
-                    let _ = auth::retire_initial_password_file(&self.users, self.initial_password_file().as_deref());
                 }
                 out
             }
@@ -1156,11 +1131,6 @@ impl Core {
                 if out["ok"] == json!(true) {
                     // The session in front of us is holding the old answer.
                     self.sessions.clear_must_change(&name);
-                    // The first password has done its job; its copy on disk goes now.
-                    if auth::retire_initial_password_file(&self.users, self.initial_password_file().as_deref()) {
-                        tracing::info!(target: "audit", user = %me, "removed {}: the first password has been changed",
-                                       auth::INITIAL_PASSWORD_FILE);
-                    }
                     // Everyone but the person doing it: changing your own password should
                     // not sign you out of the screen you are standing at.
                     if !name.eq_ignore_ascii_case(&me) {

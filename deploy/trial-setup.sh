@@ -29,8 +29,7 @@ if [ ! -s nginx/htpasswd ]; then
   # a requirement for the trial, so depending on it here adds nothing.
   docker run --rm httpd:2.4-alpine htpasswd -Bbn "$TRIAL_USER" "$TRIAL_PASS" > nginx/htpasswd
   # Not the login. nginx.conf has no auth_basic — signing in is the app's own job, and it
-  # creates `elasticpro` with a random password on first run (docker compose exec core cat
-  # /app/data/initial-admin-password). This file only matters if you turn edge
+  # creates `Admin` / `elastic` on first run. This file only matters if you turn edge
   # authentication back on, and saying otherwise would send someone hunting for a
   # password prompt that is not there.
   echo "  made nginx/htpasswd (unused unless you re-enable auth_basic — not the app login)"; made=1
