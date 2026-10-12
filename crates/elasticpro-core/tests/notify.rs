@@ -23,10 +23,10 @@ fn core(dir: &TempDir, edition: Edition) -> std::sync::Arc<Core> {
 }
 
 async fn admin_session(c: &std::sync::Arc<Core>) -> String {
-    let res = c.handle(json!({ "type": "LOGIN", "name": "elasticpro", "password": support::first_password(c) })).await;
+    let res = c.handle(json!({ "type": "LOGIN", "name": "Admin", "password": elasticpro_core::auth::DEFAULT_PASSWORD })).await;
     let s = res["session"].as_str().expect("a session").to_string();
     let ch = c
-        .handle(json!({ "type": "USER_SET_PASSWORD", "session": s, "name": "elasticpro", "password": PASSWORD }))
+        .handle(json!({ "type": "USER_SET_PASSWORD", "session": s, "name": "Admin", "password": PASSWORD }))
         .await;
     assert_eq!(ch["ok"], json!(true), "{ch}");
     s
@@ -253,10 +253,11 @@ async fn without_a_session_it_is_refused_like_everything_else() {
 }
 
 #[tokio::test]
-async fn the_shipped_password_gets_no_history() {
+async fn a_password_that_must_change_gets_no_history() {
     let dir = TempDir::new("notify-mustchange");
     let c = core(&dir, Edition::Installed);
-    let res = c.handle(json!({ "type": "LOGIN", "name": "elasticpro", "password": support::first_password(&c) })).await;
+    c.users_for_tests().add_must_change("probe", "a-first-password", elasticpro_core::auth::Role::User).unwrap();
+    let res = c.handle(json!({ "type": "LOGIN", "name": "probe", "password": "a-first-password" })).await;
     let s = res["session"].as_str().unwrap();
     let r = c.handle(json!({ "type": "NOTIFY_LIST", "session": s })).await;
     assert_eq!(r["kind"], json!("must_change_password"), "{r}");

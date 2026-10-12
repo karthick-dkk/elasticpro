@@ -194,12 +194,10 @@ docker compose --profile cache up -d
 with no host mapping (that is the image's `EXPOSE` metadata, not a published port — a mapping
 would read `0.0.0.0:8765->8765/tcp`, as nginx's 443 does).
 
-**Verify.** `https://<host>/` shows the sign-in page. The first account is `elasticpro`, with a
-password generated for this install: `docker compose exec core cat
-/app/data/initial-admin-password` (or `docker compose logs core | grep "created the first
-one"`). Signing in forces a new password (10+ characters) and deletes that file.
-`ELASTICPRO_INITIAL_ADMIN_PASSWORD_FILE` — a mounted file, never the password itself — sets the
-first password instead. `deploy/trial.sh`
+**Verify.** `https://<host>/` shows the sign-in page. The first account is `Admin`, password
+`elastic`; change it on the Accounts page (10+ characters) before anyone else reaches the page.
+`ELASTICPRO_INITIAL_ADMIN_PASSWORD_FILE` — a mounted file, never the password itself — starts the
+account with a password of your own instead. `deploy/trial.sh`
 runs the same checks CI does (no credentials → 401 at the edge if you turned basic auth back
 on; a write appears in the core's audit log under the signed-in user's name; the core is
 unreachable from outside the compose network).
@@ -752,7 +750,7 @@ Templates: re-import the previous export, or restore the Zabbix DB backup.
 | `deploy/secrets/zabbix_api_write_token` | write-only, `zabbix.createHosts` | 0640 | `zbx_phase34.py` (step 6) |
 | `deploy/secrets/vault_role_id` / `vault_secret_id` | ElasticPro's read-only AppRole | 0640 | `vault/setup.sh` (step 2) |
 | `deploy/secrets/vault_write_role_id` / `vault_write_secret_id` | write-only AppRole, `createHosts` | 0640 | `vault/setup.sh` (step 2) |
-| `core-data:/app/data/initial-admin-password` | the first `elasticpro` password, until it is changed (then deleted) | 0600, container user | the core, on its first start |
+| the `Admin` account's password (`elastic` until changed) | the first way into ElasticPro | the Accounts page | the core, on its first start |
 | `deploy/secrets/scraper_token` | ElasticPro API token (role `user`), plan + automation scrapers | 0640 | `zbx_phase34.py` (step 6), or by hand from Accounts → API tokens |
 | `deploy/zabbix/stack/secrets/db_password` | Zabbix's own Postgres password | `1997:1995`, 0640 | `stack/setup.sh` (step 3) |
 | `deploy/zabbix/stack/secrets/zabbix-vault.env` | `VAULT_TOKEN` for the Zabbix server | 0600 | `vault/setup.sh` (step 2) |
@@ -775,7 +773,7 @@ Templates: re-import the previous export, or restore the Zabbix DB backup.
 `ELASTICPRO_ZABBIX_LINUX_TEMPLATE`), `ELASTICPRO_ZABBIX_SYNC_SECS` (300), `ELASTICPRO_VAULT_ADDR`, `ELASTICPRO_VAULT_ROLE_ID_FILE`,
 `ELASTICPRO_VAULT_SECRET_ID_FILE`, `ELASTICPRO_ZABBIX_API_WRITE_TOKEN_FILE`,
 `ELASTICPRO_VAULT_WRITE_ROLE_ID_FILE`, `ELASTICPRO_VAULT_WRITE_SECRET_ID_FILE`, `ELASTICPRO_INITIAL_ADMIN_PASSWORD_FILE`
-(first run only; unset = a random password in `/app/data/initial-admin-password`).
+(first run only; unset = the shipped `Admin`/`elastic`).
 
 **Zabbix server** (`deploy/zabbix/stack/docker-compose.yml`): `ZBX_VAULT=HashiCorp`,
 `ZBX_VAULTURL`, `VAULT_TOKEN` (from `secrets/zabbix-vault.env`, not inline),

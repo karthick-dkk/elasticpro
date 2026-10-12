@@ -67,12 +67,11 @@ what it would do; `--all` restarts the whole stack; `--timeout` (default 180 s).
 
 The Rust build is long on a small server; build the image on a build machine and use `--image`.
 
-**First sign-in on a new host:** the account is `elasticpro`, with a password generated for
-this install — `docker compose exec core cat /app/data/initial-admin-password` (or
-`docker compose logs core | grep "created the first one"`). Sign in and set a real password at
-once; the file is deleted when you do. `ELASTICPRO_INITIAL_ADMIN_PASSWORD_FILE` (a mounted file, 10+
-characters) sets it instead — see `deploy/README.md`, "First sign-in". Redeploying an existing
-host changes nothing: its accounts are kept.
+**First sign-in on a new host:** the account is `Admin`, password `elastic`, on every install.
+Change it on the Accounts page before anyone else can reach the page; the core warns on every
+start until you do. `ELASTICPRO_INITIAL_ADMIN_PASSWORD_FILE` (a mounted file, 10+ characters)
+starts the account with a password of your own instead — see `deploy/README.md`, "First
+sign-in". Redeploying an existing host changes nothing: its accounts are kept.
 
 **Rollback later:** `deploy/deploy.sh --rollback` — back to the image before the last deploy
 (`ELASTICPRO_IMAGE_PREVIOUS` in `.env`).

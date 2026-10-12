@@ -195,12 +195,3 @@ impl TestServer {
         TestServer { port, hits, conns }
     }
 }
-
-/// The first account's password on a fresh core, read from the data directory the way an
-/// operator reads it. Only there until that password is changed.
-pub fn first_password(c: &elasticpro_core::Core) -> String {
-    let dir = c.data_dir().expect("a core with a data directory");
-    let raw = std::fs::read_to_string(dir.join(elasticpro_core::auth::INITIAL_PASSWORD_FILE))
-        .expect("the first password file");
-    raw.trim_end().to_string()
-}

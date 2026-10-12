@@ -17,25 +17,26 @@ fn core(dir: &TempDir, edition: Edition) -> std::sync::Arc<Core> {
     Core::new_with_rounds(Some(dir.0.clone()), edition, 1)
 }
 
-/// Sign in as the shipped account and get past its forced password change.
+/// Sign in as the shipped account and replace its shipped password.
 ///
-/// Every install now starts with one, so this is what "become an admin" looks like —
-/// there is no empty state to bootstrap out of.
+/// Every install starts with one, so this is what "become an admin" looks like — there
+/// is no empty state to bootstrap out of. The change is not forced; the tests make it so
+/// the shipped password is not what later assertions lean on.
 async fn admin_session(c: &std::sync::Arc<Core>) -> String {
     let res = c
-        .handle(json!({ "type": "LOGIN", "name": "elasticpro", "password": support::first_password(c) }))
+        .handle(json!({ "type": "LOGIN", "name": "Admin", "password": elasticpro_core::auth::DEFAULT_PASSWORD }))
         .await;
     assert_eq!(res["ok"], json!(true), "the shipped account should sign in: {res}");
     let s = res["session"].as_str().expect("a session").to_string();
     let ch = c
-        .handle(json!({ "type": "USER_SET_PASSWORD", "session": s, "name": "elasticpro", "password": PASSWORD }))
+        .handle(json!({ "type": "USER_SET_PASSWORD", "session": s, "name": "Admin", "password": PASSWORD }))
         .await;
     assert_eq!(ch["ok"], json!(true), "the forced change should succeed: {ch}");
     s
 }
 
 /// The name admin_session() leaves you signed in as.
-const ADMIN: &str = "elasticpro";
+const ADMIN: &str = "Admin";
 
 async fn login(c: &std::sync::Arc<Core>, name: &str) -> String {
     let res = c.handle(json!({ "type": "LOGIN", "name": name, "password": PASSWORD })).await;
@@ -170,22 +171,58 @@ async fn an_unauthenticated_ping_names_nothing() {
 /* --------------------------- the account that ships ---------------------------- */
 
 #[tokio::test]
-async fn a_fresh_install_ships_an_account_that_can_do_nothing_but_change_itself() {
+async fn a_fresh_install_opens_with_the_shipped_account_at_once() {
     let dir = TempDir::new("auth-seed");
-    let c = core(&dir, Edition::Installed);
+    // Hosted: the one edition where every message below exists (API tokens need HTTP).
+    let c = core(&dir, Edition::Hosted);
 
     let ping = c.handle(json!({ "type": "PING" })).await;
     assert_eq!(ping["authRequired"], json!(true));
 
-    let res = c.handle(json!({ "type": "LOGIN", "name": "elasticpro", "password": support::first_password(&c) })).await;
+    let res = c.handle(json!({ "type": "LOGIN", "name": ADMIN, "password": elasticpro_core::auth::DEFAULT_PASSWORD })).await;
     assert_eq!(res["ok"], json!(true), "the shipped account should sign in: {res}");
+    let s = res["session"].as_str().unwrap().to_string();
+    assert_eq!(res["caller"]["role"], json!("admin"));
+    assert_eq!(res["caller"]["mustChange"], json!(false), "not fenced — the default is there to be used: {res}");
+
+    // Usable at once, the whole admin surface included: no gate answers, and the ones
+    // that need nothing set up succeed outright. (CONFIG_READ on an install with no
+    // config yet answers not_found — the message ran; that is not a gate.)
+    for (t, outright) in [("PINS", true), ("CONFIG_READ", false), ("USER_LIST", true), ("TOKEN_LIST", true), ("WRITE_UNLOCK", false)] {
+        let r = c.handle(json!({ "type": t, "session": s })).await;
+        for gate in ["must_change_password", "unauthenticated", "forbidden", "needs_bootstrap"] {
+            assert_ne!(r["kind"], json!(gate), "{t} was gated on the shipped account: {r}");
+        }
+        if outright {
+            assert_eq!(r["ok"], json!(true), "{t} on the shipped account: {r}");
+        }
+    }
+    // The shipped password can be replaced but never chosen: it is below the minimum.
+    let again = c
+        .handle(json!({ "type": "USER_SET_PASSWORD", "session": s, "name": ADMIN, "password": elasticpro_core::auth::DEFAULT_PASSWORD }))
+        .await;
+    assert_eq!(again["ok"], json!(false), "{again}");
+    let ok = c.handle(json!({ "type": "USER_SET_PASSWORD", "session": s, "name": ADMIN, "password": PASSWORD })).await;
+    assert_eq!(ok["ok"], json!(true), "{ok}");
+}
+
+#[tokio::test]
+async fn an_account_that_must_change_its_password_can_do_nothing_else() {
+    // Nothing an operator does makes one of these any more; the fence is still code the
+    // dispatch runs, so it is still proven here.
+    let dir = TempDir::new("auth-fence");
+    let c = core(&dir, Edition::Installed);
+    c.users_for_tests().add_must_change("probe", "a-first-password", elasticpro_core::auth::Role::Admin).unwrap();
+
+    let res = c.handle(json!({ "type": "LOGIN", "name": "probe", "password": "a-first-password" })).await;
+    assert_eq!(res["ok"], json!(true), "{res}");
     let s = res["session"].as_str().unwrap().to_string();
     assert_eq!(res["caller"]["mustChange"], json!(true), "{res}");
 
-    // A known password is only acceptable because it buys nothing.
+    // A password that must change buys nothing until it has.
     for t in ["PINS", "CONFIG_READ", "USER_LIST", "WRITE_UNLOCK", "TOKEN_LIST"] {
         let r = c.handle(json!({ "type": t, "session": s })).await;
-        assert_eq!(r["kind"], json!("must_change_password"), "{t} worked on the shipped password: {r}");
+        assert_eq!(r["kind"], json!("must_change_password"), "{t} worked on a password that must change: {r}");
     }
     let es = c
         .handle(json!({ "type": "ES", "session": s, "clusterId": "x", "method": "GET", "path": "/_cluster/health" }))
@@ -194,24 +231,19 @@ async fn a_fresh_install_ships_an_account_that_can_do_nothing_but_change_itself(
 
     // Nor can it dodge the change by setting somebody else's password.
     let dodge = c
-        .handle(json!({ "type": "USER_SET_PASSWORD", "session": s, "name": "someone", "password": "a-long-enough-one" }))
+        .handle(json!({ "type": "USER_SET_PASSWORD", "session": s, "name": ADMIN, "password": "a-long-enough-one" }))
         .await;
     assert_eq!(dodge["ok"], json!(false), "{dodge}");
 
-    // The replacement still has to be a real password.
-    let short = c
-        .handle(json!({ "type": "USER_SET_PASSWORD", "session": s, "name": "elasticpro", "password": "abc" }))
-        .await;
-    assert_eq!(short["ok"], json!(false));
-    assert!(short["message"].as_str().unwrap().contains("at least"), "{short}");
-
-    // And once it is changed, the session in hand works — without signing in again.
-    let ok = c
-        .handle(json!({ "type": "USER_SET_PASSWORD", "session": s, "name": "elasticpro", "password": PASSWORD }))
-        .await;
+    // A change that is too short leaves it fenced; a real one lifts the fence on the
+    // live session, without a new sign-in.
+    let short = c.handle(json!({ "type": "USER_SET_PASSWORD", "session": s, "name": "probe", "password": "abc" })).await;
+    assert_eq!(short["ok"], json!(false), "{short}");
+    assert_eq!(c.handle(json!({ "type": "PINS", "session": s })).await["kind"], json!("must_change_password"));
+    let ok = c.handle(json!({ "type": "USER_SET_PASSWORD", "session": s, "name": "probe", "password": PASSWORD })).await;
     assert_eq!(ok["ok"], json!(true), "{ok}");
     assert_eq!(
-        c.handle(json!({ "type": "USER_LIST", "session": s })).await["ok"],
+        c.handle(json!({ "type": "PINS", "session": s })).await["ok"],
         json!(true),
         "the live session should stop being locked the moment the password changes"
     );
@@ -221,76 +253,47 @@ async fn a_fresh_install_ships_an_account_that_can_do_nothing_but_change_itself(
 async fn the_shipped_password_stops_working_once_it_is_replaced() {
     let dir = TempDir::new("auth-seed-gone");
     let c = core(&dir, Edition::Installed);
-    let first = support::first_password(&c);
+    let first = elasticpro_core::auth::DEFAULT_PASSWORD;
     admin_session(&c).await;
 
-    let old = c.handle(json!({ "type": "LOGIN", "name": "elasticpro", "password": first })).await;
+    let old = c.handle(json!({ "type": "LOGIN", "name": "Admin", "password": first })).await;
     assert_eq!(old["ok"], json!(false), "the first password must not survive the change: {old}");
-    let new = c.handle(json!({ "type": "LOGIN", "name": "elasticpro", "password": PASSWORD })).await;
+    let new = c.handle(json!({ "type": "LOGIN", "name": "Admin", "password": PASSWORD })).await;
     assert_eq!(new["ok"], json!(true));
     assert_eq!(new["caller"]["mustChange"], json!(false));
 }
 
-/* ------------------------- the first password, per install ------------------------ */
+/* ------------------------------ the shipped password ------------------------------ */
 
 #[tokio::test]
 async fn a_fresh_install_does_not_open_with_the_old_shipped_password() {
     for edition in [Edition::Hosted, Edition::Installed] {
         let dir = TempDir::new("auth-no-loginme");
         let c = core(&dir, edition);
-        let r = c.handle(json!({ "type": "LOGIN", "name": "elasticpro", "password": "loginme" })).await;
+        let r = c.handle(json!({ "type": "LOGIN", "name": ADMIN, "password": "loginme" })).await;
         assert_eq!(r["ok"], json!(false), "{edition:?}: loginme opened a fresh install: {r}");
     }
 }
 
 #[tokio::test]
-async fn two_installs_get_different_first_passwords() {
+async fn every_install_opens_with_the_same_shipped_password_until_it_is_changed() {
     let (d1, d2) = (TempDir::new("auth-pw-a"), TempDir::new("auth-pw-b"));
     let (c1, c2) = (core(&d1, Edition::Hosted), core(&d2, Edition::Hosted));
-    let (p1, p2) = (support::first_password(&c1), support::first_password(&c2));
-    assert_ne!(p1, p2);
-    assert!(p1.chars().count() >= 20, "too short to be a first password");
-    // Each opens its own install and not the other.
-    let other = c1.handle(json!({ "type": "LOGIN", "name": "elasticpro", "password": p2 })).await;
-    assert_eq!(other["ok"], json!(false));
-}
-
-#[tokio::test]
-async fn the_first_password_file_is_owner_only_and_goes_after_the_change() {
-    let dir = TempDir::new("auth-pw-file");
-    let c = core(&dir, Edition::Hosted);
-    let file = dir.join(elasticpro_core::auth::INITIAL_PASSWORD_FILE);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mode = std::fs::metadata(&file).expect("the file").permissions().mode() & 0o777;
-        assert_eq!(mode, 0o600, "mode {mode:o}");
+    for c in [&c1, &c2] {
+        let r = c.handle(json!({ "type": "LOGIN", "name": ADMIN, "password": elasticpro_core::auth::DEFAULT_PASSWORD })).await;
+        assert_eq!(r["ok"], json!(true), "{r}");
     }
-    let pw = support::first_password(&c);
-    // Nothing on disk holds it in the clear but that file.
-    let users = std::fs::read_to_string(dir.join("users.json")).unwrap();
-    assert!(!users.contains(&pw), "the password must not be in the accounts file");
-
-    // A second start neither regenerates it nor removes it: it is still the live one.
-    drop(c);
-    let c = core(&dir, Edition::Hosted);
-    assert_eq!(support::first_password(&c), pw);
-
-    // A failed change leaves it where it is.
-    let s = c.handle(json!({ "type": "LOGIN", "name": "elasticpro", "password": pw })).await;
-    let s = s["session"].as_str().expect("a session").to_string();
-    let short = c.handle(json!({ "type": "USER_SET_PASSWORD", "session": s, "name": "elasticpro", "password": "abc" })).await;
-    assert_eq!(short["ok"], json!(false));
-    assert!(file.exists());
-
-    let ok = c.handle(json!({ "type": "USER_SET_PASSWORD", "session": s, "name": "elasticpro", "password": PASSWORD })).await;
-    assert_eq!(ok["ok"], json!(true), "{ok}");
-    assert!(!file.exists(), "the file must go once the password is changed");
-
-    // And a later start does not bring it back.
-    drop(c);
-    let _c = core(&dir, Edition::Hosted);
-    assert!(!file.exists());
+    // Nothing on disk holds the shipped password in the clear: only its hash, salted per
+    // install, so two accounts files never match either.
+    let (u1, u2) = (std::fs::read_to_string(d1.join("users.json")).unwrap(), std::fs::read_to_string(d2.join("users.json")).unwrap());
+    assert!(!u1.contains(elasticpro_core::auth::DEFAULT_PASSWORD) && !u2.contains(elasticpro_core::auth::DEFAULT_PASSWORD));
+    assert_ne!(u1, u2);
+    // Changing it on one install changes nothing on the other.
+    admin_session(&c1).await;
+    let r = c1.handle(json!({ "type": "LOGIN", "name": ADMIN, "password": elasticpro_core::auth::DEFAULT_PASSWORD })).await;
+    assert_eq!(r["ok"], json!(false));
+    let r = c2.handle(json!({ "type": "LOGIN", "name": ADMIN, "password": elasticpro_core::auth::DEFAULT_PASSWORD })).await;
+    assert_eq!(r["ok"], json!(true));
 }
 
 #[tokio::test]
@@ -302,7 +305,6 @@ async fn an_existing_accounts_file_is_left_alone() {
     drop(c);
     let _c = core(&dir, Edition::Hosted);
     assert_eq!(std::fs::read_to_string(dir.join("users.json")).unwrap(), before);
-    assert!(!dir.join(elasticpro_core::auth::INITIAL_PASSWORD_FILE).exists());
 }
 
 #[tokio::test]
@@ -311,7 +313,6 @@ async fn portable_gets_no_seeded_account() {
     let c = core(&dir, Edition::Portable);
     let _ = c.handle(json!({ "type": "PING" })).await;
     assert!(!dir.0.join("users.json").exists(), "portable must not create an accounts file");
-    assert!(!dir.join(elasticpro_core::auth::INITIAL_PASSWORD_FILE).exists(), "nor a first password");
     assert_eq!(c.handle(json!({ "type": "PING" })).await["authRequired"], json!(false));
 }
 
