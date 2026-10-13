@@ -370,6 +370,29 @@ async fn prime(c: &Arc<Core>, s: &str, cluster: Value) -> Value {
 }
 
 #[tokio::test]
+async fn a_cluster_connected_without_a_credential_on_purpose_stays_that_way_across_page_loads() {
+    // "Continue without credentials" sends an empty header. The next page load re-reads a
+    // config file that does not record that choice and sends no header at all; the core
+    // keeps the decision and says so, or every reload asked for a password the cluster
+    // was deliberately connected without.
+    let dir = TempDir::new("zbx-anon");
+    let a = TestServer::start().await;
+    let c = hosted(&dir);
+    let s = admin(&c).await;
+    let first = prime(&c, &s, json!({ "id": "alpha", "url": a.url(), "authHeader": "" })).await;
+    assert_eq!(first["anonymous"], json!(["alpha"]), "{first}");
+    assert_eq!(first["held"], json!([]), "an empty header is not a credential: {first}");
+    let again = prime(&c, &s, json!({ "id": "alpha", "url": a.url(), "authHeader": null })).await;
+    assert_eq!(again["anonymous"], json!(["alpha"]), "the decision survives a reload: {again}");
+    assert_eq!(again["held"], json!([]));
+    // A credential typed later replaces the decision, and forgetting it brings it back.
+    let typed = prime(&c, &s, json!({ "id": "alpha", "url": a.url(), "authHeader": "Basic dHlwZWQ6aXQ=" })).await;
+    assert_eq!((typed["held"].clone(), typed["anonymous"].clone()), (json!(["alpha"]), json!([])), "{typed}");
+    let forgot = prime(&c, &s, json!({ "id": "alpha", "url": a.url(), "authHeader": "" })).await;
+    assert_eq!((forgot["held"].clone(), forgot["anonymous"].clone()), (json!([]), json!(["alpha"])), "{forgot}");
+}
+
+#[tokio::test]
 async fn a_reprime_without_a_credential_keeps_the_one_held() {
     // Every Zabbix page load is a fresh app that re-reads a config holding no password.
     // Wiping the credential an admin typed on each of those was the reported bug.

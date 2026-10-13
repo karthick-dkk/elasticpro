@@ -1,7 +1,7 @@
 /**
  * Credential prompt.
  *
- * Shown when clusters.yaml carries no usable secret (or when Elasticsearch rejects the
+ * Shown when the config file carries no usable secret (or when Elasticsearch rejects the
  * one it does carry). One credential is typed once and applied to every cluster URL with
  * a single click. It lives in memory only — never in the YAML, never in browser storage.
  */
@@ -9,7 +9,7 @@
 import { h, mount, clear, $ } from '../lib/dom.js';
 import {
   state, clusters, client, clustersNeedingCredential, clustersWithAuthError,
-  suggestedUsername, setSessionCredential, continueAnonymously, refreshAll,
+  suggestedUsername, setSessionCredential, continueAnonymously, refreshAll, configFileName,
 } from '../core/state.js';
 import { workerStatus, vaultGet, vaultSet, vaultDel } from '../core/es.js';
 import { toast } from './menu.js';
@@ -189,7 +189,7 @@ export function showCredentialDialog(reason = 'manual') {
     const sub = reason === 'auth_error'
       ? `${failing.length} cluster${failing.length === 1 ? '' : 's'} returned 401/403. Enter a credential to use for this session.`
       : needing.length
-        ? `clusters.yaml does not contain a password for ${needing.length} of ${clusters().length} cluster${clusters().length === 1 ? '' : 's'}. Enter one and it will be used for all of them.`
+        ? `${configFileName()} does not contain a password for ${needing.length} of ${clusters().length} cluster${clusters().length === 1 ? '' : 's'}. Enter one and it will be used for all of them.`
         : 'Replace the credential from the file for this browser session.';
 
     mount(dialog,
@@ -198,8 +198,10 @@ export function showCredentialDialog(reason = 'manual') {
         h('button.btn.ghost.sm', { onclick: () => !ui.busy && close(), 'aria-label': 'Close', title: 'Close (Esc)' }, '×')),
 
       h('div.modal-body',
-        h('div.seg', ...MODES.map((m) => h('button.btn.sm', {
-          class: ui.mode === m.id ? 'primary' : '',
+        // aria-pressed is what .seg styles; a bare .primary class left the selected label
+        // unreadable on the dark theme (accent-coloured text on a transparent background).
+        h('div.seg', { role: 'group', 'aria-label': 'Credential type' }, ...MODES.map((m) => h('button.btn.sm', {
+          'aria-pressed': ui.mode === m.id ? 'true' : 'false',
           onclick: () => { ui.mode = m.id; ui.error = null; draw(); },
         }, m.label))),
 

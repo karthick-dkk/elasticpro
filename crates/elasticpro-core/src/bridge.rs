@@ -1570,7 +1570,7 @@ impl Core {
             Err(e) => return json!({ "ok": false, "message": format!("bad PRIME: {e}") }),
         };
         let mut incoming = p.clusters;
-        let (held, effective) = {
+        let (held, anonymous, effective) = {
             let mut cur = self.primed.write();
             // A cluster that arrives with no credential at all keeps the one the core already
             // holds for it — same id, same URL. The browser that sent this may simply not
@@ -1601,9 +1601,17 @@ impl Core {
                 .filter(|c| c.auth_header.as_deref().is_some_and(|a| !a.is_empty()))
                 .map(|c| c.id.clone()).collect();
             held.sort();
+            // The explicit empty header is a decision — "this cluster needs no credential" —
+            // and it is kept here like any other. The page is told, so a fresh page load
+            // (which re-reads a config file that never records that decision) does not ask
+            // for a password the cluster was deliberately connected without.
+            let mut anonymous: Vec<String> = cur.clusters.values()
+                .filter(|c| c.auth_header.as_deref() == Some(""))
+                .map(|c| c.id.clone()).collect();
+            anonymous.sort();
             let mut effective: Vec<ClusterSpec> = cur.clusters.values().cloned().collect();
             effective.sort_by(|a, b| a.id.cmp(&b.id));
-            (held, effective)
+            (held, anonymous, effective)
         };
         // What is kept on disk is what the core now holds, retained credentials included —
         // not the message, which may have carried none. Jump hosts are taken from the
@@ -1652,7 +1660,7 @@ impl Core {
         let n_t = ts.len();
         drop(ts);
         let p = self.primed.read();
-        json!({ "ok": true, "count": p.clusters.len(), "readOnly": p.read_only, "tunnels": n_t, "held": held })
+        json!({ "ok": true, "count": p.clusters.len(), "readOnly": p.read_only, "tunnels": n_t, "held": held, "anonymous": anonymous })
     }
 
     async fn es(self: &Arc<Self>, msg: Value) -> Value {

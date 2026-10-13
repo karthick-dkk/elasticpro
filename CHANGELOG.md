@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.3.6
+
+**"Continue without credentials" is remembered, and the credential dialog is readable in the dark theme.**
+
+A cluster connected without a credential on purpose asked for one again on every page load.
+The page re-reads a config file that never records that choice, and the core — which did keep
+it, as an empty header — never said so. The PRIME reply now lists those clusters (`anonymous`)
+beside the ones it holds a credential for (`held`), and the page stops asking.
+
+The dialog's type selector (Username & password / API key / Bearer token) marked the chosen
+tab with a bare class the stylesheet does not dress, which on the dark theme left its label
+as dark text on a dark background. It is `aria-pressed` now, like every other segmented
+control. The dialog also names the config file actually loaded instead of `clusters.yaml`.
+
 ## 0.3.5
 
 **Notifications sit at the bottom right.**

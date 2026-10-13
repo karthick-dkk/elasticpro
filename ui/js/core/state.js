@@ -274,6 +274,7 @@ export async function reprime() {
       // typed this session wins, as it does for every cluster; else the config's shared one.
       sharedAuthHeader: sessionCred ? authHeaderFor(sessionCred) : (state.config.sharedAuthHeader || '') });
   markServerHeld(res && res.held);
+  markServerAnonymous(res && res.anonymous);
 }
 
 /**
@@ -293,6 +294,25 @@ export function markServerHeld(held) {
       c.username = c.username || '(held by the server)';
     }
   }
+}
+
+/**
+ * Clusters the core was told to connect without a credential — "Continue without
+ * credentials" — need no prompt either. That choice is kept by the core, not by the config
+ * file this page re-read, so without this every page load asked again for a password the
+ * cluster was deliberately connected without.
+ */
+export function markServerAnonymous(anonymous) {
+  if (!Array.isArray(anonymous) || !state.config) return;
+  const ids = new Set(anonymous);
+  for (const c of state.config.clusters) {
+    if (ids.has(c.id) && c.needsCred) c.anonymous = true;
+  }
+}
+
+/** What to call the config file in a sentence: its name when one is loaded. */
+export function configFileName() {
+  return (state.config && state.config.fileMeta && state.config.fileMeta.name) || 'The config file';
 }
 
 /* ------------------------------- data fetching ------------------------------- */
