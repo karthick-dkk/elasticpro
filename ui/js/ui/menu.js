@@ -199,8 +199,6 @@ export function toast(message, kind = 'ok', ms = 2600, opts = {}) {
     toastWrap = h('div.toast-wrap', { role: 'status', 'aria-live': 'polite' });
     document.body.append(toastWrap);
   }
-
-  placeToasts();
   const k = toastKind(kind, message);
   const key = opts.key || null;
   const detail = [].concat(opts.detail || []).filter(Boolean).map(String);
@@ -281,15 +279,6 @@ export function toastKind(kind, message = '') {
   return k;
 }
 
-/**
- * Top right, just under the pinned header — measured, because the header is one row on a
- * wide window and two when the tabs wrap.
- */
-function placeToasts() {
-  const head = document.querySelector('.head-fix');
-  const bottom = head ? Math.max(0, Math.round(head.getBoundingClientRect().bottom)) : 0;
-  toastWrap.style.top = `${bottom + 12}px`;
-}
 
 /* ----------------------------- notification history ----------------------------- */
 

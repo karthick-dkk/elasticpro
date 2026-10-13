@@ -784,11 +784,12 @@ body.popup { width: 330px; background: var(--surface-1); }
 
 /* A short-lived confirmation, so an action that closes its own panel still says it
    happened. Fades itself out; never needs dismissing, and the bell keeps a copy. */
-/* Top right, just under the pinned header (toast() measures it and sets `top`), newest on
-   top: column-reverse keeps the DOM oldest-first, so capping still drops the oldest. */
-.toast-wrap { position: fixed; z-index: 1000; right: 16px; top: 64px;
-              display: flex; flex-direction: column-reverse; align-items: flex-end; gap: 8px;
-              pointer-events: none; width: min(420px, calc(100vw - 32px)); }
+/* Bottom right, clear of the header and of whatever the page is showing at the top: the
+   column grows upward from the corner, oldest on top and newest nearest the corner, and
+   the DOM stays oldest-first so capping still drops the oldest. */
+.toast-wrap { position: fixed; z-index: 1000; right: 16px; bottom: 16px;
+              display: flex; flex-direction: column; justify-content: flex-end; align-items: flex-end; gap: 8px;
+              pointer-events: none; width: min(420px, calc(100vw - 32px)); max-height: calc(100vh - 32px); }
 /* The wrapper ignores the pointer so a notice never swallows a click meant for the page
    under it; the notices themselves stay clickable (a click dismisses). */
 .toast-wrap > * { pointer-events: auto; }
