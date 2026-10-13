@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.3.8
+
+**The Config page stays still.**
+
+It redrew itself on every fleet event and re-ran the open tab's loader each time. With
+thirty-odd clusters that is every couple of seconds: the Jump hosts & trust tab asked the
+core for its tunnels and pins again and again, the Zabbix tab never finished loading, and
+a URL being typed into a form was wiped mid-word. A tab now loads once per visit, and a
+fleet event changes only what fleet data changes on that page — the cluster-state pills,
+updated in place.
+
 ## 0.3.7
 
 **Two pages stop contradicting themselves.**
