@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.3.5
+
+**Notifications sit at the bottom right.**
+
+Toasts used to stack under the header at the top right, where they covered the page's
+own title row and the first line of whatever was being read. They now rise from the
+bottom-right corner, newest nearest the corner, and nothing is measured to place them:
+the stylesheet pins the corner, so a header that wraps to two rows no longer moves them.
+
 ## 0.3.4
 
 **A fresh install signs in as `Admin` / `elastic`.**
