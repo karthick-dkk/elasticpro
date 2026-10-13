@@ -16,6 +16,28 @@ import { toCsv, csvEscape } from '../lib/fmt.js';
 export const NO_DATE = 'no date in name';
 
 /**
+ * The snapshot listing's card title. Before the repositories have been read there is no
+ * repository to name, and "Snapshots in —" named one anyway.
+ */
+export function listingTitle(selected) {
+  return selected ? `Snapshots in ${selected}` : 'Snapshots';
+}
+
+/**
+ * What an empty listing says, in the order the facts are known: a search that matched
+ * nothing, a cluster that could not be read, repositories not read yet, a cluster with no
+ * repository, and only then a repository that is genuinely empty. "No snapshots in this
+ * repository" was shown for all five, so an unreachable cluster read as a clean one.
+ */
+export function listingEmptyText({ searching = false, fetched = false, repos = [], error = '' } = {}) {
+  if (searching) return 'No snapshot matches that search';
+  if (error) return `Repositories could not be read: ${error}`;
+  if (!fetched) return 'Repositories not read yet — press Refresh to list them';
+  if (!repos.length) return 'No snapshot repositories on this cluster';
+  return 'No snapshots in this repository';
+}
+
+/**
  * One row per index: its data day, and its shard outcome when the detail reported one.
  *
  * `failures` is the snapshot detail's list, or null when the detail could not be read —

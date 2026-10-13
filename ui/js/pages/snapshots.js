@@ -20,6 +20,7 @@ import {
   snapshotIndicesDialog,
 } from '../ui/snapshot-dialogs.js';
 import { pagerBar } from '../lib/pager.js';
+import { listingTitle, listingEmptyText } from '../core/snapshot-evidence.js';
 import { SNAPSHOT_PAGE_SIZES, snapshotPage, snapshotCsvRows, filterSnapshots, newestFirst } from '../core/snapshot-list.js';
 
 let host = null;
@@ -152,6 +153,14 @@ function clusterBlock(c) {
       : snapshotsView(c, repos, selected, snaps));
 }
 
+/** Why this cluster's repositories cannot be read right now, or '' when they can. */
+function unreadableReason(c) {
+  const cl = client(c.id);
+  if (!cl || !cl.state || cl.state === 'ok' || cl.state === 'unknown') return '';
+  const le = cl.lastError || {};
+  return le.message || le.kind || cl.state;
+}
+
 function repoSelect(c, repos, selected) {
   const s = h('select', { 'aria-label': 'Repository',
     onchange: (e) => { ui.repo[c.id] = e.target.value; ui.page[c.id] = 0; draw(); } },
@@ -196,7 +205,7 @@ function snapshotsView(c, repos, selected, snaps) {
     h('div.toolbar', { style: { marginBottom: '10px', display: 'flex', gap: '8px', alignItems: 'flex-end', flexWrap: 'wrap' } },
       repos.length ? h('label.field', 'Repository', repoSelect(c, repos, selected)) : null,
       h('label.field', { style: { flex: '1', maxWidth: '520px' } }, 'Search snapshots', search)),
-    card(`Snapshots in ${selected || '—'}`, sub, holder,
+    card(listingTitle(selected), sub, holder,
       [
         h('button.btn.sm.primary', {
           disabled: !repos.length,
@@ -254,7 +263,7 @@ function summaryView(c, d, repos, selected, snaps) {
         { key: 'snap-slm', open: policies.some((p) => { const lf = p.last_failure, ls = p.last_success; return lf && (!ls || lf.time > ls.time); }) })),
 
     h('div', { style: { marginTop: '10px' } },
-      collapsible('Snapshot availability', `last ${ui.days} days in ${selected || '—'}`, () =>
+      collapsible('Snapshot availability', `last ${ui.days} days${selected ? ` in ${selected}` : ''}`, () =>
         h('div', { style: { display: 'grid', gap: '10px' } },
           h('div', { style: { display: 'flex', gap: '8px', alignItems: 'flex-end', flexWrap: 'wrap' } },
             h('label.field', 'Repository', repoSelect(c, repos, selected)),
@@ -446,5 +455,6 @@ function snapTable(c, repo, snaps, { searching = false } = {}) {
   });
   return table(['Snapshot', 'Status', 'Taken', 'Ended', 'Duration', 'Indices', 'Data inside covers',
                 'Shards ok', 'Failed', ''], trs,
-    { emptyText: searching ? 'No snapshot matches that search' : 'No snapshots in this repository' });
+    { emptyText: listingEmptyText({ searching, fetched: Array.isArray((state.data.get(c.id) || {}).repos),
+                                       repos: (state.data.get(c.id) || {}).repos || [], error: unreadableReason(c) }) });
 }
