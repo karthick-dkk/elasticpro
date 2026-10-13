@@ -191,6 +191,10 @@ pub const REQUEST_WINDOW: std::time::Duration = std::time::Duration::from_secs(5
 
 /// How many finished requests the core remembers for the Request Centre.
 pub const REQUEST_LOG_KEEP: usize = 2000;
+/// The most of a request path a record keeps, in characters.
+pub const REQUEST_PATH_KEEP: usize = 600;
+/// The most in-flight records kept; beyond it the oldest is dropped.
+pub const REQUEST_INFLIGHT_KEEP: usize = 1000;
 
 /// One request to a cluster, as the Request Centre shows it: who asked, what, how long it
 /// took and how it ended. Kept for every request the core sends — the poller's and the
@@ -224,10 +228,23 @@ impl RequestLog {
     pub fn begin(&mut self, cluster: &str, origin: &str, method: &str, path: &str, via: Option<&str>) -> u64 {
         self.next += 1;
         let id = self.next;
+        // A path is kept for the operator to recognise a request by, not reproduced in full:
+        // a console request can carry kilobytes of query string, and the log keeps thousands
+        // of records. The wire request is untouched.
+        let path: String = if path.chars().count() > REQUEST_PATH_KEEP {
+            format!("{}…", path.chars().take(REQUEST_PATH_KEEP).collect::<String>())
+        } else { path.to_string() };
+        // In flight is bounded by the core's own concurrency; this is the backstop for a
+        // transport that never answers, so the map cannot grow without limit.
+        if self.inflight.len() >= REQUEST_INFLIGHT_KEEP {
+            if let Some(oldest) = self.inflight.values().min_by_key(|r| r.started_at).map(|r| r.id) {
+                self.inflight.remove(&oldest);
+            }
+        }
         let started_at = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
         self.inflight.insert(id, RequestRecord {
             id, cluster: cluster.to_string(), origin: origin.to_string(), method: method.to_string(),
-            path: path.to_string(), started_at, ms: None, ok: None, status: None, via: via.map(String::from),
+            path, started_at, ms: None, ok: None, status: None, via: via.map(String::from),
         });
         id
     }

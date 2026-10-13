@@ -47,6 +47,15 @@ async fn every_request_is_recorded_with_its_origin_and_outcome_and_carries_an_op
     assert_eq!(log["recent"][0]["origin"], json!("core"), "{log}");
     assert_eq!(log["recent"].as_array().map(|v| v.len()), Some(1), "limit is honoured");
 
+    // A very long path is kept only as far as an operator needs to recognise it; the wire
+    // request itself is untouched.
+    let long = format!("/_search?q={}", "x".repeat(5000));
+    c.handle(json!({ "type": "ES", "session": s, "clusterId": "w", "method": "GET", "path": long })).await;
+    assert!(a.last_hit().map(|h| h.path.len() > 5000).unwrap_or(false), "the cluster still got the whole path");
+    let log = c.handle(json!({ "type": "REQUEST_LOG", "session": s, "limit": 1 })).await;
+    let kept = log["recent"][0]["path"].as_str().unwrap_or("");
+    assert!(kept.chars().count() <= 601 && kept.ends_with('…'), "kept {} chars", kept.chars().count());
+
     // Narrowed to a cluster that does not exist: empty, not an error.
     let none = c.handle(json!({ "type": "REQUEST_LOG", "session": s, "cluster": "nope" })).await;
     assert_eq!(none["recent"].as_array().map(|v| v.len()), Some(0));
