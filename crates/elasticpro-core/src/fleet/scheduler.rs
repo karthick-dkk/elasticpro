@@ -4,6 +4,7 @@
 
 use super::catalogue::{self, Class, Dataset, ALL};
 use super::entry::{Entry, Outcome, Reach, ReachState, Status};
+use super::policy::{Mode, Policy};
 use std::collections::{HashMap, HashSet};
 use tokio::sync::oneshot;
 
@@ -20,12 +21,20 @@ pub const PRIO_USER: u8 = 0;
 pub const PRIO_DUE: u8 = 1;
 pub const PRIO_BACKGROUND: u8 = 2;
 
+/// The policy as the scheduler runs it: `Policy` resolved to numbers, plus the cache
+/// bound, which is a property of this process rather than of the fleet.
 #[derive(Clone, Debug)]
 pub struct Config {
+    pub mode: Mode,
     pub health_secs: u64,
+    pub intervals: HashMap<Dataset, u64>,
+    pub watch_ms: u64,
+    pub timeout_ms: u64,
     pub global: usize,
     pub per_cluster: usize,
     pub per_jump: usize,
+    pub paused_all: bool,
+    pub paused: HashSet<String>,
     pub cache_bytes: usize,
 }
 
@@ -35,15 +44,45 @@ fn env_num(name: &str) -> Option<u64> {
 
 impl Config {
     pub fn from_env() -> Config {
+        Config::from_policy(&Policy::shipped())
+    }
+
+    pub fn from_policy(p: &Policy) -> Config {
+        let p = p.clone().normalised();
         Config {
-            // Never faster than three minutes: a hundred clusters polled every thirty
-            // seconds is the load this cache exists to remove.
-            health_secs: env_num("ELASTICPRO_POLL_HEALTH_SECS").unwrap_or(180).clamp(180, 300),
-            global: env_num("ELASTICPRO_POLL_CONCURRENCY").unwrap_or(16).clamp(1, 256) as usize,
-            per_cluster: 2,
-            per_jump: 6,
+            mode: p.mode,
+            health_secs: p.interval_secs(Dataset::Health),
+            intervals: ALL.iter().map(|d| (*d, p.interval_secs(*d))).collect(),
+            watch_ms: p.watch_minutes * 60_000,
+            timeout_ms: p.timeout_ms,
+            global: p.concurrency.global,
+            per_cluster: p.concurrency.per_cluster,
+            per_jump: p.concurrency.tunnel,
+            paused_all: p.paused.all,
+            paused: p.paused.clusters.iter().cloned().collect(),
             cache_bytes: (env_num("ELASTICPRO_CACHE_MB").unwrap_or(256).max(1) as usize) * 1024 * 1024,
         }
+    }
+
+    pub fn interval(&self, ds: Dataset) -> u64 {
+        self.intervals.get(&ds).copied().unwrap_or_else(|| ds.default_interval_secs(self.health_secs))
+    }
+
+    pub fn stale_after_ms(&self, ds: Dataset) -> u64 {
+        ds.stale_after_ms(self.interval(ds))
+    }
+
+    /// How the mode treats a dataset: fetched on the schedule, or only while watched.
+    pub fn effective_class(&self, ds: Dataset) -> Class {
+        match self.mode {
+            Mode::Background => ds.class(),
+            Mode::Hybrid if ds == Dataset::Health => Class::Background,
+            Mode::Hybrid | Mode::OnDemand => Class::OnDemand,
+        }
+    }
+
+    pub fn cluster_paused(&self, id: &str) -> bool {
+        self.paused_all || self.paused.contains(id)
     }
 }
 
@@ -117,7 +156,7 @@ impl State {
 
     /// Everything due now, best first. Assigns the boot spread to clusters seen for the
     /// first time, which is the only thing it changes.
-    pub fn plan(&mut self, specs: &[SpecLite], now: u64, backing_off: &HashSet<String>) -> Vec<Candidate> {
+    pub fn plan(&mut self, specs: &[SpecLite], now: u64, backing_off: &HashSet<String>, cfg: &Config) -> Vec<Candidate> {
         let mut new: Vec<&str> = specs.iter().map(|s| s.id.as_str()).filter(|id| !self.first_due.contains_key(*id)).collect();
         new.sort();
         let n = new.len();
@@ -126,7 +165,15 @@ impl State {
         }
         let idle = self.idle(now);
         let mut out = vec![];
+        // Paused: nothing new starts, a person's ask included — it stays pending and runs
+        // when the pause is lifted. What is in flight finishes on its own.
+        if cfg.paused_all {
+            return out;
+        }
         for s in specs {
+            if cfg.paused.contains(&s.id) {
+                continue;
+            }
             let unreachable = self.reach_state(&s.id) == ReachState::Unreachable;
             let via_down = s.via.as_ref().is_some_and(|v| backing_off.contains(v));
             let first = self.first_due.get(&s.id).copied().unwrap_or(now);
@@ -148,15 +195,18 @@ impl State {
                     continue;
                 }
                 let entry = self.entries.get(&key);
+                let on_demand = cfg.effective_class(ds) == Class::OnDemand;
                 let (prio, due) = if unreachable {
-                    if ds != Dataset::Health {
+                    // Probing a cluster that is down is the poller going there on its own,
+                    // which under on-demand it never does: health comes back when asked.
+                    if ds != Dataset::Health || on_demand {
                         continue;
                     }
                     (PRIO_BACKGROUND, self.reach.get(&s.id).and_then(|r| r.next_probe_at).unwrap_or(now))
                 } else if idle && ds != Dataset::Health {
                     continue;
-                } else if ds.class() == Class::OnDemand {
-                    let watched = self.watched.get(&key).is_some_and(|t| now.saturating_sub(*t) < catalogue::WATCH_MS);
+                } else if on_demand {
+                    let watched = self.watched.get(&key).is_some_and(|t| now.saturating_sub(*t) < cfg.watch_ms);
                     if !watched || entry.is_none() {
                         continue;
                     }
@@ -226,13 +276,13 @@ impl State {
             *n = n.saturating_sub(1);
         }
         let ds = key.1;
-        let interval = ds.interval_secs(cfg.health_secs) * 1000;
+        let interval = cfg.interval(ds) * 1000;
         let seq = self.next_seq();
-        let e = self.entries.entry(key.clone()).or_insert_with(|| Entry::never(ds.stale_after_ms(cfg.health_secs), None));
+        let e = self.entries.entry(key.clone()).or_insert_with(|| Entry::never(cfg.stale_after_ms(ds), None));
         e.seq = seq;
         e.attempted_at = Some(now);
         e.took_ms = Some(took_ms);
-        e.stale_after_ms = ds.stale_after_ms(cfg.health_secs);
+        e.stale_after_ms = cfg.stale_after_ms(ds);
         let (answered, err) = match outcome {
             Outcome::Answered(map) => {
                 let data = serde_json::Value::Object(map);
@@ -362,7 +412,10 @@ mod tests {
     use serde_json::{json, Map};
 
     fn cfg() -> Config {
-        Config { health_secs: 180, global: 16, per_cluster: 2, per_jump: 6, cache_bytes: 1 << 20 }
+        Config { cache_bytes: 1 << 20, ..Config::from_policy(&Policy::shipped()) }
+    }
+    fn with_mode(mode: Mode) -> Config {
+        Config { mode, ..cfg() }
     }
     fn specs(n: usize) -> Vec<SpecLite> {
         (0..n).map(|i| SpecLite { id: format!("c{i:02}"), via: None }).collect()
@@ -384,12 +437,12 @@ mod tests {
     fn new_clusters_are_spread_over_the_boot_window() {
         let mut st = active(0);
         let s = specs(4);
-        let first = st.plan(&s, 0, &HashSet::new());
+        let first = st.plan(&s, 0, &HashSet::new(), &cfg());
         // At t=0 only the first cluster is due.
         assert!(first.iter().all(|c| c.cluster == "c00"), "{first:?}");
         assert_eq!(first.len(), 6, "every background dataset of it: {first:?}");
         assert_eq!(st.first_due["c01"], 45_000);
-        let later = st.plan(&s, 45_000, &HashSet::new());
+        let later = st.plan(&s, 45_000, &HashSet::new(), &cfg());
         assert!(later.iter().any(|c| c.cluster == "c01"));
         assert!(!later.iter().any(|c| c.cluster == "c02"));
     }
@@ -403,7 +456,7 @@ mod tests {
         st.entries.insert(("c00".into(), Dataset::Indices), Entry { next_due: Some(0), ..Entry::never(1, None) });
         st.watched.insert(("c00".into(), Dataset::Indices), 1_000_000);
         st.request(("c00".into(), Dataset::Policies), 999_000);
-        let plan = st.plan(&s, 1_000_000, &HashSet::new());
+        let plan = st.plan(&s, 1_000_000, &HashSet::new(), &cfg());
         assert_eq!((plan[0].prio, plan[0].dataset), (PRIO_USER, Dataset::Policies));
         assert_eq!((plan[1].prio, plan[1].dataset), (PRIO_DUE, Dataset::Indices));
         assert!(plan[2..].iter().all(|c| c.prio == PRIO_BACKGROUND));
@@ -424,7 +477,7 @@ mod tests {
         }
         // Then a page opens one cluster's index list and waits for it.
         st.request_first(("c39".into(), Dataset::Indices));
-        let plan = st.plan(&s, 1_000_000, &HashSet::new());
+        let plan = st.plan(&s, 1_000_000, &HashSet::new(), &cfg());
         assert_eq!((plan[0].prio, plan[0].cluster.as_str(), plan[0].dataset), (PRIO_USER, "c39", Dataset::Indices), "{:?}", &plan[..3]);
         let started = st.take(plan, &s, &cfg());
         assert!(started.iter().any(|c| c.cluster == "c39" && c.dataset == Dataset::Indices));
@@ -440,12 +493,12 @@ mod tests {
         for x in &s {
             st.first_due.insert(x.id.clone(), 0);
         }
-        let plan = st.plan(&s, 0, &HashSet::new());
+        let plan = st.plan(&s, 0, &HashSet::new(), &cfg());
         let started = st.take(plan, &s, &cfg());
         assert_eq!(started.len(), 6, "per jump host 6");
         assert!(st.running_cluster.values().all(|n| *n <= 2));
         // A second pass starts nothing more through that jump host.
-        let plan = st.plan(&s, 0, &HashSet::new());
+        let plan = st.plan(&s, 0, &HashSet::new(), &cfg());
         assert!(st.take(plan, &s, &cfg()).is_empty());
 
         let mut st = active(0);
@@ -453,7 +506,7 @@ mod tests {
         for x in &s {
             st.first_due.insert(x.id.clone(), 0);
         }
-        let plan = st.plan(&s, 0, &HashSet::new());
+        let plan = st.plan(&s, 0, &HashSet::new(), &cfg());
         let started = st.take(plan, &s, &cfg());
         assert_eq!(started.len(), 16, "global 16");
         assert!(st.running_cluster.values().all(|n| *n <= 2), "per cluster 2");
@@ -466,7 +519,7 @@ mod tests {
         st.first_due.insert("a".into(), 0);
         st.first_due.insert("b".into(), 0);
         let down: HashSet<String> = ["jh".to_string()].into();
-        let plan = st.plan(&s, 0, &down);
+        let plan = st.plan(&s, 0, &down, &cfg());
         assert!(plan.iter().all(|c| c.cluster == "b"));
     }
 
@@ -487,12 +540,12 @@ mod tests {
         assert!((1_000 + 108_000..=1_000 + 132_000).contains(&probe), "{probe}");
         // Before the probe: nothing at all. At it: health and nothing else — even though
         // every other background dataset has never been fetched.
-        assert!(st.plan(&s, probe - 1, &HashSet::new()).is_empty());
-        let plan = st.plan(&s, probe, &HashSet::new());
+        assert!(st.plan(&s, probe - 1, &HashSet::new(), &cfg()).is_empty());
+        let plan = st.plan(&s, probe, &HashSet::new(), &cfg());
         assert_eq!(plan.iter().map(|c| c.dataset).collect::<Vec<_>>(), vec![Dataset::Health]);
         // A person asking for indices does not change that while it is down.
         st.request(("c00".into(), Dataset::Indices), 0);
-        assert_eq!(st.plan(&s, probe, &HashSet::new()).len(), 1);
+        assert_eq!(st.plan(&s, probe, &HashSet::new(), &cfg()).len(), 1);
 
         // Answering again brings it back, and everything it holds comes due.
         st.entries.insert(("c00".into(), Dataset::Nodes), Entry { next_due: Some(u64::MAX), ..Entry::never(1, None) });
@@ -508,10 +561,10 @@ mod tests {
         let mut st = State::default();
         let s = specs(1);
         st.first_due.insert("c00".into(), 0);
-        let plan = st.plan(&s, IDLE_MS + 1, &HashSet::new());
+        let plan = st.plan(&s, IDLE_MS + 1, &HashSet::new(), &cfg());
         assert_eq!(plan.iter().map(|c| c.dataset).collect::<Vec<_>>(), vec![Dataset::Health]);
         st.last_activity = IDLE_MS;
-        assert_eq!(st.plan(&s, IDLE_MS + 1, &HashSet::new()).len(), 6);
+        assert_eq!(st.plan(&s, IDLE_MS + 1, &HashSet::new(), &cfg()).len(), 6);
     }
 
     #[test]
@@ -532,6 +585,69 @@ mod tests {
         assert_eq!(st.entries[&k].next_due, Some(300 + 600_000), "then backing off");
         // Nodes is not health: the cluster's reach is untouched.
         assert!(!st.reach.contains_key("c"));
+    }
+
+    #[test]
+    fn on_demand_mode_plans_nothing_on_its_own_and_only_what_was_asked() {
+        let cfg = with_mode(Mode::OnDemand);
+        let mut st = active(1_000_000);
+        let s = specs(3);
+        assert!(st.plan(&s, 1_000_000, &HashSet::new(), &cfg).is_empty(), "the poller went to a cluster by itself");
+        // Nor later, when every boot offset has passed.
+        assert!(st.plan(&s, 2_000_000, &HashSet::new(), &cfg).is_empty());
+        st.request(("c01".into(), Dataset::Health), 2_000_000);
+        let p = st.plan(&s, 2_000_000, &HashSet::new(), &cfg);
+        assert_eq!(p.len(), 1);
+        assert_eq!((p[0].cluster.as_str(), p[0].dataset, p[0].prio), ("c01", Dataset::Health, PRIO_USER));
+        // A down cluster is not probed either: health comes back when somebody asks.
+        st.reach.insert("c02".into(), Reach { state: ReachState::Unreachable, next_probe_at: Some(0), ..Reach::default() });
+        assert!(!st.plan(&s, 3_000_000, &HashSet::new(), &cfg).iter().any(|c| c.cluster == "c02"));
+    }
+
+    #[test]
+    fn hybrid_keeps_health_in_the_background_and_the_rest_only_while_watched() {
+        let cfg = with_mode(Mode::Hybrid);
+        let mut st = active(0);
+        let s = specs(1);
+        let p = st.plan(&s, 0, &HashSet::new(), &cfg);
+        assert_eq!(p.iter().map(|c| c.dataset).collect::<Vec<_>>(), vec![Dataset::Health], "{p:?}");
+        // A page looked at nodes: it comes for the watch window, then stops.
+        st.watched.insert(("c00".into(), Dataset::Nodes), 10_000);
+        st.entries.insert(("c00".into(), Dataset::Nodes), Entry::never(1, Some(10_000)));
+        assert!(st.plan(&s, 10_000, &HashSet::new(), &cfg).iter().any(|c| c.dataset == Dataset::Nodes));
+        assert!(!st.plan(&s, 10_000 + cfg.watch_ms + 1, &HashSet::new(), &cfg).iter().any(|c| c.dataset == Dataset::Nodes));
+    }
+
+    #[test]
+    fn a_paused_cluster_is_skipped_and_pause_all_holds_even_a_persons_ask() {
+        let mut cfg = cfg();
+        cfg.paused.insert("c00".into());
+        let mut st = active(0);
+        let s = specs(2);
+        st.plan(&s, 0, &HashSet::new(), &cfg);           // assigns the boot spread
+        let p = st.plan(&s, 100_000, &HashSet::new(), &cfg);
+        assert!(!p.is_empty() && p.iter().all(|c| c.cluster == "c01"), "{p:?}");
+        cfg.paused_all = true;
+        st.request(("c01".into(), Dataset::Health), 0);
+        assert!(st.plan(&s, 100_000, &HashSet::new(), &cfg).is_empty(), "paused: nothing new starts");
+        assert!(st.pending.contains_key(&("c01".to_string(), Dataset::Health)), "the ask waits for the pause to lift");
+        cfg.paused_all = false;
+        assert!(st.plan(&s, 100_000, &HashSet::new(), &cfg).iter().any(|c| c.cluster == "c01" && c.prio == PRIO_USER));
+    }
+
+    #[test]
+    fn the_policy_decides_intervals_and_the_per_cluster_limit() {
+        let mut pol = Policy::shipped();
+        pol.intervals_sec.insert("nodes".into(), 90);
+        pol.concurrency.per_cluster = 1;
+        let cfg = Config::from_policy(&pol);
+        assert_eq!(cfg.interval(Dataset::Nodes), 90);
+        assert_eq!(cfg.stale_after_ms(Dataset::Nodes), 180_000);
+        let mut st = active(0);
+        let s = specs(1);
+        let p = st.plan(&s, 0, &HashSet::new(), &cfg);
+        let started = st.take(p, &s, &cfg);
+        assert_eq!(started.len(), 1, "one request per cluster at a time: {started:?}");
     }
 
     #[test]

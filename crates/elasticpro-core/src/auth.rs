@@ -238,6 +238,10 @@ pub fn required_role(msg_type: &str) -> Option<Role> {
         // Asking the poller to go to the clusters now. Load on every cluster named, so not
         // for a guest's dashboard to trigger.
         "REFRESH" => Some(Role::User),
+        // The request policy: how and whether the poller goes to the clusters. Reading it is
+        // how a page says "paused"; changing it changes the load on every cluster.
+        "POLICY_GET" => Some(Role::User),
+        "POLICY_SET" => Some(Role::Admin),
 
         // Fleet facts with no index names, but they name hosts and jump hosts.
         "TUNNELS" | "PINS" | "REQUEST_STATS" => Some(Role::User),

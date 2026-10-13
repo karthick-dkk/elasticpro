@@ -16,6 +16,7 @@
 pub mod catalogue;
 pub mod entry;
 pub mod events;
+pub mod policy;
 pub mod scheduler;
 pub mod store;
 
@@ -25,7 +26,8 @@ use crate::http::EsRequest;
 use catalogue::{Class, Dataset, Query, ALL};
 use entry::{answer, error_of, reached, Entry, Outcome, ReachState, Status};
 use events::{EventsOwner, FleetEvent, Reauth, Tickets};
-use parking_lot::Mutex;
+use parking_lot::{Mutex, RwLock};
+use policy::Policy;
 use scheduler::{Candidate, Config, SpecLite, State};
 use serde_json::{json, Map, Value};
 use std::collections::{HashMap, HashSet};
@@ -43,7 +45,11 @@ pub fn now_ms() -> u64 {
 
 pub struct Fleet {
     pub(crate) state: Mutex<State>,
-    pub(crate) cfg: Config,
+    /// The policy as the scheduler runs it; replaced whole by `POLICY_SET`.
+    pub(crate) cfg: RwLock<Config>,
+    pub(crate) policy: RwLock<Policy>,
+    policy_path: Option<std::path::PathBuf>,
+    policy_warning: Option<String>,
     wake: tokio::sync::Notify,
     events: broadcast::Sender<FleetEvent>,
     tickets: Tickets,
@@ -60,9 +66,17 @@ pub struct Fleet {
 impl Fleet {
     pub fn new(data_dir: Option<&std::path::Path>) -> Fleet {
         let (events, _) = broadcast::channel(1024);
+        let policy_path = Policy::path_in(data_dir);
+        let (pol, policy_warning) = Policy::load(policy_path.as_deref());
+        if let Some(w) = &policy_warning {
+            tracing::error!(%w, "request policy");
+        }
         Fleet {
             state: Mutex::new(State::default()),
-            cfg: Config::from_env(),
+            cfg: RwLock::new(Config::from_policy(&pol)),
+            policy: RwLock::new(pol),
+            policy_path,
+            policy_warning,
             wake: tokio::sync::Notify::new(),
             events,
             tickets: Tickets::default(),
@@ -127,8 +141,9 @@ impl Core {
                 }
             }
         });
+        let cfg = self.fleet.cfg.read().clone();
         tracing::info!(
-            restored = n, health_secs = self.fleet.cfg.health_secs, concurrency = self.fleet.cfg.global,
+            restored = n, mode = cfg.mode.as_str(), health_secs = cfg.health_secs, concurrency = cfg.global,
             "fleet poller started"
         );
     }
@@ -188,14 +203,15 @@ impl Core {
             ts.iter().filter(|(_, r)| r.tunnel.backing_off()).map(|(k, _)| k.clone()).collect()
         };
         let now = now_ms();
+        let cfg = self.fleet.cfg.read().clone();
         let (start, gone) = {
             let mut st = self.fleet.state.lock();
             if !keep.is_empty() {
                 st.seen_clusters = true;
             }
             let gone = if st.seen_clusters { st.prune(&keep) } else { vec![] };
-            let plan = st.plan(&specs, now, &backing_off);
-            (st.take(plan, &specs, &self.fleet.cfg), gone)
+            let plan = st.plan(&specs, now, &backing_off, &cfg);
+            (st.take(plan, &specs, &cfg), gone)
         };
         if !gone.is_empty() {
             tracing::info!(clusters = ?gone, "fleet cache: dropping clusters that are no longer configured");
@@ -225,7 +241,9 @@ impl Core {
             method: "GET".into(),
             path: q.path.clone(),
             body: None,
-            timeout_ms: Some(q.timeout_ms),
+            // The policy's timeout, not the query's: an operator who raised it for a slow
+            // tunnel meant every request.
+            timeout_ms: Some(self.fleet.cfg.read().timeout_ms.max(q.timeout_ms.min(1_000))),
             auth_header: None,
             allow_writes: false,
             origin: Some(format!("poller:{}", q.key)),
@@ -332,7 +350,8 @@ impl Core {
 
     fn fleet_finish(self: &Arc<Self>, key: scheduler::Key, outcome: Outcome, took: u64) {
         let now = now_ms();
-        let cfg = &self.fleet.cfg;
+        let cfg = self.fleet.cfg.read().clone();
+        let cfg = &cfg;
         let (waiters, reach_changed, entry, reach) = {
             let mut st = self.fleet.state.lock();
             let (w, rc) = st.complete(&key, outcome, took, now, cfg, &mut catalogue::jittered_ms);
@@ -355,7 +374,7 @@ impl Core {
                 let disk = self.fleet.disk.clone();
                 let (c, ds) = key.clone();
                 #[cfg(feature = "bridge")]
-                let (redis, ttl) = (self.fleet.redis.clone(), 3 * ds.interval_secs(cfg.health_secs));
+                let (redis, ttl) = (self.fleet.redis.clone(), 3 * cfg.interval(ds));
                 #[cfg(feature = "bridge")]
                 let update = json!({ "clusterId": c, "dataset": ds.name(), "seq": e.seq }).to_string();
                 tokio::task::spawn_blocking(move || {
@@ -424,7 +443,7 @@ impl Core {
             .into_iter().filter(|d| !guest || d.guest_may_read()).collect();
         let ids = self.fleet_visible(caller);
         let now = now_ms();
-        let hs = self.fleet.cfg.health_secs;
+        let cfg = self.fleet.cfg.read().clone();
         let mut st = self.fleet.state.lock();
         st.last_activity = now;
         let mut clusters = Map::new();
@@ -444,7 +463,7 @@ impl Core {
                     // A background dataset not fetched yet is worth saying so about; an
                     // on-demand one nobody has asked for is simply not there.
                     None if since.is_none() && d.class() == Class::Background => {
-                        datasets.insert(d.name().into(), serde_json::to_value(Entry::never(d.stale_after_ms(hs), first)).unwrap_or(Value::Null));
+                        datasets.insert(d.name().into(), serde_json::to_value(Entry::never(cfg.stale_after_ms(*d), first)).unwrap_or(Value::Null));
                     }
                     None => {}
                 }
@@ -456,7 +475,8 @@ impl Core {
         json!({
             "ok": true, "epoch": self.fleet.epoch, "seq": st.seq, "now": now, "running": self.fleet_enabled(),
             "full": since.is_none(),
-            "catalogue": catalogue::catalogue_json(hs),
+            "catalogue": catalogue::catalogue_json(&cfg),
+            "policy": { "mode": cfg.mode.as_str(), "pausedAll": cfg.paused_all, "paused": cfg.paused.iter().cloned().collect::<Vec<_>>() },
             "clusterIds": ids,
             "clusters": clusters,
         })
@@ -481,13 +501,13 @@ impl Core {
             return json!({ "ok": false, "kind": "fleet_off",
                            "message": "the fleet cache is not running in this core; ask the cluster directly" });
         }
-        let hs = self.fleet.cfg.health_secs;
+        let cfg = self.fleet.cfg.read().clone();
         let wait = match msg.get("wait") {
             Some(Value::Bool(true)) => MAX_WAIT,
             Some(Value::Number(n)) => Duration::from_secs(n.as_u64().unwrap_or(0)).min(MAX_WAIT),
             _ => Duration::ZERO,
         };
-        let max_age_ms = msg.get("maxAgeSec").and_then(Value::as_u64).unwrap_or(ds.interval_secs(hs)) * 1000;
+        let max_age_ms = msg.get("maxAgeSec").and_then(Value::as_u64).unwrap_or(cfg.interval(ds)) * 1000;
         let key = (id.clone(), ds);
         let now = now_ms();
         let rx = {
@@ -533,7 +553,7 @@ impl Core {
                 e.last_read = now_ms();
                 serde_json::to_value(&*e).unwrap_or(Value::Null)
             }
-            None => serde_json::to_value(Entry::never(ds.stale_after_ms(hs), None)).unwrap_or(Value::Null),
+            None => serde_json::to_value(Entry::never(cfg.stale_after_ms(ds), None)).unwrap_or(Value::Null),
         };
         json!({ "ok": true, "clusterId": id, "dataset": ds.name(), "entry": entry, "reach": reach,
                 "waited": waited, "timedOut": timed_out })
@@ -551,6 +571,7 @@ impl Core {
         let datasets = dataset_list(msg.get("datasets")).unwrap_or_else(background);
         let user = caller.map(|c| c.name.clone()).unwrap_or_default();
         let now = now_ms();
+        let cfg = self.fleet.cfg.read().clone();
         let mut queued = 0;
         let mut skipped = vec![];
         {
@@ -571,7 +592,9 @@ impl Core {
                         continue;
                     }
                     st.refresh_rl.insert(rl, now);
-                    if d.class() == Class::OnDemand {
+                    // Watched under the running mode: in hybrid or on-demand a Refresh is
+                    // what keeps a background dataset coming for the watch window.
+                    if cfg.effective_class(*d) == Class::OnDemand {
                         st.watched.insert((id.clone(), *d), now);
                     }
                     st.request((id.clone(), *d), now);
@@ -581,6 +604,66 @@ impl Core {
         }
         self.fleet.wake.notify_one();
         json!({ "ok": true, "queued": queued, "skipped": skipped, "running": self.fleet_enabled() })
+    }
+
+    /* ------------------------------------ policy ------------------------------------ */
+
+    fn policy_reply(&self, saved: Option<Result<(), String>>) -> Value {
+        let pol = self.fleet.policy.read().clone();
+        let cfg = self.fleet.cfg.read().clone();
+        let effective: Map<String, Value> = ALL.iter()
+            .map(|d| (d.name().to_string(), json!(cfg.effective_class(*d))))
+            .collect();
+        let mut out = json!({
+            "ok": true,
+            "policy": pol,
+            "defaults": Policy::shipped(),
+            "effective": effective,
+            "path": self.fleet.policy_path.as_ref().map(|p| p.display().to_string()),
+            "stored": self.fleet.policy_path.as_ref().is_some_and(|p| p.exists()),
+            "warning": self.fleet.policy_warning,
+            "running": self.fleet_enabled(),
+        });
+        match saved {
+            Some(Ok(())) => { out["saved"] = json!(true); }
+            Some(Err(e)) => { out["saved"] = json!(false); out["warning"] = json!(e); }
+            None => {}
+        }
+        out
+    }
+
+    /// `POLICY_GET` and `POLICY_SET {policy}`. A set is validated, bounded, written to
+    /// `policy.json` and applied to the scheduler at once; without a data dir (the portable
+    /// build before a config is chosen) it is applied for this run and said so.
+    pub(crate) fn policy_msg(&self, t: &str, msg: &Value, caller: Option<&Caller>) -> Value {
+        if t == "POLICY_GET" {
+            return self.policy_reply(None);
+        }
+        let incoming = msg.get("policy").cloned().unwrap_or(Value::Null);
+        if !incoming.is_object() {
+            return json!({ "ok": false, "kind": "bad_request", "message": "policy must be an object" });
+        }
+        let pol: Policy = match serde_json::from_value(incoming) {
+            Ok(p) => p,
+            Err(e) => return json!({ "ok": false, "kind": "bad_request", "message": format!("policy: {e}") }),
+        };
+        let pol = pol.normalised();
+        let saved = match &self.fleet.policy_path {
+            Some(p) => pol.save(p),
+            None => Err("no data directory: the policy applies to this run only".to_string()),
+        };
+        *self.fleet.cfg.write() = Config::from_policy(&pol);
+        *self.fleet.policy.write() = pol.clone();
+        tracing::info!(
+            target: "audit",
+            user = caller.map(|c| c.name.as_str()).unwrap_or(""),
+            mode = pol.mode.as_str(), paused_all = pol.paused.all, paused = ?pol.paused.clusters,
+            per_cluster = pol.concurrency.per_cluster, global = pol.concurrency.global,
+            saved = saved.is_ok(),
+            "request policy changed"
+        );
+        self.fleet.wake.notify_one();
+        self.policy_reply(Some(saved))
     }
 
     /* ------------------------------------ events ------------------------------------ */

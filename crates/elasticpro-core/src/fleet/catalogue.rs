@@ -117,8 +117,9 @@ impl Dataset {
         }
     }
 
-    /// Seconds between fetches. For an on-demand dataset, while it is watched.
-    pub fn interval_secs(self, health_secs: u64) -> u64 {
+    /// The shipped seconds between fetches; the policy (`fleet::policy`) may say otherwise,
+    /// and `scheduler::Config::interval` is what the poller runs on.
+    pub fn default_interval_secs(self, health_secs: u64) -> u64 {
         match self {
             Dataset::Health => health_secs,
             Dataset::Nodes => 300,
@@ -134,9 +135,9 @@ impl Dataset {
 
     /// When a value is old enough that the page should say so: two intervals, three for
     /// policies — a policy that changes once a quarter is not stale after two hours.
-    pub fn stale_after_ms(self, health_secs: u64) -> u64 {
+    pub fn stale_after_ms(self, interval_secs: u64) -> u64 {
         let k = if self == Dataset::Policies { 3 } else { 2 };
-        k * self.interval_secs(health_secs) * 1000
+        k * interval_secs * 1000
     }
 
     /// The requests, for everything except the per-repository datasets (see
@@ -269,15 +270,18 @@ pub fn datasets_for_write(method: &str, path: &str) -> Vec<Dataset> {
 }
 
 /// The catalogue as the UI reads it from `FLEET_STATE.catalogue`.
-pub fn catalogue_json(health_secs: u64) -> Value {
+pub fn catalogue_json(cfg: &super::scheduler::Config) -> Value {
     Value::Array(
         ALL.iter()
             .map(|d| {
                 json!({
                     "dataset": d.name(),
                     "class": d.class(),
-                    "intervalSec": d.interval_secs(health_secs),
-                    "staleAfterMs": d.stale_after_ms(health_secs),
+                    // What the running policy makes of it: under hybrid or on-demand a
+                    // background dataset is fetched only while a page looks at it.
+                    "effectiveClass": cfg.effective_class(*d),
+                    "intervalSec": cfg.interval(*d),
+                    "staleAfterMs": cfg.stale_after_ms(*d),
                     "guest": d.guest_may_read(),
                     "keys": match d {
                         Dataset::Snapshots | Dataset::SnapshotsFull => json!(["byRepo"]),
@@ -309,11 +313,11 @@ mod tests {
 
     #[test]
     fn intervals_and_staleness() {
-        assert_eq!(Dataset::Health.interval_secs(180), 180);
-        assert_eq!(Dataset::Nodes.interval_secs(180), 300);
-        assert_eq!(Dataset::Snapshots.interval_secs(180), 1800);
+        assert_eq!(Dataset::Health.default_interval_secs(180), 180);
+        assert_eq!(Dataset::Nodes.default_interval_secs(180), 300);
+        assert_eq!(Dataset::Snapshots.default_interval_secs(180), 1800);
         assert_eq!(Dataset::Health.stale_after_ms(180), 360_000);
-        assert_eq!(Dataset::Policies.stale_after_ms(180), 3 * 3_600_000);
+        assert_eq!(Dataset::Policies.stale_after_ms(3600), 3 * 3_600_000);
         assert_eq!(Dataset::Indices.class(), Class::OnDemand);
         assert_eq!(Dataset::Snapshots.class(), Class::Background);
         for d in ALL {

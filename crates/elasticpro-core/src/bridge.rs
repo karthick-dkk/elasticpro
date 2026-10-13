@@ -860,6 +860,7 @@ impl Core {
             "FLEET_STATE" => self.fleet_state_msg(&msg, caller.as_ref()),
             "CLUSTER_DATASET" => self.cluster_dataset_msg(&msg, caller.as_ref()).await,
             "REFRESH" => self.refresh_msg(&msg, caller.as_ref()),
+            "POLICY_GET" | "POLICY_SET" => self.policy_msg(&t, &msg, caller.as_ref()),
             "EVENTS_TICKET" => self.events_ticket_msg(caller.clone(), reauth),
             "DELAY_SINK_GET" | "DELAY_SINK_SET" | "DELAY_SINK_RUN" => self.delay_sink_msg(&t, &msg).await,
             "NOTIFY_PUT" | "NOTIFY_LIST" | "NOTIFY_CLEAR" => self.notify_msg(&t, &msg, caller.as_ref()),
