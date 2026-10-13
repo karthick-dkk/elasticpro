@@ -1728,11 +1728,50 @@ if (config.clusters.length >= 2 && viaFleet) {
 /* ------------------------------------ verdict ------------------------------------ */
 
 restoreConsole();
+// Config page: a fleet event must not reload the open tab or wipe what is being typed.
+// On a 32-cluster install data lands every couple of seconds; the page used to rebuild on
+// each one, re-asking TUNNELS/PINS (Jump hosts) and ZABBIX_CLUSTERS (Zabbix) every time.
+{
+  await go('settings');
+  const bus = (await load('core/state.js')).bus;
+  const tab = (label) => [...doc.querySelectorAll('nav.subnav button')].find((b) => b.title === label);
+  const countOf = (type) => sent.filter((m) => m.type === type).length;
+  const fire = async () => { for (const c of config.clusters) bus.emit('data', c.id); await settleFor(700); };
+  const trust = tab('Jump hosts & trust');
+  ok(!!trust, 'config: no Jump hosts & trust tab');
+  if (trust) {
+    trust.click(); await settleFor(500);
+    const tunnels = countOf('TUNNELS'), pins = countOf('PINS');
+    ok(tunnels >= 1, 'config: opening Jump hosts & trust should ask the core for TUNNELS once');
+    const card = doc.querySelector('#trust-card');
+    await fire(); await fire();
+    ok(countOf('TUNNELS') === tunnels && countOf('PINS') === pins,
+      `config: fleet events re-asked the core (TUNNELS ${countOf('TUNNELS') - tunnels}, PINS ${countOf('PINS') - pins} more)`);
+    ok(doc.querySelector('#trust-card') === card, 'config: a fleet event rebuilt the Jump hosts tab');
+  }
+  const zbx = tab('Zabbix');
+  if (zbx) {
+    zbx.click(); await settleFor(500);
+    const asked = countOf('ZABBIX_CLUSTERS');
+    const url = doc.querySelector('#zl-zurl');
+    if (url) { url.value = 'https://zabbix.typing.test'; }
+    await fire();
+    ok(countOf('ZABBIX_CLUSTERS') === asked, 'config: a fleet event re-asked ZABBIX_CLUSTERS');
+    if (url) ok(doc.querySelector('#zl-zurl') === url && url.value === 'https://zabbix.typing.test',
+      'config: a fleet event wiped the Zabbix form while it was being typed into');
+  }
+  // The one thing fleet data does change — a cluster's state pill — still updates in place.
+  tab('Clusters').click(); await settleFor(300);
+  const shown = (await load('core/state.js')).clusters().length;   // enabled clusters only, like the table
+  const pills = doc.querySelectorAll('td[data-cluster-state]');
+  ok(pills.length === shown, `config: ${pills.length} state pills for ${shown} clusters`);
+}
+
 if (problems.length) {
   console.error(`\n${problems.length} problem(s):`);
   for (const p of problems) console.error('  ✗ ' + p);
   process.exit(1);
 }
-console.log('ok: strip, console, shards, volume, hand-off, refresh, snapshots, tasks, toasts, accounts split and the log-delay preflight');
+console.log('ok: strip, console, shards, volume, hand-off, refresh, snapshots, tasks, toasts, accounts split, the log-delay preflight and a quiet Config page');
 // The pages leave auto-refresh timers and a live tail running; nothing here waits on them.
 process.exit(0);
