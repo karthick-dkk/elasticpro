@@ -433,7 +433,15 @@ export async function editDefaults() {
       field('Log index pattern', text('ce-lp', d.logIndexPattern, { mono: true })),
       field('Time field', text('ce-tf', d.timeField, { mono: true })),
       field('Certificates (default)', select('ce-dtls', d.tls || 'auto', [['auto', 'auto'], ['system', 'system'], ['insecure', 'insecure']]))),
-    field('Request timeout (ms)', text('ce-to', d.requestTimeoutMs, { mono: true })),
+    h('div', { style: { display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '10px' } },
+      field('Live redraw', select('ce-lr', d.liveRedraw || 'pending', [
+        ['pending', 'pending — keep the page, offer "N updates — Apply"'],
+        ['live', 'live — repaint as data lands'],
+        ['manual', 'manual — only Apply or Refresh redraws']])),
+      field('Opens on', select('ce-ds', d.defaultScope || 'last-selected', [
+        ['last-selected', 'the cluster last chosen in this browser'],
+        ['all', 'All clusters']])),
+      field('Request timeout (ms)', text('ce-to', d.requestTimeoutMs, { mono: true }))),
   ];
   const saved = await modal('Defaults', 'Apply to every cluster unless a cluster overrides them.', body,
     (ctx) => [h('div', { style: { marginLeft: 'auto', display: 'flex', gap: '8px' } },
@@ -444,7 +452,8 @@ export async function editDefaults() {
         if ([ri, dw, dc, ss, to].some((v) => v == null)) return ctx.msg('Check the numeric fields.');
         r.defaults = { ...r.defaults, readOnly: val('ce-ro') === 'yes', autoRefresh: val('ce-ar') === 'yes', refreshIntervalSec: ri,
           diskWarnPercent: dw, diskCritPercent: dc, snapshotStaleHours: ss, requestTimeoutMs: to,
-          logIndexPattern: val('ce-lp').trim() || 'logstash-*', timeField: val('ce-tf').trim() || '@timestamp', tls: val('ce-dtls') };
+          logIndexPattern: val('ce-lp').trim() || 'logstash-*', timeField: val('ce-tf').trim() || '@timestamp', tls: val('ce-dtls'),
+          liveRedraw: val('ce-lr'), defaultScope: val('ce-ds') };
         try { await saveRaw(); ctx.done(true); } catch (e) { ctx.msg(`Save failed: ${e.message}`); }
       } }, 'Save'))]);
   return !!saved;

@@ -4,6 +4,7 @@ import { h, $, mount, clear } from './lib/dom.js';
 import { ago, dur } from './lib/fmt.js';
 import { idb } from './lib/idb.js';
 import { coalesce } from './lib/coalesce.js';
+import { createRedrawGate, normalisePolicy, normaliseScope, openingSelection } from './lib/quiet-ui.js';
 import * as cfg from './core/config.js';
 import { state, bus, setConfig, refreshAll, refreshModule, REFRESH_MODULES, startAutoRefresh, clusters, fleetMode,
          alerts, cachedAlerts, worstHealth, requestLoad,
@@ -77,12 +78,14 @@ const PAGES = [
   // multi: the Log delay view asks every selected cluster at once. The live tail is
   // still one cluster — it picks which, and says so, rather than the page silently
   // collapsing the fleet selection on the way in.
-  { id: 'logs',      label: 'Live logs & Log delay', icon: '▶', mod: pLogs, multi: true,  minRole: 'user' },
-  { id: 'console',   label: 'REST console',   icon: '⌫', mod: pConsole,   multi: false, minRole: 'user' },
+  // live: the page is the stream — a tail, a console, the request log. Data events reach
+  // it whatever the redraw policy says; the pending gate is for pages people read.
+  { id: 'logs',      label: 'Live logs & Log delay', icon: '▶', mod: pLogs, multi: true,  minRole: 'user', live: true },
+  { id: 'console',   label: 'REST console',   icon: '⌫', mod: pConsole,   multi: false, minRole: 'user', live: true },
   { id: 'snapshots', label: 'Snapshots & SLM',icon: '↻', mod: pSnapshots, multi: true,  minRole: 'user' },
   { id: 'volume',    label: 'Volume report',  icon: '▤', mod: pVolume,    multi: true,  minRole: 'user' },
   { id: 'automation', label: 'Automation',    icon: '⟳', mod: pAutomation, multi: true, minRole: 'user' },
-  { id: 'requests',  label: 'Requests',       icon: '⚡', mod: pRequests,  multi: true,  minRole: 'admin' },
+  { id: 'requests',  label: 'Requests',       icon: '⚡', mod: pRequests,  multi: true,  minRole: 'admin', live: true },
   { id: 'accounts',  label: 'Accounts',       icon: '☺', mod: pAccounts,  multi: true,  minRole: 'admin', accountsOnly: true },
   { id: 'settings',  label: 'Config',         icon: '⚙', mod: pSettings,  multi: true,  minRole: 'admin' },
 ];
@@ -401,7 +404,7 @@ function renderTopbar() {
   const healthSig = activeClusters().map((c) => `${c.id}:${healthState(state.data.get(c.id))}`).join(',');
   const key = JSON.stringify([page.id, page.multi, state.selected, healthSig, clusters().map((c) => `${c.id}\u0001${c.name}`),
     a.length, crit, clustersNeedingCredential().length, clustersWithAuthError().length, serverHoldsCredentials(),
-    theme, isSnapshotMode(), fleetMode(), state.autoRefresh, state.defaults.refreshIntervalSec,
+    theme, isSnapshotMode(), fleetMode(), state.autoRefresh, state.defaults.refreshIntervalSec, redrawPolicy(),
     me && me.name, embedded, state.snapshot && state.snapshot.host]);
   if (key === topbarKey && bar.firstChild) { tickStatus(); return; }
   topbarKey = key;
@@ -411,6 +414,8 @@ function renderTopbar() {
     // page borrowed from it.
     state.selected = e.target.value;
     fleetView = e.target.value === 'all';
+    // The cluster this browser opens on next time ("last selected" scope).
+    if (e.target.value !== 'all') idb.setKV('lastCluster', e.target.value);
     // Picking "All clusters" here is the deliberate choice a defaultSingle page waits
     // for; picking one cluster withdraws it.
     fleetChosen = e.target.value === 'all';
@@ -456,12 +461,23 @@ function renderTopbar() {
           h('i.dot'), 'snapshot')
       : null,
     h('span#refresh-status.muted', { style: { fontSize: '11.5px', fontVariantNumeric: 'tabular-nums' } }, ''),
+    // Updates that landed while the page was being read, held by the redraw gate. Filled
+    // in by renderPendingPill — the gate changes it far more often than the bar redraws.
+    h('button#pending-updates.btn.sm.primary', { hidden: true, onclick: () => redrawGate.apply() }, ''),
     // With the server's fleet cache there is nothing for a page to poll: the core polls
     // every cluster on its own schedule and tells the page what changed. The auto toggle
-    // would only be a switch for load that no longer exists, so it says "live" instead.
+    // would only be a switch for load that no longer exists, so this says how what lands
+    // reaches the page instead: live (repainted as it arrives) or quiet (held for Apply).
     fleetMode() && !isSnapshotMode()
-      ? h('span.pill.green', { title: 'The server polls every cluster itself and pushes what changes here. '
-          + 'Refresh asks it to fetch the clusters on screen now.' }, h('i.dot'), 'live')
+      ? (redrawPolicy() === 'live'
+        ? h('span.pill.green', { title: 'The server polls every cluster itself and pushes what changes here; '
+            + 'the page repaints as it lands. Refresh asks it to fetch the clusters on screen now. '
+            + 'Config → Defaults → Live redraw changes this.' }, h('i.dot'), 'live')
+        : h('span.pill.grey', { title: 'The server polls every cluster itself and pushes what changes here. '
+            + 'The page keeps what it shows until you press Apply'
+            + (redrawPolicy() === 'pending' ? ', or by itself after a minute without you touching it' : '')
+            + '. Refresh asks it to fetch the clusters on screen now. Config → Defaults → Live redraw changes this.' },
+          h('i.dot'), redrawPolicy() === 'pending' ? 'quiet' : 'manual'))
       : null,
     h('button.btn.sm', {
       hidden: isSnapshotMode() || fleetMode(),
@@ -519,6 +535,7 @@ function renderTopbar() {
         }, `\u23FB ${me.name}`)
       : null);
   tickStatus();
+  renderPendingPill(redrawGate.pending());
 }
 
 function tickStatus() {
@@ -656,6 +673,8 @@ export function go(id) {
   }
   currentPage = page.id;
   setRequestOrigin(`page:${page.id}`);
+  // Drawn afresh from state below: whatever the gate was holding for the old drawing is in it.
+  redrawGate.reset();
   location.hash = `#/${page.id}`;
   resolveSelection(page);
   renderNav();
@@ -687,6 +706,14 @@ async function start(config, handle) {
   // Precedence: the user's own toggle (remembered) > defaults.autoRefresh in the YAML > off.
   const saved = await idb.getKV('autoRefresh');
   state.autoRefresh = (saved === true || saved === false) ? saved : (state.defaults.autoRefresh === true);
+  // Open on the cluster last chosen in this browser (or the first), not on "All clusters":
+  // the fleet view is the dearest one there is, and the one a person who looks after a
+  // single cluster never asked for. defaults.defaultScope: 'all' restores the old start.
+  if (!isSnapshotMode()) {
+    const last = await idb.getKV('lastCluster');
+    const open = openingSelection({ scope: normaliseScope(state.defaults.defaultScope), last, clusters: clusters() });
+    if (open !== 'all') { state.selected = open; fleetView = false; }
+  }
   renderShell();
   // Opened from a Zabbix problem: arrive at the cluster it is about, on the page that
   // answers it, and then forget the request so a later start does not repeat it.
@@ -862,9 +889,10 @@ bus.on('refreshed', () => {
     }
     return { cluster: c, snapshots: snaps };
   }));
-  // The page redraw goes through the same coalescing as data events: a refresh ending
-  // while pushes are still landing is one redraw, not two back to back.
-  scheduleDataRedraw();
+  // A refresh is something a person asked for (or auto-refresh, which they turned on):
+  // it applies whatever the gate was holding, through the same coalescing as data events,
+  // so a refresh ending while pushes are still landing is one redraw, not two.
+  redrawGate.apply();
 });
 bus.on('tick', tickStatus);
 
@@ -891,7 +919,35 @@ const scheduleDataRedraw = coalesce(() => {
   const p = PAGES.find((x) => x.id === currentPage);
   if (p && p.mod.onData) p.mod.onData();
 }, { gapAfter: (costMs) => (costMs > 16 ? Math.min(1500, costMs * 2) : 0) });
-bus.on('data', () => scheduleDataRedraw());
+
+/*
+ * And, before any of that, the redraw gate. Coalescing made a burst one redraw; it did
+ * nothing about the next burst, and on a fleet there is always a next burst — the page
+ * repainted all day under whoever was reading it. Under the default policy (`pending`)
+ * what lands is held and counted on an "N updates — Apply" pill; it applies by itself
+ * once the page has gone a minute untouched. The nav badge still moves: a new alert is
+ * worth knowing about while you read. See lib/quiet-ui.js; Config → Defaults sets it.
+ */
+function redrawPolicy() { return normalisePolicy(state.defaults && state.defaults.liveRedraw); }
+function renderPendingPill(n) {
+  const el = $('#pending-updates');
+  if (!el) return;
+  el.hidden = !n;
+  if (!n) return;
+  el.textContent = `${n} update${n === 1 ? '' : 's'} — Apply`;
+  el.title = 'Data landed while you were reading. Apply redraws the page with it'
+    + (redrawPolicy() === 'pending' ? '; it also applies by itself after a minute without you touching the page.' : '.');
+}
+const redrawGate = createRedrawGate({ apply: () => scheduleDataRedraw(), policy: redrawPolicy, onChange: renderPendingPill });
+const scheduleNavRedraw = coalesce(() => renderNav());
+bus.on('data', () => {
+  scheduleNavRedraw();
+  const p = PAGES.find((x) => x.id === currentPage);
+  redrawGate.notify({ live: !!(p && p.live) });
+});
+for (const ev of ['pointerdown', 'keydown', 'wheel', 'touchstart']) {
+  document.addEventListener(ev, () => redrawGate.interact(), { capture: true, passive: true });
+}
 
 window.addEventListener('ep:navigate', (e) => {
   const id = e.detail && e.detail.page;

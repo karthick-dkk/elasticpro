@@ -1783,11 +1783,38 @@ restoreConsole();
   ok(pills.length === shown, `config: ${pills.length} state pills for ${shown} clusters`);
 }
 
+// Quiet UI: fleet data landing while somebody reads the Clusters page does not repaint it.
+// It is counted on an "N updates — Apply" pill; Apply (or a minute untouched) redraws. A live
+// page — the Request Centre — still takes every event.
+{
+  await go('overview');
+  const bus = (await load('core/state.js')).bus;
+  const view = doc.querySelector('#view');
+  const pill = () => doc.querySelector('#pending-updates');
+  // The reader touches the page: the idle window starts now, so nothing applies by itself
+  // inside this case (the harness may well have been running for over a minute).
+  doc.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Shift', bubbles: true }));
+  const first = view.firstElementChild;
+  ok(pill() && pill().hidden, 'quiet: the Apply pill should be hidden before any data lands');
+  for (const c of config.clusters) bus.emit('data', c.id); await settleFor(700);
+  ok(view.firstElementChild === first, 'quiet: a fleet event repainted the Clusters page while it was being read');
+  ok(pill() && !pill().hidden && /^\d+ updates? — Apply$/.test(pill().textContent),
+    `quiet: expected an "N updates — Apply" pill, saw ${JSON.stringify(pill() && pill().textContent)}`);
+  pill().click(); await settleFor(700);
+  ok(pill() && pill().hidden, 'quiet: Apply should clear the pill');
+  ok(doc.querySelector('.pill.grey') && [...doc.querySelectorAll('#topbar .pill')].some((p) => p.textContent.trim() === 'quiet'),
+    'quiet: the top bar should say "quiet" under the default policy, not "live"');
+  await go('requests');
+  for (const c of config.clusters) bus.emit('data', c.id); await settleFor(300);
+  ok(pill() && pill().hidden, 'quiet: a live page (Requests) must not hold data events');
+  await go('overview');
+}
+
 if (problems.length) {
   console.error(`\n${problems.length} problem(s):`);
   for (const p of problems) console.error('  ✗ ' + p);
   process.exit(1);
 }
-console.log('ok: strip, console, shards, volume, hand-off, refresh, snapshots, tasks, toasts, accounts split, the log-delay preflight, a quiet Config page and the Request Centre');
+console.log('ok: strip, console, shards, volume, hand-off, refresh, snapshots, tasks, toasts, accounts split, the log-delay preflight, a quiet Config page, the Request Centre and the redraw gate');
 // The pages leave auto-refresh timers and a live tail running; nothing here waits on them.
 process.exit(0);

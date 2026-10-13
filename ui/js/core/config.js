@@ -23,6 +23,12 @@ export const DEFAULTS = {
   // remembered), to have it poll every refreshIntervalSec.
   autoRefresh: false,
   refreshIntervalSec: 30,
+  // Quiet UI. liveRedraw: 'pending' keeps a page as it is while data lands and offers
+  // "N updates — Apply" (applied by itself after a minute without a touch); 'live'
+  // repaints on every event; 'manual' only on Apply or Refresh. defaultScope:
+  // 'last-selected' opens on the cluster last chosen in this browser; 'all' on the fleet.
+  liveRedraw: 'pending',
+  defaultScope: 'last-selected',
   requestTimeoutMs: 15000,
   logIndexPattern: 'logstash-*',
   // Named groups <source> and <date> drive the source picker on the Indices page.

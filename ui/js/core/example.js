@@ -32,6 +32,13 @@ defaults:
   # Turn it on here, or with the "Auto" toggle in the top bar (your choice is remembered).
   autoRefresh: false
   refreshIntervalSec: 30        # how often, when auto-refresh is on
+
+  # What the page does when the server pushes new data while you are reading it:
+  # pending (default) keeps the page and offers "N updates - Apply" (applied by itself
+  # after a minute without a touch); live repaints as it lands; manual only on Apply.
+  liveRedraw: pending
+  # Which cluster the app opens on: last-selected (default, remembered per browser) or all.
+  defaultScope: last-selected
   requestTimeoutMs: 15000
   diskWarnPercent: 80
   diskCritPercent: 90
