@@ -91,13 +91,27 @@ export function usageMeter(used, total, opts = {}) {
 }
 
 /* ------------------------------- time histogram ------------------------------- */
-/** buckets: [{ t: epochMs, v: count }] */
+/**
+ * What an empty histogram says. "No documents in this range" is only true when the search
+ * found none; when it found some and the cluster still sent no time buckets (a field that
+ * is not aggregatable, a build that drops aggregations), the list below is complete and the
+ * chart is what is missing — saying "no documents" over a list of documents is the page
+ * contradicting itself.
+ */
+export function histogramEmptyText(total, field = '') {
+  if (!(total > 0)) return 'No documents in this range';
+  const n = Number(total).toLocaleString();
+  return `No time buckets came back for the ${n} matching document${total === 1 ? '' : 's'}`
+    + `${field ? ` on ${field}` : ''} — the histogram cannot be drawn; the list below is complete.`;
+}
+
+/** buckets: [{ t: epochMs, v: count }]; opts.emptyText is what to say when there are none. */
 export function timeHistogram(buckets, opts = {}) {
   const W = 1000, H = opts.height || 150;
   const padL = 46, padR = 8, padT = 8, padB = 22;
   const iw = W - padL - padR, ih = H - padT - padB;
   const el = h('div.chart');
-  if (!buckets.length) return mount(el, h('div.tbl-empty', 'No documents in this range'));
+  if (!buckets.length) return mount(el, h('div.tbl-empty', opts.emptyText || 'No documents in this range'));
 
   const max = Math.max(1, ...buckets.map((b) => b.v));
   const n = buckets.length;

@@ -92,3 +92,24 @@ test('the cluster address in evidence never carries a credential', () => {
   assert.equal(url.value, 'https://h:9200');
   assert.ok(!evidenceText(h, []).includes('u:p@'), 'nor in the copied text');
 });
+
+// Regression: ISSUE-B — before the repositories were read, the Snapshots page was headed
+// "Snapshots in —" over "No snapshots in this repository": an unknown drawn as an empty result.
+// Found by /qa on 2026-10-13
+// Report: .gstack/qa-reports/qa-report-127-0-0-1-2026-10-13.md
+const { listingTitle, listingEmptyText } = E;
+
+test('the listing title names a repository only when there is one', () => {
+  assert.equal(listingTitle('daily'), 'Snapshots in daily');
+  assert.equal(listingTitle(undefined), 'Snapshots');
+  assert.equal(listingTitle(''), 'Snapshots');
+});
+
+test('an empty listing says what is actually known, in order', () => {
+  assert.equal(listingEmptyText({ searching: true, fetched: true, repos: [{ name: 'daily' }] }), 'No snapshot matches that search');
+  assert.equal(listingEmptyText({ error: 'No route to that address from this machine.' }), 'Repositories could not be read: No route to that address from this machine.');
+  assert.equal(listingEmptyText({ fetched: false }), 'Repositories not read yet — press Refresh to list them');
+  assert.equal(listingEmptyText({ fetched: true, repos: [] }), 'No snapshot repositories on this cluster');
+  assert.equal(listingEmptyText({ fetched: true, repos: [{ name: 'daily' }] }), 'No snapshots in this repository');
+  assert.equal(listingEmptyText(), 'Repositories not read yet — press Refresh to list them', 'nothing known = not read');
+});
