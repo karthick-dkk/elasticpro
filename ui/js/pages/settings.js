@@ -115,6 +115,7 @@ async function restore(v) {
 
 export function render(el) {
   host = el;
+  loadedSection = null;
   // draw() asks for whatever the open section needs. loadSink is the exception: its
   // answer decides whether the Scheduled log delay tab exists at all, so it has to be
   // asked before the bar can be drawn correctly — and it redraws when it lands.
@@ -203,7 +204,26 @@ function trustCard() {
     h('div.muted', { style: { fontSize: '11.5px' } },
       'Trust decisions record fingerprints only — never a key, a password or a certificate.'));
 }
-export function onData() { if (host && host.isConnected) draw(); }
+/**
+ * The one thing on this page that fleet data changes is a cluster's state pill. Those are
+ * updated in place; the page is not rebuilt, so a form being typed into keeps its text and
+ * no tab asks the core for anything again.
+ */
+export function onData() {
+  if (!host || !host.isConnected) return;
+  for (const td of host.querySelectorAll('td[data-cluster-state]')) {
+    td.replaceChildren(clusterStatePill(client(td.dataset.clusterState), td.dataset.kind));
+  }
+}
+
+/** A cluster's state as a pill: the Clusters tab marks an auth error yellow, Zabbix's rows red. */
+function clusterStatePill(cl, kind) {
+  if (!cl) return pill('unknown', 'grey');
+  const colour = cl.state === 'online' ? 'green'
+    : cl.state === 'unknown' ? 'grey'
+    : cl.state === 'auth_error' && kind === 'clusters' ? 'yellow' : 'red';
+  return pill(cl.state.replace('_', ' '), colour);
+}
 
 /* ------------------------------ alert triggers ------------------------------ */
 
@@ -470,6 +490,14 @@ const SECTIONS = [
 
 /** Which section is open. Remembered across redraws so a save does not move you. */
 let section = 'file';
+/**
+ * The section whose load() has run since this page was entered. draw() used to call the
+ * open section's loader on every redraw, and the page redrew on every fleet event — so
+ * on a 32-cluster install the Jump hosts tab asked the core for TUNNELS and PINS every
+ * couple of seconds, and the Zabbix tab never finished loading. A section is loaded once
+ * per visit; the actions that change what it shows call its loader themselves.
+ */
+let loadedSection = null;
 
 function visibleSections() {
   return SECTIONS.filter((s) => !s.when || s.when());
@@ -603,7 +631,7 @@ function clustersCard() {
             : c.anonymous ? pill('anonymous', 'grey') : pill('missing', 'red')),
       h('td.mono', { style: { fontSize: '11.5px' } }, c.username || '–'),
       h('td.mono', { style: { fontSize: '11px' } }, c.logIndexPattern),
-      h('td', cl ? pill(cl.state.replace('_', ' '), cl.state === 'online' ? 'green' : cl.state === 'auth_error' ? 'yellow' : cl.state === 'unknown' ? 'grey' : 'red') : pill('unknown', 'grey')),
+      h('td', { 'data-cluster-state': c.id, 'data-kind': 'clusters' }, clusterStatePill(cl, 'clusters')),
       h('td.muted', { style: { fontSize: '11.5px' } }, cl && cl.lastOkAt ? ago(cl.lastOkAt) : '–'),
       // Zabbix wins: a cluster that is a Zabbix host is edited there, on its macros.
       h('td', fromZabbix
@@ -1030,7 +1058,7 @@ function zabbixCard() {
                   : z.credential === 'secret-macro' ? 'Secret macro' : 'none', z.credentialOk ? 'green' : 'red'),
         (z.notes || []).map((n) => h('div.muted', { style: { fontSize: '11px', marginTop: '3px' } }, n))),
       h('td', { style: { fontSize: '11.5px' } }, (z.zabbixGroups || []).join(', ') || h('span.muted', 'no user group can read it')),
-      h('td', cl ? pill(cl.state.replace('_', ' '), cl.state === 'online' ? 'green' : cl.state === 'unknown' ? 'grey' : 'red') : pill('unknown', 'grey')));
+      h('td', { 'data-cluster-state': z._id, 'data-kind': 'zabbix' }, clusterStatePill(cl, 'zabbix')));
   });
   const shadowed = (state.config && state.config.shadowed) || [];
   const zopt = (state.config && state.config.raw && state.config.raw.zabbix) || {};
@@ -1102,8 +1130,12 @@ function draw() {
   const active = activeSection();
   mount(host, sectionNav(), h('div', { style: { marginTop: '12px' } }, active ? active.build() : null));
   // A section that needs a round trip asks for it here rather than on page entry, so
-  // opening Config no longer fires every request the page could ever need.
-  if (active && active.load) active.load();
+  // opening Config no longer fires every request the page could ever need — and once per
+  // visit, so a redraw never asks again.
+  if (active && active.load && loadedSection !== active.id) {
+    loadedSection = active.id;
+    active.load();
+  }
 }
 
 /** The raw file entry behind a normalised cluster (matched by name, then url). */

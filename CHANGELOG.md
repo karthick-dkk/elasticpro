@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.3.9
+
+**A Request Centre: every request the core sends, who asked, how it went.**
+
+The core keeps a record of each request to a cluster — the poller's and the pages' alike —
+with its origin, timing and outcome: what is in flight now and the last 2,000 finished. The
+new Requests page (users and up) shows them, in flight first with elapsed time, then newest
+first, with cluster / origin / outcome / slower-than filters, per-cluster totals and a CSV
+export; it reads the core's log and nothing else. Each request also carries an
+`X-Opaque-Id` (`elasticpro/<install>/<origin>/<cluster>/<n>`), so a query of ours can be found
+in a cluster's task list and told from anyone else's. The "Requests N in 5m" figure in the
+status strip links to the page.
+
+Pages are now told when they are left: Live logs stops its tail on the way out, as it had
+asked to and never was.
+
+## 0.3.8
+
+**The Config page stays still.**
+
+It redrew itself on every fleet event and re-ran the open tab's loader each time. With
+thirty-odd clusters that is every couple of seconds: the Jump hosts & trust tab asked the
+core for its tunnels and pins again and again, the Zabbix tab never finished loading, and
+a URL being typed into a form was wiped mid-word. A tab now loads once per visit, and a
+fleet event changes only what fleet data changes on that page — the cluster-state pills,
+updated in place.
+
 ## 0.3.7
 
 **Two pages stop contradicting themselves.**
