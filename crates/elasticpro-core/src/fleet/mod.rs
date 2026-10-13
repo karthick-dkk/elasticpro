@@ -228,6 +228,8 @@ impl Core {
             timeout_ms: Some(q.timeout_ms),
             auth_header: None,
             allow_writes: false,
+            origin: Some(format!("poller:{}", q.key)),
+            opaque_id: None,
         };
         answer(self.es_req(req).await)
     }

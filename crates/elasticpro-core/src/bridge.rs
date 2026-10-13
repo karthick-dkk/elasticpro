@@ -74,6 +74,9 @@ pub struct Core {
     /// When each request left for each cluster, so "how hard are we hitting it" is a
     /// number rather than a guess. Trimmed to the reporting window on every read.
     request_log: parking_lot::Mutex<HashMap<String, std::collections::VecDeque<std::time::Instant>>>,
+    requests: parking_lot::Mutex<RequestLog>,
+    /// A short id for this core, so its requests can be told from another install's.
+    instance: String,
     started: std::time::Instant,
     /// Which build this is. Portable has no accounts and never asks anyone to log in.
     edition: Edition,
@@ -185,6 +188,69 @@ struct Sink {
 
 /// The window the request counter reports over.
 pub const REQUEST_WINDOW: std::time::Duration = std::time::Duration::from_secs(5 * 60);
+
+/// How many finished requests the core remembers for the Request Centre.
+pub const REQUEST_LOG_KEEP: usize = 2000;
+
+/// One request to a cluster, as the Request Centre shows it: who asked, what, how long it
+/// took and how it ended. Kept for every request the core sends — the poller's and the
+/// pages' alike — since both go through `es_req`.
+#[derive(Clone, Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RequestRecord {
+    pub id: u64,
+    pub cluster: String,
+    pub origin: String,
+    pub method: String,
+    pub path: String,
+    /// Unix milliseconds.
+    pub started_at: u64,
+    pub ms: Option<u64>,
+    pub ok: Option<bool>,
+    /// HTTP status, or the core's own kind when there was no answer (`timeout`, `unreachable`).
+    pub status: Option<String>,
+    pub via: Option<String>,
+}
+
+/// In-flight requests by id, and the most recent finished ones, newest last.
+#[derive(Default)]
+pub struct RequestLog {
+    next: u64,
+    pub inflight: HashMap<u64, RequestRecord>,
+    pub recent: std::collections::VecDeque<RequestRecord>,
+}
+
+impl RequestLog {
+    pub fn begin(&mut self, cluster: &str, origin: &str, method: &str, path: &str, via: Option<&str>) -> u64 {
+        self.next += 1;
+        let id = self.next;
+        let started_at = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
+        self.inflight.insert(id, RequestRecord {
+            id, cluster: cluster.to_string(), origin: origin.to_string(), method: method.to_string(),
+            path: path.to_string(), started_at, ms: None, ok: None, status: None, via: via.map(String::from),
+        });
+        id
+    }
+
+    pub fn finish(&mut self, id: u64, ms: u64, ok: bool, status: String) {
+        if let Some(mut r) = self.inflight.remove(&id) {
+            r.ms = Some(ms);
+            r.ok = Some(ok);
+            r.status = Some(status);
+            self.recent.push_back(r);
+            while self.recent.len() > REQUEST_LOG_KEEP {
+                self.recent.pop_front();
+            }
+        }
+    }
+}
+
+/// The opaque id a request carries to Elasticsearch. Under 256 bytes, no spaces: the
+/// install's short id, who asked, which cluster, and the record number.
+pub fn opaque_id(instance: &str, origin: &str, cluster: &str, id: u64) -> String {
+    let clean = |s: &str| s.chars().map(|c| if c.is_ascii_alphanumeric() || "-_.:".contains(c) { c } else { '_' }).take(64).collect::<String>();
+    format!("elasticpro/{}/{}/{}/{}", clean(instance), clean(origin), clean(cluster), id)
+}
 
 /// `--config <path>` / `--config=<path>` on the command line, else $ELASTICPRO_CONFIG.
 fn config_hint_from_env() -> Option<String> {
@@ -390,6 +456,8 @@ impl Core {
             config_hint: config_hint_from_env(),
             writes_unlocked: std::sync::atomic::AtomicBool::new(false),
             request_log: parking_lot::Mutex::new(HashMap::new()),
+            requests: parking_lot::Mutex::new(RequestLog::default()),
+            instance: crate::auth::random_hex(4),
             started: std::time::Instant::now(),
             delay_sink: RwLock::new(Sink {
                 config: read_sink_config(data_dir_for_sink.as_deref(), edition),
@@ -872,6 +940,7 @@ impl Core {
             // How many requests this app has sent to each cluster lately — the answer to
             // "are we stressing Elasticsearch", as a number.
             "REQUEST_STATS" => json!({ "ok": true, "requests": self.requests_for(caller.as_ref()) }),
+            "REQUEST_LOG" => self.request_log_for(caller.as_ref(), &msg),
             "PINS" => json!({ "ok": true, "pins": self.pins_for(caller.as_ref()) }),
             "CONFIG_READ" => {
                 let path = msg.get("path").and_then(|v| v.as_str()).unwrap_or("");
@@ -1361,6 +1430,21 @@ impl Core {
         all
     }
 
+    /// The Request Centre's answer: what is in flight and what finished recently, for the
+    /// clusters this caller may see. `cluster` narrows to one; `limit` caps the finished list
+    /// (newest first; default 200).
+    fn request_log_for(&self, caller: Option<&Caller>, msg: &Value) -> Value {
+        let ids = self.visible_ids(caller);
+        let only = msg.get("cluster").and_then(|c| c.as_str()).filter(|c| !c.is_empty()).map(String::from);
+        let limit = msg.get("limit").and_then(|l| l.as_u64()).unwrap_or(200).min(REQUEST_LOG_KEEP as u64) as usize;
+        let sees = |r: &RequestRecord| ids.as_ref().is_none_or(|s| s.contains(&r.cluster)) && only.as_ref().is_none_or(|c| c == &r.cluster);
+        let log = self.requests.lock();
+        let mut inflight: Vec<&RequestRecord> = log.inflight.values().filter(|r| sees(r)).collect();
+        inflight.sort_by_key(|r| r.started_at);
+        let recent: Vec<&RequestRecord> = log.recent.iter().rev().filter(|r| sees(r)).take(limit).collect();
+        json!({ "ok": true, "inflight": inflight, "recent": recent, "keep": REQUEST_LOG_KEEP, "instance": self.instance })
+    }
+
     /// Trust decisions, less the hosts that belong to clusters this caller cannot see.
     fn pins_for(&self, caller: Option<&Caller>) -> Value {
         let mut all = self.pins.list();
@@ -1675,7 +1759,7 @@ impl Core {
     /// rather than parsed from a message. Used by the scheduled delay measurement, so
     /// that job inherits the jump hosts, the pinned certificates, the credentials and
     /// the read-only guard instead of carrying its own copy of any of them.
-    pub(crate) async fn es_req(self: &Arc<Self>, req: EsRequest) -> Value {
+    pub(crate) async fn es_req(self: &Arc<Self>, mut req: EsRequest) -> Value {
         let (spec, read_only) = (self.spec_for(&req.cluster_id), self.primed.read().read_only);
         // Like the extension: an explicit authHeader in the request wins (diagnostic
         // probes send "" for "no credential"); otherwise the primed one; none = re-prime.
@@ -1710,8 +1794,17 @@ impl Core {
         let _permits = self.es_limits.acquire(&req.cluster_id, via.as_deref()).await;
         let route = Route { tunnel: tunnel.as_ref().map(|(t, p)| (t, *p)), tls: TlsMode::parse(tls.as_deref()) };
         let writes = Writes::decide(read_only, self.writes_unlocked(), req.allow_writes);
+        // Recorded before it is sent, so a request that never answers is visible as in flight.
+        let origin = req.origin.clone().unwrap_or_else(|| "core".into());
+        let rid = self.requests.lock().begin(&req.cluster_id, &origin, &req.method, &req.path, via.as_deref());
+        req.opaque_id = Some(opaque_id(&self.instance, &origin, &req.cluster_id, rid));
         let out = self.transport.request(&req, &url, auth.as_deref(), writes, route).await;
-        // Only requests that actually went to the cluster count as load on it.
+        let ok = out.get("ok") == Some(&json!(true));
+        let status = match out.get("status").and_then(|s| s.as_u64()) {
+            Some(s) if s > 0 => s.to_string(),
+            _ => out.get("kind").and_then(|k| k.as_str()).unwrap_or(if ok { "ok" } else { "error" }).to_string(),
+        };
+        self.requests.lock().finish(rid, out.get("tookMs").and_then(|t| t.as_u64()).unwrap_or(0), ok, status);
         if out.get("kind").and_then(|k| k.as_str()) != Some("blocked_readonly") {
             self.record_request(&req.cluster_id);
         }

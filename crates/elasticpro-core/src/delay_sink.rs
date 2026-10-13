@@ -315,6 +315,8 @@ pub fn search_request(cluster_id: &str, cfg: &SinkConfig) -> EsRequest {
         auth_header: None,
         timeout_ms: Some(60_000),
         allow_writes: false,
+        origin: Some("delay-sink".into()),
+        opaque_id: None,
     }
 }
 
@@ -331,6 +333,8 @@ pub fn bulk_request(cfg: &SinkConfig, ndjson: String) -> EsRequest {
         // The guard still decides. This says only that the request is meant to write;
         // `Writes::decide` refuses it unless the config permits writes at all.
         allow_writes: true,
+        origin: Some("delay-sink".into()),
+        opaque_id: None,
     }
 }
 

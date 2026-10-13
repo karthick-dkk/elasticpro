@@ -56,6 +56,8 @@ import * as pConsole from './pages/console.js';
 import * as pSettings from './pages/settings.js';
 import * as pAutomation from './pages/automation.js';
 import * as pAccounts from './pages/accounts.js';
+import * as pRequests from './pages/requests.js';
+import { setRequestOrigin } from './core/es.js';
 
 /**
  * `minRole` is the lowest role the tab is offered to.
@@ -80,6 +82,7 @@ const PAGES = [
   { id: 'snapshots', label: 'Snapshots & SLM',icon: '↻', mod: pSnapshots, multi: true,  minRole: 'user' },
   { id: 'volume',    label: 'Volume report',  icon: '▤', mod: pVolume,    multi: true,  minRole: 'user' },
   { id: 'automation', label: 'Automation',    icon: '⟳', mod: pAutomation, multi: true, minRole: 'user' },
+  { id: 'requests',  label: 'Requests',       icon: '⚡', mod: pRequests,  multi: true,  minRole: 'user' },
   { id: 'accounts',  label: 'Accounts',       icon: '☺', mod: pAccounts,  multi: true,  minRole: 'admin', accountsOnly: true },
   { id: 'settings',  label: 'Config',         icon: '⚙', mod: pSettings,  multi: true,  minRole: 'admin' },
 ];
@@ -562,7 +565,7 @@ function renderSideFoot() {
     row('Build', h('span.mono', 'v' + (coreInfo.version || '?'))),
     // Our own load on the fleet, so "are we stressing Elasticsearch" has a number.
     (() => {
-      return row('Requests', h('span', { title: 'Requests this app sent to every cluster in the last 5 minutes; see the Clusters page for each one' },
+      return row('Requests', h('a', { href: '#/requests', title: 'Requests this app sent to every cluster in the last 5 minutes — open the Request Centre' },
         `${total} in 5m · ${perMin.toFixed(1)}/min`));
     })(),
     // one per jump host: "jumpwin ● up"
@@ -644,7 +647,15 @@ export function go(id) {
   const allowed = visiblePages();
   const page = allowed.find((p) => p.id === id) || allowed[0] || PAGES[0];
   const changed = currentPage !== page.id;
+  // The page being left is told so, before anything of the next one is drawn: a live tail
+  // or a timer belongs to the page that started it. (Live logs exported onLeave() for this
+  // and nothing called it — the tail ran on under whatever page came next.)
+  if (changed && currentPage) {
+    const prev = PAGES.find((p) => p.id === currentPage);
+    if (prev && prev.mod.onLeave) { try { prev.mod.onLeave(); } catch (_) { /* leaving must not block arriving */ } }
+  }
   currentPage = page.id;
+  setRequestOrigin(`page:${page.id}`);
   location.hash = `#/${page.id}`;
   resolveSelection(page);
   renderNav();

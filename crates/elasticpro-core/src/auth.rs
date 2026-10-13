@@ -240,7 +240,7 @@ pub fn required_role(msg_type: &str) -> Option<Role> {
         "REFRESH" => Some(Role::User),
 
         // Fleet facts with no index names, but they name hosts and jump hosts.
-        "TUNNELS" | "PINS" | "REQUEST_STATS" => Some(Role::User),
+        "TUNNELS" | "PINS" | "REQUEST_STATS" | "REQUEST_LOG" => Some(Role::User),
         // Listing the archive names object keys, which carry client and branch names —
         // the same shape of fact as an index name, and gated the same way.
 
