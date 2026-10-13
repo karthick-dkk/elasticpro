@@ -619,7 +619,7 @@ impl Core {
             "policy": pol,
             "defaults": Policy::shipped(),
             "effective": effective,
-            "path": self.fleet.policy_path.as_ref().map(|p| p.display().to_string()),
+            // Whether a file holds it (the server's path stays on the server: a user may read this).
             "stored": self.fleet.policy_path.as_ref().is_some_and(|p| p.exists()),
             "warning": self.fleet.policy_warning,
             "running": self.fleet_enabled(),

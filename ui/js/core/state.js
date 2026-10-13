@@ -854,7 +854,7 @@ async function refreshModuleFleet(module, targets) {
   const datasets = moduleDatasets(module);
   const r = await refreshFleet({ clusterIds: ids, datasets });
   if (!r || !r.ok) return false;
-  for (const d of datasets) if (ON_DEMAND.has(d)) fleet.onDemand.add(d);
+  for (const d of datasets) if (isOnDemand(d)) fleet.onDemand.add(d);
   if (ids.length === 1) await fetchFleetDataset(ids[0], datasets[datasets.length - 1], {});
   await syncFleet();
   // Anything the core does not hold (a cluster it was never given) is still asked directly.
@@ -1054,6 +1054,18 @@ export const FLEET_KEYS = {
 /** What FLEET_STATE sends without `include` — until its own catalogue says otherwise. */
 const BACKGROUND = ['health', 'nodes', 'ilm_errors', 'policies', 'ilm_assign', 'snapshots'];
 const ON_DEMAND = new Set(['snapshots_full', 'indices', 'shards']);
+/**
+ * Whether the running policy fetches a dataset only while a page looks at it. The core's
+ * catalogue says (`effectiveClass`, from policy.json's mode); until it has answered, the
+ * shipped classes stand.
+ */
+export function isOnDemand(dataset) {
+  const d = fleet.catalogue.find((x) => x.dataset === dataset);
+  if (d && d.effectiveClass) return d.effectiveClass === 'onDemand';
+  return ON_DEMAND.has(dataset);
+}
+/** The request policy as FLEET_STATE last reported it: {mode, pausedAll, paused[]}, or null. */
+export function fleetPolicy() { return fleet.policy; }
 /** Answers that mean "this core has no fleet cache for that": ask the cluster directly. */
 const FALL_BACK_KINDS = new Set(['fleet_off', 'not_found', 'bad_message', 'bad_request', 'worker_error']);
 /** …of which these say the core has none at all (an older core, a stopped poller). A
@@ -1070,6 +1082,7 @@ export const fleet = {
   catalogue: [],
   ids: null,               // the clusters the core holds for this caller (null: not known yet)
   onDemand: new Set(),     // on-demand datasets this tab has asked for, kept current by FLEET_STATE
+  policy: null,            // {mode, pausedAll, paused} from FLEET_STATE — the core's request policy, in brief
   raw: new Map(),          // clusterId → {reach, datasets: {name: entry}}, as the core sent them
   unsub: null, pushTimer: null, syncing: null, again: null, lastAnnounce: 0, announceTimer: null, lastPushSync: 0,
 };
@@ -1371,6 +1384,7 @@ export function applyFleetState(res) {
   if (!res || !res.ok) return;
   if (typeof res.now === 'number') fleet.skew = res.now - Date.now();
   if (Array.isArray(res.catalogue) && res.catalogue.length) fleet.catalogue = res.catalogue;
+  if (res.policy && typeof res.policy === 'object') fleet.policy = res.policy;
   if (Array.isArray(res.clusterIds)) {
     fleet.ids = new Set(res.clusterIds);
     if (res.full) for (const id of [...fleet.raw.keys()]) if (!fleet.ids.has(id)) fleet.raw.delete(id);
@@ -1447,7 +1461,7 @@ function fetchFleetDataset(id, dataset, { maxAgeSec } = {}) {
 }
 
 async function askFleetDataset(id, dataset, { maxAgeSec } = {}) {
-  if (ON_DEMAND.has(dataset)) fleet.onDemand.add(dataset);
+  if (isOnDemand(dataset)) fleet.onDemand.add(dataset);
   const r = await clusterDataset(id, dataset, { wait: true, maxAgeSec });
   if (!r || !r.ok) {
     if (r && r.kind === 'fleet_off') fleet.mode = 'direct';
@@ -1475,7 +1489,7 @@ export async function demandDataset(ids, dataset, { force = false } = {}) {
   if ((await detectFleet()) !== 'fleet') return false;
   const known = (ids || []).filter(fleetKnows);
   if (!known.length) return true;
-  if (ON_DEMAND.has(dataset)) fleet.onDemand.add(dataset);
+  if (isOnDemand(dataset)) fleet.onDemand.add(dataset);
   if (!datasetRead.has(dataset)) {
     datasetRead.set(dataset, readDatasetOnce(dataset).catch(() => { datasetRead.delete(dataset); }));
   }

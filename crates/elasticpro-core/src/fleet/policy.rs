@@ -141,10 +141,10 @@ impl Policy {
         match std::fs::read(p) {
             Ok(bytes) => match serde_json::from_slice::<Policy>(&bytes) {
                 Ok(pol) => (pol.normalised(), None),
-                Err(e) => (Policy::shipped(), Some(format!("{}: {e} — running the shipped policy", p.display()))),
+                Err(e) => (Policy::shipped(), Some(format!("{FILE_NAME}: {e} — running the shipped policy"))),
             },
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => (Policy::shipped(), None),
-            Err(e) => (Policy::shipped(), Some(format!("{}: {e} — running the shipped policy", p.display()))),
+            Err(e) => (Policy::shipped(), Some(format!("{FILE_NAME}: {e} — running the shipped policy"))),
         }
     }
 
@@ -165,13 +165,13 @@ impl Policy {
                 use std::os::unix::fs::OpenOptionsExt;
                 o.mode(0o600);
             }
-            let mut f = o.open(&tmp).map_err(|e| format!("{}: {e}", tmp.display()))?;
+            let mut f = o.open(&tmp).map_err(|e| format!("{FILE_NAME}.tmp: {e}"))?;
             f.write_all(&body).map_err(|e| e.to_string())?;
             f.sync_all().map_err(|e| e.to_string())?;
         }
         std::fs::rename(&tmp, path).map_err(|e| {
             let _ = std::fs::remove_file(&tmp);
-            format!("{}: {e}", path.display())
+            format!("{FILE_NAME}: {e}")
         })
     }
 }
