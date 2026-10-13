@@ -10,8 +10,13 @@
 
 import { h, mount } from '../lib/dom.js';
 import { num, dur, dt, toCsv, download } from '../lib/fmt.js';
-import { clusters, requestLoad, refreshRequestLoad } from '../core/state.js';
-import { requestLog } from '../core/es.js';
+import { state, clusters, client, requestLoad, refreshRequestLoad } from '../core/state.js';
+import { requestLog, policyGet, policySet } from '../core/es.js';
+import { TASKS_PATH, taskRows, cancelPath, privilegeHint } from '../core/es-tasks.js';
+import { ensureWrites, writesAllowed } from '../core/writes.js';
+import { confirmDialog } from '../ui/modal.js';
+import { togglePaused, setPausedAll, isPaused } from '../core/policy.js';
+import { toast } from '../ui/menu.js';
 import { card, table, pill, statTile, empty } from './common.js';
 import { NO_FILTER, requestRows, originChoices, perCluster, requestCsvRows, CSV_HEADER, originLabel } from '../core/request-log.js';
 
@@ -20,11 +25,21 @@ let log = { inflight: [], recent: [] };
 let error = null;
 let timer = null;
 const filter = { ...NO_FILTER };
+/**
+ * The request policy, read once on entry and again after each change made here — not on
+ * the two-second poll, which is about the log. null until known; {error} if the core
+ * refused or does not have one, in which case the pause buttons are not offered.
+ */
+let policy = null;
+let policyBusy = false;
+/** The Tasks panel: what the selected cluster said when last asked, and for which cluster. */
+let tasks = { cluster: null, rows: null, error: null, busy: false, at: 0, note: '' };
 
 export function render(el) {
   host = el;
   draw();
   poll();
+  loadPolicy();
   clearInterval(timer);
   timer = setInterval(() => { if (host && host.isConnected) poll(); else clearInterval(timer); }, 2000);
 }
@@ -42,6 +57,33 @@ async function poll() {
   if (host && host.isConnected) draw();
 }
 
+async function loadPolicy() {
+  try {
+    const r = await policyGet();
+    policy = r && r.ok ? r.policy : { error: (r && r.message) || 'the core did not answer' };
+  } catch (e) { policy = { error: e.message || String(e) }; }
+  if (host && host.isConnected) draw();
+}
+
+/** Send a changed policy, then read it back: what the core kept is what is shown. */
+async function changePolicy(next, said) {
+  if (policyBusy) return;
+  policyBusy = true; draw();
+  let r;
+  try { r = await policySet(next); } catch (e) { r = { ok: false, message: e.message || String(e) }; }
+  policyBusy = false;
+  if (r && r.ok) {
+    policy = r.policy;
+    toast(said, 'ok', 4000, { key: 'request-pause' });
+    if (r.warning) toast(r.warning, 'warn', 8000, { key: 'request-pause-warning' });
+  } else {
+    toast(`Not changed: ${(r && r.message) || 'refused'}`, 'err', 8000, { key: 'request-pause' });
+  }
+  await loadPolicy();
+}
+
+const policyKnown = () => !!(policy && !policy.error && policy.paused);
+
 function draw() {
   const rows = requestRows(log, filter);
   const inflight = rows.filter((r) => r.inflight).length;
@@ -49,6 +91,11 @@ function draw() {
   const byCluster = perCluster(log);
   const names = Object.fromEntries(clusters().map((c) => [c.id, c.name]));
   const nameOf = (id) => names[id] || id;
+  // Every configured cluster gets a row, not only those in the log: a cluster that has
+  // been quiet is exactly the one somebody may want to pause before it is asked again.
+  const seen = new Set(byCluster.map((c) => c.cluster));
+  const clusterRows = [...byCluster, ...clusters().filter((c) => !seen.has(c.id))
+    .map((c) => ({ cluster: c.id, count: 0, inflight: 0, failed: 0, slowestMs: 0 }))];
 
   const select = (key, options, labelOf = (x) => x) => h('select', { onchange: (e) => { filter[key] = e.target.value; draw(); } },
     ...options.map(([v, l]) => h('option', { value: v, selected: String(filter[key]) === String(v) ? '' : null }, l)));
@@ -76,6 +123,7 @@ function draw() {
     h('td', r.inflight ? pill('in flight', 'yellow') : pill(r.outcome, r.ok ? 'green' : 'red'))));
 
   mount(host,
+    pauseBar(),
     error ? h('div.banner.err', h('div', h('div.ttl', 'Could not read the request log'), h('div', error))) : null,
     tiles, bar,
     card('Requests', `${num(rows.length)} shown · in flight first, then newest first · re-read every 2 s while this page is open`,
@@ -83,7 +131,113 @@ function draw() {
         : empty('No requests match — or the core has sent none since it started.')),
     h('div', { style: { marginTop: '14px' } },
       card('Per cluster', 'what the log holds for each cluster',
-        table(['Cluster', 'Requests', 'In flight', 'Failed', 'Slowest'], byCluster.map((c) => h('tr',
-          h('td', h('b', nameOf(c.cluster))), h('td.num', num(c.count)), h('td.num', num(c.inflight)),
-          h('td.num', c.failed ? pill(num(c.failed), 'red') : '0'), h('td.num', dur(c.slowestMs)))), { emptyText: 'nothing yet' }))));
+        table(['Cluster', 'Requests', 'In flight', 'Failed', 'Slowest', ''], clusterRows.map((c) => h('tr',
+          h('td', h('b', nameOf(c.cluster)), policyKnown() && isPaused(policy, c.cluster)
+            ? h('span.pill.grey', { style: { marginLeft: '6px' }, title: policy.paused.all ? 'Every request is paused' : 'Nothing new starts for this cluster' }, 'paused') : null,
+            throttleOf(c.cluster)),
+          h('td.num', num(c.count)), h('td.num', num(c.inflight)),
+          h('td.num', c.failed ? pill(num(c.failed), 'red') : '0'), h('td.num', c.count ? dur(c.slowestMs) : '\u2014'),
+          h('td', { style: { textAlign: 'right' } }, pauseButton(c.cluster, nameOf(c.cluster))))), { emptyText: 'nothing yet' }))),
+    h('div', { style: { marginTop: '14px' } }, tasksCard(nameOf)));
+}
+
+/** "throttled: why" — the core is holding back from this cluster (budget spent, or backing off). */
+function throttleOf(id) {
+  const t = log.throttled && log.throttled[id];
+  if (!t) return null;
+  const left = Math.max(0, (t.until || 0) - Date.now());
+  return h('span.pill.yellow', { style: { marginLeft: '6px' }, title: `${t.reason || t.kind}. The poller's own fetches wait${left ? ` ${dur(left)} more` : ''}; a request you make still goes.` },
+    `throttled: ${t.kind === 'backoff' ? 'backing off' : 'budget'}`);
+}
+
+/* ------------------------------------ tasks ------------------------------------ */
+
+/** Which cluster the panel is about: the selected one, else the first configured. */
+function taskCluster() {
+  const sel = state.selected && state.selected !== 'all' ? clusters().find((c) => c.id === state.selected) : null;
+  return sel || clusters().find((c) => c.id === tasks.cluster) || clusters()[0] || null;
+}
+
+async function readTasks(c) {
+  if (!c || tasks.busy) return;
+  tasks = { ...tasks, cluster: c.id, busy: true, error: null, note: '' };
+  draw();
+  const res = await client(c.id).request('GET', TASKS_PATH, null, { origin: 'page:requests' }).catch((e) => ({ ok: false, message: e.message || String(e) }));
+  tasks = { ...tasks, busy: false, at: Date.now(),
+    rows: res.ok ? taskRows(res.json) : null,
+    error: res.ok ? null : (privilegeHint(res.status, 'list') || res.message || `HTTP ${res.status}`) };
+  draw();
+}
+
+async function cancelTask(c, row) {
+  // Two decisions by hand: the guard (config permits writes, or the session is unlocked
+  // for them) and this cancel. The core refuses anything less (`Writes::decide`).
+  if (!(await ensureWrites())) return;
+  const what = row.ours ? `our ${row.origin || 'request'}` : 'somebody else\u2019s search';
+  const yes = await confirmDialog(`Cancel task ${row.id} on ${c.name}?`,
+    `${what}, running ${dur(row.runningMs || 0)}: ${row.description || row.action}. Elasticsearch stops it where it is; nothing is rolled back.`, { yes: 'cancel the task' });
+  if (!yes) return;
+  const res = await client(c.id).request('POST', cancelPath(row.id), null, { allowWrites: true, origin: 'page:requests' })
+    .catch((e) => ({ ok: false, message: e.message || String(e) }));
+  if (res.ok) { toast(`Cancelled ${row.id} on ${c.name}`); tasks = { ...tasks, note: `Cancelled ${row.id}; re-read to see the list without it.` }; await readTasks(c); }
+  else { tasks = { ...tasks, note: privilegeHint(res.status, 'cancel') || res.message || `Cancel failed: HTTP ${res.status}` }; draw(); }
+}
+
+function tasksCard(nameOf) {
+  const c = taskCluster();
+  const picker = h('select', { onchange: (e) => { tasks = { ...tasks, cluster: e.target.value, rows: null, error: null, note: '' }; draw(); } },
+    ...clusters().map((x) => h('option', { value: x.id, selected: c && x.id === c.id ? '' : null }, x.name)));
+  const head = h('div', { style: { display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap', marginBottom: '8px' } },
+    h('label.field', 'Cluster', picker),
+    h('button.btn.sm', { disabled: !c || tasks.busy, onclick: () => readTasks(c), 'data-act': 'read-tasks' }, tasks.busy ? 'Loading\u2026' : 'Read tasks'),
+    tasks.at && tasks.cluster === (c && c.id) ? h('span.muted', { style: { fontSize: '11.5px' } }, `read ${dt(tasks.at)}`) : null,
+    h('span.muted', { style: { fontSize: '11.5px', marginLeft: 'auto' } }, writesAllowed() ? 'Cancel is a write under the guard' : 'Cancel asks to unlock writes first'));
+  const rows = tasks.cluster === (c && c.id) ? tasks.rows : null;
+  const body = tasks.error && tasks.cluster === (c && c.id)
+    ? h('div.banner.err', h('div', h('div.ttl', 'Could not read the task list'), h('div', tasks.error)))
+    : rows === null
+      ? empty('Not read yet \u2014 press Read tasks. Listing needs the cluster privilege "monitor"; this sends one request to the cluster you chose.')
+      : rows.length === 0
+        ? empty('No search running on this cluster right now.')
+        : table(['Task', 'Who', 'Running', 'Action', 'Description', ''], rows.map((r) => h('tr',
+          h('td.mono', { style: { fontSize: '11.5px' } }, r.id, r.node ? h('div.muted', { style: { fontSize: '11px' } }, r.node) : null),
+          h('td', r.ours ? pill(`ours \u00b7 ${r.origin || 'core'}`, 'green') : pill('someone else', 'grey'),
+            r.opaqueId ? h('div.mono.muted', { style: { fontSize: '10.5px', wordBreak: 'break-all' } }, r.opaqueId) : null),
+          h('td.num', r.runningMs == null ? '\u2014' : dur(r.runningMs)),
+          h('td.mono', { style: { fontSize: '11.5px' } }, r.action),
+          h('td', { style: { fontSize: '12px', wordBreak: 'break-all' } }, r.description),
+          h('td', { style: { textAlign: 'right' } }, r.cancellable
+            ? h('button.btn.sm', { 'data-act': 'cancel-task', title: 'POST _tasks/<id>/_cancel \u2014 a write, under the guard', onclick: () => cancelTask(c, r) }, 'Cancel')
+            : h('span.muted', { style: { fontSize: '11px' } }, 'not cancellable')))), {});
+  return card('Tasks on the cluster', 'what Elasticsearch is running for anyone right now \u2014 ours carry our X-Opaque-Id',
+    h('div', head, tasks.note ? h('div.banner', { style: { marginBottom: '8px' } }, tasks.note) : null, body));
+}
+
+/** "Pause all requests" / "Resume all", above everything else on the page. */
+function pauseBar() {
+  if (!policyKnown()) {
+    return policy && policy.error
+      ? h('div.muted', { style: { fontSize: '11.5px', marginBottom: '8px' } }, `Pausing is not available: ${policy.error}`)
+      : null;
+  }
+  const all = !!policy.paused.all;
+  const some = (policy.paused.clusters || []).length;
+  return h('div', { style: { display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap', marginBottom: '10px' } },
+    all ? h('span.pill.grey', { title: 'Nothing new starts on any cluster; what was in flight finishes' }, 'requests paused')
+      : some ? h('span.muted', { style: { fontSize: '11.5px' } }, `${some} cluster(s) paused`) : null,
+    h('button.btn.sm', {
+      disabled: policyBusy,
+      title: all ? 'Let the core send requests again' : 'Nothing new starts; requests in flight finish, and a page\u2019s request waits',
+      onclick: () => changePolicy(setPausedAll(policy, !all), all ? 'Requests resumed' : 'All requests paused'),
+    }, all ? 'Resume all' : 'Pause all requests'));
+}
+
+function pauseButton(id, name) {
+  if (!policyKnown()) return null;
+  const paused = (policy.paused.clusters || []).includes(id);
+  return h('button.btn.sm', {
+    disabled: policyBusy,
+    title: paused ? `Let the core send requests to ${name} again` : `Nothing new starts for ${name}; requests in flight finish`,
+    onclick: () => changePolicy(togglePaused(policy, id, !paused), paused ? `${name}: resumed` : `${name}: paused`),
+  }, paused ? 'Resume' : 'Pause');
 }

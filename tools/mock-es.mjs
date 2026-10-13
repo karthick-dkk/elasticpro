@@ -398,12 +398,39 @@ const FIELD_TYPES = {
   'log_type.keyword': 'keyword',
 };
 
+// The task list. Two long searches are always "running": one is ours — it carries the last
+// X-Opaque-Id this fixture was sent, so the Tasks panel can tell our query from a stranger's
+// — and one is somebody else's. POST /_tasks/<id>/_cancel removes it from the listing, so
+// "cancelled and still there" means the app, not the fixture.
+const seenOpaqueIds = [];
+const cancelledTasks = new Set();
+function tasksListing() {
+  const ours = seenOpaqueIds.length ? seenOpaqueIds[seenOpaqueIds.length - 1] : 'elasticpro/mock/page:indices/mock-prod/1';
+  const all = {
+    'node-1:4711': { node: 'node-1', id: 4711, type: 'transport', action: 'indices:data/read/search', description: 'indices[logstash-*], search_type[QUERY_THEN_FETCH]',
+      start_time_in_millis: Date.now() - 95_000, running_time_in_nanos: 95_000_000_000, cancellable: true, headers: { 'X-Opaque-Id': ours } },
+    'node-1:4712': { node: 'node-1', id: 4712, type: 'transport', action: 'indices:data/read/search', description: 'indices[metrics-*], search_type[QUERY_THEN_FETCH]',
+      start_time_in_millis: Date.now() - 42_000, running_time_in_nanos: 42_000_000_000, cancellable: true, headers: { 'X-Opaque-Id': 'kibana-reporting-7f3a' } },
+  };
+  const tasks = Object.fromEntries(Object.entries(all).filter(([id]) => !cancelledTasks.has(id)));
+  return { nodes: { 'node-1': { name: 'node-1', transport_address: '127.0.0.1:9300', tasks } } };
+}
+routes.unshift([(u) => u.startsWith('/_tasks?') || u === '/_tasks', () => tasksListing()]);
+
 http.createServer((req, res) => {
   let body = '';
   req.on('data', (d) => (body += d));
   req.on('end', () => {
     const url = req.url;
     res.setHeader('content-type', 'application/json');
+    const opaque = req.headers['x-opaque-id'];
+    if (opaque) { seenOpaqueIds.push(opaque); if (seenOpaqueIds.length > 50) seenOpaqueIds.shift(); }
+    const cancel = req.method === 'POST' && /^\/_tasks\/([^/?]+)\/_cancel/.exec(url);
+    if (cancel) {
+      const id = decodeURIComponent(cancel[1]);
+      cancelledTasks.add(id);
+      return res.end(JSON.stringify({ node_failures: [], nodes: { 'node-1': { name: 'node-1', tasks: { [id]: { cancelled: true } } } } }));
+    }
     if (req.method !== 'GET' && req.method !== 'HEAD' && !url.includes('_search') && !url.includes('_bulk')) {
       // DELETE /_snapshot/<repo>/<name>[,<name>...] really removes them from the listing, so
       // "deleted it and it is still there" means the app, not the fixture. Everything else

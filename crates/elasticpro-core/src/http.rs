@@ -72,6 +72,11 @@ pub struct EsRequest {
     /// Set by the core for each request it sends; never read from the wire.
     #[serde(skip)]
     pub opaque_id: Option<String>,
+    /// The signed-in person behind a page's request, set by the core from the session;
+    /// never read from the wire. Recorded with the request, and part of the abort key so
+    /// one person leaving a page cannot cancel another's requests from the same page.
+    #[serde(skip)]
+    pub user: Option<String>,
 }
 fn default_method() -> String {
     "GET".into()

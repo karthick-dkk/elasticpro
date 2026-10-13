@@ -106,6 +106,16 @@ export const refreshFleet = ({ clusterIds, datasets } = {}) => send({
 export { refreshFleet as refresh };
 /** A single-use, sixty-second ticket for GET /events. */
 export const eventsTicket = () => send({ type: 'EVENTS_TICKET' });
+/**
+ * The request policy (Config → Requests): when the poller goes to the clusters, how hard,
+ * and whether at all. GET is a user's (the strip says "paused" from it); SET an admin's.
+ * Reply: {ok, policy, defaults, effective: {dataset: 'background'|'onDemand'}, stored,
+ * saved?, warning?, running}. policy = {mode: 'background'|'hybrid'|'on-demand',
+ * intervalsSec: {dataset: s}, watchMinutes, concurrency: {global, perCluster, tunnel},
+ * timeoutMs, paused: {all, clusters: []}}.
+ */
+export const policyGet = () => send({ type: 'POLICY_GET' });
+export const policySet = (policy) => send({ type: 'POLICY_SET', policy });
 
 /** Ask the worker what it is currently enforcing (source of truth, not the UI's copy). */
 export async function workerStatus() { return send({ type: 'PING' }); }
@@ -172,6 +182,9 @@ export class EsClient {
   }
 
   _track(res) {
+    // An abort is this app letting go of its own request (the page that asked was left):
+    // it says nothing about the cluster, so it is neither a failure nor a reason to back off.
+    if (res.kind === 'aborted') return;
     if (res.ok) {
       this.state = 'online';
       this.failures = 0;

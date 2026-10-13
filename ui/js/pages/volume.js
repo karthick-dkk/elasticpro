@@ -4,7 +4,9 @@
 import { h, mount, $, activatable } from '../lib/dom.js';
 import { nodeCache, objId } from '../lib/keyed.js';
 import { bytes, num, ago, dt, toCsv, download, plural } from '../lib/fmt.js';
-import { state, clusters, activeClusters, client, refreshAll, fetchIndices, ensureFullSnapshots, demandDataset, clusterRev } from '../core/state.js';
+import { state, clusters, activeClusters, client, refreshAll, fetchIndices, ensureFullSnapshots, demandDataset, clusterRev, fleetMode, coverage, askFleetDataset, isOnDemand } from '../core/state.js';
+import { coverageBar } from '../lib/freshness.js';
+import { readAllState, startReadAll } from '../lib/read-all.js';
 import { runBounded } from '../core/fleet.js';
 import { card, collapsible, pill, table, empty, snapshotStatusByKey } from './common.js';
 import { hbarList, capacityChart, usageMeter } from '../lib/charts.js';
@@ -33,6 +35,27 @@ const VIEWS = {
 /** The summary table is its own renderer; its export is the full sheet. */
 const activeView = () => VIEWS[ui.view] || VIEWS.sheet;
 
+/**
+ * The datasets the report is computed from (core/volume.js volumeReport): nodes for disk,
+ * policies and ILM assignment for the applied ILM/SLM and repositories, the full snapshot
+ * listing for the days a backup holds, and the index list for per-day volume. What "read"
+ * means in the coverage line, and what Read all asks for.
+ */
+const DATASETS = ['nodes', 'policies', 'ilm_assign', 'snapshots_full', 'indices'];
+/** The Read all run, kept across redraws. */
+const reading = readAllState();
+
+/** The coverage line (lib/freshness.js coverageBar). Only with the fleet cache. */
+function coverageLine() {
+  if (!fleetMode()) return null;
+  const ids = activeClusters().map((c) => c.id);
+  return coverageBar({
+    cov: coverage(ids, DATASETS), datasets: DATASETS, state: reading,
+    onReadAll: () => startReadAll(reading, { clusterIds: ids, datasets: DATASETS, ask: askFleetDataset,
+      onChange: () => { if (host && host.isConnected) coverageLine(); } }),
+  });
+}
+
 export function render(el) {
   host = el;
   el.classList.add('dense');
@@ -51,6 +74,10 @@ export function onData() { if (host && host.isConnected) draw(); }
  */
 async function ensureIndices() {
   const list = activeClusters();
+  // Under a policy that fetches indices only on request, a fleet-wide view is a decision
+  // the coverage bar's Read all takes, not a side effect of opening the page. One selected
+  // cluster is what a page asks for by nature, so that still reads.
+  if (fleetMode() && list.length > 1 && isOnDemand('indices')) return;
   // With the fleet cache and more than a couple of clusters: two messages for the whole
   // fleet rather than two held requests per cluster (see demandDataset in core/state.js).
   // The rows fill in as the core's answers are pushed; until then they say unknown.
@@ -105,6 +132,7 @@ function draw() {
   }, label);
 
   mount(host,
+    coverageLine(),
     h('div.toolbar',
       h('span.muted', { style: { fontSize: '11.5px' } },
         `updated ${ago(state.lastRefresh)} · per-day volume from the dated indices, today excluded`),

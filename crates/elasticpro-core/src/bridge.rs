@@ -75,6 +75,10 @@ pub struct Core {
     /// number rather than a guess. Trimmed to the reporting window on every read.
     request_log: parking_lot::Mutex<HashMap<String, std::collections::VecDeque<std::time::Instant>>>,
     requests: parking_lot::Mutex<RequestLog>,
+    /// In-flight page requests by abort key (person + origin), with how many are running:
+    /// `ABORT_REQUESTS` wakes a key's waiters and each of them answers "aborted" instead
+    /// of waiting out the cluster. The poller and the schedules are never in here.
+    aborts: parking_lot::Mutex<HashMap<String, (Arc<tokio::sync::Notify>, usize)>>,
     /// A short id for this core, so its requests can be told from another install's.
     instance: String,
     started: std::time::Instant,
@@ -214,6 +218,8 @@ pub struct RequestRecord {
     /// HTTP status, or the core's own kind when there was no answer (`timeout`, `unreachable`).
     pub status: Option<String>,
     pub via: Option<String>,
+    /// The signed-in person behind a page's request; none for the poller and the schedules.
+    pub user: Option<String>,
 }
 
 /// In-flight requests by id, and the most recent finished ones, newest last.
@@ -225,7 +231,7 @@ pub struct RequestLog {
 }
 
 impl RequestLog {
-    pub fn begin(&mut self, cluster: &str, origin: &str, method: &str, path: &str, via: Option<&str>) -> u64 {
+    pub fn begin(&mut self, cluster: &str, origin: &str, method: &str, path: &str, via: Option<&str>, user: Option<&str>) -> u64 {
         self.next += 1;
         let id = self.next;
         // A path is kept for the operator to recognise a request by, not reproduced in full:
@@ -244,7 +250,7 @@ impl RequestLog {
         let started_at = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
         self.inflight.insert(id, RequestRecord {
             id, cluster: cluster.to_string(), origin: origin.to_string(), method: method.to_string(),
-            path, started_at, ms: None, ok: None, status: None, via: via.map(String::from),
+            path, started_at, ms: None, ok: None, status: None, via: via.map(String::from), user: user.map(String::from),
         });
         id
     }
@@ -474,6 +480,7 @@ impl Core {
             writes_unlocked: std::sync::atomic::AtomicBool::new(false),
             request_log: parking_lot::Mutex::new(HashMap::new()),
             requests: parking_lot::Mutex::new(RequestLog::default()),
+            aborts: parking_lot::Mutex::new(HashMap::new()),
             instance: crate::auth::random_hex(4),
             started: std::time::Instant::now(),
             delay_sink: RwLock::new(Sink {
@@ -856,10 +863,12 @@ impl Core {
                 self.close_tunnels().await;
                 json!({ "ok": true })
             }
-            "ES" => self.es(msg).await,
+            "ES" => self.es(msg, caller.as_ref()).await,
+            "ABORT_REQUESTS" => self.abort_requests(&msg, caller.as_ref()),
             "FLEET_STATE" => self.fleet_state_msg(&msg, caller.as_ref()),
             "CLUSTER_DATASET" => self.cluster_dataset_msg(&msg, caller.as_ref()).await,
             "REFRESH" => self.refresh_msg(&msg, caller.as_ref()),
+            "POLICY_GET" | "POLICY_SET" => self.policy_msg(&t, &msg, caller.as_ref()),
             "EVENTS_TICKET" => self.events_ticket_msg(caller.clone(), reauth),
             "DELAY_SINK_GET" | "DELAY_SINK_SET" | "DELAY_SINK_RUN" => self.delay_sink_msg(&t, &msg).await,
             "NOTIFY_PUT" | "NOTIFY_LIST" | "NOTIFY_CLEAR" => self.notify_msg(&t, &msg, caller.as_ref()),
@@ -1459,7 +1468,13 @@ impl Core {
         let mut inflight: Vec<&RequestRecord> = log.inflight.values().filter(|r| sees(r)).collect();
         inflight.sort_by_key(|r| r.started_at);
         let recent: Vec<&RequestRecord> = log.recent.iter().rev().filter(|r| sees(r)).take(limit).collect();
-        json!({ "ok": true, "inflight": inflight, "recent": recent, "keep": REQUEST_LOG_KEEP })
+        let now = crate::fleet::now_ms();
+        let throttled: serde_json::Map<String, Value> = {
+            let st = self.fleet.state.lock();
+            st.throttle.iter().filter(|(c, t)| t.until > now && ids.as_ref().is_none_or(|v: &std::collections::HashSet<String>| v.contains(*c)))
+                .map(|(c, t)| (c.clone(), serde_json::to_value(t).unwrap_or(Value::Null))).collect()
+        };
+        json!({ "ok": true, "inflight": inflight, "recent": recent, "keep": REQUEST_LOG_KEEP, "throttled": throttled })
     }
 
     /// Trust decisions, less the hosts that belong to clusters this caller cannot see.
@@ -1764,12 +1779,43 @@ impl Core {
         json!({ "ok": true, "count": p.clusters.len(), "readOnly": p.read_only, "tunnels": n_t, "held": held, "anonymous": anonymous })
     }
 
-    async fn es(self: &Arc<Self>, msg: Value) -> Value {
-        let req: EsRequest = match serde_json::from_value(msg) {
+    async fn es(self: &Arc<Self>, msg: Value, caller: Option<&Caller>) -> Value {
+        let mut req: EsRequest = match serde_json::from_value(msg) {
             Ok(r) => r,
             Err(e) => return json!({ "ok": false, "kind": "bad_message", "message": format!("bad ES request: {e}") }),
         };
+        req.user = caller.map(|c| c.name.clone());
         self.es_req(req).await
+    }
+
+    /// Whether leaving the page that asked may cancel the request: a page's or the console's,
+    /// never the poller's, the delay sink's or another part of the core's.
+    fn abortable(origin: &str) -> bool {
+        origin.starts_with("page:") || origin == "console"
+    }
+
+    fn abort_key(user: Option<&str>, origin: &str) -> String {
+        format!("{}\u{1}{}", user.unwrap_or(""), origin)
+    }
+
+    /// `ABORT_REQUESTS {origin}`: the caller's own in-flight requests from that origin stop
+    /// waiting and answer "aborted". The sockets close with the futures; nothing is sent to
+    /// the cluster, so a search already running there keeps running — that is what `_tasks`
+    /// and its cancel are for.
+    fn abort_requests(&self, msg: &Value, caller: Option<&Caller>) -> Value {
+        let origin = msg.get("origin").and_then(Value::as_str).unwrap_or("");
+        if !Self::abortable(origin) {
+            return json!({ "ok": false, "kind": "bad_request", "message": "only a page's or the console's requests can be aborted" });
+        }
+        let key = Self::abort_key(caller.map(|c| c.name.as_str()), origin);
+        let n = {
+            let a = self.aborts.lock();
+            match a.get(&key) {
+                Some((notify, n)) => { notify.notify_waiters(); *n }
+                None => 0,
+            }
+        };
+        json!({ "ok": true, "aborted": n })
     }
 
     /// The same path a page's request takes, entered with a request that was built here
@@ -1813,9 +1859,32 @@ impl Core {
         let writes = Writes::decide(read_only, self.writes_unlocked(), req.allow_writes);
         // Recorded before it is sent, so a request that never answers is visible as in flight.
         let origin = req.origin.clone().unwrap_or_else(|| "core".into());
-        let rid = self.requests.lock().begin(&req.cluster_id, &origin, &req.method, &req.path, via.as_deref());
+        let rid = self.requests.lock().begin(&req.cluster_id, &origin, &req.method, &req.path, via.as_deref(), req.user.as_deref());
         req.opaque_id = Some(opaque_id(&self.instance, &origin, &req.cluster_id, rid));
-        let out = self.transport.request(&req, &url, auth.as_deref(), writes, route).await;
+        // A page's request can be let go of when the page is: registered under its abort
+        // key before it is sent, so an ABORT_REQUESTS that arrives while it waits finds it.
+        let abort = if Self::abortable(&origin) {
+            let key = Self::abort_key(req.user.as_deref(), &origin);
+            let n = { let mut a = self.aborts.lock(); let e = a.entry(key.clone()).or_insert_with(|| (Arc::new(tokio::sync::Notify::new()), 0)); e.1 += 1; e.0.clone() };
+            Some((key, n))
+        } else { None };
+        let out = match &abort {
+            None => self.transport.request(&req, &url, auth.as_deref(), writes, route).await,
+            Some((_, notify)) => {
+                let notified = notify.notified();
+                tokio::pin!(notified);
+                notified.as_mut().enable();
+                tokio::select! {
+                    out = self.transport.request(&req, &url, auth.as_deref(), writes, route) => out,
+                    _ = &mut notified => json!({ "ok": false, "status": 0, "kind": "aborted",
+                        "message": "cancelled: the page that asked was left", "tookMs": 0 }),
+                }
+            }
+        };
+        if let Some((key, _)) = &abort {
+            let mut a = self.aborts.lock();
+            if let Some(e) = a.get_mut(key) { e.1 = e.1.saturating_sub(1); if e.1 == 0 { a.remove(key); } }
+        }
         let ok = out.get("ok") == Some(&json!(true));
         let status = match out.get("status").and_then(|s| s.as_u64()) {
             Some(s) if s > 0 => s.to_string(),

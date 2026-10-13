@@ -1810,11 +1810,148 @@ restoreConsole();
   await go('overview');
 }
 
+// Request policy: Config → Requests asks the core once per visit, stays quiet under fleet
+// events, and saves what the presets and the Request Centre's pause buttons decide.
+{
+  const es = await load('core/es.js');
+  const before = await es.policyGet();
+  ok(before && before.ok, `policy: POLICY_GET was refused: ${JSON.stringify(before)}`);
+  const bus = (await load('core/state.js')).bus;
+  const countOf = (type) => sent.filter((m) => m.type === type).length;
+  const lastOf = (type) => sent.filter((m) => m.type === type).at(-1);
+  const fire = async () => { for (const c of config.clusters) bus.emit('data', c.id); await settleFor(700); };
+  const button = (label, scope = doc) => [...scope.querySelectorAll('button')].find((b) => b.textContent.trim() === label);
+
+  await go('settings');
+  const tab = [...doc.querySelectorAll('nav.subnav button')].find((b) => b.title === 'Requests');
+  ok(!!tab, 'policy: no Requests tab on the Config page');
+  if (tab) {
+    const gets = countOf('POLICY_GET');
+    tab.click(); await settleFor(500);
+    ok(countOf('POLICY_GET') === gets + 1, `policy: opening Requests sent ${countOf('POLICY_GET') - gets} POLICY_GET, expected exactly 1`);
+    const asked = countOf('POLICY_GET');
+    await fire(); await fire();
+    ok(countOf('POLICY_GET') === asked, `policy: fleet events re-asked POLICY_GET (${countOf('POLICY_GET') - asked} more)`);
+
+    const client = [...doc.querySelectorAll('button')].find((b) => b.textContent.startsWith('Client basis'));
+    ok(!!client, 'policy: no "Client basis" preset button');
+    if (client) {
+      client.click(); await settleFor(200);
+      const pressed = [...doc.querySelectorAll('button')].find((b) => b.textContent.startsWith('Client basis'));
+      ok(pressed && pressed.getAttribute('aria-pressed') === 'true', 'policy: the chosen preset is not marked aria-pressed');
+      const sets = countOf('POLICY_SET');
+      const save = button('Save'); ok(!!save, 'policy: no Save button');
+      if (save) { save.click(); await settleFor(500); }
+      const m = lastOf('POLICY_SET');
+      ok(countOf('POLICY_SET') === sets + 1 && m && m.policy.mode === 'on-demand' && m.policy.concurrency.perCluster === 1,
+        `policy: Save after "Client basis" sent ${JSON.stringify(m && m.policy)}`);
+    }
+  }
+
+  await go('requests'); await settleFor(500);
+  const per = [...doc.querySelectorAll('section.card')].find((x) => (x.querySelector('header h2') || {}).textContent === 'Per cluster');
+  const pause = per && button('Pause', per);
+  ok(!!pause, 'policy: the Request Centre has no per-cluster Pause button');
+  if (pause) {
+    const sets = countOf('POLICY_SET');
+    const was = new Set(((lastOf('POLICY_SET') || {}).policy || before.policy || { paused: { clusters: [] } }).paused.clusters);
+    pause.click(); await settleFor(600);
+    const m = lastOf('POLICY_SET');
+    const added = m ? m.policy.paused.clusters.filter((c) => !was.has(c)) : [];
+    ok(countOf('POLICY_SET') === sets + 1 && added.length === 1 && config.clusters.some((c) => c.id === added[0]),
+      `policy: Pause sent ${JSON.stringify(m && m.policy && m.policy.paused)}`);
+    ok([...per.ownerDocument.querySelectorAll('section.card .pill.grey')].some((x) => x.textContent === 'paused'),
+      'policy: a paused cluster has no "paused" pill');
+  }
+  ok(!!button('Pause all requests'), 'policy: the Request Centre has no "Pause all requests" button');
+  await go('overview');
+  // The harness writes into the dev core's data directory; leave the policy as it was.
+  if (before && before.ok) await es.policySet(before.policy);
+}
+
+/* ------------- fleet pages state their cost up front; reading is the button ------------- */
+
+if (viaFleet) {
+  const st = await load('core/state.js');
+  const DS = ['health', 'nodes', 'ilm_errors', 'policies', 'snapshots'];   // overview.js DATASETS
+  // Under hybrid/on-demand a page can open onto clusters nothing was read for. The mock's
+  // poller runs `background`, so make that true here: forget one dataset everywhere.
+  for (const cur of st.fleet.raw.values()) delete cur.datasets.snapshots;
+  await go('alerts');
+  let before = sent.length;
+  await go('overview');
+  const bar = doc.querySelector('#view .banner.coverage');
+  ok(!!bar, 'coverage: the Clusters page has no coverage bar');
+  ok(bar && /never read|No data read yet/.test(bar.textContent), `coverage: the bar does not say what was never read: "${bar && bar.textContent}"`);
+  const opened = sent.slice(before).filter((m) => m.type === 'CLUSTER_DATASET');
+  ok(opened.length === 0, `coverage: opening the Clusters page sent ${opened.length} CLUSTER_DATASET (reading must be a decision)`);
+  const btn = bar && bar.querySelector('button[data-act="read-all"]');
+  ok(!!btn && /Read all \(one at a time\)/.test(btn.textContent), 'coverage: no "Read all (one at a time)" button');
+  if (btn) {
+    const ids = st.activeClusters().map((c) => c.id);
+    const want = ids.length * DS.length;
+    before = sent.length;
+    btn.click();
+    await settleFor(60);
+    ok(!!doc.querySelector('#view .banner.coverage button[data-act="read-cancel"]') || sent.slice(before).filter((m) => m.type === 'CLUSTER_DATASET').length === want,
+      'coverage: a running Read all shows no Cancel button');
+    // One at a time: wait until every read has been sent, up to a generous bound.
+    for (let i = 0; i < 100 && sent.slice(before).filter((m) => m.type === 'CLUSTER_DATASET').length < want; i++) await settleFor(100);
+    await settleFor(300);
+    const reads = sent.slice(before).filter((m) => m.type === 'CLUSTER_DATASET');
+    ok(reads.length === want, `coverage: Read all sent ${reads.length} CLUSTER_DATASET, expected ${ids.length} clusters × ${DS.length} datasets = ${want}`);
+    ok(reads.every((m) => m.wait === true), 'coverage: a Read all ask did not wait for its answer');
+    const order = reads.map((m) => `${m.clusterId}/${m.dataset}`);
+    const expect = ids.flatMap((id) => DS.map((d) => `${id}/${d}`));
+    ok(JSON.stringify(order) === JSON.stringify(expect), `coverage: Read all went out of order: ${order.join(', ')}`);
+    const after = doc.querySelector('#view .banner.coverage');
+    ok(after && !after.querySelector('button[data-act="read-cancel"]'), 'coverage: the bar still says Cancel after the run');
+    ok(after && !/never read/.test(after.textContent), `coverage: still "never read" after Read all: "${after && after.textContent}"`);
+  }
+}
+
+// Tasks panel: one request to the chosen cluster on the button, ours told from a stranger's
+// by the opaque id, and Cancel is a write — under read-only it asks for the guard first.
+{
+  // Earlier cases replaced the cluster clients with stubs that have no request(); the panel
+  // sends a real ES message through the bridge, so give it real clients again.
+  const stx = await load('core/state.js');
+  const esm = await load('core/es.js');
+  stx.state.config = config;                       // some cases also swapped the config for a stub one
+  if (!config.clusters.some((c) => c.id === stx.state.selected)) stx.state.selected = config.clusters[0].id;
+  for (const c of config.clusters) stx.state.clients.set(c.id, new esm.EsClient(c, stx.state.defaults, async () => {}));
+  await go('requests');
+  const before = sent.length;
+  const read = doc.querySelector('button[data-act="read-tasks"]');
+  ok(!!read, 'tasks: no "Read tasks" button');
+  if (read) {
+    read.click(); await settleFor(900);
+    const asked = sent.slice(before).filter((m) => m.type === 'ES' && /^\/_tasks/.test(m.path));
+    ok(asked.length === 1 && asked[0].method === 'GET', `tasks: expected one GET _tasks, saw ${JSON.stringify(asked.map((m) => m.method + ' ' + m.path))}`);
+    const pills = [...doc.querySelectorAll('section.card .pill')].map((p) => p.textContent.trim());
+    ok(pills.some((t) => /^ours/.test(t)), `tasks: no task marked as ours (pills: ${JSON.stringify(pills.slice(-6))})`);
+    ok(pills.includes('someone else'), 'tasks: the stranger\u2019s search is not marked as someone else\u2019s');
+    const cancel = doc.querySelector('button[data-act="cancel-task"]');
+    ok(!!cancel, 'tasks: no Cancel button');
+    if (cancel) {
+      const n = sent.length;
+      cancel.click(); await settleFor(400);
+      const dialog = doc.querySelector('.modal, [role="dialog"], .overlay');
+      ok(!!dialog, 'tasks: Cancel under read-only should ask for the write guard first (no dialog appeared)');
+      ok(!sent.slice(n).some((m) => m.type === 'ES' && /_cancel/.test(m.path)), 'tasks: a _cancel was sent before anybody said yes');
+      doc.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+      const no = dialog && [...dialog.querySelectorAll('button')].find((b) => /^(no|cancel|keep)/i.test(b.textContent.trim()));
+      if (no) no.click();
+      await settleFor(300);
+    }
+  }
+}
+
 if (problems.length) {
   console.error(`\n${problems.length} problem(s):`);
   for (const p of problems) console.error('  ✗ ' + p);
   process.exit(1);
 }
-console.log('ok: strip, console, shards, volume, hand-off, refresh, snapshots, tasks, toasts, accounts split, the log-delay preflight, a quiet Config page, the Request Centre and the redraw gate');
+console.log('ok: strip, console, shards, volume, hand-off, refresh, snapshots, tasks, toasts, accounts split, the log-delay preflight, a quiet Config page, the Request Centre and the redraw gate, the request policy, the coverage bar and the Tasks panel');
 // The pages leave auto-refresh timers and a live tail running; nothing here waits on them.
 process.exit(0);

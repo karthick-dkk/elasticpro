@@ -238,6 +238,60 @@ Zabbix one it shows, it re-reads `ZABBIX_CLUSTERS` once per difference (`zabbixD
 `/events` goes from the frame to ElasticPro's nginx, not through Zabbix
 (`deploy/zabbix/README.md`, "the fleet cache, live updates, task cards").
 
+## Request management — the message contract
+
+Everything the core sends to a cluster goes through one path (`es_req`), so one record, one
+policy and one cap cover the poller and the pages alike. `docs/` for the plan; `fleet/policy.rs`,
+`fleet/scheduler.rs` and `bridge.rs` for the code.
+
+**The request log.** Every request is recorded — id, cluster, origin, who asked, method, path,
+started, ms, ok, status, via — in flight in a map (at most 1,000) and the last 2,000 finished in a
+ring. Each carries `X-Opaque-Id: elasticpro/<install>/<origin>/<cluster>/<n>` (under 256 bytes),
+so a query of ours can be found in a cluster's `_tasks` and told from everyone else's. Origins:
+`page:<id>`, `console`, `poller:<key>`, `delay-sink`, `core`.
+
+**The policy** lives in `<data dir>/policy.json`, read once at start (shipped defaults when there is
+none — seeded from `ELASTICPRO_POLL_HEALTH_SECS` and `ELASTICPRO_POLL_CONCURRENCY`, so an
+install that never touches it runs as before; a file that does not parse is logged and ignored),
+written whole and 0600 by `POLICY_SET`, applied to the scheduler on its next tick:
+
+```json
+{ "mode": "background",
+  "intervalsSec": { "health": 180, "nodes": 300, "ilm_errors": 900, "policies": 3600, "ilm_assign": 3600,
+                    "snapshots": 1800, "snapshots_full": 1800, "indices": 600, "shards": 300 },
+  "watchMinutes": 15,
+  "concurrency": { "global": 16, "perCluster": 2, "tunnel": 6 },
+  "timeoutMs": 30000, "tunnelTimeoutMs": 60000,
+  "budgetPerClusterPerMin": 30,
+  "paused": { "all": false, "clusters": [] } }
+```
+
+Modes: `background` keeps the fleet fresh on the core's schedule; `hybrid` polls health only and
+fetches everything else while a page looks at it (the watch window); `on-demand` fetches nothing
+on its own — a page's `CLUSTER_DATASET` or `REFRESH` is what sends a request, for that cluster
+only, and with `perCluster: 1` one request at a time. Pause: nothing new starts (a person's ask
+stays pending and runs when the pause lifts); in flight finishes. Bounds: health ≥ 60 s, other
+intervals ≥ 30 s, ≤ 1 day; watch 1–240 min; global 1–256; perCluster 1–8; tunnel 1–32; timeouts
+1–600 s; budget ≤ 10,000 (0 = none). The budget is soft: beyond it the cluster's due fetches wait
+for the minute to pass, a person's ask still goes. A 429 or a timeout backs a cluster off for a
+minute, doubling to ten, until it answers. `FLEET_STATE` reports `policy: {mode, pausedAll,
+paused}`, each catalogue entry's `effectiveClass` under the mode, and per cluster a `throttle:
+{kind: budget|backoff, until, reason, level}` while one is in force.
+
+| Message | Role | Answer |
+|---|---|---|
+| `REQUEST_STATS` | user | `{ok, requests: {cluster: {last5m, perMinute, …}}}` — the strip's "Requests N in 5m". |
+| `REQUEST_LOG {cluster?, limit?}` | admin | `{ok, inflight: [record…], recent: [record…], keep, throttled: {cluster: throttle}}` — every user's requests on the clusters the caller may see, newest first, `limit` ≤ 2,000 (default 200). |
+| `POLICY_GET` | user | `{ok, policy, defaults, effective: {dataset: background|onDemand}, stored, warning?, running}` |
+| `POLICY_SET {policy}` | admin | the same, plus `saved`; `bad_request` when it does not parse (an unknown `mode`, a non-object). Values out of bounds are bounded, not refused. Audited. |
+| `ABORT_REQUESTS {origin}` | user | `{ok, aborted: n}` — the caller's own in-flight requests from a `page:<id>` or `console` origin stop waiting and answer `kind: aborted` (recorded so); keyed by person + origin, so nobody reaches another's; the poller's and the schedules' are refused (`bad_request`). Nothing is sent to the cluster: a search already running there is what `_tasks` and its `_cancel` are for. |
+
+**Cancelling a task** is `ES POST /_tasks/<node:id>/_cancel` with `allowWrites`: a write under
+both gates (`Writes::decide` — the config must permit writes or the session be unlocked, *and*
+the operator asked by hand), audited by the hosted bridge like every write, carrying the page's
+opaque id. `GET _tasks` needs the `monitor` privilege and `_cancel` the `manage` one; a credential
+without it gets the cluster's 403 and the page says so instead of failing on the click.
+
 ## Notification history — the message contract
 
 The bell keeps every notice in the browser (`localStorage`, last 50), and — when `PING` says

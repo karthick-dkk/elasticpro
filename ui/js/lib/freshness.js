@@ -13,6 +13,7 @@
 
 import { h } from './dom.js';
 import { dur } from './fmt.js';
+import { DATASET_LABELS } from '../core/policy.js';
 
 /** Past this, the data is old enough that it is worth saying so rather than implying it.
  *  The default only: a dataset from the core's fleet cache carries its own
@@ -102,4 +103,96 @@ export function freshnessBar(ts, onRefresh, opts = {}) {
       title: `Ask the cluster for current ${label} now`,
       onclick: onRefresh,
     }, busy ? '…' : '↻ Refresh'));
+}
+
+/* ------------------------------ fleet coverage ------------------------------ */
+
+const clustersWord = (n) => `${n} cluster${n === 1 ? '' : 's'}`;
+
+/**
+ * One sentence for state.js's coverage(): what a fleet page is showing, and how much of
+ * it has really been read. Zero parts are left out rather than said as "0 stale"; a
+ * cluster nothing was read for is "never read" — unknown, never a count of zero.
+ *
+ *   "Showing cached data for 32 clusters · oldest 14 m · 5 never read · 3 stale"
+ *   "Showing cached data for 32 clusters · oldest 2 m · all current"
+ *   "No data read yet for 32 clusters"
+ */
+export function coverageSentence(cov) {
+  if (!cov || !cov.clusters) return 'No clusters selected';
+  const parts = cov.oldestMs === null || cov.oldestMs === undefined
+    ? [`No data read yet for ${clustersWord(cov.clusters)}`]
+    : [`Showing cached data for ${clustersWord(cov.clusters)}`, `oldest ${dur(cov.oldestMs)}`];
+  if (cov.read === cov.clusters) parts.push('all current');
+  else {
+    // "never read" is already the headline when nothing at all was read.
+    if (cov.never && cov.oldestMs !== null && cov.oldestMs !== undefined) parts.push(`${cov.never} never read`);
+    if (cov.stale) parts.push(`${cov.stale} stale`);
+    if (cov.unreachable) parts.push(`${cov.unreachable} unreachable`);
+  }
+  return parts.join(' · ');
+}
+
+/** What the bar says while a run is going: "Reading 5 of 32 — prod-eu · Nodes & disk". */
+export function readingSentence(st, cov) {
+  const cur = st && st.current;
+  if (!cur) return st && st.controller && st.controller.signal.aborted ? 'Cancelling…' : 'Loading…';
+  const row = cov && cov.perCluster ? cov.perCluster.find((r) => r.id === cur.clusterId) : null;
+  const name = row ? row.name : cur.clusterId;
+  const label = DATASET_LABELS[cur.dataset] || cur.dataset;
+  const stopping = st.controller && st.controller.signal.aborted ? ' (cancelling after this one)' : '';
+  return `Reading ${cur.clusterIndex + 1} of ${cur.clusters} — ${name} · ${label}${stopping}`;
+}
+
+/** How the last run ended, when it did not simply finish clean. */
+function lastRunNote(last) {
+  if (!last) return '';
+  if (last.aborted) return ` · last run cancelled after ${last.done} of ${last.total} reads`;
+  if (last.failed && last.failed.length) return ` · last run: ${last.failed.length} of ${last.total} reads failed`;
+  return '';
+}
+
+/**
+ * The coverage line at the top of a fleet page: what is on screen, how old, how much of
+ * it was never read — and a button to read it. Opening the page reads nothing; this is
+ * the only thing that does, and it goes one cluster and one dataset at a time.
+ *
+ * `state` belongs to the page (lib/read-all.js readAllState()), so a run survives the
+ * page redrawing around it. The bar is ONE element kept on that state and refilled in
+ * place: calling this again — from the page's draw, or from a progress step while the
+ * page itself is holding redraws — returns the same node, so mount() leaves it where it
+ * is and nothing else on the page is rebuilt.
+ *
+ * @param cov        state.js coverage(ids, datasets)
+ * @param datasets   the page's DATASETS (named in the title, so "read" says read what)
+ * @param onReadAll  starts a run (the page wires it to startReadAll)
+ */
+export function coverageBar({ cov, datasets = [], onReadAll, state: st }) {
+  const el = st.el || (st.el = h('div.banner.coverage', { role: 'status' }));
+  const needs = (cov.never || 0) + (cov.stale || 0) > 0;
+  let text, btn = null;
+  if (st.running) {
+    text = readingSentence(st, cov);
+    const stopping = !!(st.controller && st.controller.signal.aborted);
+    btn = h('button.btn.sm', {
+      dataset: { act: 'read-cancel' }, disabled: stopping,
+      title: 'Stop after the read in flight; what was already read stays',
+      onclick: () => { if (st.controller) st.controller.abort(); coverageBar({ cov, datasets, onReadAll, state: st }); },
+    }, stopping ? 'Cancelling…' : 'Cancel');
+  } else {
+    text = coverageSentence(cov) + lastRunNote(st.last);
+    if (needs) {
+      btn = h('button.btn.sm', {
+        dataset: { act: 'read-all' },
+        title: `Ask each cluster in turn for ${datasets.map((d) => DATASET_LABELS[d] || d).join(', ')} — `
+          + `${cov.clusters * datasets.length} reads, never two at once`,
+        onclick: () => onReadAll && onReadAll(),
+      }, 'Read all (one at a time)');
+    }
+  }
+  el.replaceChildren(...[
+    st.running ? h('span.spin') : null,
+    h('span.cov-text', text),
+    btn ? h('div.acts', btn) : null].filter(Boolean));
+  return el;
 }
