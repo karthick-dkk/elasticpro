@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.3.7
+
+**Two pages stop contradicting themselves.**
+
+Snapshots: before the repositories had been read, or when the cluster could not be reached,
+the page was headed "Snapshots in —" over "No snapshots in this repository" — an unknown drawn
+as an empty result. The title names a repository only when there is one, and an empty listing
+says what is actually known: a search that matched nothing, a cluster that could not be read
+and why, repositories not read yet, a cluster with no repository, or a repository that is
+genuinely empty.
+
+Live logs: when a search found documents but the cluster sent no time buckets, the chart said
+"No documents in this range" above the list of those documents. It now says the histogram
+could not be drawn and that the list below is complete; "No documents in this range" is kept
+for a search that found none. The fixture cluster, which answered every log search with hits
+and an empty histogram, buckets them now.
+
 ## 0.3.6
 
 **"Continue without credentials" is remembered, and the credential dialog is readable in the dark theme.**
