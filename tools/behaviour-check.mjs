@@ -1742,6 +1742,8 @@ restoreConsole();
   ok(origins.some((o) => /^poller · /.test(o)), `requests: rows should name the poller as the asker, saw ${JSON.stringify(origins.slice(0, 3))}`);
   await go('overview'); const after = sent.filter((m) => m.type === 'REQUEST_LOG').length; await settleFor(2600);
   ok(sent.filter((m) => m.type === 'REQUEST_LOG').length === after, 'requests: the log is still being re-read after leaving the page');
+}
+
 // Config page: a fleet event must not reload the open tab or wipe what is being typed.
 // On a 32-cluster install data lands every couple of seconds; the page used to rebuild on
 // each one, re-asking TUNNELS/PINS (Jump hosts) and ZABBIX_CLUSTERS (Zabbix) every time.
