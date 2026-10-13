@@ -248,6 +248,7 @@ impl Core {
             allow_writes: false,
             origin: Some(format!("poller:{}", q.key)),
             opaque_id: None,
+            user: None,
         };
         answer(self.es_req(req).await)
     }

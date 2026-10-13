@@ -182,6 +182,9 @@ export class EsClient {
   }
 
   _track(res) {
+    // An abort is this app letting go of its own request (the page that asked was left):
+    // it says nothing about the cluster, so it is neither a failure nor a reason to back off.
+    if (res.kind === 'aborted') return;
     if (res.ok) {
       this.state = 'online';
       this.failures = 0;

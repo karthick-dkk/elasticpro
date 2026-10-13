@@ -241,6 +241,9 @@ pub fn required_role(msg_type: &str) -> Option<Role> {
         // The request policy: how and whether the poller goes to the clusters. Reading it is
         // how a page says "paused"; changing it changes the load on every cluster.
         "POLICY_GET" => Some(Role::User),
+        // Letting go of one's own in-flight page requests. Keyed by the caller, so it reaches
+        // nobody else's; it sends nothing to a cluster.
+        "ABORT_REQUESTS" => Some(Role::User),
         "POLICY_SET" => Some(Role::Admin),
 
         // Fleet facts with no index names, but they name hosts and jump hosts.

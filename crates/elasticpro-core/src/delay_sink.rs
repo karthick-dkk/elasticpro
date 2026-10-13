@@ -317,6 +317,7 @@ pub fn search_request(cluster_id: &str, cfg: &SinkConfig) -> EsRequest {
         allow_writes: false,
         origin: Some("delay-sink".into()),
         opaque_id: None,
+        user: None,
     }
 }
 
@@ -335,6 +336,7 @@ pub fn bulk_request(cfg: &SinkConfig, ndjson: String) -> EsRequest {
         allow_writes: true,
         origin: Some("delay-sink".into()),
         opaque_id: None,
+        user: None,
     }
 }
 
