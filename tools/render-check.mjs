@@ -72,7 +72,7 @@ if (configPath) {
   console.log('render-check: no --config given — pages will draw their "no cluster" state only');
 }
 
-const PAGES = ['alerts', 'overview', 'indices', 'shards', 'logs', 'console', 'snapshots', 'volume', 'automation', 'accounts', 'settings'];
+const PAGES = ['alerts', 'overview', 'indices', 'shards', 'logs', 'console', 'snapshots', 'volume', 'automation', 'requests', 'accounts', 'settings'];
 const view = window.document.createElement('div');
 window.document.body.append(view);
 
@@ -85,6 +85,8 @@ for (const name of PAGES) {
     await new Promise((r) => setTimeout(r, 350));
     if (mod.onData) mod.onData();
     await new Promise((r) => setTimeout(r, 150));
+    // Leave the page the way the app does, so a page that re-reads on a timer stops.
+    if (mod.onLeave) mod.onLeave();
     const nodes = view.querySelectorAll('*').length;
     const failed = errors.length > before;
     // Without a config the pages correctly draw a single "No cluster selected" node, so

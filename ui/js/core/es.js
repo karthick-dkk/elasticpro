@@ -5,6 +5,17 @@ import { bridge } from './transport.js';
 
 const send = (msg) => bridge(msg);
 
+/**
+ * Who is asking, for the core's request log and the X-Opaque-Id it sends the cluster:
+ * `page:<id>` while a page is open (app.js sets it on every navigation), or what a caller
+ * names itself. A request can always say otherwise with `opts.origin`.
+ */
+let requestOrigin = 'page';
+export function setRequestOrigin(origin) { requestOrigin = origin || 'page'; }
+
+/** What the core sent recently and what is still in flight — the Request Centre's feed. */
+export const requestLog = (params = {}) => send({ type: 'REQUEST_LOG', ...params });
+
 export async function primeWorker(clusters, readOnly = true, jumpHosts = [], { persist = true, sharedAuthHeader = undefined } = {}) {
   return send({
     type: 'PRIME',
@@ -149,6 +160,7 @@ export class EsClient {
       body: body == null ? null : typeof body === 'string' ? body : JSON.stringify(body),
       timeoutMs: opts.timeoutMs || this.defaults.requestTimeoutMs,
       allowWrites: opts.allowWrites === true,
+      origin: opts.origin || requestOrigin,
     };
     let res = await send(msg);
     if (res.kind === 'no_creds' && this.onPrimeNeeded) {

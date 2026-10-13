@@ -1728,6 +1728,22 @@ if (config.clusters.length >= 2 && viaFleet) {
 /* ------------------------------------ verdict ------------------------------------ */
 
 restoreConsole();
+// Request Centre: reads the core's own log, shows the poller's requests with who asked, and
+// stops re-reading once the page is left.
+{
+  const before = sent.filter((m) => m.type === 'REQUEST_LOG').length;
+  await go('requests'); await settleFor(2500);
+  ok(sent.filter((m) => m.type === 'REQUEST_LOG').length > before, 'requests: opening the page should read REQUEST_LOG');
+  const direct = sent.slice(-20).filter((m) => m.type === 'ES');
+  ok(!direct.length, `requests: the page sent ${direct.length} ES request(s) itself — it must only read the core's log`);
+  const rows = doc.querySelectorAll('section.card table tbody tr');
+  ok(rows.length > 0, 'requests: no rows — the poller has been running, so the log cannot be empty');
+  const origins = [...doc.querySelectorAll('section.card table tbody tr td:nth-child(3)')].map((td) => td.textContent.trim());
+  ok(origins.some((o) => /^poller · /.test(o)), `requests: rows should name the poller as the asker, saw ${JSON.stringify(origins.slice(0, 3))}`);
+  await go('overview'); const after = sent.filter((m) => m.type === 'REQUEST_LOG').length; await settleFor(2600);
+  ok(sent.filter((m) => m.type === 'REQUEST_LOG').length === after, 'requests: the log is still being re-read after leaving the page');
+}
+
 // Config page: a fleet event must not reload the open tab or wipe what is being typed.
 // On a 32-cluster install data lands every couple of seconds; the page used to rebuild on
 // each one, re-asking TUNNELS/PINS (Jump hosts) and ZABBIX_CLUSTERS (Zabbix) every time.
@@ -1772,6 +1788,6 @@ if (problems.length) {
   for (const p of problems) console.error('  ✗ ' + p);
   process.exit(1);
 }
-console.log('ok: strip, console, shards, volume, hand-off, refresh, snapshots, tasks, toasts, accounts split, the log-delay preflight and a quiet Config page');
+console.log('ok: strip, console, shards, volume, hand-off, refresh, snapshots, tasks, toasts, accounts split, the log-delay preflight, a quiet Config page and the Request Centre');
 // The pages leave auto-refresh timers and a live tail running; nothing here waits on them.
 process.exit(0);

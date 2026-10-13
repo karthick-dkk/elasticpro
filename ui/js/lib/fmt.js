@@ -91,7 +91,10 @@ export function plural(n, noun, plur) {
 }
 
 export function csvEscape(v) {
-  const s = v === null || v === undefined ? '' : String(v);
+  let s = v === null || v === undefined ? '' : String(v);
+  // A cell starting with = + - @ (or a tab / return) is a formula to a spreadsheet, and an
+  // index name or a request path is data somebody else chose. Numbers keep their sign.
+  if (/^[=+\-@\t\r]/.test(s) && !/^-?\d+(\.\d+)?$/.test(s)) s = `'${s}`;
   return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
 }
 

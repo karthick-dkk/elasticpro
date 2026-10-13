@@ -64,6 +64,14 @@ pub struct EsRequest {
     /// (`WRITE_UNLOCK`). See `guard`.
     #[serde(default)]
     pub allow_writes: bool,
+    /// Who asked: `poller:<key>`, `page:<id>`, `console`, … Recorded with the request and
+    /// carried to Elasticsearch as `X-Opaque-Id`, so a query of ours can be found in the
+    /// cluster's task list and told apart from everyone else's.
+    #[serde(default)]
+    pub origin: Option<String>,
+    /// Set by the core for each request it sends; never read from the wire.
+    #[serde(skip)]
+    pub opaque_id: Option<String>,
 }
 fn default_method() -> String {
     "GET".into()
@@ -170,6 +178,9 @@ impl Transport {
             .request(m.clone(), &full)
             .timeout(Duration::from_millis(req.timeout_ms.unwrap_or(15000)))
             .header("Accept", "application/json");
+        if let Some(id) = req.opaque_id.as_deref() {
+            rb = rb.header("X-Opaque-Id", id);
+        }
         if let Some(a) = auth.filter(|a| !a.is_empty()) {
             rb = rb.header("Authorization", a);
         }

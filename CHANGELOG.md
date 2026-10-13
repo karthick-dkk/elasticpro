@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.3.9
+
+**A Request Centre: every request the core sends, who asked, how it went.**
+
+The core keeps a record of each request to a cluster — the poller's and the pages' alike —
+with its origin, timing and outcome: what is in flight now and the last 2,000 finished. The
+new Requests page (users and up) shows them, in flight first with elapsed time, then newest
+first, with cluster / origin / outcome / slower-than filters, per-cluster totals and a CSV
+export; it reads the core's log and nothing else. Each request also carries an
+`X-Opaque-Id` (`elasticpro/<install>/<origin>/<cluster>/<n>`), so a query of ours can be found
+in a cluster's task list and told from anyone else's. The "Requests N in 5m" figure in the
+status strip links to the page.
+
+Pages are now told when they are left: Live logs stops its tail on the way out, as it had
+asked to and never was.
+
 ## 0.3.8
 
 **The Config page stays still.**
