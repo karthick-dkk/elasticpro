@@ -1910,11 +1910,48 @@ if (viaFleet) {
   }
 }
 
+// Tasks panel: one request to the chosen cluster on the button, ours told from a stranger's
+// by the opaque id, and Cancel is a write — under read-only it asks for the guard first.
+{
+  // Earlier cases replaced the cluster clients with stubs that have no request(); the panel
+  // sends a real ES message through the bridge, so give it real clients again.
+  const stx = await load('core/state.js');
+  const esm = await load('core/es.js');
+  stx.state.config = config;                       // some cases also swapped the config for a stub one
+  if (!config.clusters.some((c) => c.id === stx.state.selected)) stx.state.selected = config.clusters[0].id;
+  for (const c of config.clusters) stx.state.clients.set(c.id, new esm.EsClient(c, stx.state.defaults, async () => {}));
+  await go('requests');
+  const before = sent.length;
+  const read = doc.querySelector('button[data-act="read-tasks"]');
+  ok(!!read, 'tasks: no "Read tasks" button');
+  if (read) {
+    read.click(); await settleFor(900);
+    const asked = sent.slice(before).filter((m) => m.type === 'ES' && /^\/_tasks/.test(m.path));
+    ok(asked.length === 1 && asked[0].method === 'GET', `tasks: expected one GET _tasks, saw ${JSON.stringify(asked.map((m) => m.method + ' ' + m.path))}`);
+    const pills = [...doc.querySelectorAll('section.card .pill')].map((p) => p.textContent.trim());
+    ok(pills.some((t) => /^ours/.test(t)), `tasks: no task marked as ours (pills: ${JSON.stringify(pills.slice(-6))})`);
+    ok(pills.includes('someone else'), 'tasks: the stranger\u2019s search is not marked as someone else\u2019s');
+    const cancel = doc.querySelector('button[data-act="cancel-task"]');
+    ok(!!cancel, 'tasks: no Cancel button');
+    if (cancel) {
+      const n = sent.length;
+      cancel.click(); await settleFor(400);
+      const dialog = doc.querySelector('.modal, [role="dialog"], .overlay');
+      ok(!!dialog, 'tasks: Cancel under read-only should ask for the write guard first (no dialog appeared)');
+      ok(!sent.slice(n).some((m) => m.type === 'ES' && /_cancel/.test(m.path)), 'tasks: a _cancel was sent before anybody said yes');
+      doc.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+      const no = dialog && [...dialog.querySelectorAll('button')].find((b) => /^(no|cancel|keep)/i.test(b.textContent.trim()));
+      if (no) no.click();
+      await settleFor(300);
+    }
+  }
+}
+
 if (problems.length) {
   console.error(`\n${problems.length} problem(s):`);
   for (const p of problems) console.error('  ✗ ' + p);
   process.exit(1);
 }
-console.log('ok: strip, console, shards, volume, hand-off, refresh, snapshots, tasks, toasts, accounts split, the log-delay preflight, a quiet Config page, the Request Centre and the redraw gate, the request policy and the coverage bar');
+console.log('ok: strip, console, shards, volume, hand-off, refresh, snapshots, tasks, toasts, accounts split, the log-delay preflight, a quiet Config page, the Request Centre and the redraw gate, the request policy, the coverage bar and the Tasks panel');
 // The pages leave auto-refresh timers and a live tail running; nothing here waits on them.
 process.exit(0);

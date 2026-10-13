@@ -683,6 +683,10 @@ export function go(id) {
   if (changed && currentPage) {
     const prev = PAGES.find((p) => p.id === currentPage);
     if (prev && prev.mod.onLeave) { try { prev.mod.onLeave(); } catch (_) { /* leaving must not block arriving */ } }
+    // And whatever it was still waiting on is let go of: the core answers those requests
+    // "aborted" instead of holding them to the cluster's timeout. Only this person's, only
+    // this page's; the poller is never touched. Fire and forget — nothing here waits on it.
+    if (prev && !isSnapshotMode()) bridge({ type: 'ABORT_REQUESTS', origin: `page:${prev.id}` }).catch(() => {});
   }
   currentPage = page.id;
   setRequestOrigin(`page:${page.id}`);

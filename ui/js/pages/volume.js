@@ -4,7 +4,7 @@
 import { h, mount, $, activatable } from '../lib/dom.js';
 import { nodeCache, objId } from '../lib/keyed.js';
 import { bytes, num, ago, dt, toCsv, download, plural } from '../lib/fmt.js';
-import { state, clusters, activeClusters, client, refreshAll, fetchIndices, ensureFullSnapshots, demandDataset, clusterRev, fleetMode, coverage, askFleetDataset } from '../core/state.js';
+import { state, clusters, activeClusters, client, refreshAll, fetchIndices, ensureFullSnapshots, demandDataset, clusterRev, fleetMode, coverage, askFleetDataset, isOnDemand } from '../core/state.js';
 import { coverageBar } from '../lib/freshness.js';
 import { readAllState, startReadAll } from '../lib/read-all.js';
 import { runBounded } from '../core/fleet.js';
@@ -74,6 +74,10 @@ export function onData() { if (host && host.isConnected) draw(); }
  */
 async function ensureIndices() {
   const list = activeClusters();
+  // Under a policy that fetches indices only on request, a fleet-wide view is a decision
+  // the coverage bar's Read all takes, not a side effect of opening the page. One selected
+  // cluster is what a page asks for by nature, so that still reads.
+  if (fleetMode() && list.length > 1 && isOnDemand('indices')) return;
   // With the fleet cache and more than a couple of clusters: two messages for the whole
   // fleet rather than two held requests per cluster (see demandDataset in core/state.js).
   // The rows fill in as the core's answers are pushed; until then they say unknown.
