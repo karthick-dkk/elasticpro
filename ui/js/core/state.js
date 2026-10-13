@@ -20,6 +20,7 @@ import { runBounded } from './fleet.js';
 import { spanDaysIso } from './volume.js';
 import { clustersToAsk } from '../lib/demand.js';
 import { limiter } from '../lib/limit.js';
+import { isStale } from '../lib/freshness.js';
 
 class Emitter {
   constructor() { this.map = new Map(); }
@@ -1379,12 +1380,22 @@ export function applyFleetEntry(id, clusterState) {
   return d;
 }
 
-/** A whole FLEET_STATE answer. */
-export function applyFleetState(res) {
-  if (!res || !res.ok) return;
+/**
+ * What every FLEET_STATE answer says about the core rather than about a cluster: its clock,
+ * its catalogue and its request policy. One place, because two readers of FLEET_STATE (the
+ * full sync and readDatasetOnce's side read) each kept their own copy, and the second one
+ * learned of the catalogue but never of the policy.
+ */
+function applyFleetMeta(res) {
   if (typeof res.now === 'number') fleet.skew = res.now - Date.now();
   if (Array.isArray(res.catalogue) && res.catalogue.length) fleet.catalogue = res.catalogue;
   if (res.policy && typeof res.policy === 'object') fleet.policy = res.policy;
+}
+
+/** A whole FLEET_STATE answer. */
+export function applyFleetState(res) {
+  if (!res || !res.ok) return;
+  applyFleetMeta(res);
   if (Array.isArray(res.clusterIds)) {
     fleet.ids = new Set(res.clusterIds);
     if (res.full) for (const id of [...fleet.raw.keys()]) if (!fleet.ids.has(id)) fleet.raw.delete(id);
@@ -1460,7 +1471,12 @@ function fetchFleetDataset(id, dataset, { maxAgeSec } = {}) {
   return p;
 }
 
-async function askFleetDataset(id, dataset, { maxAgeSec } = {}) {
+/**
+ * One CLUSTER_DATASET, asked now and applied — no sharing with an ask in flight, no
+ * recent-answer shortcut. Exported for "Read all (one at a time)" (lib/read-all.js), which
+ * is a person asking for each dataset in turn and must see each answer land.
+ */
+export async function askFleetDataset(id, dataset, { maxAgeSec } = {}) {
   if (isOnDemand(dataset)) fleet.onDemand.add(dataset);
   const r = await clusterDataset(id, dataset, { wait: true, maxAgeSec });
   if (!r || !r.ok) {
@@ -1523,8 +1539,7 @@ async function readDatasetOnce(dataset) {
     if (res && NO_CACHE_KINDS.has(res.kind)) fleet.mode = 'direct';
     throw new Error((res && res.message) || 'FLEET_STATE failed');
   }
-  if (typeof res.now === 'number') fleet.skew = res.now - Date.now();
-  if (Array.isArray(res.catalogue) && res.catalogue.length) fleet.catalogue = res.catalogue;
+  applyFleetMeta(res);
   for (const [id, cs] of Object.entries(res.clusters || {})) {
     const e = cs && cs.datasets && cs.datasets[dataset];
     if (!e) continue;
@@ -1625,6 +1640,55 @@ export function datasetFreshness(clusterId, dataset) {
     ts: local(e.fetchedAt), status: e.status, staleAfterMs: e.staleAfterMs, error: e.error || null,
     reach: r ? { ...r, since: local(r.since) } : null,
   };
+}
+
+/**
+ * How much of what a fleet page shows has actually been read, and how old it is.
+ *
+ * Under the hybrid and on-demand policies the poller no longer reads most datasets by
+ * itself, so a fleet page can open onto clusters whose data was never fetched. This says
+ * so — built from datasetFreshness() alone, so "stale" here is the same test the freshness
+ * line beside each figure uses (the dataset's own staleAfterMs).
+ *
+ * Each cluster lands in exactly one bucket, so the counts add up to `clusters`:
+ *   unreachable  the core cannot reach it, or a dataset's last fetch failed
+ *   never        some dataset was never fetched — unknown, not empty
+ *   stale        all fetched, at least one older than its threshold
+ *   read         every dataset fetched (or restored from cache) and within its threshold
+ * `oldestMs` is the age of the oldest dataset that HAS been fetched, across every cluster
+ * (a never-read one has no age and is counted under `never` instead); null when nothing
+ * has been fetched at all.
+ */
+export function coverage(clusterIds, datasets, now = Date.now()) {
+  const names = new Map(clusters().map((c) => [c.id, c.name]));
+  const out = { clusters: 0, read: 0, never: 0, stale: 0, unreachable: 0, oldestMs: null, perCluster: [] };
+  for (const id of clusterIds || []) {
+    let never = false, stale = false, bad = false, oldest = null;
+    const cur = fleet.raw.get(id);
+    for (const ds of datasets || []) {
+      // With the fleet cache, a dataset the core has sent nothing for was never read here —
+      // datasetFreshness would fall back to the page's own stamp, which for `data` is the
+      // age of OTHER datasets and would count this one as read.
+      if (fleetMode() && !(cur && cur.datasets[ds])) {
+        never = true;
+        if (cur && cur.reach && cur.reach.state === 'unreachable') bad = true;
+        continue;
+      }
+      const f = datasetFreshness(id, ds);
+      if (f.reach && f.reach.state === 'unreachable') bad = true;
+      if (f.status === 'error') bad = true;
+      if (f.status === 'never' || !f.ts) { never = true; continue; }
+      const age = Math.max(0, now - f.ts);
+      if (oldest === null || age > oldest) oldest = age;
+      if (isStale(f.ts, now, f.staleAfterMs)) stale = true;
+    }
+    const status = bad ? 'unreachable' : never ? 'never' : stale ? 'stale' : 'read';
+    out.clusters++;
+    out[status]++;
+    if (oldest !== null && (out.oldestMs === null || oldest > out.oldestMs)) out.oldestMs = oldest;
+    out.perCluster.push({ id, name: names.get(id) || id, status, oldestMs: oldest });
+  }
+  return out;
 }
 
 /* ---------------------------------- alerts ----------------------------------- */

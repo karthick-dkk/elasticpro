@@ -1869,11 +1869,52 @@ restoreConsole();
   if (before && before.ok) await es.policySet(before.policy);
 }
 
+/* ------------- fleet pages state their cost up front; reading is the button ------------- */
+
+if (viaFleet) {
+  const st = await load('core/state.js');
+  const DS = ['health', 'nodes', 'ilm_errors', 'policies', 'snapshots'];   // overview.js DATASETS
+  // Under hybrid/on-demand a page can open onto clusters nothing was read for. The mock's
+  // poller runs `background`, so make that true here: forget one dataset everywhere.
+  for (const cur of st.fleet.raw.values()) delete cur.datasets.snapshots;
+  await go('alerts');
+  let before = sent.length;
+  await go('overview');
+  const bar = doc.querySelector('#view .banner.coverage');
+  ok(!!bar, 'coverage: the Clusters page has no coverage bar');
+  ok(bar && /never read|No data read yet/.test(bar.textContent), `coverage: the bar does not say what was never read: "${bar && bar.textContent}"`);
+  const opened = sent.slice(before).filter((m) => m.type === 'CLUSTER_DATASET');
+  ok(opened.length === 0, `coverage: opening the Clusters page sent ${opened.length} CLUSTER_DATASET (reading must be a decision)`);
+  const btn = bar && bar.querySelector('button[data-act="read-all"]');
+  ok(!!btn && /Read all \(one at a time\)/.test(btn.textContent), 'coverage: no "Read all (one at a time)" button');
+  if (btn) {
+    const ids = st.activeClusters().map((c) => c.id);
+    const want = ids.length * DS.length;
+    before = sent.length;
+    btn.click();
+    await settleFor(60);
+    ok(!!doc.querySelector('#view .banner.coverage button[data-act="read-cancel"]') || sent.slice(before).filter((m) => m.type === 'CLUSTER_DATASET').length === want,
+      'coverage: a running Read all shows no Cancel button');
+    // One at a time: wait until every read has been sent, up to a generous bound.
+    for (let i = 0; i < 100 && sent.slice(before).filter((m) => m.type === 'CLUSTER_DATASET').length < want; i++) await settleFor(100);
+    await settleFor(300);
+    const reads = sent.slice(before).filter((m) => m.type === 'CLUSTER_DATASET');
+    ok(reads.length === want, `coverage: Read all sent ${reads.length} CLUSTER_DATASET, expected ${ids.length} clusters × ${DS.length} datasets = ${want}`);
+    ok(reads.every((m) => m.wait === true), 'coverage: a Read all ask did not wait for its answer');
+    const order = reads.map((m) => `${m.clusterId}/${m.dataset}`);
+    const expect = ids.flatMap((id) => DS.map((d) => `${id}/${d}`));
+    ok(JSON.stringify(order) === JSON.stringify(expect), `coverage: Read all went out of order: ${order.join(', ')}`);
+    const after = doc.querySelector('#view .banner.coverage');
+    ok(after && !after.querySelector('button[data-act="read-cancel"]'), 'coverage: the bar still says Cancel after the run');
+    ok(after && !/never read/.test(after.textContent), `coverage: still "never read" after Read all: "${after && after.textContent}"`);
+  }
+}
+
 if (problems.length) {
   console.error(`\n${problems.length} problem(s):`);
   for (const p of problems) console.error('  ✗ ' + p);
   process.exit(1);
 }
-console.log('ok: strip, console, shards, volume, hand-off, refresh, snapshots, tasks, toasts, accounts split, the log-delay preflight, a quiet Config page, the Request Centre and the redraw gate, the request policy');
+console.log('ok: strip, console, shards, volume, hand-off, refresh, snapshots, tasks, toasts, accounts split, the log-delay preflight, a quiet Config page, the Request Centre and the redraw gate, the request policy and the coverage bar');
 // The pages leave auto-refresh timers and a live tail running; nothing here waits on them.
 process.exit(0);

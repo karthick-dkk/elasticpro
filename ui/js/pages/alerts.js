@@ -3,7 +3,9 @@
 import { h, mount, $, tooltip } from '../lib/dom.js';
 import { nodeCache, objId } from '../lib/keyed.js';
 import { ago, dt, toCsv, download, num } from '../lib/fmt.js';
-import { state, bus, alerts, cachedAlerts, clusters, activeClusters, client, fetchOverview, refreshAll, clusterRev } from '../core/state.js';
+import { state, bus, alerts, cachedAlerts, clusters, activeClusters, client, fetchOverview, refreshAll, clusterRev, fleetMode, coverage, askFleetDataset } from '../core/state.js';
+import { coverageBar } from '../lib/freshness.js';
+import { readAllState, startReadAll } from '../lib/read-all.js';
 import { card, collapsible, pill, statTile, table, empty, connectionBanner } from './common.js';
 import { hbarList, legend, gauge, STATUS } from '../lib/charts.js';
 import { navigateTo } from '../core/intent.js';
@@ -38,6 +40,40 @@ function kindOf(a) {
   const base = rest.split(':')[0] || 'other';
   const full = rest.startsWith('slm-fail') ? 'slm-fail' : rest.startsWith('slm-stale') ? 'slm-stale' : base;
   return KIND_LABEL[full] || full;
+}
+
+/**
+ * The datasets alerts are raised from: health and nodes (status, disk, masters, JVM), ILM
+ * errors, snapshots (last backup) and policies (SLM, repositories). What "current" means
+ * for a cluster's alerts, and what Read all asks for.
+ */
+const DATASETS = ['health', 'nodes', 'ilm_errors', 'snapshots', 'policies'];
+/** The Read all run, kept across redraws. */
+const reading = readAllState();
+/** "alerts current for N of M clusters" — one node, refilled with the bar. */
+let currentLineEl = null;
+
+/**
+ * The coverage line and, under it, how many clusters' alerts can be trusted as current.
+ * Over every configured cluster rather than the selected one: alerts() is computed for
+ * the whole fleet, and so is this page. Only with the fleet cache; never reads by itself.
+ */
+function coverageLines() {
+  if (!fleetMode()) return [];
+  const ids = clusters().map((c) => c.id);
+  const cov = coverage(ids, DATASETS);
+  const bar = coverageBar({
+    cov, datasets: DATASETS, state: reading,
+    onReadAll: () => startReadAll(reading, { clusterIds: ids, datasets: DATASETS, ask: askFleetDataset,
+      onChange: () => { if (host && host.isConnected) coverageLines(); } }),
+  });
+  // Same coverage(), so the two lines cannot disagree: a cluster's alerts are current
+  // exactly when every dataset they come from was read and is within its threshold.
+  if (!currentLineEl) currentLineEl = h('div.muted.alerts-current', { style: { fontSize: '11.5px', margin: '-8px 0 10px' } });
+  const stale = cov.perCluster.filter((r) => r.status !== 'read');
+  currentLineEl.textContent = `Alerts current for ${cov.read} of ${cov.clusters} cluster${cov.clusters === 1 ? '' : 's'}`
+    + (stale.length && stale.length <= 5 ? ` — not current: ${stale.map((r) => r.name).join(', ')}` : '');
+  return [bar, currentLineEl];
 }
 
 export function render(el) {
@@ -105,6 +141,7 @@ function draw() {
   const list = clusters();
 
   mount(host,
+    ...coverageLines(),
     h('div.grid.c4', { style: { marginBottom: '10px' } },
       statTile('Open', num(open.length), open.length ? 'not yet acknowledged' : 'all acknowledged'),
       statTile('Critical', num(crit.filter((a) => !isAcked(a.key)).length), `${num(crit.length)} in total`),

@@ -3,7 +3,9 @@
 import { h, mount, clear, reconcile } from '../lib/dom.js';
 import { nodeCache, objId } from '../lib/keyed.js';
 import { bytes, num, compact, pct, ago, dt, toCsv, download, healthClass } from '../lib/fmt.js';
-import { state, bus, clusters, activeClusters, client, fetchOverview, healthState, refreshAll, alerts, cachedAlerts, requestsFor, requestLoad, jvmSummary, clusterRev } from '../core/state.js';
+import { state, bus, clusters, activeClusters, client, fetchOverview, healthState, refreshAll, alerts, cachedAlerts, requestsFor, requestLoad, jvmSummary, clusterRev, fleetMode, coverage, askFleetDataset } from '../core/state.js';
+import { coverageBar } from '../lib/freshness.js';
+import { readAllState, startReadAll } from '../lib/read-all.js';
 import { hbarList, usageMeter } from '../lib/charts.js';
 import { card, collapsible, pill, statTile, table, connectionBanner, diskCell, lastSnapshotOf, snapshotPill, snapshotStatusByKey, empty } from './common.js';
 import { isSnapshotMode } from '../core/snapshot.js';
@@ -72,6 +74,31 @@ function alertsByCluster() {
   const m = new Map();
   cachedAlerts().forEach((a) => { if (a.cluster) m.set(a.cluster.id, (m.get(a.cluster.id) || 0) + 1); });
   return m;
+}
+
+/**
+ * The datasets this page is drawn from: health and nodes for the tiles and disk, ILM errors
+ * for the alert headline, policies for ILM/SLM and repositories, snapshots for the last
+ * backup. What "read" means in the coverage line, and what Read all asks for.
+ */
+const DATASETS = ['health', 'nodes', 'ilm_errors', 'policies', 'snapshots'];
+/** The Read all run, kept across redraws. */
+const reading = readAllState();
+
+/**
+ * The coverage line (lib/freshness.js coverageBar). Only with the fleet cache — the direct
+ * path reads on open as it always has. Nothing here reads by itself: under any policy,
+ * opening the page shows what the core holds and says how much of it there is.
+ */
+function coverageLine() {
+  if (!fleetMode()) return null;
+  const ids = activeClusters().map((c) => c.id);
+  return coverageBar({
+    cov: coverage(ids, DATASETS), datasets: DATASETS, state: reading,
+    // Each step repaints the bar alone: the page may be holding its own redraws (quiet UI).
+    onReadAll: () => startReadAll(reading, { clusterIds: ids, datasets: DATASETS, ask: askFleetDataset,
+      onChange: () => { if (host && host.isConnected) coverageLine(); } }),
+  });
 }
 
 export function render(el) { host = el; el.classList.add('dense'); draw(); }
@@ -164,6 +191,7 @@ function draw() {
 
   const shownSig = rows.map((r) => `${r.c.id}:${r.sig}`).join(',');
   mount(host,
+    coverageLine(),
     alertsSummary(),
     tiles(all),
     built.get('toolbar', [!!ui.text, ui.sort, ui.dir, ui.only, all.length, rows.length].join('|'), () => toolbar(all, rows)),
