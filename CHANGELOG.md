@@ -1,5 +1,45 @@
 # Changelog
 
+## 0.3.10
+
+**Request management: a quiet UI, a request policy, a Tasks panel, and a cap on the poller's appetite.**
+
+The felt problem — the page repainting under whoever was reading it, all day, on a large
+fleet — is gone by default. A redraw gate holds what the core pushes behind an
+"N updates — Apply" pill and applies it by itself once the page has gone a minute untouched
+(`defaults.liveRedraw`: `pending`, `live`, `manual`); Live logs, the REST console and the
+Request Centre, which are the stream, pass through. The app opens on the cluster last
+chosen in this browser rather than on "All clusters" (`defaults.defaultScope`).
+
+**The request policy** (`<data dir>/policy.json`, Config → Requests, `POLICY_GET` /
+`POLICY_SET`) decides when the poller goes to the clusters and how hard: mode
+`background` (the shipped default — an untouched install behaves as before), `hybrid`
+(health in the background, the rest only while a page looks) or `on-demand` (nothing on its
+own; a page's ask sends exactly what it shows, for that cluster — with one request per
+cluster at a time under the "Client basis" preset); per-dataset intervals; concurrency
+global / per cluster / per tunnel; the watch window; the poller's timeouts (longer through a
+jump host); a soft budget of requests per cluster per minute; and pause — all clusters or
+one — from the Request Centre. Applied without a restart. A 429 or a timeout backs a
+cluster off for a minute, doubling to ten, until it answers; the Request Centre says
+"throttled: budget" or "backing off" and why.
+
+**Fleet pages state their cost up front.** Clusters, Alerts and the Volume report open on
+what the cache holds and say so — how many clusters, the oldest age, how many never read,
+stale or unreachable — with "Read all (one at a time)": cluster by cluster, one request in
+flight, cancellable, visible as it goes. Opening a page reads nothing. Alerts says
+"current for N of M clusters".
+
+**Tasks.** The Request Centre reads the chosen cluster's running searches on a button and
+tells ours (by the `X-Opaque-Id`, naming the page that asked) from everyone else's; Cancel
+is `POST _tasks/<id>/_cancel` under both gates — the write guard, then a confirmation that
+names the task — audited like every write. A 403 is explained in the privilege's name.
+Leaving a page lets go of its requests still waiting on a slow cluster (`ABORT_REQUESTS`):
+they answer "aborted" instead of running to their timeout; the poller's never do.
+
+Also: the request log records who asked; the CSV export writes any cell a spreadsheet would
+run as a formula as text; `REQUEST_LOG` and the Requests page are administrators'.
+See docs/HANDBOOK.md, "Request management — the message contract".
+
 ## 0.3.9
 
 **A Request Centre: every request the core sends, who asked, how it went.**
