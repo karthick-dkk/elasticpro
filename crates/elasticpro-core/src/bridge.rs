@@ -1468,7 +1468,13 @@ impl Core {
         let mut inflight: Vec<&RequestRecord> = log.inflight.values().filter(|r| sees(r)).collect();
         inflight.sort_by_key(|r| r.started_at);
         let recent: Vec<&RequestRecord> = log.recent.iter().rev().filter(|r| sees(r)).take(limit).collect();
-        json!({ "ok": true, "inflight": inflight, "recent": recent, "keep": REQUEST_LOG_KEEP })
+        let now = crate::fleet::now_ms();
+        let throttled: serde_json::Map<String, Value> = {
+            let st = self.fleet.state.lock();
+            st.throttle.iter().filter(|(c, t)| t.until > now && ids.as_ref().is_none_or(|v: &std::collections::HashSet<String>| v.contains(*c)))
+                .map(|(c, t)| (c.clone(), serde_json::to_value(t).unwrap_or(Value::Null))).collect()
+        };
+        json!({ "ok": true, "inflight": inflight, "recent": recent, "keep": REQUEST_LOG_KEEP, "throttled": throttled })
     }
 
     /// Trust decisions, less the hosts that belong to clusters this caller cannot see.

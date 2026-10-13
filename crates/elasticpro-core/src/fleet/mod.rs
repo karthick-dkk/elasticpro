@@ -211,7 +211,7 @@ impl Core {
             }
             let gone = if st.seen_clusters { st.prune(&keep) } else { vec![] };
             let plan = st.plan(&specs, now, &backing_off, &cfg);
-            (st.take(plan, &specs, &cfg), gone)
+            (st.take(plan, &specs, &cfg, now), gone)
         };
         if !gone.is_empty() {
             tracing::info!(clusters = ?gone, "fleet cache: dropping clusters that are no longer configured");
@@ -242,8 +242,12 @@ impl Core {
             path: q.path.clone(),
             body: None,
             // The policy's timeout, not the query's: an operator who raised it for a slow
-            // tunnel meant every request.
-            timeout_ms: Some(self.fleet.cfg.read().timeout_ms.max(q.timeout_ms.min(1_000))),
+            // tunnel meant every request. Through a jump host, the longer one.
+            timeout_ms: Some({
+                let cfg = self.fleet.cfg.read();
+                let via = self.spec_for(cluster).and_then(|s| s.via.clone()).is_some_and(|v| !v.is_empty());
+                if via { cfg.tunnel_timeout_ms } else { cfg.timeout_ms }
+            }),
             auth_header: None,
             allow_writes: false,
             origin: Some(format!("poller:{}", q.key)),
@@ -469,8 +473,11 @@ impl Core {
                     None => {}
                 }
             }
-            if since.is_none_or(|s| reach.seq > s) || !datasets.is_empty() {
-                clusters.insert(id.clone(), json!({ "reach": reach, "datasets": datasets }));
+            // The throttle rides along whenever the cluster is reported at all: it is short-lived
+            // and changes without a seq of its own, so a page sees it on its next read.
+            let throttle = st.throttle.get(id).filter(|t| t.until > now).cloned();
+            if since.is_none_or(|s| reach.seq > s) || !datasets.is_empty() || throttle.is_some() {
+                clusters.insert(id.clone(), json!({ "reach": reach, "datasets": datasets, "throttle": throttle }));
             }
         }
         json!({

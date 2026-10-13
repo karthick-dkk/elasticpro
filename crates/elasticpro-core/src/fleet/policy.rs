@@ -75,6 +75,11 @@ pub struct Policy {
     pub concurrency: Concurrency,
     /// The poller's per-request timeout.
     pub timeout_ms: u64,
+    /// …and for a cluster reached through a jump host, which is slower by nature.
+    pub tunnel_timeout_ms: u64,
+    /// Soft cap on the poller's requests to one cluster per minute. Beyond it the cluster's
+    /// due fetches are deferred (a person's ask still goes); 0 means no cap.
+    pub budget_per_cluster_per_min: u64,
     pub paused: Paused,
 }
 
@@ -101,6 +106,8 @@ impl Policy {
             watch_minutes: 15,
             concurrency: Concurrency::default(),
             timeout_ms: 30_000,
+            tunnel_timeout_ms: 60_000,
+            budget_per_cluster_per_min: 30,
             paused: Paused::default(),
         }
     }
@@ -121,6 +128,8 @@ impl Policy {
         self.concurrency.per_cluster = self.concurrency.per_cluster.clamp(1, 8);
         self.concurrency.tunnel = self.concurrency.tunnel.clamp(1, 32);
         self.timeout_ms = self.timeout_ms.clamp(1_000, 600_000);
+        self.tunnel_timeout_ms = self.tunnel_timeout_ms.clamp(1_000, 600_000);
+        self.budget_per_cluster_per_min = self.budget_per_cluster_per_min.min(10_000);
         let mut seen = std::collections::BTreeSet::new();
         self.paused.clusters.retain(|c| !c.trim().is_empty() && seen.insert(c.clone()));
         self
@@ -188,6 +197,8 @@ mod tests {
         assert_eq!(p.interval_secs(Dataset::Shards), 300);
         assert_eq!(p.watch_minutes, 15);
         assert_eq!(p.concurrency.per_cluster, 2);
+        assert_eq!(p.budget_per_cluster_per_min, 30);
+        assert_eq!(p.tunnel_timeout_ms, 60_000);
         assert!(!p.paused.all);
     }
 
