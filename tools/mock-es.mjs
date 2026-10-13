@@ -370,7 +370,11 @@ const routes = [
     return { took: 3, hits: { total: { value: 2 }, hits: [
     { _index: 'logstash-acme-2026.09.09', _id: '1', _source: { '@timestamp': new Date().toISOString(), message: 'hello' } },
     { _index: 'logstash-acme-2026.09.09', _id: '2', _source: { '@timestamp': new Date().toISOString(), message: 'world' } },
-  ] }, aggregations: { over_time: { buckets: [] } } };
+  ] }, aggregations: { over_time: { buckets: [
+      // Real Elasticsearch always buckets the range (min_doc_count 0 + extended_bounds); the
+      // two hits above are "now", so one bucket at the current minute holds them both.
+      { key: Math.floor(Date.now() / 60000) * 60000, doc_count: 2 },
+    ] } } };
   }],
 ];
 

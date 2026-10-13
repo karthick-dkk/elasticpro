@@ -8,7 +8,7 @@
 import { h, mount, $, clear, activatable } from '../lib/dom.js';
 import { num, dt, dur, ago, ymdDots, eachDay, download, downloadBytes, toCsv } from '../lib/fmt.js';
 import { state, client, activeClusters, fetchIndices, setDelaySummary } from '../core/state.js';
-import { timeHistogram } from '../lib/charts.js';
+import { timeHistogram, histogramEmptyText } from '../lib/charts.js';
 import { card, empty, pill, table, figure } from './common.js';
 import { preflight, measureDelay, summarise, delayCoverage,
          buildDeviceQuery, documentDelays, deviceSnapshot, looksLikeIp,
@@ -191,6 +191,7 @@ async function search({ silent = false } = {}) {
     ui.total = (r.hits && r.hits.total && (r.hits.total.value ?? r.hits.total)) || 0;
     ui.totalRelation = (r.hits && r.hits.total && r.hits.total.relation) || 'eq';
     ui.tookMs = r.took || 0;
+    ui.timeField = c.timeField;
     ui.buckets = ((r.aggregations && r.aggregations.over_time && r.aggregations.over_time.buckets) || [])
       .map((b) => ({ t: b.key, v: b.doc_count }));
   } catch (e) {
@@ -278,7 +279,7 @@ function draw() {
     card('Documents over time',
       `${num(ui.total)}${ui.totalRelation === 'gte' ? '+' : ''} matching · query took ${dur(ui.tookMs)}`,
       ui.running && !ui.buckets.length ? h('div.tbl-empty', h('span.spin'), ' searching…')
-        : timeHistogram(ui.buckets, { height: 150, yLabel: 'Documents',
+        : timeHistogram(ui.buckets, { height: 150, yLabel: 'Documents', emptyText: histogramEmptyText(ui.total, ui.timeField),
             formatX: (t) => new Date(t).toLocaleString(undefined, { month: 'short', day: '2-digit', hour: '2-digit', minute: '2-digit' }),
             onSelect: (b) => { const w = ui.buckets.length > 1 ? ui.buckets[1].t - ui.buckets[0].t : 60000;
               ui.from = isoLocal(new Date(b.t)); ui.to = isoLocal(new Date(b.t + w)); search(); } })),
