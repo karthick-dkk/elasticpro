@@ -7,7 +7,7 @@ import { coalesce } from './lib/coalesce.js';
 import { createRedrawGate, normalisePolicy, normaliseScope, openingSelection } from './lib/quiet-ui.js';
 import * as cfg from './core/config.js';
 import { state, bus, setConfig, refreshAll, refreshModule, REFRESH_MODULES, startAutoRefresh, clusters, fleetMode,
-         alerts, cachedAlerts, worstHealth, requestLoad,
+         alerts, cachedAlerts, worstHealth, requestLoad, fleetPolicy,
          clustersNeedingCredential, clustersWithAuthError, hasSessionCredential, isReadOnly, healthState, activeClusters } from './core/state.js';
 import { rowMenu, toast, notificationBell, setNotificationSink } from './ui/menu.js';
 import { showCredentialDialog, serverHoldsCredentials, serverCredentialMessage } from './ui/credential-dialog.js';
@@ -567,10 +567,11 @@ function renderSideFoot() {
   const row = (label, value, opts = {}) => h('span.row', opts, h('b', label), value);
   const total = Object.values(requestLoad.clusters).reduce((n, r) => n + (r.last5m || 0), 0);
   const perMin = Object.values(requestLoad.clusters).reduce((n, r) => n + (r.perMinute || 0), 0);
+  const pol = fleetPolicy();
   // Rebuilt only when something on it changed; see renderTopbar.
   const key = JSON.stringify([meta && meta.name, meta && meta.path, meta && meta.ephemeral, clusters().length, worstHealth(),
     coreInfo.version, total, perMin.toFixed(1), (coreInfo.tunnels || []).map((t) => [t.id, t.status, t.user, t.host, t.port]),
-    isSnapshotMode(), state.snapshot && state.snapshot.host]);
+    isSnapshotMode(), state.snapshot && state.snapshot.host, pol && pol.mode, pol && pol.pausedAll]);
   if (key === sideFootKey && el.firstChild) return;
   sideFootKey = key;
 
@@ -585,6 +586,18 @@ function renderSideFoot() {
       return row('Requests', h('a', { href: '#/requests', title: 'Requests this app sent to every cluster in the last 5 minutes — open the Request Centre' },
         `${total} in 5m · ${perMin.toFixed(1)}/min`));
     })(),
+    // Said here because a paused or on-demand core looks, from any page, like a fleet that
+    // has stopped updating — the strip is where somebody looks to find out why.
+    pol && pol.pausedAll
+      ? h('span.pill.grey', { title: 'The request policy pauses every request: nothing new is sent to any cluster until an administrator resumes (Config → Requests, or the Request Centre)' }, 'requests paused')
+      : null,
+    pol && (pol.mode === 'hybrid' || pol.mode === 'on-demand')
+      ? h('span.row.muted', {
+          title: pol.mode === 'hybrid'
+            ? 'Only health is fetched in the background; the rest is fetched while a page shows it (Config → Requests)'
+            : 'Nothing is fetched in the background; each page asks for what it shows when it opens (Config → Requests)',
+        }, `mode: ${pol.mode}`)
+      : null,
     // one per jump host: "jumpwin ● up"
     ...((coreInfo.tunnels || []).map((t) => {
       const st = (t.status && t.status.state) || 'idle';

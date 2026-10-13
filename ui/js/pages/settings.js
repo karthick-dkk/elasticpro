@@ -7,7 +7,10 @@ import { state, setConfig, refreshAll, clusters, client, hasSessionCredential,
          sessionCredentialLabel, clearSessionCredential, clustersNeedingCredential, isReadOnly } from '../core/state.js';
 import { workerStatus, forgetWorker, tunnels as fetchTunnels, listPins, untrustCert, untrustHostKey, tunnelReconnect,
          delaySinkGet, delaySinkSet, delaySinkRun, trustCert,
-         zabbixLinkGet, zabbixLinkSet, zabbixLinkTest, zabbixPairBegin, zabbixUnpair } from '../core/es.js';
+         zabbixLinkGet, zabbixLinkSet, zabbixLinkTest, zabbixPairBegin, zabbixUnpair,
+         policyGet, policySet } from '../core/es.js';
+import { PRESETS, DATASETS, DATASET_LABELS, BOUNDS, intervalBounds, applyPreset, activePreset, normalisePolicy,
+         fromForm, describeMode, MODES, FALLBACK_DEFAULTS } from '../core/policy.js';
 import { defaultApiUrl, checkUrl, countdown, secondsLeft, isManaged, linkChanges, formProblems, linkSummary,
          linkView, testMessage, epUrlFrom, eventLine } from '../core/zabbix-link.js';
 import { showCredentialDialog, forgetVaultCredential } from '../ui/credential-dialog.js';
@@ -30,6 +33,9 @@ let host = null;
 let core = null;      // last PING
 let trust = null;     // last PINS + TUNNELS
 let sink = null;      // last DELAY_SINK_GET; null until asked, {supported:false} off hosted
+let pol = null;       // last POLICY_GET / POLICY_SET reply; null until asked, {error} if refused
+let polDraft = null;  // what the Requests form shows when it differs from pol.policy (a preset, a reset)
+let polNote = null;   // {text, cls} from the last save, shown inline under the form
 
 /* ------------------------- uploading a config, and its history ------------------- */
 
@@ -460,6 +466,169 @@ function delaySinkCard() {
         h('button.btn.primary', { onclick: save }, 'Save'),
         h('button.btn', { onclick: runNow }, 'Run now'))));
 }
+/* ------------------------------- the request policy ------------------------------- */
+
+/**
+ * When the poller goes to the clusters, how hard, and whether at all.
+ *
+ * Asked once per visit, like every section's load. The form is not touched by fleet
+ * events: onData only repaints state pills, so a half-typed interval survives a refresh.
+ */
+async function loadPolicy() {
+  try {
+    const res = await policyGet();
+    pol = res && res.ok ? res : { error: (res && res.message) || 'the core did not answer' };
+  } catch (e) {
+    pol = { error: e.message || String(e) };
+  }
+  polDraft = null;
+  if (host && host.isConnected && activeSection() && activeSection().id === 'requests') draw();
+}
+
+const polDefaults = () => (pol && pol.defaults) || FALLBACK_DEFAULTS;
+
+/** The form as typed, before any clamping — fromForm decides what survives. */
+function readPolicyForm() {
+  const v = (id) => { const el = host && host.querySelector(`#${id}`); return el ? el.value.trim() : ''; };
+  const intervalsSec = {};
+  for (const ds of DATASETS) intervalsSec[ds] = v(`pol-iv-${ds}`);
+  return {
+    mode: v('pol-mode'),
+    intervalsSec,
+    watchMinutes: v('pol-watch'),
+    global: v('pol-global'),
+    perCluster: v('pol-per'),
+    tunnel: v('pol-tunnel'),
+    timeoutMs: v('pol-timeout'),
+    pausedAll: !!(host && host.querySelector('#pol-all') || {}).checked,
+    pausedClusters: [...(host ? host.querySelectorAll('input[data-pol-cluster]') : [])]
+      .filter((el) => el.checked).map((el) => el.dataset.polCluster),
+  };
+}
+
+function choosePreset(id) {
+  // Start from what is on screen so a paused box ticked but not yet saved is kept.
+  const { policy } = fromForm(readPolicyForm(), polDefaults());
+  polDraft = applyPreset(policy, id, polDefaults());
+  polNote = null;
+  draw();
+}
+
+function resetPolicyForm() {
+  polDraft = normalisePolicy(polDefaults(), FALLBACK_DEFAULTS);
+  polNote = { text: 'The form shows the shipped policy. Nothing is saved until you press Save.', cls: 'banner' };
+  draw();
+}
+
+async function savePolicy() {
+  const { policy, problems } = fromForm(readPolicyForm(), polDefaults());
+  let res;
+  try { res = await policySet(policy); } catch (e) { res = { ok: false, message: e.message || String(e) }; }
+  if (!res || !res.ok) {
+    polNote = { text: `Not saved: ${(res && res.message) || 'refused'}`, cls: 'banner err' };
+    toast(polNote.text, 'err', 8000, { key: 'request-policy' });
+    draw();
+    return;
+  }
+  pol = res; polDraft = null;
+  const lines = [
+    res.saved === false ? 'Applied, but not written to disk.' : 'Saved.',
+    ...problems,
+    res.warning ? `Warning: ${res.warning}` : null,
+  ].filter(Boolean);
+  polNote = { text: lines.join(' '), cls: problems.length || res.warning ? 'banner warn' : 'banner' };
+  toast(problems.length ? 'Request policy saved — some values were adjusted' : 'Request policy saved',
+    problems.length || res.warning ? 'warn' : 'ok', 5000, { key: 'request-policy' });
+  draw();
+}
+
+function requestsCard() {
+  if (!pol) return card('Requests', 'Loading…', h('div.muted', 'Asking the core for its request policy…'));
+  if (pol.error) {
+    return card('Requests', 'not available',
+      h('div.banner.warn', { style: { margin: 0 } },
+        h('div', h('div.ttl', 'This core did not report a request policy'), h('div', pol.error),
+          h('div.muted', 'An older core polls on its built-in schedule; there is nothing to set here until it is updated.'))));
+  }
+  const defaults = polDefaults();
+  const p = normalisePolicy(polDraft || pol.policy, defaults);
+  const preset = activePreset(p, defaults);
+  const admin = isAdminCaller();
+  const effective = pol.effective || {};
+  const pausedSet = new Set(p.paused.clusters);
+  const num = (id, value, b, width = '90px', title = '') => h('input', {
+    id, type: 'number', min: String(b.min), max: String(b.max), value: String(value), disabled: !admin,
+    style: { width }, title: title || `${b.min}–${b.max}`,
+  });
+  const labelled = (label, input, hint) => h('label', { style: { display: 'grid', gap: '3px', fontSize: '11.5px' } },
+    h('span.muted', label), input, hint ? h('span.muted', { style: { fontSize: '10.5px' } }, hint) : null);
+  const modeHint = h('div#pol-mode-desc.muted', { style: { fontSize: '11.5px' } }, describeMode(p.mode));
+  const stored = pol.warning
+    ? h('span', { style: { color: 'var(--warning)' } }, pol.warning)
+    : pol.stored ? 'Kept in policy.json in the core’s data directory'
+    : 'Not saved yet — the shipped policy is running';
+
+  const ivRows = DATASETS.map((ds) => {
+    const b = intervalBounds(ds);
+    // "Unknown" rather than a guess: the class is what the running core decided, and an
+    // older core that does not say is not the same as one that polls in the background.
+    const eff = effective[ds] === 'onDemand' ? pill('on demand', 'grey')
+      : effective[ds] === 'background' ? pill('background', 'green')
+      : h('span.muted', { title: 'The core did not say how it fetches this dataset' }, 'not reported');
+    return h('tr',
+      h('td', DATASET_LABELS[ds], h('div.mono.muted', { style: { fontSize: '10.5px' } }, ds)),
+      h('td', num(`pol-iv-${ds}`, p.intervalsSec[ds], b, '100px', `${b.min}–${b.max} seconds`), h('span.muted', { style: { marginLeft: '4px' } }, 's')),
+      h('td.muted', { style: { fontSize: '11px' } }, `${defaults.intervalsSec ? defaults.intervalsSec[ds] : '—'} s`),
+      h('td', eff));
+  });
+
+  const list = clusters();
+  return card('Requests', `mode: ${p.mode}${p.paused.all ? ' · all requests paused' : pausedSet.size ? ` · ${pausedSet.size} cluster(s) paused` : ''}`,
+    h('div', { style: { display: 'grid', gap: '12px' } },
+      h('div.muted', { style: { fontSize: '12px', lineHeight: 1.6 } },
+        'This decides when the core goes to the clusters on its own, how many requests it sends at once, and whether it '
+        + 'sends any at all. It does not change what a page shows — only when the data behind it was fetched. ',
+        h('button.btn.sm.ghost', { onclick: () => navigateTo('requests') }, 'Request Centre'),
+        ' shows what is actually being sent.'),
+      !admin ? h('div.muted', { style: { fontSize: '11.5px' } }, 'Read-only — an administrator changes the request policy.') : null,
+      h('div.seg', { role: 'group', 'aria-label': 'Request policy presets', style: { display: 'flex', flexWrap: 'wrap', gap: '6px' } },
+        ...PRESETS.map((x) => h('button.btn.sm', {
+          'aria-pressed': preset === x.id ? 'true' : 'false', disabled: !admin, title: x.label,
+          onclick: () => choosePreset(x.id),
+        }, x.label))),
+      h('div', { style: { display: 'grid', gap: '4px' } },
+        labelled('Mode', h('select#pol-mode', {
+          disabled: !admin, style: { maxWidth: '220px' },
+          onchange: (e) => { modeHint.textContent = describeMode(e.target.value); },
+        }, ...MODES.map((m) => h('option', { value: m, selected: m === p.mode }, m)))),
+        modeHint),
+      table(['Dataset', 'Every', 'Shipped', 'Effective'], ivRows),
+      h('div', { style: { display: 'flex', gap: '14px', flexWrap: 'wrap', alignItems: 'start' } },
+        labelled('Watch window (minutes)', num('pol-watch', p.watchMinutes, BOUNDS.watchMinutes),
+          'how long a page keeps an on-demand dataset fresh after it was last looked at'),
+        labelled('Concurrency — all clusters', num('pol-global', p.concurrency.global, BOUNDS.global)),
+        labelled('Per cluster', num('pol-per', p.concurrency.perCluster, BOUNDS.perCluster)),
+        labelled('Per jump host', num('pol-tunnel', p.concurrency.tunnel, BOUNDS.tunnel)),
+        labelled('Timeout (ms)', num('pol-timeout', p.timeoutMs, BOUNDS.timeoutMs, '110px'))),
+      h('div', { style: { display: 'grid', gap: '6px' } },
+        h('label', { style: { display: 'inline-flex', gap: '6px', alignItems: 'center', fontSize: '12px' },
+          title: 'Nothing new starts; what is in flight finishes, and a page’s request waits' },
+          h('input#pol-all', { type: 'checkbox', checked: p.paused.all, disabled: !admin }), h('b', 'Pause all requests')),
+        list.length
+          ? h('div', { style: { display: 'flex', gap: '12px', flexWrap: 'wrap' } },
+              h('span.muted', { style: { fontSize: '11.5px' } }, 'Paused clusters:'),
+              ...list.map((c) => h('label', { style: { display: 'inline-flex', gap: '5px', alignItems: 'center', fontSize: '11.5px' } },
+                h('input', { type: 'checkbox', checked: pausedSet.has(c.id), disabled: !admin, dataset: { polCluster: c.id } }), c.name)))
+          : h('div.muted', { style: { fontSize: '11.5px' } }, 'No clusters to pause.')),
+      polNote ? h(`div.${polNote.cls.split(' ').join('.')}#pol-msg`, { style: { margin: 0, fontSize: '12px' } }, polNote.text) : null,
+      h('div.muted', { style: { fontSize: '11.5px' } }, stored,
+        pol.running === false ? ' · the poller is not running on this core' : ''),
+      h('div', { style: { display: 'flex', gap: '8px', flexWrap: 'wrap' } },
+        h('button.btn.primary', { onclick: savePolicy, disabled: !admin }, 'Save'),
+        h('button.btn', { onclick: resetPolicyForm, disabled: !admin,
+          title: 'Fill the form with the policy this build ships with; nothing is saved until Save' }, 'Reset to shipped'))));
+}
+
 /* ---------------------------------- sections ---------------------------------- */
 
 /**
@@ -484,6 +653,7 @@ const SECTIONS = [
   { id: 'alerts',   label: 'Alert triggers', icon: '⚠', build: alertRulesCard },
   { id: 'schedule', label: 'Scheduled log delay', icon: '⏱', build: delaySinkCard,
     when: () => !!(sink && sink.supported) },
+  { id: 'requests', label: 'Requests',     icon: '⚡', build: requestsCard, load: loadPolicy },
   { id: 'defaults', label: 'Defaults',     icon: '⚙', build: defaultsCard },
   { id: 'diag',     label: 'Diagnostics',  icon: '✚', build: diagnosticsCard, load: confirmCoreGuard },
 ];

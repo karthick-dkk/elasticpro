@@ -11,7 +11,9 @@
 import { h, mount } from '../lib/dom.js';
 import { num, dur, dt, toCsv, download } from '../lib/fmt.js';
 import { clusters, requestLoad, refreshRequestLoad } from '../core/state.js';
-import { requestLog } from '../core/es.js';
+import { requestLog, policyGet, policySet } from '../core/es.js';
+import { togglePaused, setPausedAll, isPaused } from '../core/policy.js';
+import { toast } from '../ui/menu.js';
 import { card, table, pill, statTile, empty } from './common.js';
 import { NO_FILTER, requestRows, originChoices, perCluster, requestCsvRows, CSV_HEADER, originLabel } from '../core/request-log.js';
 
@@ -20,11 +22,19 @@ let log = { inflight: [], recent: [] };
 let error = null;
 let timer = null;
 const filter = { ...NO_FILTER };
+/**
+ * The request policy, read once on entry and again after each change made here — not on
+ * the two-second poll, which is about the log. null until known; {error} if the core
+ * refused or does not have one, in which case the pause buttons are not offered.
+ */
+let policy = null;
+let policyBusy = false;
 
 export function render(el) {
   host = el;
   draw();
   poll();
+  loadPolicy();
   clearInterval(timer);
   timer = setInterval(() => { if (host && host.isConnected) poll(); else clearInterval(timer); }, 2000);
 }
@@ -42,6 +52,33 @@ async function poll() {
   if (host && host.isConnected) draw();
 }
 
+async function loadPolicy() {
+  try {
+    const r = await policyGet();
+    policy = r && r.ok ? r.policy : { error: (r && r.message) || 'the core did not answer' };
+  } catch (e) { policy = { error: e.message || String(e) }; }
+  if (host && host.isConnected) draw();
+}
+
+/** Send a changed policy, then read it back: what the core kept is what is shown. */
+async function changePolicy(next, said) {
+  if (policyBusy) return;
+  policyBusy = true; draw();
+  let r;
+  try { r = await policySet(next); } catch (e) { r = { ok: false, message: e.message || String(e) }; }
+  policyBusy = false;
+  if (r && r.ok) {
+    policy = r.policy;
+    toast(said, 'ok', 4000, { key: 'request-pause' });
+    if (r.warning) toast(r.warning, 'warn', 8000, { key: 'request-pause-warning' });
+  } else {
+    toast(`Not changed: ${(r && r.message) || 'refused'}`, 'err', 8000, { key: 'request-pause' });
+  }
+  await loadPolicy();
+}
+
+const policyKnown = () => !!(policy && !policy.error && policy.paused);
+
 function draw() {
   const rows = requestRows(log, filter);
   const inflight = rows.filter((r) => r.inflight).length;
@@ -49,6 +86,11 @@ function draw() {
   const byCluster = perCluster(log);
   const names = Object.fromEntries(clusters().map((c) => [c.id, c.name]));
   const nameOf = (id) => names[id] || id;
+  // Every configured cluster gets a row, not only those in the log: a cluster that has
+  // been quiet is exactly the one somebody may want to pause before it is asked again.
+  const seen = new Set(byCluster.map((c) => c.cluster));
+  const clusterRows = [...byCluster, ...clusters().filter((c) => !seen.has(c.id))
+    .map((c) => ({ cluster: c.id, count: 0, inflight: 0, failed: 0, slowestMs: 0 }))];
 
   const select = (key, options, labelOf = (x) => x) => h('select', { onchange: (e) => { filter[key] = e.target.value; draw(); } },
     ...options.map(([v, l]) => h('option', { value: v, selected: String(filter[key]) === String(v) ? '' : null }, l)));
@@ -76,6 +118,7 @@ function draw() {
     h('td', r.inflight ? pill('in flight', 'yellow') : pill(r.outcome, r.ok ? 'green' : 'red'))));
 
   mount(host,
+    pauseBar(),
     error ? h('div.banner.err', h('div', h('div.ttl', 'Could not read the request log'), h('div', error))) : null,
     tiles, bar,
     card('Requests', `${num(rows.length)} shown · in flight first, then newest first · re-read every 2 s while this page is open`,
@@ -83,7 +126,39 @@ function draw() {
         : empty('No requests match — or the core has sent none since it started.')),
     h('div', { style: { marginTop: '14px' } },
       card('Per cluster', 'what the log holds for each cluster',
-        table(['Cluster', 'Requests', 'In flight', 'Failed', 'Slowest'], byCluster.map((c) => h('tr',
-          h('td', h('b', nameOf(c.cluster))), h('td.num', num(c.count)), h('td.num', num(c.inflight)),
-          h('td.num', c.failed ? pill(num(c.failed), 'red') : '0'), h('td.num', dur(c.slowestMs)))), { emptyText: 'nothing yet' }))));
+        table(['Cluster', 'Requests', 'In flight', 'Failed', 'Slowest', ''], clusterRows.map((c) => h('tr',
+          h('td', h('b', nameOf(c.cluster)), policyKnown() && isPaused(policy, c.cluster)
+            ? h('span.pill.grey', { style: { marginLeft: '6px' }, title: policy.paused.all ? 'Every request is paused' : 'Nothing new starts for this cluster' }, 'paused') : null),
+          h('td.num', num(c.count)), h('td.num', num(c.inflight)),
+          h('td.num', c.failed ? pill(num(c.failed), 'red') : '0'), h('td.num', c.count ? dur(c.slowestMs) : '\u2014'),
+          h('td', { style: { textAlign: 'right' } }, pauseButton(c.cluster, nameOf(c.cluster))))), { emptyText: 'nothing yet' }))));
+}
+
+/** "Pause all requests" / "Resume all", above everything else on the page. */
+function pauseBar() {
+  if (!policyKnown()) {
+    return policy && policy.error
+      ? h('div.muted', { style: { fontSize: '11.5px', marginBottom: '8px' } }, `Pausing is not available: ${policy.error}`)
+      : null;
+  }
+  const all = !!policy.paused.all;
+  const some = (policy.paused.clusters || []).length;
+  return h('div', { style: { display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap', marginBottom: '10px' } },
+    all ? h('span.pill.grey', { title: 'Nothing new starts on any cluster; what was in flight finishes' }, 'requests paused')
+      : some ? h('span.muted', { style: { fontSize: '11.5px' } }, `${some} cluster(s) paused`) : null,
+    h('button.btn.sm', {
+      disabled: policyBusy,
+      title: all ? 'Let the core send requests again' : 'Nothing new starts; requests in flight finish, and a page\u2019s request waits',
+      onclick: () => changePolicy(setPausedAll(policy, !all), all ? 'Requests resumed' : 'All requests paused'),
+    }, all ? 'Resume all' : 'Pause all requests'));
+}
+
+function pauseButton(id, name) {
+  if (!policyKnown()) return null;
+  const paused = (policy.paused.clusters || []).includes(id);
+  return h('button.btn.sm', {
+    disabled: policyBusy,
+    title: paused ? `Let the core send requests to ${name} again` : `Nothing new starts for ${name}; requests in flight finish`,
+    onclick: () => changePolicy(togglePaused(policy, id, !paused), paused ? `${name}: resumed` : `${name}: paused`),
+  }, paused ? 'Resume' : 'Pause');
 }

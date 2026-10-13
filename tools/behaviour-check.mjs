@@ -1810,11 +1810,70 @@ restoreConsole();
   await go('overview');
 }
 
+// Request policy: Config → Requests asks the core once per visit, stays quiet under fleet
+// events, and saves what the presets and the Request Centre's pause buttons decide.
+{
+  const es = await load('core/es.js');
+  const before = await es.policyGet();
+  ok(before && before.ok, `policy: POLICY_GET was refused: ${JSON.stringify(before)}`);
+  const bus = (await load('core/state.js')).bus;
+  const countOf = (type) => sent.filter((m) => m.type === type).length;
+  const lastOf = (type) => sent.filter((m) => m.type === type).at(-1);
+  const fire = async () => { for (const c of config.clusters) bus.emit('data', c.id); await settleFor(700); };
+  const button = (label, scope = doc) => [...scope.querySelectorAll('button')].find((b) => b.textContent.trim() === label);
+
+  await go('settings');
+  const tab = [...doc.querySelectorAll('nav.subnav button')].find((b) => b.title === 'Requests');
+  ok(!!tab, 'policy: no Requests tab on the Config page');
+  if (tab) {
+    const gets = countOf('POLICY_GET');
+    tab.click(); await settleFor(500);
+    ok(countOf('POLICY_GET') === gets + 1, `policy: opening Requests sent ${countOf('POLICY_GET') - gets} POLICY_GET, expected exactly 1`);
+    const asked = countOf('POLICY_GET');
+    await fire(); await fire();
+    ok(countOf('POLICY_GET') === asked, `policy: fleet events re-asked POLICY_GET (${countOf('POLICY_GET') - asked} more)`);
+
+    const client = [...doc.querySelectorAll('button')].find((b) => b.textContent.startsWith('Client basis'));
+    ok(!!client, 'policy: no "Client basis" preset button');
+    if (client) {
+      client.click(); await settleFor(200);
+      const pressed = [...doc.querySelectorAll('button')].find((b) => b.textContent.startsWith('Client basis'));
+      ok(pressed && pressed.getAttribute('aria-pressed') === 'true', 'policy: the chosen preset is not marked aria-pressed');
+      const sets = countOf('POLICY_SET');
+      const save = button('Save'); ok(!!save, 'policy: no Save button');
+      if (save) { save.click(); await settleFor(500); }
+      const m = lastOf('POLICY_SET');
+      ok(countOf('POLICY_SET') === sets + 1 && m && m.policy.mode === 'on-demand' && m.policy.concurrency.perCluster === 1,
+        `policy: Save after "Client basis" sent ${JSON.stringify(m && m.policy)}`);
+    }
+  }
+
+  await go('requests'); await settleFor(500);
+  const per = [...doc.querySelectorAll('section.card')].find((x) => (x.querySelector('header h2') || {}).textContent === 'Per cluster');
+  const pause = per && button('Pause', per);
+  ok(!!pause, 'policy: the Request Centre has no per-cluster Pause button');
+  if (pause) {
+    const sets = countOf('POLICY_SET');
+    const was = new Set(((lastOf('POLICY_SET') || {}).policy || before.policy || { paused: { clusters: [] } }).paused.clusters);
+    pause.click(); await settleFor(600);
+    const m = lastOf('POLICY_SET');
+    const added = m ? m.policy.paused.clusters.filter((c) => !was.has(c)) : [];
+    ok(countOf('POLICY_SET') === sets + 1 && added.length === 1 && config.clusters.some((c) => c.id === added[0]),
+      `policy: Pause sent ${JSON.stringify(m && m.policy && m.policy.paused)}`);
+    ok([...per.ownerDocument.querySelectorAll('section.card .pill.grey')].some((x) => x.textContent === 'paused'),
+      'policy: a paused cluster has no "paused" pill');
+  }
+  ok(!!button('Pause all requests'), 'policy: the Request Centre has no "Pause all requests" button');
+  await go('overview');
+  // The harness writes into the dev core's data directory; leave the policy as it was.
+  if (before && before.ok) await es.policySet(before.policy);
+}
+
 if (problems.length) {
   console.error(`\n${problems.length} problem(s):`);
   for (const p of problems) console.error('  ✗ ' + p);
   process.exit(1);
 }
-console.log('ok: strip, console, shards, volume, hand-off, refresh, snapshots, tasks, toasts, accounts split, the log-delay preflight, a quiet Config page, the Request Centre and the redraw gate');
+console.log('ok: strip, console, shards, volume, hand-off, refresh, snapshots, tasks, toasts, accounts split, the log-delay preflight, a quiet Config page, the Request Centre and the redraw gate, the request policy');
 // The pages leave auto-refresh timers and a live tail running; nothing here waits on them.
 process.exit(0);
