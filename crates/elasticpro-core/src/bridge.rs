@@ -1459,7 +1459,7 @@ impl Core {
         let mut inflight: Vec<&RequestRecord> = log.inflight.values().filter(|r| sees(r)).collect();
         inflight.sort_by_key(|r| r.started_at);
         let recent: Vec<&RequestRecord> = log.recent.iter().rev().filter(|r| sees(r)).take(limit).collect();
-        json!({ "ok": true, "inflight": inflight, "recent": recent, "keep": REQUEST_LOG_KEEP, "instance": self.instance })
+        json!({ "ok": true, "inflight": inflight, "recent": recent, "keep": REQUEST_LOG_KEEP })
     }
 
     /// Trust decisions, less the hosts that belong to clusters this caller cannot see.

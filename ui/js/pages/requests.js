@@ -1,6 +1,7 @@
 /**
  * Page 10 — the Request Centre: every request this core sends to a cluster, in flight and
- * recent, with who asked and how it went.
+ * recent, with who asked and how it went. Administrators only: it shows every user's
+ * requests on the clusters they share.
  *
  * It reads the core's own log (REQUEST_LOG) and nothing else: opening this page never
  * sends a cluster anything. While it is open it re-reads the log every two seconds — a

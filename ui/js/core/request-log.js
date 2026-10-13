@@ -70,8 +70,11 @@ export function perCluster(log) {
 
 export const CSV_HEADER = ['started', 'cluster', 'origin', 'method', 'path', 'ms', 'outcome', 'via', 'id'];
 
-/** The same rows as the table, as CSV cells (started as ISO time). */
+/** The same rows as the table, keyed by CSV_HEADER for toCsv (started as ISO time). */
 export function requestCsvRows(rows) {
-  return rows.map((r) => [new Date(r.startedAt || 0).toISOString(), r.cluster, r.origin, r.method, r.path,
-    r.inflight ? '' : String(r.ms), r.inflight ? 'in flight' : r.outcome, r.via || '', String(r.id)]);
+  return rows.map((r) => ({
+    started: new Date(r.startedAt || 0).toISOString(), cluster: r.cluster, origin: r.origin, method: r.method,
+    path: r.path, ms: r.inflight ? '' : String(r.ms), outcome: r.inflight ? 'in flight' : r.outcome,
+    via: r.via || '', id: String(r.id),
+  }));
 }

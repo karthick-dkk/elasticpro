@@ -82,7 +82,7 @@ const PAGES = [
   { id: 'snapshots', label: 'Snapshots & SLM',icon: '↻', mod: pSnapshots, multi: true,  minRole: 'user' },
   { id: 'volume',    label: 'Volume report',  icon: '▤', mod: pVolume,    multi: true,  minRole: 'user' },
   { id: 'automation', label: 'Automation',    icon: '⟳', mod: pAutomation, multi: true, minRole: 'user' },
-  { id: 'requests',  label: 'Requests',       icon: '⚡', mod: pRequests,  multi: true,  minRole: 'user' },
+  { id: 'requests',  label: 'Requests',       icon: '⚡', mod: pRequests,  multi: true,  minRole: 'admin' },
   { id: 'accounts',  label: 'Accounts',       icon: '☺', mod: pAccounts,  multi: true,  minRole: 'admin', accountsOnly: true },
   { id: 'settings',  label: 'Config',         icon: '⚙', mod: pSettings,  multi: true,  minRole: 'admin' },
 ];

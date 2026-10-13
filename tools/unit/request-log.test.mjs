@@ -47,7 +47,20 @@ test('per-cluster totals and the CSV follow the same rows', () => {
   assert.deepEqual(pc.map((c) => [c.cluster, c.count, c.inflight, c.failed, c.slowestMs]), [['a', 2, 1, 0, 120], ['b', 2, 0, 2, 31000]]);
   const csv = M.requestCsvRows(M.requestRows(log, M.NO_FILTER, now));
   assert.equal(csv.length, 4);
-  assert.deepEqual(csv[0].slice(1, 4), ['a', 'page:indices', 'GET']);
-  assert.equal(csv[0][6], 'in flight'); assert.equal(csv[2][7], 'jump');
-  assert.equal(M.CSV_HEADER.length, csv[0].length);
+  assert.deepEqual([csv[0].cluster, csv[0].origin, csv[0].method], ['a', 'page:indices', 'GET']);
+  assert.equal(csv[0].outcome, 'in flight'); assert.equal(csv[2].via, 'jump');
+  assert.deepEqual(Object.keys(csv[0]), M.CSV_HEADER, 'the row keys are the header, so toCsv finds every column');
+});
+
+// Regression: spreadsheet formula injection through an export — a path or index name that
+// starts with = + - @ is written as text; a negative number is still a number.
+const { csvEscape, toCsv } = await import(pathToFileURL(path.join(ROOT, 'ui/js/lib/fmt.js')).href);
+test('an export never hands a spreadsheet a formula', () => {
+  assert.equal(csvEscape('=HYPERLINK("http://x")'), `"'=HYPERLINK(""http://x"")"`);
+  assert.equal(csvEscape('+1 (555) 1234'), "'+1 (555) 1234");
+  assert.equal(csvEscape('@cmd'), "'@cmd");
+  assert.equal(csvEscape('-5'), '-5'); assert.equal(csvEscape(-5.5), '-5.5');
+  assert.equal(csvEscape('/_search?q=x'), '/_search?q=x');
+  const out = toCsv([{ path: '=1+1', ms: '-3' }], ['path', 'ms']);
+  assert.equal(out.split('\n')[1], "'=1+1,-3");
 });
