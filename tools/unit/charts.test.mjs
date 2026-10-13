@@ -76,3 +76,22 @@ test('with no explicit total the parts are the total', () => {
   ]);
   assert.match(g.textContent, /10/);
 });
+
+// Regression: ISSUE-A — the Live logs chart said "No documents in this range" above a list
+// of matching documents when the cluster sent hits but no time buckets.
+// Found by /qa on 2026-10-13
+// Report: .gstack/qa-reports/qa-report-127-0-0-1-2026-10-13.md
+const { histogramEmptyText, timeHistogram } = await import(pathToFileURL(path.join(ROOT, 'ui/js/lib/charts.js')).href);
+
+test('an empty histogram says "no documents" only when there are none', () => {
+  assert.equal(histogramEmptyText(0), 'No documents in this range');
+  assert.equal(histogramEmptyText(undefined), 'No documents in this range');
+  assert.match(histogramEmptyText(2, '@timestamp'), /No time buckets came back for the 2 matching documents on @timestamp/);
+  assert.match(histogramEmptyText(1), /the 1 matching document —/, 'singular, and no field when none is known');
+  assert.match(histogramEmptyText(2), /the list below is complete/);
+});
+
+test('timeHistogram shows the caller\'s empty text, and the default without one', () => {
+  assert.equal(timeHistogram([], { emptyText: 'custom' }).textContent, 'custom');
+  assert.equal(timeHistogram([]).textContent, 'No documents in this range');
+});
