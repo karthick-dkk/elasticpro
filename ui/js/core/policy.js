@@ -22,7 +22,9 @@ export const DATASET_LABELS = {
 };
 export const DATASETS = Object.keys(DATASET_LABELS);
 
-export const MODES = ['background', 'hybrid', 'on-demand'];
+/** `auto` first: it is what the core ships. Keep its threshold equal to AUTO_HYBRID_ABOVE in policy.rs. */
+export const AUTO_HYBRID_ABOVE = 25;
+export const MODES = ['auto', 'background', 'hybrid', 'on-demand'];
 
 export const BOUNDS = {
   interval: { min: 30, max: 86400 },
@@ -41,7 +43,7 @@ export const intervalBounds = (dataset) => (dataset === 'health' ? BOUNDS.health
  * `defaults` always wins, because the health interval there can come from the environment.
  */
 export const FALLBACK_DEFAULTS = {
-  mode: 'background',
+  mode: 'auto',
   intervalsSec: { health: 180, nodes: 300, ilm_errors: 900, policies: 3600, ilm_assign: 3600,
                   snapshots: 1800, snapshots_full: 1800, indices: 600, shards: 300 },
   watchMinutes: 15,
@@ -51,6 +53,7 @@ export const FALLBACK_DEFAULTS = {
 };
 
 export const PRESETS = [
+  { id: 'auto', label: `Automatic (recommended) — background up to ${AUTO_HYBRID_ABOVE} clusters, hybrid above` },
   { id: 'background', label: 'Background — the core keeps every cluster fresh' },
   { id: 'hybrid', label: 'Hybrid — health in the background, the rest when a page looks' },
   { id: 'client', label: 'Client basis — nothing until a page asks, one request per cluster at a time' },
@@ -77,7 +80,7 @@ export function normalisePolicy(p, defaults = FALLBACK_DEFAULTS) {
   const clusters = ((src.paused && src.paused.clusters) || [])
     .filter((id) => typeof id === 'string' && id.trim() !== '' && !seen.has(id) && seen.add(id));
   return {
-    mode: MODES.includes(src.mode) ? src.mode : (MODES.includes(d.mode) ? d.mode : 'background'),
+    mode: MODES.includes(src.mode) ? src.mode : (MODES.includes(d.mode) ? d.mode : 'auto'),
     intervalsSec,
     watchMinutes: pick(src.watchMinutes, d.watchMinutes ?? 15, BOUNDS.watchMinutes),
     concurrency: {
@@ -97,7 +100,8 @@ export function normalisePolicy(p, defaults = FALLBACK_DEFAULTS) {
 export function applyPreset(policy, id, defaults = FALLBACK_DEFAULTS) {
   const base = normalisePolicy(defaults, FALLBACK_DEFAULTS);
   const paused = normalisePolicy(policy, defaults).paused;
-  if (id === 'background') return { ...base, paused };
+  if (id === 'auto') return { ...base, mode: 'auto', paused };
+  if (id === 'background') return { ...base, mode: 'background', paused };
   if (id === 'hybrid') return { ...base, mode: 'hybrid', paused };
   if (id === 'client') {
     return { ...base, mode: 'on-demand', concurrency: { ...base.concurrency, perCluster: 1, global: 4 }, paused };
@@ -187,6 +191,7 @@ export function isPaused(policy, clusterId) {
 
 export function describeMode(mode) {
   switch (mode) {
+    case 'auto': return `Background up to ${AUTO_HYBRID_ABOVE} clusters, hybrid above — so a large fleet is not polled for everything all the time.`;
     case 'background': return 'The core keeps every cluster fresh on its own schedule, whether or not anybody is looking.';
     case 'hybrid': return 'Only health is fetched in the background; everything else is fetched while a page shows it, and for the watch window after.';
     case 'on-demand': return 'The core fetches nothing on its own: opening a page sends exactly what that page shows, for that cluster.';

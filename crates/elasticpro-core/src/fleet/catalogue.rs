@@ -270,7 +270,7 @@ pub fn datasets_for_write(method: &str, path: &str) -> Vec<Dataset> {
 }
 
 /// The catalogue as the UI reads it from `FLEET_STATE.catalogue`.
-pub fn catalogue_json(cfg: &super::scheduler::Config) -> Value {
+pub fn catalogue_json(cfg: &super::scheduler::Config, clusters: usize) -> Value {
     Value::Array(
         ALL.iter()
             .map(|d| {
@@ -279,7 +279,7 @@ pub fn catalogue_json(cfg: &super::scheduler::Config) -> Value {
                     "class": d.class(),
                     // What the running policy makes of it: under hybrid or on-demand a
                     // background dataset is fetched only while a page looks at it.
-                    "effectiveClass": cfg.effective_class(*d),
+                    "effectiveClass": cfg.effective_class(*d, clusters),
                     "intervalSec": cfg.interval(*d),
                     "staleAfterMs": cfg.stale_after_ms(*d),
                     "guest": d.guest_may_read(),

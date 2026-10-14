@@ -431,7 +431,7 @@ impl Core {
     /* ---------------------------------- messages ---------------------------------- */
 
     /// The clusters this caller may see that the core actually has.
-    fn fleet_visible(&self, caller: Option<&Caller>) -> Vec<String> {
+    pub(crate) fn fleet_visible(&self, caller: Option<&Caller>) -> Vec<String> {
         let vis = self.visible_ids(caller);
         let mut ids: Vec<String> = self.all_specs().into_iter().map(|s| s.id)
             .filter(|id| vis.as_ref().is_none_or(|v| v.contains(id))).collect();
@@ -447,6 +447,8 @@ impl Core {
         let include: Vec<Dataset> = dataset_list(msg.get("include")).unwrap_or_else(background)
             .into_iter().filter(|d| !guest || d.guest_may_read()).collect();
         let ids = self.fleet_visible(caller);
+        // The mode resolves against every cluster the core polls, not the caller's share.
+        let known = self.all_specs().len();
         let now = now_ms();
         let cfg = self.fleet.cfg.read().clone();
         let mut st = self.fleet.state.lock();
@@ -483,8 +485,8 @@ impl Core {
         json!({
             "ok": true, "epoch": self.fleet.epoch, "seq": st.seq, "now": now, "running": self.fleet_enabled(),
             "full": since.is_none(),
-            "catalogue": catalogue::catalogue_json(&cfg),
-            "policy": { "mode": cfg.mode.as_str(), "pausedAll": cfg.paused_all, "paused": cfg.paused.iter().cloned().collect::<Vec<_>>() },
+            "catalogue": catalogue::catalogue_json(&cfg, known),
+            "policy": { "mode": cfg.mode.as_str(), "resolvedMode": cfg.resolved_mode(known).as_str(), "pausedAll": cfg.paused_all, "paused": cfg.paused.iter().cloned().collect::<Vec<_>>() },
             "clusterIds": ids,
             "clusters": clusters,
         })
@@ -578,6 +580,7 @@ impl Core {
         };
         let datasets = dataset_list(msg.get("datasets")).unwrap_or_else(background);
         let user = caller.map(|c| c.name.clone()).unwrap_or_default();
+        let known = self.all_specs().len();
         let now = now_ms();
         let cfg = self.fleet.cfg.read().clone();
         let mut queued = 0;
@@ -602,7 +605,7 @@ impl Core {
                     st.refresh_rl.insert(rl, now);
                     // Watched under the running mode: in hybrid or on-demand a Refresh is
                     // what keeps a background dataset coming for the watch window.
-                    if cfg.effective_class(*d) == Class::OnDemand {
+                    if cfg.effective_class(*d, known) == Class::OnDemand {
                         st.watched.insert((id.clone(), *d), now);
                     }
                     st.request((id.clone(), *d), now);
@@ -619,14 +622,16 @@ impl Core {
     fn policy_reply(&self, saved: Option<Result<(), String>>) -> Value {
         let pol = self.fleet.policy.read().clone();
         let cfg = self.fleet.cfg.read().clone();
+        let known = self.all_specs().len();
         let effective: Map<String, Value> = ALL.iter()
-            .map(|d| (d.name().to_string(), json!(cfg.effective_class(*d))))
+            .map(|d| (d.name().to_string(), json!(cfg.effective_class(*d, known))))
             .collect();
         let mut out = json!({
             "ok": true,
             "policy": pol,
             "defaults": Policy::shipped(),
             "effective": effective,
+            "resolvedMode": cfg.resolved_mode(known).as_str(),
             // Whether a file holds it (the server's path stays on the server: a user may read this).
             "stored": self.fleet.policy_path.as_ref().is_some_and(|p| p.exists()),
             "warning": self.fleet.policy_warning,

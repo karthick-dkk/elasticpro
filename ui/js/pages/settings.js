@@ -562,7 +562,8 @@ function requestsCard() {
   });
   const labelled = (label, input, hint) => h('label', { style: { display: 'grid', gap: '3px', fontSize: '11.5px' } },
     h('span.muted', label), input, hint ? h('span.muted', { style: { fontSize: '10.5px' } }, hint) : null);
-  const modeHint = h('div#pol-mode-desc.muted', { style: { fontSize: '11.5px' } }, describeMode(p.mode));
+  const modeHint = h('div#pol-mode-desc.muted', { style: { fontSize: '11.5px' } }, describeMode(p.mode),
+    p.mode === 'auto' && pol.resolvedMode ? h('b', ` Running now: ${pol.resolvedMode}.`) : null);
   const stored = pol.warning
     ? h('span', { style: { color: 'var(--warning)' } }, pol.warning)
     : pol.stored ? 'Kept in policy.json in the core’s data directory'

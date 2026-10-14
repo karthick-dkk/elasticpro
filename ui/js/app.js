@@ -605,7 +605,7 @@ function renderSideFoot() {
   // Rebuilt only when something on it changed; see renderTopbar.
   const key = JSON.stringify([meta && meta.name, meta && meta.path, meta && meta.ephemeral, clusters().length, worstHealth(),
     coreInfo.version, total, perMin.toFixed(1), (coreInfo.tunnels || []).map((t) => [t.id, t.status, t.user, t.host, t.port]),
-    isSnapshotMode(), state.snapshot && state.snapshot.host, pol && pol.mode, pol && pol.pausedAll]);
+    isSnapshotMode(), state.snapshot && state.snapshot.host, pol && pol.mode, pol && pol.resolvedMode, pol && pol.pausedAll]);
   if (key === sideFootKey && el.firstChild) return;
   sideFootKey = key;
 
@@ -625,12 +625,13 @@ function renderSideFoot() {
     pol && pol.pausedAll
       ? h('span.pill.grey', { title: 'The request policy pauses every request: nothing new is sent to any cluster until an administrator resumes (Config → Requests, or the Request Centre)' }, 'requests paused')
       : null,
-    pol && (pol.mode === 'hybrid' || pol.mode === 'on-demand')
+    // What the poller is actually doing: "auto" resolves to background or hybrid by fleet size.
+    pol && ((pol.resolvedMode || pol.mode) === 'hybrid' || (pol.resolvedMode || pol.mode) === 'on-demand')
       ? h('span.row.muted', {
-          title: pol.mode === 'hybrid'
-            ? 'Only health is fetched in the background; the rest is fetched while a page shows it (Config → Requests)'
+          title: (pol.resolvedMode || pol.mode) === 'hybrid'
+            ? `Only health is fetched in the background; the rest is fetched while a page shows it${pol.mode === 'auto' ? ' — automatic, because the fleet is larger than 25 clusters' : ''} (Config → Requests)`
             : 'Nothing is fetched in the background; each page asks for what it shows when it opens (Config → Requests)',
-        }, `mode: ${pol.mode}`)
+        }, `mode: ${pol.mode === 'auto' ? `auto → ${pol.resolvedMode}` : pol.mode}`)
       : null,
     // one per jump host: "jumpwin ● up"
     ...((coreInfo.tunnels || []).map((t) => {

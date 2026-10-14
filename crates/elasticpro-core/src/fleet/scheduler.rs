@@ -4,7 +4,7 @@
 
 use super::catalogue::{self, Class, Dataset, ALL};
 use super::entry::{Entry, Outcome, Reach, ReachState, Status};
-use super::policy::{Mode, Policy};
+use super::policy::{Mode, Policy, AUTO_HYBRID_ABOVE};
 use std::collections::{HashMap, HashSet};
 use tokio::sync::oneshot;
 
@@ -77,10 +77,21 @@ impl Config {
         ds.stale_after_ms(self.interval(ds))
     }
 
-    /// How the mode treats a dataset: fetched on the schedule, or only while watched.
-    pub fn effective_class(&self, ds: Dataset) -> Class {
+    /// The mode actually running for a core that knows `clusters` clusters: `auto` is
+    /// background for a small fleet and hybrid above `AUTO_HYBRID_ABOVE`; any other mode
+    /// is itself. Never `Auto`.
+    pub fn resolved_mode(&self, clusters: usize) -> Mode {
         match self.mode {
-            Mode::Background => ds.class(),
+            Mode::Auto if clusters > AUTO_HYBRID_ABOVE => Mode::Hybrid,
+            Mode::Auto => Mode::Background,
+            m => m,
+        }
+    }
+
+    /// How the mode treats a dataset: fetched on the schedule, or only while watched.
+    pub fn effective_class(&self, ds: Dataset, clusters: usize) -> Class {
+        match self.resolved_mode(clusters) {
+            Mode::Auto | Mode::Background => ds.class(),
             Mode::Hybrid if ds == Dataset::Health => Class::Background,
             Mode::Hybrid | Mode::OnDemand => Class::OnDemand,
         }
@@ -233,6 +244,7 @@ impl State {
         }
         self.throttle.retain(|_, t| t.until > now);
         let throttled: HashSet<&str> = self.throttle.keys().map(String::as_str).collect();
+        let clusters = specs.len();
         for s in specs {
             if cfg.paused.contains(&s.id) {
                 continue;
@@ -263,7 +275,7 @@ impl State {
                     continue;
                 }
                 let entry = self.entries.get(&key);
-                let on_demand = cfg.effective_class(ds) == Class::OnDemand;
+                let on_demand = cfg.effective_class(ds, clusters) == Class::OnDemand;
                 let (prio, due) = if unreachable {
                     // Probing a cluster that is down is the poller going there on its own,
                     // which under on-demand it never does: health comes back when asked.
@@ -717,6 +729,36 @@ mod tests {
         st.entries.insert(("c00".into(), Dataset::Nodes), Entry::never(1, Some(10_000)));
         assert!(st.plan(&s, 10_000, &HashSet::new(), &cfg).iter().any(|c| c.dataset == Dataset::Nodes));
         assert!(!st.plan(&s, 10_000 + cfg.watch_ms + 1, &HashSet::new(), &cfg).iter().any(|c| c.dataset == Dataset::Nodes));
+    }
+
+    #[test]
+    fn auto_with_25_clusters_plans_the_background_datasets() {
+        let cfg = cfg();
+        assert_eq!(cfg.mode, Mode::Auto, "auto is the shipped mode");
+        assert_eq!(cfg.resolved_mode(AUTO_HYBRID_ABOVE), Mode::Background);
+        let mut st = active(1_000_000); // somebody is looking: not idle
+        let s = specs(AUTO_HYBRID_ABOVE);
+        st.plan(&s, 0, &HashSet::new(), &cfg); // assigns the boot spread
+        let p = st.plan(&s, 1_000_000, &HashSet::new(), &cfg);
+        let got: HashSet<Dataset> = p.iter().filter(|c| c.cluster == "c00").map(|c| c.dataset).collect();
+        let want: HashSet<Dataset> = ALL.iter().copied().filter(|d| d.class() == Class::Background).collect();
+        assert_eq!(got, want, "{p:?}");
+        assert!(want.len() > 1);
+    }
+
+    #[test]
+    fn auto_with_26_clusters_plans_only_health_on_its_own() {
+        let cfg = cfg();
+        assert_eq!(cfg.resolved_mode(AUTO_HYBRID_ABOVE + 1), Mode::Hybrid);
+        let mut st = active(1_000_000); // somebody is looking: not idle
+        let s = specs(AUTO_HYBRID_ABOVE + 1);
+        st.plan(&s, 0, &HashSet::new(), &cfg);
+        let p = st.plan(&s, 1_000_000, &HashSet::new(), &cfg);
+        assert!(!p.is_empty());
+        assert!(p.iter().all(|c| c.dataset == Dataset::Health), "{p:?}");
+        // An explicit mode is not resized by the fleet.
+        assert_eq!(with_mode(Mode::Background).resolved_mode(500), Mode::Background);
+        assert_eq!(with_mode(Mode::OnDemand).resolved_mode(1), Mode::OnDemand);
     }
 
     #[test]

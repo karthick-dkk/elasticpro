@@ -98,7 +98,7 @@ async fn the_policy_is_written_0600_and_read_back_by_the_next_core() {
     assert_eq!(g["policy"]["mode"], json!("hybrid"));
     assert_eq!(g["effective"]["health"], json!("background"));
     assert_eq!(g["effective"]["nodes"], json!("onDemand"));
-    assert_eq!(g["defaults"]["mode"], json!("background"));
+    assert_eq!(g["defaults"]["mode"], json!("auto"));
 }
 
 #[tokio::test]
@@ -111,8 +111,23 @@ async fn a_policy_that_does_not_parse_is_refused_and_nothing_changes() {
         assert_eq!(r["kind"], json!("bad_request"));
     }
     let g = c.handle(json!({ "type": "POLICY_GET" })).await;
-    assert_eq!(g["policy"]["mode"], json!("background"));
+    assert_eq!(g["policy"]["mode"], json!("auto"));
     assert_eq!(g["stored"], json!(false));
+}
+
+#[tokio::test]
+async fn auto_is_the_shipped_mode_and_resolves_to_background_for_a_small_fleet() {
+    let dir = TempDir::new("policy-auto");
+    let es = TestServer::start().await;
+    let c = portable(&dir);
+    prime(&c, &es.url(), "c1").await;
+    let g = c.handle(json!({ "type": "POLICY_GET" })).await;
+    assert_eq!(g["policy"]["mode"], json!("auto"), "{g}");
+    assert_eq!(g["resolvedMode"], json!("background"), "{g}");
+    assert_eq!(g["effective"]["nodes"], json!("background"));
+    let st = c.handle(json!({ "type": "FLEET_STATE" })).await;
+    assert_eq!(st["policy"]["mode"], json!("auto"), "{st}");
+    assert_eq!(st["policy"]["resolvedMode"], json!("background"), "{st}");
 }
 
 #[test]

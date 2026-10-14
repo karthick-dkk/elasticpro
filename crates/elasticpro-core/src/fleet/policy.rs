@@ -7,6 +7,8 @@
 //! that never touches the policy behaves exactly as it did.
 //!
 //! Modes:
+//!   auto       — the shipped default: background while the core knows at most
+//!                `AUTO_HYBRID_ABOVE` clusters, hybrid above that;
 //!   background — the fleet is kept fresh on the core's schedule (how it has always been);
 //!   hybrid     — health in the background, so the strip and Alerts stay honest; everything
 //!                else only while a page is looking at it;
@@ -24,10 +26,18 @@ use std::path::{Path, PathBuf};
 
 pub const FILE_NAME: &str = "policy.json";
 
+/// `auto` runs as `background` up to this many clusters and as `hybrid` above it. Measured
+/// with 120 fixture clusters, background mode sent ~400 requests a minute to the clusters
+/// (production: ~350 a minute for 32) — every dataset of every cluster kept fresh whether
+/// or not anybody looks. A small fleet can afford that; a large one keeps health in the
+/// background (the strip and Alerts stay honest) and fetches the rest while watched.
+pub const AUTO_HYBRID_ABOVE: usize = 25;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum Mode {
     #[default]
+    Auto,
     Background,
     Hybrid,
     OnDemand,
@@ -36,6 +46,7 @@ pub enum Mode {
 impl Mode {
     pub fn as_str(self) -> &'static str {
         match self {
+            Mode::Auto => "auto",
             Mode::Background => "background",
             Mode::Hybrid => "hybrid",
             Mode::OnDemand => "on-demand",
@@ -94,14 +105,15 @@ impl Default for Policy {
 }
 
 impl Policy {
-    /// What an install without a policy file runs: today's poller.
+    /// What an install without a policy file runs: today's poller's intervals, in `auto`
+    /// mode so a large fleet is not polled for everything all the time.
     pub fn shipped() -> Policy {
         // Never faster than three minutes from the environment: a hundred clusters polled
         // every thirty seconds is the load the cache exists to remove. The file may go to
         // sixty seconds — an operator who wrote that down meant it.
         let health = env_num("ELASTICPRO_POLL_HEALTH_SECS").unwrap_or(180).clamp(180, 300);
         Policy {
-            mode: Mode::Background,
+            mode: Mode::Auto,
             intervals_sec: ALL.iter().map(|d| (d.name().to_string(), d.default_interval_secs(health))).collect(),
             watch_minutes: 15,
             concurrency: Concurrency::default(),
@@ -190,9 +202,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_shipped_policy_is_todays_poller() {
+    fn the_shipped_policy_is_todays_poller_in_auto_mode() {
         let p = Policy::shipped();
-        assert_eq!(p.mode, Mode::Background);
+        assert_eq!(p.mode, Mode::Auto);
         assert_eq!(p.interval_secs(Dataset::Health), 180);
         assert_eq!(p.interval_secs(Dataset::Shards), 300);
         assert_eq!(p.watch_minutes, 15);
@@ -218,6 +230,12 @@ mod tests {
     #[test]
     fn mode_words_are_kebab_case_on_the_wire() {
         assert_eq!(serde_json::to_string(&Mode::OnDemand).unwrap(), "\"on-demand\"");
+        assert_eq!(serde_json::to_string(&Mode::Auto).unwrap(), "\"auto\"");
+        let p: Policy = serde_json::from_str(r#"{"mode":"auto"}"#).unwrap();
+        assert_eq!(p.mode, Mode::Auto);
+        // A file that names a mode keeps it: auto is only the default.
+        let p: Policy = serde_json::from_str(r#"{"mode":"background"}"#).unwrap();
+        assert_eq!(p.mode, Mode::Background);
         assert!(serde_json::from_str::<Policy>(r#"{"mode":"sometimes"}"#).is_err());
     }
 

@@ -72,17 +72,28 @@ function blockSig(c) {
   // The page and the search are not here: moving through pages or typing redraws only the
   // table under them (see snapshotsCard), and a rebuild reads them from `ui` anyway.
   return [clusterRev(c.id), objId(state.data.get(c.id)), objId(client(c.id)), ui.repo[c.id] || '', ui.days, ui.view,
-    ui.perPage, writesAllowed(), fleetMode(), minute()].join('|');
+    ui.perPage, writesAllowed(), fleetMode(), folded(), minute()].join('|');
 }
 
+/**
+ * On "All clusters" with more than this many clusters each cluster's section starts
+ * folded: open, every one is tiles, a table and a strip — 11,458 DOM nodes at 120
+ * clusters. Folded, it is a header line until somebody opens it, and that choice is
+ * remembered per cluster like every other fold.
+ */
+const FOLD_ABOVE = 20;
+let fold = false;              // decided once per draw(), read by every block it builds
+const folded = () => fold;
+
 function placeholder(c) {
-  return h('section.lazy-block', { style: { marginBottom: '22px', minHeight: '360px' } },
+  return h('section.lazy-block', { style: { marginBottom: folded() ? '10px' : '22px', minHeight: folded() ? '40px' : '360px' } },
     h('h2', { style: { fontSize: '14px', margin: '0 0 8px' } }, c.name),
     h('div.muted', 'Loading…'));
 }
 
 function draw() {
   const list = activeClusters();
+  fold = state.selected === 'all' && list.length > FOLD_ABOVE;
   built.begin();
   const blocks = list.map((c) => built.get(c.id, blockSig(c), () => clusterBlock(c), () => placeholder(c)));
   mount(host, viewTabs(), ...blocks, list.length ? null : empty('No cluster selected'));
@@ -133,6 +144,18 @@ function listingFreshness(c, d, repo) {
 }
 
 function clusterBlock(c) {
+  if (!folded()) return clusterSection(c);
+  const d = state.data.get(c.id) || {};
+  const repos = d.repos || [];
+  // Unknown is not zero: a listing not read yet says so rather than "0 snapshots".
+  const listed = d.snapshots ? Object.values(d.snapshots).reduce((n, l) => n + ((l && l.length) || 0), 0) : null;
+  const sub = [plural(repos.length, 'repository', 'repositories'),
+    listed === null ? 'snapshots not read yet' : plural(listed, 'snapshot')].join(' · ');
+  return h('div', { style: { marginBottom: '10px' } },
+    collapsible(c.name, sub, () => clusterSection(c), { key: `snap-cluster-${c.id}`, open: false }));
+}
+
+function clusterSection(c) {
   const d = state.data.get(c.id) || {};
   const repos = d.repos || [];
   const selected = ui.repo[c.id] || (repos[0] && repos[0].name);
