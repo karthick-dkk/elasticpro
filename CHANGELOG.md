@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.3.14
+
+**Fixes from QA on 0.3.13.**
+
+A Zabbix cluster whose credential cannot be read, such as a password in a Secret macro, is no
+longer polled. Before, the core asked it for data every interval and got a 401 each time, which is
+a failed sign-in against that cluster's account. It stays on Config → Zabbix with the reason and
+how to fix it, and the core talks to it once the credential is readable.
+
+The Alerts page and the Clusters summary no longer say every cluster is healthy before any of
+them has been read. They say nothing has been read yet, or name how many clusters were read. A
+cluster with no data yet is shown as unknown, not as "Cluster unreachable".
+
+The Accounts page says plainly when a cluster's answer is not a list of users, instead of showing
+a JavaScript error.
+
 ## 0.3.13
 
 **Index template management; saved queries in the REST console.**
