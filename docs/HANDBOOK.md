@@ -256,7 +256,7 @@ install that never touches it runs as before; a file that does not parse is logg
 written whole and 0600 by `POLICY_SET`, applied to the scheduler on its next tick:
 
 ```json
-{ "mode": "background",
+{ "mode": "auto",
   "intervalsSec": { "health": 180, "nodes": 300, "ilm_errors": 900, "policies": 3600, "ilm_assign": 3600,
                     "snapshots": 1800, "snapshots_full": 1800, "indices": 600, "shards": 300 },
   "watchMinutes": 15,
@@ -266,7 +266,9 @@ written whole and 0600 by `POLICY_SET`, applied to the scheduler on its next tic
   "paused": { "all": false, "clusters": [] } }
 ```
 
-Modes: `background` keeps the fleet fresh on the core's schedule; `hybrid` polls health only and
+Modes: `auto` (the shipped default) is `background` while the core knows 25 clusters or fewer
+and `hybrid` above — measured at 120 clusters, background sent ~397 requests/min and auto ~80;
+`FLEET_STATE.policy` and `POLICY_*` report `mode` and `resolvedMode`. `background` keeps the fleet fresh on the core's schedule; `hybrid` polls health only and
 fetches everything else while a page looks at it (the watch window); `on-demand` fetches nothing
 on its own — a page's `CLUSTER_DATASET` or `REFRESH` is what sends a request, for that cluster
 only, and with `perCluster: 1` one request at a time. Pause: nothing new starts (a person's ask
@@ -291,6 +293,40 @@ both gates (`Writes::decide` — the config must permit writes or the session be
 the operator asked by hand), audited by the hosted bridge like every write, carrying the page's
 opaque id. `GET _tasks` needs the `monitor` privilege and `_cancel` the `manage` one; a credential
 without it gets the cluster's 403 and the page says so instead of failing on the click.
+
+## Alerts — tuning and silences
+
+`alerts()` (`ui/js/core/state.js`) raises what every rule sees; `tuneAlerts()`
+(`ui/js/core/alert-tuning.js`) decides what is shown and counted, only by removing a row that
+repeats another or by saying more about one:
+
+| Situation | Before | Now |
+|---|---|---|
+| A node at the flood stage / high watermark | node-level balance row + cluster-average disk row | one row, the average folded in |
+| Health yellow with unassigned shards | health row + balance row "N shards unassigned" | the health row |
+| A failing or stale repository | repo row + one row per SLM policy writing to it | the repo row |
+| SLM stopped | slm-mode row + "no recent success" per policy | the slm-mode row |
+| Many field-volume spikes on a cluster | one row per field/term | one row with the count |
+| A reading older than its dataset allows | shown as current | same level, detail says how old |
+
+Rules: disk has hysteresis (raised at the threshold, cleared 2 points below); a snapshot
+repository is critical when two or more runs in a row failed with at least one `FAILED`
+(one bad night or `PARTIAL`-only runs are a warning); a master re-election is critical
+only while the cluster is not green.
+
+**Open** means neither acknowledged nor silenced, and every count uses that one definition
+(`openAlertsNow()` / `openAlertCounts()`): the Clusters summary, the nav badge, the top bar,
+the per-cluster column, the extension badge.
+
+**Silences** silence a whole cluster (maintenance) or one alert for 1 h, 8 h, 24 h, 7 days, or
+until removed, with a reason. They are the team's, kept on the server in
+`<data dir>/silences.json` (0600) and audited; silenced alerts stay listed under *Silenced*.
+
+| Message | Role | Answer |
+|---|---|---|
+| `SILENCE_LIST` | user | `{ok, silences: [{id, scope: cluster\|alert, target, reason, by, at, until\|null}]}` — live ones, only for clusters the caller may see |
+| `SILENCE_SET {scope, target, minutes?, reason?}` | operator | `{ok, silence, silences}`; no `minutes` = until removed; at most 7 days timed; one silence per target (a new one replaces it); `forbidden` for a cluster the caller cannot see (an alert key's cluster is the longest known cluster id it starts with) |
+| `SILENCE_CLEAR {id}` | operator | `{ok, silences}`; `forbidden` / `not_found` |
 
 ## Notification history — the message contract
 
