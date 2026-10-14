@@ -152,6 +152,22 @@ async fn tls_insecure_accepts_anything_including_a_rotation() {
 }
 
 #[tokio::test]
+async fn by_default_any_certificate_is_accepted_without_a_decision() {
+    // No `tls:` on the cluster — the way the UI's defaults and every Zabbix-synced cluster
+    // arrive. A self-signed certificate, then one for another name, then a rotation.
+    let dir = TempDir::new("default-accept");
+    let srv = TlsServer::start(&self_signed("localhost")).await;
+    let c = core(&dir);
+    c.handle(json!({ "type": "PRIME", "clusters": [
+        { "id": "es", "url": srv.url(), "authHeader": "Basic ZWxhc3RpYzpzZWNyZXQ=" }
+    ]})).await;
+    assert_eq!(get(&c).await["ok"], json!(true), "a self-signed certificate connects without asking");
+    srv.rotate_to(&self_signed("some-other-name.example"));
+    assert_eq!(get(&c).await["ok"], json!(true), "a certificate for another name and a rotation are accepted too");
+    assert_eq!(srv.hits().len(), 2, "both requests reached the cluster");
+}
+
+#[tokio::test]
 async fn a_pin_is_scoped_to_one_address() {
     let dir = TempDir::new("scope");
     let cert = self_signed("localhost");

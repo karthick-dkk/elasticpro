@@ -272,9 +272,9 @@ impl Zabbix {
 
     pub fn new(url: Option<String>, token: String, template: String) -> Zabbix {
         // Zabbix frontends on self-signed certificates are the common case on a private
-        // network; the token is sent to the address an admin configured, nowhere else.
-        let insecure = std::env::var("ELASTICPRO_ZABBIX_API_INSECURE").is_ok_and(|v| v == "1");
-        Zabbix::build(url, token, template, !insecure, None)
+        // network, so any certificate is accepted unless ELASTICPRO_ZABBIX_API_VERIFY=1.
+        let verify = std::env::var("ELASTICPRO_ZABBIX_API_VERIFY").is_ok_and(|v| v == "1");
+        Zabbix::build(url, token, template, verify, None)
     }
 
     /// The client the core uses: `verify_tls` off accepts any certificate (a lab); on, the

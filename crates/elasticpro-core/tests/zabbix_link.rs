@@ -519,7 +519,9 @@ async fn the_test_reports_an_untrusted_certificate_for_the_trust_flow() {
     let tls = support::tls::TlsServer::start(&cert).await;
     let c = core(&dir, ServerZbx::default());
     let s = admin(&c).await;
-    let r = send(&c, &s, json!({ "type": "ZABBIX_LINK_SET", "zabbixUrl": tls.url(), "apiToken": TOKEN })).await;
+    // Verification is off by default (any certificate accepted); the trust flow is what
+    // somebody gets after turning it on.
+    let r = send(&c, &s, json!({ "type": "ZABBIX_LINK_SET", "zabbixUrl": tls.url(), "apiToken": TOKEN, "verifyTls": true })).await;
     assert_eq!(r["ok"], json!(true), "{r}");
     let t = send(&c, &s, json!({ "type": "ZABBIX_LINK_TEST" })).await;
     assert_eq!(t["kind"], json!("tls_untrusted"), "{t}");

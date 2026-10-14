@@ -21,7 +21,10 @@ not file public issues for vulnerabilities.
   Optionally the credential is stored in the OS vault (Windows Credential Manager).
 - Verifies TLS against the OS trust store; a certificate the OS does not trust is shown to the
   operator once and pinned (SHA-256) on explicit consent. A changed certificate is refused.
-- Opens SSH connections with the operator's key file; host keys are confirmed once and pinned.
+- Opens SSH connections with the operator's key file. By default any SSH host key and any TLS
+  certificate is accepted and recorded, so an interception would not be noticed. Set
+  `host_key: verify` on a jump host and `tls: auto` or `tls: system` on a cluster (or under
+  `defaults:`) to have them checked, and `verifyTls` for the Zabbix API.
   Passphrases are asked for and kept in memory only.
 - Listens only on 127.0.0.1 (the in-process SOCKS5 proxy for tunnelled clusters).
 - Writes: `pins.json` (fingerprints), `config_cluster.json`, the WebView profile. The write

@@ -1,13 +1,16 @@
 //! Certificate trust the operator controls.
 //!
 //! Three modes per cluster:
-//! * `system`   — the OS trust store (plus the Mozilla bundle). Strict.
-//! * `auto`     — the default: `system`, and when that fails, trust-on-first-use with an
-//!   explicit "Trust this certificate" decision in the UI. The decision is the
-//!   certificate's SHA-256, pinned in pins.json; a later change is refused and
-//!   reported rather than quietly accepted — a silent re-trust is indistinguishable
-//!   from an interception.
-//! * `insecure` — accept anything. For a lab, never for production.
+//! * `insecure` — the default: accept any certificate, self-signed, expired or for another
+//!   name, without asking. Most clusters this watches sit on a private network behind
+//!   certificates nobody can get into an OS trust store, and the operator asked for them to
+//!   just work. The certificate is still recorded, so the UI can show what was presented.
+//!   The cost is that nothing tells an interception from the real cluster.
+//! * `auto`     — opt-in: the OS trust store (plus the Mozilla bundle), and when that fails,
+//!   trust-on-first-use with an explicit "Trust this certificate" decision in the UI. The
+//!   decision is the certificate's SHA-256, pinned in pins.json; a later change is refused
+//!   and reported rather than quietly accepted.
+//! * `system`   — opt-in: the OS trust store only. Strict.
 //!
 //! The same store keeps SSH host-key fingerprints of the jump hosts.
 
@@ -28,18 +31,19 @@ pub const MARK_PIN_MISMATCH: &str = "ELASTICPRO_PIN_MISMATCH";
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum TlsMode {
-    #[default]
     Auto,
     System,
+    #[default]
     Insecure,
 }
 
 impl TlsMode {
     pub fn parse(s: Option<&str>) -> TlsMode {
         match s.map(|s| s.trim().to_ascii_lowercase()).as_deref() {
-            Some("system") | Some("strict") => TlsMode::System,
-            Some("insecure") | Some("none") | Some("false") => TlsMode::Insecure,
-            _ => TlsMode::Auto,
+            Some("system") | Some("strict") | Some("verify") => TlsMode::System,
+            Some("auto") | Some("pin") | Some("tofu") | Some("ask") => TlsMode::Auto,
+            // Unset, "insecure", "accept", anything unrecognised: accept the certificate.
+            _ => TlsMode::Insecure,
         }
     }
 }

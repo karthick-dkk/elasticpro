@@ -1088,7 +1088,7 @@ function zabbixLinkSummaryCard(s) {
         row('Zabbix URL', s.zabbixUrl || '–', ro('zabbixUrl')),
         row('API URL', s.apiUrlIsDefault ? `${defaultApiUrl(s.zabbixUrl) || '–'} (default)` : (s.apiUrl || '–'), ro('apiUrl')),
         row('API token', tokenText, ro('apiToken')),
-        row('Verify TLS', s.verifyTls !== false ? 'yes' : 'no', ro('verifyTls')),
+        row('Verify TLS', s.verifyTls === true ? 'yes' : 'no — any certificate accepted', ro('verifyTls')),
         row('Allowed sources', (s.allowedSources || []).length ? (s.allowedSources || []).join(', ') : 'any', ro('allowedSources')),
         row('Sync interval', `${s.syncSecs || '–'}s`, ro('syncSecs')),
         s.paired ? row('Paired with', `${s.zabbixUrl}${s.pairedAt ? ` · ${dt(s.pairedAt * 1000)}` : ''}${s.pairedBy ? ` by ${s.pairedBy}` : ''}`) : null,
@@ -1128,8 +1128,8 @@ function zabbixLinkFormCard(s, canCancel) {
   } else {
     tokenField = text('zl-token', '', { type: 'password', mono: true, placeholder: tok.set ? 'new token — replaces the stored one' : 'paste a Zabbix API token, or pair' });
   }
-  const tls = checkbox('zl-tls', 'Verify the Zabbix TLS certificate', s.verifyTls !== false,
-    ro('verifyTls') ? managedNote : 'Off only for a lab. On: the OS trust store, or a certificate you trust from Test connection.');
+  const tls = checkbox('zl-tls', 'Verify the Zabbix TLS certificate', s.verifyTls === true,
+    ro('verifyTls') ? managedNote : 'Off (the default): any certificate is accepted. On: the OS trust store, or a certificate you trust from Test connection.');
   if (ro('verifyTls') || linkBusy) tls.querySelector('input').disabled = true;
   const http = checkbox('zl-http', 'Allow plain http (lab only)', !!s.allowHttp, 'The API token would cross the network unencrypted.');
   const src = h('textarea#zl-src.mono', { rows: 2, spellcheck: false, disabled: ro('allowedSources') || linkBusy,
