@@ -1746,8 +1746,11 @@ export function alerts() {
   for (const c of clusters()) {
     const d = state.data.get(c.id);
     const cl = state.clients.get(c.id);
-    // The fleet cache has not checked this one yet: nothing is known, so nothing is raised.
-    if (d && d.healthUnknown) continue;
+    // Not read yet — no data at all, or the fleet cache has not checked it: nothing is known,
+    // so nothing is raised. (No data used to read as unreachable, and every cluster paged as
+    // down for the moments after sign-in.) A cluster that was tried and failed has data with
+    // reachable:false, and is raised below.
+    if (!d || d.healthUnknown) continue;
     if (!d || !d.reachable) {
       add({ key: `${c.id}:unreachable`, level: 'critical', cluster: c, title: `${c.name} unreachable`,
         detail: (cl && cl.lastError && cl.lastError.message) || 'No response', kind: cl && cl.state });
@@ -2088,7 +2091,7 @@ export function worstHealth() {
   const rank = { grey: 0, green: 1, yellow: 2, red: 3 };
   for (const c of clusters()) {
     const d = state.data.get(c.id);
-    const s = d && d.healthUnknown ? 'grey' : !d || !d.reachable ? 'red' : (d.health && d.health.status) || 'grey';
+    const s = !d || d.healthUnknown ? 'grey' : !d.reachable ? 'red' : (d.health && d.health.status) || 'grey';
     if (rank[s] > rank[worst]) worst = s;
   }
   return worst;

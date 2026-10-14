@@ -9,6 +9,7 @@ import { readAllState, startReadAll } from '../lib/read-all.js';
 import { card, collapsible, pill, statTile, table, empty, connectionBanner } from './common.js';
 import { hbarList, legend, gauge, STATUS } from '../lib/charts.js';
 import { navigateTo } from '../core/intent.js';
+import { alertsEmptyState } from '../core/fleet-summary.js';
 import { silenceFor, silences, silence, unsilence, loadSilences, SILENCE_FOR } from '../core/silences.js';
 import { modal, field, select as selectField, text as textField, val } from '../ui/modal.js';
 import { rowMenu, ICON, popover, toast, closePopover } from '../ui/menu.js';
@@ -60,6 +61,12 @@ let currentLineEl = null;
  * Over every configured cluster rather than the selected one: alerts() is computed for
  * the whole fleet, and so is this page. Only with the fleet cache; never reads by itself.
  */
+/** How many clusters have been read enough for their alerts to mean something. */
+function clustersRead(list) {
+  if (fleetMode()) return coverage(list.map((c) => c.id), DATASETS).read;
+  return list.filter((c) => { const d = state.data.get(c.id); return d && !d.healthUnknown && d.reachable; }).length;
+}
+
 function coverageLines() {
   if (!fleetMode()) return [];
   const ids = clusters().map((c) => c.id);
@@ -148,7 +155,7 @@ function draw() {
   mount(host,
     ...coverageLines(),
     h('div.grid.c4', { style: { marginBottom: '10px' } },
-      statTile('Open', num(open.length), open.length ? 'not yet acknowledged' : 'all acknowledged'),
+      statTile('Open', num(open.length), open.length ? 'not yet acknowledged' : (acked.length || silencedRows.length ? 'all acknowledged or silenced' : 'nothing open')),
       statTile('Critical', num(crit.filter((a) => !isAcked(a.key)).length), `${num(crit.length)} in total`),
       statTile('Acknowledged / silenced', `${num(acked.length)} / ${num(silencedRows.length)}`, silences().length ? `${silences().length} silence${silences().length === 1 ? '' : 's'} in force` : 'no silences'),
       statTile('Clusters affected', num(byCluster.size), `of ${num(list.length)} configured`)),
@@ -207,12 +214,15 @@ function draw() {
 
     h('div', { style: { marginTop: '10px' } },
       all.length ? null
-        : card('Alerts', 'nothing to report',
-            h('div', { style: { padding: '26px 0', textAlign: 'center' } },
-              h('div', { style: { fontSize: '26px', marginBottom: '6px' } }, '✓'),
-              h('div', { style: { fontWeight: 640 } }, 'Every cluster is healthy'),
-              h('div.muted', { style: { fontSize: '12.5px', marginTop: '3px' } },
-                `No health, disk, ILM or snapshot problem across ${num(list.length)} cluster${list.length === 1 ? '' : 's'}.`)))),
+        : (() => {
+            // Healthy only for the clusters that were read (fleet-summary.js alertsEmptyState).
+            const e = alertsEmptyState({ total: list.length, read: clustersRead(list) });
+            return card('Alerts', e.healthy ? 'nothing to report' : 'nothing raised — see why',
+              h('div', { style: { padding: '26px 0', textAlign: 'center' } },
+                h('div', { style: { fontSize: '26px', marginBottom: '6px' } }, e.healthy ? '✓' : '…'),
+                h('div', { style: { fontWeight: 640 } }, e.title),
+                h('div.muted', { style: { fontSize: '12.5px', marginTop: '3px' } }, e.detail)));
+          })()),
 
     // The clusters that cannot be reached at all get their decision buttons here too.
     h('div', { style: { marginTop: '14px' } },

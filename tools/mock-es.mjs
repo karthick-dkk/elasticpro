@@ -417,6 +417,13 @@ function tasksListing() {
   return { nodes: { 'node-1': { name: 'node-1', transport_address: '127.0.0.1:9300', tasks } } };
 }
 routes.unshift([(u) => u.startsWith('/_tasks?') || u === '/_tasks', () => tasksListing()]);
+// The native realm, as Elasticsearch answers it: a map of username → user. (Without this the
+// fixture's generic acknowledgement stood in for it, which is not a shape a cluster sends.)
+routes.unshift([(u) => u.split('?')[0] === '/_security/user', () => ({
+  elastic: { username: 'elastic', roles: ['superuser'], full_name: null, email: null, metadata: { _reserved: true }, enabled: true },
+  kibana_system: { username: 'kibana_system', roles: ['kibana_system'], metadata: { _reserved: true }, enabled: true },
+  'log-reader': { username: 'log-reader', roles: ['viewer'], full_name: 'Log reader', email: 'logs@example.test', metadata: {}, enabled: true },
+})]);
 
 // Templates. Index templates are the one kind whose writes this fixture honours: a saved
 // template that does not show up when the list is read again looks exactly like a page

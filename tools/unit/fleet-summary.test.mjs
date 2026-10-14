@@ -43,3 +43,18 @@ test('a quiet fleet is not bad; names are listed in full when few', () => {
   assert.equal(nameList(['a', 'b']), 'a, b');
   assert.equal(nameList(['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'], 6), 'a, b, c, d, e, f, +2 more');
 });
+
+// Regression: ISSUE-002 — with no data read yet the Alerts page said "Every cluster is healthy"
+// right under "Alerts current for 0 of 2 clusters". An empty alert list means healthy only for
+// the clusters that were read. Found by /qa on 2026-10-14.
+// Report: .gstack/qa-reports/run-20261014T120616Z/qa-report-192-168-64-13-2026-10-14.md
+test('no alerts reads as healthy only for the clusters that were read', async () => {
+  const { alertsEmptyState } = await import(pathToFileURL(path.join(ROOT, 'ui/js/core/fleet-summary.js')).href);
+  const all = alertsEmptyState({ total: 3, read: 3 });
+  assert.equal(all.healthy, true); assert.match(all.title, /Every cluster is healthy/);
+  const none = alertsEmptyState({ total: 2, read: 0 });
+  assert.equal(none.healthy, false); assert.match(none.title, /Nothing read yet/); assert.doesNotMatch(none.title + none.detail, /healthy/);
+  const some = alertsEmptyState({ total: 5, read: 2 });
+  assert.equal(some.healthy, false); assert.match(some.title, /No problem on the 2 clusters read/); assert.match(some.detail, /3 not read/);
+  assert.match(alertsEmptyState({ total: 1, read: 1 }).detail, /1 cluster\b/);
+});

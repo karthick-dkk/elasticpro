@@ -2143,10 +2143,16 @@ impl Core {
             if !usable || !notes.is_empty() {
                 problems += 1;
             }
-            specs.insert(id.clone(), ClusterSpec {
-                id: id.clone(), name: Some(c.name.clone()), url: c.url.clone(), auth_header: auth, via: via.clone(), tls: None,
-                zabbix_groups: c.readers.clone(), log_index_pattern: None,
-            });
+            // Only a cluster the core can sign in to is polled and reachable. One whose
+            // credential cannot be read stays in the listing below, with why — polling it
+            // meant a 401 on every interval (69 an hour on one cluster), each one a failed
+            // sign-in against the cluster's own account.
+            if usable {
+                specs.insert(id.clone(), ClusterSpec {
+                    id: id.clone(), name: Some(c.name.clone()), url: c.url.clone(), auth_header: auth, via: via.clone(), tls: None,
+                    zabbix_groups: c.readers.clone(), log_index_pattern: None,
+                });
+            }
             view.push(json!({
                 "_id": id, "name": c.name, "url": c.url, "via": via, "source": "zabbix",
                 "zabbixHost": c.host, "zabbixHostId": c.hostid, "client": c.client,
@@ -2155,7 +2161,8 @@ impl Core {
             }));
         }
         view.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
-        let n = specs.len();
+        let n = view.len();
+        let in_use = specs.len();
         {
             let mut z = self.zbx_sync.write();
             z.specs = specs;
@@ -2170,7 +2177,7 @@ impl Core {
         self.transport.forget_clients();
         tracing::info!(target: "audit", clusters = n, skipped = skipped.len(), problems,
                        credentials = if opts.use_elasticpro_credentials { "elasticpro" } else { "zabbix" }, "zabbix sync");
-        json!({ "ok": true, "clusters": n, "skipped": skipped, "problems": problems, "provisioned": provisioned, "templates": templates,
+        json!({ "ok": true, "clusters": n, "inUse": in_use, "skipped": skipped, "problems": problems, "provisioned": provisioned, "templates": templates,
                 "credentials": if opts.use_elasticpro_credentials { "elasticpro" } else { "zabbix" } })
     }
 

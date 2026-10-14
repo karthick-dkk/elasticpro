@@ -18,6 +18,7 @@ import { modal, field, text, select, val, confirmDialog } from './modal.js';
 import { toast } from './menu.js';
 import { TASKS, taskById, missingFields, preview, runTask, ROLE_PRESETS, presetValues } from '../core/tasks.js';
 import { ensureWrites } from '../core/writes.js';
+import { usersFromSecurityResponse } from '../core/security-users.js';
 
 /**
  * Read the native-realm accounts from one cluster.
@@ -30,16 +31,7 @@ export async function fetchClusterUsers(clusterId) {
   const cl = client(clusterId);
   if (!cl) return { users: null, error: 'not connected', fix: null };
   try {
-    const res = await cl.securityUsers();
-    const users = Object.values(res || {}).map((u) => ({
-      name: u.username,
-      roles: u.roles || [],
-      enabled: u.enabled !== false,
-      fullName: u.full_name || '',
-      email: u.email || '',
-      reserved: !!(u.metadata && u.metadata._reserved),
-    })).sort((a, b) => a.name.localeCompare(b.name));
-    return { users, error: null, fix: null };
+    return usersFromSecurityResponse(await cl.securityUsers());
   } catch (e) {
     // Elasticsearch puts the reason in the body; the thrown message is only the status
     // line. Reading the status line alone turned "security is switched off on this
