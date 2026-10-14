@@ -328,6 +328,31 @@ until removed, with a reason. They are the team's, kept on the server in
 | `SILENCE_SET {scope, target, minutes?, reason?}` | operator | `{ok, silence, silences}`; no `minutes` = until removed; at most 7 days timed; one silence per target (a new one replaces it); `forbidden` for a cluster the caller cannot see (an alert key's cluster is the longest known cluster id it starts with) |
 | `SILENCE_CLEAR {id}` | operator | `{ok, silences}`; `forbidden` / `not_found` |
 
+## REST console — tabs and saved queries
+
+Up to ten tabs, each with its own request and its last response; the tabs are remembered in
+this browser (IndexedDB) with secrets redacted (`ui/js/lib/redact.js`: passwords, tokens,
+keys, cloud credentials and pasted Authorization values, in the body — parsed as JSON, line by
+line for `_bulk`/`_msearch` — and in the path). Responses are never stored.
+
+**Saved queries** are kept on the server (`<data dir>/saved-queries.json`, 0600), private or
+shared with everyone signed in; the page redacts secrets before saving.
+
+| Message | Role | Answer |
+|---|---|---|
+| `QUERY_LIST` | user | `{ok, queries: [{id, owner, name, method, path, body, shared, note, at, updated}], user}` — the caller's own and every shared one, newest first |
+| `QUERY_SAVE {id?, name, method, path, body?, shared?, note?}` | user | `{ok, query, queries}`; without `id` creates, with `id` updates — only the owner or an unscoped administrator (`forbidden` otherwise); 500 per person, 256 KB body |
+| `QUERY_DELETE {id}` | user | `{ok, query, queries}`; same ownership rule |
+
+## Index templates
+
+The Indices page's **Templates** view lists, edits, simulates and compares index, component and
+legacy templates (`ui/js/core/templates.js`, `ui/js/ui/templates-view.js`). Writes (PUT/DELETE)
+go through the write guard and a confirmation; Simulate
+(`POST _index_template/_simulate_index/<name>`, `_index_template/_simulate`) is a read and is
+on the core's read-only allow-list. Compare reads clusters one at a time; Apply uses the
+multi-cluster task runner.
+
 ## Notification history — the message contract
 
 The bell keeps every notice in the browser (`localStorage`, last 50), and — when `PING` says
