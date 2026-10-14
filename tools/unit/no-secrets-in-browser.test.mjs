@@ -42,3 +42,13 @@ test('console history keeps no password, token or key', async () => {
   assert.equal(redactSecrets(null), null);
   assert.equal(redactSecrets('{"query":{"match_all":{}}}'), '{"query":{"match_all":{}}}');
 });
+
+test('a path keeps no password, token or URL credentials either', async () => {
+  const { redactPath, REDACTED } = await import(pathToFileURL(path.join(ROOT, 'ui/js/lib/redact.js')).href);
+  const out = redactPath('/_security/_authenticate?pretty&password=hunter2&api_key=abc&size=10');
+  assert.ok(!out.includes('hunter2') && !out.includes('abc'), out);
+  assert.ok(out.includes('pretty') && out.includes('size=10'), 'the rest is kept');
+  assert.equal(redactPath('https://ops:s3cret@es.local:9200/_cat/health'), `https://${REDACTED}@es.local:9200/_cat/health`);
+  assert.equal(redactPath('/_cat/indices?v&h=index,docs.count'), '/_cat/indices?v&h=index,docs.count');
+  assert.equal(redactPath('/x?access%5Ftoken=t1'), `/x?access%5Ftoken=${REDACTED}`);
+});

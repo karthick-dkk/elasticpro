@@ -6,7 +6,7 @@
  * a body's password, token or key field is saved as "[redacted]", so no secret reaches
  * browser storage. A response is never stored — it belongs to this page visit.
  */
-import { redactSecrets } from '../lib/redact.js';
+import { redactSecrets, redactPath } from '../lib/redact.js';
 
 export const MAX_TABS = 10;
 const METHODS = new Set(['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE']);
@@ -66,7 +66,7 @@ export function activeTab(st) {
 export function toStored(st) {
   return {
     v: 1, active: st.active,
-    tabs: st.tabs.slice(0, MAX_TABS).map((t) => ({ id: t.id, name: t.name || '', method: t.method, path: t.path, body: redactSecrets(t.body || '') })),
+    tabs: st.tabs.slice(0, MAX_TABS).map((t) => ({ id: t.id, name: t.name || '', method: t.method, path: redactPath(t.path || ''), body: redactSecrets(t.body || '') })),
   };
 }
 

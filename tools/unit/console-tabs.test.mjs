@@ -39,6 +39,8 @@ test('stored without secrets or responses, and read back', () => {
   assert.ok(!text.includes('hunter2-really'), 'the password is not stored');
   assert.ok(!text.includes('big response'), 'a response is not stored');
   assert.ok(text.includes('superuser'));
+  const withPath = T.toStored(T.initialState({ method: 'GET', path: '/_security/_authenticate?token=abc123' }));
+  assert.ok(!JSON.stringify(withPath).includes('abc123'), 'a token in the path is not stored');
   const back = T.fromStored(JSON.parse(text));
   assert.equal(back.tabs[0].name, 'make user'); assert.equal(back.tabs[0].method, 'PUT'); assert.equal(back.active, st.active);
   assert.equal(T.fromStored(null), null); assert.equal(T.fromStored({ v: 1, tabs: [] }), null); assert.equal(T.fromStored({ v: 2, tabs: [{ id: 'x' }] }), null);

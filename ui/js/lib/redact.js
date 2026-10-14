@@ -13,6 +13,19 @@
 export const REDACTED = '[redacted]';
 const SECRET_KEY = /pass(?:word|wd|phrase)?|secret|api[_-]?key|token|private[_-]?key|credential|authorization/i;
 
+/**
+ * The same for a request path: a query parameter whose name looks like a secret
+ * (`?password=…`, `&api_key=…`, `token=…`) and credentials written into a URL
+ * (`https://user:pass@host`) are replaced. The rest of the path is kept as typed.
+ */
+export function redactPath(p) {
+  if (typeof p !== 'string' || !p) return p;
+  return p
+    .replace(/(\/\/)[^/@\s]+:[^/@\s]*@/g, `$1${REDACTED}@`)
+    .replace(/([?&])([^=&#]+)=([^&#]*)/g, (all, sep, k, v) => (SECRET_KEY.test(decodeURIComponentSafe(k)) && v ? `${sep}${k}=${REDACTED}` : all));
+}
+function decodeURIComponentSafe(s) { try { return decodeURIComponent(s); } catch (_) { return s; } }
+
 export function redactSecrets(body) {
   if (typeof body !== 'string' || !body) return body;
   return body.replace(/("([^"\\]*(?:\\.[^"\\]*)*)"\s*:\s*)"(?:[^"\\]|\\.)*"/g,
