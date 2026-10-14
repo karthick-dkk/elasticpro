@@ -26,8 +26,42 @@ export function redactPath(p) {
 }
 function decodeURIComponentSafe(s) { try { return decodeURIComponent(s); } catch (_) { return s; } }
 
+/** A JSON value with every secret-named field (at any depth, any type) replaced. */
+function scrub(v) {
+  if (Array.isArray(v)) return v.map(scrub);
+  if (v && typeof v === 'object') {
+    const out = {};
+    for (const [k, x] of Object.entries(v)) out[k] = SECRET_KEY.test(k) ? REDACTED : scrub(x);
+    return out;
+  }
+  return v;
+}
+const hasSecretKey = (v) => (Array.isArray(v) ? v.some(hasSecretKey)
+  : v && typeof v === 'object' ? Object.entries(v).some(([k, x]) => SECRET_KEY.test(k) || hasSecretKey(x)) : false);
+
+/** A key as a JSON parser would read it: \uXXXX and other escapes decoded. */
+function decodedKey(raw) {
+  try { return JSON.parse(`"${raw}"`); } catch (_) { return raw; }
+}
+
+/**
+ * Redact one JSON document by what a parser reads — the decoded key, at any depth, whatever
+ * the value's type — so a key written as "pass\u0077ord" or a numeric secret is caught.
+ * Text that is not JSON falls back to a match on the decoded key name, string values only.
+ */
+function redactDoc(text) {
+  try {
+    const v = JSON.parse(text);
+    return hasSecretKey(v) ? JSON.stringify(scrub(v)) : text;
+  } catch (_) {
+    return text.replace(/("([^"\\]*(?:\\.[^"\\]*)*)"\s*:\s*)("(?:[^"\\]|\\.)*"|-?\d[\d.eE+-]*|true|false|null|\{[^{}]*\}|\[[^\[\]]*\])/g,
+      (all, head, key) => (SECRET_KEY.test(decodedKey(key)) ? `${head}"${REDACTED}"` : all));
+  }
+}
+
 export function redactSecrets(body) {
   if (typeof body !== 'string' || !body) return body;
-  return body.replace(/("([^"\\]*(?:\\.[^"\\]*)*)"\s*:\s*)"(?:[^"\\]|\\.)*"/g,
-    (all, head, key) => (SECRET_KEY.test(key) ? `${head}"${REDACTED}"` : all));
+  // One document, or newline-delimited ones (_bulk, _msearch): each line judged on its own.
+  try { JSON.parse(body); return redactDoc(body); } catch (_) { /* not a single document */ }
+  return body.split('\n').map((line) => (line.trim() ? redactDoc(line) : line)).join('\n');
 }
