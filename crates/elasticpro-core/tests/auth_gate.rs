@@ -724,6 +724,10 @@ async fn saved_queries_are_private_unless_shared_and_only_the_owner_changes_them
         let r = c.handle_as(m.clone(), Some(omar.clone())).await;
         assert_eq!(r["kind"], json!("forbidden"), "{m} -> {r}");
     }
+    // An administrator limited to some clusters is not an administrator of everyone's queries.
+    let scoped_admin = Caller { name: "zadmin@zabbix".into(), role: Role::Admin, must_change: false, scope: Some(vec!["ES one".into()]) };
+    let r = c.handle_as(json!({ "type": "QUERY_DELETE", "id": team_id }), Some(scoped_admin)).await;
+    assert_eq!(r["kind"], json!("forbidden"), "a scoped administrator cannot delete another person's query: {r}");
     let admin = c.handle_as(json!({ "type": "QUERY_DELETE", "id": team_id }), Some(root)).await;
     assert_eq!(admin["ok"], json!(true), "an administrator may tidy up: {admin}");
     let guest = c.handle_as(json!({ "type": "QUERY_LIST" }), Some(who("g", Role::Guest))).await;

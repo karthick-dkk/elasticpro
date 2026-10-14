@@ -888,7 +888,9 @@ impl Core {
             }
             "QUERY_SAVE" | "QUERY_DELETE" => {
                 let user = caller.as_ref().map(|c| c.name.clone()).unwrap_or_else(|| "local".into());
-                let admin = caller.as_ref().is_none_or(|c| c.role >= Role::Admin);
+                // The override is for an administrator of the whole install: one limited to some
+                // clusters (Zabbix group scope) manages only their own queries, like anyone else.
+                let admin = caller.as_ref().is_none_or(|c| c.role >= Role::Admin && c.scope.is_none());
                 let s = |k: &str| msg.get(k).and_then(Value::as_str).unwrap_or("");
                 let res = if t == "QUERY_SAVE" {
                     self.saved_queries.put(&user, admin, crate::saved_queries::Draft {
