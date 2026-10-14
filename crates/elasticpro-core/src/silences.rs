@@ -40,10 +40,19 @@ impl Silence {
     }
 }
 
-/// The cluster a silence is about: its target for a cluster silence, the part of the alert
-/// key before the first ':' for an alert silence (keys are `<clusterId>:<family>…`).
-pub fn cluster_of<'a>(scope: &str, target: &'a str) -> &'a str {
-    if scope == "alert" { target.split(':').next().unwrap_or("") } else { target }
+/// The cluster a silence is about, among `known` cluster ids: its target for a cluster
+/// silence; for an alert silence, the cluster whose id the key starts with followed by ':'
+/// (keys are `<clusterId>:<family>…`) — the LONGEST such id, so a cluster id that itself
+/// contains ':' cannot be mistaken for a shorter one the caller happens to see. None when no
+/// known cluster owns the target: refused, never guessed.
+pub fn cluster_of<'a>(scope: &str, target: &str, known: impl IntoIterator<Item = &'a String>) -> Option<&'a String> {
+    let target = target.trim();
+    if scope == "alert" {
+        known.into_iter().filter(|id| target.len() > id.len() && target.starts_with(id.as_str()) && target.as_bytes()[id.len()] == b':')
+            .max_by_key(|id| id.len())
+    } else {
+        known.into_iter().find(|id| id.as_str() == target)
+    }
 }
 
 pub struct Silences {
@@ -179,6 +188,17 @@ mod tests {
         assert!(again.remove(&b.id).unwrap().is_some());
         assert!(again.list().is_empty());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_alert_key_belongs_to_the_longest_cluster_id_it_starts_with() {
+        let known = vec!["a".to_string(), "a:b".to_string(), "prod".to_string()];
+        assert_eq!(cluster_of("alert", "a:b:disk", &known).map(String::as_str), Some("a:b"), "not the shorter \"a\"");
+        assert_eq!(cluster_of("alert", "a:disk", &known).map(String::as_str), Some("a"));
+        assert_eq!(cluster_of("alert", "nobody:disk", &known), None);
+        assert_eq!(cluster_of("alert", "prod", &known), None, "a bare cluster id is not an alert key");
+        assert_eq!(cluster_of("cluster", " prod ", &known).map(String::as_str), Some("prod"));
+        assert_eq!(cluster_of("cluster", "pro", &known), None);
     }
 
     #[test]
