@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.3.13
+
+**Index template management; saved queries in the REST console.**
+
+The Indices page has a **Templates** view: index, component and legacy templates on the selected
+cluster, with their patterns, priority, components and how many existing indices each matches.
+Edit them in a JSON editor that checks the required fields, warns about a missing priority or a
+pattern that would shadow the built-in data-stream templates, and refuses a same-priority overlap
+before Elasticsearch does; create, duplicate and delete them (built-in ones are not offered for
+deletion). Every change goes through the write guard and a confirmation. **Simulate** shows what
+an index name would get — the winning template, the resolved settings, mappings and aliases —
+and is treated as a read. **Compare across clusters** reads the clusters you pick one at a time
+and shows each template as the same, different, missing or unreadable per cluster; **Apply**
+copies one cluster's version to others, with a result per cluster.
+
+The REST console can **save a query** by name, with a note — on the server, not in the browser,
+private or shared with the team. Passwords, tokens and keys are redacted before it is saved, so a
+shared query never hands anyone a secret. The Saved queries panel finds, opens (in a tab of its
+own), shares and deletes them; only the owner or an administrator of the whole install changes
+one.
+
 ## 0.3.12
 
 **REST console tabs; the version lives on the Config page.**
