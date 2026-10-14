@@ -46,9 +46,7 @@ export function extLink(label, url, title) {
  */
 export function aboutMini(version) {
   return h('span.row.credits',
-    // No version here: the strip already carries one in its Build row, and the setup
-    // screen in its core line. Twice on the same line is noise; the dialog behind this
-    // button is where the full detail belongs.
+    // No version here: the app shows it in one place only, Config → Diagnostics.
     h('button.linkish', {
       title: 'About ElasticPro',
       onclick: () => aboutDialog(version),
@@ -71,9 +69,9 @@ export function aboutDialog(version) {
     'Multi-cluster Elasticsearch monitoring — including clusters reachable only through an SSH jump host.',
     [
       h('div', { style: { fontSize: '12.5px', lineHeight: '1.7' } },
-        // The version is here because it is the first thing a bug report needs and the
-        // last thing anyone remembers to include.
-        line('Version', h('span.mono', version ? `v${version}` : 'unknown')),
+        // The version is shown in one place only — Config → Diagnostics — so it is named here
+        // as a place, not repeated as a number.
+        line('Version', 'Config → Diagnostics → App version'),
         line('Author', extLink(AUTHOR, 'https://github.com/karthick-dkk')),
         line('Source', extLink(REPO.replace('https://', ''), REPO)),
         line('Support', extLink('Report a problem or ask a question', NEW_ISSUE)),
@@ -83,7 +81,7 @@ export function aboutDialog(version) {
         h('div',
           h('div.ttl', 'If you are reporting a problem'),
           h('div',
-            'Include the version above and what the status strip showed. Never paste your '
+            'Include the app version (Config → Diagnostics) and what the status strip showed. Never paste your '
             + 'config file or a screenshot of the Config page — both carry the cluster '
             + 'credential, and an issue is public.'))),
     ],

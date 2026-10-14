@@ -2,7 +2,7 @@
  *  acknowledgements and notes, and UI settings.
  *  It never stores credentials — the config file on disk stays the only place they live. */
 
-import { redactSecrets } from './redact.js';
+import { redactSecrets, redactPath } from './redact.js';
 const DB_NAME = 'elasticpro';
 const DB_VERSION = 3;
 const STORES = { handles: 'handles', queries: 'queries', kv: 'kv', acks: 'acks', repoSize: 'repoSize' };
@@ -74,7 +74,7 @@ export const idb = {
 
   // the one place every history write goes through (lib/redact.js).
 
-  putQuery: (q) => { const safe = { ...q, body: redactSecrets(q.body) }; return (tx(STORES.queries, 'readwrite', (os) => os.put(safe))); },
+  putQuery: (q) => { const safe = { ...q, path: redactPath(q.path), body: redactSecrets(q.body) }; return (tx(STORES.queries, 'readwrite', (os) => os.put(safe))); },
   delQuery: (id) => tx(STORES.queries, 'readwrite', (os) => os.delete(id)),
   allQueries: () => tx(STORES.queries, 'readonly', (os) => os.getAll()),
   clearQueries: () => tx(STORES.queries, 'readwrite', (os) => os.clear()),

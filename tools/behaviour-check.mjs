@@ -1953,11 +1953,32 @@ if (viaFleet) {
   }
 }
 
+// REST console tabs: up to ten, each keeping its own query; the eleventh is refused.
+{
+  await go('console');
+  const strip = () => doc.querySelectorAll('.console-tab');
+  ok(strip().length >= 1, 'console tabs: no tab strip');
+  const path = doc.querySelector('#c-path');
+  if (path) { path.value = '/_cat/health'; path.dispatchEvent(new window.Event('input', { bubbles: true })); }
+  const add = () => doc.querySelector('.console-tab-add');
+  const before = strip().length;
+  add().click(); await settleFor(200);
+  ok(strip().length === before + 1, `console tabs: + did not add a tab (${strip().length})`);
+  ok(doc.querySelector('#c-path').value !== '/_cat/health', 'console tabs: a new tab should not carry the previous path');
+  doc.querySelectorAll('.console-tab')[before - 1].querySelector('.console-tab-label').click(); await settleFor(200);
+  ok(doc.querySelector('#c-path').value === '/_cat/health', `console tabs: switching back lost the path (${doc.querySelector('#c-path').value})`);
+  for (let i = 0; i < 12; i++) { if (!add().disabled) { add().click(); await settleFor(50); } }
+  ok(strip().length === 10, `console tabs: expected at most 10, saw ${strip().length}`);
+  ok(add().disabled, 'console tabs: + should be disabled at ten');
+  while (strip().length > 1) { strip()[strip().length - 1].querySelector('.console-tab-x').click(); await settleFor(30); }
+  ok(strip().length === 1, 'console tabs: closing should leave one tab');
+}
+
 if (problems.length) {
   console.error(`\n${problems.length} problem(s):`);
   for (const p of problems) console.error('  ✗ ' + p);
   process.exit(1);
 }
-console.log('ok: strip, console, shards, volume, hand-off, refresh, snapshots, tasks, toasts, accounts split, the log-delay preflight, a quiet Config page, the Request Centre and the redraw gate, the request policy, the coverage bar and the Tasks panel');
+console.log('ok: strip, console, shards, volume, hand-off, refresh, snapshots, tasks, toasts, accounts split, the log-delay preflight, a quiet Config page, the Request Centre and the redraw gate, the request policy, the coverage bar, the Tasks panel and the console tabs');
 // The pages leave auto-refresh timers and a live tail running; nothing here waits on them.
 process.exit(0);
