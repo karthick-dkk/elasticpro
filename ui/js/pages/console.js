@@ -5,6 +5,8 @@ import { bytes, num, dur, ago, dt, download } from '../lib/fmt.js';
 import { state, client, activeClusters } from '../core/state.js';
 import { idb } from '../lib/idb.js';
 import { MAX_TABS, initialState, addTab, closeTab, updateTab, activeTab, tabTitle, toStored, fromStored } from '../core/console-tabs.js';
+import { savedQueries, loadSavedQueries, saveQuery, deleteSavedQuery, ownQuery, filterQueries } from '../core/saved-queries.js';
+import { modal, field, text as textField, checkbox, val, checked } from '../ui/modal.js';
 
 /**
  * Write to the query history, and carry on if it cannot be written.
@@ -24,7 +26,7 @@ function remember(fn) {
   } catch (_) { /* storage unavailable */ }
 }
 import { jsonView } from '../lib/jsonview.js';
-import { card, empty, pill } from './common.js';
+import { card, empty, pill, table } from './common.js';
 import { isSnapshotMode } from '../core/snapshot.js';
 import { intent, navigateTo } from '../core/intent.js';
 import { writesUnlocked, writesAllowed, syncWrites, setWritesUnlocked, writeToggle } from '../core/writes.js';
@@ -285,6 +287,7 @@ export function render(el) {
     if (handed && !(handed.path && newTabQuiet(handed))) { Object.assign(ui, handed); ui.res = null; scheduleSave(); }
     draw();
   }).catch(() => { if (handed) { Object.assign(ui, handed); ui.res = null; } draw(); });
+  loadSavedQueries().then(() => drawSaved()).catch(() => {});
   idb.allQueries().then((q) => { history = (q || []).sort((a, b) => b.ts - a.ts); drawHistory(); })
     .catch(() => { /* no stored history to show */ });
   // The core owns the unlock, not this page — re-read it rather than trusting our copy.
@@ -386,7 +389,8 @@ function draw() {
       h('div', { style: { marginLeft: 'auto', display: 'flex', gap: '6px' } },
         h('button.btn.sm', { onclick: format }, 'Format JSON'),
         h('button.btn.sm', { onclick: () => { ui.body = ''; $('#c-body').value = ''; scheduleSave(); } }, 'Clear'),
-        h('button.btn.sm.ghost', { onclick: () => saveFav(), title: 'Save this request to favourites' }, '★ Favourite'))),
+        h('button.btn.sm', { onclick: () => askSave(), title: 'Save this query by name — on the server, privately or shared with the team' }, '💾 Save query'),
+        h('button.btn.sm.ghost', { onclick: () => saveFav(), title: 'Mark this request as a favourite in this browser\'s history' }, '★ Favourite'))),
     h('div.body', { style: { padding: '10px', flex: '1', display: 'flex' } }, bodyArea));
 
   const results = h('div#c-response', { style: { minWidth: 0, display: 'flex' } }, responseCard());
@@ -405,7 +409,8 @@ function draw() {
              gap: '8px', alignItems: 'stretch' },
   }, query, split, results);
 
-  // ---- History (full width)
+  // ---- Saved queries, then History (full width)
+  const saved = h('div#c-saved', savedCard());
   const hist = h('div#c-history', historyCard());
 
   if (ui.full) {
@@ -416,7 +421,7 @@ function draw() {
     }, responseCard()));
     return;
   }
-  mount(host, dl, h('div', { style: { display: 'grid', gap: '14px' } }, h('div', { style: { display: 'grid', gap: '6px' } }, tabStrip(), requestBar), columns, hist));
+  mount(host, dl, h('div', { style: { display: 'grid', gap: '14px' } }, h('div', { style: { display: 'grid', gap: '6px' } }, tabStrip(), requestBar), columns, saved, hist));
 }
 
 /**
@@ -709,6 +714,90 @@ function responseCard() {
     },
       h('div.mono.muted.trunc', { style: { fontSize: '10.5px', marginBottom: '6px' }, title: r.url }, `${ui.method} ${r.url || ''}`),
       body));
+}
+
+/* ------------------------------- saved queries ------------------------------- */
+//
+// Named queries kept on the server (core/saved-queries.js), the person's own and the team's
+// shared ones. A tab remembers which saved query it came from, so Save updates it.
+const savedUi = { text: '', mine: false };
+
+function drawSaved() { const el = $('#c-saved'); if (el) mount(el, savedCard()); }
+
+async function askSave() {
+  const t = activeTab(tabs);
+  const existing = t.savedId ? savedQueries().find((q) => q.id === t.savedId && ownQuery(q)) : null;
+  const ok = await modal(existing ? 'Update saved query' : 'Save query', `${ui.method} ${ui.path}`, [
+    field('Name', textField('sq-name', existing ? existing.name : (t.name || tabTitle({ ...t, method: ui.method, path: ui.path })), {})),
+    field('Note', textField('sq-note', existing ? (existing.note || '') : '', { placeholder: 'what it is for (optional)' })),
+    checkbox('sq-shared', 'Share with the team', existing ? !!existing.shared : false,
+      'Everyone signed in sees it in their Saved queries; only you (or an administrator) can change it.'),
+    h('div.muted', { style: { fontSize: '11.5px', marginTop: '6px' } },
+      'Kept on the server, not in this browser. Passwords, tokens and keys in the body or path are replaced with "[redacted]" before it is saved.'),
+  ], (ctx) => [h('div', { style: { marginLeft: 'auto', display: 'flex', gap: '8px' } },
+    h('button.btn', { onclick: () => ctx.done(null) }, 'Cancel'),
+    existing ? h('button.btn', { onclick: () => doSave(ctx, null) }, 'Save as new') : null,
+    h('button.btn.primary', { onclick: () => doSave(ctx, existing ? existing.id : null) }, existing ? 'Update' : 'Save'))],
+  { width: '520px' });
+  if (ok) drawSaved();
+}
+
+async function doSave(ctx, id) {
+  const name = val('sq-name').trim();
+  if (!name) return ctx.msg('Give it a name.');
+  syncFromUi();
+  const res = await saveQuery({ id, name, method: ui.method, path: ui.path, body: ui.body, shared: checked('sq-shared'), note: val('sq-note') });
+  if (!res || !res.ok) return ctx.msg((res && res.message) || 'Could not save the query');
+  tabs = updateTab(tabs, tabs.active, { savedId: res.query.id, name: res.query.name }); scheduleSave();
+  toast(`Saved "${res.query.name}"${res.query.shared ? ' — shared with the team' : ''}`, 'ok', 3000);
+  ctx.done(true); draw();
+}
+
+function openSaved(q) {
+  // In a tab of its own, so it never overwrites what is being typed; the active tab when all ten are open.
+  if (!newTabQuiet({ method: q.method, path: q.path, body: q.body })) { ui.method = q.method; ui.path = q.path; ui.body = q.body || ''; ui.res = null; }
+  tabs = updateTab(tabs, tabs.active, { name: q.name, savedId: q.id }); scheduleSave(); draw();
+  window.scrollTo({ top: 0 });
+}
+
+async function removeSaved(q) {
+  const yes = await confirmDialog(`Delete "${q.name}"?`, q.shared ? 'It is shared — it disappears for everyone.' : 'It is removed from your saved queries.', { yes: 'delete', danger: true });
+  if (!yes) return;
+  const res = await deleteSavedQuery(q.id);
+  if (res && res.ok) { toast(`Deleted "${q.name}"`, 'ok', 2500); drawSaved(); } else toast((res && res.message) || 'Could not delete', 'err', 5000);
+}
+
+async function toggleShare(q) {
+  const res = await saveQuery({ ...q, shared: !q.shared });
+  if (res && res.ok) { toast(res.query.shared ? `"${q.name}" is shared with the team` : `"${q.name}" is private again`, 'ok', 2500); drawSaved(); }
+  else toast((res && res.message) || 'Could not change it', 'err', 5000);
+}
+
+function savedCard() {
+  const all = savedQueries();
+  const list = filterQueries(savedUi.mine ? all.filter(ownQuery) : all, savedUi.text);
+  const shared = all.filter((q) => q.shared).length;
+  return card('Saved queries', `${all.length} · ${shared} shared · kept on the server`,
+    h('div', { style: { display: 'grid', gap: '8px' } },
+      h('div', { style: { display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap' } },
+        h('input#c-saved-filter', { type: 'search', placeholder: 'find by name, path, body or note…', value: savedUi.text, style: { minWidth: '260px', flex: '1' },
+          oninput: (e) => { savedUi.text = e.target.value; const el = $('#c-saved-list'); if (el) mount(el, savedTable(filterQueries(savedUi.mine ? savedQueries().filter(ownQuery) : savedQueries(), savedUi.text))); } }),
+        h('label', { style: { fontSize: '12px', display: 'inline-flex', gap: '5px', alignItems: 'center' } },
+          h('input', { type: 'checkbox', checked: savedUi.mine, onchange: (e) => { savedUi.mine = e.target.checked; drawSaved(); } }), 'only mine')),
+      h('div#c-saved-list', savedTable(list))));
+}
+
+function savedTable(list) {
+  if (!list.length) return empty(savedQueries().length ? 'No saved query matches' : 'Nothing saved yet — write a query and press 💾 Save query.');
+  return table(['Name', 'Request', 'Owner', '', ''], list.slice(0, 300).map((q) => h('tr',
+    h('td', h('b', q.name), q.note ? h('div.muted', { style: { fontSize: '11px' } }, q.note) : null),
+    h('td.mono', { style: { fontSize: '11.5px', wordBreak: 'break-all' } }, `${q.method} ${q.path}`),
+    h('td', { style: { fontSize: '12px' } }, q.owner, q.shared ? h('span.pill.grey', { style: { marginLeft: '6px' } }, 'shared') : null),
+    h('td.muted', { style: { fontSize: '11px', whiteSpace: 'nowrap' } }, ago(q.updated)),
+    h('td', { style: { textAlign: 'right', whiteSpace: 'nowrap' } },
+      h('button.btn.sm.primary', { onclick: () => openSaved(q), title: 'Open in a tab of its own' }, 'Open'),
+      ownQuery(q) ? h('button.btn.sm', { style: { marginLeft: '4px' }, onclick: () => toggleShare(q) }, q.shared ? 'Make private' : 'Share') : null,
+      ownQuery(q) ? h('button.btn.sm.ghost', { style: { marginLeft: '4px' }, title: 'Delete', onclick: () => removeSaved(q) }, '🗑') : null))), {});
 }
 
 function drawHistory() { const el = $('#c-history'); if (el) mount(el, historyCard()); }
