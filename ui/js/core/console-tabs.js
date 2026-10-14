@@ -66,7 +66,7 @@ export function activeTab(st) {
 export function toStored(st) {
   return {
     v: 1, active: st.active,
-    tabs: st.tabs.slice(0, MAX_TABS).map((t) => ({ id: t.id, name: t.name || '', method: t.method, path: redactPath(t.path || ''), body: redactSecrets(t.body || '') })),
+    tabs: st.tabs.slice(0, MAX_TABS).map((t) => ({ id: t.id, name: t.name || '', method: t.method, path: redactPath(t.path || ''), body: redactSecrets(t.body || ''), ...(t.savedId ? { savedId: String(t.savedId) } : {}) })),
   };
 }
 
@@ -74,7 +74,7 @@ export function toStored(st) {
 export function fromStored(raw) {
   if (!raw || raw.v !== 1 || !Array.isArray(raw.tabs) || !raw.tabs.length) return null;
   const tabs = raw.tabs.slice(0, MAX_TABS).filter((t) => t && typeof t.id === 'string')
-    .map((t) => ({ ...blankTab(t), id: t.id, name: typeof t.name === 'string' ? t.name.slice(0, 40) : '' }));
+    .map((t) => ({ ...blankTab(t), id: t.id, name: typeof t.name === 'string' ? t.name.slice(0, 40) : '', ...(typeof t.savedId === 'string' ? { savedId: t.savedId } : {}) }));
   if (!tabs.length) return null;
   return { tabs, active: tabs.some((t) => t.id === raw.active) ? raw.active : tabs[0].id };
 }

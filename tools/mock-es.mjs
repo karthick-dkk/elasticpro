@@ -8,7 +8,8 @@
  *
  *   node tools/mock-es.mjs [port]        # default 9299
  *
- * Read-only fixture: any write returns {"acknowledged": true} without changing anything.
+ * Read-only fixture: any write returns {"acknowledged": true} without changing anything —
+ * except snapshot deletes and index-template PUT/DELETE, which are honoured in memory.
  */
 
 import http from 'node:http';
@@ -417,6 +418,70 @@ function tasksListing() {
 }
 routes.unshift([(u) => u.startsWith('/_tasks?') || u === '/_tasks', () => tasksListing()]);
 
+// Templates. Index templates are the one kind whose writes this fixture honours: a saved
+// template that does not show up when the list is read again looks exactly like a page
+// that forgot to save, and that is the confusion the snapshot deletes above already cost.
+// In memory only — restarting the mock puts the starting four back.
+const indexTemplates = new Map([
+  ['logs-app', { index_patterns: ['logs-app-*'], priority: 200, composed_of: ['base-settings'],
+    template: { settings: { index: { number_of_replicas: '1', refresh_interval: '5s' } },
+      mappings: { properties: { message: { type: 'text' }, level: { type: 'keyword' } } },
+      aliases: { 'logs-app': {} } },
+    version: 3, _meta: { description: 'application logs' } }],
+  ['logstash', { index_patterns: ['logstash-*'], priority: 100, composed_of: ['base-settings', 'base-mappings'],
+    template: { settings: { index: { number_of_shards: '1' } } }, version: 1 }],
+  ['.ilm-history-7', { index_patterns: ['ilm-history-7*'], priority: 2147483647, composed_of: [],
+    template: { settings: { index: { hidden: 'true', lifecycle: { name: 'ilm-history-ilm-policy' } } } },
+    data_stream: { hidden: true, allow_custom_routing: false }, version: 7,
+    _meta: { description: 'index template for ILM history indices', managed: true } }],
+  // A data stream catch-all under logs-app, so simulating a logs-app index has something
+  // in `overlapping`.
+  ['logs-default', { index_patterns: ['logs-*'], priority: 50, composed_of: ['base-mappings'],
+    template: { mappings: { properties: { '@timestamp': { type: 'date' } } } },
+    data_stream: { hidden: false, allow_custom_routing: false } }],
+]);
+const COMPONENT_TEMPLATES = {
+  'base-settings': { template: { settings: { index: { number_of_replicas: '1', codec: 'best_compression' } } }, version: 2 },
+  'base-mappings': { template: { mappings: { properties: { '@timestamp': { type: 'date' }, host: { properties: { name: { type: 'keyword' } } } } } }, version: 1 },
+};
+const LEGACY_TEMPLATES = {
+  'old-logstash': { order: 0, index_patterns: ['logstash-*'], settings: { index: { number_of_shards: '1' } },
+    mappings: { properties: { message: { type: 'text' } } }, aliases: {}, version: 1 },
+};
+const tplPath = (u) => decodeURIComponent(u.split('?')[0].split('/')[2] || '');
+const listIndexTemplates = (only) => ({ index_templates: [...indexTemplates.entries()]
+  .filter(([name]) => !only || only.split(',').some((p) => new RegExp(`^${p.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*')}$`).test(name)))
+  .map(([name, index_template]) => ({ name, index_template })) });
+const wild = (p, n) => new RegExp(`^${String(p).replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*')}$`).test(n);
+/** What _simulate_index answers: the winner's resolved template, and the rest that match. */
+function simulateIndex(indexName) {
+  const matching = [...indexTemplates.entries()].filter(([, t]) => [].concat(t.index_patterns).some((p) => wild(p, indexName)))
+    .sort(([, a], [, b]) => (b.priority || 0) - (a.priority || 0));
+  if (!matching.length) return { template: { settings: {}, mappings: {}, aliases: {} }, overlapping: [] };
+  const [, win] = matching[0];
+  const settings = {}; let mappings = { properties: {} };
+  for (const c of win.composed_of || []) {
+    const ct = (COMPONENT_TEMPLATES[c] || {}).template || {};
+    Object.assign(settings, ((ct.settings || {}).index) || {});
+    Object.assign(mappings.properties, ((ct.mappings || {}).properties) || {});
+  }
+  Object.assign(settings, (((win.template || {}).settings || {}).index) || {});
+  Object.assign(mappings.properties, (((win.template || {}).mappings || {}).properties) || {});
+  return { template: { settings: { index: settings }, mappings, aliases: (win.template || {}).aliases || {} },
+    overlapping: matching.slice(1).map(([name, t]) => ({ name, index_patterns: [].concat(t.index_patterns) })) };
+}
+routes.unshift(
+  [(u) => u === '/_index_template' || u.startsWith('/_index_template?'), () => listIndexTemplates()],
+  [(u) => /^\/_index_template\/[^_/?][^/?]*/.test(u), ({ url }) => {
+    const name = tplPath(url);
+    const out = listIndexTemplates(name);
+    return out.index_templates.length ? out : { error: { type: 'resource_not_found_exception', reason: `index template matching [${name}] not found` }, status: 404 };
+  }],
+  [(u) => u === '/_component_template' || u.startsWith('/_component_template?'), () => ({
+    component_templates: Object.entries(COMPONENT_TEMPLATES).map(([name, component_template]) => ({ name, component_template })) })],
+  [(u) => u === '/_template' || u.startsWith('/_template?'), () => LEGACY_TEMPLATES],
+);
+
 http.createServer((req, res) => {
   let body = '';
   req.on('data', (d) => (body += d));
@@ -435,6 +500,29 @@ http.createServer((req, res) => {
       // DELETE /_snapshot/<repo>/<name>[,<name>...] really removes them from the listing, so
       // "deleted it and it is still there" means the app, not the fixture. Everything else
       // stays a no-op.
+      const bare = url.split('?')[0];
+      const sim = req.method === 'POST' && /^\/_index_template\/_simulate_index\/([^/]+)$/.exec(bare);
+      if (sim) return res.end(JSON.stringify(simulateIndex(decodeURIComponent(sim[1]))));
+      const tpl = /^\/_index_template\/([^_/][^/]*)$/.exec(bare);
+      if (tpl && req.method === 'PUT') {
+        let parsed = null;
+        try { parsed = JSON.parse(body || 'null'); } catch { /* answered below */ }
+        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+          res.statusCode = 400;
+          return res.end(JSON.stringify({ error: { type: 'parse_exception', reason: 'request body is required' }, status: 400 }));
+        }
+        indexTemplates.set(decodeURIComponent(tpl[1]), parsed);
+        return res.end(JSON.stringify({ acknowledged: true }));
+      }
+      if (tpl && req.method === 'DELETE') {
+        const name = decodeURIComponent(tpl[1]);
+        if (!indexTemplates.has(name)) {
+          res.statusCode = 404;
+          return res.end(JSON.stringify({ error: { type: 'resource_not_found_exception', reason: `index_template [${name}] missing` }, status: 404 }));
+        }
+        indexTemplates.delete(name);
+        return res.end(JSON.stringify({ acknowledged: true }));
+      }
       const del = req.method === 'DELETE' && /^\/_snapshot\/[^/]+\/[^/?]+/.exec(url.split('?')[0]);
       if (del) {
         for (const name of del[0].split('/')[3].split(',')) {
@@ -444,7 +532,10 @@ http.createServer((req, res) => {
       return res.end(JSON.stringify({ acknowledged: true }));   // fixture: other writes are no-ops
     }
     const hit = routes.find(([match]) => match(url));
-    res.end(JSON.stringify(hit ? hit[1]({ body, url }) : { acknowledged: true, url }));
+    const out = hit ? hit[1]({ body, url }) : { acknowledged: true, url };
+    // A route answering an Elasticsearch error shape gets that error's HTTP status too.
+    if (out && out.error && typeof out.status === 'number') res.statusCode = out.status;
+    res.end(JSON.stringify(out));
   });
 // Loopback by default, and that default is deliberate: a fixture that answers anything
 // on every interface is one an unrelated thing on the network can find and believe. Set

@@ -116,6 +116,7 @@ pub struct Core {
     /// Each person's notification history. See `notify`.
     notify: crate::notify::NotifyStore,
     silences: crate::silences::Silences,
+    saved_queries: crate::saved_queries::SavedQueries,
 }
 
 /// Concurrency limits on requests to Elasticsearch, whoever sends them.
@@ -501,6 +502,7 @@ impl Core {
             fleet: crate::fleet::Fleet::new(data_dir_for_fleet.as_deref()),
             es_limits: EsLimits::from_env(),
             silences: crate::silences::Silences::open(data_dir_for_notify.as_ref().map(|d| d.join("silences.json"))),
+            saved_queries: crate::saved_queries::SavedQueries::open(data_dir_for_notify.as_ref().map(|d| d.join("saved-queries.json"))),
             notify: crate::notify::NotifyStore::open(data_dir_for_notify.map(|d| d.join("notifications.json"))),
         })
     }
@@ -878,6 +880,31 @@ impl Core {
             "NOTIFY_PUT" | "NOTIFY_LIST" | "NOTIFY_CLEAR" => self.notify_msg(&t, &msg, caller.as_ref()),
             // Scoped to the clusters the caller may see (Zabbix group scope): a silence names a
             // cluster, so listing, setting or removing one for a cluster you cannot see is refused.
+            // Saved REST console queries: the caller's own and every shared one. The page
+            // redacts secrets before saving; ownership decides who may change or delete.
+            "QUERY_LIST" => {
+                let user = caller.as_ref().map(|c| c.name.clone()).unwrap_or_else(|| "local".into());
+                json!({ "ok": true, "queries": self.saved_queries.visible_to(&user), "user": user })
+            }
+            "QUERY_SAVE" | "QUERY_DELETE" => {
+                let user = caller.as_ref().map(|c| c.name.clone()).unwrap_or_else(|| "local".into());
+                // The override is for an administrator of the whole install: one limited to some
+                // clusters (Zabbix group scope) manages only their own queries, like anyone else.
+                let admin = caller.as_ref().is_none_or(|c| c.role >= Role::Admin && c.scope.is_none());
+                let s = |k: &str| msg.get(k).and_then(Value::as_str).unwrap_or("");
+                let res = if t == "QUERY_SAVE" {
+                    self.saved_queries.put(&user, admin, crate::saved_queries::Draft {
+                        id: msg.get("id").and_then(Value::as_str), name: s("name"), method: s("method"), path: s("path"),
+                        body: s("body"), shared: msg.get("shared").and_then(Value::as_bool).unwrap_or(false), note: s("note"),
+                    })
+                } else {
+                    self.saved_queries.delete(&user, admin, s("id"))
+                };
+                match res {
+                    Ok(q) => json!({ "ok": true, "query": q, "queries": self.saved_queries.visible_to(&user) }),
+                    Err(e) => json!({ "ok": false, "kind": if e.starts_with("only its owner") { "forbidden" } else { "bad_request" }, "message": e }),
+                }
+            }
             "SILENCE_LIST" => {
                 let list = self.silences_visible(caller.as_ref());
                 json!({ "ok": true, "silences": list })

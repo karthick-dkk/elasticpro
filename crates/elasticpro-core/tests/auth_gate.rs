@@ -701,3 +701,35 @@ async fn a_scoped_caller_cannot_see_or_touch_silences_outside_its_scope() {
     let mine = c.handle_as(json!({ "type": "SILENCE_LIST" }), Some(admin)).await;
     assert_eq!(mine["silences"].as_array().unwrap().len(), 1, "{mine}");
 }
+
+// Saved console queries: a person sees their own and the team's shared ones; only the owner
+// (or an administrator) may change or delete one.
+#[tokio::test]
+async fn saved_queries_are_private_unless_shared_and_only_the_owner_changes_them() {
+    use elasticpro_core::auth::{Caller, Edition, Role};
+    use serde_json::json;
+    let dir = support::TempDir::new("saved-queries");
+    let c = elasticpro_core::Core::new_with_rounds(Some(dir.0.clone()), Edition::Hosted, 1);
+    let who = |n: &str, r: Role| Caller { name: n.into(), role: r, must_change: false, scope: None };
+    let (sara, omar, root) = (who("sara", Role::User), who("omar", Role::User), who("root", Role::Admin));
+    let mine = c.handle_as(json!({ "type": "QUERY_SAVE", "name": "mine", "method": "GET", "path": "/_cat/health" }), Some(sara.clone())).await;
+    assert_eq!(mine["ok"], json!(true), "{mine}");
+    let team = c.handle_as(json!({ "type": "QUERY_SAVE", "name": "team", "method": "GET", "path": "/_cat/shards", "shared": true }), Some(sara.clone())).await;
+    let team_id = team["query"]["id"].as_str().unwrap().to_string();
+    let seen = c.handle_as(json!({ "type": "QUERY_LIST" }), Some(omar.clone())).await;
+    let names: Vec<&str> = seen["queries"].as_array().unwrap().iter().map(|q| q["name"].as_str().unwrap()).collect();
+    assert_eq!(names, vec!["team"], "another person sees only what was shared");
+    for m in [json!({ "type": "QUERY_SAVE", "id": team_id, "name": "hijacked", "method": "GET", "path": "/" }),
+              json!({ "type": "QUERY_DELETE", "id": team_id })] {
+        let r = c.handle_as(m.clone(), Some(omar.clone())).await;
+        assert_eq!(r["kind"], json!("forbidden"), "{m} -> {r}");
+    }
+    // An administrator limited to some clusters is not an administrator of everyone's queries.
+    let scoped_admin = Caller { name: "zadmin@zabbix".into(), role: Role::Admin, must_change: false, scope: Some(vec!["ES one".into()]) };
+    let r = c.handle_as(json!({ "type": "QUERY_DELETE", "id": team_id }), Some(scoped_admin)).await;
+    assert_eq!(r["kind"], json!("forbidden"), "a scoped administrator cannot delete another person's query: {r}");
+    let admin = c.handle_as(json!({ "type": "QUERY_DELETE", "id": team_id }), Some(root)).await;
+    assert_eq!(admin["ok"], json!(true), "an administrator may tidy up: {admin}");
+    let guest = c.handle_as(json!({ "type": "QUERY_LIST" }), Some(who("g", Role::Guest))).await;
+    assert_eq!(guest["ok"], json!(false), "the console is not a guest's: {guest}");
+}

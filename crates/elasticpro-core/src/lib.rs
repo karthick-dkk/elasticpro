@@ -18,6 +18,7 @@ pub mod hcvault;
 pub mod http;
 pub mod notify;
 pub mod silences;
+pub mod saved_queries;
 pub mod socks;
 pub mod ssh;
 pub mod tls;

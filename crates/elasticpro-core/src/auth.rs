@@ -278,6 +278,9 @@ pub fn required_role(msg_type: &str) -> Option<Role> {
         // Silences: everyone who sees alerts may see why some are quiet; setting or removing
         // one changes what the whole team is shown, so an operator's (it is audited).
         "SILENCE_LIST" => Some(Role::User),
+        // Saved console queries: the console is a user's page; each person manages their own
+        // (the handler checks ownership), and sees what others chose to share.
+        "QUERY_LIST" | "QUERY_SAVE" | "QUERY_DELETE" => Some(Role::User),
         "SILENCE_SET" | "SILENCE_CLEAR" => Some(Role::Operator),
 
         // Anything new is refused until somebody decides where it belongs.
