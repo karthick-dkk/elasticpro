@@ -88,7 +88,7 @@ impl SavedQueries {
     pub fn visible_to(&self, user: &str) -> Vec<SavedQuery> {
         let mut v: Vec<SavedQuery> = self.list.read().iter()
             .filter(|q| q.shared || q.owner.eq_ignore_ascii_case(user)).cloned().collect();
-        v.sort_by(|a, b| b.updated.cmp(&a.updated));
+        v.sort_by_key(|a| std::cmp::Reverse(a.updated));
         v
     }
 
