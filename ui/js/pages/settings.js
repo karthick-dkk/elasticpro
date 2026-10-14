@@ -1183,12 +1183,26 @@ async function setZabbixOption(key, on) {
   await syncZabbix();
 }
 
+/** "Read: <template> (N hosts), …" — what the last sync searched, from its reply. */
+function templatesRead(templates) {
+  const t = (templates || []).filter((x) => x && x.name);
+  if (!t.length) return '';
+  return `Read: ${t.map((x) => `${x.name} (${x.hosts} host${x.hosts === 1 ? '' : 's'})`).join(', ')}`;
+}
+
 async function syncZabbix() {
   zbxBusy = true; draw();
   try {
     const res = await bridge({ type: 'ZABBIX_SYNC' });
     if (!res.ok) toast(`Zabbix sync failed: ${res.message}`, 'err', 8000, { key: 'zabbix-sync' });
-    else toast(`Zabbix sync: ${res.clusters} cluster host(s)${res.skipped && res.skipped.length ? `, ${res.skipped.length} skipped` : ''}`, 'ok', 5000, { key: 'zabbix-sync' });
+    else {
+      // A bare "0 cluster hosts" read like a broken pairing. Say which templates were read
+      // and what each held, and name the hosts left out, so the reason is on the screen.
+      const skipped = res.skipped || [];
+      toast(`Zabbix sync: ${res.clusters} cluster host(s)${skipped.length ? `, ${skipped.length} not counted` : ''}`,
+        res.clusters || !skipped.length ? 'ok' : 'warn', skipped.length || !res.clusters ? 10000 : 5000,
+        { key: 'zabbix-sync', detail: [templatesRead(res.templates), ...skipped.slice(0, 5)] });
+    }
     // The new list reaches every page the same way the first one did.
     await setConfig(state.config, state.handle);
     await refreshAll({ force: true });
@@ -1252,7 +1266,8 @@ function zabbixCard() {
       !zbx.vault ? h('div.banner.warn', 'Vault is not configured on this server, so passwords held as Vault macros cannot be read.') : null,
       table(['Cluster host', 'Elasticsearch', 'Password', 'Zabbix user groups that see it', 'Connection'], rows,
         { emptyText: 'No Zabbix host carries the cluster template yet.' }),
-      (zbx.skipped || []).length ? h('div', h('b', 'Hosts with the template that are not usable yet'),
+      (zbx.templates || []).length ? h('div.muted', { style: { fontSize: '12px' } }, templatesRead(zbx.templates)) : null,
+      (zbx.skipped || []).length ? h('div', h('b', 'Hosts not counted as clusters, and why'),
         h('ul', { style: { margin: '4px 0 0', paddingLeft: '18px', fontSize: '12px' } }, ...zbx.skipped.map((s) => h('li', s)))) : null,
       pending.length ? h('div.banner.warn', h('div', h('div.ttl', 'Waiting for a working password'),
         h('div', `${pending.map((p) => p.name).join(', ')} ${pending.length === 1 ? 'is' : 'are'} not used yet: the password could not be read. `

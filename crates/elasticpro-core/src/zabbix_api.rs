@@ -37,6 +37,11 @@ pub const DEFAULT_TEMPLATE: &str = "Elasticsearch Cluster by HTTP EP";
 /// Cluster Management links this instead of the HTTP template for a cluster behind a Windows
 /// jump host (integration/zabbix/clients-module/lib/JumpTemplate.php, NAME).
 pub const JUMP_TEMPLATE: &str = "ElasticPro Elasticsearch via SSH jump host";
+/// The family every cluster template belongs to: Zabbix's own HTTP template, ours, and the
+/// names earlier releases and other imports gave it. They share the `{$ELASTICSEARCH.*}`
+/// macros, so a host on any of them describes a cluster the same way; matching only the
+/// current name made a site on an earlier one read "0 cluster hosts" with no reason given.
+pub const TEMPLATE_FAMILY: &str = "Elasticsearch Cluster by HTTP";
 
 /// Which of ElasticPro's jump hosts (id, address, port) is the one Zabbix goes through.
 /// Addresses compare without case; the port must match.
@@ -491,15 +496,27 @@ impl Zabbix {
         Ok(true)
     }
 
-    /// Every enabled host carrying the cluster template — or Cluster Management's template for
-    /// clusters behind a Windows jump host — and the hosts that do not make sense as a
-    /// cluster, with why.
-    pub async fn clusters(&self) -> Result<(Vec<ZbxCluster>, Vec<String>), String> {
-        let tpls = self.call("template.get", json!({ "filter": { "host": [&self.template, JUMP_TEMPLATE] },
-                                                     "output": ["templateid", "host"], "selectMacros": ["macro", "value", "type"] })).await?;
+    /// Every enabled host carrying a cluster template — the configured one, any template of
+    /// its family (`TEMPLATE_FAMILY`), or Cluster Management's template for clusters behind a
+    /// Windows jump host — the hosts that do not make sense as a cluster, with why, and each
+    /// template read with how many hosts it held.
+    pub async fn clusters(&self) -> Result<(Vec<ZbxCluster>, Vec<String>, Vec<(String, usize)>), String> {
+        let out = json!(["templateid", "host"]);
+        let mac = json!(["macro", "value", "type"]);
+        let named = self.call("template.get", json!({ "filter": { "host": [&self.template, JUMP_TEMPLATE] },
+                                                      "output": out, "selectMacros": mac })).await?;
+        let family = self.call("template.get", json!({ "search": { "host": TEMPLATE_FAMILY }, "startSearch": true,
+                                                       "output": out, "selectMacros": mac })).await?;
         let empty = vec![];
-        let tpls = tpls.as_array().unwrap_or(&empty);
-        if !tpls.iter().any(|t| t["host"].as_str() == Some(self.template.as_str())) {
+        let mut tpls: Vec<Value> = vec![];
+        for t in named.as_array().unwrap_or(&empty).iter().chain(family.as_array().unwrap_or(&empty)) {
+            if !tpls.iter().any(|x| x["templateid"] == t["templateid"]) {
+                tpls.push(t.clone());
+            }
+        }
+        let tpls = &tpls;
+        let is_cluster_tpl = |t: &Value| t["host"].as_str().is_some_and(|h| h == self.template || h.starts_with(TEMPLATE_FAMILY));
+        if !tpls.iter().any(is_cluster_tpl) {
             // Name the way out. This is what a correctly paired, correctly tokened install
             // reports when nobody has created the cluster template yet, and on its own it
             // reads like a bug in the pairing rather than one missing object.
@@ -516,6 +533,7 @@ impl Zabbix {
         let (gm, ugs) = (globals.as_array().unwrap_or(&empty), ugs.as_array().unwrap_or(&empty));
         let mut ok = vec![];
         let mut skipped = vec![];
+        let mut read = vec![];
         let mut seen = std::collections::HashSet::new();
         for tpl in tpls {
             let hosts = self.call("host.get", json!({
@@ -524,6 +542,7 @@ impl Zabbix {
                 "selectHostGroups": ["groupid", "name"],
             })).await?;
             let tm = tpl["macros"].as_array().unwrap_or(&empty);
+            read.push((tpl["host"].as_str().unwrap_or("").to_string(), hosts.as_array().map_or(0, |a| a.len())));
             for h in hosts.as_array().unwrap_or(&empty) {
                 if !seen.insert(h["hostid"].as_str().unwrap_or("").to_string()) {
                     continue;
@@ -537,7 +556,27 @@ impl Zabbix {
                 }
             }
         }
-        Ok((ok, skipped))
+        // A host that says where a cluster is but is on none of those templates: named, with
+        // the templates it is on, rather than left out of the count without a word.
+        let carriers = self.call("usermacro.get", json!({ "filter": { "macro": "{$ELASTICSEARCH.HOST}" }, "output": ["hostid"] })).await?;
+        let stray: Vec<String> = carriers.as_array().unwrap_or(&empty).iter()
+            .filter_map(|m| m["hostid"].as_str().map(String::from))
+            .filter(|id| !seen.contains(id) && !tpls.iter().any(|t| t["templateid"].as_str() == Some(id.as_str())))
+            .collect::<std::collections::BTreeSet<_>>().into_iter().collect();
+        if !stray.is_empty() {
+            let hosts = self.call("host.get", json!({ "hostids": stray, "filter": { "status": 0 }, "templated_hosts": false,
+                                                      "output": ["hostid", "host", "name"], "selectParentTemplates": ["host"] })).await?;
+            let names: Vec<&str> = read.iter().filter(|(n, _)| n != JUMP_TEMPLATE).map(|(n, _)| n.as_str()).collect();
+            for h in hosts.as_array().unwrap_or(&empty) {
+                let on: Vec<&str> = h["parentTemplates"].as_array().into_iter().flatten().filter_map(|t| t["host"].as_str()).collect();
+                skipped.push(format!(
+                    "{}: has {{$ELASTICSEARCH.HOST}} but is on {} — not a cluster template ({}). Link it to {:?}, or name its template in ELASTICPRO_ZABBIX_CLUSTER_TEMPLATE",
+                    h["name"].as_str().unwrap_or("?"),
+                    if on.is_empty() { "no template".to_string() } else { on.join(", ") },
+                    names.join(", "), self.template));
+            }
+        }
+        Ok((ok, skipped, read))
     }
 }
 
