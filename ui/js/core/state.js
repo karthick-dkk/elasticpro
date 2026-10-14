@@ -3,7 +3,9 @@
 import { EsClient, primeWorker, setBadge, requestStats, workerStatus,
          fleetState, clusterDataset, refreshFleet } from './es.js';
 // lib/fmt is a leaf: no cycle, and two alert sentences need to read like the rest of the UI.
-import { bytes as bytesish, ago } from '../lib/fmt.js';
+import { bytes as bytesish, ago, dur } from '../lib/fmt.js';
+import { diskLevel, tuneAlerts, openAlerts, alertCounts } from './alert-tuning.js';
+import { isAcked } from './acks.js';
 // Cyclic with field-volume.js, which needs client() from here. Safe because both sides
 // only touch the other inside functions, never while the modules are evaluating.
 import { fieldVolumeSpikes, clearFieldVolume } from './field-volume.js';
@@ -1770,8 +1772,18 @@ export function alerts() {
     if (d.health && d.health.status === 'red') add({ key: `${c.id}:health`, level: 'critical', cluster: c, title: `${c.name} health is RED`, detail: `${d.health.unassigned_shards} unassigned shards` });
     else if (d.health && d.health.status === 'yellow') add({ key: `${c.id}:health`, level: 'warning', cluster: c, title: `${c.name} health is YELLOW`, detail: `${d.health.unassigned_shards} unassigned shards` });
     if (d.disk && isFinite(d.disk.percent)) {
-      if (d.disk.percent >= state.defaults.diskCritPercent) add({ key: `${c.id}:disk`, level: 'critical', cluster: c, title: `${c.name} disk ${d.disk.percent.toFixed(1)}%`, detail: 'Above critical threshold' });
-      else if (d.disk.percent >= state.defaults.diskWarnPercent) add({ key: `${c.id}:disk`, level: 'warning', cluster: c, title: `${c.name} disk ${d.disk.percent.toFixed(1)}%`, detail: 'Above warning threshold' });
+      // With hysteresis (alert-tuning.js diskLevel): raised at the threshold, cleared two
+      // points below it, so a disk at 79.9–80.0% does not open and close on every refresh.
+      const { diskWarnPercent: warn, diskCritPercent: crit } = state.defaults;
+      const lvl = diskLevel(d.disk.percent, diskHeld.get(c.id) || null, warn, crit);
+      if (lvl) diskHeld.set(c.id, lvl); else diskHeld.delete(c.id);
+      if (lvl) add({ key: `${c.id}:disk`, level: lvl, cluster: c, diskPercent: d.disk.percent,
+        title: `${c.name} disk ${d.disk.percent.toFixed(1)}%`,
+        detail: lvl === 'critical'
+          ? (d.disk.percent >= crit ? `Above the critical threshold (${crit}%)` : `Held critical until it falls below ${crit - 2}%`)
+          : (d.disk.percent >= warn ? `Above the warning threshold (${warn}%)` : `Held until it falls below ${warn - 2}%`) });
+    } else {
+      diskHeld.delete(c.id);
     }
     if (d.ilmErrorCount) add({ key: `${c.id}:ilm`, level: 'warning', cluster: c, title: `${c.name}: ${d.ilmErrorCount} index(es) in ILM error step`, detail: Object.keys(d.ilmErrors).slice(0, 3).join(', ') });
     if (d.slmStatus && d.slmStatus.operation_mode && d.slmStatus.operation_mode !== 'RUNNING') add({ key: `${c.id}:slm-mode`, level: 'warning', cluster: c, title: `${c.name}: SLM is ${d.slmStatus.operation_mode}`, detail: 'Snapshot lifecycle is not running' });
@@ -1781,7 +1793,7 @@ export function alerts() {
       const act = primaryAction(bal);
       add({ key: `${c.id}:disk-balance`,
         level: bal.verdict === 'critical' ? 'critical' : 'warning',
-        cluster: c,
+        cluster: c, balanceCauses: bal.causes || [],
         title: `${c.name}: ${balanceHeadline(bal)}`,
         // One suggestion, named — an alert that only states a problem leaves the reader
         // to work out the next step for themselves.
@@ -1802,7 +1814,10 @@ export function alerts() {
         detail: `${d.nodes.length} node(s) answered but none holds the master role. The cluster `
               + 'cannot accept changes to its state until one is elected.' });
     } else if (d.masterChangedAt && Date.now() - d.masterChangedAt < MASTER_ALERT_HOURS * 3600 * 1000) {
-      add({ key: `${c.id}:master-changed:${d.masterChangedFrom}->${d.master}`, level: 'critical', cluster: c,
+      // A routine re-election on a cluster that is green again is worth knowing, not paging
+      // over: critical only while the cluster is not green.
+      add({ key: `${c.id}:master-changed:${d.masterChangedFrom}->${d.master}`,
+        level: d.health && d.health.status === 'green' ? 'warning' : 'critical', cluster: c,
         title: `${c.name}: master moved from ${d.masterChangedFrom} to ${d.master}`,
         detail: `Elected ${ago(d.masterChangedAt)}. The previous master left, was cut off or was `
               + 'restarted; anything else that went wrong around then probably started there.' });
@@ -1863,9 +1878,10 @@ export function alerts() {
 
     (d.slm || []).forEach((p) => {
       const lf = p.last_failure, ls = p.last_success;
-      if (lf && (!ls || lf.time > ls.time)) add({ key: `${c.id}:slm-fail:${p.id}`, level: 'critical', cluster: c, title: `${c.name}/${p.id}: last SLM run failed`, detail: String(lf.details || '').slice(0, 160) });
+      const repo = (p.policy && p.policy.repository) || null;   // so a failing repository is raised once (alert-tuning.js)
+      if (lf && (!ls || lf.time > ls.time)) add({ key: `${c.id}:slm-fail:${p.id}`, level: 'critical', cluster: c, repo, title: `${c.name}/${p.id}: last SLM run failed`, detail: String(lf.details || '').slice(0, 160) });
       const staleMs = state.defaults.snapshotStaleHours * 3600 * 1000;
-      if (ls && Date.now() - ls.time > staleMs) add({ key: `${c.id}:slm-stale:${p.id}`, level: 'warning', cluster: c, title: `${c.name}/${p.id}: no successful snapshot recently`, detail: `Last success ${new Date(ls.time).toISOString().replace('T', ' ').slice(0, 16)}` });
+      if (ls && Date.now() - ls.time > staleMs) add({ key: `${c.id}:slm-stale:${p.id}`, level: 'warning', cluster: c, repo, title: `${c.name}/${p.id}: no successful snapshot recently`, detail: `Last success ${new Date(ls.time).toISOString().replace('T', ' ').slice(0, 16)}` });
     });
   }
   // Automations the operator wrote, from the last automation run. Computed there because
@@ -1874,8 +1890,31 @@ export function alerts() {
 
   // Rules an admin switched off are removed here rather than never raised, so the code
   // above stays one description of what is true and the registry decides what is shown.
-  return applySettings(out, loadAlertSettings(state.config && state.config.raw));
+  // Then the tuning: one row per problem, and a stale reading says how old it is.
+  return tuneAlerts(applySettings(out, loadAlertSettings(state.config && state.config.raw)), {
+    ageOf: (id, ds) => {
+      if (!fleetMode()) return null;
+      const f = datasetFreshness(id, ds);
+      return f && f.ts && f.staleAfterMs ? { ageMs: Date.now() - f.ts, staleAfterMs: f.staleAfterMs } : null;
+    },
+    ago: dur,
+  });
 }
+
+/** The disk rule's last level per cluster, for its hysteresis. */
+const diskHeld = new Map();
+
+/**
+ * Open alerts — neither acknowledged nor silenced — and their counts by level. The one
+ * definition every count on screen uses: the Clusters summary, the nav badge, the top bar
+ * and the per-cluster column. The Alerts page lists acknowledged ones too, separately.
+ */
+export function openAlertsNow() { return openAlerts(cachedAlerts(), { isAcked, isSilenced: alertSilenced }); }
+export function openAlertCounts() { return alertCounts(openAlertsNow()); }
+
+/** Set by the silences store (core/silences.js) once it has loaded; nothing is silenced before. */
+let alertSilenced = () => false;
+export function setSilencePredicate(fn) { alertSilenced = typeof fn === 'function' ? fn : () => false; alertsMemo.rev++; bus.emit('data'); }
 
 /**
  * Whether the size of the disk changed, and whether that change is believable.
@@ -1989,8 +2028,12 @@ function snapshotAlertsFor(c, repo, all) {
   if (streak) {
     const since = recent[streak - 1];
     const older = streak === recent.length && all.length > recent.length;
+    // Critical when backups are actually broken: two or more runs in a row, at least one
+    // of them FAILED. One bad night, or runs that only came back PARTIAL (some shards
+    // missed, the rest saved), is a warning — worth a look, not a page.
+    const failedInStreak = recent.slice(0, streak).some((x) => String(x.status || '').toUpperCase() === 'FAILED');
     return [{
-      key: `${key}:failing`, level: 'critical', cluster: c, repo: repo.name, snapshot,
+      key: `${key}:failing`, level: streak >= 2 && failedInStreak ? 'critical' : 'warning', cluster: c, repo: repo.name, snapshot,
       failingSince: since.start,
       title: `${c.name}/${repo.name}: ${streak} of the last ${recent.length} snapshots failed`,
       detail: `Failing since ${snapDay(since.start)} (${since.id})`
@@ -2052,13 +2095,11 @@ export function worstHealth() {
 }
 
 function updateBadge() {
-  const a = cachedAlerts();
-  const crit = a.filter((x) => x.level === 'critical').length;
-  const warn = a.length - crit;
+  const { total, critical: crit, warning: warn } = openAlertCounts();
   const w = worstHealth();
   const color = crit ? '#d03b3b' : warn ? '#fab219' : w === 'green' ? '#0ca30c' : '#64748b';
-  setBadge(a.length ? String(a.length) : '', color,
-    a.length ? `ElasticPro — ${crit} critical, ${warn} warning` : 'ElasticPro — all clusters healthy');
+  setBadge(total ? String(total) : '', color,
+    total ? `ElasticPro — ${crit} critical, ${warn} warning` : 'ElasticPro — all clusters healthy');
 }
 
 /** Small, credential-free summary so the toolbar popup can render instantly. */

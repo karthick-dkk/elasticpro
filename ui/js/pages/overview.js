@@ -3,9 +3,10 @@
 import { h, mount, clear, reconcile } from '../lib/dom.js';
 import { nodeCache, objId } from '../lib/keyed.js';
 import { bytes, num, compact, pct, ago, dt, toCsv, download, healthClass } from '../lib/fmt.js';
-import { state, bus, clusters, activeClusters, client, fetchOverview, healthState, refreshAll, alerts, cachedAlerts, requestsFor, requestLoad, jvmSummary, clusterRev, fleetMode, coverage, askFleetDataset } from '../core/state.js';
+import { state, bus, clusters, activeClusters, client, fetchOverview, healthState, refreshAll, alerts, cachedAlerts, openAlertsNow, requestsFor, requestLoad, jvmSummary, clusterRev, fleetMode, coverage, askFleetDataset } from '../core/state.js';
 import { coverageBar } from '../lib/freshness.js';
 import { readAllState, startReadAll } from '../lib/read-all.js';
+import { fleetSummary, nameList } from '../core/fleet-summary.js';
 import { hbarList, usageMeter } from '../lib/charts.js';
 import { card, collapsible, pill, statTile, table, connectionBanner, diskCell, lastSnapshotOf, snapshotPill, snapshotStatusByKey, empty } from './common.js';
 import { isSnapshotMode } from '../core/snapshot.js';
@@ -72,7 +73,7 @@ function versionKey(r) {
 let alertCounts = null;
 function alertsByCluster() {
   const m = new Map();
-  cachedAlerts().forEach((a) => { if (a.cluster) m.set(a.cluster.id, (m.get(a.cluster.id) || 0) + 1); });
+  openAlertsNow().forEach((a) => { if (a.cluster) m.set(a.cluster.id, (m.get(a.cluster.id) || 0) + 1); });
   return m;
 }
 
@@ -191,9 +192,7 @@ function draw() {
 
   const shownSig = rows.map((r) => `${r.c.id}:${r.sig}`).join(',');
   mount(host,
-    coverageLine(),
-    alertsSummary(),
-    tiles(all),
+    summaryBox(all),
     built.get('toolbar', [!!ui.text, ui.sort, ui.dir, ui.only, all.length, rows.length].join('|'), () => toolbar(all, rows)),
     summaryCard(rows, all),
     built.get('charts', `${shownSig}|${minute()}`,
@@ -226,99 +225,49 @@ function unreachableCard(rows) {
       { key: 'clusters-unreachable' }));
 }
 
-/**
- * A headline only — the full list, with its own filters and export, is the Alerts page.
- * The three most serious ones are shown so this page still says what is wrong.
- */
-function alertsSummary() {
-  // Inside Zabbix the problems are Zabbix's to show — Monitoring → Problems, the dashboard.
-  if (inZabbix()) return null;
-  const a = cachedAlerts();
-  if (!a.length) return null;
-  const crit = a.filter((x) => x.level === 'critical');
-  const warn = a.filter((x) => x.level !== 'critical');
-  const top = [...crit, ...warn].slice(0, 3);
-
-  return h(`div.banner.${crit.length ? 'err' : 'warn'}`, { style: { marginBottom: '14px' } },
-    h('div', { style: { minWidth: 0 } },
-      h('div.ttl', `${a.length} open alert${a.length === 1 ? '' : 's'} — ${crit.length} critical, ${warn.length} warning`),
-      h('div', { style: { display: 'grid', gap: '2px', marginTop: '3px' } },
-        ...top.map((x) => h('div', { style: { fontSize: '12px' } },
-          h('b', x.cluster ? `${x.cluster.name}: ` : ''), x.title,
-          x.detail ? h('span.muted', ` — ${x.detail}`) : null)),
-        a.length > top.length
-          ? h('div.muted', { style: { fontSize: '11.5px' } }, `…and ${a.length - top.length} more`)
-          : null)),
-    h('div.acts', h('button.btn.sm.primary', { onclick: () => navigateTo('alerts') }, 'Open Alerts')));
-}
-
 /** Reachable was answered as "no": the one definition, shared with the unreachable card. */
 function unreachableRows(rows) {
   return rows.filter((r) => healthState(r.d) === 'unreachable');
 }
 
-/** "a, b, c, +4 more" — every name when there are few, so a red cluster is named, not counted. */
-function nameList(names, max = 6) {
-  return names.length <= max ? names.join(', ') : `${names.slice(0, max).join(', ')}, +${names.length - max} more`;
-}
-
 /**
- * The fleet's health at a glance: how many clusters are in each state, which ones are red,
- * which ones cannot be reached, and what is going wrong most often. Disk, shards and
- * repositories are per-cluster detail — they are in the table and the charts below.
- *
- * A cluster whose health has not been read yet is "loading", never counted as green.
+ * The fleet in one box: health counts with the unreachable clusters named, the alert count by
+ * level, the problems that recur most, and how fresh all of it is (with Read all when
+ * something was never read or is stale). It replaces three things that said overlapping
+ * parts of this — the coverage bar, the red alert banner with its first three alerts, and
+ * four tiles — and took a screen's height on a large fleet before the table began. The full
+ * alert text lives on the Alerts page; this says what and how many.
  */
-function tiles(rows) {
-  const down = unreachableRows(rows);
-  const downIds = new Set(down.map((r) => r.c.id));
-  const by = { green: [], yellow: [], red: [], unknown: [] };
-  for (const r of rows) {
-    if (downIds.has(r.c.id)) continue;
-    const st = healthState(r.d);
-    (by[st] || by.unknown).push(r);
-  }
-  const online = rows.length - down.length - by.unknown.length;
-
-  // Most frequent problems first, grouped by what they are, so twenty clusters with the same
-  // fault read as one line with a count rather than twenty lines.
-  const groups = new Map();
-  for (const a of cachedAlerts()) {
-    const g = groups.get(a.title) || { title: a.title, critical: false, clusters: new Set() };
-    g.critical = g.critical || a.level === 'critical';
-    if (a.cluster) g.clusters.add(a.cluster.name);
-    groups.set(a.title, g);
-  }
-  const top = [...groups.values()]
-    .sort((x, y) => (y.critical - x.critical) || (y.clusters.size - x.clusters.size))
-    .slice(0, 3);
-
-  const healthLine = [
-    `${by.green.length} green`, `${by.yellow.length} yellow`, `${by.red.length} red`,
-    by.unknown.length ? `${by.unknown.length} loading` : null,
-  ].filter(Boolean).join(' · ');
-
-  return h('div.grid.c4.health-tiles', { style: { marginBottom: '14px' } },
-    h(`div.stat${by.red.length || down.length ? '.bad' : ''}`,
-      h('div.k', 'Cluster health'),
-      h('div.v', `${online} / ${rows.length}`),
-      h('div.d', healthLine)),
-    h(`div.stat${by.red.length ? '.bad' : ''}`,
-      h('div.k', 'Red clusters'),
-      h('div.v', String(by.red.length)),
-      h('div.d.names', by.red.length ? nameList(by.red.map((r) => r.c.name)) : 'none')),
-    h(`div.stat${down.length ? '.bad' : ''}`,
-      h('div.k', 'Unreachable'),
-      h('div.v', String(down.length)),
-      h('div.d.names', down.length ? nameList(down.map((r) => r.c.name)) : 'all reachable')),
-    h(`div.stat${top.some((g) => g.critical) ? '.bad' : ''}`,
-      h('div.k', 'Top errors'),
-      top.length
-        ? h('div.top-errs', ...top.map((g) => h('div',
-            h(`span.dot.${g.critical ? 'crit' : 'warn'}`),
-            h('span.t', g.title),
-            g.clusters.size ? h('span.muted', ` · ${g.clusters.size} cluster${g.clusters.size === 1 ? '' : 's'}`) : null)))
-        : h('div.d', 'no open alerts')));
+function summaryBox(rows) {
+  const s = fleetSummary(rows, healthState, inZabbix() ? [] : openAlertsNow());
+  const dot = (cls, n, label) => h('span.fs-count', h(`span.dot.${cls}`), h('b', String(n)), ` ${label}`);
+  const healthRow = h('div.fs-row',
+    h('span.fs-total', h('b', String(s.total)), ` cluster${s.total === 1 ? '' : 's'}`),
+    dot('ok', s.green, 'green'), dot('warn', s.yellow, 'yellow'), dot('crit', s.red, 'red'),
+    s.loading ? dot('muted', s.loading, 'loading') : null,
+    s.unreachable.length
+      ? h('span.fs-count.fs-bad', h('span.dot.crit'), h('b', String(s.unreachable.length)), ` unreachable: ${nameList(s.unreachable)}`)
+      : h('span.fs-count.muted', 'all reachable'),
+    s.red ? h('span.fs-count.fs-bad', `red: ${nameList(s.redNames)}`) : null);
+  // Inside Zabbix the problems are Zabbix's to show — Monitoring → Problems, the dashboard.
+  const alertRow = inZabbix() ? null : h('div.fs-row',
+    s.alerts
+      ? h('span', h('b', `${s.alerts} open alert${s.alerts === 1 ? '' : 's'}`), ` \u2014 ${s.critical} critical, ${s.warning} warning`,
+          s.problemKinds > s.problems.length ? h('span.muted', ` \u00b7 ${s.problemKinds} kinds of problem`) : null)
+      : h('span.muted', 'No open alerts'));
+  const problemRow = !inZabbix() && s.problems.length ? h('div.fs-row.fs-problems',
+    h('span.muted', 'Top problems:'),
+    ...s.problems.map((g) => h('span.fs-problem', { title: g.title },
+      h(`span.dot.${g.critical ? 'crit' : 'warn'}`), h('span.t', g.title),
+      h('span.muted', ` \u00b7 ${g.clusters || g.count} ${g.clusters ? `cluster${g.clusters === 1 ? '' : 's'}` : `alert${g.count === 1 ? '' : 's'}`}`)))) : null;
+  return h(`section.card.fleet-summary${s.bad ? '.bad' : ''}`,
+    h('div.fs-head',
+      h('div.fs-title', 'Fleet summary'),
+      inZabbix() ? null : h('button.btn.sm.primary', { onclick: () => navigateTo('alerts') }, 'Open Alerts')),
+    healthRow, alertRow, problemRow,
+    // Freshness last: the coverage line keeps its own element and refills it in place while a
+    // Read all runs, so it is placed here as it is, not rebuilt.
+    coverageLine());
 }
 
 function summaryCard(rows, all) {

@@ -275,6 +275,10 @@ pub fn required_role(msg_type: &str) -> Option<Role> {
         // The caller's own notification history. Not a write to any cluster, so no write
         // unlock; anybody signed in, and the handler only ever uses the caller's own name.
         "NOTIFY_PUT" | "NOTIFY_LIST" | "NOTIFY_CLEAR" => Some(Role::Guest),
+        // Silences: everyone who sees alerts may see why some are quiet; setting or removing
+        // one changes what the whole team is shown, so an operator's (it is audited).
+        "SILENCE_LIST" => Some(Role::User),
+        "SILENCE_SET" | "SILENCE_CLEAR" => Some(Role::Operator),
 
         // Anything new is refused until somebody decides where it belongs.
         _ => Some(Role::Admin),

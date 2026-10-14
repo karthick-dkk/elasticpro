@@ -9,6 +9,8 @@ import { readAllState, startReadAll } from '../lib/read-all.js';
 import { card, collapsible, pill, statTile, table, empty, connectionBanner } from './common.js';
 import { hbarList, legend, gauge, STATUS } from '../lib/charts.js';
 import { navigateTo } from '../core/intent.js';
+import { silenceFor, silences, silence, unsilence, loadSilences, SILENCE_FOR } from '../core/silences.js';
+import { modal, field, select as selectField, text as textField, val } from '../ui/modal.js';
 import { rowMenu, ICON, popover, toast, closePopover } from '../ui/menu.js';
 import { confirmDialog, inputDialog } from '../ui/modal.js';
 import {
@@ -81,7 +83,7 @@ export function render(el) {
   el.classList.add('dense');
   // Acknowledgements live on this machine; load them before the first paint so rows do
   // not flicker from unacknowledged to acknowledged.
-  Promise.all([loadAcks(), loadCurrentUser()])
+  Promise.all([loadAcks(), loadCurrentUser(), loadSilences()])
     .then(() => { pruneAcks(alerts().map((a) => a.key)); draw(); })
     .catch(() => {});
   draw();
@@ -101,8 +103,9 @@ function filtered(all) {
   let rows = all;
   if (ui.level !== 'all') rows = rows.filter((a) => (ui.level === 'critical' ? a.level === 'critical' : a.level !== 'critical'));
   if (ui.cluster !== 'all') rows = rows.filter((a) => a.cluster && a.cluster.id === ui.cluster);
-  if (ui.show === 'open') rows = rows.filter((a) => !isAcked(a.key));
+  if (ui.show === 'open') rows = rows.filter((a) => !isAcked(a.key) && !silenceFor(a));
   else if (ui.show === 'acked') rows = rows.filter((a) => isAcked(a.key));
+  else if (ui.show === 'silenced') rows = rows.filter((a) => !!silenceFor(a));
   const t = ui.text.trim().toLowerCase();
   if (t) {
     rows = rows.filter((a) => {
@@ -132,7 +135,9 @@ function draw() {
   const crit = all.filter((a) => a.level === 'critical');
   const warn = all.filter((a) => a.level !== 'critical');
   const acked = all.filter((a) => isAcked(a.key));
-  const open = all.filter((a) => !isAcked(a.key));
+  const silencedRows = all.filter((a) => !!silenceFor(a));
+  // Open: neither acknowledged nor silenced — the same definition as every count elsewhere.
+  const open = all.filter((a) => !isAcked(a.key) && !silenceFor(a));
   const byCluster = new Map();
   all.forEach((a) => {
     const k = a.cluster ? a.cluster.id : '?';
@@ -145,7 +150,7 @@ function draw() {
     h('div.grid.c4', { style: { marginBottom: '10px' } },
       statTile('Open', num(open.length), open.length ? 'not yet acknowledged' : 'all acknowledged'),
       statTile('Critical', num(crit.filter((a) => !isAcked(a.key)).length), `${num(crit.length)} in total`),
-      statTile('Acknowledged', num(acked.length), acked.length ? 'seen, still active' : 'none'),
+      statTile('Acknowledged / silenced', `${num(acked.length)} / ${num(silencedRows.length)}`, silences().length ? `${silences().length} silence${silences().length === 1 ? '' : 's'} in force` : 'no silences'),
       statTile('Clusters affected', num(byCluster.size), `of ${num(list.length)} configured`)),
 
     h('div', { style: { marginBottom: '10px' } }, statsCard(all, crit, warn, open, acked, byCluster, list)),
@@ -168,6 +173,7 @@ function draw() {
         const sel = h('select', { onchange: (e) => { ui.show = e.target.value; draw(); } },
           h('option', { value: 'open' }, `Open (${open.length})`),
           h('option', { value: 'acked' }, `Acknowledged (${acked.length})`),
+          h('option', { value: 'silenced' }, `Silenced (${silencedRows.length})`),
           h('option', { value: 'all' }, `Everything (${all.length})`));
         sel.value = ui.show; return sel;
       })()),
@@ -184,6 +190,8 @@ function draw() {
         h('span.muted', { style: { fontSize: '11.5px' } }, `updated ${ago(state.lastRefresh)}`),
         h('button.btn.sm', { onclick: () => { ui.level = 'all'; ui.cluster = 'all'; ui.text = ''; ui.show = 'open'; draw(); } }, 'Clear'),
         h('button.btn.sm', { onclick: () => refreshAll({ force: true, selected: true }) }, '↻ Refresh'))),
+
+    silencesCard(),
 
     ui.view !== 'table' && all.length
       ? h('div', { style: { marginTop: '10px' } }, graphView(rows, all))
@@ -340,9 +348,56 @@ async function ensureUser() {
   return currentUser();
 }
 
+/* ---------------------------------- silences --------------------------------- */
+
+function silenceLabel(s) {
+  return s.until ? `silenced until ${new Date(s.until).toLocaleString([], { dateStyle: 'short', timeStyle: 'short' })}` : 'silenced until removed';
+}
+
+/** Silence one alert, or a whole cluster for maintenance: the team's list, on the server. */
+async function askSilence(scope, target, name) {
+  const body = [
+    field('For', selectField('sil-for', '60', SILENCE_FOR.map(([l, m]) => [m === null ? 'none' : String(m), l]))),
+    field('Reason', textField('sil-why', '', { placeholder: scope === 'cluster' ? 'e.g. disk replacement, change 4711' : 'e.g. known, ticket 123' }),
+      scope === 'cluster'
+        ? 'Every alert of this cluster leaves the open counts until then. They stay listed under Silenced.'
+        : 'This alert leaves the open counts until then, for everyone. It stays listed under Silenced.'),
+  ];
+  const ok = await modal(scope === 'cluster' ? `Silence ${name}` : 'Silence this alert', scope === 'cluster' ? 'maintenance' : name, body,
+    (ctx) => [h('div', { style: { marginLeft: 'auto', display: 'flex', gap: '8px' } },
+      h('button.btn', { onclick: () => ctx.done(null) }, 'Cancel'),
+      h('button.btn.primary', { onclick: async () => {
+        const f = val('sil-for');
+        const res = await silence(scope, target, f === 'none' ? null : Number(f), val('sil-why'));
+        if (res && res.ok) ctx.done(true); else ctx.msg((res && res.message) || 'Could not set the silence');
+      } }, 'Silence')),
+    ], { width: '480px' });
+  if (ok) { toast(`Silenced ${scope === 'cluster' ? name : 'the alert'}`, 'ok', 3000); draw(); }
+}
+
+async function doUnsilence(s) {
+  const res = await unsilence(s.id);
+  if (res && res.ok) { toast('Silence removed', 'ok', 2500); draw(); }
+  else toast(`Could not remove the silence: ${(res && res.message) || 'unknown error'}`, 'err', 6000);
+}
+
+function silencesCard() {
+  const list = silences();
+  if (!list.length) return null;
+  const names = new Map(clusters().map((c) => [c.id, c.name]));
+  return h('div', { style: { marginTop: '10px' } }, card('Silences in force', `${list.length} · shared with everyone, kept on the server`,
+    table(['What', 'Until', 'Why', 'By', ''], list.map((s) => h('tr',
+      h('td', s.scope === 'cluster' ? h('span', h('b', names.get(s.target) || s.target), h('span.muted', ' (whole cluster)')) : h('span.mono', { style: { fontSize: '11.5px' } }, s.target)),
+      h('td', s.until ? new Date(s.until).toLocaleString() : 'until removed'),
+      h('td.muted', s.reason || '—'),
+      h('td.muted', `${s.by} · ${ago(s.at)}`),
+      h('td', { style: { textAlign: 'right' } }, h('button.btn.sm', { onclick: () => doUnsilence(s) }, 'Remove')))), {})));
+}
+
 async function doAck(a) {
   await ensureUser();
   await acknowledge(a.key);
+  bus.emit('alerts-changed');   // the open counts (nav badge, top bar) drop it now
   draw();
 }
 
@@ -352,6 +407,7 @@ async function doUnack(a) {
     { yes: 're-open' });
   if (!ok) return;
   await unacknowledge(a.key);
+  bus.emit('alerts-changed');
   draw();
 }
 
@@ -469,7 +525,8 @@ function alertRow(a, rec, notes) {
           `ack ${rec.ackedBy || 'operator'} · ${ago(rec.ackedAt)}`) : null),
       h('td.muted', { style: { fontSize: '12px', maxWidth: '360px', wordBreak: 'break-word' } }, a.detail || ''),
       h('td', snapshotCell(a)),
-      h('td', acked ? pill('acknowledged', 'grey') : pill('open', a.level === 'critical' ? 'red' : 'yellow')),
+      h('td', silenceFor(a) ? pill(silenceLabel(silenceFor(a)), 'grey')
+        : acked ? pill('acknowledged', 'grey') : pill('open', a.level === 'critical' ? 'red' : 'yellow')),
       h('td', (() => {
         const btn = h('button.btn.sm.ghost', {
           title: notes ? `${notes} note(s) — click to add or remove` : 'Add a note',
@@ -488,8 +545,12 @@ function alertRow(a, rec, notes) {
           { label: `Go to ${r.label}`, icon: ICON.console,
             onClick: () => navigateTo(r.page, null, { cluster: a.cluster ? a.cluster.id : null }) },
           { sep: true },
+          { label: 'Silence this alert…', icon: '🔕', onClick: () => askSilence('alert', a.key, a.title) },
+          a.cluster ? { label: `Silence ${a.cluster.name} (maintenance)…`, icon: '🔕', onClick: () => askSilence('cluster', a.cluster.id, a.cluster.name) } : null,
+          silenceFor(a) ? { label: 'Remove the silence', icon: '🔔', onClick: () => doUnsilence(silenceFor(a)) } : null,
+          { sep: true },
           { hint: `key: ${a.key}` },
-        ], { title: `Actions for ${a.title}` }))));
+        ].filter(Boolean), { title: `Actions for ${a.title}` }))));
 }
 
 /**

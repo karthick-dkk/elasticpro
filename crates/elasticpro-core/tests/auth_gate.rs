@@ -673,3 +673,31 @@ async fn an_edition_with_accounts_still_lists_them() {
     assert_eq!(res["ok"], json!(true), "{res}");
     assert!(res["users"].as_array().is_some_and(|u| !u.is_empty()), "{res}");
 }
+
+// Silences name a cluster: a caller scoped to some Zabbix user groups can neither see nor
+// set nor remove a silence for a cluster outside what that scope shows them.
+#[tokio::test]
+async fn a_scoped_caller_cannot_see_or_touch_silences_outside_its_scope() {
+    use elasticpro_core::auth::{Caller, Edition, Role};
+    use serde_json::json;
+    let dir = support::TempDir::new("silence-scope");
+    let c = elasticpro_core::Core::new_with_rounds(Some(dir.0.clone()), Edition::Hosted, 1);
+    let admin = Caller { name: "root".into(), role: Role::Admin, must_change: false, scope: None };
+    let primed = c.handle_as(json!({ "type": "PRIME", "readOnly": true, "clusters": [{ "id": "prod", "url": "http://127.0.0.1:1" }] }), Some(admin.clone())).await;
+    assert_eq!(primed["ok"], json!(true), "{primed}");
+    // An operator limited to a Zabbix group that holds none of the configured clusters.
+    let scoped = Caller { name: "uma".into(), role: Role::Operator, must_change: false, scope: Some(vec!["ES elsewhere".into()]) };
+    let set = c.handle_as(json!({ "type": "SILENCE_SET", "scope": "cluster", "target": "prod", "minutes": 60 }), Some(admin.clone())).await;
+    assert_eq!(set["ok"], json!(true), "{set}");
+    let id = set["silence"]["id"].as_str().unwrap().to_string();
+    for m in [json!({ "type": "SILENCE_SET", "scope": "cluster", "target": "prod", "minutes": 60 }),
+              json!({ "type": "SILENCE_SET", "scope": "alert", "target": "prod:disk", "minutes": 60 }),
+              json!({ "type": "SILENCE_CLEAR", "id": id })] {
+        let r = c.handle_as(m.clone(), Some(scoped.clone())).await;
+        assert_eq!(r["kind"], json!("forbidden"), "{m} -> {r}");
+    }
+    let listed = c.handle_as(json!({ "type": "SILENCE_LIST" }), Some(scoped.clone())).await;
+    assert_eq!(listed["silences"], json!([]), "another scope's silence is not listed: {listed}");
+    let mine = c.handle_as(json!({ "type": "SILENCE_LIST" }), Some(admin)).await;
+    assert_eq!(mine["silences"].as_array().unwrap().len(), 1, "{mine}");
+}

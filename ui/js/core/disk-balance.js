@@ -149,6 +149,9 @@ export function diskBalance(data = {}, settings = null) {
   const headroom = emptiest.pct < wm.low;   // is there anywhere useful to move data to?
 
   const reasons = [];
+  // Why, as codes beside the sentences: the alert tuning (core/alert-tuning.js) needs to know
+  // what the verdict rests on without reading prose.
+  const causes = [];
   let verdict = 'ok';
 
   // Say this first: while either switch is off, nothing else in this panel can happen.
@@ -156,31 +159,38 @@ export function diskBalance(data = {}, settings = null) {
     const off = [!alloc.allocationOn ? `allocation is "${alloc.allocation}"` : null,
                  !alloc.rebalanceOn ? `rebalancing is "${alloc.rebalance}"` : null].filter(Boolean).join(' and ');
     reasons.push(`${off} — Elasticsearch will not move shards on its own until that is set back to "all".`);
+    causes.push('switch-off');
     verdict = 'watch';
   }
 
   if (aboveFlood.length) {
     verdict = 'critical';
     reasons.push(`${aboveFlood.map((n) => n.name).join(', ')} at or above the flood stage (${wm.flood}%). Elasticsearch makes indices with a shard there read-only.`);
+    causes.push('flood');
   }
   if (aboveHigh.length) {
     if (verdict !== 'critical') verdict = 'required';
     reasons.push(`${aboveHigh.map((n) => n.name).join(', ')} above the high watermark (${wm.high}%). Elasticsearch will try to move shards away.`);
+    causes.push('high');
   }
   if (base.unassigned) {
     if (verdict === 'ok' || verdict === 'watch') verdict = 'required';
     reasons.push(`${base.unassigned} shard(s) unassigned — they may have nowhere to go.`);
+    causes.push('unassigned');
   }
   if (spread >= SPREAD_ACT && headroom) {
     if (verdict === 'ok' || verdict === 'watch') verdict = 'required';
     reasons.push(`${spread.toFixed(1)} points between ${fullest.name} (${fullest.pct.toFixed(1)}%) and ${emptiest.name} (${emptiest.pct.toFixed(1)}%), and the emptiest node has room.`);
+    causes.push('spread');
   } else if (spread >= SPREAD_WATCH) {
     if (verdict === 'ok') verdict = 'watch';
     reasons.push(`${spread.toFixed(1)} points between the fullest and emptiest node.`);
+    causes.push('spread');
   }
   if (aboveLow.length && verdict === 'ok') {
     verdict = 'watch';
     reasons.push(`${aboveLow.map((n) => n.name).join(', ')} above the low watermark (${wm.low}%). New shards will avoid them.`);
+    causes.push('low');
   }
   // Everything full is not a balance problem, and saying "rebalance" would be wrong.
   const allFull = nodes.every((n) => n.pct >= wm.high);
@@ -192,7 +202,7 @@ export function diskBalance(data = {}, settings = null) {
   return {
     ...base,
     fullest, emptiest, spread, shardSpread, avgShards,
-    aboveFlood, aboveHigh, aboveLow, headroom, allFull,
+    aboveFlood, aboveHigh, aboveLow, headroom, allFull, causes,
     verdict, reasons,
     // Reallocation only helps when something is skewed AND there is somewhere to put it.
     reallocationHelps: !allFull && (spread >= SPREAD_WATCH || aboveHigh.length > 0 || aboveFlood.length > 0) && headroom,

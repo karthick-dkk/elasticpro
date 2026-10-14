@@ -2,7 +2,9 @@
 
 import { h, mount } from '../lib/dom.js';
 import { bytes, num, ago } from '../lib/fmt.js';
-import { state, clusters, activeClusters, fetchIndices } from '../core/state.js';
+import { state, clusters, activeClusters, fetchIndices, fleetMode, coverage, askFleetDataset } from '../core/state.js';
+import { coverageBar } from '../lib/freshness.js';
+import { readAllState, startReadAll } from '../lib/read-all.js';
 import { card, collapsible, pill, statTile, empty, table } from './common.js';
 import { activeRules, runAutomation, resultsFor, allProposals, allBlocked, isRunning, lastRunAt, canArm } from '../core/automation.js';
 import { deleteIndices, closeIndices } from '../ui/index-actions.js';
@@ -16,11 +18,47 @@ import { navigateTo } from '../core/intent.js';
 let host = null;
 const ui = { showBlocked: true };
 
+/**
+ * What the rules read beyond the background datasets: the index list (the retention rules
+ * match on it) and the full snapshot listing, whose index names the snapshot verification
+ * reads before anything is proposed for deletion. What "read" means in the coverage line,
+ * and what Read all asks for.
+ */
+const DATASETS = ['indices', 'snapshots_full'];
+/** The Read all run, kept across redraws. */
+const reading = readAllState();
+
+/**
+ * Whether opening the page may read the clusters by itself. With the fleet cache and more
+ * than one cluster, no: a check is an index list and a snapshot listing per cluster —
+ * 225 reads at 120 clusters — and reading the fleet is a decision the coverage bar's
+ * Read all takes. One selected cluster is the page asking for what it shows, so that
+ * still reads; so does the direct (no-cache) mode, which has no coverage bar to offer.
+ */
+export function readsOnOpen(fleet, clusterCount) {
+  return !fleet || clusterCount <= 1;
+}
+
+/** The coverage line (lib/freshness.js coverageBar). Only with the fleet cache. */
+function coverageLine() {
+  if (!fleetMode()) return null;
+  const ids = activeClusters().map((c) => c.id);
+  return coverageBar({
+    cov: coverage(ids, DATASETS), datasets: DATASETS, state: reading,
+    onReadAll: () => startReadAll(reading, { clusterIds: ids, datasets: DATASETS, ask: askFleetDataset,
+      onChange: () => { if (host && host.isConnected) coverageLine(); } })
+      // What was read is what the rules need: evaluate it now rather than leave the
+      // person to press Run checks after waiting for the read.
+      .then((res) => { if (res && host && host.isConnected) check(); }),
+  });
+}
+
 export function render(el) {
   host = el;
   el.classList.add('dense');
   draw();
-  if (!lastRunAt()) check();          // first visit: evaluate without being asked
+  // First visit: evaluate without being asked — unless that means reading the fleet.
+  if (!lastRunAt() && readsOnOpen(fleetMode(), activeClusters().length)) check();
 }
 export function onData() { if (host && host.isConnected) draw(); }
 
@@ -45,16 +83,20 @@ function draw() {
   const blocked = allBlocked();
   const freed = proposals.reduce((s, p) => s + (p.freed || 0), 0);
   const arm = canArm();
+  const ran = !!lastRunAt();
 
   mount(host,
     h('div.grid.c4', { style: { marginBottom: '10px' } },
-      statTile('Proposed', String(proposals.length),
-        proposals.length ? 'waiting for you to run them' : 'nothing to do right now'),
-      statTile('Held back', String(blocked.length),
-        blocked.length ? 'not safe to propose — see why below' : 'nothing was refused'),
+      // Before the first check there is no count to show, only the absence of one.
+      statTile('Proposed', ran ? String(proposals.length) : '–',
+        !ran ? 'not checked yet' : proposals.length ? 'waiting for you to run them' : 'nothing to do right now'),
+      statTile('Held back', ran ? String(blocked.length) : '–',
+        !ran ? 'not checked yet' : blocked.length ? 'not safe to propose — see why below' : 'nothing was refused'),
       statTile('Would free', freed ? bytes(freed) : '–', 'if every proposal is run'),
       statTile('Last checked', lastRunAt() ? ago(lastRunAt()) : 'never',
         `${list.length} cluster${list.length === 1 ? '' : 's'}`)),
+
+    coverageLine(),
 
     h('div.toolbar',
       h('button.btn.sm.primary', { disabled: isRunning(), onclick: check },
@@ -111,7 +153,9 @@ function ruleCard(rule, list) {
         ...notes.map((x) => h('div.muted', { style: { fontSize: '11.5px' } },
           h('b', x.cluster.name), ' — ', x.item.error ? `rule failed: ${x.item.error}` : x.item.skipped)),
         !active.length && !held.length && !notes.length
-          ? empty('Nothing for this rule on any cluster.') : null),
+          // Not run is not "nothing to do": say which it is.
+          ? empty(lastRunAt() ? 'Nothing for this rule on any cluster.'
+            : 'Not checked yet — read the clusters (Read all, above) or press Run checks.') : null),
       { key: `auto-${rule.id}`, open: active.length > 0 }));
 }
 

@@ -8,7 +8,7 @@ import { createRedrawGate, normalisePolicy, normaliseScope, openingSelection } f
 import * as cfg from './core/config.js';
 import { state, bus, setConfig, refreshAll, refreshModule, REFRESH_MODULES, startAutoRefresh, clusters, fleetMode,
          alerts, cachedAlerts, worstHealth, requestLoad, fleetPolicy,
-         clustersNeedingCredential, clustersWithAuthError, hasSessionCredential, isReadOnly, healthState, activeClusters } from './core/state.js';
+         clustersNeedingCredential, clustersWithAuthError, hasSessionCredential, isReadOnly, healthState, activeClusters, openAlertsNow, openAlertCounts } from './core/state.js';
 import { rowMenu, toast, notificationBell, setNotificationSink } from './ui/menu.js';
 import { showCredentialDialog, serverHoldsCredentials, serverCredentialMessage } from './ui/credential-dialog.js';
 import { loadSnapshotFile, isSnapshotMode } from './core/snapshot.js';
@@ -58,6 +58,7 @@ import * as pSettings from './pages/settings.js';
 import * as pAutomation from './pages/automation.js';
 import * as pAccounts from './pages/accounts.js';
 import * as pRequests from './pages/requests.js';
+import { loadSilences } from './core/silences.js';
 import { setRequestOrigin } from './core/es.js';
 
 /**
@@ -327,8 +328,9 @@ let navBuiltFor = '';
 function renderNav() {
   const nav = $('#nav');
   if (!nav) return;
-  const a = cachedAlerts();
-  const crit = a.filter((x) => x.level === 'critical').length;
+  // Open alerts only — acknowledged or silenced ones are on the Alerts page, not in a count.
+  const a = openAlertsNow();
+  const crit = openAlertCounts().critical;
   const shown = visiblePages();
   const key = shown.map((p) => p.id).join(',');
   if (navBuiltFor !== key || !nav.firstChild) {
@@ -393,12 +395,41 @@ function healthPill(list) {
   }, h('i.dot'), parts.join(' · '));
 }
 
+/** Above this many clusters the top bar adds a find-as-you-type box beside the picker. */
+const FINDER_ABOVE = 30;
+
+/**
+ * Find a cluster by any part of its name, tags or address. A native <datalist> — no
+ * dropdown to build, keyboard and screen readers handled by the browser — whose choice is
+ * applied through the picker's own change handler, so the two can never disagree.
+ */
+function clusterFinder(sel) {
+  const id = 'cluster-finder-list';
+  const list = h(`datalist#${id}`, ...clusters().map((c) => h('option', { value: c.name },
+    [...(c.tags || []), c.url].filter(Boolean).join(' · '))));
+  const input = h('input#cluster-finder', {
+    type: 'search', list: id, placeholder: `Find among ${clusters().length}…`, autocomplete: 'off',
+    'aria-label': 'Find a cluster by name, tag or address', style: { width: '170px' },
+    onchange: (e) => {
+      const q = e.target.value.trim().toLowerCase();
+      if (!q) return;
+      const hit = clusters().find((c) => c.name.toLowerCase() === q)
+        || clusters().find((c) => `${c.name} ${(c.tags || []).join(' ')} ${c.url}`.toLowerCase().includes(q));
+      if (!hit) { toast(`No cluster matches "${e.target.value}"`, 'warn', 3000); return; }
+      sel.value = hit.id;
+      sel.dispatchEvent(new Event('change', { bubbles: true }));
+    },
+  });
+  return h('span', { style: { display: 'inline-flex' } }, input, list);
+}
+
 function renderTopbar() {
   const bar = $('#topbar');
   if (!bar) return;
   const page = PAGES.find((p) => p.id === currentPage) || PAGES[0];
-  const a = cachedAlerts();
-  const crit = a.filter((x) => x.level === 'critical').length;
+  // Open alerts only — acknowledged or silenced ones are on the Alerts page, not in a count.
+  const a = openAlertsNow();
+  const crit = openAlertCounts().critical;
   const theme = document.documentElement.getAttribute('data-theme') || 'system';
   resolveSelection(page);
   const healthSig = activeClusters().map((c) => `${c.id}:${healthState(state.data.get(c.id))}`).join(',');
@@ -425,6 +456,9 @@ function renderTopbar() {
   clusters().forEach((c) => sel.append(h('option', { value: c.id }, c.name)));
   resolveSelection(page);
   sel.value = state.selected;
+  // On a large fleet a dropdown of a hundred names is scrolled, not read: a box beside it
+  // finds a cluster by any part of its name, tag or address as you type.
+  const finder = clusters().length > FINDER_ABOVE ? clusterFinder(sel) : null;
 
   mount(bar,
     // The product name, and nothing else. The config filename used to sit under it, which
@@ -433,7 +467,7 @@ function renderTopbar() {
     h('div.brand', h('img', { src: 'icons/icon48.png', alt: '' }),
       h('div', h('b', 'ElasticPro'))),
     h('h1', page.label),
-    h('label.field', { style: { flexDirection: 'row', alignItems: 'center', gap: '6px' } }, sel),
+    h('label.field', { style: { flexDirection: 'row', alignItems: 'center', gap: '6px' } }, sel, finder),
     h('div.spacer'),
     (() => {
       const need = clustersNeedingCredential().length;
@@ -571,7 +605,7 @@ function renderSideFoot() {
   // Rebuilt only when something on it changed; see renderTopbar.
   const key = JSON.stringify([meta && meta.name, meta && meta.path, meta && meta.ephemeral, clusters().length, worstHealth(),
     coreInfo.version, total, perMin.toFixed(1), (coreInfo.tunnels || []).map((t) => [t.id, t.status, t.user, t.host, t.port]),
-    isSnapshotMode(), state.snapshot && state.snapshot.host, pol && pol.mode, pol && pol.pausedAll]);
+    isSnapshotMode(), state.snapshot && state.snapshot.host, pol && pol.mode, pol && pol.resolvedMode, pol && pol.pausedAll]);
   if (key === sideFootKey && el.firstChild) return;
   sideFootKey = key;
 
@@ -591,12 +625,13 @@ function renderSideFoot() {
     pol && pol.pausedAll
       ? h('span.pill.grey', { title: 'The request policy pauses every request: nothing new is sent to any cluster until an administrator resumes (Config → Requests, or the Request Centre)' }, 'requests paused')
       : null,
-    pol && (pol.mode === 'hybrid' || pol.mode === 'on-demand')
+    // What the poller is actually doing: "auto" resolves to background or hybrid by fleet size.
+    pol && ((pol.resolvedMode || pol.mode) === 'hybrid' || (pol.resolvedMode || pol.mode) === 'on-demand')
       ? h('span.row.muted', {
-          title: pol.mode === 'hybrid'
-            ? 'Only health is fetched in the background; the rest is fetched while a page shows it (Config → Requests)'
+          title: (pol.resolvedMode || pol.mode) === 'hybrid'
+            ? `Only health is fetched in the background; the rest is fetched while a page shows it${pol.mode === 'auto' ? ' — automatic, because the fleet is larger than 25 clusters' : ''} (Config → Requests)`
             : 'Nothing is fetched in the background; each page asks for what it shows when it opens (Config → Requests)',
-        }, `mode: ${pol.mode}`)
+        }, `mode: ${pol.mode === 'auto' ? `auto → ${pol.resolvedMode}` : pol.mode}`)
       : null,
     // one per jump host: "jumpwin ● up"
     ...((coreInfo.tunnels || []).map((t) => {
@@ -751,6 +786,9 @@ async function start(config, handle) {
   }
   await refreshAll({ force: true });
   startAutoRefresh();
+  // The team's alert silences: loaded now and kept current, so a silence set on another
+  // screen leaves this one's counts within a minute.
+  if (!isSnapshotMode()) { loadSilences(); setInterval(() => { loadSilences(); }, 60000); }
 }
 
 /**
@@ -958,6 +996,8 @@ function renderPendingPill(n) {
 }
 const redrawGate = createRedrawGate({ apply: () => scheduleDataRedraw(), policy: redrawPolicy, onChange: renderPendingPill });
 const scheduleNavRedraw = coalesce(() => renderNav());
+// Acknowledging or silencing changes what counts as open: the badge and the bar say so at once.
+bus.on('alerts-changed', () => { renderNav(); topbarKey = ''; renderTopbar(); });
 bus.on('data', () => {
   scheduleNavRedraw();
   const p = PAGES.find((x) => x.id === currentPage);

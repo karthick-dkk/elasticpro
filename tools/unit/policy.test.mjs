@@ -8,10 +8,14 @@ const ROOT = path.resolve(import.meta.dirname, '../..');
 const P = await import(pathToFileURL(path.join(ROOT, 'ui/js/core/policy.js')).href);
 const D = P.FALLBACK_DEFAULTS;
 
-test('three presets, each producing a whole policy', () => {
-  assert.deepEqual(P.PRESETS.map((x) => x.id), ['background', 'hybrid', 'client']);
+test('four presets, automatic first, each producing a whole policy', () => {
+  assert.deepEqual(P.PRESETS.map((x) => x.id), ['auto', 'background', 'hybrid', 'client']);
+  assert.match(P.PRESETS[0].label, /^Automatic \(recommended\)/);
+  assert.equal(P.MODES[0], 'auto', 'auto is the default mode');
+  assert.equal(D.mode, 'auto');
+  assert.deepEqual(P.applyPreset(null, 'auto', D), P.normalisePolicy(D, D), 'automatic is the shipped policy');
   const bg = P.applyPreset(null, 'background', D);
-  assert.deepEqual(bg, P.normalisePolicy(D, D), 'background is the shipped policy');
+  assert.equal(bg.mode, 'background');
   assert.equal(P.applyPreset(bg, 'hybrid', D).mode, 'hybrid');
   const client = P.applyPreset(bg, 'client', D);
   assert.equal(client.mode, 'on-demand');
@@ -27,6 +31,8 @@ test('a preset keeps what is paused', () => {
 
 test('activePreset recognises a preset and not a hand-made policy', () => {
   assert.equal(P.activePreset(P.applyPreset(null, 'client', D), D), 'client');
+  assert.equal(P.activePreset(P.normalisePolicy(D, D), D), 'auto', 'the shipped policy is the automatic preset');
+  assert.equal(P.activePreset(P.applyPreset(null, 'background', D), D), 'background');
   assert.equal(P.activePreset({ ...P.applyPreset(null, 'background', D), paused: { all: true, clusters: ['x'] } }, D), 'background');
   const custom = P.applyPreset(null, 'background', D);
   custom.intervalsSec = { ...custom.intervalsSec, nodes: 999 };
@@ -48,7 +54,7 @@ test('normalise clamps like the core and drops unknown datasets', () => {
   assert.deepEqual(n.concurrency, { global: 256, perCluster: 1, tunnel: 32 });
   assert.equal(n.timeoutMs, 1000);
   assert.deepEqual(n.paused, { all: false, clusters: ['a', 'b'] });
-  assert.equal(P.normalisePolicy({ mode: 'sometimes' }, D).mode, 'background');
+  assert.equal(P.normalisePolicy({ mode: 'sometimes' }, D).mode, 'auto');
 });
 
 test('fromForm names every field it had to change', () => {
@@ -87,7 +93,8 @@ test('togglePaused: idempotent, keeps order, removes on resume, returns a new po
 
 test('describeMode has a sentence for each mode', () => {
   for (const m of P.MODES) assert.match(P.describeMode(m), /\.$/);
-  assert.equal(new Set(P.MODES.map(P.describeMode)).size, 3);
+  assert.equal(new Set(P.MODES.map(P.describeMode)).size, 4);
+  assert.equal(P.describeMode('auto'), 'Background up to 25 clusters, hybrid above — so a large fleet is not polled for everything all the time.');
 });
 
 test('every dataset has a label', () => {
