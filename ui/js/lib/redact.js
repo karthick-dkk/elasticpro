@@ -11,7 +11,10 @@
  * type) is still covered.
  */
 export const REDACTED = '[redacted]';
-const SECRET_KEY = /pass(?:word|wd|phrase)?|secret|api[_-]?key|token|private[_-]?key|credential|authorization/i;
+// Field names that hold a secret: passwords and passphrases, tokens and API keys, private
+// and encryption keys, cloud credentials (S3 access_key/secret_key, Azure sas/key,
+// GCS credentials), client certificates, cookies and Authorization headers.
+const SECRET_KEY = /pass(?:word|wd|phrase)?|secret|api[_-]?key|access[_-]?key|encryption[_-]?key|session[_-]?key|private[_-]?key|account[_-]?key|token|credential|authori[sz]ation|bearer|cookie|\bsas\b|_sas\b|cert(?:ificate)?[_-]?(?:key|pass)|client[_-]?cert|jwt|otp/i;
 
 /**
  * The same for a request path: a query parameter whose name looks like a secret
@@ -59,8 +62,12 @@ function redactDoc(text) {
   }
 }
 
+/** "Authorization: Basic …" / "Bearer …" written into a body, as a header someone pasted. */
+const AUTH_LINE = /\b(Basic|Bearer|ApiKey)\s+[A-Za-z0-9._~+/=-]{8,}/g;
+
 export function redactSecrets(body) {
   if (typeof body !== 'string' || !body) return body;
+  body = body.replace(AUTH_LINE, `$1 ${REDACTED}`);
   // One document, or newline-delimited ones (_bulk, _msearch): each line judged on its own.
   try { JSON.parse(body); return redactDoc(body); } catch (_) { /* not a single document */ }
   return body.split('\n').map((line) => (line.trim() ? redactDoc(line) : line)).join('\n');

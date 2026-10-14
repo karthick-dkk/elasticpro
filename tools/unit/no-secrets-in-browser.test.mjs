@@ -69,3 +69,14 @@ test('redaction reads keys as a JSON parser does: escapes, numbers, nesting, NDJ
   assert.ok(!broken.includes('zzz-secret'), `not-JSON fallback missed an escaped key: ${broken}`);
   assert.equal(redactSecrets('{"query":{"match_all":{}}}'), '{"query":{"match_all":{}}}', 'nothing secret: kept exactly as typed');
 });
+
+test('cloud repository credentials and pasted Authorization values are not kept', async () => {
+  const { redactSecrets } = await import(pathToFileURL(path.join(ROOT, 'ui/js/lib/redact.js')).href);
+  const s3 = redactSecrets('{"type":"s3","settings":{"bucket":"b","access_key":"AKIAEXAMPLE1","secret_key":"wJalrSECRET","region":"eu"}}');
+  assert.ok(!s3.includes('AKIAEXAMPLE1') && !s3.includes('wJalrSECRET') && s3.includes('"bucket":"b"'), s3);
+  const az = redactSecrets('{"settings":{"account":"acct","sas":"sv=2021&sig=abc","key":"k"}}');
+  assert.ok(!az.includes('sig=abc') && az.includes('"account":"acct"'), az);
+  const hdr = redactSecrets('Authorization: Basic ZWxhc3RpYzpodW50ZXIy');
+  assert.ok(!hdr.includes('ZWxhc3RpYzpodW50ZXIy'), hdr);
+  assert.equal(redactSecrets('{"aggs":{"by":{"terms":{"field":"key"}}}}'), '{"aggs":{"by":{"terms":{"field":"key"}}}}', 'an aggregation on a field named key is not a secret');
+});
