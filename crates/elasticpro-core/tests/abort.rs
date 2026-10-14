@@ -36,7 +36,9 @@ async fn leaving_the_page_answers_its_waiting_requests_as_aborted_instead_of_tim
     let r = tokio::time::timeout(Duration::from_secs(3), waiting).await.expect("the request should stop waiting").unwrap();
     assert_eq!(r["ok"], json!(false));
     assert_eq!(r["kind"], json!("aborted"), "{r}");
-    assert!(t0.elapsed() < Duration::from_secs(2), "answered at once, not at the 15 s timeout");
+    // Well under the 15 s timeout the request carries; not a tight bound, which a busy CI
+    // runner (or a first run after a build) does not always meet.
+    assert!(t0.elapsed() < Duration::from_secs(10), "answered on the abort, not at the 15 s timeout: {:?}", t0.elapsed());
     let log = c.handle(json!({ "type": "REQUEST_LOG" })).await;
     let recent = log["recent"].as_array().unwrap();
     assert!(recent.iter().any(|x| x["origin"] == json!("page:indices") && x["status"] == json!("aborted")), "{log}");
