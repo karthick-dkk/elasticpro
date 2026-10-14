@@ -36,7 +36,20 @@ pub struct JumpSpec {
     pub password: Option<String>,
     #[serde(default)]
     pub note: Option<String>,
+    /// `verify` (or `ask`/`pin`): an unknown host key waits for the operator to trust it
+    /// and a changed one is refused. Anything else, including unset: any host key is
+    /// accepted and recorded, a changed one replaces the old record with a warning in the log.
+    #[serde(default)]
+    pub host_key: Option<String>,
 }
+impl JumpSpec {
+    /// Whether this jump host accepts any SSH host key (the default).
+    pub fn accepts_any_host_key(&self) -> bool {
+        !matches!(self.host_key.as_deref().map(|s| s.trim().to_ascii_lowercase()).as_deref(),
+                  Some("verify") | Some("ask") | Some("pin") | Some("strict"))
+    }
+}
+
 fn default_port() -> u16 {
     22
 }
@@ -93,6 +106,8 @@ impl SshError {
 
 struct Handler {
     jump_id: String,
+    /// Accept whatever host key is offered (the default; see `JumpSpec::host_key`).
+    accept_any: bool,
     pins: Arc<PinStore>,
     /// Key the server offered on the last handshake, for the UI's trust prompt.
     offered: Arc<Mutex<Option<(String, String)>>>,
@@ -112,7 +127,21 @@ impl client::Handler for Handler {
             }
         };
         *self.offered.lock() = Some((fp.clone(), kt.clone()));
-        match self.pins.hostkey_pin(&self.jump_id) {
+        let pinned = self.pins.hostkey_pin(&self.jump_id);
+        if self.accept_any {
+            // Recorded, so Config can show which key is in use; a change is logged, since
+            // in this mode nothing else would ever notice it.
+            match &pinned {
+                Some(p) if p.sha256 == fp => {}
+                Some(p) => {
+                    tracing::warn!("jump host {}: host key changed from {} to {fp}; accepted (host_key is not \"verify\")", self.jump_id, p.sha256);
+                    self.pins.trust_hostkey(&self.jump_id, &fp, &kt);
+                }
+                None => self.pins.trust_hostkey(&self.jump_id, &fp, &kt),
+            }
+            return Ok(true);
+        }
+        match pinned {
             Some(p) if p.sha256 == fp => Ok(true),
             _ => Ok(false),
         }
@@ -226,6 +255,7 @@ impl Tunnel {
         });
         let handler = Handler {
             jump_id: spec.id.clone(),
+            accept_any: spec.accepts_any_host_key(),
             pins: self.pins.clone(),
             offered: self.offered.clone(),
             dropped: self.dropped.clone(),
@@ -333,5 +363,61 @@ impl Tunnel {
     /// True while a failed connection is waiting out its back-off delay.
     pub fn backing_off(&self) -> bool {
         *self.next_attempt.lock() > Instant::now()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tls::PinStore;
+    use russh::client::Handler as _;
+    use russh::keys::PublicKey;
+
+    const KEY_A: &str = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINvbPzi8trTgI3ksv98eKSCxfH8hFz5YI0gNI74hq2el";
+    const KEY_B: &str = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPMo7PNIdyfQ8ry7jpthlyiB1aGmuLdE7vL+Aw/avLbV";
+
+    fn offered(k: &str) -> PublicKeyOrCertificate {
+        PublicKeyOrCertificate::PublicKey { key: PublicKey::from_openssh(k).unwrap(), hash_alg: None }
+    }
+    fn handler(pins: &Arc<PinStore>, accept_any: bool) -> Handler {
+        Handler { jump_id: "jw".into(), accept_any, pins: pins.clone(),
+                  offered: Arc::new(Mutex::new(None)), dropped: Arc::new(Mutex::new(false)) }
+    }
+
+    #[test]
+    fn host_key_setting_defaults_to_accept() {
+        let mut j = JumpSpec { id: "jw".into(), host: "h".into(), port: 22, user: "u".into(), ..Default::default() };
+        assert!(j.accepts_any_host_key(), "unset accepts any key");
+        for v in ["verify", "Verify", " ask ", "pin", "strict"] {
+            j.host_key = Some(v.into());
+            assert!(!j.accepts_any_host_key(), "{v:?} verifies");
+        }
+        j.host_key = Some("accept".into());
+        assert!(j.accepts_any_host_key());
+        let parsed: JumpSpec = serde_json::from_value(serde_json::json!({"id":"jw","host":"h","user":"u","hostKey":"verify"})).unwrap();
+        assert!(!parsed.accepts_any_host_key(), "the UI sends hostKey");
+    }
+
+    #[tokio::test]
+    async fn by_default_any_host_key_is_accepted_recorded_and_a_change_replaces_it() {
+        let pins = PinStore::open(None);
+        assert!(handler(&pins, true).check_server_key(&offered(KEY_A)).await.unwrap(), "unknown key accepted");
+        let a = pins.hostkey_pin("jw").expect("recorded").sha256;
+        assert!(handler(&pins, true).check_server_key(&offered(KEY_B)).await.unwrap(), "changed key accepted");
+        let b = pins.hostkey_pin("jw").expect("still recorded").sha256;
+        assert_ne!(a, b, "the record follows the key in use");
+    }
+
+    #[tokio::test]
+    async fn with_verify_an_unknown_key_waits_and_a_changed_one_is_refused() {
+        let pins = PinStore::open(None);
+        assert!(!handler(&pins, false).check_server_key(&offered(KEY_A)).await.unwrap(), "unknown key waits for the operator");
+        assert!(pins.hostkey_pin("jw").is_none(), "nothing is pinned without the operator");
+        let mut h = handler(&pins, false);
+        h.check_server_key(&offered(KEY_A)).await.unwrap();
+        let (fp, kt) = h.offered.lock().clone().unwrap();
+        pins.trust_hostkey("jw", &fp, &kt);
+        assert!(handler(&pins, false).check_server_key(&offered(KEY_A)).await.unwrap(), "the trusted key connects");
+        assert!(!handler(&pins, false).check_server_key(&offered(KEY_B)).await.unwrap(), "a changed key is refused");
     }
 }

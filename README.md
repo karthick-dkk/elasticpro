@@ -10,7 +10,7 @@ It exists because browser tools cannot do three things an operator behind a jump
 
 | Problem | What ElasticPro does |
 |---|---|
-| The cluster is only reachable through a jump host | Opens its own SSH connection with your key file; host keys are confirmed once and pinned; the tunnel reconnects by itself. No ssh.exe, PuTTY or SOCKS setup. |
+| The cluster is only reachable through a jump host | Opens its own SSH connection with your key file; any host key and certificate is accepted by default, or verified when you ask for it; the tunnel reconnects by itself. No ssh.exe, PuTTY or SOCKS setup. |
 | Self-signed or internal-CA certificates | Shows the certificate once with a **Trust** button, then pins it. A different certificate at the same address is refused. No CA import, no browser policy. |
 | "Failed to fetch" | Every failure is named — refused, DNS, timeout, TLS untrusted, pin mismatch, jump host down — with the next step and, where a decision is needed, the button to take it. |
 

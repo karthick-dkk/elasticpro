@@ -201,7 +201,7 @@ export async function editCluster(existing = null) {
     h('div', { style: { display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '10px' } },
       field('Route', select('ce-via', c.via || c.jump || '', [['', 'direct'], ...jumps.map((j) => [j, `via ${j}`])]),
         jumps.length ? null : 'No jump hosts defined yet — add one on the Config page.'),
-      field('Certificates', select('ce-tls', c.tls || '', [['', 'default (from defaults.tls)'], ['auto', 'auto — OS store, else ask & pin'], ['system', 'system — OS store only'], ['insecure', 'insecure — lab only']])),
+      field('Certificates', select('ce-tls', c.tls || '', [['', 'default (from defaults)'], ['insecure', 'accept any certificate'], ['auto', 'verify — OS store, else ask & pin'], ['system', 'strict — OS store only']])),
       field('Enabled', select('ce-enabled', c.enabled === false ? 'no' : 'yes', [['yes', 'yes'], ['no', 'no (kept in file, not polled)']]))),
     h('div', { style: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px' } },
       field('Tags', text('ce-tags', (c.tags || []).join(', '), { placeholder: 'prod, onprem' })),
@@ -339,10 +339,13 @@ export async function editJumpHost(existingId = null) {
     h('div', { style: { display: 'grid', gridTemplateColumns: '1fr 2fr', gap: '10px' } },
       field('SSH user', text('ce-juser', j.user || '', { placeholder: 'jump-user' })),
       field('Private key file', h('div', keyRow, keyNote), 'OpenSSH format (id_ed25519 / id_rsa). Passphrase, if any, is asked in the app — never stored. Leave empty to use a session password.')),
-    field('Note', text('ce-jnote', j.note || '')),
+    h('div', { style: { display: 'grid', gridTemplateColumns: '1fr 2fr', gap: '10px' } },
+      field('Host key', select('ce-jhk', j.host_key || j.hostKey || '', [['', 'accept any host key (default)'], ['verify', 'verify — confirm the first key, refuse a change']]),
+        'Accepted keys are recorded; a changed key is logged.'),
+      field('Note', text('ce-jnote', j.note || ''))),
   ];
   const saved = await modal(existingId ? `Edit jump host ${existingId}` : 'Add jump host',
-    'The host key is confirmed on first connection and pinned.', body,
+    'Any host key is accepted unless Host key is set to verify.', body,
     (ctx) => [
       existingId ? h('button.btn.danger', { onclick: async () => {
         const used = r.clusters.filter((c) => (c.via || c.jump) === existingId).length;
@@ -364,6 +367,7 @@ export async function editJumpHost(existingId = null) {
           const next = { host, port, user };
           const key = val('ce-key').trim(); if (key) next.keyFile = key;
           const note = val('ce-jnote').trim(); if (note) next.note = note;
+          if (val('ce-jhk')) next.host_key = val('ce-jhk');
           if (existingId && existingId !== id) {
             delete r.jump_hosts[existingId];
             r.clusters.forEach((c) => { if ((c.via || c.jump) === existingId) { c.via = id; delete c.jump; } });
@@ -432,7 +436,7 @@ export async function editDefaults() {
     h('div', { style: { display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '10px' } },
       field('Log index pattern', text('ce-lp', d.logIndexPattern, { mono: true })),
       field('Time field', text('ce-tf', d.timeField, { mono: true })),
-      field('Certificates (default)', select('ce-dtls', d.tls || 'auto', [['auto', 'auto'], ['system', 'system'], ['insecure', 'insecure']]))),
+      field('Certificates (default)', select('ce-dtls', d.tls || 'insecure', [['insecure', 'accept any certificate (default)'], ['auto', 'verify — OS store, else ask & pin'], ['system', 'strict — OS store only']]))),
     h('div', { style: { display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '10px' } },
       field('Live redraw', select('ce-lr', d.liveRedraw || 'pending', [
         ['pending', 'pending — keep the page, offer "N updates — Apply"'],

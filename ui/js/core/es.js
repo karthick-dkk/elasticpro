@@ -32,7 +32,7 @@ export async function primeWorker(clusters, readOnly = true, jumpHosts = [], { p
                                      // page used to (`/<logIndexPattern>/_settings…`), so it
                                      // needs the same input; without it the core reads "*".
                                      ...(c.logIndexPattern ? { logIndexPattern: c.logIndexPattern } : {}) })),
-    jumpHosts: jumpHosts.map((j) => ({ id: j.id, host: j.host, port: j.port, user: j.user, keyFile: j.keyFile || null })),
+    jumpHosts: jumpHosts.map((j) => ({ id: j.id, host: j.host, port: j.port, user: j.user, keyFile: j.keyFile || null, hostKey: j.hostKey || null })),
   });
 }
 

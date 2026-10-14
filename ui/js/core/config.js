@@ -92,8 +92,9 @@ export const DEFAULTS = {
   },
   snapshotStaleHours: 26,
   maxLogRows: 200,
-  // Certificate policy: auto (OS store, else trust-on-first-use with a prompt), system (strict), insecure.
-  tls: 'auto',
+  // Certificate policy: insecure (the default: accept any certificate), auto (OS store, else
+  // trust-on-first-use with a prompt), system (strict).
+  tls: 'insecure',
 };
 
 export function slug(s) {
@@ -148,7 +149,8 @@ export function normalize(raw, sourceName = 'clusters.yaml') {
       if (!j.user) throw new ConfigError(`jump_hosts.${j.id} is missing \`user:\``);
       if (j.passphrase || j.password) throw new ConfigError(`jump_hosts.${j.id}: passphrase/password must not be in the file — the app asks for them.`);
       return { id: String(j.id), host: String(j.host), port: Number(j.port) || 22, user: String(j.user),
-               keyFile: j.keyFile || j.key_file || j.key || '', note: j.note || '' };
+               keyFile: j.keyFile || j.key_file || j.key || '', note: j.note || '',
+               hostKey: String(j.host_key || j.hostKey || '') };
     });
   const jumpIds = new Set(jumpHosts.map((j) => j.id));
 
@@ -187,7 +189,7 @@ export function normalize(raw, sourceName = 'clusters.yaml') {
       id,
       name,
       via: via ? String(via) : '',
-      tls: String(c.tls || defaults.tls || 'auto'),
+      tls: String(c.tls || defaults.tls || 'insecure'),
       url: String(c.url).replace(/\/+$/, ''),
       origin: (() => { try { return new URL(c.url).origin; } catch { return c.url; } })(),
       tags: c.tags || [],
@@ -305,7 +307,7 @@ export function serializeConfig(raw) {
 export function newRawConfig() {
   return {
     version: 2,
-    defaults: { readOnly: true, autoRefresh: false, refreshIntervalSec: 30, logIndexPattern: 'logstash-*', tls: 'auto' },
+    defaults: { readOnly: true, autoRefresh: false, refreshIntervalSec: 30, logIndexPattern: 'logstash-*', tls: 'insecure' },
     jump_hosts: {},
     clusters: [],
   };

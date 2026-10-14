@@ -14,7 +14,8 @@ app, and the three things a browser could never do are the reason for the rewrit
 
 1. **Jump hosts.** A cluster marked `via: <jump>` in `clusters.yaml` is reached through an
    SSH connection the app opens itself with your key file — what `ssh -D` does, without
-   ssh.exe, PuTTY or a SOCKS proxy to set up. Host keys are confirmed once and pinned.
+   ssh.exe, PuTTY or a SOCKS proxy to set up. Any host key is accepted unless the jump host says
+   `host_key: verify`.
    The connection reconnects by itself when the jump host drops it.
 2. **Certificates you decide about.** A self-signed or internal-CA certificate the OS does
    not trust is shown to you once (subject, issuer, validity, SHA-256) with a *Trust* button.
@@ -96,8 +97,11 @@ clusters:
   - { name: lab,         url: "http://192.168.10.25:9200", tls: insecure }
 ```
 
-`tls:` per cluster (or under `defaults:`): `auto` (default — OS store, else ask once and pin),
-`system` (OS store only, strict), `insecure` (lab only). Names of `via:` clusters are resolved
+`tls:` per cluster (or under `defaults:`): `insecure` (default — accept any certificate, without
+asking), `auto` (OS store, else ask once and pin), `system` (OS store only, strict). The default
+means an interception would not be noticed; set `auto` or `system` where that matters. A jump host
+takes `host_key: verify` to confirm its SSH key on first contact and refuse a changed one; without
+it any key is accepted, recorded, and a change is logged. Names of `via:` clusters are resolved
 **on the jump host** (`socks5h` semantics), so use the address the jump host knows.
 
 The app remembers the file's *path* (and `--config <path>` / `ELASTICPRO_CONFIG` pre-provisions
@@ -396,7 +400,7 @@ module signs with — is set from **Config → Zabbix** and kept in `<data dir>/
 | `apiUrl` | `ELASTICPRO_ZABBIX_API_URL` | `zabbixUrl` + `/api_jsonrpc.php` |
 | `apiToken` | `ELASTICPRO_ZABBIX_API_TOKEN_FILE` | — |
 | `ssoSecret` | `ELASTICPRO_ZABBIX_SSO_SECRET`, `ELASTICPRO_ZABBIX_SSO_SECRET_FILE` | — (only a pairing sets it) |
-| `verifyTls` | `ELASTICPRO_ZABBIX_API_INSECURE=1` ⇒ false | true |
+| `verifyTls` | `ELASTICPRO_ZABBIX_API_VERIFY=1` ⇒ true, `ELASTICPRO_ZABBIX_API_INSECURE=1` ⇒ false | false (any certificate accepted) |
 | `allowedSources` | `ELASTICPRO_ZABBIX_ALLOWED_SOURCES` (comma/space list) | empty = any source |
 | `syncSecs` | `ELASTICPRO_ZABBIX_SYNC_SECS` | 300 (30–86400) |
 | CSP `frame-ancestors` | `ELASTICPRO_FRAME_ANCESTORS` (the source list, verbatim) | the `zabbixUrl` origin while a sign-in secret is set, else `'none'` |
@@ -487,7 +491,7 @@ path under `/sso/` is still 404.
 |---|---|
 | Elasticsearch writes | while `readOnly: true` (default) the core refuses anything but GET/HEAD and `_search`-family POSTs, before opening a socket. Two deliberate acts lift it: `readOnly: false` in the config (everywhere), or ticking *Allow writes* — a session-only unlock, held in memory, that applies **only** to actions the operator takes by hand (a console request, a snapshot, an index action). Background refreshes stay read-only either way |
 | Credential | in the app process; optionally in the OS vault (opt-in). Never in `pins.json`, never in logs. The YAML is the only file that may hold it |
-| Jump host | your SSH key (OpenSSH format, optional passphrase — asked in the app) or a session password; host key TOFU + pin; a key restricted to `restrict,port-forwarding,permitopen="<cluster>:9200"` is enough — the app only forwards to the cluster ports |
+| Jump host | your SSH key (OpenSSH format, optional passphrase — asked in the app) or a session password; any host key accepted by default, TOFU + pin with `host_key: verify`; a key restricted to `restrict,port-forwarding,permitopen="<cluster>:9200"` is enough — the app only forwards to the cluster ports |
 | TLS | rustls; OS trust store + Mozilla roots; per-address SHA-256 pin on explicit consent; pin mismatch → credential not sent |
 | SOCKS listener | loopback only, ephemeral port, accepts loopback peers only, CONNECT only — nothing else on the machine is told about it |
 | Data written by the app | `pins.json`, the remembered config path, theme, console history |
@@ -499,7 +503,7 @@ Against a local restricted `sshd` (`restrict,port-forwarding,permitopen="*:9470"
 endpoint that is not part of this repository, so these figures cannot be reproduced from a
 clone alone (see `lab/README.md`):
 
-- unknown host key → prompt → trust → tunnel up; key mismatch refused; ed25519 and RSA keys
+- with `host_key: verify`: unknown host key → prompt → trust → tunnel up; key mismatch refused; ed25519 and RSA keys
   (RSA signed with SHA-512, as OpenSSH 8.8+ requires); encrypted key → passphrase prompt →
   wrong passphrase reported as such → right one connects
 - SSH session killed server-side → next request reconnects transparently (~100 ms);

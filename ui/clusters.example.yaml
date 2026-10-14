@@ -47,7 +47,8 @@ defaults:
 # Jump hosts. A cluster with `via: <name>` is reached through an SSH connection the app
 # opens itself (no ssh.exe, no PuTTY): the same thing `ssh -D` does. Key file only —
 # a passphrase (if the key has one) is asked for in the app and kept in memory.
-# The host key is shown and confirmed on first contact, then pinned.
+# Any host key is accepted and recorded (a change is logged). Set host_key: verify on a
+# jump host to confirm its key on first contact and refuse a changed one.
 jump_hosts:
   jumpwin:
     host: jump-windows.internal
@@ -86,9 +87,9 @@ clusters:
   - name: lab
     url: http://192.168.10.25:9200
     enabled: true
-    # tls: auto (default) = OS trust store, else ask once and pin the certificate
-    #      system          = OS trust store only (strict)
-    #      insecure        = accept anything (lab only)
+    # tls: insecure (default) = accept any certificate, without asking
+    #      auto               = OS trust store, else ask once and pin the certificate
+    #      system             = OS trust store only (strict)
     # tls: auto
     # per-cluster credential override (optional):
     # username: lab_reader
