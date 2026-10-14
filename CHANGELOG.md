@@ -1,5 +1,47 @@
 # Changelog
 
+## 0.3.11
+
+**Built for 100+ clusters; alerts tuned; nobody is signed out on their own.**
+
+**Sessions never end by themselves.** Every restart of the core used to sign everyone out
+(sessions lived only in memory), and an 8-hour idle timeout signed out the rest. Sessions
+now live on the server (`sessions.json`, 0600, token hashes only) with no idle timeout; a
+session ends when the person signs out, or when an administrator removes, disables or
+demotes the account or changes its password. And no secret is kept in the browser: the
+session travels only as an `HttpOnly; Secure; SameSite=Strict` cookie no script can read —
+nothing is written to localStorage or sessionStorage (inside Zabbix's frame the token stays
+in page memory, as Zabbix signs the frame in on every load). The REST console's history no
+longer keeps a request body's password, token or key.
+
+**Calm at 100+ clusters.** Measured with 120 clusters: the core sent ~397 requests a minute
+in background mode; the new shipped request mode `auto` — background up to 25 clusters,
+hybrid above — sends ~75. An existing policy that names a mode keeps it. The Automation page
+no longer reads the fleet when it opens (it sent 225 reads); the coverage bar's "Read all
+(one at a time)" does. On "All clusters" above 20 clusters, each cluster's snapshot section
+starts folded. Above 30 clusters the top bar has a find-as-you-type box beside the picker.
+Every page fits a phone (375 px) with no sideways scroll.
+
+**The Clusters page summarises the fleet in one box**: health counts with unreachable and
+red clusters named, open alerts by level, the three problems that recur most (grouped by
+rule, not by title), and how fresh the data is, with Read all.
+
+**Alerts, tuned.** One fault no longer raises two or three rows: a node at the flood stage is
+one row with the cluster average folded in; unassigned shards are said once; a failing or
+stale repository is raised once, not again per SLM policy; many field-volume spikes on a
+cluster are one row with the count; a reading older than its dataset allows says how old
+it is. The disk rule has hysteresis (cleared two points below its threshold), a snapshot
+repository is critical only when runs keep failing, and a master re-election on a green
+cluster is a warning. "Open" now means neither acknowledged nor silenced in every count.
+**Silences**: silence a cluster for maintenance, or one alert, for 1 h to 7 days or until
+removed, with a reason — shared by the team, kept on the server, audited, and limited to
+the clusters each person may see.
+
+**Zabbix**: the sync finds cluster hosts on any template of the "Elasticsearch Cluster by
+HTTP" family (an earlier-generation template read "0 cluster hosts" before), reports the
+templates it read, and names the hosts it left out and why. Inside Zabbix's frame the tab
+row wraps instead of hiding its first tabs.
+
 ## 0.3.10
 
 **Request management: a quiet UI, a request policy, a Tasks panel, and a cap on the poller's appetite.**
