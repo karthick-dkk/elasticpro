@@ -29,6 +29,31 @@ use tower_http::services::ServeDir;
 /// The header a trusted proxy sets after authenticating the user.
 pub const USER_HEADER: &str = "x-auth-user";
 
+/// The session cookie. The browser holds the session only as this: `HttpOnly`, so no
+/// script — ours or one injected into the page — can read it; `Secure`, so it travels
+/// only over TLS; `SameSite=Strict`, so another site cannot make the browser send it
+/// (which is also what keeps cookie-authenticated POSTs to /bridge safe from forgery).
+/// The session itself lives on the server (`sessions.json`, token hashes only); nothing
+/// about it is ever written to localStorage or sessionStorage.
+const SESSION_COOKIE: &str = "ep_session";
+/// How long the browser keeps the cookie: 400 days, the longest browsers honour. The
+/// session does not expire on the server; this only stops a browser forgetting it first.
+const SESSION_COOKIE_MAX_AGE: u64 = 400 * 86400;
+
+fn session_cookie(headers: &HeaderMap) -> Option<String> {
+    headers.get_all(axum::http::header::COOKIE).iter()
+        .filter_map(|v| v.to_str().ok())
+        .flat_map(|v| v.split(';'))
+        .filter_map(|kv| kv.trim().split_once('='))
+        .find(|(k, _)| *k == SESSION_COOKIE)
+        .map(|(_, v)| v.trim().to_string())
+        .filter(|v| !v.is_empty() && v.len() <= 128 && v.bytes().all(|b| b.is_ascii_hexdigit()))
+}
+
+fn set_cookie(token: &str, max_age: u64) -> String {
+    format!("{SESSION_COOKIE}={token}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age={max_age}")
+}
+
 /// Message types that change something and are therefore audited by user.
 const AUDITED: &[&str] = &["ES", "WRITE_UNLOCK", "TRUST_CERT", "UNTRUST_CERT", "TRUST_HOSTKEY",
                            "UNTRUST_HOSTKEY", "CONFIG_WRITE", "FILE_WRITE", "FORGET",
@@ -154,8 +179,17 @@ async fn zabbix_pair(
 async fn bridge(
     State(app): State<Arc<App>>,
     headers: HeaderMap,
-    Json(msg): Json<serde_json::Value>,
-) -> Json<serde_json::Value> {
+    Json(mut msg): Json<serde_json::Value>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse as _;
+    // A page signed in directly carries its session as the cookie, not in the message;
+    // the core reads it from the message, so it is put there. A message that names a
+    // session itself (the Zabbix frame, which holds its token in page memory) wins.
+    if msg.get("session").and_then(|v| v.as_str()).is_none_or(str::is_empty) {
+        if let (Some(tok), Some(obj)) = (session_cookie(&headers), msg.as_object_mut()) {
+            obj.insert("session".into(), serde_json::Value::String(tok));
+        }
+    }
     let user = headers.get(USER_HEADER).and_then(|v| v.to_str().ok()).map(str::trim).filter(|u| !u.is_empty());
 
     // An API token stands on its own: it is a secret this core issued and can revoke, so
@@ -197,7 +231,7 @@ async fn bridge(
                 return Json(serde_json::json!({
                     "ok": false, "kind": "unauthenticated",
                     "message": "that API token is not valid, has expired, or has been revoked",
-                }))
+                })).into_response()
             }
         },
         None => {
@@ -237,7 +271,22 @@ async fn bridge(
             );
         }
     }
-    Json(out)
+    // Signing in directly: the session goes to the browser as the HttpOnly cookie and is
+    // taken out of the reply, so the page's scripts never hold it. Signing out clears it.
+    let mut out = out;
+    let mut cookie: Option<String> = None;
+    if matches!(t.as_str(), "LOGIN" | "BOOTSTRAP_ADMIN") && out.get("ok") == Some(&serde_json::json!(true)) {
+        if let Some(tok) = out.as_object_mut().and_then(|o| o.remove("session")).and_then(|v| v.as_str().map(String::from)) {
+            cookie = Some(set_cookie(&tok, SESSION_COOKIE_MAX_AGE));
+            out["cookie"] = serde_json::json!(true);
+        }
+    } else if t == "LOGOUT" {
+        cookie = Some(set_cookie("", 0));
+    }
+    match cookie {
+        Some(c) => ([(axum::http::header::SET_COOKIE, c)], Json(out)).into_response(),
+        None => Json(out).into_response(),
+    }
 }
 
 /// What one open event stream carries between events.

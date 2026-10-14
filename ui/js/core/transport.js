@@ -11,38 +11,29 @@ const T = globalThis.__TAURI__;
 export const isTauri = !!(T && T.core && typeof T.core.invoke === 'function');
 
 /**
- * The signed-in session, attached to every message the core then authorises against.
+ * The signed-in session.
  *
- * Kept in localStorage, so a new tab, a reload and a reopened browser all stay signed in:
- * a session ends when the person signs out (or an admin changes the account), never
- * because a window closed. It used to be sessionStorage, which with an idle timeout and
- * sessions held only in the core's memory signed people out several times a day.
+ * Signed in directly, the browser holds it only as the server's HttpOnly cookie, which no
+ * script can read and which travels with every request by itself: the page never sees
+ * the token and never stores it. Nothing about a session is ever put in localStorage or
+ * sessionStorage — secrets live on the server (the core's session store), not in the
+ * browser.
  *
- * Inside Zabbix's frame it stays per-tab (sessionStorage): Zabbix signs that frame in on
- * every load with a one-time code, and its session must not replace the one a person
- * holds when they use ElasticPro directly in another tab. The portable build never has one.
+ * Two cases have no cookie and hold the token here, in page memory only, gone on reload:
+ * Zabbix's frame (cross-site, so a Strict cookie is not sent; Zabbix signs the frame in
+ * again on every load) and the desktop app (no HTTP at all). The portable build never has
+ * one — the core does not ask.
  */
-const KEY_SESSION = 'elasticpro.session';
-const framed = (() => { try { return new URLSearchParams(location.search).get('embed') === '1'; } catch { return false; } })();
-const store = () => (framed ? sessionStorage : localStorage);
-let session = read();
+let session = '';
+let signedIn = false;
+// Before this, the token was kept in sessionStorage. Clear any left there.
+try { sessionStorage.removeItem('elasticpro.session'); localStorage.removeItem('elasticpro.session'); } catch { /* no storage: nothing to clear */ }
 
-function read() {
-  try {
-    // A tab signed in before this change holds its token in sessionStorage: keep it.
-    const v = store().getItem(KEY_SESSION) || (framed ? '' : sessionStorage.getItem(KEY_SESSION)) || '';
-    if (v && !framed) { localStorage.setItem(KEY_SESSION, v); sessionStorage.removeItem(KEY_SESSION); }
-    return v;
-  } catch { return ''; }
-}
 export function getSession() { return session; }
-export function setSession(token) {
-  session = token || '';
-  try {
-    if (session) store().setItem(KEY_SESSION, session);
-    else { store().removeItem(KEY_SESSION); sessionStorage.removeItem(KEY_SESSION); }
-  } catch { /* a private window still works, it just forgets on reload */ }
-}
+/** A token the reply carried (frame, desktop), or '' — the cookie needs no help. */
+export function setSession(token) { session = token || ''; }
+/** Whether this page is signed in, so a refusal from the core can send it back to the login. */
+export function setSignedIn(on) { signedIn = !!on; if (!on) session = ''; }
 
 /** Notified when the core says the session is gone, so the app can show the login again. */
 const expiryListeners = new Set();
@@ -59,8 +50,8 @@ export async function bridge(msg) {
       })).json();
     // An expired or revoked session must not leave the app quietly showing stale data —
     // every caller would otherwise have to notice this for itself.
-    if (res && res.kind === 'unauthenticated' && session) {
-      setSession('');
+    if (res && res.kind === 'unauthenticated' && (session || signedIn) && msg.type !== 'LOGIN') {
+      setSignedIn(false);
       for (const fn of expiryListeners) { try { fn(); } catch { /* keep telling the rest */ } }
     }
     return res;

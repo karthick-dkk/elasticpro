@@ -22,7 +22,7 @@
  */
 
 import { h, mount } from '../lib/dom.js';
-import { bridge, setSession } from '../core/transport.js';
+import { bridge, setSession, setSignedIn } from '../core/transport.js';
 
 const MIN_PASSWORD = 10;   // must match auth::MIN_PASSWORD
 
@@ -40,8 +40,8 @@ export async function authState() {
 }
 
 export async function signOut() {
-  await bridge({ type: 'LOGOUT' });
-  setSession('');
+  await bridge({ type: 'LOGOUT' });   // the server ends the session and clears the cookie
+  setSignedIn(false);
 }
 
 /**
@@ -101,8 +101,11 @@ export function loginScreen(root, { bootstrap = false, mode: startMode = null, h
       });
       busy = false;
 
-      if (res && res.ok && res.session) {
-        setSession(res.session);
+      // The session arrives as the HttpOnly cookie (res.cookie); only the desktop app gets
+      // the token in the reply, and then it stays in memory.
+      if (res && res.ok && (res.cookie || res.session)) {
+        setSession(res.session || '');
+        setSignedIn(true);
         const who = res.caller || { name: name.trim(), role: 'admin' };
         // An account that must change its password gets exactly this screen. The core
         // refuses everything else until it changes, so sending them on to a dashboard
