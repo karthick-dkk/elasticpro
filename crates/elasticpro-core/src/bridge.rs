@@ -179,6 +179,8 @@ struct ZbxSync {
     options: ZbxOptions,
     /// What the last run of `createHosts` did or could not do.
     provisioned: Vec<String>,
+    /// Each cluster template the last sync read, with how many hosts it held.
+    templates: Vec<Value>,
 }
 
 /// What the job is set to do, and what it last did. Kept together because an admin
@@ -1979,11 +1981,12 @@ impl Core {
         // Config clusters Zabbix does not have yet become hosts, when the config says so —
         // and are then read back, so they take over in this same sync.
         let provisioned = if opts.create_hosts { self.provision_hosts(&fetched.0, &opts).await } else { vec![] };
-        let (found, skipped) = if provisioned.iter().any(|p| p.starts_with("created")) {
+        let (found, skipped, templates) = if provisioned.iter().any(|p| p.starts_with("created")) {
             zapi.clusters().await.unwrap_or(fetched)
         } else {
             fetched
         };
+        let templates: Vec<Value> = templates.iter().map(|(n, k)| json!({ "name": n, "hosts": k })).collect();
         let jumps: Vec<(String, String, u16)> = self.tunnels.read().await.iter()
             .map(|(id, r)| (id.clone(), r.tunnel.spec.host.clone(), r.tunnel.spec.port)).collect();
         let jump_ids: std::collections::HashSet<String> = jumps.iter().map(|j| j.0.clone()).collect();
@@ -2082,11 +2085,12 @@ impl Core {
             z.skipped = skipped.clone();
             z.options = opts.clone();
             z.provisioned = provisioned.clone();
+            z.templates = templates.clone();
         }
         self.transport.forget_clients();
         tracing::info!(target: "audit", clusters = n, skipped = skipped.len(), problems,
                        credentials = if opts.use_elasticpro_credentials { "elasticpro" } else { "zabbix" }, "zabbix sync");
-        json!({ "ok": true, "clusters": n, "skipped": skipped, "problems": problems, "provisioned": provisioned,
+        json!({ "ok": true, "clusters": n, "skipped": skipped, "problems": problems, "provisioned": provisioned, "templates": templates,
                 "credentials": if opts.use_elasticpro_credentials { "elasticpro" } else { "zabbix" } })
     }
 
@@ -2245,6 +2249,7 @@ impl Core {
             "clusters": clusters, "lastSync": z.last_ok,
             "error": if admin { json!(z.error) } else { Value::Null },
             "skipped": if admin { json!(z.skipped) } else { json!([]) },
+            "templates": if admin { json!(z.templates) } else { json!([]) },
         })
     }
 
