@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.3.12
+
+**REST console tabs; the version lives on the Config page.**
+
+The REST console opens up to ten tabs, each with its own request and its last response,
+and remembers them across reloads — with every password, token, key and pasted
+Authorization value redacted first, in the body and in the path, so no secret is kept in the
+browser (the redaction reads keys the way a JSON parser does, line by line for `_bulk` and
+`_msearch` bodies). `+` or Alt+T opens a tab, double-click renames one, and a request handed
+over from another page opens in a tab of its own instead of overwriting what was being typed.
+Console history is redacted the same way.
+
+The app's version is shown in one place: Config → Diagnostics → App version. The status strip
+and the About dialog no longer carry it.
+
 ## 0.3.11
 
 **Built for 100+ clusters; alerts tuned; nobody is signed out on their own.**
