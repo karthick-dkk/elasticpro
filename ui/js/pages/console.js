@@ -4,6 +4,7 @@ import { h, mount, $, clear, activatable } from '../lib/dom.js';
 import { bytes, num, dur, ago, dt, download } from '../lib/fmt.js';
 import { state, client, activeClusters } from '../core/state.js';
 import { idb } from '../lib/idb.js';
+import { MAX_TABS, initialState, addTab, closeTab, updateTab, activeTab, tabTitle, toStored, fromStored } from '../core/console-tabs.js';
 
 /**
  * Write to the query history, and carry on if it cannot be written.
@@ -27,7 +28,7 @@ import { card, empty, pill } from './common.js';
 import { isSnapshotMode } from '../core/snapshot.js';
 import { intent, navigateTo } from '../core/intent.js';
 import { writesUnlocked, writesAllowed, syncWrites, setWritesUnlocked, writeToggle } from '../core/writes.js';
-import { confirmDialog } from '../ui/modal.js';
+import { confirmDialog, inputDialog } from '../ui/modal.js';
 import { toast } from '../ui/menu.js';
 
 /**
@@ -165,6 +166,86 @@ const ui = { method: 'GET', path: '/_cluster/health', body: '', running: false, 
              full: false };          // response filling the window
 let history = [];
 
+/* ----------------------------------- tabs ----------------------------------- */
+//
+// Up to ten queries open side by side (core/console-tabs.js). `ui.method/path/body` are the
+// active tab's fields; switching writes them back to it and reads the next one's. Each
+// tab's last response is kept for this visit only; the queries are remembered across
+// reloads in this browser — with password, token and key fields redacted, never a secret.
+let tabs = initialState({ method: ui.method, path: ui.path, body: ui.body });
+const tabRes = new Map();
+const TABS_KEY = 'console.tabs';
+let saveTimer = null;
+
+function syncFromUi() { tabs = updateTab(tabs, tabs.active, { method: ui.method, path: ui.path, body: ui.body }); }
+function scheduleSave() {
+  syncFromUi();
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(() => remember(() => idb.setKV(TABS_KEY, toStored(tabs))), 400);
+}
+function loadActive() {
+  const t = activeTab(tabs);
+  ui.method = t.method; ui.path = t.path; ui.body = t.body;
+  ui.res = tabRes.get(t.id) || null; ui.find = ''; ui.findAt = 0; ui.findTotal = 0;
+}
+function switchTab(id) {
+  if (id === tabs.active) return;
+  syncFromUi(); tabRes.set(tabs.active, ui.res);
+  tabs = { ...tabs, active: id }; loadActive(); scheduleSave(); draw();
+}
+function newTab(from) {
+  syncFromUi(); tabRes.set(tabs.active, ui.res);
+  const r = addTab(tabs, from || { method: 'GET', path: '/', body: '' });
+  if (!r.added) { toast(`${MAX_TABS} tabs is the most — close one first`, 'warn', 3500); return false; }
+  tabs = r.st; loadActive(); scheduleSave(); draw();
+  setTimeout(() => { const el = $('#c-path'); if (el) el.focus(); }, 0);
+  return true;
+}
+function closeTabById(id) {
+  tabRes.delete(id);
+  tabs = closeTab(tabs, id); loadActive(); scheduleSave(); draw();
+}
+async function renameTab(t) {
+  const name = await inputDialog('Name this tab', 'Name', t.name || '', { yes: 'Save', placeholder: tabTitle(t), hint: 'A dash (-) goes back to naming it after the request.' });
+  // inputDialog answers '' for Cancel too, so an empty answer changes nothing.
+  if (!name) return;
+  tabs = updateTab(tabs, t.id, { name: name === '-' ? '' : String(name).trim().slice(0, 40) }); scheduleSave(); draw();
+}
+
+/** A tab for a handed-over request; false when all ten are open. */
+function newTabQuiet(from) {
+  syncFromUi(); tabRes.set(tabs.active, ui.res);
+  const r = addTab(tabs, from);
+  if (!r.added) return false;
+  tabs = r.st; loadActive(); scheduleSave();
+  return true;
+}
+
+/** The active tab's title follows the path as it is typed, without redrawing the page. */
+function refreshTabTitle() {
+  const el = document.querySelector('.console-tab.on .t');
+  const t = activeTab(tabs);
+  if (el && !t.name) el.textContent = tabTitle({ ...t, path: ui.path }).replace(/^[A-Z]+\s/, '') || '/';
+}
+
+function tabStrip() {
+  const full = tabs.tabs.length >= MAX_TABS;
+  return h('div.console-tabs', { role: 'tablist', 'aria-label': 'Query tabs' },
+    ...tabs.tabs.map((t) => {
+      const on = t.id === tabs.active;
+      return h(`div.console-tab${on ? '.on' : ''}`, { role: 'tab', 'aria-selected': on ? 'true' : 'false', title: `${t.method} ${t.path}${t.name ? `\n${t.name}` : ''}\nDouble-click to rename` },
+        h('button.console-tab-label', { onclick: () => switchTab(t.id), ondblclick: () => renameTab(t) },
+          h('span.m', t.method), h('span.t', (t.name ? tabTitle(t) : tabTitle(t).replace(/^[A-Z]+\s/, '')) || '/')),
+        h('button.console-tab-x', { title: tabs.tabs.length === 1 ? 'Clear this tab' : 'Close this tab', 'aria-label': 'Close tab',
+          onclick: (e) => { e.stopPropagation(); closeTabById(t.id); } }, '×'));
+    }),
+    h('button.btn.sm.ghost.console-tab-add', {
+      disabled: full, onclick: () => newTab(),
+      title: full ? `${MAX_TABS} tabs is the most — close one first` : 'New tab (Alt+T)',
+    }, '+'),
+    h('span.muted.console-tab-count', `${tabs.tabs.length}/${MAX_TABS}`));
+}
+
 /* ------------------------------ the split handle ------------------------------ */
 
 function setSplit(pct) {
@@ -194,7 +275,16 @@ export function render(el) {
     const saved = Number(localStorage.getItem('elasticpro.console.split'));
     if (isFinite(saved) && saved >= 20 && saved <= 70) ui.split = saved;
   } catch (_) { /* private window: the default is fine */ }
-  if (intent.console) { Object.assign(ui, intent.console); intent.console = null; ui.res = null; }
+  const handed = intent.console ? { ...intent.console } : null;
+  intent.console = null;
+  idb.getKV(TABS_KEY).then((raw) => {
+    const st = fromStored(raw);
+    if (st) { tabs = st; loadActive(); }
+    // A request handed over from another page opens in a tab of its own (or replaces the
+    // active one when all ten are open), so it never overwrites what was being typed.
+    if (handed && !(handed.path && newTabQuiet(handed))) { Object.assign(ui, handed); ui.res = null; scheduleSave(); }
+    draw();
+  }).catch(() => { if (handed) { Object.assign(ui, handed); ui.res = null; } draw(); });
   idb.allQueries().then((q) => { history = (q || []).sort((a, b) => b.ts - a.ts); drawHistory(); })
     .catch(() => { /* no stored history to show */ });
   // The core owns the unlock, not this page — re-read it rather than trusting our copy.
@@ -208,6 +298,12 @@ export function onKey(e) {
   if (e.key === 'Escape' && ui.full) { ui.full = false; draw(); return true; }
   return false;
 }
+
+// Alt+T: a new tab, from anywhere on the page (Ctrl+T belongs to the browser).
+document.addEventListener('keydown', (e) => {
+  if (!host || !host.isConnected || !e.altKey || e.ctrlKey || e.metaKey) return;
+  if (e.code === 'KeyT') { e.preventDefault(); newTab(); }
+});
 
 function cluster() { return activeClusters()[0] || null; }
 
@@ -224,13 +320,13 @@ function draw() {
   const methods = METHODS;
   if (!methods.includes(ui.method)) ui.method = 'GET';
   const methodSel = h('select#c-method', { style: { width: '96px', fontWeight: 700 },
-    onchange: (e) => { ui.method = e.target.value; draw(); } },
+    onchange: (e) => { ui.method = e.target.value; scheduleSave(); draw(); } },
     ...methods.map((m) => h('option', m)));
   methodSel.value = ui.method;
 
   const pathInput = h('input#c-path', { type: 'text', value: ui.path, list: 'ep-list', spellcheck: false,
     placeholder: '/_cluster/health', style: { flex: '1', fontFamily: 'var(--mono)' },
-    oninput: (e) => { ui.path = e.target.value; syncTarget(); },
+    oninput: (e) => { ui.path = e.target.value; syncTarget(); scheduleSave(); refreshTabTitle(); },
     onkeydown: (e) => { if (e.key === 'Enter') run(); } });
 
   // Grouped, so the list stays usable now that it covers ILM, watermarks and shards.
@@ -241,7 +337,7 @@ function draw() {
         e.target.value = '';
         if (!s) return;
         ui.method = s.m; ui.path = s.p; ui.body = s.b || '';
-        draw();
+        scheduleSave(); draw();
       } },
     h('option', { value: '' }, 'Common requests…'),
     ...groups.map((g) => h('optgroup', { label: g },
@@ -282,14 +378,14 @@ function draw() {
   // ---- Query | Results
   const bodyArea = h('textarea#c-body', { spellcheck: false,
     style: { width: '100%', height: '100%', minHeight: '340px', fontFamily: 'var(--mono)', fontSize: '12px', resize: 'vertical', boxSizing: 'border-box' },
-    oninput: (e) => { ui.body = e.target.value; },
+    oninput: (e) => { ui.body = e.target.value; scheduleSave(); },
     onkeydown: (e) => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); run(); } } }, ui.body);
 
   const query = h('section.card', { style: { display: 'flex', flexDirection: 'column', minWidth: 0 } },
     h('header', h('h2', 'Query'), h('span.sub', 'request body'),
       h('div', { style: { marginLeft: 'auto', display: 'flex', gap: '6px' } },
         h('button.btn.sm', { onclick: format }, 'Format JSON'),
-        h('button.btn.sm', { onclick: () => { ui.body = ''; $('#c-body').value = ''; } }, 'Clear'),
+        h('button.btn.sm', { onclick: () => { ui.body = ''; $('#c-body').value = ''; scheduleSave(); } }, 'Clear'),
         h('button.btn.sm.ghost', { onclick: () => saveFav(), title: 'Save this request to favourites' }, '★ Favourite'))),
     h('div.body', { style: { padding: '10px', flex: '1', display: 'flex' } }, bodyArea));
 
@@ -320,7 +416,7 @@ function draw() {
     }, responseCard()));
     return;
   }
-  mount(host, dl, h('div', { style: { display: 'grid', gap: '14px' } }, requestBar, columns, hist));
+  mount(host, dl, h('div', { style: { display: 'grid', gap: '14px' } }, h('div', { style: { display: 'grid', gap: '6px' } }, tabStrip(), requestBar), columns, hist));
 }
 
 /**
@@ -368,12 +464,21 @@ async function run() {
   const btn = $('#c-run'); if (btn) { btn.disabled = true; btn.textContent = 'Running…'; }
 
   const started = Date.now();
+  const sentFrom = tabs.active;   // the response belongs to the tab that sent it
+  const sent = { method: ui.method, path: ui.path, body: ui.body };
   // allowWrites is set here and nowhere else in the app; the core still refuses it
   // unless the session has been unlocked above.
-  const res = await cl.request(ui.method, ui.path.trim() || '/', ui.body.trim() || null,
+  const res = await cl.request(sent.method, sent.path.trim() || '/', sent.body.trim() || null,
                                { allowWrites: writesUnlocked() });
-  ui.res = res;
   ui.running = false;
+  tabRes.set(sentFrom, res);
+  if (tabs.active !== sentFrom) {
+    // Switched tabs while it ran: the answer waits in its own tab.
+    if (btn) { btn.disabled = false; btn.textContent = 'Run ▸'; }
+    toast(`${sent.method} ${clip(sent.path)} → ${res.status || res.kind || 'done'} (in its tab)`, res.ok ? 'ok' : 'err', 3000, { key: 'console-run' });
+    return;
+  }
+  ui.res = res;
   if (btn) { btn.disabled = false; btn.textContent = 'Run ▸'; }
 
   const entry = {
@@ -615,7 +720,7 @@ function historyCard() {
     const t = ui.filter.toLowerCase();
     items = items.filter((x) => (x.path + ' ' + x.method + ' ' + (x.body || '') + ' ' + (x.cluster || '')).toLowerCase().includes(t));
   }
-  const load = (x) => { ui.method = x.method; ui.path = x.path; ui.body = x.body || ''; ui.res = null; draw(); window.scrollTo({ top: 0 }); };
+  const load = (x) => { ui.method = x.method; ui.path = x.path; ui.body = x.body || ''; ui.res = null; scheduleSave(); draw(); window.scrollTo({ top: 0 }); };
   const rows = items.slice(0, 300).map((x) => h('tr', {
     style: { cursor: 'pointer' },
     title: 'Load this request into the editor',

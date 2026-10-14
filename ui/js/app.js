@@ -201,7 +201,7 @@ function renderSetup(res) {
 
     h('div', { style: { marginTop: '14px' } }, securityNote()),
     h('div.muted#core-line', { style: { marginTop: '12px', fontSize: '11px' } },
-      coreInfo && coreInfo.desktop ? `core v${coreInfo.version} · ${coreInfo.vault ? 'OS vault available' : 'no OS vault'} · trust store: ${coreInfo.dataDir || 'memory'}`
+      coreInfo && coreInfo.desktop ? `${coreInfo.vault ? 'OS vault available' : 'no OS vault'} · trust store: ${coreInfo.dataDir || 'memory'}`
         : 'core not reachable — is this the app or the dev bridge?'),
     // The setup screen is where somebody lands before there is any config, so it is also
     // where they are most likely to want the repository or a way to ask for help.
@@ -614,7 +614,7 @@ function renderSideFoot() {
       { title: meta ? (meta.path || meta.name) : '' }),
     row('Clusters', String(clusters().length)),
     row('Health', worstHealth()),
-    row('Build', h('span.mono', 'v' + (coreInfo.version || '?'))),
+    // No version here: it is shown in one place only, Config → Diagnostics (App version).
     // Our own load on the fleet, so "are we stressing Elasticsearch" has a number.
     (() => {
       return row('Requests', h('a', { href: '#/requests', title: 'Requests this app sent to every cluster in the last 5 minutes — open the Request Centre' },
