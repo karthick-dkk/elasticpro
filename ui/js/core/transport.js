@@ -13,22 +13,34 @@ export const isTauri = !!(T && T.core && typeof T.core.invoke === 'function');
 /**
  * The signed-in session, attached to every message the core then authorises against.
  *
- * Kept in sessionStorage rather than localStorage: closing the window should end the
- * session, and a reload should not. It is a bearer token, so it lives per-tab and goes
- * when the tab does. The portable build never has one — the core does not ask.
+ * Kept in localStorage, so a new tab, a reload and a reopened browser all stay signed in:
+ * a session ends when the person signs out (or an admin changes the account), never
+ * because a window closed. It used to be sessionStorage, which with an idle timeout and
+ * sessions held only in the core's memory signed people out several times a day.
+ *
+ * Inside Zabbix's frame it stays per-tab (sessionStorage): Zabbix signs that frame in on
+ * every load with a one-time code, and its session must not replace the one a person
+ * holds when they use ElasticPro directly in another tab. The portable build never has one.
  */
 const KEY_SESSION = 'elasticpro.session';
+const framed = (() => { try { return new URLSearchParams(location.search).get('embed') === '1'; } catch { return false; } })();
+const store = () => (framed ? sessionStorage : localStorage);
 let session = read();
 
 function read() {
-  try { return sessionStorage.getItem(KEY_SESSION) || ''; } catch { return ''; }
+  try {
+    // A tab signed in before this change holds its token in sessionStorage: keep it.
+    const v = store().getItem(KEY_SESSION) || (framed ? '' : sessionStorage.getItem(KEY_SESSION)) || '';
+    if (v && !framed) { localStorage.setItem(KEY_SESSION, v); sessionStorage.removeItem(KEY_SESSION); }
+    return v;
+  } catch { return ''; }
 }
 export function getSession() { return session; }
 export function setSession(token) {
   session = token || '';
   try {
-    if (session) sessionStorage.setItem(KEY_SESSION, session);
-    else sessionStorage.removeItem(KEY_SESSION);
+    if (session) store().setItem(KEY_SESSION, session);
+    else { store().removeItem(KEY_SESSION); sessionStorage.removeItem(KEY_SESSION); }
   } catch { /* a private window still works, it just forgets on reload */ }
 }
 

@@ -467,7 +467,7 @@ impl Core {
         Arc::new(Core {
             edition,
             users,
-            sessions: Sessions::default(),
+            sessions: Sessions::open(auth_path("sessions.json")),
             tokens,
             keys: crate::vault_files::KeyStore::new(data_dir.as_deref()),
             history: crate::vault_files::ConfigHistory::new(data_dir.as_deref()),

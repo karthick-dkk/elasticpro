@@ -27,15 +27,13 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256, Sha512};
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use parking_lot::RwLock;
 
 /// Matches `crypto.rs`. Login is not a hot path; the cost is the point.
 pub const ROUNDS: u32 = 600_000;
 
-/// How long a session survives without being used.
-pub const IDLE_TIMEOUT: Duration = Duration::from_secs(8 * 3600);
 
 pub(crate) fn now() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
@@ -785,7 +783,7 @@ impl UserStore {
 
 /* ---------------------------------- sessions ---------------------------------- */
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Session {
     pub user: String,
     pub role: Role,
@@ -794,24 +792,64 @@ pub struct Session {
     pub scope: Option<Vec<String>>,
 }
 
-/// Live sessions, in memory only.
+/// Live sessions. A session ends when the person signs out, or when an administrator
+/// removes, disables or demotes the account, changes its password, or Zabbix withdraws
+/// it — never on its own: no idle timeout, and a restart of the core keeps every session.
 ///
-/// Never persisted, for the same reason the write unlock is not: closing the app must
-/// end the session, and a token found in a file after the fact must be worth nothing.
+/// Signing people out by itself was the most-reported annoyance: every upgrade, every
+/// container restart and every eight idle hours sent everyone back to the login screen
+/// mid-task. So sessions are kept in `sessions.json` beside `users.json` (hosted only,
+/// 0600), and only a SHA-256 of each token is written: the file lets the core recognise a
+/// token it issued, and a copy of the file is worth nothing to anyone who reads it.
 pub struct Sessions {
-    map: RwLock<HashMap<String, (Session, Instant)>>,
-    idle: Duration,
+    /// Token hash → session.
+    map: RwLock<HashMap<String, Session>>,
+    path: Option<PathBuf>,
 }
 
 impl Default for Sessions {
     fn default() -> Self {
-        Sessions::new(IDLE_TIMEOUT)
+        Sessions::open(None)
     }
 }
 
 impl Sessions {
-    pub fn new(idle: Duration) -> Sessions {
-        Sessions { map: RwLock::new(HashMap::new()), idle }
+    /// The sessions kept at `path` (none: in memory only, as the desktop app runs). A file
+    /// that cannot be read starts empty; it never stops the core.
+    pub fn open(path: Option<PathBuf>) -> Sessions {
+        let map = path.as_ref()
+            .and_then(|p| std::fs::read_to_string(p).ok())
+            .and_then(|s| serde_json::from_str::<HashMap<String, Session>>(&s).ok())
+            .unwrap_or_default();
+        Sessions { map: RwLock::new(map), path }
+    }
+
+    fn save(&self) {
+        let Some(p) = &self.path else { return };
+        let Ok(body) = serde_json::to_string(&*self.map.read()) else { return };
+        if let Some(dir) = p.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let tmp = p.with_extension("json.tmp");
+        let _ = std::fs::remove_file(&tmp);
+        let wrote = (|| -> std::io::Result<()> {
+            use std::io::Write as _;
+            let mut o = std::fs::OpenOptions::new();
+            o.write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                o.mode(0o600);
+            }
+            let mut f = o.open(&tmp)?;
+            f.write_all(body.as_bytes())?;
+            f.sync_all()?;
+            std::fs::rename(&tmp, p)
+        })();
+        if let Err(e) = wrote {
+            let _ = std::fs::remove_file(&tmp);
+            tracing::warn!(error = %e, "sessions could not be saved; they still work until the core restarts");
+        }
     }
 
     pub fn begin(&self, account: &Account) -> String {
@@ -823,32 +861,29 @@ impl Sessions {
             must_change: account.must_change,
             scope: account.scope.clone(),
         };
-        self.map.write().insert(token.clone(), (s, Instant::now()));
+        self.map.write().insert(token_hash(&token), s);
+        self.save();
         token
     }
 
-    /// The session this token names, if it is still live. Touches it, so an active
-    /// session does not time out under someone.
+    /// The session this token names, if it is still live.
     pub fn resolve(&self, token: &str) -> Option<Session> {
-        let mut map = self.map.write();
-        let idle = self.idle;
-        map.retain(|_, (_, seen)| seen.elapsed() < idle);
-        let (s, seen) = map.get_mut(token)?;
-        *seen = Instant::now();
-        Some(s.clone())
+        if token.is_empty() {
+            return None;
+        }
+        self.map.read().get(&token_hash(token)).cloned()
     }
 
-    /// The session this token names, without touching it. For the event stream's
-    /// periodic re-check: an open tab left alone must still time out, and resolving would
-    /// keep its session alive for as long as the stream stays open.
+    /// The same as `resolve`: kept for the event stream's periodic re-check, which asks
+    /// whether the session still exists (it ends on sign-out or an admin's change).
     pub fn peek(&self, token: &str) -> Option<Session> {
-        let map = self.map.read();
-        let (s, seen) = map.get(token)?;
-        (seen.elapsed() < self.idle).then(|| s.clone())
+        self.resolve(token)
     }
 
     pub fn end(&self, token: &str) {
-        self.map.write().remove(token);
+        if self.map.write().remove(&token_hash(token)).is_some() {
+            self.save();
+        }
     }
 
     /// The forced change is over for any session this account already holds.
@@ -857,36 +892,43 @@ impl Sessions {
     /// operator changes their password, the account is updated, and the session they are
     /// sitting in is still locked to the change-password screen.
     pub fn clear_must_change(&self, user: &str) {
-        for (s, _) in self.map.write().values_mut() {
+        for s in self.map.write().values_mut() {
             if s.user.eq_ignore_ascii_case(user) {
                 s.must_change = false;
             }
         }
+        self.save();
     }
 
     /// Rewrite the role and scope of every live session for one account. Used when Zabbix
     /// has just said something new about them: the change applies to the tab they already
     /// have open, not only to the next one.
     pub fn refresh_for(&self, user: &str, role: Role, scope: Option<Vec<String>>) {
-        for (s, _) in self.map.write().values_mut() {
-            if s.user.eq_ignore_ascii_case(user) {
+        let mut changed = false;
+        for s in self.map.write().values_mut() {
+            if s.user.eq_ignore_ascii_case(user) && (s.role != role || s.scope != scope) {
                 s.role = role;
                 s.scope = scope.clone();
+                changed = true;
             }
+        }
+        if changed {
+            self.save();
         }
     }
 
     /// Every session for one account, gone. Used when an account is removed, disabled or
     /// demoted — otherwise the change does not take effect until they happen to log out.
     pub fn end_all_for(&self, user: &str) {
-        self.map.write().retain(|_, (s, _)| !s.user.eq_ignore_ascii_case(user));
+        let before = self.map.read().len();
+        self.map.write().retain(|_, s| !s.user.eq_ignore_ascii_case(user));
+        if self.map.read().len() != before {
+            self.save();
+        }
     }
 
     pub fn count(&self) -> usize {
-        let idle = self.idle;
-        let mut map = self.map.write();
-        map.retain(|_, (_, seen)| seen.elapsed() < idle);
-        map.len()
+        self.map.read().len()
     }
 }
 
@@ -1263,16 +1305,33 @@ mod tests {
         assert!(ss.resolve("not-a-token").is_none());
     }
 
+    // Regression: sessions ended on their own — every core restart (in memory only) and
+    // every eight idle hours (IDLE_TIMEOUT) sent everyone back to the login screen.
+    // Reported 2026-10-14: "automatically I am logged out — never log out any user".
     #[test]
-    fn an_idle_session_expires() {
+    fn a_session_survives_a_restart_and_never_times_out() {
         let s = store();
         s.add("alice", "correct-horse", Role::User).unwrap();
         let acct = s.verify("alice", "correct-horse").unwrap();
-        let ss = Sessions::new(Duration::from_millis(30));
-        let tok = ss.begin(&acct);
-        assert!(ss.resolve(&tok).is_some());
-        std::thread::sleep(Duration::from_millis(60));
-        assert!(ss.resolve(&tok).is_none(), "an idle session must not live forever");
+        let dir = std::env::temp_dir().join(format!("ep-sessions-{}-{}", std::process::id(), random_hex(4)));
+        let path = dir.join("sessions.json");
+        let tok = Sessions::open(Some(path.clone())).begin(&acct);
+        // A new core reading the same file: the session is still there.
+        let after = Sessions::open(Some(path.clone()));
+        assert_eq!(after.resolve(&tok).unwrap().user, "alice", "a restart must not sign anyone out");
+        // Only a hash of the token is on disk.
+        let body = std::fs::read_to_string(&path).unwrap();
+        assert!(!body.contains(&tok), "the token itself must never be written");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+        }
+        // Signing out is the way it ends, and that is kept too.
+        after.end(&tok);
+        assert!(Sessions::open(Some(path.clone())).resolve(&tok).is_none());
+        assert!(after.resolve("").is_none());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
