@@ -236,9 +236,14 @@ button, input, select, textarea { font: inherit; color: inherit; }
               overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* --- horizontal tabs --- */
+/* Wraps whenever the tabs run out of width, like the topbar above it, rather than at a
+   chosen breakpoint. It used to wrap only below 1200px and scroll sideways above it; the
+   Requests tab moved the real limit to about 1390px, so inside Zabbix's frame (about
+   1220px beside its sidebar) the row scrolled with nothing to say so and the first tabs
+   sat past the left edge. Regression: ISSUE-003, found by /qa on 2026-10-14. */
 .nav {
   display: flex; align-items: stretch; gap: 2px; padding: 0 12px;
-  overflow-x: auto; scrollbar-width: thin;
+  flex-wrap: wrap;
 }
 .nav button {
   display: inline-flex; align-items: center; gap: 7px; white-space: nowrap;
@@ -309,13 +314,6 @@ button, input, select, textarea { font: inherit; color: inherit; }
 
 .main { min-width: 0; display: flex; flex-direction: column; flex: 1; }
 .page { padding: 16px; max-width: 1900px; width: 100%; margin: 0 auto; }
-
-/* Below 1200px the tabs no longer fit in one row without crowding the topbar controls
-   beside them; they wrap onto a second line instead of scrolling sideways, where a tab
-   past the fold is easy to miss entirely. */
-@media (max-width: 1200px) {
-  .nav { flex-wrap: wrap; overflow-x: visible; }
-}
 
 @media (max-width: 900px) {
   .brand span { display: none; }
