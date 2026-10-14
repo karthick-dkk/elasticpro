@@ -145,6 +145,15 @@ async fn zabbix_hosts_become_clusters() {
     assert_eq!(legacy["credential"], json!("secret-macro"));
     assert_eq!(legacy["credentialOk"], json!(false));
     assert!(legacy["notes"].to_string().contains("Vault macro"));
+    // Regression: ISSUE-004 — a cluster the core knows it cannot sign in to was still polled:
+    // on the test VM, 69 requests in an hour, every one a 401 against the cluster's account.
+    // Found by /qa on 2026-10-14; report .gstack/qa-reports/run-20261014T120616Z/.
+    // Listed (with why), but not in the fleet and never sent a request.
+    let fleet = c.handle(json!({ "type": "FLEET_STATE", "session": admin })).await;
+    assert!(!fleet["clusterIds"].to_string().contains("zbx-legacy"),
+            "a cluster with no usable credential must not be polled: {}", fleet["clusterIds"]);
+    let r = c.handle(json!({ "type": "ES", "session": admin, "clusterId": "zbx-legacy", "method": "GET", "path": "/" })).await;
+    assert_eq!(r["ok"], json!(false), "no request goes out for it: {r}");
 
     // --- Zabbix permissions decide who sees what
     let mine = zsession(&c, "uma", 1, &["ES vm-1"]).await;
