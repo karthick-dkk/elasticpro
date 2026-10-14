@@ -22,6 +22,7 @@ import { restoreIndicesDialog, restoreSourceOf } from '../ui/snapshot-dialogs.js
 import { pageSlice, pagerBar } from '../lib/pager.js';
 import { freshnessBar } from '../lib/freshness.js';
 import { sourceSizeChart, perDayChart, volumeAnalysisCard } from '../ui/index-metrics.js';
+import { templatesView } from '../ui/templates-view.js';
 
 let host = null;
 const ui = { sourceFilter: 'all', text: '', status: 'all', sort: 'size', dir: -1, from: '', to: '', loading: false, error: null, page: 0, view: 'indices' };
@@ -118,18 +119,20 @@ function draw() {
       : null,
 
     ui.view === 'summary' ? summaryView(c, rows, all, totals) : null,
-    ui.view === 'summary' ? null :
+    ui.view === 'templates' ? templatesView(c, { draw }) : null,
+    ui.view === 'summary' || ui.view === 'templates' ? null :
     tableCard(c, rows, all));
 }
 
 /**
- * Indices / Summary.
+ * Indices / Summary / Templates.
  *
  * Two jobs, one page. "Indices" is the working view — find an index, open it, close it,
  * delete it — and it is what the page opens on, because that is what people come here to
  * do. "Summary" is how much there is and where it came from: the same numbers, read
  * rather than acted on. They were stacked on top of each other, so the table everyone
- * wanted started four charts down the page.
+ * wanted started four charts down the page. "Templates" is what new indices will be
+ * created from — ui/templates-view.js.
  */
 function viewTabs() {
   const tab = (id, label, title) => h('button.btn.sm', {
@@ -139,7 +142,8 @@ function viewTabs() {
   }, label);
   return h('div.seg', { role: 'group', 'aria-label': 'Indices view', style: { marginBottom: '10px' } },
     tab('indices', 'Indices', 'The index list, and the actions that manage it'),
-    tab('summary', 'Summary', 'Store size, sources, indices per day, and daily volume by field'));
+    tab('summary', 'Summary', 'Store size, sources, indices per day, and daily volume by field'),
+    tab('templates', 'Templates', 'Index, component and legacy templates — view, edit, simulate, compare across clusters'));
 }
 
 function summaryView(c, rows, all, totals) {

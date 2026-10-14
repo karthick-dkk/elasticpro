@@ -432,7 +432,7 @@ function draw() {
  *    disk, and gone on restart.
  */
 /** The search-family POSTs the core allows even in read-only mode. */
-const SEARCH_POST = /(^|\/)_(search|msearch|count|field_caps|mget|explain|validate\/query|render\/template|terms_enum|search_shards|async_search|eql\/search|sql|analyze|rank_eval|resolve\/index|knn_search)(\/|\?|$)/;
+const SEARCH_POST = /(^|\/)_(search|msearch|count|field_caps|mget|explain|validate\/query|render\/template|terms_enum|search_shards|async_search|eql\/search|sql|analyze|rank_eval|resolve\/index|knn_search|index_template\/_simulate_index|index_template\/_simulate)(\/|\?|$)/;
 
 /** Would this request change the cluster? */
 function isWrite(method, path) {

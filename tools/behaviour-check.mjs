@@ -1974,11 +1974,88 @@ if (viaFleet) {
   ok(strip().length === 1, 'console tabs: closing should leave one tab');
 }
 
+// Templates: a third view on the Indices page. Built-in templates are hidden until asked
+// for; Save under read-only asks for the guard and sends no PUT before anybody says yes;
+// Simulate POSTs _simulate_index (not on the core's read-only list, so it goes through the
+// guard too) and names the template that wins.
+{
+  const stx = await load('core/state.js');
+  const esm = await load('core/es.js');
+  const wr = await load('core/writes.js');
+  stx.state.config = config;
+  if (!config.clusters.some((c) => c.id === stx.state.selected)) stx.state.selected = config.clusters[0].id;
+  for (const c of config.clusters) stx.state.clients.set(c.id, new esm.EsClient(c, stx.state.defaults, async () => {}));
+  await go('indices');
+  const tabs = () => [...doc.querySelectorAll('#view .seg button')];
+  const tplTab = tabs().find((b) => b.textContent.trim() === 'Templates');
+  ok(!!tplTab, `templates: no Templates tab on the Indices page (tabs: ${tabs().map((b) => b.textContent.trim()).join(', ')})`);
+  if (tplTab) {
+    tplTab.click();
+    for (let i = 0; i < 40 && !doc.querySelector('#view tr[data-name="logs-app"]'); i++) await settleFor(100);
+    const names = [...doc.querySelectorAll('#view tr[data-name]')].map((tr) => tr.getAttribute('data-name'));
+    ok(names.includes('logs-app'), `templates: logs-app is not listed (rows: ${names.join(', ')})`);
+    ok(!names.includes('.ilm-history-7'), 'templates: the built-in .ilm-history-7 is shown although "show built-in" is off');
+    ok(!doc.querySelector('#idx-table'), 'templates: the indices table is still drawn under the Templates view');
+
+    const topModal = () => { const m = doc.querySelectorAll('.modal'); return m.length ? m[m.length - 1] : null; };
+    const press = (root, re) => { const b = root && [...root.querySelectorAll('button')].find((x) => re.test(x.textContent.trim())); if (b) b.click(); return !!b; };
+    const row = () => doc.querySelector('#view tr[data-name="logs-app"]');
+
+    const view = row() && row().querySelector('button[data-act="tpl-view"]');
+    ok(!!view, 'templates: no View / Edit button on logs-app');
+    if (view) {
+      view.click(); await settleFor(250);
+      const area = doc.querySelector('#tpl-json');
+      ok(area && area.value.includes('"index_patterns"'), 'templates: the editor does not show the template body');
+      const save = doc.querySelector('button[data-act="tpl-save"]');
+      ok(!!save, 'templates: no Save button in the editor');
+      if (save) {
+        const n = sent.length;
+        save.click(); await settleFor(500);
+        const dlg = topModal();
+        ok(!!dlg && !dlg.querySelector('#tpl-json'), 'templates: Save under read-only should ask for the write guard first (no dialog appeared)');
+        ok(!sent.slice(n).some((m) => m.type === 'ES' && m.method === 'PUT'), 'templates: a PUT was sent before anybody said yes');
+        press(dlg, /^no$/i); await settleFor(400);
+        // Declining puts the editor back with the text intact; close it.
+        ok(!!doc.querySelector('#tpl-json'), 'templates: declining the guard lost the editor');
+        press(topModal(), /^cancel$/i); await settleFor(200);
+        ok(!sent.slice(n).some((m) => m.type === 'ES' && m.method === 'PUT'), 'templates: a PUT was sent after the guard was declined');
+      }
+    }
+
+    const sim = row() && row().querySelector('button[data-act="tpl-simulate"]');
+    ok(!!sim, 'templates: no Simulate button on logs-app');
+    if (sim) {
+      const n = sent.length;
+      sim.click(); await settleFor(250);
+      const input = topModal() && topModal().querySelector('input');
+      ok(!!input, 'templates: Simulate did not ask for an index name');
+      if (input) {
+        input.value = 'logs-app-2026.10.14';
+        press(topModal(), /^simulate$/i); await settleFor(400);
+        const unlockedHere = !wr.writesUnlocked();
+        if (unlockedHere) { press(topModal(), /^allow writes$/i); }
+        for (let i = 0; i < 40 && !doc.querySelector('#tpl-sim-result'); i++) await settleFor(100);
+        const posts = sent.slice(n).filter((m) => m.type === 'ES' && m.method === 'POST' && /^\/_index_template\/_simulate_index\//.test(m.path));
+        ok(posts.length === 1, `templates: expected one POST _simulate_index, saw ${posts.length}`);
+        const res = doc.querySelector('#tpl-sim-result');
+        ok(res && res.querySelector('[data-winner="logs-app"]'), `templates: the simulate result does not name logs-app as the winner ("${res && res.textContent.slice(0, 160)}")`);
+        ok(res && /logs-default/.test(res.textContent), 'templates: the overlapping lower-priority template is not shown');
+        press(topModal(), /^done$/i); await settleFor(150);
+        if (unlockedHere) await wr.setWritesUnlocked(false);
+      }
+    }
+    // Leave the page on its default view for whatever runs next.
+    const back = tabs().find((b) => b.textContent.trim() === 'Indices');
+    if (back) { back.click(); await settleFor(100); }
+  }
+}
+
 if (problems.length) {
   console.error(`\n${problems.length} problem(s):`);
   for (const p of problems) console.error('  ✗ ' + p);
   process.exit(1);
 }
-console.log('ok: strip, console, shards, volume, hand-off, refresh, snapshots, tasks, toasts, accounts split, the log-delay preflight, a quiet Config page, the Request Centre and the redraw gate, the request policy, the coverage bar, the Tasks panel and the console tabs');
+console.log('ok: strip, console, shards, volume, hand-off, refresh, snapshots, tasks, toasts, accounts split, the log-delay preflight, a quiet Config page, the Request Centre and the redraw gate, the request policy, the coverage bar, the Tasks panel and the console tabs, template management');
 // The pages leave auto-refresh timers and a live tail running; nothing here waits on them.
 process.exit(0);

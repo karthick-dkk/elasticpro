@@ -30,7 +30,7 @@ use std::sync::LazyLock;
 
 static READONLY_POST: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
-        r"(^|/)_(search|msearch|count|field_caps|mget|explain|validate/query|render/template|terms_enum|search_shards|async_search|eql/search|sql|sql/translate|analyze|rank_eval|resolve/index|knn_search)(/|\?|$)",
+        r"(^|/)_(search|msearch|count|field_caps|mget|explain|validate/query|render/template|terms_enum|search_shards|async_search|eql/search|sql|sql/translate|analyze|rank_eval|resolve/index|knn_search|index_template/_simulate_index|index_template/_simulate)(/|\?|$)",
     )
     .expect("static regex")
 });
@@ -95,6 +95,15 @@ mod tests {
     /// The old two-argument shape, kept so the read/write cases below stay readable.
     fn guard(read_only: bool, method: &str, path: &str) -> Option<String> {
         write_guard(Writes::decide(read_only, false, false), method, path)
+    }
+
+    #[test]
+    fn simulating_a_template_is_a_read() {
+        assert!(is_read("POST", "/_index_template/_simulate_index/logs-app-2026.10.14"));
+        assert!(is_read("POST", "/_index_template/_simulate"));
+        assert!(is_read("POST", "/_index_template/_simulate/logs-app"));
+        assert!(!is_read("PUT", "/_index_template/logs-app"), "saving one is still a write");
+        assert!(!is_read("POST", "/_index_template/logs-app"), "a POST that is not a simulate is still a write");
     }
 
     #[test]
