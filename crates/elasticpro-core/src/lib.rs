@@ -17,6 +17,7 @@ pub mod guard;
 pub mod hcvault;
 pub mod http;
 pub mod notify;
+pub mod silences;
 pub mod socks;
 pub mod ssh;
 pub mod tls;

@@ -3,7 +3,7 @@
 import { h, mount, clear, reconcile } from '../lib/dom.js';
 import { nodeCache, objId } from '../lib/keyed.js';
 import { bytes, num, compact, pct, ago, dt, toCsv, download, healthClass } from '../lib/fmt.js';
-import { state, bus, clusters, activeClusters, client, fetchOverview, healthState, refreshAll, alerts, cachedAlerts, requestsFor, requestLoad, jvmSummary, clusterRev, fleetMode, coverage, askFleetDataset } from '../core/state.js';
+import { state, bus, clusters, activeClusters, client, fetchOverview, healthState, refreshAll, alerts, cachedAlerts, openAlertsNow, requestsFor, requestLoad, jvmSummary, clusterRev, fleetMode, coverage, askFleetDataset } from '../core/state.js';
 import { coverageBar } from '../lib/freshness.js';
 import { readAllState, startReadAll } from '../lib/read-all.js';
 import { fleetSummary, nameList } from '../core/fleet-summary.js';
@@ -73,7 +73,7 @@ function versionKey(r) {
 let alertCounts = null;
 function alertsByCluster() {
   const m = new Map();
-  cachedAlerts().forEach((a) => { if (a.cluster) m.set(a.cluster.id, (m.get(a.cluster.id) || 0) + 1); });
+  openAlertsNow().forEach((a) => { if (a.cluster) m.set(a.cluster.id, (m.get(a.cluster.id) || 0) + 1); });
   return m;
 }
 
@@ -239,7 +239,7 @@ function unreachableRows(rows) {
  * alert text lives on the Alerts page; this says what and how many.
  */
 function summaryBox(rows) {
-  const s = fleetSummary(rows, healthState, inZabbix() ? [] : cachedAlerts());
+  const s = fleetSummary(rows, healthState, inZabbix() ? [] : openAlertsNow());
   const dot = (cls, n, label) => h('span.fs-count', h(`span.dot.${cls}`), h('b', String(n)), ` ${label}`);
   const healthRow = h('div.fs-row',
     h('span.fs-total', h('b', String(s.total)), ` cluster${s.total === 1 ? '' : 's'}`),

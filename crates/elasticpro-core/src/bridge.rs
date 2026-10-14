@@ -115,6 +115,7 @@ pub struct Core {
     es_limits: EsLimits,
     /// Each person's notification history. See `notify`.
     notify: crate::notify::NotifyStore,
+    silences: crate::silences::Silences,
 }
 
 /// Concurrency limits on requests to Elasticsearch, whoever sends them.
@@ -499,6 +500,7 @@ impl Core {
             zbx_metrics_cache: parking_lot::Mutex::new(HashMap::new()),
             fleet: crate::fleet::Fleet::new(data_dir_for_fleet.as_deref()),
             es_limits: EsLimits::from_env(),
+            silences: crate::silences::Silences::open(data_dir_for_notify.as_ref().map(|d| d.join("silences.json"))),
             notify: crate::notify::NotifyStore::open(data_dir_for_notify.map(|d| d.join("notifications.json"))),
         })
     }
@@ -874,6 +876,33 @@ impl Core {
             "EVENTS_TICKET" => self.events_ticket_msg(caller.clone(), reauth),
             "DELAY_SINK_GET" | "DELAY_SINK_SET" | "DELAY_SINK_RUN" => self.delay_sink_msg(&t, &msg).await,
             "NOTIFY_PUT" | "NOTIFY_LIST" | "NOTIFY_CLEAR" => self.notify_msg(&t, &msg, caller.as_ref()),
+            "SILENCE_LIST" => json!({ "ok": true, "silences": self.silences.list() }),
+            "SILENCE_SET" => {
+                let by = caller.as_ref().map(|c| c.name.clone()).unwrap_or_else(|| "local".into());
+                let minutes = msg.get("minutes").and_then(Value::as_u64);
+                match self.silences.add(
+                    msg.get("scope").and_then(Value::as_str).unwrap_or(""),
+                    msg.get("target").and_then(Value::as_str).unwrap_or(""),
+                    minutes, msg.get("reason").and_then(Value::as_str).unwrap_or(""), &by)
+                {
+                    Ok(s) => {
+                        tracing::info!(target: "audit", user = %by, scope = %s.scope, target = %s.target, until = ?s.until, reason = %s.reason, "alert silenced");
+                        json!({ "ok": true, "silence": s, "silences": self.silences.list() })
+                    }
+                    Err(e) => json!({ "ok": false, "kind": "bad_request", "message": e }),
+                }
+            }
+            "SILENCE_CLEAR" => {
+                let by = caller.as_ref().map(|c| c.name.clone()).unwrap_or_else(|| "local".into());
+                match self.silences.remove(msg.get("id").and_then(Value::as_str).unwrap_or("")) {
+                    Ok(Some(s)) => {
+                        tracing::info!(target: "audit", user = %by, scope = %s.scope, target = %s.target, "alert silence removed");
+                        json!({ "ok": true, "silences": self.silences.list() })
+                    }
+                    Ok(None) => json!({ "ok": false, "kind": "not_found", "message": "no such silence (it may have ended)" }),
+                    Err(e) => json!({ "ok": false, "kind": "io", "message": e }),
+                }
+            }
             "TUNNELS" => json!({ "ok": true, "tunnels": self.tunnels_for(caller.as_ref()).await }),
             "TUNNEL_RECONNECT" => {
                 let id = msg.get("jumpId").and_then(|v| v.as_str()).unwrap_or("");
