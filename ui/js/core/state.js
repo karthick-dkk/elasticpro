@@ -2095,11 +2095,11 @@ export function worstHealth() {
 }
 
 function updateBadge() {
-  const { critical: crit, warning: warn } = openAlertCounts();
+  const { total, critical: crit, warning: warn } = openAlertCounts();
   const w = worstHealth();
   const color = crit ? '#d03b3b' : warn ? '#fab219' : w === 'green' ? '#0ca30c' : '#64748b';
-  setBadge(a.length ? String(a.length) : '', color,
-    a.length ? `ElasticPro — ${crit} critical, ${warn} warning` : 'ElasticPro — all clusters healthy');
+  setBadge(total ? String(total) : '', color,
+    total ? `ElasticPro — ${crit} critical, ${warn} warning` : 'ElasticPro — all clusters healthy');
 }
 
 /** Small, credential-free summary so the toolbar popup can render instantly. */

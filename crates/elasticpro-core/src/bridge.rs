@@ -876,31 +876,48 @@ impl Core {
             "EVENTS_TICKET" => self.events_ticket_msg(caller.clone(), reauth),
             "DELAY_SINK_GET" | "DELAY_SINK_SET" | "DELAY_SINK_RUN" => self.delay_sink_msg(&t, &msg).await,
             "NOTIFY_PUT" | "NOTIFY_LIST" | "NOTIFY_CLEAR" => self.notify_msg(&t, &msg, caller.as_ref()),
-            "SILENCE_LIST" => json!({ "ok": true, "silences": self.silences.list() }),
+            // Scoped to the clusters the caller may see (Zabbix group scope): a silence names a
+            // cluster, so listing, setting or removing one for a cluster you cannot see is refused.
+            "SILENCE_LIST" => {
+                let vis: std::collections::HashSet<String> = self.fleet_visible(caller.as_ref()).into_iter().collect();
+                let list: Vec<_> = self.silences.list().into_iter()
+                    .filter(|s| vis.contains(crate::silences::cluster_of(&s.scope, &s.target))).collect();
+                json!({ "ok": true, "silences": list })
+            }
             "SILENCE_SET" => {
                 let by = caller.as_ref().map(|c| c.name.clone()).unwrap_or_else(|| "local".into());
+                let (scope, target) = (msg.get("scope").and_then(Value::as_str).unwrap_or(""), msg.get("target").and_then(Value::as_str).unwrap_or(""));
+                let vis: std::collections::HashSet<String> = self.fleet_visible(caller.as_ref()).into_iter().collect();
+                if !vis.contains(crate::silences::cluster_of(scope, target.trim())) {
+                    return json!({ "ok": false, "kind": "forbidden", "message": "that cluster is not one you can see" });
+                }
                 let minutes = msg.get("minutes").and_then(Value::as_u64);
-                match self.silences.add(
-                    msg.get("scope").and_then(Value::as_str).unwrap_or(""),
-                    msg.get("target").and_then(Value::as_str).unwrap_or(""),
-                    minutes, msg.get("reason").and_then(Value::as_str).unwrap_or(""), &by)
-                {
+                match self.silences.add(scope, target, minutes, msg.get("reason").and_then(Value::as_str).unwrap_or(""), &by) {
                     Ok(s) => {
                         tracing::info!(target: "audit", user = %by, scope = %s.scope, target = %s.target, until = ?s.until, reason = %s.reason, "alert silenced");
-                        json!({ "ok": true, "silence": s, "silences": self.silences.list() })
+                        let list: Vec<_> = self.silences.list().into_iter().filter(|x| vis.contains(crate::silences::cluster_of(&x.scope, &x.target))).collect();
+                        json!({ "ok": true, "silence": s, "silences": list })
                     }
                     Err(e) => json!({ "ok": false, "kind": "bad_request", "message": e }),
                 }
             }
             "SILENCE_CLEAR" => {
                 let by = caller.as_ref().map(|c| c.name.clone()).unwrap_or_else(|| "local".into());
-                match self.silences.remove(msg.get("id").and_then(Value::as_str).unwrap_or("")) {
-                    Ok(Some(s)) => {
-                        tracing::info!(target: "audit", user = %by, scope = %s.scope, target = %s.target, "alert silence removed");
-                        json!({ "ok": true, "silences": self.silences.list() })
-                    }
-                    Ok(None) => json!({ "ok": false, "kind": "not_found", "message": "no such silence (it may have ended)" }),
-                    Err(e) => json!({ "ok": false, "kind": "io", "message": e }),
+                let id = msg.get("id").and_then(Value::as_str).unwrap_or("");
+                let vis: std::collections::HashSet<String> = self.fleet_visible(caller.as_ref()).into_iter().collect();
+                match self.silences.list().into_iter().find(|s| s.id == id) {
+                    Some(s) if !vis.contains(crate::silences::cluster_of(&s.scope, &s.target)) =>
+                        json!({ "ok": false, "kind": "forbidden", "message": "that silence is for a cluster you cannot see" }),
+                    None => json!({ "ok": false, "kind": "not_found", "message": "no such silence (it may have ended)" }),
+                    Some(_) => match self.silences.remove(id) {
+                        Ok(Some(s)) => {
+                            tracing::info!(target: "audit", user = %by, scope = %s.scope, target = %s.target, "alert silence removed");
+                            let list: Vec<_> = self.silences.list().into_iter().filter(|x| vis.contains(crate::silences::cluster_of(&x.scope, &x.target))).collect();
+                            json!({ "ok": true, "silences": list })
+                        }
+                        Ok(None) => json!({ "ok": false, "kind": "not_found", "message": "no such silence (it may have ended)" }),
+                        Err(e) => json!({ "ok": false, "kind": "io", "message": e }),
+                    },
                 }
             }
             "TUNNELS" => json!({ "ok": true, "tunnels": self.tunnels_for(caller.as_ref()).await }),

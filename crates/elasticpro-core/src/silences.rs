@@ -40,6 +40,12 @@ impl Silence {
     }
 }
 
+/// The cluster a silence is about: its target for a cluster silence, the part of the alert
+/// key before the first ':' for an alert silence (keys are `<clusterId>:<family>…`).
+pub fn cluster_of<'a>(scope: &str, target: &'a str) -> &'a str {
+    if scope == "alert" { target.split(':').next().unwrap_or("") } else { target }
+}
+
 pub struct Silences {
     path: Option<PathBuf>,
     list: RwLock<Vec<Silence>>,

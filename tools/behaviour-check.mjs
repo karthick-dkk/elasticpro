@@ -1671,8 +1671,14 @@ if (config.clusters.length >= 2 && viaFleet) {
   base([{ name: 'n2', master: '*' }, { name: 'n1', master: '-' }],
     { masterChangedFrom: 'n1', masterChangedAt: Date.now() - 60000 });
   const moved = st.alerts().find((a) => a.key.startsWith('c1:master-changed'));
-  ok(!!moved && moved.level === 'critical', `a master election should be critical: ${keys().join(', ')}`);
+  // Tuned: on a cluster that is green again a re-election is worth knowing, not paging over
+  // (warning); while the cluster is not green it stays critical.
+  ok(!!moved && moved.level === 'warning', `a master election on a green cluster should be a warning: ${keys().join(', ')}`);
   ok(moved && /from n1 to n2/.test(moved.title), `the alert should name both: ${moved && moved.title}`);
+  base([{ name: 'n2', master: '*' }, { name: 'n1', master: '-' }],
+    { masterChangedFrom: 'n1', masterChangedAt: Date.now() - 60000, health: { status: 'yellow', unassigned_shards: 2 } });
+  const movedYellow = st.alerts().find((a) => a.key.startsWith('c1:master-changed'));
+  ok(!!movedYellow && movedYellow.level === 'critical', `a master election on a cluster that is not green should be critical: ${keys().join(', ')}`);
 
   // And one that moved a week ago is history, not an alert.
   base([{ name: 'n2', master: '*' }],
