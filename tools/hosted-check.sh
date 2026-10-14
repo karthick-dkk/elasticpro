@@ -150,6 +150,35 @@ done
 check "the sign-in is audited"              "$N" "2"
 kill $PID3; wait $PID3 2>/dev/null || true
 
+echo "== hosted mode, sessions: an HttpOnly cookie, kept across a restart =="
+# Signed in once, a person stays signed in: no idle timeout, and a restart of the core keeps
+# the session. The browser carries it only as an HttpOnly cookie — never a token a script
+# can read or a page could store.
+P5=$(free_port); OUT5=$(mktemp); D5=$(mktemp -d); JAR=$(mktemp)
+start5() { ELASTICPRO_BIND=0.0.0.0 ELASTICPRO_DATA_DIR="$D5" "$BIN" ui "$P5" >>"$OUT5" 2>&1 & PID5=$!; disown
+           until curl -s -o /dev/null "http://127.0.0.1:$P5/"; do sleep 0.2; done; }
+start5
+trap 'kill $PID $PID5 2>/dev/null; rm -rf "$OUT" "$OUT5" "$D5" "$JAR"' EXIT
+B5="http://127.0.0.1:$P5/bridge"
+HDR=$(curl -s -D - -o /tmp/ep-login.$$ -X POST "$B5" -H 'content-type: application/json' -c "$JAR" \
+        -d '{"type":"LOGIN","name":"Admin","password":"elastic"}' | tr -d '\r' | grep -i '^set-cookie:' || true)
+check "login answers ok"                     "$(field ok </tmp/ep-login.$$)" "True"
+check "the reply carries no token"           "$(python3 -c 'import json,sys;print("session" in json.load(open(sys.argv[1])))' /tmp/ep-login.$$)" "False"
+rm -f /tmp/ep-login.$$
+case "$HDR" in *ep_session=*HttpOnly*Secure*SameSite=Strict*) ok "the session is an HttpOnly, Secure, SameSite=Strict cookie";;
+  *) bad "session cookie attributes (got '$HDR')";; esac
+TOK=$(awk '$6=="ep_session"{print $7}' "$JAR")
+cookie() { post "$B5" -H "cookie: ep_session=$TOK" "$@"; }
+check "the cookie signs requests in"         "$(cookie -d '{"type":"WHOAMI"}' | python3 -c 'import json,sys;print((json.load(sys.stdin).get("caller") or {}).get("name"))')" "Admin"
+check "only a hash of it is on disk"         "$(grep -c "$TOK" "$D5/sessions.json" || true)" "0"
+kill $PID5; wait $PID5 2>/dev/null || true
+start5
+check "a restart keeps the session"          "$(cookie -d '{"type":"WHOAMI"}' | python3 -c 'import json,sys;print((json.load(sys.stdin).get("caller") or {}).get("name"))')" "Admin"
+OUTH=$(curl -s -D - -o /dev/null -X POST "$B5" -H 'content-type: application/json' -H "cookie: ep_session=$TOK" -d '{"type":"LOGOUT"}' | tr -d '\r' | grep -i '^set-cookie:' || true)
+case "$OUTH" in *ep_session=\;*Max-Age=0*) ok "signing out clears the cookie";; *) bad "logout cookie (got '$OUTH')";; esac
+check "and ends the session"                 "$(cookie -d '{"type":"WHOAMI"}' | python3 -c 'import json,sys;print(json.load(sys.stdin).get("caller"))')" "None"
+kill $PID5; wait $PID5 2>/dev/null || true
+
 echo "== dev mode (loopback) =="
 P2=$(free_port)
 "$BIN" ui "$P2" >/dev/null 2>&1 & PID=$!; disown

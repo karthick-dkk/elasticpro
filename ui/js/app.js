@@ -21,7 +21,7 @@ import { applyLoadedConfig } from './ui/load-config.js';
 import { authState, loginScreen, signOut } from './ui/login.js';
 import { aboutMini } from './ui/about.js';
 import { announceNewAlerts, announceSnapshotOutcomes, resetAnnounced } from './core/notify.js';
-import { onSessionLost, bridge, setSession } from './core/transport.js';
+import { onSessionLost, bridge, setSession, setSignedIn } from './core/transport.js';
 import { readLaunch, withoutCode, withoutTrouble, troubleshootTarget, themeFor, exchangeCode, rememberEmbedTheme, askZabbixToSignIn } from './core/embed.js';
 import { pageForProblem } from './core/alert-rules.js';
 
@@ -766,6 +766,7 @@ async function gateOnAuth() {
   if (!st.required) { me = null; return; }
   // A live session that must still change its password goes to the change screen, not
   // to a dashboard the core will refuse to fill.
+  if (st.caller) setSignedIn(true);
   if (st.caller && !st.caller.mustChange) { me = st.caller; return; }
   // Inside Zabbix there is no ElasticPro password to type: the person signed in to Zabbix.
   // No session here means Zabbix should sign them in again, so ask it — and say so while it
@@ -786,7 +787,7 @@ async function arriveFromZabbix() {
   if (!launch.code) return;
   const res = await exchangeCode(launch.code, bridge);
   try { history.replaceState(null, '', withoutCode(location.href)); } catch (_) { /* sandboxed frame */ }
-  if (res.ok) setSession(res.session);
+  if (res.ok) { setSession(res.session); setSignedIn(true); }
   else ssoNotice = `Signing in from Zabbix did not work: ${res.message}`;
 }
 
