@@ -55,3 +55,22 @@ export function fleetSummary(rows, healthOf, alerts, { top = 3 } = {}) {
 export function nameList(names, max = 6) {
   return names.length <= max ? names.join(', ') : `${names.slice(0, max).join(', ')}, +${names.length - max} more`;
 }
+
+/**
+ * What an empty alert list means, given how many clusters were actually read. No alerts is
+ * "healthy" only for the clusters read; for the rest it is unknown, and the page must say so
+ * rather than show a tick (unknown is not zero).
+ */
+export function alertsEmptyState({ total, read }) {
+  const s = (n) => (n === 1 ? '' : 's');
+  if (total > 0 && read >= total) {
+    return { healthy: true, title: 'Every cluster is healthy',
+      detail: `No health, disk, ILM or snapshot problem across ${total} cluster${s(total)}.` };
+  }
+  if (!read) {
+    return { healthy: false, title: 'Nothing read yet',
+      detail: `No alert can be raised for a cluster that has not been read — ${total} cluster${s(total)} not read yet. Read all (above) reads them one at a time.` };
+  }
+  return { healthy: false, title: `No problem on the ${read} cluster${s(read)} read`,
+    detail: `${total - read} not read yet — their alerts are unknown. Read all (above) reads them.` };
+}

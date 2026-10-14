@@ -6,7 +6,7 @@ import { bytes, num, compact, pct, ago, dt, toCsv, download, healthClass } from 
 import { state, bus, clusters, activeClusters, client, fetchOverview, healthState, refreshAll, alerts, cachedAlerts, openAlertsNow, requestsFor, requestLoad, jvmSummary, clusterRev, fleetMode, coverage, askFleetDataset } from '../core/state.js';
 import { coverageBar } from '../lib/freshness.js';
 import { readAllState, startReadAll } from '../lib/read-all.js';
-import { fleetSummary, nameList } from '../core/fleet-summary.js';
+import { fleetSummary, nameList, alertsEmptyState } from '../core/fleet-summary.js';
 import { hbarList, usageMeter } from '../lib/charts.js';
 import { card, collapsible, pill, statTile, table, connectionBanner, diskCell, lastSnapshotOf, snapshotPill, snapshotStatusByKey, empty } from './common.js';
 import { isSnapshotMode } from '../core/snapshot.js';
@@ -247,14 +247,17 @@ function summaryBox(rows) {
     s.loading ? dot('muted', s.loading, 'loading') : null,
     s.unreachable.length
       ? h('span.fs-count.fs-bad', h('span.dot.crit'), h('b', String(s.unreachable.length)), ` unreachable: ${nameList(s.unreachable)}`)
-      : h('span.fs-count.muted', 'all reachable'),
+      // "All reachable" only once every cluster has answered: a loading one is not known to be.
+      : h('span.fs-count.muted', s.loading ? 'none unreachable so far' : 'all reachable'),
     s.red ? h('span.fs-count.fs-bad', `red: ${nameList(s.redNames)}`) : null);
   // Inside Zabbix the problems are Zabbix's to show — Monitoring → Problems, the dashboard.
   const alertRow = inZabbix() ? null : h('div.fs-row',
     s.alerts
       ? h('span', h('b', `${s.alerts} open alert${s.alerts === 1 ? '' : 's'}`), ` \u2014 ${s.critical} critical, ${s.warning} warning`,
           s.problemKinds > s.problems.length ? h('span.muted', ` \u00b7 ${s.problemKinds} kinds of problem`) : null)
-      : h('span.muted', 'No open alerts'));
+      // No alerts means healthy only for the clusters read (fleet-summary.js alertsEmptyState).
+      : h('span.muted', (() => { const e = alertsEmptyState({ total: s.total, read: s.total - s.loading - s.unreachable.length });
+          return e.healthy ? 'No open alerts' : `No alerts raised \u2014 ${e.title.toLowerCase()}`; })()));
   const problemRow = !inZabbix() && s.problems.length ? h('div.fs-row.fs-problems',
     h('span.muted', 'Top problems:'),
     ...s.problems.map((g) => h('span.fs-problem', { title: g.title },
