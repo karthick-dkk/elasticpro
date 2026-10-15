@@ -341,6 +341,7 @@ const LOGIN_KIND = {
   bad_credentials: 'wrong name or password',
   locked: 'account locked',
   disabled: 'account blocked',
+  rate_limited: 'too many wrong passwords — slowed down',
   name_taken: 'a local account has that name',
   io_error: 'could not save the account',
 };

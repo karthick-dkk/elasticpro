@@ -433,6 +433,11 @@ impl Account {
 /// Wrong passwords in a row that lock an account by itself, and for how long.
 pub const LOCK_AFTER: u32 = 5;
 pub const LOCK_SECS: u64 = 15 * 60;
+/// The last admin is never locked out by wrong passwords — that would let anyone who knows
+/// the name shut a whole installation out of its administration. Past `LOCK_AFTER` it is
+/// slowed instead: one password checked per this many seconds, so guessing stays hopeless
+/// (two tries a minute against a password of at least ten characters).
+pub const ADMIN_THROTTLE_SECS: u64 = 30;
 /// Sign-in attempts kept for the Accounts page, newest last.
 pub const LOGIN_LOG_LEN: usize = 300;
 
@@ -468,11 +473,12 @@ pub enum AuthError {
     LastAdmin,
     Weak(String),
     Io(String),
-    /// The right password for a locked account. Said only after the password matched, so
-    /// it tells nobody without it that the name exists.
+    /// A locked account, whatever password was typed.
     Locked,
-    /// The right password for a blocked account; the same care.
+    /// A blocked account, whatever password was typed.
     Blocked,
+    /// The last admin after too many wrong passwords: wait this many seconds between tries.
+    Throttled(u64),
 }
 
 impl AuthError {
@@ -487,6 +493,7 @@ impl AuthError {
             AuthError::Io(_) => "io_error",
             AuthError::Locked => "locked",
             AuthError::Blocked => "disabled",
+            AuthError::Throttled(_) => "rate_limited",
         }
     }
 }
@@ -502,6 +509,7 @@ impl std::fmt::Display for AuthError {
             AuthError::Io(e) => write!(f, "{e}"),
             AuthError::Locked => write!(f, "this account is locked — an ElasticPro administrator can unlock it on the Accounts page"),
             AuthError::Blocked => write!(f, "this account is blocked — ask an ElasticPro administrator"),
+            AuthError::Throttled(secs) => write!(f, "too many wrong passwords — wait {secs} seconds before the next try"),
         }
     }
 }
@@ -898,14 +906,15 @@ impl UserStore {
     /// The account this name and password belong to, if any.
     ///
     /// A wrong password counts against the account, and `LOCK_AFTER` of them in a row lock
-    /// it for `LOCK_SECS` — except the last admin who can still get in, so nobody can lock
-    /// a whole installation out of its administration by typing a name. Locked and blocked
-    /// are said only to someone who typed the right password; everyone else hears "do not
-    /// match", whatever the reason.
+    /// it for `LOCK_SECS`. The last admin who can still get in is slowed instead of locked
+    /// (`ADMIN_THROTTLE_SECS`). While an account is locked or blocked, that is the answer
+    /// whatever password was typed: answering "locked" only to the right password would
+    /// tell an attacker which guess was right.
     ///
     /// The hash is worked out with no lock held: it is the slow part, on purpose, and every
     /// request reads this list (`is_blocked`). Only the bookkeeping after it takes the
-    /// write lock, briefly. A failure touches memory only, the same as a name that does not
+    /// write lock, briefly, and it re-checks that the password it compared against is still
+    /// the account's. A failure touches memory only, the same as a name that does not
     /// exist; only a good sign-in is written down.
     pub fn verify(&self, name: &str, password: &str) -> Result<Account, AuthError> {
         let found = self.accounts.read().iter()
@@ -923,7 +932,6 @@ impl UserStore {
         if external {
             return Err(AuthError::BadCredentials);
         }
-        let good = ct_eq(got.as_bytes(), hash.as_bytes());
         let at = now();
         let out = {
             let mut list = self.accounts.write();
@@ -931,13 +939,8 @@ impl UserStore {
             let Some(a) = list.iter_mut().find(|a| a.name == real) else {
                 return Err(AuthError::BadCredentials);   // removed while we were hashing
             };
-            if !good {
-                a.failed_logins = a.failed_logins.saturating_add(1);
-                a.last_failed = Some(at);
-                let last_admin = a.role == Role::Admin && !a.disabled && !a.is_locked(at) && usable_admins <= 1;
-                if a.failed_logins >= LOCK_AFTER && !a.is_locked(at) && !last_admin {
-                    a.locked_until = Some(at + LOCK_SECS);
-                }
+            // Changed while we were hashing: what was compared is no longer the password.
+            if a.hash != hash || a.salt != salt {
                 return Err(AuthError::BadCredentials);
             }
             if a.disabled {
@@ -946,8 +949,24 @@ impl UserStore {
             if a.is_locked(at) {
                 return Err(AuthError::Locked);
             }
+            let last_admin = a.role == Role::Admin && usable_admins <= 1;
+            // The last admin, past the threshold: one check per ADMIN_THROTTLE_SECS. Inside
+            // the window nothing is compared — right or wrong, the answer is the same.
+            if last_admin && a.failed_logins >= LOCK_AFTER
+                && a.last_failed.is_some_and(|t| at < t + ADMIN_THROTTLE_SECS) {
+                return Err(AuthError::Throttled(ADMIN_THROTTLE_SECS));
+            }
+            if !ct_eq(got.as_bytes(), hash.as_bytes()) {
+                a.failed_logins = a.failed_logins.saturating_add(1);
+                a.last_failed = Some(at);
+                if a.failed_logins >= LOCK_AFTER && !last_admin {
+                    a.locked_until = Some(at + LOCK_SECS);
+                }
+                return Err(AuthError::BadCredentials);
+            }
             a.failed_logins = 0;
             a.locked_until = None;
+            a.last_failed = None;
             a.last_login = Some(at);
             a.clone()
         };
@@ -1291,10 +1310,10 @@ mod tests {
         s.add("root", "correct-horse", Role::Admin).unwrap();
         s.add("bob", "correct-horse", Role::User).unwrap();
         s.set_disabled("bob", true).unwrap();
-        // Blocked is said only to someone with the right password; a wrong one hears the
-        // same as for a name that does not exist.
+        // Blocked whatever the password: a different answer for the right one would say
+        // which guess was right.
         assert_eq!(s.verify("bob", "correct-horse").unwrap_err(), AuthError::Blocked);
-        assert_eq!(s.verify("bob", "wrong-horse!").unwrap_err(), AuthError::BadCredentials);
+        assert_eq!(s.verify("bob", "wrong-horse!").unwrap_err(), AuthError::Blocked);
         assert!(s.is_blocked("BOB"));
     }
 
@@ -1306,8 +1325,9 @@ mod tests {
         for _ in 0..LOCK_AFTER {
             assert_eq!(s.verify("bob", "wrong-horse!").unwrap_err(), AuthError::BadCredentials);
         }
-        // Now even the right password is refused, and says why.
+        // Now every password is refused the same way, the right one included.
         assert_eq!(s.verify("bob", "correct-horse").unwrap_err(), AuthError::Locked);
+        assert_eq!(s.verify("bob", "wrong-horse!").unwrap_err(), AuthError::Locked);
         let bob = s.list().into_iter().find(|a| a.name == "bob").unwrap();
         assert_eq!(bob.failed_logins, LOCK_AFTER);
         assert!(bob.locked_until.is_some() && bob.public()["lockedUntil"].is_u64());
@@ -1318,17 +1338,23 @@ mod tests {
     }
 
     #[test]
-    fn wrong_passwords_never_lock_out_the_last_admin_and_are_not_written_down() {
+    fn the_last_admin_is_slowed_not_locked_and_failures_are_not_written_down() {
         let dir = scratch();
         let path = dir.join("users.json");
         let s = UserStore::open_with_rounds(Some(path.clone()), 1);
         s.add("root", "correct-horse", Role::Admin).unwrap();
         let before = std::fs::read_to_string(&path).unwrap();
-        for _ in 0..LOCK_AFTER + 2 {
+        for _ in 0..LOCK_AFTER {
             assert_eq!(s.verify("root", "wrong-horse!").unwrap_err(), AuthError::BadCredentials);
         }
+        assert_eq!(s.verify("root", "wrong-horse!").unwrap_err(), AuthError::Throttled(ADMIN_THROTTLE_SECS));
         assert_eq!(std::fs::read_to_string(&path).unwrap(), before, "a failure touches memory only");
-        assert!(s.verify("root", "correct-horse").is_ok(), "the only admin can still get in");
+        // Not locked, but slowed: inside the window even the right password waits its turn.
+        assert_eq!(s.verify("root", "correct-horse").unwrap_err(), AuthError::Throttled(ADMIN_THROTTLE_SECS));
+        assert!(!s.list()[0].is_locked(now()), "the only admin is never locked");
+        // After the window, the right password opens it.
+        s.accounts.write()[0].last_failed = Some(now() - ADMIN_THROTTLE_SECS);
+        assert!(s.verify("root", "correct-horse").is_ok());
         let _ = std::fs::remove_dir_all(dir);
     }
 

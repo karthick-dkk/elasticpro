@@ -18,12 +18,12 @@ A code keeps its meaning once it is given out. A new kind of failure gets a new 
 | Code | Kind | What it means | What to do |
 |---|---|---|---|
 | EP-101 | `unauthenticated` | No session, or it ended. | Sign in again. |
-| EP-102 | `bad_credentials` | The name and password do not match an account. | Check both. After 5 wrong passwords in a row the account locks for 15 minutes. |
+| EP-102 | `bad_credentials` | The name and password do not match an account. | Check both. After 5 wrong passwords in a row the account locks for 15 minutes (the last admin is slowed instead, see EP-107). |
 | EP-103 | `must_change_password` | The account still has its shipped password. | Set a new one. |
 | EP-104 | `needs_bootstrap` | No account exists yet. | Create the first administrator. |
 | EP-105 | `disabled` | The account is blocked. | An administrator unblocks it on the Accounts page. |
 | EP-106 | `locked` | The account is locked, by an administrator or after too many wrong passwords. | An administrator unlocks it on the Accounts page; a self-lock also clears after 15 minutes. |
-| EP-107 | `rate_limited` | Too many sign-in requests from one place. | Wait a minute. |
+| EP-107 | `rate_limited` | Too many sign-in requests, or the last admin after 5 wrong passwords (one try per 30 seconds). | Wait, then try again. |
 | EP-110 | `forbidden` | Your role may not do this, or the cluster is not one you may see. | Ask an administrator for the access. |
 | EP-111 | `no_token` | An API call without a token. | Send the token. |
 | EP-112 | `session_expired` | The session timed out. | Sign in again. |
