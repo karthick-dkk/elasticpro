@@ -388,15 +388,20 @@ pub struct Account {
     #[serde(default)]
     pub locked: bool,
     /// Locked by itself after `LOCK_AFTER` wrong passwords in a row, until this time.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    ///
+    /// This and the two below are kept in memory only, never written to the accounts file:
+    /// a wrong password must cost the same as a name that does not exist, and a disk write
+    /// on one and not the other would tell an attacker which names are real. A restart
+    /// clears a self-lock, which an admin can do anyway.
+    #[serde(skip)]
     pub locked_until: Option<u64>,
     /// Wrong passwords since the last good one.
-    #[serde(default)]
+    #[serde(skip)]
     pub failed_logins: u32,
+    #[serde(skip)]
+    pub last_failed: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_login: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_failed: Option<u64>,
 }
 
 impl Account {
@@ -893,51 +898,62 @@ impl UserStore {
     /// The account this name and password belong to, if any.
     ///
     /// A wrong password counts against the account, and `LOCK_AFTER` of them in a row lock
-    /// it for `LOCK_SECS`. Locked and blocked are said only to someone who typed the right
-    /// password; everyone else hears "do not match", whatever the reason.
+    /// it for `LOCK_SECS` — except the last admin who can still get in, so nobody can lock
+    /// a whole installation out of its administration by typing a name. Locked and blocked
+    /// are said only to someone who typed the right password; everyone else hears "do not
+    /// match", whatever the reason.
+    ///
+    /// The hash is worked out with no lock held: it is the slow part, on purpose, and every
+    /// request reads this list (`is_blocked`). Only the bookkeeping after it takes the
+    /// write lock, briefly. A failure touches memory only, the same as a name that does not
+    /// exist; only a good sign-in is written down.
     pub fn verify(&self, name: &str, password: &str) -> Result<Account, AuthError> {
+        let found = self.accounts.read().iter()
+            .find(|a| a.name.eq_ignore_ascii_case(name.trim()))
+            .map(|a| (a.name.clone(), a.salt.clone(), a.rounds, a.hash.clone(), a.source.is_some()));
+        // The hash is still computed for a name that does not exist, so the time taken does
+        // not tell an attacker which names are real.
+        let Some((real, salt, rounds, hash, external)) = found else {
+            let _ = derive(password, &random_hex(16), self.rounds);
+            return Err(AuthError::BadCredentials);
+        };
+        let got = derive(password, &salt, rounds);
+        // An account another system vouches for has no password here, so no password opens
+        // it — whatever was typed.
+        if external {
+            return Err(AuthError::BadCredentials);
+        }
+        let good = ct_eq(got.as_bytes(), hash.as_bytes());
         let at = now();
         let out = {
             let mut list = self.accounts.write();
-            let found = list.iter_mut().find(|a| a.name.eq_ignore_ascii_case(name.trim()));
-            match found {
-                // The hash is still computed for a name that does not exist, so the time
-                // taken does not tell an attacker which names are real.
-                None => {
-                    let _ = derive(password, &random_hex(16), self.rounds);
-                    return Err(AuthError::BadCredentials);
+            let usable_admins = list.iter().filter(|a| a.role == Role::Admin && !a.disabled && !a.is_locked(at)).count();
+            let Some(a) = list.iter_mut().find(|a| a.name == real) else {
+                return Err(AuthError::BadCredentials);   // removed while we were hashing
+            };
+            if !good {
+                a.failed_logins = a.failed_logins.saturating_add(1);
+                a.last_failed = Some(at);
+                let last_admin = a.role == Role::Admin && !a.disabled && !a.is_locked(at) && usable_admins <= 1;
+                if a.failed_logins >= LOCK_AFTER && !a.is_locked(at) && !last_admin {
+                    a.locked_until = Some(at + LOCK_SECS);
                 }
-                Some(a) => {
-                    let got = derive(password, &a.salt, a.rounds);
-                    // An account another system vouches for has no password here, so no
-                    // password opens it — whatever was typed.
-                    if a.source.is_some() {
-                        return Err(AuthError::BadCredentials);
-                    }
-                    if !ct_eq(got.as_bytes(), a.hash.as_bytes()) {
-                        a.failed_logins = a.failed_logins.saturating_add(1);
-                        a.last_failed = Some(at);
-                        if a.failed_logins >= LOCK_AFTER && !a.is_locked(at) {
-                            a.locked_until = Some(at + LOCK_SECS);
-                        }
-                        Err(AuthError::BadCredentials)
-                    } else if a.disabled {
-                        Err(AuthError::Blocked)
-                    } else if a.is_locked(at) {
-                        Err(AuthError::Locked)
-                    } else {
-                        a.failed_logins = 0;
-                        a.locked_until = None;
-                        a.last_login = Some(at);
-                        Ok(a.clone())
-                    }
-                }
+                return Err(AuthError::BadCredentials);
             }
+            if a.disabled {
+                return Err(AuthError::Blocked);
+            }
+            if a.is_locked(at) {
+                return Err(AuthError::Locked);
+            }
+            a.failed_logins = 0;
+            a.locked_until = None;
+            a.last_login = Some(at);
+            a.clone()
         };
-        // The count and the last sign-in survive a restart; a failed save is not a reason
-        // to refuse someone who typed the right password.
+        // A failed save is not a reason to refuse someone who typed the right password.
         let _ = self.save();
-        out
+        Ok(out)
     }
 }
 
@@ -1299,6 +1315,21 @@ mod tests {
         let ok = s.verify("bob", "correct-horse").unwrap();
         assert_eq!(ok.failed_logins, 0);
         assert!(ok.last_login.is_some());
+    }
+
+    #[test]
+    fn wrong_passwords_never_lock_out_the_last_admin_and_are_not_written_down() {
+        let dir = scratch();
+        let path = dir.join("users.json");
+        let s = UserStore::open_with_rounds(Some(path.clone()), 1);
+        s.add("root", "correct-horse", Role::Admin).unwrap();
+        let before = std::fs::read_to_string(&path).unwrap();
+        for _ in 0..LOCK_AFTER + 2 {
+            assert_eq!(s.verify("root", "wrong-horse!").unwrap_err(), AuthError::BadCredentials);
+        }
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), before, "a failure touches memory only");
+        assert!(s.verify("root", "correct-horse").is_ok(), "the only admin can still get in");
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
