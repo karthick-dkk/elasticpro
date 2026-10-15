@@ -19,9 +19,6 @@ write here needs a decision a person made by hand, as everywhere else in this pr
   python3 setup/zbx_rename.py --apply --rewrite-vault-path   # the Vault paths, and nothing else
   python3 setup/zbx_rename.py --tags                         # plan one phase
   python3 setup/zbx_rename.py --apply --tags                 # run that one phase
-  python3 setup/zbx_rename.py --apply --rename-legacy        # rename what still reads as the old
-                                                             #   product: templates get a retired
-                                                             #   marker, everything else the swap
   python3 setup/zbx_rename.py --all                          # plan every phase
   python3 setup/zbx_rename.py --apply --phase alerts --client acme   # one phase, one client
 
@@ -55,32 +52,7 @@ may write.
   maintenance  --maintenance. A live Zabbix maintenance "ElasticVue: <client>".
   relink       --templates. Links "ElasticPro client master" to each master host. It unlinks
                NOTHING: see "item history" below.
-  rename_legacy --rename-legacy. The objects that are left READING as the old product once every
-               phase above has run: templates, host groups, users, user roles, scripts, media
-               types, actions, dashboards, scheduled reports, images, maintenances. It renames
-               and never deletes, unlinks or imports, so no item and no history is touched.
-               A template is renamed to the swapped name PLUS a retired marker — "ElasticVue Pro
-               client master" becomes "ElasticPro client master (pre-0.2.0)" — because a legacy
-               template renamed to the EXACT current name is the one rename that cannot be
-               undone by renaming it back: see "THE TEMPLATE NAME TRAP" below. Everything else
-               gets the plain swap, and a target name already in use is refused per object.
-               Because a retired name is recognised by nothing — which is the point of it — a
-               legacy template is renamed only once nothing needs the old name to recognise a
-               host: no host links it, or every host that links it also links the current
-               template. Otherwise it is refused, naming the hosts and the relink to run first.
   datadir      --datadir. Prints the filesystem move. No API can do it, so nothing else.
-
-THE TEMPLATE NAME TRAP — why a template is renamed to a retired name and never to the current
-one. Zabbix's configuration.import matches a template by uuid first and then by name. A legacy
-template renamed to "ElasticPro client master" has the CURRENT name and the LEGACY uuid (the
-product name is inside the hash: see uuid_from()), and its items still carry evp.* keys. The
-next "Write master template" on the Clients page then finds a name match whose uuid is
-different and fails — and goes on failing, on every save of every client, until somebody
-renames that template back by hand. The install this was written against has no "ElasticPro
-client master" at all, so the name is free and the rename would look like a success on the day
-and break the next import. The retired marker makes the collision impossible instead of
-unlikely: the name is not the one the code writes, the uuid is untouched, the hosts stay
-linked, and the items and their history are not touched at all.
 
 MACROS IN FORMULAS — why the macro phase leaves some macros alone. A Zabbix calculated item's
 formula is text, and the master template's "requested" items are calculated items whose entire
@@ -118,15 +90,9 @@ holds item values. So this script refuses, structurally and with no flag to over
     templates_clear — "Unlink and clear" is what destroys the history.
   * host.update carrying a templates array — it REPLACES the link list, so one template
     missed from the array is silently unlinked and its items are stranded at host level.
-  * template.update renaming a legacy template to a CURRENT name — the item keys would stay
+  * template.update renaming a legacy template to a current name — the item keys would stay
     evp.*, the uuid would stay the legacy one, and "Write master template" would then fail
-    on a name-present/uuid-different collision from that moment on, permanently. The call
-    itself is no longer denied by name, because the rename_legacy phase needs it; what is
-    denied, structurally, in call(), is the dangerous shape of it: a template.update may
-    carry nothing but {templateid, host, name}, and the name it sets must end in the retired
-    marker. A payload with a "templates", "groups" or "macros" collection REPLACES that
-    collection — which is how an accidental unlink happens — and a name that is not retired
-    is the import collision above. Both are refused before the request is built.
+    on a name-present/uuid-different collision from that moment on, permanently.
   * template.delete, item.delete, trigger.delete, configuration.import, history.clear,
     trend.clear, housekeeping.update, and every other delete.
 
@@ -180,21 +146,14 @@ def flag_all(name):
 # Phases. Each is individually selectable because this runs against a production Zabbix with
 # seven live clients: an operator does one thing, looks at it, and comes back for the next.
 # ---------------------------------------------------------------------------------------------
-# rename_legacy comes after relink on purpose: relink finds the legacy master template BY NAME
-# (tpl_by_name), so renaming the templates first in the same run would leave the relink phase
-# looking for a name that is no longer there and reporting "nothing to relink" on an install
-# that has everything to relink. Rename last, when nothing left in the run depends on the old
-# name any more.
-PHASES = ["macros", "vault", "groups", "tags", "alerts", "widgets", "maintenance", "relink",
-          "rename_legacy", "datadir"]
+PHASES = ["macros", "vault", "groups", "tags", "alerts", "widgets", "maintenance", "relink", "datadir"]
 # Phase name -> the flags that select it. More than one spelling where the obvious word and
 # the precise word differ: "--dashboards" is what an operator looking at a blank widget will
 # reach for, "--widgets" is what the phase actually rewrites.
 PHASE_FLAGS = {"macros": ["--macros"], "vault": ["--vault", "--rewrite-vault-path"],
                "groups": ["--groups"], "tags": ["--tags"], "alerts": ["--alerts"],
                "widgets": ["--dashboards", "--widgets"], "maintenance": ["--maintenance"],
-               "relink": ["--templates", "--relink"],
-               "rename_legacy": ["--rename-legacy"], "datadir": ["--datadir"]}
+               "relink": ["--templates", "--relink"], "datadir": ["--datadir"]}
 # The two phases that existed before this script had phases. With --apply and no phase flag
 # they must go on doing exactly what they did, or an upgrade of this file silently stops doing
 # the work someone's runbook says it does.
@@ -264,11 +223,6 @@ WRITE_ALLOWED = {
     "hostgroup.update", "usergroup.update", "user.update", "action.update",
     "report.update", "dashboard.update", "maintenance.update",
     "item.update", "trigger.update",   # status=1 on the legacy inherited objects, nothing else
-    # The rename_legacy phase. Every one of these may carry nothing but an id and a name:
-    # UPDATE_SHAPES below is checked in call(), so a collection that would be REPLACED cannot
-    # be sent through one of them even by a mistake made later in this file.
-    "template.update", "templategroup.update", "role.update", "script.update",
-    "mediatype.update", "image.update",
 }
 # Denied by name, each with the reason an operator needs to hear. These are not oversights to
 # be added later: every one of them either deletes item history or makes "Write master
@@ -280,13 +234,10 @@ WRITE_DENIED = {
                        "-> the host -> Templates -> Unlink (never Unlink and clear)",
     "template.delete": "triggers, graphs and discovery rules still hang off a legacy template, "
                        "and deleting it takes them with it. Delete it by hand once nobody needs them",
-    # template.update was denied here by name. It is now allowed, and the danger it was denied
-    # for is denied by SHAPE instead, in call(): the payload may carry nothing but
-    # {templateid, host, name}, so no "templates", "groups" or "macros" collection can be
-    # replaced through it (that is how an accidental unlink happens, and an unlink with clear
-    # is what destroys item history), and the name it sets must end in RETIRED_SUFFIX, so the
-    # name-present/uuid-different collision that broke "Write master template" permanently
-    # cannot be created either. Nothing else about this list changed.
+    "template.update": "renaming a legacy template to a current name leaves evp.* item keys and "
+                       "a legacy uuid under a current name, and every later 'Write master "
+                       "template' then fails on a name-present/uuid-different collision, "
+                       "permanently. Link the current template instead (--templates)",
     "template.massremove": "see host.massremove: unlinking is done by hand, without clear",
     "configuration.import": "importing these templates belongs to the module, against the "
                             "current names and uuids only. Its rules carry deleteMissing for "
@@ -316,39 +267,6 @@ WRITE_DENIED = {
 # structurally rather than merely never typed, because "Unlink" and "Unlink and clear" differ
 # by this one field name and the second one is the only irrecoverable thing in the migration.
 FORBIDDEN_KEYS = ("templateids_clear", "templates_clear")
-# The shape each update method is allowed to have: the id field it must carry, and the sets of
-# other fields it may carry. A payload whose other fields are not a subset of one of those sets
-# is refused.
-#
-# This is here rather than in the phases because of what a Zabbix update method does with a
-# collection: `templates`, `groups`, `macros`, `pages`, `timeperiods` and the rest are REPLACED
-# by what the payload carries, not merged into. So a template.update built to change a name,
-# that happens to carry the `templates` array somebody read back a few lines earlier, silently
-# unlinks every template not in that array and strands its items at host level — and
-# host-level items whose template is gone are what "Unlink and clear" leaves behind, except
-# nobody chose it. A convention ("we only ever send a name") cannot be checked; a shape can.
-#
-# The two methods with more than one shape are the ones this script uses for two different
-# jobs: the widgets phase sends a dashboard's whole `pages` array and the maintenance phase
-# re-sends a window whole, and both are right. Every method the rename_legacy phase added has
-# exactly one shape, an id and a name.
-MAINTENANCE_UPDATE_KEYS = {"name", "active_since", "active_till", "maintenance_type",
-                           "description", "groups", "hosts", "tags", "timeperiods"}
-UPDATE_SHAPES = {
-    "template.update": ("templateid", [{"host", "name"}]),
-    "templategroup.update": ("templategroupid", [{"name"}]),
-    "hostgroup.update": ("groupid", [{"name"}]),
-    "usergroup.update": ("usrgrpid", [{"name"}]),
-    "user.update": ("userid", [{"username"}]),
-    "role.update": ("roleid", [{"name"}]),
-    "script.update": ("scriptid", [{"name"}]),
-    "mediatype.update": ("mediatypeid", [{"name"}]),
-    "action.update": ("actionid", [{"name"}]),
-    "report.update": ("reportid", [{"name"}]),
-    "image.update": ("imageid", [{"name"}]),
-    "dashboard.update": ("dashboardid", [{"name"}, {"pages"}]),
-    "maintenance.update": ("maintenanceid", [{"name"}, MAINTENANCE_UPDATE_KEYS]),
-}
 
 
 def _forbidden_key(x):
@@ -382,46 +300,6 @@ def call(m, p):
             raise Refused("host.update with a templates array: refused — it replaces the link "
                           "list, so a template missed from the array is unlinked and its items "
                           "are stranded at host level. Linking is done with host.massadd")
-        if m in UPDATE_SHAPES:
-            id_key, shapes = UPDATE_SHAPES[m]
-            if not isinstance(p, dict) or id_key not in p:
-                raise Refused(f"{m}: refused — it must carry exactly one {id_key} and nothing "
-                              f"this script did not build. This is a bug in this script")
-            rest = set(p) - {id_key}
-            if not any(rest <= shape for shape in shapes):
-                raise Refused(
-                    f"{m}: refused — the payload carries "
-                    f"{', '.join(sorted(rest - set().union(*shapes))) or ', '.join(sorted(rest))}, "
-                    f"which is not one of the shapes this method is allowed. A Zabbix update "
-                    f"REPLACES a collection it is given, so a rename that carries templates, "
-                    f"groups, macros or pages unlinks or deletes whatever it left out. Send the "
-                    f"id and the name only")
-        if m == "template.update":
-            # The one rename that cannot be undone by renaming it back. configuration.import
-            # matches on uuid first and then on name, so a legacy template (legacy uuid, evp.*
-            # item keys) wearing the CURRENT name makes every later "Write master template"
-            # fail on a name-present/uuid-different collision — permanently, until a person
-            # renames it back. A retired name cannot collide with a name the code writes, so
-            # the marker is required rather than merely used by the phase that calls this.
-            for field in ("host", "name"):
-                if field not in p:
-                    continue
-                if not str(p[field]).endswith(RETIRED_SUFFIX):
-                    raise Refused(
-                        f"template.update setting {field}=\"{p[field]}\": refused — a template "
-                        f"this script renames must end in \"{RETIRED_SUFFIX.strip()}\". Without "
-                        f"it the legacy template can end up wearing a name the module writes, "
-                        f"its uuid still the legacy one, and configuration.import then fails on "
-                        f"every later 'Write master template'")
-                if str(p[field]) in CURRENT_TEMPLATE_NAMES:
-                    # Belt and braces, and not theoretical: the cluster, ES and Linux template
-                    # names are settings (_common.cluster_template() and friends), so a site
-                    # could in principle have pointed one of them at a name that ends in the
-                    # marker, and then that name is current and must not be taken.
-                    raise Refused(
-                        f"template.update setting {field}=\"{p[field]}\": refused — that is a "
-                        f"name in use now (a module template, or one a *_TEMPLATE setting points "
-                        f"at), and a legacy uuid under a current name breaks every later import")
         if not APPLY:
             raise Refused(f"{m}: refused — a dry run tried to write. This is a bug in this script")
     h = {"Content-Type": "application/json-rpc"}
@@ -523,103 +401,6 @@ LEGACY_TEMPLATES = [
     # subtracted below exactly as TemplateInstaller::legacyTemplates() subtracts it.
     ("cluster/template", "Elasticsearch Cluster by HTTP EVP", _common.cluster_template()),
 ]
-# Reconciler::ULM_TEMPLATE / LEGACY_ULM_TEMPLATE (:41, :94). The log archive template is
-# imported separately and is not part of the module, so no uuid seed in this repository
-# describes it — it is ours by recorded NAME and not by uuid, which is what OURS_TEMPLATES
-# below distinguishes.
-ULM_NEW, ULM_OLD = "ElasticPro log archive S3", "ElasticVue Pro log archive S3"
-# TemplateInstaller::currentNames(): the names install() writes. One definition, used both by
-# the relink phase (to subtract a legacy name that is also a current one) and by the rename
-# phase (which must never produce one of these).
-MODULE_TEMPLATES = {MASTER_NEW, "ElasticPro cluster devices",
-                    "ElasticPro Elasticsearch via SSH jump host",
-                    "ElasticPro log archive ES via SSH jump host", _common.cluster_template()}
-# Names in use now that are NOT install()'s: the base templates each named by a setting
-# (_common.cluster_template() / es_template() / linux_template(), and the core reads the same
-# ELASTICPRO_ZABBIX_*_TEMPLATE values), and the three templates generated by
-# tools/zabbix-{alert,plan,delay}-template.mjs that Reconciler::OWN_CLUSTER_TEMPLATES (:37)
-# links to cluster hosts. A site that pointed a setting at a pre-rename spelling is using that
-# name ON PURPOSE: renaming it would leave the setting naming a template that is not there any
-# more, which is TemplateInstaller::legacyTemplates()' own reason for subtracting it.
-CURRENT_TEMPLATE_NAMES = MODULE_TEMPLATES | {
-    ULM_NEW, _common.es_template(), _common.linux_template(),
-    "ElasticPro client plan", "ElasticPro alerts", "ElasticPro log delay"}
-
-# ---------------------------------------------------------------------------------------------
-# The rename_legacy phase's two rules: what the product is called now, and the retired marker.
-# Both are derived once, here, because the phase computes a name for eleven kinds of object and
-# two of them disagreeing about the spelling is exactly the drift this codebase keeps having.
-# ---------------------------------------------------------------------------------------------
-# CHANGELOG.md 0.2.0: "The rename in 0.2.0 changed the Zabbix module ids, host tags, template
-# names and macros." So an object still carrying the old name was made by an install older than
-# that, and "(pre-0.2.0)" says which generation it belongs to rather than merely that it is old.
-#
-# WHY A MARKER AT ALL, and why only on templates: Zabbix's configuration.import matches a
-# template by uuid first and then by name. Renaming a legacy template to the EXACT name the
-# module writes leaves the current name on an object whose uuid is the legacy one and whose
-# items still carry evp.* keys, and "Write master template" then fails on a
-# name-present/uuid-different collision on every save of every client, permanently, until
-# somebody renames it back by hand. The marker makes that collision impossible: the name is not
-# one the code ever writes, so neither the uuid nor the name can clash, and the template keeps
-# its hosts, its items and all of their history. call() requires it on every template.update.
-# Host groups, users, roles, scripts, media types, actions, dashboards, reports, images and
-# maintenances have no uuid and are never imported, so for them a marker would be noise and the
-# plain swap is the right name.
-RENAME_RELEASE = "0.2.0"
-RETIRED_SUFFIX = f" (pre-{RENAME_RELEASE})"
-# How the product name is spelled now, per spelling it had. The patterns are OLD_NAME's, split
-# so that each can carry its own replacement, and each replacement carries the three casings
-# rather than being title-cased: "elasticpro".title() is "Elasticpro", and a product name
-# rendered wrong in an operator's object list is a new thing to explain on every run.
-#   elasticvue / elasticvuepro / ElasticVue Pro -> ElasticPro   (the product name itself)
-#   espro                                       -> elasticpro   (PREFIXES: {$ESPRO. -> {$ELASTICPRO.)
-#   evp                                         -> ep           (MODULES, TAG_NEW, USER_NEW)
-PRODUCT_RULES = [
-    (re.compile(r"(?i:elasticvue(?:[ _-]*pro)?)"), ("elasticpro", "ELASTICPRO", "ElasticPro")),
-    (re.compile(r"(?<![A-Za-z0-9])(?i:espro)(?![A-Za-z0-9])"),
-     ("elasticpro", "ELASTICPRO", "ElasticPro")),
-    (re.compile(r"(?<![A-Za-z0-9])(?:EVP(?![A-Za-z0-9])|evp(?![a-z0-9])|Evp(?![a-z0-9]))"),
-     ("ep", "EP", "Ep")),
-]
-
-
-def swap_product(text):
-    """The current spelling of a name that carries the previous product name, or None if it
-    carries none at all.
-
-    The boundaries are OLD_NAME's, for OLD_NAME's reasons: a bare search for "evp" matches the
-    middle of "devprod" and a bare "espro" matches "esproxy-01", and renaming somebody's host
-    group because three letters of its name look like ours is worse than leaving the old name
-    on screen. "elasticvue" needs no boundary — nothing else contains it."""
-    out = text or ""
-    for pattern, (lower, upper, mixed) in PRODUCT_RULES:
-        out = pattern.sub(
-            lambda m, lo=lower, up=upper, mx=mixed:
-            up if m.group(0).isupper() else lo if m.group(0).islower() else mx, out)
-    return None if out == (text or "") else out
-
-
-def retired_name(old):
-    """What a TEMPLATE of the old generation is renamed to: the swapped name plus the retired
-    marker. None if the name carries no old product name.
-
-    The marker is appended only once, so a template a half-finished run already renamed is not
-    pushed to "... (pre-0.2.0) (pre-0.2.0)" by the next one."""
-    swapped = swap_product(old)
-    if swapped is None:
-        return None
-    return swapped if swapped.endswith(RETIRED_SUFFIX) else swapped + RETIRED_SUFFIX
-
-
-# Legacy template name -> (the uuid seed this module would have written it from, the name in use
-# now for the same thing). The seed is None when this repository records the name but no seed
-# describes the object: the log archive template is imported separately and is not part of the
-# module, and "ElasticVue client master" is the spelling the live install reported with nothing
-# here recording how it was made. A seed means the claim "this one is ours" can be CHECKED
-# against the uuid; None means it rests on the recorded name alone — enough to rename, which is
-# reversible, and never enough to unlink or delete anything, which is not.
-OURS_TEMPLATES = dict([(name, (seed, cur)) for seed, name, cur in LEGACY_TEMPLATES]
-                      + [(MASTER_OLDEST, (None, MASTER_NEW)), (ULM_OLD, (None, ULM_NEW))])
 
 
 def new_name(macro):
@@ -685,8 +466,7 @@ if CLIENTS_WANTED:
     print(f"scoped to client(s): {', '.join(CLIENTS_WANTED)}")
     print("   scopeable phases: tags, alerts, widgets, maintenance, relink.")
     print("   NOT scopeable, and they report and write across the whole install: macros (the global")
-    print("   and template macros belong to no single client), vault, groups, modules, datadir,")
-    print("   rename_legacy (a template, a role, a script or an image belongs to no single client).")
+    print("   and template macros belong to no single client), vault, groups, modules, datadir.")
 
 found = changed = skipped = refused = objects = 0
 human = []                                     # what is left for a person, printed at the end
@@ -1742,10 +1522,8 @@ if selected("maintenance"):
 # ---------------------------------------------------------------------------------------------
 if selected("relink"):
     print("\n== the master template")
-    # TemplateInstaller::currentNames(), defined once up with the other constants: a legacy name
-    # that is also a name in use now is not a leftover. It used to be written out again here,
-    # which is the drift this codebase keeps having.
-    legacy_current = CURRENT_TEMPLATE_NAMES
+    legacy_current = {MASTER_NEW, "ElasticPro cluster devices", "ElasticPro Elasticsearch via SSH jump host",
+                      "ElasticPro log archive ES via SSH jump host", _common.cluster_template()}
     print(f"   {MASTER_OLD} / {MASTER_OLDEST}  ->  {MASTER_NEW}")
     print(f"   This is a relink, not a rename: MasterTemplate::uuid() hashes the product name, so the")
     print(f"   two templates are different objects with different uuids and, crucially, different item")
@@ -2007,375 +1785,8 @@ if selected("relink"):
                 print(f"   template \"{old_name}\": no host is linked to it any more. This script never "
                       f"deletes a template — its triggers, graphs and discovery rules still hang off it. "
                       f"Delete it by hand once nobody needs what is on it")
-                if selected("rename_legacy"):
-                    # The rename phase reports it again under the name it will have, and does so
-                    # whether it renamed it or only planned it, so one template is one line in
-                    # "left for a person" and that line names the object the operator will see
-                    # on the Templates page. Renaming is not deleting: everything on it stays.
-                    print(f"      the rename_legacy phase renames it to \"{retired_name(old_name)}\" — "
-                          f"the same template, with everything still on it")
-                else:
-                    note(f"template \"{old_name}\" has no host left: delete it by hand when nobody needs "
-                         f"its triggers, graphs and discovery rules")
-
-# ---------------------------------------------------------------------------------------------
-# Phase: rename_legacy. What is LEFT reading as the old product once every phase above has moved
-# the things the code reads.
-#
-# The phases above rename what the modules LOOK FOR: the macros a page reads a value out of, the
-# tags Reconciler recognises a host by, the five per-client alert objects AlertRouting finds by
-# name. When they are done the install works — and it still says "ElasticVue" on the Templates
-# page, in the user list, on the roles page and in the maintenance list, which is what an
-# operator and their client actually read. This phase renames those, and does nothing else:
-#
-#   * no unlink, no "unlink and clear", no delete, no configuration.import. Every write is one
-#     update carrying one id and one name, and call() enforces that shape (UPDATE_SHAPES), so
-#     item history cannot be touched by this phase even by a mistake made in it later.
-#   * a template is renamed to the swapped name PLUS the retired marker, never to the name the
-#     module writes: see RETIRED_SUFFIX, and call()'s template.update check which requires it.
-#   * everything else gets the plain swap, because nothing else has a uuid or is ever imported.
-#   * a target name that is already in use is REFUSED for that object, with the pair named. It
-#     is not worked around with a different marker: which of two objects should wear the plain
-#     name is a decision about which one is live, and that is the operator's, exactly as the
-#     twin reports in every phase above leave it.
-#
-# Hosts and item keys are deliberately outside it: see "surveyed and deliberately not renamed".
-# ---------------------------------------------------------------------------------------------
-if selected("rename_legacy"):
-    print("\n== names that still read as the old product")
-    rl_write = writing("rename_legacy")
-    print(f"   This phase renames and nothing else — no unlink, no clear, no delete, no import —")
-    print(f"   so not one item and not one value of history is touched by it.")
-    print(f"   Templates become \"<swapped name>{RETIRED_SUFFIX}\": a legacy template wearing the")
-    print(f"   EXACT current name keeps its legacy uuid and its evp.* keys, and configuration.import")
-    print(f"   matches uuid first and name second, so every later \"Write master template\" would fail")
-    print(f"   on a name-present/uuid-different collision, permanently. Everything else is swapped")
-    print(f"   plainly: it has no uuid and is never imported.")
-    if not rl_write:
-        print("   to apply: --apply --rename-legacy")
-
-    rl_delegated = []                          # objects a phase above owns, named for the summary
-    rl_quiet = []                              # the types that carry nothing of the old name
-    # Objects a phase above already renames. One object has one owner: the alerts phase knows the
-    # order a twin has to be cleared up in and the maintenance phase re-sends a window's periods,
-    # and two phases renaming one object means two plans for it in a dry run and a race in an
-    # --apply. So these are named and left to their phase, with the flag that runs it.
-    RL_DELEGATED = {("host group", GROUP_OLD): "groups"}
-    for _c in CLIENT_NAMES:
-        RL_DELEGATED[("user group", PREFIX_OLD + _c)] = "alerts"
-        RL_DELEGATED[("action", PREFIX_OLD + _c)] = "alerts"
-        RL_DELEGATED[("dashboard", PREFIX_OLD + _c)] = "alerts"
-        RL_DELEGATED[("scheduled report", PREFIX_OLD + _c + " weekly")] = "alerts"
-        RL_DELEGATED[("user", client_user(_c, True))] = "alerts"
-        RL_DELEGATED[("maintenance", PREFIX_OLD + _c)] = "maintenance"
-
-    def rl_plural(label):
-        """The plural of a type label. Written out because "user directorys" in the middle of a
-        production migration reads like a script that was not finished."""
-        return label[:-1] + "ies" if label.endswith("y") else label + "s"
-
-    def rl_delegate(label, name):
-        """The reason to leave this object to the phase that owns it, or None if nobody does."""
-        phase = RL_DELEGATED.get((label, name))
-        if not phase:
-            return None
-        rl_delegated.append(f'{label} "{name}"')
-        return (f"the {phase} phase renames this one — left to it, so one object has one owner "
-                f"(--apply --{phase}, or --all)")
-
-    def rl_template_check(row, name):
-        """Whether an old-looking template is this module's legacy one, and may be renamed.
-
-        A uuid is the only honest way to tell a template this module wrote from one of the site's
-        own that merely shares the name — uuid_from() hashes the product name, so no current uuid
-        can match a legacy object — and taking a name off somebody else's template is the same
-        class of mistake as taking a template off their hosts."""
-        if name in CURRENT_TEMPLATE_NAMES:
-            return ("a name in use NOW, not a leftover: the cluster, ES and Linux template names "
-                    "are settings (ELASTICPRO_ZABBIX_*_TEMPLATE / Roles::clusterTemplate()), so a "
-                    "site that points one at a pre-rename spelling means that name on purpose. "
-                    "Renaming it would leave the setting naming a template that is not there")
-        seed, current = OURS_TEMPLATES.get(name, (False, None))
-        if seed is False:
-            note(f'template "{name}" carries the old product name but is not one this repository '
-                 f'records as this product\'s, so it was left alone — rename it yourself if it is '
-                 f'yours; it is only a name, and nothing on it would move')
-            return ("not one of the names this repository records as this product's "
-                    "(TemplateInstaller::LEGACY_TEMPLATES, Reconciler::LEGACY_MASTER_TEMPLATES, "
-                    "Reconciler::LEGACY_ULM_TEMPLATE), so it is the site's own. Left alone")
-        if seed and row.get("uuid") == current_uuid(seed):
-            return (f"uuid {row.get('uuid')} is the one this module writes NOW, so this is the "
-                    f"CURRENT template under a name that reads old — not legacy, left alone")
-        if seed and row.get("uuid") != legacy_uuid(seed):
-            note(f'template "{name}" was not written by this module (its uuid is '
-                 f'{row.get("uuid")}, not {legacy_uuid(seed)}) — leave it alone; it is somebody '
-                 f'else\'s template sharing the name')
-            return (f"uuid {row.get('uuid')} is not the {legacy_uuid(seed)} this module would have "
-                    f"written — the site's own template sharing the name. Left alone")
-        # The one way a rename here can break something: a legacy template NAME is also how the
-        # modules still recognise a host that has not been relinked. Reconciler::masterTemplates(),
-        # esClusterTemplates(), ulmTemplates() and jumpTemplates() each match the legacy name as
-        # well as the current one, which is what makes an un-migrated install work at all. The
-        # plain swap would still be recognised — it is the current name — but a RETIRED name is
-        # recognised by nothing, deliberately, because that is what keeps it out of
-        # configuration.import's way. So renaming a legacy template a host still reaches takes
-        # that recognition away: the Clients page shows the client with no cluster, or shows no
-        # client at all, and nothing says why. It is renamed once nothing depends on the name —
-        # no host links it, or every host that links it also links the current template.
-        on = [h for h in ALL_HOSTS
-              if row["templateid"] in {t["templateid"] for t in h.get("parentTemplates") or []}]
-        waiting = sorted(h["host"] for h in on
-                         if current not in {t["host"] for t in h.get("parentTemplates") or []})
-        if waiting:
-            return ("refuse",
-                    f"{len(waiting)} host(s) still reach this template and do NOT carry "
-                    f"\"{current}\": {', '.join(waiting)}. The modules recognise an un-relinked "
-                    f"host by this legacy NAME (Reconciler::masterTemplates(), "
-                    f"esClusterTemplates(), ulmTemplates(), the jump templates), and a retired "
-                    f"name is recognised by nothing — renaming it now would leave Cluster "
-                    f"Management showing the client with no cluster, or no client at all. Nothing "
-                    f"was changed. Link \"{current}\" to those hosts first (--apply --templates "
-                    f"--accept-history-restart for the master template; save the client, or link "
-                    f"it on Data collection -> Hosts, for the others), then run this phase again")
-        return None
-
-    def rl_template_after(row, want):
-        """A template nothing links any more is still worth reporting as deletable by hand, and
-        under the name it has after this phase: the operator goes to the Templates page and finds
-        the new name there. Renaming is not deleting — its triggers, graphs and discovery rules
-        are all still on it, which is why this script deletes neither them nor it."""
-        linked = [h["host"] for h in ALL_HOSTS
-                  if row["templateid"] in {t["templateid"] for t in h.get("parentTemplates") or []}]
-        if not linked:
-            note(f'template "{want}" (was "{row.get("host")}") has no host left: delete it by hand '
-                 f'when nobody needs its triggers, graphs and discovery rules. This phase renames '
-                 f'and never deletes, so everything that was on it is still on it')
-
-    def rl_rename(label, method, params, id_key, fields, update, limit,
-                  target=swap_product, check=None, after=None):
-        """One object type: read it, plan or apply one rename per object, count it as every other
-        phase counts.
-
-        Not rename_plan(): that one pairs ONE known old name with ONE known new name and resolves
-        which of the two is present. Here the old name is discovered by pattern across every
-        object of a type, the new one is computed from it, and the refusals are different ones —
-        a target already in use, two legacy objects that would collide with each other, a name
-        over Zabbix's length limit for that field."""
-        global objects, changed, skipped
-        try:
-            rows = call(method, params)
-        except RuntimeError as e:
-            if "ot found" in str(e) or "ncorrect method" in str(e):
-                print(f"   {rl_plural(label)}: this Zabbix has no {method} — nothing of theirs was examined")
-            else:
-                print(f"   {rl_plural(label)}: could not be read ({e}) — none of them was examined")
-                note(f"{rl_plural(label)} could not be read ({e}) — look through them for the old product "
-                     f"name by hand, or run this phase as a user that may read them")
-            return
-        key = fields[0]
-        # Every name of this type that is taken, under either generation and in either name field
-        # (a template has a technical and a visible name and Zabbix keeps both unique), so that a
-        # rename onto one of them is refused here rather than failing at the API.
-        present = {str(r.get(f) or "") for r in rows for f in fields if r.get(f)}
-        wanted = {}
-        for r in rows:
-            w = target(str(r.get(key) or ""))
-            if w:
-                wanted.setdefault(w, []).append(str(r.get(key) or ""))
-        hits = 0
-        for r in sorted(rows, key=lambda r: str(r.get(key) or "").lower()):
-            name = str(r.get(key) or "")
-            want = target(name)
-            if want is None:
-                if name.endswith(RETIRED_SUFFIX):
-                    # An earlier run of this phase did this one. Reported rather than silent, so
-                    # that "a second run has nothing to do" is something the operator can see.
-                    skipped += 1
-                    print(f"   {label} \"{name}\": already retired by an earlier run — skipped")
-                continue
-            hits += 1
-            # A check answers with a reason to leave the object alone, or with ("refuse", reason)
-            # when leaving it alone is something a person has to come back to. The difference is
-            # the difference between "not ours" and "not yet": a refusal is counted and repeated
-            # in the summary, a skip is one line where it happened.
-            verdict = (check(r, name) if check else None) or rl_delegate(label, name)
-            if verdict:
-                kind, text = verdict if isinstance(verdict, tuple) else ("skip", verdict)
-                if kind == "refuse":
-                    objects += 1
-                    refuse(f"{label} \"{name}\" -> \"{want}\": {text}")
-                else:
-                    print(f"   {label} \"{name}\"  ->  \"{want}\": {text}")
-                continue
-            objects += 1
-            if len(want) > limit:
-                refuse(f"{label} \"{name}\" -> \"{want}\": the new name is {len(want)} characters "
-                       f"and Zabbix allows {limit} in this field. Nothing was truncated and "
-                       f"nothing was changed — a truncated name is a wrong name that looks like a "
-                       f"right one. Shorten it by hand and run this phase again")
-                continue
-            if want in present:
-                refuse(f"{label} \"{name}\" -> \"{want}\": \"{want}\" is already there, and Zabbix "
-                       f"makes this name unique, so the rename would fail. Nothing was changed. "
-                       f"Which of the two is the live one is a decision; this phase will not pick a "
-                       f"different name to get around it")
-                continue
-            if len(wanted.get(want, [])) > 1:
-                both = '" and "'.join(sorted(wanted[want]))
-                refuse(f"{label}: \"{both}\" would both become \"{want}\", and this name is unique "
-                       f"in Zabbix, so one of the two renames would fail. Neither was done. They "
-                       f"are two generations of the same thing: rename the one you are keeping by "
-                       f"hand, to a name of your own, and run this phase again for the other")
-                continue
-            payload = {id_key: r[id_key]}
-            for f in fields:
-                here = str(r.get(f) or "")
-                swapped = target(here) if here else None
-                if swapped:
-                    payload[f] = swapped
-            also = [f for f in fields[1:] if f in payload]
-            tail = f"   (and its {', '.join(also)})" if also else ""
-            if not rl_write:
-                print(f"   {label}: \"{name}\"  ->  \"{want}\"{tail}")
-                if after:
-                    after(r, want)
-                continue
-            try:
-                call(update, payload)
-            except (RuntimeError, Refused) as e:
-                skipped += 1
-                print(f"   {label}: \"{name}\" -> \"{want}\"  NOT RENAMED: {e}")
-                note(f"{label} \"{name}\": rename it to \"{want}\" by hand — Zabbix refused it ({e})")
-                continue
-            changed += 1
-            present.discard(name)
-            present.add(want)
-            print(f"   {label}: \"{name}\"  ->  \"{want}\"{tail}  renamed")
-            if after:
-                after(r, want)
-        if not hits:
-            rl_quiet.append(rl_plural(label))
-
-    # The templates first, because they are the ones with the trap in them. "host" is a
-    # template's technical name and "name" its visible one; Zabbix keeps both unique and shows
-    # the second, so both are swapped when both carry the old product name. 128 is Zabbix's
-    # length for either.
-    rl_rename("template", "template.get", {"output": ["templateid", "host", "name", "uuid"]},
-              "templateid", ["host", "name"], "template.update", 128,
-              target=retired_name, check=rl_template_check, after=rl_template_after)
-
-    # Everything else: no uuid, never imported, so the plain swap is the right name and a marker
-    # would be noise. The limits are Zabbix's own for each field; they are checked rather than
-    # trusted because a refusal is cheap and a truncated name is a wrong one.
-    rl_rename("host group", "hostgroup.get", {"output": ["groupid", "name"]},
-              "groupid", ["name"], "hostgroup.update", 255)
-    rl_rename("template group", "templategroup.get", {"output": ["templategroupid", "name"]},
-              "templategroupid", ["name"], "templategroup.update", 255)
-    rl_rename("user group", "usergroup.get", {"output": ["usrgrpid", "name"]},
-              "usrgrpid", ["name"], "usergroup.update", 255)
-    # A user's username, and not their name or surname: the username is the identifier the
-    # alert routing and these scripts look an account up by (AlertRouting::userNames(),
-    # zbx_api_user.py), and a person's own name is not the product's to rewrite.
-    rl_rename("user", "user.get", {"output": ["userid", "username"]},
-              "userid", ["username"], "user.update", 100)
-    rl_rename("user role", "role.get", {"output": ["roleid", "name"]},
-              "roleid", ["name"], "role.update", 255)
-    rl_rename("script", "script.get", {"output": ["scriptid", "name"]},
-              "scriptid", ["name"], "script.update", 255)
-    rl_rename("media type", "mediatype.get", {"output": ["mediatypeid", "name"]},
-              "mediatypeid", ["name"], "mediatype.update", 100)
-    # Every kind of action: a trigger action is the alerts phase's when it is named for a client,
-    # and an internal, discovery or autoregistration action named for the old product is this
-    # phase's. Only the name moves, so every condition and every escalation step stays as it is.
-    rl_rename("action", "action.get", {"output": ["actionid", "name"]},
-              "actionid", ["name"], "action.update", 255)
-    rl_rename("scheduled report", "report.get", {"output": ["reportid", "name"]},
-              "reportid", ["name"], "report.update", 255)
-    # The dashboard's NAME only. Its widgets are the widgets phase's, and call() will not accept
-    # a dashboard.update carrying both a name and pages, so this cannot replace an arrangement
-    # somebody made.
-    rl_rename("dashboard", "dashboard.get", {"output": ["dashboardid", "name"]},
-              "dashboardid", ["name"], "dashboard.update", 255)
-    rl_rename("image", "image.get", {"output": ["imageid", "name"]},
-              "imageid", ["name"], "image.update", 64)
-    # A maintenance keeps its maintenanceid through a rename, so a window that is open right now
-    # goes on suppressing exactly as it was — the same reason the maintenance phase gives. The
-    # payload is {maintenanceid, name} and nothing else: a maintenance.update that carries
-    # `timeperiods` REPLACES them, which would change when the window suppresses the client, and
-    # call() refuses that shape here (the maintenance phase, which re-sends a window whole, is
-    # the one place allowed to send them).
-    rl_rename("maintenance", "maintenance.get", {"output": ["maintenanceid", "name"]},
-              "maintenanceid", ["name"], "maintenance.update", 128)
-
-    if rl_quiet:
-        print(f"   nothing carries the old product name among: {', '.join(rl_quiet)}")
-    if rl_delegated:
-        note(f"{len(rl_delegated)} object(s) that read as the old product are renamed by other "
-             f"phases, not this one ({', '.join(rl_delegated[:4])}"
-             f"{' …' if len(rl_delegated) > 4 else ''}) — run those phases: --apply --groups "
-             f"--alerts --maintenance, or --apply --all")
-
-    # ----------------------------------------------------------------------------------------
-    # Surveyed, and deliberately not renamed. Each of these is read so that an object carrying
-    # the old name is on screen rather than discovered by somebody later; none of them is
-    # written, and the reason is per type. An object this product never creates is the site's
-    # own, and renaming somebody else's object is the same guess as renaming their macro.
-    # ----------------------------------------------------------------------------------------
-    print("\n== surveyed and deliberately NOT renamed (reads only)")
-    RL_NOT_OURS = ("this product creates none of these, so one carrying the old name is the "
-                   "site's own — renaming it is a decision with context this script does not have")
-    RL_SURVEY = [
-        ("host", "host.get", {"output": ["host", "name"]}, ["host", "name"],
-         "a host's technical name is what an active agent, zabbix_sender and an SSH check address "
-         "it by, and ClientState::clients() falls back to the host name to name a client when "
-         "{$GRP.CLIENT} is empty — so a rename here can stop collection outright and move a host "
-         "from one client to another. Rename a host on Data collection -> Hosts, deliberately, "
-         "with its agent configuration in front of you"),
-        ("proxy", "proxy.get", {"output": "extend"}, ["name", "host"],
-         "a proxy learns its own name from Hostname= in zabbix_proxy.conf, and a proxy whose name "
-         "no longer matches that file is not allowed to talk to the server at all"),
-        ("API token", "token.get", {"output": ["tokenid", "name"]}, ["name"], RL_NOT_OURS),
-        ("service", "service.get", {"output": ["serviceid", "name"]}, ["name"], RL_NOT_OURS),
-        ("SLA", "sla.get", {"output": ["slaid", "name"]}, ["name"], RL_NOT_OURS),
-        ("connector", "connector.get", {"output": ["connectorid", "name"]}, ["name"], RL_NOT_OURS),
-        ("icon map", "iconmap.get", {"output": ["iconmapid", "name"]}, ["name"], RL_NOT_OURS),
-        ("user directory", "userdirectory.get", {"output": ["userdirectoryid", "name"]}, ["name"],
-         RL_NOT_OURS),
-        ("event correlation", "correlation.get", {"output": ["correlationid", "name"]}, ["name"],
-         RL_NOT_OURS),
-    ]
-    rl_absent, rl_clean = [], []
-    for _label, _method, _params, _fields, _why in RL_SURVEY:
-        try:
-            _rows = call(_method, _params)
-        except RuntimeError as _e:
-            if "ot found" in str(_e) or "ncorrect method" in str(_e):
-                rl_absent.append(rl_plural(_label))     # a Zabbix version without this API
-            else:
-                print(f"   {rl_plural(_label)}: could not be read ({_e}) — nothing of theirs was examined")
-                note(f"{rl_plural(_label)} could not be read ({_e}) — check them for the old product name "
-                     f"by hand")
-            continue
-        _hit = sorted({str(_r.get(_f) or "") for _r in _rows for _f in _fields
-                       if OLD_NAME.search(str(_r.get(_f) or ""))})
-        if not _hit:
-            rl_clean.append(rl_plural(_label))
-            continue
-        print(f"   {_label}: {', '.join(_hit)}")
-        print(f"      left alone — {_why}")
-        note(f"{len(_hit)} {_label}(s) carry the old product name ({', '.join(_hit[:4])}"
-             f"{' …' if len(_hit) > 4 else ''}) and this phase does not rename one: {_why}")
-    if rl_clean:
-        print(f"   nothing carries the old product name among: {', '.join(rl_clean)}")
-    if rl_absent:
-        print(f"   not in this Zabbix version's API, so not examined: {', '.join(rl_absent)}")
-    print("   Never, by rule, whatever its name says: an item key, a macro name and a template")
-    print("   uuid — the key is the identity an item's history hangs on, the macro name is what a")
-    print("   calculated item's formula resolves through, and the uuid is what configuration.import")
-    print("   matches on. Nor the name of an item, trigger, graph or discovery rule: those belong")
-    print("   to the template that defines them, and the current template already carries the")
-    print("   current ones, so rewriting them on the legacy objects buys a tidier list and risks")
-    print("   an inherited object that no longer matches its parent.")
+                note(f"template \"{old_name}\" has no host left: delete it by hand when nobody needs its "
+                     f"triggers, graphs and discovery rules")
 
 # ---------------------------------------------------------------------------------------------
 # Read-only reports that were here before the phases and are not tied to one. These are the
@@ -2439,18 +1850,9 @@ for what, method, params, key in checks:
     for name in hit:
         print(f"   {what}: {name}")
     if hit:
-        human.append(f"{len(hit)} {what}(s) still named for the old product — see the list above; "
-                     f"--rename-legacy renames the ones this product wrote and names the rest")
+        human.append(f"{len(hit)} {what}(s) still named for the old product — see the list above")
 if not stale:
     print("   none")
-else:
-    # This report is read-only and ran before the rename phase existed. It still lists what it
-    # sees, and the phase is what acts on it: templates to a retired name, everything else to
-    # the plain swap, and anything that is not this product's named and left alone.
-    print("   --rename-legacy renames these in place (templates to a \"(pre-" + RENAME_RELEASE
-          + ")\" name), and")
-    print("   renames nothing it cannot show is this product's. It never deletes, so no item and no")
-    print("   history is affected by it.")
 
 # The four templates Cluster Management generates (client master, cluster devices, and the two
 # jump-host ones) take their uuids from a hash of the product name, so the rename changed every
