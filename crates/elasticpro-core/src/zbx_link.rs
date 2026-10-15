@@ -148,10 +148,7 @@ impl ServerZbx {
             api_url: env("ELASTICPRO_ZABBIX_API_URL"),
             api_token: file_env("ELASTICPRO_ZABBIX_API_TOKEN_FILE"),
             sso_secret: env("ELASTICPRO_ZABBIX_SSO_SECRET").or_else(|| file_env("ELASTICPRO_ZABBIX_SSO_SECRET_FILE")),
-            // Off by default. ELASTICPRO_ZABBIX_API_VERIFY=1 turns checking on and pins it;
-            // the older ELASTICPRO_ZABBIX_API_INSECURE=1 still pins it off.
-            verify_tls: if env("ELASTICPRO_ZABBIX_API_VERIFY").is_some_and(|v| v == "1") { Some(true) }
-                else { env("ELASTICPRO_ZABBIX_API_INSECURE").filter(|v| v == "1").map(|_| false) },
+            verify_tls: env("ELASTICPRO_ZABBIX_API_INSECURE").filter(|v| v == "1").map(|_| false),
             allowed_sources: env("ELASTICPRO_ZABBIX_ALLOWED_SOURCES").map(|v| list(&v)),
             sync_secs: env("ELASTICPRO_ZABBIX_SYNC_SECS").and_then(|v| v.parse().ok()),
             frame_ancestors: env("ELASTICPRO_FRAME_ANCESTORS"),
@@ -205,8 +202,7 @@ pub fn resolve(server: &ServerZbx, file: &LinkFile) -> Resolved {
     };
     Resolved {
         api_token: server.api_token.clone().or_else(|| file.api_token.clone()),
-        // Any certificate is accepted unless somebody turned verification on.
-        verify_tls: server.verify_tls.or(file.verify_tls).unwrap_or(false),
+        verify_tls: server.verify_tls.or(file.verify_tls).unwrap_or(true),
         allowed_sources: server.allowed_sources.clone().unwrap_or_else(|| file.allowed_sources.clone()),
         sync_secs: server.sync_secs.or(file.sync_secs).unwrap_or(DEFAULT_SYNC_SECS).clamp(MIN_SYNC_SECS, MAX_SYNC_SECS),
         zabbix_url,
@@ -948,16 +944,6 @@ mod tests {
     fn secrets_are_long_enough_for_the_sign_in() {
         assert!(random_secret().len() >= MIN_SECRET_LEN);
         assert_ne!(random_secret(), random_secret());
-    }
-
-    #[test]
-    fn the_zabbix_certificate_is_accepted_unless_verification_is_turned_on() {
-        let none = LinkFile::default();
-        assert!(!resolve(&ServerZbx::default(), &none).verify_tls, "off by default");
-        let on = LinkFile { verify_tls: Some(true), ..Default::default() };
-        assert!(resolve(&ServerZbx::default(), &on).verify_tls, "the Config checkbox turns it on");
-        let pinned_off = ServerZbx { verify_tls: Some(false), ..Default::default() };
-        assert!(!resolve(&pinned_off, &on).verify_tls, "the server still wins");
     }
 
     #[test]

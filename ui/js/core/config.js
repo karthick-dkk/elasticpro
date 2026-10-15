@@ -92,9 +92,10 @@ export const DEFAULTS = {
   },
   snapshotStaleHours: 26,
   maxLogRows: 200,
-  // Certificate policy: insecure (the default: accept any certificate), auto (OS store, else
-  // trust-on-first-use with a prompt), system (strict).
-  tls: 'insecure',
+  // Certificate policy: auto (OS store, else trust-on-first-use with a prompt), system (strict),
+  // insecure. Here, under defaults, insecure is one switch for everything: every cluster
+  // whatever its own tls says, every jump-host key and the Zabbix API.
+  tls: 'auto',
 };
 
 export function slug(s) {
@@ -134,6 +135,8 @@ export function normalize(raw, sourceName = 'clusters.yaml') {
   if (!raw || typeof raw !== 'object') throw new ConfigError('Config file is empty or not a YAML mapping.');
 
   const defaults = { ...DEFAULTS, ...(raw.defaults || {}) };
+  // Config → Defaults → Certificates = insecure: accept any certificate on every cluster.
+  const acceptAll = String(defaults.tls || '').trim().toLowerCase() === 'insecure';
   const globalCred = raw.credentials || raw.credential || null;
   let anySealed = false;
 
@@ -149,8 +152,7 @@ export function normalize(raw, sourceName = 'clusters.yaml') {
       if (!j.user) throw new ConfigError(`jump_hosts.${j.id} is missing \`user:\``);
       if (j.passphrase || j.password) throw new ConfigError(`jump_hosts.${j.id}: passphrase/password must not be in the file — the app asks for them.`);
       return { id: String(j.id), host: String(j.host), port: Number(j.port) || 22, user: String(j.user),
-               keyFile: j.keyFile || j.key_file || j.key || '', note: j.note || '',
-               hostKey: String(j.host_key || j.hostKey || '') };
+               keyFile: j.keyFile || j.key_file || j.key || '', note: j.note || '' };
     });
   const jumpIds = new Set(jumpHosts.map((j) => j.id));
 
@@ -189,7 +191,7 @@ export function normalize(raw, sourceName = 'clusters.yaml') {
       id,
       name,
       via: via ? String(via) : '',
-      tls: String(c.tls || defaults.tls || 'insecure'),
+      tls: acceptAll ? 'insecure' : String(c.tls || defaults.tls || 'auto'),
       url: String(c.url).replace(/\/+$/, ''),
       origin: (() => { try { return new URL(c.url).origin; } catch { return c.url; } })(),
       tags: c.tags || [],
@@ -236,7 +238,8 @@ export function normalize(raw, sourceName = 'clusters.yaml') {
   // every cluster's header comes from; a sealed one is not usable until it is unlocked.
   const sharedUsable = globalCred && ![globalCred.password, globalCred.apiKey, globalCred.bearer].some((v) => isSealed(v));
   const sharedAuthHeader = sharedUsable ? authHeaderFor(globalCred) : null;
-  return { defaults, clusters, jumpHosts, sourceName, loadedAt: Date.now(), raw, sealed: anySealed, sharedAuthHeader };
+  return { defaults, clusters, jumpHosts, sourceName, loadedAt: Date.now(), raw, sealed: anySealed, sharedAuthHeader,
+           acceptAllCertificates: acceptAll };
 }
 
 /** `tag1, src_hostname` or a YAML list — either way, a clean array of field names. */
@@ -307,7 +310,7 @@ export function serializeConfig(raw) {
 export function newRawConfig() {
   return {
     version: 2,
-    defaults: { readOnly: true, autoRefresh: false, refreshIntervalSec: 30, logIndexPattern: 'logstash-*', tls: 'insecure' },
+    defaults: { readOnly: true, autoRefresh: false, refreshIntervalSec: 30, logIndexPattern: 'logstash-*', tls: 'auto' },
     jump_hosts: {},
     clusters: [],
   };

@@ -312,6 +312,18 @@ struct PrimeMsg {
     /// Absent keeps the one held; "" clears it; anything else replaces it.
     #[serde(default)]
     shared_auth_header: Option<String>,
+    /// `defaults.tls` is `insecure` in the config this came from. Used only by a core with no
+    /// config file of its own (the desktop build, where the person at the keyboard opened
+    /// the file); a core started with one reads the switch from it and ignores this.
+    #[serde(default)]
+    accept_all_certificates: Option<bool>,
+}
+
+/// Whether a config turns on `defaults.tls: insecure` — accept every certificate and SSH
+/// host key, whatever a cluster's own `tls:` says.
+pub fn accepts_all_certificates(raw: &Value) -> bool {
+    raw.get("defaults").and_then(|d| d.get("tls")).and_then(|v| v.as_str())
+        .is_some_and(|v| v.trim().eq_ignore_ascii_case("insecure"))
 }
 
 /// Where the hosted core keeps its last cluster setup, so a restart does not leave every
@@ -1036,7 +1048,10 @@ impl Core {
             // "are we stressing Elasticsearch", as a number.
             "REQUEST_STATS" => json!({ "ok": true, "requests": self.requests_for(caller.as_ref()) }),
             "REQUEST_LOG" => self.request_log_for(caller.as_ref(), &msg),
-            "PINS" => json!({ "ok": true, "pins": self.pins_for(caller.as_ref()) }),
+            "PINS" => {
+                self.refresh_trust_switch().await;
+                json!({ "ok": true, "pins": self.pins_for(caller.as_ref()) })
+            }
             "CONFIG_READ" => {
                 let path = msg.get("path").and_then(|v| v.as_str()).unwrap_or("");
                 match tokio::fs::read_to_string(path).await {
@@ -1562,7 +1577,12 @@ impl Core {
     /// Trust decisions, less the hosts that belong to clusters this caller cannot see.
     fn pins_for(&self, caller: Option<&Caller>) -> Value {
         let mut all = self.pins.list();
-        let Some(ids) = self.visible_ids(caller) else { return all };
+        let visible = self.visible_ids(caller);
+        if let Some(m) = all.as_object_mut() {
+            m.insert("acceptAll".into(), json!(self.pins.accept_all()));
+            m.insert("accepted".into(), json!(self.accepted_for(visible.as_ref())));
+        }
+        let Some(ids) = visible else { return all };
         let (hosts, vias): (std::collections::HashSet<String>, std::collections::HashSet<String>) = {
             let all = self.all_specs();
             let mine: Vec<&ClusterSpec> = all.iter().filter(|s| ids.contains(&s.id)).collect();
@@ -1579,6 +1599,26 @@ impl Core {
             }
         }
         all
+    }
+
+    /// What the accept-all switch let through, each with the clusters it serves. A caller
+    /// limited to some clusters sees only those; what serves none of them (the Zabbix API's
+    /// certificate, a jump host they do not route through) is for unscoped callers only.
+    fn accepted_for(&self, visible: Option<&std::collections::HashSet<String>>) -> Vec<Value> {
+        let specs = self.all_specs();
+        self.pins.accepted().into_iter().filter_map(|a| {
+            let serves: Vec<Value> = specs.iter()
+                .filter(|s| visible.is_none_or(|v| v.contains(&s.id)))
+                .filter(|s| if a.kind == "host_key" { s.via.as_deref() == Some(a.target.as_str()) }
+                            else { crate::http::host_key(&s.url) == a.target })
+                .map(|s| json!({ "id": s.id, "name": s.name.clone().unwrap_or_else(|| s.id.clone()) }))
+                .collect();
+            if serves.is_empty() && visible.is_some() {
+                return None;
+            }
+            Some(json!({ "kind": a.kind, "target": a.target, "fingerprint": a.fingerprint, "subject": a.subject,
+                         "reason": a.reason, "firstSeen": a.first_seen, "clusters": serves }))
+        }).collect()
     }
 
     /// The cluster list for somebody who may not read the config file: credentials
@@ -1608,6 +1648,26 @@ impl Core {
             serde_yaml::from_str(t).map_err(|e| e.to_string())
         };
         parsed.map_err(|e| json!({ "ok": false, "kind": "parse_error", "message": format!("the config does not parse: {e}") }))
+    }
+
+    /// Reads `defaults.tls` from the server's own config file and sets the accept-all
+    /// switch from it — never from a request, so only whoever can edit that file (an admin,
+    /// on the Config page) turns certificate checking off. A file that cannot be read or
+    /// parsed leaves the switch as it is; no file at all leaves it to PRIME (desktop).
+    pub(crate) async fn refresh_trust_switch(&self) {
+        if self.config_hint.is_none() {
+            return;
+        }
+        let on = match self.read_config_file().await {
+            Ok(raw) => accepts_all_certificates(&raw),
+            Err(e) if e["kind"] == json!("not_found") => false,
+            Err(_) => return,
+        };
+        if self.pins.set_accept_all(on) {
+            self.transport.forget_clients();
+            tracing::warn!(target: "audit", on, "defaults.tls: insecure is {} — certificates and jump-host keys {}",
+                           if on { "on" } else { "off" }, if on { "are accepted without checking" } else { "are checked again" });
+        }
     }
 
     /// The `zabbix:` options, as the file says now. Defaults when there is no file.
@@ -1768,6 +1828,13 @@ impl Core {
             Err(e) => return json!({ "ok": false, "message": format!("bad PRIME: {e}") }),
         };
         let mut incoming = p.clusters;
+        if self.config_hint.is_some() {
+            self.refresh_trust_switch().await;
+        } else if let Some(on) = p.accept_all_certificates {
+            if self.pins.set_accept_all(on) {
+                tracing::warn!(target: "audit", on, "defaults.tls: insecure is {}", if on { "on" } else { "off" });
+            }
+        }
         let (held, anonymous, effective) = {
             let mut cur = self.primed.write();
             // A cluster that arrives with no credential at all keeps the one the core already
@@ -2044,6 +2111,7 @@ impl Core {
     /// every cluster offline. A failed sync keeps the previous list for the same reason,
     /// and says so.
     pub async fn zabbix_sync(self: &Arc<Self>) -> Value {
+        self.refresh_trust_switch().await;
         let zapi = self.zbx_api();
         if !zapi.configured() {
             return json!({ "ok": false, "kind": "not_configured",

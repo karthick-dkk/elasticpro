@@ -16,11 +16,14 @@ export function setRequestOrigin(origin) { requestOrigin = origin || 'page'; }
 /** What the core sent recently and what is still in flight — the Request Centre's feed. */
 export const requestLog = (params = {}) => send({ type: 'REQUEST_LOG', ...params });
 
-export async function primeWorker(clusters, readOnly = true, jumpHosts = [], { persist = true, sharedAuthHeader = undefined } = {}) {
+export async function primeWorker(clusters, readOnly = true, jumpHosts = [], { persist = true, sharedAuthHeader = undefined, acceptAllCertificates = false } = {}) {
   return send({
     type: 'PRIME',
     readOnly,
     persist,
+    // Config → Defaults → Certificates = insecure. A core with its own config file reads
+    // this from that file instead and ignores what a page says.
+    acceptAllCertificates,
     // undefined leaves the core's as it is; '' clears it.
     ...(sharedAuthHeader !== undefined ? { sharedAuthHeader } : {}),
     // null = "this page has no credential for it", which lets the core keep one it holds;
@@ -32,7 +35,7 @@ export async function primeWorker(clusters, readOnly = true, jumpHosts = [], { p
                                      // page used to (`/<logIndexPattern>/_settings…`), so it
                                      // needs the same input; without it the core reads "*".
                                      ...(c.logIndexPattern ? { logIndexPattern: c.logIndexPattern } : {}) })),
-    jumpHosts: jumpHosts.map((j) => ({ id: j.id, host: j.host, port: j.port, user: j.user, keyFile: j.keyFile || null, hostKey: j.hostKey || null })),
+    jumpHosts: jumpHosts.map((j) => ({ id: j.id, host: j.host, port: j.port, user: j.user, keyFile: j.keyFile || null })),
   });
 }
 

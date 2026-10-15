@@ -13,7 +13,8 @@ import { rowMenu, toast, notificationBell, setNotificationSink } from './ui/menu
 import { showCredentialDialog, serverHoldsCredentials, serverCredentialMessage } from './ui/credential-dialog.js';
 import { loadSnapshotFile, isSnapshotMode } from './core/snapshot.js';
 import { EXAMPLE_YAML } from './core/example.js';
-import { workerStatus } from './core/es.js';
+import { workerStatus, listPins } from './core/es.js';
+import { acceptedNotice, acceptedSignature, newSince, NOTICE_KEY } from './core/trust-notice.js';
 import { saveTextAs } from './core/platform.js';
 import { tryVaultCredential } from './ui/credential-dialog.js';
 import { createNewConfig, editCluster, unlockSealed } from './ui/config-editor.js';
@@ -789,6 +790,28 @@ async function start(config, handle) {
   // The team's alert silences: loaded now and kept current, so a silence set on another
   // screen leaves this one's counts within a minute.
   if (!isSnapshotMode()) { loadSilences(); setInterval(() => { loadSilences(); }, 60000); }
+  // What the "accept any certificate" switch let through, as one notice. Certificates are
+  // seen as connections are made, so it is asked again every minute.
+  if (!isSnapshotMode()) { checkAcceptedCertificates(); setInterval(checkAcceptedCertificates, 60000); }
+}
+
+/**
+ * One bell entry for every certificate and jump-host key accepted without checking — never
+ * one per cluster. It pops up when something new joins the list; otherwise it is updated
+ * in place. Nothing to say while the switch is off.
+ */
+async function checkAcceptedCertificates() {
+  let res;
+  try { res = await listPins(); } catch (_) { return; }
+  const pins = res && res.ok ? res.pins : null;
+  const accepted = pins && pins.acceptAll ? (pins.accepted || []) : [];
+  const notice = acceptedNotice(accepted);
+  if (!notice) return;
+  const sig = acceptedSignature(accepted);
+  const before = await idb.getKV('tlsAcceptedSig').catch(() => null);
+  const fresh = newSince(before, accepted).length > 0;
+  toast(notice.message, 'warn', fresh ? 10000 : 0, { key: NOTICE_KEY, detail: notice.detail, silent: !fresh });
+  if (fresh) idb.setKV('tlsAcceptedSig', sig);
 }
 
 /**
