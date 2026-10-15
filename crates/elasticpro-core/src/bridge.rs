@@ -1738,13 +1738,14 @@ impl Core {
         parse_config_text(&text).map_err(|e| json!({ "ok": false, "kind": "parse_error", "message": format!("the config does not parse: {e}") }))
     }
 
-    /// `zabbix.scopeUsersByGroup` as the server's config file says it now. Read at each
+    /// `zabbix.scopeUsersByGroup` as the server's config file (`server_config_path`) says it
+    /// now. Read at each
     /// Zabbix sign-in rather than taken from the last sync, so turning it on or off applies
     /// to the next sign-in, sync or not. Off when there is no file or it does not parse.
     fn scope_users_by_group_now(&self) -> bool {
         let read = |p: &std::path::Path| std::fs::read_to_string(p).ok().and_then(|t| parse_config_text(&t).ok());
-        let hint = self.config_hint.as_deref().map(std::path::Path::new).and_then(read);
-        let raw = match hint {
+        let primary = self.server_config_path().as_deref().and_then(read);
+        let raw = match primary {
             Some(v) if config_has_clusters(&v) => Some(v),
             other => self.stray_config_path().as_deref().and_then(read).filter(config_has_clusters).or(other),
         };

@@ -225,7 +225,8 @@ async fn config_write_without_a_path_is_refused() {
     let dir = TempDir::new("cfgnopath");
     let res = core(&dir).handle(json!({ "type": "CONFIG_WRITE", "text": "{}" })).await;
     assert_eq!(res["ok"], json!(false));
-    assert_eq!(res["message"], json!("no path"));
+    // The reason, then its error code (errors.rs).
+    assert_eq!(res["message"], json!(format!("no path ({})", res["errorCode"].as_str().unwrap())));
 }
 
 /* ----------------------------- seal / open secrets ----------------------------- */

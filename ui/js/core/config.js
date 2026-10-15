@@ -361,7 +361,7 @@ export async function loadServerView() {
   let res;
   try { res = await bridge({ type: 'CONFIG_VIEW' }); } catch (e) { return { status: 'error', error: e.message }; }
   if (!res || !res.ok) {
-    return { status: res && res.kind === 'not_found' ? 'no_file' : 'error', error: (res && res.message) || 'no answer', code: res && res.code };
+    return { status: res && res.kind === 'not_found' ? 'no_file' : 'error', error: (res && res.message) || 'no answer', errorCode: res && res.errorCode };
   }
   let config;
   try { config = parseConfigText(res.text, 'server'); } catch (e) { return { status: 'error', error: e.message }; }

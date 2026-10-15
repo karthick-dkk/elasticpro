@@ -111,6 +111,8 @@ async fn zabbix_hosts_become_clusters() {
     std::env::set_var("ELASTICPRO_VAULT_ROLE_ID_FILE", dir.join("role-id"));
     std::env::set_var("ELASTICPRO_VAULT_SECRET_ID_FILE", dir.join("secret-id"));
     let data = TempDir::new("zbx-hosts-data");
+    // Zabbix permissions deciding who sees what (below) is group scoping, off by default.
+    std::fs::write(data.join("config_cluster.json"), r#"{"zabbix":{"scopeUsersByGroup":true}}"#).unwrap();
     let c = Core::new_with_rounds(Some(data.0.clone()), Edition::Hosted, 1);
     c.zabbix_sso().set_secret(SECRET).unwrap();
 

@@ -30,8 +30,9 @@ export function withCode(message, code) {
  */
 export function stampReply(res) {
   if (!res || res.ok !== false) return res;
-  const code = res.code || UI_CODES[res.kind] || UNKNOWN_CODE;
-  return { ...res, code, message: withCode(res.message, code) };
+  // `errorCode`, not `code`: a pairing reply already uses `code` for its pairing code.
+  const code = res.errorCode || UI_CODES[res.kind] || UNKNOWN_CODE;
+  return { ...res, errorCode: code, message: withCode(res.message, code) };
 }
 
 /** The text to show for a failed reply, with its code, or `fallback` with the browser's code. */

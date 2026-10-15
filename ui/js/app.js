@@ -225,7 +225,7 @@ function renderNoClusters(res) {
       ? withCode('Your account can see only the clusters mapped to your Zabbix user groups, and none of your groups is mapped to a cluster. Ask a Zabbix administrator to add you to the right user group, or an ElasticPro administrator to add your group to a cluster’s zabbixGroups (or turn off zabbix.scopeUsersByGroup).', UI_CODES.no_clusters)
       : res.empty
         ? withCode(`No cluster is visible to ${me ? me.name : 'this account'} yet. The server's cluster list is empty for this account and Zabbix gave none. An ElasticPro administrator adds clusters on the Config page, or links Zabbix there.`, UI_CODES.no_clusters)
-        : `The cluster list could not be loaded: ${errorText(res.error ? { message: res.error, code: res.code } : null, 'no answer from the server')}`;
+        : `The cluster list could not be loaded: ${errorText(res.error ? { message: res.error, errorCode: res.errorCode } : null, 'no answer from the server')}`;
   mount(root, h('div.setup',
     h('div', { style: { display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '14px' } },
       h('img', { src: 'icons/icon48.png', width: 34, height: 34, alt: '' }),

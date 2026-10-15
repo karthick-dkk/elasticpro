@@ -9,14 +9,14 @@ const ROOT = path.resolve(import.meta.dirname, '../..');
 const M = await import(pathToFileURL(path.join(ROOT, 'ui/js/core/error-codes.js')).href);
 
 test('a core refusal keeps its own code and is not stamped twice', () => {
-  const r = M.stampReply({ ok: false, kind: 'bad_credentials', code: 'EP-102', message: 'wrong (EP-102)' });
+  const r = M.stampReply({ ok: false, kind: 'bad_credentials', errorCode: 'EP-102', message: 'wrong (EP-102)' });
   assert.equal(r.message, 'wrong (EP-102)');
   assert.equal(M.stampReply(r).message, 'wrong (EP-102)');
 });
 
 test('a failure the core never sent gets the browser code, or EP-999', () => {
   assert.equal(M.stampReply({ ok: false, kind: 'worker_error', message: 'offline' }).message, 'offline (EP-601)');
-  assert.equal(M.stampReply({ ok: false, kind: 'something_new' }).code, 'EP-999');
+  assert.equal(M.stampReply({ ok: false, kind: 'something_new' }).errorCode, 'EP-999');
   assert.equal(M.stampReply({ ok: false }).message, 'failed (EP-999)');
 });
 
@@ -27,7 +27,7 @@ test('success and no reply are left alone', () => {
 });
 
 test('errorText: the reply when there is one, else the fallback with a code', () => {
-  assert.equal(M.errorText({ ok: false, message: 'nope', code: 'EP-110' }), 'nope (EP-110)');
+  assert.equal(M.errorText({ ok: false, message: 'nope', errorCode: 'EP-110' }), 'nope (EP-110)');
   assert.equal(M.errorText(null, 'Sign-in failed.'), 'Sign-in failed. (EP-602)');
   assert.equal(M.errorText(undefined, 'x', 'sso_failed'), 'x (EP-604)');
 });
@@ -40,4 +40,10 @@ test('every browser code is in docs/ERROR-CODES.md, in the 6xx range, once', () 
     assert.match(code, /^EP-6\d\d$/);
     assert.ok(doc.includes(`| ${code} | \`${kind}\``), `${code} ${kind} missing from the doc`);
   }
+});
+
+test('a pairing code in `code` is never taken for an error code', () => {
+  const r = M.stampReply({ ok: false, kind: 'forbidden', code: 'PAIR-123', message: 'refused' });
+  assert.equal(r.code, 'PAIR-123');
+  assert.equal(r.message, 'refused (EP-999)');
 });

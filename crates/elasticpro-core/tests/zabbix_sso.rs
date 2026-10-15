@@ -16,7 +16,10 @@ use support::{TempDir, TestServer};
 
 const SECRET: &str = "integration-secret-0123456789abcdef-xyz";
 
+/// These tests are about scoping, which is off by default: turn it on in the core's own
+/// config file (the data directory's, with no ELASTICPRO_CONFIG).
 fn hosted(dir: &TempDir) -> Arc<Core> {
+    std::fs::write(dir.join("config_cluster.json"), r#"{"zabbix":{"scopeUsersByGroup":true}}"#).unwrap();
     let c = Core::new_with_rounds(Some(dir.0.clone()), Edition::Hosted, 1);
     c.zabbix_sso().set_secret(SECRET).unwrap();
     c
