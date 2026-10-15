@@ -60,11 +60,12 @@
 set -euo pipefail
 
 REPO=${EP_REPO:-karthick-dkk/elasticpro}
-# The module ids, the folder names under modules/. ep_tophosts (Top hosts) is in the
+# The module ids, the folder names under modules/. ep_tophosts (Top hosts) and ep_overview
+# (Client overview) are in the
 # integration-zabbix-elasticpro project; tools/zabbix-modules-tarball.sh still builds the archive
 # from the first five, so a release archive carries five and --from-dir a checkout of that
-# project carries all six. Listed here so uninstall, Docker mounts and the API know it.
-KNOWN_IDS=(elasticpro ep_clients ep_capacity ep_resources ep_volume ep_tophosts)
+# project carries all seven. Listed here so uninstall, Docker mounts and the API know it.
+KNOWN_IDS=(elasticpro ep_clients ep_capacity ep_resources ep_volume ep_tophosts ep_overview)
 
 VERSION=latest
 FROM_DIR=
