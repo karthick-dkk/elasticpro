@@ -18,7 +18,7 @@
 #   2. finds the Zabbix frontend: a package install (its modules/ folder, and the user PHP
 #      runs as), or a running zabbix-web-* container (the host folder mounted at
 #      /usr/share/zabbix/modules, or at /usr/share/zabbix/modules/<module>);
-#   3. puts the five module folders in place — each one staged beside the modules folder and
+#   3. puts the module folders in place — each one staged beside the modules folder and
 #      renamed in, the previous one kept in a dated backup; config.php is never touched;
 #   4. optionally registers and enables them through the Zabbix API, and presses
 #      "Write master template" on Cluster Management.
@@ -60,9 +60,11 @@
 set -euo pipefail
 
 REPO=${EP_REPO:-karthick-dkk/elasticpro}
-# The module ids, the folder names under modules/. tools/zabbix-modules-tarball.sh builds
-# the archive from the same five.
-KNOWN_IDS=(elasticpro ep_clients ep_capacity ep_resources ep_volume)
+# The module ids, the folder names under modules/. ep_tophosts (Top hosts) is in the
+# integration-zabbix-elasticpro project; tools/zabbix-modules-tarball.sh still builds the archive
+# from the first five, so a release archive carries five and --from-dir a checkout of that
+# project carries all six. Listed here so uninstall, Docker mounts and the API know it.
+KNOWN_IDS=(elasticpro ep_clients ep_capacity ep_resources ep_volume ep_tophosts)
 
 VERSION=latest
 FROM_DIR=
@@ -701,7 +703,7 @@ else
   say "Left to do in Zabbix:"
   n=1
   if [ "$ENABLED_VIA_API" -lt ${#PKG_IDS[@]} ]; then
-    say "  $n. Administration → General → Modules → Scan directory, then enable the five ElasticPro modules"; n=$((n+1))
+    say "  $n. Administration → General → Modules → Scan directory, then enable the ElasticPro modules"; n=$((n+1))
   fi
   if [ -z "$MASTER_DONE" ]; then
     say "  $n. ElasticPro → Cluster Management → Write master template (when the page asks)"; n=$((n+1))
