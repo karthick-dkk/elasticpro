@@ -40,6 +40,10 @@ pub struct ZbxOptions {
     pub create_hosts: bool,
     /// The host group created hosts go in, besides their client's.
     pub host_group: String,
+    /// Limit a Zabbix User's sign-in to the clusters their Zabbix user groups are mapped to.
+    /// Off by default: everyone who signs in through Zabbix reads every cluster, which is
+    /// what a team that already decides access in Zabbix expects.
+    pub scope_users_by_group: bool,
 }
 
 impl ZbxOptions {
@@ -51,6 +55,7 @@ impl ZbxOptions {
             create_hosts: flag("createHosts", "create_hosts"),
             host_group: z.get("hostGroup").or_else(|| z.get("host_group")).and_then(|v| v.as_str())
                 .filter(|s| !s.trim().is_empty()).unwrap_or("Elasticsearch clusters").to_string(),
+            scope_users_by_group: flag("scopeUsersByGroup", "scope_users_by_group"),
         }
     }
 }
@@ -383,6 +388,21 @@ fn host_port(url: &str) -> Option<(String, String)> {
     }
     let host = authority.rsplit_once(':').map(|(h, _)| h).unwrap_or(authority).to_string();
     Some((host, authority.to_string()))
+}
+
+/// A config file's text, JSON or YAML, as a value.
+fn parse_config_text(text: &str) -> Result<Value, String> {
+    let t = text.trim_start_matches('\u{feff}');
+    if t.trim_start().starts_with('{') {
+        serde_json::from_str(t).map_err(|e| e.to_string())
+    } else {
+        serde_yaml::from_str(t).map_err(|e| e.to_string())
+    }
+}
+
+/// Whether a raw config lists at least one cluster, under either key the file may use.
+fn config_has_clusters(raw: &Value) -> bool {
+    ["clusters", "hosts"].iter().any(|k| raw.get(*k).and_then(Value::as_array).is_some_and(|a| !a.is_empty()))
 }
 
 /// The Zabbix groups a raw config entry names. Both spellings, one list.
@@ -735,6 +755,15 @@ impl Core {
             }));
         }
 
+        // Blocked: refused everything from the moment an admin says so. The session is not
+        // ended — nobody is signed out — it just does nothing until it is unblocked.
+        if !matches!(t, "PING" | "WHOAMI" | "LOGOUT") && self.users.is_blocked(&c.name) {
+            return Err(json!({
+                "ok": false, "kind": "disabled",
+                "message": "this account is blocked — ask an ElasticPro administrator",
+            }));
+        }
+
         let method = msg.get("method").and_then(|v| v.as_str()).unwrap_or("");
         let path = msg.get("path").and_then(|v| v.as_str()).unwrap_or("");
         auth::authorize(c.role, t, method, path).map_err(|why| {
@@ -825,7 +854,15 @@ impl Core {
     }
 
     /// `handle_as`, told how the caller proved who they are.
+    ///
+    /// Every failed reply leaves with its error code (errors.rs), stamped here once.
     pub async fn handle_as_from(self: &Arc<Self>, msg: Value, caller: Option<Caller>, reauth: Reauth) -> Value {
+        let mut out = self.dispatch(msg, caller, reauth).await;
+        crate::errors::stamp(&mut out);
+        out
+    }
+
+    async fn dispatch(self: &Arc<Self>, msg: Value, caller: Option<Caller>, reauth: Reauth) -> Value {
         let t = msg.get("type").and_then(|v| v.as_str()).unwrap_or("").to_string();
         if self.edition.uses_accounts() {
             if let Err(denied) = self.gate(&t, &msg, caller.as_ref()) {
@@ -862,7 +899,7 @@ impl Core {
                 json!({ "ok": true })
             }
             "BOOTSTRAP_ADMIN" => self.bootstrap_admin(&msg),
-            "USER_LIST" | "USER_ADD" | "USER_REMOVE" | "USER_SET_ROLE" | "USER_SET_PASSWORD" => {
+            "USER_LIST" | "USER_ADD" | "USER_REMOVE" | "USER_SET_ROLE" | "USER_SET_PASSWORD" | "USER_SET_LOCKED" | "USER_SET_BLOCKED" | "USER_LOGINS" => {
                 self.users_msg(&t, &msg, caller.as_ref())
             }
             "TOKEN_LIST" | "TOKEN_CREATE" | "TOKEN_REVOKE" => self.tokens_msg(&t, &msg),
@@ -1194,16 +1231,19 @@ impl Core {
             Ok(acct) => {
                 let token = self.sessions.begin(&acct);
                 tracing::info!(target: "audit", user = %acct.name, role = acct.role.as_str(), "login");
+                self.users.record_login(&acct.name, "password", Ok(()));
                 // One shape for "who is this", built from the account rather than
                 // assembled by hand here and differently somewhere else.
                 let who = Caller { name: acct.name.clone(), role: acct.role, must_change: acct.must_change, scope: acct.scope.clone() };
                 json!({ "ok": true, "session": token, "caller": who.public() })
             }
             Err(e) => {
-                // The name is logged; the reason is not narrowed for the caller, so a
-                // failed login never confirms which half was wrong.
-                tracing::warn!(target: "audit", user = %name, "login refused");
-                json!({ "ok": false, "kind": "bad_credentials", "message": e.to_string() })
+                // The name is logged. Locked and blocked are told only to someone who typed
+                // the right password (UserStore::verify); otherwise it is "do not match",
+                // so a failed login never confirms which half was wrong.
+                tracing::warn!(target: "audit", user = %name, reason = e.kind(), "login refused");
+                self.users.record_login(name, "password", Err(&e));
+                json!({ "ok": false, "kind": e.kind(), "message": e.to_string() })
             }
         }
     }
@@ -1259,8 +1299,9 @@ impl Core {
         };
         let done = |r: Result<(), crate::auth::AuthError>| match r {
             Ok(()) => json!({ "ok": true, "users": self.users.list().iter().map(|a| a.public()).collect::<Vec<_>>() }),
-            Err(e) => json!({ "ok": false, "kind": "bad_request", "message": e.to_string() }),
+            Err(e) => json!({ "ok": false, "kind": e.kind(), "message": e.to_string() }),
         };
+        let flag = |k: &str| msg.get(k).and_then(|v| v.as_bool());
 
         match t {
             "USER_LIST" => json!({
@@ -1306,11 +1347,37 @@ impl Core {
                 }
                 let out = done(self.users.set_role(&name, role));
                 if out["ok"] == json!(true) {
-                    self.sessions.end_all_for(&name);
+                    // Their open sessions take the new role now, without signing them out.
+                    let scope = self.users.list().into_iter().find(|a| a.name.eq_ignore_ascii_case(&name)).and_then(|a| a.scope);
+                    self.sessions.refresh_for(&name, role, scope);
                     tracing::info!(target: "audit", user = %me, subject = %name, role = role.as_str(), "role changed");
                 }
                 out
             }
+            "USER_SET_LOCKED" | "USER_SET_BLOCKED" => {
+                let Some(on) = flag(if t == "USER_SET_LOCKED" { "locked" } else { "blocked" }) else {
+                    return json!({ "ok": false, "kind": "bad_request", "message": "say true or false" });
+                };
+                if on && name.eq_ignore_ascii_case(&me) {
+                    return json!({ "ok": false, "kind": "bad_request", "message": "you cannot lock or block the account you are signed in as" });
+                }
+                let (r, what) = if t == "USER_SET_LOCKED" {
+                    (self.users.set_locked(&name, on), if on { "account locked" } else { "account unlocked" })
+                } else {
+                    (self.users.set_disabled(&name, on), if on { "account blocked" } else { "account unblocked" })
+                };
+                let out = done(r);
+                if out["ok"] == json!(true) {
+                    tracing::info!(target: "audit", user = %me, subject = %name, "{what}");
+                }
+                out
+            }
+            "USER_LOGINS" => json!({
+                "ok": true,
+                "logins": self.users.logins(),
+                "lockAfter": crate::auth::LOCK_AFTER,
+                "lockMinutes": crate::auth::LOCK_SECS / 60,
+            }),
             "USER_SET_PASSWORD" => {
                 // Otherwise the forced change could be satisfied by changing somebody
                 // else's password and leaving the shipped one in place.
@@ -1527,10 +1594,7 @@ impl Core {
         m.insert("dataDir".into(), if admin { json!(self.data_dir) } else { Value::Null });
         m.insert("configHint".into(), if admin { json!(self.config_hint) } else { Value::Null });
         m.insert("uptimeSec".into(), json!(self.started.elapsed().as_secs()));
-        m.insert(
-            "defaultConfigPath".into(),
-            if admin { json!(self.data_dir.as_ref().map(|d| d.join("config_cluster.json"))) } else { Value::Null },
-        );
+        m.insert("defaultConfigPath".into(), if admin { json!(self.server_config_path()) } else { Value::Null });
         m.insert("tunnels".into(), json!(tunnels));
         m.insert("zabbixSso".into(), json!(self.zbx.configured()));
         out
@@ -1628,12 +1692,42 @@ impl Core {
     /// names, which would make this a way to read any file the core can.
     /// The server's own config file, parsed — YAML or JSON, decided by content. The error is
     /// a ready refusal. Read from the path the core was started with and no other.
+    /// Where a new config is created: the server's own file (ELASTICPRO_CONFIG) when it has
+    /// one, so the file an admin builds is the file everybody else is served; the data
+    /// directory only when there is no such file. Creating it in the data directory while
+    /// ELASTICPRO_CONFIG named another place was an admin with thirty clusters and every
+    /// operator with none — CONFIG_VIEW read the one, the admin had written the other.
+    fn server_config_path(&self) -> Option<std::path::PathBuf> {
+        self.config_hint.clone().map(std::path::PathBuf::from).or_else(|| self.data_dir.as_ref().map(|d| d.join("config_cluster.json")))
+    }
+
+    /// The config written by older versions to the data directory while ELASTICPRO_CONFIG
+    /// named another file. Read when that file is missing or lists no cluster, so an
+    /// install made before the fix keeps serving its non-admins without anyone moving it.
+    fn stray_config_path(&self) -> Option<std::path::PathBuf> {
+        let stray = self.data_dir.as_ref()?.join("config_cluster.json");
+        (self.config_hint.as_deref().map(std::path::Path::new) != Some(stray.as_path()) && stray.is_file()).then_some(stray)
+    }
+
     async fn read_config_file(&self) -> Result<Value, Value> {
-        let Some(path) = self.config_hint.clone() else {
+        let Some(hint) = self.config_hint.clone() else {
             return Err(json!({ "ok": false, "kind": "no_config",
                                "message": "this server was started without a config file (ELASTICPRO_CONFIG)" }));
         };
-        let text = match tokio::fs::read_to_string(&path).await {
+        match self.read_config_at(std::path::Path::new(&hint)).await {
+            Ok(v) if config_has_clusters(&v) => Ok(v),
+            first => match self.stray_config_path() {
+                Some(stray) => match self.read_config_at(&stray).await {
+                    Ok(v) if config_has_clusters(&v) => Ok(v),
+                    _ => first,
+                },
+                None => first,
+            },
+        }
+    }
+
+    async fn read_config_at(&self, path: &std::path::Path) -> Result<Value, Value> {
+        let text = match tokio::fs::read_to_string(path).await {
             Ok(t) => t,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 return Err(json!({ "ok": false, "kind": "not_found",
@@ -1641,13 +1735,20 @@ impl Core {
             }
             Err(e) => return Err(json!({ "ok": false, "kind": "io_error", "message": format!("cannot read the config: {e}") })),
         };
-        let t = text.trim_start_matches('\u{feff}');
-        let parsed: Result<Value, String> = if t.trim_start().starts_with('{') {
-            serde_json::from_str(t).map_err(|e| e.to_string())
-        } else {
-            serde_yaml::from_str(t).map_err(|e| e.to_string())
+        parse_config_text(&text).map_err(|e| json!({ "ok": false, "kind": "parse_error", "message": format!("the config does not parse: {e}") }))
+    }
+
+    /// `zabbix.scopeUsersByGroup` as the server's config file says it now. Read at each
+    /// Zabbix sign-in rather than taken from the last sync, so turning it on or off applies
+    /// to the next sign-in, sync or not. Off when there is no file or it does not parse.
+    fn scope_users_by_group_now(&self) -> bool {
+        let read = |p: &std::path::Path| std::fs::read_to_string(p).ok().and_then(|t| parse_config_text(&t).ok());
+        let hint = self.config_hint.as_deref().map(std::path::Path::new).and_then(read);
+        let raw = match hint {
+            Some(v) if config_has_clusters(&v) => Some(v),
+            other => self.stray_config_path().as_deref().and_then(read).filter(config_has_clusters).or(other),
         };
-        parsed.map_err(|e| json!({ "ok": false, "kind": "parse_error", "message": format!("the config does not parse: {e}") }))
+        raw.map(|v| ZbxOptions::from_config(&v).scope_users_by_group).unwrap_or(false)
     }
 
     /// Reads `defaults.tls` from the server's own config file and sets the accept-all
@@ -1744,6 +1845,12 @@ impl Core {
     /// `zabbix_sso_init`, told where the request came from: `allowedSources`, when set,
     /// is applied before anything else, and each source has a request budget.
     pub fn zabbix_sso_init_from(&self, body: &[u8], signature: &str, source: Option<std::net::IpAddr>) -> (u16, Value) {
+        let (status, mut out) = self.zabbix_sso_mint(body, signature, source);
+        crate::errors::stamp(&mut out);
+        (status, out)
+    }
+
+    fn zabbix_sso_mint(&self, body: &[u8], signature: &str, source: Option<std::net::IpAddr>) -> (u16, Value) {
         if self.edition != Edition::Hosted {
             return (404, json!({ "ok": false, "message": "not available in this build" }));
         }
@@ -1772,9 +1879,12 @@ impl Core {
             }
         };
         let role = zbx_sso::role_for(claim.zabbix_user_type).expect("verify refuses a type with no role");
-        let scope = zbx_sso::scope_for(role, &claim.groups);
+        let by_group = self.scope_users_by_group_now();
+        let scope = zbx_sso::scope_for(role, &claim.groups, by_group);
         let name = zbx_sso::account_name(&claim.username);
-        match self.users.upsert_external(&name, zbx_sso::SOURCE, role, scope.clone()) {
+        let result = self.users.upsert_external(&name, zbx_sso::SOURCE, role, scope.clone());
+        self.users.record_login(&name, "zabbix", result.as_ref().map(|_| ()));
+        match result {
             Ok(acct) => {
                 // A session already open under this name keeps the role it started with
                 // unless it is told; Zabbix having just said otherwise is the telling.
@@ -1790,10 +1900,11 @@ impl Core {
                 (409, json!({ "ok": false, "kind": "name_taken",
                               "message": format!("a local ElasticPro account is already called {n}; it will not be taken over by a Zabbix sign-in") }))
             }
-            Err(auth::AuthError::BadCredentials) => {
-                tracing::warn!(target: "audit", user = %name, "zabbix sign-in refused: account disabled here");
-                (403, json!({ "ok": false, "kind": "disabled",
-                              "message": format!("{name} is disabled in ElasticPro") }))
+            Err(e @ (auth::AuthError::Blocked | auth::AuthError::Locked)) => {
+                tracing::warn!(target: "audit", user = %name, reason = e.kind(), "zabbix sign-in refused");
+                (403, json!({ "ok": false, "kind": e.kind(),
+                              "message": format!("{name} is {} in ElasticPro — an ElasticPro administrator can change that on the Accounts page",
+                                                 if matches!(e, auth::AuthError::Locked) { "locked" } else { "blocked" }) }))
             }
             Err(e) => (500, json!({ "ok": false, "kind": "io_error", "message": e.to_string() })),
         }

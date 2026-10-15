@@ -13,6 +13,9 @@ use support::TempDir;
 
 const SECRET: &str = "integration-secret-0123456789abcdef-xyz";
 
+/// ELASTICPRO_CONFIG is one per process and each test sets its own: they take turns.
+static ENV: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 async fn zabbix_session(c: &std::sync::Arc<Core>, user: &str, ty: i64, groups: &[&str]) -> String {
     let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap();
     let body = serde_json::to_vec(&json!({ "username": user, "zabbix_user_type": ty, "groups": groups,
@@ -43,10 +46,12 @@ clusters:
   - name: Gamma
     url: https://gamma.example:9200
 defaults: { logIndexPattern: "logstash-*" }
+zabbix: { scopeUsersByGroup: true }
 "#;
 
 #[tokio::test]
 async fn the_config_view_holds_no_credentials_and_only_your_clusters() {
+    let _turn = ENV.lock().await;
     let dir = TempDir::new("zbx-view");
     let path = dir.join("clusters.yaml");
     std::fs::write(&path, CONFIG).unwrap();
@@ -54,7 +59,7 @@ async fn the_config_view_holds_no_credentials_and_only_your_clusters() {
     let c = Core::new_with_rounds(Some(dir.0.clone()), Edition::Hosted, 1);
     c.zabbix_sso().set_secret(SECRET).unwrap();
 
-    // A scoped user: Alpha only, and only Alpha's jump host.
+    // A scoped user (zabbix.scopeUsersByGroup is on): Alpha only, and only Alpha's jump host.
     let s = zabbix_session(&c, "uma", 1, &["ES alpha"]).await;
     let r = c.handle(json!({ "type": "CONFIG_VIEW", "session": s })).await;
     assert_eq!(r["ok"], json!(true), "{r}");
@@ -84,4 +89,26 @@ async fn the_config_view_holds_no_credentials_and_only_your_clusters() {
     // And the path is the server's, never the caller's.
     let r = c.handle(json!({ "type": "CONFIG_VIEW", "session": s, "path": "/etc/passwd" })).await;
     assert!(!r["text"].as_str().unwrap_or("").contains("root:"));
+}
+
+/// Without `zabbix.scopeUsersByGroup` every Zabbix sign-in reads every cluster — and an
+/// operator still sees the clusters an admin created from the setup screen, which older
+/// versions wrote to the data directory while ELASTICPRO_CONFIG named another file.
+#[tokio::test]
+async fn by_default_a_zabbix_user_sees_the_admins_clusters_wherever_setup_wrote_them() {
+    let _turn = ENV.lock().await;
+    let dir = TempDir::new("zbx-view-default");
+    let hinted = dir.join("missing-config.json");
+    std::env::set_var("ELASTICPRO_CONFIG", &hinted);
+    // Where the setup screen used to create it.
+    let stray = CONFIG.replace("zabbix: { scopeUsersByGroup: true }", "");
+    std::fs::write(dir.join("config_cluster.json"), serde_json::to_string(&serde_yaml::from_str::<Value>(&stray).unwrap()).unwrap()).unwrap();
+    let c = Core::new_with_rounds(Some(dir.0.clone()), Edition::Hosted, 1);
+    c.zabbix_sso().set_secret(SECRET).unwrap();
+
+    let s = zabbix_session(&c, "uma", 1, &["ES alpha"]).await;
+    let r = c.handle(json!({ "type": "CONFIG_VIEW", "session": s })).await;
+    assert_eq!(r["ok"], json!(true), "{r}");
+    assert_eq!(r["clusters"], json!(3), "a Zabbix User reads every cluster by default");
+    assert_eq!(r["scoped"], json!(false));
 }

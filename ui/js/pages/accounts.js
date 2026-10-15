@@ -21,7 +21,8 @@ import { ICON, toast } from '../ui/menu.js';
 const MIN_PASSWORD = 10;   // must match auth::MIN_PASSWORD
 
 let host = null;
-const ui = { users: [], tokens: [], caller: null, apiTokens: false, err: '', freshSecret: null };
+const ui = { users: [], tokens: [], caller: null, apiTokens: false, err: '', freshSecret: null,
+  logins: [], lockAfter: 5, lockMinutes: 15, failedOnly: false };
 /** Cluster accounts are read per cluster, on demand — one call each, not on every render. */
 const cu = { byCluster: {}, loading: new Set() };
 
@@ -46,6 +47,9 @@ async function load() {
   if (res && res.ok) { ui.users = res.users || []; ui.err = ''; }
   else ui.err = (res && res.message) || 'Could not read the account list.';
 
+  const lg = await bridge({ type: 'USER_LOGINS' });
+  if (lg && lg.ok) { ui.logins = lg.logins || []; ui.lockAfter = lg.lockAfter || ui.lockAfter; ui.lockMinutes = lg.lockMinutes || ui.lockMinutes; }
+
   if (ui.apiTokens) {
     const t = await bridge({ type: 'TOKEN_LIST' });
     ui.tokens = (t && t.ok && t.tokens) || [];
@@ -60,9 +64,33 @@ const ROLE_HELP = {
   guest: 'The dashboard only — no index names.',
 };
 
+/** What each role may do, in the words an admin chooses by: view, write, manage. */
+const ACCESS = { admin: 'manage', operator: 'write', user: 'view', guest: 'dashboard' };
+
 function roleCell(role) {
   const cls = role === 'admin' ? 'red' : role === 'operator' ? 'yellow' : role === 'user' ? '' : 'grey';
-  return h('span', { title: ROLE_HELP[role] || '' }, pill(role, cls));
+  return h('span', { title: ROLE_HELP[role] || '' }, pill(ACCESS[role] || role, cls),
+    h('span.muted', { style: { marginLeft: '5px', fontSize: '11px' } }, role));
+}
+
+const when = (sec) => (sec ? new Date(sec * 1000).toLocaleString() : '');
+
+/** Active, locked (by an admin or by itself, and until when) or blocked. */
+function statusCell(u) {
+  if (u.disabled) return h('span', { title: 'Every request is refused until an admin unblocks it. Their session stays open.' }, pill('blocked', 'red'));
+  if (u.locked) return h('span', { title: 'No new sign-in until an admin unlocks it.' }, pill('locked', 'yellow'));
+  if (u.lockedUntil) {
+    return h('span', { title: `${u.failedLogins} wrong passwords in a row` }, pill('locked', 'yellow'),
+      h('span.muted', { style: { marginLeft: '5px', fontSize: '11px' } }, `until ${new Date(u.lockedUntil * 1000).toLocaleTimeString()}`));
+  }
+  return pill('active', 'green');
+}
+
+function signInCell(u) {
+  return h('div', { style: { fontSize: '11.5px' } },
+    h('div', u.lastLogin ? when(u.lastLogin) : h('span.muted', 'never')),
+    u.failedLogins ? h('div', { style: { color: 'var(--critical)' } },
+      `${u.failedLogins} failed${u.lastFailed ? ` · last ${when(u.lastFailed)}` : ''}`) : null);
 }
 
 /**
@@ -246,13 +274,21 @@ function draw() {
 
     h('div', { style: { marginTop: '10px' } },
       card('ElasticPro users', `${ui.users.length} who can sign in to this app`,
-        table(['Name', 'Role', 'Origin', 'Created', ''], ui.users.map((u) => h('tr',
-          h('td', h('b', u.name), u.disabled ? h('span.muted', { style: { marginLeft: '6px', fontSize: '11px' } }, '(disabled)') : null),
+        table(['Name', 'Access', 'Status', 'Origin', 'Last sign-in', ''], ui.users.map((u) => h('tr',
+          h('td', h('b', u.name),
+            h('div.muted', { style: { fontSize: '11px' } }, u.createdAt ? `created ${new Date(u.createdAt * 1000).toISOString().slice(0, 10)}` : '')),
           h('td', roleCell(u.role)),
+          h('td', statusCell(u)),
           h('td', originCell(u)),
-          h('td.muted', { style: { fontSize: '11.5px' } }, u.createdAt ? new Date(u.createdAt * 1000).toISOString().slice(0, 10) : ''),
+          h('td', signInCell(u)),
           h('td', { style: { textAlign: 'right', whiteSpace: 'nowrap' } },
             h('button.btn.sm', { onclick: () => editUser(u) }, 'Edit'),
+            isSelf(u) ? null : h('button.btn.sm.ghost', { style: { marginLeft: '6px' },
+              title: u.locked || u.lockedUntil ? 'Let them sign in again' : 'No new sign-in until you unlock it; an open session carries on',
+              onclick: () => setFlag(u, 'locked', !(u.locked || u.lockedUntil)) }, u.locked || u.lockedUntil ? 'Unlock' : 'Lock'),
+            isSelf(u) ? null : h('button.btn.sm.ghost', { style: { marginLeft: '6px' },
+              title: u.disabled ? 'Let them work again' : 'Refuse everything they do from now on, signed in or not',
+              onclick: () => setFlag(u, 'blocked', !u.disabled) }, u.disabled ? 'Unblock' : 'Block'),
             // A Zabbix account has no password here; offering to set one would be offering
             // a second way in that the core refuses anyway.
             u.source === 'zabbix' ? null
@@ -265,6 +301,8 @@ function draw() {
             }, '×')))),
           { emptyText: 'No accounts yet.' }))),
 
+    h('div', { style: { marginTop: '10px' } }, loginsCard()),
+
     ui.apiTokens ? h('div', { style: { marginTop: '10px' } }, tokensCard()) : notHostedNote(),
 
     // A visible line between the two, because everything above it is a credential for
@@ -274,6 +312,54 @@ function draw() {
     sectionBreak('On the clusters', 'accounts that sign in to Elasticsearch itself'),
     h('div', { style: { marginTop: '10px' } }, clusterUsersCard()),
   );
+}
+
+/**
+ * Every sign-in attempt the core has seen since it started, newest first, with the error
+ * code a refused one carried. A wrong password is listed under the name that was typed,
+ * real or not — a run of them against one name is what a lockout is for.
+ */
+function loginsCard() {
+  const rows = ui.failedOnly ? ui.logins.filter((e) => !e.ok) : ui.logins;
+  const failed = ui.logins.filter((e) => !e.ok).length;
+  return card('Sign-in activity', `${ui.logins.length} attempts since the core started · ${failed} refused · `
+      + `${ui.lockAfter} wrong passwords in a row lock an account for ${ui.lockMinutes} minutes`,
+    h('div', { style: { maxHeight: '320px', overflowY: 'auto' } },
+      table(['When', 'Name', 'Via', 'Result'], rows.slice(0, 200).map((e) => h('tr',
+        h('td.muted', { style: { fontSize: '11.5px', whiteSpace: 'nowrap' } }, when(e.at)),
+        h('td', h('b', e.name || '—')),
+        h('td.muted', e.via === 'zabbix' ? 'Zabbix' : 'password'),
+        h('td', e.ok ? pill('signed in', 'green')
+          : h('span', pill(e.code || 'refused', 'red'), h('span.muted', { style: { marginLeft: '6px', fontSize: '11.5px' } }, LOGIN_KIND[e.kind] || e.kind))))),
+        { emptyText: ui.failedOnly ? 'No refused sign-in.' : 'No sign-in since the core started.' })),
+    [h('label', { style: { display: 'inline-flex', gap: '5px', alignItems: 'center', fontSize: '12px' } },
+      h('input', { type: 'checkbox', checked: ui.failedOnly, onchange: (e) => { ui.failedOnly = e.target.checked; draw(); } }),
+      'Refused only')]);
+}
+
+const LOGIN_KIND = {
+  bad_credentials: 'wrong name or password',
+  locked: 'account locked',
+  disabled: 'account blocked',
+  name_taken: 'a local account has that name',
+  io_error: 'could not save the account',
+};
+
+/** Lock / unlock (sign-in) or block / unblock (everything). */
+async function setFlag(u, which, on) {
+  if (on) {
+    const lock = which === 'locked';
+    const ok = await confirmDialog(`${lock ? 'Lock' : 'Block'} ${u.name}?`,
+      lock ? 'They cannot sign in until you unlock the account. A session they already have open carries on.'
+        : 'Everything they do is refused from now on, signed in or not, until you unblock the account. Nobody is signed out.',
+      { yes: lock ? 'lock' : 'block', danger: !lock });
+    if (!ok) return;
+  }
+  const res = await bridge({ type: which === 'locked' ? 'USER_SET_LOCKED' : 'USER_SET_BLOCKED', name: u.name, [which]: on });
+  const verb = which === 'locked' ? (on ? 'locked' : 'unlocked') : (on ? 'blocked' : 'unblocked');
+  if (!res || !res.ok) toast(`Could not change ${u.name}`, 'err', 9000, { detail: [(res && res.message) || 'The server refused it.'] });
+  else toast(`${u.name} ${verb}`, 'ok', 4000);
+  await load();
 }
 
 function isSelf(u) {
@@ -324,17 +410,17 @@ function editUser(existing) {
     isNew ? 'They sign in with this name and password.'
       : existing.source === 'zabbix'
         ? 'This account signs in through Zabbix, and Zabbix sets its role again at every sign-in. Change the Zabbix user’s role to change it for good.'
-        : 'Changing the role signs them out immediately.',
+        : 'What they may do changes at once, in any session they have open. Nobody is signed out.',
     [
       isNew ? field('User name', text('acct-name', '')) : null,
       isNew
         ? field('Password', text('acct-pw', '', { type: 'password' }), `At least ${MIN_PASSWORD} characters.`)
         : null,
-      field('Role', select('acct-role', existing ? existing.role : 'user', [
-        ['admin', 'admin — everything: accounts, secrets, config and writes'],
-        ['operator', 'operator — every cluster, may write, no administration'],
-        ['user', 'user — read-only across every page'],
-        ['guest', 'guest — the dashboard only, no index names'],
+      field('Access', select('acct-role', existing ? existing.role : 'user', [
+        ['user', 'View (user) — read-only across every page'],
+        ['operator', 'Write (operator) — every cluster, may write, no administration'],
+        ['admin', 'Manage (admin) — everything: accounts, secrets, config and writes'],
+        ['guest', 'Dashboard (guest) — the dashboard only, no index names'],
       ])),
     ].filter(Boolean),
     (ctx) => [
@@ -354,7 +440,7 @@ function editUser(existing) {
             : await bridge({ type: 'USER_SET_ROLE', name, role });
           if (!res || !res.ok) throw new Error((res && res.message) || 'The server refused it.');
           toast(isNew ? `Account ${name} created` : `${name} is now ${role}`, 'ok', 5000,
-            { detail: [isNew ? `role: ${role}` : 'their open sessions end now'] });
+            { detail: [isNew ? `access: ${role}` : 'their open sessions have it now'] });
           ctx.done(true);
           await load();
         }),

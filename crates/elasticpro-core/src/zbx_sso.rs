@@ -93,9 +93,11 @@ pub fn role_for(zabbix_user_type: i64) -> Option<Role> {
     }
 }
 
-/// Only a Zabbix User is limited to clusters. Admins and super admins see the fleet.
-pub fn scope_for(role: Role, groups: &[String]) -> Option<Vec<String>> {
-    if role == Role::User {
+/// Which clusters a Zabbix sign-in may see: every one (`None`) unless the config asks for
+/// Zabbix Users to be limited to their user groups (`zabbix.scopeUsersByGroup`). Admins and
+/// super admins see the fleet either way.
+pub fn scope_for(role: Role, groups: &[String], by_group: bool) -> Option<Vec<String>> {
+    if by_group && role == Role::User {
         let mut g: Vec<String> = groups.iter().map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
         g.sort();
         g.dedup();
@@ -351,13 +353,21 @@ mod tests {
     }
 
     #[test]
-    fn only_a_zabbix_user_is_scoped() {
+    fn every_zabbix_sign_in_reads_every_cluster_by_default() {
+        let g = vec!["ES vm-1".to_string()];
+        assert_eq!(scope_for(Role::User, &g, false), None);
+        assert_eq!(scope_for(Role::User, &[], false), None);
+        assert_eq!(scope_for(Role::Operator, &g, false), None);
+    }
+
+    #[test]
+    fn with_scoping_on_only_a_zabbix_user_is_scoped() {
         let g = vec![" ES vm-1 ".to_string(), "".to_string(), "ES vm-1".to_string()];
-        assert_eq!(scope_for(Role::User, &g), Some(vec!["ES vm-1".to_string()]));
-        assert_eq!(scope_for(Role::Operator, &g), None);
-        assert_eq!(scope_for(Role::Admin, &g), None);
+        assert_eq!(scope_for(Role::User, &g, true), Some(vec!["ES vm-1".to_string()]));
+        assert_eq!(scope_for(Role::Operator, &g, true), None);
+        assert_eq!(scope_for(Role::Admin, &g, true), None);
         // In no group at all is still scoped — to nothing.
-        assert_eq!(scope_for(Role::User, &[]), Some(vec![]));
+        assert_eq!(scope_for(Role::User, &[], true), Some(vec![]));
     }
 
     #[test]

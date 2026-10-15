@@ -2,6 +2,12 @@
 /**
  * @var CView $this
  * @var array $data  ['configured', 'frame_url', 'public_url', 'error']
+ *
+ * Each failure here carries an error code from the module's range, 7xx (the core uses
+ * 1xx-5xx, the ElasticPro page 6xx; docs/ERROR-CODES.md lists them all):
+ *   EP-701  not paired with ElasticPro yet
+ *   EP-702  ElasticPro refused to sign this Zabbix user in (its own code follows the reason)
+ *   EP-703  signed in, then lost the session three times in a minute
  */
 
 if (!$data['configured']) {
@@ -11,14 +17,15 @@ if (!$data['configured']) {
 			new CLink(_('Administration → ElasticPro'),
 				(new CUrl('zabbix.php'))->setArgument('action', 'elasticpro.link.edit')
 			),
-			_(' (or, managed on the server, copy modules/elasticpro/config.php.example to config.php).')
+			_(' (or, managed on the server, copy modules/elasticpro/config.php.example to config.php).'),
+			' (EP-701)'
 		]
-		: _('ElasticPro is not connected yet. A Zabbix Super admin pairs it under Administration → ElasticPro.')
+		: _('ElasticPro is not connected yet. A Zabbix Super admin pairs it under Administration → ElasticPro.').' (EP-701)'
 	))->addClass('ep-error');
 }
 elseif ($data['frame_url'] === null) {
 	$body = (new CDiv([
-		new CTag('b', true, _('ElasticPro could not sign you in.')),
+		new CTag('b', true, _('ElasticPro could not sign you in.').' (EP-702)'),
 		BR(),
 		$data['error']
 	]))->addClass('ep-error');
@@ -67,7 +74,7 @@ if ($data['public_url'] !== '') {
 				   still believes it is paired, because its secret lives in the Zabbix
 				   database while the core keeps its own in its data directory. That is a
 				   permanent state no amount of reloading fixes, so say what to do. */
-				if (box) box.innerHTML = '<div class="ep-error"><b>ElasticPro could not keep you signed in.</b><br>'
+				if (box) box.innerHTML = '<div class="ep-error"><b>ElasticPro could not keep you signed in. (EP-703)</b><br>'
 					+ 'It asked Zabbix to sign you in again three times in a minute, so it stopped retrying.<br><br>'
 					+ 'This almost always means Zabbix and ElasticPro no longer share a pairing secret — '
 					+ 'which happens when either side is reinstalled or its data reset, because Zabbix keeps '
@@ -75,8 +82,8 @@ if ($data['public_url'] !== '') {
 					+ 'Reloading will not fix that: a Zabbix Super admin has to re-pair the two under '
 					+ '<b>Administration \u2192 ElasticPro</b>.<br><br>'
 					+ 'The ElasticPro server log gives the exact reason on <code>/sso/zabbix</code> — '
-					+ '<code>not_configured</code> (ElasticPro has no secret), <code>bad_signature</code> '
-					+ '(the two secrets differ) or <code>stale</code> (the clocks disagree).</div>';
+					+ '<code>EP-306 not_configured</code> (ElasticPro has no secret), <code>EP-510 bad_signature</code> '
+					+ '(the two secrets differ) or <code>EP-511 stale</code> (the clocks disagree).</div>';
 				return;
 			}
 			recent.push(now);

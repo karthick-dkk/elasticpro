@@ -7,6 +7,8 @@
  * the pages did not need to change.
  */
 
+import { stampReply } from './error-codes.js';
+
 const T = globalThis.__TAURI__;
 export const isTauri = !!(T && T.core && typeof T.core.invoke === 'function');
 
@@ -54,9 +56,10 @@ export async function bridge(msg) {
       setSignedIn(false);
       for (const fn of expiryListeners) { try { fn(); } catch { /* keep telling the rest */ } }
     }
-    return res;
+    // Every failure leaves here with a code — the core's, or the browser's for one it never sent.
+    return stampReply(res);
   } catch (e) {
-    return { ok: false, kind: 'worker_error', message: String(e && e.message || e) };
+    return stampReply({ ok: false, kind: 'worker_error', message: `ElasticPro server did not answer: ${String(e && e.message || e)}` });
   }
 }
 

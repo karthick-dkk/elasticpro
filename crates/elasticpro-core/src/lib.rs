@@ -12,6 +12,7 @@ pub mod auth;
 pub mod bridge;
 pub mod crypto;
 pub mod delay_sink;
+pub mod errors;
 pub mod fleet;
 pub mod guard;
 pub mod hcvault;
