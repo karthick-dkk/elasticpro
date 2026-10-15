@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.3.15
+
+**One switch to accept every certificate, and one notification for what it accepted.**
+
+Certificate checking stays on by default. Config → Defaults → Certificates = insecure
+(`defaults.tls: insecure`) turns it off for everything at once: every cluster whatever its own
+`tls:` says, every jump host's SSH key, and the Zabbix API. Setting it back to auto brings every
+check back, because the switch never pins anything on its own.
+
+While it is on, what it let through that would otherwise have stopped (a certificate the OS store
+rejects and nobody pinned, a jump-host key nobody trusted) is listed in a single notification, not
+one per cluster, and on Config → Jump hosts & trust with the clusters each one serves. On the hosted
+build the core reads the switch from its own config file, never from a page; a file that is missing
+or does not parse turns checking back on.
+
+The module installer knows the new Top hosts widget (`ep_tophosts`), which lives in the Zabbix
+modules project.
+
+rustls is updated to 0.23.46 for RUSTSEC-2026-0346, -0347, -0348 and -0349.
+
 ## 0.3.14
 
 **Fixes from QA on 0.3.13.**

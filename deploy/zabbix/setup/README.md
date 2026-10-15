@@ -27,7 +27,7 @@ silently reusing someone else's VM.
 | `zbx_phase34.py` | `elasticpro-provision` (host creation only), client-plan template linked to cluster hosts, the scraper's ElasticPro token → `../secrets/scraper_token` (a Docker secret for `compose.plan.yml`; an older `scraper.env` is carried over), this VM as a Linux host |
 | `zbx_dashboard.py` | the "ElasticPro — Fleet" dashboard |
 | `zbx_hosts_check.py`, `zbx_e2e.py` | end-to-end checks: sign in as a Zabbix user, open the module, see what that user gets |
-| `zbx_rename.py` | upgrades only: migrates a Zabbix set up under the previous product name — macros, Vault paths, host tags, the masters host group, the per-client alert objects, blank dashboard widgets, a live maintenance, and linking the current master template. Dry run unless `--apply`, and every phase is named separately — see "Upgrading from the previous name" and "Migrating off the previous names" |
+| `zbx_rename.py` | upgrades only: migrates a Zabbix set up under the previous product name — macros, Vault paths, host tags, the masters host group, the per-client alert objects, blank dashboard widgets, a live maintenance, linking the current master template, and finally renaming whatever still *reads* as the old product (templates, groups, users, roles, scripts, media types, actions, dashboards, reports, images, maintenances). Dry run unless `--apply`, and every phase is named separately — see "Upgrading from the previous name" and "Migrating off the previous names" |
 
 Vault comes first: `../../vault/setup.sh`, then `stack/setup.sh` (secrets, TLS, networks,
 `up -d`). Run `stack/setup.sh` as root (or with sudo) — the Zabbix images run as uid 1997 /
@@ -140,10 +140,11 @@ scopes, are below the table.
 | `--templates`, `--relink` | relink | links `ElasticPro client master` to each master host. Unlinks nothing. Also needs `--accept-history-restart` |
 | `--disable-legacy-items` | (relink) | with the relink phase: sets to Disabled the items and triggers the host **inherits from the legacy template this phase just relinked**, matched by each object's parent id and never by its key prefix. Status only — nothing is deleted and re-enabling undoes it. It is also what releases the macro phase's formula lock |
 | `--accept-history-restart` | (relink) | the second hand-made decision the relink needs: the `ep.*` series starts empty |
+| `--rename-legacy` | rename_legacy | renames what still **reads** as the old product once the phases above have moved what the code reads: templates, host groups, template groups, user groups, users, user roles, scripts, media types, actions, scheduled reports, dashboards, images and maintenances. Renames only — no unlink, no clear, no delete, no import, so **no item and no history is touched**. A template gets the retired marker (`ElasticPro client master (pre-0.2.0)`); everything else gets the plain swap. See "The retired marker" below |
 | `--datadir` | datadir | prints the filesystem move. Never writes, with or without `--apply` |
 | `--all` | all of them | every phase. Still needs `--apply` to write, and the relink still needs its own two flags |
 | `--phase <name>` | one | the same, by name, repeatable: `--phase alerts --phase widgets`, or `--phase all` |
-| `--client <name>` | — | repeatable; scopes the **tags, alerts, widgets, maintenance and relink** phases to one client. The macros, vault, groups, modules and datadir phases are install-wide and say so on every run: a global or template macro belongs to no single client, the Vault phase walks every host's macro values, and the host group and the data folder are one object each |
+| `--client <name>` | — | repeatable; scopes the **tags, alerts, widgets, maintenance and relink** phases to one client. The macros, vault, groups, modules, rename_legacy and datadir phases are install-wide and say so on every run: a global or template macro belongs to no single client, the Vault phase walks every host's macro values, the host group and the data folder are one object each, and a template, a role, a script or an image belongs to no single client |
 
 `--client` scoped four phases and silently ignored the fifth: an operator proving `--tags` on
 one client of seven had the tags of all forty-two hosts rewritten. It scopes the tags phase
@@ -287,7 +288,10 @@ mails, so look at the list `zbx_rename.py` prints and delete the old half once y
 satisfied the new half is live.
 
 `--apply --alerts` does the five per-client objects for every client at once, instead of
-waiting for seven saves — see "Migrating off the previous names" below.
+waiting for seven saves — see "Migrating off the previous names" below. `--apply --rename-legacy`
+then renames the leftovers it can show are this product's, templates to a retired name and
+everything else to the plain swap, and names the ones it cannot — it still deletes nothing, so
+deciding which half of a pair is live stays yours.
 
 The four generated templates are the awkward ones: their uuids come from a hash of the product
 name, so **Cluster Management → Write master template** creates new templates rather than
@@ -344,7 +348,8 @@ python3 setup/zbx_rename.py --apply --templates --accept-history-restart --disab
                                                     # 9. the master template — maintenance window
 python3 setup/zbx_rename.py --apply --macros        # 10. the formula macros, now that step 9
                                                     #     has turned their items off
-python3 setup/zbx_rename.py --datadir               # 11. the data folder, by hand, last
+python3 setup/zbx_rename.py --apply --rename-legacy # 11. the names that are only read by people
+python3 setup/zbx_rename.py --datadir               # 12. the data folder, by hand, last
 ```
 
 **Steps 2 and 10 are the same command, and step 2 does not finish the job.** It renames every
@@ -380,6 +385,84 @@ and the next save un-manages that host for good. Prove it on one client first wi
 **Step 9 (`--templates`) is the only one that wants a maintenance window**, and only because
 of what you do by hand afterwards (unlinking). The phase itself is additive.
 
+**Step 11 (`--rename-legacy`) is cosmetic, and it is the step your client sees.** Everything
+above moves what the *code* reads; after it the install works and still says "ElasticVue" on the
+Templates page, in the user list, on the roles page and in the maintenance list. This phase
+renames those. It renames and nothing else — no unlink, no "unlink and clear", no delete, no
+`configuration.import` — so **no item and no value of history is touched by it**, and every write
+it makes is one update carrying one id and one name, a shape the script enforces in `call()`
+rather than merely intending.
+
+Per object it prints the type, the current name, the new name, and whether it was skipped
+(already done, or somebody else's) or refused (and why). A second run reports nothing to do.
+
+#### The retired marker, and why a template is never renamed to the current name
+
+A template is renamed to the swapped name **plus** `(pre-0.2.0)` — the release the rename landed
+in — and never to the name the module writes:
+
+```
+"ElasticVue Pro client master"  ->  "ElasticPro client master (pre-0.2.0)"
+```
+
+Zabbix's `configuration.import` matches a template **by uuid first and then by name**, and
+`MasterTemplate::uuid()` hashes the product name, so a legacy template's uuid can never equal a
+current one. Rename the legacy template to the exact current name and you have an object wearing
+the name the module writes, carrying the legacy uuid, with `evp.*` item keys still on it — and
+every later **Cluster Management → Write master template** then fails on a
+name-present/uuid-different collision. Permanently, on every save of every client, until somebody
+finds that template and renames it back by hand. On an install that has no `ElasticPro client
+master` yet the name is free, so the rename *looks* like a success on the day and breaks the next
+import. The marker makes the collision impossible instead of unlikely: neither the uuid nor the
+name clashes with anything the code writes, the hosts stay linked, and the items and their
+history are not touched at all. `call()` requires the marker on every `template.update` and
+refuses one aimed at a name in use now, so a later change to this script cannot reintroduce the
+trap by forgetting a suffix.
+
+Host groups, users, roles, scripts, media types, actions, dashboards, reports, images and
+maintenances get the **plain swap** instead: none of them has a uuid, none of them is ever
+imported, and the plain swap is also the name the current code recognises, so a marker there
+would be noise with a cost.
+
+Two refusals in this phase are worth knowing about before you run it:
+
+* **A target name that is already in use is refused for that object**, with both names printed.
+  It is never worked around with a different marker: which of two objects should wear the plain
+  name is a decision about which one is live, and that is yours. The same refusal covers two
+  legacy objects that would collide with *each other* — `ElasticVue Pro client master` and
+  `ElasticVue client master` both want `ElasticPro client master (pre-0.2.0)` — where it also
+  tells you to rename the one you are keeping by hand first.
+* **A legacy template a host still reaches, where that host does not also carry the current
+  template, is refused until the relink is done.** A legacy template *name* is how the modules
+  still recognise an un-migrated host (`Reconciler::masterTemplates()`, `esClusterTemplates()`,
+  `ulmTemplates()`, the jump templates), and a retired name is recognised by nothing — that is
+  the point of it. Renaming it before step 9 would leave Cluster Management showing the client
+  with no cluster, or no client at all, and nothing on the page would say why. The refusal names
+  the hosts and the command to run first.
+
+Templates it does **not** rename, each named in the output with the reason: one whose name a
+`*_TEMPLATE` setting points at (that name is current on purpose — renaming it would leave the
+setting naming a template that is not there), one whose uuid says it is not this module's, and
+one whose legacy name this repository does not record at all — the three templates generated by
+`tools/zabbix-{alert,plan,delay}-template.mjs` have no legacy name written down anywhere, so
+`ElasticVue Pro client plan` and friends are listed and left for you. Renaming one of those by
+hand is safe; nothing on it moves.
+
+What it never touches, whatever its name says: an **item key** (the identity an item's history
+hangs on), a **macro name** (what a calculated item's formula resolves through), a **template
+uuid** (what `configuration.import` matches on), and the name of an item, trigger, graph or
+discovery rule (the template that defines them owns those, and the current template already
+carries the current ones). **Hosts and proxies are surveyed and reported, never renamed**: a
+host's technical name is what an active agent, `zabbix_sender` and an SSH check address it by and
+what `ClientState::clients()` falls back to when `{$GRP.CLIENT}` is empty, and a proxy's name has
+to match `Hostname=` in its own `zabbix_proxy.conf` or the server stops talking to it. Services,
+SLAs, API tokens, connectors, icon maps, user directories and correlations are surveyed too: this
+product creates none of them, so one carrying the old name is the site's own.
+
+Objects a phase above already owns — the masters host group, the five per-client alert objects,
+a client's maintenance window — are named and left to that phase, with the flag that runs it, so
+one object has exactly one owner.
+
 ### What needs a human, and what the script refuses
 
 * **The five frontend modules.** No API renames a registered module — Zabbix keys it on the id
@@ -403,12 +486,13 @@ of what you do by hand afterwards (unlinking). The phase itself is additive.
 * **A legacy-named template the uuid says is not ours.** `MasterTemplate::uuid()` hashes the
   product name, so a uuid is the only honest way to tell a template this module wrote from one
   of the site's own that merely shares the name. One that does not match is reported and never
-  touched.
+  touched — not relinked by `--templates`, and not renamed by `--rename-legacy` either.
 * **Anything that could delete item history** is refused structurally, not warned about, and
   there is no flag that turns the refusal off: `host.massremove` in any form, any payload
   carrying `templateids_clear` or `templates_clear`, `host.update` with a `templates` array
   (it *replaces* the link list, so one template missed is silently unlinked and its items are
-  stranded at host level), `template.update` renaming a legacy template to a current name,
+  stranded at host level), `template.update` in any shape but `{templateid, host, name}` and
+  to any name that does not end in the retired marker (see "The retired marker" above),
   `template.delete`, `item.delete`, `trigger.delete`, `configuration.import`, `history.clear`,
   `trend.clear`, `housekeeping.update`, and every other delete.
 
@@ -456,7 +540,7 @@ enough on its own, it also needs `--accept-history-restart`.
 | **Item history and trends** | Only ever lost by "Unlink and clear", by deleting an item or a template, or by a `configuration.import` aimed at the old generation. The script refuses all of them, with no override. Nothing in `Store`'s backups holds item values |
 | **Collection that stopped** | A value that was never collected cannot be backfilled from anything, which is why the macro phase will not rename a macro an enabled calculated item's formula or an enabled trigger's expression still names, and why `--disable-legacy-items` is scoped to the objects inherited from the template it relinked rather than to a key prefix |
 | **`evp-was-off`** | Reversible, and an earlier version of this file said otherwise. `Lifecycle::enable()` reads `ep-was-off` and `evp-was-off` both, so **Clients → Enable** turns back on only what Disable turned off, migrated or not |
-| **Everything else** | Reversible. Every write the script makes is a rename, a tag set, a widget type, a template link or a status — all of them undone by making the opposite change |
+| **Everything else** | Reversible. Every write the script makes is a rename, a tag set, a widget type, a template link or a status — all of them undone by making the opposite change. A template renamed to its `(pre-0.2.0)` name keeps its uuid, its items, its history and its hosts: renaming it back is the whole undo |
 
 A rename is also cheap to re-run: every phase compares what is there with what it wants, so a
 second run reports "already migrated — skipped" and sends nothing.
