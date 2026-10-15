@@ -1,16 +1,20 @@
 //! Certificate trust the operator controls.
 //!
 //! Three modes per cluster:
-//! * `insecure` — the default: accept any certificate, self-signed, expired or for another
-//!   name, without asking. Most clusters this watches sit on a private network behind
-//!   certificates nobody can get into an OS trust store, and the operator asked for them to
-//!   just work. The certificate is still recorded, so the UI can show what was presented.
-//!   The cost is that nothing tells an interception from the real cluster.
-//! * `auto`     — opt-in: the OS trust store (plus the Mozilla bundle), and when that fails,
-//!   trust-on-first-use with an explicit "Trust this certificate" decision in the UI. The
-//!   decision is the certificate's SHA-256, pinned in pins.json; a later change is refused
-//!   and reported rather than quietly accepted.
-//! * `system`   — opt-in: the OS trust store only. Strict.
+//! * `system`   — the OS trust store (plus the Mozilla bundle). Strict.
+//! * `auto`     — the default: `system`, and when that fails, trust-on-first-use with an
+//!   explicit "Trust this certificate" decision in the UI. The decision is the
+//!   certificate's SHA-256, pinned in pins.json; a later change is refused and
+//!   reported rather than quietly accepted — a silent re-trust is indistinguishable
+//!   from an interception.
+//! * `insecure` — accept anything. For a lab, never for production.
+//!
+//! `defaults.tls: insecure` in the config is different from a cluster's own `tls: insecure`:
+//! it is one switch for everything — every cluster whatever its own setting, every jump
+//! host's SSH key, and the Zabbix API. It is held here (`accept_all`) because every one of
+//! those connections already asks this store. What was accepted only because of it — a
+//! certificate the OS store rejects and nobody pinned, a host key nobody trusted — is kept
+//! in `accepted`, so the UI can say so in one place.
 //!
 //! The same store keeps SSH host-key fingerprints of the jump hosts.
 
@@ -23,6 +27,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 pub const MARK_UNTRUSTED: &str = "ELASTICPRO_UNTRUSTED";
@@ -31,19 +36,18 @@ pub const MARK_PIN_MISMATCH: &str = "ELASTICPRO_PIN_MISMATCH";
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum TlsMode {
+    #[default]
     Auto,
     System,
-    #[default]
     Insecure,
 }
 
 impl TlsMode {
     pub fn parse(s: Option<&str>) -> TlsMode {
         match s.map(|s| s.trim().to_ascii_lowercase()).as_deref() {
-            Some("system") | Some("strict") | Some("verify") => TlsMode::System,
-            Some("auto") | Some("pin") | Some("tofu") | Some("ask") => TlsMode::Auto,
-            // Unset, "insecure", "accept", anything unrecognised: accept the certificate.
-            _ => TlsMode::Insecure,
+            Some("system") | Some("strict") => TlsMode::System,
+            Some("insecure") | Some("none") | Some("false") => TlsMode::Insecure,
+            _ => TlsMode::Auto,
         }
     }
 }
@@ -83,6 +87,27 @@ pub struct PinStore {
     /// Certificate most recently presented per `host:port`, trusted or not — the UI asks
     /// for it after an `ELASTICPRO_UNTRUSTED` failure.
     last_seen: Mutex<HashMap<String, CertInfo>>,
+    /// `defaults.tls: insecure`: accept every certificate and SSH host key.
+    accept_all: AtomicBool,
+    /// What `accept_all` let through that would otherwise have stopped, by `host:port`
+    /// (certificates) or `ssh:<jump id>` (host keys). In memory only: it describes this
+    /// run, and is emptied when the switch goes off.
+    accepted: Mutex<HashMap<String, Accepted>>,
+}
+
+/// A certificate or host key let through by `accept_all` alone.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Accepted {
+    /// `certificate` or `host_key`.
+    pub kind: String,
+    /// `host:port`, or the jump host's id.
+    pub target: String,
+    pub fingerprint: String,
+    /// The certificate's subject, or the key type.
+    pub subject: String,
+    /// Why it would have stopped: the verifier's error, "not trusted yet", "changed".
+    pub reason: String,
+    pub first_seen: String,
 }
 
 impl PinStore {
@@ -92,7 +117,8 @@ impl PinStore {
             .and_then(|p| std::fs::read_to_string(p).ok())
             .and_then(|t| serde_json::from_str::<PinFile>(&t).ok())
             .unwrap_or_default();
-        Arc::new(PinStore { path, data: RwLock::new(data), last_seen: Mutex::new(HashMap::new()) })
+        Arc::new(PinStore { path, data: RwLock::new(data), last_seen: Mutex::new(HashMap::new()),
+                            accept_all: AtomicBool::new(false), accepted: Mutex::new(HashMap::new()) })
     }
 
     fn save(&self) {
@@ -145,6 +171,38 @@ impl PinStore {
     }
     fn record(&self, host: &str, info: CertInfo) {
         self.last_seen.lock().insert(host.to_string(), info);
+    }
+
+    /// Whether `defaults.tls: insecure` is on.
+    pub fn accept_all(&self) -> bool {
+        self.accept_all.load(Ordering::Relaxed)
+    }
+    /// Turns the switch on or off. Off forgets what it let through. Returns whether it changed.
+    pub fn set_accept_all(&self, on: bool) -> bool {
+        let was = self.accept_all.swap(on, Ordering::Relaxed);
+        if was && !on {
+            self.accepted.lock().clear();
+        }
+        was != on
+    }
+    /// Records something `accept_all` let through; the first sighting's time is kept.
+    pub fn note_accepted(&self, kind: &str, key: &str, target: &str, fingerprint: &str, subject: &str, reason: &str) {
+        let mut m = self.accepted.lock();
+        let first_seen = m.get(key).filter(|a| a.fingerprint == fingerprint).map(|a| a.first_seen.clone()).unwrap_or_else(now_iso);
+        m.insert(key.to_string(), Accepted {
+            kind: kind.into(), target: target.into(), fingerprint: fingerprint.into(),
+            subject: subject.into(), reason: reason.into(), first_seen,
+        });
+    }
+    /// Something that now passes on its own (pinned since, or a proper certificate) is no
+    /// longer only accepted.
+    pub fn clear_accepted(&self, key: &str) {
+        self.accepted.lock().remove(key);
+    }
+    pub fn accepted(&self) -> Vec<Accepted> {
+        let mut v: Vec<Accepted> = self.accepted.lock().values().cloned().collect();
+        v.sort_by(|a, b| (&a.kind, &a.target).cmp(&(&b.kind, &b.target)));
+        v
     }
 }
 
@@ -284,6 +342,20 @@ impl ServerCertVerifier for PinningVerifier {
         let fp = info.sha256.clone();
         self.pins.record(&self.key, info);
 
+        if self.pins.accept_all() {
+            // One switch for every connection. Whatever would have stopped it is noted —
+            // the OS store's refusal, unless the operator pinned this certificate earlier.
+            let system = self.inner.verify_server_cert(end_entity, intermediates, server_name, ocsp, now);
+            let pinned = self.pins.cert_pin(&self.key).is_some_and(|p| p.sha256.eq_ignore_ascii_case(&fp));
+            match system {
+                Err(e) if !pinned => {
+                    let subject = self.pins.last_seen(&self.key).map(|i| i.subject).unwrap_or_default();
+                    self.pins.note_accepted("certificate", &self.key, &self.key, &fp, &subject, &e.to_string());
+                }
+                _ => self.pins.clear_accepted(&self.key),
+            }
+            return Ok(ServerCertVerified::assertion());
+        }
         if self.mode == TlsMode::Insecure {
             return Ok(ServerCertVerified::assertion());
         }

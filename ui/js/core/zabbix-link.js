@@ -92,7 +92,7 @@ export function linkChanges(status, form) {
   if (wantApi !== haveApi) put('apiUrl', wantApi);
   const tok = String(form.apiToken || '').trim();
   if (tok) put('apiToken', tok);
-  if (form.verifyTls !== undefined && !!form.verifyTls !== (s.verifyTls === true)) put('verifyTls', !!form.verifyTls);
+  if (form.verifyTls !== undefined && !!form.verifyTls !== (s.verifyTls !== false)) put('verifyTls', !!form.verifyTls);
   const src = parseSources(form.allowedSources).list;
   if (src.join(',') !== (s.allowedSources || []).join(',')) put('allowedSources', src);
   const secs = Number(String(form.syncSecs || '').trim());

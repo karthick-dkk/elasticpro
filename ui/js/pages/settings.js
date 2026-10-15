@@ -192,7 +192,23 @@ function trustCard() {
           }
         } },
     ], { title: `Actions for ${hostport}` })))));
+  // Config → Defaults → Certificates = insecure: what it let through, all in one table.
+  const acceptAll = !!(trust && trust.pins && trust.pins.acceptAll);
+  const accepted = (trust && trust.pins && trust.pins.accepted) || [];
+  const aRows = accepted.map((a) => h('tr',
+    h('td', { style: { fontSize: '11.5px' } }, a.kind === 'host_key' ? `SSH key · ${a.target}` : h('span.mono', a.target)),
+    h('td', { style: { fontSize: '11.5px' } }, (a.clusters || []).map((c) => c.name).join(', ') || h('span.muted', a.kind === 'host_key' ? 'jump host' : 'Zabbix API or not a cluster')),
+    h('td', { style: { fontSize: '11.5px' } }, a.subject || '–'),
+    h('td.muted', { style: { fontSize: '11px' } }, a.reason),
+    h('td.mono', { style: { fontSize: '11px', wordBreak: 'break-all' } }, a.fingerprint)));
   return h('div', { style: { display: 'grid', gap: '14px' } },
+    acceptAll ? h('div',
+      h('div', { style: { fontWeight: 620, marginBottom: '6px' } }, pill('insecure', 'orange'), ` Accepted without checking (${aRows.length})`),
+      h('div.muted', { style: { fontSize: '12px', marginBottom: '6px' } },
+        'Defaults → Certificates is set to insecure: every certificate and jump-host key is accepted. ' +
+        'These would have stopped otherwise. Set it back to auto to have them checked again.'),
+      aRows.length ? table(['What', 'Clusters', 'Subject / key type', 'Would have failed because', 'Fingerprint'], aRows)
+        : h('div.muted', { style: { fontSize: '12px' } }, 'Nothing so far: every connection made since the switch went on would have passed anyway.')) : null,
     h('div',
       h('div', { style: { display: 'flex', alignItems: 'center', marginBottom: '6px' } },
         h('span', { style: { fontWeight: 620 } }, `Jump hosts (${jh.length})`),
@@ -1088,7 +1104,7 @@ function zabbixLinkSummaryCard(s) {
         row('Zabbix URL', s.zabbixUrl || '–', ro('zabbixUrl')),
         row('API URL', s.apiUrlIsDefault ? `${defaultApiUrl(s.zabbixUrl) || '–'} (default)` : (s.apiUrl || '–'), ro('apiUrl')),
         row('API token', tokenText, ro('apiToken')),
-        row('Verify TLS', s.verifyTls === true ? 'yes' : 'no — any certificate accepted', ro('verifyTls')),
+        row('Verify TLS', s.verifyTls !== false ? 'yes' : 'no', ro('verifyTls')),
         row('Allowed sources', (s.allowedSources || []).length ? (s.allowedSources || []).join(', ') : 'any', ro('allowedSources')),
         row('Sync interval', `${s.syncSecs || '–'}s`, ro('syncSecs')),
         s.paired ? row('Paired with', `${s.zabbixUrl}${s.pairedAt ? ` · ${dt(s.pairedAt * 1000)}` : ''}${s.pairedBy ? ` by ${s.pairedBy}` : ''}`) : null,
@@ -1128,8 +1144,8 @@ function zabbixLinkFormCard(s, canCancel) {
   } else {
     tokenField = text('zl-token', '', { type: 'password', mono: true, placeholder: tok.set ? 'new token — replaces the stored one' : 'paste a Zabbix API token, or pair' });
   }
-  const tls = checkbox('zl-tls', 'Verify the Zabbix TLS certificate', s.verifyTls === true,
-    ro('verifyTls') ? managedNote : 'Off (the default): any certificate is accepted. On: the OS trust store, or a certificate you trust from Test connection.');
+  const tls = checkbox('zl-tls', 'Verify the Zabbix TLS certificate', s.verifyTls !== false,
+    ro('verifyTls') ? managedNote : 'Off only for a lab. On: the OS trust store, or a certificate you trust from Test connection.');
   if (ro('verifyTls') || linkBusy) tls.querySelector('input').disabled = true;
   const http = checkbox('zl-http', 'Allow plain http (lab only)', !!s.allowHttp, 'The API token would cross the network unencrypted.');
   const src = h('textarea#zl-src.mono', { rows: 2, spellcheck: false, disabled: ro('allowedSources') || linkBusy,

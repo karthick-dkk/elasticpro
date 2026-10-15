@@ -132,6 +132,12 @@ impl Core {
             let core = self.clone();
             tokio::spawn(async move { core.fleet_restore_redis().await });
         }
+        // The accept-all switch is in the config file; a restarted core polls before anybody
+        // opens a page that would PRIME it.
+        {
+            let core = self.clone();
+            tokio::spawn(async move { core.refresh_trust_switch().await });
+        }
         tokio::spawn(async move {
             while let Some(core) = weak.upgrade() {
                 core.fleet_tick().await;

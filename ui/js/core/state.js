@@ -273,6 +273,7 @@ export async function reprime() {
   const res = await primeWorker(own, isReadOnly(), state.config.jumpHosts || [],
     // Unlocked sealed secrets are not written to the server's disk in the clear.
     { persist: !state.config.sealed,
+      acceptAllCertificates: !!state.config.acceptAllCertificates,
       // ElasticPro's own credential, for Zabbix clusters when the config asks for it: one
       // typed this session wins, as it does for every cluster; else the config's shared one.
       sharedAuthHeader: sessionCred ? authHeaderFor(sessionCred) : (state.config.sharedAuthHeader || '') });

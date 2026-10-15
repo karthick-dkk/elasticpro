@@ -23,7 +23,7 @@ Browser tools cannot do three things an operator behind a jump host needs:
 
 | Problem | What ElasticPro does |
 |---|---|
-| The cluster is only reachable via a jump host | Opens its **own SSH connection** with your key file (`via: jumpwin`) — no ssh.exe, PuTTY or SOCKS setup. Any host key is accepted by default (`host_key: verify` confirms it once and pins it); the tunnel reconnects by itself. |
+| The cluster is only reachable via a jump host | Opens its **own SSH connection** with your key file (`via: jumpwin`) — no ssh.exe, PuTTY or SOCKS setup. Host keys are confirmed once and pinned; the tunnel reconnects by itself. |
 | Self-signed / internal-CA certificates | Shows the certificate once (subject, issuer, validity, SHA-256) with a **Trust** button, then pins it. A different certificate at the same address is refused. No CA import, no browser policy. |
 | "Failed to fetch" | Every failure is named — refused, DNS, timeout, TLS untrusted, pin mismatch, jump host down — with a one-line next step and, where a decision is needed, the button to take it. |
 
@@ -167,8 +167,8 @@ crates/elasticpro-core/   Rust core — everything with a security consequence
   guard.rs           read-only guard: GET/HEAD + search-family POST, checked before any socket;
                      writes need both the session unlock and a per-request flag
 ui/js/core/writes.js the UI's single copy of that unlock, shared by every acting page
-  tls.rs             accept any (default) | OS store → trust-on-first-use pin | OS store only; SSH host-key pins
-  ssh.rs             SSH client (russh): key/passphrase/password auth, host keys accepted or TOFU-pinned, reconnect with back-off
+  tls.rs             OS trust store → trust-on-first-use pin (SHA-256 per host:port); SSH host-key pins
+  ssh.rs             SSH client (russh): key/passphrase/password auth, TOFU host keys, reconnect with back-off
   socks.rs           in-process SOCKS5 on 127.0.0.1 → direct-tcpip channels on the jump host
   http.rs            one HTTP client per cluster (reqwest/rustls), exact error classification
   crypto.rs          AES-256-GCM + PBKDF2-HMAC-SHA512 for secrets in the config file
@@ -190,7 +190,7 @@ the session is unlocked.
 ## Security
 
 See [SECURITY.md](SECURITY.md). Short version: read-only towards Elasticsearch, credentials
-never in plain text on disk, TLS certificates and SSH host keys accepted by default, pinned on explicit consent when verification is on, loopback-only
+never in plain text on disk, TLS and SSH host keys pinned on explicit consent, loopback-only
 listeners, unsigned binaries (verify the `SHA256SUMS.txt` inside the portable zip, or build from
 source).
 

@@ -152,19 +152,25 @@ async fn tls_insecure_accepts_anything_including_a_rotation() {
 }
 
 #[tokio::test]
-async fn by_default_any_certificate_is_accepted_without_a_decision() {
-    // No `tls:` on the cluster — the way the UI's defaults and every Zabbix-synced cluster
-    // arrive. A self-signed certificate, then one for another name, then a rotation.
-    let dir = TempDir::new("default-accept");
+async fn on_the_desktop_the_switch_comes_with_prime() {
+    // No config file of the core's own: the person at the keyboard opened the file, and the
+    // page passes Defaults → Certificates on. Off again restores the cluster's own setting.
+    let dir = TempDir::new("accept-all-desktop");
     let srv = TlsServer::start(&self_signed("localhost")).await;
     let c = core(&dir);
+    let prime = |on: bool| json!({ "type": "PRIME", "acceptAllCertificates": on, "clusters": [
+        { "id": "es", "name": "es", "url": srv.url(), "tls": "auto", "authHeader": "Basic ZWxhc3RpYzpzZWNyZXQ=" } ] });
+    c.handle(prime(true)).await;
+    assert_eq!(get(&c).await["ok"], json!(true), "accepted without a decision");
+    let pins = c.handle(json!({ "type": "PINS" })).await;
+    assert_eq!(pins["pins"]["accepted"][0]["clusters"][0]["name"], json!("es"), "{pins}");
+    assert!(pins["pins"]["certs"].as_object().unwrap().is_empty(), "accepting is not pinning");
+    c.handle(prime(false)).await;
+    assert_eq!(get(&c).await["kind"], json!("tls_untrusted"), "off: the trust prompt is back");
+    c.handle(prime(true)).await;
     c.handle(json!({ "type": "PRIME", "clusters": [
-        { "id": "es", "url": srv.url(), "authHeader": "Basic ZWxhc3RpYzpzZWNyZXQ=" }
-    ]})).await;
-    assert_eq!(get(&c).await["ok"], json!(true), "a self-signed certificate connects without asking");
-    srv.rotate_to(&self_signed("some-other-name.example"));
-    assert_eq!(get(&c).await["ok"], json!(true), "a certificate for another name and a rotation are accepted too");
-    assert_eq!(srv.hits().len(), 2, "both requests reached the cluster");
+        { "id": "es", "name": "es", "url": srv.url(), "tls": "auto", "authHeader": "Basic ZWxhc3RpYzpzZWNyZXQ=" } ] })).await;
+    assert_eq!(get(&c).await["kind"], json!("tls_untrusted"), "a PRIME that does not mention the switch means off");
 }
 
 #[tokio::test]
