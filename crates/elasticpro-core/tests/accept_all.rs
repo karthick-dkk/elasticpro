@@ -50,6 +50,13 @@ async fn the_config_file_switch_accepts_every_certificate_and_lists_what_it_let_
     let again = c.handle(json!({ "type": "PINS" })).await;
     assert_eq!(again["pins"]["accepted"].as_array().unwrap().len(), 1);
 
+    // A config that no longer parses fails closed: checking is back on.
+    std::fs::write(&path, "defaults: { tls: insecure\n  broken: [").unwrap();
+    let pins = c.handle(json!({ "type": "PINS" })).await;
+    assert_eq!(pins["pins"]["acceptAll"], json!(false), "a broken file must not leave the switch on: {pins}");
+    write("insecure");
+    assert_eq!(c.handle(json!({ "type": "PINS" })).await["pins"]["acceptAll"], json!(true));
+
     // Back to auto: checked again, and the list is gone.
     write("auto");
     let pins = c.handle(json!({ "type": "PINS" })).await;

@@ -14,10 +14,12 @@ test('checking stays on by default', () => {
   assert.equal(c.acceptAllCertificates, false);
 });
 
-test('defaults.tls insecure applies to every cluster, whatever its own tls', () => {
+test('defaults.tls insecure is one switch for the core; clusters keep their own setting', () => {
+  // Not baked into each cluster: a page loaded while the switch was on must not keep
+  // "insecure" on its clusters after an admin turns it off.
   const c = normalize(raw('insecure'));
-  assert.deepEqual(c.clusters.map((x) => x.tls), ['insecure', 'insecure']);
   assert.equal(c.acceptAllCertificates, true);
+  assert.deepEqual(c.clusters.map((x) => x.tls), ['auto', 'system']);
 });
 
 const cert = (target, names, fp = target) => ({ kind: 'certificate', target, fingerprint: fp, subject: 'CN=x', reason: 'UnknownIssuer',

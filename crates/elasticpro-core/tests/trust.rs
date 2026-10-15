@@ -167,6 +167,10 @@ async fn on_the_desktop_the_switch_comes_with_prime() {
     assert!(pins["pins"]["certs"].as_object().unwrap().is_empty(), "accepting is not pinning");
     c.handle(prime(false)).await;
     assert_eq!(get(&c).await["kind"], json!("tls_untrusted"), "off: the trust prompt is back");
+    c.handle(prime(true)).await;
+    c.handle(json!({ "type": "PRIME", "clusters": [
+        { "id": "es", "name": "es", "url": srv.url(), "tls": "auto", "authHeader": "Basic ZWxhc3RpYzpzZWNyZXQ=" } ] })).await;
+    assert_eq!(get(&c).await["kind"], json!("tls_untrusted"), "a PRIME that does not mention the switch means off");
 }
 
 #[tokio::test]

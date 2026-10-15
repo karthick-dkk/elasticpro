@@ -1652,17 +1652,14 @@ impl Core {
 
     /// Reads `defaults.tls` from the server's own config file and sets the accept-all
     /// switch from it — never from a request, so only whoever can edit that file (an admin,
-    /// on the Config page) turns certificate checking off. A file that cannot be read or
-    /// parsed leaves the switch as it is; no file at all leaves it to PRIME (desktop).
+    /// on the Config page) turns certificate checking off. Fails closed: a file that is
+    /// missing, unreadable or does not parse turns checking back on. No configured file at
+    /// all leaves it to PRIME (desktop).
     pub(crate) async fn refresh_trust_switch(&self) {
         if self.config_hint.is_none() {
             return;
         }
-        let on = match self.read_config_file().await {
-            Ok(raw) => accepts_all_certificates(&raw),
-            Err(e) if e["kind"] == json!("not_found") => false,
-            Err(_) => return,
-        };
+        let on = self.read_config_file().await.map(|raw| accepts_all_certificates(&raw)).unwrap_or(false);
         if self.pins.set_accept_all(on) {
             self.transport.forget_clients();
             tracing::warn!(target: "audit", on, "defaults.tls: insecure is {} — certificates and jump-host keys {}",
@@ -1830,7 +1827,10 @@ impl Core {
         let mut incoming = p.clusters;
         if self.config_hint.is_some() {
             self.refresh_trust_switch().await;
-        } else if let Some(on) = p.accept_all_certificates {
+        } else {
+            // Every PRIME states the switch; one that does not mention it means off, so a
+            // page that never sends it cannot leave an earlier "on" standing.
+            let on = p.accept_all_certificates == Some(true);
             if self.pins.set_accept_all(on) {
                 tracing::warn!(target: "audit", on, "defaults.tls: insecure is {}", if on { "on" } else { "off" });
             }

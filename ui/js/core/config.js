@@ -191,7 +191,9 @@ export function normalize(raw, sourceName = 'clusters.yaml') {
       id,
       name,
       via: via ? String(via) : '',
-      tls: acceptAll ? 'insecure' : String(c.tls || defaults.tls || 'auto'),
+      // The cluster's own setting, unchanged by the defaults.tls: insecure switch: the core
+      // applies that one, so turning it off takes effect without every page re-sending this.
+      tls: String(c.tls || (acceptAll ? 'auto' : defaults.tls) || 'auto'),
       url: String(c.url).replace(/\/+$/, ''),
       origin: (() => { try { return new URL(c.url).origin; } catch { return c.url; } })(),
       tags: c.tags || [],
