@@ -46,7 +46,7 @@ while [ $# -gt 0 ]; do
     --all) ALL=1; shift ;;
     --timeout) TIMEOUT=$2; shift 2 ;;
     --dry-run) DRY=1; shift ;;
-    -h|--help) sed -n '2,/^set -euo/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,/^set -euo/p' "$(basename "$0")" | sed '$d' | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "unknown option: $1 (see --help)" >&2; exit 2 ;;
   esac
 done
