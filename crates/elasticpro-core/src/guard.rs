@@ -70,20 +70,33 @@ pub fn is_read(method: &str, path: &str) -> bool {
 /// the request disagreed with it about what the path was: `/_search/../_bulk` matched and
 /// reached Elasticsearch as `POST /_bulk`; `/idx/_doc/_search` matched and indexed a
 /// document whose id is `_search`; `/idx/_delete_by_query#/_search` lost its fragment on
-/// the way out. So nothing a parser would rewrite is accepted (dot segments, backslashes,
-/// fragments, percent-encoding — no index name needs any of them), every segment before
-/// the endpoint must be an index name (they cannot start with `_`), and the endpoint is
-/// followed only by the suffixes it really has.
+/// the way out. So each segment is percent-decoded and judged as Elasticsearch will read
+/// it: nothing a parser would rewrite or split (dot segments, slashes or backslashes once
+/// decoded, fragments, control characters) is accepted, every segment before the endpoint
+/// must be an index name (they cannot start with `_`), and the endpoint is followed only by
+/// the suffixes it really has.
+///
+/// Percent-encoding itself is fine: the pages search several indices at once as
+/// `/a%2Cb%2Cc/_search`, and refusing every `%` turned a user's ordinary log search into
+/// "not available to the user role".
 fn is_read_post(bare: &str) -> bool {
     // Printable ASCII only: the URL parser silently drops tabs and newlines, so `.\t.` would
     // leave here as `..`.
-    if !bare.chars().all(|c| c.is_ascii_graphic()) || bare.contains(['\\', '#', '%']) {
+    if !bare.chars().all(|c| c.is_ascii_graphic()) || bare.contains(['\\', '#']) {
         return false;
     }
-    let segs: Vec<&str> = bare.split('/').filter(|s| !s.is_empty()).collect();
-    if segs.iter().any(|s| *s == "." || *s == "..") {
-        return false;
+    let mut segs: Vec<String> = Vec::new();
+    for raw in bare.split('/').filter(|s| !s.is_empty()) {
+        let Some(seg) = percent_decode(raw) else { return false };
+        // What a decoded segment must not hold: anything that would make it more than one
+        // segment, or something other than what was checked, on the way to Elasticsearch.
+        if seg == "." || seg == ".." || seg.contains(['/', '\\', '#', '?', '%'])
+            || seg.chars().any(|c| c.is_control() || c.is_whitespace()) {
+            return false;
+        }
+        segs.push(seg);
     }
+    let segs: Vec<&str> = segs.iter().map(String::as_str).collect();
     // `_all` is the one index target that starts with `_`; anything else that does is an API.
     let Some(k) = segs.iter().position(|s| s.starts_with('_') && *s != "_all") else { return false };
     match (segs[k], &segs[k + 1..]) {
@@ -96,6 +109,24 @@ fn is_read_post(bare: &str) -> bool {
         ("_index_template", ["_simulate" | "_simulate_index", name]) => k == 0 && !name.starts_with('_'),
         _ => false,
     }
+}
+
+/// `%XX` decoded once, as UTF-8; `None` for a malformed escape or bytes that are not UTF-8.
+fn percent_decode(s: &str) -> Option<String> {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%' {
+            let hex = std::str::from_utf8(b.get(i + 1..i + 3)?).ok()?;
+            out.push(u8::from_str_radix(hex, 16).ok()?);
+            i += 3;
+        } else {
+            out.push(b[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).ok()
 }
 
 /// `Some(reason)` when the request must be refused.
@@ -118,14 +149,18 @@ mod tests {
     fn a_search_is_a_read_only_where_it_is_the_endpoint() {
         for p in ["/logs-*/_search", "/_search?size=0", "/a,b/_count", "/_msearch", "/_search/template", "/idx/_validate/query",
                   "/idx/_explain/doc-1", "/_sql?format=txt", "/_sql/translate", "/idx/_field_caps", "/_mget", "/idx/_eql/search",
-                  "/_index_template/_simulate_index/logs-x", "/_render/template", "/idx/_async_search", "/_analyze", "/_all/_search", "/_all/_count"] {
+                  "/_index_template/_simulate_index/logs-x", "/_render/template", "/idx/_async_search", "/_analyze", "/_all/_search", "/_all/_count",
+                  // The pages' own multi-index search, commas encoded.
+                  "/logstash-linux-2026.10.16%2Clogstash-windows-2026.10.16/_search", "/logs%2A/_count"] {
             assert!(super::is_read("POST", p), "{p} reads");
         }
         for p in ["/_search/../_bulk", "/_search/%2e%2e/_delete_by_query", "/_search/..\\_bulk", "/idx/_delete_by_query#/_search",
                   "/idx/_doc/_search", "/idx/_update/_search", "/idx/_create/_search", "/_bulk", "/idx/_doc", "/_reindex?x=/_search",
                   "/idx/_search/extra", "/_snapshot/r/s/_restore", "/idx/_explain/_bulk", "/idx/./_search", "/idx%2F_doc/_search",
                   "/idx/_close", "/_index_template/x", "/_all/_doc/_search", "/_all/_bulk",
-                  "/_search/.\t./_bulk", "/_search/.\n./_bulk", "/_search/..\r/_bulk", "/_search/ ../_bulk", "/idx/_bulk\t/_search"] {
+                  "/_search/.\t./_bulk", "/_search/.\n./_bulk", "/_search/..\r/_bulk", "/_search/ ../_bulk", "/idx/_bulk\t/_search",
+                  "/_search/%2E%2E/_bulk", "/idx%2F_doc/_search", "/idx%5C..%5C_bulk/_search", "/idx%23/_search", "/idx%3F/_search",
+                  "/idx%0A/_search", "/idx%25/_search", "/idx%zz/_search", "/idx%2/_search", "/%5Fbulk/_search", "/idx/%5Fdoc/_search"] {
             assert!(!super::is_read("POST", p), "{p} must count as a write");
         }
         assert!(super::is_read(" get ", "/anything/../at/all"), "a GET is a read, wherever it points");
