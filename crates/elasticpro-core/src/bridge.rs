@@ -1898,7 +1898,8 @@ impl Core {
             tracing::warn!(target: "audit", source = %s, "zabbix sign-in refused: source not in allowedSources");
             return (403, json!({ "ok": false, "kind": "forbidden", "message": "this source may not sign in through Zabbix" }));
         }
-        if !self.zbx_link.rate_ok("sso", source, crate::zbx_link::SSO_PER_MIN) {
+        // The Zabbix frontend named in allowedSources is the administrator's own: not counted.
+        if !self.zbx_link.trusted_source(source) && !self.zbx_link.rate_ok("sso", source, crate::zbx_link::SSO_PER_MIN) {
             tracing::warn!(target: "audit", source = ?source, "zabbix sign-in refused: rate limited");
             return (429, json!({ "ok": false, "kind": "rate_limited", "message": "too many sign-in requests — wait a minute" }));
         }

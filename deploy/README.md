@@ -159,6 +159,35 @@ git pull && docker compose up -d --build
 
 Trust decisions (`pins.json`) live in the `core-data` volume and survive rebuilds.
 
+## Rate limits and the whitelist
+
+The limits are flood guards only, set far above what people use:
+
+| Route | Limit (per client address) |
+|---|---|
+| `/bridge` (every page) | 500 requests/s, burst 2000 |
+| `/events` (live updates) | 200 open streams |
+| `/sso/zabbix` (sign-in from Zabbix) | 600/min in nginx, 600/min in the core |
+| `/zabbix/pair` (pairing, once) | 10/min |
+
+To take an address out of every nginx limit, for example the Zabbix server, or your office
+or VPN range that people open the UI from, add a file such as
+`deploy/nginx/rate-exempt/trusted.conf`, one `<address or CIDR> 1;` per line:
+
+```
+192.0.2.10/32  1;   # the Zabbix frontend
+10.20.0.0/16   1;   # office / VPN range people open the UI from
+```
+
+Then `docker compose up -d --force-recreate nginx` (or `deploy/deploy.sh`, which notices).
+
+The core's own sign-in budget skips every address named in the Zabbix link's
+**allowedSources** (Administration → ElasticPro in Zabbix, or Config → Zabbix here). Listing
+the Zabbix frontend there both restricts who may sign people in and removes its budget.
+
+Set `ELASTICPRO_TRUSTED_PROXIES` to the nginx address so the core believes nginx's
+`X-Real-IP`, and nobody else's: that is the address both checks above see.
+
 ## Scaling to a large fleet (100-300 clusters)
 
 The core polls every cluster in the background rather than only when a page is open —

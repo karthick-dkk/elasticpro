@@ -6,7 +6,7 @@
 mod support;
 
 use elasticpro_core::auth::Edition;
-use elasticpro_core::zbx_link::{decode_pairing_code, ServerZbx, PAIR_PER_MIN, PAIR_TTL_SECS};
+use elasticpro_core::zbx_link::{decode_pairing_code, ServerZbx, PAIR_PER_MIN, PAIR_TTL_SECS, SSO_PER_MIN};
 use elasticpro_core::zbx_sso::ZabbixSso;
 use elasticpro_core::Core;
 use serde_json::{json, Value};
@@ -482,6 +482,31 @@ async fn allowed_sources_are_enforced_on_both_routes() {
     let sb = sso_body("zed", 3);
     assert_eq!(c.zabbix_sso_init_from(&sb, &sign(&secret, &sb), Some("10.9.9.9".parse().unwrap())).0, 403);
     assert_eq!(c.zabbix_sso_init_from(&sb, &sign(&secret, &sb), Some("203.0.113.10".parse().unwrap())).0, 200);
+
+    // The Zabbix frontend named in allowedSources is every person's sign-in: never counted.
+    let zbx = Some("203.0.113.10".parse().unwrap());
+    for i in 0..SSO_PER_MIN + 5 {
+        let b = sso_body(&format!("user{i}"), 1);
+        assert_eq!(c.zabbix_sso_init_from(&b, &sign(&secret, &b), zbx).0, 200, "sign-in {i} from the listed Zabbix");
+    }
+}
+
+#[tokio::test]
+async fn sign_in_from_an_unlisted_source_still_has_a_budget() {
+    let dir = TempDir::new("zlink-sso-budget");
+    let c = core(&dir, ServerZbx::default());
+    let s = admin(&c).await;
+    let code = begin(&c, &s, "https://zbx.example.com").await;
+    let secret = code["secret"].as_str().unwrap().to_string();
+    let body = pair_body(&code, "https://zbx.example.com", "https://zbx.example.com/api_jsonrpc.php", now());
+    assert_eq!(c.zabbix_pair(&body, &sign(&secret, &body), None).0, 200);
+    let src = Some("10.7.7.7".parse().unwrap());
+    let mut last = 0;
+    for i in 0..=SSO_PER_MIN {
+        let b = sso_body(&format!("u{i}"), 1);
+        last = c.zabbix_sso_init_from(&b, &sign(&secret, &b), src).0;
+    }
+    assert_eq!(last, 429, "with no allowedSources, a flood from one address is still stopped");
 }
 
 #[test]

@@ -51,7 +51,10 @@ pub const SECRET_BYTES: usize = 32;
 /// limit in front, but the module may also reach the core directly on the `ep_sso`
 /// network, where nginx is not in the path.
 pub const PAIR_PER_MIN: usize = 10;
-pub const SSO_PER_MIN: usize = 120;
+/// Every person opening ElasticPro from Zabbix signs in from the one Zabbix frontend address,
+/// so this budget is shared by all of them; it is a flood guard, set well above a busy team.
+/// An address listed in `allowedSources` is trusted and not counted at all (`trusted_source`).
+pub const SSO_PER_MIN: usize = 600;
 /// Audit events kept in the file for the status panel. The full record is the audit log.
 const EVENTS_KEPT: usize = 30;
 
@@ -546,6 +549,13 @@ impl ZbxLink {
             },
             None => hdr.or(peer.map(canon)),
         }
+    }
+
+    /// Named in `allowedSources` — trusted by the administrator, not merely "not refused":
+    /// such a source is not rate-counted. An empty list trusts nobody this way.
+    pub fn trusted_source(&self, source: Option<IpAddr>) -> bool {
+        let list = self.resolved().allowed_sources;
+        !list.is_empty() && source.is_some_and(|ip| source_allowed(&list, ip))
     }
 
     /// `allowedSources`, applied. Empty list = anyone (the signature still decides).
