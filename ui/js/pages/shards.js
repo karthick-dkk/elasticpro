@@ -467,7 +467,8 @@ function accountingBody(c, d) {
     figure('Disk used', d.disk ? bytes(d.disk.used || 0) : '–',
       d.disk && isFinite(d.disk.percent) ? `${d.disk.percent.toFixed(1)}% of ${bytes(d.disk.total)}` : ''),
     figure('Unaccounted', acct.known ? bytes(Math.max(0, acct.gap)) : 'unknown',
-      acct.known ? (acct.material ? 'worth a look' : 'within rounding') : 'needs the index list'),
+      acct.known ? (acct.material ? 'worth a look' : 'within rounding') : 'needs the index list',
+      { alert: acct.known && acct.material }),
   ];
 
   // Everything below is a paragraph or a table, and runs full width under both columns.

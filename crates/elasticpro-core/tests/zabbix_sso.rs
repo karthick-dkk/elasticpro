@@ -16,7 +16,10 @@ use support::{TempDir, TestServer};
 
 const SECRET: &str = "integration-secret-0123456789abcdef-xyz";
 
+/// These tests are about scoping, which is off by default: turn it on in the core's own
+/// config file (the data directory's, with no ELASTICPRO_CONFIG).
 fn hosted(dir: &TempDir) -> Arc<Core> {
+    std::fs::write(dir.join("config_cluster.json"), r#"{"zabbix":{"scopeUsersByGroup":true}}"#).unwrap();
     let c = Core::new_with_rounds(Some(dir.0.clone()), Edition::Hosted, 1);
     c.zabbix_sso().set_secret(SECRET).unwrap();
     c
@@ -143,7 +146,7 @@ async fn group_changes_in_zabbix_apply_at_the_next_sign_in() {
 }
 
 #[tokio::test]
-async fn a_zabbix_admin_sees_every_cluster_and_may_write_but_not_administer() {
+async fn a_zabbix_admin_sees_every_cluster_reads_only_and_does_not_administer() {
     let dir = TempDir::new("zbx-operator");
     let c = hosted(&dir);
     let (a, b) = primed(&c).await;
@@ -151,13 +154,20 @@ async fn a_zabbix_admin_sees_every_cluster_and_may_write_but_not_administer() {
     assert_eq!(get(&c, &s, "alpha", &a.url()).await["ok"], json!(true));
     assert_eq!(get(&c, &s, "beta", &b.url()).await["ok"], json!(true));
 
-    // Managing: the write guard is theirs to unlock, and a write then goes through.
+    // Reads only: a Zabbix Admin is an ElasticPro operator, and an operator changes no
+    // cluster. The guard is not theirs to unlock and a write never leaves the core.
     let un = c.handle(json!({ "type": "WRITE_UNLOCK", "session": s, "on": true })).await;
-    assert_eq!(un["ok"], json!(true), "{un}");
-    let del = c.handle(json!({ "type": "ES", "session": s, "clusterId": "alpha", "url": a.url(),
-                                "method": "DELETE", "path": "/old-index", "allowWrites": true })).await;
-    assert_eq!(del["ok"], json!(true), "an operator's write: {del}");
-    assert_eq!(a.last_hit().unwrap().method, "DELETE");
+    assert_eq!(un["kind"], json!("forbidden"), "{un}");
+    for (m, p) in [("DELETE", "/old-index"), ("PUT", "/new-index"), ("POST", "/idx/_doc")] {
+        let w = c.handle(json!({ "type": "ES", "session": s, "clusterId": "alpha", "url": a.url(),
+                                  "method": m, "path": p, "allowWrites": true })).await;
+        assert_eq!(w["kind"], json!("forbidden"), "{m} {p} by an operator: {w}");
+    }
+    assert!(a.last_hit().is_none_or(|h| h.method == "GET"), "no write reached the cluster");
+    // A search sent as POST is a read, and goes through.
+    let q = c.handle(json!({ "type": "ES", "session": s, "clusterId": "alpha", "url": a.url(),
+                              "method": "POST", "path": "/logs-*/_search", "body": "{}" })).await;
+    assert_ne!(q["kind"], json!("forbidden"), "{q}");
 
     // Not administering.
     for t in ["CONFIG_READ", "USER_LIST", "TOKEN_CREATE", "KEY_LIST", "DELAY_SINK_SET", "TRUST_CERT"] {

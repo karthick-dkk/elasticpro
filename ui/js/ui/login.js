@@ -23,6 +23,7 @@
 
 import { h, mount } from '../lib/dom.js';
 import { bridge, setSession, setSignedIn } from '../core/transport.js';
+import { errorText } from '../core/error-codes.js';
 
 const MIN_PASSWORD = 10;   // must match auth::MIN_PASSWORD
 
@@ -81,7 +82,7 @@ export function loginScreen(root, { bootstrap = false, mode: startMode = null, h
           try { document.body.classList.remove('auth-bg'); } catch { /* not a browser */ }
           return resolve({ ...hint, mustChange: false });
         }
-        error = (res && res.message) || 'Could not set the password.';
+        error = errorText(res, 'Could not set the password.');
         return draw();
       }
       if (!name.trim()) { error = 'Enter a user name.'; return draw(); }
@@ -117,7 +118,7 @@ export function loginScreen(root, { bootstrap = false, mode: startMode = null, h
         try { document.body.classList.remove('auth-bg'); } catch { /* not a browser */ }
         return resolve(who);
       }
-      error = (res && res.message) || 'Sign-in failed.';
+      error = errorText(res, 'Sign-in failed.');
       draw();
       const pw = document.getElementById('login-pw');
       if (pw) { pw.value = ''; pw.focus(); }

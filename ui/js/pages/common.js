@@ -147,8 +147,9 @@ export function unreadable(what, reasonText, actions = null) {
  * would drift in size, weight and casing — which is exactly how a row of figures stops
  * reading as one row.
  */
-export function figure(label, value, sub) {
-  return h('div', { style: { minWidth: '140px' } },
+export function figure(label, value, sub, { alert = false } = {}) {
+  // `alert`: a figure that needs attention is red and boxed, so it is seen before it is read.
+  return h(`div${alert ? '.figure-alert' : ''}`, { style: { minWidth: '140px' } },
     h('div.muted', { style: { fontSize: '10.5px', textTransform: 'uppercase', letterSpacing: '.03em' } }, label),
     h('div', { style: { fontSize: '17px', fontWeight: 660 } }, value),
     sub ? h('div.muted', { style: { fontSize: '11px' } }, sub) : null);

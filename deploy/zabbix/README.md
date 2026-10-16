@@ -227,18 +227,26 @@ in as the Zabbix user — no second password.
 
 | Zabbix user type | ElasticPro role | Clusters | Can write |
 |------------------|---------------------|----------|-----------|
-| User             | `user`              | only those mapped to their Zabbix user groups | no |
-| Admin            | `operator`          | all | yes, behind the write unlock |
-| Super admin      | `admin`             | all | yes, and administers the app |
+| User             | `user`              | all, read-only (only those mapped to their groups with `scopeUsersByGroup`) | no |
+| Admin            | `operator`          | all, read-only | no — GET and searches only |
+| Super admin      | `admin`             | all | yes (PUT/POST/DELETE), and administers the app |
 | Guest            | —                   | not signed in | — |
 
 Accounts are created on first sign-in as `<zabbix name>@zabbix`, so a Zabbix user called
 `admin` can never become the local `admin`. Their role and groups are rewritten from
 Zabbix at every sign-in: move someone between Zabbix groups and it applies the next time
-they open the page. They have no password in ElasticPro; an admin can still disable
-one there, and a disabled account stays out whatever Zabbix says.
+they open the page. They have no password in ElasticPro; an admin can still lock or block
+one on the Accounts page, and it stays out whatever Zabbix says.
 
-**Which clusters a Zabbix User sees** is set on the cluster, in the ElasticPro config:
+**Which clusters a Zabbix User sees:** all of them, read-only, unless the config turns on
+group scoping:
+
+```yaml
+zabbix:
+  scopeUsersByGroup: true
+```
+
+With it on, which clusters a User sees is set on the cluster, in the ElasticPro config:
 
 ```yaml
 clusters:
@@ -247,7 +255,7 @@ clusters:
     zabbixGroups: [ES prod team, NOC]
 ```
 
-A User in no listed group sees no clusters, and is told so. The core enforces this on
+A User in no listed group then sees no clusters, and is told so. The core enforces this on
 every request — cluster list, Elasticsearch calls, request counts, jump
 hosts and trust decisions — not just in what the pages draw.
 

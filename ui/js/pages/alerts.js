@@ -388,7 +388,7 @@ async function askSilence(scope, target, name) {
 async function doUnsilence(s) {
   const res = await unsilence(s.id);
   if (res && res.ok) { toast('Silence removed', 'ok', 2500); draw(); }
-  else toast(`Could not remove the silence: ${(res && res.message) || 'unknown error'}`, 'err', 6000);
+  else toast(`Could not remove the silence: ${errorText(res, 'no answer from the server')}`, 'err', 6000);
 }
 
 function silencesCard() {
@@ -533,7 +533,9 @@ function alertRow(a, rec, notes) {
       h('td', h('div', a.title),
         acked ? h('div.muted', { style: { fontSize: '10.5px' } },
           `ack ${rec.ackedBy || 'operator'} · ${ago(rec.ackedAt)}`) : null),
-      h('td.muted', { style: { fontSize: '12px', maxWidth: '360px', wordBreak: 'break-word' } }, a.detail || ''),
+      // Two lines, then a click shows the rest: one long detail used to make a row a screen tall.
+      h('td.muted', { style: { fontSize: '12px', maxWidth: '360px' } },
+        a.detail ? h('div.alert-detail', { title: 'Click to show all of it', onclick: (e) => e.currentTarget.classList.toggle('open') }, a.detail) : ''),
       h('td', snapshotCell(a)),
       h('td', silenceFor(a) ? pill(silenceLabel(silenceFor(a)), 'grey')
         : acked ? pill('acknowledged', 'grey') : pill('open', a.level === 'critical' ? 'red' : 'yellow')),

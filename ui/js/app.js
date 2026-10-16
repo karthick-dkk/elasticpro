@@ -61,6 +61,7 @@ import * as pAccounts from './pages/accounts.js';
 import * as pRequests from './pages/requests.js';
 import { loadSilences } from './core/silences.js';
 import { setRequestOrigin } from './core/es.js';
+import { UI_CODES, withCode, errorText } from './core/error-codes.js';
 
 /**
  * `minRole` is the lowest role the tab is offered to.
@@ -86,7 +87,8 @@ const PAGES = [
   { id: 'console',   label: 'REST console',   icon: '⌫', mod: pConsole,   multi: false, minRole: 'user', live: true },
   { id: 'snapshots', label: 'Snapshots & SLM',icon: '↻', mod: pSnapshots, multi: true,  minRole: 'user' },
   { id: 'volume',    label: 'Volume report',  icon: '▤', mod: pVolume,    multi: true,  minRole: 'user' },
-  { id: 'automation', label: 'Automation',    icon: '⟳', mod: pAutomation, multi: true, minRole: 'user' },
+  // Not for read-only users: automation is run by operators and admins.
+  { id: 'automation', label: 'Automation',    icon: '⟳', mod: pAutomation, multi: true, minRole: 'operator' },
   { id: 'requests',  label: 'Requests',       icon: '⚡', mod: pRequests,  multi: true,  minRole: 'admin', live: true },
   { id: 'accounts',  label: 'Accounts',       icon: '☺', mod: pAccounts,  multi: true,  minRole: 'admin', accountsOnly: true },
   { id: 'settings',  label: 'Config',         icon: '⚙', mod: pSettings,  multi: true,  minRole: 'admin' },
@@ -219,10 +221,12 @@ function renderSetup(res) {
 function renderNoClusters(res) {
   const scoped = me && me.scoped;
   const why = res.status === 'no_file'
-    ? 'No clusters are configured on this server yet. An ElasticPro administrator adds them on the Config page.'
+    ? withCode('No clusters are configured on this server yet. An ElasticPro administrator adds them on the Config page.', UI_CODES.no_clusters)
     : scoped && res.empty
-      ? 'Your account can see only the clusters mapped to your Zabbix user groups, and none of your groups is mapped to a cluster. Ask a Zabbix administrator to add you to the right user group, or an ElasticPro administrator to add your group to a cluster’s zabbixGroups.'
-      : `The cluster list could not be loaded: ${res.error || 'unknown error'}`;
+      ? withCode('Your account can see only the clusters mapped to your Zabbix user groups, and none of your groups is mapped to a cluster. Ask a Zabbix administrator to add you to the right user group, or an ElasticPro administrator to add your group to a cluster’s zabbixGroups (or turn off zabbix.scopeUsersByGroup).', UI_CODES.no_clusters)
+      : res.empty
+        ? withCode(`No cluster is visible to ${me ? me.name : 'this account'} yet. The server's cluster list is empty for this account and Zabbix gave none. An ElasticPro administrator adds clusters on the Config page, or links Zabbix there.`, UI_CODES.no_clusters)
+        : `The cluster list could not be loaded: ${errorText(res.error ? { message: res.error, errorCode: res.errorCode } : null, 'no answer from the server')}`;
   mount(root, h('div.setup',
     h('div', { style: { display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '14px' } },
       h('img', { src: 'icons/icon48.png', width: 34, height: 34, alt: '' }),
@@ -849,7 +853,7 @@ async function arriveFromZabbix() {
   const res = await exchangeCode(launch.code, bridge);
   try { history.replaceState(null, '', withoutCode(location.href)); } catch (_) { /* sandboxed frame */ }
   if (res.ok) { setSession(res.session); setSignedIn(true); }
-  else ssoNotice = `Signing in from Zabbix did not work: ${res.message}`;
+  else ssoNotice = `Signing in from Zabbix did not work: ${errorText(res, 'no answer', 'sso_failed')}`;
 }
 
 /** Anyone below admin: the server's own cluster list, with the credentials taken out. */

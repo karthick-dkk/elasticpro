@@ -1213,12 +1213,12 @@ async function syncZabbix() {
     const res = await bridge({ type: 'ZABBIX_SYNC' });
     if (!res.ok) toast(`Zabbix sync failed: ${res.message}`, 'err', 8000, { key: 'zabbix-sync' });
     else {
-      // A bare "0 cluster hosts" read like a broken pairing. Say which templates were read
-      // and what each held, and name the hosts left out, so the reason is on the screen.
+      // One line: how many, how many left out, and where the list is. Naming every host
+      // here ran to a screen of text nobody read; the Zabbix section below names them.
       const skipped = res.skipped || [];
-      toast(`Zabbix sync: ${res.clusters} cluster host(s)${skipped.length ? `, ${skipped.length} not counted` : ''}`,
-        res.clusters || !skipped.length ? 'ok' : 'warn', skipped.length || !res.clusters ? 10000 : 5000,
-        { key: 'zabbix-sync', detail: [templatesRead(res.templates), ...skipped.slice(0, 5)] });
+      toast(`Zabbix sync: ${res.clusters} cluster${res.clusters === 1 ? '' : 's'}${skipped.length ? ` \u00b7 ${skipped.length} left out` : ''}`,
+        res.clusters || !skipped.length ? 'ok' : 'warn', skipped.length || !res.clusters ? 8000 : 4000,
+        { key: 'zabbix-sync', detail: skipped.length || !res.clusters ? ['Config \u2192 Zabbix lists which hosts and why.'] : [] });
     }
     // The new list reaches every page the same way the first one did.
     await setConfig(state.config, state.handle);
@@ -1285,7 +1285,7 @@ function zabbixCard() {
         { emptyText: 'No Zabbix host carries the cluster template yet.' }),
       (zbx.templates || []).length ? h('div.muted', { style: { fontSize: '12px' } }, templatesRead(zbx.templates)) : null,
       (zbx.skipped || []).length ? h('div', h('b', 'Hosts not counted as clusters, and why'),
-        h('ul', { style: { margin: '4px 0 0', paddingLeft: '18px', fontSize: '12px' } }, ...zbx.skipped.map((s) => h('li', s)))) : null,
+        h('ul', { style: { margin: '4px 0 0', paddingLeft: '18px', fontSize: '12px', maxHeight: '200px', overflowY: 'auto' } }, ...zbx.skipped.map((s) => h('li', s)))) : null,
       pending.length ? h('div.banner.warn', h('div', h('div.ttl', 'Waiting for a working password'),
         h('div', `${pending.map((p) => p.name).join(', ')} ${pending.length === 1 ? 'is' : 'are'} not used yet: the password could not be read. `
           + 'Any config-file cluster at the same address stays in use until it can.'))) : null,

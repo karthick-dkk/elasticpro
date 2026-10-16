@@ -130,8 +130,11 @@ impl Role {
     /// Operators and admins may write to a cluster. Stated once, here, so no call site
     /// invents it. Writing still needs the guard unlocked and a person acting — this is
     /// only whether the role may ask.
+    /// Only an admin writes to a cluster. An operator (a Zabbix Admin) administers alerts
+    /// and silences but sends nothing but reads to Elasticsearch: GET, HEAD and the
+    /// search-family POSTs (`guard::is_read`).
     pub fn may_write(self) -> bool {
-        matches!(self, Role::Operator | Role::Admin)
+        matches!(self, Role::Admin)
     }
 }
 
@@ -257,12 +260,17 @@ pub fn required_role(msg_type: &str) -> Option<Role> {
         "PRIME" | "FORGET" => Some(Role::Admin),
         // Operators write to clusters, so they unlock the guard to do it. The guard is
         // still one switch for the whole process, and still resets on restart.
-        "WRITE_UNLOCK" => Some(Role::Operator),
+        // Writing to a cluster is an admin's alone, so is unlocking the guard to do it.
+        "WRITE_UNLOCK" => Some(Role::Admin),
         "SEAL" | "OPEN" => Some(Role::Admin),
         "VAULT_GET" | "VAULT_SET" | "VAULT_DEL" => Some(Role::Admin),
         "TRUST_CERT" | "UNTRUST_CERT" | "TRUST_HOSTKEY" | "UNTRUST_HOSTKEY" => Some(Role::Admin),
         "TUNNEL_SECRET" | "TUNNEL_RECONNECT" => Some(Role::Admin),
         "USER_LIST" | "USER_ADD" | "USER_REMOVE" | "USER_SET_ROLE" | "USER_SET_PASSWORD" => Some(Role::Admin),
+        // Locking, blocking and the sign-in log: who may get in is an administrator's call.
+        "USER_SET_LOCKED" | "USER_SET_BLOCKED" | "USER_LOGINS" => Some(Role::Admin),
+        // Everyone's activity, with source addresses: an administrator's to read.
+        "ACTIVITY_LIST" => Some(Role::Admin),
         // Uploading a private key, and every version of a config that has held
         // credentials. Nothing below admin goes near either.
         "KEY_UPLOAD" | "KEY_LIST" | "KEY_DELETE" => Some(Role::Admin),
@@ -309,10 +317,12 @@ pub fn authorize(role: Role, msg_type: &str, method: &str, path: &str) -> Result
     }
 
     let m = method.trim().to_ascii_uppercase();
-    let is_read = m.is_empty() || m == "GET" || m == "HEAD";
+    // A search sent as POST is still a read: the same list the write guard uses.
+    let is_read = m.is_empty() || crate::guard::is_read(&m, path);
     if !is_read && !role.may_write() {
         return Err(format!(
-            "{m} requests are not available to the {} role — only an operator or admin can write to a cluster",
+            "{m} {} is not available to the {} role — only an ElasticPro admin can change a cluster; reads (GET and searches) are allowed",
+            path.split('?').next().unwrap_or(path),
             role.as_str()
         ));
     }
@@ -381,6 +391,25 @@ pub struct Account {
     /// Zabbix user groups this account is limited to; `None` sees every cluster.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scope: Option<Vec<String>>,
+    /// Locked by an admin: no new sign-in until an admin unlocks it. Sessions already open
+    /// carry on — blocking (`disabled`) is what stops those.
+    #[serde(default)]
+    pub locked: bool,
+    /// Locked by itself after `LOCK_AFTER` wrong passwords in a row, until this time.
+    ///
+    /// This and the two below are kept in memory only, never written to the accounts file:
+    /// a wrong password must cost the same as a name that does not exist, and a disk write
+    /// on one and not the other would tell an attacker which names are real. A restart
+    /// clears a self-lock, which an admin can do anyway.
+    #[serde(skip)]
+    pub locked_until: Option<u64>,
+    /// Wrong passwords since the last good one.
+    #[serde(skip)]
+    pub failed_logins: u32,
+    #[serde(skip)]
+    pub last_failed: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_login: Option<u64>,
 }
 
 impl Account {
@@ -395,8 +424,43 @@ impl Account {
             "mustChange": self.must_change,
             "source": self.source,
             "scope": self.scope,
+            "locked": self.locked,
+            "lockedUntil": self.locked_until.filter(|t| *t > now()),
+            "failedLogins": self.failed_logins,
+            "lastLogin": self.last_login,
+            "lastFailed": self.last_failed,
         })
     }
+
+    /// Locked now, by an admin or by itself.
+    pub fn is_locked(&self, at: u64) -> bool {
+        self.locked || self.locked_until.is_some_and(|t| t > at)
+    }
+}
+
+/// Wrong passwords in a row that lock an account by itself, and for how long.
+pub const LOCK_AFTER: u32 = 5;
+pub const LOCK_SECS: u64 = 15 * 60;
+/// The last admin is never locked out by wrong passwords — that would let anyone who knows
+/// the name shut a whole installation out of its administration. Past `LOCK_AFTER` it is
+/// slowed instead: one password checked per this many seconds, so guessing stays hopeless
+/// (two tries a minute against a password of at least ten characters).
+pub const ADMIN_THROTTLE_SECS: u64 = 30;
+/// Sign-in attempts kept for the Accounts page, newest last.
+pub const LOGIN_LOG_LEN: usize = 300;
+
+/// One sign-in attempt, as the Accounts page lists it. Never the password.
+#[derive(Clone, Debug, Serialize)]
+pub struct LoginEvent {
+    pub at: u64,
+    /// The name as typed (trimmed, at most 64 characters): a mistyped name is worth seeing.
+    pub name: String,
+    pub ok: bool,
+    /// The kind of failure, which errors.rs turns into a code; empty on success.
+    pub kind: String,
+    pub code: String,
+    /// "password" or "zabbix".
+    pub via: String,
 }
 
 fn derive(password: &str, salt_hex: &str, rounds: u32) -> String {
@@ -417,6 +481,29 @@ pub enum AuthError {
     LastAdmin,
     Weak(String),
     Io(String),
+    /// A locked account, whatever password was typed.
+    Locked,
+    /// A blocked account, whatever password was typed.
+    Blocked,
+    /// The last admin after too many wrong passwords: wait this many seconds between tries.
+    Throttled(u64),
+}
+
+impl AuthError {
+    /// The bridge's `kind` for this refusal (errors.rs gives it its code).
+    pub fn kind(&self) -> &'static str {
+        match self {
+            AuthError::BadCredentials => "bad_credentials",
+            AuthError::Exists(_) => "name_taken",
+            AuthError::NotFound(_) => "not_found",
+            AuthError::LastAdmin => "forbidden",
+            AuthError::Weak(_) => "bad_request",
+            AuthError::Io(_) => "io_error",
+            AuthError::Locked => "locked",
+            AuthError::Blocked => "disabled",
+            AuthError::Throttled(_) => "rate_limited",
+        }
+    }
 }
 
 impl std::fmt::Display for AuthError {
@@ -428,6 +515,9 @@ impl std::fmt::Display for AuthError {
             AuthError::LastAdmin => write!(f, "this is the only admin account — promote another before removing or demoting it"),
             AuthError::Weak(why) => write!(f, "{why}"),
             AuthError::Io(e) => write!(f, "{e}"),
+            AuthError::Locked => write!(f, "this account is locked — an ElasticPro administrator can unlock it on the Accounts page"),
+            AuthError::Blocked => write!(f, "this account is blocked — ask an ElasticPro administrator"),
+            AuthError::Throttled(secs) => write!(f, "too many wrong passwords — wait {secs} seconds before the next try"),
         }
     }
 }
@@ -528,6 +618,7 @@ pub struct UserStore {
     path: Option<PathBuf>,
     rounds: u32,
     accounts: RwLock<Vec<Account>>,
+    logins: parking_lot::Mutex<std::collections::VecDeque<LoginEvent>>,
 }
 
 impl UserStore {
@@ -544,7 +635,7 @@ impl UserStore {
             .and_then(|p| std::fs::read_to_string(p).ok())
             .and_then(|s| serde_json::from_str::<Vec<Account>>(&s).ok())
             .unwrap_or_default();
-        UserStore { path, rounds, accounts: RwLock::new(accounts) }
+        UserStore { path, rounds, accounts: RwLock::new(accounts), logins: Default::default() }
     }
 
     /// True when nobody has been created yet, which is what puts the installed build
@@ -627,6 +718,11 @@ impl UserStore {
                 must_change,
                 source: None,
                 scope: None,
+                locked: false,
+                locked_until: None,
+                failed_logins: 0,
+                last_login: None,
+                last_failed: None,
             });
         }
         self.save()
@@ -663,11 +759,12 @@ impl UserStore {
                         return Err(AuthError::Exists(name.to_string()));
                     }
                     if a.disabled {
-                        return Err(AuthError::BadCredentials);
+                        return Err(AuthError::Blocked);
                     }
-                    if a.role == role && a.scope == scope {
-                        return Ok(a.clone());
+                    if a.is_locked(now()) {
+                        return Err(AuthError::Locked);
                     }
+                    a.last_login = Some(now());
                     a.role = role;
                     a.scope = scope;
                     a.clone()
@@ -687,6 +784,11 @@ impl UserStore {
                         must_change: false,
                         source: Some(source.to_string()),
                         scope,
+                        locked: false,
+                        locked_until: None,
+                        failed_logins: 0,
+                        last_login: Some(now()),
+                        last_failed: None,
                     };
                     list.push(a.clone());
                     a
@@ -742,6 +844,52 @@ impl UserStore {
         self.save()
     }
 
+    /// Lock (no new sign-in) or unlock. Unlocking also clears a lock the account put on
+    /// itself and its count of wrong passwords.
+    pub fn set_locked(&self, name: &str, locked: bool) -> Result<(), AuthError> {
+        {
+            let mut list = self.accounts.write();
+            let admins = list.iter().filter(|a| a.role == Role::Admin && !a.disabled && !a.locked).count();
+            let Some(a) = list.iter_mut().find(|a| a.name.eq_ignore_ascii_case(name)) else {
+                return Err(AuthError::NotFound(name.to_string()));
+            };
+            if a.role == Role::Admin && locked && !a.locked && admins <= 1 {
+                return Err(AuthError::LastAdmin);
+            }
+            a.locked = locked;
+            if !locked {
+                a.locked_until = None;
+                a.failed_logins = 0;
+            }
+        }
+        self.save()
+    }
+
+    /// Blocked accounts are refused everything, signed in or not.
+    pub fn is_blocked(&self, name: &str) -> bool {
+        self.accounts.read().iter().any(|a| a.name.eq_ignore_ascii_case(name) && a.disabled)
+    }
+
+    /// Note a sign-in attempt for the Accounts page.
+    pub fn record_login(&self, name: &str, via: &str, result: Result<(), &AuthError>) {
+        let (ok, kind) = match result {
+            Ok(()) => (true, String::new()),
+            Err(e) => (false, e.kind().to_string()),
+        };
+        let code = if ok { String::new() } else { crate::errors::code_for(&kind).to_string() };
+        let name: String = name.trim().chars().filter(|c| !c.is_control()).take(64).collect();
+        let mut log = self.logins.lock();
+        log.push_back(LoginEvent { at: now(), name, ok, kind, code, via: via.to_string() });
+        while log.len() > LOGIN_LOG_LEN {
+            log.pop_front();
+        }
+    }
+
+    /// The sign-in attempts kept, newest first.
+    pub fn logins(&self) -> Vec<LoginEvent> {
+        self.logins.lock().iter().rev().cloned().collect()
+    }
+
     pub fn set_password(&self, name: &str, password: &str) -> Result<(), AuthError> {
         check_password(password)?;
         {
@@ -764,27 +912,75 @@ impl UserStore {
     }
 
     /// The account this name and password belong to, if any.
+    ///
+    /// A wrong password counts against the account, and `LOCK_AFTER` of them in a row lock
+    /// it for `LOCK_SECS`. The last admin who can still get in is slowed instead of locked
+    /// (`ADMIN_THROTTLE_SECS`). While an account is locked or blocked, that is the answer
+    /// whatever password was typed: answering "locked" only to the right password would
+    /// tell an attacker which guess was right.
+    ///
+    /// The hash is worked out with no lock held: it is the slow part, on purpose, and every
+    /// request reads this list (`is_blocked`). Only the bookkeeping after it takes the
+    /// write lock, briefly, and it re-checks that the password it compared against is still
+    /// the account's. A failure touches memory only, the same as a name that does not
+    /// exist; only a good sign-in is written down.
     pub fn verify(&self, name: &str, password: &str) -> Result<Account, AuthError> {
-        let list = self.accounts.read();
-        let found = list.iter().find(|a| a.name.eq_ignore_ascii_case(name.trim()));
-        match found {
-            // The hash is still computed for a name that does not exist, so the time
-            // taken does not tell an attacker which names are real.
-            None => {
-                let _ = derive(password, &random_hex(16), self.rounds);
-                Err(AuthError::BadCredentials)
-            }
-            Some(a) => {
-                let got = derive(password, &a.salt, a.rounds);
-                // An account another system vouches for has no password here, so no
-                // password opens it — whatever was typed.
-                if a.disabled || a.source.is_some() || !ct_eq(got.as_bytes(), a.hash.as_bytes()) {
-                    Err(AuthError::BadCredentials)
-                } else {
-                    Ok(a.clone())
-                }
-            }
+        let found = self.accounts.read().iter()
+            .find(|a| a.name.eq_ignore_ascii_case(name.trim()))
+            .map(|a| (a.name.clone(), a.salt.clone(), a.rounds, a.hash.clone(), a.source.is_some()));
+        // The hash is still computed for a name that does not exist, so the time taken does
+        // not tell an attacker which names are real.
+        let Some((real, salt, rounds, hash, external)) = found else {
+            let _ = derive(password, &random_hex(16), self.rounds);
+            return Err(AuthError::BadCredentials);
+        };
+        let got = derive(password, &salt, rounds);
+        // An account another system vouches for has no password here, so no password opens
+        // it — whatever was typed.
+        if external {
+            return Err(AuthError::BadCredentials);
         }
+        let at = now();
+        let out = {
+            let mut list = self.accounts.write();
+            let usable_admins = list.iter().filter(|a| a.role == Role::Admin && !a.disabled && !a.is_locked(at)).count();
+            let Some(a) = list.iter_mut().find(|a| a.name == real) else {
+                return Err(AuthError::BadCredentials);   // removed while we were hashing
+            };
+            // Changed while we were hashing: what was compared is no longer the password.
+            if a.hash != hash || a.salt != salt {
+                return Err(AuthError::BadCredentials);
+            }
+            if a.disabled {
+                return Err(AuthError::Blocked);
+            }
+            if a.is_locked(at) {
+                return Err(AuthError::Locked);
+            }
+            let last_admin = a.role == Role::Admin && usable_admins <= 1;
+            // The last admin, past the threshold: one check per ADMIN_THROTTLE_SECS. Inside
+            // the window nothing is compared — right or wrong, the answer is the same.
+            if last_admin && a.failed_logins >= LOCK_AFTER
+                && a.last_failed.is_some_and(|t| at < t + ADMIN_THROTTLE_SECS) {
+                return Err(AuthError::Throttled(ADMIN_THROTTLE_SECS));
+            }
+            if !ct_eq(got.as_bytes(), hash.as_bytes()) {
+                a.failed_logins = a.failed_logins.saturating_add(1);
+                a.last_failed = Some(at);
+                if a.failed_logins >= LOCK_AFTER && !last_admin {
+                    a.locked_until = Some(at + LOCK_SECS);
+                }
+                return Err(AuthError::BadCredentials);
+            }
+            a.failed_logins = 0;
+            a.locked_until = None;
+            a.last_failed = None;
+            a.last_login = Some(at);
+            a.clone()
+        };
+        // A failed save is not a reason to refuse someone who typed the right password.
+        let _ = self.save();
+        Ok(out)
     }
 }
 
@@ -1122,7 +1318,81 @@ mod tests {
         s.add("root", "correct-horse", Role::Admin).unwrap();
         s.add("bob", "correct-horse", Role::User).unwrap();
         s.set_disabled("bob", true).unwrap();
-        assert_eq!(s.verify("bob", "correct-horse").unwrap_err(), AuthError::BadCredentials);
+        // Blocked whatever the password: a different answer for the right one would say
+        // which guess was right.
+        assert_eq!(s.verify("bob", "correct-horse").unwrap_err(), AuthError::Blocked);
+        assert_eq!(s.verify("bob", "wrong-horse!").unwrap_err(), AuthError::Blocked);
+        assert!(s.is_blocked("BOB"));
+    }
+
+    #[test]
+    fn wrong_passwords_lock_an_account_and_an_admin_unlocks_it() {
+        let s = store();
+        s.add("root", "correct-horse", Role::Admin).unwrap();
+        s.add("bob", "correct-horse", Role::User).unwrap();
+        for _ in 0..LOCK_AFTER {
+            assert_eq!(s.verify("bob", "wrong-horse!").unwrap_err(), AuthError::BadCredentials);
+        }
+        // Now every password is refused the same way, the right one included.
+        assert_eq!(s.verify("bob", "correct-horse").unwrap_err(), AuthError::Locked);
+        assert_eq!(s.verify("bob", "wrong-horse!").unwrap_err(), AuthError::Locked);
+        let bob = s.list().into_iter().find(|a| a.name == "bob").unwrap();
+        assert_eq!(bob.failed_logins, LOCK_AFTER);
+        assert!(bob.locked_until.is_some() && bob.public()["lockedUntil"].is_u64());
+        s.set_locked("bob", false).unwrap();
+        let ok = s.verify("bob", "correct-horse").unwrap();
+        assert_eq!(ok.failed_logins, 0);
+        assert!(ok.last_login.is_some());
+    }
+
+    #[test]
+    fn the_last_admin_is_slowed_not_locked_and_failures_are_not_written_down() {
+        let dir = scratch();
+        let path = dir.join("users.json");
+        let s = UserStore::open_with_rounds(Some(path.clone()), 1);
+        s.add("root", "correct-horse", Role::Admin).unwrap();
+        let before = std::fs::read_to_string(&path).unwrap();
+        for _ in 0..LOCK_AFTER {
+            assert_eq!(s.verify("root", "wrong-horse!").unwrap_err(), AuthError::BadCredentials);
+        }
+        assert_eq!(s.verify("root", "wrong-horse!").unwrap_err(), AuthError::Throttled(ADMIN_THROTTLE_SECS));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), before, "a failure touches memory only");
+        // Not locked, but slowed: inside the window even the right password waits its turn.
+        assert_eq!(s.verify("root", "correct-horse").unwrap_err(), AuthError::Throttled(ADMIN_THROTTLE_SECS));
+        assert!(!s.list()[0].is_locked(now()), "the only admin is never locked");
+        // After the window, the right password opens it.
+        s.accounts.write()[0].last_failed = Some(now() - ADMIN_THROTTLE_SECS);
+        assert!(s.verify("root", "correct-horse").is_ok());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn an_admin_lock_holds_until_unlocked_and_the_last_admin_cannot_be_locked() {
+        let s = store();
+        s.add("root", "correct-horse", Role::Admin).unwrap();
+        s.add("bob", "correct-horse", Role::User).unwrap();
+        s.set_locked("bob", true).unwrap();
+        assert_eq!(s.verify("bob", "correct-horse").unwrap_err(), AuthError::Locked);
+        assert_eq!(s.set_locked("root", true), Err(AuthError::LastAdmin));
+        s.set_locked("bob", false).unwrap();
+        assert!(s.verify("bob", "correct-horse").is_ok());
+    }
+
+    #[test]
+    fn sign_ins_are_logged_newest_first_with_their_code_and_never_a_password() {
+        let s = store();
+        s.record_login("bob", "password", Err(&AuthError::BadCredentials));
+        s.record_login("bob", "password", Ok(()));
+        let log = s.logins();
+        assert!(log[0].ok && log[0].code.is_empty());
+        assert_eq!((log[1].kind.as_str(), log[1].code.as_str()), ("bad_credentials", "EP-102"));
+        let long = "x".repeat(200);
+        s.record_login(&long, "zabbix", Ok(()));
+        assert_eq!(s.logins()[0].name.len(), 64);
+        for _ in 0..LOGIN_LOG_LEN + 5 {
+            s.record_login("y", "password", Ok(()));
+        }
+        assert_eq!(s.logins().len(), LOGIN_LOG_LEN);
     }
 
     #[test]
@@ -1244,6 +1514,24 @@ mod tests {
         assert!(authorize(Role::User, "ES", "PUT", "/idx").is_err());
         // A read is fine for a user.
         assert!(authorize(Role::User, "ES", "GET", "/_cat/indices").is_ok());
+    }
+
+    #[test]
+    fn an_operator_reads_every_cluster_and_changes_none() {
+        for (m, p) in [("PUT", "/idx"), ("POST", "/idx/_doc"), ("DELETE", "/idx"), ("POST", "/_snapshot/r/s/_restore"),
+                       ("PATCH", "/x"), ("POST", "/_bulk"), ("POST", "/idx/_delete_by_query")] {
+            assert!(authorize(Role::Operator, "ES", m, p).is_err(), "{m} {p} must be refused to an operator");
+        }
+        assert!(authorize(Role::Operator, "WRITE_UNLOCK", "", "").is_err());
+        for r in [Role::Operator, Role::User] {
+            assert!(authorize(r, "ES", "GET", "/_cat/indices").is_ok());
+            assert!(authorize(r, "ES", "HEAD", "/idx").is_ok());
+            // Searches sent as POST are reads.
+            assert!(authorize(r, "ES", "POST", "/logstash-*/_search").is_ok());
+            assert!(authorize(r, "ES", "POST", "/logstash-*/_count?q=x").is_ok());
+        }
+        assert!(authorize(Role::Admin, "ES", "PUT", "/idx").is_ok());
+        assert!(authorize(Role::Admin, "WRITE_UNLOCK", "", "").is_ok());
     }
 
     #[test]

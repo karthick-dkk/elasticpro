@@ -14,6 +14,7 @@ import { saveRaw } from '../ui/config-editor.js';
 import { confirmDialog } from '../ui/modal.js';
 import { toast } from '../ui/menu.js';
 import { navigateTo } from '../core/intent.js';
+import { roleMayWrite } from '../core/writes.js';
 
 let host = null;
 const ui = { showBlocked: true };
@@ -218,6 +219,9 @@ function proposalBlock(rule, cluster, p) {
  * way the Nodes page hands over its suggested requests.
  */
 function runButton(rule, cluster, p) {
+  // Every action here changes the cluster, which only an admin may: an operator sees the
+  // proposal and who acts on it.
+  if (!roleMayWrite()) return h('span.muted', { style: { fontSize: '11px' }, title: 'Only an ElasticPro admin changes a cluster' }, 'an admin acts on this');
   const names = p.targets.map((t) => t.name);
   if (rule.action === 'delete') {
     return h('button.btn.sm.danger', {

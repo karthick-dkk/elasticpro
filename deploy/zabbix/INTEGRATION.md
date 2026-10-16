@@ -523,15 +523,19 @@ Nothing extra to run — this step is bookkeeping in Zabbix you should not skip.
 
 | Zabbix user type | ElasticPro role | Clusters | Can write |
 |---|---|---|---|
-| User | `user` | only clusters whose host group a group they're in can read | no |
-| Admin | `operator` | all | yes, behind the write unlock |
-| Super admin | `admin` | all | yes, and administers the app |
+| User | `user` | all, read-only (scoped by group only with `zabbix.scopeUsersByGroup: true`) | no |
+| Admin | `operator` | all, read-only | no — GET and searches only |
+| Super admin | `admin` | all | yes (PUT/POST/DELETE), and administers the app |
 | Guest | — | not signed in | — |
 
 Accounts are created on first sign-in as `<zabbix name>@zabbix` — so a Zabbix user named
 `admin` can never become the local `admin`. Role and groups are
 rewritten from Zabbix at **every sign-in**: move someone between Zabbix groups and it applies
 next time they open the page, no restart needed.
+
+**Group scoping is off by default:** every Zabbix sign-in reads every cluster. Set
+`zabbix: { scopeUsersByGroup: true }` in `config_cluster.json` to limit Zabbix Users as below;
+it applies from each person's next sign-in.
 
 **Config-file clusters:** `zabbixGroups: [ES prod team, NOC]` on a cluster in
 `config_cluster.json` — a Zabbix User in none of the listed groups sees no clusters, and is told

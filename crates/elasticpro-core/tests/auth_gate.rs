@@ -450,14 +450,15 @@ async fn an_admin_cannot_lock_everyone_out() {
 }
 
 #[tokio::test]
-async fn changing_someones_role_ends_their_session_at_once() {
+async fn changing_someones_role_applies_to_their_session_at_once_without_signing_them_out() {
     let dir = TempDir::new("auth-demote");
     let c = core(&dir, Edition::Installed);
     let admin = admin_session(&c).await;
     add(&c, &admin, "reader", "user").await;
     let s = login(&c, "reader").await;
 
-    // Live before, gone after — a demotion that waits for a logout is not a demotion.
+    // A demotion that waits for a logout is not a demotion — but nobody is signed out for it:
+    // the session they have takes the new role at once.
     let before = c
         .handle(json!({ "type": "ES", "session": s, "clusterId": "x", "method": "GET", "path": "/_cat/indices" }))
         .await;
@@ -467,7 +468,9 @@ async fn changing_someones_role_ends_their_session_at_once() {
     let after = c
         .handle(json!({ "type": "ES", "session": s, "clusterId": "x", "method": "GET", "path": "/_cat/indices" }))
         .await;
-    assert_eq!(after["kind"], json!("unauthenticated"), "the old session must not survive: {after}");
+    assert_eq!(after["kind"], json!("forbidden"), "the session must have the guest role now: {after}");
+    let who = c.handle(json!({ "type": "WHOAMI", "session": s })).await;
+    assert_eq!(who["caller"]["role"], json!("guest"), "still signed in, as a guest: {who}");
 }
 
 #[tokio::test]

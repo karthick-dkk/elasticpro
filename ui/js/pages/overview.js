@@ -6,12 +6,11 @@ import { bytes, num, compact, pct, ago, dt, toCsv, download, healthClass } from 
 import { state, bus, clusters, activeClusters, client, fetchOverview, healthState, refreshAll, alerts, cachedAlerts, openAlertsNow, requestsFor, requestLoad, jvmSummary, clusterRev, fleetMode, coverage, askFleetDataset } from '../core/state.js';
 import { coverageBar } from '../lib/freshness.js';
 import { readAllState, startReadAll } from '../lib/read-all.js';
-import { fleetSummary, nameList, alertsEmptyState } from '../core/fleet-summary.js';
+import { nameList } from '../core/fleet-summary.js';
 import { hbarList, usageMeter } from '../lib/charts.js';
 import { card, collapsible, pill, statTile, table, connectionBanner, diskCell, lastSnapshotOf, snapshotPill, snapshotStatusByKey, empty } from './common.js';
 import { isSnapshotMode } from '../core/snapshot.js';
 import { navigateTo } from '../core/intent.js';
-import { inZabbix } from '../core/embed.js';
 import { measureRepoBytes } from '../core/volume.js';
 import { repoSizeCache } from '../lib/idb.js';
 
@@ -190,13 +189,10 @@ function draw() {
   for (const r of all) r.sig = rowSig(r);
   built.begin();
 
-  const shownSig = rows.map((r) => `${r.c.id}:${r.sig}`).join(',');
   mount(host,
-    summaryBox(all),
+    coverageLine(),
     built.get('toolbar', [!!ui.text, ui.sort, ui.dir, ui.only, all.length, rows.length].join('|'), () => toolbar(all, rows)),
     summaryCard(rows, all),
-    built.get('charts', `${shownSig}|${minute()}`,
-      () => h('div.grid.c2', { style: { marginTop: '14px' } }, diskCard(rows), repoCard(rows))),
     built.get('unreachable', unreachableRows(rows).map((r) => `${r.c.id}:${r.sig}`).join(','),
       () => unreachableCard(rows))
   );
@@ -228,49 +224,6 @@ function unreachableCard(rows) {
 /** Reachable was answered as "no": the one definition, shared with the unreachable card. */
 function unreachableRows(rows) {
   return rows.filter((r) => healthState(r.d) === 'unreachable');
-}
-
-/**
- * The fleet in one box: health counts with the unreachable clusters named, the alert count by
- * level, the problems that recur most, and how fresh all of it is (with Read all when
- * something was never read or is stale). It replaces three things that said overlapping
- * parts of this — the coverage bar, the red alert banner with its first three alerts, and
- * four tiles — and took a screen's height on a large fleet before the table began. The full
- * alert text lives on the Alerts page; this says what and how many.
- */
-function summaryBox(rows) {
-  const s = fleetSummary(rows, healthState, inZabbix() ? [] : openAlertsNow());
-  const dot = (cls, n, label) => h('span.fs-count', h(`span.dot.${cls}`), h('b', String(n)), ` ${label}`);
-  const healthRow = h('div.fs-row',
-    h('span.fs-total', h('b', String(s.total)), ` cluster${s.total === 1 ? '' : 's'}`),
-    dot('ok', s.green, 'green'), dot('warn', s.yellow, 'yellow'), dot('crit', s.red, 'red'),
-    s.loading ? dot('muted', s.loading, 'loading') : null,
-    s.unreachable.length
-      ? h('span.fs-count.fs-bad', h('span.dot.crit'), h('b', String(s.unreachable.length)), ` unreachable: ${nameList(s.unreachable)}`)
-      // "All reachable" only once every cluster has answered: a loading one is not known to be.
-      : h('span.fs-count.muted', s.loading ? 'none unreachable so far' : 'all reachable'),
-    s.red ? h('span.fs-count.fs-bad', `red: ${nameList(s.redNames)}`) : null);
-  // Inside Zabbix the problems are Zabbix's to show — Monitoring → Problems, the dashboard.
-  const alertRow = inZabbix() ? null : h('div.fs-row',
-    s.alerts
-      ? h('span', h('b', `${s.alerts} open alert${s.alerts === 1 ? '' : 's'}`), ` \u2014 ${s.critical} critical, ${s.warning} warning`,
-          s.problemKinds > s.problems.length ? h('span.muted', ` \u00b7 ${s.problemKinds} kinds of problem`) : null)
-      // No alerts means healthy only for the clusters read (fleet-summary.js alertsEmptyState).
-      : h('span.muted', (() => { const e = alertsEmptyState({ total: s.total, read: s.total - s.loading - s.unreachable.length });
-          return e.healthy ? 'No open alerts' : `No alerts raised \u2014 ${e.title.toLowerCase()}`; })()));
-  const problemRow = !inZabbix() && s.problems.length ? h('div.fs-row.fs-problems',
-    h('span.muted', 'Top problems:'),
-    ...s.problems.map((g) => h('span.fs-problem', { title: g.title },
-      h(`span.dot.${g.critical ? 'crit' : 'warn'}`), h('span.t', g.title),
-      h('span.muted', ` \u00b7 ${g.clusters || g.count} ${g.clusters ? `cluster${g.clusters === 1 ? '' : 's'}` : `alert${g.count === 1 ? '' : 's'}`}`)))) : null;
-  return h(`section.card.fleet-summary${s.bad ? '.bad' : ''}`,
-    h('div.fs-head',
-      h('div.fs-title', 'Fleet summary'),
-      inZabbix() ? null : h('button.btn.sm.primary', { onclick: () => navigateTo('alerts') }, 'Open Alerts')),
-    healthRow, alertRow, problemRow,
-    // Freshness last: the coverage line keeps its own element and refills it in place while a
-    // Read all runs, so it is placed here as it is, not rebuilt.
-    coverageLine());
 }
 
 function summaryCard(rows, all) {
@@ -501,37 +454,6 @@ async function measureRepo(c, repo, snaps, btn) {
   } finally {
     btn.disabled = false;
   }
-}
-
-function diskCard(rows) {
-  const items = rows.filter((r) => r.d.disk).map((r) => ({
-    key: r.c.id, label: r.c.name, value: r.d.disk.used,
-    sub: `${pct(r.d.disk.percent)} of ${bytes(r.d.disk.total)}`,
-    // Same thresholds and the same meaning as the DISK USAGE meter in the table above,
-    // so the same colours. This used to fall back to --series-1 (a categorical chart hue)
-    // for "normal", which put green in the table and blue in the chart for one measure.
-    color: r.d.disk.percent >= state.defaults.diskCritPercent ? 'var(--critical)'
-      : r.d.disk.percent >= state.defaults.diskWarnPercent ? 'var(--warning)' : 'var(--good)',
-  }));
-  const body = items.length
-    ? h('div', hbarList(items, { format: bytes, topN: 14, labelWidth: 140 }),
-        h('div.legend',
-          h('span', h('i', { style: { background: 'var(--good)' } }), 'normal'),
-          h('span', h('i', { style: { background: 'var(--warning)' } }), `≥ ${state.defaults.diskWarnPercent}% used`),
-          h('span', h('i', { style: { background: 'var(--critical)' } }), `≥ ${state.defaults.diskCritPercent}% used`)))
-    : empty('No allocation data');
-  return card('Disk used by cluster', 'from _cat/allocation', body);
-}
-
-function repoCard(rows) {
-  const items = [];
-  rows.forEach((r) => (r.d.repos || []).forEach((rp) => {
-    const snaps = (r.d.snapshots && r.d.snapshots[rp.name]) || [];
-    items.push({ key: `${r.c.id}/${rp.name}`, label: `${r.c.name} / ${rp.name}`, value: snaps.length,
-      sub: `${rp.type} · ${rp.location || 'n/a'}` });
-  }));
-  return card('Snapshots per repository', 'count of snapshots currently in each repository',
-    items.length ? hbarList(items, { format: num, topN: 12, labelWidth: 190 }) : empty('No repositories'));
 }
 
 function exportSummary(rows) {

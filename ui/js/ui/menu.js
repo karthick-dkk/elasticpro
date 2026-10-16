@@ -192,6 +192,8 @@ const MAX_TOASTS = 4;
  * worth seeing. They are capped: past four, the oldest goes, since a notice nobody can
  * read before the next arrives is not a notice.
  */
+const TOAST_DETAIL_LINES = 3;
+
 export function toast(message, kind = 'ok', ms = 2600, opts = {}) {
   // A redraw of the page must never take the notices with it: a wrapper that has been
   // detached still accepts toasts, it just shows none of them.
@@ -218,8 +220,12 @@ export function toast(message, kind = 'ok', ms = 2600, opts = {}) {
   const content = () => [
     k === 'run' ? h('span.toast-ico.spin', { 'aria-hidden': 'true' }) : h('span.toast-ico', TOAST_ICON[k]),
     h('div.toast-body',
-      h('span.toast-msg', message),
-      ...detail.map((d) => h('div.toast-detail', d)),
+      // A notice is read in a glance: three lines of message, three of detail, each clamped
+      // in the CSS. The whole text stays in the bell and on hover.
+      h('span.toast-msg', { title: String(message) }, message),
+      ...detail.slice(0, TOAST_DETAIL_LINES).map((d) => h('div.toast-detail', { title: d }, d)),
+      detail.length > TOAST_DETAIL_LINES
+        ? h('div.toast-detail.muted', `+${detail.length - TOAST_DETAIL_LINES} more \u2014 open the bell for all of it`) : null,
       meta ? h('div.toast-meta', meta) : null),
     h('button.toast-x', { type: 'button', title: 'Close', 'aria-label': 'Close notification',
       onclick: (e) => { e.stopPropagation(); dismiss(el); } }, '×'),

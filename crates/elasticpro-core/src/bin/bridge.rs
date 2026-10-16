@@ -80,6 +80,12 @@ async fn main() {
     let hosted = !bind.is_loopback();
     if hosted {
         tracing::warn!(bind = %bind, "hosted mode: accounts required — a fresh install creates the first one with a password of its own");
+        // effective_source() believes X-Real-IP from any peer until this is set, so anyone
+        // who can reach the core without going through nginx can write whatever they like
+        // into source.ip in the activity log (and past the Zabbix allowedSources check).
+        if std::env::var("ELASTICPRO_TRUSTED_PROXIES").map(|v| v.trim().is_empty()).unwrap_or(true) {
+            tracing::warn!("ELASTICPRO_TRUSTED_PROXIES is not set: X-Real-IP is trusted from any peer, so source.ip in the activity log can be forged by anyone who reaches the core directly; set it to the proxy's address(es)");
+        }
     }
 
     // The dev bridge on loopback is a single person on their own machine, exactly like
@@ -160,7 +166,14 @@ async fn zabbix_sso(
     body: axum::body::Bytes,
 ) -> (axum::http::StatusCode, Json<serde_json::Value>) {
     let sig = headers.get("x-zabbix-module-signature").and_then(|v| v.to_str().ok()).unwrap_or("");
-    let (code, out) = app.core.zabbix_sso_init_from(&body, sig, source_of(&app, &headers, peer));
+    let source = source_of(&app, &headers, peer);
+    let (code, out) = app.core.zabbix_sso_init_from(&body, sig, source);
+    // A Zabbix sign-in is a sign-in like any other. The body is signed JSON naming a
+    // Zabbix user and groups; only the account the core made of it goes in the record.
+    let account = out.get("account").and_then(|v| v.as_str()).map(|a| serde_json::json!({ "name": a, "role": out.get("role") }));
+    let mut reply = out.clone();
+    if let Some(c) = account { reply["caller"] = c; }
+    app.core.record_activity(&serde_json::json!({ "type": "SSO_ZABBIX" }), None, "sso", source, &reply);
     (status(code), Json(out))
 }
 
@@ -178,6 +191,7 @@ async fn zabbix_pair(
 
 async fn bridge(
     State(app): State<Arc<App>>,
+    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
     headers: HeaderMap,
     Json(mut msg): Json<serde_json::Value>,
 ) -> axum::response::Response {
@@ -228,10 +242,15 @@ async fn bridge(
         Some(secret) => match app.core.caller_for_token(secret) {
             Some(c) => (Some(c), Reauth::Token(secret.to_string())),
             None => {
-                return Json(serde_json::json!({
+                // Guessing tokens is exactly what an activity log is for, so a refusal
+                // here is recorded like any other (the token itself never is).
+                let mut reply = serde_json::json!({
                     "ok": false, "kind": "unauthenticated",
                     "message": "that API token is not valid, has expired, or has been revoked",
-                })).into_response()
+                });
+                elasticpro_core::errors::stamp(&mut reply);
+                app.core.record_activity(&msg, None, "token", source_of(&app, &headers, peer), &reply);
+                return Json(reply).into_response()
             }
         },
         None => {
@@ -247,13 +266,16 @@ async fn bridge(
     };
 
     let t = msg.get("type").and_then(|v| v.as_str()).unwrap_or("").to_string();
-    let out = app.core.handle_as_from(msg.clone(), caller.clone(), reauth).await;
+    let source = source_of(&app, &headers, peer);
+    let out = app.core.handle_as_from_at(msg.clone(), caller.clone(), reauth, source).await;
 
     // The audit line: who did what to which cluster, and whether it went through. This
     // is the record that answers "who deleted that index".
     if AUDITED.contains(&t.as_str()) {
         let method = msg.get("method").and_then(|v| v.as_str()).unwrap_or("");
-        let is_read = t == "ES" && (method.is_empty() || method.eq_ignore_ascii_case("GET") || method.eq_ignore_ascii_case("HEAD"));
+        let path = msg.get("path").and_then(|v| v.as_str()).unwrap_or("");
+        // The one definition of a read, so a search sent as POST is not audited as a write.
+        let is_read = t == "ES" && (method.is_empty() || elasticpro_core::guard::is_read(method, path));
         if !is_read {
             tracing::info!(
                 target: "audit",
@@ -264,7 +286,7 @@ async fn bridge(
                 msg_type = %t,
                 cluster = msg.get("clusterId").and_then(|v| v.as_str()).unwrap_or("-"),
                 method = method,
-                path = msg.get("path").and_then(|v| v.as_str()).unwrap_or(""),
+                path = path,
                 ok = out.get("ok").and_then(|v| v.as_bool()).unwrap_or(false),
                 kind = out.get("kind").and_then(|v| v.as_str()).unwrap_or(""),
                 "write"
