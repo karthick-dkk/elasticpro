@@ -56,9 +56,15 @@ All must pass (the PHP spec prints `… passed, 0 failed`). Do not continue on a
 On the ElasticPro host, one command:
 
 ```bash
+deploy/deploy.sh --upgrade                   # the latest release's published images
+deploy/deploy.sh --upgrade=0.3.16            # one release's published images
 deploy/deploy.sh --pull                      # git pull, build, switch, wait for healthy
 deploy/deploy.sh --image <registry>/elasticpro-core:0.1.0   # or run an image built elsewhere
 ```
+
+`--upgrade` needs no build: it moves the core, nginx, PostgreSQL and Redis images to one
+published version through `.env`, pulls them all before changing anything, and on an unhealthy
+core puts the previous `.env` back. An older version needs `--force`.
 
 It backs up `.env`, builds `elasticpro-core:<version>-<commit>`, points `ELASTICPRO_IMAGE` at it,
 restarts only the core and waits for its health check. If the core is not healthy in time it
@@ -73,8 +79,9 @@ start until you do. `ELASTICPRO_INITIAL_ADMIN_PASSWORD_FILE` (a mounted file, 10
 starts the account with a password of your own instead — see `deploy/README.md`, "First
 sign-in". Redeploying an existing host changes nothing: its accounts are kept.
 
-**Rollback later:** `deploy/deploy.sh --rollback` — back to the image before the last deploy
-(`ELASTICPRO_IMAGE_PREVIOUS` in `.env`).
+**Rollback later:** `deploy/deploy.sh --rollback` — back to the images before the last deploy
+(`ELASTICPRO_IMAGE_PREVIOUS` in `.env`, and after an `--upgrade` the nginx, PostgreSQL and Redis
+`*_PREVIOUS` too).
 
 A cluster behind a Windows jump host now appears in ElasticPro's Zabbix listing. ElasticPro
 reaches it through its own jump host with the same address and port (`jump_hosts` in the config);
