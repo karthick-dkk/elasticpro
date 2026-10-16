@@ -1,5 +1,44 @@
 # Changelog
 
+## 0.3.17
+
+**Security fix: a made-up sign-in name was trusted. Upgrade now.**
+
+nginx passed the name from any `Authorization: Basic` header to the core as a trusted identity,
+without checking a password, so anyone who could reach the page could act as any account,
+Admin included. nginx now never passes that header on, and the core believes it only when
+`PROXY_AUTH_HEADER=true` in config.txt and the request comes from an address in
+`TRUSTED_PROXIES` (for an authenticating proxy in front). Until you upgrade, the one-line nginx
+change in the release notes closes it.
+
+The "Unexpected token '<' … is not valid JSON" errors that came and went on many pages are gone.
+They were nginx's rate limit answering in HTML. The limits are now flood guards only, nginx answers
+`/bridge` errors in JSON, the page retries a refused request quietly, and anything that remains
+says what it is (EP-606 too many requests, EP-607 core not reachable, EP-608 core too slow).
+Addresses in `RATE_EXEMPT_IPS` and the Zabbix `allowedSources` are not counted.
+
+**One settings file: `deploy/config.txt`.** Allowed domains, allowed UI addresses, the listen port,
+trusted proxies, Zabbix, logging, performance and the UI defaults, in one KEY=VALUE file.
+`deploy.sh --apply-config` checks it and applies it; a normal deploy and `--upgrade` do too. A key
+with a value wins, and the Config page shows it as "managed by config.txt". New:
+`ALLOWED_UI_IPS` (anyone else gets 403) and `ALLOWED_DOMAINS` (any other host name gets 421).
+Secrets and clusters stay out of it. See `deploy/README.md` and `docs/SETTINGS.md`.
+
+`deploy.sh --upgrade` moves a hosted install to the latest release, and `--upgrade=X.Y.Z` to one
+release: core, nginx, PostgreSQL and Redis together, pulled before anything changes, put back if
+the core is not healthy. `--rollback` undoes all four.
+
+**Zabbix modules:** the release now carries all seven modules from the modules project
+(Cluster Management, Capacity, Resources, Volume, Top hosts, Client overview and ElasticPro).
+Before, it carried an outdated copy of five. The installer gains `--upgrade` (with an old → new
+table), `--remove` (to the backup folder) and `--delete` (for good, after confirming), and says so
+plainly when a download turns out to be a web page instead of the script.
+
+Fixes: users' log searches across several indices were refused as writes; inside Zabbix, a
+re-sign-in now returns to the page you were on instead of Clusters; "Accepted without checking"
+is not shown when certificates are set to insecure on purpose, and every other notice shows once
+per change rather than every minute.
+
 ## 0.3.16
 
 **Only admins change clusters, every user action in a JSON log, and every error with a code.**
