@@ -82,7 +82,8 @@ fn is_read_post(bare: &str) -> bool {
     if segs.iter().any(|s| *s == "." || *s == "..") {
         return false;
     }
-    let Some(k) = segs.iter().position(|s| s.starts_with('_')) else { return false };
+    // `_all` is the one index target that starts with `_`; anything else that does is an API.
+    let Some(k) = segs.iter().position(|s| s.starts_with('_') && *s != "_all") else { return false };
     match (segs[k], &segs[k + 1..]) {
         ("_search" | "_msearch" | "_count" | "_field_caps" | "_mget" | "_terms_enum" | "_search_shards"
             | "_knn_search" | "_rank_eval" | "_analyze" | "_sql" | "_async_search", []) => true,
@@ -115,13 +116,13 @@ mod tests {
     fn a_search_is_a_read_only_where_it_is_the_endpoint() {
         for p in ["/logs-*/_search", "/_search?size=0", "/a,b/_count", "/_msearch", "/_search/template", "/idx/_validate/query",
                   "/idx/_explain/doc-1", "/_sql?format=txt", "/_sql/translate", "/idx/_field_caps", "/_mget", "/idx/_eql/search",
-                  "/_index_template/_simulate_index/logs-x", "/_render/template", "/idx/_async_search", "/_analyze"] {
+                  "/_index_template/_simulate_index/logs-x", "/_render/template", "/idx/_async_search", "/_analyze", "/_all/_search", "/_all/_count"] {
             assert!(super::is_read("POST", p), "{p} reads");
         }
         for p in ["/_search/../_bulk", "/_search/%2e%2e/_delete_by_query", "/_search/..\\_bulk", "/idx/_delete_by_query#/_search",
                   "/idx/_doc/_search", "/idx/_update/_search", "/idx/_create/_search", "/_bulk", "/idx/_doc", "/_reindex?x=/_search",
                   "/idx/_search/extra", "/_snapshot/r/s/_restore", "/idx/_explain/_bulk", "/idx/./_search", "/idx%2F_doc/_search",
-                  "/idx/_close", "/_index_template/x"] {
+                  "/idx/_close", "/_index_template/x", "/_all/_doc/_search", "/_all/_bulk"] {
             assert!(!super::is_read("POST", p), "{p} must count as a write");
         }
         assert!(super::is_read(" get ", "/anything/../at/all"), "a GET is a read, wherever it points");
