@@ -12,14 +12,22 @@
 
 import { h } from '../lib/dom.js';
 import { confirmDialog } from '../ui/modal.js';
+import { toast } from '../ui/menu.js';
 import { writeUnlock, workerStatus } from './es.js';
-import { isReadOnly } from './state.js';
+import { isReadOnly, state } from './state.js';
 
 let unlocked = false;
 const listeners = new Set();
 
-/** Is the session unlocked, or does the config allow writes outright? */
-export function writesAllowed() { return !isReadOnly() || unlocked; }
+/**
+ * Whether the signed-in role may change a cluster at all. Only an admin may; an operator
+ * and a user read (the core refuses the rest, auth::authorize). No caller is the portable
+ * build, which is its own administrator.
+ */
+export function roleMayWrite() { return !state.caller || state.caller.role === 'admin'; }
+
+/** Is the session unlocked, or does the config allow writes outright — for a role that may write? */
+export function writesAllowed() { return roleMayWrite() && (!isReadOnly() || unlocked); }
 export function writesUnlocked() { return unlocked; }
 
 /** Re-read the switch from the core, which owns it. Call on page render. */
@@ -63,6 +71,10 @@ export async function setWritesUnlocked(want, { confirmFirst = true } = {}) {
  * config allows writes, or because the operator unlocks the session right now.
  */
 export async function ensureWrites() {
+  if (!roleMayWrite()) {
+    toast(`Your role (${state.caller.role}) reads clusters only — an ElasticPro admin makes changes (EP-110)`, 'warn', 6000);
+    return false;
+  }
   if (!isReadOnly()) return true;
   if (unlocked) return true;
   return setWritesUnlocked(true);
@@ -73,6 +85,10 @@ export async function ensureWrites() {
  * the controls (disabled buttons, hints) follow the new state.
  */
 export function writeToggle(onchange) {
+  if (!roleMayWrite()) {
+    return h('span.pill.grey', { title: 'Your role reads clusters: GET and searches. Only an ElasticPro admin changes them.' },
+      h('i.dot'), `read-only (${state.caller.role})`);
+  }
   if (!isReadOnly()) {
     return h('span.pill.yellow', { title: 'readOnly: false in the config — every page may write.' },
       h('i.dot'), 'writes enabled (config)');

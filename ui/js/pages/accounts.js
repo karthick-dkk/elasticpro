@@ -22,7 +22,8 @@ const MIN_PASSWORD = 10;   // must match auth::MIN_PASSWORD
 
 let host = null;
 const ui = { users: [], tokens: [], caller: null, apiTokens: false, err: '', freshSecret: null,
-  logins: [], lockAfter: 5, lockMinutes: 15, failedOnly: false };
+  logins: [], lockAfter: 5, lockMinutes: 15, failedOnly: false,
+  activity: [], activityFile: null, activityUser: '', activityFailed: false, activityErr: '' };
 /** Cluster accounts are read per cluster, on demand — one call each, not on every render. */
 const cu = { byCluster: {}, loading: new Set() };
 
@@ -50,6 +51,8 @@ async function load() {
   const lg = await bridge({ type: 'USER_LOGINS' });
   if (lg && lg.ok) { ui.logins = lg.logins || []; ui.lockAfter = lg.lockAfter || ui.lockAfter; ui.lockMinutes = lg.lockMinutes || ui.lockMinutes; }
 
+  await loadActivity(false);
+
   if (ui.apiTokens) {
     const t = await bridge({ type: 'TOKEN_LIST' });
     ui.tokens = (t && t.ok && t.tokens) || [];
@@ -59,13 +62,13 @@ async function load() {
 
 const ROLE_HELP = {
   admin: 'Everything: accounts, secrets, the config, and writing to clusters.',
-  operator: 'Every cluster, and may write to them behind the write unlock — but no accounts, secrets or config.',
-  user: 'Read-only across every page.',
+  operator: 'Every cluster, read-only (GET and searches), plus alerts, silences and automation — no cluster changes, accounts, secrets or config.',
+  user: 'Read-only: clusters and the REST console (GET and searches). No Automation or Config.',
   guest: 'The dashboard only — no index names.',
 };
 
 /** What each role may do, in the words an admin chooses by: view, write, manage. */
-const ACCESS = { admin: 'manage', operator: 'write', user: 'view', guest: 'dashboard' };
+const ACCESS = { admin: 'manage', operator: 'operate', user: 'view', guest: 'dashboard' };
 
 function roleCell(role) {
   const cls = role === 'admin' ? 'red' : role === 'operator' ? 'yellow' : role === 'user' ? '' : 'grey';
@@ -259,7 +262,7 @@ function draw() {
     h('div.grid.c4', { style: { marginBottom: '10px' } },
       statTile('Accounts', String(ui.users.length), 'who can sign in'),
       statTile('Administrators', String(admins), admins === 1 ? 'the only one — cannot be removed' : 'full control'),
-      statTile('Operators', String(ui.users.filter((u) => u.role === 'operator').length), 'write to clusters, no admin'),
+      statTile('Operators', String(ui.users.filter((u) => u.role === 'operator').length), 'read clusters, run alerts'),
       statTile('Read-only', String(ui.users.filter((u) => u.role === 'user' || u.role === 'guest').length),
         `${ui.users.filter((u) => u.role === 'guest').length} of them guests`)),
 
@@ -302,6 +305,7 @@ function draw() {
           { emptyText: 'No accounts yet.' }))),
 
     h('div', { style: { marginTop: '10px' } }, loginsCard()),
+    h('div', { style: { marginTop: '10px' } }, activityCard()),
 
     ui.apiTokens ? h('div', { style: { marginTop: '10px' } }, tokensCard()) : notHostedNote(),
 
@@ -335,6 +339,48 @@ function loginsCard() {
     [h('label', { style: { display: 'inline-flex', gap: '5px', alignItems: 'center', fontSize: '12px' } },
       h('input', { type: 'checkbox', checked: ui.failedOnly, onchange: (e) => { ui.failedOnly = e.target.checked; draw(); } }),
       'Refused only')]);
+}
+
+/** The core's activity record, newest first. Filtered there, so the filters see all 1000 it keeps. */
+async function loadActivity(redraw = true) {
+  const res = await bridge({ type: 'ACTIVITY_LIST', limit: 300, user: ui.activityUser.trim() || undefined, failedOnly: ui.activityFailed });
+  if (res && res.ok) { ui.activity = res.events || []; ui.activityFile = res.file || null; ui.activityErr = ''; }
+  else ui.activityErr = (res && res.message) || 'Could not read the activity record.';
+  if (redraw) draw();
+}
+
+/**
+ * What people did, reads included: every request to a cluster, sign-ins and refusals. The
+ * same events are appended to a file as JSON lines for a SIEM; this is the last few hundred.
+ */
+function activityCard() {
+  const where = ui.activityFile
+    ? h('span', 'Written as JSON lines to ', h('code', ui.activityFile), ' for SIEM forwarding.')
+    : h('span', 'Not written to a file here (ELASTICPRO_ACTIVITY_LOG is off or there is no data directory).');
+  return card('User activity', `${ui.activity.length} shown, newest first · kept in memory since the core started`,
+    h('div',
+      ui.activityErr ? h('div.muted', { style: { color: 'var(--red, #c0392b)' } }, ui.activityErr) : null,
+      h('div', { style: { maxHeight: '360px', overflowY: 'auto' } },
+        table(['When', 'User', 'Action', 'Cluster', 'Request', 'Result', 'Source IP'], ui.activity.map((e) => {
+          const ev = e.event || {};
+          const req = e.http && e.http.request ? `${e.http.request.method} ${(e.url && e.url.path) || ''}` : '';
+          return h('tr',
+            h('td.muted', { style: { fontSize: '11.5px', whiteSpace: 'nowrap' } }, e['@timestamp'] ? new Date(e['@timestamp']).toLocaleString() : ''),
+            h('td', h('b', (e.user && e.user.name) || '—'), e.user && e.user.target ? h('span.muted', ` → ${e.user.target.name}`) : null),
+            h('td', ev.action || ''),
+            h('td.muted', (e.elasticpro && e.elasticpro.cluster) || ''),
+            h('td', { style: { fontFamily: 'var(--mono, monospace)', fontSize: '11.5px', wordBreak: 'break-all' }, title: (e.url && e.url.query) || '' }, req),
+            h('td', ev.outcome === 'success' ? pill('ok', 'green')
+              : h('span', { title: ev.reason || '' }, pill((e.error && e.error.code) || 'failed', 'red'))),
+            h('td.muted', (e.source && e.source.ip) || ''));
+        }), { emptyText: ui.activityFailed ? 'No failed action.' : 'Nothing recorded yet.' })),
+      h('div.muted', { style: { fontSize: '11.5px', marginTop: '6px' } }, where)),
+    [h('input', { type: 'search', placeholder: 'user', value: ui.activityUser, 'aria-label': 'Filter by user', style: { width: '120px' },
+        onchange: (e) => { ui.activityUser = e.target.value; loadActivity(); } }),
+     h('label', { style: { display: 'inline-flex', gap: '5px', alignItems: 'center', fontSize: '12px' } },
+       h('input', { type: 'checkbox', checked: ui.activityFailed, onchange: (e) => { ui.activityFailed = e.target.checked; loadActivity(); } }),
+       'Failures only'),
+     h('button.btn.sm.ghost', { onclick: () => loadActivity() }, 'Refresh')]);
 }
 
 const LOGIN_KIND = {
@@ -418,9 +464,9 @@ function editUser(existing) {
         ? field('Password', text('acct-pw', '', { type: 'password' }), `At least ${MIN_PASSWORD} characters.`)
         : null,
       field('Access', select('acct-role', existing ? existing.role : 'user', [
-        ['user', 'View (user) — read-only across every page'],
-        ['operator', 'Write (operator) — every cluster, may write, no administration'],
-        ['admin', 'Manage (admin) — everything: accounts, secrets, config and writes'],
+        ['user', 'View (user) — read-only clusters and REST console; no Automation or Config'],
+        ['operator', 'Operate (operator) — every cluster read-only, alerts and silences, no cluster changes'],
+        ['admin', 'Manage (admin) — everything: cluster changes, accounts, secrets, config'],
         ['guest', 'Dashboard (guest) — the dashboard only, no index names'],
       ])),
     ].filter(Boolean),

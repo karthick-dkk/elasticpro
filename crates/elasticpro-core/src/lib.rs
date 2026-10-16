@@ -8,6 +8,7 @@
 //! identical in shape to the extension's `chrome.runtime.sendMessage` protocol, so the
 //! pages did not have to change.
 
+pub mod activity;
 pub mod auth;
 pub mod bridge;
 pub mod crypto;

@@ -160,7 +160,14 @@ async fn zabbix_sso(
     body: axum::body::Bytes,
 ) -> (axum::http::StatusCode, Json<serde_json::Value>) {
     let sig = headers.get("x-zabbix-module-signature").and_then(|v| v.to_str().ok()).unwrap_or("");
-    let (code, out) = app.core.zabbix_sso_init_from(&body, sig, source_of(&app, &headers, peer));
+    let source = source_of(&app, &headers, peer);
+    let (code, out) = app.core.zabbix_sso_init_from(&body, sig, source);
+    // A Zabbix sign-in is a sign-in like any other. The body is signed JSON naming a
+    // Zabbix user and groups; only the account the core made of it goes in the record.
+    let account = out.get("account").and_then(|v| v.as_str()).map(|a| serde_json::json!({ "name": a, "role": out.get("role") }));
+    let mut reply = out.clone();
+    if let Some(c) = account { reply["caller"] = c; }
+    app.core.record_activity(&serde_json::json!({ "type": "SSO_ZABBIX" }), None, "sso", source, &reply);
     (status(code), Json(out))
 }
 
@@ -178,6 +185,7 @@ async fn zabbix_pair(
 
 async fn bridge(
     State(app): State<Arc<App>>,
+    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
     headers: HeaderMap,
     Json(mut msg): Json<serde_json::Value>,
 ) -> axum::response::Response {
@@ -247,7 +255,8 @@ async fn bridge(
     };
 
     let t = msg.get("type").and_then(|v| v.as_str()).unwrap_or("").to_string();
-    let out = app.core.handle_as_from(msg.clone(), caller.clone(), reauth).await;
+    let source = source_of(&app, &headers, peer);
+    let out = app.core.handle_as_from_at(msg.clone(), caller.clone(), reauth, source).await;
 
     // The audit line: who did what to which cluster, and whether it went through. This
     // is the record that answers "who deleted that index".

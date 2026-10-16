@@ -524,8 +524,8 @@ Nothing extra to run — this step is bookkeeping in Zabbix you should not skip.
 | Zabbix user type | ElasticPro role | Clusters | Can write |
 |---|---|---|---|
 | User | `user` | all, read-only (scoped by group only with `zabbix.scopeUsersByGroup: true`) | no |
-| Admin | `operator` | all | yes, behind the write unlock |
-| Super admin | `admin` | all | yes, and administers the app |
+| Admin | `operator` | all, read-only | no — GET and searches only |
+| Super admin | `admin` | all | yes (PUT/POST/DELETE), and administers the app |
 | Guest | — | not signed in | — |
 
 Accounts are created on first sign-in as `<zabbix name>@zabbix` — so a Zabbix user named

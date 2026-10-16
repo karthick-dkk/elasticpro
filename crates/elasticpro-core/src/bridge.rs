@@ -71,6 +71,9 @@ pub struct Core {
     primed: RwLock<Primed>,
     pub(crate) tunnels: tokio::sync::RwLock<HashMap<String, Route1>>,
     data_dir: Option<PathBuf>,
+    /// What people did, for a SIEM and for the Accounts page. Owned here rather than by a
+    /// transport so the desktop app, the bridge and the tests all feed the same record.
+    activity: crate::activity::ActivityLog,
     /// `--config <path>` or ELASTICPRO_CONFIG: a config file to offer when none is remembered.
     config_hint: Option<String>,
     /// The operator's write unlock. Session-only on purpose: never written to disk and
@@ -500,8 +503,10 @@ impl Core {
         let data_dir_for_sink = data_dir.clone();
         let data_dir_for_fleet = data_dir.clone();
         let data_dir_for_notify = data_dir.clone();
+        let activity = crate::activity::ActivityLog::new(crate::activity::ActivityConfig::from_env(data_dir.as_deref(), edition));
         Arc::new(Core {
             edition,
+            activity,
             users,
             sessions: Sessions::open(auth_path("sessions.json")),
             tokens,
@@ -857,9 +862,31 @@ impl Core {
     ///
     /// Every failed reply leaves with its error code (errors.rs), stamped here once.
     pub async fn handle_as_from(self: &Arc<Self>, msg: Value, caller: Option<Caller>, reauth: Reauth) -> Value {
-        let mut out = self.dispatch(msg, caller, reauth).await;
+        self.handle_as_from_at(msg, caller, reauth, None).await
+    }
+
+    /// `handle_as_from`, told the client address (the hosted bridge knows it, the desktop
+    /// app has none). Every exchange is written to the activity log here, on the way out,
+    /// so a refusal by the gate and a reply from a handler are recorded by the same line.
+    pub async fn handle_as_from_at(self: &Arc<Self>, msg: Value, caller: Option<Caller>, reauth: Reauth, source: Option<std::net::IpAddr>) -> Value {
+        let via = match &reauth {
+            Reauth::Session(_) => "session",
+            Reauth::Token(_) => "token",
+            Reauth::Proxy(_) => "proxy",
+            Reauth::None => "none",
+        };
+        let sent = msg.clone();
+        let mut out = self.dispatch(msg, caller.clone(), reauth).await;
         crate::errors::stamp(&mut out);
+        self.record_activity(&sent, caller.as_ref(), via, source, &out);
         out
+    }
+
+    /// Write one exchange to the activity log (background polls are skipped inside).
+    pub fn record_activity(&self, msg: &Value, caller: Option<&Caller>, via: &str, source: Option<std::net::IpAddr>, reply: &Value) {
+        if let Some(ev) = crate::activity::ActivityEvent::from_exchange(msg, caller, via, source, reply, self.edition) {
+            self.activity.record(ev);
+        }
     }
 
     async fn dispatch(self: &Arc<Self>, msg: Value, caller: Option<Caller>, reauth: Reauth) -> Value {
@@ -883,6 +910,12 @@ impl Core {
                 // the first half of a login.
                 "caller": caller.as_ref().map(|c| c.public()),
             }),
+            "ACTIVITY_LIST" => {
+                let limit = msg.get("limit").and_then(Value::as_u64).unwrap_or(300).clamp(1, crate::activity::RING as u64) as usize;
+                let user = msg.get("user").and_then(Value::as_str);
+                let failed = msg.get("failedOnly").and_then(Value::as_bool).unwrap_or(false);
+                json!({ "ok": true, "events": self.activity.list(limit, user, failed), "file": self.activity.path() })
+            }
             "LOGIN" => self.login(&msg),
             "SSO_EXCHANGE" => self.sso_exchange(&msg),
             "CONFIG_VIEW" => self.config_view(caller.as_ref()).await,
@@ -1415,7 +1448,7 @@ impl Core {
             "TOKEN_CREATE" => {
                 let name = msg.get("name").and_then(|v| v.as_str()).unwrap_or("");
                 let role = msg.get("role").and_then(|v| v.as_str()).and_then(Role::parse).unwrap_or(Role::Guest);
-                if role.may_write() {
+                if role >= Role::Operator {
                     return json!({
                         "ok": false, "kind": "bad_request",
                         "message": "an API token cannot be an administrator — a token that can delete                                     indices unattended is the thing this product exists to avoid",

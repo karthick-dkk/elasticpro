@@ -130,8 +130,11 @@ impl Role {
     /// Operators and admins may write to a cluster. Stated once, here, so no call site
     /// invents it. Writing still needs the guard unlocked and a person acting — this is
     /// only whether the role may ask.
+    /// Only an admin writes to a cluster. An operator (a Zabbix Admin) administers alerts
+    /// and silences but sends nothing but reads to Elasticsearch: GET, HEAD and the
+    /// search-family POSTs (`guard::is_read`).
     pub fn may_write(self) -> bool {
-        matches!(self, Role::Operator | Role::Admin)
+        matches!(self, Role::Admin)
     }
 }
 
@@ -257,7 +260,8 @@ pub fn required_role(msg_type: &str) -> Option<Role> {
         "PRIME" | "FORGET" => Some(Role::Admin),
         // Operators write to clusters, so they unlock the guard to do it. The guard is
         // still one switch for the whole process, and still resets on restart.
-        "WRITE_UNLOCK" => Some(Role::Operator),
+        // Writing to a cluster is an admin's alone, so is unlocking the guard to do it.
+        "WRITE_UNLOCK" => Some(Role::Admin),
         "SEAL" | "OPEN" => Some(Role::Admin),
         "VAULT_GET" | "VAULT_SET" | "VAULT_DEL" => Some(Role::Admin),
         "TRUST_CERT" | "UNTRUST_CERT" | "TRUST_HOSTKEY" | "UNTRUST_HOSTKEY" => Some(Role::Admin),
@@ -265,6 +269,8 @@ pub fn required_role(msg_type: &str) -> Option<Role> {
         "USER_LIST" | "USER_ADD" | "USER_REMOVE" | "USER_SET_ROLE" | "USER_SET_PASSWORD" => Some(Role::Admin),
         // Locking, blocking and the sign-in log: who may get in is an administrator's call.
         "USER_SET_LOCKED" | "USER_SET_BLOCKED" | "USER_LOGINS" => Some(Role::Admin),
+        // Everyone's activity, with source addresses: an administrator's to read.
+        "ACTIVITY_LIST" => Some(Role::Admin),
         // Uploading a private key, and every version of a config that has held
         // credentials. Nothing below admin goes near either.
         "KEY_UPLOAD" | "KEY_LIST" | "KEY_DELETE" => Some(Role::Admin),
@@ -311,10 +317,12 @@ pub fn authorize(role: Role, msg_type: &str, method: &str, path: &str) -> Result
     }
 
     let m = method.trim().to_ascii_uppercase();
-    let is_read = m.is_empty() || m == "GET" || m == "HEAD";
+    // A search sent as POST is still a read: the same list the write guard uses.
+    let is_read = m.is_empty() || crate::guard::is_read(&m, path);
     if !is_read && !role.may_write() {
         return Err(format!(
-            "{m} requests are not available to the {} role — only an operator or admin can write to a cluster",
+            "{m} {} is not available to the {} role — only an ElasticPro admin can change a cluster; reads (GET and searches) are allowed",
+            path.split('?').next().unwrap_or(path),
             role.as_str()
         ));
     }
@@ -1506,6 +1514,24 @@ mod tests {
         assert!(authorize(Role::User, "ES", "PUT", "/idx").is_err());
         // A read is fine for a user.
         assert!(authorize(Role::User, "ES", "GET", "/_cat/indices").is_ok());
+    }
+
+    #[test]
+    fn an_operator_reads_every_cluster_and_changes_none() {
+        for (m, p) in [("PUT", "/idx"), ("POST", "/idx/_doc"), ("DELETE", "/idx"), ("POST", "/_snapshot/r/s/_restore"),
+                       ("PATCH", "/x"), ("POST", "/_bulk"), ("POST", "/idx/_delete_by_query")] {
+            assert!(authorize(Role::Operator, "ES", m, p).is_err(), "{m} {p} must be refused to an operator");
+        }
+        assert!(authorize(Role::Operator, "WRITE_UNLOCK", "", "").is_err());
+        for r in [Role::Operator, Role::User] {
+            assert!(authorize(r, "ES", "GET", "/_cat/indices").is_ok());
+            assert!(authorize(r, "ES", "HEAD", "/idx").is_ok());
+            // Searches sent as POST are reads.
+            assert!(authorize(r, "ES", "POST", "/logstash-*/_search").is_ok());
+            assert!(authorize(r, "ES", "POST", "/logstash-*/_count?q=x").is_ok());
+        }
+        assert!(authorize(Role::Admin, "ES", "PUT", "/idx").is_ok());
+        assert!(authorize(Role::Admin, "WRITE_UNLOCK", "", "").is_ok());
     }
 
     #[test]

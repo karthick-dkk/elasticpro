@@ -87,4 +87,5 @@ node tools/check-ui.mjs && node tools/unit-check.mjs
 
 The full reference — configuration, building, each page in depth, the hosted deployment and the
 message contracts — is in [docs/REFERENCE.md](docs/REFERENCE.md) and
-[docs/HANDBOOK.md](docs/HANDBOOK.md). Licensed under [MIT](LICENSE).
+[docs/HANDBOOK.md](docs/HANDBOOK.md). The per-user activity log for a SIEM is
+described in [docs/ACTIVITY-LOG.md](docs/ACTIVITY-LOG.md). Licensed under [MIT](LICENSE).

@@ -228,8 +228,8 @@ in as the Zabbix user — no second password.
 | Zabbix user type | ElasticPro role | Clusters | Can write |
 |------------------|---------------------|----------|-----------|
 | User             | `user`              | all, read-only (only those mapped to their groups with `scopeUsersByGroup`) | no |
-| Admin            | `operator`          | all | yes, behind the write unlock |
-| Super admin      | `admin`             | all | yes, and administers the app |
+| Admin            | `operator`          | all, read-only | no — GET and searches only |
+| Super admin      | `admin`             | all | yes (PUT/POST/DELETE), and administers the app |
 | Guest            | —                   | not signed in | — |
 
 Accounts are created on first sign-in as `<zabbix name>@zabbix`, so a Zabbix user called

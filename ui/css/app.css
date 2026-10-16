@@ -498,6 +498,12 @@ table.tbl tr.kv td.v { font-size: 12px; word-break: break-all; }
 .muted { color: var(--text-muted); }
 .sec { color: var(--text-secondary); }
 .nowrap { white-space: nowrap; }
+/* A figure that needs attention (common.js figure, e.g. Unaccounted disk): red and boxed. */
+.figure-alert { padding: 6px 10px; margin: -6px 0; border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--critical) 14%, transparent);
+  border: 1px solid color-mix(in srgb, var(--critical) 45%, transparent); }
+.figure-alert > div:nth-child(2) { color: var(--critical); }
+.figure-alert > .muted { color: color-mix(in srgb, var(--critical) 70%, var(--text-secondary)); }
 /* Alerts page: an alert's detail in two lines; a click opens it (alerts.js alertRow). */
 .alert-detail { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2;
   overflow: hidden; overflow-wrap: anywhere; cursor: pointer; }
