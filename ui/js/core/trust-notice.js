@@ -1,11 +1,17 @@
 /**
- * One notice for everything `defaults.tls: insecure` let through.
+ * One notice for everything that was let through without checking — and none at all when
+ * the operator chose that.
  *
- * With the switch on, the core accepts any certificate and any jump-host key, and lists
- * what it accepted that would otherwise have stopped (PINS → `accepted`). Ten clusters on
- * self-signed certificates are one fact, not ten notifications: this folds the list into a
- * single bell entry, keyed, so it is updated in place rather than repeated, and it pops
- * up again only when something new joins the list.
+ * `defaults.tls: insecure` (the Config page, or config.txt, which wins) is a deliberate,
+ * standing decision by the person running the install. Telling them every minute, or on
+ * every page load, what they asked for is noise, and it had piled up as a column of
+ * identical toasts. So while the switch is on there is no toast and no bell entry; what
+ * was accepted stays listed where it belongs, Config → Jump hosts & trust.
+ *
+ * Anything accepted *without* that switch (not a state the core produces today, but the
+ * list is the core's to fill) is news once: it is announced when the set of certificates
+ * and keys is new to this browser, and not again while the set is the same. A rotated
+ * certificate or an added cluster is a different set and is announced.
  */
 
 export const NOTICE_KEY = 'tls-accepted';
@@ -47,4 +53,31 @@ export function acceptedNotice(accepted) {
     return `${what}${who ? ` — ${who}` : ''}: ${a.reason}`;
   });
   return { message, detail };
+}
+
+/** localStorage key for the last set announced; per browser, a convenience not a record. */
+export const SEEN_KEY = 'elasticpro.tlsAcceptedSeen';
+
+/** The set last announced in this browser ('' when none, or storage is unavailable). */
+export function readSeen(storage) {
+  try { return String(storage.getItem(SEEN_KEY) || ''); } catch (_) { return ''; }
+}
+export function writeSeen(storage, sig) {
+  try { storage.setItem(SEEN_KEY, sig); } catch (_) { /* private window: announced again next load, once */ }
+}
+
+/**
+ * What, if anything, to tell the person this pass.
+ *
+ * @param o.deliberate  the operator turned insecure on (core PINS acceptAll, or defaults.tls)
+ * @param o.accepted    the core's list
+ * @param o.seenSig     acceptedSignature of what was last announced
+ * @returns null (say nothing, bell untouched) or { message, detail, sig }
+ */
+export function noticeToShow({ deliberate = false, accepted = [], seenSig = '' } = {}) {
+  if (deliberate) return null;
+  const notice = acceptedNotice(accepted);
+  if (!notice) return null;
+  if (!newSince(seenSig, accepted).length) return null;
+  return { ...notice, sig: acceptedSignature(accepted) };
 }

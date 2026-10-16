@@ -8,7 +8,7 @@
  */
 
 import { h, mount } from '../lib/dom.js';
-import { mergeNotifications, newId, sendRule, toPut } from '../lib/notify-history.js';
+import { mergeNotifications, newId, sendRule, serverId, toPut } from '../lib/notify-history.js';
 
 let open = null;   // the popup currently on screen, if any
 
@@ -236,7 +236,12 @@ export function toast(message, kind = 'ok', ms = 2600, opts = {}) {
   // A card already fading out is finished with: take it away now and show a fresh one,
   // or its pending removal would take the new one with it.
   if (key) toastWrap.querySelectorAll(`[data-toast-key="${CSS_ESCAPE(key)}"].out`).forEach((x) => x.remove());
-  let el = key ? toastWrap.querySelector(`[data-toast-key="${CSS_ESCAPE(key)}"]`) : null;
+  // An unkeyed notice that says exactly what one already on screen says is the same
+  // notice again (a poll finding the same thing, a button pressed twice): it refreshes
+  // that card rather than stacking a second copy of it.
+  const sig = key ? '' : [k, message, meta, detail.join('\n')].join('\u0001');
+  let el = key ? toastWrap.querySelector(`[data-toast-key="${CSS_ESCAPE(key)}"]`)
+    : [...toastWrap.children].find((x) => x.dataset.toastSig === sig && !x.classList.contains('out')) || null;
   if (el) {
     clearTimeout(Number(el.dataset.timer));
     el.className = `toast ${k}${detail.length || meta ? ' rich' : ''}`;
@@ -244,6 +249,7 @@ export function toast(message, kind = 'ok', ms = 2600, opts = {}) {
   } else {
     el = h(`div.toast.${k}${detail.length || meta ? '.rich' : ''}`, ...content());
     if (key) el.dataset.toastKey = key;
+    else el.dataset.toastSig = sig;
     toastWrap.append(el);
     // Over the cap the oldest finished notice goes; a task still running keeps its card.
     while (toastWrap.children.length > MAX_TOASTS) {
@@ -321,9 +327,18 @@ function touch(key, message, kind, detail = [], meta = '', cluster = '') {
 
 function remember(message, kind, key, detail = [], meta = '', cluster = '') {
   const at = Date.now();
-  const same = key ? history.find((n) => n.key === key) : null;
-  const entry = { message: String(message), kind, at, key: key || undefined, id: key || newId(at), read: false,
-                  detail: detail.length ? detail : undefined, meta: meta || undefined, cluster: cluster || undefined };
+  if (key) retired.delete(serverId({ key }));   // said again on purpose: it belongs in the bell
+  // The same notice again is one entry with a count and a new time, not a second line:
+  // by key when it has one, else by saying exactly the same thing. Without this a poll
+  // that finds the same fact every cycle fills the 50-entry history with one sentence and
+  // pushes out everything else worth reading.
+  const sameText = (n) => !n.key && n.message === String(message) && n.kind === kind
+    && (n.meta || '') === meta && (n.cluster || '') === cluster
+    && (n.detail || []).join('\n') === detail.join('\n');
+  const same = key ? history.find((n) => n.key === key) : history.find(sameText) || null;
+  const entry = { message: String(message), kind, at, key: key || undefined, id: key || (same && same.id) || newId(at), read: false,
+                  detail: detail.length ? detail : undefined, meta: meta || undefined, cluster: cluster || undefined,
+                  count: !key && same ? (same.count || 1) + 1 : undefined };
   history = [entry, ...history.filter((n) => n !== same)].slice(0, HISTORY_MAX);
   unread = history.filter((n) => !n.read).length;
   saveHistory();
@@ -382,7 +397,8 @@ async function loadServer(older = false) {
 
 /** What the open bell lists: this browser's notices and the core's, one per key. */
 export function notificationsShown() {
-  return fetched.length ? mergeNotifications(history, fetched) : history.slice();
+  const all = fetched.length ? mergeNotifications(history, fetched) : history.slice();
+  return retired.size ? all.filter((n) => !retired.has(serverId(n))) : all;
 }
 
 /** The notices so far, newest first. */
@@ -392,6 +408,25 @@ export function clearNotifications() {
   history = []; unread = 0; saveHistory(); paintBell();
   fetched = []; fetchedMore = false; fetchGen++;
   if (storeOn()) sendQuietly({ type: 'NOTIFY_CLEAR' });
+}
+
+const retired = new Set();
+
+/**
+ * Take a keyed notice out of the bell: for one whose reason has gone (the setting it
+ * warned about was changed on purpose), so it does not sit there reading as current.
+ * Only this browser's copy; returns whether there was one.
+ */
+export function dropNotification(key) {
+  if (!key) return false;
+  // The core's copy (hosted installs keep 30 days) would otherwise come back through the
+  // merge when the bell opens; it is hidden for this page's life, and asked again each load.
+  retired.add(serverId({ key }));
+  if (!history.some((n) => n.key === key)) return false;
+  history = history.filter((n) => n.key !== key);
+  unread = history.filter((n) => !n.read).length;
+  saveHistory(); paintBell();
+  return true;
 }
 
 function markRead() {
@@ -433,7 +468,7 @@ export function notificationBell() {
             n.kind === 'run' ? h('span.toast-ico.spin') : h('span.toast-ico', { ok: '✓', err: '✕', warn: '!' }[n.kind] || '•'),
             h('div.notif-body', h('div.notif-msg', n.message),
               ...(n.detail || []).map((d) => h('div.notif-detail', d)),
-              h('div.notif-at', [n.meta, agoShort(n.at)].filter(Boolean).join(' · '))))),
+              h('div.notif-at', [n.meta, n.count > 1 ? `\u00d7${n.count}, last ${agoShort(n.at)}` : agoShort(n.at)].filter(Boolean).join(' · '))))),
           h('div', { style: { display: 'flex', justifyContent: 'flex-end', gap: '6px', paddingTop: '4px' } },
             server && fetchedMore
               ? h('button.btn.sm', { onclick: async () => { if (await loadServer(true)) c.rebuild(); } }, 'Load more')
