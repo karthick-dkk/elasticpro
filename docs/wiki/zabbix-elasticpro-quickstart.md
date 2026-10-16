@@ -97,15 +97,27 @@ The modules hold no secret: after pairing, their settings live in the Zabbix dat
 curl -fsSL https://github.com/karthick-dkk/elasticpro/releases/latest/download/zabbix-modules-install.sh | sudo bash
 ```
 
-It downloads the modules from the latest release, checks their SHA-256, finds your Zabbix frontend (a package install, or a running `zabbix-web-*` container), and puts the five module folders in place with the right owner. A module already there is kept in a dated backup under `/var/backups/elasticpro-zabbix/`, and `config.php` is never touched. It is safe to run again to upgrade. At the end it prints what it installed and what is left to do in the UI.
+It downloads the modules from the latest release, checks their SHA-256, finds your Zabbix frontend (a package install, or a running `zabbix-web-*` container), and puts the seven module folders in place with the right owner. A module already there is kept in a dated backup under `/var/backups/elasticpro-zabbix/`, and `config.php` is never touched. It is safe to run again to upgrade. At the end it prints what it installed and what is left to do in the UI.
 
 Prefer to read a script before running it as root? Download it, read it, try it, then run it:
 
 ```bash
-curl -fsSLO https://github.com/karthick-dkk/elasticpro/releases/latest/download/zabbix-modules-install.sh
+curl -fsSL https://github.com/karthick-dkk/elasticpro/releases/latest/download/zabbix-modules-install.sh -o zabbix-modules-install.sh
+head -1 zabbix-modules-install.sh                # must say: #!/usr/bin/env bash
 less zabbix-modules-install.sh
 sudo bash zabbix-modules-install.sh --dry-run      # shows every step, changes nothing
 sudo bash zabbix-modules-install.sh
+```
+
+> If running the file prints `syntax error near unexpected token newline`, or `head -1` shows `<!DOCTYPE html>`, the download saved a web page (a `github.com/.../blob/...` link, a 404, or a proxy page) instead of the script. Download it again with the `curl ... -o` line above, or from the raw link `https://raw.githubusercontent.com/karthick-dkk/elasticpro/main/deploy/zabbix/zabbix-modules-install.sh`. The installer applies the same check to the archive it downloads and stops with "GitHub returned a web page instead of the file" before it changes anything.
+{.is-warning}
+
+**Upgrade, remove, delete** later on, from the same file:
+
+```bash
+sudo bash zabbix-modules-install.sh --upgrade                          # all seven to the latest release; prints installed -> new per module
+sudo bash zabbix-modules-install.sh --remove=ep_overview               # out of Zabbix, kept in /var/backups/elasticpro-zabbix/<date>/
+sudo bash zabbix-modules-install.sh --delete=ep_overview --yes         # gone for good, config.php included
 ```
 
 Useful options (`--help` lists them all):
@@ -114,16 +126,18 @@ Useful options (`--help` lists them all):
 | --- | --- |
 | `--dry-run` | see what it would do first |
 | `--version vX.Y.Z` | a given release instead of the latest |
-| `--from-dir <path>` | no internet on this host: a copy of the repository, or an unpacked release archive |
+| `--from-dir <path>` | no internet on this host: a checkout of the modules project (integration-zabbix-elasticpro), or an unpacked release archive |
 | `--modules-dir <dir> --owner <uid:gid>` | detection picks the wrong place, or you want it somewhere else |
 | `--container <name>` | more than one Zabbix web container is running |
 | `--package` | a package-installed Zabbix frontend **and** a Zabbix web container on the same host (with `--zabbix-url`, the one publishing that URL's port is chosen) |
 | `--zabbix-url <url> --token-file <file>` | also register and enable the modules through the API (a Super admin API token, alone in a `chmod 600` file) |
-| `--uninstall` | remove them again (disable them in the UI first, or give `--zabbix-url` and `--token-file`) |
+| `--upgrade` | every module to the latest release, with a table of installed version → new version |
+| `--remove[=id,id,…]` | move modules to the dated backup folder (default: all that are installed); disable them in the UI first, or give `--zabbix-url` and `--token-file`. `--uninstall` is the same |
+| `--delete[=id,id,…]` | remove modules permanently (no backup, `config.php` too) and, with `--zabbix-url` and `--token-file`, unregister them in Zabbix; type `delete` to confirm, or `--yes` |
 
 *Zabbix in Docker:* if the web container has no host folder mounted at `/usr/share/zabbix/modules`, the installer puts the modules in `/opt/elasticpro/zabbix-modules` and prints the exact `volumes:` lines to add to the web service (files copied into a container are lost when it is re-created). Add them, then `docker compose up -d <zabbix-web-service>`.
 
-> The installer puts all five ElasticPro modules in place. This page needs only **ElasticPro**; Cluster Management and the three report widgets can stay disabled until you use them.
+> The release carries all seven ElasticPro modules, built from the modules project (integration-zabbix-elasticpro) at the commit pinned in `deploy/zabbix/MODULES_REF`, and the installer puts them all in place. This page needs only **ElasticPro**; Cluster Management and the report widgets can stay disabled until you use them.
 {.is-info}
 
 **2b. Or copy it by hand.** The same result, without the installer. Package the `elasticpro` folder on any machine that has the ElasticPro repository (for example the ElasticPro host), and copy it over:
