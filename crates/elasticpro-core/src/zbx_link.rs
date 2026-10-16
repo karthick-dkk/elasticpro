@@ -539,6 +539,15 @@ impl ZbxLink {
         true
     }
 
+    /// The TCP peer is one of `ELASTICPRO_TRUSTED_PROXIES`. False when none is named: an
+    /// unset list trusts no peer to vouch for a user (unlike X-Real-IP, which it believes).
+    pub fn peer_is_trusted_proxy(&self, peer: Option<IpAddr>) -> bool {
+        match &self.server.trusted_proxies {
+            Some(list) => peer.is_some_and(|p| source_allowed(list, canon(p))),
+            None => false,
+        }
+    }
+
     /// The source a request came from: `X-Real-IP` when the peer is a trusted proxy (any
     /// peer, when `ELASTICPRO_TRUSTED_PROXIES` is unset — the same trust nginx's `X-Auth-User`
     /// gets), else the TCP peer.

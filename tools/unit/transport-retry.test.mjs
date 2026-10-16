@@ -46,3 +46,13 @@ test('nginx\'s own JSON 429 (the new config) is read as it is once retries run o
   const r = await T.bridge({ type: 'PING' });
   assert.equal(r.errorCode, 'EP-606');
 });
+
+test('a write is not sent again after a 502: the core may have acted before it went away', async () => {
+  const calls = serve(reply(502, NGINX(502, 'Bad Gateway')), reply(200, { ok: true }));
+  const r = await T.bridge({ type: 'ES', method: 'DELETE', path: '/idx' });
+  assert.equal(calls.length, 1);
+  assert.equal(r.errorCode, 'EP-607');
+  const reads = serve(reply(502, NGINX(502, 'Bad Gateway')), reply(200, { ok: true, read: 1 }));
+  assert.deepEqual(await T.bridge({ type: 'ES', method: 'GET', path: '/_cat/health' }), { ok: true, read: 1 });
+  assert.equal(reads.length, 2);
+});

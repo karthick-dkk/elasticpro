@@ -70,17 +70,21 @@ const PROXY_STATUS = {
   503: ['core_unavailable', 'the ElasticPro core is not answering nginx (restarting, or stopped)'],
   504: ['core_timeout', 'the ElasticPro core took longer than nginx waits (120 s) to answer'],
 };
-// Retried, because the core never saw them: a 429 is nginx refusing before passing it on,
-// and a 502/503 is nginx failing to reach the core at all. Never a 504 — the core may
-// have done the work, and a write must not be sent twice.
+// A 429 is nginx refusing before passing anything on: always safe to send again. A 502/503
+// usually means nginx could not reach the core, but it also answers 502 when the core went
+// away mid-request (a restart, a crash) — after it may have acted. So those are retried only
+// for messages that change nothing; a 504 never.
 const RETRY_MS = { 429: [500, 1000, 2000], 502: [1500], 503: [1500] };
+const CHANGES = /^(ES|.*_(SET|ADD|REMOVE|DELETE|WRITE|SAVE|CLEAR|CREATE|REVOKE|UPLOAD|UNLOCK|RUN|RESTORE|BEGIN)|WRITE_UNLOCK|PRIME|FORGET|SEAL|OPEN|LOGIN|LOGOUT|BOOTSTRAP_ADMIN|TRUST_.*|UNTRUST_.*|ZABBIX_SYNC|ZABBIX_UNPAIR|REFRESH)$/;
+const readsOnly = (msg) => !CHANGES.test(String(msg.type || ''))
+  || (msg.type === 'ES' && /^(GET|HEAD)?$/i.test(String(msg.method || '').trim()));
 const pause = (ms) => new Promise((r) => setTimeout(r, ms));
 
 async function httpBridge(out) {
   const body = JSON.stringify(out);
   for (let attempt = 0; ; attempt++) {
     const r = await fetch('/bridge', { method: 'POST', headers: { 'content-type': 'application/json' }, body });
-    const waits = RETRY_MS[r.status];
+    const waits = (r.status === 429 || readsOnly(out)) ? RETRY_MS[r.status] : null;
     if (waits && attempt < waits.length) {
       const after = Number(r.headers.get('retry-after'));
       await pause(after > 0 && after < 10 ? after * 1000 : waits[attempt]);

@@ -61,6 +61,24 @@ const AUDITED: &[&str] = &["ES", "WRITE_UNLOCK", "TRUST_CERT", "UNTRUST_CERT", "
 
 struct App {
     core: Arc<Core>,
+    /// X-Auth-User is believed: ELASTICPRO_PROXY_AUTH is on (an authenticating proxy is in
+    /// front) and ELASTICPRO_TRUSTED_PROXIES names it. Off by default.
+    proxy_auth: bool,
+}
+
+/// Whether an `X-Auth-User` header names the caller. Only when an operator said an
+/// authenticating proxy sets it (ELASTICPRO_PROXY_AUTH) and said which address that proxy
+/// has (ELASTICPRO_TRUSTED_PROXIES). It used to be believed from anyone: nginx filled it
+/// from `$remote_user`, which nginx takes from any `Authorization: Basic` header without
+/// checking a password once basic auth was gone — so any name, Admin included, was a
+/// session for the asking.
+fn proxy_auth_enabled() -> bool {
+    let on = std::env::var("ELASTICPRO_PROXY_AUTH").is_ok_and(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"));
+    let proxies = std::env::var("ELASTICPRO_TRUSTED_PROXIES").is_ok_and(|v| !v.trim().is_empty());
+    if on && !proxies {
+        tracing::warn!("ELASTICPRO_PROXY_AUTH is on but ELASTICPRO_TRUSTED_PROXIES is not set: X-Auth-User is ignored — name the authenticating proxy's address to use it");
+    }
+    on && proxies
 }
 
 fn main() {
@@ -135,7 +153,7 @@ async fn run() {
         .route("/zabbix/pair", post(zabbix_pair).layer(axum::extract::DefaultBodyLimit::max(64 * 1024)))
         .fallback_service(ServeDir::new(&ui))
         .layer(axum::middleware::from_fn_with_state(core.clone(), frame_ancestors))
-        .with_state(Arc::new(App { core }));
+        .with_state(Arc::new(App { core, proxy_auth: proxy_auth_enabled() }));
     let addr = std::net::SocketAddr::from((bind, port));
     println!("elasticpro-bridge: http://{addr}/  (ui from {ui}){}", if hosted { "  [hosted: accounts required]" } else { "" });
     let l = tokio::net::TcpListener::bind(addr).await.expect("bind");
@@ -216,7 +234,12 @@ async fn bridge(
             obj.insert("session".into(), serde_json::Value::String(tok));
         }
     }
-    let user = headers.get(USER_HEADER).and_then(|v| v.to_str().ok()).map(str::trim).filter(|u| !u.is_empty());
+    // A name in X-Auth-User counts only from the authenticating proxy the operator named.
+    let user = if app.proxy_auth && app.core.zabbix_link().peer_is_trusted_proxy(Some(peer.ip())) {
+        headers.get(USER_HEADER).and_then(|v| v.to_str().ok()).map(str::trim).filter(|u| !u.is_empty())
+    } else {
+        None
+    };
 
     // An API token stands on its own: it is a secret this core issued and can revoke, so
     // unlike the user header it does not need the proxy to have vouched for anything.

@@ -67,6 +67,7 @@ const LEVELS: &[&str] = &["error", "warn", "info", "debug", "trace"];
 const SPECS: &[Spec] = &[
     // network & access (the rest of that block belongs to deploy.sh)
     spec("TRUSTED_PROXIES", Kind::Text, To::Env("ELASTICPRO_TRUSTED_PROXIES")),
+    spec("PROXY_AUTH_HEADER", Kind::Bool, To::Flag("ELASTICPRO_PROXY_AUTH")),
     spec("PUBLIC_URL", Kind::Text, To::Env("ELASTICPRO_PUBLIC_URL")),
     spec("FRAME_ANCESTORS", Kind::Text, To::Env("ELASTICPRO_FRAME_ANCESTORS")),
     // zabbix

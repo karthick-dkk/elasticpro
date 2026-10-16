@@ -37,6 +37,12 @@ RATE_EXEMPT_IPS=
 # the core directly.
 TRUSTED_PROXIES=
 
+# true only when an authenticating proxy in front of ElasticPro (oauth2-proxy, an IdP,
+# nginx basic auth) sets the X-Auth-User header from a VERIFIED identity, and that proxy's
+# address is in TRUSTED_PROXIES. The core then signs that name in without a password.
+# Empty or false (the default): the header is ignored.
+PROXY_AUTH_HEADER=
+
 # The address the Zabbix module uses to reach ElasticPro, e.g. https://elasticpro.example.com
 PUBLIC_URL=
 
@@ -50,8 +56,9 @@ FRAME_ANCESTORS=
 ZABBIX_URL=
 # The Zabbix API, if not <ZABBIX_URL>/api_jsonrpc.php
 ZABBIX_API_URL=
-# Addresses allowed to sign people in and to pair (the Zabbix frontend). They are also
-# never rate-limited. Empty: any address with a valid signature.
+# Addresses allowed to sign people in and to pair (the Zabbix frontend). The core does not
+# count their sign-ins against its budget; list them in RATE_EXEMPT_IPS too to lift nginx's
+# limit as well. Empty: any address with a valid signature.
 ZABBIX_ALLOWED_SOURCES=
 # How often clusters are read from Zabbix, in seconds (30-86400).
 ZABBIX_SYNC_SECONDS=

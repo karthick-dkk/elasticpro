@@ -128,6 +128,7 @@ FRAGMENTS="allow-ui:ALLOWED_UI_IPS allow-host:ALLOWED_DOMAINS rate-exempt:RATE_E
 FRAGMENT_NAME=config-txt.conf    # the operator's own files beside it in those directories stay theirs
 FRAGMENT_HEADER="# generated from config.txt by deploy.sh — edit config.txt, not this"
 CFG_TMP=
+BOM=$(printf '\357\273\277')    # UTF-8 byte order mark
 cleanup() { [ -z "$CFG_TMP" ] || rm -rf "$CFG_TMP"; }
 trap cleanup EXIT
 
@@ -203,10 +204,71 @@ cfg_list() {   # a comma-separated value, one trimmed non-empty item per line
 }
 cfg_get() { sed -n "s/^$1=//p" "$CFG_TMP/parsed" | tail -1; }
 
-# Prints what is wrong with VALUE for KEY and returns 1, or returns 0. Types follow the
-# comments in config.txt.example; a key it does not list is free text.
+# One rule per key, the same ones the core applies (SPECS in crates/elasticpro-core/src/settings.rs).
+# tools/unit/settings-parity.test.mjs fails when the two drift, so change both together.
+#   KEY bool | KEY int MIN MAX | KEY enum a,b,c | KEY text | KEY deploy (this script's own key)
+# bool and enum compare case-insensitively, as the core does.
+CFG_RULES='
+TRUSTED_PROXIES text
+PROXY_AUTH_HEADER bool
+PUBLIC_URL text
+FRAME_ANCESTORS text
+ZABBIX_URL text
+ZABBIX_API_URL text
+ZABBIX_ALLOWED_SOURCES text
+ZABBIX_SYNC_SECONDS int 30 86400
+ZABBIX_VERIFY_TLS bool
+ZABBIX_CLUSTER_TEMPLATE text
+ZABBIX_SCOPE_USERS_BY_GROUP bool
+ZABBIX_USE_ELASTICPRO_CREDENTIALS bool
+ZABBIX_CREATE_HOSTS bool
+ZABBIX_HOST_GROUP text
+ACTIVITY_LOG text
+ACTIVITY_LOG_MAX_MB int 1 100000
+ACTIVITY_LOG_KEEP int 0 1000
+ACTIVITY_LOG_STDOUT bool
+NOTIFY_DAYS int 1 3650
+LOG_LEVEL enum error,warn,info,debug,trace
+POLL_HEALTH_SECONDS int 180 300
+POLL_CONCURRENCY int 1 256
+ES_CONCURRENCY int 1 1024
+CACHE_MB int 1 1048576
+UI_READ_ONLY bool
+UI_AUTO_REFRESH bool
+UI_REFRESH_SECONDS int 5 3600
+UI_REQUEST_TIMEOUT_MS int 1000 600000
+UI_DISK_WARN_PERCENT int 1 100
+UI_DISK_CRIT_PERCENT int 1 100
+UI_SNAPSHOT_STALE_HOURS int 1 2160
+UI_LOG_INDEX_PATTERN text
+UI_TIME_FIELD text
+UI_TLS enum auto,system,insecure
+UI_LIVE_REDRAW enum pending,live,manual
+UI_DEFAULT_SCOPE enum last-selected,all
+UI_ROWS_PER_PAGE int 5 1000
+UI_MAX_LOG_ROWS int 10 10000
+LISTEN_PORT deploy
+ALLOWED_DOMAINS deploy
+ALLOWED_UI_IPS deploy
+RATE_EXEMPT_IPS deploy
+CORE_MEM_LIMIT deploy
+'
+
+# Prints what is wrong with VALUE for KEY and returns 1, or returns 0. First the table above
+# (what the core also enforces), then what only this script checks.
 cfg_check() {
-  local k=$1 v=$2 item
+  local k=$1 v=$2 item rule kind a b lower
+  if [[ $v == *[[:cntrl:]]* ]]; then echo "contains a control character"; return 1; fi
+  rule=$(printf '%s\n' "$CFG_RULES" | awk -v k="$k" '$1 == k { print; exit }')
+  if [ -n "$rule" ]; then
+    read -r _ kind a b <<< "$rule"
+    lower=$(printf '%s' "$v" | tr 'A-Z' 'a-z')
+    case $kind in
+      bool) case $lower in true|false) ;; *) echo "must be true or false"; return 1 ;; esac ;;
+      int)  in_range "$v" "$a" "$b" || { echo "must be a whole number from $a to $b"; return 1; } ;;
+      enum) case ",$a," in *",$lower,"*) ;; *) echo "must be one of: ${a//,/, }"; return 1 ;; esac ;;
+    esac
+  fi
   case $k in
     LISTEN_PORT) in_range "$v" 1 65535 || { echo "must be a port number, 1-65535"; return 1; } ;;
     ALLOWED_UI_IPS|RATE_EXEMPT_IPS|TRUSTED_PROXIES|ZABBIX_ALLOWED_SOURCES)
@@ -217,22 +279,7 @@ cfg_check() {
       while IFS= read -r item; do
         is_hostname "$item" || is_v4 "$item" || is_v6 "$item" || { echo "\"$item\" is not a host name or an IP address"; return 1; }
       done < <(cfg_list "$v") ;;
-    ZABBIX_VERIFY_TLS|ZABBIX_SCOPE_USERS_BY_GROUP|ZABBIX_USE_ELASTICPRO_CREDENTIALS|ZABBIX_CREATE_HOSTS|ACTIVITY_LOG_STDOUT|UI_READ_ONLY|UI_AUTO_REFRESH)
-      case $v in true|false) ;; *) echo "must be true or false"; return 1 ;; esac ;;
-    ZABBIX_SYNC_SECONDS)     in_range "$v" 30 86400 || { echo "must be a number, 30-86400"; return 1; } ;;
-    POLL_HEALTH_SECONDS)     in_range "$v" 180 300 || { echo "must be a number, 180-300"; return 1; } ;;
-    POLL_CONCURRENCY)        in_range "$v" 1 256 || { echo "must be a number, 1-256"; return 1; } ;;
-    ES_CONCURRENCY)          in_range "$v" 1 1024 || { echo "must be a number, 1-1024"; return 1; } ;;
-    UI_REFRESH_SECONDS)      in_range "$v" 5 3600 || { echo "must be a number, 5-3600"; return 1; } ;;
-    UI_REQUEST_TIMEOUT_MS)   in_range "$v" 1000 600000 || { echo "must be a number, 1000-600000"; return 1; } ;;
-    UI_DISK_WARN_PERCENT|UI_DISK_CRIT_PERCENT) in_range "$v" 0 100 || { echo "must be a percentage, 0-100"; return 1; } ;;
-    ACTIVITY_LOG_MAX_MB|ACTIVITY_LOG_KEEP|NOTIFY_DAYS|CACHE_MB|UI_SNAPSHOT_STALE_HOURS|UI_ROWS_PER_PAGE|UI_MAX_LOG_ROWS)
-      is_int "$v" || { echo "must be a whole number"; return 1; } ;;
     CORE_MEM_LIMIT) [[ $v =~ ^[0-9]+[bBkKmMgG]?$ ]] || { echo "must be a size such as 1g or 512m"; return 1; } ;;
-    LOG_LEVEL) case $v in error|warn|info|debug) ;; *) echo "must be error, warn, info or debug"; return 1 ;; esac ;;
-    UI_TLS) case $v in auto|system|insecure) ;; *) echo "must be auto, system or insecure"; return 1 ;; esac ;;
-    UI_LIVE_REDRAW) case $v in pending|live|manual) ;; *) echo "must be pending, live or manual"; return 1 ;; esac ;;
-    UI_DEFAULT_SCOPE) case $v in last-selected|all) ;; *) echo "must be last-selected or all"; return 1 ;; esac ;;
     PUBLIC_URL|ZABBIX_URL|ZABBIX_API_URL)
       [[ $v =~ ^https?://[^[:space:]]+$ ]] || { echo "must be a URL starting with http:// or https://"; return 1; } ;;
   esac
@@ -245,10 +292,11 @@ config_validate() {
   local src=$1 line n=0 key val msg errs=0 seen=" " known
   [ -n "$CFG_TMP" ] || CFG_TMP=$(mktemp -d)
   : > "$CFG_TMP/parsed"
-  known=" $(sed -n 's/^\([A-Z][A-Z0-9_]*\)=.*/\1/p' "$CONFIG_EXAMPLE" | tr '\n' ' ')"
+  known=" $(LC_ALL=C sed -e "1s/^$BOM//" "$CONFIG_EXAMPLE" | sed -n 's/^\([A-Z][A-Z0-9_]*\)=.*/\1/p' | tr '\n' ' ')"
   while IFS= read -r line || [ -n "$line" ]; do
     n=$((n + 1))
     line=${line%$'\r'}
+    [ "$n" != 1 ] || line=${line#"$BOM"}    # an editor's UTF-8 BOM; the core skips it too
     line=$(printf '%s' "$line" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
     case $line in ''|'#'*) continue ;; esac
     if ! [[ $line =~ ^[A-Za-z_][A-Za-z0-9_]*[[:space:]]*= ]]; then
@@ -256,6 +304,10 @@ config_validate() {
     fi
     key=$(printf '%s' "${line%%=*}" | sed 's/[[:space:]]*$//')
     val=$(printf '%s' "${line#*=}" | sed 's/^[[:space:]]*//')
+    case $val in    # the core takes one pair of matching quotes off a value
+      \"*\"|\'*\') [ "${#val}" -lt 2 ] || val=${val:1:${#val}-2} ;;
+    esac
+    val=$(printf '%s' "$val" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
     case $known in
       *" $key "*) ;;
       *) say "  ! $CONFIG line $n: unknown key $key — ignored (see $CONFIG_EXAMPLE for the keys)" >&2; continue ;;

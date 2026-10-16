@@ -25,7 +25,9 @@ check(){ if [ "$2" = "$3" ]; then ok "$1"; else bad "$1 (got '$2', want '$3')"; 
 
 echo "== hosted mode =="
 P=$(free_port); OUT=$(mktemp)
-ELASTICPRO_BIND=0.0.0.0 RUST_LOG=info "$BIN" ui "$P" >"$OUT" 2>&1 & PID=$!; disown
+# X-Auth-User counts only with PROXY_AUTH on and the proxy named; this instance plays the
+# authenticating proxy from loopback. The second instance below checks the default: ignored.
+ELASTICPRO_BIND=0.0.0.0 ELASTICPRO_PROXY_AUTH=1 ELASTICPRO_TRUSTED_PROXIES=127.0.0.1/32 RUST_LOG=info "$BIN" ui "$P" >"$OUT" 2>&1 & PID=$!; disown
 trap 'kill $PID 2>/dev/null; rm -f "$OUT"' EXIT
 until curl -s -o /dev/null "http://127.0.0.1:$P/"; do sleep 0.2; done
 B="http://127.0.0.1:$P/bridge"
@@ -88,6 +90,14 @@ for t in ZABBIX_LINK_GET ZABBIX_LINK_SET ZABBIX_LINK_TEST ZABBIX_PAIR_BEGIN ZABB
   check "$t needs a caller"                    "$(post $B -d "{\"type\":\"$t\"}" | field kind)" "unauthenticated"
 done
 check "a header with no account is nobody"     "$(post $B -H 'x-auth-user: mallory' -d '{"type":"ZABBIX_LINK_GET"}' | field kind)" "unauthenticated"
+
+# The default: no authenticating proxy, so X-Auth-User names nobody — not even a real account.
+# nginx used to fill it from any client's Basic header, unchecked: Admin for the asking.
+PD=$(free_port); OUTD=$(mktemp); DD=$(mktemp -d)
+ELASTICPRO_BIND=0.0.0.0 ELASTICPRO_DATA_DIR="$DD" RUST_LOG=warn "$BIN" ui "$PD" >"$OUTD" 2>&1 & PIDD=$!; disown
+for _ in $(seq 1 100); do curl -s -o /dev/null "http://127.0.0.1:$PD/" && break; sleep 0.2; done
+check "X-Auth-User is ignored by default"      "$(post "http://127.0.0.1:$PD/bridge" -H 'x-auth-user: Admin' -d '{"type":"USER_LIST"}' | field kind)" "unauthenticated"
+kill $PIDD 2>/dev/null; rm -rf "$OUTD" "$DD"
 # Pairing: with nothing in progress, unsigned and signed-with-anything look the same.
 PZ="http://127.0.0.1:$P/zabbix/pair"
 PB=$(printf '{"nonce":"n","zabbixUrl":"https://zbx","apiUrl":"https://zbx/api_jsonrpc.php","apiToken":"%s","zabbixVersion":"7.0","ts":%s}' "$(printf 'a%.0s' $(seq 64))" "$(date +%s)")
