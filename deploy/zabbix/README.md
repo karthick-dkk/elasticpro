@@ -285,8 +285,28 @@ On the Zabbix web host:
 
 ```bash
 curl -fsSL https://github.com/karthick-dkk/elasticpro/releases/latest/download/zabbix-modules-install.sh | sudo bash
-# or: download it, read it, then `sudo bash zabbix-modules-install.sh --dry-run`, then without --dry-run
+# or: download it, read it, then run it
+curl -fsSL https://github.com/karthick-dkk/elasticpro/releases/latest/download/zabbix-modules-install.sh -o zabbix-modules-install.sh
+head -1 zabbix-modules-install.sh          # must say: #!/usr/bin/env bash
+sudo bash zabbix-modules-install.sh --dry-run
+sudo bash zabbix-modules-install.sh
 ```
+
+Later, on the same host:
+
+```bash
+sudo bash zabbix-modules-install.sh --upgrade                 # all modules to the latest release, with a table
+sudo bash zabbix-modules-install.sh --remove=ep_overview      # out of Zabbix, kept in the backup folder
+sudo bash zabbix-modules-install.sh --delete=ep_overview,ep_tophosts   # gone for good (asks; --yes skips the question)
+sudo bash zabbix-modules-install.sh --remove                  # all seven that are installed
+```
+
+If running the script prints `syntax error near unexpected token newline`, or the file starts
+with `<!DOCTYPE html>`, the download saved a web page (a `github.com/.../blob/...` link, a
+404, or a proxy's page), not the script. Download it again with the `curl` line above (or the
+raw link `https://raw.githubusercontent.com/karthick-dkk/elasticpro/main/deploy/zabbix/zabbix-modules-install.sh`)
+and check `head -1`. The installer also checks the archive it downloads: if GitHub answered
+with a web page instead of the file, it says so and stops before changing anything.
 
 [`zabbix-modules-install.sh`](zabbix-modules-install.sh) takes
 `elasticpro-zabbix-modules-<ver>.tar.gz` from the release, checks its `.sha256` before
@@ -298,25 +318,37 @@ no mount it installs to `/opt/elasticpro/zabbix-modules` and prints the `volumes
 lines to add). Each module is staged beside the modules folder and renamed in; the
 previous one goes to `/var/backups/elasticpro-zabbix/<stamp>/`, `config.php` is carried
 over untouched, and a module already at this version is left alone, so re-running it is
-the upgrade. A module that is bind-mounted into the container on its own is updated in
+the upgrade (`--upgrade` does the same and prints a table first). A module that is bind-mounted into the container on its own is updated in
 place instead, since a folder renamed under a running container vanishes from it.
 
 | Option | Does |
 | --- | --- |
 | `--dry-run` | every step, nothing changed |
 | `--version vX.Y.Z` | that release instead of the latest |
-| `--from-dir <path>` / `--tarball <file>` | no download: a checkout (the archive is built from it with `tools/zabbix-modules-tarball.sh`, as the release is) or an unpacked archive; a downloaded archive, checked against `<file>.sha256` beside it |
+| `--from-dir <path>` / `--tarball <file>` | no download: a checkout of the modules project (the archive is built from it with `tools/zabbix-modules-tarball.sh --modules-src`, as the release is) or an unpacked archive; a downloaded archive, checked against `<file>.sha256` beside it |
 | `--modules-dir <dir> --owner uid:gid`, `--container <name>`, `--package` | override detection (a package frontend and a Zabbix web container on one host: `--zabbix-url` picks the one publishing its port; without it the installer asks) |
 | `--zabbix-url <url> --token-file <file>` | register and enable the modules through `module.get` / `module.create` / `module.update` — a newly copied module can be registered this way, no Scan directory needed. The token is a Super admin's, alone in a `chmod 600` file; a group- or world-readable file is refused |
 | `--write-master-template --password-file <file> [--user <name>]` | press Cluster Management → **Write master template**, the page's own action. It is not an API method, and API tokens cannot open a frontend session, so this signs in with a Super admin's password (from a `chmod 600` file) and signs out afterwards. Not with MFA or SSO on that user — press the button instead |
-| `--uninstall` | move the five module folders to the backup folder; with `--zabbix-url`/`--token-file` it disables them first, otherwise disable them in the UI before running it |
+| `--upgrade` | every module to the latest release (or `--version`), and a table first: installed version → new version, `new` when not installed, `unchanged` when the files are identical (`updated` otherwise). The replaced module is kept in the dated backup, as in a plain run |
+| `--remove[=id,id,…]` | move those modules (default: every ElasticPro module that is installed) to the dated backup folder, `config.php` with them; with `--zabbix-url`/`--token-file` it disables them first, otherwise disable them in the UI before running it. `--uninstall` is the same |
+| `--delete[=id,id,…]` | remove them permanently: no backup, `config.php` deleted with the folder, and with `--zabbix-url`/`--token-file` they are disabled and then unregistered (`module.delete`). Asks you to type `delete` on a terminal; without one it needs `--yes` |
+
+The ids are `elasticpro`, `ep_clients`, `ep_capacity`, `ep_resources`, `ep_volume`,
+`ep_tophosts` and `ep_overview`; anything else is refused before any change.
 
 Secrets go to `curl` in config files, never on a command line, and are never printed.
 
 The archive is built by `tools/zabbix-modules-tarball.sh` (GNU tar; sorted, owner 0, fixed
 mtime, `gzip -n`), which the release job in `.github/workflows/build.yml` runs on every
-`v*` tag; the same sources give the same bytes. It holds the five module folders without
-tests, tool scripts, READMEs or any `config.php`. `install-modules.sh` (below, and in
+`v*` tag; the same sources give the same bytes. It holds all seven module folders without
+tests, tool scripts, READMEs or any `config.php`. Six come from the modules project,
+[integration-zabbix-elasticpro](https://github.com/karthick-dkk/integration-zabbix-elasticpro),
+at the commit pinned in [`MODULES_REF`](MODULES_REF) (the release job checks that commit
+out and passes it as `--modules-src`; moving it is a pull request here); the seventh, the
+`elasticpro` menu module, is `deploy/zabbix/module/elasticpro` in this repository. Building
+it yourself: clone the modules project at that commit and run
+`tools/zabbix-modules-tarball.sh --modules-src <that checkout>`; without `--modules-src` the
+tool stops and says so, rather than falling back to an older copy. `install-modules.sh` (below, and in
 `PRODUCTION.md`) stays for the stack in `stack/`, where the modules are mounted from the
 repository.
 

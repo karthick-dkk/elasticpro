@@ -232,6 +232,27 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # The widgets are not in this repository: they live in the modules project, and the
+      # release carries the commit pinned in deploy/zabbix/MODULES_REF (first line that is
+      # not a comment). Read here, then passed to the checkout as its ref.
+      - name: which modules commit
+        id: modules_ref
+        run: |
+          ref=$(grep -v '^[[:space:]]*#' deploy/zabbix/MODULES_REF | grep -v '^[[:space:]]*$' | head -1 | tr -d '[:space:]')
+          [[ $ref =~ ^[0-9a-f]{40}$ ]] || { echo "deploy/zabbix/MODULES_REF must hold a full 40-character commit SHA, got: $ref" >&2; exit 1; }
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v4
+        with:
+          repository: karthick-dkk/integration-zabbix-elasticpro
+          ref: ${{ steps.modules_ref.outputs.ref }}
+          path: modules-src
+
+      # The shared-code freshness check in the tarball tool runs under node.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
       # Syntax always; shellcheck (preinstalled on the runner) for errors only.
       - name: check the installer
         run: |
@@ -248,7 +269,10 @@ jobs:
         env:
           VERSION: ${{ needs.version.outputs.version }}
         run: |
-          tools/zabbix-modules-tarball.sh --version "$VERSION" --out dist
+          tools/zabbix-modules-tarball.sh --modules-src modules-src --version "$VERSION" --out dist
+          # All seven modules, or the release would silently ship fewer.
+          [ "$(tar -tzf dist/elasticpro-zabbix-modules-*.tar.gz | grep -c '/manifest.json$')" = 7 ] \
+            || { echo "the archive must carry seven modules" >&2; exit 1; }
           cp deploy/zabbix/zabbix-modules-install.sh dist/
           # The product's own installer, so both are fetched the same way — from the
           # release rather than from whatever is on main at the time.

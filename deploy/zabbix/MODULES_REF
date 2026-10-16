@@ -1,0 +1,2 @@
+# The commit of github.com/karthick-dkk/integration-zabbix-elasticpro whose zabbix/ folder the release's elasticpro-zabbix-modules-<ver>.tar.gz is built from (build.yml checks it out). Move it forward by pull request when a new module build should ship; the first line that is not a comment is the ref.
+5d3a828572372698a92ab94d8d59001797bca1e1

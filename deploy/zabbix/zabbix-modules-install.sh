@@ -4,11 +4,20 @@
 # One line (the latest release):
 #   curl -fsSL https://github.com/karthick-dkk/elasticpro/releases/latest/download/zabbix-modules-install.sh | sudo bash
 #
-# Safer — download, read, then run:
-#   curl -fsSLO https://github.com/karthick-dkk/elasticpro/releases/latest/download/zabbix-modules-install.sh
+# Safer — download, read, then run (the exact commands that work):
+#   curl -fsSL https://github.com/karthick-dkk/elasticpro/releases/latest/download/zabbix-modules-install.sh -o zabbix-modules-install.sh
 #   less zabbix-modules-install.sh
 #   sudo bash zabbix-modules-install.sh --dry-run
 #   sudo bash zabbix-modules-install.sh [options]
+# A release other than the latest:
+#   curl -fsSL https://github.com/karthick-dkk/elasticpro/releases/download/vX.Y.Z/zabbix-modules-install.sh -o zabbix-modules-install.sh
+# Or the script as it is on main:
+#   curl -fsSL https://raw.githubusercontent.com/karthick-dkk/elasticpro/main/deploy/zabbix/zabbix-modules-install.sh -o zabbix-modules-install.sh
+#
+# If running it prints `syntax error near unexpected token newline` or `<!DOCTYPE html>`, the
+# download saved a web page, not the script (a github.com/.../blob/... page, or a 404): use the
+# raw link above (curl -fsSL … -o zabbix-modules-install.sh); `head -1 zabbix-modules-install.sh`
+# must then say `#!/usr/bin/env bash`.
 #
 # Options through the pipe: ... | sudo bash -s -- --dry-run
 #
@@ -24,11 +33,23 @@
 #      "Write master template" on Cluster Management.
 # Safe to run again: a module already at this version is left alone.
 #
+# Day-to-day:
+#   (no option)             install or update, as above
+#   --upgrade               every module to the latest release (or --version), with a table
+#                           of installed version -> new version for each
+#   --remove[=id,id,...]    move modules out of Zabbix into the backup folder (default: every
+#                           ElasticPro module that is installed); --uninstall is the same
+#   --delete[=id,id,...]    remove modules for good: no backup, and unregistered in Zabbix
+#                           when --zabbix-url and --token-file are given
+#   ids: elasticpro ep_clients ep_capacity ep_resources ep_volume ep_tophosts ep_overview
+#
 # Options:
 #   --version vX.Y.Z        that release instead of the latest
-#   --from-dir PATH         no download: PATH is a checkout of the repository (the archive is
-#                           built from it by tools/zabbix-modules-tarball.sh, as the release is),
-#                           or an extracted release archive
+#   --from-dir PATH         no download: PATH is a checkout of the modules project
+#                           (integration-zabbix-elasticpro; the archive is built from it by
+#                           tools/zabbix-modules-tarball.sh --modules-src, as the release is,
+#                           so run this script from an ElasticPro checkout), or an extracted
+#                           release archive
 #   --tarball FILE          no download: a release archive you fetched yourself; its
 #                           FILE.sha256 is checked when it is next to it
 #   --modules-dir DIR       Zabbix's modules folder (skips detection; use with --owner)
@@ -50,9 +71,20 @@
 #   --user NAME             Super admin user for --write-master-template (default Admin)
 #   --password-file FILE    that user's password, alone in a chmod 600 file
 #   --insecure              the Zabbix URL has a self-signed certificate
-#   --uninstall             remove the modules this installed (kept in the backup folder).
-#                           Disable them in Zabbix first (Administration → General → Modules),
-#                           or give --zabbix-url and --token-file and this disables them
+#   --upgrade               install the latest release (or --version) over every module and
+#                           print what changes: installed version → new version per module
+#                           ("new" when not installed, "unchanged" when the files are the same).
+#                           The replaced module is kept in the dated backup, as always
+#   --remove[=ID,ID,...]    move those modules (default: all that are installed) into the dated
+#                           backup folder; their config.php goes with them. Disable them in
+#                           Zabbix first (Administration → General → Modules), or give
+#                           --zabbix-url and --token-file and this disables them
+#   --uninstall             the same as --remove
+#   --delete[=ID,ID,...]    remove those modules permanently: no backup, config.php deleted with
+#                           the folder. With --zabbix-url and --token-file they are disabled and
+#                           then unregistered in Zabbix (module.delete). Asks you to type
+#                           "delete" on a terminal; without one it needs --yes
+#   --yes                   confirm --delete without asking
 #   --dry-run               say everything it would do; change nothing
 #   -h, --help              this text
 #
@@ -60,11 +92,10 @@
 set -euo pipefail
 
 REPO=${EP_REPO:-karthick-dkk/elasticpro}
-# The module ids, the folder names under modules/. ep_tophosts (Top hosts) and ep_overview
-# (Client overview) are in the
-# integration-zabbix-elasticpro project; tools/zabbix-modules-tarball.sh still builds the archive
-# from the first five, so a release archive carries five and --from-dir a checkout of that
-# project carries all seven. Listed here so uninstall, Docker mounts and the API know it.
+# The module ids, the folder names under modules/. A release archive carries all seven
+# (tools/zabbix-modules-tarball.sh builds it from the integration-zabbix-elasticpro project at
+# the commit in deploy/zabbix/MODULES_REF, plus the elasticpro menu module). Listed here so
+# remove, delete, Docker mounts and the API know them.
 KNOWN_IDS=(elasticpro ep_clients ep_capacity ep_resources ep_volume ep_tophosts ep_overview)
 
 VERSION=latest
@@ -82,7 +113,11 @@ ZBX_USER=Admin
 PASSWORD_FILE=
 WRITE_MASTER=0
 INSECURE=0
-UNINSTALL=0
+UNINSTALL=0     # 1 for --remove, --uninstall and --delete: no package is fetched
+DELETE=0        # 1 for --delete: no backup, and unregister in Zabbix
+UPGRADE=0
+ASSUME_YES=0
+SELECT=()       # --remove/--delete ids; empty = every known module that is installed
 DRY=0
 
 need_arg() { [ -n "${2:-}" ] || { echo "$1 needs a value (see --help)" >&2; exit 2; }; }
@@ -103,7 +138,12 @@ while [ $# -gt 0 ]; do
     --password-file) need_arg "$@"; PASSWORD_FILE=$2; shift 2 ;;
     --write-master-template) WRITE_MASTER=1; shift ;;
     --insecure) INSECURE=1; shift ;;
-    --uninstall) UNINSTALL=1; shift ;;
+    --upgrade) UPGRADE=1; shift ;;
+    --remove|--uninstall) UNINSTALL=1; shift ;;
+    --remove=*|--uninstall=*) UNINSTALL=1; IFS=, read -r -a SELECT <<<"${1#*=}"; shift ;;
+    --delete) UNINSTALL=1; DELETE=1; shift ;;
+    --delete=*) UNINSTALL=1; DELETE=1; IFS=, read -r -a SELECT <<<"${1#*=}"; shift ;;
+    --yes) ASSUME_YES=1; shift ;;
     --dry-run) DRY=1; shift ;;
     -h|--help)
       if [ -f "$0" ]; then sed -n '2,/^set -euo/p' "$0" | sed '$d; s/^# \{0,1\}//'
@@ -131,8 +171,20 @@ case "$OWNER" in ''|[0-9a-z_]*:[0-9a-z_]*) ;; *) fail "--owner is uid:gid (or us
 if [ -n "$TOKEN_FILE" ] && [ -z "$ZBX_URL" ]; then fail "--token-file needs --zabbix-url"; fi
 if [ "$WRITE_MASTER" = 1 ]; then
   [ -n "$ZBX_URL" ] && [ -n "$PASSWORD_FILE" ] || fail "--write-master-template needs --zabbix-url and --password-file (a Super admin's password: the button is a page action, and Zabbix API tokens cannot sign in to pages)"
-  [ "$UNINSTALL" = 0 ] || fail "--write-master-template and --uninstall do not go together"
+  [ "$UNINSTALL" = 0 ] || fail "--write-master-template and --remove/--delete do not go together"
 fi
+[ "$UPGRADE" = 0 ] || [ "$UNINSTALL" = 0 ] || fail "--upgrade and --remove/--delete do not go together"
+[ "$ASSUME_YES" = 0 ] || [ "$DELETE" = 1 ] || fail "--yes only confirms --delete"
+if [ "$UNINSTALL" = 1 ] && { [ -n "$FROM_DIR" ] || [ -n "$TARBALL" ] || [ "$VERSION" != latest ]; }; then
+  fail "--remove/--delete work on what is installed; --from-dir, --tarball and --version do not apply"
+fi
+# Module ids are checked against the known ones before anything is touched.
+for id in "${SELECT[@]+"${SELECT[@]}"}"; do
+  ok_id=0
+  for k in "${KNOWN_IDS[@]}"; do [ "$k" = "$id" ] && ok_id=1; done
+  [ "$ok_id" = 1 ] || fail "unknown module id \"$id\" — valid ids: ${KNOWN_IDS[*]}"
+done
+[ "$UNINSTALL" = 0 ] || [ ${#SELECT[@]} -gt 0 ] || SELECT=("${KNOWN_IDS[@]}")
 [ -z "$PASSWORD_FILE" ] || [ "$WRITE_MASTER" = 1 ] || fail "--password-file is only used by --write-master-template"
 if [ "$DRY" = 0 ] && [ "$(id -u)" != 0 ]; then
   [ -n "$MODULES_DIR" ] || fail "run as root (sudo), or give --modules-dir you can write to with --owner"
@@ -175,8 +227,18 @@ PKG_VERSION=
 sha256_of() { sha256sum "$1" | awk '{print $1}'; }
 
 # Checks a .tar.gz against its .sha256 file, then extracts it into $WORK/pkg.
+# GitHub sends a web page (a 404, a blob view, a proxy's login page) with a 200 more often
+# than one would think; curl saves it as if it were the file.
+not_a_web_page() {
+  local f=$1 first
+  first=$(head -c 64 "$f" 2>/dev/null | LC_ALL=C tr -d ' \t\r\n' | head -c 1)
+  [ "$first" != "<" ] || fail "$(basename "$f") is a web page, not the file: GitHub returned a web page instead of the file — check the version exists (--version) and that this host reaches github.com directly (no proxy page)"
+}
+
 verify_and_extract() {
   local tgz=$1 sumfile=$2 want got top
+  not_a_web_page "$tgz"
+  [ -z "$sumfile" ] || not_a_web_page "$sumfile"
   if [ -n "$sumfile" ]; then
     want=$(awk 'NR==1 {print tolower($1)}' "$sumfile")
     [[ $want =~ ^[0-9a-f]{64}$ ]] || fail "$sumfile does not hold a SHA-256"
@@ -206,12 +268,22 @@ elif [ -n "$TARBALL" ]; then
 elif [ -n "$FROM_DIR" ]; then
   step "package: from $FROM_DIR"
   [ -d "$FROM_DIR" ] || fail "$FROM_DIR is not a folder"
-  if [ -f "$FROM_DIR/tools/zabbix-modules-tarball.sh" ]; then
-    # A checkout: build the archive the release would have, and install that.
-    bash "$FROM_DIR/tools/zabbix-modules-tarball.sh" --out "$WORK/built" >/dev/null
+  mods_src=
+  if [ -d "$FROM_DIR/zabbix/embed-module" ]; then mods_src=$FROM_DIR
+  elif [ -d "$FROM_DIR/embed-module" ] && [ -f "$FROM_DIR/sync-assets.mjs" ]; then mods_src=$FROM_DIR; fi
+  if [ -n "$mods_src" ]; then
+    # A checkout of the modules project (integration-zabbix-elasticpro): build the archive the
+    # release would have from it, with the tool that sits next to this script.
+    tool=
+    [ -f "$0" ] && [ -f "$(dirname "$0")/../../tools/zabbix-modules-tarball.sh" ] && tool=$(cd "$(dirname "$0")/../.." && pwd)/tools/zabbix-modules-tarball.sh
+    [ -n "$tool" ] || fail "$FROM_DIR is a modules-project checkout: building from it needs tools/zabbix-modules-tarball.sh, so run this script from an ElasticPro checkout (deploy/zabbix/), or build the archive there and give it with --tarball"
+    bash "$tool" --modules-src "$mods_src" --out "$WORK/built" >/dev/null
     tgz=$(ls "$WORK/built"/*.tar.gz)
-    ok "built $(basename "$tgz") with tools/zabbix-modules-tarball.sh"
+    ok "built $(basename "$tgz") from $mods_src with tools/zabbix-modules-tarball.sh"
     verify_and_extract "$tgz" "$tgz.sha256"
+  elif [ -f "$FROM_DIR/tools/zabbix-modules-tarball.sh" ]; then
+    # An ElasticPro checkout: the widgets are in the modules project, which the tool needs.
+    fail "$FROM_DIR is the ElasticPro repository; the widgets are in the modules project — give --from-dir its checkout (github.com/karthick-dkk/integration-zabbix-elasticpro, at the commit in $FROM_DIR/deploy/zabbix/MODULES_REF)"
   else
     # An extracted release archive (or a folder of module folders).
     [ -n "$(ls "$FROM_DIR"/*/manifest.json 2>/dev/null)" ] || fail "$FROM_DIR has no module folders (*/manifest.json) and is not a repository checkout"
@@ -233,7 +305,7 @@ else
   ASSET=elasticpro-zabbix-modules-${TAG#v}.tar.gz
   BASE=https://github.com/$REPO/releases/download/$TAG
   curl -fsSL --retry 3 -o "$WORK/$ASSET" "$BASE/$ASSET" \
-    || fail "cannot download $BASE/$ASSET — release $TAG may predate the Zabbix modules asset (give --version, or --from-dir a checkout)"
+    || fail "cannot download $BASE/$ASSET — release $TAG may predate the Zabbix modules asset (give --version, or --from-dir the modules project's checkout)"
   curl -fsSL --retry 3 -o "$WORK/$ASSET.sha256" "$BASE/$ASSET.sha256" \
     || fail "cannot download $BASE/$ASSET.sha256 — refusing to install an unverified archive"
   ok "downloaded $ASSET ($TAG)"
@@ -449,6 +521,28 @@ module_ok_to_touch() {   # is <dir> one of ours? (its manifest names the id we e
   [ "$(sed -n 's/^[[:space:]]*"id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$dir/manifest.json" | head -1)" = "$id" ]
 }
 
+# A manifest's "version" (the first one; a string or a bare number).
+manifest_version() { sed -n 's/^[[:space:]]*"version"[[:space:]]*:[[:space:]]*"\{0,1\}\([^",]*\).*/\1/p' "$1/manifest.json" 2>/dev/null | head -1; }
+
+# --upgrade: what each module goes from and to. "unchanged" is decided by the files, not the
+# version number alone, so a module whose files changed under the same version says "updated".
+upgrade_table() {
+  local id dst cur new what
+  printf '  %-14s %-12s    %-12s %s\n' module installed new status
+  for id in "${PKG_IDS[@]}"; do
+    dst=$(dst_of "$id"); new=$(manifest_version "$PKG_DIR/$id")
+    if [ -f "$dst/manifest.json" ]; then
+      cur=$(manifest_version "$dst")
+      if [ "$(content_sum "$dst")" = "$(content_sum "$PKG_DIR/$id")" ]; then what=unchanged
+      elif [ "$cur" = "$new" ]; then what="updated (same version number, files differ)"
+      else what=updated; fi
+    else
+      cur=-; what=new
+    fi
+    printf '  %-14s %-12s →  %-12s %s\n' "$id" "${cur:-?}" "${new:-?}" "$what"
+  done
+}
+
 INSTALLED=()   # "id|folder|what happened"
 BACKED_UP=0
 
@@ -519,28 +613,45 @@ set_perms_keep() {
   find "$dir" -type f ! -path "$dir/config.php" ! \( -path "$dir/config.php.*" ! -path "$dir/config.php.example" \) -exec chmod 0644 {} +
 }
 
+# --remove: the folder goes to the dated backup. --delete: it is gone, config.php with it.
 uninstall_module() {
-  local id=$1 dst old
+  local id=$1 dst old verb=removed
+  [ "$DELETE" = 0 ] || verb=deleted
   dst=$(dst_of "$id")
   if [ ! -f "$dst/manifest.json" ]; then say "  - $id: not installed at $dst"; return; fi
   module_ok_to_touch "$dst" "$id" || { note "$id: $dst holds a different module — left alone"; return; }
   if [ -n "${INPLACE[$id]:-}" ]; then
-    if [ "$DRY" = 1 ]; then say "  would: copy $dst to $BACKUP_DIR/$STAMP/$id and empty it (config.php kept; it is mounted into $CONTAINER)"
+    if [ "$DELETE" = 1 ]; then
+      if [ "$DRY" = 1 ]; then say "  would: empty $dst, config.php too, no backup (it is mounted into $CONTAINER)"
+      else find "$dst" -mindepth 1 -maxdepth 1 -exec rm -rf {} +; fi
+      INSTALLED+=("$id|$dst|deleted (emptied; remove its volume line from the web container)")
     else
-      mkdir -p "$BACKUP_DIR/$STAMP"; cp -a "$dst" "$BACKUP_DIR/$STAMP/$id"; BACKED_UP=1
-      find "$dst" -mindepth 1 -maxdepth 1 ! -name config.php ! \( -name 'config.php.*' ! -name config.php.example \) -exec rm -rf {} +
+      if [ "$DRY" = 1 ]; then say "  would: copy $dst to $BACKUP_DIR/$STAMP/$id and empty it (config.php kept; it is mounted into $CONTAINER)"
+      else
+        mkdir -p "$BACKUP_DIR/$STAMP"; cp -a "$dst" "$BACKUP_DIR/$STAMP/$id"; BACKED_UP=1
+        find "$dst" -mindepth 1 -maxdepth 1 ! -name config.php ! \( -name 'config.php.*' ! -name config.php.example \) -exec rm -rf {} +
+      fi
+      INSTALLED+=("$id|$dst|removed (emptied; remove its volume line from the web container)")
     fi
-    INSTALLED+=("$id|$dst|removed (emptied; remove its volume line from the web container)")
   else
-    if [ "$DRY" = 1 ]; then say "  would: move $dst to $BACKUP_DIR/$STAMP/$id"
+    if [ "$DELETE" = 1 ]; then
+      if [ "$DRY" = 1 ]; then say "  would: delete $dst for good (no backup)"
+      else
+        old=$(dirname "$(dirname "$dst")")/.ep-$id.old-$STAMP
+        mv "$dst" "$old"; STAGES+=("$old")   # gone from Zabbix at once
+        rm -rf "$old"
+      fi
     else
-      old=$(dirname "$(dirname "$dst")")/.ep-$id.old-$STAMP
-      mv "$dst" "$old"; STAGES+=("$old")   # gone from Zabbix at once, even if the backup is on another disk
-      mkdir -p "$BACKUP_DIR/$STAMP"; mv "$old" "$BACKUP_DIR/$STAMP/$id"; BACKED_UP=1
+      if [ "$DRY" = 1 ]; then say "  would: move $dst to $BACKUP_DIR/$STAMP/$id"
+      else
+        old=$(dirname "$(dirname "$dst")")/.ep-$id.old-$STAMP
+        mv "$dst" "$old"; STAGES+=("$old")   # gone from Zabbix at once, even if the backup is on another disk
+        mkdir -p "$BACKUP_DIR/$STAMP"; mv "$old" "$BACKUP_DIR/$STAMP/$id"; BACKED_UP=1
+      fi
     fi
-    INSTALLED+=("$id|$dst|removed")
+    INSTALLED+=("$id|$dst|$verb")
   fi
-  ok "$id: ${DRYTAG}removed from $dst"
+  ok "$id: ${DRYTAG}$verb from $dst"
 }
 
 # Registers and enables (or disables) one module through module.get / module.create / module.update.
@@ -572,17 +683,65 @@ api_module() {
   fi
 }
 
+# --delete: disable, then unregister (module.delete) so the Modules list forgets it.
+api_unregister() {
+  local id=$1 r e mid st
+  r=$(api module.get "{\"output\":[\"moduleid\",\"status\"],\"filter\":{\"id\":\"$id\"}}")
+  e=$(api_error "$r"); [ -z "$e" ] || { API_RESULTS+=("$id: module.get failed: $e"); return; }
+  mid=$(field moduleid "$r"); st=$(field status "$r")
+  if [ -z "$mid" ]; then API_RESULTS+=("$id: not registered in Zabbix"); return; fi
+  if [ "$DRY" = 1 ]; then API_RESULTS+=("$id: would disable it if enabled, then unregister (module.update, module.delete)"); return; fi
+  if [ "$st" = 1 ]; then
+    r=$(api module.update "{\"moduleid\":\"$mid\",\"status\":0}")
+    e=$(api_error "$r"); [ -z "$e" ] || { API_RESULTS+=("$id: not disabled, so not unregistered: $e"); return; }
+  fi
+  r=$(api module.delete "[\"$mid\"]")
+  e=$(api_error "$r"); API_RESULTS+=("$id: ${e:+not unregistered: }${e:-disabled and unregistered}")
+}
+
+# --delete is permanent: say what goes, then ask (a terminal types "delete"; otherwise --yes).
+confirm_delete() {
+  local id dst n=0 ans
+  for id in "${SELECT[@]}"; do
+    dst=$(dst_of "$id")
+    [ -f "$dst/manifest.json" ] || continue
+    n=$((n+1))
+    say "  - $id ($dst)"
+    if [ -n "$(local_files "$dst")" ]; then note "$id: its config.php is deleted with it — there is no backup"; fi
+  done
+  [ "$n" -gt 0 ] || { say "  nothing selected is installed"; return; }
+  [ "$DRY" = 1 ] && return
+  if [ "$ASSUME_YES" = 1 ]; then return; fi
+  [ -t 0 ] || fail "--delete is permanent and needs a person to confirm: run it from a terminal, or add --yes"
+  printf '  Delete these %s module(s) for good? Type delete to confirm: ' "$n"
+  read -r ans || ans=
+  [ "$ans" = delete ] || fail "not confirmed — nothing was changed"
+}
+
 if [ "$UNINSTALL" = 1 ]; then
-  if [ -n "$API_CFG" ]; then
+  if [ "$DELETE" = 1 ]; then
+    step "deleting modules for good (no backup)"
+    confirm_delete
+  fi
+  if [ -n "$API_CFG" ] && [ "$DELETE" = 1 ]; then
+    step "disabling and unregistering in Zabbix"
+    for id in "${SELECT[@]}"; do api_unregister "$id"; done
+    for l in "${API_RESULTS[@]}"; do say "  - $l"; done
+  elif [ -n "$API_CFG" ]; then
     step "disabling in Zabbix first"
-    for id in "${KNOWN_IDS[@]}"; do api_module "$id" 0; done
+    for id in "${SELECT[@]}"; do api_module "$id" 0; done
     for l in "${API_RESULTS[@]}"; do say "  - $l"; done
   else
     note "disable the modules in Zabbix before this (Administration → General → Modules → Disable): a module folder that disappears while enabled leaves its menu entries pointing nowhere"
   fi
-  step "removing modules (backups in $BACKUP_DIR/$STAMP)"
-  for id in "${KNOWN_IDS[@]}"; do uninstall_module "$id"; done
+  if [ "$DELETE" = 1 ]; then step "deleting module folders"
+  else step "removing modules (backups in $BACKUP_DIR/$STAMP)"; fi
+  for id in "${SELECT[@]}"; do uninstall_module "$id"; done
 else
+  if [ "$UPGRADE" = 1 ]; then
+    step "upgrade: installed → $PKG_VERSION"
+    upgrade_table
+  fi
   step "modules → $MODULES_DIR"
   case "$MODULES_DIR" in /*) [ -d "$MODULES_DIR" ] || run mkdir -p "$MODULES_DIR" ;; esac
   for id in "${PKG_IDS[@]}"; do install_module "$id"; done
@@ -667,7 +826,7 @@ fi
 # --- summary ----------------------------------------------------------------------------------
 step "summary"
 if [ "$UNINSTALL" = 1 ]; then
-  say "Removed ElasticPro Zabbix modules:"
+  if [ "$DELETE" = 1 ]; then say "Deleted ElasticPro Zabbix modules:"; else say "Removed ElasticPro Zabbix modules:"; fi
 else
   say "ElasticPro Zabbix modules $PKG_VERSION ($MODE install):"
 fi
@@ -697,7 +856,14 @@ fi
 
 if [ "$UNINSTALL" = 1 ]; then
   say ""
-  say "In Zabbix, Administration → General → Modules: the removed modules can be deleted from the list."
+  if [ "$DELETE" = 1 ] && [ -n "$API_CFG" ]; then
+    say "In Zabbix, Administration → General → Modules: the deleted modules were unregistered (Scan directory refreshes the list)."
+  elif [ "$DELETE" = 1 ]; then
+    say "In Zabbix, Administration → General → Modules: Scan directory, then remove the deleted modules from the list."
+  else
+    say "In Zabbix, Administration → General → Modules: the removed modules can be deleted from the list."
+    [ "$BACKED_UP" = 1 ] && say "They are in $BACKUP_DIR/$STAMP (config.php included); move a folder back into the modules folder to restore it."
+  fi
   [ -n "${TARGET[*]:-}" ] && say "Remove their volume lines from the web container, then: ${COMPOSE_UP:-docker compose up -d <web service>}"
 else
   say ""
