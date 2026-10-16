@@ -937,7 +937,7 @@ async function testLink() {
  */
 async function zabbixCertDialog(res) {
   const c = res.cert || {};
-  const row = (k, v, mono) => h('div', { style: { display: 'grid', gridTemplateColumns: '90px 1fr', gap: '8px', fontSize: '12px' } },
+  const row = (k, v, mono) => h('div', { style: { display: 'grid', gridTemplateColumns: '90px minmax(0, 1fr)', gap: '8px', fontSize: '12px' } },
     h('span.muted', k), h(mono ? 'span.mono' : 'span', { style: { wordBreak: 'break-all' } }, v || '–'));
   const changed = res.kind === 'tls_pin_mismatch';
   const ok = await modal(changed ? 'The Zabbix certificate changed' : 'Trust the Zabbix certificate?',

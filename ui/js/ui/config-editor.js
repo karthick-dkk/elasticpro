@@ -196,17 +196,17 @@ export async function editCluster(existing = null) {
   const d = { ...cfg.DEFAULTS, ...r.defaults };
   const cred = c.username || c.apiKey || c.bearer ? 'own' : 'shared';
   const body = [
-    h('div', { style: { display: 'grid', gridTemplateColumns: '1fr 2fr', gap: '10px' } },
+    h('div', { style: { display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 2fr)', gap: '10px' } },
       field('Name', text('ce-name', c.name || '', { placeholder: 'acme-prod' })),
       field('URL', text('ce-url', c.url || '', { mono: true, placeholder: 'https://es.example.com:9200' }), 'Scheme, host or IP, port. For a jump-host cluster: the address as the jump host resolves it.')),
-    h('div', { style: { display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '10px' } },
+    h('div', { style: { display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1fr)', gap: '10px' } },
       field('Route', select('ce-via', c.via || c.jump || '', [['', 'direct'], ...jumps.map((j) => [j, `via ${j}`])]),
         jumps.length ? null : 'No jump hosts defined yet — add one on the Config page.'),
       field('Certificates', select('ce-tls', c.tls || '', [['', 'default (from defaults.tls)'], ['auto', 'auto — OS store, else ask & pin'], ['system', 'system — OS store only'], ['insecure', 'insecure — lab only']]),
         String((r.defaults && r.defaults.tls) || '').toLowerCase() === 'insecure'
           ? 'Not in effect: Defaults → Certificates is insecure, which accepts any certificate on every cluster.' : null),
       field('Enabled', select('ce-enabled', c.enabled === false ? 'no' : 'yes', [['yes', 'yes'], ['no', 'no (kept in file, not polled)']]))),
-    h('div', { style: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px' } },
+    h('div', { style: { display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 1fr)', gap: '10px' } },
       field('Tags', text('ce-tags', (c.tags || []).join(', '), { placeholder: 'prod, onprem' })),
       field('Live retention', text('ce-live', c.liveRetention || '', { placeholder: '30d' }),
         'How long logs stay on the cluster. Used by the volume report. 30d, 3M, 90 days, 1y.'),
@@ -219,7 +219,7 @@ export async function editCluster(existing = null) {
     // How this cluster's daily-ingest figure is derived, and the headroom every "needed"
     // number on the volume report is sized with. They were in the config schema with no
     // way to set them short of hand-editing the file.
-    h('div', { style: { display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '10px' } },
+    h('div', { style: { display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1fr)', gap: '10px' } },
       field('Volume window (days)',
         text('ce-volwin', written(c, 'volumeWindowDays', 'volume_window_days'),
           { mono: true, placeholder: String(d.volumeWindowDays) }),
@@ -234,7 +234,7 @@ export async function editCluster(existing = null) {
         `Added to the daily figure before it is multiplied out into every disk and backup requirement. 0–200, empty uses ${d.volumeHeadroomPercent}%.`)),
     h('details.disc', { open: cred === 'own' },
       h('summary', 'Credential for this cluster only (optional)'),
-      h('div', { style: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px', padding: '8px 0 2px' } },
+      h('div', { style: { display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 1fr)', gap: '10px', padding: '8px 0 2px' } },
         field('Username', text('ce-cu', c.username || ''), 'Leave both empty to use the shared credential.'),
         field('Password', text('ce-cp', '', { type: 'password', placeholder: cfg.isSealed(c.password) ? '(stored encrypted — leave empty to keep)' : c.password ? '(stored in plain text — leave empty to keep)' : '' }), 'Sealed with the master password before it is written.'))),
   ];
@@ -335,11 +335,11 @@ export async function editJumpHost(existingId = null) {
           },
         }));
   const body = [
-    h('div', { style: { display: 'grid', gridTemplateColumns: '1fr 2fr 90px', gap: '10px' } },
+    h('div', { style: { display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 2fr) 90px', gap: '10px' } },
       field('Id', text('ce-jid', existingId || '', { placeholder: 'jumpwin' }), 'Used as via: on clusters'),
       field('Host', text('ce-jhost', j.host || '', { mono: true, placeholder: 'jump-windows.internal' })),
       field('Port', text('ce-jport', j.port || 22, { mono: true }))),
-    h('div', { style: { display: 'grid', gridTemplateColumns: '1fr 2fr', gap: '10px' } },
+    h('div', { style: { display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 2fr)', gap: '10px' } },
       field('SSH user', text('ce-juser', j.user || '', { placeholder: 'jump-user' })),
       field('Private key file', h('div', keyRow, keyNote), 'OpenSSH format (id_ed25519 / id_rsa). Passphrase, if any, is asked in the app — never stored. Leave empty to use a session password.')),
     field('Note', text('ce-jnote', j.note || '')),
@@ -432,22 +432,22 @@ export async function editDefaults() {
     return field(label, input, MANAGED_NOTE);
   };
   const body = [
-    h('div', { style: { display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '10px' } },
+    h('div', { style: { display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1fr)', gap: '10px' } },
       f('Read-only', 'readOnly', select('ce-ro', d.readOnly === false ? 'no' : 'yes', [['yes', 'yes — GET/HEAD + search POSTs only'], ['no', 'no — writes allowed']])),
       f('Auto-refresh', 'autoRefresh', select('ce-ar', d.autoRefresh ? 'yes' : 'no', [['no', 'off'], ['yes', 'on']])),
       f('Refresh every (s)', 'refreshIntervalSec', text('ce-ri', d.refreshIntervalSec, { mono: true }))),
-    h('div', { style: { display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '10px' } },
+    h('div', { style: { display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1fr)', gap: '10px' } },
       f('Disk warn %', 'diskWarnPercent', text('ce-dw', d.diskWarnPercent, { mono: true })),
       f('Disk critical %', 'diskCritPercent', text('ce-dc', d.diskCritPercent, { mono: true })),
       f('Snapshot stale (h)', 'snapshotStaleHours', text('ce-ss', d.snapshotStaleHours, { mono: true }))),
-    h('div', { style: { display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '10px' } },
+    h('div', { style: { display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1fr)', gap: '10px' } },
       f('Log index pattern', 'logIndexPattern', text('ce-lp', d.logIndexPattern, { mono: true })),
       f('Time field', 'timeField', text('ce-tf', d.timeField, { mono: true })),
       f('Certificates', 'tls', select('ce-dtls', d.tls || 'auto', [['auto', 'auto — OS store, else ask & pin'], ['system', 'system — OS store only'], ['insecure', 'insecure — accept any, on every cluster']]),
         'insecure applies to all at once: every cluster whatever its own setting, every jump-host SSH key and the Zabbix API. What it lets through is listed in one notification.')),
-    h('div', { style: { display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '10px' } },
+    h('div', { style: { display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1fr)', gap: '10px' } },
       f('Live redraw', 'liveRedraw', select('ce-lr', d.liveRedraw || 'pending', [
-        ['pending', 'pending — keep the page, offer "N updates — Apply"'],
+        ['pending', 'pending — hold new data, offer Apply'],
         ['live', 'live — repaint as data lands'],
         ['manual', 'manual — only Apply or Refresh redraws']])),
       f('Opens on', 'defaultScope', select('ce-ds', d.defaultScope || 'last-selected', [
@@ -469,7 +469,10 @@ export async function editDefaults() {
         for (const k of Object.keys(managed)) delete next[k];
         r.defaults = { ...r.defaults, ...next };
         try { await saveRaw(); ctx.done(true); } catch (e) { ctx.msg(`Save failed: ${e.message}`); }
-      } }, 'Save'))]);
+      } }, 'Save'))],
+    // Wide enough that the choices read in full; the
+    // grid's minmax(0, 1fr) columns still shrink on a narrow window instead of scrolling.
+    { width: '900px' });
   return !!saved;
 }
 

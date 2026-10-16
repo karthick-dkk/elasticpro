@@ -1,0 +1,125 @@
+{
+  "version": 2,
+  "credentials": {
+    "username": "elastic",
+    "password": "not-a-real-password"
+  },
+  "defaults": {
+    "readOnly": true,
+    "autoRefresh": false,
+    "logIndexPattern": "logstash-*"
+  },
+  "jump_hosts": {
+    "jump-windows-datacenter-frankfurt-1": {
+      "host": "jump-windows-datacenter-frankfurt-1.corp.internal.example.com",
+      "port": 22,
+      "user": "svc-elasticpro-readonly",
+      "keyFile": "C:\\Users\\svc-elasticpro\\.ssh\\keys\\datacenter-frankfurt\\id_ed25519_elasticpro",
+      "note": "Reaches the Frankfurt data centre only; the key is rotated every quarter by the platform team."
+    }
+  },
+  "clusters": [
+    {
+      "name": "acme-corporation-production-eu-central-1-logging-hot",
+      "url": "http://127.0.0.1:9299",
+      "tags": [
+        "production",
+        "eu-central-1",
+        "pci-scope",
+        "customer-facing"
+      ],
+      "note": "Hot tier of the central logging platform. Owned by the platform team; escalate to the on-call lead before any change.",
+      "liveRetention": "30d",
+      "snapshotRetention": "6M"
+    },
+    {
+      "name": "globex-international-staging-ap-southeast-2-observability",
+      "url": "http://127.0.0.1:9300",
+      "tags": [
+        "production",
+        "eu-central-1",
+        "pci-scope",
+        "customer-facing"
+      ],
+      "note": "Hot tier of the central logging platform. Owned by the platform team; escalate to the on-call lead before any change.",
+      "liveRetention": "30d",
+      "snapshotRetention": "6M"
+    },
+    {
+      "name": "initech-shared-services-us-east-1-security-audit",
+      "url": "http://127.0.0.1:9301",
+      "tags": [
+        "production",
+        "eu-central-1",
+        "pci-scope",
+        "customer-facing"
+      ],
+      "note": "Hot tier of the central logging platform. Owned by the platform team; escalate to the on-call lead before any change.",
+      "liveRetention": "30d",
+      "snapshotRetention": "6M"
+    },
+    {
+      "name": "umbrella-research-lab-eu-west-3-metrics-warm-tier",
+      "url": "http://127.0.0.1:9302",
+      "tags": [
+        "production",
+        "eu-central-1",
+        "pci-scope",
+        "customer-facing"
+      ],
+      "note": "Hot tier of the central logging platform. Owned by the platform team; escalate to the on-call lead before any change.",
+      "liveRetention": "30d",
+      "snapshotRetention": "6M"
+    },
+    {
+      "name": "hooli-platform-engineering-us-west-2-search-prod",
+      "url": "http://127.0.0.1:9303",
+      "tags": [
+        "production",
+        "eu-central-1",
+        "pci-scope",
+        "customer-facing"
+      ],
+      "note": "Hot tier of the central logging platform. Owned by the platform team; escalate to the on-call lead before any change.",
+      "liveRetention": "30d",
+      "snapshotRetention": "6M"
+    },
+    {
+      "name": "behind-the-frankfurt-jump-host",
+      "url": "https://es-logging-frankfurt-01.corp.internal.example.com:9200",
+      "via": "jump-windows-datacenter-frankfurt-1",
+      "tags": [
+        "prod"
+      ],
+      "liveRetention": "30d",
+      "snapshotRetention": "6M"
+    },
+    {
+      "name": "down-00",
+      "url": "http://127.0.0.1:9500",
+      "tags": [
+        "prod"
+      ],
+      "liveRetention": "30d",
+      "snapshotRetention": "6M"
+    },
+    {
+      "name": "down-01",
+      "url": "http://127.0.0.1:9501",
+      "tags": [
+        "prod"
+      ],
+      "liveRetention": "30d",
+      "snapshotRetention": "6M"
+    },
+    {
+      "name": "down-02",
+      "url": "http://127.0.0.1:9502",
+      "tags": [
+        "prod"
+      ],
+      "liveRetention": "30d",
+      "snapshotRetention": "6M"
+    }
+  ]
+}
