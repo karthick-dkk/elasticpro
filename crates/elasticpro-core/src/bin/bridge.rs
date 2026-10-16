@@ -273,7 +273,9 @@ async fn bridge(
     // is the record that answers "who deleted that index".
     if AUDITED.contains(&t.as_str()) {
         let method = msg.get("method").and_then(|v| v.as_str()).unwrap_or("");
-        let is_read = t == "ES" && (method.is_empty() || method.eq_ignore_ascii_case("GET") || method.eq_ignore_ascii_case("HEAD"));
+        let path = msg.get("path").and_then(|v| v.as_str()).unwrap_or("");
+        // The one definition of a read, so a search sent as POST is not audited as a write.
+        let is_read = t == "ES" && (method.is_empty() || elasticpro_core::guard::is_read(method, path));
         if !is_read {
             tracing::info!(
                 target: "audit",
@@ -284,7 +286,7 @@ async fn bridge(
                 msg_type = %t,
                 cluster = msg.get("clusterId").and_then(|v| v.as_str()).unwrap_or("-"),
                 method = method,
-                path = msg.get("path").and_then(|v| v.as_str()).unwrap_or(""),
+                path = path,
                 ok = out.get("ok").and_then(|v| v.as_bool()).unwrap_or(false),
                 kind = out.get("kind").and_then(|v| v.as_str()).unwrap_or(""),
                 "write"
