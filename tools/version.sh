@@ -27,6 +27,8 @@ cd "$(dirname "$0")/.."
 
 COMPOSE=deploy/docker-compose.yml
 CHANGELOG=CHANGELOG.md
+# Put under a new version's heading by --set; --check fails until it is replaced by the notes.
+PLACEHOLDER="(write this release's entry before tagging)"
 
 # The one definition. Everything else is checked against it.
 workspace_version() {
@@ -80,6 +82,9 @@ check() {
   head=$(grep -m1 '^## ' "$CHANGELOG" | sed 's/^## *//')
   [ "$head" = "$v" ] || {
     echo "$CHANGELOG opens with '$head', Cargo.toml says $v — the release needs its entry" >&2; fail=1; }
+  if grep -qF "$PLACEHOLDER" "$CHANGELOG"; then
+    echo "$CHANGELOG still has the placeholder under ## $v — write the release notes" >&2; fail=1
+  fi
 
   [ "$fail" -eq 0 ] || exit 1
   echo "version $v is consistent across Cargo.toml, Cargo.lock, $COMPOSE and $CHANGELOG"
@@ -100,7 +105,16 @@ set_to() {
       || cargo update -p "$m" --precise "$new" >/dev/null
   done
   sed -i.bak -E "s|(karthickdk02/[a-z-]+):$old|\1:$new|g" "$COMPOSE" && rm -f "$COMPOSE.bak"
-  sed -i.bak "1,20s/^## $old\$/## $new/" "$CHANGELOG" && rm -f "$CHANGELOG.bak"
+  # A new heading for the new version, above the last release's — never a rename of it: that
+  # overwrote 0.3.15's heading with 0.3.16 and 0.3.16's with 0.3.17. An entry already written
+  # for the new version is kept; an "## Unreleased" one becomes it.
+  if grep -q "^## $new\$" "$CHANGELOG"; then :
+  elif grep -q '^## Unreleased$' "$CHANGELOG"; then
+    sed -i.bak "s/^## Unreleased\$/## $new/" "$CHANGELOG" && rm -f "$CHANGELOG.bak"
+  else
+    awk -v v="$new" -v p="$PLACEHOLDER" '!done && /^## /{print "## " v "\n\n" p "\n"; done=1} {print}' "$CHANGELOG" > "$CHANGELOG.new" \
+      && mv "$CHANGELOG.new" "$CHANGELOG"
+  fi
 
   echo "moved $old -> $new"
   check
