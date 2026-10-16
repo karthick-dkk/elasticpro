@@ -147,6 +147,38 @@ export function rememberEmbedTheme(theme) {
 export const REAUTH_MESSAGE = 'elasticpro:reauth';
 
 /**
+ * Which page the person was on when Zabbix was asked to sign them in again.
+ *
+ * Asking reloads the Zabbix page, and that page builds the frame's address from the Zabbix
+ * menu item it was opened by — so someone who opened Clusters and moved to Config inside the
+ * app came back on Clusters, in the middle of changing something. The frame's own tab
+ * storage outlives that reload, so the page is left there for the next start to take.
+ * Short-lived on purpose: a note that is never taken (the sign-in failed) must not steer a
+ * visit to some other Zabbix page a day later.
+ */
+export const REAUTH_PAGE_KEY = 'elasticpro.reauthPage';
+export const REAUTH_PAGE_TTL_MS = 120000;
+
+export function rememberPageForReauth(page, now = Date.now()) {
+  try {
+    if (page) sessionStorage.setItem(REAUTH_PAGE_KEY, JSON.stringify({ page, at: now }));
+  } catch (_) { /* storage blocked: it lands where Zabbix says, as it always did */ }
+}
+
+/** The remembered page if it is fresh and `isPage` knows it; read once, then forgotten. */
+export function takeRememberedPage(isPage, now = Date.now()) {
+  try {
+    const raw = sessionStorage.getItem(REAUTH_PAGE_KEY);
+    if (!raw) return '';
+    sessionStorage.removeItem(REAUTH_PAGE_KEY);
+    const { page, at } = JSON.parse(raw);
+    return typeof page === 'string' && now - at >= 0 && now - at < REAUTH_PAGE_TTL_MS && isPage(page) ? page : '';
+  } catch (_) {
+    return '';
+  }
+}
+
+/**
  * Running inside Zabbix? Read from the class the launch set on the page, so every page
  * asks the same question the same way.
  */

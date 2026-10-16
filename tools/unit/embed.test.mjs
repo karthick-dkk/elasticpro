@@ -160,3 +160,43 @@ test('an ElasticPro problem is placed by its rule even when Zabbix leaves the ru
   assert.equal(at('Indices in an ILM error step — warning: vm-1: 2 index(es)'), 'indices');
   assert.equal(at('No recent successful snapshot — warning: vm-1/daily'), 'snapshots');
 });
+
+/* ---------------- Staying on the page through a Zabbix re-sign-in ---------------- */
+
+function fakeStorage() {
+  const m = new Map();
+  globalThis.sessionStorage = {
+    getItem: (k) => (m.has(k) ? m.get(k) : null), setItem: (k, v) => m.set(k, String(v)), removeItem: (k) => m.delete(k),
+  };
+  return m;
+}
+const known = (id) => ['overview', 'settings'].includes(id);
+
+test('the page a person was on when Zabbix signed them in again is taken once, and not later', () => {
+  const had = globalThis.sessionStorage;
+  fakeStorage();
+  e.rememberPageForReauth('settings', 1000);
+  assert.equal(e.takeRememberedPage(known, 2000), 'settings');
+  assert.equal(e.takeRememberedPage(known, 2000), '', 'it is read once');
+  globalThis.sessionStorage = had;
+});
+
+test('a note nobody took is stale after two minutes, and a page this build does not have is ignored', () => {
+  const had = globalThis.sessionStorage;
+  fakeStorage();
+  e.rememberPageForReauth('settings', 1000);
+  assert.equal(e.takeRememberedPage(known, 1000 + e.REAUTH_PAGE_TTL_MS), '');
+  e.rememberPageForReauth('../evil', 1000);
+  assert.equal(e.takeRememberedPage(known, 1500), '');
+  e.rememberPageForReauth(null);
+  assert.equal(e.takeRememberedPage(known), '', 'no page, nothing remembered');
+  globalThis.sessionStorage = had;
+});
+
+test('blocked storage costs nothing: the person lands where Zabbix says', () => {
+  const had = globalThis.sessionStorage;
+  globalThis.sessionStorage = { getItem() { throw new Error('blocked'); }, setItem() { throw new Error('blocked'); }, removeItem() {} };
+  assert.doesNotThrow(() => e.rememberPageForReauth('settings'));
+  assert.equal(e.takeRememberedPage(known), '');
+  globalThis.sessionStorage = had;
+});

@@ -23,7 +23,7 @@ import { authState, loginScreen, signOut } from './ui/login.js';
 import { aboutMini } from './ui/about.js';
 import { announceNewAlerts, announceSnapshotOutcomes, resetAnnounced } from './core/notify.js';
 import { onSessionLost, bridge, setSession, setSignedIn } from './core/transport.js';
-import { readLaunch, withoutCode, withoutTrouble, troubleshootTarget, themeFor, exchangeCode, rememberEmbedTheme, askZabbixToSignIn } from './core/embed.js';
+import { readLaunch, withoutCode, withoutTrouble, troubleshootTarget, themeFor, exchangeCode, rememberEmbedTheme, askZabbixToSignIn, rememberPageForReauth, takeRememberedPage } from './core/embed.js';
 import { pageForProblem } from './core/alert-rules.js';
 
 let coreInfo = { version: '?' };
@@ -779,7 +779,9 @@ async function start(config, handle) {
     if (target.cluster) { state.selected = target.cluster; fleetView = false; }
     try { history.replaceState(null, '', withoutTrouble(location.href)); } catch (_) { /* sandboxed frame */ }
   }
-  const wanted = (target && target.page) || (location.hash || '').replace('#/', '') || 'overview';
+  // Back where the person was, when Zabbix signed them in again under them (see waitForZabbix).
+  const back = embedded ? takeRememberedPage((id) => PAGES.some((p) => p.id === id)) : '';
+  const wanted = back || (target && target.page) || (location.hash || '').replace('#/', '') || 'overview';
   go(PAGES.some((p) => p.id === wanted) ? wanted : 'overview');
   if (!isSnapshotMode() && clustersNeedingCredential().length) {
     // a credential remembered in the OS vault (opt-in) signs in without a prompt;
@@ -947,6 +949,10 @@ onSessionLost(() => {
 /** "Signing in through Zabbix…", and the ask. False when there is no Zabbix page around. */
 function waitForZabbix() {
   if (!askZabbixToSignIn(window)) return false;
+  // Zabbix loads its page again, and that page opens on the menu item it was reached by, not
+  // on the tab this person moved to since. Say where they were so start() can go back there
+  // — otherwise a session ending under Config → Save lands on Clusters.
+  rememberPageForReauth(currentPage);
   mount(root, h('div.setup',
     h('div', { style: { display: 'flex', alignItems: 'center', gap: '10px' } },
       h('img', { src: 'icons/icon48.png', width: 34, height: 34, alt: '' }),

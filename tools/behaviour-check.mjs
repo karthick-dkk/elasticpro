@@ -473,6 +473,9 @@ await go('volume');
 
 /* --------------------- alert triggers are listed and switchable --------------------- */
 
+/** What transport.js reads off a reply: status, headers, and the body as text. jsdom has no Response. */
+const stubReply = (obj) => ({ ok: true, status: 200, headers: { get: () => null }, text: async () => JSON.stringify(obj), json: async () => obj });
+
 /** The Config page is tabbed; open one by its label. */
 async function openSettingsTab(label) {
   const nav = doc.querySelector('nav.subnav');
@@ -648,9 +651,9 @@ await go('settings');
       // transport.js only ever calls .json() on the answer, and jsdom has no Response.
       if (body.type === 'DELAY_SINK_SET') {
         lastSet = body.config;
-        return { ok: true, json: async () => ({ ok: true, ...stub, config: body.config }) };
+        return stubReply({ ok: true, ...stub, config: body.config });
       }
-      return { ok: true, json: async () => ({ ok: true, ...stub }) };
+      return stubReply({ ok: true, ...stub });
     }
     return realFetch(input, init);
   };
@@ -1787,6 +1790,79 @@ restoreConsole();
   const shown = (await load('core/state.js')).clusters().length;   // enabled clusters only, like the table
   const pills = doc.querySelectorAll('td[data-cluster-state]');
   ok(pills.length === shown, `config: ${pills.length} state pills for ${shown} clusters`);
+}
+
+// Config page: saving something there leaves you on the Config page. A save re-reads and
+// re-applies the whole config (setConfig, the Zabbix clusters, a refresh), and "back to
+// Clusters" is where start() falls when it has nothing better — which is where people were
+// being sent in the middle of changing a setting. Driven through the real dialogs; the
+// write is stubbed so the fixture file is not rewritten, and read back as written.
+{
+  await go('settings');
+  const realFetch = globalThis.fetch;
+  let written = null;
+  globalThis.fetch = async (input, init) => {
+    const body = init && init.body ? JSON.parse(init.body) : {};
+    if (body.type === 'CONFIG_WRITE') {
+      written = body.text;
+      return stubReply({ ok: true, path: body.path, bytes: body.text.length });
+    }
+    if (body.type === 'CONFIG_READ' && written !== null) {
+      return stubReply({ ok: true, text: written, size: written.length, lastModified: Date.now() });
+    }
+    return realFetch(input, init);
+  };
+  const stays = (what) => ok((window.location.hash || '') === '#/settings',
+    `config: ${what} left the Config page — now at "${window.location.hash}"`);
+  const press = async (root, label) => {
+    const b = [...root.querySelectorAll('button')].find((x) => x.textContent.trim() === label);
+    if (b) { b.click(); await settleFor(900); }
+    return !!b;
+  };
+  try {
+    const tabButton = (label) => [...doc.querySelectorAll('nav.subnav button')].find((b) => b.title === label);
+    // Defaults → Edit defaults… → Save
+    tabButton('Defaults').click(); await settleFor(300);
+    ok(await press(doc.querySelector('#view'), 'Edit defaults…'), 'config: no Edit defaults button');
+    const dialog = doc.querySelector('.modal');
+    ok(!!dialog, 'config: the Defaults dialog did not open');
+    if (dialog) {
+      ok(await press(dialog, 'Save'), 'config: no Save in the Defaults dialog');
+      ok(written !== null, 'config: saving the Defaults dialog never wrote the config');
+      ok(!doc.querySelector('.modal'), `config: the Defaults dialog stayed open after a good save: ${(doc.querySelector('.modal-msg') || {}).textContent}`);
+      stays('saving Defaults');
+    }
+    // Clusters → Edit → Save
+    tabButton('Clusters').click(); await settleFor(300);
+    written = null;
+    const edit = [...doc.querySelectorAll('#view button')].find((b) => b.textContent.trim() === 'Edit');
+    if (edit) {
+      edit.click(); await settleFor(500);
+      const dlg = doc.querySelector('.modal');
+      if (dlg) {
+        await press(dlg, 'Save');
+        ok(written !== null, 'config: saving a cluster never wrote the config');
+        stays('saving a cluster');
+      }
+    }
+    // The Zabbix options save the config and then sync; both ends of that must stay put too.
+    tabButton('Zabbix').click(); await settleFor(600);
+    const box = doc.querySelector('#view input[type="checkbox"]:not([disabled])');
+    if (box) {
+      written = null;
+      box.checked = !box.checked; box.dispatchEvent(new window.Event('change', { bubbles: true })); await settleFor(1200);
+      stays('toggling a Zabbix option');
+      const again = doc.querySelector('#view input[type="checkbox"]:not([disabled])');
+      if (again) { again.checked = !again.checked; again.dispatchEvent(new window.Event('change', { bubbles: true })); await settleFor(1200); }
+      stays('toggling a Zabbix option back');
+    }
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+  // The saves above replaced the working config with what the stub kept; the cases after
+  // this one expect the fixture exactly as it was loaded.
+  await applyConfig({ load, configPath });
+  await go('overview');
 }
 
 // Quiet UI: fleet data landing while somebody reads the Clusters page does not repaint it.
