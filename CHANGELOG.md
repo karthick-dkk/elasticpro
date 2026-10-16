@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.3.18
+
+**Scrolling fixed: lists in panels scroll instead of closing.**
+
+Scrolling inside the bell's notification list or an alert's notes closed the panel on the first
+wheel tick, so those lists could not be scrolled at all. Panels now scroll under the wheel and
+trackpad. They still close when the page behind them scrolls, but no longer by themselves when a
+refresh changes the page height. At the end of a dialog or on its backdrop, the wheel no longer
+scrolls the page behind.
+
+`tools/scroll-check.mjs` scrolls every page, list, panel and dialog the way a Mac does, in Safari's
+engine (WebKit) and Chrome. It passed 471 checks with none failing.
+
 ## 0.3.17
 
 **Security fix: a made-up sign-in name was trusted. Upgrade now.**
