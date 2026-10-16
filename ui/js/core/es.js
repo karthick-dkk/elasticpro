@@ -2,6 +2,7 @@
  *  TLS decisions, the SSH tunnels and the read-only guard, so no page can route around them. */
 
 import { bridge } from './transport.js';
+import { setManaged } from './managed.js';
 
 const send = (msg) => bridge(msg);
 
@@ -121,7 +122,12 @@ export const policyGet = () => send({ type: 'POLICY_GET' });
 export const policySet = (policy) => send({ type: 'POLICY_SET', policy });
 
 /** Ask the worker what it is currently enforcing (source of truth, not the UI's copy). */
-export async function workerStatus() { return send({ type: 'PING' }); }
+export async function workerStatus() {
+  const st = await send({ type: 'PING' });
+  // Every PING is also where the server says what config.txt manages; see managed.js.
+  setManaged(st);
+  return st;
+}
 
 /**
  * Turn on exact net:: error reporting. Needs the optional "webRequest" permission, which

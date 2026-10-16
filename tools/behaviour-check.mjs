@@ -1832,6 +1832,25 @@ restoreConsole();
       ok(!doc.querySelector('.modal'), `config: the Defaults dialog stayed open after a good save: ${(doc.querySelector('.modal-msg') || {}).textContent}`);
       stays('saving Defaults');
     }
+    // A default config.txt manages is locked in the dialog with the reason, and a save does
+    // not write it (config.txt would keep overriding a value nobody could see take effect).
+    {
+      const managed = await load('core/managed.js');
+      managed.setManaged({ ok: true, managedDefaults: { diskWarnPercent: 71 }, managedZabbixOptions: {} });
+      written = null;
+      ok(await press(doc.querySelector('#view'), 'Edit defaults…'), 'config: no Edit defaults button (managed)');
+      const dlg = doc.querySelector('.modal');
+      const dw = dlg && dlg.querySelector('#ce-dw');
+      ok(!!dw && dw.disabled && dw.value === '71', `config: a managed default is not shown locked at its managed value (${dw && dw.disabled}, ${dw && dw.value})`);
+      ok(!!dw && dw.closest('label').textContent.includes('managed by config.txt'), 'config: a managed default does not say it is managed by config.txt');
+      ok(!!dlg && !dlg.querySelector('#ce-dc').disabled, 'config: a default config.txt does not manage was locked');
+      if (dlg) {
+        await press(dlg, 'Save');
+        ok(written !== null && !/"?diskWarnPercent"?\s*[:=]\s*71\b/.test(written), 'config: saving wrote a managed default into the config');
+      }
+      managed.setManaged({ ok: true, managedDefaults: {}, managedZabbixOptions: {} });
+      doc.querySelectorAll('.modal').forEach((m) => m.remove());
+    }
     // Clusters → Edit → Save
     tabButton('Clusters').click(); await settleFor(300);
     written = null;

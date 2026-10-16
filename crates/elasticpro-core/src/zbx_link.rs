@@ -151,7 +151,9 @@ impl ServerZbx {
             api_url: env("ELASTICPRO_ZABBIX_API_URL"),
             api_token: file_env("ELASTICPRO_ZABBIX_API_TOKEN_FILE"),
             sso_secret: env("ELASTICPRO_ZABBIX_SSO_SECRET").or_else(|| file_env("ELASTICPRO_ZABBIX_SSO_SECRET_FILE")),
-            verify_tls: env("ELASTICPRO_ZABBIX_API_INSECURE").filter(|v| v == "1").map(|_| false),
+            // "1" turns checking off. "0" says it is on and the server's — config.txt's
+            // ZABBIX_VERIFY_TLS=true, which must beat a Config-page "off". Unset: the page decides.
+            verify_tls: env("ELASTICPRO_ZABBIX_API_INSECURE").filter(|v| v == "1" || v == "0").map(|v| v == "0"),
             allowed_sources: env("ELASTICPRO_ZABBIX_ALLOWED_SOURCES").map(|v| list(&v)),
             sync_secs: env("ELASTICPRO_ZABBIX_SYNC_SECS").and_then(|v| v.parse().ok()),
             frame_ancestors: env("ELASTICPRO_FRAME_ANCESTORS"),
@@ -589,6 +591,8 @@ impl ZbxLink {
             "allowedSources": r.allowed_sources,
             "syncSecs": r.sync_secs,
             "managed": m,
+            // Which of those config.txt owns, so the page can say so rather than "the server".
+            "managedBy": crate::settings::get().zabbix_link_managed(),
             "apiToken": {
                 "set": r.api_token.is_some(), "source": token_source,
                 "at": if token_source == "ui" { json!(f.token_set_at) } else { Value::Null },

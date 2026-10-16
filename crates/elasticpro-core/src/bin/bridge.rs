@@ -63,12 +63,24 @@ struct App {
     core: Arc<Core>,
 }
 
+fn main() {
+    // config.txt first, before the runtime and before anything else reads the environment:
+    // it turns managed settings into the environment variables the rest of the core already
+    // reads (RUST_LOG for the log below included). `set_var` is sound here because this is
+    // the only thread — `#[tokio::main]` would have started a pool of them before the first
+    // line of the body.
+    elasticpro_core::settings::init();
+    run()
+}
+
 #[tokio::main]
-async fn main() {
+async fn run() {
     tracing_subscriber::fmt()
         .json()
         .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
         .init();
+    // Loading could not log: tracing was not up yet.
+    elasticpro_core::settings::report();
     let ui = std::env::args().nth(1).unwrap_or_else(|| "ui".into());
     let port: u16 = std::env::args().nth(2).and_then(|p| p.parse().ok()).unwrap_or(8765);
     let data = std::env::var("ELASTICPRO_DATA_DIR").ok().map(std::path::PathBuf::from);

@@ -17,6 +17,7 @@ import { filePickerButton, canPickByPath, uploadKey } from './upload.js';
 import { bus } from '../core/state.js';
 import { modal, confirmDialog, field, text, select, val, checked } from './modal.js';
 import { parseRetention, parseSize } from '../core/volume.js';
+import { managedDefaults, MANAGED_NOTE } from '../core/managed.js';
 
 let masterInMemory = null;      // master password for this session only (needed to seal new secrets)
 
@@ -421,30 +422,38 @@ export async function editCredentials() {
 export async function editDefaults() {
   const r = raw();
   if (!r) return false;
-  const d = { ...cfg.DEFAULTS, ...r.defaults };
+  // What config.txt manages shows as what it is — the value in force, locked, with the
+  // reason — and is never written: the file would keep a value nobody can see take effect.
+  const managed = managedDefaults();
+  const d = { ...cfg.DEFAULTS, ...r.defaults, ...managed };
+  const f = (label, key, input, hint) => {
+    if (!(key in managed)) return field(label, input, hint);
+    input.disabled = true;
+    return field(label, input, MANAGED_NOTE);
+  };
   const body = [
     h('div', { style: { display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '10px' } },
-      field('Read-only', select('ce-ro', d.readOnly === false ? 'no' : 'yes', [['yes', 'yes — GET/HEAD + search POSTs only'], ['no', 'no — writes allowed']])),
-      field('Auto-refresh', select('ce-ar', d.autoRefresh ? 'yes' : 'no', [['no', 'off'], ['yes', 'on']])),
-      field('Refresh every (s)', text('ce-ri', d.refreshIntervalSec, { mono: true }))),
+      f('Read-only', 'readOnly', select('ce-ro', d.readOnly === false ? 'no' : 'yes', [['yes', 'yes — GET/HEAD + search POSTs only'], ['no', 'no — writes allowed']])),
+      f('Auto-refresh', 'autoRefresh', select('ce-ar', d.autoRefresh ? 'yes' : 'no', [['no', 'off'], ['yes', 'on']])),
+      f('Refresh every (s)', 'refreshIntervalSec', text('ce-ri', d.refreshIntervalSec, { mono: true }))),
     h('div', { style: { display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '10px' } },
-      field('Disk warn %', text('ce-dw', d.diskWarnPercent, { mono: true })),
-      field('Disk critical %', text('ce-dc', d.diskCritPercent, { mono: true })),
-      field('Snapshot stale (h)', text('ce-ss', d.snapshotStaleHours, { mono: true }))),
+      f('Disk warn %', 'diskWarnPercent', text('ce-dw', d.diskWarnPercent, { mono: true })),
+      f('Disk critical %', 'diskCritPercent', text('ce-dc', d.diskCritPercent, { mono: true })),
+      f('Snapshot stale (h)', 'snapshotStaleHours', text('ce-ss', d.snapshotStaleHours, { mono: true }))),
     h('div', { style: { display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '10px' } },
-      field('Log index pattern', text('ce-lp', d.logIndexPattern, { mono: true })),
-      field('Time field', text('ce-tf', d.timeField, { mono: true })),
-      field('Certificates', select('ce-dtls', d.tls || 'auto', [['auto', 'auto — OS store, else ask & pin'], ['system', 'system — OS store only'], ['insecure', 'insecure — accept any, on every cluster']]),
+      f('Log index pattern', 'logIndexPattern', text('ce-lp', d.logIndexPattern, { mono: true })),
+      f('Time field', 'timeField', text('ce-tf', d.timeField, { mono: true })),
+      f('Certificates', 'tls', select('ce-dtls', d.tls || 'auto', [['auto', 'auto — OS store, else ask & pin'], ['system', 'system — OS store only'], ['insecure', 'insecure — accept any, on every cluster']]),
         'insecure applies to all at once: every cluster whatever its own setting, every jump-host SSH key and the Zabbix API. What it lets through is listed in one notification.')),
     h('div', { style: { display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '10px' } },
-      field('Live redraw', select('ce-lr', d.liveRedraw || 'pending', [
+      f('Live redraw', 'liveRedraw', select('ce-lr', d.liveRedraw || 'pending', [
         ['pending', 'pending — keep the page, offer "N updates — Apply"'],
         ['live', 'live — repaint as data lands'],
         ['manual', 'manual — only Apply or Refresh redraws']])),
-      field('Opens on', select('ce-ds', d.defaultScope || 'last-selected', [
+      f('Opens on', 'defaultScope', select('ce-ds', d.defaultScope || 'last-selected', [
         ['last-selected', 'the cluster last chosen in this browser'],
         ['all', 'All clusters']])),
-      field('Request timeout (ms)', text('ce-to', d.requestTimeoutMs, { mono: true }))),
+      f('Request timeout (ms)', 'requestTimeoutMs', text('ce-to', d.requestTimeoutMs, { mono: true }))),
   ];
   const saved = await modal('Defaults', 'Apply to every cluster unless a cluster overrides them.', body,
     (ctx) => [h('div', { style: { marginLeft: 'auto', display: 'flex', gap: '8px' } },
@@ -453,10 +462,12 @@ export async function editDefaults() {
         const n = (id, min, max) => { const v = Number(val(id)); return Number.isFinite(v) && v >= min && v <= max ? v : null; };
         const ri = n('ce-ri', 5, 3600), dw = n('ce-dw', 1, 100), dc = n('ce-dc', 1, 100), ss = n('ce-ss', 1, 24 * 90), to = n('ce-to', 1000, 600000);
         if ([ri, dw, dc, ss, to].some((v) => v == null)) return ctx.msg('Check the numeric fields.');
-        r.defaults = { ...r.defaults, readOnly: val('ce-ro') === 'yes', autoRefresh: val('ce-ar') === 'yes', refreshIntervalSec: ri,
+        const next = { readOnly: val('ce-ro') === 'yes', autoRefresh: val('ce-ar') === 'yes', refreshIntervalSec: ri,
           diskWarnPercent: dw, diskCritPercent: dc, snapshotStaleHours: ss, requestTimeoutMs: to,
           logIndexPattern: val('ce-lp').trim() || 'logstash-*', timeField: val('ce-tf').trim() || '@timestamp', tls: val('ce-dtls'),
           liveRedraw: val('ce-lr'), defaultScope: val('ce-ds') };
+        for (const k of Object.keys(managed)) delete next[k];
+        r.defaults = { ...r.defaults, ...next };
         try { await saveRaw(); ctx.done(true); } catch (e) { ctx.msg(`Save failed: ${e.message}`); }
       } }, 'Save'))]);
   return !!saved;

@@ -20,6 +20,7 @@ import { editCluster, editJumpHost, editCredentials, editDefaults, unlockSealed,
 import { card, pill, table, empty } from './common.js';
 import { navigateTo } from '../core/intent.js';
 import { ALERT_RULES, loadAlertSettings, isEnabled } from '../core/alert-rules.js';
+import { isManagedDefault, isManagedZabbixOption, managedZabbixOptions, MANAGED_NOTE } from '../core/managed.js';
 import { toast } from '../ui/menu.js';
 import { bridge } from '../core/transport.js';
 import { isSnapshotMode } from '../core/snapshot.js';
@@ -300,10 +301,10 @@ function alertRulesCard() {
             },
               h('span.muted', t.label),
               h('input', {
-                type: 'number', min: String(t.min), max: String(t.max), disabled: !admin,
-                value: String((s.thresholds && s.thresholds[t.key]) ?? state.defaults[t.key] ?? ''),
+                type: 'number', min: String(t.min), max: String(t.max), disabled: !admin || isManagedDefault(t.key),
+                value: String((isManagedDefault(t.key) ? undefined : (s.thresholds && s.thresholds[t.key])) ?? state.defaults[t.key] ?? ''),
                 style: { width: '68px' },
-                title: `${t.min}–${t.max}${t.unit}`,
+                title: isManagedDefault(t.key) ? MANAGED_NOTE : `${t.min}–${t.max}${t.unit}`,
                 onchange: (e) => {
                   const v = Number(e.target.value);
                   if (!isFinite(v) || v < t.min || v > t.max) {
@@ -1079,9 +1080,10 @@ function zabbixEventsPanel(s) {
 function zabbixLinkSummaryCard(s) {
   const sum = linkSummary(s);
   const ro = (f) => isManaged(s, f);
-  const managedNote = 'managed by server config';
+  // config.txt says so by name; anything else the server sets (a compose variable) does not.
+  const managedNote = (f) => (s.managedBy && s.managedBy[f] === 'config.txt' ? MANAGED_NOTE : 'managed by server config');
   const tok = s.apiToken || {};
-  const tokenText = ro('apiToken') ? `set · ${managedNote}`
+  const tokenText = ro('apiToken') ? `set · ${managedNote('apiToken')}`
     : tok.set ? `set · added ${tok.at ? dt(tok.at * 1000) : '–'}${tok.by ? ` by ${tok.by}` : ''}` : 'not set';
   const sync = s.sync || {};
   const syncText = sync.error ? `failed — ${sync.error}`
@@ -1089,7 +1091,7 @@ function zabbixLinkSummaryCard(s) {
       : sync.configured ? 'not synced yet' : 'not syncing yet';
   const serverSecret = s.ssoSecret && s.ssoSecret.source === 'server';
   const canUnpair = s.paired || (tok.set && tok.source === 'ui') || (s.ssoSecret && s.ssoSecret.source === 'ui');
-  const row = (label, value, managed) => field(label, h('div', { style: { fontSize: '12.5px' } }, value), managed ? managedNote : null);
+  const row = (label, value, managedField) => field(label, h('div', { style: { fontSize: '12.5px' } }, value), managedField && ro(managedField) ? managedNote(managedField) : null);
   return card('Zabbix connection', sum.title,
     h('div', { style: { display: 'grid', gap: '12px' } },
       h('div', { style: { display: 'grid', gap: '4px', padding: '8px 10px', border: '1px solid var(--border)', borderRadius: '6px' } },
@@ -1101,12 +1103,12 @@ function zabbixLinkSummaryCard(s) {
           + (s.pairedAt ? ` · paired ${dt(s.pairedAt * 1000)}${s.pairedBy ? ` by ${s.pairedBy}` : ''}` : '')),
         s.allowHttp ? h('div.banner.warn', { style: { margin: '4px 0 0' } }, 'Plain http is allowed: the API token crosses the network unencrypted. Lab only.') : null),
       h('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))', gap: '10px' } },
-        row('Zabbix URL', s.zabbixUrl || '–', ro('zabbixUrl')),
-        row('API URL', s.apiUrlIsDefault ? `${defaultApiUrl(s.zabbixUrl) || '–'} (default)` : (s.apiUrl || '–'), ro('apiUrl')),
-        row('API token', tokenText, ro('apiToken')),
-        row('Verify TLS', s.verifyTls !== false ? 'yes' : 'no', ro('verifyTls')),
-        row('Allowed sources', (s.allowedSources || []).length ? (s.allowedSources || []).join(', ') : 'any', ro('allowedSources')),
-        row('Sync interval', `${s.syncSecs || '–'}s`, ro('syncSecs')),
+        row('Zabbix URL', s.zabbixUrl || '–', 'zabbixUrl'),
+        row('API URL', s.apiUrlIsDefault ? `${defaultApiUrl(s.zabbixUrl) || '–'} (default)` : (s.apiUrl || '–'), 'apiUrl'),
+        row('API token', tokenText, 'apiToken'),
+        row('Verify TLS', s.verifyTls !== false ? 'yes' : 'no', 'verifyTls'),
+        row('Allowed sources', (s.allowedSources || []).length ? (s.allowedSources || []).join(', ') : 'any', 'allowedSources'),
+        row('Sync interval', `${s.syncSecs || '–'}s`, 'syncSecs'),
         s.paired ? row('Paired with', `${s.zabbixUrl}${s.pairedAt ? ` · ${dt(s.pairedAt * 1000)}` : ''}${s.pairedBy ? ` by ${s.pairedBy}` : ''}`) : null,
         s.zabbixVersion ? row('Zabbix version', s.zabbixVersion) : null,
         row('Last sync', syncText),
@@ -1127,16 +1129,17 @@ function zabbixLinkSummaryCard(s) {
 function zabbixLinkFormCard(s, canCancel) {
   const sum = linkSummary(s);
   const ro = (f) => isManaged(s, f);
-  const managedNote = 'managed by server config';
+  // config.txt says so by name; anything else the server sets (a compose variable) does not.
+  const managedNote = (f) => (s.managedBy && s.managedBy[f] === 'config.txt' ? MANAGED_NOTE : 'managed by server config');
   const disable = (el, f) => { if (ro(f) || linkBusy) el.disabled = true; return el; };
-  const hint = (f, text) => (ro(f) ? managedNote : text);
+  const hint = (f, text) => (ro(f) ? managedNote(f) : text);
   const zurl = disable(text('zl-zurl', s.zabbixUrl || '', { placeholder: 'https://zabbix.example.com', mono: true }), 'zabbixUrl');
   const api = disable(text('zl-api', s.apiUrlIsDefault ? '' : (s.apiUrl || ''), { placeholder: defaultApiUrl(s.zabbixUrl) || 'https://zabbix.example.com/api_jsonrpc.php', mono: true }), 'apiUrl');
   // The API URL follows the Zabbix URL until somebody types one of their own.
   zurl.addEventListener('input', () => { api.placeholder = defaultApiUrl(zurl.value) || 'https://zabbix.example.com/api_jsonrpc.php'; });
   const tok = s.apiToken || {};
   let tokenField;
-  if (ro('apiToken')) tokenField = h('div.muted', { style: { fontSize: '12.5px' } }, `set · ${managedNote}`);
+  if (ro('apiToken')) tokenField = h('div.muted', { style: { fontSize: '12.5px' } }, `set · ${managedNote('apiToken')}`);
   else if (tok.set && !tokenReplace) {
     tokenField = h('div', { style: { display: 'flex', gap: '8px', alignItems: 'center', fontSize: '12.5px' } },
       pill('set', 'green'), h('span.muted', `added ${tok.at ? dt(tok.at * 1000) : '–'}${tok.by ? ` by ${tok.by}` : ''}`),
@@ -1145,7 +1148,7 @@ function zabbixLinkFormCard(s, canCancel) {
     tokenField = text('zl-token', '', { type: 'password', mono: true, placeholder: tok.set ? 'new token — replaces the stored one' : 'paste a Zabbix API token, or pair' });
   }
   const tls = checkbox('zl-tls', 'Verify the Zabbix TLS certificate', s.verifyTls !== false,
-    ro('verifyTls') ? managedNote : 'Off only for a lab. On: the OS trust store, or a certificate you trust from Test connection.');
+    ro('verifyTls') ? managedNote('verifyTls') : 'Off only for a lab. On: the OS trust store, or a certificate you trust from Test connection.');
   if (ro('verifyTls') || linkBusy) tls.querySelector('input').disabled = true;
   const http = checkbox('zl-http', 'Allow plain http (lab only)', !!s.allowHttp, 'The API token would cross the network unencrypted.');
   const src = h('textarea#zl-src.mono', { rows: 2, spellcheck: false, disabled: ro('allowedSources') || linkBusy,
@@ -1188,7 +1191,9 @@ function zabbixLinkFormCard(s, canCancel) {
  */
 async function setZabbixOption(key, on) {
   const r = state.config && state.config.raw;
-  if (!r) return;
+  // The box is disabled; this is for anything that reaches the handler anyway. A write here
+  // would sit in the file under a value config.txt keeps overriding.
+  if (!r || isManagedZabbixOption(key)) return;
   r.zabbix = { ...(r.zabbix || {}), [key]: on };
   try {
     await saveRaw({ silent: true });
@@ -1262,12 +1267,13 @@ function zabbixCard() {
       h('td', { 'data-cluster-state': z._id, 'data-kind': 'zabbix' }, clusterStatePill(cl, 'zabbix')));
   });
   const shadowed = (state.config && state.config.shadowed) || [];
-  const zopt = (state.config && state.config.raw && state.config.raw.zabbix) || {};
+  // config.txt last: what it manages is shown as it is in force, locked, with the reason.
+  const zopt = { ...((state.config && state.config.raw && state.config.raw.zabbix) || {}), ...managedZabbixOptions() };
   const toggle = (key, label, help, disabledWhy) => h('label', { style: { display: 'flex', gap: '8px', alignItems: 'flex-start' },
-      title: disabledWhy || '' },
-    h('input', { type: 'checkbox', checked: !!zopt[key], disabled: zbxBusy || !!disabledWhy,
+      title: isManagedZabbixOption(key) ? MANAGED_NOTE : (disabledWhy || '') },
+    h('input', { type: 'checkbox', checked: !!zopt[key], disabled: zbxBusy || !!disabledWhy || isManagedZabbixOption(key),
       onchange: (e) => setZabbixOption(key, e.target.checked) }),
-    h('span', h('b', label), h('div.muted', { style: { fontSize: '11.5px' } }, disabledWhy || help)));
+    h('span', h('b', label), h('div.muted', { style: { fontSize: '11.5px' } }, isManagedZabbixOption(key) ? MANAGED_NOTE : (disabledWhy || help))));
   const pending = (state.config && state.config.zabbixPending) || [];
   return card('Zabbix', `${(zbx.clusters || []).length} cluster host(s)${zbx.lastSync ? ` · synced ${ago(zbx.lastSync * 1000)}` : ''}`,
     h('div', { style: { display: 'grid', gap: '10px' } },
