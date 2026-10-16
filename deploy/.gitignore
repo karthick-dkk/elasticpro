@@ -9,3 +9,10 @@ ssh/*
 !ssh/.gitkeep
 config/*
 !config/.gitkeep
+
+# The one settings file for a hosted install (config.txt.example is the tracked template),
+# and the nginx fragments deploy.sh --apply-config renders from it. README files stay.
+config.txt
+nginx/allow-ui/config-txt.conf
+nginx/allow-host/config-txt.conf
+nginx/rate-exempt/config-txt.conf

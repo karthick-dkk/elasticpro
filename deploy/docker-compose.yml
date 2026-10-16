@@ -30,6 +30,10 @@ services:
       ELASTICPRO_BIND: 0.0.0.0
       ELASTICPRO_DATA_DIR: /app/data
       ELASTICPRO_CONFIG: /app/config/config_cluster.json
+      # The settings file (deploy/config.txt), read by the core itself at start. A key with a
+      # value there wins over the Config page and over the defaults; empty keys are left
+      # alone. A missing file or a directory means "no settings", not an error.
+      ELASTICPRO_SETTINGS: /app/config.txt
       RUST_LOG: info,audit=info
       # Fleet at Scale (100-300 clusters). Defaults match the plan's decisions; see
       # README.md / PRODUCTION.md ("Scaling to a large fleet") for what each one trades
@@ -47,6 +51,12 @@ services:
       # these credentials in memory, and the directory is owned by the container's uid
       # with the host user's group, so both can edit it. Secrets in it stay sealed.
       - ./config:/app/config           # config_cluster.json, secrets sealed
+      # deploy.sh and install.sh always create ./config.txt first. A bind-mounted file that
+      # is missing on the host is not an error to Docker: it makes a DIRECTORY there, which
+      # is then a config.txt nobody can edit. A file mount also follows the inode, so an
+      # editor that replaces the file is only seen after the core is recreated — that is
+      # what `deploy.sh --apply-config` does.
+      - ./config.txt:/app/config.txt:ro
       - core-data:/app/data            # pins.json — trust decisions
       - ${SSH_KEYS_DIR:-./ssh}:/app/ssh:ro   # jump-host keys, read-only
       # Only ./secrets/redis, never the whole ./secrets directory — the core has no
@@ -58,8 +68,9 @@ services:
     # A bounded core is a core that fails loudly (OOM-killed, restarted, visible in
     # `docker compose ps`) instead of taking the host down with it — the failure mode the
     # unbounded scheduler work in Fleet at Scale is sized against, not a tuned ceiling.
-    # ELASTICPRO_MEM_LIMIT: lower it (512m, with ELASTICPRO_CACHE_MB=64) on a host shared with the Zabbix
-    # stack and Elasticsearch — see zabbix/README.md, "One host, both stacks".
+    # ELASTICPRO_MEM_LIMIT is rendered from CORE_MEM_LIMIT in config.txt by deploy.sh. Lower
+    # it (512m, with ELASTICPRO_CACHE_MB=64) on a host shared with the Zabbix stack and
+    # Elasticsearch — see zabbix/README.md, "One host, both stacks".
     mem_limit: ${ELASTICPRO_MEM_LIMIT:-1g}
     # No change to the image's own ENTRYPOINT: this only builds ELASTICPRO_REDIS_URL from the
     # redis_password secret file when it exists, because compose has no built-in way to
@@ -136,6 +147,11 @@ services:
       # upgrade of a deployment that predates it starts anyway: Docker creates the path if
       # it is missing, and an empty directory matches no *.conf and changes nothing.
       - ./nginx/rate-exempt:/etc/nginx/rate-exempt:ro
+      # Who may open the UI, and under which name — rendered from config.txt by deploy.sh
+      # (ALLOWED_UI_IPS, ALLOWED_DOMAINS). Directories for the reason given above: empty or
+      # missing, nginx starts and lets everyone in, as before.
+      - ./nginx/allow-ui:/etc/nginx/allow-ui:ro
+      - ./nginx/allow-host:/etc/nginx/allow-host:ro
       # Unused while nginx.conf has no auth_basic; kept so turning it back on is a
       # config change rather than a compose change.
       - ./nginx/htpasswd:/etc/nginx/htpasswd:ro

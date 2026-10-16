@@ -62,6 +62,19 @@ JSON
   echo "  made config/config_cluster.json (no clusters yet — add them here, then restart the core)"; made=1
 fi
 
+# The settings file the compose file mounts into the core (./config.txt:/app/config.txt).
+# Docker answers a bind mount whose source is missing by creating a DIRECTORY there, so it
+# has to exist before the first `docker compose up` — which is this script's reason to run.
+# Every key in the copy is empty (not managed), apart from the port the stack is already
+# using, so a stack set up without it behaves exactly as before.
+if [ -d config.txt ]; then rmdir config.txt 2>/dev/null || { echo "  ✗ deploy/config.txt is a directory with files in it — move it away"; exit 1; }; fi
+if [ ! -f config.txt ]; then
+  cp config.txt.example config.txt
+  port=$(sed -n 's/^LISTEN=//p' .env | tail -1)
+  if [ -n "$port" ]; then sed -i.tmp "s|^LISTEN_PORT=.*|LISTEN_PORT=$port|" config.txt && rm -f config.txt.tmp; fi
+  echo "  made config.txt (from config.txt.example — the one settings file; deploy.sh --apply-config puts it in force)"; made=1
+fi
+
 if [ ! -s secrets/db_password ]; then
   mkdir -p secrets
   openssl rand -base64 32 > secrets/db_password

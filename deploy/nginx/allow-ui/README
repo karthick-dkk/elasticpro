@@ -1,0 +1,8 @@
+# Addresses allowed to open the UI. Generated, not hand-written.
+#
+# deploy.sh --apply-config writes config-txt.conf here from ALLOWED_UI_IPS in
+# deploy/config.txt: the whole address space as four `0` halves (everyone refused), then each listed
+# address as `<cidr> 1;` (the most specific match wins). Edit config.txt, not this file.
+#
+# Empty directory (the default): every address may open ElasticPro. The Zabbix sign-in and
+# pairing routes are never subject to this; ZABBIX_ALLOWED_SOURCES controls those.

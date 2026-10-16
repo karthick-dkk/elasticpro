@@ -1,0 +1,8 @@
+# Host names allowed to open ElasticPro. Generated, not hand-written.
+#
+# deploy.sh --apply-config writes config-txt.conf here from ALLOWED_DOMAINS in
+# deploy/config.txt: `<name> 1;` for each listed name, then a final regex that refuses any
+# other. Edit config.txt, not this file.
+#
+# Empty directory (the default): any name is accepted. The Zabbix sign-in and pairing
+# routes are never subject to this.

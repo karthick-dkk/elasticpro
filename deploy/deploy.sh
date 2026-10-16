@@ -7,6 +7,17 @@
 #   deploy/deploy.sh --upgrade                # the latest release's published images
 #   deploy/deploy.sh --upgrade=0.3.16         # one release's published images (v0.3.16 works too)
 #   deploy/deploy.sh --rollback               # back to the images that ran before the last deploy
+#   deploy/deploy.sh --apply-config           # put deploy/config.txt in force, restart the core
+#
+# deploy/config.txt is the one settings file (config.txt.example lists every key and the
+# rules: KEY=VALUE, empty = not managed, a value = managed and wins). --apply-config checks
+# it, reports every problem and changes nothing if there is one; otherwise it renders
+# LISTEN_PORT and CORE_MEM_LIMIT into .env and ALLOWED_UI_IPS, ALLOWED_DOMAINS and
+# RATE_EXEMPT_IPS into nginx/allow-ui, allow-host and rate-exempt (config-txt.conf in each;
+# the operator's own files there are left alone). nginx is checked and reloaded (recreated
+# when the port changes), then the core is recreated, because it reads config.txt at start.
+# Nobody is signed out. A normal deploy and --upgrade do the same render at the start, and
+# restart the core anyway; config.txt is created from the example first when it is missing.
 #
 # --upgrade moves all four released images together, core, nginx, PostgreSQL and Redis, to
 # one version, through .env (ELASTICPRO_IMAGE, ELASTICPRO_NGINX_IMAGE, ELASTICPRO_DB_IMAGE,
@@ -29,11 +40,11 @@
 # One exception: when deploy/nginx/nginx.conf differs from the config the running nginx has,
 # nginx is recreated — a bind-mounted file is not picked up by a restart or a reload.
 # Options: --pull, --image TAG, --upgrade[=VERSION], --force, --rollback, --all,
-#          --timeout SECONDS (default 180), --dry-run
+#          --apply-config, --timeout SECONDS (default 180), --dry-run
 set -euo pipefail
 cd "$(dirname "$0")"
 
-PULL=0; IMAGE=; ROLLBACK=0; ALL=0; TIMEOUT=180; DRY=0; UPGRADE=; FORCE=0
+PULL=0; IMAGE=; ROLLBACK=0; ALL=0; TIMEOUT=180; DRY=0; UPGRADE=; FORCE=0; APPLY=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --pull) PULL=1; shift ;;
@@ -44,6 +55,7 @@ while [ $# -gt 0 ]; do
     --force) FORCE=1; shift ;;
     --rollback) ROLLBACK=1; shift ;;
     --all) ALL=1; shift ;;
+    --apply-config) APPLY=1; shift ;;
     --timeout) TIMEOUT=$2; shift 2 ;;
     --dry-run) DRY=1; shift ;;
     -h|--help) sed -n '2,/^set -euo/p' "$(basename "$0")" | sed '$d' | sed 's/^# \{0,1\}//'; exit 0 ;;
@@ -53,6 +65,9 @@ done
 
 [ -z "$UPGRADE" ] || [ -z "$IMAGE" ] || { echo "--upgrade and --image both pick the core image — use one" >&2; exit 2; }
 [ -z "$UPGRADE" ] || [ "$ROLLBACK" = 0 ] || { echo "--upgrade and --rollback go opposite ways — use one" >&2; exit 2; }
+if [ "$APPLY" = 1 ] && { [ -n "$UPGRADE$IMAGE" ] || [ "$ROLLBACK$PULL$ALL" != 000 ]; }; then
+  echo "--apply-config applies config.txt on its own — run it without the other options (a deploy applies it too)" >&2; exit 2
+fi
 
 say() { printf '%s\n' "$*"; }
 fail() { say "✗ $*" >&2; exit 1; }
@@ -101,10 +116,297 @@ wait_healthy() {
   return 1
 }
 
+# --- config.txt: the one settings file ----------------------------------------------------
+# config.txt.example is the single definition of the keys (and the rules, in its header);
+# config.txt is the operator's copy. The core reads config.txt itself, at start. What only
+# this script can do is the part that is not the core's: the port, the core's memory limit,
+# and the three nginx include files (who may open the UI, under which name, and who is not
+# rate limited). A key left empty is not managed here and nothing is rendered for it.
+CONFIG=config.txt
+CONFIG_EXAMPLE=config.txt.example
+FRAGMENTS="allow-ui:ALLOWED_UI_IPS allow-host:ALLOWED_DOMAINS rate-exempt:RATE_EXEMPT_IPS"
+FRAGMENT_NAME=config-txt.conf    # the operator's own files beside it in those directories stay theirs
+FRAGMENT_HEADER="# generated from config.txt by deploy.sh — edit config.txt, not this"
+CFG_TMP=
+cleanup() { [ -z "$CFG_TMP" ] || rm -rf "$CFG_TMP"; }
+trap cleanup EXIT
+
+cfg_set() {   # FILE KEY VALUE — only to seed a copy made just now
+  sed -i.tmp "s|^$2=.*|$2=$3|" "$1" && rm -f "$1.tmp"
+}
+CONFIG_SRC=$CONFIG    # what is read: config.txt, or in a dry run that has none yet, a seeded copy
+# config.txt has to exist before any `docker compose up`: it is bind-mounted into the core,
+# and Docker answers a missing file with a DIRECTORY at that path — which the core then
+# reads as "no settings" and the operator cannot edit.
+ensure_config() {
+  if [ -d "$CONFIG" ]; then
+    if [ "$DRY" = 1 ]; then say "  would: remove the empty directory Docker left at $CONFIG"
+    else rmdir "$CONFIG" 2>/dev/null || fail "deploy/$CONFIG is a directory with files in it (Docker makes one when the file is missing) — move it away"; say "  removed the directory Docker had made at $CONFIG"; fi
+  fi
+  [ -f "$CONFIG" ] && return 0
+  [ -f "$CONFIG_EXAMPLE" ] || fail "deploy/$CONFIG_EXAMPLE is missing — cannot make $CONFIG"
+  local target=$CONFIG v
+  if [ "$DRY" = 1 ]; then
+    say "  would: create $CONFIG from $CONFIG_EXAMPLE"
+    [ -n "$CFG_TMP" ] || CFG_TMP=$(mktemp -d)
+    target=$CFG_TMP/config.seeded; CONFIG_SRC=$target
+  fi
+  cp "$CONFIG_EXAMPLE" "$target"
+  # A host that was set up before config.txt existed has its port and memory limit in .env.
+  # Carry them over, or the first --apply-config would put the port back to 443 and the
+  # memory back to 1g — a settings file must start out saying what is already true.
+  v=$(env_get LISTEN); [ -z "$v" ] || cfg_set "$target" LISTEN_PORT "$v"
+  v=$(env_get ELASTICPRO_MEM_LIMIT); [ -z "$v" ] || cfg_set "$target" CORE_MEM_LIMIT "$v"
+  [ "$DRY" = 1 ] || say "== made deploy/$CONFIG from $CONFIG_EXAMPLE (edit it, then: deploy/deploy.sh --apply-config)"
+}
+
+# Address and name checks. Pure bash, so a server needs nothing beyond what this script uses.
+is_int() { case $1 in ''|*[!0-9]*) return 1 ;; esac; [ "${#1}" -le 9 ]; }
+in_range() { is_int "$1" && [ "$((10#$1))" -ge "$2" ] && [ "$((10#$1))" -le "$3" ]; }   # VALUE MIN MAX
+is_v4() {
+  local o ip=$1 re='^[0-9]{1,3}(\.[0-9]{1,3}){3}$'
+  [[ $ip =~ $re ]] || return 1
+  local IFS=.
+  for o in $ip; do [ "$((10#$o))" -le 255 ] || return 1; done
+}
+is_v6() {
+  local a=$1 g n=0 re='^[0-9A-Fa-f:.]+$' hex='^[0-9A-Fa-f]{1,4}$' dc=0 two
+  [[ $a == *:* ]] && [[ $a =~ $re ]] || return 1
+  case $a in *:::*|:[!:]*|*[!:]:) return 1 ;; esac
+  two=${a//::/X}; case $two in *X*X*) return 1 ;; *X*) dc=1 ;; esac
+  if [[ $a == *.* ]]; then      # ::ffff:192.0.2.1 — the dotted tail stands for two groups
+    is_v4 "${a##*:}" || return 1
+    a=${a%"${a##*:}"}0:0
+  fi
+  local IFS=:
+  set -- $a
+  for g in "$@"; do
+    [ -n "$g" ] || continue
+    [[ $g =~ $hex ]] || return 1
+    n=$((n + 1))
+  done
+  if [ "$dc" = 1 ]; then [ "$n" -le 7 ]; else [ "$n" -eq 8 ]; fi
+}
+is_cidr() {   # an IPv4 or IPv6 address, with or without /prefix
+  local a=${1%%/*} p=
+  case $1 in */) return 1 ;; */*) p=${1#*/} ;; esac
+  if is_v4 "$a"; then [ -z "$p" ] || { is_int "$p" && [ "$p" -le 32 ]; }
+  elif is_v6 "$a"; then [ -z "$p" ] || { is_int "$p" && [ "$p" -le 128 ]; }
+  else return 1; fi
+}
+is_hostname() {
+  local re='^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*$'
+  [[ $1 =~ $re ]] && [ "${#1}" -le 253 ]
+}
+cfg_list() {   # a comma-separated value, one trimmed non-empty item per line
+  printf '%s\n' "$1" | tr ',' '\n' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e '/^$/d'
+}
+cfg_get() { sed -n "s/^$1=//p" "$CFG_TMP/parsed" | tail -1; }
+
+# Prints what is wrong with VALUE for KEY and returns 1, or returns 0. Types follow the
+# comments in config.txt.example; a key it does not list is free text.
+cfg_check() {
+  local k=$1 v=$2 item
+  case $k in
+    LISTEN_PORT) in_range "$v" 1 65535 || { echo "must be a port number, 1-65535"; return 1; } ;;
+    ALLOWED_UI_IPS|RATE_EXEMPT_IPS|TRUSTED_PROXIES|ZABBIX_ALLOWED_SOURCES)
+      while IFS= read -r item; do
+        is_cidr "$item" || { echo "\"$item\" is not an IPv4/IPv6 address or CIDR (e.g. 10.0.0.0/8, 192.0.2.5, fd00::/8)"; return 1; }
+      done < <(cfg_list "$v") ;;
+    ALLOWED_DOMAINS)
+      while IFS= read -r item; do
+        is_hostname "$item" || is_v4 "$item" || is_v6 "$item" || { echo "\"$item\" is not a host name or an IP address"; return 1; }
+      done < <(cfg_list "$v") ;;
+    ZABBIX_VERIFY_TLS|ZABBIX_SCOPE_USERS_BY_GROUP|ZABBIX_USE_ELASTICPRO_CREDENTIALS|ZABBIX_CREATE_HOSTS|ACTIVITY_LOG_STDOUT|UI_READ_ONLY|UI_AUTO_REFRESH)
+      case $v in true|false) ;; *) echo "must be true or false"; return 1 ;; esac ;;
+    ZABBIX_SYNC_SECONDS)     in_range "$v" 30 86400 || { echo "must be a number, 30-86400"; return 1; } ;;
+    POLL_HEALTH_SECONDS)     in_range "$v" 180 300 || { echo "must be a number, 180-300"; return 1; } ;;
+    POLL_CONCURRENCY)        in_range "$v" 1 256 || { echo "must be a number, 1-256"; return 1; } ;;
+    ES_CONCURRENCY)          in_range "$v" 1 1024 || { echo "must be a number, 1-1024"; return 1; } ;;
+    UI_REFRESH_SECONDS)      in_range "$v" 5 3600 || { echo "must be a number, 5-3600"; return 1; } ;;
+    UI_REQUEST_TIMEOUT_MS)   in_range "$v" 1000 600000 || { echo "must be a number, 1000-600000"; return 1; } ;;
+    UI_DISK_WARN_PERCENT|UI_DISK_CRIT_PERCENT) in_range "$v" 0 100 || { echo "must be a percentage, 0-100"; return 1; } ;;
+    ACTIVITY_LOG_MAX_MB|ACTIVITY_LOG_KEEP|NOTIFY_DAYS|CACHE_MB|UI_SNAPSHOT_STALE_HOURS|UI_ROWS_PER_PAGE|UI_MAX_LOG_ROWS)
+      is_int "$v" || { echo "must be a whole number"; return 1; } ;;
+    CORE_MEM_LIMIT) [[ $v =~ ^[0-9]+[bBkKmMgG]?$ ]] || { echo "must be a size such as 1g or 512m"; return 1; } ;;
+    LOG_LEVEL) case $v in error|warn|info|debug) ;; *) echo "must be error, warn, info or debug"; return 1 ;; esac ;;
+    UI_TLS) case $v in auto|system|insecure) ;; *) echo "must be auto, system or insecure"; return 1 ;; esac ;;
+    UI_LIVE_REDRAW) case $v in pending|live|manual) ;; *) echo "must be pending, live or manual"; return 1 ;; esac ;;
+    UI_DEFAULT_SCOPE) case $v in last-selected|all) ;; *) echo "must be last-selected or all"; return 1 ;; esac ;;
+    PUBLIC_URL|ZABBIX_URL|ZABBIX_API_URL)
+      [[ $v =~ ^https?://[^[:space:]]+$ ]] || { echo "must be a URL starting with http:// or https://"; return 1; } ;;
+  esac
+  return 0
+}
+
+# Reads $1 into $CFG_TMP/parsed as KEY=VALUE lines, and reports EVERY problem before failing:
+# a settings file that is wrong in three places should not take three runs to fix.
+config_validate() {
+  local src=$1 line n=0 key val msg errs=0 seen=" " known
+  [ -n "$CFG_TMP" ] || CFG_TMP=$(mktemp -d)
+  : > "$CFG_TMP/parsed"
+  known=" $(sed -n 's/^\([A-Z][A-Z0-9_]*\)=.*/\1/p' "$CONFIG_EXAMPLE" | tr '\n' ' ')"
+  while IFS= read -r line || [ -n "$line" ]; do
+    n=$((n + 1))
+    line=${line%$'\r'}
+    line=$(printf '%s' "$line" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
+    case $line in ''|'#'*) continue ;; esac
+    if ! [[ $line =~ ^[A-Za-z_][A-Za-z0-9_]*[[:space:]]*= ]]; then
+      say "  ✗ $CONFIG line $n: not KEY=VALUE: $line" >&2; errs=$((errs + 1)); continue
+    fi
+    key=$(printf '%s' "${line%%=*}" | sed 's/[[:space:]]*$//')
+    val=$(printf '%s' "${line#*=}" | sed 's/^[[:space:]]*//')
+    case $known in
+      *" $key "*) ;;
+      *) say "  ! $CONFIG line $n: unknown key $key — ignored (see $CONFIG_EXAMPLE for the keys)" >&2; continue ;;
+    esac
+    case $seen in *" $key "*) say "  ✗ $CONFIG line $n: $key is set twice" >&2; errs=$((errs + 1)); continue ;; esac
+    seen="$seen$key "
+    if [ -n "$val" ] && ! msg=$(cfg_check "$key" "$val"); then
+      say "  ✗ $CONFIG line $n: $key=$val — $msg" >&2; errs=$((errs + 1)); continue
+    fi
+    printf '%s=%s\n' "$key" "$val" >> "$CFG_TMP/parsed"
+  done < "$src"
+  [ "$errs" = 0 ] || fail "$errs problem(s) in $CONFIG — nothing was changed"
+}
+
+# The text of one include file, from the list under KEY; nothing when the list is empty.
+render_fragment() {   # DIR KEY
+  local dir=$1 val item
+  val=$(cfg_get "$2")
+  [ -n "$val" ] || return 0
+  printf '%s\n' "$FRAGMENT_HEADER"
+  case $dir in
+    allow-ui)
+      # The whole address space, as halves: geo's `default 1;` already is 0.0.0.0/0, and a
+      # second /0 would only be a duplicate. Listed addresses are more specific, so they win.
+      printf '%s\n' '0.0.0.0/1 0;' '128.0.0.0/1 0;' '::/1 0;' '8000::/1 0;'
+      while IFS= read -r item; do printf '%s 1;\n' "$item"; done < <(cfg_list "$val") ;;
+    allow-host)
+      while IFS= read -r item; do
+        item=$(printf '%s' "$item" | tr 'A-Z' 'a-z')    # nginx hands $host over in lower case
+        if is_v6 "$item"; then printf '"%s" 1;\n"[%s]" 1;\n' "$item" "$item"; else printf '%s 1;\n' "$item"; fi
+      done < <(cfg_list "$val")
+      printf '%s\n' '~^ 0;' ;;     # whatever is not listed (exact names are tried first)
+    rate-exempt)
+      while IFS= read -r item; do printf '%s 1;\n' "$item"; done < <(cfg_list "$val") ;;
+  esac
+}
+
+nginx_running() { docker compose ps --status running --format '{{.Service}}' 2>/dev/null | grep -qx nginx; }
+
+# Brings config.txt into force. $1 = restart (also recreate the core, which reads config.txt
+# only at start) or keep (a deploy that restarts it anyway). Validates first and changes
+# nothing on any error. Nobody is signed out: sessions outlive a restart.
+apply_config() {
+  local mode=$1 src=$CONFIG_SRC spec dir key f old new changed="" relisten="" listen_new mem_new frag_changed=0 backups check
+  say "== settings: $CONFIG"
+  config_validate "$src"
+  listen_new=$(cfg_get LISTEN_PORT); mem_new=$(cfg_get CORE_MEM_LIMIT)
+
+  # What each include file should say now, next to what it says.
+  backups=$CFG_TMP/previous; mkdir -p "$backups" "$CFG_TMP/next"
+  for spec in $FRAGMENTS; do
+    dir=${spec%%:*}; key=${spec#*:}
+    f=nginx/$dir/$FRAGMENT_NAME
+    render_fragment "$dir" "$key" > "$CFG_TMP/next/$dir"
+    old=absent; new=absent
+    [ ! -f "$f" ] || old=present
+    [ ! -s "$CFG_TMP/next/$dir" ] || new=present
+    if [ "$old" != "$new" ] || { [ "$new" = present ] && ! cmp -s "$f" "$CFG_TMP/next/$dir"; }; then
+      changed="$changed $dir"; frag_changed=1
+    fi
+  done
+
+  for spec in $FRAGMENTS; do
+    dir=${spec%%:*}; key=${spec#*:}
+    case " $changed " in *" $dir "*) ;; *) continue ;; esac
+    f=nginx/$dir/$FRAGMENT_NAME
+    if [ -s "$CFG_TMP/next/$dir" ]; then say "   $key → $f: $(grep -vc '^#' "$CFG_TMP/next/$dir") line(s)"; else say "   $key is empty → $f removed"; fi
+  done
+  [ -n "$changed" ] || say "   nginx include files: already as config.txt says"
+
+  if [ "$DRY" = 1 ]; then
+    for dir in $changed; do
+      if [ -s "$CFG_TMP/next/$dir" ]; then say "  would: write nginx/$dir/$FRAGMENT_NAME"; else say "  would: remove nginx/$dir/$FRAGMENT_NAME"; fi
+    done
+  else
+    for dir in $changed; do
+      f=nginx/$dir/$FRAGMENT_NAME
+      mkdir -p "nginx/$dir"
+      [ ! -f "$f" ] || cp -p "$f" "$backups/$dir"
+      if [ -s "$CFG_TMP/next/$dir" ]; then cp "$CFG_TMP/next/$dir" "$f"; else rm -f "$f"; fi
+    done
+  fi
+
+  # Validate in the running nginx, whose directories now hold the new files, before anything
+  # is reloaded or recreated. A list that nginx rejects puts the old files back.
+  if [ "$frag_changed" = 1 ] && [ "$DRY" != 1 ] && nginx_running; then
+    if ! docker compose exec -T nginx test -d /etc/nginx/allow-ui -a -d /etc/nginx/allow-host 2>/dev/null; then
+      relisten=mounts     # this nginx predates the directories: only a recreate adds the mounts
+    elif ! check=$(docker compose exec -T nginx nginx -t 2>&1); then
+      for dir in $changed; do
+        f=nginx/$dir/$FRAGMENT_NAME
+        if [ -f "$backups/$dir" ]; then cp -p "$backups/$dir" "$f"; else rm -f "$f"; fi
+      done
+      printf '  %s\n' "$check" | tail -4 >&2
+      fail "nginx rejected the lists in $CONFIG — the previous nginx include files are back and nothing was reloaded"
+    fi
+  fi
+
+  # .env: the port and the core's memory limit. Empty in config.txt = not managed (the port)
+  # or back to the default (the memory), so a value removed from config.txt does not linger.
+  if [ -n "$listen_new" ] && [ "$listen_new" != "$(env_get LISTEN)" ] && { [ "$listen_new" != 443 ] || [ -n "$(env_get LISTEN)" ]; }; then
+    [ "$DRY" = 1 ] || { [ -n "${ENV_SAVED:-}" ] || { ENV_SAVED=.env.bak-$(date +%Y%m%d-%H%M%S); cp .env "$ENV_SAVED"; }; }
+    say "   LISTEN_PORT → .env LISTEN=$listen_new"
+    env_set LISTEN "$listen_new"; relisten=listen
+  fi
+  if [ -n "$mem_new" ]; then
+    if [ "$mem_new" != "$(env_get ELASTICPRO_MEM_LIMIT)" ]; then say "   CORE_MEM_LIMIT → .env ELASTICPRO_MEM_LIMIT=$mem_new"; env_set ELASTICPRO_MEM_LIMIT "$mem_new"; fi
+  elif [ -n "$(env_get ELASTICPRO_MEM_LIMIT)" ]; then
+    say "   CORE_MEM_LIMIT is empty → .env ELASTICPRO_MEM_LIMIT removed (default 1g)"; env_del ELASTICPRO_MEM_LIMIT
+  fi
+
+  # nginx: recreate for a new port, reload for new lists (a directory mount shows new files
+  # without a recreate). Not running: it reads the files when it starts.
+  if [ "$DRY" = 1 ]; then
+    [ -z "$relisten" ] || say "  would: docker compose up -d nginx   (the port changes)"
+    [ "$frag_changed" = 0 ] || say "  would: check the lists with nginx -t in the running nginx, then nginx -s reload"
+  elif nginx_running; then
+    if [ -n "$relisten" ]; then
+      run docker compose up -d nginx
+      say "✓ nginx recreated ($relisten)"
+    elif [ "$frag_changed" = 1 ]; then
+      if run docker compose exec -T nginx nginx -s reload; then say "✓ nginx reloaded"; else fail "nginx did not reload — docker compose exec nginx nginx -t"; fi
+    fi
+  fi
+
+  if [ "$mode" = restart ]; then
+    say "== restarting the core (it reads $CONFIG at start; nobody is signed out)"
+    run docker compose up -d --force-recreate core
+    if [ "$DRY" != 1 ]; then
+      if wait_healthy; then say "✓ core healthy with the new settings"; else
+        docker compose logs --tail 30 core || true
+        fail "core not healthy after applying $CONFIG — fix the value above and run --apply-config again${ENV_SAVED:+ (.env before: $ENV_SAVED)}"
+      fi
+    fi
+  fi
+  return 0
+}
+
 # --- 1. checks --------------------------------------------------------------------------
-docker compose version >/dev/null 2>&1 || fail "Docker Compose v2 is needed (docker compose …)"
+# A dry --apply-config only validates and renders, which needs no Docker.
+docker compose version >/dev/null 2>&1 || { [ "$APPLY$DRY" = 11 ] || fail "Docker Compose v2 is needed (docker compose …)"; }
 [ -f .env ] || fail "deploy/.env is missing — a first install starts with README.md (Install)"
-[ -f secrets/db_password ] || fail "deploy/secrets/db_password is missing — see README.md (Install, step 4)"
+[ -f secrets/db_password ] || [ "$APPLY$DRY" = 11 ] || fail "deploy/secrets/db_password is missing — see README.md (Install, step 4)"
+# Before any compose command: the core mounts it, and Docker makes a directory of a missing file.
+ensure_config
+
+if [ "$APPLY" = 1 ]; then
+  apply_config restart
+  [ "$DRY" = 1 ] && say "(dry run: nothing was changed)" || docker compose ps
+  exit 0
+fi
 
 CURRENT=$(env_get ELASTICPRO_IMAGE)
 CURRENT=${CURRENT:-elasticpro-core:latest}
@@ -224,17 +526,26 @@ if [ -n "$UPGRADE" ]; then
     now=$(image_of "$key"); new="$REG/elasticpro-$name:$TARGET"
     [ "$now" = "$new" ] || PLAN="$PLAN $key=$new"
   done
-  if [ -z "$PLAN" ]; then say "✓ already on $TARGET — nothing to do"; exit 0; fi
+  if [ -z "$PLAN" ]; then
+    apply_config keep
+    say "✓ already on $TARGET — nothing else to do (the core was not restarted: deploy.sh --apply-config does that)"
+    exit 0
+  fi
   if [ -n "$NOW" ] && older "$TARGET" "$NOW" && [ "$FORCE" != 1 ]; then
     fail "$TARGET is older than the $NOW running now — use --rollback to go back, or add --force"
   fi
 
+  # A bad config.txt stops the upgrade before anything is pulled.
+  [ ! -f "$CONFIG" ] || config_validate "$CONFIG"
   say "== upgrading ${NOW:-$CURRENT} → $TARGET"
   for item in $PLAN; do
     img=${item#*=}
     say "   pulling $img"
     run docker pull -q "$img" >/dev/null || fail "$img is not published (or cannot be pulled) — nothing changed"
   done
+  # After the pulls, so a release that is not published leaves everything as it was; before
+  # the .env backup, so the way back keeps the port and memory limit config.txt asks for.
+  apply_config keep
   BACKUP=.env.bak-$(date +%Y%m%d-%H%M%S)
   run cp .env "$BACKUP"
   # The core's previous image is always recorded; a support image's only when it moves, and
@@ -267,6 +578,9 @@ if [ -n "$UPGRADE" ]; then
   if wait_healthy; then say "✓ back on ${NOW:-$CURRENT}, healthy"; else say "✗ not healthy on ${NOW:-$CURRENT} either — docker compose logs core"; fi
   exit 1
 fi
+
+# config.txt in force before the core is switched: this deploy restarts it anyway.
+apply_config keep
 
 say "== deploying $IMAGE (running now: $CURRENT)"
 BACKUP=.env.bak-$(date +%Y%m%d-%H%M%S)
