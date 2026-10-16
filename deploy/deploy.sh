@@ -4,7 +4,17 @@
 #   deploy/deploy.sh                          # build this checkout and run it
 #   deploy/deploy.sh --pull                   # git pull first
 #   deploy/deploy.sh --image repo/core:0.1.0  # run an image built elsewhere (no build here)
-#   deploy/deploy.sh --rollback               # back to the image that ran before the last deploy
+#   deploy/deploy.sh --upgrade                # the latest release's published images
+#   deploy/deploy.sh --upgrade=0.3.16         # one release's published images (v0.3.16 works too)
+#   deploy/deploy.sh --rollback               # back to the images that ran before the last deploy
+#
+# --upgrade moves all four released images together, core, nginx, PostgreSQL and Redis, to
+# one version, through .env (ELASTICPRO_IMAGE, ELASTICPRO_NGINX_IMAGE, ELASTICPRO_DB_IMAGE,
+# ELASTICPRO_REDIS_IMAGE), so docker-compose.yml is never edited. Every image is pulled
+# before anything changes; a version that is not published fails with nothing touched. The
+# images come from Docker Hub's karthickdk02/ unless ELASTICPRO_REGISTRY names another
+# namespace. Going to an older version is refused without --force (--rollback is the usual
+# way back).
 #
 # In order:
 #   1. checks: .env and the stack's secrets exist, Docker Compose v2 is there;
@@ -18,23 +28,31 @@
 # The rest of the stack (nginx, database) is left running as it is; `--all` restarts it too.
 # One exception: when deploy/nginx/nginx.conf differs from the config the running nginx has,
 # nginx is recreated — a bind-mounted file is not picked up by a restart or a reload.
-# Options: --pull, --image TAG, --rollback, --all, --timeout SECONDS (default 180), --dry-run
+# Options: --pull, --image TAG, --upgrade[=VERSION], --force, --rollback, --all,
+#          --timeout SECONDS (default 180), --dry-run
 set -euo pipefail
 cd "$(dirname "$0")"
 
-PULL=0; IMAGE=; ROLLBACK=0; ALL=0; TIMEOUT=180; DRY=0
+PULL=0; IMAGE=; ROLLBACK=0; ALL=0; TIMEOUT=180; DRY=0; UPGRADE=; FORCE=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --pull) PULL=1; shift ;;
     --image) IMAGE=$2; shift 2 ;;
+    --upgrade=*) UPGRADE=${1#*=}; [ -n "$UPGRADE" ] || UPGRADE=latest; shift ;;
+    # `--upgrade 0.3.16` as well as `--upgrade=0.3.16`, but only when what follows is a version.
+    --upgrade) if [ $# -gt 1 ] && printf '%s' "$2" | grep -Eq '^v?[0-9]+\.[0-9]+\.[0-9]+$'; then UPGRADE=$2; shift 2; else UPGRADE=latest; shift; fi ;;
+    --force) FORCE=1; shift ;;
     --rollback) ROLLBACK=1; shift ;;
     --all) ALL=1; shift ;;
     --timeout) TIMEOUT=$2; shift 2 ;;
     --dry-run) DRY=1; shift ;;
-    -h|--help) sed -n '2,21p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,/^set -euo/p' "$(basename "$0")" | sed '$d' | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "unknown option: $1 (see --help)" >&2; exit 2 ;;
   esac
 done
+
+[ -z "$UPGRADE" ] || [ -z "$IMAGE" ] || { echo "--upgrade and --image both pick the core image — use one" >&2; exit 2; }
+[ -z "$UPGRADE" ] || [ "$ROLLBACK" = 0 ] || { echo "--upgrade and --rollback go opposite ways — use one" >&2; exit 2; }
 
 say() { printf '%s\n' "$*"; }
 fail() { say "✗ $*" >&2; exit 1; }
@@ -44,6 +62,30 @@ env_set() {   # KEY VALUE — replace the line, or add it
   if [ "$DRY" = 1 ]; then say "  would: set $1=$2 in .env"; return; fi
   if grep -q "^$1=" .env; then sed -i.tmp "s|^$1=.*|$1=$2|" .env && rm -f .env.tmp; else printf '%s=%s\n' "$1" "$2" >> .env; fi
 }
+env_del() {   # KEY — remove the line if it is there
+  if [ "$DRY" = 1 ]; then grep -q "^$1=" .env && say "  would: remove $1 from .env"; return 0; fi
+  sed -i.tmp "/^$1=/d" .env && rm -f .env.tmp
+}
+
+# The four images a release publishes: the .env key compose reads, and the image's name.
+RELEASED="ELASTICPRO_IMAGE:core ELASTICPRO_NGINX_IMAGE:nginx ELASTICPRO_DB_IMAGE:postgres ELASTICPRO_REDIS_IMAGE:redis"
+SUPPORT_KEYS="ELASTICPRO_NGINX_IMAGE ELASTICPRO_DB_IMAGE ELASTICPRO_REDIS_IMAGE"
+# The image a key stands for now: .env when it says, else the default in docker-compose.yml.
+image_of() {
+  local v; v=$(env_get "$1")
+  [ -n "$v" ] || v=$(sed -n "s/.*\${$1:-\([^}]*\)}.*/\1/p" docker-compose.yml | head -1)
+  printf '%s' "$v"
+}
+# "0.3.16" from karthickdk02/elasticpro-core:0.3.16 or elasticpro-core:0.3.16-ab12cd3; empty otherwise.
+version_of() { printf '%s' "${1##*:}" | sed -n 's/^\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\).*/\1/p'; }
+# True when $1 is an older version than $2.
+older() { [ "$1" != "$2" ] && [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | head -1)" = "$1" ]; }
+# Redis runs only with the cache profile; its image is pulled only then.
+redis_used() {
+  case ",$(env_get COMPOSE_PROFILES),${COMPOSE_PROFILES:-}," in *,cache,*) return 0 ;; esac
+  docker compose ps --status running --format '{{.Service}}' 2>/dev/null | grep -qx redis
+}
+
 core_health() {
   local id; id=$(docker compose ps -q core 2>/dev/null)
   [ -n "$id" ] || { echo missing; return; }
@@ -69,6 +111,8 @@ CURRENT=${CURRENT:-elasticpro-core:latest}
 PREVIOUS_BEFORE=$(env_get ELASTICPRO_IMAGE_PREVIOUS)
 
 # --- rollback only ----------------------------------------------------------------------
+# Every image the last deploy changed goes back: the core always, and nginx, PostgreSQL and
+# Redis too when it was an --upgrade that moved them.
 if [ "$ROLLBACK" = 1 ]; then
   PREV=$(env_get ELASTICPRO_IMAGE_PREVIOUS)
   [ -n "$PREV" ] || fail "no previous image recorded (ELASTICPRO_IMAGE_PREVIOUS in .env)"
@@ -76,7 +120,15 @@ if [ "$ROLLBACK" = 1 ]; then
   say "== rollback: $CURRENT → $PREV"
   env_set ELASTICPRO_IMAGE "$PREV"
   env_set ELASTICPRO_IMAGE_PREVIOUS "$CURRENT"
-  run docker compose up -d core
+  STACK=0
+  for key in $SUPPORT_KEYS; do
+    old=$(env_get "${key}_PREVIOUS"); [ -n "$old" ] || continue
+    now=$(image_of "$key")
+    docker image inspect "$old" >/dev/null 2>&1 || run docker pull -q "$old" >/dev/null || fail "the previous image $old cannot be found or pulled"
+    say "   ${key#ELASTICPRO_}: $now → $old"
+    env_set "$key" "$old"; env_set "${key}_PREVIOUS" "$now"; STACK=1
+  done
+  if [ "$STACK" = 1 ]; then run docker compose up -d; else run docker compose up -d core; fi
   [ "$DRY" = 1 ] || { wait_healthy && say "✓ core healthy on $PREV"; } || fail "core not healthy on $PREV either — docker compose logs core"
   exit 0
 fi
@@ -149,6 +201,73 @@ sync_nginx() {
   fi
 }
 
+# --- upgrade: a published release, all four images ------------------------------------
+if [ -n "$UPGRADE" ]; then
+  API="https://api.github.com/repos/karthick-dkk/elasticpro"
+  REG=${ELASTICPRO_REGISTRY:-karthickdk02}
+  if [ "$UPGRADE" = latest ]; then
+    TAG=$(curl -fsSL --max-time 20 "$API/releases/latest" 2>/dev/null | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' | head -1)
+    [ -n "$TAG" ] || fail "could not ask GitHub which release is the latest ($API) — name it: --upgrade=X.Y.Z"
+    say "== latest release: $TAG"
+  else
+    TAG=$UPGRADE
+  fi
+  TARGET=${TAG#v}
+  printf '%s' "$TARGET" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' || fail "not a release version: $TAG (expected X.Y.Z, e.g. --upgrade=0.3.16)"
+  NOW=$(version_of "$CURRENT")
+
+  # What changes: every released image not already at the target.
+  PLAN=
+  for pair in $RELEASED; do
+    key=${pair%%:*}; name=${pair#*:}
+    [ "$key" != ELASTICPRO_REDIS_IMAGE ] || redis_used || continue
+    now=$(image_of "$key"); new="$REG/elasticpro-$name:$TARGET"
+    [ "$now" = "$new" ] || PLAN="$PLAN $key=$new"
+  done
+  if [ -z "$PLAN" ]; then say "✓ already on $TARGET — nothing to do"; exit 0; fi
+  if [ -n "$NOW" ] && older "$TARGET" "$NOW" && [ "$FORCE" != 1 ]; then
+    fail "$TARGET is older than the $NOW running now — use --rollback to go back, or add --force"
+  fi
+
+  say "== upgrading ${NOW:-$CURRENT} → $TARGET"
+  for item in $PLAN; do
+    img=${item#*=}
+    say "   pulling $img"
+    run docker pull -q "$img" >/dev/null || fail "$img is not published (or cannot be pulled) — nothing changed"
+  done
+  BACKUP=.env.bak-$(date +%Y%m%d-%H%M%S)
+  run cp .env "$BACKUP"
+  # The core's previous image is always recorded; a support image's only when it moves, and
+  # a stale record from an older upgrade is dropped so --rollback undoes exactly this one.
+  for key in $SUPPORT_KEYS; do env_del "${key}_PREVIOUS"; done
+  for item in $PLAN; do
+    key=${item%%=*}; img=${item#*=}
+    env_set "${key}_PREVIOUS" "$(image_of "$key")"
+    env_set "$key" "$img"
+  done
+  printf '%s' "$PLAN" | grep -q 'ELASTICPRO_IMAGE=' || env_set ELASTICPRO_IMAGE_PREVIOUS "$CURRENT"
+  say "== restarting the stack on $TARGET"
+  run docker compose up -d
+  [ "$DRY" = 1 ] && { say "(dry run: nothing was changed)"; exit 0; }
+  say "== waiting for the core's health check (up to ${TIMEOUT}s)"
+  if wait_healthy; then
+    say "✓ ElasticPro $TARGET is running and healthy"
+    sync_nginx
+    say "  .env before this upgrade: $BACKUP   ·   undo: deploy/deploy.sh --rollback"
+    docker compose ps
+    exit 0
+  fi
+  say "✗ core not healthy on $TARGET — last log lines:"
+  docker compose logs --tail 30 core || true
+  say "== putting back the .env from before the upgrade"
+  cp "$BACKUP" .env
+  docker compose up -d
+  # The way back gets the full wait, whatever --timeout the attempt had.
+  [ "$TIMEOUT" -ge 180 ] || TIMEOUT=180
+  if wait_healthy; then say "✓ back on ${NOW:-$CURRENT}, healthy"; else say "✗ not healthy on ${NOW:-$CURRENT} either — docker compose logs core"; fi
+  exit 1
+fi
+
 say "== deploying $IMAGE (running now: $CURRENT)"
 BACKUP=.env.bak-$(date +%Y%m%d-%H%M%S)
 run cp .env "$BACKUP"
@@ -165,6 +284,8 @@ fi
 # --- 4. switch --------------------------------------------------------------------------
 [ "$IMAGE" = "$CURRENT" ] || env_set ELASTICPRO_IMAGE_PREVIOUS "$CURRENT"
 env_set ELASTICPRO_IMAGE "$IMAGE"
+# This deploy moves the core alone; --rollback must not also undo an older upgrade's nginx.
+for key in $SUPPORT_KEYS; do env_del "${key}_PREVIOUS"; done
 say "== restarting $([ "$ALL" = 1 ] && echo "the stack" || echo "the core")"
 if [ "$ALL" = 1 ]; then run docker compose up -d; else run docker compose up -d core; fi
 [ "$DRY" = 1 ] && { say "(dry run: nothing was changed)"; exit 0; }
@@ -186,6 +307,7 @@ if [ "$IMAGE" != "$CURRENT" ]; then
   # This deploy never happened: --rollback keeps meaning what it meant before it.
   if [ -n "$PREVIOUS_BEFORE" ]; then env_set ELASTICPRO_IMAGE_PREVIOUS "$PREVIOUS_BEFORE"; else sed -i.tmp '/^ELASTICPRO_IMAGE_PREVIOUS=/d' .env && rm -f .env.tmp; fi
   docker compose up -d core
+  [ "$TIMEOUT" -ge 180 ] || TIMEOUT=180
   if wait_healthy; then say "✓ back on $CURRENT, healthy"; else say "✗ not healthy on $CURRENT either — docker compose logs core"; fi
 fi
 exit 1

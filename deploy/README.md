@@ -136,6 +136,23 @@ a mapping would read `0.0.0.0:8765->8765/tcp`, as it does for nginx on 443.
 
 ## Updating
 
+To a published release (no build on this host):
+
+```bash
+deploy/deploy.sh --upgrade            # the latest release
+deploy/deploy.sh --upgrade=0.3.16     # one particular release (v0.3.16 works too)
+deploy/deploy.sh --rollback           # back to the images that ran before
+```
+
+`--upgrade` moves all four images together (core, nginx, PostgreSQL, and Redis when the cache
+profile is on) by setting `ELASTICPRO_IMAGE`, `ELASTICPRO_NGINX_IMAGE`, `ELASTICPRO_DB_IMAGE` and
+`ELASTICPRO_REDIS_IMAGE` in `.env`. It pulls everything first, so a version that is not published
+changes nothing. If the core is not healthy in time it puts the previous `.env` back and restarts
+on it. Going to an older version needs `--force`. `--dry-run` shows the plan. The images come from
+`karthickdk02/` unless `ELASTICPRO_REGISTRY` names another namespace.
+
+From this checkout instead (builds the core here):
+
 ```bash
 git pull && docker compose up -d --build
 ```
