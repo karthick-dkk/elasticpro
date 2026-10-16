@@ -25,16 +25,6 @@
 //! to write on a timer, it belongs on that same footing, and the sentence above should
 //! keep saying two.
 
-use regex::Regex;
-use std::sync::LazyLock;
-
-static READONLY_POST: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(
-        r"(^|/)_(search|msearch|count|field_caps|mget|explain|validate/query|render/template|terms_enum|search_shards|async_search|eql/search|sql|sql/translate|analyze|rank_eval|resolve/index|knn_search|index_template/_simulate_index|index_template/_simulate)(/|\?|$)",
-    )
-    .expect("static regex")
-});
-
 /// Why a particular request is allowed to write, if it is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Writes {
@@ -63,15 +53,46 @@ impl Writes {
 }
 
 /// Whether a request only reads: GET, HEAD, or a search-family POST. The one definition,
-/// used by the guard below and by the fleet cache to decide that a request changed
-/// something it holds.
+/// used by the guard below, by `auth::authorize` to keep every role but admin to reads,
+/// and by the fleet cache to decide that a request changed something it holds.
 pub fn is_read(method: &str, path: &str) -> bool {
     let m = method.trim().to_ascii_uppercase();
     if m == "GET" || m == "HEAD" {
         return true;
     }
-    let bare = path.split('?').next().unwrap_or("/");
-    m == "POST" && READONLY_POST.is_match(bare)
+    m == "POST" && is_read_post(path.split('?').next().unwrap_or("/"))
+}
+
+/// A POST that only reads: the read endpoint must BE the endpoint, not merely appear in the
+/// path.
+///
+/// This used to be a regex that accepted `_search` anywhere, and the URL parser that sends
+/// the request disagreed with it about what the path was: `/_search/../_bulk` matched and
+/// reached Elasticsearch as `POST /_bulk`; `/idx/_doc/_search` matched and indexed a
+/// document whose id is `_search`; `/idx/_delete_by_query#/_search` lost its fragment on
+/// the way out. So nothing a parser would rewrite is accepted (dot segments, backslashes,
+/// fragments, percent-encoding — no index name needs any of them), every segment before
+/// the endpoint must be an index name (they cannot start with `_`), and the endpoint is
+/// followed only by the suffixes it really has.
+fn is_read_post(bare: &str) -> bool {
+    if bare.contains(['\\', '#', '%']) {
+        return false;
+    }
+    let segs: Vec<&str> = bare.split('/').filter(|s| !s.is_empty()).collect();
+    if segs.iter().any(|s| *s == "." || *s == "..") {
+        return false;
+    }
+    let Some(k) = segs.iter().position(|s| s.starts_with('_')) else { return false };
+    match (segs[k], &segs[k + 1..]) {
+        ("_search" | "_msearch" | "_count" | "_field_caps" | "_mget" | "_terms_enum" | "_search_shards"
+            | "_knn_search" | "_rank_eval" | "_analyze" | "_sql" | "_async_search", []) => true,
+        ("_search" | "_msearch", ["template"]) | ("_search", ["scroll"]) | ("_validate", ["query"])
+            | ("_eql", ["search"]) | ("_sql", ["translate"]) | ("_render", ["template"]) => true,
+        ("_render", ["template", id]) | ("_explain", [id]) => !id.starts_with('_'),
+        ("_index_template", ["_simulate"]) => k == 0,
+        ("_index_template", ["_simulate" | "_simulate_index", name]) => k == 0 && !name.starts_with('_'),
+        _ => false,
+    }
 }
 
 /// `Some(reason)` when the request must be refused.
@@ -90,6 +111,23 @@ pub fn write_guard(writes: Writes, method: &str, path: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_search_is_a_read_only_where_it_is_the_endpoint() {
+        for p in ["/logs-*/_search", "/_search?size=0", "/a,b/_count", "/_msearch", "/_search/template", "/idx/_validate/query",
+                  "/idx/_explain/doc-1", "/_sql?format=txt", "/_sql/translate", "/idx/_field_caps", "/_mget", "/idx/_eql/search",
+                  "/_index_template/_simulate_index/logs-x", "/_render/template", "/idx/_async_search", "/_analyze"] {
+            assert!(super::is_read("POST", p), "{p} reads");
+        }
+        for p in ["/_search/../_bulk", "/_search/%2e%2e/_delete_by_query", "/_search/..\\_bulk", "/idx/_delete_by_query#/_search",
+                  "/idx/_doc/_search", "/idx/_update/_search", "/idx/_create/_search", "/_bulk", "/idx/_doc", "/_reindex?x=/_search",
+                  "/idx/_search/extra", "/_snapshot/r/s/_restore", "/idx/_explain/_bulk", "/idx/./_search", "/idx%2F_doc/_search",
+                  "/idx/_close", "/_index_template/x"] {
+            assert!(!super::is_read("POST", p), "{p} must count as a write");
+        }
+        assert!(super::is_read(" get ", "/anything/../at/all"), "a GET is a read, wherever it points");
+        assert!(!super::is_read("PUT", "/idx/_search"));
+    }
+
     use super::*;
 
     /// The old two-argument shape, kept so the read/write cases below stay readable.

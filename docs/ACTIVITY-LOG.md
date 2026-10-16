@@ -32,7 +32,7 @@ is recorded (first 64 characters), because a run of them against one name is the
 | `error.code` | the `EP-nnn` code (failures only, see ERROR-CODES.md) |
 | `user.name`, `user.roles` | who, and their role |
 | `user.target.name` | the account an administrator acted on (USER_* only) |
-| `source.ip` | the client address, honouring `X-Real-IP` from trusted proxies |
+| `source.ip` | the client address, honouring `X-Real-IP` from trusted proxies (see below) |
 | `elasticpro.cluster` | cluster id |
 | `elasticpro.via` | how the caller proved who they are: `session`, `token`, `proxy`, `sso`, `none` |
 | `elasticpro.edition` | `hosted`, `installed` or `portable` |
@@ -57,6 +57,16 @@ deleted. A write error is warned about once and never fails the request.
 | `ELASTICPRO_ACTIVITY_LOG_MAX_MB` | `50` | size at which the file rotates |
 | `ELASTICPRO_ACTIVITY_LOG_KEEP` | `5` | rotated files kept |
 | `ELASTICPRO_ACTIVITY_STDOUT` | unset | `1` also emits each event on stdout as a tracing event with target `activity` (for Docker log drivers) |
+
+Writing is done by a background thread fed through a queue of 10,000 lines, so a slow disk
+never slows a request. If the queue ever fills, further lines are dropped from the file
+(not from the Accounts page) and a warning is logged at most once a minute.
+
+**Set `ELASTICPRO_TRUSTED_PROXIES`.** `source.ip` comes from the `X-Real-IP` header nginx
+sets. While `ELASTICPRO_TRUSTED_PROXIES` is unset the core believes that header from any
+peer (and logs a warning at startup saying so), so anyone who can reach the core directly,
+bypassing nginx, can put any address in `source.ip`. Set it to the proxy's IP or CIDR
+(comma separated) and the header is believed only from those peers.
 
 The Accounts page reads the last 1000 events, held in memory since the server started;
 the file is the complete record.

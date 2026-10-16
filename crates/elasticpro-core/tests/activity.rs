@@ -33,7 +33,7 @@ async fn reads_and_refused_writes_are_listed_for_an_admin_only() {
     // A wrong password is a failure under the name that was typed.
     c.handle(json!({ "type": "LOGIN", "name": "reader", "password": "not-the-password" })).await;
 
-    // Not an admin: refused, and asking is not itself an event.
+    // Not an admin: refused. A successful poll is not an event, a refused one is.
     let denied = c.handle(json!({ "type": "ACTIVITY_LIST", "session": reader })).await;
     assert_eq!(denied["ok"], json!(false));
     assert_eq!(denied["kind"], json!("forbidden"), "{denied}");
@@ -52,13 +52,16 @@ async fn reads_and_refused_writes_are_listed_for_an_admin_only() {
     assert_eq!(write["event"]["outcome"], "failure");
     assert!(write["error"]["code"].is_string(), "{write}");
     assert!(events.iter().any(|e| e["event"]["action"] == "login" && e["event"]["outcome"] == "failure" && e["user"]["name"] == "reader"));
-    assert!(events.iter().all(|e| e["event"]["action"] != "activity_list"));
+    assert!(events.iter().filter(|e| e["event"]["action"] == "activity_list").all(|e| e["event"]["outcome"] == "failure" && e["user"]["name"] == "reader"),
+        "the admin's own successful listing is not recorded; the reader's refused one is");
+    assert!(events.iter().any(|e| e["event"]["action"] == "activity_list"), "the refused poll is recorded");
     assert!(res["file"].is_string());
 
     let only_failed = c.handle(json!({ "type": "ACTIVITY_LIST", "session": admin, "failedOnly": true })).await;
     assert!(only_failed["events"].as_array().unwrap().iter().all(|e| e["event"]["outcome"] == "failure"));
 
     // The file has the same lines, and none of what must not be there.
+    c.flush_activity();
     let text = std::fs::read_to_string(dir.0.join("activity.jsonl")).expect("the log file");
     assert!(text.lines().count() >= 4);
     for l in text.lines() { serde_json::from_str::<Value>(l).expect("JSON per line"); }

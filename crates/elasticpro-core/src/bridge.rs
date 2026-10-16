@@ -889,6 +889,11 @@ impl Core {
         }
     }
 
+    /// Wait for the activity log's writer thread to catch up with what has been recorded.
+    pub fn flush_activity(&self) {
+        self.activity.flush();
+    }
+
     async fn dispatch(self: &Arc<Self>, msg: Value, caller: Option<Caller>, reauth: Reauth) -> Value {
         let t = msg.get("type").and_then(|v| v.as_str()).unwrap_or("").to_string();
         if self.edition.uses_accounts() {

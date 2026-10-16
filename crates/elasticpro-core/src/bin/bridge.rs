@@ -80,6 +80,12 @@ async fn main() {
     let hosted = !bind.is_loopback();
     if hosted {
         tracing::warn!(bind = %bind, "hosted mode: accounts required — a fresh install creates the first one with a password of its own");
+        // effective_source() believes X-Real-IP from any peer until this is set, so anyone
+        // who can reach the core without going through nginx can write whatever they like
+        // into source.ip in the activity log (and past the Zabbix allowedSources check).
+        if std::env::var("ELASTICPRO_TRUSTED_PROXIES").map(|v| v.trim().is_empty()).unwrap_or(true) {
+            tracing::warn!("ELASTICPRO_TRUSTED_PROXIES is not set: X-Real-IP is trusted from any peer, so source.ip in the activity log can be forged by anyone who reaches the core directly; set it to the proxy's address(es)");
+        }
     }
 
     // The dev bridge on loopback is a single person on their own machine, exactly like
@@ -236,10 +242,15 @@ async fn bridge(
         Some(secret) => match app.core.caller_for_token(secret) {
             Some(c) => (Some(c), Reauth::Token(secret.to_string())),
             None => {
-                return Json(serde_json::json!({
+                // Guessing tokens is exactly what an activity log is for, so a refusal
+                // here is recorded like any other (the token itself never is).
+                let mut reply = serde_json::json!({
                     "ok": false, "kind": "unauthenticated",
                     "message": "that API token is not valid, has expired, or has been revoked",
-                })).into_response()
+                });
+                elasticpro_core::errors::stamp(&mut reply);
+                app.core.record_activity(&msg, None, "token", source_of(&app, &headers, peer), &reply);
+                return Json(reply).into_response()
             }
         },
         None => {

@@ -10,15 +10,23 @@
 //! named fields rather than from the message, so a field somebody adds to a message later
 //! cannot leak by being copied along.
 //!
-//! Writing must never hurt the request it describes. An I/O error warns once and the log
-//! carries on (and retries the file on the next event); the append is one small
-//! synchronous write under a lock, which is cheaper than handing it to another thread.
+//! Writing must never hurt the request it describes. `record()` formats the line, puts it
+//! in the in-memory ring and hands it to one dedicated writer thread over a bounded
+//! channel; it never touches the disk and never waits. If the writer falls so far behind
+//! that the channel is full the line is counted as dropped (one warning a minute at most)
+//! rather than holding a request up. The writer owns the file, the rotation and the
+//! reopen: an I/O error warns once and the log carries on, retrying the file on the next
+//! event. A reopened file that does not end in a newline (a write cut short by a full
+//! disk) gets one first, so a half line never merges with the next whole one.
 
 use std::collections::VecDeque;
 use std::fs::{File, OpenOptions};
-use std::io::Write as _;
+use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc::{sync_channel, Receiver, SyncSender, TrySendError};
+use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
 use serde_json::{json, Map, Value};
@@ -30,6 +38,8 @@ pub const RING: usize = 1000;
 pub const DEFAULT_MAX_MB: u64 = 50;
 pub const DEFAULT_KEEP: usize = 5;
 pub const FILE_NAME: &str = "activity.jsonl";
+/// Lines waiting for the writer thread before new ones are dropped.
+pub const QUEUE: usize = 10_000;
 
 /// Messages the pages send on a timer or on every navigation. They are not something a
 /// person did, and at one a few seconds they would bury everything that was.
@@ -75,16 +85,18 @@ fn clip(s: &str, max: usize) -> String {
 }
 
 impl ActivityEvent {
-    /// The event for one exchange, or `None` for a background poll.
+    /// The event for one exchange, or `None` for a background poll that went through. A
+    /// poll that failed or was refused (a scoped user turned away from CLUSTER_DATASET, a
+    /// dead session) is somebody probing and is recorded like anything else.
     pub fn from_exchange(
         msg: &Value, caller: Option<&Caller>, via: &str, source: Option<IpAddr>, reply: &Value, edition: Edition,
     ) -> Option<ActivityEvent> {
         let t = msg.get("type").and_then(Value::as_str).unwrap_or("");
-        if t.is_empty() || POLLS.contains(&t) {
+        let ok = reply.get("ok").and_then(Value::as_bool).unwrap_or(false);
+        if t.is_empty() || (ok && POLLS.contains(&t)) {
             return None;
         }
         let s = |k: &str| msg.get(k).and_then(Value::as_str).map(str::trim).filter(|v| !v.is_empty());
-        let ok = reply.get("ok").and_then(Value::as_bool).unwrap_or(false);
 
         // A sign-in has no caller going in; the reply says who it made. A failed one has
         // neither, so the name that was typed is recorded — a run of them is the point.
@@ -193,21 +205,38 @@ impl ActivityConfig {
     }
 }
 
-struct Inner {
-    file: Option<File>,
-    size: u64,
-    ring: VecDeque<Value>,
-    warned: bool,
+enum Msg {
+    Line(String),
+    /// Answered once everything queued before it has been written.
+    Flush(SyncSender<()>),
 }
 
 pub struct ActivityLog {
     cfg: ActivityConfig,
-    inner: Mutex<Inner>,
+    ring: Mutex<VecDeque<Value>>,
+    tx: Option<SyncSender<Msg>>,
+    dropped: AtomicU64,
+    last_drop_warn: Mutex<Option<Instant>>,
 }
 
 impl ActivityLog {
     pub fn new(cfg: ActivityConfig) -> ActivityLog {
-        ActivityLog { cfg, inner: Mutex::new(Inner { file: None, size: 0, ring: VecDeque::new(), warned: false }) }
+        let tx = cfg.path.clone().and_then(|path| {
+            let (tx, rx) = sync_channel::<Msg>(QUEUE);
+            let w = Writer { cfg: cfg.clone(), path: path.clone(), file: None, size: 0, warned: false };
+            match std::thread::Builder::new().name("activity-writer".into()).spawn(move || w.run(rx)) {
+                Ok(_) => Some(tx),
+                Err(e) => {
+                    tracing::warn!(error = %e, path = %path.display(), "activity log writer did not start; the log is kept in memory only");
+                    None
+                }
+            }
+        });
+        Self::with_sender(cfg, tx)
+    }
+
+    fn with_sender(cfg: ActivityConfig, tx: Option<SyncSender<Msg>>) -> ActivityLog {
+        ActivityLog { cfg, ring: Mutex::new(VecDeque::new()), tx, dropped: AtomicU64::new(0), last_drop_warn: Mutex::new(None) }
     }
 
     /// The file events are written to, if any.
@@ -215,53 +244,53 @@ impl ActivityLog {
         self.cfg.path.as_deref()
     }
 
+    /// Lines that never reached the writer because its queue was full.
+    pub fn dropped(&self) -> u64 {
+        self.dropped.load(Ordering::Relaxed)
+    }
+
     pub fn record(&self, ev: ActivityEvent) {
         let v = ev.to_json();
         let mut line = v.to_string();
         line.push('\n');
-        let mut g = self.inner.lock();
-        if g.ring.len() == RING { g.ring.pop_front(); }
-        g.ring.push_back(v);
         if self.cfg.stdout {
             tracing::info!(target: "activity", event = %line.trim_end(), "activity");
         }
-        if let Some(p) = &self.cfg.path {
-            if let Err(e) = self.append(&mut g, p, line.as_bytes()) {
-                // Once: a full disk would otherwise write a warning per click.
-                if !g.warned {
-                    g.warned = true;
-                    tracing::warn!(error = %e, path = %p.display(), "activity log is not being written; requests carry on");
+        {
+            let mut ring = self.ring.lock();
+            if ring.len() == RING { ring.pop_front(); }
+            ring.push_back(v);
+        }
+        let Some(tx) = &self.tx else { return };
+        match tx.try_send(Msg::Line(line)) {
+            Ok(()) => {}
+            // The writer has gone (it never does while this log lives); nothing to do.
+            Err(TrySendError::Disconnected(_)) => {}
+            Err(TrySendError::Full(_)) => {
+                let n = self.dropped.fetch_add(1, Ordering::Relaxed) + 1;
+                let mut last = self.last_drop_warn.lock();
+                if last.is_none_or(|t| t.elapsed() >= Duration::from_secs(60)) {
+                    *last = Some(Instant::now());
+                    tracing::warn!(dropped_total = n, "activity log writer is behind; lines are being dropped from the file (the Accounts page still has them)");
                 }
-                g.file = None;
-            } else {
-                g.warned = false;
             }
         }
     }
 
-    fn append(&self, g: &mut Inner, path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-        if g.file.is_none() {
-            g.file = Some(open(path)?);
-            g.size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+    /// Wait until every line recorded so far has been handed to the file. For tests and
+    /// for a clean shutdown; a request never calls it.
+    pub fn flush(&self) {
+        let Some(tx) = &self.tx else { return };
+        let (ack, wait) = sync_channel::<()>(1);
+        if tx.send(Msg::Flush(ack)).is_ok() {
+            let _ = wait.recv_timeout(Duration::from_secs(10));
         }
-        if g.size > 0 && g.size + bytes.len() as u64 > self.cfg.max_bytes {
-            g.file = None;
-            rotate(path, self.cfg.keep)?;
-            g.file = Some(open(path)?);
-            g.size = 0;
-        }
-        let f = g.file.as_mut().expect("opened above");
-        // One write call per line, so a reader tailing the file never sees half of one.
-        f.write_all(bytes)?;
-        f.flush()?;
-        g.size += bytes.len() as u64;
-        Ok(())
     }
 
     /// Newest first. `user` is a case-insensitive substring of the user name.
     pub fn list(&self, limit: usize, user: Option<&str>, failed_only: bool) -> Vec<Value> {
         let want = user.map(|u| u.trim().to_lowercase()).filter(|u| !u.is_empty());
-        self.inner.lock().ring.iter().rev()
+        self.ring.lock().iter().rev()
             .filter(|e| !failed_only || e["event"]["outcome"] == "failure")
             .filter(|e| want.as_ref().is_none_or(|w| e["user"]["name"].as_str().is_some_and(|n| n.to_lowercase().contains(w.as_str()))))
             .take(limit)
@@ -270,7 +299,61 @@ impl ActivityLog {
     }
 }
 
-fn open(path: &Path) -> std::io::Result<File> {
+/// The thread that owns the file.
+struct Writer {
+    cfg: ActivityConfig,
+    path: PathBuf,
+    file: Option<File>,
+    size: u64,
+    warned: bool,
+}
+
+impl Writer {
+    fn run(mut self, rx: Receiver<Msg>) {
+        // Ends when the log is dropped and the last sender with it.
+        while let Ok(m) = rx.recv() {
+            match m {
+                Msg::Line(l) => match self.append(l.as_bytes()) {
+                    Ok(()) => self.warned = false,
+                    Err(e) => {
+                        // Once: a full disk would otherwise write a warning per click.
+                        if !self.warned {
+                            self.warned = true;
+                            tracing::warn!(error = %e, path = %self.path.display(), "activity log is not being written; requests carry on");
+                        }
+                        self.file = None;
+                    }
+                },
+                Msg::Flush(ack) => { let _ = ack.send(()); }
+            }
+        }
+    }
+
+    fn append(&mut self, bytes: &[u8]) -> std::io::Result<()> {
+        if self.file.is_none() {
+            let (f, size) = open(&self.path)?;
+            self.file = Some(f);
+            self.size = size;
+        }
+        if self.size > 0 && self.size + bytes.len() as u64 > self.cfg.max_bytes {
+            self.file = None;
+            rotate(&self.path, self.cfg.keep)?;
+            let (f, size) = open(&self.path)?;
+            self.file = Some(f);
+            self.size = size;
+        }
+        let f = self.file.as_mut().expect("opened above");
+        // One write call per line, so a reader tailing the file never sees half of one.
+        f.write_all(bytes)?;
+        f.flush()?;
+        self.size += bytes.len() as u64;
+        Ok(())
+    }
+}
+
+/// Open for append (mode 0600 on creation) and report the size. A non-empty file that
+/// does not end in a newline is finished off with one first.
+fn open(path: &Path) -> std::io::Result<(File, u64)> {
     let mut o = OpenOptions::new();
     o.create(true).append(true);
     #[cfg(unix)]
@@ -278,7 +361,20 @@ fn open(path: &Path) -> std::io::Result<File> {
         use std::os::unix::fs::OpenOptionsExt;
         o.mode(0o600);
     }
-    o.open(path)
+    let mut f = o.open(path)?;
+    let mut size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+    if size > 0 {
+        let mut last = [0u8; 1];
+        let mut r = File::open(path)?;
+        r.seek(SeekFrom::Start(size - 1))?;
+        r.read_exact(&mut last)?;
+        if last[0] != b'\n' {
+            f.write_all(b"\n")?;
+            f.flush()?;
+            size += 1;
+        }
+    }
+    Ok((f, size))
 }
 
 fn numbered(path: &Path, n: usize) -> PathBuf {
@@ -399,11 +495,23 @@ mod tests {
     }
 
     #[test]
-    fn polls_are_not_recorded() {
+    fn polls_that_succeed_are_not_recorded() {
         for t in POLLS {
             assert!(ev(json!({ "type": t }), None, json!({ "ok": true })).is_none(), "{t}");
         }
         assert!(ev(json!({ "type": "REFRESH" }), None, json!({ "ok": true })).is_some());
+    }
+
+    #[test]
+    fn a_poll_that_failed_is_recorded() {
+        let c = caller("asha", crate::auth::Role::User);
+        for t in ["CLUSTER_DATASET", "ZABBIX_METRICS", "FLEET_STATE"] {
+            let e = ev(json!({ "type": t }), Some(&c), json!({ "ok": false, "kind": "forbidden", "message": "no (EP-110)", "errorCode": "EP-110" }))
+                .unwrap_or_else(|| panic!("{t} refused must be recorded"));
+            assert!(!e.ok);
+            assert_eq!(e.action, t.to_ascii_lowercase());
+            assert_eq!(e.error_code.as_deref(), Some("EP-110"));
+        }
     }
 
     #[test]
@@ -435,6 +543,7 @@ mod tests {
         for i in 0..40 {
             log.record(ActivityEvent { action: "es".into(), ok: true, user: Some(format!("u{i}")), ..Default::default() });
         }
+        log.flush();
         assert!(p.exists() && numbered(&p, 1).exists() && numbered(&p, 2).exists());
         assert!(!numbered(&p, 3).exists(), "only two rotated files are kept");
         for f in [p.clone(), numbered(&p, 1)] {
@@ -455,7 +564,44 @@ mod tests {
         let d = tmp("bad");
         let log = ActivityLog::new(cfg(Some(d.join("no-such-dir").join(FILE_NAME)), 1 << 20, 1));
         log.record(ActivityEvent { action: "es".into(), ok: true, ..Default::default() });
+        log.flush();
         assert_eq!(log.list(10, None, false).len(), 1);
+        let _ = std::fs::remove_dir_all(d);
+    }
+
+    #[test]
+    fn a_reopened_file_with_a_half_line_gets_its_newline_first() {
+        let d = tmp("repair");
+        let p = d.join(FILE_NAME);
+        std::fs::write(&p, "{\"half\":\"written").unwrap();
+        let log = ActivityLog::new(cfg(Some(p.clone()), 1 << 20, 1));
+        log.record(ActivityEvent { action: "es".into(), ok: true, user: Some("whole".into()), ..Default::default() });
+        log.flush();
+        let text = std::fs::read_to_string(&p).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 2, "{text}");
+        assert!(serde_json::from_str::<Value>(lines[0]).is_err(), "the broken line stays on its own");
+        assert_eq!(serde_json::from_str::<Value>(lines[1]).unwrap()["user"]["name"], "whole");
+        // A file that already ends in a newline is left alone.
+        drop(log);
+        let log = ActivityLog::new(cfg(Some(p.clone()), 1 << 20, 1));
+        log.record(ActivityEvent { action: "es".into(), ok: true, ..Default::default() });
+        log.flush();
+        assert_eq!(std::fs::read_to_string(&p).unwrap().lines().count(), 3);
+        let _ = std::fs::remove_dir_all(d);
+    }
+
+    #[test]
+    fn a_full_queue_drops_and_counts_without_blocking() {
+        let d = tmp("full");
+        let (tx, rx) = sync_channel::<Msg>(2);
+        let log = ActivityLog::with_sender(cfg(Some(d.join(FILE_NAME)), 1 << 20, 1), Some(tx));
+        for _ in 0..5 {
+            log.record(ActivityEvent { action: "es".into(), ok: true, ..Default::default() });
+        }
+        assert_eq!(log.dropped(), 3);
+        assert_eq!(log.list(10, None, false).len(), 5, "the ring still has every event");
+        assert_eq!(rx.try_iter().count(), 2);
         let _ = std::fs::remove_dir_all(d);
     }
 }
