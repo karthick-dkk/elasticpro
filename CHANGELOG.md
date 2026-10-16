@@ -1,5 +1,44 @@
 # Changelog
 
+## 0.3.16
+
+**Only admins change clusters, every user action in a JSON log, and every error with a code.**
+
+Roles, from Zabbix: Super admin is an ElasticPro admin, Admin is an operator, every other user
+is a user. Only an admin writes to a cluster (PUT, POST, DELETE) or unlocks writes. Operators and
+users read: GET, HEAD and searches sent as POST, which read-only users could not run in the REST
+console before. Users no longer see Automation or Config. Every Zabbix sign-in reads all clusters
+by default; `zabbix.scopeUsersByGroup: true` limits Zabbix Users to their groups again.
+
+Security fix: a POST counted as a read when `_search` appeared anywhere in its path, and the URL
+parser disagreed about what the path was, so `/_search/../_bulk` reached Elasticsearch as
+`POST /_bulk`. A read POST must now end at its read endpoint with only index names before it;
+dot segments, backslashes, fragments, percent-encoding and control characters are refused.
+
+Operators saw no clusters when the admin had created the config from the setup screen: it was
+written to the data directory while everyone else was served `ELASTICPRO_CONFIG`. New configs go
+to `ELASTICPRO_CONFIG`, and an install made before reads the stray copy.
+
+Accounts: admins lock (no new sign-in; also after five wrong passwords, for 15 minutes; the only
+admin is slowed to one try per 30 seconds instead) and block (every request refused, nobody signed
+out) any account, Zabbix ones included. Access shows as view, operate, manage; each account shows
+its last sign-in and failures; Sign-in activity lists every attempt. A role change applies to open
+sessions without signing anyone out.
+
+User activity log: every action, reads included, as one JSON line with ECS field names in
+`<data dir>/activity.jsonl` (0600, rotated by size) with user, role, source IP, cluster, method,
+path, outcome and error code — never bodies, passwords or tokens. Admins see it on Accounts → User
+activity; `docs/ACTIVITY-LOG.md` covers forwarding to a SIEM. Set `ELASTICPRO_TRUSTED_PROXIES` so
+the source IP cannot be forged; the core warns at startup when it is unset.
+
+Error codes: every failure ends with one, for example `(EP-102)`. The core uses EP-1xx to EP-5xx,
+the page EP-6xx, the Zabbix module EP-7xx ("could not keep you signed in" is EP-703). All are listed
+in `docs/ERROR-CODES.md`.
+
+Pages: the Clusters page loses the fleet summary box and the two charts at the bottom; alert details
+and notices are clamped, and the Zabbix sync notice is one line; Unaccounted on Nodes & shards is red
+when the gap is worth a look. The module installer knows the Client overview widget (`ep_overview`).
+
 ## 0.3.15
 
 **One switch to accept every certificate, and one notification for what it accepted.**
