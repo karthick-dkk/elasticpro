@@ -75,7 +75,9 @@ pub fn is_read(method: &str, path: &str) -> bool {
 /// the endpoint must be an index name (they cannot start with `_`), and the endpoint is
 /// followed only by the suffixes it really has.
 fn is_read_post(bare: &str) -> bool {
-    if bare.contains(['\\', '#', '%']) {
+    // Printable ASCII only: the URL parser silently drops tabs and newlines, so `.\t.` would
+    // leave here as `..`.
+    if !bare.chars().all(|c| c.is_ascii_graphic()) || bare.contains(['\\', '#', '%']) {
         return false;
     }
     let segs: Vec<&str> = bare.split('/').filter(|s| !s.is_empty()).collect();
@@ -122,7 +124,8 @@ mod tests {
         for p in ["/_search/../_bulk", "/_search/%2e%2e/_delete_by_query", "/_search/..\\_bulk", "/idx/_delete_by_query#/_search",
                   "/idx/_doc/_search", "/idx/_update/_search", "/idx/_create/_search", "/_bulk", "/idx/_doc", "/_reindex?x=/_search",
                   "/idx/_search/extra", "/_snapshot/r/s/_restore", "/idx/_explain/_bulk", "/idx/./_search", "/idx%2F_doc/_search",
-                  "/idx/_close", "/_index_template/x", "/_all/_doc/_search", "/_all/_bulk"] {
+                  "/idx/_close", "/_index_template/x", "/_all/_doc/_search", "/_all/_bulk",
+                  "/_search/.\t./_bulk", "/_search/.\n./_bulk", "/_search/..\r/_bulk", "/_search/ ../_bulk", "/idx/_bulk\t/_search"] {
             assert!(!super::is_read("POST", p), "{p} must count as a write");
         }
         assert!(super::is_read(" get ", "/anything/../at/all"), "a GET is a read, wherever it points");

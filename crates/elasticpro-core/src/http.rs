@@ -159,6 +159,13 @@ impl Transport {
         let base = base_url.trim_end_matches('/');
         let full = format!("{base}{path}");
 
+        // Whitespace and control characters are dropped or rewritten by the URL parser, so the
+        // path that was checked would not be the path that was sent. No real request needs
+        // them raw; the UI percent-encodes what it sends.
+        if path.chars().any(|c| c.is_ascii_control() || c.is_whitespace()) {
+            return json!({ "ok": false, "status": 0, "kind": "bad_request", "url": full, "tookMs": 0,
+                           "message": "the path holds a space or a control character — percent-encode it" });
+        }
         if let Some(msg) = write_guard(writes, &method, &path) {
             return json!({ "ok": false, "status": 0, "kind": "blocked_readonly", "message": msg, "url": full, "tookMs": 0 });
         }
