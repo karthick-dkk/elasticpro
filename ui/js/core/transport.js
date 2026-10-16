@@ -45,11 +45,7 @@ export async function bridge(msg) {
   try {
     // LOGIN carries no session, and LOGOUT carries the one it is ending.
     const out = session && msg.session === undefined ? { ...msg, session } : msg;
-    const res = isTauri
-      ? await T.core.invoke('bridge', { msg: out })
-      : await (await fetch('/bridge', {
-        method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(out),
-      })).json();
+    const res = isTauri ? await T.core.invoke('bridge', { msg: out }) : await httpBridge(out);
     // An expired or revoked session must not leave the app quietly showing stale data —
     // every caller would otherwise have to notice this for itself.
     if (res && res.kind === 'unauthenticated' && (session || signedIn) && msg.type !== 'LOGIN') {
@@ -60,6 +56,47 @@ export async function bridge(msg) {
     return stampReply(res);
   } catch (e) {
     return stampReply({ ok: false, kind: 'worker_error', message: `ElasticPro server did not answer: ${String(e && e.message || e)}` });
+  }
+}
+
+/**
+ * What an HTTP status from the proxy in front of the core means, when the answer is not the
+ * core's JSON. nginx answers these itself with an HTML page — which read as "Unexpected
+ * token '<' … is not valid JSON" and said nothing about why.
+ */
+const PROXY_STATUS = {
+  429: ['proxy_rate_limited', 'this browser sent more requests than the server allows per second — slowed down; it clears by itself'],
+  502: ['core_unavailable', 'the ElasticPro core is not answering nginx (restarting, or stopped)'],
+  503: ['core_unavailable', 'the ElasticPro core is not answering nginx (restarting, or stopped)'],
+  504: ['core_timeout', 'the ElasticPro core took longer than nginx waits (120 s) to answer'],
+};
+// A 429 is nginx refusing before passing anything on: always safe to send again. A 502/503
+// usually means nginx could not reach the core, but it also answers 502 when the core went
+// away mid-request (a restart, a crash) — after it may have acted. So those are retried only
+// for messages that change nothing; a 504 never.
+const RETRY_MS = { 429: [500, 1000, 2000], 502: [1500], 503: [1500] };
+const CHANGES = /^(ES|.*_(SET|ADD|REMOVE|DELETE|WRITE|SAVE|CLEAR|CREATE|REVOKE|UPLOAD|UNLOCK|RUN|RESTORE|BEGIN)|WRITE_UNLOCK|PRIME|FORGET|SEAL|OPEN|LOGIN|LOGOUT|BOOTSTRAP_ADMIN|TRUST_.*|UNTRUST_.*|ZABBIX_SYNC|ZABBIX_UNPAIR|REFRESH)$/;
+const readsOnly = (msg) => !CHANGES.test(String(msg.type || ''))
+  || (msg.type === 'ES' && /^(GET|HEAD)?$/i.test(String(msg.method || '').trim()));
+const pause = (ms) => new Promise((r) => setTimeout(r, ms));
+
+async function httpBridge(out) {
+  const body = JSON.stringify(out);
+  for (let attempt = 0; ; attempt++) {
+    const r = await fetch('/bridge', { method: 'POST', headers: { 'content-type': 'application/json' }, body });
+    const waits = (r.status === 429 || readsOnly(out)) ? RETRY_MS[r.status] : null;
+    if (waits && attempt < waits.length) {
+      const after = Number(r.headers.get('retry-after'));
+      await pause(after > 0 && after < 10 ? after * 1000 : waits[attempt]);
+      continue;
+    }
+    const text = await r.text();
+    try {
+      return JSON.parse(text);
+    } catch (_) {
+      const [kind, why] = PROXY_STATUS[r.status] || ['worker_error', `the server answered HTTP ${r.status} with a page instead of data`];
+      return { ok: false, kind, status: r.status, message: `ElasticPro server: ${why} (HTTP ${r.status})` };
+    }
   }
 }
 

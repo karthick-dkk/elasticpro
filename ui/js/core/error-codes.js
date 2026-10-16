@@ -14,6 +14,9 @@ export const UI_CODES = {
   no_clusters: 'EP-603',    // signed in, and no cluster this account may see
   sso_failed: 'EP-604',     // a Zabbix sign-in code could not be traded for a session
   parse_error: 'EP-605',    // the cluster list arrived but does not parse
+  proxy_rate_limited: 'EP-606', // nginx refused: more requests per second than allowed (429)
+  core_unavailable: 'EP-607',   // nginx could not reach the core (502/503)
+  core_timeout: 'EP-608',       // the core did not answer within nginx's wait (504)
 };
 
 export const UNKNOWN_CODE = 'EP-999';

@@ -16,3 +16,6 @@
 # One caveat: tools/hosted-check.sh asserts that /zabbix/pair answers 429 once it is over
 # its budget. Exempt the address that script runs from and that check fails — correctly,
 # because the limit really is off for it. Run the check from an address not listed here.
+#
+# RATE_EXEMPT_IPS in deploy/config.txt is rendered by deploy.sh --apply-config into
+# config-txt.conf here (do not edit that one). Files you write yourself still work.

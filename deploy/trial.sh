@@ -2,7 +2,7 @@
 # End-to-end trial of the hosted stack on this machine, against the mock cluster.
 # Proves the four things the deployment is for:
 #   1. no credentials -> 401 at nginx, the core is never reached
-#   2. valid credentials -> the UI and the bridge work through TLS
+#   2. a signed-in session -> the UI and the bridge work through TLS (and a bare Basic header gets nothing)
 #   3. a write shows up in the core's audit log under the signed-in user's name
 #   4. port 8765 is NOT reachable from outside the compose network
 set -uo pipefail
@@ -85,18 +85,31 @@ for t in CONFIG_READ USER_LIST PINS; do
 done
 
 echo "== 2. with credentials, through TLS =="
-code=$(curl -sk -o /dev/null -w '%{http_code}' -u "$U:$PW" "https://127.0.0.1:$LISTEN/")
+# Signing in is the app's own: LOGIN sets the session cookie. (This used to send Basic
+# credentials, which only worked because nginx turned any Basic header into a trusted
+# X-Auth-User with no password check — the hole this step now proves is closed.)
+JA=$(mktemp); JU=$(mktemp); trap 'rm -f "$JA" "$JU"' EXIT
+bridge(){ curl -sk -b "$1" -c "$1" -X POST "https://127.0.0.1:$LISTEN/bridge" -H 'content-type: application/json' -d "$2"; }
+# The shipped first account, then its forced password change, then the trial's own account.
+bridge "$JA" '{"type":"LOGIN","name":"Admin","password":"elastic"}' >/dev/null
+bridge "$JA" '{"type":"USER_SET_PASSWORD","name":"Admin","password":"trial-admin-password-1"}' >/dev/null
+bridge "$JA" "{\"type\":\"USER_ADD\",\"name\":\"$U\",\"password\":\"$PW\",\"role\":\"admin\"}" >/dev/null
+login=$(bridge "$JU" "{\"type\":\"LOGIN\",\"name\":\"$U\",\"password\":\"$PW\"}")
+echo "$login" | grep -q '"ok":true' && ok "signed in as $U (session cookie)" || bad "LOGIN as $U -> $login"
+code=$(curl -sk -o /dev/null -w '%{http_code}' -b "$JU" "https://127.0.0.1:$LISTEN/")
 [ "$code" = 200 ] && ok "UI served over TLS" || bad "UI -> $code"
-ping=$(curl -sk -u "$U:$PW" -X POST "https://127.0.0.1:$LISTEN/bridge" -H 'content-type: application/json' -d '{"type":"PING"}')
+ping=$(bridge "$JU" '{"type":"PING"}')
 echo "$ping" | grep -q '"ok":true' && ok "bridge answers PING: $(echo "$ping" | python3 -c 'import json,sys;print("v"+json.load(sys.stdin)["version"])')" || bad "PING -> $ping"
+basic=$(curl -sk -u "$U:wrong-password" -X POST "https://127.0.0.1:$LISTEN/bridge" -H 'content-type: application/json' -d '{"type":"USER_LIST"}' | python3 -c 'import json,sys;print(json.load(sys.stdin).get("kind"))')
+[ "$basic" = unauthenticated ] && ok "a Basic header with any password signs nobody in" || bad "Basic header -> '$basic' (want unauthenticated)"
 
 echo "== 3. audit trail names the user =="
-curl -sk -u "$U:$PW" -X POST "https://127.0.0.1:$LISTEN/bridge" -H 'content-type: application/json' -d '{"type":"WRITE_UNLOCK","on":true}' >/dev/null
-curl -sk -u "$U:$PW" -X POST "https://127.0.0.1:$LISTEN/bridge" -H 'content-type: application/json' -d '{"type":"WRITE_UNLOCK","on":false}' >/dev/null
+bridge "$JU" '{"type":"WRITE_UNLOCK","on":true}' >/dev/null
+bridge "$JU" '{"type":"WRITE_UNLOCK","on":false}' >/dev/null
 sleep 1
 # --no-log-prefix: each line is then exactly the JSON the core wrote, nothing else.
 auditlines=$(docker compose logs --no-log-prefix core 2>/dev/null | grep '"target":"audit"' || true)
-audit=$(printf '%s\n' "$auditlines" | grep -c "\"user\":\"$U\"" || true)
+audit=$(printf '%s\n' "$auditlines" | grep '"msg_type":"WRITE_UNLOCK"' | grep -c "\"user\":\"$U\"" || true)
 [ "$audit" -ge 2 ] && ok "$audit audit line(s) under user '$U'" || bad "expected >=2 audit lines for '$U', got $audit"
 printf '%s\n' "$auditlines" | tail -1 | python3 -c 'import json,sys
 for line in sys.stdin:

@@ -16,7 +16,7 @@ const dom = new JSDOM('<!doctype html><html><body></body></html>');
 for (const k of ['window', 'document', 'Node', 'Element', 'HTMLElement', 'customElements']) {
   globalThis[k] = k === 'window' ? dom.window : dom.window[k];
 }
-const { toast, toastKind, notifications, clearNotifications, notificationBell } = await import(pathToFileURL(path.join(ROOT, 'ui/js/ui/menu.js')).href);
+const { toast, toastKind, notifications, clearNotifications, notificationBell, dropNotification } = await import(pathToFileURL(path.join(ROOT, 'ui/js/ui/menu.js')).href);
 
 const shown = () => [...document.querySelectorAll('.toast-wrap > .toast')];
 const texts = () => shown().map((t) => t.querySelector('.toast-msg').textContent);
@@ -121,4 +121,36 @@ test('the bell keeps every notice, newest first, and a keyed one updates its ent
   const bell = notificationBell();
   assert.equal(bell, notificationBell(), 'one bell for the life of the page');
   assert.equal(bell.querySelector('.bell-count').textContent, '3');
+});
+
+test('the same unkeyed notice twice is one card, not two', () => {
+  // A poll that finds the same fact every cycle used to stack a copy each time.
+  toast('Zabbix sync failed: timeout', 'err', 9000);
+  toast('Zabbix sync failed: timeout', 'err', 9000);
+  assert.equal(shown().length, 1);
+  toast('Zabbix sync failed: refused', 'err', 9000);
+  assert.equal(shown().length, 2, 'a different message is a different notice');
+});
+
+test('the bell counts a repeat instead of listing it again', () => {
+  clearNotifications();
+  toast('Schedule stopped');
+  toast('Something else');
+  toast('Schedule stopped');
+  toast('Schedule stopped');
+  const list = notifications();
+  assert.equal(list.length, 2);
+  assert.equal(list.find((n) => n.message === 'Schedule stopped').count, 3);
+  assert.equal(list[0].message, 'Schedule stopped', 'the repeat moved to the top with a new time');
+});
+
+test('a retired keyed notice leaves the bell, and comes back when said again', () => {
+  clearNotifications();
+  toast('Accepted without checking', 'warn', 9000, { key: 'tls-accepted' });
+  assert.equal(notifications().length, 1);
+  assert.equal(dropNotification('tls-accepted'), true);
+  assert.equal(notifications().length, 0);
+  assert.equal(dropNotification('tls-accepted'), false, 'nothing left to drop');
+  toast('Accepted without checking', 'warn', 9000, { key: 'tls-accepted' });
+  assert.equal(notifications().length, 1);
 });

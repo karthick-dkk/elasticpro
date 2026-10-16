@@ -290,7 +290,14 @@ if [ "$MODE" = hosted ]; then
 
   cd "$DEST/deploy"
   step "Generating a self-signed certificate and a starter config"
+  # Remembered before trial-setup.sh makes it: an install that already has a config.txt
+  # keeps every word of it, however it is run again.
+  NEW_CONFIG=0; [ -e config.txt ] || NEW_CONFIG=1
   ./trial-setup.sh
+  # trial-setup.sh makes config.txt too; this covers a checkout whose copy of it predates
+  # that. It has to exist before `docker compose up`: the core mounts it, and Docker makes a
+  # directory of a missing file.
+  if [ -f config.txt.example ] && [ ! -f config.txt ]; then cp config.txt.example config.txt; fi
 
   # Anything compose needs on a later `docker compose up` has to be in .env, not just
   # exported here — the installer's environment dies with the installer.
@@ -346,6 +353,16 @@ if [ "$MODE" = hosted ]; then
     # next plain `docker compose up -d` goes back to 443 and fails to bind all over again.
     env_set LISTEN "$LISTEN_PORT"
     ok "nginx will take port $LISTEN_PORT on this host"
+    # And in config.txt, which deploy.sh applies on every deploy: left at its 443 it would
+    # move the port back. Only a config.txt made just now is written to.
+    if [ -f config.txt ]; then
+      if [ "$NEW_CONFIG" = 1 ]; then
+        sed -i.bak "s|^LISTEN_PORT=.*|LISTEN_PORT=$LISTEN_PORT|" config.txt && rm -f config.txt.bak
+      elif [ "$(sed -n 's/^LISTEN_PORT=//p' config.txt | tail -1)" != "$LISTEN_PORT" ]; then
+        warn "deploy/config.txt already exists and was not changed; set LISTEN_PORT=$LISTEN_PORT in it,"
+        info "or the next deploy.sh applies the port it says."
+      fi
+    fi
   fi
 
   if [ "$CACHE" = 1 ]; then

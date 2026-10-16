@@ -13,6 +13,8 @@
  * when a rule is disabled or retuned, so nothing an operator acknowledged is orphaned.
  */
 
+import { managedDefaults } from './managed.js';
+
 /**
  * `page` is the page that answers the rule — where an operator goes to act on it. Both the
  * link on an alert here and the "Troubleshoot in ElasticPro" link on a Zabbix problem
@@ -128,7 +130,11 @@ export function applySettings(list, settings) {
   });
 }
 
-/** Thresholds an admin has moved, merged over the shipped defaults. */
+/**
+ * Thresholds an admin has moved, merged over the shipped defaults — and then whatever
+ * config.txt manages, last, because a managed value wins over every other source
+ * (see managed.js). This is the one place that order is decided.
+ */
 export function effectiveDefaults(defaults, settings) {
   const out = { ...defaults };
   for (const rule of ALERT_RULES) {
@@ -139,5 +145,5 @@ export function effectiveDefaults(defaults, settings) {
       if (typeof v === 'number' && isFinite(v) && v >= t.min && v <= t.max) out[t.key] = v;
     }
   }
-  return out;
+  return { ...out, ...managedDefaults() };
 }

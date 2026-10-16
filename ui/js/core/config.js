@@ -9,6 +9,7 @@
 
 import { pickConfigPath, readConfigText, savedConfigPath, rememberConfigPath } from './platform.js';
 import { bridge } from './transport.js';
+import { managedDefaults } from './managed.js';
 
 export const CONFIG_FILE_TYPES = [
   { description: 'YAML config', accept: { 'application/yaml': ['.yaml', '.yml'], 'text/yaml': ['.yaml', '.yml'] } },
@@ -134,7 +135,9 @@ function requireYaml() {
 export function normalize(raw, sourceName = 'clusters.yaml') {
   if (!raw || typeof raw !== 'object') throw new ConfigError('Config file is empty or not a YAML mapping.');
 
-  const defaults = { ...DEFAULTS, ...(raw.defaults || {}) };
+  // config.txt last: a cluster that states nothing of its own gets the managed default, and
+  // `tls: insecure` below is the managed one when it is.
+  const defaults = { ...DEFAULTS, ...(raw.defaults || {}), ...managedDefaults() };
   // Config → Defaults → Certificates = insecure: accept any certificate on every cluster.
   const acceptAll = String(defaults.tls || '').trim().toLowerCase() === 'insecure';
   const globalCred = raw.credentials || raw.credential || null;

@@ -28,6 +28,8 @@ cd deploy
 
 # 1. Settings
 cp .env.example .env                       # LISTEN port, where the SSH keys are
+cp config.txt.example config.txt           # the settings file (see "Settings: config.txt");
+                                           # it must exist before `docker compose up`
 
 # 2. TLS — a real certificate, or a self-signed one to start:
 mkdir -p tls && openssl req -x509 -newkey rsa:4096 -nodes -days 825 \
@@ -158,6 +160,104 @@ git pull && docker compose up -d --build
 ```
 
 Trust decisions (`pins.json`) live in the `core-data` volume and survive rebuilds.
+
+## Settings: config.txt
+
+One file holds the settings of a hosted install: `deploy/config.txt` (on a server,
+`/opt/elasticpro/deploy/config.txt`). `config.txt.example` is the template and the list of
+every key, with what it means; `deploy.sh` and `install.sh` copy it to `config.txt` when it is
+missing, so a new install starts with every key empty.
+
+The rules:
+
+- `KEY=VALUE`, one per line; lines starting with `#` are comments; no quotes. Lists are
+  comma-separated (`10.0.0.0/8,192.168.1.5`).
+- **Empty (or commented out) = not managed**: the default, or the Config page, decides.
+- **A value = managed, and it wins.** The Config page shows the setting as "managed by
+  config.txt" and cannot change it.
+- **No secrets and no clusters.** Passwords, tokens and the Zabbix sign-in secret stay in
+  `deploy/secrets/` or on the Config page (encrypted); clusters and their credentials stay on
+  the Config page.
+
+The keys cover the port (`LISTEN_PORT`), who may open ElasticPro (`ALLOWED_UI_IPS`,
+`ALLOWED_DOMAINS`), rate limits (`RATE_EXEMPT_IPS`, `ZABBIX_ALLOWED_SOURCES`,
+`TRUSTED_PROXIES`), the Zabbix link, logging, performance (`CORE_MEM_LIMIT`, `POLL_*`,
+`CACHE_MB`) and the `UI_*` defaults every cluster starts from.
+
+After editing it:
+
+```bash
+deploy/deploy.sh --apply-config            # --dry-run shows what it would do
+```
+
+It checks the file first and prints **every** problem it finds (unknown keys are warned about
+and ignored); with any error nothing is changed. Then:
+
+| Key | Where it goes |
+|---|---|
+| `LISTEN_PORT` | `.env` `LISTEN`; a changed port recreates nginx |
+| `CORE_MEM_LIMIT` | `.env` `ELASTICPRO_MEM_LIMIT` (removed when empty: back to 1g) |
+| `ALLOWED_UI_IPS` | `nginx/allow-ui/config-txt.conf`; everyone else gets 403 |
+| `ALLOWED_DOMAINS` | `nginx/allow-host/config-txt.conf`; any other name gets 421 |
+| `RATE_EXEMPT_IPS` | `nginx/rate-exempt/config-txt.conf` |
+| everything else | read by the core itself from `config.txt`, mounted at `/app/config.txt` |
+
+An empty list removes its generated file. nginx is checked (`nginx -t`, in the running
+container) and reloaded; a list nginx rejects puts the previous files back and stops. Then the
+core is recreated, because it reads `config.txt` at start, and `--apply-config` waits for its
+health check. Sessions survive restarts: nobody is signed out. The Zabbix sign-in and pairing
+routes are never subject to `ALLOWED_UI_IPS` or `ALLOWED_DOMAINS` (`ZABBIX_ALLOWED_SOURCES`
+guards those).
+
+A normal `deploy.sh` and `deploy.sh --upgrade` apply the file too, at their start, so it is
+always in force; they restart the core anyway. `config.txt` is also created from the example
+on a host that has none yet, with the port and memory limit already in `.env` copied in, so
+adopting it changes nothing until you edit it.
+
+Notes:
+
+- **`config.txt` must exist before any `docker compose up`.** It is bind-mounted into the core;
+  Docker answers a missing source by creating a *directory* there. `deploy.sh`, `install.sh`
+  and `trial-setup.sh` always create it first (and clear away an empty directory Docker left);
+  if you run compose by hand on a fresh checkout, `cp config.txt.example config.txt` first. The
+  core treats a missing file or a directory as "no settings".
+- The generated files start with `# generated from config.txt by deploy.sh — edit config.txt,
+  not this`. Other files in `nginx/rate-exempt/` are yours and stay.
+- A file mount follows the inode. An editor that replaces `config.txt` is only seen by the
+  core after it is recreated, which is what `--apply-config` does.
+
+## Rate limits and the whitelist
+
+The limits are flood guards only, set far above what people use:
+
+| Route | Limit (per client address) |
+|---|---|
+| `/bridge` (every page) | 500 requests/s, burst 2000 |
+| `/events` (live updates) | 200 open streams |
+| `/sso/zabbix` (sign-in from Zabbix) | 600/min in nginx, 600/min in the core |
+| `/zabbix/pair` (pairing, once) | 10/min |
+
+To take an address out of every nginx limit, for example the Zabbix server, or your office
+or VPN range that people open the UI from, list it in `config.txt` and apply it:
+
+```
+RATE_EXEMPT_IPS=192.0.2.10,10.20.0.0/16   # the Zabbix frontend, the office / VPN range
+ZABBIX_ALLOWED_SOURCES=192.0.2.10         # who may sign people in; never rate limited either
+TRUSTED_PROXIES=172.19.0.0/16             # the nginx container's network
+```
+
+then `deploy/deploy.sh --apply-config`. `RATE_EXEMPT_IPS` is rendered into
+`nginx/rate-exempt/config-txt.conf`. Files you wrote by hand in `nginx/rate-exempt/` (one
+`<address or CIDR> 1;` per line) still work; both are read.
+
+The core's own sign-in budget skips every address named in the Zabbix link's
+**allowedSources** (Administration → ElasticPro in Zabbix, Config → Zabbix here, or
+`ZABBIX_ALLOWED_SOURCES`). Listing the Zabbix frontend there both restricts who may sign
+people in and removes its budget.
+
+`TRUSTED_PROXIES` is the address of nginx, so the core believes nginx's `X-Real-IP`, and
+nobody else's: that is the address both checks above see. Set it; without it the source
+addresses in the activity log can be forged by anyone who reaches the core directly.
 
 ## Scaling to a large fleet (100-300 clusters)
 

@@ -51,7 +51,10 @@ pub const SECRET_BYTES: usize = 32;
 /// limit in front, but the module may also reach the core directly on the `ep_sso`
 /// network, where nginx is not in the path.
 pub const PAIR_PER_MIN: usize = 10;
-pub const SSO_PER_MIN: usize = 120;
+/// Every person opening ElasticPro from Zabbix signs in from the one Zabbix frontend address,
+/// so this budget is shared by all of them; it is a flood guard, set well above a busy team.
+/// An address listed in `allowedSources` is trusted and not counted at all (`trusted_source`).
+pub const SSO_PER_MIN: usize = 600;
 /// Audit events kept in the file for the status panel. The full record is the audit log.
 const EVENTS_KEPT: usize = 30;
 
@@ -148,7 +151,9 @@ impl ServerZbx {
             api_url: env("ELASTICPRO_ZABBIX_API_URL"),
             api_token: file_env("ELASTICPRO_ZABBIX_API_TOKEN_FILE"),
             sso_secret: env("ELASTICPRO_ZABBIX_SSO_SECRET").or_else(|| file_env("ELASTICPRO_ZABBIX_SSO_SECRET_FILE")),
-            verify_tls: env("ELASTICPRO_ZABBIX_API_INSECURE").filter(|v| v == "1").map(|_| false),
+            // "1" turns checking off. "0" says it is on and the server's — config.txt's
+            // ZABBIX_VERIFY_TLS=true, which must beat a Config-page "off". Unset: the page decides.
+            verify_tls: env("ELASTICPRO_ZABBIX_API_INSECURE").filter(|v| v == "1" || v == "0").map(|v| v == "0"),
             allowed_sources: env("ELASTICPRO_ZABBIX_ALLOWED_SOURCES").map(|v| list(&v)),
             sync_secs: env("ELASTICPRO_ZABBIX_SYNC_SECS").and_then(|v| v.parse().ok()),
             frame_ancestors: env("ELASTICPRO_FRAME_ANCESTORS"),
@@ -534,6 +539,15 @@ impl ZbxLink {
         true
     }
 
+    /// The TCP peer is one of `ELASTICPRO_TRUSTED_PROXIES`. False when none is named: an
+    /// unset list trusts no peer to vouch for a user (unlike X-Real-IP, which it believes).
+    pub fn peer_is_trusted_proxy(&self, peer: Option<IpAddr>) -> bool {
+        match &self.server.trusted_proxies {
+            Some(list) => peer.is_some_and(|p| source_allowed(list, canon(p))),
+            None => false,
+        }
+    }
+
     /// The source a request came from: `X-Real-IP` when the peer is a trusted proxy (any
     /// peer, when `ELASTICPRO_TRUSTED_PROXIES` is unset — the same trust nginx's `X-Auth-User`
     /// gets), else the TCP peer.
@@ -546,6 +560,13 @@ impl ZbxLink {
             },
             None => hdr.or(peer.map(canon)),
         }
+    }
+
+    /// Named in `allowedSources` — trusted by the administrator, not merely "not refused":
+    /// such a source is not rate-counted. An empty list trusts nobody this way.
+    pub fn trusted_source(&self, source: Option<IpAddr>) -> bool {
+        let list = self.resolved().allowed_sources;
+        !list.is_empty() && source.is_some_and(|ip| source_allowed(&list, ip))
     }
 
     /// `allowedSources`, applied. Empty list = anyone (the signature still decides).
@@ -579,6 +600,8 @@ impl ZbxLink {
             "allowedSources": r.allowed_sources,
             "syncSecs": r.sync_secs,
             "managed": m,
+            // Which of those config.txt owns, so the page can say so rather than "the server".
+            "managedBy": crate::settings::get().zabbix_link_managed(),
             "apiToken": {
                 "set": r.api_token.is_some(), "source": token_source,
                 "at": if token_source == "ui" { json!(f.token_set_at) } else { Value::Null },

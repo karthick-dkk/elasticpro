@@ -9,12 +9,12 @@ import * as cfg from './core/config.js';
 import { state, bus, setConfig, refreshAll, refreshModule, REFRESH_MODULES, startAutoRefresh, clusters, fleetMode,
          alerts, cachedAlerts, worstHealth, requestLoad, fleetPolicy,
          clustersNeedingCredential, clustersWithAuthError, hasSessionCredential, isReadOnly, healthState, activeClusters, openAlertsNow, openAlertCounts } from './core/state.js';
-import { rowMenu, toast, notificationBell, setNotificationSink } from './ui/menu.js';
+import { rowMenu, toast, notificationBell, setNotificationSink, dropNotification } from './ui/menu.js';
 import { showCredentialDialog, serverHoldsCredentials, serverCredentialMessage } from './ui/credential-dialog.js';
 import { loadSnapshotFile, isSnapshotMode } from './core/snapshot.js';
 import { EXAMPLE_YAML } from './core/example.js';
 import { workerStatus, listPins } from './core/es.js';
-import { acceptedNotice, acceptedSignature, newSince, NOTICE_KEY } from './core/trust-notice.js';
+import { noticeToShow, readSeen, writeSeen, NOTICE_KEY } from './core/trust-notice.js';
 import { saveTextAs } from './core/platform.js';
 import { tryVaultCredential } from './ui/credential-dialog.js';
 import { createNewConfig, editCluster, unlockSealed } from './ui/config-editor.js';
@@ -23,7 +23,7 @@ import { authState, loginScreen, signOut } from './ui/login.js';
 import { aboutMini } from './ui/about.js';
 import { announceNewAlerts, announceSnapshotOutcomes, resetAnnounced } from './core/notify.js';
 import { onSessionLost, bridge, setSession, setSignedIn } from './core/transport.js';
-import { readLaunch, withoutCode, withoutTrouble, troubleshootTarget, themeFor, exchangeCode, rememberEmbedTheme, askZabbixToSignIn } from './core/embed.js';
+import { readLaunch, withoutCode, withoutTrouble, troubleshootTarget, themeFor, exchangeCode, rememberEmbedTheme, askZabbixToSignIn, rememberPageForReauth, takeRememberedPage } from './core/embed.js';
 import { pageForProblem } from './core/alert-rules.js';
 
 let coreInfo = { version: '?' };
@@ -779,7 +779,9 @@ async function start(config, handle) {
     if (target.cluster) { state.selected = target.cluster; fleetView = false; }
     try { history.replaceState(null, '', withoutTrouble(location.href)); } catch (_) { /* sandboxed frame */ }
   }
-  const wanted = (target && target.page) || (location.hash || '').replace('#/', '') || 'overview';
+  // Back where the person was, when Zabbix signed them in again under them (see waitForZabbix).
+  const back = embedded ? takeRememberedPage((id) => PAGES.some((p) => p.id === id)) : '';
+  const wanted = back || (target && target.page) || (location.hash || '').replace('#/', '') || 'overview';
   go(PAGES.some((p) => p.id === wanted) ? wanted : 'overview');
   if (!isSnapshotMode() && clustersNeedingCredential().length) {
     // a credential remembered in the OS vault (opt-in) signs in without a prompt;
@@ -794,28 +796,31 @@ async function start(config, handle) {
   // The team's alert silences: loaded now and kept current, so a silence set on another
   // screen leaves this one's counts within a minute.
   if (!isSnapshotMode()) { loadSilences(); setInterval(() => { loadSilences(); }, 60000); }
-  // What the "accept any certificate" switch let through, as one notice. Certificates are
-  // seen as connections are made, so it is asked again every minute.
+  // Certificates are seen as connections are made, so the core is asked again every
+  // minute — but only to learn whether something *new* was accepted (see trust-notice.js).
   if (!isSnapshotMode()) { checkAcceptedCertificates(); setInterval(checkAcceptedCertificates, 60000); }
 }
 
 /**
- * One bell entry for every certificate and jump-host key accepted without checking — never
- * one per cluster. It pops up when something new joins the list; otherwise it is updated
- * in place. Nothing to say while the switch is off.
+ * Tell the person about certificates and jump-host keys accepted without checking — once
+ * per distinct set, and not at all when they chose "insecure" themselves (then Config →
+ * Jump hosts & trust is where the list lives). The last set announced is kept in this
+ * browser so a reload or the next 60 s check does not announce it again.
  */
 async function checkAcceptedCertificates() {
   let res;
   try { res = await listPins(); } catch (_) { return; }
   const pins = res && res.ok ? res.pins : null;
-  const accepted = pins && pins.acceptAll ? (pins.accepted || []) : [];
-  const notice = acceptedNotice(accepted);
-  if (!notice) return;
-  const sig = acceptedSignature(accepted);
-  const before = await idb.getKV('tlsAcceptedSig').catch(() => null);
-  const fresh = newSince(before, accepted).length > 0;
-  toast(notice.message, 'warn', fresh ? 10000 : 0, { key: NOTICE_KEY, detail: notice.detail, silent: !fresh });
-  if (fresh) idb.setKV('tlsAcceptedSig', sig);
+  if (!pins) return;
+  const deliberate = !!pins.acceptAll || !!(state.config && state.config.acceptAllCertificates);
+  const seenSig = readSeen(localStorage);
+  const shown = noticeToShow({ deliberate, accepted: pins.accepted || [], seenSig });
+  // An entry left in the bell by an earlier build (or an earlier setting) would read as
+  // current news; the choice being deliberate retires it.
+  if (deliberate) { dropNotification(NOTICE_KEY); return; }
+  if (!shown) return;
+  toast(shown.message, 'warn', 10000, { key: NOTICE_KEY, detail: shown.detail });
+  writeSeen(localStorage, shown.sig);
 }
 
 /**
@@ -947,6 +952,10 @@ onSessionLost(() => {
 /** "Signing in through Zabbix…", and the ask. False when there is no Zabbix page around. */
 function waitForZabbix() {
   if (!askZabbixToSignIn(window)) return false;
+  // Zabbix loads its page again, and that page opens on the menu item it was reached by, not
+  // on the tab this person moved to since. Say where they were so start() can go back there
+  // — otherwise a session ending under Config → Save lands on Clusters.
+  rememberPageForReauth(currentPage);
   mount(root, h('div.setup',
     h('div', { style: { display: 'flex', alignItems: 'center', gap: '10px' } },
       h('img', { src: 'icons/icon48.png', width: 34, height: 34, alt: '' }),

@@ -87,6 +87,12 @@ A cluster behind a Windows jump host now appears in ElasticPro's Zabbix listing.
 reaches it through its own jump host with the same address and port (`jump_hosts` in the config);
 until one is configured, the listing says which to add.
 
+**Settings in one file:** everything a host needs to be told that is not a secret or a cluster
+(the port, who may open the UI and under which name, rate-limit exemptions, the Zabbix link,
+logging, performance, the UI defaults) lives in `deploy/config.txt`. Edit it, then
+`deploy/deploy.sh --apply-config` (nginx reloads, the core restarts, nobody is signed out).
+`deploy/README.md`, "Settings: config.txt", has the rules and the key table.
+
 **Rolling this out against 100-300 clusters:** the core polls in the background now rather
 than only while a page is open, and nginx got a keepalive pool to the core, gzip and two
 request limits sized for that traffic — see `deploy/README.md` ("Scaling to a large

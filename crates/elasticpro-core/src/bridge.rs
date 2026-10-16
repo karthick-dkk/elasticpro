@@ -47,15 +47,25 @@ pub struct ZbxOptions {
 }
 
 impl ZbxOptions {
+    /// The config file's options, with whatever config.txt manages laid over them — here,
+    /// once, so every caller (the sync, the sign-in scope) gets the same answer.
     pub fn from_config(raw: &Value) -> ZbxOptions {
+        ZbxOptions::from_config_with(raw, crate::settings::get())
+    }
+
+    pub fn from_config_with(raw: &Value, managed: &crate::settings::Settings) -> ZbxOptions {
         let z = raw.get("zabbix").cloned().unwrap_or(Value::Null);
         let flag = |a: &str, b: &str| z.get(a).or_else(|| z.get(b)).and_then(|v| v.as_bool()).unwrap_or(false);
         ZbxOptions {
-            use_elasticpro_credentials: flag("useElasticProCredentials", "use_elasticpro_credentials"),
-            create_hosts: flag("createHosts", "create_hosts"),
-            host_group: z.get("hostGroup").or_else(|| z.get("host_group")).and_then(|v| v.as_str())
-                .filter(|s| !s.trim().is_empty()).unwrap_or("Elasticsearch clusters").to_string(),
-            scope_users_by_group: flag("scopeUsersByGroup", "scope_users_by_group"),
+            use_elasticpro_credentials: managed.flag("ZABBIX_USE_ELASTICPRO_CREDENTIALS")
+                .unwrap_or_else(|| flag("useElasticProCredentials", "use_elasticpro_credentials")),
+            create_hosts: managed.flag("ZABBIX_CREATE_HOSTS").unwrap_or_else(|| flag("createHosts", "create_hosts")),
+            host_group: managed.text("ZABBIX_HOST_GROUP").map(String::from).unwrap_or_else(|| {
+                z.get("hostGroup").or_else(|| z.get("host_group")).and_then(|v| v.as_str())
+                    .filter(|s| !s.trim().is_empty()).unwrap_or("Elasticsearch clusters").to_string()
+            }),
+            scope_users_by_group: managed.flag("ZABBIX_SCOPE_USERS_BY_GROUP")
+                .unwrap_or_else(|| flag("scopeUsersByGroup", "scope_users_by_group")),
         }
     }
 }
@@ -1635,6 +1645,11 @@ impl Core {
         m.insert("defaultConfigPath".into(), if admin { json!(self.server_config_path()) } else { Value::Null });
         m.insert("tunnels".into(), json!(tunnels));
         m.insert("zabbixSso".into(), json!(self.zbx.configured()));
+        // What config.txt manages. The UI applies it last and shows it read-only; not secret,
+        // so every signed-in caller gets it.
+        let managed = crate::settings::get();
+        m.insert("managedDefaults".into(), managed.ping_defaults());
+        m.insert("managedZabbixOptions".into(), managed.ping_zabbix_options());
         out
     }
 
@@ -1787,7 +1802,8 @@ impl Core {
             Some(v) if config_has_clusters(&v) => Some(v),
             other => self.stray_config_path().as_deref().and_then(read).filter(config_has_clusters).or(other),
         };
-        raw.map(|v| ZbxOptions::from_config(&v).scope_users_by_group).unwrap_or(false)
+        // No file is still a config: config.txt may manage the option on its own.
+        ZbxOptions::from_config(&raw.unwrap_or(Value::Null)).scope_users_by_group
     }
 
     /// Reads `defaults.tls` from the server's own config file and sets the accept-all
@@ -1799,7 +1815,11 @@ impl Core {
         if self.config_hint.is_none() {
             return;
         }
-        let on = self.read_config_file().await.map(|raw| accepts_all_certificates(&raw)).unwrap_or(false);
+        // config.txt's UI_TLS wins over the file's `defaults.tls`.
+        let on = match crate::settings::get().text("UI_TLS") {
+            Some(tls) => tls == "insecure",
+            None => self.read_config_file().await.map(|raw| accepts_all_certificates(&raw)).unwrap_or(false),
+        };
         if self.pins.set_accept_all(on) {
             self.transport.forget_clients();
             tracing::warn!(target: "audit", on, "defaults.tls: insecure is {} — certificates and jump-host keys {}",
@@ -1898,7 +1918,8 @@ impl Core {
             tracing::warn!(target: "audit", source = %s, "zabbix sign-in refused: source not in allowedSources");
             return (403, json!({ "ok": false, "kind": "forbidden", "message": "this source may not sign in through Zabbix" }));
         }
-        if !self.zbx_link.rate_ok("sso", source, crate::zbx_link::SSO_PER_MIN) {
+        // The Zabbix frontend named in allowedSources is the administrator's own: not counted.
+        if !self.zbx_link.trusted_source(source) && !self.zbx_link.rate_ok("sso", source, crate::zbx_link::SSO_PER_MIN) {
             tracing::warn!(target: "audit", source = ?source, "zabbix sign-in refused: rate limited");
             return (429, json!({ "ok": false, "kind": "rate_limited", "message": "too many sign-in requests — wait a minute" }));
         }
@@ -1980,7 +2001,10 @@ impl Core {
         } else {
             // Every PRIME states the switch; one that does not mention it means off, so a
             // page that never sends it cannot leave an earlier "on" standing.
-            let on = p.accept_all_certificates == Some(true);
+            let on = match crate::settings::get().text("UI_TLS") {
+                Some(tls) => tls == "insecure",
+                None => p.accept_all_certificates == Some(true),
+            };
             if self.pins.set_accept_all(on) {
                 tracing::warn!(target: "audit", on, "defaults.tls: insecure is {}", if on { "on" } else { "off" });
             }
@@ -2006,7 +2030,9 @@ impl Core {
                 }
             }
             cur.clusters = incoming.drain(..).map(|c| (c.id.clone(), c)).collect();
-            cur.read_only = p.read_only != Some(false);
+            // config.txt's UI_READ_ONLY wins over what the page sends, so a managed
+            // read-only cannot be lifted by a PRIME from the browser.
+            cur.read_only = crate::settings::get().flag("UI_READ_ONLY").unwrap_or(p.read_only != Some(false));
             match p.shared_auth_header.as_deref() {
                 None => {}
                 Some("") => cur.shared_auth = None,
