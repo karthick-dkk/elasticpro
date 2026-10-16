@@ -93,6 +93,9 @@ A code keeps its meaning once it is given out. A new kind of failure gets a new 
 | EP-603 | `no_clusters` | You are signed in and no cluster is visible to your account. |
 | EP-604 | `sso_failed` | A Zabbix sign-in code could not be traded for a session. |
 | EP-605 | `parse_error` | The cluster list arrived but does not parse. |
+| EP-606 | `proxy_rate_limited` | nginx refused: this browser sent more requests per second than allowed. The page retries by itself; it shows only if that keeps happening. |
+| EP-607 | `core_unavailable` | nginx could not reach the ElasticPro core (restarting or stopped). |
+| EP-608 | `core_timeout` | The core did not answer within nginx's 120 s. |
 
 ## Inside Zabbix (7xx)
 
