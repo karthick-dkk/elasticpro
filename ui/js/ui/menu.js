@@ -12,13 +12,54 @@ import { mergeNotifications, newId, sendRule, serverId, toPut } from '../lib/not
 
 let open = null;   // the popup currently on screen, if any
 
+/**
+ * When somebody last tried to scroll the PAGE: a wheel, a touch or a key aimed anywhere
+ * but at a floating panel. A `scroll` event alone cannot say — see closeOnOuterScroll.
+ */
+let lastPageScrollInput = 0;
+if (typeof window !== 'undefined') {
+  for (const ev of ['wheel', 'touchmove', 'keydown']) {
+    window.addEventListener(ev, (e) => {
+      const t = e.target;
+      if (t instanceof Node && ((open && open.el.contains(t)) || (openPop && openPop.el.contains(t)))) return;
+      lastPageScrollInput = Date.now();
+    }, { capture: true, passive: true });
+  }
+}
+
+/**
+ * A scroll listener that closes a floating panel when the PAGE scrolls — the panel would
+ * otherwise float away from what it is anchored to — but not for the two scrolls nobody
+ * asked the page for:
+ *
+ * - The panel's own. The listener is in the capture phase, which hears scrolling anywhere,
+ *   its own list included: a long bell or notes list closed on the first wheel tick, so it
+ *   could never be scrolled at all ("cannot mouse-scroll the alerts").
+ * - The browser's. When a refresh makes the document taller or shorter it adjusts the
+ *   offset itself (scroll anchoring, clamping) and fires the very same `scroll` event with
+ *   nobody at the wheel; a notes popover someone was reading shut under them. With no
+ *   scrolling input just before it, the panel stays as long as its anchor stayed put.
+ */
+function closeOnOuterScroll(getEl, closeFn, trigger) {
+  const at = trigger.getBoundingClientRect();
+  return (e) => {
+    const el = getEl();
+    if (el && e.target instanceof Node && el.contains(e.target)) return;
+    if (Date.now() - lastPageScrollInput > 800) {
+      const now = trigger.getBoundingClientRect();
+      if (trigger.isConnected && Math.abs(now.top - at.top) < 2 && Math.abs(now.left - at.left) < 2) return;
+    }
+    closeFn();
+  };
+}
+
 function close() {
   if (!open) return;
   open.el.remove();
   document.removeEventListener('mousedown', open.away, true);
   document.removeEventListener('keydown', open.key, true);
   window.removeEventListener('resize', close);
-  window.removeEventListener('scroll', close, true);
+  window.removeEventListener('scroll', open.onScroll, true);
   open = null;
 }
 
@@ -71,9 +112,10 @@ function show(trigger, items) {
   document.addEventListener('mousedown', away, true);
   document.addEventListener('keydown', key, true);
   window.addEventListener('resize', close);
-  window.addEventListener('scroll', close, true);
+  const onScroll = closeOnOuterScroll(() => el, close, trigger);
+  window.addEventListener('scroll', onScroll, true);
 
-  open = { el, trigger, away, key };
+  open = { el, trigger, away, key, onScroll };
   const first = el.querySelector('button:not(:disabled)');
   if (first) first.focus();
 }
@@ -112,12 +154,12 @@ let openPop = null;
 
 export function closePopover() {
   if (!openPop) return;
-  const { el, away, key, onClose } = openPop;
+  const { el, away, key, onClose, onScroll } = openPop;
   el.remove();
   document.removeEventListener('mousedown', away, true);
   document.removeEventListener('keydown', key, true);
   window.removeEventListener('resize', closePopover);
-  window.removeEventListener('scroll', closePopover, true);
+  window.removeEventListener('scroll', onScroll, true);
   openPop = null;
   if (onClose) onClose();
 }
@@ -159,9 +201,10 @@ export function popover(trigger, build, opts = {}) {
   document.addEventListener('mousedown', away, true);
   document.addEventListener('keydown', key, true);
   window.addEventListener('resize', closePopover);
-  window.addEventListener('scroll', closePopover, true);
+  const onScroll = closeOnOuterScroll(() => el, closePopover, trigger);
+  window.addEventListener('scroll', onScroll, true);
 
-  openPop = { el, trigger, away, key, onClose: opts.onClose };
+  openPop = { el, trigger, away, key, onClose: opts.onClose, onScroll };
   const first = el.querySelector('input,textarea');
   if (first) setTimeout(() => first.focus(), 0);
   return ctx;

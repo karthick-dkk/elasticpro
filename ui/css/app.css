@@ -624,9 +624,19 @@ body.popup { width: 330px; background: var(--surface-1); }
 .modal-overlay {
   position: fixed; inset: 0; z-index: 100; display: grid; place-items: center; padding: 20px;
   background: color-mix(in srgb, #0b0b0b 55%, transparent); backdrop-filter: blur(2px);
+  /* A scroll container that never has anything to scroll, there only to end the chain: a
+     wheel that reaches the end of the dialog (or lands on the backdrop) would otherwise
+     carry on to the page behind it — on a Mac trackpad, the whole alerts list sliding
+     away under an open dialog. */
+  overflow: auto; overscroll-behavior: contain;
 }
+/* …and for engines that treat a box with nothing to scroll as no scroller at all (Safari:
+   the wheel went straight through to the page), the page itself stops scrolling while any
+   dialog is open. :has() so nothing has to remember to undo it; the gutter keeps a
+   classic scrollbar's width, so the page does not jump sideways behind the dialog. */
+html:has(.modal-overlay) { overflow: hidden; scrollbar-gutter: stable; }
 .modal {
-  width: min(560px, 100%); max-height: 90vh; overflow: auto;
+  width: min(560px, 100%); max-height: 90vh; overflow: auto; overscroll-behavior: contain;
   background: var(--surface-1); border: 1px solid var(--border-strong);
   border-radius: 12px; box-shadow: 0 12px 48px rgba(0,0,0,.35);
 }
@@ -790,7 +800,10 @@ body.popup { width: 330px; background: var(--surface-1); }
 }
 .pop > header .sub { font-weight: 400; font-size: 11px; color: var(--text-muted); }
 .pop > header button { margin-left: auto; }
-.pop > .body { padding: 9px 10px; overflow: auto; display: grid; gap: 7px; }
+.pop > .body { padding: 9px 10px; overflow: auto; display: grid; gap: 7px;
+  /* At the end of its list the wheel stays here: chained to the page it would scroll what
+     the panel is anchored to, and close it (menu.js closeOnOuterScroll). */
+  overscroll-behavior: contain; }
 .pop > .foot { padding: 8px 10px; border-top: 1px solid var(--border); display: flex; gap: 6px; }
 
 /* A short-lived confirmation, so an action that closes its own panel still says it
@@ -906,7 +919,7 @@ body.popup { width: 330px; background: var(--surface-1); }
 .bell .bell-count { position: absolute; top: -5px; right: -5px; min-width: 16px; height: 16px; padding: 0 4px;
   border-radius: 8px; background: var(--critical); color: #fff; font-size: 10px; font-weight: 700;
   line-height: 16px; text-align: center; box-sizing: border-box; }
-.notif-list { display: grid; gap: 6px; max-height: min(60vh, 460px); overflow: auto; min-width: 340px; }
+.notif-list { display: grid; gap: 6px; max-height: min(60vh, 460px); overflow: auto; min-width: 340px; overscroll-behavior: contain; }
 .notif { display: flex; gap: 9px; align-items: flex-start; padding: 7px 8px; border-radius: var(--radius);
   border-left: 3px solid var(--border-strong); background: var(--surface-2); }
 .notif.ok  { border-left-color: var(--good); }
