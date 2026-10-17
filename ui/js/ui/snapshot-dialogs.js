@@ -269,7 +269,7 @@ export async function restoreIndicesDialog(cluster, items, { onChanged } = {}) {
       h('span.muted', ` from ${plan.length} snapshot${plan.length === 1 ? '' : 's'} (the newest successful copy of each)`)),
     h('div.tbl-wrap', { style: { maxHeight: 'min(45vh, 420px)', overflow: 'auto' } },
       h('table.tbl', h('thead', h('tr', h('th', 'Index'), h('th', 'From snapshot'), h('th', 'Now'))), h('tbody', ...rows))),
-    h('div', { style: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px' } },
+    h('div', { style: { display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 1fr)', gap: '10px' } },
       field('Rename pattern', text('ri-rpat', anyLive ? '(.+)' : '', { mono: true }), 'Regular expression matched against each index name.'),
       field('Rename replacement', text('ri-rrep', anyLive ? 'restored-$1' : '', { mono: true }), 'Leave both empty to restore under the original names.')),
     h('div', { style: { display: 'grid', gap: '7px' } },

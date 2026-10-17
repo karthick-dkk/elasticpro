@@ -41,8 +41,8 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { createRequire } from 'node:module';
-import { fileURLToPath, pathToFileURL } from 'node:url';
+import { fileURLToPath } from 'node:url';
+import { loadPlaywright } from './lib/playwright.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const arg = (name, fallback) => {
@@ -59,20 +59,8 @@ const VIEWPORTS = [[1440, 900], [1280, 800]];
 const PAGES = ['alerts', 'overview', 'indices', 'shards', 'logs', 'console', 'snapshots', 'volume', 'automation', 'requests', 'accounts', 'settings']
   .filter((id) => !ONLY || ONLY.split(',').includes(id));
 
-let pw;
-{
-  const req = createRequire(import.meta.url);
-  const paths = [ROOT, process.cwd(), process.env.PLAYWRIGHT_MODULES].filter(Boolean);
-  let entry = null;
-  for (const base of paths) { try { entry = req.resolve('playwright', { paths: [base] }); break; } catch { /* next */ } }
-  if (!entry) {
-    console.log('scroll-check: playwright not found — skipping.');
-    console.log(`  install it in one of: ${paths.join(', ')}  (npm i playwright)`);
-    process.exit(0);
-  }
-  const m = await import(pathToFileURL(entry).href);
-  pw = m.chromium ? m : m.default;
-}
+const pw = await loadPlaywright(ROOT, 'scroll-check');
+if (!pw) process.exit(0);
 try {
   const r = await fetch(`${BASE}/bridge`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{"type":"PING"}' });
   if (!r.ok) throw new Error(`HTTP ${r.status}`);

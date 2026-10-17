@@ -16,7 +16,7 @@ import { h } from '../lib/dom.js';
 import { bytes, num, compact, toCsv, download } from '../lib/fmt.js';
 import { state } from '../core/state.js';
 import { hbarList, timeHistogram } from '../lib/charts.js';
-import { card, table, empty } from '../pages/common.js';
+import { card, table, empty, pill } from '../pages/common.js';
 import { fetchFieldVolume, storeFieldVolume, fieldVolumeFor, SPIKE_WINDOW_DAYS, SPIKE_THRESHOLD }
   from '../core/field-volume.js';
 

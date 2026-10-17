@@ -156,7 +156,7 @@ export async function ruleBuilder(existing) {
       valueInput = text(`rb-wv${i}`, c.value, { placeholder: f.value === 'duration' ? '7d' : '80' });
       valueInput.oninput = (e) => { c.value = e.target.value; refresh(); drawState(); };
     }
-    return h('div', { style: { display: 'grid', gridTemplateColumns: '1.4fr 1fr 1fr auto', gap: '6px', alignItems: 'center' } },
+    return h('div', { style: { display: 'grid', gridTemplateColumns: 'minmax(0, 1.4fr) minmax(0, 1fr) minmax(0, 1fr) auto', gap: '6px', alignItems: 'center' } },
       fieldSel, opSel, valueInput,
       h('button.btn.sm.ghost', {
         title: 'Remove this cluster condition',
@@ -188,7 +188,7 @@ export async function ruleBuilder(existing) {
       valueInput.oninput = (e) => { c.value = e.target.value; refresh(); };
     }
 
-    return h('div', { style: { display: 'grid', gridTemplateColumns: '1.1fr 1fr 1fr auto', gap: '6px', alignItems: 'center' } },
+    return h('div', { style: { display: 'grid', gridTemplateColumns: 'minmax(0, 1.1fr) minmax(0, 1fr) minmax(0, 1fr) auto', gap: '6px', alignItems: 'center' } },
       fieldSel, opSel, valueInput,
       h('button.btn.sm.ghost', {
         title: 'Remove this condition',

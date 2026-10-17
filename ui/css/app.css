@@ -362,6 +362,12 @@ input[type="number"], select, textarea {
 }
 input:focus, select:focus, textarea:focus { border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent); }
 label.field { display: flex; flex-direction: column; gap: 3px; font-size: 11px; color: var(--text-muted); }
+/* A field fills its grid cell and never widens it: a long choice ("pending — keep the page,
+   offer …") or a long hint used to push a dialog's columns past its edge, which put a sideways
+   scrollbar under the Defaults dialog. Grid columns are minmax(0, 1fr) for the same reason. */
+label.field { min-width: 0; overflow-wrap: anywhere; }
+label.field > input, label.field > select, label.field > textarea { width: 100%; min-width: 0; max-width: 100%; box-sizing: border-box; }
+label.field > select { text-overflow: ellipsis; }
 .toolbar { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 10px; margin-bottom: 14px; }
 /* Inputs, selects and buttons come out 31, 29 and 25px tall. Bottom-aligned in a row that
    stacks a label above each one, those three heights push the labels to three different
