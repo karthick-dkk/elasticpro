@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.3.19
+
+**Dialogs fit, and the Zabbix pages are compact.**
+
+The Defaults dialog, and Add and Edit cluster, no longer need a sideways scrollbar: long choices
+pushed their columns past the dialog edge. Every dialog grid now shrinks with the window, fields
+fill their column, and Defaults is wide enough to show its choices in full.
+`tools/fit-check.mjs` opens every page, about 120 dialogs and the panels in Safari's engine
+(WebKit) and Chrome at four sizes, and checks none needs a sideways scrollbar. It passed 1968
+checks with none failing. It also found a crash in the Indices volume analysis, now fixed.
+
+**Zabbix pages (modules):**
+- **ElasticPro → Settings** is one compact page of cards: each setting on one row with its default,
+  explanations behind an ⓘ hint, and one Save bar.
+- **Cluster Management** shows one edit icon per client instead of a row of links.
+- **The client page** shows the status (Enabled, In maintenance, Disabled, Decommissioned) and the
+  actions at the top. Its form uses the full width, without cutting names short.
+- **New, "Remove only in ElasticPro":** takes a client out of Cluster Management without touching
+  Zabbix. The master host is unlinked from the ElasticPro template (it keeps its data) and loses
+  its ElasticPro macros. No host is disabled or deleted, and Zabbix keeps monitoring everything.
+
 ## 0.3.18
 
 **Scrolling fixed: lists in panels scroll instead of closing.**
