@@ -209,11 +209,9 @@ secret_file() {
 WORK=$(mktemp -d)
 chmod 700 "$WORK"
 STAGES=()
-TEMPFILES=()   # single temp files made inside an installed module folder (replace_build)
 cleanup() {
   local s
   for s in "${STAGES[@]+"${STAGES[@]}"}"; do [ -d "$s" ] && rm -rf "$s"; done
-  for s in "${TEMPFILES[@]+"${TEMPFILES[@]}"}"; do rm -f -- "$s"; done
   rm -rf "$WORK"
 }
 trap cleanup EXIT
@@ -502,14 +500,85 @@ fi
 # --- 3. modules --------------------------------------------------------------------------------
 dst_of() { printf '%s' "${TARGET[$1]:-$MODULES_DIR/$1}"; }
 
+# --- working inside a module folder that someone else can write ---------------------------------
+# The installer runs as root. A module folder that is owned by another user (the Docker web
+# container's uid) or writable by group/other lets that user swap any entry in it for a symlink at
+# any moment, and no check-then-use in shell can close that window. So the rule is by design:
+#
+#   * a folder that is owned by root, with its parent, and writable by nobody else (the package
+#     install) cannot be raced, and root works in it directly;
+#   * any other folder is only ever read or written *as the folder's owner* (as_owner): whatever a
+#     swapped link points at, the owner could already touch it, so root's files are out of reach.
+#
+# GNU stat is used; where it is missing the folder counts as not root-only. root_only is true when
+# <dir> is a real directory and it and its (canonical) parent are root-owned with no group/other
+# write.
+root_only() {
+  local d=$1 x s mode
+  [ -d "$d" ] && [ ! -L "$d" ] || return 1
+  for x in "$d" "$(cd -P -- "$(dirname -- "$d")" 2>/dev/null && pwd -P)"; do
+    [ -n "$x" ] || return 1
+    s=$(stat -c '%u %a' -- "$x" 2>/dev/null) || return 1
+    mode=${s#* }
+    { [ "${s%% *}" = 0 ] && [ $(( 8#$mode & 8#022 )) -eq 0 ]; } || return 1
+  done
+}
+
+# "uid gid" to act as in a folder that is not root-only: its owner, or if root owns it (but others
+# can write) the owner of its parent. Fails when only root owns both: there is nobody to drop to.
+owner_ids() {
+  local d=$1 s p
+  s=$(stat -c '%u %g' -- "$d" 2>/dev/null) || return 1
+  [ "${s%% *}" != 0 ] && { printf '%s' "$s"; return 0; }
+  p=$(cd -P -- "$(dirname -- "$d")" 2>/dev/null && pwd -P) || return 1
+  s=$(stat -c '%u %g' -- "$p" 2>/dev/null) || return 1
+  [ "${s%% *}" != 0 ] || return 1
+  printf '%s' "$s"
+}
+
+# as_owner <module folder> <command> [args...]: run the command directly when the folder is
+# root-only, else as that folder's owner (setpriv from util-linux; runuser or su when the uid has
+# a name). Returns 99, having run nothing, when there is no way to drop privileges: callers then
+# skip the work rather than do it as root. Only external commands (dd, sh, ...), no functions.
+as_owner() {
+  local dir=$1 ids uid gid name
+  shift
+  if root_only "$dir"; then "$@"; return; fi
+  ids=$(owner_ids "$dir") || { echo "! $dir is not root-only and has no other owner to act as" >&2; return 99; }
+  uid=${ids% *}; gid=${ids#* }
+  if command -v setpriv >/dev/null 2>&1; then
+    setpriv --reuid="$uid" --regid="$gid" --clear-groups -- "$@"; return
+  fi
+  name=$(getent passwd "$uid" 2>/dev/null | cut -d: -f1 || true)
+  if [ -n "$name" ] && command -v runuser >/dev/null 2>&1; then
+    runuser -u "$name" -- "$@"; return
+  fi
+  if [ -n "$name" ] && command -v su >/dev/null 2>&1; then
+    # shellcheck disable=SC2046
+    su -s /bin/sh "$name" -c "$(printf '%q ' "$@")"; return
+  fi
+  echo "! no way to drop privileges to uid $uid (needs setpriv, or runuser/su and a user name for it)" >&2
+  return 99
+}
+
+# The first <bytes> bytes (at most one read) of <file>, which lives in a module folder: opened
+# with O_NOFOLLOW (dd iflag=nofollow), so a link in the last place fails instead of being read,
+# and O_NONBLOCK, so a FIFO cannot hang the installer. Empty on any failure.
+read_in() {
+  as_owner "$(dirname -- "$1")" dd if="$1" iflag=nofollow,nonblock bs="$2" count=1 status=none 2>/dev/null || true
+}
+
 # Content of a module folder, as a sorted checksum list; local settings (config.php) left out.
 # BUILD (what the archive was made from) is left out: it names the ElasticPro version, so it
 # changes with every release while the module's code may not. See build_differs.
 # find -P never follows a link and -type f matches regular files only, so a symlink planted in a
-# module folder is neither read nor hashed.
+# module folder is neither read nor hashed; in a folder that is not root-only it runs as the owner.
+read -r -d '' CONTENT_SUM_SH <<'EOS' || true
+cd "$1" && find -P . -type f ! -path ./BUILD ! -path ./config.php ! \( -path './config.php.*' ! -path ./config.php.example \) -print0 \
+  | LC_ALL=C sort -z | xargs -0 -r sha256sum
+EOS
 content_sum() {
-  (cd "$1" && find -P . -type f ! -path ./BUILD ! -path ./config.php ! \( -path './config.php.*' ! -path ./config.php.example \) -print0 \
-     | LC_ALL=C sort -z | xargs -0 -r sha256sum) | sha256sum | awk '{print $1}'
+  { as_owner "$1" sh -c "$CONTENT_SUM_SH" sh "$1" || echo "unreadable $RANDOM$RANDOM"; } | sha256sum | awk '{print $1}'
 }
 
 # Owner and modes: folders 0755, files 0644. config.php is left exactly as it was.
@@ -523,27 +592,36 @@ set_perms() {
 # The files a person put there: config.php and its copies, not the shipped example.
 local_files() { find "$1" -maxdepth 1 -type f \( -name config.php -o \( -name 'config.php.*' ! -name config.php.example \) \) 2>/dev/null; }
 
+# Copy a local file (config.php and its copies) from an installed module folder into the staging
+# folder, content read with read_in (dd iflag=nofollow, as the folder's owner when it is not
+# root-only) and written by root into the root-owned stage; mode and owner copied as numbers.
+# Replaces `cp -p`, which would copy whatever a swapped link pointed at.
+carry_local_file() {   # <installed file> <stage dir>
+  local f=$1 to mode own
+  to=$2/$(basename -- "$1")
+  mode=$(stat -c %a -- "$f") && own=$(stat -c %u:%g -- "$f") || return 1
+  as_owner "$(dirname -- "$f")" dd if="$f" iflag=nofollow,nonblock bs=1048576 count=1 status=none >"$to" 2>/dev/null || return 1
+  chmod "$mode" "$to" && chown -h "$own" "$to"
+}
+
 module_ok_to_touch() {   # is <dir> one of ours? (its manifest names the id we expect)
   local dir=$1 id=$2
   [ -f "$dir/manifest.json" ] || return 1
-  [ "$(sed -n 's/^[[:space:]]*"id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$dir/manifest.json" | head -1)" = "$id" ]
+  [ "$(read_in "$dir/manifest.json" 262144 | sed -n 's/^[[:space:]]*"id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)" = "$id" ]
 }
 
-# A manifest's "version" (the first one; a string or a bare number).
-# An installed module folder may be writable by another user (the Docker web container's), so
-# nothing is read from it unless it is a regular file and not a link, and only its first 256 KiB.
+# A manifest's "version" (the first one; a string or a bare number), read with read_in: at most
+# 256 KiB, never through a link, as the folder's owner when it is not root-only; only plain
+# version characters come back.
 manifest_version() {
-  [ -f "$1/manifest.json" ] && [ ! -L "$1/manifest.json" ] || return 0
-  head -c 262144 "$1/manifest.json" 2>/dev/null | sed -n 's/^[[:space:]]*"version"[[:space:]]*:[[:space:]]*"\{0,1\}\([^",]*\).*/\1/p' | head -1 | tr -cd '0-9A-Za-z._+-'
+  read_in "$1/manifest.json" 262144 | sed -n 's/^[[:space:]]*"version"[[:space:]]*:[[:space:]]*"\{0,1\}\([^",]*\).*/\1/p' | head -1 | tr -cd '0-9A-Za-z._+-' || true
 }
 
-# One value from a module folder's BUILD (key=value lines). An installed folder may be writable
-# by another user, so BUILD is read only when it is a regular file and not a symlink, only its
-# first 4 KiB, and the caller validates the value before it is printed. Empty otherwise.
+# One value from a module folder's BUILD (key=value lines), via read_in: first 4 KiB only, never
+# through a link, as the folder's owner when it is not root-only. The caller validates the value
+# before it is printed. Empty otherwise.
 build_field() {   # <module dir> <key>
-  local f=$1/BUILD
-  [ -f "$f" ] && [ ! -L "$f" ] || return 0
-  head -c 4096 "$f" 2>/dev/null | sed -n "s/^$2=//p" | head -1 | tr -d '\r[:space:]'
+  read_in "$1/BUILD" 4096 | sed -n "s/^$2=//p" | head -1 | tr -d '\r[:space:]' || true
 }
 
 # What a module folder says about its build: "modules 2.1.0, build 723f101". The version is the
@@ -566,37 +644,39 @@ build_desc() {
 }
 
 # Does the package's BUILD differ from the installed one? True too when the installed one is
-# missing, a link or not a regular file (it is replaced, never read). Only the package having a
+# missing, a link or not a regular file (it is replaced, never followed). Only the package having a
 # BUILD counts: an archive without one never touches an installed BUILD. Both are compared on
 # their first 4097 bytes, so an installed file bigger than a real BUILD always differs.
 build_differs() {   # <package module dir> <installed module dir>
   [ -f "$1/BUILD" ] || return 1
-  [ -f "$2/BUILD" ] && [ ! -L "$2/BUILD" ] || return 0
-  [ "$(head -c 4097 "$1/BUILD" | sha256sum)" != "$(head -c 4097 "$2/BUILD" 2>/dev/null | sha256sum)" ]
+  [ "$(head -c 4097 "$1/BUILD" | sha256sum)" != "$(read_in "$2/BUILD" 4097 | sha256sum)" ]
 }
 
-# Put the package's BUILD into an installed module folder, which another user may be able to
-# write to. Never through a fixed name and never by following a link: the copy is made in a
-# mktemp file (unpredictable name, created with O_EXCL) in the same folder, given the module's
-# owner and modes, then renamed over BUILD with mv -T, which replaces the entry itself and does not
-# look through it. An existing BUILD that is a link, a directory or anything but a regular file
-# is removed first (the link, not its target). Returns 1 and leaves the old BUILD when it cannot.
+# What replace_build does, run by sh: the new BUILD arrives on stdin (read from root-owned staging by
+# the caller, never from the module folder), is written to a mktemp file next to BUILD (random name,
+# created exclusively), made 0644 and renamed over BUILD with mv -T, which replaces the entry
+# itself and never looks through it. A BUILD that is a link, a directory or anything but a regular
+# file is removed first (the link, not its target). The temp file is removed if anything fails.
+read -r -d '' REPLACE_BUILD_SH <<'EOS' || true
+d=$1; b=$d/BUILD
+tmp=$(mktemp "$d/.BUILD.XXXXXXXX") || exit 1
+trap 'rm -f -- "$tmp"' EXIT
+cat >"$tmp" && chmod 0644 "$tmp" || exit 1
+if [ -L "$b" ]; then rm -f -- "$b"
+elif [ -d "$b" ]; then rm -rf -- "$b"
+elif [ -e "$b" ] && [ ! -f "$b" ]; then rm -f -- "$b"; fi
+mv -f -T -- "$tmp" "$b"
+EOS
+
+# Put the package's BUILD into an installed module folder. In a root-only folder that runs as root
+# (then BUILD gets $OWNER); in any other it runs as the folder's owner (as_owner), so a link swapped in
+# at any instant can only lead somewhere that owner could already reach, and BUILD stays theirs.
+# Returns 99 when privileges cannot be dropped (nothing was written), 1 for any other failure.
 replace_build() {   # <package module dir> <installed module dir>
-  local src=$1 dst=$2 b tmp
-  b=$dst/BUILD
-  tmp=$(mktemp "$dst/.BUILD.XXXXXXXX") || return 1
-  TEMPFILES+=("$tmp")
-  if [ -L "$tmp" ] || [ ! -f "$tmp" ] \
-     || ! head -c 4096 "$src/BUILD" >"$tmp" \
-     || ! chown -h "$OWNER" "$tmp" \
-     || ! find -P "$tmp" -maxdepth 0 -type f -exec chmod 0644 {} + \
-     || [ -L "$tmp" ] || [ ! -f "$tmp" ]; then
-    rm -f -- "$tmp"; return 1
-  fi
-  if [ -L "$b" ]; then rm -f -- "$b"
-  elif [ -d "$b" ]; then rm -rf -- "$b"
-  elif [ -e "$b" ] && [ ! -f "$b" ]; then rm -f -- "$b"; fi
-  mv -f -T -- "$tmp" "$b" || { rm -f -- "$tmp"; return 1; }
+  local src=$1 dst=$2 rc=0
+  head -c 4096 "$src/BUILD" | as_owner "$dst" sh -c "$REPLACE_BUILD_SH" sh "$dst" || rc=$?
+  [ "$rc" = 0 ] || return "$rc"
+  if root_only "$dst"; then chown -h "$OWNER" "$dst/BUILD" || return 1; fi
 }
 
 # --upgrade: what each module goes from and to. "unchanged" is decided by the files, not the
@@ -623,10 +703,15 @@ INSTALLED=()   # "id|folder|what happened"
 BACKED_UP=0
 
 install_module() {
-  local id=$1 src=$PKG_DIR/$1 dst stage old parent f
+  local id=$1 src=$PKG_DIR/$1 dst stage old parent f rc
   dst=$(dst_of "$id")
-  if [ -d "$dst" ] && [ -f "$dst/manifest.json" ] && ! module_ok_to_touch "$dst" "$id"; then
-    fail "$dst holds a different module (its manifest.json is not \"$id\") — not touched"
+  if [ -d "$dst" ] && [ -f "$dst/manifest.json" ]; then
+    # A folder someone else can write is only read as its owner (see as_owner). Without a way to drop
+    # privileges nothing in it can be checked safely, so stop here and say so rather than let the
+    # failed read look like "a different module".
+    rc=0; as_owner "$dst" true 2>/dev/null || rc=$?
+    [ "$rc" != 99 ] || fail "$dst is not owned by root alone, and this host has no way to drop privileges to its owner (setpriv from util-linux, or runuser/su and a user name for the owner's uid), so the installer will not read or change it as root — nothing was touched"
+    module_ok_to_touch "$dst" "$id" || fail "$dst holds a different module (its manifest.json is not \"$id\") — not touched"
   fi
   if [ -d "$dst" ] && [ -f "$dst/manifest.json" ] && [ "$(content_sum "$dst")" = "$(content_sum "$src")" ]; then
     # Same code. If only BUILD differs (a new ElasticPro release carrying the same module code),
@@ -635,9 +720,15 @@ install_module() {
     if build_differs "$src" "$dst"; then
       same="unchanged (build info updated)"
       if [ "$DRY" = 1 ]; then say "  would: replace $dst/BUILD with the package's"
-      elif ! replace_build "$src" "$dst"; then
-        same="unchanged (build info NOT updated)"
-        note "$id: could not replace $dst/BUILD (left as it was)"
+      else
+        rc=0; replace_build "$src" "$dst" || rc=$?
+        if [ "$rc" = 99 ]; then
+          same="unchanged (build info not updated (no way to drop privileges))"
+          note "$id: $dst is not root-only and privileges cannot be dropped, so its BUILD was left as it was"
+        elif [ "$rc" != 0 ]; then
+          same="unchanged (build info not updated)"
+          note "$id: could not replace $dst/BUILD (left as it was)"
+        fi
       fi
     fi
     if [ "$DRY" = 1 ]; then say "  would: set owner $OWNER and modes 0755/0644 on $dst (config.php left as is)"; else set_perms_keep "$dst"; fi
@@ -677,7 +768,7 @@ install_module() {
       cp -a "$src/." "$stage/"
       set_perms "$stage"
       if [ -d "$dst" ]; then
-        while IFS= read -r f; do cp -p "$f" "$stage/"; done < <(local_files "$dst")
+        while IFS= read -r f; do carry_local_file "$f" "$stage" || fail "cannot carry $f over to the new $id (it is not readable as a plain file by the folder's owner)"; done < <(local_files "$dst")
         old=$(dirname "$parent")/.ep-$id.old-$STAMP
         mv "$dst" "$old"; STAGES+=("$old")
         mv "$stage" "$dst"
@@ -692,12 +783,24 @@ install_module() {
   INSTALLED+=("$id|$dst|$what")
   ok "$id: ${DRYTAG}$what → $dst"
 }
-# Unchanged module: only owner and modes, config.php left alone.
+# Unchanged module: only owner and modes, config.php left alone. In a root-only folder that is done
+# as root. In any other, as the folder's owner and modes only: root chmod/chown by path would follow
+# an entry swapped for a link, and only root can chown, so the owner is left as it is.
+read -r -d '' PERMS_KEEP_SH <<'EOS' || true
+find -P "$1" -type d -exec chmod 0755 {} +
+find -P "$1" -type f ! -path "$1/config.php" ! \( -path "$1/config.php.*" ! -path "$1/config.php.example" \) -exec chmod 0644 {} +
+EOS
 set_perms_keep() {
-  local dir=$1
-  find -P "$dir" ! -path "$dir/config.php" ! \( -path "$dir/config.php.*" ! -path "$dir/config.php.example" \) -exec chown -h "$OWNER" {} +
-  find -P "$dir" -type d -exec chmod 0755 {} +
-  find "$dir" -type f ! -path "$dir/config.php" ! \( -path "$dir/config.php.*" ! -path "$dir/config.php.example" \) -exec chmod 0644 {} +
+  local dir=$1 rc=0
+  if root_only "$dir"; then
+    find -P "$dir" ! -path "$dir/config.php" ! \( -path "$dir/config.php.*" ! -path "$dir/config.php.example" \) -exec chown -h "$OWNER" {} +
+    find -P "$dir" -type d -exec chmod 0755 {} +
+    find -P "$dir" -type f ! -path "$dir/config.php" ! \( -path "$dir/config.php.*" ! -path "$dir/config.php.example" \) -exec chmod 0644 {} +
+    return
+  fi
+  as_owner "$dir" sh -c "$PERMS_KEEP_SH" sh "$dir" || rc=$?
+  [ "$rc" != 99 ] || note "$dir: owner and modes left as they are (not root-only, and no way to drop privileges)"
+  return 0
 }
 
 # --remove: the folder goes to the dated backup. --delete: it is gone, config.php with it.

@@ -365,10 +365,15 @@ folder; the installer's upgrade table and summary print it ("modules 2.1.0, buil
 of the "unchanged" comparison. A module whose code is the same is not re-installed or backed up:
 only its `BUILD` is replaced in place, and the table and summary say "unchanged (build info
 updated)".
-The installer treats an installed module folder as untrusted (a Docker web container may own it):
-it reads an installed `BUILD` only if it is a regular file, never a symlink, and prints only a
-validated commit; it replaces `BUILD` through a `mktemp` file in the same folder and `mv -T`, so a
-link or directory planted at that name is replaced, never followed.
+The installer treats an installed module folder that someone else can write as untrusted (a Docker
+web container may own it). A folder owned by root, with a root-owned parent and no group/other write
+(the package install), cannot be raced and is handled directly. Any other folder is only ever read or
+written *as its owner* (`setpriv`, else `runuser`/`su` when the uid has a name), never as root, so a
+file swapped for a symlink at any moment can only lead where that owner could already reach: reads
+use `dd iflag=nofollow`, `BUILD` is replaced through a `mktemp` file and `mv -T` with its content
+passed in from root-owned staging, and `config.php` is carried over the same way. In such a folder the
+owner is not changed (only root could), just the modes. With no way to drop privileges the installer
+stops before touching the folder and says so.
 
 ### Setting it up from the Zabbix UI (pairing)
 
