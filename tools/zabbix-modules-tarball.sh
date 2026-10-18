@@ -32,7 +32,7 @@
 #   modules_commit_short=723f101
 #   modules_commit_date=<ISO>    that commit's date, not the build's, so the archive stays reproducible
 #   modules_tree=clean           "modified" when --modules-src has uncommitted changes under the modules, "unknown" without git
-#   elasticpro_version=0.3.20    this archive's VERSION
+# It names nothing of this repository's release, so it changes only when the modules commit does.
 # ElasticPro -> Settings in Zabbix and zabbix-modules-install.sh read it; a module without one
 # shows "build not recorded". deploy/zabbix/MODULES_REF pins the commit and the modules version,
 # and tools/check-modules-pin.sh checks the two agree.
@@ -161,7 +161,6 @@ modules_commit=$M_COMMIT
 modules_commit_short=$M_SHORT
 modules_commit_date=$M_DATE
 modules_tree=$M_TREE
-elasticpro_version=$VERSION
 EOF
 done
 

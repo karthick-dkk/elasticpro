@@ -358,28 +358,12 @@ seven; the modules project's `CHANGELOG.md` and `v<version>` tags), separate fro
 version that commit carries. They move together, in one pull request, and only to a commit the
 modules project has released and tagged; `tools/check-modules-pin.sh` (run by `build.yml` on the
 checkout it makes) fails the build if the commit's manifests say another version. The archive
-writes a `BUILD` file (modules version, modules commit, ElasticPro version) into every module
-folder; the installer's upgrade table and summary print it ("modules 2.1.0, build 723f101") and
-**ElasticPro → Settings** in Zabbix shows it, or "build not recorded" for a copy with no `BUILD`.
-`BUILD` names the ElasticPro version, so it changes with every release; the installer leaves it out
-of the "unchanged" comparison. A module whose code is the same is not re-installed or backed up:
-only its `BUILD` is replaced in place, and the table and summary say "unchanged (build info
-updated)".
-The installer treats a module folder that someone else can influence as untrusted (a Docker web
-container may own it). A folder is *root-only* when its whole path is root's: the modules folder's
-parent is resolved to the canonical path through folders only root can write (a symlink on the way
-must be root's too), and every component from `/` down is owned by root with no group/other write
-(a sticky `/tmp`-style ancestor is allowed). That is the package install; it cannot be raced and root
-works in it directly, on that canonical path. Any other folder is only ever read or written *as the
-user who can change it* (`setpriv`, else `runuser`/`su` when the uid has a name), never as root, so a
-file or a path component swapped for a symlink at any moment can only lead where that user could
-already reach: reads use `dd iflag=nofollow`, `BUILD` is replaced through a `mktemp` file and
-`mv -T` with its content passed in from root-owned staging, and `config.php` is carried over the same
-way. In such a folder the owner is not changed (only root could), just the modes. Replacing or removing
-a whole module is done by root (stage, rename, backup), so it is refused unless the folder above the
-modules folder and the backup folder are root-only too (the stage, the old copy and the backup live
-there; renames use `mv -T`). With no way to drop privileges the installer stops before touching the
-folder and says so.
+writes a `BUILD` file (modules version, modules commit, its date, clean or modified tree) into every
+module folder. It is an ordinary file of the module: it is installed, compared and backed up with
+the rest, and it names only the modules commit, so it changes only when the modules do. The
+installer's upgrade table and summary print it ("modules 2.1.0, build 723f101"), and
+**ElasticPro → Settings** in Zabbix shows the same, or "build not recorded" for a copy without a
+`BUILD` (or one that is not a plain file, or whose values are not of the expected shape).
 
 ### Setting it up from the Zabbix UI (pairing)
 
