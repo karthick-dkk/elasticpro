@@ -209,9 +209,11 @@ secret_file() {
 WORK=$(mktemp -d)
 chmod 700 "$WORK"
 STAGES=()
+TEMPFILES=()   # single temp files made inside an installed module folder (replace_build)
 cleanup() {
   local s
   for s in "${STAGES[@]+"${STAGES[@]}"}"; do [ -d "$s" ] && rm -rf "$s"; done
+  for s in "${TEMPFILES[@]+"${TEMPFILES[@]}"}"; do rm -f -- "$s"; done
   rm -rf "$WORK"
 }
 trap cleanup EXIT
@@ -503,8 +505,10 @@ dst_of() { printf '%s' "${TARGET[$1]:-$MODULES_DIR/$1}"; }
 # Content of a module folder, as a sorted checksum list; local settings (config.php) left out.
 # BUILD (what the archive was made from) is left out: it names the ElasticPro version, so it
 # changes with every release while the module's code may not. See build_differs.
+# find -P never follows a link and -type f matches regular files only, so a symlink planted in a
+# module folder is neither read nor hashed.
 content_sum() {
-  (cd "$1" && find . -type f ! -path ./BUILD ! -path ./config.php ! \( -path './config.php.*' ! -path ./config.php.example \) -print0 \
+  (cd "$1" && find -P . -type f ! -path ./BUILD ! -path ./config.php ! \( -path './config.php.*' ! -path ./config.php.example \) -print0 \
      | LC_ALL=C sort -z | xargs -0 -r sha256sum) | sha256sum | awk '{print $1}'
 }
 
@@ -526,30 +530,73 @@ module_ok_to_touch() {   # is <dir> one of ours? (its manifest names the id we e
 }
 
 # A manifest's "version" (the first one; a string or a bare number).
-manifest_version() { sed -n 's/^[[:space:]]*"version"[[:space:]]*:[[:space:]]*"\{0,1\}\([^",]*\).*/\1/p' "$1/manifest.json" 2>/dev/null | head -1; }
+# An installed module folder may be writable by another user (the Docker web container's), so
+# nothing is read from it unless it is a regular file and not a link, and only its first 256 KiB.
+manifest_version() {
+  [ -f "$1/manifest.json" ] && [ ! -L "$1/manifest.json" ] || return 0
+  head -c 262144 "$1/manifest.json" 2>/dev/null | sed -n 's/^[[:space:]]*"version"[[:space:]]*:[[:space:]]*"\{0,1\}\([^",]*\).*/\1/p' | head -1 | tr -cd '0-9A-Za-z._+-'
+}
+
+# One value from a module folder's BUILD (key=value lines). An installed folder may be writable
+# by another user, so BUILD is read only when it is a regular file and not a symlink, only its
+# first 4 KiB, and the caller validates the value before it is printed. Empty otherwise.
+build_field() {   # <module dir> <key>
+  local f=$1/BUILD
+  [ -f "$f" ] && [ ! -L "$f" ] || return 0
+  head -c 4096 "$f" 2>/dev/null | sed -n "s/^$2=//p" | head -1 | tr -d '\r[:space:]'
+}
 
 # What a module folder says about its build: "modules 2.1.0, build 723f101". The version is the
-# manifest's; the commit comes from the BUILD file tools/zabbix-modules-tarball.sh writes
-# (key=value lines). No BUILD, or a value that is not a commit, is said to be not recorded —
-# never guessed. Only read, so a dry run can use it.
+# manifest's; the commit comes from BUILD (written by tools/zabbix-modules-tarball.sh). No BUILD,
+# a link, or a value that is not a 7-40 digit hex commit is said to be not recorded -- never
+# guessed, and nothing else from the file is ever printed. Only read, so a dry run can use it.
 build_desc() {
   local dir=$1 ver commit tree out
   ver=$(manifest_version "$dir")
-  commit=$(sed -n 's/^modules_commit_short=//p' "$dir/BUILD" 2>/dev/null | head -1 | tr -d '\r[:space:]')
-  tree=$(sed -n 's/^modules_tree=//p' "$dir/BUILD" 2>/dev/null | head -1 | tr -d '\r[:space:]')
+  commit=$(build_field "$dir" modules_commit_short)
+  tree=$(build_field "$dir" modules_tree)
   out="modules ${ver:-?}"
   case "$commit" in
     ''|*[!0-9a-f]*) out="$out, build not recorded" ;;
-    *) out="$out, build $commit"; [ "$tree" = modified ] && out="$out (modified)" ;;
+    *) if [ "${#commit}" -ge 7 ] && [ "${#commit}" -le 40 ]; then
+         out="$out, build $commit"; [ "$tree" = modified ] && out="$out (modified)"
+       else out="$out, build not recorded"; fi ;;
   esac
   printf '%s' "$out"
 }
 
-# Does the package's BUILD differ from the installed one (or is the installed one missing)? Only
-# the package having a BUILD counts: an archive without one never touches an installed BUILD.
+# Does the package's BUILD differ from the installed one? True too when the installed one is
+# missing, a link or not a regular file (it is replaced, never read). Only the package having a
+# BUILD counts: an archive without one never touches an installed BUILD. Both are compared on
+# their first 4097 bytes, so an installed file bigger than a real BUILD always differs.
 build_differs() {   # <package module dir> <installed module dir>
   [ -f "$1/BUILD" ] || return 1
-  [ "$(sha256sum <"$1/BUILD")" != "$(sha256sum <"$2/BUILD" 2>/dev/null)" ]
+  [ -f "$2/BUILD" ] && [ ! -L "$2/BUILD" ] || return 0
+  [ "$(head -c 4097 "$1/BUILD" | sha256sum)" != "$(head -c 4097 "$2/BUILD" 2>/dev/null | sha256sum)" ]
+}
+
+# Put the package's BUILD into an installed module folder, which another user may be able to
+# write to. Never through a fixed name and never by following a link: the copy is made in a
+# mktemp file (unpredictable name, created with O_EXCL) in the same folder, given the module's
+# owner and modes, then renamed over BUILD with mv -T, which replaces the entry itself and does not
+# look through it. An existing BUILD that is a link, a directory or anything but a regular file
+# is removed first (the link, not its target). Returns 1 and leaves the old BUILD when it cannot.
+replace_build() {   # <package module dir> <installed module dir>
+  local src=$1 dst=$2 b tmp
+  b=$dst/BUILD
+  tmp=$(mktemp "$dst/.BUILD.XXXXXXXX") || return 1
+  TEMPFILES+=("$tmp")
+  if [ -L "$tmp" ] || [ ! -f "$tmp" ] \
+     || ! head -c 4096 "$src/BUILD" >"$tmp" \
+     || ! chown -h "$OWNER" "$tmp" \
+     || ! find -P "$tmp" -maxdepth 0 -type f -exec chmod 0644 {} + \
+     || [ -L "$tmp" ] || [ ! -f "$tmp" ]; then
+    rm -f -- "$tmp"; return 1
+  fi
+  if [ -L "$b" ]; then rm -f -- "$b"
+  elif [ -d "$b" ]; then rm -rf -- "$b"
+  elif [ -e "$b" ] && [ ! -f "$b" ]; then rm -f -- "$b"; fi
+  mv -f -T -- "$tmp" "$b" || { rm -f -- "$tmp"; return 1; }
 }
 
 # --upgrade: what each module goes from and to. "unchanged" is decided by the files, not the
@@ -588,7 +635,10 @@ install_module() {
     if build_differs "$src" "$dst"; then
       same="unchanged (build info updated)"
       if [ "$DRY" = 1 ]; then say "  would: replace $dst/BUILD with the package's"
-      else cp "$src/BUILD" "$dst/BUILD.new" && mv -f "$dst/BUILD.new" "$dst/BUILD"; fi
+      elif ! replace_build "$src" "$dst"; then
+        same="unchanged (build info NOT updated)"
+        note "$id: could not replace $dst/BUILD (left as it was)"
+      fi
     fi
     if [ "$DRY" = 1 ]; then say "  would: set owner $OWNER and modes 0755/0644 on $dst (config.php left as is)"; else set_perms_keep "$dst"; fi
     INSTALLED+=("$id|$dst|$same")
@@ -645,8 +695,8 @@ install_module() {
 # Unchanged module: only owner and modes, config.php left alone.
 set_perms_keep() {
   local dir=$1
-  find "$dir" ! -path "$dir/config.php" ! \( -path "$dir/config.php.*" ! -path "$dir/config.php.example" \) -exec chown "$OWNER" {} +
-  find "$dir" -type d -exec chmod 0755 {} +
+  find -P "$dir" ! -path "$dir/config.php" ! \( -path "$dir/config.php.*" ! -path "$dir/config.php.example" \) -exec chown -h "$OWNER" {} +
+  find -P "$dir" -type d -exec chmod 0755 {} +
   find "$dir" -type f ! -path "$dir/config.php" ! \( -path "$dir/config.php.*" ! -path "$dir/config.php.example" \) -exec chmod 0644 {} +
 }
 

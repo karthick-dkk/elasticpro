@@ -365,6 +365,10 @@ folder; the installer's upgrade table and summary print it ("modules 2.1.0, buil
 of the "unchanged" comparison. A module whose code is the same is not re-installed or backed up:
 only its `BUILD` is replaced in place, and the table and summary say "unchanged (build info
 updated)".
+The installer treats an installed module folder as untrusted (a Docker web container may own it):
+it reads an installed `BUILD` only if it is a regular file, never a symlink, and prints only a
+validated commit; it replaces `BUILD` through a `mktemp` file in the same folder and `mv -T`, so a
+link or directory planted at that name is replaced, never followed.
 
 ### Setting it up from the Zabbix UI (pairing)
 
