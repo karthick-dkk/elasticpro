@@ -248,6 +248,12 @@ jobs:
           ref: ${{ steps.modules_ref.outputs.ref }}
           path: modules-src
 
+      # MODULES_REF also names the modules version that commit carries ("# modules X.Y.Z").
+      # The commit and the version move together; a pin whose manifests say something else
+      # would ship modules that ElasticPro, its docs and the Settings page misname.
+      - name: the pinned commit carries the modules version MODULES_REF names
+        run: tools/check-modules-pin.sh --modules-src modules-src
+
       # The shared-code freshness check in the tarball tool runs under node.
       - uses: actions/setup-node@v4
         with:
@@ -260,7 +266,9 @@ jobs:
           bash -n tools/install.sh
           python3 tools/check-zabbix-templates.py
           bash -n tools/zabbix-modules-tarball.sh
-          shellcheck -S error deploy/zabbix/zabbix-modules-install.sh tools/zabbix-modules-tarball.sh tools/install.sh
+          bash -n tools/check-modules-pin.sh
+          tools/check-modules-pin.sh --ref-only
+          shellcheck -S error deploy/zabbix/zabbix-modules-install.sh tools/zabbix-modules-tarball.sh tools/check-modules-pin.sh tools/install.sh
 
       # The version comes from the version job, so the tarball and the Windows zip in the
       # same release always carry the same number. Through env, not interpolation into the

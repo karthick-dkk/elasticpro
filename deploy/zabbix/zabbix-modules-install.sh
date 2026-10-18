@@ -524,6 +524,33 @@ module_ok_to_touch() {   # is <dir> one of ours? (its manifest names the id we e
 # A manifest's "version" (the first one; a string or a bare number).
 manifest_version() { sed -n 's/^[[:space:]]*"version"[[:space:]]*:[[:space:]]*"\{0,1\}\([^",]*\).*/\1/p' "$1/manifest.json" 2>/dev/null | head -1; }
 
+# For display only: which build a module folder is, "modules 2.1.0, build 723f101". The version is
+# the manifest's; the commit comes from the BUILD file that tools/zabbix-modules-tarball.sh puts in
+# every module folder (key=value lines). Nothing here changes a file. An installed folder may be
+# writable by another user, so BUILD is read only if it is a regular file and not a symlink, opened
+# with O_NOFOLLOW, first 4 KiB, only the known keys, and only a value of the expected shape is printed:
+# anything else is "build not recorded", never guessed.
+build_field() {   # <module dir> <key>
+  local f=$1/BUILD
+  [ -f "$f" ] && [ ! -L "$f" ] || return 0
+  dd if="$f" iflag=nofollow bs=4096 count=1 status=none 2>/dev/null | sed -n "s/^$2=//p" | head -1 | tr -d '\r[:space:]' || true
+}
+build_desc() {   # <module dir>
+  local dir=$1 ver commit tree out
+  ver=$(manifest_version "$dir")
+  commit=$(build_field "$dir" modules_commit_short)
+  tree=$(build_field "$dir" modules_tree)
+  [[ $ver =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || ver=
+  out="modules ${ver:-?}"
+  if [[ $commit =~ ^[0-9a-f]{7,40}$ ]]; then
+    out="$out, build $commit"
+    [ "$tree" != modified ] || out="$out (modified)"
+  else
+    out="$out, build not recorded"
+  fi
+  printf '%s' "$out"
+}
+
 # --upgrade: what each module goes from and to. "unchanged" is decided by the files, not the
 # version number alone, so a module whose files changed under the same version says "updated".
 upgrade_table() {
@@ -740,6 +767,12 @@ if [ "$UNINSTALL" = 1 ]; then
 else
   if [ "$UPGRADE" = 1 ]; then
     step "upgrade: installed → $PKG_VERSION"
+    cur_build="not installed"
+    for id in "${PKG_IDS[@]}"; do
+      [ -f "$(dst_of "$id")/manifest.json" ] && { cur_build=$(build_desc "$(dst_of "$id")"); break; }
+    done
+    say "  installed: $cur_build"
+    say "  new:       $(build_desc "$PKG_DIR/${PKG_IDS[0]}") (ElasticPro $PKG_VERSION)"
     upgrade_table
   fi
   step "modules → $MODULES_DIR"
@@ -828,7 +861,7 @@ step "summary"
 if [ "$UNINSTALL" = 1 ]; then
   if [ "$DELETE" = 1 ]; then say "Deleted ElasticPro Zabbix modules:"; else say "Removed ElasticPro Zabbix modules:"; fi
 else
-  say "ElasticPro Zabbix modules $PKG_VERSION ($MODE install):"
+  say "ElasticPro Zabbix modules $PKG_VERSION ($(build_desc "$PKG_DIR/${PKG_IDS[0]}"); $MODE install):"
 fi
 for l in "${INSTALLED[@]+"${INSTALLED[@]}"}"; do
   IFS='|' read -r id where what <<<"$l"

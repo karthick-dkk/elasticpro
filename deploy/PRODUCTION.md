@@ -162,6 +162,14 @@ reports use the first active one; without it, saving a client with those options
 
 ## 4. Zabbix modules — `deploy/zabbix/install-modules.sh`
 
+*Versions.* The modules carry their own version, shared by all of them and separate from
+ElasticPro's, and a release ships the modules commit pinned in `deploy/zabbix/MODULES_REF` together
+with the version it carries (`# modules X.Y.Z`); see "Modules versioning" in
+`deploy/zabbix/README.md`. The release archive's installer, `zabbix-modules-install.sh`, prints
+which modules version and build it installs; **ElasticPro → Settings** in Zabbix shows what is
+installed. This section's `install-modules.sh` copies the modules from this checkout instead and
+records no build.
+
 One command, on the Zabbix frontend host, from a checkout of this repo:
 
 ```bash
