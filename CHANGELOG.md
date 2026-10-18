@@ -1,5 +1,35 @@
 # Changelog
 
+## 0.3.20
+
+**Zabbix modules: Excel import, and a fully customizable Client overview.**
+
+No change to ElasticPro itself; this release ships the new Zabbix modules.
+
+**Cluster Management → Import is one Excel workbook.** `clients.xlsx` has three sheets: Clients
+(with requested capacity), Servers, and a Sample sheet with filled-in examples that the import
+ignores. Client type, roles, proxies and the other choices are dropdowns filled from this Zabbix,
+and every column header carries a note. Export gives your current clients in the same workbook to
+edit and import back. Every row is checked first, and one error means nothing is applied. The old
+CSV files are still accepted. No PHP zip extension is needed.
+
+**Client overview widget 2.1:**
+- **View: Cards or Summary.** Summary is the overview as it was before. Widgets you already have
+  open in Summary, so they look the same after the upgrade; new widgets start in Cards.
+- **Cards:** one card per client with its type and contract end, problems by severity (linked to
+  Problems), your own metric rows with now and N-day avg, min and max, used of allocated with a
+  disk-full forecast, servers by role (down in red), and warnings for stale data, unreachable
+  agents and metrics that are not collected.
+- **Metrics are yours to choose:** any built-in or any Zabbix item key, which servers and roles to
+  read, how to combine them, units, display (as is, bar, indicators, sparkline), thresholds where
+  higher or lower is worse, and where a click goes. Up to 20 per widget, in the order you drag them.
+- **Layout:** sections on or off and in any order, columns, compact and table density, how servers
+  and roles show, which severities count, sort by any metric, top N, and only clients over a
+  threshold or with problems.
+- **Fixed:** Warn and High no longer show 0. Empty means ElasticPro → Settings, and the form says so.
+
+Upgrade the modules with `zabbix-modules-install.sh --upgrade`.
+
 ## 0.3.19
 
 **Dialogs fit, and the Zabbix pages are compact.**
