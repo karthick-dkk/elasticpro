@@ -207,6 +207,7 @@ secret_file() {
 [ -z "$PASSWORD_FILE" ] || secret_file "$PASSWORD_FILE" "--password-file"
 
 WORK=$(mktemp -d)
+WORK=$(readlink -f -- "$WORK" 2>/dev/null || printf '%s' "$WORK")   # canonical: root_only/as_owner compare paths textually
 chmod 700 "$WORK"
 STAGES=()
 cleanup() {
@@ -498,52 +499,136 @@ if [ -n "$API_CFG" ]; then
 fi
 
 # --- 3. modules --------------------------------------------------------------------------------
-dst_of() { printf '%s' "${TARGET[$1]:-$MODULES_DIR/$1}"; }
+# trusted_realpath <absolute path>: realpath, but only through folders root controls. Each folder
+# whose entries are looked at on the way down must be root-owned and not group/other-writable (sticky
+# excuses it, like /tmp), and a symlink met on the way must be root's too, then its target is
+# resolved the same way. Anything else -- say a component owned by the Docker container's uid, who
+# could re-point it between two uses -- fails, so the resolution itself cannot be steered. A tail that
+# does not exist yet is appended as written. Prints the symlink-free path.
+trusted_realpath() {
+  local todo=$1 cur=/ comp next s mode tgt hops=0
+  case $todo in /*) ;; *) return 1 ;; esac
+  while :; do
+    todo=${todo#"${todo%%[!/]*}"}
+    [ -n "$todo" ] || break
+    comp=${todo%%/*}
+    if [ "$comp" = "$todo" ]; then todo=; else todo=${todo#*/}; fi
+    case $comp in
+      .) continue ;;
+      ..) cur=$(dirname -- "$cur"); continue ;;
+    esac
+    s=$(stat -c '%u %a' -- "$cur" 2>/dev/null) || return 1
+    mode=${s#* }
+    [ "${s%% *}" = 0 ] || return 1
+    if [ $(( 8#$mode & 8#022 )) -ne 0 ]; then [ $(( 8#$mode & 8#1000 )) -ne 0 ] || return 1; fi
+    next=${cur%/}/$comp
+    if [ -L "$next" ]; then
+      [ "$(stat -c %u -- "$next" 2>/dev/null)" = 0 ] || return 1
+      hops=$((hops + 1)); [ "$hops" -le 40 ] || return 1
+      tgt=$(readlink -- "$next") || return 1
+      case $tgt in /*) cur=/ ;; esac
+      todo=$tgt/$todo
+    elif [ -e "$next" ]; then
+      cur=$next
+    else
+      cur=$next; [ -z "$todo" ] || cur=$cur/${todo#/}
+      break
+    fi
+  done
+  printf '%s' "$cur"
+}
+
+# The module's folder, with its parent resolved by trusted_realpath, once, here: every later use by
+# root names the same symlink-free path that root_only checks, and the resolution cannot have been
+# steered by a folder someone else owns. If the parent cannot be resolved that way, the path is left
+# as given, and root_only will say no to it. The folder itself is left as named: if it is a link it
+# stays a link (and is never resolved to wherever it points).
+dst_of() {
+  local p=${TARGET[$1]:-$MODULES_DIR/$1} d
+  d=$(trusted_realpath "$(dirname -- "$p")") && [ -n "$d" ] && p=${d%/}/$(basename -- "$p")
+  printf '%s' "$p"
+}
 
 # --- working inside a module folder that someone else can write ---------------------------------
 # The installer runs as root. A module folder that is owned by another user (the Docker web
-# container's uid) or writable by group/other lets that user swap any entry in it for a symlink at
-# any moment, and no check-then-use in shell can close that window. So the rule is by design:
+# container's uid), or that sits under a folder some other user can write or a symlink, lets that
+# user swap any entry on the path for a symlink at any moment, and no check-then-use in shell can
+# close that window. So the rule is by design:
 #
-#   * a folder that is owned by root, with its parent, and writable by nobody else (the package
-#     install) cannot be raced, and root works in it directly;
-#   * any other folder is only ever read or written *as the folder's owner* (as_owner): whatever a
-#     swapped link points at, the owner could already touch it, so root's files are out of reach.
+#   * a folder whose whole path is root's -- the canonical path (no symlink, nothing relative), every
+#     component from / down owned by root and not group/other-writable (the sticky bit excuses an
+#     ancestor like /tmp, never the folder itself) -- cannot be raced, and root works in it directly;
+#   * any other folder is only ever read or written *as the user who can change it* (as_owner):
+#     whatever a swapped link points at, that user could already touch it, so root's files are out of
+#     reach. Operations that cannot be done as that user (replacing or removing a whole module) are
+#     refused there instead (require_root_paths).
 #
-# GNU stat is used; where it is missing the folder counts as not root-only. root_only is true when
-# <dir> is a real directory and it and its (canonical) parent are root-owned with no group/other
-# write.
+# GNU stat and readlink are used; where they are missing nothing counts as root-only.
+# root_only <dir> [sticky-ok]: true when <dir> is that kind of path. Callers pass the canonical path
+# (dst_of makes it); anything else -- a link anywhere in it, a trailing slash -- is simply not
+# root-only. A sticky root-owned <dir> (like /tmp) is accepted only when sticky-ok is given, for
+# folders root merely creates new entries in; a module folder never qualifies that way.
 root_only() {
-  local d=$1 x s mode
-  [ -d "$d" ] && [ ! -L "$d" ] || return 1
-  for x in "$d" "$(cd -P -- "$(dirname -- "$d")" 2>/dev/null && pwd -P)"; do
-    [ -n "$x" ] || return 1
-    s=$(stat -c '%u %a' -- "$x" 2>/dev/null) || return 1
+  local d=$1 ok=${2:-} p s mode
+  [ "$d" = "$(readlink -f -- "$d" 2>/dev/null)" ] || return 1
+  [ -d "$d" ] || return 1
+  p=$d
+  while :; do
+    s=$(stat -c '%u %a' -- "$p" 2>/dev/null) || return 1
     mode=${s#* }
-    { [ "${s%% *}" = 0 ] && [ $(( 8#$mode & 8#022 )) -eq 0 ]; } || return 1
+    [ "${s%% *}" = 0 ] || return 1
+    if [ $(( 8#$mode & 8#022 )) -ne 0 ]; then
+      { { [ "$p" != "$d" ] || [ -n "$ok" ]; } && [ $(( 8#$mode & 8#1000 )) -ne 0 ]; } || return 1
+    fi
+    [ "$p" = / ] && return 0
+    p=$(dirname -- "$p")
   done
 }
 
-# "uid gid" to act as in a folder that is not root-only: its owner, or if root owns it (but others
-# can write) the owner of its parent. Fails when only root owns both: there is nobody to drop to.
+# root_only for a path that may not exist yet: its nearest existing ancestor (where mkdir -p would
+# start creating, as root) has to be root's.
+existing_root_only() {
+  local p=$1
+  while [ ! -e "$p" ] && [ ! -L "$p" ]; do p=$(dirname -- "$p"); done
+  root_only "$p" sticky-ok
+}
+
+# Stop, naming the path, unless each path given is root's (existing_root_only).
+require_root_paths() {   # <what for> <path>...
+  local why=$1 p
+  shift
+  for p in "$@"; do
+    existing_root_only "$p" || fail "$why: $p (or a folder above it) is a symlink, or is owned or writable by someone other than root, so root cannot work there without it being redirected. Use a path that only root can change (chown root, no group/other write), or the canonical path if it contains a link. Nothing was touched"
+  done
+}
+
+# "uid gid" to act as for a folder that is not root-only: the first owner other than root on the way
+# up from it (the folder itself, then each folder above it on the canonical path). Fails when root
+# owns all of them: there is nobody to drop to.
 owner_ids() {
-  local d=$1 s p
-  s=$(stat -c '%u %g' -- "$d" 2>/dev/null) || return 1
+  local p s
+  s=$(stat -c '%u %g' -- "$1" 2>/dev/null) || return 1
   [ "${s%% *}" != 0 ] && { printf '%s' "$s"; return 0; }
-  p=$(cd -P -- "$(dirname -- "$d")" 2>/dev/null && pwd -P) || return 1
-  s=$(stat -c '%u %g' -- "$p" 2>/dev/null) || return 1
-  [ "${s%% *}" != 0 ] || return 1
-  printf '%s' "$s"
+  p=$(readlink -f -- "$(dirname -- "$1")" 2>/dev/null) || return 1
+  while [ -n "$p" ]; do
+    s=$(stat -c '%u %g' -- "$p" 2>/dev/null) || return 1
+    [ "${s%% *}" != 0 ] && { printf '%s' "$s"; return 0; }
+    [ "$p" = / ] && return 1
+    p=$(dirname -- "$p")
+  done
+  return 1
 }
 
 # as_owner <module folder> <command> [args...]: run the command directly when the folder is
-# root-only, else as that folder's owner (setpriv from util-linux; runuser or su when the uid has
-# a name). Returns 99, having run nothing, when there is no way to drop privileges: callers then
+# root-only, else as the user who can change it (setpriv from util-linux; runuser or su when the uid
+# has a name). Returns 99, having run nothing, when there is no way to drop privileges: callers then
 # skip the work rather than do it as root. Only external commands (dd, sh, ...), no functions.
+# Run directly too: when this is not root, and for the installer's own root-only working folders
+# (the unpacked package under $WORK, or the unpacked archive given as --from-dir).
 as_owner() {
   local dir=$1 ids uid gid name
   shift
-  if root_only "$dir"; then "$@"; return; fi
+  if [ "$(id -u)" != 0 ] || [[ $dir == "$WORK"/* ]] || { [ -n "$PKG_DIR" ] && [[ $dir == "$PKG_DIR"/* ]]; } || root_only "$dir"; then "$@"; return; fi
   ids=$(owner_ids "$dir") || { echo "! $dir is not root-only and has no other owner to act as" >&2; return 99; }
   uid=${ids% *}; gid=${ids#* }
   if command -v setpriv >/dev/null 2>&1; then
@@ -710,7 +795,7 @@ install_module() {
     # privileges nothing in it can be checked safely, so stop here and say so rather than let the
     # failed read look like "a different module".
     rc=0; as_owner "$dst" true 2>/dev/null || rc=$?
-    [ "$rc" != 99 ] || fail "$dst is not owned by root alone, and this host has no way to drop privileges to its owner (setpriv from util-linux, or runuser/su and a user name for the owner's uid), so the installer will not read or change it as root — nothing was touched"
+    [ "$rc" != 99 ] || fail "$dst can be changed by someone other than root (it, or a folder above it, is a symlink, owned by another user, or group/other-writable), and this host has nobody it can safely drop privileges to (setpriv from util-linux, or runuser/su and a user name for the uid), so the installer will not read or change it as root — nothing was touched"
     module_ok_to_touch "$dst" "$id" || fail "$dst holds a different module (its manifest.json is not \"$id\") — not touched"
   fi
   if [ -d "$dst" ] && [ -f "$dst/manifest.json" ] && [ "$(content_sum "$dst")" = "$(content_sum "$src")" ]; then
@@ -736,6 +821,14 @@ install_module() {
     ok "$id: $same ($dst)"
     return
   fi
+  # Replacing a whole module is done by root (staging, rename, backup), which no unprivileged user
+  # can stand in for, so the places those happen in have to be root's: the folder holding the
+  # module's own mount for a folder mounted on its own, else the folder above the modules folder
+  # (where the stage and the old copy live); plus the backup folder.
+  local bk=()
+  [ -d "$dst" ] && bk=("$BACKUP_DIR")
+  if [ -n "${INPLACE[$id]:-}" ]; then require_root_paths "$id" "$(dirname -- "$dst")" "${bk[@]+"${bk[@]}"}"
+  else require_root_paths "$id" "$(dirname -- "$(dirname -- "$dst")")" "${bk[@]+"${bk[@]}"}"; fi
   local what=installed
   [ -f "$dst/manifest.json" ] && what="updated (previous kept in $BACKUP_DIR/$STAMP/$id)"
 
@@ -753,7 +846,7 @@ install_module() {
       fi
       mkdir -p "$dst"
       find "$dst" -mindepth 1 -maxdepth 1 ! -name config.php ! \( -name 'config.php.*' ! -name config.php.example \) -exec rm -rf {} +
-      cp -a "$stage/." "$dst/"
+      cp -a --remove-destination "$stage/." "$dst/"
       chown "$OWNER" "$dst"; chmod 0755 "$dst"
     fi
   else
@@ -770,13 +863,13 @@ install_module() {
       if [ -d "$dst" ]; then
         while IFS= read -r f; do carry_local_file "$f" "$stage" || fail "cannot carry $f over to the new $id (it is not readable as a plain file by the folder's owner)"; done < <(local_files "$dst")
         old=$(dirname "$parent")/.ep-$id.old-$STAMP
-        mv "$dst" "$old"; STAGES+=("$old")
-        mv "$stage" "$dst"
+        mv -T "$dst" "$old"; STAGES+=("$old")
+        mv -T "$stage" "$dst"
         if [ -f "$old/manifest.json" ]; then
-          mkdir -p "$BACKUP_DIR/$STAMP"; mv "$old" "$BACKUP_DIR/$STAMP/$id"; BACKED_UP=1
+          mkdir -p "$BACKUP_DIR/$STAMP"; mv -T "$old" "$BACKUP_DIR/$STAMP/$id"; BACKED_UP=1
         fi
       else
-        mv "$stage" "$dst"
+        mv -T "$stage" "$dst"
       fi
     fi
   fi
@@ -810,6 +903,11 @@ uninstall_module() {
   dst=$(dst_of "$id")
   if [ ! -f "$dst/manifest.json" ]; then say "  - $id: not installed at $dst"; return; fi
   module_ok_to_touch "$dst" "$id" || { note "$id: $dst holds a different module — left alone"; return; }
+  # As for installing: root moves and empties the folder, so the places it does that in must be root's.
+  local bk=()
+  [ "$DELETE" = 1 ] || bk=("$BACKUP_DIR")
+  if [ -n "${INPLACE[$id]:-}" ]; then require_root_paths "$id" "$(dirname -- "$dst")" "${bk[@]+"${bk[@]}"}"
+  else require_root_paths "$id" "$(dirname -- "$(dirname -- "$dst")")" "${bk[@]+"${bk[@]}"}"; fi
   if [ -n "${INPLACE[$id]:-}" ]; then
     if [ "$DELETE" = 1 ]; then
       if [ "$DRY" = 1 ]; then say "  would: empty $dst, config.php too, no backup (it is mounted into $CONTAINER)"
@@ -828,15 +926,15 @@ uninstall_module() {
       if [ "$DRY" = 1 ]; then say "  would: delete $dst for good (no backup)"
       else
         old=$(dirname "$(dirname "$dst")")/.ep-$id.old-$STAMP
-        mv "$dst" "$old"; STAGES+=("$old")   # gone from Zabbix at once
+        mv -T "$dst" "$old"; STAGES+=("$old")   # gone from Zabbix at once
         rm -rf "$old"
       fi
     else
       if [ "$DRY" = 1 ]; then say "  would: move $dst to $BACKUP_DIR/$STAMP/$id"
       else
         old=$(dirname "$(dirname "$dst")")/.ep-$id.old-$STAMP
-        mv "$dst" "$old"; STAGES+=("$old")   # gone from Zabbix at once, even if the backup is on another disk
-        mkdir -p "$BACKUP_DIR/$STAMP"; mv "$old" "$BACKUP_DIR/$STAMP/$id"; BACKED_UP=1
+        mv -T "$dst" "$old"; STAGES+=("$old")   # gone from Zabbix at once, even if the backup is on another disk
+        mkdir -p "$BACKUP_DIR/$STAMP"; mv -T "$old" "$BACKUP_DIR/$STAMP/$id"; BACKED_UP=1
       fi
     fi
     INSTALLED+=("$id|$dst|$verb")
