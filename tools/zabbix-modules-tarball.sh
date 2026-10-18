@@ -25,6 +25,17 @@
 #
 # Left out: tests, tool scripts (*.py, *.mjs), READMEs, .gitignore, macOS ._* files, and every
 # config.php (config.php.example stays — it is documentation, not a setting).
+#
+# Every module folder also gets a BUILD file, key=value lines, the same in all seven:
+#   modules_version=2.1.0        the version in the manifests (they share one; "mixed" or "unknown" when they do not)
+#   modules_commit=<40 hex>      git rev-parse HEAD of --modules-src ("unknown" when it is not a git checkout)
+#   modules_commit_short=723f101
+#   modules_commit_date=<ISO>    that commit's date, not the build's, so the archive stays reproducible
+#   modules_tree=clean           "modified" when --modules-src has uncommitted changes under the modules, "unknown" without git
+#   elasticpro_version=0.3.20    this archive's VERSION
+# ElasticPro -> Settings in Zabbix and zabbix-modules-install.sh read it; a module without one
+# shows "build not recorded". deploy/zabbix/MODULES_REF pins the commit and the modules version,
+# and tools/check-modules-pin.sh checks the two agree.
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
@@ -119,6 +130,40 @@ for m in "${MODULES[@]}"; do
     (cd "$src" && xargs -0 -r cp --parents -t "$STAGE/$NAME/$id")
 done
 printf '%s\n' "$VERSION" > "$STAGE/$NAME/VERSION"
+
+# --- BUILD: what this archive was made from, written into every module folder ---
+manifest_version() { sed -n 's/^[[:space:]]*"version"[[:space:]]*:[[:space:]]*"\{0,1\}\([^",]*\).*/\1/p' "$1/manifest.json" | head -1; }
+MV=
+for m in "${MODULES[@]}"; do
+  v=$(manifest_version "${m#*:}")
+  if [ -z "$MV" ]; then MV=$v; elif [ "$v" != "$MV" ] && [ "$MV" != mixed ]; then MV=mixed; fi
+done
+case "$MV" in
+  mixed) echo "! the modules' manifests do not share one version ($(for m in "${MODULES[@]}"; do printf '%s %s, ' "${m%%:*}" "$(manifest_version "${m#*:}")"; done | sed 's/, $//')) — BUILD says mixed" >&2 ;;
+  [0-9]*.[0-9]*.[0-9]*) ;;
+  *) echo "! the manifests' version \"$MV\" is not x.y.z — BUILD records it as unknown" >&2; MV=unknown ;;
+esac
+M_COMMIT=unknown; M_SHORT=unknown; M_DATE=unknown; M_TREE=unknown
+if command -v git >/dev/null 2>&1 && git -C "$Z" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  M_COMMIT=$(git -C "$Z" rev-parse HEAD 2>/dev/null || echo unknown)
+  if [ "$M_COMMIT" != unknown ]; then
+    M_SHORT=$(git -C "$Z" rev-parse --short=7 HEAD)
+    M_DATE=$(git -C "$Z" show -s --format=%cI HEAD)
+    if [ -n "$(git -C "$Z" status --porcelain --untracked-files=normal -- . 2>/dev/null)" ]; then M_TREE=modified; else M_TREE=clean; fi
+  fi
+fi
+[ "$M_COMMIT" != unknown ] || echo "! $Z is not a git checkout — BUILD records the modules commit as unknown" >&2
+for m in "${MODULES[@]}"; do
+  cat > "$STAGE/$NAME/${m%%:*}/BUILD" <<EOF
+# Written by tools/zabbix-modules-tarball.sh. Read by ElasticPro -> Settings in Zabbix and by zabbix-modules-install.sh.
+modules_version=$MV
+modules_commit=$M_COMMIT
+modules_commit_short=$M_SHORT
+modules_commit_date=$M_DATE
+modules_tree=$M_TREE
+elasticpro_version=$VERSION
+EOF
+done
 
 mkdir -p "$OUT"
 OUT=$(cd "$OUT" && pwd)

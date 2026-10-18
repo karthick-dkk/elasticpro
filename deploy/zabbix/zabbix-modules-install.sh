@@ -524,6 +524,23 @@ module_ok_to_touch() {   # is <dir> one of ours? (its manifest names the id we e
 # A manifest's "version" (the first one; a string or a bare number).
 manifest_version() { sed -n 's/^[[:space:]]*"version"[[:space:]]*:[[:space:]]*"\{0,1\}\([^",]*\).*/\1/p' "$1/manifest.json" 2>/dev/null | head -1; }
 
+# What a module folder says about its build: "modules 2.1.0, build 723f101". The version is the
+# manifest's; the commit comes from the BUILD file tools/zabbix-modules-tarball.sh writes
+# (key=value lines). No BUILD, or a value that is not a commit, is said to be not recorded —
+# never guessed. Only read, so a dry run can use it.
+build_desc() {
+  local dir=$1 ver commit tree out
+  ver=$(manifest_version "$dir")
+  commit=$(sed -n 's/^modules_commit_short=//p' "$dir/BUILD" 2>/dev/null | head -1 | tr -d '\r[:space:]')
+  tree=$(sed -n 's/^modules_tree=//p' "$dir/BUILD" 2>/dev/null | head -1 | tr -d '\r[:space:]')
+  out="modules ${ver:-?}"
+  case "$commit" in
+    ''|*[!0-9a-f]*) out="$out, build not recorded" ;;
+    *) out="$out, build $commit"; [ "$tree" = modified ] && out="$out (modified)" ;;
+  esac
+  printf '%s' "$out"
+}
+
 # --upgrade: what each module goes from and to. "unchanged" is decided by the files, not the
 # version number alone, so a module whose files changed under the same version says "updated".
 upgrade_table() {
@@ -740,6 +757,12 @@ if [ "$UNINSTALL" = 1 ]; then
 else
   if [ "$UPGRADE" = 1 ]; then
     step "upgrade: installed → $PKG_VERSION"
+    cur_build="not installed"
+    for id in "${PKG_IDS[@]}"; do
+      [ -f "$(dst_of "$id")/manifest.json" ] && { cur_build=$(build_desc "$(dst_of "$id")"); break; }
+    done
+    say "  installed: $cur_build"
+    say "  new:       $(build_desc "$PKG_DIR/${PKG_IDS[0]}") (ElasticPro $PKG_VERSION)"
     upgrade_table
   fi
   step "modules → $MODULES_DIR"
@@ -828,7 +851,7 @@ step "summary"
 if [ "$UNINSTALL" = 1 ]; then
   if [ "$DELETE" = 1 ]; then say "Deleted ElasticPro Zabbix modules:"; else say "Removed ElasticPro Zabbix modules:"; fi
 else
-  say "ElasticPro Zabbix modules $PKG_VERSION ($MODE install):"
+  say "ElasticPro Zabbix modules $PKG_VERSION ($(build_desc "$PKG_DIR/${PKG_IDS[0]}"); $MODE install):"
 fi
 for l in "${INSTALLED[@]+"${INSTALLED[@]}"}"; do
   IFS='|' read -r id where what <<<"$l"

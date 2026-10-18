@@ -352,6 +352,18 @@ tool stops and says so, rather than falling back to an older copy. `install-modu
 `PRODUCTION.md`) stays for the stack in `stack/`, where the modules are mounted from the
 repository.
 
+**Modules versioning.** The Zabbix modules have one version of their own (`x.y.z`, shared by all
+seven; the modules project's `CHANGELOG.md` and `v<version>` tags), separate from ElasticPro's.
+[`MODULES_REF`](MODULES_REF) pins both: the commit, and a `# modules X.Y.Z` comment line naming the
+version that commit carries. They move together, in one pull request, and only to a commit the
+modules project has released and tagged; `tools/check-modules-pin.sh` (run by `build.yml` on the
+checkout it makes) fails the build if the commit's manifests say another version. The archive
+writes a `BUILD` file (modules version, modules commit, ElasticPro version) into every module
+folder; the installer's upgrade table and summary print it ("modules 2.1.0, build 723f101") and
+**ElasticPro → Settings** in Zabbix shows it, or "build not recorded" for a copy with no `BUILD`.
+Because `BUILD` carries the ElasticPro version, every ElasticPro release shows each module as
+"updated (same version number, files differ)" even when its code is the same.
+
 ### Setting it up from the Zabbix UI (pairing)
 
 Install the modules (above) — or copy `module/elasticpro/` into the frontend's

@@ -140,6 +140,9 @@ Useful options (`--help` lists them all):
 > The release carries all seven ElasticPro modules, built from the modules project (integration-zabbix-elasticpro) at the commit pinned in `deploy/zabbix/MODULES_REF`, and the installer puts them all in place. This page needs only **ElasticPro**; Cluster Management and the report widgets can stay disabled until you use them.
 {.is-info}
 
+> The modules have their own version, shared by all seven and separate from ElasticPro's. The installer prints it with the build ("modules 2.1.0, build 723f101"), and **ElasticPro → Settings** in Zabbix shows the same line at the foot of the page. `deploy/zabbix/MODULES_REF` pins the commit and the version together.
+{.is-info}
+
 **2b. Or copy it by hand.** The same result, without the installer. Package the `elasticpro` folder on any machine that has the ElasticPro repository (for example the ElasticPro host), and copy it over:
 
 ```bash

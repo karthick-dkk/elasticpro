@@ -161,6 +161,11 @@ git pull && docker compose up -d --build
 
 Trust decisions (`pins.json`) live in the `core-data` volume and survive rebuilds.
 
+The Zabbix modules are not part of these images. They have their own version (shared by all the
+modules, separate from ElasticPro's), pinned with the commit in `deploy/zabbix/MODULES_REF` and
+shipped in the release as `elasticpro-zabbix-modules-<ver>.tar.gz`; see "Modules versioning" in
+`deploy/zabbix/README.md`.
+
 ## Settings: config.txt
 
 One file holds the settings of a hosted install: `deploy/config.txt` (on a server,
