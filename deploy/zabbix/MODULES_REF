@@ -1,4 +1,4 @@
 # The commit of github.com/karthick-dkk/integration-zabbix-elasticpro whose zabbix/ folder the release's elasticpro-zabbix-modules-<ver>.tar.gz is built from (build.yml checks it out). Move it forward by pull request when a new module build should ship; the first line that is not a comment is the ref.
 # The next line names the modules version that commit carries (its manifests, and the CHANGELOG section behind its v<version> tag). The commit and this version move together: build.yml runs tools/check-modules-pin.sh and fails the build if the commit's manifests carry another version.
 # modules 2.1.0
-723f10156ed96353ba0fc8ee69a1aadc3496bda5
+2b0433dc4dc5f839d9da6296d734c9e54462119e
