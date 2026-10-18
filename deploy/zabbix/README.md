@@ -361,8 +361,10 @@ checkout it makes) fails the build if the commit's manifests say another version
 writes a `BUILD` file (modules version, modules commit, ElasticPro version) into every module
 folder; the installer's upgrade table and summary print it ("modules 2.1.0, build 723f101") and
 **ElasticPro → Settings** in Zabbix shows it, or "build not recorded" for a copy with no `BUILD`.
-Because `BUILD` carries the ElasticPro version, every ElasticPro release shows each module as
-"updated (same version number, files differ)" even when its code is the same.
+`BUILD` names the ElasticPro version, so it changes with every release; the installer leaves it out
+of the "unchanged" comparison. A module whose code is the same is not re-installed or backed up:
+only its `BUILD` is replaced in place, and the table and summary say "unchanged (build info
+updated)".
 
 ### Setting it up from the Zabbix UI (pairing)
 

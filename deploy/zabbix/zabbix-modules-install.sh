@@ -73,7 +73,9 @@
 #   --insecure              the Zabbix URL has a self-signed certificate
 #   --upgrade               install the latest release (or --version) over every module and
 #                           print what changes: installed version → new version per module
-#                           ("new" when not installed, "unchanged" when the files are the same).
+#                           ("new" when not installed, "unchanged" when the files are the same;
+#                           the BUILD file is not compared, and when only it differs it is
+#                           replaced in place: "unchanged (build info updated)").
 #                           The replaced module is kept in the dated backup, as always
 #   --remove[=ID,ID,...]    move those modules (default: all that are installed) into the dated
 #                           backup folder; their config.php goes with them. Disable them in
@@ -499,8 +501,10 @@ fi
 dst_of() { printf '%s' "${TARGET[$1]:-$MODULES_DIR/$1}"; }
 
 # Content of a module folder, as a sorted checksum list; local settings (config.php) left out.
+# BUILD (what the archive was made from) is left out: it names the ElasticPro version, so it
+# changes with every release while the module's code may not. See build_differs.
 content_sum() {
-  (cd "$1" && find . -type f ! -path ./config.php ! \( -path './config.php.*' ! -path ./config.php.example \) -print0 \
+  (cd "$1" && find . -type f ! -path ./BUILD ! -path ./config.php ! \( -path './config.php.*' ! -path ./config.php.example \) -print0 \
      | LC_ALL=C sort -z | xargs -0 -r sha256sum) | sha256sum | awk '{print $1}'
 }
 
@@ -541,6 +545,13 @@ build_desc() {
   printf '%s' "$out"
 }
 
+# Does the package's BUILD differ from the installed one (or is the installed one missing)? Only
+# the package having a BUILD counts: an archive without one never touches an installed BUILD.
+build_differs() {   # <package module dir> <installed module dir>
+  [ -f "$1/BUILD" ] || return 1
+  [ "$(sha256sum <"$1/BUILD")" != "$(sha256sum <"$2/BUILD" 2>/dev/null)" ]
+}
+
 # --upgrade: what each module goes from and to. "unchanged" is decided by the files, not the
 # version number alone, so a module whose files changed under the same version says "updated".
 upgrade_table() {
@@ -550,7 +561,8 @@ upgrade_table() {
     dst=$(dst_of "$id"); new=$(manifest_version "$PKG_DIR/$id")
     if [ -f "$dst/manifest.json" ]; then
       cur=$(manifest_version "$dst")
-      if [ "$(content_sum "$dst")" = "$(content_sum "$PKG_DIR/$id")" ]; then what=unchanged
+      if [ "$(content_sum "$dst")" = "$(content_sum "$PKG_DIR/$id")" ]; then
+        what=unchanged; build_differs "$PKG_DIR/$id" "$dst" && what="unchanged (build info updated)"
       elif [ "$cur" = "$new" ]; then what="updated (same version number, files differ)"
       else what=updated; fi
     else
@@ -570,9 +582,17 @@ install_module() {
     fail "$dst holds a different module (its manifest.json is not \"$id\") — not touched"
   fi
   if [ -d "$dst" ] && [ -f "$dst/manifest.json" ] && [ "$(content_sum "$dst")" = "$(content_sum "$src")" ]; then
+    # Same code. If only BUILD differs (a new ElasticPro release carrying the same module code),
+    # replace that one file in place: no backup, no folder swap.
+    local same="already this version"
+    if build_differs "$src" "$dst"; then
+      same="unchanged (build info updated)"
+      if [ "$DRY" = 1 ]; then say "  would: replace $dst/BUILD with the package's"
+      else cp "$src/BUILD" "$dst/BUILD.new" && mv -f "$dst/BUILD.new" "$dst/BUILD"; fi
+    fi
     if [ "$DRY" = 1 ]; then say "  would: set owner $OWNER and modes 0755/0644 on $dst (config.php left as is)"; else set_perms_keep "$dst"; fi
-    INSTALLED+=("$id|$dst|already this version")
-    ok "$id: already this version ($dst)"
+    INSTALLED+=("$id|$dst|$same")
+    ok "$id: $same ($dst)"
     return
   fi
   local what=installed
