@@ -447,9 +447,9 @@ export async function editDefaults() {
         'insecure applies to all at once: every cluster whatever its own setting, every jump-host SSH key and the Zabbix API. What it lets through is listed in one notification.')),
     h('div', { style: { display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1fr)', gap: '10px' } },
       f('Live redraw', 'liveRedraw', select('ce-lr', d.liveRedraw || 'pending', [
-        ['pending', 'pending — hold new data, offer Apply'],
+        ['pending', 'pending — draw new data when you pause'],
         ['live', 'live — repaint as data lands'],
-        ['manual', 'manual — only Apply or Refresh redraws']])),
+        ['manual', 'manual — only Refresh or a new page redraws']])),
       f('Opens on', 'defaultScope', select('ce-ds', d.defaultScope || 'last-selected', [
         ['last-selected', 'the cluster last chosen in this browser'],
         ['all', 'All clusters']])),

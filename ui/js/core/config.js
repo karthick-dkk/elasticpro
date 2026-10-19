@@ -24,9 +24,9 @@ export const DEFAULTS = {
   // remembered), to have it poll every refreshIntervalSec.
   autoRefresh: false,
   refreshIntervalSec: 30,
-  // Quiet UI. liveRedraw: 'pending' keeps a page as it is while data lands and offers
-  // "N updates — Apply" (applied by itself after a minute without a touch); 'live'
-  // repaints on every event; 'manual' only on Apply or Refresh. defaultScope:
+  // Quiet UI. liveRedraw: 'pending' keeps a page as it is while you are using it and
+  // draws what landed a few seconds after you pause; 'live' repaints on every event;
+  // 'manual' only on Refresh or when you open another page. defaultScope:
   // 'last-selected' opens on the cluster last chosen in this browser; 'all' on the fleet.
   liveRedraw: 'pending',
   defaultScope: 'last-selected',

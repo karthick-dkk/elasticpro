@@ -1884,30 +1884,27 @@ restoreConsole();
   await go('overview');
 }
 
-// Quiet UI: fleet data landing while somebody reads the Clusters page does not repaint it.
-// It is counted on an "N updates — Apply" pill; Apply (or a minute untouched) redraws. A live
-// page — the Request Centre — still takes every event.
+// Quiet UI: fleet data landing while somebody reads the Clusters page does not repaint it,
+// and nothing on the bar says it was held (no "N updates — Apply" pill). It is drawn by itself
+// once the page has gone 3 s untouched; Refresh draws it at once. A live page — the Request
+// Centre — still takes every event.
 {
   await go('overview');
   const bus = (await load('core/state.js')).bus;
   const view = doc.querySelector('#view');
-  const pill = () => doc.querySelector('#pending-updates');
-  // The reader touches the page: the idle window starts now, so nothing applies by itself
-  // inside this case (the harness may well have been running for over a minute).
-  doc.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Shift', bubbles: true }));
+  const touch = () => doc.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Shift', bubbles: true }));
+  touch();
+  ok(!doc.querySelector('#pending-updates'), 'quiet: the topbar has a #pending-updates pill');
   const first = view.firstElementChild;
-  ok(pill() && pill().hidden, 'quiet: the Apply pill should be hidden before any data lands');
   for (const c of config.clusters) bus.emit('data', c.id); await settleFor(700);
   ok(view.firstElementChild === first, 'quiet: a fleet event repainted the Clusters page while it was being read');
-  ok(pill() && !pill().hidden && /^\d+ updates? — Apply$/.test(pill().textContent),
-    `quiet: expected an "N updates — Apply" pill, saw ${JSON.stringify(pill() && pill().textContent)}`);
-  pill().click(); await settleFor(700);
-  ok(pill() && pill().hidden, 'quiet: Apply should clear the pill');
-  ok(doc.querySelector('.pill.grey') && [...doc.querySelectorAll('#topbar .pill')].some((p) => p.textContent.trim() === 'quiet'),
+  ok(!doc.querySelector('#pending-updates') && ![...doc.querySelectorAll('#topbar *')].some((e) => /updates? — Apply/.test(e.textContent)),
+    'quiet: a held update showed a pill or counter');
+  ok([...doc.querySelectorAll('#topbar .pill')].some((p) => p.textContent.trim() === 'quiet'),
     'quiet: the top bar should say "quiet" under the default policy, not "live"');
   await go('requests');
   for (const c of config.clusters) bus.emit('data', c.id); await settleFor(300);
-  ok(pill() && pill().hidden, 'quiet: a live page (Requests) must not hold data events');
+  ok(!doc.querySelector('#pending-updates'), 'quiet: a live page (Requests) grew a pill');
   await go('overview');
 }
 

@@ -500,21 +500,19 @@ function renderTopbar() {
           h('i.dot'), 'snapshot')
       : null,
     h('span#refresh-status.muted', { style: { fontSize: '11.5px', fontVariantNumeric: 'tabular-nums' } }, ''),
-    // Updates that landed while the page was being read, held by the redraw gate. Filled
-    // in by renderPendingPill — the gate changes it far more often than the bar redraws.
-    h('button#pending-updates.btn.sm.primary', { hidden: true, onclick: () => redrawGate.apply() }, ''),
     // With the server's fleet cache there is nothing for a page to poll: the core polls
     // every cluster on its own schedule and tells the page what changed. The auto toggle
     // would only be a switch for load that no longer exists, so this says how what lands
-    // reaches the page instead: live (repainted as it arrives) or quiet (held for Apply).
+    // reaches the page instead: live (repainted as it arrives) or quiet (held until you pause).
     fleetMode() && !isSnapshotMode()
       ? (redrawPolicy() === 'live'
         ? h('span.pill.green', { title: 'The server polls every cluster itself and pushes what changes here; '
             + 'the page repaints as it lands. Refresh asks it to fetch the clusters on screen now. '
             + 'Config → Defaults → Live redraw changes this.' }, h('i.dot'), 'live')
         : h('span.pill.grey', { title: 'The server polls every cluster itself and pushes what changes here. '
-            + 'The page keeps what it shows until you press Apply'
-            + (redrawPolicy() === 'pending' ? ', or by itself after a minute without you touching it' : '')
+            + (redrawPolicy() === 'pending'
+              ? 'The page does not move while you are using it; what has landed is drawn a few seconds after you pause'
+              : 'The page keeps what it shows until you press Refresh or open another page')
             + '. Refresh asks it to fetch the clusters on screen now. Config → Defaults → Live redraw changes this.' },
           h('i.dot'), redrawPolicy() === 'pending' ? 'quiet' : 'manual'))
       : null,
@@ -574,7 +572,6 @@ function renderTopbar() {
         }, `\u23FB ${me.name}`)
       : null);
   tickStatus();
-  renderPendingPill(redrawGate.pending());
 }
 
 function tickStatus() {
@@ -1016,21 +1013,12 @@ const scheduleDataRedraw = coalesce(() => {
  * And, before any of that, the redraw gate. Coalescing made a burst one redraw; it did
  * nothing about the next burst, and on a fleet there is always a next burst — the page
  * repainted all day under whoever was reading it. Under the default policy (`pending`)
- * what lands is held and counted on an "N updates — Apply" pill; it applies by itself
- * once the page has gone a minute untouched. The nav badge still moves: a new alert is
+ * what lands is held, with nothing on screen to say so, and drawn by itself once the
+ * page has gone a few seconds without a touch. The nav badge still moves: a new alert is
  * worth knowing about while you read. See lib/quiet-ui.js; Config → Defaults sets it.
  */
 function redrawPolicy() { return normalisePolicy(state.defaults && state.defaults.liveRedraw); }
-function renderPendingPill(n) {
-  const el = $('#pending-updates');
-  if (!el) return;
-  el.hidden = !n;
-  if (!n) return;
-  el.textContent = `${n} update${n === 1 ? '' : 's'} — Apply`;
-  el.title = 'Data landed while you were reading. Apply redraws the page with it'
-    + (redrawPolicy() === 'pending' ? '; it also applies by itself after a minute without you touching the page.' : '.');
-}
-const redrawGate = createRedrawGate({ apply: () => scheduleDataRedraw(), policy: redrawPolicy, onChange: renderPendingPill });
+const redrawGate = createRedrawGate({ apply: () => scheduleDataRedraw(), policy: redrawPolicy });
 const scheduleNavRedraw = coalesce(() => renderNav());
 // Acknowledging or silencing changes what counts as open: the badge and the bar say so at once.
 bus.on('alerts-changed', () => { renderNav(); topbarKey = ''; renderTopbar(); });
