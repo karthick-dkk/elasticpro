@@ -135,6 +135,8 @@ pub struct Core {
     notify: crate::notify::NotifyStore,
     silences: crate::silences::Silences,
     saved_queries: crate::saved_queries::SavedQueries,
+    /// The housekeeping scheduler's settings and what it last did. See `housekeeping`.
+    pub(crate) housekeeping: crate::housekeeping::Housekeeping,
 }
 
 /// Concurrency limits on requests to Elasticsearch, whoever sends them.
@@ -168,6 +170,23 @@ impl EsLimits {
 
     fn sem(map: &SemMap, k: &str, n: usize) -> Arc<tokio::sync::Semaphore> {
         map.lock().entry(k.to_string()).or_insert_with(|| Arc::new(tokio::sync::Semaphore::new(n))).clone()
+    }
+
+    /// Housekeeping: forget the limiter of every cluster and jump host not named in `clusters`
+    /// / `jumps`, when nothing holds or waits on it (a limiter somebody is using is kept, or
+    /// the next request would get a fresh one and its own full allowance). With `dry_run` it
+    /// only counts.
+    fn prune(&self, clusters: &std::collections::HashSet<String>, jumps: &std::collections::HashSet<String>, dry_run: bool) -> usize {
+        let mut n = 0;
+        for (map, keep) in [(&self.per_cluster, clusters), (&self.per_jump, jumps)] {
+            let mut m = map.lock();
+            let idle = |k: &String, s: &Arc<tokio::sync::Semaphore>| !keep.contains(k) && Arc::strong_count(s) == 1;
+            n += m.iter().filter(|(k, s)| idle(k, s)).count();
+            if !dry_run {
+                m.retain(|k, s| !idle(k, s));
+            }
+        }
+        n
     }
 
     async fn acquire(&self, cluster: &str, via: Option<&str>) -> Vec<tokio::sync::OwnedSemaphorePermit> {
@@ -551,6 +570,7 @@ impl Core {
             silences: crate::silences::Silences::open(data_dir_for_notify.as_ref().map(|d| d.join("silences.json"))),
             saved_queries: crate::saved_queries::SavedQueries::open(data_dir_for_notify.as_ref().map(|d| d.join("saved-queries.json"))),
             notify: crate::notify::NotifyStore::open(data_dir_for_notify.map(|d| d.join("notifications.json"))),
+            housekeeping: crate::housekeeping::Housekeeping::from_env(),
         })
     }
 
@@ -974,6 +994,7 @@ impl Core {
             "POLICY_GET" | "POLICY_SET" => self.policy_msg(&t, &msg, caller.as_ref()),
             "EVENTS_TICKET" => self.events_ticket_msg(caller.clone(), reauth),
             "DELAY_SINK_GET" | "DELAY_SINK_SET" | "DELAY_SINK_RUN" => self.delay_sink_msg(&t, &msg).await,
+            "HOUSEKEEPING_GET" | "HOUSEKEEPING_RUN" => self.housekeeping_msg(&t, &msg, caller.as_ref()).await,
             "NOTIFY_PUT" | "NOTIFY_LIST" | "NOTIFY_CLEAR" => self.notify_msg(&t, &msg, caller.as_ref()),
             // Scoped to the clusters the caller may see (Zabbix group scope): a silence names a
             // cluster, so listing, setting or removing one for a cluster you cannot see is refused.
@@ -1247,6 +1268,87 @@ impl Core {
             }));
         }
         json!({ "windowSec": REQUEST_WINDOW.as_secs(), "clusters": out })
+    }
+
+    /// The clusters configured now, for housekeeping to tell a removed cluster from one that
+    /// is merely not known yet. `Err` says why the list cannot be believed: nothing is
+    /// primed (a restart before an admin's page primes the desktop app, or the hosted core
+    /// before it restores its setup), or Zabbix is configured and its hosts have not been
+    /// read once — treating either as "every cluster was removed" would empty the cache.
+    pub(crate) fn housekeeping_known_clusters(&self) -> Result<std::collections::HashSet<String>, String> {
+        let ids: std::collections::HashSet<String> = self.all_specs().into_iter().map(|s| s.id).collect();
+        if ids.is_empty() {
+            return Err("no clusters are configured yet, so none can be called removed".into());
+        }
+        if self.edition == Edition::Hosted && self.zbx_api().configured() && self.zbx_sync.read().last_ok.is_none() {
+            return Err("the Zabbix cluster list has not been read yet".into());
+        }
+        Ok(ids)
+    }
+
+    /// The stores housekeeping tidies, for `housekeeping.rs`, which cannot see this struct's
+    /// private fields.
+    pub(crate) fn housekeeping_stores(&self) -> crate::housekeeping::Stores<'_> {
+        crate::housekeeping::Stores {
+            tokens: &self.tokens,
+            notify: &self.notify,
+            silences: &self.silences,
+            activity: &self.activity,
+        }
+    }
+
+    /// Housekeeping for the maps that grow with the clusters seen, the people who asked and
+    /// the minutes gone by. `known` is the clusters configured now — `None` when that is not
+    /// settled yet, in which case only what has expired by time goes. Returns what went (or
+    /// would, on a dry run), by name.
+    pub(crate) fn housekeep_memory(&self, known: Option<&std::collections::HashSet<String>>, dry_run: bool) -> Vec<(&'static str, usize)> {
+        let now = crate::fleet::now_ms();
+        let mut out: Vec<(&'static str, usize)> = vec![];
+        let empty = std::collections::HashSet::new();
+        let keep = known.unwrap_or(&empty);
+        let vias: std::collections::HashSet<String> = self.all_specs().into_iter().filter_map(|s| s.via).filter(|v| !v.is_empty()).collect();
+
+        // Request counters: a cluster that was removed, or whose last request is older than
+        // the reporting window, reports nothing and need not be remembered.
+        {
+            let mut log = self.request_log.lock();
+            let t = std::time::Instant::now();
+            let stale = |c: &String, q: &std::collections::VecDeque<std::time::Instant>|
+                known.is_some_and(|k| !k.contains(c)) || q.back().is_none_or(|x| t.duration_since(*x) > REQUEST_WINDOW);
+            let n = log.iter().filter(|(c, q)| stale(c, q)).count();
+            if !dry_run {
+                log.retain(|c, q| !stale(c, q));
+            }
+            out.push(("request counters", n));
+        }
+        {
+            // Without a settled cluster list every limiter looks unknown; keep them all.
+            let n = if known.is_some() { self.es_limits.prune(keep, &vias, dry_run) } else { 0 };
+            out.push(("request limiters", n));
+        }
+        {
+            let n = if known.is_some() { self.transport.prune_clients(keep, dry_run) } else { 0 };
+            out.push(("connection clients", n));
+        }
+        {
+            let mut c = self.zbx_metrics_cache.lock();
+            let ttl = std::time::Duration::from_secs(120);
+            let n = c.values().filter(|(at, _)| at.elapsed() >= ttl).count();
+            if !dry_run {
+                c.retain(|_, (at, _)| at.elapsed() < ttl);
+            }
+            out.push(("Zabbix metric cache entries", n));
+        }
+        out.push(("Zabbix sign-in nonces and codes", self.zbx.sweep_expired(dry_run)));
+        out.push(("Zabbix link budgets", self.zbx_link.sweep_expired(dry_run)));
+        let (st, tickets) = self.fleet.sweep_memory(known, now, dry_run);
+        out.push(("poller throttles", st.throttles));
+        out.push(("poller request windows", st.budget_windows));
+        out.push(("poller watch marks", st.watched));
+        out.push(("poller refresh limiters", st.refresh_limits));
+        out.push(("poller idle counters", st.running_counters));
+        out.push(("event-stream tickets", tickets));
+        out
     }
 
     /// Whether this caller may silence (or un-silence) that target: the cluster that owns it,
@@ -1886,7 +1988,9 @@ impl Core {
                               "message": "that sign-in link has expired or was already used — open ElasticPro from Zabbix again" });
         let Some(name) = self.zbx.redeem(code) else { return refused };
         let Some(acct) = self.users.list().into_iter().find(|a| a.name == name && !a.disabled) else { return refused };
-        let token = self.sessions.begin(&acct);
+        // The frame keeps this token in page memory, so a reload orphans it: marked, so
+        // housekeeping can tell it from a session somebody will come back to.
+        let token = self.sessions.begin_frame(&acct);
         tracing::info!(target: "audit", user = %acct.name, role = acct.role.as_str(), "login via zabbix");
         let who = Caller { name: acct.name.clone(), role: acct.role, must_change: false, scope: acct.scope.clone() };
         json!({ "ok": true, "session": token, "caller": who.public() })

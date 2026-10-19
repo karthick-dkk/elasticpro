@@ -47,6 +47,10 @@ const POLLS: &[&str] = &[
     "PING", "FLEET_STATE", "EVENTS_TICKET", "WHOAMI", "REQUEST_STATS", "NOTIFY_LIST", "NOTIFY_PUT",
     "POLICY_GET", "TUNNELS", "ZABBIX_METRICS", "SILENCE_LIST", "CLUSTER_DATASET", "BADGE",
     "ENABLE_NET_ERRORS", "ACTIVITY_LIST", "PINS", "ABORT_REQUESTS", "OPEN_APP",
+    // The Request Centre's housekeeping card reads this on a timer. A manual run is not a
+    // poll, but it writes its own event (with the counts) when it finishes, so the exchange
+    // is not recorded a second time when it went through.
+    "HOUSEKEEPING_GET", "HOUSEKEEPING_RUN",
 ];
 
 /// One thing somebody did, already reduced to what may be written down.
@@ -66,6 +70,8 @@ pub struct ActivityEvent {
     pub query: Option<String>,
     pub via: String,
     pub edition: String,
+    /// Extra structured facts, written under `elasticpro.detail` (housekeeping's counts).
+    pub detail: Option<Value>,
 }
 
 fn category(action: &str) -> &'static str {
@@ -132,6 +138,7 @@ impl ActivityEvent {
             query,
             via: via.to_string(),
             edition: edition_name(edition).to_string(),
+            detail: None,
         })
     }
 
@@ -157,7 +164,7 @@ impl ActivityEvent {
         if self.path.is_some() {
             o.insert("url".into(), json!({ "path": self.path, "query": self.query }));
         }
-        o.insert("elasticpro".into(), json!({ "cluster": self.cluster, "via": self.via, "edition": self.edition }));
+        o.insert("elasticpro".into(), json!({ "cluster": self.cluster, "via": self.via, "edition": self.edition, "detail": self.detail }));
         o.insert("service".into(), json!({ "name": "elasticpro", "version": env!("CARGO_PKG_VERSION") }));
         // Absent is absent: a null in a SIEM mapping is a field that exists and is empty.
         strip_nulls(&mut o);
@@ -398,6 +405,61 @@ fn rotate(path: &Path, keep: usize) -> std::io::Result<()> {
     std::fs::rename(path, numbered(path, 1))
 }
 
+/// A rotated copy of the log that housekeeping found, or would delete.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Rotated {
+    pub path: PathBuf,
+    pub bytes: u64,
+    pub age_days: u64,
+}
+
+/// Whether `name` is `{base}.{n}` — the exact shape `rotate` produces, a counter from 1 up.
+fn is_rotated_name(name: &str, base: &str) -> bool {
+    name.strip_prefix(base).and_then(|r| r.strip_prefix('.')).is_some_and(|n| {
+        !n.is_empty() && n.len() <= 4 && !n.starts_with('0') && n.bytes().all(|b| b.is_ascii_digit())
+    })
+}
+
+/// Housekeeping: delete rotated copies of the activity log (`activity.jsonl.1`, `.2` …) that
+/// were last written more than `keep_days` ago. The live file is never touched, nor is
+/// anything that is not a plain file named exactly `{log name}.{number}` beside it — a
+/// symlink with such a name included. `keep_days` of 0 does nothing: size rotation alone
+/// decides, as it always has. With `dry_run` it only lists. Returns what went, oldest first.
+pub fn prune_rotated(live: &Path, keep_days: u64, now: std::time::SystemTime, dry_run: bool) -> std::io::Result<Vec<Rotated>> {
+    if keep_days == 0 {
+        return Ok(vec![]);
+    }
+    let (Some(dir), Some(base)) = (live.parent(), live.file_name().and_then(|n| n.to_str())) else { return Ok(vec![]) };
+    let dir = if dir.as_os_str().is_empty() { Path::new(".") } else { dir };
+    let max = Duration::from_secs(keep_days.saturating_mul(86_400));
+    let mut out = vec![];
+    for e in std::fs::read_dir(dir)? {
+        let Ok(e) = e else { continue };
+        let name = e.file_name();
+        let Some(name) = name.to_str() else { continue };
+        if !is_rotated_name(name, base) {
+            continue;
+        }
+        let Ok(md) = std::fs::symlink_metadata(e.path()) else { continue };
+        if !md.file_type().is_file() {
+            continue;
+        }
+        let age = md.modified().ok().and_then(|m| now.duration_since(m).ok()).unwrap_or_default();
+        if age <= max {
+            continue;
+        }
+        if !dry_run {
+            if let Err(err) = std::fs::remove_file(e.path()) {
+                tracing::warn!(target: "audit", file = %e.path().display(), error = %err, "housekeeping: could not delete a rotated activity log");
+                continue;
+            }
+        }
+        out.push(Rotated { path: e.path(), bytes: md.len(), age_days: age.as_secs() / 86_400 });
+    }
+    out.sort_by(|a, b| b.age_days.cmp(&a.age_days).then(a.path.cmp(&b.path)));
+    Ok(out)
+}
+
 /// RFC 3339, UTC, milliseconds. No date library in this crate and one is not worth adding
 /// for a format this fixed.
 fn rfc3339_now() -> String {
@@ -603,5 +665,77 @@ mod tests {
         assert_eq!(log.list(10, None, false).len(), 5, "the ring still has every event");
         assert_eq!(rx.try_iter().count(), 2);
         let _ = std::fs::remove_dir_all(d);
+    }
+
+    fn aged(path: &Path, age_days: u64) {
+        let f = OpenOptions::new().write(true).open(path).unwrap();
+        f.set_modified(std::time::SystemTime::now() - Duration::from_secs(age_days * 86_400)).unwrap();
+    }
+
+    #[test]
+    fn rotated_logs_older_than_the_keep_days_go_and_nothing_else() {
+        let d = tmp("keepdays");
+        let live = d.join(FILE_NAME);
+        let write = |name: &str, age: u64| {
+            let p = d.join(name);
+            std::fs::write(&p, b"{}\n").unwrap();
+            aged(&p, age);
+        };
+        write(FILE_NAME, 400); // the live file: old by mtime, never touched
+        write("activity.jsonl.1", 5);
+        write("activity.jsonl.2", 40);
+        write("activity.jsonl.3", 100);
+        // Not the exact shape `rotate` makes: all left alone, however old.
+        for foreign in ["activity.jsonl.bak", "activity.jsonl.0", "activity.jsonl.01", "activity.jsonl.1.gz", "activity.jsonl.", "activity.jsonl.12345",
+                        "other.jsonl.1", "activity.jsonl1", "activity.jsonl.1x", "notes.txt"] {
+            write(foreign, 400);
+        }
+        let now = std::time::SystemTime::now();
+        let dry = prune_rotated(&live, 30, now, true).unwrap();
+        assert_eq!(dry.iter().map(|r| r.path.file_name().unwrap().to_str().unwrap()).collect::<Vec<_>>(), vec!["activity.jsonl.3", "activity.jsonl.2"]);
+        assert!(d.join("activity.jsonl.3").exists(), "a dry run deletes nothing");
+        let gone = prune_rotated(&live, 30, now, false).unwrap();
+        assert_eq!(gone.len(), 2);
+        assert_eq!((gone[0].age_days, gone[0].bytes), (100, 3));
+        for kept in ["activity.jsonl", "activity.jsonl.1", "activity.jsonl.bak", "activity.jsonl.0", "activity.jsonl.01", "activity.jsonl.1.gz",
+                     "activity.jsonl.", "activity.jsonl.12345", "other.jsonl.1", "activity.jsonl1", "activity.jsonl.1x", "notes.txt"] {
+            assert!(d.join(kept).exists(), "{kept} must stay");
+        }
+        assert!(!d.join("activity.jsonl.2").exists() && !d.join("activity.jsonl.3").exists());
+        // Off by default: 0 days is size rotation alone.
+        assert!(prune_rotated(&live, 0, now, false).unwrap().is_empty());
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_named_like_a_rotation_is_not_followed_or_deleted() {
+        let d = tmp("keepdays-link");
+        let victim = d.join("precious.db");
+        std::fs::write(&victim, b"keep me").unwrap();
+        aged(&victim, 400);
+        std::os::unix::fs::symlink(&victim, d.join("activity.jsonl.1")).unwrap();
+        let gone = prune_rotated(&d.join(FILE_NAME), 1, std::time::SystemTime::now(), false).unwrap();
+        assert!(gone.is_empty());
+        assert!(victim.exists() && d.join("activity.jsonl.1").symlink_metadata().is_ok());
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn a_housekeeping_event_carries_its_counts_under_elasticpro_detail() {
+        let ev = ActivityEvent { action: "housekeeping_run".into(), ok: true, user: Some("system".into()), via: "schedule".into(),
+            detail: Some(json!({ "items": 3 })), ..Default::default() };
+        let v = ev.to_json();
+        assert_eq!(v["event"]["action"], "housekeeping_run");
+        assert_eq!(v["elasticpro"]["detail"]["items"], 3);
+        let plain = ActivityEvent { action: "es".into(), ..Default::default() }.to_json();
+        assert!(plain["elasticpro"].get("detail").is_none(), "absent is absent");
+        // Reading the housekeeping card is a poll; a run writes its own event instead.
+        let ok = ActivityEvent::from_exchange(&json!({ "type": "HOUSEKEEPING_GET" }), None, "session", None, &json!({ "ok": true }), Edition::Hosted);
+        assert!(ok.is_none());
+        let run = ActivityEvent::from_exchange(&json!({ "type": "HOUSEKEEPING_RUN" }), None, "session", None, &json!({ "ok": true }), Edition::Hosted);
+        assert!(run.is_none(), "the run records itself, with counts");
+        let refused = ActivityEvent::from_exchange(&json!({ "type": "HOUSEKEEPING_RUN" }), None, "session", None, &json!({ "ok": false, "kind": "forbidden" }), Edition::Hosted);
+        assert!(refused.is_some(), "a refusal is somebody probing, and is recorded");
     }
 }

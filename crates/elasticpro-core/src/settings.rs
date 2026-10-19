@@ -94,6 +94,12 @@ const SPECS: &[Spec] = &[
     spec("POLL_CONCURRENCY", Kind::Int(1, 256), To::Env("ELASTICPRO_POLL_CONCURRENCY")),
     spec("ES_CONCURRENCY", Kind::Int(1, 1024), To::Env("ELASTICPRO_ES_CONCURRENCY")),
     spec("CACHE_MB", Kind::Int(1, 1_048_576), To::Env("ELASTICPRO_CACHE_MB")),
+    // housekeeping (housekeeping.rs)
+    spec("HOUSEKEEPING_MINUTES", Kind::Int(0, 10_080), To::Env("ELASTICPRO_HOUSEKEEPING_MINUTES")),
+    spec("HOUSEKEEPING_CACHE_DAYS", Kind::Int(1, 3650), To::Env("ELASTICPRO_HOUSEKEEPING_CACHE_DAYS")),
+    spec("HOUSEKEEPING_DRY_RUN", Kind::Bool, To::Flag("ELASTICPRO_HOUSEKEEPING_DRY_RUN")),
+    spec("SESSION_IDLE_DAYS", Kind::Int(0, 3650), To::Env("ELASTICPRO_SESSION_IDLE_DAYS")),
+    spec("ACTIVITY_LOG_KEEP_DAYS", Kind::Int(0, 3650), To::Env("ELASTICPRO_ACTIVITY_LOG_KEEP_DAYS")),
     // UI defaults: not environment variables; PING carries them to the UI.
     spec("UI_READ_ONLY", Kind::Bool, To::Direct),
     spec("UI_AUTO_REFRESH", Kind::Bool, To::Direct),

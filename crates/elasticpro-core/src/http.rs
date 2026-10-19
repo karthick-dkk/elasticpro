@@ -121,6 +121,18 @@ impl Transport {
         self.clients.lock().clear();
     }
 
+    /// Housekeeping: forget the cached client of every cluster that is not in `keep` (it is
+    /// built again on the next request, so this costs nothing but a handshake). With
+    /// `dry_run` it only counts.
+    pub fn prune_clients(&self, keep: &std::collections::HashSet<String>, dry_run: bool) -> usize {
+        let mut m = self.clients.lock();
+        let n = m.keys().filter(|c| !keep.contains(*c)).count();
+        if !dry_run {
+            m.retain(|c, _| keep.contains(c));
+        }
+        n
+    }
+
     fn client_for(&self, cluster: &str, url: &str, route: &Route<'_>) -> Result<Arc<CachedClient>, String> {
         let hk = host_key(url);
         let signature = format!("{hk}|{:?}|{:?}", route.tls, route.tunnel.map(|(_, p)| p));

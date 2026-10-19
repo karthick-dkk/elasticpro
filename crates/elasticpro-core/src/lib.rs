@@ -17,6 +17,7 @@ pub mod errors;
 pub mod fleet;
 pub mod guard;
 pub mod hcvault;
+pub mod housekeeping;
 pub mod http;
 pub mod notify;
 pub mod silences;

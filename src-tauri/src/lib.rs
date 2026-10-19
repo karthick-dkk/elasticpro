@@ -105,6 +105,9 @@ pub fn run() {
             // runs outside one; the pages poll FLEET_STATE {since} in process.
             let poller = core.clone();
             tauri::async_runtime::spawn(async move { poller.start_fleet_poller() });
+            // The cache this window keeps on disk is cleaned on a timer, like the hosted one.
+            let tidy = core.clone();
+            tauri::async_runtime::spawn(async move { tidy.start_housekeeping() });
             app.manage(core);
             Ok(())
         })

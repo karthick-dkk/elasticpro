@@ -111,6 +111,18 @@ impl Silences {
         self.list.read().clone()
     }
 
+    /// Housekeeping: drop the silences that have ended. `list()` does this when somebody looks;
+    /// this does it when nobody does. Returns how many; with `dry_run` it only counts.
+    pub fn prune_expired(&self, dry_run: bool) -> Result<usize, String> {
+        let now = now_ms();
+        let n = self.list.read().iter().filter(|s| !s.live(now)).count();
+        if n > 0 && !dry_run {
+            self.list.write().retain(|s| s.live(now));
+            self.save()?;
+        }
+        Ok(n)
+    }
+
     /// Add one. `minutes` = None is "until removed". Returns the silence.
     pub fn add(&self, scope: &str, target: &str, minutes: Option<u64>, reason: &str, by: &str) -> Result<Silence, String> {
         if scope != "cluster" && scope != "alert" {
@@ -209,5 +221,23 @@ mod tests {
         assert!(s.add("cluster", "x", Some(0), "", "a").is_err());
         assert!(s.add("cluster", "x", Some(MAX_MINUTES + 1), "", "a").is_err());
         assert!(s.add("cluster", "x", Some(MAX_MINUTES), "", "a").is_ok());
+    }
+
+    #[test]
+    fn prune_expired_drops_ended_silences_without_anybody_looking() {
+        let dir = std::env::temp_dir().join(format!("ep-silences-hk-{}-{}", std::process::id(), crate::auth::random_hex(3)));
+        let p = dir.join("silences.json");
+        let s = Silences::open(Some(p.clone()));
+        s.add("cluster", "a", Some(60), "", "x").unwrap();
+        s.add("cluster", "b", None, "", "x").unwrap();
+        s.add("cluster", "c", Some(60), "", "x").unwrap();
+        s.list.write().iter_mut().for_each(|x| if x.target != "b" { x.until = Some(1) });
+        assert_eq!(s.prune_expired(true).unwrap(), 2, "a dry run counts");
+        assert_eq!(s.list.read().len(), 3);
+        assert_eq!(s.prune_expired(false).unwrap(), 2);
+        assert_eq!(s.list.read().len(), 1);
+        assert_eq!(Silences::open(Some(p)).list().len(), 1, "and the file was rewritten");
+        assert_eq!(s.prune_expired(false).unwrap(), 0);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -99,6 +99,23 @@ POLL_CONCURRENCY=
 ES_CONCURRENCY=
 # In-memory cache size, MB.
 CACHE_MB=
+# Housekeeping: one timer that cleans what ElasticPro itself leaves behind (cache files of
+# removed clusters and stale ones, Redis keys of removed clusters, ended sessions, expired
+# API tokens, rotated logs). Never touches config, saved queries, uploaded keys or users.
+# Minutes between runs; 0 turns the timer off (Run now in the Request Centre still works).
+# Default 60; the first run is 5 minutes after start.
+HOUSEKEEPING_MINUTES=
+# Days an on-demand cache file (indices, shards, full snapshot list) may sit untouched before
+# it is deleted. Background datasets go after 7 days. Default 2.
+HOUSEKEEPING_CACHE_DAYS=
+# true: report what would be removed in the core log and the Request Centre, and delete nothing.
+HOUSEKEEPING_DRY_RUN=
+# Days a session may sit unused before it ends; 0 (default) = sessions never expire. Zabbix
+# frame sessions, which a reload orphans, always end after 24 hours unused. One account keeps
+# at most 50 sessions, the least recently used ending first.
+SESSION_IDLE_DAYS=
+# Days a rotated activity log (activity.jsonl.1, .2 ...) is kept; 0 (default) = by size only.
+ACTIVITY_LOG_KEEP_DAYS=
 # Memory limit of the core container, e.g. 1g or 512m.
 CORE_MEM_LIMIT=
 

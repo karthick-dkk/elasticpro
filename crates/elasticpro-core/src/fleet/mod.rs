@@ -89,6 +89,27 @@ impl Fleet {
     }
 }
 
+impl Fleet {
+    /// The disk cache, for the housekeeping sweep.
+    pub(crate) fn disk_store(&self) -> &Arc<store::DiskStore> {
+        &self.disk
+    }
+
+    /// Redis, for the housekeeping sweep.
+    #[cfg(feature = "bridge")]
+    pub(crate) fn redis_store(&self) -> &Arc<store::RedisStore> {
+        &self.redis
+    }
+
+    /// Housekeeping for the poller's in-memory bookkeeping; see `State::housekeep`. Returns
+    /// that, and how many expired events tickets went.
+    pub(crate) fn sweep_memory(&self, known: Option<&HashSet<String>>, now: u64, dry_run: bool) -> (scheduler::StateSweep, usize) {
+        let watch_ms = self.cfg.read().watch_ms;
+        let st = self.state.lock().housekeep(known, now, watch_ms, dry_run);
+        (st, self.tickets.sweep(dry_run))
+    }
+}
+
 fn is_guest(caller: Option<&Caller>) -> bool {
     caller.is_some_and(|c| c.role == Role::Guest)
 }
