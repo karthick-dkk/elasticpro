@@ -586,7 +586,9 @@ table.tbl tr.kv td.v { font-size: 12px; word-break: break-all; }
 .cl-col-mv .btn { padding: 0 5px; line-height: 1.35; }
 .cl-cols-foot { display: flex; align-items: center; gap: 8px; padding-top: 6px; border-top: 1px solid var(--border); }
 
-/* The picker marks a cluster that cannot be reached (where the platform styles options). */
+/* The picker marks a cluster that cannot be reached (where the platform styles options).
+   Its width is set from the names alone (app.js renderTopbar), never from the mark. */
+#cluster-select { flex: none; }
 #cluster-select option.unreachable { color: var(--critical-ink); }
 
 /* One cluster's block on a page that shows the whole fleet (Snapshots, …). Off screen, the
