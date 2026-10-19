@@ -11,7 +11,8 @@
 import { h, mount } from '../lib/dom.js';
 import { num, dur, dt, toCsv, download } from '../lib/fmt.js';
 import { state, clusters, client, requestLoad, refreshRequestLoad } from '../core/state.js';
-import { requestLog, policyGet, policySet } from '../core/es.js';
+import { requestLog, policyGet, policySet, housekeepingGet, housekeepingRun } from '../core/es.js';
+import { housekeepingView } from '../core/housekeeping.js';
 import { TASKS_PATH, taskRows, cancelPath, privilegeHint } from '../core/es-tasks.js';
 import { ensureWrites, writesAllowed } from '../core/writes.js';
 import { confirmDialog } from '../ui/modal.js';
@@ -34,12 +35,21 @@ let policy = null;
 let policyBusy = false;
 /** The Tasks panel: what the selected cluster said when last asked, and for which cluster. */
 let tasks = { cluster: null, rows: null, error: null, busy: false, at: 0, note: '' };
+/**
+ * Housekeeping (the core cleaning what it leaves behind): its status, read on entry, after a
+ * run, and about once a minute — not on the two-second poll, which is about the log. null
+ * until known; {error} if the core refused or does not have it.
+ */
+let hk = null;
+let hkBusy = false;
+let hkTick = 0;
 
 export function render(el) {
   host = el;
   draw();
   poll();
   loadPolicy();
+  loadHousekeeping();
   clearInterval(timer);
   timer = setInterval(() => { if (host && host.isConnected) poll(); else clearInterval(timer); }, 2000);
 }
@@ -50,6 +60,9 @@ export function onData() { /* the log is the core's; data events do not change i
 export function onLeave() { clearInterval(timer); timer = null; }
 
 async function poll() {
+  // About once a minute (every 30th two-second poll) the housekeeping card is read again,
+  // so "next run" and a scheduled run's result keep up without a page of their own timer.
+  if (++hkTick % 30 === 0) loadHousekeeping();
   try {
     const [r] = await Promise.all([requestLog({ limit: 500 }), refreshRequestLoad()]);
     if (r && r.ok) { log = r; error = null; } else { error = (r && r.message) || 'the core did not answer'; }
@@ -63,6 +76,40 @@ async function loadPolicy() {
     policy = r && r.ok ? r.policy : { error: (r && r.message) || 'the core did not answer' };
   } catch (e) { policy = { error: e.message || String(e) }; }
   if (host && host.isConnected) draw();
+}
+
+async function loadHousekeeping() {
+  try {
+    const r = await housekeepingGet();
+    hk = r && r.ok ? r : { error: (r && r.message) || 'the core did not answer' };
+  } catch (e) { hk = { error: e.message || String(e) }; }
+  if (host && host.isConnected) draw();
+}
+
+/**
+ * Run housekeeping now, or only say what it would do. A real run deletes — expired cache
+ * files, stale sessions — so it asks first; a dry run, and a core configured to only dry-run,
+ * do not.
+ */
+async function runHousekeeping(dryRun) {
+  if (hkBusy) return;
+  if (!dryRun && !(hk && hk.dryRun)) {
+    const yes = await confirmDialog('Run housekeeping now?',
+      'It deletes what ElasticPro itself no longer needs: expired and orphaned cache files, Redis keys of removed clusters, ended sessions and expired API tokens. It never touches config files, saved queries, uploaded keys, users or the config history. Use Dry run to see the list first.',
+      { yes: 'run now' });
+    if (!yes) return;
+  }
+  hkBusy = true; draw();
+  let r;
+  try { r = await housekeepingRun(dryRun); } catch (e) { r = { ok: false, message: e.message || String(e) }; }
+  hkBusy = false;
+  if (r && r.ok) {
+    hk = r;
+    toast(r.message || 'Housekeeping ran', r.run && r.run.errors ? 'warn' : 'ok', 6000, { key: 'housekeeping' });
+  } else {
+    toast(`Not run: ${(r && r.message) || 'refused'}`, 'err', 8000, { key: 'housekeeping' });
+  }
+  draw();
 }
 
 /** Send a changed policy, then read it back: what the core kept is what is shown. */
@@ -138,7 +185,47 @@ function draw() {
           h('td.num', num(c.count)), h('td.num', num(c.inflight)),
           h('td.num', c.failed ? pill(num(c.failed), 'red') : '0'), h('td.num', c.count ? dur(c.slowestMs) : '\u2014'),
           h('td', { style: { textAlign: 'right' } }, pauseButton(c.cluster, nameOf(c.cluster))))), { emptyText: 'nothing yet' }))),
-    h('div', { style: { marginTop: '14px' } }, tasksCard(nameOf)));
+    h('div', { style: { marginTop: '14px' } }, tasksCard(nameOf)),
+    h('div', { style: { marginTop: '14px' } }, housekeepingCard()));
+}
+
+/* ------------------------------------ housekeeping ------------------------------------ */
+
+function housekeepingCard() {
+  const v = housekeepingView(hk);
+  const title = 'Housekeeping';
+  const sub = 'cleans what ElasticPro itself leaves behind \u2014 cache files, stale sessions, expired tokens';
+  if (v.state === 'loading') return card(title, sub, empty('Loading\u2026'));
+  if (v.state === 'unavailable') return card(title, sub, empty(v.title, { detail: v.reason }));
+  const busy = hkBusy || v.running;
+  const actions = [
+    h('button.btn.sm', { 'data-act': 'hk-dry', disabled: busy, onclick: () => runHousekeeping(true),
+      title: 'List what a run would remove, and remove nothing' }, busy ? 'Working\u2026' : 'Dry run'),
+    h('button.btn.sm.primary', { 'data-act': 'hk-run', disabled: busy, onclick: () => runHousekeeping(false),
+      title: v.dryRun ? 'This core is set to dry-run only (HOUSEKEEPING_DRY_RUN): a run reports and removes nothing' : 'Clean up now' }, 'Run now'),
+  ];
+  const last = v.last;
+  const head = h('div', { style: { display: 'flex', gap: '14px', alignItems: 'center', flexWrap: 'wrap', marginBottom: '8px' } },
+    h('span', 'Runs ', h('b', v.schedule)),
+    v.dryRun ? pill('dry-run only', 'yellow') : null,
+    h('span', 'Next run ', h('b', v.nextRun || '\u2014')),
+    last
+      ? h('span', 'Last run ', h('b', dt(last.at)), ` ${last.trigger}${last.dryRun ? ' (dry run)' : ''}: ${last.summary}`,
+        last.errors ? pill(`${last.errors} failed`, 'red') : null)
+      : h('span.muted', 'Not run since the core started.'));
+  const rows = v.jobs.map((j) => h('tr', { 'data-job': j.id },
+    h('td', h('b', j.label)),
+    h('td', j.state === 'err' ? pill('failed', 'red') : j.state === 'ok' ? pill(v.last && v.last.dryRun ? 'would remove' : 'removed', 'green') : j.state === 'skip' ? pill('skipped', 'grey') : pill('clean', 'grey')),
+    h('td', { style: { fontSize: '12px' } }, j.text, ...j.notes.map((n) => h('div.muted', { style: { fontSize: '11px' } }, n)))));
+  const kept = v.reportOnly.length
+    ? h('div.muted', { style: { fontSize: '11.5px', marginTop: '8px' } },
+      'Never deleted, only reported: ', v.reportOnly.map((r) => `${r.label} (${r.text})`).join(' \u00b7 '))
+    : null;
+  return card(title, sub, h('div',
+    head,
+    v.jobs.length ? table(['Job', '', 'Result'], rows, {}) : empty('Run it once to see what each job does.'),
+    h('div.muted', { style: { fontSize: '11.5px', marginTop: '8px' } }, `Removes ${v.rules.join('; ')}.`),
+    kept), actions);
 }
 
 /** "throttled: why" — the core is holding back from this cluster (budget spent, or backing off). */
