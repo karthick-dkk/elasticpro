@@ -201,7 +201,7 @@ and ignored); with any error nothing is changed. Then:
 | Key | Where it goes |
 |---|---|
 | `LISTEN_PORT` | `.env` `LISTEN`; a changed port recreates nginx |
-| `CORE_MEM_LIMIT` | `.env` `ELASTICPRO_MEM_LIMIT` (removed when empty: back to 1g) |
+| `CORE_MEM_LIMIT` | `.env` `ELASTICPRO_MEM_LIMIT` (removed when empty: back to 2g) |
 | `ALLOWED_UI_IPS` | `nginx/allow-ui/config-txt.conf`; everyone else gets 403 |
 | `ALLOWED_DOMAINS` | `nginx/allow-host/config-txt.conf`; any other name gets 421 |
 | `RATE_EXEMPT_IPS` | `nginx/rate-exempt/config-txt.conf` |
@@ -268,8 +268,8 @@ addresses in the activity log can be forged by anyone who reaches the core direc
 
 The core polls every cluster in the background rather than only when a page is open —
 `ELASTICPRO_POLL_HEALTH_SECS` (default 180), `ELASTICPRO_POLL_CONCURRENCY` (default 16, global across
-every cluster) and `ELASTICPRO_CACHE_MB` (default 256, the in-memory on-demand cache's size
-budget) in `.env` control how hard that runs. The defaults are sized for 100-300 clusters
+every cluster) and `ELASTICPRO_CACHE_MB` (default: a quarter of the core's memory limit — 512 at the shipped
+2g — the budget every cached body counts against) in `.env` control how hard that runs. The defaults are sized for 100-300 clusters
 on a small server; raise `ELASTICPRO_POLL_CONCURRENCY` if clusters sit behind slow links and
 polls are falling behind, lower it if the host is CPU- or socket-constrained.
 

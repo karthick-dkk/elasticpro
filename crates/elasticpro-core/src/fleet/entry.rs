@@ -6,8 +6,80 @@
 //! last body that was good, with the time *that* body was fetched — never the time of
 //! the failure, which would pass an old answer off as a new one.
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde_json::value::RawValue;
 use serde_json::{json, Map, Value};
+use std::sync::Arc;
+
+/// A dataset's answers, held as the JSON text they serialise to rather than as a parsed
+/// `serde_json::Value`.
+///
+/// Why: a parsed body costs several times its JSON size on the heap — measured against
+/// production-shaped fixtures, 2.3× for the verbose snapshot listing, 3.3× for
+/// `_cat/indices`, 4.7× for `_cat/shards` and 28× for the ILM settings map, where every
+/// index is four one-key objects and each one-key `BTreeMap` is a ~640-byte node. A cache
+/// budget compared against the JSON length while the heap held the parsed form was off by
+/// that factor, and 0.3.21 crash-looped under a 1 GiB limit on it. As text, what the
+/// budget counts is what memory holds, and that is the one definition of an entry's size
+/// (`Entry::cost`).
+///
+/// Nothing is lost by it: the core never looks inside a body except for the repository
+/// names (`fleet_known_repos`), which parse just that part. A reply serialises the text
+/// as it is (see `fleet::reply`), the disk and Redis copies are the same text, and an
+/// `Arc` makes the copies the poller takes for them free.
+#[derive(Clone, Debug)]
+pub struct Body(Arc<RawValue>);
+
+impl Body {
+    pub fn from_value(v: &Value) -> Body {
+        // A Value always serialises; the fallback is unreachable but must not panic.
+        let raw = serde_json::value::to_raw_value(v)
+            .unwrap_or_else(|_| RawValue::from_string("null".into()).expect("null is JSON"));
+        Body(Arc::from(raw))
+    }
+
+    /// The JSON text's length: what this body holds on the heap, give or take one
+    /// allocation.
+    pub fn len(&self) -> usize {
+        self.0.get().len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    pub fn raw(&self) -> &RawValue {
+        &self.0
+    }
+
+    /// The body parsed. Costs what the comment on `Body` says; for tests and for the few
+    /// callers that need one field, which should prefer `field`.
+    pub fn parse(&self) -> Value {
+        serde_json::from_str(self.0.get()).unwrap_or(Value::Null)
+    }
+
+    /// One top-level field, parsed on its own: the rest of the body is skipped over as
+    /// text, not built.
+    pub fn field(&self, name: &str) -> Option<Value> {
+        let m: std::collections::HashMap<&str, &RawValue> = serde_json::from_str(self.0.get()).ok()?;
+        serde_json::from_str(m.get(name)?.get()).ok()
+    }
+}
+
+impl Serialize for Body {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        self.0.serialize(s)
+    }
+}
+
+impl<'de> Deserialize<'de> for Body {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Body, D::Error> {
+        Box::<RawValue>::deserialize(d).map(|b| Body(Arc::from(b)))
+    }
+}
+
+/// What an entry costs beyond its body: the struct, its key, the map slot, the error.
+pub const ENTRY_OVERHEAD: usize = 512;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -36,13 +108,10 @@ pub struct Entry {
     /// `{key: answer}` — the raw Elasticsearch body of each request under `json`, with
     /// its own `ok`/`status`, because one request can fail while the others answer (an
     /// SLM call on a basic licence) and the page shows that per figure.
-    pub data: Option<Value>,
+    pub data: Option<Body>,
     /// Consecutive failed attempts, for the back-off.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub failures: u32,
-    /// Size of `data` serialised, for the on-demand LRU. Not part of the wire shape.
-    #[serde(skip)]
-    pub bytes: usize,
     /// Last time somebody read this entry, for the LRU.
     #[serde(skip)]
     pub last_read: u64,
@@ -56,8 +125,14 @@ impl Entry {
     pub fn never(stale_after_ms: u64, next_due: Option<u64>) -> Entry {
         Entry {
             status: Status::Never, fetched_at: None, attempted_at: None, next_due, took_ms: None,
-            stale_after_ms, seq: 0, error: None, data: None, failures: 0, bytes: 0, last_read: 0,
+            stale_after_ms, seq: 0, error: None, data: None, failures: 0, last_read: 0,
         }
+    }
+
+    /// What this entry costs the cache, in bytes: the one definition the budget, the
+    /// eviction and the start-up restore all count with.
+    pub fn cost(&self) -> usize {
+        ENTRY_OVERHEAD + self.data.as_ref().map_or(0, Body::len)
     }
 }
 

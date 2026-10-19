@@ -97,9 +97,10 @@ POLL_HEALTH_SECONDS=
 POLL_CONCURRENCY=
 # Requests to Elasticsearch in flight at once, all sources together (1-1024).
 ES_CONCURRENCY=
-# In-memory cache size, MB.
+# In-memory cache size, MB. Empty: a quarter of CORE_MEM_LIMIT (512 at the default 2g). The
+# core warns at start when a value here cannot fit the limit.
 CACHE_MB=
-# Memory limit of the core container, e.g. 1g or 512m.
+# Memory limit of the core container, e.g. 2g or 512m. Empty: 2g.
 CORE_MEM_LIMIT=
 
 # ------------------------------------------------------------------ UI defaults

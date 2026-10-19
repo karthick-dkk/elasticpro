@@ -41,7 +41,9 @@ services:
       # does not override.
       ELASTICPRO_POLL_HEALTH_SECS: ${ELASTICPRO_POLL_HEALTH_SECS:-180}
       ELASTICPRO_POLL_CONCURRENCY: ${ELASTICPRO_POLL_CONCURRENCY:-16}
-      ELASTICPRO_CACHE_MB: ${ELASTICPRO_CACHE_MB:-256}
+      # Empty unless set: the core then sizes its cache to a quarter of the container's memory
+      # limit (crates/elasticpro-core/src/memory.rs) and logs the split as "memory budget".
+      ELASTICPRO_CACHE_MB: ${ELASTICPRO_CACHE_MB:-}
     volumes:
       # Writable, because adding a cluster from the Config page is the normal way to set
       # this up and a fresh install has no other way to do it — the read-only mount it
@@ -68,10 +70,11 @@ services:
     # A bounded core is a core that fails loudly (OOM-killed, restarted, visible in
     # `docker compose ps`) instead of taking the host down with it — the failure mode the
     # unbounded scheduler work in Fleet at Scale is sized against, not a tuned ceiling.
-    # ELASTICPRO_MEM_LIMIT is rendered from CORE_MEM_LIMIT in config.txt by deploy.sh. Lower
-    # it (512m, with ELASTICPRO_CACHE_MB=64) on a host shared with the Zabbix stack and
-    # Elasticsearch — see zabbix/README.md, "One host, both stacks".
-    mem_limit: ${ELASTICPRO_MEM_LIMIT:-1g}
+    # ELASTICPRO_MEM_LIMIT is rendered from CORE_MEM_LIMIT in config.txt by deploy.sh. 2g by
+    # default since 0.3.21 crash-looped at 1g with 32 large clusters; the core reads this
+    # limit and sizes its caches from it. Lower it (512m) on a host shared with the Zabbix
+    # stack and Elasticsearch — see zabbix/README.md, "One host, both stacks".
+    mem_limit: ${ELASTICPRO_MEM_LIMIT:-2g}
     # No change to the image's own ENTRYPOINT: this only builds ELASTICPRO_REDIS_URL from the
     # redis_password secret file when it exists, because compose has no built-in way to
     # turn a secret file into part of an env var's value. If a future core release reads

@@ -3,7 +3,7 @@
 //! and idle rules, the boot spread — is tested by handing it a `now`.
 
 use super::catalogue::{self, Class, Dataset, ALL};
-use super::entry::{Entry, Outcome, Reach, ReachState, Status};
+use super::entry::{Body, Entry, Outcome, Reach, ReachState, Status};
 use super::policy::{Mode, Policy, AUTO_HYBRID_ABOVE};
 use std::collections::{HashMap, HashSet};
 use tokio::sync::oneshot;
@@ -38,11 +38,8 @@ pub struct Config {
     pub per_jump: usize,
     pub paused_all: bool,
     pub paused: HashSet<String>,
+    /// Every body the cache holds, together, at most: `memory::budget().cache_bytes`.
     pub cache_bytes: usize,
-}
-
-fn env_num(name: &str) -> Option<u64> {
-    std::env::var(name).ok().and_then(|v| v.trim().parse().ok())
 }
 
 impl Config {
@@ -65,7 +62,7 @@ impl Config {
             per_jump: p.concurrency.tunnel,
             paused_all: p.paused.all,
             paused: p.paused.clusters.iter().cloned().collect(),
-            cache_bytes: (env_num("ELASTICPRO_CACHE_MB").unwrap_or(256).max(1) as usize) * 1024 * 1024,
+            cache_bytes: crate::memory::budget().cache_bytes,
         }
     }
 
@@ -388,9 +385,8 @@ impl State {
         let mut end_backoff = false;
         let (answered, err) = match outcome {
             Outcome::Answered(map) => {
-                let data = serde_json::Value::Object(map);
-                e.bytes = serde_json::to_vec(&data).map(|b| b.len()).unwrap_or(0);
-                e.data = Some(data);
+                // Held as text from here on (see `Body`); the parsed map goes with this scope.
+                e.data = Some(Body::from_value(&serde_json::Value::Object(map)));
                 e.status = Status::Ok;
                 e.fetched_at = Some(now);
                 e.error = None;
@@ -469,28 +465,64 @@ impl State {
         (self.waiters.remove(key).unwrap_or_default(), reach_changed)
     }
 
-    /// Drop on-demand bodies, least recently read first, until they fit. Background
-    /// datasets are never evicted: they are bounded by the number of clusters, and
-    /// evicting one would turn a known value into an unknown one on the overview.
-    pub fn evict(&mut self, limit: usize) {
-        let mut od: Vec<(u64, Key, usize)> = self
+    /// What every entry costs together, by `Entry::cost`.
+    pub fn total_cost(&self) -> usize {
+        self.entries.values().map(Entry::cost).sum()
+    }
+
+    /// Bring the cache within `limit` bytes. Everything counts — the budget is what the
+    /// process holds, and background bodies are most of it on a large fleet — but not
+    /// everything goes first:
+    ///   1. on-demand bodies (index and shard lists, verbose snapshots), least recently
+    ///      read first, removed outright: nobody is looking, and asking again fetches it;
+    ///   2. then background bodies other than health, the least recently read or fetched
+    ///      first. The entry stays, with its schedule, as `never` and an `evicted` error
+    ///      that says why: removing it would make it due at once and fetched straight back
+    ///      into a cache that has no room for it.
+    ///   3. Health never: it is a few hundred bytes a cluster, and it is what the overview,
+    ///      the strip and Alerts are made of.
+    ///
+    /// Nothing in flight is touched. Returns how many background bodies went, which the
+    /// caller reports: that means the budget is too small for the fleet.
+    pub fn evict(&mut self, limit: usize) -> usize {
+        let mut total = self.total_cost();
+        if total <= limit {
+            return 0;
+        }
+        let mut order: Vec<(u8, u64, Key)> = self
             .entries
             .iter()
-            .filter(|(k, e)| k.1.class() == Class::OnDemand && e.data.is_some() && !self.inflight.contains_key(*k))
-            .map(|(k, e)| (e.last_read.max(e.fetched_at.unwrap_or(0)), k.clone(), e.bytes))
+            .filter(|(k, e)| k.1 != Dataset::Health && e.data.is_some() && !self.inflight.contains_key(*k))
+            .map(|(k, e)| (u8::from(k.1.class() != Class::OnDemand), e.last_read.max(e.fetched_at.unwrap_or(0)), k.clone()))
             .collect();
-        let mut total: usize = od.iter().map(|x| x.2).sum();
-        if total <= limit {
-            return;
-        }
-        od.sort();
-        for (_, k, b) in od {
+        order.sort();
+        let mut background = 0;
+        for (rank, _, k) in order {
             if total <= limit {
                 break;
             }
-            self.entries.remove(&k);
-            total = total.saturating_sub(b);
+            if rank == 0 {
+                if let Some(e) = self.entries.remove(&k) {
+                    total = total.saturating_sub(e.cost());
+                }
+                continue;
+            }
+            let seq = self.next_seq();
+            if let Some(e) = self.entries.get_mut(&k) {
+                let freed = e.data.take().map_or(0, |b| b.len());
+                total = total.saturating_sub(freed);
+                e.status = Status::Never;
+                e.fetched_at = None;
+                e.seq = seq;
+                e.error = Some(serde_json::json!({
+                    "kind": "evicted",
+                    "message": "dropped from the fleet cache to stay within its memory budget (ELASTICPRO_CACHE_MB, or a quarter of the container's limit); fetched again when due or when asked",
+                    "query": k.1.name(),
+                }));
+                background += 1;
+            }
         }
+        background
     }
 
     /// Forget clusters that are no longer configured. Returns their ids.
@@ -692,7 +724,7 @@ mod tests {
         assert_eq!(e.status, Status::Error);
         assert_eq!(e.fetched_at, Some(100));
         assert_eq!(e.attempted_at, Some(200));
-        assert_eq!(e.data.as_ref().unwrap()["nodes"]["json"], json!([1]));
+        assert_eq!(e.data.as_ref().unwrap().parse()["nodes"]["json"], json!([1]));
         assert_eq!(e.next_due, Some(200 + 300_000), "first failure: one interval");
         st.complete(&k, failed(), 3, 300, &cfg(), &mut same);
         assert_eq!(st.entries[&k].next_due, Some(300 + 600_000), "then backing off");
@@ -845,23 +877,90 @@ mod tests {
         assert!(!st.throttle.contains_key("c00"));
     }
 
+    /// A body whose JSON is exactly `n` bytes.
+    fn body(n: usize) -> Body {
+        let b = Body::from_value(&json!("x".repeat(n - 2)));
+        assert_eq!(b.len(), n);
+        b
+    }
+    fn held(n: usize, read: u64, fetched: u64) -> Entry {
+        let mut e = Entry::never(1, Some(fetched + 300_000));
+        e.status = Status::Ok;
+        e.data = Some(body(n));
+        e.last_read = read;
+        e.fetched_at = Some(fetched);
+        e
+    }
+    fn k(c: &str, d: Dataset) -> Key {
+        (c.to_string(), d)
+    }
+
     #[test]
-    fn eviction_drops_the_least_recently_read_on_demand_body() {
+    fn an_answer_is_held_as_text_and_costs_its_length() {
         let mut st = active(0);
-        for (i, ds) in [Dataset::Indices, Dataset::Shards].into_iter().enumerate() {
-            let mut e = Entry::never(1, None);
-            e.data = Some(json!({}));
-            e.bytes = 600;
-            e.last_read = i as u64;
-            st.entries.insert(("c".into(), ds), e);
+        let key = k("c", Dataset::Indices);
+        let mut m = Map::new();
+        m.insert("indices".into(), json!({ "ok": true, "json": [{ "index": "a" }] }));
+        let text = serde_json::to_string(&serde_json::Value::Object(m.clone())).unwrap();
+        st.complete(&key, Outcome::Answered(m), 1, 10, &cfg(), &mut same);
+        let e = &st.entries[&key];
+        assert_eq!(e.data.as_ref().unwrap().raw().get(), text, "the body is the JSON it would have been sent as");
+        assert_eq!(e.cost(), crate::fleet::entry::ENTRY_OVERHEAD + text.len());
+        assert_eq!(st.total_cost(), e.cost());
+    }
+
+    #[test]
+    fn eviction_drops_the_least_recently_read_on_demand_body_first() {
+        let mut st = active(0);
+        st.entries.insert(k("c", Dataset::Indices), held(600, 0, 0));
+        st.entries.insert(k("c", Dataset::Shards), held(600, 1, 0));
+        st.entries.insert(k("c", Dataset::Health), held(10_000, 0, 0));
+        st.entries.insert(k("c", Dataset::Nodes), held(5_000, 0, 0));
+        let total = st.total_cost();
+        // Room for everything but one on-demand body.
+        assert_eq!(st.evict(total - 1), 0, "no background body had to go");
+        assert!(!st.entries.contains_key(&k("c", Dataset::Indices)), "least recently read goes first");
+        assert!(st.entries.contains_key(&k("c", Dataset::Shards)));
+        assert!(st.entries[&k("c", Dataset::Nodes)].data.is_some(), "background is only touched once on-demand is gone");
+        assert!(st.total_cost() < total);
+    }
+
+    #[test]
+    fn every_class_counts_and_the_budget_holds_except_for_health() {
+        let mut st = active(0);
+        for c in ["a", "b"] {
+            st.entries.insert(k(c, Dataset::Health), held(1_000, 0, 0));
+            st.entries.insert(k(c, Dataset::Indices), held(50_000, 5, 5));
         }
-        let mut h = Entry::never(1, None);
-        h.data = Some(json!({}));
-        h.bytes = 10_000;
-        st.entries.insert(("c".into(), Dataset::Health), h);
-        st.evict(1000);
-        assert!(!st.entries.contains_key(&("c".to_string(), Dataset::Indices)));
-        assert!(st.entries.contains_key(&("c".to_string(), Dataset::Shards)));
-        assert!(st.entries.contains_key(&("c".to_string(), Dataset::Health)), "background is never evicted");
+        st.entries.insert(k("a", Dataset::Nodes), held(20_000, 0, 100));   // newest background
+        st.entries.insert(k("b", Dataset::Nodes), held(20_000, 0, 10));    // oldest background
+        st.entries.insert(k("a", Dataset::Policies), held(20_000, 0, 50));
+        // In flight: never touched, whatever it costs.
+        st.entries.insert(k("b", Dataset::Shards), held(30_000, 0, 0));
+        st.inflight.insert(k("b", Dataset::Shards), None);
+        let seq = st.seq;
+        // A budget that background alone exceeds: on-demand all goes, then the oldest
+        // background bodies, until it fits.
+        let limit = 30_000 + 2 * 1_000 + 25_000 + 8 * crate::fleet::entry::ENTRY_OVERHEAD;
+        let dropped = st.evict(limit);
+        assert!(st.total_cost() <= limit, "{} > {limit}", st.total_cost());
+        assert!(!st.entries.contains_key(&k("a", Dataset::Indices)) && !st.entries.contains_key(&k("b", Dataset::Indices)));
+        assert_eq!(dropped, 2, "the two oldest background bodies");
+        let b = &st.entries[&k("b", Dataset::Nodes)];
+        assert!(b.data.is_none());
+        assert_eq!(b.status, Status::Never, "unknown, not empty");
+        assert_eq!(b.fetched_at, None);
+        assert_eq!(b.error.as_ref().unwrap()["kind"], json!("evicted"));
+        assert_eq!(b.next_due, Some(10 + 300_000), "its schedule stays: not fetched straight back into a full cache");
+        assert!(b.seq > seq, "pages are told");
+        assert!(st.entries[&k("a", Dataset::Policies)].data.is_none());
+        assert!(st.entries[&k("a", Dataset::Nodes)].data.is_some(), "the newest background body stays");
+        assert!(st.entries[&k("b", Dataset::Shards)].data.is_some(), "in flight is not touched");
+        // However small the budget, health stays.
+        st.evict(0);
+        for c in ["a", "b"] {
+            assert!(st.entries[&k(c, Dataset::Health)].data.is_some(), "health is never evicted");
+        }
+        assert!(st.entries[&k("a", Dataset::Nodes)].data.is_none());
     }
 }

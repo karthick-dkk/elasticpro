@@ -8,6 +8,15 @@
  *
  *   node tools/mock-es.mjs [port]        # default 9299
  *
+ * At scale, for the fleet cache's memory (tools/fleet-load.mjs): MOCK_INDICES=4000 makes
+ * every listing that many indices long — _cat/indices and _cat/shards, the ILM settings and
+ * policies' in_use_by, ILM errors for one index in twenty, and MOCK_SNAPSHOTS (default 1000)
+ * snapshots whose verbose listing names MOCK_SNAP_INDICES (default 200) indices each. Real
+ * production bodies are megabytes; the default fixture's are a few hundred bytes, which is
+ * how a cache that does not count its own memory passed every test. MOCK_FLEET=32 listens
+ * on 32 consecutive ports from [port], each a cluster of its own name (MOCK_CLUSTER_NAME-i),
+ * so one process stands in for a fleet.
+ *
  * Read-only fixture: any write returns {"acknowledged": true} without changing anything —
  * except snapshot deletes and index-template PUT/DELETE, which are honoured in memory.
  */
@@ -30,7 +39,11 @@ const index = (name, size, status = 'open', health = 'green') => ({
   'creation.date': String(Date.now() - DAY),
 });
 
-const INDICES = [
+const SCALE = Math.max(0, Number(process.env.MOCK_INDICES) || 0);
+const TENANTS = ['acme', 'beta', 'gamma', 'delta', 'omega', 'sigma', 'kappa', 'zeta'];
+const scaledName = (i) => `logstash-${TENANTS[i % TENANTS.length]}-${new Date(Date.now() - Math.floor(i / TENANTS.length) * DAY).toISOString().slice(0, 10).replace(/-/g, '.')}-${String(i).padStart(6, '0')}`;
+
+const INDICES = SCALE ? Array.from({ length: SCALE }, (_, i) => index(scaledName(i), 1e8 + i * 12345, i % 97 === 0 ? 'close' : 'open', i % 53 === 0 ? 'yellow' : 'green')) : [
   index('logstash-acme-2026.09.09', 5e9),
   index('logstash-acme-2026.09.08', 4e9),
   index('logstash-acme-2026.09.07', 4.2e9, 'close'),
@@ -39,7 +52,7 @@ const INDICES = [
 ];
 
 // Enough snapshots that the snapshot list has more than one page to move through.
-const SNAPSHOTS = Array.from({ length: 23 }, (_, i) => {
+const SNAPSHOTS = Array.from({ length: SCALE ? (Number(process.env.MOCK_SNAPSHOTS) || 1000) : 23 }, (_, i) => {
   const start = Math.floor((Date.now() - i * DAY) / 1000);
   return {
     id: `daily-${new Date((start * 1000)).toISOString().slice(0, 10).replace(/-/g, '.')}-${i}`,
@@ -112,7 +125,7 @@ const deletedSnapshots = new Set();
 const snapshotsLeft = (list) => list.filter((s) => !deletedSnapshots.has(s.snapshot));
 
 const routes = [
-  [(u) => u === '/', () => ({ cluster_name: clusterName, cluster_uuid: clusterUuid,
+  [(u) => u === '/', (hit) => ({ cluster_name: hit.name || clusterName, cluster_uuid: hit.uuid || clusterUuid,
     version: { number: '8.13.4', lucene_version: '9.10.0' } })],
   [(u) => u.startsWith('/_cluster/health'), () => ({ status: 'yellow', number_of_nodes: 3,
     number_of_data_nodes: 3, active_shards: 40, active_primary_shards: 20, unassigned_shards: 2,
@@ -417,6 +430,44 @@ function tasksListing() {
   return { nodes: { 'node-1': { name: 'node-1', transport_address: '127.0.0.1:9300', tasks } } };
 }
 routes.unshift([(u) => u.startsWith('/_tasks?') || u === '/_tasks', () => tasksListing()]);
+
+// The listings that grow with the index count, at MOCK_INDICES. Generated once: the shapes
+// are Elasticsearch's, the sizes are a large production cluster's.
+if (SCALE) {
+  const names = INDICES.map((i) => i.index);
+  const SNAP_INDICES = Number(process.env.MOCK_SNAP_INDICES) || 200;
+  const shards = names.flatMap((n, i) => ['p', 'r'].map((prirep) => ({
+    index: n, shard: '0', prirep, state: 'STARTED', node: `node-${(i + (prirep === 'r' ? 1 : 0)) % 3 + 1}`,
+    store: String(5e7 + i * 999), docs: String(100000 + i), 'unassigned.reason': null })));
+  const verbose = SNAPSHOTS.slice(0, 500).map((s, k) => ({
+    snapshot: s.id, uuid: `snap-uuid-${k}`, repository: 'daily', state: s.status,
+    indices: names.slice((k * 7) % Math.max(1, names.length - SNAP_INDICES), (k * 7) % Math.max(1, names.length - SNAP_INDICES) + SNAP_INDICES),
+    data_streams: [], include_global_state: false,
+    shards: { total: SNAP_INDICES, successful: SNAP_INDICES, failed: 0 }, failures: [],
+    start_time_in_millis: Number(s.start_epoch) * 1000, end_time_in_millis: Number(s.end_epoch) * 1000,
+    start_time: new Date(Number(s.start_epoch) * 1000).toISOString(), end_time: new Date(Number(s.end_epoch) * 1000).toISOString(),
+    duration_in_millis: 300000, version: '8.13.4', version_id: 8130499 }));
+  const policies = Object.fromEntries(TENANTS.map((t) => [`logs-${t}`, {
+    version: 3, modified_date: '2026-08-01T00:00:00Z',
+    policy: { phases: { hot: { min_age: '0ms', actions: { rollover: { max_age: '1d', max_primary_shard_size: '50gb' } } },
+      warm: { min_age: '7d', actions: { forcemerge: { max_num_segments: 1 }, shrink: { number_of_shards: 1 } } },
+      delete: { min_age: '30d', actions: { delete: { delete_searchable_snapshot: true } } } } },
+    in_use_by: { indices: names.filter((n) => n.includes(`-${t}-`)), data_streams: [], composable_templates: [`logs-${t}`] } }]));
+  const errors = Object.fromEntries(names.filter((_, i) => i % 20 === 0).map((n) => [n, {
+    index: n, managed: true, policy: 'logs-acme', lifecycle_date_millis: Date.now() - DAY, age: '1d',
+    phase: 'warm', action: 'shrink', step: 'ERROR', failed_step: 'shrink',
+    step_info: { type: 'illegal_argument_exception', reason: `index [${n}] cannot be shrunk: not enough nodes with the required attributes` },
+    phase_execution: { policy: 'logs-acme', version: 3, modified_date_in_millis: Date.now() - 30 * DAY } }]));
+  routes.unshift(
+    [(u) => u.startsWith('/_cat/shards'), ({ url }) => catProject(url, shards)],
+    [(u) => /^\/_snapshot\/[^/]+\//.test(u), () => ({ snapshots: verbose, total: verbose.length, remaining: 0 })],
+    [(u) => u.startsWith('/_ilm/policy'), () => policies],
+    [(u) => u.includes('_ilm/explain'), () => ({ indices: errors })],
+  );
+}
+// Scaled bodies are the same every time, and big: serialised once each.
+const memo = new Map();
+const memoable = (u) => SCALE && u !== '/' && !u.startsWith('/_tasks') && !u.includes('_template') && !u.includes('_search') && !u.includes('_bulk');
 // The native realm, as Elasticsearch answers it: a map of username → user. (Without this the
 // fixture's generic acknowledgement stood in for it, which is not a shape a cluster sends.)
 routes.unshift([(u) => u.split('?')[0] === '/_security/user', () => ({
@@ -489,7 +540,7 @@ routes.unshift(
   [(u) => u === '/_template' || u.startsWith('/_template?'), () => LEGACY_TEMPLATES],
 );
 
-http.createServer((req, res) => {
+const handler = (name, uuid) => (req, res) => {
   let body = '';
   req.on('data', (d) => (body += d));
   req.on('end', () => {
@@ -538,14 +589,24 @@ http.createServer((req, res) => {
       }
       return res.end(JSON.stringify({ acknowledged: true }));   // fixture: other writes are no-ops
     }
+    if (memoable(url) && memo.has(url)) return res.end(memo.get(url));
     const hit = routes.find(([match]) => match(url));
-    const out = hit ? hit[1]({ body, url }) : { acknowledged: true, url };
+    const out = hit ? hit[1]({ body, url, name, uuid }) : { acknowledged: true, url };
     // A route answering an Elasticsearch error shape gets that error's HTTP status too.
     if (out && out.error && typeof out.status === 'number') res.statusCode = out.status;
-    res.end(JSON.stringify(out));
+    const text = JSON.stringify(out);
+    if (memoable(url) && res.statusCode === 200) memo.set(url, text);
+    res.end(text);
   });
+};
 // Loopback by default, and that default is deliberate: a fixture that answers anything
 // on every interface is one an unrelated thing on the network can find and believe. Set
 // MOCK_BIND=0.0.0.0 only to let a container reach it — which is what verifying the
 // hosted stack against it needs, and nothing else should.
-}).listen(port, bind, () => console.log(`mock elasticsearch on http://${bind}:${port}`));
+const fleet = Math.max(1, Number(process.env.MOCK_FLEET) || 1);
+for (let i = 0; i < fleet; i++) {
+  const name = fleet > 1 ? `${clusterName}-${i}` : clusterName;
+  const uuid = fleet > 1 ? `${name}-uuid` : clusterUuid;
+  http.createServer(handler(name, uuid))
+    .listen(port + i, bind, () => console.log(`mock elasticsearch on http://${bind}:${port + i}${fleet > 1 ? ` (${name})` : ''}`));
+}
