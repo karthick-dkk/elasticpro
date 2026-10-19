@@ -399,7 +399,7 @@ instead and deletes nothing. Each run writes one `housekeeping_run` event to the
 |---|---|---|
 | Fleet disk cache | `cache/<cluster>/` of clusters no longer configured; on-demand dataset files (`indices`, `shards`, `snapshots_full`) untouched for `HOUSEKEEPING_CACHE_DAYS` (default 2); background dataset files untouched for 7 days; `*.tmp` older than an hour | files named exactly `<dataset>.json[.gz]` / `<dataset>.tmp` / `<dataset>.json.tmp` under `<data dir>/cache/<escaped cluster id>/`; never a symlink or its target; a folder with anything else in it stays |
 | Redis | `elasticpro:ds:<cluster>:<dataset>` keys of clusters no longer configured | keys with that prefix and a dataset name this build writes (SCAN + STRLEN + DEL) |
-| Sessions | a Zabbix-frame session unused 24 h; any other session unused `SESSION_IDLE_DAYS` (default 0 = never); beyond 50 per account, the least recently used | a session used in the last 10 minutes, or the caller's own, is never ended |
+| Sessions | a Zabbix-frame session unused 24 h (the frame orphans one per reload); an ordinary session only if `SESSION_IDLE_DAYS` is set (default 0 = never; **setting it signs people out**). No cap on how many sessions an account holds; sessions from before the `frame` flag existed count as ordinary | a session used in the last 10 minutes, or the caller's own, is never ended |
 | API tokens | tokens that expired more than 30 days ago | tokens with no expiry are never touched |
 | In-memory maps | request counters, limiters, cached connections, poller marks, tickets and Zabbix budgets of removed clusters or past their time | |
 | Notifications, silences | the existing 30-day / 2000-per-person retention and ended silences, once a day | |

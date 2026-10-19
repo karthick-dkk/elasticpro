@@ -110,9 +110,12 @@ HOUSEKEEPING_MINUTES=
 HOUSEKEEPING_CACHE_DAYS=
 # true: report what would be removed in the core log and the Request Centre, and delete nothing.
 HOUSEKEEPING_DRY_RUN=
-# Days a session may sit unused before it ends; 0 (default) = sessions never expire. Zabbix
-# frame sessions, which a reload orphans, always end after 24 hours unused. One account keeps
-# at most 50 sessions, the least recently used ending first.
+# Days an ordinary session may sit unused before it ends; 0 (default) = sessions never expire
+# and nobody is ever signed out. WARNING: setting this signs people out - anyone who has not
+# used ElasticPro for that many days must sign in again. There is no limit on how many
+# sessions one account may hold. Zabbix frame sessions, which a reload orphans (the frame
+# signs in again on every load), end after 24 hours unused whatever this says; one used
+# within the day is never ended.
 SESSION_IDLE_DAYS=
 # Days a rotated activity log (activity.jsonl.1, .2 ...) is kept; 0 (default) = by size only.
 ACTIVITY_LOG_KEEP_DAYS=

@@ -1022,8 +1022,6 @@ pub struct SessionPolicy {
     pub frame_idle_secs: u64,
     /// Any other session unused this long is ended; `None` is the default — never.
     pub idle_secs: Option<u64>,
-    /// The most sessions one account keeps; the least recently used go first.
-    pub max_per_user: usize,
     /// A session used within this long is somebody at the keyboard: nothing ends it.
     pub active_secs: u64,
 }
@@ -1204,8 +1202,12 @@ impl Sessions {
     ///
     /// * a Zabbix-frame session unused for `frame_idle_secs`;
     /// * any other session unused for `idle_secs`, when that is set (it is not, by default:
-    ///   sessions do not time out on their own);
-    /// * past `max_per_user` for one account, the least recently used.
+    ///   sessions do not time out on their own, and there is no cap on how many one account
+    ///   may hold — nobody is signed out for having signed in often).
+    ///
+    /// There is no count cap for frame sessions either: a frame reload orphans its token, and
+    /// the only ones that can be ended are those unused for `frame_idle_secs`, which the first
+    /// rule already ends. A frame session used within that time is kept however many there are.
     ///
     /// A session used within `active_secs` is never ended, whichever rule picked it, and
     /// neither is the one whose token is `protect` — the administrator who pressed the
@@ -1234,29 +1236,6 @@ impl Sessions {
                 if let Some(why) = why {
                     taken.insert(h);
                     doomed.push((h.clone(), reap_of(s, why)));
-                }
-            }
-            // The cap, over what is left: per account (names compare case-insensitively, as
-            // everywhere else), the least recently used go first.
-            let mut by_user: HashMap<String, Vec<(&String, &Session)>> = HashMap::new();
-            for (h, s) in map.iter().filter(|(h, _)| !taken.contains(h)) {
-                by_user.entry(s.user.to_ascii_lowercase()).or_default().push((h, s));
-            }
-            for (_, mut list) in by_user {
-                if list.len() <= p.max_per_user {
-                    continue;
-                }
-                list.sort_by_key(|(h, s)| (s.seen(), (*h).clone()));
-                let mut over = list.len() - p.max_per_user;
-                for (h, s) in list {
-                    if over == 0 {
-                        break;
-                    }
-                    if keep.as_ref() == Some(h) || idle_of(s) < p.active_secs {
-                        continue;
-                    }
-                    over -= 1;
-                    doomed.push((h.clone(), reap_of(s, "over the per-account session cap")));
                 }
             }
         }
@@ -1855,7 +1834,7 @@ mod tests {
     /* ------------------------- housekeeping: session expiry ------------------------- */
 
     fn policy() -> SessionPolicy {
-        SessionPolicy { frame_idle_secs: 24 * 3600, idle_secs: None, max_per_user: 50, active_secs: 600 }
+        SessionPolicy { frame_idle_secs: 24 * 3600, idle_secs: None, active_secs: 600 }
     }
 
     fn account(name: &str, role: Role) -> Account {
@@ -1907,7 +1886,7 @@ mod tests {
         let (busy, stale) = (ss.begin_frame(&a), ss.begin_frame(&a));
         let t0 = now();
         // A rule that would end every idle session at once; "idle" means ten minutes.
-        let p = SessionPolicy { frame_idle_secs: 0, idle_secs: Some(0), max_per_user: 1, active_secs: 600 };
+        let p = SessionPolicy { frame_idle_secs: 0, idle_secs: Some(0), active_secs: 600 };
         let at = t0 + 3600;
         assert!(ss.resolve_at(&busy, at - 120).is_some(), "used two minutes ago");
         let gone = ss.reap(at, &p, None, false);
@@ -1926,39 +1905,38 @@ mod tests {
         let gone = ss.reap(at, &policy(), Some(&mine), false);
         assert_eq!(gone.len(), 1);
         assert!(ss.resolve_at(&other, at).is_none() && ss.resolve_at(&mine, at).is_some());
-        // Protected from the cap as well, though it is the oldest.
-        let ss = Sessions::default();
-        let oldest = ss.begin(&a);
-        for _ in 0..3 { ss.begin(&a); }
-        let p = SessionPolicy { max_per_user: 2, ..policy() };
-        let gone = ss.reap(now() + 3 * 86_400, &p, Some(&oldest), false);
-        assert_eq!(gone.len(), 2);
-        assert!(ss.resolve_at(&oldest, now() + 3 * 86_400).is_some());
     }
 
     #[test]
-    fn one_account_keeps_at_most_the_cap_and_the_least_recently_used_go_first() {
+    fn an_account_with_sixty_ordinary_sessions_keeps_all_sixty() {
         let a = account("alice", Role::User);
-        let b = account("bob", Role::User);
         let ss = Sessions::default();
         let t0 = now();
-        let toks: Vec<String> = (0..6).map(|_| ss.begin(&a)).collect();
-        let bobs: Vec<String> = (0..2).map(|_| ss.begin(&b)).collect();
-        // Use them in a known order: tok 3 longest ago, then 0, 5, 1, 4, 2 the most recently.
-        for (rank, i) in [3usize, 0, 5, 1, 4, 2].into_iter().enumerate() {
-            ss.resolve_at(&toks[i], t0 + 1000 + 100 * rank as u64);
+        let toks: Vec<String> = (0..60).map(|_| ss.begin(&a)).collect();
+        // Not a minute, not a year, not a decade: nothing signs anyone out unless SESSION_IDLE_DAYS says so.
+        for later in [3600, 30 * 86_400, 365 * 86_400, 3650 * 86_400] {
+            assert!(ss.reap(t0 + later, &policy(), None, false).is_empty(), "after {later} s");
         }
-        let p = SessionPolicy { max_per_user: 4, ..policy() };
-        let gone = ss.reap(t0 + 100_000, &p, None, true);
-        assert_eq!(gone.len(), 2, "a dry run says what would go");
-        assert!(gone.iter().all(|g| g.user == "alice" && g.reason.contains("cap")));
-        assert_eq!(ss.count(), 8, "and removes nothing");
-        let gone = ss.reap(t0 + 100_000, &p, None, false);
-        assert_eq!(gone.len(), 2);
-        let at = t0 + 100_000;
-        let alive: Vec<bool> = toks.iter().map(|t| ss.resolve_at(t, at).is_some()).collect();
-        assert_eq!(alive, vec![false, true, true, false, true, true], "tokens 3 and 0 were the least recently used");
-        assert!(bobs.iter().all(|t| ss.resolve_at(t, at).is_some()), "another account is not touched by alice's cap");
+        assert!(toks.iter().all(|t| ss.resolve_at(t, t0 + 3650 * 86_400).is_some()));
+        assert_eq!(ss.count(), 60);
+    }
+
+    #[test]
+    fn frame_sessions_used_within_a_day_are_kept_however_many_and_idle_ones_go_with_ordinary_ones_untouched() {
+        let a = account("alice", Role::User);
+        let ss = Sessions::default();
+        let t0 = now();
+        let ordinary: Vec<String> = (0..60).map(|_| ss.begin(&a)).collect();
+        let frames: Vec<String> = (0..60).map(|_| ss.begin_frame(&a)).collect();
+        assert!(ss.reap(t0 + 23 * 3600, &policy(), None, false).is_empty(), "sixty frame sessions, all used within the day");
+        // Thirty of them are used again on the second day; thirty are orphans.
+        for f in &frames[..30] { ss.resolve_at(f, t0 + 30 * 3600); }
+        let gone = ss.reap(t0 + 40 * 3600, &policy(), None, false);
+        assert_eq!(gone.len(), 30);
+        assert!(gone.iter().all(|g| g.frame && g.reason == "idle Zabbix-frame session"));
+        assert!(frames[..30].iter().all(|f| ss.resolve_at(f, t0 + 40 * 3600).is_some()), "used within 24 h: kept");
+        assert!(frames[30..].iter().all(|f| ss.resolve_at(f, t0 + 40 * 3600).is_none()));
+        assert!(ordinary.iter().all(|t| ss.resolve_at(t, t0 + 40 * 3600).is_some()), "ordinary sessions are never trimmed");
     }
 
     #[test]
@@ -2002,7 +1980,7 @@ mod tests {
         let ss = Sessions::open(Some(path));
         let before = ss.map.read().get(&hash).cloned().unwrap();
         assert_eq!((before.last_seen, before.frame, before.seen()), (0, false, 1000));
-        // Unclassified, so only the cap or SESSION_IDLE_DAYS can end it; and using it makes it current.
+        // Unclassified, so it is an ordinary session: only SESSION_IDLE_DAYS can end it.
         assert!(ss.reap(now(), &policy(), None, false).is_empty());
         let s = ss.resolve("legacy-token").unwrap();
         assert!(s.last_seen > 1000);

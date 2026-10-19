@@ -68,7 +68,7 @@ export function housekeepingView(status, now = Date.now()) {
     rules: [
       `on-demand cache files untouched for ${status.cacheDays || 2} days`,
       `background cache files untouched for ${status.backgroundCacheDays || 7} days`,
-      status.sessionIdleDays > 0 ? `sessions unused for ${status.sessionIdleDays} days` : 'Zabbix-frame sessions unused for a day (other sessions never expire)',
+      status.sessionIdleDays > 0 ? `Zabbix-frame sessions unused for a day; ordinary sessions unused for ${status.sessionIdleDays} days (this signs people out)` : 'Zabbix-frame sessions unused for a day (other sessions never expire)',
       status.activityKeepDays > 0 ? `rotated activity logs older than ${status.activityKeepDays} days` : null,
     ].filter(Boolean),
     nextRun: null,

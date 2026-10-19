@@ -57,8 +57,6 @@ pub const BACKGROUND_CACHE_DAYS: u64 = 7;
 pub const TMP_MAX_AGE_MS: u64 = 3_600_000;
 /// A Zabbix-frame session unused this long is ended.
 pub const FRAME_IDLE_SECS: u64 = 24 * 3600;
-/// Sessions one account may hold.
-pub const SESSION_CAP: usize = 50;
 /// A session used within this long is somebody at the keyboard.
 pub const SESSION_ACTIVE_SECS: u64 = 600;
 /// An API token is deleted this long after it expired. (It is refused from the moment it
@@ -797,7 +795,6 @@ impl Core {
             let p = SessionPolicy {
                 frame_idle_secs: FRAME_IDLE_SECS,
                 idle_secs: (cfg.session_idle_days > 0).then(|| cfg.session_idle_days * 86_400),
-                max_per_user: SESSION_CAP,
                 active_secs: SESSION_ACTIVE_SECS,
             };
             let reaped = self.sessions.reap(now_secs, &p, req.protect_session.as_deref(), dry);
