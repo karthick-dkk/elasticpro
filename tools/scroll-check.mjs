@@ -26,6 +26,9 @@
  *             scrollable
  *   keys      Space / PageDown / arrows with nothing focused (Alerts, Clusters)
  *   sticky    the sticky header does not cover the first row at the top
+ *   clusters  the Clusters summary's column heads stay pinned under the top bar and line up
+ *             with their columns while the page scrolls; its Columns panel and a cluster's
+ *             name menu stay open under their own wheel and do not move the page
  *   hit       document.elementFromPoint at the pointer is the thing meant, not an overlay
  *
  * --config is a path the BRIDGE can read (same machine); it is remembered in the browser
@@ -479,6 +482,96 @@ async function run(browserName, [vw, vh], framed = false) {
       }
       await p.keyboard.press('Escape');
     }
+    await toTop();
+  }
+
+  /* ---- 2b. the Clusters page: pinned heads, Columns panel, name menu ---- */
+  if (!framed && (!ONLY || PAGES.includes('overview'))) {
+    await goPage('overview');
+    // The whole fleet, so there is a table to scroll; the selection is put back afterwards.
+    const prevSel = await F.evaluate(() => { const s = document.getElementById('cluster-select'); return s ? s.value : null; });
+    const pickAll = (v) => F.evaluate((v) => { const s = document.getElementById('cluster-select'); if (s && [...s.options].some((o) => o.value === v)) { s.value = v; s.dispatchEvent(new Event('change', { bubbles: true })); } }, v);
+    await pickAll('all'); await sleep(1200); await quiet();
+    // Open every row's details so the table is taller than the window, as on a real fleet.
+    await F.evaluate(() => { for (const b of [...document.querySelectorAll('.cl-summary tbody button[aria-expanded="false"]')].slice(0, 8)) b.click(); });
+    await sleep(800); await quiet();
+    const tall = await F.evaluate(() => { const t = document.querySelector('table.cl-tbl'); return t ? Math.round(t.getBoundingClientRect().height) : 0; });
+    if (tall < vh) rec('clusters', 'heads pinned while the page scrolls', 'SKIP', `table ${tall}px in a ${vh}px window`);
+    else {
+      await toTop();
+      // wheel over a row until the table's top has gone under the top bar
+      const start = await F.evaluate(() => { const r = document.querySelector('.cl-summary tbody tr').getBoundingClientRect(); return { x: Math.round(r.left + 200), y: Math.round(Math.min(Math.max(r.top + 10, 200), innerHeight - 60)) }; });
+      await mv(start.x, start.y);
+      for (let i = 0; i < 120; i++) {
+        await p.mouse.wheel(0, 30); await sleep(16);
+        if (i % 10 === 9 && await F.evaluate(() => document.querySelector('table.cl-tbl').getBoundingClientRect().top < document.querySelector('.head-fix').getBoundingClientRect().bottom - 150)) break;
+      }
+      await stable();
+      const pin = await F.evaluate(() => {
+        const head = document.querySelector('.head-fix').getBoundingClientRect().bottom;
+        const strip = document.querySelector('.cl-head').getBoundingClientRect();
+        const tblTop = document.querySelector('table.cl-tbl').getBoundingClientRect().top;
+        const cells = [...document.querySelectorAll('.cl-head .cl-hcell')];
+        const tr = [...document.querySelectorAll('.cl-summary tbody tr')].find((r) => r.children.length === cells.length && r.getBoundingClientRect().top > strip.bottom);
+        const drift = tr ? Math.max(...cells.map((c, i) => Math.abs(c.getBoundingClientRect().left - tr.children[i].getBoundingClientRect().left))) : -1;
+        const hit = document.elementFromPoint(Math.round(strip.left + 30), Math.round(strip.top + strip.height / 2));
+        return { head: Math.round(head), stripTop: Math.round(strip.top), tblTop: Math.round(tblTop), drift: Math.round(drift * 10) / 10, onTop: !!(hit && hit.closest('.cl-head')) };
+      });
+      check('clusters', 'heads pinned while the page scrolls', pin.tblTop < pin.head && Math.abs(pin.stripTop - pin.head) <= 1, JSON.stringify(pin));
+      check('clusters', 'pinned heads line up with their columns', pin.drift >= 0 && pin.drift <= 1.5, JSON.stringify(pin));
+      check('clusters', 'pinned heads are on top, not covered', pin.onTop, JSON.stringify(pin));
+    }
+    await F.evaluate(() => { for (const b of document.querySelectorAll('.cl-summary tbody button[aria-expanded="true"]')) b.click(); });
+    await sleep(500);
+
+    // the Columns panel: opens, the wheel inside it never closes it or moves the page
+    await toTop();
+    const colBtn = await F.evaluate(() => { const b = document.getElementById('cl-columns'); if (!b) return null; b.scrollIntoView({ block: 'center' }); const r = b.getBoundingClientRect(); return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) }; });
+    if (!colBtn) rec('clusters', 'Columns panel', 'SKIP', 'no Columns button');
+    else {
+      await sleep(200);
+      await mclick(colBtn.x, colBtn.y); await sleep(400);
+      const open = await panelOpen('.pop.cl-cols');
+      check('clusters', 'Columns panel opens', open, 'no panel');
+      if (open) {
+        const geo = await F.evaluate(() => { const r = document.querySelector('.pop.cl-cols').getBoundingClientRect(); return { top: Math.round(r.top), bottom: Math.round(r.bottom), left: Math.round(r.left), right: Math.round(r.right), vw: innerWidth, vh: innerHeight }; });
+        check('clusters', 'Columns panel fits the window', geo.top >= 0 && geo.bottom <= geo.vh && geo.left >= 0 && geo.right <= geo.vw, JSON.stringify(geo));
+        const hp = await F.evaluate(hitPoint, { sel: '.pop.cl-cols > .body', headBottom: 0 });
+        if (!hp.err) {
+          const y0 = (await info()).y;
+          await mv(hp.x, hp.y);
+          await trackpad(0, 10, 20);
+          await notches(100, 4);
+          check('clusters', 'Columns panel stays open under its own wheel', await panelOpen('.pop.cl-cols'), 'closed while the wheel was over it');
+          check('clusters', 'wheel over the Columns panel leaves the page', (await info()).y === y0, `page moved ${y0} → ${(await info()).y}`);
+        } else check('clusters', 'Columns panel hit', false, hp.err);
+      }
+      await p.keyboard.press('Escape'); await sleep(200);
+      check('clusters', 'Columns panel closes on Escape', !(await panelOpen('.pop.cl-cols')), 'still open');
+    }
+
+    // the name menu: the same, and the page scrolling elsewhere closes it (intended)
+    await toTop();
+    const nm = await F.evaluate(() => { for (const el of document.querySelectorAll('.cl-summary tbody button.cl-name')) { const r = el.getBoundingClientRect();
+      if (r.top > 140 && r.bottom < innerHeight - 220) return { x: Math.round(r.left + 20), y: Math.round(r.top + r.height / 2) }; } return null; });
+    if (!nm) rec('clusters', 'name menu', 'SKIP', 'no cluster name on screen');
+    else {
+      await mclick(nm.x, nm.y); await sleep(300);
+      const open = await panelOpen('.menu-pop');
+      check('clusters', 'name menu opens', open, 'no menu');
+      if (open) {
+        const hp = await F.evaluate(hitPoint, { sel: '.menu-pop', headBottom: 0 });
+        const y0 = (await info()).y;
+        if (!hp.err) { await mv(hp.x, hp.y); await trackpad(0, 10, 10); await notches(100, 3); }
+        check('clusters', 'name menu stays open under its own wheel', await panelOpen('.menu-pop'), 'closed while the wheel was over it');
+        check('clusters', 'wheel over the name menu leaves the page', (await info()).y === y0, `page moved ${y0} → ${(await info()).y}`);
+        await mv(farPoint.x, farPoint.y);
+        await notches(100, 3);
+        if ((await info()).y > y0) check('clusters', 'name menu closes when the page scrolls', !(await panelOpen('.menu-pop')), 'still open');
+      }
+      await p.keyboard.press('Escape');
+    }
+    if (prevSel && prevSel !== 'all') { await pickAll(prevSel); await sleep(800); }
     await toTop();
   }
 

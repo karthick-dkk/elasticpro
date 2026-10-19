@@ -33,6 +33,17 @@ function raw() {
   return r;
 }
 
+/**
+ * The entry in the config file a cluster on screen came from, matched by name and then by
+ * address — what the Config page's Edit and the Clusters page's name menu both open.
+ * Null for a cluster the file does not hold (one that came from Zabbix).
+ */
+export function rawClusterOf(c) {
+  const raw = state.config && state.config.raw;
+  const list = (raw && raw.clusters) || [];
+  return list.find((x) => x.name === c.name) || list.find((x) => String(x.url || '').replace(/\/+$/, '') === c.url) || null;
+}
+
 function jumpHostList(r) {
   const jh = r.jump_hosts;
   return Array.isArray(jh) ? jh.map((j, i) => [j.id || j.name || `jump${i + 1}`, j]) : Object.entries(jh || {});

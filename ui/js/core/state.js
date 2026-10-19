@@ -23,6 +23,7 @@ import { spanDaysIso } from './volume.js';
 import { clustersToAsk } from '../lib/demand.js';
 import { limiter } from '../lib/limit.js';
 import { isStale } from '../lib/freshness.js';
+import { sortByName } from '../lib/cluster-order.js';
 
 class Emitter {
   constructor() { this.map = new Map(); }
@@ -91,7 +92,20 @@ export const state = {
   nextRefreshAt: 0,
 };
 
-export function clusters() { return state.config ? state.config.clusters.filter((c) => c.enabled) : []; }
+/**
+ * The enabled clusters, A–Z (lib/cluster-order.js) — the order every cluster list in the app
+ * shows, from the top-bar picker to the per-cluster blocks on each page. Sorted once per
+ * config: a config change replaces `config.clusters` outright, so the array is the key.
+ */
+let byName = { src: null, len: -1, list: [] };
+export function clusters() {
+  const src = state.config && state.config.clusters;
+  if (!src) return [];
+  if (byName.src !== src || byName.len !== src.length) {
+    byName = { src, len: src.length, list: sortByName(src) };
+  }
+  return byName.list.filter((c) => c.enabled);
+}
 export function client(id) { return state.clients.get(id); }
 /** Record that `dataset` for `clusterId` was just fetched. */
 export function stampFetch(clusterId, dataset) {

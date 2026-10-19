@@ -62,6 +62,7 @@ import * as pRequests from './pages/requests.js';
 import { loadSilences } from './core/silences.js';
 import { setRequestOrigin } from './core/es.js';
 import { UI_CODES, withCode, errorText } from './core/error-codes.js';
+import { setPageGate } from './core/intent.js';
 
 /**
  * `minRole` is the lowest role the tab is offered to.
@@ -98,6 +99,8 @@ const PAGES = [
 function visiblePages() {
   return PAGES.filter((p) => may(p.minRole) && (!p.accountsOnly || !!me));
 }
+// The same answer for a page that links to another (core/intent.js canOpenPage).
+setPageGate((id) => visiblePages().some((p) => p.id === id));
 
 const root = document.getElementById('root');
 let currentPage = null;
@@ -438,7 +441,9 @@ function renderTopbar() {
   const theme = document.documentElement.getAttribute('data-theme') || 'system';
   resolveSelection(page);
   const healthSig = activeClusters().map((c) => `${c.id}:${healthState(state.data.get(c.id))}`).join(',');
-  const key = JSON.stringify([page.id, page.multi, state.selected, healthSig, clusters().map((c) => `${c.id}\u0001${c.name}`),
+  // Which clusters the picker marks unreachable: any of them, not only the selected one.
+  const downSig = clusters().filter((c) => healthState(state.data.get(c.id)) === 'unreachable').map((c) => c.id).join(',');
+  const key = JSON.stringify([page.id, page.multi, state.selected, healthSig, downSig, clusters().map((c) => `${c.id}\u0001${c.name}`),
     a.length, crit, clustersNeedingCredential().length, clustersWithAuthError().length, serverHoldsCredentials(),
     theme, isSnapshotMode(), fleetMode(), state.autoRefresh, state.defaults.refreshIntervalSec, redrawPolicy(),
     me && me.name, embedded, state.snapshot && state.snapshot.host]);
@@ -457,8 +462,14 @@ function renderTopbar() {
     fleetChosen = e.target.value === 'all';
     go(currentPage);
   } });
+  // "All clusters" first, then every cluster A–Z (clusters() is in name order). A cluster
+  // that cannot be reached says so in the list itself, so nobody picks it expecting data.
   if (page.multi) sel.append(h('option', { value: 'all' }, `All clusters (${clusters().length})`));
-  clusters().forEach((c) => sel.append(h('option', { value: c.id }, c.name)));
+  clusters().forEach((c) => {
+    const down = healthState(state.data.get(c.id)) === 'unreachable';
+    sel.append(h(down ? 'option.unreachable' : 'option', { value: c.id, title: down ? `${c.name} is unreachable` : null },
+      down ? `\u25cf ${c.name} \u2014 unreachable` : c.name));
+  });
   resolveSelection(page);
   sel.value = state.selected;
   // On a large fleet a dropdown of a hundred names is scrolled, not read: a box beside it
