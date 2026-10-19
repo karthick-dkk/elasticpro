@@ -1,5 +1,43 @@
 # Changelog
 
+## 0.3.21
+
+**Zabbix modules 2.1.1: every ElasticPro widget is fully customizable, with one colour palette.**
+
+No change to ElasticPro itself; this release ships Zabbix modules 2.1.1 and versions them properly.
+
+**Modules are versioned.** All seven Zabbix modules carry one version (now 2.1.1), with tags,
+releases and a changelog in the modules repository. ElasticPro pins the exact modules version and
+commit, the build checks they match, and ElasticPro → Settings in Zabbix shows the installed
+build ("Zabbix modules 2.1.1 · build aec612d"). The modules installer prints the version and
+build in its summary.
+
+**Customize every widget.** Client resources, Client capacity, Volume and Top hosts share one
+column editor:
+- Any built-in figure, any Zabbix item key, or a figure calculated from two items, as a column.
+- Now, average, minimum, maximum or change over N days.
+- Show it as a value, bar, coloured cell, coloured text, indicators, sparkline or badge.
+- Colours from the palette or your own, and thresholds where higher or lower is worse.
+- Columns belong to each widget. A new widget starts from the report defaults a Super admin sets.
+
+**Per widget:**
+- **Client resources** adds a **Pie chart** view: one donut per client for storage, CPU and
+  memory, showing used, free and short against allocated and requested.
+- **Volume** reads both generations of the client plan template, so unreachable clusters are
+  dimmed and "Updated … ago" works again.
+- **Top hosts** is listed as "ElasticPro top hosts". It ranks by CPU, memory, disk, JVM heap or any
+  item, by its current value or its 7-day average or maximum, and shows as a list, a table or a
+  bar chart.
+- **Client overview's Summary view** gains a usage chart, one line per client with Warn and High
+  lines.
+
+**One colour palette.** ElasticPro → Settings → Colours sets OK, Warn, High and the other colours
+for the Blue and Dark themes, used by every widget. In the Blue theme, Client resources and Client
+capacity now use the same colours as the other widgets.
+
+Widgets you already have keep their look. Upgrade the modules with
+`zabbix-modules-install.sh --upgrade`.
+
 ## 0.3.20
 
 **Zabbix modules: Excel import, and a fully customizable Client overview.**
