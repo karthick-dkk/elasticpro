@@ -463,7 +463,7 @@ function nameMenu(c) {
       { hint: c.name },
       edit,
       canOpenPage('shards') ? { label: 'Nodes', icon: '☷', note: 'Nodes & shards', onClick: () => navigateTo('shards', null, { cluster: c.id }) } : null,
-      canOpenPage('snapshots') ? { label: 'Repo', icon: '↻', note: 'Snapshots & SLM', onClick: () => navigateTo('snapshots', { view: 'summary' }, { cluster: c.id }) } : null,
+      canOpenPage('snapshots') ? { label: 'Repo', icon: '↻', note: 'Snapshots', onClick: () => navigateTo('snapshots', { view: 'summary' }, { cluster: c.id }) } : null,
       canOpenPage('logs') ? { label: 'Live log', icon: '▶', note: 'Live logs', onClick: () => navigateTo('logs', null, { cluster: c.id }) } : null,
     ];
   };

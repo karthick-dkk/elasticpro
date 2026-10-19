@@ -42,7 +42,7 @@ elasticpro-desktop/
 ```
 
 Pages and features carried over: Clusters overview (disk, repo, ILM/SLM, last snapshot,
-alerts), Indices with source/date picker, Live logs by day, Snapshots & SLM (from/to
+alerts), Indices with source/date picker, Live logs by day, Snapshots (from/to
 availability), Nodes & shards, Config; auto-refresh off by default; one credential for all
 URLs with a first-start prompt; snapshot-file mode. Clusters, jump hosts, credentials and
 defaults are created and edited in the UI and saved as JSON with encrypted secrets; the

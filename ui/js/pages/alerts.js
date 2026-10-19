@@ -97,7 +97,7 @@ export function render(el) {
 }
 export function onData() { if (host && host.isConnected) draw(); }
 
-const PAGE_LABEL = { snapshots: 'Snapshots & SLM', indices: 'Indices', shards: 'Shards', logs: 'Log delay',
+const PAGE_LABEL = { snapshots: 'Snapshots', indices: 'Indices', shards: 'Shards', logs: 'Log delay',
   volume: 'Volume report', automation: 'Automation', overview: 'Clusters' };
 
 /** Which page answers this alert. The mapping is the rule registry's — see pageForProblem. */

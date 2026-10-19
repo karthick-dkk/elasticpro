@@ -20,7 +20,7 @@ export function canOpenPage(id) { return !!pageGate(id); }
  * whichever happens to be first. Naming the cluster here selects it on the way in.
  *
  * `payload` is for the page being opened: the request for the REST console, `{ view }`
- * for Snapshots & SLM ('summary' is the view with the repositories).
+ * for Snapshots ('summary' is the view with the repositories).
  */
 export function navigateTo(page, payload, opts = {}) {
   if (page === 'console') intent.console = payload || null;
