@@ -6,7 +6,7 @@ import { EsClient, primeWorker, setBadge, requestStats, workerStatus,
 import { bytes as bytesish, ago, dur } from '../lib/fmt.js';
 import { diskLevel, tuneAlerts, alertCounts } from './alert-tuning.js';
 import { isAcked, ackFor, acksRev } from './acks.js';
-import { mergeAlerts, isOpen } from './alert-groups.js';
+import { mergeAlerts, isOpen, holdUnreachable } from './alert-groups.js';
 import { alertHistory } from './alert-history.js';
 // Cyclic with field-volume.js, which needs client() from here. Safe because both sides
 // only touch the other inside functions, never while the modules are evaluating.
@@ -1944,7 +1944,8 @@ export function openAlertCounts() { return alertCounts(openAlertsNow()); }
 
 /**
  * Alerts as the Alerts page shows them: repeats of one rule on one cluster merged into one
- * (core/alert-groups.js), each with its state — open, acknowledged or silenced. The one list
+ * (core/alert-groups.js), each with its state — open, acknowledged, silenced or, for a cluster
+ * that cannot be reached, held (holdUnreachable: listed, never counted). The one list
  * behind every count: the Alerts page, the tab badge, the top bar and the Clusters summary
  * all read it, so "open" is one definition and one number.
  *
@@ -1969,12 +1970,12 @@ function mergeContext(now) {
  */
 export function mergedAlerts({ fresh = false } = {}) {
   const now = Date.now();
-  if (fresh) return mergeAlerts(alerts(), mergeContext(now));
+  if (fresh) return holdUnreachable(mergeAlerts(alerts(), mergeContext(now)));
   const raw = cachedAlerts();
   const same = alertsMemo.value === mergedMemo.alerts && alertsMemo.rev === mergedMemo.rev
     && acksRev() === mergedMemo.acks && now - mergedMemo.at < ALERTS_MEMO_MS;
   if (same) return mergedMemo.value;
-  const value = mergeAlerts(raw, mergeContext(now));
+  const value = holdUnreachable(mergeAlerts(raw, mergeContext(now)));
   Object.assign(mergedMemo, { alerts: alertsMemo.value, rev: alertsMemo.rev, acks: acksRev(), at: now, value });
   return value;
 }
