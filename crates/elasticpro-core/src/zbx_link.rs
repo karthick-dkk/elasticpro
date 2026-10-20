@@ -522,6 +522,21 @@ impl ZbxLink {
         }
     }
 
+    /// Housekeeping: forget request budgets of sources that have gone quiet and pairing
+    /// signatures too old to be replayed. Returns how many; with `dry_run` it only counts.
+    pub fn sweep_expired(&self, dry_run: bool) -> usize {
+        let window = Duration::from_secs(60);
+        let keep = Duration::from_secs(MAX_SKEW_SECS * 2 + 5);
+        let (mut hits, mut seen) = (self.hits.lock(), self.seen.lock());
+        let n = hits.values().filter(|q| q.back().is_none_or(|t| t.elapsed() >= window)).count()
+            + seen.values().filter(|t| t.elapsed() >= keep).count();
+        if !dry_run {
+            hits.retain(|_, q| q.back().is_some_and(|t| t.elapsed() < window));
+            seen.retain(|_, t| t.elapsed() < keep);
+        }
+        n
+    }
+
     /// Whether this source may make another request on this route now.
     pub fn rate_ok(&self, route: &str, source: Option<IpAddr>, per_min: usize) -> bool {
         let key = format!("{route}|{}", source.map(|s| s.to_string()).unwrap_or_else(|| "-".into()));

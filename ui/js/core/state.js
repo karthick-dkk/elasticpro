@@ -1,11 +1,13 @@
 /** Application state, refresh loop and auto-reconnect. */
 
 import { EsClient, primeWorker, setBadge, requestStats, workerStatus,
-         fleetState, clusterDataset, refreshFleet } from './es.js';
+         fleetState, clusterDataset, refreshFleet, withFreshReads } from './es.js';
 // lib/fmt is a leaf: no cycle, and two alert sentences need to read like the rest of the UI.
 import { bytes as bytesish, ago, dur } from '../lib/fmt.js';
-import { diskLevel, tuneAlerts, openAlerts, alertCounts } from './alert-tuning.js';
-import { isAcked } from './acks.js';
+import { diskLevel, tuneAlerts, alertCounts } from './alert-tuning.js';
+import { isAcked, ackFor, acksRev } from './acks.js';
+import { mergeAlerts, isOpen } from './alert-groups.js';
+import { alertHistory } from './alert-history.js';
 // Cyclic with field-volume.js, which needs client() from here. Safe because both sides
 // only touch the other inside functions, never while the modules are evaluating.
 import { fieldVolumeSpikes, clearFieldVolume } from './field-volume.js';
@@ -23,6 +25,7 @@ import { spanDaysIso } from './volume.js';
 import { clustersToAsk } from '../lib/demand.js';
 import { limiter } from '../lib/limit.js';
 import { isStale } from '../lib/freshness.js';
+import { sortByName } from '../lib/cluster-order.js';
 
 class Emitter {
   constructor() { this.map = new Map(); }
@@ -91,7 +94,20 @@ export const state = {
   nextRefreshAt: 0,
 };
 
-export function clusters() { return state.config ? state.config.clusters.filter((c) => c.enabled) : []; }
+/**
+ * The enabled clusters, A–Z (lib/cluster-order.js) — the order every cluster list in the app
+ * shows, from the top-bar picker to the per-cluster blocks on each page. Sorted once per
+ * config: a config change replaces `config.clusters` outright, so the array is the key.
+ */
+let byName = { src: null, len: -1, list: [] };
+export function clusters() {
+  const src = state.config && state.config.clusters;
+  if (!src) return [];
+  if (byName.src !== src || byName.len !== src.length) {
+    byName = { src, len: src.length, list: sortByName(src) };
+  }
+  return byName.list.filter((c) => c.enabled);
+}
 export function client(id) { return state.clients.get(id); }
 /** Record that `dataset` for `clusterId` was just fetched. */
 export function stampFetch(clusterId, dataset) {
@@ -885,6 +901,13 @@ async function refreshModuleFleet(module, targets) {
  */
 export async function refreshAll({ force = false, selected = false } = {}) {
   if (state.refreshing || !state.config) return;
+  // A Refresh a person pressed reads past the core's few-second read cache.
+  if (force) return withFreshReads(() => refreshAllInner({ force, selected }));
+  return refreshAllInner({ force, selected });
+}
+
+async function refreshAllInner({ force, selected }) {
+  if (state.refreshing || !state.config) return;
   state.refreshing = true;
   bus.emit('refreshing', true);
   try {
@@ -906,7 +929,9 @@ export async function refreshAll({ force = false, selected = false } = {}) {
   } finally {
     state.refreshing = false;
     bus.emit('refreshing', false);
-    bus.emit('refreshed');
+    // The timer's sweep (no `force`) is the app's own doing; Refresh, the `r` key, Retry and
+    // the actions that follow a trust decision all pass `force` and are a person's.
+    bus.emit('refreshed', { byPerson: !!force });
   }
   updateBadge();
   publishPopupSummary();
@@ -1532,6 +1557,33 @@ export async function demandDataset(ids, dataset, { force = false } = {}) {
 }
 
 /**
+ * Whether the running request policy fetches nothing on its own (Client basis, the
+ * shipped one): the core goes to a cluster only when a page asks. Under it a page that
+ * simply reads what the core holds opens onto a fleet nothing was ever fetched for.
+ * False until the core has said which policy it runs.
+ */
+export function fetchesOnlyOnAsk() {
+  const p = fleet.policy;
+  return fleetMode() && !!p && (p.resolvedMode || p.mode) === 'on-demand';
+}
+
+/**
+ * What a page does on opening under such a policy: asks the core, in one message per
+ * dataset, for the datasets it shows — for the clusters that have none or an old one
+ * (demandDataset decides which, and does not ask twice in a row). The answers arrive as
+ * pushes and the page redraws as they land, the ones not in yet shown as unknown.
+ *
+ * A no-op under every other policy: the core is already keeping those fresh, and a fleet
+ * that chose `hybrid` chose reading the rest to be a decision (the page's coverage bar).
+ * Returns whether it asked.
+ */
+export async function askForPage(ids, datasets, { force = false } = {}) {
+  if (!fetchesOnlyOnAsk() || !ids || !ids.length) return false;
+  for (const ds of datasets) await demandDataset(ids, ds, { force }).catch(() => false);
+  return true;
+}
+
+/**
  * What the core holds for one dataset, every cluster, applied — without moving `seq`: this
  * is a side read, and the next FLEET_STATE {since} must still hear everything else that
  * changed since the last one.
@@ -1620,7 +1672,8 @@ async function pushedSync({ full = false } = {}) {
 function announceRefreshed() {
   if (fleet.announceTimer) { clearTimeout(fleet.announceTimer); fleet.announceTimer = null; }
   fleet.lastAnnounce = Date.now();
-  bus.emit('refreshed');
+  // Not something a person asked for: the page body waits for idle (onRefreshed, quiet-ui.js).
+  bus.emit('refreshed', { byPerson: false });
   updateBadge();
   publishPopupSummary();
 }
@@ -1913,8 +1966,45 @@ const diskHeld = new Map();
  * definition every count on screen uses: the Clusters summary, the nav badge, the top bar
  * and the per-cluster column. The Alerts page lists acknowledged ones too, separately.
  */
-export function openAlertsNow() { return openAlerts(cachedAlerts(), { isAcked, isSilenced: alertSilenced }); }
+export function openAlertsNow() { return mergedAlerts().filter(isOpen); }
 export function openAlertCounts() { return alertCounts(openAlertsNow()); }
+
+/**
+ * Alerts as the Alerts page shows them: repeats of one rule on one cluster merged into one
+ * (core/alert-groups.js), each with its state — open, acknowledged or silenced. The one list
+ * behind every count: the Alerts page, the tab badge, the top bar and the Clusters summary
+ * all read it, so "open" is one definition and one number.
+ *
+ * Memoised on what can change it: the alert list itself, the bus (data, acknowledgements,
+ * silences — see alertsMemo.rev), and the acknowledgement store.
+ */
+const mergedMemo = { alerts: null, rev: -1, acks: -1, at: 0, value: [] };
+function mergeContext(now) {
+  return {
+    now,
+    data: (id) => state.data.get(id) || null,
+    defaults: state.defaults,
+    ackFor, isAcked, silenced: (a) => alertSilenced(a),
+    startOf: (k) => alertHistory.startOf(k),
+    itemFirstSeen: (k, id) => alertHistory.itemFirstSeen(k, id),
+    approxStart: (k) => alertHistory.approxStart(k),
+  };
+}
+/**
+ * `fresh` computes from alerts() itself rather than the memo — for the caller that must see
+ * a change made by hand a moment ago (the notifier, which compares one pass with the next).
+ */
+export function mergedAlerts({ fresh = false } = {}) {
+  const now = Date.now();
+  if (fresh) return mergeAlerts(alerts(), mergeContext(now));
+  const raw = cachedAlerts();
+  const same = alertsMemo.value === mergedMemo.alerts && alertsMemo.rev === mergedMemo.rev
+    && acksRev() === mergedMemo.acks && now - mergedMemo.at < ALERTS_MEMO_MS;
+  if (same) return mergedMemo.value;
+  const value = mergeAlerts(raw, mergeContext(now));
+  Object.assign(mergedMemo, { alerts: alertsMemo.value, rev: alertsMemo.rev, acks: acksRev(), at: now, value });
+  return value;
+}
 
 /** Set by the silences store (core/silences.js) once it has loaded; nothing is silenced before. */
 let alertSilenced = () => false;
@@ -2119,7 +2209,7 @@ function publishPopupSummary() {
         version: (d.info && d.info.version && d.info.version.number) || '',
       };
     });
-    if (globalThis.chrome && chrome.storage && chrome.storage.session) chrome.storage.session.set({ summary: { at: Date.now(), rows, alerts: cachedAlerts().length } });
+    if (globalThis.chrome && chrome.storage && chrome.storage.session) chrome.storage.session.set({ summary: { at: Date.now(), rows, alerts: mergedAlerts().length } });
   } catch (_) { /* storage.session unavailable */ }
 }
 

@@ -17,6 +17,7 @@ pub mod catalogue;
 pub mod entry;
 pub mod events;
 pub mod policy;
+pub mod reply;
 pub mod scheduler;
 pub mod store;
 
@@ -28,6 +29,7 @@ use entry::{answer, error_of, reached, Entry, Outcome, ReachState, Status};
 use events::{EventsOwner, FleetEvent, Reauth, Tickets};
 use parking_lot::{Mutex, RwLock};
 use policy::Policy;
+use reply::Reply;
 use scheduler::{Candidate, Config, SpecLite, State};
 use serde_json::{json, Map, Value};
 use std::collections::{HashMap, HashSet};
@@ -89,6 +91,27 @@ impl Fleet {
     }
 }
 
+impl Fleet {
+    /// The disk cache, for the housekeeping sweep.
+    pub(crate) fn disk_store(&self) -> &Arc<store::DiskStore> {
+        &self.disk
+    }
+
+    /// Redis, for the housekeeping sweep.
+    #[cfg(feature = "bridge")]
+    pub(crate) fn redis_store(&self) -> &Arc<store::RedisStore> {
+        &self.redis
+    }
+
+    /// Housekeeping for the poller's in-memory bookkeeping; see `State::housekeep`. Returns
+    /// that, and how many expired events tickets went.
+    pub(crate) fn sweep_memory(&self, known: Option<&HashSet<String>>, now: u64, dry_run: bool) -> (scheduler::StateSweep, usize) {
+        let watch_ms = self.cfg.read().watch_ms;
+        let st = self.state.lock().housekeep(known, now, watch_ms, dry_run);
+        (st, self.tickets.sweep(dry_run))
+    }
+}
+
 fn is_guest(caller: Option<&Caller>) -> bool {
     caller.is_some_and(|c| c.role == Role::Guest)
 }
@@ -111,18 +134,11 @@ impl Core {
         if self.fleet.started.swap(true, Ordering::SeqCst) {
             return;
         }
-        let restored = self.fleet.disk.load_all();
-        let n = restored.len();
-        {
-            let mut st = self.fleet.state.lock();
-            // The first ten minutes count as watched, so a restart warms the whole cache
-            // before the first person arrives instead of when they do.
-            st.last_activity = now_ms();
-            for (c, ds, mut e) in restored {
-                e.seq = st.next_seq();
-                st.entries.insert((c, ds), e);
-            }
-        }
+        crate::memory::log_budget();
+        // The first ten minutes count as watched, so a restart warms the whole cache
+        // before the first person arrives instead of when they do.
+        self.fleet.state.lock().last_activity = now_ms();
+        let (n, skipped) = self.fleet_restore_disk();
         // Held weakly, so the poller ends with the core instead of keeping it alive.
         let weak = Arc::downgrade(self);
         // Redis is read on the side: a Redis that is down costs a connect timeout, and the
@@ -149,7 +165,8 @@ impl Core {
         });
         let cfg = self.fleet.cfg.read().clone();
         tracing::info!(
-            restored = n, mode = cfg.mode.as_str(), health_secs = cfg.health_secs, concurrency = cfg.global,
+            restored = n, over_budget = skipped, cache_mib = cfg.cache_bytes >> 20,
+            mode = cfg.mode.as_str(), health_secs = cfg.health_secs, concurrency = cfg.global,
             "fleet poller started"
         );
     }
@@ -175,25 +192,95 @@ impl Core {
         self.fleet.state.lock().last_activity = now_ms();
     }
 
+    /// The disk cache, within the budget: health first, then newest first (`restore_order`),
+    /// one file at a time, each read only if it fits — its size is known from the file
+    /// before it is read. 0.3.21 read and parsed every file whatever the budget, and with
+    /// Redis's copy on top that was more than the container had. Returns (restored, left
+    /// out for the budget).
+    fn fleet_restore_disk(&self) -> (usize, usize) {
+        let budget = self.fleet.cfg.read().cache_bytes;
+        let mut found = self.fleet.disk.found();
+        store::restore_order(&mut found);
+        let (mut n, mut skipped) = (0, 0);
+        for f in found {
+            let Some(fits) = self.fleet_restore_fits(&f, budget) else { continue };
+            if !fits {
+                skipped += 1;
+                continue;
+            }
+            let Some(e) = self.fleet.disk.load(&f) else { continue };
+            if self.fleet_restore_one(f.cluster, f.ds, e) {
+                n += 1;
+            }
+        }
+        (n, skipped)
+    }
+
+    /// Whether a found entry is worth reading: `None` when memory already holds the same
+    /// or newer (a page asked before the restore got to it, or the disk had it), else
+    /// whether it fits the budget once the copy it would replace is gone.
+    fn fleet_restore_fits(&self, f: &store::Found, budget: usize) -> Option<bool> {
+        let st = self.fleet.state.lock();
+        let have = st.entries.get(&(f.cluster.clone(), f.ds));
+        if have.is_some_and(|h| h.fetched_at >= f.fetched_at) {
+            return None;
+        }
+        Some(st.total_cost() - have.map_or(0, Entry::cost) + f.cost() <= budget)
+    }
+
+    /// Put one restored entry in, unless something newer got there first.
+    fn fleet_restore_one(&self, cluster: String, ds: Dataset, mut e: Entry) -> bool {
+        let mut st = self.fleet.state.lock();
+        let key = (cluster, ds);
+        if st.entries.get(&key).is_some_and(|have| have.fetched_at >= e.fetched_at) {
+            return false;
+        }
+        e.seq = st.next_seq();
+        st.entries.insert(key, e);
+        true
+    }
+
+    /// Redis, after the disk, for what it holds newer than the disk did — which is most
+    /// large bodies on a core that has been up a while, because those reach the disk at
+    /// most once a minute and Redis every time.
+    ///
+    /// Freshness is decided from each value's first few hundred bytes (`RedisStore::found`);
+    /// only a body that is newer than what memory holds, and fits the budget once the copy
+    /// it replaces is gone, is fetched — one at a time, so the most this ever holds twice
+    /// is one entry for the moment it is swapped in. Never the whole cache twice.
     #[cfg(feature = "bridge")]
     async fn fleet_restore_redis(&self) {
         if !self.fleet.redis.configured() {
             return;
         }
-        let got = self.fleet.redis.load_all().await;
-        let mut st = self.fleet.state.lock();
-        let mut n = 0;
-        for (c, ds, mut e) in got {
-            let key = (c, ds);
-            let newer = st.entries.get(&key).is_none_or(|have| have.fetched_at < e.fetched_at);
-            if newer {
-                e.seq = st.next_seq();
-                st.entries.insert(key, e);
+        let budget = self.fleet.cfg.read().cache_bytes;
+        let mut found = self.fleet.redis.found().await;
+        store::restore_order(&mut found);
+        let (mut n, mut skipped) = (0, 0);
+        for f in found {
+            let Some(fits) = self.fleet_restore_fits(&f, budget) else { continue };
+            if !fits {
+                skipped += 1;
+                continue;
+            }
+            let Some(e) = self.fleet.redis.load(&f).await else { continue };
+            if self.fleet_restore_one(f.cluster, f.ds, e) {
                 n += 1;
             }
         }
-        if n > 0 {
-            tracing::info!(restored = n, "fleet cache: newer entries restored from redis");
+        if n > 0 || skipped > 0 {
+            tracing::info!(restored = n, over_budget = skipped, "fleet cache: newer entries restored from redis");
+        }
+    }
+
+    /// Bring the cache within its budget, and say so when that cost background bodies.
+    fn fleet_evict(&self, st: &mut State, cfg: &Config) {
+        let dropped = st.evict(cfg.cache_bytes);
+        if dropped > 0 {
+            tracing::warn!(
+                dropped, cache_mib = cfg.cache_bytes >> 20,
+                "fleet cache: over its memory budget even without on-demand bodies — background datasets were dropped; raise CORE_MEM_LIMIT (or ELASTICPRO_CACHE_MB)"
+            );
         }
     }
 
@@ -240,7 +327,9 @@ impl Core {
         }
     }
 
-    async fn fleet_get(self: &Arc<Self>, cluster: &str, q: &Query) -> Value {
+    /// One request of a dataset. `class` is the gate's: `Prompted` when somebody is
+    /// waiting on this dataset, `Background` for the poller's due work.
+    async fn fleet_get(self: &Arc<Self>, cluster: &str, q: &Query, class: crate::gate::Class) -> Value {
         let req = EsRequest {
             cluster_id: cluster.to_string(),
             url: None,
@@ -257,17 +346,17 @@ impl Core {
             auth_header: None,
             allow_writes: false,
             origin: Some(format!("poller:{}", q.key)),
-            opaque_id: None,
-            user: None,
+            class,
+            ..Default::default()
         };
         answer(self.es_req(req).await)
     }
 
     /// Repository names from the cached `policies` answer, when there is a good one.
     fn fleet_known_repos(&self, cluster: &str) -> Option<Vec<String>> {
-        let st = self.fleet.state.lock();
-        let e = st.entries.get(&(cluster.to_string(), Dataset::Policies))?;
-        let repos = e.data.as_ref()?.get("repos")?;
+        // The body out from under the lock first; then only its `repos` part is parsed.
+        let body = self.fleet.state.lock().entries.get(&(cluster.to_string(), Dataset::Policies))?.data.clone()?;
+        let repos = body.field("repos")?;
         if repos.get("ok") != Some(&json!(true)) {
             return None;
         }
@@ -278,7 +367,7 @@ impl Core {
 
     /// One dataset, request by request. Sequential on purpose: two jobs per cluster at
     /// most, each asking one thing at a time, is the load this was built to keep to.
-    async fn fleet_fetch(self: &Arc<Self>, cluster: &str, ds: Dataset, log_pattern: Option<&str>) -> Outcome {
+    async fn fleet_fetch(self: &Arc<Self>, cluster: &str, ds: Dataset, log_pattern: Option<&str>, class: crate::gate::Class) -> Outcome {
         let mut map = Map::new();
         match ds {
             Dataset::Snapshots | Dataset::SnapshotsFull => {
@@ -286,7 +375,7 @@ impl Core {
                     Some(r) => r,
                     None => {
                         let q = Query { key: "repos".into(), path: catalogue::REPOS_PATH.into(), timeout_ms: 15_000 };
-                        let a = self.fleet_get(cluster, &q).await;
+                        let a = self.fleet_get(cluster, &q, class).await;
                         if !reached(&a) {
                             return Outcome::Failed(error_of("repos", &a));
                         }
@@ -304,14 +393,14 @@ impl Core {
                 let mut by = Map::new();
                 for r in repos {
                     let Some(q) = ds.repo_query(&r) else { continue };
-                    let mut a = self.fleet_get(cluster, &q).await;
+                    let mut a = self.fleet_get(cluster, &q, class).await;
                     let mut source = if ds == Dataset::Snapshots { "cat" } else { "verbose" };
                     // The verbose listing fails on some repositories (a missing blob, an
                     // old ES); _cat still counts them, without the index names — which
                     // the page then says it cannot know, rather than showing none.
                     if ds == Dataset::SnapshotsFull && a.get("ok") != Some(&json!(true)) {
                         let cat = Query { key: r.clone(), path: catalogue::snapshots_cat_path(&r), timeout_ms: 30_000 };
-                        let b = self.fleet_get(cluster, &cat).await;
+                        let b = self.fleet_get(cluster, &cat, class).await;
                         if reached(&b) {
                             a = b;
                             source = "cat";
@@ -329,7 +418,7 @@ impl Core {
                 // Reachable when either answers — the same rule the page used.
                 let mut first_err = None;
                 for q in ds.queries(log_pattern) {
-                    let a = self.fleet_get(cluster, &q).await;
+                    let a = self.fleet_get(cluster, &q, class).await;
                     if !reached(&a) && first_err.is_none() {
                         first_err = Some(error_of(&q.key, &a));
                     }
@@ -341,7 +430,7 @@ impl Core {
             }
             _ => {
                 for q in ds.queries(log_pattern) {
-                    let a = self.fleet_get(cluster, &q).await;
+                    let a = self.fleet_get(cluster, &q, class).await;
                     if !reached(&a) {
                         return Outcome::Failed(error_of(&q.key, &a));
                     }
@@ -354,7 +443,9 @@ impl Core {
 
     async fn fleet_job(self: Arc<Self>, c: Candidate, log_pattern: Option<String>) {
         let t0 = std::time::Instant::now();
-        let outcome = self.fleet_fetch(&c.cluster, c.dataset, log_pattern.as_deref()).await;
+        // Somebody waiting on it (a person's ask, PRIO_USER) is prompted; due work is background.
+        let class = if c.prio == scheduler::PRIO_USER { crate::gate::Class::Prompted } else { crate::gate::Class::Background };
+        let outcome = self.fleet_fetch(&c.cluster, c.dataset, log_pattern.as_deref(), class).await;
         let took = t0.elapsed().as_millis() as u64;
         self.fleet_finish((c.cluster, c.dataset), outcome, took);
     }
@@ -366,9 +457,8 @@ impl Core {
         let (waiters, reach_changed, entry, reach) = {
             let mut st = self.fleet.state.lock();
             let (w, rc) = st.complete(&key, outcome, took, now, cfg, &mut catalogue::jittered_ms);
-            if key.1.class() == Class::OnDemand {
-                st.evict(cfg.cache_bytes);
-            }
+            // Every class counts: see `State::evict` for what goes first.
+            self.fleet_evict(&mut st, cfg);
             (w, rc, st.entries.get(&key).cloned(), st.reach.get(&key.0).cloned())
         };
         for w in waiters {
@@ -448,6 +538,13 @@ impl Core {
 
     /// `FLEET_STATE {since?, include?}`.
     pub(crate) fn fleet_state_msg(&self, msg: &Value, caller: Option<&Caller>) -> Value {
+        self.fleet_state_reply(msg, caller).into_value()
+    }
+
+    /// `FLEET_STATE`, with the bodies as they are held (see `reply`). Under the lock only
+    /// the small envelope is built and the bodies' `Arc`s are taken; they are written out
+    /// after it is let go, by whoever sends the reply.
+    pub(crate) fn fleet_state_reply(&self, msg: &Value, caller: Option<&Caller>) -> Reply {
         let since = msg.get("since").and_then(Value::as_u64);
         let guest = is_guest(caller);
         let include: Vec<Dataset> = dataset_list(msg.get("include")).unwrap_or_else(background)
@@ -457,6 +554,7 @@ impl Core {
         let known = self.all_specs().len();
         let now = now_ms();
         let cfg = self.fleet.cfg.read().clone();
+        let mut reply = Reply::default();
         let mut st = self.fleet.state.lock();
         st.last_activity = now;
         let mut clusters = Map::new();
@@ -470,7 +568,7 @@ impl Core {
                     Some(e) => {
                         if since.is_none_or(|s| e.seq > s) {
                             e.last_read = now;
-                            datasets.insert(d.name().into(), serde_json::to_value(&*e).unwrap_or(Value::Null));
+                            datasets.insert(d.name().into(), reply.entry(e));
                         }
                     }
                     // A background dataset not fetched yet is worth saying so about; an
@@ -488,34 +586,42 @@ impl Core {
                 clusters.insert(id.clone(), json!({ "reach": reach, "datasets": datasets, "throttle": throttle }));
             }
         }
-        json!({
-            "ok": true, "epoch": self.fleet.epoch, "seq": st.seq, "now": now, "running": self.fleet_enabled(),
+        let seq = st.seq;
+        drop(st);
+        reply.value = json!({
+            "ok": true, "epoch": self.fleet.epoch, "seq": seq, "now": now, "running": self.fleet_enabled(),
             "full": since.is_none(),
             "catalogue": catalogue::catalogue_json(&cfg, known),
             "policy": { "mode": cfg.mode.as_str(), "resolvedMode": cfg.resolved_mode(known).as_str(), "pausedAll": cfg.paused_all, "paused": cfg.paused.iter().cloned().collect::<Vec<_>>() },
             "clusterIds": ids,
             "clusters": clusters,
-        })
+        });
+        reply
     }
 
     /// `CLUSTER_DATASET {clusterId, dataset, maxAgeSec?, wait?}`. The gate has already
     /// decided the caller may see this cluster.
     pub(crate) async fn cluster_dataset_msg(self: &Arc<Self>, msg: &Value, caller: Option<&Caller>) -> Value {
+        self.cluster_dataset_reply(msg, caller).await.into_value()
+    }
+
+    /// `CLUSTER_DATASET`, with the body as it is held (see `reply`).
+    pub(crate) async fn cluster_dataset_reply(self: &Arc<Self>, msg: &Value, caller: Option<&Caller>) -> Reply {
         let id = msg.get("clusterId").and_then(Value::as_str).unwrap_or("").to_string();
         let Some(ds) = msg.get("dataset").and_then(Value::as_str).and_then(Dataset::parse) else {
             return json!({ "ok": false, "kind": "bad_request",
-                           "message": format!("unknown dataset {:?}", msg.get("dataset")) });
+                           "message": format!("unknown dataset {:?}", msg.get("dataset")) }).into();
         };
         if is_guest(caller) && !ds.guest_may_read() {
             return json!({ "ok": false, "kind": "forbidden", "role": "guest",
-                           "message": format!("the guest role can see cluster health only, not {}", ds.name()) });
+                           "message": format!("the guest role can see cluster health only, not {}", ds.name()) }).into();
         }
         if self.spec_for(&id).is_none() {
-            return json!({ "ok": false, "kind": "not_found", "message": format!("no cluster {id:?}") });
+            return json!({ "ok": false, "kind": "not_found", "message": format!("no cluster {id:?}") }).into();
         }
         if !self.fleet_enabled() {
             return json!({ "ok": false, "kind": "fleet_off",
-                           "message": "the fleet cache is not running in this core; ask the cluster directly" });
+                           "message": "the fleet cache is not running in this core; ask the cluster directly" }).into();
         }
         let cfg = self.fleet.cfg.read().clone();
         let wait = match msg.get("wait") {
@@ -562,17 +668,22 @@ impl Core {
             Some(rx) => tokio::time::timeout(wait, rx).await.is_err(),
             None => false,
         };
-        let mut st = self.fleet.state.lock();
-        let reach = st.reach.get(&id).cloned().unwrap_or_default();
-        let entry = match st.entries.get_mut(&key) {
-            Some(e) => {
-                e.last_read = now_ms();
-                serde_json::to_value(&*e).unwrap_or(Value::Null)
-            }
-            None => serde_json::to_value(Entry::never(cfg.stale_after_ms(ds), None)).unwrap_or(Value::Null),
+        let mut reply = Reply::default();
+        let (entry, reach) = {
+            let mut st = self.fleet.state.lock();
+            let reach = st.reach.get(&id).cloned().unwrap_or_default();
+            let entry = match st.entries.get_mut(&key) {
+                Some(e) => {
+                    e.last_read = now_ms();
+                    reply.entry(e)
+                }
+                None => serde_json::to_value(Entry::never(cfg.stale_after_ms(ds), None)).unwrap_or(Value::Null),
+            };
+            (entry, reach)
         };
-        json!({ "ok": true, "clusterId": id, "dataset": ds.name(), "entry": entry, "reach": reach,
-                "waited": waited, "timedOut": timed_out })
+        reply.value = json!({ "ok": true, "clusterId": id, "dataset": ds.name(), "entry": entry, "reach": reach,
+                              "waited": waited, "timedOut": timed_out });
+        reply
     }
 
     /// `REFRESH {clusterIds?: [..] | "all", datasets?: [..]}`: go now, rather than when
@@ -642,6 +753,8 @@ impl Core {
             "stored": self.fleet.policy_path.as_ref().is_some_and(|p| p.exists()),
             "warning": self.fleet.policy_warning,
             "running": self.fleet_enabled(),
+            // The gate's limits, which the poller's share above can never exceed.
+            "gate": self.request_config().limits,
         });
         match saved {
             Some(Ok(())) => { out["saved"] = json!(true); }

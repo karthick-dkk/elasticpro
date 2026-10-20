@@ -292,6 +292,33 @@ impl NotifyStore {
         n
     }
 
+    /// Housekeeping: apply the retention now — records past their days go, and anybody over
+    /// the per-person cap loses their oldest. It otherwise runs only when the file is loaded
+    /// and when a record arrives. Returns how many went; with `dry_run` it only counts.
+    pub fn prune_now(&self, dry_run: bool) -> usize {
+        let before = self.inner.records.lock().len();
+        if dry_run {
+            // The same rule on a copy: what a real prune would leave.
+            let copy = Inner {
+                path: None,
+                retention_ms: self.inner.retention_ms,
+                records: Mutex::new(self.inner.records.lock().clone()),
+                dirty: AtomicBool::new(false),
+                flush_pending: AtomicBool::new(false),
+                writing: Mutex::new(()),
+            };
+            copy.prune(now_ms());
+            let after = copy.records.lock().len();
+            return before - after;
+        }
+        self.inner.prune(now_ms());
+        let gone = before - self.inner.records.lock().len();
+        if gone > 0 {
+            self.changed();
+        }
+        gone
+    }
+
     /// Write out now whatever is waiting for the debounce.
     pub fn flush(&self) {
         self.inner.flush();
@@ -379,5 +406,49 @@ impl Drop for Inner {
     /// Whatever the debounce was still holding is written on the way out.
     fn drop(&mut self) {
         self.flush();
+    }
+}
+
+#[cfg(test)]
+mod housekeeping_tests {
+    use super::*;
+
+    fn rec(user: &str, id: &str, age_days: u64) -> Record {
+        let at = now_ms() - age_days * DAY_MS;
+        Record { id: id.into(), user: user.into(), message: "m".into(), kind: "ok".into(), detail: vec![], meta: String::new(), cluster: None, at, updated_at: at }
+    }
+
+    #[test]
+    fn prune_now_applies_the_retention_to_a_store_nobody_has_written_to() {
+        let s = NotifyStore::open_with_days(None, 30);
+        s.inner.records.lock().extend([rec("a", "old1", 45), rec("a", "old2", 31), rec("a", "new", 2), rec("b", "bnew", 0)]);
+        // A dry run counts what a real one would remove, and removes nothing.
+        assert_eq!(s.prune_now(true), 2);
+        assert_eq!(s.inner.records.lock().len(), 4);
+        assert_eq!(s.prune_now(false), 2);
+        let left: Vec<String> = s.inner.records.lock().iter().map(|r| r.id.clone()).collect();
+        assert_eq!(left, vec!["new", "bnew"]);
+        assert_eq!(s.prune_now(false), 0, "nothing more to do");
+    }
+
+    #[test]
+    fn prune_now_enforces_the_per_person_cap_on_the_oldest() {
+        let s = NotifyStore::open_with_days(None, 3650);
+        {
+            let mut r = s.inner.records.lock();
+            for i in 0..(MAX_PER_USER + 5) {
+                let mut x = rec("a", &format!("n{i}"), 0);
+                x.at -= i as u64; // n0 newest
+                x.updated_at = x.at;
+                r.push(x);
+            }
+            r.push(rec("b", "other", 0));
+        }
+        assert_eq!(s.prune_now(true), 5);
+        assert_eq!(s.prune_now(false), 5);
+        let r = s.inner.records.lock();
+        assert_eq!(r.iter().filter(|x| x.user == "a").count(), MAX_PER_USER);
+        assert!(!r.iter().any(|x| x.id == format!("n{}", MAX_PER_USER + 4)), "the oldest went");
+        assert!(r.iter().any(|x| x.id == "other"), "another person's history is not touched");
     }
 }

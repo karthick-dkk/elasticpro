@@ -93,7 +93,7 @@ export function tuneAlerts(list, ctx = {}) {
       out.push({ key: `${clusterOf(spikes[0])}:volume`, level: 'warning', cluster: c,
         title: `${c ? c.name : clusterOf(spikes[0])}: ${spikes.length} field-volume spikes`,
         detail: spikes.slice(0, 3).map((s) => s.title.replace(/^[^:]*:\s*/, '')).join('; ') + (spikes.length > 3 ? `; +${spikes.length - 3} more` : ''),
-        grouped: spikes.length });
+        grouped: spikes.length, members: spikes });
     }
     for (const a of rows) if (!drop.has(a)) out.push(a);
   }

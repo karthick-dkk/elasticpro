@@ -20,7 +20,7 @@
  * What it measures (1440x900, 1280x800, 1024x768 and the app framed 1180 wide, the way the
  * Zabbix module shows it):
  *   pages     documentElement.scrollWidth <= clientWidth for all 12 pages, each view of the
- *             Alerts page, every segment / tab on a page, with every <details> open. A wide
+ *             Alerts page grouped each way, every segment / tab on a page, with every <details> open. A wide
  *             table scrolling inside its own .tbl-wrap is intended and is not the page.
  *   dialogs   every dialog the code can open — called by name where the page does not offer
  *             a button for it, and found by pressing the buttons and row-menu items of every
@@ -65,7 +65,7 @@ const SIZES = [[1440, 900, false], [1280, 800, false], [1024, 768, false], [1280
   .filter(([w, , framed]) => !arg('--sizes', '') || arg('--sizes', '').split(',').includes(framed ? 'f' : String(w)));
 const FRAME_W = 1180;
 /** The buttons that change what a page shows without doing anything: segments, tabs, the Config page's sections. */
-const VIEW_SEL = '#view .seg button, #view [role=tab], #view .tabs button, #view .subnav button';
+const VIEW_SEL = '#view .seg button, #view .seg-btn, #view [role=tab], #view .tabs button, #view .subnav button';
 const PAGES = ['alerts', 'overview', 'indices', 'shards', 'logs', 'console', 'snapshots', 'volume', 'automation', 'requests', 'accounts', 'settings']
   .filter((id) => !PAGE_FILTER || PAGE_FILTER.split(',').includes(id));
 
@@ -342,7 +342,7 @@ async function run(browserName, [vw, vh, framed]) {
 
   /* ---- 1. pages ---- */
   if (ONLY.includes('pages')) {
-    const ENTRIES = PAGES.flatMap((id) => (id === 'alerts' ? [[id, ''], [id, 'graph'], [id, 'both']] : [[id, '']]));
+    const ENTRIES = PAGES.map((id) => [id, '']);
     for (const [id, variant] of ENTRIES) {
       const label = variant ? `${id}:${variant}` : id;
       await goPage(id);
@@ -698,7 +698,7 @@ async function run(browserName, [vw, vh, framed]) {
       let ok = false, m = { seen: 0, issues: [] };
       for (let attempt = 0; attempt < 3 && !m.seen; attempt++) {
         ok = await F.evaluate((which) => {
-          const bs = [...document.querySelectorAll('#view tbody tr button')].filter((b) => /💬/.test(b.textContent) && b.offsetParent);
+          const bs = [...document.querySelectorAll('#view .arow button, #view tbody tr button')].filter((b) => /💬/.test(b.textContent) && b.offsetParent);
           if (!bs.length) return false;
           (which === 'first' ? bs[0] : bs[bs.length - 1]).setAttribute('data-fit-hit', ''); return true;
         }, which);

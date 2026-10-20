@@ -57,7 +57,8 @@ fn set_cookie(token: &str, max_age: u64) -> String {
 /// Message types that change something and are therefore audited by user.
 const AUDITED: &[&str] = &["ES", "WRITE_UNLOCK", "TRUST_CERT", "UNTRUST_CERT", "TRUST_HOSTKEY",
                            "UNTRUST_HOSTKEY", "CONFIG_WRITE", "FILE_WRITE", "FORGET",
-                           "ZABBIX_LINK_SET", "ZABBIX_PAIR_BEGIN", "ZABBIX_UNPAIR"];
+                           "ZABBIX_LINK_SET", "ZABBIX_PAIR_BEGIN", "ZABBIX_UNPAIR",
+                           "HOUSEKEEPING_RUN"];
 
 struct App {
     core: Arc<Core>,
@@ -126,6 +127,9 @@ async fn run() {
     // the hosted binary, rather than in Core::new — a scheduler that starts itself
     // wherever a Core is built would run in the desktop app and in every test.
     core.start_delay_sink();
+    // Cleans what the core itself leaves behind. Started here for the same reason: a
+    // scheduler that started itself in Core::new would run in every test.
+    core.start_housekeeping();
     // The last cluster setup an admin applied, so a restart does not leave everybody
     // else on "not primed" until an admin next opens the app.
     core.restore_prime().await;
@@ -134,13 +138,18 @@ async fn run() {
     if core.edition() == Edition::Hosted {
         let first = core.zabbix_sync().await;
         if first["kind"] != "not_configured" {
-            tracing::info!(result = %first, "zabbix sync at start");
+            // Capped: on a large estate `skipped` alone named hundreds of hosts, every start,
+            // in one log line.
+            tracing::info!(result = %elasticpro_core::errors::for_log(&first, 5), "zabbix sync at start");
         }
     }
     core.start_zabbix_sync();
     // After the prime and the first Zabbix sync, so the poller starts knowing the clusters
     // it is to poll and does not prune a restored cache it has not been told about yet.
     core.start_fleet_poller();
+    // Stuck records closed, the read cache aged, our orphaned searches on the clusters
+    // cancelled (ES_TASK_REAPER). See bridge.rs, "the reapers".
+    core.start_request_reaper();
     let app = Router::new()
         .route("/bridge", post(bridge))
         // Fleet cache changes, pushed. Opened with a ticket from EVENTS_TICKET; see events().
@@ -302,7 +311,10 @@ async fn bridge(
 
     let t = msg.get("type").and_then(|v| v.as_str()).unwrap_or("").to_string();
     let source = source_of(&app, &headers, peer);
-    let out = app.core.handle_as_from_at(msg.clone(), caller.clone(), reauth, source).await;
+    // A reply holding cached fleet bodies is written with them as the text they are held
+    // as (fleet::reply); everything else is the plain Value it always was.
+    let mut reply = app.core.handle_reply_as_from_at(msg.clone(), caller.clone(), reauth, source).await;
+    let out = &reply.value;
 
     // The audit line: who did what to which cluster, and whether it went through. This
     // is the record that answers "who deleted that index".
@@ -330,7 +342,7 @@ async fn bridge(
     }
     // Signing in directly: the session goes to the browser as the HttpOnly cookie and is
     // taken out of the reply, so the page's scripts never hold it. Signing out clears it.
-    let mut out = out;
+    let out = &mut reply.value;
     let mut cookie: Option<String> = None;
     if matches!(t.as_str(), "LOGIN" | "BOOTSTRAP_ADMIN") && out.get("ok") == Some(&serde_json::json!(true)) {
         if let Some(tok) = out.as_object_mut().and_then(|o| o.remove("session")).and_then(|v| v.as_str().map(String::from)) {
@@ -340,6 +352,11 @@ async fn bridge(
     } else if t == "LOGOUT" {
         cookie = Some(set_cookie("", 0));
     }
+    if reply.has_bodies() {
+        // Only FLEET_STATE and CLUSTER_DATASET carry bodies, and neither sets a cookie.
+        return ([(axum::http::header::CONTENT_TYPE, "application/json")], reply.to_json()).into_response();
+    }
+    let out = reply.value;
     match cookie {
         Some(c) => ([(axum::http::header::SET_COOKIE, c)], Json(out)).into_response(),
         None => Json(out).into_response(),

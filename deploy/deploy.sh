@@ -155,7 +155,7 @@ ensure_config() {
   cp "$CONFIG_EXAMPLE" "$target"
   # A host that was set up before config.txt existed has its port and memory limit in .env.
   # Carry them over, or the first --apply-config would put the port back to 443 and the
-  # memory back to 1g — a settings file must start out saying what is already true.
+  # memory back to 2g — a settings file must start out saying what is already true.
   v=$(env_get LISTEN); [ -z "$v" ] || cfg_set "$target" LISTEN_PORT "$v"
   v=$(env_get ELASTICPRO_MEM_LIMIT); [ -z "$v" ] || cfg_set "$target" CORE_MEM_LIMIT "$v"
   [ "$DRY" = 1 ] || say "== made deploy/$CONFIG from $CONFIG_EXAMPLE (edit it, then: deploy/deploy.sh --apply-config)"
@@ -232,7 +232,26 @@ LOG_LEVEL enum error,warn,info,debug,trace
 POLL_HEALTH_SECONDS int 180 300
 POLL_CONCURRENCY int 1 256
 ES_CONCURRENCY int 1 1024
+ES_PER_CLUSTER int 1 1024
+ES_PER_JUMP_HOST int 1 1024
+ES_BACKGROUND_RESERVE int 0 1023
+ES_QUEUE_MAX int 0 100000
+ES_QUEUE_PER_USER int 1 100000
+ES_QUEUE_WAIT_MS int 100 600000
+ES_MAX_TIMEOUT_MS int 1000 600000
+ES_READ_CACHE_SECONDS int 0 300
+ES_READ_CACHE_MB int 0 65536
+ES_MAX_RESPONSE_MB int 1 4096
+ES_MAX_FLEET_RESPONSE_MB int 1 4096
+ES_TASK_REAPER enum off,orphans,overdue
+ES_TASK_MAX_SECONDS int 30 86400
+ZABBIX_CONCURRENCY int 1 64
 CACHE_MB int 1 1048576
+HOUSEKEEPING_MINUTES int 0 10080
+HOUSEKEEPING_CACHE_DAYS int 1 3650
+HOUSEKEEPING_DRY_RUN bool
+SESSION_IDLE_DAYS int 0 3650
+ACTIVITY_LOG_KEEP_DAYS int 0 3650
 UI_READ_ONLY bool
 UI_AUTO_REFRESH bool
 UI_REFRESH_SECONDS int 5 3600
@@ -279,7 +298,7 @@ cfg_check() {
       while IFS= read -r item; do
         is_hostname "$item" || is_v4 "$item" || is_v6 "$item" || { echo "\"$item\" is not a host name or an IP address"; return 1; }
       done < <(cfg_list "$v") ;;
-    CORE_MEM_LIMIT) [[ $v =~ ^[0-9]+[bBkKmMgG]?$ ]] || { echo "must be a size such as 1g or 512m"; return 1; } ;;
+    CORE_MEM_LIMIT) [[ $v =~ ^[0-9]+[bBkKmMgG]?$ ]] || { echo "must be a size such as 2g or 512m"; return 1; } ;;
     PUBLIC_URL|ZABBIX_URL|ZABBIX_API_URL)
       [[ $v =~ ^https?://[^[:space:]]+$ ]] || { echo "must be a URL starting with http:// or https://"; return 1; } ;;
   esac
@@ -416,7 +435,7 @@ apply_config() {
   if [ -n "$mem_new" ]; then
     if [ "$mem_new" != "$(env_get ELASTICPRO_MEM_LIMIT)" ]; then say "   CORE_MEM_LIMIT → .env ELASTICPRO_MEM_LIMIT=$mem_new"; env_set ELASTICPRO_MEM_LIMIT "$mem_new"; fi
   elif [ -n "$(env_get ELASTICPRO_MEM_LIMIT)" ]; then
-    say "   CORE_MEM_LIMIT is empty → .env ELASTICPRO_MEM_LIMIT removed (default 1g)"; env_del ELASTICPRO_MEM_LIMIT
+    say "   CORE_MEM_LIMIT is empty → .env ELASTICPRO_MEM_LIMIT removed (default 2g)"; env_del ELASTICPRO_MEM_LIMIT
   fi
 
   # nginx: recreate for a new port, reload for new lists (a directory mount shows new files

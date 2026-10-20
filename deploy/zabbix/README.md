@@ -618,13 +618,13 @@ two external ones. The agent accepts passive checks from `172.16.0.0/12`, Docker
 pool; a Docker daemon configured with other address pools needs `ZBX_SERVER_HOST` changed.
 
 **Memory on a 4 GB machine that also runs a 1.6 GB Elasticsearch.** The caps add up to more
-than the machine has at the defaults (ES 1.6 + core 1.0 + Zabbix 1.4 + Vault 0.3 + scrapers
-0.2 ≈ 4.5 GB, before the OS), and a cap is the point where the kernel kills that container —
+than the machine has at the defaults (ES 1.6 + core 2.0 + Zabbix 1.4 + Vault 0.3 + scrapers
+0.2 ≈ 5.5 GB, before the OS), and a cap is the point where the kernel kills that container —
 so size them to fit:
 
 | Container | Default cap | On the shared 4 GB host |
 |---|---|---|
-| ElasticPro core | 1g | `ELASTICPRO_MEM_LIMIT=512m` with `ELASTICPRO_CACHE_MB=64` in `deploy/.env` |
+| ElasticPro core | 2g | `ELASTICPRO_MEM_LIMIT=512m` in `deploy/.env` (the cache sizes itself to a quarter of it) |
 | Redis (`--profile cache`) | 640m | leave the profile off — the disk cache is enough for one core |
 | Zabbix db / server / web / web-service / agent | 320m / 384m / 256m / 384m / 64m | as they are (already sized for this host) |
 | Vault + agent | 256m + 64m | as they are |

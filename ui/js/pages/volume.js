@@ -14,6 +14,8 @@ import { volumeReport, reportRows, SHEET_COLUMNS, CLIENT_COLUMNS, sheetCell, gb,
 import { navigateTo } from '../core/intent.js';
 import { popover } from '../ui/menu.js';
 import { repoSizeCache } from '../lib/idb.js';
+import { takeFocus, revealFocus } from '../core/focus.js';
+import { volumeAnalysisCard, setVolumeAnalysisField } from '../ui/index-metrics.js';
 
 let host = null;
 const ui = { measuring: new Set(), view: 'summary', sort: 'name', dir: 1 };
@@ -61,9 +63,17 @@ export function render(el) {
   el.classList.add('dense');
   // Values centred in every table on this page; see .vol-report in app.css.
   el.classList.add('vol-report');
+  // Opened from a field-volume alert (core/focus.js): that field's volume, above the report.
+  const f = takeFocus('volume');
+  focusField = f && f.field ? f.field : null;
+  focusRevealed = false;
+  if (focusField) setVolumeAnalysisField(focusField);
   ensureIndices();
   draw();
 }
+/** The field an alert asked to see; the analysis card for it is drawn until the page is left. */
+let focusField = null;
+let focusRevealed = false;
 export function onData() { if (host && host.isConnected) draw(); }
 
 /**
@@ -155,6 +165,10 @@ function draw() {
           onclick: () => exportTall(reports),
         }, 'Export as report layout'))),
 
+    focusField && list.length === 1
+      ? h('div', { dataset: { focus: 'field-volume' }, style: { marginBottom: '10px' } }, volumeAnalysisCard(list[0], draw))
+      : null,
+
     built.get('grid', [ui.view, ui.sort, ui.dir, allSig].join('|'),
       () => (ui.view === 'summary' ? fleetTable(reports) : sheetView(reports, activeView()))),
 
@@ -173,6 +187,7 @@ function draw() {
         collapsible(`Volume resource report — ${r.cluster.name}`, r.cluster.url,
           () => clusterCardBody(r), { key: `vol-detail-${r.cluster.id}`, open: reports.length === 1 })))));
   built.end();
+  if (focusField && !focusRevealed && revealFocus(host, '[data-focus="field-volume"]')) focusRevealed = true;
 }
 
 /* ------------------------------- fleet overview ------------------------------- */

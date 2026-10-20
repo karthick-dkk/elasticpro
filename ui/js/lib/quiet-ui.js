@@ -7,10 +7,10 @@
  *    day — which is what "the UI is overloaded" looked like from a chair. The gate sits
  *    between the event and the redraw:
  *      live     — repaint on every event (how it used to be);
- *      pending  — keep what is on screen, count what arrived, show "N updates — Apply",
- *                 and apply by itself once the page has gone `idleMs` without a touch
- *                 (the default);
- *      manual   — never repaint on an event; only Apply, Refresh or navigating does.
+ *      pending  — keep what is on screen while the person is using the page, and draw what
+ *                 arrived by itself once the page has gone `idleMs` (a few seconds)
+ *                 without a touch; nothing on screen says anything was held (the default);
+ *      manual   — never repaint on an event; only Refresh or navigating does.
  *    Pages that are live by nature (a log tail, the console, the Request Centre) pass
  *    straight through whatever the policy says — their content IS the stream.
  *
@@ -25,7 +25,7 @@
 export const REDRAW_POLICIES = ['live', 'pending', 'manual'];
 export const SCOPE_DEFAULTS = ['last-selected', 'all'];
 /** How long a page has to go untouched before pending updates apply themselves. */
-export const IDLE_MS = 60_000;
+export const IDLE_MS = 3_000;
 
 export function normalisePolicy(v, fallback = 'pending') {
   return REDRAW_POLICIES.includes(v) ? v : fallback;
@@ -38,7 +38,7 @@ export function normaliseScope(v, fallback = 'last-selected') {
  * @param {object} o
  * @param {() => void} o.apply        redraw the page now (the caller's coalesced redraw)
  * @param {string|() => string} o.policy  the policy, or a function that reads the current one
- * @param {(n: number) => void} [o.onChange]  the number of held updates changed (0 = none)
+ * @param {(n: number) => void} [o.onChange]  optional: the number of held updates changed (0 = none)
  */
 export function createRedrawGate({ apply, policy = 'pending', onChange = () => {}, idleMs = IDLE_MS,
   now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout } = {}) {
@@ -53,7 +53,7 @@ export function createRedrawGate({ apply, policy = 'pending', onChange = () => {
   function arm() {
     if (timer) return;
     // Armed for the rest of the idle window, not a fresh one: somebody who stopped
-    // touching the page five minutes ago has been idle long enough already.
+    // touching the page a minute ago has been idle long enough already.
     const due = Math.max(0, idleMs - (now() - lastInteraction));
     timer = setTimer(() => {
       timer = null;
@@ -74,13 +74,34 @@ export function createRedrawGate({ apply, policy = 'pending', onChange = () => {
     },
     /** The person touched the page: the idle window starts again. */
     interact() { lastInteraction = now(); },
-    /** Apply what is held and redraw — the pill, Refresh, or a page that asks. */
+    /** Apply what is held and redraw — Refresh, navigating, or a page that asks. */
     apply: doApply,
     /** Forget what is held without redrawing — the page is being drawn afresh anyway. */
     reset() { disarm(); clearCount(); },
     pending: () => count,
     policy: current,
   };
+}
+
+/**
+ * What a `refreshed` event does to the gate. One definition, used by the app shell.
+ *
+ * `refreshed` is emitted for two different reasons and they must not be treated alike:
+ *   - a person asked (Refresh, the `r` key, Retry, a config save, opening a file): they are
+ *     waiting for the page to change, so it applies at once — `{ byPerson: true }`, which is
+ *     also what an event with no payload means;
+ *   - the app did it by itself (the core's push, the auto-refresh timer): `{ byPerson:
+ *     false }`. That refresh's changes already reached the gate as `data` events and are
+ *     held until the page has gone idle; applying here would redraw under somebody who is
+ *     typing, right after the 5 s `refreshed` that every push-carrying change ends in.
+ *     The shell (top bar, nav, status) still updates — only the page body waits.
+ * Returns what happened, 'applied' or 'left'.
+ */
+export function onRefreshed(gate, payload) {
+  const byPerson = !payload || payload.byPerson !== false;
+  if (!byPerson) return 'left';
+  gate.apply();
+  return 'applied';
 }
 
 /** Which cluster the app opens on. 'all' only when the policy asks for the fleet. */

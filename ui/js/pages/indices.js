@@ -23,9 +23,10 @@ import { pageSlice, pagerBar } from '../lib/pager.js';
 import { freshnessBar } from '../lib/freshness.js';
 import { sourceSizeChart, perDayChart, volumeAnalysisCard } from '../ui/index-metrics.js';
 import { templatesView } from '../ui/templates-view.js';
+import { takeFocus } from '../core/focus.js';
 
 let host = null;
-const ui = { sourceFilter: 'all', text: '', status: 'all', sort: 'size', dir: -1, from: '', to: '', loading: false, error: null, page: 0, view: 'indices' };
+const ui = { ilmOnly: false, sourceFilter: 'all', text: '', status: 'all', sort: 'size', dir: -1, from: '', to: '', loading: false, error: null, page: 0, view: 'indices' };
 /** Index names ticked in the table, for the bulk actions. Cleared when the data reloads. */
 const selected = new Set();
 /** Volume-analysis UI state: which field, how far back, and whether a run is in flight. */
@@ -47,6 +48,9 @@ export function render(el) {
   host = el;
   el.classList.add('dense');   // long tables: fit more on one screen
   selected.clear();
+  // Opened from an alert about ILM errors (core/focus.js): only the indices in an error step.
+  const f = takeFocus('indices');
+  if (f && f.ilm) { ui.ilmOnly = true; ui.view = 'indices'; ui.page = 0; if (f.index) ui.text = f.index; }
   syncWrites().then(draw).catch(() => {});
   draw();
   load();
@@ -70,6 +74,7 @@ function rowsFor(c) {
   let rows = state.indices.get(c.id) || [];
   if (ui.sourceFilter === '__none') rows = rows.filter((r) => !r.source);
   else if (ui.sourceFilter !== 'all') rows = rows.filter((r) => r.source === ui.sourceFilter);
+  if (ui.ilmOnly) { const errs = (state.data.get(c.id) || {}).ilmErrors || {}; rows = rows.filter((r) => r.index in errs); }
   if (ui.status !== 'all') rows = rows.filter((r) => (ui.status === 'open' || ui.status === 'close') ? r.status === ui.status : r.health === ui.status);
   if (ui.from) rows = rows.filter((r) => !r.day || r.day >= ui.from);
   if (ui.to) rows = rows.filter((r) => !r.day || r.day <= ui.to);
@@ -116,6 +121,13 @@ function draw() {
           h('button.btn.sm.ghost', { style: { marginLeft: '6px' },
             title: 'Show every source again',
             onclick: () => { ui.sourceFilter = 'all'; ui.page = 0; draw(); } }, 'clear'))
+      : null,
+
+    ui.view === 'indices' && ui.ilmOnly
+      ? h('div.muted', { style: { fontSize: '11.5px', marginBottom: '8px' } },
+          'Only indices in an ILM error step',
+          h('button.btn.sm.ghost', { style: { marginLeft: '6px' }, title: 'Show every index again',
+            onclick: () => { ui.ilmOnly = false; ui.page = 0; draw(); } }, 'clear'))
       : null,
 
     ui.view === 'summary' ? summaryView(c, rows, all, totals) : null,
@@ -225,7 +237,7 @@ function sourceBar(c, sourceList, total) {
       // already fetched, so how old that is decides whether it is still true.
       freshnessBar(datasetFreshness(c.id, 'indices'), () => load(true), { label: 'Indices', busy: ui.loading }),
       writeToggle(draw),
-      h('button.btn.sm', { onclick: () => { ui.sourceFilter = 'all'; ui.text = ''; ui.status = 'all'; ui.from = ''; ui.to = ''; ui.page = 0; draw(); } }, 'Clear'),
+      h('button.btn.sm', { onclick: () => { ui.ilmOnly = false; ui.sourceFilter = 'all'; ui.text = ''; ui.status = 'all'; ui.from = ''; ui.to = ''; ui.page = 0; draw(); } }, 'Clear'),
       h('button.btn.sm', { onclick: () => load(true) }, '↻ Reload')));
 }
 

@@ -62,7 +62,7 @@ export const ALERT_RULES = [
        + 'Critical when a device is past its critical delay, warning when only delayed.' },
   { id: 'automation', page: 'automation', label: 'Automation rule has work waiting', level: 'warning',
     why: 'A rule you set to notify found indices matching it. Nothing ran: the work waits for a person in the app.' },
-  { id: 'volume', page: 'overview', label: 'Field volume spike', level: 'warning',
+  { id: 'volume', page: 'volume', label: 'Field volume spike', level: 'warning',
     why: 'One value is producing far more documents than its recent average.' },
 ];
 

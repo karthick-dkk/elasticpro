@@ -50,6 +50,17 @@ impl Tickets {
         t
     }
 
+    /// Housekeeping: drop tickets past their time (they are otherwise only dropped when the
+    /// next one is issued). Returns how many; with `dry_run` it only counts.
+    pub fn sweep(&self, dry_run: bool) -> usize {
+        let mut m = self.map.lock();
+        let n = m.values().filter(|(at, _)| at.elapsed() >= TICKET_TTL).count();
+        if !dry_run {
+            m.retain(|_, (at, _)| at.elapsed() < TICKET_TTL);
+        }
+        n
+    }
+
     /// The owner, once. A second redeem of the same ticket — a replay from a log or a
     /// browser history — gets nothing.
     pub fn redeem(&self, ticket: &str) -> Option<EventsOwner> {
@@ -71,5 +82,26 @@ impl FleetEvent {
     /// The SSE event name: `dataset` or `reach`.
     pub fn name(&self) -> &'static str {
         if self.dataset.is_some() { "dataset" } else { "reach" }
+    }
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sweep_drops_expired_tickets_and_a_dry_run_only_counts() {
+        let t = Tickets::default();
+        let owner = || EventsOwner { caller: None, reauth: Reauth::None };
+        let live = t.issue(owner());
+        // An expired one, put in directly: a real one takes sixty seconds to age.
+        t.map.lock().insert("old".into(), (Instant::now() - TICKET_TTL - Duration::from_secs(1), owner()));
+        assert_eq!(t.sweep(true), 1);
+        assert_eq!(t.map.lock().len(), 2);
+        assert_eq!(t.sweep(false), 1);
+        assert_eq!(t.map.lock().len(), 1);
+        assert!(t.redeem(&live).is_some(), "a live ticket is untouched");
+        assert!(t.redeem("old").is_none());
     }
 }

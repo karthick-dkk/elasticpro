@@ -2,13 +2,15 @@
 //!
 //! `policy.json` in the data dir, read once at start and rewritten by `POLICY_SET`; the
 //! scheduler reads the applied form (`scheduler::Config`) on every tick, so a change takes
-//! effect without a restart. Missing file: the shipped defaults, seeded from the two
-//! environment variables that tuned the poller before this file existed, so an install
-//! that never touches the policy behaves exactly as it did.
+//! effect without a restart. Missing file: the shipped policy — "Client basis" (on-demand,
+//! one request per cluster at a time) — with the two environment variables that tuned the
+//! poller before this file existed still winning where they name a value. A policy
+//! somebody saved is never rewritten, and a saved file that leaves a field out gets the
+//! classic value for it (`Policy::classic`), not the shipped one.
 //!
 //! Modes:
-//!   auto       — the shipped default: background while the core knows at most
-//!                `AUTO_HYBRID_ABOVE` clusters, hybrid above that;
+//!   auto       — background while the core knows at most `AUTO_HYBRID_ABOVE` clusters,
+//!                hybrid above that (what shipped before Client basis did);
 //!   background — the fleet is kept fresh on the core's schedule (how it has always been);
 //!   hybrid     — health in the background, so the strip and Alerts stay honest; everything
 //!                else only while a page is looking at it;
@@ -33,9 +35,20 @@ pub const FILE_NAME: &str = "policy.json";
 /// background (the strip and Alerts stay honest) and fetches the rest while watched.
 pub const AUTO_HYBRID_ABOVE: usize = 25;
 
+/// "Client basis", the shipped policy: the poller sends nothing until a page asks, and then
+/// one request per cluster at a time, four in all. The UI's preset of the same name is the
+/// same numbers (`tools/unit/policy.test.mjs` reads them from here).
+pub const CLIENT_BASIS_PER_CLUSTER: usize = 1;
+pub const CLIENT_BASIS_GLOBAL: usize = 4;
+/// What the Automatic, Background and Hybrid presets run with, and what a saved file that
+/// leaves a field out has always got.
+pub const CLASSIC_PER_CLUSTER: usize = 2;
+pub const CLASSIC_GLOBAL: usize = 16;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum Mode {
+    /// What a saved file that names no mode has always meant — not the shipped mode.
     #[default]
     Auto,
     Background,
@@ -62,9 +75,22 @@ pub struct Concurrency {
     pub tunnel: usize,
 }
 
+/// The classic values: what a field left out of a saved file takes, so a policy written
+/// before the shipped default changed keeps meaning what it meant.
 impl Default for Concurrency {
     fn default() -> Self {
-        Concurrency { global: env_num("ELASTICPRO_POLL_CONCURRENCY").unwrap_or(16).clamp(1, 256) as usize, per_cluster: 2, tunnel: 6 }
+        Concurrency::with_global(CLASSIC_GLOBAL, CLASSIC_PER_CLUSTER)
+    }
+}
+
+impl Concurrency {
+    /// `ELASTICPRO_POLL_CONCURRENCY` (POLL_CONCURRENCY in config.txt) wins over `global`.
+    fn with_global(global: usize, per_cluster: usize) -> Concurrency {
+        Concurrency {
+            global: env_num("ELASTICPRO_POLL_CONCURRENCY").unwrap_or(global as u64).clamp(1, 256) as usize,
+            per_cluster,
+            tunnel: 6,
+        }
     }
 }
 
@@ -98,16 +124,29 @@ fn env_num(name: &str) -> Option<u64> {
     std::env::var(name).ok().and_then(|v| v.trim().parse().ok())
 }
 
+/// What a saved file that leaves a field out gets: the classic policy, as before.
 impl Default for Policy {
     fn default() -> Policy {
-        Policy::shipped()
+        Policy::classic()
     }
 }
 
 impl Policy {
-    /// What an install without a policy file runs: today's poller's intervals, in `auto`
-    /// mode so a large fleet is not polled for everything all the time.
+    /// What an install without a policy file runs: Client basis. Nothing is fetched until a
+    /// page asks, one request per cluster at a time. The intervals, watch window and
+    /// timeouts are the classic ones; the environment still wins where it names a value.
     pub fn shipped() -> Policy {
+        Policy {
+            mode: Mode::OnDemand,
+            concurrency: Concurrency::with_global(CLIENT_BASIS_GLOBAL, CLIENT_BASIS_PER_CLUSTER),
+            ..Policy::classic()
+        }
+    }
+
+    /// What shipped before Client basis did: the poller's intervals, in `auto` mode so a
+    /// large fleet is not polled for everything all the time. The defaults of a saved file
+    /// that leaves a field out, and the Automatic, Background and Hybrid presets' base.
+    pub fn classic() -> Policy {
         // Never faster than three minutes from the environment: a hundred clusters polled
         // every thirty seconds is the load the cache exists to remove. The file may go to
         // sixty seconds — an operator who wrote that down meant it.
@@ -136,9 +175,12 @@ impl Policy {
         }
         self.intervals_sec = iv;
         self.watch_minutes = self.watch_minutes.clamp(1, 240);
-        self.concurrency.global = self.concurrency.global.clamp(1, 256);
-        self.concurrency.per_cluster = self.concurrency.per_cluster.clamp(1, 8);
-        self.concurrency.tunnel = self.concurrency.tunnel.clamp(1, 32);
+        // The poller's share of the gate, never more than the gate itself allows (gate.rs:
+        // ES_CONCURRENCY, ES_PER_CLUSTER, ES_PER_JUMP_HOST).
+        let gate = crate::gate::limits();
+        self.concurrency.global = self.concurrency.global.clamp(1, 256).min(gate.global);
+        self.concurrency.per_cluster = self.concurrency.per_cluster.clamp(1, 8).min(gate.per_cluster);
+        self.concurrency.tunnel = self.concurrency.tunnel.clamp(1, 32).min(gate.per_jump);
         self.timeout_ms = self.timeout_ms.clamp(1_000, 600_000);
         self.tunnel_timeout_ms = self.tunnel_timeout_ms.clamp(1_000, 600_000);
         self.budget_per_cluster_per_min = self.budget_per_cluster_per_min.min(10_000);
@@ -202,16 +244,33 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_shipped_policy_is_todays_poller_in_auto_mode() {
+    fn the_shipped_policy_is_client_basis() {
         let p = Policy::shipped();
-        assert_eq!(p.mode, Mode::Auto);
+        assert_eq!(p.mode, Mode::OnDemand);
+        assert_eq!(p.concurrency.per_cluster, 1);
+        assert_eq!(p.concurrency.global, 4);
+        assert_eq!(p.concurrency.tunnel, 6);
         assert_eq!(p.interval_secs(Dataset::Health), 180);
         assert_eq!(p.interval_secs(Dataset::Shards), 300);
         assert_eq!(p.watch_minutes, 15);
-        assert_eq!(p.concurrency.per_cluster, 2);
+        assert_eq!(p.timeout_ms, 30_000);
         assert_eq!(p.budget_per_cluster_per_min, 30);
         assert_eq!(p.tunnel_timeout_ms, 60_000);
         assert!(!p.paused.all);
+        assert_eq!(p, p.clone().normalised(), "the shipped policy is already within bounds");
+    }
+
+    #[test]
+    fn the_classic_policy_is_what_shipped_before_and_what_a_saved_file_falls_back_to() {
+        let p = Policy::classic();
+        assert_eq!(p.mode, Mode::Auto);
+        assert_eq!((p.concurrency.global, p.concurrency.per_cluster), (16, 2));
+        assert_eq!(p.intervals_sec, Policy::shipped().intervals_sec);
+        // A file written by hand that names only a mode keeps meaning what it meant.
+        let f: Policy = serde_json::from_str(r#"{"mode":"background"}"#).unwrap();
+        assert_eq!((f.concurrency.global, f.concurrency.per_cluster), (16, 2));
+        let f: Policy = serde_json::from_str("{}").unwrap();
+        assert_eq!(f.mode, Mode::Auto, "a file that names no mode is not the shipped mode");
     }
 
     #[test]
@@ -233,7 +292,7 @@ mod tests {
         assert_eq!(serde_json::to_string(&Mode::Auto).unwrap(), "\"auto\"");
         let p: Policy = serde_json::from_str(r#"{"mode":"auto"}"#).unwrap();
         assert_eq!(p.mode, Mode::Auto);
-        // A file that names a mode keeps it: auto is only the default.
+        // A file that names a mode keeps it, whatever the shipped one is.
         let p: Policy = serde_json::from_str(r#"{"mode":"background"}"#).unwrap();
         assert_eq!(p.mode, Mode::Background);
         assert!(serde_json::from_str::<Policy>(r#"{"mode":"sometimes"}"#).is_err());

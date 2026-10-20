@@ -48,27 +48,45 @@ test('pending: events are held and counted; Apply redraws once and clears the co
   assert.equal(applied.length, 1); assert.equal(g.pending(), 0); assert.equal(counts.at(-1), 0);
 });
 
-test('pending: applies by itself after a minute without a touch, and a touch postpones it', () => {
+test('IDLE_MS is three seconds', () => { assert.equal(Q.IDLE_MS, 3000); });
+
+test('pending: works with no onChange at all (there is no pill to feed)', () => {
+  const T = fakeTime(); const applied = [];
+  const g = Q.createRedrawGate({ apply: () => applied.push(T.now()), policy: 'pending', now: T.now, setTimer: T.setTimer, clearTimer: T.clearTimer });
+  g.interact(); g.notify(); T.advance(3_000); assert.equal(applied.length, 1);
+});
+
+test('pending: applies by itself 3 s after the last touch, never during interaction', () => {
   const { g, T, applied } = gate('pending');
   T.advance(10_000); g.interact();          // reading, touched the page at t=10s
-  T.advance(5_000); g.notify();             // t=15s: held, due at t=70s
-  T.advance(30_000); assert.equal(applied.length, 0);
-  g.interact();                              // t=45s: scrolled — the window starts again
-  T.advance(30_000); assert.equal(applied.length, 0, 'applied at the first deadline despite the touch');  // t=75s
-  T.advance(30_000); assert.equal(applied.length, 1, 'a minute after the last touch it applies');          // t=105s
+  T.advance(1_000); g.notify();             // t=11s: held, due at t=13s
+  T.advance(1_500); assert.equal(applied.length, 0, 'applied 1.5 s after a touch');   // t=12.5s
+  g.interact();                              // t=12.5s: scrolled — the window starts again
+  T.advance(1_000); assert.equal(applied.length, 0, 'applied at the first deadline despite the touch');  // t=13.5s
+  g.notify(); g.interact();                  // still busy: more data, more touches
+  T.advance(2_900); assert.equal(applied.length, 0, 'applied while the person was still interacting');
+  T.advance(200); assert.equal(applied.length, 1, 'three seconds after the last touch it applies');
   assert.equal(g.pending(), 0);
 });
 
-test('pending: a page idle for longer than the window already applies the first event at once', () => {
+test('pending: a page idle for longer than the window applies the first event at once', () => {
   const { g, T, applied } = gate('pending');
   T.advance(300_000);                        // five minutes, no touch
   g.notify(); T.advance(0);
   assert.equal(applied.length, 1);
 });
 
-test('manual: held forever; only Apply redraws', () => {
+test('pending: Refresh and navigating apply or drop what is held at once', () => {
+  const { g, T, applied } = gate('pending');
+  g.interact(); g.notify(); g.apply();
+  assert.equal(applied.length, 1); assert.equal(T.armed(), 0);
+  g.notify(); g.reset(); T.advance(10_000);
+  assert.equal(applied.length, 1, 'reset (navigation) draws afresh itself and must not apply again');
+});
+
+test('manual: held forever; only Apply (Refresh) redraws', () => {
   const { g, T, applied } = gate('manual');
-  g.notify(); g.notify(); T.advance(3_600_000);
+  g.notify(); g.notify(); g.interact(); T.advance(3_600_000);
   assert.equal(applied.length, 0); assert.equal(g.pending(), 2); assert.equal(T.armed(), 0, 'no timer in manual');
   g.apply(); assert.equal(applied.length, 1);
 });
@@ -92,6 +110,12 @@ test('reset forgets what is held without redrawing (the page is being drawn afre
   T.advance(120_000); assert.equal(applied.length, 0);
 });
 
+test('the topbar no longer carries an updates pill', async () => {
+  const fs = await import('node:fs');
+  for (const f of ['ui/js/app.js', 'ui/js/lib/quiet-ui.js', 'ui/css/app.css'])
+    assert.ok(!/pending-updates|renderPendingPill|updates? — Apply/.test(fs.readFileSync(path.join(ROOT, f), 'utf8')), f);
+});
+
 test('unknown policy and scope words fall back to the defaults', () => {
   assert.equal(Q.normalisePolicy('sometimes'), 'pending'); assert.equal(Q.normalisePolicy(undefined), 'pending');
   assert.equal(Q.normalisePolicy('manual'), 'manual');
@@ -105,4 +129,37 @@ test('opening scope: last chosen cluster, else the first, else the fleet; "all" 
   assert.equal(Q.openingSelection({ clusters }), 'a');
   assert.equal(Q.openingSelection({ clusters: [] }), 'all');
   assert.equal(Q.openingSelection({ scope: 'all', last: 'b', clusters }), 'all');
+});
+
+/* `refreshed` is emitted for a person's Refresh and for the core's push; only the first applies at once. */
+
+test('a push-driven refreshed during interaction does not redraw; it draws 3 s after the last touch', () => {
+  const { g, T, applied } = gate('pending');
+  g.interact(); g.notify();                                   // a change lands
+  for (let i = 0; i < 10; i++) {                              // typing every 400 ms
+    T.advance(400); g.interact();
+    if (i === 2) assert.equal(Q.onRefreshed(g, { byPerson: false }), 'left', 'the 5 s push announcement');
+  }
+  assert.equal(applied.length, 0, 'nothing may draw while keys are still being pressed');
+  T.advance(2_900); assert.equal(applied.length, 0, 'not before 3 s idle');
+  T.advance(100); assert.equal(applied.length, 1, 'drawn once, 3 s after the last touch');
+  assert.equal(applied[0] - 4_000 >= 3_000, true);
+});
+
+test('a person\'s Refresh applies at once; so does a refreshed with no payload', () => {
+  const { g, applied } = gate('pending');
+  g.interact(); g.notify();
+  assert.equal(Q.onRefreshed(g, { byPerson: true }), 'applied'); assert.equal(applied.length, 1);
+  g.notify(); assert.equal(Q.onRefreshed(g), 'applied'); assert.equal(applied.length, 2);
+  assert.equal(g.pending(), 0);
+});
+
+test('the core\'s push announcement says it was not a person; the Refresh path says it was', async () => {
+  const fs = await import('node:fs');
+  const st = fs.readFileSync(path.join(ROOT, 'ui/js/core/state.js'), 'utf8');
+  assert.match(st, /function announceRefreshed\(\)[\s\S]*?bus\.emit\('refreshed', \{ byPerson: false \}\)/);
+  assert.match(st, /bus\.emit\('refreshed', \{ byPerson: !!force \}\)/);
+  const app = fs.readFileSync(path.join(ROOT, 'ui/js/app.js'), 'utf8');
+  assert.ok(/onRefreshed\(redrawGate, ev\)/.test(app), 'app.js must go through onRefreshed, not redrawGate.apply() directly');
+  assert.ok(!/bus\.on\('refreshed'[\s\S]{0,1500}redrawGate\.apply\(\)/.test(app));
 });

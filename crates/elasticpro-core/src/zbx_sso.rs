@@ -225,6 +225,22 @@ impl ZabbixSso {
         Ok(c)
     }
 
+    /// Housekeeping: forget replay nonces and sign-in codes whose time has passed (they are
+    /// otherwise forgotten only when the next one arrives). Returns how many; with
+    /// `dry_run` it only counts.
+    pub fn sweep_expired(&self, dry_run: bool) -> usize {
+        let keep = Duration::from_secs(MAX_SKEW_SECS * 2 + 5);
+        let ttl = self.code_ttl;
+        let (mut nonces, mut codes) = (self.nonces.lock(), self.codes.lock());
+        let n = nonces.values().filter(|t| t.elapsed() >= keep).count()
+            + codes.values().filter(|(_, t)| t.elapsed() >= ttl).count();
+        if !dry_run {
+            nonces.retain(|_, t| t.elapsed() < keep);
+            codes.retain(|_, (_, t)| t.elapsed() < ttl);
+        }
+        n
+    }
+
     /// A one-time code for this account.
     pub fn issue_code(&self, account: &str) -> String {
         let code = random_hex(32);
@@ -390,5 +406,22 @@ mod tests {
         let code = s.issue_code("alice@zabbix");
         std::thread::sleep(Duration::from_millis(2));
         assert_eq!(s.redeem(&code), None);
+    }
+
+    #[test]
+    fn sweep_expired_forgets_old_codes_and_nonces_and_a_dry_run_only_counts() {
+        let s = sso().with_code_ttl(Duration::from_millis(0));
+        let b = body("alice", 1, &[], NOW, "nonce-0000000002");
+        s.verify(&b, &signed(&b), NOW).unwrap();
+        s.issue_code("alice@zabbix");
+        // The code's ttl is zero: it is already past. The nonce is young.
+        assert_eq!(s.sweep_expired(true), 1);
+        assert_eq!(s.codes.lock().len(), 1);
+        assert_eq!(s.sweep_expired(false), 1);
+        assert!(s.codes.lock().is_empty());
+        assert_eq!(s.nonces.lock().len(), 1, "a nonce still inside the replay window stays");
+        s.nonces.lock().insert("old".into(), Instant::now() - Duration::from_secs(MAX_SKEW_SECS * 2 + 10));
+        assert_eq!(s.sweep_expired(false), 1);
+        assert_eq!(s.nonces.lock().len(), 1);
     }
 }

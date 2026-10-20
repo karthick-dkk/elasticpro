@@ -53,9 +53,32 @@ function closeOnOuterScroll(getEl, closeFn, trigger) {
   };
 }
 
+/**
+ * Keep the wheel inside a floating panel. A list in the panel scrolls as far as it goes;
+ * past its end, or over a panel with nothing to scroll, the wheel stops there instead of
+ * scrolling the page underneath. WebKit chains a wheel over a panel that does not scroll
+ * straight to the page (overscroll-behavior only holds on a box that can scroll), which
+ * moved the page, moved the panel's anchor, and closed the panel under the pointer.
+ */
+function keepWheel(el) {
+  el.addEventListener('wheel', (e) => {
+    if (Math.abs(e.deltaY) >= Math.abs(e.deltaX)) {
+      for (let n = e.target instanceof Element ? e.target : null; n; n = n.parentElement) {
+        if (n.scrollHeight > n.clientHeight + 1 && /(auto|scroll)/.test(getComputedStyle(n).overflowY)) {
+          const can = e.deltaY < 0 ? n.scrollTop > 0 : n.scrollTop + n.clientHeight < n.scrollHeight - 1;
+          if (can) return;
+        }
+        if (n === el) break;
+      }
+    }
+    e.preventDefault();
+  }, { passive: false });
+}
+
 function close() {
   if (!open) return;
   open.el.remove();
+  open.trigger.setAttribute('aria-expanded', 'false');
   document.removeEventListener('mousedown', open.away, true);
   document.removeEventListener('keydown', open.key, true);
   window.removeEventListener('resize', close);
@@ -66,33 +89,40 @@ function close() {
 export function closeMenus() { close(); }
 
 /**
- * @param items  [{ label, icon, onClick, danger, disabled, title, sep, hint }]
- *               `sep: true` draws a divider; `hint` is a line of muted text.
- * @param opts   { label } for the trigger button (default '⋮')
+ * @param items  [{ label, icon, onClick, danger, disabled, title, sep, hint, note }]
+ *               `sep: true` draws a divider; `hint` is a line of muted text; `note` is a
+ *               quiet word at the end of an item's line (where it leads, say).
+ * @param opts   { label, title, trigger, menuLabel } — `label` is the trigger's content
+ *               (default '⋮', a node is fine); `trigger` its tag and classes (default
+ *               'button.btn.sm.menu-trigger'); `menuLabel` names the menu for a reader.
+ *               `items` may be a function, called each time the menu opens.
  */
 export function rowMenu(items, opts = {}) {
-  const trigger = h('button.btn.sm.menu-trigger', {
+  const trigger = h(opts.trigger || 'button.btn.sm.menu-trigger', {
+    type: 'button',
     title: opts.title || 'More actions',
     'aria-haspopup': 'menu',
+    'aria-expanded': 'false',
     onclick: (e) => {
       e.stopPropagation();
       const wasOpen = open && open.trigger === trigger;
       close();
       if (wasOpen) return;             // clicking the same trigger closes it
-      show(trigger, items);
+      show(trigger, typeof items === 'function' ? items() : items, opts);
     },
   }, opts.label || '⋮');
   return trigger;
 }
 
-function show(trigger, items) {
-  const el = h('div.menu-pop', { role: 'menu' });
+function show(trigger, items, opts = {}) {
+  const el = h('div.menu-pop', { role: 'menu', 'aria-label': opts.menuLabel || null });
 
   for (const it of items) {
     if (!it) continue;
     if (it.sep) { el.append(h('div.sep')); continue; }
     if (it.hint) { el.append(h('div.hint', it.hint)); continue; }
     el.append(h(`button${it.danger ? '.danger' : ''}`, {
+      type: 'button',
       disabled: !!it.disabled,
       title: it.title || '',
       role: 'menuitem',
@@ -101,14 +131,35 @@ function show(trigger, items) {
         close();
         if (!it.disabled && it.onClick) it.onClick(e);
       },
-    }, h('span.ico', it.icon || ''), h('span', it.label)));
+    }, h('span.ico', { 'aria-hidden': 'true' }, it.icon || ''), h('span', it.label),
+       it.note ? h('span.mi-note', it.note) : null));
   }
 
   document.body.append(el);
   anchorTo(el, trigger);
+  keepWheel(el);
+  trigger.setAttribute('aria-expanded', 'true');
 
-  const away = (e) => { if (!el.contains(e.target) && e.target !== trigger) close(); };
-  const key = (e) => { if (e.key === 'Escape') { e.stopPropagation(); close(); } };
+  const away = (e) => { if (!el.contains(e.target) && e.target !== trigger && !trigger.contains(e.target)) close(); };
+  // Escape closes and gives the keyboard back to the trigger; the arrows, Home and End
+  // walk the items, as in any menu a keyboard user has met before.
+  const key = (e) => {
+    if (e.key === 'Escape') {
+      e.stopPropagation(); close();
+      if (trigger.isConnected) trigger.focus();
+      return;
+    }
+    if (!el.contains(document.activeElement)) return;
+    const btns = [...el.querySelectorAll('button:not(:disabled)')];
+    if (!btns.length) return;
+    const at = btns.indexOf(document.activeElement);
+    const to = e.key === 'ArrowDown' ? (at + 1) % btns.length
+      : e.key === 'ArrowUp' ? (at - 1 + btns.length) % btns.length
+      : e.key === 'Home' ? 0 : e.key === 'End' ? btns.length - 1 : -1;
+    if (to < 0) return;
+    e.preventDefault(); e.stopPropagation();
+    btns[to].focus();
+  };
   document.addEventListener('mousedown', away, true);
   document.addEventListener('keydown', key, true);
   window.addEventListener('resize', close);
@@ -154,8 +205,9 @@ let openPop = null;
 
 export function closePopover() {
   if (!openPop) return;
-  const { el, away, key, onClose, onScroll } = openPop;
+  const { el, away, key, onClose, onScroll, trigger } = openPop;
   el.remove();
+  if (trigger.hasAttribute('aria-expanded')) trigger.setAttribute('aria-expanded', 'false');
   document.removeEventListener('mousedown', away, true);
   document.removeEventListener('keydown', key, true);
   window.removeEventListener('resize', closePopover);
@@ -171,7 +223,7 @@ export function closePopover() {
  *
  * @param trigger  the element to anchor under
  * @param build    (ctx) => Node — ctx.close() dismisses, ctx.rebuild() redraws in place
- * @param opts     { title, sub, width, onClose }
+ * @param opts     { title, sub, width, onClose, cls } — `cls`: an extra class on the panel
  */
 export function popover(trigger, build, opts = {}) {
   const already = openPop && openPop.trigger === trigger;
@@ -179,7 +231,10 @@ export function popover(trigger, build, opts = {}) {
   closeMenus();
   if (already) return null;   // clicking the same trigger again closes it
 
-  const el = h('div.pop', opts.width ? { style: { minWidth: opts.width } } : null);
+  const el = h(opts.cls ? `div.pop.${opts.cls}` : 'div.pop', {
+    role: 'dialog', 'aria-label': opts.title || null,
+    style: opts.width ? { minWidth: opts.width } : null,
+  });
   const body = h('div.body');
   const ctx = {
     close: closePopover,
@@ -195,9 +250,16 @@ export function popover(trigger, build, opts = {}) {
   mount(body, build(ctx));
   document.body.append(el);
   anchorTo(el, trigger);
+  keepWheel(el);
 
   const away = (e) => { if (!el.contains(e.target) && e.target !== trigger && !trigger.contains(e.target)) closePopover(); };
-  const key = (e) => { if (e.key === 'Escape') { e.stopPropagation(); closePopover(); } };
+  // A field inside the panel that gives Escape a meaning of its own (an inline rename:
+  // Escape cancels the edit) is marked data-own-escape, and keeps it.
+  const key = (e) => {
+    if (e.key !== 'Escape') return;
+    if (e.target instanceof Element && e.target.closest('[data-own-escape]')) return;
+    e.stopPropagation(); closePopover();
+  };
   document.addEventListener('mousedown', away, true);
   document.addEventListener('keydown', key, true);
   window.addEventListener('resize', closePopover);
@@ -205,6 +267,8 @@ export function popover(trigger, build, opts = {}) {
   window.addEventListener('scroll', onScroll, true);
 
   openPop = { el, trigger, away, key, onClose: opts.onClose, onScroll };
+  // A trigger that says it opens something (aria-haspopup) also says whether it is open.
+  if (trigger.hasAttribute('aria-haspopup')) trigger.setAttribute('aria-expanded', 'true');
   const first = el.querySelector('input,textarea');
   if (first) setTimeout(() => first.focus(), 0);
   return ctx;
@@ -252,11 +316,15 @@ export function toast(message, kind = 'ok', ms = 2600, opts = {}) {
   // A task's progress ticks are not new notifications: they update its bell entry in
   // place, and its card only if that card is still on screen — a running task shows for
   // five seconds, then lives in the bell until it finishes and shows again.
+  // bellOnly: for an entry that belongs in the bell but would be a wall on screen (one per
+  // cluster when a dozen clusters raise alerts at once). noHistory: the opposite — a card
+  // that summarises entries the bell already has.
+  if (opts.bellOnly) { remember(message, k, key, detail, meta, cluster); return null; }
   if (opts.silent) {
     touch(key, message, k, detail, meta, cluster);
     const live = key ? toastWrap.querySelector(`[data-toast-key="${CSS_ESCAPE(key)}"]:not(.out)`) : null;
     if (!live) return null;
-  } else {
+  } else if (!opts.noHistory) {
     remember(message, k, key, detail, meta, cluster);
   }
 
@@ -439,6 +507,17 @@ async function loadServer(older = false) {
 }
 
 /** What the open bell lists: this browser's notices and the core's, one per key. */
+/**
+ * Links under a notice, decided by whoever knows what the notice is about: `fn(entry) →
+ * [{ label, page?, run() }]`. The bell only draws them, so it needs to import nothing from
+ * the alerts (core/notify.js registers the one for alert bursts).
+ */
+let noticeActions = null;
+export function setNotificationActions(fn) { noticeActions = typeof fn === 'function' ? fn : null; }
+function actionsFor(entry) {
+  try { return noticeActions ? noticeActions(entry) || [] : []; } catch (_) { return []; }
+}
+
 export function notificationsShown() {
   const all = fetched.length ? mergeNotifications(history, fetched) : history.slice();
   return retired.size ? all.filter((n) => !retired.has(serverId(n))) : all;
@@ -511,7 +590,14 @@ export function notificationBell() {
             n.kind === 'run' ? h('span.toast-ico.spin') : h('span.toast-ico', { ok: '✓', err: '✕', warn: '!' }[n.kind] || '•'),
             h('div.notif-body', h('div.notif-msg', n.message),
               ...(n.detail || []).map((d) => h('div.notif-detail', d)),
-              h('div.notif-at', [n.meta, n.count > 1 ? `\u00d7${n.count}, last ${agoShort(n.at)}` : agoShort(n.at)].filter(Boolean).join(' · '))))),
+              h('div.notif-at', [n.meta, n.count > 1 ? `\u00d7${n.count}, last ${agoShort(n.at)}` : agoShort(n.at)].filter(Boolean).join(' · ')),
+              (() => {
+                const acts = actionsFor(n);
+                return acts.length ? h('div.notif-actions', ...acts.map((a) => h('a', {
+                  href: a.page ? `#/${a.page}` : '#',
+                  onclick: (e) => { e.preventDefault(); closePopover(); a.run(); },
+                }, a.label))) : null;
+              })()))),
           h('div', { style: { display: 'flex', justifyContent: 'flex-end', gap: '6px', paddingTop: '4px' } },
             server && fetchedMore
               ? h('button.btn.sm', { onclick: async () => { if (await loadServer(true)) c.rebuild(); } }, 'Load more')

@@ -11,14 +11,15 @@
 import { h, mount } from '../lib/dom.js';
 import { num, dur, dt, toCsv, download } from '../lib/fmt.js';
 import { state, clusters, client, requestLoad, refreshRequestLoad } from '../core/state.js';
-import { requestLog, policyGet, policySet } from '../core/es.js';
-import { TASKS_PATH, taskRows, cancelPath, privilegeHint } from '../core/es-tasks.js';
+import { requestLog, policyGet, policySet, housekeepingGet, housekeepingRun } from '../core/es.js';
+import { housekeepingView } from '../core/housekeeping.js';
+import { contractOf, taskRows, cancelPath, privilegeHint } from '../core/es-tasks.js';
 import { ensureWrites, writesAllowed } from '../core/writes.js';
 import { confirmDialog } from '../ui/modal.js';
 import { togglePaused, setPausedAll, isPaused } from '../core/policy.js';
 import { toast } from '../ui/menu.js';
 import { card, table, pill, statTile, empty } from './common.js';
-import { NO_FILTER, requestRows, originChoices, perCluster, requestCsvRows, CSV_HEADER, originLabel } from '../core/request-log.js';
+import { NO_FILTER, requestRows, originChoices, perCluster, requestCsvRows, CSV_HEADER, originLabel, gateFigures } from '../core/request-log.js';
 
 let host = null;
 let log = { inflight: [], recent: [] };
@@ -34,12 +35,21 @@ let policy = null;
 let policyBusy = false;
 /** The Tasks panel: what the selected cluster said when last asked, and for which cluster. */
 let tasks = { cluster: null, rows: null, error: null, busy: false, at: 0, note: '' };
+/**
+ * Housekeeping (the core cleaning what it leaves behind): its status, read on entry, after a
+ * run, and about once a minute — not on the two-second poll, which is about the log. null
+ * until known; {error} if the core refused or does not have it.
+ */
+let hk = null;
+let hkBusy = false;
+let hkTick = 0;
 
 export function render(el) {
   host = el;
   draw();
   poll();
   loadPolicy();
+  loadHousekeeping();
   clearInterval(timer);
   timer = setInterval(() => { if (host && host.isConnected) poll(); else clearInterval(timer); }, 2000);
 }
@@ -47,9 +57,18 @@ export function render(el) {
 export function onData() { /* the log is the core's; data events do not change it */ }
 
 /** Leaving the page stops the re-read; nothing is polled for a page nobody is looking at. */
-export function onLeave() { clearInterval(timer); timer = null; }
+export function onLeave() {
+  clearInterval(timer); timer = null;
+  // #view is one element for every page, so `host.isConnected` stays true after the page
+  // has gone: a read still in flight (the log, the policy, housekeeping) would land on
+  // whatever page had replaced this one. Forgetting the host is what makes draw() a no-op.
+  host = null;
+}
 
 async function poll() {
+  // About once a minute (every 30th two-second poll) the housekeeping card is read again,
+  // so "next run" and a scheduled run's result keep up without a page of their own timer.
+  if (++hkTick % 30 === 0) loadHousekeeping();
   try {
     const [r] = await Promise.all([requestLog({ limit: 500 }), refreshRequestLoad()]);
     if (r && r.ok) { log = r; error = null; } else { error = (r && r.message) || 'the core did not answer'; }
@@ -63,6 +82,40 @@ async function loadPolicy() {
     policy = r && r.ok ? r.policy : { error: (r && r.message) || 'the core did not answer' };
   } catch (e) { policy = { error: e.message || String(e) }; }
   if (host && host.isConnected) draw();
+}
+
+async function loadHousekeeping() {
+  try {
+    const r = await housekeepingGet();
+    hk = r && r.ok ? r : { error: (r && r.message) || 'the core did not answer' };
+  } catch (e) { hk = { error: e.message || String(e) }; }
+  if (host && host.isConnected) draw();
+}
+
+/**
+ * Run housekeeping now, or only say what it would do. A real run deletes — expired cache
+ * files, stale sessions — so it asks first; a dry run, and a core configured to only dry-run,
+ * do not.
+ */
+async function runHousekeeping(dryRun) {
+  if (hkBusy) return;
+  if (!dryRun && !(hk && hk.dryRun)) {
+    const yes = await confirmDialog('Run housekeeping now?',
+      'It deletes what ElasticPro itself no longer needs: expired and orphaned cache files, Redis keys of removed clusters, ended sessions and expired API tokens. It never touches config files, saved queries, uploaded keys, users or the config history. Use Dry run to see the list first.',
+      { yes: 'run now' });
+    if (!yes) return;
+  }
+  hkBusy = true; draw();
+  let r;
+  try { r = await housekeepingRun(dryRun); } catch (e) { r = { ok: false, message: e.message || String(e) }; }
+  hkBusy = false;
+  if (r && r.ok) {
+    hk = r;
+    toast(r.message || 'Housekeeping ran', r.run && r.run.errors ? 'warn' : 'ok', 6000, { key: 'housekeeping' });
+  } else {
+    toast(`Not run: ${(r && r.message) || 'refused'}`, 'err', 8000, { key: 'housekeeping' });
+  }
+  draw();
 }
 
 /** Send a changed policy, then read it back: what the core kept is what is shown. */
@@ -85,6 +138,7 @@ async function changePolicy(next, said) {
 const policyKnown = () => !!(policy && !policy.error && policy.paused);
 
 function draw() {
+  if (!host) return;   // left the page while a read was in flight
   const rows = requestRows(log, filter);
   const inflight = rows.filter((r) => r.inflight).length;
   const perMin = Object.values(requestLoad.clusters || {}).reduce((s, c) => s + (c.perMinute || 0), 0);
@@ -95,50 +149,112 @@ function draw() {
   // been quiet is exactly the one somebody may want to pause before it is asked again.
   const seen = new Set(byCluster.map((c) => c.cluster));
   const clusterRows = [...byCluster, ...clusters().filter((c) => !seen.has(c.id))
-    .map((c) => ({ cluster: c.id, count: 0, inflight: 0, failed: 0, slowestMs: 0 }))];
+    .map((c) => ({ cluster: c.id, count: 0, inflight: 0, queued: 0, failed: 0, refused: 0, slowestMs: 0 }))];
 
   const select = (key, options, labelOf = (x) => x) => h('select', { onchange: (e) => { filter[key] = e.target.value; draw(); } },
     ...options.map(([v, l]) => h('option', { value: v, selected: String(filter[key]) === String(v) ? '' : null }, l)));
   const bar = h('div.toolbar', { style: { display: 'flex', gap: '8px', alignItems: 'flex-end', flexWrap: 'wrap', marginBottom: '10px' } },
     h('label.field', 'Cluster', select('cluster', [['all', 'All clusters'], ...byCluster.map((c) => [c.cluster, nameOf(c.cluster)])])),
     h('label.field', 'Origin', select('origin', [['all', 'All origins'], ...originChoices(log).map((o) => [o, o === 'poller' ? 'poller (background)' : originLabel(o)])])),
-    h('label.field', 'Outcome', select('outcome', [['all', 'All'], ['inflight', 'In flight'], ['ok', 'OK'], ['http-error', 'HTTP error'], ['failed', 'Failed / timed out']])),
+    h('label.field', 'Outcome', select('outcome', [['all', 'All'], ['inflight', 'In flight'], ['queued', 'Queued (waiting for a slot)'], ['ok', 'OK'], ['http-error', 'HTTP error'], ['failed', 'Failed / timed out'], ['refused', 'Refused by the gate']])),
     h('label.field', 'Slower than', select('slowerThanMs', [[0, 'any'], [500, '500 ms'], [2000, '2 s'], [10000, '10 s'], [30000, '30 s']])),
     h('button.btn.sm', { style: { marginLeft: 'auto' }, onclick: () => download(`elasticpro-requests-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')}.csv`, toCsv(requestCsvRows(rows), CSV_HEADER), 'text/csv') }, 'Export CSV'),
     h('button.btn.sm', { onclick: poll }, '↻ Refresh'));
 
-  const tiles = h('div.tiles', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: '10px', marginBottom: '12px' } },
+  // The gate's four figures. From an older core that does not measure them: "—", never 0.
+  const g = gateFigures(log);
+  const unknown = 'this core does not report it';
+  const lim = g.limits;
+  const tiles = h('div.tiles', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: '10px', marginBottom: '12px' } },
     statTile('In flight', num(inflight), inflight ? 'right now' : 'nothing waiting'),
-    statTile('Last 5 minutes', `${perMin.toFixed(1)}/min`, `${num(Object.values(requestLoad.clusters || {}).reduce((s, c) => s + (c.last5m || 0), 0))} requests, every cluster`),
-    statTile('Remembered', num((log.recent || []).length), `of the last ${num(log.keep || 2000)} finished`),
-    statTile('Clusters seen', num(byCluster.length), byCluster[0] ? `busiest: ${nameOf(byCluster[0].cluster)} (${byCluster[0].count})` : '—'));
+    statTile('Queued', g.queued == null ? '\u2014' : num(g.queued),
+      g.queued == null ? unknown : g.queued ? `oldest ${dur(g.oldestWaitMs || 0)}${lim ? ` · max ${num(lim.queueMax)}` : ''}` : `waiting for a slot${lim ? ` · ${num(lim.global)} slots, ${num(lim.perCluster)} per cluster` : ''}`),
+    statTile('Wait p95', g.waitP95Ms == null ? '\u2014' : dur(g.waitP95Ms),
+      !g.known ? unknown : g.waitCount ? `people's requests, ${num(g.waitCount)} in 5 min` : 'no request from a person in 5 min'),
+    statTile('Refused 5 min', g.refused == null ? '\u2014' : num(g.refused),
+      g.refused == null ? unknown : g.refused ? `${num(g.overloaded)} queue full · ${num(g.queueTimeout)} waited too long` : 'nothing turned away'),
+    statTile('Shared + cached', g.known ? num(g.sharedOrCached) : '\u2014',
+      g.known ? `${num(g.shared)} shared · ${num(g.cacheHits)} from cache — not sent again` : unknown),
+    statTile('Last 5 minutes', `${perMin.toFixed(1)}/min`, `${num(Object.values(requestLoad.clusters || {}).reduce((s, c) => s + (c.last5m || 0), 0))} requests, every cluster`));
 
+  const stateIn = (r) => r.state === 'queued' ? pill('queued', 'grey') : r.state === 'shared' ? pill(`waiting on #${r.leader}`, 'grey') : pill('in flight', 'yellow');
   const trs = rows.slice(0, 500).map((r) => h('tr', { class: r.inflight ? 'inflight' : (r.ok ? '' : 'failed') },
     h('td.mono', { style: { fontSize: '11.5px', whiteSpace: 'nowrap' } }, dt(r.startedAt)),
     h('td', h('b', nameOf(r.cluster)), r.via ? h('div.muted', { style: { fontSize: '11px' } }, `via ${r.via}`) : null),
     h('td', r.originLabel),
+    h('td', { style: { fontSize: '11.5px' } }, r.class || '\u2014'),
     h('td.mono', { style: { fontSize: '11.5px' } }, r.method),
     h('td.mono', { style: { fontSize: '11.5px', wordBreak: 'break-all' } }, r.path),
-    h('td.num', r.inflight ? pill(`${dur(r.elapsedMs)} so far`, 'yellow') : dur(r.ms)),
-    h('td', r.inflight ? pill('in flight', 'yellow') : pill(r.outcome, r.ok ? 'green' : 'red'))));
+    h('td.num', r.queuedMs ? dur(r.queuedMs) : (r.state === 'queued' ? pill(`${dur(r.elapsedMs)} so far`, 'grey') : '\u2014')),
+    h('td.num', r.inflight ? (r.state === 'queued' ? '\u2014' : pill(`${dur(r.elapsedMs)} so far`, 'yellow')) : dur(r.ms)),
+    h('td', r.inflight ? stateIn(r) : pill(r.outcome, r.ok ? 'green' : (r.status === 'overloaded' || r.status === 'queue_timeout' ? 'yellow' : 'red')),
+      r.answeredBy ? h('span.pill.grey', { style: { marginLeft: '4px' }, title: 'Answered without sending the cluster another request' }, r.answeredBy) : null)));
+
+  const reaper = log.gate && log.gate.taskReaper;
+  const gateLine = lim ? h('div.muted', { style: { fontSize: '11.5px', margin: '-4px 0 10px' } },
+    `Gate: ${num(lim.global)} connections (${num(lim.perCluster)} per cluster, ${num(lim.perJump)} per jump host, ${num(lim.backgroundReserve)} kept for background) · `
+    + `a person's request waits up to ${dur(lim.queueWaitMs)} · read cache ${log.gate.readCache && log.gate.readCache.seconds ? `${log.gate.readCache.seconds} s` : 'off'}`
+    + (reaper ? ` · task reaper: ${reaper.mode}${reaper.last && Array.isArray(reaper.last.cancelled) ? `, last run cancelled ${reaper.last.cancelled.filter((x) => x.ok).length}` : ''}` : '')) : null;
 
   mount(host,
     pauseBar(),
     error ? h('div.banner.err', h('div', h('div.ttl', 'Could not read the request log'), h('div', error))) : null,
-    tiles, bar,
+    tiles, gateLine, bar,
     card('Requests', `${num(rows.length)} shown · in flight first, then newest first · re-read every 2 s while this page is open`,
-      rows.length ? table(['Started', 'Cluster', 'Origin', 'Method', 'Path', 'Took', 'Outcome'], trs, {})
+      rows.length ? table(['Started', 'Cluster', 'Origin', 'Class', 'Method', 'Path', 'Queued', 'Took', 'Outcome'], trs, {})
         : empty('No requests match — or the core has sent none since it started.')),
     h('div', { style: { marginTop: '14px' } },
       card('Per cluster', 'what the log holds for each cluster',
-        table(['Cluster', 'Requests', 'In flight', 'Failed', 'Slowest', ''], clusterRows.map((c) => h('tr',
+        table(['Cluster', 'Requests', 'In flight', 'Queued', 'Failed', 'Refused', 'Slowest', ''], clusterRows.map((c) => h('tr',
           h('td', h('b', nameOf(c.cluster)), policyKnown() && isPaused(policy, c.cluster)
             ? h('span.pill.grey', { style: { marginLeft: '6px' }, title: policy.paused.all ? 'Every request is paused' : 'Nothing new starts for this cluster' }, 'paused') : null,
             throttleOf(c.cluster)),
           h('td.num', num(c.count)), h('td.num', num(c.inflight)),
-          h('td.num', c.failed ? pill(num(c.failed), 'red') : '0'), h('td.num', c.count ? dur(c.slowestMs) : '\u2014'),
+          h('td.num', c.queued ? pill(num(c.queued), 'grey') : '0'),
+          h('td.num', c.failed ? pill(num(c.failed), 'red') : '0'),
+          h('td.num', c.refused ? pill(num(c.refused), 'yellow') : '0'), h('td.num', c.count ? dur(c.slowestMs) : '\u2014'),
           h('td', { style: { textAlign: 'right' } }, pauseButton(c.cluster, nameOf(c.cluster))))), { emptyText: 'nothing yet' }))),
-    h('div', { style: { marginTop: '14px' } }, tasksCard(nameOf)));
+    h('div', { style: { marginTop: '14px' } }, tasksCard(nameOf)),
+    h('div', { style: { marginTop: '14px' } }, housekeepingCard()));
+}
+
+/* ------------------------------------ housekeeping ------------------------------------ */
+
+function housekeepingCard() {
+  const v = housekeepingView(hk);
+  const title = 'Housekeeping';
+  const sub = 'cleans what ElasticPro itself leaves behind \u2014 cache files, stale sessions, expired tokens';
+  if (v.state === 'loading') return card(title, sub, empty('Loading\u2026'));
+  if (v.state === 'unavailable') return card(title, sub, empty(v.title, { detail: v.reason }));
+  const busy = hkBusy || v.running;
+  const actions = [
+    h('button.btn.sm', { 'data-act': 'hk-dry', disabled: busy, onclick: () => runHousekeeping(true),
+      title: 'List what a run would remove, and remove nothing' }, busy ? 'Working\u2026' : 'Dry run'),
+    h('button.btn.sm.primary', { 'data-act': 'hk-run', disabled: busy, onclick: () => runHousekeeping(false),
+      title: v.dryRun ? 'This core is set to dry-run only (HOUSEKEEPING_DRY_RUN): a run reports and removes nothing' : 'Clean up now' }, 'Run now'),
+  ];
+  const last = v.last;
+  const head = h('div', { style: { display: 'flex', gap: '14px', alignItems: 'center', flexWrap: 'wrap', marginBottom: '8px' } },
+    h('span', 'Runs ', h('b', v.schedule)),
+    v.dryRun ? pill('dry-run only', 'yellow') : null,
+    h('span', 'Next run ', h('b', v.nextRun || '\u2014')),
+    last
+      ? h('span', 'Last run ', h('b', dt(last.at)), ` ${last.trigger}${last.dryRun ? ' (dry run)' : ''}: ${last.summary}`,
+        last.errors ? pill(`${last.errors} failed`, 'red') : null)
+      : h('span.muted', 'Not run since the core started.'));
+  const rows = v.jobs.map((j) => h('tr', { 'data-job': j.id },
+    h('td', h('b', j.label)),
+    h('td', j.state === 'err' ? pill('failed', 'red') : j.state === 'ok' ? pill(v.last && v.last.dryRun ? 'would remove' : 'removed', 'green') : j.state === 'skip' ? pill('skipped', 'grey') : pill('clean', 'grey')),
+    h('td', { style: { fontSize: '12px' } }, j.text, ...j.notes.map((n) => h('div.muted', { style: { fontSize: '11px' } }, n)))));
+  const kept = v.reportOnly.length
+    ? h('div.muted', { style: { fontSize: '11.5px', marginTop: '8px' } },
+      'Never deleted, only reported: ', v.reportOnly.map((r) => `${r.label} (${r.text})`).join(' \u00b7 '))
+    : null;
+  return card(title, sub, h('div',
+    head,
+    v.jobs.length ? table(['Job', '', 'Result'], rows, {}) : empty('Run it once to see what each job does.'),
+    h('div.muted', { style: { fontSize: '11.5px', marginTop: '8px' } }, `Removes ${v.rules.join('; ')}.`),
+    kept), actions);
 }
 
 /** "throttled: why" — the core is holding back from this cluster (budget spent, or backing off). */
@@ -162,9 +278,18 @@ async function readTasks(c) {
   if (!c || tasks.busy) return;
   tasks = { ...tasks, cluster: c.id, busy: true, error: null, note: '' };
   draw();
-  const res = await client(c.id).request('GET', TASKS_PATH, null, { origin: 'page:requests' }).catch((e) => ({ ok: false, message: e.message || String(e) }));
+  // Which listing to read, and how ours are recognised, are the core's: from the log when it
+  // has been read, else asked for now.
+  let contract = contractOf(log);
+  if (!contract) contract = contractOf(await requestLog({ limit: 1 }).catch(() => null));
+  if (!contract) {
+    tasks = { ...tasks, busy: false, error: 'This ElasticPro core does not say how to list tasks (it is older than the page). Update it.' };
+    draw();
+    return;
+  }
+  const res = await client(c.id).request('GET', contract.path, null, { origin: 'page:requests' }).catch((e) => ({ ok: false, message: e.message || String(e) }));
   tasks = { ...tasks, busy: false, at: Date.now(),
-    rows: res.ok ? taskRows(res.json) : null,
+    rows: res.ok ? taskRows(res.json, { contract }) : null,
     error: res.ok ? null : (privilegeHint(res.status, 'list') || res.message || `HTTP ${res.status}`) };
   draw();
 }
@@ -201,7 +326,7 @@ function tasksCard(nameOf) {
         ? empty('No search running on this cluster right now.')
         : table(['Task', 'Who', 'Running', 'Action', 'Description', ''], rows.map((r) => h('tr',
           h('td.mono', { style: { fontSize: '11.5px' } }, r.id, r.node ? h('div.muted', { style: { fontSize: '11px' } }, r.node) : null),
-          h('td', r.ours ? pill(`ours \u00b7 ${r.origin || 'core'}`, 'green') : pill('someone else', 'grey'),
+          h('td', r.ours ? pill(`ours \u00b7 ${r.origin || 'core'}${r.run === 'previous' ? ' \u00b7 before the restart' : r.run === 'other' ? ' \u00b7 another install' : ''}`, 'green') : pill('someone else', 'grey'),
             r.opaqueId ? h('div.mono.muted', { style: { fontSize: '10.5px', wordBreak: 'break-all' } }, r.opaqueId) : null),
           h('td.num', r.runningMs == null ? '\u2014' : dur(r.runningMs)),
           h('td.mono', { style: { fontSize: '11.5px' } }, r.action),

@@ -6,7 +6,8 @@ use crate::auth::{self, Caller, Edition, Role, Sessions, TokenStore, UserStore};
 use crate::delay_sink::{self, SinkConfig, SinkState};
 use crate::fleet::events::Reauth;
 use crate::guard::Writes;
-use crate::http::{ClusterSpec, EsRequest, Route, Transport};
+use crate::gate::Class;
+use crate::http::{BodyLimit, ClusterSpec, EsRequest, Route, Transport};
 use crate::socks::{self, SocksServer};
 use crate::ssh::{JumpSpec, Tunnel};
 use crate::tls::{PinStore, TlsMode};
@@ -19,6 +20,7 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 struct Primed {
     clusters: HashMap<String, ClusterSpec>,
@@ -96,7 +98,7 @@ pub struct Core {
     /// In-flight page requests by abort key (person + origin), with how many are running:
     /// `ABORT_REQUESTS` wakes a key's waiters and each of them answers "aborted" instead
     /// of waiting out the cluster. The poller and the schedules are never in here.
-    aborts: parking_lot::Mutex<HashMap<String, (Arc<tokio::sync::Notify>, usize)>>,
+    aborts: parking_lot::Mutex<HashMap<String, AbortSlot>>,
     /// A short id for this core, so its requests can be told from another install's.
     instance: String,
     started: std::time::Instant,
@@ -127,64 +129,35 @@ pub struct Core {
     vault_writer: Vault,
     /// Latest Zabbix values per host, for thirty seconds. See `zabbix_metrics`.
     zbx_metrics_cache: parking_lot::Mutex<HashMap<String, (std::time::Instant, Value)>>,
+    /// One Zabbix call per host and key set at a time; the others wait for its answer.
+    zbx_metrics_flights: parking_lot::Mutex<HashMap<String, tokio::sync::watch::Receiver<Option<Value>>>>,
     /// The fleet cache and its poller. See `fleet`.
     pub(crate) fleet: crate::fleet::Fleet,
-    /// How many ES requests may be open at once. See `EsLimits`.
-    es_limits: EsLimits,
+    /// Every request to Elasticsearch waits here for a slot. See `gate`.
+    gate: Arc<crate::gate::Gate>,
+    /// The gate's limits, the read cache, the response caps and the task reaper.
+    req_cfg: RwLock<crate::gate::RequestConfig>,
+    /// A person's reads, kept for a few seconds; and the ones on their way, shared.
+    read_cache: crate::inflight::ReadCache,
+    flights: Arc<crate::inflight::Flights>,
+    /// Response bytes being read at once, all requests together.
+    body_budget: crate::http::ByteBudget,
+    /// The instance id of the run before this one, from the data dir, and the clusters it
+    /// still had reads out on: the task reaper looks there once for what it left running.
+    previous_instance: Option<String>,
+    restart_suspects: parking_lot::Mutex<Vec<String>>,
+    /// The clusters last written to the instance file, so it is rewritten only on change.
+    instance_written: parking_lot::Mutex<Vec<String>>,
+    reaper_started: std::sync::atomic::AtomicBool,
+    task_reaper_busy: std::sync::atomic::AtomicBool,
+    /// What the task reaper last did, for the Request Centre.
+    task_reaper_last: parking_lot::Mutex<Value>,
     /// Each person's notification history. See `notify`.
     notify: crate::notify::NotifyStore,
     silences: crate::silences::Silences,
     saved_queries: crate::saved_queries::SavedQueries,
-}
-
-/// Concurrency limits on requests to Elasticsearch, whoever sends them.
-///
-/// A browser that opens a page for a hundred clusters at once asks for a thousand
-/// requests in the same instant, and without a limit each became a socket — through one
-/// jump host, to clusters that were already slow. Queued here, most specific first, so a
-/// busy cluster waits on its own limit without holding a slot another cluster could use.
-struct EsLimits {
-    global: Arc<tokio::sync::Semaphore>,
-    per_cluster: SemMap,
-    per_jump: SemMap,
-}
-
-type SemMap = parking_lot::Mutex<HashMap<String, Arc<tokio::sync::Semaphore>>>;
-
-/// Requests open at once to one cluster, and through one jump host.
-const ES_PER_CLUSTER: usize = 8;
-const ES_PER_JUMP: usize = 16;
-
-impl EsLimits {
-    fn from_env() -> EsLimits {
-        let global = std::env::var("ELASTICPRO_ES_CONCURRENCY").ok().and_then(|v| v.trim().parse().ok())
-            .unwrap_or(32usize).clamp(1, 1024);
-        EsLimits {
-            global: Arc::new(tokio::sync::Semaphore::new(global)),
-            per_cluster: parking_lot::Mutex::new(HashMap::new()),
-            per_jump: parking_lot::Mutex::new(HashMap::new()),
-        }
-    }
-
-    fn sem(map: &SemMap, k: &str, n: usize) -> Arc<tokio::sync::Semaphore> {
-        map.lock().entry(k.to_string()).or_insert_with(|| Arc::new(tokio::sync::Semaphore::new(n))).clone()
-    }
-
-    async fn acquire(&self, cluster: &str, via: Option<&str>) -> Vec<tokio::sync::OwnedSemaphorePermit> {
-        let mut held = Vec::with_capacity(3);
-        let mut sems = vec![Self::sem(&self.per_cluster, cluster, ES_PER_CLUSTER)];
-        if let Some(v) = via {
-            sems.push(Self::sem(&self.per_jump, v, ES_PER_JUMP));
-        }
-        sems.push(self.global.clone());
-        for s in sems {
-            // These semaphores are never closed, so acquiring cannot fail.
-            if let Ok(p) = s.acquire_owned().await {
-                held.push(p);
-            }
-        }
-        held
-    }
+    /// The housekeeping scheduler's settings and what it last did. See `housekeeping`.
+    pub(crate) housekeeping: crate::housekeeping::Housekeeping,
 }
 
 /// What the last Zabbix sync found. The specs carry credentials and never leave the core;
@@ -224,7 +197,9 @@ pub const REQUEST_INFLIGHT_KEEP: usize = 1000;
 
 /// One request to a cluster, as the Request Centre shows it: who asked, what, how long it
 /// took and how it ended. Kept for every request the core sends — the poller's and the
-/// pages' alike — since both go through `es_req`.
+/// pages' alike — since both go through `es_req`; and for every request answered without
+/// going to the cluster (shared with one already on its way, from the read cache, refused
+/// at the gate), so what people asked for and what the clusters were sent can both be read.
 #[derive(Clone, Debug, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RequestRecord {
@@ -237,12 +212,58 @@ pub struct RequestRecord {
     pub started_at: u64,
     pub ms: Option<u64>,
     pub ok: Option<bool>,
-    /// HTTP status, or the core's own kind when there was no answer (`timeout`, `unreachable`).
+    /// HTTP status, or the core's own kind when there was no answer (`timeout`,
+    /// `unreachable`, `overloaded`, `queue_timeout`, `aborted`, `client_gone`, `reaped`).
     pub status: Option<String>,
     pub via: Option<String>,
     /// The signed-in person behind a page's request; none for the poller and the schedules.
     pub user: Option<String>,
+    /// `interactive`, `prompted` or `background`: who the gate served it as.
+    pub class: &'static str,
+    /// `queued` (waiting for a slot), `running` (sent), `shared` (waiting on another's
+    /// request), `done`.
+    pub state: &'static str,
+    /// How long it waited for a slot, once it had one.
+    pub queued_ms: Option<u64>,
+    /// Answered by a request somebody else had already sent; `leader` is that one's id.
+    pub shared: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub leader: Option<u64>,
+    /// Answered from the read cache; `ageMs` is how old the answer was.
+    pub cached: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub age_ms: Option<u64>,
+    /// Size of the answer's body, when one was read.
+    pub bytes: Option<u64>,
+    pub timeout_ms: u64,
+    /// Whether it reached the cluster, and whether it only read: an abandoned read that did
+    /// is what the ES task reaper looks for.
+    #[serde(skip)]
+    pub sent: bool,
+    #[serde(skip)]
+    pub read: bool,
+    #[serde(skip)]
+    pub begun: std::time::Instant,
+    #[serde(skip)]
+    pub running_since: Option<std::time::Instant>,
 }
+
+/// A record about to be begun.
+pub struct NewRecord<'a> {
+    pub cluster: &'a str,
+    pub origin: &'a str,
+    pub method: &'a str,
+    pub path: &'a str,
+    pub via: Option<&'a str>,
+    pub user: Option<&'a str>,
+    pub class: crate::gate::Class,
+    pub state: &'static str,
+    pub timeout_ms: u64,
+    pub read: bool,
+}
+
+/// Outcomes that leave a read possibly still running on the cluster.
+const ABANDONED: &[&str] = &["aborted", "client_gone", "reaped", "timeout"];
 
 /// In-flight requests by id, and the most recent finished ones, newest last.
 #[derive(Default)]
@@ -250,51 +271,120 @@ pub struct RequestLog {
     next: u64,
     pub inflight: HashMap<u64, RequestRecord>,
     pub recent: std::collections::VecDeque<RequestRecord>,
+    /// Clusters where a read we sent was let go of before its answer, and when: where the
+    /// ES task reaper looks.
+    pub abandoned: HashMap<String, u64>,
 }
 
 impl RequestLog {
-    pub fn begin(&mut self, cluster: &str, origin: &str, method: &str, path: &str, via: Option<&str>, user: Option<&str>) -> u64 {
+    pub fn begin(&mut self, n: NewRecord<'_>) -> u64 {
         self.next += 1;
         let id = self.next;
         // A path is kept for the operator to recognise a request by, not reproduced in full:
         // a console request can carry kilobytes of query string, and the log keeps thousands
         // of records. The wire request is untouched.
-        let path: String = if path.chars().count() > REQUEST_PATH_KEEP {
-            format!("{}…", path.chars().take(REQUEST_PATH_KEEP).collect::<String>())
-        } else { path.to_string() };
-        // In flight is bounded by the core's own concurrency; this is the backstop for a
-        // transport that never answers, so the map cannot grow without limit.
+        let path: String = if n.path.chars().count() > REQUEST_PATH_KEEP {
+            format!("{}…", n.path.chars().take(REQUEST_PATH_KEEP).collect::<String>())
+        } else { n.path.to_string() };
+        // In flight is bounded by the gate's queue; this is the backstop for a transport
+        // that never answers, so the map cannot grow without limit.
         if self.inflight.len() >= REQUEST_INFLIGHT_KEEP {
             if let Some(oldest) = self.inflight.values().min_by_key(|r| r.started_at).map(|r| r.id) {
                 self.inflight.remove(&oldest);
             }
         }
-        let started_at = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
+        let started_at = crate::fleet::now_ms();
         self.inflight.insert(id, RequestRecord {
-            id, cluster: cluster.to_string(), origin: origin.to_string(), method: method.to_string(),
-            path, started_at, ms: None, ok: None, status: None, via: via.map(String::from), user: user.map(String::from),
+            id, cluster: n.cluster.to_string(), origin: n.origin.to_string(), method: n.method.to_string(),
+            path, started_at, ms: None, ok: None, status: None, via: n.via.map(String::from), user: n.user.map(String::from),
+            class: n.class.as_str(), state: n.state, queued_ms: None, shared: false, leader: None, cached: false, age_ms: None,
+            bytes: None, timeout_ms: n.timeout_ms, sent: false, read: n.read, begun: std::time::Instant::now(), running_since: None,
         });
         id
     }
 
-    pub fn finish(&mut self, id: u64, ms: u64, ok: bool, status: String) {
-        if let Some(mut r) = self.inflight.remove(&id) {
-            r.ms = Some(ms);
-            r.ok = Some(ok);
-            r.status = Some(status);
-            self.recent.push_back(r);
-            while self.recent.len() > REQUEST_LOG_KEEP {
-                self.recent.pop_front();
-            }
+    /// It has its slot and is on its way to the cluster.
+    pub fn running(&mut self, id: u64, queued_ms: u64) {
+        if let Some(r) = self.inflight.get_mut(&id) {
+            r.state = "running";
+            r.queued_ms = Some(queued_ms);
+            r.sent = true;
+            r.running_since = Some(std::time::Instant::now());
         }
     }
+
+    /// Change an in-flight record before it finishes.
+    pub fn amend(&mut self, id: u64, f: impl FnOnce(&mut RequestRecord)) {
+        if let Some(r) = self.inflight.get_mut(&id) {
+            f(r);
+        }
+    }
+
+    pub fn finish(&mut self, id: u64, ms: u64, ok: bool, status: String) {
+        self.finish_with(id, ms, ok, status, None);
+    }
+
+    /// Finish a record. Unknown or already finished ids are left alone: whoever finishes
+    /// first — the request, its abort, its drop guard, the reaper — says how it ended.
+    pub fn finish_with(&mut self, id: u64, ms: u64, ok: bool, status: String, bytes: Option<u64>) -> Option<&RequestRecord> {
+        let mut r = self.inflight.remove(&id)?;
+        r.ms = Some(ms);
+        r.ok = Some(ok);
+        r.state = "done";
+        if bytes.is_some() {
+            r.bytes = bytes;
+        }
+        if r.sent && r.read && !r.shared && !r.cached && r.origin != TASK_REAPER_ORIGIN && ABANDONED.contains(&status.as_str()) {
+            self.abandoned.insert(r.cluster.clone(), crate::fleet::now_ms());
+        }
+        r.status = Some(status);
+        self.recent.push_back(r);
+        while self.recent.len() > REQUEST_LOG_KEEP {
+            self.recent.pop_front();
+        }
+        self.recent.back()
+    }
+}
+
+/// The status a reply is recorded under: its HTTP status, or the core's own kind.
+pub fn status_of(out: &Value) -> (bool, String) {
+    let ok = out.get("ok") == Some(&json!(true));
+    let status = match out.get("status").and_then(|s| s.as_u64()) {
+        Some(s) if s > 0 => s.to_string(),
+        _ => out.get("kind").and_then(|k| k.as_str()).unwrap_or(if ok { "ok" } else { "error" }).to_string(),
+    };
+    (ok, status)
 }
 
 /// The opaque id a request carries to Elasticsearch. Under 256 bytes, no spaces: the
 /// install's short id, who asked, which cluster, and the record number.
 pub fn opaque_id(instance: &str, origin: &str, cluster: &str, id: u64) -> String {
-    let clean = |s: &str| s.chars().map(|c| if c.is_ascii_alphanumeric() || "-_.:".contains(c) { c } else { '_' }).take(64).collect::<String>();
-    format!("elasticpro/{}/{}/{}/{}", clean(instance), clean(origin), clean(cluster), id)
+    use crate::tasks::clean;
+    format!("{}{}/{}/{}/{}", crate::tasks::OPAQUE_PREFIX, clean(instance), clean(origin), clean(cluster), id)
+}
+
+/// The file holding this install's instance id between runs: `{current, clusters}`.
+const INSTANCE_FILE: &str = "instance.json";
+
+/// This run's instance id, the last run's, and the clusters the last run still had reads
+/// out on. The file is rewritten with the new id at once.
+fn instance_ids(data_dir: Option<&std::path::Path>) -> (String, Option<String>, Vec<String>) {
+    let current = crate::auth::random_hex(4);
+    let Some(path) = data_dir.map(|d| d.join(INSTANCE_FILE)) else { return (current, None, vec![]) };
+    let before: Value = std::fs::read_to_string(&path).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or(Value::Null);
+    let previous = before.get("current").and_then(Value::as_str).filter(|p| crate::tasks::clean(p) == *p && !p.is_empty()).map(String::from);
+    let clusters: Vec<String> = before.get("clusters").and_then(Value::as_array).into_iter().flatten()
+        .filter_map(|c| c.as_str().map(String::from)).take(10_000).collect();
+    write_instance_file(&path, &current, &[]);
+    (current, previous, clusters)
+}
+
+fn write_instance_file(path: &std::path::Path, current: &str, clusters: &[String]) {
+    let text = json!({ "current": current, "clusters": clusters }).to_string();
+    let tmp = path.with_extension("json.tmp");
+    if std::fs::write(&tmp, text).and_then(|_| std::fs::rename(&tmp, path)).is_err() {
+        tracing::warn!(path = %path.display(), "could not record this run's instance id; after a restart its orphaned searches will not be recognised");
+    }
 }
 
 /// `--config <path>` / `--config=<path>` on the command line, else $ELASTICPRO_CONFIG.
@@ -514,6 +604,8 @@ impl Core {
         let data_dir_for_fleet = data_dir.clone();
         let data_dir_for_notify = data_dir.clone();
         let activity = crate::activity::ActivityLog::new(crate::activity::ActivityConfig::from_env(data_dir.as_deref(), edition));
+        let (instance, previous_instance, restart_suspects) = instance_ids(data_dir.as_deref());
+        let req_cfg = crate::gate::config().clone();
         Arc::new(Core {
             edition,
             activity,
@@ -532,7 +624,13 @@ impl Core {
             request_log: parking_lot::Mutex::new(HashMap::new()),
             requests: parking_lot::Mutex::new(RequestLog::default()),
             aborts: parking_lot::Mutex::new(HashMap::new()),
-            instance: crate::auth::random_hex(4),
+            instance,
+            previous_instance,
+            restart_suspects: parking_lot::Mutex::new(restart_suspects),
+            instance_written: parking_lot::Mutex::new(Vec::new()),
+            reaper_started: std::sync::atomic::AtomicBool::new(false),
+            task_reaper_busy: std::sync::atomic::AtomicBool::new(false),
+            task_reaper_last: parking_lot::Mutex::new(Value::Null),
             started: std::time::Instant::now(),
             delay_sink: RwLock::new(Sink {
                 config: read_sink_config(data_dir_for_sink.as_deref(), edition),
@@ -546,11 +644,17 @@ impl Core {
             zbx_writer,
             vault_writer,
             zbx_metrics_cache: parking_lot::Mutex::new(HashMap::new()),
+            zbx_metrics_flights: parking_lot::Mutex::new(HashMap::new()),
             fleet: crate::fleet::Fleet::new(data_dir_for_fleet.as_deref()),
-            es_limits: EsLimits::from_env(),
+            gate: crate::gate::Gate::new(req_cfg.limits.clone()),
+            body_budget: crate::http::ByteBudget::new(req_cfg.inflight_bytes),
+            req_cfg: RwLock::new(req_cfg),
+            read_cache: crate::inflight::ReadCache::default(),
+            flights: Arc::new(crate::inflight::Flights::default()),
             silences: crate::silences::Silences::open(data_dir_for_notify.as_ref().map(|d| d.join("silences.json"))),
             saved_queries: crate::saved_queries::SavedQueries::open(data_dir_for_notify.as_ref().map(|d| d.join("saved-queries.json"))),
             notify: crate::notify::NotifyStore::open(data_dir_for_notify.map(|d| d.join("notifications.json"))),
+            housekeeping: crate::housekeeping::Housekeeping::from_env(),
         })
     }
 
@@ -879,6 +983,16 @@ impl Core {
     /// app has none). Every exchange is written to the activity log here, on the way out,
     /// so a refusal by the gate and a reply from a handler are recorded by the same line.
     pub async fn handle_as_from_at(self: &Arc<Self>, msg: Value, caller: Option<Caller>, reauth: Reauth, source: Option<std::net::IpAddr>) -> Value {
+        self.handle_reply_as_from_at(msg, caller, reauth, source).await.into_value()
+    }
+
+    /// `handle_as_from_at`, with any cached fleet bodies left as the text they are held as
+    /// (`fleet::reply`). The hosted bridge sends this with `Reply::to_json`, so a full
+    /// `FLEET_STATE` never exists as a parsed `Value`; everything else is a plain `Value`
+    /// inside it, unchanged.
+    pub async fn handle_reply_as_from_at(
+        self: &Arc<Self>, msg: Value, caller: Option<Caller>, reauth: Reauth, source: Option<std::net::IpAddr>,
+    ) -> crate::fleet::reply::Reply {
         let via = match &reauth {
             Reauth::Session(_) => "session",
             Reauth::Token(_) => "token",
@@ -886,10 +1000,29 @@ impl Core {
             Reauth::None => "none",
         };
         let sent = msg.clone();
-        let mut out = self.dispatch(msg, caller.clone(), reauth).await;
-        crate::errors::stamp(&mut out);
-        self.record_activity(&sent, caller.as_ref(), via, source, &out);
+        let mut out = self.dispatch_reply(msg, caller.clone(), reauth).await;
+        crate::errors::stamp(&mut out.value);
+        self.record_activity(&sent, caller.as_ref(), via, source, &out.value);
         out
+    }
+
+    /// The two messages that hand back cached bodies, as a `Reply`; everything else
+    /// through `dispatch`. The gate is the same one `dispatch` applies.
+    async fn dispatch_reply(self: &Arc<Self>, msg: Value, caller: Option<Caller>, reauth: Reauth) -> crate::fleet::reply::Reply {
+        let t = msg.get("type").and_then(|v| v.as_str()).unwrap_or("");
+        if !matches!(t, "FLEET_STATE" | "CLUSTER_DATASET") {
+            return self.dispatch(msg, caller, reauth).await.into();
+        }
+        if self.edition.uses_accounts() {
+            if let Err(denied) = self.gate(t, &msg, caller.as_ref()) {
+                return denied.into();
+            }
+        }
+        if t == "FLEET_STATE" {
+            self.fleet_state_reply(&msg, caller.as_ref())
+        } else {
+            self.cluster_dataset_reply(&msg, caller.as_ref()).await
+        }
     }
 
     /// Write one exchange to the activity log (background polls are skipped inside).
@@ -960,9 +1093,10 @@ impl Core {
                     let mut p = self.primed.write();
                     p.clusters.clear();
                 }
+                self.read_cache.clear();
                 self.forget_persisted_prime();
                 self.set_writes_unlocked(false);
-                self.transport.forget_clients();
+                self.forget_connections();
                 self.close_tunnels().await;
                 json!({ "ok": true })
             }
@@ -974,6 +1108,7 @@ impl Core {
             "POLICY_GET" | "POLICY_SET" => self.policy_msg(&t, &msg, caller.as_ref()),
             "EVENTS_TICKET" => self.events_ticket_msg(caller.clone(), reauth),
             "DELAY_SINK_GET" | "DELAY_SINK_SET" | "DELAY_SINK_RUN" => self.delay_sink_msg(&t, &msg).await,
+            "HOUSEKEEPING_GET" | "HOUSEKEEPING_RUN" => self.housekeeping_msg(&t, &msg, caller.as_ref()).await,
             "NOTIFY_PUT" | "NOTIFY_LIST" | "NOTIFY_CLEAR" => self.notify_msg(&t, &msg, caller.as_ref()),
             // Scoped to the clusters the caller may see (Zabbix group scope): a silence names a
             // cluster, so listing, setting or removing one for a cluster you cannot see is refused.
@@ -1058,7 +1193,7 @@ impl Core {
                 match (fp.or(seen.as_ref().map(|c| c.sha256.clone())), seen) {
                     (Some(fp), seen) => {
                         self.pins.trust_cert(&host, &fp, seen.as_ref().map(|c| c.subject.as_str()).unwrap_or(""));
-                        self.transport.forget_clients();
+                        self.forget_connections();
                         json!({ "ok": true, "host": host, "sha256": fp })
                     }
                     _ => json!({ "ok": false, "message": "no certificate has been seen for that host yet" }),
@@ -1067,7 +1202,7 @@ impl Core {
             "UNTRUST_CERT" => {
                 let host = msg.get("host").and_then(|v| v.as_str()).unwrap_or("");
                 self.pins.untrust_cert(host);
-                self.transport.forget_clients();
+                self.forget_connections();
                 json!({ "ok": true })
             }
             "TRUST_HOSTKEY" => {
@@ -1114,7 +1249,7 @@ impl Core {
                 match self.make_route(spec).await {
                     Ok(r) => {
                         ts.insert(id, r);
-                        self.transport.forget_clients();
+                        self.forget_connections();
                         json!({ "ok": true })
                     }
                     Err(e) => json!({ "ok": false, "message": e }),
@@ -1247,6 +1382,97 @@ impl Core {
             }));
         }
         json!({ "windowSec": REQUEST_WINDOW.as_secs(), "clusters": out })
+    }
+
+    /// The clusters configured now, for housekeeping to tell a removed cluster from one that
+    /// is merely not known yet. `Err` says why the list cannot be believed: nothing is
+    /// primed (a restart before an admin's page primes the desktop app, or the hosted core
+    /// before it restores its setup), or Zabbix is configured and its hosts have not been
+    /// read once — treating either as "every cluster was removed" would empty the cache.
+    pub(crate) fn housekeeping_known_clusters(&self) -> Result<std::collections::HashSet<String>, String> {
+        let ids: std::collections::HashSet<String> = self.all_specs().into_iter().map(|s| s.id).collect();
+        if ids.is_empty() {
+            return Err("no clusters are configured yet, so none can be called removed".into());
+        }
+        if self.edition == Edition::Hosted && self.zbx_api().configured() && self.zbx_sync.read().last_ok.is_none() {
+            return Err("the Zabbix cluster list has not been read yet".into());
+        }
+        Ok(ids)
+    }
+
+    /// The stores housekeeping tidies, for `housekeeping.rs`, which cannot see this struct's
+    /// private fields.
+    pub(crate) fn housekeeping_stores(&self) -> crate::housekeeping::Stores<'_> {
+        crate::housekeeping::Stores {
+            tokens: &self.tokens,
+            notify: &self.notify,
+            silences: &self.silences,
+            activity: &self.activity,
+        }
+    }
+
+    /// Housekeeping for the maps that grow with the clusters seen, the people who asked and
+    /// the minutes gone by. `known` is the clusters configured now — `None` when that is not
+    /// settled yet, in which case only what has expired by time goes. Returns what went (or
+    /// would, on a dry run), by name.
+    pub(crate) fn housekeep_memory(&self, known: Option<&std::collections::HashSet<String>>, dry_run: bool) -> Vec<(&'static str, usize)> {
+        let now = crate::fleet::now_ms();
+        let mut out: Vec<(&'static str, usize)> = vec![];
+        let empty = std::collections::HashSet::new();
+        let keep = known.unwrap_or(&empty);
+
+        // Request counters: a cluster that was removed, or whose last request is older than
+        // the reporting window, reports nothing and need not be remembered.
+        {
+            let mut log = self.request_log.lock();
+            let t = std::time::Instant::now();
+            let stale = |c: &String, q: &std::collections::VecDeque<std::time::Instant>|
+                known.is_some_and(|k| !k.contains(c)) || q.back().is_none_or(|x| t.duration_since(*x) > REQUEST_WINDOW);
+            let n = log.iter().filter(|(c, q)| stale(c, q)).count();
+            if !dry_run {
+                log.retain(|c, q| !stale(c, q));
+            }
+            out.push(("request counters", n));
+        }
+        // The gate's own per-cluster and per-jump-host counts remove themselves at zero, and
+        // a shared request leaves the flight table when it ends; what can outlive a removed
+        // cluster is the read cache and the reaper's list of abandoned reads.
+        {
+            // Without a settled cluster list every cluster looks unknown; keep them all.
+            let n = if known.is_some() { self.read_cache.prune_clusters(keep, dry_run) } else { 0 };
+            out.push(("read cache entries", n));
+        }
+        {
+            let mut log = self.requests.lock();
+            let n = if known.is_some() { log.abandoned.keys().filter(|c| !keep.contains(*c)).count() } else { 0 };
+            if n > 0 && !dry_run {
+                log.abandoned.retain(|c, _| keep.contains(c));
+            }
+            out.push(("abandoned-read marks", n));
+        }
+        {
+            let n = if known.is_some() { self.transport.prune_clients(keep, dry_run) } else { 0 };
+            out.push(("connection clients", n));
+        }
+        {
+            let mut c = self.zbx_metrics_cache.lock();
+            let ttl = std::time::Duration::from_secs(120);
+            let n = c.values().filter(|(at, _)| at.elapsed() >= ttl).count();
+            if !dry_run {
+                c.retain(|_, (at, _)| at.elapsed() < ttl);
+            }
+            out.push(("Zabbix metric cache entries", n));
+        }
+        out.push(("Zabbix sign-in nonces and codes", self.zbx.sweep_expired(dry_run)));
+        out.push(("Zabbix link budgets", self.zbx_link.sweep_expired(dry_run)));
+        let (st, tickets) = self.fleet.sweep_memory(known, now, dry_run);
+        out.push(("poller throttles", st.throttles));
+        out.push(("poller request windows", st.budget_windows));
+        out.push(("poller watch marks", st.watched));
+        out.push(("poller refresh limiters", st.refresh_limits));
+        out.push(("poller idle counters", st.running_counters));
+        out.push(("event-stream tickets", tickets));
+        out
     }
 
     /// Whether this caller may silence (or un-silence) that target: the cluster that owns it,
@@ -1678,17 +1904,40 @@ impl Core {
         let only = msg.get("cluster").and_then(|c| c.as_str()).filter(|c| !c.is_empty()).map(String::from);
         let limit = msg.get("limit").and_then(|l| l.as_u64()).unwrap_or(200).min(REQUEST_LOG_KEEP as u64) as usize;
         let sees = |r: &RequestRecord| ids.as_ref().is_none_or(|s| s.contains(&r.cluster)) && only.as_ref().is_none_or(|c| c == &r.cluster);
-        let log = self.requests.lock();
-        let mut inflight: Vec<&RequestRecord> = log.inflight.values().filter(|r| sees(r)).collect();
+        // Copied out and the lock let go before anything else is locked or serialised: every
+        // request going to a cluster takes this lock, and nothing may be held while it waits.
+        let (mut inflight, recent): (Vec<RequestRecord>, Vec<RequestRecord>) = {
+            let log = self.requests.lock();
+            (log.inflight.values().filter(|r| sees(r)).cloned().collect(),
+             log.recent.iter().rev().filter(|r| sees(r)).take(limit).cloned().collect())
+        };
         inflight.sort_by_key(|r| r.started_at);
-        let recent: Vec<&RequestRecord> = log.recent.iter().rev().filter(|r| sees(r)).take(limit).collect();
         let now = crate::fleet::now_ms();
         let throttled: serde_json::Map<String, Value> = {
             let st = self.fleet.state.lock();
             st.throttle.iter().filter(|(c, t)| t.until > now && ids.as_ref().is_none_or(|v: &std::collections::HashSet<String>| v.contains(*c)))
                 .map(|(c, t)| (c.clone(), serde_json::to_value(t).unwrap_or(Value::Null))).collect()
         };
-        json!({ "ok": true, "inflight": inflight, "recent": recent, "keep": REQUEST_LOG_KEEP, "throttled": throttled })
+        let cfg = self.req_cfg.read().clone();
+        let (entries, bytes) = self.read_cache.usage();
+        let mut gate = self.gate.report(ids.as_ref());
+        if let Some(m) = gate.as_object_mut() {
+            m.insert("limits".into(), json!(cfg.limits));
+            m.insert("readCache".into(), json!({ "seconds": cfg.read_cache_secs, "maxBytes": cfg.read_cache_bytes, "entries": entries, "bytes": bytes }));
+            m.insert("maxResponseBytes".into(), json!(cfg.max_response_bytes));
+            m.insert("maxFleetResponseBytes".into(), json!(cfg.max_fleet_response_bytes));
+            m.insert("bodyBudget".into(), json!({ "limitBytes": self.body_budget.total_bytes(), "inUseBytes": self.body_budget.in_use_bytes() }));
+            m.insert("flights".into(), json!(self.flights.len()));
+            m.insert("taskReaper".into(), json!({ "mode": cfg.task_reaper.as_str(), "maxSeconds": cfg.task_max_secs, "last": *self.task_reaper_last.lock() }));
+        }
+        json!({
+            "ok": true, "inflight": inflight, "recent": recent, "keep": REQUEST_LOG_KEEP, "throttled": throttled,
+            "gate": gate,
+            // The Tasks panel reads its listing and how to recognise ours from here, so the
+            // two are defined once (tasks.rs).
+            "tasks": { "path": crate::tasks::TASKS_PATH, "prefix": crate::tasks::OPAQUE_PREFIX,
+                       "instance": self.instance, "previousInstance": self.previous_instance },
+        })
     }
 
     /// Trust decisions, less the hosts that belong to clusters this caller cannot see.
@@ -1821,7 +2070,7 @@ impl Core {
             None => self.read_config_file().await.map(|raw| accepts_all_certificates(&raw)).unwrap_or(false),
         };
         if self.pins.set_accept_all(on) {
-            self.transport.forget_clients();
+            self.forget_connections();
             tracing::warn!(target: "audit", on, "defaults.tls: insecure is {} — certificates and jump-host keys {}",
                            if on { "on" } else { "off" }, if on { "are accepted without checking" } else { "are checked again" });
         }
@@ -1886,7 +2135,9 @@ impl Core {
                               "message": "that sign-in link has expired or was already used — open ElasticPro from Zabbix again" });
         let Some(name) = self.zbx.redeem(code) else { return refused };
         let Some(acct) = self.users.list().into_iter().find(|a| a.name == name && !a.disabled) else { return refused };
-        let token = self.sessions.begin(&acct);
+        // The frame keeps this token in page memory, so a reload orphans it: marked, so
+        // housekeeping can tell it from a session somebody will come back to.
+        let token = self.sessions.begin_frame(&acct);
         tracing::info!(target: "audit", user = %acct.name, role = acct.role.as_str(), "login via zabbix");
         let who = Caller { name: acct.name.clone(), role: acct.role, must_change: false, scope: acct.scope.clone() };
         json!({ "ok": true, "session": token, "caller": who.public() })
@@ -1991,6 +2242,8 @@ impl Core {
     }
 
     async fn prime(self: &Arc<Self>, msg: Value) -> Value {
+        // New credentials or addresses may follow: nothing read under the old ones is kept.
+        self.read_cache.clear();
         let p: PrimeMsg = match serde_json::from_value(msg.clone()) {
             Ok(p) => p,
             Err(e) => return json!({ "ok": false, "message": format!("bad PRIME: {e}") }),
@@ -2063,7 +2316,7 @@ impl Core {
                      "sharedAuthHeader": self.primed.read().shared_auth.clone().unwrap_or_default() }),
             p.persist != Some(false),
         );
-        self.transport.forget_clients();
+        self.forget_connections();
 
         // Keep tunnels whose spec is unchanged (a live SSH session is worth keeping);
         // replace the rest. Session secrets (passphrase/password) survive a re-prime
@@ -2110,6 +2363,8 @@ impl Core {
             Err(e) => return json!({ "ok": false, "kind": "bad_message", "message": format!("bad ES request: {e}") }),
         };
         req.user = caller.map(|c| c.name.clone());
+        // A person asked. Decided here, by the way the request came in — never by its origin.
+        req.class = Class::Interactive;
         self.es_req(req).await
     }
 
@@ -2123,10 +2378,9 @@ impl Core {
         format!("{}\u{1}{}", user.unwrap_or(""), origin)
     }
 
-    /// `ABORT_REQUESTS {origin}`: the caller's own in-flight requests from that origin stop
-    /// waiting and answer "aborted". The sockets close with the futures; nothing is sent to
-    /// the cluster, so a search already running there keeps running — that is what `_tasks`
-    /// and its cancel are for.
+    /// `ABORT_REQUESTS {origin}`: the caller's own requests from that origin stop waiting —
+    /// for a slot or for the cluster — and answer "aborted". Nothing is sent to the cluster;
+    /// a search already running there is the ES task reaper's to cancel.
     fn abort_requests(&self, msg: &Value, caller: Option<&Caller>) -> Value {
         let origin = msg.get("origin").and_then(Value::as_str).unwrap_or("");
         if !Self::abortable(origin) {
@@ -2134,19 +2388,60 @@ impl Core {
         }
         let key = Self::abort_key(caller.map(|c| c.name.as_str()), origin);
         let n = {
-            let a = self.aborts.lock();
-            match a.get(&key) {
-                Some((notify, n)) => { notify.notify_waiters(); *n }
+            let mut a = self.aborts.lock();
+            match a.get_mut(&key) {
+                Some(slot) => {
+                    slot.gen += 1;
+                    slot.notify.notify_waiters();
+                    slot.count
+                }
                 None => 0,
             }
         };
         json!({ "ok": true, "aborted": n })
     }
 
-    /// The same path a page's request takes, entered with a request that was built here
-    /// rather than parsed from a message. Used by the scheduled delay measurement, so
-    /// that job inherits the jump hosts, the pinned certificates, the credentials and
-    /// the read-only guard instead of carrying its own copy of any of them.
+    /// Counted in under a person's abort key until the guard is dropped, however the
+    /// request ends.
+    fn abort_reg(self: &Arc<Self>, user: Option<&str>, origin: &str) -> AbortReg {
+        let key = Self::abort_key(user, origin);
+        let (notify, gen) = {
+            let mut a = self.aborts.lock();
+            let slot = a.entry(key.clone()).or_insert_with(|| AbortSlot { notify: Arc::new(tokio::sync::Notify::new()), count: 0, gen: 0 });
+            slot.count += 1;
+            (slot.notify.clone(), slot.gen)
+        };
+        AbortReg { core: self.clone(), key, notify, gen }
+    }
+
+    /// Resolves when this registration is aborted; never, without one.
+    async fn until_aborted(&self, reg: Option<&AbortReg>) {
+        let Some(reg) = reg else { return std::future::pending().await };
+        let notified = reg.notify.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        // An abort that landed between registering and listening is not missed.
+        if self.aborts.lock().get(&reg.key).is_none_or(|s| s.gen != reg.gen) {
+            return;
+        }
+        notified.await
+    }
+
+    fn begin_record(&self, ctx: &Outgoing, state: &'static str) -> u64 {
+        self.requests.lock().begin(NewRecord {
+            cluster: &ctx.req.cluster_id, origin: &ctx.origin, method: &ctx.req.method, path: &ctx.req.path,
+            via: ctx.via.as_deref(), user: ctx.req.user.as_deref(), class: ctx.req.class, state,
+            timeout_ms: ctx.timeout_ms, read: ctx.read,
+        })
+    }
+
+    /// Every request to a cluster goes through here: a page's (`es`), the poller's, the
+    /// delay sink's and the task reaper's. So all of them take the same jump hosts, pinned
+    /// certificates, credentials, read-only guard — and the same gate.
+    ///
+    /// In order: resolve where it goes; for a person's read, answer from the read cache or
+    /// join the same request already on its way; else record it (queued), register its
+    /// abort, wait at the gate, send. One guard closes the record however that ends.
     pub(crate) async fn es_req(self: &Arc<Self>, mut req: EsRequest) -> Value {
         let (spec, read_only) = (self.spec_for(&req.cluster_id), self.primed.read().read_only);
         // Like the extension: an explicit authHeader in the request wins (diagnostic
@@ -2179,51 +2474,551 @@ impl Core {
             }
             None => None,
         };
-        let _permits = self.es_limits.acquire(&req.cluster_id, via.as_deref()).await;
-        let route = Route { tunnel: tunnel.as_ref().map(|(t, p)| (t, *p)), tls: TlsMode::parse(tls.as_deref()) };
-        let writes = Writes::decide(read_only, self.writes_unlocked(), req.allow_writes);
-        // Recorded before it is sent, so a request that never answers is visible as in flight.
+        let cfg = self.req_cfg.read().clone();
+        // No request is given longer than the gate's ceiling, whatever it asked for: nginx
+        // gives up on the core at 120 s, and a reply nobody receives is only load.
+        let timeout_ms = req.timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS).clamp(1, cfg.limits.max_timeout_ms);
+        req.timeout_ms = Some(timeout_ms);
         let origin = req.origin.clone().unwrap_or_else(|| "core".into());
-        let rid = self.requests.lock().begin(&req.cluster_id, &origin, &req.method, &req.path, via.as_deref(), req.user.as_deref());
-        req.opaque_id = Some(opaque_id(&self.instance, &origin, &req.cluster_id, rid));
-        // A page's request can be let go of when the page is: registered under its abort
-        // key before it is sent, so an ABORT_REQUESTS that arrives while it waits finds it.
-        let abort = if Self::abortable(&origin) {
-            let key = Self::abort_key(req.user.as_deref(), &origin);
-            let n = { let mut a = self.aborts.lock(); let e = a.entry(key.clone()).or_insert_with(|| (Arc::new(tokio::sync::Notify::new()), 0)); e.1 += 1; e.0.clone() };
-            Some((key, n))
-        } else { None };
-        let out = match &abort {
-            None => self.transport.request(&req, &url, auth.as_deref(), writes, route).await,
-            Some((_, notify)) => {
-                let notified = notify.notified();
-                tokio::pin!(notified);
-                notified.as_mut().enable();
-                tokio::select! {
-                    out = self.transport.request(&req, &url, auth.as_deref(), writes, route) => out,
-                    _ = &mut notified => json!({ "ok": false, "status": 0, "kind": "aborted",
-                        "message": "cancelled: the page that asked was left", "tookMs": 0 }),
+        let writes = if req.verified_cancel && crate::guard::is_task_cancel(&req.method, &req.path) {
+            Writes::VerifiedTaskCancel
+        } else {
+            Writes::decide(read_only, self.writes_unlocked(), req.allow_writes)
+        };
+        let read = crate::guard::is_read(&req.method, &req.path);
+        let method = req.method.trim().to_ascii_uppercase();
+        // Shared and cached only what the core would send the same for anybody: a person's
+        // read, to the cluster's own address, with the cluster's own credential.
+        let own_address = req.url.as_deref().is_none_or(|u| spec.as_ref().is_some_and(|s| s.url.trim_end_matches('/') == u.trim_end_matches('/')));
+        let shareable = req.class == Class::Interactive && read && req.auth_header.is_none() && own_address && !req.allow_writes;
+        // Never cached: the console (a person typing wants the cluster's answer), the task
+        // list (it is about right now), and `/` — the connection probe, which must notice a
+        // cluster that went away or a certificate that changed the moment it happens.
+        let bare = req.path.split('?').next().unwrap_or("");
+        let cacheable = shareable && cfg.read_cache_secs > 0 && (method == "GET" || method == "HEAD")
+            && origin != "console" && !bare.starts_with("/_tasks") && !bare.is_empty() && bare != "/";
+        let key = shareable.then(|| crate::inflight::key(&req.cluster_id, &url, &method, &req.path, req.body.as_deref(), auth.as_deref()));
+        if let (true, Some(k)) = (cacheable, key.as_ref()) {
+            let max_ms = req.max_age_ms.unwrap_or(u64::MAX).min(cfg.read_cache_secs.saturating_mul(1000));
+            if max_ms > 0 {
+                if let Some((v, age)) = self.read_cache.get(k, Duration::from_millis(max_ms)) {
+                    return self.answer_cached(&req, &origin, via.as_deref(), timeout_ms, v, age);
                 }
             }
-        };
-        if let Some((key, _)) = &abort {
-            let mut a = self.aborts.lock();
-            if let Some(e) = a.get_mut(key) { e.1 = e.1.saturating_sub(1); if e.1 == 0 { a.remove(key); } }
         }
+        let ctx = Outgoing {
+            req, url, auth, via, tunnel, tls: TlsMode::parse(tls.as_deref()), writes, origin, timeout_ms, read,
+            cache_key: key.filter(|_| cacheable),
+        };
+        match key {
+            Some(k) => self.es_shared(k, ctx).await,
+            None => self.es_inline(ctx).await,
+        }
+    }
+
+    /// A read answered from the cache: recorded, counted, and marked as such.
+    fn answer_cached(&self, req: &EsRequest, origin: &str, via: Option<&str>, timeout_ms: u64, v: Arc<Value>, age_ms: u64) -> Value {
+        let mut out = (*v).clone();
+        out["cached"] = json!(true);
+        out["ageMs"] = json!(age_ms);
+        let bytes = out.get("bytes").and_then(Value::as_u64);
+        let (ok, status) = status_of(&out);
+        {
+            let mut log = self.requests.lock();
+            let id = log.begin(NewRecord {
+                cluster: &req.cluster_id, origin, method: &req.method, path: &req.path, via, user: req.user.as_deref(),
+                class: req.class, state: "done", timeout_ms, read: true,
+            });
+            log.amend(id, |r| { r.cached = true; r.age_ms = Some(age_ms); });
+            log.finish_with(id, 0, ok, status, bytes);
+        }
+        self.gate.note_cached(bytes.unwrap_or(0));
+        out
+    }
+
+    /// A request nobody else can share: its own record, its own abort, then the gate.
+    async fn es_inline(self: &Arc<Self>, mut ctx: Outgoing) -> Value {
+        let rid = self.begin_record(&ctx, "queued");
+        ctx.req.opaque_id = Some(opaque_id(&self.instance, &ctx.origin, &ctx.req.cluster_id, rid));
+        // A person's request can be let go of when its page is: registered before it waits,
+        // so an ABORT_REQUESTS that arrives while it is queued finds it too.
+        let reg = (ctx.req.class == Class::Interactive).then(|| self.abort_reg(ctx.req.user.as_deref(), &ctx.origin));
+        self.run_upstream(ctx, rid, reg.as_ref()).await
+    }
+
+    /// A person's read that others may be asking for at the same moment: join the one on
+    /// its way, or start it as a task of its own, and wait for its answer with this caller's
+    /// own timeout and abort. Leaving never cancels it for the others; the last one out does.
+    async fn es_shared(self: &Arc<Self>, key: crate::inflight::Key, ctx: Outgoing) -> Value {
+        let started = Instant::now();
+        let reg = self.abort_reg(ctx.req.user.as_deref(), &ctx.origin);
+        let me = ctx.clone();
+        // Recorded first, as the request that will go if nobody else's is on its way; turned
+        // into a "shared" record below if somebody's is. Nothing is locked while the flights
+        // are: the two locks are never held together.
+        let rid = self.begin_record(&ctx, "queued");
+        let core = self.clone();
+        let flights = self.flights.clone();
+        let joined = self.flights.join_or_start(key, rid, move |tx| {
+            let mut ctx = ctx;
+            ctx.req.opaque_id = Some(opaque_id(&core.instance, &ctx.origin, &ctx.req.cluster_id, rid));
+            let task = tokio::spawn(async move {
+                let out = core.run_upstream(ctx, rid, None).await;
+                tx.send_replace(Some(Arc::new(out)));
+                flights.done(&key, rid);
+            });
+            task.abort_handle()
+        });
+        let leader = joined.leader;
+        let seat = crate::inflight::Seat::new(self.flights.clone(), key, leader);
+        let mut follower = joined.follower.then(|| {
+            self.requests.lock().amend(rid, |r| { r.state = "shared"; r.shared = true; r.leader = Some(leader); });
+            RecordGuard { core: self.clone(), rid, started, done: false }
+        });
+        // The one who started it waits for the request itself, which keeps its own time (the
+        // queue wait, then the cluster's timeout). One who joined keeps its own clock too: a
+        // shorter timeout than the request it joined is still honoured.
+        let queue_wait = self.req_cfg.read().limits.queue_wait_ms;
+        let deadline = joined.follower.then(|| started + Duration::from_millis(me.timeout_ms + queue_wait.min(me.timeout_ms) + 1_000));
+        let mut rx = joined.rx;
+        enum Got { Answer(Arc<Value>), Lost, Timeout, Aborted }
+        let answer = async { rx.wait_for(|v| v.is_some()).await.map(|v| v.clone()) };
+        let bounded = async {
+            match deadline {
+                Some(d) => tokio::time::timeout_at(d.into(), answer).await.ok(),
+                None => Some(answer.await),
+            }
+        };
+        let got = tokio::select! {
+            r = bounded => match r {
+                Some(Ok(Some(v))) => Got::Answer(v),
+                Some(_) => Got::Lost,
+                None => Got::Timeout,
+            },
+            _ = self.until_aborted(Some(&reg)) => Got::Aborted,
+        };
+        let elapsed = started.elapsed().as_millis() as u64;
+        let ended = |out: Value, status: &str, follower: Option<RecordGuard>, seat: crate::inflight::Seat| {
+            match follower {
+                Some(mut g) => g.finish_ms(&out, elapsed),
+                // The one who started it: the request itself goes on for anyone still
+                // waiting; if nobody is, it was just cancelled, and says why.
+                None => {
+                    if seat.leave() {
+                        self.requests.lock().finish(leader, elapsed, false, status.to_string());
+                    }
+                }
+            }
+            out
+        };
+        match got {
+            Got::Answer(v) => {
+                let mut out = (*v).clone();
+                if let Some(g) = follower.as_mut() {
+                    out["shared"] = json!(true);
+                    g.finish_ms(&out, elapsed);
+                    self.gate.note_shared();
+                }
+                drop(seat);
+                out
+            }
+            Got::Aborted => ended(aborted_reply(), "aborted", follower.take(), seat),
+            Got::Timeout => ended(json!({ "ok": false, "status": 0, "kind": "timeout", "tookMs": elapsed, "url": me.url,
+                                          "message": format!("Request timed out after {:.1} s", elapsed as f64 / 1000.0),
+                                          "help": "No answer in time. The cluster may be slow, or a firewall drops packets silently." }),
+                                   "timeout", follower.take(), seat),
+            Got::Lost => ended(json!({ "ok": false, "status": 0, "kind": "aborted", "tookMs": elapsed,
+                                       "message": "cancelled: the request this one was waiting on went away" }),
+                               "aborted", follower.take(), seat),
+        }
+    }
+
+    /// Wait at the gate, send, read, record. The record's guard says `client_gone` if this
+    /// future is dropped before it finishes — a client that disconnected, a flight whose
+    /// last waiter left.
+    async fn run_upstream(self: &Arc<Self>, ctx: Outgoing, rid: u64, abort: Option<&AbortReg>) -> Value {
+        let mut rec = RecordGuard { core: self.clone(), rid, started: Instant::now(), done: false };
+        let cfg = self.req_cfg.read().clone();
+        let cluster = ctx.req.cluster_id.as_str();
+        // Refused without a socket — and without taking a slot from anyone.
+        if let Some(refused) = crate::http::refuse_early(&ctx.req, &ctx.url, ctx.writes) {
+            rec.finish(&refused);
+            if refused.get("kind").and_then(Value::as_str) != Some("blocked_readonly") {
+                self.record_request(cluster);
+            }
+            return refused;
+        }
+        let wait = (ctx.req.class == Class::Interactive).then(|| Duration::from_millis(cfg.limits.queue_wait_ms.min(ctx.timeout_ms)));
+        let permit = tokio::select! {
+            r = self.gate.admit(ctx.req.class, cluster, ctx.via.as_deref(), ctx.req.user.as_deref(), wait) => match r {
+                Ok(p) => p,
+                Err(refusal) => {
+                    let out = refusal.reply(cluster, &cfg.limits);
+                    rec.finish(&out);
+                    return out;
+                }
+            },
+            _ = self.until_aborted(abort) => {
+                let out = aborted_reply();
+                rec.finish(&out);
+                return out;
+            }
+        };
+        let queued_ms = permit.queued_ms;
+        self.requests.lock().running(rid, queued_ms);
+        // Sent from a task of its own that holds the slot until the cluster has answered. A
+        // caller that lets go — aborted, or its client gone — gets its answer at once, but
+        // the cluster is still working on the request, so its slot stays taken until the
+        // answer comes (or the request times out, or the task reaper cancels it there): the
+        // gate's numbers are what the clusters actually carry.
+        let send = {
+            let (core, ctx) = (self.clone(), ctx.clone());
+            let (cap_bytes, setting) = if ctx.req.class == Class::Interactive {
+                (cfg.max_response_bytes, "ES_MAX_RESPONSE_MB")
+            } else {
+                (cfg.max_fleet_response_bytes, "ES_MAX_FLEET_RESPONSE_MB")
+            };
+            tokio::spawn(async move {
+                let _slot = permit;
+                let route = Route { tunnel: ctx.tunnel.as_ref().map(|(t, p)| (t, *p)), tls: ctx.tls };
+                let limit = BodyLimit { cap_bytes, setting, budget: Some(&core.body_budget) };
+                core.transport.request(&ctx.req, &ctx.url, ctx.auth.as_deref(), ctx.writes, route, &limit).await
+            })
+        };
+        let mut out = tokio::select! {
+            out = send => out.unwrap_or_else(|e| json!({ "ok": false, "status": 0, "kind": "client_error", "tookMs": 0,
+                                                          "message": format!("the request failed inside ElasticPro: {e}") })),
+            _ = self.until_aborted(abort) => {
+                let out = aborted_reply();
+                rec.finish_ms(&out, rec.started.elapsed().as_millis() as u64);
+                return out;
+            }
+        };
+        if queued_ms > 0 {
+            out["queuedMs"] = json!(queued_ms);
+        }
+        rec.finish(&out);
+        self.record_request(cluster);
         let ok = out.get("ok") == Some(&json!(true));
-        let status = match out.get("status").and_then(|s| s.as_u64()) {
-            Some(s) if s > 0 => s.to_string(),
-            _ => out.get("kind").and_then(|k| k.as_str()).unwrap_or(if ok { "ok" } else { "error" }).to_string(),
-        };
-        self.requests.lock().finish(rid, out.get("tookMs").and_then(|t| t.as_u64()).unwrap_or(0), ok, status);
-        if out.get("kind").and_then(|k| k.as_str()) != Some("blocked_readonly") {
-            self.record_request(&req.cluster_id);
+        // A write that went through makes some of the fleet cache, and everything the read
+        // cache holds for that cluster, out of date.
+        if ok && !ctx.read {
+            self.fleet_invalidate(cluster, &ctx.req.method, &ctx.req.path);
+            self.read_cache.drop_cluster(cluster);
         }
-        // A write that went through makes some of the fleet cache out of date.
-        if out.get("ok") == Some(&json!(true)) && !crate::guard::is_read(&req.method, &req.path) {
-            self.fleet_invalidate(&req.cluster_id, &req.method, &req.path);
+        if let (true, Some(k)) = (ok, ctx.cache_key) {
+            let bytes = out.get("bytes").and_then(Value::as_u64).unwrap_or(u64::MAX);
+            if bytes <= crate::gate::READ_CACHE_ENTRY_MAX {
+                self.read_cache.put(k, cluster, Arc::new(out.clone()), bytes, cfg.read_cache_bytes);
+            }
         }
         out
+    }
+}
+
+/// A request's timeout when it names none (the transport's own default).
+const DEFAULT_TIMEOUT_MS: u64 = 15_000;
+
+fn aborted_reply() -> Value {
+    json!({ "ok": false, "status": 0, "kind": "aborted", "message": "cancelled: the page that asked was left", "tookMs": 0 })
+}
+
+/// One abort key's registrations: how many requests are under it, and a generation that
+/// every `ABORT_REQUESTS` moves on, so a registration made a moment before an abort sees it.
+struct AbortSlot {
+    notify: Arc<tokio::sync::Notify>,
+    count: usize,
+    gen: u64,
+}
+
+/// A request counted in under its abort key; counted out when dropped.
+struct AbortReg {
+    core: Arc<Core>,
+    key: String,
+    notify: Arc<tokio::sync::Notify>,
+    gen: u64,
+}
+
+impl Drop for AbortReg {
+    fn drop(&mut self) {
+        let mut a = self.core.aborts.lock();
+        if let Some(s) = a.get_mut(&self.key) {
+            s.count = s.count.saturating_sub(1);
+            if s.count == 0 {
+                a.remove(&self.key);
+            }
+        }
+    }
+}
+
+/// Closes a request's record. Finished explicitly with the reply; dropped unfinished — the
+/// future it lived in was dropped — it records `client_gone`.
+struct RecordGuard {
+    core: Arc<Core>,
+    rid: u64,
+    started: Instant,
+    done: bool,
+}
+
+impl RecordGuard {
+    fn finish(&mut self, out: &Value) {
+        let ms = out.get("tookMs").and_then(Value::as_u64).unwrap_or_else(|| self.started.elapsed().as_millis() as u64);
+        self.finish_ms(out, ms);
+    }
+
+    fn finish_ms(&mut self, out: &Value, ms: u64) {
+        let (ok, status) = status_of(out);
+        self.core.requests.lock().finish_with(self.rid, ms, ok, status, out.get("bytes").and_then(Value::as_u64));
+        self.done = true;
+    }
+}
+
+impl Drop for RecordGuard {
+    fn drop(&mut self) {
+        if !self.done {
+            self.core.requests.lock().finish(self.rid, self.started.elapsed().as_millis() as u64, false, "client_gone".into());
+        }
+    }
+}
+
+/// Everything a request needs once it is resolved, so it can be sent from here or from a
+/// task of its own.
+#[derive(Clone)]
+struct Outgoing {
+    req: EsRequest,
+    url: String,
+    auth: Option<String>,
+    via: Option<String>,
+    tunnel: Option<(Arc<Tunnel>, u16)>,
+    tls: TlsMode,
+    writes: Writes,
+    origin: String,
+    timeout_ms: u64,
+    read: bool,
+    /// Where to keep the answer in the read cache, if it may be kept.
+    cache_key: Option<crate::inflight::Key>,
+}
+
+/* ------------------------------------- the reapers ------------------------------------- */
+
+/// How often the request reaper runs; the ES task reaper runs every second time.
+pub const REAPER_EVERY: Duration = Duration::from_secs(30);
+const TASK_REAPER_EVERY_TICKS: u64 = 2;
+/// A record still in flight this long past its own deadline is closed as `reaped`.
+const REAP_GRACE_MS: u64 = 5_000;
+/// The poller's and the core's requests may wait for a slot without a deadline of their
+/// own; one still waiting after this long is closed all the same.
+const REAP_QUEUED_BACKGROUND_MS: u64 = 10 * 60_000;
+/// How long after a read was let go of the task reaper still looks on that cluster.
+const TASK_WINDOW_MS: u64 = 10 * 60_000;
+/// The origin the task reaper's own requests carry. Its own timeouts never make a cluster a
+/// suspect again, or a cluster that is down would be asked forever.
+pub const TASK_REAPER_ORIGIN: &str = "core:task-reaper";
+
+/// Whether an in-flight record has outlived every deadline it could have had.
+pub fn overdue(r: &RequestRecord, queue_wait_ms: u64, now: Instant) -> bool {
+    let past = |since: Instant, ms: u64| now.saturating_duration_since(since) > Duration::from_millis(ms + REAP_GRACE_MS);
+    match r.state {
+        "running" => r.running_since.is_some_and(|t| past(t, r.timeout_ms)),
+        "shared" => past(r.begun, r.timeout_ms + queue_wait_ms.min(r.timeout_ms) + 1_000),
+        "queued" if r.class == Class::Interactive.as_str() => past(r.begun, queue_wait_ms.min(r.timeout_ms)),
+        "queued" => past(r.begun, REAP_QUEUED_BACKGROUND_MS),
+        _ => false,
+    }
+}
+
+struct BusyFlag<'a>(&'a std::sync::atomic::AtomicBool);
+impl Drop for BusyFlag<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+impl Core {
+    /// Start the reapers. Called once, inside the runtime, by the bridge binary and the
+    /// desktop shell — never by `Core::new`, so the tests run them by hand.
+    pub fn start_request_reaper(self: &Arc<Self>) {
+        use std::sync::atomic::Ordering;
+        if self.reaper_started.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let weak = Arc::downgrade(self);
+        tokio::spawn(async move {
+            let mut tick = 0u64;
+            loop {
+                tokio::time::sleep(REAPER_EVERY).await;
+                let Some(core) = weak.upgrade() else { break };
+                core.reap_requests();
+                tick += 1;
+                if tick.is_multiple_of(TASK_REAPER_EVERY_TICKS) && !core.task_reaper_busy.swap(true, Ordering::SeqCst) {
+                    let c = core.clone();
+                    tokio::spawn(async move {
+                        let _busy = BusyFlag(&c.task_reaper_busy);
+                        c.reap_es_tasks().await;
+                    });
+                }
+            }
+        });
+    }
+
+    /// One pass of the request reaper: waiters past their deadline answered, in-flight
+    /// records past every deadline closed as `reaped`, empty abort keys dropped, the read
+    /// cache aged, and the clusters with reads out written down for the next run.
+    #[doc(hidden)]
+    pub fn reap_requests(&self) -> usize {
+        let expired = self.gate.expire();
+        let cfg = self.req_cfg.read().clone();
+        let now = Instant::now();
+        let reaped: Vec<RequestRecord> = {
+            let mut log = self.requests.lock();
+            let due: Vec<u64> = log.inflight.values().filter(|r| overdue(r, cfg.limits.queue_wait_ms, now)).map(|r| r.id).collect();
+            due.into_iter()
+                .filter_map(|id| {
+                    let ms = log.inflight.get(&id).map(|r| now.saturating_duration_since(r.begun).as_millis() as u64).unwrap_or(0);
+                    log.finish_with(id, ms, false, "reaped".into(), None).cloned()
+                })
+                .collect()
+        };
+        for r in &reaped {
+            tracing::warn!(cluster = %r.cluster, id = r.id, origin = %r.origin, state = r.state, "request reaped: still in flight past its deadline");
+            self.activity.record(crate::activity::ActivityEvent::system(
+                "request_reaped", self.edition, Some(&r.cluster), Some(&r.method), Some(&r.path),
+                format!("record {} ({}, {}) was still in flight past its deadline and was closed", r.id, r.origin, r.class),
+            ));
+        }
+        self.aborts.lock().retain(|_, s| s.count > 0);
+        self.read_cache.prune(Duration::from_secs(cfg.read_cache_secs));
+        self.persist_instance_clusters();
+        expired + reaped.len()
+    }
+
+    /// The clusters this run has reads out on (or let go of lately), in the instance file,
+    /// for the next run's task reaper. Written only when the list changes.
+    fn persist_instance_clusters(&self) {
+        let Some(dir) = &self.data_dir else { return };
+        let mut clusters: Vec<String> = {
+            let log = self.requests.lock();
+            log.inflight.values().filter(|r| r.sent && r.read).map(|r| r.cluster.clone()).chain(log.abandoned.keys().cloned()).collect()
+        };
+        clusters.sort();
+        clusters.dedup();
+        let mut written = self.instance_written.lock();
+        if *written != clusters {
+            write_instance_file(&dir.join(INSTANCE_FILE), &self.instance, &clusters);
+            *written = clusters;
+        }
+    }
+
+    /// One pass of the ES task reaper. Looks only at clusters where a read of ours was let
+    /// go of lately (or that the last run had reads out on), and cancels only what
+    /// `tasks::choose` allows. Every cancel is recorded in the Request Centre and the
+    /// activity log.
+    #[doc(hidden)]
+    pub async fn reap_es_tasks(self: &Arc<Self>) -> Value {
+        let cfg = self.req_cfg.read().clone();
+        let now = crate::fleet::now_ms();
+        if cfg.task_reaper == crate::gate::ReaperMode::Off {
+            let v = json!({ "at": now, "mode": "off", "checked": 0, "cancelled": [] });
+            *self.task_reaper_last.lock() = v.clone();
+            return v;
+        }
+        let mut suspects: Vec<String> = {
+            let mut log = self.requests.lock();
+            log.abandoned.retain(|_, t| now.saturating_sub(*t) < TASK_WINDOW_MS);
+            log.abandoned.keys().cloned().collect()
+        };
+        suspects.extend(std::mem::take(&mut *self.restart_suspects.lock()));
+        suspects.sort();
+        suspects.dedup();
+        suspects.retain(|c| self.spec_for(c).is_some());
+        let mut cancelled = Vec::new();
+        let mut errors = Vec::new();
+        for cluster in &suspects {
+            let res = self.es_req(EsRequest {
+                cluster_id: cluster.clone(), method: "GET".into(), path: crate::tasks::TASKS_PATH.into(), timeout_ms: Some(15_000),
+                origin: Some(TASK_REAPER_ORIGIN.into()), class: Class::Background, ..Default::default()
+            }).await;
+            if res.get("ok") != Some(&json!(true)) {
+                // Looked at again next time, while the window lasts.
+                errors.push(json!({ "cluster": cluster, "status": status_of(&res).1 }));
+                continue;
+            }
+            let inflight: std::collections::HashSet<u64> = self.requests.lock().inflight.keys().copied().collect();
+            let scope = crate::tasks::Scope {
+                cluster, instance: &self.instance, previous: self.previous_instance.as_deref(), inflight: &inflight,
+                mode: cfg.task_reaper, max_ms: cfg.task_max_secs * 1000,
+            };
+            let picks = crate::tasks::choose(res.get("json").unwrap_or(&Value::Null), &scope);
+            if picks.is_empty() {
+                // Clean: nothing of ours left running there.
+                self.requests.lock().abandoned.remove(cluster);
+            }
+            for p in picks {
+                let out = self.es_req(EsRequest {
+                    cluster_id: cluster.clone(), method: "POST".into(), path: format!("/_tasks/{}/_cancel", p.task_id), timeout_ms: Some(15_000),
+                    origin: Some(TASK_REAPER_ORIGIN.into()), class: Class::Background, verified_cancel: true, ..Default::default()
+                }).await;
+                let (ok, status) = status_of(&out);
+                if ok {
+                    if p.current {
+                        let mut log = self.requests.lock();
+                        if let Some(r) = log.recent.iter_mut().rev().find(|r| r.id == p.n) {
+                            r.status = Some("es_task_cancelled".into());
+                        }
+                    }
+                    tracing::info!(target: "audit", cluster = %cluster, task = %p.task_id, opaque_id = %p.opaque, action = %p.action,
+                                   "cancelled an orphaned search of ours on the cluster");
+                    self.activity.record(crate::activity::ActivityEvent::system(
+                        "es_task_cancelled", self.edition, Some(cluster), Some("POST"), Some(&format!("/_tasks/{}/_cancel", p.task_id)),
+                        format!("task {} ({}, running {} s), X-Opaque-Id {}", p.task_id, p.action, p.running_ms.unwrap_or(0) / 1000, p.opaque),
+                    ));
+                }
+                cancelled.push(json!({ "cluster": cluster, "task": p.task_id, "opaqueId": p.opaque, "action": p.action,
+                                       "runningMs": p.running_ms, "ok": ok, "status": status }));
+            }
+        }
+        let v = json!({ "at": now, "mode": cfg.task_reaper.as_str(), "checked": suspects.len(), "cancelled": cancelled, "errors": errors });
+        *self.task_reaper_last.lock() = v.clone();
+        v
+    }
+
+    /// Replace the request configuration. Tests only: the real one is read from the
+    /// environment once, and the environment is one per process.
+    #[doc(hidden)]
+    pub fn set_request_config_for_tests(&self, cfg: crate::gate::RequestConfig) {
+        self.gate.set_limits(cfg.limits.clone());
+        *self.req_cfg.write() = cfg;
+    }
+
+    /// The configuration in force.
+    pub fn request_config(&self) -> crate::gate::RequestConfig {
+        self.req_cfg.read().clone()
+    }
+
+    /// (running, waiting) at the gate right now.
+    #[doc(hidden)]
+    pub fn gate_counts(&self) -> (usize, usize) {
+        self.gate.counts()
+    }
+
+    /// `es_req` with a request built by the caller, class and all. Tests only: in the
+    /// product the class is decided by the code path, and no message reaches this.
+    #[doc(hidden)]
+    pub async fn es_req_as(self: &Arc<Self>, req: EsRequest) -> Value {
+        self.es_req(req).await
+    }
+
+    /// Drop every cached connection — a trust decision, a tunnel or the cluster list changed —
+    /// and every answer read through them: one fetched under the old trust must not be
+    /// handed out under the new.
+    pub(crate) fn forget_connections(&self) {
+        self.transport.forget_clients();
+        self.read_cache.clear();
+    }
+
+    /// This run's instance id, as it appears in every opaque id.
+    pub fn instance_id(&self) -> &str {
+        &self.instance
     }
 }
 
@@ -2418,7 +3213,7 @@ impl Core {
             z.provisioned = provisioned.clone();
             z.templates = templates.clone();
         }
-        self.transport.forget_clients();
+        self.forget_connections();
         tracing::info!(target: "audit", clusters = n, skipped = skipped.len(), problems,
                        credentials = if opts.use_elasticpro_credentials { "elasticpro" } else { "zabbix" }, "zabbix sync");
         json!({ "ok": true, "clusters": n, "inUse": in_use, "skipped": skipped, "problems": problems, "provisioned": provisioned, "templates": templates,
@@ -2524,7 +3319,7 @@ impl Core {
     /// What Zabbix last measured for one Zabbix cluster: `{key: {value, clock}}`, cached for
     /// thirty seconds per host so a page refresh in every open tab is one Zabbix call.
     /// The gate has already checked the caller may see this cluster.
-    async fn zabbix_metrics(&self, msg: &Value) -> Value {
+    async fn zabbix_metrics(self: &Arc<Self>, msg: &Value) -> Value {
         let id = msg.get("clusterId").and_then(|v| v.as_str()).unwrap_or("");
         let keys: Vec<String> = msg.get("keys").and_then(|v| v.as_array()).into_iter().flatten()
             .filter_map(|k| k.as_str().map(String::from)).collect();
@@ -2539,14 +3334,43 @@ impl Core {
                 return json!({ "ok": true, "items": v, "now": auth::now(), "cached": true });
             }
         }
-        match self.zbx_api().latest(&hostid, &keys).await {
-            Ok(v) => {
-                let mut c = self.zbx_metrics_cache.lock();
-                c.retain(|_, (at, _)| at.elapsed() < std::time::Duration::from_secs(120));
-                c.insert(cache_key, (std::time::Instant::now(), v.clone()));
-                json!({ "ok": true, "items": v, "now": auth::now() })
+        // One Zabbix call per host and key set at a time: every tab that asks while it is on
+        // its way waits for the same answer (and the call itself waits for one of
+        // ZABBIX_CONCURRENCY slots).
+        let mut rx = {
+            let mut f = self.zbx_metrics_flights.lock();
+            match f.get(&cache_key) {
+                Some(rx) => rx.clone(),
+                None => {
+                    let (tx, rx) = tokio::sync::watch::channel(None);
+                    f.insert(cache_key.clone(), rx.clone());
+                    let (core, api, k) = (self.clone(), self.zbx_api(), cache_key.clone());
+                    tokio::spawn(async move {
+                        let v = match api.latest(&hostid, &keys).await {
+                            Ok(v) => {
+                                let mut c = core.zbx_metrics_cache.lock();
+                                c.retain(|_, (at, _)| at.elapsed() < std::time::Duration::from_secs(120));
+                                c.insert(k.clone(), (std::time::Instant::now(), v.clone()));
+                                json!({ "ok": true, "items": v })
+                            }
+                            Err(e) => json!({ "ok": false, "kind": "zabbix_error", "message": e }),
+                        };
+                        tx.send_replace(Some(v));
+                        core.zbx_metrics_flights.lock().remove(&k);
+                    });
+                    rx
+                }
             }
-            Err(e) => json!({ "ok": false, "kind": "zabbix_error", "message": e }),
+        };
+        let got = rx.wait_for(|v| v.is_some()).await.ok().and_then(|v| v.clone());
+        match got {
+            Some(mut v) => {
+                if v["ok"] == json!(true) {
+                    v["now"] = json!(auth::now());
+                }
+                v
+            }
+            None => json!({ "ok": false, "kind": "zabbix_error", "message": "the Zabbix call this was waiting on went away" }),
         }
     }
 
@@ -2914,7 +3738,7 @@ impl Core {
                     if !self.zbx_api().configured() {
                         // The clusters came from a Zabbix this server no longer talks to.
                         *self.zbx_sync.write() = ZbxSync::default();
-                        self.transport.forget_clients();
+                        self.forget_connections();
                     }
                     self.zabbix_link_status()
                 }

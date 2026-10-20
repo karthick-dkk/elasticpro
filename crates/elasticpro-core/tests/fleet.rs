@@ -82,6 +82,9 @@ async fn the_background_set_arrives_and_snapshots_use_the_cat_listing_per_repo()
     let es = cluster(Duration::ZERO).await;
     let c = portable(&dir);
     prime(&c, json!([{ "id": "c1", "url": es.url(), "logIndexPattern": "logs-*" }])).await;
+    // The shipped policy is Client basis (nothing until a page asks); this is the background one.
+    let r = c.handle(json!({ "type": "POLICY_SET", "policy": { "mode": "background" } })).await;
+    assert_eq!(r["ok"], json!(true), "{r}");
     c.start_fleet_poller();
 
     let deadline = Instant::now() + Duration::from_secs(10);

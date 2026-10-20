@@ -15,6 +15,11 @@ import { idb } from '../lib/idb.js';
 
 const cache = new Map();      // key -> record, so rendering does not await
 let loaded = false;
+/** Bumped on every change, so a memo built from acknowledgements knows when to rebuild. */
+let rev = 0;
+export function acksRev() { return rev; }
+/** Every record, for a reader that has to look across keys (the history of an alert). */
+export function ackRecords() { return [...cache.values()]; }
 
 /** @typedef {{key:string, acked:boolean, ackedAt:number, ackedBy:string, notes:Array, missingSince:number}} AckRecord */
 
@@ -23,7 +28,7 @@ export async function loadAcks() {
     const all = (await idb.allAcks()) || [];
     cache.clear();
     for (const a of all) cache.set(a.key, a);
-    loaded = true;
+    loaded = true; rev++;
   } catch (_) { loaded = true; }   // a browser with no IndexedDB just gets no notes
   return cache;
 }
@@ -38,7 +43,7 @@ export function isAcked(key) { return !!(cache.get(key) || {}).acked; }
 export function noteCount(key) { return ((cache.get(key) || {}).notes || []).length; }
 
 async function save(rec) {
-  cache.set(rec.key, rec);
+  cache.set(rec.key, rec); rev++;
   try { await idb.putAck(rec); } catch (_) { /* memory-only for this session */ }
   return rec;
 }
@@ -57,6 +62,21 @@ export async function loadCurrentUser() {
 
 export async function acknowledge(key, { by = who, note = '' } = {}) {
   const rec = { ...ackFor(key), acked: true, ackedAt: Date.now(), ackedBy: by || 'operator' };
+  delete rec.ackedItems;        // the whole key, as before
+  rec.notes = [...(rec.notes || [])];
+  if (note.trim()) rec.notes.push({ text: note.trim(), by: by || 'operator', ts: Date.now() });
+  return save(rec);
+}
+
+/**
+ * Acknowledge a merged alert (core/alert-groups.js): the record is kept under the merged
+ * key and remembers WHICH items it covered, so an item that joins later is not hidden
+ * behind it. A record with no item list (everything acknowledged before merging existed)
+ * covers everything under its key, as it always did.
+ */
+export async function acknowledgeItems(key, itemIds, { by = who, note = '' } = {}) {
+  const rec = { ...ackFor(key), acked: true, ackedAt: Date.now(), ackedBy: by || 'operator',
+    ackedItems: [...new Set(itemIds || [])] };
   rec.notes = [...(rec.notes || [])];
   if (note.trim()) rec.notes.push({ text: note.trim(), by: by || 'operator', ts: Date.now() });
   return save(rec);
@@ -64,6 +84,7 @@ export async function acknowledge(key, { by = who, note = '' } = {}) {
 
 export async function unacknowledge(key) {
   const rec = { ...ackFor(key), acked: false, ackedAt: 0, ackedBy: '' };
+  delete rec.ackedItems;
   // Notes are kept: they are the history of the problem, not of the acknowledgement.
   return save(rec);
 }

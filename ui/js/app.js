@@ -4,10 +4,10 @@ import { h, $, mount, clear } from './lib/dom.js';
 import { ago, dur } from './lib/fmt.js';
 import { idb } from './lib/idb.js';
 import { coalesce } from './lib/coalesce.js';
-import { createRedrawGate, normalisePolicy, normaliseScope, openingSelection } from './lib/quiet-ui.js';
+import { createRedrawGate, onRefreshed, normalisePolicy, normaliseScope, openingSelection } from './lib/quiet-ui.js';
 import * as cfg from './core/config.js';
 import { state, bus, setConfig, refreshAll, refreshModule, REFRESH_MODULES, startAutoRefresh, clusters, fleetMode,
-         alerts, cachedAlerts, worstHealth, requestLoad, fleetPolicy,
+         alerts, cachedAlerts, worstHealth, requestLoad, fleetPolicy, fetchesOnlyOnAsk,
          clustersNeedingCredential, clustersWithAuthError, hasSessionCredential, isReadOnly, healthState, activeClusters, openAlertsNow, openAlertCounts } from './core/state.js';
 import { rowMenu, toast, notificationBell, setNotificationSink, dropNotification } from './ui/menu.js';
 import { showCredentialDialog, serverHoldsCredentials, serverCredentialMessage } from './ui/credential-dialog.js';
@@ -22,7 +22,7 @@ import { applyLoadedConfig } from './ui/load-config.js';
 import { authState, loginScreen, signOut } from './ui/login.js';
 import { aboutMini } from './ui/about.js';
 import { announceNewAlerts, announceSnapshotOutcomes, resetAnnounced } from './core/notify.js';
-import { onSessionLost, bridge, setSession, setSignedIn } from './core/transport.js';
+import { onSessionLost, bridge, setSession, setSignedIn, abortPage } from './core/transport.js';
 import { readLaunch, withoutCode, withoutTrouble, troubleshootTarget, themeFor, exchangeCode, rememberEmbedTheme, askZabbixToSignIn, rememberPageForReauth, takeRememberedPage } from './core/embed.js';
 import { pageForProblem } from './core/alert-rules.js';
 
@@ -62,6 +62,8 @@ import * as pRequests from './pages/requests.js';
 import { loadSilences } from './core/silences.js';
 import { setRequestOrigin } from './core/es.js';
 import { UI_CODES, withCode, errorText } from './core/error-codes.js';
+import { setPageGate } from './core/intent.js';
+import { registerPages } from './core/page-labels.js';
 
 /**
  * `minRole` is the lowest role the tab is offered to.
@@ -85,7 +87,7 @@ const PAGES = [
   // it whatever the redraw policy says; the pending gate is for pages people read.
   { id: 'logs',      label: 'Live logs & Log delay', icon: '▶', mod: pLogs, multi: true,  minRole: 'user', live: true },
   { id: 'console',   label: 'REST console',   icon: '⌫', mod: pConsole,   multi: false, minRole: 'user', live: true },
-  { id: 'snapshots', label: 'Snapshots & SLM',icon: '↻', mod: pSnapshots, multi: true,  minRole: 'user' },
+  { id: 'snapshots', label: 'Snapshots',      icon: '↻', mod: pSnapshots, multi: true,  minRole: 'user' },
   { id: 'volume',    label: 'Volume report',  icon: '▤', mod: pVolume,    multi: true,  minRole: 'user' },
   // Not for read-only users: automation is run by operators and admins.
   { id: 'automation', label: 'Automation',    icon: '⟳', mod: pAutomation, multi: true, minRole: 'operator' },
@@ -94,10 +96,15 @@ const PAGES = [
   { id: 'settings',  label: 'Config',         icon: '⚙', mod: pSettings,  multi: true,  minRole: 'admin' },
 ];
 
+// The one place a page is named; the pages that link to another read its name from here.
+registerPages(PAGES);
+
 /** The tabs this session may actually use. */
 function visiblePages() {
   return PAGES.filter((p) => may(p.minRole) && (!p.accountsOnly || !!me));
 }
+// The same answer for a page that links to another (core/intent.js canOpenPage).
+setPageGate((id) => visiblePages().some((p) => p.id === id));
 
 const root = document.getElementById('root');
 let currentPage = null;
@@ -428,6 +435,31 @@ function clusterFinder(sel) {
   return h('span', { style: { display: 'inline-flex' } }, input, list);
 }
 
+/**
+ * Mark, in the picker, every cluster that cannot be reached — any of them, not only the
+ * selected one. In place: a cluster going up or down must not rebuild the whole top bar.
+ */
+function markUnreachable(sel) {
+  if (!sel) return;
+  const byId = new Map(clusters().map((c) => [c.id, c]));
+  for (const o of sel.options) {
+    const c = byId.get(o.value);
+    if (!c) continue;
+    const down = healthState(state.data.get(c.id)) === 'unreachable';
+    const text = down ? `\u25cf ${c.name} \u2014 unreachable` : c.name;
+    if (o.textContent !== text) o.textContent = text;
+    o.classList.toggle('unreachable', down);
+    o.title = down ? `${c.name} is unreachable` : '';
+  }
+}
+
+/** Who goes to the clusters, as the top bar's live/quiet pill says it. */
+function serverLead() {
+  return fetchesOnlyOnAsk()
+    ? 'The server goes to a cluster only when a page asks for it (Config → Requests, Client basis) and pushes what arrives here'
+    : 'The server polls every cluster itself and pushes what changes here';
+}
+
 function renderTopbar() {
   const bar = $('#topbar');
   if (!bar) return;
@@ -442,7 +474,7 @@ function renderTopbar() {
     a.length, crit, clustersNeedingCredential().length, clustersWithAuthError().length, serverHoldsCredentials(),
     theme, isSnapshotMode(), fleetMode(), state.autoRefresh, state.defaults.refreshIntervalSec, redrawPolicy(),
     me && me.name, embedded, state.snapshot && state.snapshot.host]);
-  if (key === topbarKey && bar.firstChild) { tickStatus(); return; }
+  if (key === topbarKey && bar.firstChild) { tickStatus(); markUnreachable($('#cluster-select')); return; }
   topbarKey = key;
 
   const sel = h('select#cluster-select', { onchange: (e) => {
@@ -457,8 +489,17 @@ function renderTopbar() {
     fleetChosen = e.target.value === 'all';
     go(currentPage);
   } });
+  // "All clusters" first, then every cluster A–Z (clusters() is in name order). A cluster
+  // that cannot be reached says so in the list itself, so nobody picks it expecting data.
   if (page.multi) sel.append(h('option', { value: 'all' }, `All clusters (${clusters().length})`));
   clusters().forEach((c) => sel.append(h('option', { value: c.id }, c.name)));
+  markUnreachable(sel);
+  // As wide as the longest name, not the longest option: the "— unreachable" mark comes and
+  // goes, and a <select> sized by it resized the top bar, wrapped it onto a second line and
+  // moved the page under the reader. Capped, so a fleet of long names keeps the bar on one
+  // line; the list it opens shows every name whole.
+  const longest = Math.max(`All clusters (${clusters().length})`.length, ...clusters().map((c) => c.name.length));
+  sel.style.width = `${Math.min(26, Math.max(12, longest + 1))}ch`;
   resolveSelection(page);
   sel.value = state.selected;
   // On a large fleet a dropdown of a hundred names is scrolled, not read: a box beside it
@@ -500,21 +541,19 @@ function renderTopbar() {
           h('i.dot'), 'snapshot')
       : null,
     h('span#refresh-status.muted', { style: { fontSize: '11.5px', fontVariantNumeric: 'tabular-nums' } }, ''),
-    // Updates that landed while the page was being read, held by the redraw gate. Filled
-    // in by renderPendingPill — the gate changes it far more often than the bar redraws.
-    h('button#pending-updates.btn.sm.primary', { hidden: true, onclick: () => redrawGate.apply() }, ''),
-    // With the server's fleet cache there is nothing for a page to poll: the core polls
-    // every cluster on its own schedule and tells the page what changed. The auto toggle
+    // With the server's fleet cache there is nothing for a page to poll: the core goes to the
+    // clusters (on its schedule, or when a page asks) and tells the page what changed. The auto toggle
     // would only be a switch for load that no longer exists, so this says how what lands
-    // reaches the page instead: live (repainted as it arrives) or quiet (held for Apply).
+    // reaches the page instead: live (repainted as it arrives) or quiet (held until you pause).
     fleetMode() && !isSnapshotMode()
       ? (redrawPolicy() === 'live'
-        ? h('span.pill.green', { title: 'The server polls every cluster itself and pushes what changes here; '
+        ? h('span.pill.green', { title: `${serverLead()}; `
             + 'the page repaints as it lands. Refresh asks it to fetch the clusters on screen now. '
             + 'Config → Defaults → Live redraw changes this.' }, h('i.dot'), 'live')
-        : h('span.pill.grey', { title: 'The server polls every cluster itself and pushes what changes here. '
-            + 'The page keeps what it shows until you press Apply'
-            + (redrawPolicy() === 'pending' ? ', or by itself after a minute without you touching it' : '')
+        : h('span.pill.grey', { title: `${serverLead()}. `
+            + (redrawPolicy() === 'pending'
+              ? 'The page does not move while you are using it; what has landed is drawn a few seconds after you pause'
+              : 'The page keeps what it shows until you press Refresh or open another page')
             + '. Refresh asks it to fetch the clusters on screen now. Config → Defaults → Live redraw changes this.' },
           h('i.dot'), redrawPolicy() === 'pending' ? 'quiet' : 'manual'))
       : null,
@@ -574,7 +613,6 @@ function renderTopbar() {
         }, `\u23FB ${me.name}`)
       : null);
   tickStatus();
-  renderPendingPill(redrawGate.pending());
 }
 
 function tickStatus() {
@@ -630,7 +668,8 @@ function renderSideFoot() {
     pol && pol.pausedAll
       ? h('span.pill.grey', { title: 'The request policy pauses every request: nothing new is sent to any cluster until an administrator resumes (Config → Requests, or the Request Centre)' }, 'requests paused')
       : null,
-    // What the poller is actually doing: "auto" resolves to background or hybrid by fleet size.
+    // What the poller is actually doing: "auto" resolves to background or hybrid by fleet size,
+    // and the shipped Client basis is on-demand.
     pol && ((pol.resolvedMode || pol.mode) === 'hybrid' || (pol.resolvedMode || pol.mode) === 'on-demand')
       ? h('span.row.muted', {
           title: (pol.resolvedMode || pol.mode) === 'hybrid'
@@ -726,7 +765,11 @@ export function go(id) {
     // And whatever it was still waiting on is let go of: the core answers those requests
     // "aborted" instead of holding them to the cluster's timeout. Only this person's, only
     // this page's; the poller is never touched. Fire and forget — nothing here waits on it.
-    if (prev && !isSnapshotMode()) bridge({ type: 'ABORT_REQUESTS', origin: `page:${prev.id}` }).catch(() => {});
+    if (prev && !isSnapshotMode()) {
+      bridge({ type: 'ABORT_REQUESTS', origin: `page:${prev.id}` }).catch(() => {});
+      // …and the browser closes their connections, which the core also takes as "gone".
+      abortPage(`page:${prev.id}`);
+    }
   }
   currentPage = page.id;
   setRequestOrigin(`page:${page.id}`);
@@ -965,7 +1008,7 @@ function waitForZabbix() {
 }
 
 bus.on('refreshing', () => { tickStatus(); });
-bus.on('refreshed', () => {
+bus.on('refreshed', (ev) => {
   maybeOfferAuthRecovery(); renderTopbar(); renderSideFoot(); renderNav();
   // After the nav, so the tab badge and the toast agree about what is open.
   // Zabbix announces problems itself; a toast here would be the same news twice.
@@ -981,10 +1024,12 @@ bus.on('refreshed', () => {
     }
     return { cluster: c, snapshots: snaps };
   }));
-  // A refresh is something a person asked for (or auto-refresh, which they turned on):
-  // it applies whatever the gate was holding, through the same coalescing as data events,
-  // so a refresh ending while pushes are still landing is one redraw, not two.
-  redrawGate.apply();
+  // A refresh a person asked for applies whatever the gate was holding, through the same
+  // coalescing as data events, so a refresh ending while pushes are still landing is one
+  // redraw, not two. One the app did by itself (the core's push, the auto-refresh timer)
+  // does not: its changes are already held by the gate and draw once the page goes idle —
+  // see onRefreshed in lib/quiet-ui.js.
+  onRefreshed(redrawGate, ev);
 });
 bus.on('tick', tickStatus);
 
@@ -1016,21 +1061,12 @@ const scheduleDataRedraw = coalesce(() => {
  * And, before any of that, the redraw gate. Coalescing made a burst one redraw; it did
  * nothing about the next burst, and on a fleet there is always a next burst — the page
  * repainted all day under whoever was reading it. Under the default policy (`pending`)
- * what lands is held and counted on an "N updates — Apply" pill; it applies by itself
- * once the page has gone a minute untouched. The nav badge still moves: a new alert is
+ * what lands is held, with nothing on screen to say so, and drawn by itself once the
+ * page has gone a few seconds without a touch. The nav badge still moves: a new alert is
  * worth knowing about while you read. See lib/quiet-ui.js; Config → Defaults sets it.
  */
 function redrawPolicy() { return normalisePolicy(state.defaults && state.defaults.liveRedraw); }
-function renderPendingPill(n) {
-  const el = $('#pending-updates');
-  if (!el) return;
-  el.hidden = !n;
-  if (!n) return;
-  el.textContent = `${n} update${n === 1 ? '' : 's'} — Apply`;
-  el.title = 'Data landed while you were reading. Apply redraws the page with it'
-    + (redrawPolicy() === 'pending' ? '; it also applies by itself after a minute without you touching the page.' : '.');
-}
-const redrawGate = createRedrawGate({ apply: () => scheduleDataRedraw(), policy: redrawPolicy, onChange: renderPendingPill });
+const redrawGate = createRedrawGate({ apply: () => scheduleDataRedraw(), policy: redrawPolicy });
 const scheduleNavRedraw = coalesce(() => renderNav());
 // Acknowledging or silencing changes what counts as open: the badge and the bar say so at once.
 bus.on('alerts-changed', () => { renderNav(); topbarKey = ''; renderTopbar(); });

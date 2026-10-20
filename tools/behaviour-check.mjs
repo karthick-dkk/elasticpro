@@ -93,6 +93,25 @@ const groupBand = () => [...doc.querySelectorAll('table.sheet thead tr.group-hea
 
 async function go(id) { app.go(id); await settleFor(350); }
 
+/**
+ * Wait, up to `ms`, for `find()` to give an element; a named problem and null when it never
+ * does, with what the page was showing, instead of a TypeError on the next `.click()`.
+ * A page that failed to draw ("No cluster selected", "Page failed to render") reads very
+ * differently from a slow one, and this says which.
+ */
+async function waitFor(find, what, ms = 5000) {
+  const until = Date.now() + ms;
+  for (;;) {
+    const el = find();
+    if (el) return el;
+    if (Date.now() >= until) break;
+    await settleFor(50);
+  }
+  const view = doc.getElementById('view');
+  problems.push(`${what}: not on the page after ${ms} ms — the view reads "${view ? view.textContent.replace(/\s+/g, ' ').trim().slice(0, 160) : '(no #view)'}"`);
+  return null;
+}
+
 /* ------------- the status strip stays off the pages people work in ------------- */
 
 const STRIP_HIDDEN = ['indices', 'console', 'logs', 'snapshots', 'shards', 'volume'];
@@ -283,18 +302,6 @@ await go('overview');
   await settleFor(200);
   v = [...doc.querySelectorAll('table.tbl thead th')].find((th) => th.textContent.includes('Version'));
   ok(/▼/.test(v.textContent), `overview: second click should reverse, header reads "${v.textContent}"`);
-}
-
-/* ---------------------------- alerts show their shape ---------------------------- */
-
-await go('alerts');
-{
-  const titles = [...doc.querySelectorAll('section.card header h2')].map((x) => x.textContent);
-  ok(titles.includes('Alert statistics'), `alerts: no statistics card, saw ${titles.join(' | ')}`);
-  // Two gauges, drawn as arcs rather than written as numbers.
-  const paths = doc.querySelectorAll('section.card svg path').length;
-  ok(paths >= 2, `alerts: expected gauge arcs, found ${paths} path(s)`);
-  ok(/clusters alerting/.test(doc.body.textContent), 'alerts: the fleet gauge is unlabelled');
 }
 
 await go('indices');
@@ -713,6 +720,20 @@ await go('settings');
 /* ------------- the cluster summary names the JVM and opens a row ------------- */
 
 await go('overview');
+// JDK starts hidden (core/cluster-view.js SUMMARY_COLUMNS): turn it on the way a person
+// does, through the Columns panel.
+{
+  const btn = doc.getElementById('cl-columns');
+  ok(!!btn, 'overview: no Columns button on the summary');
+  if (btn) {
+    btn.click(); await settleFor(150);
+    const box = doc.getElementById('cl-colvis-jdk');
+    ok(box && !box.checked, 'overview: JDK should start hidden');
+    if (box && !box.checked) { box.checked = true; box.dispatchEvent(new window.Event('change', { bubbles: true })); await settleFor(250); }
+    doc.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); await settleFor(100);
+    ok(!doc.querySelector('.pop.cl-cols'), 'overview: Escape did not close the Columns panel');
+  }
+}
 {
   const summary = [...doc.querySelectorAll('section.card')]
     .find((sec) => (sec.querySelector('header h2') || {}).textContent === 'Cluster summary');
@@ -752,6 +773,270 @@ await go('overview');
       ok(now && now.getAttribute('aria-expanded') === 'true', 'overview: an open row should say it is open');
       now.click();
       await settleFor(250);
+    }
+  }
+}
+
+/* ------------- Clusters page: columns, the name menu, unreachable cards ------------- */
+
+{
+  const st = await load('core/state.js');
+  const cv = await load('core/cluster-view.js');
+  const press = (el) => el && el.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+  const key = (k, target = doc) => target.dispatchEvent(new window.KeyboardEvent('keydown', { key: k, bubbles: true }));
+  const summary = () => panel('Cluster summary');
+  const headCells = () => [...summary().querySelectorAll('.cl-head .cl-hcell[data-col]')];
+  const headIds = () => headCells().map((b) => b.dataset.col);
+  const headNames = () => headCells().map((b) => b.textContent.replace(/[▲▼]/g, '').trim());
+  const openCols = async () => { press(doc.getElementById('cl-columns')); await settleFor(150); return doc.querySelector('.pop.cl-cols'); };
+  const closeCols = async () => { key('Escape'); await settleFor(100); };
+  const user = () => (st.state.caller && st.state.caller.name) || 'local';
+  const stored = () => JSON.parse(window.localStorage.getItem(cv.prefsKey(user())) || 'null');
+
+  // Start from the defaults whatever an earlier case did.
+  window.localStorage.removeItem(cv.prefsKey(user()));
+  st.state.caller = { name: 'columns-check', role: 'admin' };
+  await go('overview');
+
+  // Every head sorts, says so, and the strip and the real <thead> agree.
+  {
+    const ids = headIds();
+    ok(ids[0] === 'name', `overview: the first column is "${ids[0]}", expected the cluster name`);
+    const real = [...summary().querySelectorAll('table.cl-tbl thead th[data-col]')].map((th) => th.dataset.col);
+    ok(JSON.stringify(real) === JSON.stringify(ids), `overview: pinned heads ${ids.join(',')} differ from the table's ${real.join(',')}`);
+    ok(headCells().every((b) => b.tagName === 'BUTTON' && b.hasAttribute('aria-sort')), 'overview: a pinned head is not a sort button');
+    for (const id of ids) {
+      press(summary().querySelector(`.cl-head .cl-hcell[data-col="${id}"]`)); await settleFor(120);
+      const a = summary().querySelector(`.cl-head .cl-hcell[data-col="${id}"]`);
+      const first = a.getAttribute('aria-sort');
+      press(a); await settleFor(120);
+      const b = summary().querySelector(`.cl-head .cl-hcell[data-col="${id}"]`);
+      ok(first !== 'none' && b.getAttribute('aria-sort') !== first && b.getAttribute('aria-sort') !== 'none',
+        `overview: "${id}" did not sort and then reverse (${first} → ${b.getAttribute('aria-sort')})`);
+    }
+    press(summary().querySelector('.cl-head .cl-hcell[data-col="name"]')); await settleFor(120);
+    if (summary().querySelector('.cl-head .cl-hcell[data-col="name"]').getAttribute('aria-sort') !== 'ascending') {
+      press(summary().querySelector('.cl-head .cl-hcell[data-col="name"]')); await settleFor(120);
+    }
+  }
+
+  // The rows are in the page: no box of their own.
+  ok(!summary().querySelector('.cluster-tbl-scroll'), 'overview: the summary still has its own scroll box');
+
+  // Columns: hide, reorder (keyboard and drag), rename (Enter saves, Escape cancels), reset.
+  {
+    let pop = await openCols();
+    ok(!!pop, 'overview: Columns did not open its panel');
+    ok(doc.getElementById('cl-columns').getAttribute('aria-expanded') === 'true', 'overview: the Columns button does not say it is open');
+    const nameBox = doc.getElementById('cl-colvis-name');
+    ok(nameBox && nameBox.disabled && nameBox.checked, 'overview: Cluster must be shown and not hideable');
+    const ilm = doc.getElementById('cl-colvis-ilm');
+    ilm.checked = false; ilm.dispatchEvent(new window.Event('change', { bubbles: true })); await settleFor(200);
+    ok(!headIds().includes('ilm'), 'overview: hiding ILM left it in the table');
+    ok(doc.querySelector('.pop.cl-cols'), 'overview: the panel closed after a change inside it');
+
+    const before = headIds();
+    press(doc.getElementById('cl-colup-alerts')); await settleFor(200);
+    const after = headIds();
+    ok(after.indexOf('alerts') === before.indexOf('alerts') - 1, `overview: Move up did not move Alerts (${before.join(',')} → ${after.join(',')})`);
+    ok(doc.activeElement && doc.activeElement.id === 'cl-colup-alerts', 'overview: the keyboard lost its place after Move up');
+
+    // Drag Version below Health.
+    const li = (id) => doc.querySelector(`.pop.cl-cols li[data-col="${id}"]`);
+    const dt = { setData() {}, effectAllowed: '' };
+    const fire = (el, type, extra = {}) => { const e = new window.Event(type, { bubbles: true, cancelable: true }); Object.assign(e, { dataTransfer: dt, clientY: 1e6 }, extra); el.dispatchEvent(e); };
+    fire(li('version'), 'dragstart'); fire(li('health'), 'dragover'); fire(li('health'), 'drop'); await settleFor(200);
+    const dragged = headIds();
+    ok(dragged.indexOf('version') === dragged.indexOf('health') + 1, `overview: dragging Version after Health gave ${dragged.join(',')}`);
+
+    // Rename: click, type, Escape cancels; click, type, Enter saves.
+    press(doc.getElementById('cl-colnm-version')); await settleFor(100);
+    let input = doc.getElementById('cl-colname-version');
+    ok(!!input && doc.activeElement === input, 'overview: clicking a column name did not open its rename box');
+    if (input) {
+      input.value = 'Throwaway';
+      key('Escape', input); await settleFor(150);
+      ok(doc.querySelector('.pop.cl-cols'), 'overview: Escape in the rename box closed the whole panel');
+      ok(!headNames().includes('Throwaway'), 'overview: Escape saved the rename');
+      press(doc.getElementById('cl-colnm-version')); await settleFor(100);
+      input = doc.getElementById('cl-colname-version');
+      input.value = 'ES version';
+      key('Enter', input); await settleFor(200);
+      ok(headNames().includes('ES version'), `overview: the renamed column reads ${headNames().join(' | ')}`);
+    }
+    await closeCols();
+    ok(!doc.querySelector('.pop.cl-cols'), 'overview: Escape did not close the Columns panel');
+
+    // Saved for this user — and read back from storage, not from memory: another user signs
+    // in on this tab and sees the defaults, then this one comes back to their layout.
+    const s = stored();
+    ok(s && s.columns && s.columns.names.version === 'ES version' && s.columns.shown.ilm === false,
+      `overview: the layout was not saved for this user (${JSON.stringify(s)})`);
+    const mine = headNames().join('|');
+    st.state.caller = { name: 'someone-else', role: 'admin' };
+    await go('overview');
+    ok(headIds().includes('ilm') && !headNames().includes('ES version'), 'overview: another user got this user\'s columns');
+    st.state.caller = { name: 'columns-check', role: 'admin' };
+    await go('overview');
+    ok(headNames().join('|') === mine, `overview: after signing back in the columns read ${headNames().join('|')}, expected ${mine}`);
+
+    // The CSV follows the columns on screen, in order, under their names.
+    files.length = 0;
+    press([...summary().querySelectorAll('header button')].find((b) => b.textContent === 'Export CSV')); await settleFor(150);
+    const csv = files.find((f) => /^es-cluster-summary-.*\.csv$/.test(f.name));
+    ok(!!csv, 'overview: Export CSV produced no file');
+    if (csv) {
+      const header = csv.text.split('\n')[0];
+      ok(header.includes('ES version') && !/(^|,)ILM(,|$)/.test(header), `overview: the CSV header ignores the columns on screen: ${header}`);
+      ok(header.indexOf('Health') < header.indexOf('ES version'), `overview: the CSV is not in the order on screen: ${header}`);
+    }
+
+    pop = await openCols();
+    press(doc.getElementById('cl-cols-reset')); await settleFor(200);
+    await closeCols();
+    ok(JSON.stringify(headIds()) === JSON.stringify(cv.visibleColumns(null).map((c) => c.id)), `overview: Reset left ${headIds().join(',')}`);
+    ok(headNames().includes('Version') && headIds().includes('ilm'), 'overview: Reset did not restore the names and the hidden column');
+  }
+
+  // A cluster's name opens its menu: Edit (an admin), Nodes, Repo, Live log, each going
+  // to the right page with that cluster selected.
+  {
+    const target = config.clusters[config.clusters.length - 1];
+    const trigger = () => [...summary().querySelectorAll('button.cl-name')].find((b) => b.textContent.includes(target.name));
+    const openMenu = async () => { press(trigger()); await settleFor(100); return doc.querySelector('.menu-pop'); };
+    let menu = await openMenu();
+    ok(!!menu, 'overview: clicking a cluster name opened no menu');
+    if (menu) {
+      const labels = [...menu.querySelectorAll('button[role=menuitem]')].map((b) => b.children[1].textContent);
+      for (const l of ['Edit', 'Nodes', 'Repo', 'Live log']) ok(labels.includes(l), `overview: the name menu has no "${l}" (has ${labels.join(', ')})`);
+      ok(trigger().getAttribute('aria-expanded') === 'true', 'overview: the name does not say its menu is open');
+      ok(doc.activeElement && menu.contains(doc.activeElement), 'overview: the menu did not take the keyboard');
+      key('ArrowDown'); ok(doc.activeElement !== menu.querySelector('button'), 'overview: ArrowDown did not move in the menu');
+      key('Escape'); await settleFor(80);
+      ok(!doc.querySelector('.menu-pop'), 'overview: Escape did not close the name menu');
+      ok(doc.activeElement === trigger(), 'overview: Escape did not hand the keyboard back to the name');
+    }
+    const go2 = async (label) => {
+      await go('overview');
+      st.state.selected = 'all';
+      const m = await openMenu();
+      const item = m && [...m.querySelectorAll('button[role=menuitem]')].find((b) => b.children[1].textContent === label);
+      press(item); await settleFor(450);
+    };
+    await go2('Nodes');
+    ok(/#\/shards$/.test(window.location.hash) && st.state.selected === target.id, `name menu → Nodes: at ${window.location.hash}, selected ${st.state.selected}`);
+    await go2('Repo');
+    ok(/#\/snapshots$/.test(window.location.hash) && st.state.selected === target.id, `name menu → Repo: at ${window.location.hash}, selected ${st.state.selected}`);
+    const summaryTab = [...doc.querySelectorAll('#view .seg button')].find((b) => b.textContent === 'Snapshot Summary');
+    ok(summaryTab && summaryTab.getAttribute('aria-pressed') === 'true', 'name menu → Repo: the repositories view is not the one open');
+    const snapTab = [...doc.querySelectorAll('#view .seg button')].find((b) => b.textContent === 'Snapshots');
+    if (snapTab) { press(snapTab); await settleFor(150); }
+    await go2('Live log');
+    ok(/#\/logs$/.test(window.location.hash) && st.state.selected === target.id, `name menu → Live log: at ${window.location.hash}, selected ${st.state.selected}`);
+    await go2('Edit');
+    const dlg = doc.querySelector('.modal-overlay .modal');
+    ok(dlg && /Edit cluster/.test(dlg.textContent), 'name menu → Edit: the cluster editor did not open');
+    if (dlg) { const cancel = [...dlg.querySelectorAll('button')].find((b) => b.textContent === 'Cancel'); press(cancel); await settleFor(150); }
+    // A role that may not change clusters is not offered Edit.
+    st.state.caller = { name: 'columns-check', role: 'user' };
+    await go('overview');
+    menu = await openMenu();
+    ok(menu && ![...menu.querySelectorAll('button[role=menuitem]')].some((b) => b.children[1].textContent === 'Edit'), 'name menu: Edit offered to a role that cannot edit');
+    key('Escape'); await settleFor(60);
+    st.state.caller = { name: 'columns-check', role: 'admin' };
+    st.state.selected = 'all';
+  }
+
+  // Unreachable clusters: cards above the table, not rows in it; Hide folds them to one
+  // line, remembered; a cluster that newly goes down opens the section again.
+  {
+    const [a, b] = config.clusters;
+    const real = new Map(config.clusters.map((c) => [c.id, { d: st.state.data.get(c.id), cl: st.client(c.id) && { state: st.client(c.id).state, lastError: st.client(c.id).lastError } }]));
+    const takeDown = (c, state = 'offline', message = 'connect ECONNREFUSED 127.0.0.1:9299 (EP-301)') => {
+      st.state.data.set(c.id, { ...(st.state.data.get(c.id) || {}), updatedAt: Date.now(), reachable: false, healthUnknown: false, reach: { state: 'unreachable', since: Date.now() - 18 * 60000 } });
+      const cl = st.client(c.id); if (cl) { cl.state = state; cl.lastError = { ok: false, kind: 'unreachable', message }; }
+    };
+    const restore = () => {
+      for (const [id, r] of real) { st.state.data.set(id, r.d); const cl = st.client(id); if (cl && r.cl) { cl.state = r.cl.state; cl.lastError = r.cl.lastError; } }
+    };
+    const section = () => doc.querySelector('#view section.cl-down');
+    const rowNames = () => [...summary().querySelectorAll('tbody button.cl-name')].map((x) => x.textContent.replace('▾', '').trim());
+    try {
+      st.state.selected = 'all';
+      takeDown(a);
+      await go('overview');
+      const sec = section();
+      ok(!!sec, 'unreachable: no unreachable section on the page');
+      if (sec) {
+        ok(!!(sec.compareDocumentPosition(summary()) & window.Node.DOCUMENT_POSITION_FOLLOWING), 'unreachable: the section is not above the summary');
+        ok(/1 unreachable/.test(sec.textContent), `unreachable: heading reads "${sec.querySelector('h2') && sec.querySelector('h2').textContent}"`);
+        const card = sec.querySelector(`article.cl-down-card[data-cluster="${a.id}"]`);
+        ok(!!card, `unreachable: no card for ${a.name}`);
+        ok(card && /Offline/.test(card.textContent) && /since /.test(card.textContent) && /ECONNREFUSED/.test(card.textContent),
+          `unreachable: the card does not give reason, since and error: "${card && card.textContent.slice(0, 160)}"`);
+        ok(card && card.querySelector('.cl-err').getAttribute('title').includes('ECONNREFUSED'), 'unreachable: the full error is not in the tooltip');
+        ok(!rowNames().includes(a.name), `unreachable: ${a.name} is still a row in the table`);
+        ok(/End of the list · \d+ clusters? \(\d+ here, 1 unreachable at the top\)/.test(summary().querySelector('.cl-end').textContent),
+          `unreachable: the end line reads "${summary().querySelector('.cl-end').textContent}"`);
+        const exp = card.querySelector('button.cl-exp');
+        press(exp); await settleFor(150);
+        const opened = section().querySelector(`article.cl-down-card[data-cluster="${a.id}"]`);
+        ok(opened && opened.querySelector('button.cl-exp').getAttribute('aria-expanded') === 'true', 'unreachable: ▾ did not open the card');
+        for (const k of ['Address', 'Through', 'Last answer', 'Error code', 'Next try']) ok(opened && opened.textContent.includes(k), `unreachable: the open card has no "${k}"`);
+        ok(opened && opened.textContent.includes('EP-301'), 'unreachable: the error code is not shown');
+        press(opened.querySelector('button.cl-exp')); await settleFor(100);
+      }
+
+      // Hide, and it stays hidden across a reload (read back from storage).
+      press(doc.getElementById('cl-down-toggle')); await settleFor(150);
+      ok(section() && section().classList.contains('folded') && /hidden/.test(section().textContent), 'unreachable: Hide did not fold the section to one line');
+      ok(doc.getElementById('cl-down-toggle').getAttribute('aria-expanded') === 'false', 'unreachable: the folded toggle does not say it is closed');
+      ok(stored() && stored().unreachable.hidden === true, 'unreachable: the fold was not saved');
+      st.state.caller = { name: 'someone-else', role: 'admin' }; await go('overview');
+      ok(section() && !section().classList.contains('folded'), 'unreachable: another user inherited the fold');
+      st.state.caller = { name: 'columns-check', role: 'admin' }; await go('overview');
+      ok(section() && section().classList.contains('folded'), 'unreachable: the fold did not survive a reload');
+
+      // A second cluster goes down: a new outage opens it.
+      if (b) {
+        takeDown(b, 'auth_error', 'HTTP 401 from the cluster (EP-401)');
+        await go('overview');
+        ok(section() && !section().classList.contains('folded'), 'unreachable: a newly unreachable cluster stayed hidden');
+        ok(section() && /2 unreachable/.test(section().textContent) && /Auth error/.test(section().textContent), 'unreachable: the second card is missing or has no reason');
+        // Hide again, then one recovers: 2 → 1 keeps it hidden.
+        press(doc.getElementById('cl-down-toggle')); await settleFor(150);
+        st.state.data.set(b.id, real.get(b.id).d);
+        const clb = st.client(b.id); if (clb) { clb.state = real.get(b.id).cl.state; clb.lastError = real.get(b.id).cl.lastError; }
+        await go('overview');
+        ok(section() && section().classList.contains('folded'), 'unreachable: going from 2 down to 1 opened the section');
+        press(doc.getElementById('cl-down-toggle')); await settleFor(150);
+        ok(section() && !section().classList.contains('folded'), 'unreachable: Show did not open the section');
+      }
+
+      // "Go to" from an unreachable alert: the section opens if it was hidden, and that
+      // cluster's card is open and flashed (core/alert-goto.js → core/focus.js).
+      {
+        const goto = await load('core/alert-goto.js');
+        press(doc.getElementById('cl-down-toggle')); await settleFor(150);
+        ok(section() && section().classList.contains('folded'), 'unreachable Go to: could not hide the section first');
+        goto.openGoto({ page: 'overview', focus: goto.FOCUS.unreachable({ clusterId: a.id }), clusterId: a.id });
+        await settleFor(450);
+        const card = section() && section().querySelector(`article.cl-down-card[data-cluster="${a.id}"]`);
+        ok(section() && !section().classList.contains('folded'), 'unreachable Go to: the hidden section was not shown');
+        ok(card && card.querySelector('button.cl-exp').getAttribute('aria-expanded') === 'true', 'unreachable Go to: the cluster\'s card is not open');
+        ok(card && card.classList.contains('focus-flash'), 'unreachable Go to: the card was not brought into view');
+        if (card) { press(card.querySelector('button.cl-exp')); await settleFor(100); }
+      }
+    } finally {
+      restore();
+      window.localStorage.removeItem(cv.prefsKey('columns-check'));
+      window.localStorage.removeItem(cv.prefsKey('someone-else'));
+      st.state.caller = null;
+      await go('overview');
+      // The name menu's hand-offs picked one cluster; later cases drive the whole fleet,
+      // so ask for it back the way a person does — through the picker.
+      const pick = doc.getElementById('cluster-select');
+      if (pick) { pick.value = 'all'; pick.dispatchEvent(new window.Event('change', { bubbles: true })); await settleFor(300); }
     }
   }
 }
@@ -1497,7 +1782,7 @@ if (config.clusters.length >= 2 && viaFleet) {
   const st = await load('core/state.js');
   const { DEFAULTS } = await load('core/config.js');
   const said = [];
-  const spy = (msg, kind) => said.push({ msg, kind });
+  const spy = (msg, kind, ms, opts) => said.push({ msg, kind, opts });
 
   // Its own state: the task section above emptied state.config to run against stubs, and
   // alerts() walks the configured clusters — with none, there is nothing to announce and
@@ -1534,7 +1819,7 @@ if (config.clusters.length >= 2 && viaFleet) {
   d.snapshots = { 'already-broken': [], daily: [] };
   const fresh = notify.announceNewAlerts({ notify: spy });
   ok(fresh.length === 1, `a newly broken repository should announce once, announced ${fresh.length}`);
-  ok(said.length === 1 && /daily/.test(said[0].msg), `announcement text: ${JSON.stringify(said)}`);
+  ok(said.length === 1 && /1 new alert/.test(said[0].msg) && /daily/.test((said[0].opts.detail || []).join(' ')), `announcement text: ${JSON.stringify(said)}`);
 
   said.length = 0;
   notify.announceNewAlerts({ notify: spy });
@@ -1545,8 +1830,9 @@ if (config.clusters.length >= 2 && viaFleet) {
   d.snapshots = {};
   said.length = 0;
   notify.announceNewAlerts({ notify: spy });
-  ok(said.length === 1 && /5 new alerts/.test(said[0].msg),
-    `five at once should collapse to one summary, got ${JSON.stringify(said)}`);
+  // Five repositories on one cluster are one merged alert, so one notice about five items — not a wall.
+  ok(said.length === 1 && /1 new alert/.test(said[0].msg),
+    `five at once on one cluster should be one notice, got ${JSON.stringify(said)}`);
 }
 
 /* -------------- accounts keeps the two kinds of user apart -------------- */
@@ -1753,6 +2039,40 @@ restoreConsole();
   ok(sent.filter((m) => m.type === 'REQUEST_LOG').length === after, 'requests: the log is still being re-read after leaving the page');
 }
 
+// Housekeeping card on the Request Centre: read on entry, Dry run asks the core for a dry
+// run and draws what came back, and Run now asks first (a real run deletes). The real run is
+// never pressed here: against a bridge with a real data dir it would clean it.
+{
+  await go('requests'); await settleFor(800);
+  ok(sent.some((m) => m.type === 'HOUSEKEEPING_GET'), 'housekeeping: opening the Request Centre should read HOUSEKEEPING_GET');
+  const card = panel('Housekeeping');
+  ok(!!card, 'housekeeping: no Housekeeping card on the Request Centre');
+  if (card) {
+    const act = (a) => panel('Housekeeping').querySelector(`[data-act="${a}"]`);
+    ok(act('hk-dry') && act('hk-run'), 'housekeeping: the card has no Dry run / Run now buttons');
+    ok(/Runs\s+every hour|Runs\s+off/.test(card.textContent), `housekeeping: the card does not say when it runs: ${card.textContent.slice(0, 200)}`);
+    const runs = () => sent.filter((m) => m.type === 'HOUSEKEEPING_RUN');
+    const before = runs().length;
+    act('hk-dry').click(); await settleFor(1500);
+    ok(runs().length === before + 1, `housekeeping: Dry run sent ${runs().length - before} HOUSEKEEPING_RUN, expected 1`);
+    ok(runs().length > before && runs()[runs().length - 1].dryRun === true, 'housekeeping: Dry run did not ask for a dry run');
+    const after = panel('Housekeeping');
+    ok(after.querySelectorAll('tr[data-job]').length >= 6, `housekeeping: the result lists ${after.querySelectorAll('tr[data-job]').length} jobs, expected one row per job`);
+    ok(/dry run/i.test(after.textContent), 'housekeeping: the last run is not marked as a dry run');
+    ok(!/\bremoved \d/.test(after.textContent), 'housekeeping: a dry run read as a deletion ("removed N")');
+    // Run now asks before it deletes anything; answering No sends nothing.
+    const askedBefore = runs().length;
+    act('hk-run').click(); await settleFor(300);
+    const dlg = doc.querySelector('.modal');
+    ok(!!dlg && /housekeeping/i.test(dlg.textContent), 'housekeeping: Run now did not ask first');
+    ok(runs().length === askedBefore, 'housekeeping: Run now sent the run before it was confirmed');
+    const no = dlg && [...dlg.querySelectorAll('button')].find((b) => b.textContent.trim() === 'No');
+    if (no) { no.click(); await settleFor(300); }
+    ok(!doc.querySelector('.modal'), 'housekeeping: the confirmation did not close on No');
+    ok(runs().length === askedBefore, 'housekeeping: answering No still ran housekeeping');
+  }
+}
+
 // Config page: a fleet event must not reload the open tab or wipe what is being typed.
 // On a 32-cluster install data lands every couple of seconds; the page used to rebuild on
 // each one, re-asking TUNNELS/PINS (Jump hosts) and ZABBIX_CLUSTERS (Zabbix) every time.
@@ -1884,30 +2204,27 @@ restoreConsole();
   await go('overview');
 }
 
-// Quiet UI: fleet data landing while somebody reads the Clusters page does not repaint it.
-// It is counted on an "N updates — Apply" pill; Apply (or a minute untouched) redraws. A live
-// page — the Request Centre — still takes every event.
+// Quiet UI: fleet data landing while somebody reads the Clusters page does not repaint it,
+// and nothing on the bar says it was held (no "N updates — Apply" pill). It is drawn by itself
+// once the page has gone 3 s untouched; Refresh draws it at once. A live page — the Request
+// Centre — still takes every event.
 {
   await go('overview');
   const bus = (await load('core/state.js')).bus;
   const view = doc.querySelector('#view');
-  const pill = () => doc.querySelector('#pending-updates');
-  // The reader touches the page: the idle window starts now, so nothing applies by itself
-  // inside this case (the harness may well have been running for over a minute).
-  doc.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Shift', bubbles: true }));
+  const touch = () => doc.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Shift', bubbles: true }));
+  touch();
+  ok(!doc.querySelector('#pending-updates'), 'quiet: the topbar has a #pending-updates pill');
   const first = view.firstElementChild;
-  ok(pill() && pill().hidden, 'quiet: the Apply pill should be hidden before any data lands');
   for (const c of config.clusters) bus.emit('data', c.id); await settleFor(700);
   ok(view.firstElementChild === first, 'quiet: a fleet event repainted the Clusters page while it was being read');
-  ok(pill() && !pill().hidden && /^\d+ updates? — Apply$/.test(pill().textContent),
-    `quiet: expected an "N updates — Apply" pill, saw ${JSON.stringify(pill() && pill().textContent)}`);
-  pill().click(); await settleFor(700);
-  ok(pill() && pill().hidden, 'quiet: Apply should clear the pill');
-  ok(doc.querySelector('.pill.grey') && [...doc.querySelectorAll('#topbar .pill')].some((p) => p.textContent.trim() === 'quiet'),
+  ok(!doc.querySelector('#pending-updates') && ![...doc.querySelectorAll('#topbar *')].some((e) => /updates? — Apply/.test(e.textContent)),
+    'quiet: a held update showed a pill or counter');
+  ok([...doc.querySelectorAll('#topbar .pill')].some((p) => p.textContent.trim() === 'quiet'),
     'quiet: the top bar should say "quiet" under the default policy, not "live"');
   await go('requests');
   for (const c of config.clusters) bus.emit('data', c.id); await settleFor(300);
-  ok(pill() && pill().hidden, 'quiet: a live page (Requests) must not hold data events');
+  ok(!doc.querySelector('#pending-updates'), 'quiet: a live page (Requests) grew a pill');
   await go('overview');
 }
 
@@ -1917,6 +2234,14 @@ restoreConsole();
   const es = await load('core/es.js');
   const before = await es.policyGet();
   ok(before && before.ok, `policy: POLICY_GET was refused: ${JSON.stringify(before)}`);
+  // A bridge keeps policy.json between runs, and the restore at the end of this case saves
+  // one. With a policy already stored, "Client basis" may be what is saved, so pressing it
+  // changes nothing: start from a different mode so the press and the Save mean something
+  // on every run. The fresh-install assertions below need no policy saved, so they run
+  // only on a data directory that has none (the first run on a fresh one, as in CI).
+  if (before && before.ok && before.stored !== false && before.policy && before.policy.mode === 'on-demand') {
+    await es.policySet({ ...before.policy, mode: 'background' });
+  }
   const bus = (await load('core/state.js')).bus;
   const countOf = (type) => sent.filter((m) => m.type === type).length;
   const lastOf = (type) => sent.filter((m) => m.type === type).at(-1);
@@ -1934,8 +2259,36 @@ restoreConsole();
     await fire(); await fire();
     ok(countOf('POLICY_GET') === asked, `policy: fleet events re-asked POLICY_GET (${countOf('POLICY_GET') - asked} more)`);
 
+    // The poller's concurrency inputs sit under the request gate's caps, which POLICY_GET
+    // reports: they say so, and a value typed past one is brought back to it.
+    const gate = before && before.gate;
+    ok(gate && Number.isInteger(gate.perCluster), `policy: POLICY_GET reports no gate: ${JSON.stringify(gate)}`);
+    if (gate) {
+      const per = doc.getElementById('pol-per');
+      ok(per && Number(per.max) === Math.min(8, gate.perCluster), `policy: per-cluster input allows up to ${per && per.max}, the gate ${gate.perCluster}`);
+      ok(per && per.closest('label').textContent.includes(`request gate: ${gate.perCluster}`), 'policy: the per-cluster input does not show the gate\'s cap');
+      if (per) {
+        per.value = '8'; per.dispatchEvent(new window.Event('change', { bubbles: true }));
+        ok(per.value === String(Math.min(8, gate.perCluster)), `policy: typing 8 per cluster left ${per.value} under a gate of ${gate.perCluster}`);
+      }
+      const all = doc.getElementById('pol-global');
+      ok(all && Number(all.max) === Math.min(256, gate.global), `policy: overall input allows up to ${all && all.max}, the gate ${gate.global}`);
+    }
+
     const client = [...doc.querySelectorAll('button')].find((b) => b.textContent.startsWith('Client basis'));
     ok(!!client, 'policy: no "Client basis" preset button');
+    // An install with no saved policy runs Client basis, and the page says so: that preset
+    // is the one marked, and the only one called recommended. (Skipped when this bridge's
+    // data directory already holds a policy somebody saved.)
+    if (before && before.stored === false && client) {
+      ok(client.getAttribute('aria-pressed') === 'true',
+        `policy: with no saved policy "Client basis" is not the selected preset (mode ${before.policy && before.policy.mode})`);
+      ok(/\(recommended\)/.test(client.textContent), 'policy: "Client basis" is not marked recommended');
+      const others = [...doc.querySelectorAll('button[aria-pressed="true"]')].filter((b) => b.closest('[aria-label="Request policy presets"]'));
+      ok(others.length === 1, `policy: ${others.length} presets are marked selected on a fresh install, expected 1`);
+      ok(doc.querySelector('#pol-mode').value === 'on-demand', 'policy: the mode select does not show on-demand on a fresh install');
+      ok(/shipped policy is running/.test(doc.body.textContent), 'policy: the page does not say that nothing is saved');
+    }
     if (client) {
       client.click(); await settleFor(200);
       const pressed = [...doc.querySelectorAll('button')].find((b) => b.textContent.startsWith('Client basis'));
@@ -2049,13 +2402,19 @@ if (viaFleet) {
 }
 
 // REST console tabs: up to ten, each keeping its own query; the eleventh is refused.
-{
+consoleTabs: {
   await go('console');
   const strip = () => doc.querySelectorAll('.console-tab');
+  const add = () => doc.querySelector('.console-tab-add');
+  // The page is entitled to be drawn the moment go() returns; waiting is for a machine slow
+  // enough that it is not, and the message names what stood there instead if it never is.
+  if (!(await waitFor(add, 'console tabs: the + button'))) break consoleTabs;
   ok(strip().length >= 1, 'console tabs: no tab strip');
+  // The tabs are remembered across visits (and a bridge keeps its data directory between
+  // runs), so start from one tab rather than from whatever an earlier visit left.
+  while (strip().length > 1) { strip()[strip().length - 1].querySelector('.console-tab-x').click(); await settleFor(30); }
   const path = doc.querySelector('#c-path');
   if (path) { path.value = '/_cat/health'; path.dispatchEvent(new window.Event('input', { bubbles: true })); }
-  const add = () => doc.querySelector('.console-tab-add');
   const before = strip().length;
   add().click(); await settleFor(200);
   ok(strip().length === before + 1, `console tabs: + did not add a tab (${strip().length})`);
@@ -2146,11 +2505,348 @@ if (viaFleet) {
   }
 }
 
+/* ------------- alerts: grouped by cluster, repeats merged, a way on from each ------------- */
+
+// Last, on purpose: it follows links to other pages, which selects clusters and leaves a request
+// prepared in the console. Nothing after it would be checking what it thinks it is checking.
+
+{
+  const st = await load('core/state.js');
+  const acks = await load('core/acks.js');
+  const notify = await load('core/notify.js');
+  const { DEFAULTS } = await load('core/config.js');
+  // The harness's IndexedDB never completes a transaction, so anything that awaits a write
+  // (an acknowledgement is one) would wait for ever. The browser's does; here a Map stands in,
+  // answering at once — what is under test is what the page does with the records.
+  const { idb } = await load('lib/idb.js');
+  const realIdb = { putAck: idb.putAck, delAck: idb.delAck, allAcks: idb.allAcks, setKV: idb.setKV, getKV: idb.getKV };
+  const ackRows = new Map();
+  Object.assign(idb, {
+    putAck: async (r) => { ackRows.set(r.key, JSON.parse(JSON.stringify(r))); return true; },
+    delAck: async (k) => { ackRows.delete(k); return true; },
+    allAcks: async () => [...ackRows.values()],
+    setKV: async () => true,
+    getKV: async (k) => (k === 'ackUser' ? 'qa' : undefined),
+  });
+  const saved = { config: st.state.config, data: st.state.data, clients: st.state.clients,
+    selected: st.state.selected, defaults: st.state.defaults };
+
+  // Its own fleet: the real one answers with whatever the mock happens to be doing, and
+  // this is about how a known set of alerts is laid out and what each button does.
+  const node = (name, used) => ({ node: name, 'disk.used': String(used), 'disk.total': '100', 'disk.avail': String(100 - used), shards: '10' });
+  const healthy = () => ({ reachable: true, health: { status: 'green', unassigned_shards: 0 }, slm: [], repos: [], snapshots: {} });
+  const fleet = () => ({
+    a: { ...healthy(), health: { status: 'yellow', unassigned_shards: 4 },
+         disk: { percent: 91, nodes: [node('es-hot-1', 89), node('es-hot-2', 88), node('es-hot-3', 86)] },
+         ilmErrorCount: 2, ilmErrors: { 'logs-1': { failed_step: 'rollover' }, 'logs-2': { failed_step: 'rollover' } } },
+    k: { reachable: false },
+    b: { ...healthy(), slmStatus: { operation_mode: 'STOPPED' } },
+    q: healthy(),
+  });
+  const names = { a: 'atlas-prod', k: 'kestrel-dc', b: 'bravo-ci', q: 'quiet-lab' };
+  st.state.defaults = { ...DEFAULTS, diskWarnPercent: 85, diskCritPercent: 90 };
+  st.state.config = { clusters: Object.entries(names).map(([id, name]) => ({ id, name, url: `http://${id}.example:9200`, enabled: true })) };
+  st.state.selected = 'all';
+  st.state.clients = new Map(Object.keys(names).map((id) => [id, { state: 'online' }]));
+  st.state.data = new Map(Object.entries(fleet()));
+  await acks.setCurrentUser('qa');
+  for (const k of ['a:disk', 'a:health', 'a:ilm', 'a:disk-balance', 'k:unreachable', 'b:slm-mode']) await acks.unacknowledge(k);
+  st.invalidateAlerts();
+
+  // The harness turns a.click() into a no-op (it only captures downloads), so a link is followed
+  // the way a browser does it: by dispatching the click.
+  const follow = (a) => a.dispatchEvent(new window.MouseEvent('click', { bubbles: true, cancelable: true }));
+  const navs = [];
+  const onNav = (e) => navs.push(e.detail);
+  window.addEventListener('ep:navigate', onNav);
+  try {
+    await go('alerts');
+    const groupNames = () => [...doc.querySelectorAll('#view .agroup-name')].map((x) => x.textContent);
+    const press = (label) => [...doc.querySelectorAll('#view .seg-btn')].find((b) => b.textContent === label);
+
+    // Default: grouped by cluster, worst first, then how many alerts, then name.
+    ok(press('Cluster') && press('Cluster').getAttribute('aria-pressed') === 'true', 'alerts: Cluster is not the default grouping');
+    ok(JSON.stringify(groupNames()) === JSON.stringify(['atlas-prod', 'kestrel-dc', 'bravo-ci']),
+      `alerts: groups should be atlas-prod, kestrel-dc, bravo-ci — worst, then most, then name — saw ${groupNames().join(', ')}`);
+    const tile = (k) => [...doc.querySelectorAll('#view .stat')].find((t) => t.querySelector('.k').textContent === k);
+    for (const k of ['Critical', 'Warning', 'Clusters affected', 'Acknowledged']) ok(!!tile(k), `alerts: no "${k}" tile`);
+    ok(tile('Clusters affected') && /3\s*of 4/.test(tile('Clusters affected').textContent), `alerts: clusters affected reads "${tile('Clusters affected') && tile('Clusters affected').textContent}"`);
+    ok(/1 cluster has no open alerts/.test(doc.querySelector('#view .alerts-foot').textContent), `alerts: footer reads "${doc.querySelector('#view .alerts-foot').textContent}"`);
+    ok(!!doc.querySelector('#view .agroup-head a.agroup-name'), 'alerts: the cluster name in a group header is not a link');
+
+    // The merged disk alert: one row, three nodes inside, opened with its toggle.
+    const row = (title) => [...doc.querySelectorAll('#view .arow')].find((r) => r.querySelector('.arow-title b').textContent.startsWith(title));
+    let disk = row('Disk usage above 85%');
+    ok(!!disk, `alerts: no merged disk row, rows: ${[...doc.querySelectorAll('#view .arow-title b')].map((x) => x.textContent).join(' | ')}`);
+    if (disk) {
+      ok(/on 3 nodes/.test(disk.textContent), 'alerts: the disk row does not say "on 3 nodes"');
+      ok(!disk.querySelector('.apanel'), 'alerts: the panel is open before anyone asked');
+      const t = disk.querySelector('.arow-toggle');
+      ok(t && t.getAttribute('aria-expanded') === 'false', 'alerts: the toggle does not say it is collapsed');
+      t.click();
+      await settleFor(80);
+      disk = row('Disk usage above 85%');
+      const t2 = disk.querySelector('.arow-toggle');
+      ok(t2.getAttribute('aria-expanded') === 'true', 'alerts: the toggle does not say it is expanded');
+      const items = [...disk.querySelectorAll('.aitem')];
+      ok(items.length === 3, `alerts: expected 3 nodes under the merged disk alert, saw ${items.length}`);
+      ok(items.length && /es-hot-1/.test(items[0].textContent) && /89%/.test(items[0].textContent), `alerts: the fullest node is not first: "${items[0] && items[0].textContent}"`);
+      ok(items.every((i) => i.querySelector('a.aitem-link')), 'alerts: an item has no link of its own');
+      const panel = disk.querySelector('.apanel');
+      ok(/How to fix/.test(panel.textContent) && /Related/.test(panel.textContent), 'alerts: the panel lacks How to fix or Related');
+      ok(/Likely cause/.test(panel.textContent), 'alerts: the playbook names no likely cause');
+      ok(/ILM/.test(panel.textContent), 'alerts: the disk playbook does not point at the ILM errors open on the same cluster');
+      ok(/No history yet for this alert on atlas-prod/.test(panel.textContent), `alerts: no "No history yet" in Related: ${panel.querySelector('.related-hist') && panel.querySelector('.related-hist').textContent}`);
+      const prep = [...panel.querySelectorAll('.apanel-steps a')].filter((a) => /Prepare .* in the REST console/.test(a.textContent));
+      ok(prep.length >= 2, `alerts: expected prepared console requests in the playbook, saw ${prep.length}`);
+      ok([...panel.querySelectorAll('.apanel-steps li')].some((li) => /writes still need the unlock/.test(li.textContent)),
+        'alerts: a prepared write is not labelled as needing the unlock');
+    }
+
+    // A prepared request opens the console filled in and sends nothing.
+    const before = sent.length;
+    const writeStep = disk && [...disk.querySelectorAll('.apanel-steps li')].find((li) => /read_only_allow_delete|release them/.test(li.textContent));
+    const writeLink = writeStep && writeStep.querySelector('a[href="#/console"]');
+    ok(!!writeLink, 'alerts: no prepared release request in the disk playbook');
+    if (writeLink) {
+      follow(writeLink);
+      await settleFor(350);
+      const path = doc.getElementById('c-path');
+      ok(path && /_all\/_settings/.test(path.value), `alerts: the console was not filled in, path is "${path && path.value}"`);
+      ok(sent.slice(before).every((m) => !(m.method && m.method !== 'GET' && /_all\/_settings/.test(m.path || ''))), 'alerts: a prepared write was sent');
+      st.state.selected = 'all';
+      await go('alerts');
+      disk = row('Disk usage above 85%');
+    }
+
+    // Go to: a visible link on every alert, and it opens the page with the cluster selected.
+    const rows = [...doc.querySelectorAll('#view .arow')];
+    ok(rows.length >= 5 && rows.every((r) => r.querySelector('a.golink')), `alerts: every alert needs a "Go to" link (${rows.filter((r) => r.querySelector('a.golink')).length} of ${rows.length} have one)`);
+    const link = disk && disk.querySelector('.arow-main a.golink');
+    ok(link && /^Go to .+ →$/.test(link.textContent), `alerts: the link reads "${link && link.textContent}"`);
+    navs.length = 0;
+    if (link) {
+      follow(link);
+      await settleFor(350);
+      ok(navs.some((n) => n.page === 'shards' && n.cluster === 'a'), `alerts: Go to did not navigate to shards with the cluster: ${JSON.stringify(navs)}`);
+      ok(st.state.selected === 'a', `alerts: the cluster was not selected on arrival (${st.state.selected})`);
+      ok(doc.querySelector('#view [data-focus="nodes"]'), 'alerts: the Nodes page did not bring the node table into view');
+      await go('alerts');
+      st.state.selected = 'all';
+      await go('alerts');
+    }
+    const ilmGo = row('Indices in an ILM error step');
+    navs.length = 0;
+    if (ilmGo) {
+      follow(ilmGo.querySelector('a.golink'));
+      await settleFor(450);
+      ok(navs.some((n) => n.page === 'indices' && n.cluster === 'a'), `alerts: the ILM alert did not go to Indices: ${JSON.stringify(navs)}`);
+      ok(/Only indices in an ILM error step/.test(doc.getElementById('view').textContent), 'alerts: the Indices page was not filtered to the ILM errors');
+      st.state.selected = 'all';
+      await go('alerts');
+    }
+
+    // Collapse, remembered.
+    const toggle = (name) => [...doc.querySelectorAll('#view .agroup-toggle')].find((b) => b.getAttribute('aria-label').endsWith(` ${name}`));
+    const kt = toggle('kestrel-dc');
+    ok(kt && kt.getAttribute('aria-expanded') === 'true', 'alerts: a group does not say it is expanded');
+    if (kt) {
+      kt.click();
+      await settleFor(60);
+      const after = toggle('kestrel-dc');
+      ok(after.getAttribute('aria-expanded') === 'false', 'alerts: collapsing did not collapse');
+      ok(/cluster:k/.test(window.localStorage.getItem('elasticpro.alerts.collapsed') || ''), 'alerts: the collapsed group is not remembered');
+      ok(doc.querySelectorAll('#view .agroup').length === 3, 'alerts: collapsing removed the group');
+      after.click();
+      await settleFor(60);
+    }
+    const ca = doc.getElementById('alerts-collapse-all');
+    ok(!!ca, 'alerts: no Collapse all');
+    if (ca) {
+      ca.click(); await settleFor(60);
+      ok([...doc.querySelectorAll('#view .agroup-toggle')].every((b) => b.getAttribute('aria-expanded') === 'false'), 'alerts: Collapse all left a group open');
+      doc.getElementById('alerts-collapse-all').click(); await settleFor(60);
+      ok([...doc.querySelectorAll('#view .agroup-toggle')].every((b) => b.getAttribute('aria-expanded') === 'true'), 'alerts: Expand all left a group closed');
+    }
+
+    // Keyboard: arrows step between the toggles, which are real buttons with a name.
+    {
+      const navs = [...doc.querySelectorAll('#view [data-nav]')];
+      ok(navs.length >= 4 && navs.every((b) => b.tagName === 'BUTTON' && b.hasAttribute('aria-expanded') && b.getAttribute('aria-label')), 'alerts: the toggles are not named, expandable buttons');
+      navs[0].focus();
+      navs[0].dispatchEvent(new window.KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true, cancelable: true }));
+      ok(doc.activeElement === navs[1], 'alerts: ArrowDown did not move to the next toggle');
+      navs[1].dispatchEvent(new window.KeyboardEvent('keydown', { key: 'ArrowUp', bubbles: true, cancelable: true }));
+      ok(doc.activeElement === navs[0], 'alerts: ArrowUp did not move back');
+      ok([...doc.querySelectorAll('#view .golink')].every((a) => a.tagName === 'A' && a.getAttribute('href')), 'alerts: a Go to is not a real link');
+    }
+
+    // The other groupings and the filters.
+    press('Alert type').click(); await settleFor(60);
+    ok(doc.querySelectorAll('#view .agroup').length >= 4 && !doc.querySelector('#view .agroup-head button.btn.sm + .split'), 'alerts: Alert type grouping');
+    press('None').click(); await settleFor(60);
+    ok(doc.querySelectorAll('#view .agroup.flat').length === 1 && !doc.querySelector('#view .agroup-head'), 'alerts: None should be one flat list');
+    press('Cluster').click(); await settleFor(60);
+    press('Critical').click(); await settleFor(60);
+    ok([...doc.querySelectorAll('#view .arow .apill')].filter((p) => p.textContent === 'warning').length === 0, 'alerts: Critical shows a warning');
+    press('All').click(); await settleFor(60);
+    const search = doc.getElementById('alerts-search');
+    search.value = 'bravo'; search.dispatchEvent(new window.Event('input', { bubbles: true })); await settleFor(60);
+    ok(JSON.stringify(groupNames()) === JSON.stringify(['bravo-ci']), `alerts: searching "bravo" left ${groupNames().join(', ')}`);
+    doc.getElementById('alerts-search').value = '';
+    doc.getElementById('alerts-search').dispatchEvent(new window.Event('input', { bubbles: true })); await settleFor(60);
+
+    // Acknowledge all on one cluster: its open alerts go, the rest stay, the footer says so.
+    const head = [...doc.querySelectorAll('#view .agroup-head')].find((x) => x.querySelector('.agroup-name').textContent === 'atlas-prod');
+    const ackAll = head && [...head.querySelectorAll('button')].find((b) => b.textContent === 'Acknowledge all');
+    ok(!!ackAll, 'alerts: no Acknowledge all in the group header');
+    ok(head && [...head.querySelectorAll('button')].some((b) => /^Silence 1 h$/.test(b.textContent)) && head.querySelector('.split .menu-trigger'), 'alerts: no "Silence 1 h" with its duration menu');
+    if (ackAll) {
+      ackAll.click();
+      await settleFor(200);
+      ok(JSON.stringify(groupNames()) === JSON.stringify(['kestrel-dc', 'bravo-ci']), `alerts: after Acknowledge all the groups are ${groupNames().join(', ')}`);
+      ok(/acknowledged hidden/.test(doc.querySelector('#view .alerts-foot').textContent), `alerts: footer after ack reads "${doc.querySelector('#view .alerts-foot').textContent}"`);
+      ok(st.openAlertsNow().every((m) => m.clusterId !== 'a'), 'alerts: the open counts still include the acknowledged cluster');
+      ok(/^[0-9]+$/.test(tile('Acknowledged').querySelector('.v').textContent.trim()) && Number(tile('Acknowledged').querySelector('.v').textContent) >= 3, `alerts: the Acknowledged tile reads ${tile('Acknowledged').querySelector('.v').textContent}`);
+      // Shown on request, with Re-open.
+      doc.getElementById('alerts-handled').click(); await settleFor(80);
+      ok(groupNames().includes('atlas-prod') && [...doc.querySelectorAll('#view .arow.handled')].length >= 3, 'alerts: Show acknowledged did not show them');
+      ok([...doc.querySelectorAll('#view .arow.handled button')].some((b) => b.textContent === 'Re-open'), 'alerts: an acknowledged alert has no Re-open');
+      // A node that joins an acknowledged disk alert opens it again.
+      st.state.data.get('a').disk.nodes.push(node('es-hot-4', 87));
+      st.invalidateAlerts(); await go('alerts');
+      ok(/1 new since acknowledged/.test(doc.getElementById('view').textContent), 'alerts: a new node did not re-open the acknowledged disk alert');
+      doc.getElementById('alerts-handled').click(); await settleFor(60);
+      ok(st.openAlertsNow().some((m) => m.key === 'a:disk' || m.key === 'a:disk-balance'), 'alerts: the re-opened alert is not counted as open');
+    }
+
+    // The bell: one entry per cluster, with a way to the cluster's alerts.
+    notify.resetAnnounced();
+    notify.announceNewAlerts({ notify: () => {} });
+    const d = st.state.data.get('q');
+    d.health = { status: 'yellow', unassigned_shards: 2 };
+    d.ilmErrorCount = 1; d.ilmErrors = { 'x-1': {} };
+    st.invalidateAlerts();
+    notify.announceNewAlerts();
+    const bell = doc.querySelector('button.bell');
+    ok(!!bell, 'alerts: the shell has no bell');
+    if (bell) {
+      bell.click(); await settleFor(80);
+      const entries = [...doc.querySelectorAll('.notif')].filter((n) => /quiet-lab: \d+ new alert/.test(n.textContent));
+      ok(entries.length === 1 && /quiet-lab: 2 new alerts/.test(entries[0].textContent), `alerts: the bell should have one quiet-lab entry, saw ${entries.length}: ${entries.map((e) => e.textContent).join(' / ')}`);
+      const acts = entries[0] ? [...entries[0].querySelectorAll('.notif-actions a')].map((a) => a.textContent) : [];
+      ok(acts[0] === 'Open quiet-lab alerts →' && /^Go to /.test(acts[1] || ''), `alerts: the bell entry links read ${JSON.stringify(acts)}`);
+      navs.length = 0;
+      if (entries[0]) { follow(entries[0].querySelector('.notif-actions a')); await settleFor(250); }
+      ok(navs.some((n) => n.page === 'alerts'), `alerts: "Open quiet-lab alerts" did not go to Alerts: ${JSON.stringify(navs)}`);
+      ok(JSON.stringify(groupNames()) === JSON.stringify(['quiet-lab']), `alerts: the page was not filtered to quiet-lab, it shows ${groupNames().join(', ')}`);
+      ok(/Showing quiet-lab only/.test(doc.getElementById('view').textContent), 'alerts: the cluster filter does not say it is on');
+      const showAll = [...doc.querySelectorAll('#view button')].find((b) => b.textContent === 'Show all clusters');
+      ok(!!showAll, 'alerts: no way back to every cluster');
+      if (showAll) { showAll.click(); await settleFor(60); ok(groupNames().length >= 3, 'alerts: Show all clusters did not show them'); }
+      // the next visit starts on the whole fleet again
+      await go('overview'); await go('alerts');
+      ok(groupNames().length >= 3 && !/Showing quiet-lab only/.test(doc.getElementById('view').textContent), 'alerts: the cluster filter outlived the visit');
+      st.state.selected = 'all';
+    }
+  } finally {
+    window.removeEventListener('ep:navigate', onNav);
+    Object.assign(st.state, saved);
+    for (const k of ['a:disk', 'a:health', 'a:ilm', 'a:disk-balance', 'k:unreachable', 'b:slm-mode']) await acks.unacknowledge(k);
+    Object.assign(idb, realIdb);
+    st.invalidateAlerts();
+  }
+}
+
+/* ------- the redraw gate holds against the core's 5 s `refreshed`, not only against `data` ------- */
+
+// Every core push that carries changes ends in a `refreshed`. It used to apply whatever the
+// gate was holding, so a change landed 1-2 s after it arrived — while keys were still being
+// pressed. Only a refresh a person asked for may do that.
+{
+  const st = await load('core/state.js');
+  const savedPolicy = st.state.defaults.liveRedraw;
+  st.state.defaults.liveRedraw = 'pending';
+  await go('overview');
+  await settleFor(400);
+  const view = doc.getElementById('view');
+  const id = st.activeClusters()[0].id;      // a cluster the page is showing
+  let marks = 0;
+  const mo = new window.MutationObserver((ms) => { marks += ms.length; });
+  mo.observe(view, { childList: true, subtree: true, characterData: true, attributes: true });
+  const type = () => doc.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Shift', bubbles: true }));
+  // Something visibly different, so that a redraw cannot hide behind an unchanged DOM.
+  const land = (nodes) => {
+    const d = st.state.data.get(id);
+    st.state.data.set(id, { ...d, health: { ...d.health, number_of_nodes: nodes } });
+    st.bus.emit('data', { id });
+  };
+  const seen = () => view.textContent.includes('777') || view.textContent.includes('888');
+  try {
+    // 1. A push-driven refreshed, with keys pressed throughout: nothing draws until 3 s of quiet.
+    type(); await settleFor(100);
+    marks = 0; land(777);
+    for (let i = 0; i < 10; i++) {
+      type();
+      if (i === 2) st.bus.emit('refreshed', { byPerson: false });   // what announceRefreshed emits
+      await settleFor(400);
+    }
+    ok(marks === 0 && !seen(), `gate: a push-driven refreshed redrew the page while keys were still being pressed (${marks} mutations)`);
+    await settleFor(3400);
+    ok(seen(), 'gate: the held change never drew after the page had gone quiet for 3 s');
+
+    // 2. A person's Refresh applies at once, however recently they touched the page.
+    type(); await settleFor(50);
+    land(888);
+    st.bus.emit('refreshed', { byPerson: false });
+    await settleFor(200);
+    ok(!view.textContent.includes('888'), 'gate: a held change drew without anyone asking or waiting');
+    st.bus.emit('refreshed', { byPerson: true });
+    await settleFor(250);
+    ok(view.textContent.includes('888'), 'gate: a person\'s Refresh did not apply the held change at once');
+  } finally {
+    mo.disconnect();
+    st.state.defaults.liveRedraw = savedPolicy;
+    await settleFor(3400);
+  }
+}
+
+// Client basis fetches nothing on its own, so a page that shows a cluster has to ask: opening
+// the Clusters page and the Alerts page asks the core (one REFRESH per dataset) for what they
+// show, and a cluster whose health was never read is "not read yet" on Nodes & shards, never
+// "unreachable".
+if (viaFleet) {
+  const st = await load('core/state.js');
+  const es = await load('core/es.js');
+  const pol = await es.policyGet();
+  if (pol && pol.ok && (pol.resolvedMode || pol.policy.mode) === 'on-demand') {
+    ok(st.fetchesOnlyOnAsk(), 'on-demand: the app does not know the core fetches nothing on its own');
+    const refreshed = new Set(sent.filter((m) => m.type === 'REFRESH').flatMap((m) => m.datasets || []));
+    for (const ds of ['health', 'nodes', 'ilm_errors', 'policies', 'snapshots']) {
+      ok(refreshed.has(ds), `on-demand: opening the Clusters and Alerts pages never asked the core for "${ds}"`);
+    }
+    // Asked again once the 30 s gap has passed, for the clusters that need it.
+    ok(sent.filter((m) => m.type === 'REFRESH' && (m.clusterIds || []).length >= config.clusters.length).length > 0,
+      'on-demand: no REFRESH named every cluster — a page asks for the whole fleet in one message');
+    const c0 = config.clusters[0];
+    const d0 = st.state.data.get(c0.id);
+    const was = d0 && { healthUnknown: d0.healthUnknown, reachable: d0.reachable, updatedAt: d0.updatedAt };
+    if (d0) {
+      Object.assign(d0, { healthUnknown: true, reachable: false, updatedAt: 0 });
+      await go('shards');
+      const body = doc.getElementById('view').textContent;
+      ok(/not read yet/.test(body), `shards: a cluster never read says "${body.slice(0, 120)}", not that it was not read yet`);
+      ok(!/No response from the cluster|— unreachable/.test(body), 'shards: a cluster whose health was never read is called unreachable');
+      Object.assign(d0, was);
+    }
+  }
+}
+
 if (problems.length) {
   console.error(`\n${problems.length} problem(s):`);
   for (const p of problems) console.error('  ✗ ' + p);
   process.exit(1);
 }
-console.log('ok: strip, console, shards, volume, hand-off, refresh, snapshots, tasks, toasts, accounts split, the log-delay preflight, a quiet Config page, the Request Centre and the redraw gate, the request policy, the coverage bar, the Tasks panel and the console tabs, template management');
+console.log('ok: strip, console, shards, the Clusters page (columns, name menu, unreachable cards), volume, hand-off, refresh, snapshots, tasks, toasts, accounts split, the log-delay preflight, a quiet Config page, the Request Centre and the redraw gate, the request policy, the coverage bar, the Tasks panel and the console tabs, template management, the Alerts page grouped by cluster with merged repeats, Go to, playbooks and the bell');
 // The pages leave auto-refresh timers and a live tail running; nothing here waits on them.
 process.exit(0);

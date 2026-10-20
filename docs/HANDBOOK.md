@@ -42,7 +42,7 @@ elasticpro-desktop/
 ```
 
 Pages and features carried over: Clusters overview (disk, repo, ILM/SLM, last snapshot,
-alerts), Indices with source/date picker, Live logs by day, Snapshots & SLM (from/to
+alerts), Indices with source/date picker, Live logs by day, Snapshots (from/to
 availability), Nodes & shards, Config; auto-refresh off by default; one credential for all
 URLs with a first-start prompt; snapshot-file mode. Clusters, jump hosts, credentials and
 defaults are created and edited in the UI and saved as JSON with encrypted secrets; the
@@ -168,8 +168,9 @@ On the jump server itself: same exe, `clusters.yaml` without `via:`, optionally 
 
 ## Fleet cache — the message contract
 
-The core polls every cluster itself (`crates/elasticpro-core/src/fleet/`) and pages read what it
-last found. One poller per core; every fetch is an ordinary `es_req`, so it takes the same
+The core fetches from the clusters itself (`crates/elasticpro-core/src/fleet/`) — on a schedule, or
+only when a page asks, as the request policy says (the shipped one, Client basis, is the latter) —
+and pages read what it last found. One poller per core; every fetch is an ordinary `es_req`, so it takes the same
 jump hosts, pins, credentials and read-only guard as a page, and shows up in
 `REQUEST_STATS`. It only ever sends GETs. Started by `elasticpro-bridge` and the desktop shell;
 `PING` says `fleetCache: true` when it is running — a UI that sees `false` (an older core)
@@ -228,8 +229,9 @@ ilm_errors (an SLM `_execute` also snapshots, snapshots_full); `_cluster/setting
 indices, shards, health (+ ilm_assign for `_settings`).
 
 **Environment:** `ELASTICPRO_POLL_HEALTH_SECS` (180, clamped 180–300), `ELASTICPRO_POLL_CONCURRENCY`
-(16 fetches at once; 2 per cluster, 6 per jump host), `ELASTICPRO_CACHE_MB` (256, on-demand bodies,
-LRU), `ELASTICPRO_ES_CONCURRENCY` (32 ES requests open at once from any source; 8 per cluster, 16
+(unset: the request policy decides, 4 fetches at once and 1 per cluster under the shipped Client basis, 16 and 2 under Automatic/Background; 6 per jump host; set, it wins over every preset), `ELASTICPRO_CACHE_MB` (unset: a
+quarter of the container's memory limit, or 256 without one; every cached body counts, on-demand
+ones evicted first, health never — see `memory.rs`), `ELASTICPRO_ES_CONCURRENCY` (24 ES requests open at once from any source; 4 per cluster, 8
 per jump host), `ELASTICPRO_REDIS_URL` (hosted only, optional: write-through to
 `elasticpro:ds:{cluster}:{dataset}` with `EX` 3× interval and a note on `elasticpro:updates`; down ⇒ one
 log line a minute and nothing else). The disk copy is `<data dir>/cache/<cluster>/<dataset>.json`
@@ -257,10 +259,14 @@ ring. Each carries `X-Opaque-Id: elasticpro/<install>/<origin>/<cluster>/<n>` (u
 so a query of ours can be found in a cluster's `_tasks` and told from everyone else's. Origins:
 `page:<id>`, `console`, `poller:<key>`, `delay-sink`, `core`.
 
-**The policy** lives in `<data dir>/policy.json`, read once at start (shipped defaults when there is
-none — seeded from `ELASTICPRO_POLL_HEALTH_SECS` and `ELASTICPRO_POLL_CONCURRENCY`, so an
-install that never touches it runs as before; a file that does not parse is logged and ignored),
-written whole and 0600 by `POLICY_SET`, applied to the scheduler on its next tick:
+**The policy** lives in `<data dir>/policy.json`, read once at start. With no file the core runs the
+shipped policy, **Client basis**: mode `on-demand`, `perCluster: 1`, `global: 4`, the intervals
+below. `ELASTICPRO_POLL_HEALTH_SECS` and `ELASTICPRO_POLL_CONCURRENCY` still win where they name a
+value. A file somebody saved is read as it is and never rewritten, and a field it leaves out takes
+the classic value (`mode: auto`, `perCluster: 2`, `global: 16`) — so a policy written before Client
+basis became the default means what it meant. A file that does not parse is logged and ignored.
+It is written whole and 0600 by `POLICY_SET`, applied to the scheduler on its next tick. The
+classic policy, which is what Config → Requests → Automatic saves:
 
 ```json
 { "mode": "auto",
@@ -273,12 +279,15 @@ written whole and 0600 by `POLICY_SET`, applied to the scheduler on its next tic
   "paused": { "all": false, "clusters": [] } }
 ```
 
-Modes: `auto` (the shipped default) is `background` while the core knows 25 clusters or fewer
+Modes: `on-demand` is the shipped default (Client basis, below). `auto` is `background` while the core knows 25 clusters or fewer
 and `hybrid` above — measured at 120 clusters, background sent ~397 requests/min and auto ~80;
 `FLEET_STATE.policy` and `POLICY_*` report `mode` and `resolvedMode`. `background` keeps the fleet fresh on the core's schedule; `hybrid` polls health only and
 fetches everything else while a page looks at it (the watch window); `on-demand` fetches nothing
 on its own — a page's `CLUSTER_DATASET` or `REFRESH` is what sends a request, for that cluster
-only, and with `perCluster: 1` one request at a time. Pause: nothing new starts (a person's ask
+only, and with `perCluster: 1` one request at a time; a `REFRESH` also keeps what it named fresh for
+the watch window. The pages that show a fleet (Clusters, Alerts, Nodes & shards, Snapshots) send
+that `REFRESH` when they open. To go back to keeping the fleet fresh in the background: Config →
+Requests → Automatic or Background. Pause: nothing new starts (a person's ask
 stays pending and runs when the pause lifts); in flight finishes. Bounds: health ≥ 60 s, other
 intervals ≥ 30 s, ≤ 1 day; watch 1–240 min; global 1–256; perCluster 1–8; tunnel 1–32; timeouts
 1–600 s; budget ≤ 10,000 (0 = none). The budget is soft: beyond it the cluster's due fetches wait
@@ -323,7 +332,23 @@ only while the cluster is not green.
 
 **Open** means neither acknowledged nor silenced, and every count uses that one definition
 (`openAlertsNow()` / `openAlertCounts()`): the Clusters summary, the nav badge, the top bar,
-the per-cluster column, the extension badge.
+the per-cluster column, the extension badge. What is counted is the **merged alert**: every
+alert with the same cluster and the same rule (`<cluster>:<rule>`, `core/alert-groups.js`) is
+one, listing its items. Its level is the worst item's and its age the oldest's. Acknowledging
+it covers the items it had when you did; an item that appears later (a node, a repository)
+opens it again as "N new since acknowledged". Acknowledgements written before merging keep
+covering what they covered.
+
+**History** on an alert (Related → past occurrences) comes from ElasticPro's own alert log
+(`core/alert-history.js`, kept in this browser for 30 days) and from the notes in the
+acknowledgement store. It records what this browser saw while the app was open, says how far
+back it goes, and says "No history yet" rather than a count of zero. "Probably caused by this"
+is shown only for a documented cause on the same cluster that started later within an hour
+(`core/alert-related.js` CAUSES), and never between alerts first seen together at page open.
+
+**The bell** carries one notification per cluster per burst: alerts raised for a cluster within
+two minutes of its first are one entry, "<cluster>: N new alerts", with links to that cluster's
+alerts and to the page for its worst one.
 
 **Silences** silence a whole cluster (maintenance) or one alert for 1 h, 8 h, 24 h, 7 days, or
 until removed, with a reason. They are the team's, kept on the server in
@@ -384,6 +409,39 @@ The UI sends `NOTIFY_PUT` fire-and-forget for every notice it shows (a task's si
 ticks only when their kind changes), merges `NOTIFY_LIST` with its local copy when the bell
 opens (same key/id ⇒ the server's record wins), and sends `NOTIFY_CLEAR` with "Clear all".
 An older core, a snapshot file or a `file://` render has no store and the bell stays local.
+
+## Housekeeping — the message contract
+
+One timer in the core (`housekeeping.rs`) cleans what ElasticPro itself leaves behind. It runs
+every `HOUSEKEEPING_MINUTES` (default 60; 0 = off), the first time five minutes after start, and
+is started by the bridge binary and the desktop shell, never by `Core::new`. Every deletion is a
+log line on the `audit` target (`housekeeping: removed …`, with the path or key, the reason and
+the bytes), so it survives `LOG_LEVEL=error`; `HOUSEKEEPING_DRY_RUN=true` logs `would remove`
+instead and deletes nothing. Each run writes one `housekeeping_run` event to the activity log
+(user `system`, or the administrator who pressed Run now; counts under `elasticpro.detail`).
+
+| Job | Removes | Only ever |
+|---|---|---|
+| Fleet disk cache | `cache/<cluster>/` of clusters no longer configured; on-demand dataset files (`indices`, `shards`, `snapshots_full`) untouched for `HOUSEKEEPING_CACHE_DAYS` (default 2); background dataset files untouched for 7 days; `*.tmp` older than an hour | files named exactly `<dataset>.json[.gz]` / `<dataset>.tmp` / `<dataset>.json.tmp` under `<data dir>/cache/<escaped cluster id>/`; never a symlink or its target; a folder with anything else in it stays |
+| Redis | `elasticpro:ds:<cluster>:<dataset>` keys of clusters no longer configured | keys with that prefix and a dataset name this build writes (SCAN + STRLEN + DEL) |
+| Sessions | a Zabbix-frame session unused 24 h (the frame orphans one per reload); an ordinary session only if `SESSION_IDLE_DAYS` is set (default 0 = never; **setting it signs people out**). No cap on how many sessions an account holds; sessions from before the `frame` flag existed count as ordinary | a session used in the last 10 minutes, or the caller's own, is never ended |
+| API tokens | tokens that expired more than 30 days ago | tokens with no expiry are never touched |
+| In-memory maps | request counters, limiters, cached connections, poller marks, tickets and Zabbix budgets of removed clusters or past their time | |
+| Notifications, silences | the existing 30-day / 2000-per-person retention and ended silences, once a day | |
+| Activity log | rotated files `<log>.<n>` last written more than `ACTIVITY_LOG_KEEP_DAYS` ago (default 0 = off) | the live file is never touched |
+
+Nothing is removed by cluster while the cluster list is not known (nothing primed yet, or Zabbix
+configured but not yet read): an empty list must not read as "every cluster was removed". Config
+history, uploaded keys, saved queries, users and the config files are **reported** (count, size,
+oldest) and never deleted.
+
+| Message | Role | Answer |
+|---|---|---|
+| `HOUSEKEEPING_GET` | admin | `{ok, enabled, minutes, dryRun, cacheDays, backgroundCacheDays, sessionIdleDays, activityKeepDays, running, nextRunAt, lastRun, recent}`. `lastRun` is `{startedAt, finishedAt, trigger: "schedule"\|"manual", by, dryRun, items, bytes, errors, jobs: [{id, label, ok, skipped, items, bytes, error, notes}], reportOnly: [{id, label, files, bytes, oldestAgeDays, note}]}`; `null` until a run since start. |
+| `HOUSEKEEPING_RUN {dryRun?}` | admin | Runs every job now and answers like `HOUSEKEEPING_GET` plus `run` (that report) and `message`. `dryRun: true` lists what would go and removes nothing; the configured `HOUSEKEEPING_DRY_RUN` can force a dry run, never lift one. A run already going ⇒ `{ok: false, kind: "busy"}`. Does not move the schedule. |
+
+The Request Centre shows both as the **Housekeeping** card (last run, what each job cleaned, next
+run, **Dry run**, **Run now** — which asks first).
 
 ## Zabbix connection — the message contract
 

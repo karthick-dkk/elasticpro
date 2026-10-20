@@ -11,7 +11,7 @@
 import { h, mount } from '../lib/dom.js';
 import { bytes, num, pct, compact } from '../lib/fmt.js';
 import { state, clusters, activeClusters, client, refreshAll, fetchIndices, fetchShards,
-         datasetFreshness, diskAccounting, setDangling, danglingFor, demandDataset, fleetMode } from '../core/state.js';
+         datasetFreshness, diskAccounting, setDangling, danglingFor, demandDataset, fleetMode, askForPage } from '../core/state.js';
 import { freshnessBar } from '../lib/freshness.js';
 import { card, table, empty, pill, figure, connectionBanner } from './common.js';
 import { navigateTo } from '../core/intent.js';
@@ -21,6 +21,7 @@ import { trackTask, shardMovePoll, allocationPoll } from '../ui/tasks.js';
 import { ensureWrites, writeToggle, writesAllowed } from '../core/writes.js';
 import { splitGauge, STATUS } from '../lib/charts.js';
 import { parseRetention } from '../core/volume.js';
+import { takeFocus, revealFocus } from '../core/focus.js';
 
 let host = null;
 const ui = { index: '', node: 'all', state: 'all', limit: 300, sort: 'index', dir: 1 };
@@ -35,9 +36,25 @@ const shards = { get: (id) => { const s = state.shards.get(id); return !s ? unde
 const load2 = { get: (id) => state.shards.get(id) || null };
 const loading = new Set();
 
+/**
+ * A link that opened this page with a problem in view (core/focus.js): `unassigned` shows
+ * only the shards with nowhere to go, `disk`/`nodes` bring the node table into view, and a
+ * `node` narrows the shard table to that node, largest first. Applied once, on arrival.
+ */
+let reveal = null;
+function applyFocus() {
+  const f = takeFocus('shards');
+  if (!f) return;
+  if (f.section === 'unassigned') { ui.state = 'UNASSIGNED'; ui.node = 'all'; reveal = '[data-focus="shards"]'; }
+  else if (f.section === 'disk' || f.section === 'nodes') reveal = '[data-focus="nodes"]';
+  if (f.node) { ui.node = f.node; ui.state = 'all'; ui.sort = 'store'; ui.dir = -1; }
+}
+const focusable = (el, name) => { el.dataset.focus = name; return el; };
+
 export function render(el) {
   host = el;
   el.classList.add('dense');
+  applyFocus();
   draw();
   refresh();
 }
@@ -56,8 +73,17 @@ export function onData() {
  * full reload, while every other page filled in. A failure is worth keeping only until
  * there is a reason to think it would go differently.
  */
+/** What the nodes and shards view is drawn from besides its own listing (state.js FLEET_KEYS). */
+const PAGE_DATASETS = ['health', 'nodes'];
+let askedOpenAt = 0;
 function refresh() {
   const list = activeClusters();
+  // Under a policy that fetches nothing on its own, whether the cluster is up and what its
+  // nodes are is not known until this page asks. Throttled: every push lands here.
+  if (Date.now() - askedOpenAt >= 1000) {
+    askedOpenAt = Date.now();
+    askForPage(list.map((c) => c.id), PAGE_DATASETS).catch(() => {});
+  }
   if (list.length > 2 && fleetMode()) { refreshMany(list); return; }
   for (const c of list) {
     const got = shards.get(c.id);
@@ -121,12 +147,22 @@ function draw() {
   const list = activeClusters();
   if (!list.length) return mount(host, empty('No cluster selected'));
   mount(host, ...list.map((c) => h('div', { style: { marginBottom: '14px' } }, block(c))));
+  if (reveal && revealFocus(host, reveal)) reveal = null;
 }
 
 /* --------------------------------- one cluster --------------------------------- */
 
 function block(c) {
   const d = state.data.get(c.id) || {};
+  // Unknown is not unreachable: a cluster whose health was never read has not failed to
+  // answer. The page asked for it on opening; this is what shows until it lands.
+  if (d.healthUnknown) {
+    return h('div.banner', { style: { margin: 0 } },
+      h('div', h('div.ttl', `${c.name} — not read yet`),
+        h('div.sec', { style: { fontSize: '12px' } }, 'Nothing has been fetched from this cluster yet, so whether it is up is not known. Its health and nodes were asked for; they appear here as they arrive.'),
+        h('div.mono.muted', { style: { fontSize: '11px', marginTop: '2px' } }, c.url + (c.via ? `  (via ${c.via})` : ''))),
+      h('div.acts', h('button.btn.sm', { onclick: () => refreshAll({ force: true, selected: true }) }, 'Read now')));
+  }
   if (!d.reachable) return connectionBanner(c, () => refreshAll({ force: true, selected: true }));
 
   const raw = shards.get(c.id);
@@ -403,12 +439,12 @@ function nodesAndLoadCard(c, d) {
   const load = loadBody(c);
   const sub = `${nodes.length} node(s)${d.master ? ` · master ${d.master}` : ' · no master'}`
     + (load ? ` · ${load.sub}` : '');
-  return card('Nodes & cluster load', sub,
+  return focusable(card('Nodes & cluster load', sub,
     h('div', { style: { display: 'grid', gap: '12px' } },
       nodes.length ? nodesBody(c, d) : empty('The cluster did not return a node list.'),
       load
         ? h('div', { style: { borderTop: '1px solid var(--border)', paddingTop: '11px' } }, load.node)
-        : null));
+        : null)), 'nodes');
 }
 
 function heapCell(p, n) {
@@ -597,6 +633,8 @@ function shardsCard(c, d, all, raw, started) {
 
   const nodeNames = [...new Set(all.map((s) => s.node).filter(Boolean))].sort();
   const states = [...new Set(all.map((s) => s.state))].sort();
+  // A filter carried in by a link (core/focus.js) for a state nothing is in: show everything.
+  if (all.length && ui.state !== 'all' && !states.includes(ui.state)) ui.state = 'all';
 
   const filtered = all.filter((s) => {
     if (ui.index && !s.index.toLowerCase().includes(ui.index.toLowerCase())) return false;
@@ -681,7 +719,7 @@ function shardsCard(c, d, all, raw, started) {
   const sub = `${num(filtered.length)} of ${num(all.length)} shard(s)`
     + (shown.length < filtered.length ? ` · showing the first ${num(shown.length)}` : '');
 
-  return card(`Shards — ${c.name}`, why || sub,
+  return focusable(card(`Shards — ${c.name}`, why || sub,
     h('div', controls, bulkBar,
       why ? h('div', { style: { padding: '14px' } }, empty(why)) : null,
       table([tickAll(shown.filter((x) => x.state === 'STARTED'), c),
@@ -694,7 +732,7 @@ function shardsCard(c, d, all, raw, started) {
         ? h('div', { style: { padding: '10px', textAlign: 'center' } },
             h('button.btn.sm', { onclick: () => { ui.limit += 300; draw(); } },
               `Show more (${num(filtered.length - shown.length)} hidden)`))
-        : null));
+        : null)), 'shards');
 }
 
 /** The header tick: select every movable shard currently shown, or none of them. */

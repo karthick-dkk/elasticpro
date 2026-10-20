@@ -472,27 +472,124 @@ table.tbl tr.kv td.v { font-size: 12px; word-break: break-all; }
 .tbl-empty.rich .acts { display: flex; gap: 6px; flex-wrap: wrap; justify-content: center; margin-top: 2px; }
 
 /* ------------------------- Clusters page summary table ---------------------- */
-/* At a hundred-odd rows the table used to be taller than the window, which put its own
-   horizontal scrollbar below the fold — the one control you need to see the columns that
-   do not fit gets hidden by the very overflow it exists to fix. Boxing it to the space
-   actually left under the sticky header keeps that scrollbar, and the sticky <th> row
-   sticking to the TOP OF THIS BOX rather than the page, on screen at all times. The
-   estimate below is generous on purpose: a box a little short of the window is much less
-   wrong than one that quietly grows past it. */
-.cluster-tbl-scroll { max-height: calc(100vh - 260px); min-height: 220px; overflow: auto; }
-.cluster-tbl-scroll table.tbl th { top: 0; }
+/* The table is part of the page: every row is in it and the page scrolls. It used to sit in
+   a box of its own, height-limited so its sticky head and its sideways scrollbar stayed on
+   screen; that box was a second scroll inside the page, which a trackpad kept catching.
 
-/* JDK, SLM and the request count are read occasionally, not at a glance, and are the
-   first three columns to make the table wider than a laptop screen. Below 1500px they
-   fold into the row's own "Details" panel (see detail() in overview.js) instead of
-   forcing a horizontal scroll just to read Health or Disk usage. */
-@media (max-width: 1500px) {
-  .cluster-tbl-scroll table.tbl th:nth-child(3), .cluster-tbl-scroll table.tbl td:nth-child(3),
-  .cluster-tbl-scroll table.tbl th:nth-child(9), .cluster-tbl-scroll table.tbl td:nth-child(9),
-  .cluster-tbl-scroll table.tbl th:nth-child(13), .cluster-tbl-scroll table.tbl td:nth-child(13) {
-    display: none;
-  }
+   The heads people see (.cl-head) are a strip OUTSIDE the table's horizontal scroll box,
+   sticky to the page under the top bar (--head-fix-h, measured in overview.js). A sticky
+   <th> inside an overflow-x box would stick to that box, which never scrolls vertically,
+   so it would never pin. The real <thead> stays in the table for meaning and for the
+   column widths, folded to no height; overview.js copies its widths onto the strip and
+   moves the strip with the box's horizontal scroll. */
+.card.cl-summary { overflow: visible; overflow: clip; }   /* clip: rounded corners, and not a scroll box */
+.card.cl-summary > .body { padding: 0; }
+.cl-head {
+  position: sticky; top: var(--head-fix-h, 0px); z-index: 4;
+  overflow: hidden; background: var(--surface-2);
+  border-bottom: 1px solid var(--border); box-shadow: 0 2px 6px rgba(0,0,0,.18);
 }
+.cl-head-row { display: flex; will-change: transform; }
+.cl-hcell, .cl-summary table.cl-tbl thead th {
+  font-weight: 600; font-size: 11px; letter-spacing: .03em; text-transform: uppercase;
+  padding: 8px 10px; white-space: nowrap; text-align: left; font-family: inherit;
+}
+.dense .cl-hcell, .dense .cl-summary table.cl-tbl thead th { padding-left: 8px; padding-right: 8px; }
+.cl-hcell {
+  flex: none; display: block; min-width: 0; overflow: hidden; text-overflow: ellipsis;
+  border: 0; background: transparent; color: var(--text-secondary); cursor: pointer; line-height: 1.5;
+}
+.cl-hcell.num { text-align: right; }
+.cl-hcell:hover { color: var(--text-primary); background: var(--surface-3); }
+.cl-hcell[aria-sort="ascending"], .cl-hcell[aria-sort="descending"] { color: var(--text-primary); }
+.cl-hcell:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.cl-hcell-x { cursor: default; }
+.cl-hcell-x:hover { background: transparent; }
+/* Every head says it sorts: a quiet ↕ until it is the one sorted by (▲ / ▼, in the text). */
+.cl-hcell[aria-sort="none"] .cl-th-in::after,
+.cl-summary table.cl-tbl thead th[aria-sort="none"] .cl-th-in::after { content: " \2195"; color: var(--text-muted); opacity: .7; }
+/* The real heads: laid out (their widths are the columns'), read by a screen reader, not seen. */
+.cl-summary table.cl-tbl thead th {
+  position: static; height: 0; padding-top: 0; padding-bottom: 0; border: 0; line-height: 0;
+}
+.cl-summary table.cl-tbl thead th .cl-th-in { display: block; height: 0; overflow: hidden; }
+.cl-tbl td { white-space: nowrap; }
+.cl-end { padding: 10px 14px; border-top: 1px solid var(--grid); color: var(--text-muted); text-align: center; font-size: 12px; }
+
+/* A cluster's name opens its menu: reads as a name, behaves as a button. */
+.cl-name-td { max-width: 300px; }
+.cl-name {
+  display: inline-flex; align-items: center; gap: 5px; max-width: 100%;
+  padding: 1px 4px; margin-left: -4px; border: 0; border-radius: var(--radius-sm);
+  background: transparent; color: var(--accent); font-weight: 650; cursor: pointer; text-align: left;
+}
+.cl-name:hover { background: var(--accent-soft); }
+.cl-name:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+/* Never squeezed below its own length by the other columns (a wide table scrolls instead);
+   only a name longer than this is cut, and the tooltip has it whole. */
+.cl-name-t { flex: none; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 260px; }
+.cl-caret { font-size: 10px; color: var(--text-muted); flex: none; }
+.menu-pop button .mi-note { margin-left: auto; padding-left: 14px; color: var(--text-muted); font-size: 11px; white-space: nowrap; }
+
+/* The unreachable clusters, above the table: compact cards, or one line when folded. */
+.cl-sp { flex: 1 1 auto; }
+.cl-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--critical); flex: none; }
+.cl-down {
+  background: var(--surface-1); border: 1px solid color-mix(in srgb, var(--critical) 45%, var(--border));
+  border-radius: var(--radius); padding: 10px 12px; margin-bottom: 12px;
+  display: flex; flex-direction: column; gap: 8px; min-width: 0;
+}
+.cl-down.folded { flex-direction: row; align-items: center; gap: 8px; padding: 7px 12px; flex-wrap: wrap; }
+.cl-down-names { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 0 1 auto; }
+.cl-down-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.cl-down-head h2 { margin: 0; font-size: 13.5px; font-weight: 650; }
+.cl-down-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 330px), 1fr)); gap: 8px; }
+.cl-down-card {
+  background: var(--surface-2); border: 1px solid var(--border); border-radius: 8px;
+  padding: 7px 10px; display: flex; flex-direction: column; gap: 5px; min-width: 0; font-size: 12.5px;
+}
+.cl-down-card.wide { grid-column: 1 / -1; }
+.cl-l1, .cl-l2 { display: flex; align-items: center; gap: 7px; min-width: 0; }
+/* The name gives way last: the "since" text shrinks first (it is in the open card too). */
+.cl-nm { font-size: 13.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 6ch; flex: 0 1 auto; }
+.cl-l1 .pill { flex: none; white-space: nowrap; }
+.cl-since { font-size: 11.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; flex: 0 100 auto; }
+.cl-err { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-secondary); }
+.cl-l2 .btn { flex: none; }
+.cl-exp { padding: 1px 7px; font-size: 13px; line-height: 1.2; }
+.cl-down-more { display: grid; gap: 8px; padding-top: 4px; border-top: 1px solid var(--border); }
+.cl-dl { margin: 0; display: grid; grid-template-columns: 110px minmax(0, 1fr); gap: 3px 12px; font-size: 12px; }
+.cl-dl dt { color: var(--text-muted); }
+.cl-dl dd { margin: 0; overflow-wrap: anywhere; }
+.cl-down-acts { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+.cl-down-card .diag { margin: 4px 0 0 !important; }
+
+/* The Columns panel. */
+.pop.cl-cols { width: min(340px, calc(100vw - 16px)); }
+.cl-cols-panel { display: grid; gap: 6px; }
+.cl-cols-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 1px; }
+.cl-col { display: flex; align-items: center; gap: 7px; padding: 0 4px; border-radius: 5px; min-width: 0; border: 1px solid transparent; }
+.cl-col:hover { background: var(--surface-2); }
+.cl-col.dragging { opacity: .45; }
+.cl-col.drop-before { box-shadow: inset 0 2px 0 var(--accent); }
+.cl-col.drop-after { box-shadow: inset 0 -2px 0 var(--accent); }
+.cl-grip { width: 10px; color: var(--text-muted); cursor: grab; flex: none; user-select: none; }
+.cl-col-name {
+  flex: 1 1 auto; min-width: 0; text-align: left; border: 0; background: transparent; padding: 2px 4px;
+  border-radius: 4px; cursor: text; line-height: 1.35; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-primary);
+}
+.cl-col.off .cl-col-name { color: var(--text-muted); }
+.cl-col-name:hover { background: var(--surface-3); }
+.cl-col-input { flex: 1 1 auto; min-width: 0; padding: 2px 6px; font-size: 12.5px; }
+.cl-col-note { color: var(--text-muted); font-size: 11px; white-space: nowrap; flex: none; max-width: 110px; overflow: hidden; text-overflow: ellipsis; }
+.cl-col-mv { display: inline-flex; gap: 0; flex: none; min-width: 46px; }
+.cl-col-mv .btn { padding: 0 5px; line-height: 1.35; }
+.cl-cols-foot { display: flex; align-items: center; gap: 8px; padding-top: 6px; border-top: 1px solid var(--border); }
+
+/* The picker marks a cluster that cannot be reached (where the platform styles options).
+   Its width is set from the names alone (app.js renderTopbar), never from the mark. */
+#cluster-select { flex: none; }
+#cluster-select option.unreachable { color: var(--critical-ink); }
 
 /* One cluster's block on a page that shows the whole fleet (Snapshots, …). Off screen, the
    browser skips its style and layout and reserves an estimated height instead, so a page of
@@ -514,6 +611,99 @@ table.tbl tr.kv td.v { font-size: 12px; word-break: break-all; }
 .alert-detail { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2;
   overflow: hidden; overflow-wrap: anywhere; cursor: pointer; }
 .alert-detail.open { display: block; -webkit-line-clamp: unset; line-clamp: none; }
+
+/* ------------------------- Alerts page: groups, rows, panel ------------------------- */
+/* Tokens only (light and dark come from :root); nothing here is a fixed colour. */
+.alerts-bar { align-items: flex-end; }
+.alerts-bar .field { display: flex; flex-direction: column; gap: 3px; font-size: 11px; color: var(--text-muted); }
+.alerts-bar .field.check { flex-direction: row; align-items: center; gap: 6px; height: 30px; color: var(--text-secondary); font-size: 12.5px; white-space: nowrap; }
+.toolbar.alerts-bar label.field.check > input[type="checkbox"] { width: 16px; height: 16px; flex: none; margin: 0; }
+.alerts-bar-end { margin-left: auto; display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+.seg-group { display: inline-flex; border: 1px solid var(--border-strong); border-radius: var(--radius-sm); overflow: hidden; height: 30px; }
+.seg-btn { font: inherit; font-size: 12.5px; padding: 0 12px; border: 0; border-left: 1px solid var(--border-strong);
+  background: var(--surface-1); color: var(--text-secondary); cursor: pointer; }
+.seg-btn:first-child { border-left: 0; }
+.seg-btn[aria-pressed="true"] { background: var(--accent-soft); color: var(--text-primary); font-weight: 600; }
+.seg-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+
+.agroups { display: flex; flex-direction: column; gap: 12px; }
+.agroup { background: var(--surface-1); border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; }
+.agroup.has-crit { border-color: color-mix(in srgb, var(--critical) 40%, var(--border)); }
+.agroup:not(.has-crit):not(.flat) { border-color: color-mix(in srgb, var(--warning) 35%, var(--border)); }
+.agroup-head { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 10px; padding: 9px 14px; background: var(--surface-2); }
+.agroup-name { font-weight: 640; font-size: 14.5px; color: var(--text-primary); text-decoration: none; }
+a.agroup-name:hover { text-decoration: underline; }
+.agroup-oldest { font-size: 12px; }
+.agroup-spacer { flex: 1; }
+.adot { width: 9px; height: 9px; border-radius: 50%; flex: none; }
+.adot.crit { background: var(--critical); }
+.adot.warn { background: var(--warning); }
+.apill { display: inline-block; font-size: 11.5px; line-height: 1.5; padding: 0 8px; border-radius: 10px; white-space: nowrap; }
+.apill.crit { color: var(--critical-ink); background: var(--critical-bg); }
+.apill.warn { color: var(--warning-ink); background: var(--warning-bg); }
+.apill.grey { color: var(--text-secondary); background: var(--surface-3); }
+.split { display: inline-flex; }
+.split > .btn:first-child { border-top-right-radius: 0; border-bottom-right-radius: 0; }
+.split > .btn:last-child { border-top-left-radius: 0; border-bottom-left-radius: 0; border-left: 0; }
+
+.arow { border-top: 1px solid var(--border); }
+.agroup.flat .arow:first-child { border-top: 0; }
+.arow.handled .arow-title b, .arow.handled .arow-detail { opacity: .7; }
+.arow-main { display: flex; align-items: flex-start; gap: 10px 12px; padding: 9px 14px; flex-wrap: wrap; }
+.arow-main > .apill { margin-top: 2px; }
+.arow-body { flex: 1 1 260px; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.arow-title { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 8px; }
+.arow-title b { font-weight: 620; }
+.arow-count, .arow-where { font-size: 12px; }
+.arow-detail { font-size: 12.5px; color: var(--text-secondary); display: -webkit-box; -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden; overflow-wrap: anywhere; }
+.arow-sub { font-size: 11.5px; }
+.arow-age { font-size: 12px; color: var(--text-muted); white-space: nowrap; margin-top: 3px; min-width: 52px; text-align: right; }
+.btn.sm.arow-notes { padding: 2px 6px; font-size: 12px; }
+.arow-main > .golink { min-width: 168px; }
+.golink { text-decoration: none; white-space: nowrap; font-weight: 600; justify-content: center; text-align: center; color: var(--accent); background: var(--accent-soft);
+  border-color: color-mix(in srgb, var(--accent) 40%, transparent); }
+.golink:hover { filter: brightness(1.06); }
+.btn.sm.arow-toggle, .btn.sm.agroup-toggle { color: var(--text-muted); font-size: 16px; line-height: 1; padding: 2px 8px; }
+.arow-main .menu-trigger { align-self: flex-start; }
+
+.apanel { margin: 0 14px 12px 14px; display: grid; gap: 10px; }
+.apanel-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.apanel-card { background: var(--surface-2); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px;
+  display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.apanel-cause { font-size: 12px; }
+.apanel-steps { margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 5px; color: var(--text-secondary); font-size: 12.5px; }
+.apanel-steps a, .related a, .aitem a:not(.btn) { color: var(--accent); }
+.aitems { background: var(--surface-2); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+.aitem { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 10px; padding: 6px 12px; border-top: 1px solid var(--border); font-size: 12.5px; }
+.aitem:first-child { border-top: 0; }
+.aitem-label { flex: 1 1 160px; min-width: 0; overflow-wrap: anywhere; }
+.aitem-value { font-variant-numeric: tabular-nums; }
+.aitem-value.crit { color: var(--critical-ink); }
+.aitem-value.warn { color: var(--warning-ink); }
+.aitem-since { font-size: 12px; }
+.aitem-link { padding: 1px 8px; font-size: 12px; }
+.related { display: flex; flex-direction: column; gap: 8px; font-size: 12.5px; }
+.related-rows { display: flex; flex-direction: column; gap: 6px; }
+.related-row { display: flex; gap: 8px; }
+.related-row.self { font-weight: 600; }
+.related-when { color: var(--text-muted); width: 76px; flex: none; font-variant-numeric: tabular-nums; }
+.related-flag { color: var(--warning-ink); }
+.related-hist { border-top: 1px solid var(--border); padding-top: 8px; display: flex; flex-direction: column; gap: 4px; color: var(--text-secondary); }
+.related-foot { font-size: 11.5px; }
+.alerts-foot { text-align: center; color: var(--text-muted); padding: 10px 0 2px; font-size: 12.5px; }
+@media (max-width: 900px) { .apanel-grid { grid-template-columns: minmax(0, 1fr); } }
+@media (max-width: 640px) {
+  .arow-main { padding: 9px 10px; }
+  .arow-age { text-align: left; }
+  .apanel { margin: 0 10px 12px; }
+}
+/* A link from elsewhere (core/focus.js revealFocus) brings a section into view and flashes it once. */
+.focus-flash { animation: focus-flash 2.4s ease-out 1; }
+@keyframes focus-flash { 0%, 35% { box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 55%, transparent); } 100% { box-shadow: 0 0 0 3px transparent; } }
+@media (prefers-reduced-motion: reduce) { .focus-flash { animation: none; box-shadow: 0 0 0 2px var(--accent); } }
+.notif-actions { display: flex; flex-wrap: wrap; gap: 4px 12px; margin-top: 3px; font-size: 12px; }
+.notif-actions a { color: var(--accent); font-weight: 600; }
 .trunc { max-width: 340px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .bar-mini { height: 6px; border-radius: 3px; background: var(--surface-3); overflow: hidden; min-width: 60px; }
 .bar-mini > i { display: block; height: 100%; border-radius: 3px; }

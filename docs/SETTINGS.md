@@ -52,7 +52,10 @@ Changes are read at start: `deploy/deploy.sh --apply-config` restarts the core.
 | `POLL_HEALTH_SECONDS` (180-300) | env `ELASTICPRO_POLL_HEALTH_SECS` |
 | `POLL_CONCURRENCY` (1-256) | env `ELASTICPRO_POLL_CONCURRENCY` |
 | `ES_CONCURRENCY` (1-1024) | env `ELASTICPRO_ES_CONCURRENCY` |
-| `CACHE_MB` | env `ELASTICPRO_CACHE_MB` |
+| `CACHE_MB` | env `ELASTICPRO_CACHE_MB` (empty: a quarter of the container's memory limit) |
+| `HOUSEKEEPING_MINUTES` (0-10080), `HOUSEKEEPING_CACHE_DAYS` (1-3650), `SESSION_IDLE_DAYS` (0-3650), `ACTIVITY_LOG_KEEP_DAYS` (0-3650) | env `ELASTICPRO_HOUSEKEEPING_MINUTES`, `..._CACHE_DAYS`, `ELASTICPRO_SESSION_IDLE_DAYS`, `ELASTICPRO_ACTIVITY_LOG_KEEP_DAYS` (`housekeeping.rs`) |
+| `SESSION_IDLE_DAYS` (warning) | 0 (default) never signs anyone out; any other value signs people out after that many idle days |
+| `HOUSEKEEPING_DRY_RUN` | env `ELASTICPRO_HOUSEKEEPING_DRY_RUN` = `1` / `0` |
 | `UI_TLS` | the certificate switch (`insecure` = accept every certificate), instead of `defaults.tls` |
 | `UI_READ_ONLY` | the core's read-only guard, instead of what a browser sends in PRIME |
 | `UI_*` (the rest) | `managedDefaults` in the PING reply, below |
@@ -74,6 +77,11 @@ managed keys, under the names of `DEFAULTS` in `ui/js/core/config.js`:
 "managedZabbixOptions": { "useElasticProCredentials": true, "createHosts": false,
   "scopeUsersByGroup": true, "hostGroup": "Elasticsearch clusters" }
 ```
+
+`liveRedraw` (`UI_LIVE_REDRAW`) is how data the core pushes reaches the open page: `pending`
+(the default) leaves the page alone while it is being used and draws what landed a few seconds
+after the person pauses, with nothing on screen to say it was held; `live` repaints as it
+lands; `manual` draws only on Refresh or when another page is opened.
 
 `ui/js/core/managed.js` holds the last set; `effectiveDefaults` (alert-rules.js) and the config
 normaliser apply it last, so it wins over the file and over thresholds retuned on the Config

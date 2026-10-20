@@ -10,13 +10,13 @@ import { workerStatus, forgetWorker, tunnels as fetchTunnels, listPins, untrustC
          zabbixLinkGet, zabbixLinkSet, zabbixLinkTest, zabbixPairBegin, zabbixUnpair,
          policyGet, policySet } from '../core/es.js';
 import { PRESETS, DATASETS, DATASET_LABELS, BOUNDS, intervalBounds, applyPreset, activePreset, normalisePolicy,
-         fromForm, describeMode, MODES, FALLBACK_DEFAULTS } from '../core/policy.js';
+         fromForm, describeMode, MODES, FALLBACK_DEFAULTS, boundsUnder } from '../core/policy.js';
 import { defaultApiUrl, checkUrl, countdown, secondsLeft, isManaged, linkChanges, formProblems, linkSummary,
          linkView, testMessage, epUrlFrom, eventLine } from '../core/zabbix-link.js';
 import { showCredentialDialog, forgetVaultCredential } from '../ui/credential-dialog.js';
 import { EXAMPLE_YAML } from '../core/example.js';
 import { saveTextAs } from '../core/platform.js';
-import { editCluster, editJumpHost, editCredentials, editDefaults, unlockSealed, saveRaw } from '../ui/config-editor.js';
+import { editCluster, editJumpHost, editCredentials, editDefaults, unlockSealed, saveRaw, rawClusterOf } from '../ui/config-editor.js';
 import { card, pill, table, empty } from './common.js';
 import { navigateTo } from '../core/intent.js';
 import { ALERT_RULES, loadAlertSettings, isEnabled } from '../core/alert-rules.js';
@@ -503,6 +503,8 @@ async function loadPolicy() {
 }
 
 const polDefaults = () => (pol && pol.defaults) || FALLBACK_DEFAULTS;
+/** What the form may hold: BOUNDS under the request gate's caps, as this core reported them. */
+const polBounds = () => boundsUnder(pol && pol.gate);
 
 /** The form as typed, before any clamping — fromForm decides what survives. */
 function readPolicyForm() {
@@ -525,20 +527,20 @@ function readPolicyForm() {
 
 function choosePreset(id) {
   // Start from what is on screen so a paused box ticked but not yet saved is kept.
-  const { policy } = fromForm(readPolicyForm(), polDefaults());
-  polDraft = applyPreset(policy, id, polDefaults());
+  const { policy } = fromForm(readPolicyForm(), polDefaults(), polBounds());
+  polDraft = applyPreset(policy, id, polDefaults(), polBounds());
   polNote = null;
   draw();
 }
 
 function resetPolicyForm() {
-  polDraft = normalisePolicy(polDefaults(), FALLBACK_DEFAULTS);
+  polDraft = normalisePolicy(polDefaults(), FALLBACK_DEFAULTS, polBounds());
   polNote = { text: 'The form shows the shipped policy. Nothing is saved until you press Save.', cls: 'banner' };
   draw();
 }
 
 async function savePolicy() {
-  const { policy, problems } = fromForm(readPolicyForm(), polDefaults());
+  const { policy, problems } = fromForm(readPolicyForm(), polDefaults(), polBounds());
   let res;
   try { res = await policySet(policy); } catch (e) { res = { ok: false, message: e.message || String(e) }; }
   if (!res || !res.ok) {
@@ -568,8 +570,9 @@ function requestsCard() {
           h('div.muted', 'An older core polls on its built-in schedule; there is nothing to set here until it is updated.'))));
   }
   const defaults = polDefaults();
-  const p = normalisePolicy(polDraft || pol.policy, defaults);
-  const preset = activePreset(p, defaults);
+  const bounds = polBounds();
+  const p = normalisePolicy(polDraft || pol.policy, defaults, bounds);
+  const preset = activePreset(p, defaults, bounds);
   const admin = isAdminCaller();
   const effective = pol.effective || {};
   const pausedSet = new Set(p.paused.clusters);
@@ -577,6 +580,18 @@ function requestsCard() {
     id, type: 'number', min: String(b.min), max: String(b.max), value: String(value), disabled: !admin,
     style: { width }, title: title || `${b.min}–${b.max}`,
   });
+  // A concurrency field under a gate cap: typed past it, it shows the cap at once, and the
+  // hint under it says where the cap comes from.
+  const capped = (id, value, b) => {
+    const el = num(id, value, b, '90px', b.gate ? `${b.min}–${b.max}: at most what the request gate allows (${b.gate})` : '');
+    el.addEventListener('change', () => {
+      const n = Number(el.value);
+      if (el.value.trim() !== '' && Number.isFinite(n) && n > b.max) el.value = String(b.max);
+    });
+    return el;
+  };
+  const capHint = (b, gateKey) => (pol.gate && Number.isInteger(pol.gate[gateKey])
+    ? `request gate: ${pol.gate[gateKey]}${b.gate ? ` (${b.gate})` : ''}` : null);
   const labelled = (label, input, hint) => h('label', { style: { display: 'grid', gap: '3px', fontSize: '11.5px' } },
     h('span.muted', label), input, hint ? h('span.muted', { style: { fontSize: '10.5px' } }, hint) : null);
   const modeHint = h('div#pol-mode-desc.muted', { style: { fontSize: '11.5px' } }, describeMode(p.mode),
@@ -624,9 +639,9 @@ function requestsCard() {
       h('div', { style: { display: 'flex', gap: '14px', flexWrap: 'wrap', alignItems: 'start' } },
         labelled('Watch window (minutes)', num('pol-watch', p.watchMinutes, BOUNDS.watchMinutes),
           'how long a page keeps an on-demand dataset fresh after it was last looked at'),
-        labelled('Concurrency — all clusters', num('pol-global', p.concurrency.global, BOUNDS.global)),
-        labelled('Per cluster', num('pol-per', p.concurrency.perCluster, BOUNDS.perCluster)),
-        labelled('Per jump host', num('pol-tunnel', p.concurrency.tunnel, BOUNDS.tunnel)),
+        labelled('Concurrency — all clusters', capped('pol-global', p.concurrency.global, bounds.global), capHint(bounds.global, 'global')),
+        labelled('Per cluster', capped('pol-per', p.concurrency.perCluster, bounds.perCluster), capHint(bounds.perCluster, 'perCluster')),
+        labelled('Per jump host', capped('pol-tunnel', p.concurrency.tunnel, bounds.tunnel), capHint(bounds.tunnel, 'perJump')),
         labelled('Timeout (ms)', num('pol-timeout', p.timeoutMs, BOUNDS.timeoutMs, '110px'))),
       h('div', { style: { display: 'grid', gap: '6px' } },
         h('label', { style: { display: 'inline-flex', gap: '6px', alignItems: 'center', fontSize: '12px' },
@@ -1347,12 +1362,6 @@ function draw() {
 }
 
 /** The raw file entry behind a normalised cluster (matched by name, then url). */
-function rawClusterOf(c) {
-  const raw = state.config && state.config.raw;
-  const list = (raw && raw.clusters) || [];
-  return list.find((x) => x.name === c.name) || list.find((x) => String(x.url || '').replace(/\/+$/, '') === c.url) || null;
-}
-
 function kvRow(k, v) {
   return h('tr.kv', h('td.k', k), h('td.v.mono', v));
 }

@@ -1,5 +1,75 @@
 # Changelog
 
+## 0.3.22
+
+**Steady under load: memory that stays inside its limit, one queue for every request to
+Elasticsearch, automatic housekeeping, a new Clusters page and Alerts grouped by cluster.**
+
+**Memory.** With many large clusters, 0.3.21 could use more memory than its container allowed
+and restart over and over, worst of all just after a restart. The cache now counts what it
+really holds, fills itself back after a restart newest first and only up to its budget, and
+makes room by dropping the oldest data first (cluster health is never dropped). Its size comes
+from the container's memory limit: a quarter of `CORE_MEM_LIMIT`, unless `CACHE_MB` says
+otherwise. `CORE_MEM_LIMIT` now defaults to 2g. The core logs its memory budget at start and
+warns when `CACHE_MB` cannot fit the limit. With 32 large clusters, the peak after a restart
+went from about 1.1 GB to 0.2 GB.
+
+**One queue for every request to Elasticsearch.** Pages, the REST console, the background poller
+and the log-delay measurement now all wait in one queue before anything is sent to a cluster:
+- Page requests go first, so a busy poller never slows the page you are looking at, and a burst of
+  page requests can never stop the health checks.
+- At most 24 requests at once in total, 4 to one cluster and 8 through one SSH jump host
+  (`ES_CONCURRENCY`, `ES_PER_CLUSTER`, `ES_PER_JUMP_HOST`).
+- When too many page requests are already waiting, a new one is refused at once with **EP-214**
+  and the page tries again by itself. One that waits too long gets **EP-215**. An answer too big to
+  read safely is refused with **EP-216** instead of filling the memory.
+- Two people asking the same thing at the same moment share one request, and the same read
+  within 5 seconds is answered from memory (`ES_READ_CACHE_SECONDS`). Refresh always asks the
+  cluster, and any change to a cluster clears what was kept for it.
+- A search nobody is waiting for any more (you left the page, it timed out) is cancelled on the
+  cluster. Only ElasticPro's own read searches, never a write and never anyone else's.
+- The Request Centre shows what is queued, how long requests wait, what was refused and what was
+  shared or answered from memory, and no longer shows requests as still running after they ended.
+- Config → Requests shows these limits next to the poller's own settings and will not save more
+  than they allow.
+
+**New installs use Client basis.** With no saved request policy, ElasticPro now goes to a cluster only when a page asks (Clusters, Alerts, Nodes, Indices and Snapshots ask for what they show when they open), one request per cluster at a time and four in all; a policy you already saved is untouched, and Config → Requests → Automatic or Background goes back to keeping the fleet fresh in the background.
+
+**Housekeeping.** Once an hour the core cleans up what ElasticPro itself leaves behind: cached
+data for clusters that were removed or not looked at for days, their Redis keys, expired API
+tokens, old notifications and silences, and (if you ask for it) old rotated activity logs. It never
+touches your configuration, saved queries, uploaded keys or accounts. **Nobody is signed out**
+unless an administrator sets `SESSION_IDLE_DAYS`. The Request Centre has a Housekeeping card with
+the last run, what each job cleaned, a Dry run and Run now. Settings: `HOUSEKEEPING_MINUTES`,
+`HOUSEKEEPING_CACHE_DAYS`, `HOUSEKEEPING_DRY_RUN`, `SESSION_IDLE_DAYS`, `ACTIVITY_LOG_KEEP_DAYS`.
+
+**No more "N updates — Apply".** The blinking button in the top bar is gone. New data now appears
+by itself 3 seconds after you stop clicking or typing, never in the middle of what you are doing,
+and at once when you change page or press Refresh.
+
+**Clusters page.**
+- Every cluster list in the app is A–Z, ignoring capitals, with numbers in order (es-node-2
+  before es-node-10).
+- Unreachable clusters come first as small cards: why, since when, the error, Retry and Diagnose,
+  and ▾ for the address, jump host, last answer and next try. **Hide** folds them to one line until
+  another cluster goes down.
+- The whole list is part of the page, with its column headings pinned under the top bar.
+- Every column sorts both ways. **Columns** shows, hides, reorders and renames columns, remembered
+  for you in this browser, and Export CSV follows them.
+- A cluster's name opens a menu: Edit, Nodes, Repo and Live log for that cluster.
+
+**"Snapshots & SLM" is now "Snapshots".** Same page, shorter name.
+
+**Alerts.**
+- Grouped by cluster (or by alert type, or one list). The same alert on many nodes, indices or
+  repositories is one alert that lists them.
+- **Go to** opens the page that answers each alert with the problem in view. For an unreachable
+  cluster, that is its card on the Clusters page.
+- **How to fix** gives a likely cause, steps and REST console requests ready to run (never sent
+  for you). **Related** shows what else started around the same time and when it happened before.
+- The bell shows one entry per cluster when many alerts arrive at once, with a link to that
+  cluster's alerts.
+
 ## 0.3.21
 
 **Zabbix modules 2.1.1: every ElasticPro widget is fully customizable, with one colour palette.**

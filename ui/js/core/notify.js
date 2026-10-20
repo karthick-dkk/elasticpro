@@ -5,6 +5,11 @@
  * go red while you are in the REST console and the only sign is a number on a tab. This
  * puts the first sighting of an alert in front of whoever is using the app, once.
  *
+ * One notification per cluster, not one per alert: a disk filling raises disk, health and
+ * ILM within a refresh or two of each other, and those arrive as "<cluster>: 3 new alerts"
+ * with a line each, and links to that cluster's alerts and to the page for its worst one.
+ * Alerts raised for a cluster within BURST_WINDOW_MS of its first join the same entry.
+ *
  * Three rules keep it from becoming noise, which is how a notifier stops working:
  *
  * The first pass after start-up announces nothing. Everything already wrong when you open
@@ -19,9 +24,14 @@
  * seen it; repeating it back to them is the opposite of what that means.
  */
 
-import { alerts } from './state.js';
-import { isAcked } from './acks.js';
-import { toast } from '../ui/menu.js';
+import { openAlertsNow, clusters, mergedAlerts, invalidateAlerts } from './state.js';
+import { isOpen, toObservations } from './alert-groups.js';
+import { alertHistory } from './alert-history.js';
+import { gotoFor, openGoto } from './alert-goto.js';
+import { pageLabel } from './page-labels.js';
+import { navigateTo } from './intent.js';
+import { setFocus } from './focus.js';
+import { toast, setNotificationActions } from '../ui/menu.js';
 
 /**
  * Alert key → passes it has been absent. null until the first pass, which establishes
@@ -37,53 +47,161 @@ let seen = null;
  */
 const GRACE_PASSES = 2;
 
-/** Beyond this many at once, one line saying how many beats a wall of them. */
+/** Beyond this many clusters at once, one line saying how many beats a wall of them. */
 const MAX_INDIVIDUAL = 3;
 const MS_CRITICAL = 9000;
 const MS_WARNING = 5000;
 
 /**
- * Compare the current alerts with the last pass and announce what is new.
- * @returns {Array} the alerts announced, for tests and callers that want to know.
+ * Alerts raised for the same cluster within this long of the first are ONE notification.
+ * A disk filling raises disk, health and ILM within a refresh or two of each other; three
+ * bell entries and three toasts about one cluster read as three problems.
  */
-export function announceNewAlerts({ notify = toast } = {}) {
-  let open;
-  try { open = alerts().filter((a) => !isAcked(a.key)); }
-  catch (_) { return []; }          // a notifier must never break a refresh
+export const BURST_WINDOW_MS = 2 * 60000;
 
-  const keys = new Set(open.map((a) => a.key));
+/**
+ * Clusters' open bursts: cluster id → { start, key, alerts: Map<mergedKey, alert> }. A burst
+ * is open for BURST_WINDOW_MS from its first alert; alerts that first appear in that time
+ * join it (same bell key, so the entry is updated in place rather than added to).
+ */
+let bursts = new Map();
+
+/** One line about an alert in a notice; for an existing alert that gained members, what is new on it. */
+function alertLine(m, fresh) {
+  const all = !fresh || fresh.size >= m.keys.length;
+  if (all) return `${m.title}${m.count ? ` ${m.count}` : ''}`;
+  const names = m.items.filter((i) => fresh.has(i.alertKey)).map((i) => i.label);
+  return `${m.title}: ${fresh.size} new — ${names.slice(0, 3).join(', ')}${names.length > 3 ? ` and ${names.length - 3} more` : ''}`;
+}
+
+/**
+ * The notification for one burst: "<cluster>: N new alerts", one line per alert.
+ * The key carries the cluster and when the burst began, so a burst is one bell entry for
+ * life and a later burst on the same cluster is another.
+ */
+export function burstNotice(b, clusterName) {
+  const list = [...b.alerts.values()];
+  const crit = list.filter((m) => m.level === 'critical').length;
+  return {
+    message: `${clusterName}: ${list.length} new alert${list.length === 1 ? '' : 's'}`,
+    kind: crit ? 'err' : 'warn',
+    detail: list.map((m) => alertLine(m, b.fresh && b.fresh.get(m.key))),
+    key: b.key,
+    cluster: b.clusterId,
+    critical: crit,
+  };
+}
+
+/**
+ * Add this pass's new alerts to the open bursts, starting one per cluster where none is open.
+ * `freshKeys` (optional): merged key → the member alert keys that are new on it.
+ */
+export function groupIntoBursts(fresh, now, open = bursts, freshKeys = null) {
+  for (const [id, b] of open) if (now - b.start > BURST_WINDOW_MS) open.delete(id);
+  const touched = new Set();
+  for (const m of fresh) {
+    let b = open.get(m.clusterId);
+    if (!b) {
+      b = { start: now, key: `alerts:${m.clusterId}:${now}`, clusterId: m.clusterId, alerts: new Map(), fresh: new Map() };
+      open.set(m.clusterId, b);
+    }
+    b.alerts.set(m.key, m);
+    if (freshKeys && freshKeys.has(m.key)) {
+      const set = b.fresh.get(m.key) || new Set();
+      freshKeys.get(m.key).forEach((k) => set.add(k));
+      b.fresh.set(m.key, set);
+    }
+    touched.add(m.clusterId);
+  }
+  return [...touched].map((id) => open.get(id));
+}
+
+/**
+ * Compare the current alerts with the last pass and announce what is new — one notification
+ * per cluster per burst, not one per alert.
+ *
+ * "New" is a raised alert (core/state.js alerts(), one per policy, repository, field value…)
+ * that was not there before, as it always was; the notice is about the merged alert it joins
+ * (core/alert-groups.js), so a second broken repository on a cluster that already has one
+ * says "1 new", not nothing and not a second entry.
+ * @returns {Array} the merged alerts announced, for tests and callers that want to know.
+ */
+export function announceNewAlerts({ notify = toast, now = Date.now(), list = null } = {}) {
+  let open;
+  try {
+    // Every merged alert, recorded for age and history; the open ones are what is news.
+    const all = list || mergedAlerts({ fresh: true });
+    try {
+      if (alertHistory.observe(toObservations(all), now)) invalidateAlerts();
+    } catch (_) { /* the log is a convenience; never let it stop a notice */ }
+    open = all.filter((m) => isOpen(m));
+  } catch (_) { return []; }          // a notifier must never break a refresh
+
+  const keys = new Set(open.flatMap((m) => m.keys));
   if (seen === null) { seen = new Map([...keys].map((k) => [k, 0])); return []; }
 
-  const fresh = open.filter((a) => !seen.has(a.key));
+  const freshKeys = new Map();
+  for (const m of open) {
+    const fresh = m.keys.filter((k) => !seen.has(k));
+    if (fresh.length) freshKeys.set(m.key, new Set(fresh));
+  }
+  const fresh = open.filter((m) => freshKeys.has(m.key));
   // Present now: remembered with a clean slate. Absent: counted, and dropped past the grace.
   const next = new Map([...keys].map((k) => [k, 0]));
   for (const [k, gone] of seen) {
     if (!keys.has(k) && gone + 1 <= GRACE_PASSES) next.set(k, gone + 1);
   }
   seen = next;
-  if (!fresh.length) return [];
+  if (!fresh.length) { for (const [id, b] of bursts) if (now - b.start > BURST_WINDOW_MS) bursts.delete(id); return []; }
 
-  // Critical first: if only some of them get their own line, they should be those.
-  const ordered = [...fresh].sort((a, b) =>
-    (a.level === 'critical' ? 0 : 1) - (b.level === 'critical' ? 0 : 1));
+  const touched = groupIntoBursts(fresh, now, bursts, freshKeys);
+  const nameOf = (id) => ((clusters().find((c) => c.id === id)) || {}).name || id;
+  const notices = touched.map((b) => burstNotice(b, nameOf(b.clusterId)));
+  // Critical clusters first: if only some of them get a card, they should be those.
+  notices.sort((a, b) => b.critical - a.critical);
 
-  // Keyed by the alert, so the same one coming back after a real clear updates its toast
-  // and its bell entry instead of stacking a second copy of both.
-  if (ordered.length <= MAX_INDIVIDUAL) {
-    for (const a of ordered) {
-      notify(a.title, a.level === 'critical' ? 'err' : 'warn',
-        a.level === 'critical' ? MS_CRITICAL : MS_WARNING, { key: `alert:${a.key}` });
-    }
+  const opts = (n) => ({ key: n.key, detail: n.detail, cluster: n.cluster });
+  if (notices.length <= MAX_INDIVIDUAL) {
+    for (const n of notices) notify(n.message, n.kind, n.critical ? MS_CRITICAL : MS_WARNING, opts(n));
   } else {
-    const crit = ordered.filter((a) => a.level === 'critical').length;
-    notify(`${ordered.length} new alerts${crit ? `, ${crit} critical` : ''}`,
-      crit ? 'err' : 'warn', MS_CRITICAL, { key: 'alerts-batch' });
+    // Every cluster still gets its own bell entry; the screen gets one line.
+    for (const n of notices) notify(n.message, n.kind, 0, { ...opts(n), bellOnly: true });
+    const total = notices.reduce((s2, n) => s2 + n.detail.length, 0);
+    const crit = notices.reduce((s2, n) => s2 + n.critical, 0);
+    notify(`${total} new alerts on ${notices.length} clusters${crit ? `, ${crit} critical` : ''}`,
+      crit ? 'err' : 'warn', MS_CRITICAL, { key: 'alerts-batch', noHistory: true,
+        detail: ['Each cluster has its own entry in the bell.'] });
   }
-  return ordered;
+  return fresh;
 }
 
+/**
+ * The links under a bell entry for a burst of alerts: the cluster's alerts, and the page that
+ * answers its worst one. Resolved when the bell opens, from what is open then — an alert
+ * that has cleared since has no page to send you to, and the entry just says what it said.
+ */
+export function burstActions(entry) {
+  const key = String((entry && entry.key) || '');
+  if (!key.startsWith('alerts:')) return [];
+  const id = entry.cluster || key.split(':')[1];
+  if (!id) return [];
+  const name = ((clusters().find((c) => c.id === id)) || {}).name || id;
+  const out = [{ label: `Open ${name} alerts →`, page: 'alerts', run: () => { setFocus('alerts', { cluster: id }); navigateTo('alerts', null, {}); } }];
+  let worst = null;
+  try {
+    worst = openAlertsNow().filter((m) => m.clusterId === id)
+      .sort((a, b) => (b.level === 'critical') - (a.level === 'critical') || a.since - b.since)[0] || null;
+  } catch (_) { /* nothing to point at */ }
+  if (worst) {
+    const g = gotoFor(worst);
+    if (g.page) out.push({ label: `Go to ${pageLabel(g.page)}`, page: g.page, run: () => openGoto(g) });
+  }
+  return out;
+}
+setNotificationActions(burstActions);
+
 /** Forget what has been announced — after a config change, the fleet is a different one. */
-export function resetAnnounced() { seen = null; }
+export function resetAnnounced() { seen = null; bursts = new Map(); }
 
 /* --------------------------- snapshots finishing --------------------------- */
 

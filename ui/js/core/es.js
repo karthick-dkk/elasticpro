@@ -3,6 +3,7 @@
 
 import { bridge } from './transport.js';
 import { setManaged } from './managed.js';
+import { NOT_THE_CLUSTER } from './error-codes.js';
 
 const send = (msg) => bridge(msg);
 
@@ -13,6 +14,17 @@ const send = (msg) => bridge(msg);
  */
 let requestOrigin = 'page';
 export function setRequestOrigin(origin) { requestOrigin = origin || 'page'; }
+
+/**
+ * While a person's Refresh is running, reads ask the cluster rather than the core's short
+ * read cache (`maxAgeMs: 0`). A depth, not a flag, so overlapping refreshes do not end each
+ * other's.
+ */
+let freshDepth = 0;
+export async function withFreshReads(fn) {
+  freshDepth++;
+  try { return await fn(); } finally { freshDepth--; }
+}
 
 /** What the core sent recently and what is still in flight — the Request Centre's feed. */
 export const requestLog = (params = {}) => send({ type: 'REQUEST_LOG', ...params });
@@ -63,6 +75,13 @@ export const delaySinkGet = () => send({ type: 'DELAY_SINK_GET' });
 export const delaySinkSet = (config) => send({ type: 'DELAY_SINK_SET', config });
 /** Run it now, at a moment a person chose. Same work the timer does. */
 export const delaySinkRun = () => send({ type: 'DELAY_SINK_RUN' });
+
+/**
+ * Housekeeping: the core cleaning what it leaves behind (cache files, stale sessions, ...).
+ * Admin only. GET is the status; RUN deletes now (or, with dryRun, only says what would go).
+ */
+export const housekeepingGet = () => send({ type: 'HOUSEKEEPING_GET' });
+export const housekeepingRun = (dryRun = false) => send({ type: 'HOUSEKEEPING_RUN', dryRun: !!dryRun });
 
 /**
  * The Zabbix connection (Config → Zabbix). Hosted and admin only. No answer ever carries
@@ -180,6 +199,7 @@ export class EsClient {
       timeoutMs: opts.timeoutMs || this.defaults.requestTimeoutMs,
       allowWrites: opts.allowWrites === true,
       origin: opts.origin || requestOrigin,
+      ...(opts.maxAgeMs !== undefined ? { maxAgeMs: opts.maxAgeMs } : freshDepth > 0 ? { maxAgeMs: 0 } : {}),
     };
     let res = await send(msg);
     if (res.kind === 'no_creds' && this.onPrimeNeeded) {
@@ -191,9 +211,10 @@ export class EsClient {
   }
 
   _track(res) {
-    // An abort is this app letting go of its own request (the page that asked was left):
-    // it says nothing about the cluster, so it is neither a failure nor a reason to back off.
-    if (res.kind === 'aborted') return;
+    // An abort is this app letting go of its own request (the page that asked was left); a
+    // gate refusal or an answer too large to read is the core's own limit. None of them
+    // says anything about the cluster, so none is a failure or a reason to back off.
+    if (NOT_THE_CLUSTER.has(res.kind)) return;
     if (res.ok) {
       this.state = 'online';
       this.failures = 0;

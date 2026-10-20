@@ -195,3 +195,113 @@ impl TestServer {
         TestServer { port, hits, conns }
     }
 }
+
+/// A server that answers after a delay of the responder's choosing and counts how many
+/// requests it is holding at once — the number the gate exists to bound.
+pub struct GaugedServer {
+    pub port: u16,
+    hits: Arc<Mutex<Vec<Hit>>>,
+    now: Arc<AtomicUsize>,
+    peak: Arc<AtomicUsize>,
+}
+
+impl GaugedServer {
+    /// `f` answers (status, body, delay in ms).
+    pub async fn start<F>(f: F) -> GaugedServer
+    where
+        F: Fn(&Hit) -> (u16, String, u64) + Send + Sync + 'static,
+    {
+        let f = Arc::new(f);
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        let hits = Arc::new(Mutex::new(Vec::new()));
+        let now = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        let (h, n, p) = (hits.clone(), now.clone(), peak.clone());
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else { break };
+                let (h, n, p, f) = (h.clone(), n.clone(), p.clone(), f.clone());
+                tokio::spawn(async move {
+                    let Some(hit) = read_request(&mut sock).await else { return };
+                    let cur = n.fetch_add(1, Ordering::SeqCst) + 1;
+                    p.fetch_max(cur, Ordering::SeqCst);
+                    let (status, body, delay) = f(&hit);
+                    h.lock().expect("hits").push(hit);
+                    tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+                    let res = format!(
+                        "HTTP/1.1 {status} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        if status == 200 { "OK" } else { "Error" }, body.len()
+                    );
+                    let _ = sock.write_all(res.as_bytes()).await;
+                    let _ = sock.flush().await;
+                    n.fetch_sub(1, Ordering::SeqCst);
+                });
+            }
+        });
+        GaugedServer { port, hits, now, peak }
+    }
+
+    pub fn url(&self) -> String {
+        format!("http://127.0.0.1:{}", self.port)
+    }
+    pub fn hits(&self) -> Vec<Hit> {
+        self.hits.lock().expect("hits").clone()
+    }
+    pub fn peak(&self) -> usize {
+        self.peak.load(Ordering::SeqCst)
+    }
+    pub fn holding(&self) -> usize {
+        self.now.load(Ordering::SeqCst)
+    }
+}
+
+/// A server whose every answer is a chunked body of `total` bytes, sent a megabyte at a
+/// time for as long as the client keeps reading. `declare` sends a Content-Length instead.
+/// Returns the port and a counter of bytes actually written.
+pub async fn endless_body(total: u64, declare: bool) -> (u16, Arc<AtomicUsize>) {
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.expect("bind");
+    let port = listener.local_addr().expect("addr").port();
+    let sent = Arc::new(AtomicUsize::new(0));
+    let s = sent.clone();
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut sock, _)) = listener.accept().await else { break };
+            let s = s.clone();
+            tokio::spawn(async move {
+                if read_request(&mut sock).await.is_none() {
+                    return;
+                }
+                let head = if declare {
+                    format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {total}\r\nConnection: close\r\n\r\n")
+                } else {
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n".to_string()
+                };
+                if sock.write_all(head.as_bytes()).await.is_err() {
+                    return;
+                }
+                let chunk = vec![b' '; 1024 * 1024];
+                let mut left = total;
+                while left > 0 {
+                    let n = left.min(chunk.len() as u64) as usize;
+                    let ok = if declare {
+                        sock.write_all(&chunk[..n]).await.is_ok()
+                    } else {
+                        sock.write_all(format!("{n:x}\r\n").as_bytes()).await.is_ok()
+                            && sock.write_all(&chunk[..n]).await.is_ok()
+                            && sock.write_all(b"\r\n").await.is_ok()
+                    };
+                    if !ok {
+                        return;
+                    }
+                    s.fetch_add(n, Ordering::SeqCst);
+                    left -= n as u64;
+                }
+                if !declare {
+                    let _ = sock.write_all(b"0\r\n\r\n").await;
+                }
+            });
+        }
+    });
+    (port, sent)
+}

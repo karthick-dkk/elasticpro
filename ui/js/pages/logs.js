@@ -5,6 +5,7 @@
  * cluster with its own Elasticsearch URL.
  */
 
+import { tailTick } from '../core/tail.js';
 import { h, mount, $, clear, activatable } from '../lib/dom.js';
 import { num, dt, dur, ago, ymdDots, eachDay, download, downloadBytes, toCsv } from '../lib/fmt.js';
 import { state, client, activeClusters, fetchIndices, setDelaySummary } from '../core/state.js';
@@ -21,6 +22,7 @@ import { toast } from '../ui/menu.js';
 import { confirmDialog } from '../ui/modal.js';
 import { isSnapshotMode } from '../core/snapshot.js';
 import { jsonView } from '../lib/jsonview.js';
+import { takeFocus } from '../core/focus.js';
 
 let host = null;
 let tailTimer = null;
@@ -93,6 +95,9 @@ export function render(el) {
     const back = new Date(now.getTime() - 60 * 60 * 1000);
     ui.from = isoLocal(back); ui.to = isoLocal(now);
   }
+  // Opened from a "logs arriving late" alert (core/focus.js): straight to the delay view.
+  const f = takeFocus('logs');
+  if (f && f.view === 'delay') { ui.view = 'delay'; draw(); runPreflight(); return; }
   draw();
   if (!ui.hits.length && !ui.running) search();
 }
@@ -204,13 +209,13 @@ async function search({ silent = false } = {}) {
 function startTail() {
   stopTail();
   ui.tail = true;
-  tailTimer = setInterval(() => {
+  tailTimer = setInterval(() => tailTick(() => ui.running, () => {
     const now = new Date();
     const span = new Date(ui.to) - new Date(ui.from);
     ui.to = isoLocal(now);
     ui.from = isoLocal(new Date(now.getTime() - span));
     search({ silent: true });
-  }, Math.max(5, state.defaults.refreshIntervalSec) * 1000);
+  }), Math.max(5, state.defaults.refreshIntervalSec) * 1000);
   search();
 }
 function stopTail() { ui.tail = false; if (tailTimer) clearInterval(tailTimer); tailTimer = null; }

@@ -31,7 +31,8 @@ pbkdf2 = { version = "0.12", default-features = false, features = ["hmac"] }
 hmac = "0.12"
 russh = { version = "0.63", default-features = false, features = ["ring", "rsa", "flate2", "legacy-ed25519-pkcs8-parser"] }
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# raw_value: the fleet cache holds bodies as JSON text, not parsed (fleet::entry::Body).
+serde_json = { version = "1", features = ["raw_value"] }
 serde_yaml = "0.9"
 base64 = "0.22"
 regex = "1"

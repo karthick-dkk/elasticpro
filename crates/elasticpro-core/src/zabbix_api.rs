@@ -320,6 +320,9 @@ impl Zabbix {
     /// One JSON-RPC call. `auth` false sends no token — `apiinfo.version` refuses one.
     async fn call_as(&self, method: &str, params: Value, auth: bool) -> Result<Value, ApiError> {
         let url = self.url.as_deref().ok_or_else(|| ApiError::new("not_configured", "the Zabbix API address is not set"))?;
+        // At most ZABBIX_CONCURRENCY calls open at once, from every Zabbix client this
+        // process holds (the reader, the writer, one rebuilt by a link change).
+        let _slot = zabbix_slots().acquire().await;
         let mut rb = self.http.post(url).json(&json!({ "jsonrpc": "2.0", "method": method, "params": params, "id": 1 }));
         if auth {
             rb = rb.bearer_auth(&self.token);
@@ -578,6 +581,12 @@ impl Zabbix {
         }
         Ok((ok, skipped, read))
     }
+}
+
+/// The process-wide limit on open Zabbix API calls.
+fn zabbix_slots() -> &'static tokio::sync::Semaphore {
+    static S: std::sync::OnceLock<tokio::sync::Semaphore> = std::sync::OnceLock::new();
+    S.get_or_init(|| tokio::sync::Semaphore::new(crate::gate::config().zabbix_concurrency))
 }
 
 #[cfg(test)]

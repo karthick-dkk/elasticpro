@@ -88,3 +88,27 @@ test('every key in config.txt.example is known to both', () => {
   }
   for (const key of core.rules.keys()) assert.ok(keys.includes(key), `${key} is a core key missing from config.txt.example`);
 });
+
+test('the request gate\'s keys sit in the performance section, in all three places', () => {
+  const GATE_KEYS = ['ES_CONCURRENCY', 'ES_PER_CLUSTER', 'ES_PER_JUMP_HOST', 'ES_BACKGROUND_RESERVE', 'ES_QUEUE_MAX',
+    'ES_QUEUE_PER_USER', 'ES_QUEUE_WAIT_MS', 'ES_MAX_TIMEOUT_MS', 'ES_READ_CACHE_SECONDS', 'ES_READ_CACHE_MB',
+    'ES_MAX_RESPONSE_MB', 'ES_MAX_FLEET_RESPONSE_MB', 'ES_TASK_REAPER', 'ES_TASK_MAX_SECONDS', 'ZABBIX_CONCURRENCY'];
+  const core = coreRules();
+  const sh = deployRules();
+  const ex = read('deploy/config.txt.example');
+  const perf = ex.slice(ex.indexOf('-- performance'), ex.indexOf('-- UI defaults'));
+  assert.ok(perf.length > 0, 'no performance section in config.txt.example');
+  for (const k of GATE_KEYS) {
+    assert.ok(core.rules.has(k), `${k} missing from SPECS`);
+    assert.ok(sh.has(k), `${k} missing from deploy.sh CFG_RULES`);
+    assert.match(perf, new RegExp(`^${k}=`, 'm'), `${k} is not in the performance section of config.txt.example`);
+  }
+  // The core reads each through the environment variable SPECS names; gate.rs must read the same.
+  const rs = read('crates/elasticpro-core/src/settings.rs');
+  const gate = read('crates/elasticpro-core/src/gate.rs');
+  for (const k of GATE_KEYS) {
+    const env = new RegExp(`spec\\("${k}",[^\\n]*To::Env\\("([A-Z_]+)"\\)`).exec(rs);
+    assert.ok(env, `${k} does not map to an environment variable`);
+    assert.ok(gate.includes(`"${env[1]}"`), `gate.rs never reads ${env[1]} (${k})`);
+  }
+});

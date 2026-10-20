@@ -43,6 +43,9 @@ const TABLE: &[(&str, &str)] = &[
     ("name_taken", "EP-207"),
     ("aborted", "EP-208"),
     ("blocked_readonly", "EP-209"),
+    ("overloaded", "EP-214"),
+    ("queue_timeout", "EP-215"),
+    ("response_too_large", "EP-216"),
     // 3xx: config, storage and secrets
     ("no_config", "EP-301"),
     ("parse_error", "EP-302"),
@@ -109,10 +112,37 @@ pub fn stamp(reply: &mut Value) {
     }
 }
 
+/// A reply as a log line can carry it: every list longer than `keep` cut to its first
+/// `keep` items and a note of how many more there were. For summaries of replies whose
+/// lists grow with the estate (the Zabbix sync's `skipped`).
+pub fn for_log(v: &Value, keep: usize) -> Value {
+    match v {
+        Value::Array(a) if a.len() > keep => {
+            let mut out: Vec<Value> = a.iter().take(keep).map(|x| for_log(x, keep)).collect();
+            out.push(Value::String(format!("… and {} more", a.len() - keep)));
+            Value::Array(out)
+        }
+        Value::Array(a) => Value::Array(a.iter().map(|x| for_log(x, keep)).collect()),
+        Value::Object(m) => Value::Object(m.iter().map(|(k, x)| (k.clone(), for_log(x, keep))).collect()),
+        other => other.clone(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn long_lists_are_cut_for_the_log() {
+        let skipped: Vec<String> = (0..300).map(|i| format!("host-{i}: no ES URL")).collect();
+        let v = for_log(&json!({ "ok": true, "clusters": 32, "skipped": skipped, "inUse": ["a", "b"] }), 5);
+        assert_eq!(v["skipped"].as_array().unwrap().len(), 6);
+        assert_eq!(v["skipped"][0], json!("host-0: no ES URL"));
+        assert_eq!(v["skipped"][5], json!("… and 295 more"));
+        assert_eq!(v["inUse"], json!(["a", "b"]), "short lists stay whole");
+        assert_eq!(v["clusters"], json!(32));
+    }
 
     #[test]
     fn a_refusal_gets_its_code_in_the_message() {
