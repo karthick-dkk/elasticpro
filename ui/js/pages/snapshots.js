@@ -5,7 +5,7 @@ import { nodeCache, objId } from '../lib/keyed.js';
 import { spanDays, spanDaysIso } from '../core/volume.js';
 import { num, dt, dur, ago, bytes, eachDay, ymdDots, toCsv, download, plural } from '../lib/fmt.js';
 import { state, client, activeClusters, fetchSnapshots, fetchOverview, ensureFullSnapshots, expectChange,
-         fleetMode, datasetFreshness, demandDataset, clusterRev } from '../core/state.js';
+         fleetMode, datasetFreshness, demandDataset, clusterRev, askForPage } from '../core/state.js';
 import { freshnessBar } from '../lib/freshness.js';
 import { coverageStrip } from '../lib/charts.js';
 import { card, collapsible, pill, statTile, table, empty } from './common.js';
@@ -55,6 +55,9 @@ export function onData() { if (host && host.isConnected) draw(); }
  */
 async function loadFull() {
   const list = activeClusters();
+  // Under a policy that fetches nothing on its own the repositories, SLM and the listing
+  // are not known until this page asks for them.
+  askForPage(list.map((c) => c.id), ['health', 'policies', 'snapshots']).catch(() => {});
   // Many clusters: one message to the core for all of them, answers arriving as pushes.
   // Holding a request open per cluster queued a hundred of them in front of every click.
   // One or two: asked and waited for, so the page fills in without a round of pushes.
@@ -146,6 +149,14 @@ async function reload(c) {
   draw();
 }
 
+/**
+ * Whether this cluster's repositories and SLM policies have been read. Unknown is not
+ * none: `d.repos` is an empty list until they are, and "no repositories" would say a
+ * cluster has none when nobody has looked. Without the fleet cache they come with the
+ * overview, which the page always reads.
+ */
+const policiesRead = (id) => !fleetMode() || datasetFreshness(id, 'policies').ts > 0;
+
 /** Which dataset the listing on screen came from, for its freshness line. */
 function listingFreshness(c, d, repo) {
   const src = (d.snapshotsSource || {})[repo];
@@ -158,7 +169,7 @@ function clusterBlock(c) {
   const repos = d.repos || [];
   // Unknown is not zero: a listing not read yet says so rather than "0 snapshots".
   const listed = d.snapshots ? Object.values(d.snapshots).reduce((n, l) => n + ((l && l.length) || 0), 0) : null;
-  const sub = [plural(repos.length, 'repository', 'repositories'),
+  const sub = [policiesRead(c.id) ? plural(repos.length, 'repository', 'repositories') : 'repositories not read yet',
     listed === null ? 'snapshots not read yet' : plural(listed, 'snapshot')].join(' · ');
   return h('div', { style: { marginBottom: '10px' } },
     collapsible(c.name, sub, () => clusterSection(c), { key: `snap-cluster-${c.id}`, open: false }));
@@ -273,7 +284,8 @@ function summaryView(c, d, repos, selected, snaps) {
 
   return h('div',
     h('div.grid.c4', { style: { marginBottom: '14px' } },
-      statTile('Snapshots available', num(snaps.length), selected ? `in ${selected}` : 'no repository'),
+      statTile('Snapshots available', d.snapshots ? num(snaps.length) : '–',
+        d.snapshots ? (selected ? `in ${selected}` : 'no repository') : 'not read yet'),
       statTile('Newest snapshot taken', newest ? dt(newest.start).slice(0, 12) : '–', newest ? ago(newest.start) : ''),
       // The two questions are different: when snapshots ran, and which days of indices
       // they hold. A snapshot taken this morning can contain ninety days of daily indices.
@@ -283,7 +295,7 @@ function summaryView(c, d, repos, selected, snaps) {
       statTile('Snapshot runs cover', oldest && newest ? plural(spanDays(oldest.start, newest.start), 'day') : '–',
         cov.missing.length ? `${cov.missing.length} day(s) with no snapshot run` : 'a run every day in the window')),
 
-    focusable('repos', collapsible('Repositories', repos.length ? `${repos.length} registered · add or manage` : 'none registered',
+    focusable('repos', collapsible('Repositories', repos.length ? `${repos.length} registered · add or manage` : policiesRead(c.id) ? 'none registered' : 'not read yet',
       () => h('div',
         repoTable(c, d, repos),
         h('div', { style: { paddingTop: '8px' } },
@@ -293,8 +305,9 @@ function summaryView(c, d, repos, selected, snaps) {
       { key: 'snap-repos', open: focusSection === 'repos' })),
 
     h('div', { style: { marginTop: '10px' } },
-      focusable('policies', collapsible('SLM policies', policies.length ? `${policies.length} configured` : 'none configured',
-        () => (policies.length ? slmTable(c, policies) : empty(d.slmSupported === false ? 'SLM API not available on this cluster' : 'No SLM policies configured')),
+      focusable('policies', collapsible('SLM policies', policies.length ? `${policies.length} configured` : policiesRead(c.id) ? 'none configured' : 'not read yet',
+        () => (policies.length ? slmTable(c, policies)
+          : empty(!policiesRead(c.id) ? 'SLM policies not read yet' : d.slmSupported === false ? 'SLM API not available on this cluster' : 'No SLM policies configured')),
         { key: 'snap-slm', open: focusSection === 'policies' || policies.some((p) => { const lf = p.last_failure, ls = p.last_success; return lf && (!ls || lf.time > ls.time); }) }))),
 
     h('div', { style: { marginTop: '10px' } },
@@ -490,6 +503,6 @@ function snapTable(c, repo, snaps, { searching = false } = {}) {
   });
   return table(['Snapshot', 'Status', 'Taken', 'Ended', 'Duration', 'Indices', 'Data inside covers',
                 'Shards ok', 'Failed', ''], trs,
-    { emptyText: listingEmptyText({ searching, fetched: Array.isArray((state.data.get(c.id) || {}).repos),
+    { emptyText: listingEmptyText({ searching, fetched: Array.isArray((state.data.get(c.id) || {}).repos) && policiesRead(c.id),
                                        repos: (state.data.get(c.id) || {}).repos || [], error: unreadableReason(c) }) });
 }

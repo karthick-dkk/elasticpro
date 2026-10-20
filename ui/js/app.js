@@ -7,7 +7,7 @@ import { coalesce } from './lib/coalesce.js';
 import { createRedrawGate, onRefreshed, normalisePolicy, normaliseScope, openingSelection } from './lib/quiet-ui.js';
 import * as cfg from './core/config.js';
 import { state, bus, setConfig, refreshAll, refreshModule, REFRESH_MODULES, startAutoRefresh, clusters, fleetMode,
-         alerts, cachedAlerts, worstHealth, requestLoad, fleetPolicy,
+         alerts, cachedAlerts, worstHealth, requestLoad, fleetPolicy, fetchesOnlyOnAsk,
          clustersNeedingCredential, clustersWithAuthError, hasSessionCredential, isReadOnly, healthState, activeClusters, openAlertsNow, openAlertCounts } from './core/state.js';
 import { rowMenu, toast, notificationBell, setNotificationSink, dropNotification } from './ui/menu.js';
 import { showCredentialDialog, serverHoldsCredentials, serverCredentialMessage } from './ui/credential-dialog.js';
@@ -453,6 +453,13 @@ function markUnreachable(sel) {
   }
 }
 
+/** Who goes to the clusters, as the top bar's live/quiet pill says it. */
+function serverLead() {
+  return fetchesOnlyOnAsk()
+    ? 'The server goes to a cluster only when a page asks for it (Config → Requests, Client basis) and pushes what arrives here'
+    : 'The server polls every cluster itself and pushes what changes here';
+}
+
 function renderTopbar() {
   const bar = $('#topbar');
   if (!bar) return;
@@ -534,16 +541,16 @@ function renderTopbar() {
           h('i.dot'), 'snapshot')
       : null,
     h('span#refresh-status.muted', { style: { fontSize: '11.5px', fontVariantNumeric: 'tabular-nums' } }, ''),
-    // With the server's fleet cache there is nothing for a page to poll: the core polls
-    // every cluster on its own schedule and tells the page what changed. The auto toggle
+    // With the server's fleet cache there is nothing for a page to poll: the core goes to the
+    // clusters (on its schedule, or when a page asks) and tells the page what changed. The auto toggle
     // would only be a switch for load that no longer exists, so this says how what lands
     // reaches the page instead: live (repainted as it arrives) or quiet (held until you pause).
     fleetMode() && !isSnapshotMode()
       ? (redrawPolicy() === 'live'
-        ? h('span.pill.green', { title: 'The server polls every cluster itself and pushes what changes here; '
+        ? h('span.pill.green', { title: `${serverLead()}; `
             + 'the page repaints as it lands. Refresh asks it to fetch the clusters on screen now. '
             + 'Config → Defaults → Live redraw changes this.' }, h('i.dot'), 'live')
-        : h('span.pill.grey', { title: 'The server polls every cluster itself and pushes what changes here. '
+        : h('span.pill.grey', { title: `${serverLead()}. `
             + (redrawPolicy() === 'pending'
               ? 'The page does not move while you are using it; what has landed is drawn a few seconds after you pause'
               : 'The page keeps what it shows until you press Refresh or open another page')
@@ -661,7 +668,8 @@ function renderSideFoot() {
     pol && pol.pausedAll
       ? h('span.pill.grey', { title: 'The request policy pauses every request: nothing new is sent to any cluster until an administrator resumes (Config → Requests, or the Request Centre)' }, 'requests paused')
       : null,
-    // What the poller is actually doing: "auto" resolves to background or hybrid by fleet size.
+    // What the poller is actually doing: "auto" resolves to background or hybrid by fleet size,
+    // and the shipped Client basis is on-demand.
     pol && ((pol.resolvedMode || pol.mode) === 'hybrid' || (pol.resolvedMode || pol.mode) === 'on-demand')
       ? h('span.row.muted', {
           title: (pol.resolvedMode || pol.mode) === 'hybrid'

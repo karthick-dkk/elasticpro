@@ -93,7 +93,8 @@ LOG_LEVEL=
 
 # Seconds between health polls of each cluster (180-300).
 POLL_HEALTH_SECONDS=
-# Cluster requests the poller runs at once, across the fleet (1-256).
+# Cluster requests the poller runs at once, across the fleet (1-256). Unset: 4 under the
+# shipped Client basis request policy, 16 for Automatic and Background. Set, it wins.
 POLL_CONCURRENCY=
 # Requests to Elasticsearch in flight at once, all sources together (1-1024; default 24).
 ES_CONCURRENCY=

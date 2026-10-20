@@ -3,7 +3,7 @@
 import { h, mount, reconcile } from '../lib/dom.js';
 import { nodeCache, objId } from '../lib/keyed.js';
 import { bytes, num, pct, ago, dt, dur, toCsv, download, healthClass } from '../lib/fmt.js';
-import { state, activeClusters, client, fetchOverview, healthState, refreshAll, openAlertsNow, requestsFor, requestLoad, jvmSummary, clusterRev, fleetMode, coverage, askFleetDataset } from '../core/state.js';
+import { state, activeClusters, client, fetchOverview, healthState, refreshAll, openAlertsNow, requestsFor, requestLoad, jvmSummary, clusterRev, fleetMode, coverage, askFleetDataset, askForPage } from '../core/state.js';
 import { coverageBar } from '../lib/freshness.js';
 import { readAllState, startReadAll } from '../lib/read-all.js';
 import { nameList } from '../core/fleet-summary.js';
@@ -140,8 +140,10 @@ const reading = readAllState();
 
 /**
  * The coverage line (lib/freshness.js coverageBar). Only with the fleet cache — the direct
- * path reads on open as it always has. Nothing here reads by itself: under any policy,
- * opening the page shows what the core holds and says how much of it there is.
+ * path reads on open as it always has. It says how much of what the page shows has been
+ * read, and "Read all" reads the rest one request at a time. Under Client basis (the
+ * shipped policy) the page also asks the core for the missing datasets when it opens
+ * (askOnOpen below), so the bar is what is left while the answers are still on their way.
  */
 function coverageLine() {
   if (!fleetMode()) return null;
@@ -154,14 +156,27 @@ function coverageLine() {
   });
 }
 
+/**
+ * Under a policy that fetches nothing on its own, opening the page is the ask: one message
+ * per dataset for every cluster on screen that has none or an old one. Throttled, because
+ * every push redraws the page and lands here too; demandDataset does not ask twice in 30 s.
+ */
+let askedOpenAt = 0;
+function askOnOpen() {
+  if (Date.now() - askedOpenAt < 1000) return;
+  askedOpenAt = Date.now();
+  askForPage(activeClusters().map((c) => c.id), DATASETS).catch(() => {});
+}
+
 export function render(el) {
   host = el; el.classList.add('dense'); trackHeadHeight();
   // "Go to" from an unreachable alert (core/alert-goto.js): that cluster's card, open.
   const f = takeFocus('overview');
   focusDown = f && f.section === 'unreachable' ? { cluster: f.cluster || null, prepared: false } : null;
+  askOnOpen();
   draw();
 }
-export function onData() { if (host && host.isConnected) draw(); }
+export function onData() { if (host && host.isConnected) { askOnOpen(); draw(); } }
 
 /* ------------------------------ per-user layout ------------------------------ */
 
@@ -644,10 +659,15 @@ function summaryCard(up, down, all) {
   const total = all.length;
   const shownTotal = up.length + down.length;
   const hiddenDown = prefs.unreachable.hidden;
+  // Unknown is not reachable: a cluster whose health was never read is neither, and the
+  // line says how many those are rather than counting them among the reachable.
+  const unread = up.filter((r) => !r.d || r.d.healthUnknown || !r.d.updatedAt).length;
+  const reach = up.length - unread;
   const scope = shownTotal === total
-    ? `${up.length} reachable cluster${up.length === 1 ? '' : 's'}`
-    : `${up.length} reachable of ${total} clusters`;
+    ? `${reach} reachable cluster${reach === 1 ? '' : 's'}`
+    : `${reach} reachable of ${total} clusters`;
   const sub = [scope,
+    unread ? `${unread} not read yet` : null,
     down.length ? `${down.length} unreachable ${hiddenDown ? 'hidden above' : 'shown above'}` : null,
     `sorted by ${(SORTS[ui.sort] || SORTS.name).label.toLowerCase()}${ui.sort === 'name' ? (ui.dir === 1 ? ' A–Z' : ' Z–A') : ui.dir === 1 ? ', ascending' : ', descending'}`,
     isSnapshotMode() ? `collected ${ago(state.lastRefresh)}` : `updated ${ago(state.lastRefresh)}`].filter(Boolean).join(' · ');

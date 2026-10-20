@@ -11,7 +11,7 @@
 import { h, mount } from '../lib/dom.js';
 import { bytes, num, pct, compact } from '../lib/fmt.js';
 import { state, clusters, activeClusters, client, refreshAll, fetchIndices, fetchShards,
-         datasetFreshness, diskAccounting, setDangling, danglingFor, demandDataset, fleetMode } from '../core/state.js';
+         datasetFreshness, diskAccounting, setDangling, danglingFor, demandDataset, fleetMode, askForPage } from '../core/state.js';
 import { freshnessBar } from '../lib/freshness.js';
 import { card, table, empty, pill, figure, connectionBanner } from './common.js';
 import { navigateTo } from '../core/intent.js';
@@ -73,8 +73,17 @@ export function onData() {
  * full reload, while every other page filled in. A failure is worth keeping only until
  * there is a reason to think it would go differently.
  */
+/** What the nodes and shards view is drawn from besides its own listing (state.js FLEET_KEYS). */
+const PAGE_DATASETS = ['health', 'nodes'];
+let askedOpenAt = 0;
 function refresh() {
   const list = activeClusters();
+  // Under a policy that fetches nothing on its own, whether the cluster is up and what its
+  // nodes are is not known until this page asks. Throttled: every push lands here.
+  if (Date.now() - askedOpenAt >= 1000) {
+    askedOpenAt = Date.now();
+    askForPage(list.map((c) => c.id), PAGE_DATASETS).catch(() => {});
+  }
   if (list.length > 2 && fleetMode()) { refreshMany(list); return; }
   for (const c of list) {
     const got = shards.get(c.id);
@@ -145,6 +154,15 @@ function draw() {
 
 function block(c) {
   const d = state.data.get(c.id) || {};
+  // Unknown is not unreachable: a cluster whose health was never read has not failed to
+  // answer. The page asked for it on opening; this is what shows until it lands.
+  if (d.healthUnknown) {
+    return h('div.banner', { style: { margin: 0 } },
+      h('div', h('div.ttl', `${c.name} — not read yet`),
+        h('div.sec', { style: { fontSize: '12px' } }, 'Nothing has been fetched from this cluster yet, so whether it is up is not known. Its health and nodes were asked for; they appear here as they arrive.'),
+        h('div.mono.muted', { style: { fontSize: '11px', marginTop: '2px' } }, c.url + (c.via ? `  (via ${c.via})` : ''))),
+      h('div.acts', h('button.btn.sm', { onclick: () => refreshAll({ force: true, selected: true }) }, 'Read now')));
+  }
   if (!d.reachable) return connectionBanner(c, () => refreshAll({ force: true, selected: true }));
 
   const raw = shards.get(c.id);

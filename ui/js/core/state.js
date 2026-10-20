@@ -1557,6 +1557,33 @@ export async function demandDataset(ids, dataset, { force = false } = {}) {
 }
 
 /**
+ * Whether the running request policy fetches nothing on its own (Client basis, the
+ * shipped one): the core goes to a cluster only when a page asks. Under it a page that
+ * simply reads what the core holds opens onto a fleet nothing was ever fetched for.
+ * False until the core has said which policy it runs.
+ */
+export function fetchesOnlyOnAsk() {
+  const p = fleet.policy;
+  return fleetMode() && !!p && (p.resolvedMode || p.mode) === 'on-demand';
+}
+
+/**
+ * What a page does on opening under such a policy: asks the core, in one message per
+ * dataset, for the datasets it shows — for the clusters that have none or an old one
+ * (demandDataset decides which, and does not ask twice in a row). The answers arrive as
+ * pushes and the page redraws as they land, the ones not in yet shown as unknown.
+ *
+ * A no-op under every other policy: the core is already keeping those fresh, and a fleet
+ * that chose `hybrid` chose reading the rest to be a decision (the page's coverage bar).
+ * Returns whether it asked.
+ */
+export async function askForPage(ids, datasets, { force = false } = {}) {
+  if (!fetchesOnlyOnAsk() || !ids || !ids.length) return false;
+  for (const ds of datasets) await demandDataset(ids, ds, { force }).catch(() => false);
+  return true;
+}
+
+/**
  * What the core holds for one dataset, every cluster, applied — without moving `seq`: this
  * is a side read, and the next FLEET_STATE {since} must still hear everything else that
  * changed since the last one.

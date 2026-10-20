@@ -22,9 +22,18 @@ export const DATASET_LABELS = {
 };
 export const DATASETS = Object.keys(DATASET_LABELS);
 
-/** `auto` first: it is what the core ships. Keep its threshold equal to AUTO_HYBRID_ABOVE in policy.rs. */
+/** Keep its threshold equal to AUTO_HYBRID_ABOVE in policy.rs. */
 export const AUTO_HYBRID_ABOVE = 25;
 export const MODES = ['auto', 'background', 'hybrid', 'on-demand'];
+
+/**
+ * "Client basis", what the core ships: nothing until a page asks, one request per cluster
+ * at a time. The one definition on this side; the core's is CLIENT_BASIS_* in policy.rs and
+ * tools/unit/policy.test.mjs holds the two together.
+ */
+export const CLIENT_BASIS = { mode: 'on-demand', perCluster: 1, global: 4 };
+/** What the Automatic, Background and Hybrid presets run with (CLASSIC_* in policy.rs). */
+export const CLASSIC = { perCluster: 2, global: 16 };
 
 export const BOUNDS = {
   interval: { min: 30, max: 86400 },
@@ -69,20 +78,20 @@ export function boundsUnder(gate) {
  * `defaults` always wins, because the health interval there can come from the environment.
  */
 export const FALLBACK_DEFAULTS = {
-  mode: 'auto',
+  mode: CLIENT_BASIS.mode,
   intervalsSec: { health: 180, nodes: 300, ilm_errors: 900, policies: 3600, ilm_assign: 3600,
                   snapshots: 1800, snapshots_full: 1800, indices: 600, shards: 300 },
   watchMinutes: 15,
-  concurrency: { global: 16, perCluster: 2, tunnel: 6 },
+  concurrency: { global: CLIENT_BASIS.global, perCluster: CLIENT_BASIS.perCluster, tunnel: 6 },
   timeoutMs: 30000,
   paused: { all: false, clusters: [] },
 };
 
 export const PRESETS = [
-  { id: 'auto', label: `Automatic (recommended) — background up to ${AUTO_HYBRID_ABOVE} clusters, hybrid above` },
+  { id: 'client', label: 'Client basis (recommended) — nothing until a page asks, one request per cluster at a time' },
+  { id: 'auto', label: `Automatic — background up to ${AUTO_HYBRID_ABOVE} clusters, hybrid above` },
   { id: 'background', label: 'Background — the core keeps every cluster fresh' },
   { id: 'hybrid', label: 'Hybrid — health in the background, the rest when a page looks' },
-  { id: 'client', label: 'Client basis — nothing until a page asks, one request per cluster at a time' },
 ];
 
 const clamp = (v, { min, max }) => Math.min(max, Math.max(min, v));
@@ -109,7 +118,7 @@ export function normalisePolicy(p, defaults = FALLBACK_DEFAULTS, bounds = BOUNDS
   const clusters = ((src.paused && src.paused.clusters) || [])
     .filter((id) => typeof id === 'string' && id.trim() !== '' && !seen.has(id) && seen.add(id));
   return {
-    mode: MODES.includes(src.mode) ? src.mode : (MODES.includes(d.mode) ? d.mode : 'auto'),
+    mode: MODES.includes(src.mode) ? src.mode : (MODES.includes(d.mode) ? d.mode : CLIENT_BASIS.mode),
     intervalsSec,
     watchMinutes: pick(src.watchMinutes, d.watchMinutes ?? 15, BOUNDS.watchMinutes),
     concurrency: {
@@ -129,11 +138,13 @@ export function normalisePolicy(p, defaults = FALLBACK_DEFAULTS, bounds = BOUNDS
 export function applyPreset(policy, id, defaults = FALLBACK_DEFAULTS, bounds = BOUNDS) {
   const base = normalisePolicy(defaults, FALLBACK_DEFAULTS, bounds);
   const paused = normalisePolicy(policy, defaults, bounds).paused;
-  if (id === 'auto') return { ...base, mode: 'auto', paused };
-  if (id === 'background') return { ...base, mode: 'background', paused };
-  if (id === 'hybrid') return { ...base, mode: 'hybrid', paused };
+  // The classic presets run with the classic concurrency, not the shipped one: the shipped
+  // policy is Client basis, whose one-at-a-time limit would quietly throttle "Background".
+  const classic = { ...base.concurrency, ...CLASSIC };
+  const withMode = (mode) => normalisePolicy({ ...base, mode, concurrency: classic, paused }, defaults, bounds);
+  if (id === 'auto' || id === 'background' || id === 'hybrid') return withMode(id);
   if (id === 'client') {
-    return normalisePolicy({ ...base, mode: 'on-demand', concurrency: { ...base.concurrency, perCluster: 1, global: 4 }, paused }, defaults, bounds);
+    return normalisePolicy({ ...base, mode: CLIENT_BASIS.mode, concurrency: { ...base.concurrency, perCluster: CLIENT_BASIS.perCluster, global: CLIENT_BASIS.global }, paused }, defaults, bounds);
   }
   throw new Error(`no preset "${id}"`);
 }
@@ -227,7 +238,7 @@ export function describeMode(mode) {
     case 'auto': return `Background up to ${AUTO_HYBRID_ABOVE} clusters, hybrid above — so a large fleet is not polled for everything all the time.`;
     case 'background': return 'The core keeps every cluster fresh on its own schedule, whether or not anybody is looking.';
     case 'hybrid': return 'Only health is fetched in the background; everything else is fetched while a page shows it, and for the watch window after.';
-    case 'on-demand': return 'The core fetches nothing on its own: opening a page sends exactly what that page shows, for that cluster.';
+    case 'on-demand': return 'The core fetches nothing on its own: opening a page sends exactly what that page shows, for the clusters on it — and that is kept fresh for the watch window after.';
     default: return 'The core did not say which mode is running.';
   }
 }

@@ -33,6 +33,8 @@ and the log-delay measurement now all wait in one queue before anything is sent 
 - Config → Requests shows these limits next to the poller's own settings and will not save more
   than they allow.
 
+**New installs use Client basis.** With no saved request policy, ElasticPro now goes to a cluster only when a page asks (Clusters, Alerts, Nodes, Indices and Snapshots ask for what they show when they open), one request per cluster at a time and four in all; a policy you already saved is untouched, and Config → Requests → Automatic or Background goes back to keeping the fleet fresh in the background.
+
 **Housekeeping.** Once an hour the core cleans up what ElasticPro itself leaves behind: cached
 data for clusters that were removed or not looked at for days, their Redis keys, expired API
 tokens, old notifications and silences, and (if you ask for it) old rotated activity logs. It never

@@ -93,8 +93,9 @@ logging, performance, the UI defaults) lives in `deploy/config.txt`. Edit it, th
 `deploy/deploy.sh --apply-config` (nginx reloads, the core restarts, nobody is signed out).
 `deploy/README.md`, "Settings: config.txt", has the rules and the key table.
 
-**Rolling this out against 100-300 clusters:** the core polls in the background now rather
-than only while a page is open, and nginx got a keepalive pool to the core, gzip and two
+**Rolling this out against 100-300 clusters:** a new install fetches only when a page asks (the
+"Client basis" request policy); for the core to poll in the background rather than only while a page
+is open, pick Automatic or Background in Config → Requests. nginx got a keepalive pool to the core, gzip and two
 request limits sized for that traffic — see `deploy/README.md` ("Scaling to a large
 fleet") for the `ELASTICPRO_POLL_*` / `ELASTICPRO_CACHE_MB` knobs and the optional Redis cache layer.
 Nothing here needs it: the core works, and stays warm across a restart, with only the disk

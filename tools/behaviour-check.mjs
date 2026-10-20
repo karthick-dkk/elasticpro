@@ -2250,6 +2250,18 @@ restoreConsole();
 
     const client = [...doc.querySelectorAll('button')].find((b) => b.textContent.startsWith('Client basis'));
     ok(!!client, 'policy: no "Client basis" preset button');
+    // An install with no saved policy runs Client basis, and the page says so: that preset
+    // is the one marked, and the only one called recommended. (Skipped when this bridge's
+    // data directory already holds a policy somebody saved.)
+    if (before && before.stored === false && client) {
+      ok(client.getAttribute('aria-pressed') === 'true',
+        `policy: with no saved policy "Client basis" is not the selected preset (mode ${before.policy && before.policy.mode})`);
+      ok(/\(recommended\)/.test(client.textContent), 'policy: "Client basis" is not marked recommended');
+      const others = [...doc.querySelectorAll('button[aria-pressed="true"]')].filter((b) => b.closest('[aria-label="Request policy presets"]'));
+      ok(others.length === 1, `policy: ${others.length} presets are marked selected on a fresh install, expected 1`);
+      ok(doc.querySelector('#pol-mode').value === 'on-demand', 'policy: the mode select does not show on-demand on a fresh install');
+      ok(/shipped policy is running/.test(doc.body.textContent), 'policy: the page does not say that nothing is saved');
+    }
     if (client) {
       client.click(); await settleFor(200);
       const pressed = [...doc.querySelectorAll('button')].find((b) => b.textContent.startsWith('Client basis'));
@@ -2763,6 +2775,37 @@ if (viaFleet) {
     mo.disconnect();
     st.state.defaults.liveRedraw = savedPolicy;
     await settleFor(3400);
+  }
+}
+
+// Client basis fetches nothing on its own, so a page that shows a cluster has to ask: opening
+// the Clusters page and the Alerts page asks the core (one REFRESH per dataset) for what they
+// show, and a cluster whose health was never read is "not read yet" on Nodes & shards, never
+// "unreachable".
+if (viaFleet) {
+  const st = await load('core/state.js');
+  const es = await load('core/es.js');
+  const pol = await es.policyGet();
+  if (pol && pol.ok && (pol.resolvedMode || pol.policy.mode) === 'on-demand') {
+    ok(st.fetchesOnlyOnAsk(), 'on-demand: the app does not know the core fetches nothing on its own');
+    const refreshed = new Set(sent.filter((m) => m.type === 'REFRESH').flatMap((m) => m.datasets || []));
+    for (const ds of ['health', 'nodes', 'ilm_errors', 'policies', 'snapshots']) {
+      ok(refreshed.has(ds), `on-demand: opening the Clusters and Alerts pages never asked the core for "${ds}"`);
+    }
+    // Asked again once the 30 s gap has passed, for the clusters that need it.
+    ok(sent.filter((m) => m.type === 'REFRESH' && (m.clusterIds || []).length >= config.clusters.length).length > 0,
+      'on-demand: no REFRESH named every cluster — a page asks for the whole fleet in one message');
+    const c0 = config.clusters[0];
+    const d0 = st.state.data.get(c0.id);
+    const was = d0 && { healthUnknown: d0.healthUnknown, reachable: d0.reachable, updatedAt: d0.updatedAt };
+    if (d0) {
+      Object.assign(d0, { healthUnknown: true, reachable: false, updatedAt: 0 });
+      await go('shards');
+      const body = doc.getElementById('view').textContent;
+      ok(/not read yet/.test(body), `shards: a cluster never read says "${body.slice(0, 120)}", not that it was not read yet`);
+      ok(!/No response from the cluster|— unreachable/.test(body), 'shards: a cluster whose health was never read is called unreachable');
+      Object.assign(d0, was);
+    }
   }
 }
 

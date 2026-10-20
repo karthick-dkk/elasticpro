@@ -602,7 +602,7 @@ mod tests {
     use serde_json::{json, Map};
 
     fn cfg() -> Config {
-        Config { cache_bytes: 1 << 20, ..Config::from_policy(&Policy::shipped()) }
+        Config { cache_bytes: 1 << 20, ..Config::from_policy(&Policy::classic()) }
     }
     fn with_mode(mode: Mode) -> Config {
         Config { mode, ..cfg() }
@@ -809,9 +809,23 @@ mod tests {
     }
 
     #[test]
+    fn the_shipped_policy_plans_nothing_until_a_page_asks() {
+        let cfg = Config { cache_bytes: 1 << 20, ..Config::from_policy(&Policy::shipped()) };
+        assert_eq!(cfg.mode, Mode::OnDemand, "Client basis is the shipped mode");
+        assert_eq!((cfg.per_cluster, cfg.global), (1, 4));
+        let mut st = active(1_000_000); // somebody is looking: not idle
+        let s = specs(3);
+        st.plan(&s, 0, &HashSet::new(), &cfg);
+        assert!(st.plan(&s, 1_000_000, &HashSet::new(), &cfg).is_empty(), "nothing on its own");
+        st.request(("c01".into(), Dataset::Nodes), 1_000_000);
+        let p = st.plan(&s, 1_000_000, &HashSet::new(), &cfg);
+        assert!(!p.is_empty() && p.iter().all(|c| c.cluster == "c01" && c.dataset == Dataset::Nodes), "{p:?}");
+    }
+
+    #[test]
     fn auto_with_25_clusters_plans_the_background_datasets() {
         let cfg = cfg();
-        assert_eq!(cfg.mode, Mode::Auto, "auto is the shipped mode");
+        assert_eq!(cfg.mode, Mode::Auto, "the classic policy is auto");
         assert_eq!(cfg.resolved_mode(AUTO_HYBRID_ABOVE), Mode::Background);
         let mut st = active(1_000_000); // somebody is looking: not idle
         let s = specs(AUTO_HYBRID_ABOVE);
@@ -857,7 +871,7 @@ mod tests {
 
     #[test]
     fn the_policy_decides_intervals_and_the_per_cluster_limit() {
-        let mut pol = Policy::shipped();
+        let mut pol = Policy::classic();
         pol.intervals_sec.insert("nodes".into(), 90);
         pol.concurrency.per_cluster = 1;
         let cfg = Config::from_policy(&pol);

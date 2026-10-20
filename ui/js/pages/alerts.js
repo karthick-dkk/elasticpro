@@ -3,7 +3,7 @@
 import { h, mount, $, tooltip } from '../lib/dom.js';
 import { nodeCache, objId } from '../lib/keyed.js';
 import { ago, dt, toCsv, download, num } from '../lib/fmt.js';
-import { state, bus, mergedAlerts, invalidateAlerts, clusters, activeClusters, client, fetchOverview, refreshAll, clusterRev, fleetMode, coverage, askFleetDataset } from '../core/state.js';
+import { state, bus, mergedAlerts, invalidateAlerts, clusters, activeClusters, client, fetchOverview, refreshAll, clusterRev, fleetMode, coverage, askFleetDataset, askForPage } from '../core/state.js';
 import { coverageBar } from '../lib/freshness.js';
 import { readAllState, startReadAll } from '../lib/read-all.js';
 import { card, statTile, table, empty, connectionBanner } from './common.js';
@@ -126,9 +126,24 @@ export function render(el) {
   Promise.all([loadAcks(), loadCurrentUser(), loadSilences()])
     .then(() => { pruneAcks(mergedAlerts().flatMap((m) => [m.key, ...m.keys])); invalidateAlerts(); draw(); })
     .catch(() => {});
+  askOnOpen();
   draw();
 }
-export function onData() { if (host && host.isConnected) draw(); }
+export function onData() { if (host && host.isConnected) { askOnOpen(); draw(); } }
+
+/**
+ * The bell and this page only see what the core holds. Under a policy that fetches
+ * nothing on its own that is nothing until somebody asks, so opening the page asks for
+ * every dataset an alert comes from, for every cluster (the page is about the whole fleet).
+ * Throttled: every push redraws the page and lands here, and demandDataset does not ask
+ * the same cluster twice within 30 s.
+ */
+let askedOpenAt = 0;
+function askOnOpen() {
+  if (Date.now() - askedOpenAt < 1000) return;
+  askedOpenAt = Date.now();
+  askForPage(clusters().map((c) => c.id), DATASETS).catch(() => {});
+}
 
 /**
  * Rows and connection banners kept between redraws (lib/keyed.js): the page redraws on

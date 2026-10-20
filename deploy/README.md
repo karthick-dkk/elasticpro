@@ -297,9 +297,14 @@ every one of these limits held.
 
 ## Scaling to a large fleet (100-300 clusters)
 
-The core polls every cluster in the background rather than only when a page is open —
-`ELASTICPRO_POLL_HEALTH_SECS` (default 180), `ELASTICPRO_POLL_CONCURRENCY` (default 16, global across
-every cluster) and `ELASTICPRO_CACHE_MB` (default: a quarter of the core's memory limit — 512 at the shipped
+A new install runs the **Client basis** request policy: the core goes to a cluster only when a page
+asks (one request per cluster at a time, four in all), so nothing is fetched while nobody looks.
+To keep the fleet fresh in the background instead — rather than only when a page is open — choose
+Config → Requests → Automatic or Background (a policy saved there is kept across upgrades).
+In the background modes the core's own knobs apply —
+`ELASTICPRO_POLL_HEALTH_SECS` (default 180), `ELASTICPRO_POLL_CONCURRENCY` (default 16 for the
+Automatic and Background presets, 4 under Client basis; global across every cluster, and it wins
+over either default when set) and `ELASTICPRO_CACHE_MB` (default: a quarter of the core's memory limit — 512 at the shipped
 2g — the budget every cached body counts against) in `.env` control how hard that runs. The defaults are sized for 100-300 clusters
 on a small server; raise `ELASTICPRO_POLL_CONCURRENCY` if clusters sit behind slow links and
 polls are falling behind, lower it if the host is CPU- or socket-constrained.

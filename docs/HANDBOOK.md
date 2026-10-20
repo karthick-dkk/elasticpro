@@ -168,8 +168,9 @@ On the jump server itself: same exe, `clusters.yaml` without `via:`, optionally 
 
 ## Fleet cache — the message contract
 
-The core polls every cluster itself (`crates/elasticpro-core/src/fleet/`) and pages read what it
-last found. One poller per core; every fetch is an ordinary `es_req`, so it takes the same
+The core fetches from the clusters itself (`crates/elasticpro-core/src/fleet/`) — on a schedule, or
+only when a page asks, as the request policy says (the shipped one, Client basis, is the latter) —
+and pages read what it last found. One poller per core; every fetch is an ordinary `es_req`, so it takes the same
 jump hosts, pins, credentials and read-only guard as a page, and shows up in
 `REQUEST_STATS`. It only ever sends GETs. Started by `elasticpro-bridge` and the desktop shell;
 `PING` says `fleetCache: true` when it is running — a UI that sees `false` (an older core)
@@ -258,10 +259,14 @@ ring. Each carries `X-Opaque-Id: elasticpro/<install>/<origin>/<cluster>/<n>` (u
 so a query of ours can be found in a cluster's `_tasks` and told from everyone else's. Origins:
 `page:<id>`, `console`, `poller:<key>`, `delay-sink`, `core`.
 
-**The policy** lives in `<data dir>/policy.json`, read once at start (shipped defaults when there is
-none — seeded from `ELASTICPRO_POLL_HEALTH_SECS` and `ELASTICPRO_POLL_CONCURRENCY`, so an
-install that never touches it runs as before; a file that does not parse is logged and ignored),
-written whole and 0600 by `POLICY_SET`, applied to the scheduler on its next tick:
+**The policy** lives in `<data dir>/policy.json`, read once at start. With no file the core runs the
+shipped policy, **Client basis**: mode `on-demand`, `perCluster: 1`, `global: 4`, the intervals
+below. `ELASTICPRO_POLL_HEALTH_SECS` and `ELASTICPRO_POLL_CONCURRENCY` still win where they name a
+value. A file somebody saved is read as it is and never rewritten, and a field it leaves out takes
+the classic value (`mode: auto`, `perCluster: 2`, `global: 16`) — so a policy written before Client
+basis became the default means what it meant. A file that does not parse is logged and ignored.
+It is written whole and 0600 by `POLICY_SET`, applied to the scheduler on its next tick. The
+classic policy, which is what Config → Requests → Automatic saves:
 
 ```json
 { "mode": "auto",
@@ -274,12 +279,15 @@ written whole and 0600 by `POLICY_SET`, applied to the scheduler on its next tic
   "paused": { "all": false, "clusters": [] } }
 ```
 
-Modes: `auto` (the shipped default) is `background` while the core knows 25 clusters or fewer
+Modes: `on-demand` is the shipped default (Client basis, below). `auto` is `background` while the core knows 25 clusters or fewer
 and `hybrid` above — measured at 120 clusters, background sent ~397 requests/min and auto ~80;
 `FLEET_STATE.policy` and `POLICY_*` report `mode` and `resolvedMode`. `background` keeps the fleet fresh on the core's schedule; `hybrid` polls health only and
 fetches everything else while a page looks at it (the watch window); `on-demand` fetches nothing
 on its own — a page's `CLUSTER_DATASET` or `REFRESH` is what sends a request, for that cluster
-only, and with `perCluster: 1` one request at a time. Pause: nothing new starts (a person's ask
+only, and with `perCluster: 1` one request at a time; a `REFRESH` also keeps what it named fresh for
+the watch window. The pages that show a fleet (Clusters, Alerts, Nodes & shards, Snapshots) send
+that `REFRESH` when they open. To go back to keeping the fleet fresh in the background: Config →
+Requests → Automatic or Background. Pause: nothing new starts (a person's ask
 stays pending and runs when the pause lifts); in flight finishes. Bounds: health ≥ 60 s, other
 intervals ≥ 30 s, ≤ 1 day; watch 1–240 min; global 1–256; perCluster 1–8; tunnel 1–32; timeouts
 1–600 s; budget ≤ 10,000 (0 = none). The budget is soft: beyond it the cluster's due fetches wait
