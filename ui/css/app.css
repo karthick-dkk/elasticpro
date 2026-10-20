@@ -669,20 +669,64 @@ a.agroup-name:hover { text-decoration: underline; }
 .arow-main { display: flex; align-items: flex-start; gap: 10px 12px; padding: 9px 14px; flex-wrap: wrap; }
 .arow-main > .apill { margin-top: 2px; }
 .arow-body { flex: 1 1 260px; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
-.arow-title { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 8px; }
+.arow-title { line-height: 1.5; overflow-wrap: anywhere; }
 .arow-title b { font-weight: 620; }
 .arow-count, .arow-where { font-size: 12px; }
-.arow-detail { font-size: 12.5px; color: var(--text-secondary); display: -webkit-box; -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden; overflow-wrap: anywhere; }
+.arow-detail { color: var(--text-secondary); }
+.arow:not(.open) .arow-title { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; line-clamp: 3; overflow: hidden; }
+.arow-cluster { font-weight: 620; color: var(--text-primary); text-decoration: none; }
+a.arow-cluster:hover { text-decoration: underline; }
 .arow-sub { font-size: 11.5px; }
 .arow-age { font-size: 12px; color: var(--text-muted); white-space: nowrap; margin-top: 3px; min-width: 52px; text-align: right; }
 .btn.sm.arow-notes { padding: 2px 6px; font-size: 12px; }
-.arow-main > .golink { min-width: 168px; }
-.golink { text-decoration: none; white-space: nowrap; font-weight: 600; justify-content: center; text-align: center; color: var(--accent); background: var(--accent-soft);
-  border-color: color-mix(in srgb, var(--accent) 40%, transparent); }
-.golink:hover { filter: brightness(1.06); }
+/* Go to is navigation, so it is a link; Ack is the one button on the row (a link per row, not a blue button per row). */
+.golink { text-decoration: none; white-space: nowrap; font-weight: 600; color: var(--accent); font-size: 12.5px; padding: 3px 2px; }
+.golink:hover { text-decoration: underline; }
+.golink:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 3px; }
+.arow-main > .golink { margin-top: 1px; }
+/* One summary line instead of four tiles; each count is a filter. */
+.alerts-sum { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; margin: 0 0 12px; font-size: 15px; }
+.alerts-sum-sep { color: var(--text-muted); }
+.alerts-sumbtn { font: inherit; font-weight: 700; background: transparent; border: 0; padding: 2px 2px; cursor: pointer;
+  color: var(--text-primary); border-bottom: 2px solid transparent; border-radius: 2px; }
+.alerts-sumbtn:hover { border-bottom-color: currentColor; }
+.alerts-sumbtn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.alerts-sumbtn[aria-pressed="true"] { border-bottom-color: currentColor; background: var(--surface-2); }
+.alerts-sumbtn.crit { color: var(--critical-ink); }
+.alerts-sumbtn.warn { color: var(--warning-ink); }
+.alerts-sumbtn.ack { font-weight: 500; color: var(--text-secondary); }
+/* A cluster with one alert is one line, no header; those lines share a quiet box. */
+.agroup.singles, .agroup.singles:not(.has-crit):not(.flat) { border-color: var(--border); }
+.arow.single .arow-main { align-items: center; }
+.arow.single .arow-main > .apill { margin-top: 0; }
+.agroup.singles > .arow:first-child { border-top: 0; }
+/* Unreachable first: one line a cluster, the problem once. */
+.agroup.adown { border-color: color-mix(in srgb, var(--critical) 40%, var(--border)); }
+.adown-head { background: color-mix(in srgb, var(--critical) 7%, var(--surface-2)); }
+.adown-head h2 { margin: 0; font-size: 14.5px; }
+.adown-note { font-size: 12px; }
+.adown-row .arow-main { align-items: center; }
+.adown-row .arow-main > .apill { margin-top: 0; align-self: flex-start; }
+.adown-name { font-size: 14px; overflow-wrap: anywhere; }
+.adown-reason { color: var(--text-secondary); font-size: 12.5px; overflow-wrap: anywhere; }
+.adown-meta { margin-top: 1px; }
+.adown-row.handled .adown-name, .adown-row.handled .adown-reason { opacity: .7; }
+.alink { font: inherit; background: none; border: 0; padding: 0; cursor: pointer; color: var(--accent); text-decoration: none; }
+.alink:hover { text-decoration: underline; }
+.alink:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 3px; }
+.adown-diag { margin: 0 14px 10px; }
+.adown-diag .diag { margin: 0 !important; }
+.adown-more { display: grid; gap: 8px; }
+.adown-acts { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+.adl { margin: 0; display: grid; grid-template-columns: 110px minmax(0, 1fr); gap: 3px 12px; font-size: 12.5px; }
+.adl dt { color: var(--text-muted); }
+.adl dd { margin: 0; overflow-wrap: anywhere; }
+/* Held: kept and shown, but plainly not current. */
+.aheld { display: grid; gap: 4px; background: var(--surface-2); border: 1px dashed var(--border-strong); border-radius: 8px; padding: 8px 12px; font-size: 12.5px; }
+.aheld-row { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 10px; opacity: .65; }
+.aheld-what { flex: 1 1 220px; min-width: 0; overflow-wrap: anywhere; }
+.aheld-age { font-size: 12px; white-space: nowrap; }
 .btn.sm.arow-toggle, .btn.sm.agroup-toggle { color: var(--text-muted); font-size: 16px; line-height: 1; padding: 2px 8px; }
-.arow-main .menu-trigger { align-self: flex-start; }
 
 .apanel { margin: 0 14px 12px 14px; display: grid; gap: 10px; }
 .apanel-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
