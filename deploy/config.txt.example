@@ -178,7 +178,9 @@ UI_LOG_INDEX_PATTERN=
 UI_TIME_FIELD=
 # Certificates: auto, system or insecure (insecure accepts every certificate).
 UI_TLS=
-# How data that arrives is drawn: pending, live or manual.
+# How data that arrives is drawn: pending (the default) holds it while you are using the
+# page and draws it a few seconds after you pause; live repaints as it lands; manual draws
+# only on Refresh or when you open another page.
 UI_LIVE_REDRAW=
 # What the app opens on: last-selected or all.
 UI_DEFAULT_SCOPE=

@@ -78,6 +78,11 @@ managed keys, under the names of `DEFAULTS` in `ui/js/core/config.js`:
   "scopeUsersByGroup": true, "hostGroup": "Elasticsearch clusters" }
 ```
 
+`liveRedraw` (`UI_LIVE_REDRAW`) is how data the core pushes reaches the open page: `pending`
+(the default) leaves the page alone while it is being used and draws what landed a few seconds
+after the person pauses, with nothing on screen to say it was held; `live` repaints as it
+lands; `manual` draws only on Refresh or when another page is opened.
+
 `ui/js/core/managed.js` holds the last set; `effectiveDefaults` (alert-rules.js) and the config
 normaliser apply it last, so it wins over the file and over thresholds retuned on the Config
 page. The Zabbix connection status adds `managedBy: { field: "config.txt" }` for the link

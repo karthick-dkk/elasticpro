@@ -48,27 +48,45 @@ test('pending: events are held and counted; Apply redraws once and clears the co
   assert.equal(applied.length, 1); assert.equal(g.pending(), 0); assert.equal(counts.at(-1), 0);
 });
 
-test('pending: applies by itself after a minute without a touch, and a touch postpones it', () => {
+test('IDLE_MS is three seconds', () => { assert.equal(Q.IDLE_MS, 3000); });
+
+test('pending: works with no onChange at all (there is no pill to feed)', () => {
+  const T = fakeTime(); const applied = [];
+  const g = Q.createRedrawGate({ apply: () => applied.push(T.now()), policy: 'pending', now: T.now, setTimer: T.setTimer, clearTimer: T.clearTimer });
+  g.interact(); g.notify(); T.advance(3_000); assert.equal(applied.length, 1);
+});
+
+test('pending: applies by itself 3 s after the last touch, never during interaction', () => {
   const { g, T, applied } = gate('pending');
   T.advance(10_000); g.interact();          // reading, touched the page at t=10s
-  T.advance(5_000); g.notify();             // t=15s: held, due at t=70s
-  T.advance(30_000); assert.equal(applied.length, 0);
-  g.interact();                              // t=45s: scrolled — the window starts again
-  T.advance(30_000); assert.equal(applied.length, 0, 'applied at the first deadline despite the touch');  // t=75s
-  T.advance(30_000); assert.equal(applied.length, 1, 'a minute after the last touch it applies');          // t=105s
+  T.advance(1_000); g.notify();             // t=11s: held, due at t=13s
+  T.advance(1_500); assert.equal(applied.length, 0, 'applied 1.5 s after a touch');   // t=12.5s
+  g.interact();                              // t=12.5s: scrolled — the window starts again
+  T.advance(1_000); assert.equal(applied.length, 0, 'applied at the first deadline despite the touch');  // t=13.5s
+  g.notify(); g.interact();                  // still busy: more data, more touches
+  T.advance(2_900); assert.equal(applied.length, 0, 'applied while the person was still interacting');
+  T.advance(200); assert.equal(applied.length, 1, 'three seconds after the last touch it applies');
   assert.equal(g.pending(), 0);
 });
 
-test('pending: a page idle for longer than the window already applies the first event at once', () => {
+test('pending: a page idle for longer than the window applies the first event at once', () => {
   const { g, T, applied } = gate('pending');
   T.advance(300_000);                        // five minutes, no touch
   g.notify(); T.advance(0);
   assert.equal(applied.length, 1);
 });
 
-test('manual: held forever; only Apply redraws', () => {
+test('pending: Refresh and navigating apply or drop what is held at once', () => {
+  const { g, T, applied } = gate('pending');
+  g.interact(); g.notify(); g.apply();
+  assert.equal(applied.length, 1); assert.equal(T.armed(), 0);
+  g.notify(); g.reset(); T.advance(10_000);
+  assert.equal(applied.length, 1, 'reset (navigation) draws afresh itself and must not apply again');
+});
+
+test('manual: held forever; only Apply (Refresh) redraws', () => {
   const { g, T, applied } = gate('manual');
-  g.notify(); g.notify(); T.advance(3_600_000);
+  g.notify(); g.notify(); g.interact(); T.advance(3_600_000);
   assert.equal(applied.length, 0); assert.equal(g.pending(), 2); assert.equal(T.armed(), 0, 'no timer in manual');
   g.apply(); assert.equal(applied.length, 1);
 });
@@ -90,6 +108,12 @@ test('reset forgets what is held without redrawing (the page is being drawn afre
   g.notify(); g.reset();
   assert.equal(g.pending(), 0); assert.equal(counts.at(-1), 0); assert.equal(T.armed(), 0);
   T.advance(120_000); assert.equal(applied.length, 0);
+});
+
+test('the topbar no longer carries an updates pill', async () => {
+  const fs = await import('node:fs');
+  for (const f of ['ui/js/app.js', 'ui/js/lib/quiet-ui.js', 'ui/css/app.css'])
+    assert.ok(!/pending-updates|renderPendingPill|updates? — Apply/.test(fs.readFileSync(path.join(ROOT, f), 'utf8')), f);
 });
 
 test('unknown policy and scope words fall back to the defaults', () => {
