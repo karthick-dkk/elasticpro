@@ -104,7 +104,10 @@ pub fn run() {
             // here, on Tauri's runtime, because the poller spawns tasks and setup itself
             // runs outside one; the pages poll FLEET_STATE {since} in process.
             let poller = core.clone();
-            tauri::async_runtime::spawn(async move { poller.start_fleet_poller() });
+            tauri::async_runtime::spawn(async move {
+                poller.start_fleet_poller();
+                poller.start_request_reaper();
+            });
             app.manage(core);
             Ok(())
         })

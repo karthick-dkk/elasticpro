@@ -24,6 +24,13 @@
 //! stand between this guard and every document it indexes. If anything else ever wants
 //! to write on a timer, it belongs on that same footing, and the sentence above should
 //! keep saying two.
+//!
+//! One narrow exception that writes no data: the ES task reaper (`tasks.rs`) may send
+//! `POST /_tasks/<id>/_cancel` — and nothing else — for a task it has just read from the
+//! cluster and verified as ours and read-only. It stops a search nobody is waiting for; it
+//! cannot change an index, a setting or a document. `Writes::decide` never returns that
+//! permission; only the reaper constructs it, and the guard still checks the exact shape of
+//! the path.
 
 /// Why a particular request is allowed to write, if it is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -34,6 +41,9 @@ pub enum Writes {
     Operator,
     /// `readOnly: false` in the config — everything is permitted.
     Config,
+    /// The ES task reaper cancelling one verified task of ours: `POST /_tasks/<id>/_cancel`
+    /// exactly, and nothing else. See the module comment.
+    VerifiedTaskCancel,
 }
 
 impl Writes {
@@ -129,8 +139,21 @@ fn percent_decode(s: &str) -> Option<String> {
     String::from_utf8(out).ok()
 }
 
+/// `POST /_tasks/<node>:<n>/_cancel`, with nothing before, after or around it.
+pub fn is_task_cancel(method: &str, path: &str) -> bool {
+    method.trim().eq_ignore_ascii_case("POST")
+        && path.strip_prefix("/_tasks/").and_then(|r| r.strip_suffix("/_cancel")).is_some_and(crate::tasks::is_task_id)
+}
+
 /// `Some(reason)` when the request must be refused.
 pub fn write_guard(writes: Writes, method: &str, path: &str) -> Option<String> {
+    if writes == Writes::VerifiedTaskCancel {
+        return if is_task_cancel(method, path) || is_read(method, path) {
+            None
+        } else {
+            Some(format!("Blocked: the task reaper may only cancel a task, not {} {path}", method.trim().to_ascii_uppercase()))
+        };
+    }
     if writes != Writes::Blocked || is_read(method, path) {
         return None;
     }
@@ -226,6 +249,18 @@ mod tests {
         assert!(write_guard(background, "DELETE", "/logstash-2026.01.01").is_some());
         // reads are unaffected either way
         assert!(write_guard(background, "GET", "/_cluster/health").is_none());
+    }
+
+    #[test]
+    fn the_reaper_may_cancel_a_task_and_nothing_else() {
+        let r = Writes::VerifiedTaskCancel;
+        assert!(write_guard(r, "POST", "/_tasks/oTUltX4IQMOUUVeiohTt8A:4711/_cancel").is_none());
+        for (m, p) in [("POST", "/_tasks/_cancel"), ("POST", "/_tasks/n:1/_cancel?actions=*"), ("POST", "/_tasks/n:1/../../_bulk/_cancel"),
+                       ("DELETE", "/idx"), ("POST", "/_bulk"), ("PUT", "/_tasks/n:1/_cancel"), ("POST", "/_tasks/n%3A1/_cancel"),
+                       ("POST", "/x/_tasks/n:1/_cancel")] {
+            assert!(write_guard(r, m, p).is_some(), "{m} {p}");
+        }
+        assert_ne!(Writes::decide(true, true, true), r, "no person's switch ever grants it");
     }
 
     #[test]

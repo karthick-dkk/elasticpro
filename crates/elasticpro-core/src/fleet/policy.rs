@@ -136,9 +136,12 @@ impl Policy {
         }
         self.intervals_sec = iv;
         self.watch_minutes = self.watch_minutes.clamp(1, 240);
-        self.concurrency.global = self.concurrency.global.clamp(1, 256);
-        self.concurrency.per_cluster = self.concurrency.per_cluster.clamp(1, 8);
-        self.concurrency.tunnel = self.concurrency.tunnel.clamp(1, 32);
+        // The poller's share of the gate, never more than the gate itself allows (gate.rs:
+        // ES_CONCURRENCY, ES_PER_CLUSTER, ES_PER_JUMP_HOST).
+        let gate = crate::gate::limits();
+        self.concurrency.global = self.concurrency.global.clamp(1, 256).min(gate.global);
+        self.concurrency.per_cluster = self.concurrency.per_cluster.clamp(1, 8).min(gate.per_cluster);
+        self.concurrency.tunnel = self.concurrency.tunnel.clamp(1, 32).min(gate.per_jump);
         self.timeout_ms = self.timeout_ms.clamp(1_000, 600_000);
         self.tunnel_timeout_ms = self.tunnel_timeout_ms.clamp(1_000, 600_000);
         self.budget_per_cluster_per_min = self.budget_per_cluster_per_min.min(10_000);

@@ -141,6 +141,9 @@ async fn run() {
     // After the prime and the first Zabbix sync, so the poller starts knowing the clusters
     // it is to poll and does not prune a restored cache it has not been told about yet.
     core.start_fleet_poller();
+    // Stuck records closed, the read cache aged, our orphaned searches on the clusters
+    // cancelled (ES_TASK_REAPER). See bridge.rs, "the reapers".
+    core.start_request_reaper();
     let app = Router::new()
         .route("/bridge", post(bridge))
         // Fleet cache changes, pushed. Opened with a ticket from EVENTS_TICKET; see events().

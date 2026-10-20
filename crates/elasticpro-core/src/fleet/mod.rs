@@ -240,7 +240,9 @@ impl Core {
         }
     }
 
-    async fn fleet_get(self: &Arc<Self>, cluster: &str, q: &Query) -> Value {
+    /// One request of a dataset. `class` is the gate's: `Prompted` when somebody is
+    /// waiting on this dataset, `Background` for the poller's due work.
+    async fn fleet_get(self: &Arc<Self>, cluster: &str, q: &Query, class: crate::gate::Class) -> Value {
         let req = EsRequest {
             cluster_id: cluster.to_string(),
             url: None,
@@ -257,8 +259,8 @@ impl Core {
             auth_header: None,
             allow_writes: false,
             origin: Some(format!("poller:{}", q.key)),
-            opaque_id: None,
-            user: None,
+            class,
+            ..Default::default()
         };
         answer(self.es_req(req).await)
     }
@@ -278,7 +280,7 @@ impl Core {
 
     /// One dataset, request by request. Sequential on purpose: two jobs per cluster at
     /// most, each asking one thing at a time, is the load this was built to keep to.
-    async fn fleet_fetch(self: &Arc<Self>, cluster: &str, ds: Dataset, log_pattern: Option<&str>) -> Outcome {
+    async fn fleet_fetch(self: &Arc<Self>, cluster: &str, ds: Dataset, log_pattern: Option<&str>, class: crate::gate::Class) -> Outcome {
         let mut map = Map::new();
         match ds {
             Dataset::Snapshots | Dataset::SnapshotsFull => {
@@ -286,7 +288,7 @@ impl Core {
                     Some(r) => r,
                     None => {
                         let q = Query { key: "repos".into(), path: catalogue::REPOS_PATH.into(), timeout_ms: 15_000 };
-                        let a = self.fleet_get(cluster, &q).await;
+                        let a = self.fleet_get(cluster, &q, class).await;
                         if !reached(&a) {
                             return Outcome::Failed(error_of("repos", &a));
                         }
@@ -304,14 +306,14 @@ impl Core {
                 let mut by = Map::new();
                 for r in repos {
                     let Some(q) = ds.repo_query(&r) else { continue };
-                    let mut a = self.fleet_get(cluster, &q).await;
+                    let mut a = self.fleet_get(cluster, &q, class).await;
                     let mut source = if ds == Dataset::Snapshots { "cat" } else { "verbose" };
                     // The verbose listing fails on some repositories (a missing blob, an
                     // old ES); _cat still counts them, without the index names — which
                     // the page then says it cannot know, rather than showing none.
                     if ds == Dataset::SnapshotsFull && a.get("ok") != Some(&json!(true)) {
                         let cat = Query { key: r.clone(), path: catalogue::snapshots_cat_path(&r), timeout_ms: 30_000 };
-                        let b = self.fleet_get(cluster, &cat).await;
+                        let b = self.fleet_get(cluster, &cat, class).await;
                         if reached(&b) {
                             a = b;
                             source = "cat";
@@ -329,7 +331,7 @@ impl Core {
                 // Reachable when either answers — the same rule the page used.
                 let mut first_err = None;
                 for q in ds.queries(log_pattern) {
-                    let a = self.fleet_get(cluster, &q).await;
+                    let a = self.fleet_get(cluster, &q, class).await;
                     if !reached(&a) && first_err.is_none() {
                         first_err = Some(error_of(&q.key, &a));
                     }
@@ -341,7 +343,7 @@ impl Core {
             }
             _ => {
                 for q in ds.queries(log_pattern) {
-                    let a = self.fleet_get(cluster, &q).await;
+                    let a = self.fleet_get(cluster, &q, class).await;
                     if !reached(&a) {
                         return Outcome::Failed(error_of(&q.key, &a));
                     }
@@ -354,7 +356,9 @@ impl Core {
 
     async fn fleet_job(self: Arc<Self>, c: Candidate, log_pattern: Option<String>) {
         let t0 = std::time::Instant::now();
-        let outcome = self.fleet_fetch(&c.cluster, c.dataset, log_pattern.as_deref()).await;
+        // Somebody waiting on it (a person's ask, PRIO_USER) is prompted; due work is background.
+        let class = if c.prio == scheduler::PRIO_USER { crate::gate::Class::Prompted } else { crate::gate::Class::Background };
+        let outcome = self.fleet_fetch(&c.cluster, c.dataset, log_pattern.as_deref(), class).await;
         let took = t0.elapsed().as_millis() as u64;
         self.fleet_finish((c.cluster, c.dataset), outcome, took);
     }
@@ -642,6 +646,8 @@ impl Core {
             "stored": self.fleet.policy_path.as_ref().is_some_and(|p| p.exists()),
             "warning": self.fleet.policy_warning,
             "running": self.fleet_enabled(),
+            // The gate's limits, which the poller's share above can never exceed.
+            "gate": self.request_config().limits,
         });
         match saved {
             Some(Ok(())) => { out["saved"] = json!(true); }

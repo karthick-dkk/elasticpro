@@ -77,7 +77,45 @@ pub struct EsRequest {
     /// one person leaving a page cannot cancel another's requests from the same page.
     #[serde(skip)]
     pub user: Option<String>,
+    /// How old an answer from the read cache may be, in milliseconds. `0` asks the cluster
+    /// whatever is cached (the Reload button); absent takes ES_READ_CACHE_SECONDS. It can
+    /// only shorten that, never lengthen it.
+    #[serde(default)]
+    pub max_age_ms: Option<u64>,
+    /// Who this request is for, decided by the code path that built it — `es()` for a
+    /// person, the poller and the core's own jobs for themselves. Never read from the wire:
+    /// `origin` is the client's to name, and a page calling itself `poller:x` stays a page.
+    #[serde(skip)]
+    pub class: crate::gate::Class,
+    /// Set only by the ES task reaper, for a `POST /_tasks/<id>/_cancel` on a task it has
+    /// just verified as ours and read-only. See `guard::Writes::VerifiedTaskCancel`. Never
+    /// read from the wire, and even when set it permits that one path shape and nothing else.
+    #[doc(hidden)]
+    #[serde(skip)]
+    pub verified_cancel: bool,
 }
+
+impl Default for EsRequest {
+    fn default() -> EsRequest {
+        EsRequest {
+            cluster_id: String::new(),
+            url: None,
+            method: default_method(),
+            path: default_path(),
+            body: None,
+            timeout_ms: None,
+            auth_header: None,
+            allow_writes: false,
+            origin: None,
+            opaque_id: None,
+            user: None,
+            max_age_ms: None,
+            class: crate::gate::Class::default(),
+            verified_cancel: false,
+        }
+    }
+}
+
 fn default_method() -> String {
     "GET".into()
 }
@@ -99,6 +137,138 @@ pub struct Transport {
 pub struct Route<'a> {
     pub tunnel: Option<(&'a Arc<Tunnel>, u16)>,
     pub tls: TlsMode,
+}
+
+/// Response bytes being read from clusters at once, all requests together, counted in KiB.
+///
+/// A body is charged before it is read when its length is declared, and chunk by chunk
+/// when it is not, and the charge is given back when the request is done. One answer
+/// larger than the whole budget is refused rather than waited for: it could never fit.
+pub struct ByteBudget {
+    sem: Arc<tokio::sync::Semaphore>,
+    total_kib: u32,
+}
+
+const KIB: u64 = 1024;
+
+impl ByteBudget {
+    pub fn new(bytes: u64) -> ByteBudget {
+        let total_kib = (bytes / KIB).clamp(1024, u32::MAX as u64 / 2) as u32;
+        ByteBudget { sem: Arc::new(tokio::sync::Semaphore::new(total_kib as usize)), total_kib }
+    }
+    pub fn total_bytes(&self) -> u64 {
+        self.total_kib as u64 * KIB
+    }
+    pub fn in_use_bytes(&self) -> u64 {
+        (self.total_kib as u64).saturating_sub(self.sem.available_permits() as u64) * KIB
+    }
+}
+
+/// How much of an answer a request may bring back, and where the bytes are charged.
+pub struct BodyLimit<'a> {
+    pub cap_bytes: u64,
+    /// The config.txt key that sets `cap_bytes`, for the refusal's hint.
+    pub setting: &'static str,
+    pub budget: Option<&'a ByteBudget>,
+}
+
+impl BodyLimit<'_> {
+    /// No cap and no budget: for callers that read small, known answers.
+    pub fn unlimited() -> BodyLimit<'static> {
+        BodyLimit { cap_bytes: u64::MAX, setting: "", budget: None }
+    }
+}
+
+/// Why a body was not read to the end.
+enum BodyStop {
+    /// Bigger than the cap (`declared` when Content-Length said so up front).
+    TooLarge { declared: Option<u64> },
+    /// Bigger than the whole in-flight budget.
+    OverBudget,
+    /// The deadline passed while waiting for budget.
+    BudgetWait,
+    Transport(reqwest::Error),
+}
+
+fn mb(b: u64) -> String {
+    format!("{:.0} MB", b as f64 / (1024.0 * 1024.0))
+}
+
+/// The two refusals that need no socket: a path the URL parser would rewrite, and a write
+/// the guard does not allow. Checked here and again by `request`, which is the chokepoint;
+/// the core asks first so a refused request never waits for a slot.
+pub fn refuse_early(req: &EsRequest, base_url: &str, writes: Writes) -> Option<Value> {
+    let method = req.method.to_ascii_uppercase();
+    let path = if req.path.starts_with('/') { req.path.clone() } else { format!("/{}", req.path) };
+    let full = format!("{}{path}", base_url.trim_end_matches('/'));
+    // Whitespace and control characters are dropped or rewritten by the URL parser, so the
+    // path that was checked would not be the path that was sent. No real request needs
+    // them raw; the UI percent-encodes what it sends.
+    if path.chars().any(|c| c.is_ascii_control() || c.is_whitespace()) {
+        return Some(json!({ "ok": false, "status": 0, "kind": "bad_request", "url": full, "tookMs": 0,
+                            "message": "the path holds a space or a control character — percent-encode it" }));
+    }
+    write_guard(writes, &method, &path).map(|msg| json!({ "ok": false, "status": 0, "kind": "blocked_readonly", "message": msg, "url": full, "tookMs": 0 }))
+}
+
+/// Read a body in chunks, stopping at the cap, charging the byte budget as it goes.
+async fn read_body(res: &mut reqwest::Response, limit: &BodyLimit<'_>, deadline: Instant, head: bool) -> Result<Vec<u8>, BodyStop> {
+    // A HEAD answer's Content-Length is the size its GET would have; no body follows.
+    let declared = if head { None } else { res.content_length() };
+    if let Some(n) = declared {
+        if n > limit.cap_bytes {
+            return Err(BodyStop::TooLarge { declared: Some(n) });
+        }
+    }
+    let mut held: Option<tokio::sync::OwnedSemaphorePermit> = None;
+    let mut held_kib: u32 = 0;
+    // Charge `want` bytes in all, waiting for budget no later than the deadline.
+    async fn charge(b: &ByteBudget, held: &mut Option<tokio::sync::OwnedSemaphorePermit>, held_kib: &mut u32, want: u64, deadline: Instant) -> Result<(), BodyStop> {
+        let want_kib = want.div_ceil(KIB).max(1);
+        if want_kib > b.total_kib as u64 {
+            return Err(BodyStop::OverBudget);
+        }
+        let more = want_kib as u32 - (*held_kib).min(want_kib as u32);
+        if more == 0 {
+            return Ok(());
+        }
+        let p = tokio::time::timeout_at(deadline.into(), b.sem.clone().acquire_many_owned(more)).await
+            .map_err(|_| BodyStop::BudgetWait)?
+            .map_err(|_| BodyStop::BudgetWait)?;
+        match held {
+            Some(h) => h.merge(p),
+            None => *held = Some(p),
+        }
+        *held_kib += more;
+        Ok(())
+    }
+    if let Some(b) = limit.budget {
+        charge(b, &mut held, &mut held_kib, declared.unwrap_or(64 * KIB), deadline).await?;
+    }
+    let mut buf: Vec<u8> = Vec::with_capacity(declared.unwrap_or(16 * KIB).min(8 * 1024 * KIB) as usize);
+    loop {
+        let chunk = match tokio::time::timeout_at(deadline.into(), res.chunk()).await {
+            Ok(Ok(Some(c))) => c,
+            Ok(Ok(None)) => break,
+            Ok(Err(e)) => return Err(BodyStop::Transport(e)),
+            // reqwest's own timeout covers the body; this is its backstop.
+            Err(_) => return Err(BodyStop::BudgetWait),
+        };
+        let total = buf.len() as u64 + chunk.len() as u64;
+        if total > limit.cap_bytes {
+            return Err(BodyStop::TooLarge { declared: None });
+        }
+        if let Some(b) = limit.budget {
+            if total > held_kib as u64 * KIB {
+                // Grow by doubling, so a long body is charged in a handful of steps.
+                let want = total.max(held_kib as u64 * KIB * 2).min(limit.cap_bytes).max(total);
+                charge(b, &mut held, &mut held_kib, want, deadline).await?;
+            }
+        }
+        buf.extend_from_slice(&chunk);
+    }
+    drop(held);
+    Ok(buf)
 }
 
 pub fn host_key(url: &str) -> String {
@@ -146,6 +316,7 @@ impl Transport {
         Ok(cc)
     }
 
+    /// Send one request and read its answer, within `limit`.
     pub async fn request(
         &self,
         req: &EsRequest,
@@ -153,21 +324,15 @@ impl Transport {
         auth: Option<&str>,
         writes: Writes,
         route: Route<'_>,
+        limit: &BodyLimit<'_>,
     ) -> Value {
         let method = req.method.to_ascii_uppercase();
         let path = if req.path.starts_with('/') { req.path.clone() } else { format!("/{}", req.path) };
         let base = base_url.trim_end_matches('/');
         let full = format!("{base}{path}");
 
-        // Whitespace and control characters are dropped or rewritten by the URL parser, so the
-        // path that was checked would not be the path that was sent. No real request needs
-        // them raw; the UI percent-encodes what it sends.
-        if path.chars().any(|c| c.is_ascii_control() || c.is_whitespace()) {
-            return json!({ "ok": false, "status": 0, "kind": "bad_request", "url": full, "tookMs": 0,
-                           "message": "the path holds a space or a control character — percent-encode it" });
-        }
-        if let Some(msg) = write_guard(writes, &method, &path) {
-            return json!({ "ok": false, "status": 0, "kind": "blocked_readonly", "message": msg, "url": full, "tookMs": 0 });
+        if let Some(refused) = refuse_early(req, base_url, writes) {
+            return refused;
         }
         if let Some((t, _)) = route.tunnel {
             // fail fast with the tunnel's own words if it is known to be down and backing off
@@ -185,10 +350,11 @@ impl Transport {
             Ok(m) => m,
             Err(_) => return json!({ "ok": false, "status": 0, "kind": "bad_method", "message": format!("bad method {method}"), "url": full }),
         };
+        let timeout = Duration::from_millis(req.timeout_ms.unwrap_or(15000));
         let mut rb = cc
             .client
             .request(m.clone(), &full)
-            .timeout(Duration::from_millis(req.timeout_ms.unwrap_or(15000)))
+            .timeout(timeout)
             .header("Accept", "application/json");
         if let Some(id) = req.opaque_id.as_deref() {
             rb = rb.header("X-Opaque-Id", id);
@@ -201,22 +367,57 @@ impl Transport {
         }
         let started = Instant::now();
         match rb.send().await {
-            Ok(res) => {
+            Ok(mut res) => {
                 let status = res.status();
-                let text = res.text().await.unwrap_or_default();
+                let body = read_body(&mut res, limit, started + timeout + Duration::from_secs(1), m == reqwest::Method::HEAD).await;
+                drop(res);
                 let took = started.elapsed().as_millis() as u64;
-                let parsed: Option<Value> = serde_json::from_str(&text).ok();
+                let body = match body {
+                    Ok(b) => b,
+                    Err(BodyStop::Transport(e)) => {
+                        let mut out = classify(&e, &full, &cc, route.tunnel.map(|(t, _)| t));
+                        out["tookMs"] = json!(took);
+                        return out;
+                    }
+                    Err(BodyStop::BudgetWait) => {
+                        return json!({ "ok": false, "status": 0, "kind": "timeout", "url": full, "tookMs": took,
+                            "message": "Request timed out while waiting for memory to read the answer into",
+                            "help": "Many large answers were being read at once. Try again; if it keeps happening, narrow the request." });
+                    }
+                    Err(BodyStop::OverBudget) => {
+                        return json!({ "ok": false, "status": 0, "httpStatus": status.as_u16(), "kind": "response_too_large", "url": full, "tookMs": took,
+                            "limitBytes": limit.budget.map(|b| b.total_bytes()),
+                            "message": format!("the answer is larger than the {} ElasticPro may hold in answers at once; nothing of it is shown",
+                                               mb(limit.budget.map(|b| b.total_bytes()).unwrap_or(0))),
+                            "help": "Narrow the request (filter_path, a smaller size, fewer indices). The budget is a share of the core's memory limit (CORE_MEM_LIMIT)." });
+                    }
+                    Err(BodyStop::TooLarge { declared }) => {
+                        let mut out = json!({ "ok": false, "status": 0, "httpStatus": status.as_u16(), "kind": "response_too_large", "url": full, "tookMs": took,
+                            "limitBytes": limit.cap_bytes,
+                            "message": format!("the answer is larger than {}{}; it was not read, and nothing of it is shown", mb(limit.cap_bytes),
+                                               declared.map(|d| format!(" (the cluster announced {})", mb(d))).unwrap_or_default()),
+                            "help": format!("Narrow the request (filter_path, a smaller size, fewer indices){}.",
+                                            if limit.setting.is_empty() { String::new() } else { format!(", or raise {} in config.txt", limit.setting) }) });
+                        if let Some(d) = declared {
+                            out["declaredBytes"] = json!(d);
+                        }
+                        return out;
+                    }
+                };
                 let ok = status.is_success();
                 let mut out = json!({
                     "ok": ok, "status": status.as_u16(), "statusText": status.canonical_reason().unwrap_or(""),
                     "tookMs": took, "url": full, "kind": if ok { "ok" } else { "http_error" },
                     "message": if ok { String::new() } else { format!("HTTP {} {}", status.as_u16(), status.canonical_reason().unwrap_or("")) },
+                    "bytes": body.len(),
                 });
-                match parsed {
-                    Some(j) => out["json"] = j,
-                    None => {
+                // Parsed straight from the bytes: no second copy of the body as text unless
+                // it is not JSON.
+                match serde_json::from_slice::<Value>(&body) {
+                    Ok(j) => out["json"] = j,
+                    Err(_) => {
                         out["json"] = Value::Null;
-                        out["text"] = Value::String(text);
+                        out["text"] = Value::String(String::from_utf8_lossy(&body).into_owned());
                     }
                 }
                 out
