@@ -3208,6 +3208,17 @@ if (viaFleet) {
     ok(chip && chip.textContent.includes(main.name), `evidence ${id}: the top bar does not name this cluster with its health: "${chip && chip.textContent}"`);
     ok([...doc.querySelectorAll('#topbar button')].some((b) => /Refresh/.test(b.textContent)), `evidence ${id}: no Refresh in the top bar`);
     noFleetChrome(id);
+    if (id === 'snapshots') {
+      // Where the backups are kept (a bucket, an NFS path) is not evidence and must not be in
+      // it (user decision, 0.3.23): no Location column and no repository path, in either view.
+      // The mock's "daily" repository is an fs repository at /mnt/backups.
+      for (const label of ['Snapshot Summary', 'Snapshots']) {
+        const b = [...doc.querySelectorAll('#view .seg button')].find((x) => x.textContent.trim() === label);
+        if (b) { b.click(); await settleFor(300); }
+        ok(![...doc.querySelectorAll('#view th')].some((th) => /^Location/.test(th.textContent.trim())), `evidence snapshots (${label}): a Location column is shown`);
+        ok(!text().includes('/mnt/backups'), `evidence snapshots (${label}): the repository path /mnt/backups is on the page`);
+      }
+    }
     if (id === 'console') {
       const t = text();
       ok(!t.includes('evd-foreign-path'), 'evidence console: the history lists a request recorded on another cluster');

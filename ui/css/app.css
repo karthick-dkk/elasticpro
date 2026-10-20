@@ -556,11 +556,11 @@ table.rq-tbl tr.inflight td { background: var(--accent-soft); }
   border-bottom: 1px solid var(--border); box-shadow: 0 2px 6px rgba(0,0,0,.18);
 }
 .cl-head-row { display: flex; will-change: transform; }
-.cl-hcell, .cl-summary table.cl-tbl thead th {
+.cl-hcell, .cl-summary table.cl-tbl > thead > tr > th {
   font-weight: 600; font-size: 11px; letter-spacing: .03em; text-transform: uppercase;
   padding: 8px 10px; white-space: nowrap; text-align: left; font-family: inherit;
 }
-.dense .cl-hcell, .dense .cl-summary table.cl-tbl thead th { padding-left: 8px; padding-right: 8px; }
+.dense .cl-hcell, .dense .cl-summary table.cl-tbl > thead > tr > th { padding-left: 8px; padding-right: 8px; }
 .cl-hcell {
   flex: none; display: block; min-width: 0; overflow: hidden; text-overflow: ellipsis;
   border: 0; background: transparent; color: var(--text-secondary); cursor: pointer; line-height: 1.5;
@@ -573,13 +573,33 @@ table.rq-tbl tr.inflight td { background: var(--accent-soft); }
 .cl-hcell-x:hover { background: transparent; }
 /* Every head says it sorts: a quiet ↕ until it is the one sorted by (▲ / ▼, in the text). */
 .cl-hcell[aria-sort="none"] .cl-th-in::after,
-.cl-summary table.cl-tbl thead th[aria-sort="none"] .cl-th-in::after { content: " \2195"; color: var(--text-muted); opacity: .7; }
-/* The real heads: laid out (their widths are the columns'), read by a screen reader, not seen. */
-.cl-summary table.cl-tbl thead th {
+.cl-summary table.cl-tbl > thead > tr > th[aria-sort="none"] .cl-th-in::after { content: " \2195"; color: var(--text-muted); opacity: .7; }
+/* The real heads: laid out (their widths are the columns'), read by a screen reader, not seen.
+   Child selectors throughout: the details row holds a table of its own (the repositories),
+   whose heads and cells must not be folded away or kept on one line with these. */
+.cl-summary table.cl-tbl > thead > tr > th {
   position: static; height: 0; padding-top: 0; padding-bottom: 0; border: 0; line-height: 0;
 }
-.cl-summary table.cl-tbl thead th .cl-th-in { display: block; height: 0; overflow: hidden; }
-.cl-tbl td { white-space: nowrap; }
+.cl-summary table.cl-tbl > thead > tr > th .cl-th-in { display: block; height: 0; overflow: hidden; }
+table.cl-tbl > tbody > tr > td { white-space: nowrap; }
+/* A cluster's details. The block is exactly as wide as the table and adds nothing to its
+   width (width 0, min-width 100%), so the columns the rows set decide it; what is inside
+   wraps or stacks. It used to be laid out at its own longest line: at 1280 px the JDK text
+   ran into SLM and the repositories table pushed the whole table sideways. */
+table.cl-tbl > tbody > tr.cl-detail-row > td { white-space: normal; }
+table.cl-tbl > tbody > tr.cl-detail-row:hover > td { background: var(--surface-2); }
+/* …and, when the table is wider than the window (1024 px) and scrolls, no wider than the part
+   in view, pinned to its left edge: the columns scroll, the details stay put. --cl-view-w is
+   the scroll box's width (overview.js syncHeads); 20px is the cell's own padding. */
+.cl-detail {
+  width: 0; min-width: min(100%, calc(var(--cl-view-w, 100vw) - 20px)); box-sizing: border-box;
+  position: sticky; left: 10px; display: grid; gap: 12px; padding: 4px 0;
+}
+.cl-detail-kv { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(240px, 100%), 1fr)); gap: 10px 16px; }
+.cl-detail-kv > div { min-width: 0; }
+.cl-detail-kv .v { overflow-wrap: anywhere; }
+.cl-detail .card { min-width: 0; }
+.cl-detail-loc { overflow-wrap: anywhere; min-width: 120px; }
 .cl-end { padding: 10px 14px; border-top: 1px solid var(--grid); color: var(--text-muted); text-align: center; font-size: 12px; }
 
 /* A cluster's name opens its menu: reads as a name, behaves as a button. */

@@ -670,7 +670,11 @@ function syncHeads(shell) {
   const row = strip.firstChild;
   row.style.width = `${tw}px`;
   [...row.children].forEach((cell, i) => { if (ws[i] !== undefined) cell.style.width = `${ws[i]}px`; });
-  followScroll(strip, shell.querySelector('.cl-scroll'));
+  const scroller = shell.querySelector('.cl-scroll');
+  // How much of the table is in view: an open details row is held to it (app.css .cl-detail),
+  // so a table wider than the window scrolls its columns and never the details.
+  if (scroller && scroller.clientWidth) shell.style.setProperty('--cl-view-w', `${scroller.clientWidth}px`);
+  followScroll(strip, scroller);
 }
 
 let headsRO = null;
@@ -853,7 +857,9 @@ function columnsPanel(ctx) {
 
 function detail(c, d) {
   const repos = d.repos || [];
-  const box = h('div', { style: { display: 'grid', gap: '12px', padding: '4px 0' } });
+  // .cl-detail is exactly as wide as the table and never makes it wider (app.css): the
+  // details wrap inside the columns the rows already set, at any window width.
+  const box = h('div.cl-detail');
 
   // JDK, SLM and our own request rate are summary columns too, but JDK and the request
   // count start hidden (Columns turns them on) and anyone may hide SLM — this is where
@@ -861,7 +867,7 @@ function detail(c, d) {
   // the column uses, so the two cannot disagree about what "mixed" or "12/min" means.
   const jdk = jvmSummary(d.nodes);
   const req = requestsFor(c.id);
-  box.append(h('div.grid.c3',
+  box.append(h('div.cl-detail-kv',
     kv('Cluster UUID', (d.info && d.info.cluster_uuid) || '–'),
     kv('Lucene', (d.info && d.info.version && d.info.version.lucene_version) || '–'),
     kv('Credential', c.credSource === 'shared' ? `shared (${c.username || 'api key'})` : c.credSource === 'cluster' ? `per-cluster (${c.username})` : 'none'),
@@ -878,9 +884,8 @@ function detail(c, d) {
       const newest = snaps[0], oldest = snaps[snaps.length - 1];
       const failed = snaps.filter((s) => String(s.status).toUpperCase() !== 'SUCCESS').length;
       return h('tr',
-        h('td.mono', rp.name),
-        h('td', h('span.pill.grey', rp.type)),
-        h('td.mono.trunc', { title: rp.location }, rp.location || '–'),
+        h('td', h('div.mono', rp.name), h('span.pill.grey', rp.type)),
+        h('td.mono.cl-detail-loc', { title: rp.location }, rp.location || '–'),
         h('td.mono', { style: { fontSize: '11px' } },
           [rp.settings.compress !== undefined ? `compress=${rp.settings.compress}` : null,
            rp.settings.chunk_size ? `chunk=${rp.settings.chunk_size}` : null,
@@ -892,11 +897,12 @@ function detail(c, d) {
         h('td', oldest ? h('span', { title: dt(oldest.start) }, dt(oldest.start).slice(0, 12)) : h('span.muted', '–')),
         h('td', newest ? h('span', { title: dt(newest.start) }, `${dt(newest.start).slice(0, 12)} (${ago(newest.start)})`) : h('span.muted', '–')),
         h('td.num', failed ? h('span.pill.yellow', h('i.dot'), String(failed)) : h('span.muted', '0')),
-        h('td', h('button.btn.sm', { onclick: (e) => measureRepo(c, rp, snaps, e.target) }, 'Measure size')),
-        h('td.mono', { id: `repo-size-${c.id}-${rp.name}`.replace(/[^a-z0-9-]/gi, '_') }, ''));
+        // The button and what it measured share a cell: one column fewer, so the table fits.
+        h('td', h('button.btn.sm', { onclick: (e) => measureRepo(c, rp, snaps, e.target) }, 'Measure size'),
+          h('div.mono', { id: `repo-size-${c.id}-${rp.name}`.replace(/[^a-z0-9-]/gi, '_') }, '')));
     });
     box.append(card('Snapshot repositories', 'size measurement is an on-demand, expensive call',
-      table(['Repository', 'Type', 'Location / bucket', 'Settings', 'Snapshots', 'Oldest', 'Newest', 'Non-success', '', 'Measured size'], trs)));
+      table(['Repository', 'Location / bucket', 'Settings', 'Snapshots', 'Oldest', 'Newest', 'Non-success', 'Size'], trs)));
   } else {
     box.append(card('Snapshot repositories', '', empty('No repositories registered on this cluster')));
   }
@@ -912,7 +918,7 @@ function detail(c, d) {
 
 function kv(k, v) {
   return h('div', h('div.k', { style: { fontSize: '10.5px', textTransform: 'uppercase', letterSpacing: '.05em', color: 'var(--text-muted)' } }, k),
-    h('div.mono', { style: { fontSize: '12px', wordBreak: 'break-all' } }, String(v)));
+    h('div.mono.v', { style: { fontSize: '12px' } }, String(v)));
 }
 
 /**
