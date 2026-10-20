@@ -2232,6 +2232,22 @@ restoreConsole();
     await fire(); await fire();
     ok(countOf('POLICY_GET') === asked, `policy: fleet events re-asked POLICY_GET (${countOf('POLICY_GET') - asked} more)`);
 
+    // The poller's concurrency inputs sit under the request gate's caps, which POLICY_GET
+    // reports: they say so, and a value typed past one is brought back to it.
+    const gate = before && before.gate;
+    ok(gate && Number.isInteger(gate.perCluster), `policy: POLICY_GET reports no gate: ${JSON.stringify(gate)}`);
+    if (gate) {
+      const per = doc.getElementById('pol-per');
+      ok(per && Number(per.max) === Math.min(8, gate.perCluster), `policy: per-cluster input allows up to ${per && per.max}, the gate ${gate.perCluster}`);
+      ok(per && per.closest('label').textContent.includes(`request gate: ${gate.perCluster}`), 'policy: the per-cluster input does not show the gate\'s cap');
+      if (per) {
+        per.value = '8'; per.dispatchEvent(new window.Event('change', { bubbles: true }));
+        ok(per.value === String(Math.min(8, gate.perCluster)), `policy: typing 8 per cluster left ${per.value} under a gate of ${gate.perCluster}`);
+      }
+      const all = doc.getElementById('pol-global');
+      ok(all && Number(all.max) === Math.min(256, gate.global), `policy: overall input allows up to ${all && all.max}, the gate ${gate.global}`);
+    }
+
     const client = [...doc.querySelectorAll('button')].find((b) => b.textContent.startsWith('Client basis'));
     ok(!!client, 'policy: no "Client basis" preset button');
     if (client) {

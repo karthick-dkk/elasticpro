@@ -39,6 +39,32 @@ export const BOUNDS = {
 export const intervalBounds = (dataset) => (dataset === 'health' ? BOUNDS.healthInterval : BOUNDS.interval);
 
 /**
+ * The poller's concurrency fields and the request-gate cap each one sits under, with the
+ * config.txt key that sets the cap. The core clamps the poller's share under the gate's
+ * limits (Policy::normalised() reads gate::limits()); POLICY_GET reports them as `gate`.
+ */
+export const GATE_CAPS = {
+  global: { gate: 'global', setting: 'ES_CONCURRENCY' },
+  perCluster: { gate: 'perCluster', setting: 'ES_PER_CLUSTER' },
+  tunnel: { gate: 'perJump', setting: 'ES_PER_JUMP_HOST' },
+};
+
+/**
+ * BOUNDS as this core will keep them: each concurrency maximum lowered to the request
+ * gate's cap when the core reported one. The one definition of what the form may hold —
+ * the inputs, normalisePolicy and fromForm all read it. An older core that reports no gate
+ * leaves BOUNDS as they are; each entry says whether its maximum is the gate's (`gate`).
+ */
+export function boundsUnder(gate) {
+  const out = { ...BOUNDS };
+  for (const [field, { gate: key, setting }] of Object.entries(GATE_CAPS)) {
+    const cap = gate && Number.isInteger(gate[key]) && gate[key] >= 1 ? gate[key] : null;
+    if (cap !== null && cap < BOUNDS[field].max) out[field] = { ...BOUNDS[field], max: cap, gate: setting };
+  }
+  return out;
+}
+
+/**
  * Used only when the core has not said what it ships (an older core). The core's own
  * `defaults` always wins, because the health interval there can come from the environment.
  */
@@ -63,8 +89,11 @@ const clamp = (v, { min, max }) => Math.min(max, Math.max(min, v));
 const whole = (v) => (typeof v === 'number' && Number.isFinite(v) ? Math.round(v)
   : typeof v === 'string' && v.trim() !== '' && Number.isFinite(Number(v)) ? Math.round(Number(v)) : null);
 
-/** Within bounds, unknown datasets dropped, the paused list tidy — what the core would store. */
-export function normalisePolicy(p, defaults = FALLBACK_DEFAULTS) {
+/**
+ * Within bounds, unknown datasets dropped, the paused list tidy — what the core would store.
+ * `bounds` is boundsUnder(the core's gate) when it reported one.
+ */
+export function normalisePolicy(p, defaults = FALLBACK_DEFAULTS, bounds = BOUNDS) {
   const d = defaults || FALLBACK_DEFAULTS;
   const src = p || {};
   const pick = (v, fallback, b) => clamp(whole(v) ?? fallback, b);
@@ -84,9 +113,9 @@ export function normalisePolicy(p, defaults = FALLBACK_DEFAULTS) {
     intervalsSec,
     watchMinutes: pick(src.watchMinutes, d.watchMinutes ?? 15, BOUNDS.watchMinutes),
     concurrency: {
-      global: pick(c.global, dc.global ?? 16, BOUNDS.global),
-      perCluster: pick(c.perCluster, dc.perCluster ?? 2, BOUNDS.perCluster),
-      tunnel: pick(c.tunnel, dc.tunnel ?? 6, BOUNDS.tunnel),
+      global: pick(c.global, dc.global ?? 16, bounds.global),
+      perCluster: pick(c.perCluster, dc.perCluster ?? 2, bounds.perCluster),
+      tunnel: pick(c.tunnel, dc.tunnel ?? 6, bounds.tunnel),
     },
     timeoutMs: pick(src.timeoutMs, d.timeoutMs ?? 30000, BOUNDS.timeoutMs),
     paused: { all: !!(src.paused && src.paused.all), clusters },
@@ -97,23 +126,23 @@ export function normalisePolicy(p, defaults = FALLBACK_DEFAULTS) {
  * A preset changes how the poller behaves, never what is paused: pressing "Client basis"
  * must not quietly resume a cluster somebody stopped by hand.
  */
-export function applyPreset(policy, id, defaults = FALLBACK_DEFAULTS) {
-  const base = normalisePolicy(defaults, FALLBACK_DEFAULTS);
-  const paused = normalisePolicy(policy, defaults).paused;
+export function applyPreset(policy, id, defaults = FALLBACK_DEFAULTS, bounds = BOUNDS) {
+  const base = normalisePolicy(defaults, FALLBACK_DEFAULTS, bounds);
+  const paused = normalisePolicy(policy, defaults, bounds).paused;
   if (id === 'auto') return { ...base, mode: 'auto', paused };
   if (id === 'background') return { ...base, mode: 'background', paused };
   if (id === 'hybrid') return { ...base, mode: 'hybrid', paused };
   if (id === 'client') {
-    return { ...base, mode: 'on-demand', concurrency: { ...base.concurrency, perCluster: 1, global: 4 }, paused };
+    return normalisePolicy({ ...base, mode: 'on-demand', concurrency: { ...base.concurrency, perCluster: 1, global: 4 }, paused }, defaults, bounds);
   }
   throw new Error(`no preset "${id}"`);
 }
 
 /** Which preset this policy is exactly, or null for a hand-made one. */
-export function activePreset(policy, defaults = FALLBACK_DEFAULTS) {
-  const strip = (p) => JSON.stringify({ ...normalisePolicy(p, defaults), paused: null });
+export function activePreset(policy, defaults = FALLBACK_DEFAULTS, bounds = BOUNDS) {
+  const strip = (p) => JSON.stringify({ ...normalisePolicy(p, defaults, bounds), paused: null });
   const now = strip(policy);
-  const hit = PRESETS.find((x) => strip(applyPreset(policy, x.id, defaults)) === now);
+  const hit = PRESETS.find((x) => strip(applyPreset(policy, x.id, defaults, bounds)) === now);
   return hit ? hit.id : null;
 }
 
@@ -131,15 +160,19 @@ const FIELD_NAMES = {
  * timeoutMs, pausedAll, pausedClusters: []}. A field left empty or not a number takes the
  * shipped value; one out of bounds is clamped. Either way the person is told.
  */
-export function fromForm(values, defaults = FALLBACK_DEFAULTS) {
+export function fromForm(values, defaults = FALLBACK_DEFAULTS, bounds = BOUNDS) {
   const v = values || {};
-  const d = normalisePolicy(defaults, FALLBACK_DEFAULTS);
+  const d = normalisePolicy(defaults, FALLBACK_DEFAULTS, bounds);
   const problems = [];
   const read = (raw, name, b, fallback, unit) => {
     const n = whole(raw);
     if (n === null) {
       problems.push(`${name}: "${raw ?? ''}" is not a number — using the shipped ${fallback}${unit}`);
       return fallback;
+    }
+    if (n > b.max && b.gate) {
+      problems.push(`${name}: ${n}${unit} is more than this core's request gate allows (${b.max}, set by ${b.gate} in config.txt) — saved as ${b.max}${unit}`);
+      return b.max;
     }
     if (n < b.min || n > b.max) {
       const to = clamp(n, b);
@@ -158,13 +191,13 @@ export function fromForm(values, defaults = FALLBACK_DEFAULTS) {
     intervalsSec,
     watchMinutes: read(v.watchMinutes, FIELD_NAMES.watchMinutes, BOUNDS.watchMinutes, d.watchMinutes, ''),
     concurrency: {
-      global: read(v.global, FIELD_NAMES.global, BOUNDS.global, d.concurrency.global, ''),
-      perCluster: read(v.perCluster, FIELD_NAMES.perCluster, BOUNDS.perCluster, d.concurrency.perCluster, ''),
-      tunnel: read(v.tunnel, FIELD_NAMES.tunnel, BOUNDS.tunnel, d.concurrency.tunnel, ''),
+      global: read(v.global, FIELD_NAMES.global, bounds.global, d.concurrency.global, ''),
+      perCluster: read(v.perCluster, FIELD_NAMES.perCluster, bounds.perCluster, d.concurrency.perCluster, ''),
+      tunnel: read(v.tunnel, FIELD_NAMES.tunnel, bounds.tunnel, d.concurrency.tunnel, ''),
     },
     timeoutMs: read(v.timeoutMs, FIELD_NAMES.timeoutMs, BOUNDS.timeoutMs, d.timeoutMs, ' ms'),
     paused: { all: !!v.pausedAll, clusters: v.pausedClusters || [] },
-  }, defaults);
+  }, defaults, bounds);
   return { policy, problems };
 }
 

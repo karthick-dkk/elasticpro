@@ -100,3 +100,25 @@ test('describeMode has a sentence for each mode', () => {
 test('every dataset has a label', () => {
   assert.deepEqual(Object.keys(P.DATASET_LABELS).sort(), Object.keys(D.intervalsSec).sort());
 });
+
+test('the concurrency fields sit under the request gate the core reports', () => {
+  const gate = { global: 24, perCluster: 4, perJump: 8 };
+  const b = P.boundsUnder(gate);
+  assert.deepEqual([b.global.max, b.perCluster.max, b.tunnel.max], [24, 4, 8]);
+  assert.deepEqual([b.global.gate, b.perCluster.gate, b.tunnel.gate], ['ES_CONCURRENCY', 'ES_PER_CLUSTER', 'ES_PER_JUMP_HOST']);
+  assert.equal(b.timeoutMs, P.BOUNDS.timeoutMs, 'fields without a gate cap keep their bounds');
+  assert.deepEqual(P.boundsUnder(undefined), P.BOUNDS, 'an older core that reports no gate: the form keeps its own bounds');
+  assert.equal(P.boundsUnder({ perCluster: 16 }).perCluster.max, 8, 'a gate above the poller\'s own bound does not raise it');
+
+  // Typed 8 per cluster under a gate of 4: saved as 4, and the person is told why.
+  const f = P.fromForm({ mode: 'background', intervalsSec: { ...D.intervalsSec }, watchMinutes: '15',
+    global: '16', perCluster: '8', tunnel: '6', timeoutMs: '30000' }, D, b);
+  assert.equal(f.policy.concurrency.perCluster, 4);
+  assert.equal(f.problems.length, 1);
+  assert.match(f.problems[0], /per cluster: 8 is more than this core's request gate allows \(4, set by ES_PER_CLUSTER/);
+  // A shipped default above a lowered gate is clamped too, and a preset matches what the core keeps.
+  const low = P.boundsUnder({ global: 8, perCluster: 1, perJump: 2 });
+  const n = P.normalisePolicy(D, D, low);
+  assert.deepEqual(n.concurrency, { global: 8, perCluster: 1, tunnel: 2 });
+  assert.equal(P.activePreset(n, D, low), 'auto');
+});
