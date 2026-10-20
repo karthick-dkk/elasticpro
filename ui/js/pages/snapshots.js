@@ -22,6 +22,7 @@ import {
 import { pagerBar } from '../lib/pager.js';
 import { takeFocus, revealFocus } from '../core/focus.js';
 import { listingTitle, listingEmptyText } from '../core/snapshot-evidence.js';
+import { hideAddress, scrubFresh } from '../core/evidence.js';
 import { SNAPSHOT_PAGE_SIZES, snapshotPage, snapshotCsvRows, filterSnapshots, newestFirst } from '../core/snapshot-list.js';
 
 let host = null;
@@ -46,6 +47,18 @@ export function render(el) {
   loadFull();
 }
 export function onData() { if (host && host.isConnected) draw(); }
+
+/**
+ * What the evidence footer (core/evidence.js) says about the data on screen: the age of the
+ * listing of the repository being shown, from whichever dataset it came from.
+ */
+export function evidenceData(c) {
+  const d = state.data.get(c.id) || {};
+  const repos = d.repos || [];
+  const selected = ui.repo[c.id] || (repos[0] && repos[0].name);
+  return { label: 'Snapshot data read',
+    fresh: scrubFresh(selected ? listingFreshness(c, d, selected) : datasetFreshness(c.id, 'snapshots'), c) };
+}
 
 /**
  * The verbose listing, for the clusters on screen. The overview's own listing is the light
@@ -184,13 +197,12 @@ function clusterSection(c) {
   return h('section.lazy-block', { style: { marginBottom: '22px' } },
     h('div', { style: { display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '10px', flexWrap: 'wrap' } },
       h('h2', { style: { fontSize: '14px', margin: 0 } }, c.name),
-      h('span.mono.muted', { style: { fontSize: '11.5px' } }, c.url),
       d.slmStatus ? pill(`SLM ${d.slmStatus.operation_mode}`, d.slmStatus.operation_mode === 'RUNNING' ? 'green' : 'yellow') : null,
       d.ilm ? pill(`ILM ${d.ilm.operation_mode}`, d.ilm.operation_mode === 'RUNNING' ? 'green' : 'yellow') : null,
       h('div', { style: { marginLeft: 'auto', display: 'flex', gap: '10px', alignItems: 'center' } },
         writeToggle(draw),
         // The listing's own age and a Refresh that re-reads it now (the verbose one).
-        freshnessBar(selected ? listingFreshness(c, d, selected) : 0, () => fetchSnapshots(c.id), { label: 'snapshots', dense: true }))),
+        freshnessBar(selected ? scrubFresh(listingFreshness(c, d, selected), c) : 0, () => fetchSnapshots(c.id), { label: 'snapshots', dense: true }))),
     ui.view === 'summary'
       ? summaryView(c, d, repos, selected, snaps)
       : snapshotsView(c, repos, selected, snaps));
@@ -201,7 +213,7 @@ function unreadableReason(c) {
   const cl = client(c.id);
   if (!cl || !cl.state || cl.state === 'ok' || cl.state === 'unknown') return '';
   const le = cl.lastError || {};
-  return le.message || le.kind || cl.state;
+  return hideAddress(le.message, c) || le.kind || cl.state;
 }
 
 function repoSelect(c, repos, selected) {
@@ -336,9 +348,8 @@ function repoTable(c, d, repos) {
     const count = ((d.snapshots || {})[r.name] || []).length;
     return h('tr',
       h('td', h('div', { style: { fontWeight: 640 } }, r.name), r.error
-        ? h('div.muted', { style: { fontSize: '11px', color: 'var(--critical)' }, title: r.error }, 'unreadable') : null),
+        ? h('div.muted', { style: { fontSize: '11px', color: 'var(--critical)' }, title: hideAddress(r.error, c) }, 'unreadable') : null),
       h('td', pill(r.type || '?', 'grey')),
-      h('td.mono.trunc', { style: { fontSize: '11px', maxWidth: '320px' }, title: r.location || '' }, r.location || '–'),
       h('td.num', num(count)),
       h('td', h('div', { style: { display: 'flex', gap: '4px', justifyContent: 'flex-end' } },
         h('button.btn.sm', { title: 'Check that every node can reach this repository',
@@ -353,7 +364,7 @@ function repoTable(c, d, repos) {
             onClick: () => deleteRepository(c, r.name, { onChanged: () => reload(c) }) },
         ], { title: `Actions for ${r.name}` }))));
   });
-  return table(['Repository', 'Type', 'Location', 'Snapshots', ''], trs, {
+  return table(['Repository', 'Type', 'Snapshots', ''], trs, {
     emptyText: empty('This cluster has no snapshot repository, so nothing can be backed up.', {
       detail: h('span', 'A repository is registered on the cluster itself — ',
         h('code.inline', 'PUT _snapshot/<name>'), ' — and needs a path in ',

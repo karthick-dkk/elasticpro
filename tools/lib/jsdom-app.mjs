@@ -162,10 +162,10 @@ export async function bootApp({ JSDOM, uiRoot, bridgeUrl, fleet = true }) {
 export const settleFor = (ms) => new Promise((r) => setTimeout(r, ms));
 
 /** Load a config the way the app does, so the pages see real clusters. */
-export async function applyConfig({ load, configPath }) {
+export async function applyConfig({ load, configPath, raw: given = null }) {
   const cfgMod = await load('core/config.js');
   const state = await load('core/state.js');
-  const raw = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+  const raw = given || JSON.parse(fs.readFileSync(configPath, 'utf8'));
   const config = cfgMod.normalize(raw, path.basename(configPath));
   config.fileMeta = {
     name: path.basename(configPath), path: configPath, size: 1, lastModified: Date.now(),

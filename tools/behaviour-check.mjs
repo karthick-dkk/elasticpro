@@ -112,6 +112,25 @@ async function waitFor(find, what, ms = 5000) {
   return null;
 }
 
+// An evidence page (core/evidence.js) asks for one cluster when the fleet is selected, as a
+// person would be asked; this answers it with the first. backToFleet() undoes that choice
+// through the picker, the way a person would, so the sections after it still start on "All".
+async function goOne(id) {
+  await go(id);
+  const pick = doc.getElementById('evidence-pick');
+  if (pick) { pick.value = pick.options[1].value; pick.dispatchEvent(new window.Event('change', { bubbles: true })); await settleFor(450); }
+}
+async function backToFleet() {
+  // Through the picker, as a person would: first one cluster (which clears "All clusters was
+  // asked for", so Nodes & shards opens on one again), then the fleet view the sections after
+  // this expect.
+  await go('overview');
+  const s = doc.getElementById('cluster-select');
+  if (s) { s.value = s.options[1].value; s.dispatchEvent(new window.Event('change', { bubbles: true })); await settleFor(250); }
+  (await load('core/state.js')).state.selected = 'all';
+  await go('overview');
+}
+
 /* ------------- the status strip stays off the pages people work in ------------- */
 
 const STRIP_HIDDEN = ['indices', 'console', 'logs', 'snapshots', 'shards', 'volume'];
@@ -145,15 +164,16 @@ await go('console');
     ok(!!(target.compareDocumentPosition(run) & window.Node.DOCUMENT_POSITION_FOLLOWING),
       'console: the address is not above the Run button, where it is read before pressing it');
   }
+  // An evidence page: the line names the path the request will take, never the host.
   const base = config.clusters[0].url.replace(/\/+$/, '');
-  ok(target && target.textContent.startsWith(base),
-    `console: the address line reads "${target && target.textContent}", expected to start with ${base}`);
+  ok(target && target.textContent === '/_cluster/health',
+    `console: the target line reads "${target && target.textContent}", expected the path alone`);
+  ok(target && !target.textContent.includes(base), 'console: the target line still names the cluster address');
 
   const pathInput = doc.getElementById('c-path');
   ok(!!pathInput, 'console: no path input');
   if (pathInput && target) {
-    for (const [typed, want] of [['/_cat/indices', `${base}/_cat/indices`],
-                                 ['_cluster/health', `${base}/_cluster/health`]]) {
+    for (const [typed, want] of [['/_cat/indices', '/_cat/indices'], ['_cluster/health', '/_cluster/health']]) {
       pathInput.value = typed;
       pathInput.dispatchEvent(new window.Event('input', { bubbles: true }));
       await settleFor(50);
@@ -333,7 +353,7 @@ await go('indices');
   ok(/Volume analysis/.test(sum), 'indices: Summary does not show the volume analysis');
 }
 
-await go('snapshots');
+await goOne('snapshots');
 {
   // Two views, like Indices. "Snapshots" is what the page opens on: the search bar and the
   // list, and nothing else — the tiles, repositories, SLM and the strip are on the Summary.
@@ -362,7 +382,7 @@ await go('snapshots');
 
   // Remembered for the tab: away and back lands on the same view.
   await go('volume');
-  await go('snapshots');
+  await goOne('snapshots');
   ok(pressedIs('Snapshot Summary'), 'snapshots: the chosen view was not remembered across a page change');
   segBtn('Snapshots').click();
   await settleFor(150);
@@ -400,6 +420,7 @@ await go('snapshots');
 
 /* --------------------- the volume report and its two sheets --------------------- */
 
+await backToFleet();
 await go('volume');
 // Moved here from the Indices page — the assertion moves with them, so a future change
 // that drops them cannot pass by simply not rendering them anywhere.
@@ -1691,7 +1712,7 @@ if (config.clusters.length >= 2 && viaFleet) {
   }));
   setup([{ name: 'daily', type: 'fs', error: null }], { daily: many });
   st.state.config.clusters[0].indexNameRegex = st.LEGACY_INDEX_RE;
-  await go('snapshots');
+  await goOne('snapshots');
   const list = () => [...doc.querySelectorAll('section.card')].find((x) => (x.querySelector('header h2') || {}).textContent === 'Snapshots in daily');
   const rowIds = () => [...(list() ? list().querySelectorAll('tbody tr') : [])].map((tr) => tr.querySelector('td').textContent.trim());
   const pagerBtn = (label) => [...(list() ? list().querySelectorAll('.pager button') : [])].find((b) => b.textContent.trim() === label);
@@ -1750,6 +1771,7 @@ if (config.clusters.length >= 2 && viaFleet) {
       await settleFor(30);
     }
   } else ok(false, 'evidence: no opener on a snapshot row');
+  await backToFleet();
 }
 
 /* -------------------- tasks: one request, applied to many clusters -------------------- */
@@ -3086,6 +3108,185 @@ if (viaFleet) {
       Object.assign(d0, was);
     }
   }
+}
+
+/* ------- the evidence layout: Snapshots, REST console and Indices show one cluster and nothing else ------- */
+
+// One client is one cluster, and these three pages are screenshotted for that client. With 24
+// clusters, four of them down, nothing about the other 23 may be on screen: no fleet chips, no
+// alert count, no bell, no picker listing them, no toast naming one, no history from one. And
+// the page must say what it shows: the cluster, when its data was read, when it was captured.
+{
+  const st = await load('core/state.js');
+  const menu = await load('ui/menu.js');
+  const { idb } = await load('lib/idb.js');
+  const realAllQueries = idb.allQueries;
+  const reachableUrl = config.clusters[0].url;
+  const pad2 = (n) => String(n).padStart(2, '0');
+  const fleet24 = {
+    version: 2,
+    credentials: { username: 'elastic', password: 'not-a-real-password' },
+    defaults: { readOnly: true, autoRefresh: false, logIndexPattern: 'logstash-*' },
+    clusters: Array.from({ length: 24 }, (_, i) => ({
+      name: `evc-${pad2(i + 1)}-fleetname`,
+      url: i < 20 ? reachableUrl : 'http://127.0.0.1:9',      // nothing listens on 9: connection refused
+      tags: ['prod'],
+    })),
+  };
+  await applyConfig({ load, configPath, raw: fleet24 });
+  const all = st.clusters();
+  ok(all.length === 24, `evidence: expected 24 clusters in the fixture, saw ${all.length}`);
+  const down = all.filter((c) => st.healthState(st.state.data.get(c.id)) === 'unreachable');
+  ok(down.length >= 1, `evidence: the fixture has no unreachable cluster (${down.length}) - it would prove nothing about them`);
+  const byName = (n) => all.find((c) => c.name.startsWith(n));
+  const main = byName('evc-03');
+  const other = byName('evc-09');
+  const dead = down[0];
+
+  const text = () => doc.body.textContent;
+  const barText = () => (doc.getElementById('topbar') || { textContent: '' }).textContent;
+  const noOthers = (where, mine) => {
+    for (const c of all) if (c.id !== mine.id && text().includes(c.name)) problems.push(`evidence ${where}: the page names another cluster, ${c.name}`);
+  };
+  const noFleetChrome = (where) => {
+    const bar = doc.getElementById('topbar');
+    ok(!/\d+\s+(green|yellow|red|unreachable|loading)\b/.test(bar.textContent), `evidence ${where}: a fleet status chip is in the top bar: "${bar.textContent}"`);
+    ok(![...bar.querySelectorAll('button')].some((b) => /^\d+ alerts?$/.test(b.textContent.trim())), `evidence ${where}: the alerts chip is in the top bar`);
+    ok(!bar.querySelector('.bell'), `evidence ${where}: the bell is in the top bar`);
+    ok(!bar.querySelector('#cluster-select, #cluster-finder'), `evidence ${where}: a cluster picker or finder is in the top bar`);
+    ok(!/updated|live|quiet|manual/.test(bar.textContent.replace(/Refresh/g, '')), `evidence ${where}: a fleet freshness claim is in the top bar: "${bar.textContent}"`);
+    ok(!doc.querySelector('#nav button[data-page="alerts"] .pill'), `evidence ${where}: the Alerts tab carries a count`);
+    ok(doc.getElementById('side-foot').hidden === true, `evidence ${where}: the Config/Clusters/Health/Requests strip is showing`);
+    ok(!doc.querySelector('.banner.coverage'), `evidence ${where}: the "Showing cached data for N clusters" banner is showing`);
+    ok(!/Showing cached data for \d+ clusters|oldest .* unreachable/.test(text()), `evidence ${where}: fleet coverage wording is on the page`);
+  };
+  const footer = (where) => {
+    const f = doc.getElementById('evidence-foot');
+    ok(!!f && !f.hidden, `evidence ${where}: no footer stamp`);
+    return f ? f.textContent : '';
+  };
+  const DATE = /\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}/;
+
+  // Control: the same fleet on Clusters has all of it, so the checks below can fail.
+  st.state.selected = 'all';
+  await go('overview'); await settleFor(300);
+  {
+    const bar = doc.getElementById('topbar').textContent;
+    ok(/\d+\s+(green|yellow|red|unreachable)/.test(bar), `evidence control: Clusters has no fleet chip, so the absence checks prove nothing: "${bar}"`);
+    ok(!!doc.querySelector('#topbar .bell'), 'evidence control: Clusters has no bell');
+    ok(!!doc.getElementById('cluster-select'), 'evidence control: Clusters has no picker');
+    ok(doc.getElementById('side-foot').hidden === false, 'evidence control: Clusters has no status strip');
+  }
+
+  // Snapshots with "All clusters": asks for one, and shows no fleet while it asks.
+  await go('snapshots'); await settleFor(300);
+  {
+    const pick = doc.getElementById('evidence-pick');
+    ok(!!pick, 'evidence snapshots: with "All clusters" the page does not ask for one cluster');
+    ok(/Evidence needs one cluster/.test(text()), 'evidence snapshots: no explanation that evidence needs one cluster');
+    ok(!doc.querySelector('#view section.lazy-block, #view .seg'), 'evidence snapshots: a fleet of snapshot lists is drawn under the question');
+    noFleetChrome('snapshots (choosing)');
+    ok((doc.getElementById('evidence-foot') || { hidden: true }).hidden, 'evidence snapshots: a stamp is printed while no cluster is chosen');
+    if (pick) { pick.value = main.id; pick.dispatchEvent(new window.Event('change', { bubbles: true })); await settleFor(500); }
+  }
+
+  for (const [id, label] of [['snapshots', 'Snapshots'], ['console', 'REST console'], ['indices', 'Indices']]) {
+    if (id === 'console') {
+      // The harness's in-memory IndexedDB never completes a transaction, so the history is handed
+      // to the page the way the real store would. A request recorded against another cluster
+      // must not be listed, let alone offered to Run here.
+      idb.allQueries = async () => [
+        { id: 'evd-other', ts: Date.now() - 5000, cluster: other.name, clusterId: other.id, method: 'GET',
+          path: '/_cat/evd-foreign-path', body: '', status: 200, ok: true, tookMs: 3, fav: 0 },
+        { id: 'evd-mine', ts: Date.now() - 4000, cluster: main.name, clusterId: main.id, method: 'GET',
+          path: '/_cat/evd-own-path', body: '', status: 200, ok: true, tookMs: 3, fav: 0 }];
+    }
+    await go(id); await settleFor(id === 'snapshots' ? 900 : 500);
+    ok(st.state.selected === main.id, `evidence ${id}: selected ${st.state.selected}, expected the chosen cluster`);
+    ok(doc.querySelector('#topbar h1').textContent === label, `evidence ${id}: the top bar does not carry the page title`);
+    const chip = doc.querySelector('#topbar .pill');
+    ok(chip && chip.textContent.includes(main.name), `evidence ${id}: the top bar does not name this cluster with its health: "${chip && chip.textContent}"`);
+    ok([...doc.querySelectorAll('#topbar button')].some((b) => /Refresh/.test(b.textContent)), `evidence ${id}: no Refresh in the top bar`);
+    noFleetChrome(id);
+    if (id === 'console') {
+      const t = text();
+      ok(!t.includes('evd-foreign-path'), 'evidence console: the history lists a request recorded on another cluster');
+      ok(t.includes('evd-own-path'), 'evidence console: this cluster\'s own history is missing');
+      ok(![...doc.querySelectorAll('#c-history th')].some((th) => th.textContent === 'Cluster'), 'evidence console: the history still has a Cluster column');
+      ok(footer(id).includes('no request run yet'), `evidence console: before any request the stamp should say none was run: "${footer(id)}"`);
+      doc.getElementById('c-path').value = '/_cluster/health';
+      doc.getElementById('c-path').dispatchEvent(new window.Event('input', { bubbles: true }));
+      doc.getElementById('c-run').click();
+      await settleFor(2200);          // the stamp is redrawn on its own one-second clock
+    }
+    noOthers(id, main);
+    const f = footer(id);
+    ok(f.includes(`Cluster: ${main.name}`), `evidence ${id}: the stamp does not name the cluster: "${f}"`);
+    ok(!/https?:\/\//.test(f) && !f.includes(new URL(main.url).host), `evidence ${id}: the stamp prints the cluster address: "${f}"`);
+    // Nowhere on the page: no http(s) address at all (the console's response body, which the person
+    // asked for, is the one exception and is checked separately), and not the cluster's host:port.
+    {
+      const own = new URL(main.url).host;
+      const t = doc.getElementById('view').textContent + doc.getElementById('topbar').textContent + f;
+      const body = doc.getElementById('c-out');
+      const shown = body ? t.replace(body.textContent, '') : t;
+      ok(!/https?:\/\/\S/.test(shown), `evidence ${id}: the page prints an address: "${(shown.match(/https?:\/\/\S+/) || [''])[0]}"`);
+      ok(!shown.includes(own), `evidence ${id}: the page prints the cluster's host ${own}`);
+    }
+    ok(DATE.test(f), `evidence ${id}: the stamp has no data time: "${f}"`);
+    ok(/Captured \d{2}:\d{2}:\d{2}/.test(f), `evidence ${id}: the stamp has no capture time: "${f}"`);
+    ok(!/data time unknown|not read yet|no request run yet/.test(f), `evidence ${id}: the stamp has no real data time: "${f}"`);
+  }
+
+  // What the app says by itself, while an evidence page is open: held, not shown, not lost.
+  {
+    await go('overview'); await settleFor(200);
+    // A snapshot running on another cluster, seen once so that its finishing is news.
+    const setSnap = (status) => {
+      const d = st.state.data.get(other.id);
+      st.state.data.set(other.id, { ...d, snapshots: { 'evd-repo': [{ id: 'evd-snap', status }] } });
+    };
+    setSnap('IN_PROGRESS');
+    st.bus.emit('refreshed', { byPerson: false });
+    await settleFor(100);
+    await go('indices'); await settleFor(300);
+    const before = menu.notifications().length;
+    setSnap('SUCCESS');                                      // …and it finishes while an evidence page is open
+    st.bus.emit('data', { id: other.id });
+    st.bus.emit('refreshed', { byPerson: false });
+    await settleFor(400);
+    ok(!doc.querySelector('.toast-wrap') || !doc.querySelector('.toast-wrap').textContent.includes(other.name),
+      `evidence indices: an alert toast about another cluster is on screen: "${(doc.querySelector('.toast-wrap') || {}).textContent}"`);
+    ok(menu.notifications().length === before, 'evidence indices: the notice went to the bell while the page was open');
+    noOthers('indices after an alert elsewhere', main);
+    await go('overview'); await settleFor(300);
+    const held = [...doc.querySelectorAll('.toast-wrap .toast')].map((t) => t.textContent).join(' | ');
+    ok(/Held \d+ notices? while on an evidence page/.test(held), `evidence: leaving did not say what was held: "${held}"`);
+    ok(menu.notifications().some((n) => n.message.includes(other.name)), 'evidence: the held alert never reached the bell - it was dropped');
+    // …and everything fleet-wide is back at once (on the fleet view, which is the person's to pick).
+    { const sel = doc.getElementById('cluster-select'); ok(!!sel, 'evidence: the picker did not come back on Clusters');
+      if (sel) { sel.value = 'all'; sel.dispatchEvent(new window.Event('change', { bubbles: true })); await settleFor(400); } }
+    const bar = doc.getElementById('topbar').textContent;
+    ok(/\d+\s+(green|yellow|red|unreachable)/.test(bar), `evidence: the fleet chip did not come back on Clusters: "${bar}"`);
+    ok(!!doc.querySelector('#topbar .bell'), 'evidence: the bell did not come back on Clusters');
+    ok(!!doc.getElementById('cluster-select'), 'evidence: the picker did not come back on Clusters');
+    ok([...doc.querySelectorAll('#topbar button')].some((b) => /^\d+ alerts?$/.test(b.textContent.trim())), 'evidence: the alerts chip did not come back on Clusters');
+    ok(doc.getElementById('side-foot').hidden === false, 'evidence: the status strip did not come back on Clusters');
+    ok((doc.getElementById('evidence-foot') || { hidden: true }).hidden, 'evidence: the stamp is still printed on Clusters');
+    ok(!!doc.querySelector('#nav button[data-page="alerts"] .pill'), 'evidence: the Alerts tab count did not come back');
+  }
+
+  // A cluster that cannot be reached: the stamp says so rather than inventing a time.
+  {
+    st.state.selected = dead.id;
+    await go('indices'); await settleFor(500);
+    const f = footer('indices (unreachable cluster)');
+    ok(f.includes(`Cluster: ${dead.name}`), `evidence unreachable: the stamp does not name the cluster: "${f}"`);
+    ok(/not read|unreachable|failed|data time unknown/.test(f), `evidence unreachable: the stamp claims a clean read of a cluster that is down: "${f}"`);
+    noOthers('unreachable', dead);
+    await go('overview');
+  }
+  idb.allQueries = realAllQueries;
 }
 
 if (problems.length) {
