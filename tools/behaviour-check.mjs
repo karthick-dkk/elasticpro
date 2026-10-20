@@ -2279,6 +2279,75 @@ restoreConsole();
       'policy: a paused cluster has no "paused" pill');
   }
   ok(!!button('Pause all requests'), 'policy: the Request Centre has no "Pause all requests" button');
+
+  // Stop all traffic: the pause-everything control sits in its own card, not in the table's
+  // way, and it still pauses and still resumes — exactly one POLICY_SET each, asking for the
+  // thing it says.
+  const stopCard = () => doc.querySelector('.rq-stop');
+  ok(!!stopCard() && /Stop all traffic/.test(stopCard().textContent), 'stop: no "Stop all traffic" card on the Request Centre');
+  ok(stopCard() && /Holds every request to every cluster until you resume/.test(stopCard().textContent), 'stop: the card does not say what pausing does');
+  const pauseAll = stopCard() && button('Pause all requests', stopCard());
+  ok(!!pauseAll, 'stop: "Pause all requests" is not inside the Stop all traffic card');
+  ok(pauseAll && pauseAll.classList.contains('danger'), 'stop: the pause button is not styled as a warning (.btn.danger)');
+  ok(!doc.querySelector('.rq-tbl') || ![...doc.querySelectorAll('.rq-tbl button')].some((b) => /pause/i.test(b.textContent)), 'stop: a pause button is still among the requests table');
+  if (pauseAll) {
+    const wasAll = !!((lastOf('POLICY_SET') || {}).policy || before.policy || { paused: {} }).paused.all;
+    ok(!wasAll, 'stop: the policy is already paused before the test pressed anything');
+    const sets = countOf('POLICY_SET');
+    pauseAll.click(); await settleFor(800);
+    let m = lastOf('POLICY_SET');
+    ok(countOf('POLICY_SET') === sets + 1 && m && m.policy.paused.all === true, `stop: Pause all requests sent ${JSON.stringify(m && m.policy && m.policy.paused)}`);
+    const resume = stopCard() && button('Resume all', stopCard());
+    ok(!!resume, 'stop: after pausing, the card offers no "Resume all"');
+    ok(/^Paused:/.test((doc.querySelector('.rq-status h2') || {}).textContent || ''), `stop: the status line does not say paused: "${(doc.querySelector('.rq-status h2') || {}).textContent}"`);
+    if (resume) {
+      resume.click(); await settleFor(800);
+      m = lastOf('POLICY_SET');
+      ok(countOf('POLICY_SET') === sets + 2 && m && m.policy.paused.all === false, `stop: Resume all sent ${JSON.stringify(m && m.policy && m.policy.paused)}`);
+      ok(!!(stopCard() && button('Pause all requests', stopCard())), 'stop: after resuming, the card does not offer "Pause all requests" again');
+      ok(!/^Paused:/.test((doc.querySelector('.rq-status h2') || {}).textContent || ''), 'stop: the status line still says paused after resuming');
+    }
+  }
+
+  // Answer first: one status line from the gate, the sentence under it, and the limits as chips.
+  const head = (doc.querySelector('.rq-status h2') || {}).textContent || '';
+  ok(/^(Quiet|Working normally|Busy|Holding back|Not known)\b/.test(head), `status: the Request Centre opens with "${head}"`);
+  const under = (doc.querySelector('.rq-status p') || {}).textContent || '';
+  ok(/Mode: \S/.test(under), `status: the sentence under the status line does not name the mode: "${under}"`);
+  ok(!/\bGate: \d+ connections/.test(doc.querySelector('#view').textContent), 'status: the dense "Gate: N connections" sentence is still on the page');
+  const chips = [...doc.querySelectorAll('.rq-limits .rq-chip')].map((c) => c.textContent);
+  ok(chips.some((t) => /^\d+ at once$/.test(t)) && chips.some((t) => /per cluster$/.test(t)) && chips.some((t) => /^a person waits up to /.test(t)),
+    `status: the limits are not drawn as chips: ${JSON.stringify(chips)}`);
+  const tileKeys = [...doc.querySelectorAll('.rq-tiles .stat .k')].map((k) => k.textContent);
+  ok(JSON.stringify(tileKeys) === JSON.stringify(['In flight', 'Waiting', 'Wait (95th %)', 'Turned away', 'Not sent again', 'Rate']), `status: tiles are ${JSON.stringify(tileKeys)}`);
+
+  // A table people can scan: time of day with the date on hover, the path on one line with
+  // its whole self on hover, the class as a tag, the result as a dot and a code.
+  const first = doc.querySelector('.rq-tbl tbody tr:not(.inflight)');
+  ok(!!first, 'table: no finished row to read');
+  if (first) {
+    const cells = [...first.children];
+    ok(/^\d\d:\d\d:\d\d$/.test(cells[0].textContent) && cells[0].title.length > 8, `table: Time is "${cells[0].textContent}" (title "${cells[0].title}")`);
+    const pb = first.querySelector('button.rq-path');
+    ok(pb && pb.title.startsWith(pb.textContent), `table: the path is not a one-line cell with its full text on hover: ${pb && pb.title}`);
+    ok(first.querySelector('.rq-tag'), 'table: the class is not a tag');
+    ok(first.querySelector('.rq-result .rq-rdot'), 'table: the result has no dot');
+    ok(![...doc.querySelectorAll('.rq-tbl td.num, .rq-tbl th.num')].length, 'table: a right-aligned numeric column is left in the requests table');
+  }
+  const heads = [...doc.querySelectorAll('.rq-tbl thead th')].map((t) => t.textContent);
+  ok(JSON.stringify(heads) === JSON.stringify(['Time', 'Cluster', 'From', 'Class', 'Method', 'Path', 'Wait', 'Took', 'Result']), `table: columns are ${JSON.stringify(heads)}`);
+  const hk = doc.querySelector('details.rq-hk');
+  ok(!!hk && /Housekeeping/.test(hk.querySelector('summary').textContent) && !!hk.querySelector('[data-act="hk-dry"]'), 'housekeeping: not a one-line summary with the full card inside');
+
+  // The mode in the sentence links to Config > Requests.
+  const modeLink = doc.querySelector('.rq-status p a');
+  ok(!!modeLink, 'status: the mode is not a link');
+  if (modeLink) {
+    modeLink.dispatchEvent(new window.MouseEvent('click', { bubbles: true, cancelable: true })); await settleFor(900);
+    const cur = doc.querySelector('nav.subnav button[aria-current="page"]');
+    ok(cur && cur.title === 'Requests', `status: the mode link did not open Config > Requests (open tab: ${cur && cur.title})`);
+    await go('requests'); await settleFor(300);
+  }
   await go('overview');
   // The harness writes into the dev core's data directory; leave the policy as it was.
   if (before && before.ok) await es.policySet(before.policy);

@@ -12,18 +12,24 @@ import { h, mount } from '../lib/dom.js';
 import { num, dur, dt, toCsv, download } from '../lib/fmt.js';
 import { state, clusters, client, requestLoad, refreshRequestLoad } from '../core/state.js';
 import { requestLog, policyGet, policySet, housekeepingGet, housekeepingRun } from '../core/es.js';
-import { housekeepingView } from '../core/housekeeping.js';
+import { housekeepingView, housekeepingLine } from '../core/housekeeping.js';
+import { navigateTo } from '../core/intent.js';
 import { contractOf, taskRows, cancelPath, privilegeHint } from '../core/es-tasks.js';
 import { ensureWrites, writesAllowed } from '../core/writes.js';
 import { confirmDialog } from '../ui/modal.js';
 import { togglePaused, setPausedAll, isPaused } from '../core/policy.js';
 import { toast } from '../ui/menu.js';
 import { card, table, pill, statTile, empty } from './common.js';
-import { NO_FILTER, requestRows, originChoices, perCluster, requestCsvRows, CSV_HEADER, originLabel, gateFigures } from '../core/request-log.js';
+import { NO_FILTER, requestRows, originChoices, perCluster, requestCsvRows, CSV_HEADER, originLabel, gateFigures,
+  requestStatus, modeText, limitChips, clockTime, classTag, resultTone, LOG_LIMIT } from '../core/request-log.js';
 
 let host = null;
 let log = { inflight: [], recent: [] };
+/** False until the core has answered once: the status line says "reading", not "quiet". */
+let logRead = false;
 let error = null;
+/** Whether the Housekeeping details are open; kept here because the page redraws every two seconds. */
+let hkOpen = false;
 let timer = null;
 const filter = { ...NO_FILTER };
 /**
@@ -64,8 +70,8 @@ async function poll() {
   // so "next run" and a scheduled run's result keep up without a page of their own timer.
   if (++hkTick % 30 === 0) loadHousekeeping();
   try {
-    const [r] = await Promise.all([requestLog({ limit: 500 }), refreshRequestLoad()]);
-    if (r && r.ok) { log = r; error = null; } else { error = (r && r.message) || 'the core did not answer'; }
+    const [r] = await Promise.all([requestLog({ limit: LOG_LIMIT }), refreshRequestLoad()]);
+    if (r && r.ok) { log = r; logRead = true; error = null; } else { error = (r && r.message) || 'the core did not answer'; }
   } catch (e) { error = e.message || String(e); }
   if (host && host.isConnected) draw();
 }
@@ -148,54 +154,58 @@ function draw() {
     ...options.map(([v, l]) => h('option', { value: v, selected: String(filter[key]) === String(v) ? '' : null }, l)));
   const bar = h('div.toolbar', { style: { display: 'flex', gap: '8px', alignItems: 'flex-end', flexWrap: 'wrap', marginBottom: '10px' } },
     h('label.field', 'Cluster', select('cluster', [['all', 'All clusters'], ...byCluster.map((c) => [c.cluster, nameOf(c.cluster)])])),
-    h('label.field', 'Origin', select('origin', [['all', 'All origins'], ...originChoices(log).map((o) => [o, o === 'poller' ? 'poller (background)' : originLabel(o)])])),
-    h('label.field', 'Outcome', select('outcome', [['all', 'All'], ['inflight', 'In flight'], ['queued', 'Queued (waiting for a slot)'], ['ok', 'OK'], ['http-error', 'HTTP error'], ['failed', 'Failed / timed out'], ['refused', 'Refused by the gate']])),
-    h('label.field', 'Slower than', select('slowerThanMs', [[0, 'any'], [500, '500 ms'], [2000, '2 s'], [10000, '10 s'], [30000, '30 s']])),
+    h('label.field', 'From', select('origin', [['all', 'Anything'], ...originChoices(log).map((o) => [o, o === 'poller' ? 'poller (background)' : originLabel(o)])])),
+    h('label.field', 'Result', select('outcome', [['all', 'Any result'], ['inflight', 'In flight'], ['queued', 'Queued (waiting for a slot)'], ['ok', 'OK'], ['http-error', 'HTTP error'], ['failed', 'Failed / timed out'], ['refused', 'Refused by the gate']])),
+    h('label.field', 'Slower than', select('slowerThanMs', [[0, 'Any time'], [500, '500 ms'], [2000, '2 s'], [10000, '10 s'], [30000, '30 s']])),
     h('button.btn.sm', { style: { marginLeft: 'auto' }, onclick: () => download(`elasticpro-requests-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')}.csv`, toCsv(requestCsvRows(rows), CSV_HEADER), 'text/csv') }, 'Export CSV'),
     h('button.btn.sm', { onclick: poll }, '↻ Refresh'));
 
-  // The gate's four figures. From an older core that does not measure them: "—", never 0.
+  // The gate's figures. From an older core that does not measure them: "—", never 0.
   const g = gateFigures(log);
   const unknown = 'this core does not report it';
   const lim = g.limits;
-  const tiles = h('div.tiles', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: '10px', marginBottom: '12px' } },
-    statTile('In flight', num(inflight), inflight ? 'right now' : 'nothing waiting'),
-    statTile('Queued', g.queued == null ? '\u2014' : num(g.queued),
-      g.queued == null ? unknown : g.queued ? `oldest ${dur(g.oldestWaitMs || 0)}${lim ? ` · max ${num(lim.queueMax)}` : ''}` : `waiting for a slot${lim ? ` · ${num(lim.global)} slots, ${num(lim.perCluster)} per cluster` : ''}`),
-    statTile('Wait p95', g.waitP95Ms == null ? '\u2014' : dur(g.waitP95Ms),
-      !g.known ? unknown : g.waitCount ? `people's requests, ${num(g.waitCount)} in 5 min` : 'no request from a person in 5 min'),
-    statTile('Refused 5 min', g.refused == null ? '\u2014' : num(g.refused),
-      g.refused == null ? unknown : g.refused ? `${num(g.overloaded)} queue full · ${num(g.queueTimeout)} waited too long` : 'nothing turned away'),
-    statTile('Shared + cached', g.known ? num(g.sharedOrCached) : '\u2014',
-      g.known ? `${num(g.shared)} shared · ${num(g.cacheHits)} from cache — not sent again` : unknown),
-    statTile('Last 5 minutes', `${perMin.toFixed(1)}/min`, `${num(Object.values(requestLoad.clusters || {}).reduce((s, c) => s + (c.last5m || 0), 0))} requests, every cluster`));
+  const sentLast5m = requestLoad.at ? Object.values(requestLoad.clusters || {}).reduce((s, c) => s + (c.last5m || 0), 0) : null;
+  const status = requestStatus(logRead ? log : null, { paused: policyKnown() ? !!policy.paused.all : null, sentLast5m });
+  const tiles = h('div.tiles.rq-tiles',
+    statTile('In flight', status.inFlight == null ? '—' : num(status.inFlight), status.inFlight ? 'right now' : 'nothing being sent'),
+    statTile('Waiting', g.queued == null ? '—' : num(g.queued),
+      g.queued == null ? unknown : g.queued ? `oldest ${dur(g.oldestWaitMs || 0)}${lim ? ` · max ${num(lim.queueMax)}` : ''}` : `for a free slot${lim ? ` · ${num(lim.global)} slots, ${num(lim.perCluster)} per cluster` : ''}`),
+    statTile('Wait (95th %)', g.waitP95Ms == null ? '—' : dur(g.waitP95Ms),
+      !g.known ? unknown : g.waitCount ? `people’s requests, ${num(g.waitCount)} in 5 min` : 'no request from a person in 5 min'),
+    statTile('Turned away', g.refused == null ? '—' : num(g.refused),
+      g.refused == null ? unknown : g.refused ? `${num(g.overloaded)} queue full · ${num(g.queueTimeout)} waited too long` : 'nothing, last 5 min'),
+    statTile('Not sent again', g.known ? num(g.sharedOrCached) : '—',
+      g.known ? `${num(g.shared)} shared · ${num(g.cacheHits)} from cache` : unknown),
+    statTile('Rate', sentLast5m == null ? '—' : `${perMin.toFixed(1)}/min`, sentLast5m == null ? 'not read yet' : `${num(sentLast5m)} requests, last 5 min`));
 
   const stateIn = (r) => r.state === 'queued' ? pill('queued', 'grey') : r.state === 'shared' ? pill(`waiting on #${r.leader}`, 'grey') : pill('in flight', 'yellow');
-  const trs = rows.slice(0, 500).map((r) => h('tr', { class: r.inflight ? 'inflight' : (r.ok ? '' : 'failed') },
-    h('td.mono', { style: { fontSize: '11.5px', whiteSpace: 'nowrap' } }, dt(r.startedAt)),
-    h('td', h('b', nameOf(r.cluster)), r.via ? h('div.muted', { style: { fontSize: '11px' } }, `via ${r.via}`) : null),
-    h('td', r.originLabel),
-    h('td', { style: { fontSize: '11.5px' } }, r.class || '\u2014'),
-    h('td.mono', { style: { fontSize: '11.5px' } }, r.method),
-    h('td.mono', { style: { fontSize: '11.5px', wordBreak: 'break-all' } }, r.path),
-    h('td.num', r.queuedMs ? dur(r.queuedMs) : (r.state === 'queued' ? pill(`${dur(r.elapsedMs)} so far`, 'grey') : '\u2014')),
-    h('td.num', r.inflight ? (r.state === 'queued' ? '\u2014' : pill(`${dur(r.elapsedMs)} so far`, 'yellow')) : dur(r.ms)),
-    h('td', r.inflight ? stateIn(r) : pill(r.outcome, r.ok ? 'green' : (r.status === 'overloaded' || r.status === 'queue_timeout' ? 'yellow' : 'red')),
-      r.answeredBy ? h('span.pill.grey', { style: { marginLeft: '4px' }, title: 'Answered without sending the cluster another request' }, r.answeredBy) : null)));
+  const trs = rows.slice(0, 500).map((r) => {
+    const tag = classTag(r.class);
+    const tone = resultTone(r);
+    const full = dt(r.startedAt);
+    return h('tr', { class: r.inflight ? 'inflight' : (r.ok ? '' : 'failed') },
+      h('td.rq-n', { title: full }, clockTime(r.startedAt)),
+      h('td.rq-clip', { title: nameOf(r.cluster) + (r.via ? ` via ${r.via}` : '') }, h('b', nameOf(r.cluster)), r.via ? h('div.muted.rq-via', `via ${r.via}`) : null),
+      h('td.rq-clip', { title: r.originLabel }, r.originLabel),
+      h('td', tag ? h('span.rq-tag', { class: tag.label === 'person' ? 'person' : '', title: tag.title }, tag.label) : '—'),
+      h('td.mono', r.method),
+      h('td.rq-pathcell', pathButton(r.path)),
+      h('td.rq-n', r.queuedMs ? dur(r.queuedMs) : (r.state === 'queued' ? pill(`${dur(r.elapsedMs)} so far`, 'grey') : '—')),
+      h('td.rq-n', r.inflight ? (r.state === 'queued' ? '—' : pill(`${dur(r.elapsedMs)} so far`, 'yellow')) : dur(r.ms)),
+      h('td.rq-res', r.inflight ? stateIn(r) : h('span.rq-result', { class: tone }, h('i.rq-rdot'), r.outcome),
+        r.answeredBy ? h('span.pill.grey', { style: { marginLeft: '4px' }, title: 'Answered without sending the cluster another request' }, r.answeredBy) : null));
+  });
+  const reqTable = rows.length
+    ? table([{ label: 'Time', width: '78px' }, { label: 'Cluster', width: '21%' }, { label: 'From', width: '13%' }, { label: 'Class', width: '88px' },
+      { label: 'Method', width: '66px' }, 'Path', { label: 'Wait', width: '80px' }, { label: 'Took', width: '88px' }, { label: 'Result', width: '150px' }], trs, {})
+    : empty('No requests match — or the core has sent none since it started.');
+  if (rows.length) reqTable.querySelector('table').classList.add('rq-tbl');
 
-  const reaper = log.gate && log.gate.taskReaper;
-  const gateLine = lim ? h('div.muted', { style: { fontSize: '11.5px', margin: '-4px 0 10px' } },
-    `Gate: ${num(lim.global)} connections (${num(lim.perCluster)} per cluster, ${num(lim.perJump)} per jump host, ${num(lim.backgroundReserve)} kept for background) · `
-    + `a person's request waits up to ${dur(lim.queueWaitMs)} · read cache ${log.gate.readCache && log.gate.readCache.seconds ? `${log.gate.readCache.seconds} s` : 'off'}`
-    + (reaper ? ` · task reaper: ${reaper.mode}${reaper.last && Array.isArray(reaper.last.cancelled) ? `, last run cancelled ${reaper.last.cancelled.filter((x) => x.ok).length}` : ''}` : '')) : null;
-
-  mount(host,
-    pauseBar(),
+  mount(host, h('div.rq-page',
+    h('div.rq-top', statusCard(status), stopCard()),
     error ? h('div.banner.err', h('div', h('div.ttl', 'Could not read the request log'), h('div', error))) : null,
-    tiles, gateLine, bar,
-    card('Requests', `${num(rows.length)} shown · in flight first, then newest first · re-read every 2 s while this page is open`,
-      rows.length ? table(['Started', 'Cluster', 'Origin', 'Class', 'Method', 'Path', 'Queued', 'Took', 'Outcome'], trs, {})
-        : empty('No requests match — or the core has sent none since it started.')),
+    tiles, limitsRow(lim ? limitChips(log) : null), bar,
+    card('Requests', `${num(rows.length)} shown · in flight first, then newest · live while this page is open`, reqTable),
     h('div', { style: { marginTop: '14px' } },
       card('Per cluster', 'what the log holds for each cluster',
         table(['Cluster', 'Requests', 'In flight', 'Queued', 'Failed', 'Refused', 'Slowest', ''], clusterRows.map((c) => h('tr',
@@ -205,16 +215,93 @@ function draw() {
           h('td.num', num(c.count)), h('td.num', num(c.inflight)),
           h('td.num', c.queued ? pill(num(c.queued), 'grey') : '0'),
           h('td.num', c.failed ? pill(num(c.failed), 'red') : '0'),
-          h('td.num', c.refused ? pill(num(c.refused), 'yellow') : '0'), h('td.num', c.count ? dur(c.slowestMs) : '\u2014'),
+          h('td.num', c.refused ? pill(num(c.refused), 'yellow') : '0'), h('td.num', c.count ? dur(c.slowestMs) : '—'),
           h('td', { style: { textAlign: 'right' } }, pauseButton(c.cluster, nameOf(c.cluster))))), { emptyText: 'nothing yet' }))),
     h('div', { style: { marginTop: '14px' } }, tasksCard(nameOf)),
-    h('div', { style: { marginTop: '14px' } }, housekeepingCard()));
+    h('div', { style: { marginTop: '14px' } }, housekeepingCard())));
+}
+
+/** A request's path on one line, ellipsised; the whole of it on hover, and a click copies it. */
+function pathButton(path) {
+  return h('button.rq-path.mono', {
+    type: 'button', title: `${path}\n(click to copy)`, 'aria-label': `Copy path ${path}`,
+    onclick: () => copyText(path).then((ok) => toast(ok ? 'Path copied' : 'Could not copy: select it from the tooltip', ok ? 'ok' : 'warn', 2500, { key: 'rq-copy' })),
+  }, path);
+}
+
+async function copyText(text) {
+  try {
+    if (navigator.clipboard && navigator.clipboard.writeText) { await navigator.clipboard.writeText(text); return true; }
+  } catch { /* fall through to the older way */ }
+  try {
+    const ta = h('textarea', { style: { position: 'fixed', opacity: '0', top: '0', left: '0' }, readonly: '' }, text);
+    document.body.append(ta); ta.select();
+    const ok = document.execCommand && document.execCommand('copy');
+    ta.remove();
+    return !!ok;
+  } catch { return false; }
+}
+
+/** The answer first: one status line from the live gate numbers, then the sentence under it. */
+function statusCard(st) {
+  const mode = policy && !policy.error ? modeText(policy.mode) : { label: null, because: 'the core did not say which mode it runs' };
+  const link = h('a', {
+    href: '#/settings', title: 'Open Config › Requests',
+    onclick: (e) => { e.preventDefault(); navigateTo('settings', { section: 'requests' }); },
+  }, mode.label || 'not known');
+  return h('section.rq-status', { role: 'status' },
+    h('div.rq-head', h('span.rq-dot', { class: st.tone, 'aria-hidden': 'true' }), h('h2', st.title)),
+    h('p', st.detail ? `${st.detail} ` : null, 'Mode: ', link, `, ${mode.because}.`));
+}
+
+/** "Stop all traffic": the pause-everything control, apart from the table and warned in red. */
+function stopCard() {
+  const all = policyKnown() && !!policy.paused.all;
+  const some = policyKnown() ? (policy.paused.clusters || []).length : 0;
+  let action;
+  if (policyKnown()) {
+    action = h('button.btn.danger', {
+      disabled: policyBusy, 'data-act': all ? 'resume-all' : 'pause-all',
+      title: all ? 'Let the core send requests again' : 'Nothing new starts; requests in flight finish, and a page’s request waits',
+      onclick: () => changePolicy(setPausedAll(policy, !all), all ? 'Requests resumed' : 'All requests paused'),
+    }, all ? 'Resume all' : 'Pause all requests');
+  } else if (policy && policy.error) {
+    action = h('div.muted', { style: { fontSize: '12.5px' } }, `Pausing is not available: ${policy.error}`);
+  } else {
+    action = h('div.muted', { style: { fontSize: '12.5px' } }, 'Loading the request policy…');
+  }
+  return h('section.rq-stop', { class: all ? 'paused' : '' },
+    h('h2', 'Stop all traffic'),
+    h('p', 'Holds every request to every cluster until you resume. Pages keep showing their last data, marked as old.'),
+    h('div.rq-stop-act', action,
+      all ? h('span.pill.grey', { title: 'Nothing new starts on any cluster; what was in flight finishes' }, 'requests paused')
+        : some ? h('span.muted', { style: { fontSize: '12.5px' } }, `${some} cluster${some === 1 ? '' : 's'} paused individually`) : null));
+}
+
+/** The gate's limits as labelled chips; unknown (an older core) says so. */
+function limitsRow(chips) {
+  return h('div.rq-limits',
+    h('span.rq-limits-k', 'Limits'),
+    ...(chips
+      ? chips.map((c) => h('span.rq-chip', { title: c.title }, c.pre, h('b', c.value), c.post))
+      : [h('span.muted', 'this core does not report them')]));
 }
 
 /* ------------------------------------ housekeeping ------------------------------------ */
 
+/**
+ * Housekeeping folded to one line — when it last ran, what it removed, when it runs next —
+ * with the full card (its Dry run and Run now buttons) one click away. The open state is
+ * kept here: the page redraws every two seconds and a fold that closed itself would be useless.
+ */
 function housekeepingCard() {
   const v = housekeepingView(hk);
+  return h('details.rq-hk', { open: hkOpen, ontoggle: (e) => { hkOpen = e.target.open; } },
+    h('summary', h('b', 'Housekeeping'), h('span.muted', housekeepingLine(v, clockTime)), h('span.rq-more', hkOpen ? 'hide details' : 'details')),
+    housekeepingFull(v));
+}
+
+function housekeepingFull(v) {
   const title = 'Housekeeping';
   const sub = 'cleans what ElasticPro itself leaves behind \u2014 cache files, stale sessions, expired tokens';
   if (v.state === 'loading') return card(title, sub, empty('Loading\u2026'));
@@ -329,25 +416,6 @@ function tasksCard(nameOf) {
             : h('span.muted', { style: { fontSize: '11px' } }, 'not cancellable')))), {});
   return card('Tasks on the cluster', 'what Elasticsearch is running for anyone right now \u2014 ours carry our X-Opaque-Id',
     h('div', head, tasks.note ? h('div.banner', { style: { marginBottom: '8px' } }, tasks.note) : null, body));
-}
-
-/** "Pause all requests" / "Resume all", above everything else on the page. */
-function pauseBar() {
-  if (!policyKnown()) {
-    return policy && policy.error
-      ? h('div.muted', { style: { fontSize: '11.5px', marginBottom: '8px' } }, `Pausing is not available: ${policy.error}`)
-      : null;
-  }
-  const all = !!policy.paused.all;
-  const some = (policy.paused.clusters || []).length;
-  return h('div', { style: { display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap', marginBottom: '10px' } },
-    all ? h('span.pill.grey', { title: 'Nothing new starts on any cluster; what was in flight finishes' }, 'requests paused')
-      : some ? h('span.muted', { style: { fontSize: '11.5px' } }, `${some} cluster(s) paused`) : null,
-    h('button.btn.sm', {
-      disabled: policyBusy,
-      title: all ? 'Let the core send requests again' : 'Nothing new starts; requests in flight finish, and a page\u2019s request waits',
-      onclick: () => changePolicy(setPausedAll(policy, !all), all ? 'Requests resumed' : 'All requests paused'),
-    }, all ? 'Resume all' : 'Pause all requests'));
 }
 
 function pauseButton(id, name) {

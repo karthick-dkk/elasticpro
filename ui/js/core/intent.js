@@ -1,5 +1,5 @@
 /** Cross-page hand-off (e.g. "open this index in the REST console"). */
-export const intent = { console: null, snapshots: null };
+export const intent = { console: null, snapshots: null, settings: null };
 
 /**
  * Whether this session may open a page. The shell (app.js) owns the answer — it knows the
@@ -20,11 +20,13 @@ export function canOpenPage(id) { return !!pageGate(id); }
  * whichever happens to be first. Naming the cluster here selects it on the way in.
  *
  * `payload` is for the page being opened: the request for the REST console, `{ view }`
- * for Snapshots ('summary' is the view with the repositories).
+ * for Snapshots ('summary' is the view with the repositories), `{ section }` for Config
+ * (the tab to open, e.g. 'requests').
  */
 export function navigateTo(page, payload, opts = {}) {
   if (page === 'console') intent.console = payload || null;
   if (page === 'snapshots') intent.snapshots = payload || null;
+  if (page === 'settings') intent.settings = payload || null;
   window.dispatchEvent(new CustomEvent('ep:navigate', {
     detail: { page, cluster: opts.cluster || null },
   }));
