@@ -2299,6 +2299,18 @@ if (viaFleet) {
       ok([...doc.querySelectorAll('#view .agroup-toggle')].every((b) => b.getAttribute('aria-expanded') === 'true'), 'alerts: Expand all left a group closed');
     }
 
+    // Keyboard: arrows step between the toggles, which are real buttons with a name.
+    {
+      const navs = [...doc.querySelectorAll('#view [data-nav]')];
+      ok(navs.length >= 4 && navs.every((b) => b.tagName === 'BUTTON' && b.hasAttribute('aria-expanded') && b.getAttribute('aria-label')), 'alerts: the toggles are not named, expandable buttons');
+      navs[0].focus();
+      navs[0].dispatchEvent(new window.KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true, cancelable: true }));
+      ok(doc.activeElement === navs[1], 'alerts: ArrowDown did not move to the next toggle');
+      navs[1].dispatchEvent(new window.KeyboardEvent('keydown', { key: 'ArrowUp', bubbles: true, cancelable: true }));
+      ok(doc.activeElement === navs[0], 'alerts: ArrowUp did not move back');
+      ok([...doc.querySelectorAll('#view .golink')].every((a) => a.tagName === 'A' && a.getAttribute('href')), 'alerts: a Go to is not a real link');
+    }
+
     // The other groupings and the filters.
     press('Alert type').click(); await settleFor(60);
     ok(doc.querySelectorAll('#view .agroup').length >= 4 && !doc.querySelector('#view .agroup-head button.btn.sm + .split'), 'alerts: Alert type grouping');
@@ -2356,7 +2368,15 @@ if (viaFleet) {
       ok(acts[0] === 'Open quiet-lab alerts →' && /^Go to /.test(acts[1] || ''), `alerts: the bell entry links read ${JSON.stringify(acts)}`);
       navs.length = 0;
       if (entries[0]) { follow(entries[0].querySelector('.notif-actions a')); await settleFor(250); }
-      ok(navs.some((n) => n.page === 'alerts' && n.cluster === 'q'), `alerts: "Open quiet-lab alerts" did not go to Alerts for that cluster: ${JSON.stringify(navs)}`);
+      ok(navs.some((n) => n.page === 'alerts'), `alerts: "Open quiet-lab alerts" did not go to Alerts: ${JSON.stringify(navs)}`);
+      ok(JSON.stringify(groupNames()) === JSON.stringify(['quiet-lab']), `alerts: the page was not filtered to quiet-lab, it shows ${groupNames().join(', ')}`);
+      ok(/Showing quiet-lab only/.test(doc.getElementById('view').textContent), 'alerts: the cluster filter does not say it is on');
+      const showAll = [...doc.querySelectorAll('#view button')].find((b) => b.textContent === 'Show all clusters');
+      ok(!!showAll, 'alerts: no way back to every cluster');
+      if (showAll) { showAll.click(); await settleFor(60); ok(groupNames().length >= 3, 'alerts: Show all clusters did not show them'); }
+      // the next visit starts on the whole fleet again
+      await go('overview'); await go('alerts');
+      ok(groupNames().length >= 3 && !/Showing quiet-lab only/.test(doc.getElementById('view').textContent), 'alerts: the cluster filter outlived the visit');
       st.state.selected = 'all';
     }
   } finally {

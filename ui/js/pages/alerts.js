@@ -26,7 +26,7 @@ import { playbookFor } from '../core/alert-playbooks.js';
 import { relatedFor, historyFor, WINDOW_MS } from '../core/alert-related.js';
 import { alertHistory } from '../core/alert-history.js';
 import { watermarks } from '../core/disk-balance.js';
-import { setFocus } from '../core/focus.js';
+import { setFocus, takeFocus } from '../core/focus.js';
 
 let host = null;
 /**
@@ -34,7 +34,7 @@ let host = null;
  * (localStorage, if it will have them); the filters are not — they are a question asked,
  * and the page opens on the answer to the usual one: everything open, grouped by cluster.
  */
-const ui = { level: 'all', text: '', handled: false, group: 'cluster', expanded: new Set() };
+const ui = { level: 'all', text: '', handled: false, group: 'cluster', cluster: null, expanded: new Set() };
 
 const PREF_GROUP = 'elasticpro.alerts.group';
 const PREF_COLLAPSED = 'elasticpro.alerts.collapsed';
@@ -95,9 +95,32 @@ function coverageLines() {
   return [bar, currentLineEl];
 }
 
+/**
+ * Arrow keys step between the controls that open and close things — group toggles and row
+ * toggles — so a list of fifty alerts is not fifty tab stops to get through. Everything
+ * else stays a plain button or link, reached by Tab as usual.
+ */
+function navKey(e) {
+  if ((e.key !== 'ArrowDown' && e.key !== 'ArrowUp') || e.altKey || e.ctrlKey || e.metaKey) return;
+  const t = e.target;
+  if (!t || !t.hasAttribute || !t.hasAttribute('data-nav')) return;
+  const all = [...host.querySelectorAll('[data-nav]')];
+  const next = all[all.indexOf(t) + (e.key === 'ArrowDown' ? 1 : -1)];
+  if (!next) return;
+  e.preventDefault();
+  next.focus();
+}
+
 export function render(el) {
   host = el;
   el.classList.add('dense');
+  el.removeEventListener('keydown', navKey);
+  el.addEventListener('keydown', navKey);
+  // Opened from a bell entry ("Open <cluster> alerts"): that cluster only, said out loud, and
+  // gone again on the next visit. Otherwise the whole fleet — this page does not follow the
+  // top bar's cluster, because the app opens on one cluster and the page is about all of them.
+  const f = takeFocus('alerts');
+  ui.cluster = f && f.cluster ? f.cluster : null;
   // Acknowledgements live on this machine; load them before the first paint so rows do
   // not flicker from unacknowledged to acknowledged.
   Promise.all([loadAcks(), loadCurrentUser(), loadSilences()])
@@ -143,11 +166,12 @@ function draw() {
     lastObserved = now;
     try { if (alertHistory.observe(toObservations(mergedAlerts()), now)) invalidateAlerts(); } catch (_) { /* a convenience */ }
   }
-  const list = activeClusters();
-  const inView = new Set(list.map((c) => c.id));
+  const list = clusters();
   const all = mergedAlerts();
-  const mine = all.filter((m) => inView.has(m.clusterId));
-  const sum = summaryOf(mine, list.length);
+  const sum = summaryOf(all, list.length);
+  // The alerts the filters work on: everything, or the one cluster a link asked for.
+  const mine = ui.cluster ? all.filter((m) => m.clusterId === ui.cluster) : all;
+  const only = ui.cluster ? list.find((c) => c.id === ui.cluster) : null;
   const visible = filterAlerts(mine, { level: ui.level, text: ui.text, showHandled: ui.handled,
     notesOf: (m) => allNotes(m).map((n) => n.text).join(' ') });
   const groups = groupAlerts(visible, ui.group);
@@ -168,6 +192,12 @@ function draw() {
         sum.clustersAffected ? 'with an open alert' : 'all clear'),
       statTile('Acknowledged', num(sum.acknowledged),
         sum.silenced ? `${num(sum.silenced)} silenced` : (silences().length ? `${silences().length} silence${silences().length === 1 ? '' : 's'} in force` : 'seen, still raised'))),
+
+    only
+      ? h('div.banner', { style: { marginBottom: '10px' } },
+          h('div', h('div.ttl', `Showing ${only.name} only`), h('div.muted', 'Every other cluster\u2019s alerts are hidden.')),
+          h('div.acts', h('button.btn.sm', { type: 'button', onclick: () => { ui.cluster = null; draw(); } }, 'Show all clusters')))
+      : null,
 
     h('div.toolbar.alerts-bar',
       h('label.field', 'Search', h('input#alerts-search', { type: 'search', placeholder: 'Search alerts, clusters, nodes', value: ui.text,
