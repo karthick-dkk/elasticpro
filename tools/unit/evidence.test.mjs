@@ -13,7 +13,7 @@ import { pathToFileURL } from 'node:url';
 
 const ROOT = path.resolve(import.meta.dirname, '../..');
 const ev = await import(pathToFileURL(path.join(ROOT, 'ui/js/core/evidence.js')).href);
-const { EVIDENCE_PAGES, evidenceLayout, evidenceStamp, stampTime, ageWords, safeAddress, createHeldNotices } = ev;
+const { EVIDENCE_PAGES, evidenceLayout, evidenceStamp, stampTime, ageWords, hideAddress, scrubFresh, createHeldNotices } = ev;
 
 const PAGES = ['alerts', 'overview', 'indices', 'shards', 'logs', 'console', 'snapshots', 'volume', 'automation',
   'requests', 'accounts', 'settings'];
@@ -49,7 +49,7 @@ const base = { cluster, label: 'Snapshot data read', now: NOW, version: '0.3.22'
 
 test('the footer names the cluster, the data time, the capture time, the version and the user', () => {
   const s = evidenceStamp({ ...base, fresh: { ts: at(13, 25, 20), status: 'ok' } });
-  assert.equal(s.text, 'Cluster: Alpha-logging · https://alpha.example.com:9200 · '
+  assert.equal(s.text, 'Cluster: Alpha-logging · '
     + 'Snapshot data read 2026-10-20 13:25:20 IST (2 min before this capture) · Captured 13:27:02 · '
     + 'ElasticPro 0.3.22 · Signed in as Admin');
   assert.equal(s.tone, 'ok');
@@ -94,13 +94,21 @@ test('the version and the user are left out when unknown, not printed as "?"', (
   assert.doesNotMatch(s.text, /ElasticPro|Signed in/);
 });
 
-test('the printed address carries no credentials, query or fragment', () => {
-  assert.equal(safeAddress('https://elastic:s3cret@alpha.example.com:9200/?token=abc#x'), 'https://alpha.example.com:9200');
-  assert.equal(safeAddress('http://10.0.0.5:9200/es/'), 'http://10.0.0.5:9200/es');
-  assert.equal(safeAddress('not a url'), 'not a url');
-  assert.equal(safeAddress(''), '');
-  const s = evidenceStamp({ ...base, cluster: { name: 'A', url: 'https://u:p@h:9200' }, fresh: { ts: NOW, status: 'ok' } });
-  assert.doesNotMatch(s.text, /u:p|@/);
+test('the stamp names the cluster and never its address', () => {
+  const s = evidenceStamp({ ...base, cluster: { name: 'A', url: 'https://u:p@10.9.8.7:9200/es' }, fresh: { ts: NOW, status: 'ok' } });
+  assert.doesNotMatch(s.text, /https?:|10\.9\.8\.7|9200|u:p|@/);
+  assert.match(s.text, /^Cluster: A \u00b7 /);
+});
+
+test('an error text that quotes the address is reduced to the cluster name', () => {
+  const c = { name: 'Alpha-logging', url: 'https://elastic:pw@alpha.internal:9200/' };
+  assert.equal(hideAddress('connect to https://alpha.internal:9200/_cat failed', c), 'connect to Alpha-logging failed');
+  assert.equal(hideAddress('dial alpha.internal:9200: refused', c), 'dial Alpha-logging: refused');
+  assert.equal(hideAddress('proxy http://10.0.0.1:3128 said no', c), 'proxy Alpha-logging said no');
+  assert.equal(hideAddress(undefined, c), '');
+  const f = scrubFresh({ ts: 1, status: 'error', error: { kind: 'x', message: 'no route to http://10.1.1.1:9200' } }, c);
+  assert.equal(f.error.message, 'no route to Alpha-logging');
+  assert.equal(scrubFresh(null, c), null);
 });
 
 test('ages are said in words a reader of a screenshot understands', () => {

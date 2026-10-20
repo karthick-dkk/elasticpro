@@ -9,6 +9,7 @@
 import { h, mount, $, clear, activatable } from '../lib/dom.js';
 import { bytes, num, compact, dt, ago, toCsv, download } from '../lib/fmt.js';
 import { state, client, fetchIndices, activeClusters, datasetFreshness } from '../core/state.js';
+import { hideAddress, scrubFresh } from '../core/evidence.js';
 import { card, collapsible, pill, statTile, table, empty, connectionBanner } from './common.js';
 import { navigateTo } from '../core/intent.js';
 import { syncWrites, writeToggle } from '../core/writes.js';
@@ -59,7 +60,7 @@ export function onData() { if (host && host.isConnected) draw(); }
 
 /** What the evidence footer (core/evidence.js) says about the data on screen: this list's own age. */
 export function evidenceData(c) {
-  return { label: 'Index data read', fresh: datasetFreshness(c.id, 'indices') };
+  return { label: 'Index data read', fresh: scrubFresh(datasetFreshness(c.id, 'indices'), c) };
 }
 
 function cluster() { return activeClusters()[0] || null; }
@@ -116,7 +117,7 @@ function draw() {
 
   mount(host,
     sourceBar(c, sourceList, all.length),
-    ui.error ? h('div.banner.err', h('div', h('div.ttl', 'Could not list indices'), h('div.mono', ui.error))) : null,
+    ui.error ? h('div.banner.err', h('div', h('div.ttl', 'Could not list indices'), h('div.mono', hideAddress(ui.error, c)))) : null,
     viewTabs(),
     // The picker is on Summary, so an active filter has to announce itself here — a
     // filtered table with no visible control is a table that looks like it lost rows.
@@ -240,7 +241,7 @@ function sourceBar(c, sourceList, total) {
     h('div', { style: { marginLeft: 'auto', display: 'flex', gap: '10px', alignItems: 'flex-end' } },
       // This list's own age, not the last global refresh — the page serves what was
       // already fetched, so how old that is decides whether it is still true.
-      freshnessBar(datasetFreshness(c.id, 'indices'), () => load(true), { label: 'Indices', busy: ui.loading }),
+      freshnessBar(scrubFresh(datasetFreshness(c.id, 'indices'), c), () => load(true), { label: 'Indices', busy: ui.loading }),
       writeToggle(draw),
       h('button.btn.sm', { onclick: () => { ui.ilmOnly = false; ui.sourceFilter = 'all'; ui.text = ''; ui.status = 'all'; ui.from = ''; ui.to = ''; ui.page = 0; draw(); } }, 'Clear'),
       h('button.btn.sm', { onclick: () => load(true) }, '↻ Reload')));

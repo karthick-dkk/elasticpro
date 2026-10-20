@@ -70,19 +70,27 @@ export function ageWords(ms) {
 }
 
 /**
- * The address to print for a cluster: the one the Clusters page shows, minus anything that
- * could be a secret — user:password in the authority, a query string, a fragment.
+ * A text with the cluster's address taken out: its URL, its host and host:port, and any other
+ * http(s) address, replaced by the cluster's name. For error texts that quote the address they
+ * could not reach ("connect to http://10.1.2.3:9200 failed") on a page that is photographed.
  */
-export function safeAddress(url) {
-  const raw = String(url || '').trim();
-  if (!raw) return '';
-  try {
-    const u = new URL(raw);
-    const path = u.pathname.replace(/\/+$/, '');
-    return `${u.protocol}//${u.host}${path}`;
-  } catch (_) {
-    return raw.replace(/^([a-z][a-z0-9+.-]*:\/\/)[^/@\s]*@/i, '$1').replace(/[?#].*$/, '');
+export function hideAddress(text, cluster = {}) {
+  let t = String(text == null ? '' : text);
+  const name = cluster.name || 'the cluster';
+  const raw = String((cluster && cluster.url) || '').trim();
+  const bits = [];
+  if (raw) {
+    bits.push(raw.replace(/\/+$/, ''));
+    try { const u = new URL(raw); bits.push(u.host, u.hostname); } catch (_) { /* not a URL */ }
   }
+  for (const b of bits.filter(Boolean).sort((x, y) => y.length - x.length)) t = t.split(b).join(name);
+  return t.replace(/https?:\/\/[^\s"'<>)\]]+/gi, name);
+}
+
+/** A freshness object (state.js datasetFreshness) with the address taken out of its error text. */
+export function scrubFresh(f, cluster) {
+  if (!f || !f.error || !f.error.message) return f;
+  return { ...f, error: { ...f.error, message: hideAddress(f.error.message, cluster) } };
 }
 
 /**
@@ -133,9 +141,10 @@ export function evidenceStamp(o = {}) {
     }
   }
 
-  const addr = safeAddress(cluster.url);
+  // The name only. An address is an internal host and port (and, behind a jump host, a route
+  // into the client's network) - not something to hand a client in a screenshot.
   const segments = [
-    { key: 'cluster', text: `Cluster: ${cluster.name || '?'}${addr ? ` · ${addr}` : ''}`, tone: 'ok' },
+    { key: 'cluster', text: `Cluster: ${cluster.name || '?'}`, tone: 'ok' },
     { key: 'data', text: data, tone },
     { key: 'captured', text: `Captured ${clockTime(now)}`, tone: 'ok' },
     version && version !== '?' ? { key: 'version', text: `ElasticPro ${version}`, tone: 'ok' } : null,

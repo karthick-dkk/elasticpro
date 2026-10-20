@@ -145,15 +145,16 @@ await go('console');
     ok(!!(target.compareDocumentPosition(run) & window.Node.DOCUMENT_POSITION_FOLLOWING),
       'console: the address is not above the Run button, where it is read before pressing it');
   }
+  // An evidence page: the line names the path the request will take, never the host.
   const base = config.clusters[0].url.replace(/\/+$/, '');
-  ok(target && target.textContent.startsWith(base),
-    `console: the address line reads "${target && target.textContent}", expected to start with ${base}`);
+  ok(target && target.textContent === '/_cluster/health',
+    `console: the target line reads "${target && target.textContent}", expected the path alone`);
+  ok(target && !target.textContent.includes(base), 'console: the target line still names the cluster address');
 
   const pathInput = doc.getElementById('c-path');
   ok(!!pathInput, 'console: no path input');
   if (pathInput && target) {
-    for (const [typed, want] of [['/_cat/indices', `${base}/_cat/indices`],
-                                 ['_cluster/health', `${base}/_cluster/health`]]) {
+    for (const [typed, want] of [['/_cat/indices', '/_cat/indices'], ['_cluster/health', '/_cluster/health']]) {
       pathInput.value = typed;
       pathInput.dispatchEvent(new window.Event('input', { bubbles: true }));
       await settleFor(50);
@@ -2942,7 +2943,17 @@ if (viaFleet) {
     noOthers(id, main);
     const f = footer(id);
     ok(f.includes(`Cluster: ${main.name}`), `evidence ${id}: the stamp does not name the cluster: "${f}"`);
-    ok(f.includes(main.url.replace(/\/+$/, '')), `evidence ${id}: the stamp does not give the address: "${f}"`);
+    ok(!/https?:\/\//.test(f) && !f.includes(new URL(main.url).host), `evidence ${id}: the stamp prints the cluster address: "${f}"`);
+    // Nowhere on the page: no http(s) address at all (the console's response body, which the person
+    // asked for, is the one exception and is checked separately), and not the cluster's host:port.
+    {
+      const own = new URL(main.url).host;
+      const t = doc.getElementById('view').textContent + doc.getElementById('topbar').textContent + f;
+      const body = doc.getElementById('c-out');
+      const shown = body ? t.replace(body.textContent, '') : t;
+      ok(!/https?:\/\/\S/.test(shown), `evidence ${id}: the page prints an address: "${(shown.match(/https?:\/\/\S+/) || [''])[0]}"`);
+      ok(!shown.includes(own), `evidence ${id}: the page prints the cluster's host ${own}`);
+    }
     ok(DATE.test(f), `evidence ${id}: the stamp has no data time: "${f}"`);
     ok(/Captured \d{2}:\d{2}:\d{2}/.test(f), `evidence ${id}: the stamp has no capture time: "${f}"`);
     ok(!/data time unknown|not read yet|no request run yet/.test(f), `evidence ${id}: the stamp has no real data time: "${f}"`);

@@ -3,6 +3,7 @@
 import { h, mount, $, clear, activatable } from '../lib/dom.js';
 import { bytes, num, dur, ago, dt, download } from '../lib/fmt.js';
 import { state, client, activeClusters } from '../core/state.js';
+import { hideAddress } from '../core/evidence.js';
 import { idb } from '../lib/idb.js';
 import { MAX_TABS, initialState, addTab, closeTab, updateTab, activeTab, tabTitle, toStored, fromStored } from '../core/console-tabs.js';
 import { savedQueries, loadSavedQueries, saveQuery, deleteSavedQuery, ownQuery, filterQueries } from '../core/saved-queries.js';
@@ -366,10 +367,11 @@ function draw() {
   // gets audited afterwards is which host received which path. Reading that off two
   // fields — a base down here, a path up there — is how the wrong cluster gets hit.
   // It follows the path field as it is typed, so it is never a stale answer.
+  // This is an evidence page (core/evidence.js), so it names the cluster and the path, never the
+  // host: an internal address does not belong in a screenshot handed to a client.
   const targetUrl = () => {
-    const base = String(c.url || '').replace(/\/+$/, '');
     const p = String(ui.path || '');
-    return base + (p ? (p.startsWith('/') ? p : `/${p}`) : '');
+    return p ? (p.startsWith('/') ? p : `/${p}`) : '/';
   };
   const target = h('span.mono#c-target', { style: { fontSize: '12px', wordBreak: 'break-all' } }, targetUrl());
   const syncTarget = () => { target.textContent = targetUrl(); };
@@ -381,7 +383,7 @@ function draw() {
         h('b', { style: { fontSize: '12px' } }, c.name),
         h('span.muted', { style: { fontSize: '12px' } }, ui.method),
         target,
-        c.via ? h('span.muted', { style: { fontSize: '11px' } }, `via ${c.via}`) : null),
+        null),
       h('div', { style: { display: 'flex', gap: '8px', alignItems: 'center' } },
         methodSel, pathInput,
         h('button.btn.primary#c-run', { onclick: run, style: { minWidth: '96px' } }, 'Run ▸'),
@@ -525,7 +527,7 @@ async function run() {
     toast(`${ui.method} ${clip(ui.path)} → ${res.status}${took}`, 'ok', 2600, { key: 'console-run' });
   } else {
     toast(`${ui.method} ${clip(ui.path)} → ${res.status || res.kind || 'failed'}`
-        + `${res.message ? ` · ${clip(res.message, 60)}` : ''}`, 'err', 5200, { key: 'console-run' });
+        + `${res.message ? ` · ${clip(hideAddress(res.message, c), 60)}` : ''}`, 'err', 5200, { key: 'console-run' });
   }
 }
 
@@ -688,13 +690,13 @@ function responseCard() {
 
   const body = r.kind === 'blocked_readonly'
     ? h('div.banner.warn', { style: { margin: 0 } },
-        h('div', h('div.ttl', 'Blocked by read-only mode'), h('div', r.message),
+        h('div', h('div.ttl', 'Blocked by read-only mode'), h('div', hideAddress(r.message, cluster())),
           h('div', { style: { marginTop: '8px' } },
             h('button.btn.sm.primary', { onclick: async () => { await setWritesUnlocked(true); draw(); } }, 'Allow writes'))))
     : !r.status && r.message
     ? h('div',
         h('div.banner.err', { style: { margin: 0 } }, h('div', h('div.ttl', r.kind === 'tunnel_error' ? 'Jump host' : /^tls/.test(r.kind || '') ? 'Certificate' : 'Request failed'),
-          h('div', r.message), r.help ? h('div.muted', { style: { fontSize: '11.5px', marginTop: '4px' } }, r.help) : null)),
+          h('div', hideAddress(r.message, cluster())), r.help ? h('div.muted', { style: { fontSize: '11.5px', marginTop: '4px' } }, hideAddress(r.help, cluster())) : null)),
         /^tls|tunnel_error/.test(r.kind || '')
           ? h('button.btn.sm.primary', { style: { marginTop: '8px' }, onclick: () => navigateTo('overview') }, 'Fix on the Clusters page')
           : null)
@@ -725,7 +727,7 @@ function responseCard() {
         ? { padding: '10px', flex: '1', minHeight: '0', height: 'calc(100vh - 150px)', overflow: 'auto' }
         : { padding: '10px', flex: '1', minHeight: '340px', maxHeight: '64vh', overflow: 'auto' },
     },
-      h('div.mono.muted.trunc', { style: { fontSize: '10.5px', marginBottom: '6px' }, title: r.url }, `${ui.method} ${r.url || ''}`),
+      h('div.mono.muted.trunc', { style: { fontSize: '10.5px', marginBottom: '6px' } }, `${ui.method} ${String(r.url || '').replace(/^[a-z][a-z0-9+.-]*:\/\/[^/]+/i, '')}`),
       body));
 }
 
