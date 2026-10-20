@@ -17,7 +17,7 @@
 #             peak RSS (VmHWM of the bridge, the most of any run), OOM kills, restarts.
 #
 # Needs Docker, node and python3. The fixture clusters run on this machine's loopback
-# (tools/mock-es.mjs with MOCK_FLEET / MOCK_INDICES), reached from the containers as
+# (tools/mock-es.mjs --ports with MOCK_INDICES), reached from the containers as
 # host.docker.internal — Docker Desktop. On Linux set MOCK_HOST to the docker bridge
 # address and MOCK_BIND to it. Everything it creates is named ep-load-* and removed at
 # the end unless KEEP=1.
@@ -58,7 +58,7 @@ docker volume rm "$VOL" >/dev/null 2>&1 || true
 docker network create "$NET" >/dev/null 2>&1 || true
 
 say "fixture: $CLUSTERS clusters × $INDICES indices on :${MOCK_PORT}…"
-MOCK_BIND=${MOCK_BIND:-127.0.0.1} MOCK_FLEET=$CLUSTERS MOCK_INDICES=$INDICES MOCK_SNAP_INDICES=$SNAP_INDICES node tools/mock-es.mjs "$MOCK_PORT" >/dev/null &
+MOCK_BIND=${MOCK_BIND:-127.0.0.1} MOCK_INDICES=$INDICES MOCK_SNAP_INDICES=$SNAP_INDICES node tools/mock-es.mjs --ports "$MOCK_PORT-$((MOCK_PORT + CLUSTERS - 1))" >/dev/null &
 MOCK_PID=$!
 until curl -s -o /dev/null "http://127.0.0.1:$((MOCK_PORT + CLUSTERS - 1))/"; do sleep 0.2; done
 

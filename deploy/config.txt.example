@@ -95,8 +95,41 @@ LOG_LEVEL=
 POLL_HEALTH_SECONDS=
 # Cluster requests the poller runs at once, across the fleet (1-256).
 POLL_CONCURRENCY=
-# Requests to Elasticsearch in flight at once, all sources together (1-1024).
+# Requests to Elasticsearch in flight at once, all sources together (1-1024; default 24).
 ES_CONCURRENCY=
+# ...to one cluster (default 4), and through one SSH jump host (default 8).
+ES_PER_CLUSTER=
+ES_PER_JUMP_HOST=
+# Of ES_CONCURRENCY, connections only background work (the poller, the delay sink) may
+# use, so a burst of page requests can never stop the health poll (default 2).
+ES_BACKGROUND_RESERVE=
+# Page requests that may wait for a free connection at once, everybody together (default
+# 256) and per person (default 64). Past either, a request is refused at once with EP-214
+# and a time to retry; the page retries a read once by itself. Background work never is.
+ES_QUEUE_MAX=
+ES_QUEUE_PER_USER=
+# The longest a page request waits for a connection before EP-215 (ms, default 20000).
+ES_QUEUE_WAIT_MS=
+# No request is given longer than this by a cluster, whatever it asks (ms, default 115000;
+# nginx gives up on the core at 120 s).
+ES_MAX_TIMEOUT_MS=
+# A page's read is answered from memory for this many seconds when someone asked the same
+# a moment ago (0 = off; default 5). Reload always asks the cluster; any write to a
+# cluster empties what is kept for it.
+ES_READ_CACHE_SECONDS=
+# Memory for that, MB (default 64; never more than the core's memory budget allows).
+ES_READ_CACHE_MB=
+# The largest answer a page's request may bring back, MB (default 64; EP-216 past it).
+ES_MAX_RESPONSE_MB=
+# The same for the poller's fleet-wide datasets, MB (default 256).
+ES_MAX_FLEET_RESPONSE_MB=
+# Cancel our own searches nobody waits for any more (a page left, a timeout):
+# off, orphans (default) or overdue (orphans, plus ours running past ES_TASK_MAX_SECONDS).
+# Only read tasks carrying ElasticPro's X-Opaque-Id; never a write, never anyone else's.
+ES_TASK_REAPER=
+ES_TASK_MAX_SECONDS=
+# Zabbix API calls open at once (1-64; default 4).
+ZABBIX_CONCURRENCY=
 # In-memory cache size, MB. Empty: a quarter of CORE_MEM_LIMIT (512 at the default 2g). The
 # core warns at start when a value here cannot fit the limit.
 CACHE_MB=

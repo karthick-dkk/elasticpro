@@ -264,6 +264,37 @@ people in and removes its budget.
 nobody else's: that is the address both checks above see. Set it; without it the source
 addresses in the activity log can be forged by anyone who reaches the core directly.
 
+## Performance: how the core goes to Elasticsearch
+
+Every request to a cluster — a page's, the console's, the poller's, the delay sink's —
+waits at one gate before a socket is opened. The `performance` keys in `config.txt` set it
+(each is documented in `config.txt.example`; the defaults suit 100-300 clusters):
+
+| Key | Default | What it does |
+|---|---|---|
+| `ES_CONCURRENCY` | 24 | Requests open at once, every cluster and source together. |
+| `ES_PER_CLUSTER` / `ES_PER_JUMP_HOST` | 4 / 8 | …to one cluster, and through one SSH jump host. |
+| `ES_BACKGROUND_RESERVE` | 2 | Of those, connections only background work may use, so a burst of page requests never stops the health poll. |
+| `ES_QUEUE_MAX` / `ES_QUEUE_PER_USER` | 256 / 64 | Page requests that may wait for a connection, everybody / one person. Past either: refused at once, `EP-214`, with a time to retry (the page retries a read once by itself). The poller and the core's own jobs are never refused. |
+| `ES_QUEUE_WAIT_MS` | 20000 | The longest a page request waits for a connection: `EP-215` after it. |
+| `ES_MAX_TIMEOUT_MS` | 115000 | No request is given longer than this, whatever it asks for (nginx gives up at 120 s). |
+| `ES_READ_CACHE_SECONDS` / `ES_READ_CACHE_MB` | 5 / 64 | A page read answered from memory when somebody asked the same moments ago; Refresh always asks the cluster, and any write empties what is kept for that cluster. |
+| `ES_MAX_RESPONSE_MB` / `ES_MAX_FLEET_RESPONSE_MB` | 64 / 256 | The largest answer a page's request / the poller's dataset may bring back: `EP-216` past it, read no further. |
+| `ES_TASK_REAPER` / `ES_TASK_MAX_SECONDS` | `orphans` / 300 | Cancel our own searches nobody waits for any more (a page left, a timeout) — only read tasks carrying ElasticPro's `X-Opaque-Id`, never a write, never anyone else's. `overdue` also cancels ours running past the limit; `off` turns it off. |
+| `ZABBIX_CONCURRENCY` | 4 | Zabbix API calls open at once. |
+
+Priority is strict: a person's request goes before the poller's work somebody is waiting
+for, which goes before everything else; within each, clusters take turns. Anything that
+waited long enough moves up, so nothing is starved. Requests that ask the same thing at the
+same moment share one trip to the cluster. The poller's own share (Config → Requests) can
+never exceed the gate's numbers.
+
+The Request Centre shows the gate: what is queued, the 95th-percentile wait of people's
+requests, what was refused in the last five minutes and what was answered without going to
+the cluster; each request row says its class, how long it queued, and whether it was shared
+or cached. `tools/load-check.mjs` runs the gate against a mock fleet under load and checks
+every one of these limits held.
+
 ## Scaling to a large fleet (100-300 clusters)
 
 The core polls every cluster in the background rather than only when a page is open —

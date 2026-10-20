@@ -22,7 +22,7 @@ import { applyLoadedConfig } from './ui/load-config.js';
 import { authState, loginScreen, signOut } from './ui/login.js';
 import { aboutMini } from './ui/about.js';
 import { announceNewAlerts, announceSnapshotOutcomes, resetAnnounced } from './core/notify.js';
-import { onSessionLost, bridge, setSession, setSignedIn } from './core/transport.js';
+import { onSessionLost, bridge, setSession, setSignedIn, abortPage } from './core/transport.js';
 import { readLaunch, withoutCode, withoutTrouble, troubleshootTarget, themeFor, exchangeCode, rememberEmbedTheme, askZabbixToSignIn, rememberPageForReauth, takeRememberedPage } from './core/embed.js';
 import { pageForProblem } from './core/alert-rules.js';
 
@@ -726,7 +726,11 @@ export function go(id) {
     // And whatever it was still waiting on is let go of: the core answers those requests
     // "aborted" instead of holding them to the cluster's timeout. Only this person's, only
     // this page's; the poller is never touched. Fire and forget — nothing here waits on it.
-    if (prev && !isSnapshotMode()) bridge({ type: 'ABORT_REQUESTS', origin: `page:${prev.id}` }).catch(() => {});
+    if (prev && !isSnapshotMode()) {
+      bridge({ type: 'ABORT_REQUESTS', origin: `page:${prev.id}` }).catch(() => {});
+      // …and the browser closes their connections, which the core also takes as "gone".
+      abortPage(`page:${prev.id}`);
+    }
   }
   currentPage = page.id;
   setRequestOrigin(`page:${page.id}`);

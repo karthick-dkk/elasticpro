@@ -43,6 +43,9 @@ const TABLE: &[(&str, &str)] = &[
     ("name_taken", "EP-207"),
     ("aborted", "EP-208"),
     ("blocked_readonly", "EP-209"),
+    ("overloaded", "EP-214"),
+    ("queue_timeout", "EP-215"),
+    ("response_too_large", "EP-216"),
     // 3xx: config, storage and secrets
     ("no_config", "EP-301"),
     ("parse_error", "EP-302"),

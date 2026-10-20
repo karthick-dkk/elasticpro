@@ -135,6 +135,23 @@ impl ActivityEvent {
         })
     }
 
+    /// Something the core did by itself — the request reaper closing a stuck record, the
+    /// task reaper cancelling an orphaned search — recorded like an action, by "system".
+    pub fn system(action: &str, edition: Edition, cluster: Option<&str>, method: Option<&str>, path: Option<&str>, reason: String) -> ActivityEvent {
+        ActivityEvent {
+            action: action.to_string(),
+            ok: true,
+            reason: Some(clip(&reason, 300)),
+            user: Some("system".into()),
+            cluster: cluster.map(|c| clip(c, 128)),
+            method: method.map(String::from),
+            path: path.map(|p| clip(p.split('?').next().unwrap_or(p), 512)),
+            via: "system".into(),
+            edition: edition_name(edition).to_string(),
+            ..ActivityEvent::default()
+        }
+    }
+
     /// ECS-shaped, nested. `@timestamp` is stamped here, when the event is written.
     pub fn to_json(&self) -> Value {
         let mut o = Map::new();

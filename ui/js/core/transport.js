@@ -7,7 +7,7 @@
  * the pages did not need to change.
  */
 
-import { stampReply } from './error-codes.js';
+import { stampReply, CORE_CODES } from './error-codes.js';
 
 const T = globalThis.__TAURI__;
 export const isTauri = !!(T && T.core && typeof T.core.invoke === 'function');
@@ -41,11 +41,59 @@ export function setSignedIn(on) { signedIn = !!on; if (!on) session = ''; }
 const expiryListeners = new Set();
 export function onSessionLost(fn) { expiryListeners.add(fn); return () => expiryListeners.delete(fn); }
 
+/**
+ * One AbortController per page origin (`page:<id>`), for the page's own ES requests. Leaving
+ * the page aborts it alongside ABORT_REQUESTS: the browser lets go of the connection, the
+ * core sees the client gone and drops the request — whether it was still waiting for a
+ * slot or already at the cluster. The desktop app has no connection to close; there
+ * ABORT_REQUESTS does it alone.
+ */
+const pageControllers = new Map();
+
+function signalFor(msg) {
+  const origin = msg && msg.type === 'ES' ? String(msg.origin || '') : '';
+  if (isTauri || !origin.startsWith('page:')) return undefined;
+  let c = pageControllers.get(origin);
+  if (!c) { c = new AbortController(); pageControllers.set(origin, c); }
+  return c.signal;
+}
+
+/** Let go of every request the page `origin` still has open. */
+export function abortPage(origin) {
+  const c = pageControllers.get(origin);
+  if (!c) return;
+  pageControllers.delete(origin);
+  c.abort();
+}
+
+const ABORTED = { ok: false, kind: 'aborted', status: 0, message: 'cancelled: the page that asked was left' };
+
+/**
+ * An `overloaded` refusal means nothing was sent: the core's queue was full. A read is
+ * asked once more after the time the core named (bounded here to a quarter second .. ten
+ * seconds); a write never — the person decides whether to press again.
+ */
+export function overloadRetryMs(res, msg) {
+  if (!res || res.kind !== 'overloaded' || !readsOnly(msg)) return 0;
+  const ms = Number(res.retryAfterMs);
+  return Math.min(10000, Math.max(250, Number.isFinite(ms) ? ms : 1000));
+}
+
+async function callOnce(out, signal) {
+  return isTauri ? T.core.invoke('bridge', { msg: out }) : httpBridge(out, signal);
+}
+
 export async function bridge(msg) {
   try {
     // LOGIN carries no session, and LOGOUT carries the one it is ending.
     const out = session && msg.session === undefined ? { ...msg, session } : msg;
-    const res = isTauri ? await T.core.invoke('bridge', { msg: out }) : await httpBridge(out);
+    const signal = signalFor(msg);
+    let res = await callOnce(out, signal);
+    const wait = overloadRetryMs(res, msg);
+    if (wait) {
+      await pause(wait);
+      res = signal && signal.aborted ? ABORTED : await callOnce(out, signal);
+    }
     // An expired or revoked session must not leave the app quietly showing stale data —
     // every caller would otherwise have to notice this for itself.
     if (res && res.kind === 'unauthenticated' && (session || signedIn) && msg.type !== 'LOGIN') {
@@ -55,6 +103,7 @@ export async function bridge(msg) {
     // Every failure leaves here with a code — the core's, or the browser's for one it never sent.
     return stampReply(res);
   } catch (e) {
+    if (e && e.name === 'AbortError') return stampReply({ ...ABORTED, errorCode: CORE_CODES.aborted });
     return stampReply({ ok: false, kind: 'worker_error', message: `ElasticPro server did not answer: ${String(e && e.message || e)}` });
   }
 }
@@ -76,14 +125,14 @@ const PROXY_STATUS = {
 // for messages that change nothing; a 504 never.
 const RETRY_MS = { 429: [500, 1000, 2000], 502: [1500], 503: [1500] };
 const CHANGES = /^(ES|.*_(SET|ADD|REMOVE|DELETE|WRITE|SAVE|CLEAR|CREATE|REVOKE|UPLOAD|UNLOCK|RUN|RESTORE|BEGIN)|WRITE_UNLOCK|PRIME|FORGET|SEAL|OPEN|LOGIN|LOGOUT|BOOTSTRAP_ADMIN|TRUST_.*|UNTRUST_.*|ZABBIX_SYNC|ZABBIX_UNPAIR|REFRESH)$/;
-const readsOnly = (msg) => !CHANGES.test(String(msg.type || ''))
+export const readsOnly = (msg) => !CHANGES.test(String(msg.type || ''))
   || (msg.type === 'ES' && /^(GET|HEAD)?$/i.test(String(msg.method || '').trim()));
 const pause = (ms) => new Promise((r) => setTimeout(r, ms));
 
-async function httpBridge(out) {
+async function httpBridge(out, signal) {
   const body = JSON.stringify(out);
   for (let attempt = 0; ; attempt++) {
-    const r = await fetch('/bridge', { method: 'POST', headers: { 'content-type': 'application/json' }, body });
+    const r = await fetch('/bridge', { method: 'POST', headers: { 'content-type': 'application/json' }, body, signal });
     const waits = (r.status === 429 || readsOnly(out)) ? RETRY_MS[r.status] : null;
     if (waits && attempt < waits.length) {
       const after = Number(r.headers.get('retry-after'));

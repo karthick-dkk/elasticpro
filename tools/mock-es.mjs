@@ -7,15 +7,27 @@
  * paths — tables, charts, coverage strips, snapshot lists — which is where render bugs are.
  *
  *   node tools/mock-es.mjs [port]        # default 9299
+ *   node tools/mock-es.mjs --ports 9300-9335   # a fleet: one cluster per port
  *
- * At scale, for the fleet cache's memory (tools/fleet-load.mjs): MOCK_INDICES=4000 makes
+ * For load testing (tools/load-check.mjs), all optional:
+ *   MOCK_LATENCY_MS   every answer waits this long (default 0)
+ *   MOCK_JITTER_MS    …plus up to this much more, at random (default 0)
+ *   MOCK_INDEX_COUNT  _cat/indices lists this many more indices (a big cluster's answer)
+ *   MOCK_429_RATE     this fraction of requests (0..1) is answered 429 Too Many Requests
+ * Each instance counts the requests it is holding at once; GET /_mock/stats answers
+ * {port, now, peak, total, rejected429} and POST /_mock/reset starts the count again.
+ *
+ * At scale, for the fleet cache's memory (tools/fleet-load.sh): MOCK_INDICES=4000 makes
  * every listing that many indices long — _cat/indices and _cat/shards, the ILM settings and
  * policies' in_use_by, ILM errors for one index in twenty, and MOCK_SNAPSHOTS (default 1000)
  * snapshots whose verbose listing names MOCK_SNAP_INDICES (default 200) indices each. Real
  * production bodies are megabytes; the default fixture's are a few hundred bytes, which is
- * how a cache that does not count its own memory passed every test. MOCK_FLEET=32 listens
- * on 32 consecutive ports from [port], each a cluster of its own name (MOCK_CLUSTER_NAME-i),
- * so one process stands in for a fleet.
+ * how a cache that does not count its own memory passed every test.
+ *
+ * The two index knobs differ on purpose: MOCK_INDEX_COUNT only lengthens _cat/indices and
+ * leaves the five-index fixture every page reads; MOCK_INDICES replaces the fixture with N
+ * generated indices everywhere. Both may be set. A fleet is always --ports: each port is
+ * its own cluster, named MOCK_CLUSTER_NAME-<port> with its own uuid.
  *
  * Read-only fixture: any write returns {"acknowledged": true} without changing anything —
  * except snapshot deletes and index-template PUT/DELETE, which are honoured in memory.
@@ -23,13 +35,37 @@
 
 import http from 'node:http';
 
-const port = Number(process.argv[2]) || 9299;
+/** `--ports 9300-9335` or `--ports 9300,9301`: a fleet of clusters, one per port. */
+function portsFromArgs(argv) {
+  const i = argv.indexOf('--ports');
+  if (i < 0) return [Number(argv[2]) || 9299];
+  const spec = String(argv[i + 1] || '');
+  const out = [];
+  for (const part of spec.split(',').filter(Boolean)) {
+    const [a, b] = part.split('-').map(Number);
+    for (let p = a; p <= (b || a); p++) out.push(p);
+  }
+  if (!out.length || out.some((p) => !Number.isInteger(p) || p < 1 || p > 65535)) {
+    console.error(`mock-es: --ports wants 9300-9335 or 9300,9301; got ${JSON.stringify(spec)}`);
+    process.exit(2);
+  }
+  return out;
+}
+const ports = portsFromArgs(process.argv);
+const fleet = ports.length > 1;
 const bind = process.env.MOCK_BIND || '127.0.0.1';
+const LATENCY_MS = Math.max(0, Number(process.env.MOCK_LATENCY_MS) || 0);
+const JITTER_MS = Math.max(0, Number(process.env.MOCK_JITTER_MS) || 0);
+const INDEX_COUNT = Math.max(0, Number(process.env.MOCK_INDEX_COUNT) || 0);
+const RATE_429 = Math.min(1, Math.max(0, Number(process.env.MOCK_429_RATE) || 0));
 // Identity, so several instances can stand in for a fleet rather than for one cluster.
 // Without this every instance calls itself "mock" with uuid "mock-uuid", and anything
 // that keys clusters by uuid — which the fleet cache does — treats ten of them as one.
 const clusterName = process.env.MOCK_CLUSTER_NAME || 'mock';
 const clusterUuid = process.env.MOCK_CLUSTER_UUID || `${clusterName}-uuid`;
+// In fleet mode each port is its own cluster, by name and by uuid.
+const nameFor = (port) => (fleet ? `${clusterName}-${port}` : clusterName);
+const uuidFor = (port) => (fleet ? `${clusterName}-${port}-uuid` : clusterUuid);
 const DAY = 86400000;
 
 const index = (name, size, status = 'open', health = 'green') => ({
@@ -50,6 +86,11 @@ const INDICES = SCALE ? Array.from({ length: SCALE }, (_, i) => index(scaledName
   index('logstash-beta-2026.09.09', 2e9, 'open', 'yellow'),
   index('metrics-2026.09', 9e8),
 ];
+// MOCK_INDEX_COUNT more, for a _cat/indices answer the size a big cluster gives. Listed
+// only by _cat/indices: the pages' other checks keep reading the five above.
+const CAT_INDICES = INDEX_COUNT
+  ? [...INDICES, ...Array.from({ length: INDEX_COUNT }, (_, i) => index(`bulk-${String(i).padStart(6, '0')}-2026.09.09`, 1e8 + i))]
+  : INDICES;
 
 // Enough snapshots that the snapshot list has more than one page to move through.
 const SNAPSHOTS = Array.from({ length: SCALE ? (Number(process.env.MOCK_SNAPSHOTS) || 1000) : 23 }, (_, i) => {
@@ -125,7 +166,7 @@ const deletedSnapshots = new Set();
 const snapshotsLeft = (list) => list.filter((s) => !deletedSnapshots.has(s.snapshot));
 
 const routes = [
-  [(u) => u === '/', (hit) => ({ cluster_name: hit.name || clusterName, cluster_uuid: hit.uuid || clusterUuid,
+  [(u) => u === '/', ({ port }) => ({ cluster_name: nameFor(port), cluster_uuid: uuidFor(port),
     version: { number: '8.13.4', lucene_version: '9.10.0' } })],
   [(u) => u.startsWith('/_cluster/health'), () => ({ status: 'yellow', number_of_nodes: 3,
     number_of_data_nodes: 3, active_shards: 40, active_primary_shards: 20, unassigned_shards: 2,
@@ -185,7 +226,7 @@ const routes = [
     }
     return { indices: ['logstash-acme-2026.09.09'], fields };
   }],
-  [(u) => u.startsWith('/_cat/indices'), () => INDICES],
+  [(u) => u.startsWith('/_cat/indices'), () => CAT_INDICES],
   // /_cat/recovery, which restorePoll watches after a restore. Without a route here the
   // catch-all answered {acknowledged:true} — an object, not a list of shards — and the
   // poller died with "rows.map is not a function" after five tries. Every shard reports
@@ -540,12 +581,48 @@ routes.unshift(
   [(u) => u === '/_template' || u.startsWith('/_template?'), () => LEGACY_TEMPLATES],
 );
 
-const handler = (name, uuid) => (req, res) => {
+// Across every port this process serves: what a whole fleet is holding at once.
+const all = { now: 0, peak: 0 };
+function serve(port) {
+const gauge = { port, now: 0, peak: 0, total: 0, rejected429: 0 };
+http.createServer((req, res) => {
   let body = '';
   req.on('data', (d) => (body += d));
   req.on('end', () => {
     const url = req.url;
     res.setHeader('content-type', 'application/json');
+    if (url === '/_mock/stats') return res.end(JSON.stringify({ ...gauge, fleetNow: all.now, fleetPeak: all.peak }));
+    if (url === '/_mock/reset' && req.method === 'POST') {
+      Object.assign(gauge, { peak: gauge.now, total: 0, rejected429: 0 });
+      all.peak = all.now;
+      return res.end(JSON.stringify(gauge));
+    }
+    // Held from here until the answer is written or the client lets go.
+    gauge.now++; gauge.total++; all.now++;
+    if (gauge.now > gauge.peak) gauge.peak = gauge.now;
+    if (all.now > all.peak) all.peak = all.now;
+    let held = true;
+    const release = () => { if (held) { held = false; gauge.now--; all.now--; } };
+    res.on('finish', release);
+    res.on('close', release);
+    const delay = LATENCY_MS + (JITTER_MS ? Math.random() * JITTER_MS : 0);
+    const answer = () => handle(req, res, url, body, port);
+    if (RATE_429 && Math.random() < RATE_429) {
+      gauge.rejected429++;
+      res.statusCode = 429;
+      return setTimeout(() => res.end(JSON.stringify({ error: { type: 'es_rejected_execution_exception', reason: 'rejected execution (mock)' }, status: 429 })), delay);
+    }
+    if (delay) setTimeout(answer, delay); else answer();
+  });
+// Loopback by default, and that default is deliberate: a fixture that answers anything
+// on every interface is one an unrelated thing on the network can find and believe. Set
+// MOCK_BIND=0.0.0.0 only to let a container reach it — which is what verifying the
+// hosted stack against it needs, and nothing else should.
+}).listen(port, bind, () => console.log(`mock elasticsearch on http://${bind}:${port}`));
+}
+
+function handle(req, res, url, body, port) {
+    if (res.writableEnded || res.destroyed) return;
     const opaque = req.headers['x-opaque-id'];
     if (opaque) { seenOpaqueIds.push(opaque); if (seenOpaqueIds.length > 50) seenOpaqueIds.shift(); }
     const cancel = req.method === 'POST' && /^\/_tasks\/([^/?]+)\/_cancel/.exec(url);
@@ -591,22 +668,12 @@ const handler = (name, uuid) => (req, res) => {
     }
     if (memoable(url) && memo.has(url)) return res.end(memo.get(url));
     const hit = routes.find(([match]) => match(url));
-    const out = hit ? hit[1]({ body, url, name, uuid }) : { acknowledged: true, url };
+    const out = hit ? hit[1]({ body, url, port }) : { acknowledged: true, url };
     // A route answering an Elasticsearch error shape gets that error's HTTP status too.
     if (out && out.error && typeof out.status === 'number') res.statusCode = out.status;
     const text = JSON.stringify(out);
     if (memoable(url) && res.statusCode === 200) memo.set(url, text);
     res.end(text);
-  });
-};
-// Loopback by default, and that default is deliberate: a fixture that answers anything
-// on every interface is one an unrelated thing on the network can find and believe. Set
-// MOCK_BIND=0.0.0.0 only to let a container reach it — which is what verifying the
-// hosted stack against it needs, and nothing else should.
-const fleet = Math.max(1, Number(process.env.MOCK_FLEET) || 1);
-for (let i = 0; i < fleet; i++) {
-  const name = fleet > 1 ? `${clusterName}-${i}` : clusterName;
-  const uuid = fleet > 1 ? `${name}-uuid` : clusterUuid;
-  http.createServer(handler(name, uuid))
-    .listen(port + i, bind, () => console.log(`mock elasticsearch on http://${bind}:${port + i}${fleet > 1 ? ` (${name})` : ''}`));
 }
+
+for (const p of ports) serve(p);
