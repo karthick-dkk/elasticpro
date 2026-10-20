@@ -18,7 +18,7 @@ import { EXAMPLE_YAML } from '../core/example.js';
 import { saveTextAs } from '../core/platform.js';
 import { editCluster, editJumpHost, editCredentials, editDefaults, unlockSealed, saveRaw, rawClusterOf } from '../ui/config-editor.js';
 import { card, pill, table, empty } from './common.js';
-import { navigateTo } from '../core/intent.js';
+import { navigateTo, intent } from '../core/intent.js';
 import { ALERT_RULES, loadAlertSettings, isEnabled } from '../core/alert-rules.js';
 import { isManagedDefault, isManagedZabbixOption, managedZabbixOptions, MANAGED_NOTE } from '../core/managed.js';
 import { toast } from '../ui/menu.js';
@@ -123,6 +123,9 @@ async function restore(v) {
 export function render(el) {
   host = el;
   loadedSection = null;
+  // Arriving from another page that named a tab (the Request Centre's mode link) opens it.
+  if (intent.settings && intent.settings.section && SECTIONS.some((x) => x.id === intent.settings.section)) section = intent.settings.section;
+  intent.settings = null;
   // draw() asks for whatever the open section needs. loadSink is the exception: its
   // answer decides whether the Scheduled log delay tab exists at all, so it has to be
   // asked before the bar can be drawn correctly — and it redraws when it lands.

@@ -471,6 +471,54 @@ table.tbl tr.kv td.v { font-size: 12px; word-break: break-all; }
 .tbl-empty.rich .detail { font-size: 11px; color: var(--text-muted); max-width: 60ch; word-break: break-word; }
 .tbl-empty.rich .acts { display: flex; gap: 6px; flex-wrap: wrap; justify-content: center; margin-top: 2px; }
 
+/* ------------------------------ Request Centre ------------------------------ */
+/* The answer first (status + the Stop all traffic card), the limits as chips, then a table
+   to scan: every column left-aligned, a path on one line with an ellipsis. */
+.rq-top { display: flex; flex-wrap: wrap; gap: 14px; align-items: stretch; margin-bottom: 12px; }
+.rq-status, .rq-stop { background: var(--surface-1); border: 1px solid var(--border); border-radius: var(--radius); padding: 14px 16px; min-width: 0; }
+.rq-status { flex: 999 1 480px; display: flex; flex-direction: column; gap: 6px; }
+.rq-stop { flex: 1 1 400px; display: flex; flex-direction: column; gap: 8px; border-color: color-mix(in srgb, var(--critical) 35%, var(--border)); }
+.rq-stop.paused { background: var(--warning-bg); border-color: color-mix(in srgb, var(--warning) 55%, var(--border)); }
+.rq-head { display: flex; align-items: center; gap: 10px; }
+.rq-head h2, .rq-stop h2 { margin: 0; font-size: 18px; font-weight: 650; letter-spacing: -.01em; }
+.rq-stop h2 { font-size: 14.5px; }
+.rq-status p, .rq-stop p { margin: 0; font-size: 13px; line-height: 1.5; color: var(--text-secondary); }
+.rq-status p { padding-left: 22px; }
+.rq-status p a { color: var(--accent); font-weight: 600; }
+.rq-stop-act { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: auto; }
+.rq-dot { flex: none; width: 12px; height: 12px; border-radius: 50%; background: var(--text-muted); }
+.rq-dot.green { background: var(--good); } .rq-dot.yellow { background: var(--warning); }
+.rq-dot.red { background: var(--critical); } .rq-dot.accent { background: var(--accent); }
+.rq-tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 10px; margin-bottom: 12px; }
+.rq-limits { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; margin: 0 0 12px; font-size: 12.5px; }
+.rq-limits-k { font-size: 11px; font-weight: 700; letter-spacing: .05em; text-transform: uppercase; color: var(--text-muted); margin-right: 2px; }
+.rq-chip { display: inline-flex; align-items: baseline; gap: 4px; padding: 3px 10px; border-radius: 999px; background: var(--surface-2); border: 1px solid var(--border); color: var(--text-secondary); white-space: nowrap; }
+.rq-chip b { color: var(--text-primary); font-variant-numeric: tabular-nums; }
+.rq-hk { margin-top: 14px; }
+.rq-hk > summary { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; cursor: pointer; padding: 8px 12px; list-style: none;
+  background: var(--surface-1); border: 1px solid var(--border); border-radius: var(--radius); font-size: 12.5px; }
+.rq-hk > summary::-webkit-details-marker { display: none; }
+.rq-hk > summary .rq-more { margin-left: auto; color: var(--accent); font-weight: 600; }
+.rq-hk[open] > summary { border-bottom-left-radius: 0; border-bottom-right-radius: 0; }
+.rq-hk[open] > .card { border-top-left-radius: 0; border-top-right-radius: 0; border-top: 0; }
+.rq-page table.tbl td.num, .rq-page table.tbl th.num { text-align: left; }
+table.rq-tbl { table-layout: fixed; min-width: 980px; }
+table.rq-tbl th, table.rq-tbl td { text-align: left; }
+table.rq-tbl td { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+table.rq-tbl td.rq-n { font-variant-numeric: tabular-nums; }
+table.rq-tbl td.rq-pathcell { padding-top: 0; padding-bottom: 0; }
+table.rq-tbl .rq-via { font-size: 11px; font-weight: 400; overflow: hidden; text-overflow: ellipsis; }
+table.rq-tbl tr.inflight td { background: var(--accent-soft); }
+.rq-path { display: block; width: 100%; padding: 7px 0; border: 0; background: transparent; color: var(--text-primary); text-align: left; cursor: copy;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.rq-path:hover { color: var(--accent); }
+.rq-tag { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 11px; background: var(--surface-2); color: var(--text-secondary); border: 1px solid var(--border); }
+.rq-tag.person { background: var(--accent-soft); color: var(--accent); border-color: color-mix(in srgb, var(--accent) 30%, transparent); }
+.rq-result { display: inline-flex; align-items: center; gap: 6px; font-variant-numeric: tabular-nums; }
+.rq-rdot { width: 8px; height: 8px; border-radius: 50%; background: var(--good); flex: none; }
+.rq-result.warn { color: var(--warning-ink); } .rq-result.warn .rq-rdot { background: var(--warning); }
+.rq-result.err { color: var(--critical-ink); font-weight: 600; } .rq-result.err .rq-rdot { background: var(--critical); }
+
 /* ------------------------- Clusters page summary table ---------------------- */
 /* The table is part of the page: every row is in it and the page scrolls. It used to sit in
    a box of its own, height-limited so its sticky head and its sideways scrollbar stayed on
