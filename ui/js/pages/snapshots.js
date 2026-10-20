@@ -20,6 +20,7 @@ import {
   snapshotIndicesDialog,
 } from '../ui/snapshot-dialogs.js';
 import { pagerBar } from '../lib/pager.js';
+import { takeFocus, revealFocus } from '../core/focus.js';
 import { listingTitle, listingEmptyText } from '../core/snapshot-evidence.js';
 import { SNAPSHOT_PAGE_SIZES, snapshotPage, snapshotCsvRows, filterSnapshots, newestFirst } from '../core/snapshot-list.js';
 
@@ -30,8 +31,12 @@ let host = null;
  */
 const ui = { repo: {}, days: 60, view: 'snapshots', page: {}, q: {}, perPage: SNAPSHOT_PAGE_SIZES[0] };
 
+/** Which section an alert's link wants open and in view (core/focus.js): repos | policies. */
+let focusSection = null;
+
 export function render(el) {
   host = el;
+  { const f = takeFocus('snapshots'); if (f) { if (f.view) ui.view = f.view; focusSection = f.section || null; } }
   el.classList.add('dense');   // long tables: fit more on one screen
   syncWrites().then(draw).catch(() => {});
   draw();
@@ -72,7 +77,7 @@ function blockSig(c) {
   // The page and the search are not here: moving through pages or typing redraws only the
   // table under them (see snapshotsCard), and a rebuild reads them from `ui` anyway.
   return [clusterRev(c.id), objId(state.data.get(c.id)), objId(client(c.id)), ui.repo[c.id] || '', ui.days, ui.view,
-    ui.perPage, writesAllowed(), fleetMode(), folded(), minute()].join('|');
+    ui.perPage, writesAllowed(), fleetMode(), folded(), focusSection, minute()].join('|');
 }
 
 /**
@@ -98,6 +103,7 @@ function draw() {
   const blocks = list.map((c) => built.get(c.id, blockSig(c), () => clusterBlock(c), () => placeholder(c)));
   mount(host, viewTabs(), ...blocks, list.length ? null : empty('No cluster selected'));
   built.end();
+  if (focusSection && revealFocus(host, `[data-focus="${focusSection}"]`)) focusSection = null;
   if (built.incomplete && !moreTimer) {
     moreTimer = setTimeout(() => { moreTimer = null; if (host && host.isConnected) draw(); }, 0);
   }
@@ -249,6 +255,9 @@ function snapshotsView(c, repos, selected, snaps) {
 
 /* ---------------------------- Snapshot Summary view ---------------------------- */
 
+/** Mark a section so a link from an alert can scroll to it (core/focus.js revealFocus). */
+function focusable(name, el) { el.dataset.focus = name; return el; }
+
 function summaryView(c, d, repos, selected, snaps) {
   const policies = d.slm || [];
   const cov = coverage(snaps, ui.days);
@@ -271,19 +280,19 @@ function summaryView(c, d, repos, selected, snaps) {
       statTile('Snapshot runs cover', oldest && newest ? plural(spanDays(oldest.start, newest.start), 'day') : '–',
         cov.missing.length ? `${cov.missing.length} day(s) with no snapshot run` : 'a run every day in the window')),
 
-    collapsible('Repositories', repos.length ? `${repos.length} registered · add or manage` : 'none registered',
+    focusable('repos', collapsible('Repositories', repos.length ? `${repos.length} registered · add or manage` : 'none registered',
       () => h('div',
         repoTable(c, d, repos),
         h('div', { style: { paddingTop: '8px' } },
           h('button.btn.sm.primary', {
             onclick: async () => { if (await createRepositoryDialog(c, d.pathRepo || [])) await reload(c); },
           }, '+ Add repository'))),
-      { key: 'snap-repos' }),
+      { key: 'snap-repos', open: focusSection === 'repos' })),
 
     h('div', { style: { marginTop: '10px' } },
-      collapsible('SLM policies', policies.length ? `${policies.length} configured` : 'none configured',
+      focusable('policies', collapsible('SLM policies', policies.length ? `${policies.length} configured` : 'none configured',
         () => (policies.length ? slmTable(c, policies) : empty(d.slmSupported === false ? 'SLM API not available on this cluster' : 'No SLM policies configured')),
-        { key: 'snap-slm', open: policies.some((p) => { const lf = p.last_failure, ls = p.last_success; return lf && (!ls || lf.time > ls.time); }) })),
+        { key: 'snap-slm', open: focusSection === 'policies' || policies.some((p) => { const lf = p.last_failure, ls = p.last_success; return lf && (!ls || lf.time > ls.time); }) }))),
 
     h('div', { style: { marginTop: '10px' } },
       collapsible('Snapshot availability', `last ${ui.days} days${selected ? ` in ${selected}` : ''}`, () =>

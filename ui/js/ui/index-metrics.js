@@ -51,6 +51,9 @@ export function sourceSizeChart(indices, { onSelect = null } = {}) {
     { format: bytes, topN: 12, labelWidth: 150, onSelect: onSelect || undefined });
 }
 
+/** Which field the card opens on — for a link from an alert about one field's volume. */
+export function setVolumeAnalysisField(field) { if (field) { va.field = field; va.selectedTerm = null; } }
+
 export function volumeAnalysisCard(c, redraw = () => {}) {
   _redraw = redraw;
   const fields = c.volumeFields && c.volumeFields.length ? c.volumeFields : [];

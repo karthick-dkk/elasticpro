@@ -4,8 +4,10 @@ import { EsClient, primeWorker, setBadge, requestStats, workerStatus,
          fleetState, clusterDataset, refreshFleet } from './es.js';
 // lib/fmt is a leaf: no cycle, and two alert sentences need to read like the rest of the UI.
 import { bytes as bytesish, ago, dur } from '../lib/fmt.js';
-import { diskLevel, tuneAlerts, openAlerts, alertCounts } from './alert-tuning.js';
-import { isAcked } from './acks.js';
+import { diskLevel, tuneAlerts, alertCounts } from './alert-tuning.js';
+import { isAcked, ackFor, acksRev } from './acks.js';
+import { mergeAlerts, isOpen } from './alert-groups.js';
+import { alertHistory } from './alert-history.js';
 // Cyclic with field-volume.js, which needs client() from here. Safe because both sides
 // only touch the other inside functions, never while the modules are evaluating.
 import { fieldVolumeSpikes, clearFieldVolume } from './field-volume.js';
@@ -1913,8 +1915,45 @@ const diskHeld = new Map();
  * definition every count on screen uses: the Clusters summary, the nav badge, the top bar
  * and the per-cluster column. The Alerts page lists acknowledged ones too, separately.
  */
-export function openAlertsNow() { return openAlerts(cachedAlerts(), { isAcked, isSilenced: alertSilenced }); }
+export function openAlertsNow() { return mergedAlerts().filter(isOpen); }
 export function openAlertCounts() { return alertCounts(openAlertsNow()); }
+
+/**
+ * Alerts as the Alerts page shows them: repeats of one rule on one cluster merged into one
+ * (core/alert-groups.js), each with its state — open, acknowledged or silenced. The one list
+ * behind every count: the Alerts page, the tab badge, the top bar and the Clusters summary
+ * all read it, so "open" is one definition and one number.
+ *
+ * Memoised on what can change it: the alert list itself, the bus (data, acknowledgements,
+ * silences — see alertsMemo.rev), and the acknowledgement store.
+ */
+const mergedMemo = { alerts: null, rev: -1, acks: -1, at: 0, value: [] };
+function mergeContext(now) {
+  return {
+    now,
+    data: (id) => state.data.get(id) || null,
+    defaults: state.defaults,
+    ackFor, isAcked, silenced: (a) => alertSilenced(a),
+    startOf: (k) => alertHistory.startOf(k),
+    itemFirstSeen: (k, id) => alertHistory.itemFirstSeen(k, id),
+    approxStart: (k) => alertHistory.approxStart(k),
+  };
+}
+/**
+ * `fresh` computes from alerts() itself rather than the memo — for the caller that must see
+ * a change made by hand a moment ago (the notifier, which compares one pass with the next).
+ */
+export function mergedAlerts({ fresh = false } = {}) {
+  const now = Date.now();
+  if (fresh) return mergeAlerts(alerts(), mergeContext(now));
+  const raw = cachedAlerts();
+  const same = alertsMemo.value === mergedMemo.alerts && alertsMemo.rev === mergedMemo.rev
+    && acksRev() === mergedMemo.acks && now - mergedMemo.at < ALERTS_MEMO_MS;
+  if (same) return mergedMemo.value;
+  const value = mergeAlerts(raw, mergeContext(now));
+  Object.assign(mergedMemo, { alerts: alertsMemo.value, rev: alertsMemo.rev, acks: acksRev(), at: now, value });
+  return value;
+}
 
 /** Set by the silences store (core/silences.js) once it has loaded; nothing is silenced before. */
 let alertSilenced = () => false;
@@ -2119,7 +2158,7 @@ function publishPopupSummary() {
         version: (d.info && d.info.version && d.info.version.number) || '',
       };
     });
-    if (globalThis.chrome && chrome.storage && chrome.storage.session) chrome.storage.session.set({ summary: { at: Date.now(), rows, alerts: cachedAlerts().length } });
+    if (globalThis.chrome && chrome.storage && chrome.storage.session) chrome.storage.session.set({ summary: { at: Date.now(), rows, alerts: mergedAlerts().length } });
   } catch (_) { /* storage.session unavailable */ }
 }
 

@@ -1,48 +1,58 @@
-/** Page — everything currently wrong across the fleet, in one place. */
+/** Page — everything currently wrong across the fleet, grouped by cluster. */
 
 import { h, mount, $, tooltip } from '../lib/dom.js';
 import { nodeCache, objId } from '../lib/keyed.js';
 import { ago, dt, toCsv, download, num } from '../lib/fmt.js';
-import { state, bus, alerts, cachedAlerts, clusters, activeClusters, client, fetchOverview, refreshAll, clusterRev, fleetMode, coverage, askFleetDataset } from '../core/state.js';
+import { state, bus, mergedAlerts, invalidateAlerts, clusters, activeClusters, client, fetchOverview, refreshAll, clusterRev, fleetMode, coverage, askFleetDataset } from '../core/state.js';
 import { coverageBar } from '../lib/freshness.js';
 import { readAllState, startReadAll } from '../lib/read-all.js';
-import { card, collapsible, pill, statTile, table, empty, connectionBanner } from './common.js';
-import { hbarList, legend, gauge, STATUS } from '../lib/charts.js';
+import { card, statTile, table, empty, connectionBanner } from './common.js';
 import { navigateTo } from '../core/intent.js';
 import { alertsEmptyState } from '../core/fleet-summary.js';
 import { silenceFor, silences, silence, unsilence, loadSilences, SILENCE_FOR } from '../core/silences.js';
 import { modal, field, select as selectField, text as textField, val } from '../ui/modal.js';
-import { rowMenu, ICON, popover, toast, closePopover } from '../ui/menu.js';
+import { rowMenu, ICON, popover, toast } from '../ui/menu.js';
 import { confirmDialog, inputDialog } from '../ui/modal.js';
 import {
-  loadAcks, loadCurrentUser, currentUser, setCurrentUser, ackFor, isAcked, noteCount,
-  acknowledge, unacknowledge, addNote, removeNote, pruneAcks,
+  loadAcks, loadCurrentUser, currentUser, setCurrentUser, ackFor, isAcked,
+  acknowledgeItems, unacknowledge, addNote, removeNote, pruneAcks, ackRecords,
 } from '../core/acks.js';
-import { pageForProblem } from '../core/alert-rules.js';
-import { ruleOf } from '../core/zabbix-alerts.js';
+import { errorText } from '../core/error-codes.js';
+import {
+  ageShort, filterAlerts, groupAlerts, summaryOf, isOpen, isHandled, GROUP_MODES, toObservations,
+} from '../core/alert-groups.js';
+import { gotoFor, openGoto } from '../core/alert-goto.js';
+import { playbookFor } from '../core/alert-playbooks.js';
+import { relatedFor, historyFor, WINDOW_MS } from '../core/alert-related.js';
+import { alertHistory } from '../core/alert-history.js';
+import { watermarks } from '../core/disk-balance.js';
+import { setFocus } from '../core/focus.js';
 
 let host = null;
-const ui = { level: 'all', cluster: 'all', text: '', show: 'open', view: 'table' };
-
 /**
- * What kind of problem this is, taken from the alert key rather than its wording — the
- * title carries live numbers, the key does not.
+ * What the page is showing. `group` and the collapsed groups are remembered per viewer
+ * (localStorage, if it will have them); the filters are not — they are a question asked,
+ * and the page opens on the answer to the usual one: everything open, grouped by cluster.
  */
-const KIND_LABEL = {
-  unreachable: 'Unreachable',
-  health: 'Cluster health',
-  disk: 'Disk usage',
-  ilm: 'ILM errors',
-  'slm-mode': 'SLM stopped',
-  'slm-fail': 'SLM run failed',
-  'slm-stale': 'Snapshot overdue',
-};
+const ui = { level: 'all', text: '', handled: false, group: 'cluster', expanded: new Set() };
 
-function kindOf(a) {
-  const rest = String(a.key || '').split(':').slice(1).join(':');
-  const base = rest.split(':')[0] || 'other';
-  const full = rest.startsWith('slm-fail') ? 'slm-fail' : rest.startsWith('slm-stale') ? 'slm-stale' : base;
-  return KIND_LABEL[full] || full;
+const PREF_GROUP = 'elasticpro.alerts.group';
+const PREF_COLLAPSED = 'elasticpro.alerts.collapsed';
+
+function readPref(key) { try { return localStorage.getItem(key); } catch (_) { return null; } }
+function writePref(key, value) { try { localStorage.setItem(key, value); } catch (_) { /* private window: not remembered */ } }
+
+/** Group ids the viewer folded, as `<mode>:<id>`. */
+let collapsed = (() => {
+  try { const v = JSON.parse(readPref(PREF_COLLAPSED) || '[]'); return new Set(Array.isArray(v) ? v.map(String) : []); }
+  catch (_) { return new Set(); }
+})();
+function saveCollapsed() { writePref(PREF_COLLAPSED, JSON.stringify([...collapsed])); }
+const groupKey = (g) => `${ui.group}:${g.id}`;
+
+{
+  const saved = readPref(PREF_GROUP);
+  if (GROUP_MODES.includes(saved)) ui.group = saved;
 }
 
 /**
@@ -91,41 +101,11 @@ export function render(el) {
   // Acknowledgements live on this machine; load them before the first paint so rows do
   // not flicker from unacknowledged to acknowledged.
   Promise.all([loadAcks(), loadCurrentUser(), loadSilences()])
-    .then(() => { pruneAcks(alerts().map((a) => a.key)); draw(); })
+    .then(() => { pruneAcks(mergedAlerts().flatMap((m) => [m.key, ...m.keys])); invalidateAlerts(); draw(); })
     .catch(() => {});
   draw();
 }
 export function onData() { if (host && host.isConnected) draw(); }
-
-const PAGE_LABEL = { snapshots: 'Snapshots & SLM', indices: 'Indices', shards: 'Shards', logs: 'Log delay',
-  volume: 'Volume report', automation: 'Automation', overview: 'Clusters' };
-
-/** Which page answers this alert. The mapping is the rule registry's — see pageForProblem. */
-function routeFor(a) {
-  const page = pageForProblem(ruleOf(a), `${a.title} ${a.detail || ''}`);
-  return { page, label: PAGE_LABEL[page] || page };
-}
-
-function filtered(all) {
-  let rows = all;
-  if (ui.level !== 'all') rows = rows.filter((a) => (ui.level === 'critical' ? a.level === 'critical' : a.level !== 'critical'));
-  if (ui.cluster !== 'all') rows = rows.filter((a) => a.cluster && a.cluster.id === ui.cluster);
-  if (ui.show === 'open') rows = rows.filter((a) => !isAcked(a.key) && !silenceFor(a));
-  else if (ui.show === 'acked') rows = rows.filter((a) => isAcked(a.key));
-  else if (ui.show === 'silenced') rows = rows.filter((a) => !!silenceFor(a));
-  const t = ui.text.trim().toLowerCase();
-  if (t) {
-    rows = rows.filter((a) => {
-      const notes = (ackFor(a.key).notes || []).map((n) => n.text).join(' ');
-      return `${a.title} ${a.detail || ''} ${notes}`.toLowerCase().includes(t);
-    });
-  }
-  // critical first, then by cluster name so a fleet reads consistently
-  return [...rows].sort((a, b) => {
-    if ((a.level === 'critical') !== (b.level === 'critical')) return a.level === 'critical' ? -1 : 1;
-    return String(a.cluster && a.cluster.name).localeCompare(String(b.cluster && b.cluster.name));
-  });
-}
 
 /**
  * Rows and connection banners kept between redraws (lib/keyed.js): the page redraws on
@@ -134,95 +114,109 @@ function filtered(all) {
  */
 const built = nodeCache();
 const minute = () => Math.floor(Date.now() / 60000);
+let lastObserved = 0;
+
+/** All notes on a merged alert: those on its own key and on any member's (written before merging). */
+function allNotes(m) {
+  const keys = [...new Set([m.key, ...m.keys])];
+  return keys.flatMap((k) => (ackFor(k).notes || []).map((n) => ({ ...n, key: k })))
+    .sort((a, b) => a.ts - b.ts);
+}
+
+/** The silence covering the whole of a merged alert, else the first covering any member. */
+function silenceOf(m) {
+  const per = m.members.map((a) => silenceFor(a));
+  return per.every(Boolean) ? per[0] : (per.find(Boolean) || null);
+}
+
+function silenceLabel(s) {
+  return s.until ? `silenced until ${new Date(s.until).toLocaleString([], { dateStyle: 'short', timeStyle: 'short' })}` : 'silenced until removed';
+}
 
 function draw() {
+  if (!host || !host.isConnected) return;
   built.begin();
-  const all = cachedAlerts();
-  const rows = filtered(all);
-  const crit = all.filter((a) => a.level === 'critical');
-  const warn = all.filter((a) => a.level !== 'critical');
-  const acked = all.filter((a) => isAcked(a.key));
-  const silencedRows = all.filter((a) => !!silenceFor(a));
-  // Open: neither acknowledged nor silenced — the same definition as every count elsewhere.
-  const open = all.filter((a) => !isAcked(a.key) && !silenceFor(a));
-  const byCluster = new Map();
-  all.forEach((a) => {
-    const k = a.cluster ? a.cluster.id : '?';
-    byCluster.set(k, (byCluster.get(k) || 0) + 1);
-  });
-  const list = clusters();
+  const now = Date.now();
+  // What this browser has seen of each alert (core/alert-history.js): recorded here too,
+  // because the shell only does it when it announces, and an embedded page does not.
+  if (now - lastObserved > 5000) {
+    lastObserved = now;
+    try { if (alertHistory.observe(toObservations(mergedAlerts()), now)) invalidateAlerts(); } catch (_) { /* a convenience */ }
+  }
+  const list = activeClusters();
+  const inView = new Set(list.map((c) => c.id));
+  const all = mergedAlerts();
+  const mine = all.filter((m) => inView.has(m.clusterId));
+  const sum = summaryOf(mine, list.length);
+  const visible = filterAlerts(mine, { level: ui.level, text: ui.text, showHandled: ui.handled,
+    notesOf: (m) => allNotes(m).map((n) => n.text).join(' ') });
+  const groups = groupAlerts(visible, ui.group);
+  const hiddenHandled = ui.handled ? 0 : mine.filter(isHandled).length;
+  const allCollapsed = groups.length > 0 && groups.every((g) => collapsed.has(groupKey(g)));
+  const segBtn = (label, on, onClick, title) => h('button.seg-btn', {
+    type: 'button', 'aria-pressed': String(on), title: title || null, onclick: onClick,
+  }, label);
 
   mount(host,
     ...coverageLines(),
     h('div.grid.c4', { style: { marginBottom: '10px' } },
-      statTile('Open', num(open.length), open.length ? 'not yet acknowledged' : (acked.length || silencedRows.length ? 'all acknowledged or silenced' : 'nothing open')),
-      statTile('Critical', num(crit.filter((a) => !isAcked(a.key)).length), `${num(crit.length)} in total`),
-      statTile('Acknowledged / silenced', `${num(acked.length)} / ${num(silencedRows.length)}`, silences().length ? `${silences().length} silence${silences().length === 1 ? '' : 's'} in force` : 'no silences'),
-      statTile('Clusters affected', num(byCluster.size), `of ${num(list.length)} configured`)),
+      statTile('Critical', h('span', { style: { color: sum.critical ? 'var(--critical-ink)' : null } }, num(sum.critical)),
+        sum.critical ? 'open, need a person' : 'none open'),
+      statTile('Warning', h('span', { style: { color: sum.warning ? 'var(--warning-ink)' : null } }, num(sum.warning)),
+        sum.warning ? 'open' : 'none open'),
+      statTile('Clusters affected', h('span', num(sum.clustersAffected), h('span.muted', { style: { fontSize: '13px', fontWeight: 400 } }, ` of ${num(sum.fleet)}`)),
+        sum.clustersAffected ? 'with an open alert' : 'all clear'),
+      statTile('Acknowledged', num(sum.acknowledged),
+        sum.silenced ? `${num(sum.silenced)} silenced` : (silences().length ? `${silences().length} silence${silences().length === 1 ? '' : 's'} in force` : 'seen, still raised'))),
 
-    h('div', { style: { marginBottom: '10px' } }, statsCard(all, crit, warn, open, acked, byCluster, list)),
-
-    h('div.toolbar',
-      h('label.field', 'Level', (() => {
-        const s = h('select', { onchange: (e) => { ui.level = e.target.value; draw(); } },
-          h('option', { value: 'all' }, `Any (${all.length})`),
-          h('option', { value: 'critical' }, `Critical (${crit.length})`),
-          h('option', { value: 'warning' }, `Warning (${warn.length})`));
-        s.value = ui.level; return s;
-      })()),
-      h('label.field', 'Cluster', (() => {
-        const s = h('select', { onchange: (e) => { ui.cluster = e.target.value; draw(); } },
-          h('option', { value: 'all' }, 'All clusters'),
-          ...list.map((c) => h('option', { value: c.id }, `${c.name}${byCluster.get(c.id) ? ` (${byCluster.get(c.id)})` : ''}`)));
-        s.value = ui.cluster; return s;
-      })()),
-      h('label.field', 'Show', (() => {
-        const sel = h('select', { onchange: (e) => { ui.show = e.target.value; draw(); } },
-          h('option', { value: 'open' }, `Open (${open.length})`),
-          h('option', { value: 'acked' }, `Acknowledged (${acked.length})`),
-          h('option', { value: 'silenced' }, `Silenced (${silencedRows.length})`),
-          h('option', { value: 'all' }, `Everything (${all.length})`));
-        sel.value = ui.show; return sel;
-      })()),
-      h('label.field', 'Search', h('input#alerts-search', { type: 'search', placeholder: 'title, detail or note…', value: ui.text,
-        style: { minWidth: '220px' }, oninput: (e) => { ui.text = e.target.value; draw(); } })),
-      h('label.field', 'View', (() => {
-        const sel = h('select', { onchange: (e) => { ui.view = e.target.value; draw(); } },
-          h('option', { value: 'table' }, 'Table'),
-          h('option', { value: 'graph' }, 'Graph'),
-          h('option', { value: 'both' }, 'Graph + table'));
-        sel.value = ui.view; return sel;
-      })()),
-      h('div', { style: { marginLeft: 'auto', display: 'flex', gap: '6px', alignItems: 'flex-end' } },
+    h('div.toolbar.alerts-bar',
+      h('label.field', 'Search', h('input#alerts-search', { type: 'search', placeholder: 'Search alerts, clusters, nodes', value: ui.text,
+        'aria-label': 'Search alerts', style: { minWidth: '240px' }, oninput: (e) => { ui.text = e.target.value; draw(); } })),
+      h('div.field', h('span', 'Severity'),
+        h('div.seg-group', { role: 'group', 'aria-label': 'Severity' },
+          segBtn('All', ui.level === 'all', () => { ui.level = 'all'; draw(); }),
+          segBtn('Critical', ui.level === 'critical', () => { ui.level = 'critical'; draw(); }),
+          segBtn('Warning', ui.level === 'warning', () => { ui.level = 'warning'; draw(); }))),
+      h('div.field', h('span', 'Group by'),
+        h('div.seg-group', { role: 'group', 'aria-label': 'Group by' },
+          segBtn('Cluster', ui.group === 'cluster', () => setGroup('cluster')),
+          segBtn('Alert type', ui.group === 'type', () => setGroup('type')),
+          segBtn('None', ui.group === 'none', () => setGroup('none'), 'A flat list, critical first'))),
+      h('label.field.check', h('input#alerts-handled', { type: 'checkbox', checked: ui.handled,
+        onchange: (e) => { ui.handled = e.target.checked; draw(); } }), 'Show acknowledged'),
+      h('div.alerts-bar-end',
         h('span.muted', { style: { fontSize: '11.5px' } }, `updated ${ago(state.lastRefresh)}`),
-        h('button.btn.sm', { onclick: () => { ui.level = 'all'; ui.cluster = 'all'; ui.text = ''; ui.show = 'open'; draw(); } }, 'Clear'),
-        h('button.btn.sm', { onclick: () => refreshAll({ force: true, selected: true }) }, '↻ Refresh'))),
+        ui.group !== 'none' && groups.length
+          ? h('button.btn.sm#alerts-collapse-all', { type: 'button',
+              onclick: () => {
+                if (allCollapsed) groups.forEach((g) => collapsed.delete(groupKey(g)));
+                else groups.forEach((g) => collapsed.add(groupKey(g)));
+                saveCollapsed(); draw();
+              } }, allCollapsed ? 'Expand all' : 'Collapse all')
+          : null,
+        h('button.btn.sm', { type: 'button', onclick: () => exportAlerts(mine) }, 'Export CSV'),
+        h('button.btn.sm', { type: 'button', onclick: () => refreshAll({ force: true, selected: true }) }, '↻ Refresh'))),
 
     silencesCard(),
 
-    ui.view !== 'table' && all.length
-      ? h('div', { style: { marginTop: '10px' } }, graphView(rows, all))
-      : null,
+    mine.length
+      ? h('div.agroups', ...groups.map((g) => groupSection(g, mine)),
+          groups.length ? null : h('div.card', h('div.body', empty(
+            ui.text.trim() || ui.level !== 'all' ? 'No alert matches the filter'
+              : 'Nothing open — every alert here is acknowledged or silenced. Tick “Show acknowledged” to see them.'))))
+      : (() => {
+          // Healthy only for the clusters that were read (fleet-summary.js alertsEmptyState).
+          const e = alertsEmptyState({ total: list.length, read: clustersRead(list) });
+          return card('Alerts', e.healthy ? 'nothing to report' : 'nothing raised — see why',
+            h('div', { style: { padding: '26px 0', textAlign: 'center' } },
+              h('div', { style: { fontSize: '26px', marginBottom: '6px' } }, e.healthy ? '✓' : '…'),
+              h('div', { style: { fontWeight: 640 } }, e.title),
+              h('div.muted', { style: { fontSize: '12.5px', marginTop: '3px' } }, e.detail)));
+        })(),
 
-    all.length && ui.view !== 'graph'
-      ? h('div', { style: { marginTop: '10px' } },
-          card(`Alerts (${rows.length}${rows.length !== all.length ? ` of ${all.length}` : ''})`,
-            `${crit.length} critical · ${warn.length} warning · ${acked.length} acknowledged`,
-            alertTable(rows),
-            [h('button.btn.sm', { onclick: () => exportAlerts(all) }, 'Export CSV')]))
+    mine.length
+      ? h('div.alerts-foot', footText(sum, hiddenHandled))
       : null,
-
-    h('div', { style: { marginTop: '10px' } },
-      all.length ? null
-        : (() => {
-            // Healthy only for the clusters that were read (fleet-summary.js alertsEmptyState).
-            const e = alertsEmptyState({ total: list.length, read: clustersRead(list) });
-            return card('Alerts', e.healthy ? 'nothing to report' : 'nothing raised — see why',
-              h('div', { style: { padding: '26px 0', textAlign: 'center' } },
-                h('div', { style: { fontSize: '26px', marginBottom: '6px' } }, e.healthy ? '✓' : '…'),
-                h('div', { style: { fontWeight: 640 } }, e.title),
-                h('div.muted', { style: { fontSize: '12.5px', marginTop: '3px' } }, e.detail)));
-          })()),
 
     // The clusters that cannot be reached at all get their decision buttons here too.
     h('div', { style: { marginTop: '14px' } },
@@ -233,121 +227,244 @@ function draw() {
   built.end();
 }
 
-/* ---------------------------------- graph view -------------------------------- */
-
-/**
- * Alerts as bars, so a fleet is read at a glance instead of scrolled.
- *
- * Two cuts: one bar per cluster — which client is in trouble — and one per kind of
- * problem — whether it is the same fault everywhere. Both respect the filters above,
- * and a bar is clickable: it narrows the page to that cluster.
- */
-/**
- * The shape of what is open, rather than four counts of it.
- *
- * The tiles above answer "how many"; this answers "how bad, where, and what kind" — the
- * three questions asked next. The gauge is the fraction of the fleet currently alerting,
- * which has a real ceiling (every cluster) and so is a position worth drawing rather than
- * a number with an invented maximum.
- */
-function statsCard(all, crit, warn, open, acked, byCluster, list) {
-  const openCrit = crit.filter((a) => !isAcked(a.key)).length;
-  const affected = byCluster.size;
-  const total = list.length || 1;
-
-  // Kind is the first word of the alert key after the cluster id — the family it came
-  // from — which is how "everything is snapshots" becomes visible at a glance.
-  const kinds = new Map();
-  for (const a of open) {
-    const k = String(a.key).split(':')[1] || 'other';
-    kinds.set(k, (kinds.get(k) || 0) + 1);
-  }
-  const byKind = [...kinds.entries()].sort((a, b) => b[1] - a[1]);
-
-  const worst = [...byCluster.entries()]
-    .map(([id, n]) => ({ name: (list.find((c) => c.id === id) || {}).name || id, n }))
-    .sort((a, b) => b.n - a.n).slice(0, 6);
-
-  return card('Alert statistics', `${num(open.length)} open · ${num(acked.length)} acknowledged`,
-    h('div', { style: { display: 'flex', gap: '22px', flexWrap: 'wrap', alignItems: 'flex-start' } },
-      gauge(affected, total, {
-        label: 'clusters alerting',
-        sub: `of ${num(total)}`,
-        format: (v) => String(num(v)),
-        color: openCrit ? STATUS.critical : affected ? STATUS.warning : STATUS.good,
-      }),
-      gauge(openCrit, Math.max(1, open.length), {
-        label: 'of open are critical',
-        sub: open.length ? `of ${num(open.length)}` : 'none open',
-        format: (v) => String(num(v)),
-        color: openCrit ? STATUS.critical : STATUS.good,
-      }),
-      h('div', { style: { flex: '1 1 260px', minWidth: '240px' } },
-        h('div.muted', { style: { fontSize: '11px', marginBottom: '4px' } }, 'open alerts by kind'),
-        byKind.length
-          ? hbarList(byKind.map(([k, n]) => ({
-              key: k, label: k.replace(/-/g, ' '), value: n,
-              color: k.includes('health') || k.includes('master') ? STATUS.critical : STATUS.warning,
-            })), { format: (v) => num(v), topN: 6, labelWidth: 130, showOther: false })
-          : h('div.tbl-empty', 'nothing open')),
-      h('div', { style: { flex: '1 1 220px', minWidth: '200px' } },
-        h('div.muted', { style: { fontSize: '11px', marginBottom: '4px' } }, 'clusters with the most'),
-        worst.length
-          ? hbarList(worst.map((w) => ({ key: w.name, label: w.name, value: w.n })),
-              { format: (v) => num(v), topN: 6, labelWidth: 120, showOther: false })
-          : h('div.tbl-empty', 'none affected'))));
+function setGroup(mode) {
+  if (ui.group === mode) return;
+  ui.group = mode;
+  writePref(PREF_GROUP, mode);
+  draw();
 }
 
-function graphView(rows, all) {
-  const worst = (list) => (list.some((a) => a.level === 'critical') ? 'var(--critical)' : 'var(--warning)');
-
-  const byCluster = new Map();
-  for (const a of rows) {
-    const name = a.cluster ? a.cluster.name : 'unknown';
-    if (!byCluster.has(name)) byCluster.set(name, { id: a.cluster && a.cluster.id, list: [] });
-    byCluster.get(name).list.push(a);
-  }
-
-  const clusterItems = [...byCluster.entries()].map(([name, v]) => {
-    const crit = v.list.filter((a) => a.level === 'critical').length;
-    const ackd = v.list.filter((a) => isAcked(a.key)).length;
-    return {
-      key: v.id || name, label: name, value: v.list.length, color: worst(v.list),
-      sub: [crit ? `${crit} critical` : null,
-            v.list.length - crit ? `${v.list.length - crit} warning` : null,
-            ackd ? `${ackd} acknowledged` : null].filter(Boolean).join(' · '),
-    };
-  });
-
-  const byKind = new Map();
-  for (const a of rows) {
-    const k = kindOf(a);
-    if (!byKind.has(k)) byKind.set(k, []);
-    byKind.get(k).push(a);
-  }
-  const kindItems = [...byKind.entries()].map(([label, list]) => ({
-    key: label, label, value: list.length, color: worst(list),
-    sub: [...new Set(list.map((a) => (a.cluster ? a.cluster.name : '?')))].slice(0, 4).join(', '),
-  }));
-
-  const scale = legend([
-    { label: 'has a critical alert', color: 'var(--critical)' },
-    { label: 'warnings only', color: 'var(--warning)' },
-  ]);
-
-  return h('div.grid.c2',
-    card('Alerts by cluster', `${clusterItems.length} cluster${clusterItems.length === 1 ? '' : 's'} · click a bar to filter`,
-      clusterItems.length
-        ? h('div', hbarList(clusterItems, {
-            format: (v) => String(v), topN: 24, labelWidth: 170, showOther: false,
-            onSelect: (r) => { ui.cluster = ui.cluster === r.key ? 'all' : r.key; draw(); },
-          }), scale)
-        : empty('Nothing matches the filter')),
-    card('Alerts by kind', 'the same fault across the fleet, or different ones',
-      kindItems.length
-        ? hbarList(kindItems, { format: (v) => String(v), topN: 16, labelWidth: 170, showOther: false })
-        : empty('Nothing matches the filter')));
+function footText(sum, hiddenHandled) {
+  const clear = sum.clustersClear;
+  const parts = [`${num(clear)} cluster${clear === 1 ? ' has' : 's have'} no open alerts`];
+  if (hiddenHandled) parts.push(`${num(hiddenHandled)} acknowledged${sum.silenced ? ' or silenced' : ''} hidden`);
+  return parts.join(' · ');
 }
+
+/* ----------------------------------- groups ----------------------------------- */
+
+const levelPill = (level) => h(`span.apill.${level === 'critical' ? 'crit' : 'warn'}`, level === 'critical' ? 'critical' : 'warning');
+
+function groupSection(g, all) {
+  const flat = ui.group === 'none';
+  const isCollapsed = !flat && collapsed.has(groupKey(g));
+  const bodyId = `agroup-${ui.group}-${String(g.id).replace(/[^A-Za-z0-9_-]/g, '_')}`;
+  const toggle = () => {
+    if (isCollapsed) collapsed.delete(groupKey(g)); else collapsed.add(groupKey(g));
+    saveCollapsed(); draw();
+  };
+  const cluster = g.clusterId ? clusters().find((c) => c.id === g.clusterId) : null;
+  const open = g.alerts.filter(isOpen);
+
+  const header = flat ? null : h('div.agroup-head',
+    h('span.adot', { class: g.critical ? 'crit' : 'warn', 'aria-hidden': 'true' }),
+    g.clusterId
+      ? h('a.agroup-name', { href: '#/overview', onclick: (e) => { e.preventDefault(); navigateTo('overview', null, { cluster: g.clusterId }); } }, g.name)
+      : h('span.agroup-name', g.name),
+    g.critical ? h('span.apill.crit', `${g.critical} critical`) : null,
+    g.warning ? h('span.apill.warn', `${g.warning} warning`) : null,
+    h('span.muted.agroup-oldest', `oldest ${ageShort(Date.now() - g.oldest)}`),
+    h('span.agroup-spacer'),
+    h('button.btn.sm', { type: 'button', disabled: !open.length,
+      title: open.length ? `Acknowledge the ${open.length} open alert${open.length === 1 ? '' : 's'} in ${g.name}` : 'Nothing open to acknowledge',
+      onclick: () => ackGroup(g) }, 'Acknowledge all'),
+    cluster ? silenceSplit(cluster) : null,
+    h('button.btn.sm.ghost.agroup-toggle', { type: 'button', 'data-nav': '',
+      'aria-expanded': String(!isCollapsed), 'aria-controls': bodyId,
+      'aria-label': `${isCollapsed ? 'Expand' : 'Collapse'} ${g.name}`,
+      title: isCollapsed ? 'Expand' : 'Collapse', onclick: toggle }, isCollapsed ? '▾' : '▴'));
+
+  return h(`section.agroup${g.critical ? '.has-crit' : ''}${flat ? '.flat' : ''}`, header,
+    isCollapsed ? null : h('div.agroup-body', { id: bodyId }, ...g.alerts.map((m) => alertRow(m, all))));
+}
+
+/** Silence a whole cluster: 1 h in one press, the other durations behind ▾. */
+function silenceSplit(cluster) {
+  const quick = () => doSilenceCluster(cluster, 60);
+  const items = [
+    ...SILENCE_FOR.map(([label, minutes]) => ({ label: `Silence ${cluster.name} for ${label}`, icon: '🔕', onClick: () => doSilenceCluster(cluster, minutes) })),
+    { sep: true },
+    { label: 'With a reason…', icon: '🔕', onClick: () => askSilence('cluster', [cluster.id], cluster.name) },
+    { hint: 'Every alert of the cluster leaves the open counts until then.' },
+  ];
+  return h('span.split',
+    h('button.btn.sm', { type: 'button', title: `Silence every alert of ${cluster.name} for 1 hour (maintenance)`, onclick: quick }, 'Silence 1 h'),
+    rowMenu(items, { label: '▾', title: `Other durations for ${cluster.name}` }));
+}
+
+async function doSilenceCluster(cluster, minutes) {
+  const res = await silence('cluster', cluster.id, minutes, 'From the Alerts page');
+  if (res && res.ok) { toast(`Silenced ${cluster.name}${minutes ? ` for ${SILENCE_FOR.find((x) => x[1] === minutes)[0]}` : ' until removed'}`, 'ok', 3500); draw(); }
+  else toast(`Could not silence ${cluster.name}: ${errorText(res, 'no answer from the server')}`, 'err', 6000);
+}
+
+/* ------------------------------------ rows ------------------------------------ */
+
+/** Plain-words reading of an item list for the cache signature. */
+const itemSig = (m) => m.items.map((i) => `${i.id}|${i.value}|${i.level}|${i.handled ? 1 : 0}`).join(';');
+
+function alertRow(m, all) {
+  const expanded = ui.expanded.has(m.key);
+  const notes = allNotes(m).length;
+  const sil = silenceOf(m);
+  const siblingSig = expanded ? all.filter((x) => x.clusterId === m.clusterId).map((x) => `${x.key}@${Math.floor(x.since / 60000)}`).join(',') : '';
+  const sig = [ui.group, m.level, m.title, m.count, m.detail, m.state, m.newSince, m.ackedBy, m.ackedAt, Math.floor(m.since / 60000),
+    m.approxSince, itemSig(m), expanded, notes, sil ? sil.id || sil.until : '', siblingSig, expanded ? minute() : '',
+    expanded ? ackRecords().length : '', m.problemUrl || '', objId(m.cluster)].join('\u0001');
+  return built.get(`row:${m.key}`, sig, () => buildRow(m, all, { expanded, notes, sil }));
+}
+
+function buildRow(m, all, { expanded, notes, sil }) {
+  const g = gotoFor(m);
+  const handled = isHandled(m);
+  const panelId = `apanel-${m.key.replace(/[^A-Za-z0-9_-]/g, '_')}`;
+  const where = ui.group === 'cluster' ? null : (m.cluster ? m.cluster.name : m.clusterId);
+
+  const stateNote = m.state === 'silenced' ? (sil ? silenceLabel(sil) : 'silenced')
+    : m.state === 'acked' ? `acknowledged${m.ackedBy ? ` by ${m.ackedBy}` : ''}${m.ackedAt ? ` · ${ago(m.ackedAt)}` : ''}`
+    : null;
+
+  const toggle = h('button.btn.sm.ghost.arow-toggle', { type: 'button', 'data-nav': '',
+    'aria-expanded': String(expanded), 'aria-controls': panelId,
+    'aria-label': `${expanded ? 'Hide' : 'Show'} how to fix and related for ${m.title}`,
+    title: expanded ? 'Hide how to fix and related' : 'How to fix, and what else started around it',
+    onclick: () => { if (ui.expanded.has(m.key)) ui.expanded.delete(m.key); else ui.expanded.add(m.key); draw(); } },
+  expanded ? '▴' : '▾');
+
+  // Always there, as the notes column was: a note is how "seen it, ticket 4412" gets written.
+  const notesChip = (() => {
+    const b = h('button.btn.sm.ghost.arow-notes', { type: 'button',
+      title: notes ? `${notes} note(s) — click to add or remove` : 'Add a note',
+      'aria-label': notes ? `${notes} notes on ${m.title}` : `Add a note to ${m.title}`,
+      onclick: (e) => { e.stopPropagation(); openNotes(b, m); } }, notes ? `💬 ${notes}` : '💬');
+    notePeek(b, m);
+    return b;
+  })();
+
+  return h(`div.arow${handled ? '.handled' : ''}${expanded ? '.open' : ''}`,
+    h('div.arow-main',
+      levelPill(m.level),
+      h('div.arow-body',
+        h('div.arow-title',
+          h('b', m.title),
+          m.count ? h('span.muted.arow-count', m.count) : null,
+          where ? h('span.muted.arow-where', `· ${where}`) : null,
+          m.newSince ? h('span.apill.warn', `${m.newSince} new since acknowledged`) : null,
+          stateNote ? h('span.apill.grey', stateNote) : null,
+          m.stale ? h('span.apill.grey', { title: 'The reading is older than its dataset allows' }, 'stale reading') : null),
+        m.detail ? h('div.arow-detail', { title: m.detail }, m.detail) : null,
+        m.snapshot ? h('div.arow-sub.muted', `${dt(m.snapshot.at)} · ${m.snapshot.repo || ''}${m.snapshot.status ? ` · ${m.snapshot.status}` : ''}`) : null),
+      h('span.arow-age', { title: ageTitle(m) }, ageText(m)),
+      goLink(g, m),
+      handled
+        ? h('button.btn.sm', { type: 'button', title: 'Put it back on the open list', onclick: () => doUnack(m) }, 'Re-open')
+        : h('button.btn.sm', { type: 'button', title: 'Mark as seen — it stays until the condition clears', onclick: () => doAck(m) }, 'Ack'),
+      notesChip,
+      toggle,
+      rowMenu([
+        { label: 'Notes & comments…', icon: '💬', onClick: (e) => openNotes(e.target.closest('button') || e.target, m) },
+        { label: `Go to ${g.label}`, icon: ICON.console, onClick: () => openGoto(g), disabled: !g.page },
+        { sep: true },
+        { label: 'Silence this alert…', icon: '🔕', onClick: () => askSilence('alert', m.keys, m.title) },
+        m.cluster ? { label: `Silence ${m.cluster.name} (maintenance)…`, icon: '🔕', onClick: () => askSilence('cluster', [m.clusterId], m.cluster.name) } : null,
+        sil ? { label: 'Remove the silence', icon: '🔔', onClick: () => doUnsilence(m) } : null,
+        { sep: true },
+        { hint: `key: ${m.key}` },
+      ].filter(Boolean), { title: `Actions for ${m.title}` })),
+    expanded ? detailPanel(m, all, panelId) : null);
+}
+
+function ageText(m) { return `${ageShort(Date.now() - m.since)}${m.approxSince ? '+' : ''}`; }
+function ageTitle(m) {
+  return `Since ${dt(m.since)}${m.approxSince ? ' — first seen then; it may have started before this browser had ElasticPro open' : ''}`;
+}
+
+/** "Go to <page> →" — a real link, so it can be middle-clicked, tabbed to and read out. */
+function goLink(g, m, text = null, extra = {}) {
+  if (g.external) {
+    return h('a.btn.sm.golink', { href: g.external, target: '_blank', rel: 'noopener noreferrer', ...extra }, text || 'Open in Zabbix →');
+  }
+  return h('a.btn.sm.golink', { href: `#/${g.page}`, title: `Open ${g.label} for ${m.cluster ? m.cluster.name : m.clusterId}`,
+    onclick: (e) => { e.preventDefault(); openGoto(g); }, ...extra }, text || `Go to ${g.label} →`);
+}
+
+/* --------------------------------- the panel ---------------------------------- */
+
+function detailPanel(m, all, panelId) {
+  const siblings = all.filter((x) => x.clusterId === m.clusterId);
+  const sib = new Map(siblings.map((s) => [s.family, s]));
+  const d = state.data.get(m.clusterId) || {};
+  const pb = playbookFor(m, { defaults: state.defaults, watermarks: watermarks(d.clusterSettings), siblings: sib });
+  return h('div.apanel', { id: panelId },
+    m.items.length > 1 ? itemsList(m) : null,
+    h('div.apanel-grid',
+      h('div.apanel-card', h('b', 'How to fix'),
+        h('div.muted.apanel-cause', `Likely cause: ${pb.cause}`),
+        h('ol.apanel-steps', ...pb.steps.map((s) => stepItem(s, m)))),
+      h('div.apanel-card', h('b', 'Related'), relatedBody(m, siblings))));
+}
+
+function itemsList(m) {
+  const unit = { disk: 'this node →', ilm: 'this index →', repo: 'this repository →', 'slm-fail': 'this policy →', 'slm-stale': 'this policy →',
+    volume: 'this field →' }[m.family] || 'open →';
+  const shown = m.items.slice(0, 50);
+  return h('div.aitems', { role: 'list', 'aria-label': `What ${m.title} is about` },
+    ...shown.map((it) => {
+      const g = gotoFor(m, it);
+      return h('div.aitem', { role: 'listitem' },
+        h('span.aitem-label', it.label),
+        h('span.aitem-value', { class: it.level === 'critical' ? 'crit' : 'warn' }, it.value || ''),
+        it.handled ? h('span.apill.grey', it.silenced ? 'silenced' : 'acknowledged') : null,
+        h('span.muted.aitem-since', `since ${ageShort(Date.now() - it.since)}`),
+        g.page ? goLink(g, m, unit, { class: 'aitem-link' }) : null);
+    }),
+    m.items.length > shown.length ? h('div.muted', { style: { fontSize: '11.5px' } }, `…and ${m.items.length - shown.length} more`) : null);
+}
+
+/** A playbook step: its words, then the links that act on it. */
+function stepItem(s, m) {
+  return h('li',
+    s.text,
+    ...(s.links || []).map((l) => [' ', h('a', { href: `#/${l.page}`,
+      onclick: (e) => { e.preventDefault(); if (l.focus) setFocus(l.page, l.focus); navigateTo(l.page, null, { cluster: m.clusterId }); } }, `${l.label} →`)]).flat(),
+    s.request ? [' ', h('a', { href: '#/console', title: `${s.request.method} ${s.request.path}`,
+      onclick: (e) => { e.preventDefault(); prepareRequest(s.request, m); } }, `${s.request.label || 'Prepare the request in the REST console'} →`)] : null,
+    s.request && s.request.write ? h('span.muted', ' (you review and send; writes still need the unlock)') : null);
+}
+
+/** Open the REST console with the request filled in. It is never sent from here. */
+function prepareRequest(r, m) {
+  navigateTo('console', { method: r.method, path: r.path, body: r.body || '' }, { cluster: m.clusterId });
+}
+
+function relatedBody(m, siblings) {
+  const rows = relatedFor(m, siblings);
+  const hist = historyFor(m, alertHistory.episodes(m.key), ackRecords(),
+    { retentionDays: alertHistory.retentionDays, since: alertHistory.since(), clusterName: m.cluster ? m.cluster.name : m.clusterId });
+  const line = (r) => {
+    if (r.self) return h('span', 'This alert started', m.approxSince ? h('span.muted', ' (first seen then; it may be older)') : null);
+    const a = r.alert;
+    const what = `${a.title}${a.count ? ` ${a.count}` : ''}`;
+    return h('span', what,
+      r.relation === 'caused-by-this' ? [': ', h('b.related-flag', 'probably caused by this'), h('span.muted', ` (started ${r.deltaText}; ${r.why})`)]
+        : r.relation === 'cause-of-this' ? [': ', h('b.related-flag', 'a known cause of this alert'), h('span.muted', ` (started ${r.deltaText}; ${r.why})`)]
+        : h('span.muted', /^first seen/.test(r.deltaText) ? ` (${r.deltaText})` : ` (started ${r.deltaText})`));
+  };
+  return h('div.related',
+    rows.length > 1
+      ? h('div.related-rows', ...rows.map((r) => h('div.related-row', { class: r.self ? 'self' : null },
+          h('span.related-when', r.when), line(r))))
+      : h('div.muted', { style: { fontSize: '12px' } }, 'No other alert on this cluster started within an hour of this one.'),
+    h('div.related-hist',
+      hist.empty
+        ? [h('span', h('b', hist.emptyText)), hist.sinceText ? h('span.muted', hist.sinceText) : null]
+        : [h('span', h('b', hist.lines[0])), h('span', hist.lines[1]),
+           hist.note ? h('span.muted', `Note from that time (${hist.note.by}): “${hist.note.text}”`) : null],
+      h('span.muted.related-foot',
+        `From ElasticPro’s own alert log (what this browser has seen), acknowledgements and notes. Nothing here is guessed: with no history, it says so. “Probably caused by this” appears only for a known cause on the same cluster that started later, within ${Math.round(WINDOW_MS / 60000)} minutes.`)));
+}
+
+/* ------------------------------ acknowledge / silence ------------------------------ */
 
 /** Ask who is acknowledging, once per machine. */
 async function ensureUser() {
@@ -358,34 +475,73 @@ async function ensureUser() {
   return currentUser();
 }
 
-/* ---------------------------------- silences --------------------------------- */
+/** Acknowledge what the alert lists now. Items that arrive later are not covered. */
+async function ackOne(m) { await acknowledgeItems(m.key, m.items.map((i) => i.id)); }
 
-function silenceLabel(s) {
-  return s.until ? `silenced until ${new Date(s.until).toLocaleString([], { dateStyle: 'short', timeStyle: 'short' })}` : 'silenced until removed';
+async function doAck(m) {
+  await ensureUser();
+  await ackOne(m);
+  bus.emit('alerts-changed');   // the open counts (nav badge, top bar) drop it now
+  draw();
 }
 
-/** Silence one alert, or a whole cluster for maintenance: the team's list, on the server. */
-async function askSilence(scope, target, name) {
+async function ackGroup(g) {
+  const open = g.alerts.filter(isOpen);
+  if (!open.length) return;
+  await ensureUser();
+  for (const m of open) await ackOne(m);
+  bus.emit('alerts-changed');
+  toast(`Acknowledged ${open.length} alert${open.length === 1 ? '' : 's'} in ${g.name}`, 'ok', 3000);
+  draw();
+}
+
+async function doUnack(m) {
+  const ok = await confirmDialog(`Re-open ${m.title}?`,
+    'The alert goes back to the open list. Notes written against it are kept.',
+    { yes: 're-open' });
+  if (!ok) return;
+  // The merged record, and any a member had on its own key before alerts were merged.
+  for (const k of new Set([m.key, ...m.keys])) if (isAcked(k)) await unacknowledge(k);
+  bus.emit('alerts-changed');
+  draw();
+}
+
+function askSilence(scope, targets, name) {
   const body = [
-    field('For', selectField('sil-for', '60', SILENCE_FOR.map(([l, m]) => [m === null ? 'none' : String(m), l]))),
+    field('For', selectField('sil-for', '60', SILENCE_FOR.map(([l, mins]) => [mins === null ? 'none' : String(mins), l]))),
     field('Reason', textField('sil-why', '', { placeholder: scope === 'cluster' ? 'e.g. disk replacement, change 4711' : 'e.g. known, ticket 123' }),
       scope === 'cluster'
         ? 'Every alert of this cluster leaves the open counts until then. They stay listed under Silenced.'
         : 'This alert leaves the open counts until then, for everyone. It stays listed under Silenced.'),
   ];
-  const ok = await modal(scope === 'cluster' ? `Silence ${name}` : 'Silence this alert', scope === 'cluster' ? 'maintenance' : name, body,
+  return modal(scope === 'cluster' ? `Silence ${name}` : 'Silence this alert', scope === 'cluster' ? 'maintenance' : name, body,
     (ctx) => [h('div', { style: { marginLeft: 'auto', display: 'flex', gap: '8px' } },
       h('button.btn', { onclick: () => ctx.done(null) }, 'Cancel'),
       h('button.btn.primary', { onclick: async () => {
         const f = val('sil-for');
-        const res = await silence(scope, target, f === 'none' ? null : Number(f), val('sil-why'));
+        let res = null;
+        // One silence per member: the silence list is keyed by the raised alert, which is
+        // what the rest of the app counts. An item that appears later is not silenced.
+        for (const t of targets) {
+          res = await silence(scope, t, f === 'none' ? null : Number(f), val('sil-why'));
+          if (!res || !res.ok) break;
+        }
         if (res && res.ok) ctx.done(true); else ctx.msg((res && res.message) || 'Could not set the silence');
       } }, 'Silence')),
-    ], { width: '480px' });
-  if (ok) { toast(`Silenced ${scope === 'cluster' ? name : 'the alert'}`, 'ok', 3000); draw(); }
+    ], { width: '480px' }).then((ok) => {
+      if (ok) { toast(`Silenced ${scope === 'cluster' ? name : 'the alert'}`, 'ok', 3000); draw(); }
+    });
 }
 
-async function doUnsilence(s) {
+async function doUnsilence(m) {
+  const mine = [...new Set(m.members.map((a) => silenceFor(a)).filter(Boolean))];
+  let res = null;
+  for (const s of mine) { res = await unsilence(s.id); if (!res || !res.ok) break; }
+  if (res && res.ok) { toast('Silence removed', 'ok', 2500); draw(); }
+  else toast(`Could not remove the silence: ${errorText(res, 'no answer from the server')}`, 'err', 6000);
+}
+
+async function doUnsilenceById(s) {
   const res = await unsilence(s.id);
   if (res && res.ok) { toast('Silence removed', 'ok', 2500); draw(); }
   else toast(`Could not remove the silence: ${errorText(res, 'no answer from the server')}`, 'err', 6000);
@@ -395,58 +551,41 @@ function silencesCard() {
   const list = silences();
   if (!list.length) return null;
   const names = new Map(clusters().map((c) => [c.id, c.name]));
-  return h('div', { style: { marginTop: '10px' } }, card('Silences in force', `${list.length} · shared with everyone, kept on the server`,
+  return h('div', { style: { marginBottom: '10px' } }, card('Silences in force', `${list.length} · shared with everyone, kept on the server`,
     table(['What', 'Until', 'Why', 'By', ''], list.map((s) => h('tr',
       h('td', s.scope === 'cluster' ? h('span', h('b', names.get(s.target) || s.target), h('span.muted', ' (whole cluster)')) : h('span.mono', { style: { fontSize: '11.5px' } }, s.target)),
       h('td', s.until ? new Date(s.until).toLocaleString() : 'until removed'),
       h('td.muted', s.reason || '—'),
       h('td.muted', `${s.by} · ${ago(s.at)}`),
-      h('td', { style: { textAlign: 'right' } }, h('button.btn.sm', { onclick: () => doUnsilence(s) }, 'Remove')))), {})));
+      h('td', { style: { textAlign: 'right' } }, h('button.btn.sm', { onclick: () => doUnsilenceById(s) }, 'Remove')))), {})));
 }
 
-async function doAck(a) {
-  await ensureUser();
-  await acknowledge(a.key);
-  bus.emit('alerts-changed');   // the open counts (nav badge, top bar) drop it now
-  draw();
-}
-
-async function doUnack(a) {
-  const ok = await confirmDialog(`Re-open ${a.title}?`,
-    'The alert goes back to the open list. Notes written against it are kept.',
-    { yes: 're-open' });
-  if (!ok) return;
-  await unacknowledge(a.key);
-  bus.emit('alerts-changed');
-  draw();
-}
+/* ----------------------------------- notes ------------------------------------ */
 
 /**
- * Notes on one alert, in a panel anchored to the button that opened it.
- *
- * This used to be a row spliced into the table, which pushed everything below it down
- * the page for the sake of two lines of text. Anchored, it costs no layout at all and
- * dismisses itself on Escape or a click anywhere else.
+ * Notes on one alert, in a panel anchored to the button that opened it. Anchored, it costs
+ * no layout at all and dismisses itself on Escape or a click anywhere else. Notes are
+ * written against the merged alert; any written against a member before merging are shown
+ * too and removed from where they are.
  */
-function openNotes(trigger, a) {
+function openNotes(trigger, m) {
   popover(trigger, (ctx) => {
-    const rec = ackFor(a.key);
-    const notes = (rec.notes || []).slice().sort((x, y) => x.ts - y.ts);
+    const rec = ackFor(m.key);
+    const notes = allNotes(m);
 
     const input = h('input#note-input', {
       type: 'text', placeholder: 'What was found, who is on it, ticket number…',
       style: { flex: '1', minWidth: '190px' },
       onkeydown: async (e) => {
         if (e.key !== 'Enter' || !e.target.value.trim()) return;
-        await saveNote(a, e.target.value);
+        await saveNote(m, e.target.value);
         ctx.rebuild();
       },
     });
 
     return h('div', { style: { display: 'grid', gap: '7px' } },
       rec.acked
-        ? h('div.muted', { style: { fontSize: '11px' } },
-            `Acknowledged by ${rec.ackedBy || 'operator'} ${ago(rec.ackedAt)}`)
+        ? h('div.muted', { style: { fontSize: '11px' } }, `Acknowledged by ${rec.ackedBy || 'operator'} ${ago(rec.ackedAt)}`)
         : null,
       notes.length
         ? h('div', { style: { display: 'grid', gap: '4px' } }, ...notes.map((n) =>
@@ -458,7 +597,7 @@ function openNotes(trigger, a) {
                 title: 'Remove this note',
                 onclick: async () => {
                   if (await confirmDialog('Remove this note?', n.text, { yes: 'remove', danger: true })) {
-                    await removeNote(a.key, n.ts);
+                    await removeNote(n.key, n.ts);
                     ctx.rebuild();
                     draw();
                   }
@@ -471,28 +610,28 @@ function openNotes(trigger, a) {
           onclick: async () => {
             const box = $('#note-input');
             if (!box || !box.value.trim()) return;
-            await saveNote(a, box.value);
+            await saveNote(m, box.value);
             ctx.rebuild();
           },
         }, 'Add')));
   }, {
-    title: `Notes — ${a.cluster ? a.cluster.name : ''}`,
-    sub: a.title,
+    title: `Notes — ${m.cluster ? m.cluster.name : ''}`,
+    sub: m.title,
     width: '340px',
     // The count on the button changes, so the row behind it has to be redrawn.
     onClose: () => draw(),
   });
 }
 
-async function saveNote(a, text) {
+async function saveNote(m, text) {
   await ensureUser();
-  await addNote(a.key, text);
+  await addNote(m.key, text);
   toast('Note added');
 }
 
 /** A read-only peek, so notes can be read without opening anything. */
-function notePeek(el, a) {
-  const notes = (ackFor(a.key).notes || []).slice().sort((x, y) => y.ts - x.ts);
+function notePeek(el, m) {
+  const notes = allNotes(m).reverse();
   if (!notes.length) return;
   // Built once and reused: the shared tooltip re-parents whatever it is given, so a
   // fresh node per mousemove would rebuild this on every pixel.
@@ -510,107 +649,29 @@ function notePeek(el, a) {
   el.addEventListener('click', () => tooltip.hide());
 }
 
-function alertTable(rows) {
-  const trs = [];
-  rows.forEach((a) => {
-    const rec = ackFor(a.key);
-    const notes = noteCount(a.key);
-    const sig = [a.level, a.title, a.detail, a.cluster && a.cluster.id, objId(a.cluster), a.snapshot ? [a.snapshot.id, a.snapshot.repo, a.snapshot.status, a.snapshot.at, a.snapshot.isNew].join('/') : '', a.failingSince || 0,
-      JSON.stringify(rec), notes, minute()].join('\u0001');
-    trs.push(built.get(`row:${a.key}`, sig, () => alertRow(a, rec, notes)));
-  });
-  return table(['Level', 'Cluster', 'Alert', 'Detail', 'Snapshot', 'State', 'Notes', ''], trs,
-    { emptyText: ui.show === 'open' ? 'Nothing open — every alert here is acknowledged.' : 'No alert matches the filter' });
-}
+/* ----------------------------------- export ------------------------------------ */
 
-function alertRow(a, rec, notes) {
-    const r = routeFor(a);
-    const acked = !!rec.acked;
-    return h(`tr${acked ? '.ack-row' : ''}`,
-      h('td', pill(a.level === 'critical' ? 'critical' : 'warning', a.level === 'critical' ? 'red' : 'yellow')),
-      h('td', h('div', { style: { fontWeight: 620 } }, a.cluster ? a.cluster.name : '–'),
-        a.cluster ? h('div.mono.muted', { style: { fontSize: '11px' } }, a.cluster.url) : null),
-      h('td', h('div', a.title),
-        acked ? h('div.muted', { style: { fontSize: '10.5px' } },
-          `ack ${rec.ackedBy || 'operator'} · ${ago(rec.ackedAt)}`) : null),
-      // Two lines, then a click shows the rest: one long detail used to make a row a screen tall.
-      h('td.muted', { style: { fontSize: '12px', maxWidth: '360px' } },
-        a.detail ? h('div.alert-detail', { title: 'Click to show all of it', onclick: (e) => e.currentTarget.classList.toggle('open') }, a.detail) : ''),
-      h('td', snapshotCell(a)),
-      h('td', silenceFor(a) ? pill(silenceLabel(silenceFor(a)), 'grey')
-        : acked ? pill('acknowledged', 'grey') : pill('open', a.level === 'critical' ? 'red' : 'yellow')),
-      h('td', (() => {
-        const btn = h('button.btn.sm.ghost', {
-          title: notes ? `${notes} note(s) — click to add or remove` : 'Add a note',
-          onclick: (e) => { e.stopPropagation(); openNotes(btn, a); },
-        }, `💬 ${notes || ''}`.trim());
-        notePeek(btn, a);          // hover reads them; click edits them
-        return btn;
-      })()),
-      h('td', h('div', { style: { display: 'flex', gap: '4px', justifyContent: 'flex-end' } },
-        acked
-          ? h('button.btn.sm', { title: 'Put it back on the open list', onclick: () => doUnack(a) }, 'Re-open')
-          : h('button.btn.sm.primary', { title: 'Mark as seen — it stays until the condition clears', onclick: () => doAck(a) }, 'ACK'),
-        rowMenu([
-          { label: 'Notes & comments…', icon: '💬',
-            onClick: (e) => openNotes(e.target.closest('button') || e.target, a) },
-          { label: `Go to ${r.label}`, icon: ICON.console,
-            onClick: () => navigateTo(r.page, null, { cluster: a.cluster ? a.cluster.id : null }) },
-          { sep: true },
-          { label: 'Silence this alert…', icon: '🔕', onClick: () => askSilence('alert', a.key, a.title) },
-          a.cluster ? { label: `Silence ${a.cluster.name} (maintenance)…`, icon: '🔕', onClick: () => askSilence('cluster', a.cluster.id, a.cluster.name) } : null,
-          silenceFor(a) ? { label: 'Remove the silence', icon: '🔔', onClick: () => doUnsilence(silenceFor(a)) } : null,
-          { sep: true },
-          { hint: `key: ${a.key}` },
-        ].filter(Boolean), { title: `Actions for ${a.title}` }))));
-}
-
-/**
- * The snapshot an alert is about: which repository, when it ran, and whether that counts
- * as recent.
- *
- * In its own column rather than inside the sentence. "Is the backup current" is the
- * question this page gets asked most, and an answer that has to be read out of prose in a
- * detail cell is one nobody reads. Blank for every alert that is not about a snapshot —
- * most of them.
- */
-function snapshotCell(a) {
-  const s = a.snapshot;
-  if (!s) return h('span.muted', '–');
-  return h('div', { style: { display: 'grid', gap: '2px', minWidth: '150px' } },
-    h('div', { style: { display: 'flex', gap: '6px', alignItems: 'center' } },
-      pill(s.isNew ? 'new' : 'not new', s.isNew ? 'green' : 'yellow'),
-      h('span.mono', { style: { fontSize: '11px' } }, s.status || '')),
-    h('div.muted', { style: { fontSize: '11px' }, title: `${s.id} in ${s.repo}` },
-      `${dt(s.at)} · ${s.repo}`),
-    a.failingSince
-      ? h('div', { style: { fontSize: '11px', color: 'var(--critical)' } },
-          `failing since ${dt(a.failingSince)}`)
-      : null);
-}
-
-function exportAlerts(all) {
+function exportAlerts(merged) {
   download(`es-alerts-${new Date().toISOString().slice(0, 10)}.csv`,
-    toCsv(all.map((a) => {
-      const rec = ackFor(a.key);
-      return {
-        level: a.level,
-        cluster: a.cluster ? a.cluster.name : '',
-        url: a.cluster ? a.cluster.url : '',
-        alert: a.title,
-        detail: a.detail || '',
-        repository: a.snapshot ? a.snapshot.repo : '',
-        snapshot: a.snapshot ? a.snapshot.id : '',
-        snapshot_date: a.snapshot ? new Date(a.snapshot.at).toISOString() : '',
-        snapshot_status: a.snapshot ? a.snapshot.status : '',
-        snapshot_is_new: a.snapshot ? (a.snapshot.isNew ? 'yes' : 'no') : '',
-        failing_since: a.failingSince ? new Date(a.failingSince).toISOString() : '',
-        state: rec.acked ? 'acknowledged' : 'open',
-        acknowledged_by: rec.ackedBy || '',
-        acknowledged_at: rec.ackedAt ? new Date(rec.ackedAt).toISOString() : '',
-        notes: (rec.notes || []).map((n) => `[${new Date(n.ts).toISOString().slice(0, 16)} ${n.by}] ${n.text}`).join(' | '),
-        key: a.key,
-        observed_at: new Date(state.lastRefresh || Date.now()).toISOString(),
-      };
-    })), 'text/csv');
+    toCsv(merged.map((m) => ({
+      level: m.level,
+      cluster: m.cluster ? m.cluster.name : '',
+      url: m.cluster ? m.cluster.url : '',
+      alert: m.title,
+      items: m.items.map((i) => (i.value ? `${i.label} ${i.value}` : i.label)).join(' | '),
+      detail: m.detail || '',
+      since: new Date(m.since).toISOString(),
+      repository: m.snapshot ? m.snapshot.repo : '',
+      snapshot: m.snapshot ? m.snapshot.id : '',
+      snapshot_date: m.snapshot ? new Date(m.snapshot.at).toISOString() : '',
+      snapshot_status: m.snapshot ? m.snapshot.status : '',
+      snapshot_is_new: m.snapshot ? (m.snapshot.isNew ? 'yes' : 'no') : '',
+      state: m.state === 'acked' ? 'acknowledged' : m.state,
+      new_since_acknowledged: m.newSince || 0,
+      acknowledged_by: m.ackedBy || '',
+      acknowledged_at: m.ackedAt ? new Date(m.ackedAt).toISOString() : '',
+      notes: allNotes(m).map((n) => `[${new Date(n.ts).toISOString().slice(0, 16)} ${n.by}] ${n.text}`).join(' | '),
+      key: m.key,
+      observed_at: new Date(state.lastRefresh || Date.now()).toISOString(),
+    }))), 'text/csv');
 }

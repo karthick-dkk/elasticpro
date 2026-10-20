@@ -62,6 +62,7 @@ import * as pRequests from './pages/requests.js';
 import { loadSilences } from './core/silences.js';
 import { setRequestOrigin } from './core/es.js';
 import { UI_CODES, withCode, errorText } from './core/error-codes.js';
+import { registerPages } from './core/page-labels.js';
 
 /**
  * `minRole` is the lowest role the tab is offered to.
@@ -93,6 +94,9 @@ const PAGES = [
   { id: 'accounts',  label: 'Accounts',       icon: '☺', mod: pAccounts,  multi: true,  minRole: 'admin', accountsOnly: true },
   { id: 'settings',  label: 'Config',         icon: '⚙', mod: pSettings,  multi: true,  minRole: 'admin' },
 ];
+
+// The one place a page is named; the pages that link to another read its name from here.
+registerPages(PAGES);
 
 /** The tabs this session may actually use. */
 function visiblePages() {

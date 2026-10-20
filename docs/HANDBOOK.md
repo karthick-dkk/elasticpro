@@ -323,7 +323,23 @@ only while the cluster is not green.
 
 **Open** means neither acknowledged nor silenced, and every count uses that one definition
 (`openAlertsNow()` / `openAlertCounts()`): the Clusters summary, the nav badge, the top bar,
-the per-cluster column, the extension badge.
+the per-cluster column, the extension badge. What is counted is the **merged alert**: every
+alert with the same cluster and the same rule (`<cluster>:<rule>`, `core/alert-groups.js`) is
+one, listing its items. Its level is the worst item's and its age the oldest's. Acknowledging
+it covers the items it had when you did; an item that appears later (a node, a repository)
+opens it again as "N new since acknowledged". Acknowledgements written before merging keep
+covering what they covered.
+
+**History** on an alert (Related → past occurrences) comes from ElasticPro's own alert log
+(`core/alert-history.js`, kept in this browser for 30 days) and from the notes in the
+acknowledgement store. It records what this browser saw while the app was open, says how far
+back it goes, and says "No history yet" rather than a count of zero. "Probably caused by this"
+is shown only for a documented cause on the same cluster that started later within an hour
+(`core/alert-related.js` CAUSES), and never between alerts first seen together at page open.
+
+**The bell** carries one notification per cluster per burst: alerts raised for a cluster within
+two minutes of its first are one entry, "<cluster>: N new alerts", with links to that cluster's
+alerts and to the page for its worst one.
 
 **Silences** silence a whole cluster (maintenance) or one alert for 1 h, 8 h, 24 h, 7 days, or
 until removed, with a reason. They are the team's, kept on the server in

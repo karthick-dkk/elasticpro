@@ -252,11 +252,15 @@ export function toast(message, kind = 'ok', ms = 2600, opts = {}) {
   // A task's progress ticks are not new notifications: they update its bell entry in
   // place, and its card only if that card is still on screen — a running task shows for
   // five seconds, then lives in the bell until it finishes and shows again.
+  // bellOnly: for an entry that belongs in the bell but would be a wall on screen (one per
+  // cluster when a dozen clusters raise alerts at once). noHistory: the opposite — a card
+  // that summarises entries the bell already has.
+  if (opts.bellOnly) { remember(message, k, key, detail, meta, cluster); return null; }
   if (opts.silent) {
     touch(key, message, k, detail, meta, cluster);
     const live = key ? toastWrap.querySelector(`[data-toast-key="${CSS_ESCAPE(key)}"]:not(.out)`) : null;
     if (!live) return null;
-  } else {
+  } else if (!opts.noHistory) {
     remember(message, k, key, detail, meta, cluster);
   }
 
@@ -439,6 +443,17 @@ async function loadServer(older = false) {
 }
 
 /** What the open bell lists: this browser's notices and the core's, one per key. */
+/**
+ * Links under a notice, decided by whoever knows what the notice is about: `fn(entry) →
+ * [{ label, page?, run() }]`. The bell only draws them, so it needs to import nothing from
+ * the alerts (core/notify.js registers the one for alert bursts).
+ */
+let noticeActions = null;
+export function setNotificationActions(fn) { noticeActions = typeof fn === 'function' ? fn : null; }
+function actionsFor(entry) {
+  try { return noticeActions ? noticeActions(entry) || [] : []; } catch (_) { return []; }
+}
+
 export function notificationsShown() {
   const all = fetched.length ? mergeNotifications(history, fetched) : history.slice();
   return retired.size ? all.filter((n) => !retired.has(serverId(n))) : all;
@@ -511,7 +526,14 @@ export function notificationBell() {
             n.kind === 'run' ? h('span.toast-ico.spin') : h('span.toast-ico', { ok: '✓', err: '✕', warn: '!' }[n.kind] || '•'),
             h('div.notif-body', h('div.notif-msg', n.message),
               ...(n.detail || []).map((d) => h('div.notif-detail', d)),
-              h('div.notif-at', [n.meta, n.count > 1 ? `\u00d7${n.count}, last ${agoShort(n.at)}` : agoShort(n.at)].filter(Boolean).join(' · '))))),
+              h('div.notif-at', [n.meta, n.count > 1 ? `\u00d7${n.count}, last ${agoShort(n.at)}` : agoShort(n.at)].filter(Boolean).join(' · ')),
+              (() => {
+                const acts = actionsFor(n);
+                return acts.length ? h('div.notif-actions', ...acts.map((a) => h('a', {
+                  href: a.page ? `#/${a.page}` : '#',
+                  onclick: (e) => { e.preventDefault(); closePopover(); a.run(); },
+                }, a.label))) : null;
+              })()))),
           h('div', { style: { display: 'flex', justifyContent: 'flex-end', gap: '6px', paddingTop: '4px' } },
             server && fetchedMore
               ? h('button.btn.sm', { onclick: async () => { if (await loadServer(true)) c.rebuild(); } }, 'Load more')

@@ -15,6 +15,7 @@ import { confirmDialog } from '../ui/modal.js';
 import { toast } from '../ui/menu.js';
 import { navigateTo } from '../core/intent.js';
 import { roleMayWrite } from '../core/writes.js';
+import { takeFocus, revealFocus } from '../core/focus.js';
 
 let host = null;
 const ui = { showBlocked: true };
@@ -54,8 +55,12 @@ function coverageLine() {
   });
 }
 
+/** The rule that an alert's link asked to see (core/focus.js): opened, brought into view, flashed. */
+let focusRule = null;
+
 export function render(el) {
   host = el;
+  { const f = takeFocus('automation'); if (f && f.rule) focusRule = f.rule; }
   el.classList.add('dense');
   draw();
   // First visit: evaluate without being asked — unless that means reading the fleet.
@@ -119,7 +124,11 @@ function draw() {
         h('div', arm.reason))),
 
     ...activeRules().map((rule) => ruleCard(rule, list)));
+  if (focusRule && revealFocus(host, `[data-rule="${String(focusRule).replace(/["\\]/g, '\\$&')}"]`)) focusRule = null;
 }
+
+/** What an alert names a rule by: the id the person gave their own automation, else the built-in's. */
+const ruleKey = (rule) => (rule.user ? rule.user.id : rule.id);
 
 function ruleCard(rule, list) {
   const perCluster = list.map((c) => {
@@ -139,7 +148,7 @@ function ruleCard(rule, list) {
   const sub = [n ? `${n} proposed` : 'nothing to do',
                nHeld ? `${nHeld} held back` : null].filter(Boolean).join(' · ');
 
-  return h('div', { style: { marginTop: '10px' } },
+  return h('div', { style: { marginTop: '10px' }, dataset: { rule: ruleKey(rule) } },
     collapsible(rule.title, sub,
       () => h('div', { style: { display: 'grid', gap: '10px' } },
         h('div', { style: { display: 'flex', alignItems: 'flex-start', gap: '8px' } },
@@ -157,7 +166,7 @@ function ruleCard(rule, list) {
           // Not run is not "nothing to do": say which it is.
           ? empty(lastRunAt() ? 'Nothing for this rule on any cluster.'
             : 'Not checked yet — read the clusters (Read all, above) or press Run checks.') : null),
-      { key: `auto-${rule.id}`, open: active.length > 0 }));
+      { key: `auto-${rule.id}`, open: active.length > 0 || focusRule === ruleKey(rule) }));
 }
 
 /**

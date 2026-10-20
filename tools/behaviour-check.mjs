@@ -285,18 +285,6 @@ await go('overview');
   ok(/▼/.test(v.textContent), `overview: second click should reverse, header reads "${v.textContent}"`);
 }
 
-/* ---------------------------- alerts show their shape ---------------------------- */
-
-await go('alerts');
-{
-  const titles = [...doc.querySelectorAll('section.card header h2')].map((x) => x.textContent);
-  ok(titles.includes('Alert statistics'), `alerts: no statistics card, saw ${titles.join(' | ')}`);
-  // Two gauges, drawn as arcs rather than written as numbers.
-  const paths = doc.querySelectorAll('section.card svg path').length;
-  ok(paths >= 2, `alerts: expected gauge arcs, found ${paths} path(s)`);
-  ok(/clusters alerting/.test(doc.body.textContent), 'alerts: the fleet gauge is unlabelled');
-}
-
 await go('indices');
 // The Indices page is for managing indices. The volume breakdown moved to the Volume
 // report; what must be on THIS page is the table and the controls that act on it.
@@ -1497,7 +1485,7 @@ if (config.clusters.length >= 2 && viaFleet) {
   const st = await load('core/state.js');
   const { DEFAULTS } = await load('core/config.js');
   const said = [];
-  const spy = (msg, kind) => said.push({ msg, kind });
+  const spy = (msg, kind, ms, opts) => said.push({ msg, kind, opts });
 
   // Its own state: the task section above emptied state.config to run against stubs, and
   // alerts() walks the configured clusters — with none, there is nothing to announce and
@@ -1534,7 +1522,7 @@ if (config.clusters.length >= 2 && viaFleet) {
   d.snapshots = { 'already-broken': [], daily: [] };
   const fresh = notify.announceNewAlerts({ notify: spy });
   ok(fresh.length === 1, `a newly broken repository should announce once, announced ${fresh.length}`);
-  ok(said.length === 1 && /daily/.test(said[0].msg), `announcement text: ${JSON.stringify(said)}`);
+  ok(said.length === 1 && /1 new alert/.test(said[0].msg) && /daily/.test((said[0].opts.detail || []).join(' ')), `announcement text: ${JSON.stringify(said)}`);
 
   said.length = 0;
   notify.announceNewAlerts({ notify: spy });
@@ -1545,8 +1533,9 @@ if (config.clusters.length >= 2 && viaFleet) {
   d.snapshots = {};
   said.length = 0;
   notify.announceNewAlerts({ notify: spy });
-  ok(said.length === 1 && /5 new alerts/.test(said[0].msg),
-    `five at once should collapse to one summary, got ${JSON.stringify(said)}`);
+  // Five repositories on one cluster are one merged alert, so one notice about five items — not a wall.
+  ok(said.length === 1 && /1 new alert/.test(said[0].msg),
+    `five at once on one cluster should be one notice, got ${JSON.stringify(said)}`);
 }
 
 /* -------------- accounts keeps the two kinds of user apart -------------- */
@@ -2146,11 +2135,244 @@ if (viaFleet) {
   }
 }
 
+/* ------------- alerts: grouped by cluster, repeats merged, a way on from each ------------- */
+
+// Last, on purpose: it follows links to other pages, which selects clusters and leaves a request
+// prepared in the console. Nothing after it would be checking what it thinks it is checking.
+
+{
+  const st = await load('core/state.js');
+  const acks = await load('core/acks.js');
+  const notify = await load('core/notify.js');
+  const { DEFAULTS } = await load('core/config.js');
+  // The harness's IndexedDB never completes a transaction, so anything that awaits a write
+  // (an acknowledgement is one) would wait for ever. The browser's does; here a Map stands in,
+  // answering at once — what is under test is what the page does with the records.
+  const { idb } = await load('lib/idb.js');
+  const realIdb = { putAck: idb.putAck, delAck: idb.delAck, allAcks: idb.allAcks, setKV: idb.setKV, getKV: idb.getKV };
+  const ackRows = new Map();
+  Object.assign(idb, {
+    putAck: async (r) => { ackRows.set(r.key, JSON.parse(JSON.stringify(r))); return true; },
+    delAck: async (k) => { ackRows.delete(k); return true; },
+    allAcks: async () => [...ackRows.values()],
+    setKV: async () => true,
+    getKV: async (k) => (k === 'ackUser' ? 'qa' : undefined),
+  });
+  const saved = { config: st.state.config, data: st.state.data, clients: st.state.clients,
+    selected: st.state.selected, defaults: st.state.defaults };
+
+  // Its own fleet: the real one answers with whatever the mock happens to be doing, and
+  // this is about how a known set of alerts is laid out and what each button does.
+  const node = (name, used) => ({ node: name, 'disk.used': String(used), 'disk.total': '100', 'disk.avail': String(100 - used), shards: '10' });
+  const healthy = () => ({ reachable: true, health: { status: 'green', unassigned_shards: 0 }, slm: [], repos: [], snapshots: {} });
+  const fleet = () => ({
+    a: { ...healthy(), health: { status: 'yellow', unassigned_shards: 4 },
+         disk: { percent: 91, nodes: [node('es-hot-1', 89), node('es-hot-2', 88), node('es-hot-3', 86)] },
+         ilmErrorCount: 2, ilmErrors: { 'logs-1': { failed_step: 'rollover' }, 'logs-2': { failed_step: 'rollover' } } },
+    k: { reachable: false },
+    b: { ...healthy(), slmStatus: { operation_mode: 'STOPPED' } },
+    q: healthy(),
+  });
+  const names = { a: 'atlas-prod', k: 'kestrel-dc', b: 'bravo-ci', q: 'quiet-lab' };
+  st.state.defaults = { ...DEFAULTS, diskWarnPercent: 85, diskCritPercent: 90 };
+  st.state.config = { clusters: Object.entries(names).map(([id, name]) => ({ id, name, url: `http://${id}.example:9200`, enabled: true })) };
+  st.state.selected = 'all';
+  st.state.clients = new Map(Object.keys(names).map((id) => [id, { state: 'online' }]));
+  st.state.data = new Map(Object.entries(fleet()));
+  await acks.setCurrentUser('qa');
+  for (const k of ['a:disk', 'a:health', 'a:ilm', 'a:disk-balance', 'k:unreachable', 'b:slm-mode']) await acks.unacknowledge(k);
+  st.invalidateAlerts();
+
+  // The harness turns a.click() into a no-op (it only captures downloads), so a link is followed
+  // the way a browser does it: by dispatching the click.
+  const follow = (a) => a.dispatchEvent(new window.MouseEvent('click', { bubbles: true, cancelable: true }));
+  const navs = [];
+  const onNav = (e) => navs.push(e.detail);
+  window.addEventListener('ep:navigate', onNav);
+  try {
+    await go('alerts');
+    const groupNames = () => [...doc.querySelectorAll('#view .agroup-name')].map((x) => x.textContent);
+    const press = (label) => [...doc.querySelectorAll('#view .seg-btn')].find((b) => b.textContent === label);
+
+    // Default: grouped by cluster, worst first, then how many alerts, then name.
+    ok(press('Cluster') && press('Cluster').getAttribute('aria-pressed') === 'true', 'alerts: Cluster is not the default grouping');
+    ok(JSON.stringify(groupNames()) === JSON.stringify(['atlas-prod', 'kestrel-dc', 'bravo-ci']),
+      `alerts: groups should be atlas-prod, kestrel-dc, bravo-ci — worst, then most, then name — saw ${groupNames().join(', ')}`);
+    const tile = (k) => [...doc.querySelectorAll('#view .stat')].find((t) => t.querySelector('.k').textContent === k);
+    for (const k of ['Critical', 'Warning', 'Clusters affected', 'Acknowledged']) ok(!!tile(k), `alerts: no "${k}" tile`);
+    ok(tile('Clusters affected') && /3\s*of 4/.test(tile('Clusters affected').textContent), `alerts: clusters affected reads "${tile('Clusters affected') && tile('Clusters affected').textContent}"`);
+    ok(/1 cluster has no open alerts/.test(doc.querySelector('#view .alerts-foot').textContent), `alerts: footer reads "${doc.querySelector('#view .alerts-foot').textContent}"`);
+    ok(!!doc.querySelector('#view .agroup-head a.agroup-name'), 'alerts: the cluster name in a group header is not a link');
+
+    // The merged disk alert: one row, three nodes inside, opened with its toggle.
+    const row = (title) => [...doc.querySelectorAll('#view .arow')].find((r) => r.querySelector('.arow-title b').textContent.startsWith(title));
+    let disk = row('Disk usage above 85%');
+    ok(!!disk, `alerts: no merged disk row, rows: ${[...doc.querySelectorAll('#view .arow-title b')].map((x) => x.textContent).join(' | ')}`);
+    if (disk) {
+      ok(/on 3 nodes/.test(disk.textContent), 'alerts: the disk row does not say "on 3 nodes"');
+      ok(!disk.querySelector('.apanel'), 'alerts: the panel is open before anyone asked');
+      const t = disk.querySelector('.arow-toggle');
+      ok(t && t.getAttribute('aria-expanded') === 'false', 'alerts: the toggle does not say it is collapsed');
+      t.click();
+      await settleFor(80);
+      disk = row('Disk usage above 85%');
+      const t2 = disk.querySelector('.arow-toggle');
+      ok(t2.getAttribute('aria-expanded') === 'true', 'alerts: the toggle does not say it is expanded');
+      const items = [...disk.querySelectorAll('.aitem')];
+      ok(items.length === 3, `alerts: expected 3 nodes under the merged disk alert, saw ${items.length}`);
+      ok(items.length && /es-hot-1/.test(items[0].textContent) && /89%/.test(items[0].textContent), `alerts: the fullest node is not first: "${items[0] && items[0].textContent}"`);
+      ok(items.every((i) => i.querySelector('a.aitem-link')), 'alerts: an item has no link of its own');
+      const panel = disk.querySelector('.apanel');
+      ok(/How to fix/.test(panel.textContent) && /Related/.test(panel.textContent), 'alerts: the panel lacks How to fix or Related');
+      ok(/Likely cause/.test(panel.textContent), 'alerts: the playbook names no likely cause');
+      ok(/ILM/.test(panel.textContent), 'alerts: the disk playbook does not point at the ILM errors open on the same cluster');
+      ok(/No history yet for this alert on atlas-prod/.test(panel.textContent), `alerts: no "No history yet" in Related: ${panel.querySelector('.related-hist') && panel.querySelector('.related-hist').textContent}`);
+      const prep = [...panel.querySelectorAll('.apanel-steps a')].filter((a) => /Prepare .* in the REST console/.test(a.textContent));
+      ok(prep.length >= 2, `alerts: expected prepared console requests in the playbook, saw ${prep.length}`);
+      ok([...panel.querySelectorAll('.apanel-steps li')].some((li) => /writes still need the unlock/.test(li.textContent)),
+        'alerts: a prepared write is not labelled as needing the unlock');
+    }
+
+    // A prepared request opens the console filled in and sends nothing.
+    const before = sent.length;
+    const writeStep = disk && [...disk.querySelectorAll('.apanel-steps li')].find((li) => /read_only_allow_delete|release them/.test(li.textContent));
+    const writeLink = writeStep && writeStep.querySelector('a[href="#/console"]');
+    ok(!!writeLink, 'alerts: no prepared release request in the disk playbook');
+    if (writeLink) {
+      follow(writeLink);
+      await settleFor(350);
+      const path = doc.getElementById('c-path');
+      ok(path && /_all\/_settings/.test(path.value), `alerts: the console was not filled in, path is "${path && path.value}"`);
+      ok(sent.slice(before).every((m) => !(m.method && m.method !== 'GET' && /_all\/_settings/.test(m.path || ''))), 'alerts: a prepared write was sent');
+      st.state.selected = 'all';
+      await go('alerts');
+      disk = row('Disk usage above 85%');
+    }
+
+    // Go to: a visible link on every alert, and it opens the page with the cluster selected.
+    const rows = [...doc.querySelectorAll('#view .arow')];
+    ok(rows.length >= 5 && rows.every((r) => r.querySelector('a.golink')), `alerts: every alert needs a "Go to" link (${rows.filter((r) => r.querySelector('a.golink')).length} of ${rows.length} have one)`);
+    const link = disk && disk.querySelector('.arow-main a.golink');
+    ok(link && /^Go to .+ →$/.test(link.textContent), `alerts: the link reads "${link && link.textContent}"`);
+    navs.length = 0;
+    if (link) {
+      follow(link);
+      await settleFor(350);
+      ok(navs.some((n) => n.page === 'shards' && n.cluster === 'a'), `alerts: Go to did not navigate to shards with the cluster: ${JSON.stringify(navs)}`);
+      ok(st.state.selected === 'a', `alerts: the cluster was not selected on arrival (${st.state.selected})`);
+      ok(doc.querySelector('#view [data-focus="nodes"]'), 'alerts: the Nodes page did not bring the node table into view');
+      await go('alerts');
+      st.state.selected = 'all';
+      await go('alerts');
+    }
+    const ilmGo = row('Indices in an ILM error step');
+    navs.length = 0;
+    if (ilmGo) {
+      follow(ilmGo.querySelector('a.golink'));
+      await settleFor(450);
+      ok(navs.some((n) => n.page === 'indices' && n.cluster === 'a'), `alerts: the ILM alert did not go to Indices: ${JSON.stringify(navs)}`);
+      ok(/Only indices in an ILM error step/.test(doc.getElementById('view').textContent), 'alerts: the Indices page was not filtered to the ILM errors');
+      st.state.selected = 'all';
+      await go('alerts');
+    }
+
+    // Collapse, remembered.
+    const toggle = (name) => [...doc.querySelectorAll('#view .agroup-toggle')].find((b) => b.getAttribute('aria-label').endsWith(` ${name}`));
+    const kt = toggle('kestrel-dc');
+    ok(kt && kt.getAttribute('aria-expanded') === 'true', 'alerts: a group does not say it is expanded');
+    if (kt) {
+      kt.click();
+      await settleFor(60);
+      const after = toggle('kestrel-dc');
+      ok(after.getAttribute('aria-expanded') === 'false', 'alerts: collapsing did not collapse');
+      ok(/cluster:k/.test(window.localStorage.getItem('elasticpro.alerts.collapsed') || ''), 'alerts: the collapsed group is not remembered');
+      ok(doc.querySelectorAll('#view .agroup').length === 3, 'alerts: collapsing removed the group');
+      after.click();
+      await settleFor(60);
+    }
+    const ca = doc.getElementById('alerts-collapse-all');
+    ok(!!ca, 'alerts: no Collapse all');
+    if (ca) {
+      ca.click(); await settleFor(60);
+      ok([...doc.querySelectorAll('#view .agroup-toggle')].every((b) => b.getAttribute('aria-expanded') === 'false'), 'alerts: Collapse all left a group open');
+      doc.getElementById('alerts-collapse-all').click(); await settleFor(60);
+      ok([...doc.querySelectorAll('#view .agroup-toggle')].every((b) => b.getAttribute('aria-expanded') === 'true'), 'alerts: Expand all left a group closed');
+    }
+
+    // The other groupings and the filters.
+    press('Alert type').click(); await settleFor(60);
+    ok(doc.querySelectorAll('#view .agroup').length >= 4 && !doc.querySelector('#view .agroup-head button.btn.sm + .split'), 'alerts: Alert type grouping');
+    press('None').click(); await settleFor(60);
+    ok(doc.querySelectorAll('#view .agroup.flat').length === 1 && !doc.querySelector('#view .agroup-head'), 'alerts: None should be one flat list');
+    press('Cluster').click(); await settleFor(60);
+    press('Critical').click(); await settleFor(60);
+    ok([...doc.querySelectorAll('#view .arow .apill')].filter((p) => p.textContent === 'warning').length === 0, 'alerts: Critical shows a warning');
+    press('All').click(); await settleFor(60);
+    const search = doc.getElementById('alerts-search');
+    search.value = 'bravo'; search.dispatchEvent(new window.Event('input', { bubbles: true })); await settleFor(60);
+    ok(JSON.stringify(groupNames()) === JSON.stringify(['bravo-ci']), `alerts: searching "bravo" left ${groupNames().join(', ')}`);
+    doc.getElementById('alerts-search').value = '';
+    doc.getElementById('alerts-search').dispatchEvent(new window.Event('input', { bubbles: true })); await settleFor(60);
+
+    // Acknowledge all on one cluster: its open alerts go, the rest stay, the footer says so.
+    const head = [...doc.querySelectorAll('#view .agroup-head')].find((x) => x.querySelector('.agroup-name').textContent === 'atlas-prod');
+    const ackAll = head && [...head.querySelectorAll('button')].find((b) => b.textContent === 'Acknowledge all');
+    ok(!!ackAll, 'alerts: no Acknowledge all in the group header');
+    ok(head && [...head.querySelectorAll('button')].some((b) => /^Silence 1 h$/.test(b.textContent)) && head.querySelector('.split .menu-trigger'), 'alerts: no "Silence 1 h" with its duration menu');
+    if (ackAll) {
+      ackAll.click();
+      await settleFor(200);
+      ok(JSON.stringify(groupNames()) === JSON.stringify(['kestrel-dc', 'bravo-ci']), `alerts: after Acknowledge all the groups are ${groupNames().join(', ')}`);
+      ok(/acknowledged hidden/.test(doc.querySelector('#view .alerts-foot').textContent), `alerts: footer after ack reads "${doc.querySelector('#view .alerts-foot').textContent}"`);
+      ok(st.openAlertsNow().every((m) => m.clusterId !== 'a'), 'alerts: the open counts still include the acknowledged cluster');
+      ok(/^[0-9]+$/.test(tile('Acknowledged').querySelector('.v').textContent.trim()) && Number(tile('Acknowledged').querySelector('.v').textContent) >= 3, `alerts: the Acknowledged tile reads ${tile('Acknowledged').querySelector('.v').textContent}`);
+      // Shown on request, with Re-open.
+      doc.getElementById('alerts-handled').click(); await settleFor(80);
+      ok(groupNames().includes('atlas-prod') && [...doc.querySelectorAll('#view .arow.handled')].length >= 3, 'alerts: Show acknowledged did not show them');
+      ok([...doc.querySelectorAll('#view .arow.handled button')].some((b) => b.textContent === 'Re-open'), 'alerts: an acknowledged alert has no Re-open');
+      // A node that joins an acknowledged disk alert opens it again.
+      st.state.data.get('a').disk.nodes.push(node('es-hot-4', 87));
+      st.invalidateAlerts(); await go('alerts');
+      ok(/1 new since acknowledged/.test(doc.getElementById('view').textContent), 'alerts: a new node did not re-open the acknowledged disk alert');
+      doc.getElementById('alerts-handled').click(); await settleFor(60);
+      ok(st.openAlertsNow().some((m) => m.key === 'a:disk' || m.key === 'a:disk-balance'), 'alerts: the re-opened alert is not counted as open');
+    }
+
+    // The bell: one entry per cluster, with a way to the cluster's alerts.
+    notify.resetAnnounced();
+    notify.announceNewAlerts({ notify: () => {} });
+    const d = st.state.data.get('q');
+    d.health = { status: 'yellow', unassigned_shards: 2 };
+    d.ilmErrorCount = 1; d.ilmErrors = { 'x-1': {} };
+    st.invalidateAlerts();
+    notify.announceNewAlerts();
+    const bell = doc.querySelector('button.bell');
+    ok(!!bell, 'alerts: the shell has no bell');
+    if (bell) {
+      bell.click(); await settleFor(80);
+      const entries = [...doc.querySelectorAll('.notif')].filter((n) => /quiet-lab: \d+ new alert/.test(n.textContent));
+      ok(entries.length === 1 && /quiet-lab: 2 new alerts/.test(entries[0].textContent), `alerts: the bell should have one quiet-lab entry, saw ${entries.length}: ${entries.map((e) => e.textContent).join(' / ')}`);
+      const acts = entries[0] ? [...entries[0].querySelectorAll('.notif-actions a')].map((a) => a.textContent) : [];
+      ok(acts[0] === 'Open quiet-lab alerts →' && /^Go to /.test(acts[1] || ''), `alerts: the bell entry links read ${JSON.stringify(acts)}`);
+      navs.length = 0;
+      if (entries[0]) { follow(entries[0].querySelector('.notif-actions a')); await settleFor(250); }
+      ok(navs.some((n) => n.page === 'alerts' && n.cluster === 'q'), `alerts: "Open quiet-lab alerts" did not go to Alerts for that cluster: ${JSON.stringify(navs)}`);
+      st.state.selected = 'all';
+    }
+  } finally {
+    window.removeEventListener('ep:navigate', onNav);
+    Object.assign(st.state, saved);
+    for (const k of ['a:disk', 'a:health', 'a:ilm', 'a:disk-balance', 'k:unreachable', 'b:slm-mode']) await acks.unacknowledge(k);
+    Object.assign(idb, realIdb);
+    st.invalidateAlerts();
+  }
+}
+
 if (problems.length) {
   console.error(`\n${problems.length} problem(s):`);
   for (const p of problems) console.error('  ✗ ' + p);
   process.exit(1);
 }
-console.log('ok: strip, console, shards, volume, hand-off, refresh, snapshots, tasks, toasts, accounts split, the log-delay preflight, a quiet Config page, the Request Centre and the redraw gate, the request policy, the coverage bar, the Tasks panel and the console tabs, template management');
+console.log('ok: strip, console, shards, volume, hand-off, refresh, snapshots, tasks, toasts, accounts split, the log-delay preflight, a quiet Config page, the Request Centre and the redraw gate, the request policy, the coverage bar, the Tasks panel and the console tabs, template management, the Alerts page grouped by cluster with merged repeats, Go to, playbooks and the bell');
 // The pages leave auto-refresh timers and a live tail running; nothing here waits on them.
 process.exit(0);

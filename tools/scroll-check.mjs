@@ -213,17 +213,16 @@ async function run(browserName, [vw, vh], framed = false) {
   // ...and for the alert list to stop growing: the unreachable clusters fail one by one, and a
   // page that is still gaining rows under the wheel is a measurement of the wait, not of the page
   for (let same = 0, last = -1; Date.now() - t0 < WARM * 2 && same < 8; await sleep(1000)) {
-    const n = await F.evaluate(() => document.querySelectorAll('#view tbody tr').length);
+    const n = await F.evaluate(() => document.querySelectorAll('#view tbody tr, #view .arow').length);
     same = n === last ? same + 1 : 0; last = n;
   }
-  const alertRows = await F.evaluate(() => document.querySelectorAll('#view tbody tr').length);
+  const alertRows = await F.evaluate(() => document.querySelectorAll('#view tbody tr, #view .arow').length);
   const shell = await F.evaluate(() => !!document.querySelector('.head-fix') && !!document.querySelector('#view'));
   check('setup', 'app loaded with data', shell && alertRows > 0, `shell=${shell} alert rows=${alertRows} — start the bridge with the fixture (see --config)`);
   if (!shell) { await browser.close(); return; }
 
   /* ---- 1. every page ---- */
-  // The Alerts page has three views of the same alerts; each lays out differently.
-  const ENTRIES = (framed ? ['alerts'] : PAGES).flatMap((id) => (id === 'alerts' ? [[id, ''], [id, 'graph'], [id, 'both']] : [[id, '']]));
+  const ENTRIES = (framed ? ['alerts'] : PAGES).map((id) => [id, '']);
   for (const [id, variant] of ENTRIES) {
     const label = variant ? `${id}:${variant}` : id;
     await goPage(id);
@@ -250,7 +249,7 @@ async function run(browserName, [vw, vh], framed = false) {
     }
 
     // targets: where the pointer rests
-    const TARGETS = [['content', null], ['row', '#view tbody tr'], ['chart', '#view .chart svg, #view svg.chart, #view .bar-mini'],
+    const TARGETS = [['content', null], ['row', '#view tbody tr, #view .arow'], ['chart', '#view .chart svg, #view svg.chart, #view .bar-mini'],
       ['pill', '#view .pill'], ['code', '#view pre, #view code']];
 
     if (pi.max <= 40) {
@@ -407,7 +406,7 @@ async function run(browserName, [vw, vh], framed = false) {
   }
   {
     // notes popover: needs a long list, so write real notes
-    const btn = '#view tbody tr button:has-text("💬")';
+    const btn = '#view .arow button:has-text("💬")';
     if (await F.locator(btn).count()) {
       await F.evaluate(async () => { await (await import('/js/core/acks.js')).setCurrentUser('qa'); });
       for (let n = 0; n < 24; n++) {
