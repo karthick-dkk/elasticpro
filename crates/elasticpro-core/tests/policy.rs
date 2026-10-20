@@ -128,6 +128,11 @@ async fn a_fresh_install_runs_client_basis_and_reports_it_as_the_defaults() {
     assert_eq!(g["policy"]["concurrency"]["perCluster"], json!(1));
     assert_eq!(g["policy"]["concurrency"]["global"], json!(4));
     assert_eq!(g["policy"], g["defaults"], "no file: the policy running is the shipped one");
+    // Reported either way, so the page can tell "not set" from an older core that does not say.
+    assert!(g.get("pollConcurrencyEnv").is_some(), "{g}");
+    if std::env::var("ELASTICPRO_POLL_CONCURRENCY").is_err() {
+        assert_eq!(g["pollConcurrencyEnv"], Value::Null, "{g}");
+    }
     assert!(g["effective"].as_object().unwrap().values().all(|v| v == "onDemand"), "{g}");
     let st = c.handle(json!({ "type": "FLEET_STATE" })).await;
     assert_eq!(st["policy"]["mode"], json!("on-demand"), "{st}");

@@ -755,6 +755,9 @@ impl Core {
             "running": self.fleet_enabled(),
             // The gate's limits, which the poller's share above can never exceed.
             "gate": self.request_config().limits,
+            // Set on the server, it decides "all clusters at once" for the shipped policy and
+            // for a saved one that leaves it out; null when it is not set.
+            "pollConcurrencyEnv": policy::poll_concurrency_env(),
         });
         match saved {
             Some(Ok(())) => { out["saved"] = json!(true); }

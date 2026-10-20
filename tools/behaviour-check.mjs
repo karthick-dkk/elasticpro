@@ -2363,6 +2363,49 @@ restoreConsole();
       ok(all && Number(all.max) === Math.min(256, gate.global), `policy: overall input allows up to ${all && all.max}, the gate ${gate.global}`);
     }
 
+    // Change 15: each preset says what it sends, as lower bounds from its intervals.
+    const effects = [...doc.querySelectorAll('#pol-effects .pol-effect')];
+    ok(['client', 'auto', 'background', 'hybrid'].every((id) => effects.some((e) => e.dataset.preset === id)),
+      `policy: not every preset says what it sends: ${JSON.stringify(effects.map((e) => e.dataset.preset))}`);
+    ok(effects.length && effects.every((e) => /When nobody is looking: \S/.test(e.textContent) && /When a page is open: \S/.test(e.textContent)),
+      'policy: a preset\'s effect does not have both lines');
+    const effectOf = (id) => (effects.find((e) => e.dataset.preset === id) || {}).textContent || '';
+    ok(/When nobody is looking: no requests\./.test(effectOf('client')), `policy: Client basis effect reads "${effectOf('client')}"`);
+    ok(/When nobody is looking: at least \d+ an? (minute|hour) \(health every \d+ (min|s|h) × \d+/.test(effectOf('hybrid')), `policy: Hybrid effect reads "${effectOf('hybrid')}"`);
+    ok(/Lower bounds: a poll can take more than one request/.test((doc.getElementById('pol-effects') || {}).textContent || ''), 'policy: the effects do not say they are lower bounds');
+    ok(!!doc.getElementById('pol-mode') && doc.querySelectorAll('[aria-label="Request policy presets"] button').length === 4, 'policy: the preset bar and the Mode dropdown are not both kept');
+
+    // Change 16: the numbers fold behind "Fine-tune", folded at first, one line saying them,
+    // and the fold remembered per person.
+    const fine = doc.getElementById('pol-fine');
+    ok(fine && fine.tagName === 'DETAILS', 'fine-tune: the numbers are not behind a Fine-tune fold');
+    if (fine) {
+      const key = 'elasticpro.config.requests.fineTune.' + String(((await load('core/state.js')).state.caller || {}).name || 'local').toLowerCase();
+      const wasOpen = window.localStorage.getItem(key) === '1';
+      ok(fine.open === wasOpen, `fine-tune: open=${fine.open} but the remembered state is ${wasOpen}`);
+      const line = fine.querySelector('summary').textContent;
+      ok(/^Fine-tune\s*All clusters \d+ · per cluster \d+ · per jump host \d+ · timeout \d+ (s|ms) · \S/.test(line), `fine-tune: the folded line reads "${line}"`);
+      ok(!!fine.querySelector('#pol-global') && !!fine.querySelector('#pol-iv-health') && !!fine.querySelector('#pol-watch'), 'fine-tune: the fields and the intervals are not inside the fold');
+      ok(/request gate: \d+/.test(fine.textContent), 'fine-tune: the request gate ceiling is no longer said');
+      if (doc.getElementById('pol-mode').value === 'on-demand') {
+        ok([...fine.querySelectorAll('.pol-iv-note')].every((n) => /not on a schedule: fetched when a page asks/.test(n.textContent)), 'fine-tune: under Client basis an interval is not marked as off the schedule');
+      }
+      // The line follows what is typed inside.
+      const g = doc.getElementById('pol-global');
+      const was = g.value;
+      g.value = '3'; g.dispatchEvent(new window.Event('input', { bubbles: true }));
+      ok(/All clusters 3 ·/.test(fine.querySelector('summary').textContent), `fine-tune: the folded line did not follow the typed value: "${fine.querySelector('summary').textContent}"`);
+      g.value = was; g.dispatchEvent(new window.Event('input', { bubbles: true }));
+      // Opened, it stays open after the page is drawn again, and is put back as it was.
+      fine.open = !wasOpen; fine.dispatchEvent(new window.Event('toggle'));
+      ok((window.localStorage.getItem(key) === '1') === !wasOpen, 'fine-tune: the fold\'s state is not remembered');
+      const other = [...doc.querySelectorAll('nav.subnav button')].find((b) => b.title === 'Defaults');
+      if (other) { other.click(); await settleFor(200); tab.click(); await settleFor(500); }
+      const again = doc.getElementById('pol-fine');
+      ok(again && again.open === !wasOpen, `fine-tune: after a redraw the fold is ${again && again.open ? 'open' : 'folded'}, expected ${!wasOpen ? 'open' : 'folded'}`);
+      if (again) { again.open = wasOpen; again.dispatchEvent(new window.Event('toggle')); }
+    }
+
     const client = [...doc.querySelectorAll('button')].find((b) => b.textContent.startsWith('Client basis'));
     ok(!!client, 'policy: no "Client basis" preset button');
     // An install with no saved policy runs Client basis, and the page says so: that preset

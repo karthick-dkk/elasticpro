@@ -1351,3 +1351,28 @@ html:has(.modal-overlay) { overflow: hidden; scrollbar-gutter: stable; }
 .console-tab-x:hover { color: var(--critical); }
 .console-tab-add { min-width: 30px; }
 .console-tab-count { align-self: center; font-size: 11px; margin-left: 4px; }
+
+/* --------------------------- Config › Requests (15, 16) --------------------------- */
+/* What each preset sends: one block per preset under the preset bar, the selected one marked. */
+.pol-effects { display: grid; gap: 8px; }
+.pol-effects-note { font-size: 11.5px; }
+.pol-effect-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(300px, 100%), 1fr)); gap: 8px; }
+.pol-effect { display: grid; gap: 4px; align-content: start; padding: 9px 12px; border: 1px solid var(--border);
+  border-radius: var(--radius); background: var(--surface-1); font-size: 12px; line-height: 1.45; min-width: 0; }
+.pol-effect.on { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); background: var(--accent-soft); }
+.pol-effect-h { display: flex; align-items: center; gap: 8px; font-size: 12.5px; }
+.pol-effect-on { font-size: 10.5px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; color: var(--accent); }
+.pol-effect-k { font-weight: 600; color: var(--text-secondary); }
+.pol-effect-why { font-size: 11.5px; }
+/* "Fine-tune": folded to one line by default; the numbers and the intervals inside. */
+.pol-fine > summary { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; cursor: pointer; padding: 8px 12px;
+  list-style: none; background: var(--surface-1); border: 1px solid var(--border); border-radius: var(--radius); font-size: 12.5px; }
+.pol-fine > summary::-webkit-details-marker { display: none; }
+.pol-fine > summary::before { content: "\25b8"; color: var(--text-secondary); font-size: 13px; line-height: 1; }
+.pol-fine[open] > summary::before { content: "\25be"; }
+.pol-fine[open] > summary { border-bottom-left-radius: 0; border-bottom-right-radius: 0; }
+.pol-fine-body { display: grid; gap: 12px; padding: 12px; border: 1px solid var(--border); border-top: 0;
+  border-radius: 0 0 var(--radius) var(--radius); min-width: 0; }
+.pol-env { flex-basis: 100%; color: var(--warning-ink); font-size: 12px; }
+tr.pol-iv-idle > td:first-child { color: var(--text-secondary); }
+.pol-iv-note { white-space: normal; font-size: 11.5px; }

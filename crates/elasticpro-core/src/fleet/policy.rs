@@ -83,11 +83,18 @@ impl Default for Concurrency {
     }
 }
 
+/// `ELASTICPRO_POLL_CONCURRENCY` (POLL_CONCURRENCY in config.txt) as the core reads it, or
+/// `None` when it is not set. It replaces the shipped `global`, and the `global` of a saved
+/// file that leaves it out; POLICY_GET reports it so Config → Requests can say so.
+pub fn poll_concurrency_env() -> Option<usize> {
+    env_num("ELASTICPRO_POLL_CONCURRENCY").map(|n| n.clamp(1, 256) as usize)
+}
+
 impl Concurrency {
     /// `ELASTICPRO_POLL_CONCURRENCY` (POLL_CONCURRENCY in config.txt) wins over `global`.
     fn with_global(global: usize, per_cluster: usize) -> Concurrency {
         Concurrency {
-            global: env_num("ELASTICPRO_POLL_CONCURRENCY").unwrap_or(global as u64).clamp(1, 256) as usize,
+            global: poll_concurrency_env().unwrap_or(global.clamp(1, 256)),
             per_cluster,
             tunnel: 6,
         }
