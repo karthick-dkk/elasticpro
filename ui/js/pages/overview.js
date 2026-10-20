@@ -2,25 +2,25 @@
 
 import { h, mount, reconcile } from '../lib/dom.js';
 import { nodeCache, objId } from '../lib/keyed.js';
-import { bytes, num, pct, ago, dt, dur, toCsv, download, healthClass } from '../lib/fmt.js';
-import { state, activeClusters, client, fetchOverview, healthState, refreshAll, openAlertsNow, requestsFor, requestLoad, jvmSummary, clusterRev, fleetMode, coverage, askFleetDataset } from '../core/state.js';
+import { bytes, num, pct, ago, dt, toCsv, download } from '../lib/fmt.js';
+import { state, activeClusters, client, healthState, refreshAll, openAlertsNow, requestsFor, requestLoad, jvmSummary, clusterRev, fleetMode, coverage, askFleetDataset } from '../core/state.js';
 import { coverageBar } from '../lib/freshness.js';
 import { readAllState, startReadAll } from '../lib/read-all.js';
-import { nameList } from '../core/fleet-summary.js';
 import { hbarList } from '../lib/charts.js';
-import { card, pill, table, diskCell, lastSnapshotOf, snapshotPill, snapshotStatusByKey, empty,
-         connectionProblem, diagnose, diagnosisPanel, act } from './common.js';
+import { card, table, diskCell, lastSnapshotOf, snapshotCell, snapshotStatusByKey, empty } from './common.js';
 import { isSnapshotMode } from '../core/snapshot.js';
 import { navigateTo, canOpenPage } from '../core/intent.js';
 import { measureRepoBytes } from '../core/volume.js';
 import { repoSizeCache } from '../lib/idb.js';
-import { compareNames, sortByName } from '../lib/cluster-order.js';
+import { compareNames } from '../lib/cluster-order.js';
 import { readPrefs, writePrefs, resolveColumns, visibleColumns, setColumnShown, moveColumn, moveColumnBy,
-         renameColumn, resetColumns, hideUnreachable, showUnreachable, foldUnreachable, MAX_NAME } from '../core/cluster-view.js';
+         renameColumn, resetColumns, MAX_NAME } from '../core/cluster-view.js';
 import { rowMenu, popover, ICON } from '../ui/menu.js';
 import { roleMayWrite } from '../core/writes.js';
 import { editCluster, rawClusterOf } from '../ui/config-editor.js';
 import { takeFocus, revealFocus } from '../core/focus.js';
+import { openClusterAlerts } from '../core/alert-goto.js';
+import { diskAgainstWatermarks } from '../core/disk-balance.js';
 
 let host = null;
 const expanded = new Set();
@@ -50,6 +50,10 @@ export const SORTS = {
   reqs:     { label: 'Our reqs/5m',   get: (r) => ((requestLoad.clusters[r.c.id] || {}).last5m || 0) },
 };
 const known = (v) => (typeof v === 'number' && v >= 0 ? v : null);
+/** The sort keys that still mean something for a cluster that is not answering. */
+const DOWN_KEEPS = new Set(['name', 'health', 'alerts']);
+/** Reachable was answered as "no". */
+const isDown = (r) => healthState(r.d) === 'unreachable';
 
 /**
  * Rows in `key` order (`dir` 1 ascending, -1 descending). Numbers compare as numbers and
@@ -57,7 +61,11 @@ const known = (v) => (typeof v === 'number' && v >= 0 ? v : null);
  * land where a person expects. Ties, and the unknowns at the end, go A–Z by name.
  */
 export function sortRows(rows, key, dir = 1) {
-  const get = (SORTS[key] || SORTS.name).get;
+  const own = (SORTS[key] || SORTS.name).get;
+  // An unreachable cluster has no figures to sort on — whatever its last answer said is not a
+  // measurement now — so they sort as unknown, after the rest, A–Z. Its name, its health
+  // (the worst there is) and the alerts raised for it are still true.
+  const get = (r) => (isDown(r) && !DOWN_KEEPS.has(key) ? null : own(r));
   const byName = (a, b) => compareNames(a.r.c.name, b.r.c.name);
   return rows.map((r) => ({ r, v: get(r) })).sort((a, b) => {
     const an = a.v === null || a.v === undefined, bn = b.v === null || b.v === undefined;
@@ -109,9 +117,9 @@ function alertsByCluster() {
 }
 
 /**
- * Why a cluster cannot be reached, in the words of its pill: one definition for the
- * Health cell, the unreachable cards and the CSV. `cls` is the pill colour; a certificate
- * is amber because it is a decision to take rather than an outage.
+ * Why a cluster cannot be reached: one definition for the Health cell's tooltip and the CSV.
+ * `cls` says how bad; a certificate is amber because it is a decision to take rather than
+ * an outage.
  */
 export function unreachableReason(cl) {
   const st = cl && cl.state;
@@ -156,7 +164,7 @@ function coverageLine() {
 
 export function render(el) {
   host = el; el.classList.add('dense'); trackHeadHeight();
-  // "Go to" from an unreachable alert (core/alert-goto.js): that cluster's card, open.
+  // "Go to" from an unreachable alert (core/alert-goto.js): that cluster's row, in view.
   const f = takeFocus('overview');
   focusDown = f && f.section === 'unreachable' ? { cluster: f.cluster || null, prepared: false } : null;
   draw();
@@ -166,8 +174,8 @@ export function onData() { if (host && host.isConnected) draw(); }
 /* ------------------------------ per-user layout ------------------------------ */
 
 /**
- * The signed-in person's layout (core/cluster-view.js): columns, their order and names,
- * and the unreachable fold. Read again when somebody else signs in on this tab.
+ * The signed-in person's layout (core/cluster-view.js): columns, their order and names.
+ * Read again when somebody else signs in on this tab.
  */
 let prefs = null;
 let prefsUser = null;
@@ -246,11 +254,8 @@ function toolbar(all, shown) {
 const built = nodeCache();
 /** Anything showing "5 min ago" is rebuilt at least once a minute. */
 const minute = () => Math.floor(Date.now() / 60000);
-/** What is on screen, for the buttons of a card kept from an earlier draw. */
-let lastUp = [];
-let lastDown = [];
-/** Every cluster unreachable right now, filter or not: what folding the section agrees to. */
-let lastAllDown = [];
+/** The rows on screen, in table order: what Export CSV writes. */
+let lastRows = [];
 
 /** Everything a cluster's row is drawn from. */
 function rowSig(r) {
@@ -260,19 +265,9 @@ function rowSig(r) {
     objId(state.indices.get(r.c.id))].join('|');
 }
 
-/** Reachable was answered as "no": the one definition, shared with the unreachable cards. */
+/** Reachable was answered as "no": the one definition: the rows marked red, the pointer line above the table. */
 export function unreachableRows(rows) {
   return rows.filter((r) => healthState(r.d) === 'unreachable');
-}
-
-/**
- * The page, split: unreachable clusters first, as cards, A–Z whatever the table is sorted
- * by (they have no figures to sort on); every other cluster in the table, in its order.
- */
-export function splitRows(rows) {
-  const down = sortByName(unreachableRows(rows), (r) => r.c.name);
-  const ids = new Set(down.map((r) => r.c.id));
-  return { down, up: rows.filter((r) => !ids.has(r.c.id)) };
 }
 
 /* ------------------------------ focus from an alert ------------------------------ */
@@ -285,9 +280,8 @@ let focusDown = null;
 const cssId = (id) => String(id).replace(/["\\]/g, '\\$&');
 
 /**
- * Make the asked-for cluster visible before drawing: its card open, the unreachable section
- * shown if it was folded, and a search or "Show" filter that would hide it cleared. Done
- * once; if the cluster is answering again by now, its row in the table is opened instead.
+ * Make the asked-for cluster visible before drawing: a search or "Show" filter that would
+ * hide its row is cleared. Done once; if the cluster is not loaded yet, the next draw tries.
  */
 function prepareFocus(all) {
   if (!focusDown || focusDown.prepared) return;
@@ -295,21 +289,14 @@ function prepareFocus(all) {
   const row = id ? all.find((r) => r.c.id === id) : null;
   if (id && !row) return;   // not loaded yet: try again on the next draw
   focusDown.prepared = true;
-  const down = row ? healthState(row.d) === 'unreachable' : lastAllDown.length > 0;
   if (!visibleRows(all).some((r) => !id || r.c.id === id)) { ui.text = ''; ui.only = 'all'; }
-  if (down) {
-    if (prefs.unreachable.hidden) savePrefs(showUnreachable(prefs));
-    if (id) cardOpen.add(id);
-  } else if (id) {
-    expanded.add(id);
-  }
 }
 
-/** After the draw: scroll to it and flash it, then forget the hint. */
+/** After the draw: scroll to its row (or the pointer line) and flash it, then forget the hint. */
 function revealFocused() {
   if (!focusDown || !focusDown.prepared) return;
   const id = focusDown.cluster;
-  const sel = id ? `.cl-down-card[data-cluster="${cssId(id)}"], tr[data-cluster="${cssId(id)}"]` : 'section.cl-down';
+  const sel = id ? `tr[data-cluster="${cssId(id)}"]` : '.cl-down-note';
   if (revealFocus(host, sel)) focusDown = null;
 }
 
@@ -318,166 +305,36 @@ function draw() {
   currentPrefs();
   const list = activeClusters();
   const all = list.map((c) => ({ c, d: state.data.get(c.id) || {}, cl: client(c.id) }));
-  updateFold(all);
   prepareFocus(all);
   const rows = visibleRows(all);
-  const { down, up } = splitRows(rows);
-  lastUp = up; lastDown = down;
+  lastRows = rows;
   for (const r of all) r.sig = rowSig(r);
   built.begin();
 
   mount(host,
     coverageLine(),
     built.get('toolbar', [!!ui.text, ui.sort, ui.dir, ui.only, all.length, rows.length].join('|'), () => toolbar(all, rows)),
-    unreachableSection(down),
-    summaryCard(up, down, all),
+    downNote(unreachableRows(rows).length),
+    summaryCard(rows, all),
   );
   built.end();
   scheduleHeadSync();
   revealFocused();
 }
 
-/* ---------------------------- the unreachable cards ---------------------------- */
-
-/** Cards opened with ▾, and the diagnosis each one last ran: kept across redraws. */
-const cardOpen = new Set();
-const diag = new Map();
-
-/** Bring the fold up to date (core/cluster-view.js foldUnreachable), saving what changed. */
-function updateFold(all) {
-  const downIds = [], upIds = [];
-  for (const r of all) {
-    const s = healthState(r.d);
-    if (s === 'unreachable') downIds.push(r.c.id);
-    else if (s === 'green' || s === 'yellow' || s === 'red') upIds.push(r.c.id);
-  }
-  lastAllDown = downIds;
-  const f = foldUnreachable(prefs.unreachable, downIds, upIds);
-  if (f.changed) savePrefs({ ...prefs, unreachable: { hidden: f.hidden, seen: f.seen } });
-}
-
 /**
- * Every unreachable cluster, above the table, one compact card each — or, folded, one line.
- *
- * They used to be rows in the table with dashes for every figure, plus a folded panel of
- * full banners under it. A cluster that cannot answer has nothing to put in a column; what
- * it has is a reason, a time, an error and two things to try, which is what a card holds.
- * Above the table, because a cluster that is down is the first thing to know about.
+ * One line above the table when any cluster in it is unreachable. They are rows like any
+ * other, in their A–Z place; what is wrong with each, Retry and Diagnose are on the Alerts
+ * page, and this says so and links there.
  */
-function unreachableSection(down) {
-  if (!down.length) return null;
-  const hidden = prefs.unreachable.hidden;
-  const sig = [hidden, mayEdit(), down.map((r) => `${r.c.id}:${r.sig}:${cardOpen.has(r.c.id)}:${objId(diag.get(r.c.id) || null)}`).join(',')].join('|');
-  return built.get('unreachable', sig, () => (hidden ? foldedLine(down) : downBoard(down)));
-}
-
-function foldToggle(hidden) {
-  return h('button#cl-down-toggle.btn.sm', {
-    type: 'button', 'aria-expanded': hidden ? 'false' : 'true', 'aria-controls': 'cl-down-cards',
-    title: hidden ? 'Show the unreachable clusters again' : 'Fold this away. A cluster that newly goes down opens it again.',
-    onclick: () => {
-      savePrefs(hidden ? showUnreachable(prefs) : hideUnreachable(prefs, lastAllDown));
-      draw();
-    },
-  }, hidden ? 'Show ▾' : 'Hide ▴');
-}
-
-function foldedLine(down) {
-  return h('section.cl-down.folded', { 'aria-label': `${down.length} unreachable, hidden` },
+function downNote(n) {
+  if (!n) return null;
+  const link = canOpenPage('alerts')
+    ? h('a.cl-alink', { href: '#/alerts', onclick: (e) => { e.preventDefault(); navigateTo('alerts'); } }, 'Alerts \u2192')
+    : 'Alerts';
+  return h('div.cl-down-note', { role: 'note' },
     h('i.cl-dot', { 'aria-hidden': 'true' }),
-    h('b', `${down.length} unreachable`),
-    h('span.muted.cl-down-names', `hidden · ${nameList(down.map((r) => r.c.name), 4)}`),
-    h('span.cl-sp'),
-    foldToggle(true));
-}
-
-function downBoard(down) {
-  return h('section.cl-down', { 'aria-labelledby': 'cl-down-h' },
-    h('div.cl-down-head',
-      h('i.cl-dot', { 'aria-hidden': 'true' }),
-      h('h2#cl-down-h', `${down.length} unreachable`),
-      h('span.muted', 'shown first, A–Z'),
-      h('span.cl-sp'),
-      h('button.btn.sm', {
-        type: 'button', title: 'Ask every unreachable cluster again now',
-        onclick: (e) => act(e.currentTarget, () => Promise.all(lastDown.map((r) => fetchOverview(r.c.id)))),
-      }, 'Retry all'),
-      foldToggle(false)),
-    h('div#cl-down-cards.cl-down-grid', ...down.map(downCard)));
-}
-
-const HM = new Intl.DateTimeFormat(undefined, { hour: '2-digit', minute: '2-digit' });
-/** "14:02" today, the full date and time before that. */
-function clock(ts) {
-  return Date.now() - ts < 20 * 3600 * 1000 ? HM.format(new Date(ts)) : dt(ts);
-}
-
-/** "since 14:02 · 18 min", or that the start of the outage is not known. */
-function sinceText(since) {
-  if (!since) return 'since: not known';
-  const age = Date.now() - since;
-  return `since ${clock(since)} · ${age < 60000 ? 'under a minute' : dur(age)}`;
-}
-
-function errorCode(err) {
-  if (err.errorCode) return err.errorCode;
-  const m = String(err.message || '').match(/EP-\d{3}/);
-  return m ? m[0] : '';
-}
-
-function downCard(r) {
-  const { c, d, cl } = r;
-  const reason = unreachableReason(cl);
-  const err = (cl && cl.lastError) || {};
-  const msg = err.message || 'No response from the cluster.';
-  const open = cardOpen.has(c.id);
-  const result = diag.get(c.id);
-  const retry = () => fetchOverview(c.id);
-  return h(`article.cl-down-card${open || result ? '.wide' : ''}`, { 'data-cluster': c.id, 'aria-label': `${c.name}: ${reason.label}` },
-    h('div.cl-l1',
-      h('b.cl-nm', { title: c.name }, c.name),
-      pill(reason.label, reason.cls),
-      h('span.cl-sp'),
-      h('span.muted.cl-since', { title: sinceText(d.reach && d.reach.since) }, sinceText(d.reach && d.reach.since))),
-    h('div.cl-l2',
-      h('span.cl-err', { title: msg }, msg),
-      h('button.btn.sm.primary', { type: 'button', title: `Ask ${c.name} again now`, onclick: (e) => act(e.currentTarget, retry) }, 'Retry'),
-      h('button.btn.sm', {
-        type: 'button', title: 'Walk the connection step by step and say where it stops',
-        onclick: (e) => act(e.currentTarget, async () => { diag.set(c.id, await diagnose(c)); draw(); }),
-      }, 'Diagnose'),
-      h('button.btn.sm.ghost.cl-exp', {
-        type: 'button', 'aria-expanded': open ? 'true' : 'false', 'aria-label': `Details for ${c.name}`,
-        title: open ? 'Fold the details' : 'Address, jump host, last answer, error code, next try',
-        onclick: () => { if (open) { cardOpen.delete(c.id); diag.delete(c.id); } else cardOpen.add(c.id); draw(); },
-      }, open ? '▴' : '▾')),
-    open ? downDetails(r, retry) : null,
-    result ? diagnosisPanel(result, retry) : null);
-}
-
-/** A card opened with ▾: where it is, how it is reached, when it last answered, what next. */
-function downDetails(r, retry) {
-  const { c, d, cl } = r;
-  const err = (cl && cl.lastError) || {};
-  const prob = connectionProblem(c, retry);
-  const code = errorCode(err);
-  const next = (d.reach && d.reach.nextProbeAt) || (cl && cl.nextRetryAt) || 0;
-  const last = cl && cl.lastOkAt;
-  const then = d.health && d.health.status ? ` · ${d.health.status}, ${d.health.number_of_nodes} node${d.health.number_of_nodes === 1 ? '' : 's'}` : '';
-  const row = (k, v, mono) => [h('dt', k), h(mono ? 'dd.mono' : 'dd', v)];
-  return h('div.cl-down-more',
-    h('dl.cl-dl',
-      ...row('Address', c.url, true),
-      ...row('Through', c.via ? `${c.via} (SSH jump host)` : 'direct — no jump host'),
-      ...row('Last answer', last ? `${clock(last)} · ${ago(last)}${then}` : 'none since the app started'),
-      ...row('Problem', prob.title),
-      ...row('Error', err.message || 'No response from the cluster.'),
-      ...row('Error code', code || 'none given'),
-      ...row('Next try', !next ? 'not known' : next <= Date.now() ? 'due now'
-        : `in ${dur(next - Date.now())}${cl && cl.failures > 1 ? ' (backing off)' : ''}`)),
-    prob.body,
-    h('div.cl-down-acts', ...prob.actions,
-      mayEditCluster(c) ? h('button.btn.sm.ghost', { type: 'button', onclick: () => openEditor(c) }, 'Edit cluster') : null));
+    h('span', h('b', `${n} unreachable`), `: listed in the table${ui.sort === 'name' && ui.dir === 1 ? ' in A\u2013Z order' : ''}. Reasons, Retry and Diagnose are at the top of `, link));
 }
 
 /* ------------------------------- editing a cluster ------------------------------- */
@@ -525,6 +382,36 @@ function nameMenu(c) {
 /* ------------------------------- the summary table ------------------------------- */
 
 /**
+ * Normal is quiet, a problem is loud. A state that is as it should be is plain text; one
+ * that is not is coloured text with a dot in front, so it is never told by hue alone.
+ * `kind`: 'warn' (amber) or 'bad' (red). Health is the one state that keeps its dot all the
+ * time (healthFlag); everything else gets it only when something is wrong.
+ */
+function flag(text, kind, title) {
+  return h(`span.q.${kind}`, title ? { title } : null, h('i.qdot', { 'aria-hidden': 'true' }), text);
+}
+
+/**
+ * A row's Health: a small dot and the state. Green is quiet text; yellow and red are coloured
+ * text with the reason when it is known ("yellow \u00b7 2 unassigned"); a cluster that is not
+ * answering is red and points at the Alerts page, with why in the tooltip.
+ */
+function healthFlag(r) {
+  const { d } = r;
+  if (!d.updatedAt) return h('span.muted', 'loading');
+  if (!d.reachable) {
+    const why = unreachableReason(r.cl).label;
+    const err = (r.cl && r.cl.lastError && r.cl.lastError.message) || '';
+    return flag('unreachable \u00b7 see Alerts', 'bad', err ? `${why}: ${err}` : why);
+  }
+  const st = (d.health && d.health.status) || 'unknown';
+  if (st === 'green') return h('span.q.ok.dotted', h('i.qdot', { 'aria-hidden': 'true' }), 'green');
+  const un = d.health ? d.health.unassigned_shards : null;
+  const text = (st === 'yellow' || st === 'red') && isFinite(un) && un > 0 ? `${st} \u00b7 ${un} unassigned` : st;
+  return st === 'yellow' ? flag(text, 'warn') : st === 'red' ? flag(text, 'bad') : h('span.muted', text);
+}
+
+/**
  * One function per column id, drawing that column's cell. The header, the CSV and the
  * Columns panel all come from the same column list, so a column cannot be on screen and
  * missing from the file, or the other way round.
@@ -537,30 +424,42 @@ const CELLS = {
   jdk: (r) => {
     const j = jvmSummary(r.d.nodes);
     return h('td.mono', { title: j.detail, style: { fontSize: '11.5px' } },
-      j.text === 'unknown' ? h('span.muted', 'unknown') : j.mixed ? pill(j.text, 'yellow') : j.text);
+      j.text === 'unknown' ? h('span.muted', 'unknown') : j.mixed ? flag(j.text, 'warn') : j.text);
   },
   health: (r) => {
     const { d } = r;
-    return h('td', pill(stateLabel(r), d.reachable ? healthClass(d.health && d.health.status) : d.updatedAt ? unreachableReason(r.cl).cls : 'grey'),
+    const via = d.fromZabbix && d.fromZabbix.parts.includes('health')
       // Where the figure came from, when it is Zabbix's measurement rather than this tab's.
-      d.fromZabbix && d.fromZabbix.parts.includes('health')
-        ? h('div.muted', { style: { fontSize: '10.5px' }, title: 'Measured by Zabbix, not by this app — so Elasticsearch is not asked again' },
-            `via Zabbix · ${d.fromZabbix.healthAge === null ? 'age unknown' : `${Math.round(d.fromZabbix.healthAge)}s ago`}`)
-        : null);
+      ? h('div.muted', { style: { fontSize: '10.5px' }, title: 'Measured by Zabbix, not by this app \u2014 so Elasticsearch is not asked again' },
+          `via Zabbix \u00b7 ${d.fromZabbix.healthAge === null ? 'age unknown' : `${Math.round(d.fromZabbix.healthAge)}s ago`}`)
+      : null;
+    return h('td', healthFlag(r), via);
   },
   nodes: (r) => h('td.num', r.d.health ? `${r.d.health.number_of_nodes} (${r.d.health.number_of_data_nodes} data)` : '–'),
   size: (r) => h('td.num', { title: 'Store size of the indices on this cluster' },
     clusterSize(r) >= 0 ? bytes(clusterSize(r)) : h('span.muted', '–')),
-  disk: (r) => h('td', diskCell(r.d.disk)),
+  disk: (r) => h('td', isDown(r)
+    // Not answering: what the disk held at the last answer is not what it holds now. No bar,
+    // no tick, no threshold colour — and it says why.
+    ? h('span.muted', { title: 'The cluster is not answering, so its disk use is not known now.' }, 'unknown while unreachable')
+    : diskCell(r.d.disk, r.d.clusterSettings)),
   ilm: (r) => {
     const { d } = r;
-    return h('td', d.ilm ? pill(d.ilm.operation_mode, d.ilm.operation_mode === 'RUNNING' ? (d.ilmErrorCount ? 'yellow' : 'green') : 'yellow') : h('span.muted', '–'),
-      d.ilmErrorCount ? h('div.muted', { style: { fontSize: '11px' } }, `${d.ilmErrorCount} in error`) : null);
+    if (!d.ilm) return h('td', h('span.muted', '\u2013'));
+    const mode = String(d.ilm.operation_mode || '');
+    const errs = d.ilmErrorCount || 0;
+    const bits = [];
+    if (mode !== 'RUNNING') bits.push(mode.toLowerCase());
+    if (errs) bits.push(`${errs} ILM error${errs === 1 ? '' : 's'}`);
+    return h('td', bits.length ? flag(bits.join(' \u00b7 '), 'warn') : h('span.q.ok', 'running'));
   },
   slm: (r) => {
     const { d } = r;
-    return h('td', d.slmStatus ? pill(d.slmStatus.operation_mode, d.slmStatus.operation_mode === 'RUNNING' ? 'green' : 'yellow') : h('span.muted', d.slmSupported === false ? 'n/a' : '–'),
-      (d.slm || []).length ? h('div.muted', { style: { fontSize: '11px' } }, `${d.slm.length} polic${d.slm.length > 1 ? 'ies' : 'y'}`) : null);
+    const n = (d.slm || []).length;
+    const policies = n ? h('div.muted', { style: { fontSize: '11px' } }, `${n} polic${n > 1 ? 'ies' : 'y'}`) : null;
+    if (!d.slmStatus) return h('td', h('span.muted', d.slmSupported === false ? 'n/a' : '\u2013'), policies);
+    const mode = String(d.slmStatus.operation_mode || '');
+    return h('td', mode === 'RUNNING' ? h('span.q.ok', 'running') : flag(mode.toLowerCase() || 'unknown', 'warn'), policies);
   },
   repo: (r) => {
     const names = (r.d.repos || []).map((x) => x.name);
@@ -569,11 +468,17 @@ const CELLS = {
           names.length > 3 ? h('span.muted', { style: { fontSize: '11px' } }, `+${names.length - 3} more`) : null)
       : h('span.muted', Array.isArray(r.d.repos) ? 'none' : '–'));
   },
-  snapshot: (r) => h('td', snapshotPill(lastSnapshotOf(r.d))),
-  alerts: (r, byCluster) => h('td.num', byCluster.get(r.c.id)
-    ? h('button.btn.sm.ghost', { type: 'button', title: 'Show these on the Alerts page', onclick: () => navigateTo('alerts') },
-        pill(String(byCluster.get(r.c.id)), 'yellow'))
-    : h('span.muted', '–')),
+  snapshot: (r) => h('td', snapshotCell(lastSnapshotOf(r.d), state.defaults.snapshotStaleHours)),
+  // A link to that cluster's alerts, not a button that opens all of them; nothing to open, no link.
+  alerts: (r, byCluster) => {
+    const n = byCluster.get(r.c.id) || 0;
+    if (!n) return h('td.num', h('span.muted', { 'aria-label': 'no open alerts' }, '\u2014'));
+    const label = `${n} open alert${n === 1 ? '' : 's'} for ${r.c.name}`;
+    return h('td.num', canOpenPage('alerts')
+      ? h('a.cl-alink', { href: '#/alerts', title: `Open the Alerts page, showing ${r.c.name} only`, 'aria-label': label,
+          onclick: (e) => { e.preventDefault(); openClusterAlerts(r.c.id); } }, `${n} \u2192`)
+      : h('span', { title: label }, String(n)));
+  },
   // Requests THIS app sent to the cluster — its share of the cluster's load.
   reqs: (r) => {
     const q = requestsFor(r.c.id);
@@ -597,7 +502,10 @@ const CSV = {
   size: [['bytes', (r) => (clusterSize(r) >= 0 ? clusterSize(r) : '')]],
   disk: [['%', (r) => (r.d.disk && isFinite(r.d.disk.percent) ? r.d.disk.percent.toFixed(2) : '')],
     ['used bytes', (r) => (r.d.disk && isFinite(r.d.disk.used) ? r.d.disk.used : '')],
-    ['total bytes', (r) => (r.d.disk && isFinite(r.d.disk.total) ? r.d.disk.total : '')]],
+    ['total bytes', (r) => (r.d.disk && isFinite(r.d.disk.total) ? r.d.disk.total : '')],
+    // Where it stands against the cluster's own watermarks: the same answer as the bar.
+    ['watermark', (r) => diskAgainstWatermarks(r.d.disk, r.d.clusterSettings).label],
+    ['high watermark %', (r) => { const w = diskAgainstWatermarks(r.d.disk, r.d.clusterSettings); return w.known ? w.high : ''; }]],
   ilm: [['', (r) => (r.d.ilm && r.d.ilm.operation_mode) || ''], ['in error', (r) => (r.d.ilm ? r.d.ilmErrorCount || 0 : '')]],
   slm: [['', (r) => (r.d.slmStatus && r.d.slmStatus.operation_mode) || (r.d.slmSupported === false ? 'n/a' : '')],
     ['policies', (r) => (r.d.slmStatus ? (r.d.slm || []).length : '')]],
@@ -627,35 +535,30 @@ export function csvTable(rows, cols) {
 }
 
 function exportSummary() {
-  const { headers, data } = csvTable([...lastDown, ...lastUp], visibleColumns(prefs));
+  const { headers, data } = csvTable(lastRows, visibleColumns(prefs));
   download(`es-cluster-summary-${new Date().toISOString().slice(0, 10)}.csv`, toCsv(data, headers), 'text/csv');
 }
 
-function summaryCard(up, down, all) {
+function summaryCard(rows, all) {
   const cols = visibleColumns(prefs);
   const colSig = cols.map((c) => `${c.id}:${c.name}`).join(',');
   const onSort = (key) => { ui.dir = ui.sort === key ? -ui.dir : 1; ui.sort = key; draw(); };
   const byCluster = alertCounts || alertsByCluster();
   const trs = [];
-  up.forEach((r) => {
+  rows.forEach((r) => {
     trs.push(...built.get(`row:${r.c.id}`, `${r.sig || rowSig(r)}|${colSig}|${mayEdit()}`, () => rowNodes(r, byCluster, cols)));
   });
 
   const total = all.length;
-  const shownTotal = up.length + down.length;
-  const hiddenDown = prefs.unreachable.hidden;
-  const scope = shownTotal === total
-    ? `${up.length} reachable cluster${up.length === 1 ? '' : 's'}`
-    : `${up.length} reachable of ${total} clusters`;
+  const scope = rows.length === total
+    ? `${total} cluster${total === 1 ? '' : 's'}`
+    : `${rows.length} of ${total} clusters`;
   const sub = [scope,
-    down.length ? `${down.length} unreachable ${hiddenDown ? 'hidden above' : 'shown above'}` : null,
-    `sorted by ${(SORTS[ui.sort] || SORTS.name).label.toLowerCase()}${ui.sort === 'name' ? (ui.dir === 1 ? ' A–Z' : ' Z–A') : ui.dir === 1 ? ', ascending' : ', descending'}`,
-    isSnapshotMode() ? `collected ${ago(state.lastRefresh)}` : `updated ${ago(state.lastRefresh)}`].filter(Boolean).join(' · ');
-  const end = shownTotal === 0 ? '' : `End of the list · ${shownTotal} cluster${shownTotal === 1 ? '' : 's'}`
-    + (down.length ? ` (${up.length} here, ${down.length} unreachable at the top${hiddenDown ? ', hidden' : ''})` : '');
-  const emptyText = !total ? 'No clusters configured'
-    : down.length && !up.length ? 'Every cluster that matches is unreachable — see above'
-    : 'No cluster matches the search';
+    ui.sort === 'name' ? (ui.dir === 1 ? 'A\u2013Z by name' : 'Z\u2013A by name')
+      : `sorted by ${(SORTS[ui.sort] || SORTS.name).label.toLowerCase()}${ui.dir === 1 ? ', ascending' : ', descending'}`,
+    isSnapshotMode() ? `collected ${ago(state.lastRefresh)}` : `updated ${ago(state.lastRefresh)}`].filter(Boolean).join(' \u00b7 ');
+  const end = rows.length === 0 ? '' : `End of the list \u00b7 ${rows.length} cluster${rows.length === 1 ? '' : 's'}`;
+  const emptyText = !total ? 'No clusters configured' : 'No cluster matches the search';
 
   // The card and its buttons are kept for as long as the page is open: the Columns panel is
   // anchored to its button, and a button replaced under an open panel would leave it
@@ -663,13 +566,13 @@ function summaryCard(up, down, all) {
   // the columns or the row count; the rows are put into its kept <tbody> as they are.
   const shell = built.get('summary', String(isSnapshotMode()), () => buildCard(sub));
   let fresh = false;
-  const block = built.get('summary-table', [ui.sort, ui.dir, colSig, up.length === 0, emptyText].join('|'), () => {
+  const block = built.get('summary-table', [ui.sort, ui.dir, colSig, rows.length === 0, emptyText].join('|'), () => {
     fresh = true;
     return buildTable(cols, trs, { sort: ui.sort, dir: ui.dir, onSort, emptyText });
   });
   const holder = shell.querySelector('.cl-tbl-holder');
   if (holder.firstChild !== block) { holder.replaceChildren(block); watchHeads(block); }
-  if (!fresh && up.length) reconcile(block.querySelector('tbody'), trs);
+  if (!fresh && rows.length) reconcile(block.querySelector('tbody'), trs);
   const subEl = shell.firstChild && shell.firstChild.querySelector('.sub');
   if (subEl && subEl.textContent !== sub) subEl.textContent = sub;
   const endEl = shell.querySelector('.cl-end');
@@ -706,14 +609,15 @@ function buildCard(sub) {
 function buildTable(cols, trs, { sort, dir, onSort, emptyText }) {
   const arrow = (col) => (sort === col.id ? (dir === 1 ? ' ▲' : ' ▼') : null);
   const ariaSort = (col) => (sort === col.id ? (dir === 1 ? 'ascending' : 'descending') : 'none');
+  // The first column is the expand chevron: no name, nothing to sort by.
   const thead = h('thead.cl-thead', h('tr',
+    h('th.cl-xth', { 'aria-label': 'Expand' }, h('span.cl-th-in', '')),
     ...cols.map((col) => h(`th.sortable${col.num ? '.num' : ''}`, {
       scope: 'col', 'data-col': col.id, 'aria-sort': ariaSort(col),
       // No tab stop — the strip above is what the keyboard uses — but a screen reader's
       // own "click" on a head still sorts.
       onclick: () => onSort(col.id),
-    }, h('span.cl-th-in', col.name, arrow(col)))),
-    h('th', { 'aria-label': 'Details' }, h('span.cl-th-in', ''))));
+    }, h('span.cl-th-in', col.name, arrow(col))))));
   const tbody = h('tbody');
   if (!trs.length) tbody.append(h('tr', h('td', { colspan: cols.length + 1 }, empty(emptyText))));
   trs.forEach((r) => tbody.append(r));
@@ -722,13 +626,13 @@ function buildTable(cols, trs, { sort, dir, onSort, emptyText }) {
 
   const strip = h('div.cl-head', { role: 'group', 'aria-label': 'Sort the cluster summary' },
     h('div.cl-head-row',
+      h('span.cl-hcell.cl-hcell-x', { 'aria-hidden': 'true' }),
       ...cols.map((col) => h(`button.cl-hcell${col.num ? '.num' : ''}`, {
         type: 'button', 'data-col': col.id, 'aria-sort': ariaSort(col),
         'aria-label': `Sort by ${col.name}${sort === col.id ? `, sorted ${ariaSort(col)}` : ''}`,
         title: sort === col.id ? `Sorted by ${col.name} — click to reverse` : `Sort by ${col.name}`,
         onclick: () => onSort(col.id),
-      }, h('span.cl-th-in', col.name, arrow(col)))),
-      h('span.cl-hcell.cl-hcell-x', { 'aria-hidden': 'true' })));
+      }, h('span.cl-th-in', col.name, arrow(col))))));
   scroller.addEventListener('scroll', () => followScroll(strip, scroller), { passive: true });
   strip.addEventListener('wheel', (e) => {
     if (Math.abs(e.deltaX) <= Math.abs(e.deltaY) || scroller.scrollWidth <= scroller.clientWidth) return;
@@ -798,23 +702,35 @@ function trackHeadHeight() {
 
 /* ---------------------------------- the rows ---------------------------------- */
 
-/** One cluster's row, and its details row when it is expanded. */
+/**
+ * One cluster's row, and its details row when it is expanded. The chevron at the start of the
+ * row opens the details; a cluster that is not answering has none to open (what is wrong, and
+ * Retry and Diagnose, are on the Alerts page), and its figures are dashes.
+ */
 function rowNodes(r, byCluster, cols) {
   const out = [];
   const { c, d } = r;
-  out.push(h('tr', { 'data-cluster': c.id }, ...cols.map((col) => CELLS[col.id](r, byCluster)),
-    // A real button, not a ghost that reads as a label: this is the control people go
-    // looking for when a row raises a question, and it was the quietest thing in the
-    // row. The chevron says which way it goes; aria-expanded says it to a reader.
-    h('td', h('button.btn.sm', {
+  const down = isDown(r);
+  const open = !down && expanded.has(c.id);
+  const cell = (col) => (!down || col.id === 'name' || DOWN_KEEPS.has(col.id) || col.id === 'disk'
+    ? CELLS[col.id](r, byCluster)
+    : h(`td${col.num ? '.num' : ''}`, h('span.muted', { 'aria-label': 'not known' }, '\u2014')));
+  const chevron = down ? h('td.cl-xtd')
+    : h('td.cl-xtd', h('button.cl-chev', {
       type: 'button',
-      'aria-expanded': expanded.has(c.id) ? 'true' : 'false',
-      title: expanded.has(c.id) ? `Collapse ${c.name}` : `Expand ${c.name} — nodes, disk, repositories`,
-      onclick: () => { expanded.has(c.id) ? expanded.delete(c.id) : expanded.add(c.id); draw(); },
-    }, h('span', { style: { marginRight: '5px' } }, expanded.has(c.id) ? '▾' : '▸'),
-       expanded.has(c.id) ? 'Hide details' : 'Details'))));
-
-  if (expanded.has(c.id)) out.push(h('tr', h('td', { colspan: cols.length + 1, style: { background: 'var(--surface-2)' } }, detail(c, d))));
+      'aria-expanded': open ? 'true' : 'false',
+      'aria-label': `${open ? 'Hide' : 'Show'} details for ${c.name}`,
+      title: open ? `Collapse ${c.name}` : `Expand ${c.name} \u2014 nodes, disk, repositories`,
+      onclick: () => {
+        expanded.has(c.id) ? expanded.delete(c.id) : expanded.add(c.id);
+        draw();
+        // The row was rebuilt, so the keyboard would be left on nothing: put it back.
+        const again = host && host.querySelector(`tr[data-cluster="${cssId(c.id)}"] button.cl-chev`);
+        if (again) again.focus({ preventScroll: true });
+      },
+    }, h('span', { 'aria-hidden': 'true' }, open ? '\u25be' : '\u25b8')));
+  out.push(h(`tr${down ? '.cl-row-down' : ''}`, { 'data-cluster': c.id }, chevron, ...cols.map(cell)));
+  if (open) out.push(h('tr.cl-detail-row', h('td', { colspan: cols.length + 1, style: { background: 'var(--surface-2)' } }, detail(c, d))));
   return out;
 }
 

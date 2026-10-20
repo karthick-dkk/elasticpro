@@ -29,42 +29,93 @@ function pctSetting(v) {
   return null;
 }
 
+/** Where the settings are read from, strongest first: transient beats persistent beats the defaults. */
+const SCOPES = ['transient', 'persistent', 'defaults'];
+
+/**
+ * One watermark setting as the cluster has it: the strongest scope that mentions it decides,
+ * so a value that is not a percentage is NOT skipped in favour of a weaker scope's default.
+ * `value` is the percentage, or null when the setting is not one (`absolute`: free space such
+ * as "50gb", which cannot be turned into a percentage of the whole cluster's disk).
+ * Null when no scope mentions it at all.
+ */
+function readWatermark(settings, name) {
+  if (!settings || typeof settings !== 'object') return null;
+  for (const scope of SCOPES) {
+    const s = settings[scope];
+    if (!s || typeof s !== 'object') continue;
+    const direct = s[`cluster.routing.allocation.disk.watermark.${name}`];
+    const nested = s.cluster && s.cluster.routing && s.cluster.routing.allocation
+      && s.cluster.routing.allocation.disk && s.cluster.routing.allocation.disk.watermark;
+    const v = direct !== undefined ? direct : nested ? nested[name] : undefined;
+    if (v === undefined || v === null || v === '') continue;
+    const raw = String(v).trim();
+    const value = pctSetting(raw);
+    return { value, raw, source: scope, absolute: value === null && /^\d+(\.\d+)?\s*[a-z]+$/i.test(raw) };
+  }
+  return null;
+}
+
 /** Watermarks as the cluster actually has them, with a note when they are assumed. */
 export function watermarks(settings) {
-  const flat = {};
-  const walk = (obj, prefix = '') => {
-    for (const [k, v] of Object.entries(obj || {})) {
-      if (v && typeof v === 'object' && !Array.isArray(v)) walk(v, `${prefix}${k}.`);
-      else flat[`${prefix}${k}`] = v;
-    }
-  };
-  for (const scope of ['persistent', 'transient', 'defaults']) walk((settings || {})[scope]);
-
-  const pick = (name) => {
-    // later scopes must not override earlier ones: persistent beats transient beats default
-    for (const scope of ['persistent', 'transient', 'defaults']) {
-      const s = (settings || {})[scope];
-      if (!s) continue;
-      const flatScope = {};
-      walk(s);
-      const direct = s[`cluster.routing.allocation.disk.watermark.${name}`];
-      const nested = s.cluster && s.cluster.routing && s.cluster.routing.allocation
-        && s.cluster.routing.allocation.disk && s.cluster.routing.allocation.disk.watermark;
-      const v = direct !== undefined ? direct : nested ? nested[name] : undefined;
-      const p = pctSetting(v);
-      if (p !== null) return { value: p, raw: String(v), source: scope };
-    }
-    return null;
-  };
-
-  const low = pick('low'), high = pick('high'), flood = pick('flood_stage');
+  const low = readWatermark(settings, 'low'), high = readWatermark(settings, 'high'), flood = readWatermark(settings, 'flood_stage');
+  const pick = (r, fallback) => (r && r.value !== null ? r.value : fallback);
+  const raw = (r) => (r && r.value !== null ? r.raw : null);
   return {
-    low: low ? low.value : FALLBACK.low,
-    high: high ? high.value : FALLBACK.high,
-    flood: flood ? flood.value : FALLBACK.flood,
-    assumed: !low && !high && !flood,
-    raw: { low: low && low.raw, high: high && high.raw, flood: flood && flood.raw },
+    low: pick(low, FALLBACK.low),
+    high: pick(high, FALLBACK.high),
+    flood: pick(flood, FALLBACK.flood),
+    assumed: ![low, high, flood].some((r) => r && r.value !== null),
+    raw: { low: raw(low), high: raw(high), flood: raw(flood) },
   };
+}
+
+/**
+ * Where a cluster's disk use stands against ITS OWN watermarks — the one definition the
+ * Clusters page's bar and tick, its tooltip and its CSV all read.
+ *
+ * `disk` is state.data's `disk` (the cluster-wide figure: percent, used, total);
+ * `settings` is the response of `_cluster/settings?include_defaults=true&flat_settings=true`
+ * (data.clusterSettings), or null when it has not been read.
+ *
+ * Unknown is not zero (CLAUDE.md), so thresholds are drawn only when they are known:
+ *   - settings not read            -> unknown, and `why` names the data that would say;
+ *   - read, set as percentages     -> those, `source: 'set'`;
+ *   - read, set nowhere            -> Elasticsearch's documented 85 / 90 / 95 %,
+ *                                     `source: 'default'` — it read them and found them unset;
+ *                                     (a cluster answering include_defaults reports its own
+ *                                     default instead, `source: 'reported-default'`);
+ *   - low or high set as free space ("50gb") -> unknown, and `why` says so. Never read as a
+ *     percentage.
+ * `level` is 'ok' (below low), 'low' (from low), 'high' (from high) or 'unknown'.
+ */
+export function diskAgainstWatermarks(disk, settings) {
+  const percent = disk && disk.percent !== null && disk.percent !== undefined && isFinite(disk.percent) ? Number(disk.percent) : null;
+  const out = { percent, known: false, low: null, high: null, flood: null, source: null, level: 'unknown', label: 'unknown', why: null };
+  const finish = () => { out.label = { ok: 'below low', low: 'above low', high: 'above high', unknown: 'unknown' }[out.level]; return out; };
+
+  if (!settings || typeof settings !== 'object') {
+    out.why = 'Watermark unknown: the cluster\u2019s settings (_cluster/settings, in the "policies" data) have not been read for this cluster. Read all fetches them.';
+    return finish();
+  }
+  const low = readWatermark(settings, 'low'), high = readWatermark(settings, 'high'), flood = readWatermark(settings, 'flood_stage');
+  for (const [name, r] of [['low', low], ['high', high]]) {
+    if (r && r.value === null) {
+      out.why = r.absolute
+        ? `Watermark unknown: the ${name} watermark is set as free space (${r.raw}), not a percentage, so it cannot be drawn against the cluster\u2019s disk use.`
+        : `Watermark unknown: the ${name} watermark is set to "${r.raw}", which is not a percentage.`;
+      return finish();
+    }
+  }
+  const D = FALLBACK;
+  out.low = low ? low.value : D.low;
+  out.high = high ? high.value : D.high;
+  out.flood = flood ? flood.value : D.flood;   // null when set as free space: not drawn
+  out.known = true;
+  const scopes = [low, high].filter(Boolean).map((r) => r.source);
+  out.source = scopes.some((x) => x !== 'defaults') ? 'set' : scopes.length ? 'reported-default' : 'default';
+  if (percent !== null) out.level = percent >= out.high ? 'high' : percent >= out.low ? 'low' : 'ok';
+  return finish();
 }
 
 /**

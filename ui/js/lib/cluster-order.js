@@ -3,7 +3,7 @@
  * the numbers inside a name read as numbers — es-node-2 before es-node-10.
  *
  * Every list of clusters uses this: the top-bar picker and its "Find among…" box (through
- * state.js clusters()), the Clusters page summary and its unreachable cards, and every
+ * state.js clusters()), the Clusters page summary, and every
  * page that draws one block per cluster. Before, each list was in whatever order the
  * config file happened to give, and the summary sorted with a plain localeCompare that put
  * es-node-10 before es-node-2.
