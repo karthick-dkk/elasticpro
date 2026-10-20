@@ -353,12 +353,14 @@ async fn maps_of_removed_clusters_are_dropped_and_dry_run_leaves_them() {
 
     let dry = c.handle(json!({ "type": "HOUSEKEEPING_RUN", "dryRun": true })).await;
     let mem = job(&dry["run"], "memory");
-    assert_eq!(mem["items"], json!(2), "a request counter and a limiter for b (PRIME already dropped the clients): {mem}");
+    // One: b's request counter. PRIME already dropped b's clients and emptied the read
+    // cache, and the request gate keeps no per-cluster state once nothing is in flight.
+    assert_eq!(mem["items"], json!(1), "a request counter for b: {mem}");
     assert!(mem["notes"].to_string().contains("request counters"), "{mem}");
     assert_eq!(clusters(&c).len(), 2, "a dry run leaves them");
 
     let real = c.handle(json!({ "type": "HOUSEKEEPING_RUN" })).await;
-    assert_eq!(job(&real["run"], "memory")["items"], json!(2));
+    assert_eq!(job(&real["run"], "memory")["items"], json!(1));
     assert_eq!(clusters(&c), ["a".to_string()].into_iter().collect(), "b's counter is gone, a's stays");
     let again = c.handle(json!({ "type": "HOUSEKEEPING_RUN" })).await;
     assert_eq!(job(&again["run"], "memory")["items"], json!(0), "nothing more to drop");
