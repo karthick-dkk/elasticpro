@@ -1945,13 +1945,17 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("ep-sess-seen-{}-{}", std::process::id(), random_hex(4)));
         let path = dir.join("sessions.json");
         let ss = Sessions::open(Some(path.clone()));
+        let before = now();
         let tok = ss.begin(&a);
-        let t0 = now();
+        let after = now();
         let seen_on_disk = || -> u64 {
             let m: HashMap<String, Session> = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
             m.values().next().unwrap().last_seen
         };
-        assert_eq!(seen_on_disk(), t0, "written when it began");
+        // Read the start back rather than calling now() again: a second can tick between
+        // begin() and the next now(), which failed this test on CI (left 1792513109, right ...110).
+        let t0 = seen_on_disk();
+        assert!((before..=after).contains(&t0), "written when it began: {t0} not in {before}..={after}");
         // A busy session: forty requests in a minute change nothing, in memory or on disk.
         for i in 0..40 { ss.resolve_at(&tok, t0 + i); }
         assert_eq!(ss.resolve_at(&tok, t0 + 59).unwrap().last_seen, t0, "inside the minute: not touched");
