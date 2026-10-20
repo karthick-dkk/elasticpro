@@ -45,7 +45,7 @@ pair the two UIs with a one-time code from Config → Zabbix.
 
 - **Clusters** — health, nodes, disk, ILM/SLM, repositories, last snapshot across the fleet; search and sort by anything on the row.
 - **Alerts** — every problem on one page, acknowledged and annotated against the problem, not its current value.
-- **Indices, Nodes & shards, Snapshots & SLM** — daily indices with maintenance, shard moves and replicas; heap, CPU and disk per node with disk balance; snapshots by the days of data they hold, restore with renaming, repositories.
+- **Indices, Nodes & shards, Snapshots** — daily indices with maintenance, shard moves and replicas; heap, CPU and disk per node with disk balance; snapshots by the days of data they hold, restore with renaming, repositories.
 - **Volume report and analysis** — per-day ingest, what retention costs, whether storage matches the promised policy; daily volume by an ECS field with spike detection; CSV and Excel export.
 - **REST console and Live logs** — every method, history with favourites, sixty ready-made requests; tail a day's index with a histogram.
 - **Request management** — a Request Centre listing every request the core sends (who asked, how long, how it ended); a request policy (background, hybrid or on-demand, intervals, concurrency, pause per cluster, a per-minute budget, backoff on 429 or timeout); a Tasks panel that tells our searches from anyone else's by `X-Opaque-Id` and cancels under the write guard; a quiet UI that holds updates behind "N updates — Apply" instead of repainting under you.

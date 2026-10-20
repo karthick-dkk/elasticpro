@@ -472,27 +472,124 @@ table.tbl tr.kv td.v { font-size: 12px; word-break: break-all; }
 .tbl-empty.rich .acts { display: flex; gap: 6px; flex-wrap: wrap; justify-content: center; margin-top: 2px; }
 
 /* ------------------------- Clusters page summary table ---------------------- */
-/* At a hundred-odd rows the table used to be taller than the window, which put its own
-   horizontal scrollbar below the fold — the one control you need to see the columns that
-   do not fit gets hidden by the very overflow it exists to fix. Boxing it to the space
-   actually left under the sticky header keeps that scrollbar, and the sticky <th> row
-   sticking to the TOP OF THIS BOX rather than the page, on screen at all times. The
-   estimate below is generous on purpose: a box a little short of the window is much less
-   wrong than one that quietly grows past it. */
-.cluster-tbl-scroll { max-height: calc(100vh - 260px); min-height: 220px; overflow: auto; }
-.cluster-tbl-scroll table.tbl th { top: 0; }
+/* The table is part of the page: every row is in it and the page scrolls. It used to sit in
+   a box of its own, height-limited so its sticky head and its sideways scrollbar stayed on
+   screen; that box was a second scroll inside the page, which a trackpad kept catching.
 
-/* JDK, SLM and the request count are read occasionally, not at a glance, and are the
-   first three columns to make the table wider than a laptop screen. Below 1500px they
-   fold into the row's own "Details" panel (see detail() in overview.js) instead of
-   forcing a horizontal scroll just to read Health or Disk usage. */
-@media (max-width: 1500px) {
-  .cluster-tbl-scroll table.tbl th:nth-child(3), .cluster-tbl-scroll table.tbl td:nth-child(3),
-  .cluster-tbl-scroll table.tbl th:nth-child(9), .cluster-tbl-scroll table.tbl td:nth-child(9),
-  .cluster-tbl-scroll table.tbl th:nth-child(13), .cluster-tbl-scroll table.tbl td:nth-child(13) {
-    display: none;
-  }
+   The heads people see (.cl-head) are a strip OUTSIDE the table's horizontal scroll box,
+   sticky to the page under the top bar (--head-fix-h, measured in overview.js). A sticky
+   <th> inside an overflow-x box would stick to that box, which never scrolls vertically,
+   so it would never pin. The real <thead> stays in the table for meaning and for the
+   column widths, folded to no height; overview.js copies its widths onto the strip and
+   moves the strip with the box's horizontal scroll. */
+.card.cl-summary { overflow: visible; overflow: clip; }   /* clip: rounded corners, and not a scroll box */
+.card.cl-summary > .body { padding: 0; }
+.cl-head {
+  position: sticky; top: var(--head-fix-h, 0px); z-index: 4;
+  overflow: hidden; background: var(--surface-2);
+  border-bottom: 1px solid var(--border); box-shadow: 0 2px 6px rgba(0,0,0,.18);
 }
+.cl-head-row { display: flex; will-change: transform; }
+.cl-hcell, .cl-summary table.cl-tbl thead th {
+  font-weight: 600; font-size: 11px; letter-spacing: .03em; text-transform: uppercase;
+  padding: 8px 10px; white-space: nowrap; text-align: left; font-family: inherit;
+}
+.dense .cl-hcell, .dense .cl-summary table.cl-tbl thead th { padding-left: 8px; padding-right: 8px; }
+.cl-hcell {
+  flex: none; display: block; min-width: 0; overflow: hidden; text-overflow: ellipsis;
+  border: 0; background: transparent; color: var(--text-secondary); cursor: pointer; line-height: 1.5;
+}
+.cl-hcell.num { text-align: right; }
+.cl-hcell:hover { color: var(--text-primary); background: var(--surface-3); }
+.cl-hcell[aria-sort="ascending"], .cl-hcell[aria-sort="descending"] { color: var(--text-primary); }
+.cl-hcell:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.cl-hcell-x { cursor: default; }
+.cl-hcell-x:hover { background: transparent; }
+/* Every head says it sorts: a quiet ↕ until it is the one sorted by (▲ / ▼, in the text). */
+.cl-hcell[aria-sort="none"] .cl-th-in::after,
+.cl-summary table.cl-tbl thead th[aria-sort="none"] .cl-th-in::after { content: " \2195"; color: var(--text-muted); opacity: .7; }
+/* The real heads: laid out (their widths are the columns'), read by a screen reader, not seen. */
+.cl-summary table.cl-tbl thead th {
+  position: static; height: 0; padding-top: 0; padding-bottom: 0; border: 0; line-height: 0;
+}
+.cl-summary table.cl-tbl thead th .cl-th-in { display: block; height: 0; overflow: hidden; }
+.cl-tbl td { white-space: nowrap; }
+.cl-end { padding: 10px 14px; border-top: 1px solid var(--grid); color: var(--text-muted); text-align: center; font-size: 12px; }
+
+/* A cluster's name opens its menu: reads as a name, behaves as a button. */
+.cl-name-td { max-width: 300px; }
+.cl-name {
+  display: inline-flex; align-items: center; gap: 5px; max-width: 100%;
+  padding: 1px 4px; margin-left: -4px; border: 0; border-radius: var(--radius-sm);
+  background: transparent; color: var(--accent); font-weight: 650; cursor: pointer; text-align: left;
+}
+.cl-name:hover { background: var(--accent-soft); }
+.cl-name:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+/* Never squeezed below its own length by the other columns (a wide table scrolls instead);
+   only a name longer than this is cut, and the tooltip has it whole. */
+.cl-name-t { flex: none; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 260px; }
+.cl-caret { font-size: 10px; color: var(--text-muted); flex: none; }
+.menu-pop button .mi-note { margin-left: auto; padding-left: 14px; color: var(--text-muted); font-size: 11px; white-space: nowrap; }
+
+/* The unreachable clusters, above the table: compact cards, or one line when folded. */
+.cl-sp { flex: 1 1 auto; }
+.cl-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--critical); flex: none; }
+.cl-down {
+  background: var(--surface-1); border: 1px solid color-mix(in srgb, var(--critical) 45%, var(--border));
+  border-radius: var(--radius); padding: 10px 12px; margin-bottom: 12px;
+  display: flex; flex-direction: column; gap: 8px; min-width: 0;
+}
+.cl-down.folded { flex-direction: row; align-items: center; gap: 8px; padding: 7px 12px; flex-wrap: wrap; }
+.cl-down-names { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 0 1 auto; }
+.cl-down-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.cl-down-head h2 { margin: 0; font-size: 13.5px; font-weight: 650; }
+.cl-down-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 330px), 1fr)); gap: 8px; }
+.cl-down-card {
+  background: var(--surface-2); border: 1px solid var(--border); border-radius: 8px;
+  padding: 7px 10px; display: flex; flex-direction: column; gap: 5px; min-width: 0; font-size: 12.5px;
+}
+.cl-down-card.wide { grid-column: 1 / -1; }
+.cl-l1, .cl-l2 { display: flex; align-items: center; gap: 7px; min-width: 0; }
+/* The name gives way last: the "since" text shrinks first (it is in the open card too). */
+.cl-nm { font-size: 13.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 6ch; flex: 0 1 auto; }
+.cl-l1 .pill { flex: none; white-space: nowrap; }
+.cl-since { font-size: 11.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; flex: 0 100 auto; }
+.cl-err { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-secondary); }
+.cl-l2 .btn { flex: none; }
+.cl-exp { padding: 1px 7px; font-size: 13px; line-height: 1.2; }
+.cl-down-more { display: grid; gap: 8px; padding-top: 4px; border-top: 1px solid var(--border); }
+.cl-dl { margin: 0; display: grid; grid-template-columns: 110px minmax(0, 1fr); gap: 3px 12px; font-size: 12px; }
+.cl-dl dt { color: var(--text-muted); }
+.cl-dl dd { margin: 0; overflow-wrap: anywhere; }
+.cl-down-acts { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+.cl-down-card .diag { margin: 4px 0 0 !important; }
+
+/* The Columns panel. */
+.pop.cl-cols { width: min(340px, calc(100vw - 16px)); }
+.cl-cols-panel { display: grid; gap: 6px; }
+.cl-cols-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 1px; }
+.cl-col { display: flex; align-items: center; gap: 7px; padding: 0 4px; border-radius: 5px; min-width: 0; border: 1px solid transparent; }
+.cl-col:hover { background: var(--surface-2); }
+.cl-col.dragging { opacity: .45; }
+.cl-col.drop-before { box-shadow: inset 0 2px 0 var(--accent); }
+.cl-col.drop-after { box-shadow: inset 0 -2px 0 var(--accent); }
+.cl-grip { width: 10px; color: var(--text-muted); cursor: grab; flex: none; user-select: none; }
+.cl-col-name {
+  flex: 1 1 auto; min-width: 0; text-align: left; border: 0; background: transparent; padding: 2px 4px;
+  border-radius: 4px; cursor: text; line-height: 1.35; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-primary);
+}
+.cl-col.off .cl-col-name { color: var(--text-muted); }
+.cl-col-name:hover { background: var(--surface-3); }
+.cl-col-input { flex: 1 1 auto; min-width: 0; padding: 2px 6px; font-size: 12.5px; }
+.cl-col-note { color: var(--text-muted); font-size: 11px; white-space: nowrap; flex: none; max-width: 110px; overflow: hidden; text-overflow: ellipsis; }
+.cl-col-mv { display: inline-flex; gap: 0; flex: none; min-width: 46px; }
+.cl-col-mv .btn { padding: 0 5px; line-height: 1.35; }
+.cl-cols-foot { display: flex; align-items: center; gap: 8px; padding-top: 6px; border-top: 1px solid var(--border); }
+
+/* The picker marks a cluster that cannot be reached (where the platform styles options).
+   Its width is set from the names alone (app.js renderTopbar), never from the mark. */
+#cluster-select { flex: none; }
+#cluster-select option.unreachable { color: var(--critical-ink); }
 
 /* One cluster's block on a page that shows the whole fleet (Snapshots, …). Off screen, the
    browser skips its style and layout and reserves an estimated height instead, so a page of

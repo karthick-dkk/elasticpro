@@ -713,6 +713,20 @@ await go('settings');
 /* ------------- the cluster summary names the JVM and opens a row ------------- */
 
 await go('overview');
+// JDK starts hidden (core/cluster-view.js SUMMARY_COLUMNS): turn it on the way a person
+// does, through the Columns panel.
+{
+  const btn = doc.getElementById('cl-columns');
+  ok(!!btn, 'overview: no Columns button on the summary');
+  if (btn) {
+    btn.click(); await settleFor(150);
+    const box = doc.getElementById('cl-colvis-jdk');
+    ok(box && !box.checked, 'overview: JDK should start hidden');
+    if (box && !box.checked) { box.checked = true; box.dispatchEvent(new window.Event('change', { bubbles: true })); await settleFor(250); }
+    doc.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); await settleFor(100);
+    ok(!doc.querySelector('.pop.cl-cols'), 'overview: Escape did not close the Columns panel');
+  }
+}
 {
   const summary = [...doc.querySelectorAll('section.card')]
     .find((sec) => (sec.querySelector('header h2') || {}).textContent === 'Cluster summary');
@@ -752,6 +766,255 @@ await go('overview');
       ok(now && now.getAttribute('aria-expanded') === 'true', 'overview: an open row should say it is open');
       now.click();
       await settleFor(250);
+    }
+  }
+}
+
+/* ------------- Clusters page: columns, the name menu, unreachable cards ------------- */
+
+{
+  const st = await load('core/state.js');
+  const cv = await load('core/cluster-view.js');
+  const press = (el) => el && el.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+  const key = (k, target = doc) => target.dispatchEvent(new window.KeyboardEvent('keydown', { key: k, bubbles: true }));
+  const summary = () => panel('Cluster summary');
+  const headCells = () => [...summary().querySelectorAll('.cl-head .cl-hcell[data-col]')];
+  const headIds = () => headCells().map((b) => b.dataset.col);
+  const headNames = () => headCells().map((b) => b.textContent.replace(/[▲▼]/g, '').trim());
+  const openCols = async () => { press(doc.getElementById('cl-columns')); await settleFor(150); return doc.querySelector('.pop.cl-cols'); };
+  const closeCols = async () => { key('Escape'); await settleFor(100); };
+  const user = () => (st.state.caller && st.state.caller.name) || 'local';
+  const stored = () => JSON.parse(window.localStorage.getItem(cv.prefsKey(user())) || 'null');
+
+  // Start from the defaults whatever an earlier case did.
+  window.localStorage.removeItem(cv.prefsKey(user()));
+  st.state.caller = { name: 'columns-check', role: 'admin' };
+  await go('overview');
+
+  // Every head sorts, says so, and the strip and the real <thead> agree.
+  {
+    const ids = headIds();
+    ok(ids[0] === 'name', `overview: the first column is "${ids[0]}", expected the cluster name`);
+    const real = [...summary().querySelectorAll('table.cl-tbl thead th[data-col]')].map((th) => th.dataset.col);
+    ok(JSON.stringify(real) === JSON.stringify(ids), `overview: pinned heads ${ids.join(',')} differ from the table's ${real.join(',')}`);
+    ok(headCells().every((b) => b.tagName === 'BUTTON' && b.hasAttribute('aria-sort')), 'overview: a pinned head is not a sort button');
+    for (const id of ids) {
+      press(summary().querySelector(`.cl-head .cl-hcell[data-col="${id}"]`)); await settleFor(120);
+      const a = summary().querySelector(`.cl-head .cl-hcell[data-col="${id}"]`);
+      const first = a.getAttribute('aria-sort');
+      press(a); await settleFor(120);
+      const b = summary().querySelector(`.cl-head .cl-hcell[data-col="${id}"]`);
+      ok(first !== 'none' && b.getAttribute('aria-sort') !== first && b.getAttribute('aria-sort') !== 'none',
+        `overview: "${id}" did not sort and then reverse (${first} → ${b.getAttribute('aria-sort')})`);
+    }
+    press(summary().querySelector('.cl-head .cl-hcell[data-col="name"]')); await settleFor(120);
+    if (summary().querySelector('.cl-head .cl-hcell[data-col="name"]').getAttribute('aria-sort') !== 'ascending') {
+      press(summary().querySelector('.cl-head .cl-hcell[data-col="name"]')); await settleFor(120);
+    }
+  }
+
+  // The rows are in the page: no box of their own.
+  ok(!summary().querySelector('.cluster-tbl-scroll'), 'overview: the summary still has its own scroll box');
+
+  // Columns: hide, reorder (keyboard and drag), rename (Enter saves, Escape cancels), reset.
+  {
+    let pop = await openCols();
+    ok(!!pop, 'overview: Columns did not open its panel');
+    ok(doc.getElementById('cl-columns').getAttribute('aria-expanded') === 'true', 'overview: the Columns button does not say it is open');
+    const nameBox = doc.getElementById('cl-colvis-name');
+    ok(nameBox && nameBox.disabled && nameBox.checked, 'overview: Cluster must be shown and not hideable');
+    const ilm = doc.getElementById('cl-colvis-ilm');
+    ilm.checked = false; ilm.dispatchEvent(new window.Event('change', { bubbles: true })); await settleFor(200);
+    ok(!headIds().includes('ilm'), 'overview: hiding ILM left it in the table');
+    ok(doc.querySelector('.pop.cl-cols'), 'overview: the panel closed after a change inside it');
+
+    const before = headIds();
+    press(doc.getElementById('cl-colup-alerts')); await settleFor(200);
+    const after = headIds();
+    ok(after.indexOf('alerts') === before.indexOf('alerts') - 1, `overview: Move up did not move Alerts (${before.join(',')} → ${after.join(',')})`);
+    ok(doc.activeElement && doc.activeElement.id === 'cl-colup-alerts', 'overview: the keyboard lost its place after Move up');
+
+    // Drag Version below Health.
+    const li = (id) => doc.querySelector(`.pop.cl-cols li[data-col="${id}"]`);
+    const dt = { setData() {}, effectAllowed: '' };
+    const fire = (el, type, extra = {}) => { const e = new window.Event(type, { bubbles: true, cancelable: true }); Object.assign(e, { dataTransfer: dt, clientY: 1e6 }, extra); el.dispatchEvent(e); };
+    fire(li('version'), 'dragstart'); fire(li('health'), 'dragover'); fire(li('health'), 'drop'); await settleFor(200);
+    const dragged = headIds();
+    ok(dragged.indexOf('version') === dragged.indexOf('health') + 1, `overview: dragging Version after Health gave ${dragged.join(',')}`);
+
+    // Rename: click, type, Escape cancels; click, type, Enter saves.
+    press(doc.getElementById('cl-colnm-version')); await settleFor(100);
+    let input = doc.getElementById('cl-colname-version');
+    ok(!!input && doc.activeElement === input, 'overview: clicking a column name did not open its rename box');
+    if (input) {
+      input.value = 'Throwaway';
+      key('Escape', input); await settleFor(150);
+      ok(doc.querySelector('.pop.cl-cols'), 'overview: Escape in the rename box closed the whole panel');
+      ok(!headNames().includes('Throwaway'), 'overview: Escape saved the rename');
+      press(doc.getElementById('cl-colnm-version')); await settleFor(100);
+      input = doc.getElementById('cl-colname-version');
+      input.value = 'ES version';
+      key('Enter', input); await settleFor(200);
+      ok(headNames().includes('ES version'), `overview: the renamed column reads ${headNames().join(' | ')}`);
+    }
+    await closeCols();
+    ok(!doc.querySelector('.pop.cl-cols'), 'overview: Escape did not close the Columns panel');
+
+    // Saved for this user — and read back from storage, not from memory: another user signs
+    // in on this tab and sees the defaults, then this one comes back to their layout.
+    const s = stored();
+    ok(s && s.columns && s.columns.names.version === 'ES version' && s.columns.shown.ilm === false,
+      `overview: the layout was not saved for this user (${JSON.stringify(s)})`);
+    const mine = headNames().join('|');
+    st.state.caller = { name: 'someone-else', role: 'admin' };
+    await go('overview');
+    ok(headIds().includes('ilm') && !headNames().includes('ES version'), 'overview: another user got this user\'s columns');
+    st.state.caller = { name: 'columns-check', role: 'admin' };
+    await go('overview');
+    ok(headNames().join('|') === mine, `overview: after signing back in the columns read ${headNames().join('|')}, expected ${mine}`);
+
+    // The CSV follows the columns on screen, in order, under their names.
+    files.length = 0;
+    press([...summary().querySelectorAll('header button')].find((b) => b.textContent === 'Export CSV')); await settleFor(150);
+    const csv = files.find((f) => /^es-cluster-summary-.*\.csv$/.test(f.name));
+    ok(!!csv, 'overview: Export CSV produced no file');
+    if (csv) {
+      const header = csv.text.split('\n')[0];
+      ok(header.includes('ES version') && !/(^|,)ILM(,|$)/.test(header), `overview: the CSV header ignores the columns on screen: ${header}`);
+      ok(header.indexOf('Health') < header.indexOf('ES version'), `overview: the CSV is not in the order on screen: ${header}`);
+    }
+
+    pop = await openCols();
+    press(doc.getElementById('cl-cols-reset')); await settleFor(200);
+    await closeCols();
+    ok(JSON.stringify(headIds()) === JSON.stringify(cv.visibleColumns(null).map((c) => c.id)), `overview: Reset left ${headIds().join(',')}`);
+    ok(headNames().includes('Version') && headIds().includes('ilm'), 'overview: Reset did not restore the names and the hidden column');
+  }
+
+  // A cluster's name opens its menu: Edit (an admin), Nodes, Repo, Live log, each going
+  // to the right page with that cluster selected.
+  {
+    const target = config.clusters[config.clusters.length - 1];
+    const trigger = () => [...summary().querySelectorAll('button.cl-name')].find((b) => b.textContent.includes(target.name));
+    const openMenu = async () => { press(trigger()); await settleFor(100); return doc.querySelector('.menu-pop'); };
+    let menu = await openMenu();
+    ok(!!menu, 'overview: clicking a cluster name opened no menu');
+    if (menu) {
+      const labels = [...menu.querySelectorAll('button[role=menuitem]')].map((b) => b.children[1].textContent);
+      for (const l of ['Edit', 'Nodes', 'Repo', 'Live log']) ok(labels.includes(l), `overview: the name menu has no "${l}" (has ${labels.join(', ')})`);
+      ok(trigger().getAttribute('aria-expanded') === 'true', 'overview: the name does not say its menu is open');
+      ok(doc.activeElement && menu.contains(doc.activeElement), 'overview: the menu did not take the keyboard');
+      key('ArrowDown'); ok(doc.activeElement !== menu.querySelector('button'), 'overview: ArrowDown did not move in the menu');
+      key('Escape'); await settleFor(80);
+      ok(!doc.querySelector('.menu-pop'), 'overview: Escape did not close the name menu');
+      ok(doc.activeElement === trigger(), 'overview: Escape did not hand the keyboard back to the name');
+    }
+    const go2 = async (label) => {
+      await go('overview');
+      st.state.selected = 'all';
+      const m = await openMenu();
+      const item = m && [...m.querySelectorAll('button[role=menuitem]')].find((b) => b.children[1].textContent === label);
+      press(item); await settleFor(450);
+    };
+    await go2('Nodes');
+    ok(/#\/shards$/.test(window.location.hash) && st.state.selected === target.id, `name menu → Nodes: at ${window.location.hash}, selected ${st.state.selected}`);
+    await go2('Repo');
+    ok(/#\/snapshots$/.test(window.location.hash) && st.state.selected === target.id, `name menu → Repo: at ${window.location.hash}, selected ${st.state.selected}`);
+    const summaryTab = [...doc.querySelectorAll('#view .seg button')].find((b) => b.textContent === 'Snapshot Summary');
+    ok(summaryTab && summaryTab.getAttribute('aria-pressed') === 'true', 'name menu → Repo: the repositories view is not the one open');
+    const snapTab = [...doc.querySelectorAll('#view .seg button')].find((b) => b.textContent === 'Snapshots');
+    if (snapTab) { press(snapTab); await settleFor(150); }
+    await go2('Live log');
+    ok(/#\/logs$/.test(window.location.hash) && st.state.selected === target.id, `name menu → Live log: at ${window.location.hash}, selected ${st.state.selected}`);
+    await go2('Edit');
+    const dlg = doc.querySelector('.modal-overlay .modal');
+    ok(dlg && /Edit cluster/.test(dlg.textContent), 'name menu → Edit: the cluster editor did not open');
+    if (dlg) { const cancel = [...dlg.querySelectorAll('button')].find((b) => b.textContent === 'Cancel'); press(cancel); await settleFor(150); }
+    // A role that may not change clusters is not offered Edit.
+    st.state.caller = { name: 'columns-check', role: 'user' };
+    await go('overview');
+    menu = await openMenu();
+    ok(menu && ![...menu.querySelectorAll('button[role=menuitem]')].some((b) => b.children[1].textContent === 'Edit'), 'name menu: Edit offered to a role that cannot edit');
+    key('Escape'); await settleFor(60);
+    st.state.caller = { name: 'columns-check', role: 'admin' };
+    st.state.selected = 'all';
+  }
+
+  // Unreachable clusters: cards above the table, not rows in it; Hide folds them to one
+  // line, remembered; a cluster that newly goes down opens the section again.
+  {
+    const [a, b] = config.clusters;
+    const real = new Map(config.clusters.map((c) => [c.id, { d: st.state.data.get(c.id), cl: st.client(c.id) && { state: st.client(c.id).state, lastError: st.client(c.id).lastError } }]));
+    const takeDown = (c, state = 'offline', message = 'connect ECONNREFUSED 127.0.0.1:9299 (EP-301)') => {
+      st.state.data.set(c.id, { ...(st.state.data.get(c.id) || {}), updatedAt: Date.now(), reachable: false, healthUnknown: false, reach: { state: 'unreachable', since: Date.now() - 18 * 60000 } });
+      const cl = st.client(c.id); if (cl) { cl.state = state; cl.lastError = { ok: false, kind: 'unreachable', message }; }
+    };
+    const restore = () => {
+      for (const [id, r] of real) { st.state.data.set(id, r.d); const cl = st.client(id); if (cl && r.cl) { cl.state = r.cl.state; cl.lastError = r.cl.lastError; } }
+    };
+    const section = () => doc.querySelector('#view section.cl-down');
+    const rowNames = () => [...summary().querySelectorAll('tbody button.cl-name')].map((x) => x.textContent.replace('▾', '').trim());
+    try {
+      st.state.selected = 'all';
+      takeDown(a);
+      await go('overview');
+      const sec = section();
+      ok(!!sec, 'unreachable: no unreachable section on the page');
+      if (sec) {
+        ok(!!(sec.compareDocumentPosition(summary()) & window.Node.DOCUMENT_POSITION_FOLLOWING), 'unreachable: the section is not above the summary');
+        ok(/1 unreachable/.test(sec.textContent), `unreachable: heading reads "${sec.querySelector('h2') && sec.querySelector('h2').textContent}"`);
+        const card = sec.querySelector(`article.cl-down-card[data-cluster="${a.id}"]`);
+        ok(!!card, `unreachable: no card for ${a.name}`);
+        ok(card && /Offline/.test(card.textContent) && /since /.test(card.textContent) && /ECONNREFUSED/.test(card.textContent),
+          `unreachable: the card does not give reason, since and error: "${card && card.textContent.slice(0, 160)}"`);
+        ok(card && card.querySelector('.cl-err').getAttribute('title').includes('ECONNREFUSED'), 'unreachable: the full error is not in the tooltip');
+        ok(!rowNames().includes(a.name), `unreachable: ${a.name} is still a row in the table`);
+        ok(/End of the list · \d+ clusters? \(\d+ here, 1 unreachable at the top\)/.test(summary().querySelector('.cl-end').textContent),
+          `unreachable: the end line reads "${summary().querySelector('.cl-end').textContent}"`);
+        const exp = card.querySelector('button.cl-exp');
+        press(exp); await settleFor(150);
+        const opened = section().querySelector(`article.cl-down-card[data-cluster="${a.id}"]`);
+        ok(opened && opened.querySelector('button.cl-exp').getAttribute('aria-expanded') === 'true', 'unreachable: ▾ did not open the card');
+        for (const k of ['Address', 'Through', 'Last answer', 'Error code', 'Next try']) ok(opened && opened.textContent.includes(k), `unreachable: the open card has no "${k}"`);
+        ok(opened && opened.textContent.includes('EP-301'), 'unreachable: the error code is not shown');
+        press(opened.querySelector('button.cl-exp')); await settleFor(100);
+      }
+
+      // Hide, and it stays hidden across a reload (read back from storage).
+      press(doc.getElementById('cl-down-toggle')); await settleFor(150);
+      ok(section() && section().classList.contains('folded') && /hidden/.test(section().textContent), 'unreachable: Hide did not fold the section to one line');
+      ok(doc.getElementById('cl-down-toggle').getAttribute('aria-expanded') === 'false', 'unreachable: the folded toggle does not say it is closed');
+      ok(stored() && stored().unreachable.hidden === true, 'unreachable: the fold was not saved');
+      st.state.caller = { name: 'someone-else', role: 'admin' }; await go('overview');
+      ok(section() && !section().classList.contains('folded'), 'unreachable: another user inherited the fold');
+      st.state.caller = { name: 'columns-check', role: 'admin' }; await go('overview');
+      ok(section() && section().classList.contains('folded'), 'unreachable: the fold did not survive a reload');
+
+      // A second cluster goes down: a new outage opens it.
+      if (b) {
+        takeDown(b, 'auth_error', 'HTTP 401 from the cluster (EP-401)');
+        await go('overview');
+        ok(section() && !section().classList.contains('folded'), 'unreachable: a newly unreachable cluster stayed hidden');
+        ok(section() && /2 unreachable/.test(section().textContent) && /Auth error/.test(section().textContent), 'unreachable: the second card is missing or has no reason');
+        // Hide again, then one recovers: 2 → 1 keeps it hidden.
+        press(doc.getElementById('cl-down-toggle')); await settleFor(150);
+        st.state.data.set(b.id, real.get(b.id).d);
+        const clb = st.client(b.id); if (clb) { clb.state = real.get(b.id).cl.state; clb.lastError = real.get(b.id).cl.lastError; }
+        await go('overview');
+        ok(section() && section().classList.contains('folded'), 'unreachable: going from 2 down to 1 opened the section');
+        press(doc.getElementById('cl-down-toggle')); await settleFor(150);
+        ok(section() && !section().classList.contains('folded'), 'unreachable: Show did not open the section');
+      }
+    } finally {
+      restore();
+      window.localStorage.removeItem(cv.prefsKey('columns-check'));
+      window.localStorage.removeItem(cv.prefsKey('someone-else'));
+      st.state.caller = null;
+      await go('overview');
+      // The name menu's hand-offs picked one cluster; later cases drive the whole fleet,
+      // so ask for it back the way a person does — through the picker.
+      const pick = doc.getElementById('cluster-select');
+      if (pick) { pick.value = 'all'; pick.dispatchEvent(new window.Event('change', { bubbles: true })); await settleFor(300); }
     }
   }
 }
@@ -2182,6 +2445,6 @@ if (problems.length) {
   for (const p of problems) console.error('  ✗ ' + p);
   process.exit(1);
 }
-console.log('ok: strip, console, shards, volume, hand-off, refresh, snapshots, tasks, toasts, accounts split, the log-delay preflight, a quiet Config page, the Request Centre and the redraw gate, the request policy, the coverage bar, the Tasks panel and the console tabs, template management');
+console.log('ok: strip, console, shards, the Clusters page (columns, name menu, unreachable cards), volume, hand-off, refresh, snapshots, tasks, toasts, accounts split, the log-delay preflight, a quiet Config page, the Request Centre and the redraw gate, the request policy, the coverage bar, the Tasks panel and the console tabs, template management');
 // The pages leave auto-refresh timers and a live tail running; nothing here waits on them.
 process.exit(0);

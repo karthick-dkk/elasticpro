@@ -16,7 +16,7 @@ import { defaultApiUrl, checkUrl, countdown, secondsLeft, isManaged, linkChanges
 import { showCredentialDialog, forgetVaultCredential } from '../ui/credential-dialog.js';
 import { EXAMPLE_YAML } from '../core/example.js';
 import { saveTextAs } from '../core/platform.js';
-import { editCluster, editJumpHost, editCredentials, editDefaults, unlockSealed, saveRaw } from '../ui/config-editor.js';
+import { editCluster, editJumpHost, editCredentials, editDefaults, unlockSealed, saveRaw, rawClusterOf } from '../ui/config-editor.js';
 import { card, pill, table, empty } from './common.js';
 import { navigateTo } from '../core/intent.js';
 import { ALERT_RULES, loadAlertSettings, isEnabled } from '../core/alert-rules.js';
@@ -1347,12 +1347,6 @@ function draw() {
 }
 
 /** The raw file entry behind a normalised cluster (matched by name, then url). */
-function rawClusterOf(c) {
-  const raw = state.config && state.config.raw;
-  const list = (raw && raw.clusters) || [];
-  return list.find((x) => x.name === c.name) || list.find((x) => String(x.url || '').replace(/\/+$/, '') === c.url) || null;
-}
-
 function kvRow(k, v) {
   return h('tr.kv', h('td.k', k), h('td.v.mono', v));
 }

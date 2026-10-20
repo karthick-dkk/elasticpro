@@ -9,7 +9,7 @@ import { state, client, activeClusters, fetchSnapshots, fetchOverview, ensureFul
 import { freshnessBar } from '../lib/freshness.js';
 import { coverageStrip } from '../lib/charts.js';
 import { card, collapsible, pill, statTile, table, empty } from './common.js';
-import { navigateTo } from '../core/intent.js';
+import { intent, navigateTo } from '../core/intent.js';
 import { confirmDialog } from '../ui/modal.js';
 import { writesAllowed, syncWrites, writeToggle, ensureWrites } from '../core/writes.js';
 import { rowMenu, ICON, toast } from '../ui/menu.js';
@@ -33,6 +33,9 @@ const ui = { repo: {}, days: 60, view: 'snapshots', page: {}, q: {}, perPage: SN
 export function render(el) {
   host = el;
   el.classList.add('dense');   // long tables: fit more on one screen
+  // Arriving with a view asked for (the Clusters page's "Repo" opens the repositories).
+  if (intent.snapshots && (intent.snapshots.view === 'summary' || intent.snapshots.view === 'snapshots')) ui.view = intent.snapshots.view;
+  intent.snapshots = null;
   syncWrites().then(draw).catch(() => {});
   draw();
   loadFull();

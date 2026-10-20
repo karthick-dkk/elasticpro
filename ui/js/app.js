@@ -62,6 +62,7 @@ import * as pRequests from './pages/requests.js';
 import { loadSilences } from './core/silences.js';
 import { setRequestOrigin } from './core/es.js';
 import { UI_CODES, withCode, errorText } from './core/error-codes.js';
+import { setPageGate } from './core/intent.js';
 
 /**
  * `minRole` is the lowest role the tab is offered to.
@@ -85,7 +86,7 @@ const PAGES = [
   // it whatever the redraw policy says; the pending gate is for pages people read.
   { id: 'logs',      label: 'Live logs & Log delay', icon: '▶', mod: pLogs, multi: true,  minRole: 'user', live: true },
   { id: 'console',   label: 'REST console',   icon: '⌫', mod: pConsole,   multi: false, minRole: 'user', live: true },
-  { id: 'snapshots', label: 'Snapshots & SLM',icon: '↻', mod: pSnapshots, multi: true,  minRole: 'user' },
+  { id: 'snapshots', label: 'Snapshots',      icon: '↻', mod: pSnapshots, multi: true,  minRole: 'user' },
   { id: 'volume',    label: 'Volume report',  icon: '▤', mod: pVolume,    multi: true,  minRole: 'user' },
   // Not for read-only users: automation is run by operators and admins.
   { id: 'automation', label: 'Automation',    icon: '⟳', mod: pAutomation, multi: true, minRole: 'operator' },
@@ -98,6 +99,8 @@ const PAGES = [
 function visiblePages() {
   return PAGES.filter((p) => may(p.minRole) && (!p.accountsOnly || !!me));
 }
+// The same answer for a page that links to another (core/intent.js canOpenPage).
+setPageGate((id) => visiblePages().some((p) => p.id === id));
 
 const root = document.getElementById('root');
 let currentPage = null;
@@ -428,6 +431,24 @@ function clusterFinder(sel) {
   return h('span', { style: { display: 'inline-flex' } }, input, list);
 }
 
+/**
+ * Mark, in the picker, every cluster that cannot be reached — any of them, not only the
+ * selected one. In place: a cluster going up or down must not rebuild the whole top bar.
+ */
+function markUnreachable(sel) {
+  if (!sel) return;
+  const byId = new Map(clusters().map((c) => [c.id, c]));
+  for (const o of sel.options) {
+    const c = byId.get(o.value);
+    if (!c) continue;
+    const down = healthState(state.data.get(c.id)) === 'unreachable';
+    const text = down ? `\u25cf ${c.name} \u2014 unreachable` : c.name;
+    if (o.textContent !== text) o.textContent = text;
+    o.classList.toggle('unreachable', down);
+    o.title = down ? `${c.name} is unreachable` : '';
+  }
+}
+
 function renderTopbar() {
   const bar = $('#topbar');
   if (!bar) return;
@@ -442,7 +463,7 @@ function renderTopbar() {
     a.length, crit, clustersNeedingCredential().length, clustersWithAuthError().length, serverHoldsCredentials(),
     theme, isSnapshotMode(), fleetMode(), state.autoRefresh, state.defaults.refreshIntervalSec, redrawPolicy(),
     me && me.name, embedded, state.snapshot && state.snapshot.host]);
-  if (key === topbarKey && bar.firstChild) { tickStatus(); return; }
+  if (key === topbarKey && bar.firstChild) { tickStatus(); markUnreachable($('#cluster-select')); return; }
   topbarKey = key;
 
   const sel = h('select#cluster-select', { onchange: (e) => {
@@ -457,8 +478,17 @@ function renderTopbar() {
     fleetChosen = e.target.value === 'all';
     go(currentPage);
   } });
+  // "All clusters" first, then every cluster A–Z (clusters() is in name order). A cluster
+  // that cannot be reached says so in the list itself, so nobody picks it expecting data.
   if (page.multi) sel.append(h('option', { value: 'all' }, `All clusters (${clusters().length})`));
   clusters().forEach((c) => sel.append(h('option', { value: c.id }, c.name)));
+  markUnreachable(sel);
+  // As wide as the longest name, not the longest option: the "— unreachable" mark comes and
+  // goes, and a <select> sized by it resized the top bar, wrapped it onto a second line and
+  // moved the page under the reader. Capped, so a fleet of long names keeps the bar on one
+  // line; the list it opens shows every name whole.
+  const longest = Math.max(`All clusters (${clusters().length})`.length, ...clusters().map((c) => c.name.length));
+  sel.style.width = `${Math.min(26, Math.max(12, longest + 1))}ch`;
   resolveSelection(page);
   sel.value = state.selected;
   // On a large fleet a dropdown of a hundred names is scrolled, not read: a box beside it

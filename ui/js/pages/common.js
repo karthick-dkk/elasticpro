@@ -189,23 +189,24 @@ export function table(headers, rows, opts = {}) {
   return h('div.tbl-wrap', h('table.tbl', thead, tbody));
 }
 
-/** Connection trouble banner with the self-signed-certificate escape hatch. */
+/** A button's action, with the button saying it is working until it is done. */
+export async function act(btn, fn) {
+  btn.disabled = true; const t = btn.textContent; btn.textContent = 'Working…';
+  try { await fn(); } finally { btn.disabled = false; btn.textContent = t; }
+}
+
 /**
- * Connection problem banner. The core reports exactly what went wrong, and for the two
- * cases that need a human decision — an unknown certificate, an unknown jump-host key —
- * the decision is taken right here and the request retried.
+ * What is wrong with a cluster's connection, and what can be done about it here: a title,
+ * a severity, the evidence (certificate, jump-host key) and the actions that answer it
+ * (trust this certificate, unlock this key, enter credentials). The banner below draws it;
+ * the Clusters page's unreachable cards draw the same parts in less room, so the two can
+ * never offer different answers to the same failure.
  */
-export function connectionBanner(cluster, onRetry) {
+export function connectionProblem(cluster, onRetry) {
   const cl = client(cluster.id);
   const err = (cl && cl.lastError) || {};
   const kind = err.kind || '';
   const auth = cl && cl.state === 'auth_error';
-  const out = h('div', { style: { display: 'grid', gap: '0' } });
-
-  async function act(btn, fn) {
-    btn.disabled = true; const t = btn.textContent; btn.textContent = 'Working…';
-    try { await fn(); } finally { btn.disabled = false; btn.textContent = t; }
-  }
 
   let title, cls = 'err', body = null, actions = [];
   const help = err.help ? h('div.sec', { style: { fontSize: '12px', marginTop: '5px' } }, err.help) : null;
@@ -295,13 +296,18 @@ export function connectionBanner(cluster, onRetry) {
     body = help;
   }
 
-  async function runDiagnosis(btn) {
-    await act(btn, async () => {
-      let d;
-      try { d = await diagnoseCluster(cluster); }
-      catch (e) { d = { steps: [], verdict: 'error', title: 'Diagnosis failed', detail: e.message, fix: '' }; }
-      const panel = out.querySelector('.diag');
-      const node = h('div.diag', { style: { marginTop: '-6px', marginBottom: '14px' } },
+  return { title, cls, body, actions, err };
+}
+
+/** Run the step-by-step connection diagnosis; a diagnosis that itself failed says so. */
+export async function diagnose(cluster) {
+  try { return await diagnoseCluster(cluster); }
+  catch (e) { return { steps: [], verdict: 'error', title: 'Diagnosis failed', detail: e.message, fix: '' }; }
+}
+
+/** A diagnosis, drawn: the verdict, each step that answered or did not, and the next step. */
+export function diagnosisPanel(d, onRetry) {
+  return h('div.diag', { style: { marginTop: '-6px', marginBottom: '14px' } },
         h('div.card', h('div.body', { style: { display: 'grid', gap: '9px' } },
           h('div', { style: { display: 'flex', gap: '8px', alignItems: 'center' } },
             h(`span.pill.${d.verdict === 'ok' ? 'green' : /tls|scheme/.test(d.verdict) ? 'yellow' : 'red'}`, h('i.dot'), String(d.verdict).replace('_', ' ')),
@@ -314,6 +320,21 @@ export function connectionBanner(cluster, onRetry) {
               h('span.muted', st.detail)))),
           d.fix && !/CA|trust store|policy/i.test(d.fix) ? h('div', { style: { fontSize: '12.5px', borderLeft: '2px solid var(--accent)', paddingLeft: '10px' } }, h('b', 'Next step: '), d.fix) : null,
           h('div', h('button.btn.sm', { onclick: onRetry }, 'Recheck')))));
+}
+
+/**
+ * Connection problem banner. The core reports exactly what went wrong, and for the two
+ * cases that need a human decision — an unknown certificate, an unknown jump-host key —
+ * the decision is taken right here and the request retried.
+ */
+export function connectionBanner(cluster, onRetry) {
+  const { title, cls, body, actions, err } = connectionProblem(cluster, onRetry);
+  const out = h('div', { style: { display: 'grid', gap: '0' } });
+
+  async function runDiagnosis(btn) {
+    await act(btn, async () => {
+      const node = diagnosisPanel(await diagnose(cluster), onRetry);
+      const panel = out.querySelector('.diag');
       if (panel) panel.replaceWith(node); else out.append(node);
     });
   }
