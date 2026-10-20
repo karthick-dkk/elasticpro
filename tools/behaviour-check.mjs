@@ -93,6 +93,25 @@ const groupBand = () => [...doc.querySelectorAll('table.sheet thead tr.group-hea
 
 async function go(id) { app.go(id); await settleFor(350); }
 
+/**
+ * Wait, up to `ms`, for `find()` to give an element; a named problem and null when it never
+ * does, with what the page was showing, instead of a TypeError on the next `.click()`.
+ * A page that failed to draw ("No cluster selected", "Page failed to render") reads very
+ * differently from a slow one, and this says which.
+ */
+async function waitFor(find, what, ms = 5000) {
+  const until = Date.now() + ms;
+  for (;;) {
+    const el = find();
+    if (el) return el;
+    if (Date.now() >= until) break;
+    await settleFor(50);
+  }
+  const view = doc.getElementById('view');
+  problems.push(`${what}: not on the page after ${ms} ms — the view reads "${view ? view.textContent.replace(/\s+/g, ' ').trim().slice(0, 160) : '(no #view)'}"`);
+  return null;
+}
+
 /* ------------- the status strip stays off the pages people work in ------------- */
 
 const STRIP_HIDDEN = ['indices', 'console', 'logs', 'snapshots', 'shards', 'volume'];
@@ -2215,6 +2234,14 @@ restoreConsole();
   const es = await load('core/es.js');
   const before = await es.policyGet();
   ok(before && before.ok, `policy: POLICY_GET was refused: ${JSON.stringify(before)}`);
+  // A bridge keeps policy.json between runs, and the restore at the end of this case saves
+  // one. With a policy already stored, "Client basis" may be what is saved, so pressing it
+  // changes nothing: start from a different mode so the press and the Save mean something
+  // on every run. The fresh-install assertions below need no policy saved, so they run
+  // only on a data directory that has none (the first run on a fresh one, as in CI).
+  if (before && before.ok && before.stored !== false && before.policy && before.policy.mode === 'on-demand') {
+    await es.policySet({ ...before.policy, mode: 'background' });
+  }
   const bus = (await load('core/state.js')).bus;
   const countOf = (type) => sent.filter((m) => m.type === type).length;
   const lastOf = (type) => sent.filter((m) => m.type === type).at(-1);
@@ -2375,13 +2402,19 @@ if (viaFleet) {
 }
 
 // REST console tabs: up to ten, each keeping its own query; the eleventh is refused.
-{
+consoleTabs: {
   await go('console');
   const strip = () => doc.querySelectorAll('.console-tab');
+  const add = () => doc.querySelector('.console-tab-add');
+  // The page is entitled to be drawn the moment go() returns; waiting is for a machine slow
+  // enough that it is not, and the message names what stood there instead if it never is.
+  if (!(await waitFor(add, 'console tabs: the + button'))) break consoleTabs;
   ok(strip().length >= 1, 'console tabs: no tab strip');
+  // The tabs are remembered across visits (and a bridge keeps its data directory between
+  // runs), so start from one tab rather than from whatever an earlier visit left.
+  while (strip().length > 1) { strip()[strip().length - 1].querySelector('.console-tab-x').click(); await settleFor(30); }
   const path = doc.querySelector('#c-path');
   if (path) { path.value = '/_cat/health'; path.dispatchEvent(new window.Event('input', { bubbles: true })); }
-  const add = () => doc.querySelector('.console-tab-add');
   const before = strip().length;
   add().click(); await settleFor(200);
   ok(strip().length === before + 1, `console tabs: + did not add a tab (${strip().length})`);

@@ -452,7 +452,7 @@ impl GateState {
     }
 
     fn effective(&self, w: &Waiting, now: u64) -> Class {
-        let steps = if self.limits.promote_after_ms == 0 { 0 } else { now.saturating_sub(w.since) / self.limits.promote_after_ms };
+        let steps = now.saturating_sub(w.since).checked_div(self.limits.promote_after_ms).unwrap_or(0);
         (0..steps.min(2)).fold(w.t.class, |c, _| c.up())
     }
 

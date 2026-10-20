@@ -87,7 +87,7 @@ impl Concurrency {
     /// `ELASTICPRO_POLL_CONCURRENCY` (POLL_CONCURRENCY in config.txt) wins over `global`.
     fn with_global(global: usize, per_cluster: usize) -> Concurrency {
         Concurrency {
-            global: env_num("ELASTICPRO_POLL_CONCURRENCY").map_or(global as u64, |v| v).clamp(1, 256) as usize,
+            global: env_num("ELASTICPRO_POLL_CONCURRENCY").unwrap_or(global as u64).clamp(1, 256) as usize,
             per_cluster,
             tunnel: 6,
         }

@@ -57,7 +57,13 @@ export function render(el) {
 export function onData() { /* the log is the core's; data events do not change it */ }
 
 /** Leaving the page stops the re-read; nothing is polled for a page nobody is looking at. */
-export function onLeave() { clearInterval(timer); timer = null; }
+export function onLeave() {
+  clearInterval(timer); timer = null;
+  // #view is one element for every page, so `host.isConnected` stays true after the page
+  // has gone: a read still in flight (the log, the policy, housekeeping) would land on
+  // whatever page had replaced this one. Forgetting the host is what makes draw() a no-op.
+  host = null;
+}
 
 async function poll() {
   // About once a minute (every 30th two-second poll) the housekeeping card is read again,
@@ -132,6 +138,7 @@ async function changePolicy(next, said) {
 const policyKnown = () => !!(policy && !policy.error && policy.paused);
 
 function draw() {
+  if (!host) return;   // left the page while a read was in flight
   const rows = requestRows(log, filter);
   const inflight = rows.filter((r) => r.inflight).length;
   const perMin = Object.values(requestLoad.clusters || {}).reduce((s, c) => s + (c.perMinute || 0), 0);
