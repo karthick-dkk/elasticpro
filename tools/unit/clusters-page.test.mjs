@@ -100,14 +100,6 @@ test('unreachable clusters stay in the table: A–Z by name, and after every fig
   assert.deepEqual(order(P.unreachableRows(rows)).sort(), ['Bb', 'a10', 'a9', 'zz'], 'a cluster not read yet is not unreachable');
 });
 
-test('the reason pill comes from the connection state', () => {
-  assert.deepEqual(P.unreachableReason({ state: 'auth_error' }), { label: 'Auth error', cls: 'red' });
-  assert.deepEqual(P.unreachableReason({ state: 'tls_error' }), { label: 'Certificate', cls: 'yellow' });
-  assert.deepEqual(P.unreachableReason({ state: 'tunnel_error' }), { label: 'Jump host down', cls: 'red' });
-  assert.deepEqual(P.unreachableReason({ state: 'offline' }), { label: 'Offline', cls: 'red' });
-  assert.deepEqual(P.unreachableReason(null), { label: 'Offline', cls: 'red' });
-});
-
 test('the CSV follows the visible columns, their order and their names', () => {
   let prefs = V.setColumnShown(null, 'disk', false);
   prefs = V.setColumnShown(prefs, 'jdk', true);

@@ -17,6 +17,7 @@
  */
 
 import { ALERT_RULES } from './alert-rules.js';
+import { FOCUS } from './alert-goto.js';
 
 /**
  * @typedef {{ text:string, links?:Array<{label:string, page:string, focus?:object}>,
@@ -38,8 +39,8 @@ export const PLAYBOOKS = {
   unreachable: (m) => ({
     cause: 'ElasticPro did not get an answer. The node may be down, the network or an SSH jump host in between may be, or the credential may have changed.',
     steps: [
-      { text: 'Open its card: Retry and Diagnose say whether it is the network, TLS, the credential or the jump host.',
-        links: [{ label: 'Its card on Clusters', page: 'overview', focus: { section: 'unreachable' } }] },
+      { text: 'Retry and Diagnose on its line above say whether it is the network, TLS, the credential or the jump host.',
+        links: [{ label: 'Its row on Clusters', page: 'overview', focus: FOCUS.unreachable(m) }] },
       { text: 'If Diagnose reports a refused or timed-out connection, check the Elasticsearch service and the firewall on the node itself.' },
       { text: 'If only ElasticPro cannot reach it, check the jump host tunnel and the certificate it presents. Everything else about this cluster on screen is stale until it answers.' },
     ],

@@ -21,6 +21,8 @@ import { editCluster, rawClusterOf } from '../ui/config-editor.js';
 import { takeFocus, revealFocus } from '../core/focus.js';
 import { openClusterAlerts } from '../core/alert-goto.js';
 import { diskAgainstWatermarks } from '../core/disk-balance.js';
+// Why a cluster cannot be reached: one definition, shared with the Alerts page's unreachable lines.
+import { unreachableReason } from '../core/alert-groups.js';
 
 let host = null;
 const expanded = new Set();
@@ -114,19 +116,6 @@ function alertsByCluster() {
   const m = new Map();
   openAlertsNow().forEach((a) => { if (a.cluster) m.set(a.cluster.id, (m.get(a.cluster.id) || 0) + 1); });
   return m;
-}
-
-/**
- * Why a cluster cannot be reached: one definition for the Health cell's tooltip and the CSV.
- * `cls` says how bad; a certificate is amber because it is a decision to take rather than
- * an outage.
- */
-export function unreachableReason(cl) {
-  const st = cl && cl.state;
-  if (st === 'auth_error') return { label: 'Auth error', cls: 'red' };
-  if (st === 'tls_error') return { label: 'Certificate', cls: 'yellow' };
-  if (st === 'tunnel_error') return { label: 'Jump host down', cls: 'red' };
-  return { label: 'Offline', cls: 'red' };
 }
 
 /** What a row's Health says: loading, the health colour, or why it cannot be reached. */

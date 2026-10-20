@@ -338,7 +338,12 @@ export function downFor(ms) {
   return h % 24 ? `${d} d ${h % 24} h` : `${d} d`;
 }
 
-/** Why a cluster cannot be reached, as a short label, from the client's state. */
+/**
+ * Why a cluster cannot be reached, as a short label, from the client's state. The one
+ * definition: the Alerts unreachable line, and the Clusters page's Health cell, tooltip
+ * and CSV. `cls` says how bad; a certificate is amber because it is a decision to take
+ * rather than an outage.
+ */
 export function unreachableReason(cl) {
   const st = cl && cl.state;
   if (st === 'auth_error') return { label: 'Auth error', cls: 'red' };

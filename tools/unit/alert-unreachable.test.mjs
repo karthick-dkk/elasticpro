@@ -120,8 +120,12 @@ test('the words: how long down, why, and what is held', () => {
   assert.equal(G.heldText(0), 'no other alerts');
   assert.equal(G.heldText(1), '1 older alert held, not current');
   assert.equal(G.heldText(2), '2 older alerts held, not current');
+  // One definition for the Alerts line and the Clusters page's Health cell and CSV.
+  assert.deepEqual(G.unreachableReason({ state: 'auth_error' }), { label: 'Auth error', cls: 'red' });
   assert.deepEqual(G.unreachableReason({ state: 'tls_error' }), { label: 'Certificate', cls: 'yellow' });
+  assert.deepEqual(G.unreachableReason({ state: 'tunnel_error' }), { label: 'Jump host down', cls: 'red' });
   assert.deepEqual(G.unreachableReason({ state: 'offline' }), { label: 'Offline', cls: 'red' });
+  assert.deepEqual(G.unreachableReason(null), { label: 'Offline', cls: 'red' });
 });
 
 /* ---- through the real pipeline: state.js mergedAlerts, the one list every count reads ---- */

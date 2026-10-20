@@ -22,7 +22,8 @@ import { navigateTo } from './intent.js';
  * What a hint means is each page's own business (see the page's render()).
  */
 export const FOCUS = {
-  // Clusters: that cluster's unreachable card, scrolled to and opened.
+  // Clusters: that cluster's row in the table, scrolled to and flashed (pages/overview.js
+  // revealFocused). Also the unreachable playbook's "Its row on Clusters" link.
   unreachable: (m) => ({ section: 'unreachable', cluster: m.clusterId || null }),
   // Nodes & shards: the shard table filtered to what is unassigned.
   health: () => ({ section: 'unassigned' }),
