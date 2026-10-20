@@ -1753,6 +1753,40 @@ restoreConsole();
   ok(sent.filter((m) => m.type === 'REQUEST_LOG').length === after, 'requests: the log is still being re-read after leaving the page');
 }
 
+// Housekeeping card on the Request Centre: read on entry, Dry run asks the core for a dry
+// run and draws what came back, and Run now asks first (a real run deletes). The real run is
+// never pressed here: against a bridge with a real data dir it would clean it.
+{
+  await go('requests'); await settleFor(800);
+  ok(sent.some((m) => m.type === 'HOUSEKEEPING_GET'), 'housekeeping: opening the Request Centre should read HOUSEKEEPING_GET');
+  const card = panel('Housekeeping');
+  ok(!!card, 'housekeeping: no Housekeeping card on the Request Centre');
+  if (card) {
+    const act = (a) => panel('Housekeeping').querySelector(`[data-act="${a}"]`);
+    ok(act('hk-dry') && act('hk-run'), 'housekeeping: the card has no Dry run / Run now buttons');
+    ok(/Runs\s+every hour|Runs\s+off/.test(card.textContent), `housekeeping: the card does not say when it runs: ${card.textContent.slice(0, 200)}`);
+    const runs = () => sent.filter((m) => m.type === 'HOUSEKEEPING_RUN');
+    const before = runs().length;
+    act('hk-dry').click(); await settleFor(1500);
+    ok(runs().length === before + 1, `housekeeping: Dry run sent ${runs().length - before} HOUSEKEEPING_RUN, expected 1`);
+    ok(runs().length > before && runs()[runs().length - 1].dryRun === true, 'housekeeping: Dry run did not ask for a dry run');
+    const after = panel('Housekeeping');
+    ok(after.querySelectorAll('tr[data-job]').length >= 6, `housekeeping: the result lists ${after.querySelectorAll('tr[data-job]').length} jobs, expected one row per job`);
+    ok(/dry run/i.test(after.textContent), 'housekeeping: the last run is not marked as a dry run');
+    ok(!/\bremoved \d/.test(after.textContent), 'housekeeping: a dry run read as a deletion ("removed N")');
+    // Run now asks before it deletes anything; answering No sends nothing.
+    const askedBefore = runs().length;
+    act('hk-run').click(); await settleFor(300);
+    const dlg = doc.querySelector('.modal');
+    ok(!!dlg && /housekeeping/i.test(dlg.textContent), 'housekeeping: Run now did not ask first');
+    ok(runs().length === askedBefore, 'housekeeping: Run now sent the run before it was confirmed');
+    const no = dlg && [...dlg.querySelectorAll('button')].find((b) => b.textContent.trim() === 'No');
+    if (no) { no.click(); await settleFor(300); }
+    ok(!doc.querySelector('.modal'), 'housekeeping: the confirmation did not close on No');
+    ok(runs().length === askedBefore, 'housekeeping: answering No still ran housekeeping');
+  }
+}
+
 // Config page: a fleet event must not reload the open tab or wipe what is being typed.
 // On a 32-cluster install data lands every couple of seconds; the page used to rebuild on
 // each one, re-asking TUNNELS/PINS (Jump hosts) and ZABBIX_CLUSTERS (Zabbix) every time.

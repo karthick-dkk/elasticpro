@@ -57,7 +57,8 @@ fn set_cookie(token: &str, max_age: u64) -> String {
 /// Message types that change something and are therefore audited by user.
 const AUDITED: &[&str] = &["ES", "WRITE_UNLOCK", "TRUST_CERT", "UNTRUST_CERT", "TRUST_HOSTKEY",
                            "UNTRUST_HOSTKEY", "CONFIG_WRITE", "FILE_WRITE", "FORGET",
-                           "ZABBIX_LINK_SET", "ZABBIX_PAIR_BEGIN", "ZABBIX_UNPAIR"];
+                           "ZABBIX_LINK_SET", "ZABBIX_PAIR_BEGIN", "ZABBIX_UNPAIR",
+                           "HOUSEKEEPING_RUN"];
 
 struct App {
     core: Arc<Core>,
@@ -126,6 +127,9 @@ async fn run() {
     // the hosted binary, rather than in Core::new — a scheduler that starts itself
     // wherever a Core is built would run in the desktop app and in every test.
     core.start_delay_sink();
+    // Cleans what the core itself leaves behind. Started here for the same reason: a
+    // scheduler that started itself in Core::new would run in every test.
+    core.start_housekeeping();
     // The last cluster setup an admin applied, so a restart does not leave everybody
     // else on "not primed" until an admin next opens the app.
     core.restore_prime().await;

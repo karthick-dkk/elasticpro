@@ -169,6 +169,16 @@ pub struct State {
     pub starts: HashMap<String, std::collections::VecDeque<(u64, u64)>>,
 }
 
+/// What `State::housekeep` removed (or, on a dry run, would).
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct StateSweep {
+    pub throttles: usize,
+    pub budget_windows: usize,
+    pub watched: usize,
+    pub refresh_limits: usize,
+    pub running_counters: usize,
+}
+
 /// Whether a failure is the cluster asking to be left alone: 429, or a timeout.
 pub fn backoff_reason(err: &serde_json::Value) -> Option<&'static str> {
     if err.get("status").and_then(serde_json::Value::as_u64) == Some(429) {
@@ -523,6 +533,41 @@ impl State {
             }
         }
         background
+    }
+
+    /// Housekeeping: drop bookkeeping that can no longer matter — marks, limiters and counters
+    /// of clusters that are not in `known` (when it is given), and entries whose time has
+    /// passed. Nothing that holds a cached body or a pending ask is touched; `prune` and
+    /// `evict` own those. With `dry_run` it only counts.
+    pub fn housekeep(&mut self, known: Option<&HashSet<String>>, now: u64, watch_ms: u64, dry_run: bool) -> StateSweep {
+        let gone = |c: &String| known.is_some_and(|k| !k.contains(c));
+        let mut out = StateSweep::default();
+        let throttles: Vec<String> = self.throttle.iter().filter(|(c, t)| gone(c) || t.until <= now).map(|(c, _)| c.clone()).collect();
+        let windows: Vec<String> = self.starts.iter()
+            .filter(|(c, q)| gone(c) || q.back().is_none_or(|(t, _)| now.saturating_sub(*t) >= BUDGET_WINDOW_MS))
+            .map(|(c, _)| c.clone()).collect();
+        let watched: Vec<Key> = self.watched.iter()
+            .filter(|((c, _), t)| gone(c) || now.saturating_sub(**t) >= watch_ms)
+            .map(|(k, _)| k.clone()).collect();
+        let limits: Vec<(String, String, Dataset)> = self.refresh_rl.iter()
+            .filter(|((_, c, _), t)| gone(c) || now.saturating_sub(**t) >= REFRESH_EVERY_MS)
+            .map(|(k, _)| k.clone()).collect();
+        let idle_counts = self.running_cluster.values().filter(|n| **n == 0).count()
+            + self.running_jump.values().filter(|n| **n == 0).count();
+        out.throttles = throttles.len();
+        out.budget_windows = windows.len();
+        out.watched = watched.len();
+        out.refresh_limits = limits.len();
+        out.running_counters = idle_counts;
+        if !dry_run {
+            for c in &throttles { self.throttle.remove(c); }
+            for c in &windows { self.starts.remove(c); }
+            for k in &watched { self.watched.remove(k); }
+            for k in &limits { self.refresh_rl.remove(k); }
+            self.running_cluster.retain(|_, n| *n > 0);
+            self.running_jump.retain(|_, n| *n > 0);
+        }
+        out
     }
 
     /// Forget clusters that are no longer configured. Returns their ids.
@@ -962,5 +1007,58 @@ mod tests {
             assert!(st.entries[&k(c, Dataset::Health)].data.is_some(), "health is never evicted");
         }
         assert!(st.entries[&k("a", Dataset::Nodes)].data.is_none());
+    }
+
+    #[test]
+    fn housekeep_drops_bookkeeping_of_removed_clusters_and_of_the_past() {
+        let now = 10_000_000u64;
+        let mut st = active(now);
+        let k = |c: &str, d: Dataset| (c.to_string(), d);
+        st.throttle.insert("gone".into(), Throttle { kind: ThrottleKind::Backoff, until: now + 60_000, level: 1, reason: "x".into() });
+        st.throttle.insert("kept".into(), Throttle { kind: ThrottleKind::Backoff, until: now + 60_000, level: 1, reason: "x".into() });
+        st.throttle.insert("kept2".into(), Throttle { kind: ThrottleKind::Budget, until: now - 1, level: 0, reason: "x".into() });
+        st.starts.insert("gone".into(), [(now, 1)].into());
+        st.starts.insert("kept".into(), [(now - 1000, 1)].into());
+        st.starts.insert("kept2".into(), [(now - BUDGET_WINDOW_MS - 1, 1)].into());
+        st.watched.insert(k("gone", Dataset::Indices), now);
+        st.watched.insert(k("kept", Dataset::Indices), now - 1000);
+        st.watched.insert(k("kept", Dataset::Shards), now - 20 * 60_000);
+        st.refresh_rl.insert(("u".into(), "gone".into(), Dataset::Indices), now);
+        st.refresh_rl.insert(("u".into(), "kept".into(), Dataset::Indices), now - 1);
+        st.refresh_rl.insert(("u".into(), "kept".into(), Dataset::Shards), now - REFRESH_EVERY_MS - 1);
+        st.running_cluster.insert("idle".into(), 0);
+        st.running_cluster.insert("busy".into(), 2);
+        st.running_jump.insert("j".into(), 0);
+        // Something that must never be dropped: a body and a pending ask.
+        st.entries.insert(k("kept", Dataset::Health), Entry::never(1, None));
+        st.pending.insert(k("kept", Dataset::Health), now);
+        let known: HashSet<String> = ["kept", "kept2", "busy", "idle"].iter().map(|s| s.to_string()).collect();
+        let watch_ms = 15 * 60_000;
+
+        let dry = st.housekeep(Some(&known), now, watch_ms, true);
+        assert_eq!(dry, StateSweep { throttles: 2, budget_windows: 2, watched: 2, refresh_limits: 2, running_counters: 2 });
+        assert_eq!((st.throttle.len(), st.starts.len(), st.watched.len(), st.refresh_rl.len()), (3, 3, 3, 3), "a dry run changes nothing");
+
+        let done = st.housekeep(Some(&known), now, watch_ms, false);
+        assert_eq!(done, dry);
+        assert_eq!(st.throttle.keys().collect::<Vec<_>>(), vec!["kept"]);
+        assert_eq!(st.starts.keys().collect::<Vec<_>>(), vec!["kept"]);
+        assert_eq!(st.watched.keys().collect::<Vec<_>>(), vec![&k("kept", Dataset::Indices)]);
+        assert_eq!(st.refresh_rl.len(), 1);
+        assert_eq!(st.running_cluster.get("busy"), Some(&2));
+        assert!(!st.running_cluster.contains_key("idle") && st.running_jump.is_empty());
+        assert!(st.entries.contains_key(&k("kept", Dataset::Health)) && st.pending.contains_key(&k("kept", Dataset::Health)));
+        assert_eq!(st.housekeep(Some(&known), now, watch_ms, false), StateSweep::default(), "idempotent");
+    }
+
+    #[test]
+    fn housekeep_without_a_cluster_list_only_expires_by_time() {
+        let now = 10_000_000u64;
+        let mut st = active(now);
+        st.throttle.insert("any".into(), Throttle { kind: ThrottleKind::Backoff, until: now + 60_000, level: 1, reason: "x".into() });
+        st.watched.insert(("any".into(), Dataset::Indices), now);
+        let out = st.housekeep(None, now, 15 * 60_000, false);
+        assert_eq!(out, StateSweep::default(), "an unsettled list must not read as 'every cluster is gone'");
+        assert_eq!((st.throttle.len(), st.watched.len()), (1, 1));
     }
 }

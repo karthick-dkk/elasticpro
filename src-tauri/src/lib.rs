@@ -108,6 +108,9 @@ pub fn run() {
                 poller.start_fleet_poller();
                 poller.start_request_reaper();
             });
+            // The cache this window keeps on disk is cleaned on a timer, like the hosted one.
+            let tidy = core.clone();
+            tauri::async_runtime::spawn(async move { tidy.start_housekeeping() });
             app.manage(core);
             Ok(())
         })

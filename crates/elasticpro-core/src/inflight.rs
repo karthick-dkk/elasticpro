@@ -240,6 +240,19 @@ impl ReadCache {
         }
     }
 
+    /// Housekeeping: drop what is kept for any cluster not in `keep` (a removed cluster).
+    /// Returns how many answers went, or would on a dry run.
+    pub fn prune_clusters(&self, keep: &std::collections::HashSet<String>, dry_run: bool) -> usize {
+        let mut c = self.inner.lock();
+        let gone: Vec<Key> = c.map.iter().filter(|(_, e)| !keep.contains(&e.cluster)).map(|(k, _)| *k).collect();
+        if !dry_run {
+            for k in &gone {
+                c.remove(k);
+            }
+        }
+        gone.len()
+    }
+
     /// (entries, bytes)
     pub fn usage(&self) -> (usize, u64) {
         let c = self.inner.lock();
@@ -279,6 +292,13 @@ mod tests {
         assert!(c.get(&d, Duration::ZERO).is_none() || c.get(&d, Duration::ZERO).is_some_and(|(_, age)| age == 0), "max age 0 accepts only an answer from this very millisecond");
         c.put(a, "x", Arc::new(json!(4)), 101, 100);
         assert!(c.get(&a, Duration::from_secs(5)).is_none(), "larger than the whole cache: not kept");
+        let e = key("z", "u", "GET", "/e", None, None);
+        c.put(e, "z", Arc::new(json!(5)), 10, 100);
+        let keep: std::collections::HashSet<String> = ["y".to_string()].into();
+        assert_eq!(c.prune_clusters(&keep, true), 1, "a dry run counts the removed cluster's answer");
+        assert!(c.get(&e, Duration::from_secs(5)).is_some(), "...and keeps it");
+        assert_eq!(c.prune_clusters(&keep, false), 1);
+        assert!(c.get(&e, Duration::from_secs(5)).is_none() && c.get(&d, Duration::from_secs(5)).is_some(), "a kept cluster's answer stays");
         c.prune(Duration::ZERO);
         std::thread::sleep(Duration::from_millis(2));
         c.prune(Duration::from_millis(1));

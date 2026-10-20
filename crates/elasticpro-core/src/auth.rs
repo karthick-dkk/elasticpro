@@ -27,9 +27,10 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256, Sha512};
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 
 /// Matches `crypto.rs`. Login is not a hot path; the cost is the point.
 pub const ROUNDS: u32 = 600_000;
@@ -279,6 +280,9 @@ pub fn required_role(msg_type: &str) -> Option<Role> {
         // Arming the scheduled measurement decides that this process will write
         // to a cluster unattended. Nothing below admin goes near it.
         "DELAY_SINK_GET" | "DELAY_SINK_SET" | "DELAY_SINK_RUN" => Some(Role::Admin),
+        // Housekeeping deletes files, sessions and cache entries: an administrator's to read
+        // the state of and to run.
+        "HOUSEKEEPING_GET" | "HOUSEKEEPING_RUN" => Some(Role::Admin),
 
         // The caller's own notification history. Not a write to any cluster, so no write
         // unlock; anybody signed in, and the handler only ever uses the caller's own name.
@@ -993,6 +997,50 @@ pub struct Session {
     pub started: u64,
     pub must_change: bool,
     pub scope: Option<Vec<String>>,
+    /// Unix seconds this session was last used, to the minute (see `Sessions::TOUCH_EVERY`).
+    /// 0 for a session written before this field existed: `started` stands in for it.
+    #[serde(default)]
+    pub last_seen: u64,
+    /// Made by the Zabbix frame's sign-in. The frame holds its token in page memory only, so
+    /// every reload leaves the old one behind, never to be used again; housekeeping expires
+    /// those after a day without use. Absent in a session written before this field existed.
+    #[serde(default)]
+    pub frame: bool,
+}
+
+impl Session {
+    /// When this session was last known to be in use.
+    pub fn seen(&self) -> u64 {
+        if self.last_seen > 0 { self.last_seen } else { self.started }
+    }
+}
+
+/// What housekeeping may end, and when. See `Sessions::reap`.
+#[derive(Clone, Debug)]
+pub struct SessionPolicy {
+    /// A Zabbix-frame session unused this long is ended.
+    pub frame_idle_secs: u64,
+    /// Any other session unused this long is ended; `None` is the default — never.
+    pub idle_secs: Option<u64>,
+    /// A session used within this long is somebody at the keyboard: nothing ends it.
+    pub active_secs: u64,
+}
+
+/// One session housekeeping ended (or, on a dry run, would). No token, no hash.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Reaped {
+    pub user: String,
+    pub role: Role,
+    pub frame: bool,
+    pub idle_secs: u64,
+    pub reason: &'static str,
+}
+
+/// How many sessions there are.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SessionStats {
+    pub total: usize,
+    pub frame: usize,
 }
 
 /// Live sessions. A session ends when the person signs out, or when an administrator
@@ -1008,6 +1056,12 @@ pub struct Sessions {
     /// Token hash → session.
     map: RwLock<HashMap<String, Session>>,
     path: Option<PathBuf>,
+    /// When the file was last written, unix seconds.
+    last_saved: AtomicU64,
+    /// A `last_seen` has moved in memory since the file was written.
+    touched: AtomicBool,
+    /// One writer of the file at a time.
+    saving: Mutex<()>,
 }
 
 impl Default for Sessions {
@@ -1024,11 +1078,25 @@ impl Sessions {
             .and_then(|p| std::fs::read_to_string(p).ok())
             .and_then(|s| serde_json::from_str::<HashMap<String, Session>>(&s).ok())
             .unwrap_or_default();
-        Sessions { map: RwLock::new(map), path }
+        Sessions { map: RwLock::new(map), path, last_saved: AtomicU64::new(now()), touched: AtomicBool::new(false), saving: Mutex::new(()) }
     }
 
+    /// How coarsely `last_seen` follows use: a session in constant use takes the write lock
+    /// once a minute, not once a request.
+    pub const TOUCH_EVERY: u64 = 60;
+    /// The file is rewritten for a moved `last_seen` at most this often.
+    pub const PERSIST_EVERY: u64 = 600;
+
     fn save(&self) {
+        let _one_writer = self.saving.lock();
+        self.write_file(now());
+    }
+
+    /// Write the file; `at` is the clock the caller is on, remembered as the time of the write.
+    fn write_file(&self, at: u64) {
         let Some(p) = &self.path else { return };
+        self.last_saved.store(at, Ordering::Relaxed);
+        self.touched.store(false, Ordering::Relaxed);
         let Ok(body) = serde_json::to_string(&*self.map.read()) else { return };
         if let Some(dir) = p.parent() {
             let _ = std::fs::create_dir_all(dir);
@@ -1056,25 +1124,132 @@ impl Sessions {
     }
 
     pub fn begin(&self, account: &Account) -> String {
+        self.begin_kind(account, false)
+    }
+
+    /// A session for the Zabbix frame, which keeps its token in page memory and so leaves
+    /// one behind per reload. Otherwise the same.
+    pub fn begin_frame(&self, account: &Account) -> String {
+        self.begin_kind(account, true)
+    }
+
+    fn begin_kind(&self, account: &Account, frame: bool) -> String {
         let token = random_hex(32);
+        let at = now();
         let s = Session {
             user: account.name.clone(),
             role: account.role,
-            started: now(),
+            started: at,
             must_change: account.must_change,
             scope: account.scope.clone(),
+            last_seen: at,
+            frame,
         };
         self.map.write().insert(token_hash(&token), s);
         self.save();
         token
     }
 
-    /// The session this token names, if it is still live.
+    /// The session this token names, if it is still live. Using one moves its `last_seen`.
     pub fn resolve(&self, token: &str) -> Option<Session> {
+        self.resolve_at(token, now())
+    }
+
+    /// `resolve` at a given time (seconds).
+    pub fn resolve_at(&self, token: &str, at: u64) -> Option<Session> {
         if token.is_empty() {
             return None;
         }
-        self.map.read().get(&token_hash(token)).cloned()
+        let h = token_hash(token);
+        let mut s = self.map.read().get(&h).cloned()?;
+        // The common case — seen within the minute — costs a read lock and a compare.
+        if at.saturating_sub(s.seen()) >= Self::TOUCH_EVERY {
+            if let Some(m) = self.map.write().get_mut(&h) {
+                m.last_seen = at;
+                s.last_seen = at;
+                self.touched.store(true, Ordering::Relaxed);
+            }
+            self.persist_if_due(at);
+        }
+        Some(s)
+    }
+
+    /// Write a moved `last_seen` to disk, if the last write is old enough. Never waits for
+    /// another writer: if one is at it, that write carries the change.
+    fn persist_if_due(&self, at: u64) {
+        if self.path.is_none() || !self.touched.load(Ordering::Relaxed)
+            || at.saturating_sub(self.last_saved.load(Ordering::Relaxed)) < Self::PERSIST_EVERY {
+            return;
+        }
+        if let Some(_one_writer) = self.saving.try_lock() {
+            self.write_file(at);
+        }
+    }
+
+    /// Write whatever `last_seen` has moved since the file was last written.
+    pub fn flush(&self) {
+        if self.touched.load(Ordering::Relaxed) {
+            self.save();
+        }
+    }
+
+    pub fn stats(&self) -> SessionStats {
+        let m = self.map.read();
+        SessionStats { total: m.len(), frame: m.values().filter(|s| s.frame).count() }
+    }
+
+    /// End the sessions nobody is using any more, and return what ended.
+    ///
+    /// * a Zabbix-frame session unused for `frame_idle_secs`;
+    /// * any other session unused for `idle_secs`, when that is set (it is not, by default:
+    ///   sessions do not time out on their own, and there is no cap on how many one account
+    ///   may hold — nobody is signed out for having signed in often).
+    ///
+    /// There is no count cap for frame sessions either: a frame reload orphans its token, and
+    /// the only ones that can be ended are those unused for `frame_idle_secs`, which the first
+    /// rule already ends. A frame session used within that time is kept however many there are.
+    ///
+    /// A session used within `active_secs` is never ended, whichever rule picked it, and
+    /// neither is the one whose token is `protect` — the administrator who pressed the
+    /// button. With `dry_run` nothing is ended.
+    pub fn reap(&self, at: u64, p: &SessionPolicy, protect: Option<&str>, dry_run: bool) -> Vec<Reaped> {
+        let keep = protect.filter(|t| !t.is_empty()).map(token_hash);
+        let mut doomed: Vec<(String, Reaped)> = vec![];
+        {
+            let map = self.map.read();
+            let idle_of = |s: &Session| at.saturating_sub(s.seen());
+            let reap_of = |s: &Session, reason: &'static str| Reaped {
+                user: s.user.clone(), role: s.role, frame: s.frame, idle_secs: idle_of(s), reason,
+            };
+            let mut taken: std::collections::HashSet<&String> = Default::default();
+            for (h, s) in map.iter() {
+                if keep.as_ref() == Some(h) || idle_of(s) < p.active_secs {
+                    continue;
+                }
+                let why = if s.frame && idle_of(s) >= p.frame_idle_secs {
+                    Some("idle Zabbix-frame session")
+                } else if !s.frame && p.idle_secs.is_some_and(|i| idle_of(s) >= i) {
+                    Some("idle session")
+                } else {
+                    None
+                };
+                if let Some(why) = why {
+                    taken.insert(h);
+                    doomed.push((h.clone(), reap_of(s, why)));
+                }
+            }
+        }
+        if !dry_run && !doomed.is_empty() {
+            {
+                let mut map = self.map.write();
+                for (h, _) in &doomed {
+                    map.remove(h);
+                }
+            }
+            self.save();
+        }
+        doomed.sort_by(|a, b| a.1.user.cmp(&b.1.user).then(b.1.idle_secs.cmp(&a.1.idle_secs)));
+        doomed.into_iter().map(|(_, r)| r).collect()
     }
 
     /// The same as `resolve`: kept for the event stream's periodic re-check, which asks
@@ -1245,6 +1420,20 @@ impl TokenStore {
             list.remove(i);
         }
         self.save()
+    }
+
+    /// Housekeeping: delete the tokens that expired more than `grace_secs` ago. An expired
+    /// token is already refused; this only stops the list growing. A token with no expiry is
+    /// never touched. Returns what went (or would, on a dry run).
+    pub fn sweep_expired(&self, at: u64, grace_secs: u64, dry_run: bool) -> Result<Vec<ApiToken>, AuthError> {
+        let gone = |t: &ApiToken| t.expires_at.is_some_and(|e| at >= e.saturating_add(grace_secs));
+        let out: Vec<ApiToken> = self.tokens.read().iter().filter(|t| gone(t)).cloned().collect();
+        if out.is_empty() || dry_run {
+            return Ok(out);
+        }
+        self.tokens.write().retain(|t| !gone(t));
+        self.save()?;
+        Ok(out)
     }
 
     /// The role this secret carries, if it is a live token. Records the use.
@@ -1642,6 +1831,177 @@ mod tests {
         assert!(ss.resolve(&tok).is_none(), "a demotion must not wait for a logout");
     }
 
+    /* ------------------------- housekeeping: session expiry ------------------------- */
+
+    fn policy() -> SessionPolicy {
+        SessionPolicy { frame_idle_secs: 24 * 3600, idle_secs: None, active_secs: 600 }
+    }
+
+    fn account(name: &str, role: Role) -> Account {
+        let s = store();
+        s.add(name, "correct-horse", role).unwrap();
+        s.verify(name, "correct-horse").unwrap()
+    }
+
+    #[test]
+    fn a_zabbix_frame_session_ends_after_a_day_unused_and_an_ordinary_one_does_not() {
+        let a = account("alice", Role::User);
+        let ss = Sessions::default();
+        let (normal, frame) = (ss.begin(&a), ss.begin_frame(&a));
+        let t0 = now();
+        // 23 hours on: both stay.
+        assert!(ss.reap(t0 + 23 * 3600, &policy(), None, false).is_empty());
+        // 25 hours on: the frame session goes, the ordinary one is a person's browser tab.
+        let gone = ss.reap(t0 + 25 * 3600, &policy(), None, false);
+        assert_eq!(gone.len(), 1);
+        assert!(gone[0].frame && gone[0].user == "alice" && gone[0].idle_secs >= 25 * 3600 - 2);
+        assert!(ss.resolve_at(&frame, t0 + 25 * 3600).is_none());
+        assert!(ss.resolve_at(&normal, t0 + 25 * 3600).is_some());
+        // And a year on, still: no timeout unless one was asked for.
+        assert!(ss.reap(t0 + 365 * 86_400, &policy(), None, false).is_empty());
+        assert!(ss.resolve_at(&normal, t0 + 365 * 86_400).is_some());
+    }
+
+    #[test]
+    fn session_idle_days_ends_ordinary_sessions_too() {
+        let a = account("alice", Role::User);
+        let ss = Sessions::default();
+        let tok = ss.begin(&a);
+        let t0 = now();
+        let p = SessionPolicy { idle_secs: Some(30 * 86_400), ..policy() };
+        assert!(ss.reap(t0 + 29 * 86_400, &p, None, false).is_empty());
+        // Used on day 29: the clock starts again.
+        assert!(ss.resolve_at(&tok, t0 + 29 * 86_400).is_some());
+        assert!(ss.reap(t0 + 58 * 86_400, &p, None, false).is_empty(), "29 days since it was last used");
+        let gone = ss.reap(t0 + 60 * 86_400, &p, None, false);
+        assert_eq!(gone.len(), 1);
+        assert_eq!(gone[0].reason, "idle session");
+        assert!(ss.resolve_at(&tok, t0 + 60 * 86_400).is_none());
+    }
+
+    #[test]
+    fn a_session_in_use_is_never_ended_whatever_the_rules_say() {
+        let a = account("alice", Role::Admin);
+        let ss = Sessions::default();
+        let (busy, stale) = (ss.begin_frame(&a), ss.begin_frame(&a));
+        let t0 = now();
+        // A rule that would end every idle session at once; "idle" means ten minutes.
+        let p = SessionPolicy { frame_idle_secs: 0, idle_secs: Some(0), active_secs: 600 };
+        let at = t0 + 3600;
+        assert!(ss.resolve_at(&busy, at - 120).is_some(), "used two minutes ago");
+        let gone = ss.reap(at, &p, None, false);
+        assert_eq!(gone.len(), 1, "only the unused one: {gone:?}");
+        assert!(ss.resolve_at(&busy, at).is_some());
+        assert!(ss.resolve_at(&stale, at).is_none());
+    }
+
+    #[test]
+    fn the_session_of_whoever_pressed_the_button_is_protected() {
+        let a = account("alice", Role::Admin);
+        let ss = Sessions::default();
+        let mine = ss.begin_frame(&a);
+        let other = ss.begin_frame(&a);
+        let at = now() + 3 * 86_400;
+        let gone = ss.reap(at, &policy(), Some(&mine), false);
+        assert_eq!(gone.len(), 1);
+        assert!(ss.resolve_at(&other, at).is_none() && ss.resolve_at(&mine, at).is_some());
+    }
+
+    #[test]
+    fn an_account_with_sixty_ordinary_sessions_keeps_all_sixty() {
+        let a = account("alice", Role::User);
+        let ss = Sessions::default();
+        let t0 = now();
+        let toks: Vec<String> = (0..60).map(|_| ss.begin(&a)).collect();
+        // Not a minute, not a year, not a decade: nothing signs anyone out unless SESSION_IDLE_DAYS says so.
+        for later in [3600, 30 * 86_400, 365 * 86_400, 3650 * 86_400] {
+            assert!(ss.reap(t0 + later, &policy(), None, false).is_empty(), "after {later} s");
+        }
+        assert!(toks.iter().all(|t| ss.resolve_at(t, t0 + 3650 * 86_400).is_some()));
+        assert_eq!(ss.count(), 60);
+    }
+
+    #[test]
+    fn frame_sessions_used_within_a_day_are_kept_however_many_and_idle_ones_go_with_ordinary_ones_untouched() {
+        let a = account("alice", Role::User);
+        let ss = Sessions::default();
+        let t0 = now();
+        let ordinary: Vec<String> = (0..60).map(|_| ss.begin(&a)).collect();
+        let frames: Vec<String> = (0..60).map(|_| ss.begin_frame(&a)).collect();
+        assert!(ss.reap(t0 + 23 * 3600, &policy(), None, false).is_empty(), "sixty frame sessions, all used within the day");
+        // Thirty of them are used again on the second day; thirty are orphans.
+        for f in &frames[..30] { ss.resolve_at(f, t0 + 30 * 3600); }
+        let gone = ss.reap(t0 + 40 * 3600, &policy(), None, false);
+        assert_eq!(gone.len(), 30);
+        assert!(gone.iter().all(|g| g.frame && g.reason == "idle Zabbix-frame session"));
+        assert!(frames[..30].iter().all(|f| ss.resolve_at(f, t0 + 40 * 3600).is_some()), "used within 24 h: kept");
+        assert!(frames[30..].iter().all(|f| ss.resolve_at(f, t0 + 40 * 3600).is_none()));
+        assert!(ordinary.iter().all(|t| ss.resolve_at(t, t0 + 40 * 3600).is_some()), "ordinary sessions are never trimmed");
+    }
+
+    #[test]
+    fn last_seen_follows_use_by_the_minute_and_reaches_the_disk_at_most_every_ten_minutes() {
+        let a = account("alice", Role::User);
+        let dir = std::env::temp_dir().join(format!("ep-sess-seen-{}-{}", std::process::id(), random_hex(4)));
+        let path = dir.join("sessions.json");
+        let ss = Sessions::open(Some(path.clone()));
+        let tok = ss.begin(&a);
+        let t0 = now();
+        let seen_on_disk = || -> u64 {
+            let m: HashMap<String, Session> = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+            m.values().next().unwrap().last_seen
+        };
+        assert_eq!(seen_on_disk(), t0, "written when it began");
+        // A busy session: forty requests in a minute change nothing, in memory or on disk.
+        for i in 0..40 { ss.resolve_at(&tok, t0 + i); }
+        assert_eq!(ss.resolve_at(&tok, t0 + 59).unwrap().last_seen, t0, "inside the minute: not touched");
+        // A minute on it moves in memory, but the file waits.
+        assert_eq!(ss.resolve_at(&tok, t0 + 120).unwrap().last_seen, t0 + 120);
+        assert_eq!(seen_on_disk(), t0, "not rewritten for a minute's movement");
+        // Past ten minutes since the file was written, the next touch writes it.
+        ss.resolve_at(&tok, t0 + 700);
+        assert_eq!(seen_on_disk(), t0 + 700);
+        // flush() writes a pending move on demand.
+        ss.resolve_at(&tok, t0 + 800);
+        assert_eq!(seen_on_disk(), t0 + 700);
+        ss.flush();
+        assert_eq!(seen_on_disk(), t0 + 800);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_sessions_file_from_before_last_seen_still_loads_and_counts_from_its_start() {
+        let dir = std::env::temp_dir().join(format!("ep-sess-legacy-{}-{}", std::process::id(), random_hex(4)));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("sessions.json");
+        let hash = token_hash("legacy-token");
+        let old = format!(r#"{{"{hash}":{{"user":"alice","role":"user","started":1000,"must_change":false,"scope":null}}}}"#);
+        std::fs::write(&path, old).unwrap();
+        let ss = Sessions::open(Some(path));
+        let before = ss.map.read().get(&hash).cloned().unwrap();
+        assert_eq!((before.last_seen, before.frame, before.seen()), (0, false, 1000));
+        // Unclassified, so it is an ordinary session: only SESSION_IDLE_DAYS can end it.
+        assert!(ss.reap(now(), &policy(), None, false).is_empty());
+        let s = ss.resolve("legacy-token").unwrap();
+        assert!(s.last_seen > 1000);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_reaped_session_stays_gone_after_a_restart() {
+        let a = account("alice", Role::User);
+        let dir = std::env::temp_dir().join(format!("ep-sess-reap-{}-{}", std::process::id(), random_hex(4)));
+        let path = dir.join("sessions.json");
+        let ss = Sessions::open(Some(path.clone()));
+        let frame = ss.begin_frame(&a);
+        let keep = ss.begin(&a);
+        assert_eq!(ss.reap(now() + 2 * 86_400, &policy(), None, false).len(), 1);
+        let again = Sessions::open(Some(path.clone()));
+        assert!(again.resolve(&frame).is_none() && again.resolve(&keep).is_some());
+        assert_eq!(again.stats(), SessionStats { total: 1, frame: 0 });
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /* -------------------------------- api tokens -------------------------------- */
 
     #[test]
@@ -1683,5 +2043,40 @@ mod tests {
         assert!(authorize(role, "ES", "GET", "/_cluster/health").is_ok());
         assert!(authorize(role, "ES", "GET", "/_cat/indices").is_err());
         assert!(authorize(role, "ES", "DELETE", "/idx").is_err());
+    }
+
+    #[test]
+    fn tokens_expired_for_over_thirty_days_are_deleted_and_nothing_else() {
+        let dir = std::env::temp_dir().join(format!("elasticpro-toksweep-{}", random_hex(8)));
+        let path = dir.join("tokens.json");
+        let ts = TokenStore::open(Some(path.clone()));
+        let (old, recent, forever, live) = (
+            ts.create("old", Role::User, Some(1)).unwrap(),
+            ts.create("recent", Role::User, Some(20)).unwrap(),
+            ts.create("forever", Role::Admin, None).unwrap(),
+            ts.create("live", Role::Guest, Some(90)).unwrap(),
+        );
+        let t = now();
+        let grace = 30 * 86_400;
+        // 45 days on: "old" expired on day 1 (44 days ago), "recent" on day 20 (25 days ago).
+        let at = t + 45 * 86_400;
+        let dry = ts.sweep_expired(at, grace, true).unwrap();
+        assert_eq!(dry.iter().map(|x| x.name.as_str()).collect::<Vec<_>>(), vec!["old"]);
+        assert_eq!(ts.list().len(), 4, "a dry run deletes nothing");
+        let gone = ts.sweep_expired(at, grace, false).unwrap();
+        assert_eq!(gone.len(), 1);
+        let names: Vec<String> = ts.list().into_iter().map(|x| x.name).collect();
+        assert_eq!(names, vec!["recent", "forever", "live"]);
+        // Kept: a token with no expiry, one still valid, and one expired less than 30 days ago.
+        assert_eq!(ts.verify(&forever), Some(Role::Admin));
+        assert_eq!(ts.verify(&live), Some(Role::Guest));
+        assert_eq!(ts.verify(&old), None);
+        let _ = recent;
+        // Deleted for good: a restart does not bring it back.
+        assert_eq!(TokenStore::open(Some(path.clone())).list().len(), 3);
+        // Later, "recent" crosses the line too.
+        assert_eq!(ts.sweep_expired(t + 51 * 86_400, grace, false).unwrap().len(), 1);
+        assert!(!std::fs::read_to_string(&path).unwrap().contains("recent"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

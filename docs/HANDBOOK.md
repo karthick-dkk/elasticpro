@@ -386,6 +386,39 @@ ticks only when their kind changes), merges `NOTIFY_LIST` with its local copy wh
 opens (same key/id ⇒ the server's record wins), and sends `NOTIFY_CLEAR` with "Clear all".
 An older core, a snapshot file or a `file://` render has no store and the bell stays local.
 
+## Housekeeping — the message contract
+
+One timer in the core (`housekeeping.rs`) cleans what ElasticPro itself leaves behind. It runs
+every `HOUSEKEEPING_MINUTES` (default 60; 0 = off), the first time five minutes after start, and
+is started by the bridge binary and the desktop shell, never by `Core::new`. Every deletion is a
+log line on the `audit` target (`housekeeping: removed …`, with the path or key, the reason and
+the bytes), so it survives `LOG_LEVEL=error`; `HOUSEKEEPING_DRY_RUN=true` logs `would remove`
+instead and deletes nothing. Each run writes one `housekeeping_run` event to the activity log
+(user `system`, or the administrator who pressed Run now; counts under `elasticpro.detail`).
+
+| Job | Removes | Only ever |
+|---|---|---|
+| Fleet disk cache | `cache/<cluster>/` of clusters no longer configured; on-demand dataset files (`indices`, `shards`, `snapshots_full`) untouched for `HOUSEKEEPING_CACHE_DAYS` (default 2); background dataset files untouched for 7 days; `*.tmp` older than an hour | files named exactly `<dataset>.json[.gz]` / `<dataset>.tmp` / `<dataset>.json.tmp` under `<data dir>/cache/<escaped cluster id>/`; never a symlink or its target; a folder with anything else in it stays |
+| Redis | `elasticpro:ds:<cluster>:<dataset>` keys of clusters no longer configured | keys with that prefix and a dataset name this build writes (SCAN + STRLEN + DEL) |
+| Sessions | a Zabbix-frame session unused 24 h (the frame orphans one per reload); an ordinary session only if `SESSION_IDLE_DAYS` is set (default 0 = never; **setting it signs people out**). No cap on how many sessions an account holds; sessions from before the `frame` flag existed count as ordinary | a session used in the last 10 minutes, or the caller's own, is never ended |
+| API tokens | tokens that expired more than 30 days ago | tokens with no expiry are never touched |
+| In-memory maps | request counters, limiters, cached connections, poller marks, tickets and Zabbix budgets of removed clusters or past their time | |
+| Notifications, silences | the existing 30-day / 2000-per-person retention and ended silences, once a day | |
+| Activity log | rotated files `<log>.<n>` last written more than `ACTIVITY_LOG_KEEP_DAYS` ago (default 0 = off) | the live file is never touched |
+
+Nothing is removed by cluster while the cluster list is not known (nothing primed yet, or Zabbix
+configured but not yet read): an empty list must not read as "every cluster was removed". Config
+history, uploaded keys, saved queries, users and the config files are **reported** (count, size,
+oldest) and never deleted.
+
+| Message | Role | Answer |
+|---|---|---|
+| `HOUSEKEEPING_GET` | admin | `{ok, enabled, minutes, dryRun, cacheDays, backgroundCacheDays, sessionIdleDays, activityKeepDays, running, nextRunAt, lastRun, recent}`. `lastRun` is `{startedAt, finishedAt, trigger: "schedule"\|"manual", by, dryRun, items, bytes, errors, jobs: [{id, label, ok, skipped, items, bytes, error, notes}], reportOnly: [{id, label, files, bytes, oldestAgeDays, note}]}`; `null` until a run since start. |
+| `HOUSEKEEPING_RUN {dryRun?}` | admin | Runs every job now and answers like `HOUSEKEEPING_GET` plus `run` (that report) and `message`. `dryRun: true` lists what would go and removes nothing; the configured `HOUSEKEEPING_DRY_RUN` can force a dry run, never lift one. A run already going ⇒ `{ok: false, kind: "busy"}`. Does not move the schedule. |
+
+The Request Centre shows both as the **Housekeeping** card (last run, what each job cleaned, next
+run, **Dry run**, **Run now** — which asks first).
+
 ## Zabbix connection — the message contract
 
 Hosted edition only (every other edition answers `{ok: false, kind: "not_supported", supported: false}`

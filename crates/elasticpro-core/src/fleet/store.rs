@@ -17,7 +17,7 @@ const DEBOUNCE_MS: u64 = 60_000;
 
 /// A cluster id as a directory name. Ids come from a config and from Zabbix; nothing
 /// stops one containing a slash, and a slash in a path is a way out of the cache dir.
-fn escape(id: &str) -> String {
+pub(crate) fn escape(id: &str) -> String {
     let mut s = String::new();
     for b in id.bytes() {
         if b.is_ascii_alphanumeric() || b == b'_' || b == b'-' {
@@ -29,7 +29,7 @@ fn escape(id: &str) -> String {
     s
 }
 
-fn unescape(s: &str) -> Option<String> {
+pub(crate) fn unescape(s: &str) -> Option<String> {
     let b = s.as_bytes();
     let mut out = Vec::with_capacity(b.len());
     let mut i = 0;
@@ -135,6 +135,11 @@ impl DiskStore {
     /// `data_dir/cache`, or nowhere at all when the core has no data dir.
     pub fn new(data_dir: Option<&Path>) -> DiskStore {
         DiskStore { dir: data_dir.map(|d| d.join("cache")), last_write: Mutex::new(HashMap::new()) }
+    }
+
+    /// The cache folder (`data_dir/cache`), for the housekeeping sweep.
+    pub(crate) fn root(&self) -> Option<&Path> {
+        self.dir.as_deref()
     }
 
     fn file(&self, cluster: &str, ds: Dataset, gz: bool) -> Option<PathBuf> {
@@ -297,6 +302,15 @@ pub struct RedisStore {
 #[cfg(feature = "bridge")]
 pub const UPDATES_CHANNEL: &str = "elasticpro:updates";
 
+/// What `RedisStore::sweep_unknown` found.
+#[cfg(feature = "bridge")]
+#[derive(Debug, Default)]
+pub struct RedisSweep {
+    pub scanned: usize,
+    /// Each key that went (or would, on a dry run) and its size in bytes.
+    pub removed: Vec<(String, u64)>,
+}
+
 #[cfg(feature = "bridge")]
 pub fn redis_key(cluster: &str, ds: Dataset) -> String {
     format!("elasticpro:ds:{cluster}:{}", ds.name())
@@ -424,6 +438,51 @@ impl RedisStore {
             del.arg(redis_key(cluster, d));
         }
         let _ = self.run::<i64>("del", del).await;
+    }
+
+    /// Housekeeping: delete the `elasticpro:ds:*` keys of clusters that are not in `keep`.
+    ///
+    /// Only keys of exactly the shape `elasticpro:ds:{cluster}:{dataset}` with a dataset this
+    /// build knows are ever considered; anything else under the prefix is left alone. With
+    /// `dry_run` nothing is deleted. Returns each key that went (or would), with its size in
+    /// bytes, and how many keys were looked at; `Err` when Redis could not be scanned.
+    pub async fn sweep_unknown(&self, keep: &HashSet<String>, dry_run: bool) -> Result<RedisSweep, String> {
+        if self.client.is_none() {
+            return Err("redis is not configured".into());
+        }
+        let mut cursor: u64 = 0;
+        let mut keys: Vec<String> = vec![];
+        loop {
+            let mut scan = redis::cmd("SCAN");
+            scan.arg(cursor).arg("MATCH").arg("elasticpro:ds:*").arg("COUNT").arg(500);
+            let Some((next, batch)) = self.run::<(u64, Vec<String>)>("scan", scan).await else {
+                return Err("redis could not be scanned".into());
+            };
+            keys.extend(batch);
+            cursor = next;
+            if cursor == 0 || keys.len() > 200_000 {
+                break;
+            }
+        }
+        let mut out = RedisSweep { scanned: keys.len(), removed: vec![] };
+        for k in keys {
+            let Some((cluster, ds)) = k.strip_prefix("elasticpro:ds:").and_then(|r| r.rsplit_once(':')) else { continue };
+            if Dataset::parse(ds).is_none() || keep.contains(cluster) {
+                continue;
+            }
+            let mut len = redis::cmd("STRLEN");
+            len.arg(&k);
+            let bytes = self.run::<u64>("strlen", len).await.unwrap_or(0);
+            if !dry_run {
+                let mut del = redis::cmd("DEL");
+                del.arg(&k);
+                if self.run::<i64>("del", del).await.is_none() {
+                    return Err(format!("redis refused to delete {k}"));
+                }
+            }
+            out.removed.push((k, bytes));
+        }
+        Ok(out)
     }
 
     /// Every entry Redis still holds, from `STRLEN` and the first few hundred bytes of

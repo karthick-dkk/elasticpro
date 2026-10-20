@@ -77,6 +77,13 @@ export const delaySinkSet = (config) => send({ type: 'DELAY_SINK_SET', config })
 export const delaySinkRun = () => send({ type: 'DELAY_SINK_RUN' });
 
 /**
+ * Housekeeping: the core cleaning what it leaves behind (cache files, stale sessions, ...).
+ * Admin only. GET is the status; RUN deletes now (or, with dryRun, only says what would go).
+ */
+export const housekeepingGet = () => send({ type: 'HOUSEKEEPING_GET' });
+export const housekeepingRun = (dryRun = false) => send({ type: 'HOUSEKEEPING_RUN', dryRun: !!dryRun });
+
+/**
  * The Zabbix connection (Config → Zabbix). Hosted and admin only. No answer ever carries
  * the API token or the sign-in secret — except ZABBIX_PAIR_BEGIN's pairing code, once.
  * docs/HANDBOOK.md, "Zabbix connection — the message contract".
