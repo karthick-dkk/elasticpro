@@ -27,10 +27,8 @@
 import { openAlertsNow, clusters, mergedAlerts, invalidateAlerts } from './state.js';
 import { isOpen, toObservations } from './alert-groups.js';
 import { alertHistory } from './alert-history.js';
-import { gotoFor, openGoto } from './alert-goto.js';
+import { gotoFor, openGoto, openClusterAlerts } from './alert-goto.js';
 import { pageLabel } from './page-labels.js';
-import { navigateTo } from './intent.js';
-import { setFocus } from './focus.js';
 import { toast, setNotificationActions } from '../ui/menu.js';
 
 /**
@@ -186,7 +184,7 @@ export function burstActions(entry) {
   const id = entry.cluster || key.split(':')[1];
   if (!id) return [];
   const name = ((clusters().find((c) => c.id === id)) || {}).name || id;
-  const out = [{ label: `Open ${name} alerts →`, page: 'alerts', run: () => { setFocus('alerts', { cluster: id }); navigateTo('alerts', null, {}); } }];
+  const out = [{ label: `Open ${name} alerts →`, page: 'alerts', run: () => openClusterAlerts(id) }];
   let worst = null;
   try {
     worst = openAlertsNow().filter((m) => m.clusterId === id)

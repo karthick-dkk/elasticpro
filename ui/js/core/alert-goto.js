@@ -71,6 +71,16 @@ export function openGoto(g) {
   navigateTo(g.page, null, { cluster: g.clusterId || null });
 }
 
+/**
+ * Open the Alerts page showing one cluster only ("Showing <cluster> only", with a way back to
+ * all of them) — what the bell's "Open <cluster> alerts" and the Clusters page's alert count
+ * both do. The page takes the hint once, in its own render().
+ */
+export function openClusterAlerts(clusterId) {
+  setFocus('alerts', { cluster: clusterId });
+  navigateTo('alerts', null, {});
+}
+
 /** Rule ids with no FOCUS entry — empty when the table is complete. For the test. */
 export function rulesWithoutTarget() {
   return ALERT_RULES.filter((r) => !(r.id in FOCUS)).map((r) => r.id);

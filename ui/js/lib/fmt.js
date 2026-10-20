@@ -29,6 +29,18 @@ export function pct(n, digits = 1) {
   return isFinite(n) ? `${n.toFixed(digits)}%` : '–';
 }
 
+/**
+ * Disk use written once: "56 % · 156 of 279 GB". The unit is said once when both sizes share
+ * it. Empty when the percentage is not known — the caller says why, this does not guess.
+ */
+export function diskUseText(disk) {
+  if (!disk || disk.percent === null || disk.percent === undefined || !isFinite(disk.percent)) return '';
+  const used = bytes(disk.used), total = bytes(disk.total);
+  if (total === '–') return `${Math.round(disk.percent)} %`;
+  const u = used.split(' ')[1], t = total.split(' ')[1];
+  return `${Math.round(disk.percent)} % \u00b7 ${used === '–' ? '–' : u === t ? used.split(' ')[0] : used} of ${total}`;
+}
+
 export function dur(ms) {
   ms = Number(ms);
   if (!isFinite(ms) || ms < 0) return '–';

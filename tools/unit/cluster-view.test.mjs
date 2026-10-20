@@ -93,14 +93,13 @@ test('rename: trimmed, capped, empty or the default name means the default', () 
   assert.equal(V.resolveColumns(p)[0].name, 'Where', 'Cluster can be renamed, only not hidden');
 });
 
-test('reset brings back the default columns, order and names, and keeps the fold', () => {
-  let p = V.hideUnreachable(null, ['a']);
+test('reset brings back the default columns, order and names', () => {
+  let p = V.sanitizePrefs(null);
   p = V.renameColumn(V.moveColumn(V.setColumnShown(p, 'jdk', true), 'alerts', 0), 'ilm', 'Lifecycle');
   p = V.resetColumns(p);
   assert.deepEqual(ids(V.resolveColumns(p)), V.SUMMARY_COLUMNS.map((c) => c.id));
   assert.deepEqual(shownIds(p), DEFAULT_SHOWN);
   assert.equal(V.resolveColumns(p).find((c) => c.id === 'ilm').name, 'ILM');
-  assert.equal(p.unreachable.hidden, true);
 });
 
 test('stored ids this version does not know are ignored; columns it added appear in place', () => {
@@ -149,54 +148,19 @@ test('saved per user, case-insensitively, and read back', () => {
   assert.ok(!shownIds(V.readPrefs(st, null)).includes('jdk'), 'the portable build has its own');
   assert.equal(V.prefsKey('Ann'), 'elasticpro.clusters.view.ann');
   // Nothing but layout is in it.
-  assert.deepEqual(Object.keys(JSON.parse(m.get('elasticpro.clusters.view.ann'))).sort(), ['columns', 'unreachable', 'v']);
+  assert.deepEqual(Object.keys(JSON.parse(m.get('elasticpro.clusters.view.ann'))).sort(), ['columns', 'v']);
 });
 
-/* ------------------------------ the unreachable fold ------------------------------ */
+/* ------------------------- the retired unreachable fold ------------------------- */
 
-test('hide, show, and the fold read back', () => {
-  let p = V.hideUnreachable(null, ['a', 'b', 'a']);
-  assert.deepEqual(p.unreachable, { hidden: true, seen: ['a', 'b'] });
-  p = V.showUnreachable(p);
-  assert.deepEqual(p.unreachable, { hidden: false, seen: [] });
-  assert.deepEqual(V.sanitizePrefs({ unreachable: { hidden: false, seen: ['a'] } }).unreachable, { hidden: false, seen: [] });
-});
-
-test('three down going to two keeps it hidden', () => {
-  const fold = V.hideUnreachable(null, ['a', 'b', 'c']).unreachable;
-  const f = V.foldUnreachable(fold, ['a', 'b'], ['c', 'x']);
-  assert.equal(f.hidden, true);
-  assert.deepEqual(f.seen, ['a', 'b'], 'the one that came back is forgotten');
-  assert.equal(f.changed, true);
-  const same = V.foldUnreachable({ hidden: true, seen: f.seen }, ['a', 'b'], ['c']);
-  assert.equal(same.hidden, true); assert.equal(same.changed, false);
-});
-
-test('a cluster newly down opens it again', () => {
-  const fold = V.hideUnreachable(null, ['a', 'b']).unreachable;
-  const f = V.foldUnreachable(fold, ['a', 'b', 'd'], []);
-  assert.deepEqual([f.hidden, f.reopened, f.changed], [false, true, true]);
-});
-
-test('one that recovered and fails again is a new outage', () => {
-  let fold = V.hideUnreachable(null, ['a', 'b']).unreachable;
-  let f = V.foldUnreachable(fold, ['a'], ['b']);          // b answers again
-  fold = { hidden: f.hidden, seen: f.seen };
-  f = V.foldUnreachable(fold, ['a', 'b'], []);            // and goes down again
-  assert.equal(f.hidden, false);
-});
-
-test('not read yet is neither up nor down: a reload keeps it hidden', () => {
-  const fold = V.hideUnreachable(null, ['a', 'b']).unreachable;
-  // Straight after a reload nothing has answered: nobody down, nobody known to be up.
-  let f = V.foldUnreachable(fold, [], []);
-  assert.deepEqual([f.hidden, f.seen], [true, ['a', 'b']]);
-  // Then the first answers arrive and say the same two are still down.
-  f = V.foldUnreachable({ hidden: true, seen: f.seen }, ['a', 'b'], ['c']);
-  assert.equal(f.hidden, true);
-});
-
-test('an open section stays open', () => {
-  assert.deepEqual(V.foldUnreachable({ hidden: false }, ['a'], []), { hidden: false, seen: [], changed: false, reopened: false });
-  assert.equal(V.foldUnreachable(undefined, ['a'], []).hidden, false);
+test('a stored unreachable fold is ignored, and gone from the next save', () => {
+  const legacy = { v: 1, columns: { order: [], shown: { jdk: true }, names: {} }, unreachable: { hidden: true, seen: ['a', 'b'] } };
+  const p = V.sanitizePrefs(legacy);
+  assert.equal('unreachable' in p, false, 'nothing of the old section is kept');
+  assert.deepEqual(shownIds(legacy).includes('jdk'), true, 'the columns the person chose survive');
+  const m = new Map([['elasticpro.clusters.view.ann', JSON.stringify(legacy)]]);
+  const st = { getItem: (k) => (m.has(k) ? m.get(k) : null), setItem: (k, v) => m.set(k, v) };
+  assert.equal(V.writePrefs(st, 'ann', V.readPrefs(st, 'ann')), true);
+  assert.deepEqual(Object.keys(JSON.parse(m.get('elasticpro.clusters.view.ann'))).sort(), ['columns', 'v']);
+  assert.equal(V.hideUnreachable, undefined, 'the fold has no API any more');
 });

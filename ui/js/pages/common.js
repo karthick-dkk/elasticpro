@@ -1,7 +1,8 @@
 /** Shared page pieces. */
 import { h, mount, activatable } from '../lib/dom.js';
-import { healthClass, diskClass, bytes, pct, ago, dt } from '../lib/fmt.js';
-import { state, client, refreshAll } from '../core/state.js';
+import { healthClass, ago, dt, diskUseText } from '../lib/fmt.js';
+import { diskAgainstWatermarks } from '../core/disk-balance.js';
+import { client, refreshAll } from '../core/state.js';
 import { idb } from '../lib/idb.js';
 import { confirmDialog } from '../ui/modal.js';
 import { showCredentialDialog } from '../ui/credential-dialog.js';
@@ -198,9 +199,9 @@ export async function act(btn, fn) {
 /**
  * What is wrong with a cluster's connection, and what can be done about it here: a title,
  * a severity, the evidence (certificate, jump-host key) and the actions that answer it
- * (trust this certificate, unlock this key, enter credentials). The banner below draws it;
- * the Clusters page's unreachable cards draw the same parts in less room, so the two can
- * never offer different answers to the same failure.
+ * (trust this certificate, unlock this key, enter credentials). The banner below draws it,
+ * and anything else that offers a way out of a failed connection reads the same parts, so
+ * two places can never offer different answers to the same failure.
  */
 export function connectionProblem(cluster, onRetry) {
   const cl = client(cluster.id);
@@ -361,14 +362,46 @@ function kv(k, v, mono = false) {
     h(mono ? 'span.mono' : 'span', { style: { wordBreak: 'break-all', fontSize: mono ? '11px' : '12px' } }, v));
 }
 
-export function diskCell(d) {
-  if (!d || !isFinite(d.percent)) return h('span.muted', '–');
-  const cls = diskClass(d.percent, state.defaults.diskWarnPercent, state.defaults.diskCritPercent);
-  const color = cls === 'red' ? 'var(--critical)' : cls === 'yellow' ? 'var(--warning)' : 'var(--good)';
-  return h('div', { style: { display: 'grid', gap: '3px', minWidth: '150px' } },
-    h('div', { style: { display: 'flex', justifyContent: 'space-between', fontSize: '11.5px' } },
-      h('span', pct(d.percent, 1)), h('span.muted', `${bytes(d.used)} / ${bytes(d.total)}`)),
-    h('div.bar-mini', h('i', { style: { width: `${Math.min(100, Math.max(1.5, d.percent))}%`, background: color } })));
+/**
+ * The fullest data node, for the bar's tooltip: the watermarks apply to each node, and the
+ * cluster-wide percentage can sit below them while one node is past them.
+ */
+function fullestNode(d) {
+  let best = null;
+  for (const n of d.nodes || []) {
+    const total = Number(n['disk.total']), used = Number(n['disk.used']);
+    if (!(total > 0) || !isFinite(used)) continue;
+    const p = (used / total) * 100;
+    if (!best || p > best.percent) best = { name: n.node, percent: p };
+  }
+  return best && (d.nodes || []).length > 1 ? best : null;
+}
+
+/**
+ * Disk use as one value ("56 % · 156 of 279 GB") over a bar with a tick at the cluster's
+ * high watermark. Where the bar stands against the watermarks is core/disk-balance.js's
+ * diskAgainstWatermarks — the same answer the CSV gives. Neutral below the low watermark,
+ * amber from it, red from the high one, and the text says so too, so colour is never the
+ * only signal. With the watermarks unknown there is no tick and no threshold colour, and the
+ * tooltip says which data would provide them.
+ */
+export function diskCell(d, settings) {
+  if (!d || !isFinite(d.percent)) return h('span.muted', '\u2013');
+  const w = diskAgainstWatermarks(d, settings);
+  const note = w.level === 'high' ? ' \u00b7 above high watermark' : w.level === 'low' ? ' \u00b7 above low watermark' : '';
+  const node = fullestNode(d);
+  const title = (w.known
+    ? `Disk ${d.percent.toFixed(1)} % used. Low watermark ${w.low} %, high ${w.high} % \u2014 `
+      + (w.source === 'set' ? 'set on this cluster.'
+        : w.source === 'reported-default' ? 'the cluster\u2019s own defaults (not changed).'
+        : 'Elasticsearch\u2019s defaults (not set on this cluster).')
+    : `Disk ${d.percent.toFixed(1)} % used. ${w.why}`)
+    + (node ? ` Fullest node: ${node.name} ${node.percent.toFixed(0)} % (watermarks apply per node).` : '');
+  return h('div.disk-cell', { style: { minWidth: '150px' } },
+    h(`span.disk-text${w.level === 'high' ? '.high' : w.level === 'low' ? '.low' : ''}`, diskUseText(d) + note),
+    h('div.disk-bar', { role: 'img', title, 'aria-label': title },
+      h(`i.disk-fill.${w.level}`, { style: { width: `${Math.min(100, Math.max(1.5, d.percent))}%` } }),
+      w.known ? h('i.disk-tick', { style: { left: `${Math.min(100, w.high)}%` } }) : null));
 }
 
 /**
@@ -397,11 +430,23 @@ export function lastSnapshotOf(data) {
   return best;
 }
 
-export function snapshotPill(s) {
-  if (!s) return pill('none', 'grey');
+/**
+ * The last snapshot, quiet when it is fine: a success inside the allowed window is plain text.
+ * Failed, partial, or a success older than `staleHours` (the same window the alert uses,
+ * state.js snapshotAlertsFor) is coloured text with a dot — red for failed and overdue,
+ * amber for partial.
+ */
+export function snapshotCell(s, staleHours) {
+  if (!s) return h('span.muted', 'none');
   const st = String(s.status || '').toUpperCase();
-  const cls = st === 'SUCCESS' ? 'green' : st === 'PARTIAL' ? 'yellow' : st === 'IN_PROGRESS' ? 'yellow' : st === 'FAILED' ? 'red' : 'grey';
+  const stale = isFinite(staleHours) && staleHours > 0 && Date.now() - s.start > staleHours * 3600 * 1000;
+  const word = st === 'SUCCESS' ? (stale ? 'overdue' : 'success') : (st || 'unknown').toLowerCase().replace('_', ' ');
+  const bad = st === 'FAILED' || (st === 'SUCCESS' && stale);
+  const warn = st === 'PARTIAL';
+  const first = bad || warn
+    ? h(`span.q.${bad ? 'bad' : 'warn'}`, h('i.qdot', { 'aria-hidden': 'true' }), word)
+    : h('span.q.ok', word);
   return h('div', { style: { display: 'grid', gap: '2px' } },
-    pill(st || 'unknown', cls),
-    h('span.muted', { style: { fontSize: '11px' }, title: dt(s.start) }, `${ago(s.start)} · ${s.repo || ''}`));
+    first,
+    h('span.muted', { style: { fontSize: '11px' }, title: dt(s.start) }, `${ago(s.start)} \u00b7 ${s.repo || ''}`));
 }

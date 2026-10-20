@@ -534,35 +534,52 @@ table.tbl tr.kv td.v { font-size: 12px; word-break: break-all; }
 /* The unreachable clusters, above the table: compact cards, or one line when folded. */
 .cl-sp { flex: 1 1 auto; }
 .cl-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--critical); flex: none; }
-.cl-down {
-  background: var(--surface-1); border: 1px solid color-mix(in srgb, var(--critical) 45%, var(--border));
-  border-radius: var(--radius); padding: 10px 12px; margin-bottom: 12px;
-  display: flex; flex-direction: column; gap: 8px; min-width: 0;
+/* Unreachable clusters are rows in the table. One line above it points at the Alerts page,
+   where the reasons, Retry and Diagnose are. Tints are mixed from the theme's own status
+   colours, so they follow every theme. */
+.cl-down-note {
+  display: flex; align-items: center; gap: 9px; flex-wrap: wrap; min-width: 0;
+  padding: 8px 12px; margin-bottom: 12px; font-size: 13px; color: var(--text-primary);
+  border-radius: var(--radius); background: color-mix(in srgb, var(--critical) 8%, var(--surface-1));
+  border: 1px solid color-mix(in srgb, var(--critical) 38%, var(--border));
 }
-.cl-down.folded { flex-direction: row; align-items: center; gap: 8px; padding: 7px 12px; flex-wrap: wrap; }
-.cl-down-names { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 0 1 auto; }
-.cl-down-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-.cl-down-head h2 { margin: 0; font-size: 13.5px; font-weight: 650; }
-.cl-down-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 330px), 1fr)); gap: 8px; }
-.cl-down-card {
-  background: var(--surface-2); border: 1px solid var(--border); border-radius: 8px;
-  padding: 7px 10px; display: flex; flex-direction: column; gap: 5px; min-width: 0; font-size: 12.5px;
+.cl-alink { color: var(--accent); font-weight: 600; text-decoration: none; }
+.cl-alink:hover { text-decoration: underline; }
+.cl-alink:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 3px; }
+.cl-tbl tr.cl-row-down > td { background: color-mix(in srgb, var(--critical) 7%, transparent); }
+
+/* Quiet normal, loud problem (change 7): an as-it-should-be state is plain text; a problem is
+   coloured text with a dot, so it is never told by hue alone. Inks are the themed text
+   colours, which clear 4.5:1 on their surface in every theme. */
+.q { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+.q.ok { color: var(--text-secondary); }
+.q.warn { color: var(--warning-ink); font-weight: 600; }
+.q.bad  { color: var(--critical-ink); font-weight: 600; }
+.q .qdot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; flex: none; }
+.q.ok.dotted .qdot { background: var(--good); }
+
+/* Disk against the watermarks (change 8). The fill is neutral below the low watermark, amber
+   from it, red from the high one; the tick marks the high watermark. */
+.disk-cell { display: grid; gap: 4px; }
+.disk-text { font-size: 11.5px; color: var(--text-secondary); font-variant-numeric: tabular-nums; }
+.disk-text.low { color: var(--warning-ink); font-weight: 600; }
+.disk-text.high { color: var(--critical-ink); font-weight: 600; }
+.disk-bar { position: relative; height: 6px; border-radius: 3px; background: var(--surface-3); min-width: 60px; }
+.disk-fill { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 3px; background: var(--text-muted); }
+.disk-fill.low { background: var(--warning-ink); }
+.disk-fill.high { background: var(--critical-ink); }
+.disk-tick { position: absolute; top: -3px; width: 2px; height: 12px; margin-left: -1px; background: var(--text-primary); border-radius: 1px; }
+
+/* The expand chevron at the start of a row (change 9). */
+.cl-xtd { width: 30px; padding-left: 6px !important; padding-right: 0 !important; }
+.cl-xth { width: 30px; }
+.cl-chev {
+  display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 24px; padding: 0;
+  border: 0; border-radius: var(--radius-sm); background: transparent; color: var(--text-secondary);
+  font-size: 13px; cursor: pointer;
 }
-.cl-down-card.wide { grid-column: 1 / -1; }
-.cl-l1, .cl-l2 { display: flex; align-items: center; gap: 7px; min-width: 0; }
-/* The name gives way last: the "since" text shrinks first (it is in the open card too). */
-.cl-nm { font-size: 13.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 6ch; flex: 0 1 auto; }
-.cl-l1 .pill { flex: none; white-space: nowrap; }
-.cl-since { font-size: 11.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; flex: 0 100 auto; }
-.cl-err { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-secondary); }
-.cl-l2 .btn { flex: none; }
-.cl-exp { padding: 1px 7px; font-size: 13px; line-height: 1.2; }
-.cl-down-more { display: grid; gap: 8px; padding-top: 4px; border-top: 1px solid var(--border); }
-.cl-dl { margin: 0; display: grid; grid-template-columns: 110px minmax(0, 1fr); gap: 3px 12px; font-size: 12px; }
-.cl-dl dt { color: var(--text-muted); }
-.cl-dl dd { margin: 0; overflow-wrap: anywhere; }
-.cl-down-acts { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
-.cl-down-card .diag { margin: 4px 0 0 !important; }
+.cl-chev:hover { background: var(--surface-3); color: var(--text-primary); }
+.cl-chev:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 
 /* The Columns panel. */
 .pop.cl-cols { width: min(340px, calc(100vw - 16px)); }
