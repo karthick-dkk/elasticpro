@@ -22,6 +22,7 @@ import { toast } from '../ui/menu.js';
 import { confirmDialog } from '../ui/modal.js';
 import { isSnapshotMode } from '../core/snapshot.js';
 import { jsonView } from '../lib/jsonview.js';
+import { takeFocus } from '../core/focus.js';
 
 let host = null;
 let tailTimer = null;
@@ -94,6 +95,9 @@ export function render(el) {
     const back = new Date(now.getTime() - 60 * 60 * 1000);
     ui.from = isoLocal(back); ui.to = isoLocal(now);
   }
+  // Opened from a "logs arriving late" alert (core/focus.js): straight to the delay view.
+  const f = takeFocus('logs');
+  if (f && f.view === 'delay') { ui.view = 'delay'; draw(); runPreflight(); return; }
   draw();
   if (!ui.hits.length && !ui.running) search();
 }

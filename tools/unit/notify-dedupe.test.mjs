@@ -40,13 +40,15 @@ beforeEach(() => {
   run();                                   // the baseline pass
 });
 
-test('going down is announced once, and keyed by the alert', () => {
+test('going down is announced once, as one notice for the cluster', () => {
   setReachable(false);
   assert.equal(st.alerts().some((a) => /unreachable/.test(a.title)), true, 'the fixture must raise the alert');
   run(); run(); run();
   assert.equal(said.length, 1);
   assert.equal(said[0].kind, 'err');
-  assert.match(said[0].opts.key, /^alert:c1:unreachable/);
+  assert.match(said[0].opts.key, /^alerts:c1:\d+$/, 'keyed by the cluster and the burst, not by the alert');
+  assert.equal(said[0].msg, 'prod: 1 new alert');
+  assert.deepEqual(said[0].opts.detail, ['Cluster unreachable']);
 });
 
 test('one missed refresh and a return is not news', () => {
