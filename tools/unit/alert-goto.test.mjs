@@ -52,6 +52,7 @@ test('where each rule lands on its page', () => {
   assert.deepEqual([at('repo').page, at('repo').focus.section], ['snapshots', 'repos']);
   assert.deepEqual([at('log-delay').page, at('log-delay').focus.view], ['logs', 'delay']);
   assert.equal(at('unreachable').page, 'overview');
+  assert.deepEqual(at('unreachable').focus, { section: 'unreachable', cluster: 'c1' }, 'Clusters page: that cluster\'s card');
   // The volume rule leads to the Volume report, no longer the Clusters page.
   assert.equal(at('volume').page, 'volume');
   const vol = G.mergeAlerts([{ key: 'c1:volume:host.name:p7', level: 'warning', cluster, title: 'prod: host.name "p7" volume up 500%' }], {})[0];

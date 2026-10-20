@@ -20,6 +20,7 @@ import { readPrefs, writePrefs, resolveColumns, visibleColumns, setColumnShown, 
 import { rowMenu, popover, ICON } from '../ui/menu.js';
 import { roleMayWrite } from '../core/writes.js';
 import { editCluster, rawClusterOf } from '../ui/config-editor.js';
+import { takeFocus, revealFocus } from '../core/focus.js';
 
 let host = null;
 const expanded = new Set();
@@ -153,7 +154,13 @@ function coverageLine() {
   });
 }
 
-export function render(el) { host = el; el.classList.add('dense'); trackHeadHeight(); draw(); }
+export function render(el) {
+  host = el; el.classList.add('dense'); trackHeadHeight();
+  // "Go to" from an unreachable alert (core/alert-goto.js): that cluster's card, open.
+  const f = takeFocus('overview');
+  focusDown = f && f.section === 'unreachable' ? { cluster: f.cluster || null, prepared: false } : null;
+  draw();
+}
 export function onData() { if (host && host.isConnected) draw(); }
 
 /* ------------------------------ per-user layout ------------------------------ */
@@ -268,12 +275,51 @@ export function splitRows(rows) {
   return { down, up: rows.filter((r) => !ids.has(r.c.id)) };
 }
 
+/* ------------------------------ focus from an alert ------------------------------ */
+
+/**
+ * The cluster an unreachable alert's "Go to" asked for, until it has been shown. Kept across
+ * draws: the page may open before the cluster's state has arrived.
+ */
+let focusDown = null;
+const cssId = (id) => String(id).replace(/["\\]/g, '\\$&');
+
+/**
+ * Make the asked-for cluster visible before drawing: its card open, the unreachable section
+ * shown if it was folded, and a search or "Show" filter that would hide it cleared. Done
+ * once; if the cluster is answering again by now, its row in the table is opened instead.
+ */
+function prepareFocus(all) {
+  if (!focusDown || focusDown.prepared) return;
+  const id = focusDown.cluster;
+  const row = id ? all.find((r) => r.c.id === id) : null;
+  if (id && !row) return;   // not loaded yet: try again on the next draw
+  focusDown.prepared = true;
+  const down = row ? healthState(row.d) === 'unreachable' : lastAllDown.length > 0;
+  if (!visibleRows(all).some((r) => !id || r.c.id === id)) { ui.text = ''; ui.only = 'all'; }
+  if (down) {
+    if (prefs.unreachable.hidden) savePrefs(showUnreachable(prefs));
+    if (id) cardOpen.add(id);
+  } else if (id) {
+    expanded.add(id);
+  }
+}
+
+/** After the draw: scroll to it and flash it, then forget the hint. */
+function revealFocused() {
+  if (!focusDown || !focusDown.prepared) return;
+  const id = focusDown.cluster;
+  const sel = id ? `.cl-down-card[data-cluster="${cssId(id)}"], tr[data-cluster="${cssId(id)}"]` : 'section.cl-down';
+  if (revealFocus(host, sel)) focusDown = null;
+}
+
 function draw() {
   alertCounts = alertsByCluster();
   currentPrefs();
   const list = activeClusters();
   const all = list.map((c) => ({ c, d: state.data.get(c.id) || {}, cl: client(c.id) }));
   updateFold(all);
+  prepareFocus(all);
   const rows = visibleRows(all);
   const { down, up } = splitRows(rows);
   lastUp = up; lastDown = down;
@@ -288,6 +334,7 @@ function draw() {
   );
   built.end();
   scheduleHeadSync();
+  revealFocused();
 }
 
 /* ---------------------------- the unreachable cards ---------------------------- */
@@ -755,7 +802,7 @@ function trackHeadHeight() {
 function rowNodes(r, byCluster, cols) {
   const out = [];
   const { c, d } = r;
-  out.push(h('tr', ...cols.map((col) => CELLS[col.id](r, byCluster)),
+  out.push(h('tr', { 'data-cluster': c.id }, ...cols.map((col) => CELLS[col.id](r, byCluster)),
     // A real button, not a ghost that reads as a label: this is the control people go
     // looking for when a row raises a question, and it was the quietest thing in the
     // row. The chevron says which way it goes; aria-expanded says it to a reader.

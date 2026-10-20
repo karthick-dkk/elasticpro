@@ -993,6 +993,21 @@ await go('overview');
         press(doc.getElementById('cl-down-toggle')); await settleFor(150);
         ok(section() && !section().classList.contains('folded'), 'unreachable: Show did not open the section');
       }
+
+      // "Go to" from an unreachable alert: the section opens if it was hidden, and that
+      // cluster's card is open and flashed (core/alert-goto.js → core/focus.js).
+      {
+        const goto = await load('core/alert-goto.js');
+        press(doc.getElementById('cl-down-toggle')); await settleFor(150);
+        ok(section() && section().classList.contains('folded'), 'unreachable Go to: could not hide the section first');
+        goto.openGoto({ page: 'overview', focus: goto.FOCUS.unreachable({ clusterId: a.id }), clusterId: a.id });
+        await settleFor(450);
+        const card = section() && section().querySelector(`article.cl-down-card[data-cluster="${a.id}"]`);
+        ok(section() && !section().classList.contains('folded'), 'unreachable Go to: the hidden section was not shown');
+        ok(card && card.querySelector('button.cl-exp').getAttribute('aria-expanded') === 'true', 'unreachable Go to: the cluster\'s card is not open');
+        ok(card && card.classList.contains('focus-flash'), 'unreachable Go to: the card was not brought into view');
+        if (card) { press(card.querySelector('button.cl-exp')); await settleFor(100); }
+      }
     } finally {
       restore();
       window.localStorage.removeItem(cv.prefsKey('columns-check'));
