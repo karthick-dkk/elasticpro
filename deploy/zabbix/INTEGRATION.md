@@ -769,7 +769,7 @@ Templates: re-import the previous export, or restore the Zabbix DB backup.
 ### Environment variables
 
 **Core** (`deploy/docker-compose.yml` + the overlay files): `ELASTICPRO_BIND`, `ELASTICPRO_DATA_DIR`,
-`ELASTICPRO_CONFIG`, `RUST_LOG`, `ELASTICPRO_POLL_HEALTH_SECS` (180), `ELASTICPRO_POLL_CONCURRENCY` (16),
+`ELASTICPRO_CONFIG`, `RUST_LOG`, `ELASTICPRO_POLL_HEALTH_SECS` (180), `ELASTICPRO_POLL_CONCURRENCY` (unset: the request policy decides),
 `ELASTICPRO_CACHE_MB` (a quarter of the limit), `ELASTICPRO_MEM_LIMIT` (2g), `ELASTICPRO_NOTIFY_DAYS` (30), `ELASTICPRO_REDIS_URL`
 (built from the secret file, not set directly), `ELASTICPRO_ZABBIX_SSO_SECRET_FILE`,
 `ELASTICPRO_ZABBIX_API_URL`, `ELASTICPRO_ZABBIX_API_TOKEN_FILE`, `ELASTICPRO_ZABBIX_CLUSTER_TEMPLATE`

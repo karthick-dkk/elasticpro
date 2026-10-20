@@ -40,7 +40,10 @@ services:
       # off. All three are read by the core itself — this only sets what a fresh .env
       # does not override.
       ELASTICPRO_POLL_HEALTH_SECS: ${ELASTICPRO_POLL_HEALTH_SECS:-180}
-      ELASTICPRO_POLL_CONCURRENCY: ${ELASTICPRO_POLL_CONCURRENCY:-16}
+      # Empty unless set: the request policy then decides (4 under the shipped Client
+      # basis, 16 under Automatic/Background). A number here overrides every preset, and
+      # Config → Requests then shows no preset selected.
+      ELASTICPRO_POLL_CONCURRENCY: ${ELASTICPRO_POLL_CONCURRENCY:-}
       # Empty unless set: the core then sizes its cache to a quarter of the container's memory
       # limit (crates/elasticpro-core/src/memory.rs) and logs the split as "memory budget".
       ELASTICPRO_CACHE_MB: ${ELASTICPRO_CACHE_MB:-}
