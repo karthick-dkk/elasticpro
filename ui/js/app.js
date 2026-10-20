@@ -9,7 +9,7 @@ import * as cfg from './core/config.js';
 import { state, bus, setConfig, refreshAll, refreshModule, REFRESH_MODULES, startAutoRefresh, clusters, fleetMode,
          alerts, cachedAlerts, worstHealth, requestLoad, fleetPolicy, fetchesOnlyOnAsk,
          clustersNeedingCredential, clustersWithAuthError, hasSessionCredential, isReadOnly, healthState, activeClusters, openAlertsNow, openAlertCounts } from './core/state.js';
-import { rowMenu, toast, notificationBell, setNotificationSink, dropNotification } from './ui/menu.js';
+import { rowMenu, toast, notificationBell, setNotificationSink, dropNotification, closePopover, dismissToasts } from './ui/menu.js';
 import { showCredentialDialog, serverHoldsCredentials, serverCredentialMessage } from './ui/credential-dialog.js';
 import { loadSnapshotFile, isSnapshotMode } from './core/snapshot.js';
 import { EXAMPLE_YAML } from './core/example.js';
@@ -25,6 +25,7 @@ import { announceNewAlerts, announceSnapshotOutcomes, resetAnnounced } from './c
 import { onSessionLost, bridge, setSession, setSignedIn, abortPage } from './core/transport.js';
 import { readLaunch, withoutCode, withoutTrouble, troubleshootTarget, themeFor, exchangeCode, rememberEmbedTheme, askZabbixToSignIn, rememberPageForReauth, takeRememberedPage } from './core/embed.js';
 import { pageForProblem } from './core/alert-rules.js';
+import { evidenceLayout, evidenceStamp, createHeldNotices } from './core/evidence.js';
 
 let coreInfo = { version: '?' };
 
@@ -108,6 +109,15 @@ setPageGate((id) => visiblePages().some((p) => p.id === id));
 
 const root = document.getElementById('root');
 let currentPage = null;
+
+/**
+ * The evidence layout for what is open now (core/evidence.js is the one definition of which
+ * pages). Asked wherever the shell would otherwise show something about the whole fleet.
+ */
+function layout() {
+  const sel = state.selected;
+  return evidenceLayout(currentPage, sel, clusters().some((c) => c.id === sel));
+}
 
 /**
  * Pages the status strip stays out of the way on.
@@ -341,8 +351,9 @@ function renderNav() {
   const nav = $('#nav');
   if (!nav) return;
   // Open alerts only — acknowledged or silenced ones are on the Alerts page, not in a count.
-  const a = openAlertsNow();
-  const crit = openAlertCounts().critical;
+  const ev = layout().evidence;
+  const a = ev ? [] : openAlertsNow();     // a count of the fleet's alerts is not evidence
+  const crit = ev ? 0 : openAlertCounts().critical;
   const shown = visiblePages();
   const key = shown.map((p) => p.id).join(',');
   if (navBuiltFor !== key || !nav.firstChild) {
@@ -464,16 +475,24 @@ function renderTopbar() {
   const bar = $('#topbar');
   if (!bar) return;
   const page = PAGES.find((p) => p.id === currentPage) || PAGES[0];
-  // Open alerts only — acknowledged or silenced ones are on the Alerts page, not in a count.
-  const a = openAlertsNow();
-  const crit = openAlertCounts().critical;
   const theme = document.documentElement.getAttribute('data-theme') || 'system';
   resolveSelection(page);
-  const healthSig = activeClusters().map((c) => `${c.id}:${healthState(state.data.get(c.id))}`).join(',');
+  // The evidence layout (core/evidence.js): this page is about to be photographed for one
+  // client, so the bar carries the brand, the page, THIS cluster and its health, and
+  // Refresh — nothing that counts, names or colours the rest of the fleet.
+  const L = layout();
+  const ev = L.evidence;
+  const mine = (list) => (ev ? list.filter((c) => c.id === state.selected) : list);
+  // Open alerts only — acknowledged or silenced ones are on the Alerts page, not in a count.
+  const a = ev ? [] : openAlertsNow();
+  const crit = ev ? 0 : openAlertCounts().critical;
+  const needCreds = mine(clustersNeedingCredential());
+  const badCreds = mine(clustersWithAuthError());
+  const healthSig = (ev && L.needsCluster ? [] : activeClusters()).map((c) => `${c.id}:${healthState(state.data.get(c.id))}`).join(',');
   const key = JSON.stringify([page.id, page.multi, state.selected, healthSig, clusters().map((c) => `${c.id}\u0001${c.name}`),
-    a.length, crit, clustersNeedingCredential().length, clustersWithAuthError().length, serverHoldsCredentials(),
+    a.length, crit, needCreds.length, badCreds.length, serverHoldsCredentials(),
     theme, isSnapshotMode(), fleetMode(), state.autoRefresh, state.defaults.refreshIntervalSec, redrawPolicy(),
-    me && me.name, embedded, state.snapshot && state.snapshot.host]);
+    me && me.name, embedded, state.snapshot && state.snapshot.host, ev, L.needsCluster]);
   if (key === topbarKey && bar.firstChild) { tickStatus(); markUnreachable($('#cluster-select')); return; }
   topbarKey = key;
 
@@ -504,7 +523,8 @@ function renderTopbar() {
   sel.value = state.selected;
   // On a large fleet a dropdown of a hundred names is scrolled, not read: a box beside it
   // finds a cluster by any part of its name, tag or address as you type.
-  const finder = clusters().length > FINDER_ABOVE ? clusterFinder(sel) : null;
+  const finder = clusters().length > FINDER_ABOVE && !ev ? clusterFinder(sel) : null;
+  const evCluster = ev && !L.needsCluster ? clusters().find((c) => c.id === state.selected) : null;
 
   mount(bar,
     // The product name, and nothing else. The config filename used to sit under it, which
@@ -513,11 +533,14 @@ function renderTopbar() {
     h('div.brand', h('img', { src: 'icons/icon48.png', alt: '' }),
       h('div', h('b', 'ElasticPro'))),
     h('h1', page.label),
-    h('label.field', { style: { flexDirection: 'row', alignItems: 'center', gap: '6px' } }, sel, finder),
+    // Evidence: the cluster is named, not offered. A picker's closed face shows one name but
+    // its options are every cluster, and the finder says how many there are.
+    ev ? (evCluster ? healthPill([evCluster]) : null)
+      : h('label.field', { style: { flexDirection: 'row', alignItems: 'center', gap: '6px' } }, sel, finder),
     h('div.spacer'),
     (() => {
-      const need = clustersNeedingCredential().length;
-      const bad = clustersWithAuthError().length;
+      const need = needCreds.length;
+      const bad = badCreds.length;
       if (!need && !bad) return null;
       // Somebody who cannot supply a credential gets the fact, not a button that fails.
       if (serverHoldsCredentials()) {
@@ -526,9 +549,10 @@ function renderTopbar() {
       return h('button.btn.sm.primary', {
         onclick: () => showCredentialDialog(bad && !need ? 'auth_error' : 'startup'),
         title: 'One credential, applied to every cluster',
-      }, need ? `Sign in (${need} cluster${need === 1 ? '' : 's'})` : `Re-enter credentials (${bad})`);
+      }, ev ? (need ? 'Sign in' : 'Re-enter credentials')
+        : need ? `Sign in (${need} cluster${need === 1 ? '' : 's'})` : `Re-enter credentials (${bad})`);
     })(),
-    healthPill(activeClusters()),
+    ev ? null : healthPill(activeClusters()),
     a.length
       ? h('button.btn.sm', { class: crit ? 'danger' : '', onclick: () => go('alerts'), title: 'Open the Alerts page' },
           `${a.length} alert${a.length > 1 ? 's' : ''}`)
@@ -540,12 +564,14 @@ function renderTopbar() {
       ? h('span.pill.grey', { title: `Rendered from a snapshot file collected elsewhere${state.snapshot && state.snapshot.host ? ' on ' + state.snapshot.host : ''}. The browser is making no network requests.` },
           h('i.dot'), 'snapshot')
       : null,
-    h('span#refresh-status.muted', { style: { fontSize: '11.5px', fontVariantNumeric: 'tabular-nums' } }, ''),
+    // "updated just now" is the fleet's refresh, not this page's data; on an evidence page
+    // the footer says when THIS data was read.
+    ev ? null : h('span#refresh-status.muted', { style: { fontSize: '11.5px', fontVariantNumeric: 'tabular-nums' } }, ''),
     // With the server's fleet cache there is nothing for a page to poll: the core goes to the
     // clusters (on its schedule, or when a page asks) and tells the page what changed. The auto toggle
     // would only be a switch for load that no longer exists, so this says how what lands
     // reaches the page instead: live (repainted as it arrives) or quiet (held until you pause).
-    fleetMode() && !isSnapshotMode()
+    fleetMode() && !isSnapshotMode() && !ev
       ? (redrawPolicy() === 'live'
         ? h('span.pill.green', { title: `${serverLead()}; `
             + 'the page repaints as it lands. Refresh asks it to fetch the clusters on screen now. '
@@ -558,7 +584,7 @@ function renderTopbar() {
           h('i.dot'), redrawPolicy() === 'pending' ? 'quiet' : 'manual'))
       : null,
     h('button.btn.sm', {
-      hidden: isSnapshotMode() || fleetMode(),
+      hidden: isSnapshotMode() || fleetMode() || ev,
       onclick: () => {
         state.autoRefresh = !state.autoRefresh;
         state.nextRefreshAt = Date.now() + state.defaults.refreshIntervalSec * 1000;
@@ -570,7 +596,8 @@ function renderTopbar() {
         ? `Auto-refresh is on (every ${state.defaults.refreshIntervalSec}s). Click to turn it off.`
         : 'Auto-refresh is off. Data only updates when you press Refresh. Click to turn it on.',
     }, state.autoRefresh ? `\u23F8 Auto ${state.defaults.refreshIntervalSec}s` : '\u25B6 Auto off'),
-    isSnapshotMode()
+    ev && L.needsCluster ? null
+    : isSnapshotMode()
       ? h('label.btn.sm', { style: { position: 'relative', overflow: 'hidden' }, title: 'Open a newer snapshot file' }, '↻ Load newer',
           h('input', { type: 'file', accept: '.json,application/json',
             style: { position: 'absolute', inset: '0', opacity: '0', cursor: 'pointer' },
@@ -598,13 +625,15 @@ function renderTopbar() {
           })), { label: '▾', title: 'Refresh one part only' })),
     // Inside Zabbix the theme follows the Zabbix user's; a second switch here would be one
     // that the next page load undoes.
-    notificationBell(),
+    // The bell lists every cluster's notices; it stays off an evidence page and comes back
+    // with everything in it when the person leaves.
+    ev ? null : notificationBell(),
     embedded ? null : h('button.btn.sm.ghost', { onclick: cycleTheme, title: `Theme: ${theme} \u2014 click for the next one${theme === 'warm' ? ' (warm emits the least blue light)' : ''}` },
       themeLabel(theme)),
     // Only where accounts exist. The portable build has nobody to sign out, and inside
     // Zabbix it is Zabbix you sign out of — a frame signing itself out would leave a
     // login screen asking for a password a Zabbix account does not have.
-    me && embedded
+    me && (embedded || ev)
       ? null
       : me
       ? h('button.btn.sm.ghost', {
@@ -639,7 +668,7 @@ function renderSideFoot() {
   // Decided here rather than at navigation: the strip is rebuilt from refresh events that
   // fire whatever page is open, so a decision made anywhere else comes undone on the next
   // tick. Hidden, not unbuilt — the content is cheap and stays correct for the way back.
-  el.hidden = STRIP_HIDDEN.has(currentPage);
+  el.hidden = STRIP_HIDDEN.has(currentPage) || layout().evidence;
   const meta = state.config && state.config.fileMeta;
   const row = (label, value, opts = {}) => h('span.row', opts, h('b', label), value);
   const total = Object.values(requestLoad.clusters).reduce((n, r) => n + (r.last5m || 0), 0);
@@ -696,6 +725,94 @@ function renderSideFoot() {
     h('span.strip-spacer'),
     aboutMini(coreInfo.version));
 
+}
+
+/* ------------------------------ evidence layout ------------------------------ */
+
+/** Whether an evidence page is open (core/evidence.js). Notices are held while it is. */
+let evidenceOn = false;
+const heldNotices = createHeldNotices();
+
+/**
+ * What the app announces by itself — alert bursts, snapshot outcomes, the certificate
+ * notice. On an evidence page they wait: they name other clusters, and a screenshot is the
+ * one place that must not happen. They are handed back, one bell entry each, on leaving.
+ */
+const announce = (message, kind, ms, opts) => {
+  if (evidenceOn) heldNotices.hold(message, kind, ms, opts);
+  else toast(message, kind, ms, opts);
+};
+
+/** Entering an evidence page clears what is on screen; leaving restores what was held. */
+function syncEvidence() {
+  const on = layout().evidence;
+  if (on === evidenceOn) return;
+  evidenceOn = on;
+  if (on) { closePopover(); dismissToasts(); }
+  else heldNotices.release(toast);
+}
+
+/**
+ * Asked for when an evidence page is open and no single cluster is selected. A page that
+ * drew "All clusters" would be a screenshot of the fleet, which is exactly what this layout
+ * exists to prevent; the choice is the person's, made here.
+ */
+function evidenceChooser() {
+  const pick = h('select#evidence-pick', {
+    'aria-label': 'Choose the cluster this evidence is for',
+    onchange: (e) => {
+      if (!e.target.value) return;
+      state.selected = e.target.value;
+      fleetView = false;
+      fleetChosen = false;
+      idb.setKV('lastCluster', e.target.value);
+      go(currentPage);
+    },
+  }, h('option', { value: '' }, 'Choose a cluster\u2026'), ...clusters().map((c) => h('option', { value: c.id }, c.name)));
+  pick.value = '';
+  return h('div.banner#evidence-need', { role: 'status' },
+    h('div', h('div.ttl', 'Evidence needs one cluster'),
+      h('div', 'This page is laid out for a screenshot of a single client\u2019s cluster, so it shows nothing about the rest of the fleet. '
+        + 'Choose the cluster this evidence is for.'),
+      h('div', { style: { marginTop: '8px' } }, pick)));
+}
+
+/**
+ * The line above the page when the data on it is stale, and the footer under it that is
+ * printed into every screenshot. Built into the page's own column from what the page
+ * says about its data (`evidenceData` — which dataset, how old), never from the fleet's
+ * last refresh. Rebuilt only when its words changed: it ticks with the clock.
+ */
+let evidenceKey = '';
+function renderEvidence() {
+  const view = $('#view');
+  if (!view || !view.parentNode) return;
+  let note = $('#evidence-note');
+  let foot = $('#evidence-foot');
+  const L = layout();
+  const c = L.evidence && !L.needsCluster ? clusters().find((x) => x.id === state.selected) : null;
+  if (!c) {
+    if (note) note.hidden = true;
+    if (foot) foot.hidden = true;
+    evidenceKey = '';
+    return;
+  }
+  if (!note) { note = h('div.banner.warn#evidence-note', { role: 'status', hidden: true }); view.before(note); }
+  if (!foot) { foot = h('footer#evidence-foot.evidence-foot', { 'aria-label': 'Evidence stamp' }); view.after(foot); }
+  const page = PAGES.find((p) => p.id === currentPage);
+  const info = (page && page.mod.evidenceData && page.mod.evidenceData(c)) || {};
+  const stamp = evidenceStamp({
+    cluster: c, label: info.label, fresh: info.fresh === undefined ? null : info.fresh, none: info.none,
+    now: Date.now(), version: coreInfo.version, user: me && me.name,
+  });
+  const key = `${c.id}|${stamp.text}|${stamp.note}`;
+  if (key === evidenceKey && !foot.hidden) return;
+  evidenceKey = key;
+  foot.hidden = false;
+  foot.dataset.tone = stamp.tone;
+  mount(foot, ...stamp.segments.map((seg) => h(`span.ev-seg.${seg.key}${seg.tone === 'stale' ? '.stale' : ''}`, seg.text)));
+  note.hidden = !stamp.note;
+  note.textContent = stamp.note;
 }
 
 /* ---------------------------------- router ---------------------------------- */
@@ -777,6 +894,7 @@ export function go(id) {
   redrawGate.reset();
   location.hash = `#/${page.id}`;
   resolveSelection(page);
+  syncEvidence();
   renderNav();
   renderTopbar();
   renderSideFoot();
@@ -789,7 +907,9 @@ export function go(id) {
   clear(view);
   if (changed) scrollPageTop();
   try {
-    page.mod.render(view);
+    if (layout().needsCluster) mount(view, evidenceChooser());
+    else page.mod.render(view);
+    renderEvidence();
   } catch (e) {
     console.error(e);
     mount(view, h('div.banner.err', h('div', h('div.ttl', 'Page failed to render'), h('div.mono', String(e && e.stack || e)))));
@@ -862,7 +982,7 @@ async function checkAcceptedCertificates() {
   // current news; the choice being deliberate retires it.
   if (deliberate) { dropNotification(NOTICE_KEY); return; }
   if (!shown) return;
-  toast(shown.message, 'warn', 10000, { key: NOTICE_KEY, detail: shown.detail });
+  announce(shown.message, 'warn', 10000, { key: NOTICE_KEY, detail: shown.detail });
   writeSeen(localStorage, shown.sig);
 }
 
@@ -1012,7 +1132,7 @@ bus.on('refreshed', (ev) => {
   maybeOfferAuthRecovery(); renderTopbar(); renderSideFoot(); renderNav();
   // After the nav, so the tab badge and the toast agree about what is open.
   // Zabbix announces problems itself; a toast here would be the same news twice.
-  if (!embedded) announceNewAlerts();
+  if (!embedded) announceNewAlerts({ notify: announce });
   // Snapshots finish long after the dialog that started them closed, so the outcome is
   // announced from the refresh that first sees it rather than by whoever happens to be
   // on the Snapshots page.
@@ -1023,7 +1143,7 @@ bus.on('refreshed', (ev) => {
       for (const s of list || []) snaps.push({ repo, id: s.id, status: s.status });
     }
     return { cluster: c, snapshots: snaps };
-  }));
+  }), { notify: announce });
   // A refresh a person asked for applies whatever the gate was holding, through the same
   // coalescing as data events, so a refresh ending while pushes are still landing is one
   // redraw, not two. One the app did by itself (the core's push, the auto-refresh timer)
@@ -1032,6 +1152,9 @@ bus.on('refreshed', (ev) => {
   onRefreshed(redrawGate, ev);
 });
 bus.on('tick', tickStatus);
+// The stamp's clock and the console's response time move without any data event; the state's own
+// tick only runs once auto-refresh has started, so the stamp keeps its own.
+setInterval(renderEvidence, 1000);
 
 let offeredAuthRecovery = false;
 function maybeOfferAuthRecovery() {
@@ -1054,7 +1177,9 @@ function maybeOfferAuthRecovery() {
 const scheduleDataRedraw = coalesce(() => {
   renderNav();
   const p = PAGES.find((x) => x.id === currentPage);
-  if (p && p.mod.onData) p.mod.onData();
+  // The chooser is not the page: letting the page redraw would paint it over the question.
+  if (p && p.mod.onData && !layout().needsCluster) p.mod.onData();
+  renderEvidence();
 }, { gapAfter: (costMs) => (costMs > 16 ? Math.min(1500, costMs * 2) : 0) });
 
 /*

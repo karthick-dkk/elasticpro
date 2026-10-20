@@ -48,6 +48,18 @@ export function render(el) {
 export function onData() { if (host && host.isConnected) draw(); }
 
 /**
+ * What the evidence footer (core/evidence.js) says about the data on screen: the age of the
+ * listing of the repository being shown, from whichever dataset it came from.
+ */
+export function evidenceData(c) {
+  const d = state.data.get(c.id) || {};
+  const repos = d.repos || [];
+  const selected = ui.repo[c.id] || (repos[0] && repos[0].name);
+  return { label: 'Snapshot data read',
+    fresh: selected ? listingFreshness(c, d, selected) : datasetFreshness(c.id, 'snapshots') };
+}
+
+/**
  * The verbose listing, for the clusters on screen. The overview's own listing is the light
  * _cat one, which counts snapshots but cannot say which days of indices they hold — and
  * that is most of what this page is for. A no-op without the fleet cache, whose refresh
