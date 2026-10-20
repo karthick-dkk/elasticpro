@@ -879,6 +879,16 @@ impl Core {
     /// app has none). Every exchange is written to the activity log here, on the way out,
     /// so a refusal by the gate and a reply from a handler are recorded by the same line.
     pub async fn handle_as_from_at(self: &Arc<Self>, msg: Value, caller: Option<Caller>, reauth: Reauth, source: Option<std::net::IpAddr>) -> Value {
+        self.handle_reply_as_from_at(msg, caller, reauth, source).await.into_value()
+    }
+
+    /// `handle_as_from_at`, with any cached fleet bodies left as the text they are held as
+    /// (`fleet::reply`). The hosted bridge sends this with `Reply::to_json`, so a full
+    /// `FLEET_STATE` never exists as a parsed `Value`; everything else is a plain `Value`
+    /// inside it, unchanged.
+    pub async fn handle_reply_as_from_at(
+        self: &Arc<Self>, msg: Value, caller: Option<Caller>, reauth: Reauth, source: Option<std::net::IpAddr>,
+    ) -> crate::fleet::reply::Reply {
         let via = match &reauth {
             Reauth::Session(_) => "session",
             Reauth::Token(_) => "token",
@@ -886,10 +896,29 @@ impl Core {
             Reauth::None => "none",
         };
         let sent = msg.clone();
-        let mut out = self.dispatch(msg, caller.clone(), reauth).await;
-        crate::errors::stamp(&mut out);
-        self.record_activity(&sent, caller.as_ref(), via, source, &out);
+        let mut out = self.dispatch_reply(msg, caller.clone(), reauth).await;
+        crate::errors::stamp(&mut out.value);
+        self.record_activity(&sent, caller.as_ref(), via, source, &out.value);
         out
+    }
+
+    /// The two messages that hand back cached bodies, as a `Reply`; everything else
+    /// through `dispatch`. The gate is the same one `dispatch` applies.
+    async fn dispatch_reply(self: &Arc<Self>, msg: Value, caller: Option<Caller>, reauth: Reauth) -> crate::fleet::reply::Reply {
+        let t = msg.get("type").and_then(|v| v.as_str()).unwrap_or("");
+        if !matches!(t, "FLEET_STATE" | "CLUSTER_DATASET") {
+            return self.dispatch(msg, caller, reauth).await.into();
+        }
+        if self.edition.uses_accounts() {
+            if let Err(denied) = self.gate(t, &msg, caller.as_ref()) {
+                return denied.into();
+            }
+        }
+        if t == "FLEET_STATE" {
+            self.fleet_state_reply(&msg, caller.as_ref())
+        } else {
+            self.cluster_dataset_reply(&msg, caller.as_ref()).await
+        }
     }
 
     /// Write one exchange to the activity log (background polls are skipped inside).

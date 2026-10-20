@@ -5,8 +5,8 @@
 //! Both are best-effort by design. The cache is a copy of what the clusters said; losing
 //! it costs one round of polling, so no failure here is ever allowed to stop the poller.
 
-use super::catalogue::Dataset;
-use super::entry::{Entry, Status};
+use super::catalogue::{Class, Dataset};
+use super::entry::{Entry, Status, ENTRY_OVERHEAD};
 use parking_lot::Mutex;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -53,6 +53,78 @@ fn private(p: &Path, mode: u32) {
 }
 #[cfg(not(unix))]
 fn private(_: &Path, _: u32) {}
+
+/* --------------------------------- restoring --------------------------------- */
+
+/// How much of an entry's start is read to learn when it was fetched. `Entry` serialises
+/// `status` then `fetchedAt` first, so this is generous.
+const HEAD_BYTES: usize = 256;
+
+/// `fetchedAt` from the start of a serialised entry, without reading the rest: `Some(t)`
+/// for a time, `Some(None)` for `null`, `None` when the head does not say.
+pub fn head_fetched_at(head: &[u8]) -> Option<Option<u64>> {
+    let text = std::str::from_utf8(head).unwrap_or_else(|e| std::str::from_utf8(&head[..e.valid_up_to()]).unwrap_or(""));
+    let rest = text[text.find("\"fetchedAt\"")? + 11..].trim_start().strip_prefix(':')?.trim_start();
+    if rest.starts_with("null") {
+        return Some(None);
+    }
+    let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+    // Digits running to the end of the head may be cut short: not an answer.
+    if digits.is_empty() || digits.len() == rest.len() {
+        return None;
+    }
+    digits.parse().ok().map(Some)
+}
+
+/// Where a found entry's body is.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Where {
+    Disk { path: PathBuf, gz: bool },
+    Redis(String),
+}
+
+/// A cached entry found in a store, before its body is read: enough to decide whether it
+/// is worth reading at all.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Found {
+    pub cluster: String,
+    pub ds: Dataset,
+    pub fetched_at: Option<u64>,
+    /// The serialised entry's length — what its body will cost, near enough.
+    pub bytes: usize,
+    pub at: Where,
+}
+
+impl Found {
+    /// What restoring it will cost the cache, by the same measure as `Entry::cost`.
+    pub fn cost(&self) -> usize {
+        ENTRY_OVERHEAD + self.bytes
+    }
+}
+
+/// The order a restore reads in — the reverse of the order `State::evict` drops in: every
+/// cluster's health first, then the other background datasets, then the on-demand ones,
+/// newest first within each. With a budget smaller than the cache, what is left out is
+/// what eviction would have dropped first.
+pub fn restore_order(found: &mut [Found]) {
+    found.sort_by_key(|f| {
+        let rank = match (f.ds, f.ds.class()) {
+            (Dataset::Health, _) => 0u8,
+            (_, Class::Background) => 1,
+            (_, Class::OnDemand) => 2,
+        };
+        (rank, std::cmp::Reverse(f.fetched_at))
+    });
+}
+
+/// A serialised entry, as restored: `restored`, nothing due, no error carried over.
+fn restored(body: &[u8]) -> Option<Entry> {
+    let mut e = serde_json::from_slice::<Entry>(body).ok()?;
+    e.status = Status::Restored;
+    e.next_due = None;
+    e.error = None;
+    Some(e)
+}
 
 pub struct DiskStore {
     dir: Option<PathBuf>,
@@ -123,9 +195,10 @@ impl DiskStore {
         }
     }
 
-    /// Everything on disk, as `restored` entries. Unreadable files are skipped: a cache
-    /// that cannot be read is a cache miss, not a reason to fail a start.
-    pub fn load_all(&self) -> Vec<(String, Dataset, Entry)> {
+    /// Every entry on disk, from the first few hundred bytes of each file and its size —
+    /// no body is read. Unreadable files are skipped: a cache that cannot be read is a
+    /// cache miss, not a reason to fail a start.
+    pub fn found(&self) -> Vec<Found> {
         let mut out = vec![];
         let Some(root) = &self.dir else { return out };
         let Ok(clusters) = std::fs::read_dir(root) else { return out };
@@ -140,26 +213,34 @@ impl DiskStore {
                     _ => continue,
                 };
                 let Some(ds) = Dataset::parse(&stem) else { continue };
-                let Ok(raw) = std::fs::read(f.path()) else { continue };
-                let body = if gz {
-                    use std::io::Read;
-                    let mut s = Vec::new();
-                    if flate2::read::GzDecoder::new(&raw[..]).read_to_end(&mut s).is_err() {
-                        continue;
-                    }
-                    s
-                } else {
-                    raw
-                };
-                let Ok(mut e) = serde_json::from_slice::<Entry>(&body) else { continue };
-                e.status = Status::Restored;
-                e.bytes = body.len();
-                e.next_due = None;
-                e.error = None;
-                out.push((id.clone(), ds, e));
+                let path = f.path();
+                let Some((head, bytes)) = disk_head(&path, gz) else { continue };
+                let Some(fetched_at) = head_fetched_at(&head) else { continue };
+                out.push(Found { cluster: id.clone(), ds, fetched_at, bytes, at: Where::Disk { path, gz } });
             }
         }
         out
+    }
+
+    /// One found entry, read whole, as `restored`.
+    pub fn load(&self, f: &Found) -> Option<Entry> {
+        let Where::Disk { path, gz } = &f.at else { return None };
+        let raw = std::fs::read(path).ok()?;
+        if *gz {
+            use std::io::Read;
+            let mut s = Vec::with_capacity(f.bytes);
+            flate2::read::GzDecoder::new(&raw[..]).read_to_end(&mut s).ok()?;
+            drop(raw);
+            restored(&s)
+        } else {
+            restored(&raw)
+        }
+    }
+
+    /// Everything on disk, as `restored` entries, regardless of any budget. For tests.
+    #[doc(hidden)]
+    pub fn load_all(&self) -> Vec<(String, Dataset, Entry)> {
+        self.found().into_iter().filter_map(|f| self.load(&f).map(|e| (f.cluster, f.ds, e))).collect()
     }
 
     /// Drop every cluster not in `keep`, on disk.
@@ -173,6 +254,29 @@ impl DiskStore {
             }
         }
         self.last_write.lock().retain(|(c, _), _| keep.contains(c));
+    }
+}
+
+/// The start of a cache file, decoded, and the length of the whole of it decoded. A gzip
+/// file says its decoded length in its last four bytes (mod 4 GiB, more than any body).
+fn disk_head(path: &Path, gz: bool) -> Option<(Vec<u8>, usize)> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = std::fs::File::open(path).ok()?;
+    let len = file.metadata().ok()?.len();
+    let mut head = Vec::with_capacity(HEAD_BYTES);
+    if gz {
+        if len < 18 {
+            return None;
+        }
+        file.seek(SeekFrom::End(-4)).ok()?;
+        let mut isize = [0u8; 4];
+        file.read_exact(&mut isize).ok()?;
+        file.seek(SeekFrom::Start(0)).ok()?;
+        flate2::read::GzDecoder::new(file).take(HEAD_BYTES as u64).read_to_end(&mut head).ok()?;
+        Some((head, u32::from_le_bytes(isize) as usize))
+    } else {
+        file.take(HEAD_BYTES as u64).read_to_end(&mut head).ok()?;
+        Some((head, len as usize))
     }
 }
 
@@ -267,8 +371,17 @@ impl RedisStore {
     }
 
     async fn run<T: redis::FromRedisValue>(&self, what: &str, cmd: redis::Cmd) -> Option<T> {
+        self.run_sized(what, cmd, 0).await
+    }
+
+    /// `run`, for a command that moves `bytes` of payload: two seconds and one more per
+    /// MiB, at most thirty. A flat two seconds timed out on every multi-megabyte body
+    /// sent while a dozen others shared the connection — the SET was dropped (so Redis
+    /// held a fraction of the cache) and the connection with it.
+    async fn run_sized<T: redis::FromRedisValue>(&self, what: &str, cmd: redis::Cmd, bytes: usize) -> Option<T> {
         let mut c = self.conn().await?;
-        let lost = match tokio::time::timeout(std::time::Duration::from_secs(2), cmd.query_async::<T>(&mut c)).await {
+        let wait = std::time::Duration::from_millis((2_000 + (bytes as u64 >> 20) * 1_000).min(30_000));
+        let lost = match tokio::time::timeout(wait, cmd.query_async::<T>(&mut c)).await {
             Ok(Ok(v)) => return Some(v),
             Ok(Err(e)) => {
                 self.down(what, &e);
@@ -294,7 +407,7 @@ impl RedisStore {
         }
         let mut set = redis::cmd("SET");
         set.arg(redis_key(cluster, ds)).arg(body).arg("EX").arg(ttl_secs.max(1));
-        if self.run::<()>("set", set).await.is_none() {
+        if self.run_sized::<()>("set", set, body.len()).await.is_none() {
             return;
         }
         let mut publish = redis::cmd("PUBLISH");
@@ -313,8 +426,12 @@ impl RedisStore {
         let _ = self.run::<i64>("del", del).await;
     }
 
-    /// Every entry Redis still holds, as `restored`.
-    pub async fn load_all(&self) -> Vec<(String, Dataset, Entry)> {
+    /// Every entry Redis still holds, from `STRLEN` and the first few hundred bytes of
+    /// each (`GETRANGE`) — no body is fetched, so deciding which ones are worth having
+    /// costs nothing like holding them. (0.3.21 fetched and parsed every one into a list
+    /// before looking at any, a second copy of the whole cache on top of the disk's, and
+    /// that is what took it past its limit at every start.)
+    pub async fn found(&self) -> Vec<Found> {
         let mut out = vec![];
         if self.client.is_none() {
             return out;
@@ -334,17 +451,25 @@ impl RedisStore {
         for k in keys {
             let Some((cluster, ds)) = k.strip_prefix("elasticpro:ds:").and_then(|r| r.rsplit_once(':')) else { continue };
             let Some(ds) = Dataset::parse(ds) else { continue };
-            let mut get = redis::cmd("GET");
-            get.arg(&k);
-            let Some(body) = self.run::<Option<String>>("get", get).await.flatten() else { continue };
-            let Ok(mut e) = serde_json::from_str::<Entry>(&body) else { continue };
-            e.status = Status::Restored;
-            e.bytes = body.len();
-            e.next_due = None;
-            e.error = None;
-            out.push((cluster.to_string(), ds, e));
+            let mut len = redis::cmd("STRLEN");
+            len.arg(&k);
+            let Some(bytes) = self.run::<usize>("strlen", len).await.filter(|n| *n > 0) else { continue };
+            let mut head = redis::cmd("GETRANGE");
+            head.arg(&k).arg(0).arg(HEAD_BYTES - 1);
+            let Some(head) = self.run::<Vec<u8>>("getrange", head).await else { continue };
+            let Some(fetched_at) = head_fetched_at(&head) else { continue };
+            out.push(Found { cluster: cluster.to_string(), ds, fetched_at, bytes, at: Where::Redis(k) });
         }
         out
+    }
+
+    /// One found entry, fetched whole, as `restored`.
+    pub async fn load(&self, f: &Found) -> Option<Entry> {
+        let Where::Redis(k) = &f.at else { return None };
+        let mut get = redis::cmd("GET");
+        get.arg(k);
+        let body = self.run_sized::<Option<Vec<u8>>>("get", get, f.bytes).await.flatten()?;
+        restored(&body)
     }
 }
 
@@ -364,7 +489,7 @@ mod tests {
         let mut e = Entry::never(1, None);
         e.status = Status::Ok;
         e.fetched_at = Some(1000);
-        e.data = Some(data);
+        e.data = Some(super::super::entry::Body::from_value(&data));
         e
     }
 
@@ -381,5 +506,66 @@ mod tests {
         assert_eq!(back.len(), 2);
         assert!(back.iter().all(|(_, _, e)| e.status == Status::Restored && e.fetched_at == Some(1000)));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn finding_reads_the_head_and_the_size_not_the_body() {
+        let dir = std::env::temp_dir().join(format!("elasticpro-found-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let s = DiskStore::new(Some(&dir));
+        let big = ok_entry(json!({ "indices": { "json": "y".repeat(BIG_BYTES * 3) } }));
+        let small = ok_entry(json!({ "health": { "json": {"status": "green"} } }));
+        s.save("c1", Dataset::Indices, &big, 0);
+        s.save("c1", Dataset::Health, &small, 0);
+        let mut f = s.found();
+        f.sort_by_key(|f| f.ds);
+        assert_eq!(f.len(), 2);
+        // The gzip trailer gives the decoded size of the big one; the small one is its file.
+        assert_eq!(f[0].ds, Dataset::Health);
+        assert_eq!(f[0].bytes, serde_json::to_vec(&small).unwrap().len());
+        assert_eq!(f[1].ds, Dataset::Indices);
+        assert_eq!(f[1].bytes, serde_json::to_vec(&big).unwrap().len());
+        assert!(matches!(&f[1].at, Where::Disk { gz: true, .. }));
+        assert!(f.iter().all(|f| f.fetched_at == Some(1000)));
+        // And loading one gives exactly what was saved, as restored.
+        let e = s.load(&f[1]).unwrap();
+        assert_eq!(e.status, Status::Restored);
+        assert_eq!(e.data.as_ref().unwrap().len(), big.data.as_ref().unwrap().len());
+        assert!(f[1].cost() >= e.cost(), "the estimate never undercounts what loading costs");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn fetched_at_is_read_from_the_head() {
+        assert_eq!(head_fetched_at(br#"{"status":"ok","fetchedAt":1712345678901,"attemptedAt":1}"#), Some(Some(1712345678901)));
+        assert_eq!(head_fetched_at(br#"{"status":"ok","fetchedAt" : null,"x":1}"#), Some(None));
+        assert_eq!(head_fetched_at(br#"{"status":"ok","fetchedAt":17123"#), None, "cut off: not an answer");
+        assert_eq!(head_fetched_at(br#"{"status":"ok"}"#), None);
+        assert_eq!(head_fetched_at(b"\xff\xfe garbage"), None);
+        // What Entry really serialises.
+        let e = ok_entry(json!({ "a": 1 }));
+        let text = serde_json::to_vec(&e).unwrap();
+        assert_eq!(head_fetched_at(&text[..HEAD_BYTES.min(text.len())]), Some(Some(1000)));
+    }
+
+    #[test]
+    fn restore_order_is_health_then_background_then_on_demand_newest_first() {
+        let f = |c: &str, ds, t| Found { cluster: c.into(), ds, fetched_at: t, bytes: 1, at: Where::Redis(String::new()) };
+        let mut v = vec![
+            f("a", Dataset::Indices, Some(50)),
+            f("a", Dataset::Nodes, Some(10)),
+            f("b", Dataset::Health, Some(1)),
+            f("a", Dataset::Snapshots, Some(30)),
+            f("b", Dataset::Shards, Some(90)),
+            f("a", Dataset::Health, Some(5)),
+            f("c", Dataset::Nodes, None),
+        ];
+        restore_order(&mut v);
+        let got: Vec<(&str, Dataset)> = v.iter().map(|f| (f.cluster.as_str(), f.ds)).collect();
+        assert_eq!(got, vec![
+            ("a", Dataset::Health), ("b", Dataset::Health),
+            ("a", Dataset::Snapshots), ("a", Dataset::Nodes), ("c", Dataset::Nodes),
+            ("b", Dataset::Shards), ("a", Dataset::Indices),
+        ]);
     }
 }

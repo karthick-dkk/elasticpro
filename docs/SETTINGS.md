@@ -52,7 +52,7 @@ Changes are read at start: `deploy/deploy.sh --apply-config` restarts the core.
 | `POLL_HEALTH_SECONDS` (180-300) | env `ELASTICPRO_POLL_HEALTH_SECS` |
 | `POLL_CONCURRENCY` (1-256) | env `ELASTICPRO_POLL_CONCURRENCY` |
 | `ES_CONCURRENCY` (1-1024) | env `ELASTICPRO_ES_CONCURRENCY` |
-| `CACHE_MB` | env `ELASTICPRO_CACHE_MB` |
+| `CACHE_MB` | env `ELASTICPRO_CACHE_MB` (empty: a quarter of the container's memory limit) |
 | `UI_TLS` | the certificate switch (`insecure` = accept every certificate), instead of `defaults.tls` |
 | `UI_READ_ONLY` | the core's read-only guard, instead of what a browser sends in PRIME |
 | `UI_*` (the rest) | `managedDefaults` in the PING reply, below |

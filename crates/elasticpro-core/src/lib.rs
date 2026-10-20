@@ -18,6 +18,7 @@ pub mod fleet;
 pub mod guard;
 pub mod hcvault;
 pub mod http;
+pub mod memory;
 pub mod notify;
 pub mod silences;
 pub mod saved_queries;

@@ -134,7 +134,9 @@ async fn run() {
     if core.edition() == Edition::Hosted {
         let first = core.zabbix_sync().await;
         if first["kind"] != "not_configured" {
-            tracing::info!(result = %first, "zabbix sync at start");
+            // Capped: on a large estate `skipped` alone named hundreds of hosts, every start,
+            // in one log line.
+            tracing::info!(result = %elasticpro_core::errors::for_log(&first, 5), "zabbix sync at start");
         }
     }
     core.start_zabbix_sync();
@@ -302,7 +304,10 @@ async fn bridge(
 
     let t = msg.get("type").and_then(|v| v.as_str()).unwrap_or("").to_string();
     let source = source_of(&app, &headers, peer);
-    let out = app.core.handle_as_from_at(msg.clone(), caller.clone(), reauth, source).await;
+    // A reply holding cached fleet bodies is written with them as the text they are held
+    // as (fleet::reply); everything else is the plain Value it always was.
+    let mut reply = app.core.handle_reply_as_from_at(msg.clone(), caller.clone(), reauth, source).await;
+    let out = &reply.value;
 
     // The audit line: who did what to which cluster, and whether it went through. This
     // is the record that answers "who deleted that index".
@@ -330,7 +335,7 @@ async fn bridge(
     }
     // Signing in directly: the session goes to the browser as the HttpOnly cookie and is
     // taken out of the reply, so the page's scripts never hold it. Signing out clears it.
-    let mut out = out;
+    let out = &mut reply.value;
     let mut cookie: Option<String> = None;
     if matches!(t.as_str(), "LOGIN" | "BOOTSTRAP_ADMIN") && out.get("ok") == Some(&serde_json::json!(true)) {
         if let Some(tok) = out.as_object_mut().and_then(|o| o.remove("session")).and_then(|v| v.as_str().map(String::from)) {
@@ -340,6 +345,11 @@ async fn bridge(
     } else if t == "LOGOUT" {
         cookie = Some(set_cookie("", 0));
     }
+    if reply.has_bodies() {
+        // Only FLEET_STATE and CLUSTER_DATASET carry bodies, and neither sets a cookie.
+        return ([(axum::http::header::CONTENT_TYPE, "application/json")], reply.to_json()).into_response();
+    }
+    let out = reply.value;
     match cookie {
         Some(c) => ([(axum::http::header::SET_COOKIE, c)], Json(out)).into_response(),
         None => Json(out).into_response(),

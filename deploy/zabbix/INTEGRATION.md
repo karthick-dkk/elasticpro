@@ -108,12 +108,12 @@ Nothing else is published: both Postgres instances, Redis, the Zabbix web servic
 stay on their compose networks (`deploy_internal`, `zabbix_zbx`, `ep_sso`, `vault_net`).
 
 **Memory, on a 4 GB host that also runs Elasticsearch.** The container memory caps, as shipped,
-add up to more than a 4 GB box has (ES 1.6 + core 1.0 + Zabbix 1.4 + Vault 0.3 + scrapers 0.2 ≈
-4.5 GB before the OS). If this is a shared/small host, size down before you start:
+add up to more than a 4 GB box has (ES 1.6 + core 2.0 + Zabbix 1.4 + Vault 0.3 + scrapers 0.2 ≈
+5.5 GB before the OS). If this is a shared/small host, size down before you start:
 
 | Container | Default cap | On a shared 4 GB host |
 |---|---|---|
-| ElasticPro core | 1g | `ELASTICPRO_MEM_LIMIT=512m` with `ELASTICPRO_CACHE_MB=64` in `deploy/.env` |
+| ElasticPro core | 2g | `ELASTICPRO_MEM_LIMIT=512m` in `deploy/.env` (the cache sizes itself to a quarter of it) |
 | Redis (`--profile cache`) | 640m | leave the profile off |
 | Zabbix db / server / web / web-service / agent | 320m / 384m / 256m / 384m / 64m | keep as shipped |
 | Vault + unsealer | 256m + 64m | keep as shipped |
@@ -770,7 +770,7 @@ Templates: re-import the previous export, or restore the Zabbix DB backup.
 
 **Core** (`deploy/docker-compose.yml` + the overlay files): `ELASTICPRO_BIND`, `ELASTICPRO_DATA_DIR`,
 `ELASTICPRO_CONFIG`, `RUST_LOG`, `ELASTICPRO_POLL_HEALTH_SECS` (180), `ELASTICPRO_POLL_CONCURRENCY` (16),
-`ELASTICPRO_CACHE_MB` (256), `ELASTICPRO_MEM_LIMIT` (1g), `ELASTICPRO_NOTIFY_DAYS` (30), `ELASTICPRO_REDIS_URL`
+`ELASTICPRO_CACHE_MB` (a quarter of the limit), `ELASTICPRO_MEM_LIMIT` (2g), `ELASTICPRO_NOTIFY_DAYS` (30), `ELASTICPRO_REDIS_URL`
 (built from the secret file, not set directly), `ELASTICPRO_ZABBIX_SSO_SECRET_FILE`,
 `ELASTICPRO_ZABBIX_API_URL`, `ELASTICPRO_ZABBIX_API_TOKEN_FILE`, `ELASTICPRO_ZABBIX_CLUSTER_TEMPLATE`
 (the setup scripts read the same variable, plus `ELASTICPRO_ZABBIX_ES_TEMPLATE` and

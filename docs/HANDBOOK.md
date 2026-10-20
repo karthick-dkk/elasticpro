@@ -228,8 +228,9 @@ ilm_errors (an SLM `_execute` also snapshots, snapshots_full); `_cluster/setting
 indices, shards, health (+ ilm_assign for `_settings`).
 
 **Environment:** `ELASTICPRO_POLL_HEALTH_SECS` (180, clamped 180–300), `ELASTICPRO_POLL_CONCURRENCY`
-(16 fetches at once; 2 per cluster, 6 per jump host), `ELASTICPRO_CACHE_MB` (256, on-demand bodies,
-LRU), `ELASTICPRO_ES_CONCURRENCY` (32 ES requests open at once from any source; 8 per cluster, 16
+(16 fetches at once; 2 per cluster, 6 per jump host), `ELASTICPRO_CACHE_MB` (unset: a
+quarter of the container's memory limit, or 256 without one; every cached body counts, on-demand
+ones evicted first, health never — see `memory.rs`), `ELASTICPRO_ES_CONCURRENCY` (32 ES requests open at once from any source; 8 per cluster, 16
 per jump host), `ELASTICPRO_REDIS_URL` (hosted only, optional: write-through to
 `elasticpro:ds:{cluster}:{dataset}` with `EX` 3× interval and a note on `elasticpro:updates`; down ⇒ one
 log line a minute and nothing else). The disk copy is `<data dir>/cache/<cluster>/<dataset>.json`
