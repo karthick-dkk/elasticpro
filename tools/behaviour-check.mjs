@@ -2713,6 +2713,59 @@ if (viaFleet) {
   }
 }
 
+/* ------- the redraw gate holds against the core's 5 s `refreshed`, not only against `data` ------- */
+
+// Every core push that carries changes ends in a `refreshed`. It used to apply whatever the
+// gate was holding, so a change landed 1-2 s after it arrived — while keys were still being
+// pressed. Only a refresh a person asked for may do that.
+{
+  const st = await load('core/state.js');
+  const savedPolicy = st.state.defaults.liveRedraw;
+  st.state.defaults.liveRedraw = 'pending';
+  await go('overview');
+  await settleFor(400);
+  const view = doc.getElementById('view');
+  const id = st.activeClusters()[0].id;      // a cluster the page is showing
+  let marks = 0;
+  const mo = new window.MutationObserver((ms) => { marks += ms.length; });
+  mo.observe(view, { childList: true, subtree: true, characterData: true, attributes: true });
+  const type = () => doc.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Shift', bubbles: true }));
+  // Something visibly different, so that a redraw cannot hide behind an unchanged DOM.
+  const land = (nodes) => {
+    const d = st.state.data.get(id);
+    st.state.data.set(id, { ...d, health: { ...d.health, number_of_nodes: nodes } });
+    st.bus.emit('data', { id });
+  };
+  const seen = () => view.textContent.includes('777') || view.textContent.includes('888');
+  try {
+    // 1. A push-driven refreshed, with keys pressed throughout: nothing draws until 3 s of quiet.
+    type(); await settleFor(100);
+    marks = 0; land(777);
+    for (let i = 0; i < 10; i++) {
+      type();
+      if (i === 2) st.bus.emit('refreshed', { byPerson: false });   // what announceRefreshed emits
+      await settleFor(400);
+    }
+    ok(marks === 0 && !seen(), `gate: a push-driven refreshed redrew the page while keys were still being pressed (${marks} mutations)`);
+    await settleFor(3400);
+    ok(seen(), 'gate: the held change never drew after the page had gone quiet for 3 s');
+
+    // 2. A person's Refresh applies at once, however recently they touched the page.
+    type(); await settleFor(50);
+    land(888);
+    st.bus.emit('refreshed', { byPerson: false });
+    await settleFor(200);
+    ok(!view.textContent.includes('888'), 'gate: a held change drew without anyone asking or waiting');
+    st.bus.emit('refreshed', { byPerson: true });
+    await settleFor(250);
+    ok(view.textContent.includes('888'), 'gate: a person\'s Refresh did not apply the held change at once');
+  } finally {
+    mo.disconnect();
+    st.state.defaults.liveRedraw = savedPolicy;
+    await settleFor(3400);
+  }
+}
+
 if (problems.length) {
   console.error(`\n${problems.length} problem(s):`);
   for (const p of problems) console.error('  ✗ ' + p);

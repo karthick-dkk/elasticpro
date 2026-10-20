@@ -929,7 +929,9 @@ async function refreshAllInner({ force, selected }) {
   } finally {
     state.refreshing = false;
     bus.emit('refreshing', false);
-    bus.emit('refreshed');
+    // The timer's sweep (no `force`) is the app's own doing; Refresh, the `r` key, Retry and
+    // the actions that follow a trust decision all pass `force` and are a person's.
+    bus.emit('refreshed', { byPerson: !!force });
   }
   updateBadge();
   publishPopupSummary();
@@ -1643,7 +1645,8 @@ async function pushedSync({ full = false } = {}) {
 function announceRefreshed() {
   if (fleet.announceTimer) { clearTimeout(fleet.announceTimer); fleet.announceTimer = null; }
   fleet.lastAnnounce = Date.now();
-  bus.emit('refreshed');
+  // Not something a person asked for: the page body waits for idle (onRefreshed, quiet-ui.js).
+  bus.emit('refreshed', { byPerson: false });
   updateBadge();
   publishPopupSummary();
 }

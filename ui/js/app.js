@@ -4,7 +4,7 @@ import { h, $, mount, clear } from './lib/dom.js';
 import { ago, dur } from './lib/fmt.js';
 import { idb } from './lib/idb.js';
 import { coalesce } from './lib/coalesce.js';
-import { createRedrawGate, normalisePolicy, normaliseScope, openingSelection } from './lib/quiet-ui.js';
+import { createRedrawGate, onRefreshed, normalisePolicy, normaliseScope, openingSelection } from './lib/quiet-ui.js';
 import * as cfg from './core/config.js';
 import { state, bus, setConfig, refreshAll, refreshModule, REFRESH_MODULES, startAutoRefresh, clusters, fleetMode,
          alerts, cachedAlerts, worstHealth, requestLoad, fleetPolicy,
@@ -1000,7 +1000,7 @@ function waitForZabbix() {
 }
 
 bus.on('refreshing', () => { tickStatus(); });
-bus.on('refreshed', () => {
+bus.on('refreshed', (ev) => {
   maybeOfferAuthRecovery(); renderTopbar(); renderSideFoot(); renderNav();
   // After the nav, so the tab badge and the toast agree about what is open.
   // Zabbix announces problems itself; a toast here would be the same news twice.
@@ -1016,10 +1016,12 @@ bus.on('refreshed', () => {
     }
     return { cluster: c, snapshots: snaps };
   }));
-  // A refresh is something a person asked for (or auto-refresh, which they turned on):
-  // it applies whatever the gate was holding, through the same coalescing as data events,
-  // so a refresh ending while pushes are still landing is one redraw, not two.
-  redrawGate.apply();
+  // A refresh a person asked for applies whatever the gate was holding, through the same
+  // coalescing as data events, so a refresh ending while pushes are still landing is one
+  // redraw, not two. One the app did by itself (the core's push, the auto-refresh timer)
+  // does not: its changes are already held by the gate and draw once the page goes idle —
+  // see onRefreshed in lib/quiet-ui.js.
+  onRefreshed(redrawGate, ev);
 });
 bus.on('tick', tickStatus);
 

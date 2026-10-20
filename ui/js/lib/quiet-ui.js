@@ -83,6 +83,27 @@ export function createRedrawGate({ apply, policy = 'pending', onChange = () => {
   };
 }
 
+/**
+ * What a `refreshed` event does to the gate. One definition, used by the app shell.
+ *
+ * `refreshed` is emitted for two different reasons and they must not be treated alike:
+ *   - a person asked (Refresh, the `r` key, Retry, a config save, opening a file): they are
+ *     waiting for the page to change, so it applies at once — `{ byPerson: true }`, which is
+ *     also what an event with no payload means;
+ *   - the app did it by itself (the core's push, the auto-refresh timer): `{ byPerson:
+ *     false }`. That refresh's changes already reached the gate as `data` events and are
+ *     held until the page has gone idle; applying here would redraw under somebody who is
+ *     typing, right after the 5 s `refreshed` that every push-carrying change ends in.
+ *     The shell (top bar, nav, status) still updates — only the page body waits.
+ * Returns what happened, 'applied' or 'left'.
+ */
+export function onRefreshed(gate, payload) {
+  const byPerson = !payload || payload.byPerson !== false;
+  if (!byPerson) return 'left';
+  gate.apply();
+  return 'applied';
+}
+
 /** Which cluster the app opens on. 'all' only when the policy asks for the fleet. */
 export function openingSelection({ scope = 'last-selected', last = null, clusters = [] } = {}) {
   if (normaliseScope(scope) === 'all') return 'all';

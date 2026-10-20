@@ -130,3 +130,36 @@ test('opening scope: last chosen cluster, else the first, else the fleet; "all" 
   assert.equal(Q.openingSelection({ clusters: [] }), 'all');
   assert.equal(Q.openingSelection({ scope: 'all', last: 'b', clusters }), 'all');
 });
+
+/* `refreshed` is emitted for a person's Refresh and for the core's push; only the first applies at once. */
+
+test('a push-driven refreshed during interaction does not redraw; it draws 3 s after the last touch', () => {
+  const { g, T, applied } = gate('pending');
+  g.interact(); g.notify();                                   // a change lands
+  for (let i = 0; i < 10; i++) {                              // typing every 400 ms
+    T.advance(400); g.interact();
+    if (i === 2) assert.equal(Q.onRefreshed(g, { byPerson: false }), 'left', 'the 5 s push announcement');
+  }
+  assert.equal(applied.length, 0, 'nothing may draw while keys are still being pressed');
+  T.advance(2_900); assert.equal(applied.length, 0, 'not before 3 s idle');
+  T.advance(100); assert.equal(applied.length, 1, 'drawn once, 3 s after the last touch');
+  assert.equal(applied[0] - 4_000 >= 3_000, true);
+});
+
+test('a person\'s Refresh applies at once; so does a refreshed with no payload', () => {
+  const { g, applied } = gate('pending');
+  g.interact(); g.notify();
+  assert.equal(Q.onRefreshed(g, { byPerson: true }), 'applied'); assert.equal(applied.length, 1);
+  g.notify(); assert.equal(Q.onRefreshed(g), 'applied'); assert.equal(applied.length, 2);
+  assert.equal(g.pending(), 0);
+});
+
+test('the core\'s push announcement says it was not a person; the Refresh path says it was', async () => {
+  const fs = await import('node:fs');
+  const st = fs.readFileSync(path.join(ROOT, 'ui/js/core/state.js'), 'utf8');
+  assert.match(st, /function announceRefreshed\(\)[\s\S]*?bus\.emit\('refreshed', \{ byPerson: false \}\)/);
+  assert.match(st, /bus\.emit\('refreshed', \{ byPerson: !!force \}\)/);
+  const app = fs.readFileSync(path.join(ROOT, 'ui/js/app.js'), 'utf8');
+  assert.ok(/onRefreshed\(redrawGate, ev\)/.test(app), 'app.js must go through onRefreshed, not redrawGate.apply() directly');
+  assert.ok(!/bus\.on\('refreshed'[\s\S]{0,1500}redrawGate\.apply\(\)/.test(app));
+});
