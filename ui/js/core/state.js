@@ -1,7 +1,7 @@
 /** Application state, refresh loop and auto-reconnect. */
 
 import { EsClient, primeWorker, setBadge, requestStats, workerStatus,
-         fleetState, clusterDataset, refreshFleet } from './es.js';
+         fleetState, clusterDataset, refreshFleet, withFreshReads } from './es.js';
 // lib/fmt is a leaf: no cycle, and two alert sentences need to read like the rest of the UI.
 import { bytes as bytesish, ago, dur } from '../lib/fmt.js';
 import { diskLevel, tuneAlerts, openAlerts, alertCounts } from './alert-tuning.js';
@@ -884,6 +884,13 @@ async function refreshModuleFleet(module, targets) {
  * as it always was.
  */
 export async function refreshAll({ force = false, selected = false } = {}) {
+  if (state.refreshing || !state.config) return;
+  // A Refresh a person pressed reads past the core's few-second read cache.
+  if (force) return withFreshReads(() => refreshAllInner({ force, selected }));
+  return refreshAllInner({ force, selected });
+}
+
+async function refreshAllInner({ force, selected }) {
   if (state.refreshing || !state.config) return;
   state.refreshing = true;
   bus.emit('refreshing', true);

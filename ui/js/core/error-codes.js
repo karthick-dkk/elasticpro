@@ -19,6 +19,26 @@ export const UI_CODES = {
   core_timeout: 'EP-608',       // the core did not answer within nginx's wait (504)
 };
 
+/**
+ * Core kinds the browser itself sometimes has to produce or act on — an abort it made, a
+ * gate refusal it retries. Their codes are the core's (errors.rs), repeated here so a reply
+ * the browser built carries the same code; tools/unit/error-codes.test.mjs fails if the
+ * two tables disagree.
+ */
+export const CORE_CODES = {
+  aborted: 'EP-208',
+  overloaded: 'EP-214',          // the gate's queue is full: nothing sent; retryAfterMs says when to ask again
+  queue_timeout: 'EP-215',       // waited for a free connection and got none: nothing sent
+  response_too_large: 'EP-216',  // the answer was bigger than the cap: not read
+};
+
+/**
+ * Failures that say nothing about whether the cluster is up: the core let go of the
+ * request, or never sent it, or refused to read an answer the cluster did give. A client
+ * must not mark the cluster offline or back off from it for these.
+ */
+export const NOT_THE_CLUSTER = new Set(Object.keys(CORE_CODES));
+
 export const UNKNOWN_CODE = 'EP-999';
 
 /** "message (EP-xxx)", once: a message that already ends with its code keeps just the one. */
@@ -34,7 +54,7 @@ export function withCode(message, code) {
 export function stampReply(res) {
   if (!res || res.ok !== false) return res;
   // `errorCode`, not `code`: a pairing reply already uses `code` for its pairing code.
-  const code = res.errorCode || UI_CODES[res.kind] || UNKNOWN_CODE;
+  const code = res.errorCode || UI_CODES[res.kind] || CORE_CODES[res.kind] || UNKNOWN_CODE;
   return { ...res, errorCode: code, message: withCode(res.message, code) };
 }
 

@@ -5,6 +5,7 @@
  * cluster with its own Elasticsearch URL.
  */
 
+import { tailTick } from '../core/tail.js';
 import { h, mount, $, clear, activatable } from '../lib/dom.js';
 import { num, dt, dur, ago, ymdDots, eachDay, download, downloadBytes, toCsv } from '../lib/fmt.js';
 import { state, client, activeClusters, fetchIndices, setDelaySummary } from '../core/state.js';
@@ -204,13 +205,13 @@ async function search({ silent = false } = {}) {
 function startTail() {
   stopTail();
   ui.tail = true;
-  tailTimer = setInterval(() => {
+  tailTimer = setInterval(() => tailTick(() => ui.running, () => {
     const now = new Date();
     const span = new Date(ui.to) - new Date(ui.from);
     ui.to = isoLocal(now);
     ui.from = isoLocal(new Date(now.getTime() - span));
     search({ silent: true });
-  }, Math.max(5, state.defaults.refreshIntervalSec) * 1000);
+  }), Math.max(5, state.defaults.refreshIntervalSec) * 1000);
   search();
 }
 function stopTail() { ui.tail = false; if (tailTimer) clearInterval(tailTimer); tailTimer = null; }

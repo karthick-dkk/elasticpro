@@ -52,6 +52,44 @@ test('per-cluster totals and the CSV follow the same rows', () => {
   assert.deepEqual(Object.keys(csv[0]), M.CSV_HEADER, 'the row keys are the header, so toCsv finds every column');
 });
 
+test('the gate: queued and refused rows, shared and cached answers', () => {
+  const g = {
+    inflight: [
+      { id: 20, cluster: 'a', origin: 'page:logs', class: 'interactive', state: 'queued', method: 'POST', path: '/x/_search', startedAt: now - 3000 },
+      { id: 21, cluster: 'a', origin: 'page:logs', class: 'interactive', state: 'shared', leader: 19, method: 'GET', path: '/', startedAt: now - 1000 },
+    ],
+    recent: [
+      { id: 18, cluster: 'b', origin: 'page:indices', class: 'interactive', state: 'done', method: 'GET', path: '/_cat/indices', startedAt: now - 9000, ms: 0, ok: false, status: 'overloaded' },
+      { id: 17, cluster: 'b', origin: 'page:indices', class: 'interactive', state: 'done', method: 'GET', path: '/_cat/indices', startedAt: now - 9500, ms: 0, ok: true, status: '200', cached: true, ageMs: 2100 },
+      { id: 16, cluster: 'b', origin: 'page:indices', class: 'interactive', state: 'done', method: 'GET', path: '/', startedAt: now - 9600, ms: 20000, ok: false, status: 'queue_timeout', queuedMs: 20000 },
+    ],
+  };
+  const rows = M.requestRows(g, M.NO_FILTER, now);
+  assert.match(rows[0].outcome, /^queued · 3000 ms so far/);
+  assert.match(rows[1].outcome, /^waiting on #19/);
+  assert.deepEqual(M.requestRows(g, { ...M.NO_FILTER, outcome: 'queued' }, now).map((r) => r.id), [20]);
+  assert.deepEqual(M.requestRows(g, { ...M.NO_FILTER, outcome: 'refused' }, now).map((r) => r.id), [18, 16]);
+  assert.deepEqual(M.requestRows(g, { ...M.NO_FILTER, outcome: 'inflight' }, now).map((r) => r.id), [20, 21], 'in flight includes the queued');
+  assert.equal(rows.find((r) => r.id === 17).answeredBy, 'cached 2.1 s old');
+  const pc = M.perCluster(g);
+  assert.deepEqual(pc.map((c) => [c.cluster, c.queued, c.refused, c.failed]), [['b', 0, 2, 0], ['a', 1, 0, 0]]);
+  const csv = M.requestCsvRows(rows);
+  assert.equal(csv[0].outcome, 'queued');
+  assert.equal(csv.find((r) => r.id === '16').queuedMs, '20000');
+});
+
+test('gate figures: from the core when it sends them, unknown (not zero) when it does not', () => {
+  const none = M.gateFigures({ inflight: [], recent: [] });
+  assert.equal(none.known, false);
+  assert.equal(none.queued, null); assert.equal(none.waitP95Ms, null); assert.equal(none.refused, null); assert.equal(none.sharedOrCached, null);
+  const f = M.gateFigures({ gate: { queued: { total: 3 }, oldestWaitMs: 1200, waits: { interactive: { count: 40, p95Ms: 850 } },
+    refused: { total: 2, overloaded: 1, queueTimeout: 1 }, shared: 5, cacheHits: 7, limits: { global: 24 } } });
+  assert.deepEqual([f.queued, f.waitP95Ms, f.refused, f.sharedOrCached, f.oldestWaitMs], [3, 850, 2, 12, 1200]);
+  const quiet = M.gateFigures({ gate: { queued: { total: 0 }, waits: { interactive: { count: 0, p95Ms: null } }, refused: { total: 0 }, shared: 0, cacheHits: 0 } });
+  assert.equal(quiet.waitP95Ms, null, 'no request from a person: no p95, not a p95 of 0');
+  assert.equal(quiet.refused, 0, 'measured and none: that is a real 0');
+});
+
 // Regression: spreadsheet formula injection through an export — a path or index name that
 // starts with = + - @ is written as text; a negative number is still a number.
 const { csvEscape, toCsv } = await import(pathToFileURL(path.join(ROOT, 'ui/js/lib/fmt.js')).href);
