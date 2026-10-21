@@ -45,6 +45,7 @@ Changes are read at start: `deploy/deploy.sh --apply-config` restarts the core.
 | `ZABBIX_VERIFY_TLS` | env `ELASTICPRO_ZABBIX_API_INSECURE` = `1` for false, `0` for true |
 | `ZABBIX_CLUSTER_TEMPLATE` | env `ELASTICPRO_ZABBIX_CLUSTER_TEMPLATE` |
 | `ZABBIX_SCOPE_USERS_BY_GROUP`, `ZABBIX_USE_ELASTICPRO_CREDENTIALS`, `ZABBIX_CREATE_HOSTS`, `ZABBIX_HOST_GROUP` | the config file's `zabbix:` options, overridden in `ZbxOptions::from_config` (every caller, including the Zabbix sign-in scope) |
+| `ZABBIX_METRICS_HOST` | env `ELASTICPRO_ZABBIX_METRICS_HOST`: the Zabbix host the request figures are pushed to every 60 s by `history.push` (`zbx_push.rs`). Empty: no push, and no timer. The token is the Zabbix link's, or `ELASTICPRO_ZABBIX_METRICS_TOKEN_FILE` (server-only, never in `config.txt`) |
 | `ACTIVITY_LOG`, `ACTIVITY_LOG_MAX_MB`, `ACTIVITY_LOG_KEEP` | env `ELASTICPRO_ACTIVITY_LOG`, `..._MAX_MB`, `..._KEEP` |
 | `ACTIVITY_LOG_STDOUT` | env `ELASTICPRO_ACTIVITY_STDOUT` = `1` / `0` |
 | `NOTIFY_DAYS` (1-3650) | env `ELASTICPRO_NOTIFY_DAYS` |

@@ -216,6 +216,14 @@ folder.
 2. In Zabbix: **ElasticPro → Cluster Management → Write master template**. This writes the
    client master, *Elasticsearch via SSH jump host*, *log archive ES via SSH jump host* and
    *cluster devices* templates. The banner asking for it disappears.
+3. Optional, **ElasticPro's own request gate** (`ElasticPro request gate by Zabbix trapper`, in
+   the Zabbix modules repository at `zabbix/templates/template-elasticpro-request-gate.yaml`).
+   Import it, create a host for it (for example `ElasticPro`, in a host group of its own), and
+   let a token push to that host. The pairing identity needs `history.push` added to its role,
+   or the core is given a token of its own in `ELASTICPRO_ZABBIX_METRICS_TOKEN_FILE`. Then set
+   `ZABBIX_METRICS_HOST=ElasticPro` in `config.txt` and run `deploy/deploy.sh --apply-config`.
+   The recipe, and what each token choice allows, is in `deploy/README.md`, "The request
+   figures in Zabbix". Nothing is pushed while `ZABBIX_METRICS_HOST` is empty.
 
 ## 6. Secrets and macros
 
@@ -300,6 +308,9 @@ address **as the jump host sees it**.
    whose hosts that user may read.
 7. No PHP warnings in the frontend log (`docker logs zabbix-web-1 | grep -i "php "`, or php-fpm's
    log).
+8. If you set `ZABBIX_METRICS_HOST`: the Request Centre's *Zabbix* line says when the last push
+   landed, and the host's **Latest data** shows the *Request gate* items. If the line says it is
+   failing, hover it (or read `zabbix push failed` in the core log): Zabbix's reason is given as is.
 
 ## Rollback
 

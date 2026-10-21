@@ -295,6 +295,93 @@ the cluster; each request row says its class, how long it queued, and whether it
 or cached. `tools/load-check.mjs` runs the gate against a mock fleet under load and checks
 every one of these limits held.
 
+## The request figures in Zabbix (`ZABBIX_METRICS_HOST`)
+
+The core can push what the Request Centre shows to Zabbix once a minute, so the gate is
+alerted on like everything else. The figures are the gate's in-flight and queued requests per
+class, the 95th-percentile wait, requests turned away by reason, answers shared, cached or over
+the response cap, requests per minute, the poller's mode and pause, the memory budgets in use,
+and the version. It is **off** until you name a host.
+
+What is sent: one JSON value a minute, to the trapper item `elasticpro.gate.raw` on the host
+you name. Every count covers that minute alone. **Aggregates only**: no cluster name, address
+or URL is ever in it, because the people who can read that Zabbix host need not be the people
+who may see every cluster. The template **ElasticPro request gate by Zabbix trapper** (in the
+Zabbix modules repository, `zabbix/templates/template-elasticpro-request-gate.yaml`) splits the
+value into items. It alerts when the figures stop arriving, on sustained queueing, on refusals,
+on long waits, on a pause left on and on in-flight memory, with every threshold in a macro.
+
+How: `history.push` (Zabbix 7.0 or later) over the Zabbix API connection the core already has,
+whether paired from Config → Zabbix or set by `ZABBIX_API_URL` and a token file. It uses that
+connection's address and TLS trust, so there is no new endpoint and no `zabbix_sender`. Each push
+is limited to 20 s and shares `ZABBIX_CONCURRENCY` with the sync. A failure is logged at warn
+("zabbix push failed", with Zabbix's reason) and the next try waits twice as long, up to
+10 minutes. The push runs in a task of its own, reads the gate's figures the way the Request
+Centre does, and never holds anything a request is waiting for.
+
+This writes to **Zabbix**, never to Elasticsearch, so the "writes are gated twice" rule (which is
+about clusters) does not apply. Naming the host is the opt-in.
+
+### Setting it up
+
+1. **Import the template** in Zabbix: *Data collection → Templates → Import*,
+   `template-elasticpro-request-gate.yaml`.
+2. **Create the host** the figures go to, for example `ElasticPro`, in a host group of its own
+   (for example `ElasticPro self`). It needs no interface and no agent. Link the template.
+3. **Let a token push to it.** `history.push` needs two things. The token's user role must allow
+   the API method `history.push`, and the user must have **read-write** permission on the host
+   (through its host group). Pick one:
+   - **The identity pairing made** (user `elasticpro-sync`, role *ElasticPro sync*). That role
+     is a Super admin role restricted to read methods, so as shipped it is refused with
+     `No permissions to call "history.push"`. Add `history.push` to the role's allowed API
+     methods (*Users → User roles → ElasticPro sync → API methods*). Be aware of what that
+     means: a Super admin role sees every host, so ElasticPro's token could then write values
+     into **any** trapper item in this Zabbix, not only this host's. Nothing else changes; it
+     still cannot change configuration.
+   - **A token of its own (least privilege).** Create a user role of type *User* that allows
+     only the API method `history.push` and no frontend. Create a user with that role, in a user
+     group that has read-write on the `ElasticPro self` host group and nothing else. Make an API
+     token for that user and give its file to the core as `ELASTICPRO_ZABBIX_METRICS_TOKEN_FILE`,
+     a server-only file like the other Zabbix tokens. For example, in a compose override:
+
+     ```yaml
+     services:
+       core:
+         environment:
+           ELASTICPRO_ZABBIX_METRICS_TOKEN_FILE: /run/secrets/zabbix_metrics_token
+         secrets: [zabbix_metrics_token]
+     secrets:
+       zabbix_metrics_token:
+         file: ./secrets/zabbix_metrics_token
+     ```
+
+     The core reads it before every push, so a rotated file is picked up without a restart. A
+     named file that is empty or unreadable stops the push and says why; it never falls back to
+     the pairing identity.
+   - Leave the item's *Allowed hosts* empty. If you fill it, it must list the ElasticPro
+     core's address as the Zabbix frontend sees it, because `history.push` is checked against
+     the API caller's address.
+4. **Name the host** in `config.txt` (its technical name, exactly) and apply:
+
+   ```
+   ZABBIX_METRICS_HOST=ElasticPro
+   ```
+
+   ```bash
+   deploy/deploy.sh --apply-config
+   ```
+
+5. **Check it.** The Request Centre shows a *Zabbix* line under the limits: when the last push
+   landed, how many were sent and failed, or why nothing is being pushed. Within a minute or
+   two the host's *Latest data* fills in. In the core log, `zabbix push: request figures go to
+   Zabbix` means the push started, and `zabbix push failed` gives Zabbix's own reason when one
+   fails.
+
+Template macros worth setting per site (host-level overrides): `{$ELASTICPRO.GATE.NODATA}`
+(5m), `{$ELASTICPRO.GATE.WINDOW}` (10m), `{$ELASTICPRO.GATE.QUEUED.WARN/CRIT}` (1 / 20),
+`{$ELASTICPRO.GATE.REFUSED.WARN/CRIT}` (5 / 50 in the window), `{$ELASTICPRO.GATE.WAIT.P95.WARN/CRIT}`
+(5 / 15 s; `ES_QUEUE_WAIT_MS` is 20 s by default), `{$ELASTICPRO.GATE.PAUSED.MAX}` (30m).
+
 ## Scaling to a large fleet (100-300 clusters)
 
 A new install runs the **Client basis** request policy: the core goes to a cluster only when a page

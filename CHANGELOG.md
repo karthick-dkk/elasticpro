@@ -1,5 +1,33 @@
 # Changelog
 
+## Unreleased (0.3.24)
+
+**ElasticPro's request figures in Zabbix.**
+- The core can push what the Request Centre shows to Zabbix once a minute: requests in flight
+  and queued per class, how long people wait for a slot (p95), requests turned away by reason,
+  answers shared, cached or over the response cap, requests per minute, the poller's mode and
+  pause, the memory budgets in use, and the version. It sends one JSON value to the trapper item
+  `elasticpro.gate.raw` by `history.push` (Zabbix 7.0+), over the Zabbix API connection the core
+  already has. There is no new endpoint and no `zabbix_sender`.
+- **Off by default.** Set `ZABBIX_METRICS_HOST` in `config.txt` to the Zabbix host that carries
+  the new template *ElasticPro request gate by Zabbix trapper* (Zabbix modules repository). Empty
+  means no push and no timer.
+- **Aggregates only**: no cluster name, address or URL is ever sent.
+- Each push is limited to 20 s. A failure is logged at warn with Zabbix's own reason, and the next
+  try waits twice as long, up to 10 minutes. The push runs in a task of its own and never holds
+  up a request.
+- The identity that pairing creates may only read, so it cannot push until `history.push` is added
+  to its role. `deploy/README.md` explains what that allows. The alternative is a token of the
+  push's own, `ELASTICPRO_ZABBIX_METRICS_TOKEN_FILE`, for a user that may push to that one host
+  and do nothing else.
+- This writes to Zabbix, not to Elasticsearch, so the two-gate write rule does not apply. Naming
+  the host is the opt-in.
+- The Request Centre has a *Zabbix* line under the limits, shown only when a host is set: when the
+  last push landed, how many were sent and failed, or why nothing is being pushed.
+- Answers over the response cap (`response_too_large`) are now counted by the gate (`tooLarge` in
+  the Request Centre's data), separately from requests turned away. The Request Centre's figures
+  and the pushed ones come from the same functions, so they cannot drift.
+
 ## 0.3.23
 
 **Calmer pages: problems stand out, normal states stay quiet, and the evidence pages show one
