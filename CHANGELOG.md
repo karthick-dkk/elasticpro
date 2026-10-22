@@ -1,5 +1,23 @@
 # Changelog
 
+## Unreleased
+
+**One copy of the ElasticPro menu module in Zabbix.**
+- The release's `elasticpro-zabbix-modules-<ver>.tar.gz` takes all seven modules from the modules
+  project at the commit in `deploy/zabbix/MODULES_REF`, the `elasticpro` menu module included (the
+  project's `embed-module`). ElasticPro's own copy, `deploy/zabbix/module/elasticpro/`, is gone. It
+  had drifted: its menu said "Snapshots & SLM" and its manifest 2.1.1, so a normal install showed
+  "mixed" module versions in ElasticPro → Settings. Now every module and every `BUILD` file carries
+  one version, and Settings shows one "Zabbix modules X.Y.Z · build …" line.
+- Modules pin moved to 2.1.2 (`a92188c`). The menu now reads "Snapshots".
+- The EP-701, EP-702 and EP-703 codes that only the old copy showed are ported to the modules
+  project and arrive with the next modules version after 2.1.2. Until then the ElasticPro page in
+  Zabbix shows the same messages without the code (`docs/ERROR-CODES.md` says so).
+- `deploy/zabbix/install-modules.sh` (the Docker stack in `deploy/zabbix/stack`, and the older
+  package path) needs `--modules-src <modules checkout>` for the menu module, and keeps a
+  `config.php` already in the module's folder. `setup/zbx_api_user.py` reads `sync-role.json` from
+  the installed module (or `EP_SYNC_ROLE`).
+
 ## 0.3.23
 
 **Calmer pages: problems stand out, normal states stay quiet, and the evidence pages show one

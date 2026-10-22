@@ -1,2 +1,7 @@
-# Copies placed by ../install-modules.sh --docker; the sources are in integration/zabbix/.
+# Copies placed by ../install-modules.sh --docker (and by zabbix-modules-install.sh into these
+# mounted folders); none of them is a source. The ElasticPro menu module and the six ep_* modules
+# come from the modules project, github.com/karthick-dkk/integration-zabbix-elasticpro, at the
+# commit in ../MODULES_REF. elasticpro/config.php is the stack's hand-written setting and lives
+# in the installed folder.
+elasticpro/
 ep_*/

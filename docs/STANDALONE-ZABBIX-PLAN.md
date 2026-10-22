@@ -133,19 +133,19 @@ in `ClusterTemplate.php:17-22`: that template exists *for the core's benefit* �
 core finds clusters — and it "deliberately collects nothing". In a standalone world it keeps
 being useful only as the place the connection macros live.
 
-### 1.5 `deploy/zabbix/module/elasticpro` — the embed module
+### 1.5 `embed-module` (installed as `elasticpro`; once `deploy/zabbix/module/elasticpro` here) — the embed module
 
 This module has exactly three jobs, and none of them is a figure:
 
 1. Put "ElasticPro" in the Zabbix main menu — nine app pages plus two Super-admin pages
-   ([`Module.php:28-47`](../deploy/zabbix/module/elasticpro/Module.php)).
+   ([`Module.php:28-47`](https://github.com/karthick-dkk/integration-zabbix-elasticpro/blob/v2.1.2/zabbix/embed-module/Module.php)).
 2. Mint a single-use SSO code per page load and iframe the app with it
-   ([`actions/View.php:19-30`](../deploy/zabbix/module/elasticpro/actions/View.php),
-   [`lib/SsoClient.php`](../deploy/zabbix/module/elasticpro/lib/SsoClient.php),
+   ([`actions/View.php:19-30`](https://github.com/karthick-dkk/integration-zabbix-elasticpro/blob/v2.1.2/zabbix/embed-module/actions/View.php),
+   [`lib/SsoClient.php`](https://github.com/karthick-dkk/integration-zabbix-elasticpro/blob/v2.1.2/zabbix/embed-module/lib/SsoClient.php),
    signed and verified by [`crates/elasticpro-core/src/zbx_sso.rs:1-33`](../crates/elasticpro-core/src/zbx_sso.rs)).
 3. Pair Zabbix with the core: create the read-only sync role/user, mint an API token, POST it to
-   `<ep>/zabbix/pair` ([`lib/Pairing.php:14-30`](../deploy/zabbix/module/elasticpro/lib/Pairing.php)),
-   and keep the URL + HMAC secret ([`lib/Settings.php:9-26`](../deploy/zabbix/module/elasticpro/lib/Settings.php)).
+   `<ep>/zabbix/pair` ([`lib/Pairing.php:14-30`](https://github.com/karthick-dkk/integration-zabbix-elasticpro/blob/v2.1.2/zabbix/embed-module/lib/Pairing.php)),
+   and keep the URL + HMAC secret ([`lib/Settings.php:9-26`](https://github.com/karthick-dkk/integration-zabbix-elasticpro/blob/v2.1.2/zabbix/embed-module/lib/Settings.php)).
 
 **Verdict: it is 100 % the dependency.** It is the only module whose reason to exist is the core.
 
@@ -310,12 +310,12 @@ What exists today, and what happens to it:
 | **Scoped accounts**: `scope_allows(scope, cluster_groups)` — `None` sees everything, `Some(groups)` sees a cluster only when it names one of the account's Zabbix user groups; "the default for someone Zabbix has not placed is no clusters, not all of them" | [`auth.rs:140-161`](../crates/elasticpro-core/src/auth.rs) | **Replaced by Zabbix host-group permissions, and strictly improved.** Today the scope is a *mirror* of Zabbix groups, re-written on every SSO sign-in ([`auth.rs:364-369`](../crates/elasticpro-core/src/auth.rs)); the mapping is `User → user/scoped`, `Admin → operator/all`, `Super admin → admin/all` ([`zbx_sso.rs:27-32`](../crates/elasticpro-core/src/zbx_sso.rs)). A mirror can be stale. Zabbix's own read permission on a client's host group cannot be — `API::Host()->get()` returns only what the caller may see, so the widgets already filter correctly for free |
 | `guest_may_read()` allowlist of ES paths | [`auth.rs:162-201`](../crates/elasticpro-core/src/auth.rs) | Gone with the REST console. Nothing in the modules proxies an arbitrary ES path |
 | `Writes::decide(read_only, unlocked, requested)` — the two-gate write guard | `guard.rs` | Gone from the data path. The modules' only writes are Zabbix configuration changes, which Zabbix permission-checks and audit-logs itself — the same property `Pairing.php:17-19` already relies on |
-| HMAC pairing secret, sealed in `module.config` with a key derived from Zabbix's session key | [`Settings.php:19-26`](../deploy/zabbix/module/elasticpro/lib/Settings.php) | Deleted. One fewer secret to hold, rotate and explain |
-| The read-only sync role + API token the pairing creates | [`Pairing.php:19-24`](../deploy/zabbix/module/elasticpro/lib/Pairing.php), `sync-role.json` | Deleted — **except** the ULM check's separate Zabbix API token (`{$ULM.ZABBIX.API.TOKEN}`, [`PRODUCTION.md:235-241`](../deploy/PRODUCTION.md)), which is a different token for a different purpose and stays |
+| HMAC pairing secret, sealed in `module.config` with a key derived from Zabbix's session key | [`Settings.php:19-26`](https://github.com/karthick-dkk/integration-zabbix-elasticpro/blob/v2.1.2/zabbix/embed-module/lib/Settings.php) | Deleted. One fewer secret to hold, rotate and explain |
+| The read-only sync role + API token the pairing creates | [`Pairing.php:19-24`](https://github.com/karthick-dkk/integration-zabbix-elasticpro/blob/v2.1.2/zabbix/embed-module/lib/Pairing.php), `sync-role.json` | Deleted — **except** the ULM check's separate Zabbix API token (`{$ULM.ZABBIX.API.TOKEN}`, [`PRODUCTION.md:235-241`](../deploy/PRODUCTION.md)), which is a different token for a different purpose and stays |
 
 **One thing gets worse.** Today a cell in a report can be clicked through to a live view of the
 cluster that produced it, and a Zabbix problem carries a "Troubleshoot in ElasticPro" link
-([`View.php:33-44`](../deploy/zabbix/module/elasticpro/actions/View.php)). Standalone, the deepest
+([`View.php:33-44`](https://github.com/karthick-dkk/integration-zabbix-elasticpro/blob/v2.1.2/zabbix/embed-module/actions/View.php)). Standalone, the deepest
 link available is Zabbix's own *Latest data* for that item. For a capacity review that is enough.
 For diagnosing *why* a client's logs are 90 minutes late it is not.
 

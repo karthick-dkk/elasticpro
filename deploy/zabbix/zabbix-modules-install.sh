@@ -94,8 +94,8 @@ set -euo pipefail
 REPO=${EP_REPO:-karthick-dkk/elasticpro}
 # The module ids, the folder names under modules/. A release archive carries all seven
 # (tools/zabbix-modules-tarball.sh builds it from the integration-zabbix-elasticpro project at
-# the commit in deploy/zabbix/MODULES_REF, plus the elasticpro menu module). Listed here so
-# remove, delete, Docker mounts and the API know them.
+# the commit in deploy/zabbix/MODULES_REF; the elasticpro menu module is its embed-module).
+# Listed here so remove, delete, Docker mounts and the API know them.
 KNOWN_IDS=(elasticpro ep_clients ep_capacity ep_resources ep_volume ep_tophosts ep_overview)
 
 VERSION=latest

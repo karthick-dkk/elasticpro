@@ -1,15 +1,20 @@
 #!/usr/bin/env bash
 # Put ElasticPro's Zabbix modules in place, in one step.
 #
-#   sudo deploy/zabbix/install-modules.sh                      # Zabbix installed from packages
-#   deploy/zabbix/install-modules.sh --docker                  # the stack in deploy/zabbix/stack
-#   ZABBIX_URL=https://zabbix.example.com ZABBIX_TOKEN=… sudo deploy/zabbix/install-modules.sh
+#   sudo deploy/zabbix/install-modules.sh --modules-src M       # Zabbix installed from packages
+#   deploy/zabbix/install-modules.sh --docker --modules-src M   # the stack in deploy/zabbix/stack
+#   ZABBIX_URL=https://zabbix.example.com ZABBIX_TOKEN=… sudo deploy/zabbix/install-modules.sh --modules-src M
 #                                                              # …and register + enable them
+# M is a checkout of the modules project at the commit in deploy/zabbix/MODULES_REF:
+#   git clone https://github.com/karthick-dkk/integration-zabbix-elasticpro M
+#   git -C M checkout "$(grep -v '^#' deploy/zabbix/MODULES_REF | head -1)"
 #
 # What it does, in order:
 #   1. copies the five modules (elasticpro, ep_clients, ep_capacity, ep_resources,
 #      ep_volume) into Zabbix's modules folder, without tests and tools — the ones already
-#      there are first copied to a dated backup folder, outside the modules folder;
+#      there are first copied to a dated backup folder, outside the modules folder. The
+#      ElasticPro menu module (elasticpro) is the modules project's embed-module; this
+#      repository keeps no copy of it. A config.php already in its folder is kept;
 #   2. makes the writable data folder the Cluster Management page needs, owned by the user
 #      the Zabbix frontend's PHP runs as (not with --docker: the stack's volume is that folder);
 #      with --docker, also fixes module/elasticpro/config.php to be owned 1997:1995 (the
@@ -19,6 +24,8 @@
 #      modules and creates the host groups and report dashboards (integration/zabbix/master/import.py).
 #
 # It touches no Zabbix configuration file. Options:
+#   --modules-src DIR   the modules project checkout  (required; DIR or DIR/zabbix holds
+#                                                      embed-module/; EP_MODULES_SRC also works)
 #   --modules-dir DIR   Zabbix's modules folder       (default /usr/share/zabbix/modules;
 #                                                      --docker: deploy/zabbix/module)
 #   --data-dir DIR      the page's data folder        (default /var/lib/elasticpro-zabbix;
@@ -39,17 +46,19 @@ WEB_USER=
 DOCKER=0
 DRY=0
 INSECURE=()
+MODULES_SRC=${EP_MODULES_SRC:-}
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --modules-dir) MODULES_DIR=$2; shift 2 ;;
+    --modules-src) MODULES_SRC=${2:?--modules-src needs a directory}; shift 2 ;;
     --data-dir) DATA_DIR=$2; shift 2 ;;
     --web-user) WEB_USER=$2; shift 2 ;;
     --backup-dir) BACKUP_DIR=$2; shift 2 ;;
     --docker) DOCKER=1; MODULES_DIR=$ROOT/deploy/zabbix/module; BACKUP_DIR=$ROOT/deploy/zabbix/.module-backups; shift ;;
     --insecure) INSECURE=(--insecure); shift ;;
     --dry-run) DRY=1; shift ;;
-    -h|--help) sed -n '2,31p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,/^set -euo/p' "$0" | sed '$d; s/^# \{0,1\}//'; exit 0 ;;
     *) echo "unknown option: $1 (see --help)" >&2; exit 2 ;;
   esac
 done
@@ -59,9 +68,8 @@ run() { if [ "$DRY" = 1 ]; then say "  would: $*"; else "$@"; fi; }
 fail() { say "✗ $*" >&2; exit 1; }
 
 # --docker: the zabbix/zabbix-web-nginx-pgsql image runs as uid 1997 / gid 1995, and it bind-
-# mounts elasticpro/config.php straight from the repo (elasticpro itself is never copied
-# below). A config.php that user cannot read makes the module fail with a 500 instead of the
-# app. Only root can chown to an arbitrary uid, so say what to run instead when this isn't root.
+# mounts deploy/zabbix/module/elasticpro, config.php included (the copy below keeps that file).
+# A config.php that user cannot read makes the module fail with a 500 instead of the app. Only root can chown to an arbitrary uid, so say what to run instead when this isn't root.
 fix_owner() {
   local path=$1
   if [ "$(stat -c '%u:%g %a' "$path" 2>/dev/null)" = "1997:1995 640" ]; then
@@ -76,18 +84,28 @@ fix_owner() {
   fi
 }
 
-# Module folder in Zabbix <- where it is in this repo.
+# The ElasticPro menu module comes from the modules project, the one copy of it there is.
+[ -n "$MODULES_SRC" ] || fail "--modules-src is needed: the ElasticPro menu module is the modules project's embed-module, not in this repository.
+  git clone https://github.com/karthick-dkk/integration-zabbix-elasticpro modules-src
+  git -C modules-src checkout \"\$(grep -v '^#' deploy/zabbix/MODULES_REF | head -1)\"
+  deploy/zabbix/install-modules.sh --modules-src modules-src ..."
+[ -d "$MODULES_SRC" ] || fail "--modules-src $MODULES_SRC is not a folder"
+if [ -d "$MODULES_SRC/zabbix/embed-module" ]; then MODULES_SRC=$MODULES_SRC/zabbix; fi
+MODULES_SRC=$(cd "$MODULES_SRC" && pwd)
+[ -d "$MODULES_SRC/embed-module" ] || fail "$MODULES_SRC is not a checkout of integration-zabbix-elasticpro (no zabbix/embed-module/)"
+
+# Module folder in Zabbix <- where it comes from.
 MODULES=(
-  "elasticpro:deploy/zabbix/module/elasticpro"
-  "ep_clients:integration/zabbix/clients-module"
-  "ep_capacity:integration/zabbix/capacity-widget"
-  "ep_resources:integration/zabbix/resources-widget"
-  "ep_volume:integration/zabbix/volume-widget"
+  "elasticpro:$MODULES_SRC/embed-module"
+  "ep_clients:$ROOT/integration/zabbix/clients-module"
+  "ep_capacity:$ROOT/integration/zabbix/capacity-widget"
+  "ep_resources:$ROOT/integration/zabbix/resources-widget"
+  "ep_volume:$ROOT/integration/zabbix/volume-widget"
 )
 
 # --- checks, before anything changes -----------------------------------------------------
 for m in "${MODULES[@]}"; do
-  src=$ROOT/${m#*:}
+  src=${m#*:}
   [ -f "$src/manifest.json" ] || fail "$src/manifest.json is missing — run this from a full checkout of the repo"
 done
 # The widgets carry copies of shared code; a copy that differs means sync-assets.mjs was not run.
@@ -112,8 +130,7 @@ trap 'rm -rf "$STAGE"' EXIT
 say "== modules → $MODULES_DIR"
 run mkdir -p "$MODULES_DIR"
 for m in "${MODULES[@]}"; do
-  id=${m%%:*}; src=$ROOT/${m#*:}; dst=$MODULES_DIR/$id
-  # --docker: elasticpro is mounted straight from where it lives in the repo.
+  id=${m%%:*}; src=${m#*:}; dst=$MODULES_DIR/$id
   if [ -d "$dst" ] && [ "$(cd "$src" && pwd -P)" = "$(cd "$dst" && pwd -P)" ]; then
     say "  ✓ $id (already in place)"; continue
   fi
@@ -126,14 +143,15 @@ for m in "${MODULES[@]}"; do
   # under a running container vanishes from it ("Page not found" until the web container restarts).
   stage=$STAGE/$id
   if [ "$DRY" = 1 ]; then
-    say "  would: copy $src → $dst (without test/, *.py, *.mjs, README.md, macOS ._* files), keeping the folder itself"
+    say "  would: copy $src → $dst (without test/, *.py, *.mjs, README.md, config.php, macOS ._* files), keeping the folder itself and its config.php"
   else
     mkdir -p "$stage"
-    # Everything but tests, tool scripts and notes; tar so no rsync is needed.
-    (cd "$src" && tar -cf - --exclude=./test --exclude='*.py' --exclude='*.mjs' --exclude=./README.md --exclude='._*' --exclude=.DS_Store .) | (cd "$stage" && tar -xf -)
+    # Everything but tests, tool scripts, notes and a config.php; tar so no rsync is needed.
+    (cd "$src" && tar -cf - --exclude=./test --exclude='*.py' --exclude='*.mjs' --exclude=./README.md --exclude=./config.php --exclude='._*' --exclude=.DS_Store .) | (cd "$stage" && tar -xf -)
     chmod -R u=rwX,go=rX "$stage"
     mkdir -p "$dst"
-    find "$dst" -mindepth 1 -delete
+    # The installed config.php (elasticpro's server-managed setting) stays where it is.
+    find "$dst" -mindepth 1 ! -path "$dst/config.php" -delete
     cp -a "$stage/." "$dst/"
   fi
   say "  ✓ $id"
