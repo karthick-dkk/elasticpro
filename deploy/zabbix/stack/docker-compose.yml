@@ -106,6 +106,8 @@ services:
       - ./tls/ssl.crt:/etc/ssl/nginx/ssl.crt:ro
       - ./tls/ssl.key:/etc/ssl/nginx/ssl.key:ro
       - ./tls/dhparam.pem:/etc/ssl/nginx/dhparam.pem:ro
+      # Filled by ../install-modules.sh --docker --modules-src <modules checkout>: elasticpro is
+      # the modules project's embed-module (no copy in this repository), plus its config.php.
       - ../module/elasticpro:/usr/share/zabbix/modules/elasticpro:ro
       - ../module/ep_capacity:/usr/share/zabbix/modules/ep_capacity:ro
       - ../module/ep_volume:/usr/share/zabbix/modules/ep_volume:ro

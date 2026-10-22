@@ -8,7 +8,7 @@ report a problem: it names the failure exactly, whatever the wording around it.
 |---|---|---|
 | EP-1xx to EP-5xx | the ElasticPro server (core) | `crates/elasticpro-core/src/errors.rs` |
 | EP-6xx | the ElasticPro page in the browser | `ui/js/core/error-codes.js` |
-| EP-7xx | the ElasticPro module inside Zabbix | `deploy/zabbix/module/elasticpro/views/elasticpro.embed.php` |
+| EP-7xx | the ElasticPro module inside Zabbix | `zabbix/embed-module/views/elasticpro.embed.php` in the modules project, [integration-zabbix-elasticpro](https://github.com/karthick-dkk/integration-zabbix-elasticpro) |
 | EP-999 | anything not given a code yet | |
 
 A code keeps its meaning once it is given out. A new kind of failure gets a new code.
@@ -101,6 +101,10 @@ A code keeps its meaning once it is given out. A new kind of failure gets a new 
 | EP-608 | `core_timeout` | The core did not answer within nginx's 120 s. |
 
 ## Inside Zabbix (7xx)
+
+The module is the modules project's `embed-module`, shipped at the commit in
+`deploy/zabbix/MODULES_REF`. The codes reached it after modules 2.1.2: modules 2.1.2 shows the
+same three messages without the code in brackets.
 
 | Code | What it means |
 |---|---|

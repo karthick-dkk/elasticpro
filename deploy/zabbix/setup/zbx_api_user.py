@@ -16,9 +16,24 @@ auth = call("user.login", {"username": "Admin", "password": creds["Admin"]})
 # Reading who may see which host group needs the Super admin type; what keeps it narrow is
 # the API allow-list — read methods only — and no frontend at all.
 # item.get: the Clusters page reads what Zabbix already measured (ZABBIX_METRICS).
-# The names and the allow-list live in ONE place, module/elasticpro/sync-role.json, which
-# the module's "Pair with ElasticPro" (Administration → ElasticPro) reads too.
-SPEC = json.load(open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "module", "elasticpro", "sync-role.json")))
+# The names and the allow-list live in ONE place, sync-role.json in the ElasticPro menu module
+# (the modules project's embed-module), which the module's "Pair with ElasticPro"
+# (Administration → ElasticPro) reads too. This repository keeps no copy: it is read from the
+# installed module — the stack's deploy/zabbix/module/elasticpro (install-modules.sh --docker),
+# or a package frontend's /usr/share/zabbix/modules/elasticpro — or from EP_SYNC_ROLE.
+def sync_role_path():
+    here = os.path.dirname(os.path.abspath(__file__))
+    tried = [os.environ.get("EP_SYNC_ROLE", ""),
+             os.path.join(here, "..", "module", "elasticpro", "sync-role.json"),
+             "/usr/share/zabbix/modules/elasticpro/sync-role.json"]
+    for p in tried:
+        if p and os.path.isfile(p):
+            return p
+    raise SystemExit("sync-role.json not found (looked at: " + ", ".join(p for p in tried if p) + ").\n"
+                     "Install the modules first (deploy/zabbix/install-modules.sh --docker --modules-src <modules checkout>),\n"
+                     "or set EP_SYNC_ROLE to zabbix/embed-module/sync-role.json in a checkout of\n"
+                     "github.com/karthick-dkk/integration-zabbix-elasticpro at the commit in deploy/zabbix/MODULES_REF.")
+SPEC = json.load(open(sync_role_path()))
 METHODS = SPEC["methods"]
 rules = {"ui.default_access": 0, "modules.default_access": 0, "actions.default_access": 0,
          "api.access": 1, "api.mode": 1, "api": METHODS}

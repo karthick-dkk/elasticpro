@@ -97,8 +97,8 @@ missing=0
 
 # Modules the web container bind-mounts. A missing source folder would be created by Docker as
 # an empty root-owned directory, and the module would silently not be there.
-for m in ep_capacity ep_volume ep_resources ep_clients; do
-  [ -f "../module/$m/manifest.json" ] || say "! ../module/$m is not in place yet — run: deploy/zabbix/install-modules.sh --docker"
+for m in elasticpro ep_capacity ep_volume ep_resources ep_clients; do
+  [ -f "../module/$m/manifest.json" ] || say "! ../module/$m is not in place yet — run: deploy/zabbix/install-modules.sh --docker --modules-src <modules project checkout at deploy/zabbix/MODULES_REF>"
 done
 if [ -f ../module/elasticpro/config.php ]; then
   fix_owner ../module/elasticpro/config.php
