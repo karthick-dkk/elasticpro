@@ -16,10 +16,12 @@
 - Each push is limited to 20 s. A failure is logged at warn with Zabbix's own reason, and the next
   try waits twice as long, up to 10 minutes. The push runs in a task of its own and never holds
   up a request.
-- The identity that pairing creates may only read, so it cannot push until `history.push` is added
-  to its role. `deploy/README.md` explains what that allows. The alternative is a token of the
-  push's own, `ELASTICPRO_ZABBIX_METRICS_TOKEN_FILE`, for a user that may push to that one host
-  and do nothing else.
+- Signed with the paired token. From Zabbix modules 2.1.2 the pairing role *ElasticPro sync*
+  allows `history.push`; an install paired earlier re-pairs once, which updates the role, or
+  adds the method by hand. This means the paired token can write to any trapper item in Zabbix,
+  since the role is of the Super admin type, though it still cannot change configuration. The
+  hardening option is `ELASTICPRO_ZABBIX_METRICS_TOKEN_FILE`: a push-only token, used instead,
+  for a user with read-write on the metrics host's group only.
 - This writes to Zabbix, not to Elasticsearch, so the two-gate write rule does not apply. Naming
   the host is the opt-in.
 - The Request Centre has a *Zabbix* line under the limits, shown only when a host is set: when the

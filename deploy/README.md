@@ -312,7 +312,8 @@ value into items. It alerts when the figures stop arriving, on sustained queuein
 on long waits, on a pause left on and on in-flight memory, with every threshold in a macro.
 
 How: `history.push` (Zabbix 7.0 or later) over the Zabbix API connection the core already has,
-whether paired from Config → Zabbix or set by `ZABBIX_API_URL` and a token file. It uses that
+whether paired from Config → Zabbix or set by `ZABBIX_API_URL` and a token file. It is signed
+with that connection's token too. It uses that
 connection's address and TLS trust, so there is no new endpoint and no `zabbix_sender`. Each push
 is limited to 20 s and shares `ZABBIX_CONCURRENCY` with the sync. A failure is logged at warn
 ("zabbix push failed", with Zabbix's reason) and the next try waits twice as long, up to
@@ -328,21 +329,24 @@ about clusters) does not apply. Naming the host is the opt-in.
    `template-elasticpro-request-gate.yaml`.
 2. **Create the host** the figures go to, for example `ElasticPro`, in a host group of its own
    (for example `ElasticPro self`). It needs no interface and no agent. Link the template.
-3. **Let a token push to it.** `history.push` needs two things. The token's user role must allow
-   the API method `history.push`, and the user must have **read-write** permission on the host
-   (through its host group). Pick one:
-   - **The identity pairing made** (user `elasticpro-sync`, role *ElasticPro sync*). That role
-     is a Super admin role restricted to read methods, so as shipped it is refused with
-     `No permissions to call "history.push"`. Add `history.push` to the role's allowed API
-     methods (*Users → User roles → ElasticPro sync → API methods*). Be aware of what that
-     means: a Super admin role sees every host, so ElasticPro's token could then write values
-     into **any** trapper item in this Zabbix, not only this host's. Nothing else changes; it
-     still cannot change configuration.
-   - **A token of its own (least privilege).** Create a user role of type *User* that allows
-     only the API method `history.push` and no frontend. Create a user with that role, in a user
-     group that has read-write on the `ElasticPro self` host group and nothing else. Make an API
-     token for that user and give its file to the core as `ELASTICPRO_ZABBIX_METRICS_TOKEN_FILE`,
-     a server-only file like the other Zabbix tokens. For example, in a compose override:
+3. **Let the paired token push.** `history.push` needs the token's user role to allow that API
+   method, and the user to see the host.
+   - **Normal path: the identity pairing made** (user `elasticpro-sync`, role *ElasticPro sync*).
+     From Zabbix modules 2.1.2 on, the role allows `history.push` (`embed-module/sync-role.json`).
+     An install paired earlier needs one of two things done once: re-pair (Config → Zabbix → Pair
+     with Zabbix; pairing updates a role whose methods differ from the file), or add `history.push`
+     to *Users → User roles → ElasticPro sync → API methods* by hand. Until then the push is refused
+     with `No permissions to call "history.push"`, and the Request Centre's Zabbix line says so.
+
+     **What this implies:** the role is of the Super admin type, so it sees every host. With
+     `history.push`, ElasticPro's paired token can write a value into **any trapper item** in this
+     Zabbix, not only this host's. It still cannot create, change or delete any configuration.
+   - **Hardening option: a token of its own.** To keep the paired identity read-only, remove
+     `history.push` from the *ElasticPro sync* role. Then create a user role of type *User* that
+     allows only `history.push` and no frontend. Create a user with that role, in a user group with
+     read-write on the `ElasticPro self` host group and nothing else, make an API token for it, and
+     give its file to the core as `ELASTICPRO_ZABBIX_METRICS_TOKEN_FILE`, a server-only file like
+     the other Zabbix tokens. For example, in a compose override:
 
      ```yaml
      services:
@@ -355,9 +359,10 @@ about clusters) does not apply. Naming the host is the opt-in.
          file: ./secrets/zabbix_metrics_token
      ```
 
-     The core reads it before every push, so a rotated file is picked up without a restart. A
-     named file that is empty or unreadable stops the push and says why; it never falls back to
-     the pairing identity.
+     When that is set, the core signs the pushes with this token instead of the paired one. It
+     still uses the link's address and TLS trust, and reads the file before every push, so a
+     rotated file is picked up without a restart. A named file that is empty or unreadable stops
+     the push and says why; it never falls back to the paired token.
    - Leave the item's *Allowed hosts* empty. If you fill it, it must list the ElasticPro
      core's address as the Zabbix frontend sees it, because `history.push` is checked against
      the API caller's address.

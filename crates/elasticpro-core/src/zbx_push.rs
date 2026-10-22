@@ -11,20 +11,20 @@
 //!   (Config → Zabbix, or `ELASTICPRO_ZABBIX_API_URL` + `..._TOKEN_FILE`): its address and
 //!   its TLS trust. No new endpoint, no `zabbix_sender` binary in the image. Zabbix 7.0 or
 //!   later.
-//! * **Which token.** The link's, unless `ELASTICPRO_ZABBIX_METRICS_TOKEN_FILE` names a
-//!   token of its own. The identity pairing creates ("ElasticPro sync") is a Super admin
-//!   role allowed only read methods: it sees every host and can change nothing. Allowing it
-//!   `history.push` too would let ElasticPro's token write values into any trapper item on
-//!   any host. Whether that is acceptable is the operator's decision, so the core does not
-//!   take it: it either uses the sync identity once someone has added `history.push` to its
-//!   role, or a token for a user that may push and do nothing else, with read-write on the
-//!   one host group that holds the metrics host. deploy/README.md has both recipes.
+//! * **Which token: the paired one.** The identity pairing creates ("ElasticPro sync") is
+//!   allowed `history.push` from Zabbix modules 2.1.2 on (`sync-role.json`; an older
+//!   install re-pairs once, which updates the role). That role is of the Super admin type,
+//!   so it sees every host: with `history.push` the paired token can write a value into any
+//!   trapper item in that Zabbix, though it still cannot change configuration. A site that
+//!   does not want that removes `history.push` from the role and names a push-only token in
+//!   `ELASTICPRO_ZABBIX_METRICS_TOKEN_FILE`, for a user with read-write on the one host
+//!   group that holds the metrics host; that token is then used instead, with the link's
+//!   address and TLS. deploy/README.md has both.
 //! * **Off by default.** No host named, no task at all. A host named but the Zabbix API not
 //!   configured: the timer runs (the API can be paired later from the UI) and calls
 //!   nothing.
 //! * **It writes to Zabbix, not to Elasticsearch,** so the "writes are gated twice" rule —
-//!   which is about clusters — does not apply. Naming the host is the opt-in; the token's
-//!   user needs write permission on that one host (see deploy/README.md).
+//!   which is about clusters — does not apply. Naming the host is the opt-in.
 //! * **Never in the way.** Its own task. The figures are read as a snapshot — each lock
 //!   taken briefly, as the Request Centre takes it — and the push happens after every lock
 //!   is let go. The call is bounded ([`PUSH_TIMEOUT`]), shares the Zabbix API's concurrency

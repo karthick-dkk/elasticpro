@@ -107,6 +107,7 @@ async fn a_host_without_a_configured_api_calls_nothing() {
     assert_eq!(z.hits().len(), 0, "an invalid host name: no call");
 }
 
+/// The normal path: the paired (link) token, no override file.
 #[tokio::test]
 async fn the_figures_go_to_the_trapper_item_by_history_push() {
     let z = mock_zabbix(Arc::new(AtomicBool::new(false))).await;
@@ -139,6 +140,9 @@ async fn the_figures_go_to_the_trapper_item_by_history_push() {
     let st = push_status(&c, &s).await;
     assert_eq!(st["enabled"], json!(true));
     assert_eq!(st["host"], json!("ElasticPro"));
+    assert_eq!(st["credential"], json!("link"), "no override file: the paired token signs the push: {st}");
+    assert!(hits.iter().all(|h| h.header("authorization") == Some(format!("Bearer {TOKEN}").as_str())),
+            "every push carries the link's token");
     assert!(st["pushes"].as_u64().unwrap() >= 1, "{st}");
     assert_eq!(st["failures"], json!(0));
     assert!(st["lastOkAt"].as_u64().is_some(), "{st}");

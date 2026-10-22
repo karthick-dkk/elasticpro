@@ -219,11 +219,14 @@ folder.
 3. Optional, **ElasticPro's own request gate** (`ElasticPro request gate by Zabbix trapper`, in
    the Zabbix modules repository at `zabbix/templates/template-elasticpro-request-gate.yaml`).
    Import it, create a host for it (for example `ElasticPro`, in a host group of its own), and
-   let a token push to that host. The pairing identity needs `history.push` added to its role,
-   or the core is given a token of its own in `ELASTICPRO_ZABBIX_METRICS_TOKEN_FILE`. Then set
-   `ZABBIX_METRICS_HOST=ElasticPro` in `config.txt` and run `deploy/deploy.sh --apply-config`.
-   The recipe, and what each token choice allows, is in `deploy/README.md`, "The request
-   figures in Zabbix". Nothing is pushed while `ZABBIX_METRICS_HOST` is empty.
+   re-pair once (Config → Zabbix → Pair with Zabbix). With Zabbix modules 2.1.2 the pairing
+   role *ElasticPro sync* allows `history.push`, and re-pairing updates an existing role. Then
+   set `ZABBIX_METRICS_HOST=ElasticPro` in `config.txt` and run `deploy/deploy.sh --apply-config`.
+   Be aware that the role is of the Super admin type, so the paired token can then write a value
+   into any trapper item in Zabbix, though it still cannot change configuration. To avoid that,
+   remove `history.push` from the role and give the core a push-only token in
+   `ELASTICPRO_ZABBIX_METRICS_TOKEN_FILE`. Both are in `deploy/README.md`, "The request figures in
+   Zabbix". Nothing is pushed while `ZABBIX_METRICS_HOST` is empty.
 
 ## 6. Secrets and macros
 
