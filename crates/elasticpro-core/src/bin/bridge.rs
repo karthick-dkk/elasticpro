@@ -156,9 +156,11 @@ async fn run() {
         .route("/events", get(events))
         // Server to server, from the Zabbix module: signed with HMAC, rate-limited here and
         // in nginx, and limited to `allowedSources` when those are set. nginx forwards
-        // exactly these two paths (with X-Real-IP); the module may also reach the core
+        // exactly these paths (with X-Real-IP); the module may also reach the core
         // directly on the ep_sso network. See zbx_sso.rs and zbx_link.rs.
         .route("/sso/zabbix", post(zabbix_sso).layer(axum::extract::DefaultBodyLimit::max(64 * 1024)))
+        // Read-only sibling: "what is this Zabbix user's role here?", for Cluster Management.
+        .route("/sso/zabbix/role", get(zabbix_sso_role))
         .route("/zabbix/pair", post(zabbix_pair).layer(axum::extract::DefaultBodyLimit::max(64 * 1024)))
         .fallback_service(ServeDir::new(&ui))
         .layer(axum::middleware::from_fn_with_state(core.clone(), frame_ancestors))
@@ -214,6 +216,29 @@ async fn zabbix_sso(
     if let Some(c) = account { reply["caller"] = c; }
     app.core.record_activity(&serde_json::json!({ "type": "SSO_ZABBIX" }), None, "sso", source, &reply);
     (status(code), Json(out))
+}
+
+/// `GET /sso/zabbix/role?claim=<JSON>` — the same header and signature scheme, over the
+/// claim's exact (decoded) bytes; the answer is signed back in `X-ElasticPro-Signature`.
+async fn zabbix_sso_role(
+    State(app): State<Arc<App>>,
+    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    headers: HeaderMap,
+    Query(q): Query<HashMap<String, String>>,
+) -> axum::response::Response {
+    let sig = headers.get("x-zabbix-module-signature").and_then(|v| v.to_str().ok()).unwrap_or("");
+    let claim = q.get("claim").map(String::as_str).unwrap_or("");
+    let r = app.core.zabbix_sso_role_from(claim.as_bytes(), sig, source_of(&app, &headers, peer));
+    let mut res = axum::response::Response::new(axum::body::Body::from(r.body));
+    *res.status_mut() = status(r.status);
+    let h = res.headers_mut();
+    h.insert(axum::http::header::CONTENT_TYPE, axum::http::HeaderValue::from_static("application/json"));
+    // Never cached: the answer is about one question, and the next one may differ.
+    h.insert(axum::http::header::CACHE_CONTROL, axum::http::HeaderValue::from_static("no-store"));
+    if let Some(v) = r.signature.and_then(|s| axum::http::HeaderValue::from_str(&s).ok()) {
+        h.insert("x-elasticpro-signature", v);
+    }
+    res
 }
 
 /// `POST /zabbix/pair` — the same header, the same signature scheme, the pairing secret.
