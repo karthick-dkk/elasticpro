@@ -1,5 +1,78 @@
 # Changelog
 
+## 0.3.23
+
+**Calmer pages: problems stand out, normal states stay quiet, and the evidence pages show one
+cluster and nothing else.**
+
+**Clusters page.**
+- Normal is quiet. ILM running, SLM running and a snapshot that succeeded are plain text. Only a
+  problem is coloured and has a dot: an ILM error, a failed or overdue snapshot, yellow or red
+  health with its unassigned shard count.
+- Disk is shown against the cluster's own watermarks: one figure ("56 % · 156 of 279 GB") over a
+  bar with a mark at the high watermark. It turns amber past the low watermark and red past the
+  high one, and the text says so too. If the watermarks have not been read, or are set as free
+  space ("50gb"), the page says they are unknown instead of guessing. The bar, its tooltip and the
+  CSV use the same figures.
+- Each row has a ▸ at its start that opens the cluster's details. The Alerts cell is a link that
+  opens the Alerts page for that cluster only.
+- Unreachable clusters are no longer cards above the table. They are rows in their A–Z place,
+  tinted red, saying "unreachable · see Alerts", and one line above the table points to Alerts,
+  where Retry and Diagnose now are.
+- The opened details no longer overlap ("JDK" ran into "SLM" at 1280 px), and the repositories
+  table inside them no longer pushes the page sideways. The repositories table also shows its
+  column headings again.
+- Under Client basis the summary says how many clusters have not been read yet.
+
+**Alerts page.**
+- One summary line replaces the four tiles. The critical, warning and acknowledged counts in it are
+  filters.
+- Unreachable clusters come first, in every grouping, one line each: the full name, why, how long it
+  has been down, Retry, Diagnose and Acknowledge, with Retry all and Acknowledge all for the group.
+  They appear nowhere else on the page.
+- Alerts raised on a cluster before it went down are held under its line, dimmed and marked "not
+  current". They are not counted in the bell, the tab, the top bar or the summary.
+- A cluster with one alert is one line, with no group header.
+- Go to is a plain link, and buttons that were only icons now say Note and More. For an
+  unreachable cluster, "Its row on Clusters" in How to fix opens the Clusters page at that
+  cluster's row.
+
+**Config → Requests.**
+- Each preset says what it sends to your clusters, when nobody is looking and when a page is
+  open, worked out from its own intervals and your number of clusters. For example, with 24
+  clusters: Client basis sends nothing while nobody is looking; Hybrid at least 8 requests a
+  minute (health every 3 minutes for each cluster); Background at least 16 a minute while pages
+  are in use, and at least 8 once no page has asked for 10 minutes. These are lower bounds,
+  because one check can take more than one request.
+- The intervals and the number fields (watch window, how many at once, timeout) are folded under
+  **Fine-tune**, with a one-line summary when folded. It stays open or folded the way you left
+  it. Under Client basis each interval says it is not on a schedule.
+- If `ELASTICPRO_POLL_CONCURRENCY` is set on the server, the page says whether it is what decides
+  the number of requests at once, or whether a saved policy sets its own.
+
+**Request Centre.**
+- It opens with one line that answers "is everything all right?": quiet, working normally, busy,
+  holding back, paused or not known. The limits are shown as labels.
+- The request table is easier to scan: times of day, one-line paths you can copy, a tag for each
+  kind of request, and a dot and code for the result. Housekeeping is folded to one line.
+- **Pause all requests** moved into its own "Stop all traffic" card. What it does is unchanged.
+
+**Evidence pages: Snapshots, REST console and Indices.** These pages are screenshotted as a
+client's evidence, so they now show one cluster and nothing about any other:
+- No fleet status, alert count, bell, cluster picker or status strip. With "All clusters"
+  selected, the page asks which cluster to show.
+- A footer names the cluster and says when its data was read and when the page was captured.
+  It names the cluster, never its address, and addresses are removed from error messages and the
+  console's address line too.
+- The console's history lists only that cluster's requests.
+- The Snapshots repositories table no longer shows the repository location (bucket or NFS path).
+- Notices about other clusters wait until you leave the page.
+
+**Fixed.**
+- Disk watermarks are read in Elasticsearch's own order, transient settings first, then
+  persistent, then defaults. Persistent was read first before. A watermark set as free space no
+  longer falls back to a weaker setting's percentage.
+
 ## 0.3.22
 
 **Steady under load: memory that stays inside its limit, one queue for every request to

@@ -389,6 +389,15 @@ function dismiss(el) {
   setTimeout(() => el.remove(), 300);
 }
 
+/**
+ * Take every card off the screen at once. They stay in the bell: this clears the view, not
+ * the history. For a page about to be photographed (core/evidence.js).
+ */
+export function dismissToasts() {
+  if (!toastWrap || !toastWrap.isConnected) return;
+  for (const el of [...toastWrap.children]) el.remove();
+}
+
 const TOAST_ICON = { ok: '✓', err: '✕', warn: '!', run: '' };
 
 /**

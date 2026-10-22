@@ -101,3 +101,17 @@ export function housekeepingView(status, now = Date.now()) {
   }
   return view;
 }
+
+/**
+ * The card folded to one line: "ran 13:00:12, removed 1 item, 4 KB · next in 40 m". `clock`
+ * formats a time. Nothing is said that the full card would not say: a run that did not
+ * happen is "not run since the core started", never "removed 0".
+ */
+export function housekeepingLine(view, clock) {
+  if (!view || view.state !== 'ready') return view && view.state === 'unavailable' ? `not available: ${view.reason}` : 'Loading…';
+  const last = view.last
+    ? `ran ${clock(view.last.at)}${view.last.dryRun ? ' (dry run)' : ''}, ${view.last.summary}${view.last.errors ? `, ${view.last.errors} failed` : ''}`
+    : 'not run since the core started';
+  const next = view.nextRun ? ` · next ${view.nextRun}` : '';
+  return `${last}${next}`;
+}

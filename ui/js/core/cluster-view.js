@@ -1,6 +1,7 @@
 /**
  * How one person likes the Clusters page laid out: which summary columns they see, in
- * what order and under what names, and whether they folded the unreachable section away.
+ * what order and under what names. (It used to hold a fold for the unreachable section too;
+ * that section is gone, and a stored `unreachable` key is ignored and dropped on the next save.)
  *
  * Pure: no DOM, no state. The storage is passed in, so the page hands it localStorage and
  * the unit tests hand it a Map. The core has no per-user preferences store (bridge.rs has
@@ -35,7 +36,7 @@ export const SUMMARY_COLUMNS = [
 /** A renamed column keeps at most this many characters: it is a header, not a note. */
 export const MAX_NAME = 40;
 
-const EMPTY = () => ({ v: 1, columns: { order: [], shown: {}, names: {} }, unreachable: { hidden: false, seen: [] } });
+const EMPTY = () => ({ v: 1, columns: { order: [], shown: {}, names: {} } });
 
 /** What was stored, made safe to use: wrong types dropped, nothing assumed. */
 export function sanitizePrefs(raw) {
@@ -52,9 +53,6 @@ export function sanitizePrefs(raw) {
       if (n) out.columns.names[k] = n;
     }
   }
-  const u = raw.unreachable && typeof raw.unreachable === 'object' ? raw.unreachable : {};
-  out.unreachable.hidden = u.hidden === true;
-  out.unreachable.seen = out.unreachable.hidden && Array.isArray(u.seen) ? [...new Set(u.seen.filter((x) => typeof x === 'string'))] : [];
   return out;
 }
 
@@ -162,49 +160,7 @@ export function renameColumn(prefs, id, name, defs = SUMMARY_COLUMNS) {
   });
 }
 
-/** Back to the default columns, order and names. The unreachable fold is not a column. */
+/** Back to the default columns, order and names. */
 export function resetColumns(prefs) {
   return withColumns(prefs, (c) => { c.order = []; c.shown = {}; c.names = {}; });
-}
-
-/* ------------------------- the unreachable section fold ------------------------- */
-
-/**
- * Fold the unreachable section away. `downIds` are the clusters unreachable right now:
- * hiding is agreeing to have seen THESE, and no others.
- */
-export function hideUnreachable(prefs, downIds) {
-  const p = sanitizePrefs(prefs);
-  p.unreachable = { hidden: true, seen: [...new Set(downIds)] };
-  return p;
-}
-
-export function showUnreachable(prefs) {
-  const p = sanitizePrefs(prefs);
-  p.unreachable = { hidden: false, seen: [] };
-  return p;
-}
-
-/**
- * The fold, brought up to date with what is unreachable now. A folded section stays folded
- * while every cluster down was already down when it was folded — three down going to two
- * keeps it folded — but a cluster that newly goes down opens it again, so a new outage is
- * never hidden behind an old choice.
- *
- * `upIds` are the clusters known to be answering. Only those leave the seen set: a cluster
- * that has not been read yet (a reload, a page still loading) is neither, and forgetting it
- * then would reopen the section the moment its first answer said "still down". One that
- * recovered and later fails again is a new outage, and reopens it.
- *
- * Returns { hidden, seen, changed, reopened }.
- */
-export function foldUnreachable(fold, downIds, upIds) {
-  const f = fold && typeof fold === 'object' ? fold : {};
-  if (!f.hidden) return { hidden: false, seen: [], changed: false, reopened: false };
-  const seen = Array.isArray(f.seen) ? f.seen : [];
-  const known = new Set(seen);
-  if (downIds.some((id) => !known.has(id))) return { hidden: false, seen: [], changed: true, reopened: true };
-  const up = new Set(upIds);
-  const still = seen.filter((id) => !up.has(id));
-  return { hidden: true, seen: still, changed: still.length !== seen.length, reopened: false };
 }

@@ -88,20 +88,16 @@ test('names sort naturally and without regard to case', () => {
   assert.deepEqual(order(P.sortRows(rows, 'name', 1)), ['beta', 'ES-node-1', 'es-node-2', 'es-node-10']);
 });
 
-test('unreachable clusters are split out, A–Z, whatever the table is sorted by', () => {
-  const rows = [up('m'), down('zz', 'auth_error'), loading('l'), down('Bb', 'tunnel_error'), down('a10'), down('a9', 'tls_error')];
-  const { down: dn, up: rest } = P.splitRows(P.sortRows(rows, 'nodes', -1));
-  assert.deepEqual(order(dn), ['a9', 'a10', 'Bb', 'zz']);
-  assert.deepEqual(order(rest).sort(), ['l', 'm'], 'a cluster not read yet is not unreachable');
-  assert.deepEqual(order(P.unreachableRows(rows)), ['zz', 'Bb', 'a10', 'a9']);
-});
-
-test('the reason pill comes from the connection state', () => {
-  assert.deepEqual(P.unreachableReason({ state: 'auth_error' }), { label: 'Auth error', cls: 'red' });
-  assert.deepEqual(P.unreachableReason({ state: 'tls_error' }), { label: 'Certificate', cls: 'yellow' });
-  assert.deepEqual(P.unreachableReason({ state: 'tunnel_error' }), { label: 'Jump host down', cls: 'red' });
-  assert.deepEqual(P.unreachableReason({ state: 'offline' }), { label: 'Offline', cls: 'red' });
-  assert.deepEqual(P.unreachableReason(null), { label: 'Offline', cls: 'red' });
+test('unreachable clusters stay in the table: A–Z by name, and after every figure otherwise', () => {
+  const rows = [up('m', { health: { status: 'green', number_of_nodes: 3 } }), down('zz', 'auth_error'), loading('l'),
+    down('Bb', 'tunnel_error'), down('a10'), down('a9', 'tls_error')];
+  assert.deepEqual(order(P.sortRows(rows, 'name', 1)), ['a9', 'a10', 'Bb', 'l', 'm', 'zz'], 'in their A–Z place');
+  // What an unreachable cluster last said is not a measurement now: it sorts as unknown.
+  const stale = [...rows, { ...down('stale'), d: { updatedAt: T0, reachable: false, health: { number_of_nodes: 99 }, disk: { percent: 99 } } }];
+  assert.equal(order(P.sortRows(stale, 'nodes', 1))[0], 'm');
+  assert.deepEqual(order(P.sortRows(stale, 'nodes', -1)), ['m', 'a9', 'a10', 'Bb', 'l', 'stale', 'zz'], 'figures first, then the unknowns A–Z');
+  assert.deepEqual(order(P.sortRows(stale, 'disk', -1)), order(P.sortRows(stale, 'disk', 1)), 'no cluster here has a disk figure: unknown stays A–Z both ways');
+  assert.deepEqual(order(P.unreachableRows(rows)).sort(), ['Bb', 'a10', 'a9', 'zz'], 'a cluster not read yet is not unreachable');
 });
 
 test('the CSV follows the visible columns, their order and their names', () => {
@@ -131,6 +127,19 @@ test('the CSV: several figures per column, unknown left empty, renamed twins kep
   assert.equal(data[1]['Disk usage (%)'], '', 'unknown is empty, not 0');
   assert.equal(data[1]['Size (bytes)'], '');
   assert.equal(data[2].Health, 'auth error', 'an unreachable cluster says why');
+});
+
+test('the CSV says where disk stands against the watermarks, from the same function as the bar', () => {
+  const K = (n) => `cluster.routing.allocation.disk.watermark.${n}`;
+  const set = (low, high) => ({ persistent: { [K('low')]: low, [K('high')]: high }, transient: {}, defaults: {} });
+  const rows = [
+    up('read', { disk: { percent: 81, used: 81, total: 100 }, clusterSettings: set('80%', '90%') }),
+    up('unread', { disk: { percent: 81, used: 81, total: 100 } }),
+    up('bytes', { disk: { percent: 81, used: 81, total: 100 }, clusterSettings: set('80%', '50gb') }),
+  ];
+  const { data } = P.csvTable(rows, V.visibleColumns(null));
+  assert.deepEqual(data.map((r) => r['Disk usage (watermark)']), ['above low', 'unknown', 'unknown']);
+  assert.deepEqual(data.map((r) => r['Disk usage (high watermark %)']), [90, '', ''], 'unknown is empty, not a default');
 });
 
 test('clusters() lists the enabled clusters A–Z, whatever order the config has', () => {

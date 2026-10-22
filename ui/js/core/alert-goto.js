@@ -22,7 +22,8 @@ import { navigateTo } from './intent.js';
  * What a hint means is each page's own business (see the page's render()).
  */
 export const FOCUS = {
-  // Clusters: that cluster's unreachable card, scrolled to and opened.
+  // Clusters: that cluster's row in the table, scrolled to and flashed (pages/overview.js
+  // revealFocused). Also the unreachable playbook's "Its row on Clusters" link.
   unreachable: (m) => ({ section: 'unreachable', cluster: m.clusterId || null }),
   // Nodes & shards: the shard table filtered to what is unassigned.
   health: () => ({ section: 'unassigned' }),
@@ -69,6 +70,16 @@ export function openGoto(g) {
   if (!g || !g.page) return;
   if (g.focus) setFocus(g.page, g.focus);
   navigateTo(g.page, null, { cluster: g.clusterId || null });
+}
+
+/**
+ * Open the Alerts page showing one cluster only ("Showing <cluster> only", with a way back to
+ * all of them) — what the bell's "Open <cluster> alerts" and the Clusters page's alert count
+ * both do. The page takes the hint once, in its own render().
+ */
+export function openClusterAlerts(clusterId) {
+  setFocus('alerts', { cluster: clusterId });
+  navigateTo('alerts', null, {});
 }
 
 /** Rule ids with no FOCUS entry — empty when the table is complete. For the test. */

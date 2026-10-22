@@ -269,7 +269,93 @@ export function toObservations(merged) {
 
 /** Open means something on it still needs a person: some item neither acknowledged nor silenced. */
 export const isOpen = (m) => m.state === 'open';
-export const isHandled = (m) => m.state !== 'open';
+/** Handled is a person's decision: acknowledged or silenced. A held alert is neither (see holdUnreachable). */
+export const isHandled = (m) => m.state === 'acked' || m.state === 'silenced';
+/** Held: raised on a cluster that cannot be reached now, so not current (see holdUnreachable). */
+export const isHeld = (m) => !!m.held;
+/** The alert that says a cluster cannot be reached. */
+export const isUnreachableAlert = (m) => m.family === 'unreachable';
+
+/* ------------------------------ unreachable clusters ------------------------------ */
+
+/**
+ * Alerts raised on a cluster that cannot be reached are HELD: kept, listed (dimmed, under
+ * the cluster's one unreachable line, labelled "not current"), and counted nowhere.
+ *
+ * A cluster that is down is one problem. Its other alerts were raised from data read before
+ * it went down, and nothing now can say they are still true — so they neither stand as
+ * separate groups beside the unreachable alert nor count a second time in the bell, the tab
+ * badge, the top bar or the Alerts summary. Their `state` becomes 'held' (so `isOpen` is
+ * false for them, which is the one definition every count reads) and the state they had is
+ * kept in `heldState`. Nothing is dropped: the unreachable line says how many are held.
+ *
+ * The one rule: a cluster with a merged `unreachable` alert is unreachable, and every other
+ * merged alert on it is held. Applied once, where the merged list is made (state.js
+ * mergedAlerts), so no reader can see the two disagree.
+ */
+export function holdUnreachable(merged) {
+  const down = new Set(merged.filter(isUnreachableAlert).map((m) => m.clusterId));
+  if (!down.size) return merged;
+  return merged.map((m) => (down.has(m.clusterId) && !isUnreachableAlert(m)
+    ? { ...m, held: true, heldState: m.state, state: 'held' }
+    : m));
+}
+
+/**
+ * The merged list, split into the unreachable clusters and everything else.
+ * `down` is one entry per unreachable cluster — its unreachable alert and the alerts held
+ * behind it — A–Z; `rest` is every alert of a cluster that answers. Each alert is in
+ * exactly one place: the unreachable alert and the held ones only in `down`, never in `rest`.
+ */
+export function splitUnreachable(merged) {
+  const held = new Map();
+  for (const m of merged) if (isHeld(m)) (held.get(m.clusterId) || held.set(m.clusterId, []).get(m.clusterId)).push(m);
+  const down = [];
+  const rest = [];
+  for (const m of merged) {
+    if (isUnreachableAlert(m)) {
+      down.push({ clusterId: m.clusterId, cluster: m.cluster, name: (m.cluster && m.cluster.name) || m.clusterId, alert: m,
+        held: (held.get(m.clusterId) || []).sort(compareAlerts) });
+    } else if (!isHeld(m)) rest.push(m);
+  }
+  down.sort((a, b) => compareNames(a.name, b.name));
+  return { down, rest };
+}
+
+/** The unreachable entries a filter leaves: decided by the unreachable alert itself. */
+export function filterDown(down, opts = {}) {
+  return down.filter((d) => filterAlerts([d.alert], opts).length > 0);
+}
+
+/** "under a minute", "12 min", "1 h 40 min", "3 d 4 h" — how long a cluster has been down. */
+export function downFor(ms) {
+  const m = Math.floor(Math.max(0, Number(ms) || 0) / 60000);
+  if (m < 1) return 'under a minute';
+  if (m < 60) return `${m} min`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return m % 60 ? `${h} h ${m % 60} min` : `${h} h`;
+  const d = Math.floor(h / 24);
+  return h % 24 ? `${d} d ${h % 24} h` : `${d} d`;
+}
+
+/**
+ * Why a cluster cannot be reached, as a short label, from the client's state. The one
+ * definition: the Alerts unreachable line, and the Clusters page's Health cell, tooltip
+ * and CSV. `cls` says how bad; a certificate is amber because it is a decision to take
+ * rather than an outage.
+ */
+export function unreachableReason(cl) {
+  const st = cl && cl.state;
+  if (st === 'auth_error') return { label: 'Auth error', cls: 'red' };
+  if (st === 'tls_error') return { label: 'Certificate', cls: 'yellow' };
+  if (st === 'tunnel_error') return { label: 'Jump host down', cls: 'red' };
+  return { label: 'Offline', cls: 'red' };
+}
+
+/** "2 older alerts held, not current" / "no other alerts" — what an unreachable line says of the rest. */
+export function heldText(n) {
+  return n ? `${n} older alert${n === 1 ? '' : 's'} held, not current` : 'no other alerts';
+}
 
 /* --------------------------------- ordering --------------------------------- */
 
@@ -328,6 +414,7 @@ function summarise(g) {
 export function filterAlerts(merged, { level = 'all', text = '', showHandled = false, notesOf = () => '' } = {}) {
   const t = String(text || '').trim().toLowerCase();
   return merged.filter((m) => {
+    if (isHeld(m)) return false;   // held alerts are listed under their cluster's unreachable line, never here
     if (level === 'critical' && m.level !== 'critical') return false;
     if (level === 'warning' && m.level === 'critical') return false;
     if (!showHandled && isHandled(m)) return false;
@@ -340,7 +427,11 @@ export function filterAlerts(merged, { level = 'all', text = '', showHandled = f
   });
 }
 
-/** The counts the tiles and the footer show, from one list, so they cannot disagree. */
+/**
+ * The counts the summary line and the footer show, from one list, so they cannot disagree.
+ * An unreachable cluster counts once, as one critical alert; what is held behind it counts
+ * nowhere (`held` says how many).
+ */
 export function summaryOf(merged, fleetSize) {
   const open = merged.filter(isOpen);
   const handled = merged.filter(isHandled);
@@ -352,5 +443,7 @@ export function summaryOf(merged, fleetSize) {
     clustersClear: Math.max(0, fleetSize - withOpen.size),
     acknowledged: handled.filter((m) => m.state === 'acked').length,
     silenced: handled.filter((m) => m.state === 'silenced').length,
+    // Not counted above: alerts on unreachable clusters, held until they answer.
+    held: merged.filter(isHeld).length,
   };
 }

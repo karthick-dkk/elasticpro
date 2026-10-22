@@ -112,6 +112,25 @@ async function waitFor(find, what, ms = 5000) {
   return null;
 }
 
+// An evidence page (core/evidence.js) asks for one cluster when the fleet is selected, as a
+// person would be asked; this answers it with the first. backToFleet() undoes that choice
+// through the picker, the way a person would, so the sections after it still start on "All".
+async function goOne(id) {
+  await go(id);
+  const pick = doc.getElementById('evidence-pick');
+  if (pick) { pick.value = pick.options[1].value; pick.dispatchEvent(new window.Event('change', { bubbles: true })); await settleFor(450); }
+}
+async function backToFleet() {
+  // Through the picker, as a person would: first one cluster (which clears "All clusters was
+  // asked for", so Nodes & shards opens on one again), then the fleet view the sections after
+  // this expect.
+  await go('overview');
+  const s = doc.getElementById('cluster-select');
+  if (s) { s.value = s.options[1].value; s.dispatchEvent(new window.Event('change', { bubbles: true })); await settleFor(250); }
+  (await load('core/state.js')).state.selected = 'all';
+  await go('overview');
+}
+
 /* ------------- the status strip stays off the pages people work in ------------- */
 
 const STRIP_HIDDEN = ['indices', 'console', 'logs', 'snapshots', 'shards', 'volume'];
@@ -145,15 +164,16 @@ await go('console');
     ok(!!(target.compareDocumentPosition(run) & window.Node.DOCUMENT_POSITION_FOLLOWING),
       'console: the address is not above the Run button, where it is read before pressing it');
   }
+  // An evidence page: the line names the path the request will take, never the host.
   const base = config.clusters[0].url.replace(/\/+$/, '');
-  ok(target && target.textContent.startsWith(base),
-    `console: the address line reads "${target && target.textContent}", expected to start with ${base}`);
+  ok(target && target.textContent === '/_cluster/health',
+    `console: the target line reads "${target && target.textContent}", expected the path alone`);
+  ok(target && !target.textContent.includes(base), 'console: the target line still names the cluster address');
 
   const pathInput = doc.getElementById('c-path');
   ok(!!pathInput, 'console: no path input');
   if (pathInput && target) {
-    for (const [typed, want] of [['/_cat/indices', `${base}/_cat/indices`],
-                                 ['_cluster/health', `${base}/_cluster/health`]]) {
+    for (const [typed, want] of [['/_cat/indices', '/_cat/indices'], ['_cluster/health', '/_cluster/health']]) {
       pathInput.value = typed;
       pathInput.dispatchEvent(new window.Event('input', { bubbles: true }));
       await settleFor(50);
@@ -333,7 +353,7 @@ await go('indices');
   ok(/Volume analysis/.test(sum), 'indices: Summary does not show the volume analysis');
 }
 
-await go('snapshots');
+await goOne('snapshots');
 {
   // Two views, like Indices. "Snapshots" is what the page opens on: the search bar and the
   // list, and nothing else — the tiles, repositories, SLM and the strip are on the Summary.
@@ -362,7 +382,7 @@ await go('snapshots');
 
   // Remembered for the tab: away and back lands on the same view.
   await go('volume');
-  await go('snapshots');
+  await goOne('snapshots');
   ok(pressedIs('Snapshot Summary'), 'snapshots: the chosen view was not remembered across a page change');
   segBtn('Snapshots').click();
   await settleFor(150);
@@ -400,6 +420,7 @@ await go('snapshots');
 
 /* --------------------- the volume report and its two sheets --------------------- */
 
+await backToFleet();
 await go('volume');
 // Moved here from the Indices page — the assertion moves with them, so a future change
 // that drops them cannot pass by simply not rendering them anywhere.
@@ -753,31 +774,73 @@ await go('overview');
     ok(jdkCell && /17\.0\.9/.test(jdkCell.getAttribute('title') || ''),
       'overview: the JDK cell should carry the per-version breakdown');
 
-    // The row expander is a button people can find, and it says which way it goes.
-    const expand = [...firstRow.querySelectorAll('button')].find((b) => /Details/.test(b.textContent));
-    ok(!!expand, 'overview: no Details button on a summary row');
+    // The row expander is a chevron button at the START of the row; it says which way it goes
+    // (aria-expanded), is a real button (so Tab and Enter/Space reach it), and there is no
+    // per-row "Details" button any more.
+    ok(![...firstRow.querySelectorAll('button')].some((b) => /Details/i.test(b.textContent)), 'overview: the per-row Details button is still there');
+    const expand = firstRow.querySelector('td:first-child button.cl-chev');
+    ok(!!expand, 'overview: no chevron button at the start of a summary row');
     if (expand) {
+      ok(expand.tagName === 'BUTTON' && expand.type === 'button' && expand.tabIndex >= 0, 'overview: the chevron is not a keyboard-reachable button');
       ok(expand.getAttribute('aria-expanded') === 'false', 'overview: a collapsed row should say so');
-      ok(!expand.className.includes('ghost'),
-        'overview: the row expander should look like a button, not a label');
-      const before = summary.querySelectorAll('tbody tr').length;
+      ok(/Show details for /.test(expand.getAttribute('aria-label') || ''), `overview: the chevron's name is "${expand.getAttribute('aria-label')}"`);
+      const rowId = firstRow.dataset.cluster;
+      const before = summary.querySelectorAll('table.cl-tbl > tbody > tr').length;
+      expand.focus();
       expand.click();
       await settleFor(300);
       const after = [...doc.querySelectorAll('section.card')]
         .find((sec) => (sec.querySelector('header h2') || {}).textContent === 'Cluster summary');
-      ok(after.querySelectorAll('tbody tr').length > before,
-        'overview: pressing Details did not open the detail row');
-      const now = [...after.querySelector('tbody tr').querySelectorAll('button')]
-        .find((b) => /Hide details/.test(b.textContent));
-      ok(!!now, 'overview: an open row should offer to close');
+      ok(after.querySelectorAll('table.cl-tbl > tbody > tr').length === before + 1,
+        'overview: pressing the chevron did not open exactly one detail row');
+      const detailRow = after.querySelector('tbody tr.cl-detail-row');
+      ok(detailRow && /Cluster UUID/.test(detailRow.textContent) && /Snapshot repositories/.test(detailRow.textContent),
+        'overview: the opened row does not show the details the Details button used to');
+      const now = after.querySelector(`tbody tr[data-cluster="${rowId}"] button.cl-chev`);
       ok(now && now.getAttribute('aria-expanded') === 'true', 'overview: an open row should say it is open');
+      ok(now && /Hide details for /.test(now.getAttribute('aria-label') || ''), 'overview: an open row should offer to close');
+      ok(now && doc.activeElement === now, 'overview: the keyboard lost the chevron when the row opened');
       now.click();
       await settleFor(250);
+      const closed = doc.querySelector(`#view tbody tr[data-cluster="${rowId}"] button.cl-chev`);
+      ok(closed && closed.getAttribute('aria-expanded') === 'false' && !doc.querySelector('#view tr.cl-detail-row'), 'overview: the chevron did not close the row');
+      ok(closed && doc.activeElement === closed, 'overview: the keyboard lost the chevron when the row closed');
+    }
+
+    // The Alerts cell is a link to THAT cluster's alerts, or a dash with no link at all.
+    {
+      const alertsAt = heads.indexOf('Alerts');
+      // Fresh from the page: opening and closing a row rebuilt the ones in `summary`.
+      const live = [...doc.querySelectorAll('section.card')].find((sec) => (sec.querySelector('header h2') || {}).textContent === 'Cluster summary');
+      const trs = [...live.querySelectorAll('tbody tr[data-cluster]')];
+      const withLink = trs.find((tr) => tr.children[alertsAt] && tr.children[alertsAt].querySelector('a.cl-alink'));
+      const without = trs.find((tr) => tr.children[alertsAt] && !tr.children[alertsAt].querySelector('a, button'));
+      ok(alertsAt > 0, 'overview: no Alerts column');
+      ok(!!withLink, 'overview: no cluster in the fixture has an alert to link to');
+      if (without) {
+        ok(/^\u2014$/.test(without.children[alertsAt].textContent.trim()), `overview: a cluster with no alerts reads "${without.children[alertsAt].textContent.trim()}", expected a dash`);
+      }
+      if (withLink) {
+        const link = withLink.children[alertsAt].querySelector('a.cl-alink');
+        ok(/^\d+ \u2192$/.test(link.textContent.trim()), `overview: the alerts link reads "${link.textContent}"`);
+        ok(/^#\/alerts$/.test(link.getAttribute('href')), 'overview: the alerts link does not point at the Alerts page');
+        const cid = withLink.dataset.cluster;
+        const cname = (withLink.querySelector('button.cl-name .cl-name-t') || {}).textContent;
+        // (the harness replaces HTMLAnchorElement.click to catch downloads, so dispatch the event)
+        link.dispatchEvent(new window.MouseEvent('click', { bubbles: true, cancelable: true }));
+        await settleFor(500);
+        ok(/#\/alerts$/.test(window.location.hash), `overview: the alerts link went to "${window.location.hash}"`);
+        const banner = doc.querySelector('#view .banner .ttl');
+        ok(banner && banner.textContent === `Showing ${cname} only`, `overview: the Alerts page was not filtered to ${cname}: "${banner && banner.textContent}"`);
+        const groups = [...doc.querySelectorAll('#view .agroup-name')].map((x) => x.textContent.trim());
+        ok(groups.length > 0 && groups.every((g) => g === cname), `overview: the Alerts page shows groups ${groups.join(', ')} for ${cname}`);
+        await go('overview');
+      }
     }
   }
 }
 
-/* ------------- Clusters page: columns, the name menu, unreachable cards ------------- */
+/* ------------- Clusters page: columns, the name menu, unreachable rows ------------- */
 
 {
   const st = await load('core/state.js');
@@ -947,8 +1010,8 @@ await go('overview');
     st.state.selected = 'all';
   }
 
-  // Unreachable clusters: cards above the table, not rows in it; Hide folds them to one
-  // line, remembered; a cluster that newly goes down opens the section again.
+  // Unreachable clusters are rows in the table, in their A–Z place, marked red, with one line
+  // above the table pointing at the Alerts page. The old section (cards, Retry all, Hide) is gone.
   {
     const [a, b] = config.clusters;
     const real = new Map(config.clusters.map((c) => [c.id, { d: st.state.data.get(c.id), cl: st.client(c.id) && { state: st.client(c.id).state, lastError: st.client(c.id).lastError } }]));
@@ -959,74 +1022,98 @@ await go('overview');
     const restore = () => {
       for (const [id, r] of real) { st.state.data.set(id, r.d); const cl = st.client(id); if (cl && r.cl) { cl.state = r.cl.state; cl.lastError = r.cl.lastError; } }
     };
-    const section = () => doc.querySelector('#view section.cl-down');
+    const note = () => doc.querySelector('#view .cl-down-note');
+    const rowOf = (c) => summary().querySelector(`tbody tr[data-cluster="${c.id}"]`);
     const rowNames = () => [...summary().querySelectorAll('tbody button.cl-name')].map((x) => x.textContent.replace('▾', '').trim());
+    const colAt = (id) => headIds().indexOf(id) + 1;   // the chevron column comes first
     try {
       st.state.selected = 'all';
+      ok(!note(), 'unreachable: the pointer line is there with every cluster answering');
       takeDown(a);
       await go('overview');
-      const sec = section();
-      ok(!!sec, 'unreachable: no unreachable section on the page');
-      if (sec) {
-        ok(!!(sec.compareDocumentPosition(summary()) & window.Node.DOCUMENT_POSITION_FOLLOWING), 'unreachable: the section is not above the summary');
-        ok(/1 unreachable/.test(sec.textContent), `unreachable: heading reads "${sec.querySelector('h2') && sec.querySelector('h2').textContent}"`);
-        const card = sec.querySelector(`article.cl-down-card[data-cluster="${a.id}"]`);
-        ok(!!card, `unreachable: no card for ${a.name}`);
-        ok(card && /Offline/.test(card.textContent) && /since /.test(card.textContent) && /ECONNREFUSED/.test(card.textContent),
-          `unreachable: the card does not give reason, since and error: "${card && card.textContent.slice(0, 160)}"`);
-        ok(card && card.querySelector('.cl-err').getAttribute('title').includes('ECONNREFUSED'), 'unreachable: the full error is not in the tooltip');
-        ok(!rowNames().includes(a.name), `unreachable: ${a.name} is still a row in the table`);
-        ok(/End of the list · \d+ clusters? \(\d+ here, 1 unreachable at the top\)/.test(summary().querySelector('.cl-end').textContent),
-          `unreachable: the end line reads "${summary().querySelector('.cl-end').textContent}"`);
-        const exp = card.querySelector('button.cl-exp');
-        press(exp); await settleFor(150);
-        const opened = section().querySelector(`article.cl-down-card[data-cluster="${a.id}"]`);
-        ok(opened && opened.querySelector('button.cl-exp').getAttribute('aria-expanded') === 'true', 'unreachable: ▾ did not open the card');
-        for (const k of ['Address', 'Through', 'Last answer', 'Error code', 'Next try']) ok(opened && opened.textContent.includes(k), `unreachable: the open card has no "${k}"`);
-        ok(opened && opened.textContent.includes('EP-301'), 'unreachable: the error code is not shown');
-        press(opened.querySelector('button.cl-exp')); await settleFor(100);
+      ok(!doc.querySelector('#view section.cl-down, #view .cl-down-card, #view #cl-down-toggle'), 'unreachable: the old unreachable section is still on the page');
+      ok(rowNames().includes(a.name), `unreachable: ${a.name} is not a row in the table`);
+      const A = rowOf(a);
+      ok(A && A.classList.contains('cl-row-down'), 'unreachable: the row is not marked');
+      if (A) {
+        const health = A.children[colAt('health')];
+        ok(/^unreachable \u00b7 see Alerts$/.test(health.textContent.trim()) && !!health.querySelector('.q.bad .qdot'),
+          `unreachable: Health reads "${health.textContent.trim()}"`);
+        const tip = (health.querySelector('.q') || {}).title || '';
+        ok(/Offline/.test(tip) && /ECONNREFUSED/.test(tip), `unreachable: the Health tooltip does not give reason and error: "${tip}"`);
+        const disk = A.children[colAt('disk')];
+        ok(/^unknown while unreachable$/.test(disk.textContent.trim()) && !disk.querySelector('.disk-bar, .disk-tick, .disk-fill'),
+          `unreachable: Disk reads "${disk.textContent.trim()}" or still draws a bar`);
+        for (const id of ['version', 'nodes', 'size', 'ilm', 'slm', 'snapshot']) {
+          const i = colAt(id);
+          if (i > 0) ok(A.children[i].textContent.trim() === '\u2014', `unreachable: ${id} reads "${A.children[i].textContent.trim()}", expected a dash`);
+        }
+        ok(!A.querySelector('button.cl-chev'), 'unreachable: an unreachable row has an expand chevron');
+        ok(!!A.querySelector('button.cl-name'), 'unreachable: the name menu is gone from the row');
+        ok(A.children.length === headCells().length + 1, 'unreachable: the row has a different number of cells than the heads');
+        const al = A.children[colAt('alerts')];
+        ok(!!al.querySelector('a.cl-alink') && /^\d+ \u2192$/.test(al.textContent.trim()), `unreachable: its Alerts cell reads "${al.textContent.trim()}"`);
       }
+      // A–Z: its place among the others is the place its name has.
+      const names = rowNames();
+      const sorted = [...names].sort((x, y) => x.localeCompare(y, undefined, { numeric: true, sensitivity: 'base' }));
+      ok(JSON.stringify(names) === JSON.stringify(sorted), `unreachable: rows are not A–Z: ${names.join(', ')}`);
 
-      // Hide, and it stays hidden across a reload (read back from storage).
-      press(doc.getElementById('cl-down-toggle')); await settleFor(150);
-      ok(section() && section().classList.contains('folded') && /hidden/.test(section().textContent), 'unreachable: Hide did not fold the section to one line');
-      ok(doc.getElementById('cl-down-toggle').getAttribute('aria-expanded') === 'false', 'unreachable: the folded toggle does not say it is closed');
-      ok(stored() && stored().unreachable.hidden === true, 'unreachable: the fold was not saved');
-      st.state.caller = { name: 'someone-else', role: 'admin' }; await go('overview');
-      ok(section() && !section().classList.contains('folded'), 'unreachable: another user inherited the fold');
+      const n1 = note();
+      ok(!!n1, 'unreachable: no pointer line above the table');
+      if (n1) {
+        ok(!!(n1.compareDocumentPosition(summary()) & window.Node.DOCUMENT_POSITION_FOLLOWING), 'unreachable: the pointer line is not above the summary');
+        ok(/^1 unreachable: listed in the table in A\u2013Z order\. Reasons, Retry and Diagnose are at the top of Alerts \u2192$/.test(n1.textContent.trim()), `unreachable: the pointer line reads "${n1.textContent.trim()}"`);
+        const link = n1.querySelector('a');
+        ok(link && /#\/alerts$/.test(link.getAttribute('href')), 'unreachable: the pointer line does not link to Alerts');
+      }
+      ok(/End of the list \u00b7 \d+ clusters?$/.test(summary().querySelector('.cl-end').textContent), `unreachable: the end line reads "${summary().querySelector('.cl-end').textContent}"`);
+      const sub = summary().querySelector('header .sub').textContent;
+      ok(/^\d+ clusters \u00b7 A\u2013Z by name/.test(sub) && !/shown above|reachable cluster/.test(sub), `unreachable: the summary subtitle reads "${sub}"`);
+
+      // Nothing about it is stored: the fold is retired, and an old one is dropped on the next save.
+      const user0 = user();
+      window.localStorage.setItem(cv.prefsKey('columns-check'), JSON.stringify({ v: 1, columns: { order: [], shown: {}, names: {} }, unreachable: { hidden: true, seen: [a.id] } }));
       st.state.caller = { name: 'columns-check', role: 'admin' }; await go('overview');
-      ok(section() && section().classList.contains('folded'), 'unreachable: the fold did not survive a reload');
+      ok(!!note() && !!rowOf(a), 'unreachable: an old stored fold hid the cluster or the pointer line');
+      press(doc.getElementById('cl-columns')); await settleFor(150);
+      const box = doc.getElementById('cl-colvis-reqs');
+      if (box) { box.checked = !box.checked; box.dispatchEvent(new window.Event('change', { bubbles: true })); await settleFor(200); }
+      key('Escape'); await settleFor(100);
+      ok(stored() && !('unreachable' in stored()), `unreachable: the old fold survived the next save: ${JSON.stringify(stored())}`);
+      st.state.caller = { name: user0, role: 'admin' };
 
-      // A second cluster goes down: a new outage opens it.
+      // A second one goes down.
       if (b) {
         takeDown(b, 'auth_error', 'HTTP 401 from the cluster (EP-401)');
         await go('overview');
-        ok(section() && !section().classList.contains('folded'), 'unreachable: a newly unreachable cluster stayed hidden');
-        ok(section() && /2 unreachable/.test(section().textContent) && /Auth error/.test(section().textContent), 'unreachable: the second card is missing or has no reason');
-        // Hide again, then one recovers: 2 → 1 keeps it hidden.
-        press(doc.getElementById('cl-down-toggle')); await settleFor(150);
-        st.state.data.set(b.id, real.get(b.id).d);
-        const clb = st.client(b.id); if (clb) { clb.state = real.get(b.id).cl.state; clb.lastError = real.get(b.id).cl.lastError; }
+        ok(note() && /^2 unreachable/.test(note().textContent.trim()), `unreachable: the pointer line reads "${note() && note().textContent.trim()}" with two down`);
+        ok(rowOf(b) && /unreachable/.test(rowOf(b).children[colAt('health')].textContent) && /Auth error/.test(rowOf(b).children[colAt('health')].querySelector('.q').title),
+          'unreachable: the second row has no reason in its tooltip');
+        // Sorted by a figure they go after the rest, A–Z among themselves.
+        const sortBtn = headCells().find((x) => x.dataset.col === 'nodes');
+        press(sortBtn); await settleFor(200);
+        const idx = rowNames();
+        const downNames = [a.name, b.name].sort((x, y) => x.localeCompare(y, undefined, { numeric: true, sensitivity: 'base' }));
+        ok(JSON.stringify(idx.slice(-2)) === JSON.stringify(downNames), `unreachable: sorted by Nodes, the unreachable rows are not last, A–Z: ${idx.join(', ')}`);
+        press(headCells().find((x) => x.dataset.col === 'name')); await settleFor(200);
+        // The pointer link goes to the Alerts page.
+        note().querySelector('a').dispatchEvent(new window.MouseEvent('click', { bubbles: true, cancelable: true })); await settleFor(450);
+        ok(/#\/alerts$/.test(window.location.hash), `unreachable: the pointer link went to "${window.location.hash}"`);
         await go('overview');
-        ok(section() && section().classList.contains('folded'), 'unreachable: going from 2 down to 1 opened the section');
-        press(doc.getElementById('cl-down-toggle')); await settleFor(150);
-        ok(section() && !section().classList.contains('folded'), 'unreachable: Show did not open the section');
       }
 
-      // "Go to" from an unreachable alert: the section opens if it was hidden, and that
-      // cluster's card is open and flashed (core/alert-goto.js → core/focus.js).
+      // "Go to" from an unreachable alert: that cluster's row, scrolled to and flashed.
       {
         const goto = await load('core/alert-goto.js');
-        press(doc.getElementById('cl-down-toggle')); await settleFor(150);
-        ok(section() && section().classList.contains('folded'), 'unreachable Go to: could not hide the section first');
         goto.openGoto({ page: 'overview', focus: goto.FOCUS.unreachable({ clusterId: a.id }), clusterId: a.id });
         await settleFor(450);
-        const card = section() && section().querySelector(`article.cl-down-card[data-cluster="${a.id}"]`);
-        ok(section() && !section().classList.contains('folded'), 'unreachable Go to: the hidden section was not shown');
-        ok(card && card.querySelector('button.cl-exp').getAttribute('aria-expanded') === 'true', 'unreachable Go to: the cluster\'s card is not open');
-        ok(card && card.classList.contains('focus-flash'), 'unreachable Go to: the card was not brought into view');
-        if (card) { press(card.querySelector('button.cl-exp')); await settleFor(100); }
+        const row = rowOf(a);
+        ok(row && row.classList.contains('focus-flash'), 'unreachable Go to: the cluster\'s row was not brought into view');
       }
+      restore();
+      await go('overview');
+      ok(!note(), 'unreachable: the pointer line stayed after every cluster answered');
     } finally {
       restore();
       window.localStorage.removeItem(cv.prefsKey('columns-check'));
@@ -1625,7 +1712,7 @@ if (config.clusters.length >= 2 && viaFleet) {
   }));
   setup([{ name: 'daily', type: 'fs', error: null }], { daily: many });
   st.state.config.clusters[0].indexNameRegex = st.LEGACY_INDEX_RE;
-  await go('snapshots');
+  await goOne('snapshots');
   const list = () => [...doc.querySelectorAll('section.card')].find((x) => (x.querySelector('header h2') || {}).textContent === 'Snapshots in daily');
   const rowIds = () => [...(list() ? list().querySelectorAll('tbody tr') : [])].map((tr) => tr.querySelector('td').textContent.trim());
   const pagerBtn = (label) => [...(list() ? list().querySelectorAll('.pager button') : [])].find((b) => b.textContent.trim() === label);
@@ -1684,6 +1771,7 @@ if (config.clusters.length >= 2 && viaFleet) {
       await settleFor(30);
     }
   } else ok(false, 'evidence: no opener on a snapshot row');
+  await backToFleet();
 }
 
 /* -------------------- tasks: one request, applied to many clusters -------------------- */
@@ -2275,6 +2363,49 @@ restoreConsole();
       ok(all && Number(all.max) === Math.min(256, gate.global), `policy: overall input allows up to ${all && all.max}, the gate ${gate.global}`);
     }
 
+    // Change 15: each preset says what it sends, as lower bounds from its intervals.
+    const effects = [...doc.querySelectorAll('#pol-effects .pol-effect')];
+    ok(['client', 'auto', 'background', 'hybrid'].every((id) => effects.some((e) => e.dataset.preset === id)),
+      `policy: not every preset says what it sends: ${JSON.stringify(effects.map((e) => e.dataset.preset))}`);
+    ok(effects.length && effects.every((e) => /When nobody is looking: \S/.test(e.textContent) && /When a page is open: \S/.test(e.textContent)),
+      'policy: a preset\'s effect does not have both lines');
+    const effectOf = (id) => (effects.find((e) => e.dataset.preset === id) || {}).textContent || '';
+    ok(/When nobody is looking: no requests\./.test(effectOf('client')), `policy: Client basis effect reads "${effectOf('client')}"`);
+    ok(/When nobody is looking: at least \d+ an? (minute|hour) \(health every \d+ (min|s|h) × \d+/.test(effectOf('hybrid')), `policy: Hybrid effect reads "${effectOf('hybrid')}"`);
+    ok(/Lower bounds: a poll can take more than one request/.test((doc.getElementById('pol-effects') || {}).textContent || ''), 'policy: the effects do not say they are lower bounds');
+    ok(!!doc.getElementById('pol-mode') && doc.querySelectorAll('[aria-label="Request policy presets"] button').length === 4, 'policy: the preset bar and the Mode dropdown are not both kept');
+
+    // Change 16: the numbers fold behind "Fine-tune", folded at first, one line saying them,
+    // and the fold remembered per person.
+    const fine = doc.getElementById('pol-fine');
+    ok(fine && fine.tagName === 'DETAILS', 'fine-tune: the numbers are not behind a Fine-tune fold');
+    if (fine) {
+      const key = 'elasticpro.config.requests.fineTune.' + String(((await load('core/state.js')).state.caller || {}).name || 'local').toLowerCase();
+      const wasOpen = window.localStorage.getItem(key) === '1';
+      ok(fine.open === wasOpen, `fine-tune: open=${fine.open} but the remembered state is ${wasOpen}`);
+      const line = fine.querySelector('summary').textContent;
+      ok(/^Fine-tune\s*All clusters \d+ · per cluster \d+ · per jump host \d+ · timeout \d+ (s|ms) · \S/.test(line), `fine-tune: the folded line reads "${line}"`);
+      ok(!!fine.querySelector('#pol-global') && !!fine.querySelector('#pol-iv-health') && !!fine.querySelector('#pol-watch'), 'fine-tune: the fields and the intervals are not inside the fold');
+      ok(/request gate: \d+/.test(fine.textContent), 'fine-tune: the request gate ceiling is no longer said');
+      if (doc.getElementById('pol-mode').value === 'on-demand') {
+        ok([...fine.querySelectorAll('.pol-iv-note')].every((n) => /not on a schedule: fetched when a page asks/.test(n.textContent)), 'fine-tune: under Client basis an interval is not marked as off the schedule');
+      }
+      // The line follows what is typed inside.
+      const g = doc.getElementById('pol-global');
+      const was = g.value;
+      g.value = '3'; g.dispatchEvent(new window.Event('input', { bubbles: true }));
+      ok(/All clusters 3 ·/.test(fine.querySelector('summary').textContent), `fine-tune: the folded line did not follow the typed value: "${fine.querySelector('summary').textContent}"`);
+      g.value = was; g.dispatchEvent(new window.Event('input', { bubbles: true }));
+      // Opened, it stays open after the page is drawn again, and is put back as it was.
+      fine.open = !wasOpen; fine.dispatchEvent(new window.Event('toggle'));
+      ok((window.localStorage.getItem(key) === '1') === !wasOpen, 'fine-tune: the fold\'s state is not remembered');
+      const other = [...doc.querySelectorAll('nav.subnav button')].find((b) => b.title === 'Defaults');
+      if (other) { other.click(); await settleFor(200); tab.click(); await settleFor(500); }
+      const again = doc.getElementById('pol-fine');
+      ok(again && again.open === !wasOpen, `fine-tune: after a redraw the fold is ${again && again.open ? 'open' : 'folded'}, expected ${!wasOpen ? 'open' : 'folded'}`);
+      if (again) { again.open = wasOpen; again.dispatchEvent(new window.Event('toggle')); }
+    }
+
     const client = [...doc.querySelectorAll('button')].find((b) => b.textContent.startsWith('Client basis'));
     ok(!!client, 'policy: no "Client basis" preset button');
     // An install with no saved policy runs Client basis, and the page says so: that preset
@@ -2318,6 +2449,75 @@ restoreConsole();
       'policy: a paused cluster has no "paused" pill');
   }
   ok(!!button('Pause all requests'), 'policy: the Request Centre has no "Pause all requests" button');
+
+  // Stop all traffic: the pause-everything control sits in its own card, not in the table's
+  // way, and it still pauses and still resumes — exactly one POLICY_SET each, asking for the
+  // thing it says.
+  const stopCard = () => doc.querySelector('.rq-stop');
+  ok(!!stopCard() && /Stop all traffic/.test(stopCard().textContent), 'stop: no "Stop all traffic" card on the Request Centre');
+  ok(stopCard() && /Holds every request to every cluster until you resume/.test(stopCard().textContent), 'stop: the card does not say what pausing does');
+  const pauseAll = stopCard() && button('Pause all requests', stopCard());
+  ok(!!pauseAll, 'stop: "Pause all requests" is not inside the Stop all traffic card');
+  ok(pauseAll && pauseAll.classList.contains('danger'), 'stop: the pause button is not styled as a warning (.btn.danger)');
+  ok(!doc.querySelector('.rq-tbl') || ![...doc.querySelectorAll('.rq-tbl button')].some((b) => /pause/i.test(b.textContent)), 'stop: a pause button is still among the requests table');
+  if (pauseAll) {
+    const wasAll = !!((lastOf('POLICY_SET') || {}).policy || before.policy || { paused: {} }).paused.all;
+    ok(!wasAll, 'stop: the policy is already paused before the test pressed anything');
+    const sets = countOf('POLICY_SET');
+    pauseAll.click(); await settleFor(800);
+    let m = lastOf('POLICY_SET');
+    ok(countOf('POLICY_SET') === sets + 1 && m && m.policy.paused.all === true, `stop: Pause all requests sent ${JSON.stringify(m && m.policy && m.policy.paused)}`);
+    const resume = stopCard() && button('Resume all', stopCard());
+    ok(!!resume, 'stop: after pausing, the card offers no "Resume all"');
+    ok(/^Paused:/.test((doc.querySelector('.rq-status h2') || {}).textContent || ''), `stop: the status line does not say paused: "${(doc.querySelector('.rq-status h2') || {}).textContent}"`);
+    if (resume) {
+      resume.click(); await settleFor(800);
+      m = lastOf('POLICY_SET');
+      ok(countOf('POLICY_SET') === sets + 2 && m && m.policy.paused.all === false, `stop: Resume all sent ${JSON.stringify(m && m.policy && m.policy.paused)}`);
+      ok(!!(stopCard() && button('Pause all requests', stopCard())), 'stop: after resuming, the card does not offer "Pause all requests" again');
+      ok(!/^Paused:/.test((doc.querySelector('.rq-status h2') || {}).textContent || ''), 'stop: the status line still says paused after resuming');
+    }
+  }
+
+  // Answer first: one status line from the gate, the sentence under it, and the limits as chips.
+  const head = (doc.querySelector('.rq-status h2') || {}).textContent || '';
+  ok(/^(Quiet|Working normally|Busy|Holding back|Not known)\b/.test(head), `status: the Request Centre opens with "${head}"`);
+  const under = (doc.querySelector('.rq-status p') || {}).textContent || '';
+  ok(/Mode: \S/.test(under), `status: the sentence under the status line does not name the mode: "${under}"`);
+  ok(!/\bGate: \d+ connections/.test(doc.querySelector('#view').textContent), 'status: the dense "Gate: N connections" sentence is still on the page');
+  const chips = [...doc.querySelectorAll('.rq-limits .rq-chip')].map((c) => c.textContent);
+  ok(chips.some((t) => /^\d+ at once$/.test(t)) && chips.some((t) => /per cluster$/.test(t)) && chips.some((t) => /^a person waits up to /.test(t)),
+    `status: the limits are not drawn as chips: ${JSON.stringify(chips)}`);
+  const tileKeys = [...doc.querySelectorAll('.rq-tiles .stat .k')].map((k) => k.textContent);
+  ok(JSON.stringify(tileKeys) === JSON.stringify(['In flight', 'Waiting', 'Wait (95th %)', 'Turned away', 'Not sent again', 'Rate']), `status: tiles are ${JSON.stringify(tileKeys)}`);
+
+  // A table people can scan: time of day with the date on hover, the path on one line with
+  // its whole self on hover, the class as a tag, the result as a dot and a code.
+  const first = doc.querySelector('.rq-tbl tbody tr:not(.inflight)');
+  ok(!!first, 'table: no finished row to read');
+  if (first) {
+    const cells = [...first.children];
+    ok(/^\d\d:\d\d:\d\d$/.test(cells[0].textContent) && cells[0].title.length > 8, `table: Time is "${cells[0].textContent}" (title "${cells[0].title}")`);
+    const pb = first.querySelector('button.rq-path');
+    ok(pb && pb.title.startsWith(pb.textContent), `table: the path is not a one-line cell with its full text on hover: ${pb && pb.title}`);
+    ok(first.querySelector('.rq-tag'), 'table: the class is not a tag');
+    ok(first.querySelector('.rq-result .rq-rdot'), 'table: the result has no dot');
+    ok(![...doc.querySelectorAll('.rq-tbl td.num, .rq-tbl th.num')].length, 'table: a right-aligned numeric column is left in the requests table');
+  }
+  const heads = [...doc.querySelectorAll('.rq-tbl thead th')].map((t) => t.textContent);
+  ok(JSON.stringify(heads) === JSON.stringify(['Time', 'Cluster', 'From', 'Class', 'Method', 'Path', 'Wait', 'Took', 'Result']), `table: columns are ${JSON.stringify(heads)}`);
+  const hk = doc.querySelector('details.rq-hk');
+  ok(!!hk && /Housekeeping/.test(hk.querySelector('summary').textContent) && !!hk.querySelector('[data-act="hk-dry"]'), 'housekeeping: not a one-line summary with the full card inside');
+
+  // The mode in the sentence links to Config > Requests.
+  const modeLink = doc.querySelector('.rq-status p a');
+  ok(!!modeLink, 'status: the mode is not a link');
+  if (modeLink) {
+    modeLink.dispatchEvent(new window.MouseEvent('click', { bubbles: true, cancelable: true })); await settleFor(900);
+    const cur = doc.querySelector('nav.subnav button[aria-current="page"]');
+    ok(cur && cur.title === 'Requests', `status: the mode link did not open Config > Requests (open tab: ${cur && cur.title})`);
+    await go('requests'); await settleFor(300);
+  }
   await go('overview');
   // The harness writes into the dev core's data directory; leave the policy as it was.
   if (before && before.ok) await es.policySet(before.policy);
@@ -2529,7 +2729,8 @@ consoleTabs: {
     getKV: async (k) => (k === 'ackUser' ? 'qa' : undefined),
   });
   const saved = { config: st.state.config, data: st.state.data, clients: st.state.clients,
-    selected: st.state.selected, defaults: st.state.defaults };
+    selected: st.state.selected, defaults: st.state.defaults, indices: st.state.indices };
+  const automation = await load('core/automation.js');
 
   // Its own fleet: the real one answers with whatever the mock happens to be doing, and
   // this is about how a known set of alerts is laid out and what each button does.
@@ -2545,10 +2746,19 @@ consoleTabs: {
   });
   const names = { a: 'atlas-prod', k: 'kestrel-dc', b: 'bravo-ci', q: 'quiet-lab' };
   st.state.defaults = { ...DEFAULTS, diskWarnPercent: 85, diskCritPercent: 90 };
-  st.state.config = { clusters: Object.entries(names).map(([id, name]) => ({ id, name, url: `http://${id}.example:9200`, enabled: true })) };
+  // An automation that raised an alert on kestrel-dc while it was up: an alert raised before the
+  // cluster went down, which is what the Alerts page holds behind the Unreachable line.
+  st.state.config = { clusters: Object.entries(names).map(([id, name]) => ({ id, name, url: `http://${id}.example:9200`, enabled: true })),
+    raw: { automations: [{ id: 'old', name: 'Old logs', enabled: true, clusters: ['*'], when: [],
+      match: { conditions: [{ field: 'day', op: 'olderThan', value: '30d' }], all: true }, scope: { kind: 'all' },
+      trigger: { when: 'any', count: 1 }, action: 'notify', notify: { alert: true, level: 'warning', webhook: '' } }] } };
   st.state.selected = 'all';
   st.state.clients = new Map(Object.keys(names).map((id) => [id, { state: 'online' }]));
-  st.state.data = new Map(Object.entries(fleet()));
+  st.state.indices = new Map([['k', [{ index: 'logs-2020.01.01', day: '2020-01-01', size: 1, docs: 1, health: 'green', status: 'open' }]]]);
+  st.state.data = new Map(Object.entries({ ...fleet(), k: healthy() }));
+  automation.clearAutomation();
+  await automation.runAutomation();
+  st.state.data = new Map(Object.entries(fleet()));      // …and now kestrel-dc is down
   await acks.setCurrentUser('qa');
   for (const k of ['a:disk', 'a:health', 'a:ilm', 'a:disk-balance', 'k:unreachable', 'b:slm-mode']) await acks.unacknowledge(k);
   st.invalidateAlerts();
@@ -2564,15 +2774,101 @@ consoleTabs: {
     const groupNames = () => [...doc.querySelectorAll('#view .agroup-name')].map((x) => x.textContent);
     const press = (label) => [...doc.querySelectorAll('#view .seg-btn')].find((b) => b.textContent === label);
 
-    // Default: grouped by cluster, worst first, then how many alerts, then name.
+    // Default: the unreachable cluster first, then clusters with two alerts or more as groups
+    // (worst, then most, then name), and a cluster with one alert as one line.
     ok(press('Cluster') && press('Cluster').getAttribute('aria-pressed') === 'true', 'alerts: Cluster is not the default grouping');
-    ok(JSON.stringify(groupNames()) === JSON.stringify(['atlas-prod', 'kestrel-dc', 'bravo-ci']),
-      `alerts: groups should be atlas-prod, kestrel-dc, bravo-ci — worst, then most, then name — saw ${groupNames().join(', ')}`);
-    const tile = (k) => [...doc.querySelectorAll('#view .stat')].find((t) => t.querySelector('.k').textContent === k);
-    for (const k of ['Critical', 'Warning', 'Clusters affected', 'Acknowledged']) ok(!!tile(k), `alerts: no "${k}" tile`);
-    ok(tile('Clusters affected') && /3\s*of 4/.test(tile('Clusters affected').textContent), `alerts: clusters affected reads "${tile('Clusters affected') && tile('Clusters affected').textContent}"`);
-    ok(/1 cluster has no open alerts/.test(doc.querySelector('#view .alerts-foot').textContent), `alerts: footer reads "${doc.querySelector('#view .alerts-foot').textContent}"`);
+    ok(JSON.stringify(groupNames()) === JSON.stringify(['Unreachable · 1 cluster', 'atlas-prod']),
+      `alerts: the groups should be Unreachable first, then atlas-prod (bravo-ci has one alert, so it is a line) — saw ${groupNames().join(', ')}`);
+    const sections = () => [...doc.querySelectorAll('#view .agroups > section')];
+    ok(sections()[0] && sections()[0].classList.contains('adown'), 'alerts: the Unreachable group is not first');
+    ok(!doc.querySelector('#view .stat'), 'alerts: the four tiles are still there');
+    const sumText = () => [...doc.querySelector('#view .alerts-sum').children].map((x) => x.textContent.trim()).join(' ');
+    ok(/^\d+ critical · \d+ warning · in 3 of 4 clusters · 0 acknowledged/.test(sumText()), `alerts: the summary line reads "${sumText()}"`);
+    ok(!/Alerts current for/.test(doc.getElementById('view').textContent), 'alerts: the "Alerts current for N of M clusters" sentence is still there');
+    const foot = doc.querySelector('#view .alerts-foot').textContent;
+    ok(/1 cluster has no open alerts/.test(foot) && /1 older alert held on unreachable clusters, not counted/.test(foot), `alerts: footer reads "${foot}"`);
     ok(!!doc.querySelector('#view .agroup-head a.agroup-name'), 'alerts: the cluster name in a group header is not a link');
+
+    // Unreachable first: one line, the whole name and reason, how long, Retry (primary), Diagnose, Ack, More.
+    {
+      const down = doc.querySelector('#view .adown');
+      const line = down && down.querySelector('.adown-row');
+      ok(!!line && /kestrel-dc/.test(line.textContent), 'alerts: the unreachable cluster has no line');
+      ok(line && line.querySelector('.adown-name').textContent === 'kestrel-dc', 'alerts: the line does not carry the full name');
+      ok(line && line.querySelector('.adown-reason').textContent.length > 5, 'alerts: the line carries no reason');
+      ok(line && /down (under a minute|\d+ (min|h))/.test(line.querySelector('.adown-meta').textContent), `alerts: no "down for" on the line: "${line && line.querySelector('.adown-meta').textContent}"`);
+      const btns = line ? [...line.querySelectorAll('.arow-main button')].map((b) => b.textContent) : [];
+      ok(['Retry', 'Diagnose', 'Ack', 'More'].every((w) => btns.includes(w)), `alerts: the unreachable line has ${JSON.stringify(btns)}`);
+      ok(line && line.querySelector('button.primary') && line.querySelector('button.primary').textContent === 'Retry', 'alerts: Retry is not the primary button');
+      ok(line && !line.querySelector('a.golink'), 'alerts: the unreachable line has a Go to as well');
+      const dh = [...down.querySelectorAll('.adown-head button')].map((b) => b.textContent);
+      ok(dh.includes('Retry all') && dh.includes('Acknowledge all'), `alerts: the Unreachable header has ${JSON.stringify(dh)}`);
+      // …and shown once: kestrel-dc is in no group below, whatever the grouping.
+      const kRows = () => [...doc.querySelectorAll('#view .arow')].filter((r) => /kestrel-dc/.test(r.textContent));
+      ok(kRows().length === 1, `alerts: kestrel-dc is listed ${kRows().length} times`);
+      // Its older alert is held: said on the line, not listed, not counted.
+      ok(/1 older alert held, not current/.test(line.textContent), `alerts: the line does not say what is held: "${line.querySelector('.adown-meta').textContent}"`);
+      ok(![...doc.querySelectorAll('#view .arow-title b')].some((b) => b.textContent === 'Old logs'), 'alerts: the held alert is listed as a current row');
+      ok(!st.openAlertsNow().some((m) => m.key.startsWith('k:automation')), 'alerts: the held alert is counted as open');
+      line.querySelector('.arow-toggle').click(); await settleFor(80);
+      const opened = doc.querySelector('#view .adown .adown-row');
+      const held = opened && opened.querySelector('.aheld');
+      ok(held && /Old logs/.test(held.textContent) && /not current/.test(held.textContent), 'alerts: opening the line does not list the held alert, labelled not current');
+      ok(opened && /How to fix/.test(opened.textContent) && /Related/.test(opened.textContent), 'alerts: the unreachable line has no How to fix and Related when opened');
+      opened.querySelector('.arow-toggle').click(); await settleFor(60);
+    }
+
+    // One line for a cluster with one alert: no header, severity, name, title, age, Go to, Ack, More.
+    {
+      const one = [...doc.querySelectorAll('#view .arow.single')];
+      ok(one.length === 1 && /bravo-ci/.test(one[0].textContent), `alerts: bravo-ci (one alert) should be one line, saw ${one.length} line(s)`);
+      const r1 = one[0];
+      ok(r1 && !r1.closest('section').querySelector('.agroup-head'), 'alerts: a one-alert cluster has a group header');
+      const w = r1 ? [...r1.querySelectorAll('.arow-main button')].map((b) => b.textContent) : [];
+      ok(w.includes('Ack') && w.includes('More') && r1.querySelector('a.golink') && r1.querySelector('.apill') && r1.querySelector('.arow-age'),
+        `alerts: the one-line cluster has ${JSON.stringify(w)}`);
+      ok(r1 && r1.querySelector('a.golink') && !r1.querySelector('a.golink').classList.contains('btn'), 'alerts: Go to is a button, not a link');
+      const ah = [...doc.querySelectorAll('#view .agroup-head')].find((x) => /atlas-prod/.test(x.textContent));
+      const ahb = ah ? [...ah.querySelectorAll('button')].map((b) => b.textContent) : [];
+      ok(ahb.includes('Acknowledge all') && ahb.includes('Silence ▾'), `alerts: a group header has ${JSON.stringify(ahb)}`);
+      ok(ah && [...ah.querySelectorAll('button.btn')].every((b) => b.classList.contains('ghost')), 'alerts: a group-header action is not quiet');
+    }
+
+    // The counts are filters.
+    {
+      const cnt = (id) => doc.getElementById(id);
+      const levels = () => [...doc.querySelectorAll('#view .arow:not(.adown-row) > .arow-main > .apill')].map((x) => x.textContent);
+      const allLevels = levels();
+      ok(allLevels.includes('warning') && allLevels.includes('critical'), `alerts: the fleet should have both levels, saw ${allLevels.join(',')}`);
+      cnt('alerts-sum-critical').click(); await settleFor(60);
+      ok(cnt('alerts-sum-critical').getAttribute('aria-pressed') === 'true' && press('Critical').getAttribute('aria-pressed') === 'true', 'alerts: the critical count did not apply the critical filter');
+      ok(levels().every((x) => x === 'critical') && !!doc.querySelector('#view .adown'), 'alerts: the critical count still shows warnings, or hides the unreachable cluster');
+      cnt('alerts-sum-critical').click(); await settleFor(60);
+      ok(press('All').getAttribute('aria-pressed') === 'true' && levels().length === allLevels.length, 'alerts: pressing the critical count again did not show all');
+      cnt('alerts-sum-warning').click(); await settleFor(60);
+      ok(press('Warning').getAttribute('aria-pressed') === 'true' && levels().length > 0 && levels().every((x) => x === 'warning') && !doc.querySelector('#view .adown'),
+        'alerts: the warning count did not show warnings only (an unreachable cluster is critical)');
+      cnt('alerts-sum-warning').click(); await settleFor(60);
+      cnt('alerts-sum-acked').click(); await settleFor(60);
+      ok(doc.getElementById('alerts-handled').checked && cnt('alerts-sum-acked').getAttribute('aria-pressed') === 'true', 'alerts: the acknowledged count did not show acknowledged alerts');
+      cnt('alerts-sum-acked').click(); await settleFor(60);
+      ok(!doc.getElementById('alerts-handled').checked, 'alerts: the acknowledged count did not toggle back');
+    }
+
+    // Export CSV lists held alerts too, marked: held is never passed off as current.
+    {
+      files.length = 0;
+      [...doc.querySelectorAll('#view .alerts-bar button')].find((b) => b.textContent === 'Export CSV').click(); await settleFor(150);
+      const csv = files.find((f) => /^es-alerts-.*\.csv$/.test(f.name));
+      ok(!!csv, 'alerts: Export CSV produced no file');
+      if (csv) {
+        const lines = csv.text.split('\n');
+        ok(/(^|,)held_not_current(,|$)/.test(lines[0]), `alerts: the CSV has no held column: ${lines[0].slice(0, 120)}`);
+        const heldRow = lines.find((l) => /k:automation/.test(l));
+        ok(heldRow && /,held,yes,/.test(heldRow), `alerts: the held alert is not marked in the CSV: ${heldRow}`);
+        ok(lines.filter((l) => /k:unreachable/.test(l) && /,no,/.test(l)).length === 1, 'alerts: the unreachable alert is not exactly one current row in the CSV');
+      }
+    }
 
     // The merged disk alert: one row, three nodes inside, opened with its toggle.
     const row = (title) => [...doc.querySelectorAll('#view .arow')].find((r) => r.querySelector('.arow-title b').textContent.startsWith(title));
@@ -2620,7 +2916,7 @@ consoleTabs: {
     }
 
     // Go to: a visible link on every alert, and it opens the page with the cluster selected.
-    const rows = [...doc.querySelectorAll('#view .arow')];
+    const rows = [...doc.querySelectorAll('#view .arow:not(.adown-row)')];
     ok(rows.length >= 5 && rows.every((r) => r.querySelector('a.golink')), `alerts: every alert needs a "Go to" link (${rows.filter((r) => r.querySelector('a.golink')).length} of ${rows.length} have one)`);
     const link = disk && disk.querySelector('.arow-main a.golink');
     ok(link && /^Go to .+ →$/.test(link.textContent), `alerts: the link reads "${link && link.textContent}"`);
@@ -2648,17 +2944,25 @@ consoleTabs: {
 
     // Collapse, remembered.
     const toggle = (name) => [...doc.querySelectorAll('#view .agroup-toggle')].find((b) => b.getAttribute('aria-label').endsWith(` ${name}`));
-    const kt = toggle('kestrel-dc');
+    const kt = toggle('atlas-prod');
     ok(kt && kt.getAttribute('aria-expanded') === 'true', 'alerts: a group does not say it is expanded');
     if (kt) {
       kt.click();
       await settleFor(60);
-      const after = toggle('kestrel-dc');
+      const after = toggle('atlas-prod');
       ok(after.getAttribute('aria-expanded') === 'false', 'alerts: collapsing did not collapse');
-      ok(/cluster:k/.test(window.localStorage.getItem('elasticpro.alerts.collapsed') || ''), 'alerts: the collapsed group is not remembered');
-      ok(doc.querySelectorAll('#view .agroup').length === 3, 'alerts: collapsing removed the group');
+      ok(/cluster:a/.test(window.localStorage.getItem('elasticpro.alerts.collapsed') || ''), 'alerts: the collapsed group is not remembered');
+      ok(doc.querySelectorAll('#view .agroups > section').length === 3, 'alerts: collapsing removed the group');
       after.click();
       await settleFor(60);
+    }
+    const ut = toggle('Unreachable');
+    ok(ut && ut.getAttribute('aria-expanded') === 'true', 'alerts: the Unreachable group has no toggle');
+    if (ut) {
+      ut.click(); await settleFor(60);
+      ok(toggle('Unreachable').getAttribute('aria-expanded') === 'false' && !doc.querySelector('#view .adown .adown-row'), 'alerts: collapsing Unreachable left its lines');
+      toggle('Unreachable').click(); await settleFor(60);
+      ok(!!doc.querySelector('#view .adown .adown-row'), 'alerts: expanding Unreachable did not bring its lines back');
     }
     const ca = doc.getElementById('alerts-collapse-all');
     ok(!!ca, 'alerts: no Collapse all');
@@ -2681,18 +2985,23 @@ consoleTabs: {
       ok([...doc.querySelectorAll('#view .golink')].every((a) => a.tagName === 'A' && a.getAttribute('href')), 'alerts: a Go to is not a real link');
     }
 
-    // The other groupings and the filters.
+    // The other groupings and the filters. Unreachable is first in every one, and only once.
+    const firstIsDown = () => !!doc.querySelector('#view .agroups > section:first-child.adown');
+    const kestrelRows = () => [...doc.querySelectorAll('#view .arow')].filter((r) => /kestrel-dc/.test(r.textContent)).length;
     press('Alert type').click(); await settleFor(60);
-    ok(doc.querySelectorAll('#view .agroup').length >= 4 && !doc.querySelector('#view .agroup-head button.btn.sm + .split'), 'alerts: Alert type grouping');
+    ok(doc.querySelectorAll('#view .agroup').length >= 4 && firstIsDown() && !groupNames().includes('Cluster unreachable'), `alerts: Alert type grouping: ${groupNames().join(', ')}`);
+    ok(kestrelRows() === 1, `alerts: by Alert type kestrel-dc is listed ${kestrelRows()} times`);
     press('None').click(); await settleFor(60);
-    ok(doc.querySelectorAll('#view .agroup.flat').length === 1 && !doc.querySelector('#view .agroup-head'), 'alerts: None should be one flat list');
+    ok(doc.querySelectorAll('#view .agroup.flat').length === 1 && !doc.querySelector('#view .agroup.flat .agroup-head') && firstIsDown(), 'alerts: None should be one flat list, Unreachable first');
+    ok(kestrelRows() === 1, `alerts: with no grouping kestrel-dc is listed ${kestrelRows()} times`);
     press('Cluster').click(); await settleFor(60);
     press('Critical').click(); await settleFor(60);
     ok([...doc.querySelectorAll('#view .arow .apill')].filter((p) => p.textContent === 'warning').length === 0, 'alerts: Critical shows a warning');
     press('All').click(); await settleFor(60);
     const search = doc.getElementById('alerts-search');
     search.value = 'bravo'; search.dispatchEvent(new window.Event('input', { bubbles: true })); await settleFor(60);
-    ok(JSON.stringify(groupNames()) === JSON.stringify(['bravo-ci']), `alerts: searching "bravo" left ${groupNames().join(', ')}`);
+    ok(doc.querySelectorAll('#view .arow').length === 1 && /bravo-ci/.test(doc.querySelector('#view .arow').textContent) && !doc.querySelector('#view .adown'),
+      `alerts: searching "bravo" left ${[...doc.querySelectorAll('#view .arow')].map((r) => r.textContent.slice(0, 30)).join(' | ')}`);
     doc.getElementById('alerts-search').value = '';
     doc.getElementById('alerts-search').dispatchEvent(new window.Event('input', { bubbles: true })); await settleFor(60);
 
@@ -2700,14 +3009,15 @@ consoleTabs: {
     const head = [...doc.querySelectorAll('#view .agroup-head')].find((x) => x.querySelector('.agroup-name').textContent === 'atlas-prod');
     const ackAll = head && [...head.querySelectorAll('button')].find((b) => b.textContent === 'Acknowledge all');
     ok(!!ackAll, 'alerts: no Acknowledge all in the group header');
-    ok(head && [...head.querySelectorAll('button')].some((b) => /^Silence 1 h$/.test(b.textContent)) && head.querySelector('.split .menu-trigger'), 'alerts: no "Silence 1 h" with its duration menu');
+    ok(head && [...head.querySelectorAll('button')].some((b) => b.textContent === 'Silence ▾' && b.classList.contains('menu-trigger')), 'alerts: no "Silence ▾" with its duration menu');
     if (ackAll) {
       ackAll.click();
       await settleFor(200);
-      ok(JSON.stringify(groupNames()) === JSON.stringify(['kestrel-dc', 'bravo-ci']), `alerts: after Acknowledge all the groups are ${groupNames().join(', ')}`);
+      ok(JSON.stringify(groupNames()) === JSON.stringify(['Unreachable · 1 cluster']) && doc.querySelectorAll('#view .arow.single').length === 1,
+        `alerts: after Acknowledge all the groups are ${groupNames().join(', ')}`);
       ok(/acknowledged hidden/.test(doc.querySelector('#view .alerts-foot').textContent), `alerts: footer after ack reads "${doc.querySelector('#view .alerts-foot').textContent}"`);
       ok(st.openAlertsNow().every((m) => m.clusterId !== 'a'), 'alerts: the open counts still include the acknowledged cluster');
-      ok(/^[0-9]+$/.test(tile('Acknowledged').querySelector('.v').textContent.trim()) && Number(tile('Acknowledged').querySelector('.v').textContent) >= 3, `alerts: the Acknowledged tile reads ${tile('Acknowledged').querySelector('.v').textContent}`);
+      ok(Number((doc.getElementById('alerts-sum-acked').textContent.match(/^\d+/) || [0])[0]) >= 3, `alerts: the acknowledged count reads "${doc.getElementById('alerts-sum-acked').textContent}"`);
       // Shown on request, with Re-open.
       doc.getElementById('alerts-handled').click(); await settleFor(80);
       ok(groupNames().includes('atlas-prod') && [...doc.querySelectorAll('#view .arow.handled')].length >= 3, 'alerts: Show acknowledged did not show them');
@@ -2739,19 +3049,20 @@ consoleTabs: {
       navs.length = 0;
       if (entries[0]) { follow(entries[0].querySelector('.notif-actions a')); await settleFor(250); }
       ok(navs.some((n) => n.page === 'alerts'), `alerts: "Open quiet-lab alerts" did not go to Alerts: ${JSON.stringify(navs)}`);
-      ok(JSON.stringify(groupNames()) === JSON.stringify(['quiet-lab']), `alerts: the page was not filtered to quiet-lab, it shows ${groupNames().join(', ')}`);
+      ok(JSON.stringify(groupNames()) === JSON.stringify(['quiet-lab']) && !doc.querySelector('#view .adown'), `alerts: the page was not filtered to quiet-lab, it shows ${groupNames().join(', ')}`);
       ok(/Showing quiet-lab only/.test(doc.getElementById('view').textContent), 'alerts: the cluster filter does not say it is on');
       const showAll = [...doc.querySelectorAll('#view button')].find((b) => b.textContent === 'Show all clusters');
       ok(!!showAll, 'alerts: no way back to every cluster');
-      if (showAll) { showAll.click(); await settleFor(60); ok(groupNames().length >= 3, 'alerts: Show all clusters did not show them'); }
+      if (showAll) { showAll.click(); await settleFor(60); ok(groupNames().length >= 2 && !!doc.querySelector('#view .adown'), `alerts: Show all clusters did not show them (${groupNames().join(', ')})`); }
       // the next visit starts on the whole fleet again
       await go('overview'); await go('alerts');
-      ok(groupNames().length >= 3 && !/Showing quiet-lab only/.test(doc.getElementById('view').textContent), 'alerts: the cluster filter outlived the visit');
+      ok(groupNames().length >= 2 && !!doc.querySelector('#view .adown') && !/Showing quiet-lab only/.test(doc.getElementById('view').textContent), 'alerts: the cluster filter outlived the visit');
       st.state.selected = 'all';
     }
   } finally {
     window.removeEventListener('ep:navigate', onNav);
     Object.assign(st.state, saved);
+    automation.clearAutomation();
     for (const k of ['a:disk', 'a:health', 'a:ilm', 'a:disk-balance', 'k:unreachable', 'b:slm-mode']) await acks.unacknowledge(k);
     Object.assign(idb, realIdb);
     st.invalidateAlerts();
@@ -2842,11 +3153,201 @@ if (viaFleet) {
   }
 }
 
+/* ------- the evidence layout: Snapshots, REST console and Indices show one cluster and nothing else ------- */
+
+// One client is one cluster, and these three pages are screenshotted for that client. With 24
+// clusters, four of them down, nothing about the other 23 may be on screen: no fleet chips, no
+// alert count, no bell, no picker listing them, no toast naming one, no history from one. And
+// the page must say what it shows: the cluster, when its data was read, when it was captured.
+{
+  const st = await load('core/state.js');
+  const menu = await load('ui/menu.js');
+  const { idb } = await load('lib/idb.js');
+  const realAllQueries = idb.allQueries;
+  const reachableUrl = config.clusters[0].url;
+  const pad2 = (n) => String(n).padStart(2, '0');
+  const fleet24 = {
+    version: 2,
+    credentials: { username: 'elastic', password: 'not-a-real-password' },
+    defaults: { readOnly: true, autoRefresh: false, logIndexPattern: 'logstash-*' },
+    clusters: Array.from({ length: 24 }, (_, i) => ({
+      name: `evc-${pad2(i + 1)}-fleetname`,
+      url: i < 20 ? reachableUrl : 'http://127.0.0.1:9',      // nothing listens on 9: connection refused
+      tags: ['prod'],
+    })),
+  };
+  await applyConfig({ load, configPath, raw: fleet24 });
+  const all = st.clusters();
+  ok(all.length === 24, `evidence: expected 24 clusters in the fixture, saw ${all.length}`);
+  const down = all.filter((c) => st.healthState(st.state.data.get(c.id)) === 'unreachable');
+  ok(down.length >= 1, `evidence: the fixture has no unreachable cluster (${down.length}) - it would prove nothing about them`);
+  const byName = (n) => all.find((c) => c.name.startsWith(n));
+  const main = byName('evc-03');
+  const other = byName('evc-09');
+  const dead = down[0];
+
+  const text = () => doc.body.textContent;
+  const barText = () => (doc.getElementById('topbar') || { textContent: '' }).textContent;
+  const noOthers = (where, mine) => {
+    for (const c of all) if (c.id !== mine.id && text().includes(c.name)) problems.push(`evidence ${where}: the page names another cluster, ${c.name}`);
+  };
+  const noFleetChrome = (where) => {
+    const bar = doc.getElementById('topbar');
+    ok(!/\d+\s+(green|yellow|red|unreachable|loading)\b/.test(bar.textContent), `evidence ${where}: a fleet status chip is in the top bar: "${bar.textContent}"`);
+    ok(![...bar.querySelectorAll('button')].some((b) => /^\d+ alerts?$/.test(b.textContent.trim())), `evidence ${where}: the alerts chip is in the top bar`);
+    ok(!bar.querySelector('.bell'), `evidence ${where}: the bell is in the top bar`);
+    ok(!bar.querySelector('#cluster-select, #cluster-finder'), `evidence ${where}: a cluster picker or finder is in the top bar`);
+    ok(!/updated|live|quiet|manual/.test(bar.textContent.replace(/Refresh/g, '')), `evidence ${where}: a fleet freshness claim is in the top bar: "${bar.textContent}"`);
+    ok(!doc.querySelector('#nav button[data-page="alerts"] .pill'), `evidence ${where}: the Alerts tab carries a count`);
+    ok(doc.getElementById('side-foot').hidden === true, `evidence ${where}: the Config/Clusters/Health/Requests strip is showing`);
+    ok(!doc.querySelector('.banner.coverage'), `evidence ${where}: the "Showing cached data for N clusters" banner is showing`);
+    ok(!/Showing cached data for \d+ clusters|oldest .* unreachable/.test(text()), `evidence ${where}: fleet coverage wording is on the page`);
+  };
+  const footer = (where) => {
+    const f = doc.getElementById('evidence-foot');
+    ok(!!f && !f.hidden, `evidence ${where}: no footer stamp`);
+    return f ? f.textContent : '';
+  };
+  const DATE = /\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}/;
+
+  // Control: the same fleet on Clusters has all of it, so the checks below can fail.
+  st.state.selected = 'all';
+  await go('overview'); await settleFor(300);
+  {
+    const bar = doc.getElementById('topbar').textContent;
+    ok(/\d+\s+(green|yellow|red|unreachable)/.test(bar), `evidence control: Clusters has no fleet chip, so the absence checks prove nothing: "${bar}"`);
+    ok(!!doc.querySelector('#topbar .bell'), 'evidence control: Clusters has no bell');
+    ok(!!doc.getElementById('cluster-select'), 'evidence control: Clusters has no picker');
+    ok(doc.getElementById('side-foot').hidden === false, 'evidence control: Clusters has no status strip');
+  }
+
+  // Snapshots with "All clusters": asks for one, and shows no fleet while it asks.
+  await go('snapshots'); await settleFor(300);
+  {
+    const pick = doc.getElementById('evidence-pick');
+    ok(!!pick, 'evidence snapshots: with "All clusters" the page does not ask for one cluster');
+    ok(/Evidence needs one cluster/.test(text()), 'evidence snapshots: no explanation that evidence needs one cluster');
+    ok(!doc.querySelector('#view section.lazy-block, #view .seg'), 'evidence snapshots: a fleet of snapshot lists is drawn under the question');
+    noFleetChrome('snapshots (choosing)');
+    ok((doc.getElementById('evidence-foot') || { hidden: true }).hidden, 'evidence snapshots: a stamp is printed while no cluster is chosen');
+    if (pick) { pick.value = main.id; pick.dispatchEvent(new window.Event('change', { bubbles: true })); await settleFor(500); }
+  }
+
+  for (const [id, label] of [['snapshots', 'Snapshots'], ['console', 'REST console'], ['indices', 'Indices']]) {
+    if (id === 'console') {
+      // The harness's in-memory IndexedDB never completes a transaction, so the history is handed
+      // to the page the way the real store would. A request recorded against another cluster
+      // must not be listed, let alone offered to Run here.
+      idb.allQueries = async () => [
+        { id: 'evd-other', ts: Date.now() - 5000, cluster: other.name, clusterId: other.id, method: 'GET',
+          path: '/_cat/evd-foreign-path', body: '', status: 200, ok: true, tookMs: 3, fav: 0 },
+        { id: 'evd-mine', ts: Date.now() - 4000, cluster: main.name, clusterId: main.id, method: 'GET',
+          path: '/_cat/evd-own-path', body: '', status: 200, ok: true, tookMs: 3, fav: 0 }];
+    }
+    await go(id); await settleFor(id === 'snapshots' ? 900 : 500);
+    ok(st.state.selected === main.id, `evidence ${id}: selected ${st.state.selected}, expected the chosen cluster`);
+    ok(doc.querySelector('#topbar h1').textContent === label, `evidence ${id}: the top bar does not carry the page title`);
+    const chip = doc.querySelector('#topbar .pill');
+    ok(chip && chip.textContent.includes(main.name), `evidence ${id}: the top bar does not name this cluster with its health: "${chip && chip.textContent}"`);
+    ok([...doc.querySelectorAll('#topbar button')].some((b) => /Refresh/.test(b.textContent)), `evidence ${id}: no Refresh in the top bar`);
+    noFleetChrome(id);
+    if (id === 'snapshots') {
+      // Where the backups are kept (a bucket, an NFS path) is not evidence and must not be in
+      // it (user decision, 0.3.23): no Location column and no repository path, in either view.
+      // The mock's "daily" repository is an fs repository at /mnt/backups.
+      for (const label of ['Snapshot Summary', 'Snapshots']) {
+        const b = [...doc.querySelectorAll('#view .seg button')].find((x) => x.textContent.trim() === label);
+        if (b) { b.click(); await settleFor(300); }
+        ok(![...doc.querySelectorAll('#view th')].some((th) => /^Location/.test(th.textContent.trim())), `evidence snapshots (${label}): a Location column is shown`);
+        ok(!text().includes('/mnt/backups'), `evidence snapshots (${label}): the repository path /mnt/backups is on the page`);
+      }
+    }
+    if (id === 'console') {
+      const t = text();
+      ok(!t.includes('evd-foreign-path'), 'evidence console: the history lists a request recorded on another cluster');
+      ok(t.includes('evd-own-path'), 'evidence console: this cluster\'s own history is missing');
+      ok(![...doc.querySelectorAll('#c-history th')].some((th) => th.textContent === 'Cluster'), 'evidence console: the history still has a Cluster column');
+      ok(footer(id).includes('no request run yet'), `evidence console: before any request the stamp should say none was run: "${footer(id)}"`);
+      doc.getElementById('c-path').value = '/_cluster/health';
+      doc.getElementById('c-path').dispatchEvent(new window.Event('input', { bubbles: true }));
+      doc.getElementById('c-run').click();
+      await settleFor(2200);          // the stamp is redrawn on its own one-second clock
+    }
+    noOthers(id, main);
+    const f = footer(id);
+    ok(f.includes(`Cluster: ${main.name}`), `evidence ${id}: the stamp does not name the cluster: "${f}"`);
+    ok(!/https?:\/\//.test(f) && !f.includes(new URL(main.url).host), `evidence ${id}: the stamp prints the cluster address: "${f}"`);
+    // Nowhere on the page: no http(s) address at all (the console's response body, which the person
+    // asked for, is the one exception and is checked separately), and not the cluster's host:port.
+    {
+      const own = new URL(main.url).host;
+      const t = doc.getElementById('view').textContent + doc.getElementById('topbar').textContent + f;
+      const body = doc.getElementById('c-out');
+      const shown = body ? t.replace(body.textContent, '') : t;
+      ok(!/https?:\/\/\S/.test(shown), `evidence ${id}: the page prints an address: "${(shown.match(/https?:\/\/\S+/) || [''])[0]}"`);
+      ok(!shown.includes(own), `evidence ${id}: the page prints the cluster's host ${own}`);
+    }
+    ok(DATE.test(f), `evidence ${id}: the stamp has no data time: "${f}"`);
+    ok(/Captured \d{2}:\d{2}:\d{2}/.test(f), `evidence ${id}: the stamp has no capture time: "${f}"`);
+    ok(!/data time unknown|not read yet|no request run yet/.test(f), `evidence ${id}: the stamp has no real data time: "${f}"`);
+  }
+
+  // What the app says by itself, while an evidence page is open: held, not shown, not lost.
+  {
+    await go('overview'); await settleFor(200);
+    // A snapshot running on another cluster, seen once so that its finishing is news.
+    const setSnap = (status) => {
+      const d = st.state.data.get(other.id);
+      st.state.data.set(other.id, { ...d, snapshots: { 'evd-repo': [{ id: 'evd-snap', status }] } });
+    };
+    setSnap('IN_PROGRESS');
+    st.bus.emit('refreshed', { byPerson: false });
+    await settleFor(100);
+    await go('indices'); await settleFor(300);
+    const before = menu.notifications().length;
+    setSnap('SUCCESS');                                      // …and it finishes while an evidence page is open
+    st.bus.emit('data', { id: other.id });
+    st.bus.emit('refreshed', { byPerson: false });
+    await settleFor(400);
+    ok(!doc.querySelector('.toast-wrap') || !doc.querySelector('.toast-wrap').textContent.includes(other.name),
+      `evidence indices: an alert toast about another cluster is on screen: "${(doc.querySelector('.toast-wrap') || {}).textContent}"`);
+    ok(menu.notifications().length === before, 'evidence indices: the notice went to the bell while the page was open');
+    noOthers('indices after an alert elsewhere', main);
+    await go('overview'); await settleFor(300);
+    const held = [...doc.querySelectorAll('.toast-wrap .toast')].map((t) => t.textContent).join(' | ');
+    ok(/Held \d+ notices? while on an evidence page/.test(held), `evidence: leaving did not say what was held: "${held}"`);
+    ok(menu.notifications().some((n) => n.message.includes(other.name)), 'evidence: the held alert never reached the bell - it was dropped');
+    // …and everything fleet-wide is back at once (on the fleet view, which is the person's to pick).
+    { const sel = doc.getElementById('cluster-select'); ok(!!sel, 'evidence: the picker did not come back on Clusters');
+      if (sel) { sel.value = 'all'; sel.dispatchEvent(new window.Event('change', { bubbles: true })); await settleFor(400); } }
+    const bar = doc.getElementById('topbar').textContent;
+    ok(/\d+\s+(green|yellow|red|unreachable)/.test(bar), `evidence: the fleet chip did not come back on Clusters: "${bar}"`);
+    ok(!!doc.querySelector('#topbar .bell'), 'evidence: the bell did not come back on Clusters');
+    ok(!!doc.getElementById('cluster-select'), 'evidence: the picker did not come back on Clusters');
+    ok([...doc.querySelectorAll('#topbar button')].some((b) => /^\d+ alerts?$/.test(b.textContent.trim())), 'evidence: the alerts chip did not come back on Clusters');
+    ok(doc.getElementById('side-foot').hidden === false, 'evidence: the status strip did not come back on Clusters');
+    ok((doc.getElementById('evidence-foot') || { hidden: true }).hidden, 'evidence: the stamp is still printed on Clusters');
+    ok(!!doc.querySelector('#nav button[data-page="alerts"] .pill'), 'evidence: the Alerts tab count did not come back');
+  }
+
+  // A cluster that cannot be reached: the stamp says so rather than inventing a time.
+  {
+    st.state.selected = dead.id;
+    await go('indices'); await settleFor(500);
+    const f = footer('indices (unreachable cluster)');
+    ok(f.includes(`Cluster: ${dead.name}`), `evidence unreachable: the stamp does not name the cluster: "${f}"`);
+    ok(/not read|unreachable|failed|data time unknown/.test(f), `evidence unreachable: the stamp claims a clean read of a cluster that is down: "${f}"`);
+    noOthers('unreachable', dead);
+    await go('overview');
+  }
+  idb.allQueries = realAllQueries;
+}
+
 if (problems.length) {
   console.error(`\n${problems.length} problem(s):`);
   for (const p of problems) console.error('  ✗ ' + p);
   process.exit(1);
 }
-console.log('ok: strip, console, shards, the Clusters page (columns, name menu, unreachable cards), volume, hand-off, refresh, snapshots, tasks, toasts, accounts split, the log-delay preflight, a quiet Config page, the Request Centre and the redraw gate, the request policy, the coverage bar, the Tasks panel and the console tabs, template management, the Alerts page grouped by cluster with merged repeats, Go to, playbooks and the bell');
+console.log('ok: strip, console, shards, the Clusters page (columns, name menu, unreachable rows, expand chevron, alerts link), volume, hand-off, refresh, snapshots, tasks, toasts, accounts split, the log-delay preflight, a quiet Config page, the Request Centre and the redraw gate, the request policy, the coverage bar, the Tasks panel and the console tabs, template management, the Alerts page grouped by cluster with merged repeats, Go to, playbooks and the bell');
 // The pages leave auto-refresh timers and a live tail running; nothing here waits on them.
 process.exit(0);

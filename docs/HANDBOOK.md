@@ -300,7 +300,7 @@ paused}`, each catalogue entry's `effectiveClass` under the mode, and per cluste
 |---|---|---|
 | `REQUEST_STATS` | user | `{ok, requests: {cluster: {last5m, perMinute, …}}}` — the strip's "Requests N in 5m". |
 | `REQUEST_LOG {cluster?, limit?}` | admin | `{ok, inflight: [record…], recent: [record…], keep, throttled: {cluster: throttle}}` — every user's requests on the clusters the caller may see, newest first, `limit` ≤ 2,000 (default 200). |
-| `POLICY_GET` | user | `{ok, policy, defaults, effective: {dataset: background|onDemand}, stored, warning?, running}` |
+| `POLICY_GET` | user | `{ok, policy, defaults, effective: {dataset: background|onDemand}, resolvedMode, stored, warning?, running, gate, pollConcurrencyEnv}` — `pollConcurrencyEnv` is `ELASTICPRO_POLL_CONCURRENCY` as read, or null when unset |
 | `POLICY_SET {policy}` | admin | the same, plus `saved`; `bad_request` when it does not parse (an unknown `mode`, a non-object). Values out of bounds are bounded, not refused. Audited. |
 | `ABORT_REQUESTS {origin}` | user | `{ok, aborted: n}` — the caller's own in-flight requests from a `page:<id>` or `console` origin stop waiting and answer `kind: aborted` (recorded so); keyed by person + origin, so nobody reaches another's; the poller's and the schedules' are refused (`bad_request`). Nothing is sent to the cluster: a search already running there is what `_tasks` and its `_cancel` are for. |
 

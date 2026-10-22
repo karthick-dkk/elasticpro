@@ -3,14 +3,15 @@
 import { h, mount, $ } from '../lib/dom.js';
 import { bytes, dt, ago, download } from '../lib/fmt.js';
 import * as cfg from '../core/config.js';
-import { state, setConfig, refreshAll, clusters, client, hasSessionCredential,
+import { state, setConfig, refreshAll, clusters, client, hasSessionCredential, healthState,
          sessionCredentialLabel, clearSessionCredential, clustersNeedingCredential, isReadOnly } from '../core/state.js';
 import { workerStatus, forgetWorker, tunnels as fetchTunnels, listPins, untrustCert, untrustHostKey, tunnelReconnect,
          delaySinkGet, delaySinkSet, delaySinkRun, trustCert,
          zabbixLinkGet, zabbixLinkSet, zabbixLinkTest, zabbixPairBegin, zabbixUnpair,
          policyGet, policySet } from '../core/es.js';
 import { PRESETS, DATASETS, DATASET_LABELS, BOUNDS, intervalBounds, applyPreset, activePreset, normalisePolicy,
-         fromForm, describeMode, MODES, FALLBACK_DEFAULTS, boundsUnder } from '../core/policy.js';
+         fromForm, describeMode, MODES, FALLBACK_DEFAULTS, boundsUnder, policyEffect, fineTuneSummary,
+         effectiveClass, resolvedMode } from '../core/policy.js';
 import { defaultApiUrl, checkUrl, countdown, secondsLeft, isManaged, linkChanges, formProblems, linkSummary,
          linkView, testMessage, epUrlFrom, eventLine } from '../core/zabbix-link.js';
 import { showCredentialDialog, forgetVaultCredential } from '../ui/credential-dialog.js';
@@ -18,7 +19,7 @@ import { EXAMPLE_YAML } from '../core/example.js';
 import { saveTextAs } from '../core/platform.js';
 import { editCluster, editJumpHost, editCredentials, editDefaults, unlockSealed, saveRaw, rawClusterOf } from '../ui/config-editor.js';
 import { card, pill, table, empty } from './common.js';
-import { navigateTo } from '../core/intent.js';
+import { navigateTo, intent } from '../core/intent.js';
 import { ALERT_RULES, loadAlertSettings, isEnabled } from '../core/alert-rules.js';
 import { isManagedDefault, isManagedZabbixOption, managedZabbixOptions, MANAGED_NOTE } from '../core/managed.js';
 import { toast } from '../ui/menu.js';
@@ -123,6 +124,9 @@ async function restore(v) {
 export function render(el) {
   host = el;
   loadedSection = null;
+  // Arriving from another page that named a tab (the Request Centre's mode link) opens it.
+  if (intent.settings && intent.settings.section && SECTIONS.some((x) => x.id === intent.settings.section)) section = intent.settings.section;
+  intent.settings = null;
   // draw() asks for whatever the open section needs. loadSink is the exception: its
   // answer decides whether the Scheduled log delay tab exists at all, so it has to be
   // asked before the bar can be drawn correctly — and it redraws when it lands.
@@ -561,6 +565,54 @@ async function savePolicy() {
   draw();
 }
 
+/**
+ * Whether the "Fine-tune" fold is open, per person and per browser. A convenience: losing it
+ * (a private window) only means it starts folded.
+ */
+const fineKey = () => `elasticpro.config.requests.fineTune.${String((state.caller && state.caller.name) || 'local').toLowerCase()}`;
+function fineOpen() {
+  try { return localStorage.getItem(fineKey()) === '1'; } catch (_) { return false; }
+}
+function rememberFine(open) {
+  try { if (open) localStorage.setItem(fineKey(), '1'); else localStorage.removeItem(fineKey()); } catch (_) { /* memory only */ }
+}
+
+/** The fleet the effects are worked out for: how many clusters, paused and not answering. */
+function fleetCounts(p) {
+  const list = clusters();
+  const paused = new Set(p.paused.clusters);
+  const live = list.filter((c) => !paused.has(c.id));
+  return {
+    clusters: list.length,
+    paused: list.length - live.length,
+    unreachable: live.filter((c) => healthState(state.data.get(c.id)) === 'unreachable').length,
+  };
+}
+
+/**
+ * Said beside the concurrency summary when ELASTICPRO_POLL_CONCURRENCY is set on the server
+ * (POLICY_GET's pollConcurrencyEnv): whether it is what decides "All clusters" now, or a saved
+ * policy names its own. Judged on the policy that is running, not the form.
+ */
+function envConcurrencyNote() {
+  const env = pol && Number.isInteger(pol.pollConcurrencyEnv) ? pol.pollConcurrencyEnv : null;
+  if (env === null) return null;
+  const running = pol.policy && pol.policy.concurrency ? pol.policy.concurrency.global : null;
+  const text = running === env
+    ? `ELASTICPRO_POLL_CONCURRENCY=${env} is set on the server, and it decides All clusters (${env}), not this policy. Saving here writes the policy's own value, which then wins.`
+    : `ELASTICPRO_POLL_CONCURRENCY=${env} is set on the server, but the saved policy names its own All clusters (${running}), so that is used.`;
+  return h('span#pol-env.pol-env', { role: 'note' }, text);
+}
+
+/** One preset's effect, or the hand-made policy's: what it costs when nobody looks and when a page is open. */
+function effectItem(name, e, { on = false, id = null } = {}) {
+  return h(`div.pol-effect${on ? '.on' : ''}`, { 'data-preset': id || 'custom' },
+    h('div.pol-effect-h', h('b', name), on ? h('span.pol-effect-on', 'selected') : null),
+    e.why ? h('div.muted.pol-effect-why', e.why) : null,
+    h('div', h('span.pol-effect-k', 'When nobody is looking: '), e.idle.text),
+    h('div', h('span.pol-effect-k', 'When a page is open: '), e.open.text));
+}
+
 function requestsCard() {
   if (!pol) return card('Requests', 'Loading…', h('div.muted', 'Asking the core for its request policy…'));
   if (pol.error) {
@@ -574,7 +626,6 @@ function requestsCard() {
   const p = normalisePolicy(polDraft || pol.policy, defaults, bounds);
   const preset = activePreset(p, defaults, bounds);
   const admin = isAdminCaller();
-  const effective = pol.effective || {};
   const pausedSet = new Set(p.paused.clusters);
   const num = (id, value, b, width = '90px', title = '') => h('input', {
     id, type: 'number', min: String(b.min), max: String(b.max), value: String(value), disabled: !admin,
@@ -596,24 +647,59 @@ function requestsCard() {
     h('span.muted', label), input, hint ? h('span.muted', { style: { fontSize: '10.5px' } }, hint) : null);
   const modeHint = h('div#pol-mode-desc.muted', { style: { fontSize: '11.5px' } }, describeMode(p.mode),
     p.mode === 'auto' && pol.resolvedMode ? h('b', ` Running now: ${pol.resolvedMode}.`) : null);
+  const counts = fleetCounts(p);
+  const mode = resolvedMode(p.mode, counts.clusters);
   const stored = pol.warning
     ? h('span', { style: { color: 'var(--warning)' } }, pol.warning)
     : pol.stored ? 'Kept in policy.json in the core’s data directory'
     : 'Not saved yet — the shipped policy is running';
 
+  // What each interval does under the mode in the form, for this many clusters
+  // (effectiveClass, the core's rule). Under Client basis nothing is on a schedule: an
+  // interval only says how often a page's data is fetched again while the page watches it.
   const ivRows = DATASETS.map((ds) => {
     const b = intervalBounds(ds);
-    // "Unknown" rather than a guess: the class is what the running core decided, and an
-    // older core that does not say is not the same as one that polls in the background.
-    const eff = effective[ds] === 'onDemand' ? pill('on demand', 'grey')
-      : effective[ds] === 'background' ? pill('background', 'green')
-      : h('span.muted', { title: 'The core did not say how it fetches this dataset' }, 'not reported');
-    return h('tr',
+    const bg = effectiveClass(ds, p.mode, counts.clusters) === 'background';
+    const note = bg ? h('span', pill('on a schedule', 'green'), ' kept fresh for every cluster')
+      : mode === 'on-demand' ? h('span.muted', 'not on a schedule: fetched when a page asks, then at this interval while it watches')
+      : h('span.muted', 'fetched when a page asks, then at this interval while it watches');
+    return h(`tr${mode === 'on-demand' ? '.pol-iv-idle' : ''}`,
       h('td', DATASET_LABELS[ds], h('div.mono.muted', { style: { fontSize: '10.5px' } }, ds)),
       h('td', num(`pol-iv-${ds}`, p.intervalsSec[ds], b, '100px', `${b.min}–${b.max} seconds`), h('span.muted', { style: { marginLeft: '4px' } }, 's')),
       h('td.muted', { style: { fontSize: '11px' } }, `${defaults.intervalsSec ? defaults.intervalsSec[ds] : '—'} s`),
-      h('td', eff));
+      h('td.pol-iv-note', note));
   });
+  const modeName = mode === 'on-demand' ? 'Client basis' : mode === 'hybrid' ? 'Hybrid' : 'Background';
+
+  // Change 15: what each preset does with this fleet, from its own intervals; and the
+  // hand-made policy's, when the form is not one of them. Lower bounds (policyEffect).
+  const effects = h('div#pol-effects.pol-effects',
+    h('div.muted.pol-effects-note',
+      `What each choice sends to your ${counts.clusters} cluster${counts.clusters === 1 ? '' : 's'}${counts.unreachable ? ` (${counts.unreachable} not answering now)` : ''}, `
+      + 'worked out from its intervals. Lower bounds: a poll can take more than one request.'),
+    h('div.pol-effect-list',
+      ...PRESETS.map((x) => effectItem(x.name, policyEffect(applyPreset(p, x.id, defaults, bounds), counts), { on: preset === x.id, id: x.id })),
+      preset ? null : effectItem('This policy (no preset)', policyEffect(p, counts), { on: true })));
+
+  // Change 16: the numbers fold behind "Fine-tune", one line when folded. The line follows
+  // what is typed, so a change made inside is still on it after folding.
+  const summaryText = h('span#pol-fine-sum.muted', fineTuneSummary(p, counts.clusters));
+  const fine = h('details#pol-fine.pol-fine', {
+    open: fineOpen(),
+    ontoggle: (e) => rememberFine(e.target.open),
+    oninput: () => { summaryText.textContent = fineTuneSummary(fromForm(readPolicyForm(), defaults, bounds).policy, counts.clusters); },
+    onchange: () => { summaryText.textContent = fineTuneSummary(fromForm(readPolicyForm(), defaults, bounds).policy, counts.clusters); },
+  },
+    h('summary', h('b', 'Fine-tune'), summaryText, envConcurrencyNote()),
+    h('div.pol-fine-body',
+      h('div', { style: { display: 'flex', gap: '14px', flexWrap: 'wrap', alignItems: 'start' } },
+        labelled('Watch window (minutes)', num('pol-watch', p.watchMinutes, BOUNDS.watchMinutes),
+          'how long a page keeps an on-demand dataset fresh after it was last looked at'),
+        labelled('Concurrency — all clusters', capped('pol-global', p.concurrency.global, bounds.global), capHint(bounds.global, 'global')),
+        labelled('Per cluster', capped('pol-per', p.concurrency.perCluster, bounds.perCluster), capHint(bounds.perCluster, 'perCluster')),
+        labelled('Per jump host', capped('pol-tunnel', p.concurrency.tunnel, bounds.tunnel), capHint(bounds.tunnel, 'perJump')),
+        labelled('Timeout (ms)', num('pol-timeout', p.timeoutMs, BOUNDS.timeoutMs, '110px'))),
+      table(['Dataset', 'Every', 'Shipped', `Under ${modeName}`], ivRows)));
 
   const list = clusters();
   return card('Requests', `mode: ${p.mode}${p.paused.all ? ' · all requests paused' : pausedSet.size ? ` · ${pausedSet.size} cluster(s) paused` : ''}`,
@@ -632,17 +718,13 @@ function requestsCard() {
       h('div', { style: { display: 'grid', gap: '4px' } },
         labelled('Mode', h('select#pol-mode', {
           disabled: !admin, style: { maxWidth: '220px' },
-          onchange: (e) => { modeHint.textContent = describeMode(e.target.value); },
+          // The mode changes the effects, the summary and what each interval does: redraw
+          // from the form as it stands, so nothing typed is lost.
+          onchange: () => { polDraft = fromForm(readPolicyForm(), defaults, bounds).policy; draw(); },
         }, ...MODES.map((m) => h('option', { value: m, selected: m === p.mode }, m)))),
         modeHint),
-      table(['Dataset', 'Every', 'Shipped', 'Effective'], ivRows),
-      h('div', { style: { display: 'flex', gap: '14px', flexWrap: 'wrap', alignItems: 'start' } },
-        labelled('Watch window (minutes)', num('pol-watch', p.watchMinutes, BOUNDS.watchMinutes),
-          'how long a page keeps an on-demand dataset fresh after it was last looked at'),
-        labelled('Concurrency — all clusters', capped('pol-global', p.concurrency.global, bounds.global), capHint(bounds.global, 'global')),
-        labelled('Per cluster', capped('pol-per', p.concurrency.perCluster, bounds.perCluster), capHint(bounds.perCluster, 'perCluster')),
-        labelled('Per jump host', capped('pol-tunnel', p.concurrency.tunnel, bounds.tunnel), capHint(bounds.tunnel, 'perJump')),
-        labelled('Timeout (ms)', num('pol-timeout', p.timeoutMs, BOUNDS.timeoutMs, '110px'))),
+      effects,
+      fine,
       h('div', { style: { display: 'grid', gap: '6px' } },
         h('label', { style: { display: 'inline-flex', gap: '6px', alignItems: 'center', fontSize: '12px' },
           title: 'Nothing new starts; what is in flight finishes, and a page’s request waits' },

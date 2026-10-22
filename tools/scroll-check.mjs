@@ -577,7 +577,7 @@ async function run(browserName, [vw, vh], framed = false) {
     }
 
     // the name menu: the same, and the page scrolling elsewhere closes it (intended)
-    // bring the first names into the middle of the window (the unreachable cards may fill the top)
+    // bring the first names into the middle of the window (the pointer line and the toolbar fill the top)
     await F.evaluate(() => { const b = document.querySelector('.cl-summary tbody button.cl-name'); if (b) b.scrollIntoView({ block: 'center', behavior: 'instant' }); });
     await sleep(300);
     const nm = await F.evaluate(() => { for (const el of document.querySelectorAll('.cl-summary tbody button.cl-name')) { const r = el.getBoundingClientRect();

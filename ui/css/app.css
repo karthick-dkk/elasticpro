@@ -315,6 +315,24 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .main { min-width: 0; display: flex; flex-direction: column; flex: 1; }
 .page { padding: 16px; max-width: 1900px; width: 100%; margin: 0 auto; }
 
+/* The evidence layout (js/core/evidence.js): Snapshots, REST console and Indices carry a stamp
+   at the foot of the page that is printed into every screenshot of it. Pinned to the bottom of
+   the window while the page is taller than it, and to the bottom of the content when it is not,
+   so a picture of the window and a picture of the whole page both include it. Amber when the
+   data it names is old: that is a reason not to take the picture yet. */
+#evidence-note { margin: 12px 16px 0; }
+.evidence-foot {
+  position: sticky; bottom: 0; z-index: 5; margin-top: auto; width: 100%;
+  display: flex; flex-wrap: wrap; gap: 2px 14px; align-items: baseline;
+  padding: 6px 16px; font-size: 11.5px; line-height: 1.4;
+  color: var(--text-secondary); background: var(--surface-1); border-top: 1px solid var(--border);
+  font-variant-numeric: tabular-nums;
+}
+.evidence-foot[hidden], #evidence-note[hidden] { display: none; }
+.evidence-foot .ev-seg.stale { color: var(--warning-ink); font-weight: 600; }
+.evidence-foot .ev-seg.cluster { color: var(--text-primary); font-weight: 600; }
+.evidence-foot[data-tone="stale"] { background: var(--warning-bg); border-top-color: color-mix(in srgb, var(--warning) 50%, transparent); }
+
 @media (max-width: 900px) {
   .brand span { display: none; }
 }
@@ -471,6 +489,54 @@ table.tbl tr.kv td.v { font-size: 12px; word-break: break-all; }
 .tbl-empty.rich .detail { font-size: 11px; color: var(--text-muted); max-width: 60ch; word-break: break-word; }
 .tbl-empty.rich .acts { display: flex; gap: 6px; flex-wrap: wrap; justify-content: center; margin-top: 2px; }
 
+/* ------------------------------ Request Centre ------------------------------ */
+/* The answer first (status + the Stop all traffic card), the limits as chips, then a table
+   to scan: every column left-aligned, a path on one line with an ellipsis. */
+.rq-top { display: flex; flex-wrap: wrap; gap: 14px; align-items: stretch; margin-bottom: 12px; }
+.rq-status, .rq-stop { background: var(--surface-1); border: 1px solid var(--border); border-radius: var(--radius); padding: 14px 16px; min-width: 0; }
+.rq-status { flex: 999 1 480px; display: flex; flex-direction: column; gap: 6px; }
+.rq-stop { flex: 1 1 400px; display: flex; flex-direction: column; gap: 8px; border-color: color-mix(in srgb, var(--critical) 35%, var(--border)); }
+.rq-stop.paused { background: var(--warning-bg); border-color: color-mix(in srgb, var(--warning) 55%, var(--border)); }
+.rq-head { display: flex; align-items: center; gap: 10px; }
+.rq-head h2, .rq-stop h2 { margin: 0; font-size: 18px; font-weight: 650; letter-spacing: -.01em; }
+.rq-stop h2 { font-size: 14.5px; }
+.rq-status p, .rq-stop p { margin: 0; font-size: 13px; line-height: 1.5; color: var(--text-secondary); }
+.rq-status p { padding-left: 22px; }
+.rq-status p a { color: var(--accent); font-weight: 600; }
+.rq-stop-act { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: auto; }
+.rq-dot { flex: none; width: 12px; height: 12px; border-radius: 50%; background: var(--text-muted); }
+.rq-dot.green { background: var(--good); } .rq-dot.yellow { background: var(--warning); }
+.rq-dot.red { background: var(--critical); } .rq-dot.accent { background: var(--accent); }
+.rq-tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 10px; margin-bottom: 12px; }
+.rq-limits { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; margin: 0 0 12px; font-size: 12.5px; }
+.rq-limits-k { font-size: 11px; font-weight: 700; letter-spacing: .05em; text-transform: uppercase; color: var(--text-muted); margin-right: 2px; }
+.rq-chip { display: inline-flex; align-items: baseline; gap: 4px; padding: 3px 10px; border-radius: 999px; background: var(--surface-2); border: 1px solid var(--border); color: var(--text-secondary); white-space: nowrap; }
+.rq-chip b { color: var(--text-primary); font-variant-numeric: tabular-nums; }
+.rq-hk { margin-top: 14px; }
+.rq-hk > summary { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; cursor: pointer; padding: 8px 12px; list-style: none;
+  background: var(--surface-1); border: 1px solid var(--border); border-radius: var(--radius); font-size: 12.5px; }
+.rq-hk > summary::-webkit-details-marker { display: none; }
+.rq-hk > summary .rq-more { margin-left: auto; color: var(--accent); font-weight: 600; }
+.rq-hk[open] > summary { border-bottom-left-radius: 0; border-bottom-right-radius: 0; }
+.rq-hk[open] > .card { border-top-left-radius: 0; border-top-right-radius: 0; border-top: 0; }
+.rq-page table.tbl td.num, .rq-page table.tbl th.num { text-align: left; }
+table.rq-tbl { table-layout: fixed; min-width: 980px; }
+table.rq-tbl th, table.rq-tbl td { text-align: left; }
+table.rq-tbl td { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+table.rq-tbl td.rq-n { font-variant-numeric: tabular-nums; }
+table.rq-tbl td.rq-pathcell { padding-top: 0; padding-bottom: 0; }
+table.rq-tbl .rq-via { font-size: 11px; font-weight: 400; overflow: hidden; text-overflow: ellipsis; }
+table.rq-tbl tr.inflight td { background: var(--accent-soft); }
+.rq-path { display: block; width: 100%; padding: 7px 0; border: 0; background: transparent; color: var(--text-primary); text-align: left; cursor: copy;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.rq-path:hover { color: var(--accent); }
+.rq-tag { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 11px; background: var(--surface-2); color: var(--text-secondary); border: 1px solid var(--border); }
+.rq-tag.person { background: var(--accent-soft); color: var(--accent); border-color: color-mix(in srgb, var(--accent) 30%, transparent); }
+.rq-result { display: inline-flex; align-items: center; gap: 6px; font-variant-numeric: tabular-nums; }
+.rq-rdot { width: 8px; height: 8px; border-radius: 50%; background: var(--good); flex: none; }
+.rq-result.warn { color: var(--warning-ink); } .rq-result.warn .rq-rdot { background: var(--warning); }
+.rq-result.err { color: var(--critical-ink); font-weight: 600; } .rq-result.err .rq-rdot { background: var(--critical); }
+
 /* ------------------------- Clusters page summary table ---------------------- */
 /* The table is part of the page: every row is in it and the page scrolls. It used to sit in
    a box of its own, height-limited so its sticky head and its sideways scrollbar stayed on
@@ -490,11 +556,11 @@ table.tbl tr.kv td.v { font-size: 12px; word-break: break-all; }
   border-bottom: 1px solid var(--border); box-shadow: 0 2px 6px rgba(0,0,0,.18);
 }
 .cl-head-row { display: flex; will-change: transform; }
-.cl-hcell, .cl-summary table.cl-tbl thead th {
+.cl-hcell, .cl-summary table.cl-tbl > thead > tr > th {
   font-weight: 600; font-size: 11px; letter-spacing: .03em; text-transform: uppercase;
   padding: 8px 10px; white-space: nowrap; text-align: left; font-family: inherit;
 }
-.dense .cl-hcell, .dense .cl-summary table.cl-tbl thead th { padding-left: 8px; padding-right: 8px; }
+.dense .cl-hcell, .dense .cl-summary table.cl-tbl > thead > tr > th { padding-left: 8px; padding-right: 8px; }
 .cl-hcell {
   flex: none; display: block; min-width: 0; overflow: hidden; text-overflow: ellipsis;
   border: 0; background: transparent; color: var(--text-secondary); cursor: pointer; line-height: 1.5;
@@ -507,13 +573,33 @@ table.tbl tr.kv td.v { font-size: 12px; word-break: break-all; }
 .cl-hcell-x:hover { background: transparent; }
 /* Every head says it sorts: a quiet ↕ until it is the one sorted by (▲ / ▼, in the text). */
 .cl-hcell[aria-sort="none"] .cl-th-in::after,
-.cl-summary table.cl-tbl thead th[aria-sort="none"] .cl-th-in::after { content: " \2195"; color: var(--text-muted); opacity: .7; }
-/* The real heads: laid out (their widths are the columns'), read by a screen reader, not seen. */
-.cl-summary table.cl-tbl thead th {
+.cl-summary table.cl-tbl > thead > tr > th[aria-sort="none"] .cl-th-in::after { content: " \2195"; color: var(--text-muted); opacity: .7; }
+/* The real heads: laid out (their widths are the columns'), read by a screen reader, not seen.
+   Child selectors throughout: the details row holds a table of its own (the repositories),
+   whose heads and cells must not be folded away or kept on one line with these. */
+.cl-summary table.cl-tbl > thead > tr > th {
   position: static; height: 0; padding-top: 0; padding-bottom: 0; border: 0; line-height: 0;
 }
-.cl-summary table.cl-tbl thead th .cl-th-in { display: block; height: 0; overflow: hidden; }
-.cl-tbl td { white-space: nowrap; }
+.cl-summary table.cl-tbl > thead > tr > th .cl-th-in { display: block; height: 0; overflow: hidden; }
+table.cl-tbl > tbody > tr > td { white-space: nowrap; }
+/* A cluster's details. The block is exactly as wide as the table and adds nothing to its
+   width (width 0, min-width 100%), so the columns the rows set decide it; what is inside
+   wraps or stacks. It used to be laid out at its own longest line: at 1280 px the JDK text
+   ran into SLM and the repositories table pushed the whole table sideways. */
+table.cl-tbl > tbody > tr.cl-detail-row > td { white-space: normal; }
+table.cl-tbl > tbody > tr.cl-detail-row:hover > td { background: var(--surface-2); }
+/* …and, when the table is wider than the window (1024 px) and scrolls, no wider than the part
+   in view, pinned to its left edge: the columns scroll, the details stay put. --cl-view-w is
+   the scroll box's width (overview.js syncHeads); 20px is the cell's own padding. */
+.cl-detail {
+  width: 0; min-width: min(100%, calc(var(--cl-view-w, 100vw) - 20px)); box-sizing: border-box;
+  position: sticky; left: 10px; display: grid; gap: 12px; padding: 4px 0;
+}
+.cl-detail-kv { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(240px, 100%), 1fr)); gap: 10px 16px; }
+.cl-detail-kv > div { min-width: 0; }
+.cl-detail-kv .v { overflow-wrap: anywhere; }
+.cl-detail .card { min-width: 0; }
+.cl-detail-loc { overflow-wrap: anywhere; min-width: 120px; }
 .cl-end { padding: 10px 14px; border-top: 1px solid var(--grid); color: var(--text-muted); text-align: center; font-size: 12px; }
 
 /* A cluster's name opens its menu: reads as a name, behaves as a button. */
@@ -534,35 +620,52 @@ table.tbl tr.kv td.v { font-size: 12px; word-break: break-all; }
 /* The unreachable clusters, above the table: compact cards, or one line when folded. */
 .cl-sp { flex: 1 1 auto; }
 .cl-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--critical); flex: none; }
-.cl-down {
-  background: var(--surface-1); border: 1px solid color-mix(in srgb, var(--critical) 45%, var(--border));
-  border-radius: var(--radius); padding: 10px 12px; margin-bottom: 12px;
-  display: flex; flex-direction: column; gap: 8px; min-width: 0;
+/* Unreachable clusters are rows in the table. One line above it points at the Alerts page,
+   where the reasons, Retry and Diagnose are. Tints are mixed from the theme's own status
+   colours, so they follow every theme. */
+.cl-down-note {
+  display: flex; align-items: center; gap: 9px; flex-wrap: wrap; min-width: 0;
+  padding: 8px 12px; margin-bottom: 12px; font-size: 13px; color: var(--text-primary);
+  border-radius: var(--radius); background: color-mix(in srgb, var(--critical) 8%, var(--surface-1));
+  border: 1px solid color-mix(in srgb, var(--critical) 38%, var(--border));
 }
-.cl-down.folded { flex-direction: row; align-items: center; gap: 8px; padding: 7px 12px; flex-wrap: wrap; }
-.cl-down-names { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 0 1 auto; }
-.cl-down-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-.cl-down-head h2 { margin: 0; font-size: 13.5px; font-weight: 650; }
-.cl-down-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 330px), 1fr)); gap: 8px; }
-.cl-down-card {
-  background: var(--surface-2); border: 1px solid var(--border); border-radius: 8px;
-  padding: 7px 10px; display: flex; flex-direction: column; gap: 5px; min-width: 0; font-size: 12.5px;
+.cl-alink { color: var(--accent); font-weight: 600; text-decoration: none; }
+.cl-alink:hover { text-decoration: underline; }
+.cl-alink:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 3px; }
+.cl-tbl tr.cl-row-down > td { background: color-mix(in srgb, var(--critical) 7%, transparent); }
+
+/* Quiet normal, loud problem (change 7): an as-it-should-be state is plain text; a problem is
+   coloured text with a dot, so it is never told by hue alone. Inks are the themed text
+   colours, which clear 4.5:1 on their surface in every theme. */
+.q { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+.q.ok { color: var(--text-secondary); }
+.q.warn { color: var(--warning-ink); font-weight: 600; }
+.q.bad  { color: var(--critical-ink); font-weight: 600; }
+.q .qdot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; flex: none; }
+.q.ok.dotted .qdot { background: var(--good); }
+
+/* Disk against the watermarks (change 8). The fill is neutral below the low watermark, amber
+   from it, red from the high one; the tick marks the high watermark. */
+.disk-cell { display: grid; gap: 4px; }
+.disk-text { font-size: 11.5px; color: var(--text-secondary); font-variant-numeric: tabular-nums; }
+.disk-text.low { color: var(--warning-ink); font-weight: 600; }
+.disk-text.high { color: var(--critical-ink); font-weight: 600; }
+.disk-bar { position: relative; height: 6px; border-radius: 3px; background: var(--surface-3); min-width: 60px; }
+.disk-fill { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 3px; background: var(--text-muted); }
+.disk-fill.low { background: var(--warning-ink); }
+.disk-fill.high { background: var(--critical-ink); }
+.disk-tick { position: absolute; top: -3px; width: 2px; height: 12px; margin-left: -1px; background: var(--text-primary); border-radius: 1px; }
+
+/* The expand chevron at the start of a row (change 9). */
+.cl-xtd { width: 30px; padding-left: 6px !important; padding-right: 0 !important; }
+.cl-xth { width: 30px; }
+.cl-chev {
+  display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 24px; padding: 0;
+  border: 0; border-radius: var(--radius-sm); background: transparent; color: var(--text-secondary);
+  font-size: 13px; cursor: pointer;
 }
-.cl-down-card.wide { grid-column: 1 / -1; }
-.cl-l1, .cl-l2 { display: flex; align-items: center; gap: 7px; min-width: 0; }
-/* The name gives way last: the "since" text shrinks first (it is in the open card too). */
-.cl-nm { font-size: 13.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 6ch; flex: 0 1 auto; }
-.cl-l1 .pill { flex: none; white-space: nowrap; }
-.cl-since { font-size: 11.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; flex: 0 100 auto; }
-.cl-err { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-secondary); }
-.cl-l2 .btn { flex: none; }
-.cl-exp { padding: 1px 7px; font-size: 13px; line-height: 1.2; }
-.cl-down-more { display: grid; gap: 8px; padding-top: 4px; border-top: 1px solid var(--border); }
-.cl-dl { margin: 0; display: grid; grid-template-columns: 110px minmax(0, 1fr); gap: 3px 12px; font-size: 12px; }
-.cl-dl dt { color: var(--text-muted); }
-.cl-dl dd { margin: 0; overflow-wrap: anywhere; }
-.cl-down-acts { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
-.cl-down-card .diag { margin: 4px 0 0 !important; }
+.cl-chev:hover { background: var(--surface-3); color: var(--text-primary); }
+.cl-chev:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 
 /* The Columns panel. */
 .pop.cl-cols { width: min(340px, calc(100vw - 16px)); }
@@ -652,20 +755,64 @@ a.agroup-name:hover { text-decoration: underline; }
 .arow-main { display: flex; align-items: flex-start; gap: 10px 12px; padding: 9px 14px; flex-wrap: wrap; }
 .arow-main > .apill { margin-top: 2px; }
 .arow-body { flex: 1 1 260px; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
-.arow-title { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 8px; }
+.arow-title { line-height: 1.5; overflow-wrap: anywhere; }
 .arow-title b { font-weight: 620; }
 .arow-count, .arow-where { font-size: 12px; }
-.arow-detail { font-size: 12.5px; color: var(--text-secondary); display: -webkit-box; -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden; overflow-wrap: anywhere; }
+.arow-detail { color: var(--text-secondary); }
+.arow:not(.open) .arow-title { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; line-clamp: 3; overflow: hidden; }
+.arow-cluster { font-weight: 620; color: var(--text-primary); text-decoration: none; }
+a.arow-cluster:hover { text-decoration: underline; }
 .arow-sub { font-size: 11.5px; }
 .arow-age { font-size: 12px; color: var(--text-muted); white-space: nowrap; margin-top: 3px; min-width: 52px; text-align: right; }
 .btn.sm.arow-notes { padding: 2px 6px; font-size: 12px; }
-.arow-main > .golink { min-width: 168px; }
-.golink { text-decoration: none; white-space: nowrap; font-weight: 600; justify-content: center; text-align: center; color: var(--accent); background: var(--accent-soft);
-  border-color: color-mix(in srgb, var(--accent) 40%, transparent); }
-.golink:hover { filter: brightness(1.06); }
+/* Go to is navigation, so it is a link; Ack is the one button on the row (a link per row, not a blue button per row). */
+.golink { text-decoration: none; white-space: nowrap; font-weight: 600; color: var(--accent); font-size: 12.5px; padding: 3px 2px; }
+.golink:hover { text-decoration: underline; }
+.golink:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 3px; }
+.arow-main > .golink { margin-top: 1px; }
+/* One summary line instead of four tiles; each count is a filter. */
+.alerts-sum { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; margin: 0 0 12px; font-size: 15px; }
+.alerts-sum-sep { color: var(--text-muted); }
+.alerts-sumbtn { font: inherit; font-weight: 700; background: transparent; border: 0; padding: 2px 2px; cursor: pointer;
+  color: var(--text-primary); border-bottom: 2px solid transparent; border-radius: 2px; }
+.alerts-sumbtn:hover { border-bottom-color: currentColor; }
+.alerts-sumbtn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.alerts-sumbtn[aria-pressed="true"] { border-bottom-color: currentColor; background: var(--surface-2); }
+.alerts-sumbtn.crit { color: var(--critical-ink); }
+.alerts-sumbtn.warn { color: var(--warning-ink); }
+.alerts-sumbtn.ack { font-weight: 500; color: var(--text-secondary); }
+/* A cluster with one alert is one line, no header; those lines share a quiet box. */
+.agroup.singles, .agroup.singles:not(.has-crit):not(.flat) { border-color: var(--border); }
+.arow.single .arow-main { align-items: center; }
+.arow.single .arow-main > .apill { margin-top: 0; }
+.agroup.singles > .arow:first-child { border-top: 0; }
+/* Unreachable first: one line a cluster, the problem once. */
+.agroup.adown { border-color: color-mix(in srgb, var(--critical) 40%, var(--border)); }
+.adown-head { background: color-mix(in srgb, var(--critical) 7%, var(--surface-2)); }
+.adown-head h2 { margin: 0; font-size: 14.5px; }
+.adown-note { font-size: 12px; }
+.adown-row .arow-main { align-items: center; }
+.adown-row .arow-main > .apill { margin-top: 0; align-self: flex-start; }
+.adown-name { font-size: 14px; overflow-wrap: anywhere; }
+.adown-reason { color: var(--text-secondary); font-size: 12.5px; overflow-wrap: anywhere; }
+.adown-meta { margin-top: 1px; }
+.adown-row.handled .adown-name, .adown-row.handled .adown-reason { opacity: .7; }
+.alink { font: inherit; background: none; border: 0; padding: 0; cursor: pointer; color: var(--accent); text-decoration: none; }
+.alink:hover { text-decoration: underline; }
+.alink:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 3px; }
+.adown-diag { margin: 0 14px 10px; }
+.adown-diag .diag { margin: 0 !important; }
+.adown-more { display: grid; gap: 8px; }
+.adown-acts { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+.adl { margin: 0; display: grid; grid-template-columns: 110px minmax(0, 1fr); gap: 3px 12px; font-size: 12.5px; }
+.adl dt { color: var(--text-muted); }
+.adl dd { margin: 0; overflow-wrap: anywhere; }
+/* Held: kept and shown, but plainly not current. */
+.aheld { display: grid; gap: 4px; background: var(--surface-2); border: 1px dashed var(--border-strong); border-radius: 8px; padding: 8px 12px; font-size: 12.5px; }
+.aheld-row { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 10px; opacity: .65; }
+.aheld-what { flex: 1 1 220px; min-width: 0; overflow-wrap: anywhere; }
+.aheld-age { font-size: 12px; white-space: nowrap; }
 .btn.sm.arow-toggle, .btn.sm.agroup-toggle { color: var(--text-muted); font-size: 16px; line-height: 1; padding: 2px 8px; }
-.arow-main .menu-trigger { align-self: flex-start; }
 
 .apanel { margin: 0 14px 12px 14px; display: grid; gap: 10px; }
 .apanel-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
@@ -1204,3 +1351,28 @@ html:has(.modal-overlay) { overflow: hidden; scrollbar-gutter: stable; }
 .console-tab-x:hover { color: var(--critical); }
 .console-tab-add { min-width: 30px; }
 .console-tab-count { align-self: center; font-size: 11px; margin-left: 4px; }
+
+/* --------------------------- Config › Requests (15, 16) --------------------------- */
+/* What each preset sends: one block per preset under the preset bar, the selected one marked. */
+.pol-effects { display: grid; gap: 8px; }
+.pol-effects-note { font-size: 11.5px; }
+.pol-effect-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(300px, 100%), 1fr)); gap: 8px; }
+.pol-effect { display: grid; gap: 4px; align-content: start; padding: 9px 12px; border: 1px solid var(--border);
+  border-radius: var(--radius); background: var(--surface-1); font-size: 12px; line-height: 1.45; min-width: 0; }
+.pol-effect.on { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); background: var(--accent-soft); }
+.pol-effect-h { display: flex; align-items: center; gap: 8px; font-size: 12.5px; }
+.pol-effect-on { font-size: 10.5px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; color: var(--accent); }
+.pol-effect-k { font-weight: 600; color: var(--text-secondary); }
+.pol-effect-why { font-size: 11.5px; }
+/* "Fine-tune": folded to one line by default; the numbers and the intervals inside. */
+.pol-fine > summary { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; cursor: pointer; padding: 8px 12px;
+  list-style: none; background: var(--surface-1); border: 1px solid var(--border); border-radius: var(--radius); font-size: 12.5px; }
+.pol-fine > summary::-webkit-details-marker { display: none; }
+.pol-fine > summary::before { content: "\25b8"; color: var(--text-secondary); font-size: 13px; line-height: 1; }
+.pol-fine[open] > summary::before { content: "\25be"; }
+.pol-fine[open] > summary { border-bottom-left-radius: 0; border-bottom-right-radius: 0; }
+.pol-fine-body { display: grid; gap: 12px; padding: 12px; border: 1px solid var(--border); border-top: 0;
+  border-radius: 0 0 var(--radius) var(--radius); min-width: 0; }
+.pol-env { flex-basis: 100%; color: var(--warning-ink); font-size: 12px; }
+tr.pol-iv-idle > td:first-child { color: var(--text-secondary); }
+.pol-iv-note { white-space: normal; font-size: 11.5px; }

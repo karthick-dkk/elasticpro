@@ -123,6 +123,17 @@ test('a playbook sends nothing: it prepares requests as data and never calls the
   assert.ok(!/\bfetch\(|bridge\(|\.json\(|navigateTo|from '[^']*\/(es|transport|state)\.js'/.test(src.replace(/\/\*[\s\S]*?\*\//g, '')), 'playbooks are text and data');
 });
 
+test('the unreachable playbook leads to that cluster\'s row on Clusters, the same place as Go to', () => {
+  const m = fake(ALERT_RULES.find((r) => r.id === 'unreachable'));
+  const links = PB.playbookFor(m, { watermarks: { assumed: true } }).steps.flatMap((s) => s.links || []);
+  const row = links.find((l) => l.page === 'overview');
+  assert.ok(row, 'a link to Clusters');
+  assert.equal(row.label, 'Its row on Clusters');
+  assert.deepEqual(row.focus, { section: 'unreachable', cluster: 'c1' }, 'the row of this cluster, not a card or the page top');
+  assert.deepEqual(row.focus, GOTO.gotoFor(m).focus);
+  assert.ok(!links.some((l) => /card/i.test(l.label)), 'the Clusters card is gone');
+});
+
 test('disk thresholds come from the cluster\'s watermarks when it reports them, else say "the cluster\'s"', () => {
   const m = fake(ALERT_RULES.find((r) => r.id === 'disk'));
   const known = PB.playbookFor(m, { watermarks: { low: 85, high: 90, flood: 95, assumed: false } });

@@ -152,3 +152,93 @@ test('the concurrency fields sit under the request gate the core reports', () =>
   assert.deepEqual(P.normalisePolicy(D, D, low).concurrency, { global: 4, perCluster: 1, tunnel: 2 }, 'Client basis already fits under it');
   assert.equal(P.activePreset(P.normalisePolicy(D, D, low), D, low), 'client');
 });
+
+/* ------------------------- what a policy sends (change 15) ------------------------- */
+
+const effectOf = (id, counts) => P.policyEffect(P.applyPreset(null, id, D), counts);
+
+test('the effect of each preset, for 24 clusters, from the shipped intervals', () => {
+  const n24 = { clusters: 24 };
+  const client = effectOf('client', n24);
+  assert.equal(client.idle.perMinute, 0);
+  assert.equal(client.idle.text, 'no requests.');
+  assert.match(client.open.text, /^only what that page shows, for the clusters on it/);
+  assert.equal(client.open.perMinute, null, 'what a page costs depends on the page');
+
+  const hybrid = effectOf('hybrid', n24);
+  assert.equal(hybrid.idle.perMinute, 8, '24 clusters × health every 180 s');
+  assert.equal(hybrid.idle.text, 'at least 8 a minute (health every 3 min × 24).');
+
+  const bg = effectOf('background', n24);
+  // health 1/3 + nodes 1/5 + ilm_errors 1/15 + policies 1/60 + ilm_assign 1/60 + snapshots 1/30
+  // = 2/3 of a poll a minute per cluster; indices, shards and snapshots_full never on a schedule.
+  assert.ok(Math.abs(bg.open.perMinute - 16) < 1e-9, String(bg.open.perMinute));
+  assert.match(bg.open.text, /^at least 16 a minute \(6 datasets kept fresh for each of 24 clusters\)/);
+  assert.match(bg.open.text, /indices, shards and full snapshot listings are fetched when a page asks/);
+  // The core polls health only once nobody has asked for ten minutes (scheduler.rs idle()).
+  assert.equal(bg.idle.perMinute, 8);
+  assert.match(bg.idle.text, /^at least 8 a minute \(health every 3 min × 24\) once no page has asked for 10 min; at least 16 a minute until then\.$/);
+
+  const auto = effectOf('auto', n24);
+  assert.equal(auto.mode, 'background');
+  assert.equal(auto.auto, true);
+  assert.equal(auto.open.text, bg.open.text, 'Automatic with 24 clusters is Background');
+  assert.match(auto.why, /with 24 it runs as Background/);
+});
+
+test('Automatic follows AUTO_HYBRID_ABOVE', () => {
+  const at = effectOf('auto', { clusters: P.AUTO_HYBRID_ABOVE });
+  const above = effectOf('auto', { clusters: P.AUTO_HYBRID_ABOVE + 1 });
+  assert.equal(at.mode, 'background');
+  assert.equal(above.mode, 'hybrid');
+  assert.equal(above.idle.text, `at least ${Math.floor((P.AUTO_HYBRID_ABOVE + 1) / 3)} a minute (health every 3 min × ${P.AUTO_HYBRID_ABOVE + 1}).`);
+});
+
+test('the bound uses the policy\'s own intervals, is rounded down, and counts what the core really skips', () => {
+  const p = P.normalisePolicy({ ...P.applyPreset(null, 'hybrid', D), intervalsSec: { ...D.intervalsSec, health: 240 } }, D);
+  assert.equal(P.policyEffect(p, { clusters: 24 }).idle.text, 'at least 6 a minute (health every 4 min × 24).');
+  assert.equal(P.policyEffect(p, { clusters: 10 }).idle.text, 'at least 2 a minute (health every 4 min × 10).', '2.5 is at least 2');
+  // Below one a minute it says so per hour rather than "at least 0".
+  assert.equal(effectOf('hybrid', { clusters: 1 }).idle.text, 'at least 20 an hour (health every 3 min × 1).');
+  // A cluster that does not answer gets one probe every 2 min and nothing else.
+  const down = effectOf('background', { clusters: 24, unreachable: 4 });
+  assert.ok(Math.abs(down.open.perMinute - (20 * 2 / 3 + 4 * 0.5)) < 1e-9);
+  assert.match(down.open.text, /^at least 15 a minute \(6 datasets kept fresh for each of 20 clusters, and a probe every 2 min × 4 not answering\)/);
+  // Paused clusters get nothing; pause all stops everything.
+  assert.equal(effectOf('hybrid', { clusters: 24, paused: 12 }).idle.perMinute, 4);
+  const all = P.policyEffect(P.setPausedAll(P.applyPreset(null, 'background', D), true), { clusters: 24 });
+  assert.equal(all.idle.perMinute, 0);
+  assert.match(all.idle.text, /every cluster is paused/);
+  assert.match(effectOf('background', { clusters: 0 }).idle.text, /no clusters/);
+});
+
+test('the classes agree with the core: catalogue.rs, scheduler.rs', () => {
+  const cat = fs.readFileSync(path.join(ROOT, 'crates/elasticpro-core/src/fleet/catalogue.rs'), 'utf8');
+  const arm = /Dataset::(\w+(?:\s*\|\s*Dataset::\w+)*)\s*=>\s*Class::OnDemand/.exec(cat);
+  assert.ok(arm, 'Dataset::class() has an OnDemand arm');
+  const snake = (s) => s.replace(/([a-z])([A-Z])/g, '$1_$2').toLowerCase();
+  const fromRs = arm[1].split('|').map((x) => snake(x.replace('Dataset::', '').trim())).sort();
+  assert.deepEqual([...P.ON_DEMAND_ALWAYS].sort(), fromRs);
+  assert.equal(Number(/pub const UNREACHABLE_PROBE_MS: u64 = ([\d_]+);/.exec(cat)[1].replace(/_/g, '')), P.UNREACHABLE_PROBE_SEC * 1000);
+  const sch = fs.readFileSync(path.join(ROOT, 'crates/elasticpro-core/src/fleet/scheduler.rs'), 'utf8');
+  assert.equal(Number(/pub const IDLE_MS: u64 = (\d+) \* 60_000;/.exec(sch)[1]), P.IDLE_MINUTES);
+  // effective_class: background keeps the class, hybrid only health, on-demand nothing.
+  assert.equal(P.effectiveClass('indices', 'background', 3), 'onDemand');
+  assert.equal(P.effectiveClass('nodes', 'background', 3), 'background');
+  assert.equal(P.effectiveClass('health', 'hybrid', 3), 'background');
+  assert.equal(P.effectiveClass('nodes', 'hybrid', 3), 'onDemand');
+  assert.equal(P.effectiveClass('health', 'on-demand', 3), 'onDemand');
+  assert.equal(P.effectiveClass('nodes', 'auto', P.AUTO_HYBRID_ABOVE + 1), 'onDemand');
+});
+
+test('the Fine-tune line, folded (change 16)', () => {
+  assert.equal(P.fineTuneSummary(P.applyPreset(null, 'client', D), 24),
+    'All clusters 4 · per cluster 1 · per jump host 6 · timeout 30 s · intervals only while a page watches');
+  assert.equal(P.fineTuneSummary(P.applyPreset(null, 'hybrid', D), 24),
+    'All clusters 16 · per cluster 2 · per jump host 6 · timeout 30 s · health every 3 min, the rest while a page watches');
+  assert.equal(P.fineTuneSummary(P.applyPreset(null, 'auto', D), 24),
+    'All clusters 16 · per cluster 2 · per jump host 6 · timeout 30 s · 6 datasets on a schedule, health every 3 min');
+  assert.match(P.fineTuneSummary({ ...P.applyPreset(null, 'client', D), timeoutMs: 1500 }, 24), /timeout 1500 ms/);
+  assert.equal(P.everyText(3600), '1 h');
+  assert.equal(P.everyText(90), '90 s');
+});

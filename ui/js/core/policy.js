@@ -88,11 +88,134 @@ export const FALLBACK_DEFAULTS = {
 };
 
 export const PRESETS = [
-  { id: 'client', label: 'Client basis (recommended) — nothing until a page asks, one request per cluster at a time' },
-  { id: 'auto', label: `Automatic — background up to ${AUTO_HYBRID_ABOVE} clusters, hybrid above` },
-  { id: 'background', label: 'Background — the core keeps every cluster fresh' },
-  { id: 'hybrid', label: 'Hybrid — health in the background, the rest when a page looks' },
+  { id: 'client', name: 'Client basis', label: 'Client basis (recommended) — nothing until a page asks, one request per cluster at a time' },
+  { id: 'auto', name: 'Automatic', label: `Automatic — background up to ${AUTO_HYBRID_ABOVE} clusters, hybrid above` },
+  { id: 'background', name: 'Background', label: 'Background — the core keeps every cluster fresh' },
+  { id: 'hybrid', name: 'Hybrid', label: 'Hybrid — health in the background, the rest when a page looks' },
 ];
+
+/* ------------------------------ what a policy costs ------------------------------ */
+
+/**
+ * The datasets fetched only while a page looks at them, whatever the mode: the poller never
+ * keeps them for every cluster. Keep equal to Dataset::class() in
+ * crates/elasticpro-core/src/fleet/catalogue.rs (tools/unit/policy.test.mjs reads it).
+ */
+export const ON_DEMAND_ALWAYS = ['indices', 'shards', 'snapshots_full'];
+const ON_DEMAND_WORDS = { indices: 'indices', shards: 'shards', snapshots_full: 'full snapshot listings' };
+/** Nothing asked the core for this long and it polls health only (IDLE_MS in scheduler.rs). */
+export const IDLE_MINUTES = 10;
+/** A cluster that does not answer gets one health probe this often and nothing else
+ *  (UNREACHABLE_PROBE_MS in catalogue.rs). */
+export const UNREACHABLE_PROBE_SEC = 120;
+
+/** The mode that runs for a fleet of `clusters`: `auto` is background up to AUTO_HYBRID_ABOVE,
+ *  hybrid above. Config::resolved_mode in scheduler.rs. */
+export function resolvedMode(mode, clusters) {
+  if (mode !== 'auto') return mode;
+  return clusters > AUTO_HYBRID_ABOVE ? 'hybrid' : 'background';
+}
+
+/** 'background' (fetched on its interval for every cluster) or 'onDemand' (only while a page
+ *  looks at it). Config::effective_class in scheduler.rs. */
+export function effectiveClass(dataset, mode, clusters) {
+  const m = resolvedMode(mode, clusters);
+  if (m === 'background') return ON_DEMAND_ALWAYS.includes(dataset) ? 'onDemand' : 'background';
+  if (m === 'hybrid') return dataset === 'health' ? 'background' : 'onDemand';
+  return 'onDemand';
+}
+
+/** 180 → "3 min", 3600 → "1 h", 90 → "90 s". */
+export function everyText(sec) {
+  if (sec % 3600 === 0) return `${sec / 3600} h`;
+  if (sec % 60 === 0) return `${sec / 60} min`;
+  return `${sec} s`;
+}
+
+const MODE_NAMES = { 'on-demand': 'Client basis', hybrid: 'Hybrid', background: 'Background' };
+
+/**
+ * What a policy does to the clusters: requests a minute when nobody is looking and when a
+ * page is open. The one definition; Config › Requests shows it for every preset and for a
+ * hand-made policy.
+ *
+ * Lower bounds, worked out from the policy's own intervals: every poll counts as one request,
+ * and a poll can take more (health is two, policies seven, snapshots one per repository).
+ * What the core does that this follows (scheduler.rs plan()):
+ *   - only datasets of the 'background' effective class are fetched on their interval;
+ *     indices, shards and full snapshot listings never are (ON_DEMAND_ALWAYS);
+ *   - when no page has asked the core for anything for IDLE_MINUTES it polls health only;
+ *   - a cluster that does not answer gets one health probe every UNREACHABLE_PROBE_SEC,
+ *     and nothing else; under Client basis not even that;
+ *   - a paused cluster gets nothing, and "pause all" stops everything.
+ *
+ * @param policy  a normalised policy (normalisePolicy / applyPreset)
+ * @param o.clusters     how many clusters the core polls (what `auto` resolves against)
+ * @param o.paused       how many of them the policy pauses
+ * @param o.unreachable  how many of the rest do not answer now
+ * @returns {{ mode, auto, why, idle: {perMinute, text}, open: {perMinute, text} }}
+ *   perMinute is the bound itself (not rounded), null where it depends on the page.
+ */
+export function policyEffect(policy, { clusters = 0, paused = 0, unreachable = 0 } = {}) {
+  const p = policy || {};
+  const iv = p.intervalsSec || FALLBACK_DEFAULTS.intervalsSec;
+  const watch = p.watchMinutes || FALLBACK_DEFAULTS.watchMinutes;
+  const mode = resolvedMode(p.mode || CLIENT_BASIS.mode, clusters);
+  const auto = p.mode === 'auto';
+  const why = auto ? `Background up to ${AUTO_HYBRID_ABOVE} clusters, Hybrid above: with ${clusters} it runs as ${MODE_NAMES[mode]}.` : null;
+  const out = (idle, open) => ({ mode, auto, why, idle, open });
+  const active = p.paused && p.paused.all ? 0 : Math.max(0, clusters - paused);
+  if (!clusters) return out({ perMinute: 0, text: 'no requests: no clusters are configured.' }, { perMinute: 0, text: 'nothing to ask.' });
+  if (!active) return out({ perMinute: 0, text: 'no requests: every cluster is paused.' }, { perMinute: 0, text: 'nothing new starts until requests are resumed.' });
+  const down = Math.min(Math.max(0, unreachable), active);
+  const up = active - down;
+  const pageOnly = `what that page shows, for the clusters on it, kept fresh while it is open and for ${watch} min after`;
+  if (mode === 'on-demand') {
+    return out({ perMinute: 0, text: 'no requests.' }, { perMinute: null, text: `only ${pageOnly}.` });
+  }
+  const perMin = (sec) => 60 / sec;
+  const probes = down * perMin(UNREACHABLE_PROBE_SEC);
+  const health = up * perMin(iv.health) + probes;
+  const downNote = down ? `, and a probe every ${everyText(UNREACHABLE_PROBE_SEC)} × ${down} not answering` : '';
+  const healthText = `${atLeast(health)} (health every ${everyText(iv.health)} × ${up}${downNote})`;
+  if (mode === 'hybrid') {
+    return out({ perMinute: health, text: `${healthText}.` },
+      { perMinute: health, text: `the same health, plus ${pageOnly}.` });
+  }
+  const scheduled = DATASETS.filter((ds) => effectiveClass(ds, mode, clusters) === 'background');
+  const full = up * scheduled.reduce((s, ds) => s + perMin(iv[ds]), 0) + probes;
+  const fullText = `${atLeast(full)} (${scheduled.length} datasets kept fresh for each of ${up} cluster${up === 1 ? '' : 's'}${downNote})`;
+  const words = ON_DEMAND_ALWAYS.map((ds) => ON_DEMAND_WORDS[ds]);
+  const later = `${words.slice(0, -1).join(', ')} and ${words.at(-1)}`;
+  return out(
+    { perMinute: health, text: `${healthText} once no page has asked for ${IDLE_MINUTES} min; ${atLeast(full)} until then.` },
+    { perMinute: full, text: `${fullText}; pages read what is already fetched, and ${later} are fetched when a page asks.` });
+}
+
+/**
+ * The "Fine-tune" fold's one line, collapsed: the concurrency, the timeout and what the
+ * intervals do under this mode. "All clusters 4 · per cluster 1 · per jump host 6 ·
+ * timeout 30 s · intervals only while a page watches".
+ */
+export function fineTuneSummary(policy, clusters = 0) {
+  const p = policy || {};
+  const c = p.concurrency || FALLBACK_DEFAULTS.concurrency;
+  const ms = p.timeoutMs || FALLBACK_DEFAULTS.timeoutMs;
+  const iv = p.intervalsSec || FALLBACK_DEFAULTS.intervalsSec;
+  const mode = resolvedMode(p.mode || CLIENT_BASIS.mode, clusters);
+  const scheduled = DATASETS.filter((ds) => effectiveClass(ds, mode, clusters) === 'background').length;
+  const intervals = mode === 'on-demand' ? 'intervals only while a page watches'
+    : mode === 'hybrid' ? `health every ${everyText(iv.health)}, the rest while a page watches`
+    : `${scheduled} datasets on a schedule, health every ${everyText(iv.health)}`;
+  return [`All clusters ${c.global}`, `per cluster ${c.perCluster}`, `per jump host ${c.tunnel}`,
+    `timeout ${ms % 1000 ? `${ms} ms` : `${ms / 1000} s`}`, intervals].join(' \u00b7 ');
+}
+
+/** "at least 16 a minute", or per hour below one a minute. A lower bound is rounded down. */
+function atLeast(perMinute) {
+  const down = (x) => Math.floor(x + 1e-9);
+  return perMinute >= 1 || perMinute === 0 ? `at least ${down(perMinute)} a minute` : `at least ${down(perMinute * 60)} an hour`;
+}
 
 const clamp = (v, { min, max }) => Math.min(max, Math.max(min, v));
 const whole = (v) => (typeof v === 'number' && Number.isFinite(v) ? Math.round(v)

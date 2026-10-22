@@ -3,6 +3,7 @@
 import { h, mount, $, clear, activatable } from '../lib/dom.js';
 import { bytes, num, dur, ago, dt, download } from '../lib/fmt.js';
 import { state, client, activeClusters } from '../core/state.js';
+import { hideAddress } from '../core/evidence.js';
 import { idb } from '../lib/idb.js';
 import { MAX_TABS, initialState, addTab, closeTab, updateTab, activeTab, tabTitle, toStored, fromStored } from '../core/console-tabs.js';
 import { savedQueries, loadSavedQueries, saveQuery, deleteSavedQuery, ownQuery, filterQueries } from '../core/saved-queries.js';
@@ -176,6 +177,18 @@ let history = [];
 // reloads in this browser — with password, token and key fields redacted, never a secret.
 let tabs = initialState({ method: ui.method, path: ui.path, body: ui.body });
 const tabRes = new Map();
+/** When each response on screen came back, for the evidence stamp. */
+const resAt = new WeakMap();
+
+/**
+ * What the evidence footer (core/evidence.js) says about this page's data: the console
+ * shows a live response, so its "data time" is when the one on screen came back — not a
+ * cached dataset, and not the fleet's last refresh.
+ */
+export function evidenceData(c) {
+  const at = ui.res ? (resAt.get(ui.res) || 0) : 0;
+  return { label: 'Last response received', none: 'no request run yet', fresh: { ts: at, status: at ? 'ok' : 'never' } };
+}
 const TABS_KEY = 'console.tabs';
 let saveTimer = null;
 
@@ -354,10 +367,11 @@ function draw() {
   // gets audited afterwards is which host received which path. Reading that off two
   // fields — a base down here, a path up there — is how the wrong cluster gets hit.
   // It follows the path field as it is typed, so it is never a stale answer.
+  // This is an evidence page (core/evidence.js), so it names the cluster and the path, never the
+  // host: an internal address does not belong in a screenshot handed to a client.
   const targetUrl = () => {
-    const base = String(c.url || '').replace(/\/+$/, '');
     const p = String(ui.path || '');
-    return base + (p ? (p.startsWith('/') ? p : `/${p}`) : '');
+    return p ? (p.startsWith('/') ? p : `/${p}`) : '/';
   };
   const target = h('span.mono#c-target', { style: { fontSize: '12px', wordBreak: 'break-all' } }, targetUrl());
   const syncTarget = () => { target.textContent = targetUrl(); };
@@ -369,7 +383,7 @@ function draw() {
         h('b', { style: { fontSize: '12px' } }, c.name),
         h('span.muted', { style: { fontSize: '12px' } }, ui.method),
         target,
-        c.via ? h('span.muted', { style: { fontSize: '11px' } }, `via ${c.via}`) : null),
+        null),
       h('div', { style: { display: 'flex', gap: '8px', alignItems: 'center' } },
         methodSel, pathInput,
         h('button.btn.primary#c-run', { onclick: run, style: { minWidth: '96px' } }, 'Run ▸'),
@@ -484,6 +498,7 @@ async function run() {
     return;
   }
   ui.res = res;
+  resAt.set(res, Date.now());
   if (btn) { btn.disabled = false; btn.textContent = 'Run ▸'; }
 
   const entry = {
@@ -512,7 +527,7 @@ async function run() {
     toast(`${ui.method} ${clip(ui.path)} → ${res.status}${took}`, 'ok', 2600, { key: 'console-run' });
   } else {
     toast(`${ui.method} ${clip(ui.path)} → ${res.status || res.kind || 'failed'}`
-        + `${res.message ? ` · ${clip(res.message, 60)}` : ''}`, 'err', 5200, { key: 'console-run' });
+        + `${res.message ? ` · ${clip(hideAddress(res.message, c), 60)}` : ''}`, 'err', 5200, { key: 'console-run' });
   }
 }
 
@@ -675,13 +690,13 @@ function responseCard() {
 
   const body = r.kind === 'blocked_readonly'
     ? h('div.banner.warn', { style: { margin: 0 } },
-        h('div', h('div.ttl', 'Blocked by read-only mode'), h('div', r.message),
+        h('div', h('div.ttl', 'Blocked by read-only mode'), h('div', hideAddress(r.message, cluster())),
           h('div', { style: { marginTop: '8px' } },
             h('button.btn.sm.primary', { onclick: async () => { await setWritesUnlocked(true); draw(); } }, 'Allow writes'))))
     : !r.status && r.message
     ? h('div',
         h('div.banner.err', { style: { margin: 0 } }, h('div', h('div.ttl', r.kind === 'tunnel_error' ? 'Jump host' : /^tls/.test(r.kind || '') ? 'Certificate' : 'Request failed'),
-          h('div', r.message), r.help ? h('div.muted', { style: { fontSize: '11.5px', marginTop: '4px' } }, r.help) : null)),
+          h('div', hideAddress(r.message, cluster())), r.help ? h('div.muted', { style: { fontSize: '11.5px', marginTop: '4px' } }, hideAddress(r.help, cluster())) : null)),
         /^tls|tunnel_error/.test(r.kind || '')
           ? h('button.btn.sm.primary', { style: { marginTop: '8px' }, onclick: () => navigateTo('overview') }, 'Fix on the Clusters page')
           : null)
@@ -712,7 +727,7 @@ function responseCard() {
         ? { padding: '10px', flex: '1', minHeight: '0', height: 'calc(100vh - 150px)', overflow: 'auto' }
         : { padding: '10px', flex: '1', minHeight: '340px', maxHeight: '64vh', overflow: 'auto' },
     },
-      h('div.mono.muted.trunc', { style: { fontSize: '10.5px', marginBottom: '6px' }, title: r.url }, `${ui.method} ${r.url || ''}`),
+      h('div.mono.muted.trunc', { style: { fontSize: '10.5px', marginBottom: '6px' } }, `${ui.method} ${String(r.url || '').replace(/^[a-z][a-z0-9+.-]*:\/\/[^/]+/i, '')}`),
       body));
 }
 
@@ -802,12 +817,24 @@ function savedTable(list) {
 
 function drawHistory() { const el = $('#c-history'); if (el) mount(el, historyCard()); }
 
+/**
+ * The console is an evidence page (core/evidence.js): its history is this cluster's alone.
+ * A row recorded against another cluster would be a name, a path and a status for somebody
+ * else's client in the screenshot — and "Run" would send it to this one.
+ */
+function mineHistory() {
+  const c = cluster();
+  if (!c) return [];
+  return history.filter((x) => (x.clusterId ? x.clusterId === c.id : x.cluster === c.name));
+}
+
 function historyCard() {
-  let items = history;
+  const own = mineHistory();
+  let items = own;
   if (ui.showFav) items = items.filter((x) => x.fav);
   if (ui.filter.trim()) {
     const t = ui.filter.toLowerCase();
-    items = items.filter((x) => (x.path + ' ' + x.method + ' ' + (x.body || '') + ' ' + (x.cluster || '')).toLowerCase().includes(t));
+    items = items.filter((x) => (x.path + ' ' + x.method + ' ' + (x.body || '')).toLowerCase().includes(t));
   }
   const load = (x) => { ui.method = x.method; ui.path = x.path; ui.body = x.body || ''; ui.res = null; scheduleSave(); draw(); window.scrollTo({ top: 0 }); };
   const rows = items.slice(0, 300).map((x) => h('tr', {
@@ -819,7 +846,6 @@ function historyCard() {
     h('td', h('button.btn.sm.ghost', { title: x.fav ? 'Unstar' : 'Star', style: { padding: '0 4px', color: x.fav ? 'var(--warning)' : 'var(--text-muted)' },
       onclick: async () => { x.fav = x.fav ? 0 : 1; remember(() => idb.putQuery(x)); drawHistory(); } }, x.fav ? '★' : '☆')),
     h('td.muted', { style: { fontSize: '11px', whiteSpace: 'nowrap' }, title: dt(x.ts) }, ago(x.ts)),
-    h('td', { style: { fontSize: '11.5px', whiteSpace: 'nowrap' } }, x.cluster || '?'),
     h('td.mono', { style: { fontSize: '11px', fontWeight: 700, color: 'var(--accent)' } }, x.method),
     h('td.mono', { style: { fontSize: '11.5px', maxWidth: '520px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }, title: x.path + (x.body ? '\n\n' + x.body : '') }, x.path,
       x.body ? h('span.muted', { style: { marginLeft: '6px', fontSize: '10.5px' } }, `+ body ${bytes(x.body.length)}`) : null),
@@ -830,28 +856,27 @@ function historyCard() {
       h('button.btn.sm', { title: 'Load and run', onclick: async () => { load(x); await run(); } }, 'Run'),
       h('button.btn.sm.ghost', { title: 'Delete', onclick: async () => { remember(() => idb.delQuery(x.id)); history = history.filter((y) => y.id !== x.id); drawHistory(); } }, '×')))));
 
-  return card('History', `${history.length} saved · ${history.filter((x) => x.fav).length} favourites`,
+  return card('History', `${own.length} saved · ${own.filter((x) => x.fav).length} favourites`,
     h('div', { style: { display: 'grid', gap: '8px' } },
       h('div', { style: { display: 'flex', gap: '6px', alignItems: 'center' } },
-        h('input#c-histfilter', { type: 'search', placeholder: 'filter by path, method, body or cluster…', value: ui.filter, style: { flex: '1', maxWidth: '420px' },
+        h('input#c-histfilter', { type: 'search', placeholder: 'filter by path, method or body…', value: ui.filter, style: { flex: '1', maxWidth: '420px' },
           oninput: (e) => { ui.filter = e.target.value; drawHistory(); } }),
         h('button.btn.sm', { onclick: () => { ui.showFav = !ui.showFav; drawHistory(); },
           style: ui.showFav ? { color: 'var(--warning)', borderColor: 'var(--warning)' } : null }, '★ favourites only'),
         h('span.muted', { style: { fontSize: '11px', marginLeft: 'auto' } }, 'click a row to load it into the query')),
       rows.length
         ? h('div', { style: { maxHeight: '40vh', overflow: 'auto' } },
-            h('table.tbl', h('thead', h('tr', h('th', ''), h('th', 'When'), h('th', 'Cluster'), h('th', 'Method'), h('th', 'Path'), h('th', 'Status'), h('th', 'Took'), h('th', ''))),
+            h('table.tbl', h('thead', h('tr', h('th', ''), h('th', 'When'), h('th', 'Method'), h('th', 'Path'), h('th', 'Status'), h('th', 'Took'), h('th', ''))),
               h('tbody', ...rows)))
         : empty('No saved requests yet')),
-    [h('button.btn.sm', { onclick: () => download('rest-history.json', JSON.stringify(history, null, 2), 'application/json') }, 'Export'),
+    [h('button.btn.sm', { onclick: () => download('rest-history.json', JSON.stringify(own, null, 2), 'application/json') }, 'Export'),
      h('button.btn.sm.danger', { onclick: async () => {
         if (!(await confirmDialog('Clear the request history?',
-          'Everything except starred favourites is removed from this machine. Nothing on any ' +
-          'cluster is affected.', { yes: 'clear it', danger: true }))) return;
-        const favs = history.filter((x) => x.fav);
-        remember(() => idb.clearQueries());
-        for (const f of favs) remember(() => idb.putQuery(f));
-        history = favs; drawHistory();
+          'This cluster\u2019s requests, except starred favourites, are removed from this machine. ' +
+          'Other clusters\u2019 history and every cluster itself are untouched.', { yes: 'clear it', danger: true }))) return;
+        const gone = new Set(own.filter((x) => !x.fav).map((x) => x.id));
+        for (const id of gone) remember(() => idb.delQuery(id));
+        history = history.filter((x) => !gone.has(x.id)); drawHistory();
       } }, 'Clear')]);
 }
 
