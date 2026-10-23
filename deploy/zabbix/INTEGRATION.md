@@ -583,6 +583,37 @@ but nobody is elevated and the page says "ElasticPro's answer cannot be trusted 
 connection". The answer is cached in the PHP session for 60 s. nginx forwards `/sso/zabbix/role`
 (GET only) like `/sso/zabbix`.
 
+#### The password hand-over: `POST /sso/zabbix/cluster-secret`
+
+Zabbix keeps a cluster's Elasticsearch password as the Secret macro `{$ELASTICSEARCH.PASSWORD}` —
+on the cluster host (that cluster's own) or as a global macro (the default every cluster shares).
+Nothing can read a Secret macro back through the API, the core included. So when an admin types the
+password in Cluster Management (the client's page, or Settings → Default Elasticsearch credential),
+the Zabbix module hands it to the core too:
+
+| | |
+|---|---|
+| Request | `POST {core_url}/sso/zabbix/cluster-secret`, body exactly `{"cluster":"<cluster host technical name>" \| "*","user":"<ES user>","password":"…","set_by":"<Zabbix user>","ts":<unix s>,"nonce":"<32 hex>"}`; `"*"` is the default credential |
+| Request signature | `X-Zabbix-Module-Signature: hex(HMAC-SHA256(module_secret, <the body's exact bytes>))` — the role lookup's scheme |
+| Replay window | `ts` within ±60 s; each nonce once |
+| Answer (200) | `{"ok":true,"cluster":"<echo>","set_at":<unix s>,"ts":<echo>,"nonce":"<echo>"}` — never the password |
+| Answer signature | `X-ElasticPro-Signature` over `"<ts>\n<nonce>\n" + <exact body>`, as the role lookup's |
+| Errors | 400 `bad_request` (the reason never quotes the body), 401 `bad_signature` / `stale` / `replayed`, 403 source not in `allowedSources`, 404 not the hosted build, 429 over budget, 500 `io_error` (could not be kept), 503 no secret set |
+| Kept | `cluster-secrets.json` in the data directory (0600): per cluster, AES-256-GCM with the cluster's name bound in, under the key from `ELASTICPRO_CLUSTER_SECRET_KEY_FILE` (or `ELASTICPRO_CLUSTER_SECRET_KEY`): 64 hex characters, or any string of 32+ characters (hashed). Without either the core makes `cluster-secrets.key` beside the file and warns: still encrypted, but a copy of the data directory then holds both halves — put the key outside it |
+| Logging | an audit line naming the cluster and who set it; never the password, the signature or the body |
+
+The module sends it only over a connection it trusts for this (https with verification, a loopback
+core, or a host named in `trusted_plain_hosts`) and keeps only who set it and when.
+
+**What the Zabbix sync does with it.** A cluster whose password is a Secret macro **on its host** is
+polled with the password handed over for that cluster host (credential `core-secret`); one that
+inherits the macro (the global default) is polled with the default the core holds (`core-default`).
+A cluster whose Secret macro the core was never given is listed as **"password not set"**, with the
+way to fix it, and **not polled** — never with the default in place of an override, never with
+"the last password that worked". A Vault reference and a plain-text macro work as before; a cluster
+with no password macro at all is asked without credentials, as before. nginx forwards
+`/sso/zabbix/cluster-secret` (POST only, 16 kB) like the pairing route.
+
 **Group scoping is off by default:** every Zabbix sign-in reads every cluster. Set
 `zabbix: { scopeUsersByGroup: true }` in `config_cluster.json` to limit Zabbix Users as below;
 it applies from each person's next sign-in.

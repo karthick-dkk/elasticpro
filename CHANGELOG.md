@@ -1,5 +1,21 @@
 # Changelog
 
+## Unreleased
+
+**Passwords Zabbix keeps as Secret macros now reach the core.**
+- New signed `POST /sso/zabbix/cluster-secret`: Cluster Management (Zabbix modules, next release)
+  hands over an Elasticsearch password an admin types — a cluster's own, keyed by its cluster host,
+  or the default every cluster shares (`"*"`). Signed and replay-proof like the role lookup, answered
+  signed, never echoing the password. Kept AES-256-GCM encrypted in `cluster-secrets.json` in the
+  data directory, under `ELASTICPRO_CLUSTER_SECRET_KEY_FILE` (set it outside the data directory; a key
+  is made beside the file with a warning when it is not). See deploy/zabbix/INTEGRATION.md.
+- The Zabbix sync uses it: a Secret macro on the cluster host → that cluster's held password, an
+  inherited (global) one → the held default. A cluster whose Secret macro the core was never given
+  is "password not set" and is not polled — the 401-every-interval stream is gone for good, and the
+  default never stands in for an override. Config → Zabbix names the source ("own, from Cluster
+  Management", "default, from Cluster Management", "password not set").
+- nginx forwards the new route (POST only, 16 kB); `tools/hosted-check.sh` checks the contract.
+
 ## 0.3.24
 
 **The request figures reach Zabbix, a role an admin sets on a Zabbix account stays set, and the
