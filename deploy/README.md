@@ -34,6 +34,9 @@ cp config.txt.example config.txt           # the settings file (see "Settings: c
 # 2. TLS — a real certificate, or a self-signed one to start:
 mkdir -p tls && openssl req -x509 -newkey rsa:4096 -nodes -days 825 \
   -keyout tls/privkey.pem -out tls/fullchain.pem -subj "/CN=elasticpro.internal"
+# (A trial install's certificate is made by trial-cert.sh with a subjectAltName for this host's names and
+#  addresses. To make clients such as the Zabbix host trust it, copy tls/fullchain.pem there as
+#  /usr/local/share/ca-certificates/elasticpro-trial.crt and run `sudo update-ca-certificates`.)
 
 # 3. Who may log in (phase-1 gate: HTTP basic). One line per person.
 ./make-htpasswd.sh alice
