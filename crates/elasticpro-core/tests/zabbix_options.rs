@@ -127,12 +127,14 @@ async fn zabbix_options_from_the_config() {
     let list = c.handle(json!({ "type": "ZABBIX_CLUSTERS", "session": s })).await;
     assert_eq!(list["clusters"][0]["credentialOk"], json!(false), "a removed credential must stay removed: {list}");
 
-    // --- switched off, it goes back to Zabbix's own (a Secret macro here: unusable, and said)
+    // --- switched off, it goes back to Zabbix's own (a Secret macro here the core was never
+    // handed: "password not set", unusable, and said)
     write_cfg(json!({ "useElasticProCredentials": false }));
     c.handle(json!({ "type": "PRIME", "session": s, "clusters": [], "sharedAuthHeader": "" })).await;
     c.zabbix_sync().await;
     let list = c.handle(json!({ "type": "ZABBIX_CLUSTERS", "session": s })).await;
-    assert_eq!(list["clusters"][0]["credential"], json!("secret-macro"), "{list}");
+    assert_eq!(list["clusters"][0]["credential"], json!("password-not-set"), "{list}");
+    assert_eq!(list["clusters"][0]["credentialOk"], json!(false), "{list}");
 
     // --- createHosts: a config cluster Zabbix does not have becomes a host
     write_cfg(json!({ "createHosts": true }));

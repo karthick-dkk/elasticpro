@@ -76,6 +76,10 @@ pub struct ZbxCluster {
     pub client: Option<String>,
     /// Zabbix user groups that may see it.
     pub readers: Vec<String>,
+    /// Whether `{$ELASTICSEARCH.PASSWORD}` is set on the host itself — this cluster's own
+    /// password (an override) — rather than inherited from a template or the global default.
+    /// Decides which password the core's held secrets answer with (`cluster_secrets`).
+    pub password_on_host: bool,
 }
 
 impl ZbxCluster {
@@ -150,6 +154,7 @@ pub fn cluster_from(host: &Value, macros: &HashMap<String, (i64, String)>, reade
         jump_addr: get("{$WJ.HOST}").map(|h| (h, get("{$WJ.PORT}").and_then(|p| p.parse().ok()).unwrap_or(22))),
         client: get("{$GRP.CLIENT}"),
         readers,
+        password_on_host: host["macros"].as_array().into_iter().flatten().any(|m| m["macro"].as_str() == Some("{$ELASTICSEARCH.PASSWORD}")),
     })
 }
 
@@ -646,6 +651,18 @@ mod tests {
     }
 
     #[test]
+    fn a_password_on_the_host_is_its_own_one_inherited_is_not() {
+        let own = json!({ "hostid": "1", "host": "h", "macros": [m("{$ELASTICSEARCH.HOST}", "es", "0"), m("{$ELASTICSEARCH.PASSWORD}", "", "1")] });
+        let mac = resolve_macros(own["macros"].as_array().unwrap(), &[], &[]);
+        assert!(cluster_from(&own, &mac, vec![]).unwrap().password_on_host);
+        let inherited = json!({ "hostid": "2", "host": "g", "macros": [m("{$ELASTICSEARCH.HOST}", "es", "0")] });
+        let mac = resolve_macros(inherited["macros"].as_array().unwrap(), &[], &[m("{$ELASTICSEARCH.PASSWORD}", "", "1")]);
+        let c = cluster_from(&inherited, &mac, vec![]).unwrap();
+        assert_eq!(c.password, PasswordRef::SecretMacro, "the default is a Secret macro too");
+        assert!(!c.password_on_host, "…but not this host's own");
+    }
+
+    #[test]
     fn a_secret_macro_is_reported_as_unreadable_not_empty() {
         let mac = resolve_macros(&[m("{$ELASTICSEARCH.HOST}", "es", "0"), m("{$ELASTICSEARCH.PASSWORD}", "", "1")], &[], &[]);
         assert_eq!(cluster_from(&host(), &mac, vec![]).unwrap().password, PasswordRef::SecretMacro);
@@ -696,7 +713,8 @@ mod tests {
     fn ids_are_stable_and_prefixed() {
         assert_eq!(slug("  ACME Prod / DR  "), "acme-prod-dr");
         let c = ZbxCluster { hostid: "1".into(), host: "Prod ES".into(), name: "x".into(), url: String::new(),
-                             username: String::new(), password: PasswordRef::Missing, jump: None, jump_addr: None, client: None, readers: vec![] };
+                             username: String::new(), password: PasswordRef::Missing, jump: None, jump_addr: None, client: None, readers: vec![],
+                             password_on_host: false };
         assert_eq!(c.id(), "zbx-prod-es");
     }
 }

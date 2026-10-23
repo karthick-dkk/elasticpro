@@ -30,6 +30,12 @@ import { filePickerButton, canPickByPath, configHistory, readVersion } from '../
 import { confirmDialog, modal, field, text, checkbox, val, checked } from '../ui/modal.js';
 import { rowMenu, ICON } from '../ui/menu.js';
 
+/** What each credential source the Zabbix sync reports is called (bridge.rs zabbix_sync). */
+const CREDENTIAL_LABEL = {
+  vault: 'Vault', elasticpro: 'ElasticPro credential', 'plain-macro': 'plain macro', 'secret-macro': 'Secret macro',
+  'core-secret': 'own, from Cluster Management', 'core-default': 'default, from Cluster Management', 'password-not-set': 'password not set',
+};
+
 let host = null;
 
 let core = null;      // last PING
@@ -1357,8 +1363,7 @@ function zabbixCard() {
     return h('tr',
       h('td', h('b', z.name), h('div.muted', { style: { fontSize: '11px' } }, `host ${z.zabbixHost}${z.client ? ` · client ${z.client}` : ''}`)),
       h('td.mono', { style: { fontSize: '11.5px' } }, z.url, z.via ? h('div.muted', `via ${z.via}`) : null),
-      h('td', pill(z.credential === 'vault' ? 'Vault' : z.credential === 'elasticpro' ? 'ElasticPro credential' : z.credential === 'plain-macro' ? 'plain macro'
-                  : z.credential === 'secret-macro' ? 'Secret macro' : 'none', z.credentialOk ? 'green' : 'red'),
+      h('td', pill(CREDENTIAL_LABEL[z.credential] || 'none', z.credentialOk ? 'green' : 'red'),
         (z.notes || []).map((n) => h('div.muted', { style: { fontSize: '11px', marginTop: '3px' } }, n))),
       h('td', { style: { fontSize: '11.5px' } }, (z.zabbixGroups || []).join(', ') || h('span.muted', 'no user group can read it')),
       h('td', { 'data-cluster-state': z._id, 'data-kind': 'zabbix' }, clusterStatePill(cl, 'zabbix')));

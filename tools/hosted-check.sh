@@ -181,6 +181,26 @@ check "an unknown user has no role"         "$(curl -s -H "x-zabbix-module-signa
 check "POST is not a lookup"                "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$R3")" "405"
 check "no signature reaches the log"        "$(grep -c "$(sig "$RC")" "$OUT3" || true)" "0"
 rm -f "$RH" "$RB"
+
+# The Elasticsearch password Cluster Management hands over: POST, signed both ways, kept
+# encrypted, never echoed and never logged.
+S3="http://127.0.0.1:$P3/sso/zabbix/cluster-secret"
+STS=$(date +%s); SN="hc-secret-$RANDOM$RANDOM$RANDOM"; SPW="hc-pw-$RANDOM$RANDOM"
+SB=$(printf '{"cluster":"hc-es","user":"elastic","password":"%s","set_by":"hosted-check","ts":%s,"nonce":"%s"}' "$SPW" "$STS" "$SN")
+SH=$(mktemp); SR=$(mktemp)
+SCODE=$(curl -s -D "$SH" -o "$SR" -w '%{http_code}' -H 'content-type: application/json' -H "x-zabbix-module-signature: $(sig "$SB")" --data-binary "$SB" "$S3")
+check "a signed password hand-over is kept"  "$SCODE" "200"
+check "the answer names the cluster"        "$(field cluster <"$SR")" "hc-es"
+SSIG=$(tr -d '\r' <"$SH" | awk -F': ' 'tolower($1)=="x-elasticpro-signature"{print $2}')
+SWANT=$({ printf '%s\n%s\n' "$STS" "$SN"; cat "$SR"; } | openssl dgst -sha256 -hmac "$SECRET" -r | cut -d' ' -f1)
+check "and is signed over the request"      "$([ -n "$SSIG" ] && [ "$SSIG" = "$SWANT" ] && echo yes || echo "no ('$SSIG')")" "yes"
+check "the answer never carries the password" "$(grep -c "$SPW" "$SR" || true)" "0"
+check "the same hand-over cannot be replayed" "$(curl -s -o /dev/null -w '%{http_code}' -H "x-zabbix-module-signature: $(sig "$SB")" --data-binary "$SB" "$S3")" "401"
+SB2=$(printf '{"cluster":"hc-es","user":"elastic","password":"x","set_by":"hc","ts":%s,"nonce":"hc-secret-bad-%s"}' "$(date +%s)" "$RANDOM$RANDOM")
+check "an unsigned hand-over is refused"    "$(curl -s -o /dev/null -w '%{http_code}' -H 'x-zabbix-module-signature: 00' --data-binary "$SB2" "$S3")" "401"
+check "GET is not a hand-over"              "$(curl -s -o /dev/null -w '%{http_code}' "$S3")" "405"
+check "the password is not in the log"      "$(grep -c "$SPW" "$OUT3" || true)" "0"
+rm -f "$SH" "$SR"
 kill $PID3; wait $PID3 2>/dev/null || true
 
 echo "== hosted mode, sessions: an HttpOnly cookie, kept across a restart =="

@@ -78,6 +78,28 @@ pub struct RoleQuery {
     pub nonce: String,
 }
 
+/// "Keep this Elasticsearch password for this cluster" — the signed body the Zabbix module
+/// posts to `/sso/zabbix/cluster-secret` when an admin types a cluster's password (or the
+/// default's, `cluster: "*"`) in Cluster Management. `cluster` is the cluster host's technical
+/// name. Same secret, signature, clock window and once-only nonce as the role lookup.
+#[derive(Clone, Deserialize, PartialEq)]
+pub struct SecretPush {
+    pub cluster: String,
+    #[serde(default)]
+    pub user: String,
+    pub password: String,
+    pub set_by: String,
+    pub ts: u64,
+    pub nonce: String,
+}
+
+impl std::fmt::Debug for SecretPush {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SecretPush").field("cluster", &self.cluster).field("user", &self.user)
+            .field("password", &"<redacted>").field("set_by", &self.set_by).field("ts", &self.ts).finish()
+    }
+}
+
 #[derive(Debug, PartialEq)]
 pub enum SsoError {
     NotConfigured,
@@ -251,6 +273,31 @@ impl ZabbixSso {
         Ok(q)
     }
 
+    /// Check a signed password hand-over and return it. The password is never part of an error.
+    pub fn verify_secret_push(&self, body: &[u8], signature_hex: &str, now_secs: u64) -> Result<SecretPush, SsoError> {
+        let secret = self.secret.read().clone().ok_or(SsoError::NotConfigured)?;
+        if !ZabbixSso::signature_ok(&secret, body, signature_hex) {
+            return Err(SsoError::BadSignature);
+        }
+        // Parse errors from serde can quote the input; the reason given is ours alone.
+        let q: SecretPush = serde_json::from_slice(body).map_err(|_| SsoError::BadBody("not {cluster, user, password, set_by, ts, nonce}".into()))?;
+        let bad = |v: &str, max: usize| v.trim().is_empty() || v.len() > max || v.chars().any(char::is_control) || v.trim() != v;
+        if bad(&q.cluster, 128) {
+            return Err(SsoError::BadBody("cluster is empty, too long or has control characters".into()));
+        }
+        if bad(&q.set_by, 128) {
+            return Err(SsoError::BadBody("set_by is empty, too long or has control characters".into()));
+        }
+        if q.user.len() > 128 || q.user.chars().any(char::is_control) {
+            return Err(SsoError::BadBody("user is too long or has control characters".into()));
+        }
+        if q.password.is_empty() || q.password.len() > crate::cluster_secrets::MAX_PASSWORD {
+            return Err(SsoError::BadBody(format!("the password must be 1–{} bytes", crate::cluster_secrets::MAX_PASSWORD)));
+        }
+        self.fresh_once(q.ts, &q.nonce, now_secs)?;
+        Ok(q)
+    }
+
     /// The signature on a role lookup's answer: HMAC-SHA256 under the shared secret of
     /// `"<ts>\n<nonce>\n<exact body bytes>"`, with the ts and nonce of the request it
     /// answers. `None` when no secret is set (then nothing was verified either).
@@ -342,6 +389,39 @@ mod tests {
     }
 
     const NOW: u64 = 1_790_000_000;
+
+    fn push(cluster: &str, password: &str, ts: u64, nonce: &str) -> Vec<u8> {
+        serde_json::to_vec(&serde_json::json!({ "cluster": cluster, "user": "elastic", "password": password, "set_by": "alice", "ts": ts, "nonce": nonce })).unwrap()
+    }
+
+    #[test]
+    fn a_signed_password_hand_over_is_accepted_once_and_never_shown() {
+        let s = sso();
+        let b = push("prod-es", "hunter2", 1000, "n-0123456789abcdef");
+        let q = s.verify_secret_push(&b, &signed(&b), 1000).unwrap();
+        assert_eq!((q.cluster.as_str(), q.password.as_str()), ("prod-es", "hunter2"));
+        assert!(!format!("{q:?}").contains("hunter2"));
+        assert_eq!(s.verify_secret_push(&b, &signed(&b), 1000), Err(SsoError::Replayed));
+        let d = push("*", "def", 1000, "n-default-0123456789");
+        assert_eq!(s.verify_secret_push(&d, &signed(&d), 1000).unwrap().cluster, "*", "the default is cluster \"*\"");
+    }
+
+    #[test]
+    fn a_hand_over_unsigned_stale_or_malformed_is_refused_without_the_password_in_the_reason() {
+        let s = sso();
+        let b = push("prod-es", "hunter2", 1000, "n-0123456789abcdef");
+        assert_eq!(s.verify_secret_push(&b, "00", 1000), Err(SsoError::BadSignature));
+        assert_eq!(s.verify_secret_push(&b, &signed(&b), 5000), Err(SsoError::Stale));
+        let e = push("", "hunter2", 1000, "n-aaaaaaaaaaaaaaaa");
+        assert!(matches!(s.verify_secret_push(&e, &signed(&e), 1000), Err(SsoError::BadBody(_))));
+        let e = push("prod-es", "", 1000, "n-bbbbbbbbbbbbbbbb");
+        assert!(matches!(s.verify_secret_push(&e, &signed(&e), 1000), Err(SsoError::BadBody(_))));
+        let junk = br#"{"cluster":"x","password":"hunter2"}"#.to_vec();
+        match s.verify_secret_push(&junk, &signed(&junk), 1000) {
+            Err(SsoError::BadBody(why)) => assert!(!why.contains("hunter2")),
+            other => panic!("{other:?}"),
+        }
+    }
 
     #[test]
     fn a_correctly_signed_request_is_accepted() {

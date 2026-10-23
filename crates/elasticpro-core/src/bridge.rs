@@ -123,6 +123,10 @@ pub struct Core {
     delay_sink: RwLock<Sink>,
     /// Signing in from Zabbix. Hosted only; off until a secret is configured.
     zbx: ZabbixSso,
+    /// Elasticsearch passwords the Zabbix module handed over (`POST /sso/zabbix/cluster-secret`),
+    /// encrypted at rest. The Zabbix sync takes a cluster's from here when Zabbix keeps it as a
+    /// Secret macro, which the API never returns. See `cluster_secrets`.
+    cluster_secrets: crate::cluster_secrets::ClusterSecrets,
     /// Clusters that are Zabbix hosts, and the Zabbix API and Vault that describe them.
     /// Hosted only; off until both are configured. Rebuilt whenever the link changes —
     /// see `rebuild_zbx_api` — so it sits behind a lock and is handed out as an `Arc`.
@@ -613,6 +617,7 @@ impl Core {
             tracing::info!("Zabbix sign-in is on: /sso/zabbix accepts signed requests");
         }
         let data_dir_for_sink = data_dir.clone();
+        let data_dir_for_secrets = data_dir.clone();
         let data_dir_for_fleet = data_dir.clone();
         let data_dir_for_notify = data_dir.clone();
         let activity = crate::activity::ActivityLog::new(crate::activity::ActivityConfig::from_env(data_dir.as_deref(), edition));
@@ -649,6 +654,8 @@ impl Core {
                 state: SinkState::default(),
             }),
             zbx,
+            cluster_secrets: if hosted { crate::cluster_secrets::ClusterSecrets::open(data_dir_for_secrets.as_deref()) }
+                             else { crate::cluster_secrets::ClusterSecrets::in_memory() },
             zbx_api: RwLock::new(zbx_api),
             zbx_link,
             vault,
@@ -2329,6 +2336,61 @@ impl Core {
         RoleReply { status, body, signature }
     }
 
+    /// `POST /sso/zabbix/cluster-secret`: the Zabbix module hands over an Elasticsearch password an
+    /// admin typed in Cluster Management — a cluster's own (`cluster` = the cluster host's
+    /// technical name) or the default (`cluster: "*"`). Checked like the role lookup —
+    /// `allowedSources`, a per-source budget, the signature, the clock and the nonce — then kept
+    /// encrypted (`cluster_secrets`) and answered signed over the request's ts and nonce. The
+    /// password is in no log, no answer and no error.
+    pub fn zabbix_cluster_secret_from(&self, body: &[u8], signature: &str, source: Option<std::net::IpAddr>) -> RoleReply {
+        let (status, mut out, asked) = self.zabbix_cluster_secret_answer(body, signature, source);
+        crate::errors::stamp(&mut out);
+        let body = serde_json::to_vec(&out).unwrap_or_default();
+        let signature = asked.and_then(|(ts, nonce)| self.zbx.sign_reply(ts, &nonce, &body));
+        RoleReply { status, body, signature }
+    }
+
+    fn zabbix_cluster_secret_answer(&self, body: &[u8], signature: &str, source: Option<std::net::IpAddr>) -> (u16, Value, Option<(u64, String)>) {
+        if self.edition != Edition::Hosted {
+            return (404, json!({ "ok": false, "message": "not available in this build" }), None);
+        }
+        if !self.zbx_link.source_ok(source) {
+            return (403, json!({ "ok": false, "kind": "forbidden", "message": "this source may not hand over passwords" }), None);
+        }
+        if !self.zbx_link.trusted_source(source) && !self.zbx_link.rate_ok("sso_secret", source, crate::zbx_link::SSO_PER_MIN) {
+            return (429, json!({ "ok": false, "kind": "rate_limited", "message": "too many requests — wait a minute" }), None);
+        }
+        let q = match self.zbx.verify_secret_push(body, signature, auth::now()) {
+            Ok(q) => q,
+            Err(e) => {
+                let (status, kind) = match &e {
+                    zbx_sso::SsoError::NotConfigured => (503, "not_configured"),
+                    zbx_sso::SsoError::BadSignature => (401, "bad_signature"),
+                    zbx_sso::SsoError::Stale => (401, "stale"),
+                    zbx_sso::SsoError::Replayed => (401, "replayed"),
+                    zbx_sso::SsoError::BadBody(_) => (400, "bad_request"),
+                    zbx_sso::SsoError::NoRole(_) => (403, "no_role"),
+                };
+                tracing::debug!(reason = %e, "cluster password hand-over refused");
+                return (status, json!({ "ok": false, "kind": kind, "message": e.to_string() }), None);
+            }
+        };
+        let now = auth::now();
+        if let Err(why) = self.cluster_secrets.set(&q.cluster, &q.user, &q.password, &q.set_by, now) {
+            tracing::warn!(target: "audit", cluster = %q.cluster, error = %why, "cluster password not kept");
+            return (500, json!({ "ok": false, "kind": "io_error", "message": format!("the password could not be kept: {why}"),
+                                 "ts": q.ts, "nonce": q.nonce }), Some((q.ts, q.nonce)));
+        }
+        tracing::info!(target: "audit", cluster = %q.cluster, by = %q.set_by, "cluster password handed over from Zabbix and kept encrypted");
+        (200, json!({ "ok": true, "cluster": q.cluster, "set_at": now, "ts": q.ts, "nonce": q.nonce }), Some((q.ts, q.nonce)))
+    }
+
+    /// The credential the core holds for a Zabbix cluster: its own when its password macro is on
+    /// the host, else the default (`cluster_secrets::ClusterSecrets::for_cluster`).
+    pub(crate) fn held_secret(&self, host: &str, password_on_host: bool) -> Option<crate::cluster_secrets::Held> {
+        self.cluster_secrets.for_cluster(host, password_on_host)
+    }
+
     fn zabbix_sso_role_answer(&self, claim: &[u8], signature: &str, source: Option<std::net::IpAddr>) -> (u16, Value, Option<(u64, String)>) {
         if self.edition != Edition::Hosted {
             return (404, json!({ "ok": false, "message": "not available in this build" }), None);
@@ -3286,6 +3348,7 @@ impl Core {
         for c in found {
             let id = c.id();
             let mut notes: Vec<String> = vec![];
+            let mut user_override: Option<String> = None;
             let own = held_by_url.get(&c.url.trim_end_matches('/').to_ascii_lowercase()).cloned().or_else(|| shared.clone());
             let (credential, secret) = if opts.use_elasticpro_credentials {
                 // The config says so: ElasticPro's credential, not Vault's. The header is
@@ -3305,18 +3368,25 @@ impl Core {
                 },
                 PasswordRef::Plain(p) => ("plain-macro", Some(p.clone())),
                 PasswordRef::SecretMacro => {
-                    notes.push("password is a Secret macro, which Zabbix never returns — make it a Vault macro".into());
-                    ("secret-macro", None)
+                    // Zabbix never returns a Secret macro; what the module handed over is used instead.
+                    let (credential, held, note) = secret_macro_credential(&c, self.held_secret(&c.host, c.password_on_host));
+                    if let Some(n) = note { notes.push(n); }
+                    match held {
+                        Some(h) => {
+                            if !h.user.is_empty() { user_override = Some(h.user.clone()); }
+                            (credential, Some(h.password))
+                        }
+                        None => (credential, None),
+                    }
                 }
                 PasswordRef::Missing => ("none", None),
             } };
-            let mut auth = if opts.use_elasticpro_credentials { own.clone() } else { secret.as_ref().map(|p| {
-                use base64::Engine as _;
-                format!("Basic {}", base64::engine::general_purpose::STANDARD.encode(format!("{}:{}", c.username, p)))
-            }) };
+            let username = user_override.clone().unwrap_or_else(|| c.username.clone());
+            let mut auth = if opts.use_elasticpro_credentials { own.clone() } else { secret.as_ref().map(|p| basic(&username, p)) };
             // The last good password carries on only through a Vault outage. ElasticPro's own
             // credential is local and definite: when it is gone, an admin removed it.
-            if auth.is_none() && credential != "none" && !opts.use_elasticpro_credentials {
+            // Never for "password not set": nobody gave the core one, so there is nothing to carry on.
+            if auth.is_none() && credential != "none" && credential != "password-not-set" && !opts.use_elasticpro_credentials {
                 if let Some(old) = previous.get(&id).filter(|o| o.url == c.url) {
                     auth = old.auth_header.clone();
                     if auth.is_some() {
@@ -3945,5 +4015,29 @@ impl Core {
             }
             Err(e) => (e.status(), json!({ "ok": false, "kind": e.kind(), "message": e.public_message() })),
         }
+    }
+}
+
+/// `Basic <base64 user:password>`.
+fn basic(user: &str, password: &str) -> String {
+    use base64::Engine as _;
+    format!("Basic {}", base64::engine::general_purpose::STANDARD.encode(format!("{user}:{password}")))
+}
+
+/// A cluster whose password Zabbix keeps as a Secret macro: the credential the core was handed
+/// for it — its own when the macro is on the host, else the default — or, with none, "password
+/// not set" and nothing to sign in with, so it is listed and NOT polled (polling it meant a 401 on
+/// every interval). The label, the credential, and the note to show.
+pub(crate) fn secret_macro_credential(c: &crate::zabbix_api::ZbxCluster, held: Option<crate::cluster_secrets::Held>)
+    -> (&'static str, Option<crate::cluster_secrets::Held>, Option<String>) {
+    match held {
+        Some(h) => (if c.password_on_host { "core-secret" } else { "core-default" }, Some(h), None),
+        None => ("password-not-set", None, Some(if c.password_on_host {
+            "password not set: Zabbix keeps this cluster's own password as a Secret macro, which it never returns, and \
+             ElasticPro has not been given it — press \"Change password\" on the client's page in Cluster Management".to_string()
+        } else {
+            "password not set: the default Elasticsearch credential is a Secret macro, which Zabbix never returns, and \
+             ElasticPro has not been given it — set it on Cluster Management → Settings → Default Elasticsearch credential".to_string()
+        })),
     }
 }
