@@ -524,14 +524,59 @@ Nothing extra to run — this step is bookkeeping in Zabbix you should not skip.
 | Zabbix user type | ElasticPro role | Clusters | Can write |
 |---|---|---|---|
 | User | `user` | all, read-only (scoped by group only with `zabbix.scopeUsersByGroup: true`) | no |
-| Admin | `operator` | all, read-only | no — GET and searches only |
+| Admin | `operator` (unless an ElasticPro admin pinned another role) | all, read-only | no — GET and searches only |
 | Super admin | `admin` | all | yes (PUT/POST/DELETE), and administers the app |
 | Guest | — | not signed in | — |
 
 Accounts are created on first sign-in as `<zabbix name>@zabbix` — so a Zabbix user named
-`admin` can never become the local `admin`. Role and groups are
-rewritten from Zabbix at **every sign-in**: move someone between Zabbix groups and it applies
-next time they open the page, no restart needed.
+`admin` can never become the local `admin`. Groups are rewritten from Zabbix at **every
+sign-in**: move someone between Zabbix groups and it applies next time they open the page, no
+restart needed. The role is rewritten the same way **until an ElasticPro admin changes it** on
+the Accounts page: that change is *pinned* (a "pinned" pill in the Origin column) and later
+Zabbix sign-ins keep it. **Follow Zabbix again** in the role editor clears the pin; Zabbix's
+role then applies from that person's next sign-in. The only working admin cannot be handed back
+(its next sign-in could demote it).
+
+**Who may edit Cluster Management.** ElasticPro's role decides (decision of 2026-10-22; Zabbix
+still owns hosts and host groups). A Zabbix Super admin always may. A Zabbix Admin or User may
+when ElasticPro's answer to the role lookup below is `admin` (pinned or not), and then only for
+saves their own Zabbix rights cover: the clients module checks those rights first and refuses,
+naming the step, anything that needs a Zabbix Super admin (a new host group, the DL alert-routing
+user group and account) before it changes anything. Backups and the host register stay Super
+admin only. When ElasticPro cannot be asked, or its answer cannot be trusted, only Super admins
+edit and the page says so.
+
+#### The role lookup: `GET /sso/zabbix/role`
+
+Server to server, read-only — no account is made or refreshed, no session or code is issued.
+
+| | |
+|---|---|
+| Request | `GET {core_url}/sso/zabbix/role?claim=<url-encoded JSON>`; JSON exactly `{"zabbix_user":"alice","zabbix_user_type":2,"ts":<unix s>,"nonce":"<32 hex>"}` |
+| Request signature | `X-Zabbix-Module-Signature: hex(HMAC-SHA256(module_secret, <the JSON's exact bytes>))` — the same secret and scheme as `POST /sso/zabbix` |
+| Replay window | `ts` within ±60 s of the core's clock; each nonce once (401 `replayed` otherwise) |
+| Answer (200) | `{"ok":true,"account":"alice@zabbix","role":"admin"\|"operator"\|"user"\|"guest"\|null,"pinned":bool,"source":"zabbix"\|null,"disabled":bool,"locked":bool,"zabbix_role":…,"ts":<echo>,"nonce":"<echo>"}`. `role: null` = ElasticPro has never seen this person sign in (the module then uses the Zabbix mapping, so a non-Super-admin is not an admin). A local account that happens to be called `alice@zabbix` is not counted. |
+| Answer signature | `X-ElasticPro-Signature: hex(HMAC-SHA256(module_secret, "<ts>\n<nonce>\n" + <exact body bytes>))`, using the request's ts and nonce. Only a verified request gets one. |
+| Errors | 400 `bad_request`, 401 `bad_signature` / `stale` / `replayed`, 403 source not in `allowedSources`, 404 not the hosted build, 429 over the per-source budget (the sign-in's: 600/min, the listed Zabbix frontend exempt), 503 no secret set |
+| Logging | debug level only (`RUST_LOG=elasticpro_core=debug`); never the signature or the body |
+
+**What authenticates the answer is its signature.** The module grants edit rights only on a 200
+whose `X-ElasticPro-Signature` verifies, whose echoed nonce and ts are the ones it sent, and whose
+nonce it has not seen before. Someone on the path can block that answer — and then only Super admins
+edit — but cannot forge or replay it. On top of the signature, the connection must be one of:
+
+- https with `verify_tls` on — **the recommendation**;
+- a loopback core (127.0.0.0/8, `::1`, `localhost`);
+- plain http to a host named in the ElasticPro module's `trusted_plain_hosts` (config.php, or
+  Administration → ElasticPro → Edit settings). Exact host names only: the settings page refuses IP
+  addresses and wildcards, and a `core_url` that names an IP never matches. The default is
+  `['ep-core']`, so the documented compose setup (`core_url` `http://ep-core:8765` over `ep_sso`)
+  works as installed; an empty list trusts no plain-http host.
+
+Any other plain-http core still gets its question answered (an operator is still told their role),
+but nobody is elevated and the page says "ElasticPro's answer cannot be trusted over this
+connection". The answer is cached in the PHP session for 60 s. nginx forwards `/sso/zabbix/role`
+(GET only) like `/sso/zabbix`.
 
 **Group scoping is off by default:** every Zabbix sign-in reads every cluster. Set
 `zabbix: { scopeUsersByGroup: true }` in `config_cluster.json` to limit Zabbix Users as below;

@@ -97,17 +97,35 @@ function signInCell(u) {
 }
 
 /**
- * Where an account comes from, and what it may see. A Zabbix account's role and groups are
- * rewritten from Zabbix at every sign-in, so saying so here is the difference between an
- * admin editing it and wondering why the edit did not stick.
+ * What the role editor says about a Zabbix account's role, and whether to offer handing it
+ * back. One definition, used by the dialog and the origin cell's tooltip, so the two cannot
+ * tell an admin different things. `null` for a local account: there is nothing to follow.
+ *
+ * Zabbix sets the role at each sign-in until an admin changes it here; the core then pins
+ * it (`role_pinned`, auth.rs) and later sign-ins keep it. Nothing about this is kept in the
+ * browser — it is the account's own field, read from USER_LIST.
  */
-function originCell(u) {
+export function zabbixRoleNote(u) {
+  if (!u || u.source !== 'zabbix') return null;
+  return u.rolePinned
+    ? { pinned: true, text: 'Pinned here. Zabbix sign-ins no longer change it.' }
+    : { pinned: false, text: 'Follows Zabbix at each sign-in (Zabbix Admin → Operator, Super admin → Admin). Changing it here pins it.' };
+}
+
+/**
+ * Where an account comes from, and what it may see. A Zabbix account's groups are rewritten
+ * from Zabbix at every sign-in, and so is its role unless an admin pinned it here — saying
+ * which is the difference between an admin editing it and wondering why the edit did not stick.
+ */
+export function originCell(u) {
   if (u.source !== 'zabbix') return h('span.muted', { style: { fontSize: '11.5px' } }, 'local');
   const scope = Array.isArray(u.scope)
     ? (u.scope.length ? `clusters for: ${u.scope.join(', ')}` : 'in no mapped Zabbix group — sees no clusters')
     : 'every cluster';
-  return h('span', { title: `Signed in through Zabbix. Role and groups follow Zabbix at each sign-in. ${scope}.` },
+  const note = zabbixRoleNote(u);
+  return h('span', { title: `Signed in through Zabbix. Groups follow Zabbix at each sign-in. Role: ${note.text} ${scope}.` },
     pill('zabbix', ''),
+    note.pinned ? h('span.role-pinned', { style: { marginLeft: '4px' } }, pill('pinned', 'grey')) : null,
     h('span.muted', { style: { marginLeft: '6px', fontSize: '11px' } }, scope));
 }
 
@@ -450,13 +468,35 @@ function tokensCard() {
 
 /* ---------------------------------- actions ---------------------------------- */
 
-function editUser(existing) {
+/** Hand a pinned Zabbix account's role back to Zabbix, from its next sign-in. */
+async function followZabbix(u, ctx) {
+  const res = await bridge({ type: 'USER_UNPIN_ROLE', name: u.name });
+  if (!res || !res.ok) throw new Error((res && res.message) || 'The server refused it.');
+  toast(`${u.name} follows Zabbix again`, 'ok', 5000,
+    { detail: ['its role is set from Zabbix at its next sign-in; until then it stays ' + u.role] });
+  ctx.done(true);
+  await load();
+}
+
+export function editUser(existing) {
   const isNew = !existing;
+  const note = zabbixRoleNote(existing);
+  // The dialog's context exists only once modal() has drawn the buttons; the "Follow Zabbix
+  // again" button in the body is drawn before that, so it reaches the context through here.
+  let dlg = null;
+  const roleHint = note
+    ? h('span.role-note', note.text,
+      note.pinned
+        ? h('button.btn.sm.ghost', { type: 'button', style: { marginLeft: '6px' },
+          title: 'Zabbix sets this account’s role again from its next sign-in',
+          onclick: (e) => { e.preventDefault(); if (dlg) dlg.run(e.target, () => followZabbix(existing, dlg)); } }, 'Follow Zabbix again')
+        : null)
+    : null;
   modal(
     isNew ? 'New account' : `Edit ${existing.name}`,
     isNew ? 'They sign in with this name and password.'
-      : existing.source === 'zabbix'
-        ? 'This account signs in through Zabbix, and Zabbix sets its role again at every sign-in. Change the Zabbix user’s role to change it for good.'
+      : note
+        ? 'This account signs in through Zabbix. What they may do changes at once, in any session they have open.'
         : 'What they may do changes at once, in any session they have open. Nobody is signed out.',
     [
       isNew ? field('User name', text('acct-name', '')) : null,
@@ -468,9 +508,9 @@ function editUser(existing) {
         ['operator', 'Operate (operator) — every cluster read-only, alerts and silences, no cluster changes'],
         ['admin', 'Manage (admin) — everything: cluster changes, accounts, secrets, config'],
         ['guest', 'Dashboard (guest) — the dashboard only, no index names'],
-      ])),
+      ]), roleHint),
     ].filter(Boolean),
-    (ctx) => [
+    (ctx) => { dlg = ctx; return [
       h('button.btn', { onclick: () => ctx.done(false) }, 'Cancel'),
       h('button.btn.primary', {
         // ctx.run + ctx.msg: a refusal belongs in the dialog the operator is looking at.
@@ -487,12 +527,13 @@ function editUser(existing) {
             : await bridge({ type: 'USER_SET_ROLE', name, role });
           if (!res || !res.ok) throw new Error((res && res.message) || 'The server refused it.');
           toast(isNew ? `Account ${name} created` : `${name} is now ${role}`, 'ok', 5000,
-            { detail: [isNew ? `access: ${role}` : 'their open sessions have it now'] });
+            { detail: [isNew ? `access: ${role}` : 'their open sessions have it now',
+              ...(res.pinned ? ['pinned: Zabbix sign-ins no longer change it'] : [])] });
           ctx.done(true);
           await load();
         }),
       }, isNew ? 'Create' : 'Save'),
-    ],
+    ]; },
   );
 }
 
