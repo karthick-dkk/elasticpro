@@ -519,12 +519,25 @@ impl GateState {
         out
     }
 
+    /// Running and waiting per class, and how long the oldest waiter has waited — the
+    /// whole gate, no cluster named. The Request Centre's tiles and the Zabbix push both
+    /// read this, so the two cannot count differently.
+    pub fn load(&self, now: u64) -> Load {
+        let mut out = Load::default();
+        for r in self.running.values() {
+            out.running[r.class.idx()] += 1;
+        }
+        for w in &self.waiting {
+            out.queued[w.t.class.idx()] += 1;
+        }
+        out.oldest_wait_ms = self.waiting.iter().map(|w| now.saturating_sub(w.since)).max().unwrap_or(0);
+        out
+    }
+
     /// What is running and waiting, by class and by cluster, and how long the oldest waiter
     /// has waited. `visible` narrows the per-cluster maps (a scoped admin sees their own).
     pub fn snapshot(&self, now: u64, visible: Option<&std::collections::HashSet<String>>) -> Value {
         let sees = |c: &str| visible.is_none_or(|v| v.contains(c));
-        let mut running = [0usize; 3];
-        let mut queued = [0usize; 3];
         let mut run_c: Map<String, Value> = Map::new();
         let mut wait_c: Map<String, Value> = Map::new();
         let bump = |m: &mut Map<String, Value>, k: &str| {
@@ -532,24 +545,23 @@ impl GateState {
             m.insert(k.to_string(), json!(n));
         };
         for r in self.running.values() {
-            running[r.class.idx()] += 1;
             if sees(&r.cluster) {
                 bump(&mut run_c, &r.cluster);
             }
         }
         for w in &self.waiting {
-            queued[w.t.class.idx()] += 1;
             if sees(&w.t.cluster) {
                 bump(&mut wait_c, &w.t.cluster);
             }
         }
+        let load = self.load(now);
         let by = |a: [usize; 3]| json!({ "interactive": a[0], "prompted": a[1], "background": a[2], "total": a.iter().sum::<usize>() });
         json!({
-            "running": by(running),
-            "queued": by(queued),
+            "running": by(load.running),
+            "queued": by(load.queued),
             "runningByCluster": run_c,
             "queuedByCluster": wait_c,
-            "oldestWaitMs": self.waiting.iter().map(|w| now.saturating_sub(w.since)).max().unwrap_or(0),
+            "oldestWaitMs": load.oldest_wait_ms,
         })
     }
 }
@@ -569,6 +581,37 @@ pub fn retry_after(queued: usize) -> u64 {
     (1_000 + 50 * queued as u64).min(10_000)
 }
 
+/// The gate right now, per class (indexed as [`Class::ALL`]). No cluster in it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Load {
+    pub running: [usize; 3],
+    pub queued: [usize; 3],
+    pub oldest_wait_ms: u64,
+}
+
+/// What happened at the gate over a window that ends now: grants and their waits per class
+/// (indexed as [`Class::ALL`]), refusals by kind, answers shared and cached. One function
+/// computes it ([`Gate::window`]) for the Request Centre's five minutes and the Zabbix
+/// push's one, so a figure means the same in both places.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Window {
+    pub window_ms: u64,
+    /// Grants (immediate ones included), per class.
+    pub granted: [usize; 3],
+    pub wait_p50_ms: [Option<u64>; 3],
+    pub wait_p95_ms: [Option<u64>; 3],
+    pub overloaded: usize,
+    pub queue_timeout: usize,
+    /// Every refusal the gate gave: the Request Centre's "Turned away".
+    pub refused: usize,
+    /// Answers not read because they were over the response cap (`response_too_large`).
+    /// Not a gate refusal — the request was sent — so not in `refused`.
+    pub too_large: usize,
+    pub shared: usize,
+    pub cache_hits: usize,
+    pub cache_bytes: u64,
+}
+
 /* ------------------------------------- the async side ------------------------------------- */
 
 /// What the Request Centre reports over the last five minutes.
@@ -583,6 +626,7 @@ struct Stats {
     shared: VecDeque<u64>,
     /// (when, bytes)
     cached: VecDeque<(u64, u64)>,
+    too_large: VecDeque<u64>,
 }
 
 fn trim<T>(q: &mut VecDeque<T>, now: u64, at: impl Fn(&T) -> u64) {
@@ -783,30 +827,69 @@ impl Gate {
         trim(&mut s.cached, now, |x| x.0);
     }
 
-    /// Running and queued now, plus the last five minutes: waits (p50/p95 per class),
-    /// refusals by kind, requests shared and answered from the cache.
-    pub fn report(&self, visible: Option<&std::collections::HashSet<String>>) -> Value {
+    /// An answer was over the response cap and not read.
+    pub fn note_too_large(&self) {
         let now = self.now_ms();
-        let mut out = self.inner.lock().state.snapshot(now, visible);
+        let mut s = self.stats.lock();
+        s.too_large.push_back(now);
+        trim(&mut s.too_large, now, |x| *x);
+    }
+
+    /// The gate right now, per class. A short lock, the same one the Request Centre takes.
+    pub fn load(&self) -> Load {
+        let now = self.now_ms();
+        self.inner.lock().state.load(now)
+    }
+
+    /// The last `window_ms` (at most [`STATS_WINDOW_MS`], which is all that is kept).
+    pub fn window(&self, window_ms: u64) -> Window {
+        let now = self.now_ms();
+        let window_ms = window_ms.min(STATS_WINDOW_MS);
+        let within = |at: u64| now.saturating_sub(at) <= window_ms;
         let mut s = self.stats.lock();
         trim(&mut s.waits, now, |x| x.0);
         trim(&mut s.refusals, now, |x| x.0);
         trim(&mut s.shared, now, |x| *x);
         trim(&mut s.cached, now, |x| x.0);
+        trim(&mut s.too_large, now, |x| *x);
+        let mut out = Window { window_ms, ..Window::default() };
+        for c in Class::ALL {
+            let mut v: Vec<u64> = s.waits.iter().filter(|w| w.1 == c && within(w.0)).map(|w| w.2).collect();
+            v.sort_unstable();
+            out.granted[c.idx()] = v.len();
+            out.wait_p50_ms[c.idx()] = percentile(&v, 0.5);
+            out.wait_p95_ms[c.idx()] = percentile(&v, 0.95);
+        }
+        let refused = |k: &str| s.refusals.iter().filter(|r| r.1 == k && within(r.0)).count();
+        out.overloaded = refused("overloaded");
+        out.queue_timeout = refused("queue_timeout");
+        out.refused = s.refusals.iter().filter(|r| within(r.0)).count();
+        out.too_large = s.too_large.iter().filter(|t| within(**t)).count();
+        out.shared = s.shared.iter().filter(|t| within(**t)).count();
+        out.cache_hits = s.cached.iter().filter(|c| within(c.0)).count();
+        out.cache_bytes = s.cached.iter().filter(|c| within(c.0)).map(|c| c.1).sum();
+        out
+    }
+
+    /// Running and queued now, plus the last five minutes: waits (p50/p95 per class),
+    /// refusals by kind, requests shared and answered from the cache.
+    pub fn report(&self, visible: Option<&std::collections::HashSet<String>>) -> Value {
+        let now = self.now_ms();
+        let mut out = self.inner.lock().state.snapshot(now, visible);
+        let w = self.window(STATS_WINDOW_MS);
         let mut waits = Map::new();
         for c in Class::ALL {
-            let mut v: Vec<u64> = s.waits.iter().filter(|w| w.1 == c).map(|w| w.2).collect();
-            v.sort_unstable();
-            waits.insert(c.as_str().into(), json!({ "count": v.len(), "p50Ms": percentile(&v, 0.5), "p95Ms": percentile(&v, 0.95) }));
+            let i = c.idx();
+            waits.insert(c.as_str().into(), json!({ "count": w.granted[i], "p50Ms": w.wait_p50_ms[i], "p95Ms": w.wait_p95_ms[i] }));
         }
-        let refused = |k: &str| s.refusals.iter().filter(|r| r.1 == k).count();
         let m = out.as_object_mut().expect("the snapshot is an object");
-        m.insert("windowMs".into(), json!(STATS_WINDOW_MS));
+        m.insert("windowMs".into(), json!(w.window_ms));
         m.insert("waits".into(), Value::Object(waits));
-        m.insert("refused".into(), json!({ "overloaded": refused("overloaded"), "queueTimeout": refused("queue_timeout"), "total": s.refusals.len() }));
-        m.insert("shared".into(), json!(s.shared.len()));
-        m.insert("cacheHits".into(), json!(s.cached.len()));
-        m.insert("cacheBytes".into(), json!(s.cached.iter().map(|c| c.1).sum::<u64>()));
+        m.insert("refused".into(), json!({ "overloaded": w.overloaded, "queueTimeout": w.queue_timeout, "total": w.refused }));
+        m.insert("tooLarge".into(), json!(w.too_large));
+        m.insert("shared".into(), json!(w.shared));
+        m.insert("cacheHits".into(), json!(w.cache_hits));
+        m.insert("cacheBytes".into(), json!(w.cache_bytes));
         out
     }
 
@@ -986,6 +1069,40 @@ mod tests {
         assert_eq!(v["oldestWaitMs"], json!(300));
         let only_b: std::collections::HashSet<String> = ["b".to_string()].into();
         assert!(s.snapshot(400, Some(&only_b))["queuedByCluster"].get("a").is_none());
+    }
+
+    #[test]
+    fn load_is_the_snapshot_without_clusters() {
+        let mut s = GateState::new(Limits { global: 2, background_reserve: 0, ..lim() });
+        admit(&mut s, 1, t(Class::Interactive, "a"), 0);
+        admit(&mut s, 2, t(Class::Background, "b"), 0);
+        admit(&mut s, 3, t(Class::Prompted, "a"), 100);
+        let l = s.load(400);
+        assert_eq!(l, Load { running: [1, 0, 1], queued: [0, 1, 0], oldest_wait_ms: 300 });
+        let v = s.snapshot(400, None);
+        assert_eq!(v["running"]["total"], json!(l.running.iter().sum::<usize>()));
+        assert_eq!(v["oldestWaitMs"], json!(l.oldest_wait_ms));
+    }
+
+    #[test]
+    fn the_report_and_a_window_count_alike_and_too_large_is_not_a_refusal() {
+        let g = Gate::new(lim());
+        g.note_refusal("overloaded");
+        g.note_refusal("queue_timeout");
+        g.note_too_large();
+        g.note_shared();
+        g.note_cached(100);
+        g.note_wait(Class::Interactive, 40);
+        let w = g.window(60_000);
+        assert_eq!((w.overloaded, w.queue_timeout, w.refused, w.too_large), (1, 1, 2, 1));
+        assert_eq!((w.shared, w.cache_hits, w.cache_bytes, w.granted[0]), (1, 1, 100, 1));
+        assert_eq!(w.wait_p95_ms[0], Some(40));
+        assert_eq!(w.wait_p95_ms[1], None, "no grant, no percentile");
+        let r = g.report(None);
+        assert_eq!(r["refused"]["total"], json!(w.refused), "one definition of Turned away");
+        assert_eq!(r["tooLarge"], json!(1));
+        assert_eq!(r["windowMs"], json!(STATS_WINDOW_MS));
+        assert_eq!(g.window(u64::MAX).window_ms, STATS_WINDOW_MS, "no window longer than what is kept");
     }
 
     #[test]

@@ -439,6 +439,22 @@ impl Zabbix {
         Ok(Value::Object(out))
     }
 
+    /// `history.push` (Zabbix 7.0+): one value for one trapper item, by the host's technical
+    /// name and the item key. Zabbix answers success for the call as a whole and an error per
+    /// value; a value it did not take is an error here, with Zabbix's reason ("No
+    /// permissions to referred object or it does not exist" is the usual one: no such host
+    /// or item, or the token's user may not write to that host).
+    pub async fn push_history(&self, host: &str, key: &str, value: &str, clock: u64) -> Result<(), ApiError> {
+        let r = self.call_as("history.push", json!([{ "host": host, "key": key, "value": value, "clock": clock }]), true).await?;
+        let item = r["data"].as_array().and_then(|a| a.first());
+        match item {
+            Some(i) if i.get("error").is_none() && i.get("itemid").is_some() => Ok(()),
+            Some(i) => Err(ApiError::new("zabbix_error", format!("Zabbix history.push: {}",
+                i["error"].as_str().unwrap_or("the value was not accepted")))),
+            None => Err(ApiError::new("not_zabbix", "history.push answered without a result per value — is this Zabbix 7.0 or later?")),
+        }
+    }
+
     /// A host group's id, creating it when it does not exist.
     pub async fn ensure_group(&self, name: &str) -> Result<String, String> {
         let g = self.call("hostgroup.get", json!({ "filter": { "name": [name] }, "output": ["groupid"] })).await?;

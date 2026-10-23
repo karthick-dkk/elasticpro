@@ -21,7 +21,7 @@ import { togglePaused, setPausedAll, isPaused } from '../core/policy.js';
 import { toast } from '../ui/menu.js';
 import { card, table, pill, statTile, empty } from './common.js';
 import { NO_FILTER, requestRows, originChoices, perCluster, requestCsvRows, CSV_HEADER, originLabel, gateFigures,
-  requestStatus, modeText, limitChips, clockTime, classTag, resultTone, LOG_LIMIT } from '../core/request-log.js';
+  requestStatus, modeText, limitChips, clockTime, classTag, resultTone, LOG_LIMIT, zabbixPushLine } from '../core/request-log.js';
 
 let host = null;
 let log = { inflight: [], recent: [] };
@@ -211,7 +211,7 @@ function draw() {
   mount(host, h('div.rq-page',
     h('div.rq-top', statusCard(status), stopCard()),
     error ? h('div.banner.err', h('div', h('div.ttl', 'Could not read the request log'), h('div', error))) : null,
-    tiles, limitsRow(lim ? limitChips(log) : null), bar,
+    tiles, limitsRow(lim ? limitChips(log) : null), pushRow(zabbixPushLine(log)), bar,
     card('Requests', `${num(rows.length)} shown · in flight first, then newest · live while this page is open`, reqTable),
     h('div', { style: { marginTop: '14px' } },
       card('Per cluster', 'what the log holds for each cluster',
@@ -286,6 +286,12 @@ function stopCard() {
 }
 
 /** The gate's limits as labelled chips; unknown (an older core) says so. */
+/** The Zabbix push in one line under the limits; nothing at all when the core does not push. */
+function pushRow(line) {
+  if (!line) return null;
+  return h('div.rq-limits', h('span.rq-limits-k', 'Zabbix'), pill(line.state, line.tone), h('span', { title: line.title }, line.text));
+}
+
 function limitsRow(chips) {
   return h('div.rq-limits',
     h('span.rq-limits-k', 'Limits'),

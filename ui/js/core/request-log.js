@@ -294,3 +294,32 @@ export function resultTone(r) {
   if (r.ok) return 'ok';
   return REFUSED.has(String(r.status || '')) ? 'warn' : 'err';
 }
+
+/**
+ * The Zabbix push (ZABBIX_METRICS_HOST) as one line: { state, tone, text, title }, or null
+ * when the core does not push — not set, or a core that does not report it — so an install
+ * that never asked for it is not shown an "off" it has to wonder about. `state` is
+ * waiting | failing | ok; tone is a pill colour.
+ */
+export function zabbixPushLine(log, now = Date.now()) {
+  const p = log && log.gate && log.gate.zabbixPush;
+  if (!p || !p.enabled) return null;
+  const n = (v) => Number(v || 0).toLocaleString();
+  const ago = (t) => `${dur(Math.max(0, now - t))} ago`;
+  const every = p.intervalSecs ? `every ${p.intervalSecs} s` : 'on a timer';
+  const signer = p.credential === 'metrics' ? 'its own token (ELASTICPRO_ZABBIX_METRICS_TOKEN_FILE)' : 'the Zabbix connection\u2019s token';
+  const where = `host ${p.host}, item elasticpro.gate.raw, signed with ${signer}`;
+  if (p.idle) {
+    return { state: 'waiting', tone: 'grey', text: `not pushing: ${p.idle}`, title: `Pushes ${every} to ${where} once this is fixed` };
+  }
+  if (p.consecutiveFailures > 0) {
+    return { state: 'failing', tone: 'red',
+      text: `push to ${p.host} failing, ${n(p.consecutiveFailures)} in a row${p.lastOkAt ? ` · last delivered ${ago(p.lastOkAt)}` : ' · nothing delivered yet'}`,
+      title: p.lastError || 'The reason is shown to an admin who sees every cluster, and is in the core log' };
+  }
+  if (!p.lastOkAt) {
+    return { state: 'waiting', tone: 'grey', text: `pushing to ${p.host} ${every}; the first push has not happened yet`, title: where };
+  }
+  return { state: 'ok', tone: 'green', text: `pushed to ${p.host} ${ago(p.lastOkAt)} · ${n(p.pushes)} sent, ${n(p.failures)} failed since the core started`,
+    title: `${every} to ${where}` };
+}

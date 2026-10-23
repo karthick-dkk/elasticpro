@@ -223,7 +223,7 @@ Click **Pair**.
 
 **Check it worked:** a green message reads *Paired with ElasticPro at https://&lt;elasticpro-host&gt;*, and **Connection** shows **Secret: set · paired &lt;date&gt; by &lt;you&gt;**. Click **Test connection** on the same page; it should say *ElasticPro connection works*.
 
-What pairing did, acting as you through the Zabbix API: it created (or reused) the user role **ElasticPro sync** and the user **elasticpro-sync** (read-only API methods, no frontend access), made a new API token for that user, and sent the token to ElasticPro in a signed request. You do not need to copy or store the token anywhere.
+What pairing did, acting as you through the Zabbix API: it created (or reused) the user role **ElasticPro sync** and the user **elasticpro-sync** (read-only API methods plus `history.push`, so ElasticPro can push its own request figures when `ZABBIX_METRICS_HOST` is set; no frontend access), made a new API token for that user, and sent the token to ElasticPro in a signed request. You do not need to copy or store the token anywhere.
 
 ## Step 6 — ElasticPro: confirm and sync
 

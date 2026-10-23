@@ -150,6 +150,9 @@ async fn run() {
     // Stuck records closed, the read cache aged, our orphaned searches on the clusters
     // cancelled (ES_TASK_REAPER). See bridge.rs, "the reapers".
     core.start_request_reaper();
+    // The request figures to a Zabbix trapper item, once a minute — only when
+    // ZABBIX_METRICS_HOST names a host. See zbx_push.rs.
+    core.start_zabbix_push();
     let app = Router::new()
         .route("/bridge", post(bridge))
         // Fleet cache changes, pushed. Opened with a ticket from EVENTS_TICKET; see events().
