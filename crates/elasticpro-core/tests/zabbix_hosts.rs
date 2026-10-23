@@ -142,11 +142,11 @@ async fn zabbix_hosts_become_clusters() {
     let want = format!("Basic {}", base64::engine::general_purpose::STANDARD.encode("elastic:s3cret"));
     assert_eq!(es.last_hit().unwrap().header("authorization"), Some(want.as_str()));
 
-    // --- a Secret macro is reported, not silently empty
+    // --- a Secret macro the core was never handed is "password not set", not silently empty
     let legacy = list["clusters"].as_array().unwrap().iter().find(|x| x["_id"] == "zbx-legacy").unwrap().clone();
-    assert_eq!(legacy["credential"], json!("secret-macro"));
+    assert_eq!(legacy["credential"], json!("password-not-set"));
     assert_eq!(legacy["credentialOk"], json!(false));
-    assert!(legacy["notes"].to_string().contains("Vault macro"));
+    assert!(legacy["notes"].to_string().contains("password not set"), "{legacy}");
     // Regression: ISSUE-004 — a cluster the core knows it cannot sign in to was still polled:
     // on the test VM, 69 requests in an hour, every one a 401 against the cluster's account.
     // Found by /qa on 2026-10-14; report .gstack/qa-reports/run-20261014T120616Z/.

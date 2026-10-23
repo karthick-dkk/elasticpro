@@ -164,6 +164,9 @@ async fn run() {
         .route("/sso/zabbix", post(zabbix_sso).layer(axum::extract::DefaultBodyLimit::max(64 * 1024)))
         // Read-only sibling: "what is this Zabbix user's role here?", for Cluster Management.
         .route("/sso/zabbix/role", get(zabbix_sso_role))
+        // The Zabbix module hands over an Elasticsearch password an admin typed (signed; see
+        // cluster_secrets.rs). Small bodies only.
+        .route("/sso/zabbix/cluster-secret", post(zabbix_cluster_secret).layer(axum::extract::DefaultBodyLimit::max(16 * 1024)))
         .route("/zabbix/pair", post(zabbix_pair).layer(axum::extract::DefaultBodyLimit::max(64 * 1024)))
         .fallback_service(ServeDir::new(&ui))
         .layer(axum::middleware::from_fn_with_state(core.clone(), frame_ancestors))
@@ -237,6 +240,27 @@ async fn zabbix_sso_role(
     let h = res.headers_mut();
     h.insert(axum::http::header::CONTENT_TYPE, axum::http::HeaderValue::from_static("application/json"));
     // Never cached: the answer is about one question, and the next one may differ.
+    h.insert(axum::http::header::CACHE_CONTROL, axum::http::HeaderValue::from_static("no-store"));
+    if let Some(v) = r.signature.and_then(|s| axum::http::HeaderValue::from_str(&s).ok()) {
+        h.insert("x-elasticpro-signature", v);
+    }
+    res
+}
+
+/// `POST /sso/zabbix/cluster-secret` — the same header and signature scheme over the exact body;
+/// the answer is signed back in `X-ElasticPro-Signature`, like the role lookup's.
+async fn zabbix_cluster_secret(
+    State(app): State<Arc<App>>,
+    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> axum::response::Response {
+    let sig = headers.get("x-zabbix-module-signature").and_then(|v| v.to_str().ok()).unwrap_or("");
+    let r = app.core.zabbix_cluster_secret_from(&body, sig, source_of(&app, &headers, peer));
+    let mut res = axum::response::Response::new(axum::body::Body::from(r.body));
+    *res.status_mut() = status(r.status);
+    let h = res.headers_mut();
+    h.insert(axum::http::header::CONTENT_TYPE, axum::http::HeaderValue::from_static("application/json"));
     h.insert(axum::http::header::CACHE_CONTROL, axum::http::HeaderValue::from_static("no-store"));
     if let Some(v) = r.signature.and_then(|s| axum::http::HeaderValue::from_str(&s).ok()) {
         h.insert("x-elasticpro-signature", v);
