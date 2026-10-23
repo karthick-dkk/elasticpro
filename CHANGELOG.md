@@ -1,5 +1,24 @@
 # Changelog
 
+## Unreleased (0.3.25)
+
+**A trial install's certificate can be verified, and the Docker-path installer ships current modules.**
+
+- **The trial certificate now has a subjectAltName.** It carried only CN `elasticpro.trial`, so any
+  client that verifies TLS (curl, PHP, a browser, and since 0.3.24 the Zabbix module's "Verify TLS"
+  rule for Cluster Management edit rights) failed with a hostname mismatch, and Verify TLS could never
+  pass on a trial install. `deploy/trial-cert.sh` (called by `trial-setup.sh`) now issues it for
+  `elasticpro.trial`, this host's name, every non-loopback IPv4 of the host and `127.0.0.1`, with
+  basic constraints `CA:TRUE` and a lifetime of 825 days (was 30). `deploy/README.md` says how to
+  trust it on the Zabbix host. An existing `tls/` is left as it is; delete it to get the new one.
+- **`deploy/zabbix/install-modules.sh` takes all seven modules from `--modules-src`.** It used to
+  take four from `integration/zabbix` in this repository, which was stale (so the Docker stack got
+  old Cluster Management and widgets next to a current menu module). Without `--modules-src` it
+  stops with the clone and checkout commands. It installs `ep_tophosts` and `ep_overview` too, writes
+  a `BUILD` file (modules version and commit) into each, and runs `master/import.py` from the modules
+  project. The `BUILD` code is shared with the release archive builder (`deploy/zabbix/modules-build.sh`).
+- `integration/zabbix` is deleted from this repository; docs and checks point at the modules project.
+
 ## 0.3.24
 
 **The request figures reach Zabbix, a role an admin sets on a Zabbix account stays set, and the

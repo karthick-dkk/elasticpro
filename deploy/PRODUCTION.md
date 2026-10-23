@@ -44,9 +44,7 @@ git checkout main && git log -1 --oneline          # 0d0ecd8 or later
 npm i jsdom
 node tools/check-ui.mjs && node tools/unit-check.mjs
 cargo test --workspace && cargo clippy --workspace --all-targets -- -D warnings
-cd integration/zabbix
-node --test $(git ls-files '*.test.mjs')
-docker run --rm -v "$PWD":/m -w /m/clients-module php:8.4-cli-alpine php test/spec.test.php
+# the modules project has its own tests (node --test, php spec); run them there, at the pinned commit
 ```
 
 All must pass (the PHP spec prints `… passed, 0 failed`). Do not continue on a failure.
@@ -168,10 +166,9 @@ ElasticPro's, and a release ships the modules commit pinned in `deploy/zabbix/MO
 with the version it carries (`# modules X.Y.Z`); see "Modules versioning" in
 `deploy/zabbix/README.md`. The release archive's installer, `zabbix-modules-install.sh`, prints
 which modules version and build it installs; **ElasticPro → Settings** in Zabbix shows what is
-installed. This section's `install-modules.sh` copies the modules from checkouts instead and
-records no build: the `elasticpro` menu module from the modules project (`--modules-src`, a
-checkout at the commit in `MODULES_REF`; this repository keeps no copy of it), the other four from
-this checkout.
+installed. This section's `install-modules.sh` copies all seven from the modules project
+(`--modules-src`, a checkout at the commit in `MODULES_REF`; this repository keeps no copy of any)
+and writes the same `BUILD` file into each.
 
 One command, on the Zabbix frontend host, from a checkout of this repo:
 
@@ -189,8 +186,8 @@ ZABBIX_URL=https://zabbix.example.com ZABBIX_TOKEN=<token> deploy/zabbix/install
 
 It:
 
-1. copies the five modules — `elasticpro`, `ep_clients`, `ep_capacity`, `ep_resources`,
-   `ep_volume` — into Zabbix's modules folder (`/usr/share/zabbix/modules`), without tests and
+1. copies the seven modules — `elasticpro`, `ep_clients`, `ep_capacity`, `ep_resources`,
+   `ep_volume`, `ep_tophosts`, `ep_overview` — into Zabbix's modules folder (`/usr/share/zabbix/modules`), without tests and
    tool scripts. What was there first goes to `/var/backups/elasticpro-zabbix/<date>/`. Each
    module's folder is refilled, never replaced, so Docker's bind mounts keep working, and a
    `config.php` in it is kept;
@@ -199,8 +196,8 @@ It:
    Not with `--docker`: the stack's `ep-data` volume is that folder;
 3. with `ZABBIX_URL` and `ZABBIX_TOKEN` (or `ZABBIX_USER` + `ZABBIX_PASSWORD`): registers and
    enables the modules and creates the host groups and report dashboards
-   (`integration/zabbix/master/import.py`). Without them: **Administration → General → Modules
-   → Scan directory**, then enable the five.
+   (`master/import.py` in the modules project). Without them: **Administration → General → Modules
+   → Scan directory**, then enable the seven.
 
 Options: `--modules-src` (required), `--modules-dir`, `--data-dir` (then set `EP_DATA_DIR` for PHP), `--web-user`,
 `--backup-dir`, `--insecure` (self-signed `ZABBIX_URL`), `--dry-run`.
@@ -336,6 +333,6 @@ chosen, and the page removes them when those options are unticked.
 
 ## More detail
 
-- `integration/zabbix/clients-module/README.md` — the page, statuses, jump host, alerts and reports
+- modules project, `zabbix/clients-module/README.md` — the page, statuses, jump host, alerts and reports
 - `deploy/zabbix/README.md` — the Zabbix stack and the ElasticPro side
-- `integration/zabbix/README.md` — every module and how they are installed
+- modules project, `zabbix/README.md` — every module and how they are installed
