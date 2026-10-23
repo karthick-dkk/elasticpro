@@ -16,10 +16,8 @@ made=0
 [ -f .env ] || { cp .env.example .env; echo "  made .env"; made=1; }
 
 if [ ! -s tls/fullchain.pem ] || [ ! -s tls/privkey.pem ]; then
-  mkdir -p tls
-  openssl req -x509 -newkey rsa:2048 -nodes -days 30 \
-    -keyout tls/privkey.pem -out tls/fullchain.pem -subj "/CN=elasticpro.trial" 2>/dev/null
-  echo "  made tls/ (self-signed, 30 days — NOT for a real deployment)"; made=1
+  ./trial-cert.sh tls
+  echo "  made tls/ (self-signed, 825 days, valid for this host's names and addresses — NOT for a real deployment)"; made=1
 fi
 
 if [ ! -s nginx/htpasswd ]; then

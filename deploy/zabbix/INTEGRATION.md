@@ -28,14 +28,14 @@ Management to a Zabbix that already has the base templates. Accurate to the code
 | Piece | What it is | Where it lives |
 |---|---|---|
 | **ElasticPro** page inside Zabbix | The whole app, embedded, signed in as your Zabbix user — no second password | the modules project's `zabbix/embed-module/`, installed as `elasticpro` (no copy in this repository) |
-| **Cluster Management** (Clients page) | Per-client status, setup checks, DL alerts, weekly PDF reports, Windows jump-host (SSH) monitoring | `integration/zabbix/clients-module/` (`ep_clients`) |
-| **Client capacity** / **Client resources** / **Volume report** widgets | Cross-client dashboards: requested/allocated/used, storage plan, CSV/Excel export | `integration/zabbix/capacity-widget/`, `resources-widget/`, `volume-widget/` |
+| **Cluster Management** (Clients page) | Per-client status, setup checks, DL alerts, weekly PDF reports, Windows jump-host (SSH) monitoring | `clients-module/` (modules project) (`ep_clients`) |
+| **Client capacity** / **Client resources** / **Volume report** widgets | Cross-client dashboards: requested/allocated/used, storage plan, CSV/Excel export | `capacity-widget/` (modules project), `resources-widget/`, `volume-widget/` |
 | **Host Inventory** | Every Linux/Windows host and website Zabbix monitors, one list, `inv:` tags | separate repo, `zabbix-host-inventory` |
 | **Templates** | `Elasticsearch Cluster by HTTP EP`, `Linux by Zabbix agent -EP` (base); `ElasticPro client plan`, `alerts`, `log delay` (per-cluster, fed by the scraper); `ElasticPro` (fleet-wide automation document); `ElasticPro client master` + jump-host + cluster-devices templates (written by the Clients page) | `deploy/zabbix/*.yaml`, `zbx_export_templates_ES_Linux.yaml` (repo root) |
 | **SSO** | HMAC-signed sign-in from the Zabbix module into the core; Zabbix user type maps to an ElasticPro role | `compose.sso.yml`, `embed-module/lib/SsoClient.php` in the modules project |
 | **Clusters from Zabbix hosts** | Any host carrying the cluster template becomes an ElasticPro cluster; passwords from Vault | `compose.hosts.yml`, Config → Zabbix in the app |
 | **Scraper / plan / alerts / log delay** | Reads through the core, pushes the client storage plan and alert states to each cluster's host every minute; a separate fleet-wide automation document served over HTTPS and polled by the `ElasticPro` template | `compose.plan.yml`, `compose.scraper.yml`, `elasticpro-scrape.service`/`.timer` |
-| **Dashboards** | "ElasticPro — Fleet" (forwarders/parsers/ES nodes, cluster health, client plan, trends); "— Client capacity" / "— Client resources" (cross-client) | `setup/zbx_dashboard.py`, `integration/zabbix/master/import.py` |
+| **Dashboards** | "ElasticPro — Fleet" (forwarders/parsers/ES nodes, cluster health, client plan, trends); "— Client capacity" / "— Client resources" (cross-client) | `setup/zbx_dashboard.py`, `master/import.py` (modules project) |
 
 ### Architecture
 
@@ -290,20 +290,20 @@ EP_HOST=<this-host-address> \
 admin API token> sudo deploy/zabbix/install-modules.sh --modules-src ../modules-src` — see
 PRODUCTION.md step 4 for the non-Docker layout.)
 
-`--docker` copies the five modules into `deploy/zabbix/module/*`, which the stack's
+`--docker` copies the seven modules into `deploy/zabbix/module/*`, which the stack's
 `docker-compose.yml` already bind-mounts read-only into the `web` container — nothing to copy
 by hand. A `module/elasticpro/config.php` already there (step 8) is kept.
 
-**Expect.** Five `✓ <module>` lines. With `ZABBIX_URL`/`ZABBIX_TOKEN` also given, it registers
-and enables them and runs `integration/zabbix/master/import.py` — which, on a **fresh** Zabbix,
+**Expect.** Seven `✓ <module>` lines. With `ZABBIX_URL`/`ZABBIX_TOKEN` also given, it registers
+and enables them and runs `master/import.py` (modules project) — which, on a **fresh** Zabbix,
 exits asking you to import the base templates first (it needs `Elasticsearch Cluster by HTTP
 EP`, `Linux by Zabbix agent -EP`, `ElasticPro client plan`, `alerts`, `log delay`
 already there). That is expected at this point in a fresh install — do step 5 first, then
 re-run this command's registration half, or just enable the modules by hand for now:
-**Administration → General → Modules → Scan directory**, enable all five.
+**Administration → General → Modules → Scan directory**, enable all seven.
 
 **Verify.** `docker compose -f deploy/zabbix/stack/docker-compose.yml up -d web` (picks up the
-new mounts), then **Administration → General → Modules** lists all five as enabled.
+new mounts), then **Administration → General → Modules** lists all seven as enabled.
 
 **Common failure → fix.** A stale copy in a module's folder from a previous run: the script
 tars the source into a staging directory first and only replaces the folder's *contents*, never
@@ -402,7 +402,7 @@ ZABBIX_URL=https://<this-host-address>:9443 ZABBIX_TOKEN=<super-admin-api-token>
   --insecure deploy/zabbix/install-modules.sh --docker
 ```
 
-(Or run `integration/zabbix/master/import.py` directly with the same environment variables —
+(Or run `master/import.py` (modules project) directly with the same environment variables —
 that is what the line above calls.) This creates the `Elasticsearch clients`, `Log archive`,
 `ESNodes`, `Parsers`, `Forwarders`, `Engines`, `ElasticPro clients` host groups, enables
 `ep_clients`, and builds the `— Client capacity` / `— Client resources` dashboards.
@@ -411,7 +411,7 @@ that is what the line above calls.) This creates the `Elasticsearch clients`, `L
 template is optional and lives outside this repo (`elasticpro-zabbix/ulm/`, PRODUCTION.md
 step 5.1); the script prints a note and continues without it rather than failing the rest of
 the run. If it instead hard-exits, you are running an older `import.py` — check `git log` on
-`integration/zabbix/master/import.py`; the current version treats the S3 template as optional.
+`master/import.py` (modules project); the current version treats the S3 template as optional.
 
 ### Step 8 — SSO: sign in from inside Zabbix
 
@@ -793,7 +793,7 @@ not healthy inside `--timeout` (default 180 s) and it switches back to the previ
 itself and exits with an error.
 
 Re-running `deploy/zabbix/install-modules.sh --docker` after a code update copies the current
-five modules into place again (the previous copy goes to
+seven modules into place again (the previous copy goes to
 `deploy/zabbix/.module-backups/<date>/`), then `systemctl reload php-fpm` for a package install,
 or `docker compose up -d web` for the Docker stack, to drop PHP's opcode cache. **Re-check
 `config.php`'s ownership after this** — a module re-copy does not touch it, but it is worth
@@ -919,9 +919,9 @@ deploy/deploy.sh --pull | --image <tag> | --rollback | --all    # step 17
 - [setup/README.md](setup/README.md) — what each `zbx_*.py` script does, in one table.
 - [../PRODUCTION.md](../PRODUCTION.md) — rolling Cluster Management out to a Zabbix that already
   has the base templates: jump hosts, DL alerts, weekly reports, rollback.
-- [../../integration/zabbix/README.md](../../integration/zabbix/README.md) — every module
+- [modules project, zabbix/README.md](https://github.com/karthick-dkk/integration-zabbix-elasticpro/blob/main/zabbix/README.md) — every module
   (Clients page, master template, three widgets) and how each is installed.
-- [../../integration/zabbix/clients-module/README.md](../../integration/zabbix/clients-module/README.md)
+- [modules project, zabbix/clients-module/README.md](https://github.com/karthick-dkk/integration-zabbix-elasticpro/blob/main/zabbix/clients-module/README.md)
   — Cluster Management in full: statuses, CSV bulk import, backups, the jump-host flow.
 - [../../docs/HANDBOOK.md](../../docs/HANDBOOK.md) — the fleet cache's message contract
   (`FLEET_STATE`, `CLUSTER_DATASET`, `/events`), notification history, and the desktop app's own

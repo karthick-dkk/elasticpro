@@ -131,36 +131,11 @@ done
 printf '%s\n' "$VERSION" > "$STAGE/$NAME/VERSION"
 
 # --- BUILD: what this archive was made from, written into every module folder ---
-manifest_version() { sed -n 's/^[[:space:]]*"version"[[:space:]]*:[[:space:]]*"\{0,1\}\([^",]*\).*/\1/p' "$1/manifest.json" | head -1; }
-MV=
+# shellcheck source=../deploy/zabbix/modules-build.sh
+. "$ROOT/deploy/zabbix/modules-build.sh"
+modules_build_init "$Z" "${MODULES[@]}"
 for m in "${MODULES[@]}"; do
-  v=$(manifest_version "${m#*:}")
-  if [ -z "$MV" ]; then MV=$v; elif [ "$v" != "$MV" ] && [ "$MV" != mixed ]; then MV=mixed; fi
-done
-case "$MV" in
-  mixed) echo "! the modules' manifests do not share one version ($(for m in "${MODULES[@]}"; do printf '%s %s, ' "${m%%:*}" "$(manifest_version "${m#*:}")"; done | sed 's/, $//')) — BUILD says mixed" >&2 ;;
-  [0-9]*.[0-9]*.[0-9]*) ;;
-  *) echo "! the manifests' version \"$MV\" is not x.y.z — BUILD records it as unknown" >&2; MV=unknown ;;
-esac
-M_COMMIT=unknown; M_SHORT=unknown; M_DATE=unknown; M_TREE=unknown
-if command -v git >/dev/null 2>&1 && git -C "$Z" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-  M_COMMIT=$(git -C "$Z" rev-parse HEAD 2>/dev/null || echo unknown)
-  if [ "$M_COMMIT" != unknown ]; then
-    M_SHORT=$(git -C "$Z" rev-parse --short=7 HEAD)
-    M_DATE=$(git -C "$Z" show -s --format=%cI HEAD)
-    if [ -n "$(git -C "$Z" status --porcelain --untracked-files=normal -- . 2>/dev/null)" ]; then M_TREE=modified; else M_TREE=clean; fi
-  fi
-fi
-[ "$M_COMMIT" != unknown ] || echo "! $Z is not a git checkout — BUILD records the modules commit as unknown" >&2
-for m in "${MODULES[@]}"; do
-  cat > "$STAGE/$NAME/${m%%:*}/BUILD" <<EOF
-# Written by tools/zabbix-modules-tarball.sh. Read by ElasticPro -> Settings in Zabbix and by zabbix-modules-install.sh.
-modules_version=$MV
-modules_commit=$M_COMMIT
-modules_commit_short=$M_SHORT
-modules_commit_date=$M_DATE
-modules_tree=$M_TREE
-EOF
+  modules_build_write "$STAGE/$NAME/${m%%:*}" tools/zabbix-modules-tarball.sh
 done
 
 mkdir -p "$OUT"

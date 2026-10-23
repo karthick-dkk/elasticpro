@@ -268,7 +268,7 @@ jobs:
           bash -n tools/zabbix-modules-tarball.sh
           bash -n tools/check-modules-pin.sh
           tools/check-modules-pin.sh --ref-only
-          shellcheck -S error deploy/zabbix/zabbix-modules-install.sh tools/zabbix-modules-tarball.sh tools/check-modules-pin.sh tools/install.sh
+          shellcheck -S error deploy/zabbix/zabbix-modules-install.sh deploy/zabbix/install-modules.sh deploy/zabbix/modules-build.sh deploy/trial-cert.sh deploy/trial-setup.sh tools/zabbix-modules-tarball.sh tools/check-modules-pin.sh tools/install.sh
 
       # The version comes from the version job, so the tarball and the Windows zip in the
       # same release always carry the same number. Through env, not interpolation into the

@@ -35,7 +35,7 @@ use std::time::Duration;
 /// whose template carries another name keeps working without a rebuild.
 pub const DEFAULT_TEMPLATE: &str = "Elasticsearch Cluster by HTTP EP";
 /// Cluster Management links this instead of the HTTP template for a cluster behind a Windows
-/// jump host (integration/zabbix/clients-module/lib/JumpTemplate.php, NAME).
+/// jump host (zabbix/clients-module/lib/JumpTemplate.php in the modules project, NAME).
 pub const JUMP_TEMPLATE: &str = "ElasticPro Elasticsearch via SSH jump host";
 /// The family every cluster template belongs to: Zabbix's own HTTP template, ours, and the
 /// names earlier releases and other imports gave it. They share the `{$ELASTICSEARCH.*}`
