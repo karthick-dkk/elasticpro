@@ -264,7 +264,7 @@ Click **+ New ElasticPro user**, enter a user name, a password of at least 10 ch
 
 ## Step 8 — Open ElasticPro from Zabbix
 
-In Zabbix, click **ElasticPro → Clusters**. The menu also has **Indices**, **Snapshots & SLM** and **REST console**; Super admins also see **Config**. ElasticPro loads inside Zabbix, already signed in as the Zabbix user.
+In Zabbix, click **ElasticPro → Clusters**. The menu also has **Indices**, **Snapshots** and **REST console**; Super admins also see **Config**. ElasticPro loads inside Zabbix, already signed in as the Zabbix user.
 
 > **Done.** Every page load gets its own single-use sign-in code, valid for 60 seconds, so there is nothing to renew.
 {.is-success}

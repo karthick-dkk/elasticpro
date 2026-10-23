@@ -221,7 +221,9 @@ directory widens what the core can reach.
 
 ## ElasticPro inside Zabbix
 
-`module/elasticpro/` is a Zabbix 7.0 frontend module. It adds **ElasticPro** to the
+The `elasticpro` module is a Zabbix 7.0 frontend module — the modules project's
+[`embed-module`](https://github.com/karthick-dkk/integration-zabbix-elasticpro/tree/main/zabbix/embed-module),
+installed with the other six (below); this repository keeps no copy of it. It adds **ElasticPro** to the
 Zabbix main menu, after Monitoring, and opens the whole app inside Zabbix already signed
 in as the Zabbix user — no second password.
 
@@ -341,16 +343,19 @@ Secrets go to `curl` in config files, never on a command line, and are never pri
 The archive is built by `tools/zabbix-modules-tarball.sh` (GNU tar; sorted, owner 0, fixed
 mtime, `gzip -n`), which the release job in `.github/workflows/build.yml` runs on every
 `v*` tag; the same sources give the same bytes. It holds all seven module folders without
-tests, tool scripts, READMEs or any `config.php`. Six come from the modules project,
+tests, tool scripts, READMEs or any `config.php`. All seven come from the modules project,
 [integration-zabbix-elasticpro](https://github.com/karthick-dkk/integration-zabbix-elasticpro),
 at the commit pinned in [`MODULES_REF`](MODULES_REF) (the release job checks that commit
-out and passes it as `--modules-src`; moving it is a pull request here); the seventh, the
-`elasticpro` menu module, is `deploy/zabbix/module/elasticpro` in this repository. Building
+out and passes it as `--modules-src`; moving it is a pull request here) — the `elasticpro`
+menu module too, which is that project's `embed-module`. There is one copy of each module, so
+the seven manifests, and the `BUILD` in each, carry one version, and **ElasticPro → Settings**
+shows one "Zabbix modules X.Y.Z · build …" line, never "mixed". Building
 it yourself: clone the modules project at that commit and run
 `tools/zabbix-modules-tarball.sh --modules-src <that checkout>`; without `--modules-src` the
 tool stops and says so, rather than falling back to an older copy. `install-modules.sh` (below, and in
-`PRODUCTION.md`) stays for the stack in `stack/`, where the modules are mounted from the
-repository.
+`PRODUCTION.md`) stays for the stack in `stack/`, where the modules are mounted from
+`deploy/zabbix/module/`; it takes the `elasticpro` module from the same modules checkout
+(`--modules-src`, required) and keeps a `config.php` already in its folder.
 
 **Modules versioning.** The Zabbix modules have one version of their own (`x.y.z`, shared by all
 seven; the modules project's `CHANGELOG.md` and `v<version>` tags), separate from ElasticPro's.
@@ -367,8 +372,8 @@ installer's upgrade table and summary print it ("modules 2.1.0, build 723f101"),
 
 ### Setting it up from the Zabbix UI (pairing)
 
-Install the modules (above) — or copy `module/elasticpro/` into the frontend's
-`modules/` directory — and enable it (Administration → General → Modules → Scan
+Install the modules (above) — or copy the modules project's `zabbix/embed-module/` into the
+frontend's `modules/` directory as `elasticpro` — and enable it (Administration → General → Modules → Scan
 directory). Then, as a Super admin:
 
 1. ElasticPro → Config → Zabbix → **Pair with Zabbix** shows a one-time pairing code
@@ -376,8 +381,8 @@ directory). Then, as a Super admin:
 2. Zabbix → **Administration → ElasticPro** → paste it → **Pair**.
 
 The module, acting as you through Zabbix's own API (audited), creates or reuses the role
-and user named in `module/elasticpro/sync-role.json` — the one list of API methods the
-sync may call, also read by `setup/zbx_api_user.py` — makes a new API token for that user
+and user named in the module's `sync-role.json` — the one list of API methods the
+sync may call, also read by `setup/zbx_api_user.py` from the installed module — makes a new API token for that user
 and posts it to ElasticPro's `/zabbix/pair`, HMAC-signed with the secret from the code
 exactly as the sign-in is. Only when ElasticPro accepts does it store
 `{epUrl, secret, verifyTls, pairedAt, pairedBy, tokenId}` in the module's config in the
@@ -410,7 +415,8 @@ docker compose -f docker-compose.yml -f zabbix/compose.sso.yml up -d core
 #   ELASTICPRO_ZABBIX_URL=https://zabbix.example.com:9443 (or ELASTICPRO_FRAME_ANCESTORS) on the core
 
 # Zabbix side — an existing Zabbix 7.0, or stack/ for a small one (stack/setup.sh, then up)
-cp module/elasticpro/config.php.example module/elasticpro/config.php   # fill it in
+#   the modules in place first (above; for stack/: ./install-modules.sh --docker --modules-src <modules checkout>)
+cp module/elasticpro/config.php.example module/elasticpro/config.php   # in the installed module; fill it in
 #   Administration → General → Modules → Scan directory → enable "ElasticPro"
 ```
 

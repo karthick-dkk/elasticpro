@@ -5,9 +5,9 @@
 #   tools/zabbix-modules-tarball.sh --modules-src DIR --version v0.2.0 --out /tmp/pkg
 #
 #   --modules-src DIR   a checkout of the modules project, github.com/karthick-dkk/integration-zabbix-elasticpro
-#                       (DIR, or DIR/zabbix, holds clients-module/, capacity-widget/ ... and
-#                       sync-assets.mjs). Required: the widgets live there, not in this
-#                       repository. The release builds from the commit pinned in
+#                       (DIR, or DIR/zabbix, holds embed-module/, clients-module/,
+#                       capacity-widget/ ... and sync-assets.mjs). Required: all seven modules
+#                       live there, not in this repository. The release builds from the commit pinned in
 #                       deploy/zabbix/MODULES_REF (the first line that is not a comment).
 #
 # Writes two files:
@@ -56,7 +56,7 @@ done
 fail() { printf '✗ %s\n' "$*" >&2; exit 1; }
 
 if [ -z "$MODULES_SRC" ]; then
-  fail "--modules-src is needed: the widgets are in the modules project, not in this repository.
+  fail "--modules-src is needed: the modules (the ElasticPro menu module too) are in the modules project, not in this repository.
   Get it at the commit the release uses:
     git clone https://github.com/karthick-dkk/integration-zabbix-elasticpro modules-src
     git -C modules-src checkout \"\$(grep -v '^#' deploy/zabbix/MODULES_REF | head -1)\"
@@ -71,12 +71,11 @@ Z=$(cd "$MODULES_SRC" && pwd)
 
 # Zabbix module id (the folder name in Zabbix's modules/) <- where it comes from.
 # deploy/zabbix/zabbix-modules-install.sh keeps the same seven ids (KNOWN_IDS).
-# Six come from the modules project. The ElasticPro menu module (elasticpro) is the exception
-# for now: this repository's copy carries the EP-701..703 error codes, which the modules
-# project's embed-module does not have yet. Switch the first line to "$Z/embed-module" once it
-# does, and delete deploy/zabbix/module/elasticpro.
+# All seven come from the modules project, the ElasticPro menu module (elasticpro) too: this
+# repository keeps no copy of any of them, so the seven manifests, and the BUILD written into
+# each, always name one modules version.
 MODULES=(
-  "elasticpro:$ROOT/deploy/zabbix/module/elasticpro"
+  "elasticpro:$Z/embed-module"
   "ep_clients:$Z/clients-module"
   "ep_capacity:$Z/capacity-widget"
   "ep_resources:$Z/resources-widget"
