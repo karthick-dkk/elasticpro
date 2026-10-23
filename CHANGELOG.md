@@ -69,6 +69,22 @@ Zabbix menu module comes from one place.**
   debug only. No account, session or code is created. nginx forwards it (GET only). See
   deploy/zabbix/INTEGRATION.md, Step 10.
 
+**Zabbix templates: the same in both repositories.**
+- The alerts, log-delay and client-plan templates are generated here (`tools/zabbix-*-template.mjs`
+  writes `deploy/zabbix/template-elasticpro-*.yaml`) and the modules repository ships copies. The
+  automation template (`template-elasticpro.yaml`) is kept by hand in both. Two fixes from the
+  modules repository's template audit (2.1.3) are now here as well, so the next regeneration does
+  not undo them:
+  - The automation template's "scrape has stopped running" trigger is now
+    `fuzzytime(...)=0 or nodata(...)=1`. It now also fires when the document cannot be fetched
+    at all; before, the trigger only went to UNKNOWN and raised nothing. Its UUID is unchanged,
+    so it keeps its events.
+  - The log-delay template declares its template group, as the others do. Before, an import on a
+    Zabbix whose Templates/Applications group was missing or renamed failed.
+- A new unit test checks that every template is byte-identical to the modules repository's copy
+  when `ELASTICPRO_MODULES_REPO` points at a checkout of it. When the variable is not set, the
+  test is skipped.
+
 **Also.**
 - TLS libraries updated: rustls-webpki 0.103.16 and webpki-roots 1.0.10 (RUSTSEC-2026-0381 and
   RUSTSEC-2026-0382).

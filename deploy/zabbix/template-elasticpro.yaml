@@ -293,13 +293,17 @@ zabbix_export:
             key: elasticpro.state
   triggers:
     - uuid: 2c88a75f0a0b45f18c5b5a8441d36f0a
-      expression: 'fuzzytime(/ElasticPro automation/elasticpro.epoch,{$ELASTICPRO.STALE})=0'
+      expression: 'fuzzytime(/ElasticPro automation/elasticpro.epoch,{$ELASTICPRO.STALE})=0 or nodata(/ElasticPro automation/elasticpro.epoch,{$ELASTICPRO.STALE})=1'
       name: 'ElasticPro: the automation scrape has stopped running'
       priority: HIGH
       description: |
         No fresh scrape within {$ELASTICPRO.STALE}. Every other item on this template is
         now reporting the last thing it saw, which will look like a healthy fleet
         however bad things get. Fix this trigger before trusting any of the others.
+
+        Two ways to go stale: the document is still served but old (fuzzytime), or it
+        cannot be fetched at all (nodata) — then every item here is unsupported and,
+        without the second half, this trigger only went to UNKNOWN and raised nothing.
     - uuid: d708a0179f9e4b618d4fbf6f6328f5b7
       expression: 'last(/ElasticPro automation/elasticpro.unreachable)>0'
       name: 'ElasticPro: a cluster could not be reached by the scrape'
