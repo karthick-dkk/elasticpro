@@ -123,7 +123,9 @@ export function originCell(u) {
     ? (u.scope.length ? `clusters for: ${u.scope.join(', ')}` : 'in no mapped Zabbix group — sees no clusters')
     : 'every cluster';
   const note = zabbixRoleNote(u);
-  return h('span', { title: `Signed in through Zabbix. Groups follow Zabbix at each sign-in. Role: ${note.text} ${scope}.` },
+  // note.text ends in a full stop, so the scope that follows starts a sentence of its own.
+  const sees = scope.charAt(0).toUpperCase() + scope.slice(1);
+  return h('span', { title: `Signed in through Zabbix. Groups follow Zabbix at each sign-in. Role: ${note.text} ${sees}.` },
     pill('zabbix', ''),
     note.pinned ? h('span.role-pinned', { style: { marginLeft: '4px' } }, pill('pinned', 'grey')) : null,
     h('span.muted', { style: { marginLeft: '6px', fontSize: '11px' } }, scope));
