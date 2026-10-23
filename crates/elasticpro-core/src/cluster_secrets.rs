@@ -84,15 +84,37 @@ pub fn key_from(text: &str) -> Result<[u8; 32], String> {
     Ok(Sha256::digest(t.as_bytes()).into())
 }
 
+/// A temp name of its own beside `path`: `<file>.<pid>.<nonce>.tmp`, so two writers never share one.
+fn temp_name(path: &Path) -> PathBuf {
+    let file = path.file_name().and_then(|f| f.to_str()).unwrap_or("secret");
+    path.with_file_name(format!("{file}.{}.{}.tmp", std::process::id(), crate::auth::random_hex(8)))
+}
+
+/// Write `bytes` to `path` so that no other user can read them at any moment: the temp file is
+/// created 0600 before a byte goes in (never written first and chmodded after, which left it
+/// readable per the umask in between), created new (an existing file of that name is an error,
+/// not something to write through), synced, then renamed over the target.
 fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    let tmp = path.with_extension("tmp");
-    std::fs::write(&tmp, bytes)?;
+    use std::io::Write as _;
+    let tmp = temp_name(path);
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create_new(true);
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))?;
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
     }
-    std::fs::rename(&tmp, path)
+    let written = (|| {
+        let mut f = opts.open(&tmp)?;
+        f.write_all(bytes)?;
+        f.sync_all()?;
+        drop(f);
+        std::fs::rename(&tmp, path)
+    })();
+    if written.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    written
 }
 
 impl ClusterSecrets {
@@ -267,6 +289,48 @@ mod tests {
         assert!(s.set("ok", "e", &"p".repeat(MAX_PASSWORD + 1), "a", 1).is_err());
         let h = Held { user: "u".into(), password: "secret!".into() };
         assert!(!format!("{h:?}").contains("secret!"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_file_is_0600_from_the_moment_it_exists() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = dir();
+        // A permissive umask would have made the old write-then-chmod readable in between.
+        let tmp = temp_name(&d.join(FILE));
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true).create_new(true);
+        std::os::unix::fs::OpenOptionsExt::mode(&mut opts, 0o600);
+        let f = opts.open(&tmp).unwrap();
+        assert_eq!(f.metadata().unwrap().permissions().mode() & 0o777, 0o600, "0600 before anything is written");
+        drop(f);
+        std::fs::remove_file(&tmp).unwrap();
+        write_private(&d.join(FILE), b"x").unwrap();
+        assert_eq!(std::fs::metadata(d.join(FILE)).unwrap().permissions().mode() & 0o777, 0o600);
+        assert!(std::fs::read_dir(&d).unwrap().all(|e| !e.unwrap().file_name().to_string_lossy().ends_with(".tmp")), "no temp file left behind");
+        std::fs::remove_dir_all(d).ok();
+    }
+
+    #[test]
+    fn two_writers_never_share_a_temp_name() {
+        let d = dir();
+        let target = d.join(FILE);
+        let names: std::collections::HashSet<PathBuf> = (0..64).map(|_| temp_name(&target)).collect();
+        assert_eq!(names.len(), 64);
+        let handles: Vec<_> = (0..8).map(|i| {
+            let t = target.clone();
+            std::thread::spawn(move || {
+                for _ in 0..20 {
+                    write_private(&t, format!("writer {i}").as_bytes()).unwrap();
+                }
+            })
+        }).collect();
+        for h in handles {
+            h.join().expect("a writer collided");
+        }
+        assert!(std::fs::read_to_string(&target).unwrap().starts_with("writer "));
+        assert!(std::fs::read_dir(&d).unwrap().all(|e| !e.unwrap().file_name().to_string_lossy().ends_with(".tmp")));
+        std::fs::remove_dir_all(d).ok();
     }
 
     #[test]
