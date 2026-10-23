@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased (0.3.25)
+## 0.3.25
 
 **A trial install's certificate can be verified, and the Docker-path installer ships current modules.**
 
