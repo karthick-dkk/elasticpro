@@ -52,6 +52,14 @@ test('the origin cell shows a pinned pill only when pinned', () => {
   assert.equal(A.originCell({ name: 'bob', role: 'user' }).textContent, 'local');
 });
 
+test('the origin cell\'s tooltip reads as sentences: the scope after the role note starts with a capital', () => {
+  assert.equal(A.originCell(zbx({ rolePinned: true })).getAttribute('title'),
+    'Signed in through Zabbix. Groups follow Zabbix at each sign-in. Role: Pinned here. Zabbix sign-ins no longer change it. Every cluster.');
+  assert.equal(A.originCell(zbx({ rolePinned: false, scope: ['acme', 'globex'] })).getAttribute('title'),
+    'Signed in through Zabbix. Groups follow Zabbix at each sign-in. Role: Follows Zabbix at each sign-in (Zabbix Admin → Operator, Super admin → Admin). Changing it here pins it. Clusters for: acme, globex.');
+  assert.match(A.originCell(zbx({ scope: [] })).getAttribute('title'), / In no mapped Zabbix group — sees no clusters\.$/);
+});
+
 test('the editor offers "Follow Zabbix again" for a pinned account, and it sends USER_UNPIN_ROLE', async () => {
   A.editUser(zbx({ rolePinned: true }));
   const dialog = document.querySelector('.modal');
