@@ -223,7 +223,7 @@ Click **Pair**.
 
 **Check it worked:** a green message reads *Paired with ElasticPro at https://&lt;elasticpro-host&gt;*, and **Connection** shows **Secret: set · paired &lt;date&gt; by &lt;you&gt;**. Click **Test connection** on the same page; it should say *ElasticPro connection works*.
 
-What pairing did, acting as you through the Zabbix API: it created (or reused) the user role **ElasticPro sync** and the user **elasticpro-sync** (read-only API methods, no frontend access), made a new API token for that user, and sent the token to ElasticPro in a signed request. You do not need to copy or store the token anywhere.
+What pairing did, acting as you through the Zabbix API: it created (or reused) the user role **ElasticPro sync** and the user **elasticpro-sync** (read-only API methods plus `history.push`, so ElasticPro can push its own request figures when `ZABBIX_METRICS_HOST` is set; no frontend access), made a new API token for that user, and sent the token to ElasticPro in a signed request. You do not need to copy or store the token anywhere.
 
 ## Step 6 — ElasticPro: confirm and sync
 
@@ -240,7 +240,7 @@ The **Zabbix connection** card now shows **paired with https://&lt;zabbix-host&g
 
 ## Step 7 — Users and roles, on both sides
 
-**How Zabbix users become ElasticPro users.** The user's **user type** in Zabbix decides their role in ElasticPro; Zabbix 7.0 sets the user type through the user's **role**. The ElasticPro account is created on first sign-in as `<zabbix-username>@zabbix`, has no password of its own, and its role and groups are refreshed from Zabbix at every sign-in.
+**How Zabbix users become ElasticPro users.** The user's **user type** in Zabbix decides their role in ElasticPro; Zabbix 7.0 sets the user type through the user's **role**. The ElasticPro account is created on first sign-in as `<zabbix-username>@zabbix`, has no password of its own, and its groups are refreshed from Zabbix at every sign-in. So is its role, until an ElasticPro admin changes it on the Accounts page: that change is pinned and later Zabbix sign-ins keep it (**Follow Zabbix again** in the role editor hands it back). ElasticPro's role is also what decides who may edit Cluster Management — see deploy/zabbix/INTEGRATION.md, Step 10.
 
 | Zabbix user type | ElasticPro role | Clusters they see |
 |---|---|---|
@@ -264,7 +264,7 @@ Click **+ New ElasticPro user**, enter a user name, a password of at least 10 ch
 
 ## Step 8 — Open ElasticPro from Zabbix
 
-In Zabbix, click **ElasticPro → Clusters**. The menu also has **Indices**, **Snapshots & SLM** and **REST console**; Super admins also see **Config**. ElasticPro loads inside Zabbix, already signed in as the Zabbix user.
+In Zabbix, click **ElasticPro → Clusters**. The menu also has **Indices**, **Snapshots** and **REST console**; Super admins also see **Config**. ElasticPro loads inside Zabbix, already signed in as the Zabbix user.
 
 > **Done.** Every page load gets its own single-use sign-in code, valid for 60 seconds, so there is nothing to renew.
 {.is-success}

@@ -21,7 +21,9 @@
  *   --bridge URL      elasticpro-bridge base URL       (default http://127.0.0.1:8765)
  *   --out PATH        write here instead of stdout, atomically
  *   --format json     one JSON document, shaped for a Zabbix HTTP agent item  (default)
- *   --format sender   "<host> <key> <value>" lines for zabbix_sender
+ *   --format sender   the same document as one zabbix_sender line, to the template's master
+ *                     item elasticpro.state (an HTTP agent item that also accepts trapped
+ *                     values; set {$ELASTICPRO.POLL} to 0 on a host that is only pushed to)
  *   --host NAME       host name used by --format sender   (default elasticpro)
  *   --token SECRET    an API token (elasticpro_…) minted on the Accounts page; sent as
  *                     Authorization: Bearer. Prefer a file over the command line, where
@@ -67,6 +69,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { isFreshEnough } from './lib/refetch-interval.mjs';
+import { senderLines } from './lib/scrape-sender.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const UI = path.join(ROOT, 'ui', 'js');
@@ -368,33 +371,12 @@ const doc = {
 
 /* ------------------------------------ emit ----------------------------------- */
 
-const q = (s) => `"${String(s).replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
 let text;
 
 if (format === 'sender') {
-  const lines = [
-    `${zbxHost} elasticpro.scrape.ok ${doc.ok ? 1 : 0}`,
-    `${zbxHost} elasticpro.scrape.epoch ${doc.generatedEpoch}`,
-    `${zbxHost} elasticpro.proposed ${totals.proposed}`,
-    `${zbxHost} elasticpro.held ${totals.held}`,
-    `${zbxHost} elasticpro.freed.bytes ${totals.freedBytes}`,
-    `${zbxHost} elasticpro.errors ${totals.errors}`,
-    `${zbxHost} elasticpro.unreachable ${totals.unreachable}`,
-  ];
-  for (const c of clusters) {
-    lines.push(`${zbxHost} elasticpro.cluster.reachable[${c.id}] ${c.reachable ? 1 : 0}`);
-    lines.push(`${zbxHost} elasticpro.cluster.proposed[${c.id}] ${c.proposed}`);
-    lines.push(`${zbxHost} elasticpro.cluster.held[${c.id}] ${c.held}`);
-    lines.push(`${zbxHost} elasticpro.cluster.freed.bytes[${c.id}] ${c.freedBytes}`);
-  }
-  for (const x of ruleRows) {
-    lines.push(`${zbxHost} elasticpro.rule.proposed[${x.clusterId},${x.id}] ${x.proposed}`);
-    lines.push(`${zbxHost} elasticpro.rule.held[${x.clusterId},${x.id}] ${x.held}`);
-    lines.push(`${zbxHost} elasticpro.rule.detail[${x.clusterId},${x.id}] ${q(x.detail)}`);
-  }
-  lines.push(`${zbxHost} elasticpro.discovery.clusters ${q(JSON.stringify(doc.discovery.clusters))}`);
-  lines.push(`${zbxHost} elasticpro.discovery.rules ${q(JSON.stringify(doc.discovery.rules))}`);
-  text = `${lines.join('\n')}\n`;
+  // The whole document to the one master item, so every dependent fills as it does when the
+  // HTTP agent polls. See tools/lib/scrape-sender.mjs.
+  text = senderLines(doc, zbxHost);
 } else {
   text = `${JSON.stringify(doc, null, 2)}\n`;
 }

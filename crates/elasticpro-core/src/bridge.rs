@@ -77,6 +77,15 @@ pub(crate) struct Route1 {
     socks: SocksServer,
 }
 
+/// The answer to `GET /sso/zabbix/role`: the status, the exact body bytes, and the
+/// `X-ElasticPro-Signature` over them (present only when the question verified).
+#[derive(Debug, Clone)]
+pub struct RoleReply {
+    pub status: u16,
+    pub body: Vec<u8>,
+    pub signature: Option<String>,
+}
+
 pub struct Core {
     pins: Arc<PinStore>,
     transport: Transport,
@@ -158,6 +167,9 @@ pub struct Core {
     saved_queries: crate::saved_queries::SavedQueries,
     /// The housekeeping scheduler's settings and what it last did. See `housekeeping`.
     pub(crate) housekeeping: crate::housekeeping::Housekeeping,
+    /// Whether the request figures are pushed to Zabbix, and how that last went. See
+    /// `zbx_push`.
+    pub(crate) zbx_push: parking_lot::Mutex<crate::zbx_push::PushStatus>,
 }
 
 /// What the last Zabbix sync found. The specs carry credentials and never leave the core;
@@ -655,6 +667,7 @@ impl Core {
             saved_queries: crate::saved_queries::SavedQueries::open(data_dir_for_notify.as_ref().map(|d| d.join("saved-queries.json"))),
             notify: crate::notify::NotifyStore::open(data_dir_for_notify.map(|d| d.join("notifications.json"))),
             housekeeping: crate::housekeeping::Housekeeping::from_env(),
+            zbx_push: parking_lot::Mutex::new(crate::zbx_push::PushStatus::default()),
         })
     }
 
@@ -1080,7 +1093,7 @@ impl Core {
                 json!({ "ok": true })
             }
             "BOOTSTRAP_ADMIN" => self.bootstrap_admin(&msg),
-            "USER_LIST" | "USER_ADD" | "USER_REMOVE" | "USER_SET_ROLE" | "USER_SET_PASSWORD" | "USER_SET_LOCKED" | "USER_SET_BLOCKED" | "USER_LOGINS" => {
+            "USER_LIST" | "USER_ADD" | "USER_REMOVE" | "USER_SET_ROLE" | "USER_UNPIN_ROLE" | "USER_SET_PASSWORD" | "USER_SET_LOCKED" | "USER_SET_BLOCKED" | "USER_LOGINS" => {
                 self.users_msg(&t, &msg, caller.as_ref())
             }
             "TOKEN_LIST" | "TOKEN_CREATE" | "TOKEN_REVOKE" => self.tokens_msg(&t, &msg),
@@ -1363,25 +1376,76 @@ impl Core {
         }
     }
 
-    /// Requests sent to each cluster in the last `REQUEST_WINDOW`, plus the rate that
-    /// implies. Old entries are dropped as they age out, so memory stays flat.
-    pub fn request_stats(&self) -> Value {
+    /// Requests sent to each cluster within `window` (at most `REQUEST_WINDOW`, which is
+    /// all that is kept). The one count behind the Request Centre's rate and the Zabbix
+    /// push's requests per minute. Old entries are dropped as they age out, so memory
+    /// stays flat.
+    pub(crate) fn sent_counts(&self, window: std::time::Duration) -> Vec<(String, usize)> {
         let now = std::time::Instant::now();
+        let window = window.min(REQUEST_WINDOW);
         let mut log = self.request_log.lock();
-        let mut out = serde_json::Map::new();
-        for (cluster, q) in log.iter_mut() {
+        log.iter_mut().map(|(cluster, q)| {
             while q.front().map(|t| now.duration_since(*t) > REQUEST_WINDOW).unwrap_or(false) {
                 q.pop_front();
             }
-            let n = q.len();
-            let secs = REQUEST_WINDOW.as_secs_f64();
-            out.insert(cluster.clone(), json!({
+            // Newest at the back: count from there until one is older than the window.
+            let n = q.iter().rev().take_while(|t| now.duration_since(**t) <= window).count();
+            (cluster.clone(), n)
+        }).collect()
+    }
+
+    /// Requests sent to each cluster in the last `REQUEST_WINDOW`, plus the rate that
+    /// implies.
+    pub fn request_stats(&self) -> Value {
+        let secs = REQUEST_WINDOW.as_secs_f64();
+        let out: serde_json::Map<String, Value> = self.sent_counts(REQUEST_WINDOW).into_iter().map(|(cluster, n)| {
+            (cluster, json!({
                 "last5m": n,
                 "perMinute": (n as f64) / (secs / 60.0),
                 "perSecond": (n as f64) / secs,
-            }));
-        }
+            }))
+        }).collect();
         json!({ "windowSec": REQUEST_WINDOW.as_secs(), "clusters": out })
+    }
+
+    /// Everything the Zabbix push sends, read as a snapshot: each lock taken briefly and
+    /// let go, none held across another and none across an await. Aggregates only — no
+    /// cluster is named in what this returns. See `zbx_push`.
+    pub(crate) fn push_figures(&self, window: std::time::Duration) -> crate::zbx_push::Figures {
+        let window_ms = window.as_millis() as u64;
+        let load = self.gate.load();
+        let w = self.gate.window(window_ms);
+        let sent: usize = self.sent_counts(window).iter().map(|(_, n)| n).sum();
+        let cfg = self.req_cfg.read().clone();
+        let (_, read_cache_used) = self.read_cache.usage();
+        let (policy_mode, paused_all, paused_clusters) = {
+            let pol = self.fleet.policy.read();
+            (pol.mode.as_str(), pol.paused.all, pol.paused.clusters.len())
+        };
+        let (cache_used, cache_budget) = {
+            let budget = self.fleet.cfg.read().cache_bytes as u64;
+            (self.fleet.state.lock().total_cost() as u64, budget)
+        };
+        crate::zbx_push::Figures {
+            clock: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0),
+            load,
+            window: w,
+            sent,
+            global_limit: cfg.limits.global,
+            queue_max: cfg.limits.queue_max,
+            queue_wait_ms: cfg.limits.queue_wait_ms,
+            policy_mode,
+            paused_all,
+            paused_clusters,
+            cache_used_bytes: cache_used,
+            cache_budget_bytes: cache_budget,
+            inflight_used_bytes: self.body_budget.in_use_bytes(),
+            inflight_budget_bytes: self.body_budget.total_bytes(),
+            read_cache_used_bytes: read_cache_used,
+            read_cache_budget_bytes: cfg.read_cache_bytes,
+            memory_limit_bytes: crate::memory::budget().limit_bytes,
+            clusters: self.all_specs().len(),
+        }
     }
 
     /// The clusters configured now, for housekeeping to tell a removed cluster from one that
@@ -1619,12 +1683,28 @@ impl Core {
                 if name.eq_ignore_ascii_case(&me) && role != Role::Admin {
                     return json!({ "ok": false, "kind": "bad_request", "message": "you cannot take away your own administrator role" });
                 }
-                let out = done(self.users.set_role(&name, role));
+                let mut out = done(self.users.set_role(&name, role));
                 if out["ok"] == json!(true) {
                     // Their open sessions take the new role now, without signing them out.
-                    let scope = self.users.list().into_iter().find(|a| a.name.eq_ignore_ascii_case(&name)).and_then(|a| a.scope);
-                    self.sessions.refresh_for(&name, role, scope);
-                    tracing::info!(target: "audit", user = %me, subject = %name, role = role.as_str(), "role changed");
+                    let acct = self.users.list().into_iter().find(|a| a.name.eq_ignore_ascii_case(&name));
+                    let pinned = acct.as_ref().is_some_and(|a| a.role_pinned);
+                    self.sessions.refresh_for(&name, role, acct.and_then(|a| a.scope));
+                    tracing::info!(target: "audit", user = %me, subject = %name, role = role.as_str(), pinned, "role changed");
+                    // Said back so the page can tell the admin the change will stick.
+                    out["pinned"] = json!(pinned);
+                }
+                out
+            }
+            "USER_UNPIN_ROLE" => {
+                let out = done(self.users.unpin_role(&name));
+                if out["ok"] == json!(true) {
+                    // Nothing changes until their next Zabbix sign-in, which is the point; the
+                    // open sessions are refreshed from the account as it stands, exactly as a
+                    // role change does, so a session never holds a role the account has not.
+                    if let Some(a) = self.users.list().into_iter().find(|a| a.name.eq_ignore_ascii_case(&name)) {
+                        self.sessions.refresh_for(&a.name, a.role, a.scope.clone());
+                    }
+                    tracing::info!(target: "audit", user = %me, subject = %name, "role follows zabbix again");
                 }
                 out
             }
@@ -1929,6 +2009,15 @@ impl Core {
             m.insert("bodyBudget".into(), json!({ "limitBytes": self.body_budget.total_bytes(), "inUseBytes": self.body_budget.in_use_bytes() }));
             m.insert("flights".into(), json!(self.flights.len()));
             m.insert("taskReaper".into(), json!({ "mode": cfg.task_reaper.as_str(), "maxSeconds": cfg.task_max_secs, "last": *self.task_reaper_last.lock() }));
+            // Whether these figures reach Zabbix (ZABBIX_METRICS_HOST). The last error can
+            // name the Zabbix address, so it is for an admin who sees every cluster.
+            let mut push = serde_json::to_value(&*self.zbx_push.lock()).unwrap_or(Value::Null);
+            if ids.is_some() {
+                if let Some(p) = push.as_object_mut() {
+                    p.remove("lastError");
+                }
+            }
+            m.insert("zabbixPush".into(), push);
         }
         json!({
             "ok": true, "inflight": inflight, "recent": recent, "keep": REQUEST_LOG_KEEP, "throttled": throttled,
@@ -2219,6 +2308,75 @@ impl Core {
             }
             Err(e) => (500, json!({ "ok": false, "kind": "io_error", "message": e.to_string() })),
         }
+    }
+
+    /// `GET /sso/zabbix/role`: what ElasticPro role a Zabbix user has here, for the clients
+    /// module's "who may edit Cluster Management". Read-only: no account is made or
+    /// refreshed and no session or code is issued.
+    ///
+    /// `claim` is the signed JSON `{zabbix_user, zabbix_user_type, ts, nonce}` (exact bytes),
+    /// checked like the sign-in: `allowedSources`, a per-source budget, the signature, the
+    /// clock and the nonce. The answer names the namespaced account's role, whether an admin
+    /// pinned it, and its source; `role: null` when ElasticPro has never seen this person
+    /// (the module then uses the Zabbix mapping). A verified question gets a signed answer —
+    /// `RoleReply::signature`, over the question's ts and nonce — so the module can refuse an
+    /// answer that did not come from here.
+    pub fn zabbix_sso_role_from(&self, claim: &[u8], signature: &str, source: Option<std::net::IpAddr>) -> RoleReply {
+        let (status, mut out, asked) = self.zabbix_sso_role_answer(claim, signature, source);
+        crate::errors::stamp(&mut out);
+        let body = serde_json::to_vec(&out).unwrap_or_default();
+        let signature = asked.and_then(|(ts, nonce)| self.zbx.sign_reply(ts, &nonce, &body));
+        RoleReply { status, body, signature }
+    }
+
+    fn zabbix_sso_role_answer(&self, claim: &[u8], signature: &str, source: Option<std::net::IpAddr>) -> (u16, Value, Option<(u64, String)>) {
+        if self.edition != Edition::Hosted {
+            return (404, json!({ "ok": false, "message": "not available in this build" }), None);
+        }
+        if !self.zbx_link.source_ok(source) {
+            tracing::debug!(source = ?source, "zabbix role lookup refused: source not in allowedSources");
+            return (403, json!({ "ok": false, "kind": "forbidden", "message": "this source may not ask about Zabbix users" }), None);
+        }
+        if !self.zbx_link.trusted_source(source) && !self.zbx_link.rate_ok("sso_role", source, crate::zbx_link::SSO_PER_MIN) {
+            tracing::debug!(source = ?source, "zabbix role lookup refused: rate limited");
+            return (429, json!({ "ok": false, "kind": "rate_limited", "message": "too many role lookups — wait a minute" }), None);
+        }
+        let q = match self.zbx.verify_role_query(claim, signature, auth::now()) {
+            Ok(q) => q,
+            Err(e) => {
+                let (status, kind) = match &e {
+                    zbx_sso::SsoError::NotConfigured => (503, "not_configured"),
+                    zbx_sso::SsoError::BadSignature => (401, "bad_signature"),
+                    zbx_sso::SsoError::Stale => (401, "stale"),
+                    zbx_sso::SsoError::Replayed => (401, "replayed"),
+                    zbx_sso::SsoError::BadBody(_) => (400, "bad_request"),
+                    zbx_sso::SsoError::NoRole(_) => (403, "no_role"),
+                };
+                // Never the signature or the body: the reason is enough to configure by.
+                tracing::debug!(reason = %e, "zabbix role lookup refused");
+                return (status, json!({ "ok": false, "kind": kind, "message": e.to_string() }), None);
+            }
+        };
+        let name = zbx_sso::account_name(&q.zabbix_user);
+        let zabbix_role = zbx_sso::role_for(q.zabbix_user_type).map(|r| r.as_str());
+        // Only an account a Zabbix sign-in made counts. A local account that happens to have
+        // the namespaced name is somebody else's, exactly as the sign-in refuses to take it over.
+        let acct = self.users.list().into_iter()
+            .find(|a| a.name.eq_ignore_ascii_case(&name) && a.source.as_deref() == Some(zbx_sso::SOURCE));
+        let mut out = match &acct {
+            Some(a) => json!({ "ok": true, "account": a.name, "role": a.role.as_str(), "pinned": a.role_pinned,
+                               "source": zbx_sso::SOURCE, "disabled": a.disabled, "locked": a.is_locked(auth::now()),
+                               "zabbix_role": zabbix_role }),
+            None => json!({ "ok": true, "account": name, "role": null, "pinned": false, "source": null,
+                            "disabled": false, "locked": false, "zabbix_role": zabbix_role }),
+        };
+        // Echoed so the module can check the answer is to the question it asked; the
+        // signature over them is what makes the echo worth anything.
+        out["ts"] = json!(q.ts);
+        out["nonce"] = json!(q.nonce);
+        tracing::debug!(account = %name, role = ?acct.as_ref().map(|a| a.role.as_str()),
+                        pinned = acct.as_ref().is_some_and(|a| a.role_pinned), "zabbix role lookup answered");
+        (200, out, Some((q.ts, q.nonce)))
     }
 
     async fn tunnel_status(&self) -> Vec<Value> {
@@ -2699,6 +2857,9 @@ impl Core {
         }
         rec.finish(&out);
         self.record_request(cluster);
+        if out.get("kind").and_then(Value::as_str) == Some("response_too_large") {
+            self.gate.note_too_large();
+        }
         let ok = out.get("ok") == Some(&json!(true));
         // A write that went through makes some of the fleet cache, and everything the read
         // cache holds for that cluster, out of date.
@@ -3636,6 +3797,13 @@ impl Core {
     /// The Zabbix API client as the link says it is now.
     pub(crate) fn zbx_api(&self) -> Arc<Zabbix> {
         self.zbx_api.read().clone()
+    }
+
+    /// The Zabbix API at the link's address, with its TLS trust, signed in with another
+    /// token: the Zabbix push's own (`ELASTICPRO_ZABBIX_METRICS_TOKEN_FILE`), when it has one.
+    pub(crate) fn zbx_api_with_token(&self, token: String) -> Zabbix {
+        let r = self.zbx_link.resolved();
+        Zabbix::build(r.api_url.clone(), token, String::new(), r.verify_tls, Some(self.pins.clone()))
     }
 
     /// The link holds the address and the credentials; the cluster template's name comes

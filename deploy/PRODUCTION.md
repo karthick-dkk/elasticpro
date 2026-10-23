@@ -168,18 +168,23 @@ ElasticPro's, and a release ships the modules commit pinned in `deploy/zabbix/MO
 with the version it carries (`# modules X.Y.Z`); see "Modules versioning" in
 `deploy/zabbix/README.md`. The release archive's installer, `zabbix-modules-install.sh`, prints
 which modules version and build it installs; **ElasticPro → Settings** in Zabbix shows what is
-installed. This section's `install-modules.sh` copies the modules from this checkout instead and
-records no build.
+installed. This section's `install-modules.sh` copies the modules from checkouts instead and
+records no build: the `elasticpro` menu module from the modules project (`--modules-src`, a
+checkout at the commit in `MODULES_REF`; this repository keeps no copy of it), the other four from
+this checkout.
 
 One command, on the Zabbix frontend host, from a checkout of this repo:
 
 ```bash
+git clone https://github.com/karthick-dkk/integration-zabbix-elasticpro ../modules-src
+git -C ../modules-src checkout "$(grep -v '^#' deploy/zabbix/MODULES_REF | head -1)"
+
 # Zabbix from packages:
 ZABBIX_URL=https://zabbix.example.com ZABBIX_TOKEN=<super admin API token> \
-  sudo deploy/zabbix/install-modules.sh
+  sudo deploy/zabbix/install-modules.sh --modules-src ../modules-src
 
 # The Docker stack in deploy/zabbix/stack:
-ZABBIX_URL=https://zabbix.example.com ZABBIX_TOKEN=<token> deploy/zabbix/install-modules.sh --docker
+ZABBIX_URL=https://zabbix.example.com ZABBIX_TOKEN=<token> deploy/zabbix/install-modules.sh --docker --modules-src ../modules-src
 ```
 
 It:
@@ -187,7 +192,8 @@ It:
 1. copies the five modules — `elasticpro`, `ep_clients`, `ep_capacity`, `ep_resources`,
    `ep_volume` — into Zabbix's modules folder (`/usr/share/zabbix/modules`), without tests and
    tool scripts. What was there first goes to `/var/backups/elasticpro-zabbix/<date>/`. Each
-   module's folder is refilled, never replaced, so Docker's bind mounts keep working;
+   module's folder is refilled, never replaced, so Docker's bind mounts keep working, and a
+   `config.php` in it is kept;
 2. makes the page's writable data folder, `/var/lib/elasticpro-zabbix`, owned by the user PHP
    runs as (found from php-fpm, else nginx / www-data / apache; `--web-user` to say it).
    Not with `--docker`: the stack's `ep-data` volume is that folder;
@@ -196,7 +202,7 @@ It:
    (`integration/zabbix/master/import.py`). Without them: **Administration → General → Modules
    → Scan directory**, then enable the five.
 
-Options: `--modules-dir`, `--data-dir` (then set `EP_DATA_DIR` for PHP), `--web-user`,
+Options: `--modules-src` (required), `--modules-dir`, `--data-dir` (then set `EP_DATA_DIR` for PHP), `--web-user`,
 `--backup-dir`, `--insecure` (self-signed `ZABBIX_URL`), `--dry-run`.
 
 Then reload PHP so its opcode cache drops the old code: `systemctl reload php-fpm` (or
@@ -216,6 +222,17 @@ folder.
 2. In Zabbix: **ElasticPro → Cluster Management → Write master template**. This writes the
    client master, *Elasticsearch via SSH jump host*, *log archive ES via SSH jump host* and
    *cluster devices* templates. The banner asking for it disappears.
+3. Optional, **ElasticPro's own request gate** (`ElasticPro request gate by Zabbix trapper`, in
+   the Zabbix modules repository at `zabbix/templates/template-elasticpro-request-gate.yaml`).
+   Import it, create a host for it (for example `ElasticPro`, in a host group of its own), and
+   re-pair once (Config → Zabbix → Pair with Zabbix). With Zabbix modules 2.1.2 the pairing
+   role *ElasticPro sync* allows `history.push`, and re-pairing updates an existing role. Then
+   set `ZABBIX_METRICS_HOST=ElasticPro` in `config.txt` and run `deploy/deploy.sh --apply-config`.
+   Be aware that the role is of the Super admin type, so the paired token can then write a value
+   into any trapper item in Zabbix, though it still cannot change configuration. To avoid that,
+   remove `history.push` from the role and give the core a push-only token in
+   `ELASTICPRO_ZABBIX_METRICS_TOKEN_FILE`. Both are in `deploy/README.md`, "The request figures in
+   Zabbix". Nothing is pushed while `ZABBIX_METRICS_HOST` is empty.
 
 ## 6. Secrets and macros
 
@@ -300,6 +317,9 @@ address **as the jump host sees it**.
    whose hosts that user may read.
 7. No PHP warnings in the frontend log (`docker logs zabbix-web-1 | grep -i "php "`, or php-fpm's
    log).
+8. If you set `ZABBIX_METRICS_HOST`: the Request Centre's *Zabbix* line says when the last push
+   landed, and the host's **Latest data** shows the *Request gate* items. If the line says it is
+   failing, hover it (or read `zabbix push failed` in the core log): Zabbix's reason is given as is.
 
 ## Rollback
 

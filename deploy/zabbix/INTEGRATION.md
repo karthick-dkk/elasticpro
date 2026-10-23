@@ -9,8 +9,8 @@ Management to a Zabbix that already has the base templates. Accurate to the code
 
 > **Connecting an ElasticPro and a Zabbix 7.0 that already run? Start with pairing, not
 > with this page.** Since the pairing flow, the ElasticPro ↔ Zabbix connection (sign-in from
-> Zabbix and the cluster sync's API token) is set up from the two UIs: copy
-> `module/elasticpro/` to the Zabbix frontend and enable it, then ElasticPro →
+> Zabbix and the cluster sync's API token) is set up from the two UIs: install the
+> `elasticpro` module (`zabbix-modules-install.sh`, with the other six) and enable it, then ElasticPro →
 > Config → Zabbix → **Pair with Zabbix** gives a one-time code that you paste into Zabbix →
 > Administration → **ElasticPro**. No secret files, no compose overlay, no nginx edit,
 > no hand-made API token. The step-by-step guide with screenshots is
@@ -27,12 +27,12 @@ Management to a Zabbix that already has the base templates. Accurate to the code
 
 | Piece | What it is | Where it lives |
 |---|---|---|
-| **ElasticPro** page inside Zabbix | The whole app, embedded, signed in as your Zabbix user — no second password | `module/elasticpro/` |
+| **ElasticPro** page inside Zabbix | The whole app, embedded, signed in as your Zabbix user — no second password | the modules project's `zabbix/embed-module/`, installed as `elasticpro` (no copy in this repository) |
 | **Cluster Management** (Clients page) | Per-client status, setup checks, DL alerts, weekly PDF reports, Windows jump-host (SSH) monitoring | `integration/zabbix/clients-module/` (`ep_clients`) |
 | **Client capacity** / **Client resources** / **Volume report** widgets | Cross-client dashboards: requested/allocated/used, storage plan, CSV/Excel export | `integration/zabbix/capacity-widget/`, `resources-widget/`, `volume-widget/` |
 | **Host Inventory** | Every Linux/Windows host and website Zabbix monitors, one list, `inv:` tags | separate repo, `zabbix-host-inventory` |
 | **Templates** | `Elasticsearch Cluster by HTTP EP`, `Linux by Zabbix agent -EP` (base); `ElasticPro client plan`, `alerts`, `log delay` (per-cluster, fed by the scraper); `ElasticPro` (fleet-wide automation document); `ElasticPro client master` + jump-host + cluster-devices templates (written by the Clients page) | `deploy/zabbix/*.yaml`, `zbx_export_templates_ES_Linux.yaml` (repo root) |
-| **SSO** | HMAC-signed sign-in from the Zabbix module into the core; Zabbix user type maps to an ElasticPro role | `compose.sso.yml`, `module/elasticpro/lib/SsoClient.php` |
+| **SSO** | HMAC-signed sign-in from the Zabbix module into the core; Zabbix user type maps to an ElasticPro role | `compose.sso.yml`, `embed-module/lib/SsoClient.php` in the modules project |
 | **Clusters from Zabbix hosts** | Any host carrying the cluster template becomes an ElasticPro cluster; passwords from Vault | `compose.hosts.yml`, Config → Zabbix in the app |
 | **Scraper / plan / alerts / log delay** | Reads through the core, pushes the client storage plan and alert states to each cluster's host every minute; a separate fleet-wide automation document served over HTTPS and polled by the `ElasticPro` template | `compose.plan.yml`, `compose.scraper.yml`, `elasticpro-scrape.service`/`.timer` |
 | **Dashboards** | "ElasticPro — Fleet" (forwarders/parsers/ES nodes, cluster health, client plan, trends); "— Client capacity" / "— Client resources" (cross-client) | `setup/zbx_dashboard.py`, `integration/zabbix/master/import.py` |
@@ -274,21 +274,25 @@ silently — re-run `sudo ./setup.sh`, or the exact `chown`/`chmod` it names.
 ### Step 4 — install the Zabbix modules
 
 **Purpose.** Copy `elasticpro`, `ep_clients`, `ep_capacity`, `ep_resources`, `ep_volume`
-into place, so the stack's bind mounts have something to serve.
+into place, so the stack's bind mounts have something to serve. The `elasticpro` menu module
+is the modules project's `embed-module` — this repository keeps no copy of it — so get that
+project at the commit pinned in `deploy/zabbix/MODULES_REF` first.
 
 ```bash
-cd ../..   # back to deploy/zabbix
+cd ../../..   # back to the repo root
+git clone https://github.com/karthick-dkk/integration-zabbix-elasticpro ../modules-src
+git -C ../modules-src checkout "$(grep -v '^#' deploy/zabbix/MODULES_REF | head -1)"
 EP_HOST=<this-host-address> \
-  deploy/zabbix/install-modules.sh --docker   # run from the repo root, or adjust the path
+  deploy/zabbix/install-modules.sh --docker --modules-src ../modules-src
 ```
 
 (Package-install Zabbix, not Docker: `ZABBIX_URL=https://zabbix.example.com ZABBIX_TOKEN=<super
-admin API token> sudo deploy/zabbix/install-modules.sh` — see PRODUCTION.md step 4 for the
-non-Docker layout.)
+admin API token> sudo deploy/zabbix/install-modules.sh --modules-src ../modules-src` — see
+PRODUCTION.md step 4 for the non-Docker layout.)
 
-`--docker` points the five modules at `deploy/zabbix/module/*`, which the stack's
+`--docker` copies the five modules into `deploy/zabbix/module/*`, which the stack's
 `docker-compose.yml` already bind-mounts read-only into the `web` container — nothing to copy
-by hand.
+by hand. A `module/elasticpro/config.php` already there (step 8) is kept.
 
 **Expect.** Five `✓ <module>` lines. With `ZABBIX_URL`/`ZABBIX_TOKEN` also given, it registers
 and enables them and runs `integration/zabbix/master/import.py` — which, on a **fresh** Zabbix,
@@ -437,6 +441,7 @@ then `docker compose restart nginx`.
 On the Zabbix side:
 
 ```bash
+# in the module step 4 installed
 cp zabbix/module/elasticpro/config.php.example zabbix/module/elasticpro/config.php
 ```
 
@@ -524,14 +529,59 @@ Nothing extra to run — this step is bookkeeping in Zabbix you should not skip.
 | Zabbix user type | ElasticPro role | Clusters | Can write |
 |---|---|---|---|
 | User | `user` | all, read-only (scoped by group only with `zabbix.scopeUsersByGroup: true`) | no |
-| Admin | `operator` | all, read-only | no — GET and searches only |
+| Admin | `operator` (unless an ElasticPro admin pinned another role) | all, read-only | no — GET and searches only |
 | Super admin | `admin` | all | yes (PUT/POST/DELETE), and administers the app |
 | Guest | — | not signed in | — |
 
 Accounts are created on first sign-in as `<zabbix name>@zabbix` — so a Zabbix user named
-`admin` can never become the local `admin`. Role and groups are
-rewritten from Zabbix at **every sign-in**: move someone between Zabbix groups and it applies
-next time they open the page, no restart needed.
+`admin` can never become the local `admin`. Groups are rewritten from Zabbix at **every
+sign-in**: move someone between Zabbix groups and it applies next time they open the page, no
+restart needed. The role is rewritten the same way **until an ElasticPro admin changes it** on
+the Accounts page: that change is *pinned* (a "pinned" pill in the Origin column) and later
+Zabbix sign-ins keep it. **Follow Zabbix again** in the role editor clears the pin; Zabbix's
+role then applies from that person's next sign-in. The only working admin cannot be handed back
+(its next sign-in could demote it).
+
+**Who may edit Cluster Management.** ElasticPro's role decides (decision of 2026-10-22; Zabbix
+still owns hosts and host groups). A Zabbix Super admin always may. A Zabbix Admin or User may
+when ElasticPro's answer to the role lookup below is `admin` (pinned or not), and then only for
+saves their own Zabbix rights cover: the clients module checks those rights first and refuses,
+naming the step, anything that needs a Zabbix Super admin (a new host group, the DL alert-routing
+user group and account) before it changes anything. Backups and the host register stay Super
+admin only. When ElasticPro cannot be asked, or its answer cannot be trusted, only Super admins
+edit and the page says so.
+
+#### The role lookup: `GET /sso/zabbix/role`
+
+Server to server, read-only — no account is made or refreshed, no session or code is issued.
+
+| | |
+|---|---|
+| Request | `GET {core_url}/sso/zabbix/role?claim=<url-encoded JSON>`; JSON exactly `{"zabbix_user":"alice","zabbix_user_type":2,"ts":<unix s>,"nonce":"<32 hex>"}` |
+| Request signature | `X-Zabbix-Module-Signature: hex(HMAC-SHA256(module_secret, <the JSON's exact bytes>))` — the same secret and scheme as `POST /sso/zabbix` |
+| Replay window | `ts` within ±60 s of the core's clock; each nonce once (401 `replayed` otherwise) |
+| Answer (200) | `{"ok":true,"account":"alice@zabbix","role":"admin"\|"operator"\|"user"\|"guest"\|null,"pinned":bool,"source":"zabbix"\|null,"disabled":bool,"locked":bool,"zabbix_role":…,"ts":<echo>,"nonce":"<echo>"}`. `role: null` = ElasticPro has never seen this person sign in (the module then uses the Zabbix mapping, so a non-Super-admin is not an admin). A local account that happens to be called `alice@zabbix` is not counted. |
+| Answer signature | `X-ElasticPro-Signature: hex(HMAC-SHA256(module_secret, "<ts>\n<nonce>\n" + <exact body bytes>))`, using the request's ts and nonce. Only a verified request gets one. |
+| Errors | 400 `bad_request`, 401 `bad_signature` / `stale` / `replayed`, 403 source not in `allowedSources`, 404 not the hosted build, 429 over the per-source budget (the sign-in's: 600/min, the listed Zabbix frontend exempt), 503 no secret set |
+| Logging | debug level only (`RUST_LOG=elasticpro_core=debug`); never the signature or the body |
+
+**What authenticates the answer is its signature.** The module grants edit rights only on a 200
+whose `X-ElasticPro-Signature` verifies, whose echoed nonce and ts are the ones it sent, and whose
+nonce it has not seen before. Someone on the path can block that answer — and then only Super admins
+edit — but cannot forge or replay it. On top of the signature, the connection must be one of:
+
+- https with `verify_tls` on — **the recommendation**;
+- a loopback core (127.0.0.0/8, `::1`, `localhost`);
+- plain http to a host named in the ElasticPro module's `trusted_plain_hosts` (config.php, or
+  Administration → ElasticPro → Edit settings). Exact host names only: the settings page refuses IP
+  addresses and wildcards, and a `core_url` that names an IP never matches. The default is
+  `['ep-core']`, so the documented compose setup (`core_url` `http://ep-core:8765` over `ep_sso`)
+  works as installed; an empty list trusts no plain-http host.
+
+Any other plain-http core still gets its question answered (an operator is still told their role),
+but nobody is elevated and the page says "ElasticPro's answer cannot be trusted over this
+connection". The answer is cached in the PHP session for 60 s. nginx forwards `/sso/zabbix/role`
+(GET only) like `/sso/zabbix`.
 
 **Group scoping is off by default:** every Zabbix sign-in reads every cluster. Set
 `zabbix: { scopeUsersByGroup: true }` in `config_cluster.json` to limit Zabbix Users as below;

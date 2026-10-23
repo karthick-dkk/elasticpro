@@ -90,9 +90,21 @@ Adjust the paths in the unit — it assumes the repo at `/opt/elasticpro`, the c
 
 ### Push instead of pull
 
-If you would rather not serve a file, `--format sender` emits `zabbix_sender` lines for
-trapper items. Same data, same keys; you lose the low-level discovery unless you send the
-two `elasticpro.discovery.*` items too, which that format includes.
+If you would rather not serve a file, `--format sender` writes the same document as one
+`zabbix_sender` line, to the template's master item `elasticpro.state`. That item is an HTTP
+agent item with trapping enabled, so it takes a pushed value as well as polling. Every
+dependent item and both discovery rules read from it either way, so push and pull fill the
+same items. On a host that is only pushed to, set `{$ELASTICPRO.POLL}` to `0` and the item
+never polls:
+
+```bash
+node tools/elasticpro-scrape.mjs --config clusters.yaml --format sender --host <zabbix host> \
+  | zabbix_sender -z zbx -i -
+```
+
+Before 0.3.24 this format sent one key per figure (`elasticpro.scrape.ok`,
+`elasticpro.freed.bytes`, …). The template has no items with those keys, and its other
+items are dependent items, which do not take pushed values, so Zabbix rejected every value.
 
 **Five minutes is a sensible floor either way.** Proving an index is safe to delete means
 listing every snapshot in every repository, which is the expensive half of the work, and
@@ -107,13 +119,14 @@ every run fetches both afresh.
 ## Zabbix
 
 Import `template-elasticpro.yaml` (Data collection → Templates → Import), link it to a
-host, and set four macros:
+host, and set its macros:
 
 | Macro | Meaning |
 | --- | --- |
 | `{$ELASTICPRO.URL}` | where the document is served, e.g. `https://elasticpro.internal/automation.json` |
 | `{$ELASTICPRO.USER}` | HTTP basic user — the hosted stack is behind an auth gate |
 | `{$ELASTICPRO.PASSWORD}` | that user's password (secret text) |
+| `{$ELASTICPRO.POLL}` | how often the document is fetched (default `5m`); `0` on a host the scraper pushes to with `--format sender` |
 | `{$ELASTICPRO.STALE}` | how long without a scrape before it alerts (default `30m`) |
 
 The host needs no Zabbix agent. One HTTP request fetches the whole document and every
@@ -207,7 +220,8 @@ rejects even a loopback request that has neither.
 `--format sender` has no shared secret of its own. A trapper item accepts a value when the
 host name and item key match, so restrict it:
 
-- set **Allowed hosts** on the trapper items to the scraper's address, and
+- set **Allowed hosts** on the `elasticpro.state` item (the one item it pushes to) to the
+  scraper's address, and
 - encrypt with PSK — `zabbix_sender --tls-connect psk --tls-psk-identity <id>
   --tls-psk-file <file>` against a host configured for PSK.
 
@@ -221,7 +235,9 @@ directory widens what the core can reach.
 
 ## ElasticPro inside Zabbix
 
-`module/elasticpro/` is a Zabbix 7.0 frontend module. It adds **ElasticPro** to the
+The `elasticpro` module is a Zabbix 7.0 frontend module — the modules project's
+[`embed-module`](https://github.com/karthick-dkk/integration-zabbix-elasticpro/tree/main/zabbix/embed-module),
+installed with the other six (below); this repository keeps no copy of it. It adds **ElasticPro** to the
 Zabbix main menu, after Monitoring, and opens the whole app inside Zabbix already signed
 in as the Zabbix user — no second password.
 
@@ -341,16 +357,19 @@ Secrets go to `curl` in config files, never on a command line, and are never pri
 The archive is built by `tools/zabbix-modules-tarball.sh` (GNU tar; sorted, owner 0, fixed
 mtime, `gzip -n`), which the release job in `.github/workflows/build.yml` runs on every
 `v*` tag; the same sources give the same bytes. It holds all seven module folders without
-tests, tool scripts, READMEs or any `config.php`. Six come from the modules project,
+tests, tool scripts, READMEs or any `config.php`. All seven come from the modules project,
 [integration-zabbix-elasticpro](https://github.com/karthick-dkk/integration-zabbix-elasticpro),
 at the commit pinned in [`MODULES_REF`](MODULES_REF) (the release job checks that commit
-out and passes it as `--modules-src`; moving it is a pull request here); the seventh, the
-`elasticpro` menu module, is `deploy/zabbix/module/elasticpro` in this repository. Building
+out and passes it as `--modules-src`; moving it is a pull request here) — the `elasticpro`
+menu module too, which is that project's `embed-module`. There is one copy of each module, so
+the seven manifests, and the `BUILD` in each, carry one version, and **ElasticPro → Settings**
+shows one "Zabbix modules X.Y.Z · build …" line, never "mixed". Building
 it yourself: clone the modules project at that commit and run
 `tools/zabbix-modules-tarball.sh --modules-src <that checkout>`; without `--modules-src` the
 tool stops and says so, rather than falling back to an older copy. `install-modules.sh` (below, and in
-`PRODUCTION.md`) stays for the stack in `stack/`, where the modules are mounted from the
-repository.
+`PRODUCTION.md`) stays for the stack in `stack/`, where the modules are mounted from
+`deploy/zabbix/module/`; it takes the `elasticpro` module from the same modules checkout
+(`--modules-src`, required) and keeps a `config.php` already in its folder.
 
 **Modules versioning.** The Zabbix modules have one version of their own (`x.y.z`, shared by all
 seven; the modules project's `CHANGELOG.md` and `v<version>` tags), separate from ElasticPro's.
@@ -367,8 +386,8 @@ installer's upgrade table and summary print it ("modules 2.1.0, build 723f101"),
 
 ### Setting it up from the Zabbix UI (pairing)
 
-Install the modules (above) — or copy `module/elasticpro/` into the frontend's
-`modules/` directory — and enable it (Administration → General → Modules → Scan
+Install the modules (above) — or copy the modules project's `zabbix/embed-module/` into the
+frontend's `modules/` directory as `elasticpro` — and enable it (Administration → General → Modules → Scan
 directory). Then, as a Super admin:
 
 1. ElasticPro → Config → Zabbix → **Pair with Zabbix** shows a one-time pairing code
@@ -376,8 +395,8 @@ directory). Then, as a Super admin:
 2. Zabbix → **Administration → ElasticPro** → paste it → **Pair**.
 
 The module, acting as you through Zabbix's own API (audited), creates or reuses the role
-and user named in `module/elasticpro/sync-role.json` — the one list of API methods the
-sync may call, also read by `setup/zbx_api_user.py` — makes a new API token for that user
+and user named in the module's `sync-role.json` — the one list of API methods the
+sync may call, also read by `setup/zbx_api_user.py` from the installed module — makes a new API token for that user
 and posts it to ElasticPro's `/zabbix/pair`, HMAC-signed with the secret from the code
 exactly as the sign-in is. Only when ElasticPro accepts does it store
 `{epUrl, secret, verifyTls, pairedAt, pairedBy, tokenId}` in the module's config in the
@@ -410,7 +429,8 @@ docker compose -f docker-compose.yml -f zabbix/compose.sso.yml up -d core
 #   ELASTICPRO_ZABBIX_URL=https://zabbix.example.com:9443 (or ELASTICPRO_FRAME_ANCESTORS) on the core
 
 # Zabbix side — an existing Zabbix 7.0, or stack/ for a small one (stack/setup.sh, then up)
-cp module/elasticpro/config.php.example module/elasticpro/config.php   # fill it in
+#   the modules in place first (above; for stack/: ./install-modules.sh --docker --modules-src <modules checkout>)
+cp module/elasticpro/config.php.example module/elasticpro/config.php   # in the installed module; fill it in
 #   Administration → General → Modules → Scan directory → enable "ElasticPro"
 ```
 

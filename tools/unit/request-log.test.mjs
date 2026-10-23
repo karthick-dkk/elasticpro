@@ -102,3 +102,19 @@ test('an export never hands a spreadsheet a formula', () => {
   const out = toCsv([{ path: '=1+1', ms: '-3' }], ['path', 'ms']);
   assert.equal(out.split('\n')[1], "'=1+1,-3");
 });
+
+test('the Zabbix push line: nothing when not pushing, then waiting, failing or ok', () => {
+  const at = (p) => ({ gate: { zabbixPush: p } });
+  assert.equal(M.zabbixPushLine(null, now), null);
+  assert.equal(M.zabbixPushLine({ gate: {} }, now), null, 'an older core says nothing about it');
+  assert.equal(M.zabbixPushLine(at({ enabled: false, idle: 'ZABBIX_METRICS_HOST is not set' }), now), null, 'not asked for: not shown');
+  const base = { enabled: true, host: 'ElasticPro', intervalSecs: 60, pushes: 0, failures: 0, consecutiveFailures: 0 };
+  const idle = M.zabbixPushLine(at({ ...base, idle: 'the Zabbix API is not configured (Config → Zabbix)' }), now);
+  assert.equal(idle.state, 'waiting'); assert.match(idle.text, /not configured/);
+  assert.equal(M.zabbixPushLine(at(base), now).state, 'waiting', 'before the first push');
+  const failing = M.zabbixPushLine(at({ ...base, failures: 3, consecutiveFailures: 2, lastOkAt: now - 120_000, lastError: 'Zabbix history.push: No permissions' }), now);
+  assert.equal(failing.state, 'failing'); assert.equal(failing.tone, 'red');
+  assert.match(failing.text, /2 in a row/); assert.match(failing.title, /No permissions/);
+  const ok = M.zabbixPushLine(at({ ...base, pushes: 12, lastOkAt: now - 5_000 }), now);
+  assert.equal(ok.state, 'ok'); assert.match(ok.text, /ElasticPro/); assert.match(ok.text, /12 sent, 0 failed/);
+});

@@ -158,6 +158,29 @@ for _ in $(seq 1 25); do
   N=$(grep '"target":"audit"' "$OUT3" | grep -c 'alice@zabbix' || true); [ "$N" -ge 2 ] && break; sleep 0.2
 done
 check "the sign-in is audited"              "$N" "2"
+
+# The role lookup Cluster Management asks: GET, signed both ways, read-only.
+R3="http://127.0.0.1:$P3/sso/zabbix/role"
+rclaim() { printf '{"zabbix_user":"%s","zabbix_user_type":2,"ts":%s,"nonce":"%s"}' "$1" "$2" "$3"; }
+enc()    { python3 -c 'import sys,urllib.parse;print(urllib.parse.quote(sys.argv[1],safe=""))' "$1"; }
+RTS=$(date +%s); RN="hc-role-$RANDOM$RANDOM$RANDOM"
+RC=$(rclaim alice "$RTS" "$RN"); RH=$(mktemp); RB=$(mktemp)
+RCODE=$(curl -s -D "$RH" -o "$RB" -w '%{http_code}' -H "x-zabbix-module-signature: $(sig "$RC")" "$R3?claim=$(enc "$RC")")
+check "a signed role lookup is answered"    "$RCODE" "200"
+check "with the account's role"             "$(field role <"$RB")" "operator"
+RSIG=$(tr -d '\r' <"$RH" | awk -F': ' 'tolower($1)=="x-elasticpro-signature"{print $2}')
+WANT=$({ printf '%s\n%s\n' "$RTS" "$RN"; cat "$RB"; } | openssl dgst -sha256 -hmac "$SECRET" -r | cut -d' ' -f1)
+check "and the answer is signed over the question" "$([ -n "$RSIG" ] && [ "$RSIG" = "$WANT" ] && echo yes || echo "no ('$RSIG')")" "yes"
+check "the same question cannot be asked twice" "$(curl -s -o /dev/null -w '%{http_code}' -H "x-zabbix-module-signature: $(sig "$RC")" "$R3?claim=$(enc "$RC")")" "401"
+RC2=$(rclaim alice "$RTS" "hc-role-bad-$RANDOM$RANDOM")
+check "a wrongly signed lookup is refused"  "$(curl -s -o /dev/null -w '%{http_code}' -H "x-zabbix-module-signature: $(printf '%s' "$RC2" | openssl dgst -sha256 -hmac wrong-secret-0123456789abcdef0000 -r | cut -d' ' -f1)" "$R3?claim=$(enc "$RC2")")" "401"
+RC3=$(rclaim alice "$((RTS - 600))" "hc-role-old-$RANDOM$RANDOM")
+check "a stale lookup is refused"           "$(curl -s -o /dev/null -w '%{http_code}' -H "x-zabbix-module-signature: $(sig "$RC3")" "$R3?claim=$(enc "$RC3")")" "401"
+RC4=$(rclaim nobody-here "$(date +%s)" "hc-role-new-$RANDOM$RANDOM")
+check "an unknown user has no role"         "$(curl -s -H "x-zabbix-module-signature: $(sig "$RC4")" "$R3?claim=$(enc "$RC4")" | field role)" "None"
+check "POST is not a lookup"                "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$R3")" "405"
+check "no signature reaches the log"        "$(grep -c "$(sig "$RC")" "$OUT3" || true)" "0"
+rm -f "$RH" "$RB"
 kill $PID3; wait $PID3 2>/dev/null || true
 
 echo "== hosted mode, sessions: an HttpOnly cookie, kept across a restart =="

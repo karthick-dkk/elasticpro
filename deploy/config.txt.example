@@ -75,6 +75,11 @@ ZABBIX_USE_ELASTICPRO_CREDENTIALS=
 ZABBIX_CREATE_HOSTS=
 # Host group for hosts created that way.
 ZABBIX_HOST_GROUP=
+# Push ElasticPro's own request figures (the Request Centre's: in flight, queued, wait p95,
+# refusals, memory use) to this Zabbix host every 60 s, by history.push over the Zabbix API
+# above. The host carries the template "ElasticPro request gate by Zabbix trapper", and the
+# API token's user needs read-write permission on it. Empty (the default): nothing is pushed.
+ZABBIX_METRICS_HOST=
 
 # ------------------------------------------------------------------ logging
 

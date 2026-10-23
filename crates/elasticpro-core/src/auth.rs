@@ -268,6 +268,8 @@ pub fn required_role(msg_type: &str) -> Option<Role> {
         "TRUST_CERT" | "UNTRUST_CERT" | "TRUST_HOSTKEY" | "UNTRUST_HOSTKEY" => Some(Role::Admin),
         "TUNNEL_SECRET" | "TUNNEL_RECONNECT" => Some(Role::Admin),
         "USER_LIST" | "USER_ADD" | "USER_REMOVE" | "USER_SET_ROLE" | "USER_SET_PASSWORD" => Some(Role::Admin),
+        // Handing a Zabbix account's role back to Zabbix is changing its role.
+        "USER_UNPIN_ROLE" => Some(Role::Admin),
         // Locking, blocking and the sign-in log: who may get in is an administrator's call.
         "USER_SET_LOCKED" | "USER_SET_BLOCKED" | "USER_LOGINS" => Some(Role::Admin),
         // Everyone's activity, with source addresses: an administrator's to read.
@@ -389,9 +391,15 @@ pub struct Account {
     pub must_change: bool,
     /// Where this account comes from. `None` is a local account with a password here;
     /// `Some("zabbix")` was created by a Zabbix sign-in and has no usable password — its
-    /// role and scope are rewritten from Zabbix every time that person signs in.
+    /// scope is rewritten from Zabbix every time that person signs in, and so is its role
+    /// unless an admin pinned it here (`role_pinned`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
+    /// An admin set this external account's role on the Accounts page, so a sign-in from
+    /// its source no longer rewrites it. Only ever set on an account with a `source`; a
+    /// local account's role is always the one set here anyway. `USER_UNPIN_ROLE` clears it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub role_pinned: bool,
     /// Zabbix user groups this account is limited to; `None` sees every cluster.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scope: Option<Vec<String>>,
@@ -427,6 +435,7 @@ impl Account {
             "disabled": self.disabled,
             "mustChange": self.must_change,
             "source": self.source,
+            "rolePinned": self.role_pinned,
             "scope": self.scope,
             "locked": self.locked,
             "lockedUntil": self.locked_until.filter(|t| *t > now()),
@@ -721,6 +730,7 @@ impl UserStore {
                 disabled: false,
                 must_change,
                 source: None,
+                role_pinned: false,
                 scope: None,
                 locked: false,
                 locked_until: None,
@@ -734,9 +744,12 @@ impl UserStore {
 
     /// Create or refresh an account that another system vouches for.
     ///
-    /// Zabbix is the authority for these: every sign-in rewrites the role and the scope
-    /// from what Zabbix says now, so moving someone between Zabbix groups or roles takes
-    /// effect at their next sign-in without anybody touching this app.
+    /// Zabbix is the authority for the scope: every sign-in rewrites it from what Zabbix
+    /// says now, so moving someone between Zabbix groups takes effect at their next sign-in
+    /// without anybody touching this app. The role follows Zabbix the same way until an
+    /// admin changes it here: `set_role` pins it, and from then on a sign-in keeps the
+    /// pinned role (the decision of 2026-10-22: ElasticPro's role is the authority for who
+    /// may edit Cluster Management, so it has to stick). `unpin_role` hands it back.
     ///
     /// Two refusals, both deliberate:
     ///
@@ -769,7 +782,9 @@ impl UserStore {
                         return Err(AuthError::Locked);
                     }
                     a.last_login = Some(now());
-                    a.role = role;
+                    if !a.role_pinned {
+                        a.role = role;
+                    }
                     a.scope = scope;
                     a.clone()
                 }
@@ -787,6 +802,7 @@ impl UserStore {
                         disabled: false,
                         must_change: false,
                         source: Some(source.to_string()),
+                        role_pinned: false,
                         scope,
                         locked: false,
                         locked_until: None,
@@ -829,6 +845,35 @@ impl UserStore {
                 return Err(AuthError::LastAdmin);
             }
             a.role = role;
+            // An admin chose this role for an account another system signs in: it sticks.
+            if a.source.is_some() {
+                a.role_pinned = true;
+            }
+        }
+        self.save()
+    }
+
+    /// Let the account's source set its role again, from its next sign-in. The role stays
+    /// what it is until then. Refused for a local account (nothing to follow) and, while
+    /// this is the only working admin, for an admin: the next sign-in could demote it and
+    /// leave nobody able to administer.
+    pub fn unpin_role(&self, name: &str) -> Result<(), AuthError> {
+        {
+            let mut list = self.accounts.write();
+            let admins = list.iter().filter(|a| a.role == Role::Admin && !a.disabled).count();
+            let Some(a) = list.iter_mut().find(|a| a.name.eq_ignore_ascii_case(name)) else {
+                return Err(AuthError::NotFound(name.to_string()));
+            };
+            if a.source.is_none() {
+                return Err(AuthError::Weak(format!("{} is a local account: its role is set here and follows nothing else", a.name)));
+            }
+            if a.role == Role::Admin && !a.disabled && admins <= 1 {
+                return Err(AuthError::LastAdmin);
+            }
+            if !a.role_pinned {
+                return Ok(());
+            }
+            a.role_pinned = false;
         }
         self.save()
     }
@@ -1582,6 +1627,74 @@ mod tests {
             s.record_login("y", "password", Ok(()));
         }
         assert_eq!(s.logins().len(), LOGIN_LOG_LEN);
+    }
+
+    #[test]
+    fn a_role_set_here_on_a_zabbix_account_is_pinned_and_survives_its_sign_ins() {
+        let dir = std::env::temp_dir().join(format!("ep-pin-{}-{}", std::process::id(), now()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("users.json");
+        let s = UserStore::open_with_rounds(Some(file.clone()), 1);
+        s.add("root", "correct-horse", Role::Admin).unwrap();
+        let a = s.upsert_external("ada@zabbix", "zabbix", Role::Operator, None).unwrap();
+        assert!(!a.role_pinned, "a sign-in alone pins nothing");
+        // Zabbix still decides while nobody here has.
+        assert_eq!(s.upsert_external("ada@zabbix", "zabbix", Role::User, None).unwrap().role, Role::User);
+        s.set_role("ada@zabbix", Role::Admin).unwrap();
+        let pinned = s.list().into_iter().find(|a| a.name == "ada@zabbix").unwrap();
+        assert!(pinned.role_pinned && pinned.role == Role::Admin);
+        assert_eq!(pinned.public()["rolePinned"], serde_json::json!(true));
+        // The next sign-in says Operator; the admin's choice stands, the scope still follows.
+        let after = s.upsert_external("ada@zabbix", "zabbix", Role::Operator, Some(vec!["ES a".into()])).unwrap();
+        assert_eq!((after.role, after.role_pinned), (Role::Admin, true));
+        assert_eq!(after.scope, Some(vec!["ES a".to_string()]));
+        // And it is written down, not just held in memory.
+        let reread = UserStore::open_with_rounds(Some(file), 1);
+        assert!(reread.list().into_iter().find(|a| a.name == "ada@zabbix").unwrap().role_pinned);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_local_accounts_role_change_pins_nothing() {
+        let s = store();
+        s.add("root", "correct-horse", Role::Admin).unwrap();
+        s.add("bob", "correct-horse", Role::User).unwrap();
+        s.set_role("bob", Role::Operator).unwrap();
+        let bob = s.list().into_iter().find(|a| a.name == "bob").unwrap();
+        assert!(!bob.role_pinned);
+        assert!(matches!(s.unpin_role("bob"), Err(AuthError::Weak(_))), "a local account has nothing to follow");
+        assert_eq!(s.unpin_role("nobody"), Err(AuthError::NotFound("nobody".into())));
+    }
+
+    #[test]
+    fn unpinning_hands_the_role_back_to_zabbix_at_the_next_sign_in() {
+        let s = store();
+        s.add("root", "correct-horse", Role::Admin).unwrap();
+        s.upsert_external("ada@zabbix", "zabbix", Role::Operator, None).unwrap();
+        s.set_role("ada@zabbix", Role::Admin).unwrap();
+        s.unpin_role("ada@zabbix").unwrap();
+        let now = s.list().into_iter().find(|a| a.name == "ada@zabbix").unwrap();
+        assert_eq!((now.role, now.role_pinned), (Role::Admin, false), "nothing changes until they sign in");
+        assert_eq!(s.upsert_external("ada@zabbix", "zabbix", Role::Operator, None).unwrap().role, Role::Operator);
+        // Unpinning what is not pinned is not an error.
+        assert!(s.unpin_role("ada@zabbix").is_ok());
+    }
+
+    #[test]
+    fn the_last_admin_cannot_be_handed_back_to_zabbix() {
+        // Its next sign-in could demote it, leaving nobody able to administer.
+        let s = store();
+        s.upsert_external("ada@zabbix", "zabbix", Role::Operator, None).unwrap();
+        s.set_role("ada@zabbix", Role::Admin).unwrap();
+        assert_eq!(s.unpin_role("ada@zabbix"), Err(AuthError::LastAdmin));
+        assert_eq!(s.set_role("ada@zabbix", Role::Operator), Err(AuthError::LastAdmin), "nor demoted here");
+        s.add("root", "correct-horse", Role::Admin).unwrap();
+        assert!(s.unpin_role("ada@zabbix").is_ok(), "with a second admin it no longer carries the install");
+    }
+
+    #[test]
+    fn unpinning_is_an_admins_message() {
+        assert_eq!(required_role("USER_UNPIN_ROLE"), Some(Role::Admin));
     }
 
     #[test]

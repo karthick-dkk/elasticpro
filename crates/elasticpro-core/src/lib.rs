@@ -33,6 +33,7 @@ pub mod tls;
 pub mod vault_files;
 pub mod zabbix_api;
 pub mod zbx_link;
+pub mod zbx_push;
 pub mod zbx_sso;
 #[cfg(feature = "vault")]
 pub mod vault;

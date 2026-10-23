@@ -78,8 +78,10 @@ check() {
   done < <(grep -E '^[[:space:]]*image:' "$COMPOSE" \
              | grep -oE 'karthickdk02/[a-z-]+:[0-9][0-9A-Za-z.-]*' || true)
 
+  # Notes for the next release may sit on top as "## Unreleased" or "## Unreleased (x.y.z)"
+  # while changes land; the release heading under them must still be this version.
   local head
-  head=$(grep -m1 '^## ' "$CHANGELOG" | sed 's/^## *//')
+  head=$(grep '^## ' "$CHANGELOG" | grep -vE '^## Unreleased( \([0-9][0-9A-Za-z.-]*\))?$' | head -1 | sed 's/^## *//')
   [ "$head" = "$v" ] || {
     echo "$CHANGELOG opens with '$head', Cargo.toml says $v — the release needs its entry" >&2; fail=1; }
   if grep -qF "$PLACEHOLDER" "$CHANGELOG"; then
@@ -109,8 +111,8 @@ set_to() {
   # overwrote 0.3.15's heading with 0.3.16 and 0.3.16's with 0.3.17. An entry already written
   # for the new version is kept; an "## Unreleased" one becomes it.
   if grep -q "^## $new\$" "$CHANGELOG"; then :
-  elif grep -q '^## Unreleased$' "$CHANGELOG"; then
-    sed -i.bak "s/^## Unreleased\$/## $new/" "$CHANGELOG" && rm -f "$CHANGELOG.bak"
+  elif grep -qE "^## Unreleased( \($new\))?\$" "$CHANGELOG"; then
+    sed -i.bak -E "s/^## Unreleased( \($new\))?\$/## $new/" "$CHANGELOG" && rm -f "$CHANGELOG.bak"
   else
     awk -v v="$new" -v p="$PLACEHOLDER" '!done && /^## /{print "## " v "\n\n" p "\n"; done=1} {print}' "$CHANGELOG" > "$CHANGELOG.new" \
       && mv "$CHANGELOG.new" "$CHANGELOG"

@@ -82,6 +82,8 @@ const SPECS: &[Spec] = &[
     spec("ZABBIX_USE_ELASTICPRO_CREDENTIALS", Kind::Bool, To::Direct),
     spec("ZABBIX_CREATE_HOSTS", Kind::Bool, To::Direct),
     spec("ZABBIX_HOST_GROUP", Kind::Text, To::Direct),
+    // The Zabbix host the request figures are pushed to (zbx_push.rs). Empty: no push.
+    spec("ZABBIX_METRICS_HOST", Kind::Text, To::Env("ELASTICPRO_ZABBIX_METRICS_HOST")),
     // logging
     spec("ACTIVITY_LOG", Kind::Text, To::Env("ELASTICPRO_ACTIVITY_LOG")),
     spec("ACTIVITY_LOG_MAX_MB", Kind::Int(1, 100_000), To::Env("ELASTICPRO_ACTIVITY_LOG_MAX_MB")),

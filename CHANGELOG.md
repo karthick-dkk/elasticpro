@@ -1,5 +1,104 @@
 # Changelog
 
+## 0.3.24
+
+**The request figures reach Zabbix, a role an admin sets on a Zabbix account stays set, and the
+Zabbix menu module comes from one place.**
+
+**Request figures in Zabbix.**
+- The core can push what the Request Centre shows to Zabbix once a minute: requests in flight
+  and queued per class, how long people wait for a slot (p95), requests turned away by reason,
+  answers shared, cached or over the response cap, requests per minute, the poller's mode and
+  pause, the memory budgets in use, and the version. It sends one JSON value to the trapper item
+  `elasticpro.gate.raw` by `history.push` (Zabbix 7.0+), over the Zabbix API connection the core
+  already has. There is no new endpoint and no `zabbix_sender`.
+- **Off by default.** Set `ZABBIX_METRICS_HOST` in `config.txt` to the Zabbix host that carries
+  the new template *ElasticPro request gate by Zabbix trapper* (Zabbix modules repository). Empty
+  means no push and no timer.
+- **Aggregates only**: no cluster name, address or URL is ever sent.
+- Each push is limited to 20 s. A failure is logged at warn with Zabbix's own reason, and the next
+  try waits twice as long, up to 10 minutes. The push runs in a task of its own and never holds
+  up a request.
+- Signed with the paired token. From Zabbix modules 2.1.2 the pairing role *ElasticPro sync*
+  allows `history.push`; an install paired earlier re-pairs once, which updates the role, or
+  adds the method by hand. This means the paired token can write to any trapper item in Zabbix,
+  since the role is of the Super admin type, though it still cannot change configuration. The
+  hardening option is `ELASTICPRO_ZABBIX_METRICS_TOKEN_FILE`: a push-only token, used instead,
+  for a user with read-write on the metrics host's group only.
+- This writes to Zabbix, not to Elasticsearch, so the two-gate write rule does not apply. Naming
+  the host is the opt-in.
+- The Request Centre has a *Zabbix* line under the limits, shown only when a host is set: when the
+  last push landed, how many were sent and failed, or why nothing is being pushed.
+- Answers over the response cap (`response_too_large`) are now counted by the gate (`tooLarge` in
+  the Request Centre's data), separately from requests turned away. The Request Centre's figures
+  and the pushed ones come from the same functions, so they cannot drift.
+
+**One copy of the ElasticPro menu module in Zabbix.**
+- The release's `elasticpro-zabbix-modules-<ver>.tar.gz` takes all seven modules from the modules
+  project at the commit in `deploy/zabbix/MODULES_REF`, the `elasticpro` menu module included (the
+  project's `embed-module`). ElasticPro's own copy, `deploy/zabbix/module/elasticpro/`, is gone. It
+  had drifted: its menu said "Snapshots & SLM" and its manifest 2.1.1, so a normal install showed
+  "mixed" module versions in ElasticPro → Settings. Now every module and every `BUILD` file carries
+  one version, and Settings shows one "Zabbix modules X.Y.Z · build …" line.
+- Modules pin moved to 2.1.2 (`a92188c`). The menu now reads "Snapshots".
+- The EP-701, EP-702 and EP-703 codes that only the old copy showed are ported to the modules
+  project and arrive with the next modules version after 2.1.2. Until then the ElasticPro page in
+  Zabbix shows the same messages without the code (`docs/ERROR-CODES.md` says so).
+- `deploy/zabbix/install-modules.sh` (the Docker stack in `deploy/zabbix/stack`, and the older
+  package path) needs `--modules-src <modules checkout>` for the menu module, and keeps a
+  `config.php` already in the module's folder. `setup/zbx_api_user.py` reads `sync-role.json` from
+  the installed module (or `EP_SYNC_ROLE`).
+
+**Pinned roles: an ElasticPro admin's role change on a Zabbix account sticks.**
+- Changing the role of an account that signs in through Zabbix pins it. Later Zabbix sign-ins
+  keep the admin's choice; scope still follows Zabbix. Before, a Zabbix Admin made Admin here went
+  back to Operator at the next sign-in.
+- Accounts page: the role editor says which applies. Not pinned: "Follows Zabbix at each sign-in
+  (Zabbix Admin → Operator, Super admin → Admin). Changing it here pins it." Pinned: "Pinned here.
+  Zabbix sign-ins no longer change it." with **Follow Zabbix again**. The Origin column shows a
+  "pinned" pill.
+- `USER_UNPIN_ROLE` (admin only) clears the pin; Zabbix's role applies from that person's next
+  sign-in. The only working admin cannot be unpinned. Both changes are in the activity log as
+  account (iam) events.
+
+**Cluster Management asks ElasticPro who may edit: the role lookup.**
+- `GET /sso/zabbix/role`: a read-only, signed question from the Zabbix module, answering an
+  account's role, whether it is pinned, and its source (`role: null` for someone ElasticPro has
+  never seen). Same secret, HMAC scheme, ±60 s window and once-only nonce as `/sso/zabbix`; the
+  answer is signed back over the request's ts and nonce. Rate-limited like the sign-in, logged at
+  debug only. No account, session or code is created. nginx forwards it (GET only). See
+  deploy/zabbix/INTEGRATION.md, Step 10.
+
+**Zabbix templates: the same in both repositories.**
+- The alerts, log-delay and client-plan templates are generated here (`tools/zabbix-*-template.mjs`
+  writes `deploy/zabbix/template-elasticpro-*.yaml`) and the modules repository ships copies. The
+  automation template (`template-elasticpro.yaml`) is kept by hand in both. Two fixes from the
+  modules repository's template audit (2.1.3) are now here as well, so the next regeneration does
+  not undo them:
+  - The automation template's "scrape has stopped running" trigger is now
+    `fuzzytime(...)=0 or nodata(...)=1`. It now also fires when the document cannot be fetched
+    at all; before, the trigger only went to UNKNOWN and raised nothing. Its UUID is unchanged,
+    so it keeps its events.
+  - The log-delay template declares its template group, as the others do. Before, an import on a
+    Zabbix whose Templates/Applications group was missing or renamed failed.
+- A new unit test checks that every template is byte-identical to the modules repository's copy
+  when `ELASTICPRO_MODULES_REPO` points at a checkout of it. When the variable is not set, the
+  test is skipped.
+
+**The scraper's push format works.**
+- `elasticpro-scrape.mjs --format sender` used to send one key per figure (`elasticpro.scrape.ok`,
+  `elasticpro.freed.bytes`, …). The automation template has no items with those keys, and its
+  other items are dependent items, which do not take pushed values, so Zabbix rejected every
+  value. The format now sends the whole document to the template's master item
+  `elasticpro.state`. That item now accepts pushed values (HTTP agent with trapping enabled,
+  UUID unchanged), so every dependent and both discovery rules fill as they do when it polls.
+  The new macro `{$ELASTICPRO.POLL}` (default `5m`) set to `0` stops polling on a host that is
+  only pushed to. A unit test checks every key the format emits against the template.
+
+**Also.**
+- TLS libraries updated: rustls-webpki 0.103.16 and webpki-roots 1.0.10 (RUSTSEC-2026-0381 and
+  RUSTSEC-2026-0382).
+
 ## 0.3.23
 
 **Calmer pages: problems stand out, normal states stay quiet, and the evidence pages show one
