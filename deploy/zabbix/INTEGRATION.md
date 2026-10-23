@@ -560,12 +560,23 @@ Server to server, read-only — no account is made or refreshed, no session or c
 | Errors | 400 `bad_request`, 401 `bad_signature` / `stale` / `replayed`, 403 source not in `allowedSources`, 404 not the hosted build, 429 over the per-source budget (the sign-in's: 600/min, the listed Zabbix frontend exempt), 503 no secret set |
 | Logging | debug level only (`RUST_LOG=elasticpro_core=debug`); never the signature or the body |
 
-The module grants edit rights only on a 200 whose signature verifies, whose echoed nonce and ts
-are the ones it sent, with a nonce it has not seen before, over `https` with `verify_tls` on (or
-to a loopback core). It caches the answer in the PHP session for 60 s. nginx forwards
-`/sso/zabbix/role` (GET only) like `/sso/zabbix`; on the Docker deployment the module reaches the
-core directly over `ep_sso`, which counts as trusted only on loopback — use an https `core_url`
-with verification for the elevation to apply across hosts.
+**What authenticates the answer is its signature.** The module grants edit rights only on a 200
+whose `X-ElasticPro-Signature` verifies, whose echoed nonce and ts are the ones it sent, and whose
+nonce it has not seen before. Someone on the path can block that answer — and then only Super admins
+edit — but cannot forge or replay it. On top of the signature, the connection must be one of:
+
+- https with `verify_tls` on — **the recommendation**;
+- a loopback core (127.0.0.0/8, `::1`, `localhost`);
+- plain http to a host named in the ElasticPro module's `trusted_plain_hosts` (config.php, or
+  Administration → ElasticPro → Edit settings). Exact host names only: the settings page refuses IP
+  addresses and wildcards, and a `core_url` that names an IP never matches. The default is
+  `['ep-core']`, so the documented compose setup (`core_url` `http://ep-core:8765` over `ep_sso`)
+  works as installed; an empty list trusts no plain-http host.
+
+Any other plain-http core still gets its question answered (an operator is still told their role),
+but nobody is elevated and the page says "ElasticPro's answer cannot be trusted over this
+connection". The answer is cached in the PHP session for 60 s. nginx forwards `/sso/zabbix/role`
+(GET only) like `/sso/zabbix`.
 
 **Group scoping is off by default:** every Zabbix sign-in reads every cluster. Set
 `zabbix: { scopeUsersByGroup: true }` in `config_cluster.json` to limit Zabbix Users as below;
