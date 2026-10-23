@@ -1954,6 +1954,37 @@ if (config.clusters.length >= 2 && viaFleet) {
   const bands = [...pane.querySelectorAll('h3')].map((x) => x.textContent);
   ok(bands.includes('On this installation'), `accounts: no installation band, saw ${bands.join(' | ')}`);
   ok(bands.includes('On the clusters'), `accounts: no cluster band, saw ${bands.join(' | ')}`);
+
+  // A Zabbix account's role editor says whether Zabbix still sets the role or an admin pinned
+  // it here, and "Follow Zabbix again" is a button that does something: it asks the core, and
+  // whatever the core answers lands in the dialog the admin is looking at.
+  const close = () => { const o = doc.querySelector('.modal-overlay'); if (o) o.remove(); };
+  accounts.editUser({ name: 'adam@zabbix', role: 'operator', source: 'zabbix', rolePinned: false });
+  let dlg = doc.querySelector('.modal');
+  ok(dlg && /Follows Zabbix at each sign-in \(Zabbix Admin → Operator, Super admin → Admin\)\. Changing it here pins it\./.test(dlg.textContent),
+    `accounts: the unpinned help text is missing: ${dlg && dlg.textContent}`);
+  ok(dlg && ![...dlg.querySelectorAll('button')].some((b) => b.textContent === 'Follow Zabbix again'),
+    'accounts: an account that already follows Zabbix offers to follow Zabbix again');
+  close();
+  accounts.editUser({ name: 'adam@zabbix', role: 'admin', source: 'zabbix', rolePinned: true });
+  dlg = doc.querySelector('.modal');
+  ok(dlg && /Pinned here\. Zabbix sign-ins no longer change it\./.test(dlg.textContent),
+    `accounts: the pinned help text is missing: ${dlg && dlg.textContent}`);
+  const follow = dlg && [...dlg.querySelectorAll('button')].find((b) => b.textContent === 'Follow Zabbix again');
+  ok(follow, 'accounts: a pinned Zabbix account has no "Follow Zabbix again" button');
+  if (follow) {
+    follow.click();
+    await settleFor(800);
+    // This bridge has no such account (and the portable build no accounts at all), so the
+    // core refuses — and the refusal must be shown in the dialog, not swallowed.
+    const still = doc.querySelector('.modal');
+    const said = still ? (still.querySelector('.modal-msg') || {}).textContent || '' : '';
+    ok(!still || said.trim().length > 0,
+      `accounts: "Follow Zabbix again" did nothing visible (dialog open, no message)`);
+  }
+  close();
+  const cell = accounts.originCell({ name: 'adam@zabbix', role: 'admin', source: 'zabbix', rolePinned: true });
+  ok(/pinned/.test(cell.textContent), `accounts: no pinned pill on a pinned account: ${cell.textContent}`);
 }
 
 /* ------- a cluster with security off says so, not "HTTP 500" ------- */
@@ -3348,6 +3379,6 @@ if (problems.length) {
   for (const p of problems) console.error('  ✗ ' + p);
   process.exit(1);
 }
-console.log('ok: strip, console, shards, the Clusters page (columns, name menu, unreachable rows, expand chevron, alerts link), volume, hand-off, refresh, snapshots, tasks, toasts, accounts split, the log-delay preflight, a quiet Config page, the Request Centre and the redraw gate, the request policy, the coverage bar, the Tasks panel and the console tabs, template management, the Alerts page grouped by cluster with merged repeats, Go to, playbooks and the bell');
+console.log('ok: strip, console, shards, the Clusters page (columns, name menu, unreachable rows, expand chevron, alerts link), volume, hand-off, refresh, snapshots, tasks, toasts, accounts split and pinned Zabbix roles, the log-delay preflight, a quiet Config page, the Request Centre and the redraw gate, the request policy, the coverage bar, the Tasks panel and the console tabs, template management, the Alerts page grouped by cluster with merged repeats, Go to, playbooks and the bell');
 // The pages leave auto-refresh timers and a live tail running; nothing here waits on them.
 process.exit(0);

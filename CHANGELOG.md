@@ -46,6 +46,29 @@
   `config.php` already in the module's folder. `setup/zbx_api_user.py` reads `sync-role.json` from
   the installed module (or `EP_SYNC_ROLE`).
 
+**An ElasticPro admin's role change on a Zabbix account sticks, and Cluster Management asks
+ElasticPro who may edit.**
+
+**Pinned roles.**
+- Changing the role of an account that signs in through Zabbix pins it. Later Zabbix sign-ins
+  keep the admin's choice; scope still follows Zabbix. Before, a Zabbix Admin made Admin here went
+  back to Operator at the next sign-in.
+- Accounts page: the role editor says which applies. Not pinned: "Follows Zabbix at each sign-in
+  (Zabbix Admin → Operator, Super admin → Admin). Changing it here pins it." Pinned: "Pinned here.
+  Zabbix sign-ins no longer change it." with **Follow Zabbix again**. The Origin column shows a
+  "pinned" pill.
+- `USER_UNPIN_ROLE` (admin only) clears the pin; Zabbix's role applies from that person's next
+  sign-in. The only working admin cannot be unpinned. Both changes are in the activity log as
+  account (iam) events.
+
+**Role lookup for the Zabbix clients module.**
+- `GET /sso/zabbix/role`: a read-only, signed question from the Zabbix module, answering an
+  account's role, whether it is pinned, and its source (`role: null` for someone ElasticPro has
+  never seen). Same secret, HMAC scheme, ±60 s window and once-only nonce as `/sso/zabbix`; the
+  answer is signed back over the request's ts and nonce. Rate-limited like the sign-in, logged at
+  debug only. No account, session or code is created. nginx forwards it (GET only). See
+  deploy/zabbix/INTEGRATION.md, Step 10.
+
 ## 0.3.23
 
 **Calmer pages: problems stand out, normal states stay quiet, and the evidence pages show one

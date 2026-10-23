@@ -22,6 +22,13 @@
 //! * Replay. A signed body is good for sixty seconds and exactly once.
 //! * The code, not a session, is what goes near a browser, and it is spent on first use.
 //!
+//! A second, read-only route asks who somebody is here, without signing them in:
+//! `GET /sso/zabbix/role?claim=<JSON>` (see `RoleQuery`). The clients module in Zabbix
+//! uses it to let an ElasticPro admin edit Cluster Management. The request is signed and
+//! clock-checked exactly like the sign-in, carries a nonce that works once, and the answer
+//! is signed back (`sign_reply`) over the request's `ts` and nonce, so the module can tell
+//! an answer from this core from one somebody between the two made up.
+//!
 //! The mapping, which is the product decision this implements:
 //!
 //! | Zabbix user type | Here      | Clusters                                   |
@@ -56,6 +63,17 @@ pub struct Claim {
     pub zabbix_user_type: i64,
     #[serde(default)]
     pub groups: Vec<String>,
+    pub ts: u64,
+    pub nonce: String,
+}
+
+/// "What is this Zabbix user's ElasticPro role?" — the signed body of a role lookup.
+/// Nothing is created or changed by it; the nonce is there so the answer can be bound to
+/// this one question (and the question asked once).
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct RoleQuery {
+    pub zabbix_user: String,
+    pub zabbix_user_type: i64,
     pub ts: u64,
     pub nonce: String,
 }
@@ -105,6 +123,14 @@ pub fn scope_for(role: Role, groups: &[String], by_group: bool) -> Option<Vec<St
     } else {
         None
     }
+}
+
+/// What a role lookup's answer is signed over. Public so the module's test and this
+/// crate's agree on one definition.
+pub fn reply_material(ts: u64, nonce: &str, body: &[u8]) -> Vec<u8> {
+    let mut m = format!("{ts}\n{nonce}\n").into_bytes();
+    m.extend_from_slice(body);
+    m
 }
 
 pub fn account_name(username: &str) -> String {
@@ -186,6 +212,53 @@ impl ZabbixSso {
         ct_eq(want.as_bytes(), got.as_bytes())
     }
 
+    /// The clock and the replay check, shared by the sign-in and the role lookup: a signed
+    /// body is good within `MAX_SKEW_SECS` of now and once.
+    fn fresh_once(&self, ts: u64, nonce: &str, now_secs: u64) -> Result<(), SsoError> {
+        if nonce.len() < 16 || nonce.len() > 128 {
+            return Err(SsoError::BadBody("nonce must be 16–128 characters".into()));
+        }
+        if now_secs.abs_diff(ts) > MAX_SKEW_SECS {
+            return Err(SsoError::Stale);
+        }
+        let mut seen = self.nonces.lock();
+        // Anything older than twice the skew can no longer pass the clock check, so it
+        // no longer needs remembering.
+        let keep = Duration::from_secs(MAX_SKEW_SECS * 2 + 5);
+        seen.retain(|_, t| t.elapsed() < keep);
+        if seen.contains_key(nonce) {
+            return Err(SsoError::Replayed);
+        }
+        seen.insert(nonce.to_string(), Instant::now());
+        Ok(())
+    }
+
+    /// Check a signed role lookup and return what it asks. Same secret, same signature over
+    /// the exact bytes, same clock window and the same once-only nonce as the sign-in. A
+    /// Zabbix user type with no role here is not refused: the question is read-only, and
+    /// the answer for such a type is simply "no role from Zabbix".
+    pub fn verify_role_query(&self, body: &[u8], signature_hex: &str, now_secs: u64) -> Result<RoleQuery, SsoError> {
+        let secret = self.secret.read().clone().ok_or(SsoError::NotConfigured)?;
+        if !ZabbixSso::signature_ok(&secret, body, signature_hex) {
+            return Err(SsoError::BadSignature);
+        }
+        let q: RoleQuery = serde_json::from_slice(body).map_err(|e| SsoError::BadBody(e.to_string()))?;
+        let name = q.zabbix_user.trim();
+        if name.is_empty() || name.len() > 128 || name.chars().any(|ch| ch.is_control()) {
+            return Err(SsoError::BadBody("zabbix_user is empty, too long or has control characters".into()));
+        }
+        self.fresh_once(q.ts, &q.nonce, now_secs)?;
+        Ok(q)
+    }
+
+    /// The signature on a role lookup's answer: HMAC-SHA256 under the shared secret of
+    /// `"<ts>\n<nonce>\n<exact body bytes>"`, with the ts and nonce of the request it
+    /// answers. `None` when no secret is set (then nothing was verified either).
+    pub fn sign_reply(&self, ts: u64, nonce: &str, body: &[u8]) -> Option<String> {
+        let secret = self.secret.read().clone()?;
+        Some(ZabbixSso::sign(&secret, &reply_material(ts, nonce, body)))
+    }
+
     /// Check a signed body and return what it claims. `now_secs` is a parameter so the
     /// clock can be tested; the caller passes the real one.
     pub fn verify(&self, body: &[u8], signature_hex: &str, now_secs: u64) -> Result<Claim, SsoError> {
@@ -205,20 +278,7 @@ impl ZabbixSso {
         if c.groups.len() > 500 || c.groups.iter().any(|g| g.len() > 255) {
             return Err(SsoError::BadBody("too many groups, or a group name over 255 characters".into()));
         }
-        if now_secs.abs_diff(c.ts) > MAX_SKEW_SECS {
-            return Err(SsoError::Stale);
-        }
-        {
-            let mut seen = self.nonces.lock();
-            // Anything older than twice the skew can no longer pass the clock check, so it
-            // no longer needs remembering.
-            let keep = Duration::from_secs(MAX_SKEW_SECS * 2 + 5);
-            seen.retain(|_, t| t.elapsed() < keep);
-            if seen.contains_key(&c.nonce) {
-                return Err(SsoError::Replayed);
-            }
-            seen.insert(c.nonce.clone(), Instant::now());
-        }
+        self.fresh_once(c.ts, &c.nonce, now_secs)?;
         if role_for(c.zabbix_user_type).is_none() {
             return Err(SsoError::NoRole(c.zabbix_user_type));
         }
@@ -384,6 +444,46 @@ mod tests {
         assert_eq!(scope_for(Role::Admin, &g, true), None);
         // In no group at all is still scoped — to nothing.
         assert_eq!(scope_for(Role::User, &[], true), Some(vec![]));
+    }
+
+    fn role_body(user: &str, ty: i64, ts: u64, nonce: &str) -> Vec<u8> {
+        serde_json::to_vec(&serde_json::json!({ "zabbix_user": user, "zabbix_user_type": ty, "ts": ts, "nonce": nonce })).unwrap()
+    }
+
+    #[test]
+    fn a_role_lookup_is_signed_clocked_and_asked_once() {
+        let s = sso();
+        let b = role_body("alice", 2, NOW, "rnonce-000000001");
+        let q = s.verify_role_query(&b, &signed(&b), NOW).unwrap();
+        assert_eq!((q.zabbix_user.as_str(), q.zabbix_user_type), ("alice", 2));
+        assert_eq!(s.verify_role_query(&b, &signed(&b), NOW), Err(SsoError::Replayed));
+        let b = role_body("alice", 2, NOW, "rnonce-000000002");
+        let wrong = ZabbixSso::sign(b"another-secret-that-is-long-enough-000", &b);
+        assert_eq!(s.verify_role_query(&b, &wrong, NOW), Err(SsoError::BadSignature));
+        let old = role_body("alice", 2, NOW - MAX_SKEW_SECS - 1, "rnonce-000000003");
+        assert_eq!(s.verify_role_query(&old, &signed(&old), NOW), Err(SsoError::Stale));
+        let short = role_body("alice", 2, NOW, "short");
+        assert!(matches!(s.verify_role_query(&short, &signed(&short), NOW), Err(SsoError::BadBody(_))));
+        let b = role_body("alice", 2, NOW, "rnonce-000000004");
+        assert_eq!(ZabbixSso::default().verify_role_query(&b, &signed(&b), NOW), Err(SsoError::NotConfigured));
+    }
+
+    #[test]
+    fn a_guest_may_be_asked_about() {
+        // Read-only: the answer for a type with no role is "none from Zabbix", not a refusal.
+        let b = role_body("guest", 4, NOW, "rnonce-000000005");
+        assert!(sso().verify_role_query(&b, &signed(&b), NOW).is_ok());
+    }
+
+    #[test]
+    fn the_answer_is_signed_over_the_questions_ts_and_nonce() {
+        let s = sso();
+        let body = br#"{"ok":true,"role":"admin"}"#;
+        let sig = s.sign_reply(NOW, "rnonce-000000006", body).unwrap();
+        assert_eq!(sig, ZabbixSso::sign(SECRET.as_bytes(), format!("{NOW}\nrnonce-000000006\n{{\"ok\":true,\"role\":\"admin\"}}").as_bytes()));
+        assert_ne!(sig, s.sign_reply(NOW, "rnonce-000000007", body).unwrap(), "another question, another signature");
+        assert_ne!(sig, s.sign_reply(NOW + 1, "rnonce-000000006", body).unwrap());
+        assert!(ZabbixSso::default().sign_reply(NOW, "n", body).is_none());
     }
 
     #[test]

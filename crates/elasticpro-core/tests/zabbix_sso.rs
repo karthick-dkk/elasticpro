@@ -538,3 +538,177 @@ async fn a_scoped_callers_history_follows_their_clusters() {
     c.handle(json!({ "type": "NOTIFY_PUT", "session": adam, "message": "adam on beta", "kind": "ok", "cluster": "beta" })).await;
     assert_eq!(list(adam).await, ["adam on beta"]);
 }
+
+/* ------------------- pinned roles: an admin's choice outlasts Zabbix ------------------- */
+
+#[tokio::test]
+async fn an_admins_role_change_on_a_zabbix_account_sticks_across_sign_ins() {
+    // The bug: a Zabbix Admin (operator here) made Admin on the Accounts page went back to
+    // operator at their next Zabbix sign-in.
+    let dir = TempDir::new("zbx-pin");
+    let c = hosted(&dir);
+    let s = admin(&c).await;
+    let (open, before) = session_for(&c, "adam", 2, &[]).await;
+    assert_eq!(before["role"], json!("operator"));
+    let r = c.handle(json!({ "type": "USER_SET_ROLE", "session": s, "name": "adam@zabbix", "role": "admin" })).await;
+    assert_eq!((r["ok"].clone(), r["pinned"].clone()), (json!(true), json!(true)), "{r}");
+    // The open session has it at once, as any role change.
+    let who = c.handle(json!({ "type": "WHOAMI", "session": open })).await;
+    assert_eq!(who["caller"]["role"], json!("admin"), "{who}");
+    // Zabbix still says Admin type (operator); the next sign-in keeps the admin's choice.
+    let (_, after) = session_for(&c, "adam", 2, &[]).await;
+    assert_eq!(after["role"], json!("admin"), "the pinned role reverted: {after}");
+    let list = c.handle(json!({ "type": "USER_LIST", "session": s })).await;
+    let row = list["users"].as_array().unwrap().iter().find(|u| u["name"] == "adam@zabbix").unwrap().clone();
+    assert_eq!((row["role"].clone(), row["rolePinned"].clone()), (json!("admin"), json!(true)));
+}
+
+#[tokio::test]
+async fn following_zabbix_again_applies_zabbixs_role_at_the_next_sign_in() {
+    let dir = TempDir::new("zbx-unpin");
+    let c = hosted(&dir);
+    let s = admin(&c).await;
+    let _ = session_for(&c, "adam", 2, &[]).await;
+    c.handle(json!({ "type": "USER_SET_ROLE", "session": s, "name": "adam@zabbix", "role": "admin" })).await;
+    let (open, _) = session_for(&c, "adam", 2, &[]).await;
+    let r = c.handle(json!({ "type": "USER_UNPIN_ROLE", "session": s, "name": "adam@zabbix" })).await;
+    assert_eq!(r["ok"], json!(true), "{r}");
+    // Until they sign in again nothing moves: the open session is still admin.
+    assert_eq!(c.handle(json!({ "type": "WHOAMI", "session": open })).await["caller"]["role"], json!("admin"));
+    let (_, next) = session_for(&c, "adam", 2, &[]).await;
+    assert_eq!(next["role"], json!("operator"));
+    // And that sign-in told the open session too.
+    assert_eq!(c.handle(json!({ "type": "WHOAMI", "session": open })).await["caller"]["role"], json!("operator"));
+}
+
+#[tokio::test]
+async fn only_an_admin_may_hand_a_role_back_to_zabbix() {
+    let dir = TempDir::new("zbx-unpin-gate");
+    let c = hosted(&dir);
+    let (op, _) = session_for(&c, "otto", 2, &[]).await;
+    let r = c.handle(json!({ "type": "USER_UNPIN_ROLE", "session": op, "name": "otto@zabbix" })).await;
+    assert_eq!(r["kind"], json!("forbidden"), "{r}");
+}
+
+#[tokio::test]
+async fn pinning_and_unpinning_are_in_the_activity_log_as_account_changes() {
+    let dir = TempDir::new("zbx-pin-activity");
+    let c = hosted(&dir);
+    let s = admin(&c).await;
+    let _ = session_for(&c, "adam", 2, &[]).await;
+    c.handle(json!({ "type": "USER_SET_ROLE", "session": s, "name": "adam@zabbix", "role": "admin" })).await;
+    c.handle(json!({ "type": "USER_UNPIN_ROLE", "session": s, "name": "adam@zabbix" })).await;
+    let mut events = Vec::new();
+    for _ in 0..50 {
+        let list = c.handle(json!({ "type": "ACTIVITY_LIST", "session": s, "limit": 200 })).await;
+        events = list["events"].as_array().cloned().unwrap_or_default();
+        if events.iter().any(|e| e["event"]["action"] == "user_unpin_role") { break; }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    for action in ["user_set_role", "user_unpin_role"] {
+        let e = events.iter().find(|e| e["event"]["action"] == action).unwrap_or_else(|| panic!("no {action} in {events:?}"));
+        assert_eq!(e["event"]["category"], json!(["iam"]), "{e}");
+        assert_eq!(e["user"]["target"]["name"], json!("adam@zabbix"), "{e}");
+    }
+}
+
+/* ------------------- the role lookup Cluster Management asks ------------------- */
+
+fn role_claim(user: &str, ty: i64, ts: u64, nonce: &str) -> Vec<u8> {
+    serde_json::to_vec(&json!({ "zabbix_user": user, "zabbix_user_type": ty, "ts": ts, "nonce": nonce })).unwrap()
+}
+
+/// Ask, and check the answer's signature the way the module does.
+fn ask_role(c: &Arc<Core>, user: &str, ty: i64) -> (u16, Value) {
+    let n = nonce();
+    let ts = now();
+    let claim = role_claim(user, ty, ts, &n);
+    let r = c.zabbix_sso_role_from(&claim, &ZabbixSso::sign(SECRET.as_bytes(), &claim), None);
+    let body: Value = serde_json::from_slice(&r.body).unwrap();
+    if r.status == 200 {
+        let want = ZabbixSso::sign(SECRET.as_bytes(), &elasticpro_core::zbx_sso::reply_material(ts, &n, &r.body));
+        assert_eq!(r.signature.as_deref(), Some(want.as_str()), "the answer must be signed over the question's ts and nonce");
+        assert_eq!((body["ts"].clone(), body["nonce"].clone()), (json!(ts), json!(n)), "the question is echoed");
+    }
+    (r.status, body)
+}
+
+#[tokio::test]
+async fn the_role_lookup_answers_for_a_known_zabbix_user_and_creates_nothing() {
+    let dir = TempDir::new("zbx-role-known");
+    let c = hosted(&dir);
+    let s = admin(&c).await;
+    let _ = session_for(&c, "adam", 2, &[]).await;
+    let (st, out) = ask_role(&c, "adam", 2);
+    assert_eq!(st, 200, "{out}");
+    assert_eq!((out["role"].clone(), out["pinned"].clone(), out["source"].clone()), (json!("operator"), json!(false), json!("zabbix")));
+    assert_eq!(out["account"], json!("adam@zabbix"));
+    c.handle(json!({ "type": "USER_SET_ROLE", "session": s, "name": "adam@zabbix", "role": "admin" })).await;
+    let (_, out) = ask_role(&c, "adam", 2);
+    assert_eq!((out["role"].clone(), out["pinned"].clone(), out["zabbix_role"].clone()), (json!("admin"), json!(true), json!("operator")));
+    // Never seen: role null, and still nobody of that name afterwards.
+    let (st, out) = ask_role(&c, "stranger", 2);
+    assert_eq!((st, out["role"].clone(), out["source"].clone()), (200, Value::Null, Value::Null), "{out}");
+    let list = c.handle(json!({ "type": "USER_LIST", "session": s })).await;
+    assert!(!list["users"].as_array().unwrap().iter().any(|u| u["name"] == "stranger@zabbix"), "a lookup must not create an account");
+}
+
+#[tokio::test]
+async fn a_local_account_with_the_namespaced_name_is_not_a_zabbix_users_role() {
+    let dir = TempDir::new("zbx-role-local");
+    let c = hosted(&dir);
+    let s = admin(&c).await;
+    c.handle(json!({ "type": "USER_ADD", "session": s, "name": "eve@zabbix", "password": "correct-horse-battery", "role": "admin" })).await;
+    let (_, out) = ask_role(&c, "eve", 2);
+    assert_eq!(out["role"], Value::Null, "{out}");
+}
+
+#[tokio::test]
+async fn a_blocked_account_is_reported_blocked() {
+    let dir = TempDir::new("zbx-role-blocked");
+    let c = hosted(&dir);
+    let s = admin(&c).await;
+    let _ = session_for(&c, "adam", 2, &[]).await;
+    c.handle(json!({ "type": "USER_SET_ROLE", "session": s, "name": "adam@zabbix", "role": "admin" })).await;
+    c.handle(json!({ "type": "USER_SET_BLOCKED", "session": s, "name": "adam@zabbix", "blocked": true })).await;
+    let (_, out) = ask_role(&c, "adam", 2);
+    assert_eq!((out["role"].clone(), out["disabled"].clone()), (json!("admin"), json!(true)));
+}
+
+#[tokio::test]
+async fn the_role_lookup_refuses_a_bad_signature_a_stale_clock_and_a_replay_unsigned() {
+    let dir = TempDir::new("zbx-role-refuse");
+    let c = hosted(&dir);
+    let claim = role_claim("adam", 2, now(), &nonce());
+    let wrong = ZabbixSso::sign(b"another-secret-0123456789abcdef-xyz-000", &claim);
+    let r = c.zabbix_sso_role_from(&claim, &wrong, None);
+    assert_eq!(r.status, 401);
+    assert!(r.signature.is_none(), "an unverified question gets no signed answer");
+    let body: Value = serde_json::from_slice(&r.body).unwrap();
+    assert_eq!(body["kind"], json!("bad_signature"));
+
+    let stale = role_claim("adam", 2, now() - 120, &nonce());
+    let r = c.zabbix_sso_role_from(&stale, &ZabbixSso::sign(SECRET.as_bytes(), &stale), None);
+    assert_eq!((r.status, serde_json::from_slice::<Value>(&r.body).unwrap()["kind"].clone()), (401, json!("stale")));
+
+    let once = role_claim("adam", 2, now(), &nonce());
+    let sig = ZabbixSso::sign(SECRET.as_bytes(), &once);
+    assert_eq!(c.zabbix_sso_role_from(&once, &sig, None).status, 200);
+    let again = c.zabbix_sso_role_from(&once, &sig, None);
+    assert_eq!((again.status, serde_json::from_slice::<Value>(&again.body).unwrap()["kind"].clone()), (401, json!("replayed")));
+
+    let r = c.zabbix_sso_role_from(b"not json", &ZabbixSso::sign(SECRET.as_bytes(), b"not json"), None);
+    assert_eq!(r.status, 400);
+}
+
+#[tokio::test]
+async fn the_role_lookup_is_off_without_a_secret_and_outside_hosted() {
+    let dir = TempDir::new("zbx-role-off");
+    let c = Core::new_with_rounds(Some(dir.0.clone()), Edition::Hosted, 1);
+    let claim = role_claim("adam", 2, now(), &nonce());
+    assert_eq!(c.zabbix_sso_role_from(&claim, "00", None).status, 503);
+    let dir2 = TempDir::new("zbx-role-installed");
+    let d = Core::new_with_rounds(Some(dir2.0.clone()), Edition::Installed, 1);
+    d.zabbix_sso().set_secret(SECRET).unwrap();
+    assert_eq!(d.zabbix_sso_role_from(&claim, &ZabbixSso::sign(SECRET.as_bytes(), &claim), None).status, 404);
+}

@@ -240,7 +240,7 @@ The **Zabbix connection** card now shows **paired with https://&lt;zabbix-host&g
 
 ## Step 7 — Users and roles, on both sides
 
-**How Zabbix users become ElasticPro users.** The user's **user type** in Zabbix decides their role in ElasticPro; Zabbix 7.0 sets the user type through the user's **role**. The ElasticPro account is created on first sign-in as `<zabbix-username>@zabbix`, has no password of its own, and its role and groups are refreshed from Zabbix at every sign-in.
+**How Zabbix users become ElasticPro users.** The user's **user type** in Zabbix decides their role in ElasticPro; Zabbix 7.0 sets the user type through the user's **role**. The ElasticPro account is created on first sign-in as `<zabbix-username>@zabbix`, has no password of its own, and its groups are refreshed from Zabbix at every sign-in. So is its role, until an ElasticPro admin changes it on the Accounts page: that change is pinned and later Zabbix sign-ins keep it (**Follow Zabbix again** in the role editor hands it back). ElasticPro's role is also what decides who may edit Cluster Management — see deploy/zabbix/INTEGRATION.md, Step 10.
 
 | Zabbix user type | ElasticPro role | Clusters they see |
 |---|---|---|

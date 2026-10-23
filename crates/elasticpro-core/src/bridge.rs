@@ -77,6 +77,15 @@ pub(crate) struct Route1 {
     socks: SocksServer,
 }
 
+/// The answer to `GET /sso/zabbix/role`: the status, the exact body bytes, and the
+/// `X-ElasticPro-Signature` over them (present only when the question verified).
+#[derive(Debug, Clone)]
+pub struct RoleReply {
+    pub status: u16,
+    pub body: Vec<u8>,
+    pub signature: Option<String>,
+}
+
 pub struct Core {
     pins: Arc<PinStore>,
     transport: Transport,
@@ -1084,7 +1093,7 @@ impl Core {
                 json!({ "ok": true })
             }
             "BOOTSTRAP_ADMIN" => self.bootstrap_admin(&msg),
-            "USER_LIST" | "USER_ADD" | "USER_REMOVE" | "USER_SET_ROLE" | "USER_SET_PASSWORD" | "USER_SET_LOCKED" | "USER_SET_BLOCKED" | "USER_LOGINS" => {
+            "USER_LIST" | "USER_ADD" | "USER_REMOVE" | "USER_SET_ROLE" | "USER_UNPIN_ROLE" | "USER_SET_PASSWORD" | "USER_SET_LOCKED" | "USER_SET_BLOCKED" | "USER_LOGINS" => {
                 self.users_msg(&t, &msg, caller.as_ref())
             }
             "TOKEN_LIST" | "TOKEN_CREATE" | "TOKEN_REVOKE" => self.tokens_msg(&t, &msg),
@@ -1674,12 +1683,28 @@ impl Core {
                 if name.eq_ignore_ascii_case(&me) && role != Role::Admin {
                     return json!({ "ok": false, "kind": "bad_request", "message": "you cannot take away your own administrator role" });
                 }
-                let out = done(self.users.set_role(&name, role));
+                let mut out = done(self.users.set_role(&name, role));
                 if out["ok"] == json!(true) {
                     // Their open sessions take the new role now, without signing them out.
-                    let scope = self.users.list().into_iter().find(|a| a.name.eq_ignore_ascii_case(&name)).and_then(|a| a.scope);
-                    self.sessions.refresh_for(&name, role, scope);
-                    tracing::info!(target: "audit", user = %me, subject = %name, role = role.as_str(), "role changed");
+                    let acct = self.users.list().into_iter().find(|a| a.name.eq_ignore_ascii_case(&name));
+                    let pinned = acct.as_ref().is_some_and(|a| a.role_pinned);
+                    self.sessions.refresh_for(&name, role, acct.and_then(|a| a.scope));
+                    tracing::info!(target: "audit", user = %me, subject = %name, role = role.as_str(), pinned, "role changed");
+                    // Said back so the page can tell the admin the change will stick.
+                    out["pinned"] = json!(pinned);
+                }
+                out
+            }
+            "USER_UNPIN_ROLE" => {
+                let out = done(self.users.unpin_role(&name));
+                if out["ok"] == json!(true) {
+                    // Nothing changes until their next Zabbix sign-in, which is the point; the
+                    // open sessions are refreshed from the account as it stands, exactly as a
+                    // role change does, so a session never holds a role the account has not.
+                    if let Some(a) = self.users.list().into_iter().find(|a| a.name.eq_ignore_ascii_case(&name)) {
+                        self.sessions.refresh_for(&a.name, a.role, a.scope.clone());
+                    }
+                    tracing::info!(target: "audit", user = %me, subject = %name, "role follows zabbix again");
                 }
                 out
             }
@@ -2283,6 +2308,75 @@ impl Core {
             }
             Err(e) => (500, json!({ "ok": false, "kind": "io_error", "message": e.to_string() })),
         }
+    }
+
+    /// `GET /sso/zabbix/role`: what ElasticPro role a Zabbix user has here, for the clients
+    /// module's "who may edit Cluster Management". Read-only: no account is made or
+    /// refreshed and no session or code is issued.
+    ///
+    /// `claim` is the signed JSON `{zabbix_user, zabbix_user_type, ts, nonce}` (exact bytes),
+    /// checked like the sign-in: `allowedSources`, a per-source budget, the signature, the
+    /// clock and the nonce. The answer names the namespaced account's role, whether an admin
+    /// pinned it, and its source; `role: null` when ElasticPro has never seen this person
+    /// (the module then uses the Zabbix mapping). A verified question gets a signed answer —
+    /// `RoleReply::signature`, over the question's ts and nonce — so the module can refuse an
+    /// answer that did not come from here.
+    pub fn zabbix_sso_role_from(&self, claim: &[u8], signature: &str, source: Option<std::net::IpAddr>) -> RoleReply {
+        let (status, mut out, asked) = self.zabbix_sso_role_answer(claim, signature, source);
+        crate::errors::stamp(&mut out);
+        let body = serde_json::to_vec(&out).unwrap_or_default();
+        let signature = asked.and_then(|(ts, nonce)| self.zbx.sign_reply(ts, &nonce, &body));
+        RoleReply { status, body, signature }
+    }
+
+    fn zabbix_sso_role_answer(&self, claim: &[u8], signature: &str, source: Option<std::net::IpAddr>) -> (u16, Value, Option<(u64, String)>) {
+        if self.edition != Edition::Hosted {
+            return (404, json!({ "ok": false, "message": "not available in this build" }), None);
+        }
+        if !self.zbx_link.source_ok(source) {
+            tracing::debug!(source = ?source, "zabbix role lookup refused: source not in allowedSources");
+            return (403, json!({ "ok": false, "kind": "forbidden", "message": "this source may not ask about Zabbix users" }), None);
+        }
+        if !self.zbx_link.trusted_source(source) && !self.zbx_link.rate_ok("sso_role", source, crate::zbx_link::SSO_PER_MIN) {
+            tracing::debug!(source = ?source, "zabbix role lookup refused: rate limited");
+            return (429, json!({ "ok": false, "kind": "rate_limited", "message": "too many role lookups — wait a minute" }), None);
+        }
+        let q = match self.zbx.verify_role_query(claim, signature, auth::now()) {
+            Ok(q) => q,
+            Err(e) => {
+                let (status, kind) = match &e {
+                    zbx_sso::SsoError::NotConfigured => (503, "not_configured"),
+                    zbx_sso::SsoError::BadSignature => (401, "bad_signature"),
+                    zbx_sso::SsoError::Stale => (401, "stale"),
+                    zbx_sso::SsoError::Replayed => (401, "replayed"),
+                    zbx_sso::SsoError::BadBody(_) => (400, "bad_request"),
+                    zbx_sso::SsoError::NoRole(_) => (403, "no_role"),
+                };
+                // Never the signature or the body: the reason is enough to configure by.
+                tracing::debug!(reason = %e, "zabbix role lookup refused");
+                return (status, json!({ "ok": false, "kind": kind, "message": e.to_string() }), None);
+            }
+        };
+        let name = zbx_sso::account_name(&q.zabbix_user);
+        let zabbix_role = zbx_sso::role_for(q.zabbix_user_type).map(|r| r.as_str());
+        // Only an account a Zabbix sign-in made counts. A local account that happens to have
+        // the namespaced name is somebody else's, exactly as the sign-in refuses to take it over.
+        let acct = self.users.list().into_iter()
+            .find(|a| a.name.eq_ignore_ascii_case(&name) && a.source.as_deref() == Some(zbx_sso::SOURCE));
+        let mut out = match &acct {
+            Some(a) => json!({ "ok": true, "account": a.name, "role": a.role.as_str(), "pinned": a.role_pinned,
+                               "source": zbx_sso::SOURCE, "disabled": a.disabled, "locked": a.is_locked(auth::now()),
+                               "zabbix_role": zabbix_role }),
+            None => json!({ "ok": true, "account": name, "role": null, "pinned": false, "source": null,
+                            "disabled": false, "locked": false, "zabbix_role": zabbix_role }),
+        };
+        // Echoed so the module can check the answer is to the question it asked; the
+        // signature over them is what makes the echo worth anything.
+        out["ts"] = json!(q.ts);
+        out["nonce"] = json!(q.nonce);
+        tracing::debug!(account = %name, role = ?acct.as_ref().map(|a| a.role.as_str()),
+                        pinned = acct.as_ref().is_some_and(|a| a.role_pinned), "zabbix role lookup answered");
+        (200, out, Some((q.ts, q.nonce)))
     }
 
     async fn tunnel_status(&self) -> Vec<Value> {
