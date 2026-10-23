@@ -1,8 +1,11 @@
 # Changelog
 
-## Unreleased (0.3.24)
+## 0.3.24
 
-**ElasticPro's request figures in Zabbix.**
+**The request figures reach Zabbix, a role an admin sets on a Zabbix account stays set, and the
+Zabbix menu module comes from one place.**
+
+**Request figures in Zabbix.**
 - The core can push what the Request Centre shows to Zabbix once a minute: requests in flight
   and queued per class, how long people wait for a slot (p95), requests turned away by reason,
   answers shared, cached or over the response cap, requests per minute, the poller's mode and
@@ -46,10 +49,7 @@
   `config.php` already in the module's folder. `setup/zbx_api_user.py` reads `sync-role.json` from
   the installed module (or `EP_SYNC_ROLE`).
 
-**An ElasticPro admin's role change on a Zabbix account sticks, and Cluster Management asks
-ElasticPro who may edit.**
-
-**Pinned roles.**
+**Pinned roles: an ElasticPro admin's role change on a Zabbix account sticks.**
 - Changing the role of an account that signs in through Zabbix pins it. Later Zabbix sign-ins
   keep the admin's choice; scope still follows Zabbix. Before, a Zabbix Admin made Admin here went
   back to Operator at the next sign-in.
@@ -61,13 +61,17 @@ ElasticPro who may edit.**
   sign-in. The only working admin cannot be unpinned. Both changes are in the activity log as
   account (iam) events.
 
-**Role lookup for the Zabbix clients module.**
+**Cluster Management asks ElasticPro who may edit: the role lookup.**
 - `GET /sso/zabbix/role`: a read-only, signed question from the Zabbix module, answering an
   account's role, whether it is pinned, and its source (`role: null` for someone ElasticPro has
   never seen). Same secret, HMAC scheme, ±60 s window and once-only nonce as `/sso/zabbix`; the
   answer is signed back over the request's ts and nonce. Rate-limited like the sign-in, logged at
   debug only. No account, session or code is created. nginx forwards it (GET only). See
   deploy/zabbix/INTEGRATION.md, Step 10.
+
+**Also.**
+- TLS libraries updated: rustls-webpki 0.103.16 and webpki-roots 1.0.10 (RUSTSEC-2026-0381 and
+  RUSTSEC-2026-0382).
 
 ## 0.3.23
 

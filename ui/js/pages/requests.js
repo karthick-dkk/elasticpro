@@ -285,13 +285,13 @@ function stopCard() {
         : some ? h('span.muted', { style: { fontSize: '12.5px' } }, `${some} cluster${some === 1 ? '' : 's'} paused individually`) : null));
 }
 
-/** The gate's limits as labelled chips; unknown (an older core) says so. */
 /** The Zabbix push in one line under the limits; nothing at all when the core does not push. */
 function pushRow(line) {
   if (!line) return null;
   return h('div.rq-limits', h('span.rq-limits-k', 'Zabbix'), pill(line.state, line.tone), h('span', { title: line.title }, line.text));
 }
 
+/** The gate's limits as labelled chips; unknown (an older core) says so. */
 function limitsRow(chips) {
   return h('div.rq-limits',
     h('span.rq-limits-k', 'Limits'),
