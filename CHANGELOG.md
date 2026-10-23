@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.26
+
+Zabbix modules 2.1.6 ship with this release: on Cluster Management's Discover page, a cluster host that has no Elasticsearch URL macros can now be adopted once its URL is typed (the connection macros are set from it before the templates are linked). Nothing in the core or the UI changed.
+
 ## 0.3.25
 
 **A trial install's certificate can be verified, and the Docker-path installer ships current modules.**
