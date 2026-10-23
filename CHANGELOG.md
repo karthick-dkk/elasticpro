@@ -85,6 +85,16 @@ Zabbix menu module comes from one place.**
   when `ELASTICPRO_MODULES_REPO` points at a checkout of it. When the variable is not set, the
   test is skipped.
 
+**The scraper's push format works.**
+- `elasticpro-scrape.mjs --format sender` used to send one key per figure (`elasticpro.scrape.ok`,
+  `elasticpro.freed.bytes`, …). The automation template has no items with those keys, and its
+  other items are dependent items, which do not take pushed values, so Zabbix rejected every
+  value. The format now sends the whole document to the template's master item
+  `elasticpro.state`. That item now accepts pushed values (HTTP agent with trapping enabled,
+  UUID unchanged), so every dependent and both discovery rules fill as they do when it polls.
+  The new macro `{$ELASTICPRO.POLL}` (default `5m`) set to `0` stops polling on a host that is
+  only pushed to. A unit test checks every key the format emits against the template.
+
 **Also.**
 - TLS libraries updated: rustls-webpki 0.103.16 and webpki-roots 1.0.10 (RUSTSEC-2026-0381 and
   RUSTSEC-2026-0382).

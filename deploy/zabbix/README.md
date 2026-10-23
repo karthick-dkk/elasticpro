@@ -90,9 +90,21 @@ Adjust the paths in the unit — it assumes the repo at `/opt/elasticpro`, the c
 
 ### Push instead of pull
 
-If you would rather not serve a file, `--format sender` emits `zabbix_sender` lines for
-trapper items. Same data, same keys; you lose the low-level discovery unless you send the
-two `elasticpro.discovery.*` items too, which that format includes.
+If you would rather not serve a file, `--format sender` writes the same document as one
+`zabbix_sender` line, to the template's master item `elasticpro.state`. That item is an HTTP
+agent item with trapping enabled, so it takes a pushed value as well as polling. Every
+dependent item and both discovery rules read from it either way, so push and pull fill the
+same items. On a host that is only pushed to, set `{$ELASTICPRO.POLL}` to `0` and the item
+never polls:
+
+```bash
+node tools/elasticpro-scrape.mjs --config clusters.yaml --format sender --host <zabbix host> \
+  | zabbix_sender -z zbx -i -
+```
+
+Before 0.3.24 this format sent one key per figure (`elasticpro.scrape.ok`,
+`elasticpro.freed.bytes`, …). The template has no items with those keys, and its other
+items are dependent items, which do not take pushed values, so Zabbix rejected every value.
 
 **Five minutes is a sensible floor either way.** Proving an index is safe to delete means
 listing every snapshot in every repository, which is the expensive half of the work, and
@@ -107,13 +119,14 @@ every run fetches both afresh.
 ## Zabbix
 
 Import `template-elasticpro.yaml` (Data collection → Templates → Import), link it to a
-host, and set four macros:
+host, and set its macros:
 
 | Macro | Meaning |
 | --- | --- |
 | `{$ELASTICPRO.URL}` | where the document is served, e.g. `https://elasticpro.internal/automation.json` |
 | `{$ELASTICPRO.USER}` | HTTP basic user — the hosted stack is behind an auth gate |
 | `{$ELASTICPRO.PASSWORD}` | that user's password (secret text) |
+| `{$ELASTICPRO.POLL}` | how often the document is fetched (default `5m`); `0` on a host the scraper pushes to with `--format sender` |
 | `{$ELASTICPRO.STALE}` | how long without a scrape before it alerts (default `30m`) |
 
 The host needs no Zabbix agent. One HTTP request fetches the whole document and every
@@ -207,7 +220,8 @@ rejects even a loopback request that has neither.
 `--format sender` has no shared secret of its own. A trapper item accepts a value when the
 host name and item key match, so restrict it:
 
-- set **Allowed hosts** on the trapper items to the scraper's address, and
+- set **Allowed hosts** on the `elasticpro.state` item (the one item it pushes to) to the
+  scraper's address, and
 - encrypt with PSK — `zabbix_sender --tls-connect psk --tls-psk-identity <id>
   --tls-psk-file <file>` against a host configured for PSK.
 

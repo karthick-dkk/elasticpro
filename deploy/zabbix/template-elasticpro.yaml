@@ -2,7 +2,8 @@
 #
 # Import: Data collection -> Templates -> Import. Then link it to a host and set the
 # macros below. The host needs no Zabbix agent — every value comes from one HTTP request
-# to the JSON document tools/elasticpro-scrape.mjs writes.
+# to the JSON document tools/elasticpro-scrape.mjs writes, or from the same document pushed
+# to the same item with `--format sender` (set {$ELASTICPRO.POLL} to 0 for push only).
 #
 # See deploy/zabbix/README.md for how to produce and serve that document.
 zabbix_export:
@@ -34,6 +35,9 @@ zabbix_export:
           type: SECRET_TEXT
           value: ''
           description: 'HTTP basic password for {$ELASTICPRO.USER}.'
+        - macro: '{$ELASTICPRO.POLL}'
+          value: '5m'
+          description: 'How often the document is fetched from {$ELASTICPRO.URL}. 0 on a host the scraper pushes to with --format sender: the item then never polls and only takes the pushed value.'
         - macro: '{$ELASTICPRO.STALE}'
           value: '30m'
           description: 'Alert if the scrape has not run within this long.'
@@ -42,7 +46,7 @@ zabbix_export:
           name: 'Automation: scrape document'
           type: HTTP_AGENT
           key: elasticpro.state
-          delay: 5m
+          delay: '{$ELASTICPRO.POLL}'
           history: '0'
           trends: '0'
           value_type: TEXT
@@ -54,9 +58,15 @@ zabbix_export:
           authtype: BASIC
           username: '{$ELASTICPRO.USER}'
           password: '{$ELASTICPRO.PASSWORD}'
+          allow_traps: 'YES'
           description: |
             The whole document, fetched once. Every other item derives from this one, so
             polling costs a single request no matter how many clusters and rules exist.
+
+            Trapping is enabled, so the same document can be pushed here instead
+            (elasticpro-scrape.mjs --format sender | zabbix_sender -i -). A dependent item has
+            one master, which is why push and pull share this item rather than each having
+            their own. Set Allowed hosts on it when you push.
         - uuid: 4f35ea8e8a764b82930ddad0c7b24254
           name: 'Automation: scrape succeeded'
           type: DEPENDENT
