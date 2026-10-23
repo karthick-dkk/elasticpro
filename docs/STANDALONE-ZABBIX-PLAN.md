@@ -44,33 +44,33 @@ The controller touches nothing but Zabbix and one settings file:
 | Step | Where | Source |
 |---|---|---|
 | Column list | `columns.json` in the module folder | static |
-| Rename/hide/reorder | `ColumnSettings::load('capacity')` → `Store::path('columns-capacity.json')` ([`shared/php/Store.php:50`](../integration/zabbix/shared/php/Store.php)) | (iii) |
-| Which hosts are clients | `API::Template()->get(['host' => 'ElasticPro client master'])` then `API::Host()->get(templateids:…)` ([`actions/WidgetView.php:53-71`](../integration/zabbix/capacity-widget/actions/WidgetView.php)) | (ii) |
-| Every numeric cell | `API::Item()->get(['lastvalue','lastclock','units','state'])` ([`:85-89`](../integration/zabbix/capacity-widget/actions/WidgetView.php)) | (ii) |
-| Client name, ES URL, thresholds, type, status | `API::UserMacro()->get(... {$GRP.CLIENT}, {$ES.URL}, {$EP.USAGE.WARN/HIGH}, {$EP.CLIENT.TYPE/STATUS})` ([`:97-101`](../integration/zabbix/capacity-widget/actions/WidgetView.php)) | (ii) |
-| "ES Full In" text | `Forecast::fullIn()` over `ep.es.storage.full_in` ([`shared/php/Forecast.php:15`](../integration/zabbix/shared/php/Forecast.php)) | (ii) |
+| Rename/hide/reorder | `ColumnSettings::load('capacity')` → `Store::path('columns-capacity.json')` ([`shared/php/Store.php:50`](https://github.com/karthick-dkk/integration-zabbix-elasticpro/blob/main/zabbix/shared/php/Store.php)) | (iii) |
+| Which hosts are clients | `API::Template()->get(['host' => 'ElasticPro client master'])` then `API::Host()->get(templateids:…)` ([`actions/WidgetView.php:53-71`](https://github.com/karthick-dkk/integration-zabbix-elasticpro/blob/main/zabbix/capacity-widget/actions/WidgetView.php)) | (ii) |
+| Every numeric cell | `API::Item()->get(['lastvalue','lastclock','units','state'])` ([`:85-89`](https://github.com/karthick-dkk/integration-zabbix-elasticpro/blob/main/zabbix/capacity-widget/actions/WidgetView.php)) | (ii) |
+| Client name, ES URL, thresholds, type, status | `API::UserMacro()->get(... {$GRP.CLIENT}, {$ES.URL}, {$EP.USAGE.WARN/HIGH}, {$EP.CLIENT.TYPE/STATUS})` ([`:97-101`](https://github.com/karthick-dkk/integration-zabbix-elasticpro/blob/main/zabbix/capacity-widget/actions/WidgetView.php)) | (ii) |
+| "ES Full In" text | `Forecast::fullIn()` over `ep.es.storage.full_in` ([`shared/php/Forecast.php:15`](https://github.com/karthick-dkk/integration-zabbix-elasticpro/blob/main/zabbix/shared/php/Forecast.php)) | (ii) |
 
 **No HTTP call to the core anywhere in the module.** Confirmed by grep across
-`integration/zabbix/**/*.php`: the only `http` strings are a form placeholder and a URL
+`zabbix/**/*.php`: the only `http` strings are a form placeholder and a URL
 validator in `ClientSpec.php:287,563`.
 
 Now trace the item values one level down. Every key in `columns.json` is a **`CALCULATED`** item
 on the master host — `MasterTemplate::itemExport()` hard-codes `'type' => 'CALCULATED'`
-([`MasterTemplate.php:202`](../integration/zabbix/clients-module/lib/MasterTemplate.php)) — so
+([`MasterTemplate.php:202`](https://github.com/karthick-dkk/integration-zabbix-elasticpro/blob/main/zabbix/clients-module/lib/MasterTemplate.php)) — so
 each one is an aggregation over *other* hosts' items:
 
 | Column (`columns.json`) | Key | Calculated from | Ultimate source |
 |---|---|---|---|
-| Cust.Purchased Storage | `ep.es.storage.purchased` | `{$ES.VOLUME.CUS.PURCHASED}*GB` ([`:224`](../integration/zabbix/clients-module/lib/MasterTemplate.php)) | (i) macro set by Cluster Management |
-| ES Allocated Storage | `ep.es.storage.allocated` | `max(last_foreach(/*/es.nodes.fs.total_in_bytes?[group="{$GRP.CLIENT}"]))` ([`:226`](../integration/zabbix/clients-module/lib/MasterTemplate.php)) | (v) `Elasticsearch Cluster by HTTP EP`, **or** (i) [`JumpTemplate.php:241`](../integration/zabbix/clients-module/lib/JumpTemplate.php) |
-| ES Used Storage | `ep.es.storage.used` | `es.nodes.fs.used_in_bytes` ([`:228`](../integration/zabbix/clients-module/lib/MasterTemplate.php)) | same |
-| ES Used % | `ep.es.storage.usage` | `100*used/allocated` ([`:230`](../integration/zabbix/clients-module/lib/MasterTemplate.php)) | derived |
-| ES Full In | `ep.es.storage.full_in` | `timeleft(//ep.es.storage.usage,7d,100)` ([`:237`](../integration/zabbix/clients-module/lib/MasterTemplate.php)) | derived, Zabbix's own forecast function |
-| Cust.Purchased Devices | `ep.devices.purchased` | `{$EP.DEVICES.PURCHASED}` ([`:239`](../integration/zabbix/clients-module/lib/MasterTemplate.php)) | (i) macro |
-| Devices Seen | `ep.devices.seen` | `sum(last_foreach(/*/ep.es.devices.seen?[…]))` ([`:241`](../integration/zabbix/clients-module/lib/MasterTemplate.php)) | (i) `DevicesTemplate` `HTTP_AGENT` item ([`DevicesTemplate.php:50-71`](../integration/zabbix/clients-module/lib/DevicesTemplate.php)) or the SSH variant ([`JumpTemplate.php:303`](../integration/zabbix/clients-module/lib/JumpTemplate.php)) |
-| **Logdelay Devices Count** | **`ep.delay.late`** | **`max(last_foreach(/*/elasticpro.delay[late]?[…],1h))`** ([`:248`](../integration/zabbix/clients-module/lib/MasterTemplate.php)) | **(vi) `TRAP`, scraper only** ([`template-elasticpro-log-delay.yaml:26-28`](../deploy/zabbix/template-elasticpro-log-delay.yaml)) |
-| ES/Parser/Forwarder CPU+Mem+Disk requested | `ep.<family>.<res>.requested` | sum of `ep.role.*` role items, which read `{$EP.<ROLE>.*.REQUESTED}` macros ([`:283-294`](../integration/zabbix/clients-module/lib/MasterTemplate.php)) | (i) macros |
-| … allocated / usage | `ep.<family>.<res>.allocated/usage` | `system.cpu.num`, `system.cpu.util`, `vm.memory.size[total]`, `vm.memory.utilization`, `vfs.fs.dependent.size[*,total/used]` ([`:264-317`](../integration/zabbix/clients-module/lib/MasterTemplate.php)) | (v) `Linux by Zabbix agent -EP` |
+| Cust.Purchased Storage | `ep.es.storage.purchased` | `{$ES.VOLUME.CUS.PURCHASED}*GB` ([`:224`](https://github.com/karthick-dkk/integration-zabbix-elasticpro/blob/main/zabbix/clients-module/lib/MasterTemplate.php)) | (i) macro set by Cluster Management |
+| ES Allocated Storage | `ep.es.storage.allocated` | `max(last_foreach(/*/es.nodes.fs.total_in_bytes?[group="{$GRP.CLIENT}"]))` ([`:226`](https://github.com/karthick-dkk/integration-zabbix-elasticpro/blob/main/zabbix/clients-module/lib/MasterTemplate.php)) | (v) `Elasticsearch Cluster by HTTP EP`, **or** (i) [`JumpTemplate.php:241`](https://github.com/karthick-dkk/integration-zabbix-elasticpro/blob/main/zabbix/clients-module/lib/JumpTemplate.php) |
+| ES Used Storage | `ep.es.storage.used` | `es.nodes.fs.used_in_bytes` ([`:228`](https://github.com/karthick-dkk/integration-zabbix-elasticpro/blob/main/zabbix/clients-module/lib/MasterTemplate.php)) | same |
+| ES Used % | `ep.es.storage.usage` | `100*used/allocated` ([`:230`](https://github.com/karthick-dkk/integration-zabbix-elasticpro/blob/main/zabbix/clients-module/lib/MasterTemplate.php)) | derived |
+| ES Full In | `ep.es.storage.full_in` | `timeleft(//ep.es.storage.usage,7d,100)` ([`:237`](https://github.com/karthick-dkk/integration-zabbix-elasticpro/blob/main/zabbix/clients-module/lib/MasterTemplate.php)) | derived, Zabbix's own forecast function |
+| Cust.Purchased Devices | `ep.devices.purchased` | `{$EP.DEVICES.PURCHASED}` ([`:239`](https://github.com/karthick-dkk/integration-zabbix-elasticpro/blob/main/zabbix/clients-module/lib/MasterTemplate.php)) | (i) macro |
+| Devices Seen | `ep.devices.seen` | `sum(last_foreach(/*/ep.es.devices.seen?[…]))` ([`:241`](https://github.com/karthick-dkk/integration-zabbix-elasticpro/blob/main/zabbix/clients-module/lib/MasterTemplate.php)) | (i) `DevicesTemplate` `HTTP_AGENT` item ([`DevicesTemplate.php:50-71`](https://github.com/karthick-dkk/integration-zabbix-elasticpro/blob/main/zabbix/clients-module/lib/DevicesTemplate.php)) or the SSH variant ([`JumpTemplate.php:303`](https://github.com/karthick-dkk/integration-zabbix-elasticpro/blob/main/zabbix/clients-module/lib/JumpTemplate.php)) |
+| **Logdelay Devices Count** | **`ep.delay.late`** | **`max(last_foreach(/*/elasticpro.delay[late]?[…],1h))`** ([`:248`](https://github.com/karthick-dkk/integration-zabbix-elasticpro/blob/main/zabbix/clients-module/lib/MasterTemplate.php)) | **(vi) `TRAP`, scraper only** ([`template-elasticpro-log-delay.yaml:26-28`](../deploy/zabbix/template-elasticpro-log-delay.yaml)) |
+| ES/Parser/Forwarder CPU+Mem+Disk requested | `ep.<family>.<res>.requested` | sum of `ep.role.*` role items, which read `{$EP.<ROLE>.*.REQUESTED}` macros ([`:283-294`](https://github.com/karthick-dkk/integration-zabbix-elasticpro/blob/main/zabbix/clients-module/lib/MasterTemplate.php)) | (i) macros |
+| … allocated / usage | `ep.<family>.<res>.allocated/usage` | `system.cpu.num`, `system.cpu.util`, `vm.memory.size[total]`, `vm.memory.utilization`, `vfs.fs.dependent.size[*,total/used]` ([`:264-317`](https://github.com/karthick-dkk/integration-zabbix-elasticpro/blob/main/zabbix/clients-module/lib/MasterTemplate.php)) | (v) `Linux by Zabbix agent -EP` |
 
 **Verdict:** 30 of 31 columns are already core-free. One column — *Logdelay Devices Count* — is not.
 
@@ -80,12 +80,12 @@ Identical shape, plus a per-server expansion:
 
 | Step | Where | Source |
 |---|---|---|
-| Columns derive from the *roles* | `Roles::load()` → `roles.json` in `EP_DATA_DIR` ([`actions/WidgetView.php:31`](../integration/zabbix/resources-widget/actions/WidgetView.php)) | (iii) |
-| Client rows | `Template.get` + `Host.get` + `Item.get` + `UserMacro.get` ([`:56-88`](../integration/zabbix/resources-widget/actions/WidgetView.php)) | (ii) |
-| Each client's machines | `HostGroup.get` by client name, `Host.get` with `selectInterfaces`/`selectTags` ([`:237-242`](../integration/zabbix/resources-widget/actions/WidgetView.php)) | (ii) |
-| Per-server CPU/mem/disk | `Item.get` on `system.cpu.num`, `system.cpu.util`, `vm.memory.size[total]`, `vm.memory.utilization`, `vfs.fs.dependent.size[<mount>,total/pused]` ([`:292-302`](../integration/zabbix/resources-widget/actions/WidgetView.php)) | (v) |
-| Up/down | interface `available` ([`:273-278`](../integration/zabbix/resources-widget/actions/WidgetView.php)) | (ii) |
-| **"Devices late" column** | **`ep.delay.late`** ([`:163`](../integration/zabbix/resources-widget/actions/WidgetView.php)) | **(vi)** |
+| Columns derive from the *roles* | `Roles::load()` → `roles.json` in `EP_DATA_DIR` ([`actions/WidgetView.php:31`](https://github.com/karthick-dkk/integration-zabbix-elasticpro/blob/main/zabbix/resources-widget/actions/WidgetView.php)) | (iii) |
+| Client rows | `Template.get` + `Host.get` + `Item.get` + `UserMacro.get` ([`:56-88`](https://github.com/karthick-dkk/integration-zabbix-elasticpro/blob/main/zabbix/resources-widget/actions/WidgetView.php)) | (ii) |
+| Each client's machines | `HostGroup.get` by client name, `Host.get` with `selectInterfaces`/`selectTags` ([`:237-242`](https://github.com/karthick-dkk/integration-zabbix-elasticpro/blob/main/zabbix/resources-widget/actions/WidgetView.php)) | (ii) |
+| Per-server CPU/mem/disk | `Item.get` on `system.cpu.num`, `system.cpu.util`, `vm.memory.size[total]`, `vm.memory.utilization`, `vfs.fs.dependent.size[<mount>,total/pused]` ([`:292-302`](https://github.com/karthick-dkk/integration-zabbix-elasticpro/blob/main/zabbix/resources-widget/actions/WidgetView.php)) | (v) |
+| Up/down | interface `available` ([`:273-278`](https://github.com/karthick-dkk/integration-zabbix-elasticpro/blob/main/zabbix/resources-widget/actions/WidgetView.php)) | (ii) |
+| **"Devices late" column** | **`ep.delay.late`** ([`:163`](https://github.com/karthick-dkk/integration-zabbix-elasticpro/blob/main/zabbix/resources-widget/actions/WidgetView.php)) | **(vi)** |
 
 **Verdict:** one column core-dependent; the rest already standalone.
 
@@ -93,7 +93,7 @@ Identical shape, plus a per-server expansion:
 
 This one is different in kind. It keeps **no column list of its own** — the columns *are* the
 items of the `ElasticPro client plan` template, discovered at render time from the item name,
-units and the `plan`/`column` tags ([`actions/WidgetView.php:44-77`](../integration/zabbix/volume-widget/actions/WidgetView.php)).
+units and the `plan`/`column` tags ([`actions/WidgetView.php:44-77`](https://github.com/karthick-dkk/integration-zabbix-elasticpro/blob/main/zabbix/volume-widget/actions/WidgetView.php)).
 
 Every one of those items is `type: TRAP`
 ([`template-elasticpro-client-plan.yaml:19-260`](../deploy/zabbix/template-elasticpro-client-plan.yaml)),
@@ -105,10 +105,10 @@ calculation behind each, are declared in `CLIENT_VIEW`
 
 | Also read | Where | Source |
 |---|---|---|
-| `elasticpro.plan.epoch` → "Updated N ago" / "Never updated" | [`:145,155`](../integration/zabbix/volume-widget/actions/WidgetView.php) | (vi) |
-| `elasticpro.plan.reachable` → the unreachable badge | [`:156`](../integration/zabbix/volume-widget/actions/WidgetView.php) | (vi) |
-| Thresholds `{$ELASTICPRO.PLAN.LIVE_USED.WARN}` / `LIVE_DAYS.MIN` | [`:109-113`](../integration/zabbix/volume-widget/actions/WidgetView.php) | (ii) |
-| DI / On-Prem badge | master-host macros ([`:195-216`](../integration/zabbix/volume-widget/actions/WidgetView.php)) | (ii) |
+| `elasticpro.plan.epoch` → "Updated N ago" / "Never updated" | [`:145,155`](https://github.com/karthick-dkk/integration-zabbix-elasticpro/blob/main/zabbix/volume-widget/actions/WidgetView.php) | (vi) |
+| `elasticpro.plan.reachable` → the unreachable badge | [`:156`](https://github.com/karthick-dkk/integration-zabbix-elasticpro/blob/main/zabbix/volume-widget/actions/WidgetView.php) | (vi) |
+| Thresholds `{$ELASTICPRO.PLAN.LIVE_USED.WARN}` / `LIVE_DAYS.MIN` | [`:109-113`](https://github.com/karthick-dkk/integration-zabbix-elasticpro/blob/main/zabbix/volume-widget/actions/WidgetView.php) | (ii) |
+| DI / On-Prem badge | master-host macros ([`:195-216`](https://github.com/karthick-dkk/integration-zabbix-elasticpro/blob/main/zabbix/volume-widget/actions/WidgetView.php)) | (ii) |
 | Column settings | `columns-volume.json` | (iii) |
 
 **Verdict: 100 % core-dependent.** With the scraper stopped, this widget renders its headings
@@ -119,14 +119,14 @@ honest behaviour, and it is also an empty report.
 
 | Step | Where | Source |
 |---|---|---|
-| Client registry, roles, column settings, backups, pending import | `Store::read/write` under `EP_DATA_DIR` ([`Store.php:50-99`](../integration/zabbix/shared/php/Store.php)), `Registry::all()` | (iii) |
+| Client registry, roles, column settings, backups, pending import | `Store::read/write` under `EP_DATA_DIR` ([`Store.php:50-99`](https://github.com/karthick-dkk/integration-zabbix-elasticpro/blob/main/zabbix/shared/php/Store.php)), `Registry::all()` | (iii) |
 | What exists in Zabbix now | `Reconciler::current()` — hosts, groups, templates, macros, interfaces | (ii) |
-| Setup health per client | `SetupChecks::forClients()` — `Item.get` state/error/lastvalue on `es.cluster.get_health`, `JumpTemplate::FAST`, `ep.wj.problem[fast]`, `ep.es.devices.seen`, `ulm.check`, `ulm.error`; `Proxy.get`, `ProxyGroup.get` ([`SetupChecks.php:19-46`](../integration/zabbix/clients-module/lib/SetupChecks.php)) | (ii) |
-| "Test connection" | `API::Task()->create(ZBX_TM_TASK_CHECK_NOW)` then re-read item state ([`TestConnection.php:38-60`](../integration/zabbix/clients-module/actions/TestConnection.php)) | (ii) |
-| Open problems per client | `API::Trigger()->get(value: TRUE, groupids:…)` ([`ClientList.php:63-66`](../integration/zabbix/clients-module/actions/ClientList.php)) | (ii) |
-| Storage forecast + over-purchase columns | `Item.get` on `ep.es.storage.full_in`, `ep.es.storage.purchased.usage`, `ep.devices.usage` ([`ClientList.php:54-57`](../integration/zabbix/clients-module/actions/ClientList.php)) | (ii), all calculated |
+| Setup health per client | `SetupChecks::forClients()` — `Item.get` state/error/lastvalue on `es.cluster.get_health`, `JumpTemplate::FAST`, `ep.wj.problem[fast]`, `ep.es.devices.seen`, `ulm.check`, `ulm.error`; `Proxy.get`, `ProxyGroup.get` ([`SetupChecks.php:19-46`](https://github.com/karthick-dkk/integration-zabbix-elasticpro/blob/main/zabbix/clients-module/lib/SetupChecks.php)) | (ii) |
+| "Test connection" | `API::Task()->create(ZBX_TM_TASK_CHECK_NOW)` then re-read item state ([`TestConnection.php:38-60`](https://github.com/karthick-dkk/integration-zabbix-elasticpro/blob/main/zabbix/clients-module/actions/TestConnection.php)) | (ii) |
+| Open problems per client | `API::Trigger()->get(value: TRUE, groupids:…)` ([`ClientList.php:63-66`](https://github.com/karthick-dkk/integration-zabbix-elasticpro/blob/main/zabbix/clients-module/actions/ClientList.php)) | (ii) |
+| Storage forecast + over-purchase columns | `Item.get` on `ep.es.storage.full_in`, `ep.es.storage.purchased.usage`, `ep.devices.usage` ([`ClientList.php:54-57`](https://github.com/karthick-dkk/integration-zabbix-elasticpro/blob/main/zabbix/clients-module/actions/ClientList.php)) | (ii), all calculated |
 | Template writing | `configuration.import` of `MasterTemplate`, `DevicesTemplate`, `JumpTemplate`, `ClusterTemplate` via `TemplateInstaller` | (ii) |
-| Alert routing, weekly report | Zabbix actions + a Zabbix scheduled report on a Zabbix dashboard ([`AlertRouting.php:34,117`](../integration/zabbix/clients-module/lib/AlertRouting.php)) | (ii) |
+| Alert routing, weekly report | Zabbix actions + a Zabbix scheduled report on a Zabbix dashboard ([`AlertRouting.php:34,117`](https://github.com/karthick-dkk/integration-zabbix-elasticpro/blob/main/zabbix/clients-module/lib/AlertRouting.php)) | (ii) |
 
 **Verdict: already fully standalone.** It never calls the core. Note the interesting inversion
 in `ClusterTemplate.php:17-22`: that template exists *for the core's benefit* — it is how the
@@ -155,12 +155,12 @@ This module has exactly three jobs, and none of them is a figure:
 
 - The `ElasticPro log archive S3` template "was removed from ElasticPro and lives in its own
   Zabbix template now", imported separately from `elasticpro-zabbix/ulm`
-  ([`integration/zabbix/master/import.py:57-60`](../integration/zabbix/master/import.py),
+  ([`zabbix/master/import.py:57-60`](https://github.com/karthick-dkk/integration-zabbix-elasticpro/blob/main/zabbix/master/import.py),
   [`deploy/PRODUCTION.md:190-194`](../deploy/PRODUCTION.md)). `import.py` treats it as
   **optional** and continues without it.
 - For jump-host clients the Elasticsearch half runs as two `ssh.run` items the Clients module
   writes — `ep.ulm.days` and `ep.ulm.tags`
-  ([`JumpTemplate.php:127-191`](../integration/zabbix/clients-module/lib/JumpTemplate.php)) — and
+  ([`JumpTemplate.php:127-191`](https://github.com/karthick-dkk/integration-zabbix-elasticpro/blob/main/zabbix/clients-module/lib/JumpTemplate.php)) — and
   the S3 template reads their answers back **through the Zabbix API**
   (`{$ULM.ES.VIA}=zabbix`, `{$ULM.ZABBIX.API.URL/TOKEN}` as global macros,
   [`deploy/PRODUCTION.md:231-242`](../deploy/PRODUCTION.md)).
@@ -174,10 +174,10 @@ possible: it was once in the app and is now a pure Zabbix template.
 
 | Named figure | Today's producer | Core-only? | Why |
 |---|---|---|---|
-| **Client resources** (servers / CPU / memory / disk, requested-allocated-used, per role and per family, plus the per-server expansion) | `Linux by Zabbix agent -EP` items, aggregated by `MasterTemplate::roleItems/familyItems` ([`:264-317`](../integration/zabbix/clients-module/lib/MasterTemplate.php)) | **No** | Already pure Zabbix |
+| **Client resources** (servers / CPU / memory / disk, requested-allocated-used, per role and per family, plus the per-server expansion) | `Linux by Zabbix agent -EP` items, aggregated by `MasterTemplate::roleItems/familyItems` ([`:264-317`](https://github.com/karthick-dkk/integration-zabbix-elasticpro/blob/main/zabbix/clients-module/lib/MasterTemplate.php)) | **No** | Already pure Zabbix |
 | **Capacity** (ES storage purchased/allocated/used/%, full-in, CPU & memory per family) | cluster-host ES items + master-host macros + Zabbix `CALCULATED` + `timeleft()` | **No** | Already pure Zabbix |
 | **ULM / log archive** | `ElasticPro log archive S3` + `ep.ulm.days` / `ep.ulm.tags` | **No** | Already pure Zabbix (and already out of the app) |
-| **Device count** | `ep.es.devices.seen` — one `HTTP_AGENT` POST with a `cardinality` agg ([`DevicesTemplate.php:32-34,50-71`](../integration/zabbix/clients-module/lib/DevicesTemplate.php)), or the same body over SSH | **No** | Already pure Zabbix |
+| **Device count** | `ep.es.devices.seen` — one `HTTP_AGENT` POST with a `cardinality` agg ([`DevicesTemplate.php:32-34,50-71`](https://github.com/karthick-dkk/integration-zabbix-elasticpro/blob/main/zabbix/clients-module/lib/DevicesTemplate.php)), or the same body over SSH | **No** | Already pure Zabbix |
 | **Count of delayed devices** | `elasticpro.delay[late]` `TRAP` ← scraper ← `summarise()`/`DELAY_ITEMS` ([`log-delay.js:355-375`](../ui/js/core/log-delay.js)) | **Yes, today** | Needs a terms+top_hits aggregation, a per-device `arrival − event` subtraction, `classify()` against four thresholds, and a median. Portable to Zabbix — see [§3.1](#31-log-delay) |
 | **Volume report — all 17 plan columns** | `elasticpro.plan[*]` `TRAP` ← `volumeReport()` ([`volume.js:182-290`](../ui/js/core/volume.js)) | **Yes, today** | Needs the dated index listing, snapshot listing, ILM/SLM policies, optionally per-snapshot `_status`, and ~40 lines of arithmetic. Mostly portable — see [§3.3](#33-snapshot--volume-analysis) |
 | ElasticPro alert rules (22 trapper items) | `elasticpro.alert[*]` ← `ui/js/core/automation.js` | **Yes, today** | Partly portable as triggers; the "proposal" half is not a measurement at all |
@@ -225,8 +225,8 @@ What it computes and writes:
 
 | Approach | Verdict |
 |---|---|
-| `HTTP_AGENT` master item posting the same `terms`+`top_hits` body, then dependent items with a `JAVASCRIPT` preprocessing step per figure | **The right shape.** It is exactly the pattern `DevicesTemplate::master()/figure()` already uses ([`DevicesTemplate.php:110-160`](../integration/zabbix/clients-module/lib/DevicesTemplate.php)), and `cluster-steps.json` already proves non-trivial ES5 steps are maintainable and unit-tested |
-| `SSH` `ssh.run` master item for jump-host clients | **Already proven** — `JumpTemplate` runs multi-request `curl.exe` sessions and splits the answers ([`JumpTemplate.php:206-209`](../integration/zabbix/clients-module/lib/JumpTemplate.php)) |
+| `HTTP_AGENT` master item posting the same `terms`+`top_hits` body, then dependent items with a `JAVASCRIPT` preprocessing step per figure | **The right shape.** It is exactly the pattern `DevicesTemplate::master()/figure()` already uses ([`DevicesTemplate.php:110-160`](https://github.com/karthick-dkk/integration-zabbix-elasticpro/blob/main/zabbix/clients-module/lib/DevicesTemplate.php)), and `cluster-steps.json` already proves non-trivial ES5 steps are maintainable and unit-tested |
+| `SSH` `ssh.run` master item for jump-host clients | **Already proven** — `JumpTemplate` runs multi-request `curl.exe` sessions and splits the answers ([`JumpTemplate.php:206-209`](https://github.com/karthick-dkk/integration-zabbix-elasticpro/blob/main/zabbix/clients-module/lib/JumpTemplate.php)) |
 | Calculated item | **No.** There is no per-device series in Zabbix to aggregate over |
 
 **Cost in cluster load:** identical to today, because it is the same single aggregation. At
@@ -268,7 +268,7 @@ unreachable clusters, a 15-minute watch window for on-demand datasets, a disk ca
 **Zabbix equivalent:** this *is* what a Zabbix template is. Per-item `delay`, master/dependent
 items, `ITEM_STATE_NOTSUPPORTED` with the reason, `lastclock` for freshness, history and trends
 for the cache. `DevicesTemplate::extras()` already collects eight of the nine datasets'
-interesting figures this way ([`DevicesTemplate.php:175-231`](../integration/zabbix/clients-module/lib/DevicesTemplate.php)).
+interesting figures this way ([`DevicesTemplate.php:175-231`](https://github.com/karthick-dkk/integration-zabbix-elasticpro/blob/main/zabbix/clients-module/lib/DevicesTemplate.php)).
 
 **What would be lost:** the *raw bodies*. The poller hands the UI the same JSON the pages used to
 fetch themselves, "character for character" ([`catalogue.rs:3-6`](../crates/elasticpro-core/src/fleet/catalogue.rs)),
@@ -306,7 +306,7 @@ What exists today, and what happens to it:
 | Today | Where | Standalone |
 |---|---|---|
 | `Edition::{Portable,Installed,Hosted}` decides whether accounts exist at all | [`auth.rs:67-95`](../crates/elasticpro-core/src/auth.rs) | Irrelevant. No core, no editions |
-| Four roles `Guest / User / Operator / Admin`, with `may_write()` on Operator+ | [`auth.rs:101-138`](../crates/elasticpro-core/src/auth.rs) | Collapses to Zabbix's three user types. The modules already read `USER_TYPE_SUPER_ADMIN` directly for "may edit columns" ([`capacity WidgetView.php:46`](../integration/zabbix/capacity-widget/actions/WidgetView.php)) and `canWrite()` in the clients module |
+| Four roles `Guest / User / Operator / Admin`, with `may_write()` on Operator+ | [`auth.rs:101-138`](../crates/elasticpro-core/src/auth.rs) | Collapses to Zabbix's three user types. The modules already read `USER_TYPE_SUPER_ADMIN` directly for "may edit columns" ([`capacity WidgetView.php:46`](https://github.com/karthick-dkk/integration-zabbix-elasticpro/blob/main/zabbix/capacity-widget/actions/WidgetView.php)) and `canWrite()` in the clients module |
 | **Scoped accounts**: `scope_allows(scope, cluster_groups)` — `None` sees everything, `Some(groups)` sees a cluster only when it names one of the account's Zabbix user groups; "the default for someone Zabbix has not placed is no clusters, not all of them" | [`auth.rs:140-161`](../crates/elasticpro-core/src/auth.rs) | **Replaced by Zabbix host-group permissions, and strictly improved.** Today the scope is a *mirror* of Zabbix groups, re-written on every SSO sign-in ([`auth.rs:364-369`](../crates/elasticpro-core/src/auth.rs)); the mapping is `User → user/scoped`, `Admin → operator/all`, `Super admin → admin/all` ([`zbx_sso.rs:27-32`](../crates/elasticpro-core/src/zbx_sso.rs)). A mirror can be stale. Zabbix's own read permission on a client's host group cannot be — `API::Host()->get()` returns only what the caller may see, so the widgets already filter correctly for free |
 | `guest_may_read()` allowlist of ES paths | [`auth.rs:162-201`](../crates/elasticpro-core/src/auth.rs) | Gone with the REST console. Nothing in the modules proxies an arbitrary ES path |
 | `Writes::decide(read_only, unlocked, requested)` — the two-gate write guard | `guard.rs` | Gone from the data path. The modules' only writes are Zabbix configuration changes, which Zabbix permission-checks and audit-logs itself — the same property `Pairing.php:17-19` already relies on |
@@ -380,7 +380,7 @@ The expensive stage, and the one with real unknowns.
 - `ClusterTemplate` grows the plan inputs as macros: `{$EP.PLAN.LIVE.RETENTION}`,
   `{$EP.PLAN.SNAPSHOT.RETENTION}`, `{$EP.PLAN.BACKUP.CAPACITY}`, `{$EP.PLAN.WINDOW.DAYS}`,
   `{$EP.PLAN.TOP.DAYS}`, `{$EP.PLAN.HEADROOM.PCT}`. Each present-but-empty, as that file's
-  comment already argues for ([`ClusterTemplate.php:40-48`](../integration/zabbix/clients-module/lib/ClusterTemplate.php)).
+  comment already argues for ([`ClusterTemplate.php:40-48`](https://github.com/karthick-dkk/integration-zabbix-elasticpro/blob/main/zabbix/clients-module/lib/ClusterTemplate.php)).
   Cluster Management's client form gains the fields; CSV import/export follow.
 - Two `SCRIPT` or `HTTP_AGENT` master items at `30m`/`1h`: the dated index listing, and the
   snapshot + policy listing. Reuse `es.nodes.fs.*` for live storage rather than re-asking.
@@ -451,7 +451,7 @@ the buyer, that is the cheap answer, and it should be considered on its own.
   and SSO as they are today.
 - (c) Keep the menu, drop SSO: links open the app with no sign-in pass-through.
 - **Recommendation: (b).** It is already a separate folder (`deploy/zabbix/module/elasticpro`) with
-  its own manifest and no coupling to the four `integration/zabbix` modules — grep confirms no
+  its own manifest and no coupling to the four modules this repository then held — grep confirms no
   cross-references. It costs nothing to leave in place and unshipped, and (c) is the worst of
   both: it keeps the menu while making every click a second login.
 
@@ -519,7 +519,7 @@ observable in *Latest data*, and reversible by relinking.
 |---|---|---|
 | **Replacement** — delete the scraper and the trapper templates | One code path, smallest surface | **High, once.** The production Zabbix with seven clients and ~42 hosts cuts over in a single step. If the direct items turn out to be wrong, the data they should have collected is gone and unrecoverable. Also forfeits the automation document, which has no Zabbix equivalent at all |
 | **Mode** *(recommended)* — both templates ship, same keys, per-client choice | Standalone is the default for new installs; existing installs migrate client by client | **Moderate, ongoing.** Two templates per data family must stay key-compatible, which a generator and a key-comparison test enforce cheaply (`tools/check-zabbix-templates.py` is the obvious home). The honest extra cost is documentation: every figure gains a "collected by which template" line |
-| **Fork** — a separate repo of Zabbix-only modules | Clean standalone product, no conditionals | **Highest, forever.** The shared PHP in `integration/zabbix/shared/php` is already copied into each module by `sync-assets.mjs`; a fork makes that a cross-repo sync. Worse, `MasterTemplate`, `DevicesTemplate`, `JumpTemplate` and `ClusterTemplate` would exist in two places, and the dual-name compatibility layer and `zbx_rename.py` would have to be maintained twice. Reject |
+| **Fork** — a separate repo of Zabbix-only modules | Clean standalone product, no conditionals | **Highest, forever.** The shared PHP in `zabbix/shared/php` is already copied into each module by `sync-assets.mjs`; a fork makes that a cross-repo sync. Worse, `MasterTemplate`, `DevicesTemplate`, `JumpTemplate` and `ClusterTemplate` would exist in two places, and the dual-name compatibility layer and `zbx_rename.py` would have to be maintained twice. Reject |
 
 The one argument for replacement is that a mode means two ways for a figure to be wrong. The
 counter-argument is the unrecoverable-history rule, and it wins.
@@ -541,20 +541,20 @@ counter-argument is the unrecoverable-history rule, and it wins.
 
 **Not lost, despite appearances:** the weekly client report. It is already a Zabbix scheduled
 report over a Zabbix dashboard, driven by `{$EP.REPORT.WEEKLY}` and the client DL
-([`AlertRouting.php:34,117`](../integration/zabbix/clients-module/lib/AlertRouting.php)). The
-master template's three-page dashboard ([`MasterTemplate.php:403-444`](../integration/zabbix/clients-module/lib/MasterTemplate.php))
+([`AlertRouting.php:34,117`](https://github.com/karthick-dkk/integration-zabbix-elasticpro/blob/main/zabbix/clients-module/lib/AlertRouting.php)). The
+master template's three-page dashboard ([`MasterTemplate.php:403-444`](https://github.com/karthick-dkk/integration-zabbix-elasticpro/blob/main/zabbix/clients-module/lib/MasterTemplate.php))
 is likewise pure Zabbix — once Stage 1 lands, its Log delay page works standalone too.
 
 ---
 
 ## 9. Notes for whoever picks this up
 
-- **Edit the shared PHP once.** `integration/zabbix/shared/php` is copied into each module by
-  `integration/zabbix/sync-assets.mjs`. Never edit a module's copy.
+- **Edit the shared PHP once.** `zabbix/shared/php` is copied into each module by
+  `zabbix/sync-assets.mjs`. Never edit a module's copy.
 - **Item history is unrecoverable, and so is data an item stopped collecting.** Every cutover in
   this plan is additive first and subtractive only after the replacement has history. Note the
   warning already written into `Store::holds_data()`
-  ([`Store.php:63-88`](../integration/zabbix/shared/php/Store.php)): picking the wrong data folder
+  ([`Store.php:63-88`](https://github.com/karthick-dkk/integration-zabbix-elasticpro/blob/main/zabbix/shared/php/Store.php)): picking the wrong data folder
   once caused `deleteMissing` to delete every per-role item on every master host. The same class
   of mistake is available to anyone rewriting templates.
 - **No PHP binary on this machine**, so `php -l` could not be run against anything here. The PHP

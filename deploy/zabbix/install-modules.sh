@@ -10,18 +10,18 @@
 #   git -C M checkout "$(grep -v '^#' deploy/zabbix/MODULES_REF | head -1)"
 #
 # What it does, in order:
-#   1. copies the five modules (elasticpro, ep_clients, ep_capacity, ep_resources,
-#      ep_volume) into Zabbix's modules folder, without tests and tools — the ones already
+#   1. copies the seven modules (elasticpro, ep_clients, ep_capacity, ep_resources,
+#      ep_volume, ep_tophosts, ep_overview) into Zabbix's modules folder, without tests and tools — the ones already
 #      there are first copied to a dated backup folder, outside the modules folder. The
-#      ElasticPro menu module (elasticpro) is the modules project's embed-module; this
-#      repository keeps no copy of it. A config.php already in its folder is kept;
+#      modules all come from --modules-src (elasticpro is its embed-module); this
+#      repository keeps no copy of any. Each folder gets a BUILD file naming the modules version and commit. A config.php already in its folder is kept;
 #   2. makes the writable data folder the Cluster Management page needs, owned by the user
 #      the Zabbix frontend's PHP runs as (not with --docker: the stack's volume is that folder);
 #      with --docker, also fixes module/elasticpro/config.php to be owned 1997:1995 (the
 #      zabbix image's uid/gid) when run as root, or says which `sudo chown`/`chmod` to run;
 #   3. with ZABBIX_URL and ZABBIX_TOKEN (a Super admin API token; or ZABBIX_USER and
 #      ZABBIX_PASSWORD): registers and enables the
-#      modules and creates the host groups and report dashboards (integration/zabbix/master/import.py).
+#      modules and creates the host groups and report dashboards (master/import.py of the modules project).
 #
 # It touches no Zabbix configuration file. Options:
 #   --modules-src DIR   the modules project checkout  (required; DIR or DIR/zabbix holds
@@ -84,42 +84,48 @@ fix_owner() {
   fi
 }
 
-# The ElasticPro menu module comes from the modules project, the one copy of it there is.
-[ -n "$MODULES_SRC" ] || fail "--modules-src is needed: the ElasticPro menu module is the modules project's embed-module, not in this repository.
+# All seven modules come from the modules project; this repository keeps no copy of any.
+[ -n "$MODULES_SRC" ] || fail "--modules-src is needed: the modules are in the modules project, not in this repository.
   git clone https://github.com/karthick-dkk/integration-zabbix-elasticpro modules-src
   git -C modules-src checkout \"\$(grep -v '^#' deploy/zabbix/MODULES_REF | head -1)\"
   deploy/zabbix/install-modules.sh --modules-src modules-src ..."
 [ -d "$MODULES_SRC" ] || fail "--modules-src $MODULES_SRC is not a folder"
-if [ -d "$MODULES_SRC/zabbix/embed-module" ]; then MODULES_SRC=$MODULES_SRC/zabbix; fi
+if [ -f "$MODULES_SRC/zabbix/sync-assets.mjs" ]; then MODULES_SRC=$MODULES_SRC/zabbix; fi
 MODULES_SRC=$(cd "$MODULES_SRC" && pwd)
-[ -d "$MODULES_SRC/embed-module" ] || fail "$MODULES_SRC is not a checkout of integration-zabbix-elasticpro (no zabbix/embed-module/)"
+{ [ -f "$MODULES_SRC/sync-assets.mjs" ] && [ -d "$MODULES_SRC/clients-module" ] && [ -d "$MODULES_SRC/embed-module" ]; } \
+  || fail "$MODULES_SRC is not a checkout of integration-zabbix-elasticpro (no zabbix/sync-assets.mjs, clients-module/, embed-module/)"
 
-# Module folder in Zabbix <- where it comes from.
+# Module folder in Zabbix <- where it comes from (the same seven ids as tools/zabbix-modules-tarball.sh).
 MODULES=(
   "elasticpro:$MODULES_SRC/embed-module"
-  "ep_clients:$ROOT/integration/zabbix/clients-module"
-  "ep_capacity:$ROOT/integration/zabbix/capacity-widget"
-  "ep_resources:$ROOT/integration/zabbix/resources-widget"
-  "ep_volume:$ROOT/integration/zabbix/volume-widget"
+  "ep_clients:$MODULES_SRC/clients-module"
+  "ep_capacity:$MODULES_SRC/capacity-widget"
+  "ep_resources:$MODULES_SRC/resources-widget"
+  "ep_volume:$MODULES_SRC/volume-widget"
+  "ep_tophosts:$MODULES_SRC/tophosts-widget"
+  "ep_overview:$MODULES_SRC/overview-widget"
 )
 
 # --- checks, before anything changes -----------------------------------------------------
 for m in "${MODULES[@]}"; do
   src=${m#*:}
-  [ -f "$src/manifest.json" ] || fail "$src/manifest.json is missing — run this from a full checkout of the repo"
+  [ -f "$src/manifest.json" ] || fail "$src/manifest.json is missing — is --modules-src a full checkout?"
 done
 # The widgets carry copies of shared code; a copy that differs means sync-assets.mjs was not run.
 if command -v node >/dev/null; then
-  (cd "$ROOT/integration/zabbix" && node --input-type=module -e "
+  (cd "$MODULES_SRC" && node --input-type=module -e "
     import fs from 'node:fs';
     const { SHARED_PHP, PHP_MODULES, phpFor } = await import('./sync-assets.mjs');
     const bad = [];
     for (const [dir, ns] of Object.entries(PHP_MODULES)) for (const f of SHARED_PHP) {
       if (fs.readFileSync(dir + '/lib/' + f, 'utf8') !== phpFor(fs.readFileSync('shared/php/' + f, 'utf8'), ns)) bad.push(dir + '/lib/' + f);
     }
-    if (bad.length) { console.error('out of date: ' + bad.join(', ') + ' — run: node integration/zabbix/sync-assets.mjs'); process.exit(1); }
+    if (bad.length) { console.error('out of date: ' + bad.join(', ') + ' — run: node sync-assets.mjs in the modules project'); process.exit(1); }
   ") || fail "shared code is out of date in a module"
 fi
+# shellcheck source=modules-build.sh
+. "$(dirname "$0")/modules-build.sh"
+modules_build_init "$MODULES_SRC" "${MODULES[@]}"
 [ "$DOCKER" = 1 ] || [ -d "$MODULES_DIR" ] || fail "$MODULES_DIR does not exist — is the Zabbix frontend installed here? (--modules-dir, or --docker)"
 [ "$DRY" = 1 ] || [ -w "$(dirname "$MODULES_DIR")" ] || [ -w "$MODULES_DIR" ] || fail "cannot write to $MODULES_DIR — run with sudo"
 
@@ -143,11 +149,12 @@ for m in "${MODULES[@]}"; do
   # under a running container vanishes from it ("Page not found" until the web container restarts).
   stage=$STAGE/$id
   if [ "$DRY" = 1 ]; then
-    say "  would: copy $src → $dst (without test/, *.py, *.mjs, README.md, config.php, macOS ._* files), keeping the folder itself and its config.php"
+    say "  would: copy $src → $dst (without test/, *.py, *.mjs, README.md, config.php, macOS ._* files; plus a BUILD file), keeping the folder itself and its config.php"
   else
     mkdir -p "$stage"
     # Everything but tests, tool scripts, notes and a config.php; tar so no rsync is needed.
     (cd "$src" && tar -cf - --exclude=./test --exclude='*.py' --exclude='*.mjs' --exclude=./README.md --exclude=./config.php --exclude='._*' --exclude=.DS_Store .) | (cd "$stage" && tar -xf -)
+    modules_build_write "$stage" deploy/zabbix/install-modules.sh
     chmod -R u=rwX,go=rX "$stage"
     mkdir -p "$dst"
     # The installed config.php (elasticpro's server-managed setting) stays where it is.
@@ -186,13 +193,13 @@ fi
 if [ -n "${ZABBIX_URL:-}" ] && { [ -n "${ZABBIX_TOKEN:-}" ] || [ -n "${ZABBIX_USER:-}" ]; }; then
   say "== registering in Zabbix at $ZABBIX_URL"
   if [ "$DRY" = 1 ]; then
-    say "  would: python3 integration/zabbix/master/import.py ${INSECURE[*]:-}"
+    say "  would: python3 $MODULES_SRC/master/import.py ${INSECURE[*]:-}"
   else
-    (cd "$ROOT/integration/zabbix/master" && python3 import.py "${INSECURE[@]}")
+    (cd "$MODULES_SRC/master" && python3 import.py "${INSECURE[@]}")
   fi
 else
   say "== not registered (no ZABBIX_URL with ZABBIX_TOKEN, or ZABBIX_USER + ZABBIX_PASSWORD). Run again with them, or in Zabbix:"
-  say "   Administration → General → Modules → Scan directory, then enable the five ElasticPro modules."
+  say "   Administration → General → Modules → Scan directory, then enable the seven ElasticPro modules."
 fi
 
 say ""

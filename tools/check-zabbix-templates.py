@@ -18,7 +18,7 @@ import glob, os, re, sys
 
 PRIORITIES = {"NOT_CLASSIFIED", "INFO", "WARNING", "AVERAGE", "HIGH", "DISASTER"}
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-PATTERNS = ["deploy/zabbix/template-*.yaml", "integration/zabbix/**/*.yaml"]
+PATTERNS = ["deploy/zabbix/template-*.yaml"]
 
 def main() -> int:
     files = sorted({f for p in PATTERNS for f in glob.glob(os.path.join(ROOT, p), recursive=True)})

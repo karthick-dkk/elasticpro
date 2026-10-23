@@ -508,7 +508,7 @@ and trends.
 ### Clusters behind a Windows jump host, without a proxy
 
 The Cluster Management page can monitor a cluster through a Windows jump host over SSH: the
-Zabbix server runs `curl.exe` there (see `integration/zabbix/clients-module/README.md`). The
+Zabbix server runs `curl.exe` there (see `zabbix/clients-module/README.md` in the modules project). The
 stack mounts an `ssh-keys` volume read-only at the server's `SSHKeyLocation`;
 `jump-sim/setup.sh` makes the key pair in it (owned by zabbix) and prints the public half, which
 goes in the jump user's `authorized_keys`. `jump-sim/` is also a stand-in jump host with the
