@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.27
+
+Zabbix modules 2.1.7 ship with this release: the Cluster Management client form (Add client and Edit client) is compact again, with 32 px rows, 8 px gaps and packed columns (Client + Capacity beside Connection + Log archive, Servers full width), so Add client fits one 1440x900 screen with no inner scroll. The page drops Zabbix's 1200 px minimum width for itself only, so a 1280 px window has no sideways scroll. Nothing in the core or the UI changed.
+
 ## 0.3.26
 
 Zabbix modules 2.1.6 ship with this release: on Cluster Management's Discover page, a cluster host that has no Elasticsearch URL macros can now be adopted once its URL is typed (the connection macros are set from it before the templates are linked). Nothing in the core or the UI changed.
