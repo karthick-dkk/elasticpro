@@ -52,7 +52,7 @@ pair the two UIs with a one-time code from Config → Zabbix.
 - **Jump hosts and certificates** — own SSH tunnels with host-key pinning; TLS pinning; every failure named.
 - **Security** — a read-only guard in the core: a write needs both an unlocked session and a request the operator asked for by hand; secrets encrypted on disk (AES-256-GCM, PBKDF2-SHA512); every write audited with the user's name.
 - **Accounts and roles** — admin, operator, user and guest; Zabbix single sign-on and per-group cluster scope when embedded.
-- **Zabbix integration** — five frontend modules (Cluster Management, capacity, resources and volume widgets, the embedded dashboard) and four templates (automation, alerts, client plan, log delay).
+- **Zabbix integration** — five frontend modules (Cluster Management, capacity, resources and volume widgets, the embedded dashboard) and the templates: automation, alerts, client plan and log delay are generated here; cluster health and the request gate live in the modules project.
 - **Snapshot mode** — render every page from a JSON snapshot collected out of band, with no network access at all.
 
 ## Server spec requirement to run

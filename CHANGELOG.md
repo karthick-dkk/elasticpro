@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.3.28
+
+Zabbix modules 2.1.8 ship with this release. **A new template, `ElasticPro cluster health`, takes over the cluster-health alerts from the old customer-era cluster template**, so that template can be unlinked without losing a value or an alert.
+
+- The template carries the stock Elasticsearch checks under the same item keys: cluster status RED/UNKNOWN/YELLOW, service down and response time, node count up/down, cluster restarted, unassigned and initializing shards, resharding space, the node discovery with its per-node JVM heap, latency, thread-pool and restart triggers, and the daily index-size triggers (`{$INDICES.MAX.SIZE}` / `{$INDICES.MIN.SIZE}`). Connection macros stay with `Elasticsearch Cluster by HTTP EP`; the template declares no credential macro, so the default credential set in Cluster Management keeps applying.
+- `zabbix/tools/migrate-templates.py` (modules project) now adopts a same-key discovery rule when the new template is linked, the way it adopts items: same rule id, the rule and its prototypes templated again, the discovered items untouched. It still refuses a host where a prototype would change value type under the same key. Proven on the test cluster: 210/210 item ids unchanged, 46/46 node items, 15 triggers kept their ids, 0 values lost; the old template is unlinked, not deleted, and the journal allows rollback.
+- The Roles page, the master import and Cluster Management's Discover know the new slot and link it with the other ElasticPro templates.
+
+Nothing in the core or the UI changed. The template file is `zabbix/templates/template-elasticpro-cluster-health.yaml` in the modules project; the migration map for existing clusters sets `unlink_old: true` and adds the template to `new_templates` (its `docs/MIGRATION.md`).
+
 ## 0.3.27
 
 Zabbix modules 2.1.7 ship with this release: the Cluster Management client form (Add client and Edit client) is compact again, with 32 px rows, 8 px gaps and packed columns (Client + Capacity beside Connection + Log archive, Servers full width), so Add client fits one 1440x900 screen with no inner scroll. The page drops Zabbix's 1200 px minimum width for itself only, so a 1280 px window has no sideways scroll. Nothing in the core or the UI changed.
