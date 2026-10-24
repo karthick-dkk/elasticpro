@@ -12,7 +12,7 @@ import { card, collapsible, pill, statTile, table, empty } from './common.js';
 import { intent, navigateTo } from '../core/intent.js';
 import { confirmDialog } from '../ui/modal.js';
 import { writesAllowed, syncWrites, writeToggle, ensureWrites } from '../core/writes.js';
-import { rowMenu, ICON, toast } from '../ui/menu.js';
+import { rowMenu, ICON, toast, popover } from '../ui/menu.js';
 import { trackTask, snapshotPoll } from '../ui/tasks.js';
 import {
   createSnapshotDialog, snapshotDetailsDialog, restoreSnapshotDialog, deleteSnapshot,
@@ -23,14 +23,18 @@ import { pagerBar } from '../lib/pager.js';
 import { takeFocus, revealFocus } from '../core/focus.js';
 import { listingTitle, listingEmptyText } from '../core/snapshot-evidence.js';
 import { hideAddress, scrubFresh } from '../core/evidence.js';
-import { SNAPSHOT_PAGE_SIZES, snapshotPage, snapshotCsvRows, filterSnapshots, newestFirst } from '../core/snapshot-list.js';
+import { SNAPSHOT_PAGE_SIZES, snapshotPage, snapshotCsvRows, filterSnapshots, sortSnapshots,
+         SNAPSHOT_SORTS, DEFAULT_SNAPSHOT_SORT, SNAPSHOT_COLUMNS, shownColumns } from '../core/snapshot-list.js';
+import { cycleSort, sortCaption, sortOptions, parseSort, sortValue } from '../lib/sort-order.js';
 
 let host = null;
 /**
  * Page state, kept for as long as the tab is open (like the Indices page's): which view,
  * which repository per cluster, the page and search per cluster, and rows per page.
  */
-const ui = { repo: {}, days: 60, view: 'snapshots', page: {}, q: {}, perPage: SNAPSHOT_PAGE_SIZES[0] };
+// `sort` is per cluster, like the search; `hiddenCols` is one choice for the tab — the
+// columns a person wants to see do not change with the cluster they look at.
+const ui = { repo: {}, days: 60, view: 'snapshots', page: {}, q: {}, perPage: SNAPSHOT_PAGE_SIZES[0], sort: {}, hiddenCols: new Set() };
 
 /** Which section an alert's link wants open and in view (core/focus.js): repos | policies. */
 let focusSection = null;
@@ -226,27 +230,54 @@ function repoSelect(c, repos, selected) {
 
 /* ------------------------------- Snapshots view -------------------------------- */
 
-/** The search bar and the snapshot list, and nothing else. */
+/** The search bar, the sort and column controls, and the snapshot list — nothing else. */
 function snapshotsView(c, repos, selected, snaps) {
   const holder = h('div');
   const sub = h('span', '');
+  const sortOf = () => ui.sort[c.id] || DEFAULT_SNAPSHOT_SORT;
+  const setSort = (next) => { ui.sort[c.id] = next; ui.page[c.id] = 0; sortSel.value = sortValue(next); repaint(); };
   const repaint = () => {
-    const { rows, slice } = snapshotPage(snaps, { text: ui.q[c.id] || '', page: ui.page[c.id] || 0, perPage: ui.perPage });
+    const sort = sortOf();
+    const { rows, slice } = snapshotPage(snaps, { text: ui.q[c.id] || '', page: ui.page[c.id] || 0, perPage: ui.perPage, sort });
     // Written back clamped: a search that shrank the list must not leave the page pointing
     // past its end, where Previous would appear to do nothing.
     ui.page[c.id] = slice.page;
     const q = (ui.q[c.id] || '').trim();
+    const order = sortCaption(sort, SNAPSHOT_SORTS);
     sub.textContent = !snaps.length ? '' : q
-      ? `${num(rows.length)} of ${num(snaps.length)} match · newest first`
-      : `${num(snaps.length)} total · newest first`;
+      ? `${num(rows.length)} of ${num(snaps.length)} match · ${order}`
+      : `${num(snaps.length)} total · ${order}`;
     mount(holder,
-      snapTable(c, selected, slice.rows, { searching: !!q }),
+      snapTable(c, selected, slice.rows, { searching: !!q, sort, onSort: setSort, hidden: ui.hiddenCols }),
       snaps.length ? pagerBar(slice, (p) => { ui.page[c.id] = p; repaint(); }, {
         label: 'snapshots', numbers: true,
         sizes: SNAPSHOT_PAGE_SIZES, perPage: ui.perPage,
         onSize: (n) => { ui.perPage = n; ui.page = {}; draw(); },
       }) : null);
+    colsBtn.textContent = `Columns · ${shownColumns(ui.hiddenCols).length} of ${SNAPSHOT_COLUMNS.length}`;
   };
+
+  // The Sort select and the column headers are one control: either changes `ui.sort`,
+  // and both show the same order.
+  const sortSel = h('select', { 'aria-label': 'Sort snapshots', style: { minWidth: '220px' },
+    onchange: (e) => setSort(parseSort(e.target.value, SNAPSHOT_SORTS, DEFAULT_SNAPSHOT_SORT)) },
+    ...sortOptions(SNAPSHOT_SORTS).map((o) => h('option', { value: o.value }, o.label)));
+  sortSel.value = sortValue(sortOf());
+
+  // Which columns to show. Snapshot cannot be hidden; the export keeps every column, so
+  // hiding one here loses nothing from the file handed over.
+  const colsBtn = h('button.btn.sm', { 'aria-haspopup': 'dialog', 'aria-expanded': 'false',
+    title: 'Choose which columns the list shows (Export CSV keeps them all)',
+    onclick: (e) => popover(e.currentTarget, (ctx) => h('div', { style: { display: 'grid', gap: '2px' } },
+      ...SNAPSHOT_COLUMNS.map((col) => h('label', { style: { display: 'flex', gap: '8px', alignItems: 'center', height: '24px', fontSize: '12.5px',
+          color: col.fixed ? 'var(--text-muted)' : null, cursor: col.fixed ? 'default' : 'pointer' } },
+        h('input', { type: 'checkbox', checked: col.fixed || !ui.hiddenCols.has(col.key), disabled: col.fixed,
+          'aria-label': `Show the ${col.label} column`,
+          onchange: (ev) => { if (ev.target.checked) ui.hiddenCols.delete(col.key); else ui.hiddenCols.add(col.key); repaint(); ctx.rebuild(); } }),
+        h('span', col.label), col.fixed ? h('span.muted', { style: { fontSize: '10.5px' } }, 'always') : null)),
+      h('button.btn.sm.ghost', { style: { justifySelf: 'start', marginTop: '4px' }, disabled: !ui.hiddenCols.size,
+        onclick: () => { ui.hiddenCols.clear(); repaint(); ctx.rebuild(); } }, 'Show all columns')),
+      { title: 'Show columns', width: '220px' }) }, 'Columns');
   repaint();
 
   const search = h('input', {
@@ -259,7 +290,9 @@ function snapshotsView(c, repos, selected, snaps) {
   return h('div',
     h('div.toolbar', { style: { marginBottom: '10px', display: 'flex', gap: '8px', alignItems: 'flex-end', flexWrap: 'wrap' } },
       repos.length ? h('label.field', 'Repository', repoSelect(c, repos, selected)) : null,
-      h('label.field', { style: { flex: '1', maxWidth: '520px' } }, 'Search snapshots', search)),
+      h('label.field', { style: { flex: '1', maxWidth: '520px' } }, 'Search snapshots', search),
+      h('label.field', 'Sort', sortSel),
+      h('label.field', 'Columns', colsBtn)),
     card(listingTitle(selected), sub, holder,
       [
         h('button.btn.sm.primary', {
@@ -272,9 +305,9 @@ function snapshotsView(c, repos, selected, snaps) {
         }, '+ Create snapshot'),
         h('button.btn.sm', {
           disabled: !snaps.length,
-          title: 'Every snapshot that matches the search — all pages, not just this one',
+          title: 'Every snapshot that matches the search, in the order shown — all pages and all columns, not just this page',
           onclick: () => download(`snapshots-${c.id}-${selected}.csv`,
-            toCsv(snapshotCsvRows(newestFirst(filterSnapshots(snaps, ui.q[c.id] || '')))), 'text/csv'),
+            toCsv(snapshotCsvRows(sortSnapshots(filterSnapshots(snaps, ui.q[c.id] || ''), sortOf()))), 'text/csv'),
         }, 'Export CSV'),
       ]));
 }
@@ -466,36 +499,41 @@ async function execute(c, id, repo) {
 
 /* ----------------------------------- snapshots ---------------------------------- */
 
-function snapTable(c, repo, snaps, { searching = false } = {}) {
+function snapTable(c, repo, snaps, { searching = false, sort = DEFAULT_SNAPSHOT_SORT, onSort = null, hidden = null } = {}) {
   const refresh = { onChanged: () => reload(c) };
+  const cols = shownColumns(hidden);
   const trs = snaps.map((s) => {
     const st = String(s.status || '').toUpperCase();
     const cls = st === 'SUCCESS' ? 'green' : st === 'PARTIAL' || st === 'IN_PROGRESS' ? 'yellow' : st === 'FAILED' ? 'red' : 'grey';
     const running = st === 'IN_PROGRESS';
-    return h('tr',
-      h('td.mono', { style: { fontSize: '11.5px' } },
+    // One cell per column, by key, so hiding a column drops its cell and nothing shifts.
+    const cell = {
+      snapshot: () => h('td.mono', { style: { fontSize: '11.5px' } },
         h('a', { href: '#', style: { color: 'var(--accent)', textDecoration: 'none' },
           onclick: (e) => { e.preventDefault(); snapshotDetailsDialog(c, repo, s.id, refresh).then((changed) => { if (changed) reload(c); }); } }, s.id)),
-      h('td', pill(st || '?', cls)),
-      h('td.nowrap', { style: { fontSize: '11.5px' } }, dt(s.start)),
-      h('td.nowrap.muted', { style: { fontSize: '11.5px' } }, s.end ? dt(s.end) : '–'),
-      h('td.num', typeof s.duration === 'string' ? s.duration : dur(s.duration)),
+      status: () => h('td', pill(st || '?', cls)),
+      taken: () => h('td.nowrap', { style: { fontSize: '11.5px' } }, dt(s.start)),
+      ended: () => h('td.nowrap.muted', { style: { fontSize: '11.5px' } }, s.end ? dt(s.end) : '–'),
+      duration: () => h('td.num', typeof s.duration === 'string' ? s.duration : dur(s.duration)),
       // What is in it, not just how many: the button opens a searchable list.
-      h('td', h('button.btn.sm.ghost', {
+      indices: () => h('td', h('button.btn.sm.ghost', {
         style: { fontVariantNumeric: 'tabular-nums' },
         title: 'Every index this snapshot holds, dated by the data inside — as audit evidence',
         onclick: () => snapshotIndicesDialog(c, repo, s),
       }, `${num(s.indices)} ▸`)),
       // The days of data inside the snapshot — a snapshot taken this morning can hold
       // ninety days of daily indices, and that span is what says how far back it reaches.
-      h('td.nowrap', { style: { fontSize: '11.5px' } },
+      cover: () => h('td.nowrap', { style: { fontSize: '11.5px' } },
         s.coverFrom
           ? h('span', { title: `${s.coverDays} day(s) of dated indices` }, `${s.coverFrom} → ${s.coverTo}`)
           : s.indexNames === null
             ? h('span.muted', { title: 'This repository was read with _cat, which does not name the indices' }, 'unknown')
             : h('span.muted', { title: 'No index in this snapshot carries a date in its name' }, '–')),
-      h('td.num', `${num(s.successful)}/${num(s.total)}`),
-      h('td.num', s.failed ? h('span.pill.red', h('i.dot'), num(s.failed)) : h('span.muted', '0')),
+      shards: () => h('td.num', `${num(s.successful)}/${num(s.total)}`),
+      failed: () => h('td.num', s.failed ? h('span.pill.red', h('i.dot'), num(s.failed)) : h('span.muted', '0')),
+    };
+    return h('tr',
+      ...cols.map((col) => cell[col.key]()),
       h('td', h('div', { style: { display: 'flex', gap: '4px', justifyContent: 'flex-end' } },
         h('button.btn.sm', { title: 'Indices, shards and failures in this snapshot',
           onclick: () => snapshotDetailsDialog(c, repo, s.id, refresh).then((changed) => { if (changed) reload(c); }) }, 'Details'),
@@ -512,8 +550,10 @@ function snapTable(c, repo, snaps, { searching = false } = {}) {
             onClick: () => deleteSnapshot(c, repo, s.id, refresh) },
         ], { title: `Actions for ${s.id}` }))));
   });
-  return table(['Snapshot', 'Status', 'Taken', 'Ended', 'Duration', 'Indices', 'Data inside covers',
-                'Shards ok', 'Failed', ''], trs,
-    { emptyText: listingEmptyText({ searching, fetched: Array.isArray((state.data.get(c.id) || {}).repos) && policiesRead(c.id),
+  // A header whose column has an order sorts on click; `table()` draws the arrow and aria-sort.
+  const headers = [...cols.map((col) => ({ label: col.label, sort: col.sort, num: col.num })), ''];
+  return table(headers, trs,
+    { sort: onSort ? { key: sort.key, dir: sort.dir, on: (key) => onSort(cycleSort(sort, key, SNAPSHOT_SORTS)) } : null,
+      emptyText: listingEmptyText({ searching, fetched: Array.isArray((state.data.get(c.id) || {}).repos) && policiesRead(c.id),
                                        repos: (state.data.get(c.id) || {}).repos || [], error: unreadableReason(c) }) });
 }

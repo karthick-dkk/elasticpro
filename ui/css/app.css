@@ -1327,12 +1327,17 @@ html:has(.modal-overlay) { overflow: hidden; scrollbar-gutter: stable; }
   border-width: 0 0 0 1px; animation: drawer-in .18s ease-out; }
 .modal.evidence.drawer { height: 100vh; max-height: 100vh; }
 @keyframes drawer-in { from { transform: translateX(40px); opacity: 0; } to { transform: none; opacity: 1; } }
-.ev-band { display: grid; gap: 2px; padding: 10px 14px; margin: -2px 0 6px; border-radius: var(--radius-sm);
-  background: color-mix(in srgb, var(--accent) 14%, var(--surface-1));
-  border: 1px solid color-mix(in srgb, var(--accent) 40%, var(--border)); border-left: 4px solid var(--accent); }
-.ev-band-k { font-size: 10.5px; text-transform: uppercase; letter-spacing: .08em; color: var(--accent); font-weight: 650; }
-.ev-band .ev-cluster { font-size: 21px; }
-.ev-url { font-size: 12px; color: var(--text-secondary); overflow-wrap: anywhere; }
+/* The snapshot facts (when it ran, shards, indices, data inside) fold behind a thin bar:
+   the panel leads with the index list, and the facts are one click away. The bar carries
+   no text of its own — a chevron at the left, turned when open. */
+.ev-toggle { all: unset; box-sizing: border-box; display: flex; align-items: center; height: 18px; padding: 0 8px; margin: 0 -4px;
+  border-radius: var(--radius-sm); background: var(--surface-3); color: var(--text-secondary); cursor: pointer; font-size: 11px; line-height: 1; }
+.ev-toggle:hover { color: var(--text-primary); }
+.ev-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.ev-chevron { display: inline-block; transition: transform .15s; }
+.ev-toggle[aria-expanded="true"] .ev-chevron { transform: rotate(90deg); }
+/* Read by a screen reader, drawn by nothing. */
+.sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
 .ev-kv.two { grid-template-columns: max-content 1fr max-content 1fr; }
 @media (max-width: 760px) { .ev-kv.two { grid-template-columns: max-content 1fr; } }
 

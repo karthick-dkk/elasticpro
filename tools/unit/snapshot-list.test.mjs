@@ -5,8 +5,10 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 const ROOT = path.resolve(import.meta.dirname, '../..');
-const { filterSnapshots, snapshotPage, snapshotCsvRows, SNAPSHOT_PAGE_SIZES } =
+const { filterSnapshots, snapshotPage, snapshotCsvRows, SNAPSHOT_PAGE_SIZES, sortSnapshots, durationMs,
+        SNAPSHOT_SORTS, DEFAULT_SNAPSHOT_SORT, SNAPSHOT_COLUMNS, shownColumns } =
   await import(pathToFileURL(path.join(ROOT, 'ui/js/core/snapshot-list.js')).href);
+const { cycleSort, sortOptions, parseSort, sortValue } = await import(pathToFileURL(path.join(ROOT, 'ui/js/lib/sort-order.js')).href);
 
 const DAY = 86400000;
 // Eleven snapshots, oldest first — the page must not depend on arrival order.
@@ -52,4 +54,66 @@ test('CSV rows: every row, with the data days inside, unknown where the listing 
   const cat = rows.find((r) => r.snapshot === 'cat');
   assert.equal(cat.data_from, 'unknown');
   assert.equal(cat.start, '');
+});
+
+/* ---- the sort select / header click, one order for the page and its export ---- */
+
+const ids = (rows) => rows.map((s) => s.id);
+
+test('the list opens newest first; the select offers every key both ways', () => {
+  assert.deepEqual(DEFAULT_SNAPSHOT_SORT, { key: 'taken', dir: -1 });
+  assert.equal(ids(sortSnapshots(SNAPS))[0], 'daily-10');
+  assert.equal(ids(snapshotPage(SNAPS, { sort: { key: 'taken', dir: 1 } }).rows)[0], 'daily-00');
+  const opts = sortOptions(SNAPSHOT_SORTS);
+  assert.equal(opts.length, 12);
+  assert.equal(opts[0].value, 'taken:-1');
+  assert.equal(opts[0].label, 'Taken · newest first');
+  assert.ok(opts.some((o) => o.label === 'Data inside · oldest covered day first'));
+  assert.deepEqual(parseSort('status:-1', SNAPSHOT_SORTS, DEFAULT_SNAPSHOT_SORT), { key: 'status', dir: -1 });
+  assert.deepEqual(parseSort('bogus', SNAPSHOT_SORTS, DEFAULT_SNAPSHOT_SORT), DEFAULT_SNAPSHOT_SORT, 'an unknown value falls back');
+  assert.equal(sortValue(cycleSort(DEFAULT_SNAPSHOT_SORT, 'taken', SNAPSHOT_SORTS)), 'taken:1', 'clicking Taken again flips it');
+  assert.equal(sortValue(cycleSort(DEFAULT_SNAPSHOT_SORT, 'name', SNAPSHOT_SORTS)), 'name:1');
+});
+
+test('status: failures first, then partial, then successes; ties newest first', () => {
+  const mixed = [
+    { id: 'ok-old', status: 'SUCCESS', start: 1 }, { id: 'part', status: 'PARTIAL', start: 2 },
+    { id: 'ok-new', status: 'SUCCESS', start: 3 }, { id: 'fail', status: 'FAILED', start: 0 }, { id: 'run', status: 'IN_PROGRESS', start: 4 },
+  ];
+  assert.deepEqual(ids(sortSnapshots(mixed, { key: 'status', dir: -1 })), ['fail', 'part', 'run', 'ok-new', 'ok-old']);
+  assert.deepEqual(ids(sortSnapshots(mixed, { key: 'status', dir: 1 })), ['ok-new', 'ok-old', 'run', 'part', 'fail']);
+});
+
+test('name, indices, duration and data inside; unknowns last either way', () => {
+  const rows = [
+    { id: 'b', start: 1, indices: 3, duration: 60000, coverFrom: '2026-09-20' },
+    { id: 'a', start: 2, indices: 7, duration: '5.5m', coverFrom: '2026-09-10' },
+    { id: 'c', start: 3, indices: 1, duration: 'weird', coverFrom: null, indexNames: null },
+  ];
+  assert.deepEqual(ids(sortSnapshots(rows, { key: 'name', dir: 1 })), ['a', 'b', 'c']);
+  assert.deepEqual(ids(sortSnapshots(rows, { key: 'name', dir: -1 })), ['c', 'b', 'a']);
+  assert.deepEqual(ids(sortSnapshots(rows, { key: 'indices', dir: -1 })), ['a', 'b', 'c']);
+  assert.deepEqual(ids(sortSnapshots(rows, { key: 'duration', dir: -1 })), ['a', 'b', 'c'], '5.5m is longer than 60000 ms; unreadable last');
+  assert.deepEqual(ids(sortSnapshots(rows, { key: 'duration', dir: 1 })), ['b', 'a', 'c'], 'unreadable still last when shortest first');
+  assert.deepEqual(ids(sortSnapshots(rows, { key: 'cover', dir: 1 })), ['a', 'b', 'c']);
+  assert.deepEqual(ids(sortSnapshots(rows, { key: 'cover', dir: -1 })), ['b', 'a', 'c'], 'a _cat row has no covered day: last, not first');
+});
+
+test('durationMs reads a number or an Elasticsearch time string; anything else is unknown', () => {
+  assert.equal(durationMs(1500), 1500);
+  assert.equal(durationMs('350ms'), 350);
+  assert.equal(durationMs('5.5m'), 330000);
+  assert.equal(durationMs('1.5h'), 5400000);
+  assert.equal(durationMs('2s'), 2000);
+  assert.equal(durationMs(''), null);
+  assert.equal(durationMs(undefined), null);
+  assert.equal(durationMs('n/a'), null);
+});
+
+test('columns: all nine by default, Snapshot cannot be hidden, the rest can', () => {
+  assert.equal(SNAPSHOT_COLUMNS.length, 9);
+  assert.equal(shownColumns().length, 9);
+  const shown = shownColumns(['ended', 'shards', 'snapshot']);
+  assert.deepEqual(shown.map((c) => c.key), ['snapshot', 'status', 'taken', 'duration', 'indices', 'cover', 'failed']);
+  assert.equal(shown[0].key, 'snapshot', 'the fixed column stays even when asked off');
 });
