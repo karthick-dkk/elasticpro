@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.3.30
+
+**Ships Zabbix modules 2.1.9.** Nothing in the core or the UI changed.
+
+Modules 2.1.9 is the outcome of a QA pass over every ElasticPro module, template and macro on a live Zabbix 7.0.31: every page, widget, dashboard and link, the Zabbix → ElasticPro sign-in hand-off, and the six templates imported, re-imported and fed with payloads (124 checks, 0 failed). Three fixes:
+
+- **`ElasticPro cluster health`: the two "not enough space for resharding" triggers no longer go unknown on a cluster with one data node.** The stock expression divided by (data nodes − 1), a division by zero with one data node, and Zabbix held the trigger in the unknown state. They now multiply and evaluate only with two or more data nodes.
+- **`ElasticPro cluster health`: the daily indices-size check never reports 0 B for an answer it could not read.** An authentication error, a proxy page or a changed listing used to come out as "yesterday's indices are below the daily minimum". The step now fails with the reason, and the item goes unsupported; 0 is returned only when the listing parsed and no index carries yesterday's date.
+- **Cluster Management: the client page no longer warns `Undefined array key "full_in"`** when rendered without the storage forecast.
+
+To take the template fix on an existing Zabbix, import `templates/template-elasticpro-cluster-health.yaml` from the modules (Data collection → Templates → Import, update existing); hosts keep their items and history. The automation template a Zabbix set up before 0.3.11 still holds is the old `espro.*` generation: import `deploy/zabbix/template-elasticpro.yaml` the same way (or run `deploy/zabbix/setup/zbx_phase34.py`) so the scraper's `elasticpro.*` keys land.
+
 ## 0.3.29
 
 **Snapshot evidence shows snapshot data only, and both the evidence table and the Snapshots list can be sorted.**
