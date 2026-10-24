@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.3.29
+
+**Snapshot evidence shows snapshot data only, and both the evidence table and the Snapshots list can be sorted.**
+
+- **The evidence panel (Indices in …, and Details) no longer carries the cluster's name card, its address, or the "Evidence generated … by <user>" stamp** — on screen, in Export CSV and in Copy as text alike (`evidenceHeader` is the one definition all three read). Evidence is handed to clients and pasted into tickets; an internal address and an operator's account do not belong in it. The cluster is still named once, in the panel's subtitle and the export's file name.
+- **The snapshot facts (taken → ended, duration, shards, indices, data inside) fold behind a thin bar** at the top of the panel, closed by default, a chevron at its left; click to open. The Details view opens with them shown, since they are its point.
+- **The evidence table sorts**: click Index, Data date or Shards; click again to flip. It opens on data date, newest first; undated indices stay last either way. The `#` column, Export CSV and Copy as text follow the order shown.
+- **The Snapshots list has a Sort select** — Taken, Snapshot name, Status (failures first), Indices, Duration, Data inside, each both ways — and the column headers are the same control: a click on a header moves the select, and the caption says the order ("23 total · sorted by taken, newest first"). Export CSV follows it. The order is remembered per cluster for the tab.
+- **A Columns chooser on the Snapshots toolbar** shows or hides any column but Snapshot. Export CSV keeps every column, so hiding one loses nothing from the file. The choice is kept for the tab.
+
+Nothing in the core or the Zabbix modules changed (modules stay at 2.1.8).
+
 ## 0.3.28
 
 Zabbix modules 2.1.8 ship with this release. **A new template, `ElasticPro cluster health`, takes over the cluster-health alerts from the old customer-era cluster template**, so that template can be unlinked without losing a value or an alert.
