@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.32
+
+**Ships Zabbix modules 2.1.11.** Nothing in the core or the UI changed.
+
+A correction to 2.1.10's empty-role rule, found on the test Zabbix: the "discard value" handler on the master template's usage items (CPU, memory, disk usage of a role or family) did not heal an item that was already unsupported, and a role that later lost all its servers would have kept its last usage standing as if current. Those items now go unsupported with the reason in plain words: "No server in this role yet: a usage of nothing is not a figure. It reads again when one is added." The sums (allocated, used, requested) keep reading 0. Press **Write master template** once after the upgrade; Cluster Management asks.
+
 ## 0.3.31
 
 **Snapshots: the column chooser moved behind a ⋮.** The "Columns · 7 of 9" button on the Snapshots toolbar is gone; a three-dot button in its place opens the same Show columns menu, with the count ("7 of 9 shown · Export CSV keeps every column") in the menu and on the button's label, as the row menus and the Zabbix widgets' toolbars already do. Nothing else on the page changed; sort and the chooser still remember their state for the tab.
