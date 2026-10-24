@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.33
+
+**Ships Zabbix modules 2.1.12.** Nothing in the core or the UI changed.
+
+2.1.11 corrected the master template's empty-role rule but left the template's generation number alone, so Cluster Management told every site the template was current and the correction reached no host. 2.1.12 moves the generation to 6: after this upgrade Cluster Management shows "written for an older version" until **Write master template** is pressed once, which is when the 2.1.10/2.1.11 rules (sums read 0 for a role with no servers; usage items say "No server in this role yet") land on the master hosts.
+
 ## 0.3.32
 
 **Ships Zabbix modules 2.1.11.** Nothing in the core or the UI changed.
