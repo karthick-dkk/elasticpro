@@ -1780,14 +1780,18 @@ if (config.clusters.length >= 2 && viaFleet) {
       sortSel.value = 'taken:-1'; sortSel.dispatchEvent(new window.Event('change', { bubbles: true })); await settleFor(50);
     }
   }
-  // Which columns to show: a chooser on the toolbar, Snapshot always on, the rest optional.
-  const colsBtn = [...doc.querySelectorAll('.toolbar button')].find((b) => /^Columns/.test(b.textContent));
-  ok(!!colsBtn && /Columns · 9 of 9/.test(colsBtn.textContent), `snapshot columns: no Columns button, or it miscounts (${colsBtn && colsBtn.textContent})`);
+  // Which columns to show: a chooser behind a ⋮ on the toolbar (no "Columns · 9 of 9" caption;
+  // the count is on the trigger's label and in the menu), Snapshot always on, the rest optional.
+  ok(![...doc.querySelectorAll('.toolbar button, .toolbar label')].some((b) => /^Columns/.test(b.textContent)), 'snapshot columns: the toolbar should not show a "Columns" caption or button');
+  const colsBtn = doc.querySelector('.toolbar button.menu-trigger');
+  const colsLabel = () => (colsBtn && colsBtn.getAttribute('aria-label')) || '';
+  ok(!!colsBtn && colsBtn.textContent === '⋮' && /9 of 9 columns shown/.test(colsLabel()), `snapshot columns: no ⋮ trigger, or it miscounts (${colsLabel()})`);
   const ths = () => (list() ? [...list().querySelectorAll('thead th')].map((th) => th.textContent.replace(/ [▲▼]$/, '')) : []);
   if (colsBtn) {
     colsBtn.click(); await settleFor(50);
     const pop = doc.querySelector('.pop');
-    ok(!!pop, 'snapshot columns: the Columns button opened nothing');
+    ok(!!pop, 'snapshot columns: the ⋮ opened nothing');
+    ok(!!pop && /Show columns/.test(pop.textContent) && /9 of 9 shown/.test(pop.textContent), 'snapshot columns: the menu should be titled Show columns and count 9 of 9 shown');
     if (pop) {
       const boxes = [...pop.querySelectorAll('input[type="checkbox"]')];
       ok(boxes.length === 9 && boxes.every((b) => b.checked), `snapshot columns: expected 9 ticked boxes, got ${boxes.length}`);
@@ -1797,7 +1801,8 @@ if (config.clusters.length >= 2 && viaFleet) {
         ended.checked = false; ended.dispatchEvent(new window.Event('change', { bubbles: true })); await settleFor(50);
         ok(!ths().includes('Ended') && ths().length === 9, `snapshot columns: unticking Ended should drop its column, headers now ${ths().join('|')}`);
         ok(list().querySelector('tbody tr').children.length === 9, 'snapshot columns: the rows should lose the cell too');
-        ok(/Columns · 8 of 9/.test(colsBtn.textContent), `snapshot columns: the button should count 8 of 9, says ${colsBtn.textContent}`);
+        ok(/8 of 9 columns shown/.test(colsLabel()), `snapshot columns: the trigger should count 8 of 9, says ${colsLabel()}`);
+        ok(/8 of 9 shown/.test(pop.textContent), 'snapshot columns: the menu should say 8 of 9 shown');
         ok(rowIds().length === 10 && rowIds()[0] === 'snap-22', 'snapshot columns: hiding a column changed the rows');
       }
       const reset = [...pop.querySelectorAll('button')].find((b) => /Show all columns/.test(b.textContent));

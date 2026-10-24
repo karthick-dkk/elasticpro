@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.31
+
+**Snapshots: the column chooser moved behind a ⋮.** The "Columns · 7 of 9" button on the Snapshots toolbar is gone; a three-dot button in its place opens the same Show columns menu, with the count ("7 of 9 shown · Export CSV keeps every column") in the menu and on the button's label, as the row menus and the Zabbix widgets' toolbars already do. Nothing else on the page changed; sort and the chooser still remember their state for the tab.
+
+**Ships Zabbix modules 2.1.10.** A client whose roles are not all in use no longer carries 60–150 unsupported items on its master host: every role and family aggregate the Clients page writes gets Zabbix's "check for not supported value" step on the empty-set errors only — sums (allocated, used, requested) read 0, the true figure for no machines; averages and ratios (usage) keep no value instead of going unsupported. Cluster-wide figures keep no rule: a client with no cluster host is unknown, not 0. The master template carries `{$EP.MASTER.VERSION}` (5); after the upgrade Cluster Management says it is outdated until **Write master template** is pressed once.
+
+Checked on the test VM this release: the Zabbix → ElasticPro sign-in hand-off, every module page, widget and link (modules 2.1.9 and 2.1.10), the six templates through the live harness, the client-plan scraper feeding plan and alert items to a Zabbix-sourced cluster through the core with an API token, and a cluster password handed over once through Cluster Management reaching both Zabbix and the core.
+
 ## 0.3.30
 
 **Ships Zabbix modules 2.1.9.** Nothing in the core or the UI changed.
