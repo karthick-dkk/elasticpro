@@ -254,7 +254,9 @@ function snapshotsView(c, repos, selected, snaps) {
         sizes: SNAPSHOT_PAGE_SIZES, perPage: ui.perPage,
         onSize: (n) => { ui.perPage = n; ui.page = {}; draw(); },
       }) : null);
-    colsBtn.textContent = `Columns · ${shownColumns(ui.hiddenCols).length} of ${SNAPSHOT_COLUMNS.length}`;
+    const shown = `${shownColumns(ui.hiddenCols).length} of ${SNAPSHOT_COLUMNS.length} columns shown`;
+    colsBtn.setAttribute('aria-label', `More: choose columns (${shown})`);
+    colsBtn.title = `Choose which columns the list shows · ${shown} · Export CSV keeps them all`;
   };
 
   // The Sort select and the column headers are one control: either changes `ui.sort`,
@@ -264,11 +266,14 @@ function snapshotsView(c, repos, selected, snaps) {
     ...sortOptions(SNAPSHOT_SORTS).map((o) => h('option', { value: o.value }, o.label)));
   sortSel.value = sortValue(sortOf());
 
-  // Which columns to show. Snapshot cannot be hidden; the export keeps every column, so
-  // hiding one here loses nothing from the file handed over.
-  const colsBtn = h('button.btn.sm', { 'aria-haspopup': 'dialog', 'aria-expanded': 'false',
-    title: 'Choose which columns the list shows (Export CSV keeps them all)',
+  // Which columns to show, behind a ⋮ like the row menus and the Zabbix widgets' toolbars:
+  // the toolbar carries no "Columns · 7 of 9" caption, the count is in the menu and on the
+  // trigger's label. Snapshot cannot be hidden; the export keeps every column, so hiding one
+  // here loses nothing from the file handed over.
+  const colsBtn = h('button.btn.sm.menu-trigger', { type: 'button', 'aria-haspopup': 'dialog', 'aria-expanded': 'false',
     onclick: (e) => popover(e.currentTarget, (ctx) => h('div', { style: { display: 'grid', gap: '2px' } },
+      h('div.muted', { style: { fontSize: '11px', paddingBottom: '4px' } },
+        `${shownColumns(ui.hiddenCols).length} of ${SNAPSHOT_COLUMNS.length} shown · Export CSV keeps every column`),
       ...SNAPSHOT_COLUMNS.map((col) => h('label', { style: { display: 'flex', gap: '8px', alignItems: 'center', height: '24px', fontSize: '12.5px',
           color: col.fixed ? 'var(--text-muted)' : null, cursor: col.fixed ? 'default' : 'pointer' } },
         h('input', { type: 'checkbox', checked: col.fixed || !ui.hiddenCols.has(col.key), disabled: col.fixed,
@@ -277,7 +282,7 @@ function snapshotsView(c, repos, selected, snaps) {
         h('span', col.label), col.fixed ? h('span.muted', { style: { fontSize: '10.5px' } }, 'always') : null)),
       h('button.btn.sm.ghost', { style: { justifySelf: 'start', marginTop: '4px' }, disabled: !ui.hiddenCols.size,
         onclick: () => { ui.hiddenCols.clear(); repaint(); ctx.rebuild(); } }, 'Show all columns')),
-      { title: 'Show columns', width: '220px' }) }, 'Columns');
+      { title: 'Show columns', width: '240px' }) }, '⋮');
   repaint();
 
   const search = h('input', {
@@ -292,7 +297,7 @@ function snapshotsView(c, repos, selected, snaps) {
       repos.length ? h('label.field', 'Repository', repoSelect(c, repos, selected)) : null,
       h('label.field', { style: { flex: '1', maxWidth: '520px' } }, 'Search snapshots', search),
       h('label.field', 'Sort', sortSel),
-      h('label.field', 'Columns', colsBtn)),
+      colsBtn),
     card(listingTitle(selected), sub, holder,
       [
         h('button.btn.sm.primary', {
