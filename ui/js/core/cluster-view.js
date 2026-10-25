@@ -33,10 +33,61 @@ export const SUMMARY_COLUMNS = [
   { id: 'reqs', label: 'Our reqs/5m', num: true, hidden: true },
 ];
 
+/**
+ * What an open row shows, in the same show/hide panel as the columns: the tiles across the
+ * top, the two sections under them, and the columns of each section's table. One
+ * choice for every cluster row. `fixed`: the name column of a table is the row.
+ */
+export const DETAIL_TILES = [
+  { id: 'url', label: 'Cluster URL' },
+  { id: 'jump', label: 'Jump host' },
+  { id: 'ilm', label: 'ILM' },
+  { id: 'slm', label: 'SLM' },
+  { id: 'shards', label: 'Shard allocation' },
+  { id: 'tasks', label: 'ES tasks' },
+  { id: 'rate', label: 'Search / index rate' },
+  { id: 'bucket', label: 'S3 log bucket' },
+];
+export const DETAIL_SECTIONS = [
+  { id: 'repo', label: 'Repository/Snapshot section' },
+  { id: 'nodes', label: 'Nodes section' },
+];
+export const REPO_COLUMNS = [
+  { id: 'name', label: 'Repository', fixed: true },
+  { id: 'type', label: 'Type' },
+  { id: 'location', label: 'Location / bucket' },
+  { id: 'policy', label: 'SLM policy' },
+  { id: 'count', label: 'Snapshots', num: true },
+  { id: 'oldest', label: 'Oldest' },
+  { id: 'newest', label: 'Newest' },
+  { id: 'status', label: 'Last snapshot status' },
+  { id: 'size', label: 'Size' },
+  { id: 'actions', label: 'Actions' },
+];
+export const NODE_COLUMNS = [
+  { id: 'name', label: 'Node', fixed: true },
+  { id: 'ip', label: 'IP' },
+  { id: 'id', label: 'Node ID', hidden: true },
+  { id: 'tier', label: 'Tier' },
+  { id: 'roles', label: 'Roles' },
+  { id: 'version', label: 'Version' },
+  { id: 'jdk', label: 'JDK' },
+  { id: 'cpu', label: 'CPU', num: true },
+  { id: 'heap', label: 'Heap', num: true },
+  { id: 'disk', label: 'Disk', num: true },
+  { id: 'load', label: 'Load 1m', num: true },
+  { id: 'shards', label: 'Shards', num: true },
+  { id: 'uptime', label: 'Uptime' },
+  { id: 'legend', label: 'Role legend' },
+];
+/** The groups the panel offers, keyed the way the stored preferences are. */
+export const DETAIL_GROUPS = { tiles: DETAIL_TILES, sections: DETAIL_SECTIONS, repo: REPO_COLUMNS, nodes: NODE_COLUMNS };
+
 /** A renamed column keeps at most this many characters: it is a header, not a note. */
 export const MAX_NAME = 40;
 
-const EMPTY = () => ({ v: 1, columns: { order: [], shown: {}, names: {} } });
+const EMPTY = () => ({ v: 1, columns: { order: [], shown: {}, names: {} },
+  details: { tiles: {}, sections: {}, repo: {}, nodes: {} }, expand: false });
 
 /** What was stored, made safe to use: wrong types dropped, nothing assumed. */
 export function sanitizePrefs(raw) {
@@ -53,6 +104,12 @@ export function sanitizePrefs(raw) {
       if (n) out.columns.names[k] = n;
     }
   }
+  const d = raw.details && typeof raw.details === 'object' ? raw.details : {};
+  for (const g of Object.keys(DETAIL_GROUPS)) {
+    if (!d[g] || typeof d[g] !== 'object') continue;
+    for (const [k, v] of Object.entries(d[g])) if (typeof v === 'boolean') out.details[g][k] = v;
+  }
+  out.expand = raw.expand === true;
   return out;
 }
 
@@ -160,7 +217,50 @@ export function renameColumn(prefs, id, name, defs = SUMMARY_COLUMNS) {
   });
 }
 
-/** Back to the default columns, order and names. */
+/** Back to the default columns, order and names — and the default row details. */
 export function resetColumns(prefs) {
-  return withColumns(prefs, (c) => { c.order = []; c.shown = {}; c.names = {}; });
+  const p = withColumns(prefs, (c) => { c.order = []; c.shown = {}; c.names = {}; });
+  p.details = EMPTY().details;
+  p.expand = false;
+  return p;
+}
+
+/* ------------------------------ the open row ------------------------------ */
+
+/**
+ * One group of the open row (`tiles`, `sections`, `repo` or `nodes`) as this person has
+ * it: [{ id, label, visible, fixed, num }], in the definition's order.
+ */
+export function detailItems(prefs, group) {
+  const defs = DETAIL_GROUPS[group] || [];
+  const shown = sanitizePrefs(prefs).details[group] || {};
+  return defs.map((d) => ({
+    id: d.id, label: d.label, fixed: !!d.fixed, num: !!d.num,
+    visible: d.fixed ? true : (typeof shown[d.id] === 'boolean' ? shown[d.id] : !d.hidden),
+  }));
+}
+
+/** Only the ones on screen. */
+export function detailShown(prefs, group) {
+  return detailItems(prefs, group).filter((x) => x.visible);
+}
+
+/** Show or hide one tile, section or column of the open row. A fixed one stays. */
+export function setDetailShown(prefs, group, id, on) {
+  const d = (DETAIL_GROUPS[group] || []).find((x) => x.id === id);
+  const p = sanitizePrefs(prefs);
+  if (!d || d.fixed) return p;
+  p.details[group][id] = !!on;
+  return p;
+}
+
+/** Whether every cluster row opens expanded when the page is drawn. */
+export function expandByDefault(prefs) {
+  return sanitizePrefs(prefs).expand;
+}
+
+export function setExpandByDefault(prefs, on) {
+  const p = sanitizePrefs(prefs);
+  p.expand = !!on;
+  return p;
 }

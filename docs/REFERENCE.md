@@ -112,6 +112,7 @@ Created and edited in the app (Config page), or hand-written. JSON is what the a
 | `clusters[].liveRetention` | how long logs stay on the cluster — `30d`, `90 days`, `3M`, `6 months`, `1y`. Drives the Volume report; omit it and the report says "not set" rather than assuming |
 | `clusters[].snapshotRetention` | how long snapshots are kept in the repository. Falls back to the SLM policy's `expire_after` |
 | `clusters[].backupCapacity` | total size of the snapshot repository — `2TB`, `500GB`, or a bare number of GB. Elasticsearch has no API for this (a repository is a mount point or a bucket), so without it the Volume report shows backup space used and required but leaves *available*, *free* and *Enough backup space?* unset rather than guessing |
+| `clusters[].logBucket` | the S3 bucket the cluster's logs are archived to (the enriched and raw logs share one). Named on the Clusters page, in an open row; nothing in the app reads the bucket — the archive check lives in Zabbix. Also accepted as `log_bucket` |
 | `defaults.readOnly` | `true` (default) — the core sends only GET/HEAD and `_search`-family POSTs. A write still gets out if you tick *Allow writes* for the session *and* it is an action you took by hand; `false` allows writes from anywhere |
 
 Command line: `elasticpro-<version>.exe --config C:\path\config_cluster.json` (or `ELASTICPRO_CONFIG`) pre-provisions the file, handy on a jump server.

@@ -201,6 +201,9 @@ export function normalize(raw, sourceName = 'clusters.yaml') {
       origin: (() => { try { return new URL(c.url).origin; } catch { return c.url; } })(),
       tags: c.tags || [],
       note: c.note || '',
+      // The S3 bucket the cluster's logs are archived to (enriched and raw share one); shown on
+      // the Clusters page. Nothing in the app reads the bucket: ULM is Zabbix's.
+      logBucket: String(c.logBucket || c.log_bucket || c.s3_log_bucket || '').trim(),
       credSource: hasSecret ? (hasOwn ? 'cluster' : 'shared') : 'none',
       needsCred: !hasSecret,
       sealedCred: sealed ? { ...cred } : null,

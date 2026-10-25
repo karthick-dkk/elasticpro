@@ -68,6 +68,7 @@ clusters:
     # rather than assuming a number.
     liveRetention: 30d
     snapshotRetention: 6M
+    # logBucket: acme-logs            # the S3 bucket the logs are archived to; shown on the Clusters page
     via: jumpwin
     tags: [onprem, acme]
 

@@ -65,6 +65,7 @@ import { setRequestOrigin } from './core/es.js';
 import { UI_CODES, withCode, errorText } from './core/error-codes.js';
 import { setPageGate } from './core/intent.js';
 import { registerPages } from './core/page-labels.js';
+import { refreshAge } from './core/cluster-detail.js';
 
 /**
  * `minRole` is the lowest role the tab is offered to.
@@ -99,6 +100,8 @@ const PAGES = [
 
 // The one place a page is named; the pages that link to another read its name from here.
 registerPages(PAGES);
+/** The tabs that fold behind the ☰ at the end of the row. */
+const NAV_MORE = new Set(['automation', 'requests', 'accounts', 'settings']);
 
 /** The tabs this session may actually use. */
 function visiblePages() {
@@ -359,13 +362,31 @@ function renderNav() {
   if (navBuiltFor !== key || !nav.firstChild) {
     clear(nav);
     navBuiltFor = key;
-    shown.forEach((p) => {
-      if (p.id === 'accounts' || (p.id === 'settings' && !shown.some((x) => x.id === 'accounts'))) {
-        nav.append(h('div.nav-sep'));
-      }
+    // The pages of a shift are tabs; the ones only changed deliberately — Automation,
+    // Requests, Accounts, Config — sit behind one ☰, so the row is one line at any width.
+    const more = shown.filter((p) => NAV_MORE.has(p.id));
+    shown.filter((p) => !NAV_MORE.has(p.id)).forEach((p) => {
       nav.append(h('button', { dataset: { page: p.id }, onclick: () => go(p.id) },
         h('span.ico', p.icon), h('span', p.label)));
     });
+    if (more.length) {
+      nav.append(h('div.nav-sep'));
+      nav.append(rowMenu(() => more.map((p) => ({ label: p.label, icon: p.icon, onClick: () => go(p.id),
+        title: currentPage === p.id ? `${p.label} — this page` : `Open ${p.label}` })), {
+        trigger: 'button.nav-more', label: [h('span.ico', { 'aria-hidden': 'true' }, '☰'), h('span.nav-more-t', '')],
+        title: more.map((p) => p.label).join(' · '),
+        menuLabel: `More: ${more.map((p) => p.label).join(', ')}`,
+      }));
+      nav.lastChild.setAttribute('aria-label', `More: ${more.map((p) => p.label).join(', ')}`);
+    }
+  }
+  // Where you are, when it is one of the pages behind the ☰: the ☰ says so, with the name.
+  const moreBtn = nav.querySelector('button.nav-more');
+  if (moreBtn) {
+    const here = NAV_MORE.has(currentPage) ? PAGES.find((p) => p.id === currentPage) : null;
+    if (here) moreBtn.setAttribute('aria-current', 'page'); else moreBtn.removeAttribute('aria-current');
+    const t = moreBtn.querySelector('.nav-more-t');
+    if (t && t.textContent !== (here ? here.label : '')) t.textContent = here ? here.label : '';
   }
   for (const b of nav.querySelectorAll('button[data-page]')) {
     const id = b.dataset.page;
@@ -553,10 +574,8 @@ function renderTopbar() {
         : need ? `Sign in (${need} cluster${need === 1 ? '' : 's'})` : `Re-enter credentials (${bad})`);
     })(),
     ev ? null : healthPill(activeClusters()),
-    a.length
-      ? h('button.btn.sm', { class: crit ? 'danger' : '', onclick: () => go('alerts'), title: 'Open the Alerts page' },
-          `${a.length} alert${a.length > 1 ? 's' : ''}`)
-      : null,
+    // The alert count is on the Alerts tab, where going there is one click anyway; the
+    // button that repeated it here is gone (Clusters board, 2026-10-25).
     // The read-only / writes-enabled pill used to sit here. Every page that can write
     // now carries its own "Allow writes" toggle, which says the same thing where it
     // matters; a second copy in the title bar was noise.
@@ -564,9 +583,8 @@ function renderTopbar() {
       ? h('span.pill.grey', { title: `Rendered from a snapshot file collected elsewhere${state.snapshot && state.snapshot.host ? ' on ' + state.snapshot.host : ''}. The browser is making no network requests.` },
           h('i.dot'), 'snapshot')
       : null,
-    // "updated just now" is the fleet's refresh, not this page's data; on an evidence page
-    // the footer says when THIS data was read.
-    ev ? null : h('span#refresh-status.muted', { style: { fontSize: '11.5px', fontVariantNumeric: 'tabular-nums' } }, ''),
+    // When the fleet was last refreshed is the badge on the Refresh button (tickStatus): whole
+    // minutes, the time on hover. On an evidence page the footer says when THIS data was read.
     // With the server's fleet cache there is nothing for a page to poll: the core goes to the
     // clusters (on its schedule, or when a page asks) and tells the page what changed. The auto toggle
     // would only be a switch for load that no longer exists, so this says how what lands
@@ -603,10 +621,10 @@ function renderTopbar() {
             style: { position: 'absolute', inset: '0', opacity: '0', cursor: 'pointer' },
             onchange: (e) => openSnapshot(e.target.files[0]) }))
       : h('span', { style: { display: 'inline-flex', gap: '2px' } },
-          h('button.btn.sm', {
+          h('button.btn.sm#refresh-btn', {
             onclick: () => refreshAll({ force: true, selected: true }),
             title: 'Refresh the selected cluster now, or all of them on "All clusters" (r)',
-          }, '↻ Refresh'),
+          }, '↻ Refresh', ev ? null : h('span.age#refresh-status', { 'aria-live': 'off' })),
           // A full refresh is thirteen calls per cluster. When what you are watching is
           // one of them — a snapshot you just started, an index you just deleted —
           // waiting for the other twelve is the difference between a control that feels
@@ -644,20 +662,25 @@ function renderTopbar() {
   tickStatus();
 }
 
+/**
+ * The badge on Refresh: whole minutes since the last refresh ("0m", "19m", "1h 5m"), the
+ * same rule every Refresh button in ElasticPro follows (core/cluster-detail.js refreshAge).
+ * The exact time, and on the portable build when the next automatic refresh is due, are
+ * on hover; a spinner while a refresh is running.
+ */
 function tickStatus() {
   const el = $('#refresh-status');
   if (!el) return;
-  if (state.refreshing) { mount(el, h('span', h('span.spin'), ' refreshing…')); return; }
+  const btn = el.parentElement;
+  if (state.refreshing) { mount(el, h('span.spin')); el.hidden = false; el.title = 'refreshing…'; return; }
   const left = Math.max(0, state.nextRefreshAt - Date.now());
-  if (isSnapshotMode()) {
-    const gen = state.snapshot && state.snapshot.generatedAt;
-    el.textContent = gen ? `collected ${ago(gen)}` : 'snapshot';
-    el.title = gen ? new Date(gen).toString() : '';
-    return;
-  }
-  el.textContent = state.lastRefresh
-    ? `updated ${ago(state.lastRefresh)}${fleetMode() ? '' : state.autoRefresh ? ` · next in ${dur(left)}` : ' · manual'}`
+  const t = refreshAge(state.lastRefresh);
+  if (el.textContent !== t) el.textContent = t;
+  el.hidden = !t;
+  el.title = state.lastRefresh
+    ? `Last refreshed ${new Date(state.lastRefresh).toLocaleString()}${fleetMode() ? '' : state.autoRefresh ? ` · next in ${dur(left)}` : ' · manual'}`
     : '';
+  if (btn) btn.setAttribute('aria-label', state.lastRefresh ? `Refresh — last refreshed ${ago(state.lastRefresh)}` : 'Refresh');
 }
 
 /** The status the sidebar foot used to carry, now a strip under the tabs. */

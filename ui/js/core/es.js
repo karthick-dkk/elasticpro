@@ -263,7 +263,7 @@ export class EsClient {
     // `jdk` rides along in the request already being made: the JVM a node runs on is
     // a version somebody has to know at upgrade time, and asking for it separately
     // would be a second call for one string.
-    const h = 'name,ip,version,jdk,node.role,master,heap.percent,heap.current,heap.max,ram.percent,cpu,load_1m,load_5m,disk.used,disk.avail,disk.total,disk.used_percent,uptime';
+    const h = 'id,name,ip,version,jdk,node.role,master,heap.percent,heap.current,heap.max,ram.percent,cpu,load_1m,load_5m,disk.used,disk.avail,disk.total,disk.used_percent,uptime';
     return this.json('GET', `/_cat/nodes?format=json&bytes=b&h=${encodeURIComponent(h)}`);
   }
   indices(pattern = '*') {
@@ -316,6 +316,18 @@ export class EsClient {
   tasks() {
     const h = 'action,task_id,parent_task_id,node,running_time,running_time_ns,type,description';
     return this.json('GET', `/_cat/tasks?format=json&detailed&h=${encodeURIComponent(h)}`);
+  }
+
+  /**
+   * The open row on the Clusters page: how many tasks are running and how long, and the
+   * cluster-wide search and indexing counters (two readings make a rate). Both filtered
+   * to the fields read, so neither answer grows with the node count.
+   */
+  taskCounts() {
+    return this.json('GET', '/_tasks?filter_path=nodes.*.tasks.*.running_time_in_nanos');
+  }
+  rateCounters() {
+    return this.json('GET', '/_nodes/stats/indices/search,indexing?filter_path=nodes.*.indices.search.query_total,nodes.*.indices.indexing.index_total');
   }
 
   /** Active, queued and — the one that matters — rejected work, per node. */

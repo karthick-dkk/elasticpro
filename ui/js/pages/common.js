@@ -385,22 +385,31 @@ function fullestNode(d) {
  * only signal. With the watermarks unknown there is no tick and no threshold colour, and the
  * tooltip says which data would provide them.
  */
-export function diskCell(d, settings) {
+export function diskCell(d, settings, { dataNodes = false } = {}) {
   if (!d || !isFinite(d.percent)) return h('span.muted', '\u2013');
   const w = diskAgainstWatermarks(d, settings);
+  // The bar is green until the low watermark, amber from there, red from the high one; a
+  // cluster whose watermarks are not known yet is drawn against Elasticsearch's defaults
+  // (85 / 90) and says so on hover.
+  const level = w.known ? w.level : (d.percent >= 90 ? 'high' : d.percent >= 85 ? 'low' : 'ok');
   const note = w.level === 'high' ? ' \u00b7 above high watermark' : w.level === 'low' ? ' \u00b7 above low watermark' : '';
   const node = fullestNode(d);
+  // _cat/allocation lists the nodes that hold shards: data nodes. Master-only and
+  // coordinating-only nodes are not in it, so the figure is theirs alone.
+  const n = dataNodes && Array.isArray(d.nodes) ? d.nodes.length : 0;
   const title = (w.known
     ? `Disk ${d.percent.toFixed(1)} % used. Low watermark ${w.low} %, high ${w.high} % \u2014 `
       + (w.source === 'set' ? 'set on this cluster.'
         : w.source === 'reported-default' ? 'the cluster\u2019s own defaults (not changed).'
         : 'Elasticsearch\u2019s defaults (not set on this cluster).')
     : `Disk ${d.percent.toFixed(1)} % used. ${w.why}`)
-    + (node ? ` Fullest node: ${node.name} ${node.percent.toFixed(0)} % (watermarks apply per node).` : '');
+    + (node ? ` Fullest node: ${node.name} ${node.percent.toFixed(0)} % (watermarks apply per node).` : '')
+    + (n ? ` Summed over the ${n} data node${n === 1 ? '' : 's'} _cat/allocation lists; master-only and coordinating-only nodes hold no shards and are not counted.` : '');
   return h('div.disk-cell', { style: { minWidth: '150px' } },
-    h(`span.disk-text${w.level === 'high' ? '.high' : w.level === 'low' ? '.low' : ''}`, diskUseText(d) + note),
+    h(`span.disk-text${w.level === 'high' ? '.high' : w.level === 'low' ? '.low' : ''}`, diskUseText(d) + note,
+      n ? h('span.muted', ` \u00b7 ${n} data node${n === 1 ? '' : 's'}`) : null),
     h('div.disk-bar', { role: 'img', title, 'aria-label': title },
-      h(`i.disk-fill.${w.level}`, { style: { width: `${Math.min(100, Math.max(1.5, d.percent))}%` } }),
+      h(`i.disk-fill.${level}`, { style: { width: `${Math.min(100, Math.max(1.5, d.percent))}%` } }),
       w.known ? h('i.disk-tick', { style: { left: `${Math.min(100, w.high)}%` } }) : null));
 }
 

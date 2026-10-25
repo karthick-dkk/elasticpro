@@ -147,8 +147,8 @@ test('saved per user, case-insensitively, and read back', () => {
   assert.ok(!shownIds(V.readPrefs(st, 'bob')).includes('jdk'), 'another user has their own');
   assert.ok(!shownIds(V.readPrefs(st, null)).includes('jdk'), 'the portable build has its own');
   assert.equal(V.prefsKey('Ann'), 'elasticpro.clusters.view.ann');
-  // Nothing but layout is in it.
-  assert.deepEqual(Object.keys(JSON.parse(m.get('elasticpro.clusters.view.ann'))).sort(), ['columns', 'v']);
+  // Nothing but layout is in it: the columns, what an open row shows, whether rows open.
+  assert.deepEqual(Object.keys(JSON.parse(m.get('elasticpro.clusters.view.ann'))).sort(), ['columns', 'details', 'expand', 'v']);
 });
 
 /* ------------------------- the retired unreachable fold ------------------------- */
@@ -161,6 +161,6 @@ test('a stored unreachable fold is ignored, and gone from the next save', () => 
   const m = new Map([['elasticpro.clusters.view.ann', JSON.stringify(legacy)]]);
   const st = { getItem: (k) => (m.has(k) ? m.get(k) : null), setItem: (k, v) => m.set(k, v) };
   assert.equal(V.writePrefs(st, 'ann', V.readPrefs(st, 'ann')), true);
-  assert.deepEqual(Object.keys(JSON.parse(m.get('elasticpro.clusters.view.ann'))).sort(), ['columns', 'v']);
+  assert.deepEqual(Object.keys(JSON.parse(m.get('elasticpro.clusters.view.ann'))).sort(), ['columns', 'details', 'expand', 'v']);
   assert.equal(V.hideUnreachable, undefined, 'the fold has no API any more');
 });
