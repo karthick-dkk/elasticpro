@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.3.34
+
+**The Clusters page, as approved on the design board of 2026-10-25.** Seventy comments on the board, every one of them applied; nothing in the core changed.
+
+The list:
+
+- **Search, sort and the health filter sit behind a 🔍 beside the title.** The filter bar above the table is gone. Pressing the icon opens the search box with the caret in it, the Sort by select (every column, both directions), and a Health filter with counts (All, Green, Yellow, Red, and Unreachable when any is). A filter that is set keeps the box open and the icon lit, so a shortened list never looks like the whole fleet. The "N clusters · A–Z by name · updated just now" line under the title is gone; the count is on the end line and in the search box.
+- **Columns, Export CSV and Refresh stay out of sight** until the pointer is over the right end of the header or the keyboard reaches them. Their space stays reserved, so nothing moves.
+- **Compact, centred rows.** Header and cells are 6 and 5 px tall at the padding, every figure sits under its head, and the cluster name reads left. A click anywhere on a row opens or closes it; the chevron keeps the keyboard.
+- **Health is a pill in its own colour** (green, yellow, red; grey while loading) reading the word alone. The reason — unassigned shards, why a cluster cannot be reached — is on hover and read out, no longer in the cell.
+- **Disk usage says it counts data nodes** ("56 % · 156 of 279 GB · 3 data nodes": `_cat/allocation` lists the nodes that hold shards, so master-only and coordinating-only nodes were never in the figure, and now the cell says so). The bar is green until the low watermark, amber from there, red from the high one; a cluster whose watermarks have not been read yet is drawn against Elasticsearch's defaults and says so.
+- **ILM shows the mode** (running, stopped) with the error count under it in red; hovering the count lists each index with its policy, phase, step and reason. SLM and Last snapshot stack the same way.
+- **The top bar lost the "N alerts" button** (the Alerts tab carries the count) and the "updated just now" text. **Every Refresh button now carries a minutes badge** — "0m", "19m", "1h 5m" since the last refresh, the exact time on hover, a spinner while one runs — on the top bar and on the Clusters toolbar alike.
+- **The tab row is one line at any width.** Automation, Requests, Accounts and Config sit behind a ☰ at its end, which names the page when you are on one of them.
+
+An open row:
+
+- **Tiles across the top:** Cluster URL (a link, the UUID on hover, a copy button), Jump host (the name; the SSH host, port and user on hover; "direct" when there is none), ILM and SLM, a **shard allocation gauge** (the active share as a half ring, a stacked bar and an inline legend for active, relocating, initializing and unassigned), **ES tasks** ("7 running · 1 > 60s", from `_tasks`), **Search / index rate** (searches and documents per second from two readings of `_nodes/stats` ten seconds apart, shard-level as the hover says), and the **S3 log bucket** named on the cluster (a new optional `logBucket:` on the cluster in the config file and on the cluster form; "not set" until it is). The UUID, Lucene, Credential, path.repo, Active shards, Relocating / initializing, JDK and Our requests tiles are gone — JDK and the request count are still columns (hidden by default) and the nodes table names each node's JDK.
+- **Repository/Snapshot** (renamed; the "expensive call" subtitle is gone): Repository, Type (fs grey, s3 orange), Location / bucket, **SLM policy** (which policy writes here, its name pattern and the snapshot it last produced), Snapshots (the names on hover), Oldest, Newest, **Last snapshot status** (Success, Partial, Failed, In progress), Size, and **Manage** (opens the Snapshots page on this cluster) and **Restore…** (the restore dialog for the newest snapshot, for a role that may write). Settings (compress=…) and Measure size are gone; Size reads the Volume report's measurement when every snapshot in the repository has one, and "not measured yet" otherwise — a partial sum is not a size.
+- **Nodes** is a table: Node (★ on the elected master), IP, Node ID (hidden by default), **Tier** (Hot, Warm, Cold, Frozen from the node's `data_*` roles, as ILM allocates), **Roles** as coloured chips in Elasticsearch's own names (master purple, data_hot red, data_warm amber, data_cold and data_frozen blue, ingest teal; a `node.roles: []` node reads "coordinating"), Version and JDK apart, CPU, Heap and Disk as a figure with a small bar (the bytes on hover), Load 1m, Shards (from `_cat/allocation`) and Uptime, with a role legend under the table.
+- **Show / hide, one panel for every cluster row.** Columns ▾ opens four groups — the cluster table (still reorderable and renamable), the tiles and sections of an open row, the Repository/Snapshot columns, the Nodes columns — plus "Expand details by default". Saved per signed-in person, as the columns already were; Reset to default clears all of it.
+
+Two readings an open row makes for itself (`_tasks`, `_nodes/stats`) are made for that row only, again every 30 s while it stays open, and stop when it closes or the page is left. The disk figure, the shard counts, the nodes and the repositories come from the refresh as before.
+
+Deviations from the board, deliberately: ILM, SLM and Last snapshot stay sortable (the board marked only seven columns, but a sort that worked was not asked to go); the Alerts cell keeps its dash for "none" rather than a 0; the Show / hide panel applies each tick at once instead of waiting for an Apply button.
+
 ## 0.3.33
 
 **Ships Zabbix modules 2.1.12.** Nothing in the core or the UI changed.

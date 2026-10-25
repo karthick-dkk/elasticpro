@@ -807,8 +807,11 @@ await go('overview');
       ok(after.querySelectorAll('table.cl-tbl > tbody > tr').length === before + 1,
         'overview: pressing the chevron did not open exactly one detail row');
       const detailRow = after.querySelector('tbody tr.cl-detail-row');
-      ok(detailRow && /Cluster UUID/.test(detailRow.textContent) && /Snapshot repositories/.test(detailRow.textContent),
-        'overview: the opened row does not show the details the Details button used to');
+      ok(detailRow && /Cluster URL/.test(detailRow.textContent) && /Repository\/Snapshot/.test(detailRow.textContent) && /Shard allocation/.test(detailRow.textContent),
+        'overview: the opened row does not show the details (URL, shard allocation, Repository/Snapshot)');
+      ok(detailRow && !/Cluster UUID|Lucene|path\.repo|Our requests/.test(detailRow.textContent),
+        'overview: the open row still shows a tile the board removed');
+      ok(detailRow && [...detailRow.querySelectorAll('.cl-role')].length >= 3, 'overview: the Nodes table has no role chips');
       const now = after.querySelector(`tbody tr[data-cluster="${rowId}"] button.cl-chev`);
       ok(now && now.getAttribute('aria-expanded') === 'true', 'overview: an open row should say it is open');
       ok(now && /Hide details for /.test(now.getAttribute('aria-label') || ''), 'overview: an open row should offer to close');
@@ -1050,10 +1053,11 @@ await go('overview');
       ok(A && A.classList.contains('cl-row-down'), 'unreachable: the row is not marked');
       if (A) {
         const health = A.children[colAt('health')];
-        ok(/^unreachable \u00b7 see Alerts$/.test(health.textContent.trim()) && !!health.querySelector('.q.bad .qdot'),
+        // A red pill reading Unreachable; the reason, the error and where to go are on hover.
+        ok(/^Unreachable$/.test(health.textContent.trim()) && !!health.querySelector('.pill.red .dot'),
           `unreachable: Health reads "${health.textContent.trim()}"`);
-        const tip = (health.querySelector('.q') || {}).title || '';
-        ok(/Offline/.test(tip) && /ECONNREFUSED/.test(tip), `unreachable: the Health tooltip does not give reason and error: "${tip}"`);
+        const tip = (health.querySelector('.pill') || {}).title || '';
+        ok(/Offline/.test(tip) && /ECONNREFUSED/.test(tip) && /see Alerts/.test(tip), `unreachable: the Health tooltip does not give reason and error: "${tip}"`);
         const disk = A.children[colAt('disk')];
         ok(/^unknown while unreachable$/.test(disk.textContent.trim()) && !disk.querySelector('.disk-bar, .disk-tick, .disk-fill'),
           `unreachable: Disk reads "${disk.textContent.trim()}" or still draws a bar`);
@@ -1081,8 +1085,10 @@ await go('overview');
         ok(link && /#\/alerts$/.test(link.getAttribute('href')), 'unreachable: the pointer line does not link to Alerts');
       }
       ok(/End of the list \u00b7 \d+ clusters?$/.test(summary().querySelector('.cl-end').textContent), `unreachable: the end line reads "${summary().querySelector('.cl-end').textContent}"`);
-      const sub = summary().querySelector('header .sub').textContent;
-      ok(/^\d+ clusters \u00b7 A\u2013Z by name/.test(sub) && !/shown above|reachable cluster/.test(sub), `unreachable: the summary subtitle reads "${sub}"`);
+      // The header carries no subtitle (the board of 2026-10-25): the count is on the end
+      // line and in the search box, and nothing says "shown above" or "reachable cluster".
+      ok(!summary().querySelector('header .sub'), 'unreachable: the summary header grew a subtitle back');
+      ok(!/shown above|reachable cluster/.test(summary().querySelector('header').textContent), 'unreachable: the header talks about a fold that is gone');
 
       // Nothing about it is stored: the fold is retired, and an old one is dropped on the next save.
       const user0 = user();
@@ -1101,7 +1107,7 @@ await go('overview');
         takeDown(b, 'auth_error', 'HTTP 401 from the cluster (EP-401)');
         await go('overview');
         ok(note() && /^2 unreachable/.test(note().textContent.trim()), `unreachable: the pointer line reads "${note() && note().textContent.trim()}" with two down`);
-        ok(rowOf(b) && /unreachable/.test(rowOf(b).children[colAt('health')].textContent) && /Auth error/.test(rowOf(b).children[colAt('health')].querySelector('.q').title),
+        ok(rowOf(b) && /Unreachable/.test(rowOf(b).children[colAt('health')].textContent) && /Auth error/.test(rowOf(b).children[colAt('health')].querySelector('.pill').title),
           'unreachable: the second row has no reason in its tooltip');
         // Sorted by a figure they go after the rest, A–Z among themselves.
         const sortBtn = headCells().find((x) => x.dataset.col === 'nodes');
@@ -3439,7 +3445,8 @@ if (viaFleet) {
     ok(/\d+\s+(green|yellow|red|unreachable)/.test(bar), `evidence: the fleet chip did not come back on Clusters: "${bar}"`);
     ok(!!doc.querySelector('#topbar .bell'), 'evidence: the bell did not come back on Clusters');
     ok(!!doc.getElementById('cluster-select'), 'evidence: the picker did not come back on Clusters');
-    ok([...doc.querySelectorAll('#topbar button')].some((b) => /^\d+ alerts?$/.test(b.textContent.trim())), 'evidence: the alerts chip did not come back on Clusters');
+    // The top bar has no alerts chip any more (the board of 2026-10-25): the Alerts tab carries the count.
+    ok(![...doc.querySelectorAll('#topbar button')].some((b) => /^\d+ alerts?$/.test(b.textContent.trim())), 'evidence: an alerts chip is back in the top bar');
     ok(doc.getElementById('side-foot').hidden === false, 'evidence: the status strip did not come back on Clusters');
     ok((doc.getElementById('evidence-foot') || { hidden: true }).hidden, 'evidence: the stamp is still printed on Clusters');
     ok(!!doc.querySelector('#nav button[data-page="alerts"] .pill'), 'evidence: the Alerts tab count did not come back');

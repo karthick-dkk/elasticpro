@@ -200,15 +200,15 @@ const routes = [
   // itself on one screen and every QA run had to re-establish that the fixture, not the
   // app, was wrong.
   [(u) => u.startsWith('/_cat/nodes'), (hit) => catProject(hit.url, [
-    { name: 'node-1', ip: '10.0.0.1', version: '8.13.4', jdk: '17.0.9', 'node.role': 'dim', master: '*',
+    { id: 'Xk3pQ9aTn1', name: 'node-1', ip: '10.0.0.1', version: '8.13.4', jdk: '17.0.9', 'node.role': 'dim', master: '*',
       'heap.percent': '61', 'ram.percent': '70', cpu: '12', load_1m: '1.2',
       'disk.used': '91000000000', 'disk.avail': '9000000000', 'disk.total': '100000000000',
       'disk.used_percent': '91', uptime: '10d' },
-    { name: 'node-2', ip: '10.0.0.2', version: '8.13.4', jdk: '17.0.9', 'node.role': 'dim', master: '-',
+    { id: 'b7Lm2RfEn2', name: 'node-2', ip: '10.0.0.2', version: '8.13.4', jdk: '17.0.9', 'node.role': 'dim', master: '-',
       'heap.percent': '55', 'ram.percent': '66', cpu: '9', load_1m: '0.8',
       'disk.used': '55000000000', 'disk.avail': '45000000000', 'disk.total': '100000000000',
       'disk.used_percent': '55', uptime: '10d' },
-    { name: 'node-3', ip: '10.0.0.3', version: '8.13.4', jdk: '21.0.2', 'node.role': 'dim', master: '-',
+    { id: 'Qw8nZc4Hn3', name: 'node-3', ip: '10.0.0.3', version: '8.13.4', jdk: '21.0.2', 'node.role': 'dim', master: '-',
       'heap.percent': '38', 'ram.percent': '52', cpu: '4', load_1m: '0.3',
       'disk.used': '21000000000', 'disk.avail': '79000000000', 'disk.total': '100000000000',
       'disk.used_percent': '21', uptime: '10d' }])],
@@ -291,6 +291,9 @@ const routes = [
   [(u) => u.startsWith('/_nodes/stats'), () => ({ nodes: Object.fromEntries([['n1', 'node-1', 41, 22], ['n2', 'node-2', 57, 35], ['n3', 'node-3', 88, 71]]
     .map(([id, name, heap, cpu]) => [id, { name, jvm: { mem: { heap_used_percent: heap }, uptime_in_millis: 864e6 },
       os: { cpu: { percent: cpu } }, fs: { total: { total_in_bytes: 1e12, available_in_bytes: 4e11 } },
+      // Counters that climb with the clock (42 searches and 300 documents a second across the
+      // three nodes), so two readings make the rate the Clusters page's open row shows.
+      indices: { search: { query_total: 1e6 + Math.floor(Date.now() / 1000) * 14 }, indexing: { index_total: 5e7 + Math.floor(Date.now() / 1000) * 100 } },
       thread_pool: { search: { queue: 0, rejected: 2 }, write: { queue: id === 'n3' ? 5 : 0, rejected: 7 }, get: { queue: 0, rejected: 0 } } }])) })],
   [(u) => u.startsWith('/_cluster/stats'), () => ({ indices: { count: INDICES.length, docs: { count: 5000 }, store: { size_in_bytes: 16e9 } },
     nodes: { count: { total: 3 }, versions: ['8.13.4'], jvm: { versions: [{ version: '21.0.2' }], max_uptime_in_millis: 864e6 },

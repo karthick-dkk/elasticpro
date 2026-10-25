@@ -226,7 +226,9 @@ export async function editCluster(existing = null) {
       field('Backup capacity', text('ce-backupcap', c.backupCapacity || '', { placeholder: '2TB' }),
         'Total size of the snapshot repository. Elasticsearch cannot report it, so the volume report ' +
         'says "not set" until you do. 2TB, 500GB, or a bare number of GB.'),
-      field('Note', text('ce-note', c.note || ''))),
+      field('Note', text('ce-note', c.note || '')),
+      field('S3 log bucket', text('ce-bucket', c.logBucket || c.log_bucket || '', { mono: true, placeholder: 'acme-logs' }),
+        'The bucket the enriched and raw logs are archived to. Named on the Clusters page; nothing here reads it.')),
     // How this cluster's daily-ingest figure is derived, and the headroom every "needed"
     // number on the volume report is sized with. They were in the config schema with no
     // way to set them short of hand-editing the file.
@@ -272,6 +274,7 @@ export async function editCluster(existing = null) {
           if (val('ce-enabled') === 'no') next.enabled = false; else delete next.enabled;
           const tags = val('ce-tags').split(',').map((t) => t.trim()).filter(Boolean); if (tags.length) next.tags = tags; else delete next.tags;
           const note = val('ce-note').trim(); if (note) next.note = note; else delete next.note;
+          const bucket = val('ce-bucket').trim(); if (bucket) next.logBucket = bucket; else delete next.logBucket; delete next.log_bucket;
           for (const [id, key] of [['ce-live', 'liveRetention'], ['ce-snapret', 'snapshotRetention']]) {
             const v = val(id).trim();
             if (!v) { delete next[key]; continue; }
