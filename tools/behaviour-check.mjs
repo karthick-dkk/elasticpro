@@ -133,8 +133,8 @@ async function backToFleet() {
 
 /* ------------- the status strip stays off the pages people work in ------------- */
 
-const STRIP_HIDDEN = ['indices', 'console', 'logs', 'snapshots', 'shards', 'volume'];
-const STRIP_SHOWN = ['overview', 'alerts'];
+const STRIP_HIDDEN = ['overview', 'indices', 'console', 'logs', 'snapshots', 'shards', 'volume'];
+const STRIP_SHOWN = ['alerts'];
 
 for (const id of [...STRIP_HIDDEN, ...STRIP_SHOWN]) {
   await go(id);
@@ -2660,18 +2660,22 @@ restoreConsole();
 
 if (viaFleet) {
   const st = await load('core/state.js');
-  const DS = ['health', 'nodes', 'ilm_errors', 'policies', 'snapshots'];   // overview.js DATASETS
+  const DS = ['health', 'nodes', 'ilm_errors', 'snapshots', 'policies'];   // alerts.js DATASETS
   // Under hybrid/on-demand a page can open onto clusters nothing was read for. The mock's
   // poller runs `background`, so make that true here: forget one dataset everywhere.
   for (const cur of st.fleet.raw.values()) delete cur.datasets.snapshots;
-  await go('alerts');
-  let before = sent.length;
   await go('overview');
+  ok(!doc.querySelector('#view .banner.coverage'), 'coverage: the Clusters page shows the coverage bar again (removed 2026-10-25)');
+  ok(!doc.querySelector('#side-foot:not([hidden])'), 'coverage: the status strip is back on the Clusters page');
+  // The Alerts page keeps the bar and Read all.
+  await go('overview');
+  let before = sent.length;
+  await go('alerts');
   const bar = doc.querySelector('#view .banner.coverage');
-  ok(!!bar, 'coverage: the Clusters page has no coverage bar');
+  ok(!!bar, 'coverage: the Alerts page has no coverage bar');
   ok(bar && /never read|No data read yet/.test(bar.textContent), `coverage: the bar does not say what was never read: "${bar && bar.textContent}"`);
   const opened = sent.slice(before).filter((m) => m.type === 'CLUSTER_DATASET');
-  ok(opened.length === 0, `coverage: opening the Clusters page sent ${opened.length} CLUSTER_DATASET (reading must be a decision)`);
+  ok(opened.length === 0, `coverage: opening the Alerts page sent ${opened.length} CLUSTER_DATASET (reading must be a decision)`);
   const btn = bar && bar.querySelector('button[data-act="read-all"]');
   ok(!!btn && /Read all \(one at a time\)/.test(btn.textContent), 'coverage: no "Read all (one at a time)" button');
   if (btn) {
@@ -3351,7 +3355,9 @@ if (viaFleet) {
     ok(/\d+\s+(green|yellow|red|unreachable)/.test(bar), `evidence control: Clusters has no fleet chip, so the absence checks prove nothing: "${bar}"`);
     ok(!!doc.querySelector('#topbar .bell'), 'evidence control: Clusters has no bell');
     ok(!!doc.getElementById('cluster-select'), 'evidence control: Clusters has no picker');
-    ok(doc.getElementById('side-foot').hidden === false, 'evidence control: Clusters has no status strip');
+    // The Clusters page keeps the strip off by design (2026-10-25); Alerts is where it shows.
+    ok(doc.getElementById('side-foot').hidden === true, 'evidence control: the status strip is back on the Clusters page');
+    await go('alerts'); ok(doc.getElementById('side-foot').hidden === false, 'evidence control: Alerts has no status strip'); await go('overview');
   }
 
   // Snapshots with "All clusters": asks for one, and shows no fleet while it asks.
@@ -3459,7 +3465,7 @@ if (viaFleet) {
     ok(!!doc.getElementById('cluster-select'), 'evidence: the picker did not come back on Clusters');
     // The top bar has no alerts chip any more (the board of 2026-10-25): the Alerts tab carries the count.
     ok(![...doc.querySelectorAll('#topbar button')].some((b) => /^\d+ alerts?$/.test(b.textContent.trim())), 'evidence: an alerts chip is back in the top bar');
-    ok(doc.getElementById('side-foot').hidden === false, 'evidence: the status strip did not come back on Clusters');
+    ok(doc.getElementById('side-foot').hidden === true, 'evidence: the status strip is back on the Clusters page');
     ok((doc.getElementById('evidence-foot') || { hidden: true }).hidden, 'evidence: the stamp is still printed on Clusters');
     ok(!!doc.querySelector('#nav button[data-page="alerts"] .pill'), 'evidence: the Alerts tab count did not come back');
   }

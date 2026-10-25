@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.37
+
+**Clusters: the band above the table is gone.** The status strip under the tabs (config name, cluster count, fleet health, request rate) and the "Showing cached data … Read all" line no longer show on the Clusters page: the table is the dashboard, and both were in the way of it. The strip stays on Alerts, Automation and the admin pages; the coverage line and Read all stay on Alerts. The Clusters page still asks for what it is missing when it opens, and Refresh reads every cluster on screen again. Nothing in the core changed.
+
 ## 0.3.36
 
 **Clusters: an open row lines up with the board.** The summary table centres its figures under their heads; the row that opens under it had inherited that centring, so its tiles, the Repository/Snapshot table and the Nodes table drifted off their heads. An open row now reads left to right as a form: the tiles pack at their own widths across the top (the URL on one line, shortened with the whole address on hover), both tables keep text left and bare figures right, the CPU, Heap and Disk heads sit over their bars, and an SLM policy's name pattern stacks under its name. The summary row's two-line cells (last snapshot, SLM, ILM) sit under their heads as one block. Nothing in the core changed.

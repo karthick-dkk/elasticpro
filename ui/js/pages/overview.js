@@ -3,9 +3,7 @@
 import { h, svg, mount, reconcile } from '../lib/dom.js';
 import { nodeCache, objId } from '../lib/keyed.js';
 import { bytes, num, pct, ago, dt, toCsv, download } from '../lib/fmt.js';
-import { state, activeClusters, client, healthState, refreshAll, openAlertsNow, requestsFor, requestLoad, jvmSummary, clusterRev, fleetMode, coverage, askFleetDataset, askForPage } from '../core/state.js';
-import { coverageBar } from '../lib/freshness.js';
-import { readAllState, startReadAll } from '../lib/read-all.js';
+import { state, activeClusters, client, healthState, refreshAll, openAlertsNow, requestsFor, requestLoad, jvmSummary, clusterRev, askForPage } from '../core/state.js';
 import { card, table, diskCell, lastSnapshotOf, snapshotCell, empty } from './common.js';
 import { isSnapshotMode } from '../core/snapshot.js';
 import { navigateTo, canOpenPage } from '../core/intent.js';
@@ -162,26 +160,9 @@ function stateLabel(r) {
  * backup. What "read" means in the coverage line, and what Read all asks for.
  */
 const DATASETS = ['health', 'nodes', 'ilm_errors', 'policies', 'snapshots'];
-/** The Read all run, kept across redraws. */
-const reading = readAllState();
-
-/**
- * The coverage line (lib/freshness.js coverageBar). Only with the fleet cache — the direct
- * path reads on open as it always has. It says how much of what the page shows has been
- * read, and "Read all" reads the rest one request at a time. Under Client basis (the
- * shipped policy) the page also asks the core for the missing datasets when it opens
- * (askOnOpen below), so the bar is what is left while the answers are still on their way.
- */
-function coverageLine() {
-  if (!fleetMode()) return null;
-  const ids = activeClusters().map((c) => c.id);
-  return coverageBar({
-    cov: coverage(ids, DATASETS), datasets: DATASETS, state: reading,
-    // Each step repaints the bar alone: the page may be holding its own redraws (quiet UI).
-    onReadAll: () => startReadAll(reading, { clusterIds: ids, datasets: DATASETS, ask: askFleetDataset,
-      onChange: () => { if (host && host.isConnected) coverageLine(); } }),
-  });
-}
+// The "Showing cached data … Read all" line this page used to open with is gone (board of
+// 2026-10-25): the page asks for what is missing when it opens (askOnOpen), Refresh reads
+// every cluster on screen again, and the Alerts page keeps the coverage bar and Read all.
 
 /**
  * Under a policy that fetches nothing on its own, opening the page is the ask: one message
@@ -377,7 +358,6 @@ function draw() {
   built.begin();
 
   mount(host,
-    coverageLine(),
     downNote(unreachableRows(rows).length),
     summaryCard(rows, all),
   );
