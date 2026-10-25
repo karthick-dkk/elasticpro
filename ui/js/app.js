@@ -128,9 +128,10 @@ function layout() {
  * The strip is ambient state — config name, fleet health, how hard we are hitting the
  * clusters — which is worth a glance from a dashboard and is a band of text in the way
  * when you are reading a wide table, typing a request or watching a live tail. It stays
- * on the overview, alerts, automation and the admin pages, where glancing is the point.
+ * on alerts, automation and the admin pages, where glancing is the point; the Clusters page
+ * lost it on 2026-10-25 (its table is the dashboard, the band above it was in the way).
  */
-const STRIP_HIDDEN = new Set(['indices', 'console', 'logs', 'snapshots', 'shards', 'volume']);
+const STRIP_HIDDEN = new Set(['overview', 'indices', 'console', 'logs', 'snapshots', 'shards', 'volume']);
 
 /* --------------------------------- theming ---------------------------------- */
 async function initTheme() {
