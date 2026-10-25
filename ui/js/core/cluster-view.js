@@ -72,9 +72,10 @@ export const NODE_COLUMNS = [
   { id: 'roles', label: 'Roles' },
   { id: 'version', label: 'Version' },
   { id: 'jdk', label: 'JDK' },
-  { id: 'cpu', label: 'CPU', num: true },
-  { id: 'heap', label: 'Heap', num: true },
-  { id: 'disk', label: 'Disk', num: true },
+  // A figure with a bar under it reads left, like text; only the bare numbers sit right.
+  { id: 'cpu', label: 'CPU' },
+  { id: 'heap', label: 'Heap' },
+  { id: 'disk', label: 'Disk' },
   { id: 'load', label: 'Load 1m', num: true },
   { id: 'shards', label: 'Shards', num: true },
   { id: 'uptime', label: 'Uptime' },

@@ -1182,7 +1182,7 @@ function repoSection(c, d) {
       type: () => h('td', h(`span.pill.${rp.type === 's3' ? 'orange' : 'grey'}`, { title: `Repository type ${rp.type || 'unknown'}` }, rp.type || '?')),
       location: () => h('td.mono.cl-detail-loc', { title: rp.location }, rp.location || '–'),
       policy: () => h('td', policies.length
-        ? h('div.cl-two', ...policies.slice(0, 2).map((p) => h('span', h('span.mono', p.id),
+        ? h('div.cl-pols', ...policies.slice(0, 2).map((p) => h('span.cl-two', h('span.mono', p.id),
             h('span.muted.cl-sub', { title: p.lastAt ? `last run ${dt(p.lastAt)}` : 'never run' }, `${p.pattern || ''}${p.lastSnapshot ? ` → ${p.lastSnapshot}` : ''}`))),
             policies.length > 2 ? h('span.muted.cl-sub', `+${policies.length - 2} more`) : null)
         : h('span.muted', { title: 'No SLM policy writes to this repository' }, 'none')),
