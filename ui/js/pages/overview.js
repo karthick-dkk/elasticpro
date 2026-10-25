@@ -1041,6 +1041,11 @@ function jumpTitle(c) {
   return `SSH ${j.host || '?'}:${j.port || 22}${j.user ? ` · user ${j.user}` : ''} → ${c.url}`;
 }
 
+/** http or https, parsed — never a scheme that would run something when followed. */
+function isWebUrl(u) {
+  try { const p = new URL(String(u)).protocol; return p === 'http:' || p === 'https:'; } catch (_) { return false; }
+}
+
 function tile(label, value, opts = {}) {
   return h(`div.cl-tile${opts.wide ? '.wide' : ''}`, { 'data-tile': opts.id || null },
     h('div.k', label),
@@ -1080,8 +1085,13 @@ function detail(r) {
 
   const tiles = [];
   if (shown.has('url')) {
+    // A link only for a web scheme: the address is operator-written config, and a cluster
+    // that reached the list through Zabbix is still text somebody typed somewhere.
+    const uuid = `Cluster UUID: ${(d.info && d.info.cluster_uuid) || 'unknown'}`;
     tiles.push(tile('Cluster URL', h('span.cl-url',
-      h('a.mono', { href: c.url, target: '_blank', rel: 'noopener', title: `Cluster UUID: ${(d.info && d.info.cluster_uuid) || 'unknown'}` }, c.url),
+      isWebUrl(c.url)
+        ? h('a.mono', { href: c.url, target: '_blank', rel: 'noopener', title: uuid }, c.url)
+        : h('span.mono', { title: uuid }, c.url),
       h('button.btn.sm.ghost.cl-copy', { type: 'button', 'aria-label': 'Copy cluster URL', title: 'Copy URL',
         onclick: async () => {
           try { await navigator.clipboard.writeText(c.url); toast('URL copied', 'ok', 1800, { key: 'cl-copy' }); }
