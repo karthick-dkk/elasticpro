@@ -151,3 +151,22 @@ test('clusters() lists the enabled clusters A–Z, whatever order the config has
   assert.deepEqual(S.clusters().map((c) => c.name), ['Yankee', 'zulu']);
   S.state.config = null;
 });
+
+/* ---- the page opens worst first, the fullest disk first within a state ---- */
+
+test('the default order: unreachable, red, yellow, green; within a state the fullest disk first', () => {
+  assert.deepEqual(P.DEFAULT_SORT, { key: 'health', dir: -1 });
+  const rows = [
+    up('g-half', { health: { status: 'green' }, disk: { percent: 50, total: 100, used: 50 } }),
+    up('y-full', { health: { status: 'yellow' }, disk: { percent: 90, total: 100, used: 90 } }),
+    up('g-full', { health: { status: 'green' }, disk: { percent: 80, total: 100, used: 80 } }),
+    up('r-low', { health: { status: 'red' }, disk: { percent: 10, total: 100, used: 10 } }),
+    up('y-half', { health: { status: 'yellow' }, disk: { percent: 40, total: 100, used: 40 } }),
+    down('z-down'), down('a-down'),
+    up('g-nodisk', { health: { status: 'green' } }),
+  ];
+  assert.deepEqual(order(P.sortRows(rows, P.DEFAULT_SORT.key, P.DEFAULT_SORT.dir)),
+    ['a-down', 'z-down', 'r-low', 'y-full', 'y-half', 'g-full', 'g-half', 'g-nodisk'],
+    'worst first; fullest disk first within a state; no disk figure last; unreachable A–Z among themselves');
+  assert.deepEqual(order(P.sortRows(rows, 'health', 1)).slice(0, 3), ['g-full', 'g-half', 'g-nodisk'], 'best first still breaks ties by disk');
+});

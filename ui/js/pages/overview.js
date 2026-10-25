@@ -79,11 +79,22 @@ export function sortRows(rows, key, dir = 1) {
   // (the worst there is) and the alerts raised for it are still true.
   const get = (r) => (isDown(r) && !DOWN_KEEPS.has(key) ? null : own(r));
   const byName = (a, b) => compareNames(a.r.c.name, b.r.c.name);
+  // Within one health state the fullest disk comes first: that is the row to look at.
+  // Unreachable clusters have no disk figure now, so among themselves they go A–Z.
+  const diskOf = (x) => (isDown(x.r) ? null : SORTS.disk.get(x.r));
+  const byDisk = (a, b) => {
+    const ad = diskOf(a), bd = diskOf(b);
+    if (ad === null && bd === null) return 0;
+    if (ad === null) return 1;
+    if (bd === null) return -1;
+    return bd - ad;
+  };
+  const tie = key === 'health' ? (a, b) => byDisk(a, b) || byName(a, b) : byName;
   return rows.map((r) => ({ r, v: get(r) })).sort((a, b) => {
     const an = a.v === null || a.v === undefined, bn = b.v === null || b.v === undefined;
     if (an || bn) return an && bn ? byName(a, b) : an ? 1 : -1;
     const c = typeof a.v === 'number' && typeof b.v === 'number' ? a.v - b.v : compareNames(a.v, b.v);
-    return c * dir || byName(a, b);
+    return c * dir || tie(a, b);
   }).map((x) => x.r);
 }
 
@@ -101,11 +112,17 @@ function clusterSize(r) {
   return -1;
 }
 
-// Sorted by cluster name, ascending, until the operator says otherwise.
 // The search, sort and health filter live behind the 🔍 beside the title; `search` is whether
 // that box is open. A filter that is set keeps it open: a filtered list must say so.
-const ui = { text: '', sort: 'name', dir: 1, only: 'all', search: false };
-const filtered = () => !!(ui.text || ui.only !== 'all' || ui.sort !== 'name' || ui.dir !== 1);
+/**
+ * The order the page opens in: worst health first (unreachable, red, yellow, then green),
+ * the fullest disk first within a state (sortRows's tie-break) — the clusters to look at
+ * are at the top. Until the operator says otherwise.
+ */
+export const DEFAULT_SORT = { key: 'health', dir: -1 };
+const ui = { text: '', sort: DEFAULT_SORT.key, dir: DEFAULT_SORT.dir, only: 'all', search: false };
+const filtered = () => !!(ui.text || ui.only !== 'all' || ui.sort !== DEFAULT_SORT.key || ui.dir !== DEFAULT_SORT.dir);
+const resetFilter = () => { ui.text = ''; ui.only = 'all'; ui.sort = DEFAULT_SORT.key; ui.dir = DEFAULT_SORT.dir; };
 
 /** offline worst, then red > yellow > green — so "sort by health" surfaces trouble. */
 function healthRank(r) {
@@ -253,7 +270,7 @@ function searchBox(all, shown) {
     type: 'button', 'aria-expanded': open ? 'true' : 'false', 'aria-controls': 'clusters-search-box',
     'aria-label': 'Search, sort and filter clusters', title: 'Search / sort / filter',
     onclick: () => {
-      if (open && filtered()) { ui.text = ''; ui.only = 'all'; ui.sort = 'name'; ui.dir = 1; ui.search = false; }
+      if (open && filtered()) { resetFilter(); ui.search = false; }
       else { ui.search = !ui.search; focusSearch = ui.search; }
       draw();
     },
@@ -279,13 +296,14 @@ function searchBox(all, shown) {
         oninput: (e) => { ui.text = e.target.value; draw(); } }),
       sortSel,
       h('button.btn.sm', { type: 'button', style: { minWidth: '72px' },
-        title: ui.dir === 1 ? 'Ascending \u2014 click for descending' : 'Descending \u2014 click for ascending',
-        onclick: () => { ui.dir = -ui.dir; draw(); } }, ui.dir === 1 ? '\u25b2 asc' : '\u25bc desc'),
+        title: ui.sort === 'health' ? (ui.dir === -1 ? 'Worst first \u2014 click for best first' : 'Best first \u2014 click for worst first')
+          : ui.dir === 1 ? 'Ascending \u2014 click for descending' : 'Descending \u2014 click for ascending',
+        onclick: () => { ui.dir = -ui.dir; draw(); } }, ui.sort === 'health' ? (ui.dir === -1 ? '\u25bc worst first' : '\u25b2 best first') : ui.dir === 1 ? '\u25b2 asc' : '\u25bc desc'),
       onlySel,
       h('span.muted', { style: { fontSize: '11.5px', whiteSpace: 'nowrap' } },
         shown.length === all.length ? `${all.length} cluster${all.length === 1 ? '' : 's'}` : `${shown.length} of ${all.length} shown`),
       filtered() ? h('button.btn.sm.ghost', { type: 'button', title: 'Clear the search, sort and filter',
-        onclick: () => { ui.text = ''; ui.only = 'all'; ui.sort = 'name'; ui.dir = 1; draw(); } }, 'Clear') : null));
+        onclick: () => { resetFilter(); draw(); } }, 'Clear') : null));
 }
 
 /**
