@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.3.35
+
+**Three follow-ups from the Clusters board.**
+
+- **The Clusters page opens worst first.** The default order is now health — unreachable, red, yellow, then green — and within one state the fullest disk first, so the rows to look at are at the top. A–Z by name is one click on the Cluster head away, and the direction button reads "worst first / best first" while health is the sort. Unreachable clusters have no disk figure now, so among themselves they stay A–Z.
+- **The "name · yellow" pill is gone from the top bar.** The cluster picker carries a health dot in front of the name instead — green, yellow or red, grey while loading, the state in words on hover. On "All clusters" the dot is the worst state in the picker and the counts pill beside it stays.
+
+Nothing in the core changed.
+
 ## 0.3.34
 
 **The Clusters page, as approved on the design board of 2026-10-25.** Seventy comments on the board, every one of them applied; nothing in the core changed.

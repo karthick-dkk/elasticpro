@@ -692,6 +692,11 @@ table.cl-tbl > tbody > tr.cl-detail-row:hover > td { background: var(--surface-2
 /* The picker marks a cluster that cannot be reached (where the platform styles options).
    Its width is set from the names alone (app.js renderTopbar), never from the mark. */
 #cluster-select { flex: none; }
+/* The health dot in front of the picker (app.js pickDot). */
+.pick-dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; flex: none; background: var(--text-muted); }
+.pick-dot.green { background: var(--good); }
+.pick-dot.yellow { background: var(--warning); }
+.pick-dot.red { background: var(--critical); }
 #cluster-select option.unreachable { color: var(--critical-ink); }
 
 /* One cluster's block on a page that shows the whole fleet (Snapshots, …). Off screen, the

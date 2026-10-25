@@ -1071,7 +1071,19 @@ await go('overview');
         const al = A.children[colAt('alerts')];
         ok(!!al.querySelector('a.cl-alink') && /^\d+ \u2192$/.test(al.textContent.trim()), `unreachable: its Alerts cell reads "${al.textContent.trim()}"`);
       }
-      // A–Z: its place among the others is the place its name has.
+      // Worst first (the page's default order: health, then the fullest disk): the unreachable
+      // row leads. An earlier case left the page sorted by name, so the order is set here.
+      const sortTo = async (col, want) => {
+        for (let i = 0; i < 3; i++) {
+          const b = headCells().find((x) => x.dataset.col === col);
+          if (b.getAttribute('aria-sort') === want) return;
+          press(b); await settleFor(200);
+        }
+      };
+      await sortTo('health', 'descending');
+      ok(rowNames()[0] === a.name, `unreachable: sorted worst first, the unreachable cluster is not first: ${rowNames().join(', ')}`);
+      // Sorted by name its place among the others is the place its name has.
+      await sortTo('name', 'ascending');
       const names = rowNames();
       const sorted = [...names].sort((x, y) => x.localeCompare(y, undefined, { numeric: true, sensitivity: 'base' }));
       ok(JSON.stringify(names) === JSON.stringify(sorted), `unreachable: rows are not A–Z: ${names.join(', ')}`);

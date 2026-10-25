@@ -421,6 +421,25 @@ let topbarKey = '';
  * healthy" that stays green while the cluster you are looking at is red.
  */
 const HEALTH_COLOUR = { green: 'green', yellow: 'yellow', red: 'red', unreachable: 'red', loading: 'grey' };
+/**
+ * The dot in front of the cluster picker: the chosen cluster's health in its own colour,
+ * the state in words on hover. On "All clusters" it is the worst state in the picker,
+ * with the counts on hover; the pill beside it spells them out. (The "name · yellow" pill
+ * for one cluster is gone — Clusters board, 2026-10-25.)
+ */
+function pickDot(list) {
+  if (!list.length) return null;
+  const states = list.map((c) => healthState(state.data.get(c.id)));
+  if (list.length === 1) {
+    const st = states[0];
+    return h(`i.pick-dot.${HEALTH_COLOUR[st]}`, { role: 'img', 'aria-label': `Cluster health: ${st}`, title: `${list[0].name} \u00b7 ${st}` });
+  }
+  const order = ['red', 'unreachable', 'yellow', 'loading', 'green'];
+  const n = Object.fromEntries(order.map((k) => [k, states.filter((s) => s === k).length]));
+  const worst = order.find((k) => n[k]) || 'loading';
+  const parts = ['green', 'yellow', 'red', 'unreachable', 'loading'].filter((k) => n[k]).map((k) => `${n[k]} ${k}`).join(' \u00b7 ');
+  return h(`i.pick-dot.${HEALTH_COLOUR[worst]}`, { role: 'img', 'aria-label': `Fleet health: ${parts}`, title: parts });
+}
 function healthPill(list) {
   if (!list.length) return null;
   const states = list.map((c) => healthState(state.data.get(c.id)));
@@ -557,7 +576,7 @@ function renderTopbar() {
     // Evidence: the cluster is named, not offered. A picker's closed face shows one name but
     // its options are every cluster, and the finder says how many there are.
     ev ? (evCluster ? healthPill([evCluster]) : null)
-      : h('label.field', { style: { flexDirection: 'row', alignItems: 'center', gap: '6px' } }, sel, finder),
+      : h('label.field', { style: { flexDirection: 'row', alignItems: 'center', gap: '6px' } }, pickDot(activeClusters()), sel, finder),
     h('div.spacer'),
     (() => {
       const need = needCreds.length;
@@ -573,7 +592,8 @@ function renderTopbar() {
       }, ev ? (need ? 'Sign in' : 'Re-enter credentials')
         : need ? `Sign in (${need} cluster${need === 1 ? '' : 's'})` : `Re-enter credentials (${bad})`);
     })(),
-    ev ? null : healthPill(activeClusters()),
+    // One cluster: its health is the dot on the picker. The fleet: the counts, coloured by the worst.
+    ev || activeClusters().length < 2 ? null : healthPill(activeClusters()),
     // The alert count is on the Alerts tab, where going there is one click anyway; the
     // button that repeated it here is gone (Clusters board, 2026-10-25).
     // The read-only / writes-enabled pill used to sit here. Every page that can write
