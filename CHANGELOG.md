@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.36
+
+**Clusters: an open row lines up with the board.** The summary table centres its figures under their heads; the row that opens under it had inherited that centring, so its tiles, the Repository/Snapshot table and the Nodes table drifted off their heads. An open row now reads left to right as a form: the tiles pack at their own widths across the top (the URL on one line, shortened with the whole address on hover), both tables keep text left and bare figures right, the CPU, Heap and Disk heads sit over their bars, and an SLM policy's name pattern stacks under its name. The summary row's two-line cells (last snapshot, SLM, ILM) sit under their heads as one block. Nothing in the core changed.
+
 ## 0.3.35
 
 **Three follow-ups from the Clusters board.**
