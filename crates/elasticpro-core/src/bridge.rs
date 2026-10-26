@@ -46,6 +46,8 @@ pub struct ZbxOptions {
     /// Off by default: everyone who signs in through Zabbix reads every cluster, which is
     /// what a team that already decides access in Zabbix expects.
     pub scope_users_by_group: bool,
+    /// Which Zabbix role becomes which ElasticPro role at sign-in (`zabbix.roleMap`).
+    pub role_map: zbx_sso::RoleMap,
 }
 
 impl ZbxOptions {
@@ -68,8 +70,62 @@ impl ZbxOptions {
             }),
             scope_users_by_group: managed.flag("ZABBIX_SCOPE_USERS_BY_GROUP")
                 .unwrap_or_else(|| flag("scopeUsersByGroup", "scope_users_by_group")),
+            role_map: zbx_sso::RoleMap::from_config(&z),
         }
     }
+}
+
+/// A config as a file: JSON in the order the UI writes it (`serializeConfig` in
+/// core/config.js — version, credentials, defaults, jump_hosts, clusters, then the rest),
+/// so a save from here and a save from the Config page diff cleanly against each other.
+/// `yaml` keeps a YAML file YAML.
+pub fn serialize_config(raw: &Value, yaml: bool) -> String {
+    if yaml {
+        return serde_yaml::to_string(raw).unwrap_or_default();
+    }
+    let Some(m) = raw.as_object() else { return serde_json::to_string_pretty(raw).unwrap_or_default() + "\n" };
+    let mut keys: Vec<&String> = vec![];
+    for k in ["version", "credentials", "defaults", "jump_hosts", "clusters"] {
+        if let Some((k, _)) = m.get_key_value(k) {
+            keys.push(k);
+        }
+    }
+    let rest: Vec<&String> = m.keys().filter(|k| !keys.contains(k)).collect();
+    keys.extend(rest);
+    let mut out = String::from("{\n");
+    for (i, k) in keys.iter().enumerate() {
+        let text = serde_json::to_string_pretty(&m[*k]).unwrap_or_default().replace('\n', "\n  ");
+        out.push_str(&format!("  {}: {}{}\n", serde_json::to_string(k).unwrap_or_default(), text, if i + 1 < keys.len() { "," } else { "" }));
+    }
+    out.push_str("}\n");
+    out
+}
+
+/// Write `text` to `p` by way of a temporary file and a rename, so a reader never sees
+/// half a file. 0600 for a file being created, but never a downgrade of one that already
+/// exists: forcing it unconditionally once locked the operator out of their own config
+/// file — the hosted stack deliberately shares it between the container and the host user.
+async fn write_text_atomic(p: &std::path::Path, text: &str) -> Result<(), String> {
+    let tmp = p.with_extension("tmp");
+    if let Some(dir) = p.parent() {
+        let _ = tokio::fs::create_dir_all(dir).await;
+    }
+    tokio::fs::write(&tmp, text).await.map_err(|e| format!("cannot write {}: {e}", tmp.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(p).map(|m| m.permissions().mode() & 0o777).unwrap_or(0o600);
+        let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(mode));
+    }
+    tokio::fs::rename(&tmp, p).await.map_err(|e| format!("cannot replace {}: {e}", p.display()))
+}
+
+/// The server's config file, found and parsed (`Core::locate_config`).
+struct LocatedConfig {
+    path: PathBuf,
+    /// The file is YAML, and a save keeps it so.
+    yaml: bool,
+    raw: Value,
 }
 
 pub(crate) struct Route1 {
@@ -1322,31 +1378,14 @@ impl Core {
                 // Keep what is there before replacing it. A config edited from the UI is
                 // edited by hand no longer, so an undo has to come from somewhere.
                 let kept = if t == "CONFIG_WRITE" { self.history.snapshot(&p) } else { false };
-                let tmp = p.with_extension("tmp");
-                if let Some(dir) = p.parent() {
-                    let _ = tokio::fs::create_dir_all(dir).await;
-                }
-                if let Err(e) = tokio::fs::write(&tmp, text).await {
-                    return json!({ "ok": false, "message": format!("cannot write {}: {e}", tmp.display()) });
-                }
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::PermissionsExt;
-                    // 0600 for a file being created, but never a downgrade of one that
-                    // already exists. Forcing it unconditionally meant saving from the UI
-                    // silently locked the operator out of their own config file — the
-                    // hosted stack deliberately shares it between the container and the
-                    // host user, and one write reset that to owner-only.
-                    let mode = std::fs::metadata(&p)
-                        .map(|m| m.permissions().mode() & 0o777)
-                        .unwrap_or(0o600);
-                    let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(mode));
-                }
-                match tokio::fs::rename(&tmp, &p).await {
-                    Ok(_) => json!({ "ok": true, "path": path, "bytes": text.len(), "keptVersion": kept }),
-                    Err(e) => json!({ "ok": false, "message": format!("cannot replace {path}: {e}") }),
+                match write_text_atomic(&p, text).await {
+                    Ok(()) => json!({ "ok": true, "path": path, "bytes": text.len(), "keptVersion": kept }),
+                    Err(message) => json!({ "ok": false, "message": message }),
                 }
             }
+            "CLUSTER_SAVE" => self.cluster_save(&msg, caller.as_ref()).await,
+            "AUTOMATIONS_SAVE" => self.automations_save(&msg, caller.as_ref()).await,
+            "ZABBIX_ROLEMAP_GET" | "ZABBIX_ROLEMAP_SET" => self.rolemap_msg(&t, &msg, caller.as_ref()).await,
             "SEAL" => {
                 let plain = msg.get("plain").and_then(|v| v.as_str()).unwrap_or("");
                 let master = msg.get("master").and_then(|v| v.as_str()).unwrap_or("");
@@ -2108,15 +2147,23 @@ impl Core {
     }
 
     async fn read_config_file(&self) -> Result<Value, Value> {
+        self.locate_config().await.map(|c| c.raw)
+    }
+
+    /// The server's config file as it was found: where, its text and what it parses to.
+    /// The named file (ELASTICPRO_CONFIG), unless it lists no cluster and the stray one
+    /// from an older install does — then that one, so a save from here goes back where the
+    /// clusters were read from.
+    async fn locate_config(&self) -> Result<LocatedConfig, Value> {
         let Some(hint) = self.config_hint.clone() else {
             return Err(json!({ "ok": false, "kind": "no_config",
                                "message": "this server was started without a config file (ELASTICPRO_CONFIG)" }));
         };
         match self.read_config_at(std::path::Path::new(&hint)).await {
-            Ok(v) if config_has_clusters(&v) => Ok(v),
+            Ok(c) if config_has_clusters(&c.raw) => Ok(c),
             first => match self.stray_config_path() {
                 Some(stray) => match self.read_config_at(&stray).await {
-                    Ok(v) if config_has_clusters(&v) => Ok(v),
+                    Ok(c) if config_has_clusters(&c.raw) => Ok(c),
                     _ => first,
                 },
                 None => first,
@@ -2124,7 +2171,7 @@ impl Core {
         }
     }
 
-    async fn read_config_at(&self, path: &std::path::Path) -> Result<Value, Value> {
+    async fn read_config_at(&self, path: &std::path::Path) -> Result<LocatedConfig, Value> {
         let text = match tokio::fs::read_to_string(path).await {
             Ok(t) => t,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -2133,14 +2180,223 @@ impl Core {
             }
             Err(e) => return Err(json!({ "ok": false, "kind": "io_error", "message": format!("cannot read the config: {e}") })),
         };
-        parse_config_text(&text).map_err(|e| json!({ "ok": false, "kind": "parse_error", "message": format!("the config does not parse: {e}") }))
+        let raw = parse_config_text(&text).map_err(|e| json!({ "ok": false, "kind": "parse_error", "message": format!("the config does not parse: {e}") }))?;
+        let yaml = !text.trim_start_matches('\u{feff}').trim_start().starts_with('{');
+        Ok(LocatedConfig { path: path.to_path_buf(), yaml, raw })
     }
 
-    /// `zabbix.scopeUsersByGroup` as the server's config file (`server_config_path`) says it
-    /// now. Read at each
-    /// Zabbix sign-in rather than taken from the last sync, so turning it on or off applies
-    /// to the next sign-in, sync or not. Off when there is no file or it does not parse.
-    fn scope_users_by_group_now(&self) -> bool {
+    /// Write a changed config back where it was read from, keeping the version before it.
+    async fn store_config(&self, found: &LocatedConfig) -> Result<bool, Value> {
+        let kept = self.history.snapshot(&found.path);
+        write_text_atomic(&found.path, &serialize_config(&found.raw, found.yaml)).await
+            .map_err(|message| json!({ "ok": false, "kind": "io_error", "message": message }))?;
+        Ok(kept)
+    }
+
+    /// `CLUSTER_SAVE`: one cluster added, changed or switched off by an operator (or an
+    /// admin using the same door). The rule is `cluster_save::apply`; this is the file
+    /// around it, and then the fleet: the saved cluster is polled from now on, with the
+    /// credential the core already holds for it, the shared one, or none until an admin
+    /// signs in once — the reply says which.
+    async fn cluster_save(self: &Arc<Self>, msg: &Value, caller: Option<&Caller>) -> Value {
+        let Some(incoming) = msg.get("cluster") else {
+            return json!({ "ok": false, "kind": "bad_message", "message": "CLUSTER_SAVE needs a cluster" });
+        };
+        let replace = msg.get("replace").and_then(|v| v.as_str());
+        let mut found = match self.locate_config().await {
+            Ok(c) => c,
+            Err(refusal) => return refusal,
+        };
+        let sees = |c: &Value| caller.is_none_or(|who| who.sees(&raw_groups(c)));
+        let who = caller.map(|c| c.name.as_str()).unwrap_or("-");
+        let saved = match crate::cluster_save::apply(&mut found.raw, incoming, replace, &sees) {
+            Ok(s) => s,
+            Err(r) => {
+                tracing::warn!(target: "audit", user = %who, kind = r.kind, reason = %r.message, "cluster save refused");
+                return r.to_json();
+            }
+        };
+        let kept = match self.store_config(&found).await {
+            Ok(k) => k,
+            Err(refusal) => return refusal,
+        };
+        let credential = self.adopt_saved_cluster(&saved, &found.raw).await;
+        tracing::info!(target: "audit", user = %who, cluster = %saved.name, was = ?saved.was, action = saved.action,
+                       credential, "cluster saved");
+        json!({ "ok": true, "action": saved.action, "name": saved.name, "was": saved.was, "keptVersion": kept, "credential": credential })
+    }
+
+    /// `AUTOMATIONS_SAVE`: the config's `automations:` list, replaced by an operator's. The
+    /// rules are read by the browser (core/user-rules.js); the core only keeps them.
+    async fn automations_save(self: &Arc<Self>, msg: &Value, caller: Option<&Caller>) -> Value {
+        let Some(list) = msg.get("automations") else {
+            return json!({ "ok": false, "kind": "bad_message", "message": "AUTOMATIONS_SAVE needs an automations list" });
+        };
+        let mut found = match self.locate_config().await {
+            Ok(c) => c,
+            Err(refusal) => return refusal,
+        };
+        let who = caller.map(|c| c.name.as_str()).unwrap_or("-");
+        let count = match crate::cluster_save::apply_automations(&mut found.raw, list) {
+            Ok(n) => n,
+            Err(r) => {
+                tracing::warn!(target: "audit", user = %who, kind = r.kind, reason = %r.message, "automations save refused");
+                return r.to_json();
+            }
+        };
+        let kept = match self.store_config(&found).await {
+            Ok(k) => k,
+            Err(refusal) => return refusal,
+        };
+        tracing::info!(target: "audit", user = %who, count, "automations saved");
+        json!({ "ok": true, "count": count, "keptVersion": kept })
+    }
+
+    /// Make a saved cluster the fleet's business now, without waiting for an admin's PRIME.
+    ///
+    /// The spec is built from the entry the way the UI's `normalize()` builds one, and the
+    /// credential follows PRIME's own rules: the header the core already holds for this
+    /// cluster stays while its destination — address, route, certificate setting — is the
+    /// same ("kept"); a cluster with no credential of its own in the file signs in with
+    /// the shared one, exactly as it would after an admin's PRIME ("shared"); a cluster
+    /// whose own credential is in the file and whose held header cannot follow has none
+    /// until an admin signs in — the core cannot build a header from a file it must not
+    /// read for this caller ("admin"). Nothing here derives a header.
+    async fn adopt_saved_cluster(self: &Arc<Self>, saved: &crate::cluster_save::Saved, raw: &Value) -> &'static str {
+        let entry = &saved.entry;
+        let get = |k: &str| entry.get(k).and_then(|v| v.as_str()).map(str::trim).filter(|s| !s.is_empty()).map(String::from);
+        let id = crate::cluster_save::cluster_id(&saved.name);
+        // Only an edit takes over a polled entry, and only the one it was. An add whose id
+        // is already polled (a Zabbix host's, say) does not displace it: apply() refused
+        // every config name that would collide, so this is the fleet's entry, not ours.
+        let old_id = saved.was.as_deref().map(crate::cluster_save::cluster_id);
+        let url = get("url").unwrap_or_default().trim_end_matches('/').to_string();
+        let via = {
+            let r = crate::cluster_save::route_of(entry);
+            if r.is_empty() { None } else { Some(r) }
+        };
+        let tls = get("tls");
+        let own_cred = saved.entry.as_object().is_some_and(|m| {
+            let mut probe = Value::Object(m.clone());
+            redact_config(&mut probe);
+            probe != *entry
+        });
+        let pattern = get("logIndexPattern").or_else(|| get("log_index_pattern"))
+            .or_else(|| raw.get("defaults").and_then(|d| d.get("logIndexPattern")).and_then(|v| v.as_str()).map(String::from));
+        let changed_address;
+        let credential;
+        {
+            let mut p = self.primed.write();
+            if old_id.is_none() && (p.clusters.contains_key(&id) || self.zbx_sync.read().specs.contains_key(&id)) {
+                tracing::warn!(target: "audit", cluster = %saved.name, id = %id, "cluster saved, but the fleet already polls that id; left as it was");
+                return "none";
+            }
+            let old = old_id.as_deref().and_then(|i| p.clusters.remove(i));
+            let same_address = old.as_ref().is_some_and(|o| {
+                o.url.trim_end_matches('/').eq_ignore_ascii_case(&url) && o.via == via
+                    && o.tls.as_deref().map(|t| t.trim().to_ascii_lowercase()) == tls.as_deref().map(|t| t.trim().to_ascii_lowercase())
+            });
+            changed_address = old.is_some() && !same_address;
+            let auth_header = match (&old, same_address) {
+                (Some(o), true) if o.auth_header.as_deref().is_some_and(|a| !a.is_empty()) => { credential = "kept"; o.auth_header.clone() }
+                _ if !own_cred => match p.shared_auth.clone() {
+                    Some(h) => { credential = "shared"; Some(h) }
+                    None => { credential = "none"; None }
+                },
+                _ => { credential = "admin"; None }
+            };
+            p.clusters.insert(id.clone(), ClusterSpec {
+                id: id.clone(),
+                name: Some(saved.name.clone()),
+                url,
+                auth_header,
+                via,
+                tls,
+                zabbix_groups: raw_groups(entry),
+                log_index_pattern: pattern,
+            });
+        }
+        self.read_cache.clear();
+        if changed_address {
+            self.forget_connections();
+        }
+        self.persist_current_prime().await;
+        credential
+    }
+
+    /// Write the cluster setup the core holds now to primed.json, as PRIME does — so a
+    /// cluster saved by an operator is still there after a restart. Jump hosts are taken
+    /// from the live tunnels, without their session secrets, as PRIME takes them from its
+    /// message.
+    async fn persist_current_prime(self: &Arc<Self>) {
+        let (read_only, mut clusters, shared) = {
+            let p = self.primed.read();
+            (p.read_only, p.clusters.values().cloned().collect::<Vec<ClusterSpec>>(), p.shared_auth.clone().unwrap_or_default())
+        };
+        clusters.sort_by(|a, b| a.id.cmp(&b.id));
+        let jumps: Vec<Value> = self.tunnels.read().await.values().map(|r| {
+            let s = &r.tunnel.spec;
+            json!({ "id": s.id, "host": s.host, "port": s.port, "user": s.user, "keyFile": s.key_file })
+        }).collect();
+        self.persist_prime(&json!({ "readOnly": read_only, "clusters": clusters, "jumpHosts": jumps, "sharedAuthHeader": shared }), true);
+    }
+
+    /// `ZABBIX_ROLEMAP_GET` / `ZABBIX_ROLEMAP_SET`: which Zabbix role signs in as which
+    /// ElasticPro role. Kept in the server's config file (`zabbix.roleMap`), read at every
+    /// sign-in, so a change applies to the next one; pinned accounts keep their pin.
+    async fn rolemap_msg(self: &Arc<Self>, t: &str, msg: &Value, caller: Option<&Caller>) -> Value {
+        let found = self.locate_config().await;
+        if t == "ZABBIX_ROLEMAP_GET" {
+            let (map, file) = match &found {
+                Ok(c) => (ZbxOptions::from_config(&c.raw).role_map, true),
+                Err(_) => (zbx_sso::RoleMap::default(), false),
+            };
+            let zabbix_roles = self.zabbix_roles().await;
+            return json!({ "ok": true, "roleMap": map.to_json(), "defaults": zbx_sso::RoleMap::default().to_json(),
+                           "file": file, "zabbixRoles": zabbix_roles.as_ref().ok(), "zabbixError": zabbix_roles.err() });
+        }
+        let map = match msg.get("roleMap").map(zbx_sso::RoleMap::from_message) {
+            Some(Ok(m)) => m,
+            Some(Err(e)) => return json!({ "ok": false, "kind": "bad_message", "message": e }),
+            None => return json!({ "ok": false, "kind": "bad_message", "message": "ZABBIX_ROLEMAP_SET needs a roleMap" }),
+        };
+        let mut found = match found {
+            Ok(c) => c,
+            Err(refusal) => return refusal,
+        };
+        if !found.raw.is_object() {
+            return json!({ "ok": false, "kind": "parse_error", "message": "the config file is not a mapping" });
+        }
+        if !found.raw.get("zabbix").is_some_and(Value::is_object) {
+            found.raw["zabbix"] = json!({});
+        }
+        found.raw["zabbix"]["roleMap"] = map.to_json();
+        if let Some(z) = found.raw["zabbix"].as_object_mut() {
+            z.remove("role_map");
+        }
+        let kept = match self.store_config(&found).await {
+            Ok(k) => k,
+            Err(refusal) => return refusal,
+        };
+        tracing::info!(target: "audit", user = %caller.map(|c| c.name.as_str()).unwrap_or("-"), map = %map.to_json(), "zabbix role map changed");
+        json!({ "ok": true, "roleMap": map.to_json(), "keptVersion": kept })
+    }
+
+    /// The roles Zabbix has, for the Accounts page to offer by name. Best effort: no
+    /// Zabbix, or one that does not answer, is a reason, not a failure of the page.
+    async fn zabbix_roles(&self) -> Result<Vec<Value>, String> {
+        let zapi = self.zbx_api();
+        if !zapi.configured() {
+            return Err("the Zabbix API is not paired (Config → Zabbix), so the role names cannot be listed; type them".into());
+        }
+        zapi.roles().await
+    }
+
+    /// The `zabbix:` options as the server's config file (`server_config_path`) says them
+    /// now — the sign-in scope and the role map. Read at each Zabbix sign-in rather than
+    /// taken from the last sync, so a change applies to the next sign-in, sync or not.
+    /// Defaults when there is no file or it does not parse.
+    fn zbx_options_now(&self) -> ZbxOptions {
         let read = |p: &std::path::Path| std::fs::read_to_string(p).ok().and_then(|t| parse_config_text(&t).ok());
         let primary = self.server_config_path().as_deref().and_then(read);
         let raw = match primary {
@@ -2148,7 +2404,7 @@ impl Core {
             other => self.stray_config_path().as_deref().and_then(read).filter(config_has_clusters).or(other),
         };
         // No file is still a config: config.txt may manage the option on its own.
-        ZbxOptions::from_config(&raw.unwrap_or(Value::Null)).scope_users_by_group
+        ZbxOptions::from_config(&raw.unwrap_or(Value::Null))
     }
 
     /// Reads `defaults.tls` from the server's own config file and sets the accept-all
@@ -2285,9 +2541,13 @@ impl Core {
                 return (status, json!({ "ok": false, "kind": kind, "message": e.to_string() }));
             }
         };
-        let role = zbx_sso::role_for(claim.zabbix_user_type).expect("verify refuses a type with no role");
-        let by_group = self.scope_users_by_group_now();
-        let scope = zbx_sso::scope_for(role, &claim.groups, by_group);
+        let opts = self.zbx_options_now();
+        let Some(role) = opts.role_map.resolve(claim.zabbix_role.as_deref(), claim.zabbix_user_type) else {
+            let e = zbx_sso::SsoError::NoRole(zbx_sso::RoleMap::describe(claim.zabbix_role.as_deref(), claim.zabbix_user_type));
+            tracing::warn!(target: "audit", user = %claim.username, reason = %e, "zabbix sign-in refused");
+            return (403, json!({ "ok": false, "kind": "no_role", "message": e.to_string() }));
+        };
+        let scope = zbx_sso::scope_for(role, &claim.groups, opts.scope_users_by_group);
         let name = zbx_sso::account_name(&claim.username);
         let result = self.users.upsert_external(&name, zbx_sso::SOURCE, role, scope.clone());
         self.users.record_login(&name, "zabbix", result.as_ref().map(|_| ()));
@@ -2298,6 +2558,7 @@ impl Core {
                 self.sessions.refresh_for(&acct.name, acct.role, acct.scope.clone());
                 let code = self.zbx.issue_code(&acct.name);
                 tracing::info!(target: "audit", user = %acct.name, role = acct.role.as_str(),
+                               zabbix_role = ?claim.zabbix_role, zabbix_user_type = claim.zabbix_user_type,
                                groups = ?claim.groups, "zabbix sign-in code issued");
                 (200, json!({ "ok": true, "sso_code": code, "account": acct.name, "role": acct.role.as_str(),
                               "scoped": acct.scope.is_some() }))
@@ -2420,7 +2681,8 @@ impl Core {
             }
         };
         let name = zbx_sso::account_name(&q.zabbix_user);
-        let zabbix_role = zbx_sso::role_for(q.zabbix_user_type).map(|r| r.as_str());
+        // What a first sign-in would make this person, under the map as it is now.
+        let zabbix_role = self.zbx_options_now().role_map.resolve(q.zabbix_role.as_deref(), q.zabbix_user_type).map(|r| r.as_str());
         // Only an account a Zabbix sign-in made counts. A local account that happens to have
         // the namespaced name is somebody else's, exactly as the sign-in refuses to take it over.
         let acct = self.users.list().into_iter()

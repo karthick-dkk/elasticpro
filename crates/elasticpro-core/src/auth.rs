@@ -258,6 +258,17 @@ pub fn required_role(msg_type: &str) -> Option<Role> {
         // Everything below either writes, or hands back something secret.
         // CONFIG_READ returns the raw config, which carries cluster credentials.
         "CONFIG_READ" | "CONFIG_WRITE" | "FILE_WRITE" => Some(Role::Admin),
+        // One cluster added, changed or switched off in the config file — and nothing
+        // else: no removal, no credential, nothing outside clusters[] (cluster_save.rs
+        // holds the rule). An operator runs the fleet day to day; this is the part of the
+        // config that is day-to-day work. The file itself stays an admin's to read.
+        "CLUSTER_SAVE" => Some(Role::Operator),
+        // The automations list, likewise: rules an operator writes that propose what an
+        // admin then runs. Plain data, bounded, no credential (cluster_save.rs).
+        "AUTOMATIONS_SAVE" => Some(Role::Operator),
+        // Which Zabbix role becomes which ElasticPro role at sign-in: who gets in, and as
+        // what. An administrator's, like the accounts themselves.
+        "ZABBIX_ROLEMAP_GET" | "ZABBIX_ROLEMAP_SET" => Some(Role::Admin),
         "PRIME" | "FORGET" => Some(Role::Admin),
         // Operators write to clusters, so they unlock the guard to do it. The guard is
         // still one switch for the whole process, and still resets on restart.
@@ -1838,9 +1849,23 @@ mod tests {
 
     #[test]
     fn a_user_is_read_only_everywhere_that_matters() {
-        for t in ["WRITE_UNLOCK", "CONFIG_READ", "CONFIG_WRITE", "VAULT_GET", "TRUST_CERT", "PRIME", "USER_ADD", "TOKEN_CREATE"] {
+        for t in ["WRITE_UNLOCK", "CONFIG_READ", "CONFIG_WRITE", "VAULT_GET", "TRUST_CERT", "PRIME", "USER_ADD", "TOKEN_CREATE",
+                  "CLUSTER_SAVE", "AUTOMATIONS_SAVE", "ZABBIX_ROLEMAP_GET", "ZABBIX_ROLEMAP_SET"] {
             assert!(authorize(Role::User, t, "", "").is_err(), "{t} must not be open to a user");
             assert!(authorize(Role::Admin, t, "", "").is_ok(), "{t} must be open to an admin");
+        }
+    }
+
+    #[test]
+    fn an_operator_saves_a_cluster_but_neither_reads_nor_writes_the_file() {
+        assert_eq!(required_role("CLUSTER_SAVE"), Some(Role::Operator));
+        assert_eq!(required_role("AUTOMATIONS_SAVE"), Some(Role::Operator));
+        assert!(authorize(Role::Operator, "CLUSTER_SAVE", "", "").is_ok());
+        assert!(authorize(Role::Operator, "AUTOMATIONS_SAVE", "", "").is_ok());
+        assert!(authorize(Role::User, "CLUSTER_SAVE", "", "").is_err());
+        assert!(authorize(Role::User, "AUTOMATIONS_SAVE", "", "").is_err());
+        for t in ["CONFIG_READ", "CONFIG_WRITE", "FILE_WRITE", "SEAL", "PRIME", "ZABBIX_ROLEMAP_GET", "ZABBIX_ROLEMAP_SET"] {
+            assert!(authorize(Role::Operator, t, "", "").is_err(), "{t} must stay an admin's");
         }
     }
 

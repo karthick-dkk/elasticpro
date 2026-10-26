@@ -524,6 +524,16 @@ impl Zabbix {
     /// its family (`TEMPLATE_FAMILY`), or Cluster Management's template for clusters behind a
     /// Windows jump host — the hosts that do not make sense as a cluster, with why, and each
     /// template read with how many hosts it held.
+    /// Zabbix's user roles — `roleid`, `name`, `type` — for the role map on the Accounts page.
+    pub async fn roles(&self) -> Result<Vec<Value>, String> {
+        let v = self.call("role.get", json!({ "output": ["roleid", "name", "type"] })).await?;
+        Ok(v.as_array().cloned().unwrap_or_default().into_iter().map(|r| json!({
+            "roleid": r["roleid"].as_str().unwrap_or(""),
+            "name": r["name"].as_str().unwrap_or(""),
+            "type": r["type"].as_str().and_then(|t| t.parse::<i64>().ok()).or_else(|| r["type"].as_i64()).unwrap_or(0),
+        })).collect())
+    }
+
     pub async fn clusters(&self) -> Result<(Vec<ZbxCluster>, Vec<String>, Vec<(String, usize)>), String> {
         let out = json!(["templateid", "host"]);
         let mac = json!(["macro", "value", "type"]);
