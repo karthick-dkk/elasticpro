@@ -17,7 +17,7 @@ import { nodeRoles, nodeTier, roleKind, shardAllocation, taskSummary, statsCount
 import { privilegeHint } from '../core/es-tasks.js';
 import { restoreSnapshotDialog } from '../ui/snapshot-dialogs.js';
 import { rowMenu, popover, ICON, toast } from '../ui/menu.js';
-import { roleMayWrite } from '../core/writes.js';
+import { roleMayWrite, roleMayManageClusters } from '../core/writes.js';
 import { editCluster, rawClusterOf } from '../ui/config-editor.js';
 import { takeFocus, revealFocus } from '../core/focus.js';
 import { openClusterAlerts } from '../core/alert-goto.js';
@@ -393,8 +393,12 @@ function downNote(n) {
 
 /* ------------------------------- editing a cluster ------------------------------- */
 
-/** Who may change a cluster at all: the same rule the core enforces (writes.js). */
-const mayEdit = () => roleMayWrite() && !isSnapshotMode();
+/**
+ * Who may add or change a cluster here: an operator or an admin, the rule the core
+ * enforces (writes.js, CLUSTER_SAVE). Removing one and its credential stay on the Config
+ * page, an admin's.
+ */
+const mayEdit = () => roleMayManageClusters() && !isSnapshotMode();
 /** …and this one: it must be in the config file, not a Zabbix host (edited there). */
 const mayEditCluster = (c) => mayEdit() && c.source !== 'zabbix' && !!rawClusterOf(c);
 
@@ -632,7 +636,8 @@ function summaryCard(rows, all) {
   // anchored to its button, and a button replaced under an open panel would leave it
   // anchored to nothing. The table inside (heads and scroll box) is rebuilt with the sort,
   // the columns or the row count; the rows are put into its kept <tbody> as they are.
-  const shell = built.get('summary', String(isSnapshotMode()), () => buildCard());
+  // …and with who is looking: "+ Add cluster" is in the shell, and only for a role that may.
+  const shell = built.get('summary', `${isSnapshotMode()}|${mayEdit()}`, () => buildCard());
   const counts = healthCounts(all, (r) => healthState(r.d));
   const box = built.get('searchbox', [ui.search, filtered(), !!ui.text, ui.sort, ui.dir, ui.only, all.length, rows.length,
     counts.green, counts.yellow, counts.red, counts.unreachable].join('|'), () => searchBox(all, rows));
@@ -665,6 +670,10 @@ function buildCard() {
       h('h2', 'Cluster summary'),
       h('span.cl-searchbox'),
       h('div.cl-tools', { title: 'Table options' },
+        // Adding a cluster is an operator's job as much as an admin's (core: CLUSTER_SAVE);
+        // the Config page, where an admin also adds one, is not offered to operators.
+        mayEdit() ? h('button#cl-add.btn.sm', { type: 'button', title: 'Add a cluster to the config',
+          onclick: async () => { if (await editCluster(null)) draw(); } }, '+ Add cluster') : null,
         h('button#cl-columns.btn.sm', { type: 'button', 'aria-haspopup': 'dialog', 'aria-expanded': 'false',
           title: 'Show or hide the columns, the tiles and the sections of an open row', onclick: (e) => openColumns(e.currentTarget) }, 'Columns \u25be'),
         h('button.btn.sm', { type: 'button', onclick: exportSummary, title: 'The rows on screen, in the columns on screen' }, 'Export CSV'),

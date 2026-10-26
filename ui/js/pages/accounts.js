@@ -23,7 +23,10 @@ const MIN_PASSWORD = 10;   // must match auth::MIN_PASSWORD
 let host = null;
 const ui = { users: [], tokens: [], caller: null, apiTokens: false, err: '', freshSecret: null,
   logins: [], lockAfter: 5, lockMinutes: 15, failedOnly: false,
-  activity: [], activityFile: null, activityUser: '', activityFailed: false, activityErr: '' };
+  activity: [], activityFile: null, activityUser: '', activityFailed: false, activityErr: '',
+  // The Zabbix role map (hosted only): what the core holds, the shipped defaults, the role
+  // names Zabbix lists when its API is paired, and why it could not when it is not.
+  roleMap: null, roleDefaults: null, zabbixRoles: [], roleMapNote: '', roleMapErr: '', roleMapSaving: false };
 /** Cluster accounts are read per cluster, on demand — one call each, not on every render. */
 const cu = { byCluster: {}, loading: new Set() };
 
@@ -56,16 +59,125 @@ async function load() {
   if (ui.apiTokens) {
     const t = await bridge({ type: 'TOKEN_LIST' });
     ui.tokens = (t && t.ok && t.tokens) || [];
+    await loadRoleMap();
   }
   draw();
 }
 
 const ROLE_HELP = {
-  admin: 'Everything: accounts, secrets, the config, and writing to clusters.',
-  operator: 'Every cluster, read-only (GET and searches), plus alerts, silences and automation — no cluster changes, accounts, secrets or config.',
+  admin: 'Everything: accounts, secrets, the config, removing clusters, and writing to clusters.',
+  operator: 'Runs the fleet: every cluster read-only (GET and searches), alerts, silences, automation, and adding, changing or switching off a cluster — not removing one, not its credential, not accounts or the rest of the config.',
   user: 'Read-only: clusters and the REST console (GET and searches). No Automation or Config.',
   guest: 'The dashboard only — no index names.',
 };
+
+/* ------------------------------- the Zabbix role map ------------------------------- */
+
+/** What a Zabbix role may become here. `none` is a Zabbix role that is not signed in at all. */
+export const ROLE_TARGETS = [['admin', 'admin — manage'], ['operator', 'operator — operate'], ['user', 'user — view'], ['guest', 'guest — dashboard'], ['none', 'none — not signed in']];
+/** Zabbix's user types, which the map falls back to when a role name is not listed. */
+export const ZABBIX_TYPES = [[1, 'Zabbix User'], [2, 'Zabbix Admin'], [3, 'Zabbix Super admin']];
+
+async function loadRoleMap() {
+  const r = await bridge({ type: 'ZABBIX_ROLEMAP_GET' });
+  if (!r || !r.ok) { ui.roleMapErr = (r && r.message) || 'Could not read the role map.'; return; }
+  ui.roleMap = { names: { ...(r.roleMap && r.roleMap.names) }, types: { ...(r.roleMap && r.roleMap.types) } };
+  ui.roleDefaults = r.defaults || null;
+  ui.zabbixRoles = Array.isArray(r.zabbixRoles) ? r.zabbixRoles : [];
+  ui.roleMapNote = r.zabbixError || '';
+  ui.roleMapErr = '';
+}
+
+/**
+ * The names the card lists: every name the map holds, and every role Zabbix has (when its
+ * API is paired), once each, A–Z. A role Zabbix has but the map does not is "by user type".
+ */
+export function roleMapNames(map, zabbixRoles) {
+  const seen = new Map();
+  for (const z of zabbixRoles || []) if (z && z.name) seen.set(String(z.name), Number(z.type) || 0);
+  for (const n of Object.keys((map && map.names) || {})) if (!seen.has(n)) seen.set(n, 0);
+  return [...seen.entries()].map(([name, type]) => ({ name, type })).sort((a, b) => a.name.localeCompare(b.name));
+}
+
+/**
+ * The message the Save button sends, from what the card shows: the three types, each with
+ * a role; the names that have one (a name left "by user type" is not written).
+ */
+export function roleMapMessage(types, names) {
+  const out = { names: {}, types: {} };
+  for (const [t] of ZABBIX_TYPES) if (types[t]) out.types[String(t)] = types[t];
+  for (const [n, v] of Object.entries(names)) if (v) out.names[n] = v;
+  return out;
+}
+
+function roleMapCard() {
+  if (!ui.roleMap) {
+    return card('Zabbix role map', 'what a Zabbix sign-in becomes here',
+      h('div.muted', ui.roleMapErr || 'Loading…'));
+  }
+  const map = ui.roleMap;
+  const names = roleMapNames(map, ui.zabbixRoles);
+  const typeOf = (t) => map.types[String(t)] || (ui.roleDefaults && ui.roleDefaults.types && ui.roleDefaults.types[String(t)]) || 'none';
+  const typeRows = ZABBIX_TYPES.map(([t, label]) => h('tr',
+    h('td', h('b', label), h('span.muted', { style: { marginLeft: '6px', fontSize: '11px' } }, `user type ${t}`)),
+    h('td', select(`rm-type-${t}`, typeOf(t), ROLE_TARGETS)),
+    h('td.muted', { style: { fontSize: '11px' } }, 'when the role name below is not listed, or the Zabbix module is older than 2.1.13')));
+  const nameRows = names.map((z, i) => h('tr', { 'data-role-name': z.name },
+    h('td', h('b', z.name), z.type ? h('span.muted', { style: { marginLeft: '6px', fontSize: '11px' } }, `a ${(ZABBIX_TYPES.find(([t]) => t === z.type) || [])[1] || `type ${z.type}`} role`) : null),
+    h('td', select(`rm-name-${i}`, map.names[z.name] || '', [['', z.type ? `by user type (${typeOf(z.type)})` : 'by user type'], ...ROLE_TARGETS])),
+    h('td', { style: { textAlign: 'right' } },
+      map.names[z.name] !== undefined && !ui.zabbixRoles.some((r) => r.name === z.name)
+        ? h('button.btn.sm.ghost', { title: `Forget ${z.name}; its holders go by user type`, onclick: () => { delete map.names[z.name]; draw(); } }, '×')
+        : null)));
+  const addRow = h('tr',
+    h('td', h('input#rm-new-name', { type: 'text', placeholder: 'a Zabbix role name', 'aria-label': 'Zabbix role name', style: { width: '100%' } })),
+    h('td', select('rm-new-target', 'operator', ROLE_TARGETS)),
+    h('td', { style: { textAlign: 'right' } }, h('button.btn.sm', { onclick: () => {
+      const n = val('rm-new-name').trim();
+      if (!n) return;
+      readRoleMapFromPage();
+      map.names[n] = val('rm-new-target');
+      draw();
+    } }, 'Add')));
+  const defaults = ui.roleDefaults && ui.roleDefaults.types
+    ? ZABBIX_TYPES.map(([t, l]) => `${l} → ${ui.roleDefaults.types[String(t)]}`).join(', ') : '';
+  return card('Zabbix role map', 'what a Zabbix sign-in becomes here — applied at the next sign-in; an account pinned above keeps its pin',
+    h('div',
+      ui.roleMapErr ? h('div', { style: { color: 'var(--critical)', fontSize: '12px', marginBottom: '6px' } }, ui.roleMapErr) : null,
+      table(['Zabbix role', 'Becomes', ''], [...typeRows, ...nameRows, addRow]),
+      h('div.muted', { style: { fontSize: '11.5px', marginTop: '6px' } },
+        defaults ? `Shipped: ${defaults}. ` : '',
+        'A role name wins over its user type when the Zabbix module sends it (modules 2.1.13 on). ',
+        ui.roleMapNote ? h('span', { title: ui.roleMapNote }, 'Zabbix’s role names could not be listed (hover for why) — type them. ') : null)),
+    [h('button.btn.sm.primary', { disabled: ui.roleMapSaving, onclick: saveRoleMap }, ui.roleMapSaving ? 'Working…' : 'Save role map')]);
+}
+
+/** What the card's selects say now, into ui.roleMap, so a redraw keeps unsaved choices. */
+function readRoleMapFromPage() {
+  const map = ui.roleMap;
+  if (!map || !host) return;
+  for (const [t] of ZABBIX_TYPES) { const v = val(`rm-type-${t}`); if (v) map.types[String(t)] = v; }
+  roleMapNames(map, ui.zabbixRoles).forEach((z, i) => {
+    const el = host.querySelector(`#rm-name-${i}`);
+    if (!el) return;
+    if (el.value) map.names[z.name] = el.value; else delete map.names[z.name];
+  });
+}
+
+async function saveRoleMap() {
+  readRoleMapFromPage();
+  ui.roleMapSaving = true; draw();
+  const res = await bridge({ type: 'ZABBIX_ROLEMAP_SET', roleMap: roleMapMessage(ui.roleMap.types, ui.roleMap.names) });
+  ui.roleMapSaving = false;
+  if (!res || !res.ok) {
+    ui.roleMapErr = (res && res.message) || 'The core refused the role map.';
+    toast('Role map not saved', 'err', 9000, { detail: [ui.roleMapErr] });
+  } else {
+    toast('Role map saved', 'ok', 5000, { detail: ['It applies to the next Zabbix sign-in. Accounts pinned here keep their role.'] });
+    await loadRoleMap();
+  }
+  draw();
+}
 
 /** What each role may do, in the words an admin chooses by: view, write, manage. */
 const ACCESS = { admin: 'manage', operator: 'operate', user: 'view', guest: 'dashboard' };
@@ -109,7 +221,7 @@ export function zabbixRoleNote(u) {
   if (!u || u.source !== 'zabbix') return null;
   return u.rolePinned
     ? { pinned: true, text: 'Pinned here. Zabbix sign-ins no longer change it.' }
-    : { pinned: false, text: 'Follows Zabbix at each sign-in (Zabbix Admin → Operator, Super admin → Admin). Changing it here pins it.' };
+    : { pinned: false, text: 'Follows Zabbix at each sign-in — the role map on this page says what each Zabbix role becomes. Changing it here pins it.' };
 }
 
 /**
@@ -282,7 +394,7 @@ function draw() {
     h('div.grid.c4', { style: { marginBottom: '10px' } },
       statTile('Accounts', String(ui.users.length), 'who can sign in'),
       statTile('Administrators', String(admins), admins === 1 ? 'the only one — cannot be removed' : 'full control'),
-      statTile('Operators', String(ui.users.filter((u) => u.role === 'operator').length), 'read clusters, run alerts'),
+      statTile('Operators', String(ui.users.filter((u) => u.role === 'operator').length), 'run the fleet: clusters, alerts, automation'),
       statTile('Read-only', String(ui.users.filter((u) => u.role === 'user' || u.role === 'guest').length),
         `${ui.users.filter((u) => u.role === 'guest').length} of them guests`)),
 
@@ -328,6 +440,8 @@ function draw() {
     h('div', { style: { marginTop: '10px' } }, activityCard()),
 
     ui.apiTokens ? h('div', { style: { marginTop: '10px' } }, tokensCard()) : notHostedNote(),
+    // Zabbix signs people in only on the hosted build; elsewhere there is nothing to map.
+    ui.apiTokens ? h('div', { style: { marginTop: '10px' } }, roleMapCard()) : null,
 
     // A visible line between the two, because everything above it is a credential for
     // this app and everything below it is a credential for a cluster. They are stored in

@@ -18,6 +18,7 @@ import { bus } from '../core/state.js';
 import { modal, confirmDialog, field, text, select, val, checked } from './modal.js';
 import { parseRetention, parseSize } from '../core/volume.js';
 import { managedDefaults, MANAGED_NOTE } from '../core/managed.js';
+import { roleMayWrite } from '../core/writes.js';
 
 let masterInMemory = null;      // master password for this session only (needed to seal new secrets)
 
@@ -76,6 +77,56 @@ export async function saveRaw({ silent = false } = {}) {
   bus.emit('config', next);
   if (!silent) refreshAll({ force: true });
   return path;
+}
+
+/**
+ * Whether this session edits the file itself (an admin, or the portable build) or goes
+ * through the operator's door — `CLUSTER_SAVE` / `AUTOMATIONS_SAVE`, which the core opens
+ * to operators and bounds (cluster_save.rs). The same dialogs, two ways of saving.
+ */
+export const editsFileDirectly = () => roleMayWrite() && !(state.config && state.config.serverView);
+
+/**
+ * Read the server's credential-free view again after the core changed the file for us, so
+ * the page shows what was saved — what saveRaw() does with the file for an admin.
+ */
+async function reloadServerView({ silent = false } = {}) {
+  const view = await cfg.loadServerView();
+  if (view.status !== 'ok') throw new Error(view.error || 'could not read the clusters back');
+  await setConfig(view.config, view.path);
+  bus.emit('config', view.config);
+  if (!silent) refreshAll({ force: true });
+}
+
+/** The keys the server's view adds to an entry; they are not the cluster's. */
+const VIEW_ONLY = ['_index', '_id'];
+
+/**
+ * An operator's save of one cluster: the entry as the dialog built it, to the core, which
+ * adds or replaces exactly that entry and refuses anything else. `existing` is the entry
+ * the dialog opened on (its name is what the core replaces); null adds.
+ * @returns {Promise<string>} how the saved cluster signs in: kept | shared | admin | none
+ */
+async function saveClusterAsOperator(next, existing) {
+  const cluster = { ...next };
+  for (const k of VIEW_ONLY) delete cluster[k];
+  const res = await bridge({ type: 'CLUSTER_SAVE', cluster, replace: existing ? existing.name : null });
+  if (!res || !res.ok) throw new Error((res && res.message) || 'the core refused the save');
+  await reloadServerView();
+  return res.credential || '';
+}
+
+/**
+ * Save the automations list, whichever door this session has: the file for an admin,
+ * `AUTOMATIONS_SAVE` for an operator. The Automation page's one way to save.
+ */
+export async function saveAutomations() {
+  if (editsFileDirectly()) { await saveRaw({ silent: true }); return; }
+  const r = raw();
+  if (!r) throw new Error('no config loaded');
+  const res = await bridge({ type: 'AUTOMATIONS_SAVE', automations: Array.isArray(r.automations) ? r.automations : [] });
+  if (!res || !res.ok) throw new Error((res && res.message) || 'the core refused the save');
+  await reloadServerView({ silent: true });
 }
 
 /* ------------------------------------------------------------------ master password */
@@ -206,6 +257,10 @@ export async function editCluster(existing = null) {
   // figure actually in force rather than the built-in one.
   const d = { ...cfg.DEFAULTS, ...r.defaults };
   const cred = c.username || c.apiKey || c.bearer ? 'own' : 'shared';
+  // An admin edits the file: credentials, removal and all. An operator goes through the
+  // core's CLUSTER_SAVE, which takes one entry and refuses a credential or a removal —
+  // so neither is offered, and the dialog says whose they are.
+  const direct = editsFileDirectly();
   const body = [
     h('div', { style: { display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 2fr)', gap: '10px' } },
       field('Name', text('ce-name', c.name || '', { placeholder: 'acme-prod' })),
@@ -245,16 +300,22 @@ export async function editCluster(existing = null) {
         text('ce-volhead', written(c, 'volumeHeadroomPercent', 'volume_headroom_percent'),
           { mono: true, placeholder: String(d.volumeHeadroomPercent) }),
         `Added to the daily figure before it is multiplied out into every disk and backup requirement. 0–200, empty uses ${d.volumeHeadroomPercent}%.`)),
-    h('details.disc', { open: cred === 'own' },
-      h('summary', 'Credential for this cluster only (optional)'),
-      h('div', { style: { display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 1fr)', gap: '10px', padding: '8px 0 2px' } },
-        field('Username', text('ce-cu', c.username || ''), 'Leave both empty to use the shared credential.'),
-        field('Password', text('ce-cp', '', { type: 'password', placeholder: cfg.isSealed(c.password) ? '(stored encrypted — leave empty to keep)' : c.password ? '(stored in plain text — leave empty to keep)' : '' }), 'Sealed with the master password before it is written.'))),
+    direct
+      ? h('details.disc', { open: cred === 'own' },
+          h('summary', 'Credential for this cluster only (optional)'),
+          h('div', { style: { display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 1fr)', gap: '10px', padding: '8px 0 2px' } },
+            field('Username', text('ce-cu', c.username || ''), 'Leave both empty to use the shared credential.'),
+            field('Password', text('ce-cp', '', { type: 'password', placeholder: cfg.isSealed(c.password) ? '(stored encrypted — leave empty to keep)' : c.password ? '(stored in plain text — leave empty to keep)' : '' }), 'Sealed with the master password before it is written.')))
+      : h('div.muted.ce-managed-cred', { style: { fontSize: '11.5px' } },
+          h('b', 'Credential: managed by an administrator. '),
+          'The cluster signs in with the credential set for it, or with the shared one every cluster uses; neither is shown or changed here. ',
+          'Removing a cluster is an administrator’s too.'),
   ];
   const saved = await modal(existing ? `Edit cluster ${existing.name || ''}` : 'Add cluster',
-    'Saved to config_cluster.json; the dashboard reconnects immediately.', body,
+    direct ? 'Saved to config_cluster.json; the dashboard reconnects immediately.'
+           : 'Saved to the server’s config; the cluster is read from now on.', body,
     (ctx) => [
-      existing ? h('button.btn.danger', { onclick: async () => {
+      existing && direct ? h('button.btn.danger', { onclick: async () => {
         if (!(await confirmDialog(`Remove cluster ${existing.name || existing.url}?`,
           'It is taken out of the config file. The cluster itself and its data are untouched — ' +
           'the app simply stops watching it.', { yes: 'remove', danger: true }))) return;
@@ -306,6 +367,12 @@ export async function editCluster(existing = null) {
           const effTop = Number(next.volumeTopDays ?? d.volumeTopDays);
           if (Number.isFinite(effWin) && Number.isFinite(effTop) && effTop > effWin) {
             return ctx.msg(`Heaviest days counted (${effTop}) cannot be more than the volume window (${effWin} days).`);
+          }
+          if (!direct) {
+            // The core adds or replaces exactly this entry; the view it came from is read
+            // back afterwards, so the in-memory list is not touched here.
+            try { await saveClusterAsOperator(next, existing); ctx.done(true); } catch (e) { ctx.msg(`Save failed: ${e.message}`); }
+            return;
           }
           const cu = val('ce-cu').trim(), cp = val('ce-cp');
           if (cu) {
