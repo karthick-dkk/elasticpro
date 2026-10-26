@@ -157,16 +157,40 @@ fn validate(incoming: &Value, raw: &Value) -> Result<Map<String, Value>, Refusal
         return Err(Refusal::new("bad_message", "the URL must start with http:// or https:// and name a host"));
     }
     c.insert("url".into(), json!(url));
+    // Types are checked, not coerced: the browser reads this entry with JavaScript's
+    // truthiness (`String(c.tls || …)`), so a list or a number where text belongs would
+    // mean one thing to the destination check here and another to the page — and the
+    // destination check is what keeps a credential where an admin pointed it.
     for k in ["via", "jump", "jumpHost", "jump_host"] {
         if let Some(v) = c.get(k) {
-            let Some(id) = v.as_str().map(str::trim).filter(|s| !s.is_empty()) else {
+            let Some(id) = v.as_str().map(str::trim) else {
+                return Err(Refusal::new("bad_message", format!("{k} must be a jump host id")));
+            };
+            if id.is_empty() {
                 c.remove(k);
                 continue;
-            };
+            }
             if !jump_ids(raw).iter().any(|j| j == id) {
                 return Err(Refusal::new("bad_message", format!("via: {id} is not a jump host in this config — an administrator adds jump hosts")));
             }
+            c.insert(k.into(), json!(id));
         }
+    }
+    for k in ["tls", "note", "logBucket", "log_bucket", "liveRetention", "snapshotRetention", "backupCapacity", "logIndexPattern",
+              "live_retention", "snapshot_retention", "backup_capacity", "log_index_pattern"] {
+        if c.get(k).is_some_and(|v| !v.is_string()) {
+            return Err(Refusal::new("bad_message", format!("{k} must be text")));
+        }
+    }
+    if let Some(t) = c.get("tls").and_then(|v| v.as_str()) {
+        let t = t.trim().to_ascii_lowercase();
+        if !matches!(t.as_str(), "" | "auto" | "system" | "insecure") {
+            return Err(Refusal::new("bad_message", "tls must be auto, system or insecure"));
+        }
+        if t.is_empty() { c.remove("tls"); } else { c.insert("tls".into(), json!(t)); }
+    }
+    if c.get("tags").is_some_and(|v| !v.as_array().is_some_and(|a| a.iter().all(Value::is_string))) {
+        return Err(Refusal::new("bad_message", "tags must be a list of words"));
     }
     // `enabled` is a yes or a no; "false" as a string would read as on in the UI.
     if let Some(e) = c.get("enabled") {
@@ -448,12 +472,22 @@ mod tests {
             (json!({ "name": "X", "url": "https://" }), "no host"),
             (json!({ "name": "X", "url": "https://x:9200", "via": "nowhere" }), "unknown jump host"),
             (json!({ "name": "X", "url": "https://x:9200", "enabled": "no" }), "enabled as text"),
+            (json!({ "name": "X", "url": "https://x:9200", "tls": ["insecure"] }), "tls as a list — the browser would read it as insecure"),
+            (json!({ "name": "X", "url": "https://x:9200", "tls": "trust-all" }), "tls not a known setting"),
+            (json!({ "name": "X", "url": "https://x:9200", "via": 5 }), "via as a number"),
+            (json!({ "name": "X", "url": "https://x:9200", "jumpHost": ["jumpa"] }), "a route as a list"),
+            (json!({ "name": "X", "url": "https://x:9200", "tags": "prod" }), "tags as text"),
+            (json!({ "name": "X", "url": "https://x:9200", "note": 7 }), "a note that is not text"),
             (json!("X"), "not an object"),
         ] {
             let r = apply(&mut raw, &bad, None, ALL).unwrap_err();
             assert_eq!(r.kind, "bad_message", "{why}");
         }
         assert_eq!(raw, cfg());
+        // What is accepted is written in one spelling.
+        apply(&mut raw, &json!({ "name": "X", "url": "https://x:9200", "tls": " Insecure ", "via": " jumpa ", "tags": ["a"] }), None, ALL).unwrap();
+        assert_eq!(raw["clusters"][2]["tls"], json!("insecure"));
+        assert_eq!(raw["clusters"][2]["via"], json!("jumpa"));
     }
 
     #[test]
