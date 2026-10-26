@@ -405,9 +405,14 @@ export function diskCell(d, settings, { dataNodes = false } = {}) {
     : `Disk ${d.percent.toFixed(1)} % used. ${w.why}`)
     + (node ? ` Fullest node: ${node.name} ${node.percent.toFixed(0)} % (watermarks apply per node).` : '')
     + (n ? ` Summed over the ${n} data node${n === 1 ? '' : 's'} _cat/allocation lists; master-only and coordinating-only nodes hold no shards and are not counted.` : '');
+  // The figure on the first line; the watermark note and the node count on a second, so a
+  // cell at 85 %+ grows down into its own row, never sideways into the next column.
+  const sub = [];
+  if (note) sub.push(note.replace(/^ \u00b7 /, ''));
+  if (n) sub.push(`${n} data node${n === 1 ? '' : 's'}`);
   return h('div.disk-cell', { style: { minWidth: '150px' } },
-    h(`span.disk-text${w.level === 'high' ? '.high' : w.level === 'low' ? '.low' : ''}`, diskUseText(d) + note,
-      n ? h('span.muted', ` \u00b7 ${n} data node${n === 1 ? '' : 's'}`) : null),
+    h(`span.disk-text${w.level === 'high' ? '.high' : w.level === 'low' ? '.low' : ''}`, diskUseText(d),
+      sub.length ? h('span.disk-note', sub.join(' \u00b7 ')) : null),
     h('div.disk-bar', { role: 'img', title, 'aria-label': title },
       h(`i.disk-fill.${level}`, { style: { width: `${Math.min(100, Math.max(1.5, d.percent))}%` } }),
       w.known ? h('i.disk-tick', { style: { left: `${Math.min(100, w.high)}%` } }) : null));

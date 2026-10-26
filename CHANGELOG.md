@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.38
+
+**Clusters: the disk cell no longer runs into ILM and SLM.** From the low watermark on, the cell adds "above low watermark" or "above high watermark" to the figure, and with the data-node count that line was wider than the column: on a full cluster the words ran over the two columns beside it. The figure ("91 % · 339 of 373 GB") now stands alone on the first line and the watermark note with the node count sits under it in smaller type, so the cell grows down, never sideways; whatever is still too long is cut with an ellipsis inside the cell. The same text as before, the same colours, the whole explanation still on hover. Nothing in the core changed.
+
 ## 0.3.37
 
 **Clusters: the band above the table is gone.** The status strip under the tabs (config name, cluster count, fleet health, request rate) and the "Showing cached data … Read all" line no longer show on the Clusters page: the table is the dashboard, and both were in the way of it. The strip stays on Alerts, Automation and the admin pages; the coverage line and Read all stay on Alerts. The Clusters page still asks for what it is missing when it opens, and Refresh reads every cluster on screen again. Nothing in the core changed.
