@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.39
+
+**Snapshots, REST console and Indices lose the evidence stamp.** The amber "Data from … (35 h old). Refresh before capturing." banner above the page and the footer "Cluster: … · Snapshot data read … · Captured … · ElasticPro … · Signed in as …" under it are gone, at the user's request. The rest of the single-client layout stays as it was: these pages still show one cluster and nothing about the rest of the fleet, no address, and fleet notices wait in the bell until you leave. How old the data is remains on the Refresh button's minutes badge and on each list's own freshness line. Nothing in the core changed.
+
 ## 0.3.38
 
 **Clusters: the disk cell no longer runs into ILM and SLM.** From the low watermark on, the cell adds "above low watermark" or "above high watermark" to the figure, and with the data-node count that line was wider than the column: on a full cluster the words ran over the two columns beside it. The figure ("91 % · 339 of 373 GB") now stands alone on the first line and the watermark note with the node count sits under it in smaller type, so the cell grows down, never sideways; whatever is still too long is cut with an ellipsis inside the cell. The same text as before, the same colours, the whole explanation still on hover. Nothing in the core changed.

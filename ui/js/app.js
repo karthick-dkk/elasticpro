@@ -25,7 +25,7 @@ import { announceNewAlerts, announceSnapshotOutcomes, resetAnnounced } from './c
 import { onSessionLost, bridge, setSession, setSignedIn, abortPage } from './core/transport.js';
 import { readLaunch, withoutCode, withoutTrouble, troubleshootTarget, themeFor, exchangeCode, rememberEmbedTheme, askZabbixToSignIn, rememberPageForReauth, takeRememberedPage } from './core/embed.js';
 import { pageForProblem } from './core/alert-rules.js';
-import { evidenceLayout, evidenceStamp, createHeldNotices } from './core/evidence.js';
+import { evidenceLayout, createHeldNotices } from './core/evidence.js';
 
 let coreInfo = { version: '?' };
 
@@ -605,7 +605,7 @@ function renderTopbar() {
           h('i.dot'), 'snapshot')
       : null,
     // When the fleet was last refreshed is the badge on the Refresh button (tickStatus): whole
-    // minutes, the time on hover. On an evidence page the footer says when THIS data was read.
+    // minutes, the time on hover.
     // With the server's fleet cache there is nothing for a page to poll: the core goes to the
     // clusters (on its schedule, or when a page asks) and tells the page what changed. The auto toggle
     // would only be a switch for load that no longer exists, so this says how what lands
@@ -821,44 +821,6 @@ function evidenceChooser() {
       h('div', { style: { marginTop: '8px' } }, pick)));
 }
 
-/**
- * The line above the page when the data on it is stale, and the footer under it that is
- * printed into every screenshot. Built into the page's own column from what the page
- * says about its data (`evidenceData` — which dataset, how old), never from the fleet's
- * last refresh. Rebuilt only when its words changed: it ticks with the clock.
- */
-let evidenceKey = '';
-function renderEvidence() {
-  const view = $('#view');
-  if (!view || !view.parentNode) return;
-  let note = $('#evidence-note');
-  let foot = $('#evidence-foot');
-  const L = layout();
-  const c = L.evidence && !L.needsCluster ? clusters().find((x) => x.id === state.selected) : null;
-  if (!c) {
-    if (note) note.hidden = true;
-    if (foot) foot.hidden = true;
-    evidenceKey = '';
-    return;
-  }
-  if (!note) { note = h('div.banner.warn#evidence-note', { role: 'status', hidden: true }); view.before(note); }
-  if (!foot) { foot = h('footer#evidence-foot.evidence-foot', { 'aria-label': 'Evidence stamp' }); view.after(foot); }
-  const page = PAGES.find((p) => p.id === currentPage);
-  const info = (page && page.mod.evidenceData && page.mod.evidenceData(c)) || {};
-  const stamp = evidenceStamp({
-    cluster: c, label: info.label, fresh: info.fresh === undefined ? null : info.fresh, none: info.none,
-    now: Date.now(), version: coreInfo.version, user: me && me.name,
-  });
-  const key = `${c.id}|${stamp.text}|${stamp.note}`;
-  if (key === evidenceKey && !foot.hidden) return;
-  evidenceKey = key;
-  foot.hidden = false;
-  foot.dataset.tone = stamp.tone;
-  mount(foot, ...stamp.segments.map((seg) => h(`span.ev-seg.${seg.key}${seg.tone === 'stale' ? '.stale' : ''}`, seg.text)));
-  note.hidden = !stamp.note;
-  note.textContent = stamp.note;
-}
-
 /* ---------------------------------- router ---------------------------------- */
 
 /**
@@ -953,7 +915,6 @@ export function go(id) {
   try {
     if (layout().needsCluster) mount(view, evidenceChooser());
     else page.mod.render(view);
-    renderEvidence();
   } catch (e) {
     console.error(e);
     mount(view, h('div.banner.err', h('div', h('div.ttl', 'Page failed to render'), h('div.mono', String(e && e.stack || e)))));
@@ -1196,9 +1157,6 @@ bus.on('refreshed', (ev) => {
   onRefreshed(redrawGate, ev);
 });
 bus.on('tick', tickStatus);
-// The stamp's clock and the console's response time move without any data event; the state's own
-// tick only runs once auto-refresh has started, so the stamp keeps its own.
-setInterval(renderEvidence, 1000);
 
 let offeredAuthRecovery = false;
 function maybeOfferAuthRecovery() {
@@ -1223,7 +1181,6 @@ const scheduleDataRedraw = coalesce(() => {
   const p = PAGES.find((x) => x.id === currentPage);
   // The chooser is not the page: letting the page redraw would paint it over the question.
   if (p && p.mod.onData && !layout().needsCluster) p.mod.onData();
-  renderEvidence();
 }, { gapAfter: (costMs) => (costMs > 16 ? Math.min(1500, costMs * 2) : 0) });
 
 /*

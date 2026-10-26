@@ -3339,13 +3339,11 @@ if (viaFleet) {
     ok(doc.getElementById('side-foot').hidden === true, `evidence ${where}: the Config/Clusters/Health/Requests strip is showing`);
     ok(!doc.querySelector('.banner.coverage'), `evidence ${where}: the "Showing cached data for N clusters" banner is showing`);
     ok(!/Showing cached data for \d+ clusters|oldest .* unreachable/.test(text()), `evidence ${where}: fleet coverage wording is on the page`);
+    // The stamp (cluster, data time, capture time, version, user) and its stale banner went in
+    // 0.3.39 at the user's request; nothing may bring them back.
+    ok(!doc.getElementById('evidence-foot') && !doc.getElementById('evidence-note'), `evidence ${where}: the evidence stamp or its banner is drawn`);
+    ok(!/Refresh before capturing|before this capture|Captured \d{2}:\d{2}/.test(text()), `evidence ${where}: stamp wording is on the page`);
   };
-  const footer = (where) => {
-    const f = doc.getElementById('evidence-foot');
-    ok(!!f && !f.hidden, `evidence ${where}: no footer stamp`);
-    return f ? f.textContent : '';
-  };
-  const DATE = /\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}/;
 
   // Control: the same fleet on Clusters has all of it, so the checks below can fail.
   st.state.selected = 'all';
@@ -3368,7 +3366,6 @@ if (viaFleet) {
     ok(/Evidence needs one cluster/.test(text()), 'evidence snapshots: no explanation that evidence needs one cluster');
     ok(!doc.querySelector('#view section.lazy-block, #view .seg'), 'evidence snapshots: a fleet of snapshot lists is drawn under the question');
     noFleetChrome('snapshots (choosing)');
-    ok((doc.getElementById('evidence-foot') || { hidden: true }).hidden, 'evidence snapshots: a stamp is printed while no cluster is chosen');
     if (pick) { pick.value = main.id; pick.dispatchEvent(new window.Event('change', { bubbles: true })); await settleFor(500); }
   }
 
@@ -3406,29 +3403,22 @@ if (viaFleet) {
       ok(!t.includes('evd-foreign-path'), 'evidence console: the history lists a request recorded on another cluster');
       ok(t.includes('evd-own-path'), 'evidence console: this cluster\'s own history is missing');
       ok(![...doc.querySelectorAll('#c-history th')].some((th) => th.textContent === 'Cluster'), 'evidence console: the history still has a Cluster column');
-      ok(footer(id).includes('no request run yet'), `evidence console: before any request the stamp should say none was run: "${footer(id)}"`);
       doc.getElementById('c-path').value = '/_cluster/health';
       doc.getElementById('c-path').dispatchEvent(new window.Event('input', { bubbles: true }));
       doc.getElementById('c-run').click();
-      await settleFor(2200);          // the stamp is redrawn on its own one-second clock
+      await settleFor(800);
     }
     noOthers(id, main);
-    const f = footer(id);
-    ok(f.includes(`Cluster: ${main.name}`), `evidence ${id}: the stamp does not name the cluster: "${f}"`);
-    ok(!/https?:\/\//.test(f) && !f.includes(new URL(main.url).host), `evidence ${id}: the stamp prints the cluster address: "${f}"`);
     // Nowhere on the page: no http(s) address at all (the console's response body, which the person
     // asked for, is the one exception and is checked separately), and not the cluster's host:port.
     {
       const own = new URL(main.url).host;
-      const t = doc.getElementById('view').textContent + doc.getElementById('topbar').textContent + f;
+      const t = doc.getElementById('view').textContent + doc.getElementById('topbar').textContent;
       const body = doc.getElementById('c-out');
       const shown = body ? t.replace(body.textContent, '') : t;
       ok(!/https?:\/\/\S/.test(shown), `evidence ${id}: the page prints an address: "${(shown.match(/https?:\/\/\S+/) || [''])[0]}"`);
       ok(!shown.includes(own), `evidence ${id}: the page prints the cluster's host ${own}`);
     }
-    ok(DATE.test(f), `evidence ${id}: the stamp has no data time: "${f}"`);
-    ok(/Captured \d{2}:\d{2}:\d{2}/.test(f), `evidence ${id}: the stamp has no capture time: "${f}"`);
-    ok(!/data time unknown|not read yet|no request run yet/.test(f), `evidence ${id}: the stamp has no real data time: "${f}"`);
   }
 
   // What the app says by itself, while an evidence page is open: held, not shown, not lost.
@@ -3466,17 +3456,14 @@ if (viaFleet) {
     // The top bar has no alerts chip any more (the board of 2026-10-25): the Alerts tab carries the count.
     ok(![...doc.querySelectorAll('#topbar button')].some((b) => /^\d+ alerts?$/.test(b.textContent.trim())), 'evidence: an alerts chip is back in the top bar');
     ok(doc.getElementById('side-foot').hidden === true, 'evidence: the status strip is back on the Clusters page');
-    ok((doc.getElementById('evidence-foot') || { hidden: true }).hidden, 'evidence: the stamp is still printed on Clusters');
     ok(!!doc.querySelector('#nav button[data-page="alerts"] .pill'), 'evidence: the Alerts tab count did not come back');
   }
 
-  // A cluster that cannot be reached: the stamp says so rather than inventing a time.
+  // A cluster that cannot be reached: still one cluster on the page, nobody else named.
   {
     st.state.selected = dead.id;
     await go('indices'); await settleFor(500);
-    const f = footer('indices (unreachable cluster)');
-    ok(f.includes(`Cluster: ${dead.name}`), `evidence unreachable: the stamp does not name the cluster: "${f}"`);
-    ok(/not read|unreachable|failed|data time unknown/.test(f), `evidence unreachable: the stamp claims a clean read of a cluster that is down: "${f}"`);
+    noFleetChrome('indices (unreachable cluster)');
     noOthers('unreachable', dead);
     await go('overview');
   }

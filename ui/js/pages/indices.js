@@ -58,11 +58,6 @@ export function render(el) {
 }
 export function onData() { if (host && host.isConnected) draw(); }
 
-/** What the evidence footer (core/evidence.js) says about the data on screen: this list's own age. */
-export function evidenceData(c) {
-  return { label: 'Index data read', fresh: scrubFresh(datasetFreshness(c.id, 'indices'), c) };
-}
-
 function cluster() { return activeClusters()[0] || null; }
 
 async function load(force) {
