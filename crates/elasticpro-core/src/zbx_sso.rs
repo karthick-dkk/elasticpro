@@ -29,13 +29,18 @@
 //! is signed back (`sign_reply`) over the request's `ts` and nonce, so the module can tell
 //! an answer from this core from one somebody between the two made up.
 //!
-//! The mapping, which is the product decision this implements:
+//! The mapping, which is the product decision this implements, as shipped (`RoleMap`;
+//! an ElasticPro admin changes it on the Accounts page, `zabbix.roleMap` in the config):
 //!
 //! | Zabbix user type | Here      | Clusters                                   |
 //! |------------------|-----------|--------------------------------------------|
 //! | 1 User           | user      | only those tagged with one of their groups |
 //! | 2 Admin          | operator  | all                                        |
 //! | 3 Super admin    | admin     | all                                        |
+//!
+//! A newer embed module also names the Zabbix *role* ("Admin role", or one the site made);
+//! a name the map knows wins over the type, so a site can hand one custom Zabbix role to
+//! ElasticPro admins without making its holders Zabbix Super admins.
 
 use crate::auth::{ct_eq, random_hex, Role};
 use hmac::{Hmac, Mac};
@@ -63,6 +68,12 @@ pub struct Claim {
     pub zabbix_user_type: i64,
     #[serde(default)]
     pub groups: Vec<String>,
+    /// The Zabbix role's name ("Admin role", …). Sent by embed modules from 2.1.13; an
+    /// older module sends none and the user type alone decides.
+    #[serde(default)]
+    pub zabbix_role: Option<String>,
+    #[serde(default)]
+    pub zabbix_roleid: Option<i64>,
     pub ts: u64,
     pub nonce: String,
 }
@@ -74,6 +85,9 @@ pub struct Claim {
 pub struct RoleQuery {
     pub zabbix_user: String,
     pub zabbix_user_type: i64,
+    /// The Zabbix role's name, when the module knows to send it (2.1.13 on).
+    #[serde(default)]
+    pub zabbix_role: Option<String>,
     pub ts: u64,
     pub nonce: String,
 }
@@ -107,7 +121,8 @@ pub enum SsoError {
     BadBody(String),
     Stale,
     Replayed,
-    NoRole(i64),
+    /// The Zabbix role (named, or the user type) maps to no ElasticPro role here.
+    NoRole(String),
 }
 
 impl std::fmt::Display for SsoError {
@@ -118,18 +133,167 @@ impl std::fmt::Display for SsoError {
             SsoError::BadBody(why) => write!(f, "the sign-in request is malformed: {why}"),
             SsoError::Stale => write!(f, "the sign-in request is too old or from the future — check the clocks on the Zabbix and ElasticPro hosts"),
             SsoError::Replayed => write!(f, "that sign-in request was already used"),
-            SsoError::NoRole(t) => write!(f, "Zabbix user type {t} has no ElasticPro role (guests are not signed in)"),
+            SsoError::NoRole(who) => write!(f, "{who} has no ElasticPro role here (the role map on ElasticPro's Accounts page decides; guests are never signed in)"),
         }
     }
 }
 
-/// The role a Zabbix user type becomes. Guest (4) and anything unknown get nothing.
+/// The role a Zabbix user type becomes under the shipped map. Guest (4) and anything
+/// unknown get nothing. `RoleMap::resolve` is the full answer once a site changed the map.
 pub fn role_for(zabbix_user_type: i64) -> Option<Role> {
-    match zabbix_user_type {
-        1 => Some(Role::User),
-        2 => Some(Role::Operator),
-        3 => Some(Role::Admin),
-        _ => None,
+    RoleMap::default().resolve(None, zabbix_user_type)
+}
+
+/// Which ElasticPro role a Zabbix sign-in gets: `zabbix.roleMap` in the server's config.
+///
+/// Two tables. `names` is keyed by the Zabbix role's name (compared trimmed, case
+/// folded) and wins when the module sent one and the map has it; `types` is keyed by
+/// the Zabbix user type (1 User, 2 Admin, 3 Super admin) and is the fallback — and the
+/// whole answer for an embed module older than 2.1.13, which sends no role name. A
+/// value of `None` means "no access": that Zabbix role is not signed in at all.
+///
+/// In the file:
+///
+/// ```yaml
+/// zabbix:
+///   roleMap:
+///     names: { "Admin role": operator, "ES owners": admin }
+///     types: { "1": user, "2": operator, "3": admin }
+/// ```
+///
+/// A value is `admin`, `operator`, `user`, `guest` or `none`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RoleMap {
+    pub names: Vec<(String, Option<Role>)>,
+    pub types: Vec<(i64, Option<Role>)>,
+}
+
+impl Default for RoleMap {
+    fn default() -> RoleMap {
+        RoleMap { names: vec![], types: vec![(1, Some(Role::User)), (2, Some(Role::Operator)), (3, Some(Role::Admin))] }
+    }
+}
+
+impl RoleMap {
+    /// The most entries a map may hold, and the longest Zabbix role name — bounds on what
+    /// an admin can write into the config through `ZABBIX_ROLEMAP_SET`.
+    pub const MAX_NAMES: usize = 64;
+    pub const MAX_NAME_LEN: usize = 128;
+    /// The Zabbix user types a `types` entry may name.
+    pub const USER_TYPES: [i64; 3] = [1, 2, 3];
+
+    /// "admin" | "operator" | "user" | "guest" → that role; "none" (or "") → no access;
+    /// anything else is a mistake.
+    pub fn parse_target(s: &str) -> Result<Option<Role>, String> {
+        let t = s.trim().to_ascii_lowercase();
+        match t.as_str() {
+            "" | "none" | "no access" => Ok(None),
+            _ => Role::parse(&t).map(Some).ok_or_else(|| format!("{s:?} is not a role (admin, operator, user, guest or none)")),
+        }
+    }
+
+    pub fn target_str(r: Option<Role>) -> &'static str {
+        r.map(Role::as_str).unwrap_or("none")
+    }
+
+    /// The map `zabbix.roleMap` (or `role_map`) describes, over the shipped defaults: a
+    /// type the file does not mention keeps its default. Anything malformed is skipped
+    /// rather than failing the sign-in — a typo in the config must not lock everyone out;
+    /// `ZABBIX_ROLEMAP_SET` refuses the same typo on the way in.
+    pub fn from_config(zabbix: &serde_json::Value) -> RoleMap {
+        let mut map = RoleMap::default();
+        let Some(rm) = zabbix.get("roleMap").or_else(|| zabbix.get("role_map")).and_then(|v| v.as_object()) else { return map };
+        if let Some(names) = rm.get("names").and_then(|v| v.as_object()) {
+            for (k, v) in names.iter().take(RoleMap::MAX_NAMES) {
+                let k = k.trim();
+                if k.is_empty() || k.len() > RoleMap::MAX_NAME_LEN {
+                    continue;
+                }
+                if let Ok(target) = v.as_str().map(RoleMap::parse_target).unwrap_or(Err(String::new())) {
+                    map.names.retain(|(n, _)| !n.eq_ignore_ascii_case(k));
+                    map.names.push((k.to_string(), target));
+                }
+            }
+        }
+        if let Some(types) = rm.get("types").and_then(|v| v.as_object()) {
+            for (k, v) in types {
+                let Ok(ty) = k.trim().parse::<i64>() else { continue };
+                if !RoleMap::USER_TYPES.contains(&ty) {
+                    continue;
+                }
+                if let Ok(target) = v.as_str().map(RoleMap::parse_target).unwrap_or(Err(String::new())) {
+                    map.types.retain(|(t, _)| *t != ty);
+                    map.types.push((ty, target));
+                }
+            }
+        }
+        map.types.sort_by_key(|(t, _)| *t);
+        map
+    }
+
+    /// The map as it is written to the config and shown on the Accounts page.
+    pub fn to_json(&self) -> serde_json::Value {
+        let names: serde_json::Map<String, serde_json::Value> =
+            self.names.iter().map(|(n, r)| (n.clone(), serde_json::Value::String(RoleMap::target_str(*r).into()))).collect();
+        let types: serde_json::Map<String, serde_json::Value> =
+            self.types.iter().map(|(t, r)| (t.to_string(), serde_json::Value::String(RoleMap::target_str(*r).into()))).collect();
+        serde_json::json!({ "names": names, "types": types })
+    }
+
+    /// Check a map an admin sent (`ZABBIX_ROLEMAP_SET`), strictly: every key and value
+    /// must be right, or the whole thing is refused with the first reason.
+    pub fn from_message(v: &serde_json::Value) -> Result<RoleMap, String> {
+        let Some(m) = v.as_object() else { return Err("roleMap must be an object with names and types".into()) };
+        let mut map = RoleMap { names: vec![], types: vec![] };
+        if let Some(names) = m.get("names") {
+            let Some(names) = names.as_object() else { return Err("names must be an object: Zabbix role name → ElasticPro role".into()) };
+            if names.len() > RoleMap::MAX_NAMES {
+                return Err(format!("at most {} Zabbix role names", RoleMap::MAX_NAMES));
+            }
+            for (k, v) in names {
+                let k = k.trim();
+                if k.is_empty() || k.len() > RoleMap::MAX_NAME_LEN || k.chars().any(char::is_control) {
+                    return Err(format!("a Zabbix role name must be 1–{} characters with no control characters", RoleMap::MAX_NAME_LEN));
+                }
+                if map.names.iter().any(|(n, _)| n.eq_ignore_ascii_case(k)) {
+                    return Err(format!("{k:?} is listed twice"));
+                }
+                let target = RoleMap::parse_target(v.as_str().ok_or_else(|| format!("{k}: the role must be a string"))?)?;
+                map.names.push((k.to_string(), target));
+            }
+        }
+        let defaults = RoleMap::default();
+        for ty in RoleMap::USER_TYPES {
+            let given = m.get("types").and_then(|t| t.get(ty.to_string()));
+            let target = match given {
+                Some(v) => RoleMap::parse_target(v.as_str().ok_or_else(|| format!("types.{ty}: the role must be a string"))?)?,
+                None => defaults.types.iter().find(|(t, _)| *t == ty).and_then(|(_, r)| *r),
+            };
+            map.types.push((ty, target));
+        }
+        if let Some(extra) = m.get("types").and_then(|t| t.as_object()).and_then(|t| t.keys().find(|k| !k.trim().parse::<i64>().is_ok_and(|n| RoleMap::USER_TYPES.contains(&n)))) {
+            return Err(format!("types.{extra}: Zabbix user types are 1 (User), 2 (Admin) and 3 (Super admin)"));
+        }
+        Ok(map)
+    }
+
+    /// The ElasticPro role for a sign-in: by the Zabbix role's name when the module sent
+    /// one and the map knows it, else by the user type. `None`: not signed in.
+    pub fn resolve(&self, zabbix_role: Option<&str>, zabbix_user_type: i64) -> Option<Role> {
+        if let Some(name) = zabbix_role.map(str::trim).filter(|n| !n.is_empty()) {
+            if let Some((_, r)) = self.names.iter().find(|(n, _)| n.eq_ignore_ascii_case(name)) {
+                return *r;
+            }
+        }
+        self.types.iter().find(|(t, _)| *t == zabbix_user_type).and_then(|(_, r)| *r)
+    }
+
+    /// How a refused sign-in names what had no role, for the log and the 403.
+    pub fn describe(zabbix_role: Option<&str>, zabbix_user_type: i64) -> String {
+        match zabbix_role.map(str::trim).filter(|n| !n.is_empty()) {
+            Some(n) => format!("Zabbix role {n:?} (user type {zabbix_user_type})"),
+            None => format!("Zabbix user type {zabbix_user_type}"),
+        }
     }
 }
 
@@ -325,10 +489,12 @@ impl ZabbixSso {
         if c.groups.len() > 500 || c.groups.iter().any(|g| g.len() > 255) {
             return Err(SsoError::BadBody("too many groups, or a group name over 255 characters".into()));
         }
-        self.fresh_once(c.ts, &c.nonce, now_secs)?;
-        if role_for(c.zabbix_user_type).is_none() {
-            return Err(SsoError::NoRole(c.zabbix_user_type));
+        if c.zabbix_role.as_deref().is_some_and(|r| r.len() > RoleMap::MAX_NAME_LEN || r.chars().any(char::is_control)) {
+            return Err(SsoError::BadBody("zabbix_role is too long or has control characters".into()));
         }
+        self.fresh_once(c.ts, &c.nonce, now_secs)?;
+        // Whether this role gets in is the map's call (`RoleMap::resolve`), made by the
+        // caller with the server's config in hand; verifying is about who sent this.
         Ok(c)
     }
 
@@ -482,10 +648,56 @@ mod tests {
     }
 
     #[test]
-    fn a_guest_is_not_signed_in() {
+    fn a_guest_verifies_but_the_map_gives_it_no_role() {
         let s = sso();
         let b = body("guest", 4, &[], NOW, "nonce-0000000009");
-        assert_eq!(s.verify(&b, &signed(&b), NOW), Err(SsoError::NoRole(4)));
+        let c = s.verify(&b, &signed(&b), NOW).expect("the signature is what verify checks");
+        assert_eq!(RoleMap::default().resolve(c.zabbix_role.as_deref(), c.zabbix_user_type), None);
+        assert_eq!(c.zabbix_role, None, "an older module sends no role name");
+    }
+
+    #[test]
+    fn the_role_map_prefers_a_named_role_and_falls_back_to_the_type() {
+        let m = RoleMap::from_config(&serde_json::json!({ "roleMap": {
+            "names": { "ES owners": "admin", " Admin role ": "user", "Nobody": "none" },
+            "types": { "2": "admin", "9": "admin", "1": "guest" } } }));
+        assert_eq!(m.resolve(Some("es owners"), 1), Some(Role::Admin), "names fold case; the name wins over the type");
+        assert_eq!(m.resolve(Some("Admin role"), 2), Some(Role::User));
+        assert_eq!(m.resolve(Some("Nobody"), 3), None, "a name mapped to none refuses even a Super admin");
+        assert_eq!(m.resolve(Some("Unknown role"), 2), Some(Role::Admin), "an unknown name: the type decides, as the file set it");
+        assert_eq!(m.resolve(None, 2), Some(Role::Admin));
+        assert_eq!(m.resolve(None, 1), Some(Role::Guest), "guest is a role here: the dashboard only");
+        assert_eq!(m.resolve(None, 3), Some(Role::Admin), "a type the file does not mention keeps its default");
+        assert_eq!(m.resolve(None, 9), None);
+        // What it round-trips to.
+        let j = m.to_json();
+        assert_eq!(j["names"]["ES owners"], serde_json::json!("admin"));
+        assert_eq!(j["names"]["Admin role"], serde_json::json!("user"), "trimmed on the way in");
+        assert_eq!(j["names"]["Nobody"], serde_json::json!("none"));
+        assert_eq!(j["types"], serde_json::json!({ "1": "guest", "2": "admin", "3": "admin" }));
+        assert_eq!(RoleMap::from_config(&serde_json::json!({})), RoleMap::default());
+        assert_eq!(RoleMap::from_config(&serde_json::json!({ "roleMap": { "types": { "2": "emperor" } } })), RoleMap::default(),
+                   "a value that is not a role is skipped, never a lock-out");
+    }
+
+    #[test]
+    fn a_map_from_an_admin_is_checked_strictly() {
+        let ok = RoleMap::from_message(&serde_json::json!({ "names": { "ES owners": "admin" }, "types": { "2": "admin" } })).unwrap();
+        assert_eq!(ok.resolve(None, 2), Some(Role::Admin));
+        assert_eq!(ok.resolve(None, 1), Some(Role::User), "types left out keep their defaults");
+        assert_eq!(ok.types.len(), 3);
+        for (bad, why) in [
+            (serde_json::json!("x"), "not an object"),
+            (serde_json::json!({ "names": { "": "admin" } }), "empty name"),
+            (serde_json::json!({ "names": { "A": "emperor" } }), "not a role"),
+            (serde_json::json!({ "names": { "A": "admin", "a": "user" } }), "the same name twice"),
+            (serde_json::json!({ "types": { "4": "user" } }), "guest type"),
+            (serde_json::json!({ "types": { "2": 3 } }), "a number for a role"),
+        ] {
+            assert!(RoleMap::from_message(&bad).is_err(), "{why}");
+        }
+        assert_eq!(RoleMap::parse_target("none"), Ok(None));
+        assert_eq!(RoleMap::parse_target(" Operator "), Ok(Some(Role::Operator)));
     }
 
     #[test]
