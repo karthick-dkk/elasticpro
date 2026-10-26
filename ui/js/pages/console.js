@@ -177,18 +177,6 @@ let history = [];
 // reloads in this browser — with password, token and key fields redacted, never a secret.
 let tabs = initialState({ method: ui.method, path: ui.path, body: ui.body });
 const tabRes = new Map();
-/** When each response on screen came back, for the evidence stamp. */
-const resAt = new WeakMap();
-
-/**
- * What the evidence footer (core/evidence.js) says about this page's data: the console
- * shows a live response, so its "data time" is when the one on screen came back — not a
- * cached dataset, and not the fleet's last refresh.
- */
-export function evidenceData(c) {
-  const at = ui.res ? (resAt.get(ui.res) || 0) : 0;
-  return { label: 'Last response received', none: 'no request run yet', fresh: { ts: at, status: at ? 'ok' : 'never' } };
-}
 const TABS_KEY = 'console.tabs';
 let saveTimer = null;
 
@@ -498,7 +486,6 @@ async function run() {
     return;
   }
   ui.res = res;
-  resAt.set(res, Date.now());
   if (btn) { btn.disabled = false; btn.textContent = 'Run ▸'; }
 
   const entry = {

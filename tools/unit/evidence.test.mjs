@@ -1,5 +1,5 @@
 /**
- * The evidence layout: which pages have it, what its footer says, what it holds back.
+ * The evidence layout: which pages have it, how addresses are kept out, what it holds back.
  *
  * Snapshots, the REST console and Indices are screenshotted for one client, so they must
  * show one cluster and nothing about the fleet. The DOM side is in behaviour-check.mjs;
@@ -13,7 +13,7 @@ import { pathToFileURL } from 'node:url';
 
 const ROOT = path.resolve(import.meta.dirname, '../..');
 const ev = await import(pathToFileURL(path.join(ROOT, 'ui/js/core/evidence.js')).href);
-const { EVIDENCE_PAGES, evidenceLayout, evidenceStamp, stampTime, ageWords, hideAddress, scrubFresh, createHeldNotices } = ev;
+const { EVIDENCE_PAGES, evidenceLayout, hideAddress, scrubFresh, createHeldNotices } = ev;
 
 const PAGES = ['alerts', 'overview', 'indices', 'shards', 'logs', 'console', 'snapshots', 'volume', 'automation',
   'requests', 'accounts', 'settings'];
@@ -42,62 +42,12 @@ test('app.js leaves the decision to evidence.js', () => {
   assert.doesNotMatch(src, /EVIDENCE_PAGES\s*=/, 'a second list of evidence pages');
 });
 
-const NOW = new Date(2026, 9, 20, 13, 27, 2).getTime();
-const at = (h, m, s) => new Date(2026, 9, 20, h, m, s).getTime();
-const cluster = { name: 'Alpha-logging', url: 'https://alpha.example.com:9200' };
-const base = { cluster, label: 'Snapshot data read', now: NOW, version: '0.3.22', user: 'Admin', tz: 'IST' };
-
-test('the footer names the cluster, the data time, the capture time, the version and the user', () => {
-  const s = evidenceStamp({ ...base, fresh: { ts: at(13, 25, 20), status: 'ok' } });
-  assert.equal(s.text, 'Cluster: Alpha-logging · '
-    + 'Snapshot data read 2026-10-20 13:25:20 IST (2 min before this capture) · Captured 13:27:02 · '
-    + 'ElasticPro 0.3.22 · Signed in as Admin');
-  assert.equal(s.tone, 'ok');
-  assert.equal(s.note, '');
-});
-
-test('data past the page\'s limit turns amber and says to refresh', () => {
-  const s = evidenceStamp({ ...base, fresh: { ts: NOW - 2 * 3600 * 1000, status: 'ok' } });
-  assert.equal(s.tone, 'stale');
-  assert.match(s.text, /Data is 2 h old\. Refresh before capturing\./);
-  assert.match(s.note, /2 h old/);
-  // the page's own limit decides, not a global one
-  const young = evidenceStamp({ ...base, fresh: { ts: NOW - 4 * 60 * 1000, status: 'ok', staleAfterMs: 2 * 60 * 1000 } });
-  assert.equal(young.tone, 'stale');
-  const ok = evidenceStamp({ ...base, fresh: { ts: NOW - 4 * 60 * 1000, status: 'ok', staleAfterMs: 20 * 60 * 1000 } });
-  assert.equal(ok.tone, 'ok');
-});
-
-test('unknown is not zero: never read, no timestamp and unreachable each say so', () => {
-  const never = evidenceStamp({ ...base, fresh: { ts: 0, status: 'never' } });
-  assert.match(never.text, /not read yet/);
-  assert.equal(never.tone, 'unknown');
-  assert.doesNotMatch(never.text, /1970|before this capture/);
-
-  const none = evidenceStamp({ ...base, fresh: { ts: 0, status: 'never' }, none: 'no request run yet' });
-  assert.match(none.text, /no request run yet/);
-
-  const unknown = evidenceStamp({ ...base, fresh: null });
-  assert.match(unknown.text, /data time unknown/);
-
-  const down = evidenceStamp({ ...base, fresh: { ts: NOW - 60000, status: 'ok', reach: { state: 'unreachable' } } });
-  assert.equal(down.tone, 'stale');
-  assert.match(down.text, /cluster unreachable/);
-  assert.match(down.note, /unreachable/);
-
-  const failed = evidenceStamp({ ...base, fresh: { ts: NOW - 60000, status: 'error' } });
-  assert.match(failed.text, /last fetch failed/);
-});
-
-test('the version and the user are left out when unknown, not printed as "?"', () => {
-  const s = evidenceStamp({ ...base, version: '?', user: '', fresh: { ts: NOW - 1000, status: 'ok' } });
-  assert.doesNotMatch(s.text, /ElasticPro|Signed in/);
-});
-
-test('the stamp names the cluster and never its address', () => {
-  const s = evidenceStamp({ ...base, cluster: { name: 'A', url: 'https://u:p@10.9.8.7:9200/es' }, fresh: { ts: NOW, status: 'ok' } });
-  assert.doesNotMatch(s.text, /https?:|10\.9\.8\.7|9200|u:p|@/);
-  assert.match(s.text, /^Cluster: A \u00b7 /);
+test('no page carries the evidence stamp any more (0.3.39)', () => {
+  assert.equal(ev.evidenceStamp, undefined);
+  for (const f of ['ui/js/app.js', 'ui/js/pages/snapshots.js', 'ui/js/pages/console.js', 'ui/js/pages/indices.js', 'ui/css/app.css']) {
+    const src = fs.readFileSync(path.join(ROOT, f), 'utf8');
+    assert.doesNotMatch(src, /evidenceData|evidence-foot|evidence-note|Refresh before capturing/, f);
+  }
 });
 
 test('an error text that quotes the address is reduced to the cluster name', () => {
@@ -109,20 +59,6 @@ test('an error text that quotes the address is reduced to the cluster name', () 
   const f = scrubFresh({ ts: 1, status: 'error', error: { kind: 'x', message: 'no route to http://10.1.1.1:9200' } }, c);
   assert.equal(f.error.message, 'no route to Alpha-logging');
   assert.equal(scrubFresh(null, c), null);
-});
-
-test('ages are said in words a reader of a screenshot understands', () => {
-  assert.equal(ageWords(0), '0 s');
-  assert.equal(ageWords(40000), '40 s');
-  assert.equal(ageWords(6 * 60000), '6 min');
-  assert.equal(ageWords(2 * 3600000), '2 h');
-  assert.equal(ageWords(3 * 86400000), '3 days');
-  assert.equal(ageWords(-5000), '0 s', 'a clock a little ahead is not a negative age');
-});
-
-test('the time is local, to the second, with the zone', () => {
-  assert.equal(stampTime(at(9, 5, 7), 'IST'), '2026-10-20 09:05:07 IST');
-  assert.equal(stampTime(at(9, 5, 7), ''), '2026-10-20 09:05:07');
 });
 
 test('held notices come back once, as bell entries, with one line saying how many', () => {
