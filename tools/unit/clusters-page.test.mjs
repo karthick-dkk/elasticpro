@@ -170,3 +170,19 @@ test('the default order: unreachable, red, yellow, green; within a state the ful
     'worst first; fullest disk first within a state; no disk figure last; unreachable A–Z among themselves');
   assert.deepEqual(order(P.sortRows(rows, 'health', 1)).slice(0, 3), ['g-full', 'g-half', 'g-nodisk'], 'best first still breaks ties by disk');
 });
+
+test('the disk cell keeps the watermark note and the node count on a second line', async () => {
+  const C = await imp('ui/js/pages/common.js');
+  const GB = 1024 ** 3;
+  const settings = { defaults: { cluster: { routing: { allocation: { disk: { watermark: { low: '85%', high: '90%', flood_stage: '95%' } } } } } } };
+  const nodes = [{ name: 'a', percent: 91 }, { name: 'b', percent: 88 }, { name: 'c', percent: 86 }];
+  const hot = C.diskCell({ percent: 91, used: 339 * GB, total: 373 * GB, nodes }, settings, { dataNodes: true });
+  const text = hot.querySelector('.disk-text');
+  assert.equal(text.firstChild.textContent, '91 % · 339 of 373 GB', 'the figure alone on the first line');
+  assert.equal(text.querySelector('.disk-note').textContent, 'above high watermark · 3 data nodes', 'the rest on its own line');
+  assert.ok(text.classList.contains('high'));
+  const fine = C.diskCell({ percent: 56, used: 156 * GB, total: 279 * GB, nodes }, settings, { dataNodes: true });
+  assert.equal(fine.querySelector('.disk-note').textContent, '3 data nodes', 'below the low watermark only the count is left');
+  const bare = C.diskCell({ percent: 56, used: 156 * GB, total: 279 * GB }, settings);
+  assert.equal(bare.querySelector('.disk-note'), null, 'nothing to say: no second line');
+});

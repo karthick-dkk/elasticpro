@@ -648,6 +648,10 @@ table.cl-tbl > tbody > tr.cl-detail-row:hover > td { background: var(--surface-2
    from it, red from the high one; the tick marks the high watermark. */
 .disk-cell { display: grid; gap: 4px; }
 .disk-text { font-size: 11.5px; color: var(--text-secondary); font-variant-numeric: tabular-nums; }
+/* The second line of the figure (watermark, data-node count): the cell's own width decides
+   where it ends, so it never reaches the next column. */
+.disk-note { display: block; font-size: 10.5px; font-weight: 400; color: var(--text-muted); line-height: 1.25; white-space: normal; overflow-wrap: anywhere; }
+.disk-text.low .disk-note, .disk-text.high .disk-note { color: inherit; opacity: .85; }
 .disk-text.low { color: var(--warning-ink); font-weight: 600; }
 .disk-text.high { color: var(--critical-ink); font-weight: 600; }
 .disk-bar { position: relative; height: 6px; border-radius: 3px; background: var(--surface-3); min-width: 60px; }
@@ -1430,7 +1434,8 @@ table.cl-tbl > tbody > tr.cl-row > td:not(.cl-disk-td):not(.cl-name-td) > div { 
 .cl-sub { font-size: 11px; }
 .cl-health { cursor: help; }
 .cl-health:not([title]) { cursor: default; }
-.cl-disk-td .disk-cell { margin: 0 auto; max-width: 200px; min-width: 120px !important; }
+.cl-disk-td .disk-cell { margin: 0 auto; max-width: 200px; min-width: 120px !important; overflow: hidden; }
+.cl-disk-td .disk-text { display: block; overflow: hidden; text-overflow: ellipsis; }
 .disk-fill { background: var(--good); }
 .disk-fill.ok { background: var(--good); }
 .disk-fill.low { background: var(--warning); }
