@@ -2264,12 +2264,11 @@ impl Core {
     async fn adopt_saved_cluster(self: &Arc<Self>, saved: &crate::cluster_save::Saved, raw: &Value) -> &'static str {
         let entry = &saved.entry;
         let get = |k: &str| entry.get(k).and_then(|v| v.as_str()).map(str::trim).filter(|s| !s.is_empty()).map(String::from);
-        let id_of = |name: &str| {
-            let s = crate::zabbix_api::slug(name);
-            if s.is_empty() { "cluster".to_string() } else { s }
-        };
-        let id = id_of(&saved.name);
-        let old_id = saved.was.as_deref().map(id_of);
+        let id = crate::cluster_save::cluster_id(&saved.name);
+        // Only an edit takes over a polled entry, and only the one it was. An add whose id
+        // is already polled (a Zabbix host's, say) does not displace it: apply() refused
+        // every config name that would collide, so this is the fleet's entry, not ours.
+        let old_id = saved.was.as_deref().map(crate::cluster_save::cluster_id);
         let url = get("url").unwrap_or_default().trim_end_matches('/').to_string();
         let own_cred = saved.entry.as_object().is_some_and(|m| {
             let mut probe = Value::Object(m.clone());
@@ -2282,7 +2281,11 @@ impl Core {
         let credential;
         {
             let mut p = self.primed.write();
-            let old = old_id.as_deref().and_then(|i| p.clusters.remove(i)).or_else(|| p.clusters.remove(&id));
+            if old_id.is_none() && (p.clusters.contains_key(&id) || self.zbx_sync.read().specs.contains_key(&id)) {
+                tracing::warn!(target: "audit", cluster = %saved.name, id = %id, "cluster saved, but the fleet already polls that id; left as it was");
+                return "none";
+            }
+            let old = old_id.as_deref().and_then(|i| p.clusters.remove(i));
             let same_address = old.as_ref().is_some_and(|o| o.url.trim_end_matches('/').eq_ignore_ascii_case(&url));
             changed_address = old.is_some() && !same_address;
             let auth_header = match (&old, same_address) {

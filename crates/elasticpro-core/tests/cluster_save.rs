@@ -158,14 +158,23 @@ async fn an_operator_adds_changes_and_switches_off_a_cluster_and_the_fleet_follo
     assert_eq!(v["clusters"][1]["name"], json!("Gamma Two"));
     assert_eq!(v["clusters"].as_array().unwrap().len(), 2, "an edit never removes");
 
-    // Edit Alpha, whose own credential is in the file, to a new address: the core cannot
-    // build its header from a file this caller may not read — an admin signs in once.
+    // Alpha signs in with a credential of its own: an operator may not move it — the next
+    // admin PRIME would build a header from the file and send it wherever the entry points.
     let r = save(&c, &op, json!({ "name": "Alpha", "url": "https://alpha-moved.example:9200", "tags": ["prod"] }), Some("Alpha")).await;
-    assert_eq!(r["ok"], json!(true), "{r}");
-    assert_eq!(r["credential"], json!("admin"));
+    assert_eq!(r["kind"], json!("credential_refused"), "{r}");
     let v = file(&path).1;
-    assert_eq!(v["clusters"][0]["url"], json!("https://alpha-moved.example:9200"));
-    assert_eq!(v["clusters"][0]["apiKey"], json!("alpha-api-key"), "the credential stays with the entry");
+    assert_eq!(v["clusters"][0]["url"], json!(alpha.url()));
+    // Everything else about it, yes — and the header the core holds for it stays.
+    let r = save(&c, &op, json!({ "name": "Alpha", "url": alpha.url(), "tags": ["prod", "eu"] }), Some("Alpha")).await;
+    assert_eq!((r["ok"].clone(), r["credential"].clone()), (json!(true), json!("kept")), "{r}");
+    assert_eq!(health(&c, &op, "alpha").await["ok"], json!(true));
+    assert_eq!(alpha.last_hit().unwrap().header("authorization"), Some("Basic YWxwaGE6a2V5"));
+    assert_eq!(file(&path).1["clusters"][0]["apiKey"], json!("alpha-api-key"), "the credential stays with the entry");
+    // A name that is Alpha's id in another spelling would take over its polled entry: refused.
+    let r = save(&c, &op, json!({ "name": "alpha", "url": gamma.url() }), None).await;
+    assert_eq!(r["kind"], json!("name_taken"), "{r}");
+    assert_eq!(health(&c, &op, "alpha").await["ok"], json!(true));
+    assert_eq!(alpha.last_hit().unwrap().header("authorization"), Some("Basic YWxwaGE6a2V5"), "Alpha is still Alpha");
 
     // Switch Gamma Two off: in the file, not polled from the page.
     let r = save(&c, &op, json!({ "name": "Gamma Two", "url": gamma.url(), "enabled": false }), Some("Gamma Two")).await;

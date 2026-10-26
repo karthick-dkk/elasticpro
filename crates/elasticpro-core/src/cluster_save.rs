@@ -13,7 +13,14 @@
 //! * the credential already on the entry stays exactly as it was: the operator never saw
 //!   it (`CONFIG_VIEW` strips it) and cannot have meant to change it;
 //! * a `via:` must name a jump host the file has — `normalize()` in the UI throws on an
-//!   unknown one, which would break the config for everybody, not just this cluster.
+//!   unknown one, which would break the config for everybody, not just this cluster;
+//! * names are unique by their id (`slug`), not only by their spelling: "Alpha" and
+//!   "alpha" would be one cluster to the fleet, and an add under the second would take
+//!   over the first's polled entry;
+//! * a cluster that signs in with a credential of its own keeps its address: the next
+//!   admin PRIME builds a header from the file and would send that credential wherever
+//!   the entry now points. An administrator moves such a cluster; an operator moves one
+//!   that uses the shared credential, and may change everything else about either.
 //!
 //! Which clusters a scoped caller may touch is the caller's business (`sees`); this takes
 //! the predicate. `apply_automations` is the same door for the `automations:` list.
@@ -81,6 +88,21 @@ fn jump_ids(raw: &Value) -> Vec<String> {
 
 fn name_of(c: &Value) -> Option<&str> {
     c.get("name").and_then(|v| v.as_str()).map(str::trim).filter(|s| !s.is_empty())
+}
+
+/// The id the fleet knows a config cluster by: the UI's `slug()` (core/config.js), so the
+/// core's poller and the page agree. A name with nothing usable in it is "cluster".
+pub fn cluster_id(name: &str) -> String {
+    let s = crate::zabbix_api::slug(name);
+    if s.is_empty() { "cluster".to_string() } else { s }
+}
+
+/// An address with its credential and trailing slash taken out, lower-cased for the
+/// host: what "the same address" means here.
+fn address_key(url: &str) -> String {
+    let mut v = json!(url.trim().trim_end_matches('/'));
+    redact_config(&mut v);
+    v.as_str().unwrap_or("").to_ascii_lowercase()
 }
 
 /// Whether a key is one `redact_config` takes out of a view — a credential's name.
@@ -178,22 +200,32 @@ pub fn apply(raw: &mut Value, incoming: &Value, replace: Option<&str>, sees: &dy
         }
         None => None,
     };
-    if list.iter().enumerate().any(|(i, c)| Some(i) != pos && name_of(c) == Some(name.as_str())) {
-        return Err(Refusal::new("name_taken", format!("another cluster is already called {name:?}")));
+    let id = cluster_id(&name);
+    if let Some(other) = list.iter().enumerate().find(|(i, c)| Some(*i) != pos && name_of(c).is_some_and(|n| n == name || cluster_id(n) == id)) {
+        let other = name_of(other.1).unwrap_or_default();
+        return Err(Refusal::new("name_taken", if other == name {
+            format!("another cluster is already called {name:?}")
+        } else {
+            format!("{name:?} would be the same cluster as {other:?} to the fleet (both are {id:?}) — choose a name that differs in more than case or punctuation")
+        }));
     }
     let mut entry = clean;
     let (action, was, before) = match pos {
         Some(i) => {
             let old = list[i].clone();
+            if !credential_parts(&old).is_empty()
+                && address_key(old.get("url").and_then(|v| v.as_str()).unwrap_or("")) != address_key(entry.get("url").and_then(|v| v.as_str()).unwrap_or(""))
+            {
+                return Err(Refusal::new("credential_refused",
+                    "this cluster signs in with a credential of its own, so only an administrator changes its address — everything else about it you may change"));
+            }
             // The credential the operator never saw, exactly as it was. A URL that carried
             // one (`user:pass@`) is kept whole when the operator sent its redacted form.
             for (k, v) in credential_parts(&old) {
                 entry.insert(k, v);
             }
             if let Some(old_url) = old.get("url").and_then(|v| v.as_str()) {
-                let mut shown = json!(old_url);
-                redact_config(&mut shown);
-                if shown.as_str().map(|s| s.trim_end_matches('/')) == entry.get("url").and_then(|v| v.as_str()) {
+                if address_key(old_url) == address_key(entry.get("url").and_then(|v| v.as_str()).unwrap_or("")) {
                     entry.insert("url".into(), json!(old_url));
                 }
             }
@@ -294,11 +326,34 @@ mod tests {
     }
 
     #[test]
-    fn a_changed_url_is_the_new_url() {
+    fn a_cluster_with_its_own_credential_keeps_its_address() {
         let mut raw = cfg();
-        apply(&mut raw, &json!({ "name": "Alpha", "url": "https://alpha-new:9200" }), Some("Alpha"), ALL).unwrap();
-        assert_eq!(raw["clusters"][0]["url"], json!("https://alpha-new:9200"));
-        assert_eq!(raw["clusters"][0]["apiKey"], json!("alpha-key"), "the entry's own credential stays even so");
+        let r = apply(&mut raw, &json!({ "name": "Alpha", "url": "https://alpha-new:9200" }), Some("Alpha"), ALL).unwrap_err();
+        assert_eq!(r.kind, "credential_refused");
+        assert_eq!(raw, cfg(), "nothing moved");
+        // Spelled differently, the same address: not a move.
+        apply(&mut raw, &json!({ "name": "Alpha", "url": "HTTPS://alpha:9200/" }), Some("Alpha"), ALL).unwrap();
+        assert_eq!(raw["clusters"][0]["url"], json!("https://svc:pw@alpha:9200"), "and the URL's credential comes back");
+        // A cluster on the shared credential moves freely.
+        let mut raw = cfg();
+        raw["clusters"][1] = json!({ "name": "Beta", "url": "https://beta:9200" });
+        apply(&mut raw, &json!({ "name": "Beta", "url": "https://beta-new:9200" }), Some("Beta"), ALL).unwrap();
+        assert_eq!(raw["clusters"][1]["url"], json!("https://beta-new:9200"));
+    }
+
+    #[test]
+    fn a_name_that_is_another_clusters_id_is_taken() {
+        let mut raw = cfg();
+        for name in ["alpha", "ALPHA", "Alpha!", " alpha "] {
+            let r = apply(&mut raw, &json!({ "name": name, "url": "https://x:9200" }), None, ALL).unwrap_err();
+            assert_eq!(r.kind, "name_taken", "{name:?}");
+            assert!(r.message.contains("same cluster"), "{}", r.message);
+        }
+        let r = apply(&mut raw, &json!({ "name": "beta", "url": "https://x:9200" }), Some("Alpha"), ALL).unwrap_err();
+        assert_eq!(r.kind, "name_taken", "a rename onto another's id");
+        assert_eq!(raw, cfg());
+        assert_eq!(cluster_id("Alpha Prod (EU)"), "alpha-prod-eu");
+        assert_eq!(cluster_id("!!!"), "cluster");
     }
 
     #[test]
