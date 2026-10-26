@@ -34,7 +34,7 @@ test('a local account has no Zabbix note', () => {
 test('not pinned: it follows Zabbix, and changing it here pins it', () => {
   const n = A.zabbixRoleNote(zbx({ rolePinned: false }));
   assert.equal(n.pinned, false);
-  assert.equal(n.text, 'Follows Zabbix at each sign-in (Zabbix Admin → Operator, Super admin → Admin). Changing it here pins it.');
+  assert.equal(n.text, 'Follows Zabbix at each sign-in — the role map on this page says what each Zabbix role becomes. Changing it here pins it.');
 });
 
 test('pinned: Zabbix sign-ins no longer change it', () => {
@@ -56,7 +56,7 @@ test('the origin cell\'s tooltip reads as sentences: the scope after the role no
   assert.equal(A.originCell(zbx({ rolePinned: true })).getAttribute('title'),
     'Signed in through Zabbix. Groups follow Zabbix at each sign-in. Role: Pinned here. Zabbix sign-ins no longer change it. Every cluster.');
   assert.equal(A.originCell(zbx({ rolePinned: false, scope: ['acme', 'globex'] })).getAttribute('title'),
-    'Signed in through Zabbix. Groups follow Zabbix at each sign-in. Role: Follows Zabbix at each sign-in (Zabbix Admin → Operator, Super admin → Admin). Changing it here pins it. Clusters for: acme, globex.');
+    'Signed in through Zabbix. Groups follow Zabbix at each sign-in. Role: Follows Zabbix at each sign-in — the role map on this page says what each Zabbix role becomes. Changing it here pins it. Clusters for: acme, globex.');
   assert.match(A.originCell(zbx({ scope: [] })).getAttribute('title'), / In no mapped Zabbix group — sees no clusters\.$/);
 });
 

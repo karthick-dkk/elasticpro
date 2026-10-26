@@ -10,7 +10,7 @@ import { activeRules, runAutomation, resultsFor, allProposals, allBlocked, isRun
 import { deleteIndices, closeIndices } from '../ui/index-actions.js';
 import { ruleBuilder } from '../ui/rule-builder.js';
 import { putRule, removeRule, loadRules } from '../core/user-rules.js';
-import { saveRaw } from '../ui/config-editor.js';
+import { saveAutomations } from '../ui/config-editor.js';
 import { confirmDialog } from '../ui/modal.js';
 import { toast } from '../ui/menu.js';
 import { navigateTo } from '../core/intent.js';
@@ -181,7 +181,7 @@ async function edit(existing) {
   if (!rule) return;
   try {
     putRule(rule);
-    await saveRaw({ silent: true });
+    await saveAutomations();
   } catch (e) {
     if (existing) putRule(existing); else removeRule(rule.id);
     toast('Could not save the automation', 'err', 12000,
@@ -197,7 +197,7 @@ async function destroy(u) {
     { yes: 'remove', danger: true }))) return;
   const before = loadRules().find((r) => r.id === u.id);
   removeRule(u.id);
-  try { await saveRaw({ silent: true }); }
+  try { await saveAutomations(); }
   catch (e) { if (before) putRule(before); toast('Could not remove the automation', 'err', 12000, { detail: [e.message || String(e)] }); return; }
   await check();
 }

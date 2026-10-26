@@ -20,11 +20,21 @@ let unlocked = false;
 const listeners = new Set();
 
 /**
- * Whether the signed-in role may change a cluster at all. Only an admin may; an operator
+ * Whether the signed-in role may write to a cluster at all. Only an admin may; an operator
  * and a user read (the core refuses the rest, auth::authorize). No caller is the portable
  * build, which is its own administrator.
  */
 export function roleMayWrite() { return !state.caller || state.caller.role === 'admin'; }
+
+/**
+ * Whether the signed-in role may add a cluster to the config, change one or switch one
+ * off: an operator or an admin. Removing a cluster, its credential and the rest of the
+ * file stay an admin's — the core's `CLUSTER_SAVE` refuses them whatever the page shows.
+ * Mirrors `required_role()` in auth.rs; the core, not this, is what decides.
+ */
+export function roleMayManageClusters() {
+  return !state.caller || state.caller.role === 'admin' || state.caller.role === 'operator';
+}
 
 /** Is the session unlocked, or does the config allow writes outright — for a role that may write? */
 export function writesAllowed() { return roleMayWrite() && (!isReadOnly() || unlocked); }

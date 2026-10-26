@@ -1016,12 +1016,39 @@ await go('overview');
     const dlg = doc.querySelector('.modal-overlay .modal');
     ok(dlg && /Edit cluster/.test(dlg.textContent), 'name menu → Edit: the cluster editor did not open');
     if (dlg) { const cancel = [...dlg.querySelectorAll('button')].find((b) => b.textContent === 'Cancel'); press(cancel); await settleFor(150); }
-    // A role that may not change clusters is not offered Edit.
+    // A role that may not change clusters is not offered Edit, nor "+ Add cluster".
     st.state.caller = { name: 'columns-check', role: 'user' };
     await go('overview');
     menu = await openMenu();
     ok(menu && ![...menu.querySelectorAll('button[role=menuitem]')].some((b) => b.children[1].textContent === 'Edit'), 'name menu: Edit offered to a role that cannot edit');
     key('Escape'); await settleFor(60);
+    ok(!doc.getElementById('cl-add'), 'overview: "+ Add cluster" offered to a user');
+    // An operator is offered both (the core's CLUSTER_SAVE is theirs), but the dialog has
+    // no Remove and no credential fields: those stay an admin's. Saving goes to the core,
+    // which this dev bridge (no config file) refuses — and the refusal is shown, not swallowed.
+    st.state.caller = { name: 'columns-check', role: 'operator' };
+    await go('overview');
+    ok(!!doc.getElementById('cl-add'), 'overview: no "+ Add cluster" for an operator');
+    menu = await openMenu();
+    const editItem = menu && [...menu.querySelectorAll('button[role=menuitem]')].find((b) => b.children[1].textContent === 'Edit');
+    ok(!!editItem, 'name menu: no Edit for an operator');
+    if (editItem) {
+      press(editItem); await settleFor(300);
+      const od = doc.querySelector('.modal-overlay .modal');
+      ok(od && /Edit cluster/.test(od.textContent), 'operator: the cluster editor did not open');
+      if (od) {
+        const labels = [...od.querySelectorAll('button')].map((b) => b.textContent);
+        ok(!labels.includes('Remove'), 'operator: Remove is offered');
+        ok(!od.querySelector('#ce-cp') && !od.querySelector('#ce-cu'), 'operator: credential fields are offered');
+        ok(!!od.querySelector('.ce-managed-cred'), 'operator: the dialog does not say the credential is an administrator\'s');
+        const save = [...od.querySelectorAll('button')].find((b) => b.textContent === 'Save');
+        press(save); await settleFor(600);
+        const still = doc.querySelector('.modal-overlay .modal');
+        const said = still ? ((still.querySelector('.modal-msg') || {}).textContent || '') : '';
+        ok(still && /Save failed/.test(said), `operator: a refused CLUSTER_SAVE was not shown in the dialog (${said || 'closed'})`);
+        const cancel = still && [...still.querySelectorAll('button')].find((b) => b.textContent === 'Cancel'); if (cancel) { press(cancel); await settleFor(150); }
+      }
+    } else { key('Escape'); await settleFor(60); }
     st.state.caller = { name: 'columns-check', role: 'admin' };
     st.state.selected = 'all';
   }
@@ -2063,7 +2090,7 @@ if (config.clusters.length >= 2 && viaFleet) {
   const close = () => { const o = doc.querySelector('.modal-overlay'); if (o) o.remove(); };
   accounts.editUser({ name: 'adam@zabbix', role: 'operator', source: 'zabbix', rolePinned: false });
   let dlg = doc.querySelector('.modal');
-  ok(dlg && /Follows Zabbix at each sign-in \(Zabbix Admin → Operator, Super admin → Admin\)\. Changing it here pins it\./.test(dlg.textContent),
+  ok(dlg && /Follows Zabbix at each sign-in — the role map on this page says what each Zabbix role becomes\. Changing it here pins it\./.test(dlg.textContent),
     `accounts: the unpinned help text is missing: ${dlg && dlg.textContent}`);
   ok(dlg && ![...dlg.querySelectorAll('button')].some((b) => b.textContent === 'Follow Zabbix again'),
     'accounts: an account that already follows Zabbix offers to follow Zabbix again');
