@@ -17,8 +17,9 @@
 //! * names are unique by their id (`slug`), not only by their spelling: "Alpha" and
 //!   "alpha" would be one cluster to the fleet, and an add under the second would take
 //!   over the first's polled entry;
-//! * a cluster that signs in with a credential of its own keeps its address: the next
-//!   admin PRIME builds a header from the file and would send that credential wherever
+//! * a cluster that signs in with a credential of its own keeps its destination — the
+//!   address, the route (`via`) and the certificate setting (`tls`): the next admin PRIME
+//!   builds a header from the file and would send that credential wherever, and however,
 //!   the entry now points. An administrator moves such a cluster; an operator moves one
 //!   that uses the shared credential, and may change everything else about either.
 //!
@@ -103,6 +104,21 @@ fn address_key(url: &str) -> String {
     let mut v = json!(url.trim().trim_end_matches('/'));
     redact_config(&mut v);
     v.as_str().unwrap_or("").to_ascii_lowercase()
+}
+
+/// The jump host an entry routes through, whichever key spells it; "" for direct.
+pub fn route_of(c: &Value) -> String {
+    ["via", "jump", "jumpHost", "jump_host"].iter()
+        .find_map(|k| c.get(*k).and_then(|v| v.as_str()).map(str::trim).filter(|s| !s.is_empty()))
+        .unwrap_or("").to_string()
+}
+
+/// Where and how a credential would be sent for this entry: address, route, certificate
+/// setting. Equal destinations may hold the same credential.
+pub fn destination(c: &Value) -> (String, String, String) {
+    (address_key(c.get("url").and_then(|v| v.as_str()).unwrap_or("")),
+     route_of(c),
+     c.get("tls").and_then(|v| v.as_str()).map(|s| s.trim().to_ascii_lowercase()).unwrap_or_default())
 }
 
 /// Whether a key is one `redact_config` takes out of a view — a credential's name.
@@ -201,23 +217,24 @@ pub fn apply(raw: &mut Value, incoming: &Value, replace: Option<&str>, sees: &dy
         None => None,
     };
     let id = cluster_id(&name);
-    if let Some(other) = list.iter().enumerate().find(|(i, c)| Some(*i) != pos && name_of(c).is_some_and(|n| n == name || cluster_id(n) == id)) {
-        let other = name_of(other.1).unwrap_or_default();
-        return Err(Refusal::new("name_taken", if other == name {
+    if let Some((_, other)) = list.iter().enumerate().find(|(i, c)| Some(*i) != pos && name_of(c).is_some_and(|n| n == name || cluster_id(n) == id)) {
+        let other_name = name_of(other).unwrap_or_default();
+        // A cluster this caller may not see is not named to them; the id they chose is.
+        return Err(Refusal::new("name_taken", if other_name == name {
             format!("another cluster is already called {name:?}")
+        } else if sees(other) {
+            format!("{name:?} would be the same cluster as {other_name:?} to the fleet (both are {id:?}) — choose a name that differs in more than case or punctuation")
         } else {
-            format!("{name:?} would be the same cluster as {other:?} to the fleet (both are {id:?}) — choose a name that differs in more than case or punctuation")
+            format!("another cluster already goes by {id:?} — choose a name that differs in more than case or punctuation")
         }));
     }
     let mut entry = clean;
     let (action, was, before) = match pos {
         Some(i) => {
             let old = list[i].clone();
-            if !credential_parts(&old).is_empty()
-                && address_key(old.get("url").and_then(|v| v.as_str()).unwrap_or("")) != address_key(entry.get("url").and_then(|v| v.as_str()).unwrap_or(""))
-            {
+            if !credential_parts(&old).is_empty() && destination(&old) != destination(&Value::Object(entry.clone())) {
                 return Err(Refusal::new("credential_refused",
-                    "this cluster signs in with a credential of its own, so only an administrator changes its address — everything else about it you may change"));
+                    "this cluster signs in with a credential of its own, so only an administrator changes its address, its route or its certificate setting — everything else about it you may change"));
             }
             // The credential the operator never saw, exactly as it was. A URL that carried
             // one (`user:pass@`) is kept whole when the operator sent its redacted form.
@@ -313,15 +330,15 @@ mod tests {
     #[test]
     fn editing_keeps_the_credential_the_operator_never_saw() {
         let mut raw = cfg();
-        // What CONFIG_VIEW showed of Alpha, with the tags changed and the route dropped.
-        let s = apply(&mut raw, &json!({ "name": "Alpha", "url": "https://alpha:9200", "tags": ["prod", "eu"], "_index": 0 }), Some("Alpha"), ALL).unwrap();
+        // What CONFIG_VIEW showed of Alpha, with the tags changed and the note dropped.
+        let s = apply(&mut raw, &json!({ "name": "Alpha", "url": "https://alpha:9200", "via": "jumpa", "_index": 0, "liveRetention": "30d" }), Some("Alpha"), ALL).unwrap();
         assert_eq!((s.action, s.was.as_deref()), ("edited", Some("Alpha")));
         let a = &raw["clusters"][0];
         assert_eq!(a["username"], json!("alpha-svc"));
         assert_eq!(a["apiKey"], json!("alpha-key"));
         assert_eq!(a["url"], json!("https://svc:pw@alpha:9200"), "the URL's user:pass@ comes back");
-        assert_eq!(a["tags"], json!(["prod", "eu"]));
-        assert!(a.get("via").is_none(), "the field the operator removed is gone");
+        assert_eq!(a["liveRetention"], json!("30d"));
+        assert!(a.get("tags").is_none(), "the field the operator removed is gone");
         assert_eq!(raw["clusters"].as_array().unwrap().len(), 2);
     }
 
@@ -332,12 +349,21 @@ mod tests {
         assert_eq!(r.kind, "credential_refused");
         assert_eq!(raw, cfg(), "nothing moved");
         // Spelled differently, the same address: not a move.
-        apply(&mut raw, &json!({ "name": "Alpha", "url": "HTTPS://alpha:9200/" }), Some("Alpha"), ALL).unwrap();
+        apply(&mut raw, &json!({ "name": "Alpha", "url": "HTTPS://alpha:9200/", "via": "jumpa" }), Some("Alpha"), ALL).unwrap();
         assert_eq!(raw["clusters"][0]["url"], json!("https://svc:pw@alpha:9200"), "and the URL's credential comes back");
+        // Nor its route or its certificate setting: both decide where and how the credential travels.
+        for moved in [json!({ "name": "Alpha", "url": "https://alpha:9200" }),                      // via dropped
+                      json!({ "name": "Alpha", "url": "https://alpha:9200", "jump": "jumpa", "tls": "insecure" })] {
+            let mut raw = cfg();
+            assert_eq!(apply(&mut raw, &moved, Some("Alpha"), ALL).unwrap_err().kind, "credential_refused", "{moved}");
+        }
+        let mut raw = cfg();
+        apply(&mut raw, &json!({ "name": "Alpha", "url": "https://alpha:9200", "jump": "jumpa", "note": "same route, other key" }), Some("Alpha"), ALL).unwrap();
+        assert_eq!(raw["clusters"][0]["note"], json!("same route, other key"));
         // A cluster on the shared credential moves freely.
         let mut raw = cfg();
         raw["clusters"][1] = json!({ "name": "Beta", "url": "https://beta:9200" });
-        apply(&mut raw, &json!({ "name": "Beta", "url": "https://beta-new:9200" }), Some("Beta"), ALL).unwrap();
+        apply(&mut raw, &json!({ "name": "Beta", "url": "https://beta-new:9200", "via": "jumpa", "tls": "insecure" }), Some("Beta"), ALL).unwrap();
         assert_eq!(raw["clusters"][1]["url"], json!("https://beta-new:9200"));
     }
 
@@ -405,6 +431,10 @@ mod tests {
         let r = apply(&mut raw, &json!({ "name": "Alpha", "url": "https://alpha:9200" }), Some("Alpha"), only_beta).unwrap_err();
         assert_eq!(r.kind, "not_found");
         assert!(apply(&mut raw, &json!({ "name": "Beta", "url": "https://beta:9200" }), Some("Beta"), only_beta).is_ok());
+        // Nor learn its name from a collision.
+        let r = apply(&mut raw, &json!({ "name": "alpha", "url": "https://x:9200" }), None, only_beta).unwrap_err();
+        assert_eq!(r.kind, "name_taken");
+        assert!(!r.message.contains("Alpha") && r.message.contains("\"alpha\""), "{}", r.message);
     }
 
     #[test]

@@ -2256,11 +2256,12 @@ impl Core {
     ///
     /// The spec is built from the entry the way the UI's `normalize()` builds one, and the
     /// credential follows PRIME's own rules: the header the core already holds for this
-    /// cluster stays while the address is the same ("kept"); a cluster with no credential
-    /// of its own in the file signs in with the shared one, exactly as it would after an
-    /// admin's PRIME ("shared"); a cluster whose own credential is in the file, at a new
-    /// address, has none until an admin signs in — the core cannot build a header from a
-    /// file it must not read for this caller ("admin"). Nothing here derives a header.
+    /// cluster stays while its destination — address, route, certificate setting — is the
+    /// same ("kept"); a cluster with no credential of its own in the file signs in with
+    /// the shared one, exactly as it would after an admin's PRIME ("shared"); a cluster
+    /// whose own credential is in the file and whose held header cannot follow has none
+    /// until an admin signs in — the core cannot build a header from a file it must not
+    /// read for this caller ("admin"). Nothing here derives a header.
     async fn adopt_saved_cluster(self: &Arc<Self>, saved: &crate::cluster_save::Saved, raw: &Value) -> &'static str {
         let entry = &saved.entry;
         let get = |k: &str| entry.get(k).and_then(|v| v.as_str()).map(str::trim).filter(|s| !s.is_empty()).map(String::from);
@@ -2270,6 +2271,11 @@ impl Core {
         // every config name that would collide, so this is the fleet's entry, not ours.
         let old_id = saved.was.as_deref().map(crate::cluster_save::cluster_id);
         let url = get("url").unwrap_or_default().trim_end_matches('/').to_string();
+        let via = {
+            let r = crate::cluster_save::route_of(entry);
+            if r.is_empty() { None } else { Some(r) }
+        };
+        let tls = get("tls");
         let own_cred = saved.entry.as_object().is_some_and(|m| {
             let mut probe = Value::Object(m.clone());
             redact_config(&mut probe);
@@ -2286,7 +2292,10 @@ impl Core {
                 return "none";
             }
             let old = old_id.as_deref().and_then(|i| p.clusters.remove(i));
-            let same_address = old.as_ref().is_some_and(|o| o.url.trim_end_matches('/').eq_ignore_ascii_case(&url));
+            let same_address = old.as_ref().is_some_and(|o| {
+                o.url.trim_end_matches('/').eq_ignore_ascii_case(&url) && o.via == via
+                    && o.tls.as_deref().map(|t| t.trim().to_ascii_lowercase()) == tls.as_deref().map(|t| t.trim().to_ascii_lowercase())
+            });
             changed_address = old.is_some() && !same_address;
             let auth_header = match (&old, same_address) {
                 (Some(o), true) if o.auth_header.as_deref().is_some_and(|a| !a.is_empty()) => { credential = "kept"; o.auth_header.clone() }
@@ -2301,8 +2310,8 @@ impl Core {
                 name: Some(saved.name.clone()),
                 url,
                 auth_header,
-                via: get("via").or_else(|| get("jump")).or_else(|| get("jumpHost")).or_else(|| get("jump_host")),
-                tls: get("tls"),
+                via,
+                tls,
                 zabbix_groups: raw_groups(entry),
                 log_index_pattern: pattern,
             });
