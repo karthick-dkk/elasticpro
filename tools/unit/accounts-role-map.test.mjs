@@ -43,6 +43,12 @@ test('the pure parts: the names listed, and the message Save sends', () => {
   assert.deepEqual(A.ROLE_TARGETS.map(([v]) => v), ['admin', 'operator', 'user', 'guest', 'none']);
 });
 
+test('the note when Zabbix would not list its roles names the remedy only for the known case', () => {
+  assert.match(A.roleListNote('Zabbix role.get: No permissions to call "role.get".'), /pair again with Zabbix modules 2\.1\.14 or newer, or add role\.get to the ElasticPro sync role/);
+  assert.equal(A.roleListNote('Zabbix: connection refused'), 'Zabbix’s role names could not be listed (hover for why) — type them. ');
+  assert.equal(A.roleListNote(''), 'Zabbix’s role names could not be listed (hover for why) — type them. ');
+});
+
 test('the card lists the three user types and every Zabbix role by name, with what each becomes', async () => {
   A.render(host);
   await tick(120);
