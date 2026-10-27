@@ -148,8 +148,20 @@ function roleMapCard() {
       h('div.muted', { style: { fontSize: '11.5px', marginTop: '6px' } },
         defaults ? `Shipped: ${defaults}. ` : '',
         'A role name wins over its user type when the Zabbix module sends it (modules 2.1.13 on). ',
-        ui.roleMapNote ? h('span', { title: ui.roleMapNote }, 'Zabbix’s role names could not be listed (hover for why) — type them. ') : null)),
+        ui.roleMapNote ? h('span', { title: ui.roleMapNote }, roleListNote(ui.roleMapNote)) : null)),
     [h('button.btn.sm.primary', { disabled: ui.roleMapSaving, onclick: saveRoleMap }, ui.roleMapSaving ? 'Working…' : 'Save role map')]);
+}
+
+/**
+ * The note beside the map when Zabbix's roles could not be listed. A token paired with modules
+ * before 2.1.14 may not call role.get, and the remedy is known, so that case names it; anything
+ * else keeps the reason on hover and asks for the names to be typed.
+ */
+export function roleListNote(err) {
+  if (/role\.get/i.test(err || '') && /permission/i.test(err || '')) {
+    return 'Zabbix refuses role.get to the paired token (hover for the reply): pair again with Zabbix modules 2.1.14 or newer, or add role.get to the ElasticPro sync role in Zabbix — until then, type the names. ';
+  }
+  return 'Zabbix’s role names could not be listed (hover for why) — type them. ';
 }
 
 /** What the card's selects say now, into ui.roleMap, so a redraw keeps unsaved choices. */
