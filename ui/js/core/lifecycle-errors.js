@@ -17,9 +17,17 @@
  * `known` is false when the figure cannot be told (mode not read): unknown is not zero.
  * `count`/`names` are 0/[] when the feature is not RUNNING — a stopped feature is already
  * shown by its mode.
+ *
+ * The same goes for the status itself (0.3.44, `lifecycleView`): ILM or SLM that ES reports
+ * as RUNNING is only shown as Running in green when it looks after the log indices —
+ * every open log index under an ILM policy, a scheduled SLM policy that takes them. RUNNING
+ * with nothing of the logs in its care is Running in red, and why is in the tooltip.
  */
 
 export const DEFAULT_LOG_PATTERN = 'logstash-*';
+
+/** A cluster's log index pattern: its own, else the config default (logstash-* when neither says). */
+export const logPatternOf = (cluster, defaults) => (cluster && cluster.logIndexPattern) || (defaults && defaults.logIndexPattern) || undefined;
 
 const patternsOf = (p) => String(p || DEFAULT_LOG_PATTERN).split(',').map((s) => s.trim()).filter((s) => s && !s.startsWith('-'));
 const escRe = (s) => s.replace(/[.+?^${}()|[\]\\]/g, '\\$&');
@@ -99,4 +107,74 @@ export function slmErrorTitle(e) {
     return `${f.id} failed at ${t}${f.details ? `: ${f.details.slice(0, 120)}` : ''}`;
   });
   return `SLM policy failing:\n${lines.join('\n')}`;
+}
+
+/** RUNNING → "Running", STOPPED → "Stopped": the mode as every ILM/SLM pill writes it. */
+export function modeWord(mode) {
+  const m = String(mode || '').trim();
+  return m ? m.charAt(0).toUpperCase() + m.slice(1).toLowerCase() : 'Unknown';
+}
+const isRunning = (mode) => String(mode || '').toUpperCase() === 'RUNNING';
+
+/**
+ * Does ILM look after the log indices? `d.ilmOfIndex` is { index: policy name or null } over
+ * every OPEN index of the ilm_assign answer (closed indices are not asked for), or null when
+ * that answer was not read or did not list the indices without a policy (state.js). Then the
+ * coverage is unknown, never assumed.
+ * → { known, ok, total, managed, unmanaged: [names], policies: [names] }
+ */
+export function ilmCoverage(d, pattern) {
+  const of = d && d.ilmOfIndex;
+  if (!of) return { known: false, ok: false, total: 0, managed: 0, unmanaged: [], policies: [] };
+  const names = Object.keys(of).filter((n) => matchesPattern(n, pattern)).sort();
+  const unmanaged = names.filter((n) => !of[n]);
+  const policies = [...new Set(names.map((n) => of[n]).filter(Boolean))].sort();
+  return { known: true, ok: names.length > 0 && !unmanaged.length, total: names.length,
+    managed: names.length - unmanaged.length, unmanaged, policies };
+}
+
+/**
+ * Does SLM look after the log indices: a scheduled policy whose indices take them?
+ * `d.slm` is the policy list (undefined when not read). → { known, ok, policies: [ids], others: [ids] }
+ */
+export function slmCoverage(d, pattern) {
+  if (!d || !Array.isArray(d.slm)) return { known: false, ok: false, policies: [], others: [] };
+  const scheduled = d.slm.filter((p) => p && p.policy && p.policy.schedule);
+  const policies = scheduled.filter((p) => slmCoversPattern(p, pattern)).map((p) => p.id).sort();
+  const others = scheduled.filter((p) => !slmCoversPattern(p, pattern)).map((p) => p.id).sort();
+  return { known: true, ok: policies.length > 0, policies, others };
+}
+
+const logsOf = (pattern) => patternsOf(pattern).join(', ');
+const listOf = (a, n = 5) => `${a.slice(0, n).join(', ')}${a.length > n ? `, +${a.length - n} more` : ''}`;
+
+/**
+ * The pill for ILM or SLM — ONE definition for the Clusters columns and tiles, the Snapshots
+ * page and the CSV. `kind` is 'ILM' or 'SLM'.
+ * → { tone: 'green'|'red'|'grey', word: 'Running'|'Stopped'|…|'Running ?', covered: true|false|null, why }
+ *   tone grey (and covered null) when the mode is not read, or it runs and what it covers
+ *   could not be read: unknown is not shown as good or as bad.
+ */
+export function lifecycleView(kind, d, pattern) {
+  const mode = kind === 'ILM' ? d && d.ilm && d.ilm.operation_mode : d && d.slmStatus && d.slmStatus.operation_mode;
+  if (!mode) return { tone: 'grey', word: 'Unknown', covered: null, why: `${kind} status has not been read.` };
+  const word = modeWord(mode);
+  if (!isRunning(mode)) return { tone: 'red', word, covered: false, why: `${kind} is ${word.toLowerCase()}: nothing is managed until it is started again.` };
+  const logs = logsOf(pattern);
+  if (kind === 'ILM') {
+    const c = ilmCoverage(d, pattern);
+    if (!c.known) return { tone: 'grey', word: 'Running ?', covered: null,
+      why: `ILM is running, but which policy each ${logs} index has could not be read (it needs view_index_metadata on ${logs}).` };
+    if (!c.total) return { tone: 'red', word, covered: false, why: `ILM is running, but there is no open ${logs} index for it to manage.` };
+    if (c.unmanaged.length) return { tone: 'red', word, covered: false,
+      why: `ILM is running, but ${c.unmanaged.length} of ${c.total} open ${logs} indices ${c.unmanaged.length === 1 ? 'has' : 'have'} no ILM policy: ${listOf(c.unmanaged)}` };
+    return { tone: 'green', word, covered: true,
+      why: `ILM is running and all ${c.total} open ${logs} indices are under a policy (${listOf(c.policies, 3)}).` };
+  }
+  const c = slmCoverage(d, pattern);
+  if (!c.known) return { tone: 'grey', word: 'Running ?', covered: null,
+    why: `SLM is running, but its policies could not be read (it needs manage_slm or read_slm).` };
+  if (!c.ok) return { tone: 'red', word, covered: false,
+    why: `SLM is running, but no scheduled SLM policy takes ${logs}${c.others.length ? ` (${listOf(c.others, 3)} take${c.others.length === 1 ? 's' : ''} other indices)` : ''}.` };
+  return { tone: 'green', word, covered: true, why: `SLM is running and ${listOf(c.policies, 3)} snapshot${c.policies.length === 1 ? 's' : ''} ${logs}.` };
 }

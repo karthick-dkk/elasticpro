@@ -445,6 +445,7 @@ export function buildClusterData(id, prev, raw) {
 
   out.clusterSettings = clusterSettings && clusterSettings.ok ? clusterSettings.value : prev.clusterSettings || null;
   out.appliedIlm = appliedIlm(ilmPolicies, ilmOfIndices) || prev.appliedIlm || null;
+  out.ilmOfIndex = ilmOfIndex(ilmOfIndices) || prev.ilmOfIndex || null;
   out.appliedSlm = appliedSlm(out.slm) || prev.appliedSlm || null;
 
   return out;
@@ -457,6 +458,23 @@ export function buildClusterData(id, prev, raw) {
  * Which policy is in force is answered by the indices themselves rather than guessed:
  * a cluster can define a dozen policies and apply none of them.
  */
+/**
+ * { index: policy name or null } for every open index of the ilm_assign answer, or null when
+ * it was not read — or came from a core that still asked for the policy name alone, which
+ * leaves the indices without one out of the answer: their absence would read as "every index
+ * managed". An index listed with its uuid and no lifecycle name has no ILM policy.
+ */
+export function ilmOfIndex(ofIndicesRes) {
+  if (!ofIndicesRes || !ofIndicesRes.ok) return null;
+  const out = {};
+  for (const [index, entry] of Object.entries(ofIndicesRes.value || {})) {
+    const s = (entry && entry.settings && entry.settings.index) || {};
+    if (!s.uuid) return null;
+    out[index] = (s.lifecycle && s.lifecycle.name) || null;
+  }
+  return out;
+}
+
 function appliedIlm(policiesRes, ofIndicesRes) {
   if (!policiesRes || !policiesRes.ok) return null;
   const policies = policiesRes.value || {};
@@ -733,7 +751,7 @@ export async function fetchIndices(id, pattern = '*', { force = false } = {}) {
       if (a && state.indices.has(id)) return state.indices.get(id);
       if (r.paused && !e.error) throw pausedError(r.paused);
       throw new Error((e.error && e.error.message)
-        || (r.timedOut ? 'the index list is still being fetched — it will appear when it arrives'
+        || (r.timedOut ? notInYet('The index list')
                        : 'the index list has not been fetched yet'));
     }
     if (r && !FALL_BACK_KINDS.has(r.kind)) throw new Error(r.message || r.kind || 'the index list could not be read');
@@ -1017,7 +1035,7 @@ export async function fetchShards(id, { force = false } = {}) {
       const out = { rows: null, tasks: null, pools: null, pending: !e.error && !r.paused, at: 0,
         paused: r.paused || null,
         error: (e.error && e.error.message) || (r.paused && pausedLine(r.paused))
-          || (r.timedOut ? 'the shard table is still being fetched — it will appear when it arrives'
+          || (r.timedOut ? notInYet('The shard table')
                          : 'the shard table has not been fetched yet') };
       state.shards.set(id, out);
       return out;
@@ -1496,6 +1514,13 @@ const inflight = new Map();
  */
 const waitSlots = limiter(2);
 /**
+ * How long a page waits for a cluster before it says so (0.3.44): 10 s, not the core's 20.
+ * What the core already holds is shown at once whatever its age; this bounds only the wait
+ * for a cluster nothing is held for yet. The fetch goes on, and its answer lands as a push.
+ */
+export const PAGE_WAIT_SEC = 10;
+const notInYet = (what) => `${what} did not arrive within ${PAGE_WAIT_SEC} s \u2014 ElasticPro keeps asking, and it appears here as soon as the cluster answers`;
+/**
  * The last answer per question, for a caller that is not forcing a fetch. Pages re-check
  * what they are missing on every redraw; a cluster whose answer was "not fetched yet" (it
  * is unreachable, or the core is still on it) was asked again on each one, for as long as
@@ -1527,7 +1552,7 @@ function fetchFleetDataset(id, dataset, { maxAgeSec } = {}) {
  */
 export async function askFleetDataset(id, dataset, { maxAgeSec } = {}) {
   if (isOnDemand(dataset)) fleet.onDemand.add(dataset);
-  const r = await clusterDataset(id, dataset, { wait: true, maxAgeSec });
+  const r = await clusterDataset(id, dataset, { wait: PAGE_WAIT_SEC, maxAgeSec });
   if (!r || !r.ok) {
     if (r && r.kind === 'fleet_off') fleet.mode = 'direct';
     return r || { ok: false, kind: 'worker_error' };

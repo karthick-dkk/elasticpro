@@ -390,11 +390,13 @@ export class EsClient {
   ilmPolicies() { return this.json('GET', '/_ilm/policy'); }
   /**
    * Which ILM policy the log indices are actually attached to. filter_path keeps the
-   * response to one line per index instead of the whole settings block.
+   * response to one line per index instead of the whole settings block; the uuid is there
+   * so an index WITHOUT a policy is still listed (filter_path drops an empty entry), which
+   * is how the ILM pill tells "every log index managed" from "some are not" (0.3.44).
    */
   ilmPolicyOfIndices(pattern) {
     return this.json('GET',
-      `/${encodeURIComponent(pattern)}/_settings?filter_path=*.settings.index.lifecycle.name` +
+      `/${encodeURIComponent(pattern)}/_settings?filter_path=*.settings.index.lifecycle.name,*.settings.index.uuid` +
       '&expand_wildcards=open&ignore_unavailable=true&allow_no_indices=true');
   }
   slmStats() { return this.json('GET', '/_slm/stats'); }
