@@ -11,7 +11,8 @@
 import { h, mount } from '../lib/dom.js';
 import { bytes, num, pct, compact } from '../lib/fmt.js';
 import { state, clusters, activeClusters, client, refreshAll, fetchIndices, fetchShards,
-         datasetFreshness, diskAccounting, setDangling, danglingFor, demandDataset, fleetMode, askForPage } from '../core/state.js';
+         datasetFreshness, diskAccounting, setDangling, danglingFor, demandDataset, fleetMode, askForPage, fleetPolicy } from '../core/state.js';
+import { pauseFor } from '../core/policy.js';
 import { freshnessBar } from '../lib/freshness.js';
 import { card, table, empty, pill, figure, connectionBanner } from './common.js';
 import { navigateTo } from '../core/intent.js';
@@ -89,7 +90,8 @@ function refresh() {
     const got = shards.get(c.id);
     // `pending`: the core is still fetching it and will push it when it lands — asking
     // again on every data event would only queue behind the same fetch.
-    const worthRetrying = !got || (got.error && !got.pending && isReachable(c.id));
+    // Paused: nothing is asked until an administrator resumes; asking again changes nothing.
+    const worthRetrying = !got || (got.error && !got.pending && (!got.paused || !pauseFor(fleetPolicy(), c.id)) && isReachable(c.id));
     if (worthRetrying && !loading.has(c.id)) load(c, false);
     // The index list is what the disk accounting is compared against; only the Indices
     // page fetches it otherwise.
@@ -623,6 +625,10 @@ function shardsCard(c, d, all, raw, started) {
     : raw === undefined ? 'The shard table has not been read yet.'
     : !all.length ? 'Elasticsearch returned no shards for this cluster.'
     : null;
+  if (raw && raw.error && raw.paused) {
+    return card(`Shards — ${c.name}`, 'requests paused',
+      h('div.banner.warn', { style: { margin: 0 } }, h('div', h('div.ttl', 'Requests are paused'), h('div', raw.error))));
+  }
   if (raw && raw.error) {
     return card(`Shards — ${c.name}`, 'could not be read',
       h('div', { style: { display: 'grid', gap: '8px' } },

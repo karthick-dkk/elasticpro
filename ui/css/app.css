@@ -435,6 +435,9 @@ label.field > select { text-overflow: ellipsis; }
 .pill.green  { color: var(--good-ink);     background: var(--good-bg);     border-color: color-mix(in srgb, var(--good) 35%, transparent); }
 .pill.yellow { color: var(--warning-ink);  background: var(--warning-bg);  border-color: color-mix(in srgb, var(--warning) 45%, transparent); }
 .pill.orange { color: var(--serious-ink);  background: var(--serious-bg);  border-color: color-mix(in srgb, var(--serious) 45%, transparent); }
+/* Top bar: requests paused, with Resume for an admin (ui/paused-pill.js). */
+.btn.paused-btn { color: var(--serious-ink); background: var(--serious-bg); border-color: color-mix(in srgb, var(--serious) 45%, transparent); white-space: nowrap; }
+.btn.paused-btn:hover { border-color: var(--serious); }
 .pill.red    { color: var(--critical-ink); background: var(--critical-bg); border-color: color-mix(in srgb, var(--critical) 35%, transparent); }
 .pill.grey   { color: var(--text-secondary); background: var(--surface-2); border-color: var(--border); }
 

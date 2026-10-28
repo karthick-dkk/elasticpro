@@ -4,14 +4,14 @@ import { h, mount, $ } from '../lib/dom.js';
 import { bytes, dt, ago, download } from '../lib/fmt.js';
 import * as cfg from '../core/config.js';
 import { state, setConfig, refreshAll, clusters, client, hasSessionCredential, healthState,
-         sessionCredentialLabel, clearSessionCredential, clustersNeedingCredential, isReadOnly } from '../core/state.js';
+         sessionCredentialLabel, clearSessionCredential, clustersNeedingCredential, isReadOnly, syncFleet } from '../core/state.js';
 import { workerStatus, forgetWorker, tunnels as fetchTunnels, listPins, untrustCert, untrustHostKey, tunnelReconnect,
          delaySinkGet, delaySinkSet, delaySinkRun, trustCert,
          zabbixLinkGet, zabbixLinkSet, zabbixLinkTest, zabbixPairBegin, zabbixUnpair,
          policyGet, policySet } from '../core/es.js';
 import { PRESETS, DATASETS, DATASET_LABELS, BOUNDS, intervalBounds, applyPreset, activePreset, normalisePolicy,
          fromForm, describeMode, MODES, FALLBACK_DEFAULTS, boundsUnder, policyEffect, fineTuneSummary,
-         effectiveClass, resolvedMode } from '../core/policy.js';
+         effectiveClass, resolvedMode, beginsPauseAll, PAUSE_ALL_QUESTION } from '../core/policy.js';
 import { defaultApiUrl, checkUrl, countdown, secondsLeft, isManaged, linkChanges, formProblems, linkSummary,
          linkView, testMessage, epUrlFrom, eventLine } from '../core/zabbix-link.js';
 import { showCredentialDialog, forgetVaultCredential } from '../ui/credential-dialog.js';
@@ -552,6 +552,8 @@ function resetPolicyForm() {
 
 async function savePolicy() {
   const { policy, problems } = fromForm(readPolicyForm(), polDefaults(), polBounds());
+  if (beginsPauseAll(pol && pol.policy, policy)
+      && !(await confirmDialog(PAUSE_ALL_QUESTION.title, PAUSE_ALL_QUESTION.body, { yes: PAUSE_ALL_QUESTION.yes, danger: true }))) return;
   let res;
   try { res = await policySet(policy); } catch (e) { res = { ok: false, message: e.message || String(e) }; }
   if (!res || !res.ok) {
@@ -561,6 +563,7 @@ async function savePolicy() {
     return;
   }
   pol = res; polDraft = null;
+  syncFleet().catch(() => {});   // the top bar says paused (or not) now, not at the next sync
   const lines = [
     res.saved === false ? 'Applied, but not written to disk.' : 'Saved.',
     ...problems,

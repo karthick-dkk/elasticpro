@@ -2651,11 +2651,26 @@ restoreConsole();
     const wasAll = !!((lastOf('POLICY_SET') || {}).policy || before.policy || { paused: {} }).paused.all;
     ok(!wasAll, 'stop: the policy is already paused before the test pressed anything');
     const sets = countOf('POLICY_SET');
-    pauseAll.click(); await settleFor(800);
+    // 0.3.43: it asks first. "No" sends nothing; the named action in the dialog pauses.
+    const dlg = () => doc.querySelector('.modal-overlay .modal');
+    pauseAll.click(); await settleFor(300);
+    ok(!!dlg() && /Pause all requests\?/.test(dlg().textContent), 'stop: "Pause all requests" did not ask first');
+    if (dlg()) { button('No', dlg()).click(); await settleFor(300); }
+    ok(countOf('POLICY_SET') === sets, 'stop: answering No to "Pause all requests?" still paused');
+    pauseAll.click(); await settleFor(300);
+    const yes = dlg() && button('Pause all requests', dlg());
+    ok(!!yes && yes.classList.contains('danger'), 'stop: the question has no red "Pause all requests" answer');
+    if (yes) yes.click();
+    await settleFor(800);
     let m = lastOf('POLICY_SET');
     ok(countOf('POLICY_SET') === sets + 1 && m && m.policy.paused.all === true, `stop: Pause all requests sent ${JSON.stringify(m && m.policy && m.policy.paused)}`);
     const resume = stopCard() && button('Resume all', stopCard());
     ok(!!resume, 'stop: after pausing, the card offers no "Resume all"');
+    // …and every page says so at the top (0.3.43): a pause nobody remembered held a fleet still for days.
+    const pill = async () => { for (let i = 0; i < 20 && !doc.querySelector('#topbar .paused-btn'); i++) await settleFor(250); return doc.querySelector('#topbar .paused-btn'); };
+    const topPill = await pill();
+    ok(!!topPill && /Requests paused · Resume/.test(topPill.textContent), `stop: the top bar does not say requests are paused (${topPill ? topPill.textContent : 'no button'})`);
+    ok(!topPill || /Requests to every cluster are paused since/.test(topPill.title), `stop: the top-bar button does not say since when (${topPill && topPill.title})`);
     ok(/^Paused:/.test((doc.querySelector('.rq-status h2') || {}).textContent || ''), `stop: the status line does not say paused: "${(doc.querySelector('.rq-status h2') || {}).textContent}"`);
     if (resume) {
       resume.click(); await settleFor(800);
@@ -2663,6 +2678,8 @@ restoreConsole();
       ok(countOf('POLICY_SET') === sets + 2 && m && m.policy.paused.all === false, `stop: Resume all sent ${JSON.stringify(m && m.policy && m.policy.paused)}`);
       ok(!!(stopCard() && button('Pause all requests', stopCard())), 'stop: after resuming, the card does not offer "Pause all requests" again');
       ok(!/^Paused:/.test((doc.querySelector('.rq-status h2') || {}).textContent || ''), 'stop: the status line still says paused after resuming');
+      for (let i = 0; i < 20 && doc.querySelector('#topbar .paused-btn'); i++) await settleFor(250);
+      ok(!doc.querySelector('#topbar .paused-btn'), 'stop: the top bar still says paused after resuming');
     }
   }
 

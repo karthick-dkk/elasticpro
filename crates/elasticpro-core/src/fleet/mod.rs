@@ -554,6 +554,10 @@ impl Core {
         let known = self.all_specs().len();
         let now = now_ms();
         let cfg = self.fleet.cfg.read().clone();
+        let (paused_since, paused_by) = {
+            let p = self.fleet.policy.read();
+            (p.paused.since, p.paused.by.clone())
+        };
         let mut reply = Reply::default();
         let mut st = self.fleet.state.lock();
         st.last_activity = now;
@@ -592,7 +596,8 @@ impl Core {
             "ok": true, "epoch": self.fleet.epoch, "seq": seq, "now": now, "running": self.fleet_enabled(),
             "full": since.is_none(),
             "catalogue": catalogue::catalogue_json(&cfg, known),
-            "policy": { "mode": cfg.mode.as_str(), "resolvedMode": cfg.resolved_mode(known).as_str(), "pausedAll": cfg.paused_all, "paused": cfg.paused.iter().cloned().collect::<Vec<_>>() },
+            "policy": { "mode": cfg.mode.as_str(), "resolvedMode": cfg.resolved_mode(known).as_str(), "pausedAll": cfg.paused_all, "paused": cfg.paused.iter().cloned().collect::<Vec<_>>(),
+                        "pausedSince": paused_since, "pausedBy": paused_by },
             "clusterIds": ids,
             "clusters": clusters,
         });
@@ -624,7 +629,15 @@ impl Core {
                            "message": "the fleet cache is not running in this core; ask the cluster directly" }).into();
         }
         let cfg = self.fleet.cfg.read().clone();
-        let wait = match msg.get("wait") {
+        // Paused: the ask is kept and runs when the pause is lifted, but nobody is held
+        // waiting for it. The page is told at once, and by whom and since when, instead
+        // of showing "Fetching…" for as long as the pause lasts (days, once).
+        let paused = cfg.cluster_paused(&id).then(|| {
+            let p = self.fleet.policy.read();
+            json!({ "all": cfg.paused_all, "since": p.paused.since, "by": p.paused.by })
+        });
+        let wait = if paused.is_some() { Some(Value::Bool(false)) } else { msg.get("wait").cloned() };
+        let wait = match wait.as_ref() {
             Some(Value::Bool(true)) => MAX_WAIT,
             Some(Value::Number(n)) => Duration::from_secs(n.as_u64().unwrap_or(0)).min(MAX_WAIT),
             _ => Duration::ZERO,
@@ -683,6 +696,9 @@ impl Core {
         };
         reply.value = json!({ "ok": true, "clusterId": id, "dataset": ds.name(), "entry": entry, "reach": reach,
                               "waited": waited, "timedOut": timed_out });
+        if let Some(p) = paused {
+            reply.value["paused"] = p;
+        }
         reply
     }
 
@@ -782,7 +798,9 @@ impl Core {
             Ok(p) => p,
             Err(e) => return json!({ "ok": false, "kind": "bad_request", "message": format!("policy: {e}") }),
         };
-        let pol = pol.normalised();
+        let mut pol = pol.normalised();
+        let before = self.fleet.policy.read().paused.clone();
+        pol.paused = pol.paused.stamped(&before, caller.map(|c| c.name.as_str()).unwrap_or(""), now_ms());
         let saved = match &self.fleet.policy_path {
             Some(p) => pol.save(p),
             None => Err("no data directory: the policy applies to this run only".to_string()),

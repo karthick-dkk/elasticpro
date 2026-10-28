@@ -242,3 +242,27 @@ test('the Fine-tune line, folded (change 16)', () => {
   assert.equal(P.everyText(3600), '1 h');
   assert.equal(P.everyText(90), '90 s');
 });
+
+test('a pause says what is paused, since when and by whom — and an old pause with no stamp still reads', () => {
+  const now = new Date(2026, 9, 28, 12, 0).getTime();
+  const since = new Date(2026, 9, 25, 6, 38).getTime();
+  const all = P.pausedLine({ all: true, since, by: 'Admin@zabbix' }, { now });
+  assert.match(all, /^Requests to every cluster are paused since .*25.*2026.*, by Admin@zabbix\. Nothing new is fetched until an administrator resumes/);
+  assert.match(P.pausedLine({ all: false, since: now - 60000, by: 'ops' }, { now }), /^Requests to this cluster are paused since .* today, by ops\./);
+  assert.match(P.pausedLine({ all: true, since: 0, by: '' }, { now }), /^Requests to every cluster are paused\. Nothing new/);
+  assert.equal(P.pauseFor(null, 'c1'), null);
+  assert.equal(P.pauseFor({ pausedAll: false, paused: ['c2'] }, 'c1'), null);
+  assert.deepEqual(P.pauseFor({ pausedAll: false, paused: ['c1'], pausedSince: 5, pausedBy: 'x' }, 'c1'), { all: false, since: 5, by: 'x' });
+  assert.deepEqual(P.pauseFor({ pausedAll: true, paused: [] }, null), { all: true, since: 0, by: '' }, 'the fleet view: only a pause of everything');
+});
+
+test('only a change that begins pausing everything is asked about', () => {
+  const on = P.setPausedAll(D, true);
+  const off = P.setPausedAll(D, false);
+  assert.equal(P.beginsPauseAll(off, on), true);
+  assert.equal(P.beginsPauseAll(null, on), true, 'not knowing the current policy still asks');
+  assert.equal(P.beginsPauseAll(on, on), false, 'already paused: saving another field does not ask again');
+  assert.equal(P.beginsPauseAll(on, off), false, 'resuming is not asked about');
+  assert.equal(P.beginsPauseAll(off, P.togglePaused(off, 'c1', true)), false, 'one cluster is not everything');
+  assert.match(P.PAUSE_ALL_QUESTION.body, /until an administrator resumes/);
+});

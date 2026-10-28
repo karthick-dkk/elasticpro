@@ -106,6 +106,40 @@ impl Concurrency {
 pub struct Paused {
     pub all: bool,
     pub clusters: Vec<String>,
+    /// When the pause in force began (ms since the epoch), 0 when nothing is paused. The
+    /// server stamps it; what a page sends is ignored. A page whose data stopped coming says
+    /// since when, and who to ask: a pause nobody remembered held one site still for days.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub since: u64,
+    /// Who began it; "" when nothing is paused.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub by: String,
+}
+
+fn is_zero(n: &u64) -> bool { *n == 0 }
+
+impl Paused {
+    pub fn any(&self) -> bool { self.all || !self.clusters.is_empty() }
+
+    /// This pause with its stamp carried over from the one before: kept while something
+    /// stays paused that already was, set anew when a pause begins (all, or one more
+    /// cluster), cleared when nothing is paused.
+    pub fn stamped(mut self, before: &Paused, by: &str, now: u64) -> Paused {
+        if !self.any() {
+            self.since = 0;
+            self.by.clear();
+            return self;
+        }
+        let began = (self.all && !before.all) || self.clusters.iter().any(|c| !before.clusters.contains(c));
+        if began || before.since == 0 {
+            self.since = now;
+            self.by = by.to_string();
+        } else {
+            self.since = before.since;
+            self.by = before.by.clone();
+        }
+        self
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
