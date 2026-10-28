@@ -19,6 +19,7 @@ import {
   snapshotIndicesDialog,
 } from '../ui/snapshot-dialogs.js';
 import { pagerBar } from '../lib/pager.js';
+import { lifecycleView, logPatternOf } from '../core/lifecycle-errors.js';
 import { takeFocus, revealFocus } from '../core/focus.js';
 import { listingTitle, listingEmptyText, repoOverview, openRepo } from '../core/snapshot-evidence.js';
 import { hideAddress, scrubFresh } from '../core/evidence.js';
@@ -61,7 +62,7 @@ async function loadFull() {
   const list = activeClusters();
   // Under a policy that fetches nothing on its own the repositories, SLM and the listing
   // are not known until this page asks for them.
-  askForPage(list.map((c) => c.id), ['health', 'policies', 'snapshots']).catch(() => {});
+  askForPage(list.map((c) => c.id), ['health', 'policies', 'ilm_assign', 'snapshots']).catch(() => {});
   // Many clusters: one message to the core for all of them, answers arriving as pushes.
   // Holding a request open per cluster queued a hundred of them in front of every click.
   // One or two: asked and waited for, so the page fills in without a round of pushes.
@@ -82,6 +83,12 @@ const BUILD_MS = 40;
 const built = nodeCache({ budgetMs: BUILD_MS });
 let moreTimer = null;
 const minute = () => Math.floor(Date.now() / 60000);
+
+/** SLM / ILM beside the cluster's name: the Clusters page's pill and rule (lifecycle-errors.js), why in its tooltip. */
+function lifecyclePill(kind, d, c) {
+  const v = lifecycleView(kind, d, logPatternOf(c, state.defaults));
+  return h(`span.pill.${v.tone}`, { title: v.why }, h('i.dot'), `${kind} ${v.word}`);
+}
 
 function blockSig(c) {
   // The page and the search are not here: moving through pages or typing redraws only the
@@ -171,8 +178,8 @@ function clusterSection(c) {
   return h('section.lazy-block', { style: { marginBottom: '22px' } },
     h('div', { style: { display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '10px', flexWrap: 'wrap' } },
       h('h2', { style: { fontSize: '14px', margin: 0 } }, c.name),
-      d.slmStatus ? pill(`SLM ${d.slmStatus.operation_mode}`, d.slmStatus.operation_mode === 'RUNNING' ? 'green' : 'yellow') : null,
-      d.ilm ? pill(`ILM ${d.ilm.operation_mode}`, d.ilm.operation_mode === 'RUNNING' ? 'green' : 'yellow') : null,
+      d.slmStatus ? lifecyclePill('SLM', d, c) : null,
+      d.ilm ? lifecyclePill('ILM', d, c) : null,
       h('div', { style: { marginLeft: 'auto', display: 'flex', gap: '10px', alignItems: 'center' } },
         writeToggle(draw),
         // The listing's own age and a Refresh that re-reads it now (the verbose one).

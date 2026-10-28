@@ -2504,7 +2504,7 @@ restoreConsole();
 }
 
 // Request policy: Config → Requests asks the core once per visit, stays quiet under fleet
-// events, and saves what the presets and the Request Centre's pause buttons decide.
+// events, and saves what the presets decide; the Request Centre's emergency stop has an end.
 {
   const es = await load('core/es.js');
   const before = await es.policyGet();
@@ -2621,67 +2621,69 @@ restoreConsole();
   }
 
   await go('requests'); await settleFor(500);
+  // 0.3.44: no per-cluster pause. The table says how each cluster is being handled on its
+  // own instead — normal, slowed, or held — and nothing in it stops a cluster by hand.
   const per = [...doc.querySelectorAll('section.card')].find((x) => (x.querySelector('header h2') || {}).textContent === 'Per cluster');
-  const pause = per && button('Pause', per);
-  ok(!!pause, 'policy: the Request Centre has no per-cluster Pause button');
-  if (pause) {
-    const sets = countOf('POLICY_SET');
-    const was = new Set(((lastOf('POLICY_SET') || {}).policy || before.policy || { paused: { clusters: [] } }).paused.clusters);
-    pause.click(); await settleFor(600);
-    const m = lastOf('POLICY_SET');
-    const added = m ? m.policy.paused.clusters.filter((c) => !was.has(c)) : [];
-    ok(countOf('POLICY_SET') === sets + 1 && added.length === 1 && config.clusters.some((c) => c.id === added[0]),
-      `policy: Pause sent ${JSON.stringify(m && m.policy && m.policy.paused)}`);
-    ok([...per.ownerDocument.querySelectorAll('section.card .pill.grey')].some((x) => x.textContent === 'paused'),
-      'policy: a paused cluster has no "paused" pill');
-  }
-  ok(!!button('Pause all requests'), 'policy: the Request Centre has no "Pause all requests" button');
+  ok(!per || !button('Pause', per), 'automation: the per-cluster table still has a Pause button');
+  const perHeads = per ? [...per.querySelectorAll('thead th')].map((t) => t.textContent.trim()) : [];
+  ok(!per || perHeads[1] === 'Automation', `automation: the per-cluster table has no Automation column: ${JSON.stringify(perHeads)}`);
+  ok(!per || !per.querySelector('tbody tr') || [...per.querySelectorAll('tbody tr')].every((tr) => /^(normal|slowed since .+|held: .+)$/.test((tr.children[1] || {}).textContent || '')),
+    `automation: a row's Automation cell is not normal / slowed / held: ${per ? [...per.querySelectorAll('tbody tr')].map((tr) => (tr.children[1] || {}).textContent).join(' | ') : ''}`);
 
-  // Stop all traffic: the pause-everything control sits in its own card, not in the table's
-  // way, and it still pauses and still resumes — exactly one POLICY_SET each, asking for the
-  // thing it says.
+  // The emergency stop: its own card, three lengths, each asking first; it ends by itself,
+  // and says when, on the card, in the status line and at the top of every page.
   const stopCard = () => doc.querySelector('.rq-stop');
-  ok(!!stopCard() && /Stop all traffic/.test(stopCard().textContent), 'stop: no "Stop all traffic" card on the Request Centre');
-  ok(stopCard() && /Holds every request to every cluster until you resume/.test(stopCard().textContent), 'stop: the card does not say what pausing does');
-  const pauseAll = stopCard() && button('Pause all requests', stopCard());
-  ok(!!pauseAll, 'stop: "Pause all requests" is not inside the Stop all traffic card');
-  ok(pauseAll && pauseAll.classList.contains('danger'), 'stop: the pause button is not styled as a warning (.btn.danger)');
-  ok(!doc.querySelector('.rq-tbl') || ![...doc.querySelectorAll('.rq-tbl button')].some((b) => /pause/i.test(b.textContent)), 'stop: a pause button is still among the requests table');
-  if (pauseAll) {
+  ok(!!stopCard() && /Emergency stop/.test(stopCard().textContent), 'stop: no "Emergency stop" card on the Request Centre');
+  ok(stopCard() && /for 15, 30 or 60 minutes, then starts again by itself/.test(stopCard().textContent), 'stop: the card does not say the stop ends by itself');
+  const lengths = stopCard() ? [...stopCard().querySelectorAll('button[data-act="pause-all"]')] : [];
+  ok(JSON.stringify(lengths.map((b) => b.textContent)) === JSON.stringify(['15 min', '30 min', '60 min']), `stop: the lengths offered are ${JSON.stringify(lengths.map((b) => b.textContent))}`);
+  ok(lengths.every((b) => b.classList.contains('danger')), 'stop: a stop button is not styled as a warning (.btn.danger)');
+  ok(!doc.querySelector('.rq-tbl') || ![...doc.querySelectorAll('.rq-tbl button')].some((b) => /pause|stop/i.test(b.textContent)), 'stop: a stop button is among the requests table');
+  const thirty = lengths[1];
+  if (thirty) {
     const wasAll = !!((lastOf('POLICY_SET') || {}).policy || before.policy || { paused: {} }).paused.all;
-    ok(!wasAll, 'stop: the policy is already paused before the test pressed anything');
+    ok(!wasAll, 'stop: the policy is already stopped before the test pressed anything');
     const sets = countOf('POLICY_SET');
-    // 0.3.43: it asks first. "No" sends nothing; the named action in the dialog pauses.
     const dlg = () => doc.querySelector('.modal-overlay .modal');
-    pauseAll.click(); await settleFor(300);
-    ok(!!dlg() && /Pause all requests\?/.test(dlg().textContent), 'stop: "Pause all requests" did not ask first');
+    thirty.click(); await settleFor(300);
+    ok(!!dlg() && /Stop all requests for 30 minutes\?/.test(dlg().textContent), 'stop: "30 min" did not ask first');
+    ok(!dlg() || /slows down for those on its own/.test(dlg().textContent), 'stop: the question does not say slow clusters are handled already');
     if (dlg()) { button('No', dlg()).click(); await settleFor(300); }
-    ok(countOf('POLICY_SET') === sets, 'stop: answering No to "Pause all requests?" still paused');
-    pauseAll.click(); await settleFor(300);
-    const yes = dlg() && button('Pause all requests', dlg());
-    ok(!!yes && yes.classList.contains('danger'), 'stop: the question has no red "Pause all requests" answer');
+    ok(countOf('POLICY_SET') === sets, 'stop: answering No still stopped');
+    thirty.click(); await settleFor(300);
+    const yes = dlg() && button('Stop for 30 min', dlg());
+    ok(!!yes && yes.classList.contains('danger'), 'stop: the question has no red "Stop for 30 min" answer');
     if (yes) yes.click();
     await settleFor(800);
     let m = lastOf('POLICY_SET');
-    ok(countOf('POLICY_SET') === sets + 1 && m && m.policy.paused.all === true, `stop: Pause all requests sent ${JSON.stringify(m && m.policy && m.policy.paused)}`);
-    const resume = stopCard() && button('Resume all', stopCard());
-    ok(!!resume, 'stop: after pausing, the card offers no "Resume all"');
-    // …and every page says so at the top (0.3.43): a pause nobody remembered held a fleet still for days.
+    ok(countOf('POLICY_SET') === sets + 1 && m && m.policy.paused.all === true && m.policy.paused.minutes === 30 && !m.policy.paused.since,
+      `stop: "30 min" sent ${JSON.stringify(m && m.policy && m.policy.paused)}`);
+    const resume = stopCard() && button('Resume now', stopCard());
+    ok(!!resume, 'stop: while stopped, the card offers no "Resume now"');
+    ok(stopCard() && /It ends by itself at .* \(in (29|30) min\)/.test(stopCard().textContent), `stop: the card does not say when it ends: "${stopCard() && stopCard().textContent}"`);
     const pill = async () => { for (let i = 0; i < 20 && !doc.querySelector('#topbar .paused-btn'); i++) await settleFor(250); return doc.querySelector('#topbar .paused-btn'); };
     const topPill = await pill();
-    ok(!!topPill && /Requests paused · Resume/.test(topPill.textContent), `stop: the top bar does not say requests are paused (${topPill ? topPill.textContent : 'no button'})`);
-    ok(!topPill || /Requests to every cluster are paused since/.test(topPill.title), `stop: the top-bar button does not say since when (${topPill && topPill.title})`);
-    ok(/^Paused:/.test((doc.querySelector('.rq-status h2') || {}).textContent || ''), `stop: the status line does not say paused: "${(doc.querySelector('.rq-status h2') || {}).textContent}"`);
+    ok(!!topPill && /^⏸ Emergency stop until .+ · Resume$/.test(topPill.textContent), `stop: the top bar does not say until when (${topPill ? topPill.textContent : 'no button'})`);
+    ok(!topPill || /^Emergency stop: no request goes to any cluster since .* It ends by itself at/.test(topPill.title), `stop: the top-bar button does not say since and until when (${topPill && topPill.title})`);
+    ok(/^Emergency stop:/.test((doc.querySelector('.rq-status h2') || {}).textContent || ''), `stop: the status line does not say stopped: "${(doc.querySelector('.rq-status h2') || {}).textContent}"`);
     if (resume) {
       resume.click(); await settleFor(800);
       m = lastOf('POLICY_SET');
-      ok(countOf('POLICY_SET') === sets + 2 && m && m.policy.paused.all === false, `stop: Resume all sent ${JSON.stringify(m && m.policy && m.policy.paused)}`);
-      ok(!!(stopCard() && button('Pause all requests', stopCard())), 'stop: after resuming, the card does not offer "Pause all requests" again');
-      ok(!/^Paused:/.test((doc.querySelector('.rq-status h2') || {}).textContent || ''), 'stop: the status line still says paused after resuming');
+      ok(countOf('POLICY_SET') === sets + 2 && m && m.policy.paused.all === false, `stop: Resume now sent ${JSON.stringify(m && m.policy && m.policy.paused)}`);
+      ok(!!(stopCard() && stopCard().querySelector('button[data-act="pause-all"]')), 'stop: after resuming, the card does not offer the stop again');
+      ok(!/^Emergency stop:/.test((doc.querySelector('.rq-status h2') || {}).textContent || ''), 'stop: the status line still says stopped after resuming');
       for (let i = 0; i < 20 && doc.querySelector('#topbar .paused-btn'); i++) await settleFor(250);
-      ok(!doc.querySelector('#topbar .paused-btn'), 'stop: the top bar still says paused after resuming');
+      ok(!doc.querySelector('#topbar .paused-btn'), 'stop: the top bar still says stopped after resuming');
     }
   }
+
+  // Config → Requests no longer pauses anything; it says what happens on its own instead.
+  await go('settings');
+  const reqTab = [...doc.querySelectorAll('nav.subnav button')].find((b) => b.title === 'Requests');
+  if (reqTab) { reqTab.click(); await settleFor(500); }
+  ok(!doc.getElementById('pol-all') && !doc.querySelector('input[data-pol-cluster]'), 'automation: Config → Requests still has pause boxes');
+  ok(/handled on their own/.test((doc.getElementById('pol-auto') || {}).textContent || ''), 'automation: Config → Requests does not say slow and busy clusters are handled on their own');
+  await go('requests'); await settleFor(300);
 
   // Answer first: one status line from the gate, the sentence under it, and the limits as chips.
   const head = (doc.querySelector('.rq-status h2') || {}).textContent || '';
@@ -2762,7 +2764,9 @@ if (viaFleet) {
     await settleFor(300);
     const reads = sent.slice(before).filter((m) => m.type === 'CLUSTER_DATASET');
     ok(reads.length === want, `coverage: Read all sent ${reads.length} CLUSTER_DATASET, expected ${ids.length} clusters × ${DS.length} datasets = ${want}`);
-    ok(reads.every((m) => m.wait === true), 'coverage: a Read all ask did not wait for its answer');
+    // It waits for its answer, but no longer than a person is ever held: 10 s (0.3.44).
+    const pageWait = (await load('core/state.js')).PAGE_WAIT_SEC;
+    ok(pageWait === 10 && reads.every((m) => m.wait === pageWait), `coverage: a Read all ask did not wait ${pageWait} s for its answer: ${JSON.stringify([...new Set(reads.map((m) => m.wait))])}`);
     const order = reads.map((m) => `${m.clusterId}/${m.dataset}`);
     const expect = ids.flatMap((id) => DS.map((d) => `${id}/${d}`));
     ok(JSON.stringify(order) === JSON.stringify(expect), `coverage: Read all went out of order: ${order.join(', ')}`);

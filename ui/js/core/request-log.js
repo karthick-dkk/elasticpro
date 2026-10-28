@@ -178,7 +178,7 @@ export function requestStatus(log, opts = {}) {
   const inText = `${inFlight.toLocaleString()} in flight`;
   const out = { inFlight, waiting, refused, windowMin, detail: requestSentence(log, { now, sentLast5m: opts.sentLast5m ?? null, windowMin }) };
 
-  if (opts.paused) return { ...out, level: 'paused', tone: 'yellow', title: 'Paused: no request goes to any cluster until you resume' };
+  if (opts.paused) return { ...out, level: 'paused', tone: 'yellow', title: 'Emergency stop: no request goes to any cluster until it ends' };
   if (!g.known) {
     return { ...out, level: 'unknown', tone: 'grey',
       title: `Not known: this core does not report its request gate${inFlight ? ` (${inText} in the log)` : ''}` };

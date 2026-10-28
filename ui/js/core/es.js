@@ -131,11 +131,11 @@ export { refreshFleet as refresh };
 export const eventsTicket = () => send({ type: 'EVENTS_TICKET' });
 /**
  * The request policy (Config → Requests): when the poller goes to the clusters, how hard,
- * and whether at all. GET is a user's (the strip says "paused" from it); SET an admin's.
+ * and whether at all. GET is a user's (the strip says "emergency stop" from it); SET an admin's.
  * Reply: {ok, policy, defaults, effective: {dataset: 'background'|'onDemand'}, stored,
  * saved?, warning?, running}. policy = {mode: 'background'|'hybrid'|'on-demand',
  * intervalsSec: {dataset: s}, watchMinutes, concurrency: {global, perCluster, tunnel},
- * timeoutMs, paused: {all, clusters: []}}.
+ * timeoutMs, paused: {all, minutes, since, until, by}}.
  */
 export const policyGet = () => send({ type: 'POLICY_GET' });
 export const policySet = (policy) => send({ type: 'POLICY_SET', policy });
@@ -390,11 +390,13 @@ export class EsClient {
   ilmPolicies() { return this.json('GET', '/_ilm/policy'); }
   /**
    * Which ILM policy the log indices are actually attached to. filter_path keeps the
-   * response to one line per index instead of the whole settings block.
+   * response to one line per index instead of the whole settings block; the uuid is there
+   * so an index WITHOUT a policy is still listed (filter_path drops an empty entry), which
+   * is how the ILM pill tells "every log index managed" from "some are not" (0.3.44).
    */
   ilmPolicyOfIndices(pattern) {
     return this.json('GET',
-      `/${encodeURIComponent(pattern)}/_settings?filter_path=*.settings.index.lifecycle.name` +
+      `/${encodeURIComponent(pattern)}/_settings?filter_path=*.settings.index.lifecycle.name,*.settings.index.uuid` +
       '&expand_wildcards=open&ignore_unavailable=true&allow_no_indices=true');
   }
   slmStats() { return this.json('GET', '/_slm/stats'); }

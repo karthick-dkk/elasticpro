@@ -120,7 +120,7 @@ function draw() {
   mount(host,
     sourceBar(c, sourceList, all.length),
     // Paused is not a failure: nothing was asked, on purpose. Said as what it is.
-    ui.error && ui.paused ? h('div.banner.warn', h('div', h('div.ttl', 'Requests are paused'), h('div', ui.error))) : null,
+    ui.error && ui.paused ? h('div.banner.warn', h('div', h('div.ttl', 'Emergency stop'), h('div', ui.error))) : null,
     ui.error && !ui.paused ? h('div.banner.err', h('div', h('div.ttl', 'Could not list indices'), h('div.mono', hideAddress(ui.error, c)))) : null,
     viewTabs(),
     // The picker is on Summary, so an active filter has to announce itself here — a

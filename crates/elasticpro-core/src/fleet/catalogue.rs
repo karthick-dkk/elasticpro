@@ -161,10 +161,13 @@ impl Dataset {
                 q("clusterSettings", "/_cluster/settings?include_defaults=true&flat_settings=true&filter_path=**.disk.watermark**,**.allocation.enable,**.rebalance.enable".into(), t),
             ],
             Dataset::IlmAssign => {
+                // The uuid too: without it an index with no policy has nothing left after the
+                // filter and drops out, so "every log index is managed" could not be told
+                // from "some are not" (es.js asks the same).
                 let p = log_pattern.map(str::trim).filter(|p| !p.is_empty()).unwrap_or("*");
                 vec![q(
                     "ilmOfIndices",
-                    format!("/{}/_settings?filter_path=*.settings.index.lifecycle.name&expand_wildcards=open&ignore_unavailable=true&allow_no_indices=true", enc(p)),
+                    format!("/{}/_settings?filter_path=*.settings.index.lifecycle.name,*.settings.index.uuid&expand_wildcards=open&ignore_unavailable=true&allow_no_indices=true", enc(p)),
                     t,
                 )]
             }
@@ -304,7 +307,7 @@ mod tests {
         assert_eq!(Dataset::Indices.queries(None)[0].path,
             "/_cat/indices/*?format=json&bytes=b&expand_wildcards=open,closed&h=health%2Cstatus%2Cindex%2Cuuid%2Cpri%2Crep%2Cdocs.count%2Cdocs.deleted%2Cstore.size%2Cpri.store.size%2Ccreation.date");
         assert_eq!(Dataset::IlmAssign.queries(Some("logs-*"))[0].path,
-            "/logs-*/_settings?filter_path=*.settings.index.lifecycle.name&expand_wildcards=open&ignore_unavailable=true&allow_no_indices=true");
+            "/logs-*/_settings?filter_path=*.settings.index.lifecycle.name,*.settings.index.uuid&expand_wildcards=open&ignore_unavailable=true&allow_no_indices=true");
         assert_eq!(Dataset::IlmAssign.queries(None)[0].path.split('/').nth(1), Some("*"));
         assert_eq!(snapshots_full_path("my repo"), "/_snapshot/my%20repo/_all?ignore_unavailable=true&verbose=true&sort=start_time&order=desc&size=500");
         assert!(snapshots_cat_path("r").starts_with("/_cat/snapshots/r?format=json&s=end_epoch:desc&h=id,status"));

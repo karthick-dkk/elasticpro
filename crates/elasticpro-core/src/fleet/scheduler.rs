@@ -36,8 +36,9 @@ pub struct Config {
     pub global: usize,
     pub per_cluster: usize,
     pub per_jump: usize,
+    /// The emergency stop: asked for, and when it lifts itself (see `stopped`).
     pub paused_all: bool,
-    pub paused: HashSet<String>,
+    pub paused_until: u64,
     /// Every body the cache holds, together, at most: `memory::budget().cache_bytes`.
     pub cache_bytes: usize,
 }
@@ -61,7 +62,7 @@ impl Config {
             per_cluster: p.concurrency.per_cluster,
             per_jump: p.concurrency.tunnel,
             paused_all: p.paused.all,
-            paused: p.paused.clusters.iter().cloned().collect(),
+            paused_until: p.paused.until,
             cache_bytes: crate::memory::budget().cache_bytes,
         }
     }
@@ -94,8 +95,10 @@ impl Config {
         }
     }
 
-    pub fn cluster_paused(&self, id: &str) -> bool {
-        self.paused_all || self.paused.contains(id)
+    /// Whether the emergency stop holds at `now`. It has an end, and past it nothing is
+    /// stopped even before the policy is rewritten to say so.
+    pub fn stopped(&self, now: u64) -> bool {
+        self.paused_all && now < self.paused_until
     }
 }
 
@@ -117,6 +120,28 @@ pub struct Throttle {
 pub enum ThrottleKind {
     Budget,
     Backoff,
+}
+
+/// One request answered in more than this, a timeout, or a 429 marks a cluster slowed.
+pub const SLOW_MS: u64 = 8_000;
+/// This many quick answers in a row and a slowed cluster is back to normal.
+pub const QUICK_TO_RECOVER: u32 = 3;
+/// A slowed cluster's intervals double per level (2×, 4×, …), but stretch no further than
+/// this — or than the interval itself, when that is already longer.
+pub const SLOW_INTERVAL_MAX_MS: u64 = 10 * 60_000;
+/// The gate counts as busy when a request has waited this long for a slot…
+pub const BUSY_WAIT_MS: u64 = 5_000;
+
+/// A cluster that answers slowly, handled without anybody deciding to: one request at a
+/// time, its intervals stretched, and pages served what the cache holds instead of being
+/// held for a fresh answer. `QUICK_TO_RECOVER` quick answers in a row end it.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Slowed {
+    pub since: u64,
+    pub reason: String,
+    pub level: u32,
+    pub quick: u32,
 }
 
 pub const BACKOFF_FIRST_MS: u64 = 60_000;
@@ -167,6 +192,11 @@ pub struct State {
     /// number of requests each fetch costs — the dataset's query count, so a repository
     /// listing counts as one though it fans out per repository; an estimate, said so.
     pub starts: HashMap<String, std::collections::VecDeque<(u64, u64)>>,
+    /// Clusters answering slowly; see `Slowed`.
+    pub slowed: HashMap<String, Slowed>,
+    /// Since when the gate has been busy enough that the poller's own work waits, so the
+    /// people asking go first. `None`: not busy.
+    pub busy_since: Option<u64>,
 }
 
 /// What `State::housekeep` removed (or, on a dry run, would).
@@ -204,6 +234,53 @@ impl State {
             kind: ThrottleKind::Backoff, until: now + wait, level,
             reason: format!("{why}; backing off {} s", wait / 1000),
         });
+    }
+
+    /// What one fetch said about the cluster's speed: `slow` names why it counts as slow
+    /// (a request over `SLOW_MS`, a timeout, a 429), `None` a quick answer — or a failure
+    /// that says nothing about speed, when `answered` is false.
+    pub fn note_speed(&mut self, cluster: &str, slow: Option<String>, answered: bool, now: u64) {
+        match slow {
+            Some(reason) => {
+                let s = self.slowed.entry(cluster.to_string())
+                    .or_insert(Slowed { since: now, reason: String::new(), level: 0, quick: 0 });
+                s.level = (s.level + 1).min(4);
+                s.reason = reason;
+                s.quick = 0;
+            }
+            None if answered => {
+                if let Some(s) = self.slowed.get_mut(cluster) {
+                    s.quick += 1;
+                    if s.quick >= QUICK_TO_RECOVER {
+                        self.slowed.remove(cluster);
+                    }
+                }
+            }
+            None => {}
+        }
+    }
+
+    /// `interval_ms` as it runs for this cluster: as is, or stretched while it is slowed.
+    pub fn interval_for(&self, cluster: &str, interval_ms: u64) -> u64 {
+        match self.slowed.get(cluster) {
+            Some(s) => (interval_ms << s.level.min(4)).min(SLOW_INTERVAL_MAX_MS.max(interval_ms)),
+            None => interval_ms,
+        }
+    }
+
+    /// The gate's load decides whether the poller's own work goes this tick. Busy — the
+    /// queue half full, or somebody waiting `BUSY_WAIT_MS` for a slot — and only what a
+    /// person asked for is kept; busy stays until the queue has drained. Returns what goes.
+    pub fn shed(&mut self, cands: Vec<Candidate>, queued: usize, oldest_wait_ms: u64, queue_max: usize, now: u64) -> Vec<Candidate> {
+        if queued >= (queue_max / 2).max(1) || oldest_wait_ms >= BUSY_WAIT_MS {
+            self.busy_since.get_or_insert(now);
+        } else if queued == 0 {
+            self.busy_since = None;
+        }
+        if self.busy_since.is_none() {
+            return cands;
+        }
+        cands.into_iter().filter(|c| c.prio == PRIO_USER).collect()
     }
 
     pub fn next_seq(&mut self) -> u64 {
@@ -244,18 +321,15 @@ impl State {
         }
         let idle = self.idle(now);
         let mut out = vec![];
-        // Paused: nothing new starts, a person's ask included — it stays pending and runs
-        // when the pause is lifted. What is in flight finishes on its own.
-        if cfg.paused_all {
+        // Stopped: nothing new starts, a person's ask included — it stays pending and runs
+        // when the stop ends. What is in flight finishes on its own.
+        if cfg.stopped(now) {
             return out;
         }
         self.throttle.retain(|_, t| t.until > now);
         let throttled: HashSet<&str> = self.throttle.keys().map(String::as_str).collect();
         let clusters = specs.len();
         for s in specs {
-            if cfg.paused.contains(&s.id) {
-                continue;
-            }
             let unreachable = self.reach_state(&s.id) == ReachState::Unreachable;
             let via_down = s.via.as_ref().is_some_and(|v| backing_off.contains(v));
             let first = self.first_due.get(&s.id).copied().unwrap_or(now);
@@ -340,7 +414,9 @@ impl State {
                     continue;
                 }
             }
-            if self.running_cluster.get(&c.cluster).copied().unwrap_or(0) >= cfg.per_cluster {
+            // A slowed cluster gets one request at a time, whatever the policy allows.
+            let per_cluster = if self.slowed.contains_key(&c.cluster) { 1 } else { cfg.per_cluster };
+            if self.running_cluster.get(&c.cluster).copied().unwrap_or(0) >= per_cluster {
                 continue;
             }
             let v = via.get(c.cluster.as_str()).copied().flatten();
@@ -384,7 +460,7 @@ impl State {
             *n = n.saturating_sub(1);
         }
         let ds = key.1;
-        let interval = cfg.interval(ds) * 1000;
+        let interval = self.interval_for(&key.0, cfg.interval(ds) * 1000);
         let seq = self.next_seq();
         let e = self.entries.entry(key.clone()).or_insert_with(|| Entry::never(cfg.stale_after_ms(ds), None));
         e.seq = seq;
@@ -566,6 +642,7 @@ impl State {
             for k in &limits { self.refresh_rl.remove(k); }
             self.running_cluster.retain(|_, n| *n > 0);
             self.running_jump.retain(|_, n| *n > 0);
+            self.slowed.retain(|c, _| !gone(c));
         }
         out
     }
@@ -578,7 +655,7 @@ impl State {
                 gone.insert(c.clone());
             }
         }
-        for c in self.reach.keys().chain(self.first_due.keys()) {
+        for c in self.reach.keys().chain(self.first_due.keys()).chain(self.slowed.keys()) {
             if !keep.contains(c) {
                 gone.insert(c.clone());
             }
@@ -592,6 +669,7 @@ impl State {
         self.watched.retain(|(c, _), _| keep.contains(c));
         self.pending.retain(|(c, _), _| keep.contains(c));
         self.refresh_rl.retain(|(_, c, _), _| keep.contains(c));
+        self.slowed.retain(|c, _| keep.contains(c));
         gone.into_iter().collect()
     }
 }
@@ -853,20 +931,83 @@ mod tests {
     }
 
     #[test]
-    fn a_paused_cluster_is_skipped_and_pause_all_holds_even_a_persons_ask() {
+    fn the_emergency_stop_holds_even_a_persons_ask_and_lifts_itself_at_its_end() {
         let mut cfg = cfg();
-        cfg.paused.insert("c00".into());
         let mut st = active(0);
         let s = specs(2);
         st.plan(&s, 0, &HashSet::new(), &cfg);           // assigns the boot spread
-        let p = st.plan(&s, 100_000, &HashSet::new(), &cfg);
-        assert!(!p.is_empty() && p.iter().all(|c| c.cluster == "c01"), "{p:?}");
         cfg.paused_all = true;
+        cfg.paused_until = 200_000;
         st.request(("c01".into(), Dataset::Health), 0);
-        assert!(st.plan(&s, 100_000, &HashSet::new(), &cfg).is_empty(), "paused: nothing new starts");
-        assert!(st.pending.contains_key(&("c01".to_string(), Dataset::Health)), "the ask waits for the pause to lift");
-        cfg.paused_all = false;
-        assert!(st.plan(&s, 100_000, &HashSet::new(), &cfg).iter().any(|c| c.cluster == "c01" && c.prio == PRIO_USER));
+        assert!(st.plan(&s, 100_000, &HashSet::new(), &cfg).is_empty(), "stopped: nothing new starts");
+        assert!(st.pending.contains_key(&("c01".to_string(), Dataset::Health)), "the ask waits for the stop to end");
+        // Its end passed: running again, though nobody rewrote the policy yet.
+        assert!(!cfg.stopped(200_000));
+        assert!(st.plan(&s, 200_000, &HashSet::new(), &cfg).iter().any(|c| c.cluster == "c01" && c.prio == PRIO_USER));
+    }
+
+    #[test]
+    fn a_slow_cluster_gets_one_request_at_a_time_longer_intervals_and_three_quick_answers_end_it() {
+        let cfg = cfg();
+        assert_eq!(cfg.per_cluster, 2);
+        let mut st = active(0);
+        st.note_speed("c00", Some("a request took 9.2 s".into()), true, 1_000);
+        assert_eq!(st.slowed["c00"].level, 1);
+        assert_eq!(st.slowed["c00"].since, 1_000);
+        // Intervals: 2× at level 1, then 4×, never past ten minutes unless already longer.
+        assert_eq!(st.interval_for("c00", 180_000), 360_000);
+        st.note_speed("c00", Some("the request timed out".into()), false, 2_000);
+        assert_eq!((st.slowed["c00"].level, st.slowed["c00"].since), (2, 1_000), "since: when it began");
+        assert_eq!(st.interval_for("c00", 180_000), SLOW_INTERVAL_MAX_MS);
+        assert_eq!(st.interval_for("c00", 3_600_000), 3_600_000, "a longer interval is not shortened");
+        assert_eq!(st.interval_for("c01", 180_000), 180_000, "another cluster is untouched");
+        // An answer schedules the next fetch on the stretched interval.
+        let key = ("c00".to_string(), Dataset::Nodes);
+        let _ = st.complete(&key, answered(), 5, 10_000, &cfg, &mut same);
+        assert_eq!(st.entries[&key].next_due, Some(10_000 + SLOW_INTERVAL_MAX_MS));
+        // One at a time on the slowed cluster; the other keeps the policy's two.
+        let s = specs(2);
+        let cands: Vec<Candidate> = [Dataset::Nodes, Dataset::Indices, Dataset::Shards].iter()
+            .flat_map(|d| ["c00", "c01"].map(|c| Candidate { prio: PRIO_USER, due: 0, cluster: c.into(), dataset: *d }))
+            .collect();
+        let took = st.take(cands, &s, &cfg, 20_000);
+        assert_eq!(took.iter().filter(|c| c.cluster == "c00").count(), 1);
+        assert_eq!(took.iter().filter(|c| c.cluster == "c01").count(), 2);
+        // A failure that says nothing about speed neither counts nor resets.
+        st.note_speed("c00", None, true, 30_000);
+        st.note_speed("c00", None, false, 31_000);
+        st.note_speed("c00", None, true, 32_000);
+        assert!(st.slowed.contains_key("c00"));
+        st.note_speed("c00", None, true, 33_000);
+        assert!(!st.slowed.contains_key("c00"), "three quick answers: back to normal");
+        // A slow answer between quick ones starts the count again.
+        st.note_speed("c02", Some("slow".into()), true, 0);
+        st.note_speed("c02", None, true, 1);
+        st.note_speed("c02", None, true, 2);
+        st.note_speed("c02", Some("slow".into()), true, 3);
+        st.note_speed("c02", None, true, 4);
+        st.note_speed("c02", None, true, 5);
+        assert!(st.slowed.contains_key("c02"));
+        // A cluster taken out of the config takes its mark with it.
+        st.prune(&["c00".to_string()].into_iter().collect());
+        assert!(!st.slowed.contains_key("c02"));
+    }
+
+    #[test]
+    fn a_busy_gate_holds_the_pollers_work_and_lets_people_first_until_the_queue_drains() {
+        let mut st = active(0);
+        let c = |prio| Candidate { prio, due: 0, cluster: "c00".into(), dataset: Dataset::Nodes };
+        let all = || vec![c(PRIO_USER), c(PRIO_DUE), c(PRIO_BACKGROUND)];
+        assert_eq!(st.shed(all(), 3, 1_000, 256, 0).len(), 3, "a short queue: everything goes");
+        assert!(st.busy_since.is_none());
+        let kept = st.shed(all(), 3, BUSY_WAIT_MS, 256, 10);
+        assert_eq!(kept, vec![c(PRIO_USER)], "somebody waited 5 s: only people");
+        assert_eq!(st.busy_since, Some(10));
+        assert_eq!(st.shed(all(), 128, 0, 256, 20).len(), 1, "half the queue full is busy too");
+        assert_eq!(st.shed(all(), 2, 0, 256, 30).len(), 1, "still busy until the queue has drained");
+        assert_eq!(st.busy_since, Some(10));
+        assert_eq!(st.shed(all(), 0, 0, 256, 40).len(), 3, "drained: the poller starts again by itself");
+        assert!(st.busy_since.is_none());
     }
 
     #[test]

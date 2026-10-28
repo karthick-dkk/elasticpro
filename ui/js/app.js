@@ -28,6 +28,7 @@ import { pageForProblem } from './core/alert-rules.js';
 import { EVIDENCE_PAGES, evidenceLayout, evidenceSelection, createHeldNotices } from './core/evidence.js';
 import { setHostedEdition } from './core/server-credentials.js';
 import { pausedPill, pausedKey } from './ui/paused-pill.js';
+import { pauseFor, pausedLine } from './core/policy.js';
 
 let coreInfo = { version: '?' };
 
@@ -596,8 +597,8 @@ function renderTopbar() {
       }, ev ? (need ? 'Sign in' : 'Re-enter credentials')
         : need ? `Sign in (${need} cluster${need === 1 ? '' : 's'})` : `Re-enter credentials (${bad})`);
     })(),
-    // A pause stops every fetch; said on every page, evidence pages included, because a
-    // paused fleet otherwise looks like one that is merely quiet (ui/paused-pill.js).
+    // The emergency stop holds every fetch; said on every page, evidence pages included,
+    // because a stopped fleet otherwise looks like one that is merely quiet (ui/paused-pill.js).
     pausedPill({ selected: state.selected, admin: may('admin'),
       onResumed: async () => { await syncFleet({ full: true }); topbarKey = null; go(currentPage); } }),
     // One cluster: its health is the dot on the picker. The fleet: the counts, coloured by the worst.
@@ -743,10 +744,10 @@ function renderSideFoot() {
       return row('Requests', h('a', { href: '#/requests', title: 'Requests this app sent to every cluster in the last 5 minutes — open the Request Centre' },
         `${total} in 5m · ${perMin.toFixed(1)}/min`));
     })(),
-    // Said here because a paused or on-demand core looks, from any page, like a fleet that
+    // Said here because a stopped or on-demand core looks, from any page, like a fleet that
     // has stopped updating — the strip is where somebody looks to find out why.
-    pol && pol.pausedAll
-      ? h('span.pill.grey', { title: 'The request policy pauses every request: nothing new is sent to any cluster until an administrator resumes (Config → Requests, or the Request Centre)' }, 'requests paused')
+    pauseFor(pol)
+      ? h('span.pill.grey', { title: pausedLine(pauseFor(pol)) }, 'emergency stop')
       : null,
     // What the poller is actually doing: "auto" resolves to background or hybrid by fleet size,
     // and the shipped Client basis is on-demand.
@@ -1216,7 +1217,7 @@ const redrawGate = createRedrawGate({ apply: () => scheduleDataRedraw(), policy:
 const scheduleNavRedraw = coalesce(() => renderNav());
 // Acknowledging or silencing changes what counts as open: the badge and the bar say so at once.
 bus.on('alerts-changed', () => { renderNav(); topbarKey = ''; renderTopbar(); });
-// Paused or resumed: the top bar's pill, the status strip, and the page (which asks again on a resume).
+// Stopped or resumed: the top bar's pill, the status strip, and the page (which asks again on a resume).
 bus.on('pause-changed', () => { topbarKey = ''; renderTopbar(); renderSideFoot(); bus.emit('data'); });
 bus.on('data', () => {
   scheduleNavRedraw();

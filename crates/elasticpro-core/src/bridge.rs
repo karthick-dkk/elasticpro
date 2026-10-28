@@ -1494,9 +1494,11 @@ impl Core {
         let sent: usize = self.sent_counts(window).iter().map(|(_, n)| n).sum();
         let cfg = self.req_cfg.read().clone();
         let (_, read_cache_used) = self.read_cache.usage();
+        // There is no per-cluster pause since 0.3.44; the key stays, truthfully 0, for the
+        // template items that read it.
         let (policy_mode, paused_all, paused_clusters) = {
             let pol = self.fleet.policy.read();
-            (pol.mode.as_str(), pol.paused.all, pol.paused.clusters.len())
+            (pol.mode.as_str(), pol.paused.active(crate::fleet::now_ms()), 0)
         };
         let (cache_used, cache_budget) = {
             let budget = self.fleet.cfg.read().cache_bytes as u64;
@@ -2069,10 +2071,16 @@ impl Core {
         };
         inflight.sort_by_key(|r| r.started_at);
         let now = crate::fleet::now_ms();
-        let throttled: serde_json::Map<String, Value> = {
+        // How requests are being handled without anybody deciding: the poller's holds, the
+        // clusters slowed for answering slowly, and whether a busy gate holds the poller.
+        let (throttled, slowed, busy_since) = {
             let st = self.fleet.state.lock();
-            st.throttle.iter().filter(|(c, t)| t.until > now && ids.as_ref().is_none_or(|v: &std::collections::HashSet<String>| v.contains(*c)))
-                .map(|(c, t)| (c.clone(), serde_json::to_value(t).unwrap_or(Value::Null))).collect()
+            let mine = |c: &String| ids.as_ref().is_none_or(|v: &std::collections::HashSet<String>| v.contains(c));
+            let throttled: serde_json::Map<String, Value> = st.throttle.iter().filter(|(c, t)| t.until > now && mine(c))
+                .map(|(c, t)| (c.clone(), serde_json::to_value(t).unwrap_or(Value::Null))).collect();
+            let slowed: serde_json::Map<String, Value> = st.slowed.iter().filter(|(c, _)| mine(c))
+                .map(|(c, s)| (c.clone(), serde_json::to_value(s).unwrap_or(Value::Null))).collect();
+            (throttled, slowed, st.busy_since)
         };
         let cfg = self.req_cfg.read().clone();
         let (entries, bytes) = self.read_cache.usage();
@@ -2097,6 +2105,7 @@ impl Core {
         }
         json!({
             "ok": true, "inflight": inflight, "recent": recent, "keep": REQUEST_LOG_KEEP, "throttled": throttled,
+            "slowed": slowed, "busySince": busy_since,
             "gate": gate,
             // The Tasks panel reads its listing and how to recognise ours from here, so the
             // two are defined once (tasks.rs).
@@ -3754,6 +3763,11 @@ impl Core {
     /// The configuration in force.
     pub fn request_config(&self) -> crate::gate::RequestConfig {
         self.req_cfg.read().clone()
+    }
+
+    /// The gate's load and its queue bound: what the poller's busy check reads.
+    pub(crate) fn gate_load(&self) -> (crate::gate::Load, usize) {
+        (self.gate.load(), self.req_cfg.read().limits.queue_max)
     }
 
     /// (running, waiting) at the gate right now.

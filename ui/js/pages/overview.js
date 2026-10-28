@@ -24,7 +24,7 @@ import { openClusterAlerts } from '../core/alert-goto.js';
 import { diskAgainstWatermarks } from '../core/disk-balance.js';
 // Why a cluster cannot be reached: one definition, shared with the Alerts page's unreachable lines.
 import { unreachableReason } from '../core/alert-groups.js';
-import { ilmErrorsOf, slmErrorsOf, ilmErrorTitle, slmErrorTitle } from '../core/lifecycle-errors.js';
+import { ilmErrorsOf, slmErrorsOf, ilmErrorTitle, slmErrorTitle, lifecycleView, ilmCoverage, logPatternOf } from '../core/lifecycle-errors.js';
 
 let host = null;
 /** Rows the operator opened or closed by hand; what the rest show is the preference. */
@@ -55,15 +55,15 @@ export const SORTS = {
   jdk:      { label: 'JDK',           get: (r) => { const j = jvmSummary(r.d.nodes).text; return j === 'unknown' ? null : j; } },
   snapshot: { label: 'Last snapshot', get: (r) => { const s = lastSnapshotOf(r.d); return s ? s.start : null; } },
   alerts:   { label: 'Open alerts',   get: (r) => (alertCounts || alertsByCluster()).get(r.c.id) || 0 },
-  ilm:      { label: 'ILM',           get: (r) => lifecycleSortKey(r.d.ilm && r.d.ilm.operation_mode, ilmErrorsOf(r.d, logPattern(r)).count) },
-  slm:      { label: 'SLM',           get: (r) => lifecycleSortKey(r.d.slmStatus && r.d.slmStatus.operation_mode, slmErrorsOf(r.d, logPattern(r)).count) },
+  ilm:      { label: 'ILM',           get: (r) => lifecycleSortKey(lifecycleView('ILM', r.d, logPattern(r)), ilmErrorsOf(r.d, logPattern(r)).count) },
+  slm:      { label: 'SLM',           get: (r) => lifecycleSortKey(lifecycleView('SLM', r.d, logPattern(r)), slmErrorsOf(r.d, logPattern(r)).count) },
   repo:     { label: 'Repository',    get: (r) => (Array.isArray(r.d.repos) ? r.d.repos.map((x) => x.name).join(', ') : null) },
   reqs:     { label: 'Our reqs/5m',   get: (r) => ((requestLoad.clusters[r.c.id] || {}).last5m || 0) },
 };
 /** The cluster's own log index pattern (logstash-* unless it says otherwise). */
-export const logPattern = (r) => r.c.logIndexPattern || (state.defaults && state.defaults.logIndexPattern) || undefined;
-/** Mode first, then clusters with errors ahead of clean ones. */
-const lifecycleSortKey = (mode, errs) => (mode ? `${mode}|${errs ? 0 : 1}` : null);
+export const logPattern = (r) => logPatternOf(r.c, state.defaults);
+/** The pill's word, then red (not looking after the logs) ahead of green, then errors ahead of clean. */
+const lifecycleSortKey = (v, errs) => (v.word === 'Unknown' ? null : `${v.word}|${v.tone === 'red' ? 0 : v.tone === 'grey' ? 1 : 2}|${errs ? 0 : 1}`);
 const known = (v) => (typeof v === 'number' && v >= 0 ? v : null);
 /** The sort keys that still mean something for a cluster that is not answering. */
 const DOWN_KEEPS = new Set(['name', 'health', 'alerts']);
@@ -161,10 +161,11 @@ function stateLabel(r) {
 
 /**
  * The datasets this page is drawn from: health and nodes for the tiles and disk, ILM errors
- * for the alert headline, policies for ILM/SLM and repositories, snapshots for the last
+ * for the alert headline, policies for ILM/SLM and repositories, the ILM assignment for
+ * whether ILM looks after the log indices (the ILM pill's colour), snapshots for the last
  * backup. What "read" means in the coverage line, and what Read all asks for.
  */
-const DATASETS = ['health', 'nodes', 'ilm_errors', 'policies', 'snapshots'];
+const DATASETS = ['health', 'nodes', 'ilm_errors', 'policies', 'ilm_assign', 'snapshots'];
 // The "Showing cached data … Read all" line this page used to open with is gone (board of
 // 2026-10-25): the page asks for what is missing when it opens (askOnOpen), Refresh reads
 // every cluster on screen again, and the Alerts page keeps the coverage bar and Read all.
@@ -509,18 +510,19 @@ const CELLS = {
     // no tick, no threshold colour — and it says why.
     ? h('span.muted', { title: 'The cluster is not answering, so its disk use is not known now.' }, 'unknown while unreachable')
     : diskCell(r.d.disk, r.d.clusterSettings, { dataNodes: true })),
-  // A button, as in 0.3.2: the mode in its colour, a red dot beside it when a log index is in
-  // an ILM error step (lifecycle-errors.js — the one definition). Click opens the row.
+  // A button, as in 0.3.2: Running in green only when it looks after the log indices, red
+  // otherwise (0.3.44), a red dot beside it when a log index is in an ILM error step
+  // (lifecycle-errors.js — the one definition). Click opens the row.
   ilm: (r) => {
     const { d } = r;
     return h('td', d.ilm
-      ? lifecycleButton(r, 'ILM', d.ilm.operation_mode, ilmErrorsOf(d, logPattern(r)), ilmErrorTitle)
+      ? lifecycleButton(r, 'ILM', lifecycleView('ILM', d, logPattern(r)), ilmErrorsOf(d, logPattern(r)), ilmErrorTitle)
       : h('span.muted', '\u2013'));
   },
   slm: (r) => {
     const { d } = r;
     if (!d.slmStatus) return h('td', h('span.muted', d.slmSupported === false ? 'n/a' : '\u2013'));
-    return h('td', lifecycleButton(r, 'SLM', d.slmStatus.operation_mode, slmErrorsOf(d, logPattern(r)), slmErrorTitle));
+    return h('td', lifecycleButton(r, 'SLM', lifecycleView('SLM', d, logPattern(r)), slmErrorsOf(d, logPattern(r)), slmErrorTitle));
   },
   repo: (r) => {
     const names = (r.d.repos || []).map((x) => x.name);
@@ -549,17 +551,20 @@ const CELLS = {
   },
 };
 
-/** The ILM/SLM button: mode as a pill; a red dot (never a count) when `errs` has any. */
-export function lifecycleButton(r, label, mode, errs, titleOf) {
-  const m = String(mode || '');
-  const colour = m.toUpperCase() === 'RUNNING' ? 'green' : 'yellow';
-  const word = m.toLowerCase() || 'unknown';
-  const title = errs.count ? titleOf(errs) : `${label} is ${word} \u2014 click for the cluster's details`;
-  return h('span.cl-lc', h(`button.pill.cl-pillbtn.${colour}`, {
-    type: 'button', title, 'aria-label': `${label} ${word}${errs.count ? ', has errors' : ''} \u2014 open details for ${r.c.name}`,
+/**
+ * The ILM/SLM button: the pill lifecycleView decides (Running green / red, Stopped red,
+ * Running ? grey), why in its tooltip; a red dot (never a count) when `errs` has any.
+ */
+export function lifecycleButton(r, label, view, errs, titleOf) {
+  const title = [view.why, errs.count ? titleOf(errs) : '', 'Click for the cluster\u2019s details.'].filter(Boolean).join('\n\n');
+  return h('span.cl-lc', h(`button.pill.cl-pillbtn.${view.tone}`, {
+    type: 'button', title, 'aria-label': `${label} ${view.word}${view.covered === false ? ', not looking after the log indices' : ''}${errs.count ? ', has errors' : ''} \u2014 open details for ${r.c.name}`,
     onclick: () => { if (!isOpen(r.c.id)) { toggleRow(r.c.id); draw(); } },
-  }, word), errs.count ? h('i.cl-errdot', { title, role: 'img', 'aria-label': 'errors' }) : null);
+  }, view.word), errs.count ? h('i.cl-errdot', { title: titleOf(errs), role: 'img', 'aria-label': 'errors' }) : null);
 }
+
+/** The CSV's yes / no / empty (unknown) for "looks after the log indices". */
+const coveredCsv = (v) => (v.covered === true ? 'yes' : v.covered === false ? 'no' : '');
 
 /**
  * The CSV's fields per column: [suffix, value]. The header is the column's name as this
@@ -580,8 +585,10 @@ const CSV = {
     ['watermark', (r) => diskAgainstWatermarks(r.d.disk, r.d.clusterSettings).label],
     ['high watermark %', (r) => { const w = diskAgainstWatermarks(r.d.disk, r.d.clusterSettings); return w.known ? w.high : ''; }]],
   ilm: [['', (r) => (r.d.ilm && r.d.ilm.operation_mode) || ''],
+    ['covers log indices', (r) => coveredCsv(lifecycleView('ILM', r.d, logPattern(r)))],
     ['log indices in error', (r) => { const e = ilmErrorsOf(r.d, logPattern(r)); return e.known ? e.count : ''; }]],
   slm: [['', (r) => (r.d.slmStatus && r.d.slmStatus.operation_mode) || (r.d.slmSupported === false ? 'n/a' : '')],
+    ['covers log indices', (r) => (r.d.slmStatus ? coveredCsv(lifecycleView('SLM', r.d, logPattern(r))) : '')],
     ['policies failing', (r) => { const e = slmErrorsOf(r.d, logPattern(r)); return e.known ? e.count : ''; }]],
   repo: [['', (r) => (r.d.repos || []).map((x) => x.name).join('|')], ['locations', (r) => (r.d.repos || []).map((x) => x.location).join('|')]],
   snapshot: [['', (r) => { const s = lastSnapshotOf(r.d); return s ? s.id : ''; }],
@@ -847,7 +854,7 @@ function rowNodes(r, byCluster, cols) {
       if (t && t.closest('button, a, input, select, label, .menu-pop')) return;
       toggleRow(c.id); draw();
     } }, chevron, ...cols.map(cell)));
-  if (open) out.push(h('tr.cl-detail-row', h('td', { colspan: cols.length + 1, style: { background: 'var(--surface-2)' } }, detail(r))));
+  if (open) out.push(h('tr.cl-detail-row', h('td', { colspan: cols.length + 1 }, detail(r))));
   return out;
 }
 
@@ -1082,6 +1089,12 @@ function shardTile(d) {
           leg('init', 'Initializing', a.initializing), leg('unas', 'Unassigned', a.unassigned)))));
 }
 
+/** Beside the ILM tile's pill: how many open log indices have a policy, when that is known. */
+function ilmTileNote(d, pattern, v) {
+  const c = ilmCoverage(d, pattern);
+  if (!c.known || v.word !== 'Running') return '';
+  return c.total ? `${c.managed} of ${c.total} log indices managed` : 'no open log index';
+}
 function detail(r) {
   const { c, d } = r;
   const box = h('div.cl-detail');
@@ -1110,16 +1123,18 @@ function detail(r) {
   }
   if (shown.has('ilm')) {
     const e = ilmErrorsOf(d, logPattern(r));
+    const v = lifecycleView('ILM', d, logPattern(r));
     tiles.push(tile('ILM', !d.ilm ? h('span.muted', 'unknown')
-      : h('span.mono', String(d.ilm.operation_mode || 'unknown'),
+      : h('span.mono', h(`span.pill.${v.tone}`, { title: v.why }, v.word), ' ', h('span.muted', { style: { fontSize: '11px' }, title: v.why }, ilmTileNote(d, logPattern(r), v)),
           e.count ? [' ', h('i.cl-errdot', { title: ilmErrorTitle(e), role: 'img', 'aria-label': 'errors' }),
             h('span.muted', { style: { fontSize: '11px' } }, ` ${e.names.slice(0, 3).join(', ')}${e.count > 3 ? ', \u2026' : ''}`)] : null), { id: 'ilm' }));
   }
   if (shown.has('slm')) {
     const e = slmErrorsOf(d, logPattern(r));
     const np = (d.slm || []).length;
+    const v = lifecycleView('SLM', d, logPattern(r));
     tiles.push(tile('SLM', d.slmStatus
-      ? h('span.mono', `${d.slmStatus.operation_mode} \u00b7 ${np} polic${np === 1 ? 'y' : 'ies'}`,
+      ? h('span.mono', h(`span.pill.${v.tone}`, { title: v.why }, v.word), h('span.muted', { style: { fontSize: '11px' }, title: v.why }, ` \u00b7 ${np} polic${np === 1 ? 'y' : 'ies'}`),
           e.count ? [' ', h('i.cl-errdot', { title: slmErrorTitle(e), role: 'img', 'aria-label': 'errors' }),
             h('span.muted', { style: { fontSize: '11px' } }, ` ${e.names.join(', ')}`)] : null)
       : h('span.mono', d.slmSupported === false ? 'not supported' : 'unknown'), { id: 'slm' }));

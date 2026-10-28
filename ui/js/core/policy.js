@@ -84,8 +84,11 @@ export const FALLBACK_DEFAULTS = {
   watchMinutes: 15,
   concurrency: { global: CLIENT_BASIS.global, perCluster: CLIENT_BASIS.perCluster, tunnel: 6 },
   timeoutMs: 30000,
-  paused: { all: false, clusters: [] },
+  paused: { all: false },
 };
+
+/** How long an emergency stop lasts, in minutes (policy.rs STOP_MINUTES): it always ends by itself. */
+export const STOP_MINUTES = [15, 30, 60];
 
 export const PRESETS = [
   { id: 'client', name: 'Client basis', label: 'Client basis (recommended) — nothing until a page asks, one request per cluster at a time' },
@@ -147,16 +150,15 @@ const MODE_NAMES = { 'on-demand': 'Client basis', hybrid: 'Hybrid', background: 
  *   - when no page has asked the core for anything for IDLE_MINUTES it polls health only;
  *   - a cluster that does not answer gets one health probe every UNREACHABLE_PROBE_SEC,
  *     and nothing else; under Client basis not even that;
- *   - a paused cluster gets nothing, and "pause all" stops everything.
+ *   - the emergency stop stops everything while it lasts.
  *
  * @param policy  a normalised policy (normalisePolicy / applyPreset)
  * @param o.clusters     how many clusters the core polls (what `auto` resolves against)
- * @param o.paused       how many of them the policy pauses
  * @param o.unreachable  how many of the rest do not answer now
  * @returns {{ mode, auto, why, idle: {perMinute, text}, open: {perMinute, text} }}
  *   perMinute is the bound itself (not rounded), null where it depends on the page.
  */
-export function policyEffect(policy, { clusters = 0, paused = 0, unreachable = 0 } = {}) {
+export function policyEffect(policy, { clusters = 0, unreachable = 0 } = {}) {
   const p = policy || {};
   const iv = p.intervalsSec || FALLBACK_DEFAULTS.intervalsSec;
   const watch = p.watchMinutes || FALLBACK_DEFAULTS.watchMinutes;
@@ -164,9 +166,9 @@ export function policyEffect(policy, { clusters = 0, paused = 0, unreachable = 0
   const auto = p.mode === 'auto';
   const why = auto ? `Background up to ${AUTO_HYBRID_ABOVE} clusters, Hybrid above: with ${clusters} it runs as ${MODE_NAMES[mode]}.` : null;
   const out = (idle, open) => ({ mode, auto, why, idle, open });
-  const active = p.paused && p.paused.all ? 0 : Math.max(0, clusters - paused);
+  const active = p.paused && p.paused.all ? 0 : clusters;
   if (!clusters) return out({ perMinute: 0, text: 'no requests: no clusters are configured.' }, { perMinute: 0, text: 'nothing to ask.' });
-  if (!active) return out({ perMinute: 0, text: 'no requests: every cluster is paused.' }, { perMinute: 0, text: 'nothing new starts until requests are resumed.' });
+  if (!active) return out({ perMinute: 0, text: 'no requests: the emergency stop is on.' }, { perMinute: 0, text: 'nothing new starts until it ends or an administrator lifts it.' });
   const down = Math.min(Math.max(0, unreachable), active);
   const up = active - down;
   const pageOnly = `what that page shows, for the clusters on it, kept fresh while it is open and for ${watch} min after`;
@@ -222,7 +224,10 @@ const whole = (v) => (typeof v === 'number' && Number.isFinite(v) ? Math.round(v
   : typeof v === 'string' && v.trim() !== '' && Number.isFinite(Number(v)) ? Math.round(Number(v)) : null);
 
 /**
- * Within bounds, unknown datasets dropped, the paused list tidy — what the core would store.
+ * Within bounds, unknown datasets dropped — what the core would store. Of the stop, whether
+ * it is asked for, for how long, and which one (`since`: the stop this page was shown, 0
+ * to begin one) goes back; the core stamps start and end, and does not begin again a stop
+ * that ended while the form was open.
  * `bounds` is boundsUnder(the core's gate) when it reported one.
  */
 export function normalisePolicy(p, defaults = FALLBACK_DEFAULTS, bounds = BOUNDS) {
@@ -237,9 +242,7 @@ export function normalisePolicy(p, defaults = FALLBACK_DEFAULTS, bounds = BOUNDS
   }
   const c = src.concurrency || {};
   const dc = d.concurrency || FALLBACK_DEFAULTS.concurrency;
-  const seen = new Set();
-  const clusters = ((src.paused && src.paused.clusters) || [])
-    .filter((id) => typeof id === 'string' && id.trim() !== '' && !seen.has(id) && seen.add(id));
+  const stop = src.paused || {};
   return {
     mode: MODES.includes(src.mode) ? src.mode : (MODES.includes(d.mode) ? d.mode : CLIENT_BASIS.mode),
     intervalsSec,
@@ -250,13 +253,14 @@ export function normalisePolicy(p, defaults = FALLBACK_DEFAULTS, bounds = BOUNDS
       tunnel: pick(c.tunnel, dc.tunnel ?? 6, bounds.tunnel),
     },
     timeoutMs: pick(src.timeoutMs, d.timeoutMs ?? 30000, BOUNDS.timeoutMs),
-    paused: { all: !!(src.paused && src.paused.all), clusters },
+    paused: stop.all ? { all: true, minutes: STOP_MINUTES.includes(stop.minutes) ? stop.minutes : STOP_MINUTES[0], since: whole(stop.since) || 0 }
+      : { all: false },
   };
 }
 
 /**
- * A preset changes how the poller behaves, never what is paused: pressing "Client basis"
- * must not quietly resume a cluster somebody stopped by hand.
+ * A preset changes how the poller behaves, never the emergency stop: pressing "Client
+ * basis" must not quietly lift a stop somebody began.
  */
 export function applyPreset(policy, id, defaults = FALLBACK_DEFAULTS, bounds = BOUNDS) {
   const base = normalisePolicy(defaults, FALLBACK_DEFAULTS, bounds);
@@ -291,7 +295,7 @@ const FIELD_NAMES = {
 /**
  * What the form says, as a policy, with every value the form could not keep named.
  * `values` = {mode, intervalsSec: {ds: text}, watchMinutes, global, perCluster, tunnel,
- * timeoutMs, pausedAll, pausedClusters: []}. A field left empty or not a number takes the
+ * timeoutMs, pausedAll, pausedMinutes, pausedSince}. A field left empty or not a number takes the
  * shipped value; one out of bounds is clamped. Either way the person is told.
  */
 export function fromForm(values, defaults = FALLBACK_DEFAULTS, bounds = BOUNDS) {
@@ -330,74 +334,60 @@ export function fromForm(values, defaults = FALLBACK_DEFAULTS, bounds = BOUNDS) 
       tunnel: read(v.tunnel, FIELD_NAMES.tunnel, bounds.tunnel, d.concurrency.tunnel, ''),
     },
     timeoutMs: read(v.timeoutMs, FIELD_NAMES.timeoutMs, BOUNDS.timeoutMs, d.timeoutMs, ' ms'),
-    paused: { all: !!v.pausedAll, clusters: v.pausedClusters || [] },
+    paused: { all: !!v.pausedAll, minutes: v.pausedMinutes, since: v.pausedSince },
   }, defaults, bounds);
   return { policy, problems };
 }
 
-/** A new policy with one cluster paused or resumed; the order of the rest is kept. */
-export function togglePaused(policy, clusterId, paused) {
+/** A new policy with the emergency stop begun (for `minutes`, one of STOP_MINUTES) or lifted. */
+export function setPausedAll(policy, all, minutes = STOP_MINUTES[0]) {
   const p = policy || {};
-  const was = (p.paused && p.paused.clusters) || [];
-  // Pausing one already paused leaves it where it was rather than moving it last.
-  const clusters = paused ? (was.includes(clusterId) ? [...was] : [...was, clusterId])
-    : was.filter((id) => id !== clusterId);
-  return { ...p, paused: { all: !!(p.paused && p.paused.all), clusters } };
+  return { ...p, paused: all ? { all: true, minutes, since: 0 } : { all: false } };
 }
 
-/** A new policy with every request paused, or resumed. */
-export function setPausedAll(policy, all) {
-  const p = policy || {};
-  return { ...p, paused: { clusters: [...((p.paused && p.paused.clusters) || [])], all: !!all } };
-}
+const clock = (ms, now) => {
+  const d = new Date(ms);
+  const time = d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
+  return new Date(now).toDateString() === d.toDateString() ? time
+    : `${d.toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' })}, ${time}`;
+};
 
 /**
- * What a pause means to somebody looking at a page with no data, in one sentence or two:
- * `{all, since, by}` as CLUSTER_DATASET's `paused` (or FLEET_STATE's pausedAll /
- * pausedSince / pausedBy, mapped). `since` is ms; 0 when the core did not record it (a
- * pause set before 0.3.43). Pure; `now` is for tests.
+ * What the emergency stop means to somebody looking at a page with no data, in a sentence
+ * or two: `{all, since, until, by}` as CLUSTER_DATASET's `paused` (or FLEET_STATE's
+ * pausedSince / pausedUntil / pausedBy, mapped). Times are ms. Pure; `now` is for tests.
  */
 export function pausedLine(p, { now = Date.now() } = {}) {
   const q = p || {};
-  const what = q.all ? 'Requests to every cluster are paused' : 'Requests to this cluster are paused';
-  let when = '';
-  if (q.since > 0) {
-    const d = new Date(q.since);
-    const sameDay = new Date(now).toDateString() === d.toDateString();
-    const time = d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
-    when = sameDay ? ` since ${time} today`
-      : ` since ${d.toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' })}, ${time}`;
-  }
+  const when = q.since > 0 ? ` since ${clock(q.since, now)}` : '';
   const who = q.by ? `, by ${q.by}` : '';
-  return `${what}${when}${who}. Nothing new is fetched until an administrator resumes them `
-    + '(the paused button at the top, or Request Centre → Resume all).';
+  const left = q.until > now ? Math.max(1, Math.ceil((q.until - now) / 60000)) : 0;
+  const ends = left ? ` It ends by itself at ${clock(q.until, now)} (in ${left} min); an administrator can end it sooner`
+    : ' An administrator can end it';
+  return `Emergency stop: no request goes to any cluster${when}${who}.${ends} (the button at the top, or Request Centre → Resume now).`;
 }
 
-/** The question asked before every request is paused: a pause nobody meant held a site still for days. */
-export const PAUSE_ALL_QUESTION = {
-  title: 'Pause all requests?',
-  body: 'Nothing new is fetched from any cluster until an administrator resumes. Pages keep their last data, '
-    + 'marked as old, and a page with none says requests are paused. Every page shows “Requests paused” at the top '
-    + 'until then.',
-  yes: 'pause all requests',
-};
-
-/** Whether saving `next` over `current` begins a pause of everything — the change that is asked about. Pure. */
-export function beginsPauseAll(current, next) {
-  return !!(next && next.paused && next.paused.all) && !(current && current.paused && current.paused.all);
+/** The question asked before the emergency stop begins, for how long it was chosen. */
+export function stopQuestion(minutes) {
+  return {
+    title: `Stop all requests for ${minutes} minutes?`,
+    body: `Nothing new is fetched from any cluster for ${minutes} minutes; then requests start again by themselves. `
+      + 'Pages keep their last data, marked as old, and every page shows the stop at the top until it ends. '
+      + 'You do not need this for a slow or busy cluster: ElasticPro already slows down for those on its own.',
+    yes: `stop for ${minutes} min`,
+  };
 }
 
-/** FLEET_STATE's brief policy as the `{all, since, by}` pausedLine reads, for one cluster; null when it is not paused. */
-export function pauseFor(fleetPol, clusterId) {
-  if (!fleetPol) return null;
-  const one = !!clusterId && (fleetPol.paused || []).includes(clusterId);
-  if (!fleetPol.pausedAll && !one) return null;
-  return { all: !!fleetPol.pausedAll, since: fleetPol.pausedSince || 0, by: fleetPol.pausedBy || '' };
+/** FLEET_STATE's brief policy as the `{all, since, until, by}` pausedLine reads; null when no stop holds. */
+export function pauseFor(fleetPol, _clusterId, { now = Date.now() } = {}) {
+  if (!fleetPol || !fleetPol.pausedAll) return null;
+  const until = fleetPol.pausedUntil || 0;
+  if (until && until <= now) return null;
+  return { all: true, since: fleetPol.pausedSince || 0, until, by: fleetPol.pausedBy || '' };
 }
 
-export function isPaused(policy, clusterId) {
-  const p = (policy && policy.paused) || {};
-  return !!p.all || (p.clusters || []).includes(clusterId);
+export function isPaused(policy) {
+  return !!(policy && policy.paused && policy.paused.all);
 }
 
 export function describeMode(mode) {

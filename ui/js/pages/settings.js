@@ -11,7 +11,7 @@ import { workerStatus, forgetWorker, tunnels as fetchTunnels, listPins, untrustC
          policyGet, policySet } from '../core/es.js';
 import { PRESETS, DATASETS, DATASET_LABELS, BOUNDS, intervalBounds, applyPreset, activePreset, normalisePolicy,
          fromForm, describeMode, MODES, FALLBACK_DEFAULTS, boundsUnder, policyEffect, fineTuneSummary,
-         effectiveClass, resolvedMode, beginsPauseAll, PAUSE_ALL_QUESTION } from '../core/policy.js';
+         effectiveClass, resolvedMode, pausedLine } from '../core/policy.js';
 import { defaultApiUrl, checkUrl, countdown, secondsLeft, isManaged, linkChanges, formProblems, linkSummary,
          linkView, testMessage, epUrlFrom, eventLine } from '../core/zabbix-link.js';
 import { showCredentialDialog, forgetVaultCredential } from '../ui/credential-dialog.js';
@@ -517,6 +517,12 @@ const polDefaults = () => (pol && pol.defaults) || FALLBACK_DEFAULTS;
 /** What the form may hold: BOUNDS under the request gate's caps, as this core reported them. */
 const polBounds = () => boundsUnder(pol && pol.gate);
 
+/** The stop the core reported, as the form's fields: sent back as it was, so Save never begins or lifts one. */
+function stopNow() {
+  const s = (pol && pol.policy && pol.policy.paused) || {};
+  return { pausedAll: !!s.all, pausedMinutes: s.minutes, pausedSince: s.since || 0 };
+}
+
 /** The form as typed, before any clamping — fromForm decides what survives. */
 function readPolicyForm() {
   const v = (id) => { const el = host && host.querySelector(`#${id}`); return el ? el.value.trim() : ''; };
@@ -530,14 +536,13 @@ function readPolicyForm() {
     perCluster: v('pol-per'),
     tunnel: v('pol-tunnel'),
     timeoutMs: v('pol-timeout'),
-    pausedAll: !!(host && host.querySelector('#pol-all') || {}).checked,
-    pausedClusters: [...(host ? host.querySelectorAll('input[data-pol-cluster]') : [])]
-      .filter((el) => el.checked).map((el) => el.dataset.polCluster),
+    // The emergency stop is not set here (Request Centre); saving keeps the one in force.
+    ...stopNow(),
   };
 }
 
 function choosePreset(id) {
-  // Start from what is on screen so a paused box ticked but not yet saved is kept.
+  // Start from what is on screen so a value typed but not yet saved is kept.
   const { policy } = fromForm(readPolicyForm(), polDefaults(), polBounds());
   polDraft = applyPreset(policy, id, polDefaults(), polBounds());
   polNote = null;
@@ -552,8 +557,6 @@ function resetPolicyForm() {
 
 async function savePolicy() {
   const { policy, problems } = fromForm(readPolicyForm(), polDefaults(), polBounds());
-  if (beginsPauseAll(pol && pol.policy, policy)
-      && !(await confirmDialog(PAUSE_ALL_QUESTION.title, PAUSE_ALL_QUESTION.body, { yes: PAUSE_ALL_QUESTION.yes, danger: true }))) return;
   let res;
   try { res = await policySet(policy); } catch (e) { res = { ok: false, message: e.message || String(e) }; }
   if (!res || !res.ok) {
@@ -587,15 +590,12 @@ function rememberFine(open) {
   try { if (open) localStorage.setItem(fineKey(), '1'); else localStorage.removeItem(fineKey()); } catch (_) { /* memory only */ }
 }
 
-/** The fleet the effects are worked out for: how many clusters, paused and not answering. */
-function fleetCounts(p) {
+/** The fleet the effects are worked out for: how many clusters, and how many not answering. */
+function fleetCounts() {
   const list = clusters();
-  const paused = new Set(p.paused.clusters);
-  const live = list.filter((c) => !paused.has(c.id));
   return {
     clusters: list.length,
-    paused: list.length - live.length,
-    unreachable: live.filter((c) => healthState(state.data.get(c.id)) === 'unreachable').length,
+    unreachable: list.filter((c) => healthState(state.data.get(c.id)) === 'unreachable').length,
   };
 }
 
@@ -636,7 +636,6 @@ function requestsCard() {
   const p = normalisePolicy(polDraft || pol.policy, defaults, bounds);
   const preset = activePreset(p, defaults, bounds);
   const admin = isAdminCaller();
-  const pausedSet = new Set(p.paused.clusters);
   const num = (id, value, b, width = '90px', title = '') => h('input', {
     id, type: 'number', min: String(b.min), max: String(b.max), value: String(value), disabled: !admin,
     style: { width }, title: title || `${b.min}–${b.max}`,
@@ -657,7 +656,7 @@ function requestsCard() {
     h('span.muted', label), input, hint ? h('span.muted', { style: { fontSize: '10.5px' } }, hint) : null);
   const modeHint = h('div#pol-mode-desc.muted', { style: { fontSize: '11.5px' } }, describeMode(p.mode),
     p.mode === 'auto' && pol.resolvedMode ? h('b', ` Running now: ${pol.resolvedMode}.`) : null);
-  const counts = fleetCounts(p);
+  const counts = fleetCounts();
   const mode = resolvedMode(p.mode, counts.clusters);
   const stored = pol.warning
     ? h('span', { style: { color: 'var(--warning)' } }, pol.warning)
@@ -711,8 +710,9 @@ function requestsCard() {
         labelled('Timeout (ms)', num('pol-timeout', p.timeoutMs, BOUNDS.timeoutMs, '110px'))),
       table(['Dataset', 'Every', 'Shipped', `Under ${modeName}`], ivRows)));
 
-  const list = clusters();
-  return card('Requests', `mode: ${p.mode}${p.paused.all ? ' · all requests paused' : pausedSet.size ? ` · ${pausedSet.size} cluster(s) paused` : ''}`,
+  const stop = pol.policy && pol.policy.paused;
+  const stopOn = !!(stop && stop.all && (!stop.until || stop.until > Date.now()));
+  return card('Requests', `mode: ${p.mode}${stopOn ? ' · emergency stop' : ''}`,
     h('div', { style: { display: 'grid', gap: '12px' } },
       h('div.muted', { style: { fontSize: '12px', lineHeight: 1.6 } },
         'This decides when the core goes to the clusters on its own, how many requests it sends at once, and whether it '
@@ -735,16 +735,14 @@ function requestsCard() {
         modeHint),
       effects,
       fine,
-      h('div', { style: { display: 'grid', gap: '6px' } },
-        h('label', { style: { display: 'inline-flex', gap: '6px', alignItems: 'center', fontSize: '12px' },
-          title: 'Nothing new starts; what is in flight finishes, and a page’s request waits' },
-          h('input#pol-all', { type: 'checkbox', checked: p.paused.all, disabled: !admin }), h('b', 'Pause all requests')),
-        list.length
-          ? h('div', { style: { display: 'flex', gap: '12px', flexWrap: 'wrap' } },
-              h('span.muted', { style: { fontSize: '11.5px' } }, 'Paused clusters:'),
-              ...list.map((c) => h('label', { style: { display: 'inline-flex', gap: '5px', alignItems: 'center', fontSize: '11.5px' } },
-                h('input', { type: 'checkbox', checked: pausedSet.has(c.id), disabled: !admin, dataset: { polCluster: c.id } }), c.name)))
-          : h('div.muted', { style: { fontSize: '11.5px' } }, 'No clusters to pause.')),
+      h('div.muted#pol-auto', { style: { fontSize: '12px', lineHeight: 1.6 } },
+        stopOn ? h('div', h('b', pausedLine(stop))) : null,
+        'Slow and busy clusters are handled on their own: a cluster that answers in more than 8 s (or times out, or '
+        + 'answers 429) gets one request at a time and longer intervals until it answers quickly again, and while the '
+        + 'server is busy the background polling waits so people go first. Nobody waits more than 10 s for a page. '
+        + 'To hold everything for a while, use the emergency stop in ',
+        h('button.btn.sm.ghost', { onclick: () => navigateTo('requests') }, 'Request Centre'),
+        ' — it ends by itself after 15, 30 or 60 minutes.'),
       polNote ? h(`div.${polNote.cls.split(' ').join('.')}#pol-msg`, { style: { margin: 0, fontSize: '12px' } }, polNote.text) : null,
       h('div.muted', { style: { fontSize: '11.5px' } }, stored,
         pol.running === false ? ' · the poller is not running on this core' : ''),

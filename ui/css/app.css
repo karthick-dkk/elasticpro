@@ -489,6 +489,7 @@ table.tbl tr.kv td.v { font-size: 12px; word-break: break-all; }
 .rq-status p { padding-left: 22px; }
 .rq-status p a { color: var(--accent); font-weight: 600; }
 .rq-stop-act { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: auto; }
+.rq-stop-btns { display: inline-flex; flex-wrap: wrap; gap: 6px; }
 .rq-dot { flex: none; width: 12px; height: 12px; border-radius: 50%; background: var(--text-muted); }
 .rq-dot.green { background: var(--good); } .rq-dot.yellow { background: var(--warning); }
 .rq-dot.red { background: var(--critical); } .rq-dot.accent { background: var(--accent); }
@@ -572,7 +573,6 @@ table.cl-tbl > tbody > tr > td { white-space: nowrap; }
    wraps or stacks. It used to be laid out at its own longest line: at 1280 px the JDK text
    ran into SLM and the repositories table pushed the whole table sideways. */
 table.cl-tbl > tbody > tr.cl-detail-row > td { white-space: normal; }
-table.cl-tbl > tbody > tr.cl-detail-row:hover > td { background: var(--surface-2); }
 /* …and, when the table is wider than the window (1024 px) and scrolls, no wider than the part
    in view, pinned to its left edge: the columns scroll, the details stay put. --cl-view-w is
    the scroll box's width (overview.js syncHeads); 20px is the cell's own padding. */
@@ -1438,14 +1438,27 @@ table.cl-tbl > tbody > tr > td { text-align: center; padding-top: 5px; padding-b
 table.cl-tbl > tbody > tr > td.cl-name-td { text-align: left; }
 table.cl-tbl > tbody > tr > td.num { text-align: center; }
 table.cl-tbl > tbody > tr.cl-row { cursor: pointer; }
-table.cl-tbl > tbody > tr.cl-row.open > td { background: var(--surface-2); }
+/* An open cluster and its details read as one block that is not another cluster row
+   (0.3.44): the row tinted with the accent, an accent edge running from it down the whole
+   details, the details on the recessed ground with their summary tiles in a box of their own.
+   No extra height: the edge and the tint do the separating, not padding. */
+table.cl-tbl > tbody > tr.cl-row.open > td { background: var(--accent-soft); border-bottom-color: transparent; }
+table.cl-tbl > tbody > tr.cl-row.open > td:first-child { box-shadow: inset 3px 0 0 var(--accent); }
+table.cl-tbl > tbody > tr.cl-detail-row > td,
+table.cl-tbl > tbody > tr.cl-detail-row:hover > td {
+  background: var(--surface-0); box-shadow: inset 3px 0 0 var(--accent);
+  border-bottom: 1px solid var(--border-strong); padding: 8px 12px 10px 16px;
+}
+.cl-detail .cl-tiles { background: var(--surface-1); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 8px 12px; }
+.cl-detail .card { box-shadow: none; background: var(--surface-1); }
+.cl-detail .card > header { background: var(--surface-2); padding-top: 6px; padding-bottom: 6px; }
 /* A two-line cell (last snapshot, SLM) sits under its head as one block, lines centred. */
 table.cl-tbl > tbody > tr.cl-row > td:not(.cl-disk-td):not(.cl-name-td) > div { display: inline-grid; justify-items: center; text-align: center; }
 .cl-two { display: inline-grid; gap: 1px; justify-items: center; line-height: 1.3; }
 .cl-sub { font-size: 11px; }
 /* ILM / SLM: the mode as a button, a red dot beside it when a log index or policy is failing (never a count). */
 .cl-lc { display: inline-flex; align-items: center; gap: 4px; }
-button.pill.cl-pillbtn { cursor: pointer; font-family: inherit; text-transform: lowercase; }
+button.pill.cl-pillbtn { cursor: pointer; font-family: inherit; }
 button.pill.cl-pillbtn:hover { filter: brightness(0.96); }
 button.pill.cl-pillbtn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .cl-errdot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--critical); flex: none; cursor: help; }
