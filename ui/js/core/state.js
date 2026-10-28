@@ -1117,7 +1117,7 @@ export function isOnDemand(dataset) {
   if (d && d.effectiveClass) return d.effectiveClass === 'onDemand';
   return ON_DEMAND.has(dataset);
 }
-/** The request policy as FLEET_STATE last reported it: {mode, pausedAll, paused[]}, or null. */
+/** The request policy as FLEET_STATE last reported it: {mode, pausedAll, pausedSince, pausedUntil, pausedBy}, or null. */
 export function fleetPolicy() { return fleet.policy; }
 /** Answers that mean "this core has no fleet cache for that": ask the cluster directly. */
 const FALL_BACK_KINDS = new Set(['fleet_off', 'not_found', 'bad_message', 'bad_request', 'worker_error']);
@@ -1135,7 +1135,7 @@ export const fleet = {
   catalogue: [],
   ids: null,               // the clusters the core holds for this caller (null: not known yet)
   onDemand: new Set(),     // on-demand datasets this tab has asked for, kept current by FLEET_STATE
-  policy: null,            // {mode, pausedAll, paused} from FLEET_STATE — the core's request policy, in brief
+  policy: null,            // {mode, pausedAll, pausedUntil, …} from FLEET_STATE — the core's request policy, in brief
   raw: new Map(),          // clusterId → {reach, datasets: {name: entry}}, as the core sent them
   unsub: null, pushTimer: null, syncing: null, again: null, lastAnnounce: 0, announceTimer: null, lastPushSync: 0,
 };
@@ -1439,8 +1439,8 @@ export function applyFleetEntry(id, clusterState) {
   return d;
 }
 
-/** The part of the brief policy a pause is: whether everything, which clusters, since when. */
-function pauseSig(p) { return p ? [!!p.pausedAll, p.paused || [], p.pausedSince || 0] : null; }
+/** The part of the brief policy the emergency stop is: whether it holds, since and until when. */
+function pauseSig(p) { return p ? [!!p.pausedAll, p.pausedSince || 0, p.pausedUntil || 0] : null; }
 
 /**
  * What every FLEET_STATE answer says about the core rather than about a cluster: its clock,
@@ -1454,7 +1454,7 @@ function applyFleetMeta(res) {
   if (res.policy && typeof res.policy === 'object') {
     const was = JSON.stringify(pauseSig(fleet.policy));
     fleet.policy = res.policy;
-    // A pause begun or lifted, here or by anybody: the top bar and the open page say so now.
+    // A stop begun, ended or lifted, here or by anybody: the top bar and the open page say so now.
     if (JSON.stringify(pauseSig(fleet.policy)) !== was) bus.emit('pause-changed');
   }
 }

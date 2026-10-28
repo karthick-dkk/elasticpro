@@ -276,7 +276,7 @@ classic policy, which is what Config → Requests → Automatic saves:
   "concurrency": { "global": 16, "perCluster": 2, "tunnel": 6 },
   "timeoutMs": 30000, "tunnelTimeoutMs": 60000,
   "budgetPerClusterPerMin": 30,
-  "paused": { "all": false, "clusters": [] } }
+  "paused": { "all": false } }
 ```
 
 Modes: `on-demand` is the shipped default (Client basis, below). `auto` is `background` while the core knows 25 clusters or fewer
@@ -287,14 +287,23 @@ on its own — a page's `CLUSTER_DATASET` or `REFRESH` is what sends a request, 
 only, and with `perCluster: 1` one request at a time; a `REFRESH` also keeps what it named fresh for
 the watch window. The pages that show a fleet (Clusters, Alerts, Nodes & shards, Snapshots) send
 that `REFRESH` when they open. To go back to keeping the fleet fresh in the background: Config →
-Requests → Automatic or Background. Pause: nothing new starts (a person's ask
-stays pending and runs when the pause lifts); in flight finishes. Bounds: health ≥ 60 s, other
+Requests → Automatic or Background. Emergency stop (`paused: {all: true, minutes: 15|30|60}`,
+Request Centre): nothing new starts (a person's ask stays pending and runs when it ends); in flight
+finishes. The server stamps `since`, `until` and `by`, and lifts the stop itself at `until`; a stop
+with no `until` (a pause from before 0.3.44) is dropped when the file is read, and a set that sends
+back the `since` of a stop that has already ended does not begin it again. Slow and busy clusters
+need no stop: a request over 8 s, a timeout or a 429 marks a cluster slowed (one request at a time,
+intervals ×2 per occurrence up to 10 min, pages handed the held copy; three quick answers end it),
+and while the gate's queue is half full or a request has waited 5 s the poller's own work holds so
+people go first. A page is never held more than 10 s (`CLUSTER_DATASET` `wait`). Bounds: health ≥ 60 s, other
 intervals ≥ 30 s, ≤ 1 day; watch 1–240 min; global 1–256; perCluster 1–8; tunnel 1–32; timeouts
 1–600 s; budget ≤ 10,000 (0 = none). The budget is soft: beyond it the cluster's due fetches wait
 for the minute to pass, a person's ask still goes. A 429 or a timeout backs a cluster off for a
 minute, doubling to ten, until it answers. `FLEET_STATE` reports `policy: {mode, pausedAll,
-paused}`, each catalogue entry's `effectiveClass` under the mode, and per cluster a `throttle:
-{kind: budget|backoff, until, reason, level}` while one is in force.
+pausedSince, pausedUntil, pausedBy}`, `automation: {busySince, slowed: {cluster: {since, reason,
+level, quick}}}`, each catalogue entry's `effectiveClass` under the mode, and per cluster a
+`throttle: {kind: budget|backoff, until, reason, level}` and `slowed` while one is in force.
+`REQUEST_LOG` carries `throttled`, `slowed` and `busySince` for the Request Centre.
 
 | Message | Role | Answer |
 |---|---|---|

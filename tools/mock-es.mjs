@@ -14,6 +14,8 @@
  *   MOCK_JITTER_MS    …plus up to this much more, at random (default 0)
  *   MOCK_INDEX_COUNT  _cat/indices lists this many more indices (a big cluster's answer)
  *   MOCK_429_RATE     this fraction of requests (0..1) is answered 429 Too Many Requests
+ *   MOCK_ILM_UNMANAGED  comma-separated index names left without an ILM policy, so the
+ *                       ILM pill's red "N of M open log indices have no policy" shows
  * Each instance counts the requests it is holding at once; GET /_mock/stats answers
  * {port, now, peak, total, rejected429} and POST /_mock/reset starts the count again.
  *
@@ -281,8 +283,15 @@ const routes = [
       } },
     },
   })],
-  [(u) => /_settings\?filter_path=\*\.settings\.index\.lifecycle\.name/.test(u), () =>
-    Object.fromEntries(INDICES.map((i) => [i.index, { settings: { index: { lifecycle: { name: 'logs-retention' } } } }]))],
+  // As ES answers it: the open indices the pattern matches, each with its uuid, and the
+  // policy where it has one — an index without one keeps only its uuid.
+  [(u) => /_settings\?filter_path=\*\.settings\.index\.lifecycle\.name/.test(u), ({ url: u }) => {
+    const glob = decodeURIComponent(u.split('/')[1]);
+    const re = new RegExp('^' + glob.split('*').map((x) => x.replace(/[.+?^${}()|[\]\\]/g, '\\$&')).join('.*') + '$');
+    const unmanaged = new Set((process.env.MOCK_ILM_UNMANAGED || '').split(',').filter(Boolean));
+    return Object.fromEntries(INDICES.filter((i) => i.status === 'open' && re.test(i.index)).map((i) => [i.index,
+      { settings: { index: { uuid: i.uuid, ...(unmanaged.has(i.index) ? {} : { lifecycle: { name: 'logs-retention' } }) } } }]));
+  }],
   [(u) => u.includes('_ilm/explain'), () => ({ indices: { 'logstash-beta-2026.09.09': { step: 'ERROR' } } })],
   [(u) => u.startsWith('/_nodes/settings'), () => ({ nodes: { n1: { name: 'node-1',
     settings: { path: { repo: ['/mnt/backups'] } } } } })],

@@ -38,8 +38,10 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::broadcast;
 
-/// The longest a `CLUSTER_DATASET` with `wait` holds the request open.
-pub const MAX_WAIT: Duration = Duration::from_secs(20);
+/// The longest a `CLUSTER_DATASET` with `wait` holds the request open. Nobody waits longer
+/// than this for a page: past it they get what the cache holds, with its age, and the
+/// fetch carries on and arrives by the event stream.
+pub const MAX_WAIT: Duration = Duration::from_secs(10);
 
 pub fn now_ms() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
@@ -296,14 +298,26 @@ impl Core {
             ts.iter().filter(|(_, r)| r.tunnel.backing_off()).map(|(k, _)| k.clone()).collect()
         };
         let now = now_ms();
+        if self.fleet.cfg.read().paused_all && !self.fleet.cfg.read().stopped(now) {
+            self.fleet_stop_ended();
+        }
         let cfg = self.fleet.cfg.read().clone();
+        let (load, queue_max) = self.gate_load();
+        let queued: usize = load.queued.iter().sum();
         let (start, gone) = {
             let mut st = self.fleet.state.lock();
             if !keep.is_empty() {
                 st.seen_clusters = true;
             }
             let gone = if st.seen_clusters { st.prune(&keep) } else { vec![] };
+            let was_busy = st.busy_since.is_some();
             let plan = st.plan(&specs, now, &backing_off, &cfg);
+            let plan = st.shed(plan, queued, load.oldest_wait_ms, queue_max, now);
+            if was_busy != st.busy_since.is_some() {
+                tracing::info!(busy = !was_busy, queued, oldest_wait_ms = load.oldest_wait_ms,
+                    "fleet cache: {}", if was_busy { "the queue drained; background polling resumes" }
+                                       else { "ElasticPro is busy; background polling holds so people's requests go first" });
+            }
             (st.take(plan, &specs, &cfg, now), gone)
         };
         if !gone.is_empty() {
@@ -327,9 +341,32 @@ impl Core {
         }
     }
 
+    /// The emergency stop reached its end: lifted in the policy and on disk, so every page
+    /// and the next start agree that it is over.
+    fn fleet_stop_ended(&self) {
+        let pol = {
+            let mut p = self.fleet.policy.write();
+            if !p.paused.all || p.paused.active(now_ms()) {
+                return;
+            }
+            tracing::info!(target: "audit", by = %p.paused.by, since = p.paused.since, until = p.paused.until,
+                "emergency stop ended by itself");
+            p.paused = policy::Paused::default();
+            p.clone()
+        };
+        *self.fleet.cfg.write() = Config::from_policy(&pol);
+        if let Some(path) = &self.fleet.policy_path {
+            if let Err(e) = pol.save(path) {
+                tracing::warn!(error = %e, "emergency stop ended, but policy.json could not be rewritten");
+            }
+        }
+    }
+
     /// One request of a dataset. `class` is the gate's: `Prompted` when somebody is
-    /// waiting on this dataset, `Background` for the poller's due work.
-    async fn fleet_get(self: &Arc<Self>, cluster: &str, q: &Query, class: crate::gate::Class) -> Value {
+    /// waiting on this dataset, `Background` for the poller's due work. `slowest` keeps the
+    /// longest a single request of this fetch took at the cluster (queueing at the gate is
+    /// ElasticPro's own wait, not the cluster's, and does not count).
+    async fn fleet_get(self: &Arc<Self>, cluster: &str, q: &Query, class: crate::gate::Class, slowest: &mut u64) -> Value {
         let req = EsRequest {
             cluster_id: cluster.to_string(),
             url: None,
@@ -349,7 +386,9 @@ impl Core {
             class,
             ..Default::default()
         };
-        answer(self.es_req(req).await)
+        let a = answer(self.es_req(req).await);
+        *slowest = (*slowest).max(a.get("tookMs").and_then(Value::as_u64).unwrap_or(0));
+        a
     }
 
     /// Repository names from the cached `policies` answer, when there is a good one.
@@ -367,7 +406,7 @@ impl Core {
 
     /// One dataset, request by request. Sequential on purpose: two jobs per cluster at
     /// most, each asking one thing at a time, is the load this was built to keep to.
-    async fn fleet_fetch(self: &Arc<Self>, cluster: &str, ds: Dataset, log_pattern: Option<&str>, class: crate::gate::Class) -> Outcome {
+    async fn fleet_fetch(self: &Arc<Self>, cluster: &str, ds: Dataset, log_pattern: Option<&str>, class: crate::gate::Class, slowest: &mut u64) -> Outcome {
         let mut map = Map::new();
         match ds {
             Dataset::Snapshots | Dataset::SnapshotsFull => {
@@ -375,7 +414,7 @@ impl Core {
                     Some(r) => r,
                     None => {
                         let q = Query { key: "repos".into(), path: catalogue::REPOS_PATH.into(), timeout_ms: 15_000 };
-                        let a = self.fleet_get(cluster, &q, class).await;
+                        let a = self.fleet_get(cluster, &q, class, slowest).await;
                         if !reached(&a) {
                             return Outcome::Failed(error_of("repos", &a));
                         }
@@ -393,14 +432,14 @@ impl Core {
                 let mut by = Map::new();
                 for r in repos {
                     let Some(q) = ds.repo_query(&r) else { continue };
-                    let mut a = self.fleet_get(cluster, &q, class).await;
+                    let mut a = self.fleet_get(cluster, &q, class, slowest).await;
                     let mut source = if ds == Dataset::Snapshots { "cat" } else { "verbose" };
                     // The verbose listing fails on some repositories (a missing blob, an
                     // old ES); _cat still counts them, without the index names — which
                     // the page then says it cannot know, rather than showing none.
                     if ds == Dataset::SnapshotsFull && a.get("ok") != Some(&json!(true)) {
                         let cat = Query { key: r.clone(), path: catalogue::snapshots_cat_path(&r), timeout_ms: 30_000 };
-                        let b = self.fleet_get(cluster, &cat, class).await;
+                        let b = self.fleet_get(cluster, &cat, class, slowest).await;
                         if reached(&b) {
                             a = b;
                             source = "cat";
@@ -418,7 +457,7 @@ impl Core {
                 // Reachable when either answers — the same rule the page used.
                 let mut first_err = None;
                 for q in ds.queries(log_pattern) {
-                    let a = self.fleet_get(cluster, &q, class).await;
+                    let a = self.fleet_get(cluster, &q, class, slowest).await;
                     if !reached(&a) && first_err.is_none() {
                         first_err = Some(error_of(&q.key, &a));
                     }
@@ -430,7 +469,7 @@ impl Core {
             }
             _ => {
                 for q in ds.queries(log_pattern) {
-                    let a = self.fleet_get(cluster, &q, class).await;
+                    let a = self.fleet_get(cluster, &q, class, slowest).await;
                     if !reached(&a) {
                         return Outcome::Failed(error_of(&q.key, &a));
                     }
@@ -445,17 +484,33 @@ impl Core {
         let t0 = std::time::Instant::now();
         // Somebody waiting on it (a person's ask, PRIO_USER) is prompted; due work is background.
         let class = if c.prio == scheduler::PRIO_USER { crate::gate::Class::Prompted } else { crate::gate::Class::Background };
-        let outcome = self.fleet_fetch(&c.cluster, c.dataset, log_pattern.as_deref(), class).await;
+        let mut slowest = 0;
+        let outcome = self.fleet_fetch(&c.cluster, c.dataset, log_pattern.as_deref(), class, &mut slowest).await;
         let took = t0.elapsed().as_millis() as u64;
-        self.fleet_finish((c.cluster, c.dataset), outcome, took);
+        self.fleet_finish((c.cluster, c.dataset), outcome, took, slowest);
     }
 
-    fn fleet_finish(self: &Arc<Self>, key: scheduler::Key, outcome: Outcome, took: u64) {
+    fn fleet_finish(self: &Arc<Self>, key: scheduler::Key, outcome: Outcome, took: u64, slowest: u64) {
         let now = now_ms();
         let cfg = self.fleet.cfg.read().clone();
         let cfg = &cfg;
+        // What this fetch says about the cluster's speed, decided before the outcome is used up.
+        let (slow, answered) = match &outcome {
+            Outcome::Failed(e) => (scheduler::backoff_reason(e).map(str::to_string), false),
+            Outcome::Answered(_) if slowest > scheduler::SLOW_MS =>
+                (Some(format!("a request took {:.1} s (over {} s)", slowest as f64 / 1000.0, scheduler::SLOW_MS / 1000)), true),
+            Outcome::Answered(_) => (None, true),
+        };
         let (waiters, reach_changed, entry, reach) = {
             let mut st = self.fleet.state.lock();
+            let was_slowed = st.slowed.contains_key(&key.0);
+            st.note_speed(&key.0, slow, answered, now);
+            match (was_slowed, st.slowed.get(&key.0)) {
+                (false, Some(s)) => tracing::info!(cluster = %key.0, reason = %s.reason,
+                    "fleet cache: cluster slowed — one request at a time, longer intervals, pages read the cache"),
+                (true, None) => tracing::info!(cluster = %key.0, "fleet cache: cluster answers quickly again; back to normal"),
+                _ => {}
+            }
             let (w, rc) = st.complete(&key, outcome, took, now, cfg, &mut catalogue::jittered_ms);
             // Every class counts: see `State::evict` for what goes first.
             self.fleet_evict(&mut st, cfg);
@@ -554,9 +609,9 @@ impl Core {
         let known = self.all_specs().len();
         let now = now_ms();
         let cfg = self.fleet.cfg.read().clone();
-        let (paused_since, paused_by) = {
+        let (paused_since, paused_until, paused_by) = {
             let p = self.fleet.policy.read();
-            (p.paused.since, p.paused.by.clone())
+            (p.paused.since, p.paused.until, p.paused.by.clone())
         };
         let mut reply = Reply::default();
         let mut st = self.fleet.state.lock();
@@ -586,18 +641,27 @@ impl Core {
             // The throttle rides along whenever the cluster is reported at all: it is short-lived
             // and changes without a seq of its own, so a page sees it on its next read.
             let throttle = st.throttle.get(id).filter(|t| t.until > now).cloned();
-            if since.is_none_or(|s| reach.seq > s) || !datasets.is_empty() || throttle.is_some() {
-                clusters.insert(id.clone(), json!({ "reach": reach, "datasets": datasets, "throttle": throttle }));
+            // So is the automatic slow-down, for the same reason.
+            let slowed = st.slowed.get(id).cloned();
+            if since.is_none_or(|s| reach.seq > s) || !datasets.is_empty() || throttle.is_some() || slowed.is_some() {
+                clusters.insert(id.clone(), json!({ "reach": reach, "datasets": datasets, "throttle": throttle, "slowed": slowed }));
             }
         }
         let seq = st.seq;
+        // How requests are being handled without anybody deciding: which of the caller's
+        // clusters are slowed, and whether the poller is holding for a busy gate.
+        let automation = json!({
+            "busySince": st.busy_since,
+            "slowed": ids.iter().filter_map(|id| st.slowed.get(id).map(|s| (id.clone(), json!(s)))).collect::<Map<String, Value>>(),
+        });
         drop(st);
         reply.value = json!({
             "ok": true, "epoch": self.fleet.epoch, "seq": seq, "now": now, "running": self.fleet_enabled(),
             "full": since.is_none(),
             "catalogue": catalogue::catalogue_json(&cfg, known),
-            "policy": { "mode": cfg.mode.as_str(), "resolvedMode": cfg.resolved_mode(known).as_str(), "pausedAll": cfg.paused_all, "paused": cfg.paused.iter().cloned().collect::<Vec<_>>(),
-                        "pausedSince": paused_since, "pausedBy": paused_by },
+            "policy": { "mode": cfg.mode.as_str(), "resolvedMode": cfg.resolved_mode(known).as_str(), "pausedAll": cfg.stopped(now),
+                        "pausedSince": paused_since, "pausedUntil": paused_until, "pausedBy": paused_by },
+            "automation": automation,
             "clusterIds": ids,
             "clusters": clusters,
         });
@@ -629,14 +693,17 @@ impl Core {
                            "message": "the fleet cache is not running in this core; ask the cluster directly" }).into();
         }
         let cfg = self.fleet.cfg.read().clone();
-        // Paused: the ask is kept and runs when the pause is lifted, but nobody is held
-        // waiting for it. The page is told at once, and by whom and since when, instead
-        // of showing "Fetching…" for as long as the pause lasts (days, once).
-        let paused = cfg.cluster_paused(&id).then(|| {
+        // Stopped: the ask is kept and runs when the stop ends, but nobody is held waiting
+        // for it. The page is told at once, by whom, since when and until when.
+        let paused = cfg.stopped(now_ms()).then(|| {
             let p = self.fleet.policy.read();
-            json!({ "all": cfg.paused_all, "since": p.paused.since, "by": p.paused.by })
+            json!({ "all": true, "since": p.paused.since, "until": p.paused.until, "by": p.paused.by })
         });
-        let wait = if paused.is_some() { Some(Value::Bool(false)) } else { msg.get("wait").cloned() };
+        // Slowed: the cluster takes long to answer, so a page that already has a copy is
+        // given it at once (with its age) rather than held; the fetch still goes.
+        let slowed = self.fleet.state.lock().slowed.get(&id).cloned();
+        let held = slowed.is_some() && self.fleet.state.lock().entries.get(&(id.clone(), ds)).is_some_and(|e| e.data.is_some());
+        let wait = if paused.is_some() || held { Some(Value::Bool(false)) } else { msg.get("wait").cloned() };
         let wait = match wait.as_ref() {
             Some(Value::Bool(true)) => MAX_WAIT,
             Some(Value::Number(n)) => Duration::from_secs(n.as_u64().unwrap_or(0)).min(MAX_WAIT),
@@ -696,6 +763,9 @@ impl Core {
         };
         reply.value = json!({ "ok": true, "clusterId": id, "dataset": ds.name(), "entry": entry, "reach": reach,
                               "waited": waited, "timedOut": timed_out });
+        if let Some(s) = slowed {
+            reply.value["slowed"] = json!(s);
+        }
         if let Some(p) = paused {
             reply.value["paused"] = p;
         }
@@ -810,7 +880,7 @@ impl Core {
         tracing::info!(
             target: "audit",
             user = caller.map(|c| c.name.as_str()).unwrap_or(""),
-            mode = pol.mode.as_str(), paused_all = pol.paused.all, paused = ?pol.paused.clusters,
+            mode = pol.mode.as_str(), paused_all = pol.paused.all, paused_until = pol.paused.until,
             per_cluster = pol.concurrency.per_cluster, global = pol.concurrency.global,
             saved = saved.is_ok(),
             "request policy changed"

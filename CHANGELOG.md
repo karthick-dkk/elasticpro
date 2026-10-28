@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.3.44
+
+**Requests are handled on their own; nobody waits more than 10 seconds; the pause is gone.** 0.3.43 made a pause visible, but a pause is still something a person has to remember to start and to lift. Now ElasticPro takes care of slow and busy clusters by itself, and the only manual control left is an emergency stop that always ends:
+
+- **10 seconds at most.** The server holds a page's request open for 10 s, no longer (it was 20), and pages ask for 10 s. Past that the page shows what the cache holds, with its age, and says the answer "did not arrive within 10 s — ElasticPro keeps asking"; the fetch carries on and lands by itself.
+- **A slow cluster is slowed down automatically.** One request over 8 s, a timeout or a 429 marks the cluster *slowed*: one request to it at a time, its background intervals doubled per occurrence (2×, 4×, … up to 10 minutes), and a page that already has a copy gets it at once instead of waiting. Three quick answers in a row put it back to normal. Logged when it starts and ends.
+- **A busy server puts people first.** When the request queue is half full or somebody has waited 5 s for a slot, background polling holds and only what a person asked for goes out; it starts again by itself once the queue has drained.
+- **Request Centre shows it.** The Per cluster table has an **Automation** column: normal, *slowed since 14:02* (why, in the tooltip), *held: backing off*, *held: budget* or *held: server busy*. `REQUEST_LOG` carries `slowed` and `busySince`; `FLEET_STATE` carries `automation` and a per-cluster `slowed`; `CLUSTER_DATASET` says `slowed` when it gave the held copy.
+- **Emergency stop instead of pause.** Request Centre offers *Stop for 15 / 30 / 60 min*, each asking first; it lifts itself at the end (the server clears it from `policy.json`), and an admin can end it sooner from the card or the top bar, which says "Emergency stop until 14:30". The per-cluster pause and the pause boxes in Config → Requests are gone; that page now says what happens on its own. A pause with no end — what 0.3.43 and earlier wrote, like the one that held the test site since 25 Oct — is dropped when the server reads the file. A form saved after a stop ended does not start it again (the page sends back the `since` of the stop it was shown). The Zabbix push's `paused_clusters` is now always 0, and `paused_all` is 1 only while a stop holds.
+
+**ILM and SLM say "Running" in green only when they look after the log indices.** Everywhere the status shows — the Clusters columns and tiles, the Snapshots page, the CSV — the pill reads **Running** or **Stopped** (capitalised) and is:
+
+- green when ILM runs and *every open* index matching the cluster's log pattern (`logstash-*` unless set) has an ILM policy; for SLM, when it runs and at least one scheduled policy takes those indices (none named, `*`, or a matching pattern);
+- red when it is stopped, or runs without covering them — the tooltip names the indices with no policy ("2 of 3 open logstash-* indices have no ILM policy: …") or the SLM policies that take other indices;
+- grey "Running ?" when what it covers could not be read, naming the privilege that would fix it (`view_index_metadata`, or `manage_slm` / `read_slm`). Unknown is not shown as good.
+
+The CSV gains *covers log indices* (yes / no / empty when not known) for ILM and SLM. The ILM settings read now asks for each index's uuid too (`filter_path=*.settings.index.lifecycle.name,*.settings.index.uuid`), so an index with no policy is listed instead of filtered away; on a core older than this the ILM pill stays grey. Closed indices are not counted.
+
+**Clusters: the opened row stands apart.** The row you open is tinted with a blue edge, and its details sit on their own background with boxed tiles and flat cards under a dividing line, so they no longer read as more cluster rows.
+
 ## 0.3.43
 
 **A pause says so, on every page, and asks before it starts.** "Pause all requests" stops the server fetching anything new, and a pause nobody remembered held the test site still for three days: every page kept its old data and looked normal, and Indices sat on "Fetching…" with no rows, because the server held a page's request open until the pause was lifted and the only sign of a pause was a pill in the status strip, which the Clusters page and the evidence pages hide. Now:

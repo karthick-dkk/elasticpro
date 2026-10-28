@@ -106,7 +106,8 @@ async fn only_newer_entries_that_fit_are_fetched_from_redis() {
     std::env::set_var("ELASTICPRO_CACHE_MB", "1");
     let dir = TempDir::new("fleet-restore-redis");
     // Nothing goes to a cluster in this test: only the restore runs.
-    std::fs::write(dir.join("policy.json"), r#"{"paused":{"all":true}}"#).unwrap();
+    // An emergency stop with an end far away: a stop with no end is dropped on load.
+    std::fs::write(dir.join("policy.json"), r#"{"paused":{"all":true,"minutes":60,"since":1,"until":99999999999999}}"#).unwrap();
     let disk = DiskStore::new(Some(&dir.0));
     let health = json!({ "health": { "ok": true, "json": { "status": "green" } } });
     disk.save("c1", Dataset::Health, &entry(health.clone(), 1_000), 0);

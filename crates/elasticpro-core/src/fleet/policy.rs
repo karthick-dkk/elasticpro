@@ -18,8 +18,11 @@
 //!                `REFRESH`) is what sends a request, and only for that cluster.
 //! With `concurrency.perCluster: 1` that is one request per cluster at a time.
 //!
-//! Pause: nothing new starts for a paused cluster (or for anyone, with `all`); what is in
-//! flight finishes. A person's ask stays pending and runs when the pause is lifted.
+//! Emergency stop (`paused.all`): nothing new starts for anyone; what is in flight
+//! finishes, and a person's ask stays pending. It always has an end — 15, 30 or 60
+//! minutes — and lifts itself then. A stop with no end (what a pause was before 0.3.44,
+//! including the per-cluster one, which is gone) is dropped when the file is read: one
+//! held a site still for days because nobody remembered it.
 
 use super::catalogue::{Dataset, ALL};
 use serde::{Deserialize, Serialize};
@@ -101,17 +104,26 @@ impl Concurrency {
     }
 }
 
+/// How long an emergency stop may last, in minutes: Request Centre offers these three.
+pub const STOP_MINUTES: [u64; 3] = [15, 30, 60];
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Paused {
     pub all: bool,
-    pub clusters: Vec<String>,
-    /// When the pause in force began (ms since the epoch), 0 when nothing is paused. The
-    /// server stamps it; what a page sends is ignored. A page whose data stopped coming says
-    /// since when, and who to ask: a pause nobody remembered held one site still for days.
+    /// How long the stop was asked for (one of `STOP_MINUTES`); what a page sends.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub minutes: u64,
+    /// When the stop in force began (ms since the epoch), 0 when nothing is stopped. The
+    /// server stamps it. A page sends back the one it was shown (or 0 to begin a stop), so
+    /// a form saved after that stop ended does not begin it again. A page whose data
+    /// stopped coming says since when, and who to ask.
     #[serde(skip_serializing_if = "is_zero")]
     pub since: u64,
-    /// Who began it; "" when nothing is paused.
+    /// When it lifts itself (ms since the epoch). Stamped by the server like `since`.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub until: u64,
+    /// Who began it; "" when nothing is stopped.
     #[serde(skip_serializing_if = "String::is_empty")]
     pub by: String,
 }
@@ -119,24 +131,31 @@ pub struct Paused {
 fn is_zero(n: &u64) -> bool { *n == 0 }
 
 impl Paused {
-    pub fn any(&self) -> bool { self.all || !self.clusters.is_empty() }
+    /// Whether the stop holds at `now`: asked for, and its end not reached.
+    pub fn active(&self, now: u64) -> bool {
+        self.all && now < self.until
+    }
 
-    /// This pause with its stamp carried over from the one before: kept while something
-    /// stays paused that already was, set anew when a pause begins (all, or one more
-    /// cluster), cleared when nothing is paused.
+    /// This stop with its stamp carried over from the one before: kept while the stop goes
+    /// on, cleared when nothing is stopped — or when the page carried a stop (`since` set)
+    /// that has ended meanwhile. Only an ask with no `since` begins one. The length is one
+    /// of `STOP_MINUTES`, the shortest when the page named none or another.
     pub fn stamped(mut self, before: &Paused, by: &str, now: u64) -> Paused {
-        if !self.any() {
-            self.since = 0;
-            self.by.clear();
-            return self;
+        if !self.all {
+            return Paused::default();
         }
-        let began = (self.all && !before.all) || self.clusters.iter().any(|c| !before.clusters.contains(c));
-        if began || before.since == 0 {
-            self.since = now;
-            self.by = by.to_string();
-        } else {
+        if before.active(now) {
+            self.minutes = before.minutes;
             self.since = before.since;
+            self.until = before.until;
             self.by = before.by.clone();
+        } else if self.since != 0 {
+            return Paused::default();
+        } else {
+            self.minutes = if STOP_MINUTES.contains(&self.minutes) { self.minutes } else { STOP_MINUTES[0] };
+            self.since = now;
+            self.until = now + self.minutes * 60_000;
+            self.by = by.to_string();
         }
         self
     }
@@ -225,8 +244,6 @@ impl Policy {
         self.timeout_ms = self.timeout_ms.clamp(1_000, 600_000);
         self.tunnel_timeout_ms = self.tunnel_timeout_ms.clamp(1_000, 600_000);
         self.budget_per_cluster_per_min = self.budget_per_cluster_per_min.min(10_000);
-        let mut seen = std::collections::BTreeSet::new();
-        self.paused.clusters.retain(|c| !c.trim().is_empty() && seen.insert(c.clone()));
         self
     }
 
@@ -244,7 +261,15 @@ impl Policy {
         let Some(p) = path else { return (Policy::shipped(), None) };
         match std::fs::read(p) {
             Ok(bytes) => match serde_json::from_slice::<Policy>(&bytes) {
-                Ok(pol) => (pol.normalised(), None),
+                Ok(mut pol) => {
+                    // A stop with no end is from before stops ended by themselves: dropped.
+                    if pol.paused.all && pol.paused.until == 0 {
+                        tracing::warn!(since = pol.paused.since, by = %pol.paused.by,
+                            "{FILE_NAME}: a pause with no end was in force; lifted — an emergency stop now lasts 15, 30 or 60 minutes");
+                        pol.paused = Paused::default();
+                    }
+                    (pol.normalised(), None)
+                }
                 Err(e) => (Policy::shipped(), Some(format!("{FILE_NAME}: {e} — running the shipped policy"))),
             },
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => (Policy::shipped(), None),
@@ -316,7 +341,7 @@ mod tests {
 
     #[test]
     fn a_partial_file_keeps_shipped_values_and_bounds_hold() {
-        let p: Policy = serde_json::from_str(r#"{"mode":"on-demand","intervalsSec":{"health":5,"bogus":9},"concurrency":{"perCluster":0},"paused":{"clusters":["a","a"," "]}}"#).unwrap();
+        let p: Policy = serde_json::from_str(r#"{"mode":"on-demand","intervalsSec":{"health":5,"bogus":9},"concurrency":{"perCluster":0}}"#).unwrap();
         let p = p.normalised();
         assert_eq!(p.mode, Mode::OnDemand);
         assert_eq!(p.interval_secs(Dataset::Health), 60, "health floor");
@@ -324,7 +349,6 @@ mod tests {
         assert!(!p.intervals_sec.contains_key("bogus"));
         assert_eq!(p.concurrency.per_cluster, 1);
         assert_eq!(p.concurrency.global, Concurrency::default().global, "left out: shipped");
-        assert_eq!(p.paused.clusters, vec!["a".to_string()]);
     }
 
     #[test]
@@ -346,7 +370,7 @@ mod tests {
         let path = dir.join(FILE_NAME);
         let mut p = Policy::shipped();
         p.mode = Mode::Hybrid;
-        p.paused.clusters.push("c1".into());
+        p.paused = Paused { all: true, minutes: 30, since: 1, until: u64::MAX, by: "a".into() };
         p.save(&path).unwrap();
         let (back, warn) = Policy::load(Some(&path));
         assert_eq!(back, p.normalised());
@@ -355,6 +379,36 @@ mod tests {
         let (fallback, warn) = Policy::load(Some(&path));
         assert_eq!(fallback, Policy::shipped());
         assert!(warn.unwrap().contains("shipped policy"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_stop_ends_by_itself_and_a_stop_with_no_end_is_dropped_on_load() {
+        let ask = |m| Paused { all: true, minutes: m, ..Paused::default() };
+        let p = ask(30).stamped(&Paused::default(), "ann", 1_000);
+        assert_eq!((p.since, p.until, p.by.as_str()), (1_000, 1_000 + 30 * 60_000, "ann"));
+        assert!(p.active(1_000) && p.active(1_000 + 30 * 60_000 - 1) && !p.active(1_000 + 30 * 60_000));
+        // Asked again while it holds: the first stamp stays, so nobody extends it by saving.
+        let again = ask(60).stamped(&p, "bob", 5_000);
+        assert_eq!((again.since, again.until, again.by.as_str()), (1_000, p.until, "ann"));
+        // After it ended, asking again begins a new one. A length not offered is the shortest.
+        let later = ask(7).stamped(&p, "bob", p.until);
+        assert_eq!((later.minutes, later.since, later.by.as_str()), (15, p.until, "bob"));
+        assert_eq!(Paused::default().stamped(&p, "bob", 2_000), Paused::default());
+        // A form saved after the stop ended sends back the stop it showed: not begun again.
+        let stale = Paused { all: true, minutes: 30, since: p.since, until: p.until, by: "ann".into() };
+        assert_eq!(stale.stamped(&p, "bob", p.until + 1), Paused::default());
+
+        let dir = std::env::temp_dir().join(format!("ep-policy-stop-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(FILE_NAME);
+        // What 0.3.43 wrote: paused for everyone, no end, and a per-cluster list.
+        std::fs::write(&path, br#"{"mode":"on-demand","paused":{"all":true,"clusters":["c1"],"since":5,"by":"Admin"}}"#).unwrap();
+        let (back, warn) = Policy::load(Some(&path));
+        assert!(warn.is_none());
+        assert_eq!(back.paused, Paused::default());
+        assert_eq!(back.mode, Mode::OnDemand, "the rest of the file is kept");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

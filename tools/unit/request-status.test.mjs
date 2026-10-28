@@ -59,9 +59,9 @@ test('holding back: any turned away is amber; many, or a full queue, is red', ()
   assert.equal(beats.level, 'holding', 'turned away outranks busy');
 });
 
-test('paused outranks everything: nothing is going out', () => {
+test('the emergency stop outranks everything: nothing is going out', () => {
   const s = M.requestStatus({ inflight: [], recent: [], gate: gate({ refused: { total: 9 } }) }, { now, paused: true });
-  assert.equal(s.level, 'paused'); assert.equal(s.tone, 'yellow'); assert.match(s.title, /^Paused: /);
+  assert.equal(s.level, 'paused'); assert.equal(s.tone, 'yellow'); assert.match(s.title, /^Emergency stop: /);
 });
 
 test('an older core with no gate block: not known, never a quiet 0', () => {

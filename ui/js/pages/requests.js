@@ -17,7 +17,7 @@ import { navigateTo } from '../core/intent.js';
 import { contractOf, taskRows, cancelPath, privilegeHint } from '../core/es-tasks.js';
 import { ensureWrites, writesAllowed } from '../core/writes.js';
 import { confirmDialog } from '../ui/modal.js';
-import { togglePaused, setPausedAll, isPaused, PAUSE_ALL_QUESTION } from '../core/policy.js';
+import { setPausedAll, isPaused, stopQuestion, pausedLine, STOP_MINUTES } from '../core/policy.js';
 import { toast } from '../ui/menu.js';
 import { card, table, pill, statTile, empty } from './common.js';
 import { NO_FILTER, requestRows, originChoices, perCluster, requestCsvRows, CSV_HEADER, originLabel, gateFigures,
@@ -35,7 +35,7 @@ const filter = { ...NO_FILTER };
 /**
  * The request policy, read once on entry and again after each change made here — not on
  * the two-second poll, which is about the log. null until known; {error} if the core
- * refused or does not have one, in which case the pause buttons are not offered.
+ * refused or does not have one, in which case the stop buttons are not offered.
  */
 let policy = null;
 let policyBusy = false;
@@ -143,6 +143,8 @@ async function changePolicy(next, said) {
 }
 
 const policyKnown = () => !!(policy && !policy.error && policy.paused);
+/** Whether the emergency stop holds now: asked for, and its end not reached. */
+const stopped = () => policyKnown() && isPaused(policy) && !(policy.paused.until && policy.paused.until <= Date.now());
 
 function draw() {
   if (!host) return;   // left the page while a read was in flight
@@ -173,7 +175,7 @@ function draw() {
   const unknown = 'this core does not report it';
   const lim = g.limits;
   const sentLast5m = requestLoad.at ? Object.values(requestLoad.clusters || {}).reduce((s, c) => s + (c.last5m || 0), 0) : null;
-  const status = requestStatus(logRead ? log : null, { paused: policyKnown() ? !!policy.paused.all : null, sentLast5m });
+  const status = requestStatus(logRead ? log : null, { paused: policyKnown() ? stopped() : null, sentLast5m });
   const tiles = h('div.tiles.rq-tiles',
     statTile('In flight', status.inFlight == null ? '—' : num(status.inFlight), status.inFlight ? 'right now' : 'nothing being sent'),
     statTile('Waiting', g.queued == null ? '—' : num(g.queued),
@@ -216,15 +218,13 @@ function draw() {
     card('Requests', `${num(rows.length)} shown · in flight first, then newest · live while this page is open`, reqTable),
     h('div', { style: { marginTop: '14px' } },
       card('Per cluster', 'what the log holds for each cluster',
-        table(['Cluster', 'Requests', 'In flight', 'Queued', 'Failed', 'Refused', 'Slowest', ''], clusterRows.map((c) => h('tr',
-          h('td', h('b', nameOf(c.cluster)), policyKnown() && isPaused(policy, c.cluster)
-            ? h('span.pill.grey', { style: { marginLeft: '6px' }, title: policy.paused.all ? 'Every request is paused' : 'Nothing new starts for this cluster' }, 'paused') : null,
-            throttleOf(c.cluster)),
+        table(['Cluster', 'Automation', 'Requests', 'In flight', 'Queued', 'Failed', 'Refused', 'Slowest'], clusterRows.map((c) => h('tr',
+          h('td', h('b', nameOf(c.cluster))),
+          h('td', automationOf(c.cluster)),
           h('td.num', num(c.count)), h('td.num', num(c.inflight)),
           h('td.num', c.queued ? pill(num(c.queued), 'grey') : '0'),
           h('td.num', c.failed ? pill(num(c.failed), 'red') : '0'),
-          h('td.num', c.refused ? pill(num(c.refused), 'yellow') : '0'), h('td.num', c.count ? dur(c.slowestMs) : '—'),
-          h('td', { style: { textAlign: 'right' } }, pauseButton(c.cluster, nameOf(c.cluster))))), { emptyText: 'nothing yet' }))),
+          h('td.num', c.refused ? pill(num(c.refused), 'yellow') : '0'), h('td.num', c.count ? dur(c.slowestMs) : '—'))), { emptyText: 'nothing yet' }))),
     h('div', { style: { marginTop: '14px' } }, tasksCard(nameOf)),
     h('div', { style: { marginTop: '14px' } }, housekeepingCard())));
 }
@@ -262,31 +262,66 @@ function statusCard(st) {
     h('p', st.detail ? `${st.detail} ` : null, 'Mode: ', link, `, ${mode.because}.`));
 }
 
-/** "Stop all traffic": the pause-everything control, apart from the table and warned in red. */
+/**
+ * The emergency stop, apart from the table and warned in red. It always has an end — 15, 30
+ * or 60 minutes — and lifts itself then: a pause with no end held one site still for days.
+ * A slow or busy cluster does not need it; ElasticPro slows down for those on its own (the
+ * Automation column below says when it does).
+ */
 function stopCard() {
-  const all = policyKnown() && !!policy.paused.all;
-  const some = policyKnown() ? (policy.paused.clusters || []).length : 0;
+  const on = stopped();
   let action;
-  if (policyKnown()) {
+  if (on) {
     action = h('button.btn.danger', {
-      disabled: policyBusy, 'data-act': all ? 'resume-all' : 'pause-all',
-      title: all ? 'Let the core send requests again' : 'Nothing new starts; requests in flight finish, and a page’s request waits',
+      disabled: policyBusy, 'data-act': 'resume-all', title: 'End the stop now; requests start again',
+      onclick: () => changePolicy(setPausedAll(policy, false), 'Requests resumed'),
+    }, 'Resume now');
+  } else if (policyKnown()) {
+    action = h('span.rq-stop-btns', STOP_MINUTES.map((m) => h('button.btn.danger', {
+      disabled: policyBusy, 'data-act': 'pause-all', 'data-minutes': String(m),
+      title: `Nothing new starts for ${m} minutes; requests in flight finish, and a page’s request waits`,
       onclick: async () => {
-        if (!all && !(await confirmDialog(PAUSE_ALL_QUESTION.title, PAUSE_ALL_QUESTION.body, { yes: PAUSE_ALL_QUESTION.yes, danger: true }))) return;
-        changePolicy(setPausedAll(policy, !all), all ? 'Requests resumed' : 'All requests paused');
+        const q = stopQuestion(m);
+        if (!(await confirmDialog(q.title, q.body, { yes: q.yes, danger: true }))) return;
+        changePolicy(setPausedAll(policy, true, m), `All requests stopped for ${m} minutes`);
       },
-    }, all ? 'Resume all' : 'Pause all requests');
+    }, `${m} min`)));
   } else if (policy && policy.error) {
-    action = h('div.muted', { style: { fontSize: '12.5px' } }, `Pausing is not available: ${policy.error}`);
+    action = h('div.muted', { style: { fontSize: '12.5px' } }, `The stop is not available: ${policy.error}`);
   } else {
     action = h('div.muted', { style: { fontSize: '12.5px' } }, 'Loading the request policy…');
   }
-  return h('section.rq-stop', { class: all ? 'paused' : '' },
-    h('h2', 'Stop all traffic'),
-    h('p', 'Holds every request to every cluster until you resume. Pages keep showing their last data, marked as old.'),
-    h('div.rq-stop-act', action,
-      all ? h('span.pill.grey', { title: 'Nothing new starts on any cluster; what was in flight finishes' }, 'requests paused')
-        : some ? h('span.muted', { style: { fontSize: '12.5px' } }, `${some} cluster${some === 1 ? '' : 's'} paused individually`) : null));
+  const p = on ? policy.paused : null;
+  return h('section.rq-stop', { class: on ? 'paused' : '' },
+    h('h2', 'Emergency stop'),
+    h('p', on ? pausedLine(p)
+      : 'Holds every request to every cluster for 15, 30 or 60 minutes, then starts again by itself. Pages keep their last data, marked as old.'),
+    h('div.rq-stop-act', on ? null : h('span.muted', { style: { fontSize: '12.5px' } }, 'Stop for'), action));
+}
+
+/**
+ * How ElasticPro is handling one cluster's requests on its own, in a pill: slowed (it
+ * answers slowly), held (the poller is backing off, or spent its minute's budget, or the
+ * server is busy and people's requests go first), or normal.
+ */
+function automationOf(id) {
+  const s = log.slowed && log.slowed[id];
+  const t = log.throttled && log.throttled[id];
+  const since = (ms) => clockTime(ms);
+  if (s) {
+    return h('span.pill.yellow', { title: `Since ${since(s.since)}: ${s.reason}. One request at a time, background intervals stretched (up to 10 min), and pages get the held copy at once instead of waiting. Back to normal after 3 quick answers in a row.` },
+      `slowed since ${since(s.since)}`);
+  }
+  if (t) {
+    const left = Math.max(0, (t.until || 0) - Date.now());
+    return h('span.pill.yellow', { title: `${t.reason || t.kind}. The poller's own fetches wait${left ? ` ${dur(left)} more` : ''}; a request you make still goes.` },
+      t.kind === 'backoff' ? 'held: backing off' : 'held: budget');
+  }
+  if (log.busySince) {
+    return h('span.pill.grey', { title: `Since ${since(log.busySince)} the server has had requests waiting, so background polling holds and people's requests go first. It starts again by itself when the queue drains.` },
+      'held: server busy');
+  }
+  return h('span.muted', { title: 'Answering quickly: nothing held back' }, 'normal');
 }
 
 /** The Zabbix push in one line under the limits; nothing at all when the core does not push. */
@@ -355,14 +390,6 @@ function housekeepingFull(v) {
 }
 
 /** "throttled: why" — the core is holding back from this cluster (budget spent, or backing off). */
-function throttleOf(id) {
-  const t = log.throttled && log.throttled[id];
-  if (!t) return null;
-  const left = Math.max(0, (t.until || 0) - Date.now());
-  return h('span.pill.yellow', { style: { marginLeft: '6px' }, title: `${t.reason || t.kind}. The poller's own fetches wait${left ? ` ${dur(left)} more` : ''}; a request you make still goes.` },
-    `throttled: ${t.kind === 'backoff' ? 'backing off' : 'budget'}`);
-}
-
 /* ------------------------------------ tasks ------------------------------------ */
 
 /** Which cluster the panel is about: the selected one, else the first configured. */
@@ -433,14 +460,4 @@ function tasksCard(nameOf) {
             : h('span.muted', { style: { fontSize: '11px' } }, 'not cancellable')))), {});
   return card('Tasks on the cluster', 'what Elasticsearch is running for anyone right now \u2014 ours carry our X-Opaque-Id',
     h('div', head, tasks.note ? h('div.banner', { style: { marginBottom: '8px' } }, tasks.note) : null, body));
-}
-
-function pauseButton(id, name) {
-  if (!policyKnown()) return null;
-  const paused = (policy.paused.clusters || []).includes(id);
-  return h('button.btn.sm', {
-    disabled: policyBusy,
-    title: paused ? `Let the core send requests to ${name} again` : `Nothing new starts for ${name}; requests in flight finish`,
-    onclick: () => changePolicy(togglePaused(policy, id, !paused), paused ? `${name}: resumed` : `${name}: paused`),
-  }, paused ? 'Resume' : 'Pause');
 }

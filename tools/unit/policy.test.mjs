@@ -51,9 +51,9 @@ test('a fresh install is the client preset, and the UI and the core ship the sam
   assert.equal(P.activePreset(saved, D), 'auto');
 });
 
-test('a preset keeps what is paused', () => {
-  const paused = { ...P.normalisePolicy(D, D), paused: { all: true, clusters: ['a'] } };
-  assert.deepEqual(P.applyPreset(paused, 'client', D).paused, { all: true, clusters: ['a'] });
+test('a preset keeps the emergency stop', () => {
+  const stopped = { ...P.normalisePolicy(D, D), paused: { all: true, minutes: 30, since: 7 } };
+  assert.deepEqual(P.applyPreset(stopped, 'client', D).paused, { all: true, minutes: 30, since: 7 });
 });
 
 test('activePreset recognises a preset and not a hand-made policy', () => {
@@ -61,7 +61,7 @@ test('activePreset recognises a preset and not a hand-made policy', () => {
   assert.equal(P.activePreset(P.normalisePolicy(D, D), D), 'client', 'the shipped policy is the Client basis preset');
   assert.equal(P.activePreset(P.applyPreset(null, 'auto', D), D), 'auto');
   assert.equal(P.activePreset(P.applyPreset(null, 'background', D), D), 'background');
-  assert.equal(P.activePreset({ ...P.applyPreset(null, 'background', D), paused: { all: true, clusters: ['x'] } }, D), 'background');
+  assert.equal(P.activePreset({ ...P.applyPreset(null, 'background', D), paused: { all: true, minutes: 15 } }, D), 'background');
   const custom = P.applyPreset(null, 'background', D);
   custom.intervalsSec = { ...custom.intervalsSec, nodes: 999 };
   assert.equal(P.activePreset(custom, D), null);
@@ -71,7 +71,7 @@ test('normalise clamps like the core and drops unknown datasets', () => {
   const n = P.normalisePolicy({
     mode: 'on-demand', intervalsSec: { health: 5, nodes: 1, indices: 10 ** 9, bogus: 9 },
     watchMinutes: 0, concurrency: { global: 999, perCluster: 0, tunnel: 99 }, timeoutMs: 10,
-    paused: { clusters: ['a', 'a', ' ', 'b'] },
+    paused: { clusters: ['a', 'b'] },
   }, D);
   assert.equal(n.intervalsSec.health, 60, 'health floor');
   assert.equal(n.intervalsSec.nodes, 30, 'other floor');
@@ -81,13 +81,16 @@ test('normalise clamps like the core and drops unknown datasets', () => {
   assert.equal(n.watchMinutes, 1);
   assert.deepEqual(n.concurrency, { global: 256, perCluster: 1, tunnel: 32 });
   assert.equal(n.timeoutMs, 1000);
-  assert.deepEqual(n.paused, { all: false, clusters: ['a', 'b'] });
+  assert.deepEqual(n.paused, { all: false }, 'the per-cluster pause is gone (0.3.44)');
+  // A stop keeps a length the core offers, the shortest otherwise; its stamp goes back as it was.
+  assert.deepEqual(P.normalisePolicy({ paused: { all: true, minutes: 60, since: 9, until: 99, by: 'x' } }, D).paused, { all: true, minutes: 60, since: 9 });
+  assert.deepEqual(P.normalisePolicy({ paused: { all: true, minutes: 45 } }, D).paused, { all: true, minutes: 15, since: 0 });
   assert.equal(P.normalisePolicy({ mode: 'sometimes' }, D).mode, 'on-demand', 'an unknown mode takes the shipped one');
 });
 
 test('fromForm names every field it had to change', () => {
   const ok = P.fromForm({ mode: 'hybrid', intervalsSec: { ...D.intervalsSec }, watchMinutes: '20',
-    global: '8', perCluster: '2', tunnel: '6', timeoutMs: '30000', pausedAll: false, pausedClusters: [] }, D);
+    global: '8', perCluster: '2', tunnel: '6', timeoutMs: '30000', pausedAll: false }, D);
   assert.deepEqual(ok.problems, []);
   assert.equal(ok.policy.watchMinutes, 20);
   assert.equal(ok.policy.mode, 'hybrid');
@@ -106,17 +109,18 @@ test('fromForm names every field it had to change', () => {
   assert.equal(bad.problems.length, 5);
 });
 
-test('togglePaused: idempotent, keeps order, removes on resume, returns a new policy', () => {
-  const p = { mode: 'background', paused: { all: false, clusters: ['a', 'b'] } };
-  const q = P.togglePaused(p, 'c', true);
-  assert.deepEqual(q.paused.clusters, ['a', 'b', 'c']);
+test('setPausedAll: a new stop has a length and no stamp, a lift has neither; the original is untouched', () => {
+  const p = { mode: 'background', paused: { all: false } };
+  const q = P.setPausedAll(p, true, 30);
+  assert.deepEqual(q.paused, { all: true, minutes: 30, since: 0 }, 'since 0: the core begins it');
   assert.notEqual(q, p);
-  assert.deepEqual(p.paused.clusters, ['a', 'b'], 'the original is untouched');
-  assert.deepEqual(P.togglePaused(q, 'a', true).paused.clusters, ['a', 'b', 'c'], 'pausing twice changes nothing');
-  assert.deepEqual(P.togglePaused(q, 'b', false).paused.clusters, ['a', 'c']);
-  assert.deepEqual(P.togglePaused(q, 'zz', false).paused.clusters, ['a', 'b', 'c']);
-  assert.deepEqual(P.togglePaused({}, 'x', true).paused, { all: false, clusters: ['x'] });
-  assert.equal(P.togglePaused({ paused: { all: true, clusters: [] } }, 'x', true).paused.all, true);
+  assert.deepEqual(p.paused, { all: false });
+  assert.deepEqual(P.setPausedAll(q, false).paused, { all: false });
+  assert.deepEqual(P.setPausedAll({}, true).paused, { all: true, minutes: 15, since: 0 });
+  assert.deepEqual(P.STOP_MINUTES, [15, 30, 60]);
+  // The core offers the same three lengths.
+  const pol = fs.readFileSync(path.join(ROOT, 'crates/elasticpro-core/src/fleet/policy.rs'), 'utf8');
+  assert.deepEqual(/pub const STOP_MINUTES: \[u64; 3\] = \[([\d, ]+)\];/.exec(pol)[1].split(',').map(Number), P.STOP_MINUTES);
 });
 
 test('describeMode has a sentence for each mode', () => {
@@ -204,11 +208,10 @@ test('the bound uses the policy\'s own intervals, is rounded down, and counts wh
   const down = effectOf('background', { clusters: 24, unreachable: 4 });
   assert.ok(Math.abs(down.open.perMinute - (20 * 2 / 3 + 4 * 0.5)) < 1e-9);
   assert.match(down.open.text, /^at least 15 a minute \(6 datasets kept fresh for each of 20 clusters, and a probe every 2 min × 4 not answering\)/);
-  // Paused clusters get nothing; pause all stops everything.
-  assert.equal(effectOf('hybrid', { clusters: 24, paused: 12 }).idle.perMinute, 4);
+  // The emergency stop stops everything.
   const all = P.policyEffect(P.setPausedAll(P.applyPreset(null, 'background', D), true), { clusters: 24 });
   assert.equal(all.idle.perMinute, 0);
-  assert.match(all.idle.text, /every cluster is paused/);
+  assert.match(all.idle.text, /the emergency stop is on/);
   assert.match(effectOf('background', { clusters: 0 }).idle.text, /no clusters/);
 });
 
@@ -243,26 +246,26 @@ test('the Fine-tune line, folded (change 16)', () => {
   assert.equal(P.everyText(90), '90 s');
 });
 
-test('a pause says what is paused, since when and by whom — and an old pause with no stamp still reads', () => {
+test('the stop says since when, by whom and when it ends by itself', () => {
   const now = new Date(2026, 9, 28, 12, 0).getTime();
-  const since = new Date(2026, 9, 25, 6, 38).getTime();
-  const all = P.pausedLine({ all: true, since, by: 'Admin@zabbix' }, { now });
-  assert.match(all, /^Requests to every cluster are paused since .*25.*2026.*, by Admin@zabbix\. Nothing new is fetched until an administrator resumes/);
-  assert.match(P.pausedLine({ all: false, since: now - 60000, by: 'ops' }, { now }), /^Requests to this cluster are paused since .* today, by ops\./);
-  assert.match(P.pausedLine({ all: true, since: 0, by: '' }, { now }), /^Requests to every cluster are paused\. Nothing new/);
-  assert.equal(P.pauseFor(null, 'c1'), null);
-  assert.equal(P.pauseFor({ pausedAll: false, paused: ['c2'] }, 'c1'), null);
-  assert.deepEqual(P.pauseFor({ pausedAll: false, paused: ['c1'], pausedSince: 5, pausedBy: 'x' }, 'c1'), { all: false, since: 5, by: 'x' });
-  assert.deepEqual(P.pauseFor({ pausedAll: true, paused: [] }, null), { all: true, since: 0, by: '' }, 'the fleet view: only a pause of everything');
+  const since = now - 5 * 60000;
+  const until = now + 25 * 60000;
+  const line = P.pausedLine({ all: true, since, until, by: 'Admin@zabbix' }, { now });
+  assert.match(line, /^Emergency stop: no request goes to any cluster since \S+.*, by Admin@zabbix\. It ends by itself at .* \(in 25 min\); an administrator can end it sooner/);
+  assert.match(P.pausedLine({ all: true, since: 0, by: '' }, { now }), /^Emergency stop: no request goes to any cluster\. An administrator can end it/);
+  assert.match(P.pausedLine({ all: true, since: new Date(2026, 9, 25, 6, 38).getTime(), until: 0 }, { now }), /since .*25.*2026/);
+  assert.equal(P.pauseFor(null), null);
+  assert.equal(P.pauseFor({ pausedAll: false }), null);
+  assert.deepEqual(P.pauseFor({ pausedAll: true, pausedSince: 5, pausedUntil: until, pausedBy: 'x' }, 'c1', { now }), { all: true, since: 5, until, by: 'x' });
+  assert.equal(P.pauseFor({ pausedAll: true, pausedUntil: now }, null, { now }), null, 'past its end: no stop, even before the core says so');
 });
 
-test('only a change that begins pausing everything is asked about', () => {
-  const on = P.setPausedAll(D, true);
-  const off = P.setPausedAll(D, false);
-  assert.equal(P.beginsPauseAll(off, on), true);
-  assert.equal(P.beginsPauseAll(null, on), true, 'not knowing the current policy still asks');
-  assert.equal(P.beginsPauseAll(on, on), false, 'already paused: saving another field does not ask again');
-  assert.equal(P.beginsPauseAll(on, off), false, 'resuming is not asked about');
-  assert.equal(P.beginsPauseAll(off, P.togglePaused(off, 'c1', true)), false, 'one cluster is not everything');
-  assert.match(P.PAUSE_ALL_QUESTION.body, /until an administrator resumes/);
+test('the question before a stop names its length and that slow clusters do not need it', () => {
+  const q = P.stopQuestion(30);
+  assert.equal(q.title, 'Stop all requests for 30 minutes?');
+  assert.match(q.body, /for 30 minutes; then requests start again by themselves/);
+  assert.match(q.body, /slows down for those on its own/);
+  assert.equal(q.yes, 'stop for 30 min');
+  assert.equal(P.isPaused({ paused: { all: true } }), true);
+  assert.equal(P.isPaused({ paused: { all: false } }), false);
 });

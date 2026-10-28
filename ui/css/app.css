@@ -489,6 +489,7 @@ table.tbl tr.kv td.v { font-size: 12px; word-break: break-all; }
 .rq-status p { padding-left: 22px; }
 .rq-status p a { color: var(--accent); font-weight: 600; }
 .rq-stop-act { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: auto; }
+.rq-stop-btns { display: inline-flex; flex-wrap: wrap; gap: 6px; }
 .rq-dot { flex: none; width: 12px; height: 12px; border-radius: 50%; background: var(--text-muted); }
 .rq-dot.green { background: var(--good); } .rq-dot.yellow { background: var(--warning); }
 .rq-dot.red { background: var(--critical); } .rq-dot.accent { background: var(--accent); }
