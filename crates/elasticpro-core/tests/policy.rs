@@ -67,11 +67,47 @@ async fn a_paused_cluster_is_left_alone_and_the_ask_runs_when_the_pause_lifts() 
     c.start_fleet_poller();
     tokio::time::sleep(Duration::from_millis(1500)).await;
     assert_eq!(es.connections(), 0, "a paused cluster was fetched");
-    let a = c.handle(json!({ "type": "CLUSTER_DATASET", "clusterId": "c1", "dataset": "health", "wait": 1 })).await;
-    assert_eq!(a["timedOut"], json!(true), "paused: the ask waits — {a}");
+    // Paused: the ask is kept, but nobody is held waiting for it — the page is told at once
+    // that the cluster is paused, since when and by whom, instead of "Fetching…" for days.
+    let t = Instant::now();
+    let a = c.handle(json!({ "type": "CLUSTER_DATASET", "clusterId": "c1", "dataset": "health", "wait": true })).await;
+    assert!(t.elapsed() < Duration::from_secs(2), "a paused ask was held open: {a}");
+    assert_eq!(a["ok"], json!(true), "{a}");
+    assert_eq!(a["timedOut"], json!(false), "{a}");
+    assert_eq!(a["paused"]["all"], json!(false), "{a}");
+    assert!(a["paused"]["since"].as_u64().unwrap_or(0) > 0, "since when: {a}");
     assert_eq!(es.connections(), 0);
     set(&c, json!({ "paused": { "clusters": [] } })).await;
     wait_for("the pending ask to run once unpaused", || es.connections() > 0).await;
+    let a = c.handle(json!({ "type": "CLUSTER_DATASET", "clusterId": "c1", "dataset": "health", "wait": true })).await;
+    assert!(a.get("paused").is_none(), "no longer paused: {a}");
+}
+
+#[tokio::test]
+async fn a_pause_says_since_when_and_keeps_that_while_it_lasts() {
+    let dir = TempDir::new("policy-pause-stamp");
+    let c = portable(&dir);
+    let r = set(&c, json!({ "mode": "background" })).await;
+    assert!(r["policy"]["paused"].get("since").is_none(), "nothing paused, nothing stamped: {r}");
+    // What a page sends is ignored: the server stamps it.
+    let r = set(&c, json!({ "paused": { "all": true, "since": 5, "by": "somebody else" } })).await;
+    let since = r["policy"]["paused"]["since"].as_u64().unwrap();
+    assert!(since > 5, "{r}");
+    assert!(r["policy"]["paused"].get("by").is_none(), "no caller on the portable build: {r}");
+    let st = c.handle(json!({ "type": "FLEET_STATE" })).await;
+    assert_eq!(st["policy"]["pausedSince"], json!(since), "{st}");
+    // Another change while the same pause holds keeps when it began…
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    let r = set(&c, json!({ "mode": "hybrid", "paused": { "all": true, "since": 0 } })).await;
+    assert_eq!(r["policy"]["paused"]["since"], json!(since), "{r}");
+    // …and survives a restart.
+    drop(c);
+    let c = portable(&dir);
+    let st = c.handle(json!({ "type": "FLEET_STATE" })).await;
+    assert_eq!(st["policy"]["pausedSince"], json!(since), "{st}");
+    // Lifting it clears the stamp.
+    let r = set(&c, json!({ "paused": { "all": false } })).await;
+    assert!(r["policy"]["paused"].get("since").is_none(), "{r}");
 }
 
 #[tokio::test]

@@ -8,7 +8,8 @@
 
 import { h, mount, $, clear, activatable } from '../lib/dom.js';
 import { bytes, num, compact, dt, ago, toCsv, download } from '../lib/fmt.js';
-import { state, client, fetchIndices, activeClusters, datasetFreshness } from '../core/state.js';
+import { state, client, fetchIndices, activeClusters, datasetFreshness, fleetPolicy } from '../core/state.js';
+import { pauseFor } from '../core/policy.js';
 import { hideAddress, scrubFresh } from '../core/evidence.js';
 import { card, collapsible, pill, statTile, table, empty, connectionBanner } from './common.js';
 import { navigateTo } from '../core/intent.js';
@@ -56,7 +57,13 @@ export function render(el) {
   draw();
   load();
 }
-export function onData() { if (host && host.isConnected) draw(); }
+export function onData() {
+  if (!host || !host.isConnected) return;
+  // Resumed (here or anywhere): ask again rather than keep saying it is paused.
+  const c = cluster();
+  if (ui.paused && c && !ui.loading && !pauseFor(fleetPolicy(), c.id)) { load(true); return; }
+  draw();
+}
 
 function cluster() { return activeClusters()[0] || null; }
 
@@ -64,10 +71,10 @@ async function load(force) {
   const c = cluster();
   if (!c) return;
   if (!force && state.indices.get(c.id)) { draw(); return; }
-  ui.loading = true; ui.error = null; draw();
+  ui.loading = true; ui.error = null; ui.paused = false; draw();
   // `force` asks for the list now; otherwise the core's copy serves while it is fresh.
   try { await fetchIndices(c.id, '*', { force: !!force }); selected.clear(); }
-  catch (e) { ui.error = e.message; }
+  catch (e) { ui.error = e.message; ui.paused = !!e.paused; }
   ui.loading = false; draw();
 }
 
@@ -112,7 +119,9 @@ function draw() {
 
   mount(host,
     sourceBar(c, sourceList, all.length),
-    ui.error ? h('div.banner.err', h('div', h('div.ttl', 'Could not list indices'), h('div.mono', hideAddress(ui.error, c)))) : null,
+    // Paused is not a failure: nothing was asked, on purpose. Said as what it is.
+    ui.error && ui.paused ? h('div.banner.warn', h('div', h('div.ttl', 'Requests are paused'), h('div', ui.error))) : null,
+    ui.error && !ui.paused ? h('div.banner.err', h('div', h('div.ttl', 'Could not list indices'), h('div.mono', hideAddress(ui.error, c)))) : null,
     viewTabs(),
     // The picker is on Summary, so an active filter has to announce itself here — a
     // filtered table with no visible control is a table that looks like it lost rows.

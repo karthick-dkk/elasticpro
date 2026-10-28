@@ -351,6 +351,50 @@ export function setPausedAll(policy, all) {
   return { ...p, paused: { clusters: [...((p.paused && p.paused.clusters) || [])], all: !!all } };
 }
 
+/**
+ * What a pause means to somebody looking at a page with no data, in one sentence or two:
+ * `{all, since, by}` as CLUSTER_DATASET's `paused` (or FLEET_STATE's pausedAll /
+ * pausedSince / pausedBy, mapped). `since` is ms; 0 when the core did not record it (a
+ * pause set before 0.3.43). Pure; `now` is for tests.
+ */
+export function pausedLine(p, { now = Date.now() } = {}) {
+  const q = p || {};
+  const what = q.all ? 'Requests to every cluster are paused' : 'Requests to this cluster are paused';
+  let when = '';
+  if (q.since > 0) {
+    const d = new Date(q.since);
+    const sameDay = new Date(now).toDateString() === d.toDateString();
+    const time = d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
+    when = sameDay ? ` since ${time} today`
+      : ` since ${d.toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' })}, ${time}`;
+  }
+  const who = q.by ? `, by ${q.by}` : '';
+  return `${what}${when}${who}. Nothing new is fetched until an administrator resumes them `
+    + '(the paused button at the top, or Request Centre → Resume all).';
+}
+
+/** The question asked before every request is paused: a pause nobody meant held a site still for days. */
+export const PAUSE_ALL_QUESTION = {
+  title: 'Pause all requests?',
+  body: 'Nothing new is fetched from any cluster until an administrator resumes. Pages keep their last data, '
+    + 'marked as old, and a page with none says requests are paused. Every page shows “Requests paused” at the top '
+    + 'until then.',
+  yes: 'pause all requests',
+};
+
+/** Whether saving `next` over `current` begins a pause of everything — the change that is asked about. Pure. */
+export function beginsPauseAll(current, next) {
+  return !!(next && next.paused && next.paused.all) && !(current && current.paused && current.paused.all);
+}
+
+/** FLEET_STATE's brief policy as the `{all, since, by}` pausedLine reads, for one cluster; null when it is not paused. */
+export function pauseFor(fleetPol, clusterId) {
+  if (!fleetPol) return null;
+  const one = !!clusterId && (fleetPol.paused || []).includes(clusterId);
+  if (!fleetPol.pausedAll && !one) return null;
+  return { all: !!fleetPol.pausedAll, since: fleetPol.pausedSince || 0, by: fleetPol.pausedBy || '' };
+}
+
 export function isPaused(policy, clusterId) {
   const p = (policy && policy.paused) || {};
   return !!p.all || (p.clusters || []).includes(clusterId);

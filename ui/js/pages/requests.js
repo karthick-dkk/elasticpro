@@ -10,14 +10,14 @@
 
 import { h, mount } from '../lib/dom.js';
 import { num, dur, dt, toCsv, download } from '../lib/fmt.js';
-import { state, clusters, client, requestLoad, refreshRequestLoad } from '../core/state.js';
+import { state, clusters, client, requestLoad, refreshRequestLoad, syncFleet } from '../core/state.js';
 import { requestLog, policyGet, policySet, housekeepingGet, housekeepingRun } from '../core/es.js';
 import { housekeepingView, housekeepingLine } from '../core/housekeeping.js';
 import { navigateTo } from '../core/intent.js';
 import { contractOf, taskRows, cancelPath, privilegeHint } from '../core/es-tasks.js';
 import { ensureWrites, writesAllowed } from '../core/writes.js';
 import { confirmDialog } from '../ui/modal.js';
-import { togglePaused, setPausedAll, isPaused } from '../core/policy.js';
+import { togglePaused, setPausedAll, isPaused, PAUSE_ALL_QUESTION } from '../core/policy.js';
 import { toast } from '../ui/menu.js';
 import { card, table, pill, statTile, empty } from './common.js';
 import { NO_FILTER, requestRows, originChoices, perCluster, requestCsvRows, CSV_HEADER, originLabel, gateFigures,
@@ -134,6 +134,7 @@ async function changePolicy(next, said) {
   if (r && r.ok) {
     policy = r.policy;
     toast(said, 'ok', 4000, { key: 'request-pause' });
+    syncFleet().catch(() => {});   // the top bar says paused (or not) now, not at the next sync
     if (r.warning) toast(r.warning, 'warn', 8000, { key: 'request-pause-warning' });
   } else {
     toast(`Not changed: ${(r && r.message) || 'refused'}`, 'err', 8000, { key: 'request-pause' });
@@ -270,7 +271,10 @@ function stopCard() {
     action = h('button.btn.danger', {
       disabled: policyBusy, 'data-act': all ? 'resume-all' : 'pause-all',
       title: all ? 'Let the core send requests again' : 'Nothing new starts; requests in flight finish, and a page’s request waits',
-      onclick: () => changePolicy(setPausedAll(policy, !all), all ? 'Requests resumed' : 'All requests paused'),
+      onclick: async () => {
+        if (!all && !(await confirmDialog(PAUSE_ALL_QUESTION.title, PAUSE_ALL_QUESTION.body, { yes: PAUSE_ALL_QUESTION.yes, danger: true }))) return;
+        changePolicy(setPausedAll(policy, !all), all ? 'Requests resumed' : 'All requests paused');
+      },
     }, all ? 'Resume all' : 'Pause all requests');
   } else if (policy && policy.error) {
     action = h('div.muted', { style: { fontSize: '12.5px' } }, `Pausing is not available: ${policy.error}`);

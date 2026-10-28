@@ -27,6 +27,7 @@ import { limiter } from '../lib/limit.js';
 import { isStale } from '../lib/freshness.js';
 import { sortByName } from '../lib/cluster-order.js';
 import { ilmErrorsOf } from './lifecycle-errors.js';
+import { pausedLine } from './policy.js';
 
 class Emitter {
   constructor() { this.map = new Map(); }
@@ -730,6 +731,7 @@ export async function fetchIndices(id, pattern = '*', { force = false } = {}) {
       const a = e.data && e.data.indices;
       if (a && !a.ok) throw answerError(a);
       if (a && state.indices.has(id)) return state.indices.get(id);
+      if (r.paused && !e.error) throw pausedError(r.paused);
       throw new Error((e.error && e.error.message)
         || (r.timedOut ? 'the index list is still being fetched — it will appear when it arrives'
                        : 'the index list has not been fetched yet'));
@@ -1012,8 +1014,9 @@ export async function fetchShards(id, { force = false } = {}) {
       const e = r.entry || {};
       // `pending`: nothing went wrong, the core simply has not finished; it pushes the
       // table when it lands, so the page waits rather than asking again.
-      const out = { rows: null, tasks: null, pools: null, pending: !e.error, at: 0,
-        error: (e.error && e.error.message)
+      const out = { rows: null, tasks: null, pools: null, pending: !e.error && !r.paused, at: 0,
+        paused: r.paused || null,
+        error: (e.error && e.error.message) || (r.paused && pausedLine(r.paused))
           || (r.timedOut ? 'the shard table is still being fetched — it will appear when it arrives'
                          : 'the shard table has not been fetched yet') };
       state.shards.set(id, out);
@@ -1152,6 +1155,13 @@ async function detectFleet() {
 function answerError(a) {
   const e = new Error((a && a.message) || (a && a.status ? `HTTP ${a.status}` : 'no answer'));
   e.res = a;
+  return e;
+}
+
+/** "Requests are paused…": an Error a page shows as it is, with the pause on it. */
+function pausedError(p) {
+  const e = new Error(pausedLine(p));
+  e.paused = p;
   return e;
 }
 
@@ -1411,6 +1421,9 @@ export function applyFleetEntry(id, clusterState) {
   return d;
 }
 
+/** The part of the brief policy a pause is: whether everything, which clusters, since when. */
+function pauseSig(p) { return p ? [!!p.pausedAll, p.paused || [], p.pausedSince || 0] : null; }
+
 /**
  * What every FLEET_STATE answer says about the core rather than about a cluster: its clock,
  * its catalogue and its request policy. One place, because two readers of FLEET_STATE (the
@@ -1420,7 +1433,12 @@ export function applyFleetEntry(id, clusterState) {
 function applyFleetMeta(res) {
   if (typeof res.now === 'number') fleet.skew = res.now - Date.now();
   if (Array.isArray(res.catalogue) && res.catalogue.length) fleet.catalogue = res.catalogue;
-  if (res.policy && typeof res.policy === 'object') fleet.policy = res.policy;
+  if (res.policy && typeof res.policy === 'object') {
+    const was = JSON.stringify(pauseSig(fleet.policy));
+    fleet.policy = res.policy;
+    // A pause begun or lifted, here or by anybody: the top bar and the open page say so now.
+    if (JSON.stringify(pauseSig(fleet.policy)) !== was) bus.emit('pause-changed');
+  }
 }
 
 /** A whole FLEET_STATE answer. */

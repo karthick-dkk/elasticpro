@@ -8,7 +8,7 @@ import { createRedrawGate, onRefreshed, normalisePolicy, normaliseScope, opening
 import * as cfg from './core/config.js';
 import { state, bus, setConfig, refreshAll, refreshModule, REFRESH_MODULES, startAutoRefresh, clusters, fleetMode,
          alerts, cachedAlerts, worstHealth, requestLoad, fleetPolicy, fetchesOnlyOnAsk,
-         clustersNeedingCredential, clustersWithAuthError, hasSessionCredential, isReadOnly, healthState, activeClusters, openAlertsNow, openAlertCounts } from './core/state.js';
+         clustersNeedingCredential, clustersWithAuthError, hasSessionCredential, isReadOnly, healthState, activeClusters, openAlertsNow, openAlertCounts, syncFleet } from './core/state.js';
 import { rowMenu, toast, notificationBell, setNotificationSink, dropNotification, closePopover, dismissToasts } from './ui/menu.js';
 import { showCredentialDialog, serverHoldsCredentials, serverCredentialMessage } from './ui/credential-dialog.js';
 import { loadSnapshotFile, isSnapshotMode } from './core/snapshot.js';
@@ -27,6 +27,7 @@ import { readLaunch, withoutCode, withoutTrouble, troubleshootTarget, themeFor, 
 import { pageForProblem } from './core/alert-rules.js';
 import { EVIDENCE_PAGES, evidenceLayout, evidenceSelection, createHeldNotices } from './core/evidence.js';
 import { setHostedEdition } from './core/server-credentials.js';
+import { pausedPill, pausedKey } from './ui/paused-pill.js';
 
 let coreInfo = { version: '?' };
 
@@ -534,7 +535,7 @@ function renderTopbar() {
   const key = JSON.stringify([page.id, page.multi, state.selected, healthSig, clusters().map((c) => `${c.id}\u0001${c.name}`),
     a.length, crit, needCreds.length, badCreds.length, serverHoldsCredentials(),
     theme, isSnapshotMode(), fleetMode(), state.autoRefresh, state.defaults.refreshIntervalSec, redrawPolicy(),
-    me && me.name, embedded, state.snapshot && state.snapshot.host, ev, L.needsCluster]);
+    me && me.name, embedded, state.snapshot && state.snapshot.host, ev, L.needsCluster, pausedKey(state.selected)]);
   if (key === topbarKey && bar.firstChild) { tickStatus(); markUnreachable($('#cluster-select')); return; }
   topbarKey = key;
 
@@ -595,6 +596,10 @@ function renderTopbar() {
       }, ev ? (need ? 'Sign in' : 'Re-enter credentials')
         : need ? `Sign in (${need} cluster${need === 1 ? '' : 's'})` : `Re-enter credentials (${bad})`);
     })(),
+    // A pause stops every fetch; said on every page, evidence pages included, because a
+    // paused fleet otherwise looks like one that is merely quiet (ui/paused-pill.js).
+    pausedPill({ selected: state.selected, admin: may('admin'),
+      onResumed: async () => { await syncFleet({ full: true }); topbarKey = null; go(currentPage); } }),
     // One cluster: its health is the dot on the picker. The fleet: the counts, coloured by the worst.
     ev || activeClusters().length < 2 ? null : healthPill(activeClusters()),
     // The alert count is on the Alerts tab, where going there is one click anyway; the
@@ -1211,6 +1216,8 @@ const redrawGate = createRedrawGate({ apply: () => scheduleDataRedraw(), policy:
 const scheduleNavRedraw = coalesce(() => renderNav());
 // Acknowledging or silencing changes what counts as open: the badge and the bar say so at once.
 bus.on('alerts-changed', () => { renderNav(); topbarKey = ''; renderTopbar(); });
+// Paused or resumed: the top bar's pill, the status strip, and the page (which asks again on a resume).
+bus.on('pause-changed', () => { topbarKey = ''; renderTopbar(); renderSideFoot(); bus.emit('data'); });
 bus.on('data', () => {
   scheduleNavRedraw();
   const p = PAGES.find((x) => x.id === currentPage);
