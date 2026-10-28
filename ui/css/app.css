@@ -684,6 +684,32 @@ table.cl-tbl > tbody > tr.cl-detail-row:hover > td { background: var(--surface-2
 .pick-dot.yellow { background: var(--warning); }
 .pick-dot.red { background: var(--critical); }
 #cluster-select option.unreachable { color: var(--critical-ink); }
+/* Moving through the list: the option under the pointer or the keyboard is blue, the chosen
+   cluster is pale blue and bold. Only where the browser lets a <select> popup be styled
+   (appearance: base-select); elsewhere the native popup stays (macOS paints it blue itself). */
+@supports (appearance: base-select) {
+  #cluster-select, #cluster-select::picker(select) { appearance: base-select; }
+  /* Closed, it stays one line like the native select it replaces: a long name is cut with an
+     ellipsis (the open list shows it whole), so the top bar never grows a second line. */
+  #cluster-select { display: inline-flex; align-items: center; white-space: nowrap; overflow: hidden; line-height: 1.3; color: var(--text-primary); }
+  #cluster-select > button, #cluster-select selectedcontent {
+    display: block; min-width: 0; flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  #cluster-select::picker-icon { color: var(--text-muted); flex: none; margin-left: 6px; }
+  #cluster-select option { white-space: nowrap; }
+  #cluster-select::picker(select) {
+    background: var(--surface-1); color: var(--text-primary);
+    border: 1px solid var(--border-strong); border-radius: var(--radius-sm);
+    box-shadow: var(--shadow); padding: 4px; margin-top: 2px;
+    max-height: min(60vh, 420px); overflow-y: auto;
+  }
+  #cluster-select option { padding: 5px 10px; border-radius: 4px; cursor: pointer; }
+  #cluster-select option::checkmark { color: currentColor; }
+  #cluster-select option:checked { background: var(--accent-soft); color: var(--text-primary); font-weight: 700; }
+  #cluster-select option:hover, #cluster-select option:focus, #cluster-select option:focus-visible {
+    background: var(--accent); color: #fff; outline: none;
+  }
+}
 
 /* One cluster's block on a page that shows the whole fleet (Snapshots, …). Off screen, the
    browser skips its style and layout and reserves an estimated height instead, so a page of
@@ -1414,6 +1440,12 @@ table.cl-tbl > tbody > tr.cl-row.open > td { background: var(--surface-2); }
 table.cl-tbl > tbody > tr.cl-row > td:not(.cl-disk-td):not(.cl-name-td) > div { display: inline-grid; justify-items: center; text-align: center; }
 .cl-two { display: inline-grid; gap: 1px; justify-items: center; line-height: 1.3; }
 .cl-sub { font-size: 11px; }
+/* ILM / SLM: the mode as a button, a red dot beside it when a log index or policy is failing (never a count). */
+.cl-lc { display: inline-flex; align-items: center; gap: 4px; }
+button.pill.cl-pillbtn { cursor: pointer; font-family: inherit; text-transform: lowercase; }
+button.pill.cl-pillbtn:hover { filter: brightness(0.96); }
+button.pill.cl-pillbtn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.cl-errdot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--critical); flex: none; cursor: help; }
 .cl-health { cursor: help; }
 .cl-health:not([title]) { cursor: default; }
 .cl-disk-td .disk-cell { margin: 0 auto; max-width: 200px; min-width: 120px !important; overflow: hidden; }

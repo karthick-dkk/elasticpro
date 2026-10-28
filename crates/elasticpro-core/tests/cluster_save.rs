@@ -128,8 +128,9 @@ async fn an_operator_adds_changes_and_switches_off_a_cluster_and_the_fleet_follo
     assert_eq!(r["clusters"], json!(2));
     assert!(!r["text"].as_str().unwrap().contains("alpha-api-key"));
     // And it survives a restart: the core wrote what it holds.
+    // No credential in it since 0.3.42: those are kept encrypted and resolved again at start.
     let primed = std::fs::read_to_string(dir.join("primed.json")).unwrap();
-    assert!(primed.contains("\"gamma\"") && primed.contains(SHARED), "{primed}");
+    assert!(primed.contains("\"gamma\"") && !primed.contains(SHARED) && !primed.contains("Basic "), "{primed}");
 
     // A credential in the save is refused, not dropped; nothing changes.
     for bad in [json!({ "name": "Delta", "url": "https://delta:9200", "password": "p" }),
@@ -268,4 +269,127 @@ async fn the_role_map_in_the_config_decides_what_a_zabbix_sign_in_becomes() {
     assert_eq!(r["ok"], json!(true), "{r}");
     let (_, out, _) = zabbix_session(&c, "olga", 1, Some("ES owners")).await;
     assert_eq!(out["role"], json!("admin"), "pinned: {out}");
+}
+
+fn basic(user: &str, pw: &str) -> String {
+    use base64::Engine as _;
+    format!("Basic {}", base64::engine::general_purpose::STANDARD.encode(format!("{user}:{pw}")))
+}
+
+async fn login(c: &Arc<Core>) -> String {
+    let res = c.handle(json!({ "type": "LOGIN", "name": "Admin", "password": "correct-horse-battery" })).await;
+    res["session"].as_str().expect("an admin session").to_string()
+}
+
+/// The user's ask of 2026-10-28: the password is typed once — the default by an admin, or a
+/// cluster's own when it is added or changed — kept encrypted on the server, and nobody is asked
+/// again: not on a page load, not after a restart.
+#[tokio::test]
+async fn the_server_keeps_every_credential_encrypted_and_nobody_types_it_again() {
+    let _turn = ENV.lock().await;
+    let dir = TempDir::new("kept-credentials");
+    let alpha = TestServer::start().await;
+    let beta = TestServer::start().await;
+    let cfg = json!({ "version": 2, "clusters": [
+        { "name": "Alpha", "url": alpha.url() }, { "name": "Beta", "url": beta.url() } ] });
+    let (c, _path) = hosted(&dir, &cfg);
+    let a = admin(&c).await;
+    let own = basic("alpha-user", "alpha-secret-pw");
+    let shared = basic("fleet-user", "fleet-secret-pw");
+
+    // An admin's browser primes with what it still has: Alpha's own credential, and the shared
+    // one (Beta carries the shared one too — that is not a credential of Beta's own).
+    let r = c.handle(json!({ "type": "PRIME", "session": a, "readOnly": true, "sharedAuthHeader": shared, "persist": false,
+        "clusters": [{ "id": "alpha", "name": "Alpha", "url": alpha.url(), "authHeader": own },
+                     { "id": "beta", "name": "Beta", "url": beta.url(), "authHeader": shared }] })).await;
+    assert_eq!(r["ok"], json!(true), "{r}");
+    let st = c.handle(json!({ "type": "CREDENTIAL_STATUS", "session": a })).await;
+    assert_eq!(st["default"]["user"], json!("fleet-user"), "{st}");
+    assert_eq!(st["clusters"].as_array().unwrap().iter().map(|x| (x["id"].clone(), x["user"].clone())).collect::<Vec<_>>(),
+               vec![(json!("alpha"), json!("alpha-user"))], "Beta has no credential of its own: {st}");
+    for f in ["cluster-secrets.json", "primed.json"] {
+        let text = std::fs::read_to_string(dir.join(f)).unwrap();
+        assert!(!text.contains("secret-pw") && !text.contains(&own) && !text.contains(&shared), "{f} holds a credential in the clear:\n{text}");
+    }
+    assert_eq!(health(&c, &a, "alpha").await["ok"], json!(true));
+    assert_eq!(alpha.last_hit().unwrap().header("authorization"), Some(own.as_str()));
+    assert_eq!(health(&c, &a, "beta").await["ok"], json!(true));
+    assert_eq!(beta.last_hit().unwrap().header("authorization"), Some(shared.as_str()));
+
+    // The next page load re-reads a file with no password (or a sealed one nobody unlocked):
+    // nothing is sent, and the core still has them — the page is told, so it asks nobody.
+    let r = c.handle(json!({ "type": "PRIME", "session": a, "readOnly": true,
+        "clusters": [{ "id": "alpha", "name": "Alpha", "url": alpha.url() }, { "id": "beta", "name": "Beta", "url": beta.url() }] })).await;
+    assert_eq!(r["held"], json!(["alpha", "beta"]), "{r}");
+
+    // A restart: a new core on the same data directory comes back with both.
+    drop(c);
+    let c = Core::new_with_rounds(Some(dir.0.clone()), Edition::Hosted, 1);
+    c.zabbix_sso().set_secret(SECRET).unwrap();
+    c.restore_prime().await;
+    let a = login(&c).await;
+    assert_eq!(health(&c, &a, "alpha").await["ok"], json!(true));
+    assert_eq!(alpha.last_hit().unwrap().header("authorization"), Some(own.as_str()));
+    assert_eq!(health(&c, &a, "beta").await["ok"], json!(true));
+    assert_eq!(beta.last_hit().unwrap().header("authorization"), Some(shared.as_str()));
+
+    // The admin changes the default once: every cluster without its own follows; Alpha does not.
+    let r = c.handle(json!({ "type": "CREDENTIAL_SET", "session": a, "cluster": "*", "username": "new-fleet", "password": "new-fleet-pw" })).await;
+    assert_eq!(r["ok"], json!(true), "{r}");
+    health(&c, &a, "beta").await;
+    assert_eq!(beta.last_hit().unwrap().header("authorization"), Some(basic("new-fleet", "new-fleet-pw").as_str()));
+    health(&c, &a, "alpha").await;
+    assert_eq!(alpha.last_hit().unwrap().header("authorization"), Some(own.as_str()));
+    // A cluster's own may be an API key; clearing it falls back to the default.
+    let r = c.handle(json!({ "type": "CREDENTIAL_SET", "session": a, "cluster": "alpha", "apiKey": "a2V5OnNlY3JldA==" })).await;
+    assert_eq!(r["ok"], json!(true), "{r}");
+    health(&c, &a, "alpha").await;
+    assert_eq!(alpha.last_hit().unwrap().header("authorization"), Some("ApiKey a2V5OnNlY3JldA=="));
+    let r = c.handle(json!({ "type": "CREDENTIAL_CLEAR", "session": a, "cluster": "alpha" })).await;
+    assert_eq!(r["cleared"], json!(true), "{r}");
+    health(&c, &a, "alpha").await;
+    assert_eq!(alpha.last_hit().unwrap().header("authorization"), Some(basic("new-fleet", "new-fleet-pw").as_str()));
+    let r = c.handle(json!({ "type": "CREDENTIAL_SET", "session": a, "cluster": "beta", "username": "" , "password": "x" })).await;
+    assert_eq!(r["kind"], json!("bad_message"), "{r}");
+    let r = c.handle(json!({ "type": "CREDENTIAL_SET", "session": a, "cluster": "nowhere", "username": "u", "password": "p" })).await;
+    assert_eq!(r["kind"], json!("not_found"), "a credential is kept only for a cluster the server polls: {r}");
+
+    // A cluster's own goes to the destination it was kept for and nowhere else: an admin's page
+    // that points Alpha at another address sends Alpha's own credential to neither.
+    c.handle(json!({ "type": "CREDENTIAL_SET", "session": a, "cluster": "alpha", "username": "alpha-user", "password": "alpha-secret-pw" })).await;
+    let elsewhere = TestServer::start().await;
+    c.handle(json!({ "type": "PRIME", "session": a, "readOnly": true,
+        "clusters": [{ "id": "alpha", "name": "Alpha", "url": elsewhere.url() }, { "id": "beta", "name": "Beta", "url": beta.url() }] })).await;
+    health(&c, &a, "alpha").await;
+    assert_eq!(elsewhere.last_hit().unwrap().header("authorization"), Some(basic("new-fleet", "new-fleet-pw").as_str()),
+               "only the default goes to a new address");
+    let st = c.handle(json!({ "type": "CREDENTIAL_STATUS", "session": a })).await;
+    assert_eq!(st["clusters"].as_array().unwrap().iter().find(|x| x["id"] == json!("alpha")).unwrap()["moved"], json!(true), "{st}");
+    // The admin says it moved on purpose: bound again, it is used there.
+    let r = c.handle(json!({ "type": "CREDENTIAL_SET", "session": a, "cluster": "alpha", "rebind": true })).await;
+    assert_eq!(r["rebound"], json!(true), "{r}");
+    health(&c, &a, "alpha").await;
+    assert_eq!(elsewhere.last_hit().unwrap().header("authorization"), Some(own.as_str()));
+    c.handle(json!({ "type": "PRIME", "session": a, "readOnly": true,
+        "clusters": [{ "id": "alpha", "name": "Alpha", "url": alpha.url() }, { "id": "beta", "name": "Beta", "url": beta.url() }] })).await;
+    c.handle(json!({ "type": "CREDENTIAL_CLEAR", "session": a, "cluster": "alpha" })).await;
+
+    // Nobody below admin reads or sets them.
+    let op = operator(&c).await;
+    for t in ["CREDENTIAL_STATUS", "CREDENTIAL_SET", "CREDENTIAL_CLEAR"] {
+        let r = c.handle(json!({ "type": t, "session": op, "cluster": "*", "username": "u", "password": "p" })).await;
+        assert_eq!(r["kind"], json!("forbidden"), "{t}: {r}");
+    }
+    // A cluster whose own credential the server keeps keeps its address against an operator.
+    c.handle(json!({ "type": "CREDENTIAL_SET", "session": a, "cluster": "beta", "username": "beta-user", "password": "beta-pw" })).await;
+    let r = save(&c, &op, json!({ "name": "Beta", "url": "https://elsewhere.example:9200" }), Some("Beta")).await;
+    assert_eq!(r["kind"], json!("credential_refused"), "{r}");
+    // Renamed by an operator, it keeps its credential.
+    let r = save(&c, &op, json!({ "name": "Beta Two", "url": beta.url() }), Some("Beta")).await;
+    assert_eq!((r["ok"].clone(), r["credential"].clone()), (json!(true), json!("kept")), "{r}");
+    health(&c, &a, "beta-two").await;
+    assert_eq!(beta.last_hit().unwrap().header("authorization"), Some(basic("beta-user", "beta-pw").as_str()));
+    let st = c.handle(json!({ "type": "CREDENTIAL_STATUS", "session": a })).await;
+    let ids: Vec<Value> = st["clusters"].as_array().unwrap().iter().map(|x| x["id"].clone()).collect();
+    assert_eq!(ids, vec![json!("beta-two")], "the entry moved with the name: {st}");
 }

@@ -269,6 +269,8 @@ pub fn required_role(msg_type: &str) -> Option<Role> {
         // Which Zabbix role becomes which ElasticPro role at sign-in: who gets in, and as
         // what. An administrator's, like the accounts themselves.
         "ZABBIX_ROLEMAP_GET" | "ZABBIX_ROLEMAP_SET" => Some(Role::Admin),
+        // The credentials the hosted server keeps for its clusters (cluster_secrets): an admin's.
+        "CREDENTIAL_STATUS" | "CREDENTIAL_SET" | "CREDENTIAL_CLEAR" => Some(Role::Admin),
         "PRIME" | "FORGET" => Some(Role::Admin),
         // Operators write to clusters, so they unlock the guard to do it. The guard is
         // still one switch for the whole process, and still resets on restart.
@@ -1850,7 +1852,8 @@ mod tests {
     #[test]
     fn a_user_is_read_only_everywhere_that_matters() {
         for t in ["WRITE_UNLOCK", "CONFIG_READ", "CONFIG_WRITE", "VAULT_GET", "TRUST_CERT", "PRIME", "USER_ADD", "TOKEN_CREATE",
-                  "CLUSTER_SAVE", "AUTOMATIONS_SAVE", "ZABBIX_ROLEMAP_GET", "ZABBIX_ROLEMAP_SET"] {
+                  "CLUSTER_SAVE", "AUTOMATIONS_SAVE", "ZABBIX_ROLEMAP_GET", "ZABBIX_ROLEMAP_SET",
+                  "CREDENTIAL_STATUS", "CREDENTIAL_SET", "CREDENTIAL_CLEAR"] {
             assert!(authorize(Role::User, t, "", "").is_err(), "{t} must not be open to a user");
             assert!(authorize(Role::Admin, t, "", "").is_ok(), "{t} must be open to an admin");
         }

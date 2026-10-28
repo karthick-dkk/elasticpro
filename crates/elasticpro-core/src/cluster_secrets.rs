@@ -20,6 +20,14 @@
 //!
 //! What is never possible: reading a password back out through any message. The status is who
 //! set it and when.
+//!
+//! Since 0.3.42 the hosted core keeps every credential of its own config clusters here too, not
+//! only the ones Zabbix hands over: an admin types a cluster's password once (or the default
+//! once, `"*"`, which every cluster without its own uses), and it is kept under
+//! `cfg:<cluster id>` — the prefix keeps those apart from Zabbix host names. A credential that
+//! is not a username and password (an API key, a bearer token) is kept as its whole
+//! `Authorization` header, with `HEADER_USER` in place of a username; `header_for` turns either
+//! kind into the header a request carries. Nothing outside this process ever sees one.
 
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
@@ -33,6 +41,27 @@ pub const KEY_FILE: &str = "cluster-secrets.key";
 pub const DEFAULT: &str = "*";
 /// The longest password accepted.
 pub const MAX_PASSWORD: usize = 1024;
+/// The prefix of a config cluster's entry: `cfg:<cluster id>`.
+pub const CONFIG_PREFIX: &str = "cfg:";
+/// In place of a username: the entry is a whole `Authorization` header (API key, bearer token).
+pub const HEADER_USER: &str = "(authorization header)";
+
+/// The entry name of a config cluster.
+pub fn config_key(id: &str) -> String {
+    format!("{CONFIG_PREFIX}{id}")
+}
+
+/// One entry as a status line shows it: never the secret.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Listed {
+    pub name: String,
+    /// The username, or `None` for a header entry (API key or bearer token).
+    pub user: Option<String>,
+    pub set_by: String,
+    pub set_at: u64,
+    /// The destination it is bound to; empty when unbound.
+    pub bound: String,
+}
 
 #[derive(Serialize, Deserialize, Clone, Default)]
 struct Entry {
@@ -41,6 +70,12 @@ struct Entry {
     sealed: String,
     set_by: String,
     set_at: u64,
+    /// The destination a config cluster's credential was kept for (address, route, certificate
+    /// setting — `bridge::destination_of`). It is handed out for that destination only, so an
+    /// entry left behind by a removed cluster cannot follow its name to another address. Empty
+    /// for the default and for Zabbix's entries, which are not tied to one address.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    bound: String,
 }
 
 #[derive(Serialize, Deserialize, Default)]
@@ -179,6 +214,10 @@ impl ClusterSecrets {
 
     /// Keep a password for `cluster` (`"*"` for the default). Replaces what was there.
     pub fn set(&self, cluster: &str, user: &str, password: &str, by: &str, now: u64) -> Result<(), String> {
+        self.put(cluster, user, password, "", by, now)
+    }
+
+    fn put(&self, cluster: &str, user: &str, password: &str, bound: &str, by: &str, now: u64) -> Result<(), String> {
         if let Some(p) = self.problem.read().clone() {
             return Err(p);
         }
@@ -191,7 +230,7 @@ impl ClusterSecrets {
         let sealed = crate::crypto::seal_with_key(password, &self.key, cluster)?;
         let mut st = self.stored.write();
         st.v = 1;
-        st.clusters.insert(cluster.to_string(), Entry { user: user.trim().to_string(), sealed, set_by: by.to_string(), set_at: now });
+        st.clusters.insert(cluster.to_string(), Entry { user: user.trim().to_string(), sealed, set_by: by.to_string(), set_at: now, bound: bound.to_string() });
         if let Some(p) = &self.path {
             let bytes = serde_json::to_vec_pretty(&*st).map_err(|e| e.to_string())?;
             write_private(p, &bytes).map_err(|e| format!("cannot write {}: {e}", p.display()))?;
@@ -216,6 +255,106 @@ impl ClusterSecrets {
     /// Who set it and when, never the password.
     pub fn status(&self, cluster: &str) -> Option<(String, u64)> {
         self.stored.read().clusters.get(cluster).map(|e| (e.set_by.clone(), e.set_at))
+    }
+
+    /// Keep a whole `Authorization` header for `cluster` (an API key or a bearer token, or a
+    /// header a browser built). Replaces what was there.
+    pub fn set_header(&self, cluster: &str, header: &str, by: &str, now: u64) -> Result<(), String> {
+        let h = header.trim();
+        if h.is_empty() || h.chars().any(char::is_control) {
+            return Err("the credential is empty or has control characters".into());
+        }
+        self.set(cluster, HEADER_USER, h, by, now)
+    }
+
+    /// The `Authorization` header for exactly this entry: `Basic` from a username and
+    /// password, or the header itself when that is what was kept.
+    pub fn header_for(&self, cluster: &str) -> Option<String> {
+        let held = self.get(cluster)?;
+        if held.user == HEADER_USER {
+            return Some(held.password);
+        }
+        use base64::Engine as _;
+        Some(format!("Basic {}", base64::engine::general_purpose::STANDARD.encode(format!("{}:{}", held.user, held.password))))
+    }
+
+    /// `set`, the entry bound to one destination: handed out by `header_at` for that one only.
+    pub fn set_bound(&self, cluster: &str, user: &str, password: &str, bound: &str, by: &str, now: u64) -> Result<(), String> {
+        self.put(cluster, user, password, bound, by, now)
+    }
+
+    /// `set_header`, bound to one destination.
+    pub fn set_header_bound(&self, cluster: &str, header: &str, bound: &str, by: &str, now: u64) -> Result<(), String> {
+        let h = header.trim();
+        if h.is_empty() || h.chars().any(char::is_control) {
+            return Err("the credential is empty or has control characters".into());
+        }
+        self.set_bound(cluster, HEADER_USER, h, bound, by, now)
+    }
+
+    /// The header for this entry when it may go to `destination`: an entry bound to another
+    /// destination gives nothing (an unbound one goes anywhere — the default, Zabbix's).
+    pub fn header_at(&self, cluster: &str, destination: &str) -> Option<String> {
+        let ok = self.stored.read().clusters.get(cluster).is_some_and(|e| e.bound.is_empty() || e.bound == destination);
+        if ok { self.header_for(cluster) } else { None }
+    }
+
+    /// The destination an entry is bound to (empty: unbound), or `None` without an entry.
+    pub fn bound_of(&self, cluster: &str) -> Option<String> {
+        self.stored.read().clusters.get(cluster).map(|e| e.bound.clone())
+    }
+
+    /// Bind an existing entry to a new destination (an admin moved the cluster deliberately).
+    pub fn rebind(&self, cluster: &str, destination: &str, by: &str, now: u64) -> Result<bool, String> {
+        let Some(held) = self.get(cluster) else { return Ok(false) };
+        self.set_bound(cluster, &held.user, &held.password, destination, by, now).map(|_| true)
+    }
+
+    /// Move an entry to another name (a cluster renamed), keeping its binding. The secret is
+    /// sealed again: the name is its associated data.
+    pub fn rename(&self, from: &str, to: &str) -> Result<bool, String> {
+        let Some(held) = self.get(from) else { return Ok(false) };
+        let (by, bound) = {
+            let st = self.stored.read();
+            let e = st.clusters.get(from).cloned().unwrap_or_default();
+            (e.set_by, e.bound)
+        };
+        let at = self.stored.read().clusters.get(from).map(|e| e.set_at).unwrap_or(0);
+        self.set_bound(to, &held.user, &held.password, &bound, &by, at)?;
+        self.remove(from)
+    }
+
+    /// Forget one entry. Returns whether there was one.
+    pub fn remove(&self, cluster: &str) -> Result<bool, String> {
+        if let Some(p) = self.problem.read().clone() {
+            return Err(p);
+        }
+        let mut st = self.stored.write();
+        if st.clusters.remove(cluster).is_none() {
+            return Ok(false);
+        }
+        if let Some(p) = &self.path {
+            let bytes = serde_json::to_vec_pretty(&*st).map_err(|e| e.to_string())?;
+            write_private(p, &bytes).map_err(|e| format!("cannot write {}: {e}", p.display()))?;
+        }
+        Ok(true)
+    }
+
+    /// Every entry, by name, without its secret.
+    pub fn list(&self) -> Vec<Listed> {
+        self.stored.read().clusters.iter().map(|(name, e)| Listed {
+            name: name.clone(),
+            user: if e.user == HEADER_USER { None } else { Some(e.user.clone()) },
+            set_by: e.set_by.clone(),
+            set_at: e.set_at,
+            bound: e.bound.clone(),
+        }).collect()
+    }
+
+    /// Why nothing can be kept (a configured key that is too short, a key file that could not be
+    /// written), or `None` when the store works.
+    pub fn problem(&self) -> Option<String> {
+        self.problem.read().clone()
     }
 }
 
@@ -248,6 +387,49 @@ mod tests {
             use std::os::unix::fs::PermissionsExt;
             assert_eq!(std::fs::metadata(d.join(FILE)).unwrap().permissions().mode() & 0o777, 0o600);
         }
+        std::fs::remove_dir_all(d).ok();
+    }
+
+    #[test]
+    fn config_clusters_keep_passwords_and_headers_and_can_forget_them() {
+        let d = dir();
+        let s = ClusterSecrets::open_with(Some(&d), Some(&"k".repeat(40)));
+        s.set(&config_key("alpha"), "elastic", "pw", "admin", 5).unwrap();
+        s.set_header(&config_key("beta"), "ApiKey abc==", "admin", 6).unwrap();
+        s.set(DEFAULT, "ops", "default-pw", "admin", 7).unwrap();
+        assert_eq!(s.header_for(&config_key("alpha")).as_deref(), Some("Basic ZWxhc3RpYzpwdw=="));
+        assert_eq!(s.header_for(&config_key("beta")).as_deref(), Some("ApiKey abc=="));
+        assert_eq!(s.header_for(&config_key("gamma")), None, "no fallback inside header_for");
+        let raw = std::fs::read_to_string(d.join(FILE)).unwrap();
+        assert!(!raw.contains("ApiKey abc") && !raw.contains("default-pw"), "headers are sealed like passwords");
+        let listed = s.list();
+        assert_eq!(listed.iter().find(|l| l.name == "cfg:beta").unwrap().user, None, "a header entry lists no username");
+        assert_eq!(listed.iter().find(|l| l.name == "cfg:alpha").unwrap().user.as_deref(), Some("elastic"));
+        assert!(s.set_header("cfg:x", "  ", "a", 1).is_err());
+        assert_eq!(s.remove(&config_key("alpha")), Ok(true));
+        assert_eq!(s.remove(&config_key("alpha")), Ok(false));
+        let again = ClusterSecrets::open_with(Some(&d), Some(&"k".repeat(40)));
+        assert_eq!(again.header_for(&config_key("alpha")), None, "the removal was written");
+        assert_eq!(again.header_for(&config_key("beta")).as_deref(), Some("ApiKey abc=="));
+        std::fs::remove_dir_all(d).ok();
+    }
+
+    #[test]
+    fn a_bound_entry_goes_to_its_destination_only_and_moves_with_a_rename() {
+        let d = dir();
+        let s = ClusterSecrets::open_with(Some(&d), Some(&"k".repeat(40)));
+        s.set_bound("cfg:a", "u", "p", "https://a:9200||auto", "admin", 1).unwrap();
+        assert!(s.header_at("cfg:a", "https://a:9200||auto").is_some());
+        assert_eq!(s.header_at("cfg:a", "https://evil:9200||auto"), None, "not to another address");
+        s.set(DEFAULT, "d", "dp", "admin", 1).unwrap();
+        assert!(s.header_at(DEFAULT, "anywhere").is_some(), "the default is not bound");
+        assert_eq!(s.rename("cfg:a", "cfg:b"), Ok(true));
+        assert_eq!(s.header_for("cfg:a"), None);
+        assert_eq!(s.bound_of("cfg:b").as_deref(), Some("https://a:9200||auto"), "the binding moved with it");
+        assert_eq!(s.rebind("cfg:b", "https://a2:9200||auto", "admin", 2), Ok(true));
+        assert!(s.header_at("cfg:b", "https://a2:9200||auto").is_some());
+        let again = ClusterSecrets::open_with(Some(&d), Some(&"k".repeat(40)));
+        assert_eq!(again.header_at("cfg:b", "https://a:9200||auto"), None, "the binding is kept on disk");
         std::fs::remove_dir_all(d).ok();
     }
 

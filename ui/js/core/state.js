@@ -26,6 +26,7 @@ import { clustersToAsk } from '../lib/demand.js';
 import { limiter } from '../lib/limit.js';
 import { isStale } from '../lib/freshness.js';
 import { sortByName } from '../lib/cluster-order.js';
+import { ilmErrorsOf } from './lifecycle-errors.js';
 
 class Emitter {
   constructor() { this.map = new Map(); }
@@ -569,6 +570,8 @@ async function fetchOverviewDirect(id, { withSnapshots = true } = {}) {
     root, health, alloc, nodes, repos, slm, slmStatus, ilm, ilmErr, repoPaths, ilmPolicies,
     ilmOfIndices, clusterSettings,
   });
+  // The pattern the ILM/SLM error definition (lifecycle-errors.js) is read against.
+  out.logIndexPattern = (cl.c && cl.c.logIndexPattern) || undefined;
   // Which figures came from Zabbix, and how old they were — the page says so.
   out.fromZabbix = z ? {
     parts: ['root', 'health', 'ilm', 'slmStatus'].filter((k) => z[k]),
@@ -1842,7 +1845,9 @@ export function alerts() {
     } else {
       diskHeld.delete(c.id);
     }
-    if (d.ilmErrorCount) add({ key: `${c.id}:ilm`, level: 'warning', cluster: c, title: `${c.name}: ${d.ilmErrorCount} index(es) in ILM error step`, detail: Object.keys(d.ilmErrors).slice(0, 3).join(', ') });
+    // Log indices only, and only while ILM runs: the one definition (lifecycle-errors.js), the same the Clusters dot reads.
+    const ilmE = ilmErrorsOf(d, c.logIndexPattern || d.logIndexPattern || state.defaults.logIndexPattern);
+    if (ilmE.count) add({ key: `${c.id}:ilm`, level: 'warning', cluster: c, title: `${c.name}: ${ilmE.count} log index(es) in ILM error step`, detail: ilmE.names.slice(0, 3).join(', ') });
     if (d.slmStatus && d.slmStatus.operation_mode && d.slmStatus.operation_mode !== 'RUNNING') add({ key: `${c.id}:slm-mode`, level: 'warning', cluster: c, title: `${c.name}: SLM is ${d.slmStatus.operation_mode}`, detail: 'Snapshot lifecycle is not running' });
     // Disk balance across data nodes — only meaningful with more than one.
     const bal = diskBalance(d, d.clusterSettings);

@@ -24,6 +24,7 @@ import { openClusterAlerts } from '../core/alert-goto.js';
 import { diskAgainstWatermarks } from '../core/disk-balance.js';
 // Why a cluster cannot be reached: one definition, shared with the Alerts page's unreachable lines.
 import { unreachableReason } from '../core/alert-groups.js';
+import { ilmErrorsOf, slmErrorsOf, ilmErrorTitle, slmErrorTitle } from '../core/lifecycle-errors.js';
 
 let host = null;
 /** Rows the operator opened or closed by hand; what the rest show is the preference. */
@@ -54,11 +55,15 @@ export const SORTS = {
   jdk:      { label: 'JDK',           get: (r) => { const j = jvmSummary(r.d.nodes).text; return j === 'unknown' ? null : j; } },
   snapshot: { label: 'Last snapshot', get: (r) => { const s = lastSnapshotOf(r.d); return s ? s.start : null; } },
   alerts:   { label: 'Open alerts',   get: (r) => (alertCounts || alertsByCluster()).get(r.c.id) || 0 },
-  ilm:      { label: 'ILM',           get: (r) => (r.d.ilm && r.d.ilm.operation_mode) || null },
-  slm:      { label: 'SLM',           get: (r) => (r.d.slmStatus && r.d.slmStatus.operation_mode) || null },
+  ilm:      { label: 'ILM',           get: (r) => lifecycleSortKey(r.d.ilm && r.d.ilm.operation_mode, ilmErrorsOf(r.d, logPattern(r)).count) },
+  slm:      { label: 'SLM',           get: (r) => lifecycleSortKey(r.d.slmStatus && r.d.slmStatus.operation_mode, slmErrorsOf(r.d, logPattern(r)).count) },
   repo:     { label: 'Repository',    get: (r) => (Array.isArray(r.d.repos) ? r.d.repos.map((x) => x.name).join(', ') : null) },
   reqs:     { label: 'Our reqs/5m',   get: (r) => ((requestLoad.clusters[r.c.id] || {}).last5m || 0) },
 };
+/** The cluster's own log index pattern (logstash-* unless it says otherwise). */
+export const logPattern = (r) => r.c.logIndexPattern || (state.defaults && state.defaults.logIndexPattern) || undefined;
+/** Mode first, then clusters with errors ahead of clean ones. */
+const lifecycleSortKey = (mode, errs) => (mode ? `${mode}|${errs ? 0 : 1}` : null);
 const known = (v) => (typeof v === 'number' && v >= 0 ? v : null);
 /** The sort keys that still mean something for a cluster that is not answering. */
 const DOWN_KEEPS = new Set(['name', 'health', 'alerts']);
@@ -504,25 +509,18 @@ const CELLS = {
     // no tick, no threshold colour — and it says why.
     ? h('span.muted', { title: 'The cluster is not answering, so its disk use is not known now.' }, 'unknown while unreachable')
     : diskCell(r.d.disk, r.d.clusterSettings, { dataNodes: true })),
-  // The mode on top (running, or stopped/stopping), the error count under it in red with
-  // each index's policy, step and reason on hover — the same ilmErrors the alert reads.
+  // A button, as in 0.3.2: the mode in its colour, a red dot beside it when a log index is in
+  // an ILM error step (lifecycle-errors.js — the one definition). Click opens the row.
   ilm: (r) => {
     const { d } = r;
-    if (!d.ilm) return h('td', h('span.muted', '\u2013'));
-    const mode = String(d.ilm.operation_mode || '').toLowerCase() || 'unknown';
-    const errs = d.ilmErrorCount || 0;
-    return h('td', h('div.cl-two',
-      mode === 'running' ? h('span.q.ok', 'running') : flag(mode, 'warn'),
-      errs ? h('span.q.bad.cl-sub', { title: ilmErrorText(d), 'aria-label': `${errs} ILM error${errs === 1 ? '' : 's'}: ${ilmErrorText(d)}` },
-        h('i.qdot', { 'aria-hidden': 'true' }), `${errs} error${errs === 1 ? '' : 's'}`) : null));
+    return h('td', d.ilm
+      ? lifecycleButton(r, 'ILM', d.ilm.operation_mode, ilmErrorsOf(d, logPattern(r)), ilmErrorTitle)
+      : h('span.muted', '\u2013'));
   },
   slm: (r) => {
     const { d } = r;
-    const n = (d.slm || []).length;
-    const policies = n ? h('span.muted.cl-sub', `${n} polic${n > 1 ? 'ies' : 'y'}`) : null;
-    if (!d.slmStatus) return h('td', h('div.cl-two', h('span.muted', d.slmSupported === false ? 'n/a' : '\u2013'), policies));
-    const mode = String(d.slmStatus.operation_mode || '');
-    return h('td', h('div.cl-two', mode === 'RUNNING' ? h('span.q.ok', 'running') : flag(mode.toLowerCase() || 'unknown', 'warn'), policies));
+    if (!d.slmStatus) return h('td', h('span.muted', d.slmSupported === false ? 'n/a' : '\u2013'));
+    return h('td', lifecycleButton(r, 'SLM', d.slmStatus.operation_mode, slmErrorsOf(d, logPattern(r)), slmErrorTitle));
   },
   repo: (r) => {
     const names = (r.d.repos || []).map((x) => x.name);
@@ -551,16 +549,16 @@ const CELLS = {
   },
 };
 
-/** Every index in an ILM error step, one line each: index, policy, phase, step, reason. */
-function ilmErrorText(d) {
-  const e = d.ilmErrors || {};
-  const lines = Object.entries(e).slice(0, 8).map(([index, x]) => {
-    const where = [x.policy, x.phase, x.step].filter(Boolean).join(' \u00b7 ');
-    const why = x.step_info && (x.step_info.reason || x.step_info.type);
-    return `${index}${where ? ` \u2014 ${where}` : ''}${why ? `: ${why}` : ''}`;
-  });
-  const more = Object.keys(e).length - lines.length;
-  return lines.join('\n') + (more > 0 ? `\n+${more} more` : '');
+/** The ILM/SLM button: mode as a pill; a red dot (never a count) when `errs` has any. */
+export function lifecycleButton(r, label, mode, errs, titleOf) {
+  const m = String(mode || '');
+  const colour = m.toUpperCase() === 'RUNNING' ? 'green' : 'yellow';
+  const word = m.toLowerCase() || 'unknown';
+  const title = errs.count ? titleOf(errs) : `${label} is ${word} \u2014 click for the cluster's details`;
+  return h('span.cl-lc', h(`button.pill.cl-pillbtn.${colour}`, {
+    type: 'button', title, 'aria-label': `${label} ${word}${errs.count ? ', has errors' : ''} \u2014 open details for ${r.c.name}`,
+    onclick: () => { if (!isOpen(r.c.id)) { toggleRow(r.c.id); draw(); } },
+  }, word), errs.count ? h('i.cl-errdot', { title, role: 'img', 'aria-label': 'errors' }) : null);
 }
 
 /**
@@ -581,9 +579,10 @@ const CSV = {
     // Where it stands against the cluster's own watermarks: the same answer as the bar.
     ['watermark', (r) => diskAgainstWatermarks(r.d.disk, r.d.clusterSettings).label],
     ['high watermark %', (r) => { const w = diskAgainstWatermarks(r.d.disk, r.d.clusterSettings); return w.known ? w.high : ''; }]],
-  ilm: [['', (r) => (r.d.ilm && r.d.ilm.operation_mode) || ''], ['in error', (r) => (r.d.ilm ? r.d.ilmErrorCount || 0 : '')]],
+  ilm: [['', (r) => (r.d.ilm && r.d.ilm.operation_mode) || ''],
+    ['log indices in error', (r) => { const e = ilmErrorsOf(r.d, logPattern(r)); return e.known ? e.count : ''; }]],
   slm: [['', (r) => (r.d.slmStatus && r.d.slmStatus.operation_mode) || (r.d.slmSupported === false ? 'n/a' : '')],
-    ['policies', (r) => (r.d.slmStatus ? (r.d.slm || []).length : '')]],
+    ['policies failing', (r) => { const e = slmErrorsOf(r.d, logPattern(r)); return e.known ? e.count : ''; }]],
   repo: [['', (r) => (r.d.repos || []).map((x) => x.name).join('|')], ['locations', (r) => (r.d.repos || []).map((x) => x.location).join('|')]],
   snapshot: [['', (r) => { const s = lastSnapshotOf(r.d); return s ? s.id : ''; }],
     ['status', (r) => { const s = lastSnapshotOf(r.d); return s ? s.status : ''; }],
@@ -1110,15 +1109,20 @@ function detail(r) {
     tiles.push(tile('Jump host', c.via ? h('span.mono', { title: jumpTitle(c) }, c.via) : h('span.muted', { title: 'Reached directly, no SSH tunnel' }, 'direct'), { id: 'jump' }));
   }
   if (shown.has('ilm')) {
-    const errs = d.ilmErrorCount || 0;
+    const e = ilmErrorsOf(d, logPattern(r));
     tiles.push(tile('ILM', !d.ilm ? h('span.muted', 'unknown')
       : h('span.mono', String(d.ilm.operation_mode || 'unknown'),
-          errs ? [' · ', h('span.q.bad', { title: ilmErrorText(d), style: { cursor: 'help' } }, `${errs} error${errs === 1 ? '' : 's'}`)] : null), { id: 'ilm' }));
+          e.count ? [' ', h('i.cl-errdot', { title: ilmErrorTitle(e), role: 'img', 'aria-label': 'errors' }),
+            h('span.muted', { style: { fontSize: '11px' } }, ` ${e.names.slice(0, 3).join(', ')}${e.count > 3 ? ', \u2026' : ''}`)] : null), { id: 'ilm' }));
   }
   if (shown.has('slm')) {
-    const n = (d.slm || []).length;
-    tiles.push(tile('SLM', h('span.mono', d.slmStatus ? `${d.slmStatus.operation_mode} · ${n} polic${n === 1 ? 'y' : 'ies'}`
-      : d.slmSupported === false ? 'not supported' : 'unknown'), { id: 'slm' }));
+    const e = slmErrorsOf(d, logPattern(r));
+    const np = (d.slm || []).length;
+    tiles.push(tile('SLM', d.slmStatus
+      ? h('span.mono', `${d.slmStatus.operation_mode} \u00b7 ${np} polic${np === 1 ? 'y' : 'ies'}`,
+          e.count ? [' ', h('i.cl-errdot', { title: slmErrorTitle(e), role: 'img', 'aria-label': 'errors' }),
+            h('span.muted', { style: { fontSize: '11px' } }, ` ${e.names.join(', ')}`)] : null)
+      : h('span.mono', d.slmSupported === false ? 'not supported' : 'unknown'), { id: 'slm' }));
   }
   if (shown.has('shards')) tiles.push(shardTile(d));
   if (shown.has('tasks')) {

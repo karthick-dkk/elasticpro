@@ -424,12 +424,18 @@ async function run(browserName, [vw, vh, framed]) {
     });
     dlg('Config · Add jump host', 'settings', async () => { (await import('/js/ui/config-editor.js')).editJumpHost(null); });
     dlg('Config · Edit jump host', 'settings', async () => { (await import('/js/ui/config-editor.js')).editJumpHost('jump-windows-datacenter-frankfurt-1'); });
+    // WHOAMI says hosted, so this is the server's default credential (kept encrypted on the server).
     dlg('Config · Shared credential', 'settings', async () => { (await import('/js/ui/config-editor.js')).editCredentials(); });
-    dlg('Config · Master password (new)', 'settings', async () => { (await import('/js/ui/config-editor.js')).editCredentials(); }, {
+    // The master password belongs to the portable build, where the file keeps the credential.
+    dlg('Config · Master password (new)', 'settings', async () => {
+      (await import('/js/core/server-credentials.js')).setHostedEdition(false);
+      (await import('/js/ui/config-editor.js')).editCredentials();
+    }, {
       // Save asks for the master password before it seals anything; Cancel there writes nothing
       then: async (F) => { await F.evaluate(() => { document.querySelector('#ce-secret').value = 'not-a-secret'; document.querySelector('.modal-foot .btn.primary').click(); }); },
     });
     dlg('Config · Unlock credentials', 'settings', async () => {
+      (await import('/js/core/server-credentials.js')).setHostedEdition(true);   // back to what WHOAMI said
       const S = await import('/js/core/state.js'); const m = await import('/js/ui/config-editor.js');
       const cfg = S.state.config; const c = cfg.clusters[0];
       const was = [cfg.sealed, c.sealedCred, c.needsCred];
