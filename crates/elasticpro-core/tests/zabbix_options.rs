@@ -121,8 +121,16 @@ async fn zabbix_options_from_the_config() {
     c.handle(json!({ "type": "ES", "session": s, "clusterId": "zbx-vm-1-cluster", "method": "GET", "path": "/" })).await;
     assert_eq!(es.last_hit().unwrap().header("authorization"), Some("Basic c2hhcmVkOnNoYXJlZA=="));
 
-    // --- cleared on purpose, it is gone — not carried on as "the last password that worked"
+    // --- cleared on purpose, it is gone — not carried on as "the last password that worked".
+    // Since 0.3.42 the shared credential is the server's default (kept encrypted); a page whose
+    // config file has none sends "" on every load, so that no longer clears it — the admin does,
+    // with CREDENTIAL_CLEAR.
     c.handle(json!({ "type": "PRIME", "session": s, "clusters": [], "sharedAuthHeader": "" })).await;
+    c.zabbix_sync().await;
+    let list = c.handle(json!({ "type": "ZABBIX_CLUSTERS", "session": s })).await;
+    assert_eq!(list["clusters"][0]["credentialOk"], json!(true), "a page load without one keeps the server's default: {list}");
+    let r = c.handle(json!({ "type": "CREDENTIAL_CLEAR", "session": s, "cluster": "*" })).await;
+    assert_eq!(r["ok"], json!(true), "{r}");
     c.zabbix_sync().await;
     let list = c.handle(json!({ "type": "ZABBIX_CLUSTERS", "session": s })).await;
     assert_eq!(list["clusters"][0]["credentialOk"], json!(false), "a removed credential must stay removed: {list}");

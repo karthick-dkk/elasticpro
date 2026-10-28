@@ -66,6 +66,12 @@ async fn admin(c: &Arc<Core>) -> String {
     s
 }
 
+/// The admin of a core restarted on the same data directory: the password set by `admin`.
+async fn admin_again(c: &Arc<Core>) -> String {
+    let res = c.handle(json!({ "type": "LOGIN", "name": "Admin", "password": "correct-horse-battery" })).await;
+    res["session"].as_str().expect("an admin session").to_string()
+}
+
 /// Two clusters on two test servers: `alpha` for the "ES alpha" group, `beta` for "ES beta".
 async fn primed(c: &Arc<Core>) -> (TestServer, TestServer) {
     let a = TestServer::start().await;
@@ -355,19 +361,28 @@ async fn the_last_cluster_setup_survives_a_restart() {
     {
         use std::os::unix::fs::PermissionsExt;
         let mode = std::fs::metadata(dir.join("primed.json")).unwrap().permissions().mode() & 0o777;
-        assert_eq!(mode, 0o600, "it holds credentials");
+        assert_eq!(mode, 0o600, "it names every cluster and route");
+        let text = std::fs::read_to_string(dir.join("primed.json")).unwrap();
+        assert!(!text.contains("Basic YTpi"), "credentials are kept encrypted, not in primed.json: {text}");
     }
 }
 
 #[tokio::test]
-async fn a_sealed_config_is_not_kept_on_disk() {
+async fn a_sealed_config_is_kept_without_its_secrets() {
+    // Since 0.3.42 primed.json never holds a credential (they are kept encrypted in
+    // cluster-secrets.json), so a setup unlocked from sealed values is kept like any other —
+    // which is what lets a restart come back without anyone typing a master password.
     let dir = TempDir::new("zbx-sealed");
     let c = hosted(&dir);
     let s = admin(&c).await;
     c.handle(json!({ "type": "PRIME", "session": s, "clusters": [{ "id": "x", "url": "http://127.0.0.1:1" }] })).await;
     assert!(dir.join("primed.json").exists());
-    c.handle(json!({ "type": "PRIME", "session": s, "persist": false, "clusters": [{ "id": "x", "url": "http://127.0.0.1:1" }] })).await;
-    assert!(!dir.join("primed.json").exists(), "unlocked secrets must not be written in the clear");
+    c.handle(json!({ "type": "PRIME", "session": s, "persist": false,
+                     "clusters": [{ "id": "x", "url": "http://127.0.0.1:1", "authHeader": "Basic dW5sb2NrZWQ6c2VhbGVk" }] })).await;
+    let text = std::fs::read_to_string(dir.join("primed.json")).unwrap();
+    assert!(text.contains("\"x\"") && !text.contains("dW5sb2NrZWQ6c2VhbGVk"), "unlocked secrets must not be written in the clear: {text}");
+    let kept = std::fs::read_to_string(dir.join("cluster-secrets.json")).unwrap();
+    assert!(kept.contains("cfg:x") && !kept.contains("dW5sb2NrZWQ6c2VhbGVk") && !kept.contains("sealed\":\"unlocked"), "{kept}");
     c.handle(json!({ "type": "PRIME", "session": s, "clusters": [] })).await;
     c.handle(json!({ "type": "FORGET", "session": s })).await;
     assert!(!dir.join("primed.json").exists(), "forgetting forgets the copy on disk too");
@@ -415,9 +430,14 @@ async fn a_reprime_without_a_credential_keeps_the_one_held() {
     assert_eq!(again["held"], json!(["alpha"]), "the page is told the server has it: {again}");
     get(&c, &s, "alpha", &a.url()).await;
     assert_eq!(a.last_hit().unwrap().header("authorization"), Some("Basic dHlwZWQ6aXQ="));
-    // And the copy on disk is the retained one, so a restart keeps it too.
+    // A restart keeps it too: encrypted in cluster-secrets.json, never in primed.json.
     let disk = std::fs::read_to_string(dir.join("primed.json")).unwrap();
-    assert!(disk.contains("Basic dHlwZWQ6aXQ="), "the persisted setup lost the credential");
+    assert!(!disk.contains("dHlwZWQ6aXQ="), "a credential in primed.json: {disk}");
+    let c2 = hosted(&dir);
+    c2.restore_prime().await;
+    let s2 = admin_again(&c2).await;
+    get(&c2, &s2, "alpha", &a.url()).await;
+    assert_eq!(a.last_hit().unwrap().header("authorization"), Some("Basic dHlwZWQ6aXQ="), "the restart lost the credential");
 }
 
 #[tokio::test]

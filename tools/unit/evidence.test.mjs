@@ -13,7 +13,7 @@ import { pathToFileURL } from 'node:url';
 
 const ROOT = path.resolve(import.meta.dirname, '../..');
 const ev = await import(pathToFileURL(path.join(ROOT, 'ui/js/core/evidence.js')).href);
-const { EVIDENCE_PAGES, evidenceLayout, hideAddress, scrubFresh, createHeldNotices } = ev;
+const { EVIDENCE_PAGES, evidenceLayout, evidenceSelection, hideAddress, scrubFresh, createHeldNotices } = ev;
 
 const PAGES = ['alerts', 'overview', 'indices', 'shards', 'logs', 'console', 'snapshots', 'volume', 'automation',
   'requests', 'accounts', 'settings'];
@@ -87,4 +87,15 @@ test('one held notice is "1 notice", and nothing held says nothing', () => {
   const lines = [];
   held.release((m) => lines.push(m));
   assert.equal(lines.at(-1), 'Held 1 notice while on an evidence page');
+});
+
+test('an evidence page picks the remembered cluster, else the first, and keeps a valid one', () => {
+  const ids = ['a', 'b', 'c'];
+  assert.equal(evidenceSelection('c', 'b', ids), 'c', 'a cluster already selected stays');
+  assert.equal(evidenceSelection('all', 'b', ids), 'b', 'All clusters -> the last chosen');
+  assert.equal(evidenceSelection('all', '', ids), 'a', 'nothing remembered -> the first');
+  assert.equal(evidenceSelection('all', 'gone', ids), 'a', 'a remembered cluster no longer configured');
+  assert.equal(evidenceSelection('gone', 'c', ids), 'c', 'an unknown selection');
+  assert.equal(evidenceSelection('', undefined, ids), 'a');
+  assert.equal(evidenceSelection('all', 'b', []), '', 'no cluster at all');
 });

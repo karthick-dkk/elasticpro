@@ -15,6 +15,7 @@ import { PRESETS, DATASETS, DATASET_LABELS, BOUNDS, intervalBounds, applyPreset,
 import { defaultApiUrl, checkUrl, countdown, secondsLeft, isManaged, linkChanges, formProblems, linkSummary,
          linkView, testMessage, epUrlFrom, eventLine } from '../core/zabbix-link.js';
 import { showCredentialDialog, forgetVaultCredential } from '../ui/credential-dialog.js';
+import { credentialsKeptOnServer, keptCredentials, keptLine } from '../core/server-credentials.js';
 import { EXAMPLE_YAML } from '../core/example.js';
 import { saveTextAs } from '../core/platform.js';
 import { editCluster, editJumpHost, editCredentials, editDefaults, unlockSealed, saveRaw, rawClusterOf } from '../ui/config-editor.js';
@@ -857,7 +858,39 @@ function fileCard() {
     ]);
 }
 
+/**
+ * Hosted: what the server keeps — the default every cluster without its own uses, and which
+ * clusters have their own. Typed once each; nobody is asked on a page load or after a restart.
+ */
+function keptCredentialsCard() {
+  const needing = clustersNeedingCredential().length;
+  const box = h('div#kept-cred', { style: { fontSize: '12.5px', lineHeight: '1.65', display: 'grid', gap: '6px' } }, h('div.muted', 'Loading…'));
+  keptCredentials().then((st) => {
+    const names = new Map(clusters().map((c) => [c.id, c.name]));
+    const own = st.clusters.filter((c) => names.has(c.id));
+    box.replaceChildren(
+      st.problem ? h('div', { style: { color: 'var(--critical-ink)' } }, h('b', 'The server cannot keep credentials: '), st.problem) : '',
+      h('div', h('b', 'Default: '), st.default ? keptLine(st.default) : h('span', { style: { color: 'var(--critical-ink)' } }, 'none set — clusters without their own cannot sign in')),
+      h('div', h('b', 'Own credential: '), own.length ? own.map((c) => `${names.get(c.id)} (${keptLine(c)})`).join(' · ') : 'no cluster — all use the default'),
+      needing ? h('div', { style: { color: 'var(--critical-ink)' } }, `${needing} cluster(s) have no credential the server can use.`) : '');
+  });
+  return card('Credentials', 'kept encrypted on the server',
+    h('div', { style: { display: 'grid', gap: '11px' } },
+      box,
+      h('div', { style: { fontSize: '12px', lineHeight: '1.6', display: 'grid', gap: '6px' } },
+        h('div', h('b', 'Typed once. '), 'The default here, a cluster’s own in its Edit dialog — when it is added or its credential changes. Nobody is asked again: not on a page load, not after a restart, not other users.'),
+        h('div', h('b', 'Encrypted. '), 'AES-256-GCM under the server’s own key (ELASTICPRO_CLUSTER_SECRET_KEY_FILE), never in the config file, never sent back to a browser.'),
+        h('div', h('b', 'From a config file. '), 'A credential still in the file — plain, or sealed with a master password and unlocked once — is moved to the server the first time it is used.'))),
+    [
+      h('button.btn.sm.primary', { onclick: async () => { if (await editCredentials()) draw(); } }, 'Set default credential…'),
+      state.config && state.config.sealed && needing
+        ? h('button.btn.sm', { onclick: async () => { if (await unlockSealed()) { await refreshAll({ force: true }); draw(); } }, title: 'Once: the credentials are then kept on the server' }, 'Unlock the file’s credentials once…')
+        : null,
+    ].filter(Boolean));
+}
+
 function credentialsCard() {
+  if (credentialsKeptOnServer()) return keptCredentialsCard();
   const needing = clustersNeedingCredential().length;
   return card('Credentials',
     hasSessionCredential() ? `session credential active — ${sessionCredentialLabel()}` : 'from the config file',

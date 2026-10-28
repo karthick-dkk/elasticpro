@@ -2,7 +2,6 @@
 
 import { h, mount, $ } from '../lib/dom.js';
 import { nodeCache, objId } from '../lib/keyed.js';
-import { spanDays, spanDaysIso } from '../core/volume.js';
 import { num, dt, dur, ago, bytes, eachDay, ymdDots, toCsv, download, plural } from '../lib/fmt.js';
 import { state, client, activeClusters, fetchSnapshots, fetchOverview, ensureFullSnapshots, expectChange,
          fleetMode, datasetFreshness, demandDataset, clusterRev, askForPage } from '../core/state.js';
@@ -21,7 +20,7 @@ import {
 } from '../ui/snapshot-dialogs.js';
 import { pagerBar } from '../lib/pager.js';
 import { takeFocus, revealFocus } from '../core/focus.js';
-import { listingTitle, listingEmptyText } from '../core/snapshot-evidence.js';
+import { listingTitle, listingEmptyText, repoOverview, openRepo } from '../core/snapshot-evidence.js';
 import { hideAddress, scrubFresh } from '../core/evidence.js';
 import { SNAPSHOT_PAGE_SIZES, snapshotPage, snapshotCsvRows, filterSnapshots, sortSnapshots,
          SNAPSHOT_SORTS, DEFAULT_SNAPSHOT_SORT, SNAPSHOT_COLUMNS, shownColumns } from '../core/snapshot-list.js';
@@ -34,17 +33,17 @@ let host = null;
  */
 // `sort` is per cluster, like the search; `hiddenCols` is one choice for the tab — the
 // columns a person wants to see do not change with the cluster they look at.
-const ui = { repo: {}, days: 60, view: 'snapshots', page: {}, q: {}, perPage: SNAPSHOT_PAGE_SIZES[0], sort: {}, hiddenCols: new Set() };
+const ui = { open: {}, days: 60, page: {}, q: {}, perPage: SNAPSHOT_PAGE_SIZES[0], sort: {}, hiddenCols: new Set() };
 
 /** Which section an alert's link wants open and in view (core/focus.js): repos | policies. */
 let focusSection = null;
 
 export function render(el) {
   host = el;
-  { const f = takeFocus('snapshots'); if (f) { if (f.view) ui.view = f.view; focusSection = f.section || null; } }
+  { const f = takeFocus('snapshots'); if (f) { if (f.view === 'summary' || f.section) ui.open = {}; focusSection = f.section || null; } }
   el.classList.add('dense');   // long tables: fit more on one screen
   // Arriving with a view asked for (the Clusters page's "Repo" opens the repositories).
-  if (intent.snapshots && (intent.snapshots.view === 'summary' || intent.snapshots.view === 'snapshots')) ui.view = intent.snapshots.view;
+  if (intent.snapshots && intent.snapshots.view === 'summary') ui.open = {};
   intent.snapshots = null;
   syncWrites().then(draw).catch(() => {});
   draw();
@@ -87,7 +86,7 @@ const minute = () => Math.floor(Date.now() / 60000);
 function blockSig(c) {
   // The page and the search are not here: moving through pages or typing redraws only the
   // table under them (see snapshotsCard), and a rebuild reads them from `ui` anyway.
-  return [clusterRev(c.id), objId(state.data.get(c.id)), objId(client(c.id)), ui.repo[c.id] || '', ui.days, ui.view,
+  return [clusterRev(c.id), objId(state.data.get(c.id)), objId(client(c.id)), ui.open[c.id] || '', ui.days,
     ui.perPage, writesAllowed(), fleetMode(), folded(), focusSection, minute()].join('|');
 }
 
@@ -112,31 +111,12 @@ function draw() {
   fold = state.selected === 'all' && list.length > FOLD_ABOVE;
   built.begin();
   const blocks = list.map((c) => built.get(c.id, blockSig(c), () => clusterBlock(c), () => placeholder(c)));
-  mount(host, viewTabs(), ...blocks, list.length ? null : empty('No cluster selected'));
+  mount(host, ...blocks, list.length ? null : empty('No cluster selected'));
   built.end();
   if (focusSection && revealFocus(host, `[data-focus="${focusSection}"]`)) focusSection = null;
   if (built.incomplete && !moreTimer) {
     moreTimer = setTimeout(() => { moreTimer = null; if (host && host.isConnected) draw(); }, 0);
   }
-}
-
-/**
- * Snapshots / Snapshot Summary — the same switch, and the same look, as the Indices page.
- *
- * "Snapshots" is the working view: find a snapshot, look inside it, take or restore one.
- * It is what the page opens on. "Snapshot Summary" is everything that describes the
- * backups rather than acts on one: the tiles, the repositories, SLM, the availability
- * strip. Stacked, the list everybody came for started a screen and a half down.
- */
-function viewTabs() {
-  const tab = (id, label, title) => h('button.btn.sm', {
-    'aria-pressed': ui.view === id ? 'true' : 'false',
-    title,
-    onclick: () => { if (ui.view !== id) { ui.view = id; draw(); } },
-  }, label);
-  return h('div.seg', { role: 'group', 'aria-label': 'Snapshots view', style: { marginBottom: '12px' } },
-    tab('snapshots', 'Snapshots', 'Search the snapshots, look inside one, take or restore'),
-    tab('summary', 'Snapshot Summary', 'Coverage, repositories, SLM policies and snapshot availability'));
 }
 
 /**
@@ -183,7 +163,9 @@ function clusterBlock(c) {
 function clusterSection(c) {
   const d = state.data.get(c.id) || {};
   const repos = d.repos || [];
-  const selected = ui.repo[c.id] || (repos[0] && repos[0].name);
+  // Two levels: the repositories and policies first, one repository's snapshots once it is opened.
+  const open = openRepo(ui.open[c.id], repos);
+  const selected = open || (repos[0] && repos[0].name);
   const snaps = (d.snapshots && d.snapshots[selected]) || [];
 
   return h('section.lazy-block', { style: { marginBottom: '22px' } },
@@ -195,9 +177,9 @@ function clusterSection(c) {
         writeToggle(draw),
         // The listing's own age and a Refresh that re-reads it now (the verbose one).
         freshnessBar(selected ? scrubFresh(listingFreshness(c, d, selected), c) : 0, () => fetchSnapshots(c.id), { label: 'snapshots', dense: true }))),
-    ui.view === 'summary'
-      ? summaryView(c, d, repos, selected, snaps)
-      : snapshotsView(c, repos, selected, snaps));
+    open
+      ? openedRepoView(c, d, repos, open, snaps)
+      : repositoriesView(c, d, repos));
 }
 
 /** Why this cluster's repositories cannot be read right now, or '' when they can. */
@@ -210,7 +192,7 @@ function unreadableReason(c) {
 
 function repoSelect(c, repos, selected) {
   const s = h('select', { 'aria-label': 'Repository',
-    onchange: (e) => { ui.repo[c.id] = e.target.value; ui.page[c.id] = 0; draw(); } },
+    onchange: (e) => { ui.open[c.id] = e.target.value; ui.page[c.id] = 0; draw(); } },
     ...repos.map((r) => h('option', { value: r.name }, `${r.name} (${r.type})`)));
   s.value = selected || '';
   return s;
@@ -290,7 +272,7 @@ function snapshotsView(c, repos, selected, snaps) {
       [
         h('button.btn.sm.primary', {
           disabled: !repos.length,
-          title: repos.length ? 'Start a snapshot now' : 'Register a repository first (Snapshot Summary → Repositories)',
+          title: repos.length ? 'Start a snapshot now' : 'Register a repository first (back on Repositories → + Add repository)',
           onclick: async () => {
             const made = await createSnapshotDialog(c, repos, selected);
             if (made) await reload(c);
@@ -307,77 +289,90 @@ function snapshotsView(c, repos, selected, snaps) {
 
 /* ---------------------------- Snapshot Summary view ---------------------------- */
 
+/* ------------------------------ Repositories view ------------------------------ */
+
 /** Mark a section so a link from an alert can scroll to it (core/focus.js revealFocus). */
 function focusable(name, el) { el.dataset.focus = name; return el; }
 
-function summaryView(c, d, repos, selected, snaps) {
+/**
+ * What the page opens on: the repositories and the SLM policies, and no snapshot list. */
+function repositoriesView(c, d, repos) {
   const policies = d.slm || [];
-  const cov = coverage(snaps, ui.days);
-  const dataRange = recoverableRange(snaps);
-  // Rows from the _cat listing do not name their indices: the recoverable range is then
-  // unknown, and the tile says so instead of "no dated indices".
-  const unnamed = snaps.some((s) => s.indexNames == null);
-  const oldest = snaps.length ? snaps[snaps.length - 1] : null;
-  const newest = snaps.length ? snaps[0] : null;
-
+  const read = policiesRead(c.id);
   return h('div',
-    h('div.grid.c4', { style: { marginBottom: '14px' } },
-      statTile('Snapshots available', d.snapshots ? num(snaps.length) : '–',
-        d.snapshots ? (selected ? `in ${selected}` : 'no repository') : 'not read yet'),
-      statTile('Newest snapshot taken', newest ? dt(newest.start).slice(0, 12) : '–', newest ? ago(newest.start) : ''),
-      // The two questions are different: when snapshots ran, and which days of indices
-      // they hold. A snapshot taken this morning can contain ninety days of daily indices.
-      statTile('Index data recoverable from', dataRange.from || '–',
-        dataRange.from ? `through ${dataRange.to} · ${dataRange.days} days${unnamed ? ' (some snapshots not yet read in full)' : ''}`
-          : unnamed ? 'unknown — the listing has no index names yet' : 'no dated indices in these snapshots'),
-      statTile('Snapshot runs cover', oldest && newest ? plural(spanDays(oldest.start, newest.start), 'day') : '–',
-        cov.missing.length ? `${cov.missing.length} day(s) with no snapshot run` : 'a run every day in the window')),
-
-    focusable('repos', collapsible('Repositories', repos.length ? `${repos.length} registered · add or manage` : policiesRead(c.id) ? 'none registered' : 'not read yet',
-      () => h('div',
-        repoTable(c, d, repos),
-        h('div', { style: { paddingTop: '8px' } },
-          h('button.btn.sm.primary', {
-            onclick: async () => { if (await createRepositoryDialog(c, d.pathRepo || [])) await reload(c); },
-          }, '+ Add repository'))),
-      { key: 'snap-repos', open: focusSection === 'repos' })),
-
+    focusable('repos', card('Repositories',
+      repos.length ? `${repos.length} registered · open one to see its snapshots` : read ? 'none registered' : 'not read yet',
+      repoTable(c, d, repos),
+      [h('button.btn.sm.primary', {
+        onclick: async () => { if (await createRepositoryDialog(c, d.pathRepo || [])) await reload(c); },
+      }, '+ Add repository')])),
     h('div', { style: { marginTop: '10px' } },
-      focusable('policies', collapsible('SLM policies', policies.length ? `${policies.length} configured` : policiesRead(c.id) ? 'none configured' : 'not read yet',
-        () => (policies.length ? slmTable(c, policies)
-          : empty(!policiesRead(c.id) ? 'SLM policies not read yet' : d.slmSupported === false ? 'SLM API not available on this cluster' : 'No SLM policies configured')),
-        { key: 'snap-slm', open: focusSection === 'policies' || policies.some((p) => { const lf = p.last_failure, ls = p.last_success; return lf && (!ls || lf.time > ls.time); }) }))),
+      focusable('policies', card('Policies (SLM)',
+        policies.length ? `${policies.length} configured` : read ? 'none configured' : 'not read yet',
+        policies.length ? slmTable(c, policies)
+          : empty(!read ? 'SLM policies not read yet' : d.slmSupported === false ? 'SLM API not available on this cluster' : 'No SLM policies configured')))));
+}
 
+/** One repository opened: the way back, its snapshot list and actions, and its availability strip. */
+function openedRepoView(c, d, repos, selected, snaps) {
+  const cov = coverage(snaps, ui.days);
+  return h('div',
+    h('div', { style: { display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '10px' } },
+      h('button.btn.sm', { type: 'button', 'data-act': 'back-to-repos', title: 'Back to the repositories and policies',
+        onclick: () => { ui.open[c.id] = null; draw(); } }, '← Repositories')),
+    snapshotsView(c, repos, selected, snaps),
     h('div', { style: { marginTop: '10px' } },
-      collapsible('Snapshot availability', `last ${ui.days} days${selected ? ` in ${selected}` : ''}`, () =>
+      collapsible('Snapshot availability', `last ${ui.days} days in ${selected}`, () =>
         h('div', { style: { display: 'grid', gap: '10px' } },
           h('div', { style: { display: 'flex', gap: '8px', alignItems: 'flex-end', flexWrap: 'wrap' } },
-            h('label.field', 'Repository', repoSelect(c, repos, selected)),
             h('label.field', 'Window', (() => {
               const s = h('select', { onchange: (e) => { ui.days = Number(e.target.value); draw(); } },
                 ...[14, 30, 60, 90, 180, 365].map((n) => h('option', { value: String(n) }, `${n} days`)));
               s.value = String(ui.days); return s;
             })())),
-          repos.length ? coverageStrip(cov.days, { perRow: 62 }) : empty('No repositories'),
+          coverageStrip(cov.days, { perRow: 62 }),
           cov.missing.length
             ? h('div.banner.warn', h('div', h('div.ttl', `${cov.missing.length} day(s) without a successful snapshot`),
                 h('div.mono', { style: { fontSize: '11.5px' } }, cov.missing.slice(0, 12).join(', ') + (cov.missing.length > 12 ? ` … +${cov.missing.length - 12}` : ''))))
-            : repos.length ? h('div.sec', { style: { fontSize: '12px' } }, `Every day in the window has at least one successful snapshot.`) : null),
-        { key: 'snap-coverage', open: true })));
+            : h('div.sec', { style: { fontSize: '12px' } }, `Every day in the window has at least one successful snapshot.`)),
+        { key: 'snap-coverage', open: false })));
 }
 
 /* --------------------------------- repositories -------------------------------- */
 
 function repoTable(c, d, repos) {
   const can = writesAllowed();
+  const open = (name) => { ui.open[c.id] = name; ui.page[c.id] = 0; draw(); };
   const trs = repos.map((r) => {
-    const count = ((d.snapshots || {})[r.name] || []).length;
-    return h('tr',
-      h('td', h('div', { style: { fontWeight: 640 } }, r.name), r.error
-        ? h('div.muted', { style: { fontSize: '11px', color: 'var(--critical)' }, title: hideAddress(r.error, c) }, 'unreadable') : null),
+    const o = repoOverview(r, d.snapshots ? (d.snapshots[r.name] || []) : null, d.slm || []);
+    const st = o.newest ? String(o.newest.status || '').toUpperCase() : '';
+    const cls = st === 'SUCCESS' ? 'green' : st === 'PARTIAL' || st === 'IN_PROGRESS' ? 'yellow' : st === 'FAILED' ? 'red' : 'grey';
+    // Rows from the _cat listing name no indices: the span is then unknown, never "none".
+    const span = o.span.from
+      ? h('span', { title: `${o.span.days} day(s) of dated indices${o.span.unknown ? ' — some snapshots not yet read in full' : ''}` },
+          `${o.span.from} → ${o.span.to}`)
+      : o.count === null ? h('span.muted', 'not read yet')
+      : o.span.unknown ? h('span.muted', { title: 'This repository was read with _cat, which does not name the indices' }, 'unknown')
+      : h('span.muted', { title: 'No index in these snapshots carries a date in its name' }, '–');
+    return h('tr', { style: { cursor: 'pointer' }, 'data-repo': r.name,
+        onclick: (e) => { if (!e.target.closest('button, a, .menu, [role="menu"]')) open(r.name); } },
+      h('td',
+        h('a', { href: '#', style: { fontWeight: 640, color: 'var(--accent)', textDecoration: 'none' },
+          title: `Open ${r.name}: its snapshots`, onclick: (e) => { e.preventDefault(); open(r.name); } }, r.name),
+        r.error ? h('div.muted', { style: { fontSize: '11px', color: 'var(--critical)' }, title: hideAddress(r.error, c) }, 'unreadable') : null),
       h('td', pill(r.type || '?', 'grey')),
-      h('td.num', num(count)),
+      h('td.num', o.count === null ? h('span.muted', { title: 'The snapshot listing has not been read yet' }, '–') : num(o.count)),
+      h('td.nowrap', { style: { fontSize: '11.5px' } }, o.newest
+        ? h('div', { style: { display: 'flex', gap: '6px', alignItems: 'center' } }, pill(st || '?', cls),
+            h('span', { title: dt(o.newest.start) }, ago(o.newest.start)))
+        : h('span.muted', o.count === null ? 'not read yet' : 'no snapshots')),
+      h('td.nowrap', { style: { fontSize: '11.5px' } }, span),
+      h('td', { style: { fontSize: '11.5px' } }, o.policies.length ? o.policies.join(', ')
+        : h('span.muted', { title: policiesRead(c.id) ? 'No SLM policy writes to this repository' : 'SLM policies not read yet' },
+            policiesRead(c.id) ? 'none' : 'not read yet')),
       h('td', h('div', { style: { display: 'flex', gap: '4px', justifyContent: 'flex-end' } },
+        h('button.btn.sm.primary', { type: 'button', 'data-act': 'open-repo', 'aria-label': `Open ${r.name}`,
+          title: "Show this repository's snapshots", onclick: () => open(r.name) }, 'Open'),
         h('button.btn.sm', { title: 'Check that every node can reach this repository',
           onclick: () => verifyRepository(c, r.name) }, 'Verify'),
         rowMenu([
@@ -390,7 +385,7 @@ function repoTable(c, d, repos) {
             onClick: () => deleteRepository(c, r.name, { onChanged: () => reload(c) }) },
         ], { title: `Actions for ${r.name}` }))));
   });
-  return table(['Repository', 'Type', 'Snapshots', ''], trs, {
+  return table(['Repository', 'Type', 'Snapshots', 'Newest snapshot', 'Data span', 'SLM policies', ''], trs, {
     emptyText: empty('This cluster has no snapshot repository, so nothing can be backed up.', {
       detail: h('span', 'A repository is registered on the cluster itself — ',
         h('code.inline', 'PUT _snapshot/<name>'), ' — and needs a path in ',
@@ -401,21 +396,6 @@ function repoTable(c, d, repos) {
 }
 
 /* ------------------------------------ coverage ---------------------------------- */
-
-/**
- * Across every snapshot in the repository, the span of log days they hold between them.
- *
- * Distinct from when the snapshots ran: this is what could actually be restored, read
- * from the dates in the index names each snapshot carries.
- */
-function recoverableRange(snaps) {
-  let from = null, to = null;
-  for (const s of snaps) {
-    if (s.coverFrom && (from === null || s.coverFrom < from)) from = s.coverFrom;
-    if (s.coverTo && (to === null || s.coverTo > to)) to = s.coverTo;
-  }
-  return { from, to, days: spanDaysIso(from, to) };
-}
 
 function coverage(snaps, days) {
   const today = new Date();

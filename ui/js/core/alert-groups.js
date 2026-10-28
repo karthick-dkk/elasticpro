@@ -27,6 +27,7 @@ import { ruleById } from './alert-rules.js';
 import { ruleOf } from './zabbix-alerts.js';
 import { compareNames } from '../lib/cluster-order.js';
 import { diskBalance } from './disk-balance.js';
+import { ilmErrorsOf } from './lifecycle-errors.js';
 
 export const clusterIdOf = (a) => (a && a.cluster && a.cluster.id) || String((a && a.key) || '').split(':')[0];
 /** The rule family: `vm-1:slm-fail:daily` → `slm-fail`. Alerts of no known family share `other`. */
@@ -97,7 +98,7 @@ export function itemsOf(a, ctx = {}) {
       return [one(a, a.title, '')];
     }
     case 'ilm': {
-      const errs = (d && d.ilmErrors) || {};
+      const errs = ilmErrorsOf(d, (d && d.logIndexPattern) || defaults.logIndexPattern).details;
       const names = Object.keys(errs);
       if (!names.length) return [one(a, 'indices', '')];
       return names.sort().map((n) => {

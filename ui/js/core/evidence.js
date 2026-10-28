@@ -9,6 +9,10 @@
  * cluster, the data time, the capture time and the user; the user asked for that to go, so
  * the Refresh button's minutes badge is where the age of the data is read now.)
  *
+ * The top bar still offers the cluster chooser here, one cluster at a time (no "All clusters",
+ * no find-box): choosing is how a person says which client the screenshot is for. Arriving
+ * with "All clusters" selected picks one for them, `evidenceSelection()` below.
+ *
  * This file is the one definition. app.js asks `evidenceLayout()` and nothing else decides
  * which pages these are. No DOM here, so tools/unit/evidence.test.mjs can hold it.
  */
@@ -27,6 +31,18 @@ export function evidenceLayout(pageId, selected, hasCluster = true) {
   const evidence = EVIDENCE_PAGES.has(pageId);
   const single = !!selected && selected !== 'all' && !!hasCluster;
   return { evidence, needsCluster: evidence && !single };
+}
+
+/**
+ * The cluster an evidence page opens on when "All clusters" (or a cluster that is not in the
+ * config) is selected: the one last chosen in this browser, else the first. `selected` is kept
+ * when it already names a configured cluster. '' when there is no cluster at all.
+ * `ids` is the configured cluster ids in display order.
+ */
+export function evidenceSelection(selected, last, ids = []) {
+  if (selected && selected !== 'all' && ids.includes(selected)) return selected;
+  if (last && ids.includes(last)) return last;
+  return ids[0] || '';
 }
 
 /**

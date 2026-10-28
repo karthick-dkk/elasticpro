@@ -112,13 +112,10 @@ async function waitFor(find, what, ms = 5000) {
   return null;
 }
 
-// An evidence page (core/evidence.js) asks for one cluster when the fleet is selected, as a
-// person would be asked; this answers it with the first. backToFleet() undoes that choice
-// through the picker, the way a person would, so the sections after it still start on "All".
+// An evidence page (core/evidence.js) picks one cluster itself when the fleet is selected
+// (the last one chosen, else the first), so this is just go(). backToFleet() puts "All" back.
 async function goOne(id) {
   await go(id);
-  const pick = doc.getElementById('evidence-pick');
-  if (pick) { pick.value = pick.options[1].value; pick.dispatchEvent(new window.Event('change', { bubbles: true })); await settleFor(450); }
 }
 async function backToFleet() {
   // Through the picker, as a person would: first one cluster (which clears "All clusters was
@@ -323,6 +320,25 @@ await go('overview');
   v = [...doc.querySelectorAll('table.tbl thead th')].find((th) => th.textContent.includes('Version'));
   ok(/▼/.test(v.textContent), `overview: second click should reverse, header reads "${v.textContent}"`);
 }
+// ILM / SLM are buttons (as in 0.3.2); a red dot, never a count, says a log index / policy is failing.
+{
+  const btns = [...doc.querySelectorAll('table.cl-tbl button.cl-pillbtn')];
+  ok(btns.length > 0, 'overview: the ILM/SLM cells have no buttons');
+  const bad = btns.filter((b) => b.parentElement.querySelector('.cl-errdot'));
+  ok(bad.length > 0, 'overview: the mock has a logstash-* index in an ILM error step, so a red dot should show');
+  for (const b of bad) ok(!/\d/.test(b.parentElement.textContent), `overview: the ILM/SLM cell shows a count: "${b.parentElement.textContent}"`);
+  const b0 = btns[0];
+  if (b0) {
+    const rowEl = b0.closest('tr.cl-row');
+    const was = rowEl && rowEl.classList.contains('open');
+    b0.click(); await settleFor(150);
+    const after = doc.querySelector(`tr.cl-row[data-cluster="${rowEl && rowEl.getAttribute('data-cluster')}"]`);
+    ok(!!after && after.classList.contains('open'), `overview: the ${b0.textContent} button did not open the cluster's details (was open: ${was})`);
+    // Put it back, so the checks below start from the collapsed row they expect.
+    const chev = after && after.querySelector('button.cl-chev');
+    if (!was && chev) { chev.click(); await settleFor(150); }
+  }
+}
 
 await go('indices');
 // The Indices page is for managing indices. The volume breakdown moved to the Volume
@@ -355,38 +371,51 @@ await go('indices');
 
 await goOne('snapshots');
 {
-  // Two views, like Indices. "Snapshots" is what the page opens on: the search bar and the
-  // list, and nothing else — the tiles, repositories, SLM and the strip are on the Summary.
-  const segBtn = (label) => [...doc.querySelectorAll('.seg .btn')].find((b) => b.textContent.trim() === label);
-  const pressedIs = (label) => segBtn(label) && segBtn(label).getAttribute('aria-pressed') === 'true';
-  ok(!!segBtn('Snapshots') && !!segBtn('Snapshot Summary'), 'snapshots: no Snapshots | Snapshot Summary switch');
-  ok(pressedIs('Snapshots'), 'snapshots: the page should open on the Snapshots view');
-  ok(!!doc.querySelector('input[aria-label="Search snapshots"]'), 'snapshots: no snapshot search bar on the Snapshots view');
+  // Two levels. The page opens on the repositories and the SLM policies; the snapshot list
+  // appears only once a repository is opened, with a way back.
   const listCards = () => [...doc.querySelectorAll('section.card header h2')].filter((x) => x.textContent.startsWith('Snapshots in '));
-  ok(listCards().length > 0, 'snapshots: no "Snapshots in <repo>" card on the Snapshots view');
-  ok(!panel('Snapshot availability') && !panel('Repositories') && !panel('SLM policies'),
-    'snapshots: the Snapshots view should carry only the search and the list — summary panels are showing');
-  ok(!/Index data recoverable from/.test(doc.body.textContent), 'snapshots: the stat tiles belong on the Summary view');
+  const backBtn = () => doc.querySelector('button[data-act="back-to-repos"]');
+  ok(!!panel('Repositories') && shown('Repositories'), 'snapshots: the page should open on a visible Repositories section');
+  ok(!!panel('Policies (SLM)') && shown('Policies (SLM)'), 'snapshots: the page should open on a visible Policies (SLM) section');
+  ok(!doc.querySelector('.seg .btn'), 'snapshots: the old Snapshots | Snapshot Summary switch is still there');
+  ok(listCards().length === 0 && !doc.querySelector('input[aria-label="Search snapshots"]'),
+    'snapshots: the snapshot list should not show before a repository is opened');
+  const repoRows = () => [...(panel('Repositories') || doc.createElement('div')).querySelectorAll('tbody tr[data-repo]')];
+  ok(repoRows().length > 0, 'snapshots: the Repositories section has no repository row');
+  ok(!backBtn(), 'snapshots: the way-back control shows on the repositories view');
+  const heads = [...panel('Repositories').querySelectorAll('thead th')].map((x) => x.textContent.trim());
+  for (const hd of ['Repository', 'Type', 'Snapshots', 'Newest snapshot', 'Data span', 'SLM policies']) {
+    ok(heads.includes(hd), `snapshots: the Repositories table has no "${hd}" column`);
+  }
+  // Where the backups are kept is not evidence (0.3.23): no Location column on this level either.
+  ok(!heads.includes('Location'), 'snapshots: the Repositories table shows a Location column');
+
+  // Open one, by its own Open control, as a person would.
+  const openBtn = repoRows()[0].querySelector('button[data-act="open-repo"]');
+  ok(!!openBtn, 'snapshots: a repository row has no Open control');
+  openBtn.click();
+  await settleFor(200);
+  ok(listCards().length > 0, 'snapshots: opening a repository did not show its "Snapshots in <repo>" card');
+  ok(!!doc.querySelector('input[aria-label="Search snapshots"]'), 'snapshots: no snapshot search bar in the opened repository');
   ok(!!doc.querySelector('.pager'), 'snapshots: the snapshot list has no pager');
+  ok(!!backBtn() && /Repositories/.test(backBtn().textContent), 'snapshots: the opened repository has no "← Repositories" control');
+  ok(!panel('Repositories') && !panel('Policies (SLM)'), 'snapshots: the repositories view is still showing under an opened repository');
   ok(!/Show all|more \(\d+ hidden\)/.test(doc.body.textContent), 'snapshots: the old "Show N more" control is still there');
+  ok([...doc.querySelectorAll('button')].some((b) => b.textContent.includes('Create snapshot')), 'snapshots: "+ Create snapshot" is not reachable in the opened repository');
 
-  segBtn('Snapshot Summary').click();
-  await settleFor(150);
-  ok(pressedIs('Snapshot Summary'), 'snapshots: Snapshot Summary is not marked selected after being pressed');
-  ok(shown('Snapshot availability'), 'snapshots: "Snapshot availability" starts folded');
-  ok(panel('Repositories') && panel('Repositories').querySelector('.body').hidden,
-    'snapshots: "Repositories" is a table and should still start folded');
-  ok(!!panel('SLM policies'), 'snapshots: Summary has no SLM policies panel');
-  ok(/Index data recoverable from/.test(doc.body.textContent), 'snapshots: Summary has no stat tiles');
-  ok(listCards().length === 0, 'snapshots: the snapshot list should not be on the Summary view');
-
-  // Remembered for the tab: away and back lands on the same view.
+  // Remembered for the tab: away and back lands on the same repository.
   await go('volume');
   await goOne('snapshots');
-  ok(pressedIs('Snapshot Summary'), 'snapshots: the chosen view was not remembered across a page change');
-  segBtn('Snapshots').click();
+  ok(listCards().length > 0, 'snapshots: the opened repository was not remembered across a page change');
+
+  // The way back.
+  backBtn().click();
   await settleFor(150);
-  ok(pressedIs('Snapshots'), 'snapshots: could not switch back to the Snapshots view');
+  ok(listCards().length === 0 && !!panel('Repositories'), 'snapshots: "← Repositories" did not return to the repositories view');
+  // And a row opens by being clicked, not only by its button.
+  repoRows()[0].click();
+  await settleFor(150);
+  ok(listCards().length > 0, 'snapshots: clicking a repository row did not open it');
 
   // The evidence view, opened from the real row control on the newest snapshot.
   const card0 = listCards()[0].closest('section.card');
@@ -1006,10 +1035,7 @@ await go('overview');
     ok(/#\/shards$/.test(window.location.hash) && st.state.selected === target.id, `name menu → Nodes: at ${window.location.hash}, selected ${st.state.selected}`);
     await go2('Repo');
     ok(/#\/snapshots$/.test(window.location.hash) && st.state.selected === target.id, `name menu → Repo: at ${window.location.hash}, selected ${st.state.selected}`);
-    const summaryTab = [...doc.querySelectorAll('#view .seg button')].find((b) => b.textContent === 'Snapshot Summary');
-    ok(summaryTab && summaryTab.getAttribute('aria-pressed') === 'true', 'name menu → Repo: the repositories view is not the one open');
-    const snapTab = [...doc.querySelectorAll('#view .seg button')].find((b) => b.textContent === 'Snapshots');
-    if (snapTab) { press(snapTab); await settleFor(150); }
+    ok(!!panel('Repositories') && !doc.querySelector('input[aria-label="Search snapshots"]'), 'name menu → Repo: the repositories view is not the one open');
     await go2('Live log');
     ok(/#\/logs$/.test(window.location.hash) && st.state.selected === target.id, `name menu → Live log: at ${window.location.hash}, selected ${st.state.selected}`);
     await go2('Edit');
@@ -1771,6 +1797,7 @@ if (config.clusters.length >= 2 && viaFleet) {
   setup([{ name: 'daily', type: 'fs', error: null }], { daily: many });
   st.state.config.clusters[0].indexNameRegex = st.LEGACY_INDEX_RE;
   await goOne('snapshots');
+  { const o = doc.querySelector('tr[data-repo="daily"] button[data-act="open-repo"]'); if (o) { o.click(); await settleFor(200); } }
   const list = () => [...doc.querySelectorAll('section.card')].find((x) => (x.querySelector('header h2') || {}).textContent === 'Snapshots in daily');
   const rowIds = () => [...(list() ? list().querySelectorAll('tbody tr') : [])].map((tr) => tr.querySelector('td').textContent.trim());
   const pagerBtn = (label) => [...(list() ? list().querySelectorAll('.pager button') : [])].find((b) => b.textContent.trim() === label);
@@ -2903,7 +2930,7 @@ consoleTabs: {
   const fleet = () => ({
     a: { ...healthy(), health: { status: 'yellow', unassigned_shards: 4 },
          disk: { percent: 91, nodes: [node('es-hot-1', 89), node('es-hot-2', 88), node('es-hot-3', 86)] },
-         ilmErrorCount: 2, ilmErrors: { 'logs-1': { failed_step: 'rollover' }, 'logs-2': { failed_step: 'rollover' } } },
+         ilm: { operation_mode: 'RUNNING' }, ilmErrors: { 'logstash-1': { failed_step: 'rollover' }, 'logstash-2': { failed_step: 'rollover' } } },
     k: { reachable: false },
     b: { ...healthy(), slmStatus: { operation_mode: 'STOPPED' } },
     q: healthy(),
@@ -3199,7 +3226,7 @@ consoleTabs: {
     notify.announceNewAlerts({ notify: () => {} });
     const d = st.state.data.get('q');
     d.health = { status: 'yellow', unassigned_shards: 2 };
-    d.ilmErrorCount = 1; d.ilmErrors = { 'x-1': {} };
+    d.ilm = { operation_mode: 'RUNNING' }; d.ilmErrors = { 'logstash-x-1': {} };
     st.invalidateAlerts();
     notify.announceNewAlerts();
     const bell = doc.querySelector('button.bell');
@@ -3350,7 +3377,8 @@ if (viaFleet) {
   const other = byName('evc-09');
   const dead = down[0];
 
-  const text = () => doc.body.textContent;
+  // The chooser lists every cluster by design (0.3.42); what the page SAYS is everything else.
+  const text = () => { const c = doc.body.cloneNode(true); c.querySelectorAll('#cluster-select').forEach((x) => x.remove()); return c.textContent; };
   const barText = () => (doc.getElementById('topbar') || { textContent: '' }).textContent;
   const noOthers = (where, mine) => {
     for (const c of all) if (c.id !== mine.id && text().includes(c.name)) problems.push(`evidence ${where}: the page names another cluster, ${c.name}`);
@@ -3360,7 +3388,10 @@ if (viaFleet) {
     ok(!/\d+\s+(green|yellow|red|unreachable|loading)\b/.test(bar.textContent), `evidence ${where}: a fleet status chip is in the top bar: "${bar.textContent}"`);
     ok(![...bar.querySelectorAll('button')].some((b) => /^\d+ alerts?$/.test(b.textContent.trim())), `evidence ${where}: the alerts chip is in the top bar`);
     ok(!bar.querySelector('.bell'), `evidence ${where}: the bell is in the top bar`);
-    ok(!bar.querySelector('#cluster-select, #cluster-finder'), `evidence ${where}: a cluster picker or finder is in the top bar`);
+    const pickEl = bar.querySelector('#cluster-select');
+    ok(!!pickEl, `evidence ${where}: no cluster chooser in the top bar`);
+    ok(!bar.querySelector('#cluster-finder, .cl-find'), `evidence ${where}: the find-box is in the top bar`);
+    ok(!pickEl || ![...pickEl.options].some((o) => o.value === 'all'), `evidence ${where}: the chooser offers "All clusters"`);
     ok(!/updated|live|quiet|manual/.test(bar.textContent.replace(/Refresh/g, '')), `evidence ${where}: a fleet freshness claim is in the top bar: "${bar.textContent}"`);
     ok(!doc.querySelector('#nav button[data-page="alerts"] .pill'), `evidence ${where}: the Alerts tab carries a count`);
     ok(doc.getElementById('side-foot').hidden === true, `evidence ${where}: the Config/Clusters/Health/Requests strip is showing`);
@@ -3385,14 +3416,16 @@ if (viaFleet) {
     await go('alerts'); ok(doc.getElementById('side-foot').hidden === false, 'evidence control: Alerts has no status strip'); await go('overview');
   }
 
-  // Snapshots with "All clusters": asks for one, and shows no fleet while it asks.
+  // Snapshots with "All clusters": picks one cluster by itself (the first, nothing chosen yet),
+  // draws no fleet, and the chooser changes it.
   await go('snapshots'); await settleFor(300);
   {
-    const pick = doc.getElementById('evidence-pick');
-    ok(!!pick, 'evidence snapshots: with "All clusters" the page does not ask for one cluster');
-    ok(/Evidence needs one cluster/.test(text()), 'evidence snapshots: no explanation that evidence needs one cluster');
-    ok(!doc.querySelector('#view section.lazy-block, #view .seg'), 'evidence snapshots: a fleet of snapshot lists is drawn under the question');
-    noFleetChrome('snapshots (choosing)');
+    ok(!doc.getElementById('evidence-pick') && !/Evidence needs one cluster/.test(text()), 'evidence snapshots: with "All clusters" the page asks instead of picking one');
+    ok(st.state.selected === all[0].id, `evidence snapshots: arrived on ${st.state.selected}, expected the first cluster ${all[0].id}`);
+    const pick = doc.getElementById('cluster-select');
+    ok(pick && pick.value === all[0].id, 'evidence snapshots: the chooser does not show the picked cluster');
+    ok(!doc.querySelector('#view section.lazy-block, #view .seg') || st.state.selected !== 'all', 'evidence snapshots: a fleet of snapshot lists is drawn');
+    noFleetChrome('snapshots (arriving)');
     if (pick) { pick.value = main.id; pick.dispatchEvent(new window.Event('change', { bubbles: true })); await settleFor(500); }
   }
 
@@ -3410,17 +3443,22 @@ if (viaFleet) {
     await go(id); await settleFor(id === 'snapshots' ? 900 : 500);
     ok(st.state.selected === main.id, `evidence ${id}: selected ${st.state.selected}, expected the chosen cluster`);
     ok(doc.querySelector('#topbar h1').textContent === label, `evidence ${id}: the top bar does not carry the page title`);
-    const chip = doc.querySelector('#topbar .pill');
-    ok(chip && chip.textContent.includes(main.name), `evidence ${id}: the top bar does not name this cluster with its health: "${chip && chip.textContent}"`);
+    const chip = doc.getElementById('cluster-select');
+    ok(chip && chip.value === main.id, `evidence ${id}: the chooser does not show this cluster: "${chip && chip.value}"`);
     ok([...doc.querySelectorAll('#topbar button')].some((b) => /Refresh/.test(b.textContent)), `evidence ${id}: no Refresh in the top bar`);
     noFleetChrome(id);
     if (id === 'snapshots') {
       // Where the backups are kept (a bucket, an NFS path) is not evidence and must not be in
       // it (user decision, 0.3.23): no Location column and no repository path, in either view.
       // The mock's "daily" repository is an fs repository at /mnt/backups.
-      for (const label of ['Snapshot Summary', 'Snapshots']) {
-        const b = [...doc.querySelectorAll('#view .seg button')].find((x) => x.textContent.trim() === label);
-        if (b) { b.click(); await settleFor(300); }
+      // Both levels: the repositories and policies, then one repository opened.
+      { const back = doc.querySelector('#view button[data-act="back-to-repos"]'); if (back) { back.click(); await settleFor(200); } }
+      for (const label of ['Repositories', 'Opened repository']) {
+        if (label === 'Opened repository') {
+          const b = doc.querySelector('#view button[data-act="open-repo"]');
+          if (b) { b.click(); await settleFor(300); }
+          ok(!!b && !!doc.querySelector('input[aria-label="Search snapshots"]'), 'evidence snapshots: Open did not show the snapshot list');
+        }
         ok(![...doc.querySelectorAll('#view th')].some((th) => /^Location/.test(th.textContent.trim())), `evidence snapshots (${label}): a Location column is shown`);
         ok(!text().includes('/mnt/backups'), `evidence snapshots (${label}): the repository path /mnt/backups is on the page`);
       }

@@ -49,7 +49,7 @@ test('the window is two minutes', () => assert.equal(notify.BURST_WINDOW_MS, 2 *
 
 test('three alerts on one cluster in one pass are one notification listing each', () => {
   setData({ ...Object.fromEntries(clusters.map((c) => [c.id, data()])),
-    c1: data({ health: { status: 'yellow', unassigned_shards: 4 }, disk: { percent: 92, nodes: [] }, ilmErrorCount: 6, ilmErrors: { 'logs-1': {} } }) });
+    c1: data({ health: { status: 'yellow', unassigned_shards: 4 }, disk: { percent: 92, nodes: [] }, ilm: { operation_mode: 'RUNNING' }, ilmErrors: { 'logstash-1': {} } }) });
   const fresh = run(T0 + MIN);
   assert.equal(fresh.length, 3);
   assert.equal(said.length, 1, 'one notification, not three');
@@ -67,7 +67,7 @@ test('a later pass inside the window joins the same entry; after the window it i
   run(T0 + MIN);
   const key = said[0].opts.key;
   setData({ ...Object.fromEntries(clusters.map((c) => [c.id, data()])),
-    c1: data({ health: { status: 'yellow', unassigned_shards: 1 }, ilmErrorCount: 2, ilmErrors: { a: {}, b: {} } }) });
+    c1: data({ health: { status: 'yellow', unassigned_shards: 1 }, ilm: { operation_mode: 'RUNNING' }, ilmErrors: { 'logstash-a': {}, 'logstash-b': {} } }) });
   run(T0 + MIN + 90000);                      // 90 s after the burst began
   assert.equal(said.length, 2);
   assert.equal(said[1].opts.key, key, 'the same bell entry, updated');
@@ -75,7 +75,7 @@ test('a later pass inside the window joins the same entry; after the window it i
   assert.equal(said[1].opts.detail.length, 2);
 
   setData({ ...Object.fromEntries(clusters.map((c) => [c.id, data()])),
-    c1: data({ health: { status: 'yellow', unassigned_shards: 1 }, ilmErrorCount: 2, ilmErrors: { a: {}, b: {} }, slmStatus: { operation_mode: 'STOPPED' } }) });
+    c1: data({ health: { status: 'yellow', unassigned_shards: 1 }, ilm: { operation_mode: 'RUNNING' }, ilmErrors: { 'logstash-a': {}, 'logstash-b': {} }, slmStatus: { operation_mode: 'STOPPED' } }) });
   run(T0 + MIN + 3 * MIN);                    // well after it
   assert.equal(said.length, 3);
   assert.notEqual(said[2].opts.key, key, 'a new burst is a new entry');

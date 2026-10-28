@@ -25,7 +25,8 @@ import { announceNewAlerts, announceSnapshotOutcomes, resetAnnounced } from './c
 import { onSessionLost, bridge, setSession, setSignedIn, abortPage } from './core/transport.js';
 import { readLaunch, withoutCode, withoutTrouble, troubleshootTarget, themeFor, exchangeCode, rememberEmbedTheme, askZabbixToSignIn, rememberPageForReauth, takeRememberedPage } from './core/embed.js';
 import { pageForProblem } from './core/alert-rules.js';
-import { evidenceLayout, createHeldNotices } from './core/evidence.js';
+import { EVIDENCE_PAGES, evidenceLayout, evidenceSelection, createHeldNotices } from './core/evidence.js';
+import { setHostedEdition } from './core/server-credentials.js';
 
 let coreInfo = { version: '?' };
 
@@ -543,7 +544,7 @@ function renderTopbar() {
     state.selected = e.target.value;
     fleetView = e.target.value === 'all';
     // The cluster this browser opens on next time ("last selected" scope).
-    if (e.target.value !== 'all') idb.setKV('lastCluster', e.target.value);
+    if (e.target.value !== 'all') { lastCluster = e.target.value; idb.setKV('lastCluster', e.target.value); }
     // Picking "All clusters" here is the deliberate choice a defaultSingle page waits
     // for; picking one cluster withdraws it.
     fleetChosen = e.target.value === 'all';
@@ -551,14 +552,15 @@ function renderTopbar() {
   } });
   // "All clusters" first, then every cluster A–Z (clusters() is in name order). A cluster
   // that cannot be reached says so in the list itself, so nobody picks it expecting data.
-  if (page.multi) sel.append(h('option', { value: 'all' }, `All clusters (${clusters().length})`));
+  // (An evidence page offers one cluster at a time: its shell shows nothing of the fleet.)
+  if (page.multi && !ev) sel.append(h('option', { value: 'all' }, `All clusters (${clusters().length})`));
   clusters().forEach((c) => sel.append(h('option', { value: c.id }, c.name)));
   markUnreachable(sel);
   // As wide as the longest name, not the longest option: the "— unreachable" mark comes and
   // goes, and a <select> sized by it resized the top bar, wrapped it onto a second line and
   // moved the page under the reader. Capped, so a fleet of long names keeps the bar on one
   // line; the list it opens shows every name whole.
-  const longest = Math.max(`All clusters (${clusters().length})`.length, ...clusters().map((c) => c.name.length));
+  const longest = Math.max(ev ? 0 : `All clusters (${clusters().length})`.length, ...clusters().map((c) => c.name.length));
   sel.style.width = `${Math.min(26, Math.max(12, longest + 1))}ch`;
   resolveSelection(page);
   sel.value = state.selected;
@@ -574,10 +576,10 @@ function renderTopbar() {
     h('div.brand', h('img', { src: 'icons/icon48.png', alt: '' }),
       h('div', h('b', 'ElasticPro'))),
     h('h1', page.label),
-    // Evidence: the cluster is named, not offered. A picker's closed face shows one name but
-    // its options are every cluster, and the finder says how many there are.
-    ev ? (evCluster ? healthPill([evCluster]) : null)
-      : h('label.field', { style: { flexDirection: 'row', alignItems: 'center', gap: '6px' } }, pickDot(activeClusters()), sel, finder),
+    // Evidence: the same chooser, one cluster at a time — no "All clusters", no finder (its
+    // placeholder counts the fleet) and the dot is that cluster's, not the fleet's.
+    ev && !evCluster ? null
+      : h('label.field', { style: { flexDirection: 'row', alignItems: 'center', gap: '6px' } }, pickDot(ev ? [evCluster] : activeClusters()), sel, finder),
     h('div.spacer'),
     (() => {
       const need = needCreds.length;
@@ -797,9 +799,9 @@ function syncEvidence() {
 }
 
 /**
- * Asked for when an evidence page is open and no single cluster is selected. A page that
- * drew "All clusters" would be a screenshot of the fleet, which is exactly what this layout
- * exists to prevent; the choice is the person's, made here.
+ * Asked for when an evidence page is open and there is no cluster to pick at all (an empty
+ * config). With any cluster, resolveSelection() has already picked one and the top bar's
+ * chooser changes it; a page that drew "All clusters" would be a screenshot of the fleet.
  */
 function evidenceChooser() {
   const pick = h('select#evidence-pick', {
@@ -842,7 +844,17 @@ let fleetView = true;
  */
 let fleetChosen = false;
 
+/** The cluster last chosen in this browser (idb 'lastCluster'), kept here so a page can use it synchronously. */
+let lastCluster = '';
+
 function resolveSelection(page) {
+  // An evidence page shows one cluster: the one it was left on, else the one last chosen,
+  // else the first. fleetView is not touched, so a fleet page after it is "All clusters" again.
+  if (EVIDENCE_PAGES.has(page.id)) {
+    const pick = evidenceSelection(state.selected, lastCluster, clusters().map((c) => c.id));
+    if (pick) state.selected = pick;
+    return;
+  }
   if (!page.multi) {
     if (state.selected === 'all' && clusters()[0]) state.selected = clusters()[0].id;
     return;
@@ -936,6 +948,7 @@ async function start(config, handle) {
   // single cluster never asked for. defaults.defaultScope: 'all' restores the old start.
   if (!isSnapshotMode()) {
     const last = await idb.getKV('lastCluster');
+    if (typeof last === 'string') lastCluster = last;
     const open = openingSelection({ scope: normaliseScope(state.defaults.defaultScope), last, clusters: clusters() });
     if (open !== 'all') { state.selected = open; fleetView = false; }
   }
@@ -1001,6 +1014,8 @@ async function checkAcceptedCertificates() {
 async function gateOnAuth() {
   let st;
   try { st = await authState(); } catch (_) { return; }
+  // Hosted: credentials are kept encrypted by the server, typed once (core/server-credentials.js).
+  setHostedEdition(st.edition === 'hosted');
   if (!st.required) { me = null; return; }
   // A live session that must still change its password goes to the change screen, not
   // to a dashboard the core will refuse to fill.

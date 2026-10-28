@@ -62,11 +62,11 @@ test('where each rule lands on its page', () => {
 });
 
 test('an item narrows the target: this node, this index', () => {
-  const data = { disk: { nodes: [{ node: 'hot-1', 'disk.used': '92', 'disk.total': '100' }] }, ilmErrors: { 'logs-1': {} } };
+  const data = { disk: { nodes: [{ node: 'hot-1', 'disk.used': '92', 'disk.total': '100' }] }, ilm: { operation_mode: 'RUNNING' }, ilmErrors: { 'logstash-1': {} } };
   const disk = G.mergeAlerts([{ key: 'c1:disk', level: 'critical', cluster, title: 't', diskPercent: 92 }], { defaults: { diskWarnPercent: 85, diskCritPercent: 90 }, data: () => data })[0];
   assert.deepEqual(GOTO.gotoFor(disk, disk.items[0]).focus, { section: 'disk', node: 'hot-1' });
   const ilm = G.mergeAlerts([{ key: 'c1:ilm', level: 'warning', cluster, title: 't' }], { data: () => data })[0];
-  assert.deepEqual(GOTO.gotoFor(ilm, ilm.items[0]).focus, { ilm: true, index: 'logs-1' });
+  assert.deepEqual(GOTO.gotoFor(ilm, ilm.items[0]).focus, { ilm: true, index: 'logstash-1' });
 });
 
 test('a Zabbix problem opens in Zabbix, not in a page here', () => {

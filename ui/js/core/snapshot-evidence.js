@@ -13,6 +13,7 @@
 
 import { toCsv, csvEscape } from '../lib/fmt.js';
 import { compareNullLast } from '../lib/sort-order.js';
+import { spanDaysIso } from './volume.js';
 
 export const NO_DATE = 'no date in name';
 
@@ -196,4 +197,44 @@ export function safeUrl(u) {
   } catch (_) {
     return String(u).replace(/\/\/[^/@]*@/, '//');
   }
+}
+
+/* ------------------------- the repositories overview ------------------------- */
+
+/**
+ * Across every snapshot in the repository, the span of log days they hold between them.
+ *
+ * Distinct from when the snapshots ran: this is what could actually be restored, read
+ * from the dates in the index names each snapshot carries.
+ */
+export function recoverableRange(snaps) {
+  let from = null, to = null;
+  for (const s of snaps) {
+    if (s.coverFrom && (from === null || s.coverFrom < from)) from = s.coverFrom;
+    if (s.coverTo && (to === null || s.coverTo > to)) to = s.coverTo;
+  }
+  return { from, to, days: spanDaysIso(from, to) };
+}
+
+/**
+ * One repository's row on the Repositories view, from the same figures the snapshot list
+ * and the SLM table use. `snaps` is null until the listing has been read (unknown is not
+ * zero), `newest` is the listing's first row (it arrives newest first), and `span` is
+ * `recoverableRange` with `unknown` set when some rows came from `_cat` and name no indices.
+ */
+export function repoOverview(repo, snaps, policies = []) {
+  const list = Array.isArray(snaps) ? snaps : null;
+  const range = list ? recoverableRange(list) : { from: null, to: null, days: 0 };
+  return {
+    name: repo.name,
+    count: list ? list.length : null,
+    newest: list && list.length ? list[0] : null,
+    span: { ...range, unknown: !!list && list.some((s) => s.indexNames == null) },
+    policies: policies.filter((p) => p && p.policy && p.policy.repository === repo.name).map((p) => p.id),
+  };
+}
+
+/** The repository to show open: the one asked for, only while it is still registered. */
+export function openRepo(asked, repos) {
+  return asked && (repos || []).some((r) => r.name === asked) ? asked : null;
 }

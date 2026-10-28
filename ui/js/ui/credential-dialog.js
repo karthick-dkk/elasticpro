@@ -13,6 +13,7 @@ import {
 } from '../core/state.js';
 import { workerStatus, vaultGet, vaultSet, vaultDel } from '../core/es.js';
 import { toast } from './menu.js';
+import { credentialsKeptOnServer, keptCredentials, keptFor, keepCredential, DEFAULT_CREDENTIAL } from '../core/server-credentials.js';
 
 let open = false;
 
@@ -131,6 +132,16 @@ export function showCredentialDialog(reason = 'manual') {
     if (!cred) { ui.error = ui.mode === 'basic' ? 'Enter a username.' : 'Enter a value.'; return draw(); }
     ui.busy = true; ui.error = null; ui.results = null; draw();
 
+    // Hosted: the server keeps it, encrypted — as the default every cluster without its own
+    // uses, and as the own credential of a failing cluster that had one — so this is the last
+    // time anyone types it, on this page load or any other.
+    if (credentialsKeptOnServer()) {
+      try {
+        await keepCredential(DEFAULT_CREDENTIAL, cred);
+        const status = await keptCredentials();
+        for (const c of targets) if (keptFor(status, c.id)) await keepCredential(c.id, cred);
+      } catch (e) { ui.busy = false; ui.error = `The server did not keep it: ${e.message}`; return draw(); }
+    }
     await setSessionCredential(cred, { overrideAll: ui.overrideAll });
     if (ui.vault) {
       if (ui.remember) await vaultSet(vaultScope(), JSON.stringify(cred));
@@ -273,10 +284,10 @@ export function showCredentialDialog(reason = 'manual') {
         // be the one sentence on this dialog that is not true.
         ui.hosted
           ? h('div.cd-note',
-              h('b', 'Kept on the server. '),
-              'This credential is sent to the ElasticPro server, which uses it for everyone allowed to see this cluster, ',
-              'and keeps it in its data volume (primed.json, readable by the service only) so a restart does not need an admin to sign in again. ',
-              'It is not written to the config file and is never sent to anyone else’s browser.')
+              h('b', 'Kept encrypted on the server. '),
+              'The ElasticPro server keeps it as the default credential for every cluster without one of its own (AES-256-GCM, its own key), ',
+              'and uses it for everyone allowed to see those clusters — nobody is asked again, not on a page load and not after a restart. ',
+              'It is not written to the config file and is never sent back to any browser. Config → Credentials changes or forgets it.')
           : h('div.cd-note',
               h('b', 'Kept in memory. '),
               'This credential lives in the app process for as long as it is open and is not written to clusters.yaml. ',

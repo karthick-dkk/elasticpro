@@ -92,9 +92,9 @@ test('a node-level disk alert lists the nodes past the watermarks, and is titled
 });
 
 test('ILM errors list the indices the cluster reports', () => {
-  const data = { ilmErrors: { 'logs-2': { failed_step: 'rollover' }, 'logs-1': { step: 'ERROR' } } };
+  const data = { ilm: { operation_mode: 'RUNNING' }, ilmErrors: { 'logstash-2': { failed_step: 'rollover' }, 'logstash-1': { step: 'ERROR' } } };
   const [m] = G.mergeAlerts([alert(clusters.a, 'ilm', 'warning')], ctxFor({ data: () => data }));
-  assert.deepEqual(m.items.map((i) => [i.label, i.value]), [['logs-1', 'ERROR'], ['logs-2', 'rollover']]);
+  assert.deepEqual(m.items.map((i) => [i.label, i.value]), [['logstash-1', 'ERROR'], ['logstash-2', 'rollover']]);
   assert.equal(m.count, '2 indices');
 });
 

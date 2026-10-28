@@ -770,6 +770,12 @@ impl Core {
         let Ok(text) = std::fs::read_to_string(&p) else { return };
         match serde_json::from_str::<Value>(&text) {
             Ok(v) => {
+                // A primed.json written before 0.3.42 carries credentials in the clear: they are
+                // kept encrypted now, and the file is rewritten without them by the prime below.
+                let moved = self.keep_offered_credentials(&v, "primed.json");
+                if moved > 0 {
+                    tracing::warn!(moved, "primed.json held credentials in the clear; they are kept encrypted now and the file no longer has them");
+                }
                 let out = self.prime(v).await;
                 tracing::info!(clusters = out.get("count").and_then(|c| c.as_u64()).unwrap_or(0),
                                "restored the last cluster setup");
@@ -782,6 +788,10 @@ impl Core {
         if self.edition != Edition::Hosted {
             return;
         }
+        // `persist: false` meant "these were unlocked from sealed values; do not write them in
+        // the clear". Nothing secret is written any more, so the setup is always kept — which
+        // is what lets a restart come back without anyone typing a master password.
+        let persist = persist || self.edition == Edition::Hosted;
         let Some(p) = self.data_dir.as_ref().map(|d| d.join(PRIMED_FILE)) else { return };
         if !persist {
             let _ = std::fs::remove_file(&p);
@@ -791,6 +801,20 @@ impl Core {
         if let Some(m) = keep.as_object_mut() {
             m.remove("type");
             m.remove("session");
+            // No credential is ever written here (0.3.42): they are kept encrypted in
+            // cluster-secrets.json and resolved again at start. Only the decision "this
+            // cluster needs none" (an explicit empty header) is kept, since it is not a secret.
+            m.remove("sharedAuthHeader");
+            m.remove("shared_auth_header");
+            if let Some(list) = m.get_mut("clusters").and_then(|v| v.as_array_mut()) {
+                for c in list.iter_mut().filter_map(|c| c.as_object_mut()) {
+                    for k in ["authHeader", "auth_header"] {
+                        if c.get(k).and_then(|v| v.as_str()) != Some("") {
+                            c.remove(k);
+                        }
+                    }
+                }
+            }
         }
         let tmp = p.with_extension("json.tmp");
         if std::fs::write(&tmp, keep.to_string()).is_ok() {
@@ -1163,7 +1187,13 @@ impl Core {
             "KEY_UPLOAD" | "KEY_LIST" | "KEY_DELETE" => self.keys_msg(&t, &msg),
             "CONFIG_HISTORY" | "CONFIG_RESTORE" => self.history_msg(&t, &msg),
             "PING" => self.ping(caller.as_ref()).await,
-            "PRIME" => self.prime(msg).await,
+            "PRIME" => {
+                // Hosted: what this admin's browser still carries is kept encrypted first, so the
+                // core never needs it from a browser again (keep_offered_credentials).
+                self.keep_offered_credentials(&msg, caller.as_ref().map(|c| c.name.as_str()).unwrap_or("-"));
+                self.prime(msg).await
+            }
+            "CREDENTIAL_STATUS" | "CREDENTIAL_SET" | "CREDENTIAL_CLEAR" => self.credential_msg(&t, &msg, caller.as_ref()).await,
             "FORGET" => {
                 {
                     let mut p = self.primed.write();
@@ -2209,7 +2239,9 @@ impl Core {
         };
         let sees = |c: &Value| caller.is_none_or(|who| who.sees(&raw_groups(c)));
         let who = caller.map(|c| c.name.as_str()).unwrap_or("-");
-        let saved = match crate::cluster_save::apply(&mut found.raw, incoming, replace, &sees) {
+        let kept_own = |id: &str| self.edition == Edition::Hosted
+            && self.cluster_secrets.status(&crate::cluster_secrets::config_key(id)).is_some();
+        let saved = match crate::cluster_save::apply(&mut found.raw, incoming, replace, &sees, &kept_own) {
             Ok(s) => s,
             Err(r) => {
                 tracing::warn!(target: "audit", user = %who, kind = r.kind, reason = %r.message, "cluster save refused");
@@ -2297,9 +2329,18 @@ impl Core {
                     && o.tls.as_deref().map(|t| t.trim().to_ascii_lowercase()) == tls.as_deref().map(|t| t.trim().to_ascii_lowercase())
             });
             changed_address = old.is_some() && !same_address;
+            // Hosted: a credential of the cluster's own moves with a rename; the address cannot
+            // have changed for one (cluster_save::apply locks it), so it is still the right one.
+            if let Some(old_id) = old_id.as_deref().filter(|o| *o != id) {
+                self.move_kept_credential(old_id, &id);
+            }
+            let dest = destination_of(&url, via.as_deref(), tls.as_deref());
+            let own_kept = self.edition == Edition::Hosted
+                && self.cluster_secrets.header_at(&crate::cluster_secrets::config_key(&id), &dest).is_some();
             let auth_header = match (&old, same_address) {
+                _ if own_kept => { credential = "kept"; self.kept_header(&id, &dest) }
                 (Some(o), true) if o.auth_header.as_deref().is_some_and(|a| !a.is_empty()) => { credential = "kept"; o.auth_header.clone() }
-                _ if !own_cred => match p.shared_auth.clone() {
+                _ if !own_cred => match self.kept_header(&id, &dest).or_else(|| p.shared_auth.clone()) {
                     Some(h) => { credential = "shared"; Some(h) }
                     None => { credential = "none"; None }
                 },
@@ -2652,6 +2693,213 @@ impl Core {
         self.cluster_secrets.for_cluster(host, password_on_host)
     }
 
+    /* ------------------------ credentials kept on the server ------------------------ */
+
+    /// Hosted: the `Authorization` header the core uses for a config cluster — the credential
+    /// kept for it, else the default every cluster shares (`"*"`, the same default Zabbix
+    /// hands over). The one definition: PRIME, a saved cluster and CREDENTIAL_SET all use it.
+    ///
+    /// The cluster's own is used only at the destination it was kept for: one left behind by a
+    /// removed cluster does not follow the name to an address somebody else chose.
+    fn kept_header(&self, id: &str, destination: &str) -> Option<String> {
+        if self.edition != Edition::Hosted {
+            return None;
+        }
+        self.cluster_secrets.header_at(&crate::cluster_secrets::config_key(id), destination)
+            .or_else(|| self.cluster_secrets.header_for(crate::cluster_secrets::DEFAULT))
+    }
+
+    /// Keep one header under `key`: a `Basic` one as its username and password (so the status
+    /// can name the user), anything else whole.
+    fn keep_header(&self, key: &str, header: &str, bound: &str, by: &str) -> Result<(), String> {
+        let h = header.trim();
+        if let Some(b64) = h.strip_prefix("Basic ") {
+            use base64::Engine as _;
+            if let Some((user, pass)) = base64::engine::general_purpose::STANDARD.decode(b64.trim()).ok()
+                .and_then(|b| String::from_utf8(b).ok())
+                .and_then(|t| t.split_once(':').map(|(u, p)| (u.to_string(), p.to_string())))
+            {
+                return self.cluster_secrets.set_bound(key, &user, &pass, bound, by, crate::auth::now());
+            }
+        }
+        self.cluster_secrets.set_header_bound(key, h, bound, by, crate::auth::now())
+    }
+
+    /// Hosted: credentials an admin's browser still carries — from a config file (plain, or
+    /// unlocked with the master password), or typed this session — kept encrypted the first time
+    /// the core sees them, so no page load, nobody's, and no restart needs them typed again.
+    ///
+    /// Only where nothing is kept yet: a credential set on the server is newer than one left in
+    /// a file. A cluster's header equal to the shared one is the shared one, not its own, so it
+    /// becomes the default rather than a copy per cluster that a new default would not reach.
+    /// Returns how many were kept.
+    fn keep_offered_credentials(&self, msg: &Value, by: &str) -> usize {
+        if self.edition != Edition::Hosted {
+            return 0;
+        }
+        let Ok(p) = serde_json::from_value::<PrimeMsg>(msg.clone()) else { return 0 };
+        use crate::cluster_secrets::{config_key, DEFAULT};
+        let mut kept = 0;
+        let shared = p.shared_auth_header.as_deref().map(str::trim).filter(|h| !h.is_empty());
+        if let Some(h) = shared {
+            if self.cluster_secrets.status(DEFAULT).is_none() {
+                match self.keep_header(DEFAULT, h, "", by) {
+                    Ok(()) => kept += 1,
+                    Err(why) => tracing::warn!(error = %why, "the shared credential could not be kept on the server"),
+                }
+            }
+        }
+        let default = self.cluster_secrets.header_for(DEFAULT);
+        for c in &p.clusters {
+            let Some(h) = c.auth_header.as_deref().map(str::trim).filter(|h| !h.is_empty()) else { continue };
+            if Some(h) == shared || default.as_deref() == Some(h) {
+                continue;
+            }
+            let key = config_key(&c.id);
+            if self.cluster_secrets.status(&key).is_some() {
+                continue;
+            }
+            match self.keep_header(&key, h, &spec_destination(c), by) {
+                Ok(()) => kept += 1,
+                Err(why) => tracing::warn!(cluster = %c.id, error = %why, "a cluster credential could not be kept on the server"),
+            }
+        }
+        if kept > 0 {
+            tracing::info!(target: "audit", user = %by, kept, "credentials kept encrypted on the server");
+        }
+        kept
+    }
+
+    /// Move a kept credential from one cluster id to another (a rename).
+    fn move_kept_credential(&self, from: &str, to: &str) {
+        use crate::cluster_secrets::config_key;
+        let (src, dst) = (config_key(from), config_key(to));
+        if self.cluster_secrets.status(&dst).is_some() {
+            return;
+        }
+        if let Ok(true) = self.cluster_secrets.rename(&src, &dst) {
+            tracing::info!(target: "audit", from, to, "kept credential moved with the cluster's new name");
+        }
+    }
+
+    /// Ids that disappear from the setup while a new id arrives at the same address (a cluster
+    /// renamed in the config file): the credential kept under the old id moves to the new one.
+    fn move_kept_credentials(&self, before: &HashMap<String, ClusterSpec>, incoming: &[ClusterSpec]) {
+        let now_ids: std::collections::HashSet<&str> = incoming.iter().map(|c| c.id.as_str()).collect();
+        let addr = |u: &str| u.trim_end_matches('/').to_ascii_lowercase();
+        for gone in before.values().filter(|o| !now_ids.contains(o.id.as_str())) {
+            let same: Vec<&ClusterSpec> = incoming.iter()
+                .filter(|c| !before.contains_key(&c.id) && addr(&c.url) == addr(&gone.url) && c.via == gone.via).collect();
+            if let [only] = same.as_slice() {
+                self.move_kept_credential(&gone.id, &only.id);
+            }
+        }
+    }
+
+    /// Re-apply the kept credentials to everything polled now, after one was set or cleared.
+    async fn apply_kept_credentials(self: &Arc<Self>) {
+        {
+            let mut p = self.primed.write();
+            let ids: Vec<String> = p.clusters.keys().cloned().collect();
+            for id in ids {
+                let header = p.clusters.get(&id).and_then(|c| self.kept_header(&id, &spec_destination(c)));
+                if let Some(c) = p.clusters.get_mut(&id) {
+                    if c.auth_header.as_deref() != Some("") {
+                        c.auth_header = header;
+                    }
+                }
+            }
+            p.shared_auth = self.cluster_secrets.header_for(crate::cluster_secrets::DEFAULT);
+        }
+        self.read_cache.clear();
+        self.forget_connections();
+        self.persist_current_prime().await;
+    }
+
+    /// `CREDENTIAL_STATUS` / `CREDENTIAL_SET` / `CREDENTIAL_CLEAR` (admin, hosted): the
+    /// credentials the server keeps for its config clusters, and the default every cluster
+    /// without one of its own uses. Set once; never read back — the status says who set what
+    /// and when, and for which username.
+    async fn credential_msg(self: &Arc<Self>, t: &str, msg: &Value, caller: Option<&Caller>) -> Value {
+        use crate::cluster_secrets::{CONFIG_PREFIX, DEFAULT};
+        if self.edition != Edition::Hosted {
+            return json!({ "ok": false, "kind": "not_available",
+                           "message": "credentials are kept on the server only in the hosted build; this one keeps them in the config file" });
+        }
+        let who = caller.map(|c| c.name.as_str()).unwrap_or("-");
+        let dests: HashMap<String, String> = self.primed.read().clusters.iter().map(|(id, c)| (id.clone(), spec_destination(c))).collect();
+        let line = |l: &crate::cluster_secrets::Listed, id: &str| json!({
+            "id": id, "user": l.user, "kind": if l.user.is_some() { "basic" } else { "header" },
+            "setBy": l.set_by, "setAt": l.set_at,
+            // Kept for an address the cluster no longer has: not used until it is typed again.
+            "moved": !l.bound.is_empty() && dests.get(id).is_some_and(|d| *d != l.bound),
+        });
+        if t == "CREDENTIAL_STATUS" {
+            let list = self.cluster_secrets.list();
+            let default = list.iter().find(|l| l.name == DEFAULT).map(|l| line(l, DEFAULT));
+            let clusters: Vec<Value> = list.iter()
+                .filter_map(|l| l.name.strip_prefix(CONFIG_PREFIX).map(|id| line(l, id))).collect();
+            return json!({ "ok": true, "default": default, "clusters": clusters, "problem": self.cluster_secrets.problem() });
+        }
+        let Some(cluster) = msg.get("cluster").and_then(|v| v.as_str()).map(str::trim).filter(|c| !c.is_empty()) else {
+            return json!({ "ok": false, "kind": "bad_message", "message": "say which cluster (its id), or \"*\" for the default" });
+        };
+        let key = if cluster == DEFAULT { DEFAULT.to_string() } else { crate::cluster_secrets::config_key(cluster) };
+        if t == "CREDENTIAL_CLEAR" {
+            return match self.cluster_secrets.remove(&key) {
+                Ok(had) => {
+                    tracing::info!(target: "audit", user = %who, cluster, had, "kept credential cleared");
+                    self.apply_kept_credentials().await;
+                    json!({ "ok": true, "cluster": cluster, "cleared": had })
+                }
+                Err(why) => json!({ "ok": false, "kind": "io_error", "message": format!("could not clear it: {why}") }),
+            };
+        }
+        // A cluster's own is bound to where it is polled now; the default to nowhere in particular.
+        let bound = if cluster == DEFAULT {
+            String::new()
+        } else {
+            match dests.get(cluster) {
+                Some(d) => d.clone(),
+                None => return json!({ "ok": false, "kind": "not_found",
+                                       "message": format!("no cluster the server polls has the id {cluster:?} — save the cluster first") }),
+            }
+        };
+        if msg.get("rebind").and_then(|v| v.as_bool()) == Some(true) {
+            if cluster == DEFAULT {
+                return json!({ "ok": false, "kind": "bad_message", "message": "the default is not bound to an address" });
+            }
+            return match self.cluster_secrets.rebind(&key, &bound, who, crate::auth::now()) {
+                Ok(true) => {
+                    tracing::info!(target: "audit", user = %who, cluster, "kept credential bound to the cluster's new address");
+                    self.apply_kept_credentials().await;
+                    json!({ "ok": true, "cluster": cluster, "rebound": true })
+                }
+                Ok(false) => json!({ "ok": false, "kind": "not_found", "message": "no credential is kept for that cluster" }),
+                Err(why) => json!({ "ok": false, "kind": "io_error", "message": why }),
+            };
+        }
+        let text = |k: &str| msg.get(k).and_then(|v| v.as_str()).unwrap_or("");
+        let now = crate::auth::now();
+        let result = if !text("apiKey").trim().is_empty() {
+            self.cluster_secrets.set_header_bound(&key, &format!("ApiKey {}", text("apiKey").trim()), &bound, who, now)
+        } else if !text("bearer").trim().is_empty() {
+            self.cluster_secrets.set_header_bound(&key, &format!("Bearer {}", text("bearer").trim()), &bound, who, now)
+        } else if text("username").trim().is_empty() || text("password").is_empty() {
+            return json!({ "ok": false, "kind": "bad_message", "message": "a username and a password (or an API key, or a bearer token) are needed" });
+        } else {
+            self.cluster_secrets.set_bound(&key, text("username").trim(), text("password"), &bound, who, now)
+        };
+        match result {
+            Ok(()) => {
+                tracing::info!(target: "audit", user = %who, cluster, "credential kept encrypted on the server");
+                self.apply_kept_credentials().await;
+                json!({ "ok": true, "cluster": cluster, "setAt": crate::auth::now() })
+            }
+            Err(why) => json!({ "ok": false, "kind": "invalid", "message": why }),
+        }
+    }
+
     fn zabbix_sso_role_answer(&self, claim: &[u8], signature: &str, source: Option<std::net::IpAddr>) -> (u16, Value, Option<(u64, String)>) {
         if self.edition != Edition::Hosted {
             return (404, json!({ "ok": false, "message": "not available in this build" }), None);
@@ -2755,7 +3003,30 @@ impl Core {
             // A different URL never inherits: that would be sending a credential somewhere
             // nobody gave it to. An explicit empty string is "no credential, on purpose"
             // (continue anonymously, forget the credential) and is kept as sent.
+            let hosted = self.edition == Edition::Hosted;
+            if hosted {
+                // A cluster renamed in the file arrives under a new id: the credential kept for
+                // it moves with it when nothing else claims that address.
+                self.move_kept_credentials(&cur.clusters, &incoming);
+            }
             for c in incoming.iter_mut() {
+                // "None, on purpose" (an explicit empty header) is a decision a config file does
+                // not record; the next page load sends nothing and the decision stands.
+                if hosted && c.auth_header.is_none() {
+                    if let Some(old) = cur.clusters.get(&c.id) {
+                        if old.auth_header.as_deref() == Some("") && old.url.trim_end_matches('/') == c.url.trim_end_matches('/') {
+                            c.auth_header = Some(String::new());
+                        }
+                    }
+                }
+                // Hosted: the server's kept credential is the one used — the cluster's own, else
+                // the default — whatever this page sent, unless the page says "none, on purpose".
+                if hosted && c.auth_header.as_deref() != Some("") {
+                    if let Some(h) = self.kept_header(&c.id, &spec_destination(c)) {
+                        c.auth_header = Some(h);
+                        continue;
+                    }
+                }
                 if c.auth_header.is_none() {
                     if let Some(old) = cur.clusters.get(&c.id) {
                         if old.url.trim_end_matches('/') == c.url.trim_end_matches('/') {
@@ -2772,6 +3043,11 @@ impl Core {
                 None => {}
                 Some("") => cur.shared_auth = None,
                 Some(h) => cur.shared_auth = Some(h.to_string()),
+            }
+            if hosted {
+                if let Some(h) = self.cluster_secrets.header_for(crate::cluster_secrets::DEFAULT) {
+                    cur.shared_auth = Some(h);
+                }
             }
             let mut held: Vec<String> = cur.clusters.values()
                 .filter(|c| c.auth_header.as_deref().is_some_and(|a| !a.is_empty()))
@@ -4278,6 +4554,18 @@ impl Core {
             Err(e) => (e.status(), json!({ "ok": false, "kind": e.kind(), "message": e.public_message() })),
         }
     }
+}
+
+/// Where a config cluster's requests go — address, route and certificate setting — as one
+/// string. A cluster's own kept credential is bound to it (`cluster_secrets::Entry::bound`), so it
+/// is only ever sent where it was set for; the same three things `cluster_save::destination` locks.
+pub(crate) fn destination_of(url: &str, via: Option<&str>, tls: Option<&str>) -> String {
+    format!("{}|{}|{}", url.trim().trim_end_matches('/').to_ascii_lowercase(), via.unwrap_or("").trim(),
+            tls.unwrap_or("auto").trim().to_ascii_lowercase())
+}
+
+fn spec_destination(c: &ClusterSpec) -> String {
+    destination_of(&c.url, c.via.as_deref(), c.tls.as_deref())
 }
 
 /// `Basic <base64 user:password>`.

@@ -216,7 +216,11 @@ fn credential_parts(old: &Value) -> Map<String, Value> {
 ///
 /// `replace` names the cluster being edited (its name before the edit); `None` adds one.
 /// `sees` is the caller's scope: an entry it does not see is, to this caller, not there.
-pub fn apply(raw: &mut Value, incoming: &Value, replace: Option<&str>, sees: &dyn Fn(&Value) -> bool) -> Result<Saved, Refusal> {
+/// `kept_own(id)` says whether the server keeps a credential of this cluster's own (hosted,
+/// `cluster_secrets`) — such a cluster keeps its destination exactly like one whose credential
+/// is in the file, or an operator could send that credential anywhere by editing the address.
+pub fn apply(raw: &mut Value, incoming: &Value, replace: Option<&str>, sees: &dyn Fn(&Value) -> bool,
+             kept_own: &dyn Fn(&str) -> bool) -> Result<Saved, Refusal> {
     if !raw.is_object() {
         return Err(Refusal::new("parse_error", "the config file is not a mapping"));
     }
@@ -256,7 +260,8 @@ pub fn apply(raw: &mut Value, incoming: &Value, replace: Option<&str>, sees: &dy
     let (action, was, before) = match pos {
         Some(i) => {
             let old = list[i].clone();
-            if !credential_parts(&old).is_empty() && destination(&old) != destination(&Value::Object(entry.clone())) {
+            let own = !credential_parts(&old).is_empty() || name_of(&old).is_some_and(|n| kept_own(&cluster_id(n)));
+            if own && destination(&old) != destination(&Value::Object(entry.clone())) {
                 return Err(Refusal::new("credential_refused",
                     "this cluster signs in with a credential of its own, so only an administrator changes its address, its route or its certificate setting — everything else about it you may change"));
             }
@@ -339,11 +344,12 @@ mod tests {
         })
     }
     const ALL: &dyn Fn(&Value) -> bool = &|_| true;
+    const NONE_KEPT: &dyn Fn(&str) -> bool = &|_| false;
 
     #[test]
     fn adding_a_cluster_appends_it_without_a_credential() {
         let mut raw = cfg();
-        let s = apply(&mut raw, &json!({ "name": "Gamma", "url": "https://gamma:9200/", "_index": 7, "note": "new" }), None, ALL).unwrap();
+        let s = apply(&mut raw, &json!({ "name": "Gamma", "url": "https://gamma:9200/", "_index": 7, "note": "new" }), None, ALL, NONE_KEPT).unwrap();
         assert_eq!((s.action, s.name.as_str(), s.was.clone()), ("added", "Gamma", None));
         let list = raw["clusters"].as_array().unwrap();
         assert_eq!(list.len(), 3);
@@ -355,7 +361,7 @@ mod tests {
     fn editing_keeps_the_credential_the_operator_never_saw() {
         let mut raw = cfg();
         // What CONFIG_VIEW showed of Alpha, with the tags changed and the note dropped.
-        let s = apply(&mut raw, &json!({ "name": "Alpha", "url": "https://alpha:9200", "via": "jumpa", "_index": 0, "liveRetention": "30d" }), Some("Alpha"), ALL).unwrap();
+        let s = apply(&mut raw, &json!({ "name": "Alpha", "url": "https://alpha:9200", "via": "jumpa", "_index": 0, "liveRetention": "30d" }), Some("Alpha"), ALL, NONE_KEPT).unwrap();
         assert_eq!((s.action, s.was.as_deref()), ("edited", Some("Alpha")));
         let a = &raw["clusters"][0];
         assert_eq!(a["username"], json!("alpha-svc"));
@@ -367,27 +373,39 @@ mod tests {
     }
 
     #[test]
+    fn a_cluster_whose_own_credential_the_server_keeps_keeps_its_address() {
+        // Gamma has nothing in the file, but the hosted core keeps a password of its own for it.
+        let mut raw = json!({ "clusters": [ { "name": "Gamma", "url": "https://gamma:9200" } ] });
+        let kept: &dyn Fn(&str) -> bool = &|id| id == "gamma";
+        let r = apply(&mut raw, &json!({ "name": "Gamma", "url": "https://elsewhere:9200" }), Some("Gamma"), ALL, kept).unwrap_err();
+        assert_eq!(r.kind, "credential_refused");
+        apply(&mut raw, &json!({ "name": "Gamma", "url": "https://gamma:9200", "note": "other fields still change" }), Some("Gamma"), ALL, kept).unwrap();
+        // Without a kept credential of its own (the default applies) the address may change.
+        apply(&mut raw, &json!({ "name": "Gamma", "url": "https://elsewhere:9200" }), Some("Gamma"), ALL, NONE_KEPT).unwrap();
+    }
+
+    #[test]
     fn a_cluster_with_its_own_credential_keeps_its_address() {
         let mut raw = cfg();
-        let r = apply(&mut raw, &json!({ "name": "Alpha", "url": "https://alpha-new:9200" }), Some("Alpha"), ALL).unwrap_err();
+        let r = apply(&mut raw, &json!({ "name": "Alpha", "url": "https://alpha-new:9200" }), Some("Alpha"), ALL, NONE_KEPT).unwrap_err();
         assert_eq!(r.kind, "credential_refused");
         assert_eq!(raw, cfg(), "nothing moved");
         // Spelled differently, the same address: not a move.
-        apply(&mut raw, &json!({ "name": "Alpha", "url": "HTTPS://alpha:9200/", "via": "jumpa" }), Some("Alpha"), ALL).unwrap();
+        apply(&mut raw, &json!({ "name": "Alpha", "url": "HTTPS://alpha:9200/", "via": "jumpa" }), Some("Alpha"), ALL, NONE_KEPT).unwrap();
         assert_eq!(raw["clusters"][0]["url"], json!("https://svc:pw@alpha:9200"), "and the URL's credential comes back");
         // Nor its route or its certificate setting: both decide where and how the credential travels.
         for moved in [json!({ "name": "Alpha", "url": "https://alpha:9200" }),                      // via dropped
                       json!({ "name": "Alpha", "url": "https://alpha:9200", "jump": "jumpa", "tls": "insecure" })] {
             let mut raw = cfg();
-            assert_eq!(apply(&mut raw, &moved, Some("Alpha"), ALL).unwrap_err().kind, "credential_refused", "{moved}");
+            assert_eq!(apply(&mut raw, &moved, Some("Alpha"), ALL, NONE_KEPT).unwrap_err().kind, "credential_refused", "{moved}");
         }
         let mut raw = cfg();
-        apply(&mut raw, &json!({ "name": "Alpha", "url": "https://alpha:9200", "jump": "jumpa", "note": "same route, other key" }), Some("Alpha"), ALL).unwrap();
+        apply(&mut raw, &json!({ "name": "Alpha", "url": "https://alpha:9200", "jump": "jumpa", "note": "same route, other key" }), Some("Alpha"), ALL, NONE_KEPT).unwrap();
         assert_eq!(raw["clusters"][0]["note"], json!("same route, other key"));
         // A cluster on the shared credential moves freely.
         let mut raw = cfg();
         raw["clusters"][1] = json!({ "name": "Beta", "url": "https://beta:9200" });
-        apply(&mut raw, &json!({ "name": "Beta", "url": "https://beta-new:9200", "via": "jumpa", "tls": "insecure" }), Some("Beta"), ALL).unwrap();
+        apply(&mut raw, &json!({ "name": "Beta", "url": "https://beta-new:9200", "via": "jumpa", "tls": "insecure" }), Some("Beta"), ALL, NONE_KEPT).unwrap();
         assert_eq!(raw["clusters"][1]["url"], json!("https://beta-new:9200"));
     }
 
@@ -395,11 +413,11 @@ mod tests {
     fn a_name_that_is_another_clusters_id_is_taken() {
         let mut raw = cfg();
         for name in ["alpha", "ALPHA", "Alpha!", " alpha "] {
-            let r = apply(&mut raw, &json!({ "name": name, "url": "https://x:9200" }), None, ALL).unwrap_err();
+            let r = apply(&mut raw, &json!({ "name": name, "url": "https://x:9200" }), None, ALL, NONE_KEPT).unwrap_err();
             assert_eq!(r.kind, "name_taken", "{name:?}");
             assert!(r.message.contains("same cluster"), "{}", r.message);
         }
-        let r = apply(&mut raw, &json!({ "name": "beta", "url": "https://x:9200" }), Some("Alpha"), ALL).unwrap_err();
+        let r = apply(&mut raw, &json!({ "name": "beta", "url": "https://x:9200" }), Some("Alpha"), ALL, NONE_KEPT).unwrap_err();
         assert_eq!(r.kind, "name_taken", "a rename onto another's id");
         assert_eq!(raw, cfg());
         assert_eq!(cluster_id("Alpha Prod (EU)"), "alpha-prod-eu");
@@ -409,12 +427,12 @@ mod tests {
     #[test]
     fn renaming_and_disabling_are_edits() {
         let mut raw = cfg();
-        let s = apply(&mut raw, &json!({ "name": "Beta-2", "url": "https://beta:9200", "enabled": false }), Some("Beta"), ALL).unwrap();
+        let s = apply(&mut raw, &json!({ "name": "Beta-2", "url": "https://beta:9200", "enabled": false }), Some("Beta"), ALL, NONE_KEPT).unwrap();
         assert_eq!((s.name.as_str(), s.was.as_deref()), ("Beta-2", Some("Beta")));
         assert_eq!(raw["clusters"][1]["enabled"], json!(false));
         assert_eq!(raw["clusters"][1]["password"], json!("enc:v1:sealed"), "a sealed value is kept");
         let mut raw = cfg();
-        apply(&mut raw, &json!({ "name": "Beta", "url": "https://beta:9200", "enabled": true }), Some("Beta"), ALL).unwrap();
+        apply(&mut raw, &json!({ "name": "Beta", "url": "https://beta:9200", "enabled": true }), Some("Beta"), ALL, NONE_KEPT).unwrap();
         assert!(raw["clusters"][1].get("enabled").is_none(), "enabled: true is the default and is not written");
     }
 
@@ -430,7 +448,7 @@ mod tests {
             json!({ "name": "X", "url": "https://u:p@x:9200" }),
         ] {
             let mut raw = cfg();
-            let r = apply(&mut raw, &bad, None, ALL).unwrap_err();
+            let r = apply(&mut raw, &bad, None, ALL, NONE_KEPT).unwrap_err();
             assert_eq!(r.kind, "credential_refused", "{bad}");
             assert_eq!(raw, cfg(), "nothing changed: {bad}");
         }
@@ -439,11 +457,11 @@ mod tests {
     #[test]
     fn nothing_is_ever_removed_and_names_stay_unique() {
         let mut raw = cfg();
-        let r = apply(&mut raw, &json!({ "name": "Beta", "url": "https://x:9200" }), None, ALL).unwrap_err();
+        let r = apply(&mut raw, &json!({ "name": "Beta", "url": "https://x:9200" }), None, ALL, NONE_KEPT).unwrap_err();
         assert_eq!(r.kind, "name_taken");
-        let r = apply(&mut raw, &json!({ "name": "Beta", "url": "https://x:9200" }), Some("Alpha"), ALL).unwrap_err();
+        let r = apply(&mut raw, &json!({ "name": "Beta", "url": "https://x:9200" }), Some("Alpha"), ALL, NONE_KEPT).unwrap_err();
         assert_eq!(r.kind, "name_taken", "renaming onto another cluster's name");
-        let r = apply(&mut raw, &json!({ "name": "Zeta", "url": "https://x:9200" }), Some("Nope"), ALL).unwrap_err();
+        let r = apply(&mut raw, &json!({ "name": "Zeta", "url": "https://x:9200" }), Some("Nope"), ALL, NONE_KEPT).unwrap_err();
         assert_eq!(r.kind, "not_found");
         assert_eq!(raw, cfg());
     }
@@ -452,11 +470,11 @@ mod tests {
     fn a_scoped_caller_cannot_edit_what_it_does_not_see() {
         let mut raw = cfg();
         let only_beta: &dyn Fn(&Value) -> bool = &|c| c["name"] == json!("Beta");
-        let r = apply(&mut raw, &json!({ "name": "Alpha", "url": "https://alpha:9200" }), Some("Alpha"), only_beta).unwrap_err();
+        let r = apply(&mut raw, &json!({ "name": "Alpha", "url": "https://alpha:9200" }), Some("Alpha"), only_beta, NONE_KEPT).unwrap_err();
         assert_eq!(r.kind, "not_found");
-        assert!(apply(&mut raw, &json!({ "name": "Beta", "url": "https://beta:9200" }), Some("Beta"), only_beta).is_ok());
+        assert!(apply(&mut raw, &json!({ "name": "Beta", "url": "https://beta:9200" }), Some("Beta"), only_beta, NONE_KEPT).is_ok());
         // Nor learn its name from a collision.
-        let r = apply(&mut raw, &json!({ "name": "alpha", "url": "https://x:9200" }), None, only_beta).unwrap_err();
+        let r = apply(&mut raw, &json!({ "name": "alpha", "url": "https://x:9200" }), None, only_beta, NONE_KEPT).unwrap_err();
         assert_eq!(r.kind, "name_taken");
         assert!(!r.message.contains("Alpha") && r.message.contains("\"alpha\""), "{}", r.message);
     }
@@ -480,12 +498,12 @@ mod tests {
             (json!({ "name": "X", "url": "https://x:9200", "note": 7 }), "a note that is not text"),
             (json!("X"), "not an object"),
         ] {
-            let r = apply(&mut raw, &bad, None, ALL).unwrap_err();
+            let r = apply(&mut raw, &bad, None, ALL, NONE_KEPT).unwrap_err();
             assert_eq!(r.kind, "bad_message", "{why}");
         }
         assert_eq!(raw, cfg());
         // What is accepted is written in one spelling.
-        apply(&mut raw, &json!({ "name": "X", "url": "https://x:9200", "tls": " Insecure ", "via": " jumpa ", "tags": ["a"] }), None, ALL).unwrap();
+        apply(&mut raw, &json!({ "name": "X", "url": "https://x:9200", "tls": " Insecure ", "via": " jumpa ", "tags": ["a"] }), None, ALL, NONE_KEPT).unwrap();
         assert_eq!(raw["clusters"][2]["tls"], json!("insecure"));
         assert_eq!(raw["clusters"][2]["via"], json!("jumpa"));
     }
@@ -513,11 +531,11 @@ mod tests {
     #[test]
     fn an_older_file_with_hosts_and_no_jump_hosts_works_too() {
         let mut raw = json!({ "hosts": [{ "name": "Old", "url": "https://old:9200" }] });
-        apply(&mut raw, &json!({ "name": "New", "url": "https://new:9200" }), None, ALL).unwrap();
+        apply(&mut raw, &json!({ "name": "New", "url": "https://new:9200" }), None, ALL, NONE_KEPT).unwrap();
         assert_eq!(raw["hosts"].as_array().unwrap().len(), 2);
         assert!(raw.get("clusters").is_none());
         let mut raw = json!({ "defaults": {} });
-        apply(&mut raw, &json!({ "name": "First", "url": "https://first:9200" }), None, ALL).unwrap();
+        apply(&mut raw, &json!({ "name": "First", "url": "https://first:9200" }), None, ALL, NONE_KEPT).unwrap();
         assert_eq!(raw["clusters"][0]["name"], json!("First"));
     }
 }
