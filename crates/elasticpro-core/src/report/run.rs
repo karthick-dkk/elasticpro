@@ -228,7 +228,7 @@ impl Core {
         let seen = self.report_visible(caller);
         let q = self.reports.queue.lock();
         let mut jobs: Vec<&Job> = q.jobs.iter().filter(|j| seen(j)).collect();
-        jobs.sort_by(|a, b| b.seq.cmp(&a.seq));
+        jobs.sort_by_key(|j| std::cmp::Reverse(j.seq));
         json!({ "ok": true, "jobs": jobs.into_iter().map(job_view).collect::<Vec<_>>(),
                 "concurrency": q.concurrency, "running": q.running(), "queued": q.queued() })
     }
@@ -415,9 +415,9 @@ impl Core {
     /// job's progress so far (days done, days counted), for a job over several clusters.
     /// `Ok((warning, searched, total))`, or how the job ends.
     async fn report_collect(self: &Arc<Self>, job_id: &str, cluster: &str, s: &VolumeSettings, p: &Period, acc: (u64, u64))
-        -> Result<(Option<String>, u64, u64), JobEnd>
+        -> Result<(Option<String>, u64, u64), Box<JobEnd>>
     {
-        let Some(store) = self.volume.store.as_ref() else { return Err(JobEnd::failed("no data directory")) };
+        let Some(store) = self.volume.store.as_ref() else { return Err(Box::new(JobEnd::failed("no data directory"))) };
         let today = vsched::utc_day(now_ms());
         if record_complete(store, cluster, p, today) {
             return Ok((None, 0, 0));
@@ -426,14 +426,14 @@ impl Core {
             return Ok((Some(format!("{cluster} is no longer configured: the file has what the record already held")), 0, 0));
         }
         if self.volume_stopped() {
-            return Err(JobEnd::held("the emergency stop is on: nothing was sent to the cluster and no day was collected; run the report again when the stop is over"));
+            return Err(Box::new(JobEnd::held("the emergency stop is on: nothing was sent to the cluster and no day was collected; run the report again when the stop is over")));
         }
         if self.volume_unreachable(cluster) {
             return Ok((Some(format!("{cluster} is unreachable: the file has what the record already held")), 0, 0));
         }
         let stopped = |me: &Self| me.report_stop_asked(job_id).unwrap_or_default();
-        let Some(_slot) = self.report_claim(cluster, job_id).await else { return Err(JobEnd::stopped(stopped(self))) };
-        let Some(_permit) = self.report_permit(job_id).await else { return Err(JobEnd::stopped(stopped(self))) };
+        let Some(_slot) = self.report_claim(cluster, job_id).await else { return Err(Box::new(JobEnd::stopped(stopped(self)))) };
+        let Some(_permit) = self.report_permit(job_id).await else { return Err(Box::new(JobEnd::stopped(stopped(self)))) };
         let stop = || {
             self.report_stop_asked(job_id).map(|by| format!("stopped by {by}"))
                 .or_else(|| self.volume_stopped().then(|| "the emergency stop came on".to_string()))
@@ -445,12 +445,12 @@ impl Core {
         let to = p.to_date().min(today);
         let opts = CollectOpts { origin: "volume-report", period: Some((p.from_date(), to)), stop: &stop, progress: &progress, prune: false };
         let got = self.volume_collect(cluster, s, &opts).await
-            .map_err(|e| if self.volume_stopped() { JobEnd::held(e) } else { JobEnd::failed(e) })?;
+            .map_err(|e| Box::new(if self.volume_stopped() { JobEnd::held(e) } else { JobEnd::failed(e) }))?;
         if let Some(why) = got.interrupted {
             if let Some(by) = self.report_stop_asked(job_id) {
-                return Err(JobEnd::stopped(by));
+                return Err(Box::new(JobEnd::stopped(by)));
             }
-            return Err(JobEnd::held(format!("{cluster}: {why} after {} of {} days; run the report again when the stop is over", got.searched, got.total)));
+            return Err(Box::new(JobEnd::held(format!("{cluster}: {why} after {} of {} days; run the report again when the stop is over", got.searched, got.total))));
         }
         Ok((got.error.map(|e| format!("{cluster}: {e}")), got.searched, got.total))
     }
@@ -475,7 +475,7 @@ impl Core {
         let s = self.volume_resolve(raw.as_ref(), Some(&job.cluster_id), msg.as_ref()).settings;
         let warning = match self.report_collect(&job.id, &job.cluster_id, &s, &job.period, (0, 0)).await {
             Ok((w, _, _)) => w,
-            Err(end) => return end,
+            Err(end) => return *end,
         };
         if let Some(by) = self.report_stop_asked(&job.id) {
             return JobEnd::stopped(by);
@@ -539,7 +539,7 @@ impl Core {
                 }
                 // A person's stop ends the job; the emergency stop fails it (and the
                 // schedule tries again when the stop is over).
-                Err(end) if end.status == Status::Stopped || end.retry => return end,
+                Err(end) if end.status == Status::Stopped || end.retry => return *end,
                 // One cluster that could not be collected does not cost the others their
                 // report: its sheets hold what the record has, and the job says so.
                 Err(end) => warnings.push(format!("{id}: {}; its sheets hold what the record already had",

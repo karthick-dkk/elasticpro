@@ -202,20 +202,21 @@ function draw() {
  * daily record the core keeps (VOLUME_MONTHLY_ALL, docs/VOLUME.md). A month with no record
  * is "—", never 0. The figures are the core's; this lays them out.
  */
-const monthlyAll = { rev: 0, loading: false, reply: null, error: null, unsupported: false };
+const monthlyAll = { rev: 0, loading: false, reply: null, error: null, unsupported: false, noStore: false };
 const MONTHLY_ALL_MONTHS = 13;
 
 function reaskMonthlyAll() {
-  Object.assign(monthlyAll, { loading: false, reply: null, error: null, unsupported: false });
+  Object.assign(monthlyAll, { loading: false, reply: null, error: null, unsupported: false, noStore: false });
   monthlyAll.rev++;
 }
 
 async function loadMonthlyAll() {
-  if (monthlyAll.loading || monthlyAll.reply || monthlyAll.error || monthlyAll.unsupported) return;
+  if (monthlyAll.loading || monthlyAll.reply || monthlyAll.error || monthlyAll.unsupported || monthlyAll.noStore) return;
   monthlyAll.loading = true;
   const res = await volumeMonthlyAll({ months: MONTHLY_ALL_MONTHS });
   monthlyAll.loading = false;
   if (res.unsupported) monthlyAll.unsupported = true;
+  else if (res.kind === 'no_store') monthlyAll.noStore = true;
   else if (!res.ok) monthlyAll.error = res.message || res.kind || 'no answer';
   else monthlyAll.reply = res;
   monthlyAll.rev++;
@@ -226,6 +227,10 @@ function monthlyAllView() {
   if (monthlyAll.unsupported) {
     return card('Monthly volume by cluster', null, empty('This server does not keep a daily volume record yet.', {
       detail: `Per month volume needs ElasticPro ${NEEDS_VERSION} or later on the server.` }));
+  }
+  if (monthlyAll.noStore) {
+    return card('Monthly volume by cluster', null, empty('This server keeps no daily volume record.', {
+      detail: 'It was started without a data directory. Set ELASTICPRO_DATA_DIR (the hosted image sets /app/data) and restart it.' }));
   }
   if (monthlyAll.error) return card('Monthly volume by cluster', null, empty('The monthly record could not be read.', { detail: h('span.mono', monthlyAll.error) }));
   if (!monthlyAll.reply) {

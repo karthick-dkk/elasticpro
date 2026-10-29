@@ -56,6 +56,8 @@ const autoAsked = new Set();
 /** The shared column layouts, and whether this caller may change them. */
 const layouts = { state: 'unknown', daily: null, monthly: null };
 let unsupported = false;
+/** The core answered `no_store`: it was started without a data directory, so it keeps no record. */
+let noStore = false;
 let redrawPage = () => {};
 let built = { sig: null, node: null };
 
@@ -69,6 +71,7 @@ export function resetVolumeSummary() {
   for (const m of [daily, monthly, breakdowns, lastDaily, polls]) m.clear();
   Object.assign(layouts, { state: 'unknown', daily: null, monthly: null });
   unsupported = false;
+  noStore = false;
   built = { sig: null, node: null };
   // Indices is an evidence page: the Generate report panel starts collapsed on every visit
   // (the pill's way in, showReportJobs, opens it after this).
@@ -121,6 +124,13 @@ function select(id, value, options, onChange) {
     ...options.map(([v, label]) => h('option', { value: String(v) }, label)));
   s.value = String(value);
   return s;
+}
+
+/** Unknown is not zero: say why there is no record and which setting would keep one. */
+function noRecordKept() {
+  return empty('This server keeps no daily volume record.', {
+    detail: 'It was started without a data directory. Set ELASTICPRO_DATA_DIR (the hosted image sets /app/data) and restart it.',
+  });
 }
 
 function needsNewer() {
@@ -198,6 +208,7 @@ async function loadDaily(c, force) {
   const res = await volumeDaily(c.id, { days: vs.days, avgDays: vs.avgDays, source: vs.source });
   ent.loading = false;
   if (res.unsupported) { unsupported = true; bump(); return ent; }
+  if (res.kind === 'no_store') { noStore = true; bump(); return ent; }
   if (!res.ok) ent.error = res.message || res.kind || 'no answer';
   else { ent.reply = res; lastDaily.set(c.id, res); }
   bump();
@@ -218,6 +229,7 @@ async function refreshNow(c, { auto = false } = {}) {
   if (polls.has(c.id)) return;
   const res = await volumeRun([c.id]);
   if (res.unsupported) { unsupported = true; bump(); return; }
+  if (res.kind === 'no_store') { noStore = true; bump(); return; }
   if (!res.ok) {
     // config_unreadable: the core's message is the whole answer.
     if (!auto) toast(res.kind === 'config_unreadable' ? res.message : `Could not start a collection: ${res.message || res.kind}`, 'err', 6000);
@@ -288,6 +300,7 @@ function dailyToolbar(c, reply) {
 
 function dailyView(c) {
   if (unsupported) return [modeSeg(), needsNewer()];
+  if (noStore) return [modeSeg(), noRecordKept()];
   const ent = daily.get(dkey(c));
   if (!ent) loadDaily(c);
   const reply = (ent && ent.reply) || lastDaily.get(c.id) || null;
@@ -478,6 +491,7 @@ async function loadMonthly(c) {
   const res = await volumeMonthly(c.id, { months: vs.months });
   ent.loading = false;
   if (res.unsupported) { unsupported = true; bump(); return; }
+  if (res.kind === 'no_store') { noStore = true; bump(); return; }
   if (!res.ok) ent.error = res.message || res.kind || 'no answer';
   else ent.reply = res;
   bump();
@@ -508,6 +522,7 @@ function monthlyToolbar(c, reply) {
 
 function monthlyView(c) {
   if (unsupported) return [modeSeg(), needsNewer()];
+  if (noStore) return [modeSeg(), noRecordKept()];
   const ent = monthly.get(mkey(c));
   if (!ent) loadMonthly(c);
   const reply = ent && ent.reply;
@@ -631,6 +646,7 @@ async function loadBreakdown(c, p) {
   const res = await volumeBreakdown(c.id, { field: vs.bd.field, from: p.from, to: p.to, top: vs.bd.top });
   ent.loading = false;
   if (res.unsupported) { unsupported = true; bump(); return; }
+  if (res.kind === 'no_store') { noStore = true; bump(); return; }
   if (!res.ok) ent.error = res.message || res.kind || 'no answer';
   else ent.reply = res;
   bump();
