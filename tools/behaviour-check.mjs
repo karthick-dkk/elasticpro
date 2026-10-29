@@ -65,6 +65,8 @@ if (!config.clusters.length) {
 const problems = [];
 const ok = (cond, msg) => { if (!cond) problems.push(msg); };
 const doc = window.document;
+/** What transport.js reads off a reply: status, headers, and the body as text. jsdom has no Response. */
+const stubReply = (obj) => ({ ok: true, status: 200, headers: { get: () => null }, text: async () => JSON.stringify(obj), json: async () => obj });
 
 /* ----------------------------- the app's own shell ----------------------------- */
 
@@ -363,10 +365,207 @@ await go('indices');
   const pressed = [...doc.querySelectorAll('.seg .btn')].filter((b) => b.getAttribute('aria-pressed') === 'true');
   ok(pressed.length && pressed.some((b) => b.textContent.trim() === 'Summary'),
     'indices: the Summary tab is not marked selected after being pressed');
+  // 0.3.45: Summary is the daily volume record the core keeps (docs/VOLUME.md), Daily |
+  // Monthly. The cards and charts worked out from the live index list are gone.
+  const segBtn = (label) => [...doc.querySelectorAll('.vs .seg .btn')].find((b) => b.textContent.trim() === label);
+  ok(!!segBtn('Daily') && !!segBtn('Monthly'), 'indices: Summary has no Daily | Monthly switch');
+  ok(segBtn('Daily') && segBtn('Daily').getAttribute('aria-pressed') === 'true', 'indices: Summary should open on Daily');
   const sum = doc.body.textContent;
-  ok(/Store size by source/.test(sum), 'indices: Summary does not show the source breakdown');
-  ok(/Indices per day/.test(sum), 'indices: Summary does not show indices per day');
-  ok(/Volume analysis/.test(sum), 'indices: Summary does not show the volume analysis');
+  ok(!/Store size by source/.test(sum) && !/Volume analysis/.test(sum),
+    'indices: the old Summary cards (Store size by source, Volume analysis) are still drawn');
+  // Either the record or the plain "needs 0.3.45" state — never a crash, never zeros.
+  const settled = await waitFor(() => doc.querySelector('.vs table.coltbl') || (/does not keep a daily volume record/.test(doc.body.textContent) ? doc.body : null),
+    'indices: Summary shows neither the daily record nor the "needs 0.3.45" state', 60000);
+  const coreHasVolume = !!(settled && doc.querySelector('.vs table.coltbl'));
+  if (!coreHasVolume) {
+    ok(/needs ElasticPro 0\.3\.45/.test(doc.body.textContent), 'indices: the "needs 0.3.45" state does not name the version');
+    ok(!doc.querySelector('.vs-cards'), 'indices: an older core still drew volume cards (they could only be zeros)');
+  } else {
+    // ---- Against the real core (0.3.45+) and tools/mock-es.mjs. These run once the core
+    // ---- answers VOLUME_*; with an older core the branch above runs instead.
+    // On the portable bridge opening Summary asks for a run (the record is empty), so wait
+    // for it to finish: the progress line goes and the rows are there.
+    await waitFor(() => !doc.querySelector('.vs-progress') && doc.querySelectorAll('.vs table.coltbl tbody tr').length >= 30 ? doc.body : null,
+      'indices: the daily record did not fill in after the run (30 days)', 120000);
+    const heads = [...doc.querySelectorAll('.vs table.coltbl thead th .colhead-name')].map((x) => x.textContent);
+    ok(JSON.stringify(heads) === JSON.stringify(['Index day', 'Indices', 'Documents', 'Primary size', 'Top Dataset',
+      'Event bytes', 'Sub size', 'vs 7-day avg', 'Top src_hostname', 'Top fwd_tag']),
+      `indices: the Daily table's default columns are ${heads.join(' | ')}`);
+    const t = doc.querySelector('.vs table.coltbl').textContent;
+    ok(/not measured/.test(t), 'indices: sub_size is absent in the mock, so Sub size should read "not measured"');
+    ok(/fwd-acme · \d+ %/.test(t), 'indices: the forwarder should resolve to fwdtag and show "fwd-acme · NN %"');
+    ok(/as of \d\d:\d\d/.test(t), 'indices: today\'s row does not say "as of HH:MM"');
+    ok(/Source/.test(doc.body.textContent) && [...doc.querySelectorAll('#vs-source option')].map((o) => o.value).join(',') === ',acme,beta',
+      'indices: the Source select should list All sources, acme, beta');
+    ok(!!doc.querySelector('.vs .line-chart path.lc-line') && !!doc.querySelector('.vs .lc-peak-label'),
+      'indices: the per-day line or its peak label is missing');
+    const exp = [...doc.querySelectorAll('.vs button')].find((b) => b.textContent === 'Export CSV');
+    if (exp) {
+      exp.click();
+      const f = files.at(-1);
+      ok(f && /^volume-daily-.+\.csv$/.test(f.name), `indices: the daily export is named "${f && f.name}"`);
+      ok(f && f.text.split('\n')[0] === 'cluster,day,indices,docs,primary_bytes,total_bytes,event_bytes,event_bytes_measured,sub_bytes,change_vs_avg_pct,avg_days',
+        `indices: the daily CSV header is "${f && f.text.split('\n')[0]}"`);
+    }
+    segBtn('Monthly').click();
+    await waitFor(() => (doc.querySelector('.vs table.coltbl') && /Monthly volume/.test(doc.body.textContent) ? doc.body : null), 'indices: Monthly did not draw', 15000);
+    await waitFor(() => (/field resolved: src_hostname/.test(doc.body.textContent) ? doc.body : null), 'indices: the breakdown did not resolve src_hostname', 15000);
+    segBtn('Daily') && segBtn('Daily').click();
+    await settleFor(150);
+  }
+}
+
+/* ------------- Indices › Summary, driven against contract-shaped answers ------------- */
+
+// The same views, with the core's VOLUME_* answers stubbed to the shapes docs/VOLUME.md
+// gives (and the UI reads, core/volume-daily.js). This exercises every control whatever the
+// core is; the block above is what checks the real core once it has the messages.
+{
+  const realFetch = globalThis.fetch;
+  const DAYMS = 86400000;
+  const vDay = (n) => new Date(Date.now() - n * DAYMS).toISOString().slice(0, 10);
+  const settings = { sizeBasis: 'primary', extra: { name: 'Dataset', fields: ['event.dataset', 'log_type'] },
+    sourceHost: ['src_hostname', 'host.name'], forwarder: ['fwd_tag', 'fwdtag'], tag: ['tag1'], sourceIp: ['src_ip'] };
+  const status = { lastRunAt: Date.now() - 60000, nextRunAt: null, running: false, progress: null, lastError: null, collectAt: '06:00' };
+  const row = (n) => ({ day: vDay(n), final: n > 0, live: true, totalsAt: Date.now() - 60000, aggregatedAt: Date.now() - 60000,
+    indices: 2, docs: 5800000 - n * 1000, priBytes: n === 1 ? 1.3e10 : 8e9 + n * 1e7, totalBytes: 16e9 + n * 2e7,
+    eventBytes: n % 5 === 0 ? null : 3e9, subBytes: null, basis: n === 1 ? 1.3e10 : 8e9 + n * 1e7, avg: 8.1e9,
+    changeVsAvgPct: n === 1 ? 61 : -2,
+    top: { tag: { value: 'acme', share: 0.55 }, forwarder: { value: 'fwd-acme', share: 0.62 }, sourceHost: { value: 'fw-edge-01', share: 0.3 },
+      sourceIp: { value: '10.0.0.1', share: 0.3 }, extra: { value: 'firewall', share: 0.5 } } });
+  const ym = (i) => { const d = new Date(); return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() - i, 1)).toISOString().slice(0, 7); };
+  const month = (i) => (i > 9 ? { month: ym(i), daysWithData: 0 } : {
+    month: ym(i), partial: i === 0, daysWithData: i === 0 ? 29 : i === 9 ? 12 : 30, liveDays: i < 2 ? 30 : 0, keptDays: i === 1 ? 12 : i < 2 ? 0 : 30,
+    priBytes: 2.4e11, totalBytes: 4.8e11, docs: 1.7e8, eventBytes: i === 3 ? null : 9e10, subBytes: null, avgPerDay: 8e9,
+    peakDay: { day: `${ym(i)}-14`, basis: 1.3e10 }, top: { sourceHost: { value: 'fw-edge-01', share: 0.3 }, forwarder: { value: 'fwd-acme', share: 0.6 }, extra: { value: 'firewall', share: 0.5 } } });
+  const vsent = [];
+  const answer = (b) => {
+    switch (b.type) {
+      case 'VOLUME_DAILY': return { ok: true, settings, status, sources: ['acme', 'beta'], skipped: ['metrics-2026.09'],
+        cards: { yesterday: { day: vDay(1), value: 1.3e10, avg: 8e9, changeVsAvgPct: 61 }, average: { days: b.avgDays, value: 8.4e9 },
+          monthSoFar: { month: ym(0), value: 2.3e11, days: 29 }, eventBytes30: { value: null, days: 30 } },
+        days: Array.from({ length: (b.days || 30) + 1 }, (_, n) => row(n)),
+        totals: { indices: 62, docs: 1.8e8, priBytes: 2.5e11, totalBytes: 5e11, eventBytes: null, subBytes: null } };
+      case 'VOLUME_MONTHLY': return { ok: true, status, months: Array.from({ length: b.months || 13 }, (_, i) => month(i)) };
+      case 'VOLUME_BREAKDOWN': return { ok: true, field: b.field, resolved: 'src_hostname', totals: {}, rows: [
+        { value: 'fw-edge-01', docs: 100, eventBytes: 5e8, estPriBytes: 2e9, sharePct: 40, daysSeen: 29 },
+        { kind: 'missing', docs: 5, eventBytes: null, estPriBytes: 1e8, sharePct: 2, daysSeen: 29 },
+        { kind: 'other', docs: 50, eventBytes: 2e8, estPriBytes: 1e9, sharePct: 20, daysSeen: 29 }] };
+      case 'VOLUME_RUN': return { ok: true, started: [], already: [], tooSoon: b.clusterIds || [] };
+      case 'VOLUME_LAYOUT_GET': return { ok: true, layouts: { daily: null, monthly: null } };
+      case 'VOLUME_LAYOUT_SET': return { ok: true, layouts: { [b.table]: b.layout } };
+      case 'VOLUME_MONTHLY_ALL': return { ok: true, clusters: config.clusters.map((c, k) => ({ clusterId: c.name, name: c.name,
+        months: [{ month: ym(1), daysWithData: 30, priBytes: 2e11 + k }, { month: ym(0), daysWithData: 29, priBytes: 1.9e11, partial: true }, { month: ym(2), daysWithData: 0 }] })) };
+      default: return null;
+    }
+  };
+  globalThis.fetch = async (input, init) => {
+    const body = init && init.body ? JSON.parse(init.body) : {};
+    if (String(body.type || '').startsWith('VOLUME_')) { vsent.push(body); return stubReply(answer(body)); }
+    return realFetch(input, init);
+  };
+  const vsBtn = (label, root = doc) => [...root.querySelectorAll('.vs button')].find((b) => b.textContent.trim() === label);
+  const segBtn = (label) => [...doc.querySelectorAll('.vs .seg .btn')].find((b) => b.textContent.trim() === label);
+  try {
+    await go('overview');
+    await go('indices');
+    [...doc.querySelectorAll('button')].find((b) => b.textContent.trim() === 'Summary').click();
+    await waitFor(() => doc.querySelector('.vs table.coltbl'), 'summary (stubbed): the Daily table did not draw');
+    const txt = () => doc.querySelector('.vs').textContent;
+    for (const k of ['Yesterday · primary', 'Average per day', 'This month so far', 'Event bytes · 30 days']) {
+      ok(txt().includes(k), `summary (stubbed): no "${k}" card`);
+    }
+    ok(/\+61\.0 %/.test(txt()) && /vs 7-day avg/.test(txt()), 'summary (stubbed): the Yesterday card does not show +61.0 % vs 7-day avg');
+    ok(!!doc.querySelector('.vs-cards .vs-notm'), 'summary (stubbed): Event bytes · 30 days should read "not measured" (null), not 0');
+    const avgBtns = [...doc.querySelectorAll('.vs-cards .seg .btn')];
+    ok(avgBtns.map((b) => b.textContent).join(' ') === '3D 7D 15D 30D 60D 180D', `summary (stubbed): the average buttons are ${avgBtns.map((b) => b.textContent).join(' ')}`);
+    ok(avgBtns.find((b) => b.textContent === '7D')?.getAttribute('aria-pressed') === 'true', 'summary (stubbed): 7D should be the default average');
+    ok(/Primary size per day · last 30 days/.test(txt()), 'summary (stubbed): no "Primary size per day · last 30 days" graph');
+    ok(/▲ .+ · .+ · \+61\.0 %/.test(doc.querySelector('.vs .lc-peak-label')?.textContent || ''), 'summary (stubbed): the peak label is not "▲ day · size · +x %"');
+    ok(!!doc.querySelector('.vs path.lc-avg'), 'summary (stubbed): no dashed average line');
+    // Today is not plotted: 30 finished days, one point each.
+    ok(doc.querySelectorAll('.vs .line-chart svg > rect').length === 30, `summary (stubbed): ${doc.querySelectorAll('.vs .line-chart svg > rect').length} points plotted, expected 30 finished days`);
+    const heads = () => [...doc.querySelectorAll('.vs table.coltbl thead th .colhead-name')].map((x) => x.textContent);
+    ok(heads().length === 10 && heads()[0] === 'Index day', `summary (stubbed): default columns ${heads().join(' | ')}`);
+    const firstRow = doc.querySelector('.vs table.coltbl tbody tr');
+    ok(firstRow && firstRow.classList.contains('today') && /as of \d\d:\d\d/.test(firstRow.textContent), 'summary (stubbed): the newest row is not today "as of HH:MM"');
+    ok(!!doc.querySelector('.vs table.coltbl tfoot tr.total'), 'summary (stubbed): no totals row from the core\'s totals');
+    ok(/fwd-acme · 62 %/.test(doc.querySelector('.vs table.coltbl').textContent), 'summary (stubbed): the top forwarder is not "fwd-acme · 62 %"');
+    ok(!!doc.querySelector('.vs table.coltbl .vs-high'), 'summary (stubbed): a change over +25 % is not marked');
+    ok(/Event bytes "not measured"/.test(txt()) && /never shown as 0/.test(txt()), 'summary (stubbed): no amber line under the table for unmeasured event bytes');
+    ok(/Columns \(10\/13\)/.test(txt()), 'summary (stubbed): the columns button does not read "Columns (10/13)"');
+
+    // The 30D button re-asks with the new window, and the select in the legend agrees.
+    vsent.length = 0;
+    avgBtns.find((b) => b.textContent === '30D').click();
+    await settleFor(200);
+    ok(vsent.some((m) => m.type === 'VOLUME_DAILY' && m.avgDays === 30), 'summary (stubbed): choosing 30D did not ask VOLUME_DAILY with avgDays 30');
+    ok(doc.getElementById('vs-avg-days')?.value === '30', 'summary (stubbed): the legend\'s Average select did not follow the 30D button');
+    ok(heads().includes('vs 30-day avg'), 'summary (stubbed): the change column is not renamed to the 30-day average');
+
+    // Hide a column from its header menu: the shared layout is saved, the header goes.
+    vsent.length = 0;
+    const docsTh = [...doc.querySelectorAll('.vs table.coltbl thead th')].find((th) => th.dataset.col === 'docs');
+    docsTh.querySelector('.colhead-menu').click();
+    const hide = [...doc.querySelectorAll('.menu-pop button')].find((b) => b.textContent.includes('Hide column'));
+    ok(!!hide, 'summary (stubbed): the column menu has no "Hide column"');
+    if (hide) hide.click();
+    await settleFor(150);
+    const set = vsent.find((m) => m.type === 'VOLUME_LAYOUT_SET');
+    ok(set && set.table === 'daily' && set.layout.hidden.includes('docs'), `summary (stubbed): hiding saved ${JSON.stringify(set)}`);
+    ok(!heads().includes('Documents'), 'summary (stubbed): the hidden column is still drawn');
+
+    // Rename inline, in the header.
+    const priTh = [...doc.querySelectorAll('.vs table.coltbl thead th')].find((th) => th.dataset.col === 'priBytes');
+    priTh.querySelector('.colhead-menu').click();
+    [...doc.querySelectorAll('.menu-pop button')].find((b) => b.textContent.includes('Edit name')).click();
+    const input = priTh.querySelector('input.colhead-input');
+    ok(!!input, 'summary (stubbed): Edit name did not open an input in the header');
+    if (input) {
+      input.value = 'Primary GB';
+      [...priTh.querySelectorAll('button')].find((b) => b.textContent === 'Save').click();
+      await settleFor(150);
+      ok(heads().includes('Primary GB'), `summary (stubbed): the rename did not show — ${heads().join(' | ')}`);
+    }
+
+    // Export follows the contract's daily columns.
+    vsBtn('Export CSV').click();
+    const f = files.at(-1);
+    ok(f && f.text.split('\n')[0] === 'cluster,day,indices,docs,primary_bytes,total_bytes,event_bytes,event_bytes_measured,sub_bytes,change_vs_avg_pct,avg_days',
+      `summary (stubbed): the daily CSV header is "${f && f.text.split('\n')[0]}"`);
+
+    // Refresh now, refused politely when it is too soon.
+    vsent.length = 0;
+    vsBtn('↻ Refresh now').click();
+    await settleFor(200);
+    ok(vsent.some((m) => m.type === 'VOLUME_RUN'), 'summary (stubbed): Refresh now did not send VOLUME_RUN');
+    ok(/less than a minute ago/.test(doc.body.textContent), 'summary (stubbed): a too-soon run is not explained');
+
+    // Monthly.
+    segBtn('Monthly').click();
+    await waitFor(() => (/Monthly volume/.test(doc.querySelector('.vs')?.textContent || '') && /field resolved/.test(doc.querySelector('.vs').textContent) ? doc.body : null),
+      'summary (stubbed): Monthly did not draw with its breakdown');
+    const mt = txt();
+    ok(/Primary size per month · last 13 months/.test(mt), 'summary (stubbed): no "Primary size per month · last 13 months" graph');
+    ok(/a month is the sum of its days/.test(mt), 'summary (stubbed): the Monthly sub-header is missing');
+    for (const w of ['live indices', 'kept record', '12 days kept record, 30 live', 'before the record began', 'so far']) {
+      ok(mt.includes(w), `summary (stubbed): the Monthly table never says "${w}"`);
+    }
+    ok(heads().join(' | ').startsWith('Month | Days with data | Primary size'), `summary (stubbed): Monthly columns ${heads().join(' | ')}`);
+    ok(/\(not set\)/.test(mt) && /all others/.test(mt), 'summary (stubbed): the breakdown does not list "(not set)" and "all others"');
+    ok(/field resolved: src_hostname/.test(mt), 'summary (stubbed): the breakdown does not name the resolved field');
+    ok(!!doc.querySelector('#vol-report-jobs'), 'summary (stubbed): the report-jobs mount point is missing from the Monthly toolbar');
+    vsBtn('Export CSV').click();
+    const fm = files.at(-1);
+    ok(fm && fm.text.split('\n')[0] === 'cluster,month,days_with_data,primary_bytes,avg_primary_bytes_per_day,peak_day,peak_primary_bytes,docs,event_bytes,from_kept_record_days',
+      `summary (stubbed): the monthly CSV header is "${fm && fm.text.split('\n')[0]}"`);
+    segBtn('Daily').click();
+    await settleFor(150);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+  // Leave it as the next blocks expect: the Indices page re-reads on its next visit.
+  await go('overview');
 }
 
 await goOne('snapshots');
@@ -539,12 +738,61 @@ await go('volume');
     await settleFor(200);
     ok(!!panel('Capacity by cluster'), 'volume: the summary view did not render');
   }
+
+  // Monthly (0.3.45): one row per cluster, a column per month of primary size, from
+  // VOLUME_MONTHLY_ALL. Against the real core first: the plain "needs 0.3.45" state on an
+  // older one, the table once the core has the message.
+  {
+    ok(!!viewBtn('Monthly'), 'volume: no "Monthly" view button');
+    viewBtn('Monthly').click();
+    await waitFor(() => (panel('Monthly volume by cluster') && !/Reading the monthly record/.test(panel('Monthly volume by cluster').textContent) ? doc.body : null),
+      'volume: the Monthly view did not settle', 15000);
+    const mv = panel('Monthly volume by cluster');
+    if (mv && /does not keep a daily volume record/.test(mv.textContent)) {
+      ok(/needs ElasticPro 0\.3\.45/.test(mv.textContent) || /0\.3\.45/.test(mv.textContent), 'volume: the Monthly "needs" state does not name 0.3.45');
+    } else if (mv) {
+      // ---- Real core (0.3.45+): a row per cluster the caller sees.
+      ok(mv.querySelectorAll('tbody tr').length === config.clusters.length,
+        `volume: the Monthly view has ${mv.querySelectorAll('tbody tr').length} rows for ${config.clusters.length} cluster(s)`);
+    }
+
+    // Contract-shaped answer, so the layout and the export are checked whatever the core is.
+    const realFetch = globalThis.fetch;
+    const ymAgo = (i) => { const d = new Date(); return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() - i, 1)).toISOString().slice(0, 7); };
+    globalThis.fetch = async (input, init) => {
+      const body = init && init.body ? JSON.parse(init.body) : {};
+      if (body.type === 'VOLUME_MONTHLY_ALL') {
+        return stubReply({ ok: true, clusters: config.clusters.map((c) => ({ clusterId: c.name, name: c.name, months: [
+          { month: ymAgo(2), daysWithData: 0 }, { month: ymAgo(1), daysWithData: 30, priBytes: 2e11 },
+          { month: ymAgo(0), daysWithData: 29, priBytes: 1.9e11, partial: true }] })) });
+      }
+      return realFetch(input, init);
+    };
+    try {
+      [...doc.querySelectorAll('button')].find((b) => b.textContent === '↻ Refresh').click();
+      const p = await waitFor(() => { const x = panel('Monthly volume by cluster'); return x && x.querySelector('table') ? x : null; },
+        'volume: the Monthly table did not draw from a VOLUME_MONTHLY_ALL answer');
+      if (p) {
+        const hd = [...p.querySelectorAll('thead th')].map((x) => x.textContent.trim());
+        ok(hd.length === 4 && hd[0] === 'Cluster', `volume: the Monthly columns are ${hd.join(' | ')}`);
+        ok(p.querySelectorAll('tbody tr').length === config.clusters.length, 'volume: the Monthly view should have one row per cluster');
+        ok(/—/.test(p.querySelector('tbody tr').textContent), 'volume: a month with no record should read "—", never 0');
+        exportBtn().click();
+        const f = files.at(-1);
+        ok(f && /^volume-monthly-by-cluster-\d{4}-\d{2}-\d{2}\.csv$/.test(f.name), `volume: the Monthly export is named "${f && f.name}"`);
+        ok(f && f.text.split('\n')[0] === `cluster,${ymAgo(2)},${ymAgo(1)},${ymAgo(0)}`, `volume: the Monthly CSV header is "${f && f.text.split('\n')[0]}"`);
+        ok(f && f.text.split('\n')[1].split(',')[1] === '', 'volume: a month with no record should be empty in the CSV, not 0');
+      }
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+    viewBtn('Summary').click();
+    await settleFor(200);
+    ok(!!panel('Capacity by cluster'), 'volume: Summary did not come back after Monthly');
+  }
 }
 
 /* --------------------- alert triggers are listed and switchable --------------------- */
-
-/** What transport.js reads off a reply: status, headers, and the body as text. jsdom has no Response. */
-const stubReply = (obj) => ({ ok: true, status: 200, headers: { get: () => null }, text: async () => JSON.stringify(obj), json: async () => obj });
 
 /** The Config page is tabbed; open one by its label. */
 async function openSettingsTab(label) {

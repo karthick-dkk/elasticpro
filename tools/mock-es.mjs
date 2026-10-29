@@ -88,11 +88,53 @@ const INDICES = SCALE ? Array.from({ length: SCALE }, (_, i) => index(scaledName
   index('logstash-beta-2026.09.09', 2e9, 'open', 'yellow'),
   index('metrics-2026.09', 9e8),
 ];
+/**
+ * The daily volume record (docs/VOLUME.md, "Collection") reads every
+ * logstash-<source>-<day> index the cluster has. 45 days of two sources, dated back from
+ * today (UTC, as the core counts days), so the per-day and per-month views have a history
+ * to show. Deterministic per date, so a re-run draws the same picture; acme jumps
+ * 60 % yesterday, so the peak label and the red "vs avg" have a case.
+ * Today's indices are a third full: today is still filling up.
+ *
+ * Listed by _cat/indices and searched by the per-day `_search` only — the five-index
+ * fixture above is what shards, ILM and snapshots keep reading.
+ */
+const VOLUME_DAYS = 45;
+const VOLUME_SOURCES = { acme: { bytes: 6e9, docs: 4.2e6 }, beta: { bytes: 2.1e9, docs: 1.6e6 } };
+const ymdUtc = (n) => new Date(Date.now() - n * DAY).toISOString().slice(0, 10);
+/** 0.8 .. 1.2, the same every time for the same day and salt. */
+function wobble(ymd, salt) {
+  let x = 7;
+  for (const ch of `${ymd}|${salt}`) x = (x * 31 + ch.charCodeAt(0)) >>> 0;
+  return 0.8 + (x % 401) / 1000;
+}
+function volumeDay(source, ymd) {
+  const s = VOLUME_SOURCES[source];
+  let f = wobble(ymd, source);
+  if (source === 'acme' && ymd === ymdUtc(1)) f *= 1.6;
+  if (ymd === ymdUtc(0)) f *= 0.35;
+  return { pri: Math.round(s.bytes * f), docs: Math.round(s.docs * f) };
+}
+const VOLUME_INDICES = SCALE ? [] : Array.from({ length: VOLUME_DAYS }, (_, n) => ymdUtc(n)).flatMap((ymd) =>
+  Object.keys(VOLUME_SOURCES).map((src) => {
+    const { pri, docs } = volumeDay(src, ymd);
+    const name = `logstash-${src}-${ymd.replace(/-/g, '.')}`;
+    return { index: name, health: 'green', status: 'open', uuid: name, pri: '1', rep: '1',
+      'docs.count': String(docs), 'docs.deleted': '0', 'store.size': String(pri * 2), 'pri.store.size': String(pri),
+      'creation.date': String(Date.parse(`${ymd}T00:05:00Z`)) };
+  }));
+
 // MOCK_INDEX_COUNT more, for a _cat/indices answer the size a big cluster gives. Listed
 // only by _cat/indices: the pages' other checks keep reading the five above.
-const CAT_INDICES = INDEX_COUNT
-  ? [...INDICES, ...Array.from({ length: INDEX_COUNT }, (_, i) => index(`bulk-${String(i).padStart(6, '0')}-2026.09.09`, 1e8 + i))]
-  : INDICES;
+const CAT_INDICES = [...INDICES, ...VOLUME_INDICES,
+  ...(INDEX_COUNT ? Array.from({ length: INDEX_COUNT }, (_, i) => index(`bulk-${String(i).padStart(6, '0')}-2026.09.09`, 1e8 + i)) : [])];
+
+/** `logstash-*-2026.10.20` or `a,b*` → a test on an index name, as Elasticsearch reads a target. */
+function globTest(target) {
+  const parts = String(target || '*').split(',').map((g) => g.trim()).filter(Boolean);
+  const res = parts.map((g) => new RegExp('^' + g.split('*').map((x) => x.replace(/[.+?^${}()|[\]\\]/g, '\\$&')).join('.*') + '$'));
+  return (name) => res.some((re) => re.test(name));
+}
 
 // Enough snapshots that the snapshot list has more than one page to move through.
 const SNAPSHOTS = Array.from({ length: SCALE ? (Number(process.env.MOCK_SNAPSHOTS) || 1000) : 23 }, (_, i) => {
@@ -228,7 +270,13 @@ const routes = [
     }
     return { indices: ['logstash-acme-2026.09.09'], fields };
   }],
-  [(u) => u.startsWith('/_cat/indices'), () => CAT_INDICES],
+  // Narrowed to the target a real cluster would be asked for (`/_cat/indices/logstash-*-*`
+  // from the volume collector); a bare `/_cat/indices` or `*` lists everything.
+  [(u) => u.startsWith('/_cat/indices'), ({ url }) => {
+    const target = decodeURIComponent((url.split('?')[0].split('/_cat/indices/')[1] || '*'));
+    const keep = globTest(target);
+    return CAT_INDICES.filter((i) => keep(i.index));
+  }],
   // /_cat/recovery, which restorePoll watches after a restore. Without a route here the
   // catch-all answered {acknowledged:true} — an object, not a list of shards — and the
   // poller died with "rows.map is not a function" after five tries. Every shard reports
@@ -322,6 +370,9 @@ const routes = [
   [(u) => u.includes('/_search'), (hit) => {
     let body = {};
     try { body = JSON.parse(hit.body || '{}'); } catch { /* fall through to the hit list */ }
+
+    // The volume collector's one search per day (docs/VOLUME.md, "Collection" step 3).
+    if (body.aggs && body.aggs.by_index) return volumeSearch(hit.url, body);
 
     // The close-up: the newest documents for one device, looked up by hostname or by
     // address. Answered from the same DEVICES table the aggregation uses, so the fixture
@@ -463,7 +514,82 @@ const FIELD_TYPES = {
   ClientID: 'keyword',
   'branch.keyword': 'keyword',
   'log_type.keyword': 'keyword',
+  // What the volume collector resolves (docs/VOLUME.md, "Settings"): tag1 is text with a
+  // keyword under it, so the core must pick tag1.keyword; the forwarder is fwdtag (fwd_tag
+  // is absent, so the row's first name misses); event_logsize is the numeric Event size.
+  // sub_size is left out on purpose: Sub size stays "not measured", never 0.
+  tag1: 'text',
+  fwdtag: 'keyword',
+  src_hostname: 'keyword',
+  event_logsize: 'long',
+  log_type: 'keyword',
 };
+
+/**
+ * The values each volume field holds, with their weights. Shares are the same every day
+ * apart from a per-date wobble, so the breakdown and the "top" columns are stable.
+ */
+const VOLUME_VALUES = {
+  tag1: [['acme', 5], ['beta', 3], ['gamma', 1]],
+  fwdtag: [['fwd-acme', 6], ['fwd-beta', 3]],
+  src_hostname: DEVICES.map(([name], i) => [name, 6 - i]),
+  src_ip: DEVICES.map((_, i) => [`10.0.0.${i + 1}`, 6 - i]),
+  log_type: [['firewall', 5], ['proxy', 2], ['vpn', 1], ['syslog', 2]],
+  event_logsize: [],
+};
+/** Bytes per event, per day: what `sum(event_logsize)` adds up to. */
+const eventBytesPer = (ymd) => Math.round(560 * wobble(ymd, 'ev'));
+
+/**
+ * One day's volume search, answered as Elasticsearch would: the total, the sums, a bucket
+ * per index, and for each `f_<row>` terms agg the top values with `ev`/`sub` sums, and for
+ * each `m_<row>` the documents without the field. Sums are asked only for resolved fields,
+ * and a sum on an unmapped field is 0 in a real cluster, so that is what comes back here.
+ */
+function volumeSearch(url, body) {
+  const target = decodeURIComponent(url.split('?')[0].split('/')[1] || '');
+  const keep = globTest(target);
+  const day = (/(\d{4})\.(\d{2})\.(\d{2})/.exec(target) || []).slice(1).join('-');
+  const idx = [...INDICES, ...VOLUME_INDICES].filter((i) => i.status === 'open' && keep(i.index));
+  const per = eventBytesPer(day);
+  const docsOf = (i) => Number(i['docs.count']) || 0;
+  const total = idx.reduce((s, i) => s + docsOf(i), 0);
+  const subs = (aggs, docs) => {
+    const out = {};
+    if (aggs && aggs.ev) out.ev = { value: aggs.ev.sum && aggs.ev.sum.field === 'event_logsize' ? docs * per : 0 };
+    if (aggs && aggs.sub) out.sub = { value: 0 };
+    return out;
+  };
+  const aggregations = { ...subs(body.aggs, total) };
+  aggregations.by_index = { doc_count_error_upper_bound: 0, sum_other_doc_count: 0,
+    buckets: idx.map((i) => ({ key: i.index, doc_count: docsOf(i), ...subs(body.aggs.by_index.aggs, docsOf(i)) })) };
+  for (const [name, agg] of Object.entries(body.aggs)) {
+    if (name.startsWith('f_') && agg.terms) {
+      const field = String(agg.terms.field || '').replace(/\.keyword$/, '');
+      const values = VOLUME_VALUES[field] || [];
+      const weights = values.map(([v, w]) => [v, w * wobble(day, `${field}|${v}`)]);
+      const sumW = weights.reduce((s, [, w]) => s + w, 0) || 1;
+      const present = Math.round(total * 0.97);
+      let left = present;
+      const all = weights.map(([v, w], k) => {
+        const n = k === weights.length - 1 ? left : Math.round((present * w) / sumW);
+        left -= n;
+        return { key: v, doc_count: Math.max(0, n) };
+      }).sort((a, b) => b.doc_count - a.doc_count);
+      const size = Number(agg.terms.size) || 10;
+      const top = all.slice(0, size);
+      aggregations[name] = { doc_count_error_upper_bound: 0,
+        sum_other_doc_count: all.slice(size).reduce((s, b) => s + b.doc_count, 0),
+        buckets: top.map((b) => ({ ...b, ...subs(agg.aggs, b.doc_count) })) };
+    } else if (name.startsWith('m_') && agg.missing) {
+      const field = String(agg.missing.field || '').replace(/\.keyword$/, '');
+      const missing = VOLUME_VALUES[field] && VOLUME_VALUES[field].length ? total - Math.round(total * 0.97) : total;
+      aggregations[name] = { doc_count: missing, ...subs(agg.aggs, missing) };
+    }
+  }
+  return { took: 9, timed_out: false, _shards: { total: idx.length, successful: idx.length, skipped: 0, failed: 0 },
+    hits: { total: { value: total, relation: 'eq' }, max_score: null, hits: [] }, aggregations };
+}
 
 // The task list. Two long searches are always "running": one is ours — it carries the last
 // X-Opaque-Id this fixture was sent, so the Tasks panel can tell our query from a stranger's

@@ -1553,3 +1553,63 @@ table.cl-tbl > tbody > tr.cl-detail-row > td { text-align: left; }
 .vf-info { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 12px; }
 .vf-pre { margin: 0; font-family: var(--mono); font-size: 12px; line-height: 1.45; overflow-x: auto; white-space: pre; }
 @media (max-width: 760px) { .vf-grid { grid-template-columns: minmax(0, 1fr); } }
+
+/* Indices › Summary volume (ui/volume-summary.js, lib/columns.js, lib/charts.js lineChart)
+   ----------------------------------------------------------------------------------------
+   Compact like the rest of the Indices page: 32 px rows, no empty bands. Wide tables
+   scroll inside their .tbl-wrap, never the page. "not measured" is amber everywhere it
+   appears, so an unknown never reads as a quiet zero. */
+.vs-bar { align-items: flex-end; }
+.vs-bar > .seg { align-self: flex-end; }
+.vs-right { margin-left: auto; display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+.vs-progress { font-size: 11.5px; color: var(--accent); white-space: nowrap; }
+.vs-jobs:empty { display: none; }
+.vs-cards { margin-bottom: 10px; }
+.vs-cards .stat { min-width: 0; }
+.vs-avg { margin-top: 5px; flex-wrap: wrap; }
+.vs-avg .btn { padding: 1px 6px; font-size: 10.5px; line-height: 16px; }
+.vs-high { color: var(--critical-ink); font-weight: 600; }
+.vs-notm { color: var(--warning-ink); white-space: nowrap; }
+button.vs-notm { font-size: inherit; font-weight: inherit; }
+.vs-top { display: inline-block; max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom; }
+.vs-note { margin-top: 6px; font-size: 11.5px; color: var(--warning-ink); }
+.vs-foot { margin-top: 6px; font-size: 11px; }
+.vs-resolved { font-size: 11.5px; align-self: flex-end; padding-bottom: 8px; }
+.vs-legend { margin-top: 6px; align-items: center; }
+.vs-legend select { margin-left: 6px; height: 24px; font-size: 11.5px; }
+.vs-legend i.vs-sw-line { height: 3px; width: 14px; border-radius: 2px; background: var(--series-1); vertical-align: middle; }
+.vs-legend i.vs-sw-avg { height: 0; width: 14px; border-radius: 0; border-top: 2px dashed var(--text-muted); vertical-align: middle; }
+.vs .linkish { background: none; border: 0; padding: 0; color: var(--accent); cursor: pointer; font: inherit; text-decoration: underline; text-underline-offset: 2px; }
+.vs .vs-notm.linkish { color: var(--warning-ink); }
+/* the line chart */
+.line-chart .lc-line { fill: none; stroke: var(--series-1); stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+.line-chart .lc-area { fill: color-mix(in srgb, var(--series-1) 12%, transparent); stroke: none; }
+.line-chart .lc-avg { fill: none; stroke: var(--text-muted); stroke-width: 1.5; stroke-dasharray: 6 5; }
+.line-chart .lc-dot { fill: var(--series-1); }
+.line-chart .lc-peak { fill: var(--surface-1); stroke: var(--series-1); stroke-width: 2; }
+.line-chart .lc-peak-label { font-size: 11px; fill: var(--text-secondary); font-variant-numeric: tabular-nums; }
+/* the tables: header controls, today's row, the totals */
+table.coltbl tr.today td { background: var(--accent-soft); }
+table.coltbl tfoot tr.total td { font-weight: 640; border-top: 1px solid var(--border); border-bottom: 0; }
+/* One line per row (32 px): a wide table scrolls inside its .tbl-wrap instead of wrapping. */
+table.coltbl th.colhead, table.coltbl td { white-space: nowrap; }
+table.coltbl th.colhead .colhead-name { vertical-align: middle; }
+table.coltbl th.colhead[draggable="true"] { cursor: grab; }
+table.coltbl th.colhead.dragging { opacity: .5; }
+table.coltbl th.colhead.drop { box-shadow: inset 2px 0 0 var(--accent); }
+.btn.colhead-menu { padding: 0 4px; margin-left: 3px; font-size: 11px; line-height: 14px; border-color: transparent; background: transparent; opacity: .55; }
+th.colhead:hover .btn.colhead-menu, .btn.colhead-menu:focus-visible, .btn.colhead-menu[aria-expanded="true"] { opacity: 1; border-color: var(--border); }
+.colhead-edit { display: inline-flex; gap: 4px; align-items: center; text-transform: none; letter-spacing: 0; }
+.colhead-edit input { width: 130px; height: 22px; font-size: 12px; }
+.colhead-edit .btn { padding: 1px 6px; font-size: 11px; }
+.colpick { display: grid; gap: 2px; min-width: 200px; }
+.colpick-row { display: flex; align-items: center; gap: 7px; font-size: 12.5px; min-height: 22px; cursor: pointer; }
+.colpick-row.fixed { color: var(--text-muted); cursor: default; }
+.colpick-row input { margin: 0; }
+.colpick-foot { border-top: 1px solid var(--border); margin-top: 4px; padding-top: 6px; }
+/* breakdown */
+tr.vs-special td:first-child { font-style: italic; color: var(--text-secondary); }
+.vs-share { display: inline-flex; align-items: center; gap: 6px; min-width: 120px; }
+.vs-share-bar { flex: 1; height: 7px; min-width: 60px; background: var(--surface-3); border-radius: 4px; overflow: hidden; display: block; }
+.vs-share-bar i { display: block; height: 100%; background: var(--series-1); border-radius: 4px; }
+.vs-share-n { font-size: 11.5px; font-variant-numeric: tabular-nums; min-width: 44px; text-align: right; }
