@@ -545,7 +545,7 @@ The short version of docs/VOLUME.md "Reports and mail". Code: `crates/elasticpro
 | `MAIL_SETTINGS_GET` | admin | `{host, port, security, auth, user, from, passwordSet, passwordStale, passwordFrom, managed, configured, problem, canStorePassword, passwordStoreProblem}` |
 | `MAIL_SETTINGS_SET {…, password?, clearPassword?}` | admin | as GET; a managed field may be sent unchanged, not changed (`managed`) |
 | `MAIL_TEST {to}` | admin | `{ok, steps: [{step: connect\|tls\|auth\|send, ok, detail}]}`, `kind: smtp_failed` and `message` when a step failed |
-| `REPORT_SCHEDULE_GET` | admin | `{enabled, to, cc, bcc, schedule, at, clusters, subject, sheets, lastSent, managed, timer, nextSendAt, mailConfigured}` |
+| `REPORT_SCHEDULE_GET` | admin | `{enabled, to, cc, bcc, schedule, at, clusters, subject, sheets, lastSent, managed, timer, nextSendAt, mailConfigured, nextPeriod: {from, to, label}}` — `nextPeriod` is what the next send covers (manual: `REPORT_SEND_NOW`'s default) |
 | `REPORT_SCHEDULE_SET {…}` | admin | as GET |
 | `REPORT_SEND_NOW {period?}` | admin | `{job}` — the schedule's period, or the current month so far for a manual one |
 

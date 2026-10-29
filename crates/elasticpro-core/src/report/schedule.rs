@@ -253,13 +253,44 @@ fn boundary(cadence: Cadence, utc_today: NaiveDate) -> Option<NaiveDate> {
 pub fn current(cadence: Cadence, at: &str, clock: Clock) -> Option<(Period, NaiveDateTime)> {
     let at = parse_hhmm(at)?;
     let today = clock.utc_today();
-    let p = match cadence {
-        Cadence::Manual => return None,
-        Cadence::Monthly => period::previous_month(today),
-        Cadence::Weekly => period::previous_week(today),
-        Cadence::Daily => period::yesterday(today),
+    Some((period_on(cadence, today)?, clock.moment_from(boundary(cadence, today)?, at)))
+}
+
+/// The period a cadence covers on a UTC date. `None` for manual.
+fn period_on(cadence: Cadence, utc_today: NaiveDate) -> Option<Period> {
+    match cadence {
+        Cadence::Manual => None,
+        Cadence::Monthly => Some(period::previous_month(utc_today)),
+        Cadence::Weekly => Some(period::previous_week(utc_today)),
+        Cadence::Daily => Some(period::yesterday(utc_today)),
+    }
+}
+
+/// What a manual schedule sends (`REPORT_SEND_NOW` without a period): the current UTC month
+/// so far.
+pub fn manual_period(utc_today: NaiveDate) -> Period {
+    period::month(utc_today.year(), utc_today.month(), utc_today).unwrap_or_else(|_| period::yesterday(utc_today))
+}
+
+/// The period the next scheduled send covers (`REPORT_SCHEDULE_GET` `nextPeriod`, and the
+/// page's "Download .xlsx"): the current period while it has not been sent, else the one
+/// after it — the next month, week or day, whole, as it will be sent. For manual, what
+/// `REPORT_SEND_NOW` sends by default. Whether the schedule is on does not change it.
+pub fn next_period(s: &ReportSchedule, clock: Clock) -> Period {
+    let today = clock.utc_today();
+    let Some(p) = period_on(s.schedule, today) else { return manual_period(today) };
+    if s.last_period.as_deref() != Some(period_key(&p).as_str()) {
+        return p;
+    }
+    let next = match s.schedule {
+        Cadence::Monthly => {
+            let (y, m) = if today.month() == 12 { (today.year() + 1, 1) } else { (today.year(), today.month() + 1) };
+            NaiveDate::from_ymd_opt(y, m, 1)
+        }
+        Cadence::Weekly => boundary(Cadence::Weekly, today).map(|d| d + Duration::days(7)),
+        _ => Some(today + Duration::days(1)),
     };
-    Some((p, clock.moment_from(boundary(cadence, today)?, at)))
+    next.and_then(|d| period_on(s.schedule, d)).unwrap_or(p)
 }
 
 /// The period to send now, if one is due: enabled, past its moment, not sent yet. A daily
@@ -451,6 +482,31 @@ mod tests {
         let mut w = sched(Cadence::Weekly);
         mark_passed(&mut w, at("2026-11-04 08:00"));
         assert_eq!(next_send(&w, at("2026-11-04 08:00")), Some(local("2026-11-09 07:00")), "the next Monday");
+    }
+
+    #[test]
+    fn the_next_period_is_what_the_next_send_covers() {
+        let p = |s: &ReportSchedule, c: Clock| { let x = next_period(s, c); (x.from, x.to, x.label) };
+        let mut m = sched(Cadence::Monthly);
+        assert_eq!(p(&m, at("2026-10-29 10:00")), ("2026-09-01".into(), "2026-09-30".into(), "2026-09".into()), "September not sent yet");
+        m.last_period = Some("2026-09-01..2026-09-30".into());
+        assert_eq!(p(&m, at("2026-10-29 10:00")), ("2026-10-01".into(), "2026-10-31".into(), "2026-10".into()), "sent: October, whole");
+        m.enabled = false;
+        assert_eq!(p(&m, at("2026-10-29 10:00")).0, "2026-10-01", "on or off, the same period");
+        let mut d = sched(Cadence::Monthly);
+        d.last_period = Some("2026-11-01..2026-11-30".into());
+        assert_eq!(p(&d, at("2026-12-05 10:00")).0, "2026-12-01", "December after November");
+        let mut w = sched(Cadence::Weekly);
+        w.last_period = Some("2026-10-19..2026-10-25".into());
+        assert_eq!(p(&w, at("2026-10-29 10:00")), ("2026-10-26".into(), "2026-11-01".into(), "2026-10-26 – 2026-11-01".into()));
+        let mut y = sched(Cadence::Daily);
+        assert_eq!(p(&y, at("2026-10-29 10:00")).0, "2026-10-28");
+        y.last_period = Some("2026-10-28..2026-10-28".into());
+        assert_eq!(p(&y, at("2026-10-29 10:00")).0, "2026-10-29");
+        // UTC dates: 04:00 on the 1st in India is still the 31st in UTC.
+        assert_eq!(p(&sched(Cadence::Daily), east("2026-11-01 04:00", 330)).0, "2026-10-30");
+        // Manual: what REPORT_SEND_NOW sends by default, the UTC month so far.
+        assert_eq!(p(&sched(Cadence::Manual), at("2026-10-29 10:00")), ("2026-10-01".into(), "2026-10-29".into(), "2026-10 (so far)".into()));
     }
 
     #[test]

@@ -21,7 +21,7 @@ use crate::bridge::Core;
 use crate::volume::run::CollectOpts;
 use crate::volume::schedule::{self as vsched, day_key};
 use crate::volume::VolumeSettings;
-use chrono::{Datelike, NaiveDateTime};
+use chrono::NaiveDateTime;
 use serde_json::{json, Value};
 use std::sync::Arc;
 
@@ -850,6 +850,8 @@ impl Core {
             "clusters": e.clusters, "subject": e.subject, "sheets": e.sheets, "lastSent": e.last_sent,
             "managed": managed, "timer": self.edition().schedules(), "nextSendAt": next,
             "mailConfigured": self.mail_effective().problem().is_none(),
+            // What the next send covers, for the page's "Download .xlsx" (one definition).
+            "nextPeriod": rsched::next_period(&e, Clock::now()),
         })
     }
 
@@ -1019,10 +1021,7 @@ impl Core {
             // is the current UTC month so far.
             None => match rsched::current(e.schedule, &e.at, Clock::now()) {
                 Some((p, _)) => p,
-                None => match period::month(today.year(), today.month(), today) {
-                    Ok(p) => p,
-                    Err(err) => return bad("bad_request", err),
-                },
+                None => rsched::manual_period(today),
             },
         };
         let ids = self.report_schedule_clusters(&e);
