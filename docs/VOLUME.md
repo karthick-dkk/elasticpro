@@ -191,3 +191,67 @@ avgPerDay, peakDay, docs, eventBytes, subBytes, topSourceHost, topForwarder, fro
 - daily: `cluster, day, indices, docs, primary_bytes, total_bytes, event_bytes, event_bytes_measured, sub_bytes, change_vs_avg_pct, avg_days`
 - monthly: `cluster, month, days_with_data, primary_bytes, avg_primary_bytes_per_day, peak_day, peak_primary_bytes, docs, event_bytes, from_kept_record_days`
 - breakdown: `cluster, field, field_resolved, value, period_from, period_to, docs, event_bytes, primary_bytes_estimated, share_pct, days_seen`
+
+## Reports and mail
+
+### Report jobs (Indices › Summary › Monthly › Generate report)
+
+- `REPORT_RUN` (User) `{clusterIds:[..], period, format:"xlsx"|"csvzip", mail:bool}` queues
+  **one job per cluster** (a client is a cluster). `period` is `{from:"YYYY-MM-DD", to}` or a
+  preset: `"month:2026-10"` (a current month means "so far"), `"yesterday"`, `"last7"`.
+  Reply `{jobs:[Job]}`.
+- A job: (1) collects the days of its period that the record is missing (same collector,
+  same rules, stoppable between days), (2) builds the file, (3) mails it when `mail` is set
+  and SMTP is configured (else the job ends `done` with `mailError`). Progress
+  `{done,total}` counts days collected plus one for the file.
+- At most `concurrency` jobs run at once (3..5, default 3, admin `REPORT_CONCURRENCY_SET {n}`);
+  the rest wait in FIFO order and start as slots free. Persisted in `<data>/reports/jobs.json`
+  (a job running at restart is marked `failed: "the server restarted"`).
+- `REPORT_JOBS` (User) `{}` → `{jobs:[Job], concurrency, running, queued}`: every job the
+  caller's visible clusters cover (status is shown to everyone, "for the tool").
+- `REPORT_STOP` (**Admin only**) `{id}` or `{all:true}` → stopped jobs end `stopped`.
+- `REPORT_CLEAR` (User) `{}` removes finished/stopped/failed jobs **the caller started**
+  (admin: all). `REPORT_DOWNLOAD` (User; the starter or an admin) `{id}` →
+  `{name, mime, base64}`. Files kept in `<data>/reports/` for 7 days, then pruned.
+- `Job = {id, clusterId, clusterName, period:{from,to,label}, format, mail, by, createdAt,
+  startedAt|null, endedAt|null, status:"queued"|"running"|"done"|"stopped"|"failed",
+  progress:{done,total}, file:{name,bytes}|null, error|null, mailError|null, stoppedBy|null}`
+
+### The file
+
+- `.xlsx`, sheets **Daily**, **Monthly**, **Breakdown** (one block per field: tag,
+  forwarder, sourceHost, sourceIp, extra). Daily and Monthly use the shared column layout
+  (`VOLUME_LAYOUT_*`: order, names, hidden). Byte columns are numbers (bytes) with a GB
+  column beside primary size; `null` cells read "not measured". Breakdown estimate column
+  header says "est.". Written by the core (zip + SpreadsheetML), no external tool.
+- `.zip` of `daily.csv`, `monthly.csv`, `breakdown.csv` with the CSV columns above.
+- Name: `volume-<cluster>-<from>_<to>.xlsx`.
+
+### Mail server (Config › Volume fields › Mail server (SMTP))
+
+- `<data>/mail.json` `{host, port, security:"starttls"|"tls"|"none", auth:"password"|"none",
+  user, from, password (encrypted at rest with the same key as cluster secrets)}`.
+- config.txt (lock the field): `UI_SMTP_HOST` text, `UI_SMTP_PORT` int 1..65535,
+  `UI_SMTP_SECURITY` enum starttls,tls,none, `UI_SMTP_USER` text,
+  `UI_SMTP_PASSWORD_FILE` text (path read at send time, never echoed), `UI_SMTP_FROM` text.
+- `MAIL_SETTINGS_GET` (Admin) → settings without the password, `passwordSet:bool`,
+  `managed:[keys]`. `MAIL_SETTINGS_SET` (Admin) (password only when typed; empty keeps it).
+  `MAIL_TEST` (Admin) `{to}` → `{ok, steps:[{step:"connect"|"tls"|"auth"|"send", ok, detail}]}`.
+- "none" security is allowed only with `auth:"none"` (no password over plain text).
+
+### Mailed report (Config › Volume fields › Volume report by mail)
+
+- `<data>/report-schedule.json` `{enabled, to:[..], cc:[..], bcc:[..], schedule:"monthly"|
+  "weekly"|"daily"|"manual", at:"07:00", clusters:"all"|[ids], subject:"ElasticPro volume
+  report · {period}", sheets:["daily","monthly","breakdown"], lastSent:{at, to, ok, error}|null}`.
+- Periods: monthly → previous calendar month (sent on the 1st); weekly → previous Mon..Sun
+  (sent Monday); daily → yesterday, sent after that day's scheduled collection finishes.
+  Server local time for `at`, hosted only, persisted so a restart does not resend.
+- One mail, one attachment: an .xlsx with one sheet set per cluster (sheet names prefixed by
+  cluster name, ≤31 chars). Body: per cluster yesterday, average per day (7), month so far.
+- config.txt: `UI_REPORT_TO` text (comma list), `UI_REPORT_SCHEDULE` enum
+  monthly,weekly,daily,manual, `UI_REPORT_AT` text HH:MM, `UI_REPORT_SHEETS` text.
+- `REPORT_SCHEDULE_GET` / `REPORT_SCHEDULE_SET` (Admin), `REPORT_SEND_NOW` (Admin) → runs the
+  mailed report for the current settings at once (as a background job).
+- Every mail send is an audit line (who, to-count, ok), never the addresses' contents of the
+  attachment, never the password.
