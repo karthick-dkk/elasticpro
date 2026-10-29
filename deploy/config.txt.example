@@ -193,3 +193,31 @@ UI_DEFAULT_SCOPE=
 # Rows per table page, and most log lines shown.
 UI_ROWS_PER_PAGE=
 UI_MAX_LOG_ROWS=
+
+# Index volume per day / per month (Indices > Summary; docs/VOLUME.md). Each key set here
+# locks its row in the volume settings for every cluster. Field lists are comma-separated
+# names tried left to right; the first one the mapping knows wins (a text field uses its
+# .keyword).
+# Which indices count: * is the source, YYYY.MM.DD the day. Default logstash-*-YYYY.MM.DD.
+UI_VOLUME_INDEX_FORMAT=
+# Breakdown fields. Defaults: tag1, labels.tag1, tags / fwd_tag, fwdtag, observer.name /
+# src_hostname, host.name / src_ip, source.ip, host.ip.
+UI_VOLUME_TAG_FIELDS=
+UI_VOLUME_FORWARDER_FIELDS=
+UI_VOLUME_HOST_FIELDS=
+UI_VOLUME_IP_FIELDS=
+# Numeric fields summed per day (shipper byte counts). Defaults: event_logsize / sub_size.
+UI_VOLUME_EVENT_SIZE_FIELD=
+UI_VOLUME_SUB_SIZE_FIELD=
+# One more breakdown, named as you like. Defaults: Dataset / event.dataset, log_type.
+UI_VOLUME_EXTRA_NAME=
+UI_VOLUME_EXTRA_FIELDS=
+# What the graph and cards plot: primary, total (with replicas) or eventSize.
+UI_VOLUME_SIZE_BASIS=
+# Values kept per field per day (5-100), and months the record keeps (1-36).
+UI_VOLUME_TOP_VALUES=
+UI_VOLUME_KEEP_MONTHS=
+# When the daily collection runs, HH:MM in the server's local time. That is the TZ of the
+# core container: set TZ in deploy/.env (an IANA name such as Asia/Kolkata, or a POSIX
+# string such as IST-5:30); unset is UTC. Default 06:00.
+UI_VOLUME_COLLECT_AT=

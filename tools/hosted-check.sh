@@ -76,6 +76,14 @@ check "listing it needs a caller"      "$(post $B -d '{"type":"NOTIFY_LIST"}' | 
 check "adding to it needs a caller"    "$(post $B -d '{"type":"NOTIFY_PUT","message":"m","kind":"ok"}' | field kind)" "unauthenticated"
 check "clearing it needs a caller"     "$(post $B -d '{"type":"NOTIFY_CLEAR"}' | field kind)" "unauthenticated"
 
+# The daily volume record (docs/VOLUME.md). Reading it names sources and field values, and
+# Refresh now sends searches, so every message needs a caller; the roles are proved in-process
+# (tests/volume.rs). Its timer logs "volume daily: timer started" without a user, so the
+# audit count above is unchanged — and this instance has no data dir, so no timer at all.
+for t in VOLUME_SETTINGS VOLUME_FIELDS_CHECK VOLUME_DAILY VOLUME_MONTHLY VOLUME_BREAKDOWN VOLUME_MONTHLY_ALL VOLUME_RUN VOLUME_LAYOUT_GET VOLUME_LAYOUT_SET; do
+  check "$t needs a caller"              "$(post $B -d "{\"type\":\"$t\",\"clusterId\":\"x\"}" | field kind)" "unauthenticated"
+done
+
 # Zabbix sign-in. Off until a secret is set, and a way in only with the right signature.
 S="http://127.0.0.1:$P/sso/zabbix"
 code_of() { curl -s -o /dev/null -w '%{http_code}' -X POST "$1" -H 'content-type: application/json' "${@:2}"; }
@@ -94,9 +102,12 @@ check "a header with no account is nobody"     "$(post $B -H 'x-auth-user: mallo
 # The default: no authenticating proxy, so X-Auth-User names nobody — not even a real account.
 # nginx used to fill it from any client's Basic header, unchecked: Admin for the asking.
 PD=$(free_port); OUTD=$(mktemp); DD=$(mktemp -d)
-ELASTICPRO_BIND=0.0.0.0 ELASTICPRO_DATA_DIR="$DD" RUST_LOG=warn "$BIN" ui "$PD" >"$OUTD" 2>&1 & PIDD=$!; disown
+ELASTICPRO_BIND=0.0.0.0 ELASTICPRO_DATA_DIR="$DD" RUST_LOG=warn,audit=info "$BIN" ui "$PD" >"$OUTD" 2>&1 & PIDD=$!; disown
 for _ in $(seq 1 100); do curl -s -o /dev/null "http://127.0.0.1:$PD/" && break; sleep 0.2; done
 check "X-Auth-User is ignored by default"      "$(post "http://127.0.0.1:$PD/bridge" -H 'x-auth-user: Admin' -d '{"type":"USER_LIST"}' | field kind)" "unauthenticated"
+# With a data directory the volume timer starts, says so once, and names nobody.
+check "the volume timer announces itself"      "$(grep -c 'volume daily: timer started' "$OUTD" || true)" "1"
+check "and names no user"                      "$(grep 'volume daily: timer started' "$OUTD" | grep -c '"user":' || true)" "0"
 kill $PIDD 2>/dev/null; rm -rf "$OUTD" "$DD"
 # Pairing: with nothing in progress, unsigned and signed-with-anything look the same.
 PZ="http://127.0.0.1:$P/zabbix/pair"

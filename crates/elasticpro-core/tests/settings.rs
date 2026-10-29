@@ -26,6 +26,9 @@ UI_REFRESH_SECONDS=90
 UI_DISK_WARN_PERCENT=70
 UI_TLS=insecure
 UI_TIME_FIELD=ts
+UI_VOLUME_COLLECT_AT=05:45
+UI_VOLUME_SIZE_BASIS=eventsize
+UI_VOLUME_INDEX_FORMAT=no-day-part-*
 UI_MAX_LOG_ROWS=nonsense
 ZABBIX_CREATE_HOSTS=true
 ZABBIX_SCOPE_USERS_BY_GROUP=true
@@ -46,7 +49,7 @@ async fn config_txt_reaches_the_core() {
     std::env::set_var(settings::ENV, &file);
 
     let s = settings::init();
-    assert_eq!(s.warnings().len(), 2, "UI_MAX_LOG_ROWS and SURPRISE: {:?}", s.warnings());
+    assert_eq!(s.warnings().len(), 3, "UI_MAX_LOG_ROWS, UI_VOLUME_INDEX_FORMAT and SURPRISE: {:?}", s.warnings());
 
     // The environment variables the existing readers consume.
     assert_eq!(elasticpro_core::notify::retention_days(), 45);
@@ -78,9 +81,16 @@ async fn config_txt_reaches_the_core() {
     let session = r["session"].as_str().unwrap().to_string();
     let ping = c.handle(json!({ "type": "PING", "session": session })).await;
     assert_eq!(ping["managedDefaults"], json!({
-        "readOnly": false, "refreshIntervalSec": 90, "diskWarnPercent": 70, "tls": "insecure", "timeField": "ts"
+        "readOnly": false, "refreshIntervalSec": 90, "diskWarnPercent": 70, "tls": "insecure", "timeField": "ts",
+        "volumeCollectAt": "05:45", "volumeSizeBasis": "eventSize"
     }), "only the managed keys, valid ones, under the UI's names: {ping}");
     assert_eq!(ping["managedZabbixOptions"], json!({ "createHosts": true, "scopeUsersByGroup": true, "hostGroup": "Lab" }));
+
+    // The volume settings: config.txt over everything, and named as managed.
+    let v = c.handle(json!({ "type": "VOLUME_SETTINGS", "session": session })).await;
+    assert_eq!(v["managed"], json!(["volumeSizeBasis", "volumeCollectAt"]), "{v}");
+    assert_eq!((v["settings"]["collectAt"].as_str(), v["settings"]["sizeBasis"].as_str()), (Some("05:45"), Some("eventSize")));
+    assert_eq!(v["settings"]["indexFormat"], "logstash-*-YYYY.MM.DD", "an invalid managed value is not managed");
 }
 
 #[test]

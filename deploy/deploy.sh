@@ -267,6 +267,19 @@ UI_LIVE_REDRAW enum pending,live,manual
 UI_DEFAULT_SCOPE enum last-selected,all
 UI_ROWS_PER_PAGE int 5 1000
 UI_MAX_LOG_ROWS int 10 10000
+UI_VOLUME_INDEX_FORMAT text
+UI_VOLUME_TAG_FIELDS text
+UI_VOLUME_FORWARDER_FIELDS text
+UI_VOLUME_HOST_FIELDS text
+UI_VOLUME_IP_FIELDS text
+UI_VOLUME_EVENT_SIZE_FIELD text
+UI_VOLUME_SUB_SIZE_FIELD text
+UI_VOLUME_EXTRA_NAME text
+UI_VOLUME_EXTRA_FIELDS text
+UI_VOLUME_SIZE_BASIS enum primary,total,eventSize
+UI_VOLUME_TOP_VALUES int 5 100
+UI_VOLUME_KEEP_MONTHS int 1 36
+UI_VOLUME_COLLECT_AT text
 LISTEN_PORT deploy
 ALLOWED_DOMAINS deploy
 ALLOWED_UI_IPS deploy
@@ -286,7 +299,7 @@ cfg_check() {
     case $kind in
       bool) case $lower in true|false) ;; *) echo "must be true or false"; return 1 ;; esac ;;
       int)  in_range "$v" "$a" "$b" || { echo "must be a whole number from $a to $b"; return 1; } ;;
-      enum) case ",$a," in *",$lower,"*) ;; *) echo "must be one of: ${a//,/, }"; return 1 ;; esac ;;
+      enum) case ",$(printf '%s' "$a" | tr 'A-Z' 'a-z')," in *",$lower,"*) ;; *) echo "must be one of: ${a//,/, }"; return 1 ;; esac ;;
     esac
   fi
   case $k in
@@ -302,6 +315,16 @@ cfg_check() {
     CORE_MEM_LIMIT) [[ $v =~ ^[0-9]+[bBkKmMgG]?$ ]] || { echo "must be a size such as 2g or 512m"; return 1; } ;;
     PUBLIC_URL|ZABBIX_URL|ZABBIX_API_URL)
       [[ $v =~ ^https?://[^[:space:]]+$ ]] || { echo "must be a URL starting with http:// or https://"; return 1; } ;;
+    # The same two rules the core applies (settings.rs check_text).
+    UI_VOLUME_INDEX_FORMAT)
+      case $v in
+        *YYYY.MM.DD*YYYY.MM.DD*) echo "must contain YYYY.MM.DD once"; return 1 ;;
+        *'*'*YYYY.MM.DD*|*YYYY.MM.DD*'*'*) ;;
+        *) echo "must contain * (the source) and YYYY.MM.DD (the day), e.g. logstash-*-YYYY.MM.DD"; return 1 ;;
+      esac
+      case $v in *[[:space:],/\\?#\"\<\>\|]*) echo "must be one index pattern: no spaces, commas or slashes"; return 1 ;; esac ;;
+    UI_VOLUME_COLLECT_AT)
+      [[ $v =~ ^([01][0-9]|2[0-3]):[0-5][0-9]$ ]] || { echo "must be a time of day HH:MM, 00:00 to 23:59"; return 1; } ;;
   esac
   return 0
 }

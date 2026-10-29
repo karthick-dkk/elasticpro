@@ -35,6 +35,9 @@ services:
       # alone. A missing file or a directory means "no settings", not an error.
       ELASTICPRO_SETTINGS: /app/config.txt
       RUST_LOG: info,audit=info
+      # The core's local time: the daily volume run happens at UI_VOLUME_COLLECT_AT in it.
+      # Set TZ in .env (Asia/Kolkata, Europe/Berlin, or a POSIX string like IST-5:30).
+      TZ: ${TZ:-UTC}
       # Fleet at Scale (100-300 clusters). Defaults match the plan's decisions; see
       # README.md / PRODUCTION.md ("Scaling to a large fleet") for what each one trades
       # off. All three are read by the core itself — this only sets what a fresh .env

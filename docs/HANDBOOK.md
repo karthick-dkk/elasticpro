@@ -452,6 +452,49 @@ oldest) and never deleted.
 The Request Centre shows both as the **Housekeeping** card (last run, what each job cleaned, next
 run, **Dry run**, **Run now** — which asks first).
 
+## Volume record — the message contract
+
+Index volume per day and per month, by field, for every cluster: the core collects it and keeps
+it, the pages show its answers. **docs/VOLUME.md is the contract** — what counts, the settings
+and their precedence, the store layout, every derived figure, and the message table; this is the
+short version.
+
+- **When**: hosted only, once a day at `collectAt` (server local time, `TZ` of the core; 06:00
+  by default), from a 60 s tick started by the bridge binary (`volume daily: timer started`, an
+  audit line with no user). A restart neither repeats today's run nor skips a missed one: the
+  local date of the last scheduled run is kept in each cluster's `state.json`. **Refresh now**
+  (`VOLUME_RUN`) runs at once, at most once a minute per cluster (`tooSoon`). Desktop has no
+  timer; Indices › Summary asks for a run.
+- **What it sends**: `_cat/indices/<glob>`, `_field_caps`, then one aggregation `_search` per
+  day that is not final (and today, every run) — reads only, so it works under read-only.
+  Background class, origin `volume-daily`, 60 s per request (capped by `ES_MAX_TIMEOUT_MS`), at
+  most 2 clusters at once and one request at a time per cluster. The emergency stop holds it
+  (the timer tries again next tick); an unreachable cluster is skipped.
+- **Where it lives**: `<data>/volume/<escaped id>/YYYY-MM.json.gz` + `state.json` (0600, tmp +
+  rename), `<data>/volume/layouts.json` for the shared column layouts. Nothing is held in memory
+  between requests; `VOLUME_MONTHLY_ALL` reads only the `state.json` files. Months older than
+  `keepMonths` are removed after each run.
+- **Settings**: built-in < `defaults.volume` < cluster override (`defaults.volume.overrides[id]`
+  or `clusters[].volume`) < config.txt `UI_VOLUME_*`. Hosted reads its own config file; the
+  desktop editions take `volume: {defaults, cluster}` from the message. Legacy `volumeFields`
+  is read only where no `volume` is set.
+
+| Message | Role | Answer |
+|---|---|---|
+| `VOLUME_SETTINGS {clusterId?}` | user | `{settings, managed, source, overrides}` |
+| `VOLUME_FIELDS_CHECK {clusterId}` | user | `{glob, indices: {match, days, skipped, skippedCount}, rows: [{key, tried, resolved, type, note}]}` (asks the cluster now) |
+| `VOLUME_DAILY {clusterId, days?, avgDays?, source?}` | user | `{settings, status, cards, days, sources, source, topAvailable, skipped, skippedCount, matched, window}` |
+| `VOLUME_MONTHLY {clusterId, months?}` | user | `{status, months}` |
+| `VOLUME_BREAKDOWN {clusterId, field, from?, to?, top?}` | user | `{field, resolved, resolvedAll, rows, totals, period}`; `error` when the field never resolved |
+| `VOLUME_MONTHLY_ALL {months?}` | user | `{clusters: [{clusterId, name, basis, months}]}` |
+| `VOLUME_RUN {clusterIds?}` | user | `{started, already, tooSoon, skipped: [{clusterId, reason}], stopped}` |
+| `VOLUME_LAYOUT_GET` | guest | `{layouts: {daily, monthly}}`, each `{order, hidden, labels}` |
+| `VOLUME_LAYOUT_SET {table, layout}` | operator | `{layouts}`; audited |
+
+`status = {lastRunAt, nextRunAt, running, progress: {done, total} | null, lastError, collectAt}`;
+`nextRunAt` is `null` where nothing schedules. Without a data directory every record message
+answers `{ok: false, kind: "no_store"}`.
+
 ## Zabbix connection — the message contract
 
 Hosted edition only (every other edition answers `{ok: false, kind: "not_supported", supported: false}`

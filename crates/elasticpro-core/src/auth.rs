@@ -309,6 +309,15 @@ pub fn required_role(msg_type: &str) -> Option<Role> {
         // (the handler checks ownership), and sees what others chose to share.
         "QUERY_LIST" | "QUERY_SAVE" | "QUERY_DELETE" => Some(Role::User),
         "SILENCE_SET" | "SILENCE_CLEAR" => Some(Role::Operator),
+        // The daily index-volume record: sizes per day by source name, top field values —
+        // the same kind of fact as an index listing, so not a guest's. Refresh now sends
+        // searches to the cluster, rate-limited per cluster in the handler.
+        "VOLUME_SETTINGS" | "VOLUME_FIELDS_CHECK" | "VOLUME_DAILY" | "VOLUME_MONTHLY" | "VOLUME_BREAKDOWN"
+        | "VOLUME_MONTHLY_ALL" | "VOLUME_RUN" => Some(Role::User),
+        // Which columns the volume tables show names no cluster; changing it changes what
+        // everybody sees, so an operator's (audited).
+        "VOLUME_LAYOUT_GET" => Some(Role::Guest),
+        "VOLUME_LAYOUT_SET" => Some(Role::Operator),
 
         // Anything new is refused until somebody decides where it belongs.
         _ => Some(Role::Admin),
@@ -1889,6 +1898,20 @@ mod tests {
     fn a_guest_cannot_walk_out_of_the_allowlist() {
         assert!(authorize(Role::Guest, "ES", "GET", "/_cluster/health/../../_cat/indices").is_err());
         assert!(authorize(Role::Guest, "ES", "GET", "/_nodes/../_cat/indices").is_err());
+    }
+
+    #[test]
+    fn the_volume_record_is_a_users_and_its_layout_an_operators() {
+        for t in ["VOLUME_SETTINGS", "VOLUME_FIELDS_CHECK", "VOLUME_DAILY", "VOLUME_MONTHLY", "VOLUME_BREAKDOWN",
+                  "VOLUME_MONTHLY_ALL", "VOLUME_RUN"] {
+            assert_eq!(required_role(t), Some(Role::User), "{t}");
+            assert!(authorize(Role::Guest, t, "", "").is_err(), "{t} names sources: not a guest's");
+            assert!(authorize(Role::User, t, "", "").is_ok(), "{t}");
+        }
+        assert_eq!(required_role("VOLUME_LAYOUT_GET"), Some(Role::Guest));
+        assert_eq!(required_role("VOLUME_LAYOUT_SET"), Some(Role::Operator));
+        assert!(authorize(Role::User, "VOLUME_LAYOUT_SET", "", "").is_err());
+        assert!(authorize(Role::Operator, "VOLUME_LAYOUT_SET", "", "").is_ok());
     }
 
     #[test]

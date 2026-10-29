@@ -49,6 +49,9 @@ axum = { version = "0.8", optional = true }
 tower-http = { version = "0.6", optional = true, features = ["fs", "cors"] }
 # The fleet cache's disk copy of a large dataset is gzipped.
 flate2 = "1"
+# Server-local time of day, for the daily volume run's `collectAt` (TZ of the process).
+# The record's own days are UTC dates from index names and never go through a zone.
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 # Hosted only: the fleet cache writes through to Redis when ELASTICPRO_REDIS_URL is set. Behind
 # the `bridge` feature so the desktop build does not carry a Redis client it never uses.
 redis = { version = "1", optional = true, default-features = false, features = ["tokio-comp"] }
