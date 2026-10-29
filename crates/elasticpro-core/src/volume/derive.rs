@@ -41,6 +41,19 @@ impl Totals {
     }
 }
 
+/// The average window when nobody chose one: `VOLUME_DAILY`'s default, the mailed report's
+/// "average per day (7)" and the reports' change column.
+pub const AVG_DAYS_DEFAULT: u32 = 7;
+/// Values per field a breakdown lists when nobody chose: `VOLUME_BREAKDOWN`'s default and
+/// the reports' Breakdown sheet.
+pub const BREAKDOWN_TOP_DEFAULT: usize = 25;
+
+/// The totals per date of the days given (the whole cluster, or one source where it had
+/// indices), for `avg_before`, `daily_row` and `cards`.
+pub fn history(days: &[Day], source: Option<&str>) -> BTreeMap<NaiveDate, Totals> {
+    days.iter().filter_map(|d| Some((parse_day(&d.day)?, Totals::of(d, source)?))).collect()
+}
+
 /// **basis(d)**: what the graph and the cards plot.
 pub fn basis(t: &Totals, b: SizeBasis) -> Option<u64> {
     match b {

@@ -66,8 +66,9 @@ fn private(p: &Path, mode: u32) {
 #[cfg(not(unix))]
 fn private(_: &Path, _: u32) {}
 
-/// Write `bytes` to `p` through a temporary file: created 0600, synced, renamed.
-fn write_atomic(p: &Path, bytes: &[u8]) -> Result<(), String> {
+/// Write `bytes` to `p` through a temporary file: created 0600, synced, renamed. The
+/// report queue and the mail settings are written the same way (`report`).
+pub(crate) fn write_atomic(p: &Path, bytes: &[u8]) -> Result<(), String> {
     if let Some(d) = p.parent() {
         std::fs::create_dir_all(d).map_err(|e| format!("{}: {e}", d.display()))?;
         private(d, 0o700);
@@ -128,6 +129,17 @@ impl Store {
             return MonthFile::default();
         }
         serde_json::from_slice(&text).unwrap_or_default()
+    }
+
+    /// Every kept day from `from` to `to` (inclusive), oldest first: the month files that
+    /// range touches, read one at a time and let go.
+    pub fn days_between(&self, cluster: &str, from: chrono::NaiveDate, to: chrono::NaiveDate) -> Vec<Day> {
+        let mut out = vec![];
+        for m in super::schedule::months_between(from, to) {
+            out.extend(self.read_month(cluster, &m).days.into_values()
+                .filter(|d| super::schedule::parse_day(&d.day).is_some_and(|x| x >= from && x <= to)));
+        }
+        out
     }
 
     pub fn write_month(&self, cluster: &str, month: &str, file: &MonthFile) -> Result<(), String> {

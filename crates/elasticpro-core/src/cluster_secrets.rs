@@ -351,6 +351,34 @@ impl ClusterSecrets {
         }).collect()
     }
 
+    /// Whether a secret of the core's own (the mail server's password, `report::mail`) can be
+    /// kept sealed under this key: only where the store has a file and a working key. The
+    /// desktop editions keep the store in memory under a key that dies with the process, so
+    /// a password sealed there would not open after a restart — refused, with the reason.
+    pub fn can_seal_own(&self) -> Result<(), String> {
+        if self.path.is_none() {
+            return Err("this edition keeps no key for secrets at rest (the hosted server does), so a password cannot be stored here; use a mail server without authentication".into());
+        }
+        match self.problem() {
+            Some(p) => Err(p),
+            None => Ok(()),
+        }
+    }
+
+    /// Seal one of the core's own secrets under this store's key, `aad` bound in.
+    pub fn seal_own(&self, aad: &str, plain: &str) -> Result<String, String> {
+        self.can_seal_own()?;
+        if plain.is_empty() || plain.len() > MAX_PASSWORD {
+            return Err(format!("the password must be 1–{MAX_PASSWORD} bytes"));
+        }
+        crate::crypto::seal_with_key(plain, &self.key, aad)
+    }
+
+    /// The inverse of `seal_own`; `None` when it does not open (another key, another `aad`).
+    pub fn open_own(&self, aad: &str, sealed: &str) -> Option<String> {
+        crate::crypto::open_with_key(sealed, &self.key, aad).ok()
+    }
+
     /// Why nothing can be kept (a configured key that is too short, a key file that could not be
     /// written), or `None` when the store works.
     pub fn problem(&self) -> Option<String> {
@@ -512,6 +540,21 @@ mod tests {
         }
         assert!(std::fs::read_to_string(&target).unwrap().starts_with("writer "));
         assert!(std::fs::read_dir(&d).unwrap().all(|e| !e.unwrap().file_name().to_string_lossy().ends_with(".tmp")));
+        std::fs::remove_dir_all(d).ok();
+    }
+
+    #[test]
+    fn own_secrets_need_a_kept_key() {
+        let mem = ClusterSecrets::in_memory();
+        assert!(mem.seal_own("mail.json:password", "pw").unwrap_err().contains("cannot be stored"), "desktop: refused, with the reason");
+        let d = dir();
+        let s = ClusterSecrets::open_with(Some(&d), Some(&"k".repeat(40)));
+        let sealed = s.seal_own("mail.json:password", "hunter2").unwrap();
+        assert!(!sealed.contains("hunter2"));
+        let again = ClusterSecrets::open_with(Some(&d), Some(&"k".repeat(40)));
+        assert_eq!(again.open_own("mail.json:password", &sealed).as_deref(), Some("hunter2"), "opens after a restart");
+        assert_eq!(again.open_own("other", &sealed), None, "bound to its name");
+        assert!(ClusterSecrets::open_with(Some(&d), Some("short")).seal_own("a", "b").is_err(), "a broken key keeps nothing");
         std::fs::remove_dir_all(d).ok();
     }
 

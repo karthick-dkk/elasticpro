@@ -29,7 +29,7 @@ pub mod derive;
 pub mod schedule;
 pub mod settings;
 pub mod store;
-mod run;
+pub(crate) mod run;
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -50,6 +50,34 @@ pub const MONTHLY_COLUMNS: &[&str] = &[
     "month", "daysWithData", "priBytes", "topExtra", "avgPerDay", "peakDay", "docs", "eventBytes",
     "subBytes", "topSourceHost", "topForwarder", "from",
 ];
+
+/// A column's name when the shared layout gives it none (`labels` in `VOLUME_LAYOUT_*`).
+/// One definition for every place that writes a header: the report's sheets now, the pages
+/// when they ask. `extra` is the operator's name for the extra breakdown (`extra.name`).
+pub fn column_label(table: &str, key: &str, extra: &str) -> String {
+    let fixed = match (table, key) {
+        (_, "topExtra") => return format!("Top {extra}"),
+        ("daily", "day") => "Day",
+        ("monthly", "month") => "Month",
+        ("monthly", "daysWithData") => "Days with data",
+        ("monthly", "avgPerDay") => "Average per day",
+        ("monthly", "peakDay") => "Peak day",
+        ("monthly", "from") => "Kept record days",
+        (_, "indices") => "Indices",
+        (_, "docs") => "Documents",
+        (_, "priBytes") => "Primary size",
+        (_, "totalBytes") => "Total size",
+        (_, "eventBytes") => "Event bytes",
+        (_, "subBytes") => "Sub size",
+        (_, "changeVsAvg") => "Change vs average %",
+        (_, "topSourceHost") => "Top source host",
+        (_, "topForwarder") => "Top forwarder",
+        (_, "topTag") => "Top tag",
+        (_, "topSourceIp") => "Top source IP",
+        _ => key,
+    };
+    fixed.to_string()
+}
 
 /// One day of one cluster, as kept. `None` is "not measured" all the way to the page,
 /// which renders it as such and never as 0.

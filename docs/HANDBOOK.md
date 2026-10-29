@@ -495,6 +495,53 @@ short version.
 `nextRunAt` is `null` where nothing schedules. Without a data directory every record message
 answers `{ok: false, kind: "no_store"}`.
 
+## Volume reports and mail — the message contract
+
+The short version of docs/VOLUME.md "Reports and mail". Code: `crates/elasticpro-core/src/report/`.
+
+- **Jobs**: `REPORT_RUN` queues one job per cluster. A job collects the period's missing days
+  through the volume collector (same rules: Background class, origin `volume-report`, one
+  collection per cluster at a time and two clusters at once, the daily run included), builds
+  the file from `volume::derive` (no figure computed twice), keeps it in `<data>/reports/`
+  (0600, pruned after 7 days) and mails it when `mail` is set. 3..5 jobs at once (default 3,
+  `REPORT_CONCURRENCY_SET`), the rest FIFO; the queue is `<data>/reports/jobs.json`, and a job
+  running at a restart is marked `failed: "the server restarted"`.
+- **Stops**: `REPORT_STOP` (admin) ends a queued job at once and a running one between days.
+  **The emergency stop fails a job** that would have to collect, saying so — run it again
+  when the stop is over. An unreachable cluster is not asked: the file holds what the record
+  has, and the job carries a `warning`.
+- **Mail**: `<data>/mail.json`, the password sealed under the cluster-secrets key (hosted
+  only — the desktop editions have no kept key and refuse to store one: `cannot_store_password`).
+  config.txt `UI_SMTP_*` locks fields; `UI_SMTP_PASSWORD_FILE` is read at send time. "none"
+  security only with auth "none". Recipients of every report mail — a job's with `mail: true`
+  and the mailed report — are the mailed report's `to/cc/bcc`, which only an admin sets: a user
+  cannot send cluster figures to an address of their choosing.
+- **Mailed report**: `<data>/report-schedule.json`; monthly (previous month, on the 1st), weekly
+  (previous Mon..Sun, on Monday), daily (yesterday, after that day's scheduled collection), or
+  manual, at `at` server local time. The last period sent is kept, so a restart neither resends
+  nor skips one; saving a schedule counts the period whose moment has passed as handled. One
+  .xlsx with a sheet set per cluster. Hosted timer (`volume report: timer started`, no user).
+- **Audit**: one line per mail (`volume report mailed` / `mail server test`: user, recipient
+  count, ok), per settings change, stop and concurrency change. Never an address, never a
+  password, never file contents.
+
+| Message | Role | Answer |
+|---|---|---|
+| `REPORT_RUN {clusterIds, period, format?, mail?}` | user | `{jobs: [Job], refused: [{clusterId, reason}]}`; `period` = `{from, to}`, `"month:YYYY-MM"`, `"yesterday"`, `"last7"` |
+| `REPORT_JOBS` | user | `{jobs, concurrency, running, queued}` — jobs of the clusters the caller sees, newest first |
+| `REPORT_STOP {id}` / `{all: true}` | admin | `{stopped: [ids ended now], stopping: [ids asked]}`; audited |
+| `REPORT_CLEAR` | user | `{removed}` — the caller's finished jobs (admin: all) and their files |
+| `REPORT_DOWNLOAD {id}` | user (starter or admin) | `{name, mime, bytes, base64}` |
+| `REPORT_CONCURRENCY_SET {n}` | admin | `{concurrency}`, 3..5 |
+| `MAIL_SETTINGS_GET` | admin | `{host, port, security, auth, user, from, passwordSet, passwordFrom, managed, configured, problem, canStorePassword, passwordStoreProblem}` |
+| `MAIL_SETTINGS_SET {…, password?, clearPassword?}` | admin | as GET; a managed field may be sent unchanged, not changed (`managed`) |
+| `MAIL_TEST {to}` | admin | `{ok, steps: [{step: connect\|tls\|auth\|send, ok, detail}]}`, `kind: smtp_failed` and `message` when a step failed |
+| `REPORT_SCHEDULE_GET` | admin | `{enabled, to, cc, bcc, schedule, at, clusters, subject, sheets, lastSent, managed, timer, nextSendAt, mailConfigured}` |
+| `REPORT_SCHEDULE_SET {…}` | admin | as GET |
+| `REPORT_SEND_NOW {period?}` | admin | `{job}` — the schedule's period, or the current month so far for a manual one |
+
+`Job = {id, kind: cluster|mailed, clusterId ("*" for mailed), clusterName, clusterIds, period: {from, to, label}, format, mail, by, createdAt, startedAt, endedAt, status, progress: {done, total}, file: {name, bytes} | null, error, mailError, stoppedBy, warning, sheets?, stopping}`.
+
 ## Zabbix connection — the message contract
 
 Hosted edition only (every other edition answers `{ok: false, kind: "not_supported", supported: false}`

@@ -280,6 +280,16 @@ UI_VOLUME_SIZE_BASIS enum primary,total,eventSize
 UI_VOLUME_TOP_VALUES int 5 100
 UI_VOLUME_KEEP_MONTHS int 1 36
 UI_VOLUME_COLLECT_AT text
+UI_SMTP_HOST text
+UI_SMTP_PORT int 1 65535
+UI_SMTP_SECURITY enum starttls,tls,none
+UI_SMTP_USER text
+UI_SMTP_PASSWORD_FILE text
+UI_SMTP_FROM text
+UI_REPORT_TO text
+UI_REPORT_SCHEDULE enum monthly,weekly,daily,manual
+UI_REPORT_AT text
+UI_REPORT_SHEETS text
 LISTEN_PORT deploy
 ALLOWED_DOMAINS deploy
 ALLOWED_UI_IPS deploy
@@ -323,8 +333,22 @@ cfg_check() {
         *) echo "must contain * (the source) and YYYY.MM.DD (the day), e.g. logstash-*-YYYY.MM.DD"; return 1 ;;
       esac
       case $v in *[[:space:],/\\?#\"\<\>\|]*) echo "must be one index pattern: no spaces, commas or slashes"; return 1 ;; esac ;;
-    UI_VOLUME_COLLECT_AT)
+    UI_VOLUME_COLLECT_AT|UI_REPORT_AT)
       [[ $v =~ ^([01][0-9]|2[0-3]):[0-5][0-9]$ ]] || { echo "must be a time of day HH:MM, 00:00 to 23:59"; return 1; } ;;
+    # The core checks these properly (settings.rs check_text); here, the mistakes worth
+    # catching before a deploy: a URL for a host, a list that is not addresses.
+    UI_SMTP_HOST)
+      [[ $v =~ ^[^[:space:]/@?#]+$ ]] || { echo "must be a host name or an address, without a scheme or a path"; return 1; } ;;
+    UI_SMTP_FROM)
+      [[ $v == *@* ]] || { echo "must be a mail address, e.g. ElasticPro <elasticpro@example.com>"; return 1; } ;;
+    UI_REPORT_TO)
+      while IFS= read -r item; do
+        [[ $item == *?@?* ]] || { echo "\"$item\" is not a mail address"; return 1; }
+      done < <(cfg_list "$v") ;;
+    UI_REPORT_SHEETS)
+      while IFS= read -r item; do
+        case $item in daily|monthly|breakdown) ;; *) echo "\"$item\" is not one of: daily, monthly, breakdown"; return 1 ;; esac
+      done < <(cfg_list "$v") ;;
   esac
   return 0
 }

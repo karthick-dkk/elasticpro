@@ -146,6 +146,21 @@ const SPECS: &[Spec] = &[
     spec("UI_VOLUME_TOP_VALUES", Kind::Int(5, 100), To::Direct),
     spec("UI_VOLUME_KEEP_MONTHS", Kind::Int(1, 36), To::Direct),
     spec("UI_VOLUME_COLLECT_AT", Kind::Text, To::Direct),
+    // The volume report by mail (docs/VOLUME.md "Reports and mail"): the mail server, and the
+    // mailed report's recipients and schedule. Server settings, not UI defaults: read where
+    // they are used (report::mail, report::schedule), shown as locked through `managed` in
+    // MAIL_SETTINGS_GET / REPORT_SCHEDULE_GET. The password is never a value here, only the
+    // path of a file that holds it, read when a mail is sent.
+    spec("UI_SMTP_HOST", Kind::Text, To::Direct),
+    spec("UI_SMTP_PORT", Kind::Int(1, 65_535), To::Direct),
+    spec("UI_SMTP_SECURITY", Kind::Enum(&["starttls", "tls", "none"]), To::Direct),
+    spec("UI_SMTP_USER", Kind::Text, To::Direct),
+    spec("UI_SMTP_PASSWORD_FILE", Kind::Text, To::Direct),
+    spec("UI_SMTP_FROM", Kind::Text, To::Direct),
+    spec("UI_REPORT_TO", Kind::Text, To::Direct),
+    spec("UI_REPORT_SCHEDULE", Kind::Enum(&["monthly", "weekly", "daily", "manual"]), To::Direct),
+    spec("UI_REPORT_AT", Kind::Text, To::Direct),
+    spec("UI_REPORT_SHEETS", Kind::Text, To::Direct),
 ];
 
 /// `UI_*` key -> the name the UI's `DEFAULTS` (ui/js/core/config.js) gives it.
@@ -404,10 +419,26 @@ fn check_text(key: &str, v: String) -> Result<String, String> {
             None => Ok(v),
             Some(why) => Err(format!("{v:?} {why}, e.g. logstash-*-YYYY.MM.DD")),
         },
-        "UI_VOLUME_COLLECT_AT" => match crate::volume::schedule::parse_hhmm(&v) {
+        "UI_VOLUME_COLLECT_AT" | "UI_REPORT_AT" => match crate::volume::schedule::parse_hhmm(&v) {
             Some(_) => Ok(v),
             None => Err(format!("{v:?} is not a time of day HH:MM, 00:00 to 23:59")),
         },
+        "UI_SMTP_HOST" => match crate::report::mail::validate(&v, 25, crate::report::mail::Security::Tls, crate::report::mail::Auth::None, "", "x@example.com") {
+            Ok(()) => Ok(v),
+            Err(_) => Err(format!("{v:?} is not a host name or an address (no scheme, no path)")),
+        },
+        "UI_SMTP_FROM" => match v.parse::<lettre::message::Mailbox>() {
+            Ok(_) => Ok(v),
+            Err(_) => Err(format!("{v:?} is not a mail address")),
+        },
+        "UI_REPORT_TO" => {
+            let list = crate::report::schedule::comma_list(&v);
+            if list.is_empty() {
+                return Err("names no address".into());
+            }
+            crate::report::mail::check_addresses(&list, "UI_REPORT_TO").map(|_| v)
+        }
+        "UI_REPORT_SHEETS" => crate::report::schedule::check_sheets(&crate::report::schedule::comma_list(&v)).map(|_| v),
         _ => Ok(v),
     }
 }
@@ -502,6 +533,22 @@ ES_CONCURRENCY=2000\nLOG_LEVEL=loud\nZABBIX_SYNC_SECONDS=10\nUI_AUTO_REFRESH=TRU
                                     UI_VOLUME_INDEX_FORMAT=logs-*\nUI_VOLUME_COLLECT_AT=24:00\n");
         assert!(!bad.manages("UI_VOLUME_INDEX_FORMAT") && !bad.manages("UI_VOLUME_COLLECT_AT") && !bad.manages("UI_VOLUME_KEEP_MONTHS"));
         assert_eq!(bad.warnings().len(), 5, "{:?}", bad.warnings());
+    }
+
+    #[test]
+    fn mail_and_report_keys_validate_and_stay_out_of_ping() {
+        let s = Settings::parse("UI_SMTP_HOST=smtp.example.com\nUI_SMTP_PORT=587\nUI_SMTP_SECURITY=STARTTLS\nUI_SMTP_FROM=ElasticPro <ep@example.com>\n\
+                                  UI_SMTP_PASSWORD_FILE=/run/secrets/smtp\nUI_REPORT_TO=a@example.com, b@example.com\n\
+                                  UI_REPORT_SCHEDULE=Monthly\nUI_REPORT_AT=07:30\nUI_REPORT_SHEETS=daily,breakdown\n");
+        assert!(s.warnings().is_empty(), "{:?}", s.warnings());
+        assert_eq!((s.text("UI_SMTP_SECURITY"), s.text("UI_REPORT_SCHEDULE")), (Some("starttls"), Some("monthly")));
+        assert_eq!(s.ping_defaults(), json!({}), "server settings, not UI defaults");
+        let bad = Settings::parse("UI_SMTP_HOST=smtp://x\nUI_SMTP_PORT=0\nUI_SMTP_SECURITY=ssl\nUI_SMTP_FROM=nobody\n\
+                                    UI_REPORT_TO=a@example.com, nope\nUI_REPORT_SCHEDULE=hourly\nUI_REPORT_AT=7:30\nUI_REPORT_SHEETS=weekly\n");
+        for k in ["UI_SMTP_HOST", "UI_SMTP_PORT", "UI_SMTP_SECURITY", "UI_SMTP_FROM", "UI_REPORT_TO", "UI_REPORT_SCHEDULE", "UI_REPORT_AT", "UI_REPORT_SHEETS"] {
+            assert!(!bad.manages(k), "{k} should have been rejected");
+        }
+        assert_eq!(bad.warnings().len(), 8, "{:?}", bad.warnings());
     }
 
     #[test]

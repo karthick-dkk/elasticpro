@@ -52,6 +52,11 @@ flate2 = "1"
 # Server-local time of day, for the daily volume run's `collectAt` (TZ of the process).
 # The record's own days are UTC dates from index names and never go through a zone.
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+# The volume report by mail (docs/VOLUME.md "Reports and mail"). rustls on ring with the
+# system trust store, as everywhere else in this crate: no OpenSSL, no aws-lc. The SMTP
+# connection is driven step by step (connect, TLS, auth, send) so MAIL_TEST can say which
+# step failed; no pool, nothing kept open between sends.
+lettre = { version = "0.11", default-features = false, features = ["builder", "smtp-transport", "tokio1", "tokio1-rustls", "ring", "rustls-native-certs", "hostname"] }
 # Hosted only: the fleet cache writes through to Redis when ELASTICPRO_REDIS_URL is set. Behind
 # the `bridge` feature so the desktop build does not carry a Redis client it never uses.
 redis = { version = "1", optional = true, default-features = false, features = ["tokio-comp"] }

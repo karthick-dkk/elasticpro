@@ -318,6 +318,15 @@ pub fn required_role(msg_type: &str) -> Option<Role> {
         // everybody sees, so an operator's (audited).
         "VOLUME_LAYOUT_GET" => Some(Role::Guest),
         "VOLUME_LAYOUT_SET" => Some(Role::Operator),
+        // Volume reports: generating one is reading the record (a user's), and the queue is
+        // shown to everyone who sees the clusters it covers. Stopping somebody's job, the
+        // number of slots, the mail server and the mailed schedule are an administrator's:
+        // they spend the server's capacity, hold a credential, or send cluster figures out of
+        // the building. Clear and download check ownership in the handler.
+        "REPORT_RUN" | "REPORT_JOBS" | "REPORT_CLEAR" | "REPORT_DOWNLOAD" => Some(Role::User),
+        "REPORT_STOP" | "REPORT_CONCURRENCY_SET" => Some(Role::Admin),
+        "MAIL_SETTINGS_GET" | "MAIL_SETTINGS_SET" | "MAIL_TEST" => Some(Role::Admin),
+        "REPORT_SCHEDULE_GET" | "REPORT_SCHEDULE_SET" | "REPORT_SEND_NOW" => Some(Role::Admin),
 
         // Anything new is refused until somebody decides where it belongs.
         _ => Some(Role::Admin),
@@ -1912,6 +1921,21 @@ mod tests {
         assert_eq!(required_role("VOLUME_LAYOUT_SET"), Some(Role::Operator));
         assert!(authorize(Role::User, "VOLUME_LAYOUT_SET", "", "").is_err());
         assert!(authorize(Role::Operator, "VOLUME_LAYOUT_SET", "", "").is_ok());
+    }
+
+    #[test]
+    fn reports_are_a_users_and_stopping_them_and_mail_an_admins() {
+        for t in ["REPORT_RUN", "REPORT_JOBS", "REPORT_CLEAR", "REPORT_DOWNLOAD"] {
+            assert_eq!(required_role(t), Some(Role::User), "{t}");
+            assert!(authorize(Role::Guest, t, "", "").is_err(), "{t}");
+            assert!(authorize(Role::User, t, "", "").is_ok(), "{t}");
+        }
+        for t in ["REPORT_STOP", "REPORT_CONCURRENCY_SET", "MAIL_SETTINGS_GET", "MAIL_SETTINGS_SET", "MAIL_TEST",
+                  "REPORT_SCHEDULE_GET", "REPORT_SCHEDULE_SET", "REPORT_SEND_NOW"] {
+            assert_eq!(required_role(t), Some(Role::Admin), "{t}");
+            assert!(authorize(Role::Operator, t, "", "").is_err(), "{t}: not an operator's");
+            assert!(authorize(Role::Admin, t, "", "").is_ok(), "{t}");
+        }
     }
 
     #[test]
