@@ -11,7 +11,7 @@ import { bytes, num, compact, dt, ago, toCsv, download } from '../lib/fmt.js';
 import { state, client, fetchIndices, activeClusters, datasetFreshness, fleetPolicy } from '../core/state.js';
 import { pauseFor } from '../core/policy.js';
 import { hideAddress, scrubFresh } from '../core/evidence.js';
-import { card, collapsible, pill, statTile, table, empty, connectionBanner } from './common.js';
+import { card, pill, table, empty, connectionBanner } from './common.js';
 import { navigateTo } from '../core/intent.js';
 import { syncWrites, writeToggle } from '../core/writes.js';
 import {
@@ -23,7 +23,7 @@ import { findIndexEverywhere } from '../core/snapshot-verify.js';
 import { restoreIndicesDialog, restoreSourceOf } from '../ui/snapshot-dialogs.js';
 import { pageSlice, pagerBar } from '../lib/pager.js';
 import { freshnessBar } from '../lib/freshness.js';
-import { sourceSizeChart, perDayChart, volumeAnalysisCard } from '../ui/index-metrics.js';
+import { volumeSummary, resetVolumeSummary, showReportJobs } from '../ui/volume-summary.js';
 import { templatesView } from '../ui/templates-view.js';
 import { takeFocus } from '../core/focus.js';
 
@@ -50,9 +50,12 @@ export function render(el) {
   host = el;
   el.classList.add('dense');   // long tables: fit more on one screen
   selected.clear();
+  resetVolumeSummary();        // Summary reads the daily record afresh on each visit
   // Opened from an alert about ILM errors (core/focus.js): only the indices in an error step.
   const f = takeFocus('indices');
   if (f && f.ilm) { ui.ilmOnly = true; ui.view = 'indices'; ui.page = 0; if (f.index) ui.text = f.index; }
+  // From the top-bar "Reports" pill: Summary › Monthly, with the report jobs open.
+  if (f && f.reports) { ui.view = 'summary'; showReportJobs(); }
   syncWrites().then(draw).catch(() => {});
   draw();
   load();
@@ -114,9 +117,6 @@ function draw() {
   });
   const sourceList = [...sourcesMap.values()].sort((a, b) => b.size - a.size);
 
-  const totals = rows.reduce((s, r) => ({ docs: s.docs + r.docs, size: s.size + r.size, pri: s.pri + r.pri, shards: s.shards + r.pri * (1 + r.rep) }),
-    { docs: 0, size: 0, pri: 0, shards: 0 });
-
   mount(host,
     sourceBar(c, sourceList, all.length),
     // Paused is not a failure: nothing was asked, on purpose. Said as what it is.
@@ -140,7 +140,7 @@ function draw() {
             onclick: () => { ui.ilmOnly = false; ui.page = 0; draw(); } }, 'clear'))
       : null,
 
-    ui.view === 'summary' ? summaryView(c, rows, all, totals) : null,
+    ui.view === 'summary' ? summaryView(c) : null,
     ui.view === 'templates' ? templatesView(c, { draw }) : null,
     ui.view === 'summary' || ui.view === 'templates' ? null :
     tableCard(c, rows, all));
@@ -164,69 +164,17 @@ function viewTabs() {
   }, label);
   return h('div.seg', { role: 'group', 'aria-label': 'Indices view', style: { marginBottom: '10px' } },
     tab('indices', 'Indices', 'The index list, and the actions that manage it'),
-    tab('summary', 'Summary', 'Store size, sources, indices per day, and daily volume by field'),
+    tab('summary', 'Summary', 'Volume per day and per month, from the daily record the server keeps'),
     tab('templates', 'Templates', 'Index, component and legacy templates — view, edit, simulate, compare across clusters'));
 }
 
-function summaryView(c, rows, all, totals) {
-  return h('div',
-    h('div.toolbar', { style: { marginBottom: '12px' } },
-      h('label.field', 'Source', sourcePicker(
-        [...new Map(all.map((r) => [r.source || '__none', null])).keys()].length
-          ? [...all.reduce((m, r) => {
-              const k = r.source || '__none';
-              const cur = m.get(k) || { key: k, indices: 0, docs: 0, size: 0 };
-              cur.indices++; cur.docs += r.docs; cur.size += r.size;
-              return m.set(k, cur);
-            }, new Map()).values()].sort((a, b) => b.size - a.size)
-          : [], all.length))),
-
-    h('div.grid.c4', { style: { marginBottom: '14px' } },
-      statTile('Indices shown', `${num(rows.length)}`, `of ${num(all.length)} on ${c.name}`),
-      statTile('Documents', compact(totals.docs), `${num(totals.docs)} docs`),
-      statTile('Store size', bytes(totals.size), `${num(totals.shards)} shards`),
-      statTile('Sources detected',
-        String(new Set(all.map((r) => r.source).filter(Boolean)).size), 'parsed from index names')),
-
-    h('div.grid.c2', { style: { marginBottom: '10px' } },
-      collapsible('Store size by source', 'click a bar to filter the table', () =>
-        // Selecting a bar filters the table, so it also returns to the view that has one.
-        sourceSizeChart(all, { onSelect: (r) => { ui.sourceFilter = r.key; ui.page = 0; ui.view = 'indices'; draw(); } }),
-        { key: 'idx-by-source', open: true }),
-      collapsible('Indices per day', 'daily indices detected from the naming pattern', () =>
-        perDayChart(rows, { onSelect: (r) => { ui.from = r.key; ui.to = r.key; ui.page = 0; ui.view = 'indices'; draw(); } }),
-        { key: 'idx-per-day', open: true })),
-
-    volumeAnalysisCard(c, draw));
-}
-
-/* ----------------------------- volume analysis ------------------------------ */
-
 /**
- * Daily volume split by an ECS field — tag1, src_hostname — rather than by index.
- *
- * The index list answers "how much did this cluster take yesterday". This answers "which
- * device or tag was responsible", which is the question asked when the first number moves.
- * It costs one aggregation per field, so it runs on demand rather than on every render.
+ * Summary: the daily volume record the core keeps for this cluster, per day and per month
+ * (ui/volume-summary.js, docs/VOLUME.md). It replaced the cards and charts worked out here
+ * from the live index list, which could only ever see the days whose indices still exist.
  */
-/**
- * The source picker.
- *
- * Lives on the Summary view, not in the Indices toolbar. "Which source" is a question
- * about where the volume came from — the thing Summary is for — while the Indices
- * toolbar is for finding one index: a name, a date range, a status. Choosing a source
- * still filters the table, and still drops you back on the Indices view so the filter
- * you just applied is visible where it applies.
- */
-function sourcePicker(sourceList, total) {
-  const sel = h('select', { onchange: (e) => {
-    ui.sourceFilter = e.target.value; ui.page = 0; ui.view = 'indices'; draw();
-  } },
-    h('option', { value: 'all' }, `All sources (${total} indices)`),
-    ...sourceList.filter((x) => x.key !== '__none').map((x) => h('option', { value: x.key }, `${x.key} — ${x.indices} idx · ${bytes(x.size)}`)),
-    sourceList.some((x) => x.key === '__none') ? h('option', { value: '__none' }, '(indices without a source)') : null);
-  sel.value = ui.sourceFilter;
-  return sel;
+function summaryView(c) {
+  return volumeSummary(c, { redraw: draw });
 }
 
 function sourceBar(c, sourceList, total) {

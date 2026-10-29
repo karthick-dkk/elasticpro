@@ -309,6 +309,24 @@ pub fn required_role(msg_type: &str) -> Option<Role> {
         // (the handler checks ownership), and sees what others chose to share.
         "QUERY_LIST" | "QUERY_SAVE" | "QUERY_DELETE" => Some(Role::User),
         "SILENCE_SET" | "SILENCE_CLEAR" => Some(Role::Operator),
+        // The daily index-volume record: sizes per day by source name, top field values —
+        // the same kind of fact as an index listing, so not a guest's. Refresh now sends
+        // searches to the cluster, rate-limited per cluster in the handler.
+        "VOLUME_SETTINGS" | "VOLUME_FIELDS_CHECK" | "VOLUME_DAILY" | "VOLUME_MONTHLY" | "VOLUME_BREAKDOWN"
+        | "VOLUME_MONTHLY_ALL" | "VOLUME_RUN" => Some(Role::User),
+        // Which columns the volume tables show names no cluster; changing it changes what
+        // everybody sees, so an operator's (audited).
+        "VOLUME_LAYOUT_GET" => Some(Role::Guest),
+        "VOLUME_LAYOUT_SET" => Some(Role::Operator),
+        // Volume reports: generating one is reading the record (a user's), and the queue is
+        // shown to everyone who sees the clusters it covers. Stopping somebody's job, the
+        // number of slots, the mail server and the mailed schedule are an administrator's:
+        // they spend the server's capacity, hold a credential, or send cluster figures out of
+        // the building. Clear and download check ownership in the handler.
+        "REPORT_RUN" | "REPORT_JOBS" | "REPORT_CLEAR" | "REPORT_DOWNLOAD" => Some(Role::User),
+        "REPORT_STOP" | "REPORT_CONCURRENCY_SET" => Some(Role::Admin),
+        "MAIL_SETTINGS_GET" | "MAIL_SETTINGS_SET" | "MAIL_TEST" => Some(Role::Admin),
+        "REPORT_SCHEDULE_GET" | "REPORT_SCHEDULE_SET" | "REPORT_SEND_NOW" => Some(Role::Admin),
 
         // Anything new is refused until somebody decides where it belongs.
         _ => Some(Role::Admin),
@@ -1889,6 +1907,35 @@ mod tests {
     fn a_guest_cannot_walk_out_of_the_allowlist() {
         assert!(authorize(Role::Guest, "ES", "GET", "/_cluster/health/../../_cat/indices").is_err());
         assert!(authorize(Role::Guest, "ES", "GET", "/_nodes/../_cat/indices").is_err());
+    }
+
+    #[test]
+    fn the_volume_record_is_a_users_and_its_layout_an_operators() {
+        for t in ["VOLUME_SETTINGS", "VOLUME_FIELDS_CHECK", "VOLUME_DAILY", "VOLUME_MONTHLY", "VOLUME_BREAKDOWN",
+                  "VOLUME_MONTHLY_ALL", "VOLUME_RUN"] {
+            assert_eq!(required_role(t), Some(Role::User), "{t}");
+            assert!(authorize(Role::Guest, t, "", "").is_err(), "{t} names sources: not a guest's");
+            assert!(authorize(Role::User, t, "", "").is_ok(), "{t}");
+        }
+        assert_eq!(required_role("VOLUME_LAYOUT_GET"), Some(Role::Guest));
+        assert_eq!(required_role("VOLUME_LAYOUT_SET"), Some(Role::Operator));
+        assert!(authorize(Role::User, "VOLUME_LAYOUT_SET", "", "").is_err());
+        assert!(authorize(Role::Operator, "VOLUME_LAYOUT_SET", "", "").is_ok());
+    }
+
+    #[test]
+    fn reports_are_a_users_and_stopping_them_and_mail_an_admins() {
+        for t in ["REPORT_RUN", "REPORT_JOBS", "REPORT_CLEAR", "REPORT_DOWNLOAD"] {
+            assert_eq!(required_role(t), Some(Role::User), "{t}");
+            assert!(authorize(Role::Guest, t, "", "").is_err(), "{t}");
+            assert!(authorize(Role::User, t, "", "").is_ok(), "{t}");
+        }
+        for t in ["REPORT_STOP", "REPORT_CONCURRENCY_SET", "MAIL_SETTINGS_GET", "MAIL_SETTINGS_SET", "MAIL_TEST",
+                  "REPORT_SCHEDULE_GET", "REPORT_SCHEDULE_SET", "REPORT_SEND_NOW"] {
+            assert_eq!(required_role(t), Some(Role::Admin), "{t}");
+            assert!(authorize(Role::Operator, t, "", "").is_err(), "{t}: not an operator's");
+            assert!(authorize(Role::Admin, t, "", "").is_ok(), "{t}");
+        }
     }
 
     #[test]

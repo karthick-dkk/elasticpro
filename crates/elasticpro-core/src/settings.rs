@@ -131,6 +131,36 @@ const SPECS: &[Spec] = &[
     spec("UI_DEFAULT_SCOPE", Kind::Enum(&["last-selected", "all"]), To::Direct),
     spec("UI_ROWS_PER_PAGE", Kind::Int(5, 1000), To::Direct),
     spec("UI_MAX_LOG_ROWS", Kind::Int(10, 10_000), To::Direct),
+    // The daily volume record (docs/VOLUME.md). Lists are comma-separated field names, tried
+    // left to right; the two formats are checked further in `check_text`.
+    spec("UI_VOLUME_INDEX_FORMAT", Kind::Text, To::Direct),
+    spec("UI_VOLUME_TAG_FIELDS", Kind::Text, To::Direct),
+    spec("UI_VOLUME_FORWARDER_FIELDS", Kind::Text, To::Direct),
+    spec("UI_VOLUME_HOST_FIELDS", Kind::Text, To::Direct),
+    spec("UI_VOLUME_IP_FIELDS", Kind::Text, To::Direct),
+    spec("UI_VOLUME_EVENT_SIZE_FIELD", Kind::Text, To::Direct),
+    spec("UI_VOLUME_SUB_SIZE_FIELD", Kind::Text, To::Direct),
+    spec("UI_VOLUME_EXTRA_NAME", Kind::Text, To::Direct),
+    spec("UI_VOLUME_EXTRA_FIELDS", Kind::Text, To::Direct),
+    spec("UI_VOLUME_SIZE_BASIS", Kind::Enum(&["primary", "total", "eventSize"]), To::Direct),
+    spec("UI_VOLUME_TOP_VALUES", Kind::Int(5, 100), To::Direct),
+    spec("UI_VOLUME_KEEP_MONTHS", Kind::Int(1, 36), To::Direct),
+    spec("UI_VOLUME_COLLECT_AT", Kind::Text, To::Direct),
+    // The volume report by mail (docs/VOLUME.md "Reports and mail"): the mail server, and the
+    // mailed report's recipients and schedule. Server settings, not UI defaults: read where
+    // they are used (report::mail, report::schedule), shown as locked through `managed` in
+    // MAIL_SETTINGS_GET / REPORT_SCHEDULE_GET. The password is never a value here, only the
+    // path of a file that holds it, read when a mail is sent.
+    spec("UI_SMTP_HOST", Kind::Text, To::Direct),
+    spec("UI_SMTP_PORT", Kind::Int(1, 65_535), To::Direct),
+    spec("UI_SMTP_SECURITY", Kind::Enum(&["starttls", "tls", "none"]), To::Direct),
+    spec("UI_SMTP_USER", Kind::Text, To::Direct),
+    spec("UI_SMTP_PASSWORD_FILE", Kind::Text, To::Direct),
+    spec("UI_SMTP_FROM", Kind::Text, To::Direct),
+    spec("UI_REPORT_TO", Kind::Text, To::Direct),
+    spec("UI_REPORT_SCHEDULE", Kind::Enum(&["monthly", "weekly", "daily", "manual"]), To::Direct),
+    spec("UI_REPORT_AT", Kind::Text, To::Direct),
+    spec("UI_REPORT_SHEETS", Kind::Text, To::Direct),
 ];
 
 /// `UI_*` key -> the name the UI's `DEFAULTS` (ui/js/core/config.js) gives it.
@@ -149,6 +179,19 @@ const UI_DEFAULTS: &[(&str, &str)] = &[
     ("UI_DEFAULT_SCOPE", "defaultScope"),
     ("UI_ROWS_PER_PAGE", "tableRowsPerPage"),
     ("UI_MAX_LOG_ROWS", "maxLogRows"),
+    ("UI_VOLUME_INDEX_FORMAT", "volumeIndexFormat"),
+    ("UI_VOLUME_TAG_FIELDS", "volumeTag"),
+    ("UI_VOLUME_FORWARDER_FIELDS", "volumeForwarder"),
+    ("UI_VOLUME_HOST_FIELDS", "volumeSourceHost"),
+    ("UI_VOLUME_IP_FIELDS", "volumeSourceIp"),
+    ("UI_VOLUME_EVENT_SIZE_FIELD", "volumeEventSize"),
+    ("UI_VOLUME_SUB_SIZE_FIELD", "volumeSubSize"),
+    ("UI_VOLUME_EXTRA_NAME", "volumeExtraName"),
+    ("UI_VOLUME_EXTRA_FIELDS", "volumeExtraFields"),
+    ("UI_VOLUME_SIZE_BASIS", "volumeSizeBasis"),
+    ("UI_VOLUME_TOP_VALUES", "volumeTopValues"),
+    ("UI_VOLUME_KEEP_MONTHS", "volumeKeepMonths"),
+    ("UI_VOLUME_COLLECT_AT", "volumeCollectAt"),
 ];
 
 /// The `zabbix:` options of the config file, by the name the UI and the file use.
@@ -207,7 +250,7 @@ impl Settings {
                 s.values.remove(sp.key);
                 continue;
             }
-            match canonical(&sp.kind, value) {
+            match canonical(&sp.kind, value).and_then(|v| check_text(sp.key, v)) {
                 Ok(v) => {
                     s.values.insert(sp.key, v);
                 }
@@ -216,6 +259,13 @@ impl Settings {
                     s.warnings.push(format!("{key}: {why}; the setting is not managed"));
                 }
             }
+        }
+        // A password from config.txt goes only to a server config.txt names: otherwise an
+        // administrator could point the page's host at a server of their own and receive it.
+        // deploy.sh `config_validate` refuses the same combination.
+        if s.values.contains_key("UI_SMTP_PASSWORD_FILE") && !s.values.contains_key("UI_SMTP_HOST") {
+            s.values.remove("UI_SMTP_PASSWORD_FILE");
+            s.warnings.push("UI_SMTP_PASSWORD_FILE needs UI_SMTP_HOST: a password from config.txt goes only to a mail server config.txt names; the setting is not managed".into());
         }
         s
     }
@@ -359,10 +409,44 @@ fn canonical(kind: &Kind, v: &str) -> Result<String, String> {
             Ok(n) if (*lo..=*hi).contains(&n) => Ok(n.to_string()),
             _ => Err(format!("{v:?} is not a whole number from {lo} to {hi}")),
         },
-        Kind::Enum(options) => {
-            let l = v.to_ascii_lowercase();
-            if options.contains(&l.as_str()) { Ok(l) } else { Err(format!("{v:?} is not one of {}", options.join(", "))) }
+        // Matched without regard to case, kept in the option's own spelling: `eventsize` in
+        // the file is `eventSize` to everything that reads it.
+        Kind::Enum(options) => match options.iter().find(|o| o.eq_ignore_ascii_case(v)) {
+            Some(o) => Ok(o.to_string()),
+            None => Err(format!("{v:?} is not one of {}", options.join(", "))),
+        },
+    }
+}
+
+/// What a text key has to look like beyond "no control character". deploy.sh `cfg_check`
+/// applies the same two rules.
+fn check_text(key: &str, v: String) -> Result<String, String> {
+    match key {
+        "UI_VOLUME_INDEX_FORMAT" => match crate::volume::settings::index_format_problem(&v) {
+            None => Ok(v),
+            Some(why) => Err(format!("{v:?} {why}, e.g. logstash-*-YYYY.MM.DD")),
+        },
+        "UI_VOLUME_COLLECT_AT" | "UI_REPORT_AT" => match crate::volume::schedule::parse_hhmm(&v) {
+            Some(_) => Ok(v),
+            None => Err(format!("{v:?} is not a time of day HH:MM, 00:00 to 23:59")),
+        },
+        "UI_SMTP_HOST" => match crate::report::mail::validate(&v, 25, crate::report::mail::Security::Tls, crate::report::mail::Auth::None, "", "x@example.com") {
+            Ok(()) => Ok(v),
+            Err(_) => Err(format!("{v:?} is not a host name or an address (no scheme, no path)")),
+        },
+        "UI_SMTP_FROM" => match v.parse::<lettre::message::Mailbox>() {
+            Ok(_) => Ok(v),
+            Err(_) => Err(format!("{v:?} is not a mail address")),
+        },
+        "UI_REPORT_TO" => {
+            let list = crate::report::schedule::comma_list(&v);
+            if list.is_empty() {
+                return Err("names no address".into());
+            }
+            crate::report::mail::check_addresses(&list, "UI_REPORT_TO").map(|_| v)
         }
+        "UI_REPORT_SHEETS" => crate::report::schedule::check_sheets(&crate::report::schedule::comma_list(&v)).map(|_| v),
+        _ => Ok(v),
     }
 }
 
@@ -442,6 +526,43 @@ ES_CONCURRENCY=2000\nLOG_LEVEL=loud\nZABBIX_SYNC_SECONDS=10\nUI_AUTO_REFRESH=TRU
         assert_eq!(s.warnings().len(), 8, "{:?}", s.warnings());
         assert_eq!(s.flag("UI_AUTO_REFRESH"), Some(true), "case does not matter for a boolean");
         assert_eq!(s.text("UI_TLS"), Some("insecure"), "a later valid line replaces an invalid earlier one");
+    }
+
+    #[test]
+    fn volume_keys_validate_their_formats_and_reach_ping() {
+        let s = Settings::parse("UI_VOLUME_INDEX_FORMAT=logs-*-YYYY.MM.DD\nUI_VOLUME_COLLECT_AT=05:30\n\
+                                  UI_VOLUME_SIZE_BASIS=EVENTSIZE\nUI_VOLUME_TAG_FIELDS=tag1, tags\nUI_VOLUME_TOP_VALUES=50\n");
+        assert!(s.warnings().is_empty(), "{:?}", s.warnings());
+        assert_eq!(s.text("UI_VOLUME_SIZE_BASIS"), Some("eventSize"), "kept in the option's spelling");
+        assert_eq!(s.ping_defaults(), json!({ "volumeIndexFormat": "logs-*-YYYY.MM.DD", "volumeCollectAt": "05:30",
+                                              "volumeSizeBasis": "eventSize", "volumeTag": "tag1, tags", "volumeTopValues": 50 }));
+        let bad = Settings::parse("UI_VOLUME_INDEX_FORMAT=logs-YYYY.MM.DD\nUI_VOLUME_COLLECT_AT=6:00\nUI_VOLUME_KEEP_MONTHS=48\n\
+                                    UI_VOLUME_INDEX_FORMAT=logs-*\nUI_VOLUME_COLLECT_AT=24:00\n");
+        assert!(!bad.manages("UI_VOLUME_INDEX_FORMAT") && !bad.manages("UI_VOLUME_COLLECT_AT") && !bad.manages("UI_VOLUME_KEEP_MONTHS"));
+        assert_eq!(bad.warnings().len(), 5, "{:?}", bad.warnings());
+    }
+
+    #[test]
+    fn mail_and_report_keys_validate_and_stay_out_of_ping() {
+        let s = Settings::parse("UI_SMTP_HOST=smtp.example.com\nUI_SMTP_PORT=587\nUI_SMTP_SECURITY=STARTTLS\nUI_SMTP_FROM=ElasticPro <ep@example.com>\n\
+                                  UI_SMTP_PASSWORD_FILE=/run/secrets/smtp\nUI_REPORT_TO=a@example.com, b@example.com\n\
+                                  UI_REPORT_SCHEDULE=Monthly\nUI_REPORT_AT=07:30\nUI_REPORT_SHEETS=daily,breakdown\n");
+        assert!(s.warnings().is_empty(), "{:?}", s.warnings());
+        assert_eq!((s.text("UI_SMTP_SECURITY"), s.text("UI_REPORT_SCHEDULE")), (Some("starttls"), Some("monthly")));
+        assert_eq!(s.ping_defaults(), json!({}), "server settings, not UI defaults");
+        let bad = Settings::parse("UI_SMTP_HOST=smtp://x\nUI_SMTP_PORT=0\nUI_SMTP_SECURITY=ssl\nUI_SMTP_FROM=nobody\n\
+                                    UI_REPORT_TO=a@example.com, nope\nUI_REPORT_SCHEDULE=hourly\nUI_REPORT_AT=7:30\nUI_REPORT_SHEETS=weekly\n");
+        for k in ["UI_SMTP_HOST", "UI_SMTP_PORT", "UI_SMTP_SECURITY", "UI_SMTP_FROM", "UI_REPORT_TO", "UI_REPORT_SCHEDULE", "UI_REPORT_AT", "UI_REPORT_SHEETS"] {
+            assert!(!bad.manages(k), "{k} should have been rejected");
+        }
+        assert_eq!(bad.warnings().len(), 8, "{:?}", bad.warnings());
+        // A password file without the host it goes to is refused: a page-set host must never
+        // receive it. A host that is itself refused leaves the file without one too.
+        for text in ["UI_SMTP_PASSWORD_FILE=/run/secrets/smtp\n", "UI_SMTP_HOST=smtp://x\nUI_SMTP_PASSWORD_FILE=/run/secrets/smtp\n"] {
+            let lone = Settings::parse(text);
+            assert!(!lone.manages("UI_SMTP_PASSWORD_FILE"), "{text}");
+            assert!(lone.warnings().iter().any(|w| w.starts_with("UI_SMTP_PASSWORD_FILE needs UI_SMTP_HOST")), "{:?}", lone.warnings());
+        }
     }
 
     #[test]

@@ -162,6 +162,114 @@ export function timeHistogram(buckets, opts = {}) {
   return el;
 }
 
+/* --------------------------------- line chart --------------------------------- */
+/**
+ * A quantity over time as a line: per day or per month volume.
+ *
+ * points: [{ key, label, value|null, avg?|null, changePct?|null }], oldest first. A null
+ * value is a gap in the line, never a dip to zero (a month with no record is not a month
+ * with no data). `avg` is drawn as a dashed line through each point's own average; the
+ * caller passes what the core worked out and this draws it, nothing more. The peak label
+ * names the highest point, and its change against its average when the point has one.
+ *
+ * opts: { height, formatY, formatX(point), yLabel, avgLabel, emptyText, onSelect }
+ */
+export function lineChart(points, opts = {}) {
+  const W = 1000, H = opts.height || 170;
+  const padL = 46, padR = 8, padT = 22, padB = 22;   // padT holds the peak label
+  const iw = W - padL - padR, ih = H - padT - padB;
+  const el = h('div.chart.line-chart');
+  const known = points.filter((p) => isNum(p.value));
+  if (!known.length) return mount(el, h('div.tbl-empty', opts.emptyText || 'Nothing recorded yet'));
+
+  const fmtY = opts.formatY || bytes;
+  const fmtX = opts.formatX || ((p) => p.label);
+  const max = Math.max(1, ...known.map((p) => p.value), ...points.filter((p) => isNum(p.avg)).map((p) => p.avg));
+  const n = points.length;
+  const xAt = (i) => (n === 1 ? padL + iw / 2 : padL + (i / (n - 1)) * iw);
+  const yAt = (v) => padT + ih - (v / max) * ih;
+
+  const s = svg('svg', { viewBox: `0 0 ${W} ${H}`, style: { width: '100%', height: 'auto' }, role: 'img',
+    'aria-label': opts.yLabel || 'line chart' });
+
+  // y grid, 3 lines, recessive; the labels in one group so they read as an axis.
+  const axis = svg('g', { class: 'axis' });
+  [...new Set([0, 0.5, 1].map((f) => max * f))].forEach((tv) => {
+    const y = yAt(tv);
+    s.append(svg('line', { x1: padL, x2: W - padR, y1: y, y2: y, class: 'grid-line' }));
+    axis.append(svg('text', { x: padL - 8, y: y + 3.5, 'text-anchor': 'end' }, fmtY(tv)));
+  });
+  s.append(axis);
+
+  // Five dates along the bottom, the first and the last always among them.
+  const xa = svg('g', { class: 'axis lc-x' });
+  [...new Set([0, 1, 2, 3, 4].map((k) => Math.round((k * (n - 1)) / 4)))].forEach((i) => {
+    const anchor = n === 1 ? 'middle' : i === 0 ? 'start' : i === n - 1 ? 'end' : 'middle';
+    xa.append(svg('text', { x: xAt(i), y: H - 6, 'text-anchor': anchor }, fmtX(points[i])));
+  });
+  s.append(xa);
+
+  // The line in runs between gaps; each run has its own light area under it.
+  const base = padT + ih;
+  for (const run of runsOf(points, (p) => isNum(p.value))) {
+    const d = run.map((i, k) => `${k ? 'L' : 'M'}${xAt(i).toFixed(1)},${yAt(points[i].value).toFixed(1)}`).join(' ');
+    const area = `${d} L${xAt(run[run.length - 1]).toFixed(1)},${base} L${xAt(run[0]).toFixed(1)},${base} Z`;
+    s.append(svg('path', { d: area, class: 'lc-area' }), svg('path', { d, class: 'lc-line' }));
+    if (run.length === 1) s.append(svg('circle', { cx: xAt(run[0]), cy: yAt(points[run[0]].value), r: 3, class: 'lc-dot' }));
+  }
+  for (const run of runsOf(points, (p) => isNum(p.avg))) {
+    if (run.length < 2) continue;
+    const d = run.map((i, k) => `${k ? 'L' : 'M'}${xAt(i).toFixed(1)},${yAt(points[i].avg).toFixed(1)}`).join(' ');
+    s.append(svg('path', { d, class: 'lc-avg' }));
+  }
+
+  // The peak, named where it is.
+  const peakI = points.reduce((best, p, i) => (isNum(p.value) && (best < 0 || p.value > points[best].value) ? i : best), -1);
+  if (peakI >= 0) {
+    const p = points[peakI];
+    const x = xAt(peakI), y = yAt(p.value);
+    const anchor = x > W - 160 ? 'end' : x < padL + 160 ? 'start' : 'middle';
+    s.append(svg('circle', { cx: x, cy: y, r: 3.5, class: 'lc-peak' }),
+      svg('text', { x, y: Math.max(11, y - 8), 'text-anchor': anchor, class: 'lc-peak-label' },
+        `▲ ${fmtX(p)} · ${fmtY(p.value)}${isNum(p.changePct) ? ` · ${signedPct(p.changePct)}` : ''}`));
+  }
+
+  // Hover: a slot per point, the whole height.
+  const slot = n === 1 ? iw : iw / (n - 1);
+  points.forEach((p, i) => {
+    s.append(svg('rect', {
+      x: Math.max(padL, xAt(i) - slot / 2), y: padT, width: slot, height: ih,
+      style: { fill: 'transparent', cursor: opts.onSelect ? 'pointer' : 'crosshair' },
+      onmousemove: (e) => tooltip.show(h('div', h('b', fmtX(p)),
+        tipRow(opts.yLabel || 'Value', isNum(p.value) ? fmtY(p.value) : 'no record'),
+        isNum(p.avg) ? tipRow(opts.avgLabel || 'Average', fmtY(p.avg)) : null,
+        isNum(p.changePct) ? tipRow('Change', signedPct(p.changePct)) : null), e.clientX, e.clientY),
+      onmouseleave: () => tooltip.hide(),
+      onclick: () => opts.onSelect && opts.onSelect(p),
+    }));
+  });
+  el.append(s);
+  return el;
+}
+
+const isNum = (v) => typeof v === 'number' && isFinite(v);
+
+/** "+12.3 %", "-4.0 %": a change, with its sign always written. */
+export function signedPct(v) {
+  return isNum(v) ? `${v >= 0 ? '+' : ''}${v.toFixed(1)} %` : '–';
+}
+
+/** Index runs of consecutive points that pass `ok`: the pieces of a line between gaps. */
+function runsOf(points, ok) {
+  const out = [];
+  let cur = null;
+  points.forEach((p, i) => {
+    if (ok(p)) { if (!cur) out.push(cur = []); cur.push(i); }
+    else cur = null;
+  });
+  return out;
+}
+
 /* ------------------------------ coverage strip -------------------------------- */
 /** days: [{ date:'YYYY-MM-DD', ok:boolean, count:number, detail?:string }] */
 export function coverageStrip(days, opts = {}) {

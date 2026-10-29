@@ -65,6 +65,8 @@ if (!config.clusters.length) {
 const problems = [];
 const ok = (cond, msg) => { if (!cond) problems.push(msg); };
 const doc = window.document;
+/** What transport.js reads off a reply: status, headers, and the body as text. jsdom has no Response. */
+const stubReply = (obj) => ({ ok: true, status: 200, headers: { get: () => null }, text: async () => JSON.stringify(obj), json: async () => obj });
 
 /* ----------------------------- the app's own shell ----------------------------- */
 
@@ -363,10 +365,207 @@ await go('indices');
   const pressed = [...doc.querySelectorAll('.seg .btn')].filter((b) => b.getAttribute('aria-pressed') === 'true');
   ok(pressed.length && pressed.some((b) => b.textContent.trim() === 'Summary'),
     'indices: the Summary tab is not marked selected after being pressed');
+  // 0.3.45: Summary is the daily volume record the core keeps (docs/VOLUME.md), Daily |
+  // Monthly. The cards and charts worked out from the live index list are gone.
+  const segBtn = (label) => [...doc.querySelectorAll('.vs .seg .btn')].find((b) => b.textContent.trim() === label);
+  ok(!!segBtn('Daily') && !!segBtn('Monthly'), 'indices: Summary has no Daily | Monthly switch');
+  ok(segBtn('Daily') && segBtn('Daily').getAttribute('aria-pressed') === 'true', 'indices: Summary should open on Daily');
   const sum = doc.body.textContent;
-  ok(/Store size by source/.test(sum), 'indices: Summary does not show the source breakdown');
-  ok(/Indices per day/.test(sum), 'indices: Summary does not show indices per day');
-  ok(/Volume analysis/.test(sum), 'indices: Summary does not show the volume analysis');
+  ok(!/Store size by source/.test(sum) && !/Volume analysis/.test(sum),
+    'indices: the old Summary cards (Store size by source, Volume analysis) are still drawn');
+  // Either the record or the plain "needs 0.3.45" state — never a crash, never zeros.
+  const settled = await waitFor(() => doc.querySelector('.vs table.coltbl') || (/does not keep a daily volume record/.test(doc.body.textContent) ? doc.body : null),
+    'indices: Summary shows neither the daily record nor the "needs 0.3.45" state', 60000);
+  const coreHasVolume = !!(settled && doc.querySelector('.vs table.coltbl'));
+  if (!coreHasVolume) {
+    ok(/needs ElasticPro 0\.3\.45/.test(doc.body.textContent), 'indices: the "needs 0.3.45" state does not name the version');
+    ok(!doc.querySelector('.vs-cards'), 'indices: an older core still drew volume cards (they could only be zeros)');
+  } else {
+    // ---- Against the real core (0.3.45+) and tools/mock-es.mjs. These run once the core
+    // ---- answers VOLUME_*; with an older core the branch above runs instead.
+    // On the portable bridge opening Summary asks for a run (the record is empty), so wait
+    // for it to finish: the progress line goes and the rows are there.
+    await waitFor(() => !doc.querySelector('.vs-progress') && doc.querySelectorAll('.vs table.coltbl tbody tr').length >= 30 ? doc.body : null,
+      'indices: the daily record did not fill in after the run (30 days)', 120000);
+    const heads = [...doc.querySelectorAll('.vs table.coltbl thead th .colhead-name')].map((x) => x.textContent);
+    ok(JSON.stringify(heads) === JSON.stringify(['Index day', 'Indices', 'Documents', 'Primary size', 'Top Dataset',
+      'Event bytes', 'Sub size', 'vs 7-day avg', 'Top src_hostname', 'Top fwd_tag']),
+      `indices: the Daily table's default columns are ${heads.join(' | ')}`);
+    const t = doc.querySelector('.vs table.coltbl').textContent;
+    ok(/not measured/.test(t), 'indices: sub_size is absent in the mock, so Sub size should read "not measured"');
+    ok(/fwd-acme · \d+ %/.test(t), 'indices: the forwarder should resolve to fwdtag and show "fwd-acme · NN %"');
+    ok(/as of \d\d:\d\d/.test(t), 'indices: today\'s row does not say "as of HH:MM"');
+    ok(/Source/.test(doc.body.textContent) && [...doc.querySelectorAll('#vs-source option')].map((o) => o.value).join(',') === ',acme,beta',
+      'indices: the Source select should list All sources, acme, beta');
+    ok(!!doc.querySelector('.vs .line-chart path.lc-line') && !!doc.querySelector('.vs .lc-peak-label'),
+      'indices: the per-day line or its peak label is missing');
+    const exp = [...doc.querySelectorAll('.vs button')].find((b) => b.textContent === 'Export CSV');
+    if (exp) {
+      exp.click();
+      const f = files.at(-1);
+      ok(f && /^volume-daily-.+\.csv$/.test(f.name), `indices: the daily export is named "${f && f.name}"`);
+      ok(f && f.text.split('\n')[0] === 'cluster,day,indices,docs,primary_bytes,total_bytes,event_bytes,event_bytes_measured,sub_bytes,change_vs_avg_pct,avg_days',
+        `indices: the daily CSV header is "${f && f.text.split('\n')[0]}"`);
+    }
+    segBtn('Monthly').click();
+    await waitFor(() => (doc.querySelector('.vs table.coltbl') && /Monthly volume/.test(doc.body.textContent) ? doc.body : null), 'indices: Monthly did not draw', 15000);
+    await waitFor(() => (/field resolved: src_hostname/.test(doc.body.textContent) ? doc.body : null), 'indices: the breakdown did not resolve src_hostname', 15000);
+    segBtn('Daily') && segBtn('Daily').click();
+    await settleFor(150);
+  }
+}
+
+/* ------------- Indices › Summary, driven against contract-shaped answers ------------- */
+
+// The same views, with the core's VOLUME_* answers stubbed to the shapes docs/VOLUME.md
+// gives (and the UI reads, core/volume-daily.js). This exercises every control whatever the
+// core is; the block above is what checks the real core once it has the messages.
+{
+  const realFetch = globalThis.fetch;
+  const DAYMS = 86400000;
+  const vDay = (n) => new Date(Date.now() - n * DAYMS).toISOString().slice(0, 10);
+  const settings = { sizeBasis: 'primary', extra: { name: 'Dataset', fields: ['event.dataset', 'log_type'] },
+    sourceHost: ['src_hostname', 'host.name'], forwarder: ['fwd_tag', 'fwdtag'], tag: ['tag1'], sourceIp: ['src_ip'] };
+  const status = { lastRunAt: Date.now() - 60000, nextRunAt: null, running: false, progress: null, lastError: null, collectAt: '06:00' };
+  const row = (n) => ({ day: vDay(n), final: n > 0, live: true, totalsAt: Date.now() - 60000, aggregatedAt: Date.now() - 60000,
+    indices: 2, docs: 5800000 - n * 1000, priBytes: n === 1 ? 1.3e10 : 8e9 + n * 1e7, totalBytes: 16e9 + n * 2e7,
+    eventBytes: n % 5 === 0 ? null : 3e9, subBytes: null, basis: n === 1 ? 1.3e10 : 8e9 + n * 1e7, avg: 8.1e9,
+    changeVsAvgPct: n === 1 ? 61 : -2,
+    top: { tag: { value: 'acme', share: 0.55 }, forwarder: { value: 'fwd-acme', share: 0.62 }, sourceHost: { value: 'fw-edge-01', share: 0.3 },
+      sourceIp: { value: '10.0.0.1', share: 0.3 }, extra: { value: 'firewall', share: 0.5 } } });
+  const ym = (i) => { const d = new Date(); return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() - i, 1)).toISOString().slice(0, 7); };
+  const month = (i) => (i > 9 ? { month: ym(i), daysWithData: 0 } : {
+    month: ym(i), partial: i === 0, daysWithData: i === 0 ? 29 : i === 9 ? 12 : 30, liveDays: i < 2 ? 30 : 0, keptDays: i === 1 ? 12 : i < 2 ? 0 : 30,
+    priBytes: 2.4e11, totalBytes: 4.8e11, docs: 1.7e8, eventBytes: i === 3 ? null : 9e10, subBytes: null, avgPerDay: 8e9,
+    peakDay: { day: `${ym(i)}-14`, basis: 1.3e10 }, top: { sourceHost: { value: 'fw-edge-01', share: 0.3 }, forwarder: { value: 'fwd-acme', share: 0.6 }, extra: { value: 'firewall', share: 0.5 } } });
+  const vsent = [];
+  const answer = (b) => {
+    switch (b.type) {
+      case 'VOLUME_DAILY': return { ok: true, settings, status, sources: ['acme', 'beta'], skipped: ['metrics-2026.09'],
+        cards: { yesterday: { day: vDay(1), value: 1.3e10, avg: 8e9, changeVsAvgPct: 61 }, average: { days: b.avgDays, value: 8.4e9 },
+          monthSoFar: { month: ym(0), value: 2.3e11, days: 29 }, eventBytes30: { value: null, days: 30 } },
+        days: Array.from({ length: (b.days || 30) + 1 }, (_, n) => row(n)),
+        totals: { indices: 62, docs: 1.8e8, priBytes: 2.5e11, totalBytes: 5e11, eventBytes: null, subBytes: null } };
+      case 'VOLUME_MONTHLY': return { ok: true, status, months: Array.from({ length: b.months || 13 }, (_, i) => month(i)) };
+      case 'VOLUME_BREAKDOWN': return { ok: true, field: b.field, resolved: 'src_hostname', totals: {}, rows: [
+        { value: 'fw-edge-01', docs: 100, eventBytes: 5e8, estPriBytes: 2e9, sharePct: 40, daysSeen: 29 },
+        { kind: 'missing', docs: 5, eventBytes: null, estPriBytes: 1e8, sharePct: 2, daysSeen: 29 },
+        { kind: 'other', docs: 50, eventBytes: 2e8, estPriBytes: 1e9, sharePct: 20, daysSeen: 29 }] };
+      case 'VOLUME_RUN': return { ok: true, started: [], already: [], tooSoon: b.clusterIds || [] };
+      case 'VOLUME_LAYOUT_GET': return { ok: true, layouts: { daily: null, monthly: null } };
+      case 'VOLUME_LAYOUT_SET': return { ok: true, layouts: { [b.table]: b.layout } };
+      case 'VOLUME_MONTHLY_ALL': return { ok: true, clusters: config.clusters.map((c, k) => ({ clusterId: c.name, name: c.name,
+        months: [{ month: ym(1), daysWithData: 30, priBytes: 2e11 + k }, { month: ym(0), daysWithData: 29, priBytes: 1.9e11, partial: true }, { month: ym(2), daysWithData: 0 }] })) };
+      default: return null;
+    }
+  };
+  globalThis.fetch = async (input, init) => {
+    const body = init && init.body ? JSON.parse(init.body) : {};
+    if (String(body.type || '').startsWith('VOLUME_')) { vsent.push(body); return stubReply(answer(body)); }
+    return realFetch(input, init);
+  };
+  const vsBtn = (label, root = doc) => [...root.querySelectorAll('.vs button')].find((b) => b.textContent.trim() === label);
+  const segBtn = (label) => [...doc.querySelectorAll('.vs .seg .btn')].find((b) => b.textContent.trim() === label);
+  try {
+    await go('overview');
+    await go('indices');
+    [...doc.querySelectorAll('button')].find((b) => b.textContent.trim() === 'Summary').click();
+    await waitFor(() => doc.querySelector('.vs table.coltbl'), 'summary (stubbed): the Daily table did not draw');
+    const txt = () => doc.querySelector('.vs').textContent;
+    for (const k of ['Yesterday · primary', 'Average per day', 'This month so far', 'Event bytes · 30 days']) {
+      ok(txt().includes(k), `summary (stubbed): no "${k}" card`);
+    }
+    ok(/\+61\.0 %/.test(txt()) && /vs 7-day avg/.test(txt()), 'summary (stubbed): the Yesterday card does not show +61.0 % vs 7-day avg');
+    ok(!!doc.querySelector('.vs-cards .vs-notm'), 'summary (stubbed): Event bytes · 30 days should read "not measured" (null), not 0');
+    const avgBtns = [...doc.querySelectorAll('.vs-cards .seg .btn')];
+    ok(avgBtns.map((b) => b.textContent).join(' ') === '3D 7D 15D 30D 60D 180D', `summary (stubbed): the average buttons are ${avgBtns.map((b) => b.textContent).join(' ')}`);
+    ok(avgBtns.find((b) => b.textContent === '7D')?.getAttribute('aria-pressed') === 'true', 'summary (stubbed): 7D should be the default average');
+    ok(/Primary size per day · last 30 days/.test(txt()), 'summary (stubbed): no "Primary size per day · last 30 days" graph');
+    ok(/▲ .+ · .+ · \+61\.0 %/.test(doc.querySelector('.vs .lc-peak-label')?.textContent || ''), 'summary (stubbed): the peak label is not "▲ day · size · +x %"');
+    ok(!!doc.querySelector('.vs path.lc-avg'), 'summary (stubbed): no dashed average line');
+    // Today is not plotted: 30 finished days, one point each.
+    ok(doc.querySelectorAll('.vs .line-chart svg > rect').length === 30, `summary (stubbed): ${doc.querySelectorAll('.vs .line-chart svg > rect').length} points plotted, expected 30 finished days`);
+    const heads = () => [...doc.querySelectorAll('.vs table.coltbl thead th .colhead-name')].map((x) => x.textContent);
+    ok(heads().length === 10 && heads()[0] === 'Index day', `summary (stubbed): default columns ${heads().join(' | ')}`);
+    const firstRow = doc.querySelector('.vs table.coltbl tbody tr');
+    ok(firstRow && firstRow.classList.contains('today') && /as of \d\d:\d\d/.test(firstRow.textContent), 'summary (stubbed): the newest row is not today "as of HH:MM"');
+    ok(!!doc.querySelector('.vs table.coltbl tfoot tr.total'), 'summary (stubbed): no totals row from the core\'s totals');
+    ok(/fwd-acme · 62 %/.test(doc.querySelector('.vs table.coltbl').textContent), 'summary (stubbed): the top forwarder is not "fwd-acme · 62 %"');
+    ok(!!doc.querySelector('.vs table.coltbl .vs-high'), 'summary (stubbed): a change over +25 % is not marked');
+    ok(/Event bytes "not measured"/.test(txt()) && /never shown as 0/.test(txt()), 'summary (stubbed): no amber line under the table for unmeasured event bytes');
+    ok(/Columns \(10\/13\)/.test(txt()), 'summary (stubbed): the columns button does not read "Columns (10/13)"');
+
+    // The 30D button re-asks with the new window, and the select in the legend agrees.
+    vsent.length = 0;
+    avgBtns.find((b) => b.textContent === '30D').click();
+    await settleFor(200);
+    ok(vsent.some((m) => m.type === 'VOLUME_DAILY' && m.avgDays === 30), 'summary (stubbed): choosing 30D did not ask VOLUME_DAILY with avgDays 30');
+    ok(doc.getElementById('vs-avg-days')?.value === '30', 'summary (stubbed): the legend\'s Average select did not follow the 30D button');
+    ok(heads().includes('vs 30-day avg'), 'summary (stubbed): the change column is not renamed to the 30-day average');
+
+    // Hide a column from its header menu: the shared layout is saved, the header goes.
+    vsent.length = 0;
+    const docsTh = [...doc.querySelectorAll('.vs table.coltbl thead th')].find((th) => th.dataset.col === 'docs');
+    docsTh.querySelector('.colhead-menu').click();
+    const hide = [...doc.querySelectorAll('.menu-pop button')].find((b) => b.textContent.includes('Hide column'));
+    ok(!!hide, 'summary (stubbed): the column menu has no "Hide column"');
+    if (hide) hide.click();
+    await settleFor(150);
+    const set = vsent.find((m) => m.type === 'VOLUME_LAYOUT_SET');
+    ok(set && set.table === 'daily' && set.layout.hidden.includes('docs'), `summary (stubbed): hiding saved ${JSON.stringify(set)}`);
+    ok(!heads().includes('Documents'), 'summary (stubbed): the hidden column is still drawn');
+
+    // Rename inline, in the header.
+    const priTh = [...doc.querySelectorAll('.vs table.coltbl thead th')].find((th) => th.dataset.col === 'priBytes');
+    priTh.querySelector('.colhead-menu').click();
+    [...doc.querySelectorAll('.menu-pop button')].find((b) => b.textContent.includes('Edit name')).click();
+    const input = priTh.querySelector('input.colhead-input');
+    ok(!!input, 'summary (stubbed): Edit name did not open an input in the header');
+    if (input) {
+      input.value = 'Primary GB';
+      [...priTh.querySelectorAll('button')].find((b) => b.textContent === 'Save').click();
+      await settleFor(150);
+      ok(heads().includes('Primary GB'), `summary (stubbed): the rename did not show — ${heads().join(' | ')}`);
+    }
+
+    // Export follows the contract's daily columns.
+    vsBtn('Export CSV').click();
+    const f = files.at(-1);
+    ok(f && f.text.split('\n')[0] === 'cluster,day,indices,docs,primary_bytes,total_bytes,event_bytes,event_bytes_measured,sub_bytes,change_vs_avg_pct,avg_days',
+      `summary (stubbed): the daily CSV header is "${f && f.text.split('\n')[0]}"`);
+
+    // Refresh now, refused politely when it is too soon.
+    vsent.length = 0;
+    vsBtn('↻ Refresh now').click();
+    await settleFor(200);
+    ok(vsent.some((m) => m.type === 'VOLUME_RUN'), 'summary (stubbed): Refresh now did not send VOLUME_RUN');
+    ok(/less than a minute ago/.test(doc.body.textContent), 'summary (stubbed): a too-soon run is not explained');
+
+    // Monthly.
+    segBtn('Monthly').click();
+    await waitFor(() => (/Monthly volume/.test(doc.querySelector('.vs')?.textContent || '') && /field resolved/.test(doc.querySelector('.vs').textContent) ? doc.body : null),
+      'summary (stubbed): Monthly did not draw with its breakdown');
+    const mt = txt();
+    ok(/Primary size per month · last 13 months/.test(mt), 'summary (stubbed): no "Primary size per month · last 13 months" graph');
+    ok(/a month is the sum of its days/.test(mt), 'summary (stubbed): the Monthly sub-header is missing');
+    for (const w of ['live indices', 'kept record', '12 days kept record, 30 live', 'before the record began', 'so far']) {
+      ok(mt.includes(w), `summary (stubbed): the Monthly table never says "${w}"`);
+    }
+    ok(heads().join(' | ').startsWith('Month | Days with data | Primary size'), `summary (stubbed): Monthly columns ${heads().join(' | ')}`);
+    ok(/\(not set\)/.test(mt) && /all others/.test(mt), 'summary (stubbed): the breakdown does not list "(not set)" and "all others"');
+    ok(/field resolved: src_hostname/.test(mt), 'summary (stubbed): the breakdown does not name the resolved field');
+    ok(!!doc.querySelector('#vol-report-jobs'), 'summary (stubbed): the report-jobs mount point is missing from the Monthly toolbar');
+    vsBtn('Export CSV').click();
+    const fm = files.at(-1);
+    ok(fm && fm.text.split('\n')[0] === 'cluster,month,days_with_data,primary_bytes,avg_primary_bytes_per_day,peak_day,peak_primary_bytes,docs,event_bytes,from_kept_record_days',
+      `summary (stubbed): the monthly CSV header is "${fm && fm.text.split('\n')[0]}"`);
+    segBtn('Daily').click();
+    await settleFor(150);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+  // Leave it as the next blocks expect: the Indices page re-reads on its next visit.
+  await go('overview');
 }
 
 await goOne('snapshots');
@@ -460,6 +659,211 @@ await goOne('snapshots');
   }
 }
 
+/* ------------- report jobs: Generate report, the job list and the top-bar pill ------------- */
+
+// Indices › Summary › Monthly › Generate report and the "Reports" pill (0.3.45), against the
+// REPORT_* answers docs/VOLUME.md gives, stubbed at fetch so this runs whatever the core is.
+// Proves: the panel runs one job per picked cluster (the REPORT_RUN payload), the list shows
+// running / queued / done and Download saves the file, Stop is an admin's alone (REPORT_STOP),
+// and the pill follows REPORT_JOBS and opens the panel.
+{
+  const R = await load('core/reports.js');
+  const st = (await load('core/state.js')).state;
+  const realFetch = globalThis.fetch;
+  const rsent = [];
+  let jobs = [];
+  let nextId = 1;
+  const FILE = 'volume-prod-2026-09-01_2026-09-30.xlsx';
+  const answer = (b) => {
+    switch (b.type) {
+      case 'REPORT_JOBS': return { ok: true, jobs, concurrency: 3,
+        running: jobs.filter((j) => j.status === 'running').length, queued: jobs.filter((j) => j.status === 'queued').length };
+      case 'REPORT_RUN': {
+        const made = (b.clusterIds || []).map((id) => ({ id: `j${nextId++}`, kind: 'cluster', clusterId: id, clusterName: id, clusterIds: [id],
+          period: { from: '2026-09-01', to: '2026-09-30', label: 'Sep 2026' }, format: b.format, mail: b.mail, by: 'local',
+          createdAt: Date.now(), startedAt: null, endedAt: null, status: 'queued', progress: { done: 0, total: 0 }, file: null,
+          error: null, mailError: null, stoppedBy: null, warning: null, stopping: false }));
+        jobs = [...made, ...jobs];
+        return { ok: true, jobs: made, refused: [] };
+      }
+      case 'REPORT_STOP': return { ok: true, stopped: 1, stopping: 0 };
+      case 'REPORT_CLEAR': return { ok: true, removed: 0 };
+      case 'REPORT_DOWNLOAD': return { ok: true, name: FILE, mime: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', bytes: 4, base64: 'UEsDBA==' };
+      case 'REPORT_CONCURRENCY_SET': return { ok: true, concurrency: b.n };
+      default: return { ok: false, kind: 'bad_message', message: `Unknown message type "${b.type}"` };
+    }
+  };
+  let older = true;
+  let bound = null;   // a REPORT_RUN refusal the core's bounds make
+  globalThis.fetch = async (input, init) => {
+    const body = init && init.body ? JSON.parse(init.body) : {};
+    if (bound && body.type === 'REPORT_RUN') { rsent.push(body); return stubReply(bound); }
+    if (/^(REPORT_|MAIL_)/.test(String(body.type || ''))) {
+      rsent.push(body);
+      return stubReply(older ? { ok: false, kind: 'bad_message', message: `Unknown message type "${body.type}"` } : answer(body));
+    }
+    return realFetch(input, init);
+  };
+  const pill = () => doc.getElementById('reports-pill');
+  const rows = () => [...doc.querySelectorAll('#rj-panel .rj-job')];
+  try {
+    // An older core: no pill, no Generate report, and the job list is not asked for again.
+    R.resetReports();
+    R.startReportsPoll();
+    await go('indices');
+    [...doc.querySelectorAll('button')].find((b) => b.textContent.trim() === 'Summary').click();
+    await settleFor(200);
+    const mb = [...doc.querySelectorAll('.vs .seg .btn')].find((b) => b.textContent.trim() === 'Monthly');
+    if (mb) { mb.click(); await settleFor(300); }
+    ok(R.reports.supported === false, 'reports: an unknown REPORT_JOBS was not taken for an older core');
+    ok(!pill() || pill().hidden, 'reports: the pill shows on a core without reports');
+    const mountEl = doc.getElementById('vol-report-jobs');
+    ok(!mountEl || mountEl.hidden, 'reports: Generate report is offered by a core without reports');
+    const asked = rsent.length;
+    await R.refreshReports();
+    ok(rsent.length === asked, 'reports: an older core is asked for the job list again');
+    const daily = [...doc.querySelectorAll('.vs .seg .btn')].find((b) => b.textContent.trim() === 'Daily');
+    if (daily) daily.click();
+
+    // From here on, a core that runs reports. Whatever was said before, start over.
+    older = false;
+    R.resetReports();
+    R.startReportsPoll();
+    await go('overview');
+    await waitFor(() => (pill() && !pill().hidden ? pill() : null), 'reports: the top-bar pill did not show for a core that runs reports');
+    ok(pill() && pill().textContent === 'Reports · idle', `reports: the idle pill reads "${pill() && pill().textContent}"`);
+
+    await go('indices');
+    [...doc.querySelectorAll('button')].find((b) => b.textContent.trim() === 'Summary').click();
+    await settleFor(200);
+    const monthlyBtn = [...doc.querySelectorAll('.vs .seg .btn')].find((b) => b.textContent.trim() === 'Monthly');
+    if (monthlyBtn) monthlyBtn.click();
+    const open = await waitFor(() => doc.getElementById('rj-open'), 'reports: no Generate report button on Summary › Monthly');
+    const exportBtn = [...doc.querySelectorAll('.vs-bar button')].find((b) => b.textContent === 'Export CSV');
+    ok(!!open && !!exportBtn && open.closest('.vs-right') === exportBtn.closest('.vs-right'), 'reports: Generate report is not beside Export CSV');
+    if (open) {
+      open.click();
+      await settleFor(100);
+      const panelEl = doc.getElementById('rj-panel');
+      ok(!!panelEl && !panelEl.hidden, 'reports: Generate report did not open the panel');
+      // Indices is an evidence page: only the open cluster is listed until "More clients…".
+      const first = [...doc.querySelectorAll('#rj-panel .rj-client input')];
+      ok(first.length === 1, `reports: ${first.length} client boxes before More clients…, want only the open cluster`);
+      ok(!doc.getElementById('reports-pill'), 'reports: the pill is on an evidence page');
+      const more = doc.getElementById('rj-more');
+      ok(config.clusters.length < 2 || !!more, 'reports: no More clients… button');
+      if (more) { more.click(); await settleFor(50); }
+      const boxes = [...doc.querySelectorAll('#rj-panel .rj-client input')];
+      ok(boxes.length === config.clusters.length, `reports: ${boxes.length} client boxes for ${config.clusters.length} clusters`);
+      [...doc.querySelectorAll('#rj-panel button')].find((b) => b.textContent === 'Clear').click();
+      await settleFor(50);
+      const run = doc.getElementById('rj-run');
+      ok(run && run.disabled && run.textContent === 'Run report · 0 clients', `reports: with nothing picked Run reads "${run && run.textContent}" (disabled ${run && run.disabled})`);
+      [...doc.querySelectorAll('#rj-panel button')].find((b) => b.textContent === 'Select all').click();
+      await settleFor(50);
+      const all = [...doc.querySelectorAll('#rj-panel .rj-client input')];
+      ok(all.every((b) => b.checked), 'reports: Select all left a client unticked');
+      // Untick the last one by hand, as a person would.
+      const last = all.at(-1);
+      last.checked = false; last.dispatchEvent(new window.Event('change', { bubbles: true }));
+      const want = all.slice(0, -1).map((b) => b.value);
+      const period = doc.getElementById('rj-period');
+      ok(period && period.options[0].textContent.endsWith('(so far)') && [...period.options].some((o) => o.value === 'last7') && [...period.options].some((o) => o.value === 'yesterday'),
+        'reports: the Period list lacks this month so far, Yesterday or Last 7 days');
+      period.value = period.options[1].value;
+      period.dispatchEvent(new window.Event('change', { bubbles: true }));
+      ok(doc.getElementById('rj-run').textContent === `Run report · ${want.length} client${want.length === 1 ? '' : 's'}`, `reports: Run reads "${doc.getElementById('rj-run').textContent}"`);
+      ok(/report recipients/.test(doc.querySelector('#rj-panel .rj-check').textContent), 'reports: the mail box does not say where the mail goes');
+      rsent.length = 0;
+      doc.getElementById('rj-run').click();
+      await settleFor(300);
+      const runMsg = rsent.find((m) => m.type === 'REPORT_RUN');
+      ok(!!runMsg && JSON.stringify(runMsg.clusterIds) === JSON.stringify(want) && runMsg.period === period.options[1].value
+        && runMsg.format === 'xlsx' && runMsg.mail === false, `reports: Run sent ${JSON.stringify(runMsg)}`);
+      ok(rows().length === want.length, `reports: ${rows().length} job rows after queueing ${want.length}`);
+
+      // The core's bounds: its message is the status line, as it says it.
+      bound = { ok: false, kind: 'too_many_jobs', message: 'at most 15 report jobs at once: 2 more fit' };
+      doc.getElementById('rj-run').click();
+      await settleFor(200);
+      const stl = doc.getElementById('rj-status');
+      ok(stl && !stl.hidden && stl.textContent.startsWith('at most 15 report jobs at once: 2 more fit'), `reports: too_many_jobs status reads "${stl && stl.textContent}"`);
+      bound = { ok: false, kind: 'too_many_mails', message: 'ten mails an hour is the most' };
+      doc.getElementById('rj-run').click();
+      await settleFor(200);
+      ok(doc.getElementById('rj-status').textContent.startsWith('ten mails an hour is the most'), 'reports: too_many_mails message not shown');
+      bound = null;
+
+      // The list as the core moves it on: running, queued, done.
+      jobs = [
+        { ...jobs[0], id: 'jr', status: 'running', progress: { done: 31, total: 50 }, createdAt: 1 },
+        { ...jobs[0], id: 'jq', status: 'queued', createdAt: 2, clusterName: 'second' },
+        { ...jobs[0], id: 'jd', status: 'done', file: { name: FILE, bytes: 4 }, endedAt: Date.now(), mailError: 'mail is not set up', createdAt: 0 },
+      ];
+      await R.refreshReports();
+      await settleFor(50);
+      const txt = doc.getElementById('rj-panel').textContent;
+      ok(txt.includes('Running · 62 %') && !!doc.querySelector('#rj-panel .rj-bar'), 'reports: the running job has no "Running · 62 %" and bar');
+      ok(txt.includes('Queued · #1 in line'), 'reports: the queued job does not say its place');
+      ok(txt.includes(`Done · ${FILE}`), 'reports: the finished job does not name its file');
+      ok(txt.includes('Not mailed: mail is not set up'), 'reports: a mailError is not shown');
+      ok(txt.includes('1 running · 1 queued · 1 done'), 'reports: the list header does not count the jobs');
+      ok(/At most 3 run together/.test(txt), 'reports: the footnote does not say how many run together');
+      // (The pill itself is not on this evidence page; what it would say is the poller's.)
+      ok(R.pillText(R.reports) === 'Reports · 1 running · 1 queued', `reports: the pill would read "${R.pillText(R.reports)}"`);
+
+      // Download: REPORT_DOWNLOAD, base64 to a file of the core's name.
+      rsent.length = 0;
+      const dl = doc.querySelector('#rj-panel .rj-job[data-job="jd"] .rj-dl');
+      ok(!!dl, 'reports: the done job has no Download');
+      if (dl) {
+        dl.click();
+        await settleFor(200);
+        ok(rsent.some((m) => m.type === 'REPORT_DOWNLOAD' && m.id === 'jd'), `reports: Download sent ${JSON.stringify(rsent)}`);
+        ok(files.at(-1) && files.at(-1).name === FILE, `reports: Download saved "${files.at(-1) && files.at(-1).name}"`);
+      }
+
+      // Stop: an admin's (the portable build has no accounts, so it is admin here).
+      const stop = doc.querySelector('#rj-panel .rj-job[data-job="jr"] .rj-stop');
+      ok(!!stop, 'reports: an admin sees no Stop on a running job');
+      rsent.length = 0;
+      if (stop) { stop.click(); await settleFor(200); }
+      ok(rsent.some((m) => m.type === 'REPORT_STOP' && m.id === 'jr'), `reports: Stop sent ${JSON.stringify(rsent)}`);
+      ok(!doc.getElementById('rj-stop-all').hidden, 'reports: an admin sees no Stop all');
+
+      // Anybody else: no Stop, the reason in its place, the concurrency read-only.
+      st.caller = { name: 'reader', role: 'user' };
+      await R.refreshReports();
+      await settleFor(50);
+      ok(!doc.querySelector('#rj-panel .rj-stop'), 'reports: a user is offered Stop');
+      ok(/admin only/.test(doc.querySelector('#rj-panel .rj-job[data-job="jr"]').textContent), 'reports: a user is not told Stop is admin only');
+      ok(doc.getElementById('rj-stop-all').hidden, 'reports: a user is offered Stop all');
+      ok(doc.getElementById('rj-concurrency').disabled, 'reports: a user can change how many run at once');
+      st.caller = null;
+      await R.refreshReports();
+
+      // Close it, leave, and come back through the pill: Monthly, the panel open.
+      [...doc.querySelectorAll('#rj-panel button')].find((b) => b.textContent === 'Close').click();
+      const vsMod = await load('ui/volume-summary.js');
+      vsMod.resetVolumeSummary();
+      await go('overview');
+      pill().click();
+      await settleFor(500);
+      const back = await waitFor(() => { const p = doc.getElementById('rj-panel'); return p && p.isConnected && !p.hidden ? p : null; },
+        'reports: the pill did not open Indices › Summary with the report panel');
+      ok(!!back && (doc.location.hash || '') === '#/indices', `reports: the pill went to ${doc.location.hash}`);
+      const pressed = [...doc.querySelectorAll('.vs .seg .btn')].find((b) => b.getAttribute('aria-pressed') === 'true');
+      ok(pressed && pressed.textContent.trim() === 'Monthly', 'reports: the pill did not land on Monthly');
+    }
+  } finally {
+    globalThis.fetch = realFetch;
+    jobs = [];
+  }
+  // The rest of this run is about other things: back to what the real core says.
+  R.resetReports();
+  await go('overview');
+}
+
 /* --------------------- the volume report and its two sheets --------------------- */
 
 await backToFleet();
@@ -539,12 +943,66 @@ await go('volume');
     await settleFor(200);
     ok(!!panel('Capacity by cluster'), 'volume: the summary view did not render');
   }
+
+  // Monthly (0.3.45): one row per cluster, a column per month of primary size, from
+  // VOLUME_MONTHLY_ALL. Against the real core first: the plain "needs 0.3.45" state on an
+  // older one, the table once the core has the message.
+  {
+    ok(!!viewBtn('Monthly'), 'volume: no "Monthly" view button');
+    viewBtn('Monthly').click();
+    await waitFor(() => (panel('Monthly volume by cluster') && !/Reading the monthly record/.test(panel('Monthly volume by cluster').textContent) ? doc.body : null),
+      'volume: the Monthly view did not settle', 15000);
+    const mv = panel('Monthly volume by cluster');
+    if (mv && /does not keep a daily volume record/.test(mv.textContent)) {
+      ok(/needs ElasticPro 0\.3\.45/.test(mv.textContent) || /0\.3\.45/.test(mv.textContent), 'volume: the Monthly "needs" state does not name 0.3.45');
+    } else if (mv) {
+      // ---- Real core (0.3.45+): a row per cluster the caller sees.
+      ok(mv.querySelectorAll('tbody tr').length === config.clusters.length,
+        `volume: the Monthly view has ${mv.querySelectorAll('tbody tr').length} rows for ${config.clusters.length} cluster(s)`);
+    }
+
+    // Contract-shaped answer, so the layout and the export are checked whatever the core is.
+    const realFetch = globalThis.fetch;
+    const ymAgo = (i) => { const d = new Date(); return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() - i, 1)).toISOString().slice(0, 7); };
+    globalThis.fetch = async (input, init) => {
+      const body = init && init.body ? JSON.parse(init.body) : {};
+      if (body.type === 'VOLUME_MONTHLY_ALL') {
+        return stubReply({ ok: true, clusters: config.clusters.map((c) => ({ clusterId: c.name, name: c.name, months: [
+          { month: ymAgo(2), daysWithData: 0 }, { month: ymAgo(1), daysWithData: 30, priBytes: 2e11 },
+          { month: ymAgo(0), daysWithData: 29, priBytes: 1.9e11, partial: true }] })) });
+      }
+      return realFetch(input, init);
+    };
+    try {
+      [...doc.querySelectorAll('button')].find((b) => b.textContent === '↻ Refresh').click();
+      // Wait for the stubbed answer's table (Cluster + three months), not the one the real
+      // record drew before the refresh: an export clicked while the reply is being asked
+      // again writes nothing, and files.at(-1) would be an earlier view's file.
+      const p = await waitFor(() => {
+        const x = panel('Monthly volume by cluster');
+        return x && x.querySelector('table') && x.querySelectorAll('thead th').length === 4 ? x : null;
+      }, 'volume: the Monthly table did not draw from a VOLUME_MONTHLY_ALL answer');
+      if (p) {
+        const hd = [...p.querySelectorAll('thead th')].map((x) => x.textContent.trim());
+        ok(hd.length === 4 && hd[0] === 'Cluster', `volume: the Monthly columns are ${hd.join(' | ')}`);
+        ok(p.querySelectorAll('tbody tr').length === config.clusters.length, 'volume: the Monthly view should have one row per cluster');
+        ok(/—/.test(p.querySelector('tbody tr').textContent), 'volume: a month with no record should read "—", never 0');
+        exportBtn().click();
+        const f = files.at(-1);
+        ok(f && /^volume-monthly-by-cluster-\d{4}-\d{2}-\d{2}\.csv$/.test(f.name), `volume: the Monthly export is named "${f && f.name}"`);
+        ok(f && f.text.split('\n')[0] === `cluster,${ymAgo(2)},${ymAgo(1)},${ymAgo(0)}`, `volume: the Monthly CSV header is "${f && f.text.split('\n')[0]}"`);
+        ok(f && f.text.split('\n')[1].split(',')[1] === '', 'volume: a month with no record should be empty in the CSV, not 0');
+      }
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+    viewBtn('Summary').click();
+    await settleFor(200);
+    ok(!!panel('Capacity by cluster'), 'volume: Summary did not come back after Monthly');
+  }
 }
 
 /* --------------------- alert triggers are listed and switchable --------------------- */
-
-/** What transport.js reads off a reply: status, headers, and the body as text. jsdom has no Response. */
-const stubReply = (obj) => ({ ok: true, status: 200, headers: { get: () => null }, text: async () => JSON.stringify(obj), json: async () => obj });
 
 /** The Config page is tabbed; open one by its label. */
 async function openSettingsTab(label) {
@@ -2479,6 +2937,258 @@ restoreConsole();
   await go('overview');
 }
 
+// Config > Volume fields (0.3.45): the section opens and says so when the core is older, the
+// fields can be edited and Save writes defaults.volume (and an override for one cluster, only
+// what differs), and Check fields sends VOLUME_FIELDS_CHECK and fills the check column. The
+// core's VOLUME_* messages are stubbed (the dev bridge may be older); the write is stubbed so
+// the fixture is not rewritten.
+{
+  await go('settings');
+  const realFetch = globalThis.fetch;
+  let written = null;
+  const sent = [];
+  let older = true;
+  globalThis.fetch = async (input, init) => {
+    const body = init && init.body ? JSON.parse(init.body) : {};
+    if (String(body.type || '').startsWith('VOLUME_')) {
+      sent.push(body);
+      if (older) return stubReply({ ok: false, kind: 'bad_message', message: `Unknown message type "${body.type}"` });
+      if (body.type === 'VOLUME_SETTINGS') return stubReply({ ok: true, settings: {}, managed: [], source: 'file', overrides: [] });
+      return stubReply({ ok: true, indices: { match: 150, skipped: ['metrics-2026.09', '.kibana_1'] }, rows: [
+        { key: 'tag', tried: ['tag1'], resolved: 'tag1', type: 'keyword', note: '' },
+        { key: 'eventSize', tried: ['event_logsize'], resolved: null, type: null, note: '' },
+      ] });
+    }
+    if (body.type === 'CONFIG_WRITE') { written = body.text; return stubReply({ ok: true, path: body.path, bytes: body.text.length }); }
+    if (body.type === 'CONFIG_READ' && written !== null) return stubReply({ ok: true, text: written, size: written.length, lastModified: Date.now() });
+    return realFetch(input, init);
+  };
+  const press = async (label, root = doc.querySelector('#view')) => {
+    const b = [...root.querySelectorAll('button')].find((x) => x.textContent.trim() === label);
+    if (b) { b.click(); await settleFor(700); }
+    return !!b;
+  };
+  // The write follows the press by a PING and a round trip; wait for it rather than guess.
+  const written_ = async () => { for (let i = 0; i < 20 && written === null; i++) await settleFor(250); };
+  const type = async (id, value) => {
+    const el = doc.getElementById(id);
+    if (el) { el.value = value; el.dispatchEvent(new window.Event('input', { bubbles: true })); }
+    return !!el;
+  };
+  try {
+    ok(await openSettingsTab('Volume fields'), 'volume fields: no Volume fields tab');
+    await settleFor(500);
+    const view = doc.querySelector('#view');
+    ok(!!panel('Volume fields') && !!panel('Same settings in the clusters file') && !!panel('Hosted: config.txt keys'),
+      'volume fields: the settings card and the two info cards did not all draw');
+    ok(view.textContent.includes('This server does not know Volume fields yet (needs 0.3.45)'),
+      'volume fields: an older core was not told apart from a broken page');
+    ok(!view.textContent.includes('[object Object]'), 'volume fields: the page prints [object Object]');
+    ok(['vf-index', 'vf-tag', 'vf-forwarder', 'vf-sourceHost', 'vf-sourceIp', 'vf-eventSize', 'vf-subSize', 'vf-extra', 'vf-extra-name',
+      'vf-basis', 'vf-top', 'vf-keep', 'vf-at'].every((id) => doc.getElementById(id)), 'volume fields: a field of the form is missing');
+    ok(doc.getElementById('vf-tag').value === 'tag1, labels.tag1, tags', `volume fields: Tag shows "${doc.getElementById('vf-tag').value}", expected the built-in list`);
+    ok(doc.getElementById('vf-day').disabled && doc.getElementById('vf-boundary').disabled, 'volume fields: Day of an index and Day boundary must be fixed');
+    ok(/\d+ of \d+ clusters override these fields/.test(view.textContent), 'volume fields: the override count is missing');
+
+    // Check fields: asks the core, and the answer lands in the check column.
+    older = false;
+    const cluster = doc.getElementById('vf-check-cluster');
+    ok(!!cluster && cluster.options.length > 0, 'volume fields: no cluster to check against');
+    sent.length = 0;
+    ok(await press('Check fields'), 'volume fields: no Check fields button');
+    const chk = sent.find((m) => m.type === 'VOLUME_FIELDS_CHECK');
+    ok(!!chk && chk.clusterId === cluster.value, `volume fields: Check fields sent ${JSON.stringify(sent)}`);
+    ok(doc.getElementById('vf-c-index').textContent.includes('150 match') && doc.getElementById('vf-c-index').textContent.includes('2 skipped'),
+      `volume fields: the index check reads "${doc.getElementById('vf-c-index').textContent}"`);
+    ok(doc.getElementById('vf-c-tag').textContent.includes('✓'), 'volume fields: a resolved row has no tick');
+    ok(doc.getElementById('vf-c-eventSize').textContent.includes('not measured'), 'volume fields: a missing Event size does not say what it costs');
+
+    // Save: edits a field, writes defaults.volume, leaves the rest of defaults alone.
+    ok(await type('vf-tag', 'tag1, my.tag'), 'volume fields: no Tag input');
+    written = null;
+    ok(await press('Save'), 'volume fields: no Save button');
+    await written_();
+    const file = written ? JSON.parse(written) : null;
+    ok(!!file && Array.isArray(file.defaults.volume && file.defaults.volume.tag) && file.defaults.volume.tag.join() === 'tag1,my.tag',
+      `volume fields: Save did not write defaults.volume.tag (${written && JSON.stringify(file.defaults)})`);
+    ok(!!file && file.defaults.volumeFields === undefined, 'volume fields: the legacy volumeFields was kept');
+    ok((doc.location.hash || '') === '#/settings', 'volume fields: saving left the Config page');
+
+    // A bad value is refused before anything is written.
+    await openSettingsTab('Volume fields');
+    await type('vf-index', 'logstash-*');
+    written = null;
+    await press('Save');
+    ok(written === null, 'volume fields: an index format without YYYY.MM.DD was written');
+    ok(doc.querySelector('#view').textContent.includes('YYYY.MM.DD'), 'volume fields: no reason given for the refused index format');
+
+    // Override for one cluster: only the key that differs is saved, under overrides[<id>].
+    await openSettingsTab('Volume fields');
+    ok(await press('Override for one cluster…'), 'volume fields: no override mode');
+    const pick = doc.getElementById('vf-cluster');
+    ok(!!pick, 'volume fields: override mode has no cluster picker');
+    await type('vf-forwarder', 'fwdtag');
+    written = null;
+    await press('Save');
+    await written_();
+    const f2 = written ? JSON.parse(written) : null;
+    const ov = f2 && f2.defaults.volume && f2.defaults.volume.overrides && f2.defaults.volume.overrides[pick.value];
+    ok(!!ov && JSON.stringify(ov) === JSON.stringify({ forwarder: ['fwdtag'] }), `volume fields: the override saved ${JSON.stringify(ov)}`);
+
+    // A key config.txt manages is locked, says why, and is never written.
+    const managed = await load('core/managed.js');
+    managed.setManaged({ ok: true, managedDefaults: { volumeTopValues: 40 }, managedZabbixOptions: {} });
+    await openSettingsTab('Defaults'); await openSettingsTab('Volume fields');
+    await press('Defaults · all clusters');
+    const top = doc.getElementById('vf-top');
+    ok(!!top && top.disabled && top.value === '40', `volume fields: a managed value is not shown locked (${top && top.disabled}, ${top && top.value})`);
+    ok(doc.querySelector('#view').textContent.includes('managed by config.txt'), 'volume fields: a locked row does not say it is managed by config.txt');
+    written = null;
+    await press('Save');
+    await written_();
+    ok(written !== null && !/"topValues"\s*:\s*40/.test(written), 'volume fields: saving wrote a managed value into the file');
+    managed.setManaged({ ok: true, managedDefaults: {}, managedZabbixOptions: {} });
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+  await applyConfig({ load, configPath });
+  await go('overview');
+}
+
+// Config > Volume fields > Volume report by mail and Mail server (SMTP) (0.3.45): both load for
+// an admin, a field config.txt manages is locked and left out of Save, Save sends no password
+// unless one was typed, "None" security forces "No sign-in", Send test mail shows each step
+// (a failed one too), and anybody else is told only an admin sets these. MAIL_* and
+// REPORT_SCHEDULE_* are stubbed at fetch with the shapes the core answers.
+{
+  const st = (await load('core/state.js')).state;
+  const realFetch = globalThis.fetch;
+  const sent = [];
+  let stale = true;     // the stored password was typed for another server
+  let noNext = false;   // an older core: no nextPeriod
+  const answer = (b) => {
+    switch (b.type) {
+      case 'MAIL_SETTINGS_GET': return { ok: true, host: 'smtp.example.com', port: 587, security: 'starttls', auth: 'password', user: 'ep',
+        from: 'elasticpro@example.com', passwordSet: !stale, passwordStale: stale, passwordFrom: 'stored', managed: ['from'], configured: true, problem: null,
+        canStorePassword: true, passwordStoreProblem: null };
+      case 'REPORT_SCHEDULE_GET': return { ok: true, enabled: true, to: ['ops@example.com'], cc: [], bcc: [], schedule: 'monthly', at: '07:00',
+        clusters: 'all', subject: 'ElasticPro volume report · {period}', sheets: ['daily', 'monthly', 'breakdown'],
+        lastSent: { at: Date.now() - 3600000, to: 1, ok: true, error: null }, managed: ['at'], timer: true,
+        nextSendAt: Date.now() + 86400000, mailConfigured: true,
+        ...(noNext ? {} : { nextPeriod: { from: '2026-10-01', to: '2026-10-31', label: '2026-10' } }) };
+      case 'MAIL_SETTINGS_SET': stale = false; return { ok: true };
+      case 'REPORT_SCHEDULE_SET': return { ok: true };
+      case 'MAIL_TEST': return { ok: false, kind: 'smtp_failed', message: 'auth failed', steps: [
+        { step: 'connect', ok: true, detail: '' }, { step: 'tls', ok: true, detail: '' }, { step: 'auth', ok: false, detail: '535 bad credentials' }] };
+      case 'REPORT_JOBS': return { ok: true, jobs: [], concurrency: 3, running: 0, queued: 0 };
+      default: return { ok: false, kind: 'bad_message', message: `Unknown message type "${b.type}"` };
+    }
+  };
+  globalThis.fetch = async (input, init) => {
+    const body = init && init.body ? JSON.parse(init.body) : {};
+    if (/^(REPORT_|MAIL_)/.test(String(body.type || ''))) { sent.push(body); return stubReply(answer(body)); }
+    return realFetch(input, init);
+  };
+  const byId = (id) => doc.getElementById(id);
+  const setVal = (id, v, ev = 'input') => { const el = byId(id); if (el) { el.value = v; el.dispatchEvent(new window.Event(ev, { bubbles: true })); } return !!el; };
+  const last = (type) => sent.filter((m) => m.type === type).at(-1);
+  try {
+    await go('settings');
+    ok(await openSettingsTab('Volume fields'), 'mail: no Volume fields tab');
+    await waitFor(() => byId('ms-host'), 'mail: the Mail server (SMTP) form did not load');
+    ok(!!panel('Volume report by mail') && !!panel('Mail server (SMTP)'), 'mail: the two panels are not both on Volume fields');
+    ok(byId('ms-host').value === 'smtp.example.com' && byId('ms-port').value === '587', 'mail: the mail server form does not show what the core holds');
+    ok(byId('ms-password').value === '' && byId('ms-password').placeholder === '' && byId('ms-password').type === 'password',
+      'mail: the password box is not empty, or says stored for a password typed for another server');
+    // A managed field: locked, says why, and left out of Save.
+    ok(byId('ms-from').disabled && panel('Mail server (SMTP)').textContent.includes('managed by config.txt'), 'mail: a managed From is not locked with the reason');
+    ok(byId('rm-at').disabled && panel('Volume report by mail').textContent.includes('managed by config.txt'), 'mail: a managed At is not locked with the reason');
+    ok(/last sent .+ to 1 address/.test(panel('Volume report by mail').textContent) && /next send/.test(panel('Volume report by mail').textContent),
+      'mail: the report status does not say when it was last sent and when it goes next');
+    ok(panel('Hosted: config.txt keys').textContent.includes('UI_SMTP_HOST=smtp.example.com') && panel('Hosted: config.txt keys').textContent.includes('UI_REPORT_SCHEDULE='),
+      'mail: the config.txt card has no UI_SMTP_* / UI_REPORT_* lines');
+
+    ok(byId('ms-pw-stale') && !byId('ms-pw-stale').hidden && byId('ms-pw-stale').textContent === 'The mail server changed: type the password again.',
+      'mail: a stale password does not say to type it again');
+
+    // Save, password untouched: no password in what goes.
+    setVal('ms-host', 'relay.example.com');
+    byId('ms-save').click();
+    await settleFor(300);
+    const m1 = last('MAIL_SETTINGS_SET');
+    ok(!!m1 && m1.host === 'relay.example.com' && !('password' in m1) && !('from' in m1),
+      `mail: Save with the password untouched sent ${JSON.stringify(m1)}`);
+    // Typed: it goes.
+    setVal('ms-password', 's3cret');
+    byId('ms-save').click();
+    await settleFor(300);
+    ok(last('MAIL_SETTINGS_SET') && last('MAIL_SETTINGS_SET').password === 's3cret', 'mail: a typed password was not sent');
+    ok(byId('ms-pw-stale').hidden, 'mail: the stale-password note stayed after the password was typed and saved');
+    ok(byId('ms-password').value === '', 'mail: the typed password stayed in the box after saving');
+    // "None" is plain text: no sign-in.
+    setVal('ms-security', 'none', 'change');
+    await settleFor(20);
+    ok(byId('ms-auth').value === 'none' && byId('ms-auth').disabled && byId('ms-user').disabled && byId('ms-port').value === '25',
+      'mail: Security "None" did not force No sign-in (and port 25)');
+    byId('ms-save').click();
+    await settleFor(300);
+    ok(last('MAIL_SETTINGS_SET').security === 'none' && last('MAIL_SETTINGS_SET').auth === 'none', `mail: "None" saved ${JSON.stringify(last('MAIL_SETTINGS_SET'))}`);
+
+    // Send test mail: every step, the failed one with its reason.
+    byId('ms-test').click();
+    ok(!byId('ms-test-row').hidden, 'mail: Send test mail did not ask for an address');
+    setVal('ms-test-to', 'me@example.com');
+    byId('ms-test-send').click();
+    await settleFor(300);
+    ok(last('MAIL_TEST') && last('MAIL_TEST').to === 'me@example.com', 'mail: the test was not sent to the typed address');
+    const steps = byId('ms-steps').textContent;
+    ok(steps.includes('✓ connect') && steps.includes('✗ auth: 535 bad credentials'), `mail: the test steps read "${steps}"`);
+
+    // The mailed report: Save sends the lists, and not the managed At.
+    setVal('rm-to', 'ops@example.com, lead@example.com');
+    setVal('rm-cc', 'boss@example.com');
+    byId('rm-sheet-breakdown').checked = false;
+    byId('rm-save').click();
+    await settleFor(300);
+    const s1 = last('REPORT_SCHEDULE_SET');
+    ok(!!s1 && JSON.stringify(s1.to) === '["ops@example.com","lead@example.com"]' && JSON.stringify(s1.cc) === '["boss@example.com"]'
+      && JSON.stringify(s1.sheets) === '["daily","monthly"]' && !('at' in s1) && s1.clusters === 'all',
+    `mail: the report Save sent ${JSON.stringify(s1)}`);
+    // Download .xlsx: a report job for every cluster, for the core's nextPeriod, no mail.
+    ok(byId('rm-download').textContent === 'Download .xlsx · 2026-10', `mail: the button reads "${byId('rm-download').textContent}"`);
+    sent.length = 0;
+    byId('rm-download').click();
+    await settleFor(300);
+    const run = last('REPORT_RUN');
+    ok(!!run && run.format === 'xlsx' && run.mail === false && run.clusterIds.length === config.clusters.length
+      && JSON.stringify(run.period) === '{"from":"2026-10-01","to":"2026-10-31"}',
+    `mail: Download .xlsx sent ${JSON.stringify(run)}`);
+    // An older core says no period: the button is off, with a title saying why.
+    noNext = true;
+    byId('rm-save').click();
+    await settleFor(300);
+    ok(byId('rm-download').disabled && /does not say/.test(byId('rm-download').title), 'mail: Download .xlsx is on without a nextPeriod');
+    noNext = false;
+    byId('rm-send-now').click();
+    await settleFor(300);
+    ok(!!last('REPORT_SEND_NOW'), 'mail: Send report now sent nothing');
+
+    // Anybody else: a note, no form, nothing asked.
+    st.caller = { name: 'reader', role: 'operator' };
+    sent.length = 0;
+    await openSettingsTab('Defaults'); await openSettingsTab('Volume fields');
+    await settleFor(300);
+    ok(!byId('ms-host') && /Only an ElasticPro admin sets up the mail server/.test(panel('Mail server (SMTP)').textContent),
+      'mail: a non-admin sees the mail server form');
+    ok(!sent.some((m) => m.type === 'MAIL_SETTINGS_GET' || m.type === 'REPORT_SCHEDULE_GET'), 'mail: a non-admin page asked for the admin settings');
+  } finally {
+    st.caller = null;
+    globalThis.fetch = realFetch;
+  }
+  (await load('core/reports.js')).resetReports();
+  await go('overview');
+}
+
 // Quiet UI: fleet data landing while somebody reads the Clusters page does not repaint it,
 // and nothing on the bar says it was held (no "N updates — Apply" pill). It is drawn by itself
 // once the page has gone 3 s untouched; Refresh draws it at once. A live page — the Request
@@ -3561,6 +4271,6 @@ if (problems.length) {
   for (const p of problems) console.error('  ✗ ' + p);
   process.exit(1);
 }
-console.log('ok: strip, console, shards, the Clusters page (columns, name menu, unreachable rows, expand chevron, alerts link), volume, hand-off, refresh, snapshots, tasks, toasts, accounts split and pinned Zabbix roles, the log-delay preflight, a quiet Config page, the Request Centre and the redraw gate, the request policy, the coverage bar, the Tasks panel and the console tabs, template management, the Alerts page grouped by cluster with merged repeats, Go to, playbooks and the bell');
+console.log('ok: strip, console, shards, the Clusters page (columns, name menu, unreachable rows, expand chevron, alerts link), volume, hand-off, refresh, snapshots, tasks, toasts, accounts split and pinned Zabbix roles, the log-delay preflight, a quiet Config page, Config › Volume fields, report jobs and the Reports pill, the mailed report and the mail server, the Request Centre and the redraw gate, the request policy, the coverage bar, the Tasks panel and the console tabs, template management, the Alerts page grouped by cluster with merged repeats, Go to, playbooks and the bell');
 // The pages leave auto-refresh timers and a live tail running; nothing here waits on them.
 process.exit(0);

@@ -267,6 +267,29 @@ UI_LIVE_REDRAW enum pending,live,manual
 UI_DEFAULT_SCOPE enum last-selected,all
 UI_ROWS_PER_PAGE int 5 1000
 UI_MAX_LOG_ROWS int 10 10000
+UI_VOLUME_INDEX_FORMAT text
+UI_VOLUME_TAG_FIELDS text
+UI_VOLUME_FORWARDER_FIELDS text
+UI_VOLUME_HOST_FIELDS text
+UI_VOLUME_IP_FIELDS text
+UI_VOLUME_EVENT_SIZE_FIELD text
+UI_VOLUME_SUB_SIZE_FIELD text
+UI_VOLUME_EXTRA_NAME text
+UI_VOLUME_EXTRA_FIELDS text
+UI_VOLUME_SIZE_BASIS enum primary,total,eventSize
+UI_VOLUME_TOP_VALUES int 5 100
+UI_VOLUME_KEEP_MONTHS int 1 36
+UI_VOLUME_COLLECT_AT text
+UI_SMTP_HOST text
+UI_SMTP_PORT int 1 65535
+UI_SMTP_SECURITY enum starttls,tls,none
+UI_SMTP_USER text
+UI_SMTP_PASSWORD_FILE text
+UI_SMTP_FROM text
+UI_REPORT_TO text
+UI_REPORT_SCHEDULE enum monthly,weekly,daily,manual
+UI_REPORT_AT text
+UI_REPORT_SHEETS text
 LISTEN_PORT deploy
 ALLOWED_DOMAINS deploy
 ALLOWED_UI_IPS deploy
@@ -286,7 +309,7 @@ cfg_check() {
     case $kind in
       bool) case $lower in true|false) ;; *) echo "must be true or false"; return 1 ;; esac ;;
       int)  in_range "$v" "$a" "$b" || { echo "must be a whole number from $a to $b"; return 1; } ;;
-      enum) case ",$a," in *",$lower,"*) ;; *) echo "must be one of: ${a//,/, }"; return 1 ;; esac ;;
+      enum) case ",$(printf '%s' "$a" | tr 'A-Z' 'a-z')," in *",$lower,"*) ;; *) echo "must be one of: ${a//,/, }"; return 1 ;; esac ;;
     esac
   fi
   case $k in
@@ -302,6 +325,30 @@ cfg_check() {
     CORE_MEM_LIMIT) [[ $v =~ ^[0-9]+[bBkKmMgG]?$ ]] || { echo "must be a size such as 2g or 512m"; return 1; } ;;
     PUBLIC_URL|ZABBIX_URL|ZABBIX_API_URL)
       [[ $v =~ ^https?://[^[:space:]]+$ ]] || { echo "must be a URL starting with http:// or https://"; return 1; } ;;
+    # The same two rules the core applies (settings.rs check_text).
+    UI_VOLUME_INDEX_FORMAT)
+      case $v in
+        *YYYY.MM.DD*YYYY.MM.DD*) echo "must contain YYYY.MM.DD once"; return 1 ;;
+        *'*'*YYYY.MM.DD*|*YYYY.MM.DD*'*'*) ;;
+        *) echo "must contain * (the source) and YYYY.MM.DD (the day), e.g. logstash-*-YYYY.MM.DD"; return 1 ;;
+      esac
+      case $v in *[[:space:],/\\?#\"\<\>\|]*) echo "must be one index pattern: no spaces, commas or slashes"; return 1 ;; esac ;;
+    UI_VOLUME_COLLECT_AT|UI_REPORT_AT)
+      [[ $v =~ ^([01][0-9]|2[0-3]):[0-5][0-9]$ ]] || { echo "must be a time of day HH:MM, 00:00 to 23:59"; return 1; } ;;
+    # The core checks these properly (settings.rs check_text); here, the mistakes worth
+    # catching before a deploy: a URL for a host, a list that is not addresses.
+    UI_SMTP_HOST)
+      [[ $v =~ ^[^[:space:]/@?#]+$ ]] || { echo "must be a host name or an address, without a scheme or a path"; return 1; } ;;
+    UI_SMTP_FROM)
+      [[ $v == *@* ]] || { echo "must be a mail address, e.g. ElasticPro <elasticpro@example.com>"; return 1; } ;;
+    UI_REPORT_TO)
+      while IFS= read -r item; do
+        [[ $item == *?@?* ]] || { echo "\"$item\" is not a mail address"; return 1; }
+      done < <(cfg_list "$v") ;;
+    UI_REPORT_SHEETS)
+      while IFS= read -r item; do
+        case $item in daily|monthly|breakdown) ;; *) echo "\"$item\" is not one of: daily, monthly, breakdown"; return 1 ;; esac
+      done < <(cfg_list "$v") ;;
   esac
   return 0
 }
@@ -339,6 +386,12 @@ config_validate() {
     fi
     printf '%s=%s\n' "$key" "$val" >> "$CFG_TMP/parsed"
   done < "$src"
+  # A password from config.txt goes only to a mail server config.txt names (the core drops
+  # the password file without the host, settings.rs parse — the same rule).
+  if grep -q '^UI_SMTP_PASSWORD_FILE=.' "$CFG_TMP/parsed" && ! grep -q '^UI_SMTP_HOST=.' "$CFG_TMP/parsed"; then
+    say "  ✗ $CONFIG: UI_SMTP_PASSWORD_FILE needs UI_SMTP_HOST — a password from config.txt goes only to a mail server config.txt names" >&2
+    errs=$((errs + 1))
+  fi
   [ "$errs" = 0 ] || fail "$errs problem(s) in $CONFIG — nothing was changed"
 }
 

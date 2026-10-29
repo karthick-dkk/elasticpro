@@ -182,7 +182,7 @@ pub struct Core {
     /// Elasticsearch passwords the Zabbix module handed over (`POST /sso/zabbix/cluster-secret`),
     /// encrypted at rest. The Zabbix sync takes a cluster's from here when Zabbix keeps it as a
     /// Secret macro, which the API never returns. See `cluster_secrets`.
-    cluster_secrets: crate::cluster_secrets::ClusterSecrets,
+    pub(crate) cluster_secrets: crate::cluster_secrets::ClusterSecrets,
     /// Clusters that are Zabbix hosts, and the Zabbix API and Vault that describe them.
     /// Hosted only; off until both are configured. Rebuilt whenever the link changes —
     /// see `rebuild_zbx_api` — so it sits behind a lock and is handed out as an `Arc`.
@@ -230,6 +230,11 @@ pub struct Core {
     /// Whether the request figures are pushed to Zabbix, and how that last went. See
     /// `zbx_push`.
     pub(crate) zbx_push: parking_lot::Mutex<crate::zbx_push::PushStatus>,
+    /// The daily index-volume record: its files and the runs in progress. See `volume`.
+    pub(crate) volume: crate::volume::Volume,
+    /// Volume reports: the job queue, its files, the mail server and the mailed schedule.
+    /// See `report`.
+    pub(crate) reports: crate::report::Reports,
 }
 
 /// What the last Zabbix sync found. The specs carry credentials and never leave the core;
@@ -676,6 +681,8 @@ impl Core {
         let data_dir_for_secrets = data_dir.clone();
         let data_dir_for_fleet = data_dir.clone();
         let data_dir_for_notify = data_dir.clone();
+        let data_dir_for_volume = data_dir.clone();
+        let data_dir_for_reports = data_dir.clone();
         let activity = crate::activity::ActivityLog::new(crate::activity::ActivityConfig::from_env(data_dir.as_deref(), edition));
         let (instance, previous_instance, restart_suspects) = instance_ids(data_dir.as_deref());
         let req_cfg = crate::gate::config().clone();
@@ -731,6 +738,8 @@ impl Core {
             notify: crate::notify::NotifyStore::open(data_dir_for_notify.map(|d| d.join("notifications.json"))),
             housekeeping: crate::housekeeping::Housekeeping::from_env(),
             zbx_push: parking_lot::Mutex::new(crate::zbx_push::PushStatus::default()),
+            volume: crate::volume::Volume::open(data_dir_for_volume.as_deref()),
+            reports: crate::report::Reports::open(data_dir_for_reports.as_deref()),
         })
     }
 
@@ -1003,13 +1012,21 @@ impl Core {
     ///   asking the core to send that cluster's stored credential to an address of their
     ///   choosing.
     fn gate_cluster(&self, t: &str, msg: &Value, c: &Caller) -> Result<(), Value> {
-        if !matches!(t, "ES" | "ZABBIX_METRICS" | "CLUSTER_DATASET" | "REFRESH") || c.role >= Role::Admin {
+        const VOLUME_ONE: &[&str] = &["VOLUME_SETTINGS", "VOLUME_FIELDS_CHECK", "VOLUME_DAILY", "VOLUME_MONTHLY", "VOLUME_BREAKDOWN"];
+        if !(matches!(t, "ES" | "ZABBIX_METRICS" | "CLUSTER_DATASET" | "REFRESH" | "VOLUME_RUN" | "REPORT_RUN") || VOLUME_ONE.contains(&t))
+            || c.role >= Role::Admin
+        {
+            return Ok(());
+        }
+        // VOLUME_SETTINGS without a cluster is the defaults, which name no cluster.
+        if t == "VOLUME_SETTINGS" && msg.get("clusterId").and_then(|v| v.as_str()).is_none_or(str::is_empty) {
             return Ok(());
         }
         let refuse = |why: String| json!({ "ok": false, "kind": "forbidden", "role": c.role.as_str(), "message": why });
-        // REFRESH names several clusters, or "all" of the caller's. Every named one must be
-        // theirs; "all" is resolved against what they may see, in the handler.
-        if t == "REFRESH" {
+        // REFRESH, VOLUME_RUN and REPORT_RUN name several clusters, or all of the caller's.
+        // Every named one must be theirs; "all" is resolved against what they may see, in the
+        // handler. (The other REPORT_* messages name a job, whose clusters the handler checks.)
+        if matches!(t, "REFRESH" | "VOLUME_RUN" | "REPORT_RUN") {
             if let Some(ids) = msg.get("clusterIds").and_then(|v| v.as_array()) {
                 for id in ids {
                     let id = id.as_str().unwrap_or("");
@@ -1215,6 +1232,15 @@ impl Core {
             "EVENTS_TICKET" => self.events_ticket_msg(caller.clone(), reauth),
             "DELAY_SINK_GET" | "DELAY_SINK_SET" | "DELAY_SINK_RUN" => self.delay_sink_msg(&t, &msg).await,
             "HOUSEKEEPING_GET" | "HOUSEKEEPING_RUN" => self.housekeeping_msg(&t, &msg, caller.as_ref()).await,
+            // The daily index-volume record (docs/VOLUME.md).
+            "VOLUME_SETTINGS" | "VOLUME_FIELDS_CHECK" | "VOLUME_DAILY" | "VOLUME_MONTHLY" | "VOLUME_BREAKDOWN"
+            | "VOLUME_MONTHLY_ALL" | "VOLUME_RUN" | "VOLUME_LAYOUT_GET" | "VOLUME_LAYOUT_SET" => {
+                self.volume_msg(&t, &msg, caller.as_ref()).await
+            }
+            // Volume reports and the mail that carries them (docs/VOLUME.md "Reports and mail").
+            "REPORT_RUN" | "REPORT_JOBS" | "REPORT_STOP" | "REPORT_CLEAR" | "REPORT_DOWNLOAD" | "REPORT_CONCURRENCY_SET"
+            | "MAIL_SETTINGS_GET" | "MAIL_SETTINGS_SET" | "MAIL_TEST" | "REPORT_SCHEDULE_GET" | "REPORT_SCHEDULE_SET"
+            | "REPORT_SEND_NOW" => self.report_msg(&t, &msg, caller.as_ref()).await,
             "NOTIFY_PUT" | "NOTIFY_LIST" | "NOTIFY_CLEAR" => self.notify_msg(&t, &msg, caller.as_ref()),
             // Scoped to the clusters the caller may see (Zabbix group scope): a silence names a
             // cluster, so listing, setting or removing one for a cluster you cannot see is refused.
@@ -2185,8 +2211,14 @@ impl Core {
         (self.config_hint.as_deref().map(std::path::Path::new) != Some(stray.as_path()) && stray.is_file()).then_some(stray)
     }
 
-    async fn read_config_file(&self) -> Result<Value, Value> {
+    pub(crate) async fn read_config_file(&self) -> Result<Value, Value> {
         self.locate_config().await.map(|c| c.raw)
+    }
+
+    /// Whether this core was started with a config file of its own (ELASTICPRO_CONFIG or
+    /// `--config`), readable or not.
+    pub(crate) fn has_config_file(&self) -> bool {
+        self.config_hint.is_some()
     }
 
     /// The server's config file as it was found: where, its text and what it parses to.

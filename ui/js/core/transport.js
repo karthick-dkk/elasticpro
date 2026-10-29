@@ -124,7 +124,7 @@ const PROXY_STATUS = {
 // away mid-request (a restart, a crash) — after it may have acted. So those are retried only
 // for messages that change nothing; a 504 never.
 const RETRY_MS = { 429: [500, 1000, 2000], 502: [1500], 503: [1500] };
-const CHANGES = /^(ES|.*_(SET|ADD|REMOVE|DELETE|WRITE|SAVE|CLEAR|CREATE|REVOKE|UPLOAD|UNLOCK|RUN|RESTORE|BEGIN)|WRITE_UNLOCK|PRIME|FORGET|SEAL|OPEN|LOGIN|LOGOUT|BOOTSTRAP_ADMIN|TRUST_.*|UNTRUST_.*|ZABBIX_SYNC|ZABBIX_UNPAIR|REFRESH)$/;
+const CHANGES = /^(ES|.*_(SET|ADD|REMOVE|DELETE|WRITE|SAVE|CLEAR|CREATE|REVOKE|UPLOAD|UNLOCK|RUN|RESTORE|BEGIN)|WRITE_UNLOCK|PRIME|FORGET|SEAL|OPEN|LOGIN|LOGOUT|BOOTSTRAP_ADMIN|TRUST_.*|UNTRUST_.*|ZABBIX_SYNC|ZABBIX_UNPAIR|REFRESH|REPORT_STOP|REPORT_SEND_NOW|MAIL_TEST)$/;
 export const readsOnly = (msg) => !CHANGES.test(String(msg.type || ''))
   || (msg.type === 'ES' && /^(GET|HEAD)?$/i.test(String(msg.method || '').trim()));
 const pause = (ms) => new Promise((r) => setTimeout(r, ms));

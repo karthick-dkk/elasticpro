@@ -148,6 +148,12 @@ async fn run() {
     // After the prime and the first Zabbix sync, so the poller starts knowing the clusters
     // it is to poll and does not prune a restored cache it has not been told about yet.
     core.start_fleet_poller();
+    // The daily index-volume record (docs/VOLUME.md): once a day at collectAt, server local
+    // time. After the poller, so its first tick knows the clusters and which are down.
+    core.start_volume_daily();
+    // Volume reports (docs/VOLUME.md "Reports and mail"): jobs left queued by a restart, the
+    // 7-day prune of report files, and the mailed report's schedule, once a minute.
+    core.start_report_timer();
     // Stuck records closed, the read cache aged, our orphaned searches on the clusters
     // cancelled (ES_TASK_REAPER). See bridge.rs, "the reapers".
     core.start_request_reaper();

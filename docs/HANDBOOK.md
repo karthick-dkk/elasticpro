@@ -452,6 +452,105 @@ oldest) and never deleted.
 The Request Centre shows both as the **Housekeeping** card (last run, what each job cleaned, next
 run, **Dry run**, **Run now** — which asks first).
 
+## Volume record — the message contract
+
+Index volume per day and per month, by field, for every cluster: the core collects it and keeps
+it, the pages show its answers. **docs/VOLUME.md is the contract** — what counts, the settings
+and their precedence, the store layout, every derived figure, and the message table; this is the
+short version.
+
+- **When**: hosted only, once a day at `collectAt` (server local time, `TZ` of the core; 06:00
+  by default), from a 60 s tick started by the bridge binary (`volume daily: timer started`, an
+  audit line with no user). A restart neither repeats today's run nor skips a missed one: the
+  local date of the last scheduled run is kept in each cluster's `state.json`. **Refresh now**
+  (`VOLUME_RUN`) runs at once, at most once a minute per cluster (`tooSoon`). Desktop has no
+  timer; Indices › Summary asks for a run.
+- **What it sends**: `_cat/indices/<glob>`, `_field_caps`, then one aggregation `_search` per
+  day that is not final (and today, every run) — reads only, so it works under read-only.
+  Background class, origin `volume-daily`, 60 s per request (capped by `ES_MAX_TIMEOUT_MS`), at
+  most 2 clusters at once and one request at a time per cluster. The emergency stop holds it
+  (the timer tries again next tick); an unreachable cluster is skipped.
+- **Where it lives**: `<data>/volume/<escaped id>/YYYY-MM.json.gz` + `state.json` (0600, tmp +
+  rename), `<data>/volume/layouts.json` for the shared column layouts. Nothing is held in memory
+  between requests; `VOLUME_MONTHLY_ALL` reads only the `state.json` files. Months older than
+  `keepMonths` are removed after each run.
+- **Settings**: built-in < `defaults.volume` < cluster override (`defaults.volume.overrides[id]`
+  or `clusters[].volume`) < config.txt `UI_VOLUME_*`. Hosted reads its own config file; the
+  desktop editions take `volume: {defaults, cluster}` from the message. Legacy `volumeFields`
+  is read only where no `volume` is set.
+
+| Message | Role | Answer |
+|---|---|---|
+| `VOLUME_SETTINGS {clusterId?}` | user | `{settings, managed, source, overrides}` |
+| `VOLUME_FIELDS_CHECK {clusterId}` | user | `{glob, indices: {match, days, skipped, skippedCount}, rows: [{key, tried, resolved, type, note}]}` (asks the cluster now) |
+| `VOLUME_DAILY {clusterId, days?, avgDays?, source?}` | user | `{settings, status, cards, days, sources, source, topAvailable, skipped, skippedCount, matched, window}` |
+| `VOLUME_MONTHLY {clusterId, months?}` | user | `{status, months}` |
+| `VOLUME_BREAKDOWN {clusterId, field, from?, to?, top?}` | user | `{field, resolved, resolvedAll, rows, totals, period}`; `error` when the field never resolved |
+| `VOLUME_MONTHLY_ALL {months?}` | user | `{clusters: [{clusterId, name, basis, months}]}` |
+| `VOLUME_RUN {clusterIds?}` | user | `{started, already, tooSoon, skipped: [{clusterId, reason}], stopped}` |
+| `VOLUME_LAYOUT_GET` | guest | `{layouts: {daily, monthly}}`, each `{order, hidden, labels}` |
+| `VOLUME_LAYOUT_SET {table, layout}` | operator | `{layouts}`; audited |
+
+`status = {lastRunAt, nextRunAt, running, progress: {done, total} | null, lastError, collectAt}`;
+`nextRunAt` is `null` where nothing schedules. Without a data directory every record message
+answers `{ok: false, kind: "no_store"}`.
+
+## Volume reports and mail — the message contract
+
+The short version of docs/VOLUME.md "Reports and mail". Code: `crates/elasticpro-core/src/report/`.
+
+- **Jobs**: `REPORT_RUN` queues one job per cluster. A job collects the period's missing days
+  through the volume collector (same rules: Background class, origin `volume-report`, one
+  collection per cluster at a time and two clusters at once, the daily run included), builds
+  the file from `volume::derive` (no figure computed twice), keeps it in `<data>/reports/`
+  (0600, pruned after 7 days) and mails it when `mail` is set. 3..5 jobs at once (default 3,
+  `REPORT_CONCURRENCY_SET`), the rest FIFO; the queue is `<data>/reports/jobs.json`, and a job
+  running at a restart is marked `failed: "the server restarted"`. One person may have 15
+  jobs waiting or running (`too_many_jobs`) and ask for 10 mailed ones an hour
+  (`too_many_mails`).
+- **Stops**: `REPORT_STOP` (admin) ends a queued job at once and a running one between days.
+  **The emergency stop fails a job** that would have to collect, saying so — run it again
+  when the stop is over. A period whose every day the record has settled (final, gone, or
+  never there) asks the cluster nothing and is built under the stop too. An unreachable
+  cluster is not asked: the file holds what the record has, and the job carries a `warning`.
+- **Mail**: `<data>/mail.json`, the password sealed under the cluster-secrets key (hosted
+  only — the desktop editions have no kept key and refuse to store one: `cannot_store_password`).
+  config.txt `UI_SMTP_*` locks fields; `UI_SMTP_PASSWORD_FILE` is read at send time. The stored
+  password is sealed for its server (host, port, security, user): changing any of them without
+  typing it again leaves it unused (`passwordStale`). `UI_SMTP_PASSWORD_FILE` needs
+  `UI_SMTP_HOST` and locks port, security and user too. "none"
+  security only with auth "none". Recipients of every report mail — a job's with `mail: true`
+  and the mailed report — are the mailed report's `to/cc/bcc`, which only an admin sets: a user
+  cannot send cluster figures to an address of their choosing.
+- **Mailed report**: `<data>/report-schedule.json`; monthly (previous month, on the 1st), weekly
+  (previous Mon..Sun, on Monday), daily (yesterday, after that day's scheduled collection), or
+  manual. Periods are UTC dates, like the index names; only the send time `at` is server local
+  (the first `at` after the period's last UTC day has ended). The last period sent is kept, so a
+  restart neither resends nor skips one; saving a schedule — or a config.txt change of cadence or
+  time, at the next start — counts the period whose moment has passed as handled. Every end is
+  `lastSent`; one the emergency stop (or a restart, once) cut short is tried again. One
+  .xlsx with a sheet set per cluster. Hosted timer (`volume report: timer started`, no user).
+- **Audit**: one line per mail (`volume report mailed` / `mail server test`: user, recipient
+  count, ok), per settings change, stop and concurrency change. Never an address, never a
+  password, never file contents.
+
+| Message | Role | Answer |
+|---|---|---|
+| `REPORT_RUN {clusterIds, period, format?, mail?}` | user | `{jobs: [Job], refused: [{clusterId, reason}]}`; `period` = `{from, to}`, `"month:YYYY-MM"`, `"yesterday"`, `"last7"`; `kind: too_many_jobs` / `too_many_mails` refuses the whole request |
+| `REPORT_JOBS` | user | `{jobs, concurrency, running, queued}` — jobs of the clusters the caller sees, newest first |
+| `REPORT_STOP {id}` / `{all: true}` | admin | `{stopped: [ids ended now], stopping: [ids asked]}`; audited |
+| `REPORT_CLEAR` | user | `{removed}` — the caller's finished jobs (admin: all) and their files |
+| `REPORT_DOWNLOAD {id}` | user (starter or admin) | `{name, mime, bytes, base64}` |
+| `REPORT_CONCURRENCY_SET {n}` | admin | `{concurrency}`, 3..5 |
+| `MAIL_SETTINGS_GET` | admin | `{host, port, security, auth, user, from, passwordSet, passwordStale, passwordFrom, managed, configured, problem, canStorePassword, passwordStoreProblem}` |
+| `MAIL_SETTINGS_SET {…, password?, clearPassword?}` | admin | as GET; a managed field may be sent unchanged, not changed (`managed`) |
+| `MAIL_TEST {to}` | admin | `{ok, steps: [{step: connect\|tls\|auth\|send, ok, detail}]}`, `kind: smtp_failed` and `message` when a step failed |
+| `REPORT_SCHEDULE_GET` | admin | `{enabled, to, cc, bcc, schedule, at, clusters, subject, sheets, lastSent, managed, timer, nextSendAt, mailConfigured, nextPeriod: {from, to, label}}` — `nextPeriod` is what the next send covers (manual: `REPORT_SEND_NOW`'s default) |
+| `REPORT_SCHEDULE_SET {…}` | admin | as GET |
+| `REPORT_SEND_NOW {period?}` | admin | `{job}` — the schedule's period, or the current month so far for a manual one |
+
+`Job = {id, kind: cluster|mailed, clusterId ("*" for mailed), clusterName, clusterIds, period: {from, to, label}, format, mail, by, createdAt, startedAt, endedAt, status, progress: {done, total}, file: {name, bytes} | null, error, mailError, stoppedBy, warning, sheets?, stopping}`.
+
 ## Zabbix connection — the message contract
 
 Hosted edition only (every other edition answers `{ok: false, kind: "not_supported", supported: false}`

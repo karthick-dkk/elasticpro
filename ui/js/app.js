@@ -28,6 +28,7 @@ import { pageForProblem } from './core/alert-rules.js';
 import { EVIDENCE_PAGES, evidenceLayout, evidenceSelection, createHeldNotices } from './core/evidence.js';
 import { setHostedEdition } from './core/server-credentials.js';
 import { pausedPill, pausedKey } from './ui/paused-pill.js';
+import { reportsPill } from './ui/reports-pill.js';
 import { pauseFor, pausedLine } from './core/policy.js';
 
 let coreInfo = { version: '?' };
@@ -601,6 +602,9 @@ function renderTopbar() {
     // because a stopped fleet otherwise looks like one that is merely quiet (ui/paused-pill.js).
     pausedPill({ selected: state.selected, admin: may('admin'),
       onResumed: async () => { await syncFleet({ full: true }); topbarKey = null; go(currentPage); } }),
+    // Report jobs running in the background (ui/reports-pill.js): one element that keeps
+    // its own text, so job progress never rebuilds the bar. Hidden on a core without reports.
+    reportsPill({ snapshot: isSnapshotMode(), guest: !!(me && me.role === 'guest'), evidence: ev }),
     // One cluster: its health is the dot on the picker. The fleet: the counts, coloured by the worst.
     ev || activeClusters().length < 2 ? null : healthPill(activeClusters()),
     // The alert count is on the Alerts tab, where going there is one click anyway; the

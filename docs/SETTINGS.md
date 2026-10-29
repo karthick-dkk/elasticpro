@@ -59,6 +59,9 @@ Changes are read at start: `deploy/deploy.sh --apply-config` restarts the core.
 | `HOUSEKEEPING_DRY_RUN` | env `ELASTICPRO_HOUSEKEEPING_DRY_RUN` = `1` / `0` |
 | `UI_TLS` | the certificate switch (`insecure` = accept every certificate), instead of `defaults.tls` |
 | `UI_READ_ONLY` | the core's read-only guard, instead of what a browser sends in PRIME |
+| `UI_VOLUME_*` (13 keys) | the daily volume record's settings, over `defaults.volume` and every cluster override (docs/VOLUME.md); also in `managedDefaults`, below. `UI_VOLUME_INDEX_FORMAT` must contain `*` and `YYYY.MM.DD` once; `UI_VOLUME_COLLECT_AT` is `HH:MM` (00:00-23:59) in the core's local time — `TZ` in `deploy/.env`, UTC when unset; `UI_VOLUME_SIZE_BASIS` is `primary`, `total` or `eventSize`; `UI_VOLUME_TOP_VALUES` 5-100; `UI_VOLUME_KEEP_MONTHS` 1-36; the field lists are comma-separated |
+| `UI_SMTP_HOST`, `UI_SMTP_PORT` (1-65535), `UI_SMTP_SECURITY` (`starttls`, `tls`, `none`), `UI_SMTP_USER`, `UI_SMTP_PASSWORD_FILE`, `UI_SMTP_FROM` | the mail server for the volume report (docs/VOLUME.md "Reports and mail"), over `<data>/mail.json` field by field; named in `managed` of `MAIL_SETTINGS_GET`, not in PING. The password file is a path inside the core container, read when a mail is sent, and needs `UI_SMTP_HOST` (refused without it, by the core and by deploy.sh): while it is set, port, security and user come from config.txt (or 587/starttls) and are locked on the page, so that password goes only to a server config.txt names; `none` security is accepted only without a password. Server settings, not UI defaults |
+| `UI_REPORT_TO` (comma-separated addresses), `UI_REPORT_SCHEDULE` (`monthly`, `weekly`, `daily`, `manual`), `UI_REPORT_AT` (`HH:MM`, server local time; the periods themselves are UTC dates), `UI_REPORT_SHEETS` (`daily`, `monthly`, `breakdown`, comma-separated) | the mailed volume report, over `<data>/report-schedule.json`; named in `managed` of `REPORT_SCHEDULE_GET`, not in PING |
 | `UI_*` (the rest) | `managedDefaults` in the PING reply, below |
 
 The environment variables are set once, at the top of `main` in the bridge binary, before the
@@ -74,10 +77,17 @@ managed keys, under the names of `DEFAULTS` in `ui/js/core/config.js`:
 "managedDefaults": { "readOnly": false, "autoRefresh": true, "refreshIntervalSec": 60,
   "requestTimeoutMs": 15000, "diskWarnPercent": 80, "diskCritPercent": 90, "snapshotStaleHours": 26,
   "logIndexPattern": "logstash-*", "timeField": "@timestamp", "tls": "auto",
-  "liveRedraw": "pending", "defaultScope": "all", "tableRowsPerPage": 50, "maxLogRows": 200 },
+  "liveRedraw": "pending", "defaultScope": "all", "tableRowsPerPage": 50, "maxLogRows": 200,
+  "volumeIndexFormat": "logstash-*-YYYY.MM.DD", "volumeTag": "tag1, labels.tag1", "volumeForwarder": "fwdtag",
+  "volumeSourceHost": "src_hostname", "volumeSourceIp": "src_ip", "volumeEventSize": "event_logsize",
+  "volumeSubSize": "sub_size", "volumeExtraName": "Dataset", "volumeExtraFields": "event.dataset",
+  "volumeSizeBasis": "primary", "volumeTopValues": 25, "volumeKeepMonths": 13, "volumeCollectAt": "06:00" },
 "managedZabbixOptions": { "useElasticProCredentials": true, "createHosts": false,
   "scopeUsersByGroup": true, "hostGroup": "Elasticsearch clusters" }
 ```
+
+The `volume*` field lists arrive as the comma-separated text config.txt holds; `VOLUME_SETTINGS`
+answers the resolved settings with each list as an array and `managed` naming these keys.
 
 `liveRedraw` (`UI_LIVE_REDRAW`) is how data the core pushes reaches the open page: `pending`
 (the default) leaves the page alone while it is being used and draws what landed a few seconds

@@ -49,7 +49,7 @@ FROM alpine:3.22
 # the owner id decides whether the old files can be read, and gid 999 is already `ping`
 # on Alpine. The user lands in `nogroup`, which is what it had before this was pinned.
 RUN apk --no-cache upgrade \
-  && apk add --no-cache ca-certificates \
+  && apk add --no-cache ca-certificates tzdata \
   && adduser -u 999 -S -H -h /app -s /sbin/nologin elasticpro
 WORKDIR /app
 COPY --from=build /src/target/release/elasticpro-bridge /usr/local/bin/elasticpro-bridge
