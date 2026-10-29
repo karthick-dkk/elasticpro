@@ -98,6 +98,61 @@ pub fn cluster_id(name: &str) -> String {
     if s.is_empty() { "cluster".to_string() } else { s }
 }
 
+/// The entries of a clusters file (`clusters:`, or `hosts:` in an older file).
+pub fn config_entries(raw: &Value) -> &[Value] {
+    raw.get(list_key(raw)).and_then(Value::as_array).map(Vec::as_slice).unwrap_or(&[])
+}
+
+/// A JS-truthy scalar as `String(x)` spells it; `None` for what JS calls falsy.
+fn js_text(v: Option<&Value>) -> Option<String> {
+    match v? {
+        Value::String(s) if !s.is_empty() => Some(s.clone()),
+        Value::Number(n) if n.as_f64().is_some_and(|f| f != 0.0) => Some(n.to_string()),
+        Value::Bool(true) => Some("true".into()),
+        _ => None,
+    }
+}
+
+/// `new URL(u).host`: the host, lower-cased, with the port when it is not the scheme's
+/// default. Empty when the address does not parse (the UI refuses such a file).
+fn url_host(u: &str) -> String {
+    let Ok(p) = reqwest::Url::parse(u) else { return String::new() };
+    match (p.host_str(), p.port()) {
+        (Some(h), Some(port)) => format!("{h}:{port}"),
+        (Some(h), None) => h.to_string(),
+        _ => String::new(),
+    }
+}
+
+/// The id each entry of a clusters file goes by — the UI's rule in `core/config.js`
+/// (`parseConfig`), so the ids it primes the core with:
+///
+/// * `_id` when the entry has one (a Zabbix host's id, kept exactly, collision or not);
+/// * else `slug(name)`, the name being the URL's host when the entry has none;
+/// * an id already taken gets `-<position>` appended until it is free, the position being
+///   the entry's `_index` (its place in the full list, set by the credential-free view)
+///   or else its index in this list.
+///
+/// One definition for the core: the volume settings find a cluster's own `volume` and
+/// `volumeFields` by it.
+pub fn config_ids(list: &[Value]) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::with_capacity(list.len());
+    for (i, c) in list.iter().enumerate() {
+        let own = js_text(c.get("_id"));
+        let name = js_text(c.get("name")).unwrap_or_else(|| url_host(c.get("url").and_then(Value::as_str).unwrap_or("")));
+        let mut id = own.clone().unwrap_or_else(|| cluster_id(&name));
+        let pos = c.get("_index").and_then(Value::as_f64).filter(|f| f.is_finite() && f.fract() == 0.0)
+            .map(|f| f as i64).unwrap_or(i as i64);
+        while own.is_none() && seen.contains(&id) {
+            id = format!("{id}-{pos}");
+        }
+        seen.insert(id.clone());
+        out.push(id);
+    }
+    out
+}
+
 /// An address with its credential and trailing slash taken out, lower-cased for the
 /// host: what "the same address" means here.
 fn address_key(url: &str) -> String {
@@ -422,6 +477,32 @@ mod tests {
         assert_eq!(raw, cfg());
         assert_eq!(cluster_id("Alpha Prod (EU)"), "alpha-prod-eu");
         assert_eq!(cluster_id("!!!"), "cluster");
+    }
+
+    /// The same entries through `parseConfig` of `ui/js/core/config.js` give these ids.
+    #[test]
+    fn config_ids_follow_the_ui_rule() {
+        let list = vec![
+            json!({ "name": "Prod EU", "url": "https://es1:9200" }),
+            json!({ "url": "https://ES2.example:9200/" }),        // no name: the URL's host, port kept
+            json!({ "url": "https://es3.example" }),             // default port: not in the host
+            json!({ "name": "prod eu!", "url": "https://x" }),    // collides with 0: -<position>
+            json!({ "name": "Prod-EU", "url": "https://y" }),     // collides: -4, which is free
+            json!({ "_id": "zbx-prod-eu", "name": "Prod EU", "url": "https://z" }),
+            json!({ "_id": "prod-eu", "url": "https://w" }),      // an _id is kept even when taken
+            json!({ "name": "!!!", "url": "https://v" }),         // nothing usable: "cluster"
+            json!({ "name": "Prod EU", "url": "https://u", "_index": 40 }), // the view's position
+            json!({ "name": "", "url": "http://[::1]:9201" }),     // an empty name is no name
+        ];
+        assert_eq!(config_ids(&list), vec![
+            "prod-eu", "es2-example-9200", "es3-example", "prod-eu-3", "prod-eu-4", "zbx-prod-eu", "prod-eu",
+            "cluster", "prod-eu-40", "1-9201",
+        ]);
+        // Suffixes stack while the result is still taken, as the JS loop does.
+        let stacked = vec![json!({ "name": "a", "url": "https://a" }), json!({ "name": "a-1", "url": "https://b" }),
+                           json!({ "name": "a", "url": "https://c", "_index": 1 })];
+        assert_eq!(config_ids(&stacked), vec!["a", "a-1", "a-1-1"]);
+        assert_eq!(config_entries(&json!({ "hosts": [{ "name": "h", "url": "https://h" }] })).len(), 1);
     }
 
     #[test]

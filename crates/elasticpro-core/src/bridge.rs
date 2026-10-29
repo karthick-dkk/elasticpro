@@ -2215,6 +2215,12 @@ impl Core {
         self.locate_config().await.map(|c| c.raw)
     }
 
+    /// Whether this core was started with a config file of its own (ELASTICPRO_CONFIG or
+    /// `--config`), readable or not.
+    pub(crate) fn has_config_file(&self) -> bool {
+        self.config_hint.is_some()
+    }
+
     /// The server's config file as it was found: where, its text and what it parses to.
     /// The named file (ELASTICPRO_CONFIG), unless it lists no cluster and the stray one
     /// from an older install does — then that one, so a save from here goes back where the

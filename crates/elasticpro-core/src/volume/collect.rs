@@ -214,6 +214,12 @@ pub fn apply_totals(days: &mut BTreeMap<String, Day>, month: &str, listing: &Lis
         let present = parse_day(key).is_some_and(|d| listing.days.contains_key(&d));
         if day.live && !present {
             day.live = false;
+            if !day.is_final {
+                day.error = Some(match day.aggregated_at {
+                    Some(_) => "its indices went before the day was aggregated as final: the figures are the last ones measured".into(),
+                    None => "its indices went before the day was aggregated: only the sizes were measured".into(),
+                });
+            }
             changed = true;
         }
     }
@@ -224,6 +230,37 @@ pub fn apply_totals(days: &mut BTreeMap<String, Day>, month: &str, listing: &Lis
 /// aggregated as final. Today is never final, so it is searched every run.
 pub fn needs_search(day: &Day, group: Option<&DayGroup>) -> bool {
     day.live && !day.is_final && group.is_some_and(|g| g.open > 0)
+}
+
+/// Why a past day that is not final is not searched this run, as its `error` says it —
+/// `None` when it is final, or is searched (`needs_search`), or is today. A day whose
+/// indices are all closed is asked again on the first run that finds one open; a day whose
+/// indices are gone keeps what was last measured (`apply_totals` says so when it goes).
+pub fn not_searched_why(day: &Day, group: Option<&DayGroup>, today: NaiveDate) -> Option<String> {
+    if day.is_final || !day.live || parse_day(&day.day).is_none_or(|d| d >= today) {
+        return None;
+    }
+    match group {
+        Some(g) if g.open == 0 => Some(format!(
+            "not aggregated: {} of its indices {} closed; asked again on a later run while they are open",
+            g.indices, if g.indices == 1 { "is" } else { "are" })),
+        _ => None,
+    }
+}
+
+/// What a search answer that is not whole says: shards that failed, or a time-out. Its
+/// figures are kept but the day is not final, so a later run asks again.
+pub fn partial_answer(res: &Value) -> Option<String> {
+    let failed = res.pointer("/_shards/failed").and_then(Value::as_u64).unwrap_or(0);
+    if failed > 0 {
+        let total = res.pointer("/_shards/total").and_then(Value::as_u64).unwrap_or(0);
+        let reason = res.pointer("/_shards/failures/0/reason/reason").and_then(Value::as_str)
+            .or_else(|| res.pointer("/_shards/failures/0/reason/type").and_then(Value::as_str));
+        let reason = reason.map(|r| format!(" ({})", r.chars().take(200).collect::<String>())).unwrap_or_default();
+        return Some(format!("{failed} of {total} shards failed{reason}: figures may be short; asked again on the next run"));
+    }
+    (res.get("timed_out").and_then(Value::as_bool) == Some(true))
+        .then(|| "the search timed out: figures may be short; asked again on the next run".to_string())
 }
 
 /* ------------------------------------ _field_caps ------------------------------------ */
@@ -462,8 +499,10 @@ pub fn apply_search(day: &mut Day, res: &Value, rows: &[RowResolution], group: &
         });
     }
     day.aggregated_at = Some(now_ms);
-    day.is_final = parse_day(&day.day).is_some_and(|d| d < today);
-    day.error = None;
+    // An answer with failed shards or a time-out is not final, however old the day.
+    let partial = partial_answer(res);
+    day.is_final = partial.is_none() && parse_day(&day.day).is_some_and(|d| d < today);
+    day.error = partial;
 }
 
 #[cfg(test)]
@@ -634,6 +673,48 @@ mod tests {
         assert!(needs_search(&today, Some(&DayGroup { open: 1, ..DayGroup::default() })));
         assert!(!needs_search(day, Some(&DayGroup { open: 1, ..DayGroup::default() })), "final days are not asked again");
         assert!(!needs_search(&today, Some(&DayGroup { open: 0, indices: 1, ..DayGroup::default() })), "only closed indices");
+    }
+
+    /// A past day that stays unfinished is asked again while its indices are live, and its
+    /// `error` says why it is not final.
+    #[test]
+    fn an_unfinished_past_day_is_asked_again_and_says_why() {
+        let rows = resolve_rows(&json!({ "fields": {} }), &VolumeSettings::default());
+        let today = d("2026-10-29");
+        let open = DayGroup { indices: 2, open: 2, ..DayGroup::default() };
+        // Shards failed: the figures are kept, the day is not final and is searched again.
+        let mut day = Day { day: "2026-10-20".into(), live: true, ..Day::default() };
+        let partial = json!({ "_shards": { "total": 4, "successful": 3, "failed": 1,
+                                           "failures": [{ "reason": { "type": "x", "reason": "node left" } }] },
+                              "hits": { "total": { "value": 7 } }, "aggregations": {} });
+        apply_search(&mut day, &partial, &rows, &open, today, 1);
+        assert_eq!(day.docs, Some(7));
+        assert!(!day.is_final, "a partial answer is not final");
+        assert!(day.error.as_deref().unwrap().starts_with("1 of 4 shards failed (node left)"), "{:?}", day.error);
+        assert!(needs_search(&day, Some(&open)), "asked again on the next run");
+        let timed = json!({ "timed_out": true, "hits": { "total": { "value": 7 } } });
+        apply_search(&mut day, &timed, &rows, &open, today, 2);
+        assert!(!day.is_final && day.error.as_deref().unwrap().contains("timed out"));
+        // A whole answer later makes it final and clears the error.
+        apply_search(&mut day, &json!({ "_shards": { "total": 4, "failed": 0 }, "hits": { "total": { "value": 9 } } }), &rows, &open, today, 3);
+        assert!(day.is_final && day.error.is_none());
+
+        // Closed indices: not searched, and says so; open again, searched again.
+        let closed = DayGroup { indices: 1, open: 0, ..DayGroup::default() };
+        let waiting = Day { day: "2026-10-21".into(), live: true, ..Day::default() };
+        assert!(!needs_search(&waiting, Some(&closed)));
+        assert!(not_searched_why(&waiting, Some(&closed), today).unwrap().contains("1 of its indices is closed"));
+        assert!(needs_search(&waiting, Some(&DayGroup { indices: 1, open: 1, ..DayGroup::default() })));
+        assert_eq!(not_searched_why(&waiting, Some(&closed), d("2026-10-21")), None, "today is not past");
+        assert_eq!(not_searched_why(&day, Some(&closed), today), None, "a final day needs no reason");
+
+        // Indices gone before the day was final: live false for good, and the error says so.
+        let mut days = BTreeMap::new();
+        days.insert("2026-10-22".to_string(), Day { day: "2026-10-22".into(), live: true, totals_at: 1, aggregated_at: Some(1), ..Day::default() });
+        days.insert("2026-10-23".to_string(), Day { day: "2026-10-23".into(), live: true, totals_at: 1, ..Day::default() });
+        apply_totals(&mut days, "2026-10", &Listing::default(), 5);
+        assert!(days["2026-10-22"].error.as_deref().unwrap().contains("last ones measured"));
+        assert!(days["2026-10-23"].error.as_deref().unwrap().contains("only the sizes"));
     }
 
     #[test]

@@ -388,7 +388,7 @@ impl Core {
             self.report_progress(job_id, acc.0 + d, acc.1 + t + 1);
         };
         let to = p.to_date().min(today);
-        let opts = CollectOpts { origin: "volume-report", period: Some((p.from_date(), to)), stop: &stop, progress: &progress };
+        let opts = CollectOpts { origin: "volume-report", period: Some((p.from_date(), to)), stop: &stop, progress: &progress, prune: false };
         let got = self.volume_collect(cluster, s, &opts).await.map_err(JobEnd::failed)?;
         if let Some(why) = got.interrupted {
             if let Some(by) = self.report_stop_asked(job_id) {
@@ -408,7 +408,13 @@ impl Core {
 
     async fn report_cluster(self: &Arc<Self>, job: &Job) -> JobEnd {
         let Some(store) = self.volume.store.as_ref() else { return JobEnd::failed("no data directory") };
-        let raw = self.volume_config().await;
+        // A config file that cannot be read: neither collect nor build under built-in
+        // settings, which may count other fields and plot another basis than it says.
+        let raw = match self.volume_config().await {
+            Ok(raw) => raw,
+            Err(e) => return JobEnd::failed(e),
+        };
+        // No `clusterId` in it: the cluster's override is `volume.clusters[id]` (desktop).
         let msg = job.volume.as_ref().map(|v| json!({ "volume": v }));
         let s = self.volume_resolve(raw.as_ref(), Some(&job.cluster_id), msg.as_ref()).settings;
         let warning = match self.report_collect(&job.id, &job.cluster_id, &s, &job.period, (0, 0)).await {
@@ -460,7 +466,10 @@ impl Core {
 
     async fn report_mailed(self: &Arc<Self>, job: &Job) -> JobEnd {
         let Some(store) = self.volume.store.as_ref() else { return JobEnd::failed("no data directory") };
-        let raw = self.volume_config().await;
+        let raw = match self.volume_config().await {
+            Ok(raw) => raw,
+            Err(e) => return JobEnd::failed(e),
+        };
         let (mut done, mut counted) = (0u64, 0u64);
         let mut warnings = vec![];
         let mut each: Vec<(String, VolumeSettings)> = vec![];

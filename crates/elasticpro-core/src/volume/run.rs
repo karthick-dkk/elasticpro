@@ -36,11 +36,21 @@ fn no_store() -> Value {
     bad("no_store", "this core keeps no files (no data directory), so it keeps no volume record")
 }
 
+/// What a config file that is there but cannot be used is answered with. Nothing is
+/// collected under built-in settings in its place: those may count other fields, keep
+/// fewer months (and prune the rest) or run at another hour than the file says.
+fn config_unreadable(e: &str) -> Value {
+    bad("config_unreadable", e)
+}
+
+/// Why a run ended at the emergency stop before it sent anything.
+const STOP_BEFORE: &str = "the emergency stop is on: nothing was sent";
+
 /// Settings as resolved for one request, with where they came from.
 pub(crate) struct Resolved {
     pub settings: VolumeSettings,
     managed: Vec<&'static str>,
-    source: Source,
+    pub source: Source,
     overrides: Vec<String>,
 }
 
@@ -52,6 +62,9 @@ pub(crate) struct CollectOpts<'a> {
     /// Asked between days: `Some(reason)` ends the collection there.
     pub stop: &'a (dyn Fn() -> Option<String> + Send + Sync),
     pub progress: &'a (dyn Fn(u64, u64) + Send + Sync),
+    /// The settings are ones the record may be pruned by (`Core::volume_prunes`). Even then
+    /// months go only after a run that finished without an error.
+    pub prune: bool,
 }
 
 /// What one collection did.
@@ -69,13 +82,57 @@ fn int_arg(msg: &Value, key: &str, default: u64, lo: u64, hi: u64) -> u64 {
     msg.get(key).and_then(Value::as_u64).unwrap_or(default).clamp(lo, hi)
 }
 
+/// The Daily view's figures on `today`: rows, totals and sources over the `days` shown,
+/// and the cards. The record is read from as far back as either needs — a row's average
+/// reaches `avg_days` before the window, a card may reach to the first of the month or 30
+/// days back (`derive::cards_from`) — so a short window does not shrink a card.
+pub(crate) fn daily_view(store: &Store, id: &str, s: &VolumeSettings, days: i64, avg_days: u32, source: Option<&str>, today: NaiveDate) -> Value {
+    let from = today - Duration::days(days - 1);
+    let hist_from = (from - Duration::days(avg_days as i64)).min(derive::cards_from(today, avg_days));
+    let kept = store.days_between(id, hist_from, today);
+    let history = derive::history(&kept, source);
+    let window: Vec<&super::Day> = kept.iter().filter(|d| parse_day(&d.day).is_some_and(|x| x >= from)).collect();
+    let sources: std::collections::BTreeSet<String> = window.iter().flat_map(|d| d.sources.keys().cloned()).collect();
+    let shown: Vec<(&super::Day, Totals)> = window.iter().filter_map(|d| Some((*d, Totals::of(d, source)?))).collect();
+    let rows: Vec<Value> = shown.iter()
+        .map(|(d, t)| derive::daily_row(d, t, &history, avg_days, s.size_basis, source))
+        .collect();
+    let totals = derive::window_totals(&shown.iter().map(|(_, t)| t).collect::<Vec<_>>());
+    let today_at = window.iter().find(|d| d.day == day_key(today)).map(|d| d.totals_at);
+    json!({
+        "cards": derive::cards(&history, today, avg_days, s.size_basis, today_at),
+        "days": rows, "totals": totals, "sources": sources, "source": source, "topAvailable": source.is_none(),
+        "window": { "from": day_key(from), "to": day_key(today), "days": days, "avgDays": avg_days },
+    })
+}
+
 
 impl Core {
     /* ------------------------------------ settings ------------------------------------ */
 
-    /// The clusters file, when this core has one (hosted: ELASTICPRO_CONFIG).
-    pub(crate) async fn volume_config(&self) -> Option<Value> {
-        self.read_config_file().await.ok()
+    /// The clusters file, when this core has one (hosted: ELASTICPRO_CONFIG). `Ok(None)`:
+    /// there is no config file at all, and the settings are the message's (desktop) or
+    /// built-in. `Err`: there is one and it cannot be read or parsed — then nothing is
+    /// collected (docs/VOLUME.md "Collection"), the run is tried again next tick, and the
+    /// reason is the cluster's `lastError`.
+    pub(crate) async fn volume_config(&self) -> Result<Option<Value>, String> {
+        if !self.has_config_file() {
+            return Ok(None);
+        }
+        self.read_config_file().await.map(Some).map_err(|e| {
+            format!("the config file could not be read: {}", e.get("message").and_then(Value::as_str).unwrap_or("unknown error"))
+        })
+    }
+
+    /// Whether a run under these settings may prune the record: settings from the config
+    /// file, from a desktop message, or built-in on a core that has no file to read them
+    /// from (hosted without ELASTICPRO_CONFIG). A desktop request that carried no settings
+    /// resolves to built-in too, and its `keepMonths` is nobody's decision.
+    pub(crate) fn volume_prunes(&self, r: &Resolved) -> bool {
+        match r.source {
+            Source::File | Source::Message => true,
+            Source::Builtin => self.edition() == crate::auth::Edition::Hosted && !self.has_config_file(),
+        }
     }
 
     /// The settings for one cluster (or the defaults), from the config file when there is
@@ -84,16 +141,20 @@ impl Core {
     /// The message's `volume` counts only on the desktop editions. On hosted the settings
     /// are the config file's — which an admin edits — and a request from anybody else must
     /// not be able to say what the timer's next run counts.
+    ///
+    /// A message about one cluster (`clusterId`, or `clusterIds` naming only it) carries
+    /// that cluster's override as `volume.cluster`; one about several carries each one's as
+    /// `volume.clusters[id]` (`settings::layers_from_message`).
     pub(crate) fn volume_resolve(&self, raw: Option<&Value>, cluster: Option<&str>, msg: Option<&Value>) -> Resolved {
         let from_msg = msg.filter(|_| self.edition() != crate::auth::Edition::Hosted)
             .and_then(|m| m.get("volume")).filter(|v| v.is_object());
+        let own = cluster.is_some_and(|id| msg.is_some_and(|m| {
+            m.get("clusterId").and_then(Value::as_str) == Some(id)
+                || m.get("clusterIds").and_then(Value::as_array).is_some_and(|a| a.len() == 1 && a[0].as_str() == Some(id))
+        }));
         let (layers, source, overrides) = match (raw, from_msg) {
             (Some(raw), _) => (settings::layers_from_config(raw, cluster), Source::File, settings::override_ids(raw)),
-            (None, Some(v)) => {
-                let ids = v.pointer("/defaults/overrides").and_then(Value::as_object)
-                    .map(|o| o.keys().cloned().collect()).unwrap_or_default();
-                (settings::layers_from_message(v, cluster), Source::Message, ids)
-            }
+            (None, Some(v)) => (settings::layers_from_message(v, cluster, own), Source::Message, settings::message_override_ids(v)),
             (None, None) => (Layers::default(), Source::Builtin, vec![]),
         };
         let (settings, managed) = settings::resolve(&layers, crate::settings::get());
@@ -142,27 +203,42 @@ impl Core {
             "VOLUME_MONTHLY_ALL" => return self.volume_monthly_all(msg, caller).await,
             _ => {}
         }
-        let raw = self.volume_config().await;
+        // A config file that cannot be read: the record is still shown (under built-in
+        // settings, saying so in `configError`), but nothing asks a cluster under them.
+        let (raw, config_error) = match self.volume_config().await {
+            Ok(raw) => (raw, None),
+            Err(e) => (None, Some(e)),
+        };
         let id = msg.get("clusterId").and_then(Value::as_str).filter(|s| !s.is_empty());
-        if t == "VOLUME_SETTINGS" {
+        let mut out = if t == "VOLUME_SETTINGS" {
             let r = self.volume_resolve(raw.as_ref(), id, Some(msg));
             let visible = self.visible_ids(caller);
             let overrides: Vec<String> = r.overrides.into_iter().filter(|o| visible.as_ref().is_none_or(|v| v.contains(o))).collect();
-            return json!({ "ok": true, "clusterId": id, "settings": r.settings, "managed": r.managed,
-                           "source": r.source.as_str(), "overrides": overrides });
+            json!({ "ok": true, "clusterId": id, "settings": r.settings, "managed": r.managed,
+                    "source": r.source.as_str(), "overrides": overrides })
+        } else {
+            let Some(id) = id else { return bad("bad_request", "clusterId is required") };
+            if self.spec_for(id).is_none() {
+                return bad("not_found", format!("no cluster {id:?}"));
+            }
+            let r = self.volume_resolve(raw.as_ref(), Some(id), Some(msg));
+            match t {
+                "VOLUME_FIELDS_CHECK" => match &config_error {
+                    Some(e) => return config_unreadable(e),
+                    None => self.volume_fields_check(id, &r.settings, caller).await,
+                },
+                "VOLUME_DAILY" => self.volume_daily(id, &r.settings, msg),
+                "VOLUME_MONTHLY" => self.volume_monthly(id, &r.settings, msg),
+                "VOLUME_BREAKDOWN" => self.volume_breakdown(id, msg),
+                _ => bad("bad_message", format!("Unknown message type {t:?}")),
+            }
+        };
+        if let (Some(e), Some(o)) = (config_error, out.as_object_mut()) {
+            if o.get("ok") == Some(&Value::Bool(true)) {
+                o.insert("configError".into(), json!(e));
+            }
         }
-        let Some(id) = id else { return bad("bad_request", "clusterId is required") };
-        if self.spec_for(id).is_none() {
-            return bad("not_found", format!("no cluster {id:?}"));
-        }
-        let r = self.volume_resolve(raw.as_ref(), Some(id), Some(msg));
-        match t {
-            "VOLUME_FIELDS_CHECK" => self.volume_fields_check(id, &r.settings, caller).await,
-            "VOLUME_DAILY" => self.volume_daily(id, &r.settings, msg),
-            "VOLUME_MONTHLY" => self.volume_monthly(id, &r.settings, msg),
-            "VOLUME_BREAKDOWN" => self.volume_breakdown(id, msg),
-            _ => bad("bad_message", format!("Unknown message type {t:?}")),
-        }
+        out
     }
 
     async fn volume_fields_check(self: &Arc<Self>, id: &str, s: &VolumeSettings, caller: Option<&Caller>) -> Value {
@@ -196,28 +272,18 @@ impl Core {
         let days = int_arg(msg, "days", 30, 14, 400) as i64;
         let avg_days = int_arg(msg, "avgDays", derive::AVG_DAYS_DEFAULT as u64, 3, 180) as u32;
         let source = msg.get("source").and_then(Value::as_str).filter(|s| !s.is_empty());
-        let today = schedule::utc_day(now_ms());
-        let from = today - Duration::days(days - 1);
-        let hist_from = from - Duration::days(avg_days as i64);
-
-        let kept = store.days_between(id, hist_from, today);
-        let history = derive::history(&kept, source);
-        let window: Vec<&super::Day> = kept.iter().filter(|d| parse_day(&d.day).is_some_and(|x| x >= from)).collect();
-        let sources: std::collections::BTreeSet<String> = window.iter().flat_map(|d| d.sources.keys().cloned()).collect();
-        let shown: Vec<(&super::Day, Totals)> = window.iter().filter_map(|d| Some((*d, Totals::of(d, source)?))).collect();
-        let rows: Vec<Value> = shown.iter()
-            .map(|(d, t)| derive::daily_row(d, t, &history, avg_days, s.size_basis, source))
-            .collect();
-        let totals = derive::window_totals(&shown.iter().map(|(_, t)| t).collect::<Vec<_>>());
-        let today_at = window.iter().find(|d| d.day == day_key(today)).map(|d| d.totals_at);
+        let mut out = daily_view(store, id, s, days, avg_days, source, schedule::utc_day(now_ms()));
         let st = store.read_state(id);
-        json!({
-            "ok": true, "clusterId": id, "settings": s, "status": self.volume_status(id, s, &st),
-            "cards": derive::cards(&history, today, avg_days, s.size_basis, today_at),
-            "days": rows, "totals": totals, "sources": sources, "source": source, "topAvailable": source.is_none(),
-            "skipped": st.skipped, "skippedCount": st.skipped_count, "matched": st.matched,
-            "window": { "from": day_key(from), "to": day_key(today), "days": days, "avgDays": avg_days },
-        })
+        if let Some(o) = out.as_object_mut() {
+            o.insert("ok".into(), json!(true));
+            o.insert("clusterId".into(), json!(id));
+            o.insert("settings".into(), json!(s));
+            o.insert("status".into(), self.volume_status(id, s, &st));
+            o.insert("skipped".into(), json!(st.skipped));
+            o.insert("skippedCount".into(), json!(st.skipped_count));
+            o.insert("matched".into(), json!(st.matched));
+        }
+        out
     }
 
     fn month_rows(st: &ClusterState, s: &VolumeSettings, months: usize, current: &str) -> Vec<Value> {
@@ -232,16 +298,20 @@ impl Core {
         let current = month_key(schedule::utc_day(now_ms()));
         let st = store.read_state(id);
         let rows = Core::month_rows(&st, s, months, &current);
-        json!({ "ok": true, "clusterId": id, "status": self.volume_status(id, s, &st),
+        json!({ "ok": true, "clusterId": id, "settings": s, "status": self.volume_status(id, s, &st),
                 "avgPerMonth": derive::avg_per_month(&rows), "months": rows })
     }
 
-    /// Every cluster the caller sees, from `state.json` alone.
+    /// Every cluster the caller sees, from `state.json` alone. On desktop each cluster's
+    /// override comes from the message's `volume.clusters[id]`.
     async fn volume_monthly_all(&self, msg: &Value, caller: Option<&Caller>) -> Value {
         let Some(store) = &self.volume.store else { return no_store() };
         let months = int_arg(msg, "months", 13, 1, 36) as usize;
         let current = month_key(schedule::utc_day(now_ms()));
-        let raw = self.volume_config().await;
+        let (raw, config_error) = match self.volume_config().await {
+            Ok(raw) => (raw, None),
+            Err(e) => (None, Some(e)),
+        };
         let mut out = vec![];
         for id in self.fleet_visible(caller) {
             let name = self.spec_for(&id).and_then(|s| s.name).unwrap_or_else(|| id.clone());
@@ -250,7 +320,11 @@ impl Core {
             out.push(json!({ "clusterId": id, "name": name, "basis": r.settings.size_basis,
                              "months": Core::month_rows(&st, &r.settings, months, &current) }));
         }
-        json!({ "ok": true, "clusters": out })
+        let mut reply = json!({ "ok": true, "clusters": out });
+        if let Some(e) = config_error {
+            reply["configError"] = json!(e);
+        }
+        reply
     }
 
     fn volume_breakdown(&self, id: &str, msg: &Value) -> Value {
@@ -383,11 +457,17 @@ impl Core {
     /* ---------------------------------------- runs ---------------------------------------- */
 
     /// `VOLUME_RUN {clusterIds?}`: run now, for whoever asks, at most once a minute per
-    /// cluster. Absent ids are every cluster the caller sees.
+    /// cluster. Absent ids are every cluster the caller sees. A config file that is there
+    /// but cannot be read refuses the lot (`config_unreadable`): nothing is collected under
+    /// built-in settings in its place.
     async fn volume_run_msg(self: &Arc<Self>, msg: &Value, caller: Option<&Caller>) -> Value {
         if self.volume.store.is_none() {
             return no_store();
         }
+        let raw = match self.volume_config().await {
+            Ok(raw) => raw,
+            Err(e) => return config_unreadable(&e),
+        };
         let visible = self.fleet_visible(caller);
         let ids: Vec<String> = match msg.get("clusterIds").and_then(Value::as_array) {
             Some(a) => a.iter().filter_map(Value::as_str).map(String::from).collect(),
@@ -395,7 +475,6 @@ impl Core {
         };
         let (mut started, mut already, mut too_soon, mut skipped) = (vec![], vec![], vec![], vec![]);
         let stopped = self.volume_stopped();
-        let raw = self.volume_config().await;
         let now = crate::fleet::now_ms();
         for id in ids {
             if !visible.contains(&id) {
@@ -425,8 +504,9 @@ impl Core {
                 "tooSoon" => too_soon.push(id),
                 "unreachable" => skipped.push(json!({ "clusterId": id, "reason": "unreachable" })),
                 _ => {
-                    let s = self.volume_resolve(raw.as_ref(), Some(&id), Some(msg)).settings;
-                    self.volume_spawn(id.clone(), s);
+                    let r = self.volume_resolve(raw.as_ref(), Some(&id), Some(msg));
+                    let prune = self.volume_prunes(&r);
+                    self.volume_spawn(id.clone(), r.settings, prune, None);
                     started.push(id);
                 }
             }
@@ -437,17 +517,44 @@ impl Core {
 
     /// Run one cluster in the background, behind the two-at-once limit. The caller has
     /// already marked it running.
-    fn volume_spawn(self: &Arc<Self>, id: String, s: VolumeSettings) {
+    ///
+    /// `scheduled` is set for the timer's run: the cluster's `lastScheduledDay` before the
+    /// timer marked today. A scheduled run that ends at the emergency stop — while it waited
+    /// for its turn, before `_cat`, or with days left — puts that back, so the first tick
+    /// after the stop runs the cluster again. A run that finished, or failed for any other
+    /// reason, leaves today marked: at most one scheduled run a day.
+    fn volume_spawn(self: &Arc<Self>, id: String, s: VolumeSettings, prune: bool, scheduled: Option<Option<String>>) {
         let core = self.clone();
         tokio::spawn(async move {
             let permit = core.volume.permits.clone().acquire_owned().await;
-            let result = core.volume_run_cluster(&id, &s).await;
+            // The stop may have come on while this run waited for its permit.
+            let result = if core.volume_stopped() {
+                Ok(Collected { error: Some(STOP_BEFORE.into()), interrupted: Some(STOP_BEFORE.into()), ..Collected::default() })
+            } else {
+                core.volume_run_cluster(&id, &s, prune).await
+            };
             drop(permit);
-            if let Err(e) = &result {
-                tracing::warn!(cluster = %id, error = %e, "volume daily: run did not finish");
-                if let Some(store) = &core.volume.store {
-                    let _ = store.update_state(&id, |st| st.last_error = Some(e.clone()));
+            match &result {
+                Err(e) => {
+                    tracing::warn!(cluster = %id, error = %e, "volume daily: run did not finish");
+                    if let Some(store) = &core.volume.store {
+                        let _ = store.update_state(&id, |st| st.last_error = Some(e.clone()));
+                    }
                 }
+                Ok(c) if c.interrupted.is_some() => {
+                    let why = c.error.clone().or_else(|| c.interrupted.clone()).unwrap_or_default();
+                    let why = if scheduled.is_some() { format!("{why}; the scheduled run is tried again when the stop is over") } else { why };
+                    tracing::info!(cluster = %id, reason = %why, "volume daily: run ended at the emergency stop");
+                    if let Some(store) = &core.volume.store {
+                        let _ = store.update_state(&id, |st| {
+                            if let Some(prev) = &scheduled {
+                                st.last_scheduled_day = prev.clone();
+                            }
+                            st.last_error = Some(why.clone());
+                        });
+                    }
+                }
+                Ok(_) => {}
             }
             if let Some(r) = core.volume.runs.lock().get_mut(&id) {
                 r.running = false;
@@ -464,11 +571,11 @@ impl Core {
 
     /// One cluster, start to finish (docs/VOLUME.md "Each run, per cluster"): the daily run
     /// and Refresh now.
-    async fn volume_run_cluster(self: &Arc<Self>, id: &str, s: &VolumeSettings) -> Result<(), String> {
+    async fn volume_run_cluster(self: &Arc<Self>, id: &str, s: &VolumeSettings, prune: bool) -> Result<Collected, String> {
         let stop = || self.volume_stopped().then(|| "the emergency stop came on".to_string());
         let progress = |done, total| self.volume_progress(id, done, total);
-        let opts = CollectOpts { origin: "volume-daily", period: None, stop: &stop, progress: &progress };
-        self.volume_collect(id, s, &opts).await.map(|_| ())
+        let opts = CollectOpts { origin: "volume-daily", period: None, stop: &stop, progress: &progress, prune };
+        self.volume_collect(id, s, &opts).await
     }
 
     /// The collector, for the daily run and for a report job (`report`), under the same
@@ -476,11 +583,14 @@ impl Core {
     /// never asked again. A report job passes its `period` — only the months it touches are
     /// refreshed and only its days searched; the run's status and the prune are left to the
     /// daily run — and a `stop` that also answers to `REPORT_STOP`.
+    ///
+    /// Ending at the stop is `Ok` with `interrupted` set, whether before anything was sent
+    /// or with days left; so is a request that failed while the stop came on.
     pub(crate) async fn volume_collect(self: &Arc<Self>, id: &str, s: &VolumeSettings, opts: &CollectOpts<'_>) -> Result<Collected, String> {
         let store = self.volume.store.as_ref().ok_or("no data directory")?;
         let fmt = IndexFormat::new(&s.index_format).ok_or("indexFormat cannot be used")?;
         if self.volume_stopped() {
-            return Err("the emergency stop is on: nothing was sent".into());
+            return Ok(Collected { error: Some(STOP_BEFORE.into()), interrupted: Some(STOP_BEFORE.into()), ..Collected::default() });
         }
         let job = opts.period.is_some();
         let tag = |mut r: crate::http::EsRequest| {
@@ -497,11 +607,15 @@ impl Core {
         // 1. Sizes per day, from the names.
         let cat = self.es_req(tag(collect::cat_request(id, &fmt))).await;
         if !ok(&cat) {
-            let e = format!("_cat/indices: {}", why(&cat));
+            let (e, interrupted) = match (opts.stop)() {
+                Some(reason) => (format!("{reason} before _cat/indices answered"), Some(reason)),
+                None => (format!("_cat/indices: {}", why(&cat)), None),
+            };
             if !job {
                 store.update_state(id, |st| { st.last_run_at = Some(started); st.last_error = Some(e.clone()); })?;
             }
             out.error = Some(e);
+            out.interrupted = interrupted;
             return Ok(out);
         }
         let listing = collect::read_cat(cat.get("json").unwrap_or(&Value::Null), &fmt);
@@ -523,14 +637,25 @@ impl Core {
         let mut to_search: Vec<NaiveDate> = vec![];
         for m in &months {
             let mut file = store.read_month(id, m);
-            if collect::apply_totals(&mut file.days, m, &listing, started) && !file.days.is_empty() {
-                store.write_month(id, m, &file)?;
-            }
-            for (k, d) in &file.days {
+            let mut changed = collect::apply_totals(&mut file.days, m, &listing, started);
+            for (k, d) in file.days.iter_mut() {
                 let Some(date) = parse_day(k) else { continue };
-                if in_period(date) && collect::needs_search(d, listing.days.get(&date)) {
-                    to_search.push(date);
+                if !in_period(date) {
+                    continue;
                 }
+                let group = listing.days.get(&date);
+                if collect::needs_search(d, group) {
+                    to_search.push(date);
+                } else if let Some(e) = collect::not_searched_why(d, group, today) {
+                    // A past day that stays unfinished says why (docs/VOLUME.md "Store").
+                    if d.error.as_deref() != Some(e.as_str()) {
+                        d.error = Some(e);
+                        changed = true;
+                    }
+                }
+            }
+            if changed && !file.days.is_empty() {
+                store.write_month(id, m, &file)?;
             }
             if !file.days.is_empty() {
                 summaries.insert(m.clone(), derive::month_summary(m, &file.days));
@@ -544,8 +669,29 @@ impl Core {
             let fc = self.es_req(tag(collect::field_caps_request(id, &fmt, s))).await;
             if ok(&fc) {
                 Some(collect::resolve_rows(fc.get("json").unwrap_or(&Value::Null), s))
+            } else if let Some(reason) = (opts.stop)() {
+                out.error = Some(format!("{reason} before _field_caps answered"));
+                out.interrupted = Some(reason);
+                None
             } else {
-                out.error = Some(format!("_field_caps: {}", why(&fc)));
+                // The days stay unfinished and say why; the next run asks again.
+                let e = format!("_field_caps: {}", why(&fc));
+                let note = format!("not aggregated: {e}; asked again on the next run");
+                let mut by_month: BTreeMap<String, Vec<NaiveDate>> = BTreeMap::new();
+                for d in &to_search {
+                    by_month.entry(month_key(*d)).or_default().push(*d);
+                }
+                for (m, dates) in by_month {
+                    let mut file = store.read_month(id, &m);
+                    for date in dates {
+                        if let Some(day) = file.days.get_mut(&day_key(date)) {
+                            day.error = Some(note.clone());
+                        }
+                    }
+                    store.write_month(id, &m, &file)?;
+                    summaries.insert(m.clone(), derive::month_summary(&m, &file.days));
+                }
+                out.error = Some(e);
                 None
             }
         };
@@ -572,13 +718,26 @@ impl Core {
                         break 'months;
                     }
                     let res = self.es_req(tag(collect::search_request(id, &fmt, date, &body))).await;
+                    if !ok(&res) {
+                        // Refused or cut off because the stop came on: not this day's fault.
+                        if let Some(reason) = (opts.stop)() {
+                            out.error = Some(format!("{reason} after {done} of {total} days"));
+                            out.interrupted = Some(reason);
+                            store.write_month(id, &m, &file)?;
+                            summaries.insert(m.clone(), derive::month_summary(&m, &file.days));
+                            break 'months;
+                        }
+                    }
                     if let (Some(day), Some(group)) = (file.days.get_mut(&day_key(date)), listing.days.get(&date)) {
                         if ok(&res) {
                             collect::apply_search(day, res.get("json").unwrap_or(&Value::Null), &rows, group, today, now_ms());
+                            if let Some(e) = &day.error {
+                                out.error.get_or_insert_with(|| format!("{}: {e}", day_key(date)));
+                            }
                         } else {
-                            let e = why(&res);
-                            day.error = Some(e.clone());
+                            let e = format!("the search failed: {}; asked again on the next run", why(&res));
                             out.error.get_or_insert_with(|| format!("{}: {e}", day_key(date)));
+                            day.error = Some(e);
                         }
                     }
                     done += 1;
@@ -591,7 +750,8 @@ impl Core {
         }
 
         // 4. Month summaries; for the daily run also its status, then what is older than
-        // keepMonths goes.
+        // keepMonths goes — only after a run that finished cleanly under settings the
+        // record may be pruned by (`CollectOpts::prune`).
         if job {
             store.update_state(id, |st| st.months.extend(summaries))?;
             tracing::info!(cluster = %id, origin = opts.origin, searched = out.searched, error = out.error.as_deref().unwrap_or(""), "volume: days collected for a report");
@@ -606,7 +766,9 @@ impl Core {
             st.skipped_count = listing.skipped_count;
             st.months.extend(summaries);
         })?;
-        store.prune(id, &oldest)?;
+        if opts.prune && out.error.is_none() && out.interrupted.is_none() {
+            store.prune(id, &oldest)?;
+        }
         tracing::info!(cluster = %id, days = listing.days.len(), error = error.as_deref().unwrap_or(""), "volume daily: run finished");
         Ok(out)
     }
@@ -651,15 +813,34 @@ impl Core {
         if self.volume_stopped() {
             return vec![];
         }
-        let raw = self.volume_config().await;
         let mut specs = self.all_specs();
         specs.sort_by(|a, b| a.id.cmp(&b.id));
+        // A config file that cannot be read: nothing runs and nothing is marked, so the
+        // first tick after it is fixed runs what is due. Each cluster says why.
+        let raw = match self.volume_config().await {
+            Ok(raw) => raw,
+            Err(e) => {
+                let mut told = 0;
+                for spec in &specs {
+                    if store.read_state(&spec.id).last_error.as_deref() != Some(e.as_str())
+                        && store.update_state(&spec.id, |st| st.last_error = Some(e.clone())).is_ok()
+                    {
+                        told += 1;
+                    }
+                }
+                if told > 0 {
+                    tracing::warn!(error = %e, clusters = told, "volume daily: not run, the config file could not be read");
+                }
+                return vec![];
+            }
+        };
         let mut started = vec![];
         for spec in specs {
             let id = spec.id;
-            let s = self.volume_resolve(raw.as_ref(), Some(&id), None).settings;
-            let last = store.read_state(&id).last_scheduled_day.as_deref().and_then(parse_day);
-            if !schedule::is_due(local, s.collect_time(), last) || self.volume_unreachable(&id) {
+            let r = self.volume_resolve(raw.as_ref(), Some(&id), None);
+            let prev = store.read_state(&id).last_scheduled_day;
+            let last = prev.as_deref().and_then(parse_day);
+            if !schedule::is_due(local, r.settings.collect_time(), last) || self.volume_unreachable(&id) {
                 continue;
             }
             let begin = {
@@ -676,7 +857,7 @@ impl Core {
                 continue;
             }
             // Marked before the run, not after: a run that crashes the process must not be
-            // started again by every restart.
+            // started again by every restart. A run that ends at the stop puts `prev` back.
             let today = day_key(local.date());
             if store.update_state(&id, |st| st.last_scheduled_day = Some(today.clone())).is_err() {
                 if let Some(r) = self.volume.runs.lock().get_mut(&id) {
@@ -684,7 +865,8 @@ impl Core {
                 }
                 continue;
             }
-            self.volume_spawn(id.clone(), s);
+            let prune = self.volume_prunes(&r);
+            self.volume_spawn(id.clone(), r.settings, prune, Some(prev));
             started.push(id);
         }
         started
@@ -706,6 +888,39 @@ mod tests {
         assert_eq!(long.len(), 36);
         assert_eq!(long.first().map(String::as_str), Some("2024-01"));
         assert_eq!(long.last().map(String::as_str), Some("2026-12"));
+    }
+
+    /// The cards do not depend on the table's window: 14 days with a 3-day average on the
+    /// 29th still sum the whole month and 30 days of event bytes; the rows stay 14.
+    #[test]
+    fn the_cards_read_past_a_short_window() {
+        let root = std::env::temp_dir().join(format!("ep-volume-view-{}-{}", std::process::id(), now_ms()));
+        let store = Store::new(root.clone());
+        let d = |s: &str| parse_day(s).unwrap();
+        let mut by_month: BTreeMap<String, super::super::store::MonthFile> = BTreeMap::new();
+        // 2026-09-25 .. 2026-10-29: 100 bytes primary and 10 event bytes a day.
+        let mut day = d("2026-09-25");
+        while day <= d("2026-10-29") {
+            let f = by_month.entry(month_key(day)).or_insert_with(|| super::super::store::MonthFile { version: 1, ..Default::default() });
+            f.days.insert(day_key(day), super::super::Day {
+                day: day_key(day), is_final: day < d("2026-10-29"), live: true, indices: 1, pri_bytes: 100, total_bytes: 200,
+                docs: Some(1), event_bytes: Some(10), ..Default::default()
+            });
+            day += Duration::days(1);
+        }
+        for (m, f) in &by_month {
+            store.write_month("prod", m, f).unwrap();
+        }
+        let v = daily_view(&store, "prod", &VolumeSettings::default(), 14, 3, None, d("2026-10-29"));
+        let _ = std::fs::remove_dir_all(&root);
+        assert_eq!(v["days"].as_array().unwrap().len(), 14, "the rows are the window's");
+        assert_eq!(v["totals"]["priBytes"], 1400, "and so is the totals row");
+        assert_eq!(v["cards"]["monthSoFar"]["value"], 2900, "1 Oct .. 29 Oct, not only the window and its average days");
+        assert_eq!(v["cards"]["eventBytes30"]["value"], 300, "29 Sep .. 28 Oct");
+        assert_eq!(v["cards"]["eventBytes30"]["daysMeasured"], 30);
+        assert_eq!(v["cards"]["average"]["value"], 100);
+        assert_eq!(v["days"][0]["day"], "2026-10-16");
+        assert_eq!(v["days"][0]["avg"], 100, "the first row's average still has its 3 days before");
     }
 
     #[test]
