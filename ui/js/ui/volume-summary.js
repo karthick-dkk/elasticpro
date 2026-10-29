@@ -19,6 +19,7 @@ import { state } from '../core/state.js';
 import { navigateTo } from '../core/intent.js';
 import { card, statTile, table, empty, unreadable } from '../pages/common.js';
 import { toast } from './menu.js';
+import { reportJobsMount, reportPanel, setReportPanelOpen } from './report-jobs.js';
 import {
   volumeDaily, volumeMonthly, volumeBreakdown, volumeRun, volumeLayoutGet, volumeLayoutSet, isHosted,
   NEEDS_VERSION, collectDue, hhmm, utcDay, basisOf, BASIS_LABEL, BASIS_KEY, monthValue, fromText, monthName,
@@ -73,6 +74,16 @@ export function resetVolumeSummary() {
 }
 
 const bump = () => { vs.rev++; redrawPage(); };
+
+/**
+ * Arrive on Monthly with the report panel open: the top-bar pill's way in (the Indices page
+ * takes the hint, core/focus.js). The panel keeps its own state; only the view changes.
+ */
+export function showReportJobs() {
+  vs.mode = 'monthly';
+  setReportPanelOpen(true);
+  vs.rev++;
+}
 const alive = () => !!(built.node && built.node.isConnected);
 
 /**
@@ -481,9 +492,8 @@ function monthlyToolbar(c, reply) {
     h('label.field', 'Months', select('vs-months', vs.months, MONTH_CHOICES.map((m) => [m, `${m} months`]),
       (v) => { vs.months = Number(v); bump(); })),
     h('div.vs-right',
-      // Background report jobs ("Generate report" and the top-bar status) mount here in a
-      // later release. Empty until then, on purpose.
-      h('span#vol-report-jobs.vs-jobs', { dataset: { mount: 'volume-report-jobs' } }),
+      // "Generate report" (ui/report-jobs.js): the same element on every rebuild.
+      reportJobsMount(),
       h('button.btn.sm.primary', {
         type: 'button', disabled: !reply,
         title: 'The monthly rows as CSV, one row per month',
@@ -496,7 +506,9 @@ function monthlyView(c) {
   const ent = monthly.get(mkey(c));
   if (!ent) loadMonthly(c);
   const reply = ent && ent.reply;
-  const out = [monthlyToolbar(c, reply)];
+  // The report panel sits under the toolbar whatever the record says: jobs are followed
+  // even while this cluster's months are still loading or could not be read.
+  const out = [monthlyToolbar(c, reply), reportPanel(c)];
   if (ent && ent.error) return [...out, unreadable('The monthly volume record', ent.error)];
   if (!reply) return [...out, h('div.tbl-empty', 'Reading the monthly record…')];
   const rows = monthRows(reply);

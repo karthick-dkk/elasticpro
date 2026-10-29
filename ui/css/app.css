@@ -1613,3 +1613,78 @@ tr.vs-special td:first-child { font-style: italic; color: var(--text-secondary);
 .vs-share-bar { flex: 1; height: 7px; min-width: 60px; background: var(--surface-3); border-radius: 4px; overflow: hidden; display: block; }
 .vs-share-bar i { display: block; height: 100%; background: var(--series-1); border-radius: 4px; }
 .vs-share-n { font-size: 11.5px; font-variant-numeric: tabular-nums; min-width: 44px; text-align: right; }
+
+/* Reports and mail (ui/report-jobs.js, ui/reports-pill.js, ui/report-mail.js; 0.3.45)
+   ----------------------------------------------------------------------------------------
+   Compact density: 32 px job rows, no empty bands. Everything here fits at 1024 px: the
+   panel's two halves wrap to one column when they cannot both have 340 px, names ellipsize
+   in their own cell, and a long client list scrolls inside its own box, never the page. */
+/* the top-bar pill: accent while something runs or waits, grey when idle */
+.pill.rp-pill { cursor: pointer; font: inherit; font-size: 11px; font-weight: 600; }
+.pill.rp-pill.rp-busy { color: var(--accent); background: var(--accent-soft); border-color: color-mix(in srgb, var(--accent) 35%, transparent); }
+.pill.rp-pill:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+/* Generate report */
+.vs-jobs .btn[aria-pressed="true"] { background: var(--accent-soft); border-color: var(--accent); }
+.rj-panel { margin-bottom: 10px; }
+.rj-panel > .body.rj-body { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 10px 16px; padding: 10px 12px; }
+.rj-form, .rj-jobs { display: grid; gap: 6px; align-content: start; min-width: 0; }
+.rj-clients-head, .rj-jobs-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; min-height: 26px; font-size: 12.5px; }
+.rj-clients-head .btn { padding: 1px 8px; }
+.rj-clients { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 0 10px;
+  max-height: 136px; overflow-y: auto; border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 3px 8px; }
+.rj-client { display: flex; align-items: center; gap: 6px; min-width: 0; min-height: 24px; font-size: 12.5px; cursor: pointer; }
+.rj-client input { margin: 0; flex: none; }
+.rj-client span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rj-row { display: flex; align-items: flex-end; gap: 10px; flex-wrap: wrap; }
+.rj-row > label.field { min-width: 180px; }
+.rj-row > div.field { display: flex; flex-direction: column; gap: 3px; font-size: 11px; color: var(--text-muted); }
+.rj-row .seg .btn { height: 30px; }
+.rj-check { display: flex; align-items: flex-start; gap: 7px; font-size: 12.5px; cursor: pointer; }
+.rj-check input { margin: 2px 0 0; flex: none; }
+.rj-why { color: var(--warning-ink); }
+.rj-note, .rj-foot { font-size: 11.5px; }
+.rj-counts { font-size: 11.5px; }
+.rj-conc { margin-left: auto; display: inline-flex; align-items: center; gap: 6px; font-size: 11.5px; color: var(--text-muted); }
+.rj-conc select { height: 24px; font-size: 12px; padding: 0 4px; }
+.rj-list { display: grid; border-top: 1px solid var(--border); max-height: 320px; overflow-y: auto; }
+.rj-empty { padding: 7px 0; font-size: 12px; }
+.rj-job { display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(0, .9fr) minmax(0, 1.6fr) auto; align-items: center;
+  gap: 2px 8px; min-height: 32px; padding: 2px 0; border-bottom: 1px solid var(--border); font-size: 12.5px; }
+.rj-job > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rj-client-name { font-weight: 600; }
+.rj-period { font-size: 11.5px; }
+.rj-status { display: flex; align-items: center; gap: 6px; }
+.rj-status-t { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.rj-status-t.rj-ok { color: var(--good-ink); }
+.rj-status-t.rj-bad { color: var(--critical-ink); }
+.rj-job > span.rj-status.rj-wrap, .rj-wrap .rj-status-t { white-space: normal; overflow-wrap: anywhere; }
+.rj-bar { flex: 1 0 50px; max-width: 110px; height: 6px; background: var(--surface-3); border-radius: 3px; overflow: hidden; display: block; }
+.rj-bar i { display: block; height: 100%; background: var(--accent); border-radius: 3px; }
+.rj-act { justify-self: end; }
+.rj-act .btn { padding: 1px 8px; }
+.rj-adm { font-size: 11px; }
+.rj-sub { grid-column: 1 / -1; font-size: 11.5px; overflow-wrap: anywhere; padding-bottom: 2px; }
+.rj-warn { color: var(--warning-ink); }
+.rj-acts { display: flex; gap: 6px; justify-content: flex-end; }
+/* Config › Volume fields: Volume report by mail, Mail server (SMTP) */
+.rm-panels { display: grid; gap: 12px; }
+.rm-body { display: grid; gap: 8px; }
+.rm-on { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; font-size: 12px; }
+.rm-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 6px 10px; }
+.rm-grid .rm-wide { grid-column: span 2; }
+.rm-grid input, .rm-grid select { width: 100%; box-sizing: border-box; height: 30px; }
+.rm-managed { font-size: 10.5px; }
+.rm-sheets { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+.rm-lab { font-size: 11px; color: var(--text-muted); }
+.rm-note { font-size: 11.5px; }
+.rm-acts { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.rm-test { display: inline-flex; gap: 6px; align-items: center; }
+.rm-test input { width: 220px; max-width: 100%; height: 28px; }
+.rm-status { font-size: 12px; margin-left: auto; overflow-wrap: anywhere; min-width: 0; }
+.rm-steps { display: flex; gap: 4px 14px; flex-wrap: wrap; font-size: 12px; }
+.rm-ok { color: var(--good-ink); }
+.rm-bad { color: var(--critical-ink); }
+.rm-ro { font-size: 12px; }
+.banner.rm-banner { margin: 0; font-size: 12px; }
+@media (max-width: 900px) { .rm-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 560px) { .rm-grid { grid-template-columns: minmax(0, 1fr); } .rm-grid .rm-wide { grid-column: auto; } }

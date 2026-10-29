@@ -32,6 +32,7 @@ import { confirmDialog, modal, field, text, select, checkbox, val, checked } fro
 import { VOLUME_KEYS, FIELD_ROWS, BOUNDS as VOLUME_BOUNDS, fileVolume, desktopVolume, foldManaged, overrideIds, validateVolume, applyDefaults,
   applyOverride, yamlBlock, configTxtLines, displayValue, checkCell, indicesCell, listText, toList, getPath, setPath } from '../core/volume-config.js';
 import { volumeSettings, volumeFieldsCheck } from '../core/volume-settings.js';
+import { reportMailPanels, loadReportMail, reportMailKeyLines } from '../ui/report-mail.js';
 import { rowMenu, ICON } from '../ui/menu.js';
 
 /** What each credential source the Zabbix sync reports is called (bridge.rs zabbix_sync). */
@@ -781,7 +782,7 @@ const SECTIONS = [
     when: () => !!(sink && sink.supported) },
   { id: 'requests', label: 'Requests',     icon: '⚡', build: requestsCard, load: loadPolicy },
   { id: 'defaults', label: 'Defaults',     icon: '⚙', build: defaultsCard },
-  { id: 'volume',   label: 'Volume fields', icon: '▤', build: volumeSection, load: loadVolume },
+  { id: 'volume',   label: 'Volume fields', icon: '▤', build: volumeSection, load: loadVolumeSection },
   { id: 'diag',     label: 'Diagnostics',  icon: '✚', build: diagnosticsCard, load: confirmCoreGuard },
 ];
 
@@ -1675,14 +1676,21 @@ function volumeCard() {
       h('button#vf-save.btn.sm.primary', { onclick: saveVolume, disabled: !canWrite, title: canWrite ? '' : 'Only an admin can write the config file' }, 'Save')]);
 }
 
+/** The section's two loads: the fields, and the mailed report with its mail server (ui/report-mail.js). */
+function loadVolumeSection() {
+  loadVolume();
+  loadReportMail(() => { if (host && host.isConnected && activeSection() && activeSection().id === 'volume') draw(); });
+}
+
 function volumeSection() {
   const v = volModel().values;
   return h('div', { style: { display: 'grid', gap: '12px' } },
     volumeCard(),
+    reportMailPanels(),
     h('div.vf-info',
       card('Same settings in the clusters file', 'what Save writes', h('pre.vf-pre', yamlBlock(v))),
       card('Hosted: config.txt keys', 'one line per setting',
-        h('div', { style: { display: 'grid', gap: '6px' } }, h('pre.vf-pre', configTxtLines(v)),
+        h('div', { style: { display: 'grid', gap: '6px' } }, h('pre.vf-pre', `${configTxtLines(v)}\n${reportMailKeyLines()}`),
           h('div.muted', { style: { fontSize: '11.5px' } },
             `A key set in config.txt locks its row: it shows "${MANAGED_NOTE}" here and is never written to the file.`)))));
 }
