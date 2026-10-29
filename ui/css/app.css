@@ -1539,3 +1539,17 @@ table.cl-tbl > tbody > tr.cl-detail-row > td { text-align: left; }
 .cl-expand { padding-bottom: 4px; border-bottom: 1px solid var(--border); }
 .cl-cols-rule { height: 1px; background: var(--border); margin: 4px 0; }
 .cl-cols-hint { font-size: 11px; padding-top: 4px; }
+
+/* Config › Volume fields */
+.vf-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
+.vf-bar-right { margin-left: auto; display: inline-flex; align-items: center; gap: 6px; }
+.vf-table td { vertical-align: top; }
+.vf-table td input[type="text"], .vf-table td input:not([type]) { width: 100%; box-sizing: border-box; }
+.vf-check { font-size: 12px; }
+.vf-ok { color: var(--good-ink); }
+.vf-bad { color: var(--critical-ink); }
+.vf-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px 10px; }
+.vf-grid input, .vf-grid select { width: 100%; box-sizing: border-box; }
+.vf-info { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 12px; }
+.vf-pre { margin: 0; font-family: var(--mono); font-size: 12px; line-height: 1.45; overflow-x: auto; white-space: pre; }
+@media (max-width: 760px) { .vf-grid { grid-template-columns: minmax(0, 1fr); } }
