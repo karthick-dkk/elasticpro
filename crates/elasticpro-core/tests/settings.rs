@@ -36,6 +36,9 @@ ZABBIX_HOST_GROUP=Lab
 CACHE_MB=
 LISTEN_PORT=443
 SURPRISE=1
+UI_SMTP_HOST=smtp.corp.example
+UI_SMTP_USER=svc
+UI_SMTP_PASSWORD_FILE=/run/secrets/smtp
 ";
 
 #[tokio::test]
@@ -91,6 +94,24 @@ async fn config_txt_reaches_the_core() {
     assert_eq!(v["managed"], json!(["volumeSizeBasis", "volumeCollectAt"]), "{v}");
     assert_eq!((v["settings"]["collectAt"].as_str(), v["settings"]["sizeBasis"].as_str()), (Some("05:45"), Some("eventSize")));
     assert_eq!(v["settings"]["indexFormat"], "logstash-*-YYYY.MM.DD", "an invalid managed value is not managed");
+
+    // A password from config.txt goes only to the server config.txt names: the whole
+    // destination is locked on the page, the port and security included.
+    let m = c.handle(json!({ "type": "MAIL_SETTINGS_GET", "session": session })).await;
+    assert_eq!((m["host"].as_str(), m["port"].as_u64(), m["security"].as_str(), m["user"].as_str()),
+               (Some("smtp.corp.example"), Some(587), Some("starttls"), Some("svc")), "{m}");
+    assert_eq!(m["passwordFrom"], "config.txt", "{m}");
+    for f in ["host", "port", "security", "user", "auth", "password"] {
+        assert!(m["managed"].as_array().unwrap().iter().any(|x| x == f), "{f} is locked: {m}");
+    }
+    for change in [json!({ "port": 2525 }), json!({ "security": "tls" }), json!({ "user": "someone" }), json!({ "host": "mail.attacker.example" })] {
+        let mut set = json!({ "type": "MAIL_SETTINGS_SET", "session": session });
+        set.as_object_mut().unwrap().extend(change.as_object().unwrap().clone());
+        let r = c.handle(set).await;
+        assert_eq!(r["kind"], "managed", "{change}: {r}");
+    }
+    let r = c.handle(json!({ "type": "MAIL_SETTINGS_SET", "session": session, "port": 587, "from": "ep@example.com" })).await;
+    assert_eq!(r["ok"], true, "a locked field sent as it is, and an unlocked one changed: {r}");
 }
 
 #[test]

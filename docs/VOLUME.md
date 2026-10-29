@@ -253,8 +253,15 @@ avgPerDay, peakDay, docs, eventBytes, subBytes, topSourceHost, topForwarder, fro
 
 - `REPORT_RUN` (User) `{clusterIds:[..], period, format:"xlsx"|"csvzip", mail:bool}` queues
   **one job per cluster** (a client is a cluster). `period` is `{from:"YYYY-MM-DD", to}` or a
-  preset: `"month:2026-10"` (a current month means "so far"), `"yesterday"`, `"last7"`.
-  Reply `{jobs:[Job]}`.
+  preset: `"month:2026-10"` (a current month means "so far"), `"yesterday"`, `"last7"`
+  (all from today's UTC date). Reply `{jobs:[Job], refused:[{clusterId, reason}]}`.
+- **Bounds**: at most 15 jobs (3 × the highest concurrency) of one person's may be queued
+  or running at once, and 200 of everyone's; a request that would pass either is refused
+  whole, nothing queued: `kind: "too_many_jobs"` with a message saying how many more fit.
+  `REPORT_RUN` with `mail: true` counts one mail per job, at most 10 per person per hour
+  (kept apart from the job list, so `REPORT_CLEAR` does not reset it): `kind:
+  "too_many_mails"`. `REPORT_SEND_NOW` counts toward the person's 15; the schedule's own
+  jobs count toward nothing.
 - A job: (1) collects the days of its period that the record is missing (same collector,
   same rules, stoppable between days), (2) builds the file, (3) mails it when `mail` is set
   and SMTP is configured (else the job ends `done` with `mailError`). Progress
@@ -262,17 +269,24 @@ avgPerDay, peakDay, docs, eventBytes, subBytes, topSourceHost, topForwarder, fro
 - Collection follows the daily run's rules and shares its locks: one collection per cluster
   at a time (the daily run included) and two clusters at once, origin `volume-report`. The
   **emergency stop fails a job** that would have to collect (`error` says so; run it again
-  when the stop is over) rather than holding a slot for an end nobody announced; a period
-  whose days are all final is built without asking the cluster. An unreachable cluster is
-  not asked: the file holds what the record has and the job carries `warning`. A config
-  file that cannot be read **fails the job** ("the config file could not be read: …"):
-  it is neither collected nor built under built-in settings. On desktop each job applies its
-  cluster's override from the message's `volume.clusters[id]`.
+  when the stop is over) rather than holding a slot for an end nobody announced. A period
+  whose every day is **settled** in the record is built without asking the cluster — under
+  the stop too. A day is settled when its record is final, or gone from the cluster
+  (`live: false`), or when it has no record and either comes before the oldest day the
+  cluster's record keeps or had ended before the last run that applied a whole `_cat`
+  listing to every kept month (`listedAt` in `state.json`, set by the daily run / Refresh
+  now) — that listing would have given it a record had it had an index. Today never is.
+  An unreachable cluster is not asked: the file holds what the record has and the job
+  carries `warning`. A config file that cannot be read **fails the job** ("the config file
+  could not be read: …"): it is neither collected nor built under built-in settings. On
+  desktop each job applies its cluster's override from the message's `volume.clusters[id]`.
 - A job's mail goes to the mailed report's `to/cc/bcc` (below), which only an admin sets:
   `REPORT_RUN` takes no addresses, so a user cannot send cluster figures anywhere else.
 - At most `concurrency` jobs run at once (3..5, default 3, admin `REPORT_CONCURRENCY_SET {n}`);
   the rest wait in FIFO order and start as slots free. Persisted in `<data>/reports/jobs.json`
-  (a job running at restart is marked `failed: "the server restarted"`).
+  (compact, written by a writer thread so no async worker waits on the disk; a burst of
+  changes is one write of the last state; at most 200 finished + 200 waiting entries). A
+  job running at restart is marked `failed: "the server restarted"`.
 - `REPORT_JOBS` (User) `{}` → `{jobs:[Job], concurrency, running, queued}`: every job the
   caller's visible clusters cover (status is shown to everyone, "for the tool").
 - `REPORT_STOP` (**Admin only**) `{id}` or `{all:true}` → stopped jobs end `stopped`.
@@ -296,13 +310,30 @@ avgPerDay, peakDay, docs, eventBytes, subBytes, topSourceHost, topForwarder, fro
 ### Mail server (Config › Volume fields › Mail server (SMTP))
 
 - `<data>/mail.json` `{host, port, security:"starttls"|"tls"|"none", auth:"password"|"none",
-  user, from, password (encrypted at rest with the same key as cluster secrets)}`.
+  user, from, password (encrypted at rest with the same key as cluster secrets),
+  passwordFor}`.
+- **A password goes only to the server it was typed for**, as a cluster credential goes
+  only to its destination. The stored password is sealed with associated data
+  `mail.json:password:{host}:{port}:{security}:{user}` and kept with that destination
+  (`passwordFor`). Change host, port, security or user without typing the password again
+  and it is not used: `MAIL_SETTINGS_GET` says `passwordSet: false`, `passwordStale: true`,
+  `problem: "the mail server changed: type the password again"`, and `MAIL_TEST` and every
+  report mail stop before connecting (`not_configured`). Editing `passwordFor` by hand does
+  not help: the seal does not open for another destination.
 - config.txt (lock the field): `UI_SMTP_HOST` text, `UI_SMTP_PORT` int 1..65535,
   `UI_SMTP_SECURITY` enum starttls,tls,none, `UI_SMTP_USER` text,
   `UI_SMTP_PASSWORD_FILE` text (path read at send time, never echoed), `UI_SMTP_FROM` text.
+  **`UI_SMTP_PASSWORD_FILE` needs `UI_SMTP_HOST`** (refused when config.txt is read, and by
+  deploy.sh), and while it is set port, security and user come from config.txt or their
+  defaults (587/starttls; the user must be `UI_SMTP_USER`) and are locked too: a password
+  from config.txt goes only to a server config.txt names. `MAIL_SETTINGS_SET` changing any
+  of them answers `kind: "managed"`.
 - `MAIL_SETTINGS_GET` (Admin) → settings without the password, `passwordSet:bool`,
-  `managed:[keys]`. `MAIL_SETTINGS_SET` (Admin) (password only when typed; empty keeps it).
-  `MAIL_TEST` (Admin) `{to}` → `{ok, steps:[{step:"connect"|"tls"|"auth"|"send", ok, detail}]}`.
+  `passwordStale:bool`, `managed:[keys]`. `MAIL_SETTINGS_SET` (Admin) (password only when
+  typed, sealed for the destination the save ends with; empty keeps it).
+  `MAIL_TEST` (Admin) `{to}` → `{ok, steps:[{step:"connect"|"tls"|"auth"|"send", ok, detail}]}`;
+  a session that runs out of time fails the step under way (a server that never answers
+  fails at "connect").
 - "none" security is allowed only with `auth:"none"` (no password over plain text).
 
 ### Mailed report (Config › Volume fields › Volume report by mail)
@@ -310,9 +341,20 @@ avgPerDay, peakDay, docs, eventBytes, subBytes, topSourceHost, topForwarder, fro
 - `<data>/report-schedule.json` `{enabled, to:[..], cc:[..], bcc:[..], schedule:"monthly"|
   "weekly"|"daily"|"manual", at:"07:00", clusters:"all"|[ids], subject:"ElasticPro volume
   report · {period}", sheets:["daily","monthly","breakdown"], lastSent:{at, to, ok, error}|null}`.
-- Periods: monthly → previous calendar month (sent on the 1st); weekly → previous Mon..Sun
-  (sent Monday); daily → yesterday, sent after that day's scheduled collection finishes.
-  Server local time for `at`, hosted only, persisted so a restart does not resend.
+- Periods are **UTC dates**, like the days in the index names and `REPORT_RUN`'s presets:
+  monthly → the previous calendar month of the UTC date; weekly → the previous Mon..Sun;
+  daily → the UTC day before (after that day's scheduled collection finishes). Only the send
+  **time** `at` is server local: a period goes out at the first `at` after its last UTC day
+  has ended — on the 1st (Monday, the next day) where `at` falls after midnight UTC, which
+  is the case from UTC-12 to UTC+7 for 07:00; a day later east of that, so a report never
+  goes out before its last day is over. Hosted only, persisted so a restart does not resend.
+- Every way a mailed job ends — sent, failed, stopped, or marked failed by a restart — is
+  recorded as `lastSent {at, to, ok, error}`. A scheduled job the **emergency stop** cuts
+  short gives its period back to the schedule, so the first tick after the stop sends it; one
+  a **restart** cut short before its mail began gets one more try per period (one that
+  brings the process down is not repeated by every restart; one whose mail had begun is not
+  retried — it may have gone out). A cluster that fails to collect does not fail the mailed
+  report: its sheets hold what the record has and the job carries `warning`.
 - One mail, one attachment: an .xlsx with one sheet set per cluster (sheet names prefixed by
   cluster name, ≤31 chars). Body: per cluster yesterday, average per day (7), month so far.
 - config.txt: `UI_REPORT_TO` text (comma list), `UI_REPORT_SCHEDULE` enum
@@ -320,9 +362,13 @@ avgPerDay, peakDay, docs, eventBytes, subBytes, topSourceHost, topForwarder, fro
 - `REPORT_SCHEDULE_GET` / `REPORT_SCHEDULE_SET` (Admin), `REPORT_SEND_NOW` (Admin) → runs the
   mailed report for the current settings at once (as a background job). `REPORT_SEND_NOW`
   may name a `period` like `REPORT_RUN`; without one it is the schedule's period, or the
-  current month so far for `manual`. It does not count as the schedule's send.
+  current month so far for `manual` (both from the UTC date). It does not count as the
+  schedule's send (its end is recorded in `lastSent`, but it never gives a period back).
 - A missed send (the core was down at `at`) goes out once on the first tick after; saving a
   schedule counts a period whose send moment has already passed as handled, so switching a
-  monthly report on on the 20th does not send last month's three weeks late.
+  monthly report on on the 20th does not send last month's three weeks late. A cadence or
+  `at` changed in config.txt is the same change: the first tick after the start that brings
+  it in (the file keeps what it last saw, `seenSchedule`/`seenAt`) counts the passed period
+  as handled too.
 - Every mail send is an audit line (who, to-count, ok), never the addresses' contents of the
   attachment, never the password.

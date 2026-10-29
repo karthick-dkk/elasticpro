@@ -760,6 +760,7 @@ impl Core {
         let error = out.error.clone();
         store.update_state(id, |st| {
             st.last_run_at = Some(started);
+            st.listed_at = Some(started);
             st.last_error = error.clone();
             st.matched = listing.matched;
             st.skipped = listing.skipped.clone();

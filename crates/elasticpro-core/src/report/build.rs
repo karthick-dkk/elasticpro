@@ -301,7 +301,8 @@ pub fn csv_escape(s: &str) -> String {
     if s.starts_with(['=', '+', '-', '@', '\t', '\r']) && !plain_number {
         v = format!("'{v}");
     }
-    if v.contains(['"', ',', '\n']) { format!("\"{}\"", v.replace('"', "\"\"")) } else { v }
+    // A lone carriage return ends a record for many readers, as a line feed does.
+    if v.contains(['"', ',', '\n', '\r']) { format!("\"{}\"", v.replace('"', "\"\"")) } else { v }
 }
 
 fn csv_line(cells: &[String]) -> String {
@@ -518,6 +519,8 @@ mod tests {
         assert_eq!(csv_escape("@SUM(A1)"), "'@SUM(A1)");
         assert_eq!(csv_escape("a,b"), "\"a,b\"");
         assert_eq!(csv_escape("say \"hi\""), "\"say \"\"hi\"\"\"");
+        assert_eq!(csv_escape("a\rb"), "\"a\rb\"", "a lone carriage return is quoted");
+        assert_eq!(csv_escape("\rx"), "\"'\rx\"", "defused and quoted");
         let files = csv_files(&data(), &period(), parse_day("2026-10-29").unwrap());
         let text = |i: usize| String::from_utf8(files[i].data.clone()).unwrap();
         let daily = text(0);

@@ -386,6 +386,12 @@ config_validate() {
     fi
     printf '%s=%s\n' "$key" "$val" >> "$CFG_TMP/parsed"
   done < "$src"
+  # A password from config.txt goes only to a mail server config.txt names (the core drops
+  # the password file without the host, settings.rs parse — the same rule).
+  if grep -q '^UI_SMTP_PASSWORD_FILE=.' "$CFG_TMP/parsed" && ! grep -q '^UI_SMTP_HOST=.' "$CFG_TMP/parsed"; then
+    say "  ✗ $CONFIG: UI_SMTP_PASSWORD_FILE needs UI_SMTP_HOST — a password from config.txt goes only to a mail server config.txt names" >&2
+    errs=$((errs + 1))
+  fi
   [ "$errs" = 0 ] || fail "$errs problem(s) in $CONFIG — nothing was changed"
 }
 

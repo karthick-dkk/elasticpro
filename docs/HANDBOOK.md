@@ -505,21 +505,30 @@ The short version of docs/VOLUME.md "Reports and mail". Code: `crates/elasticpro
   the file from `volume::derive` (no figure computed twice), keeps it in `<data>/reports/`
   (0600, pruned after 7 days) and mails it when `mail` is set. 3..5 jobs at once (default 3,
   `REPORT_CONCURRENCY_SET`), the rest FIFO; the queue is `<data>/reports/jobs.json`, and a job
-  running at a restart is marked `failed: "the server restarted"`.
+  running at a restart is marked `failed: "the server restarted"`. One person may have 15
+  jobs waiting or running (`too_many_jobs`) and ask for 10 mailed ones an hour
+  (`too_many_mails`).
 - **Stops**: `REPORT_STOP` (admin) ends a queued job at once and a running one between days.
   **The emergency stop fails a job** that would have to collect, saying so — run it again
-  when the stop is over. An unreachable cluster is not asked: the file holds what the record
-  has, and the job carries a `warning`.
+  when the stop is over. A period whose every day the record has settled (final, gone, or
+  never there) asks the cluster nothing and is built under the stop too. An unreachable
+  cluster is not asked: the file holds what the record has, and the job carries a `warning`.
 - **Mail**: `<data>/mail.json`, the password sealed under the cluster-secrets key (hosted
   only — the desktop editions have no kept key and refuse to store one: `cannot_store_password`).
-  config.txt `UI_SMTP_*` locks fields; `UI_SMTP_PASSWORD_FILE` is read at send time. "none"
+  config.txt `UI_SMTP_*` locks fields; `UI_SMTP_PASSWORD_FILE` is read at send time. The stored
+  password is sealed for its server (host, port, security, user): changing any of them without
+  typing it again leaves it unused (`passwordStale`). `UI_SMTP_PASSWORD_FILE` needs
+  `UI_SMTP_HOST` and locks port, security and user too. "none"
   security only with auth "none". Recipients of every report mail — a job's with `mail: true`
   and the mailed report — are the mailed report's `to/cc/bcc`, which only an admin sets: a user
   cannot send cluster figures to an address of their choosing.
 - **Mailed report**: `<data>/report-schedule.json`; monthly (previous month, on the 1st), weekly
   (previous Mon..Sun, on Monday), daily (yesterday, after that day's scheduled collection), or
-  manual, at `at` server local time. The last period sent is kept, so a restart neither resends
-  nor skips one; saving a schedule counts the period whose moment has passed as handled. One
+  manual. Periods are UTC dates, like the index names; only the send time `at` is server local
+  (the first `at` after the period's last UTC day has ended). The last period sent is kept, so a
+  restart neither resends nor skips one; saving a schedule — or a config.txt change of cadence or
+  time, at the next start — counts the period whose moment has passed as handled. Every end is
+  `lastSent`; one the emergency stop (or a restart, once) cut short is tried again. One
   .xlsx with a sheet set per cluster. Hosted timer (`volume report: timer started`, no user).
 - **Audit**: one line per mail (`volume report mailed` / `mail server test`: user, recipient
   count, ok), per settings change, stop and concurrency change. Never an address, never a
@@ -527,13 +536,13 @@ The short version of docs/VOLUME.md "Reports and mail". Code: `crates/elasticpro
 
 | Message | Role | Answer |
 |---|---|---|
-| `REPORT_RUN {clusterIds, period, format?, mail?}` | user | `{jobs: [Job], refused: [{clusterId, reason}]}`; `period` = `{from, to}`, `"month:YYYY-MM"`, `"yesterday"`, `"last7"` |
+| `REPORT_RUN {clusterIds, period, format?, mail?}` | user | `{jobs: [Job], refused: [{clusterId, reason}]}`; `period` = `{from, to}`, `"month:YYYY-MM"`, `"yesterday"`, `"last7"`; `kind: too_many_jobs` / `too_many_mails` refuses the whole request |
 | `REPORT_JOBS` | user | `{jobs, concurrency, running, queued}` — jobs of the clusters the caller sees, newest first |
 | `REPORT_STOP {id}` / `{all: true}` | admin | `{stopped: [ids ended now], stopping: [ids asked]}`; audited |
 | `REPORT_CLEAR` | user | `{removed}` — the caller's finished jobs (admin: all) and their files |
 | `REPORT_DOWNLOAD {id}` | user (starter or admin) | `{name, mime, bytes, base64}` |
 | `REPORT_CONCURRENCY_SET {n}` | admin | `{concurrency}`, 3..5 |
-| `MAIL_SETTINGS_GET` | admin | `{host, port, security, auth, user, from, passwordSet, passwordFrom, managed, configured, problem, canStorePassword, passwordStoreProblem}` |
+| `MAIL_SETTINGS_GET` | admin | `{host, port, security, auth, user, from, passwordSet, passwordStale, passwordFrom, managed, configured, problem, canStorePassword, passwordStoreProblem}` |
 | `MAIL_SETTINGS_SET {…, password?, clearPassword?}` | admin | as GET; a managed field may be sent unchanged, not changed (`managed`) |
 | `MAIL_TEST {to}` | admin | `{ok, steps: [{step: connect\|tls\|auth\|send, ok, detail}]}`, `kind: smtp_failed` and `message` when a step failed |
 | `REPORT_SCHEDULE_GET` | admin | `{enabled, to, cc, bcc, schedule, at, clusters, subject, sheets, lastSent, managed, timer, nextSendAt, mailConfigured}` |

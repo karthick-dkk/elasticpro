@@ -14,8 +14,8 @@ use super::build::{self, ClusterData};
 use super::jobs::{FileRef, Format, Job, Kind, Progress, Status, Which, MAX_CONCURRENCY, MIN_CONCURRENCY};
 use super::mail::{self, Auth, MailFile, PasswordFrom, Ready};
 use super::period::{self, Period};
-use super::schedule::{self as rsched, Cadence, LastSent, ReportSchedule};
-use super::{xlsx, zip, MAX_DOWNLOAD_BYTES};
+use super::schedule::{self as rsched, Cadence, Clock, LastSent, ReportSchedule, Retry};
+use super::{xlsx, zip, MAX_DOWNLOAD_BYTES, SCHEDULE_BY};
 use crate::auth::{Caller, Edition, Role};
 use crate::bridge::Core;
 use crate::volume::run::CollectOpts;
@@ -24,9 +24,6 @@ use crate::volume::VolumeSettings;
 use chrono::{Datelike, NaiveDateTime};
 use serde_json::{json, Value};
 use std::sync::Arc;
-
-/// Who the schedule's jobs and mails are by: nobody asked.
-pub const SCHEDULE_BY: &str = "(schedule)";
 
 fn now_ms() -> i64 {
     crate::fleet::now_ms() as i64
@@ -56,6 +53,7 @@ fn job_view(j: &Job) -> Value {
     if let Some(o) = v.as_object_mut() {
         o.remove("volume");
         o.remove("seq");
+        o.remove("mailStartedAt");
         o.insert("stopping".into(), json!(j.stop_asked.is_some()));
     }
     v
@@ -69,17 +67,36 @@ struct JobEnd {
     mail_error: Option<String>,
     warning: Option<String>,
     stopped_by: Option<String>,
+    /// It ended because of the emergency stop: the schedule tries its period again.
+    retry: bool,
+    /// The mail's recipients, when it got as far as the mail.
+    recipients: usize,
 }
 
 impl JobEnd {
     fn failed(e: impl Into<String>) -> JobEnd {
-        JobEnd { status: Status::Failed, file: None, error: Some(e.into()), mail_error: None, warning: None, stopped_by: None }
+        JobEnd { status: Status::Failed, file: None, error: Some(e.into()), mail_error: None, warning: None, stopped_by: None, retry: false, recipients: 0 }
+    }
+    /// Failed because the emergency stop is (or came) on.
+    fn held(e: impl Into<String>) -> JobEnd {
+        JobEnd { retry: true, ..JobEnd::failed(e) }
     }
     fn stopped(by: String) -> JobEnd {
-        JobEnd { status: Status::Stopped, file: None, error: None, mail_error: None, warning: None, stopped_by: Some(by) }
+        JobEnd { status: Status::Stopped, stopped_by: Some(by), error: None, ..JobEnd::failed("") }
     }
     fn done(file: FileRef, warning: Option<String>) -> JobEnd {
-        JobEnd { status: Status::Done, file: Some(file), error: None, mail_error: None, warning, stopped_by: None }
+        JobEnd { status: Status::Done, file: Some(file), error: None, warning, ..JobEnd::failed("") }
+    }
+
+    /// The mailed report's last send, as this end says it went.
+    fn last_sent(&self, at: i64) -> LastSent {
+        let ok = self.status == Status::Done && self.mail_error.is_none();
+        let error = (!ok).then(|| {
+            self.error.clone().or_else(|| self.mail_error.clone())
+                .or_else(|| self.stopped_by.as_ref().map(|by| format!("stopped by {by} before the mail went")))
+                .unwrap_or_else(|| "not sent".into())
+        });
+        LastSent { at, to: self.recipients, ok, error }
     }
 }
 
@@ -97,14 +114,24 @@ impl Drop for Slot<'_> {
     }
 }
 
-/// Every day of the period has a final record: nothing to ask the cluster.
-fn record_complete(store: &crate::volume::store::Store, id: &str, p: &Period, today: chrono::NaiveDate) -> bool {
+/// Every day of the period is settled in the record: nothing to ask the cluster. A day is
+/// settled when its record is final, or gone from the cluster (`live: false`, never changed
+/// again), or when it has no record and either comes before the oldest day the record keeps
+/// or had ended before the last whole `_cat` listing (`listed_at`) — which would have given
+/// it a record had it had an index. Today never is.
+pub(crate) fn record_complete(store: &crate::volume::store::Store, id: &str, p: &Period, today: chrono::NaiveDate) -> bool {
     if p.to_date() >= today {
         return false;
     }
-    let kept: std::collections::HashMap<String, bool> =
-        store.days_between(id, p.from_date(), p.to_date()).into_iter().map(|d| (d.day, d.is_final)).collect();
-    p.days().iter().all(|d| kept.get(&day_key(*d)) == Some(&true))
+    let oldest = store.months(id).first()
+        .and_then(|m| store.read_month(id, m).days.keys().next().and_then(|k| crate::volume::schedule::parse_day(k)));
+    let listed = store.read_state(id).listed_at.map(vsched::utc_day);
+    let kept: std::collections::HashMap<String, (bool, bool)> =
+        store.days_between(id, p.from_date(), p.to_date()).into_iter().map(|d| (d.day, (d.is_final, d.live))).collect();
+    p.days().iter().all(|d| match kept.get(&day_key(*d)) {
+        Some((is_final, live)) => *is_final || !*live,
+        None => oldest.is_some_and(|o| *d < o) || listed.is_some_and(|l| *d < l),
+    })
 }
 
 impl Core {
@@ -139,7 +166,10 @@ impl Core {
         move |j: &Job| vis.as_ref().is_none_or(|v| j.cluster_ids.iter().all(|c| v.contains(c)))
     }
 
-    /// `REPORT_RUN {clusterIds, period, format, mail}`: one job per cluster.
+    /// `REPORT_RUN {clusterIds, period, format, mail}`: one job per cluster. At most
+    /// `MAX_PENDING_PER_USER` of a person's jobs wait or run at once, and at most
+    /// `MAX_MAILED_PER_HOUR` mailed ones are asked for an hour (`too_many_jobs`,
+    /// `too_many_mails`): the whole request is refused, nothing is queued.
     async fn report_run(self: &Arc<Self>, msg: &Value, caller: Option<&Caller>) -> Value {
         let ids: Vec<String> = match msg.get("clusterIds").and_then(Value::as_array) {
             Some(a) if !a.is_empty() => a.iter().filter_map(Value::as_str).map(String::from).collect(),
@@ -174,7 +204,17 @@ impl Core {
             job.volume = volume.clone();
             jobs.push(job);
         }
-        let ids: Vec<String> = self.reports.with(|q| jobs.into_iter().map(|j| q.push(j, crate::auth::random_hex(8))).collect());
+        let queued: Result<Vec<String>, (&str, String)> = self.reports.with(|q| {
+            let n = jobs.len();
+            let mailed = if mail { n } else { 0 };
+            q.room(&by, n, mailed, now_ms())?;
+            q.note_mailed(&by, mailed, now_ms());
+            Ok(jobs.into_iter().map(|j| q.push(j, crate::auth::random_hex(8))).collect())
+        });
+        let ids = match queued {
+            Ok(ids) => ids,
+            Err((kind, message)) => return bad(kind, message),
+        };
         self.report_pump();
         tracing::info!(user = %by, jobs = ids.len(), period = %period.label, "volume report: queued");
         let q = self.reports.queue.lock();
@@ -210,6 +250,15 @@ impl Core {
             }
         };
         let (ended, asked) = self.reports.with(|q| q.stop(which, &by, now_ms()));
+        // A mailed job stopped before it began is a send that did not happen, too.
+        let mailed: Vec<Job> = {
+            let q = self.reports.queue.lock();
+            ended.iter().filter_map(|id| q.get(id)).filter(|j| j.kind == Kind::Mailed).cloned().collect()
+        };
+        for j in &mailed {
+            let last = LastSent { at: now_ms(), to: 0, ok: false, error: Some(format!("stopped by {by} before it began")) };
+            self.reports.mailed_ended(j, last, Retry::No);
+        }
         tracing::info!(target: "audit", user = %by, stopped = ended.len(), stopping = asked.len(), "volume report: jobs stopped");
         json!({ "ok": true, "stopped": ended, "stopping": asked })
     }
@@ -300,6 +349,12 @@ impl Core {
             Kind::Cluster => self.report_cluster(&job).await,
             Kind::Mailed => self.report_mailed(&job).await,
         };
+        if job.kind == Kind::Mailed {
+            // Every way a mailed job ends is its last send, sent or not; one the emergency
+            // stop cut short gives the schedule its period back, so the next tick retries.
+            let retry = if end.retry { Retry::Stop } else { Retry::No };
+            self.reports.mailed_ended(&job, end.last_sent(now_ms()), retry);
+        }
         let status = end.status;
         self.reports.with(|q| {
             if let Some(j) = q.get_mut(&id) {
@@ -371,7 +426,7 @@ impl Core {
             return Ok((Some(format!("{cluster} is no longer configured: the file has what the record already held")), 0, 0));
         }
         if self.volume_stopped() {
-            return Err(JobEnd::failed("the emergency stop is on: nothing was sent to the cluster and no day was collected; run the report again when the stop is over"));
+            return Err(JobEnd::held("the emergency stop is on: nothing was sent to the cluster and no day was collected; run the report again when the stop is over"));
         }
         if self.volume_unreachable(cluster) {
             return Ok((Some(format!("{cluster} is unreachable: the file has what the record already held")), 0, 0));
@@ -389,12 +444,13 @@ impl Core {
         };
         let to = p.to_date().min(today);
         let opts = CollectOpts { origin: "volume-report", period: Some((p.from_date(), to)), stop: &stop, progress: &progress, prune: false };
-        let got = self.volume_collect(cluster, s, &opts).await.map_err(JobEnd::failed)?;
+        let got = self.volume_collect(cluster, s, &opts).await
+            .map_err(|e| if self.volume_stopped() { JobEnd::held(e) } else { JobEnd::failed(e) })?;
         if let Some(why) = got.interrupted {
             if let Some(by) = self.report_stop_asked(job_id) {
                 return Err(JobEnd::stopped(by));
             }
-            return Err(JobEnd::failed(format!("{cluster}: {why} after {} of {} days; run the report again when the stop is over", got.searched, got.total)));
+            return Err(JobEnd::held(format!("{cluster}: {why} after {} of {} days; run the report again when the stop is over", got.searched, got.total)));
         }
         Ok((got.error.map(|e| format!("{cluster}: {e}")), got.searched, got.total))
     }
@@ -481,7 +537,13 @@ impl Core {
                     counted += t;
                     warnings.extend(w);
                 }
-                Err(end) => return end,
+                // A person's stop ends the job; the emergency stop fails it (and the
+                // schedule tries again when the stop is over).
+                Err(end) if end.status == Status::Stopped || end.retry => return end,
+                // One cluster that could not be collected does not cost the others their
+                // report: its sheets hold what the record has, and the job says so.
+                Err(end) => warnings.push(format!("{id}: {}; its sheets hold what the record already had",
+                                                  end.error.unwrap_or_else(|| "not collected".into()))),
             }
             each.push((id.clone(), s));
         }
@@ -523,22 +585,18 @@ impl Core {
             return end;
         }
         let (sched, _) = self.report_schedule_effective();
-        let sent = self.report_mail(&job.by, &sched.subject_for(&job.period), &body, Some((&name, xlsx::MIME, bytes))).await;
-        let last = LastSent {
-            at: now_ms(),
-            to: *sent.as_ref().unwrap_or(&sched.recipients()),
-            ok: sent.is_ok(),
-            error: sent.as_ref().err().cloned(),
-        };
-        {
-            let _g = self.reports.settings_lock.lock();
-            let mut f: ReportSchedule = self.reports.read_json(rsched::FILE);
-            f.last_sent = Some(last);
-            if let Err(e) = self.reports.write_json(rsched::FILE, &f) {
-                tracing::warn!(error = %e, "volume report: the last send could not be recorded");
+        // Marked, and on disk, before the session: a restart from here on does not send the
+        // period again (it may have gone out).
+        self.reports.with(|q| {
+            if let Some(j) = q.get_mut(&job.id) {
+                j.mail_started_at = Some(now_ms());
             }
-        }
+        });
+        let reports = self.clone();
+        let _ = tokio::task::spawn_blocking(move || reports.reports.flush()).await;
+        let sent = self.report_mail(&job.by, &sched.subject_for(&job.period), &body, Some((&name, xlsx::MIME, bytes))).await;
         let mut end = JobEnd::done(file, (!warnings.is_empty()).then(|| warnings.join("; ")));
+        end.recipients = *sent.as_ref().unwrap_or(&sched.recipients());
         end.mail_error = sent.err();
         end
     }
@@ -561,8 +619,10 @@ impl Core {
             Auth::Password => {
                 let pw = match &e.password {
                     PasswordFrom::None => return Err("authentication is on but no password is set".into()),
-                    PasswordFrom::Stored(sealed) => self.cluster_secrets.open_own(mail::SEAL_AAD, sealed)
-                        .ok_or("the stored mail password does not open with this server's key (was the key changed?); type it again")?,
+                    PasswordFrom::Moved => return Err(mail::MOVED.into()),
+                    // Opened for the destination in force only: sealed for another, it does not.
+                    PasswordFrom::Stored(sealed) => self.cluster_secrets.open_own(&mail::seal_aad(&e.destination()), sealed)
+                        .ok_or("the stored mail password does not open for this server with this server's key (was the key or the server changed?); type it again")?,
                     PasswordFrom::File(p) => std::fs::read_to_string(p)
                         .map_err(|err| format!("UI_SMTP_PASSWORD_FILE cannot be read: {err}"))?
                         .trim_end_matches(['\r', '\n']).to_string(),
@@ -607,7 +667,10 @@ impl Core {
 
     /// `MAIL_SETTINGS_SET` (admin): the fields given, under the same rules as config.txt.
     /// A field config.txt manages may be sent as it is, not changed. The password only when
-    /// typed: empty or absent keeps the stored one, `clearPassword: true` removes it.
+    /// typed: empty or absent keeps the stored one, `clearPassword: true` removes it. A typed
+    /// password is sealed for the destination these settings end with (host, port, security,
+    /// user); a kept one stays bound to the destination it was typed for, so changing the
+    /// server without typing it again leaves it unused (`passwordStale`), never sent there.
     fn mail_settings_set(&self, msg: &Value, caller: Option<&Caller>) -> Value {
         let m = msg.get("settings").filter(|v| v.is_object()).unwrap_or(msg);
         let s = crate::settings::get();
@@ -616,8 +679,15 @@ impl Core {
             let _g = self.reports.settings_lock.lock();
             let mut file: MailFile = self.reports.read_json(mail::FILE);
             let before = mail::effective(&file, s);
+            let pw_file = matches!(before.password, PasswordFrom::File(_));
             let locked = |field: &str, same: bool| -> Option<Value> {
-                (before.managed.contains(&field) && !same).then(|| bad("managed", format!("{field} is managed by config.txt")))
+                let by_key = mail::MANAGED_KEYS.iter().any(|(k, f)| *f == field && s.text(k).is_some());
+                (before.managed.contains(&field) && !same).then(|| if by_key || !pw_file {
+                    bad("managed", format!("{field} is managed by config.txt"))
+                } else {
+                    bad("managed", format!("{field} is locked while the password comes from UI_SMTP_PASSWORD_FILE (config.txt): \
+                                            that password goes only to the server config.txt names"))
+                })
             };
             let text = |k: &str| -> Result<Option<String>, Value> {
                 match m.get(k) {
@@ -689,22 +759,31 @@ impl Core {
                 }
                 file.from = f;
             }
-            match m.get("password") {
-                None | Some(Value::Null) => {}
-                Some(Value::String(p)) if p.is_empty() => {}
+            let typed = match m.get("password") {
+                None | Some(Value::Null) => None,
+                Some(Value::String(p)) if p.is_empty() => None,
                 Some(Value::String(p)) => {
                     if before.managed.contains(&"password") {
                         return bad("managed", "the password comes from UI_SMTP_PASSWORD_FILE (config.txt)");
                     }
-                    match self.cluster_secrets.seal_own(mail::SEAL_AAD, p) {
-                        Ok(sealed) => file.password = Some(sealed),
-                        Err(e) => return bad("cannot_store_password", e),
-                    }
+                    Some(p.as_str())
                 }
                 Some(_) => return bad("bad_request", "password must be text"),
-            }
+            };
             if m.get("clearPassword").and_then(Value::as_bool) == Some(true) {
                 file.password = None;
+                file.password_for = None;
+            }
+            if let Some(p) = typed {
+                // Sealed for the server these settings end with, and for no other.
+                let dest = mail::effective(&file, s).destination();
+                match self.cluster_secrets.seal_own(&mail::seal_aad(&dest), p) {
+                    Ok(sealed) => {
+                        file.password = Some(sealed);
+                        file.password_for = Some(dest);
+                    }
+                    Err(e) => return bad("cannot_store_password", e),
+                }
             }
             let after = mail::effective(&file, s);
             if !after.host.is_empty() || !after.from.is_empty() {
@@ -774,7 +853,7 @@ impl Core {
 
     fn report_schedule_get(&self) -> Value {
         let (e, managed) = self.report_schedule_effective();
-        let next = self.edition().schedules().then(|| rsched::next_send(&e, vsched::local_now()).and_then(vsched::local_to_ms)).flatten();
+        let next = self.edition().schedules().then(|| rsched::next_send(&e, Clock::now()).and_then(vsched::local_to_ms)).flatten();
         json!({
             "ok": true, "enabled": e.enabled, "to": e.to, "cc": e.cc, "bcc": e.bcc, "schedule": e.schedule, "at": e.at,
             "clusters": e.clusters, "subject": e.subject, "sheets": e.sheets, "lastSent": e.last_sent,
@@ -891,9 +970,13 @@ impl Core {
             }
             if after.enabled && (!before.enabled || before.schedule != after.schedule || before.at != after.at) {
                 let mut tmp = after.clone();
-                rsched::mark_passed(&mut tmp, vsched::local_now());
+                rsched::mark_passed(&mut tmp, Clock::now());
                 file.last_period = tmp.last_period;
             }
+            // What was in force when this decision was made: config.txt changing it later is
+            // noticed by the tick (`rsched::reconcile`).
+            file.seen_schedule = Some(after.schedule);
+            file.seen_at = Some(after.at.clone());
             file.set_by = Some(by.clone());
             file.set_at = Some(now_ms());
             if let Err(e) = self.reports.write_json(rsched::FILE, &file) {
@@ -904,8 +987,9 @@ impl Core {
         self.report_schedule_get()
     }
 
-    /// Queue the mailed report (one job, one workbook for all its clusters).
-    fn report_queue_mailed(self: &Arc<Self>, ids: Vec<String>, p: Period, s: &ReportSchedule, by: &str) -> String {
+    /// Queue the mailed report (one job, one workbook for all its clusters). A person's
+    /// (`REPORT_SEND_NOW`) counts toward their waiting jobs; the schedule's does not.
+    fn report_queue_mailed(self: &Arc<Self>, ids: Vec<String>, p: Period, s: &ReportSchedule, by: &str) -> Result<String, (&'static str, String)> {
         let name = match ids.as_slice() {
             [one] => self.spec_for(one).and_then(|x| x.name).unwrap_or_else(|| one.clone()),
             many => format!("{} clusters", many.len()),
@@ -913,9 +997,14 @@ impl Core {
         let mut job = Job::new(Kind::Mailed, ids, name, p, Format::Xlsx, true, by, now_ms());
         job.cluster_id = "*".into();
         job.sheets = s.sheets.clone();
-        let id = self.reports.with(|q| q.push(job, crate::auth::random_hex(8)));
+        let id = self.reports.with(|q| {
+            if by != SCHEDULE_BY {
+                q.room(by, 1, 0, now_ms())?;
+            }
+            Ok(q.push(job, crate::auth::random_hex(8)))
+        })?;
         self.report_pump();
-        id
+        Ok(id)
     }
 
     /// `REPORT_SEND_NOW {period?}` (admin): the mailed report for the current settings, at
@@ -935,7 +1024,9 @@ impl Core {
                 Ok(p) => p,
                 Err(err) => return bad("bad_request", err),
             },
-            None => match rsched::current(e.schedule, &e.at, vsched::local_now()) {
+            // The schedule's period, from the UTC date like every period; a manual schedule's
+            // is the current UTC month so far.
+            None => match rsched::current(e.schedule, &e.at, Clock::now()) {
                 Some((p, _)) => p,
                 None => match period::month(today.year(), today.month(), today) {
                     Ok(p) => p,
@@ -948,7 +1039,10 @@ impl Core {
             return bad("bad_request", "no cluster to report on");
         }
         let by = who(caller);
-        let id = self.report_queue_mailed(ids, p, &e, &by);
+        let id = match self.report_queue_mailed(ids, p, &e, &by) {
+            Ok(id) => id,
+            Err((kind, message)) => return bad(kind, message),
+        };
         tracing::info!(target: "audit", user = %by, job = %id, "volume report: send now");
         let q = self.reports.queue.lock();
         json!({ "ok": true, "job": q.get(&id).map(job_view) })
@@ -968,7 +1062,7 @@ impl Core {
             ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             loop {
                 ticker.tick().await;
-                core.report_tick_at(vsched::local_now()).await;
+                core.report_tick(Clock::now()).await;
             }
         });
         // No `user`: nobody asked. hosted-check counts audit lines that name one.
@@ -986,10 +1080,15 @@ impl Core {
         })
     }
 
-    /// One tick at the given local time. Returns the mailed job queued, if the schedule was
-    /// due. Public for the tests, which cannot wait for the 1st.
+    /// One tick at the given server local time (with the server's UTC offset at that time).
+    /// Returns the mailed job queued, if the schedule was due. Public for the tests, which
+    /// cannot wait for the 1st.
     #[doc(hidden)]
     pub async fn report_tick_at(self: &Arc<Self>, local: NaiveDateTime) -> Option<String> {
+        self.report_tick(Clock::at_local(local)).await
+    }
+
+    async fn report_tick(self: &Arc<Self>, clock: Clock) -> Option<String> {
         use std::sync::atomic::Ordering;
         if self.reports.ticking.swap(true, Ordering::SeqCst) {
             return None;
@@ -1003,13 +1102,26 @@ impl Core {
         let _done = Done(&self.reports.ticking);
         self.report_pump();
         self.reports.prune_files(std::time::SystemTime::now());
+        // config.txt changed the cadence or the time since the file last decided (it can
+        // only at a start): the period whose moment passed is handled, as a save would do.
+        {
+            let _g = self.reports.settings_lock.lock();
+            let mut f: ReportSchedule = self.reports.read_json(rsched::FILE);
+            if rsched::reconcile(&mut f, crate::settings::get(), clock) {
+                if let Err(err) = self.reports.write_json(rsched::FILE, &f) {
+                    tracing::warn!(error = %err, "volume report: the schedule could not be brought in line with config.txt; not sending, to avoid a late send");
+                    return None;
+                }
+                tracing::info!(schedule = ?f.seen_schedule, at = f.seen_at.as_deref().unwrap_or(""), "volume report: config.txt changed the schedule; a period whose moment has passed counts as handled");
+            }
+        }
         // Stopped: nothing is marked, so the report goes out on the first tick after.
         if self.volume_stopped() {
             return None;
         }
         let (e, _) = self.report_schedule_effective();
-        let collected = e.schedule != Cadence::Daily || self.report_daily_collected(&e, local);
-        let p = rsched::due(&e, local, collected)?;
+        let collected = e.schedule != Cadence::Daily || self.report_daily_collected(&e, clock.local);
+        let p = rsched::due(&e, clock, collected)?;
         let ids = self.report_schedule_clusters(&e);
         if ids.is_empty() {
             return None;
@@ -1026,7 +1138,7 @@ impl Core {
             }
         }
         tracing::info!(period = %p.label, clusters = ids.len(), "volume report: the mailed report is due");
-        Some(self.report_queue_mailed(ids, p, &e, SCHEDULE_BY))
+        self.report_queue_mailed(ids, p, &e, SCHEDULE_BY).ok()
     }
 }
 

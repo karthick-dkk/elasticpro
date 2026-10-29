@@ -19,6 +19,14 @@ pub const DEFAULT_CONCURRENCY: usize = 3;
 /// Finished jobs kept in the list; the oldest finished go first. A job's file outlives its
 /// entry only until the 7-day prune.
 pub const KEEP_FINISHED: usize = 200;
+/// Jobs one person may have queued or running at once: three rounds of the most that run.
+pub const MAX_PENDING_PER_USER: usize = 3 * MAX_CONCURRENCY;
+/// Jobs everyone together may have queued or running, so the kept list stays bounded
+/// (with `KEEP_FINISHED`, at most 400 entries).
+pub const MAX_PENDING: usize = 200;
+/// Mailed jobs (`REPORT_RUN` with `mail: true`) one person may ask for in an hour.
+pub const MAX_MAILED_PER_HOUR: usize = 10;
+pub const HOUR_MS: i64 = 3_600_000;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -121,6 +129,11 @@ pub struct Job {
     /// The sheets of a mailed report (a cluster's report has all three).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sheets: Vec<String>,
+    /// When the mailed report's SMTP session began. A restart after it does not retry the
+    /// period: the mail may have gone out (and a send that brings the process down must not
+    /// be repeated by every restart).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mail_started_at: Option<i64>,
     /// Who asked a running job to stop. The worker sees it between days and ends the job
     /// `stopped`. Not persisted: a restart fails the job anyway.
     #[serde(skip)]
@@ -136,10 +149,13 @@ impl Job {
             id: String::new(), kind, cluster_id: cluster_ids.first().cloned().unwrap_or_default(), cluster_name,
             cluster_ids, period, format, mail, by: by.to_string(), created_at: now, started_at: None, ended_at: None,
             status: Status::Queued, progress: Progress { done: 0, total: 1 }, file: None, error: None, mail_error: None,
-            stopped_by: None, warning: None, seq: 0, volume: None, sheets: vec![], stop_asked: None,
+            stopped_by: None, warning: None, seq: 0, volume: None, sheets: vec![], mail_started_at: None, stop_asked: None,
         }
     }
 }
+
+/// The error of a job that was running when the process ended.
+pub const RESTARTED: &str = "the server restarted";
 
 /// What `REPORT_STOP` names.
 pub enum Which<'a> {
@@ -158,6 +174,10 @@ pub struct Queue {
     pub jobs: Vec<Job>,
     #[serde(default)]
     pub next_seq: u64,
+    /// When each person last asked for mailed jobs (epoch ms, the last hour only): kept apart
+    /// from the jobs so that clearing the list does not reset the hourly limit.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub mailed: std::collections::BTreeMap<String, Vec<i64>>,
 }
 
 fn default_concurrency() -> usize {
@@ -166,7 +186,7 @@ fn default_concurrency() -> usize {
 
 impl Default for Queue {
     fn default() -> Queue {
-        Queue { version: 1, concurrency: DEFAULT_CONCURRENCY, jobs: vec![], next_seq: 0 }
+        Queue { version: 1, concurrency: DEFAULT_CONCURRENCY, jobs: vec![], next_seq: 0, mailed: Default::default() }
     }
 }
 
@@ -181,6 +201,51 @@ impl Queue {
 
     pub fn get(&self, id: &str) -> Option<&Job> {
         self.jobs.iter().find(|j| j.id == id)
+    }
+
+    /// Queued or running jobs, everyone's (`None`) or one person's.
+    pub fn pending(&self, by: Option<&str>) -> usize {
+        self.jobs.iter().filter(|j| !j.status.finished() && by.is_none_or(|b| j.by == b)).count()
+    }
+
+    /// Whether `by` may queue `n` more jobs, `mailed` of them with a mail, at `now`; the
+    /// refusal says why. `Err((kind, message))`.
+    pub fn room(&mut self, by: &str, n: usize, mailed: usize, now: i64) -> Result<(), (&'static str, String)> {
+        let mine = self.pending(Some(by));
+        if mine + n > MAX_PENDING_PER_USER {
+            return Err(("too_many_jobs", format!(
+                "{by} has {mine} report(s) queued or running and at most {MAX_PENDING_PER_USER} may wait at once: \
+                 ask for fewer clusters ({} more fit now) or wait for some to finish", MAX_PENDING_PER_USER.saturating_sub(mine))));
+        }
+        let all = self.pending(None);
+        if all + n > MAX_PENDING {
+            return Err(("too_many_jobs", format!("{all} reports are queued or running and at most {MAX_PENDING} may wait at once: try again when some have finished")));
+        }
+        if mailed > 0 {
+            let sent = self.mailed_within_hour(by, now);
+            if sent + mailed > MAX_MAILED_PER_HOUR {
+                return Err(("too_many_mails", format!(
+                    "at most {MAX_MAILED_PER_HOUR} mailed reports an hour per person, and {by} asked for {sent} in the last hour: \
+                     run it without mail and download the file, or try again later")));
+            }
+        }
+        Ok(())
+    }
+
+    /// Mailed jobs `by` asked for in the hour before `now`. Older entries, anyone's, go.
+    pub fn mailed_within_hour(&mut self, by: &str, now: i64) -> usize {
+        self.mailed.retain(|_, v| {
+            v.retain(|t| now - *t < HOUR_MS);
+            !v.is_empty()
+        });
+        self.mailed.get(by).map_or(0, Vec::len)
+    }
+
+    /// Count `n` mailed jobs for `by` at `now`.
+    pub fn note_mailed(&mut self, by: &str, n: usize, now: i64) {
+        if n > 0 {
+            self.mailed.entry(by.to_string()).or_default().extend(std::iter::repeat_n(now, n));
+        }
     }
 
     pub fn get_mut(&mut self, id: &str) -> Option<&mut Job> {
@@ -257,16 +322,16 @@ impl Queue {
         gone
     }
 
-    /// After a restart: what was running cannot be, any more.
-    pub fn restarted(&mut self, now: i64) -> usize {
-        let mut n = 0;
+    /// After a restart: what was running cannot be, any more. Returns the jobs so failed.
+    pub fn restarted(&mut self, now: i64) -> Vec<Job> {
+        let mut out = vec![];
         for j in self.jobs.iter_mut().filter(|j| j.status == Status::Running) {
             j.status = Status::Failed;
-            j.error = Some("the server restarted".into());
+            j.error = Some(RESTARTED.into());
             j.ended_at = Some(now);
-            n += 1;
+            out.push(j.clone());
         }
-        n
+        out
     }
 
     /// Keep at most `KEEP_FINISHED` finished jobs, dropping the oldest finished.
@@ -384,7 +449,7 @@ mod tests {
         q.promote(1);
         let text = serde_json::to_string(&q).unwrap();
         let mut back: Queue = serde_json::from_str(&text).unwrap();
-        assert_eq!(back.restarted(9), 3);
+        assert_eq!(back.restarted(9).len(), 3);
         assert_eq!(back.get("j0").unwrap().error.as_deref(), Some("the server restarted"));
         assert_eq!(back.get("j0").unwrap().status, Status::Failed);
         assert_eq!(back.get("j3").unwrap().status, Status::Queued);
@@ -402,5 +467,46 @@ mod tests {
         q.trim();
         assert_eq!(q.jobs.iter().filter(|j| j.status.finished()).count(), KEEP_FINISHED);
         assert!(q.get("j0").is_none() && q.get("live").is_some());
+    }
+
+    #[test]
+    fn one_person_may_have_fifteen_waiting_and_ten_mails_an_hour() {
+        let mut q = Queue::default();
+        assert_eq!(MAX_PENDING_PER_USER, 15);
+        for i in 0..14 {
+            q.push(job("c", "ann"), format!("a{i}"));
+        }
+        q.promote(1);
+        assert!(q.room("ann", 1, 0, 2).is_ok(), "the fifteenth fits");
+        let (kind, msg) = q.room("ann", 2, 0, 2).unwrap_err();
+        assert_eq!(kind, "too_many_jobs");
+        assert!(msg.contains("1 more fit now"), "{msg}");
+        assert!(q.room("bob", 15, 0, 2).is_ok(), "per person");
+        // Finished jobs do not count.
+        for i in 0..5 {
+            q.get_mut(&format!("a{i}")).unwrap().status = Status::Done;
+        }
+        assert!(q.room("ann", 6, 0, 3).is_ok());
+        // Everyone together is bounded too.
+        let mut many = Queue::default();
+        for i in 0..MAX_PENDING {
+            many.push(job("c", &format!("u{}", i % 20)), format!("m{i}"));
+        }
+        assert_eq!(many.room("newcomer", 1, 0, 1).unwrap_err().0, "too_many_jobs");
+
+        // Mails: ten an hour, counted apart from the list (clearing does not reset them).
+        let mut q = Queue::default();
+        assert!(q.room("ann", 10, 10, 1_000).is_ok());
+        q.note_mailed("ann", 10, 1_000);
+        q.jobs.clear();
+        let (kind, msg) = q.room("ann", 1, 1, 2_000).unwrap_err();
+        assert_eq!(kind, "too_many_mails");
+        assert!(msg.contains("10 mailed reports an hour"), "{msg}");
+        assert!(q.room("ann", 1, 0, 2_000).is_ok(), "without mail it still runs");
+        assert!(q.room("bob", 1, 1, 2_000).is_ok(), "per person");
+        assert!(q.room("ann", 1, 1, 1_000 + HOUR_MS).is_ok(), "an hour later");
+        assert!(q.mailed.is_empty(), "old entries go");
+        let text = serde_json::to_string(&Queue::default()).unwrap();
+        assert!(!text.contains("mailed"), "nothing to keep, nothing written: {text}");
     }
 }

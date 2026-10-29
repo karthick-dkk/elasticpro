@@ -260,6 +260,13 @@ impl Settings {
                 }
             }
         }
+        // A password from config.txt goes only to a server config.txt names: otherwise an
+        // administrator could point the page's host at a server of their own and receive it.
+        // deploy.sh `config_validate` refuses the same combination.
+        if s.values.contains_key("UI_SMTP_PASSWORD_FILE") && !s.values.contains_key("UI_SMTP_HOST") {
+            s.values.remove("UI_SMTP_PASSWORD_FILE");
+            s.warnings.push("UI_SMTP_PASSWORD_FILE needs UI_SMTP_HOST: a password from config.txt goes only to a mail server config.txt names; the setting is not managed".into());
+        }
         s
     }
 
@@ -549,6 +556,13 @@ ES_CONCURRENCY=2000\nLOG_LEVEL=loud\nZABBIX_SYNC_SECONDS=10\nUI_AUTO_REFRESH=TRU
             assert!(!bad.manages(k), "{k} should have been rejected");
         }
         assert_eq!(bad.warnings().len(), 8, "{:?}", bad.warnings());
+        // A password file without the host it goes to is refused: a page-set host must never
+        // receive it. A host that is itself refused leaves the file without one too.
+        for text in ["UI_SMTP_PASSWORD_FILE=/run/secrets/smtp\n", "UI_SMTP_HOST=smtp://x\nUI_SMTP_PASSWORD_FILE=/run/secrets/smtp\n"] {
+            let lone = Settings::parse(text);
+            assert!(!lone.manages("UI_SMTP_PASSWORD_FILE"), "{text}");
+            assert!(lone.warnings().iter().any(|w| w.starts_with("UI_SMTP_PASSWORD_FILE needs UI_SMTP_HOST")), "{:?}", lone.warnings());
+        }
     }
 
     #[test]
