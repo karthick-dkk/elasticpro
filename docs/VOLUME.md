@@ -359,6 +359,11 @@ avgPerDay, peakDay, docs, eventBytes, subBytes, topSourceHost, topForwarder, fro
   cluster name, ≤31 chars). Body: per cluster yesterday, average per day (7), month so far.
 - config.txt: `UI_REPORT_TO` text (comma list), `UI_REPORT_SCHEDULE` enum
   monthly,weekly,daily,manual, `UI_REPORT_AT` text HH:MM, `UI_REPORT_SHEETS` text.
+- `REPORT_SCHEDULE_GET` (and `REPORT_SCHEDULE_SET`'s reply) carries `nextPeriod: {from, to,
+  label}`: the period the next scheduled send covers (UTC dates) — the current period while
+  it has not been sent, else the next one, whole (next month, week or day); for `manual`, the
+  period `REPORT_SEND_NOW` uses by default (the UTC month so far). On or off, the same. The
+  page's "Download .xlsx" uses it instead of computing a period of its own.
 - `REPORT_SCHEDULE_GET` / `REPORT_SCHEDULE_SET` (Admin), `REPORT_SEND_NOW` (Admin) → runs the
   mailed report for the current settings at once (as a background job). `REPORT_SEND_NOW`
   may name a `period` like `REPORT_RUN`; without one it is the schedule's period, or the

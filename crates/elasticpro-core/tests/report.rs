@@ -413,6 +413,18 @@ async fn on_hosted_roles_ownership_the_stored_password_and_the_schedule() {
     assert_eq!(saved["ok"], true, "{saved}");
     assert_eq!(saved["timer"], true);
     assert!(saved["nextSendAt"].is_i64(), "{saved}");
+    // The period the next send covers, from the UTC date: last month was handled when the
+    // schedule was saved (past the 2nd), so this month, whole.
+    let utc = today();
+    if utc.day() > 2 {
+        let first = NaiveDate::from_ymd_opt(utc.year(), utc.month(), 1).unwrap();
+        assert_eq!(saved["nextPeriod"]["from"], first.format("%Y-%m-%d").to_string().as_str(), "{saved}");
+        assert_eq!(saved["nextPeriod"]["label"], first.format("%Y-%m").to_string().as_str(), "{saved}");
+    }
+    let manual = c.handle(json!({ "type": "REPORT_SCHEDULE_SET", "session": admin, "schedule": "manual" })).await;
+    assert_eq!(manual["nextPeriod"]["to"], utc.format("%Y-%m-%d").to_string().as_str(), "manual: the UTC month so far, as REPORT_SEND_NOW: {manual}");
+    let back = c.handle(json!({ "type": "REPORT_SCHEDULE_SET", "session": admin, "schedule": "monthly" })).await;
+    assert_eq!(back["ok"], true, "{back}");
     let now = chrono::Local::now().naive_local();
     if now.day() > 2 {
         assert_eq!(c.report_tick_at(now).await, None, "the month that has begun was handled when the schedule was saved");
