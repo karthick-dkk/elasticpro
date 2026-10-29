@@ -770,8 +770,13 @@ await go('volume');
     };
     try {
       [...doc.querySelectorAll('button')].find((b) => b.textContent === '↻ Refresh').click();
-      const p = await waitFor(() => { const x = panel('Monthly volume by cluster'); return x && x.querySelector('table') ? x : null; },
-        'volume: the Monthly table did not draw from a VOLUME_MONTHLY_ALL answer');
+      // Wait for the stubbed answer's table (Cluster + three months), not the one the real
+      // record drew before the refresh: an export clicked while the reply is being asked
+      // again writes nothing, and files.at(-1) would be an earlier view's file.
+      const p = await waitFor(() => {
+        const x = panel('Monthly volume by cluster');
+        return x && x.querySelector('table') && x.querySelectorAll('thead th').length === 4 ? x : null;
+      }, 'volume: the Monthly table did not draw from a VOLUME_MONTHLY_ALL answer');
       if (p) {
         const hd = [...p.querySelectorAll('thead th')].map((x) => x.textContent.trim());
         ok(hd.length === 4 && hd[0] === 'Cluster', `volume: the Monthly columns are ${hd.join(' | ')}`);
