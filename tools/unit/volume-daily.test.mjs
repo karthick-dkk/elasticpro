@@ -67,7 +67,7 @@ test('daily CSV: the contract\'s columns, null left empty, "measured" said', () 
 });
 
 test('monthly and breakdown CSV: the contract\'s columns, picked from the core\'s rows', () => {
-  const m = V.monthlyCsvRows('prod', [{ month: '2026-09', daysWithData: 30, priBytes: 3000, avgPerDay: 100, peakDay: { day: '2026-09-14', basis: 160 }, docs: 9, eventBytes: null, keptDays: 12 }]);
+  const m = V.monthlyCsvRows('prod', [{ month: '2026-09', daysWithData: 30, priBytes: 3000, avgPerDay: 130, basis: 'total', basisBytes: 3900, avgPriPerDay: 100, peakDay: { day: '2026-09-15', basis: 200 }, peakPrimary: { day: '2026-09-14', bytes: 160 }, docs: 9, eventBytes: null, keptDays: 12 }]);
   assert.deepEqual(Object.keys(m[0]), V.MONTHLY_CSV);
   assert.deepEqual([m[0].peak_day, m[0].peak_primary_bytes, m[0].from_kept_record_days, m[0].event_bytes], ['2026-09-14', 160, 12, null]);
   const b = V.breakdownCsvRows('prod', { field: 'sourceHost', resolved: 'src_hostname', rows: [
@@ -100,4 +100,17 @@ test('breakdown periods are whole UTC days, finished ones for yesterday and the 
   assert.deepEqual([by['m:2026-09'].from, by['m:2026-09'].to], ['2026-09-01', '2026-09-30']);
   assert.deepEqual([by['m:2026-08'].from, by['m:2026-08'].to], ['2026-08-01', '2026-08-31']);
   assert.deepEqual(V.lastMonths(3, now), ['2026-08', '2026-09', '2026-10']);
+});
+
+test('monthly CSV primary columns come from avgPriPerDay and peakPrimary, never the basis figures', () => {
+  const [a] = V.monthlyCsvRows('prod', [{ month: '2026-09', daysWithData: 30, priBytes: 3000, avgPriPerDay: 100, avgPerDay: 130, peakDay: { day: 'x', basis: 1 }, peakPrimary: { day: '2026-09-14', bytes: 160 } }]);
+  assert.deepEqual([a.avg_primary_bytes_per_day, a.peak_day, a.peak_primary_bytes], [100, '2026-09-14', 160]);
+  const [b] = V.monthlyCsvRows('prod', [{ month: '2026-09', daysWithData: 30, priBytes: 3000, avgPerDay: 130, peakDay: { day: 'x', basis: 1 } }]);
+  assert.deepEqual([b.avg_primary_bytes_per_day, b.peak_day, b.peak_primary_bytes], [null, null, null]);
+});
+
+test('monthValue plots basisBytes (basis is the name) and guesses nothing else', () => {
+  assert.equal(V.monthValue({ basis: 'total', basisBytes: 42, priBytes: 7, daysWithData: 3 }), 42);
+  assert.equal(V.monthValue({ basis: 'total', priBytes: 7, daysWithData: 3 }), null);
+  assert.equal(V.monthValue(null), null);
 });

@@ -185,3 +185,29 @@ test('an older core is recognised by its unknown-message answer', () => {
   assert.ok(!V.isUnknownType({ ok: false, kind: 'cluster', message: 'unreachable' }));
   assert.ok(!V.isUnknownType({ ok: true }));
 });
+
+test('indicesCell counts skipped by skippedCount, not the capped list', () => {
+  const c = V.indicesCell({ match: 3, skipped: ['a', 'b', 'c'], skippedCount: 1200 });
+  assert.equal(c.text, '3 match · 1200 skipped (a, b, +1198 more)');
+});
+
+test('desktopVolume: one payload, legacy converted, ids as the app normalizes them', () => {
+  const slug = (s) => String(s).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '') || 'cluster';
+  const raw = {
+    defaults: { volumeFields: ['tag1', 'region'] },
+    clusters: [
+      { name: 'Prod One', url: 'http://a', volumeFields: ['src_ip'] },
+      { name: 'Prod One', url: 'http://b', volume: { topValues: 10 } },
+      { _id: 'keep', name: 'x', url: 'http://c' },
+    ],
+  };
+  const v = V.desktopVolume(raw, { cluster: 'prod-one', ids: ['prod-one', 'prod-one-1', 'keep'] }, slug);
+  assert.deepEqual(v.defaults, V.fileVolume(raw.defaults), 'legacy defaults are converted, not null');
+  assert.deepEqual(v.defaults.extra.fields, ['region']);
+  assert.deepEqual(v.cluster, { sourceIp: ['src_ip'] });
+  assert.deepEqual(v.clusters, { 'prod-one': { sourceIp: ['src_ip'] }, 'prod-one-1': { topValues: 10 } });
+  const none = V.desktopVolume({ ...raw, defaults: { volume: { overrides: { keep: { keepMonths: 6 } } } } }, { ids: ['keep'] }, slug);
+  assert.equal(none.cluster, null);
+  assert.deepEqual(none.clusters, { keep: { keepMonths: 6 } });
+  assert.equal(V.desktopVolume(null, {}, slug), null);
+});

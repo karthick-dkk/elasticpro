@@ -285,8 +285,8 @@ function dailyView(c) {
   const rows = reply.days || [];
   if (!rows.length) {
     return [...out, empty('Nothing recorded yet for this cluster.', {
-      detail: (reply.skipped || []).length
-        ? `No index name fits the index format; ${num(reply.skipped.length)} were skipped (for example ${reply.skipped.slice(0, 3).join(', ')}).`
+      detail: Math.max(Number(reply.skippedCount) || 0, (reply.skipped || []).length)
+        ? `No index name fits the index format; ${num(Math.max(Number(reply.skippedCount) || 0, reply.skipped.length))} were skipped (for example ${(reply.skipped || []).slice(0, 3).join(', ')}).`
         : 'A collection fills this in: press Refresh now.',
       actions: [h('button.btn.sm', { type: 'button', onclick: () => openVolumeFields('indexFormat') }, 'Config › Volume fields')],
     })];
@@ -328,16 +328,22 @@ function dailyCards(reply) {
       h('div.v', cardValue(avg) === null ? dash() : bytes(cardValue(avg))),
       avgSeg()),
     statTile('This month so far', cardValue(month) === null ? dash() : bytes(cardValue(month)),
-      month && month.days ? `${num(month.days)} days, today as of ${hhmm((reply.status || {}).lastRunAt) || 'the last run'}` : null),
+      month && hhmm(month.asOf) ? `as of ${hhmm(month.asOf)}` : null),
     statTile('Event bytes · 30 days', evv === null
       ? h('button.linkish.vs-notm', { type: 'button', title: 'Set the Event size field in Config › Volume fields',
           onclick: () => openVolumeFields('eventSize') }, 'not measured')
       : bytes(evv), evv === null ? 'no Event size field in the mapping' : 'measured, finished days'));
 }
 
-/** Finished days, oldest first: today is still filling up and would read as a drop. */
+/**
+ * Days to plot, oldest first: only today is left out (it is still filling up and would read
+ * as a drop). A past day the core could not finish is plotted when it has a figure.
+ */
 function finishedDays(reply) {
-  return (reply.days || []).filter((d) => d.final !== false && d.day < utcDay()).sort((a, b) => (a.day < b.day ? -1 : 1));
+  const basis = basisOf(reply.settings);
+  return (reply.days || [])
+    .filter((d) => d.day < utcDay() && (d.final !== false || dayBasis(d, basis) !== null))
+    .sort((a, b) => (a.day < b.day ? -1 : 1));
 }
 const shortDay = (ymd) => {
   const m = /^\d{4}-(\d{2})-(\d{2})$/.exec(String(ymd || ''));
@@ -400,9 +406,10 @@ function dailyCell(key, d) {
     if (key in TOP_KEY || key === 'changeVsAvg') return '';
   }
   switch (key) {
-    case 'day': return d.final === false
-      ? h('span', d.day, h('span.muted', ` · as of ${hhmm(d.totalsAt || d.aggregatedAt) || 'now'}`))
-      : d.day;
+    case 'day':
+      if (d.day === utcDay()) return h('span', d.day, h('span.muted', ` · as of ${hhmm(d.totalsAt || d.aggregatedAt) || 'now'}`));
+      if (d.final === false) return h('span', d.day, h('span.muted', ` · ${d.error ? String(d.error) : 'not aggregated yet'}`));
+      return d.day;
     case 'indices': return num(d.indices);
     case 'docs': return d.docs === null || d.docs === undefined ? h('span.muted', { title: 'This day has not been aggregated yet' }, 'not yet') : num(d.docs);
     case 'priBytes': return bytes(d.priBytes);
@@ -493,16 +500,17 @@ function monthlyView(c) {
   if (ent && ent.error) return [...out, unreadable('The monthly volume record', ent.error)];
   if (!reply) return [...out, h('div.tbl-empty', 'Reading the monthly record…')];
   const rows = monthRows(reply);
-  const settings = (lastDaily.get(c.id) || {}).settings || reply.settings || {};
+  const settings = reply.settings || {};
   out.push(monthlyChart(reply, rows, settings), monthlyTable(c, rows, settings), breakdownCard(c, settings));
   return out;
 }
 
 function monthlyChart(reply, rows, settings) {
-  const basis = basisOf(settings);
-  const label = BASIS_LABEL[basis];
+  // The core names the basis on each month row (`basis`); the number is `basisBytes`.
+  const named = (rows.find((m) => BASIS_LABEL[m.basis]) || {}).basis;
+  const label = BASIS_LABEL[named || basisOf(settings)];
   const avg = typeof reply.avgPerMonth === 'number' ? reply.avgPerMonth : null;
-  const points = rows.map((m) => ({ key: m.month, label: monthName(m.month), value: monthValue(m, basis), avg }));
+  const points = rows.map((m) => ({ key: m.month, label: monthName(m.month), value: monthValue(m), avg }));
   const withData = rows.filter((m) => m.daysWithData > 0);
   const first = withData[0];
   const cur = rows.find((m) => m.partial) || null;

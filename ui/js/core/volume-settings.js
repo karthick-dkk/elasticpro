@@ -27,11 +27,11 @@ export function forgetCoreFile() { hasFile = null; }
 
 /**
  * The message with the desktop `volume` payload added when the core has no file of its own.
- * `defaults` is `raw.defaults.volume`, `cluster` that cluster's override, both as saved.
+ * `volume` is volume-config.js desktopVolume(): the one payload every desktop message uses.
  */
-export async function withVolume(msg, defaults, cluster) {
+export async function withVolume(msg, volume) {
   if (await coreHasConfigFile()) return msg;
-  return { ...msg, volume: { defaults: defaults || {}, cluster: cluster || {} } };
+  return volume ? { ...msg, volume } : msg;
 }
 
 /** Never throws: `{ok:false, unknown:true}` for an older core, `{ok:false, message}` otherwise. */
@@ -43,11 +43,11 @@ async function send(msg) {
 }
 
 /** `{settings, managed:[names], source, overrides:[ids]}` for the page. */
-export async function volumeSettings(clusterId, defaults, cluster) {
-  return send(await withVolume({ type: 'VOLUME_SETTINGS', ...(clusterId ? { clusterId } : {}) }, defaults, cluster));
+export async function volumeSettings(clusterId, volume) {
+  return send(await withVolume({ type: 'VOLUME_SETTINGS', ...(clusterId ? { clusterId } : {}) }, volume));
 }
 
 /** `{indices:{match, skipped}, rows:[{key, tried, resolved, type, note}]}` for one cluster. */
-export async function volumeFieldsCheck(clusterId, defaults, cluster) {
-  return send(await withVolume({ type: 'VOLUME_FIELDS_CHECK', clusterId }, defaults, cluster));
+export async function volumeFieldsCheck(clusterId, volume) {
+  return send(await withVolume({ type: 'VOLUME_FIELDS_CHECK', clusterId }, volume));
 }

@@ -18,13 +18,13 @@
  * sent is shown as unknown, never filled in here):
  *
  *   VOLUME_DAILY   cards.yesterday {day, value, changeVsAvgPct}   cards.average {days, value}
- *                  cards.monthSoFar {month, value, days}   cards.eventBytes30 {value|null}
+ *                  cards.monthSoFar {month, value, asOf}   cards.eventBytes30 {value|null}
  *                  totals {indices, docs, priBytes, totalBytes, eventBytes, subBytes} (the
  *                  table's totals row; no row when absent). A card's figure may also be
  *                  named `basis` or `bytes`.
  *   MonthRow       {month, partial, daysWithData, liveDays, keptDays, priBytes, totalBytes,
  *                  docs, eventBytes, subBytes, avgPerDay, peakDay:{day, basis}, top:{…},
- *                  basis?}   VOLUME_MONTHLY may add avgPerMonth (the dashed line).
+ *                  basis (the size-basis NAME), basisBytes, avgPriPerDay, peakPrimary:{day, bytes}}   VOLUME_MONTHLY may add avgPerMonth (the dashed line).
  *   VOLUME_BREAKDOWN rows [{value, docs, eventBytes|null, estPriBytes, sharePct, daysSeen,
  *                  kind?: 'missing'|'other'}], resolved, error?
  *   top.<row>      {value, share} with share a fraction (0.41 is "41 %").
@@ -34,6 +34,7 @@ import { bridge } from './transport.js';
 import { workerStatus } from './es.js';
 import { state } from './state.js';
 import { slug } from './config.js';
+import { desktopVolume } from './volume-config.js';
 
 /* ------------------------------- the transport ------------------------------- */
 
@@ -69,44 +70,15 @@ export async function coreEdition() {
 export const isHosted = async () => (await coreEdition()) === 'hosted';
 
 /**
- * The clusters-file entry behind a cluster id, by the same id rule config.js normalize()
- * uses (`_id`, else the name's slug, with a position suffix on a collision).
- */
-function rawCluster(raw, clusterId) {
-  const list = (raw && (raw.clusters || raw.hosts)) || [];
-  const seen = new Set();
-  for (let i = 0; i < list.length; i++) {
-    const c = list[i];
-    if (!c || !c.url) continue;
-    let name = c.name;
-    if (!name) { try { name = new URL(c.url).host; } catch (_) { name = String(c.url); } }
-    let id = c._id ? String(c._id) : slug(name);
-    const pos = Number.isInteger(c._index) ? c._index : i;
-    while (seen.has(id) && !c._id) id = `${id}-${pos}`;
-    seen.add(id);
-    if (id === clusterId) return c;
-  }
-  return null;
-}
-
-/**
- * The `volume` object for a desktop message: `{defaults, cluster}` straight from the file,
- * unmerged — the precedence (built-in < defaults < override < config.txt) is the core's.
- * For a message about several clusters, `clusters` maps each id to its own override.
+ * The `volume` object for a desktop message: volume-config.js desktopVolume(), the one
+ * definition (the precedence, built-in < defaults < override < config.txt, is the core's).
+ * No ids, or `[null]`, means every cluster.
  */
 export function volumeSettingsFor(clusterIds) {
   const raw = state.config && state.config.raw;
-  if (!raw) return null;
-  const defaults = (raw.defaults && raw.defaults.volume) || null;
-  const ids = Array.isArray(clusterIds) ? clusterIds : [clusterIds];
-  const own = (id) => { const rc = rawCluster(raw, id); return (rc && rc.volume) || null; };
-  if (ids.length === 1 && ids[0]) return { defaults, cluster: own(ids[0]) };
-  const clusters = {};
-  for (const id of (ids[0] ? ids : (state.config.clusters || []).map((c) => c.id))) {
-    const o = own(id);
-    if (o) clusters[id] = o;
-  }
-  return { defaults, cluster: null, clusters };
+  const ids = (Array.isArray(clusterIds) ? clusterIds : [clusterIds]).filter(Boolean);
+  const all = ((state.config && state.config.clusters) || []).map((c) => c.id);
+  return desktopVolume(raw, { cluster: ids.length === 1 ? ids[0] : null, ids: ids.length ? ids : all }, slug);
 }
 
 async function send(msg, clusterIds) {
@@ -182,14 +154,11 @@ export const BASIS_KEY = { primary: 'priBytes', total: 'totalBytes', eventSize: 
 export const basisOf = (settings) => (settings && BASIS_LABEL[settings.sizeBasis] ? settings.sizeBasis : 'primary');
 
 /**
- * A month row's value on the basis: the core's own `basis` when it sends one, else the
- * sum it sends for that basis. Picked, not computed.
+ * A month row's value on the basis: the core's `basisBytes` (its `basis` is the basis NAME).
+ * Picked, not computed; null when the core sent none.
  */
-export function monthValue(m, basis) {
-  if (!m) return null;
-  if (typeof m.basis === 'number') return m.basis;
-  const v = m[BASIS_KEY[basis] || 'priBytes'];
-  return typeof v === 'number' && (m.daysWithData || 0) > 0 ? v : null;
+export function monthValue(m) {
+  return m && typeof m.basisBytes === 'number' ? m.basisBytes : null;
 }
 
 /**
@@ -269,13 +238,11 @@ export function dailyCsvRows(clusterName, reply, avgDays) {
   }));
 }
 
-/** The peak day of a month row: `{day, basis}` (or the bytes under `bytes`/`priBytes`). */
+/** The primary-size peak of a month row: the core's `peakPrimary` `{day, bytes}`; null when absent. */
 export function peakOf(m) {
-  const p = m && m.peakDay;
-  if (!p) return null;
-  if (typeof p === 'string') return { day: p, bytes: typeof m.peakBytes === 'number' ? m.peakBytes : null };
-  const bytes = [p.basis, p.bytes, p.priBytes].find((x) => typeof x === 'number');
-  return { day: p.day || null, bytes: bytes === undefined ? null : bytes };
+  const p = m && m.peakPrimary;
+  if (!p || typeof p !== 'object') return null;
+  return { day: p.day || null, bytes: typeof p.bytes === 'number' ? p.bytes : null };
 }
 
 export function monthlyCsvRows(clusterName, months) {
@@ -284,7 +251,7 @@ export function monthlyCsvRows(clusterName, months) {
     return {
       cluster: clusterName, month: m.month, days_with_data: v(m.daysWithData),
       primary_bytes: m.daysWithData > 0 ? v(m.priBytes) : null,
-      avg_primary_bytes_per_day: v(m.avgPerDay),
+      avg_primary_bytes_per_day: v(m.avgPriPerDay),
       peak_day: p ? p.day : null, peak_primary_bytes: p ? p.bytes : null,
       docs: v(m.docs), event_bytes: v(m.eventBytes), from_kept_record_days: v(m.keptDays),
     };

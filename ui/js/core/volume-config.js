@@ -143,6 +143,70 @@ export function fileVolume(rawDefaults) {
 }
 
 /**
+ * The clusters-file entry behind an app cluster id, by the rule config.js normalize() uses
+ * (`_id`, else the slug of the name or url host, with a position suffix on a collision).
+ * `slugFn` is config.js's slug(), passed in so this file stays free of imports.
+ */
+export function rawClusterFor(raw, clusterId, slugFn) {
+  const list = (raw && (raw.clusters || raw.hosts)) || [];
+  const seen = new Set();
+  for (let i = 0; i < list.length; i++) {
+    const c = list[i];
+    if (!c || !c.url) continue;
+    let name = c.name;
+    if (!name) { try { name = new URL(c.url).host; } catch (_) { name = String(c.url); } }
+    let id = c._id ? String(c._id) : slugFn(name);
+    const pos = Number.isInteger(c._index) ? c._index : i;
+    while (seen.has(id) && !c._id) id = `${id}-${pos}`;
+    seen.add(id);
+    if (id === clusterId) return c;
+  }
+  return null;
+}
+
+/**
+ * One cluster's override as the file states it: its legacy `volumeFields` converted, then its
+ * own `volume`, then `defaults.volume.overrides[id]` (what Config saves). Partial; `{}` if none.
+ */
+export function clusterOverride(raw, clusterId, slugFn) {
+  const rc = rawClusterFor(raw, clusterId, slugFn) || {};
+  const saved = raw && raw.defaults && raw.defaults.volume && raw.defaults.volume.overrides;
+  const parts = [];
+  if (rc.volumeFields !== undefined && toList(rc.volumeFields).length) parts.push(legacyToVolume(rc.volumeFields));
+  if (isObj(rc.volume)) parts.push(rc.volume);
+  if (saved && isObj(saved[clusterId])) parts.push(saved[clusterId]);
+  const out = {};
+  for (const part of parts) {
+    for (const k of VOLUME_KEYS) {
+      const v = getPath(part, k.path);
+      if (v === undefined || v === null || v === '') continue;
+      setPath(out, k.path, k.kind === 'list' ? toList(v) : v);
+    }
+  }
+  return out;
+}
+
+/**
+ * The desktop `volume` payload, the one definition for every message that carries it:
+ * `{defaults, cluster, clusters}`. `defaults` is fileVolume(raw.defaults) (legacy converted),
+ * `cluster` the selected cluster's override (null for none selected), `clusters` each of
+ * `ids` that has an override. Ids are the app's normalized ids. null with no config.
+ */
+export function desktopVolume(raw, { cluster = null, ids = [] } = {}, slugFn) {
+  if (!raw) return null;
+  const clusters = {};
+  for (const id of ids) {
+    const o = clusterOverride(raw, id, slugFn);
+    if (Object.keys(o).length) clusters[id] = o;
+  }
+  return {
+    defaults: fileVolume(raw.defaults),
+    cluster: cluster ? clusterOverride(raw, cluster, slugFn) : null,
+    clusters,
+  };
+}
+
+/**
  * config.txt's flat names laid over a nested volume, sub-key by sub-key. The shallow
  * `{...DEFAULTS, ...raw.defaults, ...managedDefaults()}` in config.js would replace the whole
  * object by one managed key. Returns the folded volume and the set of paths that are locked.
@@ -322,8 +386,10 @@ export function checkCell(key, row) {
 export function indicesCell(indices) {
   const match = Number(indices && indices.match) || 0;
   const skipped = (indices && Array.isArray(indices.skipped)) ? indices.skipped : [];
-  const names = skipped.slice(0, 2).join(', ') + (skipped.length > 2 ? `, +${skipped.length - 2} more` : '');
-  const text = `${match} match${skipped.length ? ` · ${skipped.length} skipped (${names})` : ''}`;
+  // The list is capped by the core; `skippedCount` is the real number.
+  const count = Math.max(Number(indices && indices.skippedCount) || 0, skipped.length);
+  const names = skipped.slice(0, 2).join(', ') + (count > 2 ? `, +${count - 2} more` : '');
+  const text = `${match} match${count ? ` · ${count} skipped (${names})` : ''}`;
   return { ok: match > 0, text };
 }
 

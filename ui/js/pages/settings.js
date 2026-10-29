@@ -29,7 +29,7 @@ import { isSnapshotMode } from '../core/snapshot.js';
 import { applyLoadedConfig } from '../ui/load-config.js';
 import { filePickerButton, canPickByPath, configHistory, readVersion } from '../ui/upload.js';
 import { confirmDialog, modal, field, text, select, checkbox, val, checked } from '../ui/modal.js';
-import { VOLUME_KEYS, FIELD_ROWS, BOUNDS as VOLUME_BOUNDS, fileVolume, foldManaged, overrideIds, validateVolume, applyDefaults,
+import { VOLUME_KEYS, FIELD_ROWS, BOUNDS as VOLUME_BOUNDS, fileVolume, desktopVolume, foldManaged, overrideIds, validateVolume, applyDefaults,
   applyOverride, yamlBlock, configTxtLines, displayValue, checkCell, indicesCell, listText, toList, getPath, setPath } from '../core/volume-config.js';
 import { volumeSettings, volumeFieldsCheck } from '../core/volume-settings.js';
 import { rowMenu, ICON } from '../ui/menu.js';
@@ -1457,6 +1457,10 @@ const volOverrideOf = (id) => {
   return (o && id && o[id]) || {};
 };
 
+/** The desktop `volume` payload: the same one every volume message sends. */
+const volPayload = (id) => desktopVolume(state.config && state.config.raw, { cluster: id || null,
+  ids: ((state.config && state.config.clusters) || []).map((c) => c.id) }, cfg.slug);
+
 /** The effective defaults and which paths config.txt locks (the core's list adds to PING's). */
 function volModel() {
   const folded = foldManaged(fileVolume(rawDefaultsNow()), managedDefaults());
@@ -1468,7 +1472,7 @@ function volModel() {
 
 async function loadVolume() {
   const id = vol.mode === 'override' ? vol.clusterId : '';
-  const res = await volumeSettings(id, fileVolume(rawDefaultsNow()), volOverrideOf(id));
+  const res = await volumeSettings(id, volPayload(id));
   vol.unknown = !!res.unknown;
   const changed = JSON.stringify((vol.reply || {}).managed) !== JSON.stringify(res.ok ? res.managed : undefined);
   vol.reply = res.ok ? res : null;
@@ -1563,7 +1567,7 @@ async function checkVolume(btn) {
   const was = btn.textContent;
   btn.textContent = 'Working…';
   let res;
-  try { res = await volumeFieldsCheck(id, fileVolume(rawDefaultsNow()), volOverrideOf(id)); } finally { btn.disabled = false; btn.textContent = was; }
+  try { res = await volumeFieldsCheck(id, volPayload(id)); } finally { btn.disabled = false; btn.textContent = was; }
   if (res.unknown) { vol.unknown = true; say(res.message); return; }
   if (!res.ok) { say(`Check failed: ${res.message || 'refused'}`); return; }
   say('');
