@@ -84,6 +84,15 @@ for t in VOLUME_SETTINGS VOLUME_FIELDS_CHECK VOLUME_DAILY VOLUME_MONTHLY VOLUME_
   check "$t needs a caller"              "$(post $B -d "{\"type\":\"$t\",\"clusterId\":\"x\"}" | field kind)" "unauthenticated"
 done
 
+# Volume reports and mail (docs/VOLUME.md "Reports and mail"): generating a report reads the
+# record, downloading hands over a file, the mail settings hold a credential and MAIL_TEST
+# sends a mail — every one needs a caller. Roles and ownership are proved in-process
+# (tests/report.rs). The report timer, like the volume timer, logs without a user.
+for t in REPORT_RUN REPORT_JOBS REPORT_STOP REPORT_CLEAR REPORT_DOWNLOAD REPORT_CONCURRENCY_SET \
+         MAIL_SETTINGS_GET MAIL_SETTINGS_SET MAIL_TEST REPORT_SCHEDULE_GET REPORT_SCHEDULE_SET REPORT_SEND_NOW; do
+  check "$t needs a caller"              "$(post $B -d "{\"type\":\"$t\",\"clusterIds\":[\"x\"],\"to\":\"a@example.com\"}" | field kind)" "unauthenticated"
+done
+
 # Zabbix sign-in. Off until a secret is set, and a way in only with the right signature.
 S="http://127.0.0.1:$P/sso/zabbix"
 code_of() { curl -s -o /dev/null -w '%{http_code}' -X POST "$1" -H 'content-type: application/json' "${@:2}"; }
@@ -108,6 +117,8 @@ check "X-Auth-User is ignored by default"      "$(post "http://127.0.0.1:$PD/bri
 # With a data directory the volume timer starts, says so once, and names nobody.
 check "the volume timer announces itself"      "$(grep -c 'volume daily: timer started' "$OUTD" || true)" "1"
 check "and names no user"                      "$(grep 'volume daily: timer started' "$OUTD" | grep -c '"user":' || true)" "0"
+check "the report timer announces itself"      "$(grep -c 'volume report: timer started' "$OUTD" || true)" "1"
+check "and it names no user either"            "$(grep 'volume report: timer started' "$OUTD" | grep -c '"user":' || true)" "0"
 kill $PIDD 2>/dev/null; rm -rf "$OUTD" "$DD"
 # Pairing: with nothing in progress, unsigned and signed-with-anything look the same.
 PZ="http://127.0.0.1:$P/zabbix/pair"

@@ -41,6 +41,18 @@ pub fn month_key(d: NaiveDate) -> String {
     d.format("%Y-%m").to_string()
 }
 
+/// Every `YYYY-MM` from `from`'s month to `to`'s, oldest first.
+pub fn months_between(from: NaiveDate, to: NaiveDate) -> Vec<String> {
+    use chrono::Datelike;
+    let (mut y, mut m) = (from.year(), from.month());
+    let mut out = vec![];
+    while (y, m) <= (to.year(), to.month()) {
+        out.push(format!("{y:04}-{m:02}"));
+        (y, m) = if m == 12 { (y + 1, 1) } else { (y, m + 1) };
+    }
+    out
+}
+
 /// The first day of the month `keep_months - 1` months before `today`'s: the oldest month
 /// the record keeps. `keep_months` 1 keeps only the current month.
 pub fn oldest_kept_month(today: NaiveDate, keep_months: u32) -> NaiveDate {

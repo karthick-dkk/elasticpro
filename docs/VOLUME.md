@@ -209,6 +209,14 @@ avgPerDay, peakDay, docs, eventBytes, subBytes, topSourceHost, topForwarder, fro
   same rules, stoppable between days), (2) builds the file, (3) mails it when `mail` is set
   and SMTP is configured (else the job ends `done` with `mailError`). Progress
   `{done,total}` counts days collected plus one for the file.
+- Collection follows the daily run's rules and shares its locks: one collection per cluster
+  at a time (the daily run included) and two clusters at once, origin `volume-report`. The
+  **emergency stop fails a job** that would have to collect (`error` says so; run it again
+  when the stop is over) rather than holding a slot for an end nobody announced; a period
+  whose days are all final is built without asking the cluster. An unreachable cluster is
+  not asked: the file holds what the record has and the job carries `warning`.
+- A job's mail goes to the mailed report's `to/cc/bcc` (below), which only an admin sets:
+  `REPORT_RUN` takes no addresses, so a user cannot send cluster figures anywhere else.
 - At most `concurrency` jobs run at once (3..5, default 3, admin `REPORT_CONCURRENCY_SET {n}`);
   the rest wait in FIFO order and start as slots free. Persisted in `<data>/reports/jobs.json`
   (a job running at restart is marked `failed: "the server restarted"`).
@@ -257,6 +265,11 @@ avgPerDay, peakDay, docs, eventBytes, subBytes, topSourceHost, topForwarder, fro
 - config.txt: `UI_REPORT_TO` text (comma list), `UI_REPORT_SCHEDULE` enum
   monthly,weekly,daily,manual, `UI_REPORT_AT` text HH:MM, `UI_REPORT_SHEETS` text.
 - `REPORT_SCHEDULE_GET` / `REPORT_SCHEDULE_SET` (Admin), `REPORT_SEND_NOW` (Admin) → runs the
-  mailed report for the current settings at once (as a background job).
+  mailed report for the current settings at once (as a background job). `REPORT_SEND_NOW`
+  may name a `period` like `REPORT_RUN`; without one it is the schedule's period, or the
+  current month so far for `manual`. It does not count as the schedule's send.
+- A missed send (the core was down at `at`) goes out once on the first tick after; saving a
+  schedule counts a period whose send moment has already passed as handled, so switching a
+  monthly report on on the 20th does not send last month's three weeks late.
 - Every mail send is an audit line (who, to-count, ok), never the addresses' contents of the
   attachment, never the password.

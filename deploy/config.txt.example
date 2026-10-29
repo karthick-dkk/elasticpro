@@ -221,3 +221,26 @@ UI_VOLUME_KEEP_MONTHS=
 # core container: set TZ in deploy/.env (an IANA name such as Asia/Kolkata, or a POSIX
 # string such as IST-5:30); unset is UTC. Default 06:00.
 UI_VOLUME_COLLECT_AT=
+
+# The volume report by mail (Config > Volume fields; docs/VOLUME.md "Reports and mail").
+# Each key set here locks its field on that page. The mail server:
+UI_SMTP_HOST=
+# 1-65535. Empty: 587 for starttls, 465 for tls, 25 for none.
+UI_SMTP_PORT=
+# starttls, tls (implicit, port 465 style) or none. none is accepted only without a
+# password: a password must not cross the network in plain text.
+UI_SMTP_SECURITY=
+UI_SMTP_USER=
+# A file inside the core container that holds the password (a Docker secret, for example
+# /run/secrets/smtp_password). Read when a mail is sent; the password itself is never
+# written here, and never shown or logged.
+UI_SMTP_PASSWORD_FILE=
+# The sender, e.g. ElasticPro <elasticpro@example.com>
+UI_SMTP_FROM=
+# The mailed report: recipients (comma-separated addresses), how often (monthly on the
+# 1st, weekly on Monday, daily after the day's collection, or manual), at what time
+# (HH:MM, server local time) and which sheets (daily, monthly, breakdown).
+UI_REPORT_TO=
+UI_REPORT_SCHEDULE=
+UI_REPORT_AT=
+UI_REPORT_SHEETS=

@@ -37,34 +37,44 @@ fn no_store() -> Value {
 }
 
 /// Settings as resolved for one request, with where they came from.
-struct Resolved {
-    settings: VolumeSettings,
+pub(crate) struct Resolved {
+    pub settings: VolumeSettings,
     managed: Vec<&'static str>,
     source: Source,
     overrides: Vec<String>,
+}
+
+/// How `volume_collect` is to run: who it says it is in the request log, which days (all
+/// that are unfinished, or a report's period), when to stop and whom to tell how far it got.
+pub(crate) struct CollectOpts<'a> {
+    pub origin: &'static str,
+    pub period: Option<(NaiveDate, NaiveDate)>,
+    /// Asked between days: `Some(reason)` ends the collection there.
+    pub stop: &'a (dyn Fn() -> Option<String> + Send + Sync),
+    pub progress: &'a (dyn Fn(u64, u64) + Send + Sync),
+}
+
+/// What one collection did.
+#[derive(Debug, Default)]
+pub(crate) struct Collected {
+    pub searched: u64,
+    pub total: u64,
+    /// The first thing that went wrong (a request, a day), as the status shows it.
+    pub error: Option<String>,
+    /// Why it stopped early, when `stop` said so.
+    pub interrupted: Option<String>,
 }
 
 fn int_arg(msg: &Value, key: &str, default: u64, lo: u64, hi: u64) -> u64 {
     msg.get(key).and_then(Value::as_u64).unwrap_or(default).clamp(lo, hi)
 }
 
-/// Every `YYYY-MM` from `from`'s month to `to`'s, oldest first.
-fn months_between(from: NaiveDate, to: NaiveDate) -> Vec<String> {
-    use chrono::Datelike;
-    let (mut y, mut m) = (from.year(), from.month());
-    let mut out = vec![];
-    while (y, m) <= (to.year(), to.month()) {
-        out.push(format!("{y:04}-{m:02}"));
-        (y, m) = if m == 12 { (y + 1, 1) } else { (y, m + 1) };
-    }
-    out
-}
 
 impl Core {
     /* ------------------------------------ settings ------------------------------------ */
 
     /// The clusters file, when this core has one (hosted: ELASTICPRO_CONFIG).
-    async fn volume_config(&self) -> Option<Value> {
+    pub(crate) async fn volume_config(&self) -> Option<Value> {
         self.read_config_file().await.ok()
     }
 
@@ -74,7 +84,7 @@ impl Core {
     /// The message's `volume` counts only on the desktop editions. On hosted the settings
     /// are the config file's — which an admin edits — and a request from anybody else must
     /// not be able to say what the timer's next run counts.
-    fn volume_resolve(&self, raw: Option<&Value>, cluster: Option<&str>, msg: Option<&Value>) -> Resolved {
+    pub(crate) fn volume_resolve(&self, raw: Option<&Value>, cluster: Option<&str>, msg: Option<&Value>) -> Resolved {
         let from_msg = msg.filter(|_| self.edition() != crate::auth::Edition::Hosted)
             .and_then(|m| m.get("volume")).filter(|v| v.is_object());
         let (layers, source, overrides) = match (raw, from_msg) {
@@ -112,11 +122,11 @@ impl Core {
         })
     }
 
-    fn volume_unreachable(&self, id: &str) -> bool {
+    pub(crate) fn volume_unreachable(&self, id: &str) -> bool {
         self.fleet.state.lock().reach_state(id) == ReachState::Unreachable
     }
 
-    fn volume_stopped(&self) -> bool {
+    pub(crate) fn volume_stopped(&self) -> bool {
         self.fleet.cfg.read().stopped(crate::fleet::now_ms())
     }
 
@@ -184,28 +194,17 @@ impl Core {
     fn volume_daily(&self, id: &str, s: &VolumeSettings, msg: &Value) -> Value {
         let Some(store) = &self.volume.store else { return no_store() };
         let days = int_arg(msg, "days", 30, 14, 400) as i64;
-        let avg_days = int_arg(msg, "avgDays", 7, 3, 180) as u32;
+        let avg_days = int_arg(msg, "avgDays", derive::AVG_DAYS_DEFAULT as u64, 3, 180) as u32;
         let source = msg.get("source").and_then(Value::as_str).filter(|s| !s.is_empty());
         let today = schedule::utc_day(now_ms());
         let from = today - Duration::days(days - 1);
         let hist_from = from - Duration::days(avg_days as i64);
 
-        let mut history: BTreeMap<NaiveDate, Totals> = BTreeMap::new();
-        let mut window: Vec<super::Day> = vec![];
-        let mut sources: std::collections::BTreeSet<String> = Default::default();
-        for m in months_between(hist_from, today) {
-            for (k, d) in store.read_month(id, &m).days {
-                let Some(date) = parse_day(&k).filter(|x| *x >= hist_from && *x <= today) else { continue };
-                if let Some(t) = Totals::of(&d, source) {
-                    history.insert(date, t);
-                }
-                if date >= from {
-                    sources.extend(d.sources.keys().cloned());
-                    window.push(d);
-                }
-            }
-        }
-        let shown: Vec<(&super::Day, Totals)> = window.iter().filter_map(|d| Some((d, Totals::of(d, source)?))).collect();
+        let kept = store.days_between(id, hist_from, today);
+        let history = derive::history(&kept, source);
+        let window: Vec<&super::Day> = kept.iter().filter(|d| parse_day(&d.day).is_some_and(|x| x >= from)).collect();
+        let sources: std::collections::BTreeSet<String> = window.iter().flat_map(|d| d.sources.keys().cloned()).collect();
+        let shown: Vec<(&super::Day, Totals)> = window.iter().filter_map(|d| Some((*d, Totals::of(d, source)?))).collect();
         let rows: Vec<Value> = shown.iter()
             .map(|(d, t)| derive::daily_row(d, t, &history, avg_days, s.size_basis, source))
             .collect();
@@ -275,12 +274,8 @@ impl Core {
         if from > to || (to - from).num_days() > 1200 {
             return bad("bad_request", "from must be on or before to, and the period at most 1200 days");
         }
-        let top = int_arg(msg, "top", 25, 1, 1000) as usize;
-        let mut days: Vec<super::Day> = vec![];
-        for m in months_between(from, to) {
-            days.extend(store.read_month(id, &m).days.into_values()
-                .filter(|d| parse_day(&d.day).is_some_and(|x| x >= from && x <= to)));
-        }
+        let top = int_arg(msg, "top", derive::BREAKDOWN_TOP_DEFAULT as u64, 1, 1000) as usize;
+        let days = store.days_between(id, from, to);
         let refs: Vec<&super::Day> = days.iter().collect();
         let mut out = derive::breakdown(&refs, field, top);
         out["ok"] = json!(true);
@@ -321,7 +316,7 @@ impl Core {
         json!({ "order": order, "hidden": pick("hidden"), "labels": labels })
     }
 
-    fn volume_layouts(&self) -> Value {
+    pub(crate) fn volume_layouts(&self) -> Value {
         let stored = self.volume.store.as_ref().map(Store::read_layouts).unwrap_or(Value::Null);
         json!({ "daily": Core::layout_whole("daily", stored.get("daily")),
                 "monthly": Core::layout_whole("monthly", stored.get("monthly")) })
@@ -460,41 +455,70 @@ impl Core {
         });
     }
 
-    fn volume_progress(&self, id: &str, done: u64, total: u64) {
+    pub(crate) fn volume_progress(&self, id: &str, done: u64, total: u64) {
         if let Some(r) = self.volume.runs.lock().get_mut(id) {
             r.done = done;
             r.total = total;
         }
     }
 
-    /// One cluster, start to finish (docs/VOLUME.md "Each run, per cluster").
+    /// One cluster, start to finish (docs/VOLUME.md "Each run, per cluster"): the daily run
+    /// and Refresh now.
     async fn volume_run_cluster(self: &Arc<Self>, id: &str, s: &VolumeSettings) -> Result<(), String> {
+        let stop = || self.volume_stopped().then(|| "the emergency stop came on".to_string());
+        let progress = |done, total| self.volume_progress(id, done, total);
+        let opts = CollectOpts { origin: "volume-daily", period: None, stop: &stop, progress: &progress };
+        self.volume_collect(id, s, &opts).await.map(|_| ())
+    }
+
+    /// The collector, for the daily run and for a report job (`report`), under the same
+    /// rules: Background class, the emergency stop, one request at a time, finished days
+    /// never asked again. A report job passes its `period` — only the months it touches are
+    /// refreshed and only its days searched; the run's status and the prune are left to the
+    /// daily run — and a `stop` that also answers to `REPORT_STOP`.
+    pub(crate) async fn volume_collect(self: &Arc<Self>, id: &str, s: &VolumeSettings, opts: &CollectOpts<'_>) -> Result<Collected, String> {
         let store = self.volume.store.as_ref().ok_or("no data directory")?;
         let fmt = IndexFormat::new(&s.index_format).ok_or("indexFormat cannot be used")?;
         if self.volume_stopped() {
             return Err("the emergency stop is on: nothing was sent".into());
         }
+        let job = opts.period.is_some();
+        let tag = |mut r: crate::http::EsRequest| {
+            r.origin = Some(opts.origin.into());
+            r
+        };
         let ok = |v: &Value| v.get("ok").and_then(Value::as_bool) == Some(true);
         let why = |v: &Value| v.get("message").and_then(Value::as_str).unwrap_or("request failed").to_string();
         let started = now_ms();
         let today = schedule::utc_day(started);
         let oldest = month_key(schedule::oldest_kept_month(today, s.keep_months));
+        let mut out = Collected::default();
 
         // 1. Sizes per day, from the names.
-        let cat = self.es_req(collect::cat_request(id, &fmt)).await;
+        let cat = self.es_req(tag(collect::cat_request(id, &fmt))).await;
         if !ok(&cat) {
             let e = format!("_cat/indices: {}", why(&cat));
-            store.update_state(id, |st| { st.last_run_at = Some(started); st.last_error = Some(e.clone()); })?;
-            return Ok(());
+            if !job {
+                store.update_state(id, |st| { st.last_run_at = Some(started); st.last_error = Some(e.clone()); })?;
+            }
+            out.error = Some(e);
+            return Ok(out);
         }
         let listing = collect::read_cat(cat.get("json").unwrap_or(&Value::Null), &fmt);
         drop(cat);
 
-        let mut months: Vec<String> = store.months(id);
-        months.extend(listing.days.keys().map(|d| month_key(*d)));
+        let mut months: Vec<String> = match opts.period {
+            Some((from, to)) => schedule::months_between(from, to),
+            None => {
+                let mut m = store.months(id);
+                m.extend(listing.days.keys().map(|d| month_key(*d)));
+                m
+            }
+        };
         months.sort();
         months.dedup();
         months.retain(|m| *m >= oldest);
+        let in_period = |d: NaiveDate| opts.period.is_none_or(|(f, t)| d >= f && d <= t);
         let mut summaries = BTreeMap::new();
         let mut to_search: Vec<NaiveDate> = vec![];
         for m in &months {
@@ -504,7 +528,7 @@ impl Core {
             }
             for (k, d) in &file.days {
                 let Some(date) = parse_day(k) else { continue };
-                if collect::needs_search(d, listing.days.get(&date)) {
+                if in_period(date) && collect::needs_search(d, listing.days.get(&date)) {
                     to_search.push(date);
                 }
             }
@@ -514,15 +538,14 @@ impl Core {
         }
 
         // 2. Which field each row is.
-        let mut error: Option<String> = None;
         let rows: Option<Vec<RowResolution>> = if to_search.is_empty() {
             None
         } else {
-            let fc = self.es_req(collect::field_caps_request(id, &fmt, s)).await;
+            let fc = self.es_req(tag(collect::field_caps_request(id, &fmt, s))).await;
             if ok(&fc) {
                 Some(collect::resolve_rows(fc.get("json").unwrap_or(&Value::Null), s))
             } else {
-                error = Some(format!("_field_caps: {}", why(&fc)));
+                out.error = Some(format!("_field_caps: {}", why(&fc)));
                 None
             }
         };
@@ -531,7 +554,8 @@ impl Core {
         if let Some(rows) = rows {
             let body = collect::search_body(&rows, s.top_values);
             let total = to_search.len() as u64;
-            self.volume_progress(id, 0, total);
+            out.total = total;
+            (opts.progress)(0, total);
             let mut done = 0u64;
             let mut by_month: BTreeMap<String, Vec<NaiveDate>> = BTreeMap::new();
             for d in to_search {
@@ -540,31 +564,40 @@ impl Core {
             'months: for (m, dates) in by_month {
                 let mut file = store.read_month(id, &m);
                 for date in dates {
-                    if self.volume_stopped() {
-                        error = Some(format!("the emergency stop came on after {done} of {total} days"));
+                    if let Some(reason) = (opts.stop)() {
+                        out.error = Some(format!("{reason} after {done} of {total} days"));
+                        out.interrupted = Some(reason);
                         store.write_month(id, &m, &file)?;
                         summaries.insert(m.clone(), derive::month_summary(&m, &file.days));
                         break 'months;
                     }
-                    let res = self.es_req(collect::search_request(id, &fmt, date, &body)).await;
+                    let res = self.es_req(tag(collect::search_request(id, &fmt, date, &body))).await;
                     if let (Some(day), Some(group)) = (file.days.get_mut(&day_key(date)), listing.days.get(&date)) {
                         if ok(&res) {
                             collect::apply_search(day, res.get("json").unwrap_or(&Value::Null), &rows, group, today, now_ms());
                         } else {
                             let e = why(&res);
                             day.error = Some(e.clone());
-                            error.get_or_insert_with(|| format!("{}: {e}", day_key(date)));
+                            out.error.get_or_insert_with(|| format!("{}: {e}", day_key(date)));
                         }
                     }
                     done += 1;
-                    self.volume_progress(id, done, total);
+                    out.searched = done;
+                    (opts.progress)(done, total);
                 }
                 store.write_month(id, &m, &file)?;
                 summaries.insert(m.clone(), derive::month_summary(&m, &file.days));
             }
         }
 
-        // 4. Status and month summaries, then what is older than keepMonths goes.
+        // 4. Month summaries; for the daily run also its status, then what is older than
+        // keepMonths goes.
+        if job {
+            store.update_state(id, |st| st.months.extend(summaries))?;
+            tracing::info!(cluster = %id, origin = opts.origin, searched = out.searched, error = out.error.as_deref().unwrap_or(""), "volume: days collected for a report");
+            return Ok(out);
+        }
+        let error = out.error.clone();
         store.update_state(id, |st| {
             st.last_run_at = Some(started);
             st.last_error = error.clone();
@@ -575,7 +608,7 @@ impl Core {
         })?;
         store.prune(id, &oldest)?;
         tracing::info!(cluster = %id, days = listing.days.len(), error = error.as_deref().unwrap_or(""), "volume daily: run finished");
-        Ok(())
+        Ok(out)
     }
 
     /* ---------------------------------------- the timer ---------------------------------------- */
@@ -661,6 +694,7 @@ impl Core {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::volume::schedule::months_between;
 
     #[test]
     fn months_between_covers_every_month_once() {

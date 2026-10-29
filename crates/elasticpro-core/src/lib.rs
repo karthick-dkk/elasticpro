@@ -25,6 +25,7 @@ pub mod http;
 pub mod inflight;
 pub mod memory;
 pub mod notify;
+pub mod report;
 pub mod silences;
 pub mod saved_queries;
 pub mod settings;
