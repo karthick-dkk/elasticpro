@@ -205,15 +205,17 @@ impl Core {
                 }
             }
         }
-        let rows: Vec<Value> = window.iter()
-            .filter_map(|d| Some(derive::daily_row(d, &Totals::of(d, source)?, &history, avg_days, s.size_basis, source)))
+        let shown: Vec<(&super::Day, Totals)> = window.iter().filter_map(|d| Some((d, Totals::of(d, source)?))).collect();
+        let rows: Vec<Value> = shown.iter()
+            .map(|(d, t)| derive::daily_row(d, t, &history, avg_days, s.size_basis, source))
             .collect();
+        let totals = derive::window_totals(&shown.iter().map(|(_, t)| t).collect::<Vec<_>>());
         let today_at = window.iter().find(|d| d.day == day_key(today)).map(|d| d.totals_at);
         let st = store.read_state(id);
         json!({
             "ok": true, "clusterId": id, "settings": s, "status": self.volume_status(id, s, &st),
             "cards": derive::cards(&history, today, avg_days, s.size_basis, today_at),
-            "days": rows, "sources": sources, "source": source, "topAvailable": source.is_none(),
+            "days": rows, "totals": totals, "sources": sources, "source": source, "topAvailable": source.is_none(),
             "skipped": st.skipped, "skippedCount": st.skipped_count, "matched": st.matched,
             "window": { "from": day_key(from), "to": day_key(today), "days": days, "avgDays": avg_days },
         })
@@ -230,8 +232,9 @@ impl Core {
         let months = int_arg(msg, "months", 13, 1, 36) as usize;
         let current = month_key(schedule::utc_day(now_ms()));
         let st = store.read_state(id);
+        let rows = Core::month_rows(&st, s, months, &current);
         json!({ "ok": true, "clusterId": id, "status": self.volume_status(id, s, &st),
-                "months": Core::month_rows(&st, s, months, &current) })
+                "avgPerMonth": derive::avg_per_month(&rows), "months": rows })
     }
 
     /// Every cluster the caller sees, from `state.json` alone.

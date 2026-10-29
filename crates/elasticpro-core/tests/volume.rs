@@ -171,7 +171,11 @@ async fn finished_days_once_today_every_run_and_a_deleted_day_is_kept() {
     assert_eq!(daily["sources"], json!(["linux", "win-dc"]));
 
     // The cards and the change against the average (avgDays 3).
-    assert_eq!(daily["cards"]["yesterday"], json!({ "day": dash(d1), "value": 300 }));
+    assert_eq!(daily["cards"]["yesterday"], json!({ "day": dash(d1), "value": 300, "changeVsAvgPct": 100.0 }),
+               "300 against the two days before it, (200 + 100) / 2");
+    // The totals row: what the shown rows add up to, unmeasured event bytes still null.
+    assert_eq!(daily["totals"]["eventBytes"], Value::Null, "{}", daily["totals"]);
+    assert_eq!(daily["totals"]["days"], daily["days"].as_array().unwrap().len());
     assert_eq!(daily["cards"]["average"]["value"], 200, "(300 + 200 + 100) / 3");
     assert_eq!(daily["cards"]["average"]["daysWithData"], 3);
     let month: u64 = [(t, 1000u64), (d1, 300), (d2, 200), (d3, 100)].iter()

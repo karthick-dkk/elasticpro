@@ -122,12 +122,15 @@ pub fn daily_row(d: &Day, t: &Totals, history: &BTreeMap<NaiveDate, Totals>, avg
 pub fn cards(history: &BTreeMap<NaiveDate, Totals>, today: NaiveDate, avg_days: u32, b: SizeBasis, today_as_of: Option<i64>) -> Value {
     let yesterday = today - Duration::days(1);
     let (avg, n) = avg_before(history, today, avg_days, b);
+    // Yesterday against the N days before it: the same rule as its row's "vs N-day avg".
+    let yv = history.get(&yesterday).and_then(|t| basis(t, b));
+    let (yavg, _) = avg_before(history, yesterday, avg_days, b);
     let month_start = NaiveDate::parse_from_str(&format!("{}-01", month_key(today)), "%Y-%m-%d").unwrap_or(today);
     let month = sum_opt(history.range(month_start..=today).map(|(_, t)| basis(t, b)));
     let ev30: Vec<Option<u64>> = history.range(today - Duration::days(30)..today).map(|(_, t)| t.event_bytes).collect();
     json!({
         "basis": b,
-        "yesterday": { "day": day_key(yesterday), "value": history.get(&yesterday).and_then(|t| basis(t, b)) },
+        "yesterday": { "day": day_key(yesterday), "value": yv, "changeVsAvgPct": change_vs_avg_pct(yv, yavg) },
         "average": { "days": avg_days, "daysWithData": n, "value": avg_bytes(avg) },
         "monthSoFar": { "month": month_key(today), "value": month,
                         "asOf": history.contains_key(&today).then_some(today_as_of).flatten() },
@@ -136,7 +139,31 @@ pub fn cards(history: &BTreeMap<NaiveDate, Totals>, today: NaiveDate, avg_days: 
     })
 }
 
+/// The Daily table's totals row: Σ over the days shown. A figure no shown day measured
+/// stays `null`; it is not summed to 0.
+pub fn window_totals(ts: &[&Totals]) -> Value {
+    json!({
+        "days": ts.len(),
+        "indices": ts.iter().map(|t| t.indices).sum::<u64>(),
+        "priBytes": ts.iter().map(|t| t.pri_bytes).sum::<u64>(),
+        "totalBytes": ts.iter().map(|t| t.total_bytes).sum::<u64>(),
+        "docs": sum_opt(ts.iter().map(|t| t.docs)),
+        "eventBytes": sum_opt(ts.iter().map(|t| t.event_bytes)),
+        "subBytes": sum_opt(ts.iter().map(|t| t.sub_bytes)),
+    })
+}
+
 /* --------------------------------------- months --------------------------------------- */
+
+/// The Monthly graph's dashed line: the mean of `basisBytes` over the month rows shown,
+/// the current month ("so far") left out because it is not over.
+pub fn avg_per_month(rows: &[Value]) -> Option<u64> {
+    let vals: Vec<u64> = rows.iter()
+        .filter(|r| r["partial"] != json!(true))
+        .filter_map(|r| r["basisBytes"].as_u64())
+        .collect();
+    (!vals.is_empty()).then(|| (vals.iter().sum::<u64>() as f64 / vals.len() as f64).round() as u64)
+}
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -370,7 +397,8 @@ mod tests {
             ("2026-10-29", 1000, Some(100)), // today, as of the last run
         ]);
         let c = super::cards(&h, d("2026-10-29"), 3, SizeBasis::Primary, Some(123));
-        assert_eq!(c["yesterday"], json!({ "day": "2026-10-28", "value": 400 }));
+        assert_eq!(c["yesterday"], json!({ "day": "2026-10-28", "value": 400, "changeVsAvgPct": 100.0 }),
+                   "against the 25th..27th: only the 27th (200) has a record");
         assert_eq!(c["average"], json!({ "days": 3, "daysWithData": 2, "value": 300 }), "26th, 27th, 28th: two with a record");
         assert_eq!(c["monthSoFar"], json!({ "month": "2026-10", "value": 1700, "asOf": 123 }), "today included");
         assert_eq!(c["eventBytes30"]["value"], 46, "29 Sep .. 28 Oct, measured only; today excluded");
@@ -379,6 +407,24 @@ mod tests {
         assert_eq!(none["eventBytes30"]["value"], Value::Null, "nothing measured is null, not 0");
         assert_eq!(none["yesterday"]["value"], Value::Null);
         assert_eq!(none["monthSoFar"]["value"], Value::Null);
+        assert_eq!(none["yesterday"]["changeVsAvgPct"], Value::Null, "no earlier day, no change");
+    }
+
+    #[test]
+    fn window_totals_keep_unmeasured_null() {
+        let a = Totals { indices: 2, pri_bytes: 10, total_bytes: 20, docs: Some(5), event_bytes: None, sub_bytes: None };
+        let b = Totals { indices: 1, pri_bytes: 1, total_bytes: 2, docs: None, event_bytes: Some(7), sub_bytes: None };
+        let t = super::window_totals(&[&a, &b]);
+        assert_eq!(t, json!({ "days": 2, "indices": 3, "priBytes": 11, "totalBytes": 22,
+                              "docs": 5, "eventBytes": 7, "subBytes": null }));
+    }
+
+    #[test]
+    fn avg_per_month_leaves_the_current_month_out() {
+        let rows = [json!({ "partial": false, "basisBytes": 300 }), json!({ "partial": false, "basisBytes": null }),
+                    json!({ "partial": false, "basisBytes": 100 }), json!({ "partial": true, "basisBytes": 5000 })];
+        assert_eq!(super::avg_per_month(&rows), Some(200));
+        assert_eq!(super::avg_per_month(&rows[3..]), None, "only the month so far: no average");
     }
 
     fn day(k: &str, pri: u64, docs: Option<u64>, live: bool, tag: &[(&str, u64)], missing: u64, other: u64) -> Day {

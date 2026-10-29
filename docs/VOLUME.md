@@ -150,6 +150,11 @@ Day = { day, final, live, aggregatedAt|null, totalsAt,
   days (yesterday included); "This month so far" = Σ basis of the current month's days
   (today as of the last run); "Event bytes · 30 days" = Σ eventBytes over the last 30
   finished days (`null` if none measured).
+- **Yesterday card change**: yesterday against the N days before it (the row rule).
+- **Totals row** (Daily table): Σ over the days shown; a figure no shown day measured stays
+  `null`.
+- **Average per month** (Monthly graph's dashed line): mean of the month rows' basis over
+  the months shown, the current month left out.
 - **Top value** of a field on a day: the first `top` entry, with share = docs ÷ day docs.
 - **Month row**: month, daysWithData, partial (current month), Σ priBytes/totalBytes/docs/
   eventBytes/subBytes, avg per day (Σ basis ÷ daysWithData), peak day (max basis),
@@ -169,8 +174,8 @@ caller's cluster visibility. `volume` (desktop only, see above) is accepted on e
 |---|---|---|---|
 | `VOLUME_SETTINGS` | User | `{clusterId?}` | `{settings, managed:[names], source:"file"\|"message"\|"builtin", overrides:[clusterIds]}` |
 | `VOLUME_FIELDS_CHECK` | User | `{clusterId}` | `{indices:{match, skipped:[names]}, rows:[{key, tried:[..], resolved\|null, type\|null, note}]}` |
-| `VOLUME_DAILY` | User | `{clusterId, days?:14..400, avgDays?:3..180, source?}` | `{settings, status, cards, days:[DailyRow], sources:[names], skipped:[names]}` |
-| `VOLUME_MONTHLY` | User | `{clusterId, months?:1..36}` | `{status, months:[MonthRow]}` |
+| `VOLUME_DAILY` | User | `{clusterId, days?:14..400, avgDays?:3..180, source?}` | `{settings, status, cards, days:[DailyRow], totals, sources:[names], skipped:[names]}` |
+| `VOLUME_MONTHLY` | User | `{clusterId, months?:1..36}` | `{status, avgPerMonth, months:[MonthRow]}` |
 | `VOLUME_BREAKDOWN` | User | `{clusterId, field, from, to, top?}` | `{field, resolved, rows:[..], totals}` |
 | `VOLUME_MONTHLY_ALL` | User | `{months?}` | `{clusters:[{clusterId, name, months:[MonthRow]}]}` |
 | `VOLUME_RUN` | User | `{clusterIds?}` (absent = every cluster the caller sees) | `{started:[ids], already:[ids], tooSoon:[ids]}` |
