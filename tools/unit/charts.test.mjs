@@ -95,3 +95,63 @@ test('timeHistogram shows the caller\'s empty text, and the default without one'
   assert.equal(timeHistogram([], { emptyText: 'custom' }).textContent, 'custom');
   assert.equal(timeHistogram([]).textContent, 'No documents in this range');
 });
+
+// The volume line (Indices › Summary): what the picture claims about gaps, the average
+// and the peak. The figures are the core's; the chart must neither invent nor drop one.
+const { lineChart, signedPct } = await import(pathToFileURL(path.join(ROOT, 'ui/js/lib/charts.js')).href);
+const pt = (i, value, extra = {}) => ({ key: `d${i}`, label: `D${i}`, value, ...extra });
+const lines = (el) => [...el.querySelectorAll('path.lc-line')];
+
+test('lineChart draws one line through known points, with an area under it', () => {
+  const el = lineChart([pt(0, 10), pt(1, 20), pt(2, 15)]);
+  assert.equal(lines(el).length, 1);
+  assert.equal(el.querySelectorAll('path.lc-area').length, 1);
+  assert.equal((lines(el)[0].getAttribute('d').match(/[ML]/g) || []).length, 3);
+});
+
+test('a missing value is a gap, never a dip to zero', () => {
+  const el = lineChart([pt(0, 10), pt(1, 20), pt(2, null), pt(3, 30), pt(4, 25)]);
+  const ls = lines(el);
+  assert.equal(ls.length, 2, 'two runs either side of the gap');
+  assert.ok(ls.every((p) => (p.getAttribute('d').match(/M/g) || []).length === 1));
+  // A lone point between gaps still shows, as a dot.
+  const lone = lineChart([pt(0, null), pt(1, 5), pt(2, null)]);
+  assert.equal(lone.querySelectorAll('circle.lc-dot').length, 1);
+});
+
+test('the dashed average follows each point\'s own average, and only when there is one', () => {
+  const withAvg = lineChart([pt(0, 10, { avg: 12 }), pt(1, 20, { avg: 13 }), pt(2, 15, { avg: 14 })]);
+  assert.equal(withAvg.querySelectorAll('path.lc-avg').length, 1);
+  assert.equal(lineChart([pt(0, 10), pt(1, 20)]).querySelectorAll('path.lc-avg').length, 0);
+});
+
+test('the peak is named with its day, its size and its change against the average', () => {
+  const fmt = (v) => `${v} B`;
+  const el = lineChart([pt(0, 10, { changePct: 1 }), pt(1, 40, { changePct: 61.04 }), pt(2, 15)], { formatY: fmt });
+  const label = el.querySelector('text.lc-peak-label').textContent;
+  assert.equal(label, '▲ D1 · 40 B · +61.0 %');
+  // Without a change the label says only what is known.
+  const plain = lineChart([pt(0, 3), pt(1, 9)], { formatY: fmt }).querySelector('text.lc-peak-label').textContent;
+  assert.equal(plain, '▲ D1 · 9 B');
+});
+
+test('five dates along the bottom, the first and the last among them', () => {
+  const pts = Array.from({ length: 30 }, (_, i) => pt(i, i + 1));
+  const xs = [...lineChart(pts).querySelectorAll('g.lc-x text')].map((t) => t.textContent);
+  assert.equal(xs.length, 5);
+  assert.equal(xs[0], 'D0');
+  assert.equal(xs[4], 'D29');
+  assert.equal([...lineChart([pt(0, 1), pt(1, 2)]).querySelectorAll('g.lc-x text')].length, 2, 'no repeats when there are fewer points');
+});
+
+test('nothing known: the caller\'s empty text, not an empty frame', () => {
+  assert.equal(lineChart([pt(0, null), pt(1, null)], { emptyText: 'No finished day recorded yet' }).textContent, 'No finished day recorded yet');
+  assert.equal(lineChart([]).textContent, 'Nothing recorded yet');
+});
+
+test('signedPct always writes the sign, and an unknown as a dash', () => {
+  assert.equal(signedPct(12.345), '+12.3 %');
+  assert.equal(signedPct(-4), '-4.0 %');
+  assert.equal(signedPct(0), '+0.0 %');
+  assert.equal(signedPct(null), '–');
+});

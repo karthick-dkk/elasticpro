@@ -16,6 +16,7 @@ import { popover } from '../ui/menu.js';
 import { repoSizeCache } from '../lib/idb.js';
 import { takeFocus, revealFocus } from '../core/focus.js';
 import { volumeAnalysisCard, setVolumeAnalysisField } from '../ui/index-metrics.js';
+import { volumeMonthlyAll, monthlyAllCsvRows, monthsAcross, monthName, NEEDS_VERSION } from '../core/volume-daily.js';
 
 let host = null;
 const ui = { measuring: new Set(), view: 'summary', sort: 'name', dir: 1 };
@@ -146,21 +147,24 @@ function draw() {
     h('div.toolbar',
       h('span.muted', { style: { fontSize: '11.5px' } },
         `updated ${ago(state.lastRefresh)} · per-day volume from the dated indices, today excluded`),
-      // Three buttons rather than a dropdown: there are three views, one is always on, and
-      // which one is showing is then visible without opening anything.
+      // Buttons rather than a dropdown: one view is always on, and which one is showing is
+      // then visible without opening anything.
       h('div', { style: { display: 'flex', gap: '4px' } },
         viewBtn('summary', 'Summary', 'One line per cluster — the figures that get asked for'),
         viewBtn('sheet', 'Full report', `Every parameter — ${SHEET_COLUMNS.length} columns`),
-        viewBtn('client', 'Client plan', `The storage plan — ${CLIENT_COLUMNS.length} columns`)),
+        viewBtn('client', 'Client plan', `The storage plan — ${CLIENT_COLUMNS.length} columns`),
+        viewBtn('monthly', 'Monthly', 'One row per cluster, a column per month of primary size, from the daily record')),
       h('div', { style: { marginLeft: 'auto', display: 'flex', gap: '6px' } },
-        h('button.btn.sm', { onclick: () => refreshAll({ force: true, selected: true }) }, '↻ Refresh'),
+        h('button.btn.sm', { onclick: () => { if (ui.view === 'monthly') reaskMonthlyAll(); refreshAll({ force: true, selected: true }); } }, '↻ Refresh'),
         h('button.btn.sm.primary', {
-          title: ui.view === 'summary'
-            ? 'One row per cluster, every parameter as a column — the full report, not the summary above'
-            : `One row per cluster, the ${activeView().cols().length} columns of this view`,
-          onclick: () => exportWide(reports, activeView()),
+          title: ui.view === 'monthly'
+            ? 'One row per cluster, a column per month of primary bytes'
+            : ui.view === 'summary'
+              ? 'One row per cluster, every parameter as a column — the full report, not the summary above'
+              : `One row per cluster, the ${activeView().cols().length} columns of this view`,
+          onclick: () => (ui.view === 'monthly' ? exportMonthlyAll() : exportWide(reports, activeView())),
         }, 'Export CSV'),
-        h('button.btn.sm', {
+        ui.view === 'monthly' ? null : h('button.btn.sm', {
           title: 'One row per parameter, a column per cluster — the report as it reads on screen',
           onclick: () => exportTall(reports),
         }, 'Export as report layout'))),
@@ -169,8 +173,9 @@ function draw() {
       ? h('div', { dataset: { focus: 'field-volume' }, style: { marginBottom: '10px' } }, volumeAnalysisCard(list[0], draw))
       : null,
 
-    built.get('grid', [ui.view, ui.sort, ui.dir, allSig].join('|'),
-      () => (ui.view === 'summary' ? fleetTable(reports) : sheetView(reports, activeView()))),
+    built.get('grid', [ui.view, ui.sort, ui.dir, allSig, monthlyAll.rev].join('|'),
+      () => (ui.view === 'monthly' ? monthlyAllView()
+        : ui.view === 'summary' ? fleetTable(reports) : sheetView(reports, activeView()))),
 
     built.get('charts', allSig, () => h('div', 
       h('div.grid.c2', { style: { marginTop: '10px' } },
@@ -188,6 +193,68 @@ function draw() {
           () => clusterCardBody(r), { key: `vol-detail-${r.cluster.id}`, open: reports.length === 1 })))));
   built.end();
   if (focusField && !focusRevealed && revealFocus(host, '[data-focus="field-volume"]')) focusRevealed = true;
+}
+
+/* ------------------------------- monthly, all clusters ------------------------------- */
+
+/**
+ * One row per cluster, one column per month: the primary size each month held, from the
+ * daily record the core keeps (VOLUME_MONTHLY_ALL, docs/VOLUME.md). A month with no record
+ * is "—", never 0. The figures are the core's; this lays them out.
+ */
+const monthlyAll = { rev: 0, loading: false, reply: null, error: null, unsupported: false };
+const MONTHLY_ALL_MONTHS = 13;
+
+function reaskMonthlyAll() {
+  Object.assign(monthlyAll, { loading: false, reply: null, error: null, unsupported: false });
+  monthlyAll.rev++;
+}
+
+async function loadMonthlyAll() {
+  if (monthlyAll.loading || monthlyAll.reply || monthlyAll.error || monthlyAll.unsupported) return;
+  monthlyAll.loading = true;
+  const res = await volumeMonthlyAll({ months: MONTHLY_ALL_MONTHS });
+  monthlyAll.loading = false;
+  if (res.unsupported) monthlyAll.unsupported = true;
+  else if (!res.ok) monthlyAll.error = res.message || res.kind || 'no answer';
+  else monthlyAll.reply = res;
+  monthlyAll.rev++;
+  if (host && host.isConnected) draw();
+}
+
+function monthlyAllView() {
+  if (monthlyAll.unsupported) {
+    return card('Monthly volume by cluster', null, empty('This server does not keep a daily volume record yet.', {
+      detail: `Per month volume needs ElasticPro ${NEEDS_VERSION} or later on the server.` }));
+  }
+  if (monthlyAll.error) return card('Monthly volume by cluster', null, empty('The monthly record could not be read.', { detail: h('span.mono', monthlyAll.error) }));
+  if (!monthlyAll.reply) {
+    // Asked after this draw, not during it: the answer redraws the page.
+    setTimeout(loadMonthlyAll, 0);
+    return card('Monthly volume by cluster', null, h('div.tbl-empty', 'Reading the monthly record…'));
+  }
+  const clusters = monthlyAll.reply.clusters || [];
+  const months = monthsAcross(clusters);
+  const trs = clusters.map((c) => {
+    const by = new Map((c.months || []).map((m) => [m.month, m]));
+    return h('tr',
+      h('td', { style: { whiteSpace: 'nowrap' } }, h('b', c.name || c.clusterId)),
+      ...months.map((ym) => {
+        const m = by.get(ym);
+        const has = m && m.daysWithData > 0 && typeof m.priBytes === 'number';
+        return h('td.num', { title: has ? `${m.daysWithData} days with data${m.partial ? ', so far' : ''}` : 'no record' },
+          has ? bytes(m.priBytes) : h('span.muted', '—'));
+      }));
+  });
+  return card('Monthly volume by cluster', `primary size per month · ${plural(clusters.length, 'cluster')}`,
+    table(['Cluster', ...months.map((ym) => ({ label: monthName(ym), num: true }))], trs,
+      { emptyText: 'No cluster has a daily record yet' }));
+}
+
+function exportMonthlyAll() {
+  if (!monthlyAll.reply) return;
+  const { headers, rows } = monthlyAllCsvRows(monthlyAll.reply);
+  download(`volume-monthly-by-cluster-${new Date().toISOString().slice(0, 10)}.csv`, toCsv(rows, headers), 'text/csv');
 }
 
 /* ------------------------------- fleet overview ------------------------------- */
