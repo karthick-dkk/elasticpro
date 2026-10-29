@@ -18,17 +18,20 @@ import { showCredentialDialog, forgetVaultCredential } from '../ui/credential-di
 import { credentialsKeptOnServer, keptCredentials, keptLine } from '../core/server-credentials.js';
 import { EXAMPLE_YAML } from '../core/example.js';
 import { saveTextAs } from '../core/platform.js';
-import { editCluster, editJumpHost, editCredentials, editDefaults, unlockSealed, saveRaw, rawClusterOf } from '../ui/config-editor.js';
+import { editCluster, editJumpHost, editCredentials, editDefaults, unlockSealed, saveRaw, rawClusterOf, editsFileDirectly } from '../ui/config-editor.js';
 import { card, pill, table, empty } from './common.js';
 import { navigateTo, intent } from '../core/intent.js';
 import { ALERT_RULES, loadAlertSettings, isEnabled } from '../core/alert-rules.js';
-import { isManagedDefault, isManagedZabbixOption, managedZabbixOptions, MANAGED_NOTE } from '../core/managed.js';
+import { isManagedDefault, isManagedZabbixOption, managedZabbixOptions, managedDefaults, MANAGED_NOTE } from '../core/managed.js';
 import { toast } from '../ui/menu.js';
 import { bridge } from '../core/transport.js';
 import { isSnapshotMode } from '../core/snapshot.js';
 import { applyLoadedConfig } from '../ui/load-config.js';
 import { filePickerButton, canPickByPath, configHistory, readVersion } from '../ui/upload.js';
-import { confirmDialog, modal, field, text, checkbox, val, checked } from '../ui/modal.js';
+import { confirmDialog, modal, field, text, select, checkbox, val, checked } from '../ui/modal.js';
+import { VOLUME_KEYS, FIELD_ROWS, BOUNDS as VOLUME_BOUNDS, fileVolume, foldManaged, overrideIds, validateVolume, applyDefaults,
+  applyOverride, yamlBlock, configTxtLines, displayValue, checkCell, indicesCell, listText, toList, getPath, setPath } from '../core/volume-config.js';
+import { volumeSettings, volumeFieldsCheck } from '../core/volume-settings.js';
 import { rowMenu, ICON } from '../ui/menu.js';
 
 /** What each credential source the Zabbix sync reports is called (bridge.rs zabbix_sync). */
@@ -778,6 +781,7 @@ const SECTIONS = [
     when: () => !!(sink && sink.supported) },
   { id: 'requests', label: 'Requests',     icon: '⚡', build: requestsCard, load: loadPolicy },
   { id: 'defaults', label: 'Defaults',     icon: '⚙', build: defaultsCard },
+  { id: 'volume',   label: 'Volume fields', icon: '▤', build: volumeSection, load: loadVolume },
   { id: 'diag',     label: 'Diagnostics',  icon: '✚', build: diagnosticsCard, load: confirmCoreGuard },
 ];
 
@@ -1437,10 +1441,252 @@ function zabbixCard() {
     [h('button.btn.sm.primary', { onclick: syncZabbix, disabled: zbxBusy }, zbxBusy ? 'Syncing…' : '↻ Sync now')]);
 }
 
+/* ------------------------------- Volume fields ------------------------------- */
+
+/**
+ * Config > Volume fields: which index names count towards the daily volume record and which
+ * fields each breakdown tries (docs/VOLUME.md). The form reads and writes `defaults.volume`
+ * in the clusters file; "Override for one cluster" writes `defaults.volume.overrides[id]`,
+ * only the keys that differ. Rows config.txt manages are locked and never written.
+ */
+let vol = { mode: 'defaults', clusterId: '', reply: null, unknown: false, checked: null, note: null };
+
+const rawDefaultsNow = () => (state.config && state.config.raw && state.config.raw.defaults) || {};
+const volOverrideOf = (id) => {
+  const o = rawDefaultsNow().volume && rawDefaultsNow().volume.overrides;
+  return (o && id && o[id]) || {};
+};
+
+/** The effective defaults and which paths config.txt locks (the core's list adds to PING's). */
+function volModel() {
+  const folded = foldManaged(fileVolume(rawDefaultsNow()), managedDefaults());
+  const locked = new Set(folded.locked);
+  const names = new Set(((vol.reply && vol.reply.managed) || []).map(String));
+  VOLUME_KEYS.forEach((k) => { if (names.has(k.managed)) locked.add(k.path); });
+  return { values: folded.volume, locked };
+}
+
+async function loadVolume() {
+  const id = vol.mode === 'override' ? vol.clusterId : '';
+  const res = await volumeSettings(id, fileVolume(rawDefaultsNow()), volOverrideOf(id));
+  vol.unknown = !!res.unknown;
+  const changed = JSON.stringify((vol.reply || {}).managed) !== JSON.stringify(res.ok ? res.managed : undefined);
+  vol.reply = res.ok ? res : null;
+  // Redraw only when the answer changes what is shown, so a half-typed field is not wiped.
+  if (changed || vol.unknown) { if (host && host.isConnected && activeSection() && activeSection().id === 'volume') draw(); }
+}
+
+/** Every input of the form as a volume object; a blank one is left out (override: inherit). */
+function readVolumeForm() {
+  const g = (id) => { const el = $(`#${id}`); return el ? el.value.trim() : ''; };
+  const out = {};
+  const put = (path, v) => { if (v !== '' && !(Array.isArray(v) && !v.length)) setPath(out, path, v); };
+  const n = (id) => (g(id) === '' ? '' : Number(g(id)));
+  put('indexFormat', g('vf-index'));
+  FIELD_ROWS.forEach((r) => put(r.key, toList(g(`vf-${r.key}`))));
+  put('extra.name', g('vf-extra-name'));
+  put('extra.fields', toList(g('vf-extra')));
+  put('sizeBasis', g('vf-basis'));
+  put('topValues', n('vf-top'));
+  put('keepMonths', n('vf-keep'));
+  put('collectAt', g('vf-at'));
+  return out;
+}
+
+/** Put values into the form (Reset). Locked inputs stay as config.txt has them. */
+function fillVolumeForm(v) {
+  const set = (id, x) => { const el = $(`#${id}`); if (el && !el.disabled) el.value = x == null ? '' : String(x); };
+  set('vf-index', v.indexFormat);
+  FIELD_ROWS.forEach((r) => set(`vf-${r.key}`, listText(v[r.key])));
+  set('vf-extra-name', v.extra && v.extra.name);
+  set('vf-extra', listText(v.extra && v.extra.fields));
+  set('vf-basis', v.sizeBasis);
+  set('vf-top', v.topValues);
+  set('vf-keep', v.keepMonths);
+  set('vf-at', v.collectAt);
+}
+
+/** Defaults: the built-in values. An override: everything blank, which is "inherit". */
+function resetVolume() {
+  fillVolumeForm(vol.mode === 'override' ? {} : VOLUME_DEFAULTS);
+}
+
+async function saveVolume() {
+  if (!editsFileDirectly()) { toast('Only an ElasticPro admin changes these settings', 'warn', 6000); return; }
+  const override = vol.mode === 'override';
+  if (override && !vol.clusterId) { toast('Pick the cluster to override first', 'warn'); return; }
+  const m = volModel();
+  const values = readVolumeForm();
+  const problems = validateVolume(values, { partial: override });
+  // A locked row is not the form's to judge: config.txt's value is what is in force.
+  const mine = problems.filter((p) => ![...m.locked].some((path) => p.startsWith(LOCKED_LABEL[path] || '\u0000')));
+  if (mine.length) { vol.note = { text: mine.join(' '), cls: 'banner err' }; toast(mine[0], 'err', 6000); draw(); return; }
+  const r = state.config && state.config.raw;
+  if (!r) { toast('No config is loaded', 'warn'); return; }
+  const before = r.defaults;
+  r.defaults = override
+    ? applyOverride(before, vol.clusterId, values, m.values, m.locked)
+    : applyDefaults(before, values, m.locked);
+  try {
+    await saveRaw({ silent: true });
+    vol.note = { text: 'Saved.', cls: 'banner' };
+    toast(override ? 'Volume fields saved for this cluster' : 'Volume fields saved', 'ok', 4000);
+  } catch (e) {
+    r.defaults = before;
+    vol.note = { text: `Not saved: ${e.message}`, cls: 'banner err' };
+    toast(`Not saved: ${e.message}`, 'err', 8000);
+  }
+  draw();
+}
+
+/** The label each validation message starts with, so a locked row's complaint can be set aside. */
+const LOCKED_LABEL = {
+  indexFormat: 'Index name', tag: 'Tag', forwarder: 'Forwarder tag', sourceHost: 'Source host', sourceIp: 'Source IP',
+  eventSize: 'Event size', subSize: 'Sub size', 'extra.name': 'Extra field', 'extra.fields': 'Extra field',
+  sizeBasis: 'Size that counts', topValues: 'Top values', keepMonths: 'Keep the daily', collectAt: 'Collect once',
+};
+
+/** Fill one cell of the check column in place, so what was typed is not redrawn away. */
+function showCheck(id, cell) {
+  const el = $(`#${id}`);
+  if (!el) return;
+  el.textContent = cell.ok == null ? '' : `${cell.ok ? '✓' : '✗'} ${cell.text}`;
+  el.className = `vf-check ${cell.ok == null ? '' : cell.ok ? 'vf-ok' : 'vf-bad'}`;
+}
+
+async function checkVolume(btn) {
+  const sel = $('#vf-check-cluster');
+  const id = sel ? sel.value : '';
+  if (!id) { toast('Pick a cluster to check against', 'warn'); return; }
+  const say = (t) => { const el = $('#vf-note'); if (el) el.textContent = t; };
+  btn.disabled = true;
+  const was = btn.textContent;
+  btn.textContent = 'Working…';
+  let res;
+  try { res = await volumeFieldsCheck(id, fileVolume(rawDefaultsNow()), volOverrideOf(id)); } finally { btn.disabled = false; btn.textContent = was; }
+  if (res.unknown) { vol.unknown = true; say(res.message); return; }
+  if (!res.ok) { say(`Check failed: ${res.message || 'refused'}`); return; }
+  say('');
+  const rows = Array.isArray(res.rows) ? res.rows : [];
+  const cl = clusters().find((c) => c.id === id);
+  const head = $('#vf-check-head');
+  if (head) head.textContent = `On ${cl ? cl.name : id}`;
+  showCheck('vf-c-index', indicesCell(res.indices));
+  [...FIELD_ROWS.map((r) => r.key), 'extra'].forEach((k) => showCheck(`vf-c-${k}`, checkCell(k, rows.find((x) => x.key === k))));
+  vol.checked = id;
+}
+
+function volumeCard() {
+  const m = volModel();
+  const override = vol.mode === 'override';
+  const list = clusters();
+  if (override && !vol.clusterId && list.length) vol.clusterId = list[0].id;
+  const ov = override ? volOverrideOf(vol.clusterId) : {};
+  const canWrite = editsFileDirectly();
+
+  /** The value an input starts with: an override's own (blank = inherit), else the defaults. */
+  const start = (path) => {
+    if (!override) return getPath(m.values, path);
+    const x = getPath(ov, path);
+    return x === undefined ? '' : x;
+  };
+  const shown = (path) => (override ? getPath(m.values, path) : '');
+  const lock = (path, input) => {
+    if (!m.locked.has(path)) return input;
+    input.disabled = true;
+    input.title = MANAGED_NOTE;
+    return input;
+  };
+  const note = (path) => (m.locked.has(path) ? h('div.muted', { style: { fontSize: '10.5px' } }, MANAGED_NOTE) : null);
+  const listInput = (id, path) => lock(path, text(id, listText(start(path)), { mono: true, placeholder: listText(shown(path)) }));
+
+  const mode = (id, label) => h('button.seg-btn', {
+    'aria-pressed': String(vol.mode === id),
+    onclick: () => { vol.mode = id; vol.note = null; draw(); loadVolume(); },
+  }, label);
+
+  const bar = h('div.vf-bar',
+    h('div.seg-group', { role: 'group', 'aria-label': 'Which settings' },
+      mode('defaults', 'Defaults · all clusters'), mode('override', 'Override for one cluster…')),
+    override ? h('select#vf-cluster', {
+      'aria-label': 'Cluster to override',
+      onchange: (e) => { vol.clusterId = e.target.value; vol.note = null; draw(); loadVolume(); },
+    }, ...list.map((c) => h('option', { value: c.id, selected: c.id === vol.clusterId }, c.name))) : null,
+    h('span.muted', { style: { fontSize: '12px' } }, `${overrideIds(rawDefaultsNow()).length} of ${list.length} clusters override these fields`),
+    h('span.vf-bar-right',
+      h('span.muted', { style: { fontSize: '12px' } }, 'Check against'),
+      h('select#vf-check-cluster', { 'aria-label': 'Cluster to check against' },
+        ...list.map((c) => h('option', { value: c.id, selected: c.id === (vol.checked || (override ? vol.clusterId : state.selected)) }, c.name))),
+      h('button#vf-check.btn.sm', { onclick: (e) => checkVolume(e.currentTarget), disabled: !list.length }, 'Check fields')));
+
+  const row = (settingCell, inputs, ecs, checkId) => h('tr',
+    h('td', settingCell), h('td', inputs),
+    h('td.muted.mono', { style: { fontSize: '11.5px' } }, ecs),
+    h('td', h('span.vf-check', { id: checkId })));
+  const label = (name, use) => [h('div', { style: { fontWeight: '600' } }, name), h('div.muted', { style: { fontSize: '11px' } }, use)];
+
+  const rows = [
+    row(label('Index name', 'which indices count'),
+      [lock('indexFormat', text('vf-index', start('indexFormat'), { mono: true, placeholder: shown('indexFormat') })), note('indexFormat')],
+      '— (index name)', 'vf-c-index'),
+    ...FIELD_ROWS.map((r) => row(label(r.label, r.use), [listInput(`vf-${r.key}`, r.key), note(r.key)], r.ecs, `vf-c-${r.key}`)),
+    row([h('div', { style: { fontWeight: '600' } }, 'Extra field'),
+      lock('extra.name', text('vf-extra-name', start('extra.name'), { placeholder: override ? m.values.extra.name : 'Name', style: { width: '130px' } })),
+      note('extra.name')],
+    [listInput('vf-extra', 'extra.fields'), note('extra.fields')], 'event.dataset', 'vf-c-extra'),
+  ];
+
+  const fieldsTable = h('div.tbl-wrap', h('table.tbl.vf-table',
+    h('thead', h('tr', h('th', 'Setting'), h('th', 'Fields tried, in order'), h('th', 'ECS field'), h('th#vf-check-head', 'On cluster'))),
+    h('tbody', ...rows)));
+
+  const withInherit = (opts) => (override ? [['', 'Same as defaults'], ...opts] : opts);
+  const num = (id, path, lo, hi) => lock(path, h('input.mono', { id, type: 'number', min: lo, max: hi, step: 1, value: String(start(path)), placeholder: String(shown(path)) }));
+  const cell = (lab, input, path, hint) => h('div', field(lab, input, hint), path ? note(path) : null);
+  const fixed = (id, textOf) => { const s = select(id, 'name', [['name', textOf]]); s.disabled = true; return s; };
+  const grid = h('div.vf-grid',
+    cell('Day of an index', fixed('vf-day', 'Date in the index name (YYYY.MM.DD)')),
+    cell('Size that counts as volume', lock('sizeBasis', select('vf-basis', String(start('sizeBasis')), withInherit([
+      ['primary', 'Primary (pri.store.size)'], ['total', 'Total, with replicas (store.size)'], ['eventSize', 'Event size field (sum of event_logsize)']]))), 'sizeBasis'),
+    cell('Day boundary', fixed('vf-boundary', 'As written in the index name')),
+    cell('Top values kept per field', num('vf-top', 'topValues', VOLUME_BOUNDS.topValues[0], VOLUME_BOUNDS.topValues[1]), 'topValues'),
+    cell('Keep the daily record for (months)', num('vf-keep', 'keepMonths', VOLUME_BOUNDS.keepMonths[0], VOLUME_BOUNDS.keepMonths[1]), 'keepMonths'),
+    cell('Collect once a day at (server time)', lock('collectAt', h('input.mono', { id: 'vf-at', type: 'time', value: String(start('collectAt')) })), 'collectAt',
+      'Every 24 h. "Refresh now" on Indices › Summary runs it at once.'));
+
+  const name = (list.find((c) => c.id === vol.clusterId) || {}).name || 'a cluster';
+  return card('Volume fields',
+    override ? `override for ${name}: only what differs is saved` : 'used by every cluster that has no override',
+    h('div', { style: { display: 'grid', gap: '10px' } },
+      vol.unknown ? h('div.banner.warn', { style: { margin: 0, fontSize: '12px' } }, 'This server does not know Volume fields yet (needs 0.3.45)') : null,
+      canWrite ? null : h('div.banner.warn', { style: { margin: 0, fontSize: '12px' } },
+        'Only an ElasticPro admin changes these settings, or whoever edits config.txt on the server.'),
+      bar,
+      h('div.muted', { style: { fontSize: '11.5px' } },
+        'Each row tries its fields left to right; the first one in the mapping wins · text fields use .keyword automatically.'),
+      h('div#vf-note.muted', { style: { fontSize: '12px' } }),
+      fieldsTable, grid,
+      vol.note ? h('div', { class: vol.note.cls, style: { margin: 0, fontSize: '12px' } }, vol.note.text) : null),
+    [h('button#vf-reset.btn.sm', { onclick: resetVolume }, 'Reset to defaults'),
+      h('button#vf-save.btn.sm.primary', { onclick: saveVolume, disabled: !canWrite, title: canWrite ? '' : 'Only an admin can write the config file' }, 'Save')]);
+}
+
+function volumeSection() {
+  const v = volModel().values;
+  return h('div', { style: { display: 'grid', gap: '12px' } },
+    volumeCard(),
+    h('div.vf-info',
+      card('Same settings in the clusters file', 'what Save writes', h('pre.vf-pre', yamlBlock(v))),
+      card('Hosted: config.txt keys', 'one line per setting',
+        h('div', { style: { display: 'grid', gap: '6px' } }, h('pre.vf-pre', configTxtLines(v)),
+          h('div.muted', { style: { fontSize: '11.5px' } },
+            `A key set in config.txt locks its row: it shows "${MANAGED_NOTE}" here and is never written to the file.`)))));
+}
+
 function defaultsCard() {
   const d = state.defaults;
   return card('Effective defaults', 'from the defaults block, with built-in fallbacks',
-    table([], Object.entries(d).map(([k, v]) => kvRow(k, String(v)))),
+    table([], Object.entries(d).map(([k, v]) => kvRow(k, displayValue(v)))),
     [h('button.btn.sm', { onclick: async () => { if (await editDefaults()) draw(); } }, 'Edit defaults…')]);
 }
 

@@ -2479,6 +2479,124 @@ restoreConsole();
   await go('overview');
 }
 
+// Config > Volume fields (0.3.45): the section opens and says so when the core is older, the
+// fields can be edited and Save writes defaults.volume (and an override for one cluster, only
+// what differs), and Check fields sends VOLUME_FIELDS_CHECK and fills the check column. The
+// core's VOLUME_* messages are stubbed (the dev bridge may be older); the write is stubbed so
+// the fixture is not rewritten.
+{
+  await go('settings');
+  const realFetch = globalThis.fetch;
+  let written = null;
+  const sent = [];
+  let older = true;
+  globalThis.fetch = async (input, init) => {
+    const body = init && init.body ? JSON.parse(init.body) : {};
+    if (String(body.type || '').startsWith('VOLUME_')) {
+      sent.push(body);
+      if (older) return stubReply({ ok: false, kind: 'bad_message', message: `Unknown message type "${body.type}"` });
+      if (body.type === 'VOLUME_SETTINGS') return stubReply({ ok: true, settings: {}, managed: [], source: 'file', overrides: [] });
+      return stubReply({ ok: true, indices: { match: 150, skipped: ['metrics-2026.09', '.kibana_1'] }, rows: [
+        { key: 'tag', tried: ['tag1'], resolved: 'tag1', type: 'keyword', note: '' },
+        { key: 'eventSize', tried: ['event_logsize'], resolved: null, type: null, note: '' },
+      ] });
+    }
+    if (body.type === 'CONFIG_WRITE') { written = body.text; return stubReply({ ok: true, path: body.path, bytes: body.text.length }); }
+    if (body.type === 'CONFIG_READ' && written !== null) return stubReply({ ok: true, text: written, size: written.length, lastModified: Date.now() });
+    return realFetch(input, init);
+  };
+  const press = async (label, root = doc.querySelector('#view')) => {
+    const b = [...root.querySelectorAll('button')].find((x) => x.textContent.trim() === label);
+    if (b) { b.click(); await settleFor(700); }
+    return !!b;
+  };
+  // The write follows the press by a PING and a round trip; wait for it rather than guess.
+  const written_ = async () => { for (let i = 0; i < 20 && written === null; i++) await settleFor(250); };
+  const type = async (id, value) => {
+    const el = doc.getElementById(id);
+    if (el) { el.value = value; el.dispatchEvent(new window.Event('input', { bubbles: true })); }
+    return !!el;
+  };
+  try {
+    ok(await openSettingsTab('Volume fields'), 'volume fields: no Volume fields tab');
+    await settleFor(500);
+    const view = doc.querySelector('#view');
+    ok(!!panel('Volume fields') && !!panel('Same settings in the clusters file') && !!panel('Hosted: config.txt keys'),
+      'volume fields: the settings card and the two info cards did not all draw');
+    ok(view.textContent.includes('This server does not know Volume fields yet (needs 0.3.45)'),
+      'volume fields: an older core was not told apart from a broken page');
+    ok(!view.textContent.includes('[object Object]'), 'volume fields: the page prints [object Object]');
+    ok(['vf-index', 'vf-tag', 'vf-forwarder', 'vf-sourceHost', 'vf-sourceIp', 'vf-eventSize', 'vf-subSize', 'vf-extra', 'vf-extra-name',
+      'vf-basis', 'vf-top', 'vf-keep', 'vf-at'].every((id) => doc.getElementById(id)), 'volume fields: a field of the form is missing');
+    ok(doc.getElementById('vf-tag').value === 'tag1, labels.tag1, tags', `volume fields: Tag shows "${doc.getElementById('vf-tag').value}", expected the built-in list`);
+    ok(doc.getElementById('vf-day').disabled && doc.getElementById('vf-boundary').disabled, 'volume fields: Day of an index and Day boundary must be fixed');
+    ok(/\d+ of \d+ clusters override these fields/.test(view.textContent), 'volume fields: the override count is missing');
+
+    // Check fields: asks the core, and the answer lands in the check column.
+    older = false;
+    const cluster = doc.getElementById('vf-check-cluster');
+    ok(!!cluster && cluster.options.length > 0, 'volume fields: no cluster to check against');
+    sent.length = 0;
+    ok(await press('Check fields'), 'volume fields: no Check fields button');
+    const chk = sent.find((m) => m.type === 'VOLUME_FIELDS_CHECK');
+    ok(!!chk && chk.clusterId === cluster.value, `volume fields: Check fields sent ${JSON.stringify(sent)}`);
+    ok(doc.getElementById('vf-c-index').textContent.includes('150 match') && doc.getElementById('vf-c-index').textContent.includes('2 skipped'),
+      `volume fields: the index check reads "${doc.getElementById('vf-c-index').textContent}"`);
+    ok(doc.getElementById('vf-c-tag').textContent.includes('✓'), 'volume fields: a resolved row has no tick');
+    ok(doc.getElementById('vf-c-eventSize').textContent.includes('not measured'), 'volume fields: a missing Event size does not say what it costs');
+
+    // Save: edits a field, writes defaults.volume, leaves the rest of defaults alone.
+    ok(await type('vf-tag', 'tag1, my.tag'), 'volume fields: no Tag input');
+    written = null;
+    ok(await press('Save'), 'volume fields: no Save button');
+    await written_();
+    const file = written ? JSON.parse(written) : null;
+    ok(!!file && Array.isArray(file.defaults.volume && file.defaults.volume.tag) && file.defaults.volume.tag.join() === 'tag1,my.tag',
+      `volume fields: Save did not write defaults.volume.tag (${written && JSON.stringify(file.defaults)})`);
+    ok(!!file && file.defaults.volumeFields === undefined, 'volume fields: the legacy volumeFields was kept');
+    ok((doc.location.hash || '') === '#/settings', 'volume fields: saving left the Config page');
+
+    // A bad value is refused before anything is written.
+    await openSettingsTab('Volume fields');
+    await type('vf-index', 'logstash-*');
+    written = null;
+    await press('Save');
+    ok(written === null, 'volume fields: an index format without YYYY.MM.DD was written');
+    ok(doc.querySelector('#view').textContent.includes('YYYY.MM.DD'), 'volume fields: no reason given for the refused index format');
+
+    // Override for one cluster: only the key that differs is saved, under overrides[<id>].
+    await openSettingsTab('Volume fields');
+    ok(await press('Override for one cluster…'), 'volume fields: no override mode');
+    const pick = doc.getElementById('vf-cluster');
+    ok(!!pick, 'volume fields: override mode has no cluster picker');
+    await type('vf-forwarder', 'fwdtag');
+    written = null;
+    await press('Save');
+    await written_();
+    const f2 = written ? JSON.parse(written) : null;
+    const ov = f2 && f2.defaults.volume && f2.defaults.volume.overrides && f2.defaults.volume.overrides[pick.value];
+    ok(!!ov && JSON.stringify(ov) === JSON.stringify({ forwarder: ['fwdtag'] }), `volume fields: the override saved ${JSON.stringify(ov)}`);
+
+    // A key config.txt manages is locked, says why, and is never written.
+    const managed = await load('core/managed.js');
+    managed.setManaged({ ok: true, managedDefaults: { volumeTopValues: 40 }, managedZabbixOptions: {} });
+    await openSettingsTab('Defaults'); await openSettingsTab('Volume fields');
+    await press('Defaults · all clusters');
+    const top = doc.getElementById('vf-top');
+    ok(!!top && top.disabled && top.value === '40', `volume fields: a managed value is not shown locked (${top && top.disabled}, ${top && top.value})`);
+    ok(doc.querySelector('#view').textContent.includes('managed by config.txt'), 'volume fields: a locked row does not say it is managed by config.txt');
+    written = null;
+    await press('Save');
+    await written_();
+    ok(written !== null && !/"topValues"\s*:\s*40/.test(written), 'volume fields: saving wrote a managed value into the file');
+    managed.setManaged({ ok: true, managedDefaults: {}, managedZabbixOptions: {} });
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+  await applyConfig({ load, configPath });
+  await go('overview');
+}
+
 // Quiet UI: fleet data landing while somebody reads the Clusters page does not repaint it,
 // and nothing on the bar says it was held (no "N updates — Apply" pill). It is drawn by itself
 // once the page has gone 3 s untouched; Refresh draws it at once. A live page — the Request
@@ -3561,6 +3679,6 @@ if (problems.length) {
   for (const p of problems) console.error('  ✗ ' + p);
   process.exit(1);
 }
-console.log('ok: strip, console, shards, the Clusters page (columns, name menu, unreachable rows, expand chevron, alerts link), volume, hand-off, refresh, snapshots, tasks, toasts, accounts split and pinned Zabbix roles, the log-delay preflight, a quiet Config page, the Request Centre and the redraw gate, the request policy, the coverage bar, the Tasks panel and the console tabs, template management, the Alerts page grouped by cluster with merged repeats, Go to, playbooks and the bell');
+console.log('ok: strip, console, shards, the Clusters page (columns, name menu, unreachable rows, expand chevron, alerts link), volume, hand-off, refresh, snapshots, tasks, toasts, accounts split and pinned Zabbix roles, the log-delay preflight, a quiet Config page, Config › Volume fields, the Request Centre and the redraw gate, the request policy, the coverage bar, the Tasks panel and the console tabs, template management, the Alerts page grouped by cluster with merged repeats, Go to, playbooks and the bell');
 // The pages leave auto-refresh timers and a live tail running; nothing here waits on them.
 process.exit(0);

@@ -10,6 +10,7 @@
 import { pickConfigPath, readConfigText, savedConfigPath, rememberConfigPath } from './platform.js';
 import { bridge } from './transport.js';
 import { managedDefaults } from './managed.js';
+import { VOLUME_DEFAULTS, cloneVolume, effectiveVolume } from './volume-config.js';
 
 export const CONFIG_FILE_TYPES = [
   { description: 'YAML config', accept: { 'application/yaml': ['.yaml', '.yml'], 'text/yaml': ['.yaml', '.yml'] } },
@@ -74,6 +75,11 @@ export const DEFAULTS = {
   // only candidates: the aggregation runs on demand, one field at a time, and a name
   // this cluster does not have reports that rather than costing anything.
   volumeFields: ['tag1', 'fwd_tag', 'fwdtag', 'src_hostname'],
+  // The daily volume record's settings (0.3.45, docs/VOLUME.md): which index names count,
+  // which fields each breakdown tries, what the graph plots, when the day is collected.
+  // Nested, so normalize() folds it key by key; a shallow spread would let one managed key
+  // or one stated key replace the whole object. The legacy volumeFields above is still read.
+  volume: cloneVolume(VOLUME_DEFAULTS),
   // Offered in the Live logs field picker. Searching one named field is the common case —
   // "which host", "which tag" — and spelling it as Lucene every time is a way to mistype
   // a field name and get zero hits that look like zero data.
@@ -138,6 +144,8 @@ export function normalize(raw, sourceName = 'clusters.yaml') {
   // config.txt last: a cluster that states nothing of its own gets the managed default, and
   // `tls: insecure` below is the managed one when it is.
   const defaults = { ...DEFAULTS, ...(raw.defaults || {}), ...managedDefaults() };
+  // `volume` is nested: file (or the converted legacy list), then config.txt per sub-key.
+  defaults.volume = effectiveVolume(raw.defaults, managedDefaults());
   // Config → Defaults → Certificates = insecure: accept any certificate on every cluster.
   const acceptAll = String(defaults.tls || '').trim().toLowerCase() === 'insecure';
   const globalCred = raw.credentials || raw.credential || null;
