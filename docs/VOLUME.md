@@ -54,14 +54,31 @@ defaults:
   day-index glob wins. A `text` field uses `<name>.keyword` when that is a keyword.
   Sum fields must be numeric.
 - A cluster entry may also carry `volume: {…}` in `clusters[]`; it counts like an override.
-- **Legacy** `volumeFields` (defaults or cluster): read only when no `volume` is set.
+  Entries in the file have no `id`: the core finds a cluster's entry by the id the UI primes
+  it under (`core/config.js`; in the core `cluster_save::config_ids`): `_id` when set, else
+  the slug of `name` (of the URL's host when there is no name), and an id already taken gets
+  `-<position>` appended (`_index`, else the entry's index) until it is free. The keys of
+  `overrides` are those ids too.
+- **Legacy** `volumeFields` (defaults or cluster): read only when no `volume` is set (for a
+  cluster: neither `clusters[].volume` nor an `overrides` entry).
   `tag1`→tag, `fwd_tag`/`fwdtag`→forwarder, `src_hostname`→sourceHost, `src_ip`→sourceIp,
-  the rest→extra fields. The editor writes `volume` on its first save.
+  the rest→extra fields. The editor writes `volume` on its first save. One conversion
+  (`settings::level_layer`) for the file and the desktop message.
 - **Precedence**: built-in < `defaults.volume` < cluster override < config.txt. A config.txt
   key locks its row everywhere ("managed by config.txt").
-- **Where the core reads them**: hosted, its own config file (ELASTICPRO_CONFIG). Without a
-  config file (desktop), from the `volume` object the UI sends with each `VOLUME_*` message
-  (`{defaults: <defaults.volume>, cluster: <that cluster's override>}`).
+- **Where the core reads them**: hosted, its own config file (ELASTICPRO_CONFIG); the message
+  payload is ignored. Built-in settings only when the core has **no config file at all**. A
+  config file that is there but cannot be read or parsed is not replaced by built-in
+  settings: nothing is collected (the timer marks nothing and retries next tick, each
+  cluster's `lastError` reads "the config file could not be read: …", `VOLUME_RUN` and
+  `VOLUME_FIELDS_CHECK` answer `kind: "config_unreadable"`, report jobs fail with that
+  error); the record is still shown, the replies carrying `configError`.
+- **Desktop** (no config file): from the `volume` object the UI sends with each message:
+  `{defaults: <defaults.volume>, cluster: <this cluster's override>, clusters: {<id>: <override>}}`.
+  A cluster's override is `clusters[id]`; else, in a message about that one cluster
+  (`clusterId`, or `clusterIds` naming only it), `cluster`; else `defaults.overrides[id]`.
+  `VOLUME_RUN`, `VOLUME_MONTHLY_ALL` and `REPORT_RUN` over several clusters therefore apply
+  each cluster's own override. A level may also be sent as legacy `volumeFields`.
 
 ### config.txt keys (hosted)
 
@@ -89,7 +106,12 @@ defaults:
   (`VOLUME_RUN`) runs it at once for whoever asks, at most once per 60 s per cluster. On
   desktop there is no timer: opening Indices › Summary asks for a run when the last one
   is older than today's `collectAt`.
-- **Respects** the emergency stop (skipped, retried next tick) and unreachable clusters.
+- **Respects** the emergency stop and unreachable clusters. Stopped at the tick: nothing is
+  started or marked. A scheduled run the stop ends later — while it waits for a permit
+  (checked after the permit is acquired), before `_cat`, or with days left — gives its day
+  back (`lastScheduledDay` is restored), so the first tick after the stop runs that cluster
+  again; a scheduled run that completed, or failed for any other reason, counts as today's.
+  The day is marked before the run so a crash is not repeated by every restart.
   At most 2 clusters at once, one request at a time per cluster, 60 s per request,
   `gate::Class::Background`, origin `volume-daily` in the request log. Searches only:
   works under read-only.
@@ -119,7 +141,22 @@ defaults:
      ```
      `ev`/`sub` aggs are left out when that field is not resolved (the figure is `null`).
      Terms aggs are left out for unresolved rows (the row carries `error`).
-  4. Prune month files older than `keepMonths`.
+  4. Prune month files older than `keepMonths` — only after a run that finished without an
+     error or a stop, under settings the record may be pruned by: the config file's, a
+     desktop message's, or built-in on a hosted core with no config file. A desktop request
+     that carried no settings never prunes.
+- **A past day that stays `final: false`** is asked again on every later run while it is
+  live with an open index, and its `error` says why it is not final:
+  - the search failed → "the search failed: …; asked again on the next run";
+  - the answer had failed shards or timed out → figures kept, "N of M shards failed (…):
+    figures may be short; asked again on the next run" (such an answer is never final);
+  - `_field_caps` failed → "not aggregated: _field_caps: …; asked again on the next run";
+  - all its indices are closed → not searched, "not aggregated: N of its indices are closed;
+    asked again on a later run while they are open";
+  - its indices went before it was final → `live: false` for good, "its indices went before
+    the day was aggregated as final: the figures are the last ones measured" (or "only the
+    sizes were measured").
+  A later whole answer makes the day final and clears `error`.
 
 ### Store
 
@@ -149,7 +186,10 @@ Day = { day, final, live, aggregatedAt|null, totalsAt,
 - **Cards**: yesterday's basis; "Average per day · N days" = mean of the last N finished
   days (yesterday included); "This month so far" = Σ basis of the current month's days
   (today as of the last run); "Event bytes · 30 days" = Σ eventBytes over the last 30
-  finished days (`null` if none measured).
+  finished days (`null` if none measured). The cards do not depend on the table's window:
+  the record is read from `derive::cards_from(today, N)` (the earliest of the N days before
+  yesterday, the first of the month, 30 days back) whatever `days` is; rows, totals and
+  `sources` stay limited to the window.
 - **Yesterday card change**: yesterday against the N days before it (the row rule).
 - **Totals row** (Daily table): Σ over the days shown; a figure no shown day measured stays
   `null`.
@@ -157,8 +197,11 @@ Day = { day, final, live, aggregatedAt|null, totalsAt,
   the months shown, the current month left out.
 - **Top value** of a field on a day: the first `top` entry, with share = docs ÷ day docs.
 - **Month row**: month, daysWithData, partial (current month), Σ priBytes/totalBytes/docs/
-  eventBytes/subBytes, avg per day (Σ basis ÷ daysWithData), peak day (max basis),
-  liveDays/keptDays, top value per field over the month (by summed docs).
+  eventBytes/subBytes, `basis`, `basisBytes` (Σ basis), `avgPerDay` (Σ basis ÷ daysWithData;
+  eventSize: ÷ days with event bytes measured), `peakDay` `{day, bytes}` (max basis), and
+  beside them on primary size whatever the basis: `avgPriPerDay` (Σ priBytes ÷ daysWithData)
+  and `peakPrimary` `{day, bytes}`; liveDays/keptDays, top value per field over the month
+  (by summed docs).
 - **Breakdown** (field, from, to, top): per value Σ docs, Σ eventBytes (measured),
   Σ estimated primary (rule above), share % of the estimated total, days seen. Rows
   "(not set)" (missing) and "all others" (other) are listed and counted.
@@ -168,14 +211,17 @@ Day = { day, final, live, aggregatedAt|null, totalsAt,
 ## Messages
 
 All return `{ok, …}`; failures carry `kind` and `message`. Cluster-scoped ones obey the
-caller's cluster visibility. `volume` (desktop only, see above) is accepted on each.
+caller's cluster visibility. `volume` (desktop only, see above) is accepted on each. When the
+config file cannot be read, the read-only replies (`VOLUME_SETTINGS`, `VOLUME_DAILY`,
+`VOLUME_MONTHLY`, `VOLUME_MONTHLY_ALL`, `VOLUME_BREAKDOWN`) carry `configError`, and
+`VOLUME_RUN` / `VOLUME_FIELDS_CHECK` fail with `kind: "config_unreadable"`.
 
 | Type | Role | Request | Reply |
 |---|---|---|---|
 | `VOLUME_SETTINGS` | User | `{clusterId?}` | `{settings, managed:[names], source:"file"\|"message"\|"builtin", overrides:[clusterIds]}` |
 | `VOLUME_FIELDS_CHECK` | User | `{clusterId}` | `{indices:{match, skipped:[names]}, rows:[{key, tried:[..], resolved\|null, type\|null, note}]}` |
 | `VOLUME_DAILY` | User | `{clusterId, days?:14..400, avgDays?:3..180, source?}` | `{settings, status, cards, days:[DailyRow], totals, sources:[names], skipped:[names]}` |
-| `VOLUME_MONTHLY` | User | `{clusterId, months?:1..36}` | `{status, avgPerMonth, months:[MonthRow]}` |
+| `VOLUME_MONTHLY` | User | `{clusterId, months?:1..36}` | `{settings, status, avgPerMonth, months:[MonthRow]}` |
 | `VOLUME_BREAKDOWN` | User | `{clusterId, field, from, to, top?}` | `{field, resolved, rows:[..], totals}` |
 | `VOLUME_MONTHLY_ALL` | User | `{months?}` | `{clusters:[{clusterId, name, months:[MonthRow]}]}` |
 | `VOLUME_RUN` | User | `{clusterIds?}` (absent = every cluster the caller sees) | `{started:[ids], already:[ids], tooSoon:[ids]}` |
@@ -195,6 +241,10 @@ avgPerDay, peakDay, docs, eventBytes, subBytes, topSourceHost, topForwarder, fro
 
 - daily: `cluster, day, indices, docs, primary_bytes, total_bytes, event_bytes, event_bytes_measured, sub_bytes, change_vs_avg_pct, avg_days`
 - monthly: `cluster, month, days_with_data, primary_bytes, avg_primary_bytes_per_day, peak_day, peak_primary_bytes, docs, event_bytes, from_kept_record_days`
+  — the primary columns are the month row's `priBytes`, `avgPriPerDay` and `peakPrimary`,
+  never the basis figures (`avgPerDay`, `peakDay`), whatever `sizeBasis` is. In the .xlsx
+  Monthly sheet the Average per day / Peak day columns follow the basis, as on the page, and
+  their headers name it when it is not primary size ("Average per day · event bytes").
 - breakdown: `cluster, field, field_resolved, value, period_from, period_to, docs, event_bytes, primary_bytes_estimated, share_pct, days_seen`
 
 ## Reports and mail
@@ -214,7 +264,10 @@ avgPerDay, peakDay, docs, eventBytes, subBytes, topSourceHost, topForwarder, fro
   **emergency stop fails a job** that would have to collect (`error` says so; run it again
   when the stop is over) rather than holding a slot for an end nobody announced; a period
   whose days are all final is built without asking the cluster. An unreachable cluster is
-  not asked: the file holds what the record has and the job carries `warning`.
+  not asked: the file holds what the record has and the job carries `warning`. A config
+  file that cannot be read **fails the job** ("the config file could not be read: …"):
+  it is neither collected nor built under built-in settings. On desktop each job applies its
+  cluster's override from the message's `volume.clusters[id]`.
 - A job's mail goes to the mailed report's `to/cc/bcc` (below), which only an admin sets:
   `REPORT_RUN` takes no addresses, so a user cannot send cluster figures anywhere else.
 - At most `concurrency` jobs run at once (3..5, default 3, admin `REPORT_CONCURRENCY_SET {n}`);

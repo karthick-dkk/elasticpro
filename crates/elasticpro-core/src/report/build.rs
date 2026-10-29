@@ -170,6 +170,12 @@ fn daily_sheet(data: &ClusterData, p: &Period, layouts: &Value) -> Vec<Vec<Cell>
 
 fn monthly_sheet(data: &ClusterData, p: &Period, layouts: &Value, today: NaiveDate) -> Vec<Vec<Cell>> {
     let cols = columns(layouts, "monthly", &data.settings.extra.name);
+    // Average and peak follow the basis, as on the page; off primary size the header says
+    // which figure they are, so they are not read as primary size beside its column.
+    let on = match data.settings.size_basis {
+        SizeBasis::Primary => String::new(),
+        b => format!(" · {}", basis_name(b)),
+    };
     let mut head = vec![];
     for (k, label) in &cols {
         match k.as_str() {
@@ -178,10 +184,11 @@ fn monthly_sheet(data: &ClusterData, p: &Period, layouts: &Value, today: NaiveDa
                 head.push(Cell::head(format!("{label} GB")));
             }
             "peakDay" => {
-                head.push(Cell::head(label.clone()));
-                head.push(Cell::head(format!("{label} (bytes)")));
+                head.push(Cell::head(format!("{label}{on}")));
+                head.push(Cell::head(format!("{label}{on} (bytes)")));
             }
-            "avgPerDay" | "eventBytes" | "subBytes" => head.push(Cell::head(format!("{label} (bytes)"))),
+            "avgPerDay" => head.push(Cell::head(format!("{label}{on} (bytes)"))),
+            "eventBytes" | "subBytes" => head.push(Cell::head(format!("{label} (bytes)"))),
             _ => head.push(Cell::head(label.clone())),
         }
     }
@@ -319,7 +326,8 @@ pub const BREAKDOWN_CSV: &[&str] = &["cluster", "field", "field_resolved", "valu
     "event_bytes", "primary_bytes_estimated", "share_pct", "days_seen"];
 
 /// `daily.csv`, `monthly.csv`, `breakdown.csv` (docs/VOLUME.md "CSV columns"). The monthly
-/// file is on the primary basis whatever `sizeBasis` says: its columns are named for it.
+/// file's columns are named for primary size, so they carry the month row's primary
+/// figures (`avgPriPerDay`, `peakPrimary`) whatever `sizeBasis` says.
 pub fn csv_files(data: &ClusterData, p: &Period, today: NaiveDate) -> Vec<Entry> {
     let head = |cols: &[&str]| csv_line(&cols.iter().map(|c| c.to_string()).collect::<Vec<_>>());
     let mut daily = vec![head(DAILY_CSV)];
@@ -331,10 +339,10 @@ pub fn csv_files(data: &ClusterData, p: &Period, today: NaiveDate) -> Vec<Entry>
         ]));
     }
     let mut monthly = vec![head(MONTHLY_CSV)];
-    for r in data.month_rows(p, SizeBasis::Primary, today) {
+    for r in data.month_rows(p, data.settings.size_basis, today) {
         monthly.push(csv_line(&[
             data.id.clone(), csv_num(&r["month"]), csv_num(&r["daysWithData"]), csv_num(&r["priBytes"]),
-            csv_num(&r["avgPerDay"]), csv_num(&r["peakDay"]["day"]), csv_num(&r["peakDay"]["bytes"]), csv_num(&r["docs"]),
+            csv_num(&r["avgPriPerDay"]), csv_num(&r["peakPrimary"]["day"]), csv_num(&r["peakPrimary"]["bytes"]), csv_num(&r["docs"]),
             csv_num(&r["eventBytes"]), csv_num(&r["keptDays"]),
         ]));
     }
@@ -382,20 +390,23 @@ pub fn human_bytes(n: Option<u64>) -> String {
     format!("{v:.d$} {}", UNITS[i])
 }
 
-/// The mail body's lines for one cluster: yesterday, average per day (7), month so far —
-/// `derive::cards`, as the Daily page shows them. `today` is today's UTC date.
-pub fn mail_summary(store: &Store, id: &str, name: &str, s: &VolumeSettings, today: NaiveDate) -> String {
-    let month_start = NaiveDate::parse_from_str(&format!("{}-01", month_key(today)), "%Y-%m-%d").unwrap_or(today);
-    let from = month_start.min(today - Duration::days(derive::AVG_DAYS_DEFAULT as i64));
-    let days = store.days_between(id, from, today);
-    let history = derive::history(&days, None);
-    let today_at = days.iter().find(|d| d.day == day_key(today)).map(|d| d.totals_at);
-    let c = derive::cards(&history, today, derive::AVG_DAYS_DEFAULT, s.size_basis, today_at);
-    let basis = match s.size_basis {
+/// A basis as the file and the mail name it.
+fn basis_name(b: SizeBasis) -> &'static str {
+    match b {
         SizeBasis::Primary => "primary size",
         SizeBasis::Total => "total size",
         SizeBasis::EventSize => "event bytes",
-    };
+    }
+}
+
+/// The mail body's lines for one cluster: yesterday, average per day (7), month so far —
+/// `derive::cards`, as the Daily page shows them. `today` is today's UTC date.
+pub fn mail_summary(store: &Store, id: &str, name: &str, s: &VolumeSettings, today: NaiveDate) -> String {
+    let days = store.days_between(id, derive::cards_from(today, derive::AVG_DAYS_DEFAULT), today);
+    let history = derive::history(&days, None);
+    let today_at = days.iter().find(|d| d.day == day_key(today)).map(|d| d.totals_at);
+    let c = derive::cards(&history, today, derive::AVG_DAYS_DEFAULT, s.size_basis, today_at);
+    let basis = basis_name(s.size_basis);
     let b = |v: &Value| human_bytes(v.as_u64());
     format!(
         "{name} ({basis})\n  Yesterday ({}): {}\n  Average per day · {} days: {} ({} days with data)\n  This month so far ({}): {}\n",
@@ -519,6 +530,25 @@ mod tests {
         let b = text(2);
         assert_eq!(b.lines().next().unwrap(), BREAKDOWN_CSV.join(","));
         assert!(b.contains("'=cmd|' /C calc'!A0"), "a value that looks like a formula is defused: {b}");
+    }
+
+    /// Off primary size, the columns named for primary size still carry primary figures,
+    /// and the basis-following ones say which figure they are.
+    #[test]
+    fn primary_columns_carry_primary_under_another_basis() {
+        let mut d = data();
+        d.settings.size_basis = SizeBasis::EventSize;
+        let today = parse_day("2026-10-29").unwrap();
+        let files = csv_files(&d, &period(), today);
+        let monthly = String::from_utf8(files[1].data.clone()).unwrap();
+        assert_eq!(monthly.lines().nth(1).unwrap(), "prod/eu,2026-10,3,1073742124,357914041,2026-10-20,1073741824,30,5,0",
+                   "avg and peak primary, not the event-bytes basis (5 per day, peak the 18th)");
+        let sheets = sheets(&d, &period(), &layouts(), today, &["monthly".into()], false);
+        let head: Vec<String> = sheets[0].rows[0].iter().map(text).collect();
+        assert!(head.contains(&"Average per day · event bytes (bytes)".to_string()), "{head:?}");
+        assert!(head.contains(&"Peak day · event bytes (bytes)".to_string()), "{head:?}");
+        let avg = head.iter().position(|h| h.starts_with("Average per day")).unwrap();
+        assert_eq!(sheets[0].rows[1][avg], Cell::Int(5.0), "the basis figure, under a header that names it");
     }
 
     #[test]

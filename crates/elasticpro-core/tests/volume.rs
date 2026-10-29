@@ -19,7 +19,7 @@ use elasticpro_core::auth::Edition;
 use elasticpro_core::Core;
 use serde_json::{json, Value};
 use std::sync::{Arc, Mutex};
-use support::{TempDir, TestServer};
+use support::{GaugedServer, TempDir, TestServer};
 
 type Listing = Arc<Mutex<Vec<(String, u64)>>>;
 
@@ -351,4 +351,114 @@ async fn on_hosted_every_message_needs_a_caller_with_the_right_role() {
     assert_eq!(msg_settings["ok"], true, "{msg_settings}");
     assert_eq!(msg_settings["source"], "builtin", "a request cannot set what hosted counts");
     assert_eq!(msg_settings["settings"]["topValues"], 25);
+}
+
+async fn stop(c: &Arc<Core>, on: bool) {
+    let paused = if on { json!({ "all": true, "minutes": 30 }) } else { json!({ "all": false }) };
+    let r = c.handle(json!({ "type": "POLICY_SET", "policy": { "paused": paused } })).await;
+    assert_eq!(r["ok"], true, "{r}");
+}
+
+async fn wait_for<F: Fn() -> bool>(what: &str, f: F) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !f() {
+        assert!(std::time::Instant::now() < deadline, "timed out waiting for {what}");
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+}
+
+/// A scheduled run that the emergency stop ends — here while it waited for one of the two
+/// permits — is run again on the first tick after the stop is lifted. One that finished is
+/// not: still once a day.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_scheduled_run_the_stop_ended_is_run_after_the_stop() {
+    let t = today();
+    // Four clusters, each its own server; `_cat` answers slowly and lists nothing, so a run
+    // that gets to send it finishes without any further request.
+    let mut servers = vec![];
+    for _ in 0..4 {
+        servers.push(GaugedServer::start(|hit| {
+            if hit.path.starts_with("/_cat/indices/") { (200, "[]".into(), 600) } else { (404, "{}".into(), 0) }
+        }).await);
+    }
+    let cats = |s: &GaugedServer| s.hits().iter().filter(|h| h.path.starts_with("/_cat/indices/")).count();
+    let dir = TempDir::new("volume-stop-queue");
+    let c = Core::new_with_rounds(Some(dir.0.clone()), Edition::Portable, 1);
+    let ids = ["c0", "c1", "c2", "c3"];
+    let clusters: Vec<Value> = ids.iter().zip(&servers).map(|(id, s)| json!({ "id": id, "url": s.url() })).collect();
+    let r = c.handle(json!({ "type": "PRIME", "readOnly": true, "clusters": clusters })).await;
+    assert_eq!(r["ok"], true, "{r}");
+
+    assert_eq!(c.volume_tick_at(local(t, "06:00")).await.len(), 4, "all four due");
+    // Two hold the permits and have sent `_cat`; the other two wait. Then the stop.
+    wait_for("two runs to reach their cluster", || servers.iter().filter(|s| cats(s) > 0).count() == 2).await;
+    stop(&c, true).await;
+    for id in ids {
+        settle(&c, id).await;
+    }
+    let ran: Vec<&str> = ids.iter().zip(&servers).filter(|(_, s)| cats(s) == 1).map(|(id, _)| *id).collect();
+    let waited: Vec<&str> = ids.iter().zip(&servers).filter(|(_, s)| cats(s) == 0).map(|(id, _)| *id).collect();
+    assert_eq!((ran.len(), waited.len()), (2, 2), "nothing was sent for the two that waited");
+    for id in &waited {
+        let d = c.handle(json!({ "type": "VOLUME_DAILY", "clusterId": id })).await;
+        let e = d["status"]["lastError"].as_str().unwrap_or("");
+        assert!(e.contains("emergency stop") && e.contains("tried again"), "{id}: {d}");
+    }
+    assert!(c.volume_tick_at(local(t, "06:01")).await.is_empty(), "nothing while the stop holds");
+
+    stop(&c, false).await;
+    let mut again = c.volume_tick_at(local(t, "06:02")).await;
+    again.sort();
+    assert_eq!(again, waited, "the two the stop held back, and not the two that finished");
+    for id in ids {
+        settle(&c, id).await;
+    }
+    assert!(servers.iter().all(|s| cats(s) == 1), "each cluster asked once today");
+    assert!(c.volume_tick_at(local(t, "09:00")).await.is_empty(), "and still once a day");
+}
+
+/// Desktop messages about several clusters apply each one's override from
+/// `volume.clusters[id]`; VOLUME_MONTHLY says which settings its rows are under.
+#[tokio::test]
+async fn desktop_messages_about_several_clusters_use_each_ones_override() {
+    let t = today();
+    let la: Listing = Arc::new(Mutex::new(vec![(format!("logstash-linux-{}", dot(t - Duration::days(1))), 10)]));
+    let lb: Listing = Arc::new(Mutex::new(vec![(format!("logstash-linux-{}", dot(t - Duration::days(1))), 10)]));
+    let (sa, sb) = (cluster(la, false).await, cluster(lb, false).await);
+    let dir = TempDir::new("volume-desktop-many");
+    let c = Core::new_with_rounds(Some(dir.0.clone()), Edition::Portable, 1);
+    let r = c.handle(json!({ "type": "PRIME", "readOnly": true,
+                             "clusters": [{ "id": "a", "url": sa.url() }, { "id": "b", "url": sb.url() }] })).await;
+    assert_eq!(r["ok"], true, "{r}");
+    let volume = json!({ "defaults": { "topValues": 30 }, "cluster": { "topValues": 99 },
+                         "clusters": { "a": { "topValues": 50, "sizeBasis": "total" }, "b": { "volumeFields": ["kind_x"] } } });
+    let run = c.handle(json!({ "type": "VOLUME_RUN", "volume": volume })).await;
+    assert_eq!(run["started"], json!(["a", "b"]), "{run}");
+    settle(&c, "a").await;
+    settle(&c, "b").await;
+    let size = |s: &TestServer| -> Value {
+        let h = s.hits().into_iter().find(|h| h.path.contains("/_search")).expect("a search");
+        serde_json::from_str::<Value>(&h.body).unwrap()["aggs"]["f_tag"]["terms"]["size"].clone()
+    };
+    assert_eq!(size(&sa), 50, "a's override from clusters.a, not the message's `cluster`");
+    assert_eq!(size(&sb), 30, "b has no topValues of its own: the defaults'");
+    let fc = sb.hits().into_iter().find(|h| h.path.contains("/_field_caps")).unwrap();
+    assert!(fc.path.contains("kind_x"), "b's legacy volumeFields became its extra row: {}", fc.path);
+    let fa = sa.hits().into_iter().find(|h| h.path.contains("/_field_caps")).unwrap();
+    assert!(!fa.path.contains("kind_x"), "and not a's: {}", fa.path);
+
+    let all = c.handle(json!({ "type": "VOLUME_MONTHLY_ALL", "volume": volume })).await;
+    let basis: Vec<(String, String)> = all["clusters"].as_array().unwrap().iter()
+        .map(|x| (x["clusterId"].as_str().unwrap().to_string(), x["basis"].as_str().unwrap().to_string())).collect();
+    assert_eq!(basis, vec![("a".to_string(), "total".to_string()), ("b".to_string(), "primary".to_string())], "{all}");
+
+    let m = c.handle(json!({ "type": "VOLUME_MONTHLY", "clusterId": "a", "volume": volume })).await;
+    assert_eq!(m["settings"]["sizeBasis"], "total", "VOLUME_MONTHLY carries the settings its rows are under: {m}");
+    assert_eq!(m["settings"]["topValues"], 50, "clusters.a is a's override, not the unkeyed `cluster`");
+    assert_eq!(m["months"][0]["basis"], "total");
+    let mb = c.handle(json!({ "type": "VOLUME_MONTHLY", "clusterId": "b", "volume": volume })).await;
+    assert_eq!(mb["settings"]["extra"]["fields"], json!(["kind_x"]), "{mb}");
+    let own = c.handle(json!({ "type": "VOLUME_MONTHLY", "clusterId": "b",
+                               "volume": { "defaults": { "topValues": 30 }, "cluster": { "topValues": 99 } } })).await;
+    assert_eq!(own["settings"]["topValues"], 99, "about one cluster with nothing keyed: `cluster` is its override");
 }

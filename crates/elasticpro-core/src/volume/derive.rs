@@ -125,6 +125,14 @@ pub fn daily_row(d: &Day, t: &Totals, history: &BTreeMap<NaiveDate, Totals>, avg
     })
 }
 
+/// The first day `cards` reads: the average's N days before yesterday, the first of the
+/// month, the 30 days of event bytes — whichever reaches furthest. Whoever builds the
+/// history the cards get loads at least from here, whatever its own window is.
+pub fn cards_from(today: NaiveDate, avg_days: u32) -> NaiveDate {
+    let month_start = NaiveDate::parse_from_str(&format!("{}-01", month_key(today)), "%Y-%m-%d").unwrap_or(today);
+    (today - Duration::days(avg_days as i64 + 1)).min(month_start).min(today - Duration::days(30))
+}
+
 /// The four cards. `today` is today's UTC date; "finished" days are the ones before it.
 ///
 /// * yesterday's basis;
@@ -262,7 +270,8 @@ pub fn month_row(s: &MonthSummary, b: SizeBasis, current_month: &str) -> Value {
         SizeBasis::Total => (Some(s.total_bytes), s.days_with_data, &s.peak_total),
         SizeBasis::EventSize => (s.event_bytes, s.event_days, &s.peak_event_size),
     };
-    let avg = sum.filter(|_| divisor > 0).map(|x| (x as f64 / divisor as f64).round() as u64);
+    let mean = |sum: Option<u64>, divisor: u64| sum.filter(|_| divisor > 0).map(|x| (x as f64 / divisor as f64).round() as u64);
+    let avg = mean(sum, divisor);
     let mut top = Map::new();
     for key in FIELD_KEYS {
         let t = s.top.get(key).cloned().flatten();
@@ -279,6 +288,8 @@ pub fn month_row(s: &MonthSummary, b: SizeBasis, current_month: &str) -> Value {
         "priBytes": s.pri_bytes, "totalBytes": s.total_bytes, "docs": s.docs,
         "eventBytes": s.event_bytes, "subBytes": s.sub_bytes,
         "basis": b, "basisBytes": sum, "avgPerDay": avg, "peakDay": peak,
+        // On primary size whatever the basis: what a column named for primary size shows.
+        "avgPriPerDay": mean(Some(s.pri_bytes), s.days_with_data), "peakPrimary": s.peak_primary,
         "liveDays": s.live_days, "keptDays": s.kept_days, "top": top,
     })
 }
@@ -416,6 +427,9 @@ mod tests {
         assert_eq!(c["monthSoFar"], json!({ "month": "2026-10", "value": 1700, "asOf": 123 }), "today included");
         assert_eq!(c["eventBytes30"]["value"], 46, "29 Sep .. 28 Oct, measured only; today excluded");
         assert_eq!(c["eventBytes30"]["daysMeasured"], 3);
+        assert_eq!(cards_from(d("2026-10-29"), 3), d("2026-09-29"), "30 days back reaches furthest");
+        assert_eq!(cards_from(d("2026-10-29"), 60), d("2026-08-29"), "the average before yesterday");
+        assert_eq!(cards_from(d("2026-10-31"), 3), d("2026-10-01"), "the first of the month");
         let none = super::cards(&hist(&[("2026-10-28", 1, None)]), d("2026-10-29"), 7, SizeBasis::EventSize, None);
         assert_eq!(none["eventBytes30"]["value"], Value::Null, "nothing measured is null, not 0");
         assert_eq!(none["yesterday"]["value"], Value::Null);
@@ -486,9 +500,15 @@ mod tests {
         assert_eq!(r["partial"], true);
         assert_eq!(r["peakDay"], json!({ "day": "2026-10-02", "bytes": 300 }));
         assert_eq!(r["top"]["tag"]["share"], 0.5);
+        assert_eq!((r["avgPriPerDay"].clone(), r["peakPrimary"].clone()), (json!(200), json!({ "day": "2026-10-02", "bytes": 300 })));
         let r = month_row(&s, SizeBasis::EventSize, "2026-11");
         assert_eq!(r["avgPerDay"], 40, "event bytes over the two days they were measured");
         assert_eq!(r["partial"], false);
+        assert_eq!(r["avgPriPerDay"], 200, "primary beside the basis, whatever the basis");
+        assert_eq!(r["peakPrimary"], json!({ "day": "2026-10-02", "bytes": 300 }));
+        assert_eq!(r["peakDay"]["bytes"], 60, "the basis peak is event bytes: day 2's 30 docs × 2");
+        let t = month_row(&s, SizeBasis::Total, "2026-11");
+        assert_eq!((t["avgPerDay"].as_u64(), t["avgPriPerDay"].as_u64()), (Some(400), Some(200)));
     }
 
     #[test]

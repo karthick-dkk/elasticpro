@@ -8,7 +8,8 @@
 //!
 //! A cluster override is `defaults.volume.overrides[<id>]` or `clusters[].volume` — the
 //! contract counts both as one; `clusters[].volume` goes first and the overrides map on
-//! top, because the map is what the editor writes. config.txt locks its rows everywhere,
+//! top, because the map is what the editor writes. A `clusters[]` entry has no `id`; it is
+//! found by the id the UI primes it under (`cluster_save::config_ids`). config.txt locks its rows everywhere,
 //! which is why `managed` lists them by the names PING's `managedDefaults` uses.
 //!
 //! The legacy `volumeFields` list (one flat list of field names, defaults or cluster) is
@@ -282,41 +283,71 @@ impl Source {
 #[derive(Clone, Debug, Default)]
 pub struct Layers {
     pub defaults: Value,
-    /// `clusters[].volume` (or the message's `cluster`), then the overrides map entry.
+    /// `clusters[].volume` (or the message's cluster override), then the overrides map entry.
     pub cluster: Vec<Value>,
 }
 
-/// The layers from a clusters file, for one cluster or none.
+/// A level's legacy flat list, whichever spelling it uses.
+fn legacy_of(level: &Value) -> Option<&Value> {
+    level.get("volumeFields").or_else(|| level.get("volume_fields"))
+}
+
+/// **One level** — the defaults, or one cluster — as the layer it means: its `volume`
+/// object when it has one, else its legacy `volumeFields` list converted (`legacy_layer`).
+/// The one conversion, for the clusters file and the desktop message alike.
+pub fn level_layer(volume: Option<&Value>, legacy: Option<&Value>) -> Option<Value> {
+    match volume.filter(|v| v.is_object()) {
+        Some(v) => Some(v.clone()),
+        None => legacy.and_then(legacy_layer),
+    }
+}
+
+/// The layers from a clusters file, for one cluster or none. A cluster's entry is found by
+/// the id the UI gives it (`cluster_save::config_ids`): file entries carry no `id`.
 pub fn layers_from_config(raw: &Value, cluster_id: Option<&str>) -> Layers {
     let d = raw.get("defaults").cloned().unwrap_or(Value::Null);
-    let defaults = match d.get("volume") {
-        Some(v) if v.is_object() => v.clone(),
-        _ => d.get("volumeFields").or_else(|| d.get("volume_fields")).and_then(legacy_layer).unwrap_or(Value::Null),
-    };
+    let defaults = level_layer(d.get("volume"), legacy_of(&d)).unwrap_or(Value::Null);
     let mut cluster = vec![];
     if let Some(id) = cluster_id {
-        let entry = raw.get("clusters").and_then(Value::as_array)
-            .and_then(|cs| cs.iter().find(|c| c.get("id").and_then(Value::as_str) == Some(id)));
-        let own = entry.and_then(|c| c.get("volume")).filter(|v| v.is_object()).cloned();
+        let list = crate::cluster_save::config_entries(raw);
+        let entry = crate::cluster_save::config_ids(list).iter().position(|x| x == id).and_then(|i| list.get(i));
         let over = defaults.get("overrides").and_then(|o| o.get(id)).filter(|v| v.is_object()).cloned();
-        if own.is_none() && over.is_none() {
-            if let Some(l) = entry.and_then(|c| c.get("volumeFields").or_else(|| c.get("volume_fields"))).and_then(legacy_layer) {
-                cluster.push(l);
-            }
-        }
+        // The legacy list counts only where the cluster has no `volume` of either kind.
+        let own = entry.and_then(|c| level_layer(c.get("volume"), if over.is_some() { None } else { legacy_of(c) }));
         cluster.extend(own);
         cluster.extend(over);
     }
     Layers { defaults, cluster }
 }
 
-/// The layers from a message's `volume: {defaults, cluster}` (desktop: no config file).
-/// Without `cluster`, the defaults' own overrides map is consulted, as in a file.
-pub fn layers_from_message(v: &Value, cluster_id: Option<&str>) -> Layers {
-    let defaults = v.get("defaults").filter(|d| d.is_object()).cloned().unwrap_or(Value::Null);
+/// One level of a desktop message as its layer. The UI sends `defaults.volume` and the
+/// overrides as saved (volume objects); a level sent whole (`{volume, volumeFields}`) or a
+/// legacy list alone (`{volumeFields}`) is read as the file's would be: `level_layer`.
+fn message_level(m: &Value) -> Option<Value> {
+    let o = m.as_object()?;
+    if o.get("volume").is_some_and(Value::is_object) {
+        return level_layer(o.get("volume"), legacy_of(m));
+    }
+    let settings = o.keys().any(|k| !matches!(k.as_str(), "volumeFields" | "volume_fields" | "overrides"));
+    let mut layer = level_layer(settings.then_some(m), legacy_of(m)).unwrap_or_else(|| json!({}));
+    if let (Some(over), Some(l)) = (o.get("overrides"), layer.as_object_mut()) {
+        l.entry("overrides").or_insert_with(|| over.clone());
+    }
+    Some(layer)
+}
+
+/// The layers from a message's `volume: {defaults, cluster, clusters}` (desktop: no config
+/// file). A cluster's override is `clusters[id]` when the message has one for it — what
+/// `VOLUME_RUN`, `VOLUME_MONTHLY_ALL` and a report over several clusters carry — else, when
+/// the message is about this one cluster (`own`: its `clusterId`), `cluster`. Neither: the
+/// defaults' own overrides map, as in a file. `cluster` never applies to another cluster.
+pub fn layers_from_message(v: &Value, cluster_id: Option<&str>, own: bool) -> Layers {
+    let defaults = v.get("defaults").and_then(message_level).unwrap_or(Value::Null);
     let mut cluster = vec![];
-    match v.get("cluster").filter(|c| c.is_object()) {
-        Some(c) => cluster.push(c.clone()),
+    let explicit = v.get("cluster").filter(|c| own && c.is_object());
+    let mapped = || cluster_id.and_then(|id| v.get("clusters").and_then(|m| m.get(id))).filter(|c| c.is_object());
+    match mapped().or(explicit) {
+        Some(c) => cluster.extend(message_level(c)),
         None => {
             if let Some(o) = cluster_id.and_then(|id| defaults.get("overrides").and_then(|o| o.get(id))).filter(|o| o.is_object()) {
                 cluster.push(o.clone());
@@ -326,15 +357,26 @@ pub fn layers_from_message(v: &Value, cluster_id: Option<&str>) -> Layers {
     Layers { defaults, cluster }
 }
 
-/// Every cluster id a clusters file gives its own volume settings.
+/// Every cluster id a desktop message gives its own volume settings.
+pub fn message_override_ids(v: &Value) -> Vec<String> {
+    let defaults = v.get("defaults").and_then(message_level).unwrap_or(Value::Null);
+    let mut ids: Vec<String> = defaults.get("overrides").and_then(Value::as_object).map(|o| o.keys().cloned().collect()).unwrap_or_default();
+    ids.extend(v.get("clusters").and_then(Value::as_object).into_iter().flatten()
+        .filter(|(_, c)| c.as_object().is_some_and(|o| !o.is_empty())).map(|(k, _)| k.clone()));
+    ids.sort();
+    ids.dedup();
+    ids
+}
+
+/// Every cluster id a clusters file gives its own volume settings: the overrides map, and
+/// each entry with a `volume` or a legacy `volumeFields`, by the id the UI gives it.
 pub fn override_ids(raw: &Value) -> Vec<String> {
     let mut ids: Vec<String> = raw.pointer("/defaults/volume/overrides").and_then(Value::as_object)
         .map(|o| o.keys().cloned().collect()).unwrap_or_default();
-    for c in raw.get("clusters").and_then(Value::as_array).into_iter().flatten() {
-        if c.get("volume").is_some_and(Value::is_object) {
-            if let Some(id) = c.get("id").and_then(Value::as_str) {
-                ids.push(id.to_string());
-            }
+    let list = crate::cluster_save::config_entries(raw);
+    for (c, id) in list.iter().zip(crate::cluster_save::config_ids(list)) {
+        if level_layer(c.get("volume"), legacy_of(c)).is_some() {
+            ids.push(id);
         }
     }
     ids.sort();
@@ -377,7 +419,7 @@ mod tests {
                 "forwarder": ["fwd_a"], "topValues": 40, "sizeBasis": "total", "collectAt": "05:30",
                 "overrides": { "prod-eu": { "forwarder": ["fwdtag"], "keepMonths": 6 } },
             } },
-            "clusters": [ { "id": "prod-eu", "volume": { "forwarder": ["from_cluster"], "topValues": 50 } } ],
+            "clusters": [ { "name": "Prod EU", "url": "https://es-eu:9200", "volume": { "forwarder": ["from_cluster"], "topValues": 50 } } ],
         });
         let none = Settings::default();
         let (d, m) = resolve(&layers_from_config(&raw, None), &none);
@@ -420,8 +462,8 @@ mod tests {
         let raw = json!({
             "defaults": { "volumeFields": ["tag1", "fwd_tag", "fwdtag", "src_hostname", "app_name"] },
             "clusters": [
-                { "id": "old", "volumeFields": "src_ip, kind" },
-                { "id": "new", "volumeFields": ["tag1"], "volume": { "tag": ["labels.tag1"] } },
+                { "name": "old", "url": "https://old:9200", "volumeFields": "src_ip, kind" },
+                { "name": "new", "url": "https://new:9200", "volumeFields": ["tag1"], "volume": { "tag": ["labels.tag1"] } },
             ],
         });
         let none = Settings::default();
@@ -446,13 +488,71 @@ mod tests {
     #[test]
     fn the_message_carries_defaults_and_one_override() {
         let msg = json!({ "defaults": { "topValues": 30, "overrides": { "a": { "topValues": 60 } } }, "cluster": { "keepMonths": 3 } });
-        let (s, _) = resolve(&layers_from_message(&msg, Some("a")), &Settings::default());
+        let (s, _) = resolve(&layers_from_message(&msg, Some("a"), true), &Settings::default());
         assert_eq!((s.top_values, s.keep_months), (30, 3), "an explicit cluster layer replaces the map lookup");
         let msg = json!({ "defaults": { "topValues": 30, "overrides": { "a": { "topValues": 60 } } } });
-        let (s, _) = resolve(&layers_from_message(&msg, Some("a")), &Settings::default());
+        let (s, _) = resolve(&layers_from_message(&msg, Some("a"), true), &Settings::default());
         assert_eq!(s.top_values, 60);
         assert_eq!(override_ids(&json!({ "defaults": { "volume": { "overrides": { "b": {}, "a": {} } } },
-                                         "clusters": [{ "id": "c", "volume": {} }, { "id": "d" }] })), vec!["a", "b", "c"]);
+                                         "clusters": [{ "name": "c", "url": "https://c", "volume": {} },
+                                                      { "name": "d", "url": "https://d" },
+                                                      { "name": "E e", "url": "https://e", "volumeFields": ["x"] }] })),
+                   vec!["a", "b", "c", "e-e"], "a legacy list is a cluster's own settings too");
+    }
+
+    /// A hand-written hosted entry has no `id`: it is found by the id the UI primes it under.
+    #[test]
+    fn a_clusters_file_entry_is_found_by_the_ui_id() {
+        let raw = json!({
+            "defaults": { "volume": { "topValues": 40 } },
+            "clusters": [
+                { "name": "Prod EU", "url": "https://es-eu:9200", "volume": { "forwarder": ["fwdtag"] } },
+                { "name": "prod eu", "url": "https://es-eu2:9200", "volume": { "forwarder": ["second"] } },
+                { "url": "https://legacy.example:9200", "volumeFields": ["tag1", "kind"] },
+            ],
+        });
+        let none = Settings::default();
+        let (eu, _) = resolve(&layers_from_config(&raw, Some("prod-eu")), &none);
+        assert_eq!(eu.forwarder, vec!["fwdtag"]);
+        assert_eq!(eu.top_values, 40, "defaults still under it");
+        let (eu2, _) = resolve(&layers_from_config(&raw, Some("prod-eu-1")), &none);
+        assert_eq!(eu2.forwarder, vec!["second"], "a colliding name gets the UI's position suffix");
+        let (legacy, _) = resolve(&layers_from_config(&raw, Some("legacy-example-9200")), &none);
+        assert_eq!((legacy.tag.clone(), legacy.extra.fields.clone()), (vec!["tag1".to_string()], vec!["kind".to_string()]),
+                   "per-cluster volumeFields, found by the URL host's slug");
+        assert_eq!(override_ids(&raw), vec!["legacy-example-9200", "prod-eu", "prod-eu-1"]);
+        let (other, _) = resolve(&layers_from_config(&raw, Some("nope")), &none);
+        assert_eq!(other.forwarder, VolumeSettings::default().forwarder);
+    }
+
+    /// Desktop messages about several clusters carry each one's override in `clusters`, and
+    /// a legacy list in the message is converted as the file's is.
+    #[test]
+    fn a_message_about_several_clusters_uses_each_ones_override() {
+        let msg = json!({
+            "defaults": { "topValues": 30, "overrides": { "c": { "topValues": 70 } } },
+            "cluster": { "topValues": 99 },
+            "clusters": { "a": { "topValues": 50 }, "b": { "volumeFields": ["fwdtag", "kind"] } },
+        });
+        let s = |id: &str, own: bool| resolve(&layers_from_message(&msg, Some(id), own), &Settings::default()).0;
+        assert_eq!(s("a", false).top_values, 50, "clusters[id]");
+        assert_eq!(s("a", true).top_values, 50, "keyed by id beats the unkeyed `cluster`");
+        assert_eq!(s("d", true).top_values, 99, "a message about this cluster, nothing keyed: its `cluster`");
+        assert_eq!(s("b", false).forwarder, vec!["fwdtag"], "a legacy list in clusters[id] is converted");
+        assert_eq!(s("b", false).extra.fields, vec!["kind"]);
+        assert_eq!(s("b", false).top_values, 30);
+        assert_eq!(s("c", false).top_values, 70, "no entry: the defaults' overrides map");
+        assert_eq!(s("d", false).top_values, 30, "and not another cluster's `cluster`");
+        assert_eq!(message_override_ids(&msg), vec!["a", "b", "c"]);
+        // Legacy defaults, as a level sent whole or as a list alone.
+        let legacy = json!({ "defaults": { "volumeFields": ["tag1", "src_ip", "app"], "overrides": { "x": { "topValues": 10 } } } });
+        let (d, _) = resolve(&layers_from_message(&legacy, Some("x"), false), &Settings::default());
+        assert_eq!((d.tag.clone(), d.source_ip.clone(), d.extra.fields.clone(), d.top_values),
+                   (vec!["tag1".to_string()], vec!["src_ip".to_string()], vec!["app".to_string()], 10));
+        let whole = json!({ "defaults": { "volume": { "sizeBasis": "total" }, "volumeFields": ["app"] } });
+        let (w, _) = resolve(&layers_from_message(&whole, None, false), &Settings::default());
+        assert_eq!((w.size_basis, w.extra.fields.clone()), (SizeBasis::Total, VolumeSettings::default().extra.fields),
+                   "volume set: the legacy list is not read, as in the file");
     }
 
     #[test]
