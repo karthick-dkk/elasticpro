@@ -694,8 +694,10 @@ await goOne('snapshots');
     }
   };
   let older = true;
+  let bound = null;   // a REPORT_RUN refusal the core's bounds make
   globalThis.fetch = async (input, init) => {
     const body = init && init.body ? JSON.parse(init.body) : {};
+    if (bound && body.type === 'REPORT_RUN') { rsent.push(body); return stubReply(bound); }
     if (/^(REPORT_|MAIL_)/.test(String(body.type || ''))) {
       rsent.push(body);
       return stubReply(older ? { ok: false, kind: 'bad_message', message: `Unknown message type "${body.type}"` } : answer(body));
@@ -744,6 +746,13 @@ await goOne('snapshots');
       await settleFor(100);
       const panelEl = doc.getElementById('rj-panel');
       ok(!!panelEl && !panelEl.hidden, 'reports: Generate report did not open the panel');
+      // Indices is an evidence page: only the open cluster is listed until "More clients…".
+      const first = [...doc.querySelectorAll('#rj-panel .rj-client input')];
+      ok(first.length === 1, `reports: ${first.length} client boxes before More clients…, want only the open cluster`);
+      ok(!doc.getElementById('reports-pill'), 'reports: the pill is on an evidence page');
+      const more = doc.getElementById('rj-more');
+      ok(config.clusters.length < 2 || !!more, 'reports: no More clients… button');
+      if (more) { more.click(); await settleFor(50); }
       const boxes = [...doc.querySelectorAll('#rj-panel .rj-client input')];
       ok(boxes.length === config.clusters.length, `reports: ${boxes.length} client boxes for ${config.clusters.length} clusters`);
       [...doc.querySelectorAll('#rj-panel button')].find((b) => b.textContent === 'Clear').click();
@@ -773,6 +782,18 @@ await goOne('snapshots');
         && runMsg.format === 'xlsx' && runMsg.mail === false, `reports: Run sent ${JSON.stringify(runMsg)}`);
       ok(rows().length === want.length, `reports: ${rows().length} job rows after queueing ${want.length}`);
 
+      // The core's bounds: its message is the status line, as it says it.
+      bound = { ok: false, kind: 'too_many_jobs', message: 'at most 15 report jobs at once: 2 more fit' };
+      doc.getElementById('rj-run').click();
+      await settleFor(200);
+      const stl = doc.getElementById('rj-status');
+      ok(stl && !stl.hidden && stl.textContent.startsWith('at most 15 report jobs at once: 2 more fit'), `reports: too_many_jobs status reads "${stl && stl.textContent}"`);
+      bound = { ok: false, kind: 'too_many_mails', message: 'ten mails an hour is the most' };
+      doc.getElementById('rj-run').click();
+      await settleFor(200);
+      ok(doc.getElementById('rj-status').textContent.startsWith('ten mails an hour is the most'), 'reports: too_many_mails message not shown');
+      bound = null;
+
       // The list as the core moves it on: running, queued, done.
       jobs = [
         { ...jobs[0], id: 'jr', status: 'running', progress: { done: 31, total: 50 }, createdAt: 1 },
@@ -788,7 +809,8 @@ await goOne('snapshots');
       ok(txt.includes('Not mailed: mail is not set up'), 'reports: a mailError is not shown');
       ok(txt.includes('1 running · 1 queued · 1 done'), 'reports: the list header does not count the jobs');
       ok(/At most 3 run together/.test(txt), 'reports: the footnote does not say how many run together');
-      ok(pill().textContent === 'Reports · 1 running · 1 queued' && pill().classList.contains('rp-busy'), `reports: the pill reads "${pill().textContent}"`);
+      // (The pill itself is not on this evidence page; what it would say is the poller's.)
+      ok(R.pillText(R.reports) === 'Reports · 1 running · 1 queued', `reports: the pill would read "${R.pillText(R.reports)}"`);
 
       // Download: REPORT_DOWNLOAD, base64 to a file of the core's name.
       rsent.length = 0;
@@ -3042,16 +3064,20 @@ restoreConsole();
   const st = (await load('core/state.js')).state;
   const realFetch = globalThis.fetch;
   const sent = [];
+  let stale = true;     // the stored password was typed for another server
+  let noNext = false;   // an older core: no nextPeriod
   const answer = (b) => {
     switch (b.type) {
       case 'MAIL_SETTINGS_GET': return { ok: true, host: 'smtp.example.com', port: 587, security: 'starttls', auth: 'password', user: 'ep',
-        from: 'elasticpro@example.com', passwordSet: true, passwordFrom: 'stored', managed: ['from'], configured: true, problem: null,
+        from: 'elasticpro@example.com', passwordSet: !stale, passwordStale: stale, passwordFrom: 'stored', managed: ['from'], configured: true, problem: null,
         canStorePassword: true, passwordStoreProblem: null };
       case 'REPORT_SCHEDULE_GET': return { ok: true, enabled: true, to: ['ops@example.com'], cc: [], bcc: [], schedule: 'monthly', at: '07:00',
         clusters: 'all', subject: 'ElasticPro volume report · {period}', sheets: ['daily', 'monthly', 'breakdown'],
         lastSent: { at: Date.now() - 3600000, to: 1, ok: true, error: null }, managed: ['at'], timer: true,
-        nextSendAt: Date.now() + 86400000, mailConfigured: true };
-      case 'MAIL_SETTINGS_SET': case 'REPORT_SCHEDULE_SET': return { ok: true };
+        nextSendAt: Date.now() + 86400000, mailConfigured: true,
+        ...(noNext ? {} : { nextPeriod: { from: '2026-10-01', to: '2026-10-31', label: '2026-10' } }) };
+      case 'MAIL_SETTINGS_SET': stale = false; return { ok: true };
+      case 'REPORT_SCHEDULE_SET': return { ok: true };
       case 'MAIL_TEST': return { ok: false, kind: 'smtp_failed', message: 'auth failed', steps: [
         { step: 'connect', ok: true, detail: '' }, { step: 'tls', ok: true, detail: '' }, { step: 'auth', ok: false, detail: '535 bad credentials' }] };
       case 'REPORT_JOBS': return { ok: true, jobs: [], concurrency: 3, running: 0, queued: 0 };
@@ -3072,8 +3098,8 @@ restoreConsole();
     await waitFor(() => byId('ms-host'), 'mail: the Mail server (SMTP) form did not load');
     ok(!!panel('Volume report by mail') && !!panel('Mail server (SMTP)'), 'mail: the two panels are not both on Volume fields');
     ok(byId('ms-host').value === 'smtp.example.com' && byId('ms-port').value === '587', 'mail: the mail server form does not show what the core holds');
-    ok(byId('ms-password').value === '' && byId('ms-password').placeholder === 'stored' && byId('ms-password').type === 'password',
-      'mail: the password box is not empty with "stored" for a stored password');
+    ok(byId('ms-password').value === '' && byId('ms-password').placeholder === '' && byId('ms-password').type === 'password',
+      'mail: the password box is not empty, or says stored for a password typed for another server');
     // A managed field: locked, says why, and left out of Save.
     ok(byId('ms-from').disabled && panel('Mail server (SMTP)').textContent.includes('managed by config.txt'), 'mail: a managed From is not locked with the reason');
     ok(byId('rm-at').disabled && panel('Volume report by mail').textContent.includes('managed by config.txt'), 'mail: a managed At is not locked with the reason');
@@ -3081,6 +3107,9 @@ restoreConsole();
       'mail: the report status does not say when it was last sent and when it goes next');
     ok(panel('Hosted: config.txt keys').textContent.includes('UI_SMTP_HOST=smtp.example.com') && panel('Hosted: config.txt keys').textContent.includes('UI_REPORT_SCHEDULE='),
       'mail: the config.txt card has no UI_SMTP_* / UI_REPORT_* lines');
+
+    ok(byId('ms-pw-stale') && !byId('ms-pw-stale').hidden && byId('ms-pw-stale').textContent === 'The mail server changed: type the password again.',
+      'mail: a stale password does not say to type it again');
 
     // Save, password untouched: no password in what goes.
     setVal('ms-host', 'relay.example.com');
@@ -3094,6 +3123,7 @@ restoreConsole();
     byId('ms-save').click();
     await settleFor(300);
     ok(last('MAIL_SETTINGS_SET') && last('MAIL_SETTINGS_SET').password === 's3cret', 'mail: a typed password was not sent');
+    ok(byId('ms-pw-stale').hidden, 'mail: the stale-password note stayed after the password was typed and saved');
     ok(byId('ms-password').value === '', 'mail: the typed password stayed in the box after saving');
     // "None" is plain text: no sign-in.
     setVal('ms-security', 'none', 'change');
@@ -3124,13 +3154,21 @@ restoreConsole();
     ok(!!s1 && JSON.stringify(s1.to) === '["ops@example.com","lead@example.com"]' && JSON.stringify(s1.cc) === '["boss@example.com"]'
       && JSON.stringify(s1.sheets) === '["daily","monthly"]' && !('at' in s1) && s1.clusters === 'all',
     `mail: the report Save sent ${JSON.stringify(s1)}`);
-    // Download .xlsx: a report job for every cluster, previous month, no mail.
+    // Download .xlsx: a report job for every cluster, for the core's nextPeriod, no mail.
+    ok(byId('rm-download').textContent === 'Download .xlsx · 2026-10', `mail: the button reads "${byId('rm-download').textContent}"`);
     sent.length = 0;
     byId('rm-download').click();
     await settleFor(300);
     const run = last('REPORT_RUN');
-    ok(!!run && run.format === 'xlsx' && run.mail === false && run.clusterIds.length === config.clusters.length && /^month:\d{4}-\d{2}$/.test(run.period),
-      `mail: Download .xlsx sent ${JSON.stringify(run)}`);
+    ok(!!run && run.format === 'xlsx' && run.mail === false && run.clusterIds.length === config.clusters.length
+      && JSON.stringify(run.period) === '{"from":"2026-10-01","to":"2026-10-31"}',
+    `mail: Download .xlsx sent ${JSON.stringify(run)}`);
+    // An older core says no period: the button is off, with a title saying why.
+    noNext = true;
+    byId('rm-save').click();
+    await settleFor(300);
+    ok(byId('rm-download').disabled && /does not say/.test(byId('rm-download').title), 'mail: Download .xlsx is on without a nextPeriod');
+    noNext = false;
     byId('rm-send-now').click();
     await settleFor(300);
     ok(!!last('REPORT_SEND_NOW'), 'mail: Send report now sent nothing');

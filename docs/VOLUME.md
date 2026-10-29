@@ -254,7 +254,10 @@ avgPerDay, peakDay, docs, eventBytes, subBytes, topSourceHost, topForwarder, fro
 - `REPORT_RUN` (User) `{clusterIds:[..], period, format:"xlsx"|"csvzip", mail:bool}` queues
   **one job per cluster** (a client is a cluster). `period` is `{from:"YYYY-MM-DD", to}` or a
   preset: `"month:2026-10"` (a current month means "so far"), `"yesterday"`, `"last7"`
-  (all from today's UTC date). Reply `{jobs:[Job], refused:[{clusterId, reason}]}`.
+  (all from today's UTC date). Reply `{ok, jobs:[Job], refused:[{clusterId, reason}]}`: a cluster
+  the caller cannot see is `refused` with `reason: "unknown"` (listed once however often it
+  was asked for) and the rest are queued; a refusal of the whole request is a failure
+  (`kind`, `message`), below.
 - **Bounds**: at most 15 jobs (3 × the highest concurrency) of one person's may be queued
   or running at once, and 200 of everyone's; a request that would pass either is refused
   whole, nothing queued: `kind: "too_many_jobs"` with a message saying how many more fit.
@@ -293,9 +296,17 @@ avgPerDay, peakDay, docs, eventBytes, subBytes, topSourceHost, topForwarder, fro
 - `REPORT_CLEAR` (User) `{}` removes finished/stopped/failed jobs **the caller started**
   (admin: all). `REPORT_DOWNLOAD` (User; the starter or an admin) `{id}` →
   `{name, mime, base64}`. Files kept in `<data>/reports/` for 7 days, then pruned.
-- `Job = {id, clusterId, clusterName, period:{from,to,label}, format, mail, by, createdAt,
-  startedAt|null, endedAt|null, status:"queued"|"running"|"done"|"stopped"|"failed",
-  progress:{done,total}, file:{name,bytes}|null, error|null, mailError|null, stoppedBy|null}`
+- `Job = {id, kind:"cluster"|"mailed", clusterId, clusterName, clusterIds:[ids], period:{from,to,label},
+  format, mail, by, createdAt, startedAt|null, endedAt|null,
+  status:"queued"|"running"|"done"|"stopped"|"failed", progress:{done,total},
+  file:{name,bytes}|null, error|null, mailError|null, stoppedBy|null, warning|null,
+  stopping:bool, sheets?:[names]}`. `kind: "cluster"` is a job `REPORT_RUN` queued (`clusterIds`
+  is its one cluster); `"mailed"` is the schedule's or `REPORT_SEND_NOW`'s: one workbook for
+  `clusterIds`, `sheets` the sheets it holds. `warning` is something the file should be read
+  with (the cluster was unreachable: only the record is in it). `stopping` is true from the
+  moment somebody asked a running job to stop until it ends. `mailStartedAt` (when the mail's
+  SMTP session began, so a restart does not send it twice) is kept in `jobs.json` and is
+  never in a reply; neither is the desktop's `volume`.
 
 ### The file
 
@@ -317,9 +328,28 @@ avgPerDay, peakDay, docs, eventBytes, subBytes, topSourceHost, topForwarder, fro
   `mail.json:password:{host}:{port}:{security}:{user}` and kept with that destination
   (`passwordFor`). Change host, port, security or user without typing the password again
   and it is not used: `MAIL_SETTINGS_GET` says `passwordSet: false`, `passwordStale: true`,
-  `problem: "the mail server changed: type the password again"`, and `MAIL_TEST` and every
+  `problem: "the mail server changed: type the password again"` (the page says "The mail
+  server changed: type the password again." under the password box), and `MAIL_TEST` and every
   report mail stop before connecting (`not_configured`). Editing `passwordFor` by hand does
   not help: the seal does not open for another destination.
+- Replies are flat (no `settings` wrapper), admin only:
+  - `MAIL_SETTINGS_GET` `{ok, host, port, security, auth, user, from, passwordSet,
+    passwordFrom:"stored"|"config.txt"|null, passwordStale, managed:[fields], configured,
+    problem|null, canStorePassword, passwordStoreProblem|null}`. Never the password, not even
+    its length. `problem` says what stops sending (no host or From, an invalid value, a
+    password file without a user, a stale or missing password); `configured` is true when
+    host and From are set. `canStorePassword: false` (the edition keeps no key at rest) comes
+    with `passwordStoreProblem` saying why; a mail server without authentication still works.
+  - `REPORT_SCHEDULE_GET` `{ok, enabled, to, cc, bcc, schedule:"monthly"|"weekly"|"daily"|"manual",
+    at:"HH:MM", clusters:"all"|[ids], subject, sheets:[names], lastSent:{at, to, ok, error|null}|null,
+    managed:[fields], timer:bool, nextSendAt:ms|null, nextPeriod:{from,to,label},
+    mailConfigured:bool}`. `timer` is true on the hosted edition only (the one with a clock
+    that sends); without it `nextSendAt` is null, which it is also when the schedule never
+    will send (off, nobody to send to, manual). `mailConfigured` is "the mail server has no
+    problem".
+  - `MAIL_SETTINGS_SET`, `REPORT_SCHEDULE_SET` answer `{ok}` (the schedule's with the same
+    `nextPeriod`) or a failure (`kind: "managed"` for a field config.txt holds,
+    `"cannot_store_password"`, `"bad_request"`).
 - config.txt (lock the field): `UI_SMTP_HOST` text, `UI_SMTP_PORT` int 1..65535,
   `UI_SMTP_SECURITY` enum starttls,tls,none, `UI_SMTP_USER` text,
   `UI_SMTP_PASSWORD_FILE` text (path read at send time, never echoed), `UI_SMTP_FROM` text.

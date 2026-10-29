@@ -8,7 +8,7 @@ import { state, clusters, activeClusters, client, refreshAll, fetchIndices, ensu
 import { coverageBar } from '../lib/freshness.js';
 import { readAllState, startReadAll } from '../lib/read-all.js';
 import { runBounded } from '../core/fleet.js';
-import { card, collapsible, pill, table, empty, snapshotStatusByKey } from './common.js';
+import { card, collapsible, pill, table, empty, snapshotStatusByKey, configErrorBanner } from './common.js';
 import { hbarList, capacityChart, usageMeter } from '../lib/charts.js';
 import { volumeReport, reportRows, SHEET_COLUMNS, CLIENT_COLUMNS, sheetCell, gb, days as fmtDays, yesNo, measureRepoBytes, headroomPct } from '../core/volume.js';
 import { navigateTo } from '../core/intent.js';
@@ -16,7 +16,7 @@ import { popover } from '../ui/menu.js';
 import { repoSizeCache } from '../lib/idb.js';
 import { takeFocus, revealFocus } from '../core/focus.js';
 import { volumeAnalysisCard, setVolumeAnalysisField } from '../ui/index-metrics.js';
-import { volumeMonthlyAll, monthlyAllCsvRows, monthsAcross, monthName, NEEDS_VERSION } from '../core/volume-daily.js';
+import { volumeMonthlyAll, configErrorOf, monthlyAllCsvRows, monthsAcross, monthName, NEEDS_VERSION } from '../core/volume-daily.js';
 
 let host = null;
 const ui = { measuring: new Set(), view: 'summary', sort: 'name', dir: 1 };
@@ -247,8 +247,9 @@ function monthlyAllView() {
       }));
   });
   return card('Monthly volume by cluster', `primary size per month · ${plural(clusters.length, 'cluster')}`,
-    table(['Cluster', ...months.map((ym) => ({ label: monthName(ym), num: true }))], trs,
-      { emptyText: 'No cluster has a daily record yet' }));
+    h('div', configErrorBanner(configErrorOf(monthlyAll.reply)),
+      table(['Cluster', ...months.map((ym) => ({ label: monthName(ym), num: true }))], trs,
+        { emptyText: 'No cluster has a daily record yet' })));
 }
 
 function exportMonthlyAll() {

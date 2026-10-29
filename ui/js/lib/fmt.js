@@ -107,7 +107,7 @@ export function csvEscape(v) {
   // A cell starting with = + - @ (or a tab / return) is a formula to a spreadsheet, and an
   // index name or a request path is data somebody else chose. Numbers keep their sign.
   if (/^[=+\-@\t\r]/.test(s) && !/^-?\d+(\.\d+)?$/.test(s)) s = `'${s}`;
-  return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+  return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
 }
 
 export function toCsv(rows, headers) {

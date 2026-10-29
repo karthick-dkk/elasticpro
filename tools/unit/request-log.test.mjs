@@ -99,6 +99,9 @@ test('an export never hands a spreadsheet a formula', () => {
   assert.equal(csvEscape('@cmd'), "'@cmd");
   assert.equal(csvEscape('-5'), '-5'); assert.equal(csvEscape(-5.5), '-5.5');
   assert.equal(csvEscape('/_search?q=x'), '/_search?q=x');
+  // A lone carriage return ends a record for many readers: quoted, as the core's csv_escape does.
+  assert.equal(csvEscape('a\rb'), '"a\rb"');
+  assert.equal(csvEscape('a\r\nb'), '"a\r\nb"');
   const out = toCsv([{ path: '=1+1', ms: '-3' }], ['path', 'ms']);
   assert.equal(out.split('\n')[1], "'=1+1,-3");
 });

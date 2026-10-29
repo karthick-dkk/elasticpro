@@ -114,6 +114,19 @@ export const volumeLayoutSet = (table, layout) => send({ type: 'VOLUME_LAYOUT_SE
 
 /* ------------------------------ reading a reply ------------------------------ */
 
+/**
+ * What a reply's `configError` means to the reader: the server's config file could not be
+ * read, so the core answered from the record it already holds and collects nothing new.
+ * `config_unreadable` refusals (VOLUME_RUN, VOLUME_FIELDS_CHECK) carry the same error as
+ * their message and are shown as they are.
+ */
+export function configErrorText(err) {
+  return `The server's config file could not be read: ${err}. Figures shown are the last ones recorded; nothing new is collected until it is fixed.`;
+}
+
+/** The configError of a reply, if it has one. */
+export const configErrorOf = (res) => (res && res.ok !== false && res.configError ? String(res.configError) : '');
+
 /** A time the core sent, as ms: epoch ms or an ISO string. null when there is none. */
 export function toMs(v) {
   if (v === null || v === undefined || v === '') return null;

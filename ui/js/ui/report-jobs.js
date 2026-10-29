@@ -18,7 +18,7 @@ import { clusters, state } from '../core/state.js';
 import { toast } from './menu.js';
 import { confirmDialog } from './modal.js';
 import {
-  reports, onReports, refreshReports, startReportsPoll, reportRun, reportStop, reportClear, reportDownload,
+  reports, onReports, refreshReports, startReportsPoll, failText, reportRun, reportStop, reportClear, reportDownload,
   reportConcurrencySet, reportScheduleGet, periodPresets, periodLabel, jobStatusText, jobPct, jobClient,
   countsText, sortJobs, isActive, isFinished, base64ToBytes,
 } from '../core/reports.js';
@@ -30,7 +30,11 @@ export const isAdmin = () => !state.caller || state.caller.role === 'admin';
 const callerName = () => (state.caller && state.caller.name) || null;
 
 /** What is being asked for. Kept across redraws and visits, for the session. */
-const form = { picked: null, period: null, format: 'xlsx', mail: false };
+const form = { picked: null, period: null, format: 'xlsx', mail: false, more: false };
+/** The cluster on screen: Indices is an evidence page, so the panel lists only this one until "More clients…". */
+let openId = null;
+/** The panel's own status line: what the last run said when it was refused. */
+let status = null;
 /** For an admin: what REPORT_SCHEDULE_GET says about where a job's mail goes. */
 let mailInfo = { asked: false, ok: null, why: '' };
 
@@ -43,6 +47,7 @@ let headEl = null;
 let concEl = null;
 let footEl = null;
 let clusterSig = '';
+let statusEl = null;
 
 /* --------------------------------- the button --------------------------------- */
 
@@ -76,6 +81,7 @@ function syncButton() {
 /** Open (or close) the panel: the button, and the top-bar pill on its way here. */
 export function setReportPanelOpen(on) {
   open = !!on;
+  if (!open) { form.more = false; form.picked = new Set(openId ? [openId] : []); setStatus(null); if (formEl) renderForm(); }
   if (open) { renderForm(); askMailInfo(); refreshReports(); }
   if (panelEl) panelEl.hidden = !open;
   syncButton();
@@ -89,9 +95,12 @@ export function setReportPanelOpen(on) {
  */
 export function reportPanel(c) {
   if (!panelEl) build();
-  if (form.picked === null) form.picked = new Set(c ? [c.id] : []);
-  const sig = clusters().map((x) => x.id).join('\u0001');
-  if (sig !== clusterSig) renderForm();
+  const id = c ? c.id : null;
+  const moved = id !== openId;
+  openId = id;
+  if (form.picked === null || (moved && !form.more)) form.picked = new Set(id ? [id] : []);
+  const sig = `${clusters().map((x) => x.id).join('\u0001')}|${id}`;
+  if (sig !== clusterSig || moved) renderForm();
   panelEl.hidden = !open || reports.supported === false;
   return panelEl;
 }
@@ -105,12 +114,14 @@ function build() {
   headEl = h('span.rj-counts.muted');
   listEl = h('div.rj-list', { role: 'list' });
   footEl = h('div.rj-foot.muted');
+  statusEl = h('div#rj-status.rj-status', { role: 'status', hidden: true });
   panelEl = h('section#rj-panel.card.rj-panel', { hidden: true },
     h('header', h('h2', 'Generate report'), h('span.sub', 'one job per client'),
       h('div', { style: { marginLeft: 'auto', display: 'flex', gap: '6px' } },
         h('button.btn.sm', { type: 'button', title: 'Close the panel; jobs keep running', onclick: () => setReportPanelOpen(false) }, 'Close'))),
     h('div.body.rj-body',
       formEl,
+      statusEl,
       h('div.rj-jobs',
         h('div.rj-jobs-head',
           h('b', 'Report jobs'), headEl,
@@ -136,16 +147,36 @@ function syncRun() {
   const b = formEl && formEl.querySelector('#rj-run');
   if (b) { b.textContent = runLabel(); b.disabled = !form.picked || !form.picked.size; }
   const n = formEl && formEl.querySelector('#rj-picked');
-  if (n) n.textContent = `${form.picked ? form.picked.size : 0} of ${clusters().length}`;
+  if (n) n.textContent = `${form.picked ? form.picked.size : 0} of ${shownClusters().length}`;
+}
+
+/**
+ * The clusters the panel lists: only the open one, unless "More clients…" was pressed. The
+ * Indices page is photographed as one client's evidence, so a panel that is open on it must
+ * not list the others by default.
+ */
+function shownClusters() {
+  const all = clusters();
+  return form.more ? all : all.filter((x) => x.id === openId);
+}
+
+function setStatus(s) {
+  status = s;
+  if (!statusEl) return;
+  statusEl.hidden = !s;
+  statusEl.textContent = s ? s.text : '';
+  statusEl.className = `rj-status${s && s.cls ? ` ${s.cls}` : ''}`;
 }
 
 function renderForm() {
   if (!formEl) return;
-  const list = clusters();
-  clusterSig = list.map((x) => x.id).join('\u0001');
+  const full = clusters();
+  const list = shownClusters();
+  clusterSig = `${full.map((x) => x.id).join('\u0001')}|${openId}`;
   if (!form.picked) form.picked = new Set();
   // A cluster no longer offered (config reloaded, visibility changed) is not asked for.
   for (const id of [...form.picked]) if (!list.some((x) => x.id === id)) form.picked.delete(id);
+  if (!form.more && openId && list.some((x) => x.id === openId) && !form.picked.size) form.picked.add(openId);
   const presets = periodPresets();
   if (!form.period || !presets.some((p) => p.value === form.period)) form.period = presets[0].value;
 
@@ -172,8 +203,11 @@ function renderForm() {
   mount(formEl,
     h('div.rj-clients-head',
       h('b', 'Clients'), h('span#rj-picked.muted', `${form.picked.size} of ${list.length}`),
-      h('button.btn.sm', { type: 'button', onclick: () => all(true) }, 'Select all'),
-      h('button.btn.sm', { type: 'button', onclick: () => all(false) }, 'Clear')),
+      form.more ? h('button.btn.sm', { type: 'button', onclick: () => all(true) }, 'Select all') : null,
+      form.more ? h('button.btn.sm', { type: 'button', onclick: () => all(false) }, 'Clear') : null,
+      form.more
+        ? h('button#rj-fewer.btn.sm', { type: 'button', onclick: () => { form.more = false; form.picked = new Set(openId ? [openId] : []); renderForm(); } }, 'Fewer clients')
+        : (full.length > 1 ? h('button#rj-more.btn.sm', { type: 'button', title: 'List every cluster to pick from', onclick: () => { form.more = true; renderForm(); } }, 'More clients…') : null)),
     list.length ? h('div.rj-clients', ...list.map(box)) : h('div.muted', 'No cluster to report on.'),
     h('div.rj-row',
       h('label.field', 'Period', period),
@@ -217,9 +251,11 @@ async function run() {
   if (b) b.disabled = true;
   const res = await reportRun({ clusterIds: ids, period: form.period, format: form.format, mail: form.mail });
   syncRun();
-  if (!res.ok) { toast(`The report did not start: ${res.message || res.kind || 'refused'}`, 'err', 7000); return; }
+  if (!res.ok) { setStatus({ text: failText(res, 'The report did not start'), cls: 'rj-bad' }); return; }
+  setStatus(null);
   const n = (res.jobs || []).length;
-  const refused = res.refused || [];
+  // Only clusters this person picked are named: the core's answer is not trusted to stay inside the ask.
+  const refused = (res.refused || []).filter((r) => ids.includes(r.clusterId));
   if (n) toast(`${plural(n, 'report job')} queued for ${periodLabel(form.period)}`, 'ok', 4000, { key: 'report-run' });
   if (refused.length) {
     const name = (id) => (clusters().find((x) => x.id === id) || {}).name || id;

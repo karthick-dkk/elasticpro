@@ -604,7 +604,7 @@ function renderTopbar() {
       onResumed: async () => { await syncFleet({ full: true }); topbarKey = null; go(currentPage); } }),
     // Report jobs running in the background (ui/reports-pill.js): one element that keeps
     // its own text, so job progress never rebuilds the bar. Hidden on a core without reports.
-    reportsPill({ snapshot: isSnapshotMode(), guest: !!(me && me.role === 'guest') }),
+    reportsPill({ snapshot: isSnapshotMode(), guest: !!(me && me.role === 'guest'), evidence: ev }),
     // One cluster: its health is the dot on the picker. The fleet: the counts, coloured by the worst.
     ev || activeClusters().length < 2 ? null : healthPill(activeClusters()),
     // The alert count is on the Alerts tab, where going there is one click anyway; the

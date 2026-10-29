@@ -7,6 +7,7 @@ import { idb } from '../lib/idb.js';
 import { confirmDialog } from '../ui/modal.js';
 import { showCredentialDialog } from '../ui/credential-dialog.js';
 import { diagnoseCluster } from '../core/diagnose.js';
+import { configErrorText } from '../core/volume-daily.js';
 import { trustCert, untrustCert, trustHostKey, untrustHostKey, tunnelSecret, tunnelReconnect } from '../core/es.js';
 
 export function card(title, sub, body, actions) {
@@ -463,4 +464,9 @@ export function snapshotCell(s, staleHours) {
   return h('div', { style: { display: 'grid', gap: '2px' } },
     first,
     h('span.muted', { style: { fontSize: '11px' }, title: dt(s.start) }, `${ago(s.start)} \u00b7 ${s.repo || ''}`));
+}
+
+/** The amber banner for a volume reply's `configError`; null when there is none. */
+export function configErrorBanner(err) {
+  return err ? h('div.banner.warn.vol-config-error', { role: 'status' }, configErrorText(err)) : null;
 }

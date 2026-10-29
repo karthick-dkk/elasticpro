@@ -312,21 +312,25 @@ export function periodLabel(p, now = Date.now()) {
 }
 
 /**
- * The period a mailed report covers, for "Download .xlsx" beside its settings: what the
- * next scheduled mail would hold (docs/VOLUME.md "Mailed report"). Monthly, and a report
- * only sent by hand, take the previous calendar month; weekly the previous Monday to
- * Sunday; daily yesterday.
+ * The period "Download .xlsx" beside the mailed report's settings covers: the core's
+ * `nextPeriod` from REPORT_SCHEDULE_GET (the one definition: the timer's own function),
+ * as a REPORT_RUN `{from, to}`. null from an older core, which does not say.
  */
-export function schedulePeriod(schedule, now = Date.now()) {
-  const d = new Date(now);
-  if (schedule === 'daily') return 'yesterday';
-  if (schedule === 'weekly') {
-    const today = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate());
-    const sinceMonday = (d.getUTCDay() + 6) % 7;
-    const thisMonday = today - sinceMonday * 86400000;
-    return { from: utcDay(thisMonday - 7 * 86400000), to: utcDay(thisMonday - 86400000) };
-  }
-  return `month:${new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() - 1, 1)).toISOString().slice(0, 7)}`;
+export function nextPeriodOf(sched) {
+  const p = sched && sched.nextPeriod;
+  return p && typeof p.from === 'string' && typeof p.to === 'string' ? { from: p.from, to: p.to, label: p.label } : null;
+}
+
+/** Kinds whose message is the whole answer: the core says how many more fit, or when. */
+const BOUND_KINDS = new Set(['too_many_jobs', 'too_many_mails']);
+
+/**
+ * A refused REPORT_RUN / REPORT_SEND_NOW in words. A bound the core enforces (too many
+ * jobs, too many mails) is shown as the core says it; anything else gets `prefix`.
+ */
+export function failText(res, prefix) {
+  const msg = (res && (res.message || res.kind)) || 'refused';
+  return res && BOUND_KINDS.has(res.kind) && res.message ? String(res.message) : `${prefix}: ${msg}`;
 }
 
 /* ---------------------------------- the mail ---------------------------------- */

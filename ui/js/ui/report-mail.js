@@ -27,7 +27,7 @@ import { toMs } from '../core/volume-daily.js';
 import {
   REPORTS_NEEDS, mailSettingsGet, mailSettingsSet, mailTest, reportScheduleGet, reportScheduleSet, reportSendNow,
   reportRun, refreshReports, openReportJobs, settingsOf, managedFields, mailConfigTxtLines, lastSentText, stepText,
-  addressList, schedulePeriod, periodLabel,
+  addressList, nextPeriodOf, periodLabel, failText,
 } from '../core/reports.js';
 import { isAdmin, forgetMailInfo } from './report-jobs.js';
 
@@ -156,9 +156,20 @@ function scheduleBody() {
     h('div.muted.rm-note', 'Each sheet uses the columns, names and order set on Indices › Summary. The mail body holds the key figures: yesterday, average per day, month so far.'),
     h('div.rm-acts',
       h('button#rm-send-now.btn.sm', { type: 'button', title: 'Mail the report now with the saved settings, as a background job', onclick: sendNow }, 'Send report now'),
-      h('button#rm-download.btn.sm', { type: 'button', title: 'Make the same .xlsx as a report job, to download from the job list', onclick: downloadXlsx }, 'Download .xlsx'),
+      downloadButton(),
       scheduleStatus(s)),
     h('div#rm-note'));
+}
+
+const DOWNLOAD_TITLE = 'Make an .xlsx for the period the next scheduled mail covers, as a report job to download from the job list';
+
+/** "Download .xlsx": only with the period the core names; an older core does not. */
+function downloadButton() {
+  const p = nextPeriodOf(rm.sched);
+  return h('button#rm-download.btn.sm', {
+    type: 'button', disabled: !p, onclick: downloadXlsx,
+    title: p ? `${DOWNLOAD_TITLE} (${periodLabel(p)})` : 'This server does not say which period the next mail covers (needs a newer ElasticPro core)',
+  }, p ? `Download .xlsx · ${periodLabel(p)}` : 'Download .xlsx');
 }
 
 /** "✓ last sent 2 h ago to 3 addresses · next send …", and what would stop it sending. */
@@ -207,6 +218,8 @@ async function saveSchedule() {
   if (back.ok) rm.schedManaged = managedFields(back.managed);
   const st = $('#rm-status');
   if (st) st.replaceWith(scheduleStatus(rm.sched));
+  const dl = $('#rm-download');
+  if (dl) dl.replaceWith(downloadButton());
   setNote('rm-note', { text: 'Saved.', cls: 'banner' });
   toast('Volume report by mail saved', 'ok', 4000);
   forgetMailInfo();
@@ -214,7 +227,7 @@ async function saveSchedule() {
 
 async function sendNow() {
   const res = await reportSendNow();
-  if (!res.ok) { setNote('rm-note', { text: `Not sent: ${res.message || res.kind || 'refused'}`, cls: 'banner err' }); return; }
+  if (!res.ok) { setNote('rm-note', { text: failText(res, 'Not sent'), cls: 'banner err' }); return; }
   refreshReports();
   setNote('rm-note', { text: 'The mailed report is running as a background job, with the saved settings.', cls: 'banner', open: true });
 }
@@ -223,12 +236,14 @@ async function downloadXlsx() {
   const pick = val('rm-clusters');
   const ids = pick && pick !== 'all' ? [pick] : clusters().map((c) => c.id);
   if (!ids.length) { toast('No cluster to report on', 'warn'); return; }
-  const period = schedulePeriod(val('rm-when') || (rm.sched || {}).schedule);
-  const res = await reportRun({ clusterIds: ids, period, format: 'xlsx', mail: false });
-  if (!res.ok) { setNote('rm-note', { text: `Not started: ${res.message || res.kind || 'refused'}`, cls: 'banner err' }); return; }
+  // The core's own period for the next scheduled mail (REPORT_SCHEDULE_GET nextPeriod): not computed here.
+  const period = nextPeriodOf(rm.sched);
+  if (!period) { toast('This server does not say which period the next mail covers', 'warn'); return; }
+  const res = await reportRun({ clusterIds: ids, period: { from: period.from, to: period.to }, format: 'xlsx', mail: false });
+  if (!res.ok) { setNote('rm-note', { text: failText(res, 'Not started'), cls: 'banner err' }); return; }
   refreshReports();
   const n = (res.jobs || []).length;
-  const refused = (res.refused || []).length;
+  const refused = (res.refused || []).filter((r) => ids.includes(r.clusterId)).length;
   setNote('rm-note', {
     text: `${n} report job${n === 1 ? '' : 's'} queued for ${periodLabel(period)}${refused ? `, ${refused} refused` : ''}. Each file is downloaded from the job list.`,
     cls: 'banner', open: true,
@@ -265,8 +280,10 @@ function mailBody() {
       cell(M, 'security', 'Security', sec),
       cell(M, 'auth', 'Sign in', au),
       cell(M, 'user', 'Username', text('ms-user', m.user || '', { mono: true })),
-      cell(M, 'password', 'Password', pw,
-        canStore ? 'Kept encrypted on the server; never shown again.' : (m.passwordStoreProblem || 'This edition cannot keep a password.')),
+      h('div',
+        cell(M, 'password', 'Password', pw,
+          canStore ? 'Kept encrypted on the server; never shown again.' : (m.passwordStoreProblem || 'This edition cannot keep a password.')),
+        staleNote(m)),
       cell(M, 'from', 'From', text('ms-from', m.from || '', { placeholder: 'ElasticPro <elasticpro@example.com>' }), null, true)),
     h('div.rm-acts',
       h('button#ms-test.btn.sm', { type: 'button', 'aria-expanded': 'false', onclick: toggleTest }, 'Send test mail'),
@@ -280,6 +297,12 @@ function mailBody() {
   // elements are on the page (syncAuth finds them by id).
   queueMicrotask(syncAuth);
   return body;
+}
+
+/** The stored password was typed for another server: the core does not use it until it is typed again. */
+function staleNote(m) {
+  return h('div#ms-pw-stale.rm-bad', { hidden: !m.passwordStale, role: 'status' },
+    m.passwordStale ? 'The mail server changed: type the password again.' : '');
 }
 
 function mailStatus(m) {
@@ -345,6 +368,8 @@ async function saveMail() {
   if (pw) { pw.value = ''; pw.placeholder = pwPlaceholder(rm.mail || {}); }
   const st = $('#ms-status');
   if (st) st.replaceWith(mailStatus(rm.mail || {}));
+  const stale = $('#ms-pw-stale');
+  if (stale) stale.replaceWith(staleNote(rm.mail || {}));
   setNote('ms-note', { text: 'Saved.', cls: 'banner' });
 }
 

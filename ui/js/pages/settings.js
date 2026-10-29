@@ -19,7 +19,7 @@ import { credentialsKeptOnServer, keptCredentials, keptLine } from '../core/serv
 import { EXAMPLE_YAML } from '../core/example.js';
 import { saveTextAs } from '../core/platform.js';
 import { editCluster, editJumpHost, editCredentials, editDefaults, unlockSealed, saveRaw, rawClusterOf, editsFileDirectly } from '../ui/config-editor.js';
-import { card, pill, table, empty } from './common.js';
+import { card, pill, table, empty, configErrorBanner } from './common.js';
 import { navigateTo, intent } from '../core/intent.js';
 import { ALERT_RULES, loadAlertSettings, isEnabled } from '../core/alert-rules.js';
 import { isManagedDefault, isManagedZabbixOption, managedZabbixOptions, managedDefaults, MANAGED_NOTE } from '../core/managed.js';
@@ -1475,7 +1475,8 @@ async function loadVolume() {
   const id = vol.mode === 'override' ? vol.clusterId : '';
   const res = await volumeSettings(id, volPayload(id));
   vol.unknown = !!res.unknown;
-  const changed = JSON.stringify((vol.reply || {}).managed) !== JSON.stringify(res.ok ? res.managed : undefined);
+  const changed = JSON.stringify((vol.reply || {}).managed) !== JSON.stringify(res.ok ? res.managed : undefined)
+    || ((vol.reply || {}).configError || '') !== (res.ok ? res.configError || '' : '');
   vol.reply = res.ok ? res : null;
   // Redraw only when the answer changes what is shown, so a half-typed field is not wiped.
   if (changed || vol.unknown) { if (host && host.isConnected && activeSection() && activeSection().id === 'volume') draw(); }
@@ -1570,7 +1571,8 @@ async function checkVolume(btn) {
   let res;
   try { res = await volumeFieldsCheck(id, volPayload(id)); } finally { btn.disabled = false; btn.textContent = was; }
   if (res.unknown) { vol.unknown = true; say(res.message); return; }
-  if (!res.ok) { say(`Check failed: ${res.message || 'refused'}`); return; }
+  // config_unreadable: the core's message is the whole answer.
+  if (!res.ok) { say(res.kind === 'config_unreadable' ? res.message : `Check failed: ${res.message || 'refused'}`); return; }
   say('');
   const rows = Array.isArray(res.rows) ? res.rows : [];
   const cl = clusters().find((c) => c.id === id);
@@ -1663,6 +1665,7 @@ function volumeCard() {
   return card('Volume fields',
     override ? `override for ${name}: only what differs is saved` : 'used by every cluster that has no override',
     h('div', { style: { display: 'grid', gap: '10px' } },
+      configErrorBanner(vol.reply && vol.reply.configError),
       vol.unknown ? h('div.banner.warn', { style: { margin: 0, fontSize: '12px' } }, 'This server does not know Volume fields yet (needs 0.3.45)') : null,
       canWrite ? null : h('div.banner.warn', { style: { margin: 0, fontSize: '12px' } },
         'Only an ElasticPro admin changes these settings, or whoever edits config.txt on the server.'),

@@ -29,11 +29,12 @@ function sync() {
 }
 
 /**
- * The pill, or null where reports cannot apply: a snapshot file (no core to ask) and a
- * guest (REPORT_JOBS is a user's message, and the page it opens is not a guest's).
+ * The pill, or null where reports cannot apply: a snapshot file (no core to ask), a
+ * guest (REPORT_JOBS is a user's message, and the page it opens is not a guest's) and an
+ * evidence page (core/evidence.js): job counts are fleet-wide chrome, like the alert count.
  */
-export function reportsPill({ snapshot = false, guest = false } = {}) {
-  if (snapshot || guest) return null;
+export function reportsPill({ snapshot = false, guest = false, evidence = false } = {}) {
+  if (snapshot || guest || evidence) return null;
   if (!el) {
     el = h('button#reports-pill.pill.rp-pill.grey', {
       type: 'button', hidden: true,

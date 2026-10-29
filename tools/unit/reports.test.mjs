@@ -38,13 +38,21 @@ test('a period in words, from a preset or from a job', () => {
   assert.equal(R.periodLabel({ from: '2026-10-28', to: '2026-10-28' }), '2026-10-28');
 });
 
-test('the period a mailed report covers, for Download .xlsx beside it', () => {
-  assert.equal(R.schedulePeriod('monthly', NOW), 'month:2026-09');
-  assert.equal(R.schedulePeriod('manual', NOW), 'month:2026-09');
-  assert.equal(R.schedulePeriod('daily', NOW), 'yesterday');
-  // Thursday 29 Oct: the previous Monday..Sunday is 19..25 Oct; on a Monday, the week before it.
-  assert.deepEqual(R.schedulePeriod('weekly', NOW), { from: '2026-10-19', to: '2026-10-25' });
-  assert.deepEqual(R.schedulePeriod('weekly', Date.UTC(2026, 9, 26, 8)), { from: '2026-10-19', to: '2026-10-25' });
+test('the period Download .xlsx covers is the core\'s nextPeriod, never computed here', () => {
+  assert.equal(R.schedulePeriod, undefined, 'one definition: the core\'s');
+  assert.deepEqual(R.nextPeriodOf({ nextPeriod: { from: '2026-10-01', to: '2026-10-31', label: '2026-10' } }),
+    { from: '2026-10-01', to: '2026-10-31', label: '2026-10' });
+  assert.equal(R.nextPeriodOf({}), null, 'an older core does not say');
+  assert.equal(R.nextPeriodOf({ nextPeriod: { from: 5 } }), null);
+  assert.equal(R.nextPeriodOf(null), null);
+});
+
+test('a bound the core enforces is shown as the core says it', () => {
+  const m = 'at most 15 jobs at once: 3 more fit';
+  assert.equal(R.failText({ kind: 'too_many_jobs', message: m }, 'The report did not start'), m);
+  assert.equal(R.failText({ kind: 'too_many_mails', message: 'ten an hour' }, 'x'), 'ten an hour');
+  assert.equal(R.failText({ kind: 'bad_request', message: 'no recipients' }, 'Not sent'), 'Not sent: no recipients');
+  assert.equal(R.failText({}, 'Not sent'), 'Not sent: refused');
 });
 
 const job = (o) => ({ id: o.id || 'j', clusterId: 'prod-eu', clusterName: 'prod-eu', status: 'queued', progress: { done: 0, total: 0 }, createdAt: 0, ...o });

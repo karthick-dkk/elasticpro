@@ -17,10 +17,10 @@ import { lineChart, signedPct } from '../lib/charts.js';
 import { columnsButton, columnTable, sanitizeLayout } from '../lib/columns.js';
 import { state } from '../core/state.js';
 import { navigateTo } from '../core/intent.js';
-import { card, statTile, table, empty, unreadable } from '../pages/common.js';
+import { card, statTile, table, empty, unreadable, configErrorBanner } from '../pages/common.js';
 import { toast } from './menu.js';
 import { reportJobsMount, reportPanel, setReportPanelOpen } from './report-jobs.js';
-import {
+import { configErrorOf,
   volumeDaily, volumeMonthly, volumeBreakdown, volumeRun, volumeLayoutGet, volumeLayoutSet, isHosted,
   NEEDS_VERSION, collectDue, hhmm, utcDay, basisOf, BASIS_LABEL, BASIS_KEY, monthValue, fromText, monthName,
   lastMonths, breakdownPeriods, breakdownLabel, peakOf, dailyCsvRows, monthlyCsvRows, breakdownCsvRows,
@@ -70,6 +70,9 @@ export function resetVolumeSummary() {
   Object.assign(layouts, { state: 'unknown', daily: null, monthly: null });
   unsupported = false;
   built = { sig: null, node: null };
+  // Indices is an evidence page: the Generate report panel starts collapsed on every visit
+  // (the pill's way in, showReportJobs, opens it after this).
+  setReportPanelOpen(false);
   vs.rev++;
 }
 
@@ -216,7 +219,8 @@ async function refreshNow(c, { auto = false } = {}) {
   const res = await volumeRun([c.id]);
   if (res.unsupported) { unsupported = true; bump(); return; }
   if (!res.ok) {
-    if (!auto) toast(`Could not start a collection: ${res.message || res.kind}`, 'err', 6000);
+    // config_unreadable: the core's message is the whole answer.
+    if (!auto) toast(res.kind === 'config_unreadable' ? res.message : `Could not start a collection: ${res.message || res.kind}`, 'err', 6000);
     return;
   }
   if ((res.tooSoon || []).includes(c.id)) {
@@ -288,6 +292,7 @@ function dailyView(c) {
   if (!ent) loadDaily(c);
   const reply = (ent && ent.reply) || lastDaily.get(c.id) || null;
   const out = [dailyToolbar(c, reply)];
+  if (reply) out.push(configErrorBanner(configErrorOf(reply)));
   if (ent && ent.error && !reply) return [...out, unreadable('The daily volume record', ent.error)];
   if (!reply) return [...out, h('div.tbl-empty', 'Reading the daily record…')];
   const st = reply.status || {};
@@ -509,6 +514,7 @@ function monthlyView(c) {
   // The report panel sits under the toolbar whatever the record says: jobs are followed
   // even while this cluster's months are still loading or could not be read.
   const out = [monthlyToolbar(c, reply), reportPanel(c)];
+  if (reply) out.push(configErrorBanner(configErrorOf(reply)));
   if (ent && ent.error) return [...out, unreadable('The monthly volume record', ent.error)];
   if (!reply) return [...out, h('div.tbl-empty', 'Reading the monthly record…')];
   const rows = monthRows(reply);
