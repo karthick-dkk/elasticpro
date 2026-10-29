@@ -659,6 +659,189 @@ await goOne('snapshots');
   }
 }
 
+/* ------------- report jobs: Generate report, the job list and the top-bar pill ------------- */
+
+// Indices › Summary › Monthly › Generate report and the "Reports" pill (0.3.45), against the
+// REPORT_* answers docs/VOLUME.md gives, stubbed at fetch so this runs whatever the core is.
+// Proves: the panel runs one job per picked cluster (the REPORT_RUN payload), the list shows
+// running / queued / done and Download saves the file, Stop is an admin's alone (REPORT_STOP),
+// and the pill follows REPORT_JOBS and opens the panel.
+{
+  const R = await load('core/reports.js');
+  const st = (await load('core/state.js')).state;
+  const realFetch = globalThis.fetch;
+  const rsent = [];
+  let jobs = [];
+  let nextId = 1;
+  const FILE = 'volume-prod-2026-09-01_2026-09-30.xlsx';
+  const answer = (b) => {
+    switch (b.type) {
+      case 'REPORT_JOBS': return { ok: true, jobs, concurrency: 3,
+        running: jobs.filter((j) => j.status === 'running').length, queued: jobs.filter((j) => j.status === 'queued').length };
+      case 'REPORT_RUN': {
+        const made = (b.clusterIds || []).map((id) => ({ id: `j${nextId++}`, kind: 'cluster', clusterId: id, clusterName: id, clusterIds: [id],
+          period: { from: '2026-09-01', to: '2026-09-30', label: 'Sep 2026' }, format: b.format, mail: b.mail, by: 'local',
+          createdAt: Date.now(), startedAt: null, endedAt: null, status: 'queued', progress: { done: 0, total: 0 }, file: null,
+          error: null, mailError: null, stoppedBy: null, warning: null, stopping: false }));
+        jobs = [...made, ...jobs];
+        return { ok: true, jobs: made, refused: [] };
+      }
+      case 'REPORT_STOP': return { ok: true, stopped: 1, stopping: 0 };
+      case 'REPORT_CLEAR': return { ok: true, removed: 0 };
+      case 'REPORT_DOWNLOAD': return { ok: true, name: FILE, mime: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', bytes: 4, base64: 'UEsDBA==' };
+      case 'REPORT_CONCURRENCY_SET': return { ok: true, concurrency: b.n };
+      default: return { ok: false, kind: 'bad_message', message: `Unknown message type "${b.type}"` };
+    }
+  };
+  let older = true;
+  globalThis.fetch = async (input, init) => {
+    const body = init && init.body ? JSON.parse(init.body) : {};
+    if (/^(REPORT_|MAIL_)/.test(String(body.type || ''))) {
+      rsent.push(body);
+      return stubReply(older ? { ok: false, kind: 'bad_message', message: `Unknown message type "${body.type}"` } : answer(body));
+    }
+    return realFetch(input, init);
+  };
+  const pill = () => doc.getElementById('reports-pill');
+  const rows = () => [...doc.querySelectorAll('#rj-panel .rj-job')];
+  try {
+    // An older core: no pill, no Generate report, and the job list is not asked for again.
+    R.resetReports();
+    R.startReportsPoll();
+    await go('indices');
+    [...doc.querySelectorAll('button')].find((b) => b.textContent.trim() === 'Summary').click();
+    await settleFor(200);
+    const mb = [...doc.querySelectorAll('.vs .seg .btn')].find((b) => b.textContent.trim() === 'Monthly');
+    if (mb) { mb.click(); await settleFor(300); }
+    ok(R.reports.supported === false, 'reports: an unknown REPORT_JOBS was not taken for an older core');
+    ok(!pill() || pill().hidden, 'reports: the pill shows on a core without reports');
+    const mountEl = doc.getElementById('vol-report-jobs');
+    ok(!mountEl || mountEl.hidden, 'reports: Generate report is offered by a core without reports');
+    const asked = rsent.length;
+    await R.refreshReports();
+    ok(rsent.length === asked, 'reports: an older core is asked for the job list again');
+    const daily = [...doc.querySelectorAll('.vs .seg .btn')].find((b) => b.textContent.trim() === 'Daily');
+    if (daily) daily.click();
+
+    // From here on, a core that runs reports. Whatever was said before, start over.
+    older = false;
+    R.resetReports();
+    R.startReportsPoll();
+    await go('overview');
+    await waitFor(() => (pill() && !pill().hidden ? pill() : null), 'reports: the top-bar pill did not show for a core that runs reports');
+    ok(pill() && pill().textContent === 'Reports · idle', `reports: the idle pill reads "${pill() && pill().textContent}"`);
+
+    await go('indices');
+    [...doc.querySelectorAll('button')].find((b) => b.textContent.trim() === 'Summary').click();
+    await settleFor(200);
+    const monthlyBtn = [...doc.querySelectorAll('.vs .seg .btn')].find((b) => b.textContent.trim() === 'Monthly');
+    if (monthlyBtn) monthlyBtn.click();
+    const open = await waitFor(() => doc.getElementById('rj-open'), 'reports: no Generate report button on Summary › Monthly');
+    const exportBtn = [...doc.querySelectorAll('.vs-bar button')].find((b) => b.textContent === 'Export CSV');
+    ok(!!open && !!exportBtn && open.closest('.vs-right') === exportBtn.closest('.vs-right'), 'reports: Generate report is not beside Export CSV');
+    if (open) {
+      open.click();
+      await settleFor(100);
+      const panelEl = doc.getElementById('rj-panel');
+      ok(!!panelEl && !panelEl.hidden, 'reports: Generate report did not open the panel');
+      const boxes = [...doc.querySelectorAll('#rj-panel .rj-client input')];
+      ok(boxes.length === config.clusters.length, `reports: ${boxes.length} client boxes for ${config.clusters.length} clusters`);
+      [...doc.querySelectorAll('#rj-panel button')].find((b) => b.textContent === 'Clear').click();
+      await settleFor(50);
+      const run = doc.getElementById('rj-run');
+      ok(run && run.disabled && run.textContent === 'Run report · 0 clients', `reports: with nothing picked Run reads "${run && run.textContent}" (disabled ${run && run.disabled})`);
+      [...doc.querySelectorAll('#rj-panel button')].find((b) => b.textContent === 'Select all').click();
+      await settleFor(50);
+      const all = [...doc.querySelectorAll('#rj-panel .rj-client input')];
+      ok(all.every((b) => b.checked), 'reports: Select all left a client unticked');
+      // Untick the last one by hand, as a person would.
+      const last = all.at(-1);
+      last.checked = false; last.dispatchEvent(new window.Event('change', { bubbles: true }));
+      const want = all.slice(0, -1).map((b) => b.value);
+      const period = doc.getElementById('rj-period');
+      ok(period && period.options[0].textContent.endsWith('(so far)') && [...period.options].some((o) => o.value === 'last7') && [...period.options].some((o) => o.value === 'yesterday'),
+        'reports: the Period list lacks this month so far, Yesterday or Last 7 days');
+      period.value = period.options[1].value;
+      period.dispatchEvent(new window.Event('change', { bubbles: true }));
+      ok(doc.getElementById('rj-run').textContent === `Run report · ${want.length} client${want.length === 1 ? '' : 's'}`, `reports: Run reads "${doc.getElementById('rj-run').textContent}"`);
+      ok(/report recipients/.test(doc.querySelector('#rj-panel .rj-check').textContent), 'reports: the mail box does not say where the mail goes');
+      rsent.length = 0;
+      doc.getElementById('rj-run').click();
+      await settleFor(300);
+      const runMsg = rsent.find((m) => m.type === 'REPORT_RUN');
+      ok(!!runMsg && JSON.stringify(runMsg.clusterIds) === JSON.stringify(want) && runMsg.period === period.options[1].value
+        && runMsg.format === 'xlsx' && runMsg.mail === false, `reports: Run sent ${JSON.stringify(runMsg)}`);
+      ok(rows().length === want.length, `reports: ${rows().length} job rows after queueing ${want.length}`);
+
+      // The list as the core moves it on: running, queued, done.
+      jobs = [
+        { ...jobs[0], id: 'jr', status: 'running', progress: { done: 31, total: 50 }, createdAt: 1 },
+        { ...jobs[0], id: 'jq', status: 'queued', createdAt: 2, clusterName: 'second' },
+        { ...jobs[0], id: 'jd', status: 'done', file: { name: FILE, bytes: 4 }, endedAt: Date.now(), mailError: 'mail is not set up', createdAt: 0 },
+      ];
+      await R.refreshReports();
+      await settleFor(50);
+      const txt = doc.getElementById('rj-panel').textContent;
+      ok(txt.includes('Running · 62 %') && !!doc.querySelector('#rj-panel .rj-bar'), 'reports: the running job has no "Running · 62 %" and bar');
+      ok(txt.includes('Queued · #1 in line'), 'reports: the queued job does not say its place');
+      ok(txt.includes(`Done · ${FILE}`), 'reports: the finished job does not name its file');
+      ok(txt.includes('Not mailed: mail is not set up'), 'reports: a mailError is not shown');
+      ok(txt.includes('1 running · 1 queued · 1 done'), 'reports: the list header does not count the jobs');
+      ok(/At most 3 run together/.test(txt), 'reports: the footnote does not say how many run together');
+      ok(pill().textContent === 'Reports · 1 running · 1 queued' && pill().classList.contains('rp-busy'), `reports: the pill reads "${pill().textContent}"`);
+
+      // Download: REPORT_DOWNLOAD, base64 to a file of the core's name.
+      rsent.length = 0;
+      const dl = doc.querySelector('#rj-panel .rj-job[data-job="jd"] .rj-dl');
+      ok(!!dl, 'reports: the done job has no Download');
+      if (dl) {
+        dl.click();
+        await settleFor(200);
+        ok(rsent.some((m) => m.type === 'REPORT_DOWNLOAD' && m.id === 'jd'), `reports: Download sent ${JSON.stringify(rsent)}`);
+        ok(files.at(-1) && files.at(-1).name === FILE, `reports: Download saved "${files.at(-1) && files.at(-1).name}"`);
+      }
+
+      // Stop: an admin's (the portable build has no accounts, so it is admin here).
+      const stop = doc.querySelector('#rj-panel .rj-job[data-job="jr"] .rj-stop');
+      ok(!!stop, 'reports: an admin sees no Stop on a running job');
+      rsent.length = 0;
+      if (stop) { stop.click(); await settleFor(200); }
+      ok(rsent.some((m) => m.type === 'REPORT_STOP' && m.id === 'jr'), `reports: Stop sent ${JSON.stringify(rsent)}`);
+      ok(!doc.getElementById('rj-stop-all').hidden, 'reports: an admin sees no Stop all');
+
+      // Anybody else: no Stop, the reason in its place, the concurrency read-only.
+      st.caller = { name: 'reader', role: 'user' };
+      await R.refreshReports();
+      await settleFor(50);
+      ok(!doc.querySelector('#rj-panel .rj-stop'), 'reports: a user is offered Stop');
+      ok(/admin only/.test(doc.querySelector('#rj-panel .rj-job[data-job="jr"]').textContent), 'reports: a user is not told Stop is admin only');
+      ok(doc.getElementById('rj-stop-all').hidden, 'reports: a user is offered Stop all');
+      ok(doc.getElementById('rj-concurrency').disabled, 'reports: a user can change how many run at once');
+      st.caller = null;
+      await R.refreshReports();
+
+      // Close it, leave, and come back through the pill: Monthly, the panel open.
+      [...doc.querySelectorAll('#rj-panel button')].find((b) => b.textContent === 'Close').click();
+      const vsMod = await load('ui/volume-summary.js');
+      vsMod.resetVolumeSummary();
+      await go('overview');
+      pill().click();
+      await settleFor(500);
+      const back = await waitFor(() => { const p = doc.getElementById('rj-panel'); return p && p.isConnected && !p.hidden ? p : null; },
+        'reports: the pill did not open Indices › Summary with the report panel');
+      ok(!!back && (doc.location.hash || '') === '#/indices', `reports: the pill went to ${doc.location.hash}`);
+      const pressed = [...doc.querySelectorAll('.vs .seg .btn')].find((b) => b.getAttribute('aria-pressed') === 'true');
+      ok(pressed && pressed.textContent.trim() === 'Monthly', 'reports: the pill did not land on Monthly');
+    }
+  } finally {
+    globalThis.fetch = realFetch;
+    jobs = [];
+  }
+  // The rest of this run is about other things: back to what the real core says.
+  R.resetReports();
+  await go('overview');
+}
+
 /* --------------------- the volume report and its two sheets --------------------- */
 
 await backToFleet();
@@ -2850,6 +3033,124 @@ restoreConsole();
   await go('overview');
 }
 
+// Config > Volume fields > Volume report by mail and Mail server (SMTP) (0.3.45): both load for
+// an admin, a field config.txt manages is locked and left out of Save, Save sends no password
+// unless one was typed, "None" security forces "No sign-in", Send test mail shows each step
+// (a failed one too), and anybody else is told only an admin sets these. MAIL_* and
+// REPORT_SCHEDULE_* are stubbed at fetch with the shapes the core answers.
+{
+  const st = (await load('core/state.js')).state;
+  const realFetch = globalThis.fetch;
+  const sent = [];
+  const answer = (b) => {
+    switch (b.type) {
+      case 'MAIL_SETTINGS_GET': return { ok: true, host: 'smtp.example.com', port: 587, security: 'starttls', auth: 'password', user: 'ep',
+        from: 'elasticpro@example.com', passwordSet: true, passwordFrom: 'stored', managed: ['from'], configured: true, problem: null,
+        canStorePassword: true, passwordStoreProblem: null };
+      case 'REPORT_SCHEDULE_GET': return { ok: true, enabled: true, to: ['ops@example.com'], cc: [], bcc: [], schedule: 'monthly', at: '07:00',
+        clusters: 'all', subject: 'ElasticPro volume report · {period}', sheets: ['daily', 'monthly', 'breakdown'],
+        lastSent: { at: Date.now() - 3600000, to: 1, ok: true, error: null }, managed: ['at'], timer: true,
+        nextSendAt: Date.now() + 86400000, mailConfigured: true };
+      case 'MAIL_SETTINGS_SET': case 'REPORT_SCHEDULE_SET': return { ok: true };
+      case 'MAIL_TEST': return { ok: false, kind: 'smtp_failed', message: 'auth failed', steps: [
+        { step: 'connect', ok: true, detail: '' }, { step: 'tls', ok: true, detail: '' }, { step: 'auth', ok: false, detail: '535 bad credentials' }] };
+      case 'REPORT_JOBS': return { ok: true, jobs: [], concurrency: 3, running: 0, queued: 0 };
+      default: return { ok: false, kind: 'bad_message', message: `Unknown message type "${b.type}"` };
+    }
+  };
+  globalThis.fetch = async (input, init) => {
+    const body = init && init.body ? JSON.parse(init.body) : {};
+    if (/^(REPORT_|MAIL_)/.test(String(body.type || ''))) { sent.push(body); return stubReply(answer(body)); }
+    return realFetch(input, init);
+  };
+  const byId = (id) => doc.getElementById(id);
+  const setVal = (id, v, ev = 'input') => { const el = byId(id); if (el) { el.value = v; el.dispatchEvent(new window.Event(ev, { bubbles: true })); } return !!el; };
+  const last = (type) => sent.filter((m) => m.type === type).at(-1);
+  try {
+    await go('settings');
+    ok(await openSettingsTab('Volume fields'), 'mail: no Volume fields tab');
+    await waitFor(() => byId('ms-host'), 'mail: the Mail server (SMTP) form did not load');
+    ok(!!panel('Volume report by mail') && !!panel('Mail server (SMTP)'), 'mail: the two panels are not both on Volume fields');
+    ok(byId('ms-host').value === 'smtp.example.com' && byId('ms-port').value === '587', 'mail: the mail server form does not show what the core holds');
+    ok(byId('ms-password').value === '' && byId('ms-password').placeholder === 'stored' && byId('ms-password').type === 'password',
+      'mail: the password box is not empty with "stored" for a stored password');
+    // A managed field: locked, says why, and left out of Save.
+    ok(byId('ms-from').disabled && panel('Mail server (SMTP)').textContent.includes('managed by config.txt'), 'mail: a managed From is not locked with the reason');
+    ok(byId('rm-at').disabled && panel('Volume report by mail').textContent.includes('managed by config.txt'), 'mail: a managed At is not locked with the reason');
+    ok(/last sent .+ to 1 address/.test(panel('Volume report by mail').textContent) && /next send/.test(panel('Volume report by mail').textContent),
+      'mail: the report status does not say when it was last sent and when it goes next');
+    ok(panel('Hosted: config.txt keys').textContent.includes('UI_SMTP_HOST=smtp.example.com') && panel('Hosted: config.txt keys').textContent.includes('UI_REPORT_SCHEDULE='),
+      'mail: the config.txt card has no UI_SMTP_* / UI_REPORT_* lines');
+
+    // Save, password untouched: no password in what goes.
+    setVal('ms-host', 'relay.example.com');
+    byId('ms-save').click();
+    await settleFor(300);
+    const m1 = last('MAIL_SETTINGS_SET');
+    ok(!!m1 && m1.host === 'relay.example.com' && !('password' in m1) && !('from' in m1),
+      `mail: Save with the password untouched sent ${JSON.stringify(m1)}`);
+    // Typed: it goes.
+    setVal('ms-password', 's3cret');
+    byId('ms-save').click();
+    await settleFor(300);
+    ok(last('MAIL_SETTINGS_SET') && last('MAIL_SETTINGS_SET').password === 's3cret', 'mail: a typed password was not sent');
+    ok(byId('ms-password').value === '', 'mail: the typed password stayed in the box after saving');
+    // "None" is plain text: no sign-in.
+    setVal('ms-security', 'none', 'change');
+    await settleFor(20);
+    ok(byId('ms-auth').value === 'none' && byId('ms-auth').disabled && byId('ms-user').disabled && byId('ms-port').value === '25',
+      'mail: Security "None" did not force No sign-in (and port 25)');
+    byId('ms-save').click();
+    await settleFor(300);
+    ok(last('MAIL_SETTINGS_SET').security === 'none' && last('MAIL_SETTINGS_SET').auth === 'none', `mail: "None" saved ${JSON.stringify(last('MAIL_SETTINGS_SET'))}`);
+
+    // Send test mail: every step, the failed one with its reason.
+    byId('ms-test').click();
+    ok(!byId('ms-test-row').hidden, 'mail: Send test mail did not ask for an address');
+    setVal('ms-test-to', 'me@example.com');
+    byId('ms-test-send').click();
+    await settleFor(300);
+    ok(last('MAIL_TEST') && last('MAIL_TEST').to === 'me@example.com', 'mail: the test was not sent to the typed address');
+    const steps = byId('ms-steps').textContent;
+    ok(steps.includes('✓ connect') && steps.includes('✗ auth: 535 bad credentials'), `mail: the test steps read "${steps}"`);
+
+    // The mailed report: Save sends the lists, and not the managed At.
+    setVal('rm-to', 'ops@example.com, lead@example.com');
+    setVal('rm-cc', 'boss@example.com');
+    byId('rm-sheet-breakdown').checked = false;
+    byId('rm-save').click();
+    await settleFor(300);
+    const s1 = last('REPORT_SCHEDULE_SET');
+    ok(!!s1 && JSON.stringify(s1.to) === '["ops@example.com","lead@example.com"]' && JSON.stringify(s1.cc) === '["boss@example.com"]'
+      && JSON.stringify(s1.sheets) === '["daily","monthly"]' && !('at' in s1) && s1.clusters === 'all',
+    `mail: the report Save sent ${JSON.stringify(s1)}`);
+    // Download .xlsx: a report job for every cluster, previous month, no mail.
+    sent.length = 0;
+    byId('rm-download').click();
+    await settleFor(300);
+    const run = last('REPORT_RUN');
+    ok(!!run && run.format === 'xlsx' && run.mail === false && run.clusterIds.length === config.clusters.length && /^month:\d{4}-\d{2}$/.test(run.period),
+      `mail: Download .xlsx sent ${JSON.stringify(run)}`);
+    byId('rm-send-now').click();
+    await settleFor(300);
+    ok(!!last('REPORT_SEND_NOW'), 'mail: Send report now sent nothing');
+
+    // Anybody else: a note, no form, nothing asked.
+    st.caller = { name: 'reader', role: 'operator' };
+    sent.length = 0;
+    await openSettingsTab('Defaults'); await openSettingsTab('Volume fields');
+    await settleFor(300);
+    ok(!byId('ms-host') && /Only an ElasticPro admin sets up the mail server/.test(panel('Mail server (SMTP)').textContent),
+      'mail: a non-admin sees the mail server form');
+    ok(!sent.some((m) => m.type === 'MAIL_SETTINGS_GET' || m.type === 'REPORT_SCHEDULE_GET'), 'mail: a non-admin page asked for the admin settings');
+  } finally {
+    st.caller = null;
+    globalThis.fetch = realFetch;
+  }
+  (await load('core/reports.js')).resetReports();
+  await go('overview');
+}
+
 // Quiet UI: fleet data landing while somebody reads the Clusters page does not repaint it,
 // and nothing on the bar says it was held (no "N updates — Apply" pill). It is drawn by itself
 // once the page has gone 3 s untouched; Refresh draws it at once. A live page — the Request
@@ -3932,6 +4233,6 @@ if (problems.length) {
   for (const p of problems) console.error('  ✗ ' + p);
   process.exit(1);
 }
-console.log('ok: strip, console, shards, the Clusters page (columns, name menu, unreachable rows, expand chevron, alerts link), volume, hand-off, refresh, snapshots, tasks, toasts, accounts split and pinned Zabbix roles, the log-delay preflight, a quiet Config page, Config › Volume fields, the Request Centre and the redraw gate, the request policy, the coverage bar, the Tasks panel and the console tabs, template management, the Alerts page grouped by cluster with merged repeats, Go to, playbooks and the bell');
+console.log('ok: strip, console, shards, the Clusters page (columns, name menu, unreachable rows, expand chevron, alerts link), volume, hand-off, refresh, snapshots, tasks, toasts, accounts split and pinned Zabbix roles, the log-delay preflight, a quiet Config page, Config › Volume fields, report jobs and the Reports pill, the mailed report and the mail server, the Request Centre and the redraw gate, the request policy, the coverage bar, the Tasks panel and the console tabs, template management, the Alerts page grouped by cluster with merged repeats, Go to, playbooks and the bell');
 // The pages leave auto-refresh timers and a live tail running; nothing here waits on them.
 process.exit(0);

@@ -23,7 +23,7 @@ import { findIndexEverywhere } from '../core/snapshot-verify.js';
 import { restoreIndicesDialog, restoreSourceOf } from '../ui/snapshot-dialogs.js';
 import { pageSlice, pagerBar } from '../lib/pager.js';
 import { freshnessBar } from '../lib/freshness.js';
-import { volumeSummary, resetVolumeSummary } from '../ui/volume-summary.js';
+import { volumeSummary, resetVolumeSummary, showReportJobs } from '../ui/volume-summary.js';
 import { templatesView } from '../ui/templates-view.js';
 import { takeFocus } from '../core/focus.js';
 
@@ -54,6 +54,8 @@ export function render(el) {
   // Opened from an alert about ILM errors (core/focus.js): only the indices in an error step.
   const f = takeFocus('indices');
   if (f && f.ilm) { ui.ilmOnly = true; ui.view = 'indices'; ui.page = 0; if (f.index) ui.text = f.index; }
+  // From the top-bar "Reports" pill: Summary › Monthly, with the report jobs open.
+  if (f && f.reports) { ui.view = 'summary'; showReportJobs(); }
   syncWrites().then(draw).catch(() => {});
   draw();
   load();
