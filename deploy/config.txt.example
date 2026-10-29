@@ -233,7 +233,9 @@ UI_SMTP_SECURITY=
 UI_SMTP_USER=
 # A file inside the core container that holds the password (a Docker secret, for example
 # /run/secrets/smtp_password). Read when a mail is sent; the password itself is never
-# written here, and never shown or logged.
+# written here, and never shown or logged. Needs UI_SMTP_HOST (and UI_SMTP_USER): a
+# password from this file goes only to the server named here, so while it is set the
+# host, port, security and user cannot be changed on the page.
 UI_SMTP_PASSWORD_FILE=
 # The sender, e.g. ElasticPro <elasticpro@example.com>
 UI_SMTP_FROM=

@@ -1,18 +1,28 @@
 //! The mailed report: its settings (`<data>/report-schedule.json`) and when it is due.
 //!
-//! Server local time, like the daily collection (`volume::schedule`): "sent on the 1st at
-//! 07:00" is the operator's 1st. A period is due once its send moment has passed and it has
-//! not been sent — the key of the last period sent by the schedule is kept on disk, so a
-//! restart neither sends it again nor skips one that was missed while the core was down
-//! (the first tick after the restart sends it, once).
+//! Two clocks, each for what it is good at. A period is a range of **UTC dates**, like the
+//! days in the index names and every other report (`period`): the monthly report is the
+//! previous calendar month of the UTC date, the weekly one the previous Monday..Sunday, the
+//! daily one the UTC day before. The send **time** `at` is server local, like the daily
+//! collection's `collectAt`: a period is sent at the first `at` after its last UTC day has
+//! ended — on the 1st at 07:00 wherever 07:00 comes after midnight UTC (UTC itself, the
+//! Americas, India), on the 2nd at 07:00 where it does not (east of UTC+7), so a report
+//! never goes out before its last day is over.
+//!
+//! A period is due once its send moment has passed and it has not been sent — the key of
+//! the last period sent by the schedule is kept on disk, so a restart neither sends it again
+//! nor skips one that was missed while the core was down (the first tick after the restart
+//! sends it, once).
 //!
 //! Saving a schedule marks the current period as already handled when its moment has
 //! passed: switching a monthly report on on the 20th sends next month's, not last month's
-//! three weeks late. `REPORT_SEND_NOW` is for that.
+//! three weeks late. `REPORT_SEND_NOW` is for that. A cadence or time changed in
+//! config.txt is the same change made another way: the first tick after the start that
+//! brings it in marks the passed period handled too (`reconcile`).
 
 use super::period::{self, Period};
 use crate::volume::schedule::parse_hhmm;
-use chrono::{Datelike, Duration, NaiveDateTime};
+use chrono::{Datelike, Duration, NaiveDate, NaiveDateTime, NaiveTime};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -79,6 +89,18 @@ pub struct ReportSchedule {
     /// setting; it is the memory that keeps a restart from sending twice.
     #[serde(default)]
     pub last_period: Option<String>,
+    /// The cadence and time in force when the schedule last decided which period was handled
+    /// (a save, or a tick that found config.txt changed). `None`: the file's own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seen_schedule: Option<Cadence>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seen_at: Option<String>,
+    /// The period last given another try after a restart cut its job short, and how many:
+    /// a job that brings the process down is retried once, not on every restart.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retried_period: Option<String>,
+    #[serde(default)]
+    pub retried: u32,
     #[serde(default)]
     pub set_by: Option<String>,
     #[serde(default)]
@@ -103,7 +125,7 @@ impl Default for ReportSchedule {
         ReportSchedule {
             enabled: false, to: vec![], cc: vec![], bcc: vec![], schedule: Cadence::Manual, at: default_at(),
             clusters: default_clusters(), subject: default_subject(), sheets: default_sheets(), last_sent: None,
-            last_period: None, set_by: None, set_at: None,
+            last_period: None, seen_schedule: None, seen_at: None, retried_period: None, retried: 0, set_by: None, set_at: None,
         }
     }
 }
@@ -173,34 +195,82 @@ pub fn period_key(p: &Period) -> String {
     format!("{}..{}", p.from, p.to)
 }
 
-/// The period a cadence covers when asked at `local`, and the moment it may first be sent.
-/// `None` for manual.
-pub fn current(cadence: Cadence, at: &str, local: NaiveDateTime) -> Option<(Period, NaiveDateTime)> {
-    let at = parse_hhmm(at)?;
-    let today = local.date();
+/// The two readings of now a schedule decision needs: server local time (`at` is in it)
+/// and UTC (a period's days are in it).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Clock {
+    pub local: NaiveDateTime,
+    pub utc: NaiveDateTime,
+}
+
+impl Clock {
+    pub fn now() -> Clock {
+        let n = chrono::Local::now();
+        Clock { local: n.naive_local(), utc: n.naive_utc() }
+    }
+
+    /// A server local time, with the server's offset at that time (the tests' way in).
+    pub fn at_local(local: NaiveDateTime) -> Clock {
+        use chrono::TimeZone;
+        let utc = chrono::Local.from_local_datetime(&local).earliest().map(|d| d.naive_utc()).unwrap_or(local);
+        Clock { local, utc }
+    }
+
+    /// A clock `offset_minutes` east of UTC.
+    pub fn with_offset(utc: NaiveDateTime, offset_minutes: i64) -> Clock {
+        Clock { local: utc + Duration::minutes(offset_minutes), utc }
+    }
+
+    pub fn utc_today(&self) -> NaiveDate {
+        self.utc.date()
+    }
+
+    /// Local time of the start of a UTC date.
+    fn local_start_of(&self, utc_date: NaiveDate) -> NaiveDateTime {
+        utc_date.and_time(NaiveTime::MIN) + (self.local - self.utc)
+    }
+
+    /// The first local `at` at or after the start of a UTC date: when a period that ended
+    /// the day before may go out.
+    fn moment_from(&self, utc_date: NaiveDate, at: NaiveTime) -> NaiveDateTime {
+        let start = self.local_start_of(utc_date);
+        if start.time() <= at { start.date().and_time(at) } else { (start.date() + Duration::days(1)).and_time(at) }
+    }
+}
+
+/// The UTC date a cadence's current period gave way on (the 1st, Monday, today).
+fn boundary(cadence: Cadence, utc_today: NaiveDate) -> Option<NaiveDate> {
     match cadence {
         Cadence::Manual => None,
-        Cadence::Monthly => {
-            let first = today.with_day(1)?;
-            Some((period::previous_month(today), first.and_time(at)))
-        }
-        Cadence::Weekly => {
-            let monday = today - Duration::days(today.weekday().num_days_from_monday() as i64);
-            Some((period::previous_week(today), monday.and_time(at)))
-        }
-        Cadence::Daily => Some((period::yesterday(today), today.and_time(at))),
+        Cadence::Monthly => utc_today.with_day(1),
+        Cadence::Weekly => Some(utc_today - Duration::days(utc_today.weekday().num_days_from_monday() as i64)),
+        Cadence::Daily => Some(utc_today),
     }
+}
+
+/// The period a cadence covers now (UTC dates) and the local moment it may first be sent.
+/// `None` for manual.
+pub fn current(cadence: Cadence, at: &str, clock: Clock) -> Option<(Period, NaiveDateTime)> {
+    let at = parse_hhmm(at)?;
+    let today = clock.utc_today();
+    let p = match cadence {
+        Cadence::Manual => return None,
+        Cadence::Monthly => period::previous_month(today),
+        Cadence::Weekly => period::previous_week(today),
+        Cadence::Daily => period::yesterday(today),
+    };
+    Some((p, clock.moment_from(boundary(cadence, today)?, at)))
 }
 
 /// The period to send now, if one is due: enabled, past its moment, not sent yet. A daily
 /// report also waits for that day's scheduled collection (`collected`), so yesterday's
 /// figures are final when they go out.
-pub fn due(s: &ReportSchedule, local: NaiveDateTime, collected: bool) -> Option<Period> {
+pub fn due(s: &ReportSchedule, clock: Clock, collected: bool) -> Option<Period> {
     if !s.enabled || s.to.is_empty() {
         return None;
     }
-    let (p, moment) = current(s.schedule, &s.at, local)?;
-    if local < moment || s.last_period.as_deref() == Some(period_key(&p).as_str()) {
+    let (p, moment) = current(s.schedule, &s.at, clock)?;
+    if clock.local < moment || s.last_period.as_deref() == Some(period_key(&p).as_str()) {
         return None;
     }
     if s.schedule == Cadence::Daily && !collected {
@@ -211,40 +281,98 @@ pub fn due(s: &ReportSchedule, local: NaiveDateTime, collected: bool) -> Option<
 
 /// When the schedule will next send, local time: now when a period is due (or waiting for
 /// the day's collection), else the next period's moment. `None` when it never will.
-pub fn next_send(s: &ReportSchedule, local: NaiveDateTime) -> Option<NaiveDateTime> {
+pub fn next_send(s: &ReportSchedule, clock: Clock) -> Option<NaiveDateTime> {
     if !s.enabled || s.to.is_empty() {
         return None;
     }
-    let (p, moment) = current(s.schedule, &s.at, local)?;
+    let (p, moment) = current(s.schedule, &s.at, clock)?;
     if s.last_period.as_deref() != Some(period_key(&p).as_str()) {
-        return Some(moment.max(local));
+        return Some(moment.max(clock.local));
     }
-    let today = local.date();
-    Some(match s.schedule {
+    let today = clock.utc_today();
+    let next = match s.schedule {
         Cadence::Monthly => {
             let (y, m) = if today.month() == 12 { (today.year() + 1, 1) } else { (today.year(), today.month() + 1) };
-            chrono::NaiveDate::from_ymd_opt(y, m, 1)?.and_time(moment.time())
+            NaiveDate::from_ymd_opt(y, m, 1)?
         }
-        Cadence::Weekly => moment + Duration::days(7),
-        _ => moment + Duration::days(1),
-    })
+        Cadence::Weekly => boundary(Cadence::Weekly, today)? + Duration::days(7),
+        _ => today + Duration::days(1),
+    };
+    Some(clock.moment_from(next, moment.time()))
 }
 
 /// When saving: the period whose moment has already passed counts as handled.
-pub fn mark_passed(s: &mut ReportSchedule, local: NaiveDateTime) {
-    if let Some((p, moment)) = current(s.schedule, &s.at, local) {
-        if local >= moment {
+pub fn mark_passed(s: &mut ReportSchedule, clock: Clock) {
+    if let Some((p, moment)) = current(s.schedule, &s.at, clock) {
+        if clock.local >= moment {
             s.last_period = Some(period_key(&p));
         }
     }
+}
+
+/// config.txt changed the cadence or the time since the file last decided (a save, or an
+/// earlier start): do what a save would have done — the period whose moment has passed
+/// counts as handled — and remember what is now in force. `true` when the file changed.
+pub fn reconcile(file: &mut ReportSchedule, s: &crate::settings::Settings, clock: Clock) -> bool {
+    let (e, _) = file.effective(s);
+    let seen = (file.seen_schedule.unwrap_or(file.schedule), file.seen_at.clone().unwrap_or_else(|| file.at.clone()));
+    if seen == (e.schedule, e.at.clone()) {
+        return false;
+    }
+    if e.enabled {
+        let mut tmp = e.clone();
+        mark_passed(&mut tmp, clock);
+        file.last_period = tmp.last_period;
+    }
+    file.seen_schedule = Some(e.schedule);
+    file.seen_at = Some(e.at);
+    true
+}
+
+/// How a mailed job ended that did not send, for `ended_unsent`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Retry {
+    /// A person stopped it, or it failed on its own: the period stays handled.
+    No,
+    /// The emergency stop: try again on the first tick after it is over.
+    Stop,
+    /// A restart cut it short before its mail: try again, once per period.
+    Restart,
+}
+
+/// A scheduled job for `key` ended without sending. Gives the period back to the schedule
+/// (`last_period` cleared, so the next tick queues it again) when that is what `retry` asks
+/// and the schedule still remembers this period as its last. Returns whether it did.
+pub fn give_back(file: &mut ReportSchedule, key: &str, retry: Retry) -> bool {
+    if retry == Retry::No || file.last_period.as_deref() != Some(key) {
+        return false;
+    }
+    if retry == Retry::Restart {
+        let before = if file.retried_period.as_deref() == Some(key) { file.retried } else { 0 };
+        if before >= 1 {
+            return false;
+        }
+        file.retried_period = Some(key.to_string());
+        file.retried = before + 1;
+    }
+    file.last_period = None;
+    true
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn at(s: &str) -> NaiveDateTime {
+    fn local(s: &str) -> NaiveDateTime {
         NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M").unwrap()
+    }
+    /// A server on UTC: local time and UTC agree.
+    fn at(s: &str) -> Clock {
+        Clock::with_offset(local(s), 0)
+    }
+    /// A server `minutes` east of UTC, at local time `s`.
+    fn east(s: &str, minutes: i64) -> Clock {
+        Clock::with_offset(local(s) - Duration::minutes(minutes), minutes)
     }
     fn sched(c: Cadence) -> ReportSchedule {
         ReportSchedule { enabled: true, to: vec!["a@x.org".into()], schedule: c, at: "07:00".into(), ..ReportSchedule::default() }
@@ -311,15 +439,90 @@ mod tests {
     #[test]
     fn the_next_send() {
         let mut s = sched(Cadence::Monthly);
-        assert_eq!(next_send(&s, at("2026-10-31 23:00")), Some(at("2026-10-31 23:00")), "September never sent: now");
+        assert_eq!(next_send(&s, at("2026-10-31 23:00")), Some(local("2026-10-31 23:00")), "September never sent: now");
         mark_passed(&mut s, at("2026-10-20 10:00"));
-        assert_eq!(next_send(&s, at("2026-10-20 10:00")), Some(at("2026-11-01 07:00")));
-        assert_eq!(next_send(&s, at("2026-12-05 10:00")), Some(at("2026-12-05 10:00")), "November not sent yet: due now");
+        assert_eq!(next_send(&s, at("2026-10-20 10:00")), Some(local("2026-11-01 07:00")));
+        assert_eq!(next_send(&s, at("2026-12-05 10:00")), Some(local("2026-12-05 10:00")), "November not sent yet: due now");
         let mut d = sched(Cadence::Daily);
-        assert_eq!(next_send(&d, at("2026-10-29 05:00")), Some(at("2026-10-29 07:00")));
+        assert_eq!(next_send(&d, at("2026-10-29 05:00")), Some(local("2026-10-29 07:00")));
         mark_passed(&mut d, at("2026-10-29 08:00"));
-        assert_eq!(next_send(&d, at("2026-10-29 08:00")), Some(at("2026-10-30 07:00")));
+        assert_eq!(next_send(&d, at("2026-10-29 08:00")), Some(local("2026-10-30 07:00")));
         assert_eq!(next_send(&sched(Cadence::Manual), at("2026-10-29 08:00")), None);
+        let mut w = sched(Cadence::Weekly);
+        mark_passed(&mut w, at("2026-11-04 08:00"));
+        assert_eq!(next_send(&w, at("2026-11-04 08:00")), Some(local("2026-11-09 07:00")), "the next Monday");
+    }
+
+    #[test]
+    fn periods_are_utc_dates_and_only_the_time_is_local() {
+        // India, UTC+5:30: 07:00 on the 1st is 01:30 UTC on the 1st — October is over.
+        let p = due(&sched(Cadence::Monthly), east("2026-11-01 07:00", 330), true).unwrap();
+        assert_eq!((p.from.as_str(), p.to.as_str()), ("2026-10-01", "2026-10-31"));
+        assert_eq!(due(&sched(Cadence::Monthly), east("2026-11-01 06:59", 330), true), None);
+        // A daily report at 04:00 India time on the 29th: 22:30 UTC on the 28th. The UTC
+        // 28th is not over, so the 27th is the day due — the record's days are UTC days.
+        let mut d = sched(Cadence::Daily);
+        d.at = "04:00".into();
+        let p = due(&d, east("2026-10-29 04:00", 330), true).unwrap();
+        assert_eq!(p.from, "2026-10-27", "{p:?}");
+        // After 05:30 local (UTC midnight) the 28th has ended; it goes at the next 04:00.
+        d.last_period = Some(period_key(&p));
+        assert_eq!(due(&d, east("2026-10-29 06:00", 330), true), None, "the 28th waits for 04:00");
+        assert_eq!(next_send(&d, east("2026-10-29 06:00", 330)), Some(local("2026-10-30 04:00")));
+        assert_eq!(due(&d, east("2026-10-30 04:00", 330), true).map(|p| p.from), Some("2026-10-28".into()));
+        // New York, UTC-4: 07:00 on the 1st is 11:00 UTC on the 1st.
+        let p = due(&sched(Cadence::Monthly), east("2026-11-01 07:00", -240), true).unwrap();
+        assert_eq!(p.to, "2026-10-31");
+        // Tokyo, UTC+9: 07:00 on the 1st is 22:00 UTC on the 31st — October is not over, so
+        // September is the current period (long sent) and October goes on the 2nd at 07:00.
+        let mut m = sched(Cadence::Monthly);
+        m.last_period = Some("2026-09-01..2026-09-30".into());
+        assert_eq!(due(&m, east("2026-11-01 07:00", 540), true), None, "October's last UTC day is not over");
+        assert_eq!(due(&m, east("2026-11-01 10:00", 540), true), None, "over now, but 07:00 has passed for the day");
+        assert_eq!(next_send(&m, east("2026-11-01 10:00", 540)), Some(local("2026-11-02 07:00")));
+        assert_eq!(due(&m, east("2026-11-02 07:00", 540), true).map(|p| p.to), Some("2026-10-31".into()));
+    }
+
+    #[test]
+    fn a_cadence_or_time_changed_in_config_txt_is_handled_like_a_save() {
+        let mut f = sched(Cadence::Monthly);
+        f.seen_schedule = Some(Cadence::Monthly);
+        f.seen_at = Some("07:00".into());
+        let none = crate::settings::Settings::default();
+        assert!(!reconcile(&mut f, &none, at("2026-10-20 10:00")), "nothing changed");
+        assert_eq!(due(&f, at("2026-10-20 10:00"), true).map(|p| p.from), Some("2026-09-01".into()),
+                   "unchanged, a missed send still goes out");
+        // config.txt now says weekly: last week's moment (Monday the 19th) has passed.
+        let weekly = crate::settings::Settings::parse("UI_REPORT_SCHEDULE=weekly\n");
+        assert!(reconcile(&mut f, &weekly, at("2026-10-20 10:00")));
+        let (e, _) = f.effective(&weekly);
+        assert_eq!(due(&e, at("2026-10-20 10:00"), true), None, "not sent late");
+        assert_eq!((f.seen_schedule, f.seen_at.as_deref()), (Some(Cadence::Weekly), Some("07:00")));
+        assert!(!reconcile(&mut f, &weekly, at("2026-10-20 10:05")), "once");
+        assert!(due(&f.effective(&weekly).0, at("2026-10-26 07:00"), true).is_some(), "next Monday's goes");
+        // A file that never recorded what it saw compares with its own fields.
+        let mut old = sched(Cadence::Monthly);
+        assert!(!reconcile(&mut old, &none, at("2026-10-20 10:00")));
+        assert!(reconcile(&mut old, &crate::settings::Settings::parse("UI_REPORT_AT=06:00\n"), at("2026-10-20 10:00")));
+        assert_eq!(old.last_period.as_deref(), Some("2026-09-01..2026-09-30"));
+    }
+
+    #[test]
+    fn an_unsent_period_is_given_back_for_the_stop_and_once_for_a_restart() {
+        let key = "2026-10-01..2026-10-31";
+        let mut f = sched(Cadence::Monthly);
+        f.last_period = Some(key.into());
+        assert!(!give_back(&mut f, key, Retry::No), "stopped by a person: handled");
+        assert!(!give_back(&mut f, "2026-09-01..2026-09-30", Retry::Stop), "not the period it remembers");
+        assert!(give_back(&mut f, key, Retry::Stop));
+        assert_eq!(f.last_period, None);
+        f.last_period = Some(key.into());
+        assert!(give_back(&mut f, key, Retry::Stop), "the stop as often as it comes");
+        f.last_period = Some(key.into());
+        assert!(give_back(&mut f, key, Retry::Restart), "a restart: once");
+        f.last_period = Some(key.into());
+        assert!(!give_back(&mut f, key, Retry::Restart), "not on every restart");
+        assert_eq!(f.last_period.as_deref(), Some(key));
     }
 
     #[test]

@@ -2,9 +2,9 @@
 //!
 //! A day is a date in the index names (docs/VOLUME.md "What counts"), so a period is a
 //! range of those dates and nothing here goes through a time zone. "Today" is given by the
-//! caller: a report somebody asks for counts from today's UTC date, like the cards; the
-//! mailed report counts from the server's local date, because "sent on the 1st" is the
-//! operator's 1st (see `schedule`).
+//! caller, and every caller gives today's UTC date — a report somebody asks for, like the
+//! cards, and the mailed report too: only its send time is server local (see `schedule`),
+//! so "the previous month" is the same days whoever asks and wherever the server is.
 
 use crate::volume::schedule::{day_key, parse_day};
 use chrono::{Datelike, Duration, NaiveDate, Weekday};

@@ -7,6 +7,16 @@
 //! `passwordSet`, nothing more. With `UI_SMTP_PASSWORD_FILE` the password is read from that
 //! file when a mail is sent, and not kept anywhere by the core.
 //!
+//! A password goes only to the server it was given for, as a cluster's credential goes only
+//! to its destination (`ClusterSecrets::set_bound`). The stored one is sealed with its
+//! destination — host, port, security, user — in the associated data and kept with that
+//! destination beside it: change any of the four without typing the password again and it
+//! is not used (`passwordSet: false`, `passwordStale: true`, "the mail server changed: type
+//! the password again"), never handed to the new server. A password from config.txt goes
+//! only to a server config.txt names: `UI_SMTP_PASSWORD_FILE` needs `UI_SMTP_HOST` (refused
+//! at load otherwise), and while it is set port, security and user come from config.txt too
+//! (or their built-in defaults) and cannot be changed from the page.
+//!
 //! "none" security is allowed only with no authentication: a password over plain text is
 //! a password given away, so the combination is refused when saved and again when sent.
 //!
@@ -24,9 +34,22 @@ use serde_json::{json, Value};
 use std::time::Duration;
 
 pub const FILE: &str = "mail.json";
-/// The associated data the stored password is sealed with: moved into another file or
-/// field, it no longer opens.
-pub const SEAL_AAD: &str = "mail.json:password";
+/// The start of the associated data the stored password is sealed with (`seal_aad`): moved
+/// into another file or field, it no longer opens.
+pub const SEAL_AAD_PREFIX: &str = "mail.json:password";
+/// What a stored password says when its server was changed after it was typed.
+pub const MOVED: &str = "the mail server changed: type the password again";
+
+/// The destination a password is given for: `host:port:security:user`.
+pub fn destination(host: &str, port: u16, security: Security, user: &str) -> String {
+    format!("{host}:{port}:{}:{user}", security.as_str())
+}
+
+/// The associated data a password for `destination` is sealed with: opened for any other
+/// destination, it does not open.
+pub fn seal_aad(destination: &str) -> String {
+    format!("{SEAL_AAD_PREFIX}:{destination}")
+}
 /// The longest wait for any one step; a whole session is bounded by `SESSION_TIMEOUT`.
 pub const STEP_TIMEOUT: Duration = Duration::from_secs(20);
 pub const SESSION_TIMEOUT: Duration = Duration::from_secs(90);
@@ -47,6 +70,13 @@ impl Security {
             "tls" => Some(Security::Tls),
             "none" => Some(Security::None),
             _ => None,
+        }
+    }
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Security::Starttls => "starttls",
+            Security::Tls => "tls",
+            Security::None => "none",
         }
     }
     pub fn default_port(self) -> u16 {
@@ -84,6 +114,9 @@ pub struct MailFile {
     pub from: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub password: Option<String>,
+    /// The destination (`destination`) the password was typed for; it is sealed with it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub password_for: Option<String>,
     #[serde(default)]
     pub set_by: Option<String>,
     #[serde(default)]
@@ -94,8 +127,11 @@ pub struct MailFile {
 #[derive(Clone, PartialEq)]
 pub enum PasswordFrom {
     None,
-    /// Sealed in `mail.json`.
+    /// Sealed in `mail.json`, for the server in force.
     Stored(String),
+    /// Sealed in `mail.json` for another server (host, port, security or user changed since
+    /// it was typed): never used, and shown as not set.
+    Moved,
     /// `UI_SMTP_PASSWORD_FILE`: a path, read at send time.
     File(String),
 }
@@ -105,6 +141,7 @@ impl std::fmt::Debug for PasswordFrom {
         match self {
             PasswordFrom::None => f.write_str("None"),
             PasswordFrom::Stored(_) => f.write_str("Stored(<sealed>)"),
+            PasswordFrom::Moved => f.write_str("Moved"),
             PasswordFrom::File(p) => write!(f, "File({p})"),
         }
     }
@@ -121,7 +158,8 @@ pub struct Effective {
     pub from: String,
     pub password: PasswordFrom,
     /// The fields config.txt sets: `host`, `port`, `security`, `user`, `password`, `from`
-    /// (and `auth`, which a password file implies).
+    /// (and `auth`, which a password file implies; with a password file also `port`,
+    /// `security` and `user`, which then come from config.txt or their defaults).
     pub managed: Vec<&'static str>,
 }
 
@@ -136,18 +174,24 @@ pub const MANAGED_KEYS: &[(&str, &str)] = &[
 ];
 
 pub fn effective(file: &MailFile, s: &crate::settings::Settings) -> Effective {
+    // A password from config.txt goes only to a server config.txt names (settings.rs refuses
+    // the file without the host at load; the same rule, held here too).
+    let pw_file = s.text("UI_SMTP_HOST").and(s.text("UI_SMTP_PASSWORD_FILE")).is_some();
     let mut e = Effective {
         host: file.host.clone(),
         port: 0,
-        security: file.security,
+        security: if pw_file { Security::default() } else { file.security },
         auth: file.auth,
-        user: file.user.clone(),
+        user: if pw_file { String::new() } else { file.user.clone() },
         from: file.from.clone(),
-        password: file.password.clone().map(PasswordFrom::Stored).unwrap_or(PasswordFrom::None),
+        password: PasswordFrom::None,
         managed: vec![],
     };
     for (key, field) in MANAGED_KEYS {
         let Some(v) = s.text(key) else { continue };
+        if *field == "password" && !pw_file {
+            continue;
+        }
         match *field {
             "host" => e.host = v.to_string(),
             "port" => e.port = v.parse().unwrap_or(0),
@@ -163,12 +207,30 @@ pub fn effective(file: &MailFile, s: &crate::settings::Settings) -> Effective {
         e.managed.push(field);
     }
     if e.port == 0 {
-        e.port = file.port.unwrap_or_else(|| e.security.default_port());
+        e.port = if pw_file { e.security.default_port() } else { file.port.unwrap_or_else(|| e.security.default_port()) };
+    }
+    if pw_file {
+        for f in ["port", "security", "user"] {
+            if !e.managed.contains(&f) {
+                e.managed.push(f);
+            }
+        }
+    } else if let Some(sealed) = &file.password {
+        e.password = if file.password_for.as_deref() == Some(e.destination().as_str()) {
+            PasswordFrom::Stored(sealed.clone())
+        } else {
+            PasswordFrom::Moved
+        };
     }
     e
 }
 
 impl Effective {
+    /// Where a password would go: `destination(host, port, security, user)`.
+    pub fn destination(&self) -> String {
+        destination(&self.host, self.port, self.security, &self.user)
+    }
+
     /// Configured enough to try a send.
     pub fn configured(&self) -> bool {
         !self.host.is_empty() && !self.from.is_empty()
@@ -176,7 +238,7 @@ impl Effective {
 
     pub fn password_set(&self) -> bool {
         match &self.password {
-            PasswordFrom::None => false,
+            PasswordFrom::None | PasswordFrom::Moved => false,
             PasswordFrom::Stored(_) => true,
             PasswordFrom::File(p) => std::fs::metadata(p).is_ok_and(|m| m.is_file() && m.len() > 0),
         }
@@ -188,7 +250,9 @@ impl Effective {
             "host": self.host, "port": self.port, "security": self.security, "auth": self.auth,
             "user": self.user, "from": self.from,
             "passwordSet": self.password_set(),
-            "passwordFrom": match self.password { PasswordFrom::None => Value::Null, PasswordFrom::Stored(_) => json!("stored"), PasswordFrom::File(_) => json!("config.txt") },
+            "passwordFrom": match self.password { PasswordFrom::None | PasswordFrom::Moved => Value::Null, PasswordFrom::Stored(_) => json!("stored"), PasswordFrom::File(_) => json!("config.txt") },
+            // A password is kept, but for another server: it is not used; type it again.
+            "passwordStale": self.password == PasswordFrom::Moved,
             "managed": self.managed,
             "configured": self.configured(),
             "problem": self.problem(),
@@ -200,7 +264,11 @@ impl Effective {
         if !self.configured() {
             return Some("no mail server: set the host and the From address".into());
         }
+        if matches!(self.password, PasswordFrom::File(_)) && self.auth == Auth::Password && self.user.trim().is_empty() {
+            return Some("UI_SMTP_PASSWORD_FILE needs UI_SMTP_USER in config.txt: the user comes from there with the password".into());
+        }
         validate(&self.host, self.port, self.security, self.auth, &self.user, &self.from).err()
+            .or_else(|| (self.auth == Auth::Password && self.password == PasswordFrom::Moved).then(|| MOVED.into()))
             .or_else(|| (self.auth == Auth::Password && !self.password_set()).then(|| "authentication is on but no password is set".into()))
     }
 }
@@ -309,10 +377,23 @@ fn step(steps: &mut Vec<Step>, name: &'static str, r: Result<String, String>) ->
 /// One session: connect, TLS (implicit or STARTTLS, or none), auth, and the send when there
 /// is a mail. Stops at the first step that fails; the steps taken are the answer.
 pub async fn session(r: &Ready, mail: Option<&Outgoing>) -> Vec<Step> {
+    session_within(r, mail, SESSION_TIMEOUT).await
+}
+
+/// `session` with its time limit given. Out of time, the step that was under way fails —
+/// a server that never answers fails at "connect", not at "send".
+pub async fn session_within(r: &Ready, mail: Option<&Outgoing>, limit: Duration) -> Vec<Step> {
     let mut steps = vec![];
     let run = session_steps(r, mail, &mut steps);
-    if tokio::time::timeout(SESSION_TIMEOUT, run).await.is_err() {
-        steps.push(Step { step: "send", ok: false, detail: format!("the session took longer than {} s", SESSION_TIMEOUT.as_secs()) });
+    if tokio::time::timeout(limit, run).await.is_err() {
+        let under_way = match steps.last().map(|s| s.step) {
+            None => "connect",
+            Some("connect") => "tls",
+            Some("tls") => "auth",
+            _ => "send",
+        };
+        let secs = limit.as_secs_f64();
+        steps.push(Step { step: under_way, ok: false, detail: format!("no answer: the session took longer than {secs} s") });
     }
     steps
 }
@@ -419,9 +500,85 @@ mod tests {
         let e = effective(&file, &s);
         assert_eq!((e.host.as_str(), e.security, e.port, e.auth), ("smtp.corp", Security::Tls, 465, Auth::Password));
         assert_eq!(e.password, PasswordFrom::File("/run/secrets/smtp".into()));
-        assert_eq!(e.managed, vec!["host", "security", "user", "auth", "password"]);
+        assert_eq!(e.managed, vec!["host", "security", "user", "auth", "password", "port"]);
         assert!(!e.password_set(), "the file does not exist here");
         assert_eq!(e.problem().as_deref(), Some("authentication is on but no password is set"));
+    }
+
+    fn bound_file(host: &str, port: Option<u16>, security: Security, user: &str, typed_for: &str) -> MailFile {
+        MailFile { host: host.into(), port, security, auth: Auth::Password, user: user.into(), from: "ep@x.org".into(),
+                   password: Some("enc:v1:key:SEALED".into()), password_for: Some(typed_for.into()), ..MailFile::default() }
+    }
+
+    #[test]
+    fn a_stored_password_is_for_the_server_it_was_typed_for() {
+        let none = crate::settings::Settings::default();
+        let dest = destination("smtp.corp", 587, Security::Starttls, "svc");
+        assert_eq!(dest, "smtp.corp:587:starttls:svc");
+        assert_eq!(seal_aad(&dest), "mail.json:password:smtp.corp:587:starttls:svc");
+        let e = effective(&bound_file("smtp.corp", None, Security::Starttls, "svc", &dest), &none);
+        assert_eq!(e.password, PasswordFrom::Stored("enc:v1:key:SEALED".into()), "the port is the default, 587: the same server");
+        assert!(e.password_set() && e.problem().is_none(), "{:?}", e.problem());
+        // Each of the four, changed without the password typed again: not used, and said so.
+        for moved in [
+            bound_file("evil.example", None, Security::Starttls, "svc", &dest),
+            bound_file("smtp.corp", Some(2525), Security::Starttls, "svc", &dest),
+            bound_file("smtp.corp", Some(587), Security::Tls, "svc", &dest),
+            bound_file("smtp.corp", None, Security::Starttls, "other", &dest),
+        ] {
+            let e = effective(&moved, &none);
+            assert_eq!(e.password, PasswordFrom::Moved, "{moved:?}");
+            assert!(!e.password_set());
+            assert_eq!(e.problem().as_deref(), Some(MOVED));
+            let v = e.view();
+            assert_eq!((v["passwordSet"].as_bool(), v["passwordStale"].as_bool(), v["passwordFrom"].is_null()), (Some(false), Some(true), true), "{v}");
+        }
+        // A password kept before it was bound to anything goes nowhere.
+        let mut old = bound_file("smtp.corp", None, Security::Starttls, "svc", &dest);
+        old.password_for = None;
+        assert_eq!(effective(&old, &none).password, PasswordFrom::Moved);
+        // Authentication off: a stale password is no problem, it is simply not used.
+        let mut off = bound_file("other", None, Security::Starttls, "svc", &dest);
+        off.auth = Auth::None;
+        assert_eq!(effective(&off, &none).problem(), None);
+    }
+
+    #[test]
+    fn a_password_file_locks_the_whole_destination_to_config_txt() {
+        let mut file = bound_file("evil.example", Some(2525), Security::Tls, "attacker", "x");
+        file.auth = Auth::None;
+        let s = crate::settings::Settings::parse("UI_SMTP_HOST=smtp.corp\nUI_SMTP_PASSWORD_FILE=/run/secrets/smtp\nUI_SMTP_USER=svc\n");
+        let e = effective(&file, &s);
+        assert_eq!((e.host.as_str(), e.port, e.security, e.user.as_str(), e.auth), ("smtp.corp", 587, Security::Starttls, "svc", Auth::Password),
+                   "mail.json's port and security are not used with a password file");
+        for f in ["host", "port", "security", "user", "auth", "password"] {
+            assert!(e.managed.contains(&f), "{f} is locked: {:?}", e.managed);
+        }
+        let no_user = crate::settings::Settings::parse("UI_SMTP_HOST=smtp.corp\nUI_SMTP_PASSWORD_FILE=/run/secrets/smtp\n");
+        assert!(effective(&file, &no_user).problem().unwrap().contains("UI_SMTP_USER"));
+        // Without UI_SMTP_HOST the file is refused when config.txt is read, so never used.
+        let no_host = crate::settings::Settings::parse("UI_SMTP_PASSWORD_FILE=/run/secrets/smtp\n");
+        assert!(no_host.warnings().iter().any(|w| w.contains("UI_SMTP_PASSWORD_FILE needs UI_SMTP_HOST")), "{:?}", no_host.warnings());
+        let e = effective(&file, &no_host);
+        assert!(!matches!(e.password, PasswordFrom::File(_)) && e.host == "evil.example" && !e.managed.contains(&"password"), "{e:?}");
+    }
+
+    #[tokio::test]
+    async fn a_server_that_never_answers_fails_at_connect() {
+        // Accepts the connection and says nothing: lettre waits for the greeting.
+        let l = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let port = l.local_addr().unwrap().port();
+        let hold = tokio::spawn(async move {
+            let mut kept = vec![];
+            while let Ok((s, _)) = l.accept().await {
+                kept.push(s);
+            }
+        });
+        let r = Ready { host: "127.0.0.1".into(), port, security: Security::None, credentials: None, from: "ep@x.org".into() };
+        let steps = session_within(&r, None, Duration::from_millis(300)).await;
+        assert_eq!(steps.len(), 1, "{steps:?}");
+        assert_eq!((steps[0].step, steps[0].ok), ("connect", false), "{steps:?}");
+        hold.abort();
     }
 
     #[test]
@@ -443,7 +600,8 @@ mod tests {
 
     #[test]
     fn the_password_is_never_in_the_view_or_a_debug_line() {
-        let file = MailFile { host: "h".into(), user: "u".into(), from: "ep@x.org".into(), password: Some("enc:v1:key:SEALED".into()), ..MailFile::default() };
+        let file = MailFile { host: "h".into(), user: "u".into(), from: "ep@x.org".into(), password: Some("enc:v1:key:SEALED".into()),
+                              password_for: Some(destination("h", 587, Security::Starttls, "u")), ..MailFile::default() };
         let e = effective(&file, &crate::settings::Settings::default());
         let v = e.view().to_string();
         assert!(!v.contains("SEALED") && !v.contains("enc:v1"), "{v}");

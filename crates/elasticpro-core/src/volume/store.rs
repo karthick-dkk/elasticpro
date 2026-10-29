@@ -41,6 +41,11 @@ pub struct ClusterState {
     /// The local date of the last scheduled run, so a restart neither repeats today's run
     /// nor skips a missed one.
     pub last_scheduled_day: Option<String>,
+    /// When a run last applied a whole `_cat` listing to every kept month (epoch ms): a
+    /// finished day with no record by then had no index (`report` builds such a period
+    /// from the record without asking the cluster).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub listed_at: Option<i64>,
     #[serde(default)]
     pub matched: u64,
     #[serde(default)]

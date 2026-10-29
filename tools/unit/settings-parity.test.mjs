@@ -112,3 +112,16 @@ test('the request gate\'s keys sit in the performance section, in all three plac
     assert.ok(gate.includes(`"${env[1]}"`), `gate.rs never reads ${env[1]} (${k})`);
   }
 });
+
+test('a password file needs its host, in deploy.sh and in the core alike', () => {
+  // A password from config.txt goes only to a mail server config.txt names; otherwise an
+  // administrator could point the page's host at their own server and receive it.
+  const sh = read('deploy/deploy.sh');
+  const at = sh.indexOf('config_validate() {');
+  const fn = sh.slice(at, sh.indexOf('\n}\n', at));
+  assert.match(fn, /UI_SMTP_PASSWORD_FILE=\.' "\$CFG_TMP\/parsed" && ! grep -q '\^UI_SMTP_HOST=\./,
+    'deploy.sh config_validate does not refuse UI_SMTP_PASSWORD_FILE without UI_SMTP_HOST');
+  const rs = read('crates/elasticpro-core/src/settings.rs');
+  assert.match(rs, /contains_key\("UI_SMTP_PASSWORD_FILE"\) && !s\.values\.contains_key\("UI_SMTP_HOST"\)/,
+    'settings.rs parse does not drop UI_SMTP_PASSWORD_FILE without UI_SMTP_HOST');
+});
