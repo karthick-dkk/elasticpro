@@ -434,7 +434,9 @@ impl Core {
             "linksEnabled": self.display_links_on(),
             "options": Core::play_options(),
         });
-        if caller.is_none_or(|c| c.role >= Role::Admin) {
+        // Displays, links and groups span every cluster: the same rule as PLAY_LINK_* — an
+        // administrator limited to some clusters sees none of them.
+        if caller.is_none_or(|c| c.role >= Role::Admin && !c.limited()) {
             out["displays"] = json!(eff.displays);
             let mut groups: Vec<String> = self.all_specs().into_iter().flat_map(|s| s.zabbix_groups).filter(|g| !g.trim().is_empty()).collect();
             groups.sort();
