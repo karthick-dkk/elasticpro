@@ -13,7 +13,8 @@ test('classify: the ordinary bands', () => {
   assert.equal(ld.classify(29.9, T), 'OK');
   assert.equal(ld.classify(30, T), 'DELAYED', 'the threshold itself is delayed');
   assert.equal(ld.classify(59.9, T), 'DELAYED');
-  assert.equal(ld.classify(60, T), 'CRITICAL', 'the critical threshold itself is critical');
+  assert.equal(ld.classify(60, T), 'DELAYED', 'exactly 60 min is still yellow (30 to 60 inclusive)');
+  assert.equal(ld.classify(60.1, T), 'CRITICAL', 'over 60 min is red');
   assert.equal(ld.classify(6000, T), 'CRITICAL');
 });
 
