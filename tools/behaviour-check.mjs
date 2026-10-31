@@ -2937,6 +2937,141 @@ restoreConsole();
   await go('overview');
 }
 
+// Cluster type and ULM (0.3.47, core/cluster-kind.js): a CI / DI / On-Prem badge beside every
+// name, the Type filter, the edit dialog writing the cluster's file keys (desktop) and
+// CLUSTER_META_SET (hosted, a Zabbix cluster's meta part only), and the snapshot cell saying
+// "ULM · s3 <bucket>" for a cluster that expects no snapshots. Writes are stubbed so the fixture
+// is not rewritten; the core's CLUSTER_META_* are stubbed since this dev bridge is not hosted.
+{
+  const st = await load('core/state.js');
+  const ck = await load('core/cluster-kind.js');
+  const sc = await load('core/server-credentials.js');
+  const press = (el) => el && el.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+  const realFetch = globalThis.fetch;
+  let written = null;
+  let metaStore = {};
+  const metaSent = [];
+  globalThis.fetch = async (input, init) => {
+    const body = init && init.body ? JSON.parse(init.body) : {};
+    if (body.type === 'CONFIG_WRITE') { written = body.text; return stubReply({ ok: true, path: body.path, bytes: body.text.length }); }
+    if (body.type === 'CONFIG_READ' && written !== null) return stubReply({ ok: true, text: written, size: written.length, lastModified: Date.now() });
+    if (body.type === 'CLUSTER_META_GET') return stubReply({ ok: true, clusters: metaStore });
+    if (body.type === 'CLUSTER_META_SET') {
+      metaSent.push(body);
+      metaStore = { ...metaStore, [body.clusterId]: { ...body.meta, source: 'set', setBy: 'kind-check' } };
+      return stubReply({ ok: true, clusters: metaStore });
+    }
+    return realFetch(input, init);
+  };
+  const summary = () => panel('Cluster summary');
+  const rowOf = (c) => summary() && summary().querySelector(`tbody tr[data-cluster="${c.id}"]`);
+  const badgeOf = (c) => { const r = rowOf(c); const b = r && r.querySelector('.cl-type'); return b ? b.textContent : null; };
+  const target = config.clusters[0];
+  const trigger = () => [...summary().querySelectorAll('button.cl-name')].find((b) => b.textContent.includes(target.name));
+  const menuItem = async (label) => {
+    press(trigger()); await settleFor(120);
+    const m = doc.querySelector('.menu-pop');
+    return m && [...m.querySelectorAll('button[role=menuitem]')].find((b) => b.children[1].textContent === label);
+  };
+  // Who was signed in and what was selected go back afterwards: later cases depend on them.
+  const before = { caller: st.state.caller, selected: st.state.selected };
+  try {
+    st.state.caller = { name: 'kind-check', role: 'admin' };
+    st.state.selected = 'all';
+    await go('overview');
+    const rows = [...summary().querySelectorAll('tbody tr[data-cluster]')];
+    ok(rows.length > 0 && rows.every((r) => r.querySelector('td.cl-name-td .cl-type')), 'cluster type: a row has no CI / DI / On-Prem badge');
+    ok(badgeOf(target) === 'On-Prem', `cluster type: a cluster with no type reads "${badgeOf(target)}", expected On-Prem`);
+
+    // Desktop: Edit → CI. ULM and SLM follow the type; the bucket shows with ULM on; Save writes
+    // the file keys, and the row's badge and snapshot cell follow.
+    press(await menuItem('Edit')); await settleFor(400);
+    let dlg = doc.querySelector('.modal-overlay .modal');
+    ok(dlg && dlg.querySelector('#ce-type-ci'), 'cluster type: the edit dialog has no Cluster type control');
+    if (dlg && dlg.querySelector('#ce-type-ci')) {
+      ok(!dlg.querySelector('#ce-ulm').checked && dlg.querySelector('#ce-slm').value === 'expected' && dlg.querySelector('#ce-ulm-block').hidden,
+        'cluster type: an unset cluster does not open on On-Prem’s defaults (ULM off, SLM expected, no bucket)');
+      press(dlg.querySelector('#ce-type-ci')); await settleFor(60);
+      ok(dlg.querySelector('#ce-ulm').checked && dlg.querySelector('#ce-slm').value === 'none' && !dlg.querySelector('#ce-ulm-block').hidden,
+        'cluster type: choosing CI did not turn ULM on, SLM to Not used and show the bucket');
+      ok(/checked in Zabbix \(log archive \(S3\) template\), not here/.test(dlg.textContent), 'cluster type: the bucket hint does not say where the archive is checked');
+      dlg.querySelector('#ce-ulm-bucket').value = 'Bad_Bucket';
+      press([...dlg.querySelectorAll('button')].find((b) => b.textContent === 'Save')); await settleFor(300);
+      ok(doc.querySelector('.modal-overlay .modal') && /bucket/i.test((doc.querySelector('.modal-msg') || {}).textContent || ''),
+        'cluster type: an invalid bucket name was not refused in the dialog');
+      dlg.querySelector('#ce-ulm-bucket').value = 'acme-logs';
+      written = null;
+      press([...dlg.querySelectorAll('button')].find((b) => b.textContent === 'Save')); await settleFor(900);
+      ok(written !== null && /"type":\s*"ci"/.test(written) && /"bucket":\s*"acme-logs"/.test(written) && !/"slm"/.test(written),
+        `cluster type: the save did not write type ci and the bucket (with SLM following the type): ${String(written).slice(0, 300)}`);
+      doc.querySelectorAll('.modal-overlay').forEach((m) => m.remove());
+      await go('overview');
+      ok(badgeOf(target) === 'CI', `cluster type: after the save the badge reads "${badgeOf(target)}", expected CI`);
+      const live = st.clusters().find((c) => c.id === target.id) || target;
+      ok(ck.slmExempt(live), 'cluster type: a CI cluster with SLM following the type is not SLM-exempt');
+      const snapCell = rowOf(target) && rowOf(target).querySelector('.cl-ulm');
+      if (snapCell) ok(/ULM · s3 acme-logs/.test(snapCell.textContent), `cluster type: the snapshot cell reads "${snapCell.textContent}"`);
+      ok(!st.alerts().some((a) => a.cluster && a.cluster.id === target.id && /:(slm-mode|slm-stale)|:repo:.*:(none|stale)$/.test(a.key)),
+        'cluster type: a CI cluster still raises a no-snapshot / SLM-stopped alert');
+    }
+
+    // The Type filter: CI only shows that one cluster; Clear brings the fleet back.
+    {
+      // Open already when an earlier case left a sort set; pressing it then would clear and close it.
+      if (!doc.getElementById('clusters-type')) { press(doc.getElementById('clusters-search-btn')); await settleFor(150); }
+      const sel = doc.getElementById('clusters-type');
+      ok(!!sel, 'cluster type: the search box has no Type filter');
+      if (sel) {
+        ok([...sel.options].some((o) => /^CI \(1\)$/.test(o.textContent)), `cluster type: the filter does not count CI clusters (${[...sel.options].map((o) => o.textContent).join(', ')})`);
+        sel.value = 'ci'; sel.dispatchEvent(new window.Event('change', { bubbles: true })); await settleFor(200);
+        const names = [...summary().querySelectorAll('tbody tr[data-cluster]')].map((r) => r.dataset.cluster);
+        ok(names.length === 1 && names[0] === target.id, `cluster type: filtering on CI shows ${names.join(', ') || 'nothing'}`);
+        const clear = [...summary().querySelectorAll('button')].find((b) => b.textContent === 'Clear');
+        press(clear); await settleFor(200);
+        ok(summary().querySelectorAll('tbody tr[data-cluster]').length === rows.length, 'cluster type: Clear did not bring every cluster back');
+      }
+    }
+
+    // Hosted: a Zabbix cluster is edited in the meta part only, through CLUSTER_META_SET.
+    sc.setHostedEdition(true);
+    ck.setClusterMeta({});
+    const live = st.state.config.clusters.find((c) => c.id === target.id);
+    const was = { source: live.source, zabbix: live.zabbix };
+    live.source = 'zabbix'; live.zabbix = { host: 'zbx-host-1' };
+    try {
+      await go('overview');
+      const item = await menuItem('Edit');
+      ok(item && /cluster type/.test(item.textContent), 'cluster type: a Zabbix cluster offers no Edit for its type to an admin (hosted)');
+      press(item); await settleFor(300);
+      dlg = doc.querySelector('.modal-overlay .modal');
+      ok(dlg && dlg.querySelector('#ce-type-di') && !dlg.querySelector('#ce-name') && !dlg.querySelector('#ce-url'),
+        'cluster type: a Zabbix cluster’s dialog is not the meta part only');
+      if (dlg && dlg.querySelector('#ce-type-di')) {
+        press(dlg.querySelector('#ce-type-di')); await settleFor(60);
+        dlg.querySelector('#ce-ulm-bucket').value = 'zbx-logs';
+        press([...dlg.querySelectorAll('button')].find((b) => b.textContent === 'Save')); await settleFor(400);
+        const m = metaSent[metaSent.length - 1];
+        ok(m && m.clusterId === target.id && m.meta.type === 'di' && m.meta.ulm.bucket === 'zbx-logs' && m.meta.ulm.enabled === null && m.meta.slm === null,
+          `cluster type: CLUSTER_META_SET was not sent as {type: di, ulm: {enabled: null, bucket}, slm: null}: ${JSON.stringify(m)}`);
+        ok(!doc.querySelector('.modal-overlay .modal'), 'cluster type: the Zabbix cluster dialog stayed open after a good save');
+        await go('overview');
+        ok(badgeOf(target) === 'DI', `cluster type: after CLUSTER_META_SET the badge reads "${badgeOf(target)}", expected DI`);
+      }
+    } finally {
+      live.source = was.source; live.zabbix = was.zabbix;
+    }
+  } finally {
+    globalThis.fetch = realFetch;
+    sc.setHostedEdition(false);
+    ck.setClusterMeta({});
+    doc.querySelectorAll('.modal-overlay').forEach((m) => m.remove());
+    st.state.caller = before.caller;
+    st.state.selected = before.selected;
+  }
+  await applyConfig({ load, configPath });
+  await go('overview');
+}
+
 // Config > Volume fields (0.3.45): the section opens and says so when the core is older, the
 // fields can be edited and Save writes defaults.volume (and an override for one cluster, only
 // what differs), and Check fields sends VOLUME_FIELDS_CHECK and fills the check column. The
@@ -4528,6 +4663,6 @@ if (problems.length) {
   for (const p of problems) console.error('  ✗ ' + p);
   process.exit(1);
 }
-console.log('ok: strip, console, shards, the Clusters page (columns, name menu, unreachable rows, expand chevron, alerts link), volume, hand-off, refresh, snapshots, tasks, toasts, accounts split and pinned Zabbix roles, the log-delay preflight, a quiet Config page, Config › Volume fields, report jobs and the Reports pill, the mailed report and the mail server, the Request Centre and the redraw gate, the request policy, the coverage bar, the Tasks panel and the console tabs, template management, the Alerts page grouped by cluster with merged repeats, Go to, playbooks and the bell, and the default credential (no password asked for a new cluster, promote, never replaced unticked)');
+console.log('ok: strip, console, shards, the Clusters page (columns, name menu, unreachable rows, expand chevron, alerts link), volume, hand-off, refresh, snapshots, tasks, toasts, accounts split and pinned Zabbix roles, the log-delay preflight, a quiet Config page, cluster type (badge, Type filter, edit dialog to file keys and CLUSTER_META_SET), Config › Volume fields, report jobs and the Reports pill, the mailed report and the mail server, the Request Centre and the redraw gate, the request policy, the coverage bar, the Tasks panel and the console tabs, template management, the Alerts page grouped by cluster with merged repeats, Go to, playbooks and the bell, and the default credential (no password asked for a new cluster, promote, never replaced unticked)');
 // The pages leave auto-refresh timers and a live tail running; nothing here waits on them.
 process.exit(0);

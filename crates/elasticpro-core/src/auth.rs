@@ -309,6 +309,11 @@ pub fn required_role(msg_type: &str) -> Option<Role> {
         // (the handler checks ownership), and sees what others chose to share.
         "QUERY_LIST" | "QUERY_SAVE" | "QUERY_DELETE" => Some(Role::User),
         "SILENCE_SET" | "SILENCE_CLEAR" => Some(Role::Operator),
+        // A cluster's type, ULM bucket and whether SLM is expected (cluster_meta): read by every
+        // page that decides whether "no snapshot" is a problem, so a user's; setting it changes
+        // which alerts the whole team is shown, so an administrator's (audited).
+        "CLUSTER_META_GET" => Some(Role::User),
+        "CLUSTER_META_SET" => Some(Role::Admin),
         // The daily index-volume record: sizes per day by source name, top field values —
         // the same kind of fact as an index listing, so not a guest's. Refresh now sends
         // searches to the cluster, rate-limited per cluster in the handler.
@@ -1921,6 +1926,16 @@ mod tests {
         assert_eq!(required_role("VOLUME_LAYOUT_SET"), Some(Role::Operator));
         assert!(authorize(Role::User, "VOLUME_LAYOUT_SET", "", "").is_err());
         assert!(authorize(Role::Operator, "VOLUME_LAYOUT_SET", "", "").is_ok());
+    }
+
+    #[test]
+    fn cluster_type_is_read_by_a_user_and_set_by_an_admin() {
+        assert_eq!(required_role("CLUSTER_META_GET"), Some(Role::User));
+        assert!(authorize(Role::Guest, "CLUSTER_META_GET", "", "").is_err());
+        assert!(authorize(Role::User, "CLUSTER_META_GET", "", "").is_ok());
+        assert_eq!(required_role("CLUSTER_META_SET"), Some(Role::Admin));
+        assert!(authorize(Role::Operator, "CLUSTER_META_SET", "", "").is_err(), "it changes what everyone is alerted on");
+        assert!(authorize(Role::Admin, "CLUSTER_META_SET", "", "").is_ok());
     }
 
     #[test]

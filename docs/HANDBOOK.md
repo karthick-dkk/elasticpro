@@ -694,6 +694,32 @@ Setting, promoting or clearing the default starts a Zabbix sync, so a Zabbix clu
 as *password not set* is polled with the new default within seconds rather than at the next
 interval.
 
+## Cluster type and ULM — the message contract
+
+0.3.47. Every cluster is **CI**, **DI** or **On-Prem**, with ULM (log archive to S3) on or off and
+SLM snapshots expected or not. Defaults by type: CI / DI → ULM on, SLM none; On-Prem → ULM off,
+SLM expected; a cluster with no type takes On-Prem's. With ULM on and SLM none
+(`slmExempt`, `ui/js/core/cluster-kind.js` — the one definition), the rules *SLM not running*,
+*no recent successful snapshot*, a repository's *no snapshots* and *newest snapshot is not recent*
+do not raise for that cluster; a policy that exists and fails (`slm-fail`) and a repository whose
+snapshots fail still do. The Clusters page shows a CI / DI / On-Prem badge beside each name and a
+Type filter; its snapshot cell and the Snapshots page say *ULM · s3 \<bucket\>* instead of *none*,
+and the SLM pill reads *Not used* (grey) instead of red. Only the bucket's name is kept: whether the
+archive is complete is checked by the Zabbix log archive (S3) template. ElasticPro never reads S3.
+
+Hosted: one store for every cluster, Zabbix ones too, `<data>/cluster-meta.json` (0600, tmp +
+rename). A Zabbix cluster with no entry takes its type from the host tag `elasticpro:type`
+(`CI`, `DI`, `On-Prem`), read on the sync's existing `host.get` (`selectTags`). Desktop: the
+cluster's own keys in the config file — `type: ci|di|onprem`, `ulm: true|false` or
+`ulm: {enabled, bucket}`, `slm: expected|none`; an older `logBucket` is still read as the bucket.
+Set in the Edit cluster dialog (*Cluster type*); a Zabbix cluster's name menu opens the same part
+alone. ULM and SLM follow the type until an admin changes them.
+
+| Message | Role | Answer |
+|---|---|---|
+| `CLUSTER_META_GET` | user | `{ok, clusters: {<id>: {type, ulm: {enabled?, bucket}, slm?, source: "set"\|"zabbix-tag", setBy?, setAt?}}}` — the clusters the caller sees that have an entry or a tag; `enabled` / `slm` absent = follow the type. Desktop: `{ok: false, kind: "not_available"}`. |
+| `CLUSTER_META_SET {clusterId, meta: {type, ulm: {enabled: bool\|null, bucket}, slm: "expected"\|"none"\|null} \| null}` | admin | The same answer, after the change. `type` is required (`ci`, `di`, `onprem`; `CI`, `On-Prem` accepted); `bucket` empty or an S3 name (3–63 of `a-z 0-9 . -`, letter or digit at both ends, no `..`, not an IP). `meta: null` forgets the entry (back to the tag or the defaults). `forbidden` for a cluster the caller does not see, `bad_request` for a bad value. Audit line `cluster type set` (or `cleared`) with `cluster`, `kind`, `ulm`, `bucket`, `slm`. |
+
 ## Security model
 
 | | |

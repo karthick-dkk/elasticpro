@@ -224,6 +224,8 @@ pub struct Core {
     /// Each person's notification history. See `notify`.
     notify: crate::notify::NotifyStore,
     silences: crate::silences::Silences,
+    /// Each cluster's type, ULM bucket and whether SLM is expected (hosted). See `cluster_meta`.
+    cluster_meta: crate::cluster_meta::ClusterMeta,
     saved_queries: crate::saved_queries::SavedQueries,
     /// The housekeeping scheduler's settings and what it last did. See `housekeeping`.
     pub(crate) housekeeping: crate::housekeeping::Housekeeping,
@@ -251,6 +253,9 @@ struct ZbxSync {
     provisioned: Vec<String>,
     /// Each cluster template the last sync read, with how many hosts it held.
     templates: Vec<Value>,
+    /// The type each Zabbix cluster's host tag `elasticpro:type` names, by cluster id —
+    /// what CLUSTER_META_GET answers for a cluster with no entry of its own.
+    kinds: HashMap<String, String>,
 }
 
 /// What the job is set to do, and what it last did. Kept together because an admin
@@ -739,6 +744,8 @@ impl Core {
             read_cache: crate::inflight::ReadCache::default(),
             flights: Arc::new(crate::inflight::Flights::default()),
             silences: crate::silences::Silences::open(data_dir_for_notify.as_ref().map(|d| d.join("silences.json"))),
+            cluster_meta: crate::cluster_meta::ClusterMeta::open(
+                data_dir_for_notify.as_ref().filter(|_| hosted).map(|d| d.join(crate::cluster_meta::META_FILE))),
             saved_queries: crate::saved_queries::SavedQueries::open(data_dir_for_notify.as_ref().map(|d| d.join("saved-queries.json"))),
             notify: crate::notify::NotifyStore::open(data_dir_for_notify.map(|d| d.join("notifications.json"))),
             housekeeping: crate::housekeeping::Housekeeping::from_env(),
@@ -1274,6 +1281,7 @@ impl Core {
                     Err(e) => json!({ "ok": false, "kind": if e.starts_with("only its owner") { "forbidden" } else { "bad_request" }, "message": e }),
                 }
             }
+            "CLUSTER_META_GET" | "CLUSTER_META_SET" => self.cluster_meta_msg(&t, &msg, caller.as_ref()),
             "SILENCE_LIST" => {
                 let list = self.silences_visible(caller.as_ref());
                 json!({ "ok": true, "silences": list })
@@ -1654,6 +1662,55 @@ impl Core {
         let known: Vec<String> = self.all_specs().into_iter().map(|s| s.id).collect();
         let visible: std::collections::HashSet<String> = self.fleet_visible(caller).into_iter().collect();
         crate::silences::cluster_of(scope, target, &known).is_some_and(|id| visible.contains(id))
+    }
+
+    /// `CLUSTER_META_GET` (user) / `CLUSTER_META_SET` (admin), hosted: each cluster's type,
+    /// ULM bucket and whether SLM is expected (`cluster_meta`). Scoped to the clusters the
+    /// caller sees. GET answers `{ok, clusters: {<id>: {type, ulm: {enabled?, bucket}, slm?,
+    /// source: "set"|"zabbix-tag", setBy?, setAt?}}}` — only the clusters that have an entry
+    /// or a Zabbix tag; the rest follow the On-Prem defaults in the page. SET takes
+    /// `{clusterId, meta: {type, ulm: {enabled, bucket}, slm} | null}` (null forgets it).
+    fn cluster_meta_msg(&self, t: &str, msg: &Value, caller: Option<&Caller>) -> Value {
+        if self.edition != Edition::Hosted {
+            return json!({ "ok": false, "kind": "not_available",
+                           "message": "cluster type is kept on the server only in the hosted build; this one keeps `type`, `ulm` and `slm` on the cluster in the config file" });
+        }
+        let visible: std::collections::HashSet<String> = self.fleet_visible(caller).into_iter().collect();
+        if t == "CLUSTER_META_SET" {
+            let by = caller.map(|c| c.name.clone()).unwrap_or_else(|| "local".into());
+            let id = msg.get("clusterId").and_then(Value::as_str).unwrap_or("").trim().to_string();
+            if !visible.contains(&id) {
+                return json!({ "ok": false, "kind": "forbidden", "message": "that is not a cluster you can see" });
+            }
+            let meta = match msg.get("meta") {
+                None | Some(Value::Null) => None,
+                Some(m) => match crate::cluster_meta::parse(m, &by, crate::fleet::now_ms()) {
+                    Ok(m) => Some(m),
+                    Err(e) => return json!({ "ok": false, "kind": "bad_request", "message": e }),
+                },
+            };
+            if let Err(e) = self.cluster_meta.set(&id, meta.clone()) {
+                return json!({ "ok": false, "kind": "io", "message": e });
+            }
+            match &meta {
+                Some(m) => tracing::info!(target: "audit", user = %by, cluster = %id, kind = %m.kind, ulm = ?m.ulm.enabled,
+                                          bucket = %m.ulm.bucket, slm = ?m.slm, "cluster type set"),
+                None => tracing::info!(target: "audit", user = %by, cluster = %id, "cluster type cleared"),
+            }
+        }
+        let kept = self.cluster_meta.all();
+        let seeds = self.zbx_sync.read().kinds.clone();
+        let mut out = serde_json::Map::new();
+        for id in &visible {
+            if let Some(m) = kept.get(id) {
+                let mut v = serde_json::to_value(m).unwrap_or(Value::Null);
+                v["source"] = json!("set");
+                out.insert(id.clone(), v);
+            } else if let Some(k) = seeds.get(id) {
+                out.insert(id.clone(), json!({ "type": k, "ulm": { "bucket": "" }, "source": "zabbix-tag" }));
+            }
+        }
+        json!({ "ok": true, "clusters": out })
     }
 
     /// The live silences this caller may see.
@@ -4045,9 +4102,13 @@ impl Core {
         };
         let mut specs = HashMap::new();
         let mut view = Vec::new();
+        let mut kinds = HashMap::new();
         let mut problems = 0;
         for c in found {
             let id = c.id();
+            if let Some(k) = c.kind.as_deref() {
+                kinds.insert(id.clone(), k.to_string());
+            }
             let mut notes: Vec<String> = vec![];
             let mut user_override: Option<String> = None;
             let own = held_by_url.get(&c.url.trim_end_matches('/').to_ascii_lowercase()).cloned().or_else(|| shared.clone());
@@ -4128,7 +4189,7 @@ impl Core {
                 "_id": id, "name": c.name, "url": c.url, "via": via, "source": "zabbix",
                 "zabbixHost": c.host, "zabbixHostId": c.hostid, "client": c.client,
                 "zabbixGroups": c.readers, "username": c.username,
-                "credential": credential, "credentialOk": usable, "notes": notes,
+                "credential": credential, "credentialOk": usable, "notes": notes, "type": c.kind,
             }));
         }
         view.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
@@ -4144,6 +4205,7 @@ impl Core {
             z.options = opts.clone();
             z.provisioned = provisioned.clone();
             z.templates = templates.clone();
+            z.kinds = kinds;
         }
         self.forget_connections();
         tracing::info!(target: "audit", clusters = n, skipped = skipped.len(), problems,

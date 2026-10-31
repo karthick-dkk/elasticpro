@@ -4,7 +4,8 @@ import { h, svg, mount, reconcile } from '../lib/dom.js';
 import { nodeCache, objId } from '../lib/keyed.js';
 import { bytes, num, pct, ago, dt, toCsv, download } from '../lib/fmt.js';
 import { state, activeClusters, client, healthState, refreshAll, openAlertsNow, requestsFor, requestLoad, jvmSummary, clusterRev, askForPage } from '../core/state.js';
-import { card, table, diskCell, lastSnapshotOf, snapshotCell, empty } from './common.js';
+import { card, table, diskCell, lastSnapshotOf, snapshotCellFor, empty } from './common.js';
+import { CLUSTER_TYPES, clusterKind, clusterKindRev } from '../core/cluster-kind.js';
 import { isSnapshotMode } from '../core/snapshot.js';
 import { navigateTo, canOpenPage } from '../core/intent.js';
 import { repoSizeCache } from '../lib/idb.js';
@@ -18,7 +19,8 @@ import { privilegeHint } from '../core/es-tasks.js';
 import { restoreSnapshotDialog } from '../ui/snapshot-dialogs.js';
 import { rowMenu, popover, ICON, toast } from '../ui/menu.js';
 import { roleMayWrite, roleMayManageClusters } from '../core/writes.js';
-import { editCluster, rawClusterOf } from '../ui/config-editor.js';
+import { editCluster, editClusterKind, rawClusterOf } from '../ui/config-editor.js';
+import { credentialsKeptOnServer } from '../core/server-credentials.js';
 import { takeFocus, revealFocus } from '../core/focus.js';
 import { openClusterAlerts } from '../core/alert-goto.js';
 import { diskAgainstWatermarks } from '../core/disk-balance.js';
@@ -56,7 +58,7 @@ export const SORTS = {
   snapshot: { label: 'Last snapshot', get: (r) => { const s = lastSnapshotOf(r.d); return s ? s.start : null; } },
   alerts:   { label: 'Open alerts',   get: (r) => (alertCounts || alertsByCluster()).get(r.c.id) || 0 },
   ilm:      { label: 'ILM',           get: (r) => lifecycleSortKey(lifecycleView('ILM', r.d, logPattern(r)), ilmErrorsOf(r.d, logPattern(r)).count) },
-  slm:      { label: 'SLM',           get: (r) => lifecycleSortKey(lifecycleView('SLM', r.d, logPattern(r)), slmErrorsOf(r.d, logPattern(r)).count) },
+  slm:      { label: 'SLM',           get: (r) => lifecycleSortKey(lifecycleView('SLM', r.d, logPattern(r), r.c), slmErrorsOf(r.d, logPattern(r)).count) },
   repo:     { label: 'Repository',    get: (r) => (Array.isArray(r.d.repos) ? r.d.repos.map((x) => x.name).join(', ') : null) },
   reqs:     { label: 'Our reqs/5m',   get: (r) => ((requestLoad.clusters[r.c.id] || {}).last5m || 0) },
 };
@@ -123,9 +125,10 @@ function clusterSize(r) {
  * are at the top. Until the operator says otherwise.
  */
 export const DEFAULT_SORT = { key: 'health', dir: -1 };
-const ui = { text: '', sort: DEFAULT_SORT.key, dir: DEFAULT_SORT.dir, only: 'all', search: false };
-const filtered = () => !!(ui.text || ui.only !== 'all' || ui.sort !== DEFAULT_SORT.key || ui.dir !== DEFAULT_SORT.dir);
-const resetFilter = () => { ui.text = ''; ui.only = 'all'; ui.sort = DEFAULT_SORT.key; ui.dir = DEFAULT_SORT.dir; };
+// `type`: CI / DI / On-Prem, or 'all' (core/cluster-kind.js).
+const ui = { text: '', sort: DEFAULT_SORT.key, dir: DEFAULT_SORT.dir, only: 'all', type: 'all', search: false };
+const filtered = () => !!(ui.text || ui.only !== 'all' || ui.type !== 'all' || ui.sort !== DEFAULT_SORT.key || ui.dir !== DEFAULT_SORT.dir);
+const resetFilter = () => { ui.text = ''; ui.only = 'all'; ui.type = 'all'; ui.sort = DEFAULT_SORT.key; ui.dir = DEFAULT_SORT.dir; };
 
 /** offline worst, then red > yellow > green — so "sort by health" surfaces trouble. */
 function healthRank(r) {
@@ -232,13 +235,15 @@ function visibleRows(all) {
     rows = rows.filter(({ c, d }) => {
       const version = versionOf(d);
       const repos = (d.repos || []).map((r) => r.name).join(' ');
-      const hay = `${c.name} ${c.url} ${(c.tags || []).join(' ')} ${c.via || ''} ${version} ${repos}`;
+      const hay = `${c.name} ${c.url} ${(c.tags || []).join(' ')} ${c.via || ''} ${version} ${repos} ${clusterKind(c).label}`;
       return hay.toLowerCase().includes(t);
     });
   }
 
   // One health state, as the Health column classifies it (core/state.js healthState).
   if (ui.only !== 'all') rows = rows.filter((r) => healthState(r.d) === ui.only);
+  // One cluster type, as the badge beside the name says it.
+  if (ui.type !== 'all') rows = rows.filter((r) => clusterKind(r.c).type === ui.type);
 
   return sortRows(rows, ui.sort, ui.dir);
 }
@@ -276,6 +281,12 @@ function searchBox(all, shown) {
     h('option', { value: 'red' }, `Red (${n('red')})`),
     n('unreachable') ? h('option', { value: 'unreachable' }, `Unreachable (${n('unreachable')})`) : null);
   onlySel.value = ui.only;
+  const byType = new Map();
+  for (const r of all) { const t = clusterKind(r.c).type; byType.set(t, (byType.get(t) || 0) + 1); }
+  const typeSel = h('select#clusters-type', { 'aria-label': 'Cluster type', onchange: (e) => { ui.type = e.target.value; draw(); } },
+    h('option', { value: 'all' }, `All types (${all.length})`),
+    ...CLUSTER_TYPES.map((t) => h('option', { value: t.id }, `${t.label} (${byType.get(t.id) || 0})`)));
+  typeSel.value = ui.type;
   return h('span.cl-searchbox', btn,
     h('span#clusters-search-box.cl-search', { role: 'group', 'aria-label': 'Search, sort and filter' },
       h('input#clusters-search', { type: 'search', value: ui.text, 'aria-label': 'Search clusters',
@@ -287,6 +298,7 @@ function searchBox(all, shown) {
           : ui.dir === 1 ? 'Ascending \u2014 click for descending' : 'Descending \u2014 click for ascending',
         onclick: () => { ui.dir = -ui.dir; draw(); } }, ui.sort === 'health' ? (ui.dir === -1 ? '\u25bc worst first' : '\u25b2 best first') : ui.dir === 1 ? '\u25b2 asc' : '\u25bc desc'),
       onlySel,
+      typeSel,
       h('span.muted', { style: { fontSize: '11.5px', whiteSpace: 'nowrap' } },
         shown.length === all.length ? `${all.length} cluster${all.length === 1 ? '' : 's'}` : `${shown.length} of ${all.length} shown`),
       filtered() ? h('button.btn.sm.ghost', { type: 'button', title: 'Clear the search, sort and filter',
@@ -311,7 +323,7 @@ function rowSig(r) {
   return [clusterRev(r.c.id), objId(r.d), objId(r.cl), r.cl && r.cl.state, objId(r.c), isOpen(r.c.id), L ? L.at : 0,
     objId(prefs && prefs.details), (sizeCaches.get(r.c.id) || {}).size || 0,
     (alertCounts && alertCounts.get(r.c.id)) || 0, q.last5m, q.perMinute.toFixed(1), minute(), objId(state.defaults),
-    objId(state.indices.get(r.c.id))].join('|');
+    objId(state.indices.get(r.c.id)), clusterKindRev()].join('|');
 }
 
 /** Reachable was answered as "no": the one definition: the rows marked red, the pointer line above the table. */
@@ -423,6 +435,10 @@ async function openEditor(c) {
 function nameMenu(c) {
   const items = () => {
     const edit = !mayEdit() ? null
+      // A Zabbix cluster: its type, ULM and SLM are set here (an admin's, hosted); the rest in Zabbix.
+      : c.source === 'zabbix' && roleMayWrite() && credentialsKeptOnServer()
+        ? { label: 'Edit', icon: ICON.edit, note: 'cluster type', title: `Managed in Zabbix — host ${(c.zabbix && c.zabbix.host) || ''}; its type, ULM and SLM are set here`,
+            onClick: async () => { if (await editClusterKind(c)) draw(); } }
       : c.source === 'zabbix' ? { label: 'Edit', icon: ICON.edit, note: 'in Zabbix', disabled: true,
           title: `Managed in Zabbix — host ${(c.zabbix && c.zabbix.host) || ''}` }
       : !rawClusterOf(c) ? { label: 'Edit', icon: ICON.edit, note: 'cluster settings', disabled: true, title: 'Not in the config file' }
@@ -441,6 +457,17 @@ function nameMenu(c) {
     title: `${c.url}${c.tags && c.tags.length ? '\n' + c.tags.join(', ') : ''}`,
     menuLabel: `Actions for ${c.name}`,
   });
+}
+
+/**
+ * CI / DI / On-Prem beside the name (core/cluster-kind.js — the one definition the alert
+ * rules read too): what the cluster is, and so whether "no snapshot" means anything.
+ */
+function typeBadge(c) {
+  const k = clusterKind(c);
+  const how = k.slmExpected ? 'SLM snapshots expected' : 'no SLM snapshots expected';
+  const ulm = k.ulm.enabled ? `ULM archives its logs to S3${k.ulm.bucket ? ` (${k.ulm.bucket})` : ''}` : 'no ULM archive';
+  return h(`span.cl-type.cl-type-${k.type}`, { title: `${k.label} cluster · ${ulm} · ${how}${k.set.type ? '' : ' (type not set: On-Prem defaults)'}` }, k.label);
 }
 
 /* ------------------------------- the summary table ------------------------------- */
@@ -484,7 +511,7 @@ function healthFlag(r) {
  * missing from the file, or the other way round.
  */
 const CELLS = {
-  name: (r) => h('td.cl-name-td', nameMenu(r.c)),
+  name: (r) => h('td.cl-name-td', nameMenu(r.c), typeBadge(r.c)),
   version: (r) => h('td.mono', versionOf(r.d) || '–'),
   // The JVM the nodes run on. A cluster mid-upgrade has more than one, and saying "mixed"
   // with the breakdown on hover beats picking whichever node answered first.
@@ -522,7 +549,7 @@ const CELLS = {
   slm: (r) => {
     const { d } = r;
     if (!d.slmStatus) return h('td', h('span.muted', d.slmSupported === false ? 'n/a' : '\u2013'));
-    return h('td', lifecycleButton(r, 'SLM', lifecycleView('SLM', d, logPattern(r)), slmErrorsOf(d, logPattern(r)), slmErrorTitle));
+    return h('td', lifecycleButton(r, 'SLM', lifecycleView('SLM', d, logPattern(r), r.c), slmErrorsOf(d, logPattern(r)), slmErrorTitle));
   },
   repo: (r) => {
     const names = (r.d.repos || []).map((x) => x.name);
@@ -531,7 +558,7 @@ const CELLS = {
           names.length > 3 ? h('span.muted', { style: { fontSize: '11px' } }, `+${names.length - 3} more`) : null)
       : h('span.muted', Array.isArray(r.d.repos) ? 'none' : '–'));
   },
-  snapshot: (r) => h('td', snapshotCell(lastSnapshotOf(r.d), state.defaults.snapshotStaleHours)),
+  snapshot: (r) => h('td', snapshotCellFor(r.c, r.d, state.defaults.snapshotStaleHours)),
   // A link to that cluster's alerts, not a button that opens all of them; nothing to open, no link.
   alerts: (r, byCluster) => {
     const n = byCluster.get(r.c.id) || 0;
@@ -588,7 +615,7 @@ const CSV = {
     ['covers log indices', (r) => coveredCsv(lifecycleView('ILM', r.d, logPattern(r)))],
     ['log indices in error', (r) => { const e = ilmErrorsOf(r.d, logPattern(r)); return e.known ? e.count : ''; }]],
   slm: [['', (r) => (r.d.slmStatus && r.d.slmStatus.operation_mode) || (r.d.slmSupported === false ? 'n/a' : '')],
-    ['covers log indices', (r) => (r.d.slmStatus ? coveredCsv(lifecycleView('SLM', r.d, logPattern(r))) : '')],
+    ['covers log indices', (r) => (r.d.slmStatus ? coveredCsv(lifecycleView('SLM', r.d, logPattern(r), r.c)) : '')],
     ['policies failing', (r) => { const e = slmErrorsOf(r.d, logPattern(r)); return e.known ? e.count : ''; }]],
   repo: [['', (r) => (r.d.repos || []).map((x) => x.name).join('|')], ['locations', (r) => (r.d.repos || []).map((x) => x.location).join('|')]],
   snapshot: [['', (r) => { const s = lastSnapshotOf(r.d); return s ? s.id : ''; }],
@@ -645,7 +672,7 @@ function summaryCard(rows, all) {
   // …and with who is looking: "+ Add cluster" is in the shell, and only for a role that may.
   const shell = built.get('summary', `${isSnapshotMode()}|${mayEdit()}`, () => buildCard());
   const counts = healthCounts(all, (r) => healthState(r.d));
-  const box = built.get('searchbox', [ui.search, filtered(), !!ui.text, ui.sort, ui.dir, ui.only, all.length, rows.length,
+  const box = built.get('searchbox', [ui.search, filtered(), !!ui.text, ui.sort, ui.dir, ui.only, ui.type, clusterKindRev(), all.map((r) => clusterKind(r.c).type).join(','), all.length, rows.length,
     counts.green, counts.yellow, counts.red, counts.unreachable].join('|'), () => searchBox(all, rows));
   const boxAt = shell.querySelector('.cl-searchbox');
   if (boxAt !== box) boxAt.replaceWith(box);
@@ -1132,7 +1159,7 @@ function detail(r) {
   if (shown.has('slm')) {
     const e = slmErrorsOf(d, logPattern(r));
     const np = (d.slm || []).length;
-    const v = lifecycleView('SLM', d, logPattern(r));
+    const v = lifecycleView('SLM', d, logPattern(r), c);
     tiles.push(tile('SLM', d.slmStatus
       ? h('span.mono', h(`span.pill.${v.tone}`, { title: v.why }, v.word), h('span.muted', { style: { fontSize: '11px' }, title: v.why }, ` \u00b7 ${np} polic${np === 1 ? 'y' : 'ies'}`),
           e.count ? [' ', h('i.cl-errdot', { title: slmErrorTitle(e), role: 'img', 'aria-label': 'errors' }),
@@ -1155,8 +1182,9 @@ function detail(r) {
       { id: 'rate', title: 'The change in _nodes/stats search.query_total and indexing.index_total between two readings, per second. query_total counts once per shard, so this is shard-level.' }));
   }
   if (shown.has('bucket')) {
-    tiles.push(tile('S3 log bucket', c.logBucket ? h('span.mono', { title: 'Enriched and raw logs share this bucket' }, c.logBucket)
-      : h('span.muted', { title: 'Set it on the cluster: Config → edit cluster → S3 log bucket' }, 'not set'), { id: 'bucket' }));
+    const k = clusterKind(c);
+    tiles.push(tile('S3 log bucket', k.ulm.bucket ? h('span.mono', { title: `Enriched and raw logs share this bucket. ULM ${k.ulm.enabled ? 'on' : 'off'}.` }, k.ulm.bucket)
+      : h('span.muted', { title: 'Set it on the cluster: edit cluster → ULM S3 bucket' }, k.ulm.enabled ? 'ULM on, bucket not set' : 'not set'), { id: 'bucket' }));
   }
   if (tiles.length) box.append(h('div.cl-tiles', ...tiles));
 

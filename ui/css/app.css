@@ -600,6 +600,9 @@ table.cl-tbl > tbody > tr.cl-detail-row > td { white-space: normal; }
    only a name longer than this is cut, and the tooltip has it whole. */
 .cl-name-t { flex: none; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 260px; }
 .cl-caret { font-size: 10px; color: var(--text-muted); flex: none; }
+/* CI / DI / On-Prem beside the name (core/cluster-kind.js). A label, not a state: neutral. */
+.cl-type { display: inline-block; margin-left: 4px; padding: 0 5px; border: 1px solid var(--border); border-radius: var(--radius-sm);
+  font-size: 10px; font-weight: 650; line-height: 15px; color: var(--text-secondary); background: var(--surface-2); vertical-align: middle; white-space: nowrap; }
 .menu-pop button .mi-note { margin-left: auto; padding-left: 14px; color: var(--text-muted); font-size: 11px; white-space: nowrap; }
 
 /* The unreachable clusters, above the table: compact cards, or one line when folded. */
