@@ -294,3 +294,115 @@ async fn prime_falls_back_to_the_shared_credential_where_nothing_is_kept() {
         "clusters": [{ "id": "beta", "name": "Beta", "url": alpha.url() }] })).await;
     assert_eq!((r["held"].clone(), r["defaultCredential"].clone()), (json!([]), json!(false)), "{r}");
 }
+
+/// Review of f330d57: an admin forgot the default on purpose (Config → Credentials → Forget).
+/// A page that still carries a shared credential — the config file's, or one typed into the
+/// sign-in dialog — must not put it back: only CREDENTIAL_SET or CREDENTIAL_PROMOTE of "*" makes
+/// a default again, and the mark survives a restart. `onlyIfAbsent` never replaces a default.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_forgotten_default_is_not_brought_back_by_a_page() {
+    let _turn = ENV.lock().await;
+    capture();
+    let data = TempDir::new("default-cred-forgot");
+    let c = Core::new_with_rounds(Some(data.0.clone()), Edition::Hosted, 1);
+    let a = admin(&c).await;
+    let alpha = TestServer::start().await;
+    let fleet = basic("fleet", "fleet-pw");
+    let prime = |shared: Option<&str>| {
+        let mut m = json!({ "type": "PRIME", "session": a, "readOnly": true, "persist": false,
+            "clusters": [{ "id": "alpha", "name": "Alpha", "url": alpha.url() }] });
+        if let Some(s) = shared { m["sharedAuthHeader"] = json!(s); }
+        m
+    };
+    let r = c.handle(json!({ "type": "CREDENTIAL_SET", "session": a, "cluster": "*", "username": "fleet", "password": "fleet-pw" })).await;
+    assert_eq!(r["ok"], json!(true), "{r}");
+    let r = c.handle(json!({ "type": "CREDENTIAL_CLEAR", "session": a, "cluster": "*" })).await;
+    assert_eq!(r["cleared"], json!(true), "{r}");
+    // The page still has the old credential and sends it as the shared one.
+    let r = c.handle(prime(Some(&fleet))).await;
+    assert_eq!((r["held"].clone(), r["defaultCredential"].clone()), (json!([]), json!(false)), "{r}");
+    let st = c.handle(json!({ "type": "CREDENTIAL_STATUS", "session": a })).await;
+    assert_eq!(st["default"], Value::Null, "a PRIME brought the forgotten default back: {st}");
+    health(&c, &a, "alpha").await;
+    assert_eq!(alpha.last_hit().unwrap().header("authorization"), None, "the forgotten credential was used anyway");
+    // …nor after a restart.
+    drop(c);
+    let c = Core::new_with_rounds(Some(data.0.clone()), Edition::Hosted, 1);
+    let a = c.handle(json!({ "type": "LOGIN", "name": "Admin", "password": "correct-horse-battery" })).await["session"].as_str().unwrap().to_string();
+    let mut m = prime(Some(&fleet));
+    m["session"] = json!(a);
+    c.handle(m).await;
+    let st = c.handle(json!({ "type": "CREDENTIAL_STATUS", "session": a })).await;
+    assert_eq!(st["default"], Value::Null, "{st}");
+    // An explicit act makes one; `onlyIfAbsent` then never replaces it.
+    let r = c.handle(json!({ "type": "CREDENTIAL_SET", "session": a, "cluster": "*", "onlyIfAbsent": true, "username": "new", "password": "new-pw" })).await;
+    assert_eq!(r["ok"], json!(true), "{r}");
+    let r = c.handle(json!({ "type": "CREDENTIAL_SET", "session": a, "cluster": "*", "onlyIfAbsent": true, "username": "other", "password": "other-pw" })).await;
+    assert_eq!((r["kind"].clone(), r["user"].clone()), (json!("exists"), json!("new")), "{r}");
+    let st = c.handle(json!({ "type": "CREDENTIAL_STATUS", "session": a })).await;
+    assert_eq!(st["default"]["user"], json!("new"), "{st}");
+    assert!(!r.to_string().contains("new-pw"));
+    // With a default again, a page's shared credential is still not the default.
+    let mut m = prime(Some(&fleet));
+    m["session"] = json!(a);
+    let r = c.handle(m).await;
+    assert_eq!(r["held"], json!(["alpha"]));
+    health(&c, &a, "alpha").await;
+    assert_eq!(alpha.last_hit().unwrap().header("authorization"), Some(basic("new", "new-pw").as_str()));
+}
+
+/// Review of f330d57, item 7 (since 0.3.42): the header held for a cluster carried on to a PRIME
+/// that changed its route or certificate setting but kept its address — so a cluster's own
+/// credential, bound to its destination, followed it to one nobody gave it to.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_held_header_does_not_follow_a_cluster_to_a_new_route_or_certificate_setting() {
+    let _turn = ENV.lock().await;
+    capture();
+    let data = TempDir::new("default-cred-dest");
+    let c = Core::new_with_rounds(Some(data.0.clone()), Edition::Hosted, 1);
+    let a = admin(&c).await;
+    let alpha = TestServer::start().await;
+    let spec = |tls: &str| json!({ "type": "PRIME", "session": a, "readOnly": true, "persist": false,
+        "clusters": [{ "id": "alpha", "name": "Alpha", "url": alpha.url(), "tls": tls }] });
+    c.handle(spec("auto")).await;
+    let r = c.handle(json!({ "type": "CREDENTIAL_SET", "session": a, "cluster": "alpha", "username": "own", "password": "own-pw" })).await;
+    assert_eq!(r["ok"], json!(true), "{r}");
+    let r = c.handle(spec("auto")).await;
+    assert_eq!(r["held"], json!(["alpha"]), "{r}");
+    // Same address, laxer certificate setting, nothing sent: no default, so nothing to sign in with.
+    let r = c.handle(spec("insecure")).await;
+    assert_eq!(r["held"], json!([]), "the own credential followed the cluster to a new destination: {r}");
+    health(&c, &a, "alpha").await;
+    assert_eq!(alpha.last_hit().unwrap().header("authorization"), None);
+}
+
+/// Review of f330d57, item 5: a cluster connected without a credential on purpose keeps that
+/// decision across page loads — until an admin gives it one (`dropAnonymous`), when the default
+/// applies at once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_anonymous_cluster_takes_the_default_once_the_admin_says_so() {
+    let _turn = ENV.lock().await;
+    capture();
+    let data = TempDir::new("default-cred-anon");
+    let c = Core::new_with_rounds(Some(data.0.clone()), Edition::Hosted, 1);
+    let a = admin(&c).await;
+    let alpha = TestServer::start().await;
+    let prime = |header: Option<&str>, drop: bool| {
+        let mut cl = json!({ "id": "alpha", "name": "Alpha", "url": alpha.url() });
+        if let Some(h) = header { cl["authHeader"] = json!(h); }
+        let mut m = json!({ "type": "PRIME", "session": a, "readOnly": true, "persist": false, "clusters": [cl] });
+        if drop { m["dropAnonymous"] = json!(["alpha"]); }
+        m
+    };
+    let r = c.handle(prime(Some(""), false)).await;
+    assert_eq!(r["anonymous"], json!(["alpha"]), "{r}");
+    c.handle(json!({ "type": "CREDENTIAL_SET", "session": a, "cluster": "*", "username": "fleet", "password": "fleet-pw" })).await;
+    let r = c.handle(prime(None, false)).await;
+    assert_eq!((r["held"].clone(), r["anonymous"].clone()), (json!([]), json!(["alpha"])), "a page load keeps the decision: {r}");
+    let r = c.handle(prime(None, true)).await;
+    assert_eq!((r["held"].clone(), r["anonymous"].clone()), (json!(["alpha"]), json!([])), "{r}");
+    health(&c, &a, "alpha").await;
+    assert_eq!(alpha.last_hit().unwrap().header("authorization"), Some(basic("fleet", "fleet-pw").as_str()));
+    let r = c.handle(prime(None, false)).await;
+    assert_eq!(r["held"], json!(["alpha"]), "and it stays withdrawn: {r}");
+}

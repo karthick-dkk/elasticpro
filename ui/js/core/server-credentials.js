@@ -58,8 +58,13 @@ export async function keptCredentials() {
  */
 export async function promoteCredential(from, { replace = false } = {}) {
   const r = await bridge({ type: 'CREDENTIAL_PROMOTE', from, ...(replace ? { replace: true } : {}) });
-  if (!r || !r.ok) throw new Error((r && r.message) || 'the server did not make it the default');
+  if (!r || !r.ok) throw refusal(r, 'the server did not make it the default');
   return r;
+}
+
+/** An Error carrying the core's `kind` (and, for `exists`, the default's user), never a secret. */
+function refusal(r, fallback) {
+  return Object.assign(new Error((r && r.message) || fallback), { kind: (r && r.kind) || '', user: (r && r.user) || null });
 }
 
 /** "Local-ES-Cluster's credential (user zabbix)" — a promotable entry as a choice reads. Pure. */
@@ -76,11 +81,13 @@ export function defaultChoiceLabel(entry) {
 }
 
 /**
- * Which credential the Add/Edit cluster dialog starts on: a cluster that has one of its own (kept
- * on the server, or still in the file) keeps it; everything else — a new cluster above all — uses
- * the default and asks for nothing. Pure.
+ * Which credential the Add/Edit cluster dialog starts on: a cluster connected without one on
+ * purpose says so ('none' — the core sends it nothing, whatever is kept); one that has its own
+ * (kept on the server, or still in the file) keeps it; everything else — a new cluster above
+ * all — uses the default and asks for nothing. Pure.
  */
-export function initialCredentialChoice({ keptOwn = null, fileOwn = false } = {}) {
+export function initialCredentialChoice({ keptOwn = null, fileOwn = false, anonymous = false } = {}) {
+  if (anonymous) return 'none';
   return keptOwn || fileOwn ? 'own' : 'default';
 }
 
@@ -92,11 +99,13 @@ export function keptFor(status, id) {
 }
 
 /** Keep a credential for a cluster id, or `*` for the default. Throws with the server's reason. */
-export async function keepCredential(id, cred) {
+export async function keepCredential(id, cred, { onlyIfAbsent = false } = {}) {
   const fields = credentialFields(cred);
   if (!fields) throw new Error('Enter a username and a password, an API key or a token.');
-  const r = await bridge({ type: 'CREDENTIAL_SET', cluster: id, ...fields });
-  if (!r || !r.ok) throw new Error((r && r.message) || 'the server did not keep it');
+  // `onlyIfAbsent` (the default only): set it where there is none, never replace one somebody
+  // set meanwhile — the core answers `exists` instead.
+  const r = await bridge({ type: 'CREDENTIAL_SET', cluster: id, ...fields, ...(onlyIfAbsent ? { onlyIfAbsent: true } : {}) });
+  if (!r || !r.ok) throw refusal(r, 'the server did not keep it');
   return r;
 }
 

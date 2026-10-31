@@ -10,6 +10,7 @@ import { h, mount, clear, $ } from '../lib/dom.js';
 import {
   state, clusters, client, clustersNeedingCredential, clustersWithAuthError,
   suggestedUsername, setSessionCredential, continueAnonymously, refreshAll, configFileName, reprime,
+  reconnectWithServerCredentials,
 } from '../core/state.js';
 import { workerStatus, vaultGet, vaultSet, vaultDel } from '../core/es.js';
 import { toast } from './menu.js';
@@ -111,9 +112,15 @@ function openDialog(reason, status) {
   // Clusters that rejected the default itself (no credential of their own kept): each needs one
   // of its own. Shown as that, with a way to set it — the generic form stays one press away.
   const rejected = keptDefault ? failing.filter((c) => !keptFor(status, c.id)) : [];
+  // Hosted, a default kept and not being replaced: what is typed is kept for exactly these —
+  // config clusters this dialog is about — and the list says so, not "all N".
+  const keptTargets = targets.filter((c) => c.source !== 'zabbix');
 
   const ui = { mode: 'basic', overrideAll: needing.length === 0, busy: false, results: null, error: null, remember: false, vault: false,
                hosted: credentialsKeptOnServer(), replaceDefault: false, view: rejected.length && !needing.length ? 'rejected' : 'form' };
+  // The clusters this dialog acts on, as the list, the button and the probe all count them.
+  const listed = () => (ui.hosted ? (keptDefault && !ui.replaceDefault ? keptTargets : targets)
+    : ui.overrideAll ? clusters() : targets);
   workerStatus().then((st) => {
     if (st && st.vault) ui.vault = true;
     if (st && st.edition === 'hosted') ui.hosted = true;
@@ -163,25 +170,35 @@ function openDialog(reason, status) {
     // time anyone types it, on this page load or any other.
     // An existing default is never replaced silently (0.3.46): only with the box ticked. Left
     // unticked, what is typed becomes the own credential of the clusters this dialog is for.
+    // The browser holds nothing typed on hosted: no session credential, so nothing rides a later
+    // PRIME as the shared one — the page reconnects with what the server now resolves.
     if (credentialsKeptOnServer()) {
       try {
         const now = await keptCredentials();
         const hasDefault = !!keptFor(now, DEFAULT_CREDENTIAL);
         if (hasDefault && !ui.replaceDefault) {
-          for (const c of targets) if (c.source !== 'zabbix') await keepCredential(c.id, cred);
+          for (const c of keptTargets) await keepCredential(c.id, cred);
         } else {
-          await keepCredential(DEFAULT_CREDENTIAL, cred);
+          // Ticked: replace it. Unticked with none at open: set it — unless one appeared since.
+          await keepCredential(DEFAULT_CREDENTIAL, cred, { onlyIfAbsent: !ui.replaceDefault });
           for (const c of targets) if (keptFor(now, c.id)) await keepCredential(c.id, cred);
         }
-      } catch (e) { ui.busy = false; ui.error = `The server did not keep it: ${e.message}`; return draw(); }
-    }
-    await setSessionCredential(cred, { overrideAll: ui.overrideAll });
-    if (ui.vault) {
-      if (ui.remember) await vaultSet(vaultScope(), JSON.stringify(cred));
-      else await vaultDel(vaultScope());
+      } catch (e) {
+        ui.busy = false;
+        ui.error = e.kind === 'exists' ? `A default credential was set meanwhile${e.user ? ` (user ${e.user})` : ''}; it was not replaced. Close and open this dialog again.`
+          : `The server did not keep it: ${e.message}`;
+        return draw();
+      }
+      await reconnectWithServerCredentials();
+    } else {
+      await setSessionCredential(cred, { overrideAll: ui.overrideAll });
+      if (ui.vault) {
+        if (ui.remember) await vaultSet(vaultScope(), JSON.stringify(cred));
+        else await vaultDel(vaultScope());
+      }
     }
 
-    const probeList = ui.overrideAll ? clusters() : targets;
+    const probeList = listed();
     const results = [];
     await Promise.all(probeList.map(async (c) => {
       const cl = client(c.id);
@@ -295,7 +312,7 @@ function openDialog(reason, status) {
                   placeholder: 'eyJhbGciOi…',
                   onkeydown: (e) => { if (e.key === 'Enter') connect(); } })),
 
-        someHaveFileCreds
+        someHaveFileCreds && !ui.hosted
           ? h('label', { style: { display: 'flex', gap: '8px', alignItems: 'flex-start', fontSize: '12px', marginTop: '2px' } },
               h('input', { type: 'checkbox', checked: ui.overrideAll, style: { marginTop: '2px' },
                 onchange: (e) => { ui.overrideAll = e.target.checked; } }),
@@ -306,14 +323,15 @@ function openDialog(reason, status) {
 
         h('div.cd-targets',
           h('div.muted', { style: { fontSize: '11px', textTransform: 'uppercase', letterSpacing: '.05em', marginBottom: '5px' } },
-            ui.overrideAll ? `Will connect all ${clusters().length} cluster(s)` : `Will connect ${targets.length} cluster(s)`),
+            ui.hosted && keptDefault && !ui.replaceDefault ? `Kept as the own credential of ${listed().length} cluster(s)`
+              : !ui.hosted && ui.overrideAll ? `Will connect all ${clusters().length} cluster(s)` : `Will connect ${listed().length} cluster(s)`),
           ...(ui.results
             ? ui.results.map((r) => h('div.cd-row',
                 h(`span.pill.${r.ok ? 'green' : 'red'}`, h('i.dot'), r.ok ? 'connected' : 'failed'),
                 h('span', { style: { fontWeight: 600 } }, r.c.name),
                 h('span.muted.trunc', { style: { fontSize: '11.5px' } }, r.detail),
                 r.tls ? h('span.muted', { style: { marginLeft: 'auto', fontSize: '11px' } }, 'see Clusters page') : null))
-            : (ui.overrideAll ? clusters() : targets).map((c) => h('div.cd-row',
+            : listed().map((c) => h('div.cd-row',
                 h('span.pill.grey', h('i.dot'), 'pending'),
                 h('span', { style: { fontWeight: 600 } }, c.name),
                 h('span.mono.muted.trunc', c.url))))),
@@ -374,7 +392,7 @@ function openDialog(reason, status) {
             ui.results ? 'Done' : 'Cancel'),
           h('button.btn.primary', { onclick: connect, disabled: ui.busy },
             ui.busy ? h('span', h('span.spin'), ' Connecting…')
-              : `Connect ${ui.overrideAll ? clusters().length : targets.length} cluster${(ui.overrideAll ? clusters().length : targets.length) === 1 ? '' : 's'}`))));
+              : `Connect ${listed().length} cluster${listed().length === 1 ? '' : 's'}`))));
 
     const first = $('#cd-user') || $('#cd-apikey') || $('#cd-bearer');
     if (first && !ui.busy && !ui.results) setTimeout(() => first.focus(), 0);

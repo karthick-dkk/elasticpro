@@ -4281,6 +4281,8 @@ if (viaFleet) {
   const server = { default: { id: '*', user: 'fleet', kind: 'basic', setBy: 'Admin', setAt: 1793000000 }, own: [],
                    promotable: [] };
   const credSent = [];
+  const primeSent = [];
+  let failWrites = 0;
   let written = null;
   globalThis.fetch = async (input, init) => {
     const body = init && init.body ? JSON.parse(init.body) : {};
@@ -4296,14 +4298,19 @@ if (viaFleet) {
         server.default = { id: '*', user: p ? p.user : 'x', kind: 'basic', setBy: 'Admin', setAt: 1793000001 };
         return stubReply({ ok: true, cluster: '*', from: body.from, user: server.default.user, kind: 'basic', replaced: false });
       }
-      if (t === 'CREDENTIAL_SET' && body.cluster === '*') server.default = { id: '*', user: body.username || null, kind: 'basic', setBy: 'Admin', setAt: 1793000002 };
+      if (t === 'CREDENTIAL_SET' && body.cluster === '*') {
+        if (body.onlyIfAbsent && server.default) return stubReply({ ok: false, kind: 'exists', user: server.default.user, message: 'a default credential is already set' });
+        server.default = { id: '*', user: body.username || null, kind: 'basic', setBy: 'Admin', setAt: 1793000002 };
+      }
       return stubReply({ ok: true, cluster: body.cluster });
     }
     if (t === 'PRIME') {
+      primeSent.push(body);
       const r = await realFetch(input, init);
       const res = JSON.parse(await r.text());
       return stubReply({ ...res, defaultCredential: !!server.default });
     }
+    if (t === 'CONFIG_WRITE' && failWrites > 0) { failWrites--; return stubReply({ ok: false, kind: 'io_error', message: 'disk full' }); }
     if (t === 'CONFIG_WRITE') { written = body.text; return stubReply({ ok: true, path: body.path, bytes: body.text.length }); }
     if (t === 'CONFIG_READ' && written !== null) return stubReply({ ok: true, text: written, size: written.length, lastModified: Date.now() });
     return realFetch(input, init);
@@ -4313,6 +4320,8 @@ if (viaFleet) {
   const press = (el) => el && el.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
   const button = (root, re) => root && [...root.querySelectorAll('button')].find((b) => re.test(b.textContent.trim()));
   const signInButton = () => button(doc.getElementById('topbar'), /^Sign in/);
+  // A dialog that never closes (the defect under test) must fail a check, not hang the run.
+  const within = (p, ms = 4000) => Promise.race([p, new Promise((r) => setTimeout(r, ms))]);
   try {
     sc.setHostedEdition(true);
     st.state.caller = { name: 'default-check', role: 'admin' };
@@ -4339,7 +4348,7 @@ if (viaFleet) {
       dlg.querySelector('#ce-name').value = 'dc-two';
       dlg.querySelector('#ce-url').value = url;
       press(button(dlg, /^Add cluster$/));
-      await adding; await settleFor(600);
+      await within(adding); await settleFor(600);
       ok(!dialog(), `default: the Add cluster dialog stayed open: ${(doc.querySelector('.modal-msg') || {}).textContent || ''}`);
       ok(!credSent.length, `default: adding a cluster on the default sent ${credSent.map((m) => m.type).join(', ')}`);
       const saved = written ? JSON.parse(written).clusters.find((c) => c.name === 'dc-two') : null;
@@ -4388,7 +4397,7 @@ if (viaFleet) {
       dlg.querySelector('#ce-name').value = 'dc-three';
       dlg.querySelector('#ce-url').value = url;
       press(button(dlg, /^Add cluster$/));
-      await adding2; await settleFor(600);
+      await within(adding2); await settleFor(600);
       ok(credSent.some((m) => m.type === 'CREDENTIAL_PROMOTE' && m.from === 'Local-ES-Cluster'), `promote: adding with it chosen sent ${JSON.stringify(credSent)}`);
       ok(!credSent.some((m) => m.type === 'CREDENTIAL_SET'), 'promote: a password was sent although a kept one was chosen');
     } else problems.push('promote: the Add cluster dialog did not open');
@@ -4414,17 +4423,98 @@ if (viaFleet) {
       if (!m || !box) return;
       if (tick) { box.checked = true; box.dispatchEvent(new window.Event('change', { bubbles: true })); await settleFor(50); }
       m = doc.querySelector('.modal.creds');
+      // The list is exactly what the credential will be kept for (review item 4), not "all N".
+      if (!tick) {
+        const rows = [...m.querySelectorAll('.cd-targets .cd-row')].map((r) => r.textContent);
+        ok(rows.length === 1 && rows[0].includes('dc-one') && /Kept as the own credential of 1 cluster/.test(m.textContent) && /Connect 1 cluster\b/.test(m.textContent),
+          `replace: the dialog lists ${rows.length} cluster(s) (${rows.join(' | ')}) for a credential kept for dc-one only`);
+      }
       m.querySelector('#cd-user').value = 'typed-user';
       m.querySelector('#cd-pass').value = 'typed-pw';
       credSent.length = 0;
+      primeSent.length = 0;
       press(button(m, /^Connect/)); await settleFor(1200);
     };
     await typeAndConnect(false);
     ok(credSent.length && credSent.every((m) => m.type === 'CREDENTIAL_SET' && m.cluster !== '*'),
       `replace: unticked, the dialog sent ${JSON.stringify(credSent.map((m) => ({ type: m.type, cluster: m.cluster })))}`);
+    // Review item 1: what was typed is not held by the page, so no PRIME carries it as the
+    // shared credential the core would keep as the default.
+    {
+      const typed = Buffer.from('typed-user:typed-pw').toString('base64');
+      await st.reprime();
+      ok(primeSent.length > 0 && primeSent.every((p) => !('sharedAuthHeader' in p) && !JSON.stringify(p).includes(typed)),
+        `replace: after the unticked dialog a PRIME carried ${JSON.stringify(primeSent.map((p) => p.sharedAuthHeader))}`);
+      ok(!st.hasSessionCredential(), 'replace: the page holds the typed credential');
+    }
     await closeAll();
     await typeAndConnect(true);
-    ok(credSent.some((m) => m.type === 'CREDENTIAL_SET' && m.cluster === '*'), 'replace: ticked, the default was not replaced');
+    ok(credSent.some((m) => m.type === 'CREDENTIAL_SET' && m.cluster === '*' && !m.onlyIfAbsent), 'replace: ticked, the default was not replaced');
+    await closeAll();
+    for (const c of st.clusters()) { const cl = st.client(c.id); if (cl) cl.state = 'unknown'; }
+
+    // Review item 2: the Add dialog sets the default once. A config save that fails leaves it
+    // set (and says so); pressing again saves the cluster without setting it a second time.
+    server.default = null; server.promotable = []; server.own = [];
+    credSent.length = 0;
+    failWrites = 1;
+    const adding3 = ce.editCluster(null);
+    await settleFor(300);
+    dlg = dialog();
+    if (dlg) {
+      dlg.querySelector('#ce-name').value = 'dc-four';
+      dlg.querySelector('#ce-url').value = url;
+      dlg.querySelector('#ce-du').value = 'set-once';
+      dlg.querySelector('#ce-dp').value = 'set-once-pw';
+      press(button(dlg, /^Add cluster$/)); await settleFor(500);
+      const said = (dlg.querySelector('.modal-msg') || {}).textContent || '';
+      ok(/WAS set/.test(said), `retry: a failed save after setting the default does not say it was set ("${said}")`);
+      ok(credSent.length === 1 && credSent[0].cluster === '*' && credSent[0].onlyIfAbsent === true, `retry: the default was set with ${JSON.stringify(credSent.map((m) => ({ c: m.cluster, o: m.onlyIfAbsent })))}`);
+      press(button(dlg, /^Add cluster$/)); await within(adding3); await settleFor(500);
+      ok(!dialog(), `retry: the second press did not save (${(doc.querySelector('.modal-msg') || {}).textContent || ''})`);
+      ok(credSent.filter((m) => m.cluster === '*').length === 1, 'retry: the default was set a second time');
+      ok(written && JSON.parse(written).clusters.filter((c) => c.name === 'dc-four').length === 1, 'retry: the cluster is not in the file exactly once');
+    } else problems.push('retry: the Add cluster dialog did not open');
+    await closeAll();
+
+    // Review item 3: switching to the default asks only once the rest of the form is valid.
+    server.default = null;
+    const two = st.clusters().find((c) => c.name === 'dc-two');
+    server.own = two ? [{ id: two.id, user: 'own-two', kind: 'basic', setBy: 'Admin', setAt: 1793000000 }] : [];
+    credSent.length = 0;
+    const editing = ce.editCluster(ce.rawClusterOf(two));
+    await settleFor(300);
+    dlg = dialog();
+    if (dlg) {
+      ok(dlg.querySelector('#ce-cred-own').checked, 'switch: a cluster with its own credential does not start on it');
+      const def = dlg.querySelector('#ce-cred-default');
+      def.checked = true; def.dispatchEvent(new window.Event('change', { bubbles: true }));
+      press(button(dlg, /^Save$/)); await settleFor(300);
+      const overlays = doc.querySelectorAll('.modal-overlay').length;
+      ok(overlays === 1, `switch: the confirmation was asked before the empty default fields were checked (${overlays} dialogs open)`);
+      ok(/Set the default credential once/.test((dlg.querySelector('.modal-msg') || {}).textContent || ''), 'switch: the empty default fields were not reported');
+      ok(!credSent.length, `switch: something was sent for an invalid form: ${JSON.stringify(credSent)}`);
+      press(button(dlg, /^Cancel$/)); await within(editing); await settleFor(100);
+    } else problems.push('switch: the Edit cluster dialog did not open');
+    await closeAll();
+
+    // Review item 5: a cluster connected anonymously says so, and choosing the default drops it.
+    server.default = { id: '*', user: 'fleet', kind: 'basic', setBy: 'Admin', setAt: 1793000000 };
+    server.own = [];
+    const anon = st.clusters().find((c) => c.name === 'dc-one');
+    anon.anonymous = true;
+    const editing2 = ce.editCluster(ce.rawClusterOf(anon));
+    await settleFor(300);
+    dlg = dialog();
+    if (dlg) {
+      const none = dlg.querySelector('#ce-cred-none');
+      ok(none && none.checked && /No credential \(connected anonymously\)/.test(dlg.textContent), 'anonymous: the dialog does not say the cluster is connected without a credential');
+      const def = dlg.querySelector('#ce-cred-default');
+      def.checked = true; def.dispatchEvent(new window.Event('change', { bubbles: true }));
+      primeSent.length = 0;
+      press(button(dlg, /^Save$/)); await within(editing2); await settleFor(500);
+      ok(primeSent.some((p) => (p.dropAnonymous || []).includes(anon.id)), `anonymous: choosing the default did not withdraw "anonymous" (${JSON.stringify(primeSent.map((p) => p.dropAnonymous))})`);
+    } else problems.push('anonymous: the Edit cluster dialog did not open');
     await closeAll();
   } finally {
     globalThis.fetch = realFetch;

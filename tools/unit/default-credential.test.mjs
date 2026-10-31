@@ -103,3 +103,82 @@ test('a PRIME that says the default covers clusters takes them off the sign-in l
   assert.equal(S.state.config.clusters.find((x) => x.id === 'open').credSource, 'none', 'anonymous stays anonymous');
   S.state.config = null;
 });
+
+/* ---------------- review of f330d57 ---------------- */
+
+test('an anonymous cluster starts on "No credential", whatever else is kept', () => {
+  assert.equal(K.initialCredentialChoice({ anonymous: true }), 'none');
+  assert.equal(K.initialCredentialChoice({ anonymous: true, keptOwn: { id: 'a' } }), 'none');
+  assert.equal(K.initialCredentialChoice({ anonymous: false, fileOwn: true }), 'own');
+});
+
+test('setting the default from a dialog never replaces one: onlyIfAbsent, and the refusal says whose', async () => {
+  sent.length = 0;
+  reply = { ok: false, kind: 'exists', user: 'fleet', setBy: 'Admin', message: 'a default credential is already set (fleet, set by Admin)' };
+  const err = await K.keepCredential('*', { username: 'u', password: 'p' }, { onlyIfAbsent: true }).catch((e) => e);
+  assert.equal(sent.at(-1).onlyIfAbsent, true);
+  assert.equal(err.kind, 'exists');
+  assert.equal(err.user, 'fleet');
+  reply = { ok: true };
+  await K.keepCredential('alpha', { username: 'u', password: 'p' });
+  assert.equal('onlyIfAbsent' in sent.at(-1), false, 'a cluster\'s own is not sent with it');
+  reply = { ok: false, kind: 'exists', user: 'fleet', message: 'already set' };
+  const e2 = await K.promoteCredential('cfg:a').catch((e) => e);
+  assert.equal(e2.kind, 'exists');
+});
+
+test('markServerDefault(false) puts back what it (or a held mark) took off, and nothing else', () => {
+  S.state.config = { clusters: [
+    { id: 'a', name: 'a', url: 'http://a', enabled: true, needsCred: true, anonymous: false, credSource: 'none', source: 'file', username: '' },
+    { id: 'b', name: 'b', url: 'http://b', enabled: true, needsCred: true, anonymous: false, credSource: 'none', source: 'file', username: '' },
+    { id: 'f', name: 'f', url: 'http://f', enabled: true, needsCred: false, anonymous: false, credSource: 'shared', source: 'file', username: 'elastic' },
+  ], fileMeta: { name: 'c.json' } };
+  S.markServerHeld(['b']);
+  S.markServerDefault(true, ['b']);
+  assert.deepEqual(S.clustersNeedingCredential(), []);
+  // The default was forgotten: the core now holds only b (its own).
+  S.markServerDefault(false, ['b']);
+  assert.deepEqual(S.clustersNeedingCredential().map((c) => c.id), ['a'], 'a needs one again; b is held; f has the file\'s');
+  const a = S.state.config.clusters.find((c) => c.id === 'a');
+  assert.equal(a.credSource, 'none');
+  assert.equal(a.username, '');
+  // …and b, once the core stops holding it too.
+  S.markServerDefault(false, []);
+  assert.deepEqual(S.clustersNeedingCredential().map((c) => c.id), ['a', 'b']);
+  assert.equal(S.state.config.clusters.find((c) => c.id === 'f').needsCred, false);
+  S.state.config = null;
+});
+
+test('hosted: a typed credential is never held by the page, and never rides a PRIME as the shared one', async () => {
+  K.setHostedEdition(true);
+  try {
+    S.state.config = { clusters: [
+      { id: 'a', name: 'a', url: 'http://a', enabled: true, needsCred: true, anonymous: false, credSource: 'none', source: 'file' },
+      { id: 'q', name: 'q', url: 'http://q', enabled: true, needsCred: true, anonymous: true, credSource: 'none', source: 'file' },
+    ], fileMeta: { name: 'c.json' }, jumpHosts: [] };
+    S.state.clients.clear();
+    sent.length = 0;
+    reply = (m) => (m.type === 'PRIME' ? { ok: true, held: ['a'], anonymous: [], defaultCredential: true } : { ok: true });
+    await S.setSessionCredential({ username: 'typed-user', password: 'typed-pw' });
+    assert.equal(S.hasSessionCredential(), false, 'the page holds no typed credential on hosted');
+    const primes = sent.filter((m) => m.type === 'PRIME');
+    assert.ok(primes.length >= 1, 'it re-primed');
+    const typedHeader = Buffer.from('typed-user:typed-pw').toString('base64');
+    for (const p of primes) {
+      assert.equal('sharedAuthHeader' in p, false, `a PRIME carried a shared credential: ${JSON.stringify(p.sharedAuthHeader)}`);
+      assert.ok(!JSON.stringify(p).includes('typed-pw') && !JSON.stringify(p).includes(typedHeader), 'the typed credential reached a PRIME');
+    }
+    // An anonymous cluster given a credential: the next PRIME — and only that one — says so.
+    sent.length = 0;
+    S.withdrawAnonymous('q');
+    await S.reprime();
+    await S.reprime();
+    const [first, second] = sent.filter((m) => m.type === 'PRIME');
+    assert.deepEqual(first.dropAnonymous, ['q']);
+    assert.ok(first.clusters.find((c) => c.id === 'q').authHeader == null, 'not "" — no longer anonymous');
+    assert.equal('dropAnonymous' in second, false);
+  } finally {
+    K.setHostedEdition(false);
+    S.state.config = null;
+  }
+});

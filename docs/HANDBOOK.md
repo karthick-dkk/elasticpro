@@ -674,15 +674,20 @@ Add dialog offers to set it once there (typed) or to use a credential the server
 default (401/403) is named — *The default credential was rejected by …* — with **Set its own
 credential…** (a Zabbix cluster's own password is set in Cluster Management). The sign-in dialog
 never replaces an existing default unless **Replace the default credential** is ticked; unticked,
-what is typed is kept as the listed clusters' own.
+what is typed is kept as the own credential of exactly the clusters it lists. On hosted the page
+never holds what was typed: the server keeps it and the page reconnects. A cluster connected
+without a credential on purpose opens on *No credential (connected anonymously)*; choosing the
+default or its own withdraws that (`dropAnonymous`). The Add dialog sets the default with
+`onlyIfAbsent` and only once per dialog, so a retry after a failed save, or a default somebody set
+meanwhile, never replaces one.
 
 | Message | Role | Answer |
 |---|---|---|
 | `CREDENTIAL_STATUS` | admin | `{ok, default: {id: "*", user, kind: "basic"\|"header", setBy, setAt, moved}\|null, clusters: [same, per config cluster id], promotable: [{id, cluster, source: "config"\|"zabbix", user, kind, setBy, setAt}], problem}`. `promotable` lists, while there is no default, every kept entry the server's key opens; `id` is the entry's name in the store (`cfg:<id>` or the Zabbix host). Empty once a default exists. |
-| `CREDENTIAL_SET {cluster, username+password \| apiKey \| bearer \| rebind}` | admin | `{ok, cluster, setAt}`. `cluster: "*"` sets the default. |
-| `CREDENTIAL_CLEAR {cluster}` | admin | `{ok, cluster, cleared}` — the cluster then uses the default. |
+| `CREDENTIAL_SET {cluster, username+password \| apiKey \| bearer \| rebind, onlyIfAbsent?}` | admin | `{ok, cluster, setAt}`. `cluster: "*"` sets the default. With `onlyIfAbsent: true` (the Add dialog's) an existing default is not replaced: `{ok: false, kind: "exists", user, setBy, message}`. |
+| `CREDENTIAL_CLEAR {cluster}` | admin | `{ok, cluster, cleared}` — the cluster then uses the default. Clearing `"*"` also marks the default as forgotten (who, when; kept in `cluster-secrets.json`): until CREDENTIAL_SET or CREDENTIAL_PROMOTE of `"*"`, no PRIME's `sharedAuthHeader` is kept as the default or used in its place. |
 | `CREDENTIAL_PROMOTE {from, replace?}` | admin | Copies a kept entry to the default without the password being typed: `{ok, cluster: "*", from, user, kind, replaced, setAt}`. `from` is a `promotable` id (a config cluster's bare id is accepted). An existing default is refused — `{ok: false, kind: "exists", message}` naming its user — unless `replace: true`. `not_found` for an unknown entry, `unreadable` for one the key does not open. Audit line `kept credential made the default` with `user`, `from`, `replaced`; never the secret. |
-| `PRIME` (reply fields) | admin | `held: [id]` (clusters the core signs in to), `anonymous: [id]` (none on purpose), `defaultCredential: bool` — hosted, whether a cluster with nothing of its own is covered (the kept default, or the message's shared credential where nothing can be kept). A cluster with no own entry and no default falls back to the message's `sharedAuthHeader`, as `CLUSTER_SAVE` does. |
+| `PRIME` (credential fields) | admin | Message: `dropAnonymous: [id]` — clusters connected without a credential on purpose that an admin has just given one (the default or their own); the core stops keeping "none, on purpose" for them. On hosted the page sends no `sharedAuthHeader` except a `credentials:` block still in the config file (its one-time move to the server), never one typed. Reply: `held: [id]` (clusters the core signs in to), `anonymous: [id]` (none on purpose), `defaultCredential: bool` — hosted, whether a cluster with nothing of its own is covered (the kept default, or the message's shared credential where nothing can be kept and the default was not forgotten). A cluster with no own entry and no default falls back to that shared credential, as `CLUSTER_SAVE` does. A header held from before carries on only while address, route and certificate setting are all unchanged. |
 | `CLUSTER_SAVE` (reply field) | operator | `credential: "kept"\|"shared"\|"admin"\|"none"`. On `none` the page says *No default credential is set; an admin sets it in Config → Credentials* — no form. |
 
 Setting, promoting or clearing the default starts a Zabbix sync, so a Zabbix cluster held back

@@ -497,6 +497,11 @@ struct PrimeMsg {
     /// Absent keeps the one held; "" clears it; anything else replaces it.
     #[serde(default)]
     shared_auth_header: Option<String>,
+    /// Ids of clusters connected without a credential on purpose ("Continue without
+    /// credentials") whose decision an admin has just withdrawn by giving them one — the
+    /// default, or their own. Without it the core would keep the "none, on purpose" it holds.
+    #[serde(default)]
+    drop_anonymous: Vec<String>,
     /// `defaults.tls` is `insecure` in the config this came from. Used only by a core with no
     /// config file of its own (the desktop build, where the person at the keyboard opened
     /// the file); a core started with one reads the switch from it and ignores this.
@@ -2782,8 +2787,11 @@ impl Core {
         use crate::cluster_secrets::{config_key, DEFAULT};
         let mut kept = 0;
         let shared = p.shared_auth_header.as_deref().map(str::trim).filter(|h| !h.is_empty());
+        // The one-time move (0.3.42) of a shared credential the browser carries from the config
+        // file. Never once an admin forgot the default on purpose: only CREDENTIAL_SET or
+        // CREDENTIAL_PROMOTE makes one then, not a page that still has the old one.
         if let Some(h) = shared {
-            if self.cluster_secrets.status(DEFAULT).is_none() {
+            if self.cluster_secrets.status(DEFAULT).is_none() && self.cluster_secrets.default_cleared().is_none() {
                 match self.keep_header(DEFAULT, h, "", by) {
                     Ok(()) => kept += 1,
                     Err(why) => tracing::warn!(error = %why, "the shared credential could not be kept on the server"),
@@ -2896,7 +2904,12 @@ impl Core {
         };
         let key = if cluster == DEFAULT { DEFAULT.to_string() } else { crate::cluster_secrets::config_key(cluster) };
         if t == "CREDENTIAL_CLEAR" {
-            return match self.cluster_secrets.remove(&key) {
+            let removed = if cluster == DEFAULT {
+                self.cluster_secrets.forget_default(who, crate::auth::now())
+            } else {
+                self.cluster_secrets.remove(&key)
+            };
+            return match removed {
                 Ok(had) => {
                     tracing::info!(target: "audit", user = %who, cluster, had, "kept credential cleared");
                     self.apply_kept_credentials().await;
@@ -2931,6 +2944,16 @@ impl Core {
                 Ok(false) => json!({ "ok": false, "kind": "not_found", "message": "no credential is kept for that cluster" }),
                 Err(why) => json!({ "ok": false, "kind": "io_error", "message": why }),
             };
+        }
+        // `onlyIfAbsent`: set the default only where there is none — what a dialog that offered
+        // "none set yet" sends, so a default somebody set meanwhile (or this same dialog on an
+        // earlier try) is never silently replaced.
+        if cluster == DEFAULT && msg.get("onlyIfAbsent").and_then(|v| v.as_bool()) == Some(true) {
+            if let Some(cur) = self.cluster_secrets.list().into_iter().find(|l| l.name == DEFAULT) {
+                return json!({ "ok": false, "kind": "exists", "user": cur.user, "setBy": cur.set_by,
+                               "message": format!("a default credential is already set ({}, set by {})",
+                                                  cur.user.as_deref().unwrap_or("an API key or token"), cur.set_by) });
+            }
         }
         let text = |k: &str| msg.get(k).and_then(|v| v.as_str()).unwrap_or("");
         let now = crate::auth::now();
@@ -2979,7 +3002,7 @@ impl Core {
         let replace = msg.get("replace").and_then(|v| v.as_bool()) == Some(true);
         if let Some(cur) = listed.iter().find(|l| l.name == DEFAULT) {
             if !replace {
-                return json!({ "ok": false, "kind": "exists",
+                return json!({ "ok": false, "kind": "exists", "user": cur.user, "setBy": cur.set_by,
                                "message": format!("a default credential is already set ({}, set by {}); say replace to replace it",
                                                   cur.user.as_deref().unwrap_or("an API key or token"), cur.set_by) });
             }
@@ -3114,15 +3137,24 @@ impl Core {
             // says "" on purpose, else the one held. Hosted, a cluster with nothing of its own
             // and nothing kept signs in with it — what CLUSTER_SAVE already does for a cluster
             // an operator adds ("shared"), so the two doors agree.
-            let shared_now: Option<String> = match p.shared_auth_header.as_deref().map(str::trim) {
-                Some("") => None,
-                Some(h) => Some(h.to_string()),
-                None => cur.shared_auth.clone().filter(|h| !h.is_empty()),
+            //
+            // Not once an admin forgot the default on purpose (`default_cleared`): a browser that
+            // still carries a shared credential must not bring the forgotten one back.
+            let default_forgotten = hosted && self.cluster_secrets.default_cleared().is_some();
+            let shared_now: Option<String> = if default_forgotten { None } else {
+                match p.shared_auth_header.as_deref().map(str::trim) {
+                    Some("") => None,
+                    Some(h) => Some(h.to_string()),
+                    None => cur.shared_auth.clone().filter(|h| !h.is_empty()),
+                }
             };
             for c in incoming.iter_mut() {
                 // "None, on purpose" (an explicit empty header) is a decision a config file does
                 // not record; the next page load sends nothing and the decision stands.
-                if hosted && c.auth_header.is_none() {
+                // An admin chose a credential for a cluster that was connected without one
+                // (`dropAnonymous`): the decision is withdrawn, not carried over.
+                let leaves_anonymous = p.drop_anonymous.contains(&c.id);
+                if hosted && c.auth_header.is_none() && !leaves_anonymous {
                     if let Some(old) = cur.clusters.get(&c.id) {
                         if old.auth_header.as_deref() == Some("") && old.url.trim_end_matches('/') == c.url.trim_end_matches('/') {
                             c.auth_header = Some(String::new());
@@ -3137,9 +3169,14 @@ impl Core {
                         continue;
                     }
                 }
+                // The header held before carries on only to the same destination — address,
+                // route AND certificate setting, the key a cluster's own credential is bound to.
+                // Comparing the address alone let a held own credential follow a cluster to a
+                // new route or a laxer certificate setting nobody gave it to.
                 if c.auth_header.is_none() {
                     if let Some(old) = cur.clusters.get(&c.id) {
-                        if old.url.trim_end_matches('/') == c.url.trim_end_matches('/') {
+                        let dropped = leaves_anonymous && old.auth_header.as_deref() == Some("");
+                        if !dropped && spec_destination(old) == spec_destination(c) {
                             c.auth_header = old.auth_header.clone();
                         }
                     }
@@ -3155,6 +3192,7 @@ impl Core {
             match p.shared_auth_header.as_deref() {
                 None => {}
                 Some("") => cur.shared_auth = None,
+                Some(_) if default_forgotten => cur.shared_auth = None,
                 Some(h) => cur.shared_auth = Some(h.to_string()),
             }
             if hosted {
