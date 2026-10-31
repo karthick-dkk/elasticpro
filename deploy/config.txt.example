@@ -246,3 +246,28 @@ UI_REPORT_TO=
 UI_REPORT_SCHEDULE=
 UI_REPORT_AT=
 UI_REPORT_SHEETS=
+
+# Play, the NOC wall display (#/play; docs/PLAY.md). Each key set here locks its field on
+# Config > Play. Display links (a URL a TV opens without signing in) are on unless
+# UI_PLAY_ENABLED=false, which also ends every TV already showing one.
+UI_PLAY_ENABLED=
+# Delayed devices: yellow from this many minutes (default 30), red above this many (60).
+UI_PLAY_DELAY_YELLOW_MIN=
+UI_PLAY_DELAY_RED_MIN=
+# Which nodes a cluster is expected to have: seen24h (every name seen in the last 24 h,
+# the default) or pinned (the list kept on Config > Play).
+UI_PLAY_NODE_EXPECTED=
+# A cluster with a node that left blinks: untilBack (default), untilAck or off.
+UI_PLAY_NODE_BLINK=
+# How often a wall looks for nodes that left, 10-3600 seconds (default 60).
+UI_PLAY_NODE_CHECK_SECONDS=
+# What puts a cluster in the spotlight, comma-separated: red, nodeLeft, slmFailed, storage,
+# unreachable, criticalAlert, ilmError, yellow (default: the first six), or none.
+UI_PLAY_SPOTLIGHT_WHEN=
+# Minutes a cluster stays in the spotlight after its last problem clears (default 10), and
+# seconds each cluster in it is shown, 5-120 (default 13).
+UI_PLAY_SPOTLIGHT_LEAVE_MIN=
+UI_PLAY_SPOTLIGHT_SECONDS=
+# Clusters left off every wall (comma-separated cluster ids). Shown on Config > Play with the
+# reason "set in config.txt"; the rest of ElasticPro still shows them.
+UI_PLAY_EXCLUDE=

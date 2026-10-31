@@ -694,6 +694,56 @@ Setting, promoting or clearing the default starts a Zabbix sync, so a Zabbix clu
 as *password not set* is polled with the new default within seconds rather than at the next
 interval.
 
+## Play (NOC wall display) — the message contract
+
+0.3.47; docs/PLAY.md is the design. The wall runs the same UI code as every page; the core adds
+only display links, the Play settings, node-name history, shared acknowledgements and a shared
+measurement cache. Times are ms since the epoch. Every reply that names clusters is cut to the
+clusters the caller sees: Zabbix group scope, and a display link's own cluster list.
+
+**Display links** (hosted only; `UI_PLAY_ENABLED=false` turns them off and ends every TV on one).
+A link is a secret this core issued: only its SHA-256 is kept (`<data>/play-links.json`, 0600),
+and the secret is shown once, in `PLAY_LINK_CREATE`'s reply. The TV opens
+`https://<host>/#/play?display=<secret>`; the page sends `PLAY_EXCHANGE`, and the bridge turns
+the session into the same HttpOnly / Secure / SameSite=Strict cookie a sign-in gets (and takes it
+out of the reply). That session's caller is `display:<name>`, role user, **`play_only`**: it may
+send only `PLAY_READS` (`auth.rs`) — FLEET_STATE, CLUSTER_DATASET, EVENTS_TICKET, REFRESH,
+VOLUME_DAILY / MONTHLY / MONTHLY_ALL, SILENCE_LIST, ACK_LIST, PLAY_STATE, PLAY_ZOOM_SET,
+PLAY_SHARE_GET / PUT (`delay` only), PING, CONFIG_VIEW, ZABBIX_CLUSTERS, WHOAMI, LOGOUT, the
+shell's startup no-ops, and `ES` only as a read `_search` / `_field_caps` without `scroll` (the
+log-delay measurement). Anything else: `{ok: false, kind: "forbidden", playOnly: true, message:
+"a display link only shows Play…"}`. It never writes (`allowWrites` is dropped before
+`Writes::decide`). The caller is rebuilt from the link at every request, so revoking it, its
+expiry, or switching links off ends every TV on it at once; `allowFrom` is checked on every
+request against the address `source_of` decides (X-Real-IP only from `ELASTICPRO_TRUSTED_PROXIES`).
+
+| Message | Role | Answer |
+|---|---|---|
+| `PLAY_LINK_CREATE {name, clusters: "all"\|{group}\|[ids], allowFrom?: [cidr], expires?: "permanent"\|days, settings?}` | admin | `{ok, link: {id, name, url, clusters, allowFrom, expires, expiresAt, createdAt, createdBy, …}, secret}` — `url` is `<ELASTICPRO_PUBLIC_URL or the browser's origin>/#/play?display=<secret>`, shown once. Default expiry: permanent. |
+| `PLAY_LINK_LIST` | admin | `{ok, enabled, links: [{id, name, clusters, allowFrom, expires: "permanent"\|{at}, expiresAt, expired, createdAt, createdBy, lastSeen: {at, from}\|null, sessions, settings}]}` — never a secret or a usable URL. |
+| `PLAY_LINK_REVOKE {id}` | admin | `{ok, id, sessionsEnded}`; its sessions end at once. |
+| `PLAY_LINK_SET {id, settings}` | admin | The display's settings, merged: `{slides: [{id, show, dwellSec}] (ordered; fleet, alerts, spotlight, delay, backups, volume), criticalTakesScreen, spotlightAll, theme: dark\|light, sound: off\|chime, zoom: null\|0.8…1.5}` (`zoom: null`: the TV keeps its own). → `{ok, id, settings}`. |
+| `PLAY_EXCHANGE {secret}` | none | `{ok, caller, display: {id, name}, cookie: true}`; `bad_credentials` for an unknown, revoked or expired link, `forbidden` from an address `allowFrom` does not name, `disabled` / `unsupported`. |
+| `PLAY_CONFIG_GET` | user | `{ok, watch, exclude: [{clusterId, reason, by, at, managed?}], defaultDisplay, managed: [UI_PLAY_* keys], managedFields: {"watch.x": key}, linksEnabled, options}`; an admin also gets `displays`, `links`, `groups` (the Zabbix user groups the clusters carry). |
+| `PLAY_CONFIG_SET {settings}` | admin | One of `{watch: {...}}` (merged; a locked field with another value: `kind: "managed"`), `{exclude: {add: {clusterId, reason}}}` / `{exclude: {remove: clusterId}}` (a reason is required; `by`/`at` stamped by the server), `{defaultDisplay}`, `{displays: {<linkId>: {...}}}`. Answers as `PLAY_CONFIG_GET`. Audited. |
+| `PLAY_STATE {open?: [alertKey]}` | user, play_only | `{ok, settings: {watch, display}, zoom, excluded: [ids], nodes: {clusterId: {expected, present, left: [{node, since}], asOf, answering}}, openSince: {alertKey: at}, now}`. `open` is this display's open alerts; each keeps its first time per display (`<data>/play/open-since.json`). |
+| `PLAY_ZOOM_SET {zoom}` | play_only | A display link's TV saving its − / +: `{ok, zoom, fixed}`. A fixed `zoom` in the display's settings wins. |
+| `PLAY_NODE_FORGET {clusterId, node}` | operator | `{ok}`; the node is no longer expected (and unpinned). Audited. |
+| `PLAY_SHARE_PUT {kind: "delay"\|"repoSize", clusterId, measuredAt, data}` | user (play_only: `delay`) | `{ok, kept}` — `kept: false` when a newer one is held. Delay data is a list of device records or `{devices: [...]}`, at most 2,000 and 1 MB; a repository size an object up to 64 KB. Kept 48 h on disk (`<data>/play/share/<kind>/`). |
+| `PLAY_SHARE_GET {kind, clusterIds?}` | user, play_only | `{ok, kind, records: {clusterId: {measuredAt, putAt, by, data}}, keepHours}`. |
+| `ACK_LIST` | user, play_only | `{ok, acks: {key: {by, at, note?, record?}}}` (`<data>/acks.json`, hosted; desktop keeps IndexedDB). |
+| `ACK_SET {key, note?, record?}` | user | `{ok, key, ack}`. `record` is acks.js's own record; the server stamps `ackedBy`/`ackedAt` when this change acknowledges, and the author of each new note. Audit line `alert acknowledgement set` (user, key, note length — never the note). |
+| `ACK_CLEAR {key}` | user | `{ok, key}`. Audited. |
+
+**Node-name history** (`<data>/play/nodes.json`) is fed from every `nodes` entry the fleet poller
+completes — the names it already fetched, never a request of its own. A name not seen for 24 h is
+no longer expected (or, with `nodeExpected: "pinned"`, the pinned list is). "Left" holds while the
+cluster answers.
+
+**config.txt** (`UI_PLAY_*`, see `deploy/config.txt.example`): each key locks its `watch` field;
+`UI_PLAY_EXCLUDE` adds exclusions (reason *set in config.txt*, `managed: true`) the page cannot
+remove; `UI_PLAY_ENABLED=false` turns display links off.
+
 ## Security model
 
 | | |

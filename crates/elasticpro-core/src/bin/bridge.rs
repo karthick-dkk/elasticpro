@@ -403,13 +403,29 @@ async fn bridge(
     // taken out of the reply, so the page's scripts never hold it. Signing out clears it.
     let out = &mut reply.value;
     let mut cookie: Option<String> = None;
-    if matches!(t.as_str(), "LOGIN" | "BOOTSTRAP_ADMIN") && out.get("ok") == Some(&serde_json::json!(true)) {
+    // A display link (Play) exchanged for a session is the same: the TV holds it only as the
+    // same cookie, with the same attributes.
+    if matches!(t.as_str(), "LOGIN" | "BOOTSTRAP_ADMIN" | "PLAY_EXCHANGE") && out.get("ok") == Some(&serde_json::json!(true)) {
         if let Some(tok) = out.as_object_mut().and_then(|o| o.remove("session")).and_then(|v| v.as_str().map(String::from)) {
             cookie = Some(set_cookie(&tok, SESSION_COOKIE_MAX_AGE));
             out["cookie"] = serde_json::json!(true);
         }
     } else if t == "LOGOUT" {
         cookie = Some(set_cookie("", 0));
+    }
+    // A new display link's URL, when ELASTICPRO_PUBLIC_URL does not say where this server is:
+    // the address the administrator's browser used (Origin, else Host over https).
+    if t == "PLAY_LINK_CREATE" {
+        if let Some(url) = out.pointer("/link/url").and_then(|v| v.as_str()).filter(|u| u.starts_with('/')).map(String::from) {
+            let origin = headers.get(axum::http::header::ORIGIN).and_then(|v| v.to_str().ok())
+                .filter(|o| o.starts_with("http://") || o.starts_with("https://")).map(|o| o.trim_end_matches('/').to_string())
+                .or_else(|| headers.get(axum::http::header::HOST).and_then(|v| v.to_str().ok())
+                    .filter(|h| !h.is_empty() && h.chars().all(|c| c.is_ascii_alphanumeric() || ".-:[]".contains(c)))
+                    .map(|h| format!("https://{h}")));
+            if let Some(o) = origin {
+                out["link"]["url"] = serde_json::json!(format!("{o}{url}"));
+            }
+        }
     }
     if reply.has_bodies() {
         // Only FLEET_STATE and CLUSTER_DATASET carry bodies, and neither sets a cookie.

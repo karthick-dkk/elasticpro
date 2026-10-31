@@ -161,6 +161,19 @@ const SPECS: &[Spec] = &[
     spec("UI_REPORT_SCHEDULE", Kind::Enum(&["monthly", "weekly", "daily", "manual"]), To::Direct),
     spec("UI_REPORT_AT", Kind::Text, To::Direct),
     spec("UI_REPORT_SHEETS", Kind::Text, To::Direct),
+    // Play, the NOC wall display (docs/PLAY.md "Play settings"). Each key locks its field on
+    // Config › Play; UI_PLAY_EXCLUDE adds exclusions (cluster ids) the page cannot remove, and
+    // UI_PLAY_ENABLED=false turns display links off. Read where used (play::settings).
+    spec("UI_PLAY_ENABLED", Kind::Bool, To::Direct),
+    spec("UI_PLAY_DELAY_YELLOW_MIN", Kind::Int(1, 1440), To::Direct),
+    spec("UI_PLAY_DELAY_RED_MIN", Kind::Int(1, 1440), To::Direct),
+    spec("UI_PLAY_NODE_EXPECTED", Kind::Enum(&["seen24h", "pinned"]), To::Direct),
+    spec("UI_PLAY_NODE_BLINK", Kind::Enum(&["untilBack", "untilAck", "off"]), To::Direct),
+    spec("UI_PLAY_NODE_CHECK_SECONDS", Kind::Int(10, 3600), To::Direct),
+    spec("UI_PLAY_SPOTLIGHT_WHEN", Kind::Text, To::Direct),
+    spec("UI_PLAY_SPOTLIGHT_LEAVE_MIN", Kind::Int(1, 1440), To::Direct),
+    spec("UI_PLAY_SPOTLIGHT_SECONDS", Kind::Int(5, 120), To::Direct),
+    spec("UI_PLAY_EXCLUDE", Kind::Text, To::Direct),
 ];
 
 /// `UI_*` key -> the name the UI's `DEFAULTS` (ui/js/core/config.js) gives it.
@@ -446,6 +459,18 @@ fn check_text(key: &str, v: String) -> Result<String, String> {
             crate::report::mail::check_addresses(&list, "UI_REPORT_TO").map(|_| v)
         }
         "UI_REPORT_SHEETS" => crate::report::schedule::check_sheets(&crate::report::schedule::comma_list(&v)).map(|_| v),
+        "UI_PLAY_SPOTLIGHT_WHEN" => match crate::play::settings::spotlight_when_problem(&v) {
+            None => Ok(v),
+            Some(why) => Err(why),
+        },
+        "UI_PLAY_EXCLUDE" => {
+            let ids = crate::play::settings::comma_list(&v);
+            if ids.is_empty() {
+                Err("names no cluster id".into())
+            } else {
+                Ok(ids.join(","))
+            }
+        }
         _ => Ok(v),
     }
 }

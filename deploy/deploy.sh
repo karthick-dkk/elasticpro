@@ -290,6 +290,16 @@ UI_REPORT_TO text
 UI_REPORT_SCHEDULE enum monthly,weekly,daily,manual
 UI_REPORT_AT text
 UI_REPORT_SHEETS text
+UI_PLAY_ENABLED bool
+UI_PLAY_DELAY_YELLOW_MIN int 1 1440
+UI_PLAY_DELAY_RED_MIN int 1 1440
+UI_PLAY_NODE_EXPECTED enum seen24h,pinned
+UI_PLAY_NODE_BLINK enum untilBack,untilAck,off
+UI_PLAY_NODE_CHECK_SECONDS int 10 3600
+UI_PLAY_SPOTLIGHT_WHEN text
+UI_PLAY_SPOTLIGHT_LEAVE_MIN int 1 1440
+UI_PLAY_SPOTLIGHT_SECONDS int 5 120
+UI_PLAY_EXCLUDE text
 LISTEN_PORT deploy
 ALLOWED_DOMAINS deploy
 ALLOWED_UI_IPS deploy
@@ -335,6 +345,20 @@ cfg_check() {
       case $v in *[[:space:],/\\?#\"\<\>\|]*) echo "must be one index pattern: no spaces, commas or slashes"; return 1 ;; esac ;;
     UI_VOLUME_COLLECT_AT|UI_REPORT_AT)
       [[ $v =~ ^([01][0-9]|2[0-3]):[0-5][0-9]$ ]] || { echo "must be a time of day HH:MM, 00:00 to 23:59"; return 1; } ;;
+    # The same rule as the core (settings.rs check_text, play::settings::spotlight_when_problem).
+    UI_PLAY_SPOTLIGHT_WHEN)
+      lower=$(printf '%s' "$v" | tr 'A-Z' 'a-z' | tr -d '[:space:]')
+      if [ "$lower" != none ]; then
+        [ -n "$(printf '%s' "$lower" | tr -d ',')" ] || { echo "names nothing (use none for an empty list)"; return 1; }
+        while IFS= read -r item; do
+          case ",red,nodeleft,slmfailed,storage,unreachable,criticalalert,ilmerror,yellow," in
+            *",$(printf '%s' "$item" | tr 'A-Z' 'a-z'),"*) ;;
+            *) echo "\"$item\" is not one of red, nodeLeft, slmFailed, storage, unreachable, criticalAlert, ilmError, yellow"; return 1 ;;
+          esac
+        done < <(cfg_list "$v")
+      fi ;;
+    UI_PLAY_EXCLUDE)
+      [ -n "$(cfg_list "$v")" ] || { echo "names no cluster id"; return 1; } ;;
     # The core checks these properly (settings.rs check_text); here, the mistakes worth
     # catching before a deploy: a URL for a host, a list that is not addresses.
     UI_SMTP_HOST)

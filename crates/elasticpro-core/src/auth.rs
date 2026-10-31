@@ -202,6 +202,55 @@ pub fn guest_may_read(path: &str) -> bool {
     path_allowed(path, GUEST_READS)
 }
 
+/// What a display-link caller (`play_only`) may send: the reads the Play page is made of,
+/// and nothing else. An allowlist, like `GUEST_READS`: a message added later is refused to a
+/// TV until somebody decides it belongs here.
+///
+/// Besides docs/PLAY.md's list: WHOAMI and LOGOUT (the page asks who it is, and may leave),
+/// the shell's startup no-ops (BADGE, OPEN_APP, ENABLE_NET_ERRORS), and ZABBIX_CLUSTERS — the
+/// credential-free list of the clusters that are Zabbix hosts, without which a wall could
+/// not name them.
+pub const PLAY_READS: &[&str] = &[
+    "FLEET_STATE", "CLUSTER_DATASET", "EVENTS_TICKET", "REFRESH",
+    "VOLUME_DAILY", "VOLUME_MONTHLY", "VOLUME_MONTHLY_ALL",
+    "SILENCE_LIST", "ACK_LIST", "PLAY_STATE", "PLAY_ZOOM_SET", "PLAY_SHARE_GET", "PLAY_SHARE_PUT",
+    "PING", "CONFIG_VIEW", "ES", "ZABBIX_CLUSTERS",
+    "WHOAMI", "LOGOUT", "BADGE", "OPEN_APP", "ENABLE_NET_ERRORS",
+];
+
+/// The refusal a display link gets for anything outside `PLAY_READS`.
+pub const PLAY_REFUSED: &str = "a display link only shows Play";
+
+/// Whether a display-link caller may send this message.
+///
+/// `ES` only as the log-delay measurement sends it: a `_search` or a `_field_caps`, read
+/// (GET, or a POST search), with no scroll context left open on the cluster. Of the shared
+/// cache, only `delay` measurements may be offered by a TV (a repository size is measured by
+/// a person on the Volume page, or by the scraper).
+pub fn play_may(msg_type: &str, method: &str, path: &str, kind: Option<&str>) -> Result<(), String> {
+    if !PLAY_READS.contains(&msg_type) {
+        return Err(PLAY_REFUSED.into());
+    }
+    match msg_type {
+        "ES" => {
+            let m = method.trim().to_ascii_uppercase();
+            let (bare, query) = path.split_once('?').unwrap_or((path, ""));
+            let last = bare.trim_end_matches('/').rsplit('/').next().unwrap_or("");
+            let read = m.is_empty() || crate::guard::is_read(&m, path);
+            let scroll = query.split('&').any(|kv| kv.split('=').next().is_some_and(|k| k.eq_ignore_ascii_case("scroll")));
+            let shaped = matches!(last, "_search" | "_field_caps") && !bare.contains("..") && !scroll;
+            if read && shaped && matches!(m.as_str(), "" | "GET" | "POST") {
+                Ok(())
+            } else {
+                let shown = if m.is_empty() { "GET" } else { m.as_str() };
+                Err(format!("{PLAY_REFUSED}: it may send only the log-delay searches (_search, _field_caps), not {shown} {bare}"))
+            }
+        }
+        "PLAY_SHARE_PUT" if kind != Some("delay") => Err(format!("{PLAY_REFUSED}: it may share only delay measurements")),
+        _ => Ok(()),
+    }
+}
+
 /// The minimum role a message type needs, or `None` when no session is required.
 ///
 /// `None` is deliberately tiny: PING is how the UI discovers that a login is needed in
@@ -328,6 +377,26 @@ pub fn required_role(msg_type: &str) -> Option<Role> {
         "MAIL_SETTINGS_GET" | "MAIL_SETTINGS_SET" | "MAIL_TEST" => Some(Role::Admin),
         "REPORT_SCHEDULE_GET" | "REPORT_SCHEDULE_SET" | "REPORT_SEND_NOW" => Some(Role::Admin),
 
+        // Play, the NOC wall display (docs/PLAY.md). Trading a display link's secret for a
+        // session is how a TV signs in, so it cannot need one; the link itself is the proof.
+        "PLAY_EXCHANGE" => None,
+        // Display links hand read access to whoever holds the URL: an administrator's.
+        "PLAY_LINK_CREATE" | "PLAY_LINK_LIST" | "PLAY_LINK_REVOKE" | "PLAY_LINK_SET" => Some(Role::Admin),
+        // The Play settings: anybody who can open Play reads them; changing them changes every
+        // wall in the building, so an administrator's.
+        "PLAY_CONFIG_GET" | "PLAY_STATE" => Some(Role::User),
+        // A display link's TV saving its own zoom (the handler refuses anybody else).
+        "PLAY_ZOOM_SET" => Some(Role::User),
+        "PLAY_CONFIG_SET" => Some(Role::Admin),
+        // A node removed on purpose stops blinking: day-to-day fleet work, an operator's.
+        "PLAY_NODE_FORGET" => Some(Role::Operator),
+        // The shared measurement cache: a measurement somebody already made, kept so the next
+        // display does not make it again. Reading and offering one are a user's.
+        "PLAY_SHARE_GET" | "PLAY_SHARE_PUT" => Some(Role::User),
+        // Shared acknowledgements (hosted): the same as acknowledging on the Alerts page,
+        // which any user may do; every set and clear is audited.
+        "ACK_LIST" | "ACK_SET" | "ACK_CLEAR" => Some(Role::User),
+
         // Anything new is refused until somebody decides where it belongs.
         _ => Some(Role::Admin),
     }
@@ -386,18 +455,54 @@ pub struct Caller {
     /// The Zabbix user groups this caller is limited to, or `None` for every cluster.
     /// See `scope_allows`.
     pub scope: Option<Vec<String>>,
+    /// Set for a caller that came in through a display link (Play): `play_only`, with the
+    /// link's own limits. `None` for everybody else.
+    pub play: Option<PlayCaller>,
+}
+
+/// A display link's limits, carried by the caller its session resolves to. Read from the
+/// link at every request (play/links.rs), so a change to the link applies at once.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PlayCaller {
+    /// The link's id.
+    pub link: String,
+    /// The clusters the link names by id, or `None` when it names all of them or a group
+    /// (a group is the caller's `scope`).
+    pub clusters: Option<Vec<String>>,
+    /// The addresses the link may be used from (CIDR); empty: anywhere.
+    pub allow_from: Vec<String>,
 }
 
 impl Caller {
     pub fn public(&self) -> serde_json::Value {
-        serde_json::json!({
+        let mut v = serde_json::json!({
             "name": self.name, "role": self.role.as_str(), "mustChange": self.must_change,
-            "scoped": self.scope.is_some(),
-        })
+            "scoped": self.limited(),
+        });
+        if let Some(p) = &self.play {
+            v["playOnly"] = serde_json::json!(true);
+            v["display"] = serde_json::json!(p.link);
+        }
+        v
     }
-    /// May this caller see a cluster tagged with these Zabbix groups?
+    /// May this caller see a cluster tagged with these Zabbix groups? Groups only: a call
+    /// site that knows the cluster's id asks `sees_cluster`, which adds a display link's list.
     pub fn sees(&self, cluster_groups: &[String]) -> bool {
         scope_allows(self.scope.as_deref(), cluster_groups)
+    }
+    /// May this caller see this cluster: its Zabbix groups, and for a display link that
+    /// names clusters by id, its id. The one definition the gate and every reply use.
+    pub fn sees_cluster(&self, id: &str, cluster_groups: &[String]) -> bool {
+        self.sees(cluster_groups)
+            && self.play.as_ref().and_then(|p| p.clusters.as_ref()).is_none_or(|ids| ids.iter().any(|i| i == id))
+    }
+    /// Limited to some clusters, by Zabbix group or by a display link's list.
+    pub fn limited(&self) -> bool {
+        self.scope.is_some() || self.play.as_ref().is_some_and(|p| p.clusters.is_some())
+    }
+    /// Came in through a display link: may send only `PLAY_READS`.
+    pub fn play_only(&self) -> bool {
+        self.play.is_some()
     }
 }
 
@@ -1082,6 +1187,10 @@ pub struct Session {
     /// those after a day without use. Absent in a session written before this field existed.
     #[serde(default)]
     pub frame: bool,
+    /// Made by exchanging a display link's secret (Play): the link's id. The caller this
+    /// session resolves to is `play_only`, and lives only as long as the link does.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub play_link: Option<String>,
 }
 
 impl Session {
@@ -1220,10 +1329,51 @@ impl Sessions {
             scope: account.scope.clone(),
             last_seen: at,
             frame,
+            play_link: None,
         };
         self.map.write().insert(token_hash(&token), s);
         self.save();
         token
+    }
+
+    /// A session for a display link (Play): read-only, named `display:<name>`, limited to
+    /// the link's group `scope` (its cluster ids and addresses are read from the link itself
+    /// at every request).
+    pub fn begin_display(&self, user: &str, scope: Option<Vec<String>>, link: &str) -> String {
+        let token = random_hex(32);
+        let at = now();
+        let s = Session {
+            user: user.to_string(),
+            role: Role::User,
+            started: at,
+            must_change: false,
+            scope,
+            last_seen: at,
+            frame: false,
+            play_link: Some(link.to_string()),
+        };
+        self.map.write().insert(token_hash(&token), s);
+        self.save();
+        token
+    }
+
+    /// End every session made from this display link. Returns how many ended.
+    pub fn end_display(&self, link: &str) -> usize {
+        let ended = {
+            let mut m = self.map.write();
+            let before = m.len();
+            m.retain(|_, s| s.play_link.as_deref() != Some(link));
+            before - m.len()
+        };
+        if ended > 0 {
+            self.save();
+        }
+        ended
+    }
+
+    /// How many live sessions a display link has.
+    pub fn display_sessions(&self, link: &str) -> usize {
+        self.map.read().values().filter(|s| s.play_link.as_deref() == Some(link)).count()
     }
 
     /// The session this token names, if it is still live. Using one moves its `last_seen`.
@@ -1425,7 +1575,7 @@ impl ApiToken {
 /// revoked without anyone having to work out what it is.
 pub const TOKEN_PREFIX: &str = "elasticpro_";
 
-fn token_hash(secret: &str) -> String {
+pub(crate) fn token_hash(secret: &str) -> String {
     hex::encode(Sha256::digest(secret.as_bytes()))
 }
 
