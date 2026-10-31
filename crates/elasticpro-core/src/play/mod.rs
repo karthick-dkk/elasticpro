@@ -187,6 +187,12 @@ fn bad(message: impl Into<String>) -> Value {
     json!({ "ok": false, "kind": "bad_request", "message": message.into() })
 }
 
+/// Messages that reach every cluster (display links, fleet-wide Play settings): only for a
+/// caller with no cluster limit.
+fn fleet_wide(t: &str) -> bool {
+    t.starts_with("PLAY_LINK_") || t == "PLAY_CONFIG_SET"
+}
+
 fn forbidden(message: impl Into<String>) -> Value {
     json!({ "ok": false, "kind": "forbidden", "message": message.into() })
 }
@@ -277,6 +283,13 @@ impl Core {
     /// has already decided the role (auth::required_role) and, for a display link, the
     /// message (auth::play_may).
     pub(crate) async fn play_msg(self: &Arc<Self>, t: &str, msg: &Value, caller: Option<&Caller>) -> Value {
+        // Display links and the fleet-wide Play settings reach every cluster: a link can be made
+        // for all of them, and a watch rule or an exclusion applies on every display. So they are
+        // an administrator's with no cluster limit; one limited to some clusters could otherwise
+        // hand a TV the clusters it may not see itself.
+        if fleet_wide(t) && caller.is_some_and(|c| c.limited()) {
+            return forbidden("display links and Play settings need an administrator who sees every cluster");
+        }
         match t {
             "PLAY_LINK_CREATE" => self.play_link_create(msg, caller),
             "PLAY_LINK_LIST" => self.play_link_list(),
@@ -642,5 +655,25 @@ impl Core {
                 Err(e) => bad(e),
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod scope_tests {
+    use super::fleet_wide;
+    use crate::auth::{Caller, Role};
+
+    #[test]
+    fn display_links_and_settings_need_an_unlimited_caller() {
+        for t in ["PLAY_LINK_CREATE", "PLAY_LINK_LIST", "PLAY_LINK_REVOKE", "PLAY_LINK_SET", "PLAY_CONFIG_SET"] {
+            assert!(fleet_wide(t), "{t} reaches every cluster");
+        }
+        for t in ["PLAY_STATE", "PLAY_CONFIG_GET", "PLAY_NODE_FORGET", "PLAY_SHARE_GET", "ACK_SET"] {
+            assert!(!fleet_wide(t), "{t} is scoped per cluster instead");
+        }
+        let scoped = Caller { name: "ops@zabbix".into(), role: Role::Admin, must_change: false, scope: Some(vec!["Team A".into()]), play: None };
+        let full = Caller { name: "admin".into(), role: Role::Admin, must_change: false, scope: None, play: None };
+        assert!(scoped.limited(), "an administrator limited to some host groups is refused");
+        assert!(!full.limited(), "one who sees every cluster is not");
     }
 }
