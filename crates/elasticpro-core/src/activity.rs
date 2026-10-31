@@ -51,6 +51,8 @@ const POLLS: &[&str] = &[
     // poll, but it writes its own event (with the counts) when it finishes, so the exchange
     // is not recorded a second time when it went through.
     "HOUSEKEEPING_GET", "HOUSEKEEPING_RUN",
+    // A Play wall asks for its state each minute, and reads (and offers) the shared measurements.
+    "PLAY_STATE", "ACK_LIST", "PLAY_SHARE_GET", "PLAY_SHARE_PUT",
 ];
 
 /// One thing somebody did, already reduced to what may be written down.
@@ -504,7 +506,7 @@ mod tests {
     use super::*;
 
     fn caller(name: &str, role: crate::auth::Role) -> Caller {
-        Caller { name: name.into(), role, must_change: false, scope: None }
+        Caller { name: name.into(), role, must_change: false, scope: None, play: None }
     }
 
     fn ev(msg: Value, c: Option<&Caller>, reply: Value) -> Option<ActivityEvent> {

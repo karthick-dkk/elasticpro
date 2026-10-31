@@ -107,6 +107,19 @@ for t in CLUSTER_META_GET CLUSTER_META_SET; do
   check "$t needs a caller"              "$(post $B -d "{\"type\":\"$t\",\"clusterId\":\"x\",\"meta\":{\"type\":\"ci\"}}" | field kind)" "unauthenticated"
 done
 
+# Play, the NOC wall display (docs/PLAY.md). Every message needs a caller but one: a TV trades
+# its display link's secret for a session (PLAY_EXCHANGE), and a made-up secret gets nothing —
+# no session, no cookie. What a display-link session may then send, allowFrom, revoke and
+# expiry are proved in-process (tests/play.rs, tests/play_settings.rs).
+check "PING offers display links"        "$(post $B -d '{"type":"PING"}' | field playLinks)" "True"
+check "PING offers shared acks"          "$(post $B -d '{"type":"PING"}' | field sharedAcks)" "True"
+for t in PLAY_LINK_CREATE PLAY_LINK_LIST PLAY_LINK_REVOKE PLAY_LINK_SET PLAY_CONFIG_GET PLAY_CONFIG_SET \
+         PLAY_NODE_FORGET PLAY_STATE PLAY_ZOOM_SET PLAY_SHARE_GET PLAY_SHARE_PUT ACK_LIST ACK_SET ACK_CLEAR; do
+  check "$t needs a caller"              "$(post $B -d "{\"type\":\"$t\",\"id\":\"x\",\"name\":\"tv\",\"key\":\"x:y\",\"kind\":\"delay\",\"clusterId\":\"x\"}" | field kind)" "unauthenticated"
+done
+check "a made-up display secret is refused" "$(post $B -d '{"type":"PLAY_EXCHANGE","secret":"epdisplay_00"}' | field kind)" "bad_credentials"
+check "and sets no cookie"               "$(curl -s -o /dev/null -D - -X POST $B -H 'content-type: application/json' -d '{"type":"PLAY_EXCHANGE","secret":"epdisplay_00"}' | grep -ci '^set-cookie' || true)" "0"
+
 # Zabbix sign-in. Off until a secret is set, and a way in only with the right signature.
 S="http://127.0.0.1:$P/sso/zabbix"
 code_of() { curl -s -o /dev/null -w '%{http_code}' -X POST "$1" -H 'content-type: application/json' "${@:2}"; }

@@ -243,7 +243,7 @@ async fn a_prime_does_not_wait_for_a_slow_request_in_flight() {
 /* ------------------------------------ who sees what ------------------------------------ */
 
 fn who(name: &str, role: Role, scope: Option<Vec<&str>>) -> Caller {
-    Caller { name: name.into(), role, must_change: false, scope: scope.map(|v| v.into_iter().map(String::from).collect()) }
+    Caller { name: name.into(), role, must_change: false, scope: scope.map(|v| v.into_iter().map(String::from).collect()), play: None }
 }
 
 async fn hosted_with_two_clusters(dir: &TempDir) -> Arc<Core> {

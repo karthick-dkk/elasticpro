@@ -501,6 +501,12 @@ impl Core {
                 (Some(format!("a request took {:.1} s (over {} s)", slowest as f64 / 1000.0, scheduler::SLOW_MS / 1000)), true),
             Outcome::Answered(_) => (None, true),
         };
+        // Play's node-name history: the names this answer already holds, so a wall can say
+        // "a node left" without one more request to the cluster (docs/PLAY.md).
+        let node_names = match (&outcome, key.1) {
+            (Outcome::Answered(m), Dataset::Nodes) => crate::play::nodes::names_in(m),
+            _ => None,
+        };
         let (waiters, reach_changed, entry, reach) = {
             let mut st = self.fleet.state.lock();
             let was_slowed = st.slowed.contains_key(&key.0);
@@ -516,6 +522,9 @@ impl Core {
             self.fleet_evict(&mut st, cfg);
             (w, rc, st.entries.get(&key).cloned(), st.reach.get(&key.0).cloned())
         };
+        if let Some(names) = node_names {
+            self.play.record_nodes(&key.0, &names, now);
+        }
         for w in waiters {
             let _ = w.send(());
         }
@@ -911,8 +920,7 @@ impl Core {
             return Some(None);
         }
         let c = match &owner.reauth {
-            Reauth::Session(t) => self.sessions.peek(t)
-                .map(|s| Caller { name: s.user, role: s.role, must_change: s.must_change, scope: s.scope }),
+            Reauth::Session(t) => self.sessions.peek(t).and_then(|s| self.caller_from_session(s)),
             Reauth::Token(secret) => self.caller_for_token(secret),
             Reauth::Proxy(name) => self.caller_for_proxy_user(name),
             Reauth::None => None,
@@ -934,6 +942,6 @@ impl Core {
             return false;
         }
         let Some(spec) = self.spec_for(&ev.cluster_id) else { return false };
-        caller.is_none_or(|c| c.sees(&spec.zabbix_groups))
+        caller.is_none_or(|c| c.sees_cluster(&spec.id, &spec.zabbix_groups))
     }
 }

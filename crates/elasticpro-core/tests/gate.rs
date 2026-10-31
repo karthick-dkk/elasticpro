@@ -192,7 +192,7 @@ async fn five_people_asking_the_same_at_once_cost_the_cluster_one_request() {
     let dir = TempDir::new("gate-share");
     let srv = GaugedServer::start(|_| (200, r#"{"status":"green"}"#.into(), 300)).await;
     let c = Core::new_with_rounds(Some(dir.0.clone()), Edition::Hosted, 1);
-    let admin = Caller { name: "admin".into(), role: Role::Admin, must_change: false, scope: None };
+    let admin = Caller { name: "admin".into(), role: Role::Admin, must_change: false, scope: None, play: None };
     let r = c.handle_as(json!({ "type": "PRIME", "readOnly": true, "clusters": [{ "id": "es", "url": srv.url(), "authHeader": "Basic c2hhcmVk" }] }), Some(admin)).await;
     assert_eq!(r["ok"], json!(true), "{r}");
     // Cache off: this is single-flight alone.
@@ -200,7 +200,7 @@ async fn five_people_asking_the_same_at_once_cost_the_cluster_one_request() {
     let mut all = Vec::new();
     for i in 0..5 {
         let c = c.clone();
-        let who = Caller { name: format!("user{i}"), role: Role::User, must_change: false, scope: None };
+        let who = Caller { name: format!("user{i}"), role: Role::User, must_change: false, scope: None, play: None };
         all.push(tokio::spawn(async move { c.handle_as(get("/_cluster/health", "page:overview"), Some(who)).await }));
     }
     let mut shared = 0;
@@ -212,7 +212,7 @@ async fn five_people_asking_the_same_at_once_cost_the_cluster_one_request() {
     }
     assert_eq!(srv.hits().len(), 1, "one request reached the cluster");
     assert_eq!(shared, 4);
-    let l = c.handle_as(json!({ "type": "REQUEST_LOG" }), Some(Caller { name: "admin".into(), role: Role::Admin, must_change: false, scope: None })).await;
+    let l = c.handle_as(json!({ "type": "REQUEST_LOG" }), Some(Caller { name: "admin".into(), role: Role::Admin, must_change: false, scope: None, play: None })).await;
     let recent = l["recent"].as_array().unwrap();
     assert_eq!(recent.iter().filter(|r| r["shared"] == json!(true)).count(), 4, "{l}");
     assert_eq!(l["gate"]["shared"], json!(4));
