@@ -654,6 +654,41 @@ nginx forwards exactly `location = /sso/zabbix` and `location = /zabbix/pair` to
 `X-Real-IP`, a 64 KiB body cap and `limit_req` (60 r/m burst 30 and 10 r/m burst 5); every other
 path under `/sso/` is still 404.
 
+## Credentials kept on the server — the message contract
+
+Hosted only (0.3.42; the default credential's own rules since 0.3.46). The core keeps every
+cluster credential in `<data>/cluster-secrets.json` (AES-256-GCM under
+`ELASTICPRO_CLUSTER_SECRET_KEY_FILE`, 0600): a config cluster's own as `cfg:<id>`, bound to its
+address, route and certificate setting; a password the Zabbix module handed over under the
+cluster host's name; and **the default** as `*`, unbound, which every cluster without its own
+uses — config clusters, and Zabbix clusters whose password macro is not on their host. Nothing
+is ever read back: answers carry usernames, who set what and when.
+
+**A new cluster that uses the default credential never asks for a password.** With a default
+kept, a cluster added in the Add cluster dialog (its **Credential** choice starts on *Default
+credential (user …)*), by an operator's `CLUSTER_SAVE`, from the config file or from Zabbix
+signs in with it at once: PRIME lists it in `held` and answers `defaultCredential: true`, so the
+page shows no *Sign in (N clusters)*, no startup prompt and no form. With no default yet, the
+Add dialog offers to set it once there (typed) or to use a credential the server already keeps
+(`promotable`); Config → Credentials offers the same as one button. A cluster that rejects the
+default (401/403) is named — *The default credential was rejected by …* — with **Set its own
+credential…** (a Zabbix cluster's own password is set in Cluster Management). The sign-in dialog
+never replaces an existing default unless **Replace the default credential** is ticked; unticked,
+what is typed is kept as the listed clusters' own.
+
+| Message | Role | Answer |
+|---|---|---|
+| `CREDENTIAL_STATUS` | admin | `{ok, default: {id: "*", user, kind: "basic"\|"header", setBy, setAt, moved}\|null, clusters: [same, per config cluster id], promotable: [{id, cluster, source: "config"\|"zabbix", user, kind, setBy, setAt}], problem}`. `promotable` lists, while there is no default, every kept entry the server's key opens; `id` is the entry's name in the store (`cfg:<id>` or the Zabbix host). Empty once a default exists. |
+| `CREDENTIAL_SET {cluster, username+password \| apiKey \| bearer \| rebind}` | admin | `{ok, cluster, setAt}`. `cluster: "*"` sets the default. |
+| `CREDENTIAL_CLEAR {cluster}` | admin | `{ok, cluster, cleared}` — the cluster then uses the default. |
+| `CREDENTIAL_PROMOTE {from, replace?}` | admin | Copies a kept entry to the default without the password being typed: `{ok, cluster: "*", from, user, kind, replaced, setAt}`. `from` is a `promotable` id (a config cluster's bare id is accepted). An existing default is refused — `{ok: false, kind: "exists", message}` naming its user — unless `replace: true`. `not_found` for an unknown entry, `unreadable` for one the key does not open. Audit line `kept credential made the default` with `user`, `from`, `replaced`; never the secret. |
+| `PRIME` (reply fields) | admin | `held: [id]` (clusters the core signs in to), `anonymous: [id]` (none on purpose), `defaultCredential: bool` — hosted, whether a cluster with nothing of its own is covered (the kept default, or the message's shared credential where nothing can be kept). A cluster with no own entry and no default falls back to the message's `sharedAuthHeader`, as `CLUSTER_SAVE` does. |
+| `CLUSTER_SAVE` (reply field) | operator | `credential: "kept"\|"shared"\|"admin"\|"none"`. On `none` the page says *No default credential is set; an admin sets it in Config → Credentials* — no form. |
+
+Setting, promoting or clearing the default starts a Zabbix sync, so a Zabbix cluster held back
+as *password not set* is polled with the new default within seconds rather than at the next
+interval.
+
 ## Security model
 
 | | |

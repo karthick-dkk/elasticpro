@@ -4266,11 +4266,178 @@ if (viaFleet) {
   idb.allQueries = realAllQueries;
 }
 
+/* ------- 0.3.46: a new cluster that uses the default credential never asks for a password ------- */
+
+// Hosted, driven through the real dialogs. The dev bridge is the portable build, so the
+// hosted messages are answered at fetch: CREDENTIAL_* from a small server-side model, PRIME
+// passed through with the hosted core's `defaultCredential` added, the config write kept in
+// memory. What is checked is what the page sends and what it shows.
+{
+  const st = await load('core/state.js');
+  const sc = await load('core/server-credentials.js');
+  const ce = await load('ui/config-editor.js');
+  const cd = await load('ui/credential-dialog.js');
+  const realFetch = globalThis.fetch;
+  const server = { default: { id: '*', user: 'fleet', kind: 'basic', setBy: 'Admin', setAt: 1793000000 }, own: [],
+                   promotable: [] };
+  const credSent = [];
+  let written = null;
+  globalThis.fetch = async (input, init) => {
+    const body = init && init.body ? JSON.parse(init.body) : {};
+    const t = String(body.type || '');
+    if (t === 'CREDENTIAL_STATUS') {
+      return stubReply({ ok: true, default: server.default, clusters: server.own, promotable: server.default ? [] : server.promotable, problem: null });
+    }
+    if (t === 'CREDENTIAL_SET' || t === 'CREDENTIAL_CLEAR' || t === 'CREDENTIAL_PROMOTE') {
+      credSent.push(body);
+      if (t === 'CREDENTIAL_PROMOTE') {
+        const p = server.promotable.find((x) => x.id === body.from);
+        if (server.default && !body.replace) return stubReply({ ok: false, kind: 'exists', message: 'a default credential is already set' });
+        server.default = { id: '*', user: p ? p.user : 'x', kind: 'basic', setBy: 'Admin', setAt: 1793000001 };
+        return stubReply({ ok: true, cluster: '*', from: body.from, user: server.default.user, kind: 'basic', replaced: false });
+      }
+      if (t === 'CREDENTIAL_SET' && body.cluster === '*') server.default = { id: '*', user: body.username || null, kind: 'basic', setBy: 'Admin', setAt: 1793000002 };
+      return stubReply({ ok: true, cluster: body.cluster });
+    }
+    if (t === 'PRIME') {
+      const r = await realFetch(input, init);
+      const res = JSON.parse(await r.text());
+      return stubReply({ ...res, defaultCredential: !!server.default });
+    }
+    if (t === 'CONFIG_WRITE') { written = body.text; return stubReply({ ok: true, path: body.path, bytes: body.text.length }); }
+    if (t === 'CONFIG_READ' && written !== null) return stubReply({ ok: true, text: written, size: written.length, lastModified: Date.now() });
+    return realFetch(input, init);
+  };
+  const dialog = () => doc.querySelector('.modal-overlay .modal');
+  const closeAll = async () => { for (const o of doc.querySelectorAll('.modal-overlay')) o.remove(); await settleFor(50); };
+  const press = (el) => el && el.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+  const button = (root, re) => root && [...root.querySelectorAll('button')].find((b) => re.test(b.textContent.trim()));
+  const signInButton = () => button(doc.getElementById('topbar'), /^Sign in/);
+  try {
+    sc.setHostedEdition(true);
+    st.state.caller = { name: 'default-check', role: 'admin' };
+    // A config file with no credential at all, as on the hosted server.
+    const url = config.clusters[0].url;
+    await applyConfig({ load, configPath, raw: { version: 2, defaults: { readOnly: true, autoRefresh: false }, clusters: [{ name: 'dc-one', url }] } });
+    written = JSON.stringify({ version: 2, defaults: { readOnly: true, autoRefresh: false }, clusters: [{ name: 'dc-one', url }] });
+    await go('overview');
+    ok(!st.clustersNeedingCredential().length, `default: with a default set, ${st.clustersNeedingCredential().map((c) => c.name).join(', ')} still "need" a credential`);
+    ok(!signInButton(), 'default: "Sign in" is in the top bar although the default covers every cluster');
+
+    // Add a cluster: the Default choice is preselected, names the user, and nothing is asked.
+    credSent.length = 0;
+    const adding = ce.editCluster(null);
+    await settleFor(300);
+    let dlg = dialog();
+    ok(dlg && /Add cluster/.test(dlg.textContent), 'default: the Add cluster dialog did not open');
+    if (dlg) {
+      const def = dlg.querySelector('#ce-cred-default'), own = dlg.querySelector('#ce-cred-own');
+      ok(def && def.checked && own && !own.checked, 'default: a new cluster does not start on the default credential');
+      ok(/Default credential \(user fleet\)/.test(dlg.textContent), 'default: the Default choice does not name the default\'s user');
+      ok(dlg.querySelector('#ce-cred-ownblock').hidden, 'default: the own-credential fields show although the default is chosen');
+      ok(!dlg.querySelector('#ce-du') && !dlg.querySelector('#ce-dp'), 'default: a default is set, yet the dialog offers to set one');
+      dlg.querySelector('#ce-name').value = 'dc-two';
+      dlg.querySelector('#ce-url').value = url;
+      press(button(dlg, /^Add cluster$/));
+      await adding; await settleFor(600);
+      ok(!dialog(), `default: the Add cluster dialog stayed open: ${(doc.querySelector('.modal-msg') || {}).textContent || ''}`);
+      ok(!credSent.length, `default: adding a cluster on the default sent ${credSent.map((m) => m.type).join(', ')}`);
+      const saved = written ? JSON.parse(written).clusters.find((c) => c.name === 'dc-two') : null;
+      ok(saved && !saved.username && !saved.password && !saved.apiKey, `default: the new cluster was written with a credential: ${JSON.stringify(saved)}`);
+      ok(st.clusters().some((c) => c.name === 'dc-two') && !st.clustersNeedingCredential().length,
+        `default: the new cluster "needs" a credential: ${st.clustersNeedingCredential().map((c) => c.name).join(', ')}`);
+      await go('overview');
+      ok(!signInButton(), 'default: "Sign in" appeared after adding a cluster on the default');
+      // Any way into the sign-in dialog says "using the default" and shows no form.
+      cd.showCredentialDialog('startup');
+      await settleFor(300);
+      ok(!doc.querySelector('.modal.creds'), 'default: the credential dialog opened a form although the default covers every cluster');
+      ok(/Using the default credential/.test((doc.querySelector('.toast-wrap') || {}).textContent || ''), 'default: the page did not say it uses the default credential');
+    }
+    await closeAll();
+
+    // No default, one promotable entry: the Credentials card offers it, and pressing sends PROMOTE.
+    server.default = null;
+    server.promotable = [{ id: 'Local-ES-Cluster', cluster: 'Local-ES-Cluster', source: 'zabbix', user: 'zabbix', kind: 'basic', setBy: 'zabbix-admin', setAt: 1793000000 }];
+    credSent.length = 0;
+    await go('settings');
+    const tab = [...doc.querySelectorAll('nav.subnav button')].find((b) => b.title === 'Credentials');
+    ok(!!tab, 'promote: no Credentials tab on the Config page');
+    if (tab) { tab.click(); await settleFor(400); }
+    const promote = doc.getElementById('kc-promote');
+    ok(promote && /Use Local-ES-Cluster’s credential \(user zabbix\) as the default for every cluster without its own/.test(promote.textContent),
+      `promote: the Credentials card does not offer the kept credential as the default (${promote ? promote.textContent : 'no button'})`);
+    ok(/No default credential/.test((doc.getElementById('kept-cred') || {}).textContent || ''), 'promote: the card does not say there is no default');
+    if (promote) {
+      promote.click(); await settleFor(600);
+      ok(credSent.length === 1 && credSent[0].type === 'CREDENTIAL_PROMOTE' && credSent[0].from === 'Local-ES-Cluster' && !credSent[0].replace,
+        `promote: pressing it sent ${JSON.stringify(credSent)}`);
+      ok(!doc.getElementById('kc-promote'), 'promote: the offer is still there after the default was set');
+    }
+    // The Add dialog with no default and a promotable entry: the choice is offered, and taken.
+    server.default = null;
+    credSent.length = 0;
+    const adding2 = ce.editCluster(null);
+    await settleFor(300);
+    dlg = dialog();
+    if (dlg) {
+      ok(/Default credential — none set yet/.test(dlg.textContent), 'promote: the Default choice does not say none is set');
+      const src = dlg.querySelector('#ce-defsrc');
+      ok(src && src.value === 'Local-ES-Cluster', `promote: the dialog does not offer the kept credential as the default (${src && src.value})`);
+      ok(dlg.querySelector('#ce-deftype') && dlg.querySelector('#ce-deftype').hidden, 'promote: the type-it-here fields show while a kept one is chosen');
+      dlg.querySelector('#ce-name').value = 'dc-three';
+      dlg.querySelector('#ce-url').value = url;
+      press(button(dlg, /^Add cluster$/));
+      await adding2; await settleFor(600);
+      ok(credSent.some((m) => m.type === 'CREDENTIAL_PROMOTE' && m.from === 'Local-ES-Cluster'), `promote: adding with it chosen sent ${JSON.stringify(credSent)}`);
+      ok(!credSent.some((m) => m.type === 'CREDENTIAL_SET'), 'promote: a password was sent although a kept one was chosen');
+    } else problems.push('promote: the Add cluster dialog did not open');
+    await closeAll();
+
+    // The credential dialog never overwrites the default unless the box is ticked.
+    server.default = { id: '*', user: 'fleet', kind: 'basic', setBy: 'Admin', setAt: 1793000000 };
+    await go('overview');
+    const one = st.clusters().find((c) => c.name === 'dc-one');
+    const failAgain = () => { const cl = st.client(one.id); if (cl) cl.state = 'auth_error'; };
+    const typeAndConnect = async (tick) => {
+      failAgain();
+      cd.showCredentialDialog('auth_error');
+      await settleFor(300);
+      let m = doc.querySelector('.modal.creds');
+      ok(m && /The default credential was rejected by dc-one/.test(m.textContent), `rejected: the dialog does not say the default was rejected (${m ? m.textContent.slice(0, 120) : 'none'})`);
+      ok(!!button(m, /^Set its own credential…$/), 'rejected: no "Set its own credential…"');
+      ok(!m || !m.querySelector('#cd-pass'), 'rejected: a generic sign-in form is the first thing shown');
+      press(button(m, /^Type a credential instead/)); await settleFor(100);
+      m = doc.querySelector('.modal.creds');
+      const box = m && m.querySelector('#cd-replace-default');
+      ok(box && !box.checked, 'replace: no "Replace the default credential" box, or it starts ticked');
+      if (!m || !box) return;
+      if (tick) { box.checked = true; box.dispatchEvent(new window.Event('change', { bubbles: true })); await settleFor(50); }
+      m = doc.querySelector('.modal.creds');
+      m.querySelector('#cd-user').value = 'typed-user';
+      m.querySelector('#cd-pass').value = 'typed-pw';
+      credSent.length = 0;
+      press(button(m, /^Connect/)); await settleFor(1200);
+    };
+    await typeAndConnect(false);
+    ok(credSent.length && credSent.every((m) => m.type === 'CREDENTIAL_SET' && m.cluster !== '*'),
+      `replace: unticked, the dialog sent ${JSON.stringify(credSent.map((m) => ({ type: m.type, cluster: m.cluster })))}`);
+    await closeAll();
+    await typeAndConnect(true);
+    ok(credSent.some((m) => m.type === 'CREDENTIAL_SET' && m.cluster === '*'), 'replace: ticked, the default was not replaced');
+    await closeAll();
+  } finally {
+    globalThis.fetch = realFetch;
+    sc.setHostedEdition(false);
+    await closeAll();
+  }
+}
+
 if (problems.length) {
   console.error(`\n${problems.length} problem(s):`);
   for (const p of problems) console.error('  ✗ ' + p);
   process.exit(1);
 }
-console.log('ok: strip, console, shards, the Clusters page (columns, name menu, unreachable rows, expand chevron, alerts link), volume, hand-off, refresh, snapshots, tasks, toasts, accounts split and pinned Zabbix roles, the log-delay preflight, a quiet Config page, Config › Volume fields, report jobs and the Reports pill, the mailed report and the mail server, the Request Centre and the redraw gate, the request policy, the coverage bar, the Tasks panel and the console tabs, template management, the Alerts page grouped by cluster with merged repeats, Go to, playbooks and the bell');
+console.log('ok: strip, console, shards, the Clusters page (columns, name menu, unreachable rows, expand chevron, alerts link), volume, hand-off, refresh, snapshots, tasks, toasts, accounts split and pinned Zabbix roles, the log-delay preflight, a quiet Config page, Config › Volume fields, report jobs and the Reports pill, the mailed report and the mail server, the Request Centre and the redraw gate, the request policy, the coverage bar, the Tasks panel and the console tabs, template management, the Alerts page grouped by cluster with merged repeats, Go to, playbooks and the bell, and the default credential (no password asked for a new cluster, promote, never replaced unticked)');
 // The pages leave auto-refresh timers and a live tail running; nothing here waits on them.
 process.exit(0);

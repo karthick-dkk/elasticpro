@@ -4,7 +4,7 @@ import { h, mount, $ } from '../lib/dom.js';
 import { bytes, dt, ago, download } from '../lib/fmt.js';
 import * as cfg from '../core/config.js';
 import { state, setConfig, refreshAll, clusters, client, hasSessionCredential, healthState,
-         sessionCredentialLabel, clearSessionCredential, clustersNeedingCredential, isReadOnly, syncFleet } from '../core/state.js';
+         sessionCredentialLabel, clearSessionCredential, clustersNeedingCredential, isReadOnly, syncFleet, reprime } from '../core/state.js';
 import { workerStatus, forgetWorker, tunnels as fetchTunnels, listPins, untrustCert, untrustHostKey, tunnelReconnect,
          delaySinkGet, delaySinkSet, delaySinkRun, trustCert,
          zabbixLinkGet, zabbixLinkSet, zabbixLinkTest, zabbixPairBegin, zabbixUnpair,
@@ -15,7 +15,7 @@ import { PRESETS, DATASETS, DATASET_LABELS, BOUNDS, intervalBounds, applyPreset,
 import { defaultApiUrl, checkUrl, countdown, secondsLeft, isManaged, linkChanges, formProblems, linkSummary,
          linkView, testMessage, epUrlFrom, eventLine } from '../core/zabbix-link.js';
 import { showCredentialDialog, forgetVaultCredential } from '../ui/credential-dialog.js';
-import { credentialsKeptOnServer, keptCredentials, keptLine } from '../core/server-credentials.js';
+import { credentialsKeptOnServer, keptCredentials, keptLine, promoteCredential, promotableLabel, rejectedDefault } from '../core/server-credentials.js';
 import { EXAMPLE_YAML } from '../core/example.js';
 import { saveTextAs } from '../core/platform.js';
 import { editCluster, editJumpHost, editCredentials, editDefaults, unlockSealed, saveRaw, rawClusterOf, editsFileDirectly } from '../ui/config-editor.js';
@@ -865,6 +865,35 @@ function fileCard() {
 }
 
 /**
+ * Hosted, no default yet, but the server keeps a credential it could become (0.3.46): one a
+ * cluster was given, or one Zabbix handed over. Making it the default types nothing — the
+ * server copies it — and every cluster without its own, a new one above all, then signs in
+ * with it instead of asking for a password.
+ */
+function promoteChoice(st) {
+  const list = (st && !st.default && st.promotable) || [];
+  if (!list.length) return '';
+  const pick = list.length > 1
+    ? h('select#kc-promote-from', { 'aria-label': 'Credential to use as the default' },
+        ...list.map((p) => h('option', { value: p.id }, promotableLabel(p))))
+    : null;
+  const btn = h('button.btn.sm.primary#kc-promote', { onclick: async () => {
+    const from = pick ? pick.value : list[0].id;
+    btn.disabled = true;
+    try {
+      const r = await promoteCredential(from);
+      await reprime();
+      refreshAll({ force: true });
+      toast(`Default credential set from ${(list.find((p) => p.id === from) || {}).cluster || from} (user ${r.user || 'API key or token'}). Every cluster without its own signs in with it.`, 'ok', 6000);
+      draw();
+    } catch (e) { btn.disabled = false; toast(`The default was not set: ${e.message}`, 'err', 8000); }
+  } }, list.length > 1 ? 'Use it as the default' : `Use ${promotableLabel(list[0])} as the default for every cluster without its own`);
+  return h('div.kc-promote', { style: { display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap' } },
+    h('span', h('b', 'No default credential. '), list.length > 1 ? 'The server keeps these; one can be the default without typing it again:' : ''),
+    pick, btn);
+}
+
+/**
  * Hosted: what the server keeps — the default every cluster without its own uses, and which
  * clusters have their own. Typed once each; nobody is asked on a page load or after a restart.
  */
@@ -874,10 +903,17 @@ function keptCredentialsCard() {
   keptCredentials().then((st) => {
     const names = new Map(clusters().map((c) => [c.id, c.name]));
     const own = st.clusters.filter((c) => names.has(c.id));
+    const rejected = rejectedDefault(clusters(), (id) => { const cl = client(id); return cl && cl.state; }, st);
     box.replaceChildren(
       st.problem ? h('div', { style: { color: 'var(--critical-ink)' } }, h('b', 'The server cannot keep credentials: '), st.problem) : '',
       h('div', h('b', 'Default: '), st.default ? keptLine(st.default) : h('span', { style: { color: 'var(--critical-ink)' } }, 'none set — clusters without their own cannot sign in')),
+      promoteChoice(st),
       h('div', h('b', 'Own credential: '), own.length ? own.map((c) => `${names.get(c.id)} (${keptLine(c)})`).join(' · ') : 'no cluster — all use the default'),
+      ...rejected.map((c) => h('div.kc-rejected', { style: { display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap' } },
+        h('span', { style: { color: 'var(--critical-ink)' } }, `The default credential was rejected by ${c.name}.`),
+        c.source === 'zabbix'
+          ? h('span.muted', 'Its own password is set in Zabbix: Cluster Management → the client’s page → Change password.')
+          : h('button.btn.sm', { onclick: async () => { if (await editCluster(rawClusterOf(c))) draw(); } }, 'Set its own credential…'))),
       needing ? h('div', { style: { color: 'var(--critical-ink)' } }, `${needing} cluster(s) have no credential the server can use.`) : '');
   });
   return card('Credentials', 'kept encrypted on the server',

@@ -93,6 +93,13 @@ for t in REPORT_RUN REPORT_JOBS REPORT_STOP REPORT_CLEAR REPORT_DOWNLOAD REPORT_
   check "$t needs a caller"              "$(post $B -d "{\"type\":\"$t\",\"clusterIds\":[\"x\"],\"to\":\"a@example.com\"}" | field kind)" "unauthenticated"
 done
 
+# The credentials the server keeps (0.3.42; CREDENTIAL_PROMOTE since 0.3.46): an admin's, so
+# never a caller-less request's. Roles and the promote itself are proved in-process
+# (tests/cluster_save.rs, tests/default_credential.rs).
+for t in CREDENTIAL_STATUS CREDENTIAL_SET CREDENTIAL_CLEAR CREDENTIAL_PROMOTE; do
+  check "$t needs a caller"              "$(post $B -d "{\"type\":\"$t\",\"cluster\":\"*\",\"from\":\"x\"}" | field kind)" "unauthenticated"
+done
+
 # Zabbix sign-in. Off until a secret is set, and a way in only with the right signature.
 S="http://127.0.0.1:$P/sso/zabbix"
 code_of() { curl -s -o /dev/null -w '%{http_code}' -X POST "$1" -H 'content-type: application/json' "${@:2}"; }

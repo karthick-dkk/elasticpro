@@ -324,6 +324,21 @@ impl ClusterSecrets {
         self.remove(from)
     }
 
+    /// Copy one entry's credential to another name, unbound — what makes an existing entry the
+    /// default (`"*"`) without anybody typing its password again. The secret is opened and sealed
+    /// again under the new name (the name is its associated data); it never leaves this process.
+    /// `Ok(false)` when `from` holds nothing this key opens.
+    pub fn copy(&self, from: &str, to: &str, by: &str, now: u64) -> Result<bool, String> {
+        let Some(held) = self.get(from) else { return Ok(false) };
+        self.set(to, &held.user, &held.password, by, now).map(|_| true)
+    }
+
+    /// Entries other than the default whose secret this key opens: what could become the
+    /// default. Never the secret.
+    pub fn promotable(&self) -> Vec<Listed> {
+        self.list().into_iter().filter(|l| l.name != DEFAULT && self.get(&l.name).is_some()).collect()
+    }
+
     /// Forget one entry. Returns whether there was one.
     pub fn remove(&self, cluster: &str) -> Result<bool, String> {
         if let Some(p) = self.problem.read().clone() {
@@ -458,6 +473,32 @@ mod tests {
         assert!(s.header_at("cfg:b", "https://a2:9200||auto").is_some());
         let again = ClusterSecrets::open_with(Some(&d), Some(&"k".repeat(40)));
         assert_eq!(again.header_at("cfg:b", "https://a:9200||auto"), None, "the binding is kept on disk");
+        std::fs::remove_dir_all(d).ok();
+    }
+
+    #[test]
+    fn an_entry_copied_to_the_default_is_unbound_and_listed_as_promotable_before() {
+        let d = dir();
+        let s = ClusterSecrets::open_with(Some(&d), Some(&"k".repeat(40)));
+        s.set("Local-ES-Cluster", "zabbix", "zbx-pw", "alice", 1).unwrap();
+        s.set_header_bound("cfg:alpha", "ApiKey abc==", "https://a:9200||auto", "admin", 2).unwrap();
+        let names: Vec<String> = s.promotable().into_iter().map(|l| l.name).collect();
+        assert_eq!(names, vec!["Local-ES-Cluster".to_string(), "cfg:alpha".to_string()]);
+        assert_eq!(s.copy("nothing-here", DEFAULT, "bob", 3), Ok(false));
+        assert_eq!(s.copy("Local-ES-Cluster", DEFAULT, "bob", 3), Ok(true));
+        assert_eq!(s.get(DEFAULT), Some(Held { user: "zabbix".into(), password: "zbx-pw".into() }));
+        assert_eq!(s.bound_of(DEFAULT).as_deref(), Some(""), "the default is bound to nothing");
+        assert_eq!(s.status(DEFAULT), Some(("bob".into(), 3)));
+        assert!(s.get("Local-ES-Cluster").is_some(), "the source stays where it was");
+        assert!(s.promotable().iter().all(|l| l.name != DEFAULT));
+        // A header entry stays a header, and its binding does not come along.
+        s.copy("cfg:alpha", DEFAULT, "bob", 4).unwrap();
+        assert_eq!(s.header_at(DEFAULT, "https://elsewhere:9200||auto").as_deref(), Some("ApiKey abc=="));
+        let raw = std::fs::read_to_string(d.join(FILE)).unwrap();
+        assert!(!raw.contains("zbx-pw") && !raw.contains("ApiKey abc"));
+        // A key that opens nothing offers nothing.
+        let wrong = ClusterSecrets::open_with(Some(&d), Some(&"x".repeat(40)));
+        assert!(wrong.promotable().is_empty());
         std::fs::remove_dir_all(d).ok();
     }
 

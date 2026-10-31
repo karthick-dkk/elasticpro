@@ -297,6 +297,32 @@ export async function reprime() {
       sharedAuthHeader: sessionCred ? authHeaderFor(sessionCred) : (state.config.sharedAuthHeader || '') });
   markServerHeld(res && res.held);
   markServerAnonymous(res && res.anonymous);
+  markServerDefault(res && res.defaultCredential);
+}
+
+/** What the last PRIME said about the default credential: true, false, or null (not said). */
+let serverDefault = null;
+export function serverDefaultCredential() { return serverDefault; }
+
+/**
+ * Clusters the core's default credential covers need no prompt (0.3.46).
+ *
+ * The core says, on every PRIME, whether a cluster with no credential of its own is covered —
+ * the default kept on the server, or a shared one — never the credential. A cluster that is not
+ * anonymous on purpose and has nothing of its own then signs in with it, so it is not listed by
+ * `clustersNeedingCredential()`: no "Sign in (N clusters)" and no startup prompt for a cluster
+ * added after the default was set. A reply without the field (an older core) changes nothing.
+ */
+export function markServerDefault(covered) {
+  if (typeof covered !== 'boolean') return;
+  serverDefault = covered;
+  if (!covered || !state.config) return;
+  for (const c of state.config.clusters) {
+    if (c.source === 'zabbix' || !c.needsCred || c.anonymous || c.clearCred) continue;
+    c.needsCred = false;
+    c.credSource = 'server';
+    c.username = c.username || '(default credential)';
+  }
 }
 
 /**
