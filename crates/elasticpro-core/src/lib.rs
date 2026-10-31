@@ -11,6 +11,7 @@
 pub mod activity;
 pub mod auth;
 pub mod bridge;
+pub mod cluster_meta;
 pub mod cluster_save;
 pub mod cluster_secrets;
 pub mod crypto;

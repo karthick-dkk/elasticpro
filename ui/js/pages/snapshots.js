@@ -20,6 +20,7 @@ import {
 } from '../ui/snapshot-dialogs.js';
 import { pagerBar } from '../lib/pager.js';
 import { lifecycleView, logPatternOf } from '../core/lifecycle-errors.js';
+import { slmExempt, ulmLabel, ULM_WHY, clusterKindRev } from '../core/cluster-kind.js';
 import { takeFocus, revealFocus } from '../core/focus.js';
 import { listingTitle, listingEmptyText, repoOverview, openRepo } from '../core/snapshot-evidence.js';
 import { hideAddress, scrubFresh } from '../core/evidence.js';
@@ -86,7 +87,7 @@ const minute = () => Math.floor(Date.now() / 60000);
 
 /** SLM / ILM beside the cluster's name: the Clusters page's pill and rule (lifecycle-errors.js), why in its tooltip. */
 function lifecyclePill(kind, d, c) {
-  const v = lifecycleView(kind, d, logPatternOf(c, state.defaults));
+  const v = lifecycleView(kind, d, logPatternOf(c, state.defaults), c);
   return h(`span.pill.${v.tone}`, { title: v.why }, h('i.dot'), `${kind} ${v.word}`);
 }
 
@@ -94,7 +95,7 @@ function blockSig(c) {
   // The page and the search are not here: moving through pages or typing redraws only the
   // table under them (see snapshotsCard), and a rebuild reads them from `ui` anyway.
   return [clusterRev(c.id), objId(state.data.get(c.id)), objId(client(c.id)), ui.open[c.id] || '', ui.days,
-    ui.perPage, writesAllowed(), fleetMode(), folded(), focusSection, minute()].join('|');
+    ui.perPage, writesAllowed(), fleetMode(), folded(), focusSection, minute(), clusterKindRev()].join('|');
 }
 
 /**
@@ -162,7 +163,7 @@ function clusterBlock(c) {
   // Unknown is not zero: a listing not read yet says so rather than "0 snapshots".
   const listed = d.snapshots ? Object.values(d.snapshots).reduce((n, l) => n + ((l && l.length) || 0), 0) : null;
   const sub = [policiesRead(c.id) ? plural(repos.length, 'repository', 'repositories') : 'repositories not read yet',
-    listed === null ? 'snapshots not read yet' : plural(listed, 'snapshot')].join(' · ');
+    listed === null ? 'snapshots not read yet' : !listed && slmExempt(c) ? ulmLabel(c) : plural(listed, 'snapshot')].join(' · ');
   return h('div', { style: { marginBottom: '10px' } },
     collapsible(c.name, sub, () => clusterSection(c), { key: `snap-cluster-${c.id}`, open: false }));
 }
@@ -180,6 +181,8 @@ function clusterSection(c) {
       h('h2', { style: { fontSize: '14px', margin: 0 } }, c.name),
       d.slmStatus ? lifecyclePill('SLM', d, c) : null,
       d.ilm ? lifecyclePill('ILM', d, c) : null,
+      // No snapshots expected here: its logs are archived to S3 by ULM (core/cluster-kind.js).
+      slmExempt(c) ? h('span.pill.grey.snap-ulm', { title: ULM_WHY }, ulmLabel(c)) : null,
       h('div', { style: { marginLeft: 'auto', display: 'flex', gap: '10px', alignItems: 'center' } },
         writeToggle(draw),
         // The listing's own age and a Refresh that re-reads it now (the verbose one).
@@ -317,7 +320,8 @@ function repositoriesView(c, d, repos) {
       focusable('policies', card('Policies (SLM)',
         policies.length ? `${policies.length} configured` : read ? 'none configured' : 'not read yet',
         policies.length ? slmTable(c, policies)
-          : empty(!read ? 'SLM policies not read yet' : d.slmSupported === false ? 'SLM API not available on this cluster' : 'No SLM policies configured')))));
+          : empty(!read ? 'SLM policies not read yet' : d.slmSupported === false ? 'SLM API not available on this cluster'
+            : slmExempt(c) ? `No SLM policies configured — none expected: ${ulmLabel(c)}` : 'No SLM policies configured')))));
 }
 
 /** One repository opened: the way back, its snapshot list and actions, and its availability strip. */

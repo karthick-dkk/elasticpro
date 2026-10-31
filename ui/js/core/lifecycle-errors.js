@@ -24,6 +24,8 @@
  * with nothing of the logs in its care is Running in red, and why is in the tooltip.
  */
 
+import { slmExempt, ulmLabel, ULM_WHY } from './cluster-kind.js';
+
 export const DEFAULT_LOG_PATTERN = 'logstash-*';
 
 /** A cluster's log index pattern: its own, else the config default (logstash-* when neither says). */
@@ -154,8 +156,16 @@ const listOf = (a, n = 5) => `${a.slice(0, n).join(', ')}${a.length > n ? `, +${
  * → { tone: 'green'|'red'|'grey', word: 'Running'|'Stopped'|…|'Running ?', covered: true|false|null, why }
  *   tone grey (and covered null) when the mode is not read, or it runs and what it covers
  *   could not be read: unknown is not shown as good or as bad.
+ * `cluster`, when given, lets SLM say "Not used" for a cluster that expects none (ULM).
  */
-export function lifecycleView(kind, d, pattern) {
+export function lifecycleView(kind, d, pattern, cluster = null) {
+  // SLM on a cluster whose logs ULM archives and that takes no snapshots (cluster-kind.js
+  // slmExempt): stopped, or no policy for the logs, is its normal state — grey "Not used",
+  // never red. A green one stays green; a failing policy still shows its red dot.
+  if (kind === 'SLM' && cluster && slmExempt(cluster)) {
+    const v = lifecycleView(kind, d, pattern);
+    return v.tone === 'green' ? v : { tone: 'grey', word: 'Not used', covered: null, why: `${ulmLabel(cluster)}. ${ULM_WHY}` };
+  }
   const mode = kind === 'ILM' ? d && d.ilm && d.ilm.operation_mode : d && d.slmStatus && d.slmStatus.operation_mode;
   if (!mode) return { tone: 'grey', word: 'Unknown', covered: null, why: `${kind} status has not been read.` };
   const word = modeWord(mode);

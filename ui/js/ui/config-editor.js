@@ -24,6 +24,7 @@ import { credentialsKeptOnServer, keptCredentials, keptFor, keepCredential, forg
          credentialFields, DEFAULT_CREDENTIAL, promoteCredential, promotableLabel, defaultChoiceLabel,
          initialCredentialChoice } from '../core/server-credentials.js';
 import { toast } from './menu.js';
+import { CLUSTER_TYPES, clusterKind, typeDefaults, bucketProblem, saveClusterMeta } from '../core/cluster-kind.js';
 
 let masterInMemory = null;      // master password for this session only (needed to seal new secrets)
 
@@ -253,6 +254,86 @@ const VOLUME_FIELDS = [
   { id: 'ce-volhead', key: 'volumeHeadroomPercent', snake: 'volume_headroom_percent', label: 'Planning headroom', min: 0, max: 200 },
 ];
 
+/**
+ * The cluster's type, ULM and SLM part of the dialog (core/cluster-kind.js is the one
+ * definition of what they mean). ULM and SLM follow the type until the admin changes them:
+ * an untouched half is saved as "follow the type" (null), not as a copy of today's default.
+ * `editable` false shows them read-only (hosted, not an admin: CLUSTER_META_SET is an admin's).
+ * → { node, read() → { meta, changed } | { error } }
+ */
+function kindSection(c, { editable = true } = {}) {
+  const k = clusterKind(c);
+  const touched = { type: false, ulm: false, slm: false };
+  let type = k.type;
+  const typeBtns = CLUSTER_TYPES.map((t) => h('button.seg-btn', { type: 'button', id: `ce-type-${t.id}`, disabled: !editable,
+    'aria-pressed': String(t.id === type), onclick: () => { type = t.id; touched.type = true; follow(); } }, t.label));
+  const ulm = h('input', { id: 'ce-ulm', type: 'checkbox', checked: k.ulm.enabled, disabled: !editable,
+    onchange: () => { touched.ulm = true; follow(); } });
+  const bucket = text('ce-ulm-bucket', k.ulm.bucket, { mono: true, placeholder: 'acme-logs' });
+  bucket.disabled = !editable;
+  const bucket0 = k.ulm.bucket;
+  const bucketBlock = h('div#ce-ulm-block', field('ULM S3 bucket', bucket,
+    'Name only. Whether the archive is complete is checked in Zabbix (log archive (S3) template), not here.'));
+  const slm = select('ce-slm', k.slmExpected ? 'expected' : 'none', [
+    ['expected', 'Expected: report a missing or failed snapshot'],
+    ['none', 'Not used: do not report "SLM not found"']]);
+  slm.disabled = !editable;
+  slm.addEventListener('change', () => { touched.slm = true; });
+  // The halves nobody changed follow the type, now as on save.
+  const follow = () => {
+    const d = typeDefaults(type);
+    if (!touched.ulm && !k.set.ulm) ulm.checked = d.ulm;
+    if (!touched.slm && !k.set.slm) slm.value = d.slm;
+    bucketBlock.hidden = !ulm.checked;
+    for (const b of typeBtns) b.setAttribute('aria-pressed', String(b.id === `ce-type-${type}`));
+  };
+  bucketBlock.hidden = !ulm.checked;
+  const node = h('fieldset.ce-kind', { style: { border: '1px solid var(--border)', borderRadius: '6px', padding: '8px 10px', display: 'grid', gap: '8px', margin: 0 } },
+    h('legend', { style: { fontSize: '12px', padding: '0 4px' } }, 'Cluster type'),
+    h('div', { style: { display: 'flex', gap: '12px', alignItems: 'center', flexWrap: 'wrap' } },
+      h('div.seg-group', { role: 'group', 'aria-label': 'Cluster type' }, ...typeBtns),
+      h('label', { style: { display: 'flex', gap: '7px', alignItems: 'center', fontSize: '12.5px', cursor: editable ? 'pointer' : 'default' } },
+        ulm, 'ULM enabled (logs archived to S3)')),
+    bucketBlock,
+    field('Snapshots (SLM)', slm, k.set.type || k.set.ulm || k.set.slm ? null : 'Type not set yet: On-Prem until one is chosen.'),
+    editable ? null : h('div.muted', { style: { fontSize: '11.5px' } }, 'Set by an administrator.'));
+  const read = () => {
+    const b = bucket.value.trim();
+    // Checked whether or not ULM is on: the name is kept either way, and the core refuses a bad one.
+    const bad = bucketProblem(b);
+    if (bad) return { error: bad };
+    const ulmSet = touched.ulm || k.set.ulm;
+    const slmSet = touched.slm || k.set.slm;
+    const meta = { type, ulm: { enabled: ulmSet ? ulm.checked : null, bucket: b }, slm: slmSet ? slm.value : null };
+    const changed = touched.type || touched.ulm || touched.slm || b !== bucket0;
+    // A type nobody chose is not written: unset reads as On-Prem, and stays unset.
+    return { meta, changed, typeSet: touched.type || k.set.type };
+  };
+  return { node, read };
+}
+
+/**
+ * A Zabbix cluster: everything else about it is Zabbix's, so the dialog opens on its type,
+ * ULM and SLM only (hosted; CLUSTER_META_SET, an admin's). Returns whether it was saved.
+ */
+export async function editClusterKind(cluster) {
+  if (!cluster) return false;
+  const part = kindSection(cluster);
+  const saved = await modal(`Edit cluster ${cluster.name || ''}`,
+    `Managed in Zabbix${cluster.zabbix && cluster.zabbix.host ? ` (host ${cluster.zabbix.host})` : ''}: only its type, ULM and SLM are set here.`,
+    [part.node],
+    (ctx) => [h('div', { style: { marginLeft: 'auto', display: 'flex', gap: '8px' } },
+      h('button.btn', { onclick: () => ctx.done(null) }, 'Cancel'),
+      h('button.btn.primary', { onclick: async () => {
+        const r = part.read();
+        if (r.error) return ctx.msg(r.error);
+        try { await saveClusterMeta(cluster.id, r.meta); } catch (e) { return ctx.msg(`Save failed: ${e.message}`); }
+        bus.emit('data');
+        ctx.done(true);
+      } }, 'Save'))]);
+  return !!saved;
+}
+
 export async function editCluster(existing = null) {
   const r = raw();
   if (!r) return false;
@@ -283,6 +364,9 @@ export async function editCluster(existing = null) {
   const onScreen = existing ? clusters().find((x) => x.name === existing.name) : null;
   const screenId = onScreen ? onScreen.id : null;
   const anonymous = !!(onScreen && onScreen.anonymous);
+  // Hosted, the type is the server's (CLUSTER_META_SET, an admin's); desktop, the entry's keys.
+  const kindEditable = !onServer || roleMayWrite();
+  const kind = kindSection(onScreen || (existing ? { ...existing, id: null } : null), { editable: kindEditable });
   const choice0 = initialCredentialChoice({ keptOwn, fileOwn, anonymous });
   // Set by a save that made the default (or found one made meanwhile): a retry after the
   // config save failed does not try again — PROMOTE would refuse, CREDENTIAL_SET replace.
@@ -376,9 +460,8 @@ export async function editCluster(existing = null) {
       field('Backup capacity', text('ce-backupcap', c.backupCapacity || '', { placeholder: '2TB' }),
         'Total size of the snapshot repository. Elasticsearch cannot report it, so the volume report ' +
         'says "not set" until you do. 2TB, 500GB, or a bare number of GB.'),
-      field('Note', text('ce-note', c.note || '')),
-      field('S3 log bucket', text('ce-bucket', c.logBucket || c.log_bucket || '', { mono: true, placeholder: 'acme-logs' }),
-        'The bucket the enriched and raw logs are archived to. Named on the Clusters page; nothing here reads it.')),
+      field('Note', text('ce-note', c.note || ''))),
+    kind.node,
     // How this cluster's daily-ingest figure is derived, and the headroom every "needed"
     // number on the volume report is sized with. They were in the config schema with no
     // way to set them short of hand-editing the file.
@@ -426,7 +509,30 @@ export async function editCluster(existing = null) {
           if (val('ce-enabled') === 'no') next.enabled = false; else delete next.enabled;
           const tags = val('ce-tags').split(',').map((t) => t.trim()).filter(Boolean); if (tags.length) next.tags = tags; else delete next.tags;
           const note = val('ce-note').trim(); if (note) next.note = note; else delete next.note;
-          const bucket = val('ce-bucket').trim(); if (bucket) next.logBucket = bucket; else delete next.logBucket; delete next.log_bucket;
+          // Type, ULM and SLM: the server's store (hosted, an admin's) or the entry's own keys.
+          const kindRead = kind.read();
+          if (kindRead.error) return ctx.msg(kindRead.error);
+          const kindToServer = onServer && kindEditable && kindRead.changed;
+          // Hosted: kept by the core once the cluster is known to it (after the save primes it).
+          const keepKind = async () => {
+            if (!kindToServer) return '';
+            const id = (clusters().find((x) => x.name === name) || {}).id;
+            if (!id) return 'Saved to the config, but the cluster type was not kept: the cluster is not listed yet.';
+            try { await saveClusterMeta(id, kindRead.meta); } catch (e) { return `Saved to the config, but the cluster type was not kept: ${e.message}`; }
+            bus.emit('data');
+            return '';
+          };
+          if (!onServer) {
+            const m = kindRead.meta;
+            if (kindRead.typeSet) next.type = m.type; else delete next.type;
+            const u = { ...(m.ulm.enabled !== null ? { enabled: m.ulm.enabled } : {}), ...(m.ulm.bucket ? { bucket: m.ulm.bucket } : {}) };
+            if (Object.keys(u).length) next.ulm = u; else delete next.ulm;
+            if (m.slm) next.slm = m.slm; else delete next.slm;
+            // The bucket has one home now: `ulm.bucket` (cluster-kind.js still reads an old logBucket).
+            delete next.logBucket; delete next.log_bucket;
+          } else if (kindToServer) {
+            delete next.logBucket; delete next.log_bucket;
+          }
           for (const [id, key] of [['ce-live', 'liveRetention'], ['ce-snapret', 'snapshotRetention']]) {
             const v = val(id).trim();
             if (!v) { delete next[key]; continue; }
@@ -464,6 +570,8 @@ export async function editCluster(existing = null) {
             // back afterwards, so the in-memory list is not touched here.
             let how;
             try { how = await saveClusterAsOperator(next, existing); } catch (e) { return ctx.msg(`Save failed: ${e.message}`); }
+            const kindErr = await keepKind();
+            if (kindErr) return ctx.msg(kindErr);
             // Saved, but nothing to sign in with: say who sets it, rather than leave a cluster
             // that silently fails. Nobody below admin is offered a form for it.
             if (how === 'none') toast('No default credential is set; an admin sets it in Config → Credentials.', 'warn', 9000, { key: 'no-default-credential' });
@@ -541,6 +649,8 @@ export async function editCluster(existing = null) {
               else if (takeAlong && id) await rebindCredential(id);
               await reprime();
             } catch (e) { return ctx.msg(`Saved to the config, but the credential was not kept: ${e.message}`); }
+            const kindErr = await keepKind();
+            if (kindErr) return ctx.msg(kindErr);
             refreshAll({ force: true });
             ctx.done(true);
             return;

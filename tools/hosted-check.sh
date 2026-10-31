@@ -100,6 +100,13 @@ for t in CREDENTIAL_STATUS CREDENTIAL_SET CREDENTIAL_CLEAR CREDENTIAL_PROMOTE; d
   check "$t needs a caller"              "$(post $B -d "{\"type\":\"$t\",\"cluster\":\"*\",\"from\":\"x\"}" | field kind)" "unauthenticated"
 done
 
+# Cluster type, ULM bucket and whether SLM is expected (0.3.47, cluster_meta.rs): reading it is a
+# user's, setting it an admin's — never a caller-less request's. Roles, validation, the Zabbix tag
+# seed and the 0600 store are proved in-process (tests/cluster_meta.rs).
+for t in CLUSTER_META_GET CLUSTER_META_SET; do
+  check "$t needs a caller"              "$(post $B -d "{\"type\":\"$t\",\"clusterId\":\"x\",\"meta\":{\"type\":\"ci\"}}" | field kind)" "unauthenticated"
+done
+
 # Zabbix sign-in. Off until a secret is set, and a way in only with the right signature.
 S="http://127.0.0.1:$P/sso/zabbix"
 code_of() { curl -s -o /dev/null -w '%{http_code}' -X POST "$1" -H 'content-type: application/json' "${@:2}"; }
