@@ -79,8 +79,12 @@ test('the display secret comes out of #/play?display=…, and the page id never 
 });
 
 test('cluster kind: CI / DI → ULM on, SLM none; On-Prem and unset → SLM expected', () => {
-  assert.deepEqual(K.clusterKind({ type: 'CI' }), { type: 'CI', ulm: { enabled: true, bucket: null }, slmExpected: false });
-  assert.deepEqual(K.clusterKind({}), { type: 'On-Prem', ulm: { enabled: false, bucket: null }, slmExpected: true });
+  // The fields Play reads (cluster-kind.js returns more: label, set, source).
+  const ci = K.clusterKind({ type: 'CI' });
+  assert.deepEqual([ci.type, ci.label, ci.ulm.enabled, ci.slmExpected], ['ci', 'CI', true, false]);
+  assert.ok(!ci.ulm.bucket, 'no bucket set reads as empty, never as a name');
+  const unset = K.clusterKind({});
+  assert.deepEqual([unset.type, unset.label, unset.ulm.enabled, unset.slmExpected], ['onprem', 'On-Prem', false, true]);
   assert.equal(K.clusterKind({ type: 'di', ulm: { enabled: true, bucket: 'logs-di' } }).ulm.bucket, 'logs-di');
   assert.equal(K.slmExempt({ type: 'DI' }), true);
   assert.equal(K.slmExempt({ type: 'DI', slm: 'expected' }), false);
