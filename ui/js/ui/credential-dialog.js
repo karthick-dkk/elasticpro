@@ -9,11 +9,13 @@
 import { h, mount, clear, $ } from '../lib/dom.js';
 import {
   state, clusters, client, clustersNeedingCredential, clustersWithAuthError,
-  suggestedUsername, setSessionCredential, continueAnonymously, refreshAll, configFileName,
+  suggestedUsername, setSessionCredential, continueAnonymously, refreshAll, configFileName, reprime,
+  reconnectWithServerCredentials,
 } from '../core/state.js';
 import { workerStatus, vaultGet, vaultSet, vaultDel } from '../core/es.js';
 import { toast } from './menu.js';
-import { credentialsKeptOnServer, keptCredentials, keptFor, keepCredential, DEFAULT_CREDENTIAL } from '../core/server-credentials.js';
+import { credentialsKeptOnServer, keptCredentials, keptFor, keepCredential, keptLine, DEFAULT_CREDENTIAL } from '../core/server-credentials.js';
+import { editCluster, rawClusterOf } from './config-editor.js';
 
 let open = false;
 
@@ -81,13 +83,44 @@ export function showCredentialDialog(reason = 'manual') {
     return;
   }
   open = true;
+  if (!credentialsKeptOnServer()) { openDialog(reason, null); return; }
+  // Hosted (0.3.46): what the server keeps decides what this dialog is. With a default, a
+  // cluster that merely "needs" a credential is covered by it — re-primed, and told so, with
+  // no form; one that rejected it is offered a credential of its own, not a sign-in form.
+  keptCredentials().then(async (status) => {
+    const st = status && status.ok ? status : null;
+    if (st && st.default && reason !== 'auth_error' && !clustersWithAuthError().length) {
+      if (clustersNeedingCredential().length) await reprime();
+      if (!clustersNeedingCredential().length) {
+        open = false;
+        toast(`Using the default credential (${keptLine(st.default)}) — nothing to type.`, 'ok', 6000, { key: 'default-credential' });
+        refreshAll({ force: true });
+        return;
+      }
+    }
+    openDialog(reason, st);
+  }, () => openDialog(reason, null));
+}
 
+/** The dialog itself; `status` is CREDENTIAL_STATUS on hosted (null elsewhere, or unreadable). */
+function openDialog(reason, status) {
   const needing = clustersNeedingCredential();
   const failing = clustersWithAuthError();
   const targets = needing.length ? needing : failing.length ? failing : clusters();
   const someHaveFileCreds = clusters().some((c) => c.credSource === 'shared' || c.credSource === 'cluster');
+  const keptDefault = status ? keptFor(status, DEFAULT_CREDENTIAL) : null;
+  // Clusters that rejected the default itself (no credential of their own kept): each needs one
+  // of its own. Shown as that, with a way to set it — the generic form stays one press away.
+  const rejected = keptDefault ? failing.filter((c) => !keptFor(status, c.id)) : [];
+  // Hosted, a default kept and not being replaced: what is typed is kept for exactly these —
+  // config clusters this dialog is about — and the list says so, not "all N".
+  const keptTargets = targets.filter((c) => c.source !== 'zabbix');
 
-  const ui = { mode: 'basic', overrideAll: needing.length === 0, busy: false, results: null, error: null, remember: false, vault: false };
+  const ui = { mode: 'basic', overrideAll: needing.length === 0, busy: false, results: null, error: null, remember: false, vault: false,
+               hosted: credentialsKeptOnServer(), replaceDefault: false, view: rejected.length && !needing.length ? 'rejected' : 'form' };
+  // The clusters this dialog acts on, as the list, the button and the probe all count them.
+  const listed = () => (ui.hosted ? (keptDefault && !ui.replaceDefault ? keptTargets : targets)
+    : ui.overrideAll ? clusters() : targets);
   workerStatus().then((st) => {
     if (st && st.vault) ui.vault = true;
     if (st && st.edition === 'hosted') ui.hosted = true;
@@ -135,20 +168,37 @@ export function showCredentialDialog(reason = 'manual') {
     // Hosted: the server keeps it, encrypted — as the default every cluster without its own
     // uses, and as the own credential of a failing cluster that had one — so this is the last
     // time anyone types it, on this page load or any other.
+    // An existing default is never replaced silently (0.3.46): only with the box ticked. Left
+    // unticked, what is typed becomes the own credential of the clusters this dialog is for.
+    // The browser holds nothing typed on hosted: no session credential, so nothing rides a later
+    // PRIME as the shared one — the page reconnects with what the server now resolves.
     if (credentialsKeptOnServer()) {
       try {
-        await keepCredential(DEFAULT_CREDENTIAL, cred);
-        const status = await keptCredentials();
-        for (const c of targets) if (keptFor(status, c.id)) await keepCredential(c.id, cred);
-      } catch (e) { ui.busy = false; ui.error = `The server did not keep it: ${e.message}`; return draw(); }
-    }
-    await setSessionCredential(cred, { overrideAll: ui.overrideAll });
-    if (ui.vault) {
-      if (ui.remember) await vaultSet(vaultScope(), JSON.stringify(cred));
-      else await vaultDel(vaultScope());
+        const now = await keptCredentials();
+        const hasDefault = !!keptFor(now, DEFAULT_CREDENTIAL);
+        if (hasDefault && !ui.replaceDefault) {
+          for (const c of keptTargets) await keepCredential(c.id, cred);
+        } else {
+          // Ticked: replace it. Unticked with none at open: set it — unless one appeared since.
+          await keepCredential(DEFAULT_CREDENTIAL, cred, { onlyIfAbsent: !ui.replaceDefault });
+          for (const c of targets) if (keptFor(now, c.id)) await keepCredential(c.id, cred);
+        }
+      } catch (e) {
+        ui.busy = false;
+        ui.error = e.kind === 'exists' ? `A default credential was set meanwhile${e.user ? ` (user ${e.user})` : ''}; it was not replaced. Close and open this dialog again.`
+          : `The server did not keep it: ${e.message}`;
+        return draw();
+      }
+      await reconnectWithServerCredentials();
+    } else {
+      await setSessionCredential(cred, { overrideAll: ui.overrideAll });
+      if (ui.vault) {
+        if (ui.remember) await vaultSet(vaultScope(), JSON.stringify(cred));
+        else await vaultDel(vaultScope());
+      }
     }
 
-    const probeList = ui.overrideAll ? clusters() : targets;
+    const probeList = listed();
     const results = [];
     await Promise.all(probeList.map(async (c) => {
       const cl = client(c.id);
@@ -193,7 +243,30 @@ export function showCredentialDialog(reason = 'manual') {
     refreshAll({ force: true });
   }
 
+  function drawRejected() {
+    const names = rejected.map((c) => c.name).join(', ');
+    mount(dialog,
+      h('div.modal-head',
+        h('div', h('h2', `The default credential was rejected by ${names}`),
+          h('p.sub', `Every other cluster without its own keeps signing in with the default (${keptLine(keptDefault)}). `
+            + `Give ${rejected.length === 1 ? 'this cluster' : 'these clusters'} a credential of ${rejected.length === 1 ? 'its' : 'their'} own.`)),
+        h('button.btn.ghost.sm', { onclick: () => close(), 'aria-label': 'Close', title: 'Close (Esc)' }, '×')),
+      h('div.modal-body',
+        h('div.cd-targets', ...rejected.map((c) => h('div.cd-row.cd-rejected',
+          h('span.pill.red', h('i.dot'), 'rejected'),
+          h('span', { style: { fontWeight: 600 } }, c.name),
+          h('span.mono.muted.trunc', c.url),
+          h('button.btn.sm', { style: { marginLeft: 'auto' }, onclick: async () => {
+            close();
+            if (await editCluster(rawClusterOf(c))) refreshAll({ force: true });
+          } }, 'Set its own credential…'))))),
+      h('div.modal-foot',
+        h('button.btn.ghost', { onclick: () => { ui.view = 'form'; draw(); } }, 'Type a credential instead…'),
+        h('div', { style: { marginLeft: 'auto' } }, h('button.btn', { onclick: () => close() }, 'Close'))));
+  }
+
   function draw() {
+    if (ui.view === 'rejected') return drawRejected();
     const title = reason === 'auth_error' ? 'Elasticsearch rejected the stored credential'
       : needing.length ? 'Credentials needed' : 'Set credentials';
 
@@ -239,7 +312,7 @@ export function showCredentialDialog(reason = 'manual') {
                   placeholder: 'eyJhbGciOi…',
                   onkeydown: (e) => { if (e.key === 'Enter') connect(); } })),
 
-        someHaveFileCreds
+        someHaveFileCreds && !ui.hosted
           ? h('label', { style: { display: 'flex', gap: '8px', alignItems: 'flex-start', fontSize: '12px', marginTop: '2px' } },
               h('input', { type: 'checkbox', checked: ui.overrideAll, style: { marginTop: '2px' },
                 onchange: (e) => { ui.overrideAll = e.target.checked; } }),
@@ -250,14 +323,15 @@ export function showCredentialDialog(reason = 'manual') {
 
         h('div.cd-targets',
           h('div.muted', { style: { fontSize: '11px', textTransform: 'uppercase', letterSpacing: '.05em', marginBottom: '5px' } },
-            ui.overrideAll ? `Will connect all ${clusters().length} cluster(s)` : `Will connect ${targets.length} cluster(s)`),
+            ui.hosted && keptDefault && !ui.replaceDefault ? `Kept as the own credential of ${listed().length} cluster(s)`
+              : !ui.hosted && ui.overrideAll ? `Will connect all ${clusters().length} cluster(s)` : `Will connect ${listed().length} cluster(s)`),
           ...(ui.results
             ? ui.results.map((r) => h('div.cd-row',
                 h(`span.pill.${r.ok ? 'green' : 'red'}`, h('i.dot'), r.ok ? 'connected' : 'failed'),
                 h('span', { style: { fontWeight: 600 } }, r.c.name),
                 h('span.muted.trunc', { style: { fontSize: '11.5px' } }, r.detail),
                 r.tls ? h('span.muted', { style: { marginLeft: 'auto', fontSize: '11px' } }, 'see Clusters page') : null))
-            : (ui.overrideAll ? clusters() : targets).map((c) => h('div.cd-row',
+            : listed().map((c) => h('div.cd-row',
                 h('span.pill.grey', h('i.dot'), 'pending'),
                 h('span', { style: { fontWeight: 600 } }, c.name),
                 h('span.mono.muted.trunc', c.url))))),
@@ -275,6 +349,16 @@ export function showCredentialDialog(reason = 'manual') {
                   'Stores it in the Windows Credential Manager (your account only), so the next start signs in without asking. Untick to remove a remembered one.')))
           : null,
 
+        ui.hosted && keptDefault
+          ? h('label', { style: { display: 'flex', gap: '8px', alignItems: 'flex-start', fontSize: '12px', marginTop: '2px' } },
+              h('input#cd-replace-default', { type: 'checkbox', checked: ui.replaceDefault, style: { marginTop: '2px' },
+                onchange: (e) => { ui.replaceDefault = e.target.checked; draw(); } }),
+              h('span', h('b', 'Replace the default credential'),
+                h('div.muted', { style: { fontSize: '11.5px' } },
+                  `The server keeps one (${keptLine(keptDefault)}) that every cluster without its own uses. `
+                  + 'Left unticked, this is kept as the own credential of the clusters listed above only.')))
+          : null,
+
         ui.summary ? h('div.banner.warn', { style: { margin: 0 } }, ui.summary) : null,
 
         ui.error ? h('div.banner.err', { style: { margin: 0 } }, ui.error) : null,
@@ -285,7 +369,9 @@ export function showCredentialDialog(reason = 'manual') {
         ui.hosted
           ? h('div.cd-note',
               h('b', 'Kept encrypted on the server. '),
-              'The ElasticPro server keeps it as the default credential for every cluster without one of its own (AES-256-GCM, its own key), ',
+              keptDefault && !ui.replaceDefault
+                ? 'The ElasticPro server keeps it as the own credential of these clusters (AES-256-GCM, its own key); the default stays as it is. '
+                : 'The ElasticPro server keeps it as the default credential for every cluster without one of its own (AES-256-GCM, its own key), ',
               'and uses it for everyone allowed to see those clusters — nobody is asked again, not on a page load and not after a restart. ',
               'It is not written to the config file and is never sent back to any browser. Config → Credentials changes or forgets it.')
           : h('div.cd-note',
@@ -306,7 +392,7 @@ export function showCredentialDialog(reason = 'manual') {
             ui.results ? 'Done' : 'Cancel'),
           h('button.btn.primary', { onclick: connect, disabled: ui.busy },
             ui.busy ? h('span', h('span.spin'), ' Connecting…')
-              : `Connect ${ui.overrideAll ? clusters().length : targets.length} cluster${(ui.overrideAll ? clusters().length : targets.length) === 1 ? '' : 's'}`))));
+              : `Connect ${listed().length} cluster${listed().length === 1 ? '' : 's'}`))));
 
     const first = $('#cd-user') || $('#cd-apikey') || $('#cd-bearer');
     if (first && !ui.busy && !ui.results) setTimeout(() => first.focus(), 0);

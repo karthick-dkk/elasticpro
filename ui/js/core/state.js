@@ -28,6 +28,7 @@ import { isStale } from '../lib/freshness.js';
 import { sortByName } from '../lib/cluster-order.js';
 import { ilmErrorsOf } from './lifecycle-errors.js';
 import { pausedLine } from './policy.js';
+import { credentialsKeptOnServer } from './server-credentials.js';
 
 class Emitter {
   constructor() { this.map = new Map(); }
@@ -215,6 +216,9 @@ export function applySessionCredential({ overrideAll = false } = {}) {
  * (or to all clusters when overrideAll is set), then reconnect.
  */
 export async function setSessionCredential(cred, { overrideAll = false } = {}) {
+  // Hosted: the server keeps credentials, the browser holds none — a typed one held here rode
+  // every later PRIME as the shared credential and could become the default nobody chose.
+  if (credentialsKeptOnServer()) { sessionCred = null; await reconnectWithServerCredentials(); return 0; }
   sessionCred = cred;
   const n = applySessionCredential({ overrideAll });
   for (const c of state.config.clusters) {
@@ -224,6 +228,36 @@ export async function setSessionCredential(cred, { overrideAll = false } = {}) {
   await reprime();
   bus.emit('config', state.config);
   return n;
+}
+
+/**
+ * Hosted: after a credential was kept on the server (CREDENTIAL_SET / PROMOTE), reconnect with
+ * what the server now resolves — nothing typed is held or sent by this page.
+ */
+export async function reconnectWithServerCredentials() {
+  if (!state.config) return;
+  for (const c of state.config.clusters) {
+    const cl = state.clients.get(c.id);
+    if (cl) { cl.failures = 0; cl.nextRetryAt = 0; cl.state = 'unknown'; }
+  }
+  await reprime();
+  bus.emit('config', state.config);
+}
+
+/** Drop a typed credential this page holds, without touching what the clusters use. */
+export function forgetSessionCredential() { sessionCred = null; }
+
+/**
+ * Clusters an admin just gave a credential (the default, or their own) after they were
+ * connected without one on purpose: the next PRIME tells the core to drop that decision
+ * (`dropAnonymous`), which it otherwise keeps across page loads.
+ */
+const leavingAnonymous = new Set();
+export function withdrawAnonymous(id) {
+  if (!id) return;
+  leavingAnonymous.add(String(id));
+  const c = state.config && state.config.clusters.find((x) => x.id === id);
+  if (c) c.anonymous = false;
 }
 
 /** Mark the clusters without a credential as deliberately anonymous. */
@@ -288,16 +322,67 @@ export async function reprime() {
   // A config cluster set aside because Zabbix has its address is still primed: its
   // credential is the one "use ElasticPro credentials" hands to the Zabbix cluster there.
   const own = state.config.clusters.filter((c) => c.source !== 'zabbix').concat(state.config.shadowedClusters || []);
+  const hosted = credentialsKeptOnServer();
+  const dropAnonymous = [...leavingAnonymous];
+  for (const c of own) if (leavingAnonymous.has(c.id)) c.anonymous = false;
   const res = await primeWorker(own, isReadOnly(), state.config.jumpHosts || [],
     // Unlocked sealed secrets are not written to the server's disk in the clear.
     { persist: !state.config.sealed,
       acceptAllCertificates: !!state.config.acceptAllCertificates,
       // ElasticPro's own credential, for Zabbix clusters when the config asks for it: one
       // typed this session wins, as it does for every cluster; else the config's shared one.
-      sharedAuthHeader: sessionCred ? authHeaderFor(sessionCred) : (state.config.sharedAuthHeader || '') });
+      // Hosted: never one typed here (the browser holds none), and the config file's only as
+      // it is in the file — the one-time move to the server; with none, nothing is sent.
+      sharedAuthHeader: hosted ? (state.config.sharedAuthHeader || undefined)
+        : sessionCred ? authHeaderFor(sessionCred) : (state.config.sharedAuthHeader || ''),
+      dropAnonymous });
+  if (res && res.ok) for (const id of dropAnonymous) leavingAnonymous.delete(id);
   markServerHeld(res && res.held);
   markServerAnonymous(res && res.anonymous);
+  markServerDefault(res && res.defaultCredential, res && res.held);
 }
+
+/** What the last PRIME said about the default credential: true, false, or null (not said). */
+let serverDefault = null;
+export function serverDefaultCredential() { return serverDefault; }
+
+/**
+ * Clusters the core's default credential covers need no prompt (0.3.46).
+ *
+ * The core says, on every PRIME, whether a cluster with no credential of its own is covered —
+ * the default kept on the server, or a shared one — never the credential. A cluster that is not
+ * anonymous on purpose and has nothing of its own then signs in with it, so it is not listed by
+ * `clustersNeedingCredential()`: no "Sign in (N clusters)" and no startup prompt for a cluster
+ * added after the default was set. A reply without the field (an older core) changes nothing.
+ */
+export function markServerDefault(covered, held = []) {
+  if (typeof covered !== 'boolean') return;
+  serverDefault = covered;
+  if (!state.config) return;
+  if (!covered) {
+    // The default is gone (forgotten, or never set): what this page marked as signed in by the
+    // server — and the core no longer holds — needs a credential again, and says so.
+    const still = new Set(Array.isArray(held) ? held : []);
+    for (const c of state.config.clusters) {
+      if (!serverMarked.has(c.id) || still.has(c.id) || c.credSource !== 'server') continue;
+      c.needsCred = true;
+      c.credSource = 'none';
+      if (c.username === '(default credential)' || c.username === '(held by the server)') c.username = '';
+      serverMarked.delete(c.id);
+    }
+    return;
+  }
+  for (const c of state.config.clusters) {
+    if (c.source === 'zabbix' || !c.needsCred || c.anonymous || c.clearCred) continue;
+    c.needsCred = false;
+    c.credSource = 'server';
+    c.username = c.username || '(default credential)';
+    serverMarked.add(c.id);
+  }
+}
+
+/** Ids this page marked as signed in by the server (held, or covered by the default). */
+const serverMarked = new Set();
 
 /**
  * Clusters the core already holds a credential for need no prompt.
@@ -314,6 +399,7 @@ export function markServerHeld(held) {
       c.needsCred = false;
       c.credSource = 'server';
       c.username = c.username || '(held by the server)';
+      serverMarked.add(c.id);
     }
   }
 }

@@ -9,7 +9,8 @@
  */
 
 import { h, mount, $ } from '../lib/dom.js';
-import { state, setConfig, refreshAll, clusters, applyUnlockedCredential, reprime } from '../core/state.js';
+import { state, setConfig, refreshAll, clusters, applyUnlockedCredential, reprime, hasSessionCredential, sessionCredentialLabel,
+         withdrawAnonymous, forgetSessionCredential } from '../core/state.js';
 import * as cfg from '../core/config.js';
 import { bridge } from '../core/transport.js';
 import { rememberConfigPath, pickFilePath } from '../core/platform.js';
@@ -20,7 +21,9 @@ import { parseRetention, parseSize } from '../core/volume.js';
 import { managedDefaults, MANAGED_NOTE } from '../core/managed.js';
 import { roleMayWrite } from '../core/writes.js';
 import { credentialsKeptOnServer, keptCredentials, keptFor, keepCredential, forgetCredential, rebindCredential, keptLine,
-         credentialFields, DEFAULT_CREDENTIAL } from '../core/server-credentials.js';
+         credentialFields, DEFAULT_CREDENTIAL, promoteCredential, promotableLabel, defaultChoiceLabel,
+         initialCredentialChoice } from '../core/server-credentials.js';
+import { toast } from './menu.js';
 
 let masterInMemory = null;      // master password for this session only (needed to seal new secrets)
 
@@ -266,10 +269,93 @@ export async function editCluster(existing = null) {
   const keptId = existing ? (clusters().find((x) => x.name === existing.name) || {}).id : null;
   const keptOwn = kept && keptId ? keptFor(kept, keptId) : null;
   const keptDefault = kept ? keptFor(kept, DEFAULT_CREDENTIAL) : null;
+  // With no default yet, what the server keeps that could become it without being typed again.
+  const promotable = (kept && kept.promotable) || [];
+  const fileOwn = cred === 'own';
   // An admin edits the file: credentials, removal and all. An operator goes through the
   // core's CLUSTER_SAVE, which takes one entry and refuses a credential or a removal —
   // so neither is offered, and the dialog says whose they are.
   const direct = editsFileDirectly();
+  // 0.3.46: which credential the cluster signs in with is one choice, made here. A new
+  // cluster starts on the default and asks for nothing; one with its own keeps it.
+  // A cluster connected without a credential on purpose ("Continue without credentials")
+  // says so: choosing the default or its own withdraws that decision on save.
+  const onScreen = existing ? clusters().find((x) => x.name === existing.name) : null;
+  const screenId = onScreen ? onScreen.id : null;
+  const anonymous = !!(onScreen && onScreen.anonymous);
+  const choice0 = initialCredentialChoice({ keptOwn, fileOwn, anonymous });
+  // Set by a save that made the default (or found one made meanwhile): a retry after the
+  // config save failed does not try again — PROMOTE would refuse, CREDENTIAL_SET replace.
+  let defaultDone = null;
+  const credentialChoice = () => {
+    const fileShared = r.credentials && (r.credentials.username || r.credentials.apiKey || r.credentials.bearer) ? r.credentials : null;
+    const defaultLabel = onServer ? defaultChoiceLabel(keptDefault)
+      : fileShared ? `Default credential (${fileShared.username ? `user ${fileShared.username}` : 'an API key or token'}, from the config file)`
+      : hasSessionCredential() ? `Default credential (${sessionCredentialLabel()}, typed this session)`
+      : 'Default credential — none in the config file yet';
+    const show = (v) => {
+      const dflt = $('#ce-cred-defblock'), own = $('#ce-cred-ownblock');
+      if (dflt) dflt.hidden = v !== 'default';
+      if (own) own.hidden = v !== 'own';
+      const none = $('#ce-cred-noneblock');
+      if (none) none.hidden = v !== 'none';
+    };
+    const radio = (value, label) => h('label', { style: { display: 'flex', gap: '7px', alignItems: 'center', fontSize: '12.5px', cursor: 'pointer' } },
+      h('input', { type: 'radio', name: 'ce-cred', id: `ce-cred-${value}`, value, checked: choice0 === value, onchange: () => show(value) }),
+      h('b', label));
+    const pair = (...nodes) => h('div', { style: { display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 1fr)', gap: '10px' } }, ...nodes);
+    // Hosted, no default yet: set it here once, or make one the server keeps the default.
+    const defSrc = onServer && !keptDefault && promotable.length
+      ? select('ce-defsrc', promotable[0].id, [...promotable.map((p) => [p.id, `Use ${promotableLabel(p)}`]), ['', 'Type it here']])
+      : null;
+    const typeDefault = onServer && !keptDefault
+      ? h('div#ce-deftype', { style: { display: 'grid', gap: '4px' } },
+          h('div.muted', { style: { fontSize: '11.5px' } }, h('b', 'Set it once here: '), 'used by every cluster without its own.'),
+          pair(field('Username', text('ce-du', '', { placeholder: 'elastic' })),
+            field('Password', text('ce-dp', '', { type: 'password' }), 'Kept encrypted on the server as the default — never written to the config file, never shown again.')))
+      : null;
+    if (defSrc && typeDefault) {
+      typeDefault.hidden = true;
+      defSrc.addEventListener('change', () => { typeDefault.hidden = !!defSrc.value; });
+    }
+    const defBlock = h('div#ce-cred-defblock', { style: { display: 'grid', gap: '6px', padding: '0 0 2px 22px', fontSize: '11.5px' } },
+      onServer
+        ? (keptDefault
+            ? h('div.muted', 'Signs in with the default the server keeps (', keptLine(keptDefault), '). Nothing to type.')
+            : h('div.muted', h('b', 'No default credential is set yet. '),
+                promotable.length ? 'Use one the server already keeps, or type it once:' : ''))
+        : h('div.muted', fileShared || hasSessionCredential()
+            ? 'Signs in with it. Nothing to type here, and no master password is needed.'
+            : 'The app asks for it once at start and uses it for every cluster without its own. Nothing to type here.'),
+      defSrc ? field('Default from', defSrc) : null,
+      typeDefault);
+    const ownBlock = h('div#ce-cred-ownblock', { style: { display: 'grid', gap: '6px', padding: '0 0 2px 22px' } },
+      onServer
+        ? h('div.muted', { style: { fontSize: '11.5px' } },
+            keptOwn ? [h('b', 'The server keeps one for this cluster: '), keptLine(keptOwn), '. Type a new one to replace it.']
+              : fileOwn ? [h('b', 'Its credential is still in the config file. '), 'Type it here once and it moves to the server; the file then holds none.']
+              : 'Kept encrypted on the server (AES-256-GCM); never written to the config file, never shown again.')
+        : null,
+      onServer
+        ? pair(field('Username', text('ce-cu', '', { placeholder: (keptOwn && keptOwn.user) || c.username || '', autocomplete: 'off' })),
+            field('Password', text('ce-cp', '', { type: 'password', autocomplete: 'new-password',
+              placeholder: keptOwn ? '(kept on the server — leave empty to keep)' : '' })))
+        : pair(field('Username', text('ce-cu', c.username || '')),
+            field('Password', text('ce-cp', '', { type: 'password', placeholder: cfg.isSealed(c.password) ? '(stored encrypted — leave empty to keep)' : c.password ? '(stored in plain text — leave empty to keep)' : '' }),
+              'Sealed with the master password before it is written.')));
+    defBlock.hidden = choice0 !== 'default';
+    ownBlock.hidden = choice0 !== 'own';
+    const noneBlock = anonymous
+      ? h('div#ce-cred-noneblock.muted', { style: { padding: '0 0 2px 22px', fontSize: '11.5px' } },
+          'Connected without a credential on purpose. Choose the default or its own to sign it in.')
+      : null;
+    if (noneBlock) noneBlock.hidden = choice0 !== 'none';
+    return h('fieldset.ce-cred', { style: { border: '1px solid var(--border)', borderRadius: '6px', padding: '8px 10px', display: 'grid', gap: '6px', margin: 0 } },
+      h('legend', { style: { fontSize: '12px', padding: '0 4px' } }, 'Credential'),
+      anonymous ? radio('none', 'No credential (connected anonymously)') : null, noneBlock,
+      radio('default', defaultLabel), defBlock,
+      radio('own', 'Its own credential'), ownBlock);
+  };
   const body = [
     h('div', { style: { display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 2fr)', gap: '10px' } },
       field('Name', text('ce-name', c.name || '', { placeholder: 'acme-prod' })),
@@ -309,26 +395,8 @@ export async function editCluster(existing = null) {
         text('ce-volhead', written(c, 'volumeHeadroomPercent', 'volume_headroom_percent'),
           { mono: true, placeholder: String(d.volumeHeadroomPercent) }),
         `Added to the daily figure before it is multiplied out into every disk and backup requirement. 0–200, empty uses ${d.volumeHeadroomPercent}%.`)),
-    direct && onServer
-      ? h('details.disc', { open: !!keptOwn || cred === 'own' },
-          h('summary', 'Credential for this cluster only (optional)'),
-          h('div.muted', { style: { fontSize: '11.5px', padding: '6px 0 2px' } },
-            keptOwn ? [h('b', 'The server keeps one for this cluster: '), keptLine(keptOwn), '. Type a new one to replace it.']
-              : cred === 'own' ? [h('b', 'Its credential is still in the config file. '), 'Type it here once and it moves to the server; the file then holds none.']
-              : [h('b', 'Uses the default credential'), keptDefault ? ` (${keptLine(keptDefault)}).` : ' — none is set yet: Config → Credentials.']),
-          h('div', { style: { display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 1fr)', gap: '10px', padding: '6px 0 2px' } },
-            field('Username', text('ce-cu', '', { placeholder: (keptOwn && keptOwn.user) || c.username || '', autocomplete: 'off' })),
-            field('Password', text('ce-cp', '', { type: 'password', autocomplete: 'new-password',
-              placeholder: keptOwn ? '(kept on the server — leave empty to keep)' : '' }),
-              'Kept encrypted on the server (AES-256-GCM); never written to the config file, never shown again.')),
-          keptOwn ? h('label', { style: { display: 'flex', gap: '6px', alignItems: 'center', fontSize: '12px', paddingTop: '4px' } },
-            h('input#ce-cdef', { type: 'checkbox' }), 'Use the default credential instead (forget this cluster’s own)') : null)
-    : direct
-      ? h('details.disc', { open: cred === 'own' },
-          h('summary', 'Credential for this cluster only (optional)'),
-          h('div', { style: { display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 1fr)', gap: '10px', padding: '8px 0 2px' } },
-            field('Username', text('ce-cu', c.username || ''), 'Leave both empty to use the shared credential.'),
-            field('Password', text('ce-cp', '', { type: 'password', placeholder: cfg.isSealed(c.password) ? '(stored encrypted — leave empty to keep)' : c.password ? '(stored in plain text — leave empty to keep)' : '' }), 'Sealed with the master password before it is written.')))
+    direct
+      ? credentialChoice()
       : h('div.muted.ce-managed-cred', { style: { fontSize: '11.5px' } },
           h('b', 'Credential: managed by an administrator. '),
           'The cluster signs in with the credential set for it, or with the shared one every cluster uses; neither is shown or changed here. ',
@@ -394,17 +462,61 @@ export async function editCluster(existing = null) {
           if (!direct) {
             // The core adds or replaces exactly this entry; the view it came from is read
             // back afterwards, so the in-memory list is not touched here.
-            try { await saveClusterAsOperator(next, existing); ctx.done(true); } catch (e) { ctx.msg(`Save failed: ${e.message}`); }
+            let how;
+            try { how = await saveClusterAsOperator(next, existing); } catch (e) { return ctx.msg(`Save failed: ${e.message}`); }
+            // Saved, but nothing to sign in with: say who sets it, rather than leave a cluster
+            // that silently fails. Nobody below admin is offered a form for it.
+            if (how === 'none') toast('No default credential is set; an admin sets it in Config → Credentials.', 'warn', 9000, { key: 'no-default-credential' });
+            ctx.done(true);
             return;
           }
+          const choice = checked('ce-cred-own') ? 'own' : checked('ce-cred-none') ? 'none' : 'default';
+          const ownChosen = choice === 'own';
+          const clearFileCred = () => { delete next.username; delete next.password; delete next.apiKey; delete next.bearer; };
+          // Put the entry in the file's list; undone when the save fails, so a retry is the
+          // same save again — not "another cluster already has that name".
+          const place = () => {
+            const at = existing ? r.clusters.indexOf(existing) : -1;
+            if (at >= 0) r.clusters[at] = next; else r.clusters.push(next);
+            return () => { if (at >= 0) r.clusters[at] = existing; else r.clusters = r.clusters.filter((x) => x !== next); };
+          };
+          // Leaving a credential of its own for the default forgets the own one: asked — but
+          // only once everything else on the form is valid, so the answer is never wasted.
+          const switching = choice === 'default' && existing && (keptOwn || fileOwn);
+          const confirmSwitch = async () => !switching || confirmDialog(`Use the default credential for ${name}?`,
+            `Its own credential (${keptOwn ? keptLine(keptOwn) : 'in the config file'}) is forgotten, and ${name} signs in with the default`
+            + `${onServer && keptDefault ? ` (${keptLine(keptDefault)})` : ''}.`, { yes: 'use the default' });
           if (onServer) {
-            const cu = val('ce-cu').trim(), cp = val('ce-cp');
-            const useDefault = !!keptOwn && checked('ce-cdef');
+            const cu = ownChosen ? val('ce-cu').trim() : '', cp = ownChosen ? val('ce-cp') : '';
+            const useDefault = choice === 'default' && !!keptOwn;
             if ((cu || cp) && !(cu && cp)) return ctx.msg('Enter both the username and the password, or leave both empty.');
             const typed = cu && cp ? { username: cu, password: cp } : null;
+            if (ownChosen && !typed && !keptOwn && !fileOwn) return ctx.msg('Type its own username and password, or choose the default credential.');
+            // Hosted, no default yet: set it now — from what the server keeps, or typed once — so
+            // the cluster signs in the moment it is saved and nothing asks for a password. Only
+            // where there still is none: a default set meanwhile (by somebody else, or by this
+            // dialog on an earlier try whose save failed) is used, never replaced.
+            let setDefault = null;
+            if (choice === 'default' && !keptDefault && !defaultDone) {
+              const src = promotable.length ? val('ce-defsrc') : '';
+              if (src) setDefault = () => promoteCredential(src);
+              else {
+                const du = val('ce-du').trim(), dp = val('ce-dp');
+                if (!du || !dp) return ctx.msg('Set the default credential once — a username and a password — or choose its own credential.');
+                setDefault = () => keepCredential(DEFAULT_CREDENTIAL, { username: du, password: dp }, { onlyIfAbsent: true });
+              }
+            }
+            if (!(await confirmSwitch())) return;
             // A credential typed here, or the default chosen, replaces any the file still has:
             // after this the file carries no secret for the cluster.
-            if (typed || useDefault) { delete next.username; delete next.password; delete next.apiKey; delete next.bearer; }
+            if (typed || choice === 'default') clearFileCred();
+            if (setDefault) {
+              try { await setDefault(); defaultDone = 'set'; } catch (e) {
+                if (e.kind !== 'exists') return ctx.msg(`The default credential was not set: ${e.message}`);
+                defaultDone = 'existed';
+                toast(`A default credential was set meanwhile${e.user ? ` (user ${e.user})` : ''}; ${name} uses it. What was chosen here was not kept.`, 'warn', 9000);
+              }
+            }
             // The server's own credential for this cluster is bound to its address, route and
             // certificate setting. Moved here on purpose, it may go along — asked, not assumed.
             const where = (x) => [String(x.url || '').replace(/\/+$/, '').toLowerCase(), x.via || x.jump || '', (x.tls || 'auto').toLowerCase()].join('|');
@@ -413,8 +525,15 @@ export async function editCluster(existing = null) {
               `The server keeps a credential of ${name}’s own (${keptLine(keptOwn)}), given for its old address. `
               + 'Send it to the new one? If not, the cluster signs in with the default credential until you type its own again.',
               { yes: 'keep it' });
-            if (existing) r.clusters[r.clusters.indexOf(existing)] = next; else r.clusters.push(next);
-            try { await saveRaw({ silent: true }); } catch (e) { return ctx.msg(`Save failed: ${e.message}`); }
+            // A cluster connected without a credential on purpose, now given one: the core is told
+            // to drop that decision on the next PRIME (the save's own), so the credential applies.
+            if (anonymous && choice !== 'none' && screenId) withdrawAnonymous(screenId);
+            const undo = place();
+            try { await saveRaw({ silent: true }); } catch (e) {
+              undo();
+              return ctx.msg(`Save failed: ${e.message}.${defaultDone === 'set'
+                ? ' The default credential WAS set and stays set; press the button again to save the cluster.' : ''}`);
+            }
             const id = (clusters().find((x) => x.name === name) || {}).id;
             try {
               if (typed && id) await keepCredential(id, typed);
@@ -426,14 +545,20 @@ export async function editCluster(existing = null) {
             ctx.done(true);
             return;
           }
-          const cu = val('ce-cu').trim(), cp = val('ce-cp');
-          if (cu) {
+          // Desktop: the default is the file's `credentials:` block (or the one typed this
+          // session) — chosen, it asks for no password and no master password.
+          const cu = ownChosen ? val('ce-cu').trim() : '', cp = ownChosen ? val('ce-cp') : '';
+          if (ownChosen && !cu && !(c.apiKey || c.bearer)) return ctx.msg('Type its own username and password, or choose the default credential.');
+          if (ownChosen && cu && !cp && !c.password) return ctx.msg('Enter the password for this cluster, or choose the default credential.');
+          if (!(await confirmSwitch())) return;
+          if (choice === 'default') clearFileCred();
+          else if (ownChosen && cu) {
             next.username = cu;
             if (cp) { try { next.password = await seal(cp); } catch (e) { return ctx.msg(e.message); } if (next.password == null) return; }
-            else if (!c.password) return ctx.msg('Enter the password for this cluster, or clear the username to use the shared credential.');
-          } else { delete next.username; delete next.password; }
-          if (existing) r.clusters[r.clusters.indexOf(existing)] = next; else r.clusters.push(next);
-          try { await saveRaw(); ctx.done(true); } catch (e) { ctx.msg(`Save failed: ${e.message}`); }
+          } else if (ownChosen) { delete next.username; delete next.password; }
+          if (anonymous && choice !== 'none' && screenId) withdrawAnonymous(screenId);
+          const undo = place();
+          try { await saveRaw(); ctx.done(true); } catch (e) { undo(); ctx.msg(`Save failed: ${e.message}`); }
         } }, existing ? 'Save' : 'Add cluster'))]);
   return !!saved;
 }
@@ -579,7 +704,8 @@ async function editDefaultCredential(r) {
       cur ? h('button.btn.danger', { onclick: async () => {
         if (!(await confirmDialog('Forget the default credential?',
           'Clusters without a credential of their own stop signing in until a new default is set.', { yes: 'forget', danger: true }))) return;
-        try { await forgetCredential(DEFAULT_CREDENTIAL); await reprime(); refreshAll({ force: true }); ctx.done(true); } catch (e) { ctx.msg(e.message); }
+        // A credential this page still holds must not ride the next PRIME back in as the default.
+        try { await forgetCredential(DEFAULT_CREDENTIAL); forgetSessionCredential(); await reprime(); refreshAll({ force: true }); ctx.done(true); } catch (e) { ctx.msg(e.message); }
       } }, 'Forget') : null,
       h('div', { style: { marginLeft: 'auto', display: 'flex', gap: '8px' } },
         h('button.btn', { onclick: () => ctx.done(null) }, 'Cancel'),

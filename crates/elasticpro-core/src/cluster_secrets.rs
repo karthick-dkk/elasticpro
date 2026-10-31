@@ -82,6 +82,18 @@ struct Entry {
 struct Stored {
     v: u32,
     clusters: BTreeMap<String, Entry>,
+    /// The default was forgotten on purpose: by whom, and when. While it stands nothing but an
+    /// explicit act (CREDENTIAL_SET or CREDENTIAL_PROMOTE of `"*"`) makes a default again — a
+    /// browser that still carries a shared credential does not quietly put the forgotten one
+    /// back (`bridge::keep_offered_credentials`). Setting a default removes it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    default_cleared: Option<Cleared>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct Cleared {
+    pub by: String,
+    pub at: u64,
 }
 
 /// A held credential. Its Debug never shows the password.
@@ -230,6 +242,9 @@ impl ClusterSecrets {
         let sealed = crate::crypto::seal_with_key(password, &self.key, cluster)?;
         let mut st = self.stored.write();
         st.v = 1;
+        if cluster == DEFAULT {
+            st.default_cleared = None;
+        }
         st.clusters.insert(cluster.to_string(), Entry { user: user.trim().to_string(), sealed, set_by: by.to_string(), set_at: now, bound: bound.to_string() });
         if let Some(p) = &self.path {
             let bytes = serde_json::to_vec_pretty(&*st).map_err(|e| e.to_string())?;
@@ -324,20 +339,54 @@ impl ClusterSecrets {
         self.remove(from)
     }
 
+    /// Copy one entry's credential to another name, unbound — what makes an existing entry the
+    /// default (`"*"`) without anybody typing its password again. The secret is opened and sealed
+    /// again under the new name (the name is its associated data); it never leaves this process.
+    /// `Ok(false)` when `from` holds nothing this key opens.
+    pub fn copy(&self, from: &str, to: &str, by: &str, now: u64) -> Result<bool, String> {
+        let Some(held) = self.get(from) else { return Ok(false) };
+        self.set(to, &held.user, &held.password, by, now).map(|_| true)
+    }
+
+    /// Entries other than the default whose secret this key opens: what could become the
+    /// default. Never the secret.
+    pub fn promotable(&self) -> Vec<Listed> {
+        self.list().into_iter().filter(|l| l.name != DEFAULT && self.get(&l.name).is_some()).collect()
+    }
+
     /// Forget one entry. Returns whether there was one.
     pub fn remove(&self, cluster: &str) -> Result<bool, String> {
+        self.remove_marked(cluster, None)
+    }
+
+    /// Forget the default on purpose: removed, and marked as forgotten by `by` at `now`, so
+    /// that only an explicit act makes one again (`default_cleared`). Returns whether there
+    /// was one; the mark is kept either way.
+    pub fn forget_default(&self, by: &str, now: u64) -> Result<bool, String> {
+        self.remove_marked(DEFAULT, Some(Cleared { by: by.to_string(), at: now }))
+    }
+
+    /// Who forgot the default and when, while no default has been set since.
+    pub fn default_cleared(&self) -> Option<Cleared> {
+        self.stored.read().default_cleared.clone()
+    }
+
+    fn remove_marked(&self, cluster: &str, mark: Option<Cleared>) -> Result<bool, String> {
         if let Some(p) = self.problem.read().clone() {
             return Err(p);
         }
         let mut st = self.stored.write();
-        if st.clusters.remove(cluster).is_none() {
+        let had = st.clusters.remove(cluster).is_some();
+        if mark.is_some() {
+            st.default_cleared = mark;
+        } else if !had {
             return Ok(false);
         }
         if let Some(p) = &self.path {
             let bytes = serde_json::to_vec_pretty(&*st).map_err(|e| e.to_string())?;
             write_private(p, &bytes).map_err(|e| format!("cannot write {}: {e}", p.display()))?;
         }
-        Ok(true)
+        Ok(had)
     }
 
     /// Every entry, by name, without its secret.
@@ -458,6 +507,52 @@ mod tests {
         assert!(s.header_at("cfg:b", "https://a2:9200||auto").is_some());
         let again = ClusterSecrets::open_with(Some(&d), Some(&"k".repeat(40)));
         assert_eq!(again.header_at("cfg:b", "https://a:9200||auto"), None, "the binding is kept on disk");
+        std::fs::remove_dir_all(d).ok();
+    }
+
+    #[test]
+    fn an_entry_copied_to_the_default_is_unbound_and_listed_as_promotable_before() {
+        let d = dir();
+        let s = ClusterSecrets::open_with(Some(&d), Some(&"k".repeat(40)));
+        s.set("Local-ES-Cluster", "zabbix", "zbx-pw", "alice", 1).unwrap();
+        s.set_header_bound("cfg:alpha", "ApiKey abc==", "https://a:9200||auto", "admin", 2).unwrap();
+        let names: Vec<String> = s.promotable().into_iter().map(|l| l.name).collect();
+        assert_eq!(names, vec!["Local-ES-Cluster".to_string(), "cfg:alpha".to_string()]);
+        assert_eq!(s.copy("nothing-here", DEFAULT, "bob", 3), Ok(false));
+        assert_eq!(s.copy("Local-ES-Cluster", DEFAULT, "bob", 3), Ok(true));
+        assert_eq!(s.get(DEFAULT), Some(Held { user: "zabbix".into(), password: "zbx-pw".into() }));
+        assert_eq!(s.bound_of(DEFAULT).as_deref(), Some(""), "the default is bound to nothing");
+        assert_eq!(s.status(DEFAULT), Some(("bob".into(), 3)));
+        assert!(s.get("Local-ES-Cluster").is_some(), "the source stays where it was");
+        assert!(s.promotable().iter().all(|l| l.name != DEFAULT));
+        // A header entry stays a header, and its binding does not come along.
+        s.copy("cfg:alpha", DEFAULT, "bob", 4).unwrap();
+        assert_eq!(s.header_at(DEFAULT, "https://elsewhere:9200||auto").as_deref(), Some("ApiKey abc=="));
+        let raw = std::fs::read_to_string(d.join(FILE)).unwrap();
+        assert!(!raw.contains("zbx-pw") && !raw.contains("ApiKey abc"));
+        // A key that opens nothing offers nothing.
+        let wrong = ClusterSecrets::open_with(Some(&d), Some(&"x".repeat(40)));
+        assert!(wrong.promotable().is_empty());
+        std::fs::remove_dir_all(d).ok();
+    }
+
+    #[test]
+    fn a_forgotten_default_is_marked_until_a_default_is_set_again_and_the_mark_survives_a_restart() {
+        let d = dir();
+        let key = "k".repeat(40);
+        let s = ClusterSecrets::open_with(Some(&d), Some(&key));
+        assert_eq!(s.default_cleared(), None);
+        s.set(DEFAULT, "fleet", "pw", "admin", 1).unwrap();
+        assert_eq!(s.forget_default("alice", 5), Ok(true));
+        assert_eq!(s.default_cleared(), Some(Cleared { by: "alice".into(), at: 5 }));
+        assert_eq!(s.forget_default("bob", 6), Ok(false), "nothing left to forget; the mark is renewed");
+        let again = ClusterSecrets::open_with(Some(&d), Some(&key));
+        assert_eq!(again.default_cleared(), Some(Cleared { by: "bob".into(), at: 6 }), "kept on disk");
+        assert_eq!(again.remove("cfg:x"), Ok(false));
+        again.set("cfg:x", "u", "p", "admin", 7).unwrap();
+        assert!(again.default_cleared().is_some(), "a cluster's own does not lift it");
+        again.copy("cfg:x", DEFAULT, "carol", 8).unwrap();
+        assert_eq!(again.default_cleared(), None, "an explicit default lifts it");
         std::fs::remove_dir_all(d).ok();
     }
 

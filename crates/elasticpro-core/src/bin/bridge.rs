@@ -57,7 +57,7 @@ fn set_cookie(token: &str, max_age: u64) -> String {
 /// Message types that change something and are therefore audited by user.
 const AUDITED: &[&str] = &["ES", "WRITE_UNLOCK", "TRUST_CERT", "UNTRUST_CERT", "TRUST_HOSTKEY",
                            "UNTRUST_HOSTKEY", "CONFIG_WRITE", "FILE_WRITE", "CLUSTER_SAVE", "AUTOMATIONS_SAVE", "FORGET",
-                           "ZABBIX_ROLEMAP_SET", "CREDENTIAL_SET", "CREDENTIAL_CLEAR",
+                           "ZABBIX_ROLEMAP_SET", "CREDENTIAL_SET", "CREDENTIAL_CLEAR", "CREDENTIAL_PROMOTE",
                            "ZABBIX_LINK_SET", "ZABBIX_PAIR_BEGIN", "ZABBIX_UNPAIR",
                            "HOUSEKEEPING_RUN"];
 

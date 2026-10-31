@@ -38,12 +38,57 @@ export function credentialFields(cred) {
   return null;
 }
 
-/** What the server keeps: `{ ok, default, clusters: [{id, user, kind, setBy, setAt}], problem }`. */
+/**
+ * What the server keeps: `{ ok, default, clusters: [{id, user, kind, setBy, setAt}], promotable, problem }`.
+ * `promotable` (0.3.46): with no default, the kept entries that could become it without anybody
+ * typing the password again — `[{id, cluster, source: 'config'|'zabbix', user, kind}]`.
+ */
 export async function keptCredentials() {
   let r;
   try { r = await bridge({ type: 'CREDENTIAL_STATUS' }); } catch (e) { r = { ok: false, message: e.message }; }
-  if (!r || !r.ok) return { ok: false, default: null, clusters: [], problem: (r && r.message) || 'no answer' };
-  return { ok: true, default: r.default || null, clusters: Array.isArray(r.clusters) ? r.clusters : [], problem: r.problem || null };
+  if (!r || !r.ok) return { ok: false, default: null, clusters: [], promotable: [], problem: (r && r.message) || 'no answer' };
+  return { ok: true, default: r.default || null, clusters: Array.isArray(r.clusters) ? r.clusters : [],
+           promotable: !r.default && Array.isArray(r.promotable) ? r.promotable : [], problem: r.problem || null };
+}
+
+/**
+ * Make a credential the server already keeps the default (`CREDENTIAL_PROMOTE`): nothing is
+ * typed and nothing comes back but the username. An existing default is replaced only with
+ * `replace`. Throws with the server's reason.
+ */
+export async function promoteCredential(from, { replace = false } = {}) {
+  const r = await bridge({ type: 'CREDENTIAL_PROMOTE', from, ...(replace ? { replace: true } : {}) });
+  if (!r || !r.ok) throw refusal(r, 'the server did not make it the default');
+  return r;
+}
+
+/** An Error carrying the core's `kind` (and, for `exists`, the default's user), never a secret. */
+function refusal(r, fallback) {
+  return Object.assign(new Error((r && r.message) || fallback), { kind: (r && r.kind) || '', user: (r && r.user) || null });
+}
+
+/** "Local-ES-Cluster's credential (user zabbix)" — a promotable entry as a choice reads. Pure. */
+export function promotableLabel(entry) {
+  if (!entry) return '';
+  const name = entry.cluster || entry.id;
+  return entry.kind === 'header' || !entry.user ? `${name}’s API key or token` : `${name}’s credential (user ${entry.user})`;
+}
+
+/** "Default credential (user fleet)" / "— none set yet": the default as the Add-cluster choice names it. Pure. */
+export function defaultChoiceLabel(entry) {
+  if (!entry) return 'Default credential — none set yet';
+  return entry.kind === 'header' || !entry.user ? 'Default credential (an API key or token)' : `Default credential (user ${entry.user})`;
+}
+
+/**
+ * Which credential the Add/Edit cluster dialog starts on: a cluster connected without one on
+ * purpose says so ('none' — the core sends it nothing, whatever is kept); one that has its own
+ * (kept on the server, or still in the file) keeps it; everything else — a new cluster above
+ * all — uses the default and asks for nothing. Pure.
+ */
+export function initialCredentialChoice({ keptOwn = null, fileOwn = false, anonymous = false } = {}) {
+  if (anonymous) return 'none';
+  return keptOwn || fileOwn ? 'own' : 'default';
 }
 
 /** The entry kept for one cluster id (or `*`), or null. Pure. */
@@ -54,11 +99,13 @@ export function keptFor(status, id) {
 }
 
 /** Keep a credential for a cluster id, or `*` for the default. Throws with the server's reason. */
-export async function keepCredential(id, cred) {
+export async function keepCredential(id, cred, { onlyIfAbsent = false } = {}) {
   const fields = credentialFields(cred);
   if (!fields) throw new Error('Enter a username and a password, an API key or a token.');
-  const r = await bridge({ type: 'CREDENTIAL_SET', cluster: id, ...fields });
-  if (!r || !r.ok) throw new Error((r && r.message) || 'the server did not keep it');
+  // `onlyIfAbsent` (the default only): set it where there is none, never replace one somebody
+  // set meanwhile — the core answers `exists` instead.
+  const r = await bridge({ type: 'CREDENTIAL_SET', cluster: id, ...fields, ...(onlyIfAbsent ? { onlyIfAbsent: true } : {}) });
+  if (!r || !r.ok) throw refusal(r, 'the server did not keep it');
   return r;
 }
 
@@ -85,4 +132,16 @@ export function keptLine(entry) {
   const who = entry.kind === 'header' ? 'API key or token' : (entry.user || '(no username)');
   const when = entry.setAt ? new Date(entry.setAt * 1000).toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' }) : '';
   return `${who}${entry.setBy ? ` · set by ${entry.setBy}` : ''}${when ? ` on ${when}` : ''}`;
+}
+
+/**
+ * Clusters that rejected the default credential (HTTP 401/403): a config cluster with no
+ * credential of its own kept, or a Zabbix cluster signing in with the default
+ * (`core-default`). Each needs a credential of its own — not the default replaced for every
+ * other cluster, and not a generic sign-in form. `stateOf(id)` is the client's state. Pure.
+ */
+export function rejectedDefault(list, stateOf, status) {
+  if (!status || !status.default) return [];
+  return (list || []).filter((c) => stateOf(c.id) === 'auth_error'
+    && (c.source === 'zabbix' ? !!(c.zabbix && c.zabbix.credential === 'core-default') : !keptFor(status, c.id)));
 }

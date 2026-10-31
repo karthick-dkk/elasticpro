@@ -29,7 +29,7 @@ export async function withFreshReads(fn) {
 /** What the core sent recently and what is still in flight — the Request Centre's feed. */
 export const requestLog = (params = {}) => send({ type: 'REQUEST_LOG', ...params });
 
-export async function primeWorker(clusters, readOnly = true, jumpHosts = [], { persist = true, sharedAuthHeader = undefined, acceptAllCertificates = false } = {}) {
+export async function primeWorker(clusters, readOnly = true, jumpHosts = [], { persist = true, sharedAuthHeader = undefined, acceptAllCertificates = false, dropAnonymous = [] } = {}) {
   return send({
     type: 'PRIME',
     readOnly,
@@ -39,6 +39,8 @@ export async function primeWorker(clusters, readOnly = true, jumpHosts = [], { p
     acceptAllCertificates,
     // undefined leaves the core's as it is; '' clears it.
     ...(sharedAuthHeader !== undefined ? { sharedAuthHeader } : {}),
+    // Clusters connected without a credential on purpose that an admin has just given one.
+    ...(dropAnonymous.length ? { dropAnonymous } : {}),
     // null = "this page has no credential for it", which lets the core keep one it holds;
     // "" = "no credential, on purpose" (continue anonymously, or forget it), which clears.
     clusters: clusters.map((c) => ({ id: c.id, name: c.name, url: c.url, authHeader: (c.anonymous || c.clearCred) ? '' : c.authHeader,
