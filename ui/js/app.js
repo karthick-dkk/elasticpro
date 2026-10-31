@@ -64,6 +64,8 @@ import * as pSettings from './pages/settings.js';
 import * as pAutomation from './pages/automation.js';
 import * as pAccounts from './pages/accounts.js';
 import * as pRequests from './pages/requests.js';
+import * as pPlay from './pages/play.js';
+import { displaySecretOf, playExchange, pageOfHash } from './play/api.js';
 import { loadSilences } from './core/silences.js';
 import { setRequestOrigin } from './core/es.js';
 import { UI_CODES, withCode, errorText } from './core/error-codes.js';
@@ -100,6 +102,9 @@ const PAGES = [
   { id: 'requests',  label: 'Requests',       icon: '⚡', mod: pRequests,  multi: true,  minRole: 'admin', live: true },
   { id: 'accounts',  label: 'Accounts',       icon: '☺', mod: pAccounts,  multi: true,  minRole: 'admin', accountsOnly: true },
   { id: 'settings',  label: 'Config',         icon: '⚙', mod: pSettings,  multi: true,  minRole: 'admin' },
+  // The NOC wall display (docs/PLAY.md): full screen, no tab — the "▶ Play" button in the top
+  // bar opens it, and a display link opens nothing else.
+  { id: 'play',      label: 'Play',           icon: '▶', mod: pPlay,      multi: true,  minRole: 'user', live: true, noTab: true },
 ];
 
 // The one place a page is named; the pages that link to another read its name from here.
@@ -107,8 +112,17 @@ registerPages(PAGES);
 /** The tabs that fold behind the ☰ at the end of the row. */
 const NAV_MORE = new Set(['automation', 'requests', 'accounts', 'settings']);
 
+/**
+ * A session made from a display link (PLAY_EXCHANGE): caller `display:<name>`, scope
+ * `play_only`. It may show Play and nothing else — the core refuses the rest anyway.
+ */
+function isDisplay() {
+  return !!me && (me.scope === 'play_only' || String(me.name || '').startsWith('display:'));
+}
+
 /** The tabs this session may actually use. */
 function visiblePages() {
+  if (isDisplay()) return PAGES.filter((p) => p.id === 'play');
   return PAGES.filter((p) => may(p.minRole) && (!p.accountsOnly || !!me));
 }
 // The same answer for a page that links to another (core/intent.js canOpenPage).
@@ -362,7 +376,7 @@ function renderNav() {
   const ev = layout().evidence;
   const a = ev ? [] : openAlertsNow();     // a count of the fleet's alerts is not evidence
   const crit = ev ? 0 : openAlertCounts().critical;
-  const shown = visiblePages();
+  const shown = visiblePages().filter((p) => !p.noTab);
   const key = shown.map((p) => p.id).join(',');
   if (navBuiltFor !== key || !nav.firstChild) {
     clear(nav);
@@ -678,6 +692,10 @@ function renderTopbar() {
     // that the next page load undoes.
     // The bell lists every cluster's notices; it stays off an evidence page and comes back
     // with everything in it when the person leaves.
+    // The wall display: full screen, the same figures. Not on an evidence page (it shows the fleet).
+    ev || !visiblePages().some((p) => p.id === 'play') ? null
+      : h('button.btn.sm#play-btn', { type: 'button', onclick: () => go('play'),
+          title: 'Play: the fleet as a wall display, full screen, slide after slide (Esc leaves)' }, '\u25B6 Play'),
     ev ? null : notificationBell(),
     embedded ? null : h('button.btn.sm.ghost', { onclick: cycleTheme, title: `Theme: ${theme} \u2014 click for the next one${theme === 'warm' ? ' (warm emits the least blue light)' : ''}` },
       themeLabel(theme)),
@@ -796,6 +814,8 @@ const heldNotices = createHeldNotices();
  */
 const announce = (message, kind, ms, opts) => {
   if (evidenceOn) heldNotices.hold(message, kind, ms, opts);
+  // Play is a wall: nothing pops up over it. The notice is kept in the bell for later.
+  else if (currentPage === 'play') toast(message, kind, 0, { ...(opts || {}), bellOnly: true });
   else toast(message, kind, ms, opts);
 };
 
@@ -895,6 +915,9 @@ function scrollPageTop() {
   if (main) main.scrollTop = 0;
 }
 
+/** The page Play was opened from, for its Exit. */
+let playReturn = '';
+
 export function go(id) {
   // A hash typed by hand, or one left in the address bar by a previous session under a
   // different account, must not land on a tab this role does not have.
@@ -916,6 +939,11 @@ export function go(id) {
       abortPage(`page:${prev.id}`);
     }
   }
+  // Play has no chrome (html.play, like .embedded): the shell stays built underneath, hidden,
+  // and Esc / Exit brings back the page Play was opened from.
+  if (page.id === 'play' && changed && currentPage && currentPage !== 'play') playReturn = currentPage;
+  document.documentElement.classList.toggle('play', page.id === 'play');
+  if (page.id === 'play' && changed) { closePopover(); dismissToasts(); }
   currentPage = page.id;
   setRequestOrigin(`page:${page.id}`);
   // Drawn afresh from state below: whatever the gate was holding for the old drawing is in it.
@@ -972,7 +1000,7 @@ async function start(config, handle) {
   }
   // Back where the person was, when Zabbix signed them in again under them (see waitForZabbix).
   const back = embedded ? takeRememberedPage((id) => PAGES.some((p) => p.id === id)) : '';
-  const wanted = back || (target && target.page) || (location.hash || '').replace('#/', '') || 'overview';
+  const wanted = back || (target && target.page) || pageOfHash(location.hash) || 'overview';
   go(PAGES.some((p) => p.id === wanted) ? wanted : 'overview');
   if (!isSnapshotMode() && clustersNeedingCredential().length) {
     // a credential remembered in the OS vault (opt-in) signs in without a prompt;
@@ -989,7 +1017,7 @@ async function start(config, handle) {
   if (!isSnapshotMode()) { loadSilences(); setInterval(() => { loadSilences(); }, 60000); }
   // Certificates are seen as connections are made, so the core is asked again every
   // minute — but only to learn whether something *new* was accepted (see trust-notice.js).
-  if (!isSnapshotMode()) { checkAcceptedCertificates(); setInterval(checkAcceptedCertificates, 60000); }
+  if (!isSnapshotMode() && !isDisplay()) { checkAcceptedCertificates(); setInterval(checkAcceptedCertificates, 60000); }
 }
 
 /**
@@ -1054,6 +1082,40 @@ async function arriveFromZabbix() {
   else ssoNotice = `Signing in from Zabbix did not work: ${errorText(res, 'no answer', 'sso_failed')}`;
 }
 
+/**
+ * A TV opening `#/play?display=<secret>`: the secret is exchanged once (PLAY_EXCHANGE, no
+ * session needed) for a session cookie scoped to Play, taken out of the address at once, and
+ * the page loads again into Play signed in as the display. Returns true while it is busy
+ * with that (boot stops there), false when there is no display link in the address.
+ *
+ * A refused link says why and tries again every minute — a TV left on a wall should come
+ * back by itself once the link or the network is fixed.
+ */
+async function arriveFromDisplayLink() {
+  const secret = displaySecretOf(location.hash);
+  if (!secret) return false;
+  try { history.replaceState(null, '', `${location.pathname}${location.search}#/play`); } catch (_) { /* sandboxed frame */ }
+  for (;;) {
+    const res = await playExchange(secret);
+    if (res && res.ok) {
+      // A token in the reply (no cookie, e.g. a framed TV browser) is kept in page memory
+      // and boot goes on; otherwise the cookie is set and the page loads again into Play.
+      if (res.session) { setSession(res.session); setSignedIn(true); return false; }
+      location.reload();
+      return true;
+    }
+    const why = res && res.unsupported ? 'this ElasticPro server does not have display links (needs 0.3.47)'
+      : errorText(res, 'no answer from the server');
+    mount(root, h('div.setup',
+      h('div', { style: { display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '14px' } },
+        h('img', { src: 'icons/icon48.png', width: 34, height: 34, alt: '' }),
+        h('div', h('h2', 'ElasticPro Play'))),
+      h('div.banner.err#display-refused', h('div', h('div.ttl', 'This display link was not accepted'), h('div', why),
+        h('div.muted', { style: { marginTop: '6px' } }, 'Trying again every minute. An ElasticPro administrator manages display links in Config \u203A Play.')))));
+    await new Promise((r) => setTimeout(r, 60000));
+  }
+}
+
 /** Anyone below admin: the server's own cluster list, with the credentials taken out. */
 function readsServerView() {
   return !!me && me.role !== 'admin';
@@ -1080,11 +1142,14 @@ function takeFrameShape() {
 
 async function boot() {
   if (!takeFrameShape()) await initTheme();
+  if (await arriveFromDisplayLink()) return;
   await arriveFromZabbix();
   await gateOnAuth();
   state.caller = me ? { name: me.name, role: me.role } : null;
+  pPlay.configure({ display: isDisplay(), onExit: () => go(playReturn && playReturn !== 'play' ? playReturn : 'overview') });
   try { coreInfo = (await workerStatus()) || coreInfo; } catch (_) { /* dev bridge missing */ }
-  connectNotificationStore(coreInfo);
+  // A display link reads only what Play needs: the bell's server copy is not among it.
+  if (isDisplay()) setNotificationSink(null); else connectNotificationStore(coreInfo);
   if (readsServerView()) {
     const view = await cfg.loadServerView();
     if (view.status !== 'ok') { renderNoClusters(view); return; }
@@ -1247,7 +1312,7 @@ window.addEventListener('ep:navigate', (e) => {
 });
 
 window.addEventListener('hashchange', () => {
-  const wanted = (location.hash || '').replace('#/', '');
+  const wanted = pageOfHash(location.hash);
   if (wanted && wanted !== currentPage && PAGES.some((p) => p.id === wanted)) go(wanted);
 });
 

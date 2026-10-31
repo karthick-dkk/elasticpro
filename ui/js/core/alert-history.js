@@ -131,6 +131,18 @@ export function createHistory({ storage = browserStorage(), retentionDays = RETE
       for (const [k, e] of Object.entries(st.open)) if (e.clusterId === clusterId) out[k] = e.start;
       return out;
     },
+    /**
+     * Every episode that touched the window from `from` to now: the open ones (with their
+     * start) and the closed ones that ended inside it. For a fleet view's "last 24 h" — the
+     * episodes as recorded, nothing counted here.
+     */
+    window(from, now = Date.now()) {
+      load(now);
+      const open = Object.entries(st.open).map(([key, e]) => ({ key, clusterId: e.clusterId, rule: e.rule, start: e.start, end: null,
+        level: e.level, approx: !!e.approx }));
+      const closed = st.closed.filter((e) => e.end >= from);
+      return { open, closed, since: st.since };
+    },
     /** When the log began: nothing earlier than this was seen, so nothing earlier is "history". */
     since() { return load(Date.now()).since; },
     retentionDays,

@@ -4628,11 +4628,178 @@ if (viaFleet) {
   await go('overview');
 }
 
+/* ------- 0.3.47 Play: the wall display — slides, keys, zoom, takeover, exclusion, an older core ------- */
+
+// The dev bridge has no PLAY_* messages yet, so they are answered at fetch (stubReply): one
+// cluster excluded, a node gone from the other, shared acknowledgements and a shared delay
+// record. Then the same page against "Unknown message type", which is what an older core says.
+{
+  await applyConfig({ load, configPath });
+  await settleFor(1500);
+  const st = await load('core/state.js');
+  const pPlay = await load('pages/play.js');
+  const realFetch = globalThis.fetch;
+  const list = st.clusters();
+  ok(list.length >= 2, `play: the fixture needs two clusters, has ${list.length}`);
+  const [shown, hidden] = list;
+  const sent = [];
+  const play = {
+    older: false,
+    acks: {},
+    state: () => ({ ok: true, now: Date.now(), excluded: [hidden.id],
+      settings: { watch: { delayYellowFromMin: 30, delayRedAboveMin: 60, nodeBlink: 'untilBack',
+        spotlight: { when: ['red', 'nodeLeft', 'slmFailed', 'storage', 'unreachable', 'criticalAlert'], perClusterSec: 13, leaveAfterMin: 10, whenEmpty: 'skip' } },
+        display: { slides: ['fleet', 'alerts', 'spotlight', 'delay', 'backups', 'volume'].map((id) => ({ id, show: true })), criticalTakesScreen: true, zoom: null } },
+      nodes: { [shown.id]: { expected: ['node-1', 'node-2'], present: ['node-1'], left: [{ node: 'node-2', since: Date.now() - 120000 }] } },
+      openSince: {} }),
+  };
+  const older = { ok: false, kind: 'bad_message', message: 'Unknown message type (EP-202)' };
+  globalThis.fetch = async (input, init) => {
+    const body = init && init.body ? JSON.parse(init.body) : {};
+    const t = String(body.type || '');
+    if (/^(PLAY_|ACK_)/.test(t)) {
+      sent.push(body);
+      if (play.older) return stubReply(older);
+      if (t === 'PLAY_STATE') return stubReply(play.state());
+      if (t === 'ACK_LIST') return stubReply({ ok: true, acks: play.acks });
+      if (t === 'PLAY_SHARE_GET') {
+        return stubReply({ ok: true, records: body.kind === 'delay'
+          ? [{ clusterId: shown.id, measuredAt: Date.now() - 60000, data: { records: [
+            { device: 'fw-edge-01', delayMinutes: 55, arrival: Date.now() - 60000, peak24: { value: 80, at: Date.now() - 3600000 } },
+            { device: 'fw-edge-02', delayMinutes: 42, arrival: Date.now() - 60000 },
+            { device: 'fw-edge-03', delayMinutes: 2, arrival: Date.now() - 60000 }], truncated: 0 } }]
+          : [{ clusterId: shown.id, measuredAt: Date.now() - 600000, data: { bytes: 5 * 1024 ** 3 } }] });
+      }
+      return stubReply({ ok: true });
+    }
+    if (t === 'VOLUME_DAILY') {
+      sent.push(body);
+      const day = (n) => new Date(Date.now() - n * 86400000).toISOString().slice(0, 10);
+      return stubReply({ ok: true, settings: { sizeBasis: 'primary' }, status: {},
+        cards: { yesterday: { day: day(1), value: 2e10, changeVsAvgPct: 12 }, average: { days: 7, value: 1.8e10 }, monthSoFar: { value: 5e11 } },
+        days: Array.from({ length: 31 }, (_, n) => ({ day: day(n), indices: 3, docs: 1e6, priBytes: 1.5e10 + n * 1e8, avg: 1.7e10, live: true, final: n > 0 })) });
+    }
+    return realFetch(input, init);
+  };
+  const root = () => doc.querySelector('.pl-root');
+  const titleText = () => (doc.querySelector('.pl-title') || {}).textContent || '';
+  const key = (k) => doc.dispatchEvent(new window.KeyboardEvent('keydown', { key: k, bubbles: true, cancelable: true }));
+  const viewText = () => (doc.getElementById('view') || {}).textContent || '';
+  try {
+    // No warm-up here: the check drives the takeover a few seconds after opening.
+    pPlay.configure({ display: false, onExit: () => app.go('overview'), warmMs: 0 });
+    await go('overview');
+    ok(!!doc.getElementById('play-btn'), 'play: no "▶ Play" button in the top bar');
+    try { localStorage.removeItem('elasticpro.play.zoom'); } catch (_) { /* none */ }
+    doc.getElementById('play-btn').click();
+    await settleFor(5500);     // the shared delay record is read a few seconds after opening
+    ok(doc.documentElement.classList.contains('play'), 'play: html.play is not set (the chrome would show)');
+    ok(!!root(), 'play: the wall did not draw');
+    ok(titleText() === 'Fleet', `play: opens on "${titleText()}", not the fleet wall`);
+    ok(sent.some((m) => m.type === 'PLAY_STATE'), 'play: PLAY_STATE was not asked');
+    ok(sent.some((m) => m.type === 'ACK_LIST'), 'play: ACK_LIST was not asked');
+    // exclusion: left out of every slide
+    const tiles = [...doc.querySelectorAll('.pl-tile[data-cluster]')];
+    ok(tiles.length === list.length - 1, `play: ${tiles.length} tiles for ${list.length} clusters with one excluded`);
+    ok(!tiles.some((t) => t.dataset.cluster === hidden.id), 'play: the excluded cluster has a tile');
+    // node left: blinks
+    const mine = tiles.find((t) => t.dataset.cluster === shown.id);
+    ok(mine && mine.classList.contains('pl-blink'), 'play: a cluster with a node that left does not blink');
+    ok(/node left on node-2|node-2/.test(viewText()), 'play: the node that left is not named');
+    // the shared delay record: three devices — two at 30–60 min (55, 42), one under 30
+    ok(/2 at 30–60 min/.test(viewText()) && /0 over 60 min/.test(viewText()), `play: delayed devices from the shared record are not on the strip: ${viewText().slice(0, 300)}`);
+    // keys: → turns, Space pauses, + / − zoom
+    const seen = new Set([titleText()]);
+    for (let i = 0; i < 6; i++) {
+      key('ArrowRight'); await settleFor(150);
+      seen.add(titleText());
+      ok(!/could not be drawn/.test(viewText()), `play: slide "${titleText()}" could not be drawn: ${viewText().slice(0, 200)}`);
+      ok(!excludedNamed(), `play: slide "${titleText()}" names the excluded cluster`);
+    }
+    for (const t of ['Fleet', 'Alerts', 'Log delay', 'Backups', 'Volume and capacity']) ok(seen.has(t), `play: → never reached "${t}" (saw ${[...seen].join(', ')})`);
+    while (titleText() !== 'Log delay') { key('ArrowRight'); await settleFor(100); if (seen.size > 50) break; }
+    ok(/fw-edge-01/.test(viewText()) && /55 min/.test(viewText()) && /1 h 20/.test(viewText()), 'play: Log delay does not list the worst device with its 24 h peak');
+    while (titleText() !== 'Backups') { key('ArrowRight'); await settleFor(100); }
+    ok(/5\.00 GB/.test(viewText()), 'play: Backups does not show the shared backup size');
+    ok(/not measured/.test(viewText()) || list.length - 1 === 1, 'play: a cluster with no shared size should read "not measured"');
+    while (titleText() !== 'Volume and capacity') { key('ArrowRight'); await settleFor(100); }
+    ok(sent.some((m) => m.type === 'VOLUME_DAILY' && m.days === 30 && m.avgDays === 7), 'play: the volume record was not asked (30 days, 7-day average)');
+    ok(/Yesterday · all clusters/.test(viewText()) && /\+12\.0 %/.test(viewText()), 'play: Volume does not show yesterday against the 7-day average');
+    key('ArrowLeft'); await settleFor(150);
+    ok(titleText() === 'Backups', `play: ← went to "${titleText()}"`);
+    key(' '); await settleFor(150);
+    ok(pPlay._debug().engine.paused && /paused/.test(doc.querySelector('.pl-hchips').textContent), 'play: Space did not pause');
+    key(' '); await settleFor(100);
+    ok(!pPlay._debug().engine.paused, 'play: Space did not resume');
+    const zl = () => doc.querySelector('.pl-zl').textContent;
+    key('+'); await settleFor(100);
+    ok(zl() === '110 %' && doc.querySelector('.pl-body').style.getPropertyValue('--pz') === '1.1', `play: + made the zoom ${zl()}`);
+    key('+'); key('+'); key('+'); key('+'); await settleFor(100);
+    ok(zl() === '150 %', `play: zoom went past 150 % (${zl()})`);
+    let remembered = null;
+    try { remembered = localStorage.getItem('elasticpro.play.zoom'); } catch (_) { /* none */ }
+    ok(remembered === '1.5', `play: a person's zoom is not remembered in this browser (${remembered})`);
+    for (let i = 0; i < 8; i++) key('-');
+    await settleFor(100);
+    ok(zl() === '80 %', `play: zoom went below 80 % (${zl()})`);
+    key('+'); key('+'); await settleFor(100);
+
+    // critical takeover: a new critical alert takes the screen; an acknowledgement lets go
+    const before = st.state.data.get(shown.id);
+    st.state.data.set(shown.id, { ...before, health: { ...(before.health || {}), status: 'red', unassigned_shards: 4 } });
+    st.bus.emit('data', shown.id);
+    await settleFor(2300);
+    const dbg = pPlay._debug();
+    ok(dbg.take && dbg.take.active && root().classList.contains('takeover') && titleText() === 'Alerts',
+      `play: a new critical alert did not take the screen (title "${titleText()}", active ${JSON.stringify(dbg.take && dbg.take.active)})`);
+    const hot = dbg.take && dbg.take.active && dbg.take.active.key;
+    ok(hot && !!doc.querySelector(`.pl-arow.hot[data-key="${hot}"]`), 'play: the alert that took the screen is not at the top');
+    play.acks = { [hot]: { by: 'qa', at: Date.now() } };
+    await settleFor(11500);
+    ok(!pPlay._debug().take.active && !root().classList.contains('takeover'), 'play: an acknowledgement (ACK_LIST) did not let the screen go');
+    st.state.data.set(shown.id, before);
+    st.bus.emit('data', shown.id);
+    await settleFor(300);
+
+    // a display link: no Exit, Escape stays
+    pPlay.configure({ display: true, onExit: () => { problems.push('play: a display link left Play'); } });
+    await go('play'); await settleFor(600);
+    ok(!doc.querySelector('.pl-exit'), 'play: a display link offers Exit');
+    doc.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+    await settleFor(200);
+    ok(doc.documentElement.classList.contains('play'), 'play: Escape left Play on a display link');
+    pPlay.configure({ display: false, onExit: () => app.go('overview') });
+
+    // an older core: no PLAY_* at all — still draws, says what is missing, never throws
+    play.older = true;
+    await go('overview'); await go('play'); await settleFor(2500);
+    ok(!!root() && titleText() === 'Fleet', 'play: against an older core the wall did not draw');
+    ok(/older server/.test(doc.querySelector('.pl-hchips').textContent), 'play: an older core is not said to be one');
+    ok(doc.querySelectorAll('.pl-tile[data-cluster]').length === list.length, 'play: an older core has no exclusions, so every cluster has a tile');
+    for (let i = 0; i < 6; i++) { key('ArrowRight'); await settleFor(120); ok(!/could not be drawn/.test(viewText()), `play (older core): "${titleText()}" could not be drawn`); }
+
+    // Escape leaves for a person, and every timer and listener goes with it
+    doc.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+    await settleFor(300);
+    ok(!doc.documentElement.classList.contains('play'), 'play: Escape did not leave Play');
+    const after = pPlay._debug();
+    ok(after.timers === 0 && after.listeners === 0, `play: leaving kept ${after.timers} timer(s) and ${after.listeners} listener(s)`);
+  } finally {
+    globalThis.fetch = realFetch;
+    if (doc.documentElement.classList.contains('play')) await go('overview');
+  }
+
+  function excludedNamed() {
+    return hidden.name !== shown.name && !shown.name.includes(hidden.name) && viewText().includes(hidden.name);
+  }
+}
+
+
 if (problems.length) {
   console.error(`\n${problems.length} problem(s):`);
   for (const p of problems) console.error('  ✗ ' + p);
   process.exit(1);
 }
-console.log('ok: strip, console, shards, the Clusters page (columns, name menu, unreachable rows, expand chevron, alerts link), volume, hand-off, refresh, snapshots, tasks, toasts, accounts split and pinned Zabbix roles, the log-delay preflight, a quiet Config page, Config › Volume fields, report jobs and the Reports pill, the mailed report and the mail server, the Request Centre and the redraw gate, the request policy, the coverage bar, the Tasks panel and the console tabs, template management, the Alerts page grouped by cluster with merged repeats, Go to, playbooks and the bell, and the default credential (no password asked for a new cluster, promote, never replaced unticked), and Config › Play (links, revoke, exclusion, locked fields, watch rules)');
+console.log('ok: strip, console, shards, the Clusters page (columns, name menu, unreachable rows, expand chevron, alerts link), volume, hand-off, refresh, snapshots, tasks, toasts, accounts split and pinned Zabbix roles, the log-delay preflight, a quiet Config page, Config › Volume fields, report jobs and the Reports pill, the mailed report and the mail server, the Request Centre and the redraw gate, the request policy, the coverage bar, the Tasks panel and the console tabs, template management, the Alerts page grouped by cluster with merged repeats, Go to, playbooks and the bell, and the default credential (no password asked for a new cluster, promote, never replaced unticked), and Config › Play (links, revoke, exclusion, locked fields, watch rules, and Play (slides, keys, zoom, takeover, exclusion, display link, an older core)');
 // The pages leave auto-refresh timers and a live tail running; nothing here waits on them.
 process.exit(0);

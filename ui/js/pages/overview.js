@@ -1216,6 +1216,16 @@ function repoSection(c, d) {
   return card('Repository/Snapshot', '', table(cols.map((col) => ({ label: col.label, num: col.num })), trs));
 }
 
+/**
+ * Where a node's CPU, heap and disk turn amber ('low') and red ('high'). One definition: the node
+ * table here and Play's spotlight colour the same reading the same way.
+ */
+export const NODE_LOAD_LEVELS = { cpu: { warn: 80, crit: 90 }, heap: { warn: 75, crit: 90 }, disk: { warn: 85, crit: 90 } };
+export function nodeLoadLevel(p, which) {
+  const t = NODE_LOAD_LEVELS[which] || NODE_LOAD_LEVELS.cpu;
+  return p >= t.crit ? 'high' : p >= t.warn ? 'low' : 'ok';
+}
+
 /** The chip a node role takes: Elasticsearch's own name, coloured by what it does. */
 const roleChip = (role) => h(`span.cl-role.${roleKind(role)}`, role);
 const TIER_PILL = { hot: 'red', warm: 'yellow', cold: 'blue', frozen: 'blue', data: 'grey' };
@@ -1228,9 +1238,8 @@ function nodesSection(d) {
   const shardsOf = new Map(((d.disk && d.disk.nodes) || []).map((x) => [x.node, Number(x.shards)]));
   const bar = (p, cls) => h('div.cl-mini', { role: 'img', 'aria-label': `${Math.round(p)} percent` },
     h(`i.${cls}`, { style: { width: `${Math.max(1.5, Math.min(100, p))}%` } }));
-  const level = (p, warn, crit) => (p >= crit ? 'high' : p >= warn ? 'low' : 'ok');
-  const pctCell = (p, sub, warn, crit) => (isFinite(p)
-    ? h('div.cl-two', h('span', `${Math.round(p)} %`, sub ? h('span.muted.cl-sub', ` · ${sub}`) : null), bar(p, level(p, warn, crit)))
+  const pctCell = (p, sub, which) => (isFinite(p)
+    ? h('div.cl-two', h('span', `${Math.round(p)} %`, sub ? h('span.muted.cl-sub', ` · ${sub}`) : null), bar(p, nodeLoadLevel(p, which)))
     : h('span.muted', '–'));
   const trs = nodes.map((n) => {
     const roles = nodeRoles(n['node.role']);
@@ -1245,9 +1254,9 @@ function nodesSection(d) {
       roles: () => h('td', h('div.cl-roles', roles.length ? roles.map(roleChip) : h('span.cl-role.other', { title: 'node.roles: [] — coordinating-only' }, 'coordinating'))),
       version: () => h('td.mono', n.version || '–'),
       jdk: () => h('td.mono', n.jdk || '–'),
-      cpu: () => h('td', pctCell(Number(n.cpu), '', 80, 90)),
-      heap: () => h('td', pctCell(Number(n['heap.percent']), n['heap.current'] && n['heap.max'] ? `${bytes(Number(n['heap.current']))} / ${bytes(Number(n['heap.max']))}` : '', 75, 90)),
-      disk: () => h('td', pctCell(Number(n['disk.used_percent']), n['disk.used'] && n['disk.total'] ? `${bytes(Number(n['disk.used']))} / ${bytes(Number(n['disk.total']))}` : '', 85, 90)),
+      cpu: () => h('td', pctCell(Number(n.cpu), '', 'cpu')),
+      heap: () => h('td', pctCell(Number(n['heap.percent']), n['heap.current'] && n['heap.max'] ? `${bytes(Number(n['heap.current']))} / ${bytes(Number(n['heap.max']))}` : '', 'heap')),
+      disk: () => h('td', pctCell(Number(n['disk.used_percent']), n['disk.used'] && n['disk.total'] ? `${bytes(Number(n['disk.used']))} / ${bytes(Number(n['disk.total']))}` : '', 'disk')),
       load: () => h('td.num.mono', n.load_1m ?? '–'),
       shards: () => h('td.num', shardsOf.has(n.name) ? num(shardsOf.get(n.name)) : h('span.muted', { title: 'Not in _cat/allocation: no shards here' }, '–')),
       uptime: () => h('td.mono', n.uptime || '–'),

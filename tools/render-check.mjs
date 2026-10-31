@@ -72,7 +72,9 @@ if (configPath) {
   console.log('render-check: no --config given — pages will draw their "no cluster" state only');
 }
 
-const PAGES = ['alerts', 'overview', 'indices', 'shards', 'logs', 'console', 'snapshots', 'volume', 'automation', 'requests', 'accounts', 'settings'];
+// play: the wall display (docs/PLAY.md). Drawn against whatever core this is — an older one
+// has no PLAY_* messages, and Play must still draw, saying what is missing.
+const PAGES = ['alerts', 'overview', 'indices', 'shards', 'logs', 'console', 'snapshots', 'volume', 'automation', 'requests', 'accounts', 'settings', 'play'];
 const view = window.document.createElement('div');
 window.document.body.append(view);
 
