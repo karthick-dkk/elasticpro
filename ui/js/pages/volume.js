@@ -16,6 +16,7 @@ import { popover } from '../ui/menu.js';
 import { repoSizeCache } from '../lib/idb.js';
 import { takeFocus, revealFocus } from '../core/focus.js';
 import { volumeAnalysisCard, setVolumeAnalysisField } from '../ui/index-metrics.js';
+import { sharePut } from '../play/api.js';
 import { volumeMonthlyAll, configErrorOf, monthlyAllCsvRows, monthsAcross, monthName, NEEDS_VERSION } from '../core/volume-daily.js';
 
 let host = null;
@@ -614,6 +615,9 @@ async function measureRepos(c) {
     ({ counted, failed } = m);
     // Every read failing is unknown, not an empty repository.
     if (m.total !== null) repoBytes.set(c.id, m.total);
+    // Shared through the core so Play shows the same figure (docs/PLAY.md, backup size);
+    // an older core has no shared cache and simply does not keep it.
+    if (m.total !== null) sharePut('repoSize', c.id, Date.now(), { bytes: m.total, counted: m.counted, failed: m.failed }).catch(() => {});
     await cache.flush((key) => snapshotStatusByKey(d, key));
   } finally {
     ui.measuring.delete(c.id);

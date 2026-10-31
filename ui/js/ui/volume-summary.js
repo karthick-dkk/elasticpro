@@ -24,7 +24,7 @@ import { configErrorOf,
   volumeDaily, volumeMonthly, volumeBreakdown, volumeRun, volumeLayoutGet, volumeLayoutSet, isHosted,
   NEEDS_VERSION, collectDue, hhmm, utcDay, basisOf, BASIS_LABEL, BASIS_KEY, monthValue, fromText, monthName,
   lastMonths, breakdownPeriods, breakdownLabel, peakOf, dailyCsvRows, monthlyCsvRows, breakdownCsvRows,
-  DAILY_CSV, MONTHLY_CSV, BREAKDOWN_CSV,
+  DAILY_CSV, MONTHLY_CSV, BREAKDOWN_CSV, cardValue, dailyPoints, shortDay,
 } from '../core/volume-daily.js';
 
 /** While a collection runs the record is asked for again this often, for at most this long. */
@@ -324,9 +324,6 @@ function dailyView(c) {
   return out;
 }
 
-/** The card value the core sent, under whichever name it used for it. Picked, not computed. */
-const cardValue = (x) => (x && typeof x === 'object' ? [x.value, x.basis, x.bytes].find((v) => typeof v === 'number') ?? null
-  : typeof x === 'number' ? x : null);
 
 function avgSeg() {
   return h('div.seg.vs-avg', { role: 'group', 'aria-label': 'Days in the average' },
@@ -364,29 +361,10 @@ function dailyCards(reply) {
       : bytes(evv), evv === null ? 'no Event size field in the mapping' : 'measured, finished days'));
 }
 
-/**
- * Days to plot, oldest first: only today is left out (it is still filling up and would read
- * as a drop). A past day the core could not finish is plotted when it has a figure.
- */
-function finishedDays(reply) {
-  const basis = basisOf(reply.settings);
-  return (reply.days || [])
-    .filter((d) => d.day < utcDay() && (d.final !== false || dayBasis(d, basis) !== null))
-    .sort((a, b) => (a.day < b.day ? -1 : 1));
-}
-const shortDay = (ymd) => {
-  const m = /^\d{4}-(\d{2})-(\d{2})$/.exec(String(ymd || ''));
-  return m ? `${Number(m[2])} ${['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'][Number(m[1]) - 1]}` : String(ymd || '');
-};
-const dayBasis = (d, basis) => (typeof d.basis === 'number' ? d.basis : (typeof d[BASIS_KEY[basis]] === 'number' ? d[BASIS_KEY[basis]] : null));
-
 function dailyChart(reply) {
   const basis = basisOf(reply.settings);
   const label = BASIS_LABEL[basis];
-  const points = finishedDays(reply).map((d) => ({
-    key: d.day, label: shortDay(d.day), value: dayBasis(d, basis),
-    avg: typeof d.avg === 'number' ? d.avg : null, changePct: typeof d.changeVsAvgPct === 'number' ? d.changeVsAvgPct : null,
-  }));
+  const points = dailyPoints(reply);
   const st = reply.status || {};
   return card(`${label} per day · last ${vs.days} days`, st.lastRunAt ? `collected ${hhmm(st.lastRunAt)}` : null,
     h('div',

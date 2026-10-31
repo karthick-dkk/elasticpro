@@ -61,12 +61,17 @@ const BROWSERS = arg('--browsers', 'chromium,webkit').split(',');
 const WARM = Number(arg('--warm', '25000'));
 const ONLY = arg('--only', 'pages,dialogs,panels').split(',');
 const PAGE_FILTER = arg('--pages', '');
-const SIZES = [[1440, 900, false], [1280, 800, false], [1024, 768, false], [1280, 800, true]]
-  .filter(([w, , framed]) => !arg('--sizes', '') || arg('--sizes', '').split(',').includes(framed ? 'f' : String(w)));
+// Play is a wall display: 1080p is its baseline and 4K must look the same. `--pages play` alone
+// measures it at those two; `--sizes 1920,3840` names them for any run.
+const PLAY_ONLY = arg('--pages', '') === 'play';
+const SIZES = [[1440, 900, false], [1280, 800, false], [1024, 768, false], [1280, 800, true], [1920, 1080, false], [3840, 2160, false]]
+  .filter(([w, , framed]) => (arg('--sizes', '')
+    ? arg('--sizes', '').split(',').includes(framed ? 'f' : String(w))
+    : PLAY_ONLY ? w >= 1920 : w < 1920));
 const FRAME_W = 1180;
 /** The buttons that change what a page shows without doing anything: segments, tabs, the Config page's sections. */
 const VIEW_SEL = '#view .seg button, #view .seg-btn, #view [role=tab], #view .tabs button, #view .subnav button';
-const PAGES = ['alerts', 'overview', 'indices', 'shards', 'logs', 'console', 'snapshots', 'volume', 'automation', 'requests', 'accounts', 'settings']
+const PAGES = ['alerts', 'overview', 'indices', 'shards', 'logs', 'console', 'snapshots', 'volume', 'automation', 'requests', 'accounts', 'settings', 'play']
   .filter((id) => !PAGE_FILTER || PAGE_FILTER.split(',').includes(id));
 
 const pw = await loadPlaywright(ROOT, 'fit-check');
@@ -136,6 +141,29 @@ const dialogFit = () => {
   const leaf = stick.filter(([el]) => !stick.some(([o]) => o !== el && el.contains(o)));
   for (const [el, r] of leaf.slice(0, 4)) issues.push(`${name(el)} sticks out (${Math.round(r.left)}..${Math.round(r.right)} vs dialog edge ${Math.round(edge)})`);
   return { none: false, issues, title: (m.querySelector('h2') || {}).textContent || '', n: ovs.length };
+};
+
+/**
+ * Play: never a scroll bar, either way. The slide's box holds everything (each list is cut to
+ * what fits, "+N more"), and every panel on it lies wholly inside the window.
+ */
+const playFit = () => {
+  const de = document.documentElement;
+  const cw = de.clientWidth, ch = de.clientHeight;
+  const issues = [];
+  if (de.scrollHeight > ch + 1 || de.scrollWidth > cw + 1) issues.push(`document scrolls (${de.scrollWidth}x${de.scrollHeight} in ${cw}x${ch})`);
+  const slide = document.querySelector('.pl-slide');
+  if (!slide) return { issues: ['no slide drawn'], title: '' };
+  if (slide.scrollHeight > slide.clientHeight + 1) issues.push(`slide is ${slide.scrollHeight} tall in ${slide.clientHeight}`);
+  if (slide.scrollWidth > slide.clientWidth + 1) issues.push(`slide is ${slide.scrollWidth} wide in ${slide.clientWidth}`);
+  const name = (e) => `${e.tagName.toLowerCase()}${typeof e.className === 'string' && e.className.trim() ? '.' + e.className.trim().split(/\s+/).slice(0, 2).join('.') : ''}`;
+  for (const el of document.querySelectorAll('.pl-head, .pl-kpi, .pl-tile, .pl-arow, .pl-half, .pl-chart, .pl-fact, .pl-nodes, .pl-vtable, .pl-aside, .pl-strip, .pl-chips')) {
+    const r = el.getBoundingClientRect();
+    if (!r.width || !r.height) continue;
+    if (r.left < -1 || r.top < -1 || r.right > cw + 1 || r.bottom > ch + 1) issues.push(`${name(el)} spans x ${Math.round(r.left)}..${Math.round(r.right)}, y ${Math.round(r.top)}..${Math.round(r.bottom)}`);
+    if (issues.length > 6) break;
+  }
+  return { issues, title: (document.querySelector('.pl-title') || {}).textContent || '' };
 };
 
 /** Floating things: wholly in the window, and no sideways scroll of their own. */
@@ -358,6 +386,22 @@ async function run(browserName, [vw, vh, framed]) {
       check(`page ${label}`, 'no sideways scroll', m.sw <= m.cw + 1 && m.bw <= m.cw + 1,
         `document is ${m.sw} wide in ${m.cw}${m.culprits.length ? ' — ' + m.culprits.join('; ') : ''}`);
 
+      // Play: every slide, at 100 % and at the largest zoom
+      if (id === 'play') {
+        const press = (k) => F.evaluate((k) => document.dispatchEvent(new KeyboardEvent('keydown', { key: k, bubbles: true, cancelable: true })), k);
+        for (const [zoomKeys, label] of [[[], '100 %'], [['+', '+', '+', '+'], '150 %']]) {
+          for (const k of zoomKeys) await press(k);
+          for (let i = 0; i < 6; i++) {
+            await sleep(400);
+            const m = await F.evaluate(playFit);
+            check(`page ${label === '100 %' ? 'play' : 'play 150 %'}`, `slide "${m.title}"`, !m.issues.length, m.issues.join('; '));
+            await press('ArrowRight');
+          }
+        }
+        for (let i = 0; i < 6; i++) await press('-');
+        await press('+'); await press('+');
+        continue;
+      }
       // every view a page offers: segments and tabs (not the ones that act), and its selects
       if (variant) continue;
       const views = await F.evaluate((sel) => {
