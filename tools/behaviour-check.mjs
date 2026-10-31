@@ -4523,11 +4523,116 @@ if (viaFleet) {
   }
 }
 
+// Config > Play (0.3.47): the section opens (and says so when the core is older); a new link sends
+// the permanent default and shows its URL once; revoke asks first; an empty reason is refused;
+// a field config.txt manages is locked and left out of the watch-rule save; the save payload.
+// PLAY_* is stubbed at fetch with the shapes docs/PLAY.md describes (the Rust side is built apart).
+{
+  await go('settings');
+  const realFetch = globalThis.fetch;
+  const sent = [];
+  let older = true;
+  const closeAll = async () => { for (const o of doc.querySelectorAll('.modal-overlay')) o.remove(); await settleFor(50); };
+  const cid = (await load('core/state.js')).clusters()[0].id;
+  const links = [{ id: 'l1', name: 'NOC wall', clusters: 'all', allowFrom: [], expires: 'permanent', lastSeen: { at: Math.floor(Date.now() / 1000) - 120, from: '10.1.2.3' }, settings: {} }];
+  globalThis.fetch = async (input, init) => {
+    const body = init && init.body ? JSON.parse(init.body) : {};
+    if (String(body.type || '').startsWith('PLAY_')) {
+      sent.push(body);
+      if (older) return stubReply({ ok: false, kind: 'bad_message', message: `Unknown message type "${body.type}"` });
+      switch (body.type) {
+        case 'PLAY_CONFIG_GET': return stubReply({ ok: true, watch: { delayRedAboveMin: 75 }, exclude: [], managed: ['UI_PLAY_DELAY_RED_MIN'], groups: ['Prod'] });
+        case 'PLAY_LINK_LIST': return stubReply({ ok: true, links });
+        case 'PLAY_LINK_CREATE': return stubReply({ ok: true, link: { id: 'l2', name: body.name, url: 'https://noc.example/#/play?display=SECRET123' }, secret: 'SECRET123' });
+        default: return stubReply({ ok: true });
+      }
+    }
+    return realFetch(input, init);
+  };
+  const view = () => doc.querySelector('#view');
+  const type = (id, v) => { const el = doc.getElementById(id); if (el) { el.value = v; el.dispatchEvent(new window.Event('input', { bubbles: true })); el.dispatchEvent(new window.Event('change', { bubbles: true })); } return !!el; };
+  const pressIn = async (root, re) => { const b = [...root.querySelectorAll('button')].find((x) => re.test(x.textContent.trim())); if (b) { b.click(); await settleFor(500); } return !!b; };
+  const modalEl = () => doc.querySelector('.modal');
+  try {
+    ok(await openSettingsTab('Play'), 'play: no Play tab');
+    await settleFor(500);
+    ok(view().textContent.includes('This server does not have Play yet (needs 0.3.47)'), 'play: an older core was not told apart from a broken page');
+    ok(!/What a display link can do|same rules in config\.txt/i.test(view().textContent), 'play: an explainer box is back');
+
+    older = false;
+    // The section loads once per visit: leave the page and come back.
+    await go('overview'); await go('settings'); await openSettingsTab('Play'); await settleFor(600);
+    ok(!!panel('Displays') && !!panel('Watch rules (server side, every display)') && !!panel('Excluded clusters'), 'play: the three cards did not draw');
+    ok(view().textContent.includes('NOC wall') && view().textContent.includes('10.1.2.3'), 'play: the display row (name, last seen address) is missing');
+    ok(!view().textContent.includes('[object Object]'), 'play: the page prints [object Object]');
+
+    // New display link: permanent by default, the URL shown once.
+    sent.length = 0;
+    ok(await pressIn(view(), /^New display link/), 'play: no New display link button');
+    ok(!!modalEl(), 'play: the new link dialog did not open');
+    ok(doc.getElementById('pl-expires').value === 'permanent', `play: expiry defaults to ${doc.getElementById('pl-expires').value}`);
+    await pressIn(modalEl(), /^Create link$/);
+    ok(!sent.some((m) => m.type === 'PLAY_LINK_CREATE'), 'play: a link was made without a name');
+    type('pl-name', 'Floor 2');
+    await pressIn(modalEl(), /^Create link$/);
+    const made = sent.find((m) => m.type === 'PLAY_LINK_CREATE');
+    ok(!!made && made.name === 'Floor 2' && made.clusters === 'all' && made.expires === 'permanent' && made.allowFrom === undefined,
+      `play: create sent ${JSON.stringify(made)}`);
+    ok((doc.getElementById('pl-url') || {}).value === 'https://noc.example/#/play?display=SECRET123', 'play: the link URL is not shown');
+    ok(/will not be shown again/.test(modalEl().textContent), 'play: no one-time note');
+    ok(!!doc.getElementById('pl-copy-url'), 'play: no Copy link on the new link');
+    await closeAll(); await settleFor(300);
+
+    // Revoke asks first.
+    sent.length = 0;
+    ok(await pressIn(view(), /^Revoke$/), 'play: no Revoke button');
+    ok(!!modalEl() && /Revoke "NOC wall"/.test(modalEl().textContent), 'play: revoke did not ask');
+    ok(!sent.some((m) => m.type === 'PLAY_LINK_REVOKE'), 'play: revoked before the answer');
+    await pressIn(modalEl(), /^No$/); await settleFor(300);
+    ok(!sent.some((m) => m.type === 'PLAY_LINK_REVOKE'), 'play: "No" still revoked');
+    await pressIn(view(), /^Revoke$/);
+    await pressIn(modalEl(), /^Revoke the link$/); await settleFor(300);
+    ok(sent.some((m) => m.type === 'PLAY_LINK_REVOKE' && m.id === 'l1'), `play: confirmed revoke sent ${JSON.stringify(sent.map((m) => m.type))}`);
+
+    // Exclude refuses an empty reason.
+    sent.length = 0;
+    type('pl-ex-cluster', cid);
+    type('pl-ex-reason', '   ');
+    await pressIn(view(), /^Exclude from Play$/);
+    ok(!sent.some((m) => m.type === 'PLAY_CONFIG_SET'), 'play: excluded without a reason');
+    type('pl-ex-cluster', cid);
+    type('pl-ex-reason', 'being rebuilt');
+    await pressIn(view(), /^Exclude from Play$/);
+    const ex = sent.find((m) => m.type === 'PLAY_CONFIG_SET');
+    ok(!!ex && ex.exclude && ex.exclude.add && ex.exclude.add.clusterId === cid && ex.exclude.add.reason === 'being rebuilt', `play: exclude sent ${JSON.stringify(ex)}`);
+    await settleFor(500);
+
+    // A managed field is locked and not sent; the rest is.
+    const red = doc.getElementById('pl-red');
+    ok(!!red && red.disabled && red.value === '75' && red.title === 'managed by config.txt', 'play: a managed field is not shown locked');
+    ok(/managed by config\.txt/.test(panel('Watch rules (server side, every display)').textContent), 'play: a locked field does not say why');
+    ok(!doc.getElementById('pl-yellow').disabled, 'play: an unmanaged field is locked');
+    type('pl-yellow', '20');
+    doc.getElementById('pl-when-yellow').checked = true;
+    sent.length = 0;
+    await pressIn(view(), /^Save$/);
+    const ws = sent.find((m) => m.type === 'PLAY_CONFIG_SET');
+    ok(!!ws && ws.watch && ws.watch.delayYellowFromMin === 20 && !('delayRedAboveMin' in ws.watch), `play: watch save sent ${JSON.stringify(ws)}`);
+    ok(!!ws && ws.watch.nodeBlink === 'untilBack' && ws.watch.nodeCheckSec === 60 && ws.watch.spotlight.perClusterSec === 13
+      && ws.watch.spotlight.leaveAfterMin === 10 && ws.watch.spotlight.whenEmpty === 'skip'
+      && ws.watch.spotlight.when.includes('yellow') && ws.watch.spotlight.when.includes('red'), `play: watch payload is ${JSON.stringify(ws && ws.watch)}`);
+  } finally {
+    globalThis.fetch = realFetch;
+    await closeAll();
+  }
+  await go('overview');
+}
+
 if (problems.length) {
   console.error(`\n${problems.length} problem(s):`);
   for (const p of problems) console.error('  ✗ ' + p);
   process.exit(1);
 }
-console.log('ok: strip, console, shards, the Clusters page (columns, name menu, unreachable rows, expand chevron, alerts link), volume, hand-off, refresh, snapshots, tasks, toasts, accounts split and pinned Zabbix roles, the log-delay preflight, a quiet Config page, Config › Volume fields, report jobs and the Reports pill, the mailed report and the mail server, the Request Centre and the redraw gate, the request policy, the coverage bar, the Tasks panel and the console tabs, template management, the Alerts page grouped by cluster with merged repeats, Go to, playbooks and the bell, and the default credential (no password asked for a new cluster, promote, never replaced unticked)');
+console.log('ok: strip, console, shards, the Clusters page (columns, name menu, unreachable rows, expand chevron, alerts link), volume, hand-off, refresh, snapshots, tasks, toasts, accounts split and pinned Zabbix roles, the log-delay preflight, a quiet Config page, Config › Volume fields, report jobs and the Reports pill, the mailed report and the mail server, the Request Centre and the redraw gate, the request policy, the coverage bar, the Tasks panel and the console tabs, template management, the Alerts page grouped by cluster with merged repeats, Go to, playbooks and the bell, and the default credential (no password asked for a new cluster, promote, never replaced unticked), and Config › Play (links, revoke, exclusion, locked fields, watch rules)');
 // The pages leave auto-refresh timers and a live tail running; nothing here waits on them.
 process.exit(0);

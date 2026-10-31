@@ -34,6 +34,7 @@ import { VOLUME_KEYS, FIELD_ROWS, BOUNDS as VOLUME_BOUNDS, fileVolume, desktopVo
 import { volumeSettings, volumeFieldsCheck } from '../core/volume-settings.js';
 import { reportMailPanels, loadReportMail, reportMailKeyLines } from '../ui/report-mail.js';
 import { rowMenu, ICON } from '../ui/menu.js';
+import { playSection, loadPlay } from '../ui/play-settings.js';
 
 /** What each credential source the Zabbix sync reports is called (bridge.rs zabbix_sync). */
 const CREDENTIAL_LABEL = {
@@ -783,6 +784,7 @@ const SECTIONS = [
   { id: 'requests', label: 'Requests',     icon: '⚡', build: requestsCard, load: loadPolicy },
   { id: 'defaults', label: 'Defaults',     icon: '⚙', build: defaultsCard },
   { id: 'volume',   label: 'Volume fields', icon: '▤', build: volumeSection, load: loadVolumeSection },
+  { id: 'play',     label: 'Play',         icon: '▶', build: playSection, load: () => loadPlay(draw) },
   { id: 'diag',     label: 'Diagnostics',  icon: '✚', build: diagnosticsCard, load: confirmCoreGuard },
 ];
 
