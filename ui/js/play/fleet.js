@@ -8,7 +8,8 @@
 import { h } from '../lib/dom.js';
 import { alertCounts } from '../core/alert-tuning.js';
 import { classify, STATUS } from '../core/log-delay.js';
-import { kpi, unknown, minutes, fitRows, openFor } from './parts.js';
+import { kpi, unknown, minutes, fitRows, openFor, clockText } from './parts.js';
+import { heldLine } from '../core/alert-groups.js';
 
 export const id = 'fleet';
 export const title = 'Fleet';
@@ -86,7 +87,19 @@ function tile(ctx, c) {
       h('span', h(`b${a.critical ? '.red' : a.warning ? '.yellow' : ''}`, String(a.total)), ' alerts')),
     h('div.pl-tdev', { title: `Devices by delay: under ${ctx.watch.delayYellowFromMin} min, ${ctx.watch.delayYellowFromMin}–${ctx.watch.delayRedAboveMin} min, over ${ctx.watch.delayRedAboveMin} min` },
       sum ? [h('span.pl-dev.green', String(sum.by.OK || 0)), h('span.pl-dev.yellow', String(sum.by.DELAYED || 0)), h('span.pl-dev.red', String(sum.by.CRITICAL || 0))]
-        : h('span.pl-unk', 'devices not measured')));
+        : h('span.pl-unk', 'devices not measured')),
+    heldNote(ctx, c.id));
+}
+
+/**
+ * A down cluster's held alerts (alert-groups.js holdUnreachable): one dimmed line, the same
+ * words as the Alerts page's unreachable line, in no count on the tile or the strip.
+ */
+export function heldNote(ctx, id) {
+  const held = (ctx.heldBy && ctx.heldBy.get(id)) || [];
+  if (!held.length) return null;
+  return h('div.pl-theld', { title: held.map((m) => m.title).join(' · ') },
+    heldLine(held, (t) => clockText(t, ctx.tz, { seconds: false })));
 }
 
 /** Smaller tiles for a bigger wall, so a fleet fits one screen. */

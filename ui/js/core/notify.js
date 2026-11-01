@@ -25,7 +25,7 @@
  */
 
 import { openAlertsNow, clusters, mergedAlerts, invalidateAlerts } from './state.js';
-import { isOpen, toObservations } from './alert-groups.js';
+import { isOpen, isHeld, toObservations } from './alert-groups.js';
 import { alertHistory } from './alert-history.js';
 import { gotoFor, openGoto, openClusterAlerts } from './alert-goto.js';
 import { pageLabel } from './page-labels.js';
@@ -125,7 +125,7 @@ export function groupIntoBursts(fresh, now, open = bursts, freshKeys = null) {
  * @returns {Array} the merged alerts announced, for tests and callers that want to know.
  */
 export function announceNewAlerts({ notify = toast, now = Date.now(), list = null } = {}) {
-  let open;
+  let open, held;
   try {
     // Every merged alert, recorded for age and history; the open ones are what is news.
     const all = list || mergedAlerts({ fresh: true });
@@ -133,9 +133,13 @@ export function announceNewAlerts({ notify = toast, now = Date.now(), list = nul
       if (alertHistory.observe(toObservations(all), now)) invalidateAlerts();
     } catch (_) { /* the log is a convenience; never let it stop a notice */ }
     open = all.filter((m) => isOpen(m));
+    held = all.filter((m) => isHeld(m));
   } catch (_) { return []; }          // a notifier must never break a refresh
 
-  const keys = new Set(open.flatMap((m) => m.keys));
+  // Held alerts (a cluster that is down) are never news, but they are remembered: when the
+  // cluster answers again and one is still true, it was raised before the outage and is not
+  // announced a second time. Only what was not there before, held or open, is new.
+  const keys = new Set([...open, ...held].flatMap((m) => m.keys));
   if (seen === null) { seen = new Map([...keys].map((k) => [k, 0])); return []; }
 
   const freshKeys = new Map();

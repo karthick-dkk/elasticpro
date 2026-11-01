@@ -104,11 +104,17 @@ export function createEngine({ order, now = 0, isEmpty = () => false, dwellFor =
  * is not taken over by every alert that was already there. After that a key not seen before
  * takes the screen and holds it until it is acknowledged, it clears, or TAKEOVER_MS pass.
  * Returns `{seen:Set, active: {key, since}|null}`.
+ *
+ * `held`: alerts held on a cluster that is down (alert-groups.js holdUnreachable). They never
+ * take the screen, but they are remembered: when the cluster answers again and one of them is
+ * still true and critical, it was raised before the outage and does not take over a second time.
  */
-export function takeover(prev, { open = [], acked = () => false, now, enabled = true }) {
-  const keys = open.map((a) => (typeof a === 'string' ? a : a.key));
-  if (!prev) return { seen: new Set(keys), active: null };
-  const seen = new Set(prev.seen);
+export function takeover(prev, { open = [], held = [], acked = () => false, now, enabled = true }) {
+  const keyOf = (a) => (typeof a === 'string' ? a : a.key);
+  const keys = open.map(keyOf);
+  const heldKeys = new Set(held.map(keyOf));
+  if (!prev) return { seen: new Set([...keys, ...heldKeys]), active: null };
+  const seen = new Set([...prev.seen, ...heldKeys]);
   let active = prev.active;
   if (active && (!keys.includes(active.key) || acked(active.key) || now - active.since >= TAKEOVER_MS)) active = null;
   for (const k of keys) {
@@ -117,7 +123,7 @@ export function takeover(prev, { open = [], acked = () => false, now, enabled = 
     if (enabled && !active && !acked(k)) active = { key: k, since: now };
   }
   // Forget what cleared, so the same problem coming back later counts as new.
-  for (const k of [...seen]) if (!keys.includes(k)) seen.delete(k);
+  for (const k of [...seen]) if (!keys.includes(k) && !heldKeys.has(k)) seen.delete(k);
   return { seen, active };
 }
 

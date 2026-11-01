@@ -20,7 +20,7 @@ import {
 import { errorText } from '../core/error-codes.js';
 import {
   ageShort, filterAlerts, groupAlerts, summaryOf, isOpen, isHandled, GROUP_MODES, toObservations,
-  splitUnreachable, filterDown, downFor, unreachableReason, heldText,
+  splitUnreachable, filterDown, downFor, unreachableReason, heldText, heldLine,
 } from '../core/alert-groups.js';
 import { gotoFor, openGoto } from '../core/alert-goto.js';
 import { playbookFor } from '../core/alert-playbooks.js';
@@ -423,7 +423,7 @@ function downRow(dn, all) {
   const sig = ['down', m.state, m.level, m.detail, m.ackedBy, m.ackedAt, Math.floor(m.since / 60000), m.approxSince, expanded, notes,
     sil ? sil.id || sil.until : '', clusterRev(dn.clusterId), cl.state, objId(cl.lastError), d.reach && d.reach.since,
     d.reach && d.reach.nextProbeAt, objId(diag.get(dn.clusterId) || null), minute(),
-    dn.held.map((x) => `${x.key}@${Math.floor(x.since / 60000)}`).join(','),
+    dn.held.map((x) => `${x.key}@${Math.floor(x.since / 60000)}@${x.asOf || 0}@${x.heldState}@${x.level}@${x.detail}`).join(','),
     expanded ? all.filter((x) => x.clusterId === m.clusterId).map((x) => `${x.key}@${Math.floor(x.since / 60000)}`).join(',') : '',
     expanded ? ackRecords().length : '', objId(m.cluster)].join('\u0001');
   return built.get(`down:${m.key}`, sig, () => buildDownRow(dn, all, { expanded, notes, sil }));
@@ -453,9 +453,9 @@ function buildDownRow(dn, all, { expanded, notes, sil }) {
     'aria-label': `${expanded ? 'Hide' : 'Show'} details, how to fix and held alerts for ${dn.name}`,
     title: expanded ? 'Hide the details' : 'Address, how it is reached, how to fix, and the alerts held behind this one',
     onclick: flip }, expanded ? '▴' : '▾');
-  const heldLine = dn.held.length
+  const heldBtn = dn.held.length
     ? h('button.alink.adown-held', { type: 'button', 'aria-expanded': String(expanded), 'aria-controls': panelId, onclick: flip,
-        title: 'Raised from data read before this cluster went down. Not counted until it answers.' }, heldText(dn.held.length))
+        title: 'Worked out from the last data read before this cluster went down. Not counted until it answers.' }, heldLine(dn.held, dt))
     : h('span', heldText(0));
 
   const row = h(`div.arow.adown-row${handled ? '.handled' : ''}${expanded ? '.open' : ''}`, { 'data-cluster': id },
@@ -468,7 +468,7 @@ function buildDownRow(dn, all, { expanded, notes, sil }) {
           stateNote ? [' ', h('span.apill.grey', stateNote)] : null),
         h('div.adown-reason', { title: msg }, msg),
         h('div.arow-sub.muted.adown-meta', { title: reachSince ? `Since ${dt(reachSince)}` : ageTitle(m) },
-          `${downText}${!reachSince && m.approxSince ? '+' : ''} · `, heldLine)),
+          `${downText}${!reachSince && m.approxSince ? '+' : ''} · `, heldBtn)),
       h('button.btn.sm.primary.adown-retry', { type: 'button', title: `Ask ${dn.name} again now`,
         onclick: (e) => act(e.currentTarget, retry) }, 'Retry'),
       h('button.btn.sm.adown-diagnose', { type: 'button', title: 'Walk the connection step by step and say where it stops',
@@ -504,18 +504,35 @@ function downDetails({ c, cl, d, retry }) {
     prob.actions.length ? h('div.adown-acts', ...prob.actions) : null);
 }
 
-/** The alerts held behind an unreachable line, dimmed and labelled. */
+/**
+ * The alerts held behind an unreachable line, dimmed and labelled: what was wrong with the
+ * cluster when it was last read (state.js heldAlerts), each "as of" the data it rests on.
+ * They can be acknowledged — the record is the alert's own key, so it carries over when the
+ * cluster answers and the alert is current again — but they are counted nowhere.
+ */
 function heldList(dn) {
   if (!dn.held.length) return null;
   return h('div.aheld', { role: 'list', 'aria-label': `Alerts held on ${dn.name}, not current` },
     h('div.aheld-head', h('b', 'Held, not current'),
-      h('span.muted', ' — raised from data read before the cluster went down. Not counted, and not known to be true now; they are checked again when it answers.')),
-    ...dn.held.map((x) => h('div.aheld-row', { role: 'listitem' },
-      h(`span.apill.${x.level === 'critical' ? 'crit' : 'warn'}`, x.level),
-      h('span.aheld-what', h('b', x.title), x.count ? ` ${x.count}` : '',
-        x.items.length === 1 && x.items[0].label && !`${x.title} ${x.detail || ''}`.includes(x.items[0].label) ? ` (${x.items[0].label})` : '',
-        x.detail ? ` · ${x.detail}` : ''),
-      h('span.muted.aheld-age', { title: `Since ${dt(x.since)}` }, `${ageShort(Date.now() - x.since)} old`))));
+      h('span.muted', ' — worked out from the last data read before the cluster went down. Not counted, and not known to be true now; they are checked again when it answers.')),
+    ...dn.held.map((x) => {
+      const acked = x.heldState === 'acked';
+      return h(`div.aheld-row${acked ? '.handled' : ''}`, { role: 'listitem', 'data-key': x.key },
+        h(`span.apill.${x.level === 'critical' ? 'crit' : 'warn'}`, x.level),
+        h('span.aheld-what', h('b', x.title), x.count ? ` ${x.count}` : '',
+          x.items.length === 1 && x.items[0].label && !`${x.title} ${x.detail || ''}`.includes(x.items[0].label) ? ` (${x.items[0].label})` : '',
+          x.detail ? ` · ${x.detail}` : ''),
+        acked ? h('span.apill.grey', `acknowledged${x.ackedBy ? ` by ${x.ackedBy}` : ''}`)
+          : x.heldState === 'silenced' ? h('span.apill.grey', 'silenced') : null,
+        x.asOf
+          ? h('span.muted.aheld-age', { title: `Worked out from data read ${ago(x.asOf)} · first seen ${dt(x.since)}` }, `as of ${dt(x.asOf)}`)
+          : h('span.muted.aheld-age', { title: `Since ${dt(x.since)}` }, `${ageShort(Date.now() - x.since)} old`),
+        acked
+          ? h('button.btn.sm.ghost.aheld-ack', { type: 'button', title: 'Put it back on the open list for when the cluster answers', onclick: () => doUnack(x) }, 'Re-open')
+          : x.heldState === 'open'
+            ? h('button.btn.sm.ghost.aheld-ack', { type: 'button', title: 'Mark as seen — it carries over when the cluster answers, and is still counted nowhere while it is down', onclick: () => doAck(x) }, 'Ack')
+            : null);
+    }));
 }
 
 async function doSilenceCluster(cluster, minutes) {
@@ -909,6 +926,8 @@ function exportAlerts(merged) {
       // Held: raised on a cluster that cannot be reached now. Listed here, never as current.
       state: m.held ? 'held' : m.state === 'acked' ? 'acknowledged' : m.state,
       held_not_current: m.held ? 'yes' : 'no',
+      // For a held alert worked out from cached data: when that data was read. Empty otherwise.
+      held_as_of: m.held && m.asOf ? new Date(m.asOf).toISOString() : '',
       new_since_acknowledged: m.newSince || 0,
       acknowledged_by: m.ackedBy || '',
       acknowledged_at: m.ackedAt ? new Date(m.ackedAt).toISOString() : '',

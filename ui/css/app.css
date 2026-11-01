@@ -835,6 +835,8 @@ a.arow-cluster:hover { text-decoration: underline; }
 .aheld-row { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 10px; opacity: .65; }
 .aheld-what { flex: 1 1 220px; min-width: 0; overflow-wrap: anywhere; }
 .aheld-age { font-size: 12px; white-space: nowrap; }
+.aheld-row.handled { opacity: .5; }
+.aheld-ack { padding-block: 0; }
 .btn.sm.arow-toggle, .btn.sm.agroup-toggle { color: var(--text-muted); font-size: 16px; line-height: 1; padding: 2px 8px; }
 
 .apanel { margin: 0 14px 12px 14px; display: grid; gap: 10px; }
@@ -1839,6 +1841,8 @@ html.play .main, html.play .page { padding: 0; margin: 0; max-width: none; }
 .pl-dev.yellow { color: var(--tv-yellow); }
 .pl-dev.red { color: var(--tv-red); }
 .pl-tdev .pl-unk { font-size: .9em; }
+/* a down cluster's held alerts: one dimmed line, never a count */
+.pl-theld { font-size: .82em; color: var(--tv-muted); opacity: .8; font-style: italic; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 /* a node left: the tile blinks every 3 s until it is back */
 .pl-blink { animation: pl-blink 3s steps(1, end) infinite; }
 @keyframes pl-blink {

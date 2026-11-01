@@ -9,6 +9,7 @@ import { h } from '../lib/dom.js';
 import { alertCounts } from '../core/alert-tuning.js';
 import { alertHistory } from '../core/alert-history.js';
 import { kpi, unknown, openFor, fitRows, clockText } from './parts.js';
+import { heldNote } from './fleet.js';
 
 export const id = 'alerts';
 export const title = 'Alerts';
@@ -49,7 +50,9 @@ function row(ctx, m, hot) {
     h(`span.pl-sev.${m.level}`, m.level === 'critical' ? 'CRIT' : 'WARN'),
     h('div.pl-atext',
       h('div.pl-atitle', m.title, m.count ? h('span.pl-acount', ` ${m.count}`) : null),
-      h('div.pl-adetail', [cluster, m.detail].filter(Boolean).join(' · '))),
+      h('div.pl-adetail', [cluster, m.detail].filter(Boolean).join(' · ')),
+      // A down cluster's row says what is held behind it, as the Alerts page's line does.
+      m.family === 'unreachable' ? heldNote(ctx, m.clusterId) : null),
     h('div.pl-afor', openFor(ctx.now - ctx.openSince(m))),
     h('div.pl-aby', ack ? `ack ${ack.by || 'someone'}` : ''));
 }

@@ -144,7 +144,7 @@ const { state, setConfig, fetchOverview, fetchIndices, activeClusters } =
 const { runAutomation, resultsFor, activeRules } = await import(path.join(UI, 'core/automation.js'));
 const { client, alerts, setDelaySummary, delaySummaryFor } = await import(path.join(UI, 'core/state.js'));
 const { preflight, measureDelay, summarise, delayItemValues } = await import(path.join(UI, 'core/log-delay.js'));
-const { zabbixAlertValues, ZABBIX_ALERT_RULES } = await import(path.join(UI, 'core/zabbix-alerts.js'));
+const { zabbixAlertsToSend, ZABBIX_ALERT_RULES } = await import(path.join(UI, 'core/zabbix-alerts.js'));
 const { volumeReport, clientPlanValues, measureRepoBytes } = await import(path.join(UI, 'core/volume.js'));
 
 /* ---------------------------------- gather ---------------------------------- */
@@ -257,7 +257,7 @@ for (const c of activeClusters()) {
               zabbixHost: (c.zabbix && c.zabbix.host) || null,
               delay: measuredNow.has(c.id) ? delayItemValues((delaySummaryFor(c.id) || {}).summary) : [],
               // The same alerts() the Alerts page lists, as the rules Zabbix raises.
-              alerts: zabbixAlertValues(alerts().filter((a) => a.cluster && a.cluster.id === c.id)) });
+              alerts: zabbixAlertsToSend(!!data.reachable, alerts().filter((a) => a.cluster && a.cluster.id === c.id)) });
 }
 if (memoryPath) {
   const next = { clusters: {} };
@@ -422,7 +422,9 @@ if (sendTo) {
     // Log delay, when it was measured this run: template "ElasticPro log delay".
     for (const d of p.delay) values.push({ host: p.zabbixHost, key: `elasticpro.delay[${d.key}]`, value: d.value, clock: at });
     // Every rule, every run — 0 included — so a trigger resolves the run its condition does.
-    for (const rule of ZABBIX_ALERT_RULES) {
+    // Not for a cluster that did not answer: its rules are unknown, so its problems stay as
+    // they were rather than resolving and reopening around the outage (zabbixAlertsToSend).
+    for (const rule of p.alerts ? ZABBIX_ALERT_RULES : []) {
       const a = p.alerts[rule];
       values.push({ host: p.zabbixHost, key: `elasticpro.alert[${rule}]`, value: a.level, clock: at });
       values.push({ host: p.zabbixHost, key: `elasticpro.alert.detail[${rule}]`, value: a.detail, clock: at });

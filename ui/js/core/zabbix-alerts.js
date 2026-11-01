@@ -42,8 +42,10 @@ export const LEVEL_VALUE = { warning: 1, critical: 2 };
  */
 export function zabbixAlertValues(alertsForCluster) {
   const out = {};
+  // Held alerts (worked out from a down cluster's cached data) are never sent as current.
+  const current = (alertsForCluster || []).filter((a) => a && !a.cached && !a.held);
   for (const rule of ZABBIX_ALERT_RULES) {
-    const mine = (alertsForCluster || []).filter((a) => ruleOf(a) === rule);
+    const mine = current.filter((a) => ruleOf(a) === rule);
     const level = mine.reduce((m, a) => Math.max(m, LEVEL_VALUE[a.level] || 0), 0);
     const detail = mine.slice(0, 3).map((a) => a.title + (a.detail ? ` — ${a.detail}` : '')).join(' | ')
       + (mine.length > 3 ? ` | and ${mine.length - 3} more` : '');
@@ -51,4 +53,19 @@ export function zabbixAlertValues(alertsForCluster) {
     out[rule] = { level, detail: level ? `${word}: ${detail}`.slice(0, 250) : '' };
   }
   return out;
+}
+
+/**
+ * What to send Zabbix for one cluster's rules this run: the values, or null — send none.
+ *
+ * A cluster that did not answer has rules nobody can evaluate now. Sending 0 ("clear") for
+ * each resolved every ElasticPro problem on its host the minute it went down, and reopened
+ * them — as new events, freshly notified — the minute it came back. Unknown is not zero: no
+ * value is sent, so each trigger keeps the state it had (the triggers read the detail's last
+ * value, alerts.find()). The outage itself is Zabbix's own "Service is down". When the cluster
+ * answers, the next run sends every rule again: one still true stays the same open problem,
+ * one that cleared while it was down resolves.
+ */
+export function zabbixAlertsToSend(reachable, alertsForCluster) {
+  return reachable ? zabbixAlertValues(alertsForCluster) : null;
 }

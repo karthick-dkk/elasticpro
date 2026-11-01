@@ -348,6 +348,38 @@ it covers the items it had when you did; an item that appears later (a node, a r
 opens it again as "N new since acknowledged". Acknowledgements written before merging keep
 covering what they covered.
 
+**Unreachable clusters and held alerts.** A cluster that does not answer is one line at the top
+of the Alerts page and one critical alert in every count. Its other rules are not dropped: they
+are evaluated against its newest **cached** data (`heldAlerts()` in `core/state.js`, the rules
+and limits in `core/alert-held.js`) — with the fleet cache, the core's last good answer per
+dataset, which it keeps with its `fetchedAt` when a fetch fails (health included); without it,
+the last data the page read while the cluster answered. Nothing is fetched from the cluster, and
+the page keeps one cached copy per cluster that is down, dropped once it answers. What they raise
+is **held** under the cluster's line, dimmed and labelled "not current", each **as of** the time
+of the data it rests on, and the line says "N older alerts held, not current · as of HH:MM" (the
+oldest of them). Rules run as of that time, so "no recent snapshot" is about the cluster as it
+was, not about how long it has been down.
+
+- **Unknown is not zero.** A rule whose dataset was never read, or was read more than
+  **24 hours** before now (`HELD_MAX_AGE_HOURS`), shows nothing — the fleet cache keeps its last
+  answers indefinitely, so the limit is ours. A field-volume spike has no reading time this
+  page can vouch for and is not evaluated for a down cluster.
+- **Counted nowhere:** not the bell or its notifications, the tab title, the top bar, the
+  Alerts summary or footer counts, the Clusters column, Play's counts, takeover or spotlight.
+- **Acknowledging** a held alert is allowed (Ack on its row). The record is the alert's own
+  `<cluster>:<rule>` key — shared on the server when hosted — so it covers the alert when the
+  cluster answers and it is current again; it changes no count while the cluster is down.
+- **When the cluster answers**, the live rules run as usual: an alert still true is current
+  again, the same alert — no duplicate, and **not announced again** (the bell and Play's
+  takeover remember held keys, so only what was not there before the outage is news; its age
+  runs on from before it); one that no longer applies is gone.
+- **Zabbix:** held alerts are never sent. For a cluster that did not answer the scraper sends
+  no `elasticpro.alert[*]` values at all (`zabbixAlertsToSend`), so each ElasticPro problem
+  on its host stays as it was — neither resolved when the cluster goes down nor raised again
+  as a new event when it comes back; the outage is Zabbix's own "Service is down". The next
+  run after it answers sends every rule: still true stays the same problem, cleared resolves.
+- The CSV export lists held alerts marked `held_not_current: yes`, with `held_as_of`.
+
 **History** on an alert (Related → past occurrences) comes from ElasticPro's own alert log
 (`core/alert-history.js`, kept in this browser for 30 days) and from the notes in the
 acknowledgement store. It records what this browser saw while the app was open, says how far

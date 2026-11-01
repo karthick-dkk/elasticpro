@@ -6,7 +6,8 @@ import { EsClient, primeWorker, setBadge, requestStats, workerStatus,
 import { bytes as bytesish, ago, dur } from '../lib/fmt.js';
 import { diskLevel, tuneAlerts, alertCounts } from './alert-tuning.js';
 import { isAcked, ackFor, acksRev } from './acks.js';
-import { mergeAlerts, isOpen, holdUnreachable } from './alert-groups.js';
+import { mergeAlerts, isOpen, isHeld, holdUnreachable } from './alert-groups.js';
+import { HELD_DATASETS, HELD_MAX_AGE_MS, stampHeld, evaluatedAt } from './alert-held.js';
 import { alertHistory } from './alert-history.js';
 // Cyclic with field-volume.js, which needs client() from here. Safe because both sides
 // only touch the other inside functions, never while the modules are evaluating.
@@ -17,7 +18,7 @@ import { loadClusterMeta, slmExempt } from './cluster-kind.js';
 import { ZABBIX_ITEMS, fromZabbix } from './zabbix-metrics.js';
 import { bridge, subscribe } from './transport.js';
 import { automationAlerts } from './automation.js';
-import { loadAlertSettings, applySettings, effectiveDefaults } from './alert-rules.js';
+import { loadAlertSettings, applySettings, effectiveDefaults, isEnabled } from './alert-rules.js';
 // Bounded fan-out for the fleet refresh loop — see runBounded's own doc comment for why:
 // a page asking every cluster something at once is a simultaneous aggregation against
 // each one, and the clusters this app watches are the ones already under load.
@@ -51,7 +52,7 @@ class Emitter {
  * a page asks for it several times per draw — on a hundred-odd clusters that was a large
  * part of each redraw. See cachedAlerts().
  */
-const alertsMemo = { rev: 0, at: 0, forRev: -1, value: null, deps: [] };
+const alertsMemo = { rev: 0, at: 0, forRev: -1, value: null, held: [], deps: [] };
 
 /**
  * A number that changes whenever a cluster's data does: every 'data' or 'indices' event
@@ -678,6 +679,10 @@ async function fetchOverviewDirect(id, { withSnapshots = true } = {}) {
     root, health, alloc, nodes, repos, slm, slmStatus, ilm, ilmErr, repoPaths, ilmPolicies,
     ilmOfIndices, clusterSettings,
   });
+  // Without the fleet cache, the last data read while it answered is what a held alert is
+  // computed from (heldSource). One entry per cluster that is down; gone once it answers.
+  if (answered) lastReachable.delete(id);
+  else if (prev.reachable && !prev.healthUnknown) lastReachable.set(id, prev);
   // The pattern the ILM/SLM error definition (lifecycle-errors.js) is read against.
   out.logIndexPattern = (cl.c && cl.c.logIndexPattern) || undefined;
   // Which figures came from Zabbix, and how old they were — the page says so.
@@ -1300,12 +1305,14 @@ export function answerToPair(a) {
  *     the error, and buildClusterData keeps the rest of what it knew from `prev` as always.
  * `restored` (read back from the core's disk at start-up) is used, marked `stale: 'restored'`.
  */
-export function fleetPairs(cs) {
+export function fleetPairs(cs, { lastGood = false } = {}) {
   const out = {};
   const ds = (cs && cs.datasets) || {};
   for (const [name, keys] of Object.entries(FLEET_KEYS)) {
     const e = ds[name];
-    const usable = !!(e && e.data && e.status !== 'never' && !(name === 'health' && e.status === 'error'));
+    // `lastGood` (heldAlerts only): health's last good body too — the cluster as it was when
+    // it last answered, which is what a held alert is about and never what is shown as now.
+    const usable = !!(e && e.data && e.status !== 'never' && !(name === 'health' && e.status === 'error' && !lastGood));
     for (const k of keys) {
       const a = usable ? e.data[k] : null;
       // A failed health check is a known fact (the cluster did not answer); anything else
@@ -1925,13 +1932,14 @@ export function cachedAlerts() {
     return [...alertsMemo.value];
   }
   const value = alerts();
-  Object.assign(alertsMemo, { value, forRev: alertsMemo.rev, at: now, deps });
+  Object.assign(alertsMemo, { value, held: heldAlerts(now), forRev: alertsMemo.rev, at: now, deps });
   return [...value];
 }
 
 export function alerts() {
   const out = [];
   const add = (...a) => out.push(...a.filter(Boolean));
+  const now = Date.now();
   for (const c of clusters()) {
     const d = state.data.get(c.id);
     const cl = state.clients.get(c.id);
@@ -1943,143 +1951,10 @@ export function alerts() {
     if (!d || !d.reachable) {
       add({ key: `${c.id}:unreachable`, level: 'critical', cluster: c, title: `${c.name} unreachable`,
         detail: (cl && cl.lastError && cl.lastError.message) || 'No response', kind: cl && cl.state });
+      // Its other rules are evaluated from cached data, and only ever held: heldAlerts().
       continue;
     }
-    // Devices shipping late, from the last measurement — see setDelaySummary.
-    const ds = delaySummaries.get(c.id);
-    if (ds && Date.now() - ds.at < DELAY_ALERT_HOURS * 3600 * 1000) {
-      const by = ds.summary.by || {};
-      const w = ds.summary.worst;
-      const worst = w && w.delayMinutes !== null ? ` Worst: ${w.device}, ${Math.round(w.delayMinutes)} min behind.` : '';
-      if (by.CRITICAL) {
-        add({ key: `${c.id}:log-delay`, level: 'critical', cluster: c,
-          title: `${c.name}: ${by.CRITICAL} device(s) critically late shipping logs`,
-          detail: `${by.CRITICAL} critical, ${by.DELAYED || 0} delayed of ${ds.summary.devices}.${worst}` });
-      } else if (by.DELAYED) {
-        add({ key: `${c.id}:log-delay`, level: 'warning', cluster: c,
-          title: `${c.name}: ${by.DELAYED} device(s) shipping logs late`,
-          detail: `${by.DELAYED} delayed of ${ds.summary.devices}.${worst}` });
-      }
-    }
-    if (d.health && d.health.status === 'red') add({ key: `${c.id}:health`, level: 'critical', cluster: c, title: `${c.name} health is RED`, detail: `${d.health.unassigned_shards} unassigned shards` });
-    else if (d.health && d.health.status === 'yellow') add({ key: `${c.id}:health`, level: 'warning', cluster: c, title: `${c.name} health is YELLOW`, detail: `${d.health.unassigned_shards} unassigned shards` });
-    if (d.disk && isFinite(d.disk.percent)) {
-      // With hysteresis (alert-tuning.js diskLevel): raised at the threshold, cleared two
-      // points below it, so a disk at 79.9–80.0% does not open and close on every refresh.
-      const { diskWarnPercent: warn, diskCritPercent: crit } = state.defaults;
-      const lvl = diskLevel(d.disk.percent, diskHeld.get(c.id) || null, warn, crit);
-      if (lvl) diskHeld.set(c.id, lvl); else diskHeld.delete(c.id);
-      if (lvl) add({ key: `${c.id}:disk`, level: lvl, cluster: c, diskPercent: d.disk.percent,
-        title: `${c.name} disk ${d.disk.percent.toFixed(1)}%`,
-        detail: lvl === 'critical'
-          ? (d.disk.percent >= crit ? `Above the critical threshold (${crit}%)` : `Held critical until it falls below ${crit - 2}%`)
-          : (d.disk.percent >= warn ? `Above the warning threshold (${warn}%)` : `Held until it falls below ${warn - 2}%`) });
-    } else {
-      diskHeld.delete(c.id);
-    }
-    // Log indices only, and only while ILM runs: the one definition (lifecycle-errors.js), the same the Clusters dot reads.
-    const ilmE = ilmErrorsOf(d, c.logIndexPattern || d.logIndexPattern || state.defaults.logIndexPattern);
-    if (ilmE.count) add({ key: `${c.id}:ilm`, level: 'warning', cluster: c, title: `${c.name}: ${ilmE.count} log index(es) in ILM error step`, detail: ilmE.names.slice(0, 3).join(', ') });
-    // ULM on and SLM not expected (cluster-kind.js): no snapshot, SLM stopped and a stale
-    // listing are this cluster's normal state. A policy that exists and fails still raises.
-    const exempt = slmExempt(c);
-    if (!exempt && d.slmStatus && d.slmStatus.operation_mode && d.slmStatus.operation_mode !== 'RUNNING') add({ key: `${c.id}:slm-mode`, level: 'warning', cluster: c, title: `${c.name}: SLM is ${d.slmStatus.operation_mode}`, detail: 'Snapshot lifecycle is not running' });
-    // Disk balance across data nodes — only meaningful with more than one.
-    const bal = diskBalance(d, d.clusterSettings);
-    if (bal.applicable && (bal.verdict === 'critical' || bal.verdict === 'required' || bal.verdict === 'watch')) {
-      const act = primaryAction(bal);
-      add({ key: `${c.id}:disk-balance`,
-        level: bal.verdict === 'critical' ? 'critical' : 'warning',
-        cluster: c, balanceCauses: bal.causes || [],
-        title: `${c.name}: ${balanceHeadline(bal)}`,
-        // One suggestion, named — an alert that only states a problem leaves the reader
-        // to work out the next step for themselves.
-        detail: bal.reasons[0] + (act ? `  Suggested: ${act.title} (${act.method} ${act.path}).` : '') });
-    }
-
-    // Field-volume spikes, when the Indices page has run an analysis for this cluster.
-    for (const sp of spikesFor(c.id)) {
-      add({ key: `${c.id}:volume:${sp.field}:${sp.term}`, level: 'warning', cluster: c,
-        title: `${c.name}: ${sp.field} "${sp.term}" volume up ${Math.round(sp.changePct)}%`,
-        detail: `${sp.latest.docs.toLocaleString()} documents on ${sp.latestDay} against a ` +
-                `${Math.round(sp.baseline).toLocaleString()} average over the previous ${sp.baselineDays} days` });
-    }
-    // Who holds the master role, and whether it just changed hands.
-    if (d.master === null && d.nodes && d.nodes.length) {
-      add({ key: `${c.id}:no-master`, level: 'critical', cluster: c,
-        title: `${c.name}: no master node`,
-        detail: `${d.nodes.length} node(s) answered but none holds the master role. The cluster `
-              + 'cannot accept changes to its state until one is elected.' });
-    } else if (d.masterChangedAt && Date.now() - d.masterChangedAt < MASTER_ALERT_HOURS * 3600 * 1000) {
-      // A routine re-election on a cluster that is green again is worth knowing, not paging
-      // over: critical only while the cluster is not green.
-      add({ key: `${c.id}:master-changed:${d.masterChangedFrom}->${d.master}`,
-        level: d.health && d.health.status === 'green' ? 'warning' : 'critical', cluster: c,
-        title: `${c.name}: master moved from ${d.masterChangedFrom} to ${d.master}`,
-        detail: `Elected ${ago(d.masterChangedAt)}. The previous master left, was cut off or was `
-              + 'restarted; anything else that went wrong around then probably started there.' });
-    }
-
-    // The disk itself getting bigger or smaller.
-    if (d.capacity && d.capacity.changedAt
-        && Date.now() - d.capacity.changedAt < CAPACITY_ALERT_HOURS * 3600 * 1000) {
-      const from = d.capacity.changedFrom, to = d.capacity.total;
-      const grew = to > from;
-      add({
-        key: `${c.id}:capacity:${from}->${to}`,
-        level: grew ? 'warning' : 'critical',
-        cluster: c,
-        title: grew
-          ? `${c.name}: disk capacity grew to ${bytesish(to)}`
-          : `${c.name}: disk capacity FELL to ${bytesish(to)}`,
-        detail: grew
-          ? `Was ${bytesish(from)}, now ${bytesish(to)} — ${bytesish(to - from)} added ${ago(d.capacity.changedAt)}. `
-            + 'Expected if you just extended the storage; worth confirming nobody else did it.'
-          : `Was ${bytesish(from)}, now ${bytesish(to)} — ${bytesish(from - to)} gone ${ago(d.capacity.changedAt)}. `
-            + 'A data path is missing or a mount was lost. The node count is unchanged, so this is not a node leaving.',
-      });
-    }
-
-    // Disk Elasticsearch holds that no index accounts for.
-    {
-      const acct = diskAccounting(d, state.indices.get(c.id));
-      if (acct.material) {
-        const dang = danglingFor(c.id);
-        const named = dang && dang.indices && dang.indices.length
-          ? ` ${dang.indices.length} dangling index(es): ${dang.indices.slice(0, 3).map((x) => x.index_name).join(', ')}.`
-          : dang ? ' No dangling indices, so it is orphaned shard data rather than a lost index.'
-                 : ' Open Nodes & shards to check for dangling indices.';
-        add({ key: `${c.id}:disk-unaccounted`, level: 'warning', cluster: c,
-          title: `${c.name}: ${bytesish(acct.gap)} of disk is not accounted for by any index`,
-          detail: `Elasticsearch holds ${bytesish(acct.held)} on its data path but the index list `
-                + `totals ${bytesish(acct.accounted)}.${named}` });
-      }
-    }
-
-    // Snapshots, per repository, over the last five runs and no further back.
-    //
-    // A repository that has been running for a year holds hundreds of snapshots, and
-    // whether the one from March failed says nothing about whether backups work today.
-    // Five is enough to tell a bad night from a broken schedule, and short enough that
-    // the answer is about now.
-    //
-    // Per repository rather than per cluster: two repositories are two different places
-    // the data is being written to, and one of them failing while the other succeeds is
-    // exactly the case a merged view hides.
-    for (const repo of d.repos || []) {
-      // A repository whose listing has not been read yet is unknown — "no snapshots" would
-      // be a guess presented as a finding.
-      if (!repo.error && !Array.isArray((d.snapshots || {})[repo.name])) continue;
-      add(...snapshotAlertsFor(c, repo, ((d.snapshots || {})[repo.name]) || []).filter((a) => !exempt || !EXEMPT_REPO.test(a.key)));
-    }
-
-    (d.slm || []).forEach((p) => {
-      const lf = p.last_failure, ls = p.last_success;
-      const repo = (p.policy && p.policy.repository) || null;   // so a failing repository is raised once (alert-tuning.js)
-      if (lf && (!ls || lf.time > ls.time)) add({ key: `${c.id}:slm-fail:${p.id}`, level: 'critical', cluster: c, repo, title: `${c.name}/${p.id}: last SLM run failed`, detail: String(lf.details || '').slice(0, 160) });
-      const staleMs = state.defaults.snapshotStaleHours * 3600 * 1000;
-      if (!exempt && ls && Date.now() - ls.time > staleMs) add({ key: `${c.id}:slm-stale:${p.id}`, level: 'warning', cluster: c, repo, title: `${c.name}/${p.id}: no successful snapshot recently`, detail: `Last success ${new Date(ls.time).toISOString().replace('T', ' ').slice(0, 16)}` });
-    });
+    clusterAlerts(c, d, add, { now, live: true });
   }
   // Automations the operator wrote, from the last automation run. Computed there because
   // evaluating a rule can need a snapshot listing and this function is synchronous.
@@ -2096,6 +1971,240 @@ export function alerts() {
     },
     ago: dur,
   });
+}
+
+/**
+ * Every per-cluster rule, for one cluster, from its data `d`, as of `now`. The one
+ * description of what is wrong with a cluster: alerts() calls it with what the cluster said
+ * just now (`live`), heldAlerts() with what it said last, before it stopped answering.
+ * Pushes through `add`; nothing here fetches.
+ */
+function clusterAlerts(c, d, add, { now = Date.now(), live = true } = {}) {
+  // Devices shipping late, from the last measurement — see setDelaySummary.
+  const ds = delaySummaries.get(c.id);
+  if (ds && now - ds.at < DELAY_ALERT_HOURS * 3600 * 1000) {
+    const by = ds.summary.by || {};
+    const w = ds.summary.worst;
+    const worst = w && w.delayMinutes !== null ? ` Worst: ${w.device}, ${Math.round(w.delayMinutes)} min behind.` : '';
+    if (by.CRITICAL) {
+      add({ key: `${c.id}:log-delay`, level: 'critical', cluster: c,
+        title: `${c.name}: ${by.CRITICAL} device(s) critically late shipping logs`,
+        detail: `${by.CRITICAL} critical, ${by.DELAYED || 0} delayed of ${ds.summary.devices}.${worst}` });
+    } else if (by.DELAYED) {
+      add({ key: `${c.id}:log-delay`, level: 'warning', cluster: c,
+        title: `${c.name}: ${by.DELAYED} device(s) shipping logs late`,
+        detail: `${by.DELAYED} delayed of ${ds.summary.devices}.${worst}` });
+    }
+  }
+  if (d.health && d.health.status === 'red') add({ key: `${c.id}:health`, level: 'critical', cluster: c, title: `${c.name} health is RED`, detail: `${d.health.unassigned_shards} unassigned shards` });
+  else if (d.health && d.health.status === 'yellow') add({ key: `${c.id}:health`, level: 'warning', cluster: c, title: `${c.name} health is YELLOW`, detail: `${d.health.unassigned_shards} unassigned shards` });
+  if (d.disk && isFinite(d.disk.percent)) {
+    // With hysteresis (alert-tuning.js diskLevel): raised at the threshold, cleared two
+    // points below it, so a disk at 79.9–80.0% does not open and close on every refresh.
+    const { diskWarnPercent: warn, diskCritPercent: crit } = state.defaults;
+    const lvl = diskLevel(d.disk.percent, diskHeld.get(c.id) || null, warn, crit);
+    // Only a live reading moves the hysteresis: a held evaluation reads it, never writes it.
+    if (live) { if (lvl) diskHeld.set(c.id, lvl); else diskHeld.delete(c.id); }
+    if (lvl) add({ key: `${c.id}:disk`, level: lvl, cluster: c, diskPercent: d.disk.percent,
+      title: `${c.name} disk ${d.disk.percent.toFixed(1)}%`,
+      detail: lvl === 'critical'
+        ? (d.disk.percent >= crit ? `Above the critical threshold (${crit}%)` : `Held critical until it falls below ${crit - 2}%`)
+        : (d.disk.percent >= warn ? `Above the warning threshold (${warn}%)` : `Held until it falls below ${warn - 2}%`) });
+  } else if (live) {
+    diskHeld.delete(c.id);
+  }
+  // Log indices only, and only while ILM runs: the one definition (lifecycle-errors.js), the same the Clusters dot reads.
+  const ilmE = ilmErrorsOf(d, c.logIndexPattern || d.logIndexPattern || state.defaults.logIndexPattern);
+  if (ilmE.count) add({ key: `${c.id}:ilm`, level: 'warning', cluster: c, title: `${c.name}: ${ilmE.count} log index(es) in ILM error step`, detail: ilmE.names.slice(0, 3).join(', ') });
+  // ULM on and SLM not expected (cluster-kind.js): no snapshot, SLM stopped and a stale
+  // listing are this cluster's normal state. A policy that exists and fails still raises.
+  const exempt = slmExempt(c);
+  if (!exempt && d.slmStatus && d.slmStatus.operation_mode && d.slmStatus.operation_mode !== 'RUNNING') add({ key: `${c.id}:slm-mode`, level: 'warning', cluster: c, title: `${c.name}: SLM is ${d.slmStatus.operation_mode}`, detail: 'Snapshot lifecycle is not running' });
+  // Disk balance across data nodes — only meaningful with more than one.
+  const bal = diskBalance(d, d.clusterSettings);
+  if (bal.applicable && (bal.verdict === 'critical' || bal.verdict === 'required' || bal.verdict === 'watch')) {
+    const act = primaryAction(bal);
+    add({ key: `${c.id}:disk-balance`,
+      level: bal.verdict === 'critical' ? 'critical' : 'warning',
+      cluster: c, balanceCauses: bal.causes || [],
+      title: `${c.name}: ${balanceHeadline(bal)}`,
+      // One suggestion, named — an alert that only states a problem leaves the reader
+      // to work out the next step for themselves.
+      detail: bal.reasons[0] + (act ? `  Suggested: ${act.title} (${act.method} ${act.path}).` : '') });
+  }
+
+  // Field-volume spikes, when the Indices page has run an analysis for this cluster.
+  for (const sp of spikesFor(c.id)) {
+    add({ key: `${c.id}:volume:${sp.field}:${sp.term}`, level: 'warning', cluster: c,
+      title: `${c.name}: ${sp.field} "${sp.term}" volume up ${Math.round(sp.changePct)}%`,
+      detail: `${sp.latest.docs.toLocaleString()} documents on ${sp.latestDay} against a ` +
+              `${Math.round(sp.baseline).toLocaleString()} average over the previous ${sp.baselineDays} days` });
+  }
+  // Who holds the master role, and whether it just changed hands.
+  if (d.master === null && d.nodes && d.nodes.length) {
+    add({ key: `${c.id}:no-master`, level: 'critical', cluster: c,
+      title: `${c.name}: no master node`,
+      detail: `${d.nodes.length} node(s) answered but none holds the master role. The cluster `
+            + 'cannot accept changes to its state until one is elected.' });
+  } else if (d.masterChangedAt && now - d.masterChangedAt < MASTER_ALERT_HOURS * 3600 * 1000) {
+    // A routine re-election on a cluster that is green again is worth knowing, not paging
+    // over: critical only while the cluster is not green.
+    add({ key: `${c.id}:master-changed:${d.masterChangedFrom}->${d.master}`,
+      level: d.health && d.health.status === 'green' ? 'warning' : 'critical', cluster: c,
+      title: `${c.name}: master moved from ${d.masterChangedFrom} to ${d.master}`,
+      detail: `Elected ${ago(d.masterChangedAt)}. The previous master left, was cut off or was `
+            + 'restarted; anything else that went wrong around then probably started there.' });
+  }
+
+  // The disk itself getting bigger or smaller.
+  if (d.capacity && d.capacity.changedAt
+      && now - d.capacity.changedAt < CAPACITY_ALERT_HOURS * 3600 * 1000) {
+    const from = d.capacity.changedFrom, to = d.capacity.total;
+    const grew = to > from;
+    add({
+      key: `${c.id}:capacity:${from}->${to}`,
+      level: grew ? 'warning' : 'critical',
+      cluster: c,
+      title: grew
+        ? `${c.name}: disk capacity grew to ${bytesish(to)}`
+        : `${c.name}: disk capacity FELL to ${bytesish(to)}`,
+      detail: grew
+        ? `Was ${bytesish(from)}, now ${bytesish(to)} — ${bytesish(to - from)} added ${ago(d.capacity.changedAt)}. `
+          + 'Expected if you just extended the storage; worth confirming nobody else did it.'
+        : `Was ${bytesish(from)}, now ${bytesish(to)} — ${bytesish(from - to)} gone ${ago(d.capacity.changedAt)}. `
+          + 'A data path is missing or a mount was lost. The node count is unchanged, so this is not a node leaving.',
+    });
+  }
+
+  // Disk Elasticsearch holds that no index accounts for.
+  {
+    const acct = diskAccounting(d, state.indices.get(c.id));
+    if (acct.material) {
+      const dang = danglingFor(c.id);
+      const named = dang && dang.indices && dang.indices.length
+        ? ` ${dang.indices.length} dangling index(es): ${dang.indices.slice(0, 3).map((x) => x.index_name).join(', ')}.`
+        : dang ? ' No dangling indices, so it is orphaned shard data rather than a lost index.'
+               : ' Open Nodes & shards to check for dangling indices.';
+      add({ key: `${c.id}:disk-unaccounted`, level: 'warning', cluster: c,
+        title: `${c.name}: ${bytesish(acct.gap)} of disk is not accounted for by any index`,
+        detail: `Elasticsearch holds ${bytesish(acct.held)} on its data path but the index list `
+              + `totals ${bytesish(acct.accounted)}.${named}` });
+    }
+  }
+
+  // Snapshots, per repository, over the last five runs and no further back.
+  //
+  // A repository that has been running for a year holds hundreds of snapshots, and
+  // whether the one from March failed says nothing about whether backups work today.
+  // Five is enough to tell a bad night from a broken schedule, and short enough that
+  // the answer is about now.
+  //
+  // Per repository rather than per cluster: two repositories are two different places
+  // the data is being written to, and one of them failing while the other succeeds is
+  // exactly the case a merged view hides.
+  for (const repo of d.repos || []) {
+    // A repository whose listing has not been read yet is unknown — "no snapshots" would
+    // be a guess presented as a finding.
+    if (!repo.error && !Array.isArray((d.snapshots || {})[repo.name])) continue;
+    add(...snapshotAlertsFor(c, repo, ((d.snapshots || {})[repo.name]) || [], now).filter((a) => !exempt || !EXEMPT_REPO.test(a.key)));
+  }
+
+  (d.slm || []).forEach((p) => {
+    const lf = p.last_failure, ls = p.last_success;
+    const repo = (p.policy && p.policy.repository) || null;   // so a failing repository is raised once (alert-tuning.js)
+    if (lf && (!ls || lf.time > ls.time)) add({ key: `${c.id}:slm-fail:${p.id}`, level: 'critical', cluster: c, repo, title: `${c.name}/${p.id}: last SLM run failed`, detail: String(lf.details || '').slice(0, 160) });
+    const staleMs = state.defaults.snapshotStaleHours * 3600 * 1000;
+    if (!exempt && ls && now - ls.time > staleMs) add({ key: `${c.id}:slm-stale:${p.id}`, level: 'warning', cluster: c, repo, title: `${c.name}/${p.id}: no successful snapshot recently`, detail: `Last success ${new Date(ls.time).toISOString().replace('T', ' ').slice(0, 16)}` });
+  });
+}
+
+/* ------------------------------ held, from cached data ------------------------------ */
+
+/**
+ * Without the fleet cache: a down cluster's data as it was when it last answered
+ * (fetchOverviewDirect). With it, the core's cache is the record and this stays empty.
+ */
+const lastReachable = new Map();
+/** Per down cluster: the data rebuilt from the cache, until one of its readings changes. */
+const heldMemo = new Map();
+
+/**
+ * A down cluster's newest cached data — `{d, at: {dataset: ms}}` — or null when there is none.
+ * Nothing is fetched. With the fleet cache: its entries, which keep the last good answer and
+ * its fetchedAt when a fetch fails, health included (fleetPairs lastGood), built by the same
+ * buildClusterData as the live view. Without it: the last data this page read while the
+ * cluster answered, all of it as of that read.
+ */
+function heldSource(id) {
+  const cur = fleetMode() ? fleet.raw.get(id) : null;
+  if (cur) {
+    const at = {};
+    for (const n of HELD_DATASETS) {
+      const e = cur.datasets[n];
+      if (e && e.data && e.status !== 'never' && e.fetchedAt) at[n] = local(e.fetchedAt);
+    }
+    if (!Object.keys(at).length) return null;
+    const cl = state.clients.get(id);
+    const reSrc = cl && cl.c ? cl.c.indexNameRegex : undefined;
+    const sig = `${HELD_DATASETS.map((n) => at[n] || 0).join(',')}|${reSrc || ''}`;
+    const memo = heldMemo.get(id);
+    if (memo && memo.sig === sig) return memo;
+    const raw = fleetPairs(cur, { lastGood: true });
+    raw.updatedAt = at.health || undefined;
+    const prev = state.data.get(id) || {};
+    const d = buildClusterData(id, prev, raw);
+    // Its own repository objects: the snapshot listing writes `error` onto them.
+    d.repos = (d.repos || []).map((r) => ({ ...r }));
+    d.logIndexPattern = prev.logIndexPattern;
+    applySnapshotEntries(d, cur, reSrc);
+    const out = { d, at, sig };
+    heldMemo.set(id, out);
+    return out;
+  }
+  const d = lastReachable.get(id);
+  const t = d && Number(d.updatedAt);
+  if (!t) return null;
+  return { d, at: Object.fromEntries(HELD_DATASETS.map((n) => [n, t])) };
+}
+
+/** The cached data a held alert on this cluster was computed from, while it is down. */
+export function heldDataFor(id) {
+  const m = heldMemo.get(id);
+  return m ? m.d : lastReachable.get(id) || null;
+}
+
+/**
+ * Every rule, evaluated for each cluster that cannot be reached, from its newest cached data
+ * (heldSource) — what was wrong with it when it was last read. Each alert carries `asOf` and
+ * `cached: true`; mergedAlerts holds them under the cluster's unreachable line, so none is
+ * ever open, counted, announced or sent to Zabbix. A rule whose data is unknown or older
+ * than HELD_MAX_AGE_MS (alert-held.js) says nothing. Not part of alerts(), which stays
+ * "what is true now" for every reader that takes it raw (the Zabbix scraper among them).
+ */
+export function heldAlerts(now = Date.now()) {
+  const settings = loadAlertSettings(state.config && state.config.raw);
+  const down = new Set();
+  const out = [];
+  // Held only behind an unreachable line: with that rule switched off there is no line.
+  if (isEnabled(settings, 'unreachable')) {
+    for (const c of clusters()) {
+      const d = state.data.get(c.id);
+      if (!d || d.healthUnknown || d.reachable) continue;
+      down.add(c.id);
+      const src = heldSource(c.id);
+      const when = src && evaluatedAt(src.at);
+      if (!when || now - when > HELD_MAX_AGE_MS) continue;
+      const raised = [];
+      clusterAlerts(c, src.d, (...a) => raised.push(...a.filter(Boolean)), { now: when, live: false });
+      const ds = delaySummaries.get(c.id);
+      out.push(...stampHeld(raised, { at: src.at, delayAt: ds ? ds.at : null, now }));
+    }
+  }
+  // Bounded: one entry per cluster that is down now, and none for one that answers.
+  for (const id of [...heldMemo.keys()]) if (!down.has(id)) heldMemo.delete(id);
+  for (const id of [...lastReachable.keys()]) if (!clusters().some((c) => c.id === id)) lastReachable.delete(id);
+  // Tuned like the live list (one row per problem), without the staleness note: `asOf` says it.
+  return tuneAlerts(applySettings(out, settings), {});
 }
 
 /** The repository rules an SLM-exempt cluster does not raise: none, and not recent. Failing still does. */
@@ -2126,7 +2235,8 @@ const mergedMemo = { alerts: null, rev: -1, acks: -1, at: 0, value: [] };
 function mergeContext(now) {
   return {
     now,
-    data: (id) => state.data.get(id) || null,
+    // A held alert's items (disk per node, ILM per index) come from the data it was raised from.
+    data: (id) => heldDataFor(id) || state.data.get(id) || null,
     defaults: state.defaults,
     ackFor, isAcked, silenced: (a) => alertSilenced(a),
     startOf: (k) => alertHistory.startOf(k),
@@ -2140,8 +2250,8 @@ function mergeContext(now) {
  */
 export function mergedAlerts({ fresh = false } = {}) {
   const now = Date.now();
-  if (fresh) return holdUnreachable(mergeAlerts(alerts(), mergeContext(now)));
-  const raw = cachedAlerts();
+  if (fresh) return holdUnreachable(mergeAlerts([...alerts(), ...heldAlerts(now)], mergeContext(now)));
+  const raw = [...cachedAlerts(), ...alertsMemo.held];
   const same = alertsMemo.value === mergedMemo.alerts && alertsMemo.rev === mergedMemo.rev
     && acksRev() === mergedMemo.acks && now - mergedMemo.at < ALERTS_MEMO_MS;
   if (same) return mergedMemo.value;
@@ -2233,7 +2343,7 @@ const snapDay = (ms) => (ms ? new Date(ms).toISOString().replace('T', ' ').slice
  * then, not five. If the streak fills the whole window the start is older than we looked,
  * and the alert says so rather than naming the fifth-oldest run as the beginning.
  */
-function snapshotAlertsFor(c, repo, all) {
+function snapshotAlertsFor(c, repo, all, now = Date.now()) {
   const key = `${c.id}:repo:${repo.name}`;
   if (repo.error) {
     return [{ key: `${key}:unreadable`, level: 'warning', cluster: c, repo: repo.name,
@@ -2250,7 +2360,7 @@ function snapshotAlertsFor(c, repo, all) {
 
   const latest = recent[0];
   const staleMs = state.defaults.snapshotStaleHours * 3600 * 1000;
-  const isNew = Date.now() - latest.start <= staleMs;
+  const isNew = now - latest.start <= staleMs;
   // Carried structurally as well as in the prose so the alerts table can show the date
   // and the new/old answer in their own column rather than making them be read out of a
   // sentence.
@@ -2353,7 +2463,7 @@ function publishPopupSummary() {
         version: (d.info && d.info.version && d.info.version.number) || '',
       };
     });
-    if (globalThis.chrome && chrome.storage && chrome.storage.session) chrome.storage.session.set({ summary: { at: Date.now(), rows, alerts: mergedAlerts().length } });
+    if (globalThis.chrome && chrome.storage && chrome.storage.session) chrome.storage.session.set({ summary: { at: Date.now(), rows, alerts: mergedAlerts().filter((m) => !isHeld(m)).length } });
   } catch (_) { /* storage.session unavailable */ }
 }
 
