@@ -3103,8 +3103,18 @@ restoreConsole();
     }
     if (body.type === 'CONFIG_WRITE') { written = body.text; return stubReply({ ok: true, path: body.path, bytes: body.text.length }); }
     if (body.type === 'CONFIG_READ' && written !== null) return stubReply({ ok: true, text: written, size: written.length, lastModified: Date.now() });
+    // Every PING says what config.txt manages (managed.js setManaged), and the dev bridge
+    // manages nothing — so a PING landing while the managed case below runs (the Config page
+    // asks one on open, Save asks one, the side foot every 10 s) undid what it set up, and
+    // whether it did was a matter of timing. The bridge's answer, with the case's own list.
+    if (body.type === 'PING' && managedNow) {
+      const res = await realFetch(input, init);
+      const j = await res.json();
+      return stubReply({ ...j, managedDefaults: { ...managedNow }, managedZabbixOptions: {} });
+    }
     return realFetch(input, init);
   };
+  let managedNow = null;
   const press = async (label, root = doc.querySelector('#view')) => {
     const b = [...root.querySelectorAll('button')].find((x) => x.textContent.trim() === label);
     if (b) { b.click(); await settleFor(700); }
@@ -3179,7 +3189,8 @@ restoreConsole();
 
     // A key config.txt manages is locked, says why, and is never written.
     const managed = await load('core/managed.js');
-    managed.setManaged({ ok: true, managedDefaults: { volumeTopValues: 40 }, managedZabbixOptions: {} });
+    managedNow = { volumeTopValues: 40 };
+    managed.setManaged({ ok: true, managedDefaults: { ...managedNow }, managedZabbixOptions: {} });
     await openSettingsTab('Defaults'); await openSettingsTab('Volume fields');
     await press('Defaults · all clusters');
     const top = doc.getElementById('vf-top');
@@ -3191,8 +3202,10 @@ restoreConsole();
     ok(written !== null, 'volume fields: Save with a managed value wrote nothing');
     ok(written === null || !/"topValues"\s*:\s*40/.test(written),
       `volume fields: saving wrote a managed value into the file (${written && JSON.stringify((JSON.parse(written).defaults || {}).volume)})`);
+    managedNow = null;
     managed.setManaged({ ok: true, managedDefaults: {}, managedZabbixOptions: {} });
   } finally {
+    managedNow = null;
     globalThis.fetch = realFetch;
   }
   await applyConfig({ load, configPath });
