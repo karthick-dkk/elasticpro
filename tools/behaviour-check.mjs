@@ -3499,9 +3499,98 @@ restoreConsole();
       // The emergency stop is not the form's: Save sends no `paused`, so it can never lift one.
       ok(m && !('paused' in m.policy), `policy: Config › Requests Save sent the stop: ${JSON.stringify(m && m.policy && m.policy.paused)}`);
     }
+
+    // Duplicate requests and While Play runs (2026-11-01): their own sections; the gap and each
+    // Play interval are inputs within their bounds, the three kinds a person types are listed and
+    // not editable, Save sends them, and a field config.txt locks reads "managed by config.txt".
+    const gapSec = doc.getElementById('pol-gap-sec');
+    ok(!!gapSec, 'gap: no "Duplicate requests" section on Config › Requests');
+    const gapIn = doc.getElementById('pol-gap');
+    ok(gapIn && gapIn.min === '30' && gapIn.max === '600', `gap: the gap input allows ${gapIn && gapIn.min}–${gapIn && gapIn.max}, expected 30–600`);
+    const gtext = gapSec ? gapSec.textContent : '';
+    ok(/Askers waiting on the same request share it — always on/.test(gtext), `gap: in-flight sharing is not said to be always on: "${gtext}"`);
+    ok(/REST console/.test(gtext) && !/Indices page search|Snapshots page search/.test(gtext), `gap: the kinds never held are not what goes to a cluster as typed: "${gtext}"`);
+    ok(gapSec && gapSec.querySelectorAll('input').length === 1, 'gap: something besides the gap is editable under Duplicate requests');
+    const playSec = doc.getElementById('pol-play-sec');
+    ok(!!playSec, 'play schedule: no "While Play runs" section on Config › Requests');
+    const keys = ['healthSec', 'nodesSec', 'lifecycleSec', 'snapshotsSec', 'indicesSec', 'delayFullSec', 'delayLateSec'];
+    const input = (k) => doc.getElementById(`pol-play-${k}`);
+    ok(keys.every(input), `play schedule: no input for ${keys.filter((k) => !input(k)).join(', ')}`);
+    const now = await es.policyGet();
+    ok(now && now.ok && now.policy && now.policy.play && keys.every((k) => input(k) && Number(input(k).value) === now.policy.play[k]),
+      `play schedule: the inputs do not show the policy: ${JSON.stringify(now && now.policy && now.policy.play)}`);
+    ok(gapIn && Number(gapIn.value) === now.policy.minGapSec, `gap: the input shows ${gapIn && gapIn.value}, the policy ${now.policy.minGapSec}`);
+    ok(/full check/.test(playSec ? playSec.textContent : '') && /late devices/.test(playSec ? playSec.textContent : ''), 'play schedule: the log delay\'s two tiers are not both there');
+    if (gapIn && input('healthSec') && !gapIn.disabled) {
+      const was = { gap: gapIn.value, health: input('healthSec').value };
+      gapIn.value = '90'; input('healthSec').value = '600';
+      const save = button('Save');
+      if (save) { save.click(); await settleFor(500); }
+      const m = lastOf('POLICY_SET');
+      ok(m && m.policy.minGapSec === 90 && m.policy.play && m.policy.play.healthSec === 600 && m.policy.play.delayLateSec === now.policy.play.delayLateSec,
+        `gap: Save sent ${JSON.stringify(m && { minGapSec: m.policy.minGapSec, play: m.policy.play })}`);
+      const back = await es.policyGet();
+      ok(back.policy.minGapSec === 90 && back.policy.play.healthSec === 600, `gap: the core kept ${JSON.stringify({ g: back.policy.minGapSec, h: back.policy.play.healthSec })}`);
+      const g2 = doc.getElementById('pol-gap'); const h2 = doc.getElementById('pol-play-healthSec');
+      if (g2 && h2) { g2.value = was.gap; h2.value = was.health; const s2 = button('Save'); if (s2) { s2.click(); await settleFor(500); } }
+    }
+    // config.txt locks the gap and Play's health interval: both drawn locked, saying so; the rest stay editable.
+    const realFetch = globalThis.fetch;
+    const lockedBy = { minGapSec: 'POLL_MIN_GAP_SECONDS', 'play.healthSec': 'POLL_PLAY_HEALTH_SECONDS' };
+    globalThis.fetch = async (input2, init) => {
+      const body = init && init.body ? JSON.parse(init.body) : {};
+      const res = await realFetch(input2, init);
+      if (body.type !== 'POLICY_GET') return res;
+      const j = await res.json();
+      return stubReply({ ...j, managed: lockedBy });
+    };
+    // A fresh visit to Config › Requests: the policy is read once per visit.
+    const revisit = async () => {
+      await go('overview'); await go('settings');
+      const t = [...doc.querySelectorAll('nav.subnav button')].find((b) => b.title === 'Requests');
+      if (t) { t.click(); await settleFor(700); }
+    };
+    try {
+      await revisit();
+      const g = doc.getElementById('pol-gap');
+      ok(g && g.disabled && /managed by config\.txt \(POLL_MIN_GAP_SECONDS\)/.test(g.closest('label').textContent),
+        `gap: a gap config.txt locks is not drawn locked with its key: ${g && g.closest('label').textContent}`);
+      const ph = doc.getElementById('pol-play-healthSec');
+      ok(ph && ph.disabled && /managed by config\.txt \(POLL_PLAY_HEALTH_SECONDS\)/.test(ph.closest('tr').textContent),
+        `play schedule: a locked interval does not say so: ${ph && ph.closest('tr').textContent}`);
+      const pn = doc.getElementById('pol-play-nodesSec');
+      ok(pn && !pn.disabled, 'play schedule: an interval config.txt does not lock was drawn locked');
+    } finally {
+      globalThis.fetch = realFetch;
+      await revisit();
+    }
   }
 
   await go('requests'); await settleFor(500);
+  // What the duplicate-request gap saved, per dataset over the last hour (REQUEST_LOG `asks`).
+  {
+    const gc = [...doc.querySelectorAll('section.card')].find((x) => (x.querySelector('header h2') || {}).textContent === 'Duplicate requests');
+    ok(!!gc && !!gc.querySelector('#rq-gap'), 'gap: the Request Centre has no "Duplicate requests" card');
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = async (input2, init) => {
+      const body = init && init.body ? JSON.parse(init.body) : {};
+      const res = await realFetch(input2, init);
+      if (body.type !== 'REQUEST_LOG') return res;
+      const j = await res.json();
+      return stubReply({ ...j, asks: { windowMinutes: 60, gapSec: 60, since: null, byDataset: {
+        health: { asked: 42, sent: 12, recent: 30, shared: 0, held: 0 },
+        direct: { asked: 5, sent: 3, recent: 1, shared: 1, held: 0 } } } });
+    };
+    try {
+      await settleFor(2600);
+      const t = (doc.getElementById('rq-gap') || {}).textContent || '';
+      ok(/health: asked 42 this hour, sent 12, 30 answered from a reading under a minute old/.test(t), `gap: the Request Centre reads "${t}"`);
+      ok(/page reads: asked 5 this hour, sent 3, 1 answered from a reading under a minute old, 1 shared one already on its way/.test(t), `gap: page reads read "${t}"`);
+      ok(/32 of 47 asks/.test(t), `gap: the total saved reads "${t}"`);
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  }
   // 0.3.44: no per-cluster pause. The table says how each cluster is being handled on its
   // own instead — normal, slowed, or held — and nothing in it stops a cluster by hand.
   const per = [...doc.querySelectorAll('section.card')].find((x) => (x.querySelector('header h2') || {}).textContent === 'Per cluster');

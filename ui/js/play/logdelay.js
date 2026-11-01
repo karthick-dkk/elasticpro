@@ -7,11 +7,17 @@
  * "Peak 24 h" is the one figure no other page has: the highest delay a device showed in the
  * measurements of the last 24 h (play/measure.js carries it from one measurement to the
  * next, shared through the core so every display shows the same).
+ *
+ * The measurement has two tiers (play/measure.js): a full check of every device every 2 h,
+ * and the late list re-checked every 15 min. The slide says when each last ran — "last full
+ * check 14:00 · late devices re-checked 14:45" — the oldest across its clusters, so a device
+ * that went quiet since the full check is not read as measured a minute ago.
  */
 
 import { h } from '../lib/dom.js';
 import { classify, summarise, STATUS } from '../core/log-delay.js';
 import { kpi, unknown, minutes, fitRows, clockText } from './parts.js';
+import { tierLine } from './measure.js';
 
 export const id = 'delay';
 export const title = 'Log delay';
@@ -64,7 +70,9 @@ export function render(ctx) {
     h('table.pl-tbl', h('thead', h('tr', h('th', 'Cluster'), h('th.num', 'Median delay'), h('th.num', `Devices > ${t.delayYellowFromMin} min`))), h('tbody', clRows)));
   ctx.afterMount(() => { fitRows(devBox, devRows, () => null); fitRows(clBox, clRows, () => null); });
   const truncated = done.reduce((n, c) => n + (ctx.delay.get(c.id).truncated || 0), 0);
+  const tiers = tierLine(done.map((c) => ctx.delay.get(c.id)), (ms) => clockText(ms, ctx.tz, { seconds: false }));
   return h('div.pl-slide.pl-logdelay',
+    tiers ? h('div.pl-s.pl-tiers', tiers) : null,
     h('div.pl-kpis',
       kpi('Devices sending logs', String(s.devices), `${done.length} of ${ctx.clusters.length} clusters measured${truncated ? ' · list capped' : ''}`),
       kpi(`Under ${t.delayYellowFromMin} min`, String(s.by.OK || 0), null, 'green'),

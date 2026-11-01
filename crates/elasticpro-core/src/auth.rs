@@ -253,6 +253,119 @@ pub fn play_may(msg_type: &str, method: &str, path: &str, kind: Option<&str>) ->
     }
 }
 
+/// The device-delay fields shipped in `ui/js/core/config.js` DEFAULTS (`delayFields`); a cluster
+/// whose config names none uses these (tools/unit holds the two equal).
+pub const DELAY_DEVICE_DEFAULT: &str = "src_hostname";
+pub const DELAY_EVENT_TIME_DEFAULT: &[&str] = &["ingested_time", "event_created", "event.created"];
+pub const DELAY_METADATA_DEFAULT: &[&str] = &["parser_tag", "fwdtag", "src_ip", "tag1", "ClientID", "branch", "log_type"];
+/// The arrival timestamp when neither the cluster nor config.txt (`UI_TIME_FIELD`) names one.
+pub const DELAY_ARRIVAL_DEFAULT: &str = "@timestamp";
+/// The widest window the measurement asks about, in hours (`measureDelay(…, 24)`).
+pub const DELAY_MAX_HOURS: u64 = 24;
+
+/// A cluster's `delayFields` as its config gives them (what `PRIME` carries).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct DelayFields {
+    pub device: Option<String>,
+    #[serde(alias = "event_time")]
+    pub event_time: Vec<String>,
+    pub metadata: Vec<String>,
+}
+
+/// The name a terms aggregation runs against: `log-delay.js` `aggregatableName`, the same rule
+/// (`.keyword` appended unless already there, IP-like, or `ClientID`).
+pub fn aggregatable_name(field: &str) -> String {
+    let f = field.trim();
+    let ip_like = f.split(['.', '_']).any(|t| matches!(t.to_ascii_lowercase().as_str(), "ip" | "addr" | "address"));
+    if f.is_empty() || f.ends_with(".keyword") || f == "ClientID" || ip_like {
+        f.to_string()
+    } else {
+        format!("{f}.keyword")
+    }
+}
+
+/// Everything a display link's log-delay request may name for one cluster: its index pattern,
+/// the field devices are grouped by (as aggregated), the arrival timestamp, and the fields the
+/// newest document may bring back — the cluster's own delay configuration, nothing else.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DelayShape {
+    pub pattern: Option<String>,
+    pub device: String,
+    pub arrivals: Vec<String>,
+    pub source: Vec<String>,
+}
+
+/// The clusters file's `defaults:` as far as the log delay goes: what a cluster that names none
+/// of its own takes — a Zabbix host's always, since Zabbix gives it no delay fields.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct DelayDefaults {
+    pub pattern: Option<String>,
+    pub time_field: Option<String>,
+    pub fields: Option<DelayFields>,
+}
+
+impl DelayDefaults {
+    /// From the parsed clusters file (`defaults.logIndexPattern`, `.timeField`, `.delayFields`).
+    pub fn from_config(raw: &serde_json::Value) -> DelayDefaults {
+        let d = &raw["defaults"];
+        let text = |k: &str| d.get(k).and_then(|v| v.as_str()).map(str::trim).filter(|v| !v.is_empty()).map(String::from);
+        DelayDefaults {
+            pattern: text("logIndexPattern"),
+            time_field: text("timeField"),
+            fields: d.get("delayFields").or_else(|| d.get("delay_fields")).filter(|v| v.is_object())
+                .and_then(|v| serde_json::from_value(v.clone()).ok()),
+        }
+    }
+}
+
+impl DelayShape {
+    /// The cluster's own settings over the shipped defaults (no clusters file, no config.txt).
+    pub fn of(pattern: Option<String>, time_field: Option<&str>, managed_time: Option<&str>, fields: Option<&DelayFields>) -> DelayShape {
+        DelayShape::resolve(pattern, time_field, fields, &DelayDefaults::default(), managed_time, None)
+    }
+
+    /// What the UI measures this cluster with, resolved the way it resolves it — config.js
+    /// `normalize` (the cluster's own, else `defaults` = shipped, the clusters file's, then
+    /// config.txt's over both) and log-delay.js `resolveFields` (`src_hostname`, the
+    /// event-time list, `@timestamp` when nothing names one). One definition, so the gate and
+    /// the measurer cannot disagree, for a config cluster and a Zabbix host alike.
+    pub fn resolve(own_pattern: Option<String>, own_time: Option<&str>, own_fields: Option<&DelayFields>,
+                   file: &DelayDefaults, managed_time: Option<&str>, managed_pattern: Option<&str>) -> DelayShape {
+        let pick = |xs: [Option<&str>; 3], last: &str| -> String {
+            xs.into_iter().flatten().map(str::trim).find(|x| !x.is_empty()).unwrap_or(last).to_string()
+        };
+        let pattern = Some(pick([own_pattern.as_deref(), managed_pattern, file.pattern.as_deref()], "logstash-*"));
+        let arrival = pick([own_time, managed_time, file.time_field.as_deref()], DELAY_ARRIVAL_DEFAULT);
+        let shipped = |l: &[&str]| l.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        let base = file.fields.clone().unwrap_or(DelayFields {
+            device: Some(DELAY_DEVICE_DEFAULT.into()),
+            event_time: shipped(DELAY_EVENT_TIME_DEFAULT),
+            metadata: shipped(DELAY_METADATA_DEFAULT),
+        });
+        let own = own_fields.cloned().unwrap_or_default();
+        let clean = |v: &Vec<String>| v.iter().map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect::<Vec<_>>();
+        let device = [own.device.as_deref(), base.device.as_deref()].into_iter().flatten().map(str::trim)
+            .find(|x| !x.is_empty()).unwrap_or(DELAY_DEVICE_DEFAULT).to_string();
+        let mut event = clean(&own.event_time);
+        if event.is_empty() {
+            event = clean(&base.event_time);
+        }
+        let mut metadata = clean(&own.metadata);
+        if metadata.is_empty() {
+            metadata = clean(&base.metadata);
+        }
+        let mut source = vec![arrival.clone()];
+        source.extend(event);
+        // resolveFields falls back to these when a cluster's list is empty: always allowed.
+        source.extend(shipped(DELAY_EVENT_TIME_DEFAULT));
+        source.extend(metadata.into_iter().map(|m| m.trim_end_matches(".keyword").to_string()));
+        source.sort();
+        source.dedup();
+        DelayShape { pattern, device: aggregatable_name(&device), arrivals: vec![arrival], source }
+    }
+}
+
 /// The one Elasticsearch request a display link may send, in full: the log-delay
 /// measurement (`ui/js/core/log-delay.js` `preflight` and `measureDelay`), and nothing that
 /// merely ends in `_search`. `play_may` has already allowed the endpoint; this decides the
@@ -265,8 +378,14 @@ pub fn play_may(msg_type: &str, method: &str, path: &str, kind: Option<&str>) ->
 ///   `allow_no_indices`, and `fields` for `_field_caps`), so no `expand_wildcards`;
 /// * `_field_caps` is a GET with no body; `_search` carries exactly the body
 ///   `buildSearchBody` builds: `size: 0`, one time range, a terms aggregation of at most
-///   500 devices with one newest document each.
-pub fn play_es_shape(pattern: Option<&str>, method: &str, path: &str, body: Option<&str>) -> Result<(), String> {
+///   500 devices with one newest document each — and, for the late list's re-check
+///   (ui/js/play/measure.js), that body with one more filter after the range naming only
+///   those devices: `{"terms": {<the aggregation's own field>: [1–500 plain names]}}`;
+/// * every field it names is the cluster's own delay configuration (`DelayShape`): the device
+///   field, the arrival timestamp, the event-time and metadata fields; and the window is at
+///   most the last 24 hours (`now-<N>h` to `now`).
+pub fn play_es_shape(shape: &DelayShape, method: &str, path: &str, body: Option<&str>) -> Result<(), String> {
+    let pattern = shape.pattern.as_deref();
     let refuse = |why: &str| Err(format!("{PLAY_REFUSED}: only the log-delay measurement may be sent ({why})"));
     let (bare, query) = path.split_once('?').unwrap_or((path, ""));
     let parts: Vec<&str> = bare.split('/').collect();
@@ -301,11 +420,27 @@ pub fn play_es_shape(pattern: Option<&str>, method: &str, path: &str, body: Opti
         return refuse("a search is a POST");
     }
     let Some(v) = body.and_then(|b| serde_json::from_str::<serde_json::Value>(b).ok()) else { return refuse("the measurement's body") };
-    if delay_search_body(&v) { Ok(()) } else { refuse("the measurement's body: size 0, one time range, the device terms") }
+    if delay_search_body(&v, shape) { Ok(()) } else { refuse("the measurement's body: size 0, the last 24 h, the cluster's own delay fields") }
+}
+
+/// `now-<N>h` with 1 ≤ N ≤ `DELAY_MAX_HOURS`: the measurement's window, never a wider one.
+fn within_a_day(gte: &str) -> bool {
+    gte.strip_prefix("now-").and_then(|r| r.strip_suffix('h')).and_then(|n| n.parse::<u64>().ok())
+        .is_some_and(|n| (1..=DELAY_MAX_HOURS).contains(&n))
+}
+
+/// The most devices the late list's re-check may name (the measurement's own terms size).
+pub const DELAY_LATE_MAX: usize = 500;
+
+/// A device name as the late list's re-check may name it: what a terms aggregation returned
+/// as a bucket key — any printable text up to 256 characters, but no wildcard (`*`, `?`) and
+/// no control character, so it can only ever match that one device.
+fn device_name(s: &str) -> bool {
+    !s.trim().is_empty() && s.chars().count() <= 256 && !s.chars().any(|c| c.is_control() || c == '*' || c == '?')
 }
 
 /// `buildSearchBody`'s shape, key for key.
-fn delay_search_body(v: &serde_json::Value) -> bool {
+fn delay_search_body(v: &serde_json::Value, shape: &DelayShape) -> bool {
     use serde_json::Value;
     fn keys(v: &Value, want: &[&str], optional: &[&str]) -> bool {
         v.as_object().is_some_and(|m| want.iter().all(|k| m.contains_key(*k))
@@ -323,15 +458,29 @@ fn delay_search_body(v: &serde_json::Value) -> bool {
     if !keys(v, &["size", "query", "aggs"], &[]) || v["size"] != serde_json::json!(0) {
         return false;
     }
-    // query: {bool: {filter: [{range: {<arrival>: {gte, lte, format}}}]}}
+    // query: {bool: {filter: [{range: {<arrival>: {gte, lte, format}}}, {terms: …}?]}}
     let q = &v["query"];
+    let filter = q["bool"]["filter"].as_array();
     let range_ok = keys(q, &["bool"], &[]) && keys(&q["bool"], &["filter"], &[])
-        && q["bool"]["filter"].as_array().is_some_and(|f| f.len() == 1 && keys(&f[0], &["range"], &[])
-            && f[0]["range"].as_object().is_some_and(|m| m.keys().all(|k| plain(k)))
-            && one_field(&f[0]["range"]).is_some_and(|r| keys(r, &[], &["gte", "lte", "format"])
-                && r.as_object().is_some_and(|m| m.values().all(Value::is_string))));
+        && filter.is_some_and(|f| matches!(f.len(), 1 | 2) && keys(&f[0], &["range"], &[])
+            && f[0]["range"].as_object().is_some_and(|m| m.len() == 1 && m.keys().all(|k| shape.arrivals.contains(k)))
+            && one_field(&f[0]["range"]).is_some_and(|r| keys(r, &["gte", "lte"], &["format"])
+                && r["gte"].as_str().is_some_and(within_a_day) && r["lte"] == serde_json::json!("now")
+                && r.get("format").is_none_or(|x| *x == serde_json::json!("strict_date_optional_time"))));
     if !range_ok {
         return false;
+    }
+    // The late list's re-check: one terms filter on the aggregation's own field, naming only
+    // plain device names — never a pattern, never another field, never anything beside it.
+    if let Some(narrow) = filter.and_then(|f| f.get(1)) {
+        let field = v["aggs"]["devices"]["terms"]["field"].as_str();
+        let ok = keys(narrow, &["terms"], &[])
+            && narrow["terms"].as_object().is_some_and(|m| m.len() == 1)
+            && field.is_some_and(|f| narrow["terms"].get(f).is_some_and(|names| names.as_array().is_some_and(|a|
+                (1..=DELAY_LATE_MAX).contains(&a.len()) && a.iter().all(|x| x.as_str().is_some_and(device_name)))));
+        if !ok {
+            return false;
+        }
     }
     // aggs: {devices: {terms: {field, size ≤ 500, order?}, aggs: {latest: {top_hits: {size: 1, sort, _source}}}}}
     let d = &v["aggs"];
@@ -339,7 +488,7 @@ fn delay_search_body(v: &serde_json::Value) -> bool {
         return false;
     }
     let t = &d["devices"]["terms"];
-    let terms_ok = keys(t, &["field", "size"], &["order"]) && t["field"].as_str().is_some_and(plain)
+    let terms_ok = keys(t, &["field", "size"], &["order"]) && t["field"].as_str() == Some(shape.device.as_str())
         && t["size"].as_u64().is_some_and(|n| (1..=500).contains(&n))
         && t.get("order").is_none_or(|o| *o == serde_json::json!({ "_count": "desc" }));
     let inner = &d["devices"]["aggs"];
@@ -347,8 +496,9 @@ fn delay_search_body(v: &serde_json::Value) -> bool {
         && keys(&inner["latest"]["top_hits"], &["size", "_source"], &["sort"])
         && inner["latest"]["top_hits"]["size"] == serde_json::json!(1)
         && strings(&inner["latest"]["top_hits"]["_source"])
+        && inner["latest"]["top_hits"]["_source"].as_array().is_some_and(|a| a.iter().all(|x| x.as_str().is_some_and(|f| shape.source.iter().any(|s| s == f))))
         && inner["latest"]["top_hits"].get("sort").is_none_or(|s| s.as_array().is_some_and(|a| a.len() <= 2
-            && a.iter().all(|x| x.as_object().is_some_and(|m| m.len() == 1 && m.keys().all(|k| plain(k)))
+            && a.iter().all(|x| x.as_object().is_some_and(|m| m.len() == 1 && m.keys().all(|k| shape.arrivals.contains(k)))
                 && one_field(x).is_some_and(|o| keys(o, &["order"], &[]) && o["order"].is_string()))));
     terms_ok && hits_ok
 }
@@ -2139,51 +2289,174 @@ mod tests {
         }).to_string()
     }
 
+    /// The delay configuration `delay_body` measures: device `host`, arrival `@timestamp`,
+    /// event time `event.created`, metadata `host`.
+    fn sh(p: Option<&str>) -> DelayShape {
+        let f = DelayFields { device: Some("host".into()), event_time: vec!["event.created".into()], metadata: vec!["host".into()] };
+        DelayShape::of(p.map(String::from), Some("@timestamp"), None, Some(&f))
+    }
+
     #[test]
     fn a_display_link_may_send_the_delay_measurement_and_nothing_shaped_like_it() {
         let p = Some("logs-*");
         let body = delay_body(500);
         // The measurement as the page sends it.
-        assert!(play_es_shape(p, "POST", "/logs-*/_search?ignore_unavailable=true&allow_no_indices=true", Some(&body)).is_ok());
-        assert!(play_es_shape(p, "POST", "/logs-%2A/_search?ignore_unavailable=true&allow_no_indices=true", Some(&body)).is_ok(), "percent-encoded");
-        assert!(play_es_shape(p, "GET", "/logs-*/_field_caps?ignore_unavailable=true&fields=host%2C%40timestamp", None).is_ok());
+        assert!(play_es_shape(&sh(p), "POST", "/logs-*/_search?ignore_unavailable=true&allow_no_indices=true", Some(&body)).is_ok());
+        assert!(play_es_shape(&sh(p), "POST", "/logs-%2A/_search?ignore_unavailable=true&allow_no_indices=true", Some(&body)).is_ok(), "percent-encoded");
+        assert!(play_es_shape(&sh(p), "GET", "/logs-*/_field_caps?ignore_unavailable=true&fields=host%2C%40timestamp", None).is_ok());
         // Every index on the cluster, hidden ones included.
-        assert!(play_es_shape(p, "GET", "/*,.*/_search?expand_wildcards=all", Some(&body)).is_err());
-        assert!(play_es_shape(p, "POST", "/logs-*/_search?expand_wildcards=all", Some(&body)).is_err());
-        assert!(play_es_shape(p, "POST", "/.security*/_search", Some(&body)).is_err());
-        assert!(play_es_shape(p, "POST", "/logs-*,.kibana/_search", Some(&body)).is_err());
-        assert!(play_es_shape(p, "POST", "/_search", Some(&body)).is_err());
+        assert!(play_es_shape(&sh(p), "GET", "/*,.*/_search?expand_wildcards=all", Some(&body)).is_err());
+        assert!(play_es_shape(&sh(p), "POST", "/logs-*/_search?expand_wildcards=all", Some(&body)).is_err());
+        assert!(play_es_shape(&sh(p), "POST", "/.security*/_search", Some(&body)).is_err());
+        assert!(play_es_shape(&sh(p), "POST", "/logs-*,.kibana/_search", Some(&body)).is_err());
+        assert!(play_es_shape(&sh(p), "POST", "/_search", Some(&body)).is_err());
         // Documents rather than counts.
         let docs = serde_json::json!({ "size": 10000, "query": { "match_all": {} } }).to_string();
-        assert!(play_es_shape(p, "POST", "/logs-*/_search", Some(&docs)).is_err());
-        assert!(play_es_shape(p, "POST", "/logs-*/_search", Some(&delay_body(10000))).is_err(), "at most 500 devices");
+        assert!(play_es_shape(&sh(p), "POST", "/logs-*/_search", Some(&docs)).is_err());
+        assert!(play_es_shape(&sh(p), "POST", "/logs-*/_search", Some(&delay_body(10000))).is_err(), "at most 500 devices");
         // No pattern of its own is not a looser rule: only the default the caller passes counts.
-        assert!(play_es_shape(None, "POST", "/logs-*/_search", Some(&body)).is_err(), "no pattern, nothing");
-        assert!(play_es_shape(p, "POST", "/remote:logs-*/_search", Some(&body)).is_err(), "cross-cluster search");
+        assert!(play_es_shape(&sh(None), "POST", "/logs-*/_search", Some(&body)).is_err(), "no pattern, nothing");
+        assert!(play_es_shape(&sh(p), "POST", "/remote:logs-*/_search", Some(&body)).is_err(), "cross-cluster search");
         // _source: required, plain field names only — never a wildcard that returns whole documents.
         let edit = |f: &dyn Fn(&mut serde_json::Value)| { let mut v: serde_json::Value = serde_json::from_str(&delay_body(10)).unwrap(); f(&mut v); v.to_string() };
         let wild = edit(&|v| v["aggs"]["devices"]["aggs"]["latest"]["top_hits"]["_source"] = serde_json::json!(["*"]));
-        assert!(play_es_shape(p, "POST", "/logs-*/_search", Some(&wild)).is_err(), "a wildcard _source");
+        assert!(play_es_shape(&sh(p), "POST", "/logs-*/_search", Some(&wild)).is_err(), "a wildcard _source");
         let none = edit(&|v| { v["aggs"]["devices"]["aggs"]["latest"]["top_hits"].as_object_mut().unwrap().remove("_source"); });
-        assert!(play_es_shape(p, "POST", "/logs-*/_search", Some(&none)).is_err(), "_source is required");
+        assert!(play_es_shape(&sh(p), "POST", "/logs-*/_search", Some(&none)).is_err(), "_source is required");
         let wild_terms = edit(&|v| v["aggs"]["devices"]["terms"]["field"] = serde_json::json!("*"));
-        assert!(play_es_shape(p, "POST", "/logs-*/_search", Some(&wild_terms)).is_err(), "a wildcard terms field");
+        assert!(play_es_shape(&sh(p), "POST", "/logs-*/_search", Some(&wild_terms)).is_err(), "a wildcard terms field");
         let mut more: serde_json::Value = serde_json::from_str(&body).unwrap();
         more["aggs"]["devices"]["aggs"]["latest"]["top_hits"]["size"] = serde_json::json!(100);
-        assert!(play_es_shape(p, "POST", "/logs-*/_search", Some(&more.to_string())).is_err(), "one newest document per device");
+        assert!(play_es_shape(&sh(p), "POST", "/logs-*/_search", Some(&more.to_string())).is_err(), "one newest document per device");
         more["aggs"]["devices"]["aggs"]["latest"]["top_hits"]["size"] = serde_json::json!(1);
         more["aggs"]["other"] = serde_json::json!({ "terms": { "field": "user.password" } });
-        assert!(play_es_shape(p, "POST", "/logs-*/_search", Some(&more.to_string())).is_err(), "no other aggregation");
-        assert!(play_es_shape(p, "POST", "/logs-*/_search", None).is_err());
-        assert!(play_es_shape(p, "POST", "/logs-*/_field_caps?fields=x", Some(&body)).is_err(), "field caps has no body");
+        assert!(play_es_shape(&sh(p), "POST", "/logs-*/_search", Some(&more.to_string())).is_err(), "no other aggregation");
+        assert!(play_es_shape(&sh(p), "POST", "/logs-*/_search", None).is_err());
+        assert!(play_es_shape(&sh(p), "POST", "/logs-*/_field_caps?fields=x", Some(&body)).is_err(), "field caps has no body");
         // A cluster with no pattern of its own (a Zabbix host): the gate passes the managed
         // default (UI_LOG_INDEX_PATTERN, else logstash-*) and only that exact pattern counts.
         let d = Some("logstash-*");
-        assert!(play_es_shape(d, "POST", "/logstash-*/_search", Some(&body)).is_ok());
+        assert!(play_es_shape(&sh(d), "POST", "/logstash-*/_search", Some(&body)).is_ok());
         for t in ["*", "_all", ".ds-logs", "a,b", "logstash-*,.kibana", "remote:logstash-*", "logs-*"] {
-            assert!(play_es_shape(d, "POST", &format!("/{t}/_search"), Some(&body)).is_err(), "{t}");
-            assert!(play_es_shape(None, "POST", &format!("/{t}/_search"), Some(&body)).is_err(), "no pattern: {t}");
+            assert!(play_es_shape(&sh(d), "POST", &format!("/{t}/_search"), Some(&body)).is_err(), "{t}");
+            assert!(play_es_shape(&sh(None), "POST", &format!("/{t}/_search"), Some(&body)).is_err(), "no pattern: {t}");
         }
+    }
+
+    /// The late list's re-check: `delay_body` with one terms filter after the range.
+    fn narrowed(field: &str, names: serde_json::Value) -> serde_json::Value {
+        let mut v: serde_json::Value = serde_json::from_str(&delay_body(500)).unwrap();
+        v["query"]["bool"]["filter"].as_array_mut().unwrap().push(serde_json::json!({ "terms": { field: names } }));
+        v
+    }
+
+    #[test]
+    fn a_display_link_may_recheck_the_late_list_and_nothing_wider() {
+        let p = Some("logs-*");
+        let path = "/logs-*/_search?ignore_unavailable=true&allow_no_indices=true";
+        let send = |v: &serde_json::Value| play_es_shape(&sh(p), "POST", path, Some(&v.to_string()));
+        // The re-check as measure.js builds it: the aggregation's own field, plain names.
+        assert!(send(&narrowed("host.keyword", serde_json::json!(["fw-01", "10.1.2.3", "fe80::1", "edge router 7"]))).is_ok());
+        let five_hundred: Vec<String> = (0..500).map(|i| format!("d{i}")).collect();
+        assert!(send(&narrowed("host.keyword", serde_json::json!(five_hundred))).is_ok(), "500 names");
+        // Another field than the one aggregated: refused.
+        assert!(send(&narrowed("user.name", serde_json::json!(["root"]))).is_err(), "a different field");
+        assert!(send(&narrowed("host", serde_json::json!(["fw-01"]))).is_err(), "not even the field's base name");
+        // More than 500, none, or something other than names.
+        let many: Vec<String> = (0..501).map(|i| format!("d{i}")).collect();
+        assert!(send(&narrowed("host.keyword", serde_json::json!(many))).is_err(), "> 500 values");
+        assert!(send(&narrowed("host.keyword", serde_json::json!([]))).is_err(), "no values");
+        assert!(send(&narrowed("host.keyword", serde_json::json!([1, 2]))).is_err(), "non-string");
+        assert!(send(&narrowed("host.keyword", serde_json::json!([["fw-01"]]))).is_err(), "nested");
+        assert!(send(&narrowed("host.keyword", serde_json::json!(["fw-*"]))).is_err(), "a wildcard");
+        assert!(send(&narrowed("host.keyword", serde_json::json!(["fw-0?"]))).is_err(), "a single-character wildcard");
+        assert!(send(&narrowed("host.keyword", serde_json::json!(["fw\n01"]))).is_err(), "a control character (a newline)");
+        assert!(send(&narrowed("host.keyword", serde_json::json!(["bad\u{7}bell"]))).is_err(), "a control character (a bell)");
+        assert!(send(&narrowed("host.keyword", serde_json::json!(["x".repeat(257)]))).is_err(), "over 256 characters");
+        // Extra keys inside terms (a boost, a lookup), a terms lookup object, two filters.
+        let mut extra = narrowed("host.keyword", serde_json::json!(["fw-01"]));
+        extra["query"]["bool"]["filter"][1]["terms"]["boost"] = serde_json::json!(2);
+        assert!(send(&extra).is_err(), "extra keys in terms");
+        let lookup = narrowed("host.keyword", serde_json::json!({ "index": "users", "id": "1", "path": "hosts" }));
+        assert!(send(&lookup).is_err(), "a terms lookup");
+        let mut two = narrowed("host.keyword", serde_json::json!(["fw-01"]));
+        two["query"]["bool"]["filter"].as_array_mut().unwrap().push(serde_json::json!({ "terms": { "host.keyword": ["fw-02"] } }));
+        assert!(send(&two).is_err(), "two terms filters");
+        let mut beside = narrowed("host.keyword", serde_json::json!(["fw-01"]));
+        beside["query"]["bool"]["filter"][1]["match_all"] = serde_json::json!({});
+        assert!(send(&beside).is_err(), "anything beside the terms");
+        let mut first = narrowed("host.keyword", serde_json::json!(["fw-01"]));
+        first["query"]["bool"]["filter"].as_array_mut().unwrap().swap(0, 1);
+        assert!(send(&first).is_err(), "the range comes first");
+        // The aggregation narrowed by its own terms.include, or a script: still refused.
+        let mut include = narrowed("host.keyword", serde_json::json!(["fw-01"]));
+        include["aggs"]["devices"]["terms"]["include"] = serde_json::json!(".*");
+        assert!(send(&include).is_err(), "terms.include");
+        let mut script = narrowed("host.keyword", serde_json::json!(["fw-01"]));
+        script["query"]["bool"]["filter"][1] = serde_json::json!({ "script": { "script": "true" } });
+        assert!(send(&script).is_err(), "a script filter");
+        let mut must = narrowed("host.keyword", serde_json::json!(["fw-01"]));
+        must["query"]["bool"]["must"] = serde_json::json!([{ "match_all": {} }]);
+        assert!(send(&must).is_err(), "another bool clause");
+        // Everything else stays as strict: the narrowed body on another target, or with size > 0.
+        let ok = narrowed("host.keyword", serde_json::json!(["fw-01"]));
+        assert!(play_es_shape(&sh(p), "POST", "/*/_search", Some(&ok.to_string())).is_err(), "only the log pattern");
+        let mut docs = ok.clone();
+        docs["size"] = serde_json::json!(10);
+        assert!(send(&docs).is_err(), "size 0 only");
+    }
+
+    #[test]
+    fn a_display_link_names_only_its_clusters_delay_fields_over_at_most_a_day() {
+        let p = Some("logs-*");
+        let ok = |v: &serde_json::Value| play_es_shape(&sh(p), "POST", "/logs-*/_search", Some(&v.to_string())).is_ok();
+        let base: serde_json::Value = serde_json::from_str(&delay_body(500)).unwrap();
+        assert!(ok(&base));
+        let with = |f: &dyn Fn(&mut serde_json::Value)| { let mut v = base.clone(); f(&mut v); v };
+        fn range(v: &mut serde_json::Value) -> &mut serde_json::Value { &mut v["query"]["bool"]["filter"][0]["range"]["@timestamp"] }
+        for h in ["now-1h", "now-12h", "now-24h"] {
+            assert!(ok(&with(&|v| range(v)["gte"] = serde_json::json!(h))), "{h}");
+        }
+        for h in ["now-25h", "now-0h", "now-7d", "now-1y", "2020-01-01", "now", "now-24h/d"] {
+            assert!(!ok(&with(&|v| range(v)["gte"] = serde_json::json!(h))), "gte {h}");
+        }
+        assert!(!ok(&with(&|v| range(v)["lte"] = serde_json::json!("now+1d"))), "lte past now");
+        assert!(!ok(&with(&|v| { range(v).as_object_mut().unwrap().remove("lte"); })), "no end");
+        assert!(!ok(&with(&|v| range(v)["format"] = serde_json::json!("epoch_millis"))), "another format");
+        assert!(!ok(&with(&|v| v["query"]["bool"]["filter"][0]["range"] = serde_json::json!({ "user.created": { "gte": "now-24h", "lte": "now" } }))), "another range field");
+        assert!(!ok(&with(&|v| v["aggs"]["devices"]["terms"]["field"] = serde_json::json!("user.name.keyword"))), "another terms field");
+        assert!(!ok(&with(&|v| v["aggs"]["devices"]["aggs"]["latest"]["top_hits"]["_source"] = serde_json::json!(["@timestamp", "user.password"]))), "another _source field");
+        assert!(!ok(&with(&|v| v["aggs"]["devices"]["aggs"]["latest"]["top_hits"]["sort"] = serde_json::json!([{ "user.created": { "order": "desc" } }]))), "another sort field");
+        // The cluster's config decides: another device field is fine once the cluster names it.
+        let f = DelayFields { device: Some("src_ip".into()), event_time: vec![], metadata: vec![] };
+        let s2 = DelayShape::of(p.map(String::from), Some("ts"), None, Some(&f));
+        assert_eq!((s2.device.as_str(), s2.arrivals.clone()), ("src_ip", vec!["ts".to_string()]), "an IP-like field is not .keyword");
+        assert!(s2.source.contains(&"event.created".to_string()) && s2.source.contains(&"ClientID".to_string()), "the shipped event-time and metadata fields");
+        // A cluster that names nothing (a Zabbix host) takes the clusters file's defaults, and
+        // config.txt's time field over them — as config.js normalize does.
+        let file = DelayDefaults::from_config(&serde_json::json!({ "defaults": { "timeField": "arrived", "logIndexPattern": "fw-*",
+            "delayFields": { "device": "fw_name", "eventTime": ["evt"], "metadata": ["site.keyword"] } } }));
+        let z = DelayShape::resolve(None, None, None, &file, None, None);
+        assert_eq!((z.pattern.as_deref(), z.device.as_str(), z.arrivals.clone()), (Some("fw-*"), "fw_name.keyword", vec!["arrived".to_string()]));
+        assert!(z.source.contains(&"evt".to_string()) && z.source.contains(&"site".to_string()) && !z.source.contains(&"ClientID".to_string()));
+        assert_eq!(DelayShape::resolve(None, None, None, &file, Some("@ts"), Some("logs-*")).arrivals, vec!["@ts".to_string()], "config.txt over the file");
+        assert_eq!(DelayShape::resolve(Some("own-*".into()), Some("t"), None, &file, Some("@ts"), Some("logs-*")).arrivals, vec!["t".to_string()], "the cluster's own over both");
+        let none = DelayShape::of(None, None, Some("@ts"), None);
+        assert_eq!((none.device.as_str(), none.arrivals.clone()), ("src_hostname.keyword", vec!["@ts".to_string()]), "config.txt's UI_TIME_FIELD");
+        assert_eq!(DelayShape::of(None, None, None, None).arrivals, vec!["@timestamp".to_string()]);
+        assert_eq!(aggregatable_name("host"), "host.keyword");
+        assert_eq!(aggregatable_name("dst_addr"), "dst_addr");
+        assert_eq!(aggregatable_name("ClientID"), "ClientID");
+        assert_eq!(aggregatable_name("x.keyword"), "x.keyword");
+    }
+
+    #[test]
+    fn a_device_name_is_text_without_a_wildcard_or_a_control_character() {
+        assert!(device_name("fw-01") && device_name("10.1.2.3") && device_name("edge router 7") && device_name("ünïcode"));
+        assert!(!device_name("") && !device_name("   ") && !device_name("a*") && !device_name("a?b"));
+        assert!(!device_name("a\u{0}b") && !device_name("tab\there"));
+        assert!(!device_name("bell\u{7}"));
+        assert!(!device_name(&"x".repeat(257)) && device_name(&"x".repeat(256)));
     }
 
     #[test]

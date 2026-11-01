@@ -244,6 +244,9 @@ async fn the_read_cache_answers_a_repeat_and_a_write_or_a_reload_goes_past_it() 
     let srv = TestServer::start().await;
     let c = primed(&dir, &srv.url(), false).await; // writes allowed by config
     c.set_request_config_for_tests(cfg(|r| r.read_cache_secs = 30));
+    // The read cache's own rules, with no duplicate-request gap under them (a Reload inside
+    // the gap gets the gap's reading: tests/gap.rs).
+    c.set_min_gap_for_tests(0);
     let a = c.handle(get("/_cat/indices", "page:indices")).await;
     assert_eq!(a["ok"], json!(true), "{a}");
     let b = c.handle(get("/_cat/indices", "page:indices")).await;

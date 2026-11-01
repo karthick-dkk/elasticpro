@@ -52,6 +52,8 @@ Changes are read at start: `deploy/deploy.sh --apply-config` restarts the core.
 | `LOG_LEVEL` | env `RUST_LOG` = `<level>,audit=info` (the audit lines are warnings and stay on at `error`) |
 | `POLL_HEALTH_SECONDS` (180-300) | env `ELASTICPRO_POLL_HEALTH_SECS` |
 | `POLL_CONCURRENCY` (1-256) | env `ELASTICPRO_POLL_CONCURRENCY` |
+| `POLL_MIN_GAP_SECONDS` (30-600) | the request policy's `minGapSec` (Config › Requests › Duplicate requests), read where it is used (`Policy::with_managed`); the field is locked |
+| `POLL_PLAY_HEALTH_SECONDS` (60-3600), `POLL_PLAY_NODES_SECONDS` (60-3600), `POLL_PLAY_LIFECYCLE_SECONDS` (900-86400), `POLL_PLAY_SNAPSHOTS_SECONDS` (600-86400), `POLL_PLAY_INDICES_SECONDS` (300-86400), `POLL_PLAY_DELAY_FULL_SECONDS` (1800-86400), `POLL_PLAY_DELAY_LATE_SECONDS` (300-7200) | the request policy's `play.*` (Config › Requests › While Play runs), the same way; each locks its field |
 | `ES_CONCURRENCY` (1-1024) | env `ELASTICPRO_ES_CONCURRENCY` |
 | `CACHE_MB` | env `ELASTICPRO_CACHE_MB` (empty: a quarter of the container's memory limit) |
 | `HOUSEKEEPING_MINUTES` (0-10080), `HOUSEKEEPING_CACHE_DAYS` (1-3650), `SESSION_IDLE_DAYS` (0-3650), `ACTIVITY_LOG_KEEP_DAYS` (0-3650) | env `ELASTICPRO_HOUSEKEEPING_MINUTES`, `..._CACHE_DAYS`, `ELASTICPRO_SESSION_IDLE_DAYS`, `ELASTICPRO_ACTIVITY_LOG_KEEP_DAYS` (`housekeeping.rs`) |

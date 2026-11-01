@@ -3,6 +3,7 @@
 import { h, mount, $, clear, activatable } from '../lib/dom.js';
 import { bytes, num, dur, ago, dt, download } from '../lib/fmt.js';
 import { state, client, activeClusters } from '../core/state.js';
+import { REQUEST_PURPOSE } from '../core/es.js';
 import { hideAddress } from '../core/evidence.js';
 import { idb } from '../lib/idb.js';
 import { MAX_TABS, initialState, addTab, closeTab, updateTab, activeTab, tabTitle, toStored, fromStored } from '../core/console-tabs.js';
@@ -475,8 +476,9 @@ async function run() {
   const sent = { method: ui.method, path: ui.path, body: ui.body };
   // allowWrites is set here and nowhere else in the app; the core still refuses it
   // unless the session has been unlocked above.
+  // A person typed it: sent at once, never held by the duplicate-request gap (REQUEST_PURPOSE).
   const res = await cl.request(sent.method, sent.path.trim() || '/', sent.body.trim() || null,
-                               { allowWrites: writesUnlocked() });
+                               { allowWrites: writesUnlocked(), purpose: REQUEST_PURPOSE.console });
   ui.running = false;
   tabRes.set(sentFrom, res);
   if (tabs.active !== sentFrom) {

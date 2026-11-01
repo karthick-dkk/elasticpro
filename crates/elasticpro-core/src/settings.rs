@@ -94,6 +94,16 @@ const SPECS: &[Spec] = &[
     // performance
     spec("POLL_HEALTH_SECONDS", Kind::Int(180, 300), To::Env("ELASTICPRO_POLL_HEALTH_SECS")),
     spec("POLL_CONCURRENCY", Kind::Int(1, 256), To::Env("ELASTICPRO_POLL_CONCURRENCY")),
+    // The request policy's duplicate-request gap and Play schedule (fleet/policy.rs
+    // GAP_BOUNDS, PLAY_FIELDS): each locks its field on Config › Requests. Read where used.
+    spec("POLL_MIN_GAP_SECONDS", Kind::Int(30, 600), To::Direct),
+    spec("POLL_PLAY_HEALTH_SECONDS", Kind::Int(60, 3600), To::Direct),
+    spec("POLL_PLAY_LIFECYCLE_SECONDS", Kind::Int(900, 86_400), To::Direct),
+    spec("POLL_PLAY_SNAPSHOTS_SECONDS", Kind::Int(600, 86_400), To::Direct),
+    spec("POLL_PLAY_INDICES_SECONDS", Kind::Int(300, 86_400), To::Direct),
+    spec("POLL_PLAY_NODES_SECONDS", Kind::Int(60, 3600), To::Direct),
+    spec("POLL_PLAY_DELAY_FULL_SECONDS", Kind::Int(1800, 86_400), To::Direct),
+    spec("POLL_PLAY_DELAY_LATE_SECONDS", Kind::Int(300, 7200), To::Direct),
     spec("ES_CONCURRENCY", Kind::Int(1, 1024), To::Env("ELASTICPRO_ES_CONCURRENCY")),
     spec("ES_PER_CLUSTER", Kind::Int(1, 1024), To::Env("ELASTICPRO_ES_PER_CLUSTER")),
     spec("ES_PER_JUMP_HOST", Kind::Int(1, 1024), To::Env("ELASTICPRO_ES_PER_JUMP_HOST")),

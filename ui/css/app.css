@@ -1419,6 +1419,11 @@ html:has(.modal-overlay) { overflow: hidden; scrollbar-gutter: stable; }
 .pol-env { flex-basis: 100%; color: var(--warning-ink); font-size: 12px; }
 tr.pol-iv-idle > td:first-child { color: var(--text-secondary); }
 .pol-iv-note { white-space: normal; font-size: 11.5px; }
+/* Duplicate requests and While Play runs: one bordered block each, under Fine-tune. */
+.pol-sec { display: grid; gap: 8px; padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--radius); min-width: 0; }
+.pol-sec-h { margin: 0; font-size: 12.5px; }
+.pol-sec-note, .pol-sec-list { font-size: 11.5px; line-height: 1.55; margin: 0; }
+.pol-sec-list { padding-left: 18px; }
 
 /* ---------------- Clusters page, the board of 2026-10-25 ---------------- */
 /* The tab row is one line at any width: it scrolls sideways rather than wrapping, and the
