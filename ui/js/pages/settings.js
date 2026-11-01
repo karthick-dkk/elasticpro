@@ -11,7 +11,7 @@ import { workerStatus, forgetWorker, tunnels as fetchTunnels, listPins, untrustC
          policyGet, policySet } from '../core/es.js';
 import { PRESETS, DATASETS, DATASET_LABELS, BOUNDS, intervalBounds, applyPreset, activePreset, normalisePolicy,
          fromForm, describeMode, MODES, FALLBACK_DEFAULTS, boundsUnder, policyEffect, fineTuneSummary,
-         effectiveClass, resolvedMode, pausedLine } from '../core/policy.js';
+         effectiveClass, resolvedMode, pausedLine, GAP, PLAY_FIELDS, everyText } from '../core/policy.js';
 import { defaultApiUrl, checkUrl, countdown, secondsLeft, isManaged, linkChanges, formProblems, linkSummary,
          linkView, testMessage, epUrlFrom, eventLine } from '../core/zabbix-link.js';
 import { showCredentialDialog, forgetVaultCredential } from '../ui/credential-dialog.js';
@@ -535,7 +535,66 @@ function readPolicyForm() {
     perCluster: v('pol-per'),
     tunnel: v('pol-tunnel'),
     timeoutMs: v('pol-timeout'),
+    minGapSec: v('pol-gap'),
+    play: Object.fromEntries(PLAY_FIELDS.map((f) => [f.key, v(`pol-play-${f.key}`)])),
   };
+}
+
+/** The config.txt key that locks a policy field (POLICY_GET's `managed`), or null. */
+const policyLock = (field) => (pol && pol.managed && pol.managed[field]) || null;
+
+/**
+ * "Duplicate requests": the gap (editable unless config.txt locks it), what it does, and the
+ * kinds of request it never holds (the core's GAP_EXEMPT, listed, not editable).
+ */
+function gapSection(p, admin, defaults) {
+  const lock = policyLock('minGapSec');
+  const exempt = (pol && Array.isArray(pol.gapExempt) && pol.gapExempt.length ? pol.gapExempt.map((x) => x.label)
+    : ['the REST console', 'the Indices page search (live and snapshots)', 'the Snapshots page search']);
+  const shipped = (defaults && defaults.minGapSec) || GAP.def;
+  return h('section#pol-gap-sec.pol-sec', { 'aria-labelledby': 'pol-gap-h' },
+    h('h4#pol-gap-h.pol-sec-h', 'Duplicate requests'),
+    h('div.muted.pol-sec-note',
+      'A request ElasticPro sends by itself — a page loading, Play, Retry or Refresh, the poller — is not sent again while ',
+      'the same request was answered less than this long ago: the asker gets that reading, with its age, and the next request ',
+      'goes once the gap has passed. Writes are never held back: what a write changed is read again at once.'),
+    h('div', { style: { display: 'flex', gap: '14px', flexWrap: 'wrap', alignItems: 'end' } },
+      h('label', { style: { display: 'grid', gap: '3px', fontSize: '11.5px' } },
+        h('span.muted', 'Minimum gap (seconds)'),
+        h('input#pol-gap', { type: 'number', min: String(GAP.min), max: String(GAP.max), value: String(p.minGapSec),
+          disabled: !admin || !!lock, style: { width: '90px' },
+          title: lock ? `${MANAGED_NOTE} (${lock})` : `${GAP.min}–${GAP.max} s; shipped ${shipped} s` }),
+        h('span.muted', { style: { fontSize: '10.5px' } }, lock ? `${MANAGED_NOTE} (${lock})` : `${GAP.min}–${GAP.max} s · shipped ${shipped} s`))),
+    h('ul#pol-gap-facts.pol-sec-list',
+      h('li', h('b', 'Askers waiting on the same request share it'), ' — always on.'),
+      h('li', 'Never held, sent at once (a person typed them): ', exempt.join(', '), '.')));
+}
+
+/**
+ * "While Play runs": what Play keeps going on its own for every display, each interval
+ * editable within its bounds unless config.txt locks it.
+ */
+function playScheduleSection(p, admin, defaults) {
+  const dp = (defaults && defaults.play) || {};
+  const rows = PLAY_FIELDS.map((f) => {
+    const lock = policyLock(`play.${f.key}`);
+    return h('tr', { 'data-play': f.key },
+      h('td', f.label, h('div.muted', { style: { fontSize: '10.5px' } }, f.covers)),
+      h('td', h('input', { id: `pol-play-${f.key}`, type: 'number', min: String(f.min), max: String(f.max),
+        value: String(p.play[f.key]), disabled: !admin || !!lock, style: { width: '100px' },
+        title: lock ? `${MANAGED_NOTE} (${lock})` : `${f.min}–${f.max} seconds` }),
+      h('span.muted', { style: { marginLeft: '4px' } }, 's'),
+      h('div.muted', { style: { fontSize: '10.5px' } }, everyText(p.play[f.key]))),
+      h('td.muted', { style: { fontSize: '11px' } }, `${dp[f.key] ?? f.def} s`),
+      h('td.pol-iv-note', lock ? h('span', pill('locked', 'grey'), ` ${MANAGED_NOTE} (${lock})`) : h('span.muted', `${everyText(f.min)}–${everyText(f.max)}`)));
+  });
+  return h('section#pol-play-sec.pol-sec', { 'aria-labelledby': 'pol-play-h' },
+    h('h4#pol-play-h.pol-sec-h', 'While Play runs'),
+    h('div.muted.pol-sec-note',
+      'What Play keeps going on its own, for every display. If somebody\u2019s page shows the same data at the same time, ',
+      'that page\u2019s faster pace applies while it is open — and the gap above still holds for both. The log delay is ',
+      'measured in two tiers: a full check of every device, then only the devices at or past the yellow line, in one request.'),
+    table(['What', 'Every', 'Shipped', ''], rows));
 }
 
 function choosePreset(id) {
@@ -735,6 +794,8 @@ function requestsCard() {
         modeHint),
       effects,
       fine,
+      gapSection(p, admin, defaults),
+      playScheduleSection(p, admin, defaults),
       h('div.muted#pol-auto', { style: { fontSize: '12px', lineHeight: 1.6 } },
         stopOn ? h('div', h('b', pausedLine(stop))) : null,
         'Slow and busy clusters are handled on their own: a cluster that answers in more than 8 s (or times out, or '

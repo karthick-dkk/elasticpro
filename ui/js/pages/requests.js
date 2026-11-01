@@ -18,7 +18,7 @@ import { navigateTo } from '../core/intent.js';
 import { contractOf, taskRows, cancelPath, privilegeHint } from '../core/es-tasks.js';
 import { ensureWrites, writesAllowed } from '../core/writes.js';
 import { confirmDialog } from '../ui/modal.js';
-import { isPaused, stopQuestion, pausedLine, mayStop, stopRefusal, STOP_MINUTES } from '../core/policy.js';
+import { isPaused, stopQuestion, pausedLine, mayStop, stopRefusal, STOP_MINUTES, gapLine, DATASETS } from '../core/policy.js';
 import { toast } from '../ui/menu.js';
 import { card, table, pill, statTile, empty } from './common.js';
 import { NO_FILTER, requestRows, originChoices, perCluster, requestCsvRows, CSV_HEADER, originLabel, gateFigures,
@@ -246,8 +246,36 @@ function draw() {
           h('td.num', c.queued ? pill(num(c.queued), 'grey') : '0'),
           h('td.num', c.failed ? pill(num(c.failed), 'red') : '0'),
           h('td.num', c.refused ? pill(num(c.refused), 'yellow') : '0'), h('td.num', c.count ? dur(c.slowestMs) : '—'))), { emptyText: 'nothing yet' }))),
+    h('div', { style: { marginTop: '14px' } }, gapCard()),
     h('div', { style: { marginTop: '14px' } }, tasksCard(nameOf)),
     h('div', { style: { marginTop: '14px' } }, housekeepingCard())));
+}
+
+/**
+ * What the duplicate-request gap saved over the last hour, one line per dataset (REQUEST_LOG's
+ * `asks`, counted in the core): asked, sent, and answered from a reading inside the gap or from
+ * one already on its way. A page's own reads are counted as "page reads". From an older core
+ * that does not count them: said so, never zeros.
+ */
+function gapCard() {
+  const a = log && log.asks;
+  if (!a || typeof a.byDataset !== 'object') {
+    return card('Duplicate requests', 'last hour', h('div.muted#rq-gap', 'This core does not count what the duplicate-request gap saves.'));
+  }
+  const gap = Number(a.gapSec) || 60;
+  const order = [...DATASETS, 'direct'];
+  const names = Object.keys(a.byDataset).sort((x, y) => (order.indexOf(x) + 1 || 99) - (order.indexOf(y) + 1 || 99) || x.localeCompare(y));
+  const label = (n) => (n === 'direct' ? 'page reads' : n);
+  const since = a.since && Date.now() - a.since < 59 * 60000 ? ` · counted since ${clockTime(a.since)}` : '';
+  const sum = (k) => names.reduce((t, n) => t + (Number(a.byDataset[n][k]) || 0), 0);
+  const saved = sum('recent') + sum('shared');
+  return card('Duplicate requests', `last hour · gap ${gap} s${since}`,
+    names.length
+      ? h('div#rq-gap', { style: { display: 'grid', gap: '4px', fontSize: '12.5px' } },
+        h('div', h('b', `${num(saved)} of ${num(sum('asked'))} asks`), ` answered without a new request — from a reading under ${gap} s old, or one already on its way.`),
+        h('ul', { style: { margin: '4px 0 0', paddingLeft: '18px', lineHeight: 1.6 } },
+          ...names.map((n) => h('li', { 'data-dataset': n }, gapLine(label(n), a.byDataset[n], gap)))))
+      : h('div.muted#rq-gap', 'Nothing asked in the last hour.'));
 }
 
 /** A request's path on one line, ellipsised; the whole of it on hover, and a click copies it. */
