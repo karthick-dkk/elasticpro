@@ -265,7 +265,9 @@ pub fn play_may(msg_type: &str, method: &str, path: &str, kind: Option<&str>) ->
 ///   `allow_no_indices`, and `fields` for `_field_caps`), so no `expand_wildcards`;
 /// * `_field_caps` is a GET with no body; `_search` carries exactly the body
 ///   `buildSearchBody` builds: `size: 0`, one time range, a terms aggregation of at most
-///   500 devices with one newest document each.
+///   500 devices with one newest document each — and, for the late list's re-check
+///   (ui/js/play/measure.js), that body with one more filter after the range naming only
+///   those devices: `{"terms": {<the aggregation's own field>: [1–500 plain names]}}`.
 pub fn play_es_shape(pattern: Option<&str>, method: &str, path: &str, body: Option<&str>) -> Result<(), String> {
     let refuse = |why: &str| Err(format!("{PLAY_REFUSED}: only the log-delay measurement may be sent ({why})"));
     let (bare, query) = path.split_once('?').unwrap_or((path, ""));
@@ -304,6 +306,16 @@ pub fn play_es_shape(pattern: Option<&str>, method: &str, path: &str, body: Opti
     if delay_search_body(&v) { Ok(()) } else { refuse("the measurement's body: size 0, one time range, the device terms") }
 }
 
+/// The most devices the late list's re-check may name (the measurement's own terms size).
+pub const DELAY_LATE_MAX: usize = 500;
+
+/// A device name as the late list's re-check may name it: what a terms aggregation returned
+/// as a bucket key — any printable text up to 256 characters, but no wildcard (`*`, `?`) and
+/// no control character, so it can only ever match that one device.
+fn device_name(s: &str) -> bool {
+    !s.trim().is_empty() && s.chars().count() <= 256 && !s.chars().any(|c| c.is_control() || c == '*' || c == '?')
+}
+
 /// `buildSearchBody`'s shape, key for key.
 fn delay_search_body(v: &serde_json::Value) -> bool {
     use serde_json::Value;
@@ -323,15 +335,28 @@ fn delay_search_body(v: &serde_json::Value) -> bool {
     if !keys(v, &["size", "query", "aggs"], &[]) || v["size"] != serde_json::json!(0) {
         return false;
     }
-    // query: {bool: {filter: [{range: {<arrival>: {gte, lte, format}}}]}}
+    // query: {bool: {filter: [{range: {<arrival>: {gte, lte, format}}}, {terms: …}?]}}
     let q = &v["query"];
+    let filter = q["bool"]["filter"].as_array();
     let range_ok = keys(q, &["bool"], &[]) && keys(&q["bool"], &["filter"], &[])
-        && q["bool"]["filter"].as_array().is_some_and(|f| f.len() == 1 && keys(&f[0], &["range"], &[])
+        && filter.is_some_and(|f| matches!(f.len(), 1 | 2) && keys(&f[0], &["range"], &[])
             && f[0]["range"].as_object().is_some_and(|m| m.keys().all(|k| plain(k)))
             && one_field(&f[0]["range"]).is_some_and(|r| keys(r, &[], &["gte", "lte", "format"])
                 && r.as_object().is_some_and(|m| m.values().all(Value::is_string))));
     if !range_ok {
         return false;
+    }
+    // The late list's re-check: one terms filter on the aggregation's own field, naming only
+    // plain device names — never a pattern, never another field, never anything beside it.
+    if let Some(narrow) = filter.and_then(|f| f.get(1)) {
+        let field = v["aggs"]["devices"]["terms"]["field"].as_str();
+        let ok = keys(narrow, &["terms"], &[])
+            && narrow["terms"].as_object().is_some_and(|m| m.len() == 1)
+            && field.is_some_and(|f| narrow["terms"].get(f).is_some_and(|names| names.as_array().is_some_and(|a|
+                (1..=DELAY_LATE_MAX).contains(&a.len()) && a.iter().all(|x| x.as_str().is_some_and(device_name)))));
+        if !ok {
+            return false;
+        }
     }
     // aggs: {devices: {terms: {field, size ≤ 500, order?}, aggs: {latest: {top_hits: {size: 1, sort, _source}}}}}
     let d = &v["aggs"];
@@ -2184,6 +2209,78 @@ mod tests {
             assert!(play_es_shape(d, "POST", &format!("/{t}/_search"), Some(&body)).is_err(), "{t}");
             assert!(play_es_shape(None, "POST", &format!("/{t}/_search"), Some(&body)).is_err(), "no pattern: {t}");
         }
+    }
+
+    /// The late list's re-check: `delay_body` with one terms filter after the range.
+    fn narrowed(field: &str, names: serde_json::Value) -> serde_json::Value {
+        let mut v: serde_json::Value = serde_json::from_str(&delay_body(500)).unwrap();
+        v["query"]["bool"]["filter"].as_array_mut().unwrap().push(serde_json::json!({ "terms": { field: names } }));
+        v
+    }
+
+    #[test]
+    fn a_display_link_may_recheck_the_late_list_and_nothing_wider() {
+        let p = Some("logs-*");
+        let path = "/logs-*/_search?ignore_unavailable=true&allow_no_indices=true";
+        let send = |v: &serde_json::Value| play_es_shape(p, "POST", path, Some(&v.to_string()));
+        // The re-check as measure.js builds it: the aggregation's own field, plain names.
+        assert!(send(&narrowed("host.keyword", serde_json::json!(["fw-01", "10.1.2.3", "fe80::1", "edge router 7"]))).is_ok());
+        let five_hundred: Vec<String> = (0..500).map(|i| format!("d{i}")).collect();
+        assert!(send(&narrowed("host.keyword", serde_json::json!(five_hundred))).is_ok(), "500 names");
+        // Another field than the one aggregated: refused.
+        assert!(send(&narrowed("user.name", serde_json::json!(["root"]))).is_err(), "a different field");
+        assert!(send(&narrowed("host", serde_json::json!(["fw-01"]))).is_err(), "not even the field's base name");
+        // More than 500, none, or something other than names.
+        let many: Vec<String> = (0..501).map(|i| format!("d{i}")).collect();
+        assert!(send(&narrowed("host.keyword", serde_json::json!(many))).is_err(), "> 500 values");
+        assert!(send(&narrowed("host.keyword", serde_json::json!([]))).is_err(), "no values");
+        assert!(send(&narrowed("host.keyword", serde_json::json!([1, 2]))).is_err(), "non-string");
+        assert!(send(&narrowed("host.keyword", serde_json::json!([["fw-01"]]))).is_err(), "nested");
+        assert!(send(&narrowed("host.keyword", serde_json::json!(["fw-*"]))).is_err(), "a wildcard");
+        assert!(send(&narrowed("host.keyword", serde_json::json!(["fw-0?"]))).is_err(), "a single-character wildcard");
+        assert!(send(&narrowed("host.keyword", serde_json::json!(["fw\n01"]))).is_err(), "a control character (a newline)");
+        assert!(send(&narrowed("host.keyword", serde_json::json!(["bad\u{7}bell"]))).is_err(), "a control character (a bell)");
+        assert!(send(&narrowed("host.keyword", serde_json::json!(["x".repeat(257)]))).is_err(), "over 256 characters");
+        // Extra keys inside terms (a boost, a lookup), a terms lookup object, two filters.
+        let mut extra = narrowed("host.keyword", serde_json::json!(["fw-01"]));
+        extra["query"]["bool"]["filter"][1]["terms"]["boost"] = serde_json::json!(2);
+        assert!(send(&extra).is_err(), "extra keys in terms");
+        let lookup = narrowed("host.keyword", serde_json::json!({ "index": "users", "id": "1", "path": "hosts" }));
+        assert!(send(&lookup).is_err(), "a terms lookup");
+        let mut two = narrowed("host.keyword", serde_json::json!(["fw-01"]));
+        two["query"]["bool"]["filter"].as_array_mut().unwrap().push(serde_json::json!({ "terms": { "host.keyword": ["fw-02"] } }));
+        assert!(send(&two).is_err(), "two terms filters");
+        let mut beside = narrowed("host.keyword", serde_json::json!(["fw-01"]));
+        beside["query"]["bool"]["filter"][1]["match_all"] = serde_json::json!({});
+        assert!(send(&beside).is_err(), "anything beside the terms");
+        let mut first = narrowed("host.keyword", serde_json::json!(["fw-01"]));
+        first["query"]["bool"]["filter"].as_array_mut().unwrap().swap(0, 1);
+        assert!(send(&first).is_err(), "the range comes first");
+        // The aggregation narrowed by its own terms.include, or a script: still refused.
+        let mut include = narrowed("host.keyword", serde_json::json!(["fw-01"]));
+        include["aggs"]["devices"]["terms"]["include"] = serde_json::json!(".*");
+        assert!(send(&include).is_err(), "terms.include");
+        let mut script = narrowed("host.keyword", serde_json::json!(["fw-01"]));
+        script["query"]["bool"]["filter"][1] = serde_json::json!({ "script": { "script": "true" } });
+        assert!(send(&script).is_err(), "a script filter");
+        let mut must = narrowed("host.keyword", serde_json::json!(["fw-01"]));
+        must["query"]["bool"]["must"] = serde_json::json!([{ "match_all": {} }]);
+        assert!(send(&must).is_err(), "another bool clause");
+        // Everything else stays as strict: the narrowed body on another target, or with size > 0.
+        let ok = narrowed("host.keyword", serde_json::json!(["fw-01"]));
+        assert!(play_es_shape(p, "POST", "/*/_search", Some(&ok.to_string())).is_err(), "only the log pattern");
+        let mut docs = ok.clone();
+        docs["size"] = serde_json::json!(10);
+        assert!(send(&docs).is_err(), "size 0 only");
+    }
+
+    #[test]
+    fn a_device_name_is_text_without_a_wildcard_or_a_control_character() {
+        assert!(device_name("fw-01") && device_name("10.1.2.3") && device_name("edge router 7") && device_name("ünïcode"));
+        assert!(!device_name("") && !device_name("   ") && !device_name("a*") && !device_name("a?b"));
+        assert!(!device_name("a\u{0}b") && !device_name("tab\there"));
+        assert!(!device_name("bell\u{7}"));
+        assert!(!device_name(&"x".repeat(257)) && device_name(&"x".repeat(256)));
     }
 
     #[test]
