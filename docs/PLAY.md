@@ -49,9 +49,10 @@ be read says "no data" / "not measured", never 0.
 
 ### Slides (canvas boards 2 to 7)
 
-1. **Fleet wall**: a tile per visible cluster, worst first — by tone first (red: anything
-   critical, red health, not answering > orange: High > yellow > no data > green), then health
-   and how much is open within a tone (`status.js` `rank`, which the spotlight's order reads too): name, status line, nodes x/y, fullest
+1. **Fleet wall**: a tile per visible cluster, in the display's **fleet wall order** (below). By
+   default worst first — by tone first (red: anything critical, red health, not answering > orange:
+   High > yellow > no data > green), then health and how much is open within a tone (`status.js`
+   `rank`, which the spotlight's order reads too): name, status line, nodes x/y, fullest
    disk %, cluster log delay, open alerts, and **delayed devices** as three counts
    (green < 30 min, yellow 30–60 min inclusive, red > 60 min). A cluster with a node that left
    **blinks every 3 s** until the node is back (or is forgotten). A tile is red (critical),
@@ -167,7 +168,25 @@ is what the fleet poller already fetches.
   {when: [red, nodeLeft, slmFailed, storage, unreachable, criticalAlert], perClusterSec: 13,
   leaveAfterMin: 10, whenEmpty: "skip"|"allHealthy"|"everyCluster"}}, exclude: [{clusterId,
   reason, by, at}], displays: {<linkId>: {slides, dwellSec, criticalTakesScreen, theme, sound,
-  zoom}}, defaultDisplay: {…}}`.
+  zoom, fleetOrder}}, defaultDisplay: {…}}`.
+- **Fleet wall order** (`fleetOrder`, per display; Config › Play › Edit): one to three distinct
+  keys, default `["critical", "logDelay", "volume"]`, an old file without it reads as the
+  default, and a person opening Play without a display link uses the default. Each key sorts
+  **largest first** (`name`: A to Z); the next key breaks a tie and the cluster name breaks the
+  last one. The core refuses an empty list, more than three, an unknown key or a repeat.
+
+  | Key | Figure (one definition, reused) |
+  |---|---|
+  | `critical` | The status rank of `play/status.js` (health, node left, critical and other open alerts, disk past high watermark) |
+  | `logDelay` | The cluster's worst device delay in minutes: the Log delay slide's "Worst device", per cluster |
+  | `volume` | Volume used yesterday: the Volume slide's "Yesterday" for the cluster |
+  | `disk` | The fullest disk %: `status.fullest`, the tile's disk figure |
+  | `alerts` | The open alert count on the tile |
+  | `name` | The cluster name, A to Z |
+
+  **Unknown last**: a cluster with no figure for a key (log delay not measured, no volume
+  record, disk not read) goes after every cluster that has one for that key, never as 0; a
+  measured 0 beats not measured. The slide header shows the order as a chip.
 - `PLAY_CONFIG_GET` (User: reads; Admin sees links) / `PLAY_CONFIG_SET` (Admin). Exclude needs
   a non-empty reason. config.txt keys lock fields ("managed by config.txt"):
   `UI_PLAY_ENABLED`, `UI_PLAY_DELAY_YELLOW_MIN`, `UI_PLAY_DELAY_RED_MIN`,

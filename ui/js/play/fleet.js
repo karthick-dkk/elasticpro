@@ -12,6 +12,8 @@ import { kpi, unknown, minutes, fitRows, openFor, clockText } from './parts.js';
 import { heldLine } from '../core/alert-groups.js';
 import { toneOfCounts } from '../core/alert-levels.js';
 import { tileBlink, nodeDiskCritical } from './status.js';
+import { FLEET_KEYS, readFleetOrder } from '../core/play-config.js';
+import { cardsOf } from './volume.js';
 
 export const id = 'fleet';
 export const title = 'Fleet';
@@ -117,9 +119,57 @@ export function heldNote(ctx, id) {
 /** Smaller tiles for a bigger wall, so a fleet fits one screen. */
 const density = (n) => (n <= 8 ? 'xl' : n <= 15 ? 'l' : n <= 30 ? 'm' : n <= 60 ? 's' : 'xs');
 
+/**
+ * A cluster's figure for one order key, or null when it is not known (never 0). Each is the
+ * figure the rest of Play already shows: `critical` is the status rank (status.js, the one
+ * definition of "what is wrong"), `logDelay` the worst device's delay of the cluster (the
+ * Log delay slide's "Worst device", per cluster), `volume` yesterday's volume (the Volume
+ * slide's figure), `disk` the fullest disk (status.fullest), `alerts` the open count on the tile.
+ */
+export function fleetFigure(ctx, c, key) {
+  const s = ctx.st.get(c.id);
+  switch (key) {
+    case 'critical': return s.rank;
+    case 'logDelay': {
+      const del = ctx.delay.get(c.id);
+      const w = del && del.summary && del.summary.worst;
+      return w && typeof w.delayMinutes === 'number' ? w.delayMinutes : null;
+    }
+    case 'volume': {
+      const v = ctx.volume && ctx.volume.get(c.id);
+      return v && v.reply ? cardsOf(v.reply).yesterday : null;
+    }
+    case 'disk': return s.fullest ? s.fullest.pct : null;
+    case 'alerts': return alertCounts(ctx.openBy.get(c.id) || []).total;
+    default: return null;
+  }
+}
+
+const byName = (a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' });
+
+/**
+ * The wall's order: the keys in turn, each largest first (name A to Z); a cluster with no
+ * figure for a key goes after every cluster that has one; the cluster name breaks a final tie.
+ */
+export function orderFleet(ctx, clusters, order) {
+  const keys = readFleetOrder(order);
+  const fig = new Map(clusters.map((c) => [c.id, keys.map((k) => (k === 'name' ? null : fleetFigure(ctx, c, k)))]));
+  return [...clusters].sort((x, y) => {
+    for (let i = 0; i < keys.length; i++) {
+      if (keys[i] === 'name') { const n = byName(x, y); if (n) return n; continue; }
+      const a = fig.get(x.id)[i], b = fig.get(y.id)[i];
+      if (a === null || b === null) { if (a === b) continue; return a === null ? 1 : -1; }
+      if (a !== b) return b - a;
+    }
+    return byName(x, y);
+  });
+}
+
+/** "Critical problems › Log delay › Volume used yesterday", for the slide header. */
+export const orderText = (order) => readFleetOrder(order).map((k) => FLEET_KEYS.find(([id]) => id === k)[1]).join(' › ');
+
 export function render(ctx) {
-  const list = [...ctx.clusters].sort((x, y) => ctx.st.get(y.id).rank - ctx.st.get(x.id).rank
-    || x.name.localeCompare(y.name, undefined, { numeric: true, sensitivity: 'base' }));
+  const list = orderFleet(ctx, ctx.clusters, ctx.display && ctx.display.fleetOrder);
   const tiles = list.map((c) => tile(ctx, c));
   const grid = h(`div.pl-tiles.${density(list.length)}`, tiles);
   ctx.afterMount(() => fitRows(grid, tiles, (n) => h('div.pl-tile.pl-more', `+${n} more`)));

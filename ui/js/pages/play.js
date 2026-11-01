@@ -331,7 +331,8 @@ function paintHead(ctx) {
   if (!els || !engine) return;
   const cur = SLIDE.get(shownId()) || SLIDES[0];
   if (els.title.textContent !== cur.title) els.title.textContent = cur.title;
-  mount(els.chips, ...headerChips(ctx));
+  mount(els.chips, ...headerChips(ctx), cur.id === 'fleet'
+    ? h('span.pl-hchip', { title: 'Fleet wall order (Config › Play)' }, `Order: ${sFleet.orderText(ps.display.fleetOrder).toLowerCase()}`) : null);
   els.root.classList.toggle('takeover', !!(take && take.active));
   // dots: one per slide in the order; a skipped one is dim
   const order = engine.order;
