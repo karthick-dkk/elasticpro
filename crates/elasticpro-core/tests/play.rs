@@ -306,6 +306,9 @@ async fn a_node_missing_from_a_nodes_answer_has_left_until_forgotten_and_it_surv
         let c = start(&dir);
         prime(c.clone(), es.url()).await;
         c.start_fleet_poller();
+        // Two node listings a few milliseconds apart: the duplicate-request gap would answer
+        // the second from the first (tests/gap.rs); this is about what the second says.
+        c.set_min_gap_for_tests(0);
         nodes_now(&c).await;
         let st = c.handle(json!({ "type": "PLAY_STATE" })).await;
         assert_eq!(st["nodes"]["c1"]["left"], json!([]), "{st}");

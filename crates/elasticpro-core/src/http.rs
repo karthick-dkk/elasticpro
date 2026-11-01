@@ -82,6 +82,12 @@ pub struct EsRequest {
     /// only shorten that, never lengthen it.
     #[serde(default)]
     pub max_age_ms: Option<u64>,
+    /// What a person is doing, where it decides how the request is handled: one of
+    /// `fleet::policy::GAP_EXEMPT` (the REST console, the Indices and Snapshots page searches)
+    /// is never held by the duplicate-request gap nor answered from another's reading. Named
+    /// by the page; ignored for a display link.
+    #[serde(default)]
+    pub purpose: Option<String>,
     /// Who this request is for, decided by the code path that built it — `es()` for a
     /// person, the poller and the core's own jobs for themselves. Never read from the wire:
     /// `origin` is the client's to name, and a page calling itself `poller:x` stays a page.
@@ -110,6 +116,7 @@ impl Default for EsRequest {
             opaque_id: None,
             user: None,
             max_age_ms: None,
+            purpose: None,
             class: crate::gate::Class::default(),
             verified_cancel: false,
         }

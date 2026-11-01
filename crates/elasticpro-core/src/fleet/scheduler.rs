@@ -2,9 +2,10 @@
 //! I/O and no clock of its own, so every rule here — priority, limits, the unreachable
 //! and idle rules, the boot spread — is tested by handing it a `now`.
 
+use super::asks::{Answered, AskCounts};
 use super::catalogue::{self, Class, Dataset, ALL};
 use super::entry::{Body, Entry, Outcome, Reach, ReachState, Status};
-use super::policy::{Mode, Policy, AUTO_HYBRID_ABOVE};
+use super::policy::{Mode, PlaySchedule, Policy, AUTO_HYBRID_ABOVE};
 use std::collections::{HashMap, HashSet};
 use tokio::sync::oneshot;
 
@@ -16,6 +17,9 @@ pub const IDLE_MS: u64 = 10 * 60_000;
 pub const REFRESH_EVERY_MS: u64 = 10_000;
 /// A write is followed by a re-read this long after it, so the cluster has applied it.
 pub const AFTER_WRITE_MS: u64 = 3_000;
+/// How long Play counts as watching a cluster's datasets after its last ask. Play asks at
+/// least once a minute (ui/js/pages/play.js `minute`), so three missed asks end it.
+pub const PLAY_WATCH_MS: u64 = 3 * 60_000;
 
 pub const PRIO_USER: u8 = 0;
 pub const PRIO_DUE: u8 = 1;
@@ -41,6 +45,11 @@ pub struct Config {
     pub paused_until: u64,
     /// Every body the cache holds, together, at most: `memory::budget().cache_bytes`.
     pub cache_bytes: usize,
+    /// Duplicate requests: a dataset answered less than this long ago is not fetched again
+    /// (`State::gap_until`). The policy's `minGapSec`.
+    pub gap_ms: u64,
+    /// What Play keeps going while a display watches (`State::play_watched`).
+    pub play: PlaySchedule,
 }
 
 impl Config {
@@ -48,8 +57,9 @@ impl Config {
         Config::from_policy(&Policy::shipped())
     }
 
+    /// The policy as it runs: with what config.txt manages put over it (`Policy::with_managed`).
     pub fn from_policy(p: &Policy) -> Config {
-        let p = p.clone().normalised();
+        let p = p.clone().with_managed(crate::settings::get()).0;
         Config {
             mode: p.mode,
             health_secs: p.interval_secs(Dataset::Health),
@@ -64,6 +74,8 @@ impl Config {
             paused_all: p.paused.all,
             paused_until: p.paused.until,
             cache_bytes: crate::memory::budget().cache_bytes,
+            gap_ms: p.min_gap_sec * 1000,
+            play: p.play,
         }
     }
 
@@ -197,6 +209,15 @@ pub struct State {
     /// Since when the gate has been busy enough that the poller's own work waits, so the
     /// people asking go first. `None`: not busy.
     pub busy_since: Option<u64>,
+    /// Last time a Play display asked for this dataset (`REFRESH {watcher: "play"}`): Play
+    /// watches it for `PLAY_WATCH_MS`, at the policy's Play interval.
+    pub play_watched: HashMap<Key, u64>,
+    /// Re-reads a write asked for (`fleet_invalidate`): the reading the cache holds predates
+    /// the write, so the gap does not hold them. Gone when the re-read starts.
+    pub after_write: HashSet<Key>,
+    /// What every ask came to over the last hour (Request Centre): sent, answered from a
+    /// reading inside the gap, joined one already on its way, or served what was held.
+    pub asks: AskCounts,
 }
 
 /// What `State::housekeep` removed (or, on a dry run, would).
@@ -296,6 +317,26 @@ impl State {
         now.saturating_sub(self.last_activity) > IDLE_MS
     }
 
+    /// Duplicate requests: when the gap after this dataset's last answer ends, or `None`
+    /// when no answer holds one — never answered, or a write made the reading out of date.
+    /// The one definition: the planner, `CLUSTER_DATASET` and `REFRESH` all ask it.
+    pub fn gap_until(&self, key: &Key, gap_ms: u64) -> Option<u64> {
+        if gap_ms == 0 || self.after_write.contains(key) {
+            return None;
+        }
+        self.entries.get(key)?.fetched_at.map(|t| t + gap_ms)
+    }
+
+    /// Whether the gap holds this dataset at `now`.
+    pub fn within_gap(&self, key: &Key, gap_ms: u64, now: u64) -> bool {
+        self.gap_until(key, gap_ms).is_some_and(|g| now < g)
+    }
+
+    /// Whether a Play display watches this dataset now.
+    pub fn play_watching(&self, key: &Key, now: u64) -> bool {
+        self.play_watched.get(key).is_some_and(|t| now.saturating_sub(*t) < PLAY_WATCH_MS)
+    }
+
     /// Ask for a dataset at priority 0, no earlier than `at`. An earlier ask wins.
     pub fn request(&mut self, key: Key, at: u64) {
         let e = self.pending.entry(key).or_insert(at);
@@ -340,9 +381,15 @@ impl State {
                 }
                 // A person asked. Still only health for a cluster that does not answer:
                 // the request stays pending and runs once it does.
+                // The gap: answered less than `gap_ms` ago, so nothing goes until it passes
+                // — an ask waiting meanwhile goes then (unless a write asked for it).
+                let gap = self.gap_until(&key, cfg.gap_ms);
+                let held = gap.is_some_and(|g| now < g);
                 if let Some(at) = self.pending.get(&key) {
                     if *at <= now && (!unreachable || ds == Dataset::Health) {
-                        out.push(Candidate { prio: PRIO_USER, due: *at, cluster: s.id.clone(), dataset: ds });
+                        if !held {
+                            out.push(Candidate { prio: PRIO_USER, due: *at, cluster: s.id.clone(), dataset: ds });
+                        }
                         continue;
                     }
                 }
@@ -366,15 +413,36 @@ impl State {
                     (PRIO_BACKGROUND, self.reach.get(&s.id).and_then(|r| r.next_probe_at).unwrap_or(now))
                 } else if idle && ds != Dataset::Health {
                     continue;
-                } else if on_demand {
-                    let watched = self.watched.get(&key).is_some_and(|t| now.saturating_sub(*t) < cfg.watch_ms);
-                    if !watched || entry.is_none() {
-                        continue;
-                    }
-                    (PRIO_DUE, entry.and_then(|e| e.next_due).unwrap_or(now))
                 } else {
-                    (PRIO_BACKGROUND, entry.and_then(|e| e.next_due).unwrap_or(0).max(first))
+                    // Who wants it, and how often: the schedule (background) or a page that
+                    // watches it, at the policy's interval; a Play display, at the Play
+                    // interval. The soonest of them decides — the faster watcher's pace.
+                    let mut best: Option<(u8, u64)> = None;
+                    let mut offer = |p: u8, d: u64| {
+                        if best.is_none_or(|(_, bd)| d < bd) {
+                            best = Some((p, d));
+                        }
+                    };
+                    if on_demand {
+                        let watched = self.watched.get(&key).is_some_and(|t| now.saturating_sub(*t) < cfg.watch_ms);
+                        if watched && entry.is_some() {
+                            offer(PRIO_DUE, entry.and_then(|e| e.next_due).unwrap_or(now));
+                        }
+                    } else {
+                        offer(PRIO_BACKGROUND, entry.and_then(|e| e.next_due).unwrap_or(0).max(first));
+                    }
+                    if let (true, Some(iv)) = (self.play_watching(&key, now), cfg.play.interval_secs(ds)) {
+                        // From the last attempt, so a cluster that keeps failing is not asked
+                        // every tick; stretched like any interval while the cluster is slowed.
+                        let last = entry.and_then(|e| e.attempted_at.or(e.fetched_at));
+                        offer(PRIO_DUE, last.map_or(first, |t| t + self.interval_for(&s.id, iv * 1000)));
+                    }
+                    match best {
+                        Some(b) => b,
+                        None => continue,
+                    }
                 };
+                let due = gap.map_or(due, |g| due.max(g));
                 if due <= now {
                     out.push(Candidate { prio, due, cluster: s.id.clone(), dataset: ds });
                 }
@@ -430,7 +498,9 @@ impl State {
             self.running += 1;
             if c.prio == PRIO_USER {
                 self.pending.remove(&key);
+                self.after_write.remove(&key);
             }
+            self.asks.note(c.dataset.name(), Answered::Sent, now);
             if cfg.budget_per_min > 0 {
                 self.starts.entry(c.cluster.clone()).or_default().push_back((now, cost));
             }
@@ -628,17 +698,22 @@ impl State {
         let limits: Vec<(String, String, Dataset)> = self.refresh_rl.iter()
             .filter(|((_, c, _), t)| gone(c) || now.saturating_sub(**t) >= REFRESH_EVERY_MS)
             .map(|(k, _)| k.clone()).collect();
+        let play: Vec<Key> = self.play_watched.iter()
+            .filter(|((c, _), t)| gone(c) || now.saturating_sub(**t) >= PLAY_WATCH_MS)
+            .map(|(k, _)| k.clone()).collect();
         let idle_counts = self.running_cluster.values().filter(|n| **n == 0).count()
             + self.running_jump.values().filter(|n| **n == 0).count();
         out.throttles = throttles.len();
         out.budget_windows = windows.len();
-        out.watched = watched.len();
+        out.watched = watched.len() + play.len();
         out.refresh_limits = limits.len();
         out.running_counters = idle_counts;
         if !dry_run {
             for c in &throttles { self.throttle.remove(c); }
             for c in &windows { self.starts.remove(c); }
             for k in &watched { self.watched.remove(k); }
+            for k in &play { self.play_watched.remove(k); }
+            self.asks.prune(now);
             for k in &limits { self.refresh_rl.remove(k); }
             self.running_cluster.retain(|_, n| *n > 0);
             self.running_jump.retain(|_, n| *n > 0);
@@ -667,6 +742,8 @@ impl State {
         self.reach.retain(|c, _| keep.contains(c));
         self.first_due.retain(|c, _| keep.contains(c));
         self.watched.retain(|(c, _), _| keep.contains(c));
+        self.play_watched.retain(|(c, _), _| keep.contains(c));
+        self.after_write.retain(|(c, _)| keep.contains(c));
         self.pending.retain(|(c, _), _| keep.contains(c));
         self.refresh_rl.retain(|(_, c, _), _| keep.contains(c));
         self.slowed.retain(|c, _| keep.contains(c));
@@ -1204,6 +1281,159 @@ mod tests {
         assert!(!st.running_cluster.contains_key("idle") && st.running_jump.is_empty());
         assert!(st.entries.contains_key(&k("kept", Dataset::Health)) && st.pending.contains_key(&k("kept", Dataset::Health)));
         assert_eq!(st.housekeep(Some(&known), now, watch_ms, false), StateSweep::default(), "idempotent");
+    }
+
+    /// One cluster under Client basis with somebody looking, its boot spread passed.
+    fn client_basis() -> (State, Vec<SpecLite>, Config) {
+        // Room for every dataset at once: these tests are about when, not how many.
+        let cfg = Config { cache_bytes: 1 << 20, per_cluster: 8, global: 16, ..Config::from_policy(&Policy::shipped()) };
+        let mut st = active(0);
+        st.first_due.insert("c00".into(), 0);
+        (st, specs(1), cfg)
+    }
+    fn run(st: &mut State, s: &[SpecLite], cfg: &Config, now: u64) -> Vec<Dataset> {
+        let p = st.plan(s, now, &HashSet::new(), cfg);
+        let started = st.take(p, s, cfg, now);
+        for c in &started {
+            let _ = st.complete(&(c.cluster.clone(), c.dataset), answered(), 5, now, cfg, &mut same);
+        }
+        started.into_iter().map(|c| c.dataset).collect()
+    }
+
+    #[test]
+    fn two_askers_inside_the_gap_make_one_request_and_after_it_a_new_one_goes() {
+        let (mut st, s, cfg) = client_basis();
+        assert_eq!(cfg.gap_ms, 60_000, "the shipped gap is a minute");
+        let key = ("c00".to_string(), Dataset::Nodes);
+        st.request(key.clone(), 1_000);
+        assert_eq!(run(&mut st, &s, &cfg, 1_000), vec![Dataset::Nodes], "the first ask goes");
+        // A second asker 30 s later (a Retry, another page): nothing is sent, the reading holds.
+        assert!(st.within_gap(&key, cfg.gap_ms, 31_000));
+        st.request(key.clone(), 31_000);
+        assert!(run(&mut st, &s, &cfg, 31_000).is_empty(), "inside the gap: no request");
+        assert!(st.pending.contains_key(&key), "the ask waits for the gap to pass");
+        assert!(run(&mut st, &s, &cfg, 60_999).is_empty());
+        // Once the gap has passed, the waiting ask goes.
+        assert_eq!(run(&mut st, &s, &cfg, 61_000), vec![Dataset::Nodes], "past the gap: the next request goes");
+        assert_eq!(st.asks.last_hour(61_000)["nodes"][0], 2, "two sent");
+        // A write makes the reading out of date: its re-read is not held.
+        st.after_write.insert(key.clone());
+        st.request(key.clone(), 62_000);
+        assert!(!st.within_gap(&key, cfg.gap_ms, 62_000));
+        assert_eq!(run(&mut st, &s, &cfg, 62_000), vec![Dataset::Nodes], "a write's re-read goes at once");
+        assert!(!st.after_write.contains(&key), "and only that one");
+        st.request(key.clone(), 63_000);
+        assert!(run(&mut st, &s, &cfg, 63_000).is_empty(), "the gap holds again after it");
+    }
+
+    #[test]
+    fn concurrent_askers_share_the_fetch_on_its_way() {
+        let (mut st, s, cfg) = client_basis();
+        let key = ("c00".to_string(), Dataset::Health);
+        st.request(key.clone(), 0);
+        let p = st.plan(&s, 0, &HashSet::new(), &cfg);
+        let started = st.take(p, &s, &cfg, 0);
+        assert_eq!(started.len(), 1);
+        // Asked again while it is on its way: planned nothing, started nothing.
+        st.request(key.clone(), 10);
+        let again = st.plan(&s, 10, &HashSet::new(), &cfg);
+        assert!(st.take(again, &s, &cfg, 10).is_empty(), "one request on its way per dataset");
+        let _ = st.complete(&key, answered(), 5, 20, &cfg, &mut same);
+        assert!(st.within_gap(&key, cfg.gap_ms, 21), "and its answer is the reading the gap holds");
+    }
+
+    #[test]
+    fn play_keeps_its_datasets_coming_at_the_play_intervals() {
+        let (mut st, s, cfg) = client_basis();
+        assert_eq!(cfg.play.interval_secs(Dataset::Health), Some(300));
+        assert_eq!(cfg.play.interval_secs(Dataset::Policies), Some(4 * 3600));
+        assert_eq!(cfg.play.interval_secs(Dataset::IlmAssign), Some(4 * 3600));
+        assert_eq!(cfg.play.interval_secs(Dataset::SnapshotsFull), Some(2 * 3600));
+        assert_eq!(cfg.play.interval_secs(Dataset::Indices), Some(3600));
+        assert_eq!(cfg.play.interval_secs(Dataset::Nodes), Some(300));
+        assert_eq!(cfg.play.interval_secs(Dataset::Shards), None, "Play never shows shards");
+        // Nobody watching: Client basis fetches nothing.
+        assert!(run(&mut st, &s, &cfg, 0).is_empty());
+        // A display watches health, nodes and policies.
+        for d in [Dataset::Health, Dataset::Nodes, Dataset::Policies] {
+            st.play_watched.insert(("c00".into(), d), 0);
+        }
+        let first = run(&mut st, &s, &cfg, 0);
+        assert_eq!(first, vec![Dataset::Health, Dataset::Nodes, Dataset::Policies]);
+        // Kept watched (Play asks every minute): health and nodes again at 5 min, policies at 4 h.
+        let mut at = 0;
+        let mut got: Vec<(u64, Dataset)> = vec![];
+        while at <= 4 * 3_600_000 {
+            for d in [Dataset::Health, Dataset::Nodes, Dataset::Policies] {
+                st.play_watched.insert(("c00".into(), d), at);
+            }
+            st.last_activity = at;
+            for d in run(&mut st, &s, &cfg, at) { got.push((at, d)); }
+            at += 60_000;
+        }
+        let when = |d: Dataset| got.iter().filter(|(_, x)| *x == d).map(|(t, _)| *t).collect::<Vec<_>>();
+        assert_eq!(when(Dataset::Health).len(), 48, "every 5 min for 4 h: {:?}", when(Dataset::Health));
+        assert_eq!(when(Dataset::Health)[0], 300_000);
+        assert_eq!(when(Dataset::Policies), vec![4 * 3_600_000], "SLM/ILM every 4 h");
+        // Play goes away: nothing after its watch lapses.
+        let quiet = at + PLAY_WATCH_MS;
+        st.last_activity = quiet;
+        assert!(run(&mut st, &s, &cfg, quiet).is_empty(), "no display, no Play pace");
+    }
+
+    #[test]
+    fn the_faster_watcher_sets_the_pace_and_the_gap_floors_it() {
+        let (mut st, s, mut cfg) = client_basis();
+        let key = ("c00".to_string(), Dataset::Indices);
+        st.play_watched.insert(key.clone(), 0);
+        assert_eq!(run(&mut st, &s, &cfg, 0), vec![Dataset::Indices]);
+        // Play alone: the index list hourly.
+        st.play_watched.insert(key.clone(), 600_000);
+        st.last_activity = 600_000;
+        assert!(run(&mut st, &s, &cfg, 600_000).is_empty(), "Play wants it hourly");
+        // A person opens the Indices page: the page's pace (the policy's 600 s) while it watches.
+        st.watched.insert(key.clone(), 600_000);
+        assert_eq!(run(&mut st, &s, &cfg, 600_000), vec![Dataset::Indices], "the faster watcher: the page");
+        st.play_watched.insert(key.clone(), 1_200_000);
+        st.watched.insert(key.clone(), 1_200_000);
+        st.last_activity = 1_200_000;
+        assert_eq!(run(&mut st, &s, &cfg, 1_200_000), vec![Dataset::Indices], "every 600 s while the page is open");
+        // The page has gone (its watch window over): back to Play's hour.
+        let later = 1_200_000 + cfg.watch_ms + 1;
+        st.play_watched.insert(key.clone(), later);
+        st.last_activity = later;
+        assert!(run(&mut st, &s, &cfg, later).is_empty(), "Play's pace again");
+        assert_eq!(run(&mut st, &s, &cfg, 1_200_000 + 3_600_000).len(), 0, "the watch lapsed meanwhile");
+        // A page interval below the gap is floored by it: never twice inside the gap.
+        cfg.intervals.insert(Dataset::Indices, 30);
+        let t = 10_000_000;
+        st.watched.insert(key.clone(), t);
+        st.last_activity = t;
+        st.entries.get_mut(&key).unwrap().next_due = Some(0);
+        assert_eq!(run(&mut st, &s, &cfg, t), vec![Dataset::Indices]);
+        st.entries.get_mut(&key).unwrap().next_due = Some(t + 30_000);
+        st.watched.insert(key.clone(), t + 30_000);
+        assert!(run(&mut st, &s, &cfg, t + 30_000).is_empty(), "due by its interval, held by the gap");
+        st.watched.insert(key.clone(), t + 60_000);
+        st.last_activity = t + 60_000;
+        assert_eq!(run(&mut st, &s, &cfg, t + 60_000), vec![Dataset::Indices]);
+    }
+
+    #[test]
+    fn under_background_play_does_not_slow_the_schedule() {
+        let mut st = active(1_000_000);
+        let s = specs(1);
+        st.first_due.insert("c00".into(), 0);
+        let cfg = with_mode(Mode::Background);
+        st.play_watched.insert(("c00".into(), Dataset::Health), 1_000_000);
+        let _ = run(&mut st, &s, &cfg, 1_000_000);
+        let next = st.entries[&("c00".to_string(), Dataset::Health)].next_due.unwrap();
+        assert_eq!(next, 1_000_000 + 180_000, "the policy's 180 s, not Play's 300");
+        st.play_watched.insert(("c00".into(), Dataset::Health), next);
+        st.last_activity = next;
+        let planned = |st: &mut State, at| st.plan(&s, at, &HashSet::new(), &cfg).iter().any(|c| c.dataset == Dataset::Health);
+        assert!(!planned(&mut st, next - 1));
+        assert!(planned(&mut st, next), "due on the schedule's interval");
     }
 
     #[test]

@@ -13,6 +13,7 @@
 //! The poller is started explicitly, like the delay sink: a scheduler that started itself
 //! in `Core::new` would run in every test.
 
+pub mod asks;
 pub mod catalogue;
 pub mod entry;
 pub mod events;
@@ -24,6 +25,7 @@ pub mod store;
 use crate::auth::{Caller, Role};
 use crate::bridge::Core;
 use crate::http::EsRequest;
+use asks::Answered;
 use catalogue::{Class, Dataset, Query, ALL};
 use entry::{answer, error_of, reached, Entry, Outcome, ReachState, Status};
 use events::{EventsOwner, FleetEvent, Reauth, Tickets};
@@ -573,6 +575,8 @@ impl Core {
         {
             let mut st = self.fleet.state.lock();
             for d in ds {
+                // The reading the cache holds predates the write: the gap does not hold this.
+                st.after_write.insert((cluster.to_string(), d));
                 st.request((cluster.to_string(), d), at);
             }
         }
@@ -586,6 +590,30 @@ impl Core {
         let mut v: Vec<String> = st.pending.keys().filter(|(c, _)| c == cluster).map(|(_, d)| d.name().to_string()).collect();
         v.sort();
         v
+    }
+
+    /// The duplicate-request gap, set for a test (0: off) — the policy's floor is 30 s, which
+    /// a test that counts what reaches its server cannot wait out. Holds until the policy
+    /// is next applied.
+    #[doc(hidden)]
+    pub fn set_min_gap_for_tests(&self, ms: u64) {
+        self.fleet.cfg.write().gap_ms = ms;
+    }
+
+    /// The duplicate-request gap as it runs, in milliseconds.
+    pub(crate) fn fleet_gap_ms(&self) -> u64 {
+        self.fleet.cfg.read().gap_ms
+    }
+
+    /// Count one of a page's own reads (`Core::es_req`) in the Request Centre's figures.
+    pub(crate) fn fleet_note_ask(&self, name: &str, how: Answered) {
+        self.fleet.state.lock().asks.note(name, how, now_ms());
+    }
+
+    /// What every ask came to over the last hour (REQUEST_LOG's `asks`).
+    pub(crate) fn fleet_asks_json(&self) -> Value {
+        let gap = self.fleet_gap_ms();
+        self.fleet.state.lock().asks.to_json(now_ms(), gap)
     }
 
     /* ---------------------------------- messages ---------------------------------- */
@@ -669,7 +697,9 @@ impl Core {
             "full": since.is_none(),
             "catalogue": catalogue::catalogue_json(&cfg, known),
             "policy": { "mode": cfg.mode.as_str(), "resolvedMode": cfg.resolved_mode(known).as_str(), "pausedAll": cfg.stopped(now),
-                        "pausedSince": paused_since, "pausedUntil": paused_until, "pausedBy": paused_by },
+                        "pausedSince": paused_since, "pausedUntil": paused_until, "pausedBy": paused_by,
+                        // What every page and display paces itself by: the gap, and Play's schedule.
+                        "minGapSec": cfg.gap_ms / 1000, "play": cfg.play },
             "automation": automation,
             "clusterIds": ids,
             "clusters": clusters,
@@ -725,15 +755,24 @@ impl Core {
             let mut st = self.fleet.state.lock();
             st.last_activity = now;
             st.watched.insert(key.clone(), now);
+            // The gap: answered less than `gap_ms` ago, so this asker gets that reading
+            // whatever max age it named — a Retry, a Refresh, another page, another display.
+            let recent = st.within_gap(&key, cfg.gap_ms, now);
             let fresh = st.entries.get(&key).is_some_and(|e| {
                 e.status == Status::Ok && e.fetched_at.is_some_and(|t| now.saturating_sub(t) <= max_age_ms)
             }) && !st.pending.contains_key(&key);
             // A cluster that does not answer is not asked again for this: its health
             // probe is already scheduled, and waiting would only hold the page open.
             let unreachable = st.reach_state(&id) == ReachState::Unreachable && ds != Dataset::Health;
-            if fresh || unreachable {
+            if recent || fresh || unreachable {
+                st.asks.note(ds.name(), if recent { Answered::Recent } else { Answered::Held }, now);
                 None
             } else {
+                // On its way already, or asked by somebody else and about to go: this asker
+                // shares that answer. Otherwise it is sent, and counted when it starts.
+                if st.inflight.contains_key(&key) || st.pending.contains_key(&key) {
+                    st.asks.note(ds.name(), Answered::Shared, now);
+                }
                 if !st.inflight.contains_key(&key) {
                     // A request held open for this answer goes ahead of the queue.
                     if wait.is_zero() {
@@ -781,8 +820,17 @@ impl Core {
         reply
     }
 
-    /// `REFRESH {clusterIds?: [..] | "all", datasets?: [..]}`: go now, rather than when
-    /// due. The gate has already checked every named cluster is the caller's.
+    /// `REFRESH {clusterIds?: [..] | "all", datasets?: [..], watcher?: "play"}`: go now, rather
+    /// than when due. The gate has already checked every named cluster is the caller's.
+    ///
+    /// The gap holds a Refresh like any ask: a dataset answered less than `gap_ms` ago is not
+    /// fetched again — skipped with `reason: "recent"` and when the next may go — and one
+    /// already on its way is shared, not asked twice.
+    ///
+    /// `watcher: "play"` is a Play display saying what it shows, not a person asking for it
+    /// now: the datasets are Play-watched (`State::play_watched`) and the planner fetches them
+    /// at the policy's Play intervals; only what was never fetched is asked for at once. It
+    /// marks nothing as a page's, so a page's faster pace applies only while a page watches.
     pub(crate) fn refresh_msg(&self, msg: &Value, caller: Option<&Caller>) -> Value {
         let visible = self.fleet_visible(caller);
         let ids: Vec<String> = match msg.get("clusterIds") {
@@ -791,6 +839,7 @@ impl Core {
             _ => visible,
         };
         let datasets = dataset_list(msg.get("datasets")).unwrap_or_else(background);
+        let play = msg.get("watcher").and_then(Value::as_str) == Some("play");
         let user = caller.map(|c| c.name.clone()).unwrap_or_default();
         let known = self.all_specs().len();
         let now = now_ms();
@@ -807,6 +856,26 @@ impl Core {
                     // Down is down: one probe answers for all of it.
                     if unreachable && *d != Dataset::Health {
                         skipped.push(json!({ "clusterId": id, "dataset": d.name(), "reason": "unreachable" }));
+                        continue;
+                    }
+                    let key = (id.clone(), *d);
+                    if play {
+                        st.play_watched.insert(key.clone(), now);
+                        let never = st.entries.get(&key).is_none_or(|e| e.fetched_at.is_none() && e.attempted_at.is_none());
+                        if never && !st.inflight.contains_key(&key) && !st.pending.contains_key(&key) {
+                            st.request(key, now);
+                            queued += 1;
+                        }
+                        continue;
+                    }
+                    if let Some(next) = st.gap_until(&key, cfg.gap_ms).filter(|g| now < *g) {
+                        st.asks.note(d.name(), Answered::Recent, now);
+                        skipped.push(json!({ "clusterId": id, "dataset": d.name(), "reason": "recent", "nextAt": next }));
+                        continue;
+                    }
+                    if st.inflight.contains_key(&key) {
+                        st.asks.note(d.name(), Answered::Shared, now);
+                        skipped.push(json!({ "clusterId": id, "dataset": d.name(), "reason": "on_its_way" }));
                         continue;
                     }
                     let rl = (user.clone(), id.clone(), *d);
@@ -832,7 +901,10 @@ impl Core {
     /* ------------------------------------ policy ------------------------------------ */
 
     fn policy_reply(&self, saved: Option<Result<(), String>>) -> Value {
-        let pol = self.fleet.policy.read().clone();
+        // As it runs: config.txt's values over the stored ones, and which fields it locks.
+        let (pol, locked) = self.fleet.policy.read().clone().with_managed(crate::settings::get());
+        let managed: Map<String, Value> = policy::managed_fields().into_iter()
+            .filter(|(f, _)| locked.contains(f)).map(|(f, k)| (f, json!(k))).collect();
         let cfg = self.fleet.cfg.read().clone();
         let known = self.all_specs().len();
         let effective: Map<String, Value> = ALL.iter()
@@ -853,6 +925,12 @@ impl Core {
             // Set on the server, it decides "all clusters at once" for the shipped policy and
             // for a saved one that leaves it out; null when it is not set.
             "pollConcurrencyEnv": policy::poll_concurrency_env(),
+            // Fields config.txt locks, by name, with the key: "managed by config.txt".
+            "managed": managed,
+            // Duplicate requests: the kinds a person types, never held (not editable).
+            "gapExempt": policy::GAP_EXEMPT.iter().map(|(p, label)| json!({ "purpose": p, "label": label })).collect::<Vec<_>>(),
+            "gapBounds": { "min": policy::GAP_BOUNDS.0, "max": policy::GAP_BOUNDS.1 },
+            "playBounds": policy::PLAY_FIELDS.iter().map(|(f, lo, hi, _)| (f.to_string(), json!({ "min": lo, "max": hi }))).collect::<Map<String, Value>>(),
         });
         match saved {
             Some(Ok(())) => { out["saved"] = json!(true); }
@@ -874,6 +952,11 @@ impl Core {
         if !incoming.is_object() {
             return json!({ "ok": false, "kind": "bad_request", "message": "policy must be an object" });
         }
+        // A field config.txt locks is config.txt's: sent with its value it is accepted, with
+        // another it is refused (and nothing else is applied either).
+        if let Err(e) = Policy::check_managed(&incoming, crate::settings::get()) {
+            return json!({ "ok": false, "kind": "managed", "message": e });
+        }
         let pol: Policy = match serde_json::from_value(incoming) {
             Ok(p) => p,
             Err(e) => return json!({ "ok": false, "kind": "bad_request", "message": format!("policy: {e}") }),
@@ -887,6 +970,9 @@ impl Core {
         {
             let mut cur = self.fleet.policy.write();
             pol.paused = cur.paused.clone();
+            // What config.txt locks keeps its stored value on disk (see `keep_stored`).
+            let (_, locked) = pol.clone().with_managed(crate::settings::get());
+            pol = pol.keep_stored(&cur, &locked);
             *cur = pol.clone();
         }
         let saved = match &self.fleet.policy_path {
@@ -899,6 +985,7 @@ impl Core {
             user = caller.map(|c| c.name.as_str()).unwrap_or(""),
             mode = pol.mode.as_str(), paused_all = pol.paused.all, paused_until = pol.paused.until,
             per_cluster = pol.concurrency.per_cluster, global = pol.concurrency.global,
+            min_gap_sec = pol.min_gap_sec, play = ?pol.play,
             saved = saved.is_ok(),
             "request policy changed"
         );
