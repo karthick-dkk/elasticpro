@@ -38,7 +38,8 @@ test('three failing policies are three raw alerts but one open alert', () => {
   assert.equal(open.length, 1);
   assert.equal(open[0].key, 'c1:slm-fail');
   assert.equal(open[0].items.length, 3);
-  assert.deepEqual(st.openAlertCounts(), { total: 1, critical: 1, warning: 0 });
+  // A failed SLM run is High (alert-rules.js): counted as open, at its own level.
+  assert.deepEqual(st.openAlertCounts(), { total: 1, critical: 0, high: 1, warning: 0 });
 });
 
 test('acknowledging the merged alert drops it from the count; a fourth policy failing brings it back', async () => {

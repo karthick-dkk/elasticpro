@@ -54,7 +54,7 @@ for (const r of rules) {
   out('          type: TRAP');
   out(`          key: ${q(`elasticpro.alert[${r.id}]`)}`);
   out('          value_type: UNSIGNED');
-  out(`          description: ${q(`${r.why} 0 clear, 1 warning, 2 critical.`)}`);
+  out(`          description: ${q(`${r.zabbixWhy || r.why} 0 clear, 1 warning, 2 critical.`)}`);
   out('          valuemap:');
   out("            name: 'ElasticPro alert level'");
   out('          tags:');
@@ -95,7 +95,7 @@ for (const r of rules) {
     // Closable by hand: an operator who has dealt with it can say so, and if it is still
     // true the next scraper run opens it again, freshly named.
     out('      manual_close: YES');
-    out(`      description: ${q(`${r.why} Raised by ElasticPro (${word}).`)}`);
+    out(`      description: ${q(`${r.zabbixWhy || r.why} Raised by ElasticPro (${word}).`)}`);
     out('      tags:');
     out('        - tag: source');
     out('          value: elasticpro');

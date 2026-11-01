@@ -1,6 +1,6 @@
 /**
  * Slide 2, Alerts: the merged alerts (core/state.js mergedAlerts) that are open or
- * acknowledged, critical first then newest — what the Alerts page and the tab badge count,
+ * acknowledged, critical first, then high, then warning, then newest — what the Alerts page and the tab badge count,
  * nothing recounted. Beside them: open now, and the last 24 h from the alert history this
  * browser keeps (core/alert-history.js). Never skipped: with nothing open it says All clear.
  */
@@ -10,6 +10,7 @@ import { alertCounts } from '../core/alert-tuning.js';
 import { alertHistory } from '../core/alert-history.js';
 import { kpi, unknown, openFor, fitRows, clockText } from './parts.js';
 import { heldNote } from './fleet.js';
+import { levelRank, levelOf, LEVEL_SHORT } from '../core/alert-levels.js';
 
 export const id = 'alerts';
 export const title = 'Alerts';
@@ -17,11 +18,10 @@ export const DATASETS = ['health', 'nodes', 'ilm_errors', 'policies', 'snapshots
 
 export const isEmpty = () => false;
 
-const RANK = { critical: 2, warning: 1 };
-/** Open before acknowledged; within each, critical first, then the newest. */
+/** Open before acknowledged; within each, critical, then high, then warning, then the newest. */
 export function alertOrder(list, { acked, since }) {
   return [...list].sort((a, b) => (acked(a) ? 1 : 0) - (acked(b) ? 1 : 0)
-    || (RANK[b.level] || 0) - (RANK[a.level] || 0) || since(b) - since(a));
+    || levelRank(b.level) - levelRank(a.level) || since(b) - since(a));
 }
 
 /**
@@ -46,8 +46,9 @@ export function lastDay(win, visible, now) {
 function row(ctx, m, hot) {
   const ack = ctx.acked(m);
   const cluster = m.cluster ? m.cluster.name : m.clusterId;
-  return h(`div.pl-arow.${m.level}${ack ? '.acked' : ''}${hot ? '.hot' : ''}`, { dataset: { key: m.key } },
-    h(`span.pl-sev.${m.level}`, m.level === 'critical' ? 'CRIT' : 'WARN'),
+  const level = levelOf(m.level);
+  return h(`div.pl-arow.${level}${ack ? '.acked' : ''}${hot ? '.hot' : ''}`, { dataset: { key: m.key } },
+    h(`span.pl-sev.${level}`, LEVEL_SHORT[level]),
     h('div.pl-atext',
       h('div.pl-atitle', m.title, m.count ? h('span.pl-acount', ` ${m.count}`) : null),
       h('div.pl-adetail', [cluster, m.detail].filter(Boolean).join(' · ')),
@@ -81,6 +82,7 @@ export function render(ctx) {
     h('aside.pl-aside',
       h('div.pl-ahead', 'Open now'),
       kpi('Critical', String(c.critical), null, c.critical ? 'red' : 'green'),
+      kpi('High', String(c.high), null, c.high ? 'orange' : 'green'),
       kpi('Warning', String(c.warning), null, c.warning ? 'yellow' : 'green'),
       kpi('Acknowledged', String(ackN), ctx.sharedAcks ? 'shared' : 'on this screen'),
       h('div.pl-ahead', 'Last 24 h'),

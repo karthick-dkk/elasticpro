@@ -24,6 +24,7 @@
  */
 
 import { ruleById } from './alert-rules.js';
+import { levelRank, worstLevel, countLevels } from './alert-levels.js';
 import { ruleOf } from './zabbix-alerts.js';
 import { compareNames } from '../lib/cluster-order.js';
 import { diskBalance } from './disk-balance.js';
@@ -36,8 +37,8 @@ export const familyOf = (a) => ruleOf(a) || 'other';
 /** One merged alert per cluster and rule. */
 export const mergeKeyOf = (a) => `${clusterIdOf(a)}:${familyOf(a)}`;
 
-const rank = (level) => (level === 'critical' ? 2 : 1);
-const worst = (a, b) => (rank(a) >= rank(b) ? a : b);
+const rank = levelRank;
+const worst = worstLevel;
 
 /** "33 m", "1 h 40 m", "26 h", "3 d 4 h" — an age to read at a glance, never decimals. */
 export function ageShort(ms) {
@@ -107,6 +108,12 @@ export function itemsOf(a, ctx = {}) {
         return { id: `${a.key}|${n}`, label: n, value: String(e.failed_step || e.step || ''), level: a.level, alertKey: a.key, index: n };
       });
     }
+    case 'heap': {
+      // The nodes over the line, from the reading the alert was raised from (state.js).
+      const hot = Array.isArray(a.heapNodes) ? a.heapNodes : [];
+      if (!hot.length) return [one(a, a.title, a.detail || '')];
+      return hot.map((n) => ({ id: `${a.key}|${n.name}`, label: n.name, value: pctText(n.pct), level: a.level, alertKey: a.key, node: n.name }));
+    }
     case 'slm-fail': case 'slm-stale': {
       const policy = segs(a.key).slice(2).join(':') || a.key;
       return [one(a, policy, fam === 'slm-fail' ? 'last run failed' : 'no recent success', { policy })];
@@ -138,12 +145,12 @@ export function itemsOf(a, ctx = {}) {
 function countText(fam, items, merged) {
   const n = items.length;
   const unit = {
-    disk: ['node', 'nodes', 'on '], 'disk-balance': ['node', 'nodes', 'on '], ilm: ['index', 'indices', ''], repo: ['repository', 'repositories', ''],
+    disk: ['node', 'nodes', 'on '], 'disk-balance': ['node', 'nodes', 'on '], heap: ['node', 'nodes', 'on '], ilm: ['index', 'indices', ''], repo: ['repository', 'repositories', ''],
     'slm-fail': ['policy', 'policies', ''], 'slm-stale': ['policy', 'policies', ''],
     volume: ['field value', 'field values', ''], automation: ['automation', 'automations', ''],
   }[fam];
   if (!unit) return '';
-  if ((fam === 'disk' || fam === 'disk-balance') && (n < 1 || !items[0].node)) return '';
+  if ((fam === 'disk' || fam === 'disk-balance' || fam === 'heap') && (n < 1 || !items[0].node)) return '';
   if (n === 1 && !['ilm', 'repo', 'volume'].includes(fam)) return '';
   return `${unit[2]}${n} ${n === 1 ? unit[0] : unit[1]}`;
 }
@@ -388,7 +395,7 @@ export function heldByCluster(merged) {
 
 /* --------------------------------- ordering --------------------------------- */
 
-/** Critical first, then the oldest, then by title — inside a group. */
+/** Worst level first (critical, high, warning), then the oldest, then by title — inside a group. */
 export function compareAlerts(a, b) {
   return rank(b.level) - rank(a.level) || a.since - b.since || compareNames(a.title, b.title);
 }
@@ -396,6 +403,7 @@ export function compareAlerts(a, b) {
 /** Worst severity, then how many alerts, then name A–Z (natural, case-insensitive). */
 export function compareGroups(a, b) {
   return (b.critical > 0) - (a.critical > 0)
+    || (b.high > 0) - (a.high > 0)
     || b.alerts.length - a.alerts.length
     || compareNames(a.name, b.name);
 }
@@ -406,7 +414,7 @@ export const GROUP_MODES = ['cluster', 'type', 'none'];
  * @param {Array} merged  the alerts to show
  * @param {'cluster'|'type'|'none'} mode
  * @returns {Array<{id:string, name:string, clusterId?:string, family?:string, critical:number,
- *                  warning:number, oldest:number, alerts:Array}>}
+ *                  high:number, warning:number, oldest:number, alerts:Array}>}
  */
 export function groupAlerts(merged, mode = 'cluster') {
   if (mode === 'none') {
@@ -429,8 +437,8 @@ export function groupAlerts(merged, mode = 'cluster') {
 }
 
 function summarise(g) {
-  const critical = g.alerts.filter((a) => a.level === 'critical').length;
-  return { ...g, critical, warning: g.alerts.length - critical,
+  const { critical, high, warning } = countLevels(g.alerts);
+  return { ...g, critical, high, warning,
     oldest: g.alerts.reduce((m, a) => Math.min(m, a.since), Infinity) };
 }
 
@@ -444,8 +452,10 @@ export function filterAlerts(merged, { level = 'all', text = '', showHandled = f
   const t = String(text || '').trim().toLowerCase();
   return merged.filter((m) => {
     if (isHeld(m)) return false;   // held alerts are listed under their cluster's unreachable line, never here
+    // One level each; a level nobody registered is a warning (alert-levels.js levelRank).
     if (level === 'critical' && m.level !== 'critical') return false;
-    if (level === 'warning' && m.level === 'critical') return false;
+    if (level === 'high' && m.level !== 'high') return false;
+    if (level === 'warning' && rank(m.level) > 1) return false;
     if (!showHandled && isHandled(m)) return false;
     if (t) {
       const hay = [m.title, m.count, m.detail, m.cluster && m.cluster.name, ...m.items.map((i) => `${i.label} ${i.value}`), notesOf(m)]
@@ -465,9 +475,9 @@ export function summaryOf(merged, fleetSize) {
   const open = merged.filter(isOpen);
   const handled = merged.filter(isHandled);
   const withOpen = new Set(open.map((m) => m.clusterId));
-  const critical = open.filter((m) => m.level === 'critical').length;
+  const { critical, high, warning } = countLevels(open);
   return {
-    critical, warning: open.length - critical, open: open.length,
+    critical, high, warning, open: open.length,
     clustersAffected: withOpen.size, fleet: fleetSize,
     clustersClear: Math.max(0, fleetSize - withOpen.size),
     acknowledged: handled.filter((m) => m.state === 'acked').length,

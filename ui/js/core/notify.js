@@ -27,6 +27,7 @@
 import { openAlertsNow, clusters, mergedAlerts, invalidateAlerts } from './state.js';
 import { isOpen, isHeld, toObservations } from './alert-groups.js';
 import { alertHistory } from './alert-history.js';
+import { byLevel } from './alert-levels.js';
 import { gotoFor, openGoto, openClusterAlerts } from './alert-goto.js';
 import { pageLabel } from './page-labels.js';
 import { toast, setNotificationActions } from '../ui/menu.js';
@@ -79,6 +80,7 @@ function alertLine(m, fresh) {
  */
 export function burstNotice(b, clusterName) {
   const list = [...b.alerts.values()];
+  // Critical is the only level that makes a burst an error: High is announced as a warning is.
   const crit = list.filter((m) => m.level === 'critical').length;
   return {
     message: `${clusterName}: ${list.length} new alert${list.length === 1 ? '' : 's'}`,
@@ -195,7 +197,7 @@ export function burstActions(entry) {
   let worst = null;
   try {
     worst = openAlertsNow().filter((m) => m.clusterId === id)
-      .sort((a, b) => (b.level === 'critical') - (a.level === 'critical') || a.since - b.since)[0] || null;
+      .sort((a, b) => byLevel(a, b) || a.since - b.since)[0] || null;
   } catch (_) { /* nothing to point at */ }
   if (worst) {
     const g = gotoFor(worst);
