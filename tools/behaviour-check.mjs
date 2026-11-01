@@ -964,10 +964,16 @@ await go('volume');
     // Contract-shaped answer, so the layout and the export are checked whatever the core is.
     const realFetch = globalThis.fetch;
     const ymAgo = (i) => { const d = new Date(); return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() - i, 1)).toISOString().slice(0, 7); };
+    // The stubbed rows carry a name the real record never has. Their shape cannot tell them
+    // apart: from the 1st of the month after tools/mock-es.mjs's 45 days first span three
+    // calendar months (2026-11-01: Sep, Oct, Nov), the real table is Cluster + three months
+    // too, the wait below took it, and the export was clicked while the refresh was still
+    // being asked — writing nothing, so files.at(-1) was the client plan's file.
+    const stubName = (c) => `${c.name} (stubbed)`;
     globalThis.fetch = async (input, init) => {
       const body = init && init.body ? JSON.parse(init.body) : {};
       if (body.type === 'VOLUME_MONTHLY_ALL') {
-        return stubReply({ ok: true, clusters: config.clusters.map((c) => ({ clusterId: c.name, name: c.name, months: [
+        return stubReply({ ok: true, clusters: config.clusters.map((c) => ({ clusterId: c.name, name: stubName(c), months: [
           { month: ymAgo(2), daysWithData: 0 }, { month: ymAgo(1), daysWithData: 30, priBytes: 2e11 },
           { month: ymAgo(0), daysWithData: 29, priBytes: 1.9e11, partial: true }] })) });
       }
@@ -975,12 +981,13 @@ await go('volume');
     };
     try {
       [...doc.querySelectorAll('button')].find((b) => b.textContent === '↻ Refresh').click();
-      // Wait for the stubbed answer's table (Cluster + three months), not the one the real
+      // Wait for the stubbed answer's table (its names, Cluster + three months), not the one the real
       // record drew before the refresh: an export clicked while the reply is being asked
       // again writes nothing, and files.at(-1) would be an earlier view's file.
       const p = await waitFor(() => {
         const x = panel('Monthly volume by cluster');
-        return x && x.querySelector('table') && x.querySelectorAll('thead th').length === 4 ? x : null;
+        const first = x && x.querySelector('tbody tr td b');
+        return first && first.textContent === stubName(config.clusters[0]) && x.querySelectorAll('thead th').length === 4 ? x : null;
       }, 'volume: the Monthly table did not draw from a VOLUME_MONTHLY_ALL answer');
       if (p) {
         const hd = [...p.querySelectorAll('thead th')].map((x) => x.textContent.trim());
