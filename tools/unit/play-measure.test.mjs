@@ -45,6 +45,23 @@ const T = { ...L.DEFAULT_THRESHOLDS };   // yellow 30, red above 60
 const MIN = 60000;
 const rec = (device, delayMinutes) => ({ device, delayMinutes, arrival: 1, event: 1, docs: 1 });
 
+test('the display-link gate knows the shipped delay fields the pages use (config.js DEFAULTS = auth.rs)', async () => {
+  const fs = await import('node:fs');
+  const rs = fs.readFileSync(path.join(ROOT, 'crates/elasticpro-core/src/auth.rs'), 'utf8');
+  const list = (name) => [...new RegExp(`pub const ${name}: &\\[&str\\] = &\\[([^\\]]*)\\];`).exec(rs)[1].matchAll(/"([^"]*)"/g)].map((m) => m[1]);
+  const { DEFAULTS } = await import(url('ui/js/core/config.js'));
+  assert.equal(/pub const DELAY_DEVICE_DEFAULT: &str = "([^"]+)";/.exec(rs)[1], DEFAULTS.delayFields.device);
+  assert.deepEqual(list('DELAY_EVENT_TIME_DEFAULT'), DEFAULTS.delayFields.eventTime);
+  assert.deepEqual(list('DELAY_METADATA_DEFAULT'), DEFAULTS.delayFields.metadata);
+  assert.equal(/pub const DELAY_ARRIVAL_DEFAULT: &str = "([^"]+)";/.exec(rs)[1], DEFAULTS.timeField);
+  // The aggregation's field, the same rule on both sides.
+  for (const f of ['host', 'src_ip', 'dst_addr', 'ClientID', 'x.keyword', 'src_hostname']) {
+    const want = L.aggregatableName(f);
+    assert.ok(rs.includes('pub fn aggregatable_name'), 'the Rust rule exists');
+    assert.equal(want, f === 'host' ? 'host.keyword' : f === 'src_hostname' ? 'src_hostname.keyword' : f, f);
+  }
+});
+
 test('the schedule is the request policy\'s, 2 h and 15 min when the core does not say', () => {
   assert.deepEqual(M.scheduleFrom(null), { fullMs: 2 * 60 * MIN, lateMs: 15 * MIN });
   assert.deepEqual(M.scheduleFrom({ play: { delayFullSec: 3600, delayLateSec: 600 } }), { fullMs: 60 * MIN, lateMs: 10 * MIN });

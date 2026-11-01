@@ -316,14 +316,15 @@ check "the admin's values stand"                "$(cookie -d '{"type":"POLICY_GE
 # The log delay's late list (docs/PLAY.md): a display link may send the measurement narrowed to
 # the late devices — one terms filter on the aggregation's own field — and nothing wider. No
 # cluster here: the gate checks the shape first, so a body it lets through ends at no_creds.
-DELAY='{"size":0,"query":{"bool":{"filter":[{"range":{"@timestamp":{"gte":"now-24h","lte":"now","format":"strict_date_optional_time"}}}FILTER]}},"aggs":{"devices":{"terms":{"field":"host.keyword","size":500,"order":{"_count":"desc"}},"aggs":{"latest":{"top_hits":{"size":1,"sort":[{"@timestamp":{"order":"desc"}}],"_source":["@timestamp","event.created"]}}}}}}'
+# No cluster: the shipped delay fields (device src_hostname, arrival @timestamp) are the only ones.
+DELAY='{"size":0,"query":{"bool":{"filter":[{"range":{"@timestamp":{"gte":"now-24h","lte":"now","format":"strict_date_optional_time"}}}FILTER]}},"aggs":{"devices":{"terms":{"field":"src_hostname.keyword","size":500,"order":{"_count":"desc"}},"aggs":{"latest":{"top_hits":{"size":1,"sort":[{"@timestamp":{"order":"desc"}}],"_source":["@timestamp","event.created"]}}}}}}'
 es_tv() { python3 -c 'import json,sys;print(json.dumps({"type":"ES","clusterId":"x","method":"POST","path":"/logstash-*/_search?ignore_unavailable=true&allow_no_indices=true","body":sys.argv[1].replace("FILTER",sys.argv[2])}))' "$DELAY" "$1"; }
 gate() { python3 -c 'import json,sys;k=json.load(sys.stdin).get("kind");print("refused" if k=="forbidden" else "through")'; }
-check "a display link may re-check the late list"      "$(as_jar "$JTV" -d "$(es_tv ',{"terms":{"host.keyword":["fw-01","fw 02"]}}')" | gate)" "through"
+check "a display link may re-check the late list"      "$(as_jar "$JTV" -d "$(es_tv ',{"terms":{"src_hostname.keyword":["fw-01","fw 02"]}}')" | gate)" "through"
 check "the full check as before"                       "$(as_jar "$JTV" -d "$(es_tv '')" | gate)" "through"
 check "but not on another field"                       "$(as_jar "$JTV" -d "$(es_tv ',{"terms":{"user.name":["root"]}}')" | gate)" "refused"
-check "nor with a wildcard"                            "$(as_jar "$JTV" -d "$(es_tv ',{"terms":{"host.keyword":["fw-*"]}}')" | gate)" "refused"
-check "nor with a second filter"                       "$(as_jar "$JTV" -d "$(es_tv ',{"terms":{"host.keyword":["a"]}},{"terms":{"host.keyword":["b"]}}')" | gate)" "refused"
+check "nor with a wildcard"                            "$(as_jar "$JTV" -d "$(es_tv ',{"terms":{"src_hostname.keyword":["fw-*"]}}')" | gate)" "refused"
+check "nor with a second filter"                       "$(as_jar "$JTV" -d "$(es_tv ',{"terms":{"src_hostname.keyword":["a"]}},{"terms":{"src_hostname.keyword":["b"]}}')" | gate)" "refused"
 check "nor with a script"                              "$(as_jar "$JTV" -d "$(es_tv ',{"script":{"script":"true"}}')" | gate)" "refused"
 for _ in $(seq 1 25); do
   N=$(grep '"target":"audit"' "$OUT5" | grep '"user":"hc-op"' | grep -c 'emergency stop' || true); [ "$N" -ge 2 ] && break; sleep 0.2

@@ -230,13 +230,14 @@ pub struct Policy {
 pub const GAP_BOUNDS: (u64, u64) = (30, 600);
 pub const GAP_DEFAULT_SEC: u64 = 60;
 
-/// The kinds of request a person types, which are never held by the gap and never answered
-/// from another's reading: sent at once. By the `purpose` the page names on its `ES`
-/// message (ui/js), never guessed from a path. `(purpose, what Config › Requests calls it)`.
+/// The kinds of request a person types and sends to the cluster as typed, which are never held
+/// by the gap nor answered from another's reading: sent at once. By the `purpose` the page
+/// names on its `ES` message (ui/js), never guessed from a path. `(purpose, what Config ›
+/// Requests calls it)`. Only what really goes to a cluster as typed belongs here: the Indices
+/// and Snapshots page searches match their term in the browser over listings read like any
+/// page's (and held and shared like them), so they send nothing a person typed.
 pub const GAP_EXEMPT: &[(&str, &str)] = &[
     ("console", "the REST console"),
-    ("index-search", "the Indices page search (live and snapshots)"),
-    ("snapshot-search", "the Snapshots page search"),
 ];
 
 /// Whether a request of this purpose is one of `GAP_EXEMPT`.
@@ -432,21 +433,31 @@ impl Policy {
         (self.normalised(), locked)
     }
 
-    /// A `POLICY_SET`'s policy, as sent, checked against what config.txt locks: a locked
-    /// field the page sends with the value config.txt gives is accepted (a page that sends the
-    /// whole policy back is not refused for it); with another value it is refused, by name;
-    /// left out, nothing is asked of it.
-    pub fn check_managed(incoming: &serde_json::Value, s: &Settings) -> Result<(), String> {
-        let (effective, locked) = Policy::classic().with_managed(s);
+    /// A `POLICY_SET`'s policy, as sent, checked against what config.txt locks. A locked field
+    /// is accepted when the page sends a value it can only have come by honestly: config.txt's
+    /// own, the value the page was shown (`current` as it runs — normalised, so a late re-check
+    /// clamped to the full check reads as clamped), or what this very policy runs as once
+    /// config.txt is put over it. Left out, nothing is asked of it. Any other value is refused,
+    /// by name — so a page that sends the whole policy back can always save.
+    pub fn check_managed(incoming: &serde_json::Value, current: &Policy, s: &Settings) -> Result<(), String> {
+        let (shown, locked) = current.clone().with_managed(s);
+        if locked.is_empty() {
+            return Ok(());
+        }
+        let parsed: Option<Policy> = serde_json::from_value(incoming.clone()).ok();
+        let runs = parsed.map(|p| p.with_managed(s).0);
+        let field = |p: &Policy, f: &str| match f.strip_prefix("play.") {
+            Some(pf) => p.play.get(pf),
+            None => Some(p.min_gap_sec),
+        };
         for f in &locked {
             let ptr = format!("/{}", f.replace('.', "/"));
             let Some(asked) = incoming.pointer(&ptr) else { continue };
-            let want = match f.strip_prefix("play.") {
-                Some(pf) => effective.play.get(pf),
-                None => Some(effective.min_gap_sec),
-            };
-            if asked.as_u64() != want {
-                let key = managed_fields().into_iter().find(|(n, _)| n == f).map(|(_, k)| k).unwrap_or("");
+            let key = managed_fields().into_iter().find(|(n, _)| n == f).map(|(_, k)| k).unwrap_or("");
+            let raw = s.text(key).and_then(|v| v.parse::<u64>().ok());
+            let ok = asked.as_u64().is_some_and(|n| Some(n) == raw || Some(n) == field(&shown, f)
+                || runs.as_ref().is_some_and(|r| Some(n) == field(r, f)));
+            if !ok {
                 return Err(format!("{f} is managed by config.txt ({key}) and cannot be changed here"));
             }
         }
@@ -656,8 +667,8 @@ mod tests {
         let v = serde_json::to_value(Policy::shipped()).unwrap();
         assert_eq!(v["minGapSec"], serde_json::json!(60));
         assert_eq!(v["play"]["delayLateSec"], serde_json::json!(900));
-        assert!(gap_exempt("console") && gap_exempt("index-search") && gap_exempt("snapshot-search"));
-        assert!(!gap_exempt("") && !gap_exempt("page:console") && !gap_exempt("refresh"));
+        assert!(gap_exempt("console"));
+        assert!(!gap_exempt("") && !gap_exempt("page:console") && !gap_exempt("refresh") && !gap_exempt("index-search"));
     }
 
     #[test]
@@ -667,12 +678,13 @@ mod tests {
         assert_eq!((p.min_gap_sec, p.play.health_sec, p.play.delay_late_sec), (120, 600, 1200));
         assert_eq!(locked, vec!["minGapSec", "play.healthSec", "play.delayLateSec"]);
         // POLICY_SET: a locked field sent with config.txt's value, or left out, is accepted…
-        assert!(Policy::check_managed(&serde_json::json!({ "minGapSec": 120, "play": { "healthSec": 600 } }), &txt).is_ok());
-        assert!(Policy::check_managed(&serde_json::json!({ "mode": "hybrid", "play": { "nodesSec": 120 } }), &txt).is_ok());
+        let cur = Policy::shipped();
+        assert!(Policy::check_managed(&serde_json::json!({ "minGapSec": 120, "play": { "healthSec": 600 } }), &cur, &txt).is_ok());
+        assert!(Policy::check_managed(&serde_json::json!({ "mode": "hybrid", "play": { "nodesSec": 120 } }), &cur, &txt).is_ok());
         // …with another value it is refused, by name and key.
-        let e = Policy::check_managed(&serde_json::json!({ "minGapSec": 90 }), &txt).unwrap_err();
+        let e = Policy::check_managed(&serde_json::json!({ "minGapSec": 90 }), &cur, &txt).unwrap_err();
         assert!(e.contains("minGapSec") && e.contains("managed by config.txt") && e.contains("POLL_MIN_GAP_SECONDS"), "{e}");
-        let e = Policy::check_managed(&serde_json::json!({ "play": { "delayLateSec": 900 } }), &txt).unwrap_err();
+        let e = Policy::check_managed(&serde_json::json!({ "play": { "delayLateSec": 900 } }), &cur, &txt).unwrap_err();
         assert!(e.contains("play.delayLateSec") && e.contains("POLL_PLAY_DELAY_LATE_SECONDS"), "{e}");
         // What is saved keeps the stored value of a locked field, so removing the key brings it back.
         let mut stored = Policy::shipped();
@@ -683,6 +695,46 @@ mod tests {
         // Nothing in config.txt: nothing locked.
         assert!(Policy::shipped().with_managed(&Settings::parse("")).1.is_empty());
         assert_eq!(managed_fields().len(), 1 + PLAY_FIELDS.len());
+    }
+
+    #[test]
+    fn a_locked_late_recheck_clamped_by_the_full_check_can_always_be_saved() {
+        // config.txt locks the late re-check at 3600 s; the stored full check is 1800 s, so the
+        // late re-check runs (and the page shows) 1800 s. Sending back what the page shows saves.
+        let txt = Settings::parse("POLL_PLAY_DELAY_LATE_SECONDS=3600\n");
+        let mut stored = Policy::shipped();
+        stored.play.delay_full_sec = 1800;
+        let (shown, locked) = stored.clone().with_managed(&txt);
+        assert_eq!(locked, vec!["play.delayLateSec"]);
+        assert_eq!((shown.play.delay_full_sec, shown.play.delay_late_sec), (1800, 1800), "clamped to the full check");
+        let page = serde_json::to_value(&shown).unwrap();
+        assert!(Policy::check_managed(&page, &stored, &txt).is_ok(), "what the page was shown");
+        // The person raises the full check to 2 h, the late field still showing 1800: saves, and
+        // then runs at config.txt's 3600.
+        let mut raised = page.clone();
+        raised["play"]["delayFullSec"] = serde_json::json!(7200);
+        assert!(Policy::check_managed(&raised, &stored, &txt).is_ok());
+        let p: Policy = serde_json::from_value(raised).unwrap();
+        assert_eq!(p.with_managed(&txt).0.play.delay_late_sec, 3600);
+        // …and lowers it again below the lock: the clamp wins, and that saves too.
+        let mut lowered = serde_json::to_value(Policy::shipped().with_managed(&txt).0).unwrap();
+        lowered["play"]["delayFullSec"] = serde_json::json!(1800);
+        lowered["play"]["delayLateSec"] = serde_json::json!(1800);
+        assert!(Policy::check_managed(&lowered, &Policy::shipped(), &txt).is_ok(), "what this policy runs as");
+        // config.txt's own value is always accepted; something else never is.
+        let mut own = page.clone();
+        own["play"]["delayLateSec"] = serde_json::json!(3600);
+        assert!(Policy::check_managed(&own, &stored, &txt).is_ok());
+        let mut other = page;
+        other["play"]["delayLateSec"] = serde_json::json!(600);
+        assert!(Policy::check_managed(&other, &stored, &txt).unwrap_err().contains("POLL_PLAY_DELAY_LATE_SECONDS"));
+        // The other way round: the full check locked below a stored late re-check.
+        let txt = Settings::parse("POLL_PLAY_DELAY_FULL_SECONDS=1800\n");
+        let mut stored = Policy::shipped();
+        stored.play.delay_late_sec = 3600;
+        let shown = stored.clone().with_managed(&txt).0;
+        assert_eq!((shown.play.delay_full_sec, shown.play.delay_late_sec), (1800, 1800));
+        assert!(Policy::check_managed(&serde_json::to_value(&shown).unwrap(), &stored, &txt).is_ok());
     }
 
     #[test]

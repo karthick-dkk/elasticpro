@@ -191,7 +191,14 @@ late; none when none is) — about 54–58, from about 95.
   character, and nothing else in it. A different field, more than 500 values, a number, a
   wildcard, extra keys (a `boost`, a terms lookup), two terms filters, `terms.include` or a
   script are refused. A display link's request is never treated as typed by a person: the
-  duplicate-request gap holds it like any page's.
+  duplicate-request gap holds it like any page's, whatever `purpose` or origin it names.
+- Every field the body names is the cluster's own delay configuration (`auth::DelayShape`):
+  the terms field is its device field as aggregated (`aggregatableName`), the range and the
+  sort are on its arrival timestamp (`timeField`, else config.txt's `UI_TIME_FIELD`, else
+  `@timestamp`), and `_source` holds only that, its event-time and its metadata fields — what
+  the admin's `PRIME` carries (`timeField`, `delayFields`), or the shipped defaults. The window is
+  `now-<N>h` (N ≤ 24) to `now`. What reaches the cluster is the body the gate checked, written
+  out again, so a key given twice cannot say one thing to the gate and another to the cluster.
 - `allowFrom`: the session is refused from any other address (`source_of` / trusted proxies).
   Revoke ends its sessions at once. Hosted only; `UI_PLAY_ENABLED=false` turns links off.
 - Stored in `<data>/play-links.json` (secret hashed like API tokens).

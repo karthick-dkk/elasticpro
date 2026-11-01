@@ -20,6 +20,8 @@ pub const AFTER_WRITE_MS: u64 = 3_000;
 /// How long Play counts as watching a cluster's datasets after its last ask. Play asks at
 /// least once a minute (ui/js/pages/play.js `minute`), so three missed asks end it.
 pub const PLAY_WATCH_MS: u64 = 3 * 60_000;
+/// A reading may be stamped this far after `now` (two clocks on one host) and still hold the gap.
+pub const CLOCK_SLACK_MS: u64 = 1_000;
 
 pub const PRIO_USER: u8 = 0;
 pub const PRIO_DUE: u8 = 1;
@@ -320,16 +322,19 @@ impl State {
     /// Duplicate requests: when the gap after this dataset's last answer ends, or `None`
     /// when no answer holds one — never answered, or a write made the reading out of date.
     /// The one definition: the planner, `CLUSTER_DATASET` and `REFRESH` all ask it.
-    pub fn gap_until(&self, key: &Key, gap_ms: u64) -> Option<u64> {
+    ///
+    /// The clock is the wall's: a reading stamped later than `now` (the clock stepped back,
+    /// NTP) holds nothing, rather than everything for the length of the step plus the gap.
+    pub fn gap_until(&self, key: &Key, gap_ms: u64, now: u64) -> Option<u64> {
         if gap_ms == 0 || self.after_write.contains(key) {
             return None;
         }
-        self.entries.get(key)?.fetched_at.map(|t| t + gap_ms)
+        self.entries.get(key)?.fetched_at.filter(|t| *t <= now + CLOCK_SLACK_MS).map(|t| t + gap_ms)
     }
 
     /// Whether the gap holds this dataset at `now`.
     pub fn within_gap(&self, key: &Key, gap_ms: u64, now: u64) -> bool {
-        self.gap_until(key, gap_ms).is_some_and(|g| now < g)
+        self.gap_until(key, gap_ms, now).is_some_and(|g| now < g)
     }
 
     /// Whether a Play display watches this dataset now.
@@ -383,7 +388,7 @@ impl State {
                 // the request stays pending and runs once it does.
                 // The gap: answered less than `gap_ms` ago, so nothing goes until it passes
                 // — an ask waiting meanwhile goes then (unless a write asked for it).
-                let gap = self.gap_until(&key, cfg.gap_ms);
+                let gap = self.gap_until(&key, cfg.gap_ms, now);
                 let held = gap.is_some_and(|g| now < g);
                 if let Some(at) = self.pending.get(&key) {
                     if *at <= now && (!unreachable || ds == Dataset::Health) {
@@ -1324,6 +1329,25 @@ mod tests {
         assert!(!st.after_write.contains(&key), "and only that one");
         st.request(key.clone(), 63_000);
         assert!(run(&mut st, &s, &cfg, 63_000).is_empty(), "the gap holds again after it");
+    }
+
+    #[test]
+    fn a_failed_answer_holds_nothing_and_a_clock_stepped_back_holds_nothing() {
+        let (mut st, s, cfg) = client_basis();
+        let key = ("c00".to_string(), Dataset::Nodes);
+        st.inflight.insert(key.clone(), None);
+        let _ = st.complete(&key, failed(), 5, 1_000, &cfg, &mut same);
+        assert!(!st.within_gap(&key, cfg.gap_ms, 2_000), "never answered: nothing to hold");
+        st.request(key.clone(), 2_000);
+        assert_eq!(run(&mut st, &s, &cfg, 2_000), vec![Dataset::Nodes], "a retry after a failure goes");
+        // Answered at 2 000; a later failure keeps that reading and its time, and the gap from it.
+        let _ = st.complete(&key, failed(), 5, 3_000, &cfg, &mut same);
+        assert!(st.within_gap(&key, cfg.gap_ms, 3_000));
+        // The wall clock steps back an hour: the reading is "from the future" and holds nothing.
+        let back = 2_000u64;
+        st.entries.get_mut(&key).unwrap().fetched_at = Some(back + 3_600_000);
+        assert!(!st.within_gap(&key, cfg.gap_ms, back), "a reading stamped after now holds nothing");
+        assert_eq!(st.gap_until(&key, cfg.gap_ms, back + 3_600_000 - CLOCK_SLACK_MS), Some(back + 3_600_000 + cfg.gap_ms), "within the slack it still does");
     }
 
     #[test]

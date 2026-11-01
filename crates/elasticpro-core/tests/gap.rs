@@ -70,23 +70,49 @@ async fn what_a_person_types_is_never_held_nor_shared() {
     // A page read it a moment ago: the gap would answer anybody else from that reading.
     let _ = c.handle(get(path)).await;
     assert_eq!(hits_on(&srv, path), 1);
-    for purpose in ["console", "index-search", "snapshot-search"] {
-        let mut m = get(path);
-        m["purpose"] = json!(purpose);
-        let r = c.handle(m).await;
-        assert!(r.get("cached").is_none() && r.get("shared").is_none(), "{purpose} went to the cluster: {r}");
-    }
-    assert_eq!(hits_on(&srv, path), 4, "each of the three exempt kinds sent its own");
+    let mut m = get(path);
+    m["purpose"] = json!("console");
+    let r = c.handle(m).await;
+    assert!(r.get("cached").is_none() && r.get("shared").is_none(), "the console went to the cluster: {r}");
+    assert_eq!(hits_on(&srv, path), 2);
     // The console by its origin too, as it always was.
     let mut console = get(path);
     console["origin"] = json!("console");
     assert!(c.handle(console).await.get("cached").is_none());
-    assert_eq!(hits_on(&srv, path), 5);
-    // A purpose nobody exempted is held like any page read.
-    let mut other = get(path);
-    other["purpose"] = json!("refresh");
-    assert_eq!(c.handle(other).await["cached"], json!(true));
-    assert_eq!(hits_on(&srv, path), 5);
+    assert_eq!(hits_on(&srv, path), 3);
+    // A purpose nobody exempted is held like any page read — the Indices and Snapshots page
+    // searches among them: they match their term in the browser, and send nothing typed.
+    for purpose in ["refresh", "index-search", "snapshot-search"] {
+        let mut other = get(path);
+        other["purpose"] = json!(purpose);
+        assert_eq!(c.handle(other).await["cached"], json!(true), "{purpose}");
+    }
+    assert_eq!(hits_on(&srv, path), 3);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_reading_is_the_same_request_only_and_a_failed_answer_is_never_held() {
+    let dir = TempDir::new("gap-key");
+    let srv = TestServer::with(|h| if h.path.starts_with("/broken") { (500, r#"{"error":"x"}"#.into()) } else { (200, r#"{"ok":1}"#.into()) }).await;
+    let c = Core::new_with_rounds(Some(dir.0.clone()), Edition::Portable, 1);
+    // Two clusters at one address with different credentials, and a third with the same one.
+    let r = c.handle(json!({ "type": "PRIME", "readOnly": true, "clusters": [
+        { "id": "a", "url": srv.url(), "authHeader": "Basic YTph" },
+        { "id": "b", "url": srv.url(), "authHeader": "Basic Yjpi" },
+        { "id": "c", "url": srv.url(), "authHeader": "Basic YTph" } ] })).await;
+    assert_eq!(r["ok"], json!(true), "{r}");
+    let ask = |id: &str, method: &str, path: &str| json!({ "type": "ES", "clusterId": id, "method": method, "path": path, "origin": "page:overview" });
+    assert!(c.handle(ask("a", "GET", "/_cat/nodes")).await.get("cached").is_none());
+    assert_eq!(c.handle(ask("a", "GET", "/_cat/nodes")).await["cached"], json!(true), "the same request, held");
+    assert!(c.handle(ask("b", "GET", "/_cat/nodes")).await.get("cached").is_none(), "another credential is another request");
+    assert!(c.handle(ask("c", "GET", "/_cat/nodes")).await.get("cached").is_none(), "another cluster is another request, one address or not");
+    assert!(c.handle(ask("a", "HEAD", "/_cat/nodes")).await.get("cached").is_none(), "HEAD is not GET");
+    assert_eq!(hits_on(&srv, "/_cat/nodes"), 4);
+    // A failed answer holds nothing: the next asker goes to the cluster again.
+    let f = c.handle(ask("a", "GET", "/broken")).await;
+    assert_eq!(f["ok"], json!(false), "{f}");
+    assert!(c.handle(ask("a", "GET", "/broken")).await.get("cached").is_none());
+    assert_eq!(hits_on(&srv, "/broken"), 2);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

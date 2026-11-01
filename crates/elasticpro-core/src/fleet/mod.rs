@@ -868,7 +868,7 @@ impl Core {
                         }
                         continue;
                     }
-                    if let Some(next) = st.gap_until(&key, cfg.gap_ms).filter(|g| now < *g) {
+                    if let Some(next) = st.gap_until(&key, cfg.gap_ms, now).filter(|g| now < *g) {
                         st.asks.note(d.name(), Answered::Recent, now);
                         skipped.push(json!({ "clusterId": id, "dataset": d.name(), "reason": "recent", "nextAt": next }));
                         continue;
@@ -954,7 +954,8 @@ impl Core {
         }
         // A field config.txt locks is config.txt's: sent with its value it is accepted, with
         // another it is refused (and nothing else is applied either).
-        if let Err(e) = Policy::check_managed(&incoming, crate::settings::get()) {
+        let current = self.fleet.policy.read().clone();
+        if let Err(e) = Policy::check_managed(&incoming, &current, crate::settings::get()) {
             return json!({ "ok": false, "kind": "managed", "message": e });
         }
         let pol: Policy = match serde_json::from_value(incoming) {

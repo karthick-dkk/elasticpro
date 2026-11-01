@@ -997,10 +997,15 @@ impl Core {
                 let id = msg.get("clusterId").and_then(|v| v.as_str()).unwrap_or("");
                 // A cluster with no pattern of its own (a Zabbix host) uses the managed default,
                 // as the page does; anything else is refused and the wall says "not measured".
-                let pattern = self.spec_for(id).and_then(|s| s.log_index_pattern)
+                let spec = self.spec_for(id);
+                let pattern = spec.as_ref().and_then(|s| s.log_index_pattern.clone())
                     .or_else(|| crate::settings::get().text("UI_LOG_INDEX_PATTERN").map(String::from))
                     .or_else(|| Some("logstash-*".to_string()));
-                auth::play_es_shape(pattern.as_deref(), method, path, msg.get("body").and_then(|v| v.as_str())).map_err(|why| {
+                // Only the cluster's own delay configuration: its device field, its arrival
+                // timestamp, its event-time and metadata fields — never a field a TV picks.
+                let shape = auth::DelayShape::of(pattern, spec.as_ref().and_then(|s| s.time_field.as_deref()),
+                    crate::settings::get().text("UI_TIME_FIELD"), spec.as_ref().and_then(|s| s.delay_fields.as_ref()));
+                auth::play_es_shape(&shape, method, path, msg.get("body").and_then(|v| v.as_str())).map_err(|why| {
                     json!({ "ok": false, "kind": "forbidden", "role": c.role.as_str(), "playOnly": true, "message": why })
                 })?;
             }
@@ -2470,6 +2475,10 @@ impl Core {
         });
         let pattern = get("logIndexPattern").or_else(|| get("log_index_pattern"))
             .or_else(|| raw.get("defaults").and_then(|d| d.get("logIndexPattern")).and_then(|v| v.as_str()).map(String::from));
+        let defaults = raw.get("defaults");
+        let time_field = get("timeField").or_else(|| defaults.and_then(|d| d.get("timeField")).and_then(|v| v.as_str()).map(String::from));
+        let delay_fields = entry.get("delayFields").or_else(|| defaults.and_then(|d| d.get("delayFields")))
+            .and_then(|v| serde_json::from_value::<crate::auth::DelayFields>(v.clone()).ok());
         let changed_address;
         let credential;
         {
@@ -2510,6 +2519,8 @@ impl Core {
                 tls,
                 zabbix_groups: raw_groups(entry),
                 log_index_pattern: pattern,
+                time_field,
+                delay_fields,
             });
         }
         self.read_cache.clear();
@@ -3391,10 +3402,19 @@ impl Core {
         };
         req.user = caller.map(|c| c.name.clone());
         // A display link never writes, whatever it asks: `Writes::decide` is never told it asked.
-        // Nor is anything it sends a person typing: the duplicate-request gap holds it.
+        // Nor is anything it sends a person typing: the duplicate-request gap holds it, whatever
+        // purpose or origin it names. And what goes to the cluster is the body the gate checked,
+        // written out again: a body with a key twice was checked as its last one (serde), and
+        // the cluster must not read the first.
         if caller.is_some_and(Caller::play_only) {
             req.allow_writes = false;
             req.purpose = None;
+            if req.origin.as_deref().is_some_and(|o| !o.starts_with("page:")) {
+                req.origin = Some("page:play".into());
+            }
+            if let Some(b) = req.body.as_deref() {
+                req.body = serde_json::from_str::<Value>(b).ok().map(|v| v.to_string());
+            }
         }
         // A person asked. Decided here, by the way the request came in — never by its origin.
         req.class = Class::Interactive;
@@ -4258,7 +4278,7 @@ impl Core {
             if usable {
                 specs.insert(id.clone(), ClusterSpec {
                     id: id.clone(), name: Some(c.name.clone()), url: c.url.clone(), auth_header: auth, via: via.clone(), tls: None,
-                    zabbix_groups: c.readers.clone(), log_index_pattern: None,
+                    zabbix_groups: c.readers.clone(), log_index_pattern: None, time_field: None, delay_fields: None,
                 });
             }
             view.push(json!({

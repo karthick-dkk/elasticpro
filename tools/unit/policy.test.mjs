@@ -300,7 +300,7 @@ test('duplicate requests and the Play schedule: the UI and the core ship the sam
   const rp = es.indexOf('export const REQUEST_PURPOSE');
   const purposes = [...es.slice(rp, es.indexOf('});', rp)).matchAll(/'([\w-]+)'/g)].map((m) => m[1]);
   assert.deepEqual(purposes.sort(), exempt.sort());
-  assert.equal(exempt.length, 3);
+  assert.deepEqual(exempt, ['console'], 'only what goes to a cluster as a person typed it');
 });
 
 test('the gap and the Play schedule are kept in bounds, read from the form, and kept by a preset', () => {

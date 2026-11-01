@@ -39,6 +39,12 @@ pub struct ClusterSpec {
     /// fleet poller builds the same request the page used to, so it needs the same input.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub log_index_pattern: Option<String>,
+    /// The config's `timeField` and `delayFields`: the only fields a display link's log-delay
+    /// measurement may name for this cluster (`auth::DelayShape`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub time_field: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delay_fields: Option<crate::auth::DelayFields>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -83,7 +89,7 @@ pub struct EsRequest {
     #[serde(default)]
     pub max_age_ms: Option<u64>,
     /// What a person is doing, where it decides how the request is handled: one of
-    /// `fleet::policy::GAP_EXEMPT` (the REST console, the Indices and Snapshots page searches)
+    /// `fleet::policy::GAP_EXEMPT` (the REST console)
     /// is never held by the duplicate-request gap nor answered from another's reading. Named
     /// by the page; ignored for a display link.
     #[serde(default)]

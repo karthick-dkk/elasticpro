@@ -14,11 +14,13 @@ const send = (msg) => bridge(msg);
  */
 let requestOrigin = 'page';
 /**
- * The kinds of request a person types, by the `purpose` an ES message carries: sent at once,
- * never held by the duplicate-request gap nor answered from another's reading. The core's list
- * is GAP_EXEMPT in crates/elasticpro-core/src/fleet/policy.rs (tools/unit holds them equal).
+ * The kinds of request a person types and sends as typed, by the `purpose` an ES message
+ * carries: sent at once, never held by the duplicate-request gap nor answered from another's
+ * reading. The core's list is GAP_EXEMPT in crates/elasticpro-core/src/fleet/policy.rs
+ * (tools/unit holds them equal). Only the REST console: the Indices and Snapshots searches
+ * match their term in the browser over listings read like any page's.
  */
-export const REQUEST_PURPOSE = Object.freeze({ console: 'console', indexSearch: 'index-search', snapshotSearch: 'snapshot-search' });
+export const REQUEST_PURPOSE = Object.freeze({ console: 'console' });
 export function setRequestOrigin(origin) { requestOrigin = origin || 'page'; }
 
 /**
@@ -55,7 +57,11 @@ export async function primeWorker(clusters, readOnly = true, jumpHosts = [], { p
                                      // The fleet poller builds the ILM-assignment request the
                                      // page used to (`/<logIndexPattern>/_settings…`), so it
                                      // needs the same input; without it the core reads "*".
-                                     ...(c.logIndexPattern ? { logIndexPattern: c.logIndexPattern } : {}) })),
+                                     ...(c.logIndexPattern ? { logIndexPattern: c.logIndexPattern } : {}),
+                                     // The log-delay fields: a display link may measure this
+                                     // cluster with these and no others (auth.rs DelayShape).
+                                     ...(c.timeField ? { timeField: c.timeField } : {}),
+                                     ...(c.delayFields ? { delayFields: c.delayFields } : {}) })),
     jumpHosts: jumpHosts.map((j) => ({ id: j.id, host: j.host, port: j.port, user: j.user, keyFile: j.keyFile || null })),
   });
 }
@@ -237,8 +243,8 @@ export class EsClient {
       allowWrites: opts.allowWrites === true,
       origin: opts.origin || requestOrigin,
       // What a person is doing, where it decides how the core treats the request: the REST
-      // console and the Indices and Snapshots page searches are never held by the duplicate-
-      // request gap (fleet/policy.rs GAP_EXEMPT; REQUEST_PURPOSE below).
+      // console is never held by the duplicate-request gap (fleet/policy.rs GAP_EXEMPT;
+      // REQUEST_PURPOSE above).
       ...(opts.purpose ? { purpose: opts.purpose } : {}),
       ...(opts.maxAgeMs !== undefined ? { maxAgeMs: opts.maxAgeMs } : freshDepth > 0 ? { maxAgeMs: 0 } : {}),
     };

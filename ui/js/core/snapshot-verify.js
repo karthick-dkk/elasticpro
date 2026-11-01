@@ -19,7 +19,6 @@
  */
 
 import { client, state, ensureFullSnapshots } from './state.js';
-import { REQUEST_PURPOSE } from './es.js';
 
 const SNAPSHOT_LIST_SIZE = 1000;
 
@@ -148,8 +147,8 @@ export async function findIndexEverywhere(cluster, term, { max = 200 } = {}) {
   const unverified = [];
   for (const repo of repos) {
     let list;
-    // A person's search (Indices page): sent at once, never held by the duplicate-request gap.
-    try { list = (await cl.snapshots(repo, SNAPSHOT_LIST_SIZE, { purpose: REQUEST_PURPOSE.indexSearch })).snapshots || []; }
+    // The listing is read like any page's (held by the gap and shared); the term is matched here.
+    try { list = (await cl.snapshots(repo, SNAPSHOT_LIST_SIZE)).snapshots || []; }
     catch (e) { unverified.push(`${repo}: ${e.message || e}`); continue; }
     for (const s of list) {
       for (const idx of s.indices || []) {

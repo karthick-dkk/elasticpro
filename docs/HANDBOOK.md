@@ -298,12 +298,18 @@ page's own read the same cluster, address, method, path, body and credential (th
 `Core::es_req`; GET and HEAD, as the read cache keeps, and an answer it can keep — at most 4 MB).
 What a write changed is re-read at once, never held. Askers for a request already on its way
 share it — always on (`inflight::Flights` for a page's reads, one fetch per dataset in the
-scheduler). Never held, sent at once and never shared, by the `purpose` the page names on its
-`ES` message (`fleet::policy::GAP_EXEMPT`, never guessed from a path): the REST console
-(`console`), the Indices page search (`index-search`) and the Snapshots page search
-(`snapshot-search` — today it filters the listing it already has and sends nothing). A display
-link's `purpose` is ignored. Pages stamp a reading with the cluster's time, not the time it was
-handed over (`EsClient.readingSince`), so a held reading never reads as fresh.
+scheduler). The gap is a floor for every automatic read: `ES_READ_CACHE_SECONDS=0` turns off the
+read cache's own few seconds, not the gap, so a page's repeat read inside the gap is still that
+reading; only a failed answer (anything but `ok`) is never held. Never held, sent at once and
+never shared, by the `purpose` the page names on its `ES` message (`fleet::policy::GAP_EXEMPT`,
+never guessed from a path): the REST console (`console`; also by its origin). That is the only
+request a person types that goes to a cluster as typed — the Indices and Snapshots page searches
+match their term in the browser, over listings read like any page's (held and shared like
+them). A display link's `purpose` is ignored and an origin of its own other than `page:…` is
+read as `page:play`, so a TV is never taken for a person typing. The clock is the wall's: a
+reading stamped later than now (the clock stepped back) holds nothing. Pages stamp a reading
+with the cluster's time, not the time it was handed over (`EsClient.readingSince`), so a held
+reading never reads as fresh.
 
 **While Play runs** (`play`, Config › Requests › While Play runs): what Play keeps going for every
 display — health 5 min, nodes 5 min, SLM/ILM 4 h, snapshots 2 h, the index list 1 h, the log

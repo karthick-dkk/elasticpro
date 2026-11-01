@@ -3508,7 +3508,7 @@ restoreConsole();
     ok(gapIn && gapIn.min === '30' && gapIn.max === '600', `gap: the gap input allows ${gapIn && gapIn.min}–${gapIn && gapIn.max}, expected 30–600`);
     const gtext = gapSec ? gapSec.textContent : '';
     ok(/Askers waiting on the same request share it — always on/.test(gtext), `gap: in-flight sharing is not said to be always on: "${gtext}"`);
-    ok(/REST console/.test(gtext) && /Indices page search/.test(gtext) && /Snapshots page search/.test(gtext), `gap: the kinds never held are not all listed: "${gtext}"`);
+    ok(/REST console/.test(gtext) && !/Indices page search|Snapshots page search/.test(gtext), `gap: the kinds never held are not what goes to a cluster as typed: "${gtext}"`);
     ok(gapSec && gapSec.querySelectorAll('input').length === 1, 'gap: something besides the gap is editable under Duplicate requests');
     const playSec = doc.getElementById('pol-play-sec');
     ok(!!playSec, 'play schedule: no "While Play runs" section on Config › Requests');

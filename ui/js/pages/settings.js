@@ -550,7 +550,7 @@ const policyLock = (field) => (pol && pol.managed && pol.managed[field]) || null
 function gapSection(p, admin, defaults) {
   const lock = policyLock('minGapSec');
   const exempt = (pol && Array.isArray(pol.gapExempt) && pol.gapExempt.length ? pol.gapExempt.map((x) => x.label)
-    : ['the REST console', 'the Indices page search (live and snapshots)', 'the Snapshots page search']);
+    : ['the REST console']);
   const shipped = (defaults && defaults.minGapSec) || GAP.def;
   return h('section#pol-gap-sec.pol-sec', { 'aria-labelledby': 'pol-gap-h' },
     h('h4#pol-gap-h.pol-sec-h', 'Duplicate requests'),
