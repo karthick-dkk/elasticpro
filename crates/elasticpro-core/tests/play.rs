@@ -156,7 +156,8 @@ async fn a_display_link_measures_only_with_its_clusters_delay_fields_and_names_n
     assert_eq!(as_display(&c, &tok, caps(json!({ "purpose": "console" })), from).await["cached"], json!(true), "purpose console is held");
     // Play-watching a cluster outside the link's list is refused; its own is taken.
     let r = as_display(&c, &tok, json!({ "type": "REFRESH", "clusterIds": ["c2"], "datasets": ["health"], "watcher": "play" }), from).await;
-    assert!(r["kind"] == json!("forbidden") || r["queued"] == json!(0), "{r}");
+    assert_eq!((r["ok"].clone(), r["kind"].clone()), (json!(false), json!("forbidden")), "refused, not ignored: {r}");
+    assert!(r["message"].as_str().unwrap_or("").contains("c2"), "{r}");
     let r = as_display(&c, &tok, json!({ "type": "REFRESH", "clusterIds": ["c1"], "datasets": ["health"], "watcher": "play" }), from).await;
     assert_eq!(r["ok"], json!(true), "{r}");
 }

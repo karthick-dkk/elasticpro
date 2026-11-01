@@ -195,8 +195,11 @@ late; none when none is) — about 54–58, from about 95.
 - Every field the body names is the cluster's own delay configuration (`auth::DelayShape`):
   the terms field is its device field as aggregated (`aggregatableName`), the range and the
   sort are on its arrival timestamp (`timeField`, else config.txt's `UI_TIME_FIELD`, else
-  `@timestamp`), and `_source` holds only that, its event-time and its metadata fields — what
-  the admin's `PRIME` carries (`timeField`, `delayFields`), or the shipped defaults. The window is
+  `@timestamp`), and `_source` holds only that, its event-time and its metadata fields —
+  resolved as the UI resolves them (`auth::DelayShape::resolve`, config.js `normalize`): the
+  cluster's own (`timeField`, `delayFields`, which the admin's `PRIME` carries), else the
+  clusters file's `defaults:` with config.txt's `UI_TIME_FIELD` over it, else the shipped
+  values. A Zabbix host names none of its own, so the clusters file's defaults decide it. The window is
   `now-<N>h` (N ≤ 24) to `now`. What reaches the cluster is the body the gate checked, written
   out again, so a key given twice cannot say one thing to the gate and another to the cluster.
 - `allowFrom`: the session is refused from any other address (`source_of` / trusted proxies).

@@ -296,26 +296,73 @@ pub struct DelayShape {
     pub source: Vec<String>,
 }
 
-impl DelayShape {
-    /// From the cluster's primed config (`timeField`, `delayFields`), config.txt's
-    /// `UI_TIME_FIELD`, and the shipped defaults, in that order.
-    pub fn of(pattern: Option<String>, time_field: Option<&str>, managed_time: Option<&str>, fields: Option<&DelayFields>) -> DelayShape {
-        let d = fields.cloned().unwrap_or_default();
-        let device = aggregatable_name(d.device.as_deref().map(str::trim).filter(|x| !x.is_empty()).unwrap_or(DELAY_DEVICE_DEFAULT));
-        let mut arrivals: Vec<String> = [time_field, managed_time].into_iter().flatten()
-            .map(str::trim).filter(|x| !x.is_empty()).map(String::from).collect();
-        if arrivals.is_empty() {
-            arrivals.push(DELAY_ARRIVAL_DEFAULT.to_string());
+/// The clusters file's `defaults:` as far as the log delay goes: what a cluster that names none
+/// of its own takes — a Zabbix host's always, since Zabbix gives it no delay fields.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct DelayDefaults {
+    pub pattern: Option<String>,
+    pub time_field: Option<String>,
+    pub fields: Option<DelayFields>,
+}
+
+impl DelayDefaults {
+    /// From the parsed clusters file (`defaults.logIndexPattern`, `.timeField`, `.delayFields`).
+    pub fn from_config(raw: &serde_json::Value) -> DelayDefaults {
+        let d = &raw["defaults"];
+        let text = |k: &str| d.get(k).and_then(|v| v.as_str()).map(str::trim).filter(|v| !v.is_empty()).map(String::from);
+        DelayDefaults {
+            pattern: text("logIndexPattern"),
+            time_field: text("timeField"),
+            fields: d.get("delayFields").or_else(|| d.get("delay_fields")).filter(|v| v.is_object())
+                .and_then(|v| serde_json::from_value(v.clone()).ok()),
         }
-        arrivals.dedup();
-        let list = |v: &Vec<String>, def: &[&str]| -> Vec<String> {
-            let v: Vec<String> = v.iter().map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect();
-            if v.is_empty() { def.iter().map(|x| x.to_string()).collect() } else { v }
+    }
+}
+
+impl DelayShape {
+    /// The cluster's own settings over the shipped defaults (no clusters file, no config.txt).
+    pub fn of(pattern: Option<String>, time_field: Option<&str>, managed_time: Option<&str>, fields: Option<&DelayFields>) -> DelayShape {
+        DelayShape::resolve(pattern, time_field, fields, &DelayDefaults::default(), managed_time, None)
+    }
+
+    /// What the UI measures this cluster with, resolved the way it resolves it — config.js
+    /// `normalize` (the cluster's own, else `defaults` = shipped, the clusters file's, then
+    /// config.txt's over both) and log-delay.js `resolveFields` (`src_hostname`, the
+    /// event-time list, `@timestamp` when nothing names one). One definition, so the gate and
+    /// the measurer cannot disagree, for a config cluster and a Zabbix host alike.
+    pub fn resolve(own_pattern: Option<String>, own_time: Option<&str>, own_fields: Option<&DelayFields>,
+                   file: &DelayDefaults, managed_time: Option<&str>, managed_pattern: Option<&str>) -> DelayShape {
+        let pick = |xs: [Option<&str>; 3], last: &str| -> String {
+            xs.into_iter().flatten().map(str::trim).find(|x| !x.is_empty()).unwrap_or(last).to_string()
         };
-        let mut source = arrivals.clone();
-        source.extend(list(&d.event_time, DELAY_EVENT_TIME_DEFAULT));
-        source.extend(list(&d.metadata, DELAY_METADATA_DEFAULT).into_iter().map(|m| m.trim_end_matches(".keyword").to_string()));
-        DelayShape { pattern, device, arrivals, source }
+        let pattern = Some(pick([own_pattern.as_deref(), managed_pattern, file.pattern.as_deref()], "logstash-*"));
+        let arrival = pick([own_time, managed_time, file.time_field.as_deref()], DELAY_ARRIVAL_DEFAULT);
+        let shipped = |l: &[&str]| l.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        let base = file.fields.clone().unwrap_or(DelayFields {
+            device: Some(DELAY_DEVICE_DEFAULT.into()),
+            event_time: shipped(DELAY_EVENT_TIME_DEFAULT),
+            metadata: shipped(DELAY_METADATA_DEFAULT),
+        });
+        let own = own_fields.cloned().unwrap_or_default();
+        let clean = |v: &Vec<String>| v.iter().map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect::<Vec<_>>();
+        let device = [own.device.as_deref(), base.device.as_deref()].into_iter().flatten().map(str::trim)
+            .find(|x| !x.is_empty()).unwrap_or(DELAY_DEVICE_DEFAULT).to_string();
+        let mut event = clean(&own.event_time);
+        if event.is_empty() {
+            event = clean(&base.event_time);
+        }
+        let mut metadata = clean(&own.metadata);
+        if metadata.is_empty() {
+            metadata = clean(&base.metadata);
+        }
+        let mut source = vec![arrival.clone()];
+        source.extend(event);
+        // resolveFields falls back to these when a cluster's list is empty: always allowed.
+        source.extend(shipped(DELAY_EVENT_TIME_DEFAULT));
+        source.extend(metadata.into_iter().map(|m| m.trim_end_matches(".keyword").to_string()));
+        source.sort();
+        source.dedup();
+        DelayShape { pattern, device: aggregatable_name(&device), arrivals: vec![arrival], source }
     }
 }
 
@@ -2385,6 +2432,15 @@ mod tests {
         let s2 = DelayShape::of(p.map(String::from), Some("ts"), None, Some(&f));
         assert_eq!((s2.device.as_str(), s2.arrivals.clone()), ("src_ip", vec!["ts".to_string()]), "an IP-like field is not .keyword");
         assert!(s2.source.contains(&"event.created".to_string()) && s2.source.contains(&"ClientID".to_string()), "the shipped event-time and metadata fields");
+        // A cluster that names nothing (a Zabbix host) takes the clusters file's defaults, and
+        // config.txt's time field over them — as config.js normalize does.
+        let file = DelayDefaults::from_config(&serde_json::json!({ "defaults": { "timeField": "arrived", "logIndexPattern": "fw-*",
+            "delayFields": { "device": "fw_name", "eventTime": ["evt"], "metadata": ["site.keyword"] } } }));
+        let z = DelayShape::resolve(None, None, None, &file, None, None);
+        assert_eq!((z.pattern.as_deref(), z.device.as_str(), z.arrivals.clone()), (Some("fw-*"), "fw_name.keyword", vec!["arrived".to_string()]));
+        assert!(z.source.contains(&"evt".to_string()) && z.source.contains(&"site".to_string()) && !z.source.contains(&"ClientID".to_string()));
+        assert_eq!(DelayShape::resolve(None, None, None, &file, Some("@ts"), Some("logs-*")).arrivals, vec!["@ts".to_string()], "config.txt over the file");
+        assert_eq!(DelayShape::resolve(Some("own-*".into()), Some("t"), None, &file, Some("@ts"), Some("logs-*")).arrivals, vec!["t".to_string()], "the cluster's own over both");
         let none = DelayShape::of(None, None, Some("@ts"), None);
         assert_eq!((none.device.as_str(), none.arrivals.clone()), ("src_hostname.keyword", vec!["@ts".to_string()]), "config.txt's UI_TIME_FIELD");
         assert_eq!(DelayShape::of(None, None, None, None).arrivals, vec!["@timestamp".to_string()]);

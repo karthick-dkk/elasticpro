@@ -992,23 +992,8 @@ impl Core {
             auth::play_may(t, method, path, msg.get("kind").and_then(|v| v.as_str())).map_err(|why| {
                 json!({ "ok": false, "kind": "forbidden", "role": c.role.as_str(), "playOnly": true, "message": why })
             })?;
-            // And only the log-delay measurement itself: its index pattern, its parameters, its body.
-            if t == "ES" {
-                let id = msg.get("clusterId").and_then(|v| v.as_str()).unwrap_or("");
-                // A cluster with no pattern of its own (a Zabbix host) uses the managed default,
-                // as the page does; anything else is refused and the wall says "not measured".
-                let spec = self.spec_for(id);
-                let pattern = spec.as_ref().and_then(|s| s.log_index_pattern.clone())
-                    .or_else(|| crate::settings::get().text("UI_LOG_INDEX_PATTERN").map(String::from))
-                    .or_else(|| Some("logstash-*".to_string()));
-                // Only the cluster's own delay configuration: its device field, its arrival
-                // timestamp, its event-time and metadata fields — never a field a TV picks.
-                let shape = auth::DelayShape::of(pattern, spec.as_ref().and_then(|s| s.time_field.as_deref()),
-                    crate::settings::get().text("UI_TIME_FIELD"), spec.as_ref().and_then(|s| s.delay_fields.as_ref()));
-                auth::play_es_shape(&shape, method, path, msg.get("body").and_then(|v| v.as_str())).map_err(|why| {
-                    json!({ "ok": false, "kind": "forbidden", "role": c.role.as_str(), "playOnly": true, "message": why })
-                })?;
-            }
+            // And only the log-delay measurement itself — its index pattern, parameters and
+            // body — which `es()` checks (`delay_shape_for` reads the clusters file).
         }
         if auth::required_role(t).is_none() {
             return Ok(());
@@ -3395,7 +3380,27 @@ impl Core {
                 "defaultCredential": default_credential })
     }
 
+    /// What a display link may measure this cluster with (`auth::DelayShape`): the cluster's
+    /// own settings, the clusters file's `defaults:` (a Zabbix host has nothing else), then
+    /// config.txt and the shipped values — resolved as the UI resolves them.
+    async fn delay_shape_for(&self, id: &str) -> auth::DelayShape {
+        let spec = self.spec_for(id);
+        let file = self.read_config_file().await.map(|raw| auth::DelayDefaults::from_config(&raw)).unwrap_or_default();
+        let managed = crate::settings::get();
+        auth::DelayShape::resolve(spec.as_ref().and_then(|s| s.log_index_pattern.clone()), spec.as_ref().and_then(|s| s.time_field.as_deref()),
+            spec.as_ref().and_then(|s| s.delay_fields.as_ref()), &file, managed.text("UI_TIME_FIELD"), managed.text("UI_LOG_INDEX_PATTERN"))
+    }
+
     async fn es(self: &Arc<Self>, msg: Value, caller: Option<&Caller>) -> Value {
+        // A display link: only the log-delay measurement, on the cluster's own delay fields;
+        // anything else is refused and the wall says "not measured".
+        if let Some(c) = caller.filter(|c| c.play_only()) {
+            let s = |k: &str| msg.get(k).and_then(Value::as_str).unwrap_or("");
+            let shape = self.delay_shape_for(s("clusterId")).await;
+            if let Err(why) = auth::play_es_shape(&shape, s("method"), s("path"), msg.get("body").and_then(Value::as_str)) {
+                return json!({ "ok": false, "kind": "forbidden", "role": c.role.as_str(), "playOnly": true, "message": why });
+            }
+        }
         let mut req: EsRequest = match serde_json::from_value(msg) {
             Ok(r) => r,
             Err(e) => return json!({ "ok": false, "kind": "bad_message", "message": format!("bad ES request: {e}") }),
