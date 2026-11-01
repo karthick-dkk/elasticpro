@@ -3188,7 +3188,9 @@ restoreConsole();
     written = null;
     await press('Save');
     await written_();
-    ok(written !== null && !/"topValues"\s*:\s*40/.test(written), 'volume fields: saving wrote a managed value into the file');
+    ok(written !== null, 'volume fields: Save with a managed value wrote nothing');
+    ok(written === null || !/"topValues"\s*:\s*40/.test(written),
+      `volume fields: saving wrote a managed value into the file (${written && JSON.stringify((JSON.parse(written).defaults || {}).volume)})`);
     managed.setManaged({ ok: true, managedDefaults: {}, managedZabbixOptions: {} });
   } finally {
     globalThis.fetch = realFetch;
