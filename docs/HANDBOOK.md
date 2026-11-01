@@ -281,8 +281,46 @@ classic policy, which is what Config → Requests → Automatic saves:
   "concurrency": { "global": 16, "perCluster": 2, "tunnel": 6 },
   "timeoutMs": 30000, "tunnelTimeoutMs": 60000,
   "budgetPerClusterPerMin": 30,
-  "paused": { "all": false } }
+  "paused": { "all": false },
+  "minGapSec": 60,
+  "play": { "healthSec": 300, "nodesSec": 300, "lifecycleSec": 14400, "snapshotsSec": 7200,
+            "indicesSec": 3600, "delayFullSec": 7200, "delayLateSec": 900 } }
 ```
+
+**Duplicate requests** (`minGapSec`, Config › Requests › Duplicate requests; 30–600 s, shipped
+60). A request ElasticPro sends by itself — a page loading, Play, Retry or Refresh, the poller, a
+dataset ask — is not sent again while the same request was answered by the cluster less than the
+gap ago: the asker gets that reading, with its age, and the next request goes once the gap has
+passed (an ask waiting meanwhile goes then). "The same request" is the same cluster and dataset
+for the fleet cache (`scheduler::State::gap_until`: the planner, `CLUSTER_DATASET` and `REFRESH`
+all ask it — a `REFRESH` inside the gap is skipped with `reason: "recent"` and `nextAt`), and for a
+page's own read the same cluster, address, method, path, body and credential (the read cache,
+`Core::es_req`; GET and HEAD, as the read cache keeps, and an answer it can keep — at most 4 MB).
+What a write changed is re-read at once, never held. Askers for a request already on its way
+share it — always on (`inflight::Flights` for a page's reads, one fetch per dataset in the
+scheduler). Never held, sent at once and never shared, by the `purpose` the page names on its
+`ES` message (`fleet::policy::GAP_EXEMPT`, never guessed from a path): the REST console
+(`console`), the Indices page search (`index-search`) and the Snapshots page search
+(`snapshot-search` — today it filters the listing it already has and sends nothing). A display
+link's `purpose` is ignored. Pages stamp a reading with the cluster's time, not the time it was
+handed over (`EsClient.readingSince`), so a held reading never reads as fresh.
+
+**While Play runs** (`play`, Config › Requests › While Play runs): what Play keeps going for every
+display — health 5 min, nodes 5 min, SLM/ILM 4 h, snapshots 2 h, the index list 1 h, the log
+delay's full check 2 h and its late devices 15 min (docs/PLAY.md). Play says what it shows with
+`REFRESH {…, watcher: "play"}`; the scheduler keeps watchers per dataset and the effective interval
+is the soonest of them — the schedule (background), a page watching (the watch window, the
+policy's `intervalsSec`), a Play display (`play`) — floored by the gap. Bounds: health and nodes
+60–3600 s, SLM/ILM 900 s–1 day, snapshots 600 s–1 day, index list 300 s–1 day, full check
+1800 s–1 day, late devices 300–7200 s and never slower than the full check.
+
+**config.txt locks them**: `POLL_MIN_GAP_SECONDS`, `POLL_PLAY_HEALTH_SECONDS`,
+`POLL_PLAY_NODES_SECONDS`, `POLL_PLAY_LIFECYCLE_SECONDS`, `POLL_PLAY_SNAPSHOTS_SECONDS`,
+`POLL_PLAY_INDICES_SECONDS`, `POLL_PLAY_DELAY_FULL_SECONDS`, `POLL_PLAY_DELAY_LATE_SECONDS` (same
+bounds). A key with a value wins over policy.json, the field reads "managed by config.txt (KEY)"
+on Config › Requests, and `POLICY_SET` refuses another value for it (`kind: "managed"`); sent with
+config.txt's value, or left out, it is accepted. policy.json keeps its own value, which comes back
+when the key is taken out.
 
 Modes: `on-demand` is the shipped default (Client basis, below). `auto` is `background` while the core knows 25 clusters or fewer
 and `hybrid` above — measured at 120 clusters, background sent ~397 requests/min and auto ~80;
@@ -313,14 +351,20 @@ minute, doubling to ten, until it answers. `FLEET_STATE` reports `policy: {mode,
 pausedSince, pausedUntil, pausedBy}`, `automation: {busySince, slowed: {cluster: {since, reason,
 level, quick}}}`, each catalogue entry's `effectiveClass` under the mode, and per cluster a
 `throttle: {kind: budget|backoff, until, reason, level}` and `slowed` while one is in force.
-`REQUEST_LOG` carries `throttled`, `slowed` and `busySince` for the Request Centre.
+`REQUEST_LOG` carries `throttled`, `slowed` and `busySince` for the Request Centre, and `asks`:
+what the gap saved over the last hour (rolling, by the minute) — `{windowMinutes: 60, gapSec,
+since, byDataset: {<dataset>|direct: {asked, sent, recent, shared, held}}}`, where every ask is
+exactly one of sent (a request went), recent (a reading inside the gap), shared (one already on its
+way) or held (fresh enough for the asker anyway, or the cluster is down); `direct` is the pages'
+own reads. The Request Centre's **Duplicate requests** card reads it: "health: asked 42 this hour,
+sent 12, 30 answered from a reading under a minute old".
 
 | Message | Role | Answer |
 |---|---|---|
 | `REQUEST_STATS` | user | `{ok, requests: {cluster: {last5m, perMinute, …}}}` — the strip's "Requests N in 5m". |
 | `REQUEST_LOG {cluster?, limit?}` | admin | `{ok, inflight: [record…], recent: [record…], keep, throttled: {cluster: throttle}}` — every user's requests on the clusters the caller may see, newest first, `limit` ≤ 2,000 (default 200). `gate` carries the request gate's figures (running and queued per class, waits, `refused`, `tooLarge`: answers over the response cap in the window, not counted as refused) and `zabbixPush`: `{enabled, host, idle, intervalSecs, credential: "link"\|"metrics", lastOkAt, lastAttemptAt, pushes, failures, consecutiveFailures, lastError, nextAt}` (`lastError` only for an admin who sees every cluster; never a token). |
-| `POLICY_GET` | user | `{ok, policy, defaults, effective: {dataset: background|onDemand}, resolvedMode, stored, warning?, running, gate, pollConcurrencyEnv}` — `pollConcurrencyEnv` is `ELASTICPRO_POLL_CONCURRENCY` as read, or null when unset |
-| `POLICY_SET {policy}` | admin | the same, plus `saved`; `bad_request` when it does not parse (an unknown `mode`, a non-object). Values out of bounds are bounded, not refused. `paused` is ignored: the stop in force is kept as it is (only `POLICY_PAUSE` / `POLICY_RESUME` change it), so a form opened before a stop began never lifts it. Audited. |
+| `POLICY_GET` | user | `{ok, policy, defaults, effective: {dataset: background|onDemand}, resolvedMode, stored, warning?, running, gate, pollConcurrencyEnv, managed, gapExempt, gapBounds, playBounds}` — `pollConcurrencyEnv` is `ELASTICPRO_POLL_CONCURRENCY` as read, or null when unset; `policy` as it runs (config.txt's values in); `managed` `{field: config.txt key}` for `minGapSec` and `play.<field>` |
+| `POLICY_SET {policy}` | admin | the same, plus `saved`; `bad_request` when it does not parse (an unknown `mode`, a non-object); `managed` when it names a field config.txt locks with another value. Values out of bounds are bounded, not refused. `paused` is ignored: the stop in force is kept as it is (only `POLICY_PAUSE` / `POLICY_RESUME` change it), so a form opened before a stop began never lifts it. Audited. |
 | `POLICY_PAUSE {minutes}` | operator | the emergency stop begun for 15, 30 or 60 minutes and nothing else changed; answered like `POLICY_SET`. A stop asked for while one holds keeps the one in force (not lengthened). `bad_request` for any other length or for a message carrying a `policy`; `forbidden` for an operator limited to some clusters. Audited (activity `policy_pause`, category configuration; `audit` line with the user). |
 | `POLICY_RESUME` | operator | the stop ended (harmless when none holds), nothing else changed; the same refusals and audit (`policy_resume`). |
 | `ABORT_REQUESTS {origin}` | user | `{ok, aborted: n}` — the caller's own in-flight requests from a `page:<id>` or `console` origin stop waiting and answer `kind: aborted` (recorded so); keyed by person + origin, so nobody reaches another's; the poller's and the schedules' are refused (`bad_request`). Nothing is sent to the cluster: a search already running there is what `_tasks` and its `_cancel` are for. |
