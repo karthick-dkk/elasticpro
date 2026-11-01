@@ -114,9 +114,16 @@ export function clusters() {
   return byName.list.filter((c) => c.enabled);
 }
 export function client(id) { return state.clients.get(id); }
-/** Record that `dataset` for `clusterId` was just fetched. */
-export function stampFetch(clusterId, dataset) {
-  state.fetchedAt[`${clusterId}:${dataset}`] = Date.now();
+/** EsClient.readingSince, or "now" for a client without it (a stand-in in a check). */
+const readingWindow = (cl) => (cl && typeof cl.readingSince === 'function' ? cl.readingSince() : () => Date.now());
+
+/**
+ * Record when `dataset` for `clusterId` was fetched: now, or `at` — when the cluster gave the
+ * oldest answer it was made of (EsClient.readingSince), so a reading the core served from
+ * inside the duplicate-request gap is never stamped as fresher than it is.
+ */
+export function stampFetch(clusterId, dataset, at = Date.now()) {
+  state.fetchedAt[`${clusterId}:${dataset}`] = at;
 }
 
 /** When it was fetched, or 0 if this dataset has never been read. */
@@ -633,6 +640,7 @@ export async function fetchOverview(id, opts = {}) {
 async function fetchOverviewDirect(id, { withSnapshots = true } = {}) {
   const cl = state.clients.get(id);
   if (!cl) return null;
+  const since = readingWindow(cl);
   const prev = state.data.get(id) || {};
 
   // Reach for the cluster before interrogating it.
@@ -691,7 +699,7 @@ async function fetchOverviewDirect(id, { withSnapshots = true } = {}) {
     healthAge: z.ages.health ?? null,
   } : null;
   state.data.set(id, out);
-  stampFetch(id, 'data');
+  stampFetch(id, 'data', since());
   bus.emit('data', id);
 
   if (withSnapshots && out.repos.length) await fetchSnapshotsDirect(id);
@@ -781,6 +789,7 @@ async function fetchSnapshotsDirect(id) {
   const cl = state.clients.get(id);
   const d = state.data.get(id);
   if (!cl || !d) return;
+  const since = readingWindow(cl);
   d.snapshots = d.snapshots || {};
   for (const repo of d.repos) {
     try {
@@ -800,7 +809,7 @@ async function fetchSnapshotsDirect(id) {
     }
   }
   state.data.set(id, d);
-  stampFetch(id, 'data');
+  stampFetch(id, 'data', Math.min(since(), fetchedAt(id, 'data') || Infinity));
   bus.emit('data', id);
 }
 
@@ -852,10 +861,12 @@ export async function fetchIndices(id, pattern = '*', { force = false } = {}) {
   }
   const cl = state.clients.get(id);
   if (!cl) return [];
-  const rows = await cl.indices(pattern);
+  const since = readingWindow(cl);
+  let rows;
+  try { rows = await cl.indices(pattern); } catch (e) { since(); throw e; }
   const parsed = rows.map((r) => parseIndexName(r.index, cl.c.indexNameRegex, r));
   state.indices.set(id, parsed);
-  stampFetch(id, 'indices');
+  stampFetch(id, 'indices', since());
   bus.emit('indices', id);
   return parsed;
 }
@@ -1142,6 +1153,7 @@ export async function fetchShards(id, { force = false } = {}) {
   }
   const cl = state.clients.get(id);
   if (!cl) return null;
+  const since = readingWindow(cl);
   const out = { rows: null, error: null, tasks: null, pools: null, pending: null, at: Date.now() };
   try { out.rows = await cl.shardsAll(); } catch (e) { out.error = e.message || String(e); }
   // What the cluster is busy doing. Separate from the shard read so one failing does not
@@ -1150,8 +1162,9 @@ export async function fetchShards(id, { force = false } = {}) {
     cl.tasks().catch(() => null), cl.threadPools().catch(() => null), cl.pendingTasks().catch(() => null),
   ]);
   Object.assign(out, { tasks, pools, pending: pending && pending.tasks });
+  out.at = since();
   state.shards.set(id, out);
-  stampFetch(id, 'shards');
+  stampFetch(id, 'shards', out.at);
   bus.emit('data', id);
   return out;
 }
@@ -1694,6 +1707,30 @@ export async function demandDataset(ids, dataset, { force = false } = {}) {
   if (!due.length) return true;
   for (const id of due) demandAsked.set(`${id}\u0000${dataset}`, now);
   const r = await refreshFleet({ clusterIds: due, datasets: [dataset] });
+  if (r && !r.ok && NO_CACHE_KINDS.has(r.kind)) { fleet.mode = 'direct'; return false; }
+  return true;
+}
+
+/**
+ * What a Play display shows, said to the core once a minute: every cluster on the wall and
+ * every dataset its slides read, as Play-watched (`REFRESH {watcher: 'play'}`). The core keeps
+ * each coming at the request policy's Play pace (Config › Requests › While Play runs) and
+ * fetches at once only what it never has; the answers arrive as pushes like any other. Unlike
+ * demandDataset it decides nothing by age here: the pace is the core's, one definition.
+ *
+ * Returns false when there is no fleet cache (the caller then asks the clusters itself).
+ */
+export async function watchForPlay(ids, datasets) {
+  if ((await detectFleet()) !== 'fleet') return false;
+  const known = (ids || []).filter(fleetKnows);
+  if (!known.length || !datasets || !datasets.length) return true;
+  for (const ds of datasets) {
+    if (isOnDemand(ds)) fleet.onDemand.add(ds);
+    if (!datasetRead.has(ds)) datasetRead.set(ds, readDatasetOnce(ds).catch(() => { datasetRead.delete(ds); }));
+  }
+  await Promise.all(datasets.map((ds) => datasetRead.get(ds)));
+  if (!fleetMode()) return false;
+  const r = await refreshFleet({ clusterIds: known, datasets, watcher: 'play' });
   if (r && !r.ok && NO_CACHE_KINDS.has(r.kind)) { fleet.mode = 'direct'; return false; }
   return true;
 }

@@ -13,6 +13,12 @@ const send = (msg) => bridge(msg);
  * names itself. A request can always say otherwise with `opts.origin`.
  */
 let requestOrigin = 'page';
+/**
+ * The kinds of request a person types, by the `purpose` an ES message carries: sent at once,
+ * never held by the duplicate-request gap nor answered from another's reading. The core's list
+ * is GAP_EXEMPT in crates/elasticpro-core/src/fleet/policy.rs (tools/unit holds them equal).
+ */
+export const REQUEST_PURPOSE = Object.freeze({ console: 'console', indexSearch: 'index-search', snapshotSearch: 'snapshot-search' });
 export function setRequestOrigin(origin) { requestOrigin = origin || 'page'; }
 
 /**
@@ -122,11 +128,17 @@ export const clusterDataset = (clusterId, dataset, { maxAgeSec, wait } = {}) => 
   ...(maxAgeSec !== undefined && maxAgeSec !== null ? { maxAgeSec } : {}),
   ...(wait !== undefined ? { wait } : {}),
 });
-/** Fetch now rather than when due. `clusterIds` is an array or "all"; rate-limited per person. */
-export const refreshFleet = ({ clusterIds, datasets } = {}) => send({
+/**
+ * Fetch now rather than when due. `clusterIds` is an array or "all"; rate-limited per person.
+ * The duplicate-request gap still holds (a dataset answered less than a minute ago is that
+ * reading). `watcher: 'play'` is a Play display saying what it shows: the core keeps it coming
+ * at the request policy's Play pace instead (fleet/mod.rs refresh_msg).
+ */
+export const refreshFleet = ({ clusterIds, datasets, watcher } = {}) => send({
   type: 'REFRESH',
   ...(clusterIds ? { clusterIds } : {}),
   ...(datasets && datasets.length ? { datasets } : {}),
+  ...(watcher ? { watcher } : {}),
 });
 export { refreshFleet as refresh };
 /** A single-use, sixty-second ticket for GET /events. */
@@ -185,6 +197,21 @@ export class EsClient {
     this.failures = 0;
     this.nextRetryAt = 0;
     this.info = null;
+    /** Open readingSince() windows: each keeps the oldest answer seen while it is open. */
+    this._reads = new Set();
+  }
+
+  /**
+   * When the oldest of the answers that follow was given by the cluster: a page's own read can
+   * be served from a reading the core already holds (the duplicate-request gap, `cached` with
+   * `ageMs`), and a page that stamps "fetched now" on it would show a reading up to a minute
+   * old as fresh. Call it before the requests; the function it returns closes the window and
+   * says when (ms; now when nothing was older).
+   */
+  readingSince() {
+    const w = { oldest: Infinity };
+    this._reads.add(w);
+    return () => { this._reads.delete(w); return Number.isFinite(w.oldest) ? w.oldest : Date.now(); };
   }
 
   get backoffMs() {
@@ -209,6 +236,10 @@ export class EsClient {
       timeoutMs: opts.timeoutMs || this.defaults.requestTimeoutMs,
       allowWrites: opts.allowWrites === true,
       origin: opts.origin || requestOrigin,
+      // What a person is doing, where it decides how the core treats the request: the REST
+      // console and the Indices and Snapshots page searches are never held by the duplicate-
+      // request gap (fleet/policy.rs GAP_EXEMPT; REQUEST_PURPOSE below).
+      ...(opts.purpose ? { purpose: opts.purpose } : {}),
       ...(opts.maxAgeMs !== undefined ? { maxAgeMs: opts.maxAgeMs } : freshDepth > 0 ? { maxAgeMs: 0 } : {}),
     };
     let res = await send(msg);
@@ -216,6 +247,9 @@ export class EsClient {
       await this.onPrimeNeeded();
       res = await send(msg);
     }
+    const age = res && res.cached && Number(res.ageMs) > 0 ? Number(res.ageMs) : 0;
+    const at = Date.now() - age;
+    for (const w of this._reads) if (at < w.oldest) w.oldest = at;
     this._track(res);
     return res;
   }
@@ -386,8 +420,8 @@ export class EsClient {
   }
   repositories() { return this.json('GET', '/_snapshot?local=false'); }
   /** ES >= 7.14 supports sort/size/order on the get-snapshots API. */
-  snapshots(repo, size = 500) {
-    return this.json('GET', `/_snapshot/${encodeURIComponent(repo)}/_all?ignore_unavailable=true&verbose=true&sort=start_time&order=desc&size=${size}`);
+  snapshots(repo, size = 500, opts = {}) {
+    return this.json('GET', `/_snapshot/${encodeURIComponent(repo)}/_all?ignore_unavailable=true&verbose=true&sort=start_time&order=desc&size=${size}`, null, opts);
   }
   snapshotsCat(repo) {
     return this.json('GET', `/_cat/snapshots/${encodeURIComponent(repo)}?format=json&s=end_epoch:desc&h=id,status,start_epoch,end_epoch,duration,indices,successful_shards,failed_shards,total_shards`);
