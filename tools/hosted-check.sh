@@ -279,7 +279,7 @@ check "a restart keeps the session"          "$(cookie -d '{"type":"WHOAMI"}' | 
 
 # The emergency stop is an operator's as well as an admin's (roles plan, decision 2): the stop
 # alone, through POLICY_PAUSE / POLICY_RESUME; the rest of the policy stays POLICY_SET's, an
-# admin's. A user and a display link are refused. Limited operators, the other fields and the
+# admin's, and POLICY_SET leaves the stop as it is. A user and a display link are refused. Limited operators, the other fields and the
 # lengths are proved in-process (tests/policy.rs).
 JOP=$(mktemp); JUS=$(mktemp); JTV=$(mktemp)
 trap 'kill $PID $PID5 2>/dev/null; rm -rf "$OUT" "$OUT5" "$D5" "$JAR" "$JOP" "$JUS" "$JTV"' EXIT
@@ -290,11 +290,13 @@ post "$B5" -c "$JUS" -d '{"type":"LOGIN","name":"hc-user","password":"hc-user-pw
 as_jar() { post "$B5" -H "cookie: ep_session=$(awk '$6=="ep_session"{print $7}' "$1")" "${@:2}"; }
 paused() { python3 -c 'import json,sys;d=json.load(sys.stdin);p=(d.get("policy") or {}).get("paused") or {};print(d.get("ok"),p.get("all"),p.get("minutes"),p.get("by"))'; }
 check "an operator begins the emergency stop"   "$(as_jar "$JOP" -d '{"type":"POLICY_PAUSE","minutes":15}' | paused)" "True True 15 hc-op"
-check "but sets no other policy field"          "$(as_jar "$JOP" -d '{"type":"POLICY_SET","policy":{"mode":"background"}}' | field kind)" "forbidden"
+check "an admin's stale Save does not lift it"  "$(cookie -d '{"type":"POLICY_SET","policy":{"mode":"on-demand","paused":{"all":false}}}' | paused)" "True True 15 hc-op"
+check "but sets no other policy field"         "$(as_jar "$JOP" -d '{"type":"POLICY_SET","policy":{"mode":"background"}}' | field kind)" "forbidden"
 check "nor smuggles one into the stop"          "$(as_jar "$JOP" -d '{"type":"POLICY_PAUSE","minutes":15,"policy":{"mode":"background"}}' | field kind)" "bad_request"
 check "a user may not end it"                   "$(as_jar "$JUS" -d '{"type":"POLICY_RESUME"}' | field kind)" "forbidden"
 check "a user may not begin one"                "$(as_jar "$JUS" -d '{"type":"POLICY_PAUSE","minutes":15}' | field kind)" "forbidden"
 check "an operator ends it"                     "$(as_jar "$JOP" -d '{"type":"POLICY_RESUME"}' | paused)" "True False None None"
+check "and POLICY_SET never begins one"        "$(cookie -d '{"type":"POLICY_SET","policy":{"mode":"on-demand","paused":{"all":true,"minutes":30}}}' | paused)" "True False None None"
 SECRET5=$(cookie -d '{"type":"PLAY_LINK_CREATE","name":"hc-tv"}' | field secret)
 post "$B5" -c "$JTV" -d "$(printf '{"type":"PLAY_EXCHANGE","secret":"%s"}' "$SECRET5")" >/dev/null
 check "a display link is signed in"             "$(as_jar "$JTV" -d '{"type":"WHOAMI"}' | python3 -c 'import json,sys;print((json.load(sys.stdin).get("caller") or {}).get("playOnly"))')" "True"

@@ -290,12 +290,13 @@ that `REFRESH` when they open. To go back to keeping the fleet fresh in the back
 Requests → Automatic or Background. Emergency stop (`paused: {all: true, minutes: 15|30|60}`,
 Request Centre): nothing new starts (a person's ask stays pending and runs when it ends); in flight
 finishes. An operator begins and ends it as an admin does — `POLICY_PAUSE` / `POLICY_RESUME`,
-which change the stop and nothing else; the rest of the policy stays `POLICY_SET`'s, an admin's.
+which change the stop and nothing else; the rest of the policy stays `POLICY_SET`'s, an admin's,
+and `POLICY_SET` ignores `paused` (it never begins, changes or lifts a stop).
 The stop holds every cluster (there is no per-cluster stop), so an operator limited to some
 clusters by Zabbix host groups is refused it, as Play refuses its fleet-wide messages to a limited
-caller; an admin is not, since `POLICY_SET` is theirs anyway. A display link never gets it. The server stamps `since`, `until` and `by`, and lifts the stop itself at `until`; a stop
-with no `until` (a pause from before 0.3.44) is dropped when the file is read, and a set that sends
-back the `since` of a stop that has already ended does not begin it again. Slow and busy clusters
+caller; an admin is not, since the rest of the policy, which reaches every cluster too, is theirs anyway. A display link never gets it. The server stamps `since`, `until` and `by`, and lifts the stop itself at `until`; a stop
+with no `until` (a pause from before 0.3.44) is dropped when the file is read, and asking for a stop
+while one holds keeps the one in force. Slow and busy clusters
 need no stop: a request over 8 s, a timeout or a 429 marks a cluster slowed (one request at a time,
 intervals ×2 per occurrence up to 10 min, pages handed the held copy; three quick answers end it),
 and while the gate's queue is half full or a request has waited 5 s the poller's own work holds so
@@ -314,7 +315,7 @@ level, quick}}}`, each catalogue entry's `effectiveClass` under the mode, and pe
 | `REQUEST_STATS` | user | `{ok, requests: {cluster: {last5m, perMinute, …}}}` — the strip's "Requests N in 5m". |
 | `REQUEST_LOG {cluster?, limit?}` | admin | `{ok, inflight: [record…], recent: [record…], keep, throttled: {cluster: throttle}}` — every user's requests on the clusters the caller may see, newest first, `limit` ≤ 2,000 (default 200). `gate` carries the request gate's figures (running and queued per class, waits, `refused`, `tooLarge`: answers over the response cap in the window, not counted as refused) and `zabbixPush`: `{enabled, host, idle, intervalSecs, credential: "link"\|"metrics", lastOkAt, lastAttemptAt, pushes, failures, consecutiveFailures, lastError, nextAt}` (`lastError` only for an admin who sees every cluster; never a token). |
 | `POLICY_GET` | user | `{ok, policy, defaults, effective: {dataset: background|onDemand}, resolvedMode, stored, warning?, running, gate, pollConcurrencyEnv}` — `pollConcurrencyEnv` is `ELASTICPRO_POLL_CONCURRENCY` as read, or null when unset |
-| `POLICY_SET {policy}` | admin | the same, plus `saved`; `bad_request` when it does not parse (an unknown `mode`, a non-object). Values out of bounds are bounded, not refused. Audited. |
+| `POLICY_SET {policy}` | admin | the same, plus `saved`; `bad_request` when it does not parse (an unknown `mode`, a non-object). Values out of bounds are bounded, not refused. `paused` is ignored: the stop in force is kept as it is (only `POLICY_PAUSE` / `POLICY_RESUME` change it), so a form opened before a stop began never lifts it. Audited. |
 | `POLICY_PAUSE {minutes}` | operator | the emergency stop begun for 15, 30 or 60 minutes and nothing else changed; answered like `POLICY_SET`. A stop asked for while one holds keeps the one in force (not lengthened). `bad_request` for any other length or for a message carrying a `policy`; `forbidden` for an operator limited to some clusters. Audited (activity `policy_pause`, category configuration; `audit` line with the user). |
 | `POLICY_RESUME` | operator | the stop ended (harmless when none holds), nothing else changed; the same refusals and audit (`policy_resume`). |
 | `ABORT_REQUESTS {origin}` | user | `{ok, aborted: n}` — the caller's own in-flight requests from a `page:<id>` or `console` origin stop waiting and answer `kind: aborted` (recorded so); keyed by person + origin, so nobody reaches another's; the poller's and the schedules' are refused (`bad_request`). Nothing is sent to the cluster: a search already running there is what `_tasks` and its `_cancel` are for. |

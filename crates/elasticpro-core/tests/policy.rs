@@ -97,8 +97,8 @@ async fn a_stop_is_stamped_by_the_server_keeps_its_end_and_a_pause_with_no_end_i
     let c = portable(&dir);
     let r = set(&c, json!({ "mode": "background" })).await;
     assert!(r["policy"]["paused"].get("since").is_none(), "nothing stopped, nothing stamped: {r}");
-    // A new stop: no `since` from the page. The server stamps since and until.
-    let r = set(&c, json!({ "paused": { "all": true, "minutes": 30, "since": 0, "until": 1, "by": "somebody else" } })).await;
+    // A new stop: the server stamps since and until.
+    let r = c.handle(json!({ "type": "POLICY_PAUSE", "minutes": 30 })).await;
     let since = r["policy"]["paused"]["since"].as_u64().unwrap();
     let until = r["policy"]["paused"]["until"].as_u64().unwrap();
     assert!(since > 5, "{r}");
@@ -107,9 +107,9 @@ async fn a_stop_is_stamped_by_the_server_keeps_its_end_and_a_pause_with_no_end_i
     let st = c.handle(json!({ "type": "FLEET_STATE" })).await;
     assert_eq!((st["policy"]["pausedSince"].clone(), st["policy"]["pausedUntil"].clone()), (json!(since), json!(until)), "{st}");
     assert_eq!(st["policy"]["pausedAll"], json!(true), "{st}");
-    // Another change while it holds keeps when it began and ends: nobody extends it by saving.
+    // Asked again while it holds: when it began and ends are kept — nobody extends it.
     tokio::time::sleep(Duration::from_millis(20)).await;
-    let r = set(&c, json!({ "mode": "hybrid", "paused": { "all": true, "minutes": 60, "since": since } })).await;
+    let r = c.handle(json!({ "type": "POLICY_PAUSE", "minutes": 60 })).await;
     assert_eq!((r["policy"]["paused"]["since"].clone(), r["policy"]["paused"]["until"].clone()), (json!(since), json!(until)), "{r}");
     // …and survives a restart.
     drop(c);
@@ -117,11 +117,9 @@ async fn a_stop_is_stamped_by_the_server_keeps_its_end_and_a_pause_with_no_end_i
     let st = c.handle(json!({ "type": "FLEET_STATE" })).await;
     assert_eq!(st["policy"]["pausedUntil"], json!(until), "{st}");
     // Lifting it clears the stamp.
-    let r = set(&c, json!({ "paused": { "all": false } })).await;
+    let r = c.handle(json!({ "type": "POLICY_RESUME" })).await;
     assert!(r["policy"]["paused"].get("since").is_none(), "{r}");
-    // A form still showing the stop that just ended does not begin it again.
-    let r = set(&c, json!({ "paused": { "all": true, "minutes": 30, "since": since } })).await;
-    assert_eq!(r["policy"]["paused"]["all"], json!(false), "a stop that ended was begun again: {r}");
+    assert_eq!(r["policy"]["paused"]["all"], json!(false), "{r}");
     drop(c);
     // What 0.3.43 left behind — paused for everyone with no end, and one cluster paused —
     // is dropped when the next core reads it.
@@ -130,6 +128,42 @@ async fn a_stop_is_stamped_by_the_server_keeps_its_end_and_a_pause_with_no_end_i
     let st = c.handle(json!({ "type": "FLEET_STATE" })).await;
     assert_eq!(st["policy"]["pausedAll"], json!(false), "{st}");
     assert_eq!(st["policy"]["mode"], json!("hybrid"), "the rest of the file is kept: {st}");
+}
+
+#[tokio::test]
+async fn policy_set_never_begins_changes_or_lifts_the_stop() {
+    let dir = TempDir::new("policy-set-keeps-stop");
+    let c = hosted(&dir);
+    let (admin, s) = sessions(&c, &[("olga", "operator")]).await;
+    let op = &s[0];
+    // The admin opens Config › Requests: the policy as it is, no stop.
+    let stale = as_session(&c, &admin, json!({ "type": "POLICY_GET" })).await["policy"].clone();
+    assert_eq!(stale["paused"], json!({ "all": false }));
+    // Meanwhile the operator stops the fleet.
+    let r = as_session(&c, op, json!({ "type": "POLICY_PAUSE", "minutes": 30 })).await;
+    let stop = r["policy"]["paused"].clone();
+    assert_eq!(stop["all"], json!(true), "{r}");
+    // The admin saves the form they opened before: the mode changes, the stop does not lift.
+    let mut form = stale.clone();
+    form["mode"] = json!("hybrid");
+    let r = as_session(&c, &admin, json!({ "type": "POLICY_SET", "policy": form })).await;
+    assert_eq!(r["ok"], json!(true), "{r}");
+    assert_eq!(r["policy"]["mode"], json!("hybrid"), "{r}");
+    assert_eq!(r["policy"]["paused"], stop, "a stale form lifted the stop: {r}");
+    // Nor any other `paused` a payload carries: not lengthened, not ended, not re-stamped.
+    for p in [json!({ "all": true, "minutes": 60, "since": 0 }), json!({ "all": false }), json!({ "all": true, "minutes": 15, "since": 1, "until": 2, "by": "x" })] {
+        let r = as_session(&c, &admin, json!({ "type": "POLICY_SET", "policy": { "mode": "hybrid", "paused": p } })).await;
+        assert_eq!(r["policy"]["paused"], stop, "POLICY_SET changed the stop with {p}: {r}");
+    }
+    let on_disk: Value = serde_json::from_slice(&std::fs::read(dir.join("policy.json")).unwrap()).unwrap();
+    assert_eq!(on_disk["paused"], stop, "and on disk: {on_disk}");
+    // With no stop in force, a payload asking for one begins nothing.
+    as_session(&c, op, json!({ "type": "POLICY_RESUME" })).await;
+    let r = as_session(&c, &admin, json!({ "type": "POLICY_SET", "policy": { "mode": "background", "paused": { "all": true, "minutes": 30 } } })).await;
+    assert_eq!(r["ok"], json!(true), "{r}");
+    assert_eq!(r["policy"]["paused"], json!({ "all": false }), "POLICY_SET began a stop: {r}");
+    let st = as_session(&c, &admin, json!({ "type": "FLEET_STATE" })).await;
+    assert_eq!(st["policy"]["pausedAll"], json!(false), "{st}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

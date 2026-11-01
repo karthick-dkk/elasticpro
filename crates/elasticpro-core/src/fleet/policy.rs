@@ -22,7 +22,9 @@
 //! finishes, and a person's ask stays pending. It always has an end — 15, 30 or 60
 //! minutes — and lifts itself then. A stop with no end (what a pause was before 0.3.44,
 //! including the per-cluster one, which is gone) is dropped when the file is read: one
-//! held a site still for days because nobody remembered it.
+//! held a site still for days because nobody remembered it. It is begun and ended with
+//! `POLICY_PAUSE {minutes}` and `POLICY_RESUME` — an operator's or an admin's (`may_stop`) —
+//! which touch nothing else; `POLICY_SET` sets everything else and ignores `paused`.
 
 use super::catalogue::{Dataset, ALL};
 use crate::auth::{Caller, Role};
@@ -175,9 +177,10 @@ pub const STOP_DISPLAY: &str = "a display link only shows Play";
 /// The stop holds every cluster — the per-cluster pause went in 0.3.44 — so an operator
 /// limited to some clusters (Zabbix host groups, a display link's list) would hold, or let
 /// go, clusters it cannot see. Refused, as Play refuses its fleet-wide messages to a limited
-/// caller. An administrator is not refused here even when limited: `POLICY_SET` already lets
-/// an administrator set the whole policy, the stop included, and the narrow message must not
-/// give less than the wide one. A display link never gets this far (the gate), and is
+/// caller. An administrator is not refused here even when limited: `POLICY_SET` lets an
+/// administrator set the rest of the request policy — the mode, the budgets — which already
+/// reaches every cluster, and the stop was an administrator's, limited or not, before it had
+/// messages of its own. A display link never gets this far (the gate), and is
 /// refused here too.
 pub fn may_stop(caller: Option<&Caller>) -> Result<(), &'static str> {
     let Some(c) = caller else { return Ok(()) };
@@ -451,7 +454,7 @@ mod tests {
         assert_eq!(may_stop(Some(&who(Role::Admin, None))), Ok(()));
         // Limited to some clusters: the stop would hold the others too.
         assert_eq!(may_stop(Some(&who(Role::Operator, team()))), Err(STOP_LIMITED));
-        // An administrator may set the whole policy anyway (POLICY_SET), limited or not.
+        // An administrator sets the rest of the policy anyway (POLICY_SET), limited or not.
         assert_eq!(may_stop(Some(&who(Role::Admin, team()))), Ok(()));
         // A display link, even one naming every cluster.
         let mut tv = who(Role::User, None);

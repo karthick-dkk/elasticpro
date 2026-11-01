@@ -133,8 +133,8 @@ export { refreshFleet as refresh };
 export const eventsTicket = () => send({ type: 'EVENTS_TICKET' });
 /**
  * The request policy (Config → Requests): when the poller goes to the clusters, how hard,
- * and whether at all. GET is a user's (the strip says "emergency stop" from it); SET an admin's;
- * the emergency stop alone is policyPause / policyResume, below.
+ * and whether at all. GET is a user's (the strip says "emergency stop" from it); SET an admin's,
+ * and the core ignores `paused` in it: the emergency stop is policyPause / policyResume, below.
  * Reply: {ok, policy, defaults, effective: {dataset: 'background'|'onDemand'}, stored,
  * saved?, warning?, running}. policy = {mode: 'background'|'hybrid'|'on-demand',
  * intervalsSec: {dataset: s}, watchMinutes, concurrency: {global, perCluster, tunnel},

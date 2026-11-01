@@ -3484,6 +3484,8 @@ restoreConsole();
       const m = lastOf('POLICY_SET');
       ok(countOf('POLICY_SET') === sets + 1 && m && m.policy.mode === 'on-demand' && m.policy.concurrency.perCluster === 1,
         `policy: Save after "Client basis" sent ${JSON.stringify(m && m.policy)}`);
+      // The emergency stop is not the form's: Save sends no `paused`, so it can never lift one.
+      ok(m && !('paused' in m.policy), `policy: Config › Requests Save sent the stop: ${JSON.stringify(m && m.policy && m.policy.paused)}`);
     }
   }
 
@@ -3508,7 +3510,7 @@ restoreConsole();
   ok(!doc.querySelector('.rq-tbl') || ![...doc.querySelectorAll('.rq-tbl button')].some((b) => /pause|stop/i.test(b.textContent)), 'stop: a stop button is among the requests table');
   const thirty = lengths[1];
   if (thirty) {
-    const wasAll = !!((lastOf('POLICY_SET') || {}).policy || before.policy || { paused: {} }).paused.all;
+    const wasAll = !!((before.policy || {}).paused || {}).all;
     ok(!wasAll, 'stop: the policy is already stopped before the test pressed anything');
     // Since the operator may stop the fleet too, the page sends the stop alone (POLICY_PAUSE /
     // POLICY_RESUME), never the whole policy.

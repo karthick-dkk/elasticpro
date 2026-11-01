@@ -863,7 +863,8 @@ impl Core {
     }
 
     /// `POLICY_GET` and `POLICY_SET {policy}`. A set is validated, bounded, written to
-    /// `policy.json` and applied to the scheduler at once; without a data dir (the portable
+    /// `policy.json` and applied to the scheduler at once — everything but the emergency stop,
+    /// which only `POLICY_PAUSE` / `POLICY_RESUME` change; without a data dir (the portable
     /// build before a config is chosen) it is applied for this run and said so.
     pub(crate) fn policy_msg(&self, t: &str, msg: &Value, caller: Option<&Caller>) -> Value {
         if t == "POLICY_GET" {
@@ -878,14 +879,21 @@ impl Core {
             Err(e) => return json!({ "ok": false, "kind": "bad_request", "message": format!("policy: {e}") }),
         };
         let mut pol = pol.normalised();
-        let before = self.fleet.policy.read().paused.clone();
-        pol.paused = pol.paused.stamped(&before, caller.map(|c| c.name.as_str()).unwrap_or(""), now_ms());
+        // The emergency stop is not POLICY_SET's: it has its own messages (POLICY_PAUSE,
+        // POLICY_RESUME). Whatever `paused` the payload carries is ignored and the stop in
+        // force is kept as it is — so a Config › Requests form opened before somebody began a
+        // stop can never lift it on Save, and no payload begins, lengthens or shortens one.
+        // Set under the write lock, so a stop begun meanwhile is not lost either.
+        {
+            let mut cur = self.fleet.policy.write();
+            pol.paused = cur.paused.clone();
+            *cur = pol.clone();
+        }
         let saved = match &self.fleet.policy_path {
             Some(p) => pol.save(p),
             None => Err("no data directory: the policy applies to this run only".to_string()),
         };
         *self.fleet.cfg.write() = Config::from_policy(&pol);
-        *self.fleet.policy.write() = pol.clone();
         tracing::info!(
             target: "audit",
             user = caller.map(|c| c.name.as_str()).unwrap_or(""),
@@ -900,10 +908,10 @@ impl Core {
 
     /// `POLICY_PAUSE {minutes}` and `POLICY_RESUME`: the emergency stop begun or ended, and
     /// nothing else in the policy touched. An operator's (auth::required_role), where
-    /// `POLICY_SET` stays an administrator's: the stop is day-to-day fleet work, the budgets,
-    /// the mode and the intervals are not. The length is one of `STOP_MINUTES`, refused
-    /// otherwise; a stop asked for while one holds keeps the one in force (`Paused::stamped`,
-    /// as POLICY_SET does), so nobody extends a stop by asking again. A message that carries
+    /// `POLICY_SET` stays an administrator's (and ignores `paused`): the stop is day-to-day
+    /// fleet work, the budgets, the mode and the intervals are not. The length is one of `STOP_MINUTES`, refused
+    /// otherwise; a stop asked for while one holds keeps the one in force (`Paused::stamped`),
+    /// so nobody extends a stop by asking again. A message that carries
     /// a `policy` is refused rather than half-applied. Answered like POLICY_SET.
     pub(crate) fn policy_pause_msg(&self, t: &str, msg: &Value, caller: Option<&Caller>) -> Value {
         if let Err(why) = policy::may_stop(caller) {

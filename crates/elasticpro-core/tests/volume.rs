@@ -354,8 +354,9 @@ async fn on_hosted_every_message_needs_a_caller_with_the_right_role() {
 }
 
 async fn stop(c: &Arc<Core>, on: bool) {
-    let paused = if on { json!({ "all": true, "minutes": 30 }) } else { json!({ "all": false }) };
-    let r = c.handle(json!({ "type": "POLICY_SET", "policy": { "paused": paused } })).await;
+    // The stop's own messages: POLICY_SET leaves the stop alone.
+    let msg = if on { json!({ "type": "POLICY_PAUSE", "minutes": 30 }) } else { json!({ "type": "POLICY_RESUME" }) };
+    let r = c.handle(msg).await;
     assert_eq!(r["ok"], true, "{r}");
 }
 
