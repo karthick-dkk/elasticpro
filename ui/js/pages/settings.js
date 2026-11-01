@@ -1515,9 +1515,16 @@ async function loadVolume() {
   if (changed || vol.unknown) { if (host && host.isConnected && activeSection() && activeSection().id === 'volume') draw(); }
 }
 
-/** Every input of the form as a volume object; a blank one is left out (override: inherit). */
+/**
+ * Every input of the form as a volume object; a blank one is left out (override: inherit).
+ * A locked input (drawn disabled: config.txt manages it) is never read: what it shows is
+ * config.txt's value, not anything typed. The managed set can change between the draw and the
+ * Save — the app re-reads it from the core's PING every 10 s — and Save used to decide from
+ * the set at that moment, so a key config.txt stopped managing meanwhile had its old,
+ * locked value written into the clusters file.
+ */
 function readVolumeForm() {
-  const g = (id) => { const el = $(`#${id}`); return el ? el.value.trim() : ''; };
+  const g = (id) => { const el = $(`#${id}`); return el && !el.disabled ? el.value.trim() : ''; };
   const out = {};
   const put = (path, v) => { if (v !== '' && !(Array.isArray(v) && !v.length)) setPath(out, path, v); };
   const n = (id) => (g(id) === '' ? '' : Number(g(id)));
