@@ -92,7 +92,7 @@ export const state = {
    */
   fetchedAt: {},
   refreshing: false,
-  /** Who is signed in ({name, role}), on builds with accounts; null on the portable one. */
+  /** Who is signed in ({name, role, scoped, playOnly}), on builds with accounts; null on the portable one. */
   caller: null,
   timer: null,
   tick: null,

@@ -245,7 +245,7 @@ The **Zabbix connection** card now shows **paired with https://&lt;zabbix-host&g
 | Zabbix user type | ElasticPro role | Clusters they see |
 |---|---|---|
 | User | `user` (read-only) | only clusters whose Zabbix host group one of their user groups can **read** |
-| Admin | `operator` | all; may write, behind the write unlock |
+| Admin | `operator` | all; may write, behind the write unlock; may begin and end the emergency stop |
 | Super admin | `admin` | all; also administers the app |
 | Guest | not signed in | none |
 

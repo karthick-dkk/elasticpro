@@ -3510,21 +3510,25 @@ restoreConsole();
   if (thirty) {
     const wasAll = !!((lastOf('POLICY_SET') || {}).policy || before.policy || { paused: {} }).paused.all;
     ok(!wasAll, 'stop: the policy is already stopped before the test pressed anything');
+    // Since the operator may stop the fleet too, the page sends the stop alone (POLICY_PAUSE /
+    // POLICY_RESUME), never the whole policy.
     const sets = countOf('POLICY_SET');
+    const pauses = countOf('POLICY_PAUSE');
+    const resumes = countOf('POLICY_RESUME');
     const dlg = () => doc.querySelector('.modal-overlay .modal');
     thirty.click(); await settleFor(300);
     ok(!!dlg() && /Stop all requests for 30 minutes\?/.test(dlg().textContent), 'stop: "30 min" did not ask first');
     ok(!dlg() || /slows down for those on its own/.test(dlg().textContent), 'stop: the question does not say slow clusters are handled already');
     if (dlg()) { button('No', dlg()).click(); await settleFor(300); }
-    ok(countOf('POLICY_SET') === sets, 'stop: answering No still stopped');
+    ok(countOf('POLICY_PAUSE') === pauses && countOf('POLICY_SET') === sets, 'stop: answering No still stopped');
     thirty.click(); await settleFor(300);
     const yes = dlg() && button('Stop for 30 min', dlg());
     ok(!!yes && yes.classList.contains('danger'), 'stop: the question has no red "Stop for 30 min" answer');
     if (yes) yes.click();
     await settleFor(800);
-    let m = lastOf('POLICY_SET');
-    ok(countOf('POLICY_SET') === sets + 1 && m && m.policy.paused.all === true && m.policy.paused.minutes === 30 && !m.policy.paused.since,
-      `stop: "30 min" sent ${JSON.stringify(m && m.policy && m.policy.paused)}`);
+    let m = lastOf('POLICY_PAUSE');
+    ok(countOf('POLICY_PAUSE') === pauses + 1 && m && m.minutes === 30 && !m.policy && countOf('POLICY_SET') === sets,
+      `stop: "30 min" sent ${JSON.stringify(m)} (POLICY_SET ${countOf('POLICY_SET') - sets})`);
     const resume = stopCard() && button('Resume now', stopCard());
     ok(!!resume, 'stop: while stopped, the card offers no "Resume now"');
     ok(stopCard() && /It ends by itself at .* \(in (29|30) min\)/.test(stopCard().textContent), `stop: the card does not say when it ends: "${stopCard() && stopCard().textContent}"`);
@@ -3535,12 +3539,47 @@ restoreConsole();
     ok(/^Emergency stop:/.test((doc.querySelector('.rq-status h2') || {}).textContent || ''), `stop: the status line does not say stopped: "${(doc.querySelector('.rq-status h2') || {}).textContent}"`);
     if (resume) {
       resume.click(); await settleFor(800);
-      m = lastOf('POLICY_SET');
-      ok(countOf('POLICY_SET') === sets + 2 && m && m.policy.paused.all === false, `stop: Resume now sent ${JSON.stringify(m && m.policy && m.policy.paused)}`);
+      ok(countOf('POLICY_RESUME') === resumes + 1 && countOf('POLICY_SET') === sets, `stop: Resume now sent ${countOf('POLICY_RESUME') - resumes} POLICY_RESUME, ${countOf('POLICY_SET') - sets} POLICY_SET`);
       ok(!!(stopCard() && stopCard().querySelector('button[data-act="pause-all"]')), 'stop: after resuming, the card does not offer the stop again');
       ok(!/^Emergency stop:/.test((doc.querySelector('.rq-status h2') || {}).textContent || ''), 'stop: the status line still says stopped after resuming');
       for (let i = 0; i < 20 && doc.querySelector('#topbar .paused-btn'); i++) await settleFor(250);
       ok(!doc.querySelector('#topbar .paused-btn'), 'stop: the top bar still says stopped after resuming');
+    }
+  }
+
+  // An operator (roles plan, decision 2): the Requests tab opens on the stop alone — the same
+  // three lengths, asking first — with no request log (the top bar is tools/unit/operator-stop).
+  // One limited to some clusters sees the stop and why it is not theirs.
+  {
+    const st = await load('core/state.js');
+    const was = st.state.caller;
+    try {
+      st.state.caller = { name: 'olga', role: 'operator' };
+      await go('overview');
+      const from = sent.length;   // not emptied: later cases read every REFRESH this run sent
+      await go('requests'); await settleFor(600);
+      const card = stopCard();
+      const mine = sent.slice(from);
+      ok(!!card && /Emergency stop/.test(card.textContent), 'operator: no emergency stop on the Request Centre');
+      ok(!mine.some((x) => x.type === 'REQUEST_LOG' || x.type === 'HOUSEKEEPING_GET'), `operator: the page asked for the admin's log (${mine.map((x) => x.type).join(',')})`);
+      ok(!doc.querySelector('.rq-tbl') && !doc.querySelector('.rq-tiles'), 'operator: the request log is drawn for an operator');
+      const opLengths = card ? [...card.querySelectorAll('button[data-act="pause-all"]')].map((b) => b.textContent) : [];
+      ok(JSON.stringify(opLengths) === JSON.stringify(['15 min', '30 min', '60 min']), `operator: the lengths offered are ${JSON.stringify(opLengths)}`);
+      const q = card && card.querySelector('button[data-act="pause-all"]');
+      if (q) {
+        const pauses = countOf('POLICY_PAUSE');
+        q.click(); await settleFor(300);
+        const dlg = doc.querySelector('.modal-overlay .modal');
+        ok(!!dlg && /Stop all requests for 15 minutes\?/.test(dlg.textContent), 'operator: "15 min" did not ask first');
+        if (dlg) { button('No', dlg).click(); await settleFor(300); }
+        ok(countOf('POLICY_PAUSE') === pauses, 'operator: answering No still stopped');
+      }
+      st.state.caller = { name: 'uma@zabbix', role: 'operator', scoped: true };
+      await go('overview'); await go('requests'); await settleFor(600);
+      ok(stopCard() && !stopCard().querySelector('button') && /limited to some clusters/.test(stopCard().textContent),
+        `operator: a limited operator is offered the stop: "${stopCard() && stopCard().textContent}"`);
+    } finally {
+      st.state.caller = was;
     }
   }
 

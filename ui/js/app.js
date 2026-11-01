@@ -29,7 +29,7 @@ import { EVIDENCE_PAGES, evidenceLayout, evidenceSelection, createHeldNotices } 
 import { setHostedEdition } from './core/server-credentials.js';
 import { pausedPill, pausedKey } from './ui/paused-pill.js';
 import { reportsPill } from './ui/reports-pill.js';
-import { pauseFor, pausedLine } from './core/policy.js';
+import { pauseFor, pausedLine, mayStop, stopRefusal } from './core/policy.js';
 
 let coreInfo = { version: '?' };
 
@@ -99,7 +99,8 @@ const PAGES = [
   { id: 'volume',    label: 'Volume report',  icon: '▤', mod: pVolume,    multi: true,  minRole: 'user' },
   // Not for read-only users: automation is run by operators and admins.
   { id: 'automation', label: 'Automation',    icon: '⟳', mod: pAutomation, multi: true, minRole: 'operator' },
-  { id: 'requests',  label: 'Requests',       icon: '⚡', mod: pRequests,  multi: true,  minRole: 'admin', live: true },
+  // An operator gets the emergency stop here; the request log itself stays an admin's.
+  { id: 'requests',  label: 'Requests',       icon: '⚡', mod: pRequests,  multi: true,  minRole: 'operator', live: true },
   { id: 'accounts',  label: 'Accounts',       icon: '☺', mod: pAccounts,  multi: true,  minRole: 'admin', accountsOnly: true },
   { id: 'settings',  label: 'Config',         icon: '⚙', mod: pSettings,  multi: true,  minRole: 'admin' },
   // The NOC wall display (docs/PLAY.md): full screen, no tab — the "▶ Play" button in the top
@@ -614,7 +615,9 @@ function renderTopbar() {
     })(),
     // The emergency stop holds every fetch; said on every page, evidence pages included,
     // because a stopped fleet otherwise looks like one that is merely quiet (ui/paused-pill.js).
-    pausedPill({ selected: state.selected, admin: may('admin'),
+    // An operator may end it as well as an admin (POLICY_RESUME); one limited to some
+    // clusters may not, since it holds them all.
+    pausedPill({ selected: state.selected, mayEnd: mayStop(me), refusal: stopRefusal(me),
       onResumed: async () => { await syncFleet({ full: true }); topbarKey = null; go(currentPage); } }),
     // Report jobs running in the background (ui/reports-pill.js): one element that keeps
     // its own text, so job progress never rebuilds the bar. Hidden on a core without reports.
@@ -1150,7 +1153,8 @@ async function boot() {
   if (await arriveFromDisplayLink()) return;
   await arriveFromZabbix();
   await gateOnAuth();
-  state.caller = me ? { name: me.name, role: me.role } : null;
+  // `scoped` and `playOnly` decide whether the emergency stop is offered (policy.js mayStop).
+  state.caller = me ? { name: me.name, role: me.role, scoped: !!me.scoped, playOnly: isDisplay() } : null;
   pPlay.configure({ display: isDisplay(), onExit: () => go(playReturn && playReturn !== 'play' ? playReturn : 'overview') });
   try { coreInfo = (await workerStatus()) || coreInfo; } catch (_) { /* dev bridge missing */ }
   // A display link reads only what Play needs: the bell's server copy is not among it.

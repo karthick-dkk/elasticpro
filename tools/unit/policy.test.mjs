@@ -251,8 +251,8 @@ test('the stop says since when, by whom and when it ends by itself', () => {
   const since = now - 5 * 60000;
   const until = now + 25 * 60000;
   const line = P.pausedLine({ all: true, since, until, by: 'Admin@zabbix' }, { now });
-  assert.match(line, /^Emergency stop: no request goes to any cluster since \S+.*, by Admin@zabbix\. It ends by itself at .* \(in 25 min\); an administrator can end it sooner/);
-  assert.match(P.pausedLine({ all: true, since: 0, by: '' }, { now }), /^Emergency stop: no request goes to any cluster\. An administrator can end it/);
+  assert.match(line, /^Emergency stop: no request goes to any cluster since \S+.*, by Admin@zabbix\. It ends by itself at .* \(in 25 min\); an operator or administrator can end it sooner/);
+  assert.match(P.pausedLine({ all: true, since: 0, by: '' }, { now }), /^Emergency stop: no request goes to any cluster\. An operator or administrator can end it/);
   assert.match(P.pausedLine({ all: true, since: new Date(2026, 9, 25, 6, 38).getTime(), until: 0 }, { now }), /since .*25.*2026/);
   assert.equal(P.pauseFor(null), null);
   assert.equal(P.pauseFor({ pausedAll: false }), null);

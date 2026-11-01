@@ -25,6 +25,7 @@
 //! held a site still for days because nobody remembered it.
 
 use super::catalogue::{Dataset, ALL};
+use crate::auth::{Caller, Role};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -159,6 +160,34 @@ impl Paused {
         }
         self
     }
+}
+
+/// The refusal a caller limited to some clusters gets for `POLICY_PAUSE` / `POLICY_RESUME`.
+pub const STOP_LIMITED: &str =
+    "the emergency stop holds every cluster: an operator limited to some clusters cannot begin or end it — ask an administrator, or an operator who sees every cluster";
+/// …and a display link, which the gate refuses first (it is not in `auth::PLAY_READS`).
+pub const STOP_DISPLAY: &str = "a display link only shows Play";
+
+/// Whether this caller may begin or end the emergency stop (`POLICY_PAUSE`, `POLICY_RESUME`),
+/// past the role the gate already checked (operator: `auth::required_role`). `None` is the
+/// portable build, which has no accounts.
+///
+/// The stop holds every cluster — the per-cluster pause went in 0.3.44 — so an operator
+/// limited to some clusters (Zabbix host groups, a display link's list) would hold, or let
+/// go, clusters it cannot see. Refused, as Play refuses its fleet-wide messages to a limited
+/// caller. An administrator is not refused here even when limited: `POLICY_SET` already lets
+/// an administrator set the whole policy, the stop included, and the narrow message must not
+/// give less than the wide one. A display link never gets this far (the gate), and is
+/// refused here too.
+pub fn may_stop(caller: Option<&Caller>) -> Result<(), &'static str> {
+    let Some(c) = caller else { return Ok(()) };
+    if c.play_only() {
+        return Err(STOP_DISPLAY);
+    }
+    if c.limited() && c.role < Role::Admin {
+        return Err(STOP_LIMITED);
+    }
+    Ok(())
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -410,5 +439,27 @@ mod tests {
         assert_eq!(back.paused, Paused::default());
         assert_eq!(back.mode, Mode::OnDemand, "the rest of the file is kept");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_stop_is_an_operators_who_sees_every_cluster() {
+        use crate::auth::PlayCaller;
+        let who = |role, scope: Option<Vec<String>>| Caller { name: "x".into(), role, must_change: false, scope, play: None };
+        let team = || Some(vec!["ES team A".to_string()]);
+        assert_eq!(may_stop(None), Ok(()), "the portable build has no accounts");
+        assert_eq!(may_stop(Some(&who(Role::Operator, None))), Ok(()));
+        assert_eq!(may_stop(Some(&who(Role::Admin, None))), Ok(()));
+        // Limited to some clusters: the stop would hold the others too.
+        assert_eq!(may_stop(Some(&who(Role::Operator, team()))), Err(STOP_LIMITED));
+        // An administrator may set the whole policy anyway (POLICY_SET), limited or not.
+        assert_eq!(may_stop(Some(&who(Role::Admin, team()))), Ok(()));
+        // A display link, even one naming every cluster.
+        let mut tv = who(Role::User, None);
+        tv.play = Some(PlayCaller { link: "l1".into(), clusters: None, allow_from: vec![] });
+        assert_eq!(may_stop(Some(&tv)), Err(STOP_DISPLAY));
+        // A display link that names clusters is limited as well; still the display refusal.
+        tv.play = Some(PlayCaller { link: "l1".into(), clusters: Some(vec!["c1".into()]), allow_from: vec![] });
+        tv.role = Role::Admin;
+        assert_eq!(may_stop(Some(&tv)), Err(STOP_DISPLAY));
     }
 }

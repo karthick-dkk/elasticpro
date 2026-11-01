@@ -898,6 +898,61 @@ impl Core {
         self.policy_reply(Some(saved))
     }
 
+    /// `POLICY_PAUSE {minutes}` and `POLICY_RESUME`: the emergency stop begun or ended, and
+    /// nothing else in the policy touched. An operator's (auth::required_role), where
+    /// `POLICY_SET` stays an administrator's: the stop is day-to-day fleet work, the budgets,
+    /// the mode and the intervals are not. The length is one of `STOP_MINUTES`, refused
+    /// otherwise; a stop asked for while one holds keeps the one in force (`Paused::stamped`,
+    /// as POLICY_SET does), so nobody extends a stop by asking again. A message that carries
+    /// a `policy` is refused rather than half-applied. Answered like POLICY_SET.
+    pub(crate) fn policy_pause_msg(&self, t: &str, msg: &Value, caller: Option<&Caller>) -> Value {
+        if let Err(why) = policy::may_stop(caller) {
+            return json!({ "ok": false, "kind": "forbidden", "message": why });
+        }
+        if msg.get("policy").is_some() {
+            return json!({ "ok": false, "kind": "bad_request",
+                           "message": format!("{t} begins or ends the emergency stop and nothing else; the rest of the policy is POLICY_SET's") });
+        }
+        let ask = if t == "POLICY_PAUSE" {
+            match msg.get("minutes").and_then(Value::as_u64).filter(|m| policy::STOP_MINUTES.contains(m)) {
+                Some(minutes) => policy::Paused { all: true, minutes, ..Default::default() },
+                None => return json!({ "ok": false, "kind": "bad_request", "message": "minutes must be 15, 30 or 60" }),
+            }
+        } else {
+            policy::Paused::default()
+        };
+        let who = caller.map(|c| c.name.as_str()).unwrap_or("");
+        let now = now_ms();
+        // Read, change and put back under one lock: a POLICY_SET landing meanwhile is not lost.
+        let (pol, before) = {
+            let mut cur = self.fleet.policy.write();
+            let before = cur.paused.clone();
+            cur.paused = ask.stamped(&before, who, now);
+            (cur.clone(), before)
+        };
+        let saved = match &self.fleet.policy_path {
+            Some(p) => pol.save(p),
+            None => Err("no data directory: the policy applies to this run only".to_string()),
+        };
+        *self.fleet.cfg.write() = Config::from_policy(&pol);
+        let what = match (before.active(now), pol.paused.active(now)) {
+            (false, true) => "emergency stop begun",
+            (true, true) => "emergency stop already in force; kept",
+            (true, false) => "emergency stop ended",
+            (false, false) => "emergency stop not in force; nothing to end",
+        };
+        tracing::info!(
+            target: "audit",
+            user = caller.map(|c| c.name.as_str()).unwrap_or(""),
+            action = t, minutes = pol.paused.minutes, paused_all = pol.paused.all,
+            paused_until = pol.paused.until, paused_by = pol.paused.by.as_str(),
+            saved = saved.is_ok(),
+            "{}", what
+        );
+        self.fleet.wake.notify_one();
+        self.policy_reply(Some(saved))
+    }
+
     /* ------------------------------------ events ------------------------------------ */
 
     pub(crate) fn events_ticket_msg(&self, caller: Option<Caller>, reauth: Reauth) -> Value {

@@ -244,7 +244,7 @@ in as the Zabbix user — no second password.
 | Zabbix user type | ElasticPro role | Clusters | Can write |
 |------------------|---------------------|----------|-----------|
 | User             | `user`              | all, read-only (only those mapped to their groups with `scopeUsersByGroup`) | no |
-| Admin            | `operator`          | all, read-only | no — GET and searches only |
+| Admin            | `operator`          | all, read-only | no — GET and searches only; may begin and end the emergency stop |
 | Super admin      | `admin`             | all | yes (PUT/POST/DELETE), and administers the app |
 | Guest            | —                   | not signed in | — |
 

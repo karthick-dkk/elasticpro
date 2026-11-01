@@ -398,6 +398,10 @@ pub fn required_role(msg_type: &str) -> Option<Role> {
         // nobody else's; it sends nothing to a cluster.
         "ABORT_REQUESTS" => Some(Role::User),
         "POLICY_SET" => Some(Role::Admin),
+        // The emergency stop alone, begun (15, 30 or 60 min) or ended: day-to-day fleet work,
+        // an operator's — and nothing else in the policy (fleet/mod.rs policy_pause_msg). It
+        // holds every cluster, so not for an operator limited to some (policy::may_stop).
+        "POLICY_PAUSE" | "POLICY_RESUME" => Some(Role::Operator),
 
         // Fleet facts with no index names, but they name hosts and jump hosts.
         "TUNNELS" | "PINS" | "REQUEST_STATS" => Some(Role::User),
@@ -2231,6 +2235,19 @@ mod tests {
         for t in ["CONFIG_READ", "CONFIG_WRITE", "FILE_WRITE", "SEAL", "PRIME", "ZABBIX_ROLEMAP_GET", "ZABBIX_ROLEMAP_SET"] {
             assert!(authorize(Role::Operator, t, "", "").is_err(), "{t} must stay an admin's");
         }
+    }
+
+    #[test]
+    fn an_operator_begins_and_ends_the_emergency_stop_but_sets_nothing_else_in_the_policy() {
+        for t in ["POLICY_PAUSE", "POLICY_RESUME"] {
+            assert_eq!(required_role(t), Some(Role::Operator), "{t}");
+            assert!(authorize(Role::Operator, t, "", "").is_ok(), "{t} is an operator's");
+            assert!(authorize(Role::Admin, t, "", "").is_ok(), "{t} is an admin's too");
+            assert!(authorize(Role::User, t, "", "").is_err(), "{t} is not a user's");
+            assert!(authorize(Role::Guest, t, "", "").is_err(), "{t} is not a guest's");
+            assert!(play_may(t, "", "", None).is_err(), "{t} is not a display link's");
+        }
+        assert!(authorize(Role::Operator, "POLICY_SET", "", "").is_err(), "the rest of the policy stays an admin's");
     }
 
     #[test]
