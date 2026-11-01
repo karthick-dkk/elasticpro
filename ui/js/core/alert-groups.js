@@ -28,6 +28,7 @@ import { ruleOf } from './zabbix-alerts.js';
 import { compareNames } from '../lib/cluster-order.js';
 import { diskBalance } from './disk-balance.js';
 import { ilmErrorsOf } from './lifecycle-errors.js';
+import { oldestAsOf } from './alert-held.js';
 
 export const clusterIdOf = (a) => (a && a.cluster && a.cluster.id) || String((a && a.key) || '').split(':')[0];
 /** The rule family: `vm-1:slm-fail:daily` → `slm-fail`. Alerts of no known family share `other`. */
@@ -257,6 +258,10 @@ export function mergeAlerts(list, ctx = {}) {
       snapshot: members.map((m) => m.snapshot).find(Boolean) || null,
       stale: members.some((m) => m.stale),
       problemUrl: members.map((m) => m.problemUrl).find(Boolean) || null,
+      // Raised from a down cluster's cached data (state.js heldAlerts): never current, and as
+      // of the oldest reading any member rests on.
+      cached: members.some((m) => m.cached),
+      asOf: oldestAsOf(members),
     });
   }
   return out;
@@ -293,11 +298,15 @@ export const isUnreachableAlert = (m) => m.family === 'unreachable';
  * The one rule: a cluster with a merged `unreachable` alert is unreachable, and every other
  * merged alert on it is held. Applied once, where the merged list is made (state.js
  * mergedAlerts), so no reader can see the two disagree.
+ *
+ * Most of what is held is evaluated from the cluster's cached data while it is down
+ * (state.js heldAlerts, alert-held.js): the same rules, as of the time of that data
+ * (`asOf`). Such an alert (`cached`) is held whatever else is true — it is never current.
  */
 export function holdUnreachable(merged) {
   const down = new Set(merged.filter(isUnreachableAlert).map((m) => m.clusterId));
-  if (!down.size) return merged;
-  return merged.map((m) => (down.has(m.clusterId) && !isUnreachableAlert(m)
+  if (!down.size && !merged.some((m) => m.cached)) return merged;
+  return merged.map((m) => (!isUnreachableAlert(m) && (down.has(m.clusterId) || m.cached)
     ? { ...m, held: true, heldState: m.state, state: 'held' }
     : m));
 }
@@ -356,6 +365,25 @@ export function unreachableReason(cl) {
 /** "2 older alerts held, not current" / "no other alerts" — what an unreachable line says of the rest. */
 export function heldText(n) {
   return n ? `${n} older alert${n === 1 ? '' : 's'} held, not current` : 'no other alerts';
+}
+
+/**
+ * The held alerts of one unreachable cluster as one line: "2 older alerts held, not current ·
+ * as of 14:02" — the time of the OLDEST reading any of them rests on, written by `clock`
+ * (the Alerts page's dt, Play's clockText). The one wording for the Alerts page's unreachable
+ * line and Play's down tile and Alerts slide.
+ */
+export function heldLine(held, clock = (t) => new Date(t).toISOString().slice(11, 16)) {
+  const list = held || [];
+  const asOf = oldestAsOf(list);
+  return heldText(list.length) + (list.length && asOf ? ` · as of ${clock(asOf)}` : '');
+}
+
+/** The held alerts, per cluster: clusterId → [merged alert]. */
+export function heldByCluster(merged) {
+  const out = new Map();
+  for (const m of merged || []) if (isHeld(m)) (out.get(m.clusterId) || out.set(m.clusterId, []).get(m.clusterId)).push(m);
+  return out;
 }
 
 /* --------------------------------- ordering --------------------------------- */

@@ -44,12 +44,25 @@ export function diskLevel(pct, prev, warn, crit, band = DISK_HYSTERESIS) {
 const familyOf = (a) => String(a.key || '').split(':')[1] || '';
 const clusterOf = (a) => (a.cluster && a.cluster.id) || String(a.key || '').split(':')[0];
 
-/** Which fleet dataset each rule reads from, for the staleness note. */
-export const RULE_DATASET = {
-  health: 'health', disk: 'nodes', 'disk-balance': 'nodes', 'disk-unaccounted': 'nodes',
-  capacity: 'nodes', 'no-master': 'nodes', 'master-changed': 'nodes',
-  ilm: 'ilm_errors', 'slm-mode': 'policies', 'slm-fail': 'policies', 'slm-stale': 'policies', repo: 'snapshots',
+/**
+ * Every dataset each rule reads, the one that carries its finding first. A held alert
+ * (alert-held.js) is dated by the OLDEST of them — a reading is as old as its oldest part:
+ *   disk-balance   nodes, and the watermarks from policies (clusterSettings)
+ *   disk-unaccounted  nodes, and the index list (`indices`, on demand — can be days old)
+ *   master-changed nodes, and health (its level: critical while the cluster is not green)
+ *   ilm            ilm_errors, and ILM's operation mode from policies (only while ILM runs)
+ *   repo           snapshots, and the repository list from policies
+ * The dangling-index note on disk-unaccounted only words its detail; it decides nothing.
+ */
+export const RULE_READS = {
+  health: ['health'], disk: ['nodes'], 'disk-balance': ['nodes', 'policies'], 'disk-unaccounted': ['nodes', 'indices'],
+  capacity: ['nodes'], 'no-master': ['nodes'], 'master-changed': ['nodes', 'health'],
+  ilm: ['ilm_errors', 'policies'], 'slm-mode': ['policies'], 'slm-fail': ['policies'], 'slm-stale': ['policies'],
+  repo: ['snapshots', 'policies'],
 };
+
+/** Which fleet dataset each rule's finding comes from, for the staleness note: the first it reads. */
+export const RULE_DATASET = Object.fromEntries(Object.entries(RULE_READS).map(([k, v]) => [k, v[0]]));
 
 /**
  * @param {Array} list  what alerts() raised

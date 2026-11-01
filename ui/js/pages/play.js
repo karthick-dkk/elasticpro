@@ -18,7 +18,7 @@
 import { h, mount } from '../lib/dom.js';
 import { state, clusters, client, mergedAlerts, invalidateAlerts, askForPage, demandDataset, fleetPolicy, fleetMode,
   datasetFreshness, refreshAll } from '../core/state.js';
-import { isOpen, isHeld, toObservations } from '../core/alert-groups.js';
+import { isOpen, isHeld, heldByCluster, toObservations } from '../core/alert-groups.js';
 import { alertHistory } from '../core/alert-history.js';
 import { isStale } from '../lib/freshness.js';
 import { isSnapshotMode } from '../core/snapshot.js';
@@ -161,7 +161,12 @@ function context(force = false) {
   }
   const list = visible();
   const ids = new Set(list.map((c) => c.id));
-  const merged = mergedAlerts().filter((m) => ids.has(m.clusterId) && !isHeld(m));
+  const mine = mergedAlerts().filter((m) => ids.has(m.clusterId));
+  const merged = mine.filter((m) => !isHeld(m));
+  // Held under a down cluster (alert-groups.js holdUnreachable): one dimmed line under its
+  // tile and its Alerts row, in no count, never taking the screen (docs/PLAY.md).
+  const held = mine.filter(isHeld);
+  const heldBy = heldByCluster(held);
   // Acknowledged or not is mergedAlerts()'s answer (acks.js records, ackedItems per merged
   // item): on hosted those records are the server's shared ones, read again by pollAcks.
   const open = merged.filter((m) => isOpen(m));
@@ -192,7 +197,7 @@ function context(force = false) {
   }
 
   const ctx = {
-    now, tz: ps.tz || null, clusters: list, st, open, merged, openBy,
+    now, tz: ps.tz || null, clusters: list, st, open, merged, openBy, held, heldBy,
     data: (id) => state.data.get(id) || null,
     indices: (id) => state.indices.get(id) || null,
     report: reportOf,
@@ -409,8 +414,10 @@ function tick() {
   const before = take && take.active ? take.active.key : null;
   // The first WARM_MS only learn what is already wrong: the data and the shared measurements are
   // still arriving, and a TV switched on mid-incident must not be taken over by all of it.
-  take = now - openedAt < warmMs ? takeover(null, { open: crit, now })
-    : takeover(take, { open: crit, now, enabled: ps.display.criticalTakesScreen });
+  // Held alerts never take the screen, and one that becomes current when its cluster answers
+  // again was there before the outage: not new (engine.js takeover `held`).
+  take = now - openedAt < warmMs ? takeover(null, { open: crit, held: ctx.held, now })
+    : takeover(take, { open: crit, held: ctx.held, now, enabled: ps.display.criticalTakesScreen });
   const holding = take.active;
   if (holding && now - lastAckPoll > 10000 && support.acks !== false) { lastAckPoll = now; pollAcks(); }
   let moved = false;
@@ -433,7 +440,10 @@ async function loadPlayState() {
   // The open alerts go with it once the warm-up is over (before that the data is still arriving,
   // and an empty list would wipe the times the server kept across a reload).
   const warm = Date.now() - openedAt >= warmMs;
-  const res = await playState(warm && support.play !== false ? context().open.map((m) => m.key) : undefined);
+  // Held keys go too: only so the server keeps "open for" across an outage — an alert raised
+  // before its cluster went down and still true when it answers is not one minute old.
+  const c = warm && support.play !== false ? context() : null;
+  const res = await playState(c ? [...c.open, ...c.held].map((m) => m.key) : undefined);
   if (res && res.ok) {
     support.play = true;
     ps = readPlayState(res);

@@ -3103,8 +3103,18 @@ restoreConsole();
     }
     if (body.type === 'CONFIG_WRITE') { written = body.text; return stubReply({ ok: true, path: body.path, bytes: body.text.length }); }
     if (body.type === 'CONFIG_READ' && written !== null) return stubReply({ ok: true, text: written, size: written.length, lastModified: Date.now() });
+    // Every PING says what config.txt manages (managed.js setManaged), and the dev bridge
+    // manages nothing — so a PING landing while the managed case below runs (the Config page
+    // asks one on open, Save asks one, the side foot every 10 s) undid what it set up, and
+    // whether it did was a matter of timing. The bridge's answer, with the case's own list.
+    if (body.type === 'PING' && managedNow) {
+      const res = await realFetch(input, init);
+      const j = await res.json();
+      return stubReply({ ...j, managedDefaults: { ...managedNow }, managedZabbixOptions: {} });
+    }
     return realFetch(input, init);
   };
+  let managedNow = null;
   const press = async (label, root = doc.querySelector('#view')) => {
     const b = [...root.querySelectorAll('button')].find((x) => x.textContent.trim() === label);
     if (b) { b.click(); await settleFor(700); }
@@ -3179,7 +3189,8 @@ restoreConsole();
 
     // A key config.txt manages is locked, says why, and is never written.
     const managed = await load('core/managed.js');
-    managed.setManaged({ ok: true, managedDefaults: { volumeTopValues: 40 }, managedZabbixOptions: {} });
+    managedNow = { volumeTopValues: 40 };
+    managed.setManaged({ ok: true, managedDefaults: { ...managedNow }, managedZabbixOptions: {} });
     await openSettingsTab('Defaults'); await openSettingsTab('Volume fields');
     await press('Defaults · all clusters');
     const top = doc.getElementById('vf-top');
@@ -3191,8 +3202,10 @@ restoreConsole();
     ok(written !== null, 'volume fields: Save with a managed value wrote nothing');
     ok(written === null || !/"topValues"\s*:\s*40/.test(written),
       `volume fields: saving wrote a managed value into the file (${written && JSON.stringify((JSON.parse(written).defaults || {}).volume)})`);
+    managedNow = null;
     managed.setManaged({ ok: true, managedDefaults: {}, managedZabbixOptions: {} });
   } finally {
+    managedNow = null;
     globalThis.fetch = realFetch;
   }
   await applyConfig({ load, configPath });
@@ -3882,6 +3895,55 @@ consoleTabs: {
       ok(held && /Old logs/.test(held.textContent) && /not current/.test(held.textContent), 'alerts: opening the line does not list the held alert, labelled not current');
       ok(opened && /How to fix/.test(opened.textContent) && /Related/.test(opened.textContent), 'alerts: the unreachable line has no How to fix and Related when opened');
       opened.querySelector('.arow-toggle').click(); await settleFor(60);
+    }
+
+    // Held from cached data: kestrel-dc's last good answers are in the fleet cache (health
+    // yellow, a disk at 95 %, read 12 minutes ago). Its rules run on them — nothing is asked of
+    // the cluster — and what they raise is held under its line, "as of" that read, counted
+    // nowhere, and can be acknowledged there.
+    {
+      const sumBefore = [...doc.querySelector('#view .alerts-sum').children].map((x) => x.textContent.trim()).join(' ');
+      const openBefore = st.openAlertCounts();
+      const readAt = Date.now() - 12 * 60000;
+      const ans = (json) => ({ ok: true, status: 200, kind: 'ok', message: '', json, tookMs: 5 });
+      const ent = (data, extra = {}) => ({ status: 'ok', fetchedAt: readAt, attemptedAt: readAt, nextDue: Date.now() + 60000,
+        tookMs: 5, staleAfterMs: 360000, seq: 1, error: null, data, ...extra });
+      const wasMode = st.fleet.mode;
+      const wasRaw = st.fleet.raw.get('k');
+      const sentBefore = sent.length;
+      st.fleet.mode = 'fleet';
+      st.fleet.raw.set('k', { reach: { state: 'unreachable', since: Date.now() - 18 * 60000 }, datasets: {
+        health: ent({ root: ans({ name: 'k1', cluster_name: 'kestrel', version: { number: '8.13.0' } }), health: ans({ status: 'yellow', unassigned_shards: 2 }) },
+          { status: 'error', attemptedAt: Date.now() - 60000, error: { ok: false, kind: 'connect', message: 'ECONNREFUSED' } }),
+        nodes: ent({ nodes: ans([{ name: 'k1', master: '*' }]), alloc: ans([{ node: 'k1', 'disk.used': '95', 'disk.total': '100', 'disk.avail': '5', shards: '3' }]) }),
+      } });
+      st.invalidateAlerts(); await go('alerts');
+      const line = () => doc.querySelector('#view .adown .adown-row');
+      ok(/3 older alerts held, not current · as of /.test(line() ? line().querySelector('.adown-meta').textContent : ''),
+        `alerts: the line does not say what is held from cache, and as of when: "${line() && line().querySelector('.adown-meta').textContent}"`);
+      const sumNow = [...doc.querySelector('#view .alerts-sum').children].map((x) => x.textContent.trim()).join(' ');
+      ok(sumNow === sumBefore, `alerts: held alerts changed the summary: "${sumBefore}" → "${sumNow}"`);
+      ok(JSON.stringify(st.openAlertCounts()) === JSON.stringify(openBefore), 'alerts: held alerts changed the open counts (bell, tab, top bar)');
+      ok(![...doc.querySelectorAll('#view .agroup:not(.adown) .arow')].some((r) => /kestrel-dc/.test(r.textContent)), 'alerts: a held alert is listed as a current row');
+      line().querySelector('.arow-toggle').click(); await settleFor(80);
+      const heldRows = () => [...doc.querySelectorAll('#view .adown .aheld-row')];
+      const diskRow = () => heldRows().find((r) => /Disk usage above/.test(r.textContent));
+      ok(heldRows().length === 3 && !!diskRow(), `alerts: expected the automation, health and disk held, saw ${heldRows().map((r) => r.textContent.slice(0, 40)).join(' | ')}`);
+      ok(diskRow() && /^as of /.test(diskRow().querySelector('.aheld-age').textContent), `alerts: a held disk alert does not say "as of": "${diskRow() && diskRow().querySelector('.aheld-age').textContent}"`);
+      ok(sent.length === sentBefore || sent.slice(sentBefore).every((m) => !/kestrel|k\.example/.test(JSON.stringify(m))), 'alerts: evaluating held alerts asked the down cluster for something');
+      const ackBtn = diskRow() && diskRow().querySelector('button.aheld-ack');
+      ok(ackBtn && ackBtn.textContent === 'Ack', 'alerts: a held alert has no Ack');
+      if (ackBtn) {
+        ackBtn.click(); await settleFor(150);
+        ok(acks.isAcked('k:disk'), 'alerts: Ack on a held alert wrote no acknowledgement under its own key');
+        ok(diskRow() && /acknowledged by qa/.test(diskRow().textContent), `alerts: the held row does not say it is acknowledged: "${diskRow() && diskRow().textContent}"`);
+        ok(JSON.stringify(st.openAlertCounts()) === JSON.stringify(openBefore), 'alerts: acknowledging a held alert changed the open counts');
+        await acks.unacknowledge('k:disk');
+      }
+      line().querySelector('.arow-toggle').click(); await settleFor(60);
+      if (wasRaw) st.fleet.raw.set('k', wasRaw); else st.fleet.raw.delete('k');
+      st.fleet.mode = wasMode;
+      st.invalidateAlerts(); await go('alerts');
     }
 
     // One line for a cluster with one alert: no header, severity, name, title, age, Go to, Ack, More.

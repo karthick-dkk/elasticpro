@@ -25,7 +25,7 @@
  */
 
 import { openAlertsNow, clusters, mergedAlerts, invalidateAlerts } from './state.js';
-import { isOpen, toObservations } from './alert-groups.js';
+import { isOpen, isHeld, toObservations } from './alert-groups.js';
 import { alertHistory } from './alert-history.js';
 import { gotoFor, openGoto, openClusterAlerts } from './alert-goto.js';
 import { pageLabel } from './page-labels.js';
@@ -125,7 +125,7 @@ export function groupIntoBursts(fresh, now, open = bursts, freshKeys = null) {
  * @returns {Array} the merged alerts announced, for tests and callers that want to know.
  */
 export function announceNewAlerts({ notify = toast, now = Date.now(), list = null } = {}) {
-  let open;
+  let open, held;
   try {
     // Every merged alert, recorded for age and history; the open ones are what is news.
     const all = list || mergedAlerts({ fresh: true });
@@ -133,9 +133,16 @@ export function announceNewAlerts({ notify = toast, now = Date.now(), list = nul
       if (alertHistory.observe(toObservations(all), now)) invalidateAlerts();
     } catch (_) { /* the log is a convenience; never let it stop a notice */ }
     open = all.filter((m) => isOpen(m));
+    held = all.filter((m) => isHeld(m));
   } catch (_) { return []; }          // a notifier must never break a refresh
 
+  // Held alerts (a cluster that is down) are never news. One that was already seen open —
+  // announced before the outage — stays remembered while it is held, so when the cluster
+  // answers and it is still true it is not announced a second time. A held key is never ADDED
+  // (the first pass included): an alert nobody was shown — this page opened mid-outage, or a
+  // threshold moved while the cluster was down — is announced when it becomes current.
   const keys = new Set(open.flatMap((m) => m.keys));
+  if (seen !== null) for (const k of held.flatMap((m) => m.keys)) if (seen.has(k)) keys.add(k);
   if (seen === null) { seen = new Map([...keys].map((k) => [k, 0])); return []; }
 
   const freshKeys = new Map();

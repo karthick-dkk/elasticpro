@@ -57,9 +57,20 @@ be read says "no data" / "not measured", never 0.
    (30–60 / > 60), fullest disk. Status line = health word + worst reason + where, e.g.
    "Red · disk 91 % on es-hot-03" — composed once in `ui/js/play/status.js` from existing
    pieces (`healthState`, `diskBalance().fullest`, the open alert of highest severity).
+   A cluster that is not answering has one dimmed line under its tile for the alerts **held**
+   behind it (worked out from its last cached data, see HANDBOOK "Unreachable clusters and
+   held alerts"): "2 older alerts held, not current · as of 14:02" — the same words as the
+   Alerts page (`heldLine`, `core/alert-groups.js`). Never in the tile's alert count or the strip.
 2. **Alerts**: `mergedAlerts()` open alerts, critical first then newest; severity, title,
    cluster · detail, open for, acknowledged by. Side: open now (critical, warning,
-   acknowledged), last 24 h (raised, resolved, longest open). "All clear" when none.
+   acknowledged), last 24 h (raised, resolved, longest open). "All clear" when none. Held
+   alerts are not rows: the unreachable row carries the same dimmed held line as the tile.
+   They are never counted and never take the screen. When the cluster answers again, one that
+   this display already showed open before the outage does not take the screen a second time;
+   one it was never shown (the TV was switched on during the outage, or the alert appeared only
+   while held) takes it as any new critical alert does — held keys are kept in what the display
+   has seen, never added to it. "Open for" runs on from before the outage (held keys go with
+   `PLAY_STATE.open`).
 3. **Cluster spotlight**: clusters with a **critical problem** join automatically and leave
    10 min after their last one clears (per display). Critical problem (Config tick boxes,
    defaults on): red health, a node left, SLM failed or no good snapshot in 26 h (not for
