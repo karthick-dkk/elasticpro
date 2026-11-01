@@ -275,11 +275,9 @@ pub fn play_es_shape(pattern: Option<&str>, method: &str, path: &str, body: Opti
         return refuse("one index pattern, then _search or _field_caps");
     }
     let Some(target) = crate::guard::percent_decode(target) else { return refuse("the index pattern is not readable") };
-    let target_ok = match pattern.map(str::trim).filter(|p| !p.is_empty()) {
-        Some(p) => target == p,
-        None => !target.is_empty() && !target.contains(',') && !target.starts_with('.') && !target.starts_with('-')
-            && target != "*" && target != "_all" && !target.contains(".."),
-    };
+    // Exactly the pattern the measurement uses, never a looser one: the caller passes the
+    // cluster's own logIndexPattern, or the managed default for a cluster with none.
+    let target_ok = pattern.map(str::trim).filter(|p| !p.is_empty()).is_some_and(|p| target == p);
     if !target_ok {
         return refuse("the cluster's log index pattern only");
     }
@@ -316,7 +314,12 @@ fn delay_search_body(v: &serde_json::Value) -> bool {
     fn one_field(v: &Value) -> Option<&Value> {
         v.as_object().filter(|m| m.len() == 1).and_then(|m| m.values().next())
     }
-    let strings = |v: &Value| v.as_array().is_some_and(|a| a.len() <= 64 && a.iter().all(Value::is_string));
+    // A field the measurement names: plain, never a wildcard that could pull a whole document.
+    fn plain(f: &str) -> bool {
+        !f.is_empty() && f.len() <= 128 && f.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '@' | '-'))
+    }
+    let strings = |v: &Value| v.as_array().is_some_and(|a| !a.is_empty() && a.len() <= 16
+        && a.iter().all(|x| x.as_str().is_some_and(plain)));
     if !keys(v, &["size", "query", "aggs"], &[]) || v["size"] != serde_json::json!(0) {
         return false;
     }
@@ -324,6 +327,7 @@ fn delay_search_body(v: &serde_json::Value) -> bool {
     let q = &v["query"];
     let range_ok = keys(q, &["bool"], &[]) && keys(&q["bool"], &["filter"], &[])
         && q["bool"]["filter"].as_array().is_some_and(|f| f.len() == 1 && keys(&f[0], &["range"], &[])
+            && f[0]["range"].as_object().is_some_and(|m| m.keys().all(|k| plain(k)))
             && one_field(&f[0]["range"]).is_some_and(|r| keys(r, &[], &["gte", "lte", "format"])
                 && r.as_object().is_some_and(|m| m.values().all(Value::is_string))));
     if !range_ok {
@@ -335,16 +339,17 @@ fn delay_search_body(v: &serde_json::Value) -> bool {
         return false;
     }
     let t = &d["devices"]["terms"];
-    let terms_ok = keys(t, &["field", "size"], &["order"]) && t["field"].is_string()
+    let terms_ok = keys(t, &["field", "size"], &["order"]) && t["field"].as_str().is_some_and(plain)
         && t["size"].as_u64().is_some_and(|n| (1..=500).contains(&n))
         && t.get("order").is_none_or(|o| *o == serde_json::json!({ "_count": "desc" }));
     let inner = &d["devices"]["aggs"];
     let hits_ok = keys(inner, &["latest"], &[]) && keys(&inner["latest"], &["top_hits"], &[])
-        && keys(&inner["latest"]["top_hits"], &["size"], &["sort", "_source"])
+        && keys(&inner["latest"]["top_hits"], &["size", "_source"], &["sort"])
         && inner["latest"]["top_hits"]["size"] == serde_json::json!(1)
-        && inner["latest"]["top_hits"].get("_source").is_none_or(strings)
+        && strings(&inner["latest"]["top_hits"]["_source"])
         && inner["latest"]["top_hits"].get("sort").is_none_or(|s| s.as_array().is_some_and(|a| a.len() <= 2
-            && a.iter().all(|x| one_field(x).is_some_and(|o| keys(o, &["order"], &[]) && o["order"].is_string()))));
+            && a.iter().all(|x| x.as_object().is_some_and(|m| m.len() == 1 && m.keys().all(|k| plain(k)))
+                && one_field(x).is_some_and(|o| keys(o, &["order"], &[]) && o["order"].is_string()))));
     terms_ok && hits_ok
 }
 
@@ -2148,6 +2153,17 @@ mod tests {
         let docs = serde_json::json!({ "size": 10000, "query": { "match_all": {} } }).to_string();
         assert!(play_es_shape(p, "POST", "/logs-*/_search", Some(&docs)).is_err());
         assert!(play_es_shape(p, "POST", "/logs-*/_search", Some(&delay_body(10000))).is_err(), "at most 500 devices");
+        // No pattern of its own is not a looser rule: only the default the caller passes counts.
+        assert!(play_es_shape(None, "POST", "/logs-*/_search", Some(&body)).is_err(), "no pattern, nothing");
+        assert!(play_es_shape(p, "POST", "/remote:logs-*/_search", Some(&body)).is_err(), "cross-cluster search");
+        // _source: required, plain field names only — never a wildcard that returns whole documents.
+        let edit = |f: &dyn Fn(&mut serde_json::Value)| { let mut v: serde_json::Value = serde_json::from_str(&delay_body(10)).unwrap(); f(&mut v); v.to_string() };
+        let wild = edit(&|v| v["aggs"]["devices"]["aggs"]["latest"]["top_hits"]["_source"] = serde_json::json!(["*"]));
+        assert!(play_es_shape(p, "POST", "/logs-*/_search", Some(&wild)).is_err(), "a wildcard _source");
+        let none = edit(&|v| { v["aggs"]["devices"]["aggs"]["latest"]["top_hits"].as_object_mut().unwrap().remove("_source"); });
+        assert!(play_es_shape(p, "POST", "/logs-*/_search", Some(&none)).is_err(), "_source is required");
+        let wild_terms = edit(&|v| v["aggs"]["devices"]["terms"]["field"] = serde_json::json!("*"));
+        assert!(play_es_shape(p, "POST", "/logs-*/_search", Some(&wild_terms)).is_err(), "a wildcard terms field");
         let mut more: serde_json::Value = serde_json::from_str(&body).unwrap();
         more["aggs"]["devices"]["aggs"]["latest"]["top_hits"]["size"] = serde_json::json!(100);
         assert!(play_es_shape(p, "POST", "/logs-*/_search", Some(&more.to_string())).is_err(), "one newest document per device");
@@ -2156,10 +2172,13 @@ mod tests {
         assert!(play_es_shape(p, "POST", "/logs-*/_search", Some(&more.to_string())).is_err(), "no other aggregation");
         assert!(play_es_shape(p, "POST", "/logs-*/_search", None).is_err());
         assert!(play_es_shape(p, "POST", "/logs-*/_field_caps?fields=x", Some(&body)).is_err(), "field caps has no body");
-        // A cluster with no pattern of its own (a Zabbix host): one plain pattern.
-        assert!(play_es_shape(None, "POST", "/logstash-*/_search", Some(&body)).is_ok());
-        for t in ["*", "_all", ".ds-logs", "a,b"] {
-            assert!(play_es_shape(None, "POST", &format!("/{t}/_search"), Some(&body)).is_err(), "{t}");
+        // A cluster with no pattern of its own (a Zabbix host): the gate passes the managed
+        // default (UI_LOG_INDEX_PATTERN, else logstash-*) and only that exact pattern counts.
+        let d = Some("logstash-*");
+        assert!(play_es_shape(d, "POST", "/logstash-*/_search", Some(&body)).is_ok());
+        for t in ["*", "_all", ".ds-logs", "a,b", "logstash-*,.kibana", "remote:logstash-*", "logs-*"] {
+            assert!(play_es_shape(d, "POST", &format!("/{t}/_search"), Some(&body)).is_err(), "{t}");
+            assert!(play_es_shape(None, "POST", &format!("/{t}/_search"), Some(&body)).is_err(), "no pattern: {t}");
         }
     }
 
