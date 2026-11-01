@@ -106,6 +106,24 @@ pub(crate) fn daily_view(store: &Store, id: &str, s: &VolumeSettings, days: i64,
     })
 }
 
+/// The month files a collection refreshes, oldest first: a report's period's months, or
+/// every month kept on disk (`kept`) and every month the listing has a day in; none older
+/// than `oldest` (`YYYY-MM`, the first month `keepMonths` keeps).
+pub(crate) fn months_to_refresh(kept: impl FnOnce() -> Vec<String>, listing: &collect::Listing,
+                                period: Option<(NaiveDate, NaiveDate)>, oldest: &str) -> Vec<String> {
+    let mut months: Vec<String> = match period {
+        Some((from, to)) => schedule::months_between(from, to),
+        None => {
+            let mut m = kept();
+            m.extend(listing.days.keys().map(|d| month_key(*d)));
+            m
+        }
+    };
+    months.sort();
+    months.dedup();
+    months.retain(|m| m.as_str() >= oldest);
+    months
+}
 
 impl Core {
     /* ------------------------------------ settings ------------------------------------ */
@@ -621,17 +639,7 @@ impl Core {
         let listing = collect::read_cat(cat.get("json").unwrap_or(&Value::Null), &fmt);
         drop(cat);
 
-        let mut months: Vec<String> = match opts.period {
-            Some((from, to)) => schedule::months_between(from, to),
-            None => {
-                let mut m = store.months(id);
-                m.extend(listing.days.keys().map(|d| month_key(*d)));
-                m
-            }
-        };
-        months.sort();
-        months.dedup();
-        months.retain(|m| *m >= oldest);
+        let months = months_to_refresh(|| store.months(id), &listing, opts.period, &oldest);
         let in_period = |d: NaiveDate| opts.period.is_none_or(|(f, t)| d >= f && d <= t);
         let mut summaries = BTreeMap::new();
         let mut to_search: Vec<NaiveDate> = vec![];
@@ -922,6 +930,93 @@ mod tests {
         assert_eq!(v["cards"]["average"]["value"], 100);
         assert_eq!(v["days"][0]["day"], "2026-10-16");
         assert_eq!(v["days"][0]["avg"], 100, "the first row's average still has its 3 days before");
+    }
+
+    /// What a run does with a listing on `today` (docs/VOLUME.md "Each run, per cluster",
+    /// step 1, and the search marking past days final), on an empty record: the months it
+    /// picks, each day in its own month file, and every open day searched.
+    fn collect_on(store: &Store, id: &str, cat: &Value, today: NaiveDate, keep_months: u32) {
+        let fmt = IndexFormat::new("logstash-*-YYYY.MM.DD").unwrap();
+        let listing = collect::read_cat(cat, &fmt);
+        let oldest = month_key(schedule::oldest_kept_month(today, keep_months));
+        for m in months_to_refresh(|| store.months(id), &listing, None, &oldest) {
+            let mut file = store.read_month(id, &m);
+            collect::apply_totals(&mut file.days, &m, &listing, 1);
+            for (k, d) in file.days.iter_mut() {
+                let date = parse_day(k).unwrap();
+                assert!(collect::needs_search(d, listing.days.get(&date)), "{k} is searched on {today}");
+                assert_eq!(collect::not_searched_why(d, listing.days.get(&date), today), None);
+                d.is_final = date < today;
+                d.docs = Some(1);
+            }
+            store.write_month(id, &m, &file).unwrap();
+        }
+        store.prune(id, &oldest).unwrap();
+    }
+
+    /// 45 days of `logstash-<src>-YYYY.MM.DD` ending on `today`, as tools/mock-es.mjs lists
+    /// them: two sources, 100 + 50 bytes primary a day.
+    fn cat_45_days(today: NaiveDate) -> Value {
+        let rows: Vec<Value> = (0..45).flat_map(|n| {
+            let d = today - Duration::days(n);
+            [("acme", 100), ("beta", 50)].map(|(src, b)| json!({
+                "index": format!("logstash-{src}-{}", d.format("%Y.%m.%d")), "status": "open",
+                "docs.count": "1", "pri.store.size": b.to_string(), "store.size": (b * 2).to_string(),
+            }))
+        }).collect();
+        Value::Array(rows)
+    }
+
+    /// The first of a month, the last of one and New Year's Day: the record a run makes on
+    /// that day is the whole window, today included, read across the month (and year)
+    /// boundary; "This month so far" starts again on the 1st and yesterday is the last day
+    /// of the month before.
+    #[test]
+    fn the_record_reads_across_month_and_year_ends() {
+        let d = |s: &str| parse_day(s).unwrap();
+        for (today, months, month_so_far) in [
+            ("2026-11-01", vec!["2026-09", "2026-10", "2026-11"], 150),
+            ("2026-10-31", vec!["2026-09", "2026-10"], 31 * 150),
+            ("2027-01-01", vec!["2026-11", "2026-12", "2027-01"], 150),
+            ("2026-12-31", vec!["2026-11", "2026-12"], 31 * 150),
+        ] {
+            let today = d(today);
+            let root = std::env::temp_dir().join(format!("ep-volume-edge-{}-{}-{today}", std::process::id(), now_ms()));
+            let store = Store::new(root.clone());
+            collect_on(&store, "prod", &cat_45_days(today), today, 13);
+            let kept = store.months("prod");
+            let v = daily_view(&store, "prod", &VolumeSettings::default(), 30, 7, None, today);
+            let one = daily_view(&store, "prod", &VolumeSettings::default(), 30, 7, Some("beta"), today);
+            // keepMonths 1 keeps only the current month: on the 1st that is today alone.
+            let root1 = root.with_extension("keep1");
+            let store1 = Store::new(root1.clone());
+            collect_on(&store1, "prod", &cat_45_days(today), today, 1);
+            let v1 = daily_view(&store1, "prod", &VolumeSettings::default(), 30, 7, None, today);
+            let _ = std::fs::remove_dir_all(&root);
+            let _ = std::fs::remove_dir_all(&root1);
+
+            assert_eq!(kept, months, "{today}: one file per month the 45 days touch");
+            let rows = v["days"].as_array().unwrap();
+            assert_eq!(rows.len(), 30, "{today}: 30 rows");
+            assert_eq!(rows[0]["day"], day_key(today - Duration::days(29)), "{today}: the oldest row");
+            assert_eq!(rows[29]["day"], day_key(today), "{today}: today is the newest row");
+            assert_eq!(rows[29]["final"], false, "{today}: today is not final");
+            assert_eq!(rows[28]["final"], true, "{today}: yesterday is");
+            assert_eq!(rows[29]["priBytes"], 150);
+            assert_eq!(v["window"]["to"], day_key(today));
+            assert_eq!(v["totals"]["priBytes"], 30 * 150);
+            assert_eq!(v["cards"]["yesterday"]["day"], day_key(today - Duration::days(1)));
+            assert_eq!(v["cards"]["yesterday"]["value"], 150);
+            assert_eq!(v["cards"]["average"]["daysWithData"], 7);
+            assert_eq!(v["cards"]["monthSoFar"]["month"], month_key(today));
+            assert_eq!(v["cards"]["monthSoFar"]["value"], month_so_far, "{today}: this month so far");
+            assert_eq!(v["sources"], json!(["acme", "beta"]));
+            assert_eq!(one["days"].as_array().unwrap().len(), 30, "{today}: a source's rows too");
+            assert_eq!(one["totals"]["priBytes"], 30 * 50);
+            let first = NaiveDate::parse_from_str(&format!("{}-01", month_key(today)), "%Y-%m-%d").unwrap();
+            assert_eq!(v1["days"].as_array().unwrap().len() as i64, ((today - first).num_days() + 1).min(30),
+                "{today}: keepMonths 1 keeps the current month, today included");
+        }
     }
 
     #[test]
