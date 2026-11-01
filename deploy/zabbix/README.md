@@ -314,7 +314,7 @@ Later, on the same host:
 sudo bash zabbix-modules-install.sh --upgrade                 # all modules to the latest release, with a table
 sudo bash zabbix-modules-install.sh --remove=ep_overview      # out of Zabbix, kept in the backup folder
 sudo bash zabbix-modules-install.sh --delete=ep_overview,ep_tophosts   # gone for good (asks; --yes skips the question)
-sudo bash zabbix-modules-install.sh --remove                  # all seven that are installed
+sudo bash zabbix-modules-install.sh --remove                  # all eight that are installed
 ```
 
 If running the script prints `syntax error near unexpected token newline`, or the file starts
@@ -350,19 +350,19 @@ place instead, since a folder renamed under a running container vanishes from it
 | `--delete[=id,id,…]` | remove them permanently: no backup, `config.php` deleted with the folder, and with `--zabbix-url`/`--token-file` they are disabled and then unregistered (`module.delete`). Asks you to type `delete` on a terminal; without one it needs `--yes` |
 
 The ids are `elasticpro`, `ep_clients`, `ep_capacity`, `ep_resources`, `ep_volume`,
-`ep_tophosts` and `ep_overview`; anything else is refused before any change.
+`ep_tophosts`, `ep_overview` and `ep_play`; anything else is refused before any change.
 
 Secrets go to `curl` in config files, never on a command line, and are never printed.
 
 The archive is built by `tools/zabbix-modules-tarball.sh` (GNU tar; sorted, owner 0, fixed
 mtime, `gzip -n`), which the release job in `.github/workflows/build.yml` runs on every
-`v*` tag; the same sources give the same bytes. It holds all seven module folders without
-tests, tool scripts, READMEs or any `config.php`. All seven come from the modules project,
+`v*` tag; the same sources give the same bytes. It holds all eight module folders without
+tests, tool scripts, READMEs or any `config.php`. All eight come from the modules project,
 [integration-zabbix-elasticpro](https://github.com/karthick-dkk/integration-zabbix-elasticpro),
 at the commit pinned in [`MODULES_REF`](MODULES_REF) (the release job checks that commit
 out and passes it as `--modules-src`; moving it is a pull request here) — the `elasticpro`
 menu module too, which is that project's `embed-module`. There is one copy of each module, so
-the seven manifests, and the `BUILD` in each, carry one version, and **ElasticPro → Settings**
+the eight manifests, and the `BUILD` in each, carry one version, and **ElasticPro → Settings**
 shows one "Zabbix modules X.Y.Z · build …" line, never "mixed". Building
 it yourself: clone the modules project at that commit and run
 `tools/zabbix-modules-tarball.sh --modules-src <that checkout>`; without `--modules-src` the
@@ -372,7 +372,7 @@ tool stops and says so, rather than falling back to an older copy. `install-modu
 (`--modules-src`, required) and keeps a `config.php` already in its folder.
 
 **Modules versioning.** The Zabbix modules have one version of their own (`x.y.z`, shared by all
-seven; the modules project's `CHANGELOG.md` and `v<version>` tags), separate from ElasticPro's.
+eight; the modules project's `CHANGELOG.md` and `v<version>` tags), separate from ElasticPro's.
 [`MODULES_REF`](MODULES_REF) pins both: the commit, and a `# modules X.Y.Z` comment line naming the
 version that commit carries. They move together, in one pull request, and only to a commit the
 modules project has released and tagged; `tools/check-modules-pin.sh` (run by `build.yml` on the

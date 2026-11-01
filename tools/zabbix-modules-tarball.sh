@@ -72,7 +72,7 @@ Z=$(cd "$MODULES_SRC" && pwd)
 # Zabbix module id (the folder name in Zabbix's modules/) <- where it comes from.
 # deploy/zabbix/zabbix-modules-install.sh keeps the same seven ids (KNOWN_IDS).
 # All seven come from the modules project, the ElasticPro menu module (elasticpro) too: this
-# repository keeps no copy of any of them, so the seven manifests, and the BUILD written into
+# repository keeps no copy of any of them, so the eight manifests, and the BUILD written into
 # each, always name one modules version.
 MODULES=(
   "elasticpro:$Z/embed-module"
@@ -82,6 +82,7 @@ MODULES=(
   "ep_volume:$Z/volume-widget"
   "ep_tophosts:$Z/tophosts-widget"
   "ep_overview:$Z/overview-widget"
+  "ep_play:$Z/play-widget"
 )
 
 case "$(tar --version 2>/dev/null || true)" in *'GNU tar'*) ;; *) fail "GNU tar is needed for a reproducible archive (macOS: brew install gnu-tar, then put gtar first on PATH as tar)" ;; esac

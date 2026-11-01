@@ -166,7 +166,7 @@ ElasticPro's, and a release ships the modules commit pinned in `deploy/zabbix/MO
 with the version it carries (`# modules X.Y.Z`); see "Modules versioning" in
 `deploy/zabbix/README.md`. The release archive's installer, `zabbix-modules-install.sh`, prints
 which modules version and build it installs; **ElasticPro → Settings** in Zabbix shows what is
-installed. This section's `install-modules.sh` copies all seven from the modules project
+installed. This section's `install-modules.sh` copies all eight from the modules project
 (`--modules-src`, a checkout at the commit in `MODULES_REF`; this repository keeps no copy of any)
 and writes the same `BUILD` file into each.
 
@@ -186,8 +186,8 @@ ZABBIX_URL=https://zabbix.example.com ZABBIX_TOKEN=<token> deploy/zabbix/install
 
 It:
 
-1. copies the seven modules — `elasticpro`, `ep_clients`, `ep_capacity`, `ep_resources`,
-   `ep_volume`, `ep_tophosts`, `ep_overview` — into Zabbix's modules folder (`/usr/share/zabbix/modules`), without tests and
+1. copies the eight modules — `elasticpro`, `ep_clients`, `ep_capacity`, `ep_resources`,
+   `ep_volume`, `ep_tophosts`, `ep_overview`, `ep_play` — into Zabbix's modules folder (`/usr/share/zabbix/modules`), without tests and
    tool scripts. What was there first goes to `/var/backups/elasticpro-zabbix/<date>/`. Each
    module's folder is refilled, never replaced, so Docker's bind mounts keep working, and a
    `config.php` in it is kept;
@@ -197,7 +197,7 @@ It:
 3. with `ZABBIX_URL` and `ZABBIX_TOKEN` (or `ZABBIX_USER` + `ZABBIX_PASSWORD`): registers and
    enables the modules and creates the host groups and report dashboards
    (`master/import.py` in the modules project). Without them: **Administration → General → Modules
-   → Scan directory**, then enable the seven.
+   → Scan directory**, then enable the eight.
 
 Options: `--modules-src` (required), `--modules-dir`, `--data-dir` (then set `EP_DATA_DIR` for PHP), `--web-user`,
 `--backup-dir`, `--insecure` (self-signed `ZABBIX_URL`), `--dry-run`.
