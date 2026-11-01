@@ -21,11 +21,11 @@ const P = await import(url('ui/js/core/play-config.js'));
 const A = await import(url('ui/js/play/api.js'));
 
 /** One cluster's inputs: rank, fullest disk %, worst delay (min), yesterday's bytes, open alerts. */
-const mk = (rows) => {
+const mk = (rows) => {  // delay = the tile's median
   const clusters = rows.map((r) => ({ id: r.id, name: r.name || r.id }));
   const ctx = {
     st: new Map(rows.map((r) => [r.id, { rank: r.rank ?? 0, fullest: r.disk === undefined ? null : { pct: r.disk } }])),
-    delay: new Map(rows.filter((r) => r.delay !== undefined).map((r) => [r.id, { summary: { worst: r.delay === null ? null : { delayMinutes: r.delay } } }])),
+    delay: new Map(rows.filter((r) => r.delay !== undefined).map((r) => [r.id, { summary: { median: r.delay, worst: { delayMinutes: 9999 } } }])),
     volume: new Map(rows.filter((r) => r.vol !== undefined).map((r) => [r.id, { reply: r.vol === null ? null : { cards: { yesterday: { bytes: r.vol } } } }])),
     openBy: new Map(rows.map((r) => [r.id, Array.from({ length: r.alerts || 0 }, () => ({ level: 'warning' }))])),
   };
@@ -70,5 +70,15 @@ test('the default is critical, log delay, volume; anything unusable falls back t
   assert.deepEqual(A.readPlayState({ settings: { display: { fleetOrder: ['alerts', 'name'] } } }).display.fleetOrder, ['alerts', 'name']);
   const rows = [{ id: 'a', rank: 1 }, { id: 'b', rank: 9 }];
   assert.deepEqual(ids(rows, undefined), ['b', 'a'], 'a person without a display link');
-  assert.equal(F.orderText(['critical', 'logDelay']), 'Critical problems › Log delay');
+  assert.equal(F.orderText(['critical', 'logDelay', 'volume']), 'critical › delay › volume');
+  assert.equal(F.orderTitle(['critical', 'logDelay']), 'Critical problems › Log delay');
+});
+
+test('the log delay key sorts by the figure the tile prints, not the worst device', () => {
+  const rows = [{ id: 'a', delay: 5 }, { id: 'b', delay: 50 }, { id: 'c', delay: 20 }];
+  const { clusters, ctx } = mk(rows);
+  const printed = (c) => F.tileDelayMinutes(ctx, c);
+  assert.deepEqual(F.orderFleet(ctx, clusters, ['logDelay']).map((c) => printed(c)), [50, 20, 5]);
+  for (const c of clusters) assert.equal(F.fleetFigure(ctx, c, 'logDelay'), printed(c));
+  assert.equal(F.tileDelayMinutes({ delay: new Map() }, { id: 'x' }), null);
 });

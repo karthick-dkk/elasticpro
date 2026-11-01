@@ -178,7 +178,7 @@ is what the fleet poller already fetches.
   | Key | Figure (one definition, reused) |
   |---|---|
   | `critical` | The status rank of `play/status.js` (health, node left, critical and other open alerts, disk past high watermark) |
-  | `logDelay` | The cluster's worst device delay in minutes: the Log delay slide's "Worst device", per cluster |
+  | `logDelay` | The delay shown on the tile (the median of the cluster's measured devices): `tileDelayMinutes`, called by the tile and the sort |
   | `volume` | Volume used yesterday: the Volume slide's "Yesterday" for the cluster |
   | `disk` | The fullest disk %: `status.fullest`, the tile's disk figure |
   | `alerts` | The open alert count on the tile |
@@ -186,7 +186,7 @@ is what the fleet poller already fetches.
 
   **Unknown last**: a cluster with no figure for a key (log delay not measured, no volume
   record, disk not read) goes after every cluster that has one for that key, never as 0; a
-  measured 0 beats not measured. The slide header shows the order as a chip.
+  measured 0 beats not measured. The slide header shows the order as a chip (short labels, full wording in its title).
 - `PLAY_CONFIG_GET` (User: reads; Admin sees links) / `PLAY_CONFIG_SET` (Admin). Exclude needs
   a non-empty reason. config.txt keys lock fields ("managed by config.txt"):
   `UI_PLAY_ENABLED`, `UI_PLAY_DELAY_YELLOW_MIN`, `UI_PLAY_DELAY_RED_MIN`,
