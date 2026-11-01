@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/elasticpro-core", "src-tauri"]
+members = ["crates/elasticpro-core"]
 resolver = "2"
 
 [workspace.package]

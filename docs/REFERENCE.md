@@ -1,6 +1,6 @@
 # ElasticPro
 
-**Multi-cluster Elasticsearch dashboard for Windows — reaches clusters behind an SSH jump host, decides certificate trust itself, and never writes to a cluster.**
+**Multi-cluster Elasticsearch dashboard (hosted Docker; the Windows desktop build is deprecated) — reaches clusters behind an SSH jump host, decides certificate trust itself, and never writes to a cluster.**
 
 [![build](https://github.com/karthick-dkk/elasticpro/actions/workflows/build.yml/badge.svg)](https://github.com/karthick-dkk/elasticpro/actions/workflows/build.yml)
 [![ci](https://github.com/karthick-dkk/elasticpro/actions/workflows/ci.yml/badge.svg)](https://github.com/karthick-dkk/elasticpro/actions/workflows/ci.yml)
@@ -12,7 +12,7 @@
 ![Linux](https://img.shields.io/badge/Linux-x64-FCC624?logo=linux&logoColor=black)
 ![License: MIT](https://img.shields.io/badge/license-MIT-green)
 
-A portable desktop app (Tauri 2 + a small Rust core, vanilla-JS UI, no Node.js) that shows
+A hosted web app (a small Rust core, vanilla-JS UI, no Node.js; the Tauri desktop shell is deprecated since 0.3.52) that shows
 the health, disk, repositories, ILM/SLM state, last snapshot and daily indices of many
 Elasticsearch clusters on one screen — including clusters that are only reachable through a
 jump host. Read-only towards Elasticsearch by design.
@@ -52,33 +52,16 @@ Browser tools cannot do three things an operator behind a jump host needs:
   validated before it is trusted and one containing a credential is refused. Whatever collects it is not
   part of this repository; the schema the app accepts is in `ui/js/core/snapshot.js`
 
-## Quick start (Windows, portable)
+## Quick start
 
-1. Download `ElasticPro-0.1.0-portable-win64.zip` from [Releases](../../releases) and unzip it anywhere
-   (e.g. `C:\Tools\ElasticPro\`). The zip is the whole app: `elasticpro-0.1.0.exe`, the
-   `WebView2Loader.dll` it needs beside it, the `portable` marker, an empty `data\`, an example config
-   and `SHA256SUMS.txt` over the pair. Keep the folder together — no file in it is optional.
-   No binary is committed to this repository; every build is a release asset.
-2. **Windows Server 2016 only:** the app needs the Microsoft WebView2 runtime, which Server 2016 does not ship. No install is required — unpack Microsoft's *Fixed Version Runtime* into the `WebView2Runtime\` folder next to the exe (see [docs/HANDBOOK.md → Portable mode](docs/HANDBOOK.md#portable-mode-no-install-at-all)). Windows 10/11 and Server 2019+ already have it.
-3. Run `elasticpro-0.1.0.exe`. The binaries are not code-signed: on first run SmartScreen may ask — *More info → Run anyway*.
-4. **+ Create new config**, add your first cluster, and (for on-prem clusters) a jump host with your SSH key. Confirm the jump host's key fingerprint once, trust each self-signed certificate once.
+Hosted (the maintained build): see the README, "One-click installation" —
+`install.sh --hosted --yes` brings up the Docker stack. Zabbix modules: attached to every release.
 
-Everything the app stores stays in `data\` next to the exe (`portable` marker file): `config_cluster.json`, `pins.json` (fingerprints only), the WebView profile.
-
-### Other platforms
-
-The macOS and Linux desktop packages are release assets too — see [Downloads](#downloads) for which
-one to take. On Linux the installer script picks it for you:
-
-```bash
-curl -fsSL https://github.com/karthick-dkk/elasticpro/releases/latest/download/install.sh | bash
-curl -fsSL https://github.com/karthick-dkk/elasticpro/releases/latest/download/install.sh | bash -s -- --portable
-```
-
-The `-s --` matters: `curl … | bash --portable` passes the flag to bash, which rejects it. The script
-refuses to install something that cannot run — the desktop app is a windowed x86_64 application, so on
-an arm64 box or a machine with no display it stops and points at `--hosted` instead of leaving a
-package behind that will never open.
+> **Deprecated: desktop builds.** The portable Windows zip, installers, `.dmg`, `.AppImage`, `.deb`
+> and `.rpm` ended with [0.3.51](https://github.com/karthick-dkk/elasticpro/releases/tag/v0.3.51). The Windows quick start, the other-platform
+> installer modes (`install.sh --portable`, which now exits with a deprecation message) and the
+> WebView2 notes were removed from this page; the 0.3.51 tag carries the old text. The `src-tauri/`
+> folder stays in the tree but is not built.
 
 ## Configuration
 
@@ -123,29 +106,9 @@ Command line: `elasticpro-<version>.exe --config C:\path\config_cluster.json` (o
 
 No Node.js anywhere: the UI is plain ES modules, the CLI is Rust.
 
-**On Windows** — Rust (MSVC) + Visual Studio Build Tools (C++ workload):
-
-```powershell
-cargo install tauri-cli --version "^2" --locked
-cargo tauri build
-# target\release\elasticpro.exe                          portable
-# target\release\bundle\nsis\ElasticPro_<ver>_x64-setup.exe   per-user installer
-```
-
-**From Linux, without any Microsoft toolchain** — this is how the release zips are made:
-
-```bash
-tools/build-windows-cross.sh            # mingw-w64, x86_64-pc-windows-gnu, std from source; idempotent
-# dist/ElasticPro-<ver>-portable-win64.zip
-
-tools/build-windows-cross.sh --install  # …and drop the exe at the repo root for a quick local run
-```
-
-Runs on Linux (apt) and macOS (brew). The exe carries its version in the name
-(`elasticpro-0.1.0.exe`), so which build a machine runs is answerable by looking at it rather
-than by starting it. Built binaries are not tracked here — `/*.exe`, `/WebView2Loader.dll` and
-`/SHA256SUMS.txt` are gitignored, and the packages that people install come from the release
-that CI builds on each platform.
+> **Deprecated: desktop builds.** `cargo tauri build` and `tools/build-windows-cross.sh` ended with
+> 0.3.52 (`src-tauri` is no longer a workspace member and the script exits with a message). The last
+> desktop release is [0.3.51](https://github.com/karthick-dkk/elasticpro/releases/tag/v0.3.51); check that tag out to rebuild it.
 
 **Run the UI in a browser** (development, tests):
 
@@ -158,7 +121,7 @@ npm i jsdom && node tools/render-check.mjs     # render every page against a run
 ```
 
 This works on macOS and Linux as well as Windows — the core, its tests and the whole UI run
-anywhere; only the Tauri shell and the packaging are Windows-specific.
+anywhere.
 
 `lab/README.md` shows how to stand up a mock 80-cluster fleet and a restricted local `sshd`
 to exercise the jump-host path end to end.
@@ -177,9 +140,9 @@ ui/js/core/writes.js the UI's single copy of that unlock, shared by every acting
   crypto.rs          AES-256-GCM + PBKDF2-HMAC-SHA512 for secrets in the config file
   vault.rs           OS credential store (Windows Credential Manager) — opt-in
   bridge.rs          the JSON message API the UI talks to
-src-tauri/           Tauri 2 shell: one `bridge` command, native dialogs, portable-mode setup
+src-tauri/           DEPRECATED Tauri 2 desktop shell (0.3.52): kept in the tree, not built or released
 ui/                  the app UI: vanilla ES modules, no bundler
-tools/               cross-build script, portable README
+tools/               check scripts, installers, release tooling
 docs/                HANDBOOK.md (full operator manual), screenshots
 ```
 
@@ -194,8 +157,7 @@ the session is unlocked.
 
 See [SECURITY.md](SECURITY.md). Short version: read-only towards Elasticsearch, credentials
 never in plain text on disk, TLS and SSH host keys pinned on explicit consent, loopback-only
-listeners, unsigned binaries (verify the `SHA256SUMS.txt` inside the portable zip, or build from
-source).
+listeners, verify the release archive against `SHA256SUMS.txt`.
 
 ## Volume report
 
@@ -337,45 +299,18 @@ record that answers "who deleted that index".
 
 ## Downloads
 
-Every [release](../../releases) carries a package per platform, built by CI on that platform.
+Every [release](../../releases) carries the Zabbix modules archive (`elasticpro-zabbix-modules-<ver>.tar.gz`,
+its `.sha256`, `zabbix-modules-install.sh`), `install.sh` and `SHA256SUMS.txt`. The Docker images are on Docker Hub as
+`karthickdk02/elasticpro-core`, `-nginx`, `-redis` and `-postgres`, tagged with the release.
 
-| Platform | Package | Notes |
-|---|---|---|
-| **Windows** x64 | `ElasticPro-<ver>-portable-win64.zip` | **Recommended.** One folder, no installer, no admin rights. Unzip and run. |
-| **Windows** x64 | `ElasticPro_<ver>_x64-setup.exe` | NSIS installer, per-user; embeds the WebView2 bootstrapper. |
-| **macOS** Apple Silicon | `ElasticPro_<ver>_aarch64.dmg` | macOS 10.15+. Unsigned — see below. |
-| **macOS** Intel | `ElasticPro_<ver>_x64.dmg` | macOS 10.15+. Unsigned — see below. |
-| **Linux** x64 | `elasticpro_<ver>_amd64.AppImage` | Self-contained; `chmod +x` and run. |
-| **Linux** x64 | `elasticpro_<ver>_amd64.deb` | Debian/Ubuntu. Needs `libwebkit2gtk-4.1-0`, `libgtk-3-0`. |
-| **Linux** x64 | `elasticpro-<ver>-1.x86_64.rpm` | Fedora/RHEL. |
+### Deprecated: desktop packages
 
-No binary is committed to this repository. A build is a release asset, which means rolling a machine
-back is a matter of taking the package from an older release's page rather than hoping the right file
-is still in the tree. A binary tracked beside its own source drifts behind it, and then ships to
-whoever clones the repository.
-
-**None of the binaries are code-signed.** Windows SmartScreen: *More info → Run anyway*.
-macOS Gatekeeper refuses an unsigned, un-notarised app outright — right-click → *Open*, or
-`xattr -dr com.apple.quarantine "/Applications/ElasticPro.app"`. Verify checksums or build
-from source if that matters to you.
-
-### What differs by platform
-
-The Rust core, the read-only guard, the TLS and SSH host-key pinning and the whole UI are the
-same everywhere. Three things are not:
-
-| | Windows | macOS | Linux |
-|---|---|---|---|
-| Web view | WebView2 (Edge) | WKWebView | WebKitGTK |
-| Portable mode (`portable` marker, `data\` beside the exe) | yes | no — use the app bundle | no — use the AppImage |
-| Optional OS credential store | Credential Manager | Keychain | kernel keyring — **login session only** |
-
-Windows is the platform the app is deployed and documented for; macOS and Linux builds exist
-so the app can be run and developed anywhere, and are less exercised in the field.
+The desktop packages (portable Windows zip, NSIS installer, `.dmg`, `.AppImage`, `.deb`, `.rpm`) ended
+with [0.3.51](https://github.com/karthick-dkk/elasticpro/releases/tag/v0.3.51). They are not built or released any more; 0.3.51 stays on the releases page.
 
 ## Documentation
 
-- [docs/HANDBOOK.md](docs/HANDBOOK.md) — full operator manual: portable mode, configuration reference, build routes, deployment, what was verified
+- [docs/HANDBOOK.md](docs/HANDBOOK.md) — operator manual (its desktop and Windows sections are deprecated since 0.3.52): configuration reference, deployment, what was verified
 - [lab/README.md](lab/README.md) — local test bench (mock fleet + restricted sshd)
 - [CHANGELOG.md](CHANGELOG.md)
 

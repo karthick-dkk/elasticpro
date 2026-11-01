@@ -1,4 +1,9 @@
 #!/usr/bin/env bash
+# DEPRECATED as of 0.3.52: the Windows desktop build ended with 0.3.51 and src-tauri is no
+# longer a workspace member. This script now only says so. Check out v0.3.51 to rebuild it.
+echo "tools/build-windows-cross.sh is deprecated: desktop builds ended with 0.3.51 (src-tauri is no longer built). Use the hosted Docker build, or check out the v0.3.51 tag." >&2
+exit 1
+#
 # Cross-compile the Windows portable build without any Microsoft toolchain:
 # target x86_64-pc-windows-gnu, linker mingw-w64, std built from source (-Zbuild-std)
 # so no rust-std download is needed and a plain distro/brew rustc is enough.

@@ -31,8 +31,9 @@ not file public issues for vulnerabilities.
 - Writes: `pins.json` (fingerprints), `config_cluster.json`, the WebView profile. The write
   unlock is never among them.
 
-**Not covered.** The Windows binaries are not code-signed. Verify `SHA256SUMS.txt` from the
-release, or build from source.
+**Not covered.** The desktop builds ended with 0.3.51 and their Windows binaries were never
+code-signed. Releases from 0.3.52 carry the Docker images and the Zabbix modules archive; verify
+the archive against `SHA256SUMS.txt` from the release.
 
 **Known advisories in dependencies.** CI runs `cargo audit` on every push. One advisory is
 currently accepted rather than fixed, because there is no fixed version to move to:
