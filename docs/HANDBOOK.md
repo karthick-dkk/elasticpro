@@ -735,13 +735,19 @@ the session into the same HttpOnly / Secure / SameSite=Strict cookie a sign-in g
 out of the reply). That session's caller is `display:<name>`, role user, **`play_only`**: it may
 send only `PLAY_READS` (`auth.rs`) — FLEET_STATE, CLUSTER_DATASET, EVENTS_TICKET, REFRESH,
 VOLUME_DAILY / MONTHLY / MONTHLY_ALL, SILENCE_LIST, ACK_LIST, PLAY_STATE, PLAY_ZOOM_SET,
-PLAY_SHARE_GET / PUT (`delay` only), PING, CONFIG_VIEW, ZABBIX_CLUSTERS, WHOAMI, LOGOUT, the
-shell's startup no-ops, and `ES` only as a read `_search` / `_field_caps` without `scroll` (the
-log-delay measurement). Anything else: `{ok: false, kind: "forbidden", playOnly: true, message:
+PLAY_SHARE_GET / PUT (`delay` only), PING, CONFIG_VIEW, ZABBIX_CLUSTERS, CLUSTER_META_GET (type and ULM), WHOAMI, LOGOUT, the
+shell's startup no-ops, and `ES` only as the log-delay measurement itself (`auth::play_es_shape`):
+the cluster's own `logIndexPattern` (a cluster with none: one plain pattern, no comma, nothing
+starting with `.`), no query parameter but `ignore_unavailable`, `allow_no_indices` and (for
+`_field_caps`) `fields`, `_field_caps` as a GET without a body, and `_search` with exactly the body
+`buildSearchBody` makes (`size: 0`, one time range, a terms aggregation of at most 500 devices with
+one newest document each). Anything else: `{ok: false, kind: "forbidden", playOnly: true, message:
 "a display link only shows Play…"}`. It never writes (`allowWrites` is dropped before
 `Writes::decide`). The caller is rebuilt from the link at every request, so revoking it, its
 expiry, or switching links off ends every TV on it at once; `allowFrom` is checked on every
 request against the address `source_of` decides (X-Real-IP only from `ELASTICPRO_TRUSTED_PROXIES`).
+A link keeps its five newest sessions (a TV that reloads makes a new one); a display-link session
+unused for a day is ended by housekeeping, like a Zabbix frame's.
 
 | Message | Role | Answer |
 |---|---|---|

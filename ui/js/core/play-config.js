@@ -19,11 +19,22 @@ async function send(msg) {
   return res || { ok: false, message: 'the core did not answer' };
 }
 
-/** `{watch, exclude:[{clusterId, reason, by, at}], defaultDisplay, managed:[UI_PLAY_*], groups?:[name]}` */
+/**
+ * `{watch, exclude:[{clusterId, reason, by, at, managed?}], defaultDisplay, managed:[UI_PLAY_*],
+ * managedFields:{"watch.x": UI_PLAY_*}, linksEnabled, options}`; an admin also gets
+ * `displays`, `links` and `groups`.
+ */
 export const playConfigGet = () => send({ type: 'PLAY_CONFIG_GET' });
-/** `watch` (managed fields already left out) and/or `exclude: {add:{clusterId, reason}} | {remove: clusterId}` */
-export const playConfigSet = (part) => send({ type: 'PLAY_CONFIG_SET', ...part });
-/** `{links:[{id, name, clusters, allowFrom, expires, createdAt, lastSeen:{at, from}, settings, url?}]}` */
+/**
+ * One change, wrapped as the core takes it (`{settings: …}`): `{watch}` (managed fields already
+ * left out), `{exclude: {add:{clusterId, reason}} | {remove: clusterId}}`, `{defaultDisplay}` or
+ * `{displays: {<linkId>: …}}`. Answers as PLAY_CONFIG_GET.
+ */
+export const playConfigSet = (part) => send({ type: 'PLAY_CONFIG_SET', settings: part });
+/**
+ * `{enabled, links:[{id, name, clusters, allowFrom, expires: "permanent"|{at}, expiresAt, expired,
+ * createdAt, createdBy, lastSeen:{at, from}|null, sessions, settings}]}`: never a secret or a URL.
+ */
 export const playLinkList = () => send({ type: 'PLAY_LINK_LIST' });
 /** `{link:{id, name, url, …}, secret}`: the secret is shown once. */
 export const playLinkCreate = (payload) => send({ type: 'PLAY_LINK_CREATE', ...payload });
@@ -60,18 +71,14 @@ export const WATCH_DEFAULTS = {
   spotlight: { when: SPOTLIGHT_WHEN.filter((w) => w.on).map((w) => w.id), perClusterSec: 13, leaveAfterMin: 10, whenEmpty: 'skip' },
 };
 
-/** Which config.txt key locks which field (docs/PLAY.md). whenEmpty has none. */
-export const MANAGED_KEY = {
-  delayYellowFromMin: 'UI_PLAY_DELAY_YELLOW_MIN', delayRedAboveMin: 'UI_PLAY_DELAY_RED_MIN',
-  nodeExpected: 'UI_PLAY_NODE_EXPECTED', nodeBlink: 'UI_PLAY_NODE_BLINK', nodeCheckSec: 'UI_PLAY_NODE_CHECK_SECONDS',
-  'spotlight.when': 'UI_PLAY_SPOTLIGHT_WHEN', 'spotlight.perClusterSec': 'UI_PLAY_SPOTLIGHT_SECONDS',
-  'spotlight.leaveAfterMin': 'UI_PLAY_SPOTLIGHT_LEAVE_MIN', exclude: 'UI_PLAY_EXCLUDE',
-};
-
-/** The set of field paths PLAY_CONFIG_GET says config.txt manages. */
+/**
+ * The set of watch-field paths config.txt manages ("delayRedAboveMin", "spotlight.when", …),
+ * from PLAY_CONFIG_GET's `managedFields` — `{"watch.delayRedAboveMin": "UI_PLAY_DELAY_RED_MIN"}`,
+ * the core's own map of field to key, so the page never keeps a second copy of it.
+ */
 export function lockedFields(reply) {
-  const keys = new Set(((reply && reply.managed) || []).map(String));
-  return new Set(Object.keys(MANAGED_KEY).filter((p) => keys.has(MANAGED_KEY[p])));
+  const f = reply && reply.managedFields && typeof reply.managedFields === 'object' ? reply.managedFields : {};
+  return new Set(Object.keys(f).filter((p) => p.startsWith('watch.')).map((p) => p.slice('watch.'.length)));
 }
 
 /* ------------------------------ display links ------------------------------- */
@@ -150,6 +157,23 @@ export function displaySettings(raw) {
     sound: r.sound === 'chime' ? 'chime' : 'off',
     zoom: ZOOMS.some(([z]) => z === r.zoom) ? r.zoom : null,
   };
+}
+
+/**
+ * PLAY_LINK_CREATE for a link made again with a new secret (PLAY_LINK_LIST never hands one
+ * back): the same name, clusters, addresses, display settings, and the expiry it has left —
+ * permanent stays permanent, a dated one keeps its date to the day (at least one day).
+ */
+export function replacePayload(link, now = Date.now()) {
+  const l = link || {};
+  const at = l.expiresAt || (l.expires && typeof l.expires === 'object' ? l.expires.at : null);
+  const out = {
+    name: l.name, clusters: l.clusters || 'all',
+    expires: at ? Math.min(3650, Math.max(1, Math.ceil((Number(at) - now) / 86400000))) : 'permanent',
+    settings: settingsPayload(l.settings),
+  };
+  if (Array.isArray(l.allowFrom) && l.allowFrom.length) out.allowFrom = [...l.allowFrom];
+  return out;
 }
 
 /** Move slide `i` by `dir` (-1 up, +1 down); a copy, unchanged at the ends. */

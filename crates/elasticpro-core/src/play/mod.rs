@@ -135,6 +135,10 @@ pub struct Play {
     pub(crate) share: share::Share,
     pub(crate) acks: acks::Acks,
     open_since: OpenSince,
+    /// Held across every read-modify-write of `play.json` (PLAY_CONFIG_SET, a display's
+    /// settings, a TV's zoom, a forgotten node, a revoked link), so one never writes back
+    /// a copy read before another's change and loses it.
+    pub(crate) edit: parking_lot::Mutex<()>,
 }
 
 impl Play {
@@ -150,6 +154,7 @@ impl Play {
             share: share::Share::open(data_dir.map(|d| d.join("play").join(share::DIR))),
             acks: acks::Acks::open(at(acks::FILE)),
             open_since: OpenSince::open(data_dir.map(|d| d.join("play").join("open-since.json"))),
+            edit: Default::default(),
         }
     }
 
@@ -308,6 +313,17 @@ impl Core {
         }
     }
 
+    /// The watch rules as this caller may read them: the pinned node lists only of the
+    /// clusters it sees (a node name says what a cluster is made of).
+    fn watch_for(&self, w: &settings::Watch, caller: Option<&Caller>) -> settings::Watch {
+        let mut w = w.clone();
+        if !w.pinned.is_empty() {
+            let visible = self.fleet_visible(caller);
+            w.pinned.retain(|id, _| visible.contains(id));
+        }
+        w
+    }
+
     /// Whether this caller sees the cluster with this id (it must exist).
     fn play_sees(&self, caller: Option<&Caller>, id: &str) -> bool {
         self.spec_for(id).is_some_and(|s| caller.is_none_or(|c| c.sees_cluster(&s.id, &s.zabbix_groups)))
@@ -364,6 +380,7 @@ impl Core {
         match self.play.links.revoke(id) {
             Ok(Some(link)) => {
                 let ended = self.sessions.end_display(&link.id);
+                let _one = self.play.edit.lock();
                 let mut st = self.play.settings.read().clone();
                 let had_zoom = st.tv_zoom.remove(&link.id).is_some();
                 if st.displays.remove(&link.id).is_some() || had_zoom {
@@ -380,6 +397,7 @@ impl Core {
 
     /// A display's settings, merged over what it has (or the default display's).
     fn play_put_display(&self, link: &str, patch: &Value) -> Result<settings::Display, String> {
+        let _one = self.play.edit.lock();
         let mut st = self.play.settings.read().clone();
         let mut v = serde_json::to_value(st.display_for(Some(link))).map_err(|e| e.to_string())?;
         settings::merge(&mut v, patch);
@@ -425,7 +443,7 @@ impl Core {
         let managed = crate::settings::get();
         let mut out = json!({
             "ok": true,
-            "watch": eff.watch,
+            "watch": self.watch_for(&eff.watch, caller),
             "exclude": eff.exclude.iter().filter(|e| caller.is_none_or(|c| !c.limited()) || self.play_sees(caller, &e.cluster_id))
                 .collect::<Vec<_>>(),
             "defaultDisplay": eff.default_display,
@@ -458,6 +476,7 @@ impl Core {
             }
         }
         let by = who(caller);
+        let one = self.play.edit.lock();
         let current = self.play.settings.read().clone();
         let next = match settings::apply_change(&current, patch, crate::settings::get(), &by, now_ms()) {
             Ok(n) => n,
@@ -467,6 +486,7 @@ impl Core {
         if let Err(e) = self.play.save_settings(&next) {
             return json!({ "ok": false, "kind": "io", "message": format!("the Play settings could not be saved: {e}") });
         }
+        drop(one);
         let added: Vec<&settings::Exclude> = next.exclude.iter()
             .filter(|e| !current.exclude.iter().any(|o| o.cluster_id == e.cluster_id && o.reason == e.reason)).collect();
         let removed: Vec<&settings::Exclude> = current.exclude.iter().filter(|e| !next.exclude.iter().any(|n| n.cluster_id == e.cluster_id)).collect();
@@ -492,6 +512,7 @@ impl Core {
         }
         let known = self.play.nodes.forget(id, node, now_ms());
         // Pinned, it would be expected again at once.
+        let one = self.play.edit.lock();
         let mut st = self.play.settings.read().clone();
         let mut unpinned = false;
         if let Some(list) = st.watch.pinned.get_mut(id) {
@@ -502,6 +523,7 @@ impl Core {
         if unpinned {
             let _ = self.play.save_settings(&st);
         }
+        drop(one);
         if !known && !unpinned {
             return json!({ "ok": false, "kind": "not_found", "message": format!("{node:?} is not a node Play knows on {id:?}") });
         }
@@ -525,6 +547,7 @@ impl Core {
         if let Err(e) = settings::check_zoom("zoom", z) {
             return bad(e);
         }
+        let _one = self.play.edit.lock();
         let mut st = self.play.settings.read().clone();
         if st.tv_zoom.get(&link).is_none_or(|old| (old - z).abs() > 1e-9) {
             st.tv_zoom.insert(link.clone(), z);
@@ -570,7 +593,7 @@ impl Core {
         let open_since = self.play.open_since.update(&display_key, open.as_deref(), now);
         json!({
             "ok": true,
-            "settings": { "watch": eff.watch, "display": eff.display_for(link.as_deref()) },
+            "settings": { "watch": self.watch_for(&eff.watch, caller), "display": eff.display_for(link.as_deref()) },
             "zoom": eff.zoom_for(link.as_deref()),
             "excluded": excluded.iter().filter(|id| caller.is_none_or(|c| !c.limited()) || visible.contains(id)).collect::<Vec<_>>(),
             "nodes": nodes,

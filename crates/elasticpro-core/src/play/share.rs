@@ -80,8 +80,13 @@ impl Share {
     }
 
     /// Offer a measurement. `Ok(true)`: kept; `Ok(false)`: a newer one is kept already.
-    pub fn put(&self, kind: &str, cluster: &str, measured_at: u64, data: Value, by: &str, now_ms: u64) -> Result<bool, String> {
+    pub fn put(&self, kind: &str, cluster: &str, measured_at: u64, mut data: Value, by: &str, now_ms: u64) -> Result<bool, String> {
         check_kind(kind)?;
+        // When it was measured is the record's own `measuredAt`, checked here; a second one
+        // inside the data would only be a claim a reader might believe instead.
+        if let Some(m) = data.as_object_mut() {
+            m.remove("measuredAt");
+        }
         if cluster.trim().is_empty() {
             return Err("clusterId: the cluster the measurement is of".into());
         }
@@ -189,5 +194,17 @@ mod tests {
             assert_eq!(s.sweep(now + KEEP_MS), 1);
         }
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_time_inside_the_data_is_not_kept() {
+        let s = Share::open(None);
+        let now = 10 * 86_400_000;
+        let data = json!({ "devices": [{ "device": "fw1", "delayMinutes": 3 }], "truncated": 0, "measuredAt": now + 99 });
+        assert!(s.put("delay", "c1", now - 5, data, "tv", now).unwrap());
+        let got = s.get("delay", &["c1".to_string()], now);
+        assert_eq!(got["c1"]["measuredAt"], json!(now - 5));
+        assert!(got["c1"]["data"].get("measuredAt").is_none(), "only the record's own time is kept");
+        assert_eq!(got["c1"]["data"]["devices"][0]["device"], json!("fw1"));
     }
 }

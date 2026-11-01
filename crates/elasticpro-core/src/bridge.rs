@@ -992,6 +992,14 @@ impl Core {
             auth::play_may(t, method, path, msg.get("kind").and_then(|v| v.as_str())).map_err(|why| {
                 json!({ "ok": false, "kind": "forbidden", "role": c.role.as_str(), "playOnly": true, "message": why })
             })?;
+            // And only the log-delay measurement itself: its index pattern, its parameters, its body.
+            if t == "ES" {
+                let id = msg.get("clusterId").and_then(|v| v.as_str()).unwrap_or("");
+                let pattern = self.spec_for(id).and_then(|s| s.log_index_pattern);
+                auth::play_es_shape(pattern.as_deref(), method, path, msg.get("body").and_then(|v| v.as_str())).map_err(|why| {
+                    json!({ "ok": false, "kind": "forbidden", "role": c.role.as_str(), "playOnly": true, "message": why })
+                })?;
+            }
         }
         if auth::required_role(t).is_none() {
             return Ok(());

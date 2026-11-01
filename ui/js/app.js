@@ -117,7 +117,7 @@ const NAV_MORE = new Set(['automation', 'requests', 'accounts', 'settings']);
  * `play_only`. It may show Play and nothing else — the core refuses the rest anyway.
  */
 function isDisplay() {
-  return !!me && (me.scope === 'play_only' || String(me.name || '').startsWith('display:'));
+  return !!me && (me.playOnly === true || me.scope === 'play_only' || String(me.name || '').startsWith('display:'));
 }
 
 /** The tabs this session may actually use. */
@@ -1106,14 +1106,19 @@ async function arriveFromDisplayLink() {
     }
     const why = res && res.unsupported ? 'this ElasticPro server does not have display links (needs 0.3.47)'
       : errorText(res, 'no answer from the server');
-    mount(root, h('div.setup',
-      h('div', { style: { display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '14px' } },
-        h('img', { src: 'icons/icon48.png', width: 34, height: 34, alt: '' }),
-        h('div', h('h2', 'ElasticPro Play'))),
-      h('div.banner.err#display-refused', h('div', h('div.ttl', 'This display link was not accepted'), h('div', why),
-        h('div.muted', { style: { marginTop: '6px' } }, 'Trying again every minute. An ElasticPro administrator manages display links in Config \u203A Play.')))));
+    displayRefused(why, 'Trying again every minute. An ElasticPro administrator manages display links in Config \u203A Play.');
     await new Promise((r) => setTimeout(r, 60000));
   }
+}
+
+/** The TV's screen when its display link is refused, or stops being accepted while it shows Play. */
+function displayRefused(why, next) {
+  mount(root, h('div.setup',
+    h('div', { style: { display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '14px' } },
+      h('img', { src: 'icons/icon48.png', width: 34, height: 34, alt: '' }),
+      h('div', h('h2', 'ElasticPro Play'))),
+    h('div.banner.err#display-refused', h('div', h('div.ttl', 'This display link was not accepted'), h('div', why),
+      h('div.muted', { style: { marginTop: '6px' } }, next)))));
 }
 
 /** Anyone below admin: the server's own cluster list, with the credentials taken out. */
@@ -1199,7 +1204,17 @@ setInterval(async () => {
 // that quietly stopped updating.
 onSessionLost(() => {
   if (!me) return;
+  const wasDisplay = isDisplay();
   me = null;
+  // A TV's link revoked, expired or switched off: the secret is long gone from the address, so a
+  // reload would land on a sign-in form nobody at the wall can fill. Say what happened instead.
+  if (wasDisplay) {
+    state.caller = null;
+    document.documentElement.classList.remove('play');
+    displayRefused('the link was revoked, has expired, or display links were switched off on this server',
+      'Open the new link an ElasticPro administrator gives you (Config \u203A Play).');
+    return;
+  }
   state.caller = null;
   // A reload inside Zabbix would come back without the one-time code — it is spent and
   // gone from the address — and land on this app's login. Zabbix signs them in instead.

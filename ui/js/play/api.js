@@ -1,7 +1,7 @@
 /**
  * Play's messages to the core (docs/PLAY.md): PLAY_STATE, the shared measurement cache
- * (PLAY_SHARE_GET / PLAY_SHARE_PUT), shared acknowledgements (ACK_LIST) and the display-link
- * exchange (PLAY_EXCHANGE).
+ * (PLAY_SHARE_GET / PLAY_SHARE_PUT) and the display-link exchange (PLAY_EXCHANGE).
+ * Acknowledgements are acks.js's (the one definition of what is acknowledged), not read here.
  *
  * An older core does not know these. That is reported as `unsupported` — the same test the
  * volume record uses (core/volume-daily.js isUnsupported) — and Play carries on with what
@@ -32,7 +32,7 @@ export const WATCH_DEFAULTS = Object.freeze({
 /** A display's own settings, defaulted. */
 export const DISPLAY_DEFAULTS = Object.freeze({
   slides: Object.freeze(['fleet', 'alerts', 'spotlight', 'delay', 'backups', 'volume']),
-  dwellSec: 20, criticalTakesScreen: true, spotlightAll: false, theme: 'dark', sound: false, zoom: null,
+  dwellSec: 20, criticalTakesScreen: true, spotlightAll: false, theme: 'dark', sound: 'off', zoom: null,
 });
 /** The six slide ids, as Config › Play names them. */
 export const SLIDE_IDS = Object.freeze(['fleet', 'alerts', 'spotlight', 'delay', 'backups', 'volume']);
@@ -60,7 +60,8 @@ const num = (v, d) => (typeof v === 'number' && isFinite(v) && v > 0 ? v : d);
 /**
  * A PLAY_STATE reply as Play reads it: `{watch, display, excluded:Set, nodes, openSince, now}`.
  * `settings` may carry the watch rules under `watch` or flat, and this display's under
- * `display` (or `defaultDisplay` for a person).
+ * `display` (or `defaultDisplay` for a person). The core's top-level `zoom` is what the display
+ * shows at (the administrator's fixed one, else what its TV last saved, else 1): `lastZoom`.
  */
 export function readPlayState(res) {
   const s = (res && res.settings) || {};
@@ -93,10 +94,10 @@ export function readPlayState(res) {
     criticalTakesScreen: d.criticalTakesScreen !== false,
     spotlightAll: !!d.spotlightAll,
     theme: d.theme || DISPLAY_DEFAULTS.theme,
-    sound: !!d.sound,
+    sound: d.sound === 'chime' || d.sound === true ? 'chime' : 'off',
     // A zoom Config fixed for this display; null means "the one it was last left at".
     zoom: zn(d.zoom),
-    lastZoom: zn(d.lastZoom),
+    lastZoom: zn(res && res.zoom) ?? zn(d.lastZoom),
     zoomFixed: zn(d.zoom) !== null,
   };
   const excluded = new Set((res && Array.isArray(res.excluded) ? res.excluded : [])
@@ -113,7 +114,8 @@ export function readPlayState(res) {
 /** The defaults, as if a core had answered with nothing: what Play runs on against an older core. */
 export const defaultPlayState = () => readPlayState({});
 
-export const playState = () => send({ type: 'PLAY_STATE' });
+/** `open`: the alert keys this display shows open now, so each keeps its first time on the server. */
+export const playState = (open) => send(Array.isArray(open) ? { type: 'PLAY_STATE', open } : { type: 'PLAY_STATE' });
 
 /* ------------------------------ shared measurements ------------------------------ */
 
@@ -145,25 +147,6 @@ export async function shareGet(kind, clusterIds) {
 
 export const sharePut = (kind, clusterId, measuredAt, data) =>
   send({ type: 'PLAY_SHARE_PUT', kind, clusterId, measuredAt, data });
-
-/* ----------------------------- shared acknowledgements ----------------------------- */
-
-/** ACK_LIST as a Map key → {by, at, note}: `acks` as a map or a list of `{key, by, at, note}`. */
-export function readAcks(res) {
-  const out = new Map();
-  if (!res || !res.ok) return out;
-  const src = res.acks ?? res.items ?? res.records ?? null;
-  if (Array.isArray(src)) { for (const a of src) if (a && a.key) out.set(String(a.key), { by: a.by || '', at: a.at || 0, note: a.note || '' }); }
-  else if (src && typeof src === 'object') {
-    for (const [k, a] of Object.entries(src)) out.set(k, { by: (a && a.by) || '', at: (a && a.at) || 0, note: (a && a.note) || '' });
-  }
-  return out;
-}
-
-export async function ackList() {
-  const res = await send({ type: 'ACK_LIST' });
-  return res.ok ? { ok: true, acks: readAcks(res) } : res;
-}
 
 /* --------------------------------- display links --------------------------------- */
 

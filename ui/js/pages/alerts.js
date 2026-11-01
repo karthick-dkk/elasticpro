@@ -3,7 +3,7 @@
 import { h, mount, $, tooltip } from '../lib/dom.js';
 import { nodeCache, objId } from '../lib/keyed.js';
 import { ago, dt, dur, toCsv, download, num } from '../lib/fmt.js';
-import { state, bus, mergedAlerts, invalidateAlerts, clusters, client, fetchOverview, refreshAll, clusterRev, fleetMode, coverage, askFleetDataset, askForPage } from '../core/state.js';
+import { state, bus, mergedAlerts, invalidateAlerts, clusters, client, fetchOverview, refreshAll, clusterRev, fleetMode, coverage, askFleetDataset, askForPage, healthState } from '../core/state.js';
 import { coverageBar } from '../lib/freshness.js';
 import { readAllState, startReadAll } from '../lib/read-all.js';
 import { card, table, empty, act, diagnose, diagnosisPanel, connectionProblem } from './common.js';
@@ -117,7 +117,13 @@ export function render(el) {
   // Acknowledgements live on this machine; load them before the first paint so rows do
   // not flicker from unacknowledged to acknowledged.
   Promise.all([loadAcks(), loadCurrentUser(), loadSilences()])
-    .then(() => { pruneAcks(mergedAlerts().flatMap((m) => [m.key, ...m.keys])); invalidateAlerts(); draw(); })
+    .then(() => {
+      // Hosted, only a fleet that has answered in full may clear a shared record (acks.js).
+      const ids = clusters().map((c) => c.id);
+      const complete = ids.every((id) => !['loading', 'unknown'].includes(healthState(state.data.get(id))));
+      pruneAcks(mergedAlerts().flatMap((m) => [m.key, ...m.keys]), { clusterIds: ids, complete });
+      invalidateAlerts(); draw();
+    })
     .catch(() => {});
   askOnOpen();
   draw();

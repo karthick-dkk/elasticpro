@@ -16,7 +16,7 @@ import { MANAGED_NOTE } from '../core/managed.js';
 import {
   NO_PLAY, SLIDES, DWELL, ZOOMS, EXPIRES, SPOTLIGHT_WHEN, playConfigGet, playConfigSet, playLinkList, playLinkCreate, playLinkRevoke,
   playLinkSet, lockedFields, linkPayload, scopeText, slidesText, displaySettings, moveSlide, settingsPayload, watchRules, watchProblems,
-  watchPayload, excludeAdd,
+  watchPayload, excludeAdd, replacePayload,
 } from '../core/play-config.js';
 
 const pl = { cfg: null, links: null, unknown: false, problem: '', note: null, redraw: () => {} };
@@ -63,7 +63,7 @@ function displaysCard() {
       h('td', slidesText(l.settings)),
       h('td', { title: l.lastSeen && l.lastSeen.at ? dt(ms(l.lastSeen.at)) : '' }, seen),
       h('td.pl-actions',
-        h('button.btn.sm.pl-copy', { onclick: () => copyLink(l) }, 'Copy link'),
+        h('button.btn.sm.pl-replace', { onclick: () => replaceLink(l) }, 'Replace link…'),
         h('button.btn.sm.pl-edit', { onclick: () => editDisplay(l) }, 'Edit'),
         h('button.btn.sm.danger.pl-revoke', { onclick: () => revoke(l) }, 'Revoke')));
   });
@@ -77,9 +77,38 @@ function displaysCard() {
   admin && !pl.unknown ? [h('button#pl-new.btn.sm.primary', { onclick: newLink }, 'New display link…')] : null);
 }
 
-async function copyLink(l) {
-  if (l.url && /display=/.test(l.url)) return copyText(l.url);
-  toast('A link is shown only once, when it is made. Revoke this one and make a new link.', 'warn', 7000);
+/** The new link's address, shown once, in a dialog of its own or the one that made it. */
+function showUrl(body, name, url) {
+  mount(body,
+    h('div', { style: { fontWeight: 620 } }, `Link for ${name}`),
+    h('input#pl-url.mono', { readOnly: true, value: url, style: { width: '100%', boxSizing: 'border-box' },
+      onfocus: (ev) => ev.target.select() }),
+    note('This link will not be shown again. Copy it now and open it on the TV.', 'banner warn'));
+}
+
+/**
+ * A link's secret is shown once, when it is made, and the server keeps only its hash, so an
+ * old link cannot be copied again. Replacing it revokes the old one (the TV on it stops at
+ * once) and makes a new one with the same name, clusters, addresses, expiry and settings.
+ */
+async function replaceLink(l) {
+  const yes = await confirmDialog(`Replace the link for "${l.name}"?`,
+    'The old link stops working at once: the TV on it shows that it was refused until it is given the new one. '
+    + 'The new link keeps this display\'s clusters, addresses, expiry and slides.', { yes: 'replace the link', danger: true });
+  if (!yes) return;
+  const gone = await playLinkRevoke(l.id);
+  if (!gone.ok) { toast(`Not replaced: ${gone.message || 'refused'}`, 'err', 7000); return; }
+  const r = await playLinkCreate(replacePayload(l));
+  reload();
+  if (!r.ok) { toast(`The old link is revoked, but a new one was not made: ${r.message || 'refused'}. Make it with New display link.`, 'err', 9000); return; }
+  const url = (r.link && r.link.url) || '';
+  const body = h('div.pl-form');
+  showUrl(body, l.name, url);
+  modal('New link', `for ${l.name}`, [body], (ctx) => [
+    h('div', { style: { marginLeft: 'auto', display: 'flex', gap: '8px' } },
+      h('button.btn', { onclick: () => ctx.done(null) }, 'Close'),
+      h('button#pl-copy-url.btn.primary', { onclick: () => copyText(url) }, 'Copy link')),
+  ], { width: '520px' });
 }
 
 async function revoke(l) {
@@ -124,11 +153,7 @@ function newLink() {
         const r = await playLinkCreate(f.payload);
         if (!r.ok) return ctx.msg(r.message || 'The server refused the link');
         const url = (r.link && r.link.url) || '';
-        mount(body,
-          h('div', { style: { fontWeight: 620 } }, `Link for ${f.payload.name}`),
-          h('input#pl-url.mono', { readOnly: true, value: url, style: { width: '100%', boxSizing: 'border-box' },
-            onfocus: (ev) => ev.target.select() }),
-          note('This link will not be shown again. Copy it now and open it on the TV.', 'banner warn'));
+        showUrl(body, f.payload.name, url);
         btn.replaceWith(h('button#pl-copy-url.btn.primary', { onclick: () => copyText(url) }, 'Copy link'));
         reload();
         return null;
@@ -143,7 +168,7 @@ function editDisplay(l) {
   const d = displaySettings(l.settings);
   const list = h('div.pl-slides');
   const draw = () => {
-    mount(list, ...slides.map((s, i) => h('div.pl-slide',
+    mount(list, ...slides.map((s, i) => h('div.pl-cfg-slide',
       h('label.pl-check', h('input', { type: 'checkbox', id: `pl-show-${s.id}`, checked: s.show,
         onchange: (e) => { s.show = e.target.checked; } }), SLIDES.find((x) => x.id === s.id).label),
       h('span.muted', 'stays'),
@@ -217,7 +242,7 @@ function watchCard() {
     row('Each cluster shows for', 'spotlight.perClusterSec', lockIt('spotlight.perClusterSec', sel('pl-persec', w.spotlight.perClusterSec,
       [...new Set([13, 10, 20, 30, w.spotlight.perClusterSec])].map((n) => [n, `${n} s${n === 13 ? ' (default)' : ''}`])))),
     row('Leaves the spotlight', 'spotlight.leaveAfterMin', lockIt('spotlight.leaveAfterMin', sel('pl-leave', w.spotlight.leaveAfterMin,
-      [[10, '10 min after its last critical problem clears'], [0, 'At once'], [30, '30 min after']]))),
+      [...new Set([10, 1, 30, w.spotlight.leaveAfterMin])].map((n) => [n, n === 10 ? '10 min after its last critical problem clears' : `${n} min after`])))),
     row('Nobody in it', 'whenEmpty', lockIt('whenEmpty', sel('pl-empty', w.spotlight.whenEmpty,
       [['skip', 'Skip the slide'], ['allHealthy', 'Show "All clusters healthy"'], ['everyCluster', 'Every cluster in turn']]))),
     pl.note ? note(pl.note.text, pl.note.cls) : null);

@@ -44,6 +44,27 @@ export function withPeaks(records, prev, now) {
 }
 
 /**
+ * What PLAY_SHARE_PUT carries for a delay measurement (docs/HANDBOOK.md: a list of device
+ * records or `{devices: [...]}`): `{devices, truncated}`. One definition, read back by fromShare.
+ */
+export function shareData(rec) {
+  return { devices: (rec && Array.isArray(rec.records) ? rec.records : []).slice(0, MAX_RECORDS), truncated: (rec && rec.truncated) || 0 };
+}
+
+/**
+ * A shared record (PLAY_SHARE_GET, one cluster's `{measuredAt, data}`) as a measurement:
+ * `{measuredAt, records, truncated}`. `data` is `{devices}` or the bare list; the record's own
+ * `measuredAt` (the server's) wins over anything inside `data`.
+ */
+export function fromShare(r) {
+  if (!r || !r.data) return null;
+  const d = r.data;
+  const devices = Array.isArray(d) ? d : Array.isArray(d.devices) ? d.devices : null;
+  if (!devices) return null;
+  return { truncated: (!Array.isArray(d) && d.truncated) || 0, records: devices, measuredAt: r.measuredAt };
+}
+
+/**
  * @param o.clusters   () → the clusters on this display (with their config entries)
  * @param o.client     (id) → the EsClient for a cluster
  * @param o.reachable  (id) → whether to try it now
@@ -56,6 +77,7 @@ export function createMeasurer(o) {
   const tried = new Map();           // id → last attempt (ms)
   const busy = new Set();
   let share = null;                  // null: not asked yet; false: this core has no shared cache
+  let putProblem = '';               // the last offer the core refused (kept here only), '' when it took it
   let token = null;
   let running = false;
 
@@ -78,8 +100,8 @@ export function createMeasurer(o) {
     share = true;
     let changed = false;
     for (const c of list) {
-      const r = res.byCluster.get(c.id);
-      if (r && r.data) changed = adopt(c, { measuredAt: r.measuredAt, ...r.data }, 'shared') || changed;
+      const rec = fromShare(res.byCluster.get(c.id));
+      if (rec) changed = adopt(c, rec, 'shared') || changed;
     }
     if (changed) o.onChange();
   }
@@ -105,8 +127,9 @@ export function createMeasurer(o) {
     const rec = { measuredAt: at, records: withPeaks(res.records, prev, at), truncated: res.truncated || 0 };
     adopt(c, rec, 'local');
     if (share !== false) {
-      const put = await sharePut('delay', c.id, at, { records: rec.records, truncated: rec.truncated });
+      const put = await sharePut('delay', c.id, at, shareData(rec));
       if (!put.ok && put.unsupported) share = false;
+      else putProblem = put.ok ? '' : (put.message || put.kind || 'refused');
     }
   }
 
@@ -148,6 +171,8 @@ export function createMeasurer(o) {
     measuring: () => [...busy],
     /** null until asked, then whether this core keeps the shared cache. */
     shared: () => share,
+    /** Why the last measurement was not shared ('' when it was): kept on this screen only. */
+    putProblem: () => putProblem,
     stop() { if (token) token.cancel(); },
   };
 }

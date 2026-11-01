@@ -35,8 +35,10 @@ test('PLAY_STATE: the documented shape is read, and an empty reply is the defaul
     settings: {
       watch: { delayYellowFromMin: 20, delayRedAboveMin: 45, nodeBlink: 'off', spotlight: { when: ['red', 'yellow'], perClusterSec: 10, leaveAfterMin: 5, whenEmpty: 'everyCluster' } },
       display: { slides: [{ id: 'alerts', show: true, dwellSec: 30 }, { id: 'fleet', show: false }, { id: 'delay', show: true }, { id: 'nope' }],
-        criticalTakesScreen: false, spotlightAll: true, zoom: null, lastZoom: 1.25 },
+        criticalTakesScreen: false, spotlightAll: true, zoom: null, sound: 'off' },
     },
+    // The core's PLAY_STATE: `zoom` at the top is what this display shows at (its TV's last − / +).
+    zoom: 1.25,
     excluded: ['c9', { clusterId: 'c8', reason: 'lab' }], nodes: { c1: { expected: ['a', 'b'], present: ['a'], left: [{ node: 'b', since: 1 }] } },
     openSince: { 'c1:disk': 5 } });
   assert.equal(r.watch.delayYellowFromMin, 20);
@@ -55,6 +57,8 @@ test('PLAY_STATE: the documented shape is read, and an empty reply is the defaul
   assert.equal(r.openSince['c1:disk'], 5);
   assert.equal(r.now, 1793000000000);
   assert.equal(A.readPlayState({ settings: { display: { zoom: 1.1 } } }).display.zoomFixed, true);
+  assert.equal(r.display.sound, 'off', 'the core says "off": no chime (a non-empty string is not "on")');
+  assert.equal(A.readPlayState({ settings: { display: { sound: 'chime' } } }).display.sound, 'chime');
 });
 
 test('shared cache and ACK_LIST are read as a list or a map; the newest record per cluster wins', () => {
@@ -65,8 +69,7 @@ test('shared cache and ACK_LIST are read as a list or a map; the newest record p
   const map = A.readShare({ ok: true, byCluster: { c: { measuredAt: 5, data: { bytes: 7 } } } });
   assert.equal(map.get('c').data.bytes, 7);
   assert.equal(A.readShare({ ok: false }).size, 0);
-  assert.equal(A.readAcks({ ok: true, acks: { 'c1:disk': { by: 'ann', at: 3 } } }).get('c1:disk').by, 'ann');
-  assert.equal(A.readAcks({ ok: true, acks: [{ key: 'c1:health', by: 'bo' }] }).get('c1:health').by, 'bo');
+  assert.equal(A.readAcks, undefined, 'Play keeps no reading of ACK_LIST of its own: acks.js is the one definition');
 });
 
 test('the display secret comes out of #/play?display=…, and the page id never carries a query', () => {
@@ -115,4 +118,18 @@ test('a shared delay record carries each device’s peak over 24 h', () => {
   assert.deepEqual(out[1].peak24, { value: 20, at: day + 500 }, 'a peak older than a day is forgotten');
   assert.equal(out[2].peak24, null, 'no delay read, no peak — never 0');
   assert.equal(M.withPeaks(Array.from({ length: 2500 }, (_, i) => ({ device: `d${i}`, delayMinutes: 1 })), null, 0).length, M.MAX_RECORDS);
+});
+
+test('a shared delay measurement goes as {devices, truncated} (the core\'s shape) and reads back with the server\'s time', () => {
+  const recs = [{ device: 'fw-1', delayMinutes: 55 }, { device: 'fw-2', delayMinutes: 2 }];
+  const data = M.shareData({ measuredAt: 1, records: recs, truncated: 3 });
+  assert.deepEqual(Object.keys(data).sort(), ['devices', 'truncated'], 'never `records`: the core refuses that');
+  assert.equal(data.devices.length, 2);
+  // what PLAY_SHARE_GET hands back: the record's measuredAt is the server's; one inside data never wins
+  const back = M.fromShare({ measuredAt: 500, data: { ...data, measuredAt: 999999 } });
+  assert.equal(back.measuredAt, 500);
+  assert.equal(back.records[0].device, 'fw-1');
+  assert.equal(back.truncated, 3);
+  assert.equal(M.fromShare({ measuredAt: 7, data: recs }).records.length, 2, 'a bare list is a measurement too');
+  assert.equal(M.fromShare({ measuredAt: 7, data: { records: recs } }), null, 'the old {records} shape is not the contract');
 });

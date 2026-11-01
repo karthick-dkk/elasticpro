@@ -56,12 +56,24 @@ async fn cluster(names: Arc<Mutex<Vec<&'static str>>>) -> TestServer {
 
 async fn prime(c: &Arc<Core>, s: &str, es: &TestServer) {
     let r = admin(c, s, json!({ "type": "PRIME", "readOnly": true, "clusters": [
-        { "id": "c1", "url": es.url() }, { "id": "c2", "url": es.url() } ] })).await;
+        { "id": "c1", "url": es.url(), "logIndexPattern": "logs-*" }, { "id": "c2", "url": es.url(), "logIndexPattern": "logs-*" } ] })).await;
     assert_eq!(r["ok"], json!(true), "{r}");
 }
 
 fn ip(s: &str) -> Option<IpAddr> {
     Some(s.parse().unwrap())
+}
+
+/// The log-delay measurement's search body, as ui/js/core/log-delay.js buildSearchBody builds it.
+fn delay_body(size: u64) -> String {
+    json!({
+        "size": 0,
+        "query": { "bool": { "filter": [{ "range": { "@timestamp": { "gte": "now-24h", "lte": "now", "format": "strict_date_optional_time" } } }] } },
+        "aggs": { "devices": {
+            "terms": { "field": "host.keyword", "size": size, "order": { "_count": "desc" } },
+            "aggs": { "latest": { "top_hits": { "size": 1, "sort": [{ "@timestamp": { "order": "desc" } }], "_source": ["@timestamp"] } } },
+        } },
+    }).to_string()
 }
 
 /// One message as the TV holding `token` sends it, from `source`.
@@ -111,10 +123,14 @@ async fn a_display_link_shows_play_and_nothing_else() {
     let ps = as_display(&c, &tok, json!({ "type": "PLAY_STATE" }), from).await;
     assert_eq!(ps["ok"], json!(true), "{ps}");
     assert_eq!(ps["zoom"], json!(1.0));
-    let search = as_display(&c, &tok, json!({ "type": "ES", "clusterId": "c1", "method": "POST", "path": "/logs-*/_search", "body": "{}" }), from).await;
+    let search = as_display(&c, &tok, json!({ "type": "ES", "clusterId": "c1", "method": "POST",
+        "path": "/logs-%2A/_search?ignore_unavailable=true&allow_no_indices=true", "body": delay_body(500) }), from).await;
     assert_eq!(search["ok"], json!(true), "the delay measurement's search: {search}");
     let caps = as_display(&c, &tok, json!({ "type": "ES", "clusterId": "c1", "method": "GET", "path": "/logs-*/_field_caps?fields=host" }), from).await;
     assert_eq!(caps["ok"], json!(true), "{caps}");
+    // Each cluster's type and ULM: without it every CI / DI cluster would read as On-Prem on the wall.
+    let meta = as_display(&c, &tok, json!({ "type": "CLUSTER_META_GET" }), from).await;
+    assert_eq!(meta["ok"], json!(true), "{meta}");
 
     // Everything else is refused, with the one reason.
     for msg in [
@@ -126,6 +142,13 @@ async fn a_display_link_shows_play_and_nothing_else() {
         json!({ "type": "ES", "clusterId": "c1", "method": "PUT", "path": "/logs-1/_search" }),
         json!({ "type": "ES", "clusterId": "c1", "method": "GET", "path": "/_cat/indices" }),
         json!({ "type": "ES", "clusterId": "c1", "method": "POST", "path": "/logs-*/_search?scroll=1m" }),
+        // Anything shaped like a search that is not the measurement: every index, hidden ones too;
+        // documents rather than counts; another pattern.
+        json!({ "type": "ES", "clusterId": "c1", "method": "GET", "path": "/*,.*/_search?expand_wildcards=all", "body": delay_body(500) }),
+        json!({ "type": "ES", "clusterId": "c1", "method": "POST", "path": "/logs-*/_search", "body": json!({ "size": 10000, "query": { "match_all": {} } }).to_string() }),
+        json!({ "type": "ES", "clusterId": "c1", "method": "POST", "path": "/logs-*/_search", "body": "{}" }),
+        json!({ "type": "ES", "clusterId": "c1", "method": "POST", "path": "/.security/_search", "body": delay_body(500) }),
+        json!({ "type": "CLUSTER_META_SET", "clusterId": "c1", "meta": { "type": "ci" } }),
         json!({ "type": "ACK_SET", "key": "c1:disk" }),
         json!({ "type": "PLAY_CONFIG_GET" }),
         json!({ "type": "PLAY_LINK_LIST" }),
@@ -138,9 +161,10 @@ async fn a_display_link_shows_play_and_nothing_else() {
         assert!(r["message"].as_str().unwrap().starts_with("a display link only shows Play"), "{msg} -> {r}");
     }
     // A cluster the link does not name is not its, even for a search.
-    let other = as_display(&c, &tok, json!({ "type": "ES", "clusterId": "c2", "method": "POST", "path": "/logs-*/_search" }), from).await;
+    let other = as_display(&c, &tok, json!({ "type": "ES", "clusterId": "c2", "method": "POST", "path": "/logs-*/_search", "body": delay_body(500) }), from).await;
     assert_eq!(other["kind"], json!("forbidden"), "{other}");
-    assert!(!es.hits().iter().any(|h| h.method == "DELETE" || h.path.starts_with("/_cat/indices")), "nothing refused reached the cluster");
+    assert!(!es.hits().iter().any(|h| h.method == "DELETE" || h.path.starts_with("/_cat/indices") || h.path.contains("expand_wildcards")
+        || h.path.starts_with("/.security")), "nothing refused reached the cluster");
 
     // Its own zoom is kept for it.
     let z = as_display(&c, &tok, json!({ "type": "PLAY_ZOOM_SET", "zoom": 1.25 }), from).await;
@@ -473,4 +497,52 @@ async fn ping_says_what_play_has_here() {
     assert_eq!((p["playLinks"].clone(), p["sharedAcks"].clone()), (json!(true), json!(true)), "{p}");
     let d = Core::new_with_rounds(None, Edition::Portable, 1).handle(json!({ "type": "PING" })).await;
     assert_eq!((d["playLinks"].clone(), d["sharedAcks"].clone()), (json!(false), json!(false)));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pinned_node_lists_are_cut_to_the_clusters_the_caller_sees() {
+    let dir = TempDir::new("play-pinned");
+    let c = hosted(&dir);
+    let s = admin_session(&c).await;
+    let es = cluster(Arc::new(Mutex::new(vec!["n1"]))).await;
+    prime(&c, &s, &es).await;
+    let set = admin(&c, &s, json!({ "type": "PLAY_CONFIG_SET", "settings": { "watch": { "nodeExpected": "pinned",
+        "pinned": { "c1": ["es-hot-01"], "c2": ["hidden-node-of-c2"] } } } })).await;
+    assert_eq!(set["ok"], json!(true), "{set}");
+    assert_eq!(set["watch"]["pinned"]["c2"], json!(["hidden-node-of-c2"]), "an administrator who sees both sees both: {set}");
+    let (_, key) = create(&c, &s, json!({ "name": "Team A TV", "clusters": ["c1"] })).await;
+    let ex = exchange(&c, &key, None).await;
+    let tok = ex["session"].as_str().unwrap().to_string();
+    let ps = as_display(&c, &tok, json!({ "type": "PLAY_STATE" }), None).await;
+    assert_eq!(ps["ok"], json!(true), "{ps}");
+    assert_eq!(ps["settings"]["watch"]["pinned"], json!({ "c1": ["es-hot-01"] }), "only the link's cluster: {ps}");
+    assert!(!ps.to_string().contains("hidden-node-of-c2"), "{ps}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn changes_to_the_play_settings_made_at_once_are_all_kept() {
+    let dir = TempDir::new("play-race");
+    let c = hosted(&dir);
+    let s = admin_session(&c).await;
+    let es = cluster(Arc::new(Mutex::new(vec!["n1"]))).await;
+    prime(&c, &s, &es).await;
+    let (_, key) = create(&c, &s, json!({ "name": "Wall", "clusters": "all" })).await;
+    let tok = exchange(&c, &key, None).await["session"].as_str().unwrap().to_string();
+    // Forty exclusions and forty TV zooms at once: each is a read-modify-write of play.json.
+    let mut jobs = vec![];
+    for i in 0..40 {
+        let (c2, s2, t2) = (c.clone(), s.clone(), tok.clone());
+        jobs.push(tokio::spawn(async move {
+            admin(&c2, &s2, json!({ "type": "PLAY_CONFIG_SET", "settings": { "exclude": { "add": { "clusterId": format!("x{i}"), "reason": "race" } } } })).await;
+            as_display(&c2, &t2, json!({ "type": "PLAY_ZOOM_SET", "zoom": if i % 2 == 0 { 1.25 } else { 0.9 } }), None).await;
+        }));
+    }
+    for j in jobs {
+        j.await.unwrap();
+    }
+    let got = admin(&c, &s, json!({ "type": "PLAY_CONFIG_GET" })).await;
+    let n = got["exclude"].as_array().map(Vec::len).unwrap_or(0);
+    assert_eq!(n, 40, "every exclusion made at once is kept: {got}");
+    let on_disk: Value = serde_json::from_str(&std::fs::read_to_string(dir.join("play.json")).unwrap()).unwrap();
+    assert_eq!(on_disk["exclude"].as_array().map(Vec::len), Some(40), "and on disk");
 }

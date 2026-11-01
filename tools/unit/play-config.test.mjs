@@ -72,8 +72,11 @@ test('watch problems', () => {
 });
 
 test('which fields config.txt locks, and that the save leaves them out', () => {
-  const locked = P.lockedFields({ managed: ['UI_PLAY_DELAY_RED_MIN', 'UI_PLAY_SPOTLIGHT_WHEN', 'SOMETHING_ELSE'] });
+  // The core's PLAY_CONFIG_GET: `managed` names the keys, `managedFields` maps each locked field to its key.
+  const locked = P.lockedFields({ managed: ['UI_PLAY_DELAY_RED_MIN', 'UI_PLAY_SPOTLIGHT_WHEN', 'UI_PLAY_EXCLUDE'],
+    managedFields: { 'watch.delayRedAboveMin': 'UI_PLAY_DELAY_RED_MIN', 'watch.spotlight.when': 'UI_PLAY_SPOTLIGHT_WHEN' } });
   assert.deepEqual([...locked].sort(), ['delayRedAboveMin', 'spotlight.when']);
+  assert.equal(P.lockedFields({ managed: ['UI_PLAY_DELAY_RED_MIN'] }).size, 0, 'the field map is the core\'s managedFields, not a copy kept here');
   const out = P.watchPayload(P.watchRules(), locked);
   assert.equal('delayRedAboveMin' in out, false);
   assert.equal('when' in out.spotlight, false);
@@ -81,6 +84,24 @@ test('which fields config.txt locks, and that the save leaves them out', () => {
   assert.equal(out.spotlight.perClusterSec, 13);
   assert.equal(out.spotlight.whenEmpty, 'skip');
   assert.equal(P.lockedFields(null).size, 0);
+});
+
+test('a link made again keeps its name, clusters, addresses, settings and the expiry it has left', () => {
+  const now = 1_800_000_000_000;
+  const p = P.replacePayload({ id: 'x', name: 'NOC', clusters: { group: 'Prod' }, allowFrom: ['10.0.0.0/8'], expires: { at: now + 2.5 * 86400000 },
+    expiresAt: now + 2.5 * 86400000, settings: { slides: [{ id: 'alerts', show: true, dwellSec: 30 }], theme: 'light', sound: 'chime', zoom: 1.25 } }, now);
+  assert.equal(p.name, 'NOC');
+  assert.deepEqual(p.clusters, { group: 'Prod' });
+  assert.deepEqual(p.allowFrom, ['10.0.0.0/8']);
+  assert.equal(p.expires, 3);
+  assert.equal(p.settings.slides[0].id, 'alerts');
+  assert.equal(p.settings.slides[0].dwellSec, 30);
+  assert.equal(p.settings.theme, 'light');
+  assert.equal(p.settings.zoom, 1.25);
+  const perm = P.replacePayload({ name: 'TV', clusters: 'all', allowFrom: [], expires: 'permanent', expiresAt: null, settings: {} }, now);
+  assert.equal(perm.expires, 'permanent');
+  assert.equal('allowFrom' in perm, false);
+  assert.equal(P.replacePayload({ name: 'old', expiresAt: now - 1000 }, now).expires, 1, 'never zero days');
 });
 
 test('excluding needs a cluster and a reason', () => {

@@ -27,7 +27,9 @@ import { volumeReport } from '../core/volume.js';
 import { volumeDaily } from '../core/volume-daily.js';
 import { classify, summarise, DEFAULT_THRESHOLDS } from '../core/log-delay.js';
 import { healthState } from '../core/state.js';
-import { playState, readPlayState, defaultPlayState, ackList, shareGet, zoomSet } from '../play/api.js';
+import { playState, readPlayState, defaultPlayState, shareGet, zoomSet } from '../play/api.js';
+import { loadAcks, isAcked, acksOnServer } from '../core/acks.js';
+import { credentialsKeptOnServer } from '../core/server-credentials.js';
 import { createEngine, zoomStep, ZOOM_STEPS, dwellMs, takeover, spotlightMembers, burnShift, staleness } from '../play/engine.js';
 import { clusterStatus, spotlightReasons } from '../play/status.js';
 import { createMeasurer, MEASURE_EVERY_MS } from '../play/measure.js';
@@ -61,7 +63,6 @@ let onExit = null;
 let ps = defaultPlayState();
 let support = { play: null, acks: null, volume: null };
 let skew = 0;
-let sharedAcks = null;            // Map key → {by, at, note} from ACK_LIST, or null on an older core
 let engine = null;
 let take = null;                  // play/engine.js takeover() state
 let spot = new Map();
@@ -161,8 +162,9 @@ function context(force = false) {
   const list = visible();
   const ids = new Set(list.map((c) => c.id));
   const merged = mergedAlerts().filter((m) => ids.has(m.clusterId) && !isHeld(m));
-  const sharedAck = (m) => (sharedAcks ? sharedAcks.get(m.key) || null : null);
-  const open = merged.filter((m) => isOpen(m) && !sharedAck(m));
+  // Acknowledged or not is mergedAlerts()'s answer (acks.js records, ackedItems per merged
+  // item): on hosted those records are the server's shared ones, read again by pollAcks.
+  const open = merged.filter((m) => isOpen(m));
   const openBy = new Map();
   for (const m of open) (openBy.get(m.clusterId) || openBy.set(m.clusterId, []).get(m.clusterId)).push(m);
   const st = new Map(list.map((c) => [c.id, clusterStatus(c, state.data.get(c.id), {
@@ -200,13 +202,13 @@ function context(force = false) {
     delay, delayT: t, delayNote: delayNote(),
     repoSize, volume,
     spot: { members: spot, order },
-    acked: (m) => sharedAck(m) || (m.state === 'acked' ? { by: m.ackedBy, at: m.ackedAt } : null),
-    sharedAcks: !!sharedAcks,
+    acked: (m) => (m.state === 'acked' ? { by: m.ackedBy, at: m.ackedAt } : null),
+    sharedAcks: acksOnServer() === true,
     openSince: (m) => Number(ps.openSince[m.key]) || m.since,
     blink: (id) => {
       const s = st.get(id);
       if (!s || !s.left.length || ps.watch.nodeBlink === 'off') return false;
-      return ps.watch.nodeBlink !== 'untilAck' || !(sharedAcks && sharedAcks.has(`${id}:node-left`));
+      return ps.watch.nodeBlink !== 'untilAck' || !isAcked(`${id}:node-left`);
     },
     staleMs, logPattern: state.defaults.logIndexPattern,
     takeover: take && take.active,
@@ -221,7 +223,9 @@ function delayNote() {
   if (!measurer) return null;
   const busy = measurer.measuring().length;
   if (busy) return `measuring ${busy} cluster${busy === 1 ? '' : 's'}…`;
-  return measurer.shared() === false ? 'measured by this screen every 15 min' : 'measured every 15 min';
+  if (measurer.shared() === false) return 'measured by this screen every 15 min';
+  const p = measurer.putProblem();
+  return p ? `measured by this screen; not shared: ${p}` : 'measured every 15 min';
 }
 
 /** Whether a slide has anything to show (Alerts always has: "All clear"). */
@@ -426,7 +430,10 @@ function tick() {
 /* ---------------------------------- the core ---------------------------------- */
 
 async function loadPlayState() {
-  const res = await playState();
+  // The open alerts go with it once the warm-up is over (before that the data is still arriving,
+  // and an empty list would wipe the times the server kept across a reload).
+  const warm = Date.now() - openedAt >= warmMs;
+  const res = await playState(warm && support.play !== false ? context().open.map((m) => m.key) : undefined);
   if (res && res.ok) {
     support.play = true;
     ps = readPlayState(res);
@@ -441,11 +448,13 @@ async function loadPlayState() {
   if (engine) engine.setOrder(orderOf(), Date.now());
 }
 
+/** The acknowledgements again (acks.js: the server's on hosted, this browser's on desktop). */
 async function pollAcks() {
-  if (support.acks === false) return;
-  const res = await ackList();
-  if (res.ok) { support.acks = true; sharedAcks = res.acks; }
-  else if (res.unsupported) { support.acks = false; sharedAcks = null; }
+  // Desktop keeps them in this browser, in the cache acks.js already holds: nothing to fetch.
+  if (credentialsKeptOnServer()) await loadAcks();
+  // Hosted but kept in this browser: a core too old to share them.
+  support.acks = credentialsKeptOnServer() ? acksOnServer() === true : null;
+  invalidateAlerts();
 }
 
 /** Mark what the slides read as watched, so a fleet that fetches only on ask (or hybrid) has it. */
@@ -572,6 +581,13 @@ export function onLeave() {
   ctxMemo = { at: 0, ctx: null };
   delayMemo.clear();
   document.documentElement.classList.remove('play');
+}
+
+/** For the checks: the core half of the once-a-minute poll (PLAY_STATE, acknowledgements) now. */
+export async function _poll() {
+  await loadPlayState().catch(() => {});
+  await pollAcks().catch(() => {});
+  draw();
 }
 
 /** For the checks: what the page holds now. */

@@ -46,6 +46,9 @@ async function serverKeeps() {
   return onServer;
 }
 
+/** Where they are kept now: true the server, false this browser, null not asked yet. */
+export function acksOnServer() { return onServer; }
+
 /** A reply saying the server does not have these messages (an older core): IndexedDB then. */
 function unsupported(res) {
   return !!res && !res.ok && (res.kind === 'bad_message'
@@ -183,6 +186,16 @@ export async function removeNote(key, ts) {
 }
 
 /**
+ * The cluster an acknowledgement key names (`<clusterId>:…`), the longest of `ids` that
+ * prefixes it, or null when none does: the core's own rule (silences::cluster_of).
+ */
+export function ackClusterOf(key, ids) {
+  let best = null;
+  for (const id of ids) if (String(key).startsWith(`${id}:`) && (!best || id.length > best.length)) best = id;
+  return best;
+}
+
+/**
  * Drop records whose alert no longer exists, so the store does not grow forever with
  * problems that were fixed months ago. Records carrying notes are kept.
  */
@@ -209,10 +222,26 @@ export const ACK_GRACE_DAYS = 30;
  * everything, including the date it was first acknowledged. Records carrying notes are
  * still never removed at all — somebody wrote those.
  */
-export async function pruneAcks(liveKeys) {
+export async function pruneAcks(liveKeys, { clusterIds = null, complete = false } = {}) {
   const live = new Set(liveKeys);
   const now = Date.now();
   const graceMs = ACK_GRACE_DAYS * 86400000;
+
+  // Hosted, the records are the team's (ACK_LIST). One browser's list of live alerts is not
+  // enough to rewrite them: it may be partial (a fleet still loading, a cluster this person
+  // cannot see), and writing a record back would stamp it in this person's name. So nothing
+  // is written here; a record is cleared only when its cluster is gone from the fleet, and
+  // only once every cluster has answered.
+  if (await serverKeeps()) {
+    if (!complete || !Array.isArray(clusterIds) || !clusterIds.length) return;
+    const ids = clusterIds.map(String);
+    for (const [key, rec] of [...cache.entries()]) {
+      if ((rec.notes || []).length || ackClusterOf(key, ids)) continue;
+      cache.delete(key);
+      await unpersist(key);
+    }
+    return;
+  }
 
   for (const [key, rec] of [...cache.entries()]) {
     if (live.has(key)) {

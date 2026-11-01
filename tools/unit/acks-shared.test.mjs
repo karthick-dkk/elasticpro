@@ -56,14 +56,21 @@ test('on the hosted server an acknowledgement goes to the core and comes back st
   assert.equal(acks.noteCount('c1:disk'), 1, 'notes are kept when the acknowledgement goes');
 });
 
-test('a long-gone record without notes is cleared on the server', async () => {
-  await acks.acknowledge('c2:gone', {});
+test('pruning never rewrites a shared record: it clears one only when its cluster is gone and the fleet has answered', async () => {
+  server.set('c2:disk', { by: 'ann', at: 7, record: { acked: true, ackedBy: 'ann', ackedAt: 7, notes: [] } });
+  server.set('c3:health', { by: 'bo', at: 8, record: { acked: true, ackedBy: 'bo', ackedAt: 8, notes: [] } });
+  await acks.loadAcks();
+  sent.length = 0;
+  // A partial list of live alerts (a fleet still loading): nothing is written, nobody re-acknowledges.
+  await acks.pruneAcks([], { clusterIds: ['c2', 'c3'], complete: false });
   await acks.pruneAcks([]);
-  const rec = acks.ackFor('c2:gone');
-  assert.ok(rec.missingSince > 0);
-  assert.ok(server.get('c2:gone').record.missingSince > 0, 'the clock is kept where everybody sees it');
-  rec.missingSince = Date.now() - (acks.ACK_GRACE_DAYS + 1) * 86400000;
-  await acks.pruneAcks([]);
-  assert.equal(server.has('c2:gone'), false);
-  assert.ok(sent.includes('ACK_CLEAR'));
+  await acks.pruneAcks([], { clusterIds: ['c2', 'c3'], complete: true });
+  assert.ok(!sent.includes('ACK_SET'), `a prune wrote a shared record: ${sent.join(', ')}`);
+  assert.equal(server.get('c2:disk').by, 'ann', 'still acknowledged by the person who did');
+  assert.ok(!sent.includes('ACK_CLEAR'), 'the clusters still exist');
+  // c3 is gone from the fleet, and every cluster has answered: its record goes.
+  await acks.pruneAcks([], { clusterIds: ['c2'], complete: true });
+  assert.equal(server.has('c3:health'), false);
+  assert.equal(server.has('c2:disk'), true);
+  assert.equal(acks.ackClusterOf('prod:eu:disk', ['prod', 'prod:eu']), 'prod:eu', 'the longest id wins');
 });
