@@ -10,8 +10,8 @@
 #   git -C M checkout "$(grep -v '^#' deploy/zabbix/MODULES_REF | head -1)"
 #
 # What it does, in order:
-#   1. copies the seven modules (elasticpro, ep_clients, ep_capacity, ep_resources,
-#      ep_volume, ep_tophosts, ep_overview) into Zabbix's modules folder, without tests and tools — the ones already
+#   1. copies the eight modules (elasticpro, ep_clients, ep_capacity, ep_resources,
+#      ep_volume, ep_tophosts, ep_overview, ep_play) into Zabbix's modules folder, without tests and tools — the ones already
 #      there are first copied to a dated backup folder, outside the modules folder. The
 #      modules all come from --modules-src (elasticpro is its embed-module); this
 #      repository keeps no copy of any. Each folder gets a BUILD file naming the modules version and commit. A config.php already in its folder is kept;
@@ -84,7 +84,7 @@ fix_owner() {
   fi
 }
 
-# All seven modules come from the modules project; this repository keeps no copy of any.
+# All eight modules come from the modules project; this repository keeps no copy of any.
 [ -n "$MODULES_SRC" ] || fail "--modules-src is needed: the modules are in the modules project, not in this repository.
   git clone https://github.com/karthick-dkk/integration-zabbix-elasticpro modules-src
   git -C modules-src checkout \"\$(grep -v '^#' deploy/zabbix/MODULES_REF | head -1)\"
@@ -95,7 +95,7 @@ MODULES_SRC=$(cd "$MODULES_SRC" && pwd)
 { [ -f "$MODULES_SRC/sync-assets.mjs" ] && [ -d "$MODULES_SRC/clients-module" ] && [ -d "$MODULES_SRC/embed-module" ]; } \
   || fail "$MODULES_SRC is not a checkout of integration-zabbix-elasticpro (no zabbix/sync-assets.mjs, clients-module/, embed-module/)"
 
-# Module folder in Zabbix <- where it comes from (the same seven ids as tools/zabbix-modules-tarball.sh).
+# Module folder in Zabbix <- where it comes from (the same eight ids as tools/zabbix-modules-tarball.sh).
 MODULES=(
   "elasticpro:$MODULES_SRC/embed-module"
   "ep_clients:$MODULES_SRC/clients-module"
@@ -104,6 +104,7 @@ MODULES=(
   "ep_volume:$MODULES_SRC/volume-widget"
   "ep_tophosts:$MODULES_SRC/tophosts-widget"
   "ep_overview:$MODULES_SRC/overview-widget"
+  "ep_play:$MODULES_SRC/play-widget"
 )
 
 # --- checks, before anything changes -----------------------------------------------------
@@ -199,7 +200,7 @@ if [ -n "${ZABBIX_URL:-}" ] && { [ -n "${ZABBIX_TOKEN:-}" ] || [ -n "${ZABBIX_US
   fi
 else
   say "== not registered (no ZABBIX_URL with ZABBIX_TOKEN, or ZABBIX_USER + ZABBIX_PASSWORD). Run again with them, or in Zabbix:"
-  say "   Administration → General → Modules → Scan directory, then enable the seven ElasticPro modules."
+  say "   Administration → General → Modules → Scan directory, then enable the eight ElasticPro modules."
 fi
 
 say ""

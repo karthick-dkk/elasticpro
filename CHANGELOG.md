@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.3.49
+
+**Play inside Zabbix (modules 2.1.15).** The Zabbix modules pinned by this release add Play to Zabbix:
+
+- **ElasticPro › Play** in the Zabbix menu opens the wall display as the signed-in Zabbix user, through the same sign-in the other ElasticPro pages use, so it shows the clusters that user sees. `&fullscreen=1` hides Zabbix's menu for that page only, with an *Exit full screen* link; it never changes the user's saved layout (Zabbix's own `kiosk=1` would).
+- **ElasticPro Play** dashboard widget (`ep_play`, the eighth module) shows Play sized to the widget, with an *Open full screen* link. The widget stores no address, sign-in code or secret: each time the frame loads it asks Zabbix for a fresh one-use sign-in, guarded by Zabbix's CSRF check. It goes blank while its dashboard page is out of view and signs in again when it comes back. There is no display-link field: a widget's fields are readable by anyone who can view the dashboard.
+- Guests are refused, and a user who is not a Super admin is told the error code but never the internal core address.
+
+`install-modules.sh`, `zabbix-modules-install.sh` (`KNOWN_IDS`), the release archive and its check now carry eight modules. The Zabbix test stack's compose file also mounts `ep_tophosts` and `ep_overview`, which it had left out.
+
 ## 0.3.48
 
 **The Windows portable build is back.** The 0.3.45, 0.3.46 and 0.3.47 releases have no Windows portable folder and no checksums file: a report test kept a variable it used only on Linux and macOS, and on Windows clippy (`-D warnings`) refused it as unused. Each release's Docker images and the other desktop builds are unaffected. The variable now lives inside the Unix-only check.

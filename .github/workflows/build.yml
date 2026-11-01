@@ -278,9 +278,9 @@ jobs:
           VERSION: ${{ needs.version.outputs.version }}
         run: |
           tools/zabbix-modules-tarball.sh --modules-src modules-src --version "$VERSION" --out dist
-          # All seven modules, or the release would silently ship fewer.
-          [ "$(tar -tzf dist/elasticpro-zabbix-modules-*.tar.gz | grep -c '/manifest.json$')" = 7 ] \
-            || { echo "the archive must carry seven modules" >&2; exit 1; }
+          # All eight modules, or the release would silently ship fewer.
+          [ "$(tar -tzf dist/elasticpro-zabbix-modules-*.tar.gz | grep -c '/manifest.json$')" = 8 ] \
+            || { echo "the archive must carry eight modules" >&2; exit 1; }
           cp deploy/zabbix/zabbix-modules-install.sh dist/
           # The product's own installer, so both are fetched the same way — from the
           # release rather than from whatever is on main at the time.

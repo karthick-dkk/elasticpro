@@ -20,8 +20,9 @@ be read says "no data" / "not measured", never 0.
   `.embedded`. Dark TV theme (`.tv` tokens), text in `rem` scaled from the viewport so 1080p
   and 4K look the same; never a scroll bar.
 - Who opens it: any signed-in user (a "▶ Play" button in the top bar), or a TV through a
-  **display link** (below). Inside Zabbix: the module's menu entry / dashboard widget opens the
-  same page (separate Zabbix-modules patch release).
+  **display link** (below). Inside Zabbix (modules 2.1.15): the **ElasticPro › Play** menu entry
+  and the **ElasticPro Play** dashboard widget (`ep_play`) open the same page as the signed-in
+  Zabbix user, through the embed's one-use sign-in.
 - Data: the existing fleet engine (`startAutoRefresh`, SSE). Play marks the datasets its
   slides need as watched (`askForPage`) so a hybrid-mode fleet (>25 clusters) has them.
   Toasts/notifications are off on this page.

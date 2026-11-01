@@ -290,20 +290,20 @@ EP_HOST=<this-host-address> \
 admin API token> sudo deploy/zabbix/install-modules.sh --modules-src ../modules-src` — see
 PRODUCTION.md step 4 for the non-Docker layout.)
 
-`--docker` copies the seven modules into `deploy/zabbix/module/*`, which the stack's
+`--docker` copies the eight modules into `deploy/zabbix/module/*`, which the stack's
 `docker-compose.yml` already bind-mounts read-only into the `web` container — nothing to copy
 by hand. A `module/elasticpro/config.php` already there (step 8) is kept.
 
-**Expect.** Seven `✓ <module>` lines. With `ZABBIX_URL`/`ZABBIX_TOKEN` also given, it registers
+**Expect.** Eight `✓ <module>` lines. With `ZABBIX_URL`/`ZABBIX_TOKEN` also given, it registers
 and enables them and runs `master/import.py` (modules project) — which, on a **fresh** Zabbix,
 exits asking you to import the base templates first (it needs `Elasticsearch Cluster by HTTP
 EP`, `Linux by Zabbix agent -EP`, `ElasticPro client plan`, `alerts`, `log delay`
 already there). That is expected at this point in a fresh install — do step 5 first, then
 re-run this command's registration half, or just enable the modules by hand for now:
-**Administration → General → Modules → Scan directory**, enable all seven.
+**Administration → General → Modules → Scan directory**, enable all eight.
 
 **Verify.** `docker compose -f deploy/zabbix/stack/docker-compose.yml up -d web` (picks up the
-new mounts), then **Administration → General → Modules** lists all seven as enabled.
+new mounts), then **Administration → General → Modules** lists all eight as enabled.
 
 **Common failure → fix.** A stale copy in a module's folder from a previous run: the script
 tars the source into a staging directory first and only replaces the folder's *contents*, never
@@ -793,7 +793,7 @@ not healthy inside `--timeout` (default 180 s) and it switches back to the previ
 itself and exits with an error.
 
 Re-running `deploy/zabbix/install-modules.sh --docker` after a code update copies the current
-seven modules into place again (the previous copy goes to
+eight modules into place again (the previous copy goes to
 `deploy/zabbix/.module-backups/<date>/`), then `systemctl reload php-fpm` for a package install,
 or `docker compose up -d web` for the Docker stack, to drop PHP's opcode cache. **Re-check
 `config.php`'s ownership after this** — a module re-copy does not touch it, but it is worth

@@ -113,6 +113,9 @@ services:
       - ../module/ep_volume:/usr/share/zabbix/modules/ep_volume:ro
       - ../module/ep_resources:/usr/share/zabbix/modules/ep_resources:ro
       - ../module/ep_clients:/usr/share/zabbix/modules/ep_clients:ro
+      - ../module/ep_tophosts:/usr/share/zabbix/modules/ep_tophosts:ro
+      - ../module/ep_overview:/usr/share/zabbix/modules/ep_overview:ro
+      - ../module/ep_play:/usr/share/zabbix/modules/ep_play:ro
       # Copied in from the zabbix-host-inventory repo (see its README). Absent, this is an
       # empty folder with no manifest.json, which Zabbix skips.
       - ../module/host_inventory:/usr/share/zabbix/modules/host_inventory:ro

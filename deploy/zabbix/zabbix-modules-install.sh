@@ -41,7 +41,7 @@
 #                           ElasticPro module that is installed); --uninstall is the same
 #   --delete[=id,id,...]    remove modules for good: no backup, and unregistered in Zabbix
 #                           when --zabbix-url and --token-file are given
-#   ids: elasticpro ep_clients ep_capacity ep_resources ep_volume ep_tophosts ep_overview
+#   ids: elasticpro ep_clients ep_capacity ep_resources ep_volume ep_tophosts ep_overview ep_play
 #
 # Options:
 #   --version vX.Y.Z        that release instead of the latest
@@ -92,11 +92,11 @@
 set -euo pipefail
 
 REPO=${EP_REPO:-karthick-dkk/elasticpro}
-# The module ids, the folder names under modules/. A release archive carries all seven
+# The module ids, the folder names under modules/. A release archive carries all eight
 # (tools/zabbix-modules-tarball.sh builds it from the integration-zabbix-elasticpro project at
 # the commit in deploy/zabbix/MODULES_REF; the elasticpro menu module is its embed-module).
 # Listed here so remove, delete, Docker mounts and the API know them.
-KNOWN_IDS=(elasticpro ep_clients ep_capacity ep_resources ep_volume ep_tophosts ep_overview)
+KNOWN_IDS=(elasticpro ep_clients ep_capacity ep_resources ep_volume ep_tophosts ep_overview ep_play)
 
 VERSION=latest
 FROM_DIR=
