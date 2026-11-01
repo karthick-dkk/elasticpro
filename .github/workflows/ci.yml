@@ -44,6 +44,25 @@ jobs:
       - name: cargo clippy
         run: cargo clippy -p elasticpro-core --features bridge --all-targets
 
+  # build.yml runs this same clippy on Windows, but only on a tag, so a test that left a
+  # variable used only under #[cfg(unix)] failed the Windows portable build of 0.3.45,
+  # 0.3.46 and 0.3.47 while every pull request was green. Same command, same cache key,
+  # on every change.
+  windows:
+    name: windows — clippy
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: win-portable
+      - name: clippy (whole workspace, incl. the Tauri shell)
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
   ui:
     name: ui — syntax & render
     runs-on: ubuntu-latest

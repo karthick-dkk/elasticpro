@@ -3,7 +3,7 @@ members = ["crates/elasticpro-core", "src-tauri"]
 resolver = "2"
 
 [workspace.package]
-version = "0.3.47"
+version = "0.3.48"
 edition = "2021"
 license = "MIT"
 

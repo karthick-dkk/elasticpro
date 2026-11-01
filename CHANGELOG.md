@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.48
+
+**The Windows portable build is back.** The 0.3.45, 0.3.46 and 0.3.47 releases have no Windows portable folder and no checksums file: a report test kept a variable it used only on Linux and macOS, and on Windows clippy (`-D warnings`) refused it as unused. Each release's Docker images and the other desktop builds are unaffected. The variable now lives inside the Unix-only check.
+
+**Pull requests run the Windows clippy.** It ran only when a release was tagged, so every pull request was green while three releases failed. A `windows — clippy` job in CI runs the same command on every change.
+
 ## 0.3.47
 
 **Play: the NOC wall display.** A full-screen page for the TV on the wall, `#/play`, opened with the **▶ Play** button in the top bar or, on a TV nobody signs in on, through a display link. It runs the same code as every other page, so each figure on it is the one the Overview, Alerts, Logs, Snapshots and Volume pages show. A figure that cannot be read says *no data* or *not measured*, never 0.

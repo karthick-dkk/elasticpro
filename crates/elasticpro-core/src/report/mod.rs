@@ -276,10 +276,10 @@ mod tests {
             q.concurrency = 3;
         });
         r.flush();
-        let f = d.join("reports").join(JOBS_FILE);
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
+            let f = d.join("reports").join(JOBS_FILE);
             assert_eq!(std::fs::metadata(&f).unwrap().permissions().mode() & 0o777, 0o600);
         }
         let again = Reports::open(Some(&d));
