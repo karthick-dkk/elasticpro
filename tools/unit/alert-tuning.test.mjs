@@ -71,5 +71,5 @@ test('open = neither acknowledged nor silenced; counts by level from one place',
   const list = [A('disk', 'critical'), A('health', 'warning'), A('ilm', 'warning')];
   const open = T.openAlerts(list, { isAcked: (k) => k === 'p1:health', isSilenced: (a) => a.key === 'p1:ilm' });
   assert.deepEqual(open.map((a) => a.key), ['p1:disk']);
-  assert.deepEqual(T.alertCounts(list), { total: 3, critical: 1, warning: 2 });
+  assert.deepEqual(T.alertCounts(list), { total: 3, critical: 1, high: 0, warning: 2 });
 });

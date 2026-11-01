@@ -34,6 +34,8 @@ export const FOCUS = {
   capacity: () => ({ section: 'disk' }),
   'no-master': () => ({ section: 'nodes' }),
   'master-changed': () => ({ section: 'nodes' }),
+  // The node list, where heap is a column; an item names the node.
+  heap: (m, it) => ({ section: 'nodes', ...(it && it.node ? { node: it.node } : {}) }),
   // Indices: only the indices in an ILM error step.
   ilm: (m, it) => ({ ilm: true, ...(it && it.index ? { index: it.index } : {}) }),
   // Snapshots: the summary view, which holds the repositories and the SLM policies.

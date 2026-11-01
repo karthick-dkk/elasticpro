@@ -145,7 +145,7 @@ test('held alerts count nowhere: open counts, the summary, Zabbix', () => {
   applyFleetEntry('c1', cluster({ down: true }));
   S.invalidateAlerts();
   assert.deepEqual(S.openAlertsNow().map((m) => m.key), ['c1:unreachable']);
-  assert.deepEqual(S.openAlertCounts(), { total: 1, critical: 1, warning: 0 }, 'the disk critical is not counted');
+  assert.deepEqual(S.openAlertCounts(), { total: 1, critical: 1, high: 0, warning: 0 }, 'the disk critical is not counted');
   const sum = G.summaryOf(S.mergedAlerts(), 1);
   assert.deepEqual([sum.critical, sum.warning, sum.open, sum.held], [1, 0, 1, 2]);
   // Zabbix: nothing is sent for a cluster that did not answer, and a held alert is never a value.

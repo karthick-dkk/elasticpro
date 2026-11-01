@@ -20,11 +20,22 @@ import { managedDefaults } from './managed.js';
  * link on an alert here and the "Troubleshoot in ElasticPro" link on a Zabbix problem
  * read it, so the two cannot send the same alert to different places.
  *
- * @typedef {{ id:string, page:string, label:string, why:string, level:'critical'|'warning',
- *             thresholds?: Array<{key:string,label:string,unit:string,min:number,max:number}> }} AlertRule
+ * @typedef {{ id:string, page:string, label:string, why:string, level:'critical'|'high'|'warning',
+ *             thresholds?: Array<{key:string,label:string,unit:string,min:number,max:number}>, zabbixWhy?:string }} AlertRule
  */
 
-/** @type {AlertRule[]} */
+/**
+ * JVM heap above this, on any node, is a High alert (the owner's rule, 2026-11-01). Its own
+ * figure, not the node table's colours (pages/overview.js NODE_LOAD_LEVELS, amber at 75 and
+ * red at 90): those say how loaded a node looks, this says when to raise it.
+ */
+export const HEAP_HIGH_PERCENT = 85;
+
+/**
+ * `level` is the rule's usual level — what the Config list shows. A rule can raise below it
+ * (log-delay: High past the red line, warning while only delayed); never above it.
+ * @type {AlertRule[]}
+ */
 export const ALERT_RULES = [
   { id: 'unreachable', page: 'overview', label: 'Cluster unreachable', level: 'critical',
     why: 'The cluster did not answer. Everything else on this page about it is stale.' },
@@ -50,16 +61,22 @@ export const ALERT_RULES = [
     why: 'Lifecycle management has stopped for those indices; they will not roll over or delete.' },
   { id: 'slm-mode', page: 'snapshots', label: 'SLM not running', level: 'warning',
     why: 'Snapshot lifecycle is stopped, so scheduled backups are not being taken.' },
-  { id: 'slm-fail', page: 'snapshots', label: 'Last SLM run failed', level: 'critical',
+  { id: 'slm-fail', page: 'snapshots', label: 'Last SLM run failed', level: 'high',
     why: 'The most recent scheduled snapshot did not succeed.' },
   { id: 'slm-stale', page: 'snapshots', label: 'No recent successful snapshot', level: 'warning',
     why: 'Backups have stopped running rather than started failing.',
     thresholds: [{ key: 'snapshotStaleHours', label: 'Stale after', unit: 'h', min: 1, max: 720 }] },
   { id: 'repo', page: 'snapshots', label: 'Snapshot repository problems', level: 'critical',
     why: 'A repository is unreadable, empty, or its recent snapshots failed.' },
-  { id: 'log-delay', page: 'logs', label: 'Devices shipping logs late', level: 'critical',
+  { id: 'log-delay', page: 'logs', label: 'Devices shipping logs late', level: 'high',
     why: 'Logs are arriving behind real time — searches and detections see the past, not now. '
+       + 'High when a device is past its critical delay (over 60 min), warning when only delayed.',
+    // The words the Zabbix template carries (tools/zabbix-alert-template.mjs), unchanged: a
+    // High alert still reaches its critical trigger there (zabbix-alerts.js ZABBIX_LEVEL).
+    zabbixWhy: 'Logs are arriving behind real time — searches and detections see the past, not now. '
        + 'Critical when a device is past its critical delay, warning when only delayed.' },
+  { id: 'heap', page: 'shards', label: `JVM heap above ${HEAP_HIGH_PERCENT}%`, level: 'high',
+    why: 'A node short of heap collects garbage instead of answering, and is the next to leave the cluster.' },
   { id: 'automation', page: 'automation', label: 'Automation rule has work waiting', level: 'warning',
     why: 'A rule you set to notify found indices matching it. Nothing ran: the work waits for a person in the app.' },
   { id: 'volume', page: 'volume', label: 'Field volume spike', level: 'warning',

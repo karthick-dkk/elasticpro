@@ -52,8 +52,11 @@ be read says "no data" / "not measured", never 0.
 1. **Fleet wall**: a tile per visible cluster, worst first: name, status line, nodes x/y, fullest
    disk %, cluster log delay, open alerts, and **delayed devices** as three counts
    (green < 30 min, yellow 30–60 min inclusive, red > 60 min). A cluster with a node that left
-   **blinks every 3 s** until the node is back (or is forgotten). Top strip: clusters by health,
-   open alerts (critical/warning), node left (count + newest), delayed devices
+   **blinks every 3 s** until the node is back (or is forgotten). A tile is red (critical),
+   orange (High: its worst open alert is High — the status word reads "High"), yellow or green,
+   and red and orange tiles blink (see Blinks below). Top strip: clusters by status (red, not
+   answering, high, yellow, green, no data — the tiles' own colours), open alerts
+   (critical/high/warning), node left (count + newest), delayed devices
    (30–60 / > 60), fullest disk. Status line = health word + worst reason + where, e.g.
    "Red · disk 91 % on es-hot-03" — composed once in `ui/js/play/status.js` from existing
    pieces (`healthState`, `diskBalance().fullest`, the open alert of highest severity).
@@ -61,14 +64,14 @@ be read says "no data" / "not measured", never 0.
    behind it (worked out from its last cached data, see HANDBOOK "Unreachable clusters and
    held alerts"): "2 older alerts held, not current · as of 14:02" — the same words as the
    Alerts page (`heldLine`, `core/alert-groups.js`). Never in the tile's alert count or the strip.
-2. **Alerts**: `mergedAlerts()` open alerts, critical first then newest; severity, title,
-   cluster · detail, open for, acknowledged by. Side: open now (critical, warning,
-   acknowledged), last 24 h (raised, resolved, longest open). "All clear" when none. Held
+2. **Alerts**: `mergedAlerts()` open alerts, critical first, then high, then warning, then
+   newest; severity (CRIT red, HIGH orange, WARN yellow), title, cluster · detail, open for,
+   acknowledged by. Side: open now (critical, high, warning, acknowledged), last 24 h (raised, resolved, longest open). "All clear" when none. Held
    alerts are not rows: the unreachable row carries the same dimmed held line as the tile.
    They are never counted and never take the screen. When the cluster answers again, one that
    this display already showed open before the outage does not take the screen a second time;
    one it was never shown (the TV was switched on during the outage, or the alert appeared only
-   while held) takes it as any new critical alert does — held keys are kept in what the display
+   while held) takes it as any new critical alert does (a High alert never takes the screen) — held keys are kept in what the display
    has seen, never added to it. "Open for" runs on from before the outage (held keys go with
    `PLAY_STATE.open`).
 3. **Cluster spotlight**: clusters with a **critical problem** join automatically and leave
@@ -91,6 +94,25 @@ be read says "no data" / "not measured", never 0.
 6. **Volume and capacity**: yesterday (all clusters) vs 7-day avg, average per day, month so
    far, shortest disk runway; per cluster yesterday / 7-day avg / change; days of disk left
    (total size). From the 0.3.45 record (`VOLUME_MONTHLY_ALL` / `VOLUME_DAILY`).
+
+### Blinks
+
+Play only, by a CSS class on the element (`ui/css/app.css`, "Blinks"), never a timer; only
+the background changes, in two steps a cycle, so nothing moves and the CPU barely notices.
+Under `prefers-reduced-motion: reduce` every blink is a steady highlight in the same colour.
+
+| Where | When | Class | Rate |
+|---|---|---|---|
+| Fleet wall tile | a node left (Config › Play › node blink) — **wins over the others** | `pl-blink` | 3 s |
+| Fleet wall tile | critical: tone red (red health, not answering, a critical alert, a node past its high watermark) | `blink-crit` (red) | 1.2 s |
+| Fleet wall tile | High: tone orange (worst open alert High, nothing critical) | `blink-high` (orange) | 2.4 s |
+| Spotlight nodes table | a node whose disk is at or past the high watermark (`nodeDiskCritical`, the same test as the tile's red): red bar at the left of the row, the row blinks; every other row keeps a transparent bar of the same width | `tr.blink-crit` | 1.2 s |
+| Log delay, Top 10 clusters | the cluster's median delay is red — `classify` CRITICAL, over the red line (60 min) | `tr.blink-crit` | 1.2 s |
+| Volume, Days of disk left | the runway is red — under 7 days (`RUNWAY_RED_DAYS`, the slide's own red line) | `td.blink-crit` | 1.2 s |
+
+`play/status.js tileBlink` picks a tile's one class; `spotlight.js nodeRowBlink`,
+`logdelay.js delayRowBlink` and `volume.js runwayBlink` the others — each from the definition
+the slide already colours by, so a blink never disagrees with the colour under it.
 
 ### Where each figure comes from (all existing unless marked NEW)
 

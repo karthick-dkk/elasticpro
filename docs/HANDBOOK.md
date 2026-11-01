@@ -351,6 +351,44 @@ repository is critical when two or more runs in a row failed with at least one `
 (one bad night or `PARTIAL`-only runs are a warning); a master re-election is critical
 only while the cluster is not green.
 
+### Alert levels
+
+Three levels, worst first — one definition, `core/alert-levels.js`; everything that sorts,
+counts, filters or colours by level reads it there:
+
+| Level | Colour | Rules |
+|---|---|---|
+| **Critical** | red | cluster not answering; health red; disk over the critical threshold / a node past its high watermark (and the flood-stage balance row); disk capacity fell; no master; master moved while not green; a repository whose runs keep failing |
+| **High** | orange (`--high`, Play `--tv-orange` #ff8c42) | log delay over 60 min (a device past its critical delay, `classify` CRITICAL); JVM heap over 85 % on any node (`heap`, new, `HEAP_HIGH_PERCENT`); an SLM policy whose last run failed (`slm-fail`) |
+| **Warning** | yellow | everything else: health yellow, disk over the warning threshold, disk balance, disk not accounted for, capacity grew, master moved on a green cluster, ILM errors, SLM stopped, no recent snapshot, repository warnings, log delay 30–60 min, field-volume spikes, automations |
+
+Changed in this release: `slm-fail` critical → High; `log-delay` past the red line critical →
+High; `heap` is new, High. An automation rule can be set to raise at any of the three.
+
+- **Counts.** High is an open alert like any other: the Alerts summary reads "N critical · N
+  high · N warning", its Severity filter has a High button, the CSV's `level` column says
+  `high`. The Alerts tab badge is red when anything critical is open, **orange** when the worst
+  open is High, otherwise yellow; the browser-extension badge likewise. Acknowledged, silenced
+  and held alerts are counted nowhere, whatever their level.
+- **Notifications.** A new High is announced like a warning (a yellow bell entry and toast).
+  What is critical-only stays so: an error-coloured notification, Play's takeover and chime,
+  the spotlight's "critical alert" reason. The bell's own count is of unread notices and keeps
+  its colour.
+- **Zabbix.** The ElasticPro alerts template (modules 2.1.16) has two triggers per rule,
+  `^critical: ` at priority HIGH and `^warning: ` at WARNING, and no High one. A High alert is
+  sent to the critical trigger — item value 2, detail `critical: [High] …` — so it raises a
+  Zabbix problem at the severity Zabbix itself calls High, where failed snapshots and late logs
+  were raised before. The JVM heap rule is not sent: the ElasticPro cluster health template
+  has its own per-node heap triggers. *Follow-up for the modules repository:* add a third
+  trigger per rule, `find(…detail[rule],,"regexp","^high: ")=1` at priority HIGH, move the
+  `^critical: ` trigger to DISASTER, and add `3 → high` to the "ElasticPro alert level"
+  valuemap; once that template is pinned, `ZABBIX_LEVEL.high` in `core/zabbix-alerts.js`
+  becomes `{ value: 3, word: 'high' }` and the generator (`tools/zabbix-alert-template.mjs`)
+  writes the new trigger.
+- **Play.** A High cluster's tile is orange, says "High" and blinks orange every 2.4 s; the
+  Alerts slide shows HIGH rows between CRIT and WARN and counts High under Open now (see
+  docs/PLAY.md, "Blinks").
+
 **Open** means neither acknowledged nor silenced, and every count uses that one definition
 (`openAlertsNow()` / `openAlertCounts()`): the Clusters summary, the nav badge, the top bar,
 the per-cluster column, the extension badge. What is counted is the **merged alert**: every

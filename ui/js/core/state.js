@@ -18,7 +18,7 @@ import { loadClusterMeta, slmExempt } from './cluster-kind.js';
 import { ZABBIX_ITEMS, fromZabbix } from './zabbix-metrics.js';
 import { bridge, subscribe } from './transport.js';
 import { automationAlerts } from './automation.js';
-import { loadAlertSettings, applySettings, effectiveDefaults, isEnabled } from './alert-rules.js';
+import { loadAlertSettings, applySettings, effectiveDefaults, isEnabled, HEAP_HIGH_PERCENT } from './alert-rules.js';
 // Bounded fan-out for the fleet refresh loop — see runBounded's own doc comment for why:
 // a page asking every cluster something at once is a simultaneous aggregation against
 // each one, and the clusters this app watches are the ones already under load.
@@ -1986,8 +1986,10 @@ function clusterAlerts(c, d, add, { now = Date.now(), live = true } = {}) {
     const by = ds.summary.by || {};
     const w = ds.summary.worst;
     const worst = w && w.delayMinutes !== null ? ` Worst: ${w.device}, ${Math.round(w.delayMinutes)} min behind.` : '';
+    // Past the red line (classify's CRITICAL, over 60 min) is High, not critical: logs late
+    // are searches seeing the past, not data lost (the owner's rule, 2026-11-01).
     if (by.CRITICAL) {
-      add({ key: `${c.id}:log-delay`, level: 'critical', cluster: c,
+      add({ key: `${c.id}:log-delay`, level: 'high', cluster: c,
         title: `${c.name}: ${by.CRITICAL} device(s) critically late shipping logs`,
         detail: `${by.CRITICAL} critical, ${by.DELAYED || 0} delayed of ${ds.summary.devices}.${worst}` });
     } else if (by.DELAYED) {
@@ -2031,6 +2033,19 @@ function clusterAlerts(c, d, add, { now = Date.now(), live = true } = {}) {
       // One suggestion, named — an alert that only states a problem leaves the reader
       // to work out the next step for themselves.
       detail: bal.reasons[0] + (act ? `  Suggested: ${act.title} (${act.method} ${act.path}).` : '') });
+  }
+
+  // JVM heap past HEAP_HIGH_PERCENT on any node (alert-rules.js), from the same node rows the
+  // node table reads. A node whose heap was not read is left out, never counted as 0.
+  {
+    const hot = (d.nodes || []).map((n) => ({ name: n.name, pct: Number(n['heap.percent']) }))
+      .filter((n) => n.name && heapHigh(n.pct)).sort((a, b) => b.pct - a.pct);
+    if (hot.length) {
+      add({ key: `${c.id}:heap`, level: 'high', cluster: c, heapNodes: hot,
+        title: `${c.name}: JVM heap above ${HEAP_HIGH_PERCENT}% on ${hot.length === 1 ? hot[0].name : `${hot.length} nodes`}`,
+        detail: hot.slice(0, 3).map((n) => `${n.name} ${Math.round(n.pct)}%`).join(', ')
+          + (hot.length > 3 ? ` and ${hot.length - 3} more` : '') });
+    }
   }
 
   // Field-volume spikes, when the Indices page has run an analysis for this cluster.
@@ -2112,11 +2127,15 @@ function clusterAlerts(c, d, add, { now = Date.now(), live = true } = {}) {
   (d.slm || []).forEach((p) => {
     const lf = p.last_failure, ls = p.last_success;
     const repo = (p.policy && p.policy.repository) || null;   // so a failing repository is raised once (alert-tuning.js)
-    if (lf && (!ls || lf.time > ls.time)) add({ key: `${c.id}:slm-fail:${p.id}`, level: 'critical', cluster: c, repo, title: `${c.name}/${p.id}: last SLM run failed`, detail: String(lf.details || '').slice(0, 160) });
+    // High: one failed run is a backup to retry today; the repository rule says when backups are broken.
+    if (lf && (!ls || lf.time > ls.time)) add({ key: `${c.id}:slm-fail:${p.id}`, level: 'high', cluster: c, repo, title: `${c.name}/${p.id}: last SLM run failed`, detail: String(lf.details || '').slice(0, 160) });
     const staleMs = state.defaults.snapshotStaleHours * 3600 * 1000;
     if (!exempt && ls && now - ls.time > staleMs) add({ key: `${c.id}:slm-stale:${p.id}`, level: 'warning', cluster: c, repo, title: `${c.name}/${p.id}: no successful snapshot recently`, detail: `Last success ${new Date(ls.time).toISOString().replace('T', ' ').slice(0, 16)}` });
   });
 }
+
+/** Whether one node's heap reading raises the heap rule: strictly over HEAP_HIGH_PERCENT. */
+export function heapHigh(pct) { return Number.isFinite(pct) && pct > HEAP_HIGH_PERCENT; }
 
 /* ------------------------------ held, from cached data ------------------------------ */
 
@@ -2476,11 +2495,11 @@ export function worstHealth() {
 }
 
 function updateBadge() {
-  const { total, critical: crit, warning: warn } = openAlertCounts();
+  const { total, critical: crit, high, warning: warn } = openAlertCounts();
   const w = worstHealth();
-  const color = crit ? '#d03b3b' : warn ? '#fab219' : w === 'green' ? '#0ca30c' : '#64748b';
+  const color = crit ? '#d03b3b' : high ? '#ff8c42' : warn ? '#fab219' : w === 'green' ? '#0ca30c' : '#64748b';
   setBadge(total ? String(total) : '', color,
-    total ? `ElasticPro — ${crit} critical, ${warn} warning` : 'ElasticPro — all clusters healthy');
+    total ? `ElasticPro — ${crit} critical, ${high} high, ${warn} warning` : 'ElasticPro — all clusters healthy');
 }
 
 /** Small, credential-free summary so the toolbar popup can render instantly. */

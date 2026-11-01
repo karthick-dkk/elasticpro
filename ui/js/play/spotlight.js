@@ -15,7 +15,8 @@ import { clusterKind, slmExempt } from '../core/cluster-kind.js';
 import { nodeLoadLevel } from '../pages/overview.js';
 import { cardValue, dailyPoints, BASIS_LABEL, basisOf, NEEDS_VERSION } from '../core/volume-daily.js';
 import { kpi, unknown, minutes, fitRows, openFor, pillEl } from './parts.js';
-import { SPOTLIGHT_WHY } from './status.js';
+import { SPOTLIGHT_WHY, nodeDiskCritical } from './status.js';
+import { toneOfCounts } from '../core/alert-levels.js';
 import { lastGood, listingState, endOf } from './snapshots.js';
 import { totalEvents, yesterdayRow } from './volume.js';
 import { spotlightPhase } from './engine.js';
@@ -40,6 +41,9 @@ function chips(ctx, currentId) {
     }));
 }
 
+/** The class a node row takes: '.blink-crit' for a node whose disk is a critical problem. */
+export const nodeRowBlink = (critical) => (critical ? '.blink-crit' : '');
+
 function nodesTable(ctx, d, fullest) {
   const disk = new Map(((fullest && fullest.nodes) || []).map((n) => [n.name, n]));
   const nodes = [...(d.nodes || [])].sort((a, b) => ((disk.get(b.name) || {}).pct || -1) - ((disk.get(a.name) || {}).pct || -1)
@@ -48,9 +52,12 @@ function nodesTable(ctx, d, fullest) {
   const pctCell = (p, tone) => (isFinite(p) ? h('span.pl-pc', bar(p, tone), h(`b.${tone}`, `${Math.round(p)} %`)) : unknown('–'));
   const rows = nodes.map((n) => {
     const dn = disk.get(n.name);
-    const dt = dn ? (dn.pct >= fullest.high ? 'red' : dn.pct >= fullest.low ? 'yellow' : 'green') : 'grey';
+    const crit = dn ? nodeDiskCritical(dn.pct, fullest) : false;
+    const dt = dn ? (crit ? 'red' : dn.pct >= fullest.low ? 'yellow' : 'green') : 'grey';
     const heap = Number(n['heap.percent']), cpu = Number(n.cpu);
-    return h('tr', h('td.pl-node', n.name, String(n.master || '').trim() === '*' ? ' ★' : ''),
+    // A node with a critical problem: a red bar at the left and the row blinks (docs/PLAY.md,
+    // "Blinks"). Every other row keeps the bar, transparent, so the columns do not move.
+    return h(`tr${nodeRowBlink(crit)}`, h('td.pl-node', n.name, String(n.master || '').trim() === '*' ? ' ★' : ''),
       h('td', dn ? pctCell(dn.pct, dt) : h('span.pl-unk', 'no data role')),
       h('td', pctCell(heap, LEVEL_TONE[nodeLoadLevel(heap, 'heap')])),
       h('td', pctCell(cpu, LEVEL_TONE[nodeLoadLevel(cpu, 'cpu')])));
@@ -105,10 +112,10 @@ function panel(ctx, c, days) {
     h('div.pl-kpis',
       kpi('Total events', events === null ? unknown(noVol) : num(events), 'live days in the record'),
       kpi('Disk used', disk ? `${Math.round(disk.percent)} %` : unknown(), disk ? `${bytes(disk.used)} of ${bytes(disk.total)}` : null,
-        s.fullest && s.fullest.pct >= s.fullest.high ? 'red' : ''),
+        s.fullest && nodeDiskCritical(s.fullest.pct, s.fullest) ? 'red' : ''),
       kpi('Heap', heapTop ? `${Math.round(heapTop.p)} %` : unknown(), heapTop ? `highest · ${heapTop.name}` : null,
         heapTop ? LEVEL_TONE[nodeLoadLevel(heapTop.p, 'heap')] : ''),
-      kpi('Open alerts', String(a.total), a.total ? `${a.critical} critical · ${a.warning} warning` : 'none', a.critical ? 'red' : a.warning ? 'yellow' : 'green'),
+      kpi('Open alerts', String(a.total), a.total ? `${a.critical} critical · ${a.high} high · ${a.warning} warning` : 'none', toneOfCounts(a) || 'green'),
       kpi('Volume · 7-day avg', avg === null ? unknown(noVol) : bytes(avg), 'per day')),
     h('div.pl-sbody',
       h('div.pl-scol', nodesTable(ctx, d, s.fullest)),
