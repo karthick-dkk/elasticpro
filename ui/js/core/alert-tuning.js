@@ -28,6 +28,7 @@
  */
 
 import { countLevels, worstLevel } from './alert-levels.js';
+import { heapOverHigh, HEAP_CLEAR_PERCENT, HEAP_RAISE_READINGS } from './alert-rules.js';
 
 /** Points below a threshold before a raised disk alert clears. */
 export const DISK_HYSTERESIS = 2;
@@ -41,6 +42,21 @@ export function diskLevel(pct, prev, warn, crit, band = DISK_HYSTERESIS) {
   if (pct >= crit || (prev === 'critical' && pct >= crit - band)) return 'critical';
   if (pct >= warn || (prev && pct >= warn - band)) return 'warning';
   return null;
+}
+
+/**
+ * One node's heap rule after one more node reading: `{streak, raised}`, from what it was
+ * (`prev`, or null). Raised once the heap has been over the High line (heapOverHigh) on
+ * HEAP_RAISE_READINGS readings in a row; once raised, held until it falls below
+ * HEAP_CLEAR_PERCENT. A reading with no heap figure changes nothing — unknown is not 0.
+ * Pure, so the flapping case is testable (alert-levels.test.mjs).
+ */
+export function heapStep(prev, pct, { clear = HEAP_CLEAR_PERCENT, readings = HEAP_RAISE_READINGS } = {}) {
+  const was = prev || { streak: 0, raised: false };
+  if (!Number.isFinite(pct)) return was;
+  if (was.raised) return pct < clear ? { streak: 0, raised: false } : { streak: was.streak + 1, raised: true };
+  const streak = heapOverHigh(pct) ? was.streak + 1 : 0;
+  return { streak, raised: streak >= readings };
 }
 
 const familyOf = (a) => String(a.key || '').split(':')[1] || '';

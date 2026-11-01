@@ -99,24 +99,51 @@ test('state: a failed SLM run is raised High', () => {
   assert.equal(a.level, 'high');
 });
 
-test('state: JVM heap strictly over 85 % on any node is one High alert naming the nodes; 85 or unread is not', () => {
-  st.state.data.get('c1').nodes = [nodeRow('es-1', 91), nodeRow('es-2', 85), nodeRow('es-3', null), nodeRow('es-4', 88)];
-  const heap = st.alerts().filter((x) => x.key === 'c1:heap');
+/** One node reading: a new node list, as each fetch makes — the same values or not. */
+const reading = (rows) => { st.state.data.get('c1').nodes = rows.map((r) => ({ ...r })); return st.alerts().filter((x) => x.key === 'c1:heap'); };
+
+test('state: JVM heap over 85 % on two readings in a row is one High alert naming the nodes; 85 or unread is not', () => {
+  const rows = [nodeRow('es-1', 91), nodeRow('es-2', 85), nodeRow('es-3', null), nodeRow('es-4', 88)];
+  assert.equal(reading(rows).length, 0, 'one reading over the line is not an alert yet');
+  const heap = reading(rows);
   assert.equal(heap.length, 1);
   assert.equal(heap[0].level, 'high');
   assert.deepEqual(heap[0].heapNodes.map((n) => n.name), ['es-1', 'es-4'], 'worst first; 85 % is not over 85; unread is not 0');
   assert.match(heap[0].detail, /es-1 91%, es-4 88%/);
+  // Recomputing without a new reading (a redraw) is not a reading: still raised, not doubly so.
+  assert.equal(st.alerts().filter((x) => x.key === 'c1:heap').length, 1);
   const [m] = st.openAlertsNow().filter((x) => x.family === 'heap');
   assert.deepEqual(m.items.map((i) => [i.label, i.value, i.level]), [['es-1', '91%', 'high'], ['es-4', '88%', 'high']]);
   assert.equal(m.count, 'on 2 nodes');
 
-  st.state.data.get('c1').nodes = [nodeRow('es-1', 85), nodeRow('es-2', null)];
-  assert.equal(st.alerts().filter((x) => x.key === 'c1:heap').length, 0);
+  // Held between 80 and 85; cleared below 80.
+  assert.deepEqual(reading([nodeRow('es-1', 82), nodeRow('es-2', null)])[0].heapNodes.map((n) => n.name), ['es-1'], 'held above the clear line');
+  assert.equal(reading([nodeRow('es-1', 79), nodeRow('es-2', null)]).length, 0, 'cleared below 80');
+});
+
+test('heap hysteresis: 86, 84, 86, 84 is not four alerts; once raised it holds until under 80', () => {
+  const run = (seq) => {
+    let s = null, opened = 0, wasUp = false;
+    const states = seq.map((pct) => { s = T.heapStep(s, pct); if (s.raised && !wasUp) opened++; wasUp = s.raised; return s.raised; });
+    return { opened, states };
+  };
+  assert.equal(run([86, 84, 86, 84]).opened, 0, 'never two readings in a row over 85: nothing raised, not four episodes');
+  const flap = run([86, 86, 84, 86, 84, 86, 81]);
+  assert.equal(flap.opened, 1, 'raised once and held through the flapping');
+  assert.deepEqual(flap.states, [false, true, true, true, true, true, true]);
+  assert.deepEqual(run([86, 86, 79, 86]).states, [false, true, false, false], 'under 80 clears; one reading over starts the count again');
+  assert.deepEqual(run([86, NaN, 86]).states, [false, false, true], 'a reading with no heap figure changes nothing');
+  assert.equal(R.HEAP_CLEAR_PERCENT, 80);
+  assert.equal(R.HEAP_RAISE_READINGS, 2);
+  // The same flapping through the rule itself: one alert, open throughout.
+  const seen = [86, 86, 84, 86, 84].map((pct) => reading([nodeRow('es-1', pct)]).length);
+  assert.deepEqual(seen, [0, 1, 1, 1, 1]);
 });
 
 test('state: an acknowledged High leaves every count; a held one was never in them', async () => {
   st.state.data.get('c1').slm = [policy('daily')];
-  st.state.data.get('c1').nodes = [nodeRow('es-1', 95)];
+  reading([nodeRow('es-1', 95)]);
+  reading([nodeRow('es-1', 95)]);
   st.invalidateAlerts();
   assert.deepEqual(st.openAlertCounts(), { total: 2, critical: 0, high: 2, warning: 0 });
   const m = st.openAlertsNow().find((x) => x.family === 'heap');
@@ -216,6 +243,14 @@ test('Play status: a High cluster is orange and says "High"; rank critical > hig
   assert.equal(crit.tone, 'red');
   assert.equal(red.tone, 'red', 'red health outranks a High alert');
   assert.ok(crit.rank > hi.rank && hi.rank > warn.rank);
+  // Tone first: a green-health cluster with one High alert sorts above a yellow-health cluster
+  // with nothing open, and above one with no data.
+  const yellowQuiet = St.clusterStatus(cluster, data('yellow', easy), { open: [] });
+  const noData = St.clusterStatus(cluster, null, {});
+  const warnMany = St.clusterStatus(cluster, data('yellow', easy), { open: Array.from({ length: 40 }, (_, i) => open('warning', 'ilm', `w${i}`)) });
+  assert.ok(hi.rank > yellowQuiet.rank, 'High on green outranks yellow health');
+  assert.ok(hi.rank > warnMany.rank, 'no number of warnings lifts a yellow tile above a High one');
+  assert.ok(yellowQuiet.rank > noData.rank && noData.rank > St.clusterStatus(cluster, data('green', easy), { open: [] }).rank, 'yellow > no data > green');
   assert.equal(St.worstAlert([open('warning', 'ilm', 'w'), open('high', 'heap', 'h'), open('warning', 'x', 'x')]).title, 'h');
 });
 
@@ -243,6 +278,18 @@ test('Play blinks: critical → blink-crit, High → blink-high, a node that lef
   assert.equal(V.runwayBlink(V.RUNWAY_RED_DAYS), '');
   assert.equal(V.runwayTone(20), 'yellow');
   assert.equal(V.runwayBlink(null), '');
+});
+
+test('heap colour: a cell over the High line is orange, the alert\'s colour, and its tooltip says the line', async () => {
+  const O = await import(url('ui/js/pages/overview.js'));
+  assert.equal(O.heapLevel(86), 'over');
+  assert.equal(O.heapLevel(95), 'over', 'past 90 too: the cell says what the alert says');
+  assert.equal(O.heapLevel(85), 'low');
+  assert.equal(O.heapLevel(50), 'ok');
+  assert.match(O.HEAP_TITLE, /over 85 %/);
+  const css = fs.readFileSync(path.join(ROOT, 'ui/css/app.css'), 'utf8');
+  assert.match(css, /\.cl-mini i\.over \{ background: var\(--high\); \}/);
+  assert.match(css, /\.pl-bar i\.orange \{ background: var\(--tv-orange\); \}/);
 });
 
 test('Play CSS: the blink rates, colour-only keyframes, and a steady highlight for reduced motion', () => {

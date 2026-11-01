@@ -19,7 +19,14 @@ import { byLevel, countLevels } from '../core/alert-levels.js';
 export const HEALTH_WORD = { green: 'Green', yellow: 'Yellow', red: 'Red', unreachable: 'Not answering', loading: 'No data' };
 /** The status word of a cluster whose worst open alert is High (and nothing makes it red). */
 export const HIGH_WORD = 'High';
-/** Worst first: a tile's place on the wall. */
+/**
+ * Worst first: a tile's place on the wall (and the spotlight's order). Its tone first — red
+ * (anything critical, red health, not answering) > orange (High) > yellow > no data > green —
+ * then, within a tone, health and how much is open. TONE_STEP is larger than anything the
+ * within-tone part can add up to on a real cluster, so no count lifts a tile into the next tone.
+ */
+const TONE_RANK = { red: 4, orange: 3, yellow: 2, grey: 1, green: 0 };
+const TONE_STEP = 100000;
 const HEALTH_RANK = { unreachable: 50, red: 40, yellow: 20, loading: 10, green: 0 };
 
 /**
@@ -82,8 +89,8 @@ export function clusterStatus(c, d, { open = [], nodes = null, client = null } =
   // A High cluster says so first: its health word is still true, but not the news.
   if (tone === 'orange') word = HIGH_WORD;
   const line = [word, reason ? `${reason}${where ? ` on ${where}` : ''}` : ''].filter(Boolean).join(' · ');
-  const rank = (HEALTH_RANK[st] || 0) + (left.length ? 30 : 0) + crit * 3 + high * 2 + warning
-    + (diskCrit ? 25 : 0);
+  const within = (HEALTH_RANK[st] || 0) + (left.length ? 30 : 0) + crit * 3 + high * 2 + warning + (diskCrit ? 25 : 0);
+  const rank = (TONE_RANK[tone] || 0) * TONE_STEP + Math.min(within, TONE_STEP - 1);
   return { state: st, word, reason, where, line, tone, rank, fullest, left };
 }
 

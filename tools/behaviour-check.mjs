@@ -4042,7 +4042,11 @@ consoleTabs: {
       const cnt = (id) => doc.getElementById(id);
       const levels = () => [...doc.querySelectorAll('#view .arow:not(.adown-row) > .arow-main > .apill')].map((x) => x.textContent);
       const a0 = st.state.data.get('a');
-      st.state.data.set('a', { ...a0, nodes: [{ name: 'es-hot-1', 'heap.percent': '93' }, { name: 'es-hot-2', 'heap.percent': '40' }] });
+      // Two node readings in a row over 85 % (the rule's hysteresis): each fetch is a new node list.
+      for (let i = 0; i < 2; i++) {
+        st.state.data.set('a', { ...a0, nodes: [{ name: 'es-hot-1', 'heap.percent': '93' }, { name: 'es-hot-2', 'heap.percent': '40' }] });
+        st.alerts();
+      }
       await acks.unacknowledge('a:heap');
       st.invalidateAlerts(); await go('alerts');
       const hiRows = [...doc.querySelectorAll('#view .arow')].filter((r) => r.querySelector(':scope > .arow-main > .apill.high'));
@@ -5129,7 +5133,7 @@ if (viaFleet) {
     {
       const was = st.state.data.get(shown.id);
       const nodes = (was.nodes && was.nodes.length ? was.nodes : [{ name: 'node-1' }]).map((n, i) => (i === 0 ? { ...n, 'heap.percent': '93' } : n));
-      st.state.data.set(shown.id, { ...was, nodes });
+      for (let i = 0; i < 2; i++) { st.state.data.set(shown.id, { ...was, nodes: nodes.map((x) => ({ ...x })) }); st.alerts(); }
       st.invalidateAlerts(); st.bus.emit('data', shown.id);
       await settleFor(1500);
       ok(!pPlay._debug().take.active, 'play: a High alert took the screen (only critical does)');

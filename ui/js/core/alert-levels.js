@@ -2,7 +2,7 @@
  * An alert's level — the one definition of what the levels are, their order and how many
  * of each are open. Three, worst first:
  *
- *   critical  red health, a node left, a disk past its high watermark, a cluster not answering
+ *   critical  red health, a disk past its high watermark, a cluster not answering, no master …
  *   high      a log delay over 60 min, JVM heap over 85 %, an SLM policy whose last run failed
  *   warning   everything else
  *

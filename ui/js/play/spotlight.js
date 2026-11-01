@@ -12,7 +12,7 @@ import { lineChart, signedPct } from '../lib/charts.js';
 import { alertCounts } from '../core/alert-tuning.js';
 import { lifecycleView } from '../core/lifecycle-errors.js';
 import { clusterKind, slmExempt } from '../core/cluster-kind.js';
-import { nodeLoadLevel } from '../pages/overview.js';
+import { nodeLoadLevel, heapLevel, HEAP_TITLE } from '../pages/overview.js';
 import { cardValue, dailyPoints, BASIS_LABEL, basisOf, NEEDS_VERSION } from '../core/volume-daily.js';
 import { kpi, unknown, minutes, fitRows, openFor, pillEl } from './parts.js';
 import { SPOTLIGHT_WHY, nodeDiskCritical } from './status.js';
@@ -27,7 +27,7 @@ export const DATASETS = ['health', 'nodes', 'policies', 'snapshots', 'ilm_assign
 
 export const isEmpty = (ctx) => !ctx.spot.order.length && ctx.watch.spotlight.whenEmpty !== 'allHealthy';
 
-const LEVEL_TONE = { high: 'red', low: 'yellow', ok: 'green' };
+const LEVEL_TONE = { high: 'red', over: 'orange', low: 'yellow', ok: 'green' };
 
 function chips(ctx, currentId) {
   return h('div.pl-chips', h('span.pl-chiplabel', 'In the spotlight'),
@@ -59,11 +59,11 @@ function nodesTable(ctx, d, fullest) {
     // "Blinks"). Every other row keeps the bar, transparent, so the columns do not move.
     return h(`tr${nodeRowBlink(crit)}`, h('td.pl-node', n.name, String(n.master || '').trim() === '*' ? ' ★' : ''),
       h('td', dn ? pctCell(dn.pct, dt) : h('span.pl-unk', 'no data role')),
-      h('td', pctCell(heap, LEVEL_TONE[nodeLoadLevel(heap, 'heap')])),
+      h('td', pctCell(heap, LEVEL_TONE[heapLevel(heap)])),
       h('td', pctCell(cpu, LEVEL_TONE[nodeLoadLevel(cpu, 'cpu')])));
   });
   const body = h('tbody', rows.length ? rows : h('tr', h('td', { colSpan: 4 }, h('span.pl-unk', 'no node list'))));
-  const box = h('div.pl-nodes', h('table.pl-tbl', h('thead', h('tr', h('th', 'Node'), h('th', 'Disk'), h('th', 'Heap'), h('th', 'CPU'))), body));
+  const box = h('div.pl-nodes', h('table.pl-tbl', h('thead', h('tr', h('th', 'Node'), h('th', 'Disk'), h('th', { title: HEAP_TITLE }, 'Heap'), h('th', 'CPU'))), body));
   ctx.afterMount(() => fitRows(box, rows, (k) => h('div.pl-more', `+${k} more nodes`)));
   return box;
 }
@@ -114,7 +114,7 @@ function panel(ctx, c, days) {
       kpi('Disk used', disk ? `${Math.round(disk.percent)} %` : unknown(), disk ? `${bytes(disk.used)} of ${bytes(disk.total)}` : null,
         s.fullest && nodeDiskCritical(s.fullest.pct, s.fullest) ? 'red' : ''),
       kpi('Heap', heapTop ? `${Math.round(heapTop.p)} %` : unknown(), heapTop ? `highest · ${heapTop.name}` : null,
-        heapTop ? LEVEL_TONE[nodeLoadLevel(heapTop.p, 'heap')] : ''),
+        heapTop ? LEVEL_TONE[heapLevel(heapTop.p)] : ''),
       kpi('Open alerts', String(a.total), a.total ? `${a.critical} critical · ${a.high} high · ${a.warning} warning` : 'none', toneOfCounts(a) || 'green'),
       kpi('Volume · 7-day avg', avg === null ? unknown(noVol) : bytes(avg), 'per day')),
     h('div.pl-sbody',

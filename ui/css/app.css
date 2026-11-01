@@ -41,7 +41,7 @@
      nobody can read. Inks are themed, because ink must contrast with what it sits on. */
   --good-ink: #0a7a0a; --warning-ink: #8a5300; --serious-ink: #a03c14; --critical-ink: #b02525;
   /* High, the level between warning and critical (core/alert-levels.js): orange. */
-  --high-bg: #ffeedd; --high-ink: #a3460a;
+  --high-bg: #ffeedd; --high-ink: #b5380e;   /* 5.2:1 on --high-bg; redder than --warning-ink so the two pills part */
 
   --grid: #e6e5e1;
   --shadow: 0 1px 2px rgba(11,11,11,.06), 0 8px 24px rgba(11,11,11,.06);
@@ -1531,6 +1531,7 @@ table.cl-tbl > tbody > tr.cl-detail-row > td { text-align: left; }
 .cl-mini i { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 3px; background: var(--good); }
 .cl-mini i.low { background: var(--warning); }
 .cl-mini i.high { background: var(--critical); }
+.cl-mini i.over { background: var(--high); }   /* heap past the High alert's line (overview.js heapLevel) */
 .cl-star { color: var(--warning-ink); }
 .cl-roles { display: inline-flex; gap: 3px; flex-wrap: wrap; justify-content: center; }
 .cl-role {
@@ -1951,6 +1952,7 @@ html.play .main, html.play .page { padding: 0; margin: 0; max-width: none; }
 .pl-bar i { display: block; height: 100%; border-radius: .3em; background: var(--tv-green); }
 .pl-bar i.yellow { background: var(--tv-yellow); }
 .pl-bar i.red { background: var(--tv-red); }
+.pl-bar i.orange { background: var(--tv-orange); }
 .pl-bar i.grey { background: var(--tv-muted); }
 .pl-chart { background: var(--tv-panel); border: 1px solid var(--tv-line); border-radius: .6em; padding: .5em .8em; flex: 0 1 auto; min-height: 0; overflow: hidden; }
 .pl-chead { display: flex; align-items: center; gap: 1em; font-size: .95em; margin-bottom: .2em; white-space: nowrap; min-width: 0; }

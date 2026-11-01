@@ -359,16 +359,18 @@ counts, filters or colours by level reads it there:
 | Level | Colour | Rules |
 |---|---|---|
 | **Critical** | red | cluster not answering; health red; disk over the critical threshold / a node past its high watermark (and the flood-stage balance row); disk capacity fell; no master; master moved while not green; a repository whose runs keep failing |
-| **High** | orange (`--high`, Play `--tv-orange` #ff8c42) | log delay over 60 min (a device past its critical delay, `classify` CRITICAL); JVM heap over 85 % on any node (`heap`, new, `HEAP_HIGH_PERCENT`); an SLM policy whose last run failed (`slm-fail`) |
+| **High** | orange (`--high`, Play `--tv-orange` #ff8c42) | log delay over 60 min (a device past its critical delay, `classify` CRITICAL); JVM heap over 85 % on any node (`heap`, new) — raised after two node readings in a row over 85 %, cleared only below 80 % (`HEAP_HIGH_PERCENT` / `HEAP_RAISE_READINGS` / `HEAP_CLEAR_PERCENT` in `alert-rules.js`, `heapStep` in `alert-tuning.js`, the disk rule's kind of hysteresis); the node tables colour a heap over 85 % orange, the alert's colour, and say the line in the column's tooltip; an SLM policy whose last run failed (`slm-fail`) |
 | **Warning** | yellow | everything else: health yellow, disk over the warning threshold, disk balance, disk not accounted for, capacity grew, master moved on a green cluster, ILM errors, SLM stopped, no recent snapshot, repository warnings, log delay 30–60 min, field-volume spikes, automations |
 
 Changed in this release: `slm-fail` critical → High; `log-delay` past the red line critical →
-High; `heap` is new, High. An automation rule can be set to raise at any of the three.
+High; `heap` is new, High. An automation rule can be set to raise at any of the three. The
+`log-delay` alert's words say "over 60 min late", not "critical".
 
 - **Counts.** High is an open alert like any other: the Alerts summary reads "N critical · N
   high · N warning", its Severity filter has a High button, the CSV's `level` column says
   `high`. The Alerts tab badge is red when anything critical is open, **orange** when the worst
-  open is High, otherwise yellow; the browser-extension badge likewise. Acknowledged, silenced
+  open is High, otherwise yellow — and says the worst level in words on hover and to a screen
+  reader, not by colour alone; the browser-extension badge likewise. Acknowledged, silenced
   and held alerts are counted nowhere, whatever their level.
 - **Notifications.** A new High is announced like a warning (a yellow bell entry and toast).
   What is critical-only stays so: an error-coloured notification, Play's takeover and chime,
@@ -387,7 +389,8 @@ High; `heap` is new, High. An automation rule can be set to raise at any of the 
   writes the new trigger.
 - **Play.** A High cluster's tile is orange, says "High" and blinks orange every 2.4 s; the
   Alerts slide shows HIGH rows between CRIT and WARN and counts High under Open now (see
-  docs/PLAY.md, "Blinks").
+  docs/PLAY.md, "Blinks"). A failed SLM run and logs over 60 min late are High, so they no
+  longer take over the Play screen: only critical does.
 
 **Open** means neither acknowledged nor silenced, and every count uses that one definition
 (`openAlertsNow()` / `openAlertCounts()`): the Clusters summary, the nav badge, the top bar,

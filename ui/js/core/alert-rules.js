@@ -25,11 +25,19 @@ import { managedDefaults } from './managed.js';
  */
 
 /**
- * JVM heap above this, on any node, is a High alert (the owner's rule, 2026-11-01). Its own
- * figure, not the node table's colours (pages/overview.js NODE_LOAD_LEVELS, amber at 75 and
- * red at 90): those say how loaded a node looks, this says when to raise it.
+ * The heap rule's figures, in one place (the owner's rule, 2026-11-01): a node's JVM heap
+ * strictly over HEAP_HIGH_PERCENT on HEAP_RAISE_READINGS node readings in a row raises a High
+ * alert, and it clears only when the heap falls below HEAP_CLEAR_PERCENT — so a node that
+ * collects garbage around 85 % does not open and close an alert on every refresh
+ * (alert-tuning.js heapStep). The node tables colour a heap over HEAP_HIGH_PERCENT orange,
+ * the alert's colour, so a cell and the alert it raises agree (heapOverHigh).
  */
 export const HEAP_HIGH_PERCENT = 85;
+export const HEAP_CLEAR_PERCENT = 80;
+export const HEAP_RAISE_READINGS = 2;
+
+/** Whether one heap reading is over the High line (not yet an alert: see heapStep). */
+export function heapOverHigh(pct) { return Number.isFinite(pct) && pct > HEAP_HIGH_PERCENT; }
 
 /**
  * `level` is the rule's usual level — what the Config list shows. A rule can raise below it
@@ -76,7 +84,8 @@ export const ALERT_RULES = [
     zabbixWhy: 'Logs are arriving behind real time — searches and detections see the past, not now. '
        + 'Critical when a device is past its critical delay, warning when only delayed.' },
   { id: 'heap', page: 'shards', label: `JVM heap above ${HEAP_HIGH_PERCENT}%`, level: 'high',
-    why: 'A node short of heap collects garbage instead of answering, and is the next to leave the cluster.' },
+    why: `A node short of heap collects garbage instead of answering, and is the next to leave the cluster. `
+       + `Raised after ${HEAP_RAISE_READINGS} readings in a row over ${HEAP_HIGH_PERCENT}%, cleared below ${HEAP_CLEAR_PERCENT}%.` },
   { id: 'automation', page: 'automation', label: 'Automation rule has work waiting', level: 'warning',
     why: 'A rule you set to notify found indices matching it. Nothing ran: the work waits for a person in the app.' },
   { id: 'volume', page: 'volume', label: 'Field volume spike', level: 'warning',

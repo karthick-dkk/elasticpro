@@ -419,11 +419,13 @@ function renderNav() {
     // gets a badge — the tabs used to show a shortcut number that no longer exists.
     if (id !== 'alerts') continue;
     const want = a.length ? `${tone}:${a.length}` : '';
+    // Said in words too, not by colour alone: the worst open level, on hover and to a screen reader.
+    const worstWord = crit ? 'critical' : tone === 'high' ? 'high' : 'warning';
     let badge = b.querySelector('.pill');
     if ((badge ? badge.dataset.v : '') === want) continue;
     if (badge) badge.remove();
     if (want) {
-      badge = h('span.pill', { class: tone, style: { fontSize: '10px', padding: '0 5px' } }, String(a.length));
+      badge = h('span.pill', { class: tone, title: `${a.length} open — worst is ${worstWord}`, 'aria-label': `${a.length} open alerts, worst ${worstWord}`, style: { fontSize: '10px', padding: '0 5px' } }, String(a.length));
       badge.dataset.v = want;
       b.append(badge);
     }

@@ -4,7 +4,7 @@ import { EsClient, primeWorker, setBadge, requestStats, workerStatus,
          fleetState, clusterDataset, refreshFleet, withFreshReads } from './es.js';
 // lib/fmt is a leaf: no cycle, and two alert sentences need to read like the rest of the UI.
 import { bytes as bytesish, ago, dur } from '../lib/fmt.js';
-import { diskLevel, tuneAlerts, alertCounts } from './alert-tuning.js';
+import { diskLevel, heapStep, tuneAlerts, alertCounts } from './alert-tuning.js';
 import { isAcked, ackFor, acksRev } from './acks.js';
 import { mergeAlerts, isOpen, holdUnreachable } from './alert-groups.js';
 import { HELD_DATASETS, HELD_MAX_AGE_MS, stampHeld, evaluatedAt } from './alert-held.js';
@@ -1990,8 +1990,8 @@ function clusterAlerts(c, d, add, { now = Date.now(), live = true } = {}) {
     // are searches seeing the past, not data lost (the owner's rule, 2026-11-01).
     if (by.CRITICAL) {
       add({ key: `${c.id}:log-delay`, level: 'high', cluster: c,
-        title: `${c.name}: ${by.CRITICAL} device(s) critically late shipping logs`,
-        detail: `${by.CRITICAL} critical, ${by.DELAYED || 0} delayed of ${ds.summary.devices}.${worst}` });
+        title: `${c.name}: ${by.CRITICAL} device(s) shipping logs over 60 min late`,
+        detail: `${by.CRITICAL} over 60 min, ${by.DELAYED || 0} 30–60 min late, of ${ds.summary.devices}.${worst}` });
     } else if (by.DELAYED) {
       add({ key: `${c.id}:log-delay`, level: 'warning', cluster: c,
         title: `${c.name}: ${by.DELAYED} device(s) shipping logs late`,
@@ -2035,11 +2035,21 @@ function clusterAlerts(c, d, add, { now = Date.now(), live = true } = {}) {
       detail: bal.reasons[0] + (act ? `  Suggested: ${act.title} (${act.method} ${act.path}).` : '') });
   }
 
-  // JVM heap past HEAP_HIGH_PERCENT on any node (alert-rules.js), from the same node rows the
-  // node table reads. A node whose heap was not read is left out, never counted as 0.
+  // JVM heap, per node, from the same node rows the node table reads — with hysteresis
+  // (alert-tuning.js heapStep): raised after two readings in a row over 85 %, cleared below
+  // 80 %. A reading is a new node list (each fetch parses a new one; a redraw does not), and
+  // only a live one moves the rule: a held evaluation reads it, never writes it. A node whose
+  // heap was not read is left out, never counted as 0.
   {
-    const hot = (d.nodes || []).map((n) => ({ name: n.name, pct: Number(n['heap.percent']) }))
-      .filter((n) => n.name && heapHigh(n.pct)).sort((a, b) => b.pct - a.pct);
+    const rows = (d.nodes || []).map((n) => ({ name: n.name, pct: Number(n['heap.percent']) })).filter((n) => n.name);
+    let seen = heapHeld.get(c.id);
+    if (live && (!seen || seen.reading !== d.nodes)) {
+      const prev = seen ? seen.nodes : new Map();
+      seen = { reading: d.nodes, nodes: new Map(rows.map((n) => [n.name, heapStep(prev.get(n.name) || null, n.pct)])) };
+      heapHeld.set(c.id, seen);
+    }
+    const hot = rows.filter((n) => Number.isFinite(n.pct) && seen && seen.nodes.get(n.name) && seen.nodes.get(n.name).raised)
+      .sort((a, b) => b.pct - a.pct);
     if (hot.length) {
       add({ key: `${c.id}:heap`, level: 'high', cluster: c, heapNodes: hot,
         title: `${c.name}: JVM heap above ${HEAP_HIGH_PERCENT}% on ${hot.length === 1 ? hot[0].name : `${hot.length} nodes`}`,
@@ -2134,8 +2144,8 @@ function clusterAlerts(c, d, add, { now = Date.now(), live = true } = {}) {
   });
 }
 
-/** Whether one node's heap reading raises the heap rule: strictly over HEAP_HIGH_PERCENT. */
-export function heapHigh(pct) { return Number.isFinite(pct) && pct > HEAP_HIGH_PERCENT; }
+/** The heap rule's state per cluster: the node list it last stepped on, and each node's {streak, raised}. */
+const heapHeld = new Map();
 
 /* ------------------------------ held, from cached data ------------------------------ */
 

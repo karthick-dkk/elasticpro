@@ -36,8 +36,9 @@ test('a device past its critical delay (over 60 min) raises a High alert naming 
   s.setDelaySummary('c1', summarise([rec('fw-1', 'OK', 2), rec('proxy-3', 'CRITICAL', 95), rec('fw-2', 'DELAYED', 41)]));
   const [a] = delayAlerts();
   assert.equal(a.level, 'high', 'log delay over 60 min is High, not critical (2026-11-01)');
-  assert.match(a.title, /1 device\(s\) critically late/);
-  assert.match(a.detail, /1 critical, 1 delayed of 3/);
+  assert.match(a.title, /1 device\(s\) shipping logs over 60 min late/);
+  assert.doesNotMatch(`${a.title} ${a.detail}`, /critical/, 'a High alert does not call itself critical');
+  assert.match(a.detail, /1 over 60 min, 1 30–60 min late, of 3/);
   assert.match(a.detail, /proxy-3, 95 min/);
 });
 

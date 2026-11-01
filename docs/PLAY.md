@@ -49,7 +49,9 @@ be read says "no data" / "not measured", never 0.
 
 ### Slides (canvas boards 2 to 7)
 
-1. **Fleet wall**: a tile per visible cluster, worst first: name, status line, nodes x/y, fullest
+1. **Fleet wall**: a tile per visible cluster, worst first — by tone first (red: anything
+   critical, red health, not answering > orange: High > yellow > no data > green), then health
+   and how much is open within a tone (`status.js` `rank`, which the spotlight's order reads too): name, status line, nodes x/y, fullest
    disk %, cluster log delay, open alerts, and **delayed devices** as three counts
    (green < 30 min, yellow 30–60 min inclusive, red > 60 min). A cluster with a node that left
    **blinks every 3 s** until the node is back (or is forgotten). A tile is red (critical),
