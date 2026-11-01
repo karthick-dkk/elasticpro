@@ -522,12 +522,6 @@ const polDefaults = () => (pol && pol.defaults) || FALLBACK_DEFAULTS;
 /** What the form may hold: BOUNDS under the request gate's caps, as this core reported them. */
 const polBounds = () => boundsUnder(pol && pol.gate);
 
-/** The stop the core reported, as the form's fields: sent back as it was, so Save never begins or lifts one. */
-function stopNow() {
-  const s = (pol && pol.policy && pol.policy.paused) || {};
-  return { pausedAll: !!s.all, pausedMinutes: s.minutes, pausedSince: s.since || 0 };
-}
-
 /** The form as typed, before any clamping — fromForm decides what survives. */
 function readPolicyForm() {
   const v = (id) => { const el = host && host.querySelector(`#${id}`); return el ? el.value.trim() : ''; };
@@ -541,8 +535,6 @@ function readPolicyForm() {
     perCluster: v('pol-per'),
     tunnel: v('pol-tunnel'),
     timeoutMs: v('pol-timeout'),
-    // The emergency stop is not set here (Request Centre); saving keeps the one in force.
-    ...stopNow(),
   };
 }
 
@@ -562,8 +554,11 @@ function resetPolicyForm() {
 
 async function savePolicy() {
   const { policy, problems } = fromForm(readPolicyForm(), polDefaults(), polBounds());
+  // The emergency stop is not this form's: it has its own messages (Request Centre), and the
+  // core ignores `paused` in POLICY_SET — so a form opened before a stop began never lifts it.
+  const { paused: _stop, ...rest } = policy;
   let res;
-  try { res = await policySet(policy); } catch (e) { res = { ok: false, message: e.message || String(e) }; }
+  try { res = await policySet(rest); } catch (e) { res = { ok: false, message: e.message || String(e) }; }
   if (!res || !res.ok) {
     polNote = { text: `Not saved: ${(res && res.message) || 'refused'}`, cls: 'banner err' };
     toast(polNote.text, 'err', 8000, { key: 'request-policy' });
@@ -1520,9 +1515,16 @@ async function loadVolume() {
   if (changed || vol.unknown) { if (host && host.isConnected && activeSection() && activeSection().id === 'volume') draw(); }
 }
 
-/** Every input of the form as a volume object; a blank one is left out (override: inherit). */
+/**
+ * Every input of the form as a volume object; a blank one is left out (override: inherit).
+ * A locked input (drawn disabled: config.txt manages it) is never read: what it shows is
+ * config.txt's value, not anything typed. The managed set can change between the draw and the
+ * Save — the app re-reads it from the core's PING every 10 s — and Save used to decide from
+ * the set at that moment, so a key config.txt stopped managing meanwhile had its old,
+ * locked value written into the clusters file.
+ */
 function readVolumeForm() {
-  const g = (id) => { const el = $(`#${id}`); return el ? el.value.trim() : ''; };
+  const g = (id) => { const el = $(`#${id}`); return el && !el.disabled ? el.value.trim() : ''; };
   const out = {};
   const put = (path, v) => { if (v !== '' && !(Array.isArray(v) && !v.length)) setPath(out, path, v); };
   const n = (id) => (g(id) === '' ? '' : Number(g(id)));

@@ -168,7 +168,7 @@ export function policyEffect(policy, { clusters = 0, unreachable = 0 } = {}) {
   const out = (idle, open) => ({ mode, auto, why, idle, open });
   const active = p.paused && p.paused.all ? 0 : clusters;
   if (!clusters) return out({ perMinute: 0, text: 'no requests: no clusters are configured.' }, { perMinute: 0, text: 'nothing to ask.' });
-  if (!active) return out({ perMinute: 0, text: 'no requests: the emergency stop is on.' }, { perMinute: 0, text: 'nothing new starts until it ends or an administrator lifts it.' });
+  if (!active) return out({ perMinute: 0, text: 'no requests: the emergency stop is on.' }, { perMinute: 0, text: 'nothing new starts until it ends or an operator or administrator lifts it.' });
   const down = Math.min(Math.max(0, unreachable), active);
   const up = active - down;
   const pageOnly = `what that page shows, for the clusters on it, kept fresh while it is open and for ${watch} min after`;
@@ -362,9 +362,34 @@ export function pausedLine(p, { now = Date.now() } = {}) {
   const when = q.since > 0 ? ` since ${clock(q.since, now)}` : '';
   const who = q.by ? `, by ${q.by}` : '';
   const left = q.until > now ? Math.max(1, Math.ceil((q.until - now) / 60000)) : 0;
-  const ends = left ? ` It ends by itself at ${clock(q.until, now)} (in ${left} min); an administrator can end it sooner`
-    : ' An administrator can end it';
+  const ends = left ? ` It ends by itself at ${clock(q.until, now)} (in ${left} min); an operator or administrator can end it sooner`
+    : ' An operator or administrator can end it';
   return `Emergency stop: no request goes to any cluster${when}${who}.${ends} (the button at the top, or Request Centre → Resume now).`;
+}
+
+/**
+ * Whether this caller may begin or end the emergency stop (POLICY_PAUSE / POLICY_RESUME), as
+ * the core decides it (fleet/policy.rs may_stop): an operator or an admin; not an operator
+ * limited to some clusters (`scoped`), because the stop holds every cluster; never a display
+ * link. `caller` is WHOAMI's `{name, role, scoped, playOnly}`; null is the portable build,
+ * which has no accounts. Only what is offered — the core refuses the rest either way.
+ */
+export function mayStop(caller) {
+  if (caller == null) return true;
+  if (caller.playOnly || caller.scope === 'play_only') return false;
+  if (caller.role === 'admin') return true;
+  return caller.role === 'operator' && !caller.scoped;
+}
+
+/**
+ * Why this caller may not begin or end the stop when the role alone would allow it: an
+ * operator limited to some clusters. '' for everybody else (pausedLine already says who can).
+ */
+export function stopRefusal(caller) {
+  if (caller && caller.role === 'operator' && caller.scoped && !caller.playOnly) {
+    return 'It holds every cluster, so an operator limited to some clusters cannot begin or end it: ask an administrator, or an operator who sees every cluster.';
+  }
+  return '';
 }
 
 /** The question asked before the emergency stop begins, for how long it was chosen. */

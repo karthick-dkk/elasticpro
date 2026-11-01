@@ -66,7 +66,7 @@ async function load() {
 
 const ROLE_HELP = {
   admin: 'Everything: accounts, secrets, the config, removing clusters, and writing to clusters.',
-  operator: 'Runs the fleet: every cluster read-only (GET and searches), alerts, silences, automation, and adding, changing or switching off a cluster — not removing one, not its credential, not accounts or the rest of the config.',
+  operator: 'Runs the fleet: every cluster read-only (GET and searches), alerts, silences, automation, the emergency stop, and adding, changing or switching off a cluster — not removing one, not its credential, not accounts or the rest of the config.',
   user: 'Read-only: clusters and the REST console (GET and searches). No Automation or Config.',
   guest: 'The dashboard only — no index names.',
 };
@@ -633,7 +633,7 @@ export function editUser(existing) {
         : null,
       field('Access', select('acct-role', existing ? existing.role : 'user', [
         ['user', 'View (user) — read-only clusters and REST console; no Automation or Config'],
-        ['operator', 'Operate (operator) — every cluster read-only, alerts and silences, no cluster changes'],
+        ['operator', 'Operate (operator) — every cluster read-only, alerts and silences, the emergency stop, no cluster changes'],
         ['admin', 'Manage (admin) — everything: cluster changes, accounts, secrets, config'],
         ['guest', 'Dashboard (guest) — the dashboard only, no index names'],
       ]), roleHint),

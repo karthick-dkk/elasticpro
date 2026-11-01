@@ -348,61 +348,9 @@ async fn a_node_missing_from_a_nodes_answer_has_left_until_forgotten_and_it_surv
 
 /* ----------------------------- shared acknowledgements ----------------------------- */
 
-/// The audit lines written while `f` runs (JSON, as the bridge writes them).
-#[derive(Clone, Default)]
-struct Lines(Arc<Mutex<Vec<u8>>>);
-
-impl std::io::Write for Lines {
-    fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
-        self.0.lock().unwrap().extend_from_slice(b);
-        Ok(b.len())
-    }
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
-#[tokio::test]
-async fn acknowledgements_are_shared_audited_and_cut_to_what_the_caller_sees() {
-    let dir = TempDir::new("play-acks");
-    let c = hosted(&dir);
-    let s = admin_session(&c).await;
-    let es = cluster(Arc::new(Mutex::new(vec!["n1"]))).await;
-    prime(&c, &s, &es).await;
-    let lines = Lines::default();
-    let sub = tracing_subscriber::fmt().json().with_writer({ let l = lines.clone(); move || l.clone() })
-        .with_max_level(tracing::Level::INFO).finish();
-    let _guard = tracing::subscriber::set_default(sub);
-
-    let set = admin(&c, &s, json!({ "type": "ACK_SET", "key": "c1:disk:hot", "note": "vendor ticket 4412",
-        "record": { "acked": true, "ackedAt": 1, "ackedBy": "someone", "notes": [] } })).await;
-    assert_eq!(set["ok"], json!(true), "{set}");
-    assert_eq!(set["ack"]["by"], json!("Admin"));
-    assert_eq!(set["ack"]["record"]["ackedBy"], json!("Admin"), "the server says who");
-    assert_eq!(admin(&c, &s, json!({ "type": "ACK_SET", "key": "c2:disk" })).await["ok"], json!(true));
-    let list = admin(&c, &s, json!({ "type": "ACK_LIST" })).await;
-    assert_eq!(list["acks"].as_object().unwrap().len(), 2, "{list}");
-    // It is in the file, not in a browser.
-    assert!(std::fs::read_to_string(dir.join("acks.json")).unwrap().contains("c1:disk:hot"));
-
-    // A display link for c1 sees c1's acknowledgement only.
-    let (_, secret) = create(&c, &s, json!({ "name": "c1 wall", "clusters": ["c1"] })).await;
-    let tok = exchange(&c, &secret, ip("10.0.0.1")).await["session"].as_str().unwrap().to_string();
-    let seen = as_display(&c, &tok, json!({ "type": "ACK_LIST" }), ip("10.0.0.1")).await;
-    assert_eq!(seen["acks"].as_object().unwrap().keys().collect::<Vec<_>>(), vec!["c1:disk:hot"], "{seen}");
-
-    let clr = admin(&c, &s, json!({ "type": "ACK_CLEAR", "key": "c1:disk:hot" })).await;
-    assert_eq!(clr["ok"], json!(true), "{clr}");
-    assert_eq!(admin(&c, &s, json!({ "type": "ACK_LIST" })).await["acks"].as_object().unwrap().len(), 1);
-    assert_eq!(admin(&c, &s, json!({ "type": "ACK_SET", "key": "" })).await["kind"], json!("bad_request"));
-
-    let text = String::from_utf8(lines.0.lock().unwrap().clone()).unwrap();
-    let audit: Vec<&str> = text.lines().filter(|l| l.contains("\"target\":\"audit\"")).collect();
-    assert!(audit.iter().any(|l| l.contains("alert acknowledgement set") && l.contains("c1:disk:hot") && l.contains("\"user\":\"Admin\"")), "{text}");
-    assert!(audit.iter().any(|l| l.contains("alert acknowledgement cleared") && l.contains("c1:disk:hot")), "{text}");
-    assert!(!text.contains("vendor ticket 4412"), "a note is counted, not copied into the log");
-    assert!(!text.contains(&secret) && !text.contains(PASSWORD), "no secret is ever logged");
-}
+// The acknowledgement test lives in tests/play_audit.rs, a binary of its own: it captures
+// audit lines with a thread-local subscriber, which other tests in this binary (running in
+// parallel, hitting the same ACK_SET callsite) could make miss its first line.
 
 /* ---------------------------- shared measurement cache ---------------------------- */
 

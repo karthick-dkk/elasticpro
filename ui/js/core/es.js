@@ -133,7 +133,8 @@ export { refreshFleet as refresh };
 export const eventsTicket = () => send({ type: 'EVENTS_TICKET' });
 /**
  * The request policy (Config → Requests): when the poller goes to the clusters, how hard,
- * and whether at all. GET is a user's (the strip says "emergency stop" from it); SET an admin's.
+ * and whether at all. GET is a user's (the strip says "emergency stop" from it); SET an admin's,
+ * and the core ignores `paused` in it: the emergency stop is policyPause / policyResume, below.
  * Reply: {ok, policy, defaults, effective: {dataset: 'background'|'onDemand'}, stored,
  * saved?, warning?, running}. policy = {mode: 'background'|'hybrid'|'on-demand',
  * intervalsSec: {dataset: s}, watchMinutes, concurrency: {global, perCluster, tunnel},
@@ -141,6 +142,13 @@ export const eventsTicket = () => send({ type: 'EVENTS_TICKET' });
  */
 export const policyGet = () => send({ type: 'POLICY_GET' });
 export const policySet = (policy) => send({ type: 'POLICY_SET', policy });
+/**
+ * The emergency stop alone, begun for `minutes` (15, 30 or 60) or ended: an operator's as
+ * well as an admin's, and nothing else in the policy changes (fleet/mod.rs policy_pause_msg).
+ * A stop asked for while one holds keeps the one in force. Answered like POLICY_SET.
+ */
+export const policyPause = (minutes) => send({ type: 'POLICY_PAUSE', minutes });
+export const policyResume = () => send({ type: 'POLICY_RESUME' });
 
 /** Ask the worker what it is currently enforcing (source of truth, not the UI's copy). */
 export async function workerStatus() {

@@ -97,8 +97,8 @@ async fn a_stop_is_stamped_by_the_server_keeps_its_end_and_a_pause_with_no_end_i
     let c = portable(&dir);
     let r = set(&c, json!({ "mode": "background" })).await;
     assert!(r["policy"]["paused"].get("since").is_none(), "nothing stopped, nothing stamped: {r}");
-    // A new stop: no `since` from the page. The server stamps since and until.
-    let r = set(&c, json!({ "paused": { "all": true, "minutes": 30, "since": 0, "until": 1, "by": "somebody else" } })).await;
+    // A new stop: the server stamps since and until.
+    let r = c.handle(json!({ "type": "POLICY_PAUSE", "minutes": 30 })).await;
     let since = r["policy"]["paused"]["since"].as_u64().unwrap();
     let until = r["policy"]["paused"]["until"].as_u64().unwrap();
     assert!(since > 5, "{r}");
@@ -107,9 +107,9 @@ async fn a_stop_is_stamped_by_the_server_keeps_its_end_and_a_pause_with_no_end_i
     let st = c.handle(json!({ "type": "FLEET_STATE" })).await;
     assert_eq!((st["policy"]["pausedSince"].clone(), st["policy"]["pausedUntil"].clone()), (json!(since), json!(until)), "{st}");
     assert_eq!(st["policy"]["pausedAll"], json!(true), "{st}");
-    // Another change while it holds keeps when it began and ends: nobody extends it by saving.
+    // Asked again while it holds: when it began and ends are kept — nobody extends it.
     tokio::time::sleep(Duration::from_millis(20)).await;
-    let r = set(&c, json!({ "mode": "hybrid", "paused": { "all": true, "minutes": 60, "since": since } })).await;
+    let r = c.handle(json!({ "type": "POLICY_PAUSE", "minutes": 60 })).await;
     assert_eq!((r["policy"]["paused"]["since"].clone(), r["policy"]["paused"]["until"].clone()), (json!(since), json!(until)), "{r}");
     // …and survives a restart.
     drop(c);
@@ -117,11 +117,9 @@ async fn a_stop_is_stamped_by_the_server_keeps_its_end_and_a_pause_with_no_end_i
     let st = c.handle(json!({ "type": "FLEET_STATE" })).await;
     assert_eq!(st["policy"]["pausedUntil"], json!(until), "{st}");
     // Lifting it clears the stamp.
-    let r = set(&c, json!({ "paused": { "all": false } })).await;
+    let r = c.handle(json!({ "type": "POLICY_RESUME" })).await;
     assert!(r["policy"]["paused"].get("since").is_none(), "{r}");
-    // A form still showing the stop that just ended does not begin it again.
-    let r = set(&c, json!({ "paused": { "all": true, "minutes": 30, "since": since } })).await;
-    assert_eq!(r["policy"]["paused"]["all"], json!(false), "a stop that ended was begun again: {r}");
+    assert_eq!(r["policy"]["paused"]["all"], json!(false), "{r}");
     drop(c);
     // What 0.3.43 left behind — paused for everyone with no end, and one cluster paused —
     // is dropped when the next core reads it.
@@ -130,6 +128,42 @@ async fn a_stop_is_stamped_by_the_server_keeps_its_end_and_a_pause_with_no_end_i
     let st = c.handle(json!({ "type": "FLEET_STATE" })).await;
     assert_eq!(st["policy"]["pausedAll"], json!(false), "{st}");
     assert_eq!(st["policy"]["mode"], json!("hybrid"), "the rest of the file is kept: {st}");
+}
+
+#[tokio::test]
+async fn policy_set_never_begins_changes_or_lifts_the_stop() {
+    let dir = TempDir::new("policy-set-keeps-stop");
+    let c = hosted(&dir);
+    let (admin, s) = sessions(&c, &[("olga", "operator")]).await;
+    let op = &s[0];
+    // The admin opens Config › Requests: the policy as it is, no stop.
+    let stale = as_session(&c, &admin, json!({ "type": "POLICY_GET" })).await["policy"].clone();
+    assert_eq!(stale["paused"], json!({ "all": false }));
+    // Meanwhile the operator stops the fleet.
+    let r = as_session(&c, op, json!({ "type": "POLICY_PAUSE", "minutes": 30 })).await;
+    let stop = r["policy"]["paused"].clone();
+    assert_eq!(stop["all"], json!(true), "{r}");
+    // The admin saves the form they opened before: the mode changes, the stop does not lift.
+    let mut form = stale.clone();
+    form["mode"] = json!("hybrid");
+    let r = as_session(&c, &admin, json!({ "type": "POLICY_SET", "policy": form })).await;
+    assert_eq!(r["ok"], json!(true), "{r}");
+    assert_eq!(r["policy"]["mode"], json!("hybrid"), "{r}");
+    assert_eq!(r["policy"]["paused"], stop, "a stale form lifted the stop: {r}");
+    // Nor any other `paused` a payload carries: not lengthened, not ended, not re-stamped.
+    for p in [json!({ "all": true, "minutes": 60, "since": 0 }), json!({ "all": false }), json!({ "all": true, "minutes": 15, "since": 1, "until": 2, "by": "x" })] {
+        let r = as_session(&c, &admin, json!({ "type": "POLICY_SET", "policy": { "mode": "hybrid", "paused": p } })).await;
+        assert_eq!(r["policy"]["paused"], stop, "POLICY_SET changed the stop with {p}: {r}");
+    }
+    let on_disk: Value = serde_json::from_slice(&std::fs::read(dir.join("policy.json")).unwrap()).unwrap();
+    assert_eq!(on_disk["paused"], stop, "and on disk: {on_disk}");
+    // With no stop in force, a payload asking for one begins nothing.
+    as_session(&c, op, json!({ "type": "POLICY_RESUME" })).await;
+    let r = as_session(&c, &admin, json!({ "type": "POLICY_SET", "policy": { "mode": "background", "paused": { "all": true, "minutes": 30 } } })).await;
+    assert_eq!(r["ok"], json!(true), "{r}");
+    assert_eq!(r["policy"]["paused"], json!({ "all": false }), "POLICY_SET began a stop: {r}");
+    let st = as_session(&c, &admin, json!({ "type": "FLEET_STATE" })).await;
+    assert_eq!(st["policy"]["pausedAll"], json!(false), "{st}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -260,4 +294,156 @@ fn reading_the_policy_takes_a_user_and_changing_it_an_administrator() {
     assert!(authorize(Role::Guest, "POLICY_GET", "", "").is_err());
     assert!(authorize(Role::Operator, "POLICY_SET", "", "").is_err());
     assert!(authorize(Role::Admin, "POLICY_SET", "", "").is_ok());
+    // The emergency stop alone is an operator's (POLICY_PAUSE / POLICY_RESUME).
+    for t in ["POLICY_PAUSE", "POLICY_RESUME"] {
+        assert!(authorize(Role::Operator, t, "", "").is_ok(), "{t}");
+        assert!(authorize(Role::User, t, "", "").is_err(), "{t}");
+    }
+}
+
+/* ------------------- the emergency stop, an operator's (POLICY_PAUSE) ------------------- */
+
+const PASSWORD: &str = "correct-horse-battery";
+
+fn hosted(dir: &TempDir) -> Arc<Core> {
+    Core::new_with_rounds(Some(dir.0.clone()), Edition::Hosted, 1)
+}
+
+/// Signed in as the shipped admin with its password replaced, and the named accounts added.
+async fn sessions(c: &Arc<Core>, accounts: &[(&str, &str)]) -> (String, Vec<String>) {
+    let r = c.handle(json!({ "type": "LOGIN", "name": "Admin", "password": elasticpro_core::auth::DEFAULT_PASSWORD })).await;
+    let admin = r["session"].as_str().expect("a session").to_string();
+    let ch = c.handle(json!({ "type": "USER_SET_PASSWORD", "session": admin, "name": "Admin", "password": PASSWORD })).await;
+    assert_eq!(ch["ok"], json!(true), "{ch}");
+    let mut out = vec![];
+    for (name, role) in accounts {
+        let a = c.handle(json!({ "type": "USER_ADD", "session": admin, "name": name, "password": PASSWORD, "role": role })).await;
+        assert_eq!(a["ok"], json!(true), "{a}");
+        let l = c.handle(json!({ "type": "LOGIN", "name": name, "password": PASSWORD })).await;
+        out.push(l["session"].as_str().expect("a session").to_string());
+    }
+    (admin, out)
+}
+
+async fn as_session(c: &Arc<Core>, s: &str, mut msg: Value) -> Value {
+    msg["session"] = json!(s);
+    c.handle(msg).await
+}
+
+/// The policy with the stop taken out: what an operator must never change.
+fn rest(p: &Value) -> Value {
+    let mut p = p.clone();
+    p.as_object_mut().unwrap().remove("paused");
+    p
+}
+
+#[tokio::test]
+async fn an_operator_begins_and_ends_the_emergency_stop_and_changes_nothing_else() {
+    let dir = TempDir::new("policy-operator-stop");
+    let c = hosted(&dir);
+    let (admin, s) = sessions(&c, &[("olga", "operator"), ("ursula", "user")]).await;
+    let (op, user) = (&s[0], &s[1]);
+    // The admin's policy, not the shipped one, so "nothing else changed" means something.
+    let r = as_session(&c, &admin, json!({ "type": "POLICY_SET", "policy": { "mode": "hybrid", "budgetPerClusterPerMin": 12 } })).await;
+    assert_eq!(r["ok"], json!(true), "{r}");
+    let before = rest(&r["policy"]);
+
+    let t0 = now_ms();
+    let r = as_session(&c, op, json!({ "type": "POLICY_PAUSE", "minutes": 30 })).await;
+    assert_eq!(r["ok"], json!(true), "{r}");
+    assert_eq!(r["saved"], json!(true), "{r}");
+    let p = &r["policy"]["paused"];
+    assert_eq!((p["all"].clone(), p["minutes"].clone(), p["by"].clone()), (json!(true), json!(30), json!("olga")), "{r}");
+    let until = p["until"].as_u64().unwrap();
+    assert!(until >= t0 + 30 * 60_000 && until <= now_ms() + 30 * 60_000, "{r}");
+    assert_eq!(rest(&r["policy"]), before, "the stop and nothing else");
+    let on_disk: Value = serde_json::from_slice(&std::fs::read(dir.join("policy.json")).unwrap()).unwrap();
+    assert_eq!(on_disk["paused"]["by"], json!("olga"), "kept like any other stop: {on_disk}");
+    let st = as_session(&c, user, json!({ "type": "FLEET_STATE" })).await;
+    assert_eq!(st["policy"]["pausedAll"], json!(true), "every page says so: {st}");
+    assert_eq!(st["policy"]["pausedBy"], json!("olga"), "{st}");
+
+    // Asked again while it holds: kept as it is, not lengthened.
+    let r = as_session(&c, op, json!({ "type": "POLICY_PAUSE", "minutes": 60 })).await;
+    assert_eq!(r["ok"], json!(true), "{r}");
+    assert_eq!(r["policy"]["paused"]["until"], json!(until), "{r}");
+    assert_eq!(r["policy"]["paused"]["minutes"], json!(30), "{r}");
+
+    // A user may read the stop, never begin or end it.
+    for m in [json!({ "type": "POLICY_PAUSE", "minutes": 15 }), json!({ "type": "POLICY_RESUME" })] {
+        let r = as_session(&c, user, m.clone()).await;
+        assert_eq!(r["kind"], json!("forbidden"), "{m} -> {r}");
+    }
+
+    let r = as_session(&c, op, json!({ "type": "POLICY_RESUME" })).await;
+    assert_eq!(r["ok"], json!(true), "{r}");
+    assert_eq!(r["policy"]["paused"], json!({ "all": false }), "{r}");
+    assert_eq!(rest(&r["policy"]), before, "ending it changes nothing else either");
+    // Ending a stop that is not in force is harmless.
+    let r = as_session(&c, op, json!({ "type": "POLICY_RESUME" })).await;
+    assert_eq!(r["ok"], json!(true), "{r}");
+
+    // An admin's stop is an operator's to end.
+    let r = as_session(&c, &admin, json!({ "type": "POLICY_PAUSE", "minutes": 15 })).await;
+    assert_eq!(r["policy"]["paused"]["by"], json!("Admin"), "{r}");
+    let r = as_session(&c, op, json!({ "type": "POLICY_RESUME" })).await;
+    assert_eq!(r["policy"]["paused"]["all"], json!(false), "{r}");
+}
+
+#[tokio::test]
+async fn an_operator_sets_no_other_policy_field() {
+    let dir = TempDir::new("policy-operator-fields");
+    let c = hosted(&dir);
+    let (admin, s) = sessions(&c, &[("olga", "operator")]).await;
+    let op = &s[0];
+    let before = as_session(&c, &admin, json!({ "type": "POLICY_GET" })).await;
+    // The whole policy: an administrator's.
+    let r = as_session(&c, op, json!({ "type": "POLICY_SET", "policy": { "mode": "background", "paused": { "all": true, "minutes": 15 } } })).await;
+    assert_eq!(r["kind"], json!("forbidden"), "{r}");
+    // A stop that carries a policy along is refused whole, not half-applied.
+    let r = as_session(&c, op, json!({ "type": "POLICY_PAUSE", "minutes": 15, "policy": { "mode": "background" } })).await;
+    assert_eq!(r["kind"], json!("bad_request"), "{r}");
+    let r = as_session(&c, op, json!({ "type": "POLICY_RESUME", "policy": { "budgetPerClusterPerMin": 0 } })).await;
+    assert_eq!(r["kind"], json!("bad_request"), "{r}");
+    // Only the lengths the page offers; none named is refused, not the shortest by default.
+    for m in [json!(45), json!(0), json!("30"), Value::Null] {
+        let r = as_session(&c, op, json!({ "type": "POLICY_PAUSE", "minutes": m })).await;
+        assert_eq!(r["kind"], json!("bad_request"), "{m} -> {r}");
+    }
+    let after = as_session(&c, &admin, json!({ "type": "POLICY_GET" })).await;
+    assert_eq!(after["policy"], before["policy"], "nothing changed");
+    assert_eq!(after["stored"], json!(false), "nothing written");
+}
+
+#[tokio::test]
+async fn a_limited_operator_and_a_display_link_cannot_stop_the_fleet() {
+    use elasticpro_core::auth::{Caller, PlayCaller};
+    let dir = TempDir::new("policy-limited-stop");
+    let c = hosted(&dir);
+    let _ = sessions(&c, &[]).await;
+    let who = |name: &str, role, scope: Option<Vec<String>>| Caller { name: name.into(), role, must_change: false, scope, play: None };
+    let team = || Some(vec!["ES team A".to_string()]);
+    // An operator limited to some Zabbix host groups: the stop would hold the others too.
+    for m in [json!({ "type": "POLICY_PAUSE", "minutes": 15 }), json!({ "type": "POLICY_RESUME" })] {
+        let r = c.handle_as(m.clone(), Some(who("uma@zabbix", Role::Operator, team()))).await;
+        assert_eq!(r["kind"], json!("forbidden"), "{m} -> {r}");
+        assert!(r["message"].as_str().unwrap().contains("limited to some clusters"), "{r}");
+    }
+    // A display link, whatever role its session carries: the gate refuses it.
+    let mut tv = who("display:Lobby", Role::User, None);
+    tv.play = Some(PlayCaller { link: "l1".into(), clusters: None, allow_from: vec![] });
+    for role in [Role::User, Role::Operator] {
+        tv.role = role;
+        let r = c.handle_as(json!({ "type": "POLICY_PAUSE", "minutes": 15 }), Some(tv.clone())).await;
+        assert_eq!(r["kind"], json!("forbidden"), "{r}");
+        assert_eq!(r["playOnly"], json!(true), "{r}");
+    }
+    let g = c.handle_as(json!({ "type": "POLICY_GET" }), Some(who("ann", Role::Admin, None))).await;
+    assert_eq!(g["policy"]["paused"]["all"], json!(false), "nothing was stopped: {g}");
+    // An administrator may, limited or not (POLICY_SET is theirs anyway); so may an operator who sees every cluster.
+    let r = c.handle_as(json!({ "type": "POLICY_PAUSE", "minutes": 15 }), Some(who("zadmin@zabbix", Role::Admin, team()))).await;
+    assert_eq!(r["ok"], json!(true), "{r}");
+    let r = c.handle_as(json!({ "type": "POLICY_RESUME" }), Some(who("olga@zabbix", Role::Operator, None))).await;
+    assert_eq!(r["ok"], json!(true), "{r}");
+    assert_eq!(r["policy"]["paused"]["all"], json!(false), "{r}");
 }

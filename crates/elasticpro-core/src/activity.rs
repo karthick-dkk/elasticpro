@@ -757,4 +757,17 @@ mod tests {
         let refused = ActivityEvent::from_exchange(&json!({ "type": "HOUSEKEEPING_RUN" }), None, "session", None, &json!({ "ok": false, "kind": "forbidden" }), Edition::Hosted);
         assert!(refused.is_some(), "a refusal is somebody probing, and is recorded");
     }
+
+    #[test]
+    fn the_emergency_stop_is_recorded_under_the_callers_name_with_the_policy_changes() {
+        let op = Caller { name: "olga".into(), role: crate::auth::Role::Operator, must_change: false, scope: None, play: None };
+        for t in ["POLICY_PAUSE", "POLICY_RESUME"] {
+            let ev = ActivityEvent::from_exchange(&json!({ "type": t, "minutes": 15 }), Some(&op), "session", None, &json!({ "ok": true }), Edition::Hosted)
+                .expect("a stop is something a person did, not a poll");
+            assert_eq!(ev.user.as_deref(), Some("olga"), "{t}");
+            assert_eq!(ev.role.as_deref(), Some("operator"), "{t}");
+            assert_eq!(category(&ev.action), category("policy_set"), "{t}: the same category as the rest of the policy");
+            assert_eq!(category(&ev.action), "configuration");
+        }
+    }
 }

@@ -495,7 +495,7 @@ async fn a_scheduled_report_the_emergency_stop_cuts_short_is_recorded_and_tried_
 
     let first = first_of_next_month_noon();
     let job = c.report_tick_at(first).await.expect("due on the 1st");
-    let stop = c.handle(json!({ "type": "POLICY_SET", "session": admin, "policy": { "paused": { "all": true, "minutes": 30 } } })).await;
+    let stop = c.handle(json!({ "type": "POLICY_PAUSE", "session": admin, "minutes": 30 })).await;
     assert_eq!(stop["ok"], true, "{stop}");
     let j = ended(&c, Some(&admin), &job).await;
     assert_eq!(j["status"], "failed", "{j}");
@@ -507,7 +507,7 @@ async fn a_scheduled_report_the_emergency_stop_cuts_short_is_recorded_and_tried_
 
     // Not while the stop holds; on the first tick after it, once.
     assert_eq!(c.report_tick_at(first + Duration::minutes(1)).await, None, "the stop holds");
-    let lift = c.handle(json!({ "type": "POLICY_SET", "session": admin, "policy": { "paused": { "all": false } } })).await;
+    let lift = c.handle(json!({ "type": "POLICY_RESUME", "session": admin })).await;
     assert_eq!(lift["ok"], true, "{lift}");
     let again = c.report_tick_at(first + Duration::minutes(2)).await.expect("the period was given back to the schedule");
     let j = ended(&c, Some(&admin), &again).await;
@@ -557,7 +557,7 @@ async fn a_period_the_record_holds_is_built_under_the_emergency_stop() {
         }
         tokio::time::sleep(std::time::Duration::from_millis(25)).await;
     }
-    let stop = c.handle(json!({ "type": "POLICY_SET", "policy": { "paused": { "all": true, "minutes": 30 } } })).await;
+    let stop = c.handle(json!({ "type": "POLICY_PAUSE", "minutes": 30 })).await;
     assert_eq!(stop["ok"], true, "{stop}");
     let asked = es.hits().len();
     let day = |n: i64| (t - Duration::days(n)).format("%Y-%m-%d").to_string();

@@ -5,13 +5,14 @@
  * a pill in the status strip, which the Clusters page and the evidence pages hide, so a
  * fleet paused by somebody who then forgot sat still for three days while every page
  * looked normal. Now a stop always ends by itself (15, 30 or 60 minutes), and the top bar,
- * which is on every page, says until when; an admin can end it sooner from here.
+ * which is on every page, says until when; an operator or an admin can end it sooner from
+ * here (POLICY_RESUME, which touches nothing else in the policy).
  */
 
 import { h } from '../lib/dom.js';
 import { fleetPolicy, fleetMode } from '../core/state.js';
-import { policyGet, policySet } from '../core/es.js';
-import { pauseFor, pausedLine, setPausedAll } from '../core/policy.js';
+import { policyResume } from '../core/es.js';
+import { pauseFor, pausedLine } from '../core/policy.js';
 import { confirmDialog } from './modal.js';
 import { toast } from './menu.js';
 
@@ -25,16 +26,17 @@ const until = (p) => (p.until ? ` until ${new Date(p.until).toLocaleTimeString(u
 
 /**
  * The pill, or null when no stop holds. `selected` is the cluster in the chooser ("all"
- * for the fleet view); `admin` whether this person may end it; `onResumed` redraws the
- * page so it asks again.
+ * for the fleet view); `mayEnd` whether this person may end it (policy.js mayStop: an
+ * operator or an admin); `refusal` the sentence that says who can when they may not;
+ * `onResumed` redraws the page so it asks again.
  */
-export function pausedPill({ selected, admin, onResumed }) {
+export function pausedPill({ selected, mayEnd, refusal = '', onResumed }) {
   if (!fleetMode()) return null;
   const p = pauseFor(fleetPolicy(), selected === 'all' ? null : selected);
   if (!p) return null;
   const line = pausedLine(p);
-  if (!admin) {
-    return h('span.pill.orange', { title: line }, `⏸ Emergency stop${until(p)}`);
+  if (!mayEnd) {
+    return h('span.pill.orange', { title: refusal ? `${line} ${refusal}` : line }, `⏸ Emergency stop${until(p)}`);
   }
   return h('button.btn.sm.paused-btn', {
     title: `${line} Click to end it now.`,
@@ -48,12 +50,9 @@ async function resume(line, onResumed) {
     { yes: 'resume now' });
   if (!ok) return;
   let r;
-  try {
-    const cur = await policyGet();
-    if (!cur || !cur.ok) throw new Error((cur && cur.message) || 'could not read the request policy');
-    const next = setPausedAll(cur.policy, false);
-    r = await policySet(next);
-  } catch (e) { r = { ok: false, message: e.message || String(e) }; }
+  // The stop alone: no read of the whole policy and write of it back, which an operator may
+  // not send and which could put back a policy somebody saved in between.
+  try { r = await policyResume(); } catch (e) { r = { ok: false, message: e.message || String(e) }; }
   if (r && r.ok) {
     toast('Requests resumed', 'ok', 4000, { key: 'request-pause' });
     if (onResumed) onResumed();

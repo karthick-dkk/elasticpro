@@ -1,7 +1,8 @@
 /**
  * Page 10 — the Request Centre: every request this core sends to a cluster, in flight and
- * recent, with who asked and how it went. Administrators only: it shows every user's
- * requests on the clusters they share.
+ * recent, with who asked and how it went. The log is an administrator's: it shows every
+ * user's requests on the clusters they share. An operator opens the page for the emergency
+ * stop alone (POLICY_PAUSE / POLICY_RESUME) and is sent nothing of the log.
  *
  * It reads the core's own log (REQUEST_LOG) and nothing else: opening this page never
  * sends a cluster anything. While it is open it re-reads the log every two seconds — a
@@ -11,13 +12,13 @@
 import { h, mount } from '../lib/dom.js';
 import { num, dur, dt, toCsv, download } from '../lib/fmt.js';
 import { state, clusters, client, requestLoad, refreshRequestLoad, syncFleet } from '../core/state.js';
-import { requestLog, policyGet, policySet, housekeepingGet, housekeepingRun } from '../core/es.js';
+import { requestLog, policyGet, policyPause, policyResume, housekeepingGet, housekeepingRun } from '../core/es.js';
 import { housekeepingView, housekeepingLine } from '../core/housekeeping.js';
 import { navigateTo } from '../core/intent.js';
 import { contractOf, taskRows, cancelPath, privilegeHint } from '../core/es-tasks.js';
 import { ensureWrites, writesAllowed } from '../core/writes.js';
 import { confirmDialog } from '../ui/modal.js';
-import { setPausedAll, isPaused, stopQuestion, pausedLine, STOP_MINUTES } from '../core/policy.js';
+import { isPaused, stopQuestion, pausedLine, mayStop, stopRefusal, STOP_MINUTES } from '../core/policy.js';
 import { toast } from '../ui/menu.js';
 import { card, table, pill, statTile, empty } from './common.js';
 import { NO_FILTER, requestRows, originChoices, perCluster, requestCsvRows, CSV_HEADER, originLabel, gateFigures,
@@ -50,12 +51,15 @@ let hk = null;
 let hkBusy = false;
 let hkTick = 0;
 
+/** The log, its figures and housekeeping are an administrator's; anybody else gets the stop alone. */
+const isAdmin = () => !state.caller || state.caller.role === 'admin';
+
 export function render(el) {
   host = el;
   draw();
   poll();
   loadPolicy();
-  loadHousekeeping();
+  if (isAdmin()) loadHousekeeping();
   clearInterval(timer);
   timer = setInterval(() => { if (host && host.isConnected) poll(); else clearInterval(timer); }, 2000);
 }
@@ -72,6 +76,13 @@ export function onLeave() {
 }
 
 async function poll() {
+  // Not an administrator: no log to read. The card is drawn again so a stop that ended by
+  // itself stops showing, and the policy read again about once a minute.
+  if (!isAdmin()) {
+    if (++hkTick % 30 === 0) loadPolicy();
+    if (host && host.isConnected) draw();
+    return;
+  }
   // About once a minute (every 30th two-second poll) the housekeeping card is read again,
   // so "next run" and a scheduled run's result keep up without a page of their own timer.
   if (++hkTick % 30 === 0) loadHousekeeping();
@@ -124,12 +135,16 @@ async function runHousekeeping(dryRun) {
   draw();
 }
 
-/** Send a changed policy, then read it back: what the core kept is what is shown. */
-async function changePolicy(next, said) {
+/**
+ * Begin the stop for `minutes`, or end it (0), then read the policy back: what the core kept
+ * is what is shown. The stop alone (POLICY_PAUSE / POLICY_RESUME), so an operator may send it
+ * and nothing else in the policy is touched.
+ */
+async function changeStop(minutes, said) {
   if (policyBusy) return;
   policyBusy = true; draw();
   let r;
-  try { r = await policySet(next); } catch (e) { r = { ok: false, message: e.message || String(e) }; }
+  try { r = await (minutes ? policyPause(minutes) : policyResume()); } catch (e) { r = { ok: false, message: e.message || String(e) }; }
   policyBusy = false;
   if (r && r.ok) {
     policy = r.policy;
@@ -148,6 +163,12 @@ const stopped = () => policyKnown() && isPaused(policy) && !(policy.paused.until
 
 function draw() {
   if (!host) return;   // left the page while a read was in flight
+  if (!isAdmin()) {
+    mount(host, h('div.rq-page',
+      h('div.rq-top', stopCard()),
+      h('p.muted.rq-op-note', 'The request log, its figures and housekeeping are an administrator’s.')));
+    return;
+  }
   const rows = requestRows(log, filter);
   const inflight = rows.filter((r) => r.inflight).length;
   const perMin = Object.values(requestLoad.clusters || {}).reduce((s, c) => s + (c.perMinute || 0), 0);
@@ -270,11 +291,14 @@ function statusCard(st) {
  */
 function stopCard() {
   const on = stopped();
+  const refused = !mayStop(state.caller);
   let action;
-  if (on) {
+  if (refused && policyKnown()) {
+    action = h('div.muted.rq-stop-refused', { style: { fontSize: '12.5px' } }, stopRefusal(state.caller) || 'An operator or administrator can begin or end it.');
+  } else if (on) {
     action = h('button.btn.danger', {
       disabled: policyBusy, 'data-act': 'resume-all', title: 'End the stop now; requests start again',
-      onclick: () => changePolicy(setPausedAll(policy, false), 'Requests resumed'),
+      onclick: () => changeStop(0, 'Requests resumed'),
     }, 'Resume now');
   } else if (policyKnown()) {
     action = h('span.rq-stop-btns', STOP_MINUTES.map((m) => h('button.btn.danger', {
@@ -283,7 +307,7 @@ function stopCard() {
       onclick: async () => {
         const q = stopQuestion(m);
         if (!(await confirmDialog(q.title, q.body, { yes: q.yes, danger: true }))) return;
-        changePolicy(setPausedAll(policy, true, m), `All requests stopped for ${m} minutes`);
+        changeStop(m, `All requests stopped for ${m} minutes`);
       },
     }, `${m} min`)));
   } else if (policy && policy.error) {
@@ -296,7 +320,7 @@ function stopCard() {
     h('h2', 'Emergency stop'),
     h('p', on ? pausedLine(p)
       : 'Holds every request to every cluster for 15, 30 or 60 minutes, then starts again by itself. Pages keep their last data, marked as old.'),
-    h('div.rq-stop-act', on ? null : h('span.muted', { style: { fontSize: '12.5px' } }, 'Stop for'), action));
+    h('div.rq-stop-act', on || refused ? null : h('span.muted', { style: { fontSize: '12.5px' } }, 'Stop for'), action));
 }
 
 /**
