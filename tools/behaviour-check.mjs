@@ -1969,11 +1969,12 @@ await go('logs');
         `5h30 is a queue, not an offset: ${JSON.stringify(byDevice['switch-05'])}`);
 
       // The measurement is published as each cluster's log-delay alert — the one the Alerts
-      // page lists and the scraper sends to Zabbix. proxy-03 is critical in the fixture.
+      // page lists and the scraper sends to Zabbix. proxy-03 is past the red line (over 60 min)
+      // in the fixture, which is a High alert since 2026-11-01, not a critical one.
       const stNow = await load('core/state.js');
       const late = stNow.alerts().filter((a) => /:log-delay$/.test(a.key));
-      ok(late.length === measurable && late.every((a) => a.level === 'critical'),
-        `log delay should raise one critical alert per measured cluster: ${JSON.stringify(late.map((a) => [a.key, a.level]))}`);
+      ok(late.length === measurable && late.every((a) => a.level === 'high'),
+        `log delay should raise one High alert per measured cluster: ${JSON.stringify(late.map((a) => [a.key, a.level]))}`);
 
       // Worst first — a critical device at the bottom of the list is a device nobody sees.
       const first = [...trs[0].children][2].textContent.trim();
@@ -4003,7 +4004,7 @@ consoleTabs: {
     ok(sections()[0] && sections()[0].classList.contains('adown'), 'alerts: the Unreachable group is not first');
     ok(!doc.querySelector('#view .stat'), 'alerts: the four tiles are still there');
     const sumText = () => [...doc.querySelector('#view .alerts-sum').children].map((x) => x.textContent.trim()).join(' ');
-    ok(/^\d+ critical · \d+ warning · in 3 of 4 clusters · 0 acknowledged/.test(sumText()), `alerts: the summary line reads "${sumText()}"`);
+    ok(/^\d+ critical · \d+ high · \d+ warning · in 3 of 4 clusters · 0 acknowledged/.test(sumText()), `alerts: the summary line reads "${sumText()}"`);
     ok(!/Alerts current for/.test(doc.getElementById('view').textContent), 'alerts: the "Alerts current for N of M clusters" sentence is still there');
     const foot = doc.querySelector('#view .alerts-foot').textContent;
     ok(/1 cluster has no open alerts/.test(foot) && /1 older alert held on unreachable clusters, not counted/.test(foot), `alerts: footer reads "${foot}"`);
@@ -4122,6 +4123,34 @@ consoleTabs: {
       ok(doc.getElementById('alerts-handled').checked && cnt('alerts-sum-acked').getAttribute('aria-pressed') === 'true', 'alerts: the acknowledged count did not show acknowledged alerts');
       cnt('alerts-sum-acked').click(); await settleFor(60);
       ok(!doc.getElementById('alerts-handled').checked, 'alerts: the acknowledged count did not toggle back');
+    }
+
+    // High (2026-11-01): a node over 85 % heap is a High row — an orange "high" pill — counted on
+    // its own in the summary line, and its count filters to it as the others do.
+    {
+      const cnt = (id) => doc.getElementById(id);
+      const levels = () => [...doc.querySelectorAll('#view .arow:not(.adown-row) > .arow-main > .apill')].map((x) => x.textContent);
+      const a0 = st.state.data.get('a');
+      // Two node readings in a row over 85 % (the rule's hysteresis): each fetch is a new node list.
+      for (let i = 0; i < 2; i++) {
+        st.state.data.set('a', { ...a0, nodes: [{ name: 'es-hot-1', 'heap.percent': '93' }, { name: 'es-hot-2', 'heap.percent': '40' }] });
+        st.alerts();
+      }
+      await acks.unacknowledge('a:heap');
+      st.invalidateAlerts(); await go('alerts');
+      const hiRows = [...doc.querySelectorAll('#view .arow')].filter((r) => r.querySelector(':scope > .arow-main > .apill.high'));
+      ok(hiRows.length === 1 && /JVM heap above 85%/.test(hiRows[0].textContent) && hiRows[0].querySelector('.apill.high').textContent === 'high',
+        `alerts: a node at 93 % heap is not one High row (saw ${hiRows.length}: ${hiRows.map((r) => r.textContent.slice(0, 60)).join(' | ')})`);
+      ok(/^\d+ critical · 1 high · \d+ warning · /.test(sumText()), `alerts: the summary line does not count the High alert: "${sumText()}"`);
+      ok(levels().indexOf('high') > levels().lastIndexOf('critical') && levels().indexOf('high') < levels().indexOf('warning'),
+        `alerts: High is not between critical and warning in its group: ${levels().join(',')}`);
+      cnt('alerts-sum-high').click(); await settleFor(60);
+      ok(press('High') && press('High').getAttribute('aria-pressed') === 'true' && levels().length === 1 && levels()[0] === 'high' && !doc.querySelector('#view .adown'),
+        `alerts: the high count did not show the High alert only: ${levels().join(',')}`);
+      cnt('alerts-sum-high').click(); await settleFor(60);
+      ok(press('All').getAttribute('aria-pressed') === 'true', 'alerts: pressing the high count again did not show all');
+      st.state.data.set('a', a0);
+      st.invalidateAlerts(); await go('alerts');
     }
 
     // Export CSV lists held alerts too, marked: held is never passed off as current.
@@ -5187,6 +5216,30 @@ if (viaFleet) {
     st.state.data.set(shown.id, before);
     st.bus.emit('data', shown.id);
     await settleFor(300);
+
+    // High (2026-11-01): a node over 85 % heap is a HIGH row on the Alerts slide, counted under
+    // Open now, and never takes the screen; on the wall the node-left blink still wins its tile.
+    {
+      const was = st.state.data.get(shown.id);
+      const nodes = (was.nodes && was.nodes.length ? was.nodes : [{ name: 'node-1' }]).map((n, i) => (i === 0 ? { ...n, 'heap.percent': '93' } : n));
+      for (let i = 0; i < 2; i++) { st.state.data.set(shown.id, { ...was, nodes: nodes.map((x) => ({ ...x })) }); st.alerts(); }
+      st.invalidateAlerts(); st.bus.emit('data', shown.id);
+      await settleFor(1500);
+      ok(!pPlay._debug().take.active, 'play: a High alert took the screen (only critical does)');
+      for (let i = 0; i < 14 && titleText() !== 'Alerts'; i++) { key('ArrowRight'); await settleFor(120); }
+      const hi = [...doc.querySelectorAll('.pl-arow.high')];
+      ok(hi.length >= 1 && hi.every((r) => r.querySelector('.pl-sev').textContent === 'HIGH') && hi.some((r) => /JVM heap/.test(r.textContent)),
+        `play: the Alerts slide has no HIGH row for the heap alert (${hi.length} high rows)`);
+      const kv = [...doc.querySelectorAll('.pl-aside .pl-kpi')].find((k) => k.querySelector('.pl-k').textContent === 'High');
+      ok(kv && Number(kv.querySelector('.pl-v').textContent) >= 1, `play: Open now does not count High (${kv && kv.textContent})`);
+      for (let i = 0; i < 14 && titleText() !== 'Fleet'; i++) { key('ArrowRight'); await settleFor(120); }
+      const t = doc.querySelector(`.pl-tile[data-cluster="${shown.id}"]`);
+      ok(t && t.classList.contains('pl-blink') && !t.classList.contains('blink-high') && !t.classList.contains('blink-crit'),
+        `play: the node-left blink does not win over High on its tile (${t && t.className})`);
+      st.state.data.set(shown.id, was);
+      st.invalidateAlerts(); st.bus.emit('data', shown.id);
+      await settleFor(300);
+    }
 
     // a display link: no Exit, Escape stays
     pPlay.configure({ display: true, onExit: () => { problems.push('play: a display link left Play'); } });

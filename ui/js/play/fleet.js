@@ -10,6 +10,8 @@ import { alertCounts } from '../core/alert-tuning.js';
 import { classify, STATUS } from '../core/log-delay.js';
 import { kpi, unknown, minutes, fitRows, openFor, clockText } from './parts.js';
 import { heldLine } from '../core/alert-groups.js';
+import { toneOfCounts } from '../core/alert-levels.js';
+import { tileBlink, nodeDiskCritical } from './status.js';
 
 export const id = 'fleet';
 export const title = 'Fleet';
@@ -18,9 +20,18 @@ export const DATASETS = ['health', 'nodes'];
 
 export const isEmpty = (ctx) => !ctx.clusters.length;
 
-const healthCounts = (ctx) => {
-  const n = { green: 0, yellow: 0, red: 0, unreachable: 0, loading: 0 };
-  for (const c of ctx.clusters) n[ctx.st.get(c.id).state]++;
+/**
+ * Clusters by the colour their tile shows (play/status.js tone): red, not answering, high,
+ * yellow, green, no data — so the strip and the wall below it cannot disagree.
+ */
+export const statusCounts = (ctx) => {
+  const n = { red: 0, unreachable: 0, high: 0, yellow: 0, green: 0, loading: 0 };
+  for (const c of ctx.clusters) {
+    const s = ctx.st.get(c.id);
+    const k = s.state === 'unreachable' || s.state === 'loading' ? s.state
+      : s.tone === 'orange' ? 'high' : s.tone === 'grey' ? 'loading' : s.tone;
+    n[k in n ? k : 'loading']++;
+  }
   return n;
 };
 
@@ -37,7 +48,7 @@ function newestLeft(ctx) {
 }
 
 function strip(ctx) {
-  const n = healthCounts(ctx);
+  const n = statusCounts(ctx);
   const a = alertCounts(ctx.open);
   const left = ctx.clusters.reduce((s, c) => s + ctx.st.get(c.id).left.length, 0);
   const newest = newestLeft(ctx);
@@ -51,10 +62,11 @@ function strip(ctx) {
   }
   const part = (k, cls) => (n[k] ? h(`span.pl-c.${cls}`, `${n[k]} ${k === 'unreachable' ? 'not answering' : k === 'loading' ? 'no data' : k}`) : null);
   return h('div.pl-strip',
-    kpi('Clusters by health', h('span.pl-parts', part('red', 'red'), part('unreachable', 'red'), part('yellow', 'yellow'),
+    kpi('Clusters by status', h('span.pl-parts', part('red', 'red'), part('unreachable', 'red'), part('high', 'orange'), part('yellow', 'yellow'),
       part('green', 'green'), part('loading', 'grey')), `${ctx.clusters.length} on this display`),
     kpi('Open alerts', h('span.pl-parts', h(`span.pl-c.${a.critical ? 'red' : 'grey'}`, `${a.critical} critical`),
-      h(`span.pl-c.${a.warning ? 'yellow' : 'grey'}`, `${a.warning} warning`)), null, a.critical ? 'red' : a.warning ? 'yellow' : 'green'),
+      h(`span.pl-c.${a.high ? 'orange' : 'grey'}`, `${a.high} high`),
+      h(`span.pl-c.${a.warning ? 'yellow' : 'grey'}`, `${a.warning} warning`)), null, toneOfCounts(a) || 'green'),
     kpi('Node left', ctx.nodeHistory ? String(left) : unknown('not tracked', 'This server does not keep node-name history yet (needs 0.3.47)'),
       newest ? `${newest.node} · ${newest.cluster} · ${openFor(ctx.now - newest.since)} ago` : ctx.nodeHistory ? 'none in 24 h' : 'needs 0.3.47',
       left ? 'red' : ''),
@@ -62,7 +74,7 @@ function strip(ctx) {
       h(`span.pl-c.${high ? 'red' : 'grey'}`, `${high} over ${ctx.watch.delayRedAboveMin} min`)) : unknown('not measured'),
     measured.length ? `${measured.length} of ${ctx.clusters.length} clusters measured` : ctx.delayNote),
     kpi('Fullest disk', full ? `${Math.round(full.pct)} %` : unknown(),
-      full ? `${full.name} · ${full.cluster}` : null, full ? (full.pct >= full.high ? 'red' : full.pct >= full.low ? 'yellow' : '') : ''));
+      full ? `${full.name} · ${full.cluster}` : null, full ? (nodeDiskCritical(full.pct, full) ? 'red' : full.pct >= full.low ? 'yellow' : '') : ''));
 }
 
 function tile(ctx, c) {
@@ -76,15 +88,15 @@ function tile(ctx, c) {
   const present = nodes && Array.isArray(nodes.present) ? nodes.present.length : (d.health ? d.health.number_of_nodes : null);
   const expected = nodes && Array.isArray(nodes.expected) && nodes.expected.length ? nodes.expected.length : null;
   const delayTone = sum && sum.median !== null ? STATUS[classify(sum.median, ctx.delayT)].cls : 'grey';
-  const blink = ctx.blink(c.id);
-  return h(`div.pl-tile.${s.tone}${blink ? '.pl-blink' : ''}`, { dataset: { cluster: c.id } },
+  const blink = tileBlink(s, ctx.blink(c.id));
+  return h(`div.pl-tile.${s.tone}${blink ? `.${blink}` : ''}`, { dataset: { cluster: c.id } },
     h('div.pl-tname', { title: c.name }, c.name),
     h(`div.pl-tline.${s.tone}`, s.line),
     h('div.pl-tfig',
       h('span', h('b', present === null || present === undefined ? '–' : String(present)), expected ? `/${expected}` : '', ' nodes'),
       h('span', s.fullest ? h('b', `${Math.round(s.fullest.pct)} %`) : unknown('–'), ' disk'),
       h('span', sum && sum.median !== null ? h(`b.${delayTone}`, minutes(sum.median)) : unknown(del && del.error ? 'not measurable' : 'not measured', del && del.error ? del.error : ''), ' delay'),
-      h('span', h(`b${a.critical ? '.red' : a.warning ? '.yellow' : ''}`, String(a.total)), ' alerts')),
+      h('span', h(`b${toneOfCounts(a) ? `.${toneOfCounts(a)}` : ''}`, String(a.total)), ' alerts')),
     h('div.pl-tdev', { title: `Devices by delay: under ${ctx.watch.delayYellowFromMin} min, ${ctx.watch.delayYellowFromMin}–${ctx.watch.delayRedAboveMin} min, over ${ctx.watch.delayRedAboveMin} min` },
       sum ? [h('span.pl-dev.green', String(sum.by.OK || 0)), h('span.pl-dev.yellow', String(sum.by.DELAYED || 0)), h('span.pl-dev.red', String(sum.by.CRITICAL || 0))]
         : h('span.pl-unk', 'devices not measured')),

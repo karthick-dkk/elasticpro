@@ -27,7 +27,7 @@ function tokensIn(selector) {
  * the colour of the thing itself and are tuned to read on either ground.
  */
 const UNTHEMED = ['--radius', '--radius-sm', '--mono', '--sans',
-                  '--good', '--warning', '--serious', '--critical'];
+                  '--good', '--warning', '--serious', '--high', '--critical'];
 
 const root = tokensIn(':root {');
 const DARK_THEMES = [':root[data-theme="dark"] {', ':root[data-theme="dark-blue"] {',

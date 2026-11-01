@@ -23,6 +23,12 @@ export const id = 'delay';
 export const title = 'Log delay';
 export const DATASETS = [];
 
+/**
+ * The class a cluster's row in "Top 10 clusters by delay" takes: it blinks when its median
+ * delay is red — classify's CRITICAL, over the red line (60 min unless Config › Play moves it).
+ */
+export const delayRowBlink = (median, t) => (median !== null && median !== undefined && classify(median, t) === 'CRITICAL' ? '.blink-crit' : '');
+
 const measured = (ctx) => ctx.clusters.filter((c) => { const x = ctx.delay.get(c.id); return x && x.records; });
 export const isEmpty = (ctx) => !measured(ctx).length;
 
@@ -53,7 +59,7 @@ export function render(ctx) {
     h('td', h(`span.pl-pill.${tone(r.status)}`, (STATUS[r.status] || STATUS.ERROR).label))));
   const per = done.map((c) => ({ c, sum: ctx.delay.get(c.id).summary }))
     .sort((a, b) => (b.sum.median ?? -Infinity) - (a.sum.median ?? -Infinity)).slice(0, 10);
-  const clRows = per.map(({ c, sum }) => h('tr',
+  const clRows = per.map(({ c, sum }) => h(`tr${delayRowBlink(sum.median, ctx.delayT)}`,
     h('td', c.name),
     h(`td.num.${sum.median === null ? 'grey' : tone(classify(sum.median, ctx.delayT))}`, sum.median === null ? unknown('–') : minutes(sum.median)),
     h('td.num', String((sum.by.DELAYED || 0) + (sum.by.CRITICAL || 0)))));

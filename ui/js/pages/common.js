@@ -178,7 +178,7 @@ export function table(headers, rows, opts = {}) {
     const cls = [c.num ? 'num' : '', key && sort ? 'sortable' : ''].filter(Boolean).join('.');
     return h(cls ? `th.${cls}` : 'th', {
       style: c.width ? { width: c.width } : null,
-      title: key && sort ? `Sort by ${c.label || c}` : null,
+      title: (c && c.title) || (key && sort ? `Sort by ${c.label || c}` : null),
       'aria-sort': active ? (sort.dir === 1 ? 'ascending' : 'descending') : (key && sort ? 'none' : null),
       ...(key && sort ? activatable(() => sort.on(key), { role: null }) : {}),
     // A label can be a node — a select-all tick, for instance — so it is appended rather

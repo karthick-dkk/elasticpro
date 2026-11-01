@@ -24,6 +24,16 @@ export const DATASETS = ['nodes', 'indices'];
 
 export const isEmpty = (ctx) => !ctx.clusters.length;
 
+/** Days of disk left: red under RUNWAY_RED_DAYS, yellow under RUNWAY_YELLOW_DAYS — the table and the KPI alike. */
+export const RUNWAY_RED_DAYS = 7;
+export const RUNWAY_YELLOW_DAYS = 30;
+export function runwayTone(days) {
+  if (days === null || days === undefined || !isFinite(days)) return '';
+  return days < RUNWAY_RED_DAYS ? 'red' : days < RUNWAY_YELLOW_DAYS ? 'yellow' : '';
+}
+/** A red runway blinks (docs/PLAY.md, "Blinks"). */
+export const runwayBlink = (days) => (runwayTone(days) === 'red' ? '.blink-crit' : '');
+
 /** Σ docs of the record's live days; null when no live day carries a count. */
 export function totalEvents(reply) {
   const live = ((reply && reply.days) || []).filter((d) => d.live === true && typeof d.docs === 'number');
@@ -89,7 +99,7 @@ export function render(ctx) {
     h('td.num', x.cards && x.cards.yesterday !== null ? bytes(x.cards.yesterday) : unknown(x.v && x.v.unsupported ? noRec : 'no data')),
     h('td.num', x.cards && x.cards.average !== null ? bytes(x.cards.average) : unknown('–')),
     h(`td.num${x.cards && x.cards.change > 25 ? '.yellow' : ''}`, x.cards && x.cards.change !== null ? signedPct(x.cards.change) : unknown('–')),
-    h(`td.num${x.r.liveSufficientDays !== null && x.r.liveSufficientDays < 7 ? '.red' : x.r.liveSufficientDays !== null && x.r.liveSufficientDays < 30 ? '.yellow' : ''}`,
+    h(`td.num${runwayTone(x.r.liveSufficientDays) ? `.${runwayTone(x.r.liveSufficientDays)}` : ''}${runwayBlink(x.r.liveSufficientDays)}`,
       x.r.liveSufficientDays !== null && isFinite(x.r.liveSufficientDays) ? fmtDays(x.r.liveSufficientDays) : unknown('no data', 'Needs the index list and the disk figures')),
     h('td.num', x.r.liveTotalGB ? gb(x.r.liveTotalGB) : unknown('–'))));
   const body = h('tbody', trs);
@@ -106,6 +116,6 @@ export function render(ctx) {
       kpi('Average per day', fleet.average.value === null ? unknown(noRec) : bytes(fleet.average.value), cover(fleet.average) ? `7 days · ${cover(fleet.average)}` : null),
       kpi('Month so far', fleet.month.value === null ? unknown(noRec) : bytes(fleet.month.value), cover(fleet.month)),
       kpi('Shortest disk runway', runway ? fmtDays(runway.r.liveSufficientDays) : unknown('no data', 'Needs the index list and the disk figures'),
-        runway ? runway.c.name : null, runway && runway.r.liveSufficientDays < 7 ? 'red' : runway && runway.r.liveSufficientDays < 30 ? 'yellow' : '')),
+        runway ? runway.c.name : null, runway ? runwayTone(runway.r.liveSufficientDays) : '')),
     box);
 }

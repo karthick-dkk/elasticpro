@@ -309,7 +309,7 @@ function alertRulesCard() {
         } })),
       h('td', h('div', { style: { fontWeight: 620 } }, r.label),
         h('div.muted', { style: { fontSize: '11px' } }, r.why)),
-      h('td', pill(r.level, r.level === 'critical' ? 'red' : 'yellow')),
+      h('td', pill(r.level, { critical: 'red', high: 'high' }[r.level] || 'yellow')),
       h('td', (r.thresholds || []).length
         ? h('div', { style: { display: 'flex', gap: '10px', flexWrap: 'wrap' } },
             ...r.thresholds.map((t) => h('label', {

@@ -6,6 +6,7 @@ import { bytes, num, pct, ago, dt, toCsv, download } from '../lib/fmt.js';
 import { state, activeClusters, client, healthState, refreshAll, openAlertsNow, requestsFor, requestLoad, jvmSummary, clusterRev, askForPage } from '../core/state.js';
 import { card, table, diskCell, lastSnapshotOf, snapshotCellFor, empty } from './common.js';
 import { CLUSTER_TYPES, clusterKind, clusterKindRev } from '../core/cluster-kind.js';
+import { heapOverHigh, HEAP_HIGH_PERCENT, HEAP_CLEAR_PERCENT, HEAP_RAISE_READINGS } from '../core/alert-rules.js';
 import { isSnapshotMode } from '../core/snapshot.js';
 import { navigateTo, canOpenPage } from '../core/intent.js';
 import { repoSizeCache } from '../lib/idb.js';
@@ -1254,6 +1255,17 @@ export function nodeLoadLevel(p, which) {
   return p >= t.crit ? 'high' : p >= t.warn ? 'low' : 'ok';
 }
 
+/**
+ * A node's heap: 'over' (orange, the High alert's colour) past the heap rule's line
+ * (alert-rules.js heapOverHigh, 85 %), else amber or fine as NODE_LOAD_LEVELS says — so a cell
+ * never shows amber for a node the Alerts page calls High. The node table and Play read it.
+ */
+export function heapLevel(p) {
+  return heapOverHigh(p) ? 'over' : nodeLoadLevel(p, 'heap') === 'ok' ? 'ok' : 'low';
+}
+/** The heap column's tooltip: the line it is coloured by. */
+export const HEAP_TITLE = `JVM heap used. Amber from ${NODE_LOAD_LEVELS.heap.warn} %; orange over ${HEAP_HIGH_PERCENT} %, where a High alert is raised (after ${HEAP_RAISE_READINGS} readings in a row; it clears below ${HEAP_CLEAR_PERCENT} %).`;
+
 /** The chip a node role takes: Elasticsearch's own name, coloured by what it does. */
 const roleChip = (role) => h(`span.cl-role.${roleKind(role)}`, role);
 const TIER_PILL = { hot: 'red', warm: 'yellow', cold: 'blue', frozen: 'blue', data: 'grey' };
@@ -1267,7 +1279,7 @@ function nodesSection(d) {
   const bar = (p, cls) => h('div.cl-mini', { role: 'img', 'aria-label': `${Math.round(p)} percent` },
     h(`i.${cls}`, { style: { width: `${Math.max(1.5, Math.min(100, p))}%` } }));
   const pctCell = (p, sub, which) => (isFinite(p)
-    ? h('div.cl-two', h('span', `${Math.round(p)} %`, sub ? h('span.muted.cl-sub', ` · ${sub}`) : null), bar(p, nodeLoadLevel(p, which)))
+    ? h('div.cl-two', h('span', `${Math.round(p)} %`, sub ? h('span.muted.cl-sub', ` · ${sub}`) : null), bar(p, which === 'heap' ? heapLevel(p) : nodeLoadLevel(p, which)))
     : h('span.muted', '–'));
   const trs = nodes.map((n) => {
     const roles = nodeRoles(n['node.role']);
@@ -1291,7 +1303,7 @@ function nodesSection(d) {
     };
     return h('tr', ...cols.map((col) => cell[col.id]()));
   });
-  const body = [table(cols.map((col) => ({ label: col.label, num: col.num })), trs)];
+  const body = [table(cols.map((col) => ({ label: col.label, num: col.num, title: col.id === 'heap' ? HEAP_TITLE : null })), trs)];
   if (legend) {
     body.push(h('div.cl-legend', { 'aria-label': 'Role colours' }, h('span.muted', 'node.roles:'),
       ...['master', 'data_hot', 'data_warm', 'data_cold', 'data_frozen', 'data_content', 'ingest', 'ml', 'transform', 'remote_cluster_client'].map(roleChip),

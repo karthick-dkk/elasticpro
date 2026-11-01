@@ -8,6 +8,7 @@
  * unreachable one is counted once, as unreachable, not also by a stale colour.
  */
 import { ruleForKey } from './alert-rules.js';
+import { countLevels } from './alert-levels.js';
 
 /** What kind of problem an alert is: its rule. A title carries the cluster's name and the
  *  value ("prod-a disk 94.8%"), so grouping by title never groups anything. */
@@ -25,7 +26,7 @@ export function fleetSummary(rows, healthOf, alerts, { top = 3 } = {}) {
     else by.loading.push(r.c.name);
   }
   const list = alerts || [];
-  const critical = list.filter((a) => a.level === 'critical').length;
+  const { critical, high } = countLevels(list);
   // Grouped by what they are, so twenty clusters with the same fault read as one line with a
   // count rather than twenty lines; critical first, then the most widespread.
   const groups = new Map();
@@ -45,7 +46,7 @@ export function fleetSummary(rows, healthOf, alerts, { top = 3 } = {}) {
     total: rows.length,
     green: by.green.length, yellow: by.yellow.length, red: by.red.length, loading: by.loading.length,
     redNames: by.red, unreachable: by.unreachable,
-    alerts: list.length, critical, warning: list.length - critical,
+    alerts: list.length, critical, high, warning: list.length - critical - high,
     problems, problemKinds: groups.size,
     bad: by.red.length > 0 || by.unreachable.length > 0 || critical > 0,
   };

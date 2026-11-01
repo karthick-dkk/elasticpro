@@ -336,7 +336,7 @@ export function automationAlerts(clusterById) {
       if (!cluster) continue;
       out.push({
         key: `${clusterId}:automation:${u.id}`,
-        level: u.notify.level === 'critical' ? 'critical' : 'warning',
+        level: u.notify.level === 'critical' || u.notify.level === 'high' ? u.notify.level : 'warning',
         cluster,
         title: `${u.name}`,
         detail: `${p.targets.length} match${p.targets.length === 1 ? '' : 'es'} on ${cluster.name}`
