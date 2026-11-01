@@ -122,7 +122,7 @@ fn is_read_post(bare: &str) -> bool {
 }
 
 /// `%XX` decoded once, as UTF-8; `None` for a malformed escape or bytes that are not UTF-8.
-fn percent_decode(s: &str) -> Option<String> {
+pub(crate) fn percent_decode(s: &str) -> Option<String> {
     let b = s.as_bytes();
     let mut out = Vec::with_capacity(b.len());
     let mut i = 0;

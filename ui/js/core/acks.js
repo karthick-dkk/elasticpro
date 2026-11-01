@@ -7,11 +7,21 @@
  * rather than its current value, so a note written when the disk was at 86% is still
  * attached when it reaches 91%.
  *
- * Kept in IndexedDB on this machine. It is a local operator log, not shared state — two
- * people running the app do not see each other's notes.
+ * Where it is kept depends on the edition (0.3.47):
+ *
+ *  - desktop (portable / installed): IndexedDB on this machine, a local operator log — two
+ *    people running the app do not see each other's notes;
+ *  - hosted: the server (`ACK_LIST` / `ACK_SET` / `ACK_CLEAR`, `<data>/acks.json`), so an
+ *    acknowledgement is the team's — the person at the desk acknowledges and the Play wall
+ *    stops taking the screen for it. Same keys; the server says who acknowledged and when,
+ *    and audits every change. Acknowledgements a browser kept before are not moved (they
+ *    were one person's). A server too old to know the messages: IndexedDB, as before.
+ *
+ * The exports are the same in both: the pages never ask which it is.
  */
 
 import { idb } from '../lib/idb.js';
+import { bridge } from './transport.js';
 
 const cache = new Map();      // key -> record, so rendering does not await
 let loaded = false;
@@ -23,7 +33,78 @@ export function ackRecords() { return [...cache.values()]; }
 
 /** @typedef {{key:string, acked:boolean, ackedAt:number, ackedBy:string, notes:Array, missingSince:number}} AckRecord */
 
+/* ----------------------------- where they are kept ----------------------------- */
+
+/** true: the hosted server keeps them; false: IndexedDB. Asked once (WHOAMI's edition). */
+let onServer = null;
+async function serverKeeps() {
+  if (onServer !== null) return onServer;
+  try {
+    const w = await bridge({ type: 'WHOAMI' });
+    onServer = !!(w && w.ok && w.edition === 'hosted');
+  } catch (_) { onServer = false; }
+  return onServer;
+}
+
+/** Where they are kept now: true the server, false this browser, null not asked yet. */
+export function acksOnServer() { return onServer; }
+
+/** A reply saying the server does not have these messages (an older core): IndexedDB then. */
+function unsupported(res) {
+  return !!res && !res.ok && (res.kind === 'bad_message'
+    || (res.kind === 'forbidden' && /is not available to the/.test(String(res.message || ''))));
+}
+
+/** The server's entry `{by, at, note?, record?}` as the record the pages use. */
+function fromServer(key, a) {
+  const r = (a && a.record && typeof a.record === 'object') ? a.record : null;
+  const rec = {
+    key,
+    acked: r ? r.acked !== false : true,
+    ackedAt: r && Number.isFinite(r.ackedAt) ? r.ackedAt : (a.at || 0),
+    ackedBy: r && typeof r.ackedBy === 'string' ? r.ackedBy : (a.by || ''),
+    notes: r && Array.isArray(r.notes) ? r.notes : (a.note ? [{ text: a.note, by: a.by || '', ts: a.at || 0 }] : []),
+    missingSince: (r && r.missingSince) || 0,
+  };
+  if (r && Array.isArray(r.ackedItems)) rec.ackedItems = r.ackedItems;
+  return rec;
+}
+
+/** Keep one record where this edition keeps them; the server's answer (who, when) wins. */
+async function persist(rec) {
+  if (await serverKeeps()) {
+    const { key, ...record } = rec;
+    const res = await bridge({ type: 'ACK_SET', key, record });
+    if (res && res.ok && res.ack) return fromServer(key, res.ack);
+    if (!unsupported(res)) return rec;          // refused or unreachable: this session only
+    onServer = false;
+  }
+  try { await idb.putAck(rec); } catch (_) { /* memory-only for this session */ }
+  return rec;
+}
+
+/** Forget one record where this edition keeps them. */
+async function unpersist(key) {
+  if (await serverKeeps()) {
+    const res = await bridge({ type: 'ACK_CLEAR', key });
+    if (!unsupported(res)) return;
+    onServer = false;
+  }
+  try { await idb.delAck(key); } catch (_) { /* ignore */ }
+}
+
 export async function loadAcks() {
+  if (await serverKeeps()) {
+    const res = await bridge({ type: 'ACK_LIST' });
+    if (res && res.ok) {
+      cache.clear();
+      for (const [key, a] of Object.entries(res.acks || {})) cache.set(key, fromServer(key, a));
+      loaded = true; rev++;
+      return cache;
+    }
+    if (!unsupported(res)) { loaded = true; return cache; }   // keep what is shown; the next load asks again
+    onServer = false;
+  }
   try {
     const all = (await idb.allAcks()) || [];
     cache.clear();
@@ -44,8 +125,9 @@ export function noteCount(key) { return ((cache.get(key) || {}).notes || []).len
 
 async function save(rec) {
   cache.set(rec.key, rec); rev++;
-  try { await idb.putAck(rec); } catch (_) { /* memory-only for this session */ }
-  return rec;
+  const kept = await persist(rec);
+  if (kept !== rec) { cache.set(rec.key, kept); rev++; }
+  return kept;
 }
 
 /** Who wrote this. Remembered so it is typed once, not once per note. */
@@ -104,6 +186,16 @@ export async function removeNote(key, ts) {
 }
 
 /**
+ * The cluster an acknowledgement key names (`<clusterId>:…`), the longest of `ids` that
+ * prefixes it, or null when none does: the core's own rule (silences::cluster_of).
+ */
+export function ackClusterOf(key, ids) {
+  let best = null;
+  for (const id of ids) if (String(key).startsWith(`${id}:`) && (!best || id.length > best.length)) best = id;
+  return best;
+}
+
+/**
  * Drop records whose alert no longer exists, so the store does not grow forever with
  * problems that were fixed months ago. Records carrying notes are kept.
  */
@@ -130,10 +222,26 @@ export const ACK_GRACE_DAYS = 30;
  * everything, including the date it was first acknowledged. Records carrying notes are
  * still never removed at all — somebody wrote those.
  */
-export async function pruneAcks(liveKeys) {
+export async function pruneAcks(liveKeys, { clusterIds = null, complete = false } = {}) {
   const live = new Set(liveKeys);
   const now = Date.now();
   const graceMs = ACK_GRACE_DAYS * 86400000;
+
+  // Hosted, the records are the team's (ACK_LIST). One browser's list of live alerts is not
+  // enough to rewrite them: it may be partial (a fleet still loading, a cluster this person
+  // cannot see), and writing a record back would stamp it in this person's name. So nothing
+  // is written here; a record is cleared only when its cluster is gone from the fleet, and
+  // only once every cluster has answered.
+  if (await serverKeeps()) {
+    if (!complete || !Array.isArray(clusterIds) || !clusterIds.length) return;
+    const ids = clusterIds.map(String);
+    for (const [key, rec] of [...cache.entries()]) {
+      if ((rec.notes || []).length || ackClusterOf(key, ids)) continue;
+      cache.delete(key);
+      await unpersist(key);
+    }
+    return;
+  }
 
   for (const [key, rec] of [...cache.entries()]) {
     if (live.has(key)) {
@@ -141,7 +249,7 @@ export async function pruneAcks(liveKeys) {
       if (rec.missingSince) {
         const next = { ...rec, missingSince: 0 };
         cache.set(key, next);
-        try { await idb.putAck(next); } catch (_) { /* the in-memory copy is still right */ }
+        await persist(next);              // a failure leaves the in-memory copy, which is still right
       }
       continue;
     }
@@ -150,12 +258,12 @@ export async function pruneAcks(liveKeys) {
     if (!rec.missingSince) {
       const next = { ...rec, missingSince: now };
       cache.set(key, next);
-      try { await idb.putAck(next); } catch (_) { /* ignore */ }
+      await persist(next);
       continue;
     }
     if (now - rec.missingSince < graceMs) continue;
 
     cache.delete(key);
-    try { await idb.delAck(key); } catch (_) { /* ignore */ }
+    await unpersist(key);
   }
 }

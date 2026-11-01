@@ -183,7 +183,9 @@ export const STATUS = {
 export function classify(delayMinutes, t = DEFAULT_THRESHOLDS) {
   if (delayMinutes === null || delayMinutes === undefined || !isFinite(delayMinutes)) return 'ERROR';
   if (delayMinutes <= -t.delayMinutes) return 'CLOCK_AHEAD';
-  if (delayMinutes >= t.criticalMinutes) return 'CRITICAL';
+  // Red is strictly above the critical line: exactly 60 min is still yellow (the owner's rule,
+  // 2026-10-31: under 30 green, 30 to 60 yellow, over 60 red), here and on Play alike.
+  if (delayMinutes > t.criticalMinutes) return 'CRITICAL';
   if (delayMinutes >= t.delayMinutes) return 'DELAYED';
   return 'OK';
 }

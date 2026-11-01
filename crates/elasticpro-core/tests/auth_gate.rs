@@ -685,11 +685,11 @@ async fn a_scoped_caller_cannot_see_or_touch_silences_outside_its_scope() {
     use serde_json::json;
     let dir = support::TempDir::new("silence-scope");
     let c = elasticpro_core::Core::new_with_rounds(Some(dir.0.clone()), Edition::Hosted, 1);
-    let admin = Caller { name: "root".into(), role: Role::Admin, must_change: false, scope: None };
+    let admin = Caller { name: "root".into(), role: Role::Admin, must_change: false, scope: None, play: None };
     let primed = c.handle_as(json!({ "type": "PRIME", "readOnly": true, "clusters": [{ "id": "prod", "url": "http://127.0.0.1:1" }] }), Some(admin.clone())).await;
     assert_eq!(primed["ok"], json!(true), "{primed}");
     // An operator limited to a Zabbix group that holds none of the configured clusters.
-    let scoped = Caller { name: "uma".into(), role: Role::Operator, must_change: false, scope: Some(vec!["ES elsewhere".into()]) };
+    let scoped = Caller { name: "uma".into(), role: Role::Operator, must_change: false, scope: Some(vec!["ES elsewhere".into()]), play: None };
     let set = c.handle_as(json!({ "type": "SILENCE_SET", "scope": "cluster", "target": "prod", "minutes": 60 }), Some(admin.clone())).await;
     assert_eq!(set["ok"], json!(true), "{set}");
     let id = set["silence"]["id"].as_str().unwrap().to_string();
@@ -713,7 +713,7 @@ async fn saved_queries_are_private_unless_shared_and_only_the_owner_changes_them
     use serde_json::json;
     let dir = support::TempDir::new("saved-queries");
     let c = elasticpro_core::Core::new_with_rounds(Some(dir.0.clone()), Edition::Hosted, 1);
-    let who = |n: &str, r: Role| Caller { name: n.into(), role: r, must_change: false, scope: None };
+    let who = |n: &str, r: Role| Caller { name: n.into(), role: r, must_change: false, scope: None, play: None };
     let (sara, omar, root) = (who("sara", Role::User), who("omar", Role::User), who("root", Role::Admin));
     let mine = c.handle_as(json!({ "type": "QUERY_SAVE", "name": "mine", "method": "GET", "path": "/_cat/health" }), Some(sara.clone())).await;
     assert_eq!(mine["ok"], json!(true), "{mine}");
@@ -728,7 +728,7 @@ async fn saved_queries_are_private_unless_shared_and_only_the_owner_changes_them
         assert_eq!(r["kind"], json!("forbidden"), "{m} -> {r}");
     }
     // An administrator limited to some clusters is not an administrator of everyone's queries.
-    let scoped_admin = Caller { name: "zadmin@zabbix".into(), role: Role::Admin, must_change: false, scope: Some(vec!["ES one".into()]) };
+    let scoped_admin = Caller { name: "zadmin@zabbix".into(), role: Role::Admin, must_change: false, scope: Some(vec!["ES one".into()]), play: None };
     let r = c.handle_as(json!({ "type": "QUERY_DELETE", "id": team_id }), Some(scoped_admin)).await;
     assert_eq!(r["kind"], json!("forbidden"), "a scoped administrator cannot delete another person's query: {r}");
     let admin = c.handle_as(json!({ "type": "QUERY_DELETE", "id": team_id }), Some(root)).await;

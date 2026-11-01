@@ -224,6 +224,8 @@ pub struct Core {
     /// Each person's notification history. See `notify`.
     notify: crate::notify::NotifyStore,
     silences: crate::silences::Silences,
+    /// Each cluster's type, ULM bucket and whether SLM is expected (hosted). See `cluster_meta`.
+    cluster_meta: crate::cluster_meta::ClusterMeta,
     saved_queries: crate::saved_queries::SavedQueries,
     /// The housekeeping scheduler's settings and what it last did. See `housekeeping`.
     pub(crate) housekeeping: crate::housekeeping::Housekeeping,
@@ -235,6 +237,9 @@ pub struct Core {
     /// Volume reports: the job queue, its files, the mail server and the mailed schedule.
     /// See `report`.
     pub(crate) reports: crate::report::Reports,
+    /// Play, the NOC wall display: display links, its settings, node-name history, shared
+    /// acknowledgements and the shared measurement cache. See `play`.
+    pub(crate) play: crate::play::Play,
 }
 
 /// What the last Zabbix sync found. The specs carry credentials and never leave the core;
@@ -251,6 +256,9 @@ struct ZbxSync {
     provisioned: Vec<String>,
     /// Each cluster template the last sync read, with how many hosts it held.
     templates: Vec<Value>,
+    /// The type each Zabbix cluster's host tag `elasticpro:type` names, by cluster id —
+    /// what CLUSTER_META_GET answers for a cluster with no entry of its own.
+    kinds: HashMap<String, String>,
 }
 
 /// What the job is set to do, and what it last did. Kept together because an admin
@@ -691,6 +699,7 @@ impl Core {
         let activity = crate::activity::ActivityLog::new(crate::activity::ActivityConfig::from_env(data_dir.as_deref(), edition));
         let (instance, previous_instance, restart_suspects) = instance_ids(data_dir.as_deref());
         let req_cfg = crate::gate::config().clone();
+        let play = crate::play::Play::open(data_dir.as_deref(), edition);
         Arc::new(Core {
             edition,
             activity,
@@ -739,12 +748,15 @@ impl Core {
             read_cache: crate::inflight::ReadCache::default(),
             flights: Arc::new(crate::inflight::Flights::default()),
             silences: crate::silences::Silences::open(data_dir_for_notify.as_ref().map(|d| d.join("silences.json"))),
+            cluster_meta: crate::cluster_meta::ClusterMeta::open(
+                data_dir_for_notify.as_ref().filter(|_| hosted).map(|d| d.join(crate::cluster_meta::META_FILE))),
             saved_queries: crate::saved_queries::SavedQueries::open(data_dir_for_notify.as_ref().map(|d| d.join("saved-queries.json"))),
             notify: crate::notify::NotifyStore::open(data_dir_for_notify.map(|d| d.join("notifications.json"))),
             housekeeping: crate::housekeeping::Housekeeping::from_env(),
             zbx_push: parking_lot::Mutex::new(crate::zbx_push::PushStatus::default()),
             volume: crate::volume::Volume::open(data_dir_for_volume.as_deref()),
             reports: crate::report::Reports::open(data_dir_for_reports.as_deref()),
+            play,
         })
     }
 
@@ -850,8 +862,10 @@ impl Core {
     /// Ids of the primed clusters this caller may see, or `None` for all of them.
     pub(crate) fn visible_ids(&self, caller: Option<&Caller>) -> Option<std::collections::HashSet<String>> {
         let c = caller?;
-        c.scope.as_ref()?;
-        Some(self.all_specs().into_iter().filter(|s| c.sees(&s.zabbix_groups)).map(|s| s.id).collect())
+        if !c.limited() {
+            return None;
+        }
+        Some(self.all_specs().into_iter().filter(|s| c.sees_cluster(&s.id, &s.zabbix_groups)).map(|s| s.id).collect())
     }
 
     /* -------------------------------- who is asking -------------------------------- */
@@ -914,7 +928,7 @@ impl Core {
     /// The caller a session token names, if the session is still live.
     pub fn caller_for_session(&self, token: &str) -> Option<Caller> {
         let s = self.sessions.resolve(token)?;
-        Some(Caller { name: s.user, role: s.role, must_change: s.must_change, scope: s.scope })
+        self.caller_from_session(s)
     }
 
     /// The caller for a name a trusted reverse proxy has already authenticated.
@@ -932,7 +946,7 @@ impl Core {
             .list()
             .into_iter()
             .find(|a| a.name.eq_ignore_ascii_case(name) && !a.disabled)
-            .map(|a| Caller { name: a.name, role: a.role, must_change: a.must_change, scope: a.scope })
+            .map(|a| Caller { name: a.name, role: a.role, must_change: a.must_change, scope: a.scope, play: None })
     }
 
     /// The caller an API token names. Hosted only — see `Edition::uses_api_tokens`.
@@ -942,7 +956,7 @@ impl Core {
         }
         let role = self.tokens.verify(secret)?;
         // A token is not a person and has no password to change.
-        Some(Caller { name: format!("token:{}", &secret[..secret.len().min(12)]), role, must_change: false, scope: None })
+        Some(Caller { name: format!("token:{}", &secret[..secret.len().min(12)]), role, must_change: false, scope: None, play: None })
     }
 
     /// Whether this caller may send this message, as a ready-made refusal.
@@ -969,6 +983,27 @@ impl Core {
                     "message": "no accounts exist yet — create the first administrator to continue",
                 })),
             };
+        }
+        // A display link shows Play and nothing else (auth::PLAY_READS), whatever the message's
+        // role would otherwise allow — the session-less ones included.
+        if let Some(c) = caller.filter(|c| c.play_only()) {
+            let method = msg.get("method").and_then(|v| v.as_str()).unwrap_or("");
+            let path = msg.get("path").and_then(|v| v.as_str()).unwrap_or("");
+            auth::play_may(t, method, path, msg.get("kind").and_then(|v| v.as_str())).map_err(|why| {
+                json!({ "ok": false, "kind": "forbidden", "role": c.role.as_str(), "playOnly": true, "message": why })
+            })?;
+            // And only the log-delay measurement itself: its index pattern, its parameters, its body.
+            if t == "ES" {
+                let id = msg.get("clusterId").and_then(|v| v.as_str()).unwrap_or("");
+                // A cluster with no pattern of its own (a Zabbix host) uses the managed default,
+                // as the page does; anything else is refused and the wall says "not measured".
+                let pattern = self.spec_for(id).and_then(|s| s.log_index_pattern)
+                    .or_else(|| crate::settings::get().text("UI_LOG_INDEX_PATTERN").map(String::from))
+                    .or_else(|| Some("logstash-*".to_string()));
+                auth::play_es_shape(pattern.as_deref(), method, path, msg.get("body").and_then(|v| v.as_str())).map_err(|why| {
+                    json!({ "ok": false, "kind": "forbidden", "role": c.role.as_str(), "playOnly": true, "message": why })
+                })?;
+            }
         }
         if auth::required_role(t).is_none() {
             return Ok(());
@@ -1035,7 +1070,7 @@ impl Core {
             if let Some(ids) = msg.get("clusterIds").and_then(|v| v.as_array()) {
                 for id in ids {
                     let id = id.as_str().unwrap_or("");
-                    if !self.spec_for(id).is_some_and(|s| c.sees(&s.zabbix_groups)) {
+                    if !self.spec_for(id).is_some_and(|s| c.sees_cluster(&s.id, &s.zabbix_groups)) {
                         return Err(refuse(format!("cluster {id:?} is not one of yours")));
                     }
                 }
@@ -1044,9 +1079,9 @@ impl Core {
         }
         let id = msg.get("clusterId").and_then(|v| v.as_str()).unwrap_or("");
         let spec = self.spec_for(id);
-        if c.scope.is_some() {
+        if c.limited() {
             match &spec {
-                Some(s) if c.sees(&s.zabbix_groups) => {}
+                Some(s) if c.sees_cluster(&s.id, &s.zabbix_groups) => {}
                 _ => return Err(refuse(format!(
                     "cluster {id:?} is not one of yours — ask a Zabbix administrator to add you to a user group mapped to it"
                 ))),
@@ -1122,7 +1157,16 @@ impl Core {
             Reauth::None => "none",
         };
         let sent = msg.clone();
-        let mut out = self.dispatch_reply(msg, caller.clone(), reauth).await;
+        let t = msg.get("type").and_then(|v| v.as_str()).unwrap_or("");
+        let mut out = if t == "PLAY_EXCHANGE" && !caller.as_ref().is_some_and(Caller::play_only) {
+            // Needs the client's address (a link may be limited to some), which only this
+            // entry point has.
+            self.play_exchange(&msg, source).into()
+        } else if let Some(refused) = self.display_source_refusal(caller.as_ref(), source) {
+            refused.into()
+        } else {
+            self.dispatch_reply(msg, caller.clone(), reauth).await
+        };
         crate::errors::stamp(&mut out.value);
         self.record_activity(&sent, caller.as_ref(), via, source, &out.value);
         out
@@ -1247,6 +1291,14 @@ impl Core {
             | "MAIL_SETTINGS_GET" | "MAIL_SETTINGS_SET" | "MAIL_TEST" | "REPORT_SCHEDULE_GET" | "REPORT_SCHEDULE_SET"
             | "REPORT_SEND_NOW" => self.report_msg(&t, &msg, caller.as_ref()).await,
             "NOTIFY_PUT" | "NOTIFY_LIST" | "NOTIFY_CLEAR" => self.notify_msg(&t, &msg, caller.as_ref()),
+            // Play, the NOC wall display (docs/PLAY.md), and the shared acknowledgements.
+            // PLAY_EXCHANGE needs the client's address and is answered in handle_reply_as_from_at;
+            // reached here (no address known) a link limited to some addresses is refused.
+            "PLAY_EXCHANGE" => self.play_exchange(&msg, None),
+            "PLAY_LINK_CREATE" | "PLAY_LINK_LIST" | "PLAY_LINK_REVOKE" | "PLAY_LINK_SET" | "PLAY_CONFIG_GET" | "PLAY_CONFIG_SET"
+            | "PLAY_NODE_FORGET" | "PLAY_STATE" | "PLAY_ZOOM_SET" | "PLAY_SHARE_PUT" | "PLAY_SHARE_GET" | "ACK_LIST" | "ACK_SET" | "ACK_CLEAR" => {
+                self.play_msg(&t, &msg, caller.as_ref()).await
+            }
             // Scoped to the clusters the caller may see (Zabbix group scope): a silence names a
             // cluster, so listing, setting or removing one for a cluster you cannot see is refused.
             // Saved REST console queries: the caller's own and every shared one. The page
@@ -1274,6 +1326,7 @@ impl Core {
                     Err(e) => json!({ "ok": false, "kind": if e.starts_with("only its owner") { "forbidden" } else { "bad_request" }, "message": e }),
                 }
             }
+            "CLUSTER_META_GET" | "CLUSTER_META_SET" => self.cluster_meta_msg(&t, &msg, caller.as_ref()),
             "SILENCE_LIST" => {
                 let list = self.silences_visible(caller.as_ref());
                 json!({ "ok": true, "silences": list })
@@ -1656,6 +1709,55 @@ impl Core {
         crate::silences::cluster_of(scope, target, &known).is_some_and(|id| visible.contains(id))
     }
 
+    /// `CLUSTER_META_GET` (user) / `CLUSTER_META_SET` (admin), hosted: each cluster's type,
+    /// ULM bucket and whether SLM is expected (`cluster_meta`). Scoped to the clusters the
+    /// caller sees. GET answers `{ok, clusters: {<id>: {type, ulm: {enabled?, bucket}, slm?,
+    /// source: "set"|"zabbix-tag", setBy?, setAt?}}}` — only the clusters that have an entry
+    /// or a Zabbix tag; the rest follow the On-Prem defaults in the page. SET takes
+    /// `{clusterId, meta: {type, ulm: {enabled, bucket}, slm} | null}` (null forgets it).
+    fn cluster_meta_msg(&self, t: &str, msg: &Value, caller: Option<&Caller>) -> Value {
+        if self.edition != Edition::Hosted {
+            return json!({ "ok": false, "kind": "not_available",
+                           "message": "cluster type is kept on the server only in the hosted build; this one keeps `type`, `ulm` and `slm` on the cluster in the config file" });
+        }
+        let visible: std::collections::HashSet<String> = self.fleet_visible(caller).into_iter().collect();
+        if t == "CLUSTER_META_SET" {
+            let by = caller.map(|c| c.name.clone()).unwrap_or_else(|| "local".into());
+            let id = msg.get("clusterId").and_then(Value::as_str).unwrap_or("").trim().to_string();
+            if !visible.contains(&id) {
+                return json!({ "ok": false, "kind": "forbidden", "message": "that is not a cluster you can see" });
+            }
+            let meta = match msg.get("meta") {
+                None | Some(Value::Null) => None,
+                Some(m) => match crate::cluster_meta::parse(m, &by, crate::fleet::now_ms()) {
+                    Ok(m) => Some(m),
+                    Err(e) => return json!({ "ok": false, "kind": "bad_request", "message": e }),
+                },
+            };
+            if let Err(e) = self.cluster_meta.set(&id, meta.clone()) {
+                return json!({ "ok": false, "kind": "io", "message": e });
+            }
+            match &meta {
+                Some(m) => tracing::info!(target: "audit", user = %by, cluster = %id, kind = %m.kind, ulm = ?m.ulm.enabled,
+                                          bucket = %m.ulm.bucket, slm = ?m.slm, "cluster type set"),
+                None => tracing::info!(target: "audit", user = %by, cluster = %id, "cluster type cleared"),
+            }
+        }
+        let kept = self.cluster_meta.all();
+        let seeds = self.zbx_sync.read().kinds.clone();
+        let mut out = serde_json::Map::new();
+        for id in &visible {
+            if let Some(m) = kept.get(id) {
+                let mut v = serde_json::to_value(m).unwrap_or(Value::Null);
+                v["source"] = json!("set");
+                out.insert(id.clone(), v);
+            } else if let Some(k) = seeds.get(id) {
+                out.insert(id.clone(), json!({ "type": k, "ulm": { "bucket": "" }, "source": "zabbix-tag" }));
+            }
+        }
+        json!({ "ok": true, "clusters": out })
+    }
+
     /// The live silences this caller may see.
     fn silences_visible(&self, caller: Option<&Caller>) -> Vec<crate::silences::Silence> {
         self.silences.list().into_iter().filter(|s| self.silence_allowed(caller, &s.scope, &s.target)).collect()
@@ -1681,7 +1783,7 @@ impl Core {
                 self.users.record_login(&acct.name, "password", Ok(()));
                 // One shape for "who is this", built from the account rather than
                 // assembled by hand here and differently somewhere else.
-                let who = Caller { name: acct.name.clone(), role: acct.role, must_change: acct.must_change, scope: acct.scope.clone() };
+                let who = Caller { name: acct.name.clone(), role: acct.role, must_change: acct.must_change, scope: acct.scope.clone(), play: None };
                 json!({ "ok": true, "session": token, "caller": who.public() })
             }
             Err(e) => {
@@ -1714,7 +1816,7 @@ impl Core {
                 match self.users.verify(name, password) {
                     Ok(acct) => {
                         let token = self.sessions.begin(&acct);
-                        let who = Caller { name: acct.name.clone(), role: acct.role, must_change: acct.must_change, scope: None };
+                        let who = Caller { name: acct.name.clone(), role: acct.role, must_change: acct.must_change, scope: None, play: None };
                         json!({ "ok": true, "session": token, "caller": who.public() })
                     }
                     Err(e) => json!({ "ok": false, "message": e.to_string() }),
@@ -2033,6 +2135,10 @@ impl Core {
             "notifyDays": self.notify.days(),
             // Config → Zabbix can set up the connection (admins; ZABBIX_LINK_GET).
             "zabbixLink": self.edition == Edition::Hosted,
+            // Play (docs/PLAY.md): display links exist on this server (hosted, not switched off
+            // by UI_PLAY_ENABLED), and acknowledgements are the team's (ACK_*), not the browser's.
+            "playLinks": self.edition == Edition::Hosted && crate::play::settings::links_enabled(crate::settings::get()),
+            "sharedAcks": self.edition == Edition::Hosted,
         });
         if self.edition.uses_accounts() && caller.is_none() {
             return out;
@@ -2525,14 +2631,16 @@ impl Core {
             Ok(v) => v,
             Err(refusal) => return refusal,
         };
-        let scoped = caller.and_then(|c| c.scope.as_ref()).is_some();
+        let scoped = caller.is_some_and(Caller::limited);
         let key = if raw.get("clusters").is_some() { "clusters" } else { "hosts" };
         let mut used_vias = std::collections::HashSet::new();
         if let Some(Value::Array(list)) = raw.get_mut(key) {
+            // The ids the fleet knows these entries by, for a display link that names clusters.
+            let ids = crate::cluster_save::config_ids(list);
             let kept: Vec<Value> = std::mem::take(list)
                 .into_iter()
                 .enumerate()
-                .filter(|(_, c)| caller.is_none_or(|who| who.sees(&raw_groups(c))))
+                .filter(|(i, c)| caller.is_none_or(|who| who.sees_cluster(ids.get(*i).map(String::as_str).unwrap_or(""), &raw_groups(c))))
                 .map(|(i, mut c)| {
                     // The position in the full list, so a name that collides with another
                     // cluster's gets the same id here as in the admin's view.
@@ -2578,7 +2686,7 @@ impl Core {
         // housekeeping can tell it from a session somebody will come back to.
         let token = self.sessions.begin_frame(&acct);
         tracing::info!(target: "audit", user = %acct.name, role = acct.role.as_str(), "login via zabbix");
-        let who = Caller { name: acct.name.clone(), role: acct.role, must_change: false, scope: acct.scope.clone() };
+        let who = Caller { name: acct.name.clone(), role: acct.role, must_change: false, scope: acct.scope.clone(), play: None };
         json!({ "ok": true, "session": token, "caller": who.public() })
     }
 
@@ -3279,6 +3387,10 @@ impl Core {
             Err(e) => return json!({ "ok": false, "kind": "bad_message", "message": format!("bad ES request: {e}") }),
         };
         req.user = caller.map(|c| c.name.clone());
+        // A display link never writes, whatever it asks: `Writes::decide` is never told it asked.
+        if caller.is_some_and(Caller::play_only) {
+            req.allow_writes = false;
+        }
         // A person asked. Decided here, by the way the request came in — never by its origin.
         req.class = Class::Interactive;
         self.es_req(req).await
@@ -4045,9 +4157,13 @@ impl Core {
         };
         let mut specs = HashMap::new();
         let mut view = Vec::new();
+        let mut kinds = HashMap::new();
         let mut problems = 0;
         for c in found {
             let id = c.id();
+            if let Some(k) = c.kind.as_deref() {
+                kinds.insert(id.clone(), k.to_string());
+            }
             let mut notes: Vec<String> = vec![];
             let mut user_override: Option<String> = None;
             let own = held_by_url.get(&c.url.trim_end_matches('/').to_ascii_lowercase()).cloned().or_else(|| shared.clone());
@@ -4128,7 +4244,7 @@ impl Core {
                 "_id": id, "name": c.name, "url": c.url, "via": via, "source": "zabbix",
                 "zabbixHost": c.host, "zabbixHostId": c.hostid, "client": c.client,
                 "zabbixGroups": c.readers, "username": c.username,
-                "credential": credential, "credentialOk": usable, "notes": notes,
+                "credential": credential, "credentialOk": usable, "notes": notes, "type": c.kind,
             }));
         }
         view.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
@@ -4144,6 +4260,7 @@ impl Core {
             z.options = opts.clone();
             z.provisioned = provisioned.clone();
             z.templates = templates.clone();
+            z.kinds = kinds;
         }
         self.forget_connections();
         tracing::info!(target: "audit", clusters = n, skipped = skipped.len(), problems,
@@ -4313,7 +4430,8 @@ impl Core {
         let clusters: Vec<Value> = z.view.iter().filter(|v| {
             let groups: Vec<String> = v["zabbixGroups"].as_array().into_iter().flatten()
                 .filter_map(|g| g.as_str().map(String::from)).collect();
-            caller.is_none_or(|c| c.sees(&groups))
+            let id = v.get("_id").and_then(Value::as_str).unwrap_or("");
+            caller.is_none_or(|c| c.sees_cluster(id, &groups))
         }).map(|v| {
             let mut v = v.clone();
             // Which Zabbix groups can see a cluster, and why its credential failed, are an

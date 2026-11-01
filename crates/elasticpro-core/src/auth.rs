@@ -202,6 +202,157 @@ pub fn guest_may_read(path: &str) -> bool {
     path_allowed(path, GUEST_READS)
 }
 
+/// What a display-link caller (`play_only`) may send: the reads the Play page is made of,
+/// and nothing else. An allowlist, like `GUEST_READS`: a message added later is refused to a
+/// TV until somebody decides it belongs here.
+///
+/// Besides docs/PLAY.md's list: WHOAMI and LOGOUT (the page asks who it is, and may leave),
+/// the shell's startup no-ops (BADGE, OPEN_APP, ENABLE_NET_ERRORS), and ZABBIX_CLUSTERS — the
+/// credential-free list of the clusters that are Zabbix hosts, without which a wall could
+/// not name them; and CLUSTER_META_GET, each cluster's type and ULM, without which the wall
+/// would raise "no snapshot" for a ULM cluster that takes none (docs/PLAY.md, Spotlight and
+/// Backups).
+pub const PLAY_READS: &[&str] = &[
+    "FLEET_STATE", "CLUSTER_DATASET", "EVENTS_TICKET", "REFRESH",
+    "VOLUME_DAILY", "VOLUME_MONTHLY", "VOLUME_MONTHLY_ALL",
+    "SILENCE_LIST", "ACK_LIST", "PLAY_STATE", "PLAY_ZOOM_SET", "PLAY_SHARE_GET", "PLAY_SHARE_PUT",
+    "PING", "CONFIG_VIEW", "ES", "ZABBIX_CLUSTERS", "CLUSTER_META_GET",
+    "WHOAMI", "LOGOUT", "BADGE", "OPEN_APP", "ENABLE_NET_ERRORS",
+];
+
+/// The refusal a display link gets for anything outside `PLAY_READS`.
+pub const PLAY_REFUSED: &str = "a display link only shows Play";
+
+/// Whether a display-link caller may send this message.
+///
+/// `ES` only as the log-delay measurement sends it: a `_search` or a `_field_caps`, read
+/// (GET, or a POST search), with no scroll context left open on the cluster. Of the shared
+/// cache, only `delay` measurements may be offered by a TV (a repository size is measured by
+/// a person on the Volume page, or by the scraper).
+pub fn play_may(msg_type: &str, method: &str, path: &str, kind: Option<&str>) -> Result<(), String> {
+    if !PLAY_READS.contains(&msg_type) {
+        return Err(PLAY_REFUSED.into());
+    }
+    match msg_type {
+        "ES" => {
+            let m = method.trim().to_ascii_uppercase();
+            let (bare, query) = path.split_once('?').unwrap_or((path, ""));
+            let last = bare.trim_end_matches('/').rsplit('/').next().unwrap_or("");
+            let read = m.is_empty() || crate::guard::is_read(&m, path);
+            let scroll = query.split('&').any(|kv| kv.split('=').next().is_some_and(|k| k.eq_ignore_ascii_case("scroll")));
+            let shaped = matches!(last, "_search" | "_field_caps") && !bare.contains("..") && !scroll;
+            if read && shaped && matches!(m.as_str(), "" | "GET" | "POST") {
+                Ok(())
+            } else {
+                let shown = if m.is_empty() { "GET" } else { m.as_str() };
+                Err(format!("{PLAY_REFUSED}: it may send only the log-delay searches (_search, _field_caps), not {shown} {bare}"))
+            }
+        }
+        "PLAY_SHARE_PUT" if kind != Some("delay") => Err(format!("{PLAY_REFUSED}: it may share only delay measurements")),
+        _ => Ok(()),
+    }
+}
+
+/// The one Elasticsearch request a display link may send, in full: the log-delay
+/// measurement (`ui/js/core/log-delay.js` `preflight` and `measureDelay`), and nothing that
+/// merely ends in `_search`. `play_may` has already allowed the endpoint; this decides the
+/// rest from the request itself:
+///
+/// * the target is the cluster's own `logIndexPattern` (`pattern`, from the primed spec).
+///   A cluster with none (a Zabbix host) takes one plain pattern: no comma, not `*` or
+///   `_all`, nothing starting with `.`;
+/// * the query string holds only what those two calls send (`ignore_unavailable`,
+///   `allow_no_indices`, and `fields` for `_field_caps`), so no `expand_wildcards`;
+/// * `_field_caps` is a GET with no body; `_search` carries exactly the body
+///   `buildSearchBody` builds: `size: 0`, one time range, a terms aggregation of at most
+///   500 devices with one newest document each.
+pub fn play_es_shape(pattern: Option<&str>, method: &str, path: &str, body: Option<&str>) -> Result<(), String> {
+    let refuse = |why: &str| Err(format!("{PLAY_REFUSED}: only the log-delay measurement may be sent ({why})"));
+    let (bare, query) = path.split_once('?').unwrap_or((path, ""));
+    let parts: Vec<&str> = bare.split('/').collect();
+    let [lead, target, endpoint] = parts.as_slice() else { return refuse("one index pattern, then _search or _field_caps") };
+    if !lead.is_empty() {
+        return refuse("one index pattern, then _search or _field_caps");
+    }
+    let Some(target) = crate::guard::percent_decode(target) else { return refuse("the index pattern is not readable") };
+    // Exactly the pattern the measurement uses, never a looser one: the caller passes the
+    // cluster's own logIndexPattern, or the managed default for a cluster with none.
+    let target_ok = pattern.map(str::trim).filter(|p| !p.is_empty()).is_some_and(|p| target == p);
+    if !target_ok {
+        return refuse("the cluster's log index pattern only");
+    }
+    let allowed: &[&str] = match *endpoint {
+        "_field_caps" => &["ignore_unavailable", "allow_no_indices", "fields"],
+        "_search" => &["ignore_unavailable", "allow_no_indices"],
+        _ => return refuse("_search or _field_caps"),
+    };
+    for kv in query.split('&').filter(|kv| !kv.is_empty()) {
+        let k = kv.split('=').next().unwrap_or("");
+        if !allowed.contains(&k) {
+            return refuse("no other query parameters");
+        }
+    }
+    let m = method.trim().to_ascii_uppercase();
+    let body = body.map(str::trim).filter(|b| !b.is_empty());
+    if *endpoint == "_field_caps" {
+        return if matches!(m.as_str(), "" | "GET") && body.is_none() { Ok(()) } else { refuse("_field_caps is a GET without a body") };
+    }
+    if !matches!(m.as_str(), "POST" | "GET") {
+        return refuse("a search is a POST");
+    }
+    let Some(v) = body.and_then(|b| serde_json::from_str::<serde_json::Value>(b).ok()) else { return refuse("the measurement's body") };
+    if delay_search_body(&v) { Ok(()) } else { refuse("the measurement's body: size 0, one time range, the device terms") }
+}
+
+/// `buildSearchBody`'s shape, key for key.
+fn delay_search_body(v: &serde_json::Value) -> bool {
+    use serde_json::Value;
+    fn keys(v: &Value, want: &[&str], optional: &[&str]) -> bool {
+        v.as_object().is_some_and(|m| want.iter().all(|k| m.contains_key(*k))
+            && m.keys().all(|k| want.contains(&k.as_str()) || optional.contains(&k.as_str())))
+    }
+    fn one_field(v: &Value) -> Option<&Value> {
+        v.as_object().filter(|m| m.len() == 1).and_then(|m| m.values().next())
+    }
+    // A field the measurement names: plain, never a wildcard that could pull a whole document.
+    fn plain(f: &str) -> bool {
+        !f.is_empty() && f.len() <= 128 && f.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '@' | '-'))
+    }
+    let strings = |v: &Value| v.as_array().is_some_and(|a| !a.is_empty() && a.len() <= 16
+        && a.iter().all(|x| x.as_str().is_some_and(plain)));
+    if !keys(v, &["size", "query", "aggs"], &[]) || v["size"] != serde_json::json!(0) {
+        return false;
+    }
+    // query: {bool: {filter: [{range: {<arrival>: {gte, lte, format}}}]}}
+    let q = &v["query"];
+    let range_ok = keys(q, &["bool"], &[]) && keys(&q["bool"], &["filter"], &[])
+        && q["bool"]["filter"].as_array().is_some_and(|f| f.len() == 1 && keys(&f[0], &["range"], &[])
+            && f[0]["range"].as_object().is_some_and(|m| m.keys().all(|k| plain(k)))
+            && one_field(&f[0]["range"]).is_some_and(|r| keys(r, &[], &["gte", "lte", "format"])
+                && r.as_object().is_some_and(|m| m.values().all(Value::is_string))));
+    if !range_ok {
+        return false;
+    }
+    // aggs: {devices: {terms: {field, size ≤ 500, order?}, aggs: {latest: {top_hits: {size: 1, sort, _source}}}}}
+    let d = &v["aggs"];
+    if !keys(d, &["devices"], &[]) || !keys(&d["devices"], &["terms", "aggs"], &[]) {
+        return false;
+    }
+    let t = &d["devices"]["terms"];
+    let terms_ok = keys(t, &["field", "size"], &["order"]) && t["field"].as_str().is_some_and(plain)
+        && t["size"].as_u64().is_some_and(|n| (1..=500).contains(&n))
+        && t.get("order").is_none_or(|o| *o == serde_json::json!({ "_count": "desc" }));
+    let inner = &d["devices"]["aggs"];
+    let hits_ok = keys(inner, &["latest"], &[]) && keys(&inner["latest"], &["top_hits"], &[])
+        && keys(&inner["latest"]["top_hits"], &["size", "_source"], &["sort"])
+        && inner["latest"]["top_hits"]["size"] == serde_json::json!(1)
+        && strings(&inner["latest"]["top_hits"]["_source"])
+        && inner["latest"]["top_hits"].get("sort").is_none_or(|s| s.as_array().is_some_and(|a| a.len() <= 2
+            && a.iter().all(|x| x.as_object().is_some_and(|m| m.len() == 1 && m.keys().all(|k| plain(k)))
+                && one_field(x).is_some_and(|o| keys(o, &["order"], &[]) && o["order"].is_string()))));
+    terms_ok && hits_ok
+}
+
 /// The minimum role a message type needs, or `None` when no session is required.
 ///
 /// `None` is deliberately tiny: PING is how the UI discovers that a login is needed in
@@ -309,6 +460,11 @@ pub fn required_role(msg_type: &str) -> Option<Role> {
         // (the handler checks ownership), and sees what others chose to share.
         "QUERY_LIST" | "QUERY_SAVE" | "QUERY_DELETE" => Some(Role::User),
         "SILENCE_SET" | "SILENCE_CLEAR" => Some(Role::Operator),
+        // A cluster's type, ULM bucket and whether SLM is expected (cluster_meta): read by every
+        // page that decides whether "no snapshot" is a problem, so a user's; setting it changes
+        // which alerts the whole team is shown, so an administrator's (audited).
+        "CLUSTER_META_GET" => Some(Role::User),
+        "CLUSTER_META_SET" => Some(Role::Admin),
         // The daily index-volume record: sizes per day by source name, top field values —
         // the same kind of fact as an index listing, so not a guest's. Refresh now sends
         // searches to the cluster, rate-limited per cluster in the handler.
@@ -327,6 +483,26 @@ pub fn required_role(msg_type: &str) -> Option<Role> {
         "REPORT_STOP" | "REPORT_CONCURRENCY_SET" => Some(Role::Admin),
         "MAIL_SETTINGS_GET" | "MAIL_SETTINGS_SET" | "MAIL_TEST" => Some(Role::Admin),
         "REPORT_SCHEDULE_GET" | "REPORT_SCHEDULE_SET" | "REPORT_SEND_NOW" => Some(Role::Admin),
+
+        // Play, the NOC wall display (docs/PLAY.md). Trading a display link's secret for a
+        // session is how a TV signs in, so it cannot need one; the link itself is the proof.
+        "PLAY_EXCHANGE" => None,
+        // Display links hand read access to whoever holds the URL: an administrator's.
+        "PLAY_LINK_CREATE" | "PLAY_LINK_LIST" | "PLAY_LINK_REVOKE" | "PLAY_LINK_SET" => Some(Role::Admin),
+        // The Play settings: anybody who can open Play reads them; changing them changes every
+        // wall in the building, so an administrator's.
+        "PLAY_CONFIG_GET" | "PLAY_STATE" => Some(Role::User),
+        // A display link's TV saving its own zoom (the handler refuses anybody else).
+        "PLAY_ZOOM_SET" => Some(Role::User),
+        "PLAY_CONFIG_SET" => Some(Role::Admin),
+        // A node removed on purpose stops blinking: day-to-day fleet work, an operator's.
+        "PLAY_NODE_FORGET" => Some(Role::Operator),
+        // The shared measurement cache: a measurement somebody already made, kept so the next
+        // display does not make it again. Reading and offering one are a user's.
+        "PLAY_SHARE_GET" | "PLAY_SHARE_PUT" => Some(Role::User),
+        // Shared acknowledgements (hosted): the same as acknowledging on the Alerts page,
+        // which any user may do; every set and clear is audited.
+        "ACK_LIST" | "ACK_SET" | "ACK_CLEAR" => Some(Role::User),
 
         // Anything new is refused until somebody decides where it belongs.
         _ => Some(Role::Admin),
@@ -386,18 +562,54 @@ pub struct Caller {
     /// The Zabbix user groups this caller is limited to, or `None` for every cluster.
     /// See `scope_allows`.
     pub scope: Option<Vec<String>>,
+    /// Set for a caller that came in through a display link (Play): `play_only`, with the
+    /// link's own limits. `None` for everybody else.
+    pub play: Option<PlayCaller>,
+}
+
+/// A display link's limits, carried by the caller its session resolves to. Read from the
+/// link at every request (play/links.rs), so a change to the link applies at once.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PlayCaller {
+    /// The link's id.
+    pub link: String,
+    /// The clusters the link names by id, or `None` when it names all of them or a group
+    /// (a group is the caller's `scope`).
+    pub clusters: Option<Vec<String>>,
+    /// The addresses the link may be used from (CIDR); empty: anywhere.
+    pub allow_from: Vec<String>,
 }
 
 impl Caller {
     pub fn public(&self) -> serde_json::Value {
-        serde_json::json!({
+        let mut v = serde_json::json!({
             "name": self.name, "role": self.role.as_str(), "mustChange": self.must_change,
-            "scoped": self.scope.is_some(),
-        })
+            "scoped": self.limited(),
+        });
+        if let Some(p) = &self.play {
+            v["playOnly"] = serde_json::json!(true);
+            v["display"] = serde_json::json!(p.link);
+        }
+        v
     }
-    /// May this caller see a cluster tagged with these Zabbix groups?
+    /// May this caller see a cluster tagged with these Zabbix groups? Groups only: a call
+    /// site that knows the cluster's id asks `sees_cluster`, which adds a display link's list.
     pub fn sees(&self, cluster_groups: &[String]) -> bool {
         scope_allows(self.scope.as_deref(), cluster_groups)
+    }
+    /// May this caller see this cluster: its Zabbix groups, and for a display link that
+    /// names clusters by id, its id. The one definition the gate and every reply use.
+    pub fn sees_cluster(&self, id: &str, cluster_groups: &[String]) -> bool {
+        self.sees(cluster_groups)
+            && self.play.as_ref().and_then(|p| p.clusters.as_ref()).is_none_or(|ids| ids.iter().any(|i| i == id))
+    }
+    /// Limited to some clusters, by Zabbix group or by a display link's list.
+    pub fn limited(&self) -> bool {
+        self.scope.is_some() || self.play.as_ref().is_some_and(|p| p.clusters.is_some())
+    }
+    /// Came in through a display link: may send only `PLAY_READS`.
+    pub fn play_only(&self) -> bool {
+        self.play.is_some()
     }
 }
 
@@ -1082,6 +1294,10 @@ pub struct Session {
     /// those after a day without use. Absent in a session written before this field existed.
     #[serde(default)]
     pub frame: bool,
+    /// Made by exchanging a display link's secret (Play): the link's id. The caller this
+    /// session resolves to is `play_only`, and lives only as long as the link does.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub play_link: Option<String>,
 }
 
 impl Session {
@@ -1220,10 +1436,74 @@ impl Sessions {
             scope: account.scope.clone(),
             last_seen: at,
             frame,
+            play_link: None,
         };
         self.map.write().insert(token_hash(&token), s);
         self.save();
         token
+    }
+
+    /// How many live sessions one display link keeps: a TV that reloads, or a link opened
+    /// on a second screen, makes a new one each time. The newest are kept.
+    pub const DISPLAY_SESSIONS_MAX: usize = 5;
+
+    /// A session for a display link (Play): read-only, named `display:<name>`, limited to
+    /// the link's group `scope` (its cluster ids and addresses are read from the link itself
+    /// at every request). Past `DISPLAY_SESSIONS_MAX` for the link, the least recently used
+    /// ones end.
+    pub fn begin_display(&self, user: &str, scope: Option<Vec<String>>, link: &str) -> String {
+        self.begin_display_at(user, scope, link, now())
+    }
+
+    /// `begin_display` at a given time (seconds).
+    pub fn begin_display_at(&self, user: &str, scope: Option<Vec<String>>, link: &str, at: u64) -> String {
+        let token = random_hex(32);
+        let s = Session {
+            user: user.to_string(),
+            role: Role::User,
+            started: at,
+            must_change: false,
+            scope,
+            last_seen: at,
+            frame: false,
+            play_link: Some(link.to_string()),
+        };
+        {
+            let mut m = self.map.write();
+            let mine = token_hash(&token);
+            m.insert(mine.clone(), s);
+            let mut same: Vec<(String, u64)> = m.iter()
+                .filter(|(h, x)| **h != mine && x.play_link.as_deref() == Some(link))
+                .map(|(h, x)| (h.clone(), x.seen())).collect();
+            if same.len() >= Self::DISPLAY_SESSIONS_MAX {
+                // Newest first; everything past the cap (counting the new one) ends.
+                same.sort_by_key(|(h, seen)| (std::cmp::Reverse(*seen), h.clone()));
+                for (h, _) in same.into_iter().skip(Self::DISPLAY_SESSIONS_MAX - 1) {
+                    m.remove(&h);
+                }
+            }
+        }
+        self.save();
+        token
+    }
+
+    /// End every session made from this display link. Returns how many ended.
+    pub fn end_display(&self, link: &str) -> usize {
+        let ended = {
+            let mut m = self.map.write();
+            let before = m.len();
+            m.retain(|_, s| s.play_link.as_deref() != Some(link));
+            before - m.len()
+        };
+        if ended > 0 {
+            self.save();
+        }
+        ended
+    }
+
+    /// How many live sessions a display link has.
+    pub fn display_sessions(&self, link: &str) -> usize {
+        self.map.read().values().filter(|s| s.play_link.as_deref() == Some(link)).count()
     }
 
     /// The session this token names, if it is still live. Using one moves its `last_seen`.
@@ -1302,9 +1582,13 @@ impl Sessions {
                 if keep.as_ref() == Some(h) || idle_of(s) < p.active_secs {
                     continue;
                 }
+                // A display link's session is a TV's: one left behind by a reload (or a TV
+                // switched off) goes after the same day unused as a frame's.
                 let why = if s.frame && idle_of(s) >= p.frame_idle_secs {
                     Some("idle Zabbix-frame session")
-                } else if !s.frame && p.idle_secs.is_some_and(|i| idle_of(s) >= i) {
+                } else if s.play_link.is_some() && idle_of(s) >= p.frame_idle_secs {
+                    Some("idle display-link session")
+                } else if !s.frame && s.play_link.is_none() && p.idle_secs.is_some_and(|i| idle_of(s) >= i) {
                     Some("idle session")
                 } else {
                     None
@@ -1425,7 +1709,7 @@ impl ApiToken {
 /// revoked without anyone having to work out what it is.
 pub const TOKEN_PREFIX: &str = "elasticpro_";
 
-fn token_hash(secret: &str) -> String {
+pub(crate) fn token_hash(secret: &str) -> String {
     hex::encode(Sha256::digest(secret.as_bytes()))
 }
 
@@ -1839,6 +2123,65 @@ mod tests {
 
     /* ------------------------------- authorisation ------------------------------- */
 
+    /// What `buildSearchBody` (ui/js/core/log-delay.js) sends, as a string.
+    fn delay_body(size: u64) -> String {
+        serde_json::json!({
+            "size": 0,
+            "query": { "bool": { "filter": [{ "range": { "@timestamp": { "gte": "now-24h", "lte": "now", "format": "strict_date_optional_time" } } }] } },
+            "aggs": { "devices": {
+                "terms": { "field": "host.keyword", "size": size, "order": { "_count": "desc" } },
+                "aggs": { "latest": { "top_hits": { "size": 1, "sort": [{ "@timestamp": { "order": "desc" } }], "_source": ["@timestamp", "event.created", "host"] } } },
+            } },
+        }).to_string()
+    }
+
+    #[test]
+    fn a_display_link_may_send_the_delay_measurement_and_nothing_shaped_like_it() {
+        let p = Some("logs-*");
+        let body = delay_body(500);
+        // The measurement as the page sends it.
+        assert!(play_es_shape(p, "POST", "/logs-*/_search?ignore_unavailable=true&allow_no_indices=true", Some(&body)).is_ok());
+        assert!(play_es_shape(p, "POST", "/logs-%2A/_search?ignore_unavailable=true&allow_no_indices=true", Some(&body)).is_ok(), "percent-encoded");
+        assert!(play_es_shape(p, "GET", "/logs-*/_field_caps?ignore_unavailable=true&fields=host%2C%40timestamp", None).is_ok());
+        // Every index on the cluster, hidden ones included.
+        assert!(play_es_shape(p, "GET", "/*,.*/_search?expand_wildcards=all", Some(&body)).is_err());
+        assert!(play_es_shape(p, "POST", "/logs-*/_search?expand_wildcards=all", Some(&body)).is_err());
+        assert!(play_es_shape(p, "POST", "/.security*/_search", Some(&body)).is_err());
+        assert!(play_es_shape(p, "POST", "/logs-*,.kibana/_search", Some(&body)).is_err());
+        assert!(play_es_shape(p, "POST", "/_search", Some(&body)).is_err());
+        // Documents rather than counts.
+        let docs = serde_json::json!({ "size": 10000, "query": { "match_all": {} } }).to_string();
+        assert!(play_es_shape(p, "POST", "/logs-*/_search", Some(&docs)).is_err());
+        assert!(play_es_shape(p, "POST", "/logs-*/_search", Some(&delay_body(10000))).is_err(), "at most 500 devices");
+        // No pattern of its own is not a looser rule: only the default the caller passes counts.
+        assert!(play_es_shape(None, "POST", "/logs-*/_search", Some(&body)).is_err(), "no pattern, nothing");
+        assert!(play_es_shape(p, "POST", "/remote:logs-*/_search", Some(&body)).is_err(), "cross-cluster search");
+        // _source: required, plain field names only — never a wildcard that returns whole documents.
+        let edit = |f: &dyn Fn(&mut serde_json::Value)| { let mut v: serde_json::Value = serde_json::from_str(&delay_body(10)).unwrap(); f(&mut v); v.to_string() };
+        let wild = edit(&|v| v["aggs"]["devices"]["aggs"]["latest"]["top_hits"]["_source"] = serde_json::json!(["*"]));
+        assert!(play_es_shape(p, "POST", "/logs-*/_search", Some(&wild)).is_err(), "a wildcard _source");
+        let none = edit(&|v| { v["aggs"]["devices"]["aggs"]["latest"]["top_hits"].as_object_mut().unwrap().remove("_source"); });
+        assert!(play_es_shape(p, "POST", "/logs-*/_search", Some(&none)).is_err(), "_source is required");
+        let wild_terms = edit(&|v| v["aggs"]["devices"]["terms"]["field"] = serde_json::json!("*"));
+        assert!(play_es_shape(p, "POST", "/logs-*/_search", Some(&wild_terms)).is_err(), "a wildcard terms field");
+        let mut more: serde_json::Value = serde_json::from_str(&body).unwrap();
+        more["aggs"]["devices"]["aggs"]["latest"]["top_hits"]["size"] = serde_json::json!(100);
+        assert!(play_es_shape(p, "POST", "/logs-*/_search", Some(&more.to_string())).is_err(), "one newest document per device");
+        more["aggs"]["devices"]["aggs"]["latest"]["top_hits"]["size"] = serde_json::json!(1);
+        more["aggs"]["other"] = serde_json::json!({ "terms": { "field": "user.password" } });
+        assert!(play_es_shape(p, "POST", "/logs-*/_search", Some(&more.to_string())).is_err(), "no other aggregation");
+        assert!(play_es_shape(p, "POST", "/logs-*/_search", None).is_err());
+        assert!(play_es_shape(p, "POST", "/logs-*/_field_caps?fields=x", Some(&body)).is_err(), "field caps has no body");
+        // A cluster with no pattern of its own (a Zabbix host): the gate passes the managed
+        // default (UI_LOG_INDEX_PATTERN, else logstash-*) and only that exact pattern counts.
+        let d = Some("logstash-*");
+        assert!(play_es_shape(d, "POST", "/logstash-*/_search", Some(&body)).is_ok());
+        for t in ["*", "_all", ".ds-logs", "a,b", "logstash-*,.kibana", "remote:logstash-*", "logs-*"] {
+            assert!(play_es_shape(d, "POST", &format!("/{t}/_search"), Some(&body)).is_err(), "{t}");
+            assert!(play_es_shape(None, "POST", &format!("/{t}/_search"), Some(&body)).is_err(), "no pattern: {t}");
+        }
+    }
+
     #[test]
     fn only_admin_writes_to_a_cluster() {
         assert!(authorize(Role::Admin, "ES", "DELETE", "/logstash-2026.01.01").is_ok());
@@ -1921,6 +2264,16 @@ mod tests {
         assert_eq!(required_role("VOLUME_LAYOUT_SET"), Some(Role::Operator));
         assert!(authorize(Role::User, "VOLUME_LAYOUT_SET", "", "").is_err());
         assert!(authorize(Role::Operator, "VOLUME_LAYOUT_SET", "", "").is_ok());
+    }
+
+    #[test]
+    fn cluster_type_is_read_by_a_user_and_set_by_an_admin() {
+        assert_eq!(required_role("CLUSTER_META_GET"), Some(Role::User));
+        assert!(authorize(Role::Guest, "CLUSTER_META_GET", "", "").is_err());
+        assert!(authorize(Role::User, "CLUSTER_META_GET", "", "").is_ok());
+        assert_eq!(required_role("CLUSTER_META_SET"), Some(Role::Admin));
+        assert!(authorize(Role::Operator, "CLUSTER_META_SET", "", "").is_err(), "it changes what everyone is alerted on");
+        assert!(authorize(Role::Admin, "CLUSTER_META_SET", "", "").is_ok());
     }
 
     #[test]
@@ -2029,6 +2382,26 @@ mod tests {
         let s = store();
         s.add(name, "correct-horse", role).unwrap();
         s.verify(name, "correct-horse").unwrap()
+    }
+
+    #[test]
+    fn a_display_link_keeps_its_five_newest_sessions_and_an_unused_one_goes_after_a_day() {
+        let ss = Sessions::default();
+        let t0 = 1_800_000_000;
+        let toks: Vec<String> = (0..7).map(|i| ss.begin_display_at("display:TV", None, "link1", t0 + i)).collect();
+        let other = ss.begin_display_at("display:Lobby", None, "link2", t0);
+        assert_eq!(ss.display_sessions("link1"), Sessions::DISPLAY_SESSIONS_MAX, "capped per link");
+        assert_eq!(ss.display_sessions("link2"), 1, "another link's are its own");
+        assert!(ss.resolve_at(&toks[0], t0 + 10).is_none() && ss.resolve_at(&toks[1], t0 + 10).is_none(), "the oldest ended");
+        assert!(ss.resolve_at(&toks[6], t0 + 10).is_some(), "the newest kept");
+        // A day on, the unused ones go; one in use stays.
+        let at = t0 + 25 * 3600;
+        assert!(ss.resolve_at(&other, at).is_some());
+        let gone = ss.reap(at, &policy(), None, false);
+        assert_eq!(gone.len(), Sessions::DISPLAY_SESSIONS_MAX, "{gone:?}");
+        assert!(gone.iter().all(|r| r.reason == "idle display-link session" && r.user == "display:TV"));
+        assert_eq!(ss.display_sessions("link1"), 0);
+        assert_eq!(ss.display_sessions("link2"), 1);
     }
 
     #[test]

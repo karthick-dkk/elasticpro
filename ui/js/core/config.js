@@ -212,6 +212,11 @@ export function normalize(raw, sourceName = 'clusters.yaml') {
       // The S3 bucket the cluster's logs are archived to (enriched and raw share one); shown on
       // the Clusters page. Nothing in the app reads the bucket: ULM is Zabbix's.
       logBucket: String(c.logBucket || c.log_bucket || c.s3_log_bucket || '').trim(),
+      // Desktop: the cluster's type, ULM and SLM expectation, as written (core/cluster-kind.js
+      // is the one reader). Hosted keeps them in the core's store instead.
+      type: c.type || '',
+      ulm: c.ulm ?? null,
+      slm: c.slm || '',
       credSource: hasSecret ? (hasOwn ? 'cluster' : 'shared') : 'none',
       needsCred: !hasSecret,
       sealedCred: sealed ? { ...cred } : null,

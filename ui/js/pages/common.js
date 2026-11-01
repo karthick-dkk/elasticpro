@@ -8,6 +8,7 @@ import { confirmDialog } from '../ui/modal.js';
 import { showCredentialDialog } from '../ui/credential-dialog.js';
 import { diagnoseCluster } from '../core/diagnose.js';
 import { configErrorText } from '../core/volume-daily.js';
+import { slmExempt, ulmLabel, ULM_WHY } from '../core/cluster-kind.js';
 import { trustCert, untrustCert, trustHostKey, untrustHostKey, tunnelSecret, tunnelReconnect } from '../core/es.js';
 
 export function card(title, sub, body, actions) {
@@ -464,6 +465,18 @@ export function snapshotCell(s, staleHours) {
   return h('div', { style: { display: 'grid', gap: '2px' } },
     first,
     h('span.muted', { style: { fontSize: '11px' }, title: dt(s.start) }, `${ago(s.start)} \u00b7 ${s.repo || ''}`));
+}
+
+/**
+ * A cluster's last-snapshot cell. For a cluster that expects no snapshots (ULM on, SLM none —
+ * core/cluster-kind.js slmExempt, the rule the alerts follow too) "none" is "ULM · s3 <bucket>",
+ * and an old success is not overdue; a failed or partial one still shows as one.
+ */
+export function snapshotCellFor(c, d, staleHours) {
+  const s = lastSnapshotOf(d || {});
+  if (!slmExempt(c)) return snapshotCell(s, staleHours);
+  if (!s) return h('span.cl-ulm', { title: ULM_WHY }, ulmLabel(c));
+  return snapshotCell(s, 0);
 }
 
 /** The amber banner for a volume reply's `configError`; null when there is none. */

@@ -125,3 +125,27 @@ test('a password file needs its host, in deploy.sh and in the core alike', () =>
   assert.match(rs, /contains_key\("UI_SMTP_PASSWORD_FILE"\) && !s\.values\.contains_key\("UI_SMTP_HOST"\)/,
     'settings.rs parse does not drop UI_SMTP_PASSWORD_FILE without UI_SMTP_HOST');
 });
+
+test('the Play keys are the same list in the core, deploy.sh, config.txt.example and play::settings', () => {
+  // docs/PLAY.md "Play settings" names ten UI_PLAY_* keys; play/settings.rs KEYS is what
+  // PLAY_CONFIG_GET reports as managed, so a key missing there would lock nothing visibly.
+  const PLAY = ['UI_PLAY_ENABLED', 'UI_PLAY_DELAY_YELLOW_MIN', 'UI_PLAY_DELAY_RED_MIN', 'UI_PLAY_NODE_EXPECTED',
+    'UI_PLAY_NODE_BLINK', 'UI_PLAY_NODE_CHECK_SECONDS', 'UI_PLAY_SPOTLIGHT_WHEN', 'UI_PLAY_SPOTLIGHT_LEAVE_MIN',
+    'UI_PLAY_SPOTLIGHT_SECONDS', 'UI_PLAY_EXCLUDE'];
+  const core = coreRules();
+  const sh = deployRules();
+  const ex = read('deploy/config.txt.example');
+  const play = read('crates/elasticpro-core/src/play/settings.rs');
+  const keys = play.slice(play.indexOf('pub const KEYS'), play.indexOf('];', play.indexOf('pub const KEYS')));
+  assert.deepEqual([...keys.matchAll(/"(UI_PLAY_[A-Z_]+)"/g)].map((m) => m[1]), PLAY, 'play::settings::KEYS differs');
+  for (const k of PLAY) {
+    assert.ok(core.rules.has(k), `${k} missing from SPECS`);
+    assert.equal(sh.get(k), core.rules.get(k), `${k}: deploy.sh and the core disagree`);
+    assert.match(ex, new RegExp(`^${k}=`, 'm'), `${k} missing from config.txt.example`);
+  }
+  // Every other key locks a watch field (play::settings::MANAGED); UI_PLAY_ENABLED and
+  // UI_PLAY_EXCLUDE are handled on their own.
+  for (const k of PLAY.filter((x) => !['UI_PLAY_ENABLED', 'UI_PLAY_EXCLUDE'].includes(x))) {
+    assert.ok(play.includes(`("${k}", "/watch/`), `${k} locks no field in play::settings::MANAGED`);
+  }
+});

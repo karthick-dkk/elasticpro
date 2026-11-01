@@ -918,7 +918,7 @@ impl Core {
         let req = RunRequest {
             trigger: Trigger::Manual,
             dry_run: msg.get("dryRun").and_then(Value::as_bool).unwrap_or(false),
-            by: Some(caller.cloned().unwrap_or(Caller { name: "local".into(), role: Role::Admin, must_change: false, scope: None })),
+            by: Some(caller.cloned().unwrap_or(Caller { name: "local".into(), role: Role::Admin, must_change: false, scope: None, play: None })),
             protect_session: msg.get("session").and_then(Value::as_str).map(String::from),
             now,
         };

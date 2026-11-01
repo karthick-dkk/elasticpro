@@ -11,6 +11,7 @@
 pub mod activity;
 pub mod auth;
 pub mod bridge;
+pub mod cluster_meta;
 pub mod cluster_save;
 pub mod cluster_secrets;
 pub mod crypto;
@@ -25,6 +26,7 @@ pub mod http;
 pub mod inflight;
 pub mod memory;
 pub mod notify;
+pub mod play;
 pub mod report;
 pub mod silences;
 pub mod saved_queries;

@@ -964,10 +964,16 @@ await go('volume');
     // Contract-shaped answer, so the layout and the export are checked whatever the core is.
     const realFetch = globalThis.fetch;
     const ymAgo = (i) => { const d = new Date(); return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() - i, 1)).toISOString().slice(0, 7); };
+    // The stubbed rows carry a name the real record never has. Their shape cannot tell them
+    // apart: from the 1st of the month after tools/mock-es.mjs's 45 days first span three
+    // calendar months (2026-11-01: Sep, Oct, Nov), the real table is Cluster + three months
+    // too, the wait below took it, and the export was clicked while the refresh was still
+    // being asked — writing nothing, so files.at(-1) was the client plan's file.
+    const stubName = (c) => `${c.name} (stubbed)`;
     globalThis.fetch = async (input, init) => {
       const body = init && init.body ? JSON.parse(init.body) : {};
       if (body.type === 'VOLUME_MONTHLY_ALL') {
-        return stubReply({ ok: true, clusters: config.clusters.map((c) => ({ clusterId: c.name, name: c.name, months: [
+        return stubReply({ ok: true, clusters: config.clusters.map((c) => ({ clusterId: c.name, name: stubName(c), months: [
           { month: ymAgo(2), daysWithData: 0 }, { month: ymAgo(1), daysWithData: 30, priBytes: 2e11 },
           { month: ymAgo(0), daysWithData: 29, priBytes: 1.9e11, partial: true }] })) });
       }
@@ -975,12 +981,13 @@ await go('volume');
     };
     try {
       [...doc.querySelectorAll('button')].find((b) => b.textContent === '↻ Refresh').click();
-      // Wait for the stubbed answer's table (Cluster + three months), not the one the real
+      // Wait for the stubbed answer's table (its names, Cluster + three months), not the one the real
       // record drew before the refresh: an export clicked while the reply is being asked
       // again writes nothing, and files.at(-1) would be an earlier view's file.
       const p = await waitFor(() => {
         const x = panel('Monthly volume by cluster');
-        return x && x.querySelector('table') && x.querySelectorAll('thead th').length === 4 ? x : null;
+        const first = x && x.querySelector('tbody tr td b');
+        return first && first.textContent === stubName(config.clusters[0]) && x.querySelectorAll('thead th').length === 4 ? x : null;
       }, 'volume: the Monthly table did not draw from a VOLUME_MONTHLY_ALL answer');
       if (p) {
         const hd = [...p.querySelectorAll('thead th')].map((x) => x.textContent.trim());
@@ -2937,6 +2944,141 @@ restoreConsole();
   await go('overview');
 }
 
+// Cluster type and ULM (0.3.47, core/cluster-kind.js): a CI / DI / On-Prem badge beside every
+// name, the Type filter, the edit dialog writing the cluster's file keys (desktop) and
+// CLUSTER_META_SET (hosted, a Zabbix cluster's meta part only), and the snapshot cell saying
+// "ULM · s3 <bucket>" for a cluster that expects no snapshots. Writes are stubbed so the fixture
+// is not rewritten; the core's CLUSTER_META_* are stubbed since this dev bridge is not hosted.
+{
+  const st = await load('core/state.js');
+  const ck = await load('core/cluster-kind.js');
+  const sc = await load('core/server-credentials.js');
+  const press = (el) => el && el.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+  const realFetch = globalThis.fetch;
+  let written = null;
+  let metaStore = {};
+  const metaSent = [];
+  globalThis.fetch = async (input, init) => {
+    const body = init && init.body ? JSON.parse(init.body) : {};
+    if (body.type === 'CONFIG_WRITE') { written = body.text; return stubReply({ ok: true, path: body.path, bytes: body.text.length }); }
+    if (body.type === 'CONFIG_READ' && written !== null) return stubReply({ ok: true, text: written, size: written.length, lastModified: Date.now() });
+    if (body.type === 'CLUSTER_META_GET') return stubReply({ ok: true, clusters: metaStore });
+    if (body.type === 'CLUSTER_META_SET') {
+      metaSent.push(body);
+      metaStore = { ...metaStore, [body.clusterId]: { ...body.meta, source: 'set', setBy: 'kind-check' } };
+      return stubReply({ ok: true, clusters: metaStore });
+    }
+    return realFetch(input, init);
+  };
+  const summary = () => panel('Cluster summary');
+  const rowOf = (c) => summary() && summary().querySelector(`tbody tr[data-cluster="${c.id}"]`);
+  const badgeOf = (c) => { const r = rowOf(c); const b = r && r.querySelector('.cl-type'); return b ? b.textContent : null; };
+  const target = config.clusters[0];
+  const trigger = () => [...summary().querySelectorAll('button.cl-name')].find((b) => b.textContent.includes(target.name));
+  const menuItem = async (label) => {
+    press(trigger()); await settleFor(120);
+    const m = doc.querySelector('.menu-pop');
+    return m && [...m.querySelectorAll('button[role=menuitem]')].find((b) => b.children[1].textContent === label);
+  };
+  // Who was signed in and what was selected go back afterwards: later cases depend on them.
+  const before = { caller: st.state.caller, selected: st.state.selected };
+  try {
+    st.state.caller = { name: 'kind-check', role: 'admin' };
+    st.state.selected = 'all';
+    await go('overview');
+    const rows = [...summary().querySelectorAll('tbody tr[data-cluster]')];
+    ok(rows.length > 0 && rows.every((r) => r.querySelector('td.cl-name-td .cl-type')), 'cluster type: a row has no CI / DI / On-Prem badge');
+    ok(badgeOf(target) === 'On-Prem', `cluster type: a cluster with no type reads "${badgeOf(target)}", expected On-Prem`);
+
+    // Desktop: Edit → CI. ULM and SLM follow the type; the bucket shows with ULM on; Save writes
+    // the file keys, and the row's badge and snapshot cell follow.
+    press(await menuItem('Edit')); await settleFor(400);
+    let dlg = doc.querySelector('.modal-overlay .modal');
+    ok(dlg && dlg.querySelector('#ce-type-ci'), 'cluster type: the edit dialog has no Cluster type control');
+    if (dlg && dlg.querySelector('#ce-type-ci')) {
+      ok(!dlg.querySelector('#ce-ulm').checked && dlg.querySelector('#ce-slm').value === 'expected' && dlg.querySelector('#ce-ulm-block').hidden,
+        'cluster type: an unset cluster does not open on On-Prem’s defaults (ULM off, SLM expected, no bucket)');
+      press(dlg.querySelector('#ce-type-ci')); await settleFor(60);
+      ok(dlg.querySelector('#ce-ulm').checked && dlg.querySelector('#ce-slm').value === 'none' && !dlg.querySelector('#ce-ulm-block').hidden,
+        'cluster type: choosing CI did not turn ULM on, SLM to Not used and show the bucket');
+      ok(/checked in Zabbix \(log archive \(S3\) template\), not here/.test(dlg.textContent), 'cluster type: the bucket hint does not say where the archive is checked');
+      dlg.querySelector('#ce-ulm-bucket').value = 'Bad_Bucket';
+      press([...dlg.querySelectorAll('button')].find((b) => b.textContent === 'Save')); await settleFor(300);
+      ok(doc.querySelector('.modal-overlay .modal') && /bucket/i.test((doc.querySelector('.modal-msg') || {}).textContent || ''),
+        'cluster type: an invalid bucket name was not refused in the dialog');
+      dlg.querySelector('#ce-ulm-bucket').value = 'acme-logs';
+      written = null;
+      press([...dlg.querySelectorAll('button')].find((b) => b.textContent === 'Save')); await settleFor(900);
+      ok(written !== null && /"type":\s*"ci"/.test(written) && /"bucket":\s*"acme-logs"/.test(written) && !/"slm"/.test(written),
+        `cluster type: the save did not write type ci and the bucket (with SLM following the type): ${String(written).slice(0, 300)}`);
+      doc.querySelectorAll('.modal-overlay').forEach((m) => m.remove());
+      await go('overview');
+      ok(badgeOf(target) === 'CI', `cluster type: after the save the badge reads "${badgeOf(target)}", expected CI`);
+      const live = st.clusters().find((c) => c.id === target.id) || target;
+      ok(ck.slmExempt(live), 'cluster type: a CI cluster with SLM following the type is not SLM-exempt');
+      const snapCell = rowOf(target) && rowOf(target).querySelector('.cl-ulm');
+      if (snapCell) ok(/ULM · s3 acme-logs/.test(snapCell.textContent), `cluster type: the snapshot cell reads "${snapCell.textContent}"`);
+      ok(!st.alerts().some((a) => a.cluster && a.cluster.id === target.id && /:(slm-mode|slm-stale)|:repo:.*:(none|stale)$/.test(a.key)),
+        'cluster type: a CI cluster still raises a no-snapshot / SLM-stopped alert');
+    }
+
+    // The Type filter: CI only shows that one cluster; Clear brings the fleet back.
+    {
+      // Open already when an earlier case left a sort set; pressing it then would clear and close it.
+      if (!doc.getElementById('clusters-type')) { press(doc.getElementById('clusters-search-btn')); await settleFor(150); }
+      const sel = doc.getElementById('clusters-type');
+      ok(!!sel, 'cluster type: the search box has no Type filter');
+      if (sel) {
+        ok([...sel.options].some((o) => /^CI \(1\)$/.test(o.textContent)), `cluster type: the filter does not count CI clusters (${[...sel.options].map((o) => o.textContent).join(', ')})`);
+        sel.value = 'ci'; sel.dispatchEvent(new window.Event('change', { bubbles: true })); await settleFor(200);
+        const names = [...summary().querySelectorAll('tbody tr[data-cluster]')].map((r) => r.dataset.cluster);
+        ok(names.length === 1 && names[0] === target.id, `cluster type: filtering on CI shows ${names.join(', ') || 'nothing'}`);
+        const clear = [...summary().querySelectorAll('button')].find((b) => b.textContent === 'Clear');
+        press(clear); await settleFor(200);
+        ok(summary().querySelectorAll('tbody tr[data-cluster]').length === rows.length, 'cluster type: Clear did not bring every cluster back');
+      }
+    }
+
+    // Hosted: a Zabbix cluster is edited in the meta part only, through CLUSTER_META_SET.
+    sc.setHostedEdition(true);
+    ck.setClusterMeta({});
+    const live = st.state.config.clusters.find((c) => c.id === target.id);
+    const was = { source: live.source, zabbix: live.zabbix };
+    live.source = 'zabbix'; live.zabbix = { host: 'zbx-host-1' };
+    try {
+      await go('overview');
+      const item = await menuItem('Edit');
+      ok(item && /cluster type/.test(item.textContent), 'cluster type: a Zabbix cluster offers no Edit for its type to an admin (hosted)');
+      press(item); await settleFor(300);
+      dlg = doc.querySelector('.modal-overlay .modal');
+      ok(dlg && dlg.querySelector('#ce-type-di') && !dlg.querySelector('#ce-name') && !dlg.querySelector('#ce-url'),
+        'cluster type: a Zabbix cluster’s dialog is not the meta part only');
+      if (dlg && dlg.querySelector('#ce-type-di')) {
+        press(dlg.querySelector('#ce-type-di')); await settleFor(60);
+        dlg.querySelector('#ce-ulm-bucket').value = 'zbx-logs';
+        press([...dlg.querySelectorAll('button')].find((b) => b.textContent === 'Save')); await settleFor(400);
+        const m = metaSent[metaSent.length - 1];
+        ok(m && m.clusterId === target.id && m.meta.type === 'di' && m.meta.ulm.bucket === 'zbx-logs' && m.meta.ulm.enabled === null && m.meta.slm === null,
+          `cluster type: CLUSTER_META_SET was not sent as {type: di, ulm: {enabled: null, bucket}, slm: null}: ${JSON.stringify(m)}`);
+        ok(!doc.querySelector('.modal-overlay .modal'), 'cluster type: the Zabbix cluster dialog stayed open after a good save');
+        await go('overview');
+        ok(badgeOf(target) === 'DI', `cluster type: after CLUSTER_META_SET the badge reads "${badgeOf(target)}", expected DI`);
+      }
+    } finally {
+      live.source = was.source; live.zabbix = was.zabbix;
+    }
+  } finally {
+    globalThis.fetch = realFetch;
+    sc.setHostedEdition(false);
+    ck.setClusterMeta({});
+    doc.querySelectorAll('.modal-overlay').forEach((m) => m.remove());
+    st.state.caller = before.caller;
+    st.state.selected = before.selected;
+  }
+  await applyConfig({ load, configPath });
+  await go('overview');
+}
+
 // Config > Volume fields (0.3.45): the section opens and says so when the core is older, the
 // fields can be edited and Save writes defaults.volume (and an override for one cluster, only
 // what differs), and Check fields sends VOLUME_FIELDS_CHECK and fills the check column. The
@@ -4523,11 +4665,364 @@ if (viaFleet) {
   }
 }
 
+// Config > Play (0.3.47): the section opens (and says so when the core is older); a new link sends
+// the permanent default and shows its URL once; an old link is replaced (revoked, then made again
+// with the same settings, the new URL shown once); revoke asks first; an empty reason is refused;
+// a field config.txt manages is locked and left out of the watch-rule save; the save payload.
+//
+// The watch rules and the exclusions go to this real core (PLAY_CONFIG_GET / PLAY_CONFIG_SET,
+// wrapped as {settings}), and what it kept is read back. Stubbed, and only these: PLAY_LINK_*
+// (display links are the hosted server's; this portable dev bridge answers `unsupported`, and
+// tools/play-e2e.mjs drives them against a hosted one), and the config.txt lock laid over the
+// real PLAY_CONFIG_GET reply (`managed` / `managedFields`: this bridge was started without one).
+{
+  await go('settings');
+  const realFetch = globalThis.fetch;
+  const sent = [];
+  let older = true;
+  const core = async (msg) => (await realFetch(`${bridgeUrl}/bridge`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(msg) })).json();
+  const closeAll = async () => { for (const o of doc.querySelectorAll('.modal-overlay')) o.remove(); await settleFor(50); };
+  const cid = (await load('core/state.js')).clusters()[0].id;
+  // What the core's PLAY_LINK_LIST says of a link: never a URL or a secret.
+  let links = [{ id: 'l1', name: 'NOC wall', clusters: 'all', allowFrom: ['10.1.0.0/16'], expires: 'permanent', expiresAt: null, expired: false,
+    createdAt: Date.now() - 86400000, createdBy: 'Admin', lastSeen: { at: Date.now() - 120000, from: '10.1.2.3' }, sessions: 1,
+    settings: { slides: [{ id: 'alerts', show: true, dwellSec: 30 }], criticalTakesScreen: true, spotlightAll: false, theme: 'dark', sound: 'off', zoom: 1.25 } }];
+  let made = 0;
+  globalThis.fetch = async (input, init) => {
+    const body = init && init.body ? JSON.parse(init.body) : {};
+    if (String(body.type || '').startsWith('PLAY_')) {
+      sent.push(body);
+      if (older) return stubReply({ ok: false, kind: 'bad_message', message: `Unknown message type "${body.type}"` });
+      switch (body.type) {
+        case 'PLAY_CONFIG_GET': {
+          const real = await core({ type: 'PLAY_CONFIG_GET' });
+          return stubReply({ ...real, watch: { ...real.watch, delayRedAboveMin: 75 }, managed: ['UI_PLAY_DELAY_RED_MIN'],
+            managedFields: { 'watch.delayRedAboveMin': 'UI_PLAY_DELAY_RED_MIN' }, groups: ['Prod'] });
+        }
+        case 'PLAY_LINK_LIST': return stubReply({ ok: true, enabled: true, links });
+        case 'PLAY_LINK_CREATE': {
+          made++;
+          const link = { id: `n${made}`, name: body.name, clusters: body.clusters, allowFrom: body.allowFrom || [], expires: 'permanent', expiresAt: null,
+            lastSeen: null, sessions: 0, settings: body.settings || {} };
+          links = [...links, link];
+          return stubReply({ ok: true, link: { ...link, url: `https://noc.example/#/play?display=SECRET${made}` }, secret: `SECRET${made}` });
+        }
+        case 'PLAY_LINK_REVOKE': links = links.filter((l) => l.id !== body.id); return stubReply({ ok: true, id: body.id, sessionsEnded: 1 });
+        case 'PLAY_LINK_SET': return stubReply({ ok: true, id: body.id, settings: body.settings });
+        default: return realFetch(input, init);
+      }
+    }
+    return realFetch(input, init);
+  };
+  const view = () => doc.querySelector('#view');
+  const type = (id, v) => { const el = doc.getElementById(id); if (el) { el.value = v; el.dispatchEvent(new window.Event('input', { bubbles: true })); el.dispatchEvent(new window.Event('change', { bubbles: true })); } return !!el; };
+  const pressIn = async (root, re) => { const b = [...root.querySelectorAll('button')].find((x) => re.test(x.textContent.trim())); if (b) { b.click(); await settleFor(500); } return !!b; };
+  const modalEl = () => doc.querySelector('.modal');
+  try {
+    ok(await openSettingsTab('Play'), 'play: no Play tab');
+    await settleFor(500);
+    ok(view().textContent.includes('This server does not have Play yet (needs 0.3.47)'), 'play: an older core was not told apart from a broken page');
+    ok(!/What a display link can do|same rules in config\.txt/i.test(view().textContent), 'play: an explainer box is back');
+
+    older = false;
+    // The section loads once per visit: leave the page and come back.
+    await go('overview'); await go('settings'); await openSettingsTab('Play'); await settleFor(600);
+    ok(!!panel('Displays') && !!panel('Watch rules (server side, every display)') && !!panel('Excluded clusters'), 'play: the three cards did not draw');
+    ok(view().textContent.includes('NOC wall') && view().textContent.includes('10.1.2.3'), 'play: the display row (name, last seen address) is missing');
+    ok(!view().textContent.includes('[object Object]'), 'play: the page prints [object Object]');
+    ok(![...view().querySelectorAll('button')].some((b) => /^Copy link$/.test(b.textContent.trim())), 'play: a listed link offers "Copy link" (the core never hands one back)');
+
+    // Replace link: asks, revokes the old one, makes it again with the same name, clusters,
+    // addresses, expiry and settings, and shows the new URL once.
+    sent.length = 0;
+    ok(await pressIn(view(), /^Replace link/), 'play: no "Replace link…" on a display row');
+    ok(!!modalEl() && /Replace the link for "NOC wall"/.test(modalEl().textContent), 'play: replace did not ask first');
+    ok(!sent.some((m) => m.type === 'PLAY_LINK_REVOKE'), 'play: replaced before the answer');
+    await pressIn(modalEl(), /^Replace the link$/); await settleFor(400);
+    const order = sent.filter((m) => /^PLAY_LINK_(REVOKE|CREATE)$/.test(m.type)).map((m) => m.type);
+    ok(order.join(',') === 'PLAY_LINK_REVOKE,PLAY_LINK_CREATE', `play: replace sent ${order.join(', ')}`);
+    const again = sent.find((m) => m.type === 'PLAY_LINK_CREATE');
+    ok(!!again && again.name === 'NOC wall' && again.clusters === 'all' && again.expires === 'permanent' && (again.allowFrom || []).join() === '10.1.0.0/16'
+      && again.settings && again.settings.zoom === 1.25 && again.settings.slides[0].id === 'alerts' && again.settings.slides[0].dwellSec === 30,
+      `play: the replacement link is not the old one's twin: ${JSON.stringify(again)}`);
+    ok((doc.getElementById('pl-url') || {}).value === 'https://noc.example/#/play?display=SECRET1', 'play: the replacement URL is not shown');
+    ok(/will not be shown again/.test((modalEl() || {}).textContent || ''), 'play: no one-time note on the replacement');
+    await closeAll(); await settleFor(400);
+    links = [{ ...links[0], id: 'l1', name: 'NOC wall' }];
+    await go('overview'); await go('settings'); await openSettingsTab('Play'); await settleFor(600);
+
+    // New display link: permanent by default, the URL shown once.
+    sent.length = 0;
+    ok(await pressIn(view(), /^New display link/), 'play: no New display link button');
+    ok(!!modalEl(), 'play: the new link dialog did not open');
+    ok(doc.getElementById('pl-expires').value === 'permanent', `play: expiry defaults to ${doc.getElementById('pl-expires').value}`);
+    await pressIn(modalEl(), /^Create link$/);
+    ok(!sent.some((m) => m.type === 'PLAY_LINK_CREATE'), 'play: a link was made without a name');
+    type('pl-name', 'Floor 2');
+    await pressIn(modalEl(), /^Create link$/);
+    const created = sent.find((m) => m.type === 'PLAY_LINK_CREATE');
+    ok(!!created && created.name === 'Floor 2' && created.clusters === 'all' && created.expires === 'permanent' && created.allowFrom === undefined,
+      `play: create sent ${JSON.stringify(created)}`);
+    ok(/^https:\/\/noc\.example\/#\/play\?display=SECRET\d+$/.test((doc.getElementById('pl-url') || {}).value || ''), 'play: the link URL is not shown');
+    ok(/will not be shown again/.test(modalEl().textContent), 'play: no one-time note');
+    ok(!!doc.getElementById('pl-copy-url'), 'play: no Copy link on the new link');
+    await closeAll(); await settleFor(300);
+
+    // Revoke asks first.
+    sent.length = 0;
+    ok(await pressIn(view(), /^Revoke$/), 'play: no Revoke button');
+    ok(!!modalEl() && /Revoke "NOC wall"/.test(modalEl().textContent), 'play: revoke did not ask');
+    ok(!sent.some((m) => m.type === 'PLAY_LINK_REVOKE'), 'play: revoked before the answer');
+    await pressIn(modalEl(), /^No$/); await settleFor(300);
+    ok(!sent.some((m) => m.type === 'PLAY_LINK_REVOKE'), 'play: "No" still revoked');
+    await pressIn(view(), /^Revoke$/);
+    await pressIn(modalEl(), /^Revoke the link$/); await settleFor(300);
+    ok(sent.some((m) => m.type === 'PLAY_LINK_REVOKE' && m.id === 'l1'), `play: confirmed revoke sent ${JSON.stringify(sent.map((m) => m.type))}`);
+
+    // Exclude refuses an empty reason.
+    sent.length = 0;
+    type('pl-ex-cluster', cid);
+    type('pl-ex-reason', '   ');
+    await pressIn(view(), /^Exclude from Play$/);
+    ok(!sent.some((m) => m.type === 'PLAY_CONFIG_SET'), 'play: excluded without a reason');
+    type('pl-ex-cluster', cid);
+    type('pl-ex-reason', 'being rebuilt');
+    await pressIn(view(), /^Exclude from Play$/);
+    const ex = sent.find((m) => m.type === 'PLAY_CONFIG_SET');
+    ok(!!ex && ex.settings && ex.settings.exclude && ex.settings.exclude.add && ex.settings.exclude.add.clusterId === cid
+      && ex.settings.exclude.add.reason === 'being rebuilt', `play: exclude sent ${JSON.stringify(ex)}`);
+    await settleFor(500);
+    const keptEx = await core({ type: 'PLAY_CONFIG_GET' });
+    ok((keptEx.exclude || []).some((x) => x.clusterId === cid && x.reason === 'being rebuilt' && x.by),
+      `play: the core did not keep the exclusion (with who): ${JSON.stringify(keptEx.exclude)}`);
+    ok(/being rebuilt/.test(panel('Excluded clusters').textContent) && /Include again/.test(panel('Excluded clusters').textContent),
+      'play: the excluded cluster is not listed back from the core');
+
+    // A managed field is locked and not sent; the rest is.
+    const red = doc.getElementById('pl-red');
+    ok(!!red && red.disabled && red.value === '75' && red.title === 'managed by config.txt', 'play: a managed field is not shown locked');
+    ok(/managed by config\.txt/.test(panel('Watch rules (server side, every display)').textContent), 'play: a locked field does not say why');
+    ok(!doc.getElementById('pl-yellow').disabled, 'play: an unmanaged field is locked');
+    type('pl-yellow', '20');
+    doc.getElementById('pl-when-yellow').checked = true;
+    sent.length = 0;
+    await pressIn(view(), /^Save$/);
+    const ws0 = sent.find((m) => m.type === 'PLAY_CONFIG_SET');
+    const ws = ws0 && ws0.settings;
+    ok(!!ws && ws.watch && ws.watch.delayYellowFromMin === 20 && !('delayRedAboveMin' in ws.watch), `play: watch save sent ${JSON.stringify(ws0)}`);
+    ok(!!ws && ws.watch.nodeBlink === 'untilBack' && ws.watch.nodeCheckSec === 60 && ws.watch.spotlight.perClusterSec === 13
+      && ws.watch.spotlight.leaveAfterMin === 10 && ws.watch.spotlight.whenEmpty === 'skip'
+      && ws.watch.spotlight.when.includes('yellow') && ws.watch.spotlight.when.includes('red'), `play: watch payload is ${JSON.stringify(ws && ws.watch)}`);
+    await settleFor(400);
+    const keptW = (await core({ type: 'PLAY_CONFIG_GET' })).watch || {};
+    ok(keptW.delayYellowFromMin === 20 && keptW.delayRedAboveMin === 60 && (keptW.spotlight || {}).when.includes('yellow'),
+      `play: the core did not keep the watch rules as saved: ${JSON.stringify(keptW)}`);
+    ok(/Saved/.test(panel('Watch rules (server side, every display)').textContent), 'play: the save is not confirmed');
+    // Put the core back as it was for the wall below: the shipped watch rules, nothing excluded.
+    await core({ type: 'PLAY_CONFIG_SET', settings: { watch: { delayYellowFromMin: 30, spotlight: { when: ['red', 'nodeLeft', 'slmFailed', 'storage', 'unreachable', 'criticalAlert'] } } } });
+    await core({ type: 'PLAY_CONFIG_SET', settings: { exclude: { remove: cid } } });
+  } finally {
+    globalThis.fetch = realFetch;
+    await closeAll();
+  }
+  await go('overview');
+}
+
+/* ------- 0.3.47 Play: the wall display — slides, keys, zoom, takeover, exclusion, an older core ------- */
+
+// Against this real core: the exclusion is made with PLAY_CONFIG_SET, the shared delay record and
+// backup size are put with PLAY_SHARE_PUT in the very shape the page's measurer sends
+// (play/measure.js shareData), and PLAY_STATE / PLAY_SHARE_GET are the core's answers. Stubbed,
+// and only these: a node gone from a cluster (laid over the real PLAY_STATE: the mock cluster's
+// node list never changes between two polls, so the core's node history never sees one leave);
+// VOLUME_DAILY (a fresh data dir has no daily record yet); ACK_LIST, answered with a notes-only
+// record of the kind a hosted core keeps, to prove the wall does not read presence as an
+// acknowledgement (this portable bridge keeps acknowledgements in the browser, acks.js). Then the
+// same page against "Unknown message type", which is what an older core says.
+{
+  await applyConfig({ load, configPath });
+  await settleFor(1500);
+  const st = await load('core/state.js');
+  const pPlay = await load('pages/play.js');
+  const M = await load('play/measure.js');
+  const acksMod = await load('core/acks.js');
+  const realFetch = globalThis.fetch;
+  const core = async (msg) => (await realFetch(`${bridgeUrl}/bridge`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(msg) })).json();
+  const list = st.clusters();
+  ok(list.length >= 2, `play: the fixture needs two clusters, has ${list.length}`);
+  const [shown, hidden] = list;
+  const sent = [];
+  const play = { older: false, notesOnly: null };
+  const older = { ok: false, kind: 'bad_message', message: 'Unknown message type (EP-202)' };
+  // The core, set up as a wall would find it.
+  const exAdd = await core({ type: 'PLAY_CONFIG_SET', settings: { exclude: { add: { clusterId: hidden.id, reason: 'behaviour-check' } } } });
+  ok(exAdd.ok, `play: the core did not take the exclusion: ${JSON.stringify(exAdd)}`);
+  const devices = [
+    { device: 'fw-edge-01', delayMinutes: 55, arrival: Date.now() - 60000, peak24: { value: 80, at: Date.now() - 3600000 } },
+    { device: 'fw-edge-02', delayMinutes: 42, arrival: Date.now() - 60000 },
+    { device: 'fw-edge-03', delayMinutes: 2, arrival: Date.now() - 60000 }];
+  const putD = await core({ type: 'PLAY_SHARE_PUT', kind: 'delay', clusterId: shown.id, measuredAt: Date.now() - 60000,
+    data: M.shareData({ records: devices, truncated: 0 }) });
+  ok(putD.ok && putD.kept, `play: the core refused the page's own delay payload: ${JSON.stringify(putD)}`);
+  const putR = await core({ type: 'PLAY_SHARE_PUT', kind: 'repoSize', clusterId: shown.id, measuredAt: Date.now() - 600000, data: { bytes: 5 * 1024 ** 3 } });
+  ok(putR.ok, `play: the core refused a repository size: ${JSON.stringify(putR)}`);
+  globalThis.fetch = async (input, init) => {
+    const body = init && init.body ? JSON.parse(init.body) : {};
+    const t = String(body.type || '');
+    if (/^(PLAY_|ACK_)/.test(t)) {
+      sent.push(body);
+      if (play.older) return stubReply(older);
+      if (t === 'PLAY_STATE') {
+        const real = await core(body);
+        return stubReply({ ...real, nodes: { ...(real.nodes || {}),
+          [shown.id]: { expected: ['node-1', 'node-2'], present: ['node-1'], left: [{ node: 'node-2', since: Date.now() - 120000 }], answering: true } } });
+      }
+      if (t === 'ACK_LIST') return stubReply({ ok: true, acks: play.notesOnly || {} });
+      return realFetch(input, init);
+    }
+    if (t === 'VOLUME_DAILY') {
+      sent.push(body);
+      const day = (n) => new Date(Date.now() - n * 86400000).toISOString().slice(0, 10);
+      return stubReply({ ok: true, settings: { sizeBasis: 'primary' }, status: {},
+        cards: { yesterday: { day: day(1), value: 2e10, changeVsAvgPct: 12 }, average: { days: 7, value: 1.8e10 }, monthSoFar: { value: 5e11 } },
+        days: Array.from({ length: 31 }, (_, n) => ({ day: day(n), indices: 3, docs: 1e6, priBytes: 1.5e10 + n * 1e8, avg: 1.7e10, live: true, final: n > 0 })) });
+    }
+    return realFetch(input, init);
+  };
+  const root = () => doc.querySelector('.pl-root');
+  const titleText = () => (doc.querySelector('.pl-title') || {}).textContent || '';
+  const key = (k) => doc.dispatchEvent(new window.KeyboardEvent('keydown', { key: k, bubbles: true, cancelable: true }));
+  const viewText = () => (doc.getElementById('view') || {}).textContent || '';
+  try {
+    // No warm-up here: the check drives the takeover a few seconds after opening.
+    pPlay.configure({ display: false, onExit: () => app.go('overview'), warmMs: 0 });
+    await go('overview');
+    ok(!!doc.getElementById('play-btn'), 'play: no "▶ Play" button in the top bar');
+    try { localStorage.removeItem('elasticpro.play.zoom'); } catch (_) { /* none */ }
+    doc.getElementById('play-btn').click();
+    await settleFor(5500);     // the shared delay record is read a few seconds after opening
+    ok(doc.documentElement.classList.contains('play'), 'play: html.play is not set (the chrome would show)');
+    ok(!!root(), 'play: the wall did not draw');
+    ok(titleText() === 'Fleet', `play: opens on "${titleText()}", not the fleet wall`);
+    ok(sent.some((m) => m.type === 'PLAY_STATE'), 'play: PLAY_STATE was not asked');
+    ok(sent.some((m) => m.type === 'PLAY_SHARE_GET' && m.kind === 'delay'), 'play: the shared delay record was not asked');
+    // exclusion: left out of every slide
+    const tiles = [...doc.querySelectorAll('.pl-tile[data-cluster]')];
+    ok(tiles.length === list.length - 1, `play: ${tiles.length} tiles for ${list.length} clusters with one excluded`);
+    ok(!tiles.some((t) => t.dataset.cluster === hidden.id), 'play: the excluded cluster has a tile');
+    // node left: blinks
+    const mine = tiles.find((t) => t.dataset.cluster === shown.id);
+    ok(mine && mine.classList.contains('pl-blink'), 'play: a cluster with a node that left does not blink');
+    ok(/node left on node-2|node-2/.test(viewText()), 'play: the node that left is not named');
+    // the shared delay record: three devices — two at 30–60 min (55, 42), one under 30
+    ok(/2 at 30–60 min/.test(viewText()) && /0 over 60 min/.test(viewText()), `play: delayed devices from the shared record are not on the strip: ${viewText().slice(0, 300)}`);
+    // keys: → turns, Space pauses, + / − zoom
+    const seen = new Set([titleText()]);
+    for (let i = 0; i < 6; i++) {
+      key('ArrowRight'); await settleFor(150);
+      seen.add(titleText());
+      ok(!/could not be drawn/.test(viewText()), `play: slide "${titleText()}" could not be drawn: ${viewText().slice(0, 200)}`);
+      ok(!excludedNamed(), `play: slide "${titleText()}" names the excluded cluster`);
+    }
+    for (const t of ['Fleet', 'Alerts', 'Log delay', 'Backups', 'Volume and capacity']) ok(seen.has(t), `play: → never reached "${t}" (saw ${[...seen].join(', ')})`);
+    // Bounded: a slide skipped as empty would otherwise turn forever.
+    for (let i = 0; i < 14 && titleText() !== 'Log delay'; i++) { key('ArrowRight'); await settleFor(100); }
+    ok(/fw-edge-01/.test(viewText()) && /55 min/.test(viewText()) && /1 h 20/.test(viewText()), 'play: Log delay does not list the worst device with its 24 h peak');
+    for (let i = 0; i < 14 && titleText() !== 'Backups'; i++) { key('ArrowRight'); await settleFor(100); }
+    ok(/5\.00 GB/.test(viewText()), 'play: Backups does not show the shared backup size');
+    ok(/not measured/.test(viewText()) || list.length - 1 === 1, 'play: a cluster with no shared size should read "not measured"');
+    for (let i = 0; i < 14 && titleText() !== 'Volume and capacity'; i++) { key('ArrowRight'); await settleFor(100); }
+    ok(sent.some((m) => m.type === 'VOLUME_DAILY' && m.days === 30 && m.avgDays === 7), 'play: the volume record was not asked (30 days, 7-day average)');
+    ok(/Yesterday · all clusters/.test(viewText()) && /\+12\.0 %/.test(viewText()), 'play: Volume does not show yesterday against the 7-day average');
+    key('ArrowLeft'); await settleFor(150);
+    ok(titleText() === 'Backups', `play: ← went to "${titleText()}"`);
+    key(' '); await settleFor(150);
+    ok(pPlay._debug().engine.paused && /paused/.test(doc.querySelector('.pl-hchips').textContent), 'play: Space did not pause');
+    key(' '); await settleFor(100);
+    ok(!pPlay._debug().engine.paused, 'play: Space did not resume');
+    const zl = () => doc.querySelector('.pl-zl').textContent;
+    key('+'); await settleFor(100);
+    ok(zl() === '110 %' && doc.querySelector('.pl-body').style.getPropertyValue('--pz') === '1.1', `play: + made the zoom ${zl()}`);
+    key('+'); key('+'); key('+'); key('+'); await settleFor(100);
+    ok(zl() === '150 %', `play: zoom went past 150 % (${zl()})`);
+    let remembered = null;
+    try { remembered = localStorage.getItem('elasticpro.play.zoom'); } catch (_) { /* none */ }
+    ok(remembered === '1.5', `play: a person's zoom is not remembered in this browser (${remembered})`);
+    for (let i = 0; i < 8; i++) key('-');
+    await settleFor(100);
+    ok(zl() === '80 %', `play: zoom went below 80 % (${zl()})`);
+    key('+'); key('+'); await settleFor(100);
+
+    // critical takeover: a new critical alert takes the screen; an acknowledgement lets go
+    const before = st.state.data.get(shown.id);
+    st.state.data.set(shown.id, { ...before, health: { ...(before.health || {}), status: 'red', unassigned_shards: 4 } });
+    st.bus.emit('data', shown.id);
+    await settleFor(2300);
+    const dbg = pPlay._debug();
+    ok(dbg.take && dbg.take.active && root().classList.contains('takeover') && titleText() === 'Alerts',
+      `play: a new critical alert did not take the screen (title "${titleText()}", active ${JSON.stringify(dbg.take && dbg.take.active)})`);
+    const hot = dbg.take && dbg.take.active && dbg.take.active.key;
+    ok(hot && !!doc.querySelector(`.pl-arow.hot[data-key="${hot}"]`), 'play: the alert that took the screen is not at the top');
+    // The open alerts go to the core with PLAY_STATE, so "open for" survives a reload.
+    sent.length = 0;
+    await pPlay._poll(); await settleFor(200);
+    const asked = sent.find((m) => m.type === 'PLAY_STATE');
+    ok(asked && Array.isArray(asked.open) && asked.open.includes(hot), `play: PLAY_STATE did not carry the open alert keys: ${JSON.stringify(asked)}`);
+    ok(Number(pPlay._debug().ps.openSince[hot]) > 0, 'play: the core did not keep when the alert was first open');
+    // A record kept only for its notes (acked: false) is not an acknowledgement.
+    play.notesOnly = { [hot]: { by: 'qa', at: Date.now(), note: 'looking', record: { acked: false, ackedBy: '', ackedAt: 0, notes: [{ text: 'looking', by: 'qa', ts: Date.now() }] } } };
+    // Not awaited: the record is in acks.js's cache at once; the shim's IndexedDB never says it is written.
+    acksMod.addNote(hot, 'looking', 'qa');
+    await pPlay._poll(); await settleFor(1500);
+    ok(pPlay._debug().take.active && root().classList.contains('takeover'), 'play: a note alone let the screen go (it is not an acknowledgement)');
+    acksMod.acknowledge(hot, { by: 'qa' });
+    await settleFor(1500);
+    ok(!pPlay._debug().take.active && !root().classList.contains('takeover'), 'play: an acknowledgement did not let the screen go');
+    acksMod.unacknowledge(hot);
+    st.state.data.set(shown.id, before);
+    st.bus.emit('data', shown.id);
+    await settleFor(300);
+
+    // a display link: no Exit, Escape stays
+    pPlay.configure({ display: true, onExit: () => { problems.push('play: a display link left Play'); } });
+    await go('play'); await settleFor(600);
+    ok(!doc.querySelector('.pl-exit'), 'play: a display link offers Exit');
+    doc.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+    await settleFor(200);
+    ok(doc.documentElement.classList.contains('play'), 'play: Escape left Play on a display link');
+    pPlay.configure({ display: false, onExit: () => app.go('overview') });
+
+    // an older core: no PLAY_* at all — still draws, says what is missing, never throws
+    play.older = true;
+    await go('overview'); await go('play'); await settleFor(2500);
+    ok(!!root() && titleText() === 'Fleet', 'play: against an older core the wall did not draw');
+    ok(/older server/.test(doc.querySelector('.pl-hchips').textContent), 'play: an older core is not said to be one');
+    ok(doc.querySelectorAll('.pl-tile[data-cluster]').length === list.length, 'play: an older core has no exclusions, so every cluster has a tile');
+    for (let i = 0; i < 6; i++) { key('ArrowRight'); await settleFor(120); ok(!/could not be drawn/.test(viewText()), `play (older core): "${titleText()}" could not be drawn`); }
+
+    // Escape leaves for a person, and every timer and listener goes with it
+    doc.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+    await settleFor(300);
+    ok(!doc.documentElement.classList.contains('play'), 'play: Escape did not leave Play');
+    const after = pPlay._debug();
+    ok(after.timers === 0 && after.listeners === 0, `play: leaving kept ${after.timers} timer(s) and ${after.listeners} listener(s)`);
+  } finally {
+    globalThis.fetch = realFetch;
+    if (doc.documentElement.classList.contains('play')) await go('overview');
+    await core({ type: 'PLAY_CONFIG_SET', settings: { exclude: { remove: hidden.id } } });
+  }
+
+  function excludedNamed() {
+    return hidden.name !== shown.name && !shown.name.includes(hidden.name) && viewText().includes(hidden.name);
+  }
+}
+
+
 if (problems.length) {
   console.error(`\n${problems.length} problem(s):`);
   for (const p of problems) console.error('  ✗ ' + p);
   process.exit(1);
 }
-console.log('ok: strip, console, shards, the Clusters page (columns, name menu, unreachable rows, expand chevron, alerts link), volume, hand-off, refresh, snapshots, tasks, toasts, accounts split and pinned Zabbix roles, the log-delay preflight, a quiet Config page, Config › Volume fields, report jobs and the Reports pill, the mailed report and the mail server, the Request Centre and the redraw gate, the request policy, the coverage bar, the Tasks panel and the console tabs, template management, the Alerts page grouped by cluster with merged repeats, Go to, playbooks and the bell, and the default credential (no password asked for a new cluster, promote, never replaced unticked)');
+console.log('ok: strip, console, shards, the Clusters page (columns, name menu, unreachable rows, expand chevron, alerts link), volume, hand-off, refresh, snapshots, tasks, toasts, accounts split and pinned Zabbix roles, the log-delay preflight, a quiet Config page, Config › Volume fields, report jobs and the Reports pill, the mailed report and the mail server, the Request Centre and the redraw gate, the request policy, the coverage bar, the Tasks panel and the console tabs, template management, the Alerts page grouped by cluster with merged repeats, cluster type (badge, Type filter, edit dialog to file keys and CLUSTER_META_SET), Go to, playbooks and the bell, and the default credential (no password asked for a new cluster, promote, never replaced unticked), and Config › Play (links, revoke, exclusion, locked fields, watch rules), and Play (slides, keys, zoom, takeover, exclusion, display link, an older core)');
 // The pages leave auto-refresh timers and a live tail running; nothing here waits on them.
 process.exit(0);

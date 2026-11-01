@@ -166,6 +166,40 @@ export const BASIS_LABEL = { primary: 'Primary size', total: 'Total size', event
 export const BASIS_KEY = { primary: 'priBytes', total: 'totalBytes', eventSize: 'eventBytes' };
 export const basisOf = (settings) => (settings && BASIS_LABEL[settings.sizeBasis] ? settings.sizeBasis : 'primary');
 
+/** The card value the core sent, under whichever name it used for it. Picked, not computed. */
+export const cardValue = (x) => (x && typeof x === 'object' ? [x.value, x.basis, x.bytes].find((v) => typeof v === 'number') ?? null
+  : typeof x === 'number' ? x : null);
+
+/** A DailyRow's figure on the basis: the core's `basis`, else the basis's own field. Picked, not computed. */
+export const dayBasis = (d, basis) => (typeof d.basis === 'number' ? d.basis : (typeof d[BASIS_KEY[basis]] === 'number' ? d[BASIS_KEY[basis]] : null));
+
+/**
+ * Days to plot, oldest first: only today is left out (it is still filling up and would read
+ * as a drop). A past day the core could not finish is plotted when it has a figure. One
+ * definition for Indices › Summary and Play's spotlight chart.
+ */
+export function finishedDays(reply, today = utcDay()) {
+  const basis = basisOf(reply && reply.settings);
+  return ((reply && reply.days) || [])
+    .filter((d) => d.day < today && (d.final !== false || dayBasis(d, basis) !== null))
+    .sort((a, b) => (a.day < b.day ? -1 : 1));
+}
+
+/** "2026-10-07" → "7 Oct". */
+export const shortDay = (ymd) => {
+  const m = /^\d{4}-(\d{2})-(\d{2})$/.exec(String(ymd || ''));
+  return m ? `${Number(m[2])} ${['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'][Number(m[1]) - 1]}` : String(ymd || '');
+};
+
+/** The daily chart's points (lib/charts.js lineChart), oldest first: the core's figures, picked. */
+export function dailyPoints(reply, today = utcDay()) {
+  const basis = basisOf(reply && reply.settings);
+  return finishedDays(reply, today).map((d) => ({
+    key: d.day, label: shortDay(d.day), value: dayBasis(d, basis),
+    avg: typeof d.avg === 'number' ? d.avg : null, changePct: typeof d.changeVsAvgPct === 'number' ? d.changeVsAvgPct : null,
+  }));
+}
+
 /**
  * A month row's value on the basis: the core's `basisBytes` (its `basis` is the basis NAME).
  * Picked, not computed; null when the core sent none.

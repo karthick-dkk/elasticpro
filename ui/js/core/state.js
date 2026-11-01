@@ -13,6 +13,7 @@ import { alertHistory } from './alert-history.js';
 import { fieldVolumeSpikes, clearFieldVolume } from './field-volume.js';
 import { diskBalance, balanceHeadline, primaryAction } from './disk-balance.js';
 import { DEFAULTS, authHeaderFor, loadZabbixClusters, mergeZabbixClusters, zabbixDrift } from './config.js';
+import { loadClusterMeta, slmExempt } from './cluster-kind.js';
 import { ZABBIX_ITEMS, fromZabbix } from './zabbix-metrics.js';
 import { bridge, subscribe } from './transport.js';
 import { automationAlerts } from './automation.js';
@@ -287,6 +288,8 @@ export async function setConfig(config, handle) {
   // Every config, however it arrived, gets the clusters that are Zabbix hosts — here, once,
   // so reloading the file from the Config page cannot quietly drop them.
   mergeZabbixClusters(config, (await loadZabbixClusters()).clusters);
+  // Hosted: each cluster's type, ULM and SLM expectation, once per config (cluster-kind.js).
+  await loadClusterMeta();
   state.config = config;
   state.handle = handle !== undefined ? handle : state.handle;   // the remembered path, or null for load-once
   // Shipped defaults, then the file's, then whatever an admin retuned on the Config page.
@@ -1977,7 +1980,10 @@ export function alerts() {
     // Log indices only, and only while ILM runs: the one definition (lifecycle-errors.js), the same the Clusters dot reads.
     const ilmE = ilmErrorsOf(d, c.logIndexPattern || d.logIndexPattern || state.defaults.logIndexPattern);
     if (ilmE.count) add({ key: `${c.id}:ilm`, level: 'warning', cluster: c, title: `${c.name}: ${ilmE.count} log index(es) in ILM error step`, detail: ilmE.names.slice(0, 3).join(', ') });
-    if (d.slmStatus && d.slmStatus.operation_mode && d.slmStatus.operation_mode !== 'RUNNING') add({ key: `${c.id}:slm-mode`, level: 'warning', cluster: c, title: `${c.name}: SLM is ${d.slmStatus.operation_mode}`, detail: 'Snapshot lifecycle is not running' });
+    // ULM on and SLM not expected (cluster-kind.js): no snapshot, SLM stopped and a stale
+    // listing are this cluster's normal state. A policy that exists and fails still raises.
+    const exempt = slmExempt(c);
+    if (!exempt && d.slmStatus && d.slmStatus.operation_mode && d.slmStatus.operation_mode !== 'RUNNING') add({ key: `${c.id}:slm-mode`, level: 'warning', cluster: c, title: `${c.name}: SLM is ${d.slmStatus.operation_mode}`, detail: 'Snapshot lifecycle is not running' });
     // Disk balance across data nodes — only meaningful with more than one.
     const bal = diskBalance(d, d.clusterSettings);
     if (bal.applicable && (bal.verdict === 'critical' || bal.verdict === 'required' || bal.verdict === 'watch')) {
@@ -2064,7 +2070,7 @@ export function alerts() {
       // A repository whose listing has not been read yet is unknown — "no snapshots" would
       // be a guess presented as a finding.
       if (!repo.error && !Array.isArray((d.snapshots || {})[repo.name])) continue;
-      add(...snapshotAlertsFor(c, repo, ((d.snapshots || {})[repo.name]) || []));
+      add(...snapshotAlertsFor(c, repo, ((d.snapshots || {})[repo.name]) || []).filter((a) => !exempt || !EXEMPT_REPO.test(a.key)));
     }
 
     (d.slm || []).forEach((p) => {
@@ -2072,7 +2078,7 @@ export function alerts() {
       const repo = (p.policy && p.policy.repository) || null;   // so a failing repository is raised once (alert-tuning.js)
       if (lf && (!ls || lf.time > ls.time)) add({ key: `${c.id}:slm-fail:${p.id}`, level: 'critical', cluster: c, repo, title: `${c.name}/${p.id}: last SLM run failed`, detail: String(lf.details || '').slice(0, 160) });
       const staleMs = state.defaults.snapshotStaleHours * 3600 * 1000;
-      if (ls && Date.now() - ls.time > staleMs) add({ key: `${c.id}:slm-stale:${p.id}`, level: 'warning', cluster: c, repo, title: `${c.name}/${p.id}: no successful snapshot recently`, detail: `Last success ${new Date(ls.time).toISOString().replace('T', ' ').slice(0, 16)}` });
+      if (!exempt && ls && Date.now() - ls.time > staleMs) add({ key: `${c.id}:slm-stale:${p.id}`, level: 'warning', cluster: c, repo, title: `${c.name}/${p.id}: no successful snapshot recently`, detail: `Last success ${new Date(ls.time).toISOString().replace('T', ' ').slice(0, 16)}` });
     });
   }
   // Automations the operator wrote, from the last automation run. Computed there because
@@ -2091,6 +2097,9 @@ export function alerts() {
     ago: dur,
   });
 }
+
+/** The repository rules an SLM-exempt cluster does not raise: none, and not recent. Failing still does. */
+const EXEMPT_REPO = /:repo:.*:(none|stale)$/;
 
 /** The disk rule's last level per cluster, for its hysteresis. */
 const diskHeld = new Map();

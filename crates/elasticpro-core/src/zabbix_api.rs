@@ -80,6 +80,9 @@ pub struct ZbxCluster {
     /// password (an override) — rather than inherited from a template or the global default.
     /// Decides which password the core's held secrets answer with (`cluster_secrets`).
     pub password_on_host: bool,
+    /// The cluster type the host tag `elasticpro:type` names (ci | di | onprem), when it
+    /// names one ElasticPro knows. Seeds `cluster_meta` for a cluster with no entry there.
+    pub kind: Option<String>,
 }
 
 impl ZbxCluster {
@@ -155,6 +158,10 @@ pub fn cluster_from(host: &Value, macros: &HashMap<String, (i64, String)>, reade
         client: get("{$GRP.CLIENT}"),
         readers,
         password_on_host: host["macros"].as_array().into_iter().flatten().any(|m| m["macro"].as_str() == Some("{$ELASTICSEARCH.PASSWORD}")),
+        kind: host["tags"].as_array().into_iter().flatten()
+            .find(|t| t["tag"].as_str() == Some(crate::cluster_meta::TYPE_TAG))
+            .and_then(|t| t["value"].as_str().and_then(crate::cluster_meta::normalize_type))
+            .map(String::from),
     })
 }
 
@@ -573,7 +580,7 @@ impl Zabbix {
             let hosts = self.call("host.get", json!({
                 "templateids": [tpl["templateid"]], "filter": { "status": 0 },
                 "output": ["hostid", "host", "name"], "selectMacros": ["macro", "value", "type"],
-                "selectHostGroups": ["groupid", "name"],
+                "selectHostGroups": ["groupid", "name"], "selectTags": ["tag", "value"],
             })).await?;
             let tm = tpl["macros"].as_array().unwrap_or(&empty);
             read.push((tpl["host"].as_str().unwrap_or("").to_string(), hosts.as_array().map_or(0, |a| a.len())));
@@ -720,11 +727,23 @@ mod tests {
     }
 
     #[test]
+    fn the_type_tag_seeds_the_cluster_kind() {
+        let mut m = HashMap::new();
+        m.insert("{$ELASTICSEARCH.HOST}".to_string(), (0, "10.0.0.5".to_string()));
+        let with = |tags: Value| cluster_from(&json!({ "hostid": "9", "host": "a", "tags": tags }), &m, vec![]).unwrap().kind;
+        assert_eq!(with(json!([{ "tag": "elasticpro:type", "value": "CI" }])), Some("ci".into()));
+        assert_eq!(with(json!([{ "tag": "other", "value": "x" }, { "tag": "elasticpro:type", "value": "On-Prem" }])), Some("onprem".into()));
+        assert_eq!(with(json!([{ "tag": "elasticpro:type", "value": "cloud" }])), None, "an unknown type seeds nothing");
+        assert_eq!(with(json!([])), None);
+        assert_eq!(cluster_from(&json!({ "hostid": "9", "host": "a" }), &m, vec![]).unwrap().kind, None, "no tags asked for: none");
+    }
+
+    #[test]
     fn ids_are_stable_and_prefixed() {
         assert_eq!(slug("  ACME Prod / DR  "), "acme-prod-dr");
         let c = ZbxCluster { hostid: "1".into(), host: "Prod ES".into(), name: "x".into(), url: String::new(),
                              username: String::new(), password: PasswordRef::Missing, jump: None, jump_addr: None, client: None, readers: vec![],
-                             password_on_host: false };
+                             password_on_host: false, kind: None };
         assert_eq!(c.id(), "zbx-prod-es");
     }
 }
