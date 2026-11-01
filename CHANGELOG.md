@@ -4,7 +4,7 @@
 
 **The Apple-silicon macOS build is back.** GitHub retires its macOS 14 runner image on 2 November 2026, and a scheduled brownout cancelled 0.3.50's arm64 job, so the 0.3.50 release has no macOS arm64 build and no checksums file. The arm64 build now runs on macOS 15, and the Rust target is chosen by the build's label rather than the runner's name. Nothing else changes: 0.3.50's Docker images and other builds are the same code.
 
-**Play: the time-left line is a hairline.** The bar under Play's top bar that shows how long the slide has left is now a thin line (1 px at 1080p, 2 px at 4K) instead of a 3–4 px bar.
+**Play: the time-left line is a hairline.** The bar under Play's top bar that shows how long the slide has left is now a thin line (1 px at 1080p, 2 px at 4K) instead of a 3–4 px bar. On the Alerts slide a warning sits in a yellow bar and a critical alert in a red one, as in the design; before, only the stripe at the left edge was coloured.
 
 ## 0.3.50
 
