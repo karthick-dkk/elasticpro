@@ -20,7 +20,7 @@
  * Pure: state.js supplies the cached data and the dataset times; tools/unit covers this.
  */
 
-import { RULE_DATASET } from './alert-tuning.js';
+import { RULE_READS } from './alert-tuning.js';
 
 /**
  * The oldest reading a held alert may be computed from. The fleet cache keeps its last good
@@ -31,20 +31,26 @@ import { RULE_DATASET } from './alert-tuning.js';
 export const HELD_MAX_AGE_HOURS = 24;
 export const HELD_MAX_AGE_MS = HELD_MAX_AGE_HOURS * 3600 * 1000;
 
-/** The background datasets a held evaluation reads — every one RULE_DATASET names. */
-export const HELD_DATASETS = [...new Set(Object.values(RULE_DATASET))];
+/**
+ * The background datasets a held evaluation reads from the fleet cache — every one RULE_READS
+ * names except `indices`, which is the page's own on-demand list (state.indices) and is dated
+ * by its own fetch (state.js heldSource).
+ */
+export const HELD_DATASETS = [...new Set(Object.values(RULE_READS).flat())].filter((n) => n !== 'indices');
 
 const familyOf = (a) => String((a && a.key) || '').split(':')[1] || '';
 
 /**
- * When the data a rule read was fetched, or null when that is not known.
- * `at` is {dataset: ms}; `delayAt` the time of the last log-delay measurement.
+ * When the data a rule read was fetched — the OLDEST of everything it reads (RULE_READS) —
+ * or null when any of it is not known. `at` is {dataset: ms}; `delayAt` the time of the last
+ * log-delay measurement.
  */
 export function readingTime(family, at = {}, delayAt = null) {
   if (family === 'log-delay') return Number.isFinite(delayAt) && delayAt > 0 ? delayAt : null;
-  const ds = RULE_DATASET[family];
-  const t = ds ? Number(at[ds]) : NaN;
-  return Number.isFinite(t) && t > 0 ? t : null;
+  const reads = RULE_READS[family];
+  if (!reads) return null;
+  const ts = reads.map((ds) => Number(at[ds]));
+  return ts.every((t) => Number.isFinite(t) && t > 0) ? Math.min(...ts) : null;
 }
 
 /**

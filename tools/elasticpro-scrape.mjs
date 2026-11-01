@@ -144,7 +144,7 @@ const { state, setConfig, fetchOverview, fetchIndices, activeClusters } =
 const { runAutomation, resultsFor, activeRules } = await import(path.join(UI, 'core/automation.js'));
 const { client, alerts, setDelaySummary, delaySummaryFor } = await import(path.join(UI, 'core/state.js'));
 const { preflight, measureDelay, summarise, delayItemValues } = await import(path.join(UI, 'core/log-delay.js'));
-const { zabbixAlertsToSend, ZABBIX_ALERT_RULES } = await import(path.join(UI, 'core/zabbix-alerts.js'));
+const { zabbixAlertsToSend, zabbixAlertsCleared, alertHostsToClear, ZABBIX_ALERT_RULES } = await import(path.join(UI, 'core/zabbix-alerts.js'));
 const { volumeReport, clientPlanValues, measureRepoBytes } = await import(path.join(UI, 'core/volume.js'));
 
 /* ---------------------------------- gather ---------------------------------- */
@@ -259,8 +259,22 @@ for (const c of activeClusters()) {
               // The same alerts() the Alerts page lists, as the rules Zabbix raises.
               alerts: zabbixAlertsToSend(!!data.reachable, alerts().filter((a) => a.cluster && a.cluster.id === c.id)) });
 }
+// The Zabbix hosts rule values went to, across runs: a cluster no longer configured is sent
+// every rule clear once, then forgotten (alertHostsToClear). Needs --memory to remember.
+const sentHosts = alertHostsToClear(memory.zabbixSent, activeClusters().map((c) => c.id));
+if (sendTo) for (const p of plan) if (p.zabbixHost && p.alerts) sentHosts.keep[p.id] = p.zabbixHost;
+let nextMemory = null;
+const saveMemory = () => {
+  const tmp = `${memoryPath}.tmp-${process.pid}`;
+  try { fs.writeFileSync(tmp, JSON.stringify(nextMemory)); fs.renameSync(tmp, memoryPath); }
+  catch (e) { problems.push(`cannot write ${memoryPath}: ${e.message || e}`); }
+};
 if (memoryPath) {
   const next = { clusters: {} };
+  // The ones to clear stay remembered until the clear is delivered (below).
+  next.zabbixSent = sendTo
+    ? { ...sentHosts.keep, ...Object.fromEntries(sentHosts.clear.map((x) => [x.id, x.host])) }
+    : (memory.zabbixSent || {});
   for (const c of activeClusters()) {
     const d = state.data.get(c.id) || {};
     const prevIndices = memory.clusters[c.id] && memory.clusters[c.id].indices;
@@ -275,9 +289,8 @@ if (memoryPath) {
         : (prevIndices || null),
     };
   }
-  const tmp = `${memoryPath}.tmp-${process.pid}`;
-  try { fs.writeFileSync(tmp, JSON.stringify(next)); fs.renameSync(tmp, memoryPath); }
-  catch (e) { problems.push(`cannot write ${memoryPath}: ${e.message || e}`); }
+  nextMemory = next;
+  saveMemory();
 }
 if (repoCachePath) {
   try { fs.writeFileSync(repoCachePath, JSON.stringify(Object.fromEntries(repoCache))); }
@@ -430,6 +443,14 @@ if (sendTo) {
       values.push({ host: p.zabbixHost, key: `elasticpro.alert.detail[${rule}]`, value: a.detail, clock: at });
     }
   }
+  // A cluster sent rule values before and no longer configured: every rule clear, once.
+  const cleared = zabbixAlertsCleared();
+  for (const x of sentHosts.clear) {
+    for (const rule of ZABBIX_ALERT_RULES) {
+      values.push({ host: x.host, key: `elasticpro.alert[${rule}]`, value: cleared[rule].level, clock: at });
+      values.push({ host: x.host, key: `elasticpro.alert.detail[${rule}]`, value: cleared[rule].detail, clock: at });
+    }
+  }
   if (homeless.length) {
     problems.push(`no Zabbix host for ${homeless.join(', ')} — its client plan is not sent `
       + '(turn on zabbix.createHosts, or give it a host with the cluster template)');
@@ -441,6 +462,11 @@ if (sendTo) {
       console.error(`elasticpro-scrape: sent to Zabbix ${sendTo} — processed ${r.processed ?? '?'}, `
         + `failed ${r.failed ?? '?'} of ${r.total ?? values.length}`
         + (r.failed ? ' (a failed value is an item the host does not have: link the "ElasticPro client plan" template)' : ''));
+      // Delivered: the removed clusters' clears are done, and they are forgotten.
+      if (sentHosts.clear.length && nextMemory) {
+        for (const x of sentHosts.clear) delete nextMemory.zabbixSent[x.id];
+        saveMemory();
+      }
     } catch (e) {
       console.error(`elasticpro-scrape: could not send to Zabbix at ${sendTo}: ${e.message || e}`);
     }

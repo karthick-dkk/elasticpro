@@ -136,10 +136,13 @@ export function announceNewAlerts({ notify = toast, now = Date.now(), list = nul
     held = all.filter((m) => isHeld(m));
   } catch (_) { return []; }          // a notifier must never break a refresh
 
-  // Held alerts (a cluster that is down) are never news, but they are remembered: when the
-  // cluster answers again and one is still true, it was raised before the outage and is not
-  // announced a second time. Only what was not there before, held or open, is new.
-  const keys = new Set([...open, ...held].flatMap((m) => m.keys));
+  // Held alerts (a cluster that is down) are never news. One that was already seen open —
+  // announced before the outage — stays remembered while it is held, so when the cluster
+  // answers and it is still true it is not announced a second time. A held key is never ADDED
+  // (the first pass included): an alert nobody was shown — this page opened mid-outage, or a
+  // threshold moved while the cluster was down — is announced when it becomes current.
+  const keys = new Set(open.flatMap((m) => m.keys));
+  if (seen !== null) for (const k of held.flatMap((m) => m.keys)) if (seen.has(k)) keys.add(k);
   if (seen === null) { seen = new Map([...keys].map((k) => [k, 0])); return []; }
 
   const freshKeys = new Map();

@@ -65,9 +65,12 @@ be read says "no data" / "not measured", never 0.
    cluster · detail, open for, acknowledged by. Side: open now (critical, warning,
    acknowledged), last 24 h (raised, resolved, longest open). "All clear" when none. Held
    alerts are not rows: the unreachable row carries the same dimmed held line as the tile.
-   They are never counted and never take the screen; one that is still true when its cluster
-   answers again was there before the outage, so it does not take the screen then either, and
-   its "open for" runs on from before the outage (held keys go with `PLAY_STATE.open`).
+   They are never counted and never take the screen. When the cluster answers again, one that
+   this display already showed open before the outage does not take the screen a second time;
+   one it was never shown (the TV was switched on during the outage, or the alert appeared only
+   while held) takes it as any new critical alert does — held keys are kept in what the display
+   has seen, never added to it. "Open for" runs on from before the outage (held keys go with
+   `PLAY_STATE.open`).
 3. **Cluster spotlight**: clusters with a **critical problem** join automatically and leave
    10 min after their last one clears (per display). Critical problem (Config tick boxes,
    defaults on): red health, a node left, SLM failed or no good snapshot in 26 h (not for

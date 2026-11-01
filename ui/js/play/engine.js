@@ -106,15 +106,18 @@ export function createEngine({ order, now = 0, isEmpty = () => false, dwellFor =
  * Returns `{seen:Set, active: {key, since}|null}`.
  *
  * `held`: alerts held on a cluster that is down (alert-groups.js holdUnreachable). They never
- * take the screen, but they are remembered: when the cluster answers again and one of them is
- * still true and critical, it was raised before the outage and does not take over a second time.
+ * take the screen. One this display already saw open before the outage stays remembered while
+ * held, so if it is still true and critical when the cluster answers it does not take over a
+ * second time. A held key is never ADDED to what was seen (the first look included): a display
+ * switched on mid-outage, or an alert that appeared only while held, takes over when it
+ * becomes current — nobody was shown it.
  */
 export function takeover(prev, { open = [], held = [], acked = () => false, now, enabled = true }) {
   const keyOf = (a) => (typeof a === 'string' ? a : a.key);
   const keys = open.map(keyOf);
   const heldKeys = new Set(held.map(keyOf));
-  if (!prev) return { seen: new Set([...keys, ...heldKeys]), active: null };
-  const seen = new Set([...prev.seen, ...heldKeys]);
+  if (!prev) return { seen: new Set(keys), active: null };
+  const seen = new Set(prev.seen);
   let active = prev.active;
   if (active && (!keys.includes(active.key) || acked(active.key) || now - active.since >= TAKEOVER_MS)) active = null;
   for (const k of keys) {

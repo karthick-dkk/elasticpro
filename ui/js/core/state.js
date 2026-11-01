@@ -6,7 +6,7 @@ import { EsClient, primeWorker, setBadge, requestStats, workerStatus,
 import { bytes as bytesish, ago, dur } from '../lib/fmt.js';
 import { diskLevel, tuneAlerts, alertCounts } from './alert-tuning.js';
 import { isAcked, ackFor, acksRev } from './acks.js';
-import { mergeAlerts, isOpen, isHeld, holdUnreachable } from './alert-groups.js';
+import { mergeAlerts, isOpen, holdUnreachable } from './alert-groups.js';
 import { HELD_DATASETS, HELD_MAX_AGE_MS, stampHeld, evaluatedAt } from './alert-held.js';
 import { alertHistory } from './alert-history.js';
 // Cyclic with field-volume.js, which needs client() from here. Safe because both sides
@@ -682,7 +682,7 @@ async function fetchOverviewDirect(id, { withSnapshots = true } = {}) {
   // Without the fleet cache, the last data read while it answered is what a held alert is
   // computed from (heldSource). One entry per cluster that is down; gone once it answers.
   if (answered) lastReachable.delete(id);
-  else if (prev.reachable && !prev.healthUnknown) lastReachable.set(id, prev);
+  else if (prev.reachable && !prev.healthUnknown) lastReachable.set(id, frozenCopy(prev));
   // The pattern the ILM/SLM error definition (lifecycle-errors.js) is read against.
   out.logIndexPattern = (cl.c && cl.c.logIndexPattern) || undefined;
   // Which figures came from Zabbix, and how old they were — the page says so.
@@ -2122,18 +2122,47 @@ function clusterAlerts(c, d, add, { now = Date.now(), live = true } = {}) {
 
 /**
  * Without the fleet cache: a down cluster's data as it was when it last answered
- * (fetchOverviewDirect). With it, the core's cache is the record and this stays empty.
+ * (fetchOverviewDirect), as a copy that shares nothing the page goes on writing to. With
+ * the fleet cache, the core's cache is the record and this stays empty — or holds an entry
+ * from a moment the page fell back to direct fetches, which is dropped once the cluster
+ * is not down (heldAlerts).
  */
 const lastReachable = new Map();
 /** Per down cluster: the data rebuilt from the cache, until one of its readings changes. */
 const heldMemo = new Map();
+
+/** Whether this cluster reads as down now: tried, and not answering (what raises its unreachable alert). */
+function isDown(id) {
+  const d = state.data.get(id);
+  return !!d && !d.healthUnknown && !d.reachable;
+}
+
+/**
+ * `d` frozen for the held list. A refresh builds the next state.data entry over it — a skipped
+ * repositories call keeps the same `repos` objects, and the snapshot listing then writes the
+ * outage's error and an empty listing into them and into `snapshots` — so the copy has its own
+ * repository objects and its own listing per repository.
+ */
+export function frozenCopy(d) {
+  return {
+    ...d,
+    repos: (d.repos || []).map((r) => ({ ...r })),
+    snapshots: Object.fromEntries(Object.entries(d.snapshots || {}).map(([k, v]) => [k, Array.isArray(v) ? [...v] : v])),
+  };
+}
+
+/** When the index list this page holds for a cluster was read: the on-demand `indices` reading. */
+function indicesAt(id) {
+  return Array.isArray(state.indices.get(id)) ? fetchedAt(id, 'indices') : 0;
+}
 
 /**
  * A down cluster's newest cached data — `{d, at: {dataset: ms}}` — or null when there is none.
  * Nothing is fetched. With the fleet cache: its entries, which keep the last good answer and
  * its fetchedAt when a fetch fails, health included (fleetPairs lastGood), built by the same
  * buildClusterData as the live view. Without it: the last data this page read while the
- * cluster answered, all of it as of that read.
+ * cluster answered, all of it as of that read. Either way the index list is dated by its own
+ * read (`indices`), which may be much older.
  */
 function heldSource(id) {
   const cur = fleetMode() ? fleet.raw.get(id) : null;
@@ -2144,11 +2173,12 @@ function heldSource(id) {
       if (e && e.data && e.status !== 'never' && e.fetchedAt) at[n] = local(e.fetchedAt);
     }
     if (!Object.keys(at).length) return null;
+    if (indicesAt(id)) at.indices = indicesAt(id);
     const cl = state.clients.get(id);
     const reSrc = cl && cl.c ? cl.c.indexNameRegex : undefined;
     const sig = `${HELD_DATASETS.map((n) => at[n] || 0).join(',')}|${reSrc || ''}`;
     const memo = heldMemo.get(id);
-    if (memo && memo.sig === sig) return memo;
+    if (memo && memo.sig === sig) return { ...memo, at };
     const raw = fleetPairs(cur, { lastGood: true });
     raw.updatedAt = at.health || undefined;
     const prev = state.data.get(id) || {};
@@ -2164,11 +2194,14 @@ function heldSource(id) {
   const d = lastReachable.get(id);
   const t = d && Number(d.updatedAt);
   if (!t) return null;
-  return { d, at: Object.fromEntries(HELD_DATASETS.map((n) => [n, t])) };
+  const at = Object.fromEntries(HELD_DATASETS.map((n) => [n, t]));
+  if (indicesAt(id)) at.indices = indicesAt(id);
+  return { d, at };
 }
 
-/** The cached data a held alert on this cluster was computed from, while it is down. */
+/** The cached data a held alert on this cluster was computed from — only while it is down. */
 export function heldDataFor(id) {
+  if (!isDown(id)) return null;
   const m = heldMemo.get(id);
   return m ? m.d : lastReachable.get(id) || null;
 }
@@ -2183,14 +2216,11 @@ export function heldDataFor(id) {
  */
 export function heldAlerts(now = Date.now()) {
   const settings = loadAlertSettings(state.config && state.config.raw);
-  const down = new Set();
   const out = [];
   // Held only behind an unreachable line: with that rule switched off there is no line.
   if (isEnabled(settings, 'unreachable')) {
     for (const c of clusters()) {
-      const d = state.data.get(c.id);
-      if (!d || d.healthUnknown || d.reachable) continue;
-      down.add(c.id);
+      if (!isDown(c.id)) continue;
       const src = heldSource(c.id);
       const when = src && evaluatedAt(src.at);
       if (!when || now - when > HELD_MAX_AGE_MS) continue;
@@ -2200,9 +2230,12 @@ export function heldAlerts(now = Date.now()) {
       out.push(...stampHeld(raised, { at: src.at, delayAt: ds ? ds.at : null, now }));
     }
   }
-  // Bounded: one entry per cluster that is down now, and none for one that answers.
-  for (const id of [...heldMemo.keys()]) if (!down.has(id)) heldMemo.delete(id);
-  for (const id of [...lastReachable.keys()]) if (!clusters().some((c) => c.id === id)) lastReachable.delete(id);
+  // Bounded: an entry only for a configured cluster that is down now. One that answers again —
+  // by whichever path, the fleet cache included — keeps nothing frozen.
+  const configured = new Set(clusters().map((c) => c.id));
+  for (const m of [heldMemo, lastReachable]) {
+    for (const id of [...m.keys()]) if (!configured.has(id) || !isDown(id)) m.delete(id);
+  }
   // Tuned like the live list (one row per problem), without the staleness note: `asOf` says it.
   return tuneAlerts(applySettings(out, settings), {});
 }
@@ -2463,7 +2496,7 @@ function publishPopupSummary() {
         version: (d.info && d.info.version && d.info.version.number) || '',
       };
     });
-    if (globalThis.chrome && chrome.storage && chrome.storage.session) chrome.storage.session.set({ summary: { at: Date.now(), rows, alerts: mergedAlerts().filter((m) => !isHeld(m)).length } });
+    if (globalThis.chrome && chrome.storage && chrome.storage.session) chrome.storage.session.set({ summary: { at: Date.now(), rows, alerts: openAlertsNow().length } });
   } catch (_) { /* storage.session unavailable */ }
 }
 

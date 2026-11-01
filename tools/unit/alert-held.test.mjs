@@ -50,7 +50,7 @@ test('a rule is dated by the dataset it reads; unknown or too old says nothing',
   assert.equal(H.HELD_MAX_AGE_MS, 24 * HOUR);
   assert.equal(H.evaluatedAt(at), NOW - 10 * MIN, 'evaluated as of the newest reading — when it was last read');
   assert.equal(H.evaluatedAt({}), null);
-  assert.equal(H.readingTime('repo', { snapshots: NOW - MIN }), NOW - MIN);
+  assert.equal(H.readingTime('repo', { snapshots: NOW - MIN, policies: NOW - 2 * MIN }), NOW - 2 * MIN);
   assert.equal(H.readingTime('log-delay', {}, null), null);
 });
 
@@ -198,6 +198,106 @@ test('the cluster answers again: still true is current, not announced again; cle
   notify.resetAnnounced();
 });
 
+test('the bell: a page opened mid-outage announces the held alert when it is current and still true', () => {
+  const said = [];
+  const spy = (msg) => said.push(msg);
+  const pass = () => notify.announceNewAlerts({ notify: spy, now: Date.now() });
+  notify.resetAnnounced();
+  applyFleetEntry('c1', cluster({ age: MIN, down: true }));   // down before this page opened
+  pass();                                                     // the first pass: nothing is news
+  for (let i = 0; i < 3; i++) pass();
+  assert.deepEqual(said, [], 'held alerts are never news while held');
+  const back = cluster({ age: 0 });
+  back.datasets.health.data.health = ans({ status: 'green', number_of_nodes: 1, unassigned_shards: 0 });
+  applyFleetEntry('c1', back);
+  const fresh = pass();
+  assert.deepEqual(fresh.map((m) => m.family), ['disk'], 'nobody was shown it: announced once it is current');
+  assert.equal(said.length, 1);
+  notify.resetAnnounced();
+});
+
+test('the bell: a held alert that appears only during the outage (a threshold moved) is announced on return', () => {
+  const said = [];
+  const pass = () => notify.announceNewAlerts({ notify: (m) => said.push(m), now: Date.now() });
+  notify.resetAnnounced();
+  state.defaults = { ...DEFAULTS, diskWarnPercent: 98, diskCritPercent: 99 };   // 95 %: no disk alert, hysteresis included
+  applyFleetEntry('c1', cluster({ age: MIN }));
+  pass();
+  assert.ok(!S.openAlertsNow().some((m) => m.family === 'disk'));
+  applyFleetEntry('c1', cluster({ age: MIN, down: true }));
+  pass();
+  state.defaults = { ...DEFAULTS };                                              // moved while it is down
+  S.invalidateAlerts();
+  pass(); pass();
+  assert.ok(S.mergedAlerts({ fresh: true }).some((m) => m.family === 'disk' && G.isHeld(m)), 'held under the new threshold');
+  said.length = 0;
+  applyFleetEntry('c1', cluster({ age: 0 }));
+  assert.ok(pass().some((m) => m.family === 'disk'), 'never shown before: announced when current');
+  notify.resetAnnounced();
+});
+
+test('direct mode: a failing refresh of a down cluster does not rewrite what is held', async () => {
+  setFleetMode('direct');
+  const refused = () => Promise.reject(Object.assign(new Error('connect ECONNREFUSED'), { res: { ok: false, kind: 'connect' } }));
+  const c = { id: 'c1', name: 'prod', url: 'http://es:9200', enabled: true };
+  state.clients.set('c1', { c, state: 'online', root: refused, health: refused, snapshots: refused, snapshotsCat: refused });
+  const bad = (id, h) => ({ id, status: 'FAILED', start: NOW - h * HOUR, end: NOW - h * HOUR + MIN });
+  state.data.set('c1', { id: 'c1', reachable: true, updatedAt: NOW - 10 * MIN, health: { status: 'green', unassigned_shards: 0 },
+    repos: [{ name: 'daily', type: 'fs', settings: {} }], snapshots: { daily: [bad('s2', 1), bad('s1', 25)] }, slm: [], nodes: [] });
+  await S.fetchOverview('c1');                     // the cluster refuses: down, and the listing fails
+  const d = state.data.get('c1');
+  assert.equal(d.reachable, false);
+  assert.ok(d.repos[0].error, 'the live entry says the listing failed');
+  const held = S.mergedAlerts({ fresh: true }).filter(G.isHeld);
+  assert.deepEqual(held.map((m) => m.keys.join()), ['c1:repo:daily:failing'], 'the held repository alert is what was true, not the outage');
+  assert.equal(held[0].asOf, NOW - 10 * MIN);
+  assert.equal(S.heldDataFor('c1').snapshots.daily.length, 2, 'the held copy kept its listing');
+  setFleetMode('fleet');
+});
+
+test('a fallback blip: answering again through the fleet cache keeps nothing frozen', async () => {
+  applyFleetEntry('c1', cluster({ age: 0 }));                                    // up, disk 95 %
+  setFleetMode('direct');                                                       // a worker_error: direct for a moment
+  const refused = () => Promise.reject(new Error('connect ECONNREFUSED'));
+  state.clients.set('c1', { c: { id: 'c1', name: 'prod' }, state: 'online', _track() {}, root: refused, health: refused, snapshots: refused, snapshotsCat: refused });
+  await S.fetchOverview('c1');
+  assert.ok(S.heldDataFor('c1'), 'down: the last good data is held');
+  setFleetMode('fleet');
+  const back = cluster({ age: 0 });
+  back.datasets.nodes.data.alloc = ans([{ node: 'n1', 'disk.used': '850', 'disk.avail': '150', 'disk.total': '1000', 'disk.indices': '800', shards: '10' }]);
+  applyFleetEntry('c1', back);                                                  // answers via the cache: 85 %
+  assert.equal(S.heldDataFor('c1'), null, 'not down: nothing held is offered');
+  const disk = S.mergedAlerts({ fresh: true }).find((m) => m.family === 'disk');
+  assert.deepEqual(disk.items.map((i) => i.value), ['85%'], 'the items are from the live reading, not the frozen one');
+  S.heldAlerts();
+  setFleetMode('direct');
+  state.data.set('c1', { reachable: false, updatedAt: NOW });
+  assert.equal(S.heldDataFor('c1'), null, 'and the frozen copy was dropped once it answered');
+  setFleetMode('fleet');
+});
+
+test('a rule is as old as the oldest thing it reads (RULE_READS)', () => {
+  const at = { health: NOW - 1 * MIN, nodes: NOW - 2 * MIN, policies: NOW - 3 * MIN, ilm_errors: NOW - 4 * MIN, snapshots: NOW - 5 * MIN };
+  assert.equal(H.readingTime('disk-unaccounted', at), null, 'the index list was never read: unknown');
+  assert.equal(H.readingTime('disk-unaccounted', { ...at, indices: NOW - 3 * HOUR }), NOW - 3 * HOUR, 'dated by the index list');
+  assert.equal(H.readingTime('disk-balance', at), NOW - 3 * MIN, 'nodes and the watermarks from policies');
+  assert.equal(H.readingTime('master-changed', at), NOW - 2 * MIN, 'nodes and health');
+  assert.equal(H.readingTime('ilm', at), NOW - 4 * MIN, 'ilm_errors and ILM mode from policies');
+  assert.equal(H.readingTime('repo', at), NOW - 5 * MIN, 'snapshots and the repository list');
+  assert.equal(H.readingTime('repo', { snapshots: NOW }), null, 'repository list unknown: unknown');
+  assert.ok(!H.HELD_DATASETS.includes('indices'), 'the index list is dated by its own read, not from the fleet cache');
+});
+
+test('Zabbix: a cluster no longer configured is sent every rule clear once, then forgotten', () => {
+  const { clear, keep } = Z.alertHostsToClear({ c1: 'host-1', gone: 'host-gone', off: 'host-off' }, ['c1', 'c2']);
+  assert.deepEqual(clear, [{ id: 'gone', host: 'host-gone' }, { id: 'off', host: 'host-off' }]);
+  assert.deepEqual(keep, { c1: 'host-1' }, 'still configured — down or not — stays remembered and is not cleared');
+  const cleared = Z.zabbixAlertsCleared();
+  assert.deepEqual(Object.keys(cleared), Z.ZABBIX_ALERT_RULES);
+  assert.ok(Object.values(cleared).every((v) => v.level === 0 && v.detail === ''));
+  assert.deepEqual(Z.alertHostsToClear(undefined, ['c1']), { clear: [], keep: {} }, 'nothing remembered: nothing to clear');
+});
+
 test('acknowledging a held alert carries over when the cluster answers', () => {
   const c = { id: 'c1', name: 'prod' };
   const rec = { 'c1:disk': { acked: true, ackedBy: 'asha', ackedItems: ['c1:disk'] } };
@@ -212,16 +312,26 @@ test('acknowledging a held alert carries over when the cluster answers', () => {
   assert.equal(up[0].state, 'acked', 'the same key: the acknowledgement covers it when it is current');
 });
 
-test('Play: a held alert never takes the screen, and does not take it on the way back either', () => {
-  let t = E.takeover(null, { open: ['a:health'], now: 0 });
-  // b goes down with a critical disk alert: held, not open.
+test('Play: seen open before the outage, held through it — no second takeover on the way back', () => {
+  let t = E.takeover(null, { open: ['a:health', 'b:disk'], now: 0 });   // b's disk already on screen
+  // b goes down: its disk alert is held, never taking the screen.
   t = E.takeover(t, { open: ['a:health', 'b:unreachable'], held: ['b:disk'], now: 1000 });
   assert.equal(t.active && t.active.key, 'b:unreachable', 'the outage itself is news');
-  t = E.takeover(t, { open: ['a:health'], held: ['b:disk'], now: E.TAKEOVER_MS + 2000 });
   for (let i = 0; i < 5; i++) t = E.takeover(t, { open: ['a:health'], held: ['b:disk'], now: E.TAKEOVER_MS + 3000 + i });
   assert.ok(t.seen.has('b:disk'), 'remembered while held');
   t = E.takeover(t, { open: ['a:health', 'b:disk'], now: E.TAKEOVER_MS + 9000 });
-  assert.equal(t.active, null, 'b answers with the disk still critical: raised before the outage, no takeover');
+  assert.equal(t.active, null, 'b answers with the disk still critical: shown before the outage, no takeover');
+});
+
+test('Play: a display switched on mid-outage was never shown the held alert — it takes over when current', () => {
+  // The first look: b is down, its disk held. Held keys are never added to what was seen.
+  let t = E.takeover(null, { open: ['b:unreachable'], held: ['b:disk'], now: 0 });
+  assert.ok(!t.seen.has('b:disk'));
+  for (let i = 1; i < 4; i++) t = E.takeover(t, { open: ['b:unreachable'], held: ['b:disk'], now: i });
+  assert.equal(t.active, null, 'held never takes the screen');
+  assert.ok(!t.seen.has('b:disk'), 'not added while held either');
+  t = E.takeover(t, { open: ['b:disk'], now: 10 });
+  assert.equal(t.active && t.active.key, 'b:disk', 'current now, and nobody saw it: it takes the screen');
 });
 
 test('memory: one cached copy per cluster that is down, none once it answers', () => {

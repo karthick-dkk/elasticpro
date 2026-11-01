@@ -69,3 +69,30 @@ export function zabbixAlertValues(alertsForCluster) {
 export function zabbixAlertsToSend(reachable, alertsForCluster) {
   return reachable ? zabbixAlertValues(alertsForCluster) : null;
 }
+
+/** Every rule clear: what a cluster ElasticPro no longer watches is sent, once. */
+export function zabbixAlertsCleared() {
+  return Object.fromEntries(ZABBIX_ALERT_RULES.map((r) => [r, { level: 0, detail: '' }]));
+}
+
+/**
+ * The Zabbix hosts rule values were sent to for clusters this run no longer has (removed, or
+ * switched off). Sending nothing for a cluster that is not answering keeps its problems as
+ * they were — right through an outage, wrong for good: a cluster that went down and was then
+ * removed would never be sent a value again, and its problems would stay open for ever. So
+ * each is sent every rule clear once (zabbixAlertsCleared) and then forgotten.
+ *
+ * `sent`: {clusterId: zabbixHost} remembered from earlier runs. Returns `clear` [{id, host}]
+ * and `keep` — the remembered ones still configured, down or not.
+ */
+export function alertHostsToClear(sent, activeIds) {
+  const active = new Set(activeIds || []);
+  const clear = [];
+  const keep = {};
+  for (const [id, host] of Object.entries(sent || {})) {
+    if (!host) continue;
+    if (active.has(id)) keep[id] = host;
+    else clear.push({ id, host });
+  }
+  return { clear, keep };
+}
