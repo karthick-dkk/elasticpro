@@ -1,8 +1,10 @@
 # ElasticPro
 
-Portable Windows desktop app (Tauri 2 + Rust core + unbundled vanilla ES modules) for
-monitoring multiple Elasticsearch clusters, including clusters reachable only through SSH
-jump hosts. Also runs hosted on Linux behind nginx — same core, same UI.
+Hosted Docker product (Rust core + unbundled vanilla ES modules, behind nginx) for monitoring
+multiple Elasticsearch clusters, including clusters reachable only through SSH jump hosts, with
+Zabbix frontend modules. The Docker images and the Zabbix modules are the only maintained builds.
+The Tauri desktop shell (`src-tauri/`) is deprecated as of 0.3.52: not built, linted or released;
+last released in 0.3.51.
 
 ## Conventions that matter
 

@@ -3,8 +3,9 @@
 ## What is ElasticPro? What problem does it solve?
 
 ElasticPro is a monitoring and operations console for fleets of Elasticsearch clusters. It runs
-as a portable Windows desktop app and as a hosted web app on a Linux server, with the same
-Rust core and the same UI in both.
+as a hosted web app on a Linux server (the Docker stack) with a set of Zabbix frontend modules.
+The desktop builds (Windows, macOS, Linux) are deprecated: they ended with
+[0.3.51](https://github.com/karthick-dkk/elasticpro/releases/tag/v0.3.51).
 
 It exists because browser tools cannot do three things an operator behind a jump host needs:
 
@@ -32,12 +33,15 @@ Then open `https://<server>/` and sign in as `Admin` / `elastic` — change the 
 use. Add `--cache` for the Redis-backed fleet cache. The installer pulls the published image
 for the release and compiles only when there is none.
 
-Desktop, on Windows: download `ElasticPro-<ver>-portable-win64.zip` from the
-[latest release](https://github.com/karthick-dkk/elasticpro/releases/latest), unzip, run. One
-folder, no installer, no admin rights. macOS (`.dmg`) and Linux (`.AppImage`, `.deb`, `.rpm`)
-packages are on the same page; none are code-signed.
+Zabbix modules: every release attaches `elasticpro-zabbix-modules-<ver>.tar.gz` (and its `.sha256`)
+with `zabbix-modules-install.sh`; the modules source is
+[integration-zabbix-elasticpro](https://github.com/karthick-dkk/integration-zabbix-elasticpro).
 
-Zabbix: the frontend modules and templates are in
+**Deprecated: desktop builds.** The portable Windows zip, installers, `.dmg`, `.AppImage`, `.deb`
+and `.rpm` ended with [0.3.51](https://github.com/karthick-dkk/elasticpro/releases/tag/v0.3.51); nothing newer is built. `install.sh --portable` now
+exits with that message. Download 0.3.51 from the releases page if you still need it.
+
+The frontend modules and templates source is
 [integration-zabbix-elasticpro](https://github.com/karthick-dkk/integration-zabbix-elasticpro);
 pair the two UIs with a one-time code from Config → Zabbix.
 
@@ -67,8 +71,8 @@ Hosted (the stack: core, nginx, Redis, PostgreSQL):
 | Disk | 10 GB free | images, the fleet cache on disk, PostgreSQL, logs |
 | Network | port 443 (or `--listen`) inbound; outbound to each cluster, directly or through its jump host over SSH | the core is never reachable except through nginx |
 
-Desktop: Windows 10/11 x64 with WebView2 (Edge); macOS 10.15 or later; Linux with
-`libwebkit2gtk-4.1`. Nothing to install on the clusters: ElasticPro only speaks the
+Desktop (deprecated, last released in 0.3.51): Windows 10/11 x64 with WebView2; macOS 10.15 or
+later; Linux with `libwebkit2gtk-4.1`. Nothing to install on the clusters: ElasticPro only speaks the
 Elasticsearch REST API, read-only unless an operator unlocks writes.
 
 ## Author / Contribution

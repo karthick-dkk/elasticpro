@@ -1,4 +1,9 @@
-# ElasticPro — Windows desktop app
+# ElasticPro — operator handbook
+
+> **Deprecated as of 0.3.52: the Windows / desktop builds.** Only the hosted Docker build and the
+> Zabbix modules are maintained. The desktop sections below (steps to build, the Windows
+> cross-build, portable mode) describe 0.3.51 and are kept for reference; `src-tauri/` is no longer
+> a workspace member and `tools/build-windows-cross.sh` exits with a message.
 
 | | |
 |---|---|
@@ -111,7 +116,7 @@ The app remembers the file's *path* (and `--config <path>` / `ELASTICPRO_CONFIG`
 one, e.g. on the jump server). Contents are re-read on every start and on window focus when
 the file changed.
 
-## Steps to build
+## Steps to build (deprecated: desktop, last released in 0.3.51)
 
 No Node.js is involved. Rust + the Tauri CLI, on Windows:
 
@@ -141,7 +146,7 @@ Credential Manager) — the WebView2 UI itself needs real Windows.
 Linux/macOS builds work the same (`cargo tauri build`) with the platform's WebKit
 dependencies; the Linux build was used to run the full app under Xvfb in the tests below.
 
-## Portable mode (no install at all)
+## Portable mode (no install at all) — deprecated, desktop ended with 0.3.51
 
 The portable zip carries a `portable` marker file: with it present, everything the app
 stores — `pins.json`, the WebView profile, the remembered config path — lives in `data\`
