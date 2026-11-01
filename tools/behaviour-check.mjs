@@ -3202,6 +3202,17 @@ restoreConsole();
     ok(written !== null, 'volume fields: Save with a managed value wrote nothing');
     ok(written === null || !/"topValues"\s*:\s*40/.test(written),
       `volume fields: saving wrote a managed value into the file (${written && JSON.stringify((JSON.parse(written).defaults || {}).volume)})`);
+    // config.txt lets go of the key while the page is open (the next PING says so) and the
+    // field is still drawn locked: Save must not write the value it showed — nobody typed it.
+    managedNow = {};
+    managed.setManaged({ ok: true, managedDefaults: {}, managedZabbixOptions: {} });
+    const stillLocked = doc.getElementById('vf-top');
+    ok(!!stillLocked && stillLocked.disabled, 'volume fields: the locked field was redrawn before Save (the case needs it drawn locked)');
+    written = null;
+    await press('Save');
+    await written_();
+    ok(written === null || !/"topValues"\s*:\s*40/.test(written),
+      `volume fields: a locked field's value was written once config.txt let go of the key (${written && JSON.stringify((JSON.parse(written).defaults || {}).volume)})`);
     managedNow = null;
     managed.setManaged({ ok: true, managedDefaults: {}, managedZabbixOptions: {} });
   } finally {
