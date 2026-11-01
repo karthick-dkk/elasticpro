@@ -27,6 +27,24 @@ be read says "no data" / "not measured", never 0.
   slides need as watched (`askForPage`) so a hybrid-mode fleet (>25 clusters) has them.
   Toasts/notifications are off on this page.
 
+### Browser full screen
+
+"Full screen" above means no app chrome; the browser's own full screen is separate and
+`ui/js/core/fullscreen.js` owns it.
+
+- **Button.** Clicking "▶ Play" calls `requestFullscreen()` inside the click (the user gesture
+  the browser demands), then routes to `#/play`. A refusal, or a browser without the API
+  (old Safari: `webkitRequestFullscreen` is tried), never shows an error: Play opens in the window.
+- **On the page.** A ⛶ button in the controls ("Full screen" / "Leave full screen", state follows
+  `fullscreenchange`) and the **F** key toggle it. Esc leaves full screen and Play keeps running
+  (a second Esc exits Play). Leaving Play exits full screen only if Play entered it.
+- **TVs.** A display link loads with no click, so the browser will not allow full screen by
+  itself. Recommended: run the browser in kiosk mode. Otherwise Play shows a one-time hint
+  ("Press F or click ⛶ for full screen — or run the browser in kiosk mode") for 10 s, only
+  when not already full screen; dismissing it is remembered in `localStorage`.
+- **Embedded in Zabbix.** Works only when the Zabbix iframe has `allow="fullscreen"` (the modules
+  patch adds it). Where `document.fullscreenEnabled` is false the ⛶ button is not drawn.
+
 ### Slide engine
 
 - Slides in the display's order; each stays `dwellSec` (default 20). Cluster spotlight stays

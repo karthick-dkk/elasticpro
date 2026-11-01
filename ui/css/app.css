@@ -1915,3 +1915,9 @@ html.play .main, html.play .page { padding: 0; margin: 0; max-width: none; }
 .pl-dname { font-weight: 600; }
 .pl-vtable { flex: 1 1 auto; min-height: 0; overflow: hidden; background: var(--tv-panel); border: 1px solid var(--tv-line); border-radius: .6em; padding: .5em .9em; }
 .pl-cname { font-weight: 600; }
+
+/* full screen (docs/PLAY.md): the one-time hint on a display link, shown over the controls' place */
+.pl-fshint { position: fixed; left: 50%; bottom: 1.2rem; transform: translateX(-50%); display: flex; align-items: center; gap: .7rem;
+  padding: .5rem .8rem; background: rgba(18, 22, 27, .94); border: 1px solid var(--tv-line); border-radius: .8rem; color: var(--tv-text-2); font-size: 1rem; }
+.pl-root.ctl .pl-fshint { display: none; }
+.pl-fshint-x { font: inherit; background: none; border: 0; color: var(--tv-text-2); cursor: pointer; }

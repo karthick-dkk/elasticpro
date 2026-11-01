@@ -4781,6 +4781,58 @@ if (viaFleet) {
   }
 }
 
+// Play opens in the browser's full screen (docs/PLAY.md): pressing "▶ Play" asks for it inside
+// the click and lands on #/play; the page's ⛶ button and F key toggle it; Esc leaving it keeps
+// Play running; leaving Play gives the screen back only if Play took it; a refusal is silent.
+{
+  const root = doc.documentElement;
+  const calls = { req: 0, exit: 0 };
+  let refuse = false;
+  const change = () => doc.dispatchEvent(new window.Event('fullscreenchange'));
+  const setFs = (v) => Object.defineProperty(doc, 'fullscreenElement', { value: v, configurable: true });
+  root.requestFullscreen = async () => {
+    calls.req++;
+    if (refuse) throw new TypeError('refused');
+    setFs(root); change();
+  };
+  doc.exitFullscreen = async () => { calls.exit++; setFs(null); change(); };
+  const fsBtn = () => doc.querySelector('.pl-ctl .pl-fs');
+  const label = () => (fsBtn() ? fsBtn().getAttribute('aria-label') : null);
+  const key = (k) => doc.dispatchEvent(new window.KeyboardEvent('keydown', { key: k, bubbles: true }));
+  try {
+    await go('overview');
+    const play = doc.getElementById('play-btn');
+    ok(!!play, 'fullscreen: no ▶ Play button in the top bar');
+    if (play) {
+      play.click(); await settleFor(600);
+      ok(calls.req === 1, `fullscreen: ▶ Play asked for full screen ${calls.req} times`);
+      ok(/#\/play$/.test(window.location.hash), `fullscreen: ▶ Play landed on "${window.location.hash}"`);
+      ok(label() === 'Leave full screen', `fullscreen: the ⛶ button reads "${label()}" while full screen`);
+      key('f'); await settleFor(300);
+      ok(calls.exit === 1 && label() === 'Full screen', 'fullscreen: F did not leave full screen');
+      key('F'); await settleFor(300);
+      ok(calls.req === 2, 'fullscreen: F did not enter full screen');
+      setFs(null); change();   // Esc
+      await settleFor(100);
+      ok(/#\/play$/.test(window.location.hash) && label() === 'Full screen', 'fullscreen: Esc leaving full screen did not keep Play running');
+      if (fsBtn()) { fsBtn().click(); await settleFor(300); }
+      ok(calls.req === 3, 'fullscreen: the ⛶ button did not enter full screen');
+      await go('overview');
+      ok(calls.exit === 2, `fullscreen: leaving Play exited ${calls.exit - 1} times, expected 1`);
+      refuse = true;
+      doc.getElementById('play-btn').click(); await settleFor(600);
+      ok(/#\/play$/.test(window.location.hash), 'fullscreen: a refused request stopped Play opening');
+      refuse = false;
+      await go('overview');
+      ok(calls.exit === 2, 'fullscreen: leaving Play exited a full screen it never entered');
+    }
+  } finally {
+    delete root.requestFullscreen; delete doc.exitFullscreen;
+    try { delete doc.fullscreenElement; } catch (_) { /* own property only */ }
+    await go('overview');
+  }
+}
+
 // Config > Play (0.3.47): the section opens (and says so when the core is older); a new link sends
 // the permanent default and shows its URL once; an old link is replaced (revoked, then made again
 // with the same settings, the new URL shown once); revoke asks first; an empty reason is refused;
