@@ -81,16 +81,19 @@ jobs:
         include:
           # macos-13 was retired as a runner label; a job asking for a label that does
           # not exist queues forever instead of failing, which stalled every build run.
-          # macos-15-intel is the current Intel image.
+          # macos-14 went the same way on 2026-11-02 (its brownouts cancelled 0.3.50's
+          # arm64 job). macos-15 is the current Apple-silicon image, macos-15-intel the
+          # Intel one. The Rust target is chosen by label below, not by runner name, so a
+          # runner rename touches one line.
           - { os: windows-latest,  label: windows-x64, args: '' }
-          - { os: macos-14,        label: macos-arm64, args: '--target aarch64-apple-darwin' }
+          - { os: macos-15,        label: macos-arm64, args: '--target aarch64-apple-darwin' }
           - { os: macos-15-intel,  label: macos-x64,   args: '--target x86_64-apple-darwin' }
           - { os: ubuntu-22.04,    label: linux-x64,   args: '' }
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.os == 'macos-14' && 'aarch64-apple-darwin' || (matrix.os == 'macos-15-intel' && 'x86_64-apple-darwin' || '') }}
+          targets: ${{ matrix.label == 'macos-arm64' && 'aarch64-apple-darwin' || (matrix.label == 'macos-x64' && 'x86_64-apple-darwin' || '') }}
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.label }}
