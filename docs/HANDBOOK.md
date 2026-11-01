@@ -1,4 +1,9 @@
-# ElasticPro — Windows desktop app
+# ElasticPro — operator handbook
+
+> **Deprecated as of 0.3.52: the Windows / desktop builds.** Only the hosted Docker build and the
+> Zabbix modules are maintained. The desktop sections below (steps to build, the Windows
+> cross-build, portable mode) describe 0.3.51 and are kept for reference; `src-tauri/` is no longer
+> a workspace member and `tools/build-windows-cross.sh` exits with a message.
 
 | | |
 |---|---|
@@ -111,7 +116,7 @@ The app remembers the file's *path* (and `--config <path>` / `ELASTICPRO_CONFIG`
 one, e.g. on the jump server). Contents are re-read on every start and on window focus when
 the file changed.
 
-## Steps to build
+## Steps to build (deprecated: desktop, last released in 0.3.51)
 
 No Node.js is involved. Rust + the Tauri CLI, on Windows:
 
@@ -141,7 +146,7 @@ Credential Manager) — the WebView2 UI itself needs real Windows.
 Linux/macOS builds work the same (`cargo tauri build`) with the platform's WebKit
 dependencies; the Linux build was used to run the full app under Xvfb in the tests below.
 
-## Portable mode (no install at all)
+## Portable mode (no install at all) — deprecated, desktop ended with 0.3.51
 
 The portable zip carries a `portable` marker file: with it present, everything the app
 stores — `pins.json`, the WebView profile, the remembered config path — lives in `data\`
@@ -276,8 +281,52 @@ classic policy, which is what Config → Requests → Automatic saves:
   "concurrency": { "global": 16, "perCluster": 2, "tunnel": 6 },
   "timeoutMs": 30000, "tunnelTimeoutMs": 60000,
   "budgetPerClusterPerMin": 30,
-  "paused": { "all": false } }
+  "paused": { "all": false },
+  "minGapSec": 60,
+  "play": { "healthSec": 300, "nodesSec": 300, "lifecycleSec": 14400, "snapshotsSec": 7200,
+            "indicesSec": 3600, "delayFullSec": 7200, "delayLateSec": 900 } }
 ```
+
+**Duplicate requests** (`minGapSec`, Config › Requests › Duplicate requests; 30–600 s, shipped
+60). A request ElasticPro sends by itself — a page loading, Play, Retry or Refresh, the poller, a
+dataset ask — is not sent again while the same request was answered by the cluster less than the
+gap ago: the asker gets that reading, with its age, and the next request goes once the gap has
+passed (an ask waiting meanwhile goes then). "The same request" is the same cluster and dataset
+for the fleet cache (`scheduler::State::gap_until`: the planner, `CLUSTER_DATASET` and `REFRESH`
+all ask it — a `REFRESH` inside the gap is skipped with `reason: "recent"` and `nextAt`), and for a
+page's own read the same cluster, address, method, path, body and credential (the read cache,
+`Core::es_req`; GET and HEAD, as the read cache keeps, and an answer it can keep — at most 4 MB).
+What a write changed is re-read at once, never held. Askers for a request already on its way
+share it — always on (`inflight::Flights` for a page's reads, one fetch per dataset in the
+scheduler). The gap is a floor for every automatic read: `ES_READ_CACHE_SECONDS=0` turns off the
+read cache's own few seconds, not the gap, so a page's repeat read inside the gap is still that
+reading; only a failed answer (anything but `ok`) is never held. Never held, sent at once and
+never shared, by the `purpose` the page names on its `ES` message (`fleet::policy::GAP_EXEMPT`,
+never guessed from a path): the REST console (`console`; also by its origin). That is the only
+request a person types that goes to a cluster as typed — the Indices and Snapshots page searches
+match their term in the browser, over listings read like any page's (held and shared like
+them). A display link's `purpose` is ignored and an origin of its own other than `page:…` is
+read as `page:play`, so a TV is never taken for a person typing. The clock is the wall's: a
+reading stamped later than now (the clock stepped back) holds nothing. Pages stamp a reading
+with the cluster's time, not the time it was handed over (`EsClient.readingSince`), so a held
+reading never reads as fresh.
+
+**While Play runs** (`play`, Config › Requests › While Play runs): what Play keeps going for every
+display — health 5 min, nodes 5 min, SLM/ILM 4 h, snapshots 2 h, the index list 1 h, the log
+delay's full check 2 h and its late devices 15 min (docs/PLAY.md). Play says what it shows with
+`REFRESH {…, watcher: "play"}`; the scheduler keeps watchers per dataset and the effective interval
+is the soonest of them — the schedule (background), a page watching (the watch window, the
+policy's `intervalsSec`), a Play display (`play`) — floored by the gap. Bounds: health and nodes
+60–3600 s, SLM/ILM 900 s–1 day, snapshots 600 s–1 day, index list 300 s–1 day, full check
+1800 s–1 day, late devices 300–7200 s and never slower than the full check.
+
+**config.txt locks them**: `POLL_MIN_GAP_SECONDS`, `POLL_PLAY_HEALTH_SECONDS`,
+`POLL_PLAY_NODES_SECONDS`, `POLL_PLAY_LIFECYCLE_SECONDS`, `POLL_PLAY_SNAPSHOTS_SECONDS`,
+`POLL_PLAY_INDICES_SECONDS`, `POLL_PLAY_DELAY_FULL_SECONDS`, `POLL_PLAY_DELAY_LATE_SECONDS` (same
+bounds). A key with a value wins over policy.json, the field reads "managed by config.txt (KEY)"
+on Config › Requests, and `POLICY_SET` refuses another value for it (`kind: "managed"`); sent with
+config.txt's value, or left out, it is accepted. policy.json keeps its own value, which comes back
+when the key is taken out.
 
 Modes: `on-demand` is the shipped default (Client basis, below). `auto` is `background` while the core knows 25 clusters or fewer
 and `hybrid` above — measured at 120 clusters, background sent ~397 requests/min and auto ~80;
@@ -308,14 +357,20 @@ minute, doubling to ten, until it answers. `FLEET_STATE` reports `policy: {mode,
 pausedSince, pausedUntil, pausedBy}`, `automation: {busySince, slowed: {cluster: {since, reason,
 level, quick}}}`, each catalogue entry's `effectiveClass` under the mode, and per cluster a
 `throttle: {kind: budget|backoff, until, reason, level}` and `slowed` while one is in force.
-`REQUEST_LOG` carries `throttled`, `slowed` and `busySince` for the Request Centre.
+`REQUEST_LOG` carries `throttled`, `slowed` and `busySince` for the Request Centre, and `asks`:
+what the gap saved over the last hour (rolling, by the minute) — `{windowMinutes: 60, gapSec,
+since, byDataset: {<dataset>|direct: {asked, sent, recent, shared, held}}}`, where every ask is
+exactly one of sent (a request went), recent (a reading inside the gap), shared (one already on its
+way) or held (fresh enough for the asker anyway, or the cluster is down); `direct` is the pages'
+own reads. The Request Centre's **Duplicate requests** card reads it: "health: asked 42 this hour,
+sent 12, 30 answered from a reading under a minute old".
 
 | Message | Role | Answer |
 |---|---|---|
 | `REQUEST_STATS` | user | `{ok, requests: {cluster: {last5m, perMinute, …}}}` — the strip's "Requests N in 5m". |
 | `REQUEST_LOG {cluster?, limit?}` | admin | `{ok, inflight: [record…], recent: [record…], keep, throttled: {cluster: throttle}}` — every user's requests on the clusters the caller may see, newest first, `limit` ≤ 2,000 (default 200). `gate` carries the request gate's figures (running and queued per class, waits, `refused`, `tooLarge`: answers over the response cap in the window, not counted as refused) and `zabbixPush`: `{enabled, host, idle, intervalSecs, credential: "link"\|"metrics", lastOkAt, lastAttemptAt, pushes, failures, consecutiveFailures, lastError, nextAt}` (`lastError` only for an admin who sees every cluster; never a token). |
-| `POLICY_GET` | user | `{ok, policy, defaults, effective: {dataset: background|onDemand}, resolvedMode, stored, warning?, running, gate, pollConcurrencyEnv}` — `pollConcurrencyEnv` is `ELASTICPRO_POLL_CONCURRENCY` as read, or null when unset |
-| `POLICY_SET {policy}` | admin | the same, plus `saved`; `bad_request` when it does not parse (an unknown `mode`, a non-object). Values out of bounds are bounded, not refused. `paused` is ignored: the stop in force is kept as it is (only `POLICY_PAUSE` / `POLICY_RESUME` change it), so a form opened before a stop began never lifts it. Audited. |
+| `POLICY_GET` | user | `{ok, policy, defaults, effective: {dataset: background|onDemand}, resolvedMode, stored, warning?, running, gate, pollConcurrencyEnv, managed, gapExempt, gapBounds, playBounds}` — `pollConcurrencyEnv` is `ELASTICPRO_POLL_CONCURRENCY` as read, or null when unset; `policy` as it runs (config.txt's values in); `managed` `{field: config.txt key}` for `minGapSec` and `play.<field>` |
+| `POLICY_SET {policy}` | admin | the same, plus `saved`; `bad_request` when it does not parse (an unknown `mode`, a non-object); `managed` when it names a field config.txt locks with another value. Values out of bounds are bounded, not refused. `paused` is ignored: the stop in force is kept as it is (only `POLICY_PAUSE` / `POLICY_RESUME` change it), so a form opened before a stop began never lifts it. Audited. |
 | `POLICY_PAUSE {minutes}` | operator | the emergency stop begun for 15, 30 or 60 minutes and nothing else changed; answered like `POLICY_SET`. A stop asked for while one holds keeps the one in force (not lengthened). `bad_request` for any other length or for a message carrying a `policy`; `forbidden` for an operator limited to some clusters. Audited (activity `policy_pause`, category configuration; `audit` line with the user). |
 | `POLICY_RESUME` | operator | the stop ended (harmless when none holds), nothing else changed; the same refusals and audit (`policy_resume`). |
 | `ABORT_REQUESTS {origin}` | user | `{ok, aborted: n}` — the caller's own in-flight requests from a `page:<id>` or `console` origin stop waiting and answer `kind: aborted` (recorded so); keyed by person + origin, so nobody reaches another's; the poller's and the schedules' are refused (`bad_request`). Nothing is sent to the cluster: a search already running there is what `_tasks` and its `_cancel` are for. |
@@ -345,6 +400,47 @@ Rules: disk has hysteresis (raised at the threshold, cleared 2 points below); a 
 repository is critical when two or more runs in a row failed with at least one `FAILED`
 (one bad night or `PARTIAL`-only runs are a warning); a master re-election is critical
 only while the cluster is not green.
+
+### Alert levels
+
+Three levels, worst first — one definition, `core/alert-levels.js`; everything that sorts,
+counts, filters or colours by level reads it there:
+
+| Level | Colour | Rules |
+|---|---|---|
+| **Critical** | red | cluster not answering; health red; disk over the critical threshold / a node past its high watermark (and the flood-stage balance row); disk capacity fell; no master; master moved while not green; a repository whose runs keep failing |
+| **High** | orange (`--high`, Play `--tv-orange` #ff8c42) | log delay over 60 min (a device past its critical delay, `classify` CRITICAL); JVM heap over 85 % on any node (`heap`, new) — raised after two node readings in a row over 85 %, cleared only below 80 % (`HEAP_HIGH_PERCENT` / `HEAP_RAISE_READINGS` / `HEAP_CLEAR_PERCENT` in `alert-rules.js`, `heapStep` in `alert-tuning.js`, the disk rule's kind of hysteresis); the node tables colour a heap over 85 % orange, the alert's colour, and say the line in the column's tooltip; an SLM policy whose last run failed (`slm-fail`) |
+| **Warning** | yellow | everything else: health yellow, disk over the warning threshold, disk balance, disk not accounted for, capacity grew, master moved on a green cluster, ILM errors, SLM stopped, no recent snapshot, repository warnings, log delay 30–60 min, field-volume spikes, automations |
+
+Changed in this release: `slm-fail` critical → High; `log-delay` past the red line critical →
+High; `heap` is new, High. An automation rule can be set to raise at any of the three. The
+`log-delay` alert's words say "over 60 min late", not "critical".
+
+- **Counts.** High is an open alert like any other: the Alerts summary reads "N critical · N
+  high · N warning", its Severity filter has a High button, the CSV's `level` column says
+  `high`. The Alerts tab badge is red when anything critical is open, **orange** when the worst
+  open is High, otherwise yellow — and says the worst level in words on hover and to a screen
+  reader, not by colour alone; the browser-extension badge likewise. Acknowledged, silenced
+  and held alerts are counted nowhere, whatever their level.
+- **Notifications.** A new High is announced like a warning (a yellow bell entry and toast).
+  What is critical-only stays so: an error-coloured notification, Play's takeover and chime,
+  the spotlight's "critical alert" reason. The bell's own count is of unread notices and keeps
+  its colour.
+- **Zabbix.** The ElasticPro alerts template (modules 2.1.16) has two triggers per rule,
+  `^critical: ` at priority HIGH and `^warning: ` at WARNING, and no High one. A High alert is
+  sent to the critical trigger — item value 2, detail `critical: [High] …` — so it raises a
+  Zabbix problem at the severity Zabbix itself calls High, where failed snapshots and late logs
+  were raised before. The JVM heap rule is not sent: the ElasticPro cluster health template
+  has its own per-node heap triggers. *Follow-up for the modules repository:* add a third
+  trigger per rule, `find(…detail[rule],,"regexp","^high: ")=1` at priority HIGH, move the
+  `^critical: ` trigger to DISASTER, and add `3 → high` to the "ElasticPro alert level"
+  valuemap; once that template is pinned, `ZABBIX_LEVEL.high` in `core/zabbix-alerts.js`
+  becomes `{ value: 3, word: 'high' }` and the generator (`tools/zabbix-alert-template.mjs`)
+  writes the new trigger.
+- **Play.** A High cluster's tile is orange, says "High" and blinks orange every 2.4 s; the
+  Alerts slide shows HIGH rows between CRIT and WARN and counts High under Open now (see
+  docs/PLAY.md, "Blinks"). A failed SLM run and logs over 60 min late are High, so they no
+  longer take over the Play screen: only critical does.
 
 **Open** means neither acknowledged nor silenced, and every count uses that one definition
 (`openAlertsNow()` / `openAlertCounts()`): the Clusters summary, the nav badge, the top bar,

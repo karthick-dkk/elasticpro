@@ -279,7 +279,7 @@ export async function ruleBuilder(existing) {
 
   const alertBox = h('input', { id: 'rb-alert', type: 'checkbox', checked: rule.notify.alert });
   alertBox.onchange = (e) => { rule.notify.alert = e.target.checked; refresh(); };
-  const levelSel = select('rb-level', rule.notify.level, [['warning', 'warning'], ['critical', 'critical']]);
+  const levelSel = select('rb-level', rule.notify.level, [['warning', 'warning'], ['high', 'high'], ['critical', 'critical']]);
   levelSel.onchange = (e) => { rule.notify.level = e.target.value; refresh(); };
   const hookInput = text('rb-hook', rule.notify.webhook, { placeholder: 'https://hooks.example.com/…' });
   hookInput.oninput = (e) => { rule.notify.webhook = e.target.value; refresh(); };

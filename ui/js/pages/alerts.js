@@ -26,6 +26,7 @@ import { gotoFor, openGoto } from '../core/alert-goto.js';
 import { playbookFor } from '../core/alert-playbooks.js';
 import { relatedFor, historyFor, WINDOW_MS } from '../core/alert-related.js';
 import { alertHistory } from '../core/alert-history.js';
+import { LEVEL_CLASS, levelOf } from '../core/alert-levels.js';
 import { watermarks } from '../core/disk-balance.js';
 import { setFocus, takeFocus } from '../core/focus.js';
 
@@ -212,6 +213,10 @@ function draw() {
         () => { ui.level = ui.level === 'critical' ? 'all' : 'critical'; draw(); },
         ui.level === 'critical' ? 'Showing critical only — press to show all' : 'Show the critical alerts only'),
       h('span.alerts-sum-sep', { 'aria-hidden': 'true' }, '·'),
+      sumBtn('alerts-sum-high', `${num(sum.high)} high`, 'high', ui.level === 'high',
+        () => { ui.level = ui.level === 'high' ? 'all' : 'high'; draw(); },
+        ui.level === 'high' ? 'Showing high only — press to show all' : 'Show the high alerts only'),
+      h('span.alerts-sum-sep', { 'aria-hidden': 'true' }, '·'),
       sumBtn('alerts-sum-warning', `${num(sum.warning)} warning`, 'warn', ui.level === 'warning',
         () => { ui.level = ui.level === 'warning' ? 'all' : 'warning'; draw(); },
         ui.level === 'warning' ? 'Showing warnings only — press to show all' : 'Show the warnings only'),
@@ -236,12 +241,13 @@ function draw() {
         h('div.seg-group', { role: 'group', 'aria-label': 'Severity' },
           segBtn('All', ui.level === 'all', () => { ui.level = 'all'; draw(); }),
           segBtn('Critical', ui.level === 'critical', () => { ui.level = 'critical'; draw(); }),
+          segBtn('High', ui.level === 'high', () => { ui.level = 'high'; draw(); }),
           segBtn('Warning', ui.level === 'warning', () => { ui.level = 'warning'; draw(); }))),
       h('div.field', h('span', 'Group by'),
         h('div.seg-group', { role: 'group', 'aria-label': 'Group by' },
           segBtn('Cluster', ui.group === 'cluster', () => setGroup('cluster')),
           segBtn('Alert type', ui.group === 'type', () => setGroup('type')),
-          segBtn('None', ui.group === 'none', () => setGroup('none'), 'A flat list, critical first'))),
+          segBtn('None', ui.group === 'none', () => setGroup('none'), 'A flat list, critical first, then high'))),
       h('label.field.check', h('input#alerts-handled', { type: 'checkbox', checked: ui.handled,
         onchange: (e) => { ui.handled = e.target.checked; draw(); } }), 'Show acknowledged'),
       h('div.alerts-bar-end',
@@ -300,7 +306,7 @@ function footText(sum, hiddenHandled) {
 
 /* ----------------------------------- groups ----------------------------------- */
 
-const levelPill = (level) => h(`span.apill.${level === 'critical' ? 'crit' : 'warn'}`, level === 'critical' ? 'critical' : 'warning');
+const levelPill = (level) => h(`span.apill.${LEVEL_CLASS[levelOf(level)]}`, levelOf(level));
 
 /** The collapse key of the Unreachable group: the same in every grouping, because it is in every one. */
 const DOWN_KEY = 'unreachable';
@@ -342,11 +348,12 @@ function groupSection(g, all) {
   const open = g.alerts.filter(isOpen);
 
   const header = flat ? null : h('div.agroup-head',
-    h('span.adot', { class: g.critical ? 'crit' : 'warn', 'aria-hidden': 'true' }),
+    h('span.adot', { class: g.critical ? 'crit' : g.high ? 'high' : 'warn', 'aria-hidden': 'true' }),
     g.clusterId
       ? h('a.agroup-name', { href: '#/overview', onclick: (e) => { e.preventDefault(); navigateTo('overview', null, { cluster: g.clusterId }); } }, g.name)
       : h('span.agroup-name', g.name),
     g.critical ? h('span.apill.crit', `${g.critical} critical`) : null,
+    g.high ? h('span.apill.high', `${g.high} high`) : null,
     g.warning ? h('span.apill.warn', `${g.warning} warning`) : null,
     h('span.muted.agroup-oldest', `oldest ${ageShort(Date.now() - g.oldest)}`),
     h('span.agroup-spacer'),
@@ -359,7 +366,7 @@ function groupSection(g, all) {
       'aria-label': `${isCollapsed ? 'Expand' : 'Collapse'} ${g.name}`,
       title: isCollapsed ? 'Expand' : 'Collapse', onclick: toggle }, isCollapsed ? '▾' : '▴'));
 
-  return h(`section.agroup${g.critical ? '.has-crit' : ''}${flat ? '.flat' : ''}`, header,
+  return h(`section.agroup${g.critical ? '.has-crit' : g.high ? '.has-high' : ''}${flat ? '.flat' : ''}`, header,
     isCollapsed ? null : h('div.agroup-body', { id: bodyId }, ...g.alerts.map((m) => alertRow(m, all))));
 }
 
@@ -518,7 +525,7 @@ function heldList(dn) {
     ...dn.held.map((x) => {
       const acked = x.heldState === 'acked';
       return h(`div.aheld-row${acked ? '.handled' : ''}`, { role: 'listitem', 'data-key': x.key },
-        h(`span.apill.${x.level === 'critical' ? 'crit' : 'warn'}`, x.level),
+        levelPill(x.level),
         h('span.aheld-what', h('b', x.title), x.count ? ` ${x.count}` : '',
           x.items.length === 1 && x.items[0].label && !`${x.title} ${x.detail || ''}`.includes(x.items[0].label) ? ` (${x.items[0].label})` : '',
           x.detail ? ` · ${x.detail}` : ''),
@@ -670,7 +677,7 @@ function itemsList(m) {
       const g = gotoFor(m, it);
       return h('div.aitem', { role: 'listitem' },
         h('span.aitem-label', it.label),
-        h('span.aitem-value', { class: it.level === 'critical' ? 'crit' : 'warn' }, it.value || ''),
+        h('span.aitem-value', { class: LEVEL_CLASS[levelOf(it.level)] }, it.value || ''),
         it.handled ? h('span.apill.grey', it.silenced ? 'silenced' : 'acknowledged') : null,
         h('span.muted.aitem-since', `since ${ageShort(Date.now() - it.since)}`),
         g.page ? goLink(g, m, unit, { class: 'aitem-link' }) : null);

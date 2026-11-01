@@ -154,7 +154,7 @@ test('state: an automation alert raised before the cluster went down is held, an
   const g = all.filter((m) => m.clusterId === 'g');
   assert.deepEqual(g.map((m) => [m.family, m.state]).sort(), [['automation', 'held'], ['unreachable', 'open']]);
   assert.deepEqual(st.openAlertsNow().map((m) => m.key).sort(), ['a:automation', 'g:unreachable'], 'the held alert is in no count');
-  assert.deepEqual(st.openAlertCounts(), { total: 2, critical: 1, warning: 1 });
+  assert.deepEqual(st.openAlertCounts(), { total: 2, critical: 1, high: 0, warning: 1 });
   auto.clearAutomation();
 });
 

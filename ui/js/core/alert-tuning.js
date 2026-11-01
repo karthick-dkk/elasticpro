@@ -23,9 +23,12 @@
  * Plus `diskLevel`, the disk rule's hysteresis: raised at the threshold, cleared only two
  * points below it, so a disk sitting at 79.9–80.0% stops opening and closing an alert on
  * every refresh. And `openAlerts` / `alertCounts`, the one definition of "open" (neither
- * acknowledged nor silenced) and of how many are critical — the Clusters page, the nav
+ * acknowledged nor silenced) and of how many are at each level — the Clusters page, the nav
  * badge and the top bar all said "open" while counting acknowledged ones.
  */
+
+import { countLevels, worstLevel } from './alert-levels.js';
+import { heapOverHigh, HEAP_CLEAR_PERCENT, HEAP_RAISE_READINGS } from './alert-rules.js';
 
 /** Points below a threshold before a raised disk alert clears. */
 export const DISK_HYSTERESIS = 2;
@@ -39,6 +42,21 @@ export function diskLevel(pct, prev, warn, crit, band = DISK_HYSTERESIS) {
   if (pct >= crit || (prev === 'critical' && pct >= crit - band)) return 'critical';
   if (pct >= warn || (prev && pct >= warn - band)) return 'warning';
   return null;
+}
+
+/**
+ * One node's heap rule after one more node reading: `{streak, raised}`, from what it was
+ * (`prev`, or null). Raised once the heap has been over the High line (heapOverHigh) on
+ * HEAP_RAISE_READINGS readings in a row; once raised, held until it falls below
+ * HEAP_CLEAR_PERCENT. A reading with no heap figure changes nothing — unknown is not 0.
+ * Pure, so the flapping case is testable (alert-levels.test.mjs).
+ */
+export function heapStep(prev, pct, { clear = HEAP_CLEAR_PERCENT, readings = HEAP_RAISE_READINGS } = {}) {
+  const was = prev || { streak: 0, raised: false };
+  if (!Number.isFinite(pct)) return was;
+  if (was.raised) return pct < clear ? { streak: 0, raised: false } : { streak: was.streak + 1, raised: true };
+  const streak = heapOverHigh(pct) ? was.streak + 1 : 0;
+  return { streak, raised: streak >= readings };
 }
 
 const familyOf = (a) => String(a.key || '').split(':')[1] || '';
@@ -58,7 +76,7 @@ export const RULE_READS = {
   health: ['health'], disk: ['nodes'], 'disk-balance': ['nodes', 'policies'], 'disk-unaccounted': ['nodes', 'indices'],
   capacity: ['nodes'], 'no-master': ['nodes'], 'master-changed': ['nodes', 'health'],
   ilm: ['ilm_errors', 'policies'], 'slm-mode': ['policies'], 'slm-fail': ['policies'], 'slm-stale': ['policies'],
-  repo: ['snapshots', 'policies'],
+  repo: ['snapshots', 'policies'], heap: ['nodes'],
 };
 
 /** Which fleet dataset each rule's finding comes from, for the staleness note: the first it reads. */
@@ -86,7 +104,7 @@ export function tuneAlerts(list, ctx = {}) {
     const disk = fam('disk')[0];
     if (bal && disk && (bal.balanceCauses || []).some((c) => c === 'flood' || c === 'high')) {
       drop.add(disk);
-      bal.level = bal.level === 'critical' || disk.level === 'critical' ? 'critical' : 'warning';
+      bal.level = worstLevel(bal.level, disk.level);
       bal.detail = `${bal.detail}  Cluster average ${disk.diskPercent != null ? `${disk.diskPercent.toFixed(1)}%` : 'above its threshold'}.`;
     }
     // 2. unassigned shards: the health row says it
@@ -129,9 +147,7 @@ export function openAlerts(list, { isAcked = () => false, isSilenced = () => fal
   return (list || []).filter((a) => !isAcked(a.key) && !isSilenced(a));
 }
 
-/** The one count of alerts by level. */
+/** The one count of alerts by level: `{total, critical, high, warning}` (core/alert-levels.js). */
 export function alertCounts(list) {
-  const total = (list || []).length;
-  const critical = (list || []).filter((a) => a.level === 'critical').length;
-  return { total, critical, warning: total - critical };
+  return countLevels(list);
 }

@@ -1,9 +1,9 @@
 [workspace]
-members = ["crates/elasticpro-core", "src-tauri"]
+members = ["crates/elasticpro-core"]
 resolver = "2"
 
 [workspace.package]
-version = "0.3.50"
+version = "0.3.51"
 edition = "2021"
 license = "MIT"
 

@@ -16,7 +16,7 @@
  * watermark" rather than quoting a default as if it were measured.
  */
 
-import { ALERT_RULES } from './alert-rules.js';
+import { ALERT_RULES, HEAP_HIGH_PERCENT } from './alert-rules.js';
 import { FOCUS } from './alert-goto.js';
 
 /**
@@ -139,6 +139,17 @@ export const PLAYBOOKS = {
         request: read('/_cat/nodes?v&h=name,ip,node.role,master,uptime', 'Prepare the node list in the REST console') },
       { text: 'Check that a majority of the master-eligible nodes are running and can reach each other on the transport port.' },
       { text: 'Read the log of a master-eligible node for "master not discovered" and what it is waiting for.' },
+    ],
+  }),
+
+  heap: (m) => ({
+    cause: `A node has used more than ${HEAP_HIGH_PERCENT}% of its JVM heap. Garbage collection then takes the time requests need; past that, the node stops answering and leaves the cluster.`,
+    steps: [
+      { text: `See each node's heap${first(m, 'node') ? ` (${first(m, 'node')} first)` : ''}.`, links: [{ label: 'Nodes', page: 'shards', focus: { section: 'nodes' } }],
+        request: read('/_cat/nodes?v&h=name,heap.percent,heap.max,ram.percent,cpu&s=heap.percent:desc', 'Prepare the node heap list in the REST console') },
+      { text: 'Look for what holds the heap: field data and large aggregations, too many shards on one node, bulk requests too big.',
+        request: read('/_nodes/stats/breaker,indices/fielddata?human&pretty', 'Prepare the circuit-breaker and field-data stats in the REST console') },
+      { text: 'A brief peak during a merge or a big search clears by itself. A node that stays above the line needs fewer shards or more heap.' },
     ],
   }),
 

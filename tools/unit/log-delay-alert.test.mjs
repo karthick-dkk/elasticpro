@@ -32,12 +32,13 @@ test('nothing measured, nothing raised', () => {
   assert.deepEqual(delayAlerts(), []);
 });
 
-test('a device past its critical delay raises a critical alert naming the worst', () => {
+test('a device past its critical delay (over 60 min) raises a High alert naming the worst', () => {
   s.setDelaySummary('c1', summarise([rec('fw-1', 'OK', 2), rec('proxy-3', 'CRITICAL', 95), rec('fw-2', 'DELAYED', 41)]));
   const [a] = delayAlerts();
-  assert.equal(a.level, 'critical');
-  assert.match(a.title, /1 device\(s\) critically late/);
-  assert.match(a.detail, /1 critical, 1 delayed of 3/);
+  assert.equal(a.level, 'high', 'log delay over 60 min is High, not critical (2026-11-01)');
+  assert.match(a.title, /1 device\(s\) shipping logs over 60 min late/);
+  assert.doesNotMatch(`${a.title} ${a.detail}`, /critical/, 'a High alert does not call itself critical');
+  assert.match(a.detail, /1 over 60 min, 1 30–60 min late, of 3/);
   assert.match(a.detail, /proxy-3, 95 min/);
 });
 
@@ -59,6 +60,7 @@ test('an old measurement says nothing about now', () => {
 test('it reaches Zabbix as the log-delay rule', () => {
   s.setDelaySummary('c1', summarise([rec('proxy-3', 'CRITICAL', 95)]));
   const v = zabbixAlertValues(s.alerts().filter((a) => a.cluster && a.cluster.id === 'c1'));
+  // High reaches the template's critical trigger (priority HIGH) and says it is High.
   assert.equal(v['log-delay'].level, 2);
-  assert.match(v['log-delay'].detail, /^critical: vm-1: 1 device/);
+  assert.match(v['log-delay'].detail, /^critical: \[High\] vm-1: 1 device/);
 });

@@ -16,7 +16,7 @@ const ar = await import(pathToFileURL(path.join(ROOT, 'ui/js/core/alert-rules.js
 test('every rule has an id, a label and a reason', () => {
   for (const r of ar.ALERT_RULES) {
     assert.ok(r.id && r.label && r.why, `${r.id || '(no id)'} is incomplete`);
-    assert.ok(['critical', 'warning'].includes(r.level), `${r.id} has level ${r.level}`);
+    assert.ok(['critical', 'high', 'warning'].includes(r.level), `${r.id} has level ${r.level}`);
   }
 });
 

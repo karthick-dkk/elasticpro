@@ -12,10 +12,11 @@ import { lineChart, signedPct } from '../lib/charts.js';
 import { alertCounts } from '../core/alert-tuning.js';
 import { lifecycleView } from '../core/lifecycle-errors.js';
 import { clusterKind, slmExempt } from '../core/cluster-kind.js';
-import { nodeLoadLevel } from '../pages/overview.js';
+import { nodeLoadLevel, heapLevel, HEAP_TITLE } from '../pages/overview.js';
 import { cardValue, dailyPoints, BASIS_LABEL, basisOf, NEEDS_VERSION } from '../core/volume-daily.js';
 import { kpi, unknown, minutes, fitRows, openFor, pillEl } from './parts.js';
-import { SPOTLIGHT_WHY } from './status.js';
+import { SPOTLIGHT_WHY, nodeDiskCritical } from './status.js';
+import { toneOfCounts } from '../core/alert-levels.js';
 import { lastGood, listingState, endOf } from './snapshots.js';
 import { totalEvents, yesterdayRow } from './volume.js';
 import { spotlightPhase } from './engine.js';
@@ -26,7 +27,7 @@ export const DATASETS = ['health', 'nodes', 'policies', 'snapshots', 'ilm_assign
 
 export const isEmpty = (ctx) => !ctx.spot.order.length && ctx.watch.spotlight.whenEmpty !== 'allHealthy';
 
-const LEVEL_TONE = { high: 'red', low: 'yellow', ok: 'green' };
+const LEVEL_TONE = { high: 'red', over: 'orange', low: 'yellow', ok: 'green' };
 
 function chips(ctx, currentId) {
   return h('div.pl-chips', h('span.pl-chiplabel', 'In the spotlight'),
@@ -40,6 +41,9 @@ function chips(ctx, currentId) {
     }));
 }
 
+/** The class a node row takes: '.blink-crit' for a node whose disk is a critical problem. */
+export const nodeRowBlink = (critical) => (critical ? '.blink-crit' : '');
+
 function nodesTable(ctx, d, fullest) {
   const disk = new Map(((fullest && fullest.nodes) || []).map((n) => [n.name, n]));
   const nodes = [...(d.nodes || [])].sort((a, b) => ((disk.get(b.name) || {}).pct || -1) - ((disk.get(a.name) || {}).pct || -1)
@@ -48,15 +52,18 @@ function nodesTable(ctx, d, fullest) {
   const pctCell = (p, tone) => (isFinite(p) ? h('span.pl-pc', bar(p, tone), h(`b.${tone}`, `${Math.round(p)} %`)) : unknown('–'));
   const rows = nodes.map((n) => {
     const dn = disk.get(n.name);
-    const dt = dn ? (dn.pct >= fullest.high ? 'red' : dn.pct >= fullest.low ? 'yellow' : 'green') : 'grey';
+    const crit = dn ? nodeDiskCritical(dn.pct, fullest) : false;
+    const dt = dn ? (crit ? 'red' : dn.pct >= fullest.low ? 'yellow' : 'green') : 'grey';
     const heap = Number(n['heap.percent']), cpu = Number(n.cpu);
-    return h('tr', h('td.pl-node', n.name, String(n.master || '').trim() === '*' ? ' ★' : ''),
+    // A node with a critical problem: a red bar at the left and the row blinks (docs/PLAY.md,
+    // "Blinks"). Every other row keeps the bar, transparent, so the columns do not move.
+    return h(`tr${nodeRowBlink(crit)}`, h('td.pl-node', n.name, String(n.master || '').trim() === '*' ? ' ★' : ''),
       h('td', dn ? pctCell(dn.pct, dt) : h('span.pl-unk', 'no data role')),
-      h('td', pctCell(heap, LEVEL_TONE[nodeLoadLevel(heap, 'heap')])),
+      h('td', pctCell(heap, LEVEL_TONE[heapLevel(heap)])),
       h('td', pctCell(cpu, LEVEL_TONE[nodeLoadLevel(cpu, 'cpu')])));
   });
   const body = h('tbody', rows.length ? rows : h('tr', h('td', { colSpan: 4 }, h('span.pl-unk', 'no node list'))));
-  const box = h('div.pl-nodes', h('table.pl-tbl', h('thead', h('tr', h('th', 'Node'), h('th', 'Disk'), h('th', 'Heap'), h('th', 'CPU'))), body));
+  const box = h('div.pl-nodes', h('table.pl-tbl', h('thead', h('tr', h('th', 'Node'), h('th', 'Disk'), h('th', { title: HEAP_TITLE }, 'Heap'), h('th', 'CPU'))), body));
   ctx.afterMount(() => fitRows(box, rows, (k) => h('div.pl-more', `+${k} more nodes`)));
   return box;
 }
@@ -105,10 +112,10 @@ function panel(ctx, c, days) {
     h('div.pl-kpis',
       kpi('Total events', events === null ? unknown(noVol) : num(events), 'live days in the record'),
       kpi('Disk used', disk ? `${Math.round(disk.percent)} %` : unknown(), disk ? `${bytes(disk.used)} of ${bytes(disk.total)}` : null,
-        s.fullest && s.fullest.pct >= s.fullest.high ? 'red' : ''),
+        s.fullest && nodeDiskCritical(s.fullest.pct, s.fullest) ? 'red' : ''),
       kpi('Heap', heapTop ? `${Math.round(heapTop.p)} %` : unknown(), heapTop ? `highest · ${heapTop.name}` : null,
-        heapTop ? LEVEL_TONE[nodeLoadLevel(heapTop.p, 'heap')] : ''),
-      kpi('Open alerts', String(a.total), a.total ? `${a.critical} critical · ${a.warning} warning` : 'none', a.critical ? 'red' : a.warning ? 'yellow' : 'green'),
+        heapTop ? LEVEL_TONE[heapLevel(heapTop.p)] : ''),
+      kpi('Open alerts', String(a.total), a.total ? `${a.critical} critical · ${a.high} high · ${a.warning} warning` : 'none', toneOfCounts(a) || 'green'),
       kpi('Volume · 7-day avg', avg === null ? unknown(noVol) : bytes(avg), 'per day')),
     h('div.pl-sbody',
       h('div.pl-scol', nodesTable(ctx, d, s.fullest)),

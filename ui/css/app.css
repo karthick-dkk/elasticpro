@@ -34,11 +34,14 @@
   /* Status FILLS - the colour of the thing itself: bars, dots, borders. Tuned to read on
      a dark surface, not themed. */
   --good: #0ca30c; --warning: #fab219; --serious: #ec835a; --critical: #d03b3b;
+  --high: #ff8c42;
   --good-bg: #e6f5e6; --warning-bg: #fdf3dc; --critical-bg: #fae6e6; --serious-bg: #fceee7;
   /* Status INKS - the same status rendered as TEXT on its own -bg. A fill colour and a
      text colour have different jobs, and #fab219 on #fdf3dc is 1.48:1 - a warning pill
      nobody can read. Inks are themed, because ink must contrast with what it sits on. */
   --good-ink: #0a7a0a; --warning-ink: #8a5300; --serious-ink: #a03c14; --critical-ink: #b02525;
+  /* High, the level between warning and critical (core/alert-levels.js): orange. */
+  --high-bg: #ffeedd; --high-ink: #b5380e;   /* 5.2:1 on --high-bg; redder than --warning-ink so the two pills part */
 
   --grid: #e6e5e1;
   --shadow: 0 1px 2px rgba(11,11,11,.06), 0 8px 24px rgba(11,11,11,.06);
@@ -69,6 +72,7 @@
     --seq-100: #184f95; --seq-250: #256abf; --seq-400: #3987e5; --seq-550: #86b6ef; --seq-700: #cde2fb;
     --good-bg: #122a12; --warning-bg: #3a2f10; --critical-bg: #3a1717; --serious-bg: #3a2418;
     --good-ink: var(--good); --warning-ink: #f5c451; --serious-ink: var(--serious); --critical-ink: #ef6a6a;
+    --high-bg: #3a2414; --high-ink: #ff9f5f;
     --grid: #2b2b29;
     --shadow: 0 1px 2px rgba(0,0,0,.4), 0 8px 24px rgba(0,0,0,.35);
   }
@@ -93,6 +97,7 @@
   --seq-100: #184f95; --seq-250: #256abf; --seq-400: #3987e5; --seq-550: #86b6ef; --seq-700: #cde2fb;
   --good-bg: #122a12; --warning-bg: #3a2f10; --critical-bg: #3a1717; --serious-bg: #3a2418;
   --good-ink: var(--good); --warning-ink: #f5c451; --serious-ink: var(--serious); --critical-ink: #ef6a6a;
+  --high-bg: #3a2414; --high-ink: #ff9f5f;
   --grid: #2b2b29;
   --shadow: 0 1px 2px rgba(0,0,0,.4), 0 8px 24px rgba(0,0,0,.35);
 }
@@ -128,6 +133,7 @@
   --seq-100: #17325c; --seq-250: #24518f; --seq-400: #3d7fd4; --seq-550: #79aaea; --seq-700: #c6ddf8;
   --good-bg: #10281f; --warning-bg: #322a12; --critical-bg: #331a20; --serious-bg: #33241a;
   --good-ink: #52c78a; --warning-ink: #e8bf5f; --serious-ink: #ef9a72; --critical-ink: #f07b83;
+  --high-bg: #33231a; --high-ink: #ffa166;
   --grid: #1d2a42;
   --shadow: 0 1px 2px rgba(0,0,0,.45), 0 8px 24px rgba(0,0,0,.4);
 }
@@ -163,6 +169,7 @@
   --seq-100: #3d2e14; --seq-250: #6b5220; --seq-400: #a67c2e; --seq-550: #d1a552; --seq-700: #f0d49a;
   --good-bg: #14240f; --warning-bg: #2e2410; --critical-bg: #2e1813; --serious-bg: #2e2014;
   --good-ink: #6fbf73; --warning-ink: #e8c168; --serious-ink: #eda179; --critical-ink: #f08a7a;
+  --high-bg: #2e1f12; --high-ink: #f6a064;
   --grid: #2b2318;
   --shadow: 0 1px 2px rgba(0,0,0,.5), 0 8px 24px rgba(0,0,0,.42);
 }
@@ -435,6 +442,7 @@ label.field > select { text-overflow: ellipsis; }
 .pill.green  { color: var(--good-ink);     background: var(--good-bg);     border-color: color-mix(in srgb, var(--good) 35%, transparent); }
 .pill.yellow { color: var(--warning-ink);  background: var(--warning-bg);  border-color: color-mix(in srgb, var(--warning) 45%, transparent); }
 .pill.orange { color: var(--serious-ink);  background: var(--serious-bg);  border-color: color-mix(in srgb, var(--serious) 45%, transparent); }
+.pill.high   { color: var(--high-ink);     background: var(--high-bg);     border-color: color-mix(in srgb, var(--high) 45%, transparent); }
 /* Top bar: requests paused, with Resume for an admin (ui/paused-pill.js). */
 .btn.paused-btn { color: var(--serious-ink); background: var(--serious-bg); border-color: color-mix(in srgb, var(--serious) 45%, transparent); white-space: nowrap; }
 .btn.paused-btn:hover { border-color: var(--serious); }
@@ -756,6 +764,7 @@ table.cl-tbl > tbody > tr.cl-detail-row > td { white-space: normal; }
 .agroup { background: var(--surface-1); border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; }
 .agroup.has-crit { border-color: color-mix(in srgb, var(--critical) 40%, var(--border)); }
 .agroup:not(.has-crit):not(.flat) { border-color: color-mix(in srgb, var(--warning) 35%, var(--border)); }
+.agroup.has-high:not(.flat) { border-color: color-mix(in srgb, var(--high) 45%, var(--border)); }
 .agroup-head { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 10px; padding: 9px 14px; background: var(--surface-2); }
 .agroup-name { font-weight: 640; font-size: 14.5px; color: var(--text-primary); text-decoration: none; }
 a.agroup-name:hover { text-decoration: underline; }
@@ -764,9 +773,11 @@ a.agroup-name:hover { text-decoration: underline; }
 .adot { width: 9px; height: 9px; border-radius: 50%; flex: none; }
 .adot.crit { background: var(--critical); }
 .adot.warn { background: var(--warning); }
+.adot.high { background: var(--high); }
 .apill { display: inline-block; font-size: 11.5px; line-height: 1.5; padding: 0 8px; border-radius: 10px; white-space: nowrap; }
 .apill.crit { color: var(--critical-ink); background: var(--critical-bg); }
 .apill.warn { color: var(--warning-ink); background: var(--warning-bg); }
+.apill.high { color: var(--high-ink); background: var(--high-bg); }
 .apill.grey { color: var(--text-secondary); background: var(--surface-3); }
 .split { display: inline-flex; }
 .split > .btn:first-child { border-top-right-radius: 0; border-bottom-right-radius: 0; }
@@ -803,9 +814,10 @@ a.arow-cluster:hover { text-decoration: underline; }
 .alerts-sumbtn[aria-pressed="true"] { border-bottom-color: currentColor; background: var(--surface-2); }
 .alerts-sumbtn.crit { color: var(--critical-ink); }
 .alerts-sumbtn.warn { color: var(--warning-ink); }
+.alerts-sumbtn.high { color: var(--high-ink); }
 .alerts-sumbtn.ack { font-weight: 500; color: var(--text-secondary); }
 /* A cluster with one alert is one line, no header; those lines share a quiet box. */
-.agroup.singles, .agroup.singles:not(.has-crit):not(.flat) { border-color: var(--border); }
+.agroup.singles, .agroup.singles:not(.has-crit):not(.flat), .agroup.singles.has-high { border-color: var(--border); }
 .arow.single .arow-main { align-items: center; }
 .arow.single .arow-main > .apill { margin-top: 0; }
 .agroup.singles > .arow:first-child { border-top: 0; }
@@ -853,6 +865,7 @@ a.arow-cluster:hover { text-decoration: underline; }
 .aitem-value { font-variant-numeric: tabular-nums; }
 .aitem-value.crit { color: var(--critical-ink); }
 .aitem-value.warn { color: var(--warning-ink); }
+.aitem-value.high { color: var(--high-ink); }
 .aitem-since { font-size: 12px; }
 .aitem-link { padding: 1px 8px; font-size: 12px; }
 .related { display: flex; flex-direction: column; gap: 8px; font-size: 12.5px; }
@@ -1406,6 +1419,11 @@ html:has(.modal-overlay) { overflow: hidden; scrollbar-gutter: stable; }
 .pol-env { flex-basis: 100%; color: var(--warning-ink); font-size: 12px; }
 tr.pol-iv-idle > td:first-child { color: var(--text-secondary); }
 .pol-iv-note { white-space: normal; font-size: 11.5px; }
+/* Duplicate requests and While Play runs: one bordered block each, under Fine-tune. */
+.pol-sec { display: grid; gap: 8px; padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--radius); min-width: 0; }
+.pol-sec-h { margin: 0; font-size: 12.5px; }
+.pol-sec-note, .pol-sec-list { font-size: 11.5px; line-height: 1.55; margin: 0; }
+.pol-sec-list { padding-left: 18px; }
 
 /* ---------------- Clusters page, the board of 2026-10-25 ---------------- */
 /* The tab row is one line at any width: it scrolls sideways rather than wrapping, and the
@@ -1518,6 +1536,7 @@ table.cl-tbl > tbody > tr.cl-detail-row > td { text-align: left; }
 .cl-mini i { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 3px; background: var(--good); }
 .cl-mini i.low { background: var(--warning); }
 .cl-mini i.high { background: var(--critical); }
+.cl-mini i.over { background: var(--high); }   /* heap past the High alert's line (overview.js heapLevel) */
 .cl-star { color: var(--warning-ink); }
 .cl-roles { display: inline-flex; gap: 3px; flex-wrap: wrap; justify-content: center; }
 .cl-role {
@@ -1723,6 +1742,7 @@ tr.vs-special td:first-child { font-style: italic; color: var(--text-secondary);
   --tv-bg: #0b0d10; --tv-panel: #12161b; --tv-panel-2: #181d24; --tv-line: #262d36;
   --tv-text: #f2f4f7; --tv-text-2: #b9c0ca; --tv-muted: #7d8794;
   --tv-green: #2fbf5b; --tv-yellow: #f2b632; --tv-red: #ef4b4b; --tv-blue: #4c93f0; --tv-amber: #f0a020;
+  --tv-orange: #ff8c42;   /* High (core/alert-levels.js), between yellow and red */
   --surface-1: var(--tv-panel); --surface-3: var(--tv-line); --text-muted: var(--tv-muted);
   --text-secondary: var(--tv-text-2); --series-1: var(--tv-blue); --border: var(--tv-line); --grid: var(--tv-line);
   color-scheme: dark;
@@ -1754,7 +1774,7 @@ html.play .main, html.play .page { padding: 0; margin: 0; max-width: none; }
 .pl-fetched.stale { color: var(--tv-amber); }
 .pl-fetched.none { color: var(--tv-muted); }
 .pl-clock { font-size: 1.6rem; font-weight: 700; }
-.pl-progress { flex: 0 0 auto; height: .22rem; background: var(--tv-panel-2); overflow: hidden; }
+.pl-progress { flex: 0 0 auto; height: max(1px, .07rem); background: var(--tv-panel-2); overflow: hidden; }
 .pl-progress i { display: block; height: 100%; background: var(--tv-blue); transform-origin: left; transform: scaleX(0); transition: transform 1s linear; }
 .pl-root.takeover .pl-progress i { background: var(--tv-red); }
 .pl-body { --pz: 1; flex: 1 1 auto; min-height: 0; overflow: hidden; font-size: calc(1rem * var(--pz)); }
@@ -1781,6 +1801,7 @@ html.play .main, html.play .page { padding: 0; margin: 0; max-width: none; }
 .pl-kpi.green .pl-v { color: var(--tv-green); }
 .pl-kpi.yellow .pl-v { color: var(--tv-yellow); }
 .pl-kpi.red .pl-v { color: var(--tv-red); }
+.pl-kpi.orange .pl-v { color: var(--tv-orange); }
 .pl-unk { color: var(--tv-amber); font-weight: 500; font-size: .85em; }
 .pl-v .pl-unk { font-size: .55em; }
 .pl-parts { display: inline-flex; gap: .5em; font-size: .6em; vertical-align: middle; }
@@ -1788,6 +1809,7 @@ html.play .main, html.play .page { padding: 0; margin: 0; max-width: none; }
 .pl-c.green, .pl-root b.green { color: var(--tv-green); }
 .pl-c.yellow, .pl-root b.yellow, .pl-root td.yellow { color: var(--tv-yellow); }
 .pl-c.red, .pl-root b.red, .pl-root td.red { color: var(--tv-red); }
+.pl-c.orange, .pl-root b.orange, .pl-root td.orange { color: var(--tv-orange); }
 .pl-c.grey, .pl-root b.grey { color: var(--tv-muted); }
 .pl-pill { display: inline-block; font-size: .8em; padding: .05em .55em; border-radius: 1em; border: 1px solid currentColor; white-space: nowrap; }
 .pl-pill.green { color: var(--tv-green); }
@@ -1826,11 +1848,13 @@ html.play .main, html.play .page { padding: 0; margin: 0; max-width: none; }
 .pl-tile.green { border-left-color: var(--tv-green); }
 .pl-tile.yellow { border-left-color: var(--tv-yellow); }
 .pl-tile.red { border-left-color: var(--tv-red); background: color-mix(in srgb, var(--tv-red) 9%, var(--tv-panel)); }
+.pl-tile.orange { border-left-color: var(--tv-orange); background: color-mix(in srgb, var(--tv-orange) 8%, var(--tv-panel)); }
 .pl-tile.pl-more { border-left-color: var(--tv-line); justify-content: center; align-items: center; color: var(--tv-muted); }
 .pl-tname { font-size: 1.15em; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .pl-tline { font-size: .95em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--tv-text-2); }
 .pl-tline.red { color: var(--tv-red); }
 .pl-tline.yellow { color: var(--tv-yellow); }
+.pl-tline.orange { color: var(--tv-orange); }
 .pl-tline.green { color: var(--tv-green); }
 .pl-tfig { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .1em .8em; font-size: .9em; color: var(--tv-text-2); }
 .pl-tfig > span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -1849,19 +1873,52 @@ html.play .main, html.play .page { padding: 0; margin: 0; max-width: none; }
   0% { background: color-mix(in srgb, var(--tv-red) 38%, var(--tv-panel)); border-color: var(--tv-red); }
   50% { background: var(--tv-panel); }
 }
+/* Blinks (docs/PLAY.md, "Blinks"): a critical tile every 1.2 s, a High tile every 2.4 s, and on
+   the other slides a critical row or cell (a node past its high watermark, a cluster's delay
+   over the red line, a disk runway under 7 days) every 1.2 s. Classes, not timers; the
+   background only, in two steps, so nothing moves and a frame is painted twice a cycle. The node-left
+   blink above is listed after these and wins on a tile that has both (play/status.js tileBlink
+   gives it only one class in any case). */
+.pl-tile.blink-crit { animation: pl-blink-crit 1.2s steps(1, end) infinite; }
+.pl-tile.blink-high { animation: pl-blink-high 2.4s steps(1, end) infinite; }
+.pl-tile.pl-blink { animation: pl-blink 3s steps(1, end) infinite; }
+@keyframes pl-blink-crit {
+  0% { background: color-mix(in srgb, var(--tv-red) 30%, var(--tv-panel)); }
+  50% { background: color-mix(in srgb, var(--tv-red) 9%, var(--tv-panel)); }
+}
+@keyframes pl-blink-high {
+  0% { background: color-mix(in srgb, var(--tv-orange) 28%, var(--tv-panel)); }
+  50% { background: color-mix(in srgb, var(--tv-orange) 8%, var(--tv-panel)); }
+}
+.pl-root tr.blink-crit > td, .pl-root td.blink-crit { animation: pl-blink-cell 1.2s steps(1, end) infinite; }
+@keyframes pl-blink-cell {
+  0% { background: color-mix(in srgb, var(--tv-red) 30%, transparent); }
+  50% { background: transparent; }
+}
+/* No motion wanted: the same colours, held still. */
+@media (prefers-reduced-motion: reduce) {
+  .pl-blink, .pl-tile.pl-blink, .pl-tile.blink-crit, .pl-tile.blink-high,
+  .pl-root tr.blink-crit > td, .pl-root td.blink-crit { animation: none; }
+  .pl-tile.pl-blink, .pl-tile.blink-crit { background: color-mix(in srgb, var(--tv-red) 24%, var(--tv-panel)); border-color: var(--tv-red); }
+  .pl-tile.blink-high { background: color-mix(in srgb, var(--tv-orange) 20%, var(--tv-panel)); border-color: var(--tv-orange); }
+  .pl-root tr.blink-crit > td, .pl-root td.blink-crit { background: color-mix(in srgb, var(--tv-red) 22%, transparent); }
+}
 
 /* 2. alerts */
 .pl-alerts { flex-direction: row; }
 .pl-alist { flex: 1 1 auto; min-width: 0; min-height: 0; overflow: hidden; display: flex; flex-direction: column; gap: .45em; }
 .pl-arow { display: grid; grid-template-columns: 4.2em minmax(0, 1fr) 7em 9em; gap: .9em; align-items: center; flex: 0 0 auto;
   background: var(--tv-panel); border: 1px solid var(--tv-line); border-left: .35em solid var(--tv-yellow); border-radius: .5em; padding: .5em .8em; }
-.pl-arow.critical { border-left-color: var(--tv-red); }
+.pl-arow.critical { border-left-color: var(--tv-red); background: color-mix(in srgb, var(--tv-red) 12%, var(--tv-panel)); border-color: color-mix(in srgb, var(--tv-red) 40%, var(--tv-line)); }
+.pl-arow.warning { border-left-color: var(--tv-yellow); background: color-mix(in srgb, var(--tv-yellow) 12%, var(--tv-panel)); border-color: color-mix(in srgb, var(--tv-yellow) 40%, var(--tv-line)); }
+.pl-arow.high { border-left-color: var(--tv-orange); background: color-mix(in srgb, var(--tv-orange) 12%, var(--tv-panel)); border-color: color-mix(in srgb, var(--tv-orange) 40%, var(--tv-line)); }
 .pl-arow.acked { opacity: .55; }
 .pl-arow.hot { background: color-mix(in srgb, var(--tv-red) 22%, var(--tv-panel)); border-color: var(--tv-red); }
 .pl-arow.pl-more { display: block; border-left-color: var(--tv-line); }
 .pl-sev { font-weight: 800; font-size: .9em; text-align: center; border-radius: .3em; padding: .15em 0; }
 .pl-sev.critical { background: var(--tv-red); color: #fff; }
 .pl-sev.warning { background: var(--tv-yellow); color: #111; }
+.pl-sev.high { background: var(--tv-orange); color: #111; }
 .pl-atext { min-width: 0; }
 .pl-atitle { font-size: 1.25em; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .pl-acount { color: var(--tv-muted); font-weight: 500; font-size: .8em; }
@@ -1884,17 +1941,23 @@ html.play .main, html.play .page { padding: 0; margin: 0; max-width: none; }
 .pl-sline { font-size: 1.3em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .pl-sline.red { color: var(--tv-red); }
 .pl-sline.yellow { color: var(--tv-yellow); }
+.pl-sline.orange { color: var(--tv-orange); }
 .pl-sline.green { color: var(--tv-green); }
 .pl-sbody { flex: 1 1 auto; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.25fr); gap: 1em; }
 .pl-scol { min-height: 0; overflow: hidden; display: flex; flex-direction: column; gap: .8em; }
 .pl-nodes { flex: 1 1 auto; min-height: 0; overflow: hidden; background: var(--tv-panel); border: 1px solid var(--tv-line); border-radius: .6em; padding: .4em .7em; }
 .pl-node { font-weight: 600; }
+/* the node table's left bar: transparent on every row, red on a node with a critical problem,
+   so the columns never move when one turns (play/spotlight.js nodeRowBlink) */
+.pl-nodes td.pl-node { border-left: .3em solid transparent; }
+.pl-nodes tr.blink-crit > td.pl-node { border-left-color: var(--tv-red); }
 .pl-pc { display: inline-flex; align-items: center; gap: .5em; width: 100%; }
 .pl-pc b { min-width: 3em; text-align: right; }
 .pl-bar { flex: 1; height: .55em; background: var(--tv-panel-2); border-radius: .3em; overflow: hidden; }
 .pl-bar i { display: block; height: 100%; border-radius: .3em; background: var(--tv-green); }
 .pl-bar i.yellow { background: var(--tv-yellow); }
 .pl-bar i.red { background: var(--tv-red); }
+.pl-bar i.orange { background: var(--tv-orange); }
 .pl-bar i.grey { background: var(--tv-muted); }
 .pl-chart { background: var(--tv-panel); border: 1px solid var(--tv-line); border-radius: .6em; padding: .5em .8em; flex: 0 1 auto; min-height: 0; overflow: hidden; }
 .pl-chead { display: flex; align-items: center; gap: 1em; font-size: .95em; margin-bottom: .2em; white-space: nowrap; min-width: 0; }

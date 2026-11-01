@@ -39,6 +39,12 @@ pub struct ClusterSpec {
     /// fleet poller builds the same request the page used to, so it needs the same input.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub log_index_pattern: Option<String>,
+    /// The config's `timeField` and `delayFields`: the only fields a display link's log-delay
+    /// measurement may name for this cluster (`auth::DelayShape`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub time_field: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delay_fields: Option<crate::auth::DelayFields>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -82,6 +88,12 @@ pub struct EsRequest {
     /// only shorten that, never lengthen it.
     #[serde(default)]
     pub max_age_ms: Option<u64>,
+    /// What a person is doing, where it decides how the request is handled: one of
+    /// `fleet::policy::GAP_EXEMPT` (the REST console)
+    /// is never held by the duplicate-request gap nor answered from another's reading. Named
+    /// by the page; ignored for a display link.
+    #[serde(default)]
+    pub purpose: Option<String>,
     /// Who this request is for, decided by the code path that built it — `es()` for a
     /// person, the poller and the core's own jobs for themselves. Never read from the wire:
     /// `origin` is the client's to name, and a page calling itself `poller:x` stays a page.
@@ -110,6 +122,7 @@ impl Default for EsRequest {
             opaque_id: None,
             user: None,
             max_age_ms: None,
+            purpose: None,
             class: crate::gate::Class::default(),
             verified_cancel: false,
         }

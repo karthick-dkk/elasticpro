@@ -48,6 +48,28 @@ export const BOUNDS = {
 export const intervalBounds = (dataset) => (dataset === 'health' ? BOUNDS.healthInterval : BOUNDS.interval);
 
 /**
+ * Duplicate requests: a request ElasticPro sends by itself is not sent again while the same
+ * one was answered less than `minGapSec` ago (GAP_BOUNDS / GAP_DEFAULT_SEC in policy.rs).
+ */
+export const GAP = { min: 30, max: 600, def: 60 };
+
+/**
+ * While Play runs: each interval Play keeps going for a display, its bounds and shipped value
+ * (PLAY_FIELDS and PlaySchedule::default in policy.rs; tools/unit/policy.test.mjs holds the two
+ * equal), and what it covers.
+ */
+export const PLAY_FIELDS = [
+  { key: 'healthSec', label: 'Health', covers: 'health', min: 60, max: 3600, def: 300 },
+  { key: 'nodesSec', label: 'Nodes & disk', covers: 'nodes — the node-left blink and disk', min: 60, max: 3600, def: 300 },
+  { key: 'lifecycleSec', label: 'SLM & ILM', covers: 'policies, ilm_errors, ilm_assign', min: 900, max: 86400, def: 14400 },
+  { key: 'snapshotsSec', label: 'Snapshots', covers: 'snapshots, snapshots_full', min: 600, max: 86400, def: 7200 },
+  { key: 'indicesSec', label: 'Index list', covers: 'indices', min: 300, max: 86400, def: 3600 },
+  { key: 'delayFullSec', label: 'Log delay — full check', covers: 'every device, today’s query, up to 500', min: 1800, max: 86400, def: 7200 },
+  { key: 'delayLateSec', label: 'Log delay — late devices', covers: 'only the devices at or past the yellow line, in one request', min: 300, max: 7200, def: 900 },
+];
+const PLAY_DEFAULTS = Object.fromEntries(PLAY_FIELDS.map((f) => [f.key, f.def]));
+
+/**
  * The poller's concurrency fields and the request-gate cap each one sits under, with the
  * config.txt key that sets the cap. The core clamps the poller's share under the gate's
  * limits (Policy::normalised() reads gate::limits()); POLICY_GET reports them as `gate`.
@@ -85,6 +107,8 @@ export const FALLBACK_DEFAULTS = {
   concurrency: { global: CLIENT_BASIS.global, perCluster: CLIENT_BASIS.perCluster, tunnel: 6 },
   timeoutMs: 30000,
   paused: { all: false },
+  minGapSec: GAP.def,
+  play: { ...PLAY_DEFAULTS },
 };
 
 /** How long an emergency stop lasts, in minutes (policy.rs STOP_MINUTES): it always ends by itself. */
@@ -243,6 +267,12 @@ export function normalisePolicy(p, defaults = FALLBACK_DEFAULTS, bounds = BOUNDS
   const c = src.concurrency || {};
   const dc = d.concurrency || FALLBACK_DEFAULTS.concurrency;
   const stop = src.paused || {};
+  const sp = src.play || {};
+  const dp = d.play || PLAY_DEFAULTS;
+  const play = {};
+  for (const f of PLAY_FIELDS) play[f.key] = pick(sp[f.key], dp[f.key] ?? f.def, f);
+  // The late list is never re-checked less often than a full check runs (PlaySchedule::normalised).
+  play.delayLateSec = Math.min(play.delayLateSec, play.delayFullSec);
   return {
     mode: MODES.includes(src.mode) ? src.mode : (MODES.includes(d.mode) ? d.mode : CLIENT_BASIS.mode),
     intervalsSec,
@@ -255,6 +285,8 @@ export function normalisePolicy(p, defaults = FALLBACK_DEFAULTS, bounds = BOUNDS
     timeoutMs: pick(src.timeoutMs, d.timeoutMs ?? 30000, BOUNDS.timeoutMs),
     paused: stop.all ? { all: true, minutes: STOP_MINUTES.includes(stop.minutes) ? stop.minutes : STOP_MINUTES[0], since: whole(stop.since) || 0 }
       : { all: false },
+    minGapSec: pick(src.minGapSec, d.minGapSec ?? GAP.def, GAP),
+    play,
   };
 }
 
@@ -263,8 +295,10 @@ export function normalisePolicy(p, defaults = FALLBACK_DEFAULTS, bounds = BOUNDS
  * basis" must not quietly lift a stop somebody began.
  */
 export function applyPreset(policy, id, defaults = FALLBACK_DEFAULTS, bounds = BOUNDS) {
-  const base = normalisePolicy(defaults, FALLBACK_DEFAULTS, bounds);
-  const paused = normalisePolicy(policy, defaults, bounds).paused;
+  const cur = normalisePolicy(policy, defaults, bounds);
+  // The gap and the Play schedule are their own sections: a preset keeps them too.
+  const base = { ...normalisePolicy(defaults, FALLBACK_DEFAULTS, bounds), minGapSec: cur.minGapSec, play: cur.play };
+  const paused = cur.paused;
   // The classic presets run with the classic concurrency, not the shipped one: the shipped
   // policy is Client basis, whose one-at-a-time limit would quietly throttle "Background".
   const classic = { ...base.concurrency, ...CLASSIC };
@@ -290,6 +324,7 @@ const FIELD_NAMES = {
   perCluster: 'Concurrency — per cluster',
   tunnel: 'Concurrency — per jump host',
   timeoutMs: 'Timeout (ms)',
+  minGapSec: 'Duplicate requests — minimum gap (s)',
 };
 
 /**
@@ -335,8 +370,30 @@ export function fromForm(values, defaults = FALLBACK_DEFAULTS, bounds = BOUNDS) 
     },
     timeoutMs: read(v.timeoutMs, FIELD_NAMES.timeoutMs, BOUNDS.timeoutMs, d.timeoutMs, ' ms'),
     paused: { all: !!v.pausedAll, minutes: v.pausedMinutes, since: v.pausedSince },
+    minGapSec: v.minGapSec === undefined ? d.minGapSec : read(v.minGapSec, FIELD_NAMES.minGapSec, GAP, d.minGapSec, ' s'),
+    play: Object.fromEntries(PLAY_FIELDS.map((f) => [f.key, (v.play || {})[f.key] === undefined ? d.play[f.key]
+      : read(v.play[f.key], `While Play runs — ${f.label}`, f, d.play[f.key], ' s')])),
   }, defaults, bounds);
+  if (whole((v.play || {}).delayLateSec) > policy.play.delayFullSec) {
+    problems.push(`While Play runs — late devices: never less often than the full check — saved as ${policy.play.delayLateSec} s`);
+  }
   return { policy, problems };
+}
+
+/**
+ * "health: asked 42 this hour, sent 12, 30 answered from a reading under a minute old" — what
+ * the duplicate-request gap did for one dataset over the last hour (REQUEST_LOG's `asks`).
+ * `row` is `{asked, sent, recent, shared, held}`; parts that are 0 (but sent) are left out.
+ */
+export function gapLine(name, row, gapSec = GAP.def) {
+  const r = row || {};
+  const n = (k) => Number(r[k]) || 0;
+  const gap = gapSec % 60 === 0 ? (gapSec === 60 ? 'a minute' : `${gapSec / 60} minutes`) : `${gapSec} s`;
+  const parts = [`asked ${n('asked')} this hour`, `sent ${n('sent')}`];
+  if (n('recent')) parts.push(`${n('recent')} answered from a reading under ${gap} old`);
+  if (n('shared')) parts.push(`${n('shared')} shared one already on its way`);
+  if (n('held')) parts.push(`${n('held')} served what was held (fresh enough, or the cluster is down)`);
+  return `${name}: ${parts.join(', ')}`;
 }
 
 /** A new policy with the emergency stop begun (for `minutes`, one of STOP_MINUTES) or lifted. */

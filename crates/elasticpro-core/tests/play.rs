@@ -55,8 +55,11 @@ async fn cluster(names: Arc<Mutex<Vec<&'static str>>>) -> TestServer {
 }
 
 async fn prime(c: &Arc<Core>, s: &str, es: &TestServer) {
+    // With the delay fields the measurement uses (delay_body): device `host`, arrival `@timestamp`.
+    let f = json!({ "device": "host", "eventTime": ["event.created"], "metadata": [] });
     let r = admin(c, s, json!({ "type": "PRIME", "readOnly": true, "clusters": [
-        { "id": "c1", "url": es.url(), "logIndexPattern": "logs-*" }, { "id": "c2", "url": es.url(), "logIndexPattern": "logs-*" } ] })).await;
+        { "id": "c1", "url": es.url(), "logIndexPattern": "logs-*", "timeField": "@timestamp", "delayFields": f },
+        { "id": "c2", "url": es.url(), "logIndexPattern": "logs-*", "timeField": "@timestamp", "delayFields": f } ] })).await;
     assert_eq!(r["ok"], json!(true), "{r}");
 }
 
@@ -98,6 +101,66 @@ async fn create(c: &Arc<Core>, s: &str, body: Value) -> (String, String) {
 }
 
 /* -------------------------------- display links -------------------------------- */
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_display_link_measures_only_with_its_clusters_delay_fields_and_names_nothing_of_its_own() {
+    let dir = TempDir::new("play-delay-shape");
+    let c = hosted(&dir);
+    let s = admin_session(&c).await;
+    let es = cluster(Arc::new(Mutex::new(vec!["n1"]))).await;
+    prime(&c, &s, &es).await;
+    let (_id, secret) = create(&c, &s, json!({ "name": "Wall", "clusters": ["c1"] })).await;
+    let ex = exchange(&c, &secret, ip("10.1.1.1")).await;
+    let tok = ex["session"].as_str().unwrap().to_string();
+    let from = ip("10.1.1.1");
+    let path = "/logs-*/_search?ignore_unavailable=true&allow_no_indices=true";
+    let search = |body: String| json!({ "type": "ES", "clusterId": "c1", "method": "POST", "path": path, "body": body });
+    let edit = |f: &dyn Fn(&mut Value)| { let mut v: Value = serde_json::from_str(&delay_body(500)).unwrap(); f(&mut v); v.to_string() };
+    let kind = |r: &Value| r["kind"].as_str().unwrap_or("").to_string();
+    // The cluster's own fields: through.
+    assert_eq!(as_display(&c, &tok, search(delay_body(500)), from).await["ok"], json!(true));
+    // Aimed elsewhere: another terms field, another range field, a wider window, other _source fields.
+    for (why, body) in [
+        ("terms on user.name", edit(&|v| v["aggs"]["devices"]["terms"]["field"] = json!("user.name.keyword"))),
+        ("terms on _index", edit(&|v| v["aggs"]["devices"]["terms"]["field"] = json!("_index"))),
+        ("a range on another field", edit(&|v| v["query"]["bool"]["filter"][0]["range"] = json!({ "event.created": { "gte": "now-24h", "lte": "now" } }))),
+        ("a week back", edit(&|v| v["query"]["bool"]["filter"][0]["range"]["@timestamp"]["gte"] = json!("now-168h"))),
+        ("an absolute date", edit(&|v| v["query"]["bool"]["filter"][0]["range"]["@timestamp"]["gte"] = json!("2020-01-01"))),
+        ("up to the future", edit(&|v| v["query"]["bool"]["filter"][0]["range"]["@timestamp"]["lte"] = json!("now+1y"))),
+        ("_source user.password", edit(&|v| v["aggs"]["devices"]["aggs"]["latest"]["top_hits"]["_source"] = json!(["@timestamp", "user.password"]))),
+        ("terms filter on _id", edit(&|v| v["query"]["bool"]["filter"].as_array_mut().unwrap().push(json!({ "terms": { "_id": ["1"] } })))),
+        ("a null in the late list", edit(&|v| v["query"]["bool"]["filter"].as_array_mut().unwrap().push(json!({ "terms": { "host.keyword": ["fw", null] } })))),
+        ("a mixed late list", edit(&|v| v["query"]["bool"]["filter"].as_array_mut().unwrap().push(json!({ "terms": { "host.keyword": ["fw", 7] } })))),
+        ("a blank name", edit(&|v| v["query"]["bool"]["filter"].as_array_mut().unwrap().push(json!({ "terms": { "host.keyword": ["   "] } })))),
+    ] {
+        assert_eq!(kind(&as_display(&c, &tok, search(body), from).await), "forbidden", "{why}");
+    }
+    // The late list's re-check on the cluster's device field: through.
+    let late = edit(&|v| v["query"]["bool"]["filter"].as_array_mut().unwrap().push(json!({ "terms": { "host.keyword": ["fw-01"] } })));
+    assert_eq!(as_display(&c, &tok, search(late), from).await["ok"], json!(true));
+    // A key twice: checked as its last one, and only that one reaches the cluster.
+    let mut dup = delay_body(500);
+    let at = dup.rfind("\"size\":0}").expect("the top-level size");
+    dup.insert_str(at, "\"size\":10000,");
+    assert!(dup.contains("\"size\":10000"), "{dup}");
+    let before = es.hits().len();
+    assert_eq!(as_display(&c, &tok, search(dup), from).await["ok"], json!(true));
+    let sent = es.hits()[before..].iter().find(|h| h.path.contains("_search")).map(|h| h.body.clone()).unwrap_or_default();
+    assert!(!sent.contains("10000") && sent.contains("\"size\":0"), "the body the gate checked, written again: {sent}");
+    // Calling itself the console (by origin or purpose) does not make a TV a person typing:
+    // the gap holds its _field_caps like any page's.
+    let caps = |extra: Value| { let mut m = json!({ "type": "ES", "clusterId": "c1", "method": "GET", "path": "/logs-*/_field_caps?fields=host" });
+        for (k, v) in extra.as_object().unwrap() { m[k] = v.clone(); } m };
+    assert_eq!(as_display(&c, &tok, caps(json!({ "origin": "console" })), from).await["ok"], json!(true));
+    assert_eq!(as_display(&c, &tok, caps(json!({ "origin": "console" })), from).await["cached"], json!(true), "origin console is held");
+    assert_eq!(as_display(&c, &tok, caps(json!({ "purpose": "console" })), from).await["cached"], json!(true), "purpose console is held");
+    // Play-watching a cluster outside the link's list is refused; its own is taken.
+    let r = as_display(&c, &tok, json!({ "type": "REFRESH", "clusterIds": ["c2"], "datasets": ["health"], "watcher": "play" }), from).await;
+    assert_eq!((r["ok"].clone(), r["kind"].clone()), (json!(false), json!("forbidden")), "refused, not ignored: {r}");
+    assert!(r["message"].as_str().unwrap_or("").contains("c2"), "{r}");
+    let r = as_display(&c, &tok, json!({ "type": "REFRESH", "clusterIds": ["c1"], "datasets": ["health"], "watcher": "play" }), from).await;
+    assert_eq!(r["ok"], json!(true), "{r}");
+}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_display_link_shows_play_and_nothing_else() {
@@ -306,6 +369,9 @@ async fn a_node_missing_from_a_nodes_answer_has_left_until_forgotten_and_it_surv
         let c = start(&dir);
         prime(c.clone(), es.url()).await;
         c.start_fleet_poller();
+        // Two node listings a few milliseconds apart: the duplicate-request gap would answer
+        // the second from the first (tests/gap.rs); this is about what the second says.
+        c.set_min_gap_for_tests(0);
         nodes_now(&c).await;
         let st = c.handle(json!({ "type": "PLAY_STATE" })).await;
         assert_eq!(st["nodes"]["c1"]["left"], json!([]), "{st}");

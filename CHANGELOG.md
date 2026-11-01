@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.51
+
+**The Apple-silicon macOS build is back.** GitHub retires its macOS 14 runner image on 2 November 2026, and a scheduled brownout cancelled 0.3.50's arm64 job, so the 0.3.50 release has no macOS arm64 build and no checksums file. The arm64 build now runs on macOS 15, and the Rust target is chosen by the build's label rather than the runner's name. Nothing else changes: 0.3.50's Docker images and other builds are the same code.
+
+**Play: the time-left line is a hairline.** The bar under Play's top bar that shows how long the slide has left is now a thin line (1 px at 1080p, 2 px at 4K) instead of a 3–4 px bar. On the Alerts slide a warning sits in a yellow bar and a critical alert in a red one, as in the design; before, only the stripe at the left edge was coloured.
+
 ## 0.3.50
 
 **Alerts — held alerts now show what was wrong.** When a cluster cannot be reached, ElasticPro evaluates its alert rules against its last cached data — nothing is asked of the cluster — and lists what they raise under its Unreachable line, dimmed and marked "not current", each "as of" the time of the data it came from ("2 older alerts held, not current · as of 14:02"). A rule whose data is missing or more than 24 hours old shows nothing. Held alerts are still counted nowhere — not the bell, the tab, the top bar, the summary or Play — and can be acknowledged; the acknowledgement carries over when the cluster answers. When it does, an alert that was announced before the outage and is still true is current again without being announced a second time; one nobody was shown (a page or TV opened during the outage) is announced then; one that cleared is gone. Play shows the same dimmed line under a down cluster's tile. For Zabbix, a cluster that does not answer no longer sends "clear" for every rule: its ElasticPro problems stay as they were through the outage instead of resolving and reopening as new events; a cluster removed from the configuration has its alert values cleared once. Automation and log-delay values are not sent for a cluster that does not answer.

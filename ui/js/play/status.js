@@ -14,11 +14,30 @@ import { unreachableReason } from '../core/alert-groups.js';
 import { ilmErrorsOf } from '../core/lifecycle-errors.js';
 import { slmExempt } from '../core/cluster-kind.js';
 import { backedUpWithin } from './snapshots.js';
+import { byLevel, countLevels } from '../core/alert-levels.js';
 
 export const HEALTH_WORD = { green: 'Green', yellow: 'Yellow', red: 'Red', unreachable: 'Not answering', loading: 'No data' };
-/** Worst first: a tile's place on the wall. */
+/** The status word of a cluster whose worst open alert is High (and nothing makes it red). */
+export const HIGH_WORD = 'High';
+/**
+ * Worst first: a tile's place on the wall (and the spotlight's order). Its tone first — red
+ * (anything critical, red health, not answering) > orange (High) > yellow > no data > green —
+ * then, within a tone, health and how much is open. TONE_STEP is larger than anything the
+ * within-tone part can add up to on a real cluster, so no count lifts a tile into the next tone.
+ */
+const TONE_RANK = { red: 4, orange: 3, yellow: 2, grey: 1, green: 0 };
+const TONE_STEP = 100000;
 const HEALTH_RANK = { unreachable: 50, red: 40, yellow: 20, loading: 10, green: 0 };
-const LEVEL_RANK = { critical: 2, warning: 1 };
+
+/**
+ * Whether a node's disk is a critical problem: at or past the cluster's high watermark (90 %
+ * unless the cluster says otherwise) — where Elasticsearch stops placing shards on it. The
+ * one test: the tile's red, the status line's "disk 91 %", the spotlight's storage reason and
+ * the red bar on the spotlight's node row all read it.
+ */
+export function nodeDiskCritical(pct, fullest) {
+  return !!fullest && Number.isFinite(pct) && pct >= fullest.high;
+}
 
 /** The fullest data node against the cluster's watermarks, or null when the disk was not read. */
 export function fullestOf(d) {
@@ -31,7 +50,7 @@ export function fullestOf(d) {
 
 /** The open alert to name: highest severity, then the oldest. */
 export function worstAlert(open) {
-  return [...(open || [])].sort((a, b) => (LEVEL_RANK[b.level] || 0) - (LEVEL_RANK[a.level] || 0) || a.since - b.since)[0] || null;
+  return [...(open || [])].sort((a, b) => byLevel(a, b) || a.since - b.since)[0] || null;
 }
 
 /**
@@ -40,7 +59,7 @@ export function worstAlert(open) {
  */
 export function clusterStatus(c, d, { open = [], nodes = null, client = null } = {}) {
   const st = healthState(d);
-  const word = HEALTH_WORD[st] || st;
+  let word = HEALTH_WORD[st] || st;
   const fullest = st === 'unreachable' || st === 'loading' ? null : fullestOf(d);
   const left = nodes && Array.isArray(nodes.left) ? nodes.left : [];
   let reason = '', where = '';
@@ -48,7 +67,7 @@ export function clusterStatus(c, d, { open = [], nodes = null, client = null } =
     reason = unreachableReason(client).label.toLowerCase();
   } else if (st !== 'loading') {
     const top = worstAlert(open);
-    if (fullest && fullest.pct >= fullest.high) {
+    if (fullest && nodeDiskCritical(fullest.pct, fullest)) {
       reason = `disk ${Math.round(fullest.pct)} %`; where = fullest.name;
     } else if (left.length) {
       reason = `${left.length === 1 ? 'node' : `${left.length} nodes`} left`; where = left.map((x) => x.node).join(', ');
@@ -60,14 +79,31 @@ export function clusterStatus(c, d, { open = [], nodes = null, client = null } =
       reason = `${(d.health && d.health.unassigned_shards) || 0} unassigned shards`;
     }
   }
+  const { critical: crit, high, warning } = countLevels(open);
+  const diskCrit = fullest ? nodeDiskCritical(fullest.pct, fullest) : false;
+  // Red (critical) > orange (High) > yellow (warning, yellow health, a node left) > green.
+  const tone = st === 'unreachable' || st === 'red' || crit || diskCrit ? 'red'
+    : high ? 'orange'
+      : st === 'yellow' || open.length || left.length || (fullest && fullest.pct >= fullest.low) ? 'yellow'
+        : st === 'loading' ? 'grey' : 'green';
+  // A High cluster says so first: its health word is still true, but not the news.
+  if (tone === 'orange') word = HIGH_WORD;
   const line = [word, reason ? `${reason}${where ? ` on ${where}` : ''}` : ''].filter(Boolean).join(' · ');
-  const crit = open.filter((a) => a.level === 'critical').length;
-  const tone = st === 'unreachable' || st === 'red' || crit || (fullest && fullest.pct >= fullest.high) ? 'red'
-    : st === 'yellow' || open.length || left.length || (fullest && fullest.pct >= fullest.low) ? 'yellow'
-      : st === 'loading' ? 'grey' : 'green';
-  const rank = (HEALTH_RANK[st] || 0) + (left.length ? 30 : 0) + crit * 3 + (open.length - crit)
-    + (fullest && fullest.pct >= fullest.high ? 25 : 0);
+  const within = (HEALTH_RANK[st] || 0) + (left.length ? 30 : 0) + crit * 3 + high * 2 + warning + (diskCrit ? 25 : 0);
+  const rank = (TONE_RANK[tone] || 0) * TONE_STEP + Math.min(within, TONE_STEP - 1);
   return { state: st, word, reason, where, line, tone, rank, fullest, left };
+}
+
+/**
+ * The blink a fleet tile takes (docs/PLAY.md, "Blinks"): a node that left wins (`pl-blink`,
+ * every 3 s, Config › Play › node blink), then a critical tile (`blink-crit`, red, 1.2 s),
+ * then a High one (`blink-high`, orange, 2.4 s). '' for none. `nodeLeft` is ctx.blink(id).
+ */
+export function tileBlink(s, nodeLeft) {
+  if (nodeLeft) return 'pl-blink';
+  if (s && s.tone === 'red') return 'blink-crit';
+  if (s && s.tone === 'orange') return 'blink-high';
+  return '';
 }
 
 /** The spotlight's tests, by the name Config › Play ticks them under (docs/PLAY.md). */
@@ -92,7 +128,7 @@ export function spotlightReasons(c, d, { open = [], nodes = null, when = [], sta
   if (on.has('nodeLeft') && nodes && Array.isArray(nodes.left) && nodes.left.length) out.push('nodeLeft');
   if (on.has('storage')) {
     const f = fullestOf(d);
-    if (f && f.nodes.some((n) => n.pct >= f.high)) out.push('storage');
+    if (f && f.nodes.some((n) => nodeDiskCritical(n.pct, f))) out.push('storage');
   }
   if (on.has('slmFailed') && !slmExempt(c)) {
     const failed = open.some((a) => a.family === 'slm-fail');

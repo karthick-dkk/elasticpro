@@ -19,6 +19,8 @@
  * localStorage. Retention matches the bell's (30 days).
  */
 
+import { worstLevel, levelOf } from './alert-levels.js';
+
 export const RETENTION_DAYS = 30;
 const DAY_MS = 86400000;
 /** Gone this long and the episode is over. Longer than a refresh or two, so a blip is not an end. */
@@ -87,7 +89,8 @@ export function createHistory({ storage = browserStorage(), retentionDays = RETE
         st.open[m.key] = ep;
       }
       ep.last = now;
-      ep.level = m.level === 'critical' || ep.level === 'critical' ? 'critical' : 'warning';
+      // The worst it reached (critical > high > warning), kept for the episode's life.
+      ep.level = worstLevel(levelOf(m.level), levelOf(ep.level));
       // A time the alert itself knows (a snapshot failing since…) beats the first sighting.
       if (Number.isFinite(m.startHint) && m.startHint > 0 && m.startHint < ep.start) { ep.start = m.startHint; ep.approx = false; }
       for (const it of m.items || []) {

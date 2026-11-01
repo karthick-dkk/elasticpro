@@ -377,7 +377,10 @@ function renderNav() {
   // Open alerts only — acknowledged or silenced ones are on the Alerts page, not in a count.
   const ev = layout().evidence;
   const a = ev ? [] : openAlertsNow();     // a count of the fleet's alerts is not evidence
-  const crit = ev ? 0 : openAlertCounts().critical;
+  const counts = ev ? null : openAlertCounts();
+  const crit = counts ? counts.critical : 0;
+  // The tab's colour is the worst open level: red, orange for High, else yellow.
+  const tone = crit ? 'red' : counts && counts.high ? 'high' : 'yellow';
   const shown = visiblePages().filter((p) => !p.noTab);
   const key = shown.map((p) => p.id).join(',');
   if (navBuiltFor !== key || !nav.firstChild) {
@@ -416,12 +419,14 @@ function renderNav() {
     // The alert count belongs on the tab: it is the reason to go there. Nothing else
     // gets a badge — the tabs used to show a shortcut number that no longer exists.
     if (id !== 'alerts') continue;
-    const want = a.length ? `${crit ? 'red' : 'yellow'}:${a.length}` : '';
+    const want = a.length ? `${tone}:${a.length}` : '';
+    // Said in words too, not by colour alone: the worst open level, on hover and to a screen reader.
+    const worstWord = crit ? 'critical' : tone === 'high' ? 'high' : 'warning';
     let badge = b.querySelector('.pill');
     if ((badge ? badge.dataset.v : '') === want) continue;
     if (badge) badge.remove();
     if (want) {
-      badge = h('span.pill', { class: crit ? 'red' : 'yellow', style: { fontSize: '10px', padding: '0 5px' } }, String(a.length));
+      badge = h('span.pill', { class: tone, title: `${a.length} open — worst is ${worstWord}`, 'aria-label': `${a.length} open alerts, worst ${worstWord}`, style: { fontSize: '10px', padding: '0 5px' } }, String(a.length));
       badge.dataset.v = want;
       b.append(badge);
     }

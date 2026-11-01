@@ -4,7 +4,7 @@ import { EsClient, primeWorker, setBadge, requestStats, workerStatus,
          fleetState, clusterDataset, refreshFleet, withFreshReads } from './es.js';
 // lib/fmt is a leaf: no cycle, and two alert sentences need to read like the rest of the UI.
 import { bytes as bytesish, ago, dur } from '../lib/fmt.js';
-import { diskLevel, tuneAlerts, alertCounts } from './alert-tuning.js';
+import { diskLevel, heapStep, tuneAlerts, alertCounts } from './alert-tuning.js';
 import { isAcked, ackFor, acksRev } from './acks.js';
 import { mergeAlerts, isOpen, holdUnreachable } from './alert-groups.js';
 import { HELD_DATASETS, HELD_MAX_AGE_MS, stampHeld, evaluatedAt } from './alert-held.js';
@@ -18,7 +18,7 @@ import { loadClusterMeta, slmExempt } from './cluster-kind.js';
 import { ZABBIX_ITEMS, fromZabbix } from './zabbix-metrics.js';
 import { bridge, subscribe } from './transport.js';
 import { automationAlerts } from './automation.js';
-import { loadAlertSettings, applySettings, effectiveDefaults, isEnabled } from './alert-rules.js';
+import { loadAlertSettings, applySettings, effectiveDefaults, isEnabled, HEAP_HIGH_PERCENT } from './alert-rules.js';
 // Bounded fan-out for the fleet refresh loop — see runBounded's own doc comment for why:
 // a page asking every cluster something at once is a simultaneous aggregation against
 // each one, and the clusters this app watches are the ones already under load.
@@ -114,9 +114,16 @@ export function clusters() {
   return byName.list.filter((c) => c.enabled);
 }
 export function client(id) { return state.clients.get(id); }
-/** Record that `dataset` for `clusterId` was just fetched. */
-export function stampFetch(clusterId, dataset) {
-  state.fetchedAt[`${clusterId}:${dataset}`] = Date.now();
+/** EsClient.readingSince, or "now" for a client without it (a stand-in in a check). */
+const readingWindow = (cl) => (cl && typeof cl.readingSince === 'function' ? cl.readingSince() : () => Date.now());
+
+/**
+ * Record when `dataset` for `clusterId` was fetched: now, or `at` — when the cluster gave the
+ * oldest answer it was made of (EsClient.readingSince), so a reading the core served from
+ * inside the duplicate-request gap is never stamped as fresher than it is.
+ */
+export function stampFetch(clusterId, dataset, at = Date.now()) {
+  state.fetchedAt[`${clusterId}:${dataset}`] = at;
 }
 
 /** When it was fetched, or 0 if this dataset has never been read. */
@@ -633,6 +640,7 @@ export async function fetchOverview(id, opts = {}) {
 async function fetchOverviewDirect(id, { withSnapshots = true } = {}) {
   const cl = state.clients.get(id);
   if (!cl) return null;
+  const since = readingWindow(cl);
   const prev = state.data.get(id) || {};
 
   // Reach for the cluster before interrogating it.
@@ -691,7 +699,7 @@ async function fetchOverviewDirect(id, { withSnapshots = true } = {}) {
     healthAge: z.ages.health ?? null,
   } : null;
   state.data.set(id, out);
-  stampFetch(id, 'data');
+  stampFetch(id, 'data', since());
   bus.emit('data', id);
 
   if (withSnapshots && out.repos.length) await fetchSnapshotsDirect(id);
@@ -781,6 +789,7 @@ async function fetchSnapshotsDirect(id) {
   const cl = state.clients.get(id);
   const d = state.data.get(id);
   if (!cl || !d) return;
+  const since = readingWindow(cl);
   d.snapshots = d.snapshots || {};
   for (const repo of d.repos) {
     try {
@@ -800,7 +809,7 @@ async function fetchSnapshotsDirect(id) {
     }
   }
   state.data.set(id, d);
-  stampFetch(id, 'data');
+  stampFetch(id, 'data', Math.min(since(), fetchedAt(id, 'data') || Infinity));
   bus.emit('data', id);
 }
 
@@ -852,10 +861,12 @@ export async function fetchIndices(id, pattern = '*', { force = false } = {}) {
   }
   const cl = state.clients.get(id);
   if (!cl) return [];
-  const rows = await cl.indices(pattern);
+  const since = readingWindow(cl);
+  let rows;
+  try { rows = await cl.indices(pattern); } catch (e) { since(); throw e; }
   const parsed = rows.map((r) => parseIndexName(r.index, cl.c.indexNameRegex, r));
   state.indices.set(id, parsed);
-  stampFetch(id, 'indices');
+  stampFetch(id, 'indices', since());
   bus.emit('indices', id);
   return parsed;
 }
@@ -1142,6 +1153,7 @@ export async function fetchShards(id, { force = false } = {}) {
   }
   const cl = state.clients.get(id);
   if (!cl) return null;
+  const since = readingWindow(cl);
   const out = { rows: null, error: null, tasks: null, pools: null, pending: null, at: Date.now() };
   try { out.rows = await cl.shardsAll(); } catch (e) { out.error = e.message || String(e); }
   // What the cluster is busy doing. Separate from the shard read so one failing does not
@@ -1150,8 +1162,9 @@ export async function fetchShards(id, { force = false } = {}) {
     cl.tasks().catch(() => null), cl.threadPools().catch(() => null), cl.pendingTasks().catch(() => null),
   ]);
   Object.assign(out, { tasks, pools, pending: pending && pending.tasks });
+  out.at = since();
   state.shards.set(id, out);
-  stampFetch(id, 'shards');
+  stampFetch(id, 'shards', out.at);
   bus.emit('data', id);
   return out;
 }
@@ -1699,6 +1712,30 @@ export async function demandDataset(ids, dataset, { force = false } = {}) {
 }
 
 /**
+ * What a Play display shows, said to the core once a minute: every cluster on the wall and
+ * every dataset its slides read, as Play-watched (`REFRESH {watcher: 'play'}`). The core keeps
+ * each coming at the request policy's Play pace (Config › Requests › While Play runs) and
+ * fetches at once only what it never has; the answers arrive as pushes like any other. Unlike
+ * demandDataset it decides nothing by age here: the pace is the core's, one definition.
+ *
+ * Returns false when there is no fleet cache (the caller then asks the clusters itself).
+ */
+export async function watchForPlay(ids, datasets) {
+  if ((await detectFleet()) !== 'fleet') return false;
+  const known = (ids || []).filter(fleetKnows);
+  if (!known.length || !datasets || !datasets.length) return true;
+  for (const ds of datasets) {
+    if (isOnDemand(ds)) fleet.onDemand.add(ds);
+    if (!datasetRead.has(ds)) datasetRead.set(ds, readDatasetOnce(ds).catch(() => { datasetRead.delete(ds); }));
+  }
+  await Promise.all(datasets.map((ds) => datasetRead.get(ds)));
+  if (!fleetMode()) return false;
+  const r = await refreshFleet({ clusterIds: known, datasets, watcher: 'play' });
+  if (r && !r.ok && NO_CACHE_KINDS.has(r.kind)) { fleet.mode = 'direct'; return false; }
+  return true;
+}
+
+/**
  * Whether the running request policy fetches nothing on its own (Client basis, the
  * shipped one): the core goes to a cluster only when a page asks. Under it a page that
  * simply reads what the core holds opens onto a fleet nothing was ever fetched for.
@@ -1986,10 +2023,12 @@ function clusterAlerts(c, d, add, { now = Date.now(), live = true } = {}) {
     const by = ds.summary.by || {};
     const w = ds.summary.worst;
     const worst = w && w.delayMinutes !== null ? ` Worst: ${w.device}, ${Math.round(w.delayMinutes)} min behind.` : '';
+    // Past the red line (classify's CRITICAL, over 60 min) is High, not critical: logs late
+    // are searches seeing the past, not data lost (the owner's rule, 2026-11-01).
     if (by.CRITICAL) {
-      add({ key: `${c.id}:log-delay`, level: 'critical', cluster: c,
-        title: `${c.name}: ${by.CRITICAL} device(s) critically late shipping logs`,
-        detail: `${by.CRITICAL} critical, ${by.DELAYED || 0} delayed of ${ds.summary.devices}.${worst}` });
+      add({ key: `${c.id}:log-delay`, level: 'high', cluster: c,
+        title: `${c.name}: ${by.CRITICAL} device(s) shipping logs over 60 min late`,
+        detail: `${by.CRITICAL} over 60 min, ${by.DELAYED || 0} 30–60 min late, of ${ds.summary.devices}.${worst}` });
     } else if (by.DELAYED) {
       add({ key: `${c.id}:log-delay`, level: 'warning', cluster: c,
         title: `${c.name}: ${by.DELAYED} device(s) shipping logs late`,
@@ -2031,6 +2070,29 @@ function clusterAlerts(c, d, add, { now = Date.now(), live = true } = {}) {
       // One suggestion, named — an alert that only states a problem leaves the reader
       // to work out the next step for themselves.
       detail: bal.reasons[0] + (act ? `  Suggested: ${act.title} (${act.method} ${act.path}).` : '') });
+  }
+
+  // JVM heap, per node, from the same node rows the node table reads — with hysteresis
+  // (alert-tuning.js heapStep): raised after two readings in a row over 85 %, cleared below
+  // 80 %. A reading is a new node list (each fetch parses a new one; a redraw does not), and
+  // only a live one moves the rule: a held evaluation reads it, never writes it. A node whose
+  // heap was not read is left out, never counted as 0.
+  {
+    const rows = (d.nodes || []).map((n) => ({ name: n.name, pct: Number(n['heap.percent']) })).filter((n) => n.name);
+    let seen = heapHeld.get(c.id);
+    if (live && (!seen || seen.reading !== d.nodes)) {
+      const prev = seen ? seen.nodes : new Map();
+      seen = { reading: d.nodes, nodes: new Map(rows.map((n) => [n.name, heapStep(prev.get(n.name) || null, n.pct)])) };
+      heapHeld.set(c.id, seen);
+    }
+    const hot = rows.filter((n) => Number.isFinite(n.pct) && seen && seen.nodes.get(n.name) && seen.nodes.get(n.name).raised)
+      .sort((a, b) => b.pct - a.pct);
+    if (hot.length) {
+      add({ key: `${c.id}:heap`, level: 'high', cluster: c, heapNodes: hot,
+        title: `${c.name}: JVM heap above ${HEAP_HIGH_PERCENT}% on ${hot.length === 1 ? hot[0].name : `${hot.length} nodes`}`,
+        detail: hot.slice(0, 3).map((n) => `${n.name} ${Math.round(n.pct)}%`).join(', ')
+          + (hot.length > 3 ? ` and ${hot.length - 3} more` : '') });
+    }
   }
 
   // Field-volume spikes, when the Indices page has run an analysis for this cluster.
@@ -2112,11 +2174,15 @@ function clusterAlerts(c, d, add, { now = Date.now(), live = true } = {}) {
   (d.slm || []).forEach((p) => {
     const lf = p.last_failure, ls = p.last_success;
     const repo = (p.policy && p.policy.repository) || null;   // so a failing repository is raised once (alert-tuning.js)
-    if (lf && (!ls || lf.time > ls.time)) add({ key: `${c.id}:slm-fail:${p.id}`, level: 'critical', cluster: c, repo, title: `${c.name}/${p.id}: last SLM run failed`, detail: String(lf.details || '').slice(0, 160) });
+    // High: one failed run is a backup to retry today; the repository rule says when backups are broken.
+    if (lf && (!ls || lf.time > ls.time)) add({ key: `${c.id}:slm-fail:${p.id}`, level: 'high', cluster: c, repo, title: `${c.name}/${p.id}: last SLM run failed`, detail: String(lf.details || '').slice(0, 160) });
     const staleMs = state.defaults.snapshotStaleHours * 3600 * 1000;
     if (!exempt && ls && now - ls.time > staleMs) add({ key: `${c.id}:slm-stale:${p.id}`, level: 'warning', cluster: c, repo, title: `${c.name}/${p.id}: no successful snapshot recently`, detail: `Last success ${new Date(ls.time).toISOString().replace('T', ' ').slice(0, 16)}` });
   });
 }
+
+/** The heap rule's state per cluster: the node list it last stepped on, and each node's {streak, raised}. */
+const heapHeld = new Map();
 
 /* ------------------------------ held, from cached data ------------------------------ */
 
@@ -2476,11 +2542,11 @@ export function worstHealth() {
 }
 
 function updateBadge() {
-  const { total, critical: crit, warning: warn } = openAlertCounts();
+  const { total, critical: crit, high, warning: warn } = openAlertCounts();
   const w = worstHealth();
-  const color = crit ? '#d03b3b' : warn ? '#fab219' : w === 'green' ? '#0ca30c' : '#64748b';
+  const color = crit ? '#d03b3b' : high ? '#ff8c42' : warn ? '#fab219' : w === 'green' ? '#0ca30c' : '#64748b';
   setBadge(total ? String(total) : '', color,
-    total ? `ElasticPro — ${crit} critical, ${warn} warning` : 'ElasticPro — all clusters healthy');
+    total ? `ElasticPro — ${crit} critical, ${high} high, ${warn} warning` : 'ElasticPro — all clusters healthy');
 }
 
 /** Small, credential-free summary so the toolbar popup can render instantly. */

@@ -3,17 +3,18 @@
 # ElasticPro installer.
 #
 #   curl -fsSL https://raw.githubusercontent.com/karthick-dkk/elasticpro/main/tools/install.sh | bash
-#   curl -fsSL https://raw.githubusercontent.com/karthick-dkk/elasticpro/main/tools/install.sh | bash -s -- --portable
-#   curl -fsSL https://raw.githubusercontent.com/karthick-dkk/elasticpro/main/tools/install.sh | bash -s -- --hosted
+#   curl -fsSL https://raw.githubusercontent.com/karthick-dkk/elasticpro/main/tools/install.sh | bash -s -- --listen 8443 --cache
 #
-# Note the `-s --` before the flags. `curl … | bash --portable` would pass the flag to
+# Note the `-s --` before the flags. `curl … | bash --cache` would pass the flag to
 # bash, not to this script, and bash would reject it.
 #
-# What this will not do is install something that cannot run. The desktop app is built for
-# x86_64 Linux and x64 Windows only, and it is a windowed application — so on an arm64
-# server, or a machine with no display, this stops and tells you what to do instead rather
-# than leaving a package installed that will never open. --hosted is that alternative: the
-# same product served over HTTPS, built from source, on whatever architecture you have.
+# This installs the hosted Docker stack (nginx + the core, served over HTTPS), which is
+# the one maintained build of ElasticPro; --hosted is the default and is still accepted.
+# The Zabbix modules have their own installer, zabbix-modules-install.sh.
+#
+# DEPRECATED: the desktop builds (Windows, macOS, Linux installers and the portable zip)
+# ended with 0.3.51. --portable and the old desktop install path now print that and exit
+# non-zero without changing anything. 0.3.51 stays on the releases page.
 set -euo pipefail
 
 REPO="karthick-dkk/elasticpro"
@@ -25,7 +26,7 @@ API="https://api.github.com/repos/${REPO}"
 LINUX_BASE=/opt
 linux_dir() { printf '%s/elasticpro_%s' "$LINUX_BASE" "$1"; }
 
-MODE=install          # install | portable | hosted
+MODE=hosted           # hosted (the only maintained mode); portable|install are deprecated
 CACHE=0               # --cache: run Redis too (hosted)
 LISTEN_PORT=""        # --listen: the host port nginx takes (hosted; default 443)
 VERSION=""            # empty = the latest release
@@ -47,12 +48,10 @@ usage() {
   cat <<'EOF'
 ElasticPro installer
 
-  --portable        A self-contained copy in the current directory. Nothing is installed,
-                    nothing is written outside it, and deleting the folder removes it.
-                    Windows: the portable zip. Linux: the AppImage.
-  --hosted          The Docker stack instead of the desktop app: nginx + the core, served
-                    over HTTPS. Works on any architecture because it builds from source,
-                    and needs no display — this is the option for a server.
+  (default)         The Docker stack: nginx + the core, served over HTTPS. Pulls the
+                    published images; builds from source if none exist for this machine.
+  --hosted          Same as the default, kept so existing commands still work.
+  --portable        DEPRECATED — desktop builds ended with 0.3.51. Exits with an error.
   --listen PORT     Hosted: the port on this host (default 443). Use it when something
                     already has 443 — otherwise nginx cannot start and says the address
                     is already in use.
@@ -60,7 +59,7 @@ ElasticPro installer
                     and on disk without it; Redis is worth adding from a few dozen
                     clusters, and is what a second core would share.
   --version vX.Y.Z  A specific release (default: the latest release; `main` for the branch).
-  --dir PATH        Where a portable copy or a hosted checkout goes.
+  --dir PATH        Where the hosted checkout goes.
   --dry-run         Say what would happen; change nothing.
   -y, --yes         Do not ask before using sudo.
   -h, --help        This.
@@ -71,6 +70,7 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --portable) MODE=portable ;;
     --hosted)   MODE=hosted ;;
+    --install)  MODE=install ;;
     --version)  VERSION="${2:-}"; shift ;;
     --version=*) VERSION="${1#*=}" ;;
     --dir)      DEST="${2:-}"; shift ;;
@@ -85,6 +85,14 @@ while [ $# -gt 0 ]; do
   esac
   shift
 done
+
+# The desktop builds ended with 0.3.51. Stop before anything is fetched or changed.
+if [ "$MODE" != hosted ]; then
+  warn "Desktop builds ended with 0.3.51 and are deprecated."
+  info "Use --hosted (the default: the Docker stack), or download 0.3.51 from the releases page:"
+  info "  https://github.com/${REPO}/releases/tag/v0.3.51"
+  die "nothing installed"
+fi
 
 # Checked here rather than where it is used: a dry run never reaches the hosted section,
 # and a typo should stop before anything is fetched.
@@ -157,49 +165,6 @@ esac
 
 step "Detected ${OS}/${ARCH}"
 
-# The one place that knows which combinations were actually built. Everything else asks
-# here, so a new target is added once rather than in three branches.
-supported() {
-  case "$1/$2" in
-    linux/x64|windows/x64|macos/x64|macos/arm64) return 0 ;;
-    *) return 1 ;;
-  esac
-}
-
-if [ "$MODE" != hosted ] && ! supported "$OS" "$ARCH"; then
-  say ""
-  warn "There is no ${OS}/${ARCH} build of the ElasticPro desktop app."
-  say ""
-  info "The release carries Linux x86_64 (.deb/.rpm/.AppImage), Windows x64 (.msi/.exe/zip)"
-  info "and macOS on both architectures. ${OS}/${ARCH} is not among them."
-  say ""
-  info "Two ways forward:"
-  info "  • --hosted   the same product over HTTPS, built from source on this machine."
-  info "               Needs Docker. Works on any architecture, and needs no display."
-  info "  • build it   git clone https://github.com/${REPO} && cargo tauri build"
-  say ""
-  die "nothing installed"
-fi
-
-# A windowed application on a machine with nowhere to draw is a package that will never
-# open. Worth stopping for, because the symptom otherwise appears much later.
-if [ "$OS" = linux ] && [ "$MODE" != hosted ]; then
-  if [ -z "${DISPLAY:-}" ] && [ -z "${WAYLAND_DISPLAY:-}" ]; then
-    say ""
-    warn "No DISPLAY and no WAYLAND_DISPLAY — this machine has no graphical session."
-    info "ElasticPro is a windowed application; installed here it would have nowhere"
-    info "to open. If this is a server, --hosted serves the same product over HTTPS."
-    say ""
-    if [ "$ASSUME_YES" -eq 0 ] && [ -t 0 ]; then
-      printf '  Install anyway? [y/N] '
-      read -r reply </dev/tty || reply=n
-      case "$reply" in y|Y|yes) ;; *) die "nothing installed" ;; esac
-    else
-      die "nothing installed (pass --yes to override, or use --hosted)"
-    fi
-  fi
-fi
-
 # ------------------------------------------------------------------ which release
 
 resolve_release() {
@@ -215,7 +180,7 @@ resolve_release() {
 # fetched a tree with no deploy/ in it; every release has carried deploy/ for a long time,
 # and "whatever was pushed an hour ago" is the wrong default for something people run in
 # production. `--version main` still asks for the branch.
-if [ "$MODE" = hosted ] && [ -z "$VERSION" ]; then
+if [ -z "$VERSION" ]; then
   REF=$(curl -fsSL "${API}/releases/latest" 2>/dev/null | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' | head -1)
   if [ -n "$REF" ]; then
     info "latest release: ${REF}"
@@ -437,122 +402,3 @@ if [ "$MODE" = hosted ]; then
   info "    adopts this one's containers"
   exit 0
 fi
-
-# ------------------------------------------------------------------ pick the asset
-
-case "$OS/$MODE" in
-  linux/portable)   PATTERN='amd64\.AppImage$';       KIND=appimage ;;
-  windows/portable) PATTERN='portable-win64\.zip$';   KIND=zip ;;
-  macos/portable)   die "there is no portable macOS build — the .dmg is the only macOS asset" ;;
-  linux/install)
-    if   command -v dpkg >/dev/null 2>&1; then PATTERN='amd64\.deb$';    KIND=deb
-    elif command -v rpm  >/dev/null 2>&1; then PATTERN='x86_64\.rpm$';   KIND=rpm
-    else                                       PATTERN='amd64\.AppImage$'; KIND=appimage
-      warn "neither dpkg nor rpm found — falling back to the AppImage"
-    fi ;;
-  windows/install)  PATTERN='x64_en-US\.msi$';        KIND=msi ;;
-  macos/install)
-    if [ "$ARCH" = arm64 ]; then PATTERN='aarch64\.dmg$'; else PATTERN='x64\.dmg$'; fi
-    KIND=dmg ;;
-  *) die "no asset for ${OS}/${MODE}" ;;
-esac
-
-URL=$(asset_url "$PATTERN") || true
-[ -n "${URL:-}" ] || die "release ${TAG} has no asset matching ${PATTERN}"
-FILE=$(basename "$URL")
-info "asset ${FILE}"
-
-if [ "$DRY" -eq 1 ]; then ok "dry run — would download ${URL}"; exit 0; fi
-
-TMP=$(mktemp -d)
-trap 'rm -rf "$TMP"' EXIT
-
-step "Downloading"
-curl -fSL --progress-bar -o "$TMP/$FILE" "$URL" || die "download failed"
-
-# Every release carries SHA256SUMS.txt, written by the release-checksums job over the
-# finished asset list. Verify against it rather than printing a hash nobody compares: a
-# truncated download and a tampered one look identical otherwise. A release that somehow
-# has no checksum file still installs, but says so — refusing would strand anyone on an
-# older tag that predates the file.
-if command -v sha256sum >/dev/null 2>&1; then SUM=$(sha256sum "$TMP/$FILE" | cut -d' ' -f1)
-elif command -v shasum  >/dev/null 2>&1; then SUM=$(shasum -a 256 "$TMP/$FILE" | cut -d' ' -f1)
-else SUM=""; fi
-SUMS_URL=$(asset_url 'SHA256SUMS\.txt$') || true
-if [ -z "$SUM" ]; then
-  warn "no sha256 tool on this machine — the download cannot be verified"
-elif [ -z "$SUMS_URL" ]; then
-  warn "this release publishes no SHA256SUMS.txt — the download cannot be verified"
-  info "sha256 ${SUM}"
-elif ! curl -fsSL -o "$TMP/SHA256SUMS.txt" "$SUMS_URL"; then
-  warn "could not fetch SHA256SUMS.txt — the download cannot be verified"
-  info "sha256 ${SUM}"
-else
-  WANT=$(awk -v f="$FILE" '$2 == f || $2 == "*" f { print $1 }' "$TMP/SHA256SUMS.txt" | head -1)
-  [ -n "$WANT" ] || die "SHA256SUMS.txt does not list ${FILE} — refusing to install an asset the release does not vouch for"
-  [ "$WANT" = "$SUM" ] || die "checksum mismatch for ${FILE}: expected ${WANT}, got ${SUM} — do not use this download"
-  ok "sha256 verified against the release's SHA256SUMS.txt"
-fi
-
-# ------------------------------------------------------------------ install it
-
-case "$KIND" in
-  deb)
-    step "Installing the package"
-    # apt resolves the webkit dependencies; dpkg alone would leave them unmet.
-    if command -v apt-get >/dev/null 2>&1; then as_root apt-get install -y "$TMP/$FILE"
-    else as_root dpkg -i "$TMP/$FILE"; fi
-    ok "Installed. Launch it from your applications menu, or run: elasticpro" ;;
-  rpm)
-    step "Installing the package"
-    if command -v dnf >/dev/null 2>&1; then as_root dnf install -y "$TMP/$FILE"
-    else as_root rpm -i "$TMP/$FILE"; fi
-    ok "Installed. Launch it from your applications menu, or run: elasticpro" ;;
-  appimage)
-    # Portable stays where the operator is standing — that is what portable means. An
-    # install goes to the versioned directory under /opt.
-    VER=${TAG#v}
-    DEST=${DEST:-$( [ "$MODE" = portable ] && echo "$PWD" || linux_dir "$VER" )}
-    if [ "$MODE" = portable ]; then
-      mkdir -p "$DEST"
-      install -m 0755 "$TMP/$FILE" "$DEST/$FILE"
-      ok "Placed ${DEST}/${FILE}"
-      info "Self-contained: run it directly, delete it to remove it."
-    else
-      as_root mkdir -p "$DEST"
-      as_root install -m 0755 "$TMP/$FILE" "$DEST/elasticpro"
-      ok "Installed ${DEST}/elasticpro"
-      # One stable name pointing at the version in use, so a rollback is a symlink
-      # change and nobody's script has to know the version number.
-      if as_root ln -sfn "$DEST/elasticpro" /usr/local/bin/elasticpro 2>/dev/null; then
-        info "Linked /usr/local/bin/elasticpro → ${DEST}/elasticpro"
-        info "Run it by name: elasticpro"
-      else
-        info "Run it with: ${DEST}/elasticpro"
-      fi
-    fi ;;
-  zip)
-    need unzip
-    DEST=${DEST:-$PWD}
-    step "Unpacking into ${DEST}"
-    unzip -q -o "$TMP/$FILE" -d "$DEST"
-    ok "Unpacked ${DEST}/ElasticPro-portable-win64"
-    info "Self-contained: it keeps everything in its own data\\ folder and installs nothing."
-    info "Delete the folder to remove it." ;;
-  msi)
-    step "Handing the installer to Windows"
-    # A GUI installer, started from a shell that is about to exit: /passive keeps a
-    # progress window so it is obvious something is happening.
-    MSI_WIN=$(cygpath -w "$TMP/$FILE" 2>/dev/null || printf '%s' "$TMP/$FILE")
-    msiexec.exe /i "$MSI_WIN" /passive || die "the installer reported a failure"
-    ok "Installed. Look for ElasticPro in the Start menu." ;;
-  dmg)
-    step "Mounting the disk image"
-    MP=$(hdiutil attach -nobrowse -readonly "$TMP/$FILE" | awk '/\/Volumes\//{print substr($0, index($0,"/Volumes/"))}' | head -1)
-    [ -n "$MP" ] || die "could not mount the disk image"
-    cp -R "$MP"/*.app /Applications/ && ok "Copied to /Applications" || warn "could not copy into /Applications"
-    hdiutil detach "$MP" >/dev/null || true ;;
-esac
-
-say ""
-info "Source and support: https://github.com/${REPO}"
