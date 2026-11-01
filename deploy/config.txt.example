@@ -101,6 +101,23 @@ POLL_HEALTH_SECONDS=
 # Cluster requests the poller runs at once, across the fleet (1-256). Unset: 4 under the
 # shipped Client basis request policy, 16 for Automatic and Background. Set, it wins.
 POLL_CONCURRENCY=
+# Duplicate requests (Config › Requests): a request ElasticPro sends by itself is not sent
+# again while the same one was answered less than this many seconds ago; the asker gets that
+# reading (30-600; default 60). The REST console and the Indices and Snapshots page searches
+# are never held. Set, it locks the field.
+POLL_MIN_GAP_SECONDS=
+# While Play runs (Config › Requests): how often Play keeps each kind of data coming for a
+# display, in seconds. Set, each locks its field. Health (60-3600; 300), SLM/ILM
+# (900-86400; 14400), snapshots (600-86400; 7200), the index list (300-86400; 3600), nodes
+# (60-3600; 300); the log delay's full check (1800-86400; 7200) and its late list
+# re-checked (300-7200; 900).
+POLL_PLAY_HEALTH_SECONDS=
+POLL_PLAY_LIFECYCLE_SECONDS=
+POLL_PLAY_SNAPSHOTS_SECONDS=
+POLL_PLAY_INDICES_SECONDS=
+POLL_PLAY_NODES_SECONDS=
+POLL_PLAY_DELAY_FULL_SECONDS=
+POLL_PLAY_DELAY_LATE_SECONDS=
 # Requests to Elasticsearch in flight at once, all sources together (1-1024; default 24).
 ES_CONCURRENCY=
 # ...to one cluster (default 4), and through one SSH jump host (default 8).
