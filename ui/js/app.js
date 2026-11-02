@@ -65,6 +65,7 @@ import * as pAutomation from './pages/automation.js';
 import * as pAccounts from './pages/accounts.js';
 import * as pRequests from './pages/requests.js';
 import * as pPlay from './pages/play.js';
+import { fullscreen } from './core/fullscreen.js';
 import { displaySecretOf, playExchange, pageOfHash } from './play/api.js';
 import { loadSilences } from './core/silences.js';
 import { setRequestOrigin } from './core/es.js';
@@ -702,7 +703,7 @@ function renderTopbar() {
     // with everything in it when the person leaves.
     // The wall display: full screen, the same figures. Not on an evidence page (it shows the fleet).
     ev || !visiblePages().some((p) => p.id === 'play') ? null
-      : h('button.btn.sm#play-btn', { type: 'button', onclick: () => go('play'),
+      : h('button.btn.sm#play-btn', { type: 'button', onclick: () => { try { fullscreen().request().catch(() => {}); } catch (_) { /* no API: Play opens in the window */ } go('play'); },
           title: 'Play: the fleet as a wall display, full screen, slide after slide (Esc leaves)' }, '\u25B6 Play'),
     ev ? null : notificationBell(),
     embedded ? null : h('button.btn.sm.ghost', { onclick: cycleTheme, title: `Theme: ${theme} \u2014 click for the next one${theme === 'warm' ? ' (warm emits the least blue light)' : ''}` },
@@ -937,6 +938,7 @@ export function go(id) {
   // and nothing called it — the tail ran on under whatever page came next.)
   if (changed && currentPage) {
     const prev = PAGES.find((p) => p.id === currentPage);
+    if (currentPage === 'play') fullscreen().leavePlay().catch(() => {});   // only if Play took the screen
     if (prev && prev.mod.onLeave) { try { prev.mod.onLeave(); } catch (_) { /* leaving must not block arriving */ } }
     // And whatever it was still waiting on is let go of: the core answers those requests
     // "aborted" instead of holding them to the cluster's timeout. Only this person's, only

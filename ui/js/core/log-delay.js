@@ -343,6 +343,63 @@ export function buildSearchBody(resolved, { from, to, size = 500 } = {}) {
   };
 }
 
+/* ------------------------------ the late list ------------------------------ */
+
+/** The statuses that put a device on the late list: at or past the yellow line (classify). */
+export const LATE_STATUSES = new Set(['DELAYED', 'CRITICAL']);
+/** The most devices one re-check may name (the measurement's own terms size; auth.rs DELAY_LATE_MAX). */
+export const LATE_MAX = 500;
+
+/**
+ * A device name a re-check may name: what a terms aggregation returned as a bucket key, as
+ * the display-link gate accepts it (auth.rs `device_name`) — text up to 256 characters with
+ * no wildcard and no control character. One that is not stays as measured until the next
+ * full check.
+ */
+export function recheckable(name) {
+  const s = String(name ?? '');
+  // eslint-disable-next-line no-control-regex
+  return s.trim() !== '' && [...s].length <= 256 && !/[*?\u0000-\u001f\u007f-\u009f]/.test(s);
+}
+
+/**
+ * The late list: the devices of a measurement at or past the yellow line (`classify` on `t`,
+ * the one definition), worst first, at most LATE_MAX — the names a re-check asks about.
+ */
+export function lateList(records, t = DEFAULT_THRESHOLDS) {
+  return (records || [])
+    .filter((r) => r && LATE_STATUSES.has(classify(r.delayMinutes, t)) && recheckable(r.device))
+    .sort((a, b) => b.delayMinutes - a.delayMinutes)
+    .slice(0, LATE_MAX)
+    .map((r) => String(r.device));
+}
+
+/**
+ * The late list's re-check: the measurement's own search (buildSearchBody, unchanged) with one
+ * more filter naming only those devices, on the field the aggregation groups by — the one
+ * extra shape a display link may send (auth.rs `delay_search_body`).
+ */
+export function buildLateSearchBody(resolved, devices, opts = {}) {
+  const body = buildSearchBody(resolved, opts);
+  body.query.bool.filter.push({ terms: { [resolved.device]: (devices || []).map(String) } });
+  return body;
+}
+
+/**
+ * The late devices of one cluster, measured again in one request. Returns the fresh records
+ * of the devices that answered; one that sent nothing in the window is not in it.
+ */
+export async function measureLate(esClient, cluster, pre, devices, hours = 24) {
+  const names = (devices || []).filter(recheckable).slice(0, LATE_MAX);
+  if (!names.length) return { records: [] };
+  const t = thresholds(cluster);
+  const body = buildLateSearchBody(pre.resolved, names, { from: `now-${hours}h`, to: 'now', size: 500 });
+  const res = await esClient.search(cluster.logIndexPattern || 'logstash-*', body,
+    { qs: 'ignore_unavailable=true&allow_no_indices=true', timeoutMs: 60000 });
+  const agg = (res.aggregations || {}).devices || {};
+  return { records: (agg.buckets || []).map((b) => recordFrom(b, pre.resolved, t)) };
+}
+
 /** Roll a set of records into the counts the summary shows. */
 /**
  * A measurement, as the numbers Zabbix keeps — the one list. The scraper sends these to each

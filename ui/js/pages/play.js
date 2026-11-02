@@ -16,7 +16,7 @@
  */
 
 import { h, mount } from '../lib/dom.js';
-import { state, clusters, client, mergedAlerts, invalidateAlerts, askForPage, demandDataset, fleetPolicy, fleetMode,
+import { state, clusters, client, mergedAlerts, invalidateAlerts, watchForPlay, fleetMode,
   datasetFreshness, refreshAll } from '../core/state.js';
 import { isOpen, isHeld, heldByCluster, toObservations } from '../core/alert-groups.js';
 import { alertHistory } from '../core/alert-history.js';
@@ -40,10 +40,11 @@ import * as sSpotlight from '../play/spotlight.js';
 import * as sLogdelay from '../play/logdelay.js';
 import * as sBackups from '../play/backups.js';
 import * as sVolume from '../play/volume.js';
+import { fullscreen, hintDismissed, dismissHint } from '../core/fullscreen.js';
 
 export const SLIDES = [sFleet, sAlerts, sSpotlight, sLogdelay, sBackups, sVolume];
 const SLIDE = new Map(SLIDES.map((s) => [s.id, s]));
-/** Everything the slides read, marked watched (askForPage) so a fleet that fetches on ask has it. */
+/** Everything the slides read, Play-watched (watchForPlay) so the core keeps it coming at Play's pace. */
 export const DATASETS = ['health', 'nodes', 'ilm_errors', 'policies', 'ilm_assign', 'snapshots', 'snapshots_full', 'indices'];
 const ZOOM_KEY = 'elasticpro.play.zoom';
 const CONTROLS_MS = 5000;
@@ -228,9 +229,11 @@ function delayNote() {
   if (!measurer) return null;
   const busy = measurer.measuring().length;
   if (busy) return `measuring ${busy} cluster${busy === 1 ? '' : 's'}…`;
-  if (measurer.shared() === false) return 'measured by this screen every 15 min';
+  const { fullMs, lateMs } = measurer.schedule();
+  const every = `full check every ${Math.round(fullMs / 60000)} min, late devices every ${Math.round(lateMs / 60000)} min`;
+  if (measurer.shared() === false) return `measured by this screen: ${every}`;
   const p = measurer.putProblem();
-  return p ? `measured by this screen; not shared: ${p}` : 'measured every 15 min';
+  return p ? `measured by this screen; not shared: ${p}` : `measured: ${every}`;
 }
 
 /** Whether a slide has anything to show (Alerts always has: "All clear"). */
@@ -269,10 +272,13 @@ function freshness(slide, ctx) {
       if (f.staleAfterMs ? isStale(f.ts, ctx.now, f.staleAfterMs) : staleness(f.ts, ctx.now, { refreshMs }) === 'stale') stale = true;
     }
     if (slide.id === 'delay') {
+      // The full check is the oldest part of a measurement (the late list is re-checked between).
       const d = ctx.delay.get(c.id);
-      if (!d || !d.measuredAt) { missing = true; continue; }
-      if (!oldest || d.measuredAt < oldest) oldest = d.measuredAt;
-      if (staleness(d.measuredAt, ctx.now, { refreshMs: MEASURE_EVERY_MS }) === 'stale') stale = true;
+      const at = d && (d.fullAt || d.measuredAt);
+      if (!at) { missing = true; continue; }
+      if (!oldest || at < oldest) oldest = at;
+      const every = measurer ? measurer.schedule().fullMs : MEASURE_EVERY_MS;
+      if (staleness(at, ctx.now, { refreshMs: every }) === 'stale') stale = true;
     }
   }
   return { oldest, stale, missing };
@@ -300,15 +306,25 @@ function skeleton() {
   e.progress = h('div.pl-progress', e.bar);
   e.body = h('main.pl-body', e.stage);
   e.pauseBtn = btn('⏸', 'Pause (Space)', () => { togglePause(); });
+  const fs = fullscreen();
+  const fsBtn = fs.supported() ? btn('⛶', 'Full screen', () => { fs.toggle(); }, '.pl-fs') : null;
+  e.fsBtn = fsBtn;
+  if (fsBtn) fsBtn.setAttribute('aria-pressed', 'false');
   e.ctl = h('div.pl-ctl', { role: 'toolbar', 'aria-label': 'Play controls' },
     btn('◀', 'Previous slide (←)', () => step(-1)),
     e.pauseBtn,
     btn('▶', 'Next slide (→)', () => step(1)),
     h('span.pl-csep'),
     btn('−', 'Smaller (−)', () => zoomBy(-1)), zoomLabel, btn('+', 'Larger (+)', () => zoomBy(1)),
+    fsBtn ? h('span.pl-csep') : null, fsBtn,
     display ? null : h('span.pl-csep'),
     display ? null : btn('✕ Exit', 'Leave Play (Esc)', () => exit(), '.pl-exit'));
-  e.root = h('div.pl-root.tv', e.head, e.progress, e.body, e.ctl);
+  // A display link loads without a click, so it cannot start full screen itself: say how, once.
+  e.hint = display && fsBtn && !fs.active() && !hintDismissed()
+    ? h('div.pl-fshint', { role: 'status' }, 'Press F or click ⛶ for full screen — or run the browser in kiosk mode',
+        h('button.pl-fshint-x', { type: 'button', 'aria-label': 'Dismiss', onclick: () => hideHint(true) }, '✕'))
+    : null;
+  e.root = h('div.pl-root.tv', e.head, e.progress, e.body, e.ctl, e.hint);
   return e;
 }
 
@@ -468,16 +484,16 @@ async function pollAcks() {
   invalidateAlerts();
 }
 
-/** Mark what the slides read as watched, so a fleet that fetches only on ask (or hybrid) has it. */
+/**
+ * Tell the core what the slides read: Play-watched, so it keeps each coming at the request
+ * policy's Play pace (Config › Requests › While Play runs) under every mode that fetches on
+ * ask, and fetches at once only what it never has.
+ */
 async function askData() {
   if (isSnapshotMode()) return;
   const ids = visible().map((c) => c.id);
   if (!ids.length) return;
-  await askForPage(ids, DATASETS).catch(() => false);
-  const p = fleetPolicy();
-  if (fleetMode() && p && (p.resolvedMode || p.mode) === 'hybrid') {
-    for (const ds of DATASETS) await demandDataset(ids, ds).catch(() => false);
-  }
+  await watchForPlay(ids, DATASETS).catch(() => false);
   // The portable build with its own refresh switched off: a wall display still moves.
   if (!fleetMode() && !state.autoRefresh) refreshAll().catch(() => {});
 }
@@ -524,10 +540,22 @@ function onKeyDown(e) {
   if (k === 'ArrowRight') { e.preventDefault(); step(1); }
   else if (k === 'ArrowLeft') { e.preventDefault(); step(-1); }
   else if (k === ' ' || k === 'Spacebar') { e.preventDefault(); togglePause(); }
+  else if ((k === 'f' || k === 'F') && !e.shiftKey && fullscreen().supported()) { e.preventDefault(); fullscreen().toggle(); }
   else if (k === '+' || k === '=' || k === 'Add') { e.preventDefault(); zoomBy(1); }
   else if (k === '-' || k === '_' || k === 'Subtract') { e.preventDefault(); zoomBy(-1); }
   else return;
   showControls();
+}
+let offFs = null;
+function paintFs(on) {
+  if (!els || !els.fsBtn) return;
+  const t = on ? 'Leave full screen' : 'Full screen';
+  els.fsBtn.title = t; els.fsBtn.setAttribute('aria-label', t); els.fsBtn.setAttribute('aria-pressed', String(on));
+  if (on) hideHint(false);
+}
+function hideHint(remember) {
+  if (remember) dismissHint();
+  if (els && els.hint) { els.hint.remove(); els.hint = null; }
 }
 function showControls() {
   ctlUntil = Date.now() + CONTROLS_MS;
@@ -551,8 +579,13 @@ export function render(el) {
     reachable: (id) => { const s = healthState(state.data.get(id)); return s !== 'unreachable' && s !== 'loading'; },
     now: serverNow,
     onChange: () => { if (host && host.isConnected) draw(); },
+    // The late list is decided on the wall's own yellow line (Config › Play).
+    thresholds: () => delayT(),
   });
   listen(document, 'keydown', onKeyDown);
+  offFs = fullscreen().subscribe(paintFs);
+  paintFs(fullscreen().active());
+  if (els.hint) later(() => hideHint(false), 10000);
   listen(document, 'mousemove', showControls, { passive: true });
   draw();
   every(tick, 1000);
@@ -581,6 +614,7 @@ export function onKey(e) {
 }
 
 export function onLeave() {
+  if (offFs) { offFs(); offFs = null; }
   for (const t of timers) { clearTimeout(t); clearInterval(t); }
   timers.clear();
   for (const [target, ev, fn, opts] of listeners.splice(0)) target.removeEventListener(ev, fn, opts);

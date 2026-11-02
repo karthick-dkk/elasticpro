@@ -303,6 +303,29 @@ check "a display link is signed in"             "$(as_jar "$JTV" -d '{"type":"WH
 check "a display link may not begin a stop"     "$(as_jar "$JTV" -d '{"type":"POLICY_PAUSE","minutes":15}' | field kind)" "forbidden"
 check "nor end one"                             "$(as_jar "$JTV" -d '{"type":"POLICY_RESUME"}' | field kind)" "forbidden"
 check "the operator's mode was never changed"   "$(cookie -d '{"type":"POLICY_GET"}' | python3 -c 'import json,sys;print(json.load(sys.stdin)["policy"]["mode"])')" "on-demand"
+# Duplicate requests and While Play runs (Config › Requests) are the request policy's like the
+# rest: POLICY_SET, an admin's. Bounds, config.txt locking and the scheduler are proved
+# in-process (fleet/policy.rs, fleet/scheduler.rs, tests/gap.rs).
+gp() { python3 -c 'import json,sys;d=json.load(sys.stdin);p=d.get("policy") or {};print(d.get("ok"),p.get("minGapSec"),(p.get("play") or {}).get("healthSec"),(p.get("play") or {}).get("delayLateSec"))'; }
+check "an admin sets the gap and Play's pace"   "$(cookie -d '{"type":"POLICY_SET","policy":{"mode":"on-demand","minGapSec":120,"play":{"healthSec":600,"delayLateSec":1200}}}' | gp)" "True 120 600 1200"
+check "kept within bounds"                     "$(cookie -d '{"type":"POLICY_SET","policy":{"mode":"on-demand","minGapSec":5,"play":{"healthSec":600,"delayLateSec":99999}}}' | gp)" "True 30 600 7200"
+check "an operator may not set them"            "$(as_jar "$JOP" -d '{"type":"POLICY_SET","policy":{"mode":"on-demand","minGapSec":600}}' | field kind)" "forbidden"
+check "nor a user"                              "$(as_jar "$JUS" -d '{"type":"POLICY_SET","policy":{"mode":"on-demand","minGapSec":600}}' | field kind)" "forbidden"
+check "nor a display link"                      "$(as_jar "$JTV" -d '{"type":"POLICY_SET","policy":{"mode":"on-demand","play":{"healthSec":60}}}' | field kind)" "forbidden"
+check "the admin's values stand"                "$(cookie -d '{"type":"POLICY_GET"}' | gp)" "True 30 600 7200"
+# The log delay's late list (docs/PLAY.md): a display link may send the measurement narrowed to
+# the late devices — one terms filter on the aggregation's own field — and nothing wider. No
+# cluster here: the gate checks the shape first, so a body it lets through ends at no_creds.
+# No cluster: the shipped delay fields (device src_hostname, arrival @timestamp) are the only ones.
+DELAY='{"size":0,"query":{"bool":{"filter":[{"range":{"@timestamp":{"gte":"now-24h","lte":"now","format":"strict_date_optional_time"}}}FILTER]}},"aggs":{"devices":{"terms":{"field":"src_hostname.keyword","size":500,"order":{"_count":"desc"}},"aggs":{"latest":{"top_hits":{"size":1,"sort":[{"@timestamp":{"order":"desc"}}],"_source":["@timestamp","event.created"]}}}}}}'
+es_tv() { python3 -c 'import json,sys;print(json.dumps({"type":"ES","clusterId":"x","method":"POST","path":"/logstash-*/_search?ignore_unavailable=true&allow_no_indices=true","body":sys.argv[1].replace("FILTER",sys.argv[2])}))' "$DELAY" "$1"; }
+gate() { python3 -c 'import json,sys;k=json.load(sys.stdin).get("kind");print("refused" if k=="forbidden" else "through")'; }
+check "a display link may re-check the late list"      "$(as_jar "$JTV" -d "$(es_tv ',{"terms":{"src_hostname.keyword":["fw-01","fw 02"]}}')" | gate)" "through"
+check "the full check as before"                       "$(as_jar "$JTV" -d "$(es_tv '')" | gate)" "through"
+check "but not on another field"                       "$(as_jar "$JTV" -d "$(es_tv ',{"terms":{"user.name":["root"]}}')" | gate)" "refused"
+check "nor with a wildcard"                            "$(as_jar "$JTV" -d "$(es_tv ',{"terms":{"src_hostname.keyword":["fw-*"]}}')" | gate)" "refused"
+check "nor with a second filter"                       "$(as_jar "$JTV" -d "$(es_tv ',{"terms":{"src_hostname.keyword":["a"]}},{"terms":{"src_hostname.keyword":["b"]}}')" | gate)" "refused"
+check "nor with a script"                              "$(as_jar "$JTV" -d "$(es_tv ',{"script":{"script":"true"}}')" | gate)" "refused"
 for _ in $(seq 1 25); do
   N=$(grep '"target":"audit"' "$OUT5" | grep '"user":"hc-op"' | grep -c 'emergency stop' || true); [ "$N" -ge 2 ] && break; sleep 0.2
 done

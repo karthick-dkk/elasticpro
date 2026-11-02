@@ -269,3 +269,63 @@ test('the question before a stop names its length and that slow clusters do not 
   assert.equal(P.isPaused({ paused: { all: true } }), true);
   assert.equal(P.isPaused({ paused: { all: false } }), false);
 });
+
+test('duplicate requests and the Play schedule: the UI and the core ship the same numbers', () => {
+  const rs = fs.readFileSync(path.join(ROOT, 'crates/elasticpro-core/src/fleet/policy.rs'), 'utf8');
+  const gap = /pub const GAP_BOUNDS: \(u64, u64\) = \((\d+), (\d+)\);/.exec(rs);
+  assert.deepEqual([P.GAP.min, P.GAP.max], [Number(gap[1]), Number(gap[2])]);
+  assert.equal(P.GAP.def, Number(/pub const GAP_DEFAULT_SEC: u64 = (\d+);/.exec(rs)[1]));
+  // PLAY_FIELDS: name and bounds, row for row.
+  const block = rs.slice(rs.indexOf('pub const PLAY_FIELDS'), rs.indexOf('];', rs.indexOf('pub const PLAY_FIELDS')));
+  const rows = [...block.matchAll(/\("(\w+)", ([\d_]+), ([\d_]+), "(\w+)"\)/g)].map((m) => [m[1], Number(m[2].replace(/_/g, '')), Number(m[3].replace(/_/g, ''))]);
+  assert.deepEqual(rows.map((r) => r[0]).sort(), P.PLAY_FIELDS.map((f) => f.key).sort());
+  for (const [key, min, max] of rows) {
+    const f = P.PLAY_FIELDS.find((x) => x.key === key);
+    assert.deepEqual([f.min, f.max], [min, max], key);
+  }
+  // The shipped values: PlaySchedule::default.
+  const at = rs.indexOf('impl Default for PlaySchedule');
+  const def = rs.slice(at, rs.indexOf('\n}\n', at));
+  const secs = (field) => {
+    const m = new RegExp(`${field}: ([\\d_ *]+),`).exec(def);
+    return m[1].split('*').reduce((a, x) => a * Number(x.replace(/[_\s]/g, '')), 1);
+  };
+  const snake = (k) => k.replace(/[A-Z]/g, (c) => `_${c.toLowerCase()}`);
+  for (const f of P.PLAY_FIELDS) assert.equal(f.def, secs(snake(f.key)), f.key);
+  assert.deepEqual(P.FALLBACK_DEFAULTS.play, Object.fromEntries(P.PLAY_FIELDS.map((f) => [f.key, f.def])));
+  // The exempt kinds are the ones the pages name (es.js REQUEST_PURPOSE).
+  const ex = rs.indexOf('pub const GAP_EXEMPT');
+  const exempt = [...rs.slice(ex, rs.indexOf('];', ex)).matchAll(/\("([\w-]+)", "/g)].map((m) => m[1]);
+  const es = fs.readFileSync(path.join(ROOT, 'ui/js/core/es.js'), 'utf8');
+  const rp = es.indexOf('export const REQUEST_PURPOSE');
+  const purposes = [...es.slice(rp, es.indexOf('});', rp)).matchAll(/'([\w-]+)'/g)].map((m) => m[1]);
+  assert.deepEqual(purposes.sort(), exempt.sort());
+  assert.deepEqual(exempt, ['console'], 'only what goes to a cluster as a person typed it');
+});
+
+test('the gap and the Play schedule are kept in bounds, read from the form, and kept by a preset', () => {
+  const p = P.normalisePolicy({ minGapSec: 5, play: { healthSec: 1, delayFullSec: 1800, delayLateSec: 7200 } }, D);
+  assert.equal(p.minGapSec, 30);
+  assert.equal(p.play.healthSec, 60);
+  assert.equal(p.play.delayLateSec, 1800, 'never less often than the full check');
+  assert.equal(P.normalisePolicy(null, D).minGapSec, 60);
+  const { policy, problems } = P.fromForm({ minGapSec: '9999', play: { indicesSec: '7200', delayLateSec: 'soon' } }, D);
+  assert.equal(policy.minGapSec, 600);
+  assert.equal(policy.play.indicesSec, 7200);
+  assert.equal(policy.play.delayLateSec, 900, 'not a number: the shipped value');
+  assert.ok(problems.some((x) => /minimum gap/.test(x)) && problems.some((x) => /late devices/.test(x)), problems.join('\n'));
+  // A preset is about the mode and the concurrency: the gap and Play's pace stay as set.
+  const mine = { ...P.normalisePolicy(D, D), minGapSec: 120, play: { ...D.play, healthSec: 600 } };
+  const bg = P.applyPreset(mine, 'background', D);
+  assert.equal(bg.minGapSec, 120);
+  assert.equal(bg.play.healthSec, 600);
+  assert.equal(P.activePreset({ ...P.normalisePolicy(D, D), minGapSec: 120 }, D), 'client', 'a changed gap is still Client basis');
+});
+
+test('what the gap saved reads as one line per dataset', () => {
+  assert.equal(P.gapLine('health', { asked: 42, sent: 12, recent: 30, shared: 0, held: 0 }, 60),
+    'health: asked 42 this hour, sent 12, 30 answered from a reading under a minute old');
+  assert.equal(P.gapLine('direct', { asked: 5, sent: 2, recent: 1, shared: 1, held: 1 }, 120),
+    'direct: asked 5 this hour, sent 2, 1 answered from a reading under 2 minutes old, 1 shared one already on its way, 1 served what was held (fresh enough, or the cluster is down)');
+  assert.equal(P.gapLine('nodes', {}, 45), 'nodes: asked 0 this hour, sent 0');
+});

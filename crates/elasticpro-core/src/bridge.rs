@@ -992,18 +992,8 @@ impl Core {
             auth::play_may(t, method, path, msg.get("kind").and_then(|v| v.as_str())).map_err(|why| {
                 json!({ "ok": false, "kind": "forbidden", "role": c.role.as_str(), "playOnly": true, "message": why })
             })?;
-            // And only the log-delay measurement itself: its index pattern, its parameters, its body.
-            if t == "ES" {
-                let id = msg.get("clusterId").and_then(|v| v.as_str()).unwrap_or("");
-                // A cluster with no pattern of its own (a Zabbix host) uses the managed default,
-                // as the page does; anything else is refused and the wall says "not measured".
-                let pattern = self.spec_for(id).and_then(|s| s.log_index_pattern)
-                    .or_else(|| crate::settings::get().text("UI_LOG_INDEX_PATTERN").map(String::from))
-                    .or_else(|| Some("logstash-*".to_string()));
-                auth::play_es_shape(pattern.as_deref(), method, path, msg.get("body").and_then(|v| v.as_str())).map_err(|why| {
-                    json!({ "ok": false, "kind": "forbidden", "role": c.role.as_str(), "playOnly": true, "message": why })
-                })?;
-            }
+            // And only the log-delay measurement itself — its index pattern, parameters and
+            // body — which `es()` checks (`delay_shape_for` reads the clusters file).
         }
         if auth::required_role(t).is_none() {
             return Ok(());
@@ -2245,6 +2235,8 @@ impl Core {
             "ok": true, "inflight": inflight, "recent": recent, "keep": REQUEST_LOG_KEEP, "throttled": throttled,
             "slowed": slowed, "busySince": busy_since,
             "gate": gate,
+            // What the duplicate-request gap saved, per dataset, over the last hour.
+            "asks": self.fleet_asks_json(),
             // The Tasks panel reads its listing and how to recognise ours from here, so the
             // two are defined once (tasks.rs).
             "tasks": { "path": crate::tasks::TASKS_PATH, "prefix": crate::tasks::OPAQUE_PREFIX,
@@ -2468,6 +2460,10 @@ impl Core {
         });
         let pattern = get("logIndexPattern").or_else(|| get("log_index_pattern"))
             .or_else(|| raw.get("defaults").and_then(|d| d.get("logIndexPattern")).and_then(|v| v.as_str()).map(String::from));
+        let defaults = raw.get("defaults");
+        let time_field = get("timeField").or_else(|| defaults.and_then(|d| d.get("timeField")).and_then(|v| v.as_str()).map(String::from));
+        let delay_fields = entry.get("delayFields").or_else(|| defaults.and_then(|d| d.get("delayFields")))
+            .and_then(|v| serde_json::from_value::<crate::auth::DelayFields>(v.clone()).ok());
         let changed_address;
         let credential;
         {
@@ -2508,6 +2504,8 @@ impl Core {
                 tls,
                 zabbix_groups: raw_groups(entry),
                 log_index_pattern: pattern,
+                time_field,
+                delay_fields,
             });
         }
         self.read_cache.clear();
@@ -3382,15 +3380,46 @@ impl Core {
                 "defaultCredential": default_credential })
     }
 
+    /// What a display link may measure this cluster with (`auth::DelayShape`): the cluster's
+    /// own settings, the clusters file's `defaults:` (a Zabbix host has nothing else), then
+    /// config.txt and the shipped values — resolved as the UI resolves them.
+    async fn delay_shape_for(&self, id: &str) -> auth::DelayShape {
+        let spec = self.spec_for(id);
+        let file = self.read_config_file().await.map(|raw| auth::DelayDefaults::from_config(&raw)).unwrap_or_default();
+        let managed = crate::settings::get();
+        auth::DelayShape::resolve(spec.as_ref().and_then(|s| s.log_index_pattern.clone()), spec.as_ref().and_then(|s| s.time_field.as_deref()),
+            spec.as_ref().and_then(|s| s.delay_fields.as_ref()), &file, managed.text("UI_TIME_FIELD"), managed.text("UI_LOG_INDEX_PATTERN"))
+    }
+
     async fn es(self: &Arc<Self>, msg: Value, caller: Option<&Caller>) -> Value {
+        // A display link: only the log-delay measurement, on the cluster's own delay fields;
+        // anything else is refused and the wall says "not measured".
+        if let Some(c) = caller.filter(|c| c.play_only()) {
+            let s = |k: &str| msg.get(k).and_then(Value::as_str).unwrap_or("");
+            let shape = self.delay_shape_for(s("clusterId")).await;
+            if let Err(why) = auth::play_es_shape(&shape, s("method"), s("path"), msg.get("body").and_then(Value::as_str)) {
+                return json!({ "ok": false, "kind": "forbidden", "role": c.role.as_str(), "playOnly": true, "message": why });
+            }
+        }
         let mut req: EsRequest = match serde_json::from_value(msg) {
             Ok(r) => r,
             Err(e) => return json!({ "ok": false, "kind": "bad_message", "message": format!("bad ES request: {e}") }),
         };
         req.user = caller.map(|c| c.name.clone());
         // A display link never writes, whatever it asks: `Writes::decide` is never told it asked.
+        // Nor is anything it sends a person typing: the duplicate-request gap holds it, whatever
+        // purpose or origin it names. And what goes to the cluster is the body the gate checked,
+        // written out again: a body with a key twice was checked as its last one (serde), and
+        // the cluster must not read the first.
         if caller.is_some_and(Caller::play_only) {
             req.allow_writes = false;
+            req.purpose = None;
+            if req.origin.as_deref().is_some_and(|o| !o.starts_with("page:")) {
+                req.origin = Some("page:play".into());
+            }
+            if let Some(b) = req.body.as_deref() {
+                req.body = serde_json::from_str::<Value>(b).ok().map(|v| v.to_string());
+            }
         }
         // A person asked. Decided here, by the way the request came in — never by its origin.
         req.class = Class::Interactive;
@@ -3519,18 +3548,28 @@ impl Core {
         // Shared and cached only what the core would send the same for anybody: a person's
         // read, to the cluster's own address, with the cluster's own credential.
         let own_address = req.url.as_deref().is_none_or(|u| spec.as_ref().is_some_and(|s| s.url.trim_end_matches('/') == u.trim_end_matches('/')));
-        let shareable = req.class == Class::Interactive && read && req.auth_header.is_none() && own_address && !req.allow_writes;
-        // Never cached: the console (a person typing wants the cluster's answer), the task
-        // list (it is about right now), and `/` — the connection probe, which must notice a
-        // cluster that went away or a certificate that changed the moment it happens.
+        // What a person types (fleet::policy::GAP_EXEMPT, by the purpose the page names; the
+        // console also by its origin) goes to the cluster at once: never held by the gap,
+        // never answered from a reading, never joined to somebody else's request.
+        let exempt = req.purpose.as_deref().is_some_and(crate::fleet::policy::gap_exempt) || origin == "console";
+        let shareable = req.class == Class::Interactive && read && req.auth_header.is_none() && own_address && !req.allow_writes && !exempt;
+        // Never cached: the task list (it is about right now), and `/` — the connection
+        // probe, which must notice a cluster that went away or a certificate that changed
+        // the moment it happens.
         let bare = req.path.split('?').next().unwrap_or("");
-        let cacheable = shareable && cfg.read_cache_secs > 0 && (method == "GET" || method == "HEAD")
-            && origin != "console" && !bare.starts_with("/_tasks") && !bare.is_empty() && bare != "/";
+        let cacheable = shareable && (method == "GET" || method == "HEAD")
+            && !bare.starts_with("/_tasks") && !bare.is_empty() && bare != "/";
         let key = shareable.then(|| crate::inflight::key(&req.cluster_id, &url, &method, &req.path, req.body.as_deref(), auth.as_deref()));
+        // Duplicate requests: the same read answered less than the gap ago is that reading,
+        // whatever max age the page named (a Retry, a Refresh); past the gap the read cache's
+        // own few seconds (ES_READ_CACHE_SECONDS), which a page can only shorten.
+        let gap_ms = self.fleet_gap_ms();
         if let (true, Some(k)) = (cacheable, key.as_ref()) {
-            let max_ms = req.max_age_ms.unwrap_or(u64::MAX).min(cfg.read_cache_secs.saturating_mul(1000));
+            let own = req.max_age_ms.unwrap_or(u64::MAX).min(cfg.read_cache_secs.saturating_mul(1000));
+            let max_ms = own.max(gap_ms);
             if max_ms > 0 {
                 if let Some((v, age)) = self.read_cache.get(k, Duration::from_millis(max_ms)) {
+                    self.fleet_note_ask(DIRECT_READS, if age < gap_ms { crate::fleet::asks::Answered::Recent } else { crate::fleet::asks::Answered::Held });
                     return self.answer_cached(&req, &origin, via.as_deref(), timeout_ms, v, age);
                 }
             }
@@ -3599,6 +3638,7 @@ impl Core {
             task.abort_handle()
         });
         let leader = joined.leader;
+        self.fleet_note_ask(DIRECT_READS, if joined.follower { crate::fleet::asks::Answered::Shared } else { crate::fleet::asks::Answered::Sent });
         let seat = crate::inflight::Seat::new(self.flights.clone(), key, leader);
         let mut follower = joined.follower.then(|| {
             self.requests.lock().amend(rid, |r| { r.state = "shared"; r.shared = true; r.leader = Some(leader); });
@@ -3750,6 +3790,10 @@ impl Core {
 
 /// A request's timeout when it names none (the transport's own default).
 const DEFAULT_TIMEOUT_MS: u64 = 15_000;
+
+/// The name a page's own reads are counted under in the Request Centre's figures (beside the
+/// fleet's datasets).
+pub const DIRECT_READS: &str = "direct";
 
 fn aborted_reply() -> Value {
     json!({ "ok": false, "status": 0, "kind": "aborted", "message": "cancelled: the page that asked was left", "tookMs": 0 })
@@ -3919,7 +3963,8 @@ impl Core {
             ));
         }
         self.aborts.lock().retain(|_, s| s.count > 0);
-        self.read_cache.prune(Duration::from_secs(cfg.read_cache_secs));
+        // Kept as long as the gap may still answer from it, or the read cache's own seconds.
+        self.read_cache.prune(Duration::from_millis(cfg.read_cache_secs.saturating_mul(1000).max(self.fleet_gap_ms())));
         self.persist_instance_clusters();
         expired + reaped.len()
     }
@@ -4238,7 +4283,7 @@ impl Core {
             if usable {
                 specs.insert(id.clone(), ClusterSpec {
                     id: id.clone(), name: Some(c.name.clone()), url: c.url.clone(), auth_header: auth, via: via.clone(), tls: None,
-                    zabbix_groups: c.readers.clone(), log_index_pattern: None,
+                    zabbix_groups: c.readers.clone(), log_index_pattern: None, time_field: None, delay_fields: None,
                 });
             }
             view.push(json!({

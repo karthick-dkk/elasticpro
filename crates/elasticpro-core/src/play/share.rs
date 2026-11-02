@@ -8,6 +8,12 @@
 //! each under `<data>/play/share/<kind>/`, read when asked for, so the core holds none of it
 //! in memory; kept 48 h. Without a data directory (the desktop app before a config is chosen)
 //! they are kept in memory instead.
+//!
+//! A delay record carries the measurement's two tiers (ui/js/play/measure.js): `fullAt`, when
+//! the last full check ran (every device), and `lateAt`, when the late list (`late`: the
+//! devices at or past the yellow line) was last re-checked — so every display says the same
+//! "last full check 14:00 · late devices re-checked 14:45", and only one display measures.
+//! Both are times no later than the record's own `measuredAt` (the newer of the two), checked here.
 
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
@@ -26,6 +32,35 @@ pub const MAX_DELAY_BYTES: usize = 1024 * 1024;
 pub const MAX_REPO_BYTES: usize = 64 * 1024;
 /// A measurement claiming to be from the future by more than this is refused.
 const CLOCK_SKEW_MS: u64 = 5 * 60_000;
+/// Devices on a delay record's late list, at most (the re-check names each: auth.rs
+/// `DELAY_LATE_MAX`).
+pub const MAX_LATE: usize = crate::auth::DELAY_LATE_MAX;
+
+/// A delay record's two tiers, checked: `fullAt` (default: the record's own time — a page
+/// from before the tiers measured everything every time) and `lateAt` (0: not re-checked since
+/// the full check), each no later than `measured_at` and the late re-check no earlier than the
+/// full check it follows; `late` a list of at most `MAX_LATE` names. Returns (fullAt, lateAt).
+fn delay_tiers(data: &Value, measured_at: u64) -> Result<(u64, u64), String> {
+    let time = |k: &str| match data.get(k) {
+        None | Some(Value::Null) => Ok(None),
+        Some(v) => v.as_u64().map(Some).ok_or_else(|| format!("data.{k}: ms since the epoch")),
+    };
+    let full = time("fullAt")?.unwrap_or(measured_at);
+    let late = time("lateAt")?.unwrap_or(0);
+    if full > measured_at || late > measured_at {
+        return Err("data.fullAt / data.lateAt: no later than the record's measuredAt".into());
+    }
+    if late != 0 && late < full {
+        return Err("data.lateAt: the late list is re-checked after the full check it came from".into());
+    }
+    if let Some(l) = data.get("late") {
+        let ok = l.as_array().is_some_and(|a| a.len() <= MAX_LATE && a.iter().all(Value::is_string));
+        if !ok {
+            return Err(format!("data.late: a list of at most {MAX_LATE} device names"));
+        }
+    }
+    Ok((full, late))
+}
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -106,6 +141,7 @@ impl Share {
             if bytes > MAX_DELAY_BYTES {
                 return Err(format!("data: at most {} KB", MAX_DELAY_BYTES / 1024));
             }
+            delay_tiers(&data, measured_at)?;
         } else {
             if !data.is_object() {
                 return Err("data: a repository size is an object".into());
@@ -136,7 +172,15 @@ impl Share {
         let mut out = Map::new();
         for c in clusters {
             if let Some(r) = self.read(kind, c).filter(|r| now_ms.saturating_sub(r.measured_at) < KEEP_MS) {
-                out.insert(c.clone(), json!({ "measuredAt": r.measured_at, "putAt": r.put_at, "by": r.by, "data": r.data }));
+                let mut v = json!({ "measuredAt": r.measured_at, "putAt": r.put_at, "by": r.by, "data": r.data });
+                // The two tiers, as checked when it was put: every display reads the same.
+                if kind == "delay" {
+                    if let Ok((full, late)) = delay_tiers(&r.data, r.measured_at) {
+                        v["fullAt"] = json!(full);
+                        v["lateAt"] = if late == 0 { Value::Null } else { json!(late) };
+                    }
+                }
+                out.insert(c.clone(), v);
             }
         }
         out
@@ -194,6 +238,37 @@ mod tests {
             assert_eq!(s.sweep(now + KEEP_MS), 1);
         }
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_delay_record_carries_its_full_check_and_its_late_recheck() {
+        let s = Share::open(None);
+        let now = 10 * 86_400_000;
+        let full = now - 3_600_000;
+        // A full check, then the late list re-checked 45 min after it: one record, both times.
+        let d = json!({ "devices": [{ "device": "fw1", "delayMinutes": 41 }], "fullAt": full, "lateAt": full + 2_700_000, "late": ["fw1"] });
+        assert!(s.put("delay", "c1", full + 2_700_000, d, "tv", now).unwrap());
+        let got = &s.get("delay", &["c1".to_string()], now)["c1"];
+        assert_eq!((got["fullAt"].clone(), got["lateAt"].clone()), (json!(full), json!(full + 2_700_000)));
+        assert_eq!(got["data"]["late"], json!(["fw1"]));
+        // A page from before the tiers: the record's own time is its full check, no re-check.
+        assert!(s.put("delay", "c2", now - 5, json!({ "devices": [] }), "tv", now).unwrap());
+        let old = &s.get("delay", &["c2".to_string()], now)["c2"];
+        assert_eq!((old["fullAt"].clone(), old["lateAt"].clone()), (json!(now - 5), Value::Null));
+        // Times that contradict the record are refused.
+        let at = now - 10;
+        let over: Vec<String> = (0..=MAX_LATE).map(|i| format!("d{i}")).collect();
+        for (bad, why) in [
+            (json!({ "devices": [], "fullAt": at + 1 }), "a full check after the record"),
+            (json!({ "devices": [], "fullAt": at - 100, "lateAt": at + 1 }), "a re-check after the record"),
+            (json!({ "devices": [], "fullAt": at - 100, "lateAt": at - 200 }), "a re-check before its full check"),
+            (json!({ "devices": [], "fullAt": "today" }), "not a time"),
+            (json!({ "devices": [], "late": "fw1" }), "a late list that is not a list"),
+            (json!({ "devices": [], "late": [1] }), "names only"),
+            (json!({ "devices": [], "late": over }), "over 500"),
+        ] {
+            assert!(s.put("delay", "c3", at, bad, "tv", now).is_err(), "{why}");
+        }
     }
 
     #[test]
