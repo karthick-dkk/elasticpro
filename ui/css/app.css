@@ -1726,12 +1726,14 @@ tr.vs-special td:first-child { font-style: italic; color: var(--text-secondary);
 .pl-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 12px; }
 .pl-grid select, .pl-form select, .pl-form input[type="text"] { max-width: 100%; box-sizing: border-box; }
 .pl-slides { display: grid; gap: 2px; }
+.pl-order { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+.pl-slide-note { font-size: 11px; }
 /* Config › Play's slide list; not the wall's .pl-slide, whose flex alignment this once overrode */
 .pl-cfg-slide { display: flex; align-items: center; gap: 8px; min-height: 32px; }
 .pl-cfg-slide .pl-check { flex: 1 1 auto; }
 .pl-check { display: flex; align-items: center; gap: 7px; font-size: 12.5px; cursor: pointer; }
 .pl-chosen { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 2px 10px; max-height: 160px; overflow: auto; }
-@media (max-width: 560px) { .pl-grid { grid-template-columns: minmax(0, 1fr); } .pl-label { flex-basis: 100%; } }
+@media (max-width: 560px) { .pl-grid, .pl-order { grid-template-columns: minmax(0, 1fr); } .pl-label { flex-basis: 100%; } }
 /* Play */
 /* The NOC wall display (pages/play.js, docs/PLAY.md). No app chrome: html.play hides the
    shell like .embedded reshapes it. Type is in rem, and rem is taken from the viewport, so a

@@ -5037,6 +5037,18 @@ if (viaFleet) {
     links = [{ ...links[0], id: 'l1', name: 'NOC wall' }];
     await go('overview'); await go('settings'); await openSettingsTab('Play'); await settleFor(600);
 
+    // Fleet wall order: the row is there with the default, and saving sends what was chosen.
+    sent.length = 0;
+    ok(await pressIn(view(), /^Edit$/), 'play: no Edit on a display row');
+    ok(/Fleet wall order/.test(modalEl().textContent) && /breaks a tie/.test(modalEl().textContent), 'play: no Fleet wall order row');
+    ok(/every cluster, in the Fleet wall order below/.test(modalEl().textContent), 'play: the Fleet wall slide has no order note');
+    ok([0, 1, 2].map((i) => doc.getElementById(`pl-order-${i}`).value).join() === 'critical,logDelay,volume', 'play: the order does not start at the default');
+    type('pl-order-0', 'disk'); type('pl-order-1', 'name'); type('pl-order-2', 'none');
+    await pressIn(modalEl(), /^Save$/); await settleFor(300);
+    const setOrder = sent.find((m) => m.type === 'PLAY_LINK_SET');
+    ok(!!setOrder && JSON.stringify(setOrder.settings.fleetOrder) === '["disk","name"]', `play: the order save sent ${JSON.stringify(setOrder)}`);
+    await closeAll(); await settleFor(300);
+
     // New display link: permanent by default, the URL shown once.
     sent.length = 0;
     ok(await pressIn(view(), /^New display link/), 'play: no New display link button');

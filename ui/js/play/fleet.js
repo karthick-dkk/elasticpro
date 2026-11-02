@@ -12,6 +12,8 @@ import { kpi, unknown, minutes, fitRows, openFor, clockText } from './parts.js';
 import { heldLine } from '../core/alert-groups.js';
 import { toneOfCounts } from '../core/alert-levels.js';
 import { tileBlink, nodeDiskCritical } from './status.js';
+import { FLEET_KEYS, readFleetOrder } from '../core/play-config.js';
+import { cardsOf } from './volume.js';
 
 export const id = 'fleet';
 export const title = 'Fleet';
@@ -77,6 +79,16 @@ function strip(ctx) {
       full ? `${full.name} · ${full.cluster}` : null, full ? (nodeDiskCritical(full.pct, full) ? 'red' : full.pct >= full.low ? 'yellow' : '') : ''));
 }
 
+/**
+ * The delay a cluster's tile prints (the median of its measured devices), or null when not
+ * measured. The tile and the `logDelay` order key both call this: one definition.
+ */
+export function tileDelayMinutes(ctx, c) {
+  const del = ctx.delay.get(c.id);
+  const sum = del && del.summary;
+  return sum && typeof sum.median === 'number' ? sum.median : null;
+}
+
 function tile(ctx, c) {
   const s = ctx.st.get(c.id);
   const d = ctx.data(c.id) || {};
@@ -87,7 +99,8 @@ function tile(ctx, c) {
   const sum = del && del.summary;
   const present = nodes && Array.isArray(nodes.present) ? nodes.present.length : (d.health ? d.health.number_of_nodes : null);
   const expected = nodes && Array.isArray(nodes.expected) && nodes.expected.length ? nodes.expected.length : null;
-  const delayTone = sum && sum.median !== null ? STATUS[classify(sum.median, ctx.delayT)].cls : 'grey';
+  const delayMin = tileDelayMinutes(ctx, c);
+  const delayTone = delayMin !== null ? STATUS[classify(delayMin, ctx.delayT)].cls : 'grey';
   const blink = tileBlink(s, ctx.blink(c.id));
   return h(`div.pl-tile.${s.tone}${blink ? `.${blink}` : ''}`, { dataset: { cluster: c.id } },
     h('div.pl-tname', { title: c.name }, c.name),
@@ -95,7 +108,7 @@ function tile(ctx, c) {
     h('div.pl-tfig',
       h('span', h('b', present === null || present === undefined ? '–' : String(present)), expected ? `/${expected}` : '', ' nodes'),
       h('span', s.fullest ? h('b', `${Math.round(s.fullest.pct)} %`) : unknown('–'), ' disk'),
-      h('span', sum && sum.median !== null ? h(`b.${delayTone}`, minutes(sum.median)) : unknown(del && del.error ? 'not measurable' : 'not measured', del && del.error ? del.error : ''), ' delay'),
+      h('span', delayMin !== null ? h(`b.${delayTone}`, minutes(delayMin)) : unknown(del && del.error ? 'not measurable' : 'not measured', del && del.error ? del.error : ''), ' delay'),
       h('span', h(`b${toneOfCounts(a) ? `.${toneOfCounts(a)}` : ''}`, String(a.total)), ' alerts')),
     h('div.pl-tdev', { title: `Devices by delay: under ${ctx.watch.delayYellowFromMin} min, ${ctx.watch.delayYellowFromMin}–${ctx.watch.delayRedAboveMin} min, over ${ctx.watch.delayRedAboveMin} min` },
       sum ? [h('span.pl-dev.green', String(sum.by.OK || 0)), h('span.pl-dev.yellow', String(sum.by.DELAYED || 0)), h('span.pl-dev.red', String(sum.by.CRITICAL || 0))]
@@ -117,9 +130,56 @@ export function heldNote(ctx, id) {
 /** Smaller tiles for a bigger wall, so a fleet fits one screen. */
 const density = (n) => (n <= 8 ? 'xl' : n <= 15 ? 'l' : n <= 30 ? 'm' : n <= 60 ? 's' : 'xs');
 
+/**
+ * A cluster's figure for one order key, or null when it is not known (never 0). Each is the
+ * figure the rest of Play already shows: `critical` is the status rank (status.js, the one
+ * definition of "what is wrong"), `logDelay` the delay the tile prints
+ * (tileDelayMinutes), `volume` yesterday's volume (the Volume
+ * slide's figure), `disk` the fullest disk (status.fullest), `alerts` the open count on the tile.
+ */
+export function fleetFigure(ctx, c, key) {
+  const s = ctx.st.get(c.id);
+  switch (key) {
+    case 'critical': return s.rank;
+    case 'logDelay': return tileDelayMinutes(ctx, c);
+    case 'volume': {
+      const v = ctx.volume && ctx.volume.get(c.id);
+      return v && v.reply ? cardsOf(v.reply).yesterday : null;
+    }
+    case 'disk': return s.fullest ? s.fullest.pct : null;
+    case 'alerts': return alertCounts(ctx.openBy.get(c.id) || []).total;
+    default: return null;
+  }
+}
+
+const byName = (a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' });
+
+/**
+ * The wall's order: the keys in turn, each largest first (name A to Z); a cluster with no
+ * figure for a key goes after every cluster that has one; the cluster name breaks a final tie.
+ */
+export function orderFleet(ctx, clusters, order) {
+  const keys = readFleetOrder(order);
+  const fig = new Map(clusters.map((c) => [c.id, keys.map((k) => (k === 'name' ? null : fleetFigure(ctx, c, k)))]));
+  return [...clusters].sort((x, y) => {
+    for (let i = 0; i < keys.length; i++) {
+      if (keys[i] === 'name') { const n = byName(x, y); if (n) return n; continue; }
+      const a = fig.get(x.id)[i], b = fig.get(y.id)[i];
+      if (a === null || b === null) { if (a === b) continue; return a === null ? 1 : -1; }
+      if (a !== b) return b - a;
+    }
+    return byName(x, y);
+  });
+}
+
+const SHORT = { critical: 'critical', logDelay: 'delay', volume: 'volume', disk: 'disk', alerts: 'alerts', name: 'name' };
+/** "critical › delay › volume", for the slide header chip. */
+export const orderText = (order) => readFleetOrder(order).map((k) => SHORT[k]).join(' › ');
+/** The full wording, for the chip's title. */
+export const orderTitle = (order) => readFleetOrder(order).map((k) => FLEET_KEYS.find(([id]) => id === k)[1]).join(' › ');
+
 export function render(ctx) {
-  const list = [...ctx.clusters].sort((x, y) => ctx.st.get(y.id).rank - ctx.st.get(x.id).rank
-    || x.name.localeCompare(y.name, undefined, { numeric: true, sensitivity: 'base' }));
+  const list = orderFleet(ctx, ctx.clusters, ctx.display && ctx.display.fleetOrder);
   const tiles = list.map((c) => tile(ctx, c));
   const grid = h(`div.pl-tiles.${density(list.length)}`, tiles);
   ctx.afterMount(() => fitRows(grid, tiles, (n) => h('div.pl-tile.pl-more', `+${n} more`)));

@@ -13,6 +13,7 @@
 
 import { bridge } from '../core/transport.js';
 import { isUnsupported } from '../core/volume-daily.js';
+import { readFleetOrder } from '../core/play-config.js';
 
 async function send(msg) {
   let res;
@@ -93,6 +94,7 @@ export function readPlayState(res) {
     dwellSec,
     criticalTakesScreen: d.criticalTakesScreen !== false,
     spotlightAll: !!d.spotlightAll,
+    fleetOrder: readFleetOrder(d.fleetOrder),
     theme: d.theme || DISPLAY_DEFAULTS.theme,
     sound: d.sound === 'chime' || d.sound === true ? 'chime' : 'off',
     // A zoom Config fixed for this display; null means "the one it was last left at".

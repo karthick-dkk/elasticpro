@@ -51,6 +51,25 @@ export const SLIDES = [
   { id: 'backups', label: 'Backups' },
   { id: 'volume', label: 'Volume and capacity' },
 ];
+/**
+ * What the fleet wall can be ordered by (docs/PLAY.md "Fleet wall order"), the words the
+ * Config › Play selects use. The core's FLEET_KEYS is the same list.
+ */
+export const FLEET_KEYS = [
+  ['critical', 'Critical problems'], ['logDelay', 'Log delay'], ['volume', 'Volume used yesterday'],
+  ['disk', 'Disk used'], ['alerts', 'Open alerts'], ['name', 'Name'],
+];
+export const FLEET_ORDER_DEFAULT = ['critical', 'logDelay', 'volume'];
+
+/** A display's fleetOrder: known, distinct keys, at most three; the default when nothing usable is there. */
+export function readFleetOrder(raw) {
+  const out = [];
+  for (const k of Array.isArray(raw) ? raw : []) {
+    if (FLEET_KEYS.some(([id]) => id === k) && !out.includes(k) && out.length < 3) out.push(k);
+  }
+  return out.length ? out : [...FLEET_ORDER_DEFAULT];
+}
+
 export const DWELL = [20, 10, 30, 60];
 export const ZOOMS = [[null, '100 % · the TV keeps what was last set on it'], [0.8, '80 %'], [0.9, '90 %'], [1.1, '110 %'], [1.25, '125 %'], [1.5, '150 %']];
 export const EXPIRES = [['permanent', 'Permanent (until revoked)'], ['90', 'After 90 days'], ['30', 'After 30 days'], ['365', 'After 1 year']];
@@ -156,6 +175,7 @@ export function displaySettings(raw) {
     theme: r.theme === 'light' ? 'light' : 'dark',
     sound: r.sound === 'chime' ? 'chime' : 'off',
     zoom: ZOOMS.some(([z]) => z === r.zoom) ? r.zoom : null,
+    fleetOrder: readFleetOrder(r.fleetOrder),
   };
 }
 
@@ -189,7 +209,7 @@ export function moveSlide(slides, i, dir) {
 export function settingsPayload(s) {
   const d = displaySettings(s);
   return { slides: d.slides.map((x) => ({ id: x.id, show: x.show, dwellSec: x.dwellSec })), criticalTakesScreen: d.criticalTakesScreen,
-    spotlightAll: d.spotlightAll, theme: d.theme, sound: d.sound, zoom: d.zoom };
+    spotlightAll: d.spotlightAll, theme: d.theme, sound: d.sound, zoom: d.zoom, fleetOrder: d.fleetOrder };
 }
 
 /* ------------------------------- watch rules --------------------------------- */

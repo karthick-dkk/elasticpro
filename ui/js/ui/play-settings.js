@@ -15,7 +15,7 @@ import { toast } from './menu.js';
 import { MANAGED_NOTE } from '../core/managed.js';
 import {
   NO_PLAY, SLIDES, DWELL, ZOOMS, EXPIRES, SPOTLIGHT_WHEN, playConfigGet, playConfigSet, playLinkList, playLinkCreate, playLinkRevoke,
-  playLinkSet, lockedFields, linkPayload, scopeText, slidesText, displaySettings, moveSlide, settingsPayload, watchRules, watchProblems,
+  playLinkSet, lockedFields, linkPayload, scopeText, slidesText, displaySettings, moveSlide, settingsPayload, watchRules, watchProblems, FLEET_KEYS,
   watchPayload, excludeAdd, replacePayload,
 } from '../core/play-config.js';
 
@@ -171,6 +171,7 @@ function editDisplay(l) {
     mount(list, ...slides.map((s, i) => h('div.pl-cfg-slide',
       h('label.pl-check', h('input', { type: 'checkbox', id: `pl-show-${s.id}`, checked: s.show,
         onchange: (e) => { s.show = e.target.checked; } }), SLIDES.find((x) => x.id === s.id).label),
+      s.id === 'fleet' ? h('span.muted.pl-slide-note', 'every cluster, in the Fleet wall order below') : null,
       h('span.muted', 'stays'),
       Object.assign(sel(`pl-dwell-${s.id}`, s.dwellSec, [...new Set([...DWELL, s.dwellSec])].map((n) => [n, `${n} s`])),
         { onchange: (e) => { s.dwellSec = Number(e.target.value); } }),
@@ -180,6 +181,10 @@ function editDisplay(l) {
   draw();
   const body = h('div.pl-form',
     h('div', { style: { fontWeight: 620, fontSize: '12.5px' } }, 'Slides, in order'), list,
+    h('div.field', 'Fleet wall order', h('div.pl-order',
+      ...[0, 1, 2].map((i) => sel(`pl-order-${i}`, d.fleetOrder[i] || 'none',
+        [...(i ? [['none', '(none)']] : []), ...FLEET_KEYS.map(([k, t]) => [k, `${['1st', '2nd', '3rd'][i]}: ${t}`])]))),
+      h('span.muted', { style: { fontSize: '11px' } }, 'Largest first for each; the cluster name breaks a tie.')),
     h('div.pl-grid',
       field('A critical alert', sel('pl-critical', d.criticalTakesScreen ? 'takes' : 'bar', [['takes', 'Takes the screen, held 5 min'], ['bar', 'Red bar only']])),
       field('Cluster spotlight', sel('pl-spot', d.spotlightAll ? 'every' : 'critical', [['critical', 'Clusters with a critical problem (automatic)'], ['every', 'Every cluster, by name']])),
@@ -195,6 +200,7 @@ function editDisplay(l) {
           slides: slides.map((s) => ({ ...s, dwellSec: Number(val(`pl-dwell-${s.id}`)) || s.dwellSec, show: checked(`pl-show-${s.id}`) })),
           criticalTakesScreen: val('pl-critical') === 'takes', spotlightAll: val('pl-spot') === 'every',
           theme: val('pl-theme'), sound: val('pl-sound'), zoom: zoom === 'keep' ? null : Number(zoom),
+          fleetOrder: [0, 1, 2].map((i) => val(`pl-order-${i}`)).filter((k) => k !== 'none'),
         });
         const r = await playLinkSet(l.id, next);
         if (!r.ok) return ctx.msg(r.message || 'The server refused the settings');

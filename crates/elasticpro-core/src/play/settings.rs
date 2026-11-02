@@ -26,6 +26,9 @@ pub const NODE_BLINK: &[&str] = &["untilBack", "untilAck", "off"];
 pub const WHEN_EMPTY: &[&str] = &["skip", "allHealthy", "everyCluster"];
 pub const THEMES: &[&str] = &["dark", "light"];
 pub const SOUNDS: &[&str] = &["off", "chime"];
+/// What the fleet wall can be ordered by (docs/PLAY.md "Fleet wall order").
+pub const FLEET_KEYS: &[&str] = &["critical", "logDelay", "volume", "disk", "alerts", "name"];
+const FLEET_ORDER_DEFAULT: &[&str] = &["critical", "logDelay", "volume"];
 
 /// The config.txt keys of Play, in config.txt.example's order.
 pub const KEYS: &[&str] = &[
@@ -131,6 +134,8 @@ pub struct Display {
     pub sound: String,
     /// Fixed by the administrator; `None`: the TV keeps what was last set on it (`PLAY_ZOOM_SET`).
     pub zoom: Option<f64>,
+    /// The fleet wall's order: one to three of `FLEET_KEYS`, each largest first (name A to Z).
+    pub fleet_order: Vec<String>,
 }
 
 impl Default for Display {
@@ -142,6 +147,7 @@ impl Default for Display {
             theme: "dark".into(),
             sound: "off".into(),
             zoom: None,
+            fleet_order: FLEET_ORDER_DEFAULT.iter().map(|s| s.to_string()).collect(),
         }
     }
 }
@@ -198,6 +204,15 @@ impl Display {
         one_of(&format!("{at}.sound"), &self.sound, SOUNDS)?;
         if let Some(z) = self.zoom {
             check_zoom(&format!("{at}.zoom"), z)?;
+        }
+        if self.fleet_order.is_empty() || self.fleet_order.len() > 3 {
+            return Err(format!("{at}.fleetOrder: one to three keys"));
+        }
+        for (i, k) in self.fleet_order.iter().enumerate() {
+            one_of(&format!("{at}.fleetOrder"), k, FLEET_KEYS)?;
+            if self.fleet_order[..i].contains(k) {
+                return Err(format!("{at}.fleetOrder: {k:?} is listed twice"));
+            }
         }
         Ok(())
     }
@@ -512,7 +527,29 @@ mod tests {
         assert_eq!(v["defaultDisplay"]["slides"][0], json!({ "id": "fleet", "show": true, "dwellSec": 20 }));
         assert_eq!(v["defaultDisplay"]["criticalTakesScreen"], json!(true));
         assert_eq!(v["defaultDisplay"]["zoom"], Value::Null);
+        assert_eq!(v["defaultDisplay"]["fleetOrder"], json!(["critical", "logDelay", "volume"]));
         assert_eq!(s.zoom_for(Some("x")), 1.0);
+    }
+
+    #[test]
+    fn fleet_order_defaults_and_is_checked() {
+        // An old file, written before the field existed, reads as the default.
+        let old: Display = serde_json::from_value(json!({ "theme": "light" })).unwrap();
+        assert_eq!(old.fleet_order, vec!["critical", "logDelay", "volume"]);
+        let cur = PlaySettings::default();
+        let none = Settings::default();
+        let ok = apply_change(&cur, &json!({ "defaultDisplay": { "fleetOrder": ["name"] } }), &none, "kd", 1).unwrap();
+        assert_eq!(ok.default_display.fleet_order, vec!["name"]);
+        let ok = apply_change(&cur, &json!({ "defaultDisplay": { "fleetOrder": ["disk", "alerts", "name"] } }), &none, "kd", 1).unwrap();
+        assert_eq!(ok.default_display.fleet_order, vec!["disk", "alerts", "name"]);
+        for bad in [
+            json!({ "defaultDisplay": { "fleetOrder": [] } }),
+            json!({ "defaultDisplay": { "fleetOrder": ["size"] } }),
+            json!({ "defaultDisplay": { "fleetOrder": ["disk", "disk"] } }),
+            json!({ "defaultDisplay": { "fleetOrder": ["critical", "logDelay", "volume", "name"] } }),
+        ] {
+            assert!(apply_change(&cur, &bad, &none, "kd", 1).is_err(), "{bad}");
+        }
     }
 
     #[test]
