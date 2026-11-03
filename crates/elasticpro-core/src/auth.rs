@@ -628,6 +628,10 @@ pub fn required_role(msg_type: &str) -> Option<Role> {
         // everybody sees, so an operator's (audited).
         "VOLUME_LAYOUT_GET" => Some(Role::Guest),
         "VOLUME_LAYOUT_SET" => Some(Role::Operator),
+        // The Config card's preview of an index pattern before anybody saves it: an index
+        // listing of a pattern the caller types, so the settings' owner's — an admin's (a
+        // limited admin only on the clusters they see: bridge `gate_cluster`).
+        "VOLUME_PATTERN_CHECK" => Some(Role::Admin),
         // Volume reports: generating one is reading the record (a user's), and the queue is
         // shown to everyone who sees the clusters it covers. Stopping somebody's job, the
         // number of slots, the mail server and the mailed schedule are an administrator's:
@@ -2554,6 +2558,9 @@ mod tests {
         assert_eq!(required_role("VOLUME_LAYOUT_SET"), Some(Role::Operator));
         assert!(authorize(Role::User, "VOLUME_LAYOUT_SET", "", "").is_err());
         assert!(authorize(Role::Operator, "VOLUME_LAYOUT_SET", "", "").is_ok());
+        assert_eq!(required_role("VOLUME_PATTERN_CHECK"), Some(Role::Admin));
+        assert!(authorize(Role::Operator, "VOLUME_PATTERN_CHECK", "", "").is_err());
+        assert!(authorize(Role::Admin, "VOLUME_PATTERN_CHECK", "", "").is_ok());
     }
 
     #[test]

@@ -305,3 +305,53 @@ pub async fn endless_body(total: u64, declare: bool) -> (u16, Arc<AtomicUsize>) 
     });
     (port, sent)
 }
+
+/// What a volume day search under an index pattern (0.3.53) asks for, read off its body:
+/// the indices dated on the day (counted in full), the time-split ones, and the UTC day
+/// (`YYYY-MM-DD`) the time-split ones are counted on. `None` for a request without a query
+/// (the legacy per-day search names its day in the path).
+pub struct DaySearch {
+    pub dated: Vec<String>,
+    pub split: Vec<String>,
+    pub day: Option<String>,
+}
+
+pub fn day_search(hit: &Hit) -> Option<DaySearch> {
+    if !hit.path.contains("/_search") {
+        return None;
+    }
+    let body: serde_json::Value = serde_json::from_str(&hit.body).ok()?;
+    if body.pointer("/aggs/days").is_some() {
+        return None;
+    }
+    let q = body.get("query")?;
+    let names = |v: &serde_json::Value| -> Vec<String> {
+        v.pointer("/terms/_index").and_then(|a| a.as_array()).into_iter().flatten()
+            .filter_map(|x| x.as_str().map(String::from)).collect()
+    };
+    let split_part = |v: &serde_json::Value| -> (Vec<String>, Option<String>) {
+        let f = v.pointer("/bool/filter").cloned().unwrap_or_default();
+        let day = f.get(1).and_then(|r| r.get("range")).and_then(|r| r.as_object())
+            .and_then(|m| m.values().next().cloned())
+            .and_then(|r| r.get("gte").and_then(|g| g.as_str().map(String::from)));
+        (f.get(0).map(names).unwrap_or_default(), day)
+    };
+    if q.get("terms").is_some() {
+        return Some(DaySearch { dated: names(q), split: vec![], day: None });
+    }
+    if let Some(should) = q.pointer("/bool/should").and_then(|s| s.as_array()) {
+        let (split, day) = should.get(1).map(split_part).unwrap_or_default();
+        return Some(DaySearch { dated: should.first().map(names).unwrap_or_default(), split, day });
+    }
+    let (split, day) = split_part(q);
+    Some(DaySearch { dated: vec![], split, day })
+}
+
+/// The days a volume time-split histogram (0.3.53) is asked about: the indices it names.
+/// `None` for any other request.
+pub fn histogram_indices(hit: &Hit) -> Option<Vec<String>> {
+    let body: serde_json::Value = serde_json::from_str(&hit.body).ok()?;
+    body.pointer("/aggs/days/date_histogram")?;
+    Some(body.pointer("/query/bool/filter/0/terms/_index").and_then(|a| a.as_array()).into_iter().flatten()
+        .filter_map(|x| x.as_str().map(String::from)).collect())
+}

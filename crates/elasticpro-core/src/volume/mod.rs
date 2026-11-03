@@ -1,10 +1,11 @@
 //! The daily index-volume record (docs/VOLUME.md is the contract; read it first).
 //!
 //! Once a day — hosted only, at `collectAt` server local time — and whenever somebody
-//! presses Refresh now, the core asks each cluster three things: `_cat/indices` on the
-//! day-index glob (sizes per day, from the index names), `_field_caps` (which field each
-//! breakdown row resolves to), and one aggregation search per day that is not finished
-//! yet. What comes back is kept on disk per cluster and month, so the record outlives the
+//! presses Refresh now, the core asks each cluster: `_cat/indices` on the index pattern
+//! (sizes per day, from the dates in the index names), `_field_caps` (which field each
+//! breakdown row resolves to), one `date_histogram` when some index has no date in its name
+//! (the days its documents fall on), and one aggregation search per day that is not
+//! finished yet. What comes back is kept on disk per cluster and month, so the record outlives the
 //! indices it was measured from: a day whose indices were deleted stays, `live: false`.
 //!
 //! The figures the pages, the CSV and the mails show are worked out here, once
@@ -14,8 +15,10 @@
 //! ```text
 //!   tick (60 s, hosted) ─┐            VOLUME_RUN (anyone, ≤ 1/min/cluster) ─┐
 //!                        └── due? ──▶ run(cluster) ◀────────────────────────┘
-//!                                      ├── _cat/indices/<glob>     totals, live flags
-//!                                      ├── _field_caps             rows resolved
+//!                                      ├── _cat/indices/<pattern>  totals, live flags
+//!                                      ├── _field_caps             rows (and time field) resolved
+//!                                      ├── date_histogram          days of the time-split indices
+//!                                      │                           (only when some index has no date)
 //!                                      ├── _search × unfinished    docs, sums, terms
 //!                                      └── month files + state.json, then prune
 //! ```
@@ -49,6 +52,38 @@ pub const DAILY_HIDDEN: &[&str] = &["totalBytes", "topTag", "topSourceIp"];
 pub const MONTHLY_COLUMNS: &[&str] = &[
     "month", "daysWithData", "priBytes", "topExtra", "avgPerDay", "peakDay", "docs", "eventBytes",
     "subBytes", "topSourceHost", "topForwarder", "from",
+];
+
+/// Columns of Reports › Capacity & retention's *Storage plan* table (docs/REPORTS.md
+/// board 4), in their default order. `cluster` is always first and cannot be hidden.
+pub const CAPACITY_COLUMNS: &[&str] = &[
+    "cluster", "perDay", "buffered", "liveRetention", "livePolicy", "liveDisk", "liveRequired", "liveShortfall",
+    "backupPolicy", "backupDisk", "backupRequired", "backupShortfall",
+];
+/// Columns of Reports › Overview's *By cluster* table (docs/REPORTS.md board 1), in their
+/// default order. `cluster` is always first and cannot be hidden.
+pub const OVERVIEW_COLUMNS: &[&str] = &[
+    "cluster", "type", "yesterday", "avg7", "vsAvg", "monthSoFar", "diskUsed", "diskLasts", "liveRetention",
+    "backups", "daily",
+];
+
+/// A table `VOLUME_LAYOUT_GET/SET` keeps a shared layout for.
+pub struct LayoutTable {
+    pub name: &'static str,
+    /// Its columns, in their default order.
+    pub columns: &'static [&'static str],
+    /// Hidden by default.
+    pub hidden: &'static [&'static str],
+    /// Always first and always shown.
+    pub locked: Option<&'static str>,
+}
+
+/// Every table with a shared layout. Any other table name is refused.
+pub const LAYOUT_TABLES: &[LayoutTable] = &[
+    LayoutTable { name: "daily", columns: DAILY_COLUMNS, hidden: DAILY_HIDDEN, locked: None },
+    LayoutTable { name: "monthly", columns: MONTHLY_COLUMNS, hidden: &[], locked: None },
+    LayoutTable { name: "capacity", columns: CAPACITY_COLUMNS, hidden: &[], locked: Some("cluster") },
+    LayoutTable { name: "overview", columns: OVERVIEW_COLUMNS, hidden: &[], locked: Some("cluster") },
 ];
 
 /// A column's name when the shared layout gives it none (`labels` in `VOLUME_LAYOUT_*`).
@@ -94,12 +129,24 @@ pub struct Day {
     pub live: bool,
     pub aggregated_at: Option<i64>,
     pub totals_at: i64,
+    /// Indices that count on this day: the ones dated by name, plus the time-split ones
+    /// that had documents on it (`unmeasured_size_indices`).
     pub indices: u64,
-    pub pri_bytes: u64,
-    pub total_bytes: u64,
+    /// `_cat/indices` sizes of the indices dated by name on this day. `None` when the day
+    /// has none (every document came from indices split by time, whose size per day
+    /// Elasticsearch does not report). Never the whole day's size while
+    /// `unmeasured_size_indices` > 0: read it through `Day::sizes`.
+    pub pri_bytes: Option<u64>,
+    pub total_bytes: Option<u64>,
     pub docs: Option<u64>,
     pub event_bytes: Option<u64>,
     pub sub_bytes: Option<u64>,
+    /// Indices split into days by time that had documents on this day (from its search):
+    /// their documents and event bytes are in the figures, their size is not in
+    /// `pri_bytes`/`total_bytes`. 0 on a day dated by name only, and on every record
+    /// written before 0.3.53.
+    #[serde(default)]
+    pub unmeasured_size_indices: u64,
     #[serde(default)]
     pub sources: BTreeMap<String, SourceTotals>,
     #[serde(default)]
@@ -107,15 +154,41 @@ pub struct Day {
     pub error: Option<String>,
 }
 
+impl Day {
+    /// The day's primary and total size **as a figure for the whole day**: `None` (not
+    /// measured) while any index that counts on it was split by time. The one definition
+    /// every derived figure reads (`derive`); the record itself keeps the dated part.
+    pub fn sizes(&self) -> (Option<u64>, Option<u64>) {
+        whole(self.pri_bytes, self.total_bytes, self.unmeasured_size_indices)
+    }
+}
+
+impl SourceTotals {
+    /// As `Day::sizes`, for one source.
+    pub fn sizes(&self) -> (Option<u64>, Option<u64>) {
+        whole(self.pri_bytes, self.total_bytes, self.unmeasured_size_indices)
+    }
+}
+
+fn whole(pri: Option<u64>, total: Option<u64>, unmeasured: u64) -> (Option<u64>, Option<u64>) {
+    if unmeasured > 0 {
+        (None, None)
+    } else {
+        (pri, total)
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SourceTotals {
     pub indices: u64,
-    pub pri_bytes: u64,
-    pub total_bytes: u64,
+    pub pri_bytes: Option<u64>,
+    pub total_bytes: Option<u64>,
     pub docs: Option<u64>,
     pub event_bytes: Option<u64>,
     pub sub_bytes: Option<u64>,
+    #[serde(default)]
+    pub unmeasured_size_indices: u64,
 }
 
 /// One breakdown row on one day. `error` set means the field could not be resolved: the

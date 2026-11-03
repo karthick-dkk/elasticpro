@@ -47,6 +47,40 @@ impl SizeBasis {
     }
 }
 
+/// Where an index's day comes from (docs/VOLUME.md "What counts").
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum DayFrom {
+    /// An index whose name carries `YYYY.MM.DD` counts on that day in full; one without a
+    /// date in its name is split into days by its documents' time field.
+    #[default]
+    Name,
+    /// Every index is split into days by its documents' time field.
+    Time,
+}
+
+impl DayFrom {
+    pub fn parse(s: &str) -> Option<DayFrom> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "name" => Some(DayFrom::Name),
+            "time" => Some(DayFrom::Time),
+            _ => None,
+        }
+    }
+}
+
+/// Which of the two ways of naming the indices is in force, for the settings page: the
+/// legacy `indexFormat` (set at a later layer than any `indexPattern`), an `indexPattern`
+/// somebody set, or the built-in pattern.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum PatternSource {
+    Format,
+    Pattern,
+    #[default]
+    Default,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Extra {
@@ -57,7 +91,17 @@ pub struct Extra {
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VolumeSettings {
+    /// The legacy index-name format (`logstash-*-YYYY.MM.DD`). In force only when
+    /// `pattern_source` is `Format`.
     pub index_format: String,
+    /// One or more comma-separated index patterns (`logstash-*`), no date part needed.
+    pub index_pattern: String,
+    pub day_from: DayFrom,
+    /// The documents' time field, for the indices split into days by time.
+    pub time_field: String,
+    /// Which of `index_format` / `index_pattern` decides what counts. Worked out by `apply`
+    /// (the later layer that sets either wins; one layer setting both: the pattern).
+    pub pattern_source: PatternSource,
     pub tag: Vec<String>,
     pub forwarder: Vec<String>,
     pub source_host: Vec<String>,
@@ -79,6 +123,10 @@ impl Default for VolumeSettings {
     fn default() -> VolumeSettings {
         VolumeSettings {
             index_format: "logstash-*-YYYY.MM.DD".into(),
+            index_pattern: "logstash-*".into(),
+            day_from: DayFrom::Name,
+            time_field: "@timestamp".into(),
+            pattern_source: PatternSource::Default,
             tag: list(&["tag1", "labels.tag1", "tags"]),
             forwarder: list(&["fwd_tag", "fwdtag", "observer.name"]),
             source_host: list(&["src_hostname", "host.name"]),
@@ -97,6 +145,9 @@ impl Default for VolumeSettings {
 /// config.txt key → the settings key it manages → the name PING carries it under.
 pub const MANAGED: &[(&str, &str, &str)] = &[
     ("UI_VOLUME_INDEX_FORMAT", "indexFormat", "volumeIndexFormat"),
+    ("UI_VOLUME_INDEX_PATTERN", "indexPattern", "volumeIndexPattern"),
+    ("UI_VOLUME_DAY_FROM", "dayFrom", "volumeDayFrom"),
+    ("UI_VOLUME_TIME_FIELD", "timeField", "volumeTimeField"),
     ("UI_VOLUME_TAG_FIELDS", "tag", "volumeTag"),
     ("UI_VOLUME_FORWARDER_FIELDS", "forwarder", "volumeForwarder"),
     ("UI_VOLUME_HOST_FIELDS", "sourceHost", "volumeSourceHost"),
@@ -137,13 +188,81 @@ pub fn index_format_problem(f: &str) -> Option<&'static str> {
     None
 }
 
+/// The most patterns one `indexPattern` may list.
+pub const MAX_PATTERNS: usize = 20;
+
+/// The patterns of an `indexPattern`, trimmed.
+pub fn split_patterns(p: &str) -> Vec<String> {
+    p.split(',').map(str::trim).filter(|s| !s.is_empty()).map(String::from).collect()
+}
+
+/// Why an `indexPattern` cannot be used, if it cannot. One or more comma-separated
+/// patterns, each an index name, alias, data stream or wildcard pattern as Elasticsearch
+/// takes it in a path; a later one may exclude (`logstash-*,-logstash-test-*`). No date
+/// part is needed.
+pub fn index_pattern_problem(p: &str) -> Option<String> {
+    if p.trim().is_empty() {
+        return Some("names no index pattern".into());
+    }
+    if p.split(',').any(|s| s.trim().is_empty()) {
+        return Some("has an empty pattern between commas".into());
+    }
+    let parts = split_patterns(p);
+    if parts.len() > MAX_PATTERNS {
+        return Some(format!("lists more than {MAX_PATTERNS} patterns"));
+    }
+    for (i, x) in parts.iter().enumerate() {
+        let body = match x.strip_prefix('-') {
+            Some(rest) if i > 0 => rest,
+            Some(_) => return Some(format!("{x:?}: the first pattern cannot be an exclusion")),
+            None => x.as_str(),
+        };
+        if body.is_empty() || body.len() > 255 {
+            return Some(format!("{x:?}: a pattern is 1 to 255 characters"));
+        }
+        if body.starts_with(['_', '+', '-']) {
+            return Some(format!("{x:?}: an index name cannot start with _, + or -"));
+        }
+        if body.chars().any(|c| c.is_control() || c.is_whitespace() || matches!(c, '/' | '\\' | '?' | '#' | '"' | '<' | '>' | '|' | ':')) {
+            return Some(format!("{x:?}: no spaces, slashes, quotes, ?, #, <, >, | or :"));
+        }
+    }
+    None
+}
+
+/// Why a `timeField` cannot be used, if it cannot: it is one field name.
+pub fn time_field_problem(f: &str) -> Option<&'static str> {
+    if f.is_empty() || f.len() > 255 || f.chars().any(|c| c.is_control() || c.is_whitespace() || matches!(c, ',' | '"' | '*')) {
+        return Some("must be one field name: no spaces, commas, quotes or *");
+    }
+    None
+}
+
 impl VolumeSettings {
     /// Lay one layer over this one. Unknown keys and values that do not fit are ignored.
+    ///
+    /// `indexPattern` and the legacy `indexFormat`: whichever the later layer sets is in
+    /// force (`pattern_source`); a layer that sets both means the pattern.
     pub fn apply(&mut self, layer: &Value) {
         let Some(m) = layer.as_object() else { return };
         if let Some(f) = m.get("indexFormat").and_then(Value::as_str).map(str::trim) {
             if index_format_problem(f).is_none() {
                 self.index_format = f.to_string();
+                self.pattern_source = PatternSource::Format;
+            }
+        }
+        if let Some(p) = m.get("indexPattern").and_then(Value::as_str) {
+            if index_pattern_problem(p).is_none() {
+                self.index_pattern = split_patterns(p).join(",");
+                self.pattern_source = PatternSource::Pattern;
+            }
+        }
+        if let Some(d) = m.get("dayFrom").and_then(Value::as_str).and_then(DayFrom::parse) {
+            self.day_from = d;
+        }
+        if let Some(t) = m.get("timeField").and_then(Value::as_str).map(str::trim) {
+            if time_field_problem(t).is_none() {
+                self.time_field = t.to_string();
             }
         }
         for (key, slot) in [
@@ -553,6 +672,49 @@ mod tests {
         let (w, _) = resolve(&layers_from_message(&whole, None, false), &Settings::default());
         assert_eq!((w.size_basis, w.extra.fields.clone()), (SizeBasis::Total, VolumeSettings::default().extra.fields),
                    "volume set: the legacy list is not read, as in the file");
+    }
+
+    /// `indexPattern` (default `logstash-*`) and the legacy `indexFormat`: the later layer
+    /// wins, config.txt last; one layer with both means the pattern. `patternSource` says
+    /// which is in force.
+    #[test]
+    fn the_pattern_or_the_legacy_format_whichever_the_later_layer_sets() {
+        let none = Settings::default();
+        let d = VolumeSettings::default();
+        let v = serde_json::to_value(&d).unwrap();
+        assert_eq!((v["indexPattern"].as_str(), v["dayFrom"].as_str(), v["timeField"].as_str(), v["patternSource"].as_str()),
+                   (Some("logstash-*"), Some("name"), Some("@timestamp"), Some("default")));
+        // A clusters file that names only the format: exactly as before 0.3.53.
+        let fmt = json!({ "defaults": { "volume": { "indexFormat": "logs-*-YYYY.MM.DD" } } });
+        let (s, _) = resolve(&layers_from_config(&fmt, None), &none);
+        assert_eq!((s.pattern_source, s.index_format.as_str()), (PatternSource::Format, "logs-*-YYYY.MM.DD"));
+        // A pattern in a cluster override beats the defaults' format; in the same layer as a
+        // format, the pattern wins.
+        let both = json!({ "defaults": { "volume": { "indexFormat": "logs-*-YYYY.MM.DD",
+                                                     "overrides": { "a": { "indexPattern": "app-*, web-*" } } } } });
+        let (a, _) = resolve(&layers_from_config(&both, Some("a")), &none);
+        assert_eq!((a.pattern_source, a.index_pattern.as_str()), (PatternSource::Pattern, "app-*,web-*"));
+        let mut one = VolumeSettings::default();
+        one.apply(&json!({ "indexFormat": "logs-*-YYYY.MM.DD", "indexPattern": "logs-*" }));
+        assert_eq!(one.pattern_source, PatternSource::Pattern);
+        // config.txt: UI_VOLUME_INDEX_FORMAT alone is the legacy behaviour, with the pattern
+        // too the pattern; either beats the file.
+        let txt = Settings::parse("UI_VOLUME_INDEX_FORMAT=old-*-YYYY.MM.DD\n");
+        let (t, managed) = resolve(&layers_from_config(&both, Some("a")), &txt);
+        assert_eq!((t.pattern_source, t.index_format.as_str()), (PatternSource::Format, "old-*-YYYY.MM.DD"));
+        assert_eq!(managed, vec!["volumeIndexFormat"]);
+        let txt = Settings::parse("UI_VOLUME_INDEX_FORMAT=old-*-YYYY.MM.DD\nUI_VOLUME_INDEX_PATTERN=new-*\nUI_VOLUME_DAY_FROM=TIME\nUI_VOLUME_TIME_FIELD=event.created\n");
+        assert!(txt.warnings().is_empty(), "{:?}", txt.warnings());
+        let (t, managed) = resolve(&layers_from_config(&fmt, None), &txt);
+        assert_eq!((t.pattern_source, t.index_pattern.as_str(), t.day_from, t.time_field.as_str()),
+                   (PatternSource::Pattern, "new-*", DayFrom::Time, "event.created"));
+        assert_eq!(managed, vec!["volumeIndexFormat", "volumeIndexPattern", "volumeDayFrom", "volumeTimeField"]);
+        // Values that do not fit leave the layer below.
+        let mut s = VolumeSettings::default();
+        s.apply(&json!({ "indexPattern": "a,,b", "dayFrom": "never", "timeField": "a b" }));
+        assert_eq!(s, VolumeSettings::default());
+        let bad = Settings::parse("UI_VOLUME_INDEX_PATTERN=_all\nUI_VOLUME_DAY_FROM=sometimes\nUI_VOLUME_TIME_FIELD=a,b\n");
+        assert_eq!(bad.warnings().len(), 3, "{:?}", bad.warnings());
     }
 
     #[test]

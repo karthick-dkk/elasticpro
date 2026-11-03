@@ -423,7 +423,7 @@ mod tests {
     use crate::volume::{FieldAgg, TopValue};
 
     fn day(k: &str, pri: u64, docs: Option<u64>, ev: Option<u64>) -> Day {
-        let mut d = Day { day: k.into(), is_final: true, live: true, indices: 1, pri_bytes: pri, total_bytes: pri * 2, docs, event_bytes: ev, ..Day::default() };
+        let mut d = Day { day: k.into(), is_final: true, live: true, indices: 1, pri_bytes: Some(pri), total_bytes: Some(pri * 2), docs, event_bytes: ev, ..Day::default() };
         d.fields.insert("tag".into(), FieldAgg {
             field: Some("tag1".into()),
             top: vec![TopValue { value: "=cmd|' /C calc'!A0".into(), docs: docs.unwrap_or(0) / 2, event_bytes: None, sub_bytes: None }],
