@@ -1,7 +1,7 @@
 /**
  * "Reports · 3 running · 1 queued" in the top bar, on every page (0.3.45).
  *
- * Report jobs run in the background so nobody has to wait on Indices › Summary for them;
+ * Report jobs run in the background so nobody has to wait on Reports for them;
  * this is how somebody who left knows they are still going, and the way back to them.
  * It reads the one poller in core/reports.js: every 5 s while a job runs or waits, every
  * 60 s when idle, never while the tab is hidden, and not at all on a core that does not
@@ -38,7 +38,7 @@ export function reportsPill({ snapshot = false, guest = false, evidence = false 
   if (!el) {
     el = h('button#reports-pill.pill.rp-pill.grey', {
       type: 'button', hidden: true,
-      title: 'Report jobs running in the background. Opens Indices › Summary › Monthly with the report panel.',
+      title: 'Report jobs running in the background. Opens Reports › Exports & schedules with the report jobs.',
       onclick: () => openReportJobs(),
     });
     onReports(sync);

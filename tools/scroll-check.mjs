@@ -59,7 +59,7 @@ const HOLD = Number(arg('--hold', '10000'));
 const WARM = Number(arg('--warm', '30000'));
 const ONLY = arg('--pages', '');
 const VIEWPORTS = [[1440, 900], [1280, 800]];
-const PAGES = ['alerts', 'overview', 'indices', 'shards', 'logs', 'console', 'snapshots', 'volume', 'automation', 'requests', 'accounts', 'settings']
+const PAGES = ['alerts', 'overview', 'indices', 'shards', 'logs', 'console', 'snapshots', 'reports', 'automation', 'requests', 'accounts', 'settings']
   .filter((id) => !ONLY || ONLY.split(',').includes(id));
 
 const pw = await loadPlaywright(ROOT, 'scroll-check');

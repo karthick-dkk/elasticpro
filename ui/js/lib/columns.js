@@ -180,7 +180,114 @@ export function countLabel(defs, layout) {
   return `${cols.filter((c) => c.visible).length}/${cols.length}`;
 }
 
+/**
+ * The group band over a table's headers: one cell per run of visible columns that share a
+ * `group` (from the defs; no group = a blank cell). `null` when a group comes back after
+ * another one — a reorder mixed them, and a band over a mixed run would name columns that
+ * are not under it.
+ */
+export function groupBand(defs, layout) {
+  const byKey = new Map(defs.map((d) => [d.key, d]));
+  const runs = [];
+  for (const c of visibleColumns(defs, layout)) {
+    const g = (byKey.get(c.key) && byKey.get(c.key).group) || '';
+    const last = runs[runs.length - 1];
+    if (last && last.group === g) last.span++;
+    else runs.push({ group: g, span: 1 });
+  }
+  const named = runs.filter((r) => r.group).map((r) => r.group);
+  if (new Set(named).size !== named.length) return null;
+  return runs;
+}
+
 /* --------------------------------- renderer --------------------------------- */
+
+/**
+ * The Columns menu of the Reports tables (docs/REPORTS.md): a tick to show or hide, a drag
+ * handle and ▲/▼ to reorder, the locked column first, Reset to default, Save for everyone.
+ * The model is the one above; this is the second way of drawing it.
+ *
+ * @param o {
+ *   defs, layout,                 // layout as it is on screen now
+ *   onChange(layout),             // every tick, move and reset: the table redraws with it
+ *   onSave(layout) -> Promise<{ok, message?}>,   // Save for everyone
+ *   canSave: boolean,             // false: the button is there, disabled, and says why
+ *   saveWhy?: string,             // why it cannot (role, or the server's refusal)
+ *   note?: string,                // "Arranged in this browser only" and the like
+ *   id?: string,
+ * }
+ * The same `o` may be updated in place by the page (o.layout, o.note, o.canSave) between
+ * redraws; the open panel rebuilds from it after every change.
+ */
+export function columnsMenu(o) {
+  const btn = h('button.btn.sm', {
+    type: 'button', id: o.id || null, 'aria-haspopup': 'dialog', 'aria-expanded': 'false',
+    title: 'Show, hide and reorder the columns of this table',
+    onclick: (e) => popover(e.currentTarget, (ctx) => menuBody(o, ctx), { title: 'Columns', sub: 'tick to show · drag or ▲▼ to move', cls: 'colmenu', width: '330px' }),
+  }, 'Columns ▾');
+  btn.columnsMenu = o;
+  return btn;
+}
+
+function menuBody(o, ctx) {
+  const apply = (next) => { o.layout = next; o.onChange(next); ctx.rebuild(); };
+  const cols = resolveColumns(o.defs, o.layout);
+  const movable = cols.filter((c) => !c.locked);
+  let dragKey = null;
+  const status = h('div.colmenu-status', { role: 'status' }, o.note || '');
+  const rows = cols.map((c) => {
+    if (c.locked) {
+      return h('li.lock', { dataset: { col: c.key } },
+        h('span.grip', { 'aria-hidden': 'true' }, '·'),
+        h('input', { type: 'checkbox', checked: true, disabled: true, 'aria-label': `${c.name} (always shown)` }),
+        h('span.nm', c.name), h('span.muted.fix', 'always first'));
+    }
+    const i = movable.indexOf(c);
+    const li = h('li', { draggable: 'true', dataset: { col: c.key } },
+      h('span.grip', { 'aria-hidden': 'true', title: 'Drag to move' }, '⋮⋮'),
+      h('input', { type: 'checkbox', checked: c.visible, 'aria-label': `Show ${c.name}`,
+        onchange: (ev) => apply(setShown(o.defs, o.layout, c.key, ev.target.checked)) }),
+      h('span.nm', c.name),
+      h('span.ud',
+        h('button', { type: 'button', 'aria-label': `Move ${c.name} up`, disabled: i === 0,
+          onclick: () => apply(moveTo(o.defs, o.layout, c.key, i - 1)) }, '▲'),
+        h('button', { type: 'button', 'aria-label': `Move ${c.name} down`, disabled: i === movable.length - 1,
+          onclick: () => apply(moveTo(o.defs, o.layout, c.key, i + 1)) }, '▼')));
+    li.addEventListener('dragstart', (e) => {
+      dragKey = c.key;
+      if (e.dataTransfer) { e.dataTransfer.setData('text/plain', c.key); e.dataTransfer.effectAllowed = 'move'; }
+      li.classList.add('dragging');
+    });
+    li.addEventListener('dragend', () => li.classList.remove('dragging'));
+    li.addEventListener('dragover', (e) => { e.preventDefault(); li.classList.add('drop'); });
+    li.addEventListener('dragleave', () => li.classList.remove('drop'));
+    li.addEventListener('drop', (e) => {
+      e.preventDefault();
+      li.classList.remove('drop');
+      const key = (e.dataTransfer && e.dataTransfer.getData('text/plain')) || dragKey;
+      if (key && key !== c.key) apply(dropOn(o.defs, o.layout, key, c.key));
+    });
+    return li;
+  });
+  const save = h('button.btn.sm.primary', {
+    type: 'button', disabled: !o.canSave, title: o.canSave ? 'Everybody sees this arrangement' : (o.saveWhy || ''),
+    onclick: async () => {
+      save.disabled = true;
+      status.textContent = 'Saving…';
+      let res;
+      try { res = await o.onSave(sanitizeFull(o.defs, o.layout)); } catch (e) { res = { ok: false, message: e && e.message }; }
+      status.textContent = res && res.ok ? 'Saved for everyone.' : (res && res.message) || 'Not saved.';
+      save.disabled = !o.canSave;
+    },
+  }, 'Save for everyone');
+  return h('div.colmenu-body',
+    h('ul', ...rows),
+    status,
+    h('div.colmenu-foot',
+      h('button.btn.sm', { type: 'button', onclick: () => apply(emptyLayout()) }, 'Reset to default'),
+      h('span', { style: { marginLeft: 'auto' } }),
+      save));
+}
 
 /**
  * The "Columns (n/m) ▾" button and its panel: a tick per column, and Show all.
@@ -288,13 +395,21 @@ export function columnTable(o) {
     return th;
   });
 
+  // `after`: columns that are not part of the shared layout (the core keeps a fixed key list
+  // per table), drawn after the arranged ones: { label, num?, cell(row) }.
+  const after = o.after || [];
+  for (const a of after) head.push(h(`th${a.num ? '.num' : ''}`, { title: a.title || a.label }, a.label));
   const tr = (row, cls) => h(cls ? `tr.${cls}` : 'tr', o.rowAttrs ? o.rowAttrs(row) : null,
     ...cols.map((c) => {
       const v = o.cell(c.key, row);
       return h(c.num ? 'td.num' : 'td', v === null || v === undefined ? '' : v);
+    }),
+    ...after.map((a) => {
+      const v = a.cell(row);
+      return h(a.num ? 'td.num' : 'td', v === null || v === undefined ? '' : v);
     }));
   const body = h('tbody', ...o.rows.map((r) => tr(r)));
-  if (!o.rows.length) body.append(h('tr', h('td', { colspan: cols.length }, h('div.tbl-empty', o.emptyText || 'Nothing to show'))));
+  if (!o.rows.length) body.append(h('tr', h('td', { colspan: cols.length + after.length }, h('div.tbl-empty', o.emptyText || 'Nothing to show'))));
   const foot = o.foot && o.foot.length ? h('tfoot', ...o.foot.map((r) => tr(r, 'total'))) : null;
   return h('div.tbl-wrap', h('table.tbl.coltbl', h('thead', h('tr', ...head)), body, foot));
 }

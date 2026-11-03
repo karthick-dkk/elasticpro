@@ -27,7 +27,7 @@ const fake = (rule, extra = {}) => G.mergeAlerts([{ key: `c1:${rule.id}`, level:
   { defaults: { diskWarnPercent: 85, diskCritPercent: 90 } })[0];
 
 test('the page ids are read from app.js', () => {
-  assert.ok(PAGE_IDS.length >= 10 && PAGE_IDS.includes('shards') && PAGE_IDS.includes('volume'), PAGE_IDS.join());
+  assert.ok(PAGE_IDS.length >= 10 && PAGE_IDS.includes('shards') && PAGE_IDS.includes('reports'), PAGE_IDS.join());
 });
 
 test('every rule has a Go to target, on a page that exists', () => {
@@ -53,8 +53,8 @@ test('where each rule lands on its page', () => {
   assert.deepEqual([at('log-delay').page, at('log-delay').focus.view], ['logs', 'delay']);
   assert.equal(at('unreachable').page, 'overview');
   assert.deepEqual(at('unreachable').focus, { section: 'unreachable', cluster: 'c1' }, 'Clusters page: that cluster\'s card');
-  // The volume rule leads to the Volume report, no longer the Clusters page.
-  assert.equal(at('volume').page, 'volume');
+  // The volume rule leads to Reports (the Volume report until 0.3.53), not the Clusters page.
+  assert.equal(at('volume').page, 'reports');
   const vol = G.mergeAlerts([{ key: 'c1:volume:host.name:p7', level: 'warning', cluster, title: 'prod: host.name "p7" volume up 500%' }], {})[0];
   assert.deepEqual(GOTO.gotoFor(vol).focus, { field: 'host.name' });
   const auto = G.mergeAlerts([{ key: 'c1:automation:my-rule', level: 'warning', cluster, title: 'My rule', detail: '' }], {})[0];

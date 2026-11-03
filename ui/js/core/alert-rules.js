@@ -88,7 +88,7 @@ export const ALERT_RULES = [
        + `Raised after ${HEAP_RAISE_READINGS} readings in a row over ${HEAP_HIGH_PERCENT}%, cleared below ${HEAP_CLEAR_PERCENT}%.` },
   { id: 'automation', page: 'automation', label: 'Automation rule has work waiting', level: 'warning',
     why: 'A rule you set to notify found indices matching it. Nothing ran: the work waits for a person in the app.' },
-  { id: 'volume', page: 'volume', label: 'Field volume spike', level: 'warning',
+  { id: 'volume', page: 'reports', label: 'Field volume spike', level: 'warning',
     why: 'One value is producing far more documents than its recent average.' },
 ];
 
@@ -110,7 +110,7 @@ export function pageForProblem(ruleId, text) {
   if (rule && rule.page) return rule.page;
   if (/snapshot|slm|backup|repositor/.test(t)) return 'snapshots';
   if (/log delay|delayed device|ingest delay/.test(t)) return 'logs';
-  if (/indices size|volume|client plan/.test(t)) return 'volume';
+  if (/indices size|volume|client plan|storage plan/.test(t)) return 'reports';
   if (/ilm/.test(t)) return 'indices';
   // A disk alert is a placement problem: the page that can act on it is the one that
   // moves shards off the full node. Health and masters are read there too.

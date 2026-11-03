@@ -265,9 +265,9 @@ export const PLAYBOOKS = {
     return {
       cause: 'One value of a field is producing far more documents than its recent average: a device in a loop, a new source, or a real surge.',
       steps: [
-        { text: `See the daily volume for ${f || 'that field'} and which value moved.`, links: [{ label: 'Field volume', page: 'volume', focus: f ? { field: f } : null }] },
+        { text: `See the daily volume for ${f || 'that field'} and which value moved.`, links: [{ label: 'Field volume', page: 'reports', focus: f ? { field: f } : null }] },
         { text: 'Find the source of that value and check whether it is behaving: a restarted shipper replaying old logs looks like this.' },
-        { text: 'If it is real and stays, the capacity figures will change: check the storage plan.', links: [{ label: 'Volume report', page: 'volume' }] },
+        { text: 'If it is real and stays, the capacity figures will change: check the storage plan.', links: [{ label: 'Storage plan', page: 'reports', focus: { section: 'capacity' } }] },
       ],
     };
   },

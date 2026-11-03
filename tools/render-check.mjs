@@ -74,19 +74,33 @@ if (configPath) {
 
 // play: the wall display (docs/PLAY.md). Drawn against whatever core this is — an older one
 // has no PLAY_* messages, and Play must still draw, saying what is missing.
-const PAGES = ['alerts', 'overview', 'indices', 'shards', 'logs', 'console', 'snapshots', 'volume', 'automation', 'requests', 'accounts', 'settings', 'play'];
+// reports: one page of six sections (docs/REPORTS.md), each drawn from its own route.
+const REPORT_SECTIONS = ['overview', 'daily', 'capacity', 'measure', 'planning', 'exports'];
+const PAGES = ['alerts', 'overview', 'indices', 'shards', 'logs', 'console', 'snapshots',
+  ...REPORT_SECTIONS.map((s) => `reports/${s}`), 'automation', 'requests', 'accounts', 'settings', 'play'];
 const view = window.document.createElement('div');
 window.document.body.append(view);
 
 for (const name of PAGES) {
   const before = errors.length;
   try {
-    const mod = await load(`pages/${name}.js`);
+    const [page, section] = name.split('/');
+    const mod = await load(`pages/${page}.js`);
     while (view.firstChild) view.removeChild(view.firstChild);
+    window.history.replaceState(null, '', `#/${name}`);
     mod.render(view);
-    await new Promise((r) => setTimeout(r, 350));
+    await new Promise((r) => setTimeout(r, section ? 900 : 350));
     if (mod.onData) mod.onData();
     await new Promise((r) => setTimeout(r, 150));
+    if (section) {
+      const on = view.querySelector('.rp-nav a[aria-current="page"]');
+      if (!on || on.dataset.section !== section) errors.push(`${name}: the section nav does not mark ${section} as the one shown`);
+    }
+    // Indices lost its Summary tab to Reports › Daily & monthly (board 7): one line says where.
+    if (page === 'indices' && configured) {
+      if ([...view.querySelectorAll('.seg button')].some((b) => b.textContent.trim() === 'Summary')) errors.push('indices: the Summary tab is still there');
+      if (!/Daily and monthly summary is now in/.test(view.textContent)) errors.push('indices: no line saying the summary moved to Reports');
+    }
     // Leave the page the way the app does, so a page that re-reads on a timer stops.
     if (mod.onLeave) mod.onLeave();
     const nodes = view.querySelectorAll('*').length;
@@ -96,7 +110,7 @@ for (const name of PAGES) {
     if (!failed && configured && nodes < 3) {
       errors.push(`${name}: rendered only ${nodes} node(s) — the page is effectively blank`);
     }
-    console.log(`${errors.length > before ? '✗' : '✓'} ${name.padEnd(10)} ${String(nodes).padStart(5)} nodes`);
+    console.log(`${errors.length > before ? '✗' : '✓'} ${name.padEnd(17)} ${String(nodes).padStart(5)} nodes`);
   } catch (e) {
     console.log(`✗ ${name.padEnd(10)} THREW: ${e.message}`);
     errors.push(`${name}: ${e.message}`);
