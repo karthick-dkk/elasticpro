@@ -10,8 +10,9 @@
  */
 
 import { h, mount, $, activatable } from '../lib/dom.js';
+import { nodeCache, objId } from '../lib/keyed.js';
 import { bytes, toCsv, download, plural } from '../lib/fmt.js';
-import { state, client, fetchIndices, ensureFullSnapshots, demandDataset, fleetMode, isOnDemand } from '../core/state.js';
+import { state, client, fetchIndices, ensureFullSnapshots, demandDataset, fleetMode, isOnDemand, clusterRev } from '../core/state.js';
 import { runBounded } from '../core/fleet.js';
 import { card, snapshotStatusByKey } from '../pages/common.js';
 import { volumeReport, reportRows, SHEET_COLUMNS, CLIENT_COLUMNS, sheetCell, measureRepoBytes, liveHeldDays, parseRetention } from '../core/volume.js';
@@ -20,7 +21,7 @@ import { popover } from '../ui/menu.js';
 import { repoSizeCache } from '../lib/idb.js';
 import { sharePut } from '../play/api.js';
 import { columnsMenu } from '../lib/columns.js';
-import { clusterFigures, repoBytes, RATE_DAYS } from './record.js';
+import { clusterFigures, repoBytes, RATE_DAYS, recordState } from './record.js';
 import { layoutOf, setLocalLayout, layoutNote, canShare, shareWhy, shareLayout } from './layouts.js';
 import { layoutTable, layoutCsv } from './table.js';
 import { amber, muted, tag, loading, diskBar, gbCell } from './cells.js';
@@ -362,8 +363,21 @@ export function capacitySection(ctx) {
     btn('plan', 'Plan', 'The storage plan: what each cluster needs against what it has'),
     btn('sheet', `Every parameter (${SHEET_COLUMNS.length})`, `Every parameter — ${SHEET_COLUMNS.length} columns`),
     btn('client', `Client plan (${CLIENT_COLUMNS.length})`, `The client storage plan — ${CLIENT_COLUMNS.length} columns`));
-  const body = ui.view === 'plan'
+  // Kept while nothing it is drawn from changed: the page redraws on every push from the
+  // core, and a rebuilt sheet would close a column note open on its header (a popover closes
+  // when its trigger leaves the page) and lose the sheet's scroll position.
+  built.begin();
+  const body = built.get(`view:${ui.view}`, dataSig(ctx.clusters), () => (ui.view === 'plan'
     ? planView(ctx, ctx.clusters.map(rowOf))
-    : sheetView(reportsOf(ctx.clusters), VIEWS[ui.view] || VIEWS.sheet);
+    : sheetView(reportsOf(ctx.clusters), VIEWS[ui.view] || VIEWS.sheet)));
+  built.end();
   return h('div.rp-section', h('div.toolbar.rp-bar', seg), h('div#rp-cap-msg'), body);
+}
+
+const built = nodeCache();
+/** Everything a view is drawn from, so a redraw with nothing new reuses the drawn table. */
+function dataSig(list) {
+  return [ui.sort, ui.dir, recordState.rev, layoutNote(TABLE), JSON.stringify(layoutOf(TABLE)), [...ui.measuring].join(','),
+    ...list.map((c) => [c.id, clusterRev(c.id), objId(state.data.get(c.id)), objId(state.indices.get(c.id)), objId(c),
+      repoBytes.has(c.id) ? repoBytes.get(c.id) : '-'].join(':')), new Date().toISOString().slice(0, 10)].join('|');
 }
