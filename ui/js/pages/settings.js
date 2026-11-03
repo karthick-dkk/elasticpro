@@ -29,9 +29,10 @@ import { isSnapshotMode } from '../core/snapshot.js';
 import { applyLoadedConfig } from '../ui/load-config.js';
 import { filePickerButton, canPickByPath, configHistory, readVersion } from '../ui/upload.js';
 import { confirmDialog, modal, field, text, select, checkbox, val, checked } from '../ui/modal.js';
-import { VOLUME_KEYS, FIELD_ROWS, BOUNDS as VOLUME_BOUNDS, fileVolume, desktopVolume, foldManaged, overrideIds, validateVolume, applyDefaults,
+import { patternPreview, VOLUME_KEYS, FIELD_ROWS, BOUNDS as VOLUME_BOUNDS, fileVolume, desktopVolume, foldManaged, overrideIds, validateVolume, applyDefaults,
   applyOverride, yamlBlock, configTxtLines, displayValue, checkCell, indicesCell, listText, toList, getPath, setPath } from '../core/volume-config.js';
-import { volumeSettings, volumeFieldsCheck } from '../core/volume-settings.js';
+import { volumeSettings, volumeFieldsCheck, volumePatternCheck } from '../core/volume-settings.js';
+import { planTemplatesPanel, loadPlanTemplates } from '../ui/plan-templates-editor.js';
 import { reportMailPanels, loadReportMail, reportMailKeyLines } from '../ui/report-mail.js';
 import { rowMenu, ICON } from '../ui/menu.js';
 import { playSection, loadPlay } from '../ui/play-settings.js';
@@ -839,7 +840,7 @@ const SECTIONS = [
     when: () => !!(sink && sink.supported) },
   { id: 'requests', label: 'Requests',     icon: '⚡', build: requestsCard, load: loadPolicy },
   { id: 'defaults', label: 'Defaults',     icon: '⚙', build: defaultsCard },
-  { id: 'volume',   label: 'Volume fields', icon: '▤', build: volumeSection, load: loadVolumeSection },
+  { id: 'volume',   label: 'Reports', icon: '▤', build: volumeSection, load: loadVolumeSection },
   { id: 'play',     label: 'Play',         icon: '▶', build: playSection, load: () => loadPlay(draw) },
   { id: 'diag',     label: 'Diagnostics',  icon: '✚', build: diagnosticsCard, load: confirmCoreGuard },
 ];
@@ -1561,7 +1562,7 @@ function volModel() {
   const folded = foldManaged(fileVolume(rawDefaultsNow()), managedDefaults());
   const locked = new Set(folded.locked);
   const names = new Set(((vol.reply && vol.reply.managed) || []).map(String));
-  VOLUME_KEYS.forEach((k) => { if (names.has(k.managed)) locked.add(k.path); });
+  VOLUME_KEYS.forEach((k) => { if (names.has(k.managed) || names.has(k.env)) locked.add(k.path); });
   return { values: folded.volume, locked };
 }
 
@@ -1590,6 +1591,9 @@ function readVolumeForm() {
   const put = (path, v) => { if (v !== '' && !(Array.isArray(v) && !v.length)) setPath(out, path, v); };
   const n = (id) => (g(id) === '' ? '' : Number(g(id)));
   put('indexFormat', g('vf-index'));
+  put('indexPattern', g('vf-pattern'));
+  { const r = $('input[name="vf-dayfrom"]:checked'); if (r && !r.disabled) put('dayFrom', r.value); }
+  put('timeField', g('vf-time'));
   FIELD_ROWS.forEach((r) => put(r.key, toList(g(`vf-${r.key}`))));
   put('extra.name', g('vf-extra-name'));
   put('extra.fields', toList(g('vf-extra')));
@@ -1604,6 +1608,10 @@ function readVolumeForm() {
 function fillVolumeForm(v) {
   const set = (id, x) => { const el = $(`#${id}`); if (el && !el.disabled) el.value = x == null ? '' : String(x); };
   set('vf-index', v.indexFormat);
+  set('vf-pattern', v.indexPattern);
+  set('vf-time', v.timeField);
+  { const r = $(`input[name="vf-dayfrom"][value="${v.dayFrom || 'name'}"]`); if (r && !r.disabled) r.checked = true; }
+  previewPattern();
   FIELD_ROWS.forEach((r) => set(`vf-${r.key}`, listText(v[r.key])));
   set('vf-extra-name', v.extra && v.extra.name);
   set('vf-extra', listText(v.extra && v.extra.fields));
@@ -1648,6 +1656,7 @@ async function saveVolume() {
 
 /** The label each validation message starts with, so a locked row's complaint can be set aside. */
 const LOCKED_LABEL = {
+  indexPattern: 'Index pattern', dayFrom: 'Which day', timeField: 'Time field',
   indexFormat: 'Index name', tag: 'Tag', forwarder: 'Forwarder tag', sourceHost: 'Source host', sourceIp: 'Source IP',
   eventSize: 'Event size', subSize: 'Sub size', 'extra.name': 'Extra field', 'extra.fields': 'Extra field',
   sizeBasis: 'Size that counts', topValues: 'Top values', keepMonths: 'Keep the daily', collectAt: 'Collect once',
@@ -1684,7 +1693,8 @@ async function checkVolume(btn) {
   vol.checked = id;
 }
 
-function volumeCard() {
+/** What both Reports cards need to draw a settings input: the mode, the starting value, the lock. */
+function volCtx() {
   const m = volModel();
   const override = vol.mode === 'override';
   const list = clusters();
@@ -1706,6 +1716,93 @@ function volumeCard() {
     return input;
   };
   const note = (path) => (m.locked.has(path) ? h('div.muted', { style: { fontSize: '10.5px' } }, MANAGED_NOTE) : null);
+  return { m, override, list, ov, canWrite, start, shown, lock, note };
+}
+
+/* ------------------------------ Which indices count ------------------------------ */
+
+let pvTimer = null;
+let pvSeq = 0;
+
+/** Ask the core what the pattern in the form matches, a moment after the last keystroke. */
+function previewPattern(now) {
+  clearTimeout(pvTimer);
+  pvTimer = setTimeout(runPreview, now ? 0 : 500);
+}
+
+async function runPreview() {
+  const box = $('#vf-pv');
+  if (!box) return;
+  const sel = $('#vf-pv-cluster');
+  const id = sel ? sel.value : '';
+  if (!id) { mount(box, h('div.muted', { style: { padding: '6px 12px' } }, 'Pick a cluster to see what the pattern matches.')); return; }
+  const m = volModel();
+  const typed = ($('#vf-pattern') || { value: '' }).value.trim();
+  const pat = typed || m.values.indexPattern;
+  const bad = validateVolume({ indexPattern: pat }, { partial: true });
+  if (bad.length) { mount(box, h('div.vf-bad', { style: { padding: '6px 12px', fontSize: '12.5px' } }, bad[0])); return; }
+  const radio = $('input[name="vf-dayfrom"]:checked');
+  const dayFrom = radio ? radio.value : m.values.dayFrom;
+  const tf = (($('#vf-time') || { value: '' }).value.trim()) || m.values.timeField;
+  const mine = ++pvSeq;
+  mount(box, h('div.muted', { style: { padding: '6px 12px' } }, 'Loading…'));
+  const res = await volumePatternCheck(id, pat, dayFrom, volPayload(id));
+  if (mine !== pvSeq || !box.isConnected) return;
+  const view = patternPreview(res, tf);
+  mount(box, view.banner ? h('div', { class: view.bannerCls, style: { padding: '6px 12px', fontSize: '12.5px', margin: 0 } }, view.banner)
+    : view.rows.map(([label, value, cls]) => h('div', h('span', label), h('span', { class: cls || '', style: { fontFamily: 'var(--mono)' } }, value))));
+}
+
+/** A text input that refreshes the preview as it is typed in. */
+function withPreview(input) { input.addEventListener('input', () => previewPattern()); return input; }
+
+function indicesCard() {
+  const { m, override, list, canWrite, start, shown, lock, note } = volCtx();
+  const pill = (path, env) => (m.locked.has(path) ? h('span.pill.grey', { title: MANAGED_NOTE }, `config.txt: ${env}`) : null);
+  const dayRadio = (value, title, help) => {
+    const on = (start('dayFrom') || m.values.dayFrom) === value;
+    const input = h('input', { type: 'radio', name: 'vf-dayfrom', value, checked: on, 'aria-describedby': 'vf-day-l', onchange: () => previewPattern() });
+    lock('dayFrom', input);
+    return h('label.vf-opt', { class: on ? 'on' : '' }, input, h('span', h('b', title), h('br'), h('span.muted', { style: { fontSize: '12px' } }, help)));
+  };
+  const pick = vol.checked || (override ? vol.clusterId : state.selected) || (list[0] && list[0].id) || '';
+  const legacyOnly = m.locked.has('indexFormat') && !m.locked.has('indexPattern');
+  const lbl = { style: { fontWeight: '600', fontSize: '12.5px' } };
+  const body = h('div', { style: { display: 'grid', gap: '12px' } },
+    legacyOnly ? h('div.banner.warn', { style: { margin: 0, fontSize: '12px' } },
+      `In force: UI_VOLUME_INDEX_FORMAT (${m.values.indexFormat}) from config.txt. Set UI_VOLUME_INDEX_PATTERN to use the pattern below instead.`) : null,
+    h('div.vf-fld', h('label', { for: 'vf-pattern', ...lbl }, 'Index pattern'),
+      withPreview(lock('indexPattern', text('vf-pattern', start('indexPattern'), { mono: true, placeholder: shown('indexPattern') || 'logstash-*' }))),
+      h('span.muted', { style: { fontSize: '12px' } }, 'The default. One or more patterns, comma-separated. No date part is needed in the pattern.'),
+      note('indexPattern')),
+    h('div.vf-fld', { role: 'radiogroup', 'aria-labelledby': 'vf-day-l' }, h('span#vf-day-l', lbl, 'Which day a document counts on'),
+      dayRadio('name', 'From the index name when it carries a date, otherwise from the time field',
+        'logstash-web-2026.11.02 counts on 2 Nov in full. An index with no date in its name (logstash-000014) is split by its documents’ time field.'),
+      dayRadio('time', 'Always from the time field', 'Every index is split by its documents’ time field, dated name or not.'),
+      note('dayFrom')),
+    h('div.vf-grid2',
+      h('div.vf-fld', h('label', { for: 'vf-time', ...lbl }, 'Time field'),
+        withPreview(lock('timeField', text('vf-time', start('timeField'), { mono: true, placeholder: shown('timeField') || '@timestamp' }))), note('timeField')),
+      h('div.vf-fld', h('label', { for: 'vf-tz', ...lbl }, 'Days end at'),
+        h('input#vf-tz', { value: '00:00 UTC', disabled: true, title: 'The collector counts days in UTC' }))),
+    h('div.vf-fld',
+      h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' } },
+        h('span', lbl, 'What this matches on'),
+        h('select#vf-pv-cluster', { 'aria-label': 'Cluster to preview against', onchange: () => previewPattern(true) },
+          ...list.map((c) => h('option', { value: c.id, selected: c.id === pick }, c.name))),
+        h('button#vf-pv-go.btn.sm', { type: 'button', onclick: () => previewPattern(true), disabled: !list.length }, 'Preview')),
+      h('div#vf-pv.vf-prev', { 'aria-live': 'polite' }, h('div.muted', { style: { padding: '6px 12px' } }, list.length ? 'Loading…' : 'No cluster to preview against.')),
+      h('span.muted', { style: { fontSize: '12px' } },
+        'For an index split by time the day’s documents and shipper bytes are measured; its disk size per day is not (Elasticsearch reports size per index), so those days show disk size as “not measured” rather than a share.')),
+    h('div', { style: { display: 'flex', gap: '6px', flexWrap: 'wrap', alignItems: 'center' } },
+      pill('indexPattern', 'UI_VOLUME_INDEX_PATTERN'), pill('dayFrom', 'UI_VOLUME_DAY_FROM'), pill('timeField', 'UI_VOLUME_TIME_FIELD')));
+  setTimeout(() => previewPattern(true), 0);
+  return card('Which indices count', override ? 'override for one cluster: only what differs is saved' : 'Config › Reports', body,
+    [h('button#vf-pat-save.btn.sm.primary', { onclick: saveVolume, disabled: !canWrite, title: canWrite ? 'Saves every field of this section' : 'Only an admin can write the config file' }, 'Save')]);
+}
+
+function volumeCard() {
+  const { m, override, list, ov, canWrite, start, shown, lock, note } = volCtx();
   const listInput = (id, path) => lock(path, text(id, listText(start(path)), { mono: true, placeholder: listText(shown(path)) }));
 
   const mode = (id, label) => h('button.seg-btn', {
@@ -1734,7 +1831,7 @@ function volumeCard() {
   const label = (name, use) => [h('div', { style: { fontWeight: '600' } }, name), h('div.muted', { style: { fontSize: '11px' } }, use)];
 
   const rows = [
-    row(label('Index name', 'which indices count'),
+    row(label('Index name', 'older setting: a pattern with a date'),
       [lock('indexFormat', text('vf-index', start('indexFormat'), { mono: true, placeholder: shown('indexFormat') })), note('indexFormat')],
       '— (index name)', 'vf-c-index'),
     ...FIELD_ROWS.map((r) => row(label(r.label, r.use), [listInput(`vf-${r.key}`, r.key), note(r.key)], r.ecs, `vf-c-${r.key}`)),
@@ -1783,14 +1880,17 @@ function volumeCard() {
 /** The section's two loads: the fields, and the mailed report with its mail server (ui/report-mail.js). */
 function loadVolumeSection() {
   loadVolume();
+  loadPlanTemplates(() => { if (host && host.isConnected && activeSection() && activeSection().id === 'volume') draw(); });
   loadReportMail(() => { if (host && host.isConnected && activeSection() && activeSection().id === 'volume') draw(); });
 }
 
 function volumeSection() {
   const v = volModel().values;
   return h('div', { style: { display: 'grid', gap: '12px' } },
+    indicesCard(),
     volumeCard(),
     reportMailPanels(),
+    planTemplatesPanel(() => { if (host && host.isConnected && activeSection() && activeSection().id === 'volume') draw(); }),
     h('div.vf-info',
       card('Same settings in the clusters file', 'what Save writes', h('pre.vf-pre', yamlBlock(v))),
       card('Hosted: config.txt keys', 'one line per setting',

@@ -874,6 +874,27 @@ alone. ULM and SLM follow the type until an admin changes them.
 | `CLUSTER_META_GET` | user | `{ok, clusters: {<id>: {type, ulm: {enabled?, bucket}, slm?, source: "set"\|"zabbix-tag", setBy?, setAt?}}}` — the clusters the caller sees that have an entry or a tag; `enabled` / `slm` absent = follow the type. Desktop: `{ok: false, kind: "not_available"}`. |
 | `CLUSTER_META_SET {clusterId, meta: {type, ulm: {enabled: bool\|null, bucket}, slm: "expected"\|"none"\|null} \| null}` | admin | The same answer, after the change. `type` is required (`ci`, `di`, `onprem`; `CI`, `On-Prem` accepted); `bucket` empty or an S3 name (3–63 of `a-z 0-9 . -`, letter or digit at both ends, no `..`, not an IP). `meta: null` forgets the entry (back to the tag or the defaults). `forbidden` for a cluster the caller does not see, `bad_request` for a bad value. Audit line `cluster type set` (or `cleared`) with `cluster`, `kind`, `ulm`, `bucket`, `slm`. |
 
+## Plan templates — the message contract
+
+0.3.53. Reports › Planning sizes a new or existing cluster from a **plan template**
+(`docs/REPORTS.md`, "Planning (board 8) and Plan templates (board 10)"). Templates are shared
+settings: admins edit them (Config › Reports › Plan templates), everyone plans with them. Hosted:
+`<data>/plan-templates.json` (0600, tmp + rename); a missing file reads as the two seeded templates,
+**Standard** and **Small / lab**. Desktop: the page keeps the list in the browser
+(`localStorage`, `elasticpro.planTemplates`); the core answers from memory and holds nothing.
+
+A template is `{name, backup: "disk"|"s3"|"ulm", roles: [role]}`. A role is
+`{on, name, rule, cpu, ram, root, notes, ...}` with `rule` one of `volume` (`cap`: GB per day per
+server), `fixed` (`count`), `tier` (`tier`: `hot`|`warm`, `nodeTB`), `whenData` (`count` from `from`
+data nodes), `follows` (`of`: another role's name, `per`: one per N of it) or `target` (`target`:
+`s3`|`ulm`, `cap` for `ulm`). `cpu`, `ram` (GB), `root` (GB) and every rule number are a number
+>= 0 or `null`; `null` is "[set]" in the page and is never taken as 0.
+
+| Message | Role | Answer |
+|---|---|---|
+| `PLAN_TEMPLATES_GET` | user | `{ok, templates: [...], custom, updatedBy?, updatedAt?}`; `custom: false` = the seeds. A display link is refused. |
+| `PLAN_TEMPLATES_SET {templates}` | admin, no cluster limit | The whole list replaces the stored one; answers as GET. `bad_request` for a duplicate template name (case-insensitive) or role name, an unknown `rule`, `backup`, `tier` or `target`, a negative or non-numeric value, a `follows` that names no role or loops, an empty list, more than 50 templates or 60 roles, a body over 256 KB. `forbidden` for an administrator limited to some clusters (the templates serve every cluster, like Play's fleet-wide settings). Audit line `plan templates changed` (`templates`, `changed`); activity action `plan_templates_set`, category `configuration`. |
+
 ## Play (NOC wall display) — the message contract
 
 0.3.47; docs/PLAY.md is the design. The wall runs the same UI code as every page; the core adds

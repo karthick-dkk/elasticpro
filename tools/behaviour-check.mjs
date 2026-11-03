@@ -3129,7 +3129,7 @@ restoreConsole();
     return !!el;
   };
   try {
-    ok(await openSettingsTab('Volume fields'), 'volume fields: no Volume fields tab');
+    ok(await openSettingsTab('Reports'), 'volume fields: no Reports tab');
     await settleFor(500);
     const view = doc.querySelector('#view');
     ok(!!panel('Volume fields') && !!panel('Same settings in the clusters file') && !!panel('Hosted: config.txt keys'),
@@ -3168,7 +3168,7 @@ restoreConsole();
     ok((doc.location.hash || '') === '#/settings', 'volume fields: saving left the Config page');
 
     // A bad value is refused before anything is written.
-    await openSettingsTab('Volume fields');
+    await openSettingsTab('Reports');
     await type('vf-index', 'logstash-*');
     written = null;
     await press('Save');
@@ -3176,7 +3176,7 @@ restoreConsole();
     ok(doc.querySelector('#view').textContent.includes('YYYY.MM.DD'), 'volume fields: no reason given for the refused index format');
 
     // Override for one cluster: only the key that differs is saved, under overrides[<id>].
-    await openSettingsTab('Volume fields');
+    await openSettingsTab('Reports');
     ok(await press('Override for one cluster…'), 'volume fields: no override mode');
     const pick = doc.getElementById('vf-cluster');
     ok(!!pick, 'volume fields: override mode has no cluster picker');
@@ -3192,7 +3192,7 @@ restoreConsole();
     const managed = await load('core/managed.js');
     managedNow = { volumeTopValues: 40 };
     managed.setManaged({ ok: true, managedDefaults: { ...managedNow }, managedZabbixOptions: {} });
-    await openSettingsTab('Defaults'); await openSettingsTab('Volume fields');
+    await openSettingsTab('Defaults'); await openSettingsTab('Reports');
     await press('Defaults · all clusters');
     const top = doc.getElementById('vf-top');
     ok(!!top && top.disabled && top.value === '40', `volume fields: a managed value is not shown locked (${top && top.disabled}, ${top && top.value})`);
@@ -3263,7 +3263,7 @@ restoreConsole();
   const last = (type) => sent.filter((m) => m.type === type).at(-1);
   try {
     await go('settings');
-    ok(await openSettingsTab('Volume fields'), 'mail: no Volume fields tab');
+    ok(await openSettingsTab('Reports'), 'mail: no Volume fields tab');
     await waitFor(() => byId('ms-host'), 'mail: the Mail server (SMTP) form did not load');
     ok(!!panel('Volume report by mail') && !!panel('Mail server (SMTP)'), 'mail: the two panels are not both on Volume fields');
     ok(byId('ms-host').value === 'smtp.example.com' && byId('ms-port').value === '587', 'mail: the mail server form does not show what the core holds');
@@ -3345,7 +3345,7 @@ restoreConsole();
     // Anybody else: a note, no form, nothing asked.
     st.caller = { name: 'reader', role: 'operator' };
     sent.length = 0;
-    await openSettingsTab('Defaults'); await openSettingsTab('Volume fields');
+    await openSettingsTab('Defaults'); await openSettingsTab('Reports');
     await settleFor(300);
     ok(!byId('ms-host') && /Only an ElasticPro admin sets up the mail server/.test(panel('Mail server (SMTP)').textContent),
       'mail: a non-admin sees the mail server form');
@@ -5340,11 +5340,129 @@ if (viaFleet) {
 }
 
 
+// Reports (0.3.53): Planning recalculates as it is typed in, the backup target hides the /backup
+// column, "Based on" fills the volume from the 7-day event_logsize, Export CSV hands over the bill
+// of materials; Config › Reports › Plan templates saves with PLAN_TEMPLATES_SET, and "Which indices
+// count" previews through VOLUME_PATTERN_CHECK and locks a key config.txt manages. The volume
+// messages are stubbed (the dev bridge may be older); PLAN_TEMPLATES_GET is the real core's.
+{
+  const realFetch = globalThis.fetch;
+  const DAY = 86400000;
+  const sentP = [];
+  const days = Array.from({ length: 10 }, (_, i) => ({ day: new Date(Date.now() - (i + 1) * DAY).toISOString().slice(0, 10), final: true, eventBytes: 4e11 }));
+  let tplStore = null;
+  globalThis.fetch = async (input, init) => {
+    const body = init && init.body ? JSON.parse(init.body) : {};
+    const t = String(body.type || '');
+    if (t === 'VOLUME_DAILY') { sentP.push(body); return stubReply({ ok: true, settings: { sizeBasis: 'eventSize' }, days, cards: {}, status: {} }); }
+    if (t === 'VOLUME_PATTERN_CHECK') {
+      sentP.push(body);
+      return stubReply({ ok: true, matched: 412, dated: 398, undated: 14, datedExample: 'logstash-fw-2026.11.02', undatedExample: 'logstash-000014' });
+    }
+    if (t === 'VOLUME_SETTINGS') return stubReply({ ok: true, settings: {}, managed: ['UI_VOLUME_INDEX_PATTERN'], source: 'file', overrides: [] });
+    if (t === 'VOLUME_FIELDS_CHECK') return stubReply({ ok: true, indices: { match: 1, skipped: [] }, rows: [] });
+    if (t === 'PLAN_TEMPLATES_SET') { sentP.push(body); tplStore = body.templates; return stubReply({ ok: true, templates: body.templates, custom: true }); }
+    if (t === 'PLAN_TEMPLATES_GET' && tplStore) return stubReply({ ok: true, templates: tplStore, custom: true });
+    if (body.type === 'CONFIG_WRITE') return stubReply({ ok: true, path: body.path, bytes: body.text.length });
+    return realFetch(input, init);
+  };
+  const hostEl = doc.createElement('div');
+  const txt = (id) => (doc.getElementById(id) || { textContent: '' }).textContent;
+  const fire = (el, type = 'input') => el.dispatchEvent(new window.Event(type, { bubbles: true }));
+  const firstCell = (name) => [...doc.querySelectorAll('#pn-bom tbody tr')].find((r) => r.cells[0].textContent === name);
+  try {
+    // ---- Planning ----
+    await go('overview');
+    doc.body.append(hostEl);
+    const planning = await load('reports/planning.js');
+    hostEl.append(planning.planningSection());
+    await waitFor(() => doc.getElementById('pn-bom') && firstCell('Forwarder'), 'planning: the bill of materials did not draw');
+    ok(txt('pn-servers') === '15 +3', `planning: Servers reads "${txt('pn-servers')}", expected "15 +3" (3 roles without a count)`);
+    ok(/without a CPU spec/.test(txt('pn-cpu') + doc.querySelector('#pn-cpu + .d')?.textContent), 'planning: the CPU tile does not say how many roles it left out');
+    ok(/\[set/.test(firstCell('Other servers')?.textContent || ''), 'planning: an unset value is not shown as [set]');
+    ok(!!doc.querySelector('#pn-bom thead')?.textContent.includes('/backup disk'), 'planning: disk backups should show the /backup disk column');
+
+    const pd = doc.getElementById('pn-pd');
+    pd.value = '1000'; fire(pd);
+    await settleFor(50);
+    ok(firstCell('Forwarder').cells[2].textContent === '7', `planning: 1000 GB a day should need 7 forwarders, the row reads "${firstCell('Forwarder').cells[2].textContent}"`);
+    ok(doc.getElementById('pn-pd') === pd && doc.activeElement !== null, 'planning: typing redrew the input it was typed in');
+
+    for (const [id, label, hasCol] of [['pn-bk-s3', 'S3', false], ['pn-bk-ulm', 'ULM', false], ['pn-bk-disk', 'disk', true]]) {
+      doc.getElementById(id).click();
+      await settleFor(50);
+      const has = doc.querySelector('#pn-bom thead').textContent.includes('/backup disk');
+      ok(has === hasCol, `planning: with backups to ${label} the /backup disk column is ${has ? 'shown' : 'hidden'}`);
+    }
+    doc.getElementById('pn-bk-s3').click();
+    await settleFor(50);
+    ok(/bucket/.test(firstCell('S3 backup')?.textContent || ''), 'planning: the S3 backup row does not say it is a bucket');
+    doc.getElementById('pn-bk-disk').click();
+
+    // Based on an existing cluster: daily volume from the 7-day mean of event_logsize.
+    const cl = doc.getElementById('pn-cl');
+    cl.value = cl.options[1].value; fire(cl, 'change');
+    await waitFor(() => (/Filled/.test(doc.getElementById('pn-based-hint')?.textContent || '') ? doc.body : null), 'planning: "Based on" a cluster filled nothing');
+    ok(doc.getElementById('pn-pd').value === '400', `planning: daily volume from the cluster reads ${doc.getElementById('pn-pd').value}, expected 400 (4e11 bytes a day)`);
+
+    // Export CSV: the bill of materials, [set] kept as [set].
+    doc.getElementById('pn-csv').click();
+    const csv = files.at(-1);
+    ok(csv && /^plan-standard\.csv$/.test(csv.name), `planning: the export is named "${csv && csv.name}"`);
+    ok(csv && csv.text.split('\n')[0].startsWith('role,sizing_rule,count') && /\n"?Total/.test(csv.text) && /Other servers,fixed count,\[set\]/.test(csv.text),
+      'planning: the CSV is not the bill of materials with a Total row and [set] kept');
+    hostEl.remove();
+
+    // ---- Config > Reports: Which indices count, Plan templates ----
+    sentP.length = 0;
+    await go('settings');
+    ok(await openSettingsTab('Reports'), 'reports config: no Reports tab');
+    await waitFor(() => doc.getElementById('pt-list') && doc.getElementById('pt-list').children.length >= 2, 'plan templates: the template list did not load');
+    const names = [...doc.querySelectorAll('#pt-list .pt-item b')].map((b) => b.textContent);
+    ok(names[0] === 'Standard' && names.includes('Small / lab'), `plan templates: the list reads ${names.join(' | ')}`);
+    ok(doc.querySelectorAll('.pt-table input.unset').length > 10, 'plan templates: values not set yet are not amber');
+    ok(!!doc.getElementById('vf-pattern') && doc.getElementById('vf-pattern').disabled, 'which indices: UI_VOLUME_INDEX_PATTERN is managed but its input is not locked');
+    ok(/config\.txt: UI_VOLUME_INDEX_PATTERN/.test(doc.querySelector('#view').textContent), 'which indices: no "config.txt: UI_VOLUME_INDEX_PATTERN" pill');
+    await waitFor(() => (/Dated by name/.test(txt('vf-pv')) ? doc.body : null), 'which indices: the preview never showed');
+    ok(/398 · e\.g\. logstash-fw-2026\.11\.02/.test(txt('vf-pv')) && /Split by @timestamp/.test(txt('vf-pv')), `which indices: the preview reads "${txt('vf-pv')}"`);
+    const pcheck = sentP.find((m) => m.type === 'VOLUME_PATTERN_CHECK');
+    ok(pcheck && pcheck.indexPattern === 'logstash-*' && pcheck.dayFrom === 'name', `which indices: the preview sent ${JSON.stringify(pcheck)}`);
+
+    // New, rename, backups to S3, Save template: the whole list is sent.
+    doc.getElementById('pt-new').click();
+    await settleFor(100);
+    const nm = doc.getElementById('pt-name');
+    nm.value = 'Edge site'; fire(nm);
+    const s3 = doc.querySelector('input[name="pt-bt"][value="s3"]');
+    s3.checked = true; fire(s3, 'change');
+    doc.getElementById('pt-save').click();
+    await waitFor(() => sentP.find((m) => m.type === 'PLAN_TEMPLATES_SET'), 'plan templates: Save template did not send PLAN_TEMPLATES_SET');
+    const set = sentP.find((m) => m.type === 'PLAN_TEMPLATES_SET');
+    ok(set && set.templates.length === 3 && set.templates[2].name === 'Edge site' && set.templates[2].backup === 's3',
+      `plan templates: Save sent ${set && JSON.stringify(set.templates.map((t) => [t.name, t.backup]))}`);
+    ok(set && set.templates[0].roles[3].nodeTB === null, 'plan templates: an empty value was sent as something other than null');
+
+    // Delete asks first, then sends the list without it.
+    sentP.length = 0;
+    doc.getElementById('pt-del').click();
+    const yes = await waitFor(() => [...doc.querySelectorAll('.modal button')].find((b) => b.textContent === 'Delete'), 'plan templates: Delete did not ask');
+    if (yes) { yes.click(); await waitFor(() => sentP.find((m) => m.type === 'PLAN_TEMPLATES_SET'), 'plan templates: confirmed Delete sent nothing'); }
+    ok((sentP.find((m) => m.type === 'PLAN_TEMPLATES_SET') || { templates: [] }).templates.length === 2, 'plan templates: Delete did not send the list without the template');
+  } finally {
+    globalThis.fetch = realFetch;
+    hostEl.remove();
+    try { localStorage.removeItem('elasticpro.planTemplates'); } catch { /* none */ }
+  }
+  await applyConfig({ load, configPath });
+  await go('overview');
+}
+
+
 if (problems.length) {
   console.error(`\n${problems.length} problem(s):`);
   for (const p of problems) console.error('  ✗ ' + p);
   process.exit(1);
 }
-console.log('ok: strip, console, shards, the Clusters page (columns, name menu, unreachable rows, expand chevron, alerts link), volume, hand-off, refresh, snapshots, tasks, toasts, accounts split and pinned Zabbix roles, the log-delay preflight, a quiet Config page, Config › Volume fields, report jobs and the Reports pill, the mailed report and the mail server, the Request Centre and the redraw gate, the request policy, the coverage bar, the Tasks panel and the console tabs, template management, the Alerts page grouped by cluster with merged repeats, cluster type (badge, Type filter, edit dialog to file keys and CLUSTER_META_SET), Go to, playbooks and the bell, and the default credential (no password asked for a new cluster, promote, never replaced unticked), and Config › Play (links, revoke, exclusion, locked fields, watch rules), and Play (slides, keys, zoom, takeover, exclusion, display link, an older core)');
+console.log('ok: strip, console, shards, the Clusters page (columns, name menu, unreachable rows, expand chevron, alerts link), volume, hand-off, refresh, snapshots, tasks, toasts, accounts split and pinned Zabbix roles, the log-delay preflight, a quiet Config page, Config › Volume fields, report jobs and the Reports pill, the mailed report and the mail server, the Request Centre and the redraw gate, the request policy, the coverage bar, the Tasks panel and the console tabs, template management, the Alerts page grouped by cluster with merged repeats, cluster type (badge, Type filter, edit dialog to file keys and CLUSTER_META_SET), Go to, playbooks and the bell, and the default credential (no password asked for a new cluster, promote, never replaced unticked), and Config › Play (links, revoke, exclusion, locked fields, watch rules), and Play (slides, keys, zoom, takeover, exclusion, display link, an older core), and Reports (Planning recalculates, the backup target, Based on a cluster, CSV; plan templates save and delete; which indices count)');
 // The pages leave auto-refresh timers and a live tail running; nothing here waits on them.
 process.exit(0);

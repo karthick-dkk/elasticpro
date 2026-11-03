@@ -41,7 +41,7 @@ test('a managed name replaces one sub-key and not the object', () => {
 
 test('every VOLUME.md managed name and config.txt key is mapped', () => {
   const managed = V.VOLUME_KEYS.map((k) => k.managed);
-  assert.deepEqual(managed, ['volumeIndexFormat', 'volumeTag', 'volumeForwarder', 'volumeSourceHost', 'volumeSourceIp',
+  assert.deepEqual(managed, ['volumeIndexFormat', 'volumeIndexPattern', 'volumeDayFrom', 'volumeTimeField', 'volumeTag', 'volumeForwarder', 'volumeSourceHost', 'volumeSourceIp',
     'volumeEventSize', 'volumeSubSize', 'volumeExtraName', 'volumeExtraFields', 'volumeSizeBasis', 'volumeTopValues',
     'volumeKeepMonths', 'volumeCollectAt']);
   assert.ok(V.VOLUME_KEYS.every((k) => /^UI_VOLUME_[A-Z_]+$/.test(k.env)));
@@ -156,7 +156,9 @@ test('the YAML block and the config.txt lines carry the current values', () => {
   assert.match(V.yamlBlock(v), /keepMonths: {2}6/);
   assert.match(V.yamlBlock(v), /collectAt: {3}"06:00"/);
   const t = V.configTxtLines(v).split('\n');
-  assert.equal(t.length, 13);
+  assert.equal(t.length, 16);
+  assert.ok(t.includes('UI_VOLUME_INDEX_PATTERN=logstash-*'));
+  assert.ok(t.includes('UI_VOLUME_DAY_FROM=name'));
   assert.ok(t.includes('UI_VOLUME_TAG_FIELDS=tag1,labels.tag1,tags'));
   assert.ok(t.includes('UI_VOLUME_KEEP_MONTHS=6'));
   assert.ok(t.includes('UI_VOLUME_EXTRA_NAME=Dataset'));
@@ -210,4 +212,25 @@ test('desktopVolume: one payload, legacy converted, ids as the app normalizes th
   assert.equal(none.cluster, null);
   assert.deepEqual(none.clusters, { keep: { keepMonths: 6 } });
   assert.equal(V.desktopVolume(null, {}, slug), null);
+});
+
+test('Which indices count: the pattern, the day rule and the time field are validated and kept', () => {
+  const ok = V.cloneVolume();
+  assert.deepEqual(V.validateVolume(ok), []);
+  assert.equal(ok.indexPattern, 'logstash-*', 'the default pattern needs no date part');
+  assert.equal(ok.dayFrom, 'name');
+  assert.equal(ok.timeField, '@timestamp');
+  assert.match(V.validateVolume({ ...ok, indexPattern: '' }).join(' '), /Index pattern: name at least one/);
+  assert.match(V.validateVolume({ ...ok, indexPattern: 'a b*' }).join(' '), /not an index pattern/);
+  assert.deepEqual(V.validateVolume({ ...ok, indexPattern: 'logstash-*, fw-*' }), [], 'comma-separated patterns');
+  assert.match(V.validateVolume({ ...ok, dayFrom: 'sometimes' }).join(' '), /pick one of the two/);
+  assert.match(V.validateVolume({ ...ok, timeField: 'a b' }).join(' '), /Time field/);
+  assert.deepEqual(V.validateVolume({ indexPattern: 'x-*' }, { partial: true }), [], 'an override may state only the pattern');
+  // Saving the form must not drop them: they are in what is written.
+  const w = V.buildDefaultsToWrite({ ...ok, indexPattern: 'fw-*', dayFrom: 'time' }, {}, new Set());
+  assert.equal(w.indexPattern, 'fw-*');
+  assert.equal(w.dayFrom, 'time');
+  const folded = V.foldManaged(ok, { volumeIndexPattern: 'x-*' });
+  assert.equal(folded.volume.indexPattern, 'x-*');
+  assert.ok(folded.locked.has('indexPattern'));
 });
