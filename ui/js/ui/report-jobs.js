@@ -21,8 +21,9 @@ import { confirmDialog } from './modal.js';
 import {
   reports, onReports, refreshReports, startReportsPoll, failText, reportRun, reportStop, reportClear, reportDownload,
   reportConcurrencySet, reportScheduleGet, periodPresets, periodLabel, jobStatusText, jobPct, jobClient,
-  countsText, sortJobs, isActive, isFinished, base64ToBytes,
+  countsText, sortJobs, isActive, isFinished, base64ToBytes, isWorkerDown, failLevel,
 } from '../core/reports.js';
+import { jobClusterLines, clusterLineText } from '../core/report-types.js';
 
 const CONCURRENCY = [3, 4, 5];
 
@@ -252,7 +253,7 @@ async function run() {
   if (b) b.disabled = true;
   const res = await reportRun({ clusterIds: ids, period: form.period, format: form.format, mail: form.mail });
   syncRun();
-  if (!res.ok) { setStatus({ text: failText(res, 'The report did not start'), cls: 'rj-bad' }); return; }
+  if (!res.ok) { setStatus({ text: failText(res, 'The report did not start'), cls: isWorkerDown(res) ? 'rj-warn' : 'rj-bad' }); return; }
   setStatus(null);
   const n = (res.jobs || []).length;
   // Only clusters this person picked are named: the core's answer is not trusted to stay inside the ask.
@@ -314,13 +315,31 @@ function jobRow(j, all, admin) {
           h('i', { style: { width: `${pct}%` } }))
         : null),
     h('span.rj-act', act),
+    clusterProgress(j),
     j.warning ? h('div.rj-sub.rj-warn', String(j.warning)) : null,
     j.mailError ? h('div.rj-sub.rj-warn', `Not mailed: ${j.mailError}`) : null);
 }
 
+const clusterName = (id) => (clusters().find((x) => x.id === id) || {}).name || id;
+
+/**
+ * An indices or hosts job covers every picked cluster: one line per cluster under the row,
+ * with its state, day, partitions and days done, how many requests the controller allows at
+ * once, how often it halved and why, and — for a cluster the job could not read — the reason.
+ * A finished job keeps only the clusters that failed; a figure the core did not send is left
+ * out of the line rather than shown as 0.
+ */
+function clusterProgress(j) {
+  const lines = jobClusterLines(j, clusterName).filter((l) => isActive(j) || l.failed);
+  if (!lines.length) return null;
+  return h('div.rj-sub.rj-clusters', { dataset: { clusters: String(lines.length) } },
+    ...lines.map((l) => h(`div.rj-cl${l.failed ? '.rj-warn' : ''}`, { dataset: { cluster: l.id, state: l.state }, title: clusterLineText(l) },
+      h('b', l.name), ' ', h('span', clusterLineText(l)))));
+}
+
 async function stopOne(j) {
   const res = await reportStop({ id: j.id });
-  if (!res.ok) toast(`Not stopped: ${res.message || res.kind || 'refused'}`, 'err', 6000);
+  if (!res.ok) toast(`Not stopped: ${res.message || res.kind || 'refused'}`, failLevel(res), 6000);
   refreshReports();
 }
 
@@ -331,19 +350,19 @@ async function stopAll() {
     `${plural(n, 'job')} running or waiting will end as stopped. Files already made are kept.`, { yes: 'stop all', danger: true });
   if (!yes) return;
   const res = await reportStop({ all: true });
-  if (!res.ok) toast(`Not stopped: ${res.message || res.kind || 'refused'}`, 'err', 6000);
+  if (!res.ok) toast(`Not stopped: ${res.message || res.kind || 'refused'}`, failLevel(res), 6000);
   refreshReports();
 }
 
 async function clearFinished() {
   const res = await reportClear();
-  if (!res.ok) toast(`Not cleared: ${res.message || res.kind || 'refused'}`, 'err', 6000);
+  if (!res.ok) toast(`Not cleared: ${res.message || res.kind || 'refused'}`, failLevel(res), 6000);
   refreshReports();
 }
 
 async function setConcurrency(n) {
   const res = await reportConcurrencySet(n);
-  if (!res.ok) toast(`Not changed: ${res.message || res.kind || 'refused'}`, 'err', 6000);
+  if (!res.ok) toast(`Not changed: ${res.message || res.kind || 'refused'}`, failLevel(res), 6000);
   refreshReports();
 }
 

@@ -124,18 +124,30 @@ async fn run() {
     // the portable build; a non-loopback bind is the hosted deployment.
     let edition = if hosted { Edition::Hosted } else { Edition::Portable };
     let core = Core::new(data, edition);
+    // What this process is (docs/WORKER.md): `core` serves people and the monitoring, `worker`
+    // runs the batch work on an internal port, `all` (unset) is both, as before 0.3.54.
+    let role = core.role();
+    let starts = elasticpro_core::worker::starts(role);
+    tracing::info!(target: "audit", role = role.as_str(), version = elasticpro_core::VERSION, "starting");
     // The one timer in the product. It is started here, inside the runtime and only for
     // the hosted binary, rather than in Core::new — a scheduler that starts itself
     // wherever a Core is built would run in the desktop app and in every test.
-    core.start_delay_sink();
+    if starts.delay_sink {
+        core.start_delay_sink();
+    }
     // The history store's writer (docs/HISTORY.md): a tick a minute that writes nothing until
     // config.txt permits it and an admin armed it.
-    core.start_history_store();
+    if starts.history_store {
+        core.start_history_store();
+    }
     // Cleans what the core itself leaves behind. Started here for the same reason: a
     // scheduler that started itself in Core::new would run in every test.
-    core.start_housekeeping();
+    if starts.housekeeping {
+        core.start_housekeeping();
+    }
     // The last cluster setup an admin applied, so a restart does not leave everybody
-    // else on "not primed" until an admin next opens the app.
+    // else on "not primed" until an admin next opens the app. The worker reads it too (it
+    // never writes it): the clusters it collects from are the core's.
     core.restore_prime().await;
     // Clusters that are Zabbix hosts: once now, so they are there on the first page load,
     // then on a timer.
@@ -147,25 +159,61 @@ async fn run() {
             tracing::info!(result = %elasticpro_core::errors::for_log(&first, 5), "zabbix sync at start");
         }
     }
-    core.start_zabbix_sync();
+    // The worker keeps its cluster list the same way, read-only: it never makes Zabbix hosts.
+    if starts.zabbix_sync || role == elasticpro_core::worker::Role::Worker {
+        core.start_zabbix_sync();
+    }
     // After the prime and the first Zabbix sync, so the poller starts knowing the clusters
     // it is to poll and does not prune a restored cache it has not been told about yet.
-    core.start_fleet_poller();
+    if starts.fleet_poller {
+        core.start_fleet_poller();
+    }
     // The daily index-volume record (docs/VOLUME.md): once a day at collectAt, server local
     // time. After the poller, so its first tick knows the clusters and which are down.
-    core.start_volume_daily();
+    if starts.volume_daily {
+        core.start_volume_daily();
+    }
     // Volume reports (docs/VOLUME.md "Reports and mail"): jobs left queued by a restart, the
     // 7-day prune of report files, and the mailed report's schedule, once a minute.
-    core.start_report_timer();
+    if starts.report_timer {
+        core.start_report_timer();
+    }
     // Stuck records closed, the read cache aged, our orphaned searches on the clusters
     // cancelled (ES_TASK_REAPER). See bridge.rs, "the reapers".
-    core.start_request_reaper();
+    if starts.request_reaper {
+        core.start_request_reaper();
+    }
     // The request figures to a Zabbix trapper item, once a minute — only when
     // ZABBIX_METRICS_HOST names a host. See zbx_push.rs.
-    core.start_zabbix_push();
+    if starts.zabbix_push {
+        core.start_zabbix_push();
+    }
     // ElasticPro's own health (docs/HEALTH.md): one sample a minute of this process and the
     // data volume, kept for a day. Reads no cluster.
-    core.start_health();
+    if starts.health {
+        core.start_health();
+    }
+    // The worker: its heartbeat (worker/status.json, worker/requests.jsonl), the settings it
+    // reloads, and its internal port — and nothing people can reach.
+    if starts.worker_loops {
+        core.start_worker_loops();
+    }
+    if starts.worker_http {
+        let port: u16 = std::env::var("ELASTICPRO_WORKER_PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(elasticpro_core::worker::PORT);
+        let app = Router::new()
+            .route("/run", post(worker_action))
+            .route("/send-now", post(worker_action))
+            .route("/stop", post(worker_action))
+            .route("/queue", post(worker_action))
+            .route("/health", get(worker_health))
+            .layer(axum::extract::DefaultBodyLimit::max(256 * 1024))
+            .with_state(core);
+        let addr = std::net::SocketAddr::from((bind, port));
+        println!("elasticpro-bridge: report worker on http://{addr}/  (internal only: /run /send-now /stop /queue /health)");
+        let l = tokio::net::TcpListener::bind(addr).await.expect("bind");
+        axum::serve(l, app).await.expect("serve");
+        return;
+    }
     let app = Router::new()
         .route("/bridge", post(bridge))
         // Fleet cache changes, pushed. Opened with a ticket from EVENTS_TICKET; see events().
@@ -188,6 +236,24 @@ async fn run() {
     println!("elasticpro-bridge: http://{addr}/  (ui from {ui}){}", if hosted { "  [hosted: accounts required]" } else { "" });
     let l = tokio::net::TcpListener::bind(addr).await.expect("bind");
     axum::serve(l, app.into_make_service_with_connect_info::<std::net::SocketAddr>()).await.expect("serve");
+}
+
+/// The report worker's actions (`POST /run`, `/send-now`, `/stop`, `/queue`): the core forwards
+/// them with the shared token and its version; see `Core::worker_http`.
+async fn worker_action(
+    State(core): State<Arc<Core>>,
+    uri: axum::http::Uri,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> (axum::http::StatusCode, Json<serde_json::Value>) {
+    let h = |k: &str| headers.get(k).and_then(|v| v.to_str().ok());
+    let (code, out) = core.worker_http(uri.path(), h(elasticpro_core::worker::TOKEN_HEADER), h(elasticpro_core::worker::VERSION_HEADER), &body).await;
+    (status(code), Json(out))
+}
+
+/// `GET /health` of the report worker, for the compose healthcheck: up, version, queue.
+async fn worker_health(State(core): State<Arc<Core>>) -> Json<serde_json::Value> {
+    Json(core.worker_health())
 }
 
 /// Who may show this app in a frame: the paired Zabbix frontend, or nobody. Set here

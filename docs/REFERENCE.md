@@ -305,6 +305,19 @@ Messages: `REPORT_RUN`, `REPORT_SCHEDULE_GET/SET` and `REPORT_SEND_NOW` take `ki
 the caller's clusters). Settings: the `UI_REPORT_INDICES_*`, `UI_REPORT_HOSTS_*`,
 `UI_REPORT_CONCURRENCY_*` keys and `REPORT_CPU_SLOTS` in [SETTINGS.md](SETTINGS.md).
 
+### The report worker (0.3.54)
+
+The hosted stack runs the batch work in its own container ([WORKER.md](WORKER.md)): the same
+image as the core with `ELASTICPRO_ROLE=worker`, its own memory and CPU cap
+(`ELASTICPRO_WORKER_MEM_LIMIT`, default 1g; `ELASTICPRO_WORKER_CPUS`, default 1.0) and its own
+request gate. The core (`ELASTICPRO_ROLE=core`) checks who may do what and hands report runs,
+sends, stops and collections to it over the internal network; every read (Exports, Reports,
+the hosts view, downloads) stays in the core, from the files the worker writes. A worker that is
+down never touches monitoring: the core answers those actions `worker_unavailable` (EP-218)
+and scheduled work resumes when it is back. A worker of another version refuses work
+(`worker_version`, EP-219). The Request Centre shows the worker's requests labelled *worker*;
+Requests › ElasticPro health shows its memory, CPU, gate and running jobs.
+
 ## Hosted on a server
 
 The same core and UI can run on a Linux server and be used from a browser — three

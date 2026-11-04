@@ -115,15 +115,18 @@ Decisions made while building, within the contract:
 - **Database** is always *not known*: the core does not connect to it (the db container has its
   own healthcheck). **Redis** is the write-through store's last success / last failure, no extra
   round trip.
-- **Reports share** of the memory budget is `null` ("not known — this core has no reports share")
-  until `memory.rs` gains it; then `budget.reports = {budgetBytes, usedBytes}`.
+- **Reports share** of the memory budget is `budget.reports = {budgetBytes, usedBytes, pageMaxBytes,
+  holder}` from `memory.rs` (L/8, at least 64 MiB): `usedBytes` is `null` — what the share holds is
+  not counted, so it is *not known*, never a zero; `holder` is `worker` in role `core` (the reports
+  run there, under the worker's limit) and `this process` otherwise. (0.3.54, the worker build.)
 - **Report jobs**: in role `all` the queue the core holds; in role `core` `reports/jobs.json`; when
   the worker's status file lists running jobs, those (they carry the concurrency). A job's
   `day`, `partitions` (`{done,total}`), `pages`, `rows`, `concurrency`, `halvings`, `lastReason`
   are read from the job or from its `progress`, by those camelCase names, when present; a job
   without them shows *not reported*. `reportKind` (`indices`, `hosts`) names the kind; absent is
   `volume`.
-- **Role** is `ELASTICPRO_ROLE` (`core`, `worker`, else `all`). In `all` there is no worker: its
+- **Role** is the core's own (`Core::role`, decided once from `ELASTICPRO_ROLE`: `core`, `worker`,
+  else `all`). In `all` there is no worker: its
   chip is *not deployed — role all* (off, not a fault) and no worker check is made. In `core` a
   missing status file is red.
 - The ring is `<data>/health/<role>.json`, written every 10 samples; a file that does not parse

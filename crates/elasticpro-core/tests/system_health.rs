@@ -44,7 +44,11 @@ async fn an_admin_reads_the_snapshot_and_no_cluster_is_asked() {
     assert!(pings.is_some_and(|p| p["count"].as_u64().unwrap() >= 5), "{}", r["core"]["messages"]);
     let classes: Vec<&str> = r["core"]["gate"]["classes"].as_array().unwrap().iter().map(|c| c["class"].as_str().unwrap()).collect();
     assert_eq!(classes, ["interactive", "prompted", "background"]);
-    assert!(r["core"]["budget"]["reports"].is_null(), "no reports share in memory.rs yet: not known, not zero");
+    // The reports share of memory.rs: its budget, and what it holds not known rather than zero.
+    let rep = &r["core"]["budget"]["reports"];
+    assert!(rep["budgetBytes"].as_u64().is_some_and(|b| b >= 64 * 1024 * 1024), "{rep}");
+    assert!(rep["usedBytes"].is_null(), "{rep}");
+    assert_eq!(rep["holder"], json!("this process"), "role all runs the reports itself: {rep}");
     assert!(r["core"]["disk"]["areas"].as_array().is_some_and(|a| a.len() == 5), "{}", r["core"]["disk"]);
     assert_eq!(r["trends"]["points"].as_array().map(|p| p.len()), Some(1), "the first read takes the first sample");
 

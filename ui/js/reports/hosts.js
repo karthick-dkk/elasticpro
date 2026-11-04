@@ -72,11 +72,25 @@ function paintTable() {
   if (v.state === 'error') { mount(table, empty('Volume by host could not be read.', { detail: h('span.mono', v.error) })); return; }
   if (!v.data) { mount(table, h('div.tbl-empty', 'Reading volume by host…')); return; }
   const d = v.data;
-  const cols = [...FIXED, ...d.fields.map((f) => ({ col: `meta.${f}`, label: f, meta: f }))];
-  const row = (r) => h('tr',
-    h('td.mono', r.day), h('td.mono', r.index), h('td', r.source ?? ''), h('td.mono', r.host ?? h('span.muted', 'no host')),
-    h('td.num', cellOf(r.docs, num)), h('td.num', cellOf(r.eventBytes, (x) => bytes(x))), h('td.num', cellOf(r.subBytes, (x) => bytes(x))),
-    ...d.fields.map((f) => h('td', r.meta[f] === undefined || r.meta[f] === null ? h('span.muted', '—') : String(r.meta[f]))));
+  // The ClientID and branch columns are the core's filled values (rows[].clientId/branch, as the
+  // workbook fills them) and sort on the filled value (`clientId`/`branch`), not the raw field.
+  const metaCol = (f) => (f === d.clientIdField ? { col: 'clientId', label: f, fill: 'clientId' }
+    : f === d.branchField ? { col: 'branch', label: f, fill: 'branch' } : { col: `meta.${f}`, label: f, meta: f });
+  const cols = [...FIXED, ...d.fields.map(metaCol)];
+  const metaCell = (r, c) => {
+    const val = c.fill ? (r[c.fill] ?? r.meta[c.label]) : r.meta[c.meta];
+    return h('td', val === undefined || val === null || val === '' ? h('span.muted', '—') : String(val));
+  };
+  // Event size: the documents that had no event size are said on hover, never folded into the sum silently.
+  const eventCell = (r) => {
+    const cell = cellOf(r.eventBytes, (x) => bytes(x));
+    return r.eventMissingDocs ? h('span', { title: `${num(r.eventMissingDocs)} document(s) had no event size` }, cell, h('span.hv-inc', `${num(r.eventMissingDocs)} without`)) : cell;
+  };
+  const row = (r) => h(`tr${r.incomplete ? '.hv-row-inc' : ''}`,
+    h('td.mono', r.day, r.incomplete ? h('span.hv-inc', { title: 'The collection hit its page bound on this day: the rows are a lower bound' }, 'incomplete') : null),
+    h('td.mono', r.index), h('td', r.source ?? ''), h('td.mono', r.host ?? h('span.muted', 'no host')),
+    h('td.num', cellOf(r.docs, num)), h('td.num', eventCell(r)), h('td.num', cellOf(r.subBytes, (x) => bytes(x))),
+    ...cols.slice(FIXED.length).map((c) => metaCell(r, c)));
   const totals = h('tr.hv-totals', h('th', { scope: 'row', colspan: 4 }, `Total · ${plural(d.total, 'row')}`),
     h('td.num', cellOf(d.totals.docs, num)), h('td.num', cellOf(d.totals.eventBytes, (x) => bytes(x))), h('td.num', cellOf(d.totals.subBytes, (x) => bytes(x))),
     ...d.fields.map(() => h('td')));
@@ -89,6 +103,10 @@ function paintTable() {
   mount(table,
     d.incompleteDays.length ? h('div.banner.warn.hv-incomplete', { style: { margin: '0 0 6px', fontSize: '12px' } },
       `Incomplete: ${d.incompleteDays.join(', ')}. The collection hit its page bound on ${d.incompleteDays.length === 1 ? 'that day' : 'those days'}, so its rows are a lower bound.`) : null,
+    d.failedDays.length ? h('div.banner.warn.hv-days.hv-failed',
+      `Not held: ${d.failedDays.map((x) => `${x.day} (${x.failed})`).join(', ')}. The collection is tried again on the next ticks; Run now with Collect again asks at once.`) : null,
+    d.collectingDays.length ? h('div.muted.hv-days.hv-collecting',
+      `Being collected: ${d.collectingDays.map((x) => x.day).join(', ')}. Their rows appear when the day is complete.`) : null,
     d.notInMapping.length ? h('div.muted.hv-nomap', { style: { margin: '0 0 6px', fontSize: '12px' } },
       `Not in this cluster's mapping, so they have no column: ${d.notInMapping.join(', ')}.`) : null,
     h('div.tbl-wrap.rp-tbl', h('table.tbl.hv-tbl',

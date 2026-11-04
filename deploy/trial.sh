@@ -5,6 +5,14 @@
 #   2. a signed-in session -> the UI and the bridge work through TLS (and a bare Basic header gets nothing)
 #   3. a write shows up in the core's audit log under the signed-in user's name
 #   4. port 8765 is NOT reachable from outside the compose network
+# and, since 0.3.54, the report worker (docs/WORKER.md):
+#   5. the worker is up and healthy, and the core sees its heartbeat
+#   6. the core in role core never starts the report timer; the worker does
+#   7. the worker cannot be reached through nginx, nor from the host
+#   8. (on a stack with a real cluster: TRIAL_CLUSTER_ID=<cluster id>) killing the worker during
+#      a hosts collection leaves PING and an ES read answering in their normal time; the core
+#      says worker_unavailable; the checkpoint survives and the collection finishes when the
+#      worker is back; the job names any cluster that failed
 set -uo pipefail
 cd "$(dirname "$0")"
 LISTEN=${LISTEN:-443}
@@ -29,7 +37,8 @@ export ELASTICPRO_NGINX_IMAGE=${ELASTICPRO_NGINX_IMAGE:-karthickdk02/elasticpro-
 export ELASTICPRO_REDIS_IMAGE=${ELASTICPRO_REDIS_IMAGE:-karthickdk02/elasticpro-redis:latest}
 export ELASTICPRO_DB_IMAGE=${ELASTICPRO_DB_IMAGE:-karthickdk02/elasticpro-postgres:latest}
 
-docker compose build core 2>&1 | tail -2
+# TRIAL_SKIP_BUILD=1: the image ELASTICPRO_IMAGE names was built already (with other build args).
+[ "${TRIAL_SKIP_BUILD:-}" = 1 ] || docker compose build core 2>&1 | tail -2
 docker compose up -d 2>&1 | tail -3
 
 # If a container did not start — a port already taken is the usual reason — then whatever
@@ -37,7 +46,7 @@ docker compose up -d 2>&1 | tail -3
 # returning 200 would be reported as "UI served over TLS". Check the stack is actually up
 # before believing anything it says.
 running=$(docker compose ps --services --filter status=running | sort | tr '\n' ' ')
-for svc in core db nginx; do
+for svc in core worker db nginx; do
   case " $running " in
     *" $svc "*) ;;
     *) echo "  ✗ service '$svc' is not running — the trial would be testing something else"
@@ -136,6 +145,125 @@ if docker run --rm --network none alpine:3 sh -c 'true' >/dev/null 2>&1; then
     bad "core reachable from a container outside the compose network"
   else ok "core unreachable from outside the compose network"; fi
 fi
+echo "== 5. the report worker is up =="
+WORKER_ID=$(docker compose ps -q worker)
+wh=missing
+for i in $(seq 1 30); do
+  wh=$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$WORKER_ID" 2>/dev/null || echo missing)
+  [ "$wh" = healthy ] && break
+  sleep 3
+done
+[ "$wh" = healthy ] && ok "worker container healthy (GET /health on 8766)" || bad "worker is '$wh' (want healthy)"
+wstate=$(bridge "$JU" '{"type":"SYSTEM_HEALTH"}' | python3 -c 'import json,sys
+d = json.load(sys.stdin); print(d.get("role"), (d.get("worker") or {}).get("state"))')
+[ "$wstate" = "core up" ] && ok "the core (role core) reads the worker’s heartbeat: up" || bad "SYSTEM_HEALTH role/worker: '$wstate' (want 'core up')"
+
+echo "== 6. the report timer runs in the worker, never in the core =="
+corelog=$(docker compose logs --no-log-prefix core 2>/dev/null || true)
+workerlog=$(docker compose logs --no-log-prefix worker 2>/dev/null || true)
+printf '%s\n' "$corelog" | grep -q '"role":"core"' && ok "the core started in role core" || bad "no 'starting' line with role core in the core's log"
+printf '%s\n' "$corelog" | grep -q 'volume report: timer started' && bad "the core started the report timer in role core" \
+  || ok "the core did not start the report timer"
+printf '%s\n' "$workerlog" | grep -q 'volume report: timer started' && ok "the worker started the report timer" \
+  || bad "the worker's log has no 'volume report: timer started'"
+runs=$(bridge "$JU" '{"type":"REPORT_JOBS"}' | python3 -c 'import json,sys;d=json.load(sys.stdin);print(d.get("ok"), (d.get("worker") or {}).get("state"))')
+[ "$runs" = "True up" ] && ok "REPORT_JOBS answers from jobs.json and names the worker up" || bad "REPORT_JOBS -> '$runs' (want 'True up')"
+
+echo "== 7. the worker is not reachable through nginx or from the host =="
+for path in /run /send-now /stop /queue /health; do
+  body=$(curl -sk -X POST "https://127.0.0.1:$LISTEN$path" -H 'content-type: application/json' -d '{}' 2>/dev/null | head -c 400)
+  if printf '%s' "$body" | grep -q '"role":"worker"\|worker token'; then bad "nginx routes $path to the worker: $body"; else ok "$path through nginx does not reach the worker"; fi
+done
+wbinding=$(docker inspect "$WORKER_ID" --format '{{index .NetworkSettings.Ports "8766/tcp"}}' 2>/dev/null || echo '?')
+[ "$wbinding" = "[]" ] || [ "$wbinding" = "<no value>" ] || [ -z "$wbinding" ] \
+  && ok "worker has no host port binding (8766/tcp -> none)" || bad "worker has a host binding for 8766: $wbinding — it must not"
+# Inside the network the token is what keeps an action out: no token, refused.
+wrun=$(docker compose exec -T core wget -q -O - -T 4 --header='content-type: application/json' \
+        --post-data='{"type":"REPORT_STOP","msg":{"all":true}}' http://worker:8766/stop 2>&1 || true)
+printf '%s' "$wrun" | grep -q '"ok":true' && bad "the worker took an action without its token: $wrun" || ok "the worker refuses an action without the shared token"
+
+echo "== 8. killing the worker mid hosts collection =="
+# TRIAL_ES_URL (e.g. tools/mock-es.mjs on the host, http://host.docker.internal:9299, started
+# with MOCK_LATENCY_MS so a collection takes a while): primed as cluster trial-mock, no
+# credential, and used for this step — beside trial-down, an address nothing answers on, so
+# the resumed job has a cluster it must name as failed.
+if [ -n "${TRIAL_ES_URL:-}" ]; then
+  TRIAL_CLUSTER_ID=${TRIAL_CLUSTER_ID:-trial-mock}
+  pr=$(bridge "$JU" "{\"type\":\"PRIME\",\"readOnly\":true,\"clusters\":[{\"id\":\"$TRIAL_CLUSTER_ID\",\"name\":\"$TRIAL_CLUSTER_ID\",\"url\":\"$TRIAL_ES_URL\",\"authHeader\":\"\"},{\"id\":\"trial-down\",\"name\":\"trial-down\",\"url\":\"http://127.0.0.1:1\",\"authHeader\":\"\"}]}")
+  DOWN=trial-down
+  printf '%s' "$pr" | grep -q '"ok":true' && ok "cluster $TRIAL_CLUSTER_ID primed at $TRIAL_ES_URL" || bad "PRIME -> $(printf '%s' "$pr" | head -c 200)"
+fi
+if [ -z "${TRIAL_CLUSTER_ID:-}" ]; then
+  echo "  - skipped: set TRIAL_CLUSTER_ID to a cluster this stack can read (the test VM), or TRIAL_ES_URL to a mock, to run it"
+else
+  C=$TRIAL_CLUSTER_ID
+  esread(){ curl -sk -o "$1" -w '%{time_total}' -b "$JU" -X POST "https://127.0.0.1:$LISTEN/bridge" -H 'content-type: application/json' \
+              -d "{\"type\":\"ES\",\"clusterId\":\"$C\",\"method\":\"GET\",\"path\":\"/_cluster/health?timeout=$2s\"}"; }
+  # The ES read's normal time, before any report runs.
+  t_es0=$(esread /dev/null 30)
+  # The worker learns the cluster from primed.json within its 30-s reload.
+  JOB=; job=
+  for i in $(seq 1 30); do
+    job=$(bridge "$JU" "{\"type\":\"REPORT_RUN\",\"kind\":\"hosts\",\"clusterIds\":[\"$C\"],\"period\":\"last7\",\"collectAgain\":true}" \
+          | python3 -c 'import json,sys;d=json.load(sys.stdin);j=(d.get("jobs") or [{}])[0];print(j.get("id") or "", d.get("kind") or "", json.dumps(d.get("refused") or []))')
+    JOB=${job%% *}
+    [ -n "$JOB" ] && break
+    sleep 3
+  done
+  [ -n "$JOB" ] && ok "hosts job $JOB queued in the worker" || bad "REPORT_RUN hosts -> '$job'"
+  # Until a page is in and checkpointed.
+  pages=0
+  for i in $(seq 1 120); do
+    pages=$(bridge "$JU" '{"type":"REPORT_JOBS"}' | python3 -c "import json,sys
+d = json.load(sys.stdin)
+j = next((j for j in d.get('jobs', []) if j.get('id') == '$JOB'), {})
+print(((j.get('progress') or {}).get('pages')) or 0)")
+    [ "${pages:-0}" -gt 0 ] && break
+    sleep 1
+  done
+  [ "${pages:-0}" -gt 0 ] && ok "collection under way ($pages page(s) in)" || bad "no page collected within 120 s"
+  docker compose kill worker >/dev/null 2>&1
+  ok "worker killed"
+  # Monitoring answers in its normal time without the worker: PING within 2 s, the ES read
+  # within 2 s of what it took before the report ran.
+  t_ping=$(curl -sk -o /dev/null -w '%{time_total}' -b "$JU" -X POST "https://127.0.0.1:$LISTEN/bridge" -H 'content-type: application/json' -d '{"type":"PING"}')
+  t_es=$(esread /tmp/trial-es.$$ 31)
+  python3 -c "import sys; sys.exit(0 if float('$t_ping') < 2 else 1)" && ok "PING answered in ${t_ping}s with the worker down" || bad "PING took ${t_ping}s with the worker down"
+  if python3 -c "import sys; sys.exit(0 if float('$t_es') < float('$t_es0') + 2 else 1)" && grep -q '"ok":true' /tmp/trial-es.$$; then ok "an ES read answered in ${t_es}s with the worker down (${t_es0}s before the report)"
+  else bad "ES read with the worker down: ${t_es}s (before: ${t_es0}s), $(head -c 200 /tmp/trial-es.$$)"; fi
+  rm -f /tmp/trial-es.$$
+  down=$(bridge "$JU" '{"type":"REPORT_CONCURRENCY_SET","n":3}' | python3 -c 'import json,sys;print(json.load(sys.stdin).get("kind"))')
+  [ "$down" = worker_unavailable ] && ok "an action is refused as worker_unavailable" || bad "with the worker down an action answered '$down'"
+  cps=$(docker compose exec -T core sh -c "ls /app/data/volume/*/hosts/*.partial.json 2>/dev/null | wc -l" | tr -d ' \r')
+  [ "${cps:-0}" -gt 0 ] && ok "$cps checkpoint(s) kept on the data volume" || bad "no hosts checkpoint on the data volume after the kill"
+  docker compose start worker >/dev/null 2>&1
+  for i in $(seq 1 30); do
+    [ "$(docker inspect -f '{{.State.Health.Status}}' "$WORKER_ID" 2>/dev/null)" = healthy ] && break; sleep 3
+  done
+  st=$(bridge "$JU" '{"type":"REPORT_JOBS"}' | python3 -c "import json,sys
+d = json.load(sys.stdin); j = next((j for j in d.get('jobs', []) if j.get('id') == '$JOB'), {}); print(j.get('status'), j.get('error'))")
+  case "$st" in failed*restarted*) ok "the cut-short job is marked by the restarted worker ($st)";; *) bad "the cut-short job reads '$st' (want failed, the server restarted)";; esac
+  # Run again without collectAgain: it resumes from the checkpoints rather than starting over.
+  job2=$(bridge "$JU" "{\"type\":\"REPORT_RUN\",\"kind\":\"hosts\",\"clusterIds\":[\"$C\"${DOWN:+,\"$DOWN\"}],\"period\":\"last7\"}" \
+         | python3 -c 'import json,sys;d=json.load(sys.stdin);print(((d.get("jobs") or [{}])[0]).get("id") or "")')
+  end=""
+  for i in $(seq 1 300); do
+    end=$(bridge "$JU" '{"type":"REPORT_JOBS"}' | python3 -c "import json,sys
+d = json.load(sys.stdin); j = next((j for j in d.get('jobs', []) if j.get('id') == '$job2'), {})
+print(j.get('status'), json.dumps(j.get('failedClusters') or []))")
+    case "$end" in done*|failed*|stopped*) break;; esac
+    sleep 2
+  done
+  if [ -n "${DOWN:-}" ]; then
+    case "$end" in "done "*"\"$DOWN\""*) ok "the job names the cluster that failed: ${end#done }";;
+                   *) bad "the job does not name $DOWN as failed: '$end'";; esac
+  fi
+  case "$end" in "done "*) ok "the collection finished after the restart; clusters named as failed: ${end#done }";;
+                 *) bad "the resumed job ended '$end' (want done)";; esac
+  left=$(docker compose exec -T core sh -c "ls /app/data/volume/*/hosts/*.partial.json 2>/dev/null | wc -l" | tr -d ' \r')
+  [ "${left:-0}" -lt "${cps:-0}" ] && ok "the checkpoints were taken up ($cps → $left)" || bad "checkpoints before $cps, after $left"
+fi
+
 docker compose ps --format '  {{.Service}}  {{.Status}}  {{.Ports}}'
 
 [ $fail -eq 0 ] && echo "ok: hosted stack trial passed" || { echo "FAILED"; exit 1; }

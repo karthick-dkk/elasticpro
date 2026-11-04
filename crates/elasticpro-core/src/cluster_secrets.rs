@@ -197,8 +197,20 @@ impl ClusterSecrets {
                     None => {
                         let mut k = [0u8; 32];
                         rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut k);
-                        if let Err(e) = write_private(&kp, hex::encode(k).as_bytes()) {
-                            problem = Some(format!("cannot write {}: {e}", kp.display()));
+                        if kp.exists() {
+                            if let Err(e) = write_private(&kp, hex::encode(k).as_bytes()) {
+                                problem = Some(format!("cannot write {}: {e}", kp.display()));
+                            }
+                        } else {
+                            // The core and the report worker may start at once on a fresh volume:
+                            // one key is made, and both use it (docs/WORKER.md).
+                            match crate::worker::create_once(&kp, || hex::encode(k).into_bytes()) {
+                                Ok(b) => match key_from(&String::from_utf8_lossy(&b)) {
+                                    Ok(won) => k = won,
+                                    Err(why) => problem = Some(format!("{}: {why}", kp.display())),
+                                },
+                                Err(e) => problem = Some(format!("cannot write {}: {e}", kp.display())),
+                            }
                         }
                         tracing::warn!(key = %kp.display(),
                             "cluster secrets: no ELASTICPRO_CLUSTER_SECRET_KEY_FILE set, so the key was made beside the encrypted file; \
@@ -217,6 +229,20 @@ impl ClusterSecrets {
             tracing::warn!(entries = bad, "cluster secrets: the key does not open {bad} kept password(s) — was the key changed?");
         }
         s
+    }
+
+    /// Read the kept passwords again (the report worker, after the core changed one). The key
+    /// is not read again: it is fixed for the life of the process.
+    pub fn reload(&self) {
+        let Some(p) = &self.path else { return };
+        match std::fs::read(p) {
+            Ok(b) => match serde_json::from_slice::<Stored>(&b) {
+                Ok(s) => *self.stored.write() = s,
+                Err(e) => tracing::warn!(error = %e, "cluster secrets: the file could not be read again; keeping what is held"),
+            },
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => *self.stored.write() = Stored { v: 1, ..Default::default() },
+            Err(e) => tracing::warn!(error = %e, "cluster secrets: the file could not be read again; keeping what is held"),
+        }
     }
 
     fn valid_name(cluster: &str) -> bool {

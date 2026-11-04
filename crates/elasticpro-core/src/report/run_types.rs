@@ -52,10 +52,19 @@ pub(crate) struct Concurrency {
 
 /// From config.txt, the ceiling under the gate's per-cluster cap less one: one slot of each
 /// cluster always stays free for the health poll and for people (`ES_PER_CLUSTER`).
+#[cfg(test)]
 pub(crate) fn concurrency() -> Concurrency {
+    concurrency_for(crate::gate::limits().per_cluster, crate::worker::Role::All)
+}
+
+/// The same under a given gate cap. In role `worker` the gate is the worker's own (nobody's
+/// clicks and no health poll go through it), so the ceiling may use the whole per-cluster cap;
+/// in role `all` it stays one under, as above (docs/WORKER.md).
+pub(crate) fn concurrency_for(per_cluster: usize, role: crate::worker::Role) -> Concurrency {
     let s = crate::settings::get();
     let int = |k: &str, d: u64| s.text(k).and_then(|v| v.parse::<u64>().ok()).unwrap_or(d);
-    let room = (crate::gate::limits().per_cluster as u32).saturating_sub(1).max(1);
+    let keep_free = if role == crate::worker::Role::Worker { 0 } else { 1 };
+    let room = (per_cluster as u32).saturating_sub(keep_free).max(1);
     let max = (int("UI_REPORT_CONCURRENCY_MAX", control::DEFAULT_MAX as u64) as u32).clamp(1, control::MAX_ALLOWED).min(room);
     let start = (int("UI_REPORT_CONCURRENCY_START", control::DEFAULT_START as u64) as u32).clamp(1, max);
     Concurrency { start, max, target_ms: int("UI_REPORT_PAGE_TARGET_MS", control::DEFAULT_TARGET_MS) }
@@ -261,7 +270,7 @@ impl Core {
             }
         };
         let cfg = self.hosts_config();
-        let conc = concurrency();
+        let conc = concurrency_for(self.gate.limits().per_cluster, self.role);
         let mut ctl = Controller::new(conc.start, conc.max, conc.target_ms);
         let dir = HostsDir::new(store.root(), &id);
         let ind = match Indices::from_settings(&s) {
@@ -1216,5 +1225,13 @@ mod tests {
         let c = concurrency();
         assert!(c.max >= 1 && c.max < crate::gate::limits().per_cluster.max(2) as u32, "{c:?}");
         assert!(c.start <= c.max);
+    }
+
+    #[test]
+    fn in_the_worker_the_ceiling_may_use_the_whole_per_cluster_cap() {
+        use crate::worker::Role;
+        assert_eq!(concurrency_for(4, Role::All).max, 3, "role all keeps one slot for the poller and people");
+        assert_eq!(concurrency_for(4, Role::Worker).max, 4, "the worker's gate is its own");
+        assert_eq!(concurrency_for(1, Role::All).max, 1, "never below one");
     }
 }

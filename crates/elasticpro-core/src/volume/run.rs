@@ -245,6 +245,13 @@ impl Core {
     /* ------------------------------------- status ------------------------------------- */
 
     fn volume_run_state(&self, id: &str) -> RunState {
+        // Role core: the collection runs in the report worker, whose heartbeat lists it.
+        if self.role == crate::worker::Role::Core {
+            let st = self.data_dir().and_then(|d| crate::health::WorkerStatus::read(d).ok().flatten());
+            return st.and_then(|s| s.collection.into_iter().find(|c| c.kind == "volume" && c.cluster_id == id))
+                .map(|c| RunState { running: true, done: c.progress.done, total: c.progress.total, asked_at: None })
+                .unwrap_or_default();
+        }
         self.volume.runs.lock().get(id).cloned().unwrap_or_default()
     }
 
@@ -269,6 +276,9 @@ impl Core {
     }
 
     pub(crate) fn volume_stopped(&self) -> bool {
+        // The report worker holds no stop of its own: it reads the core's policy.json again
+        // whenever the file changed (one stat), before every request and every page.
+        self.fleet_policy_reload();
         self.fleet.cfg.read().stopped(crate::fleet::now_ms())
     }
 
@@ -280,6 +290,14 @@ impl Core {
         match t {
             "VOLUME_LAYOUT_GET" => return self.volume_layouts_get(),
             "VOLUME_LAYOUT_SET" => return self.volume_layouts_set(msg, caller),
+            // Role core: collection is the report worker's (docs/WORKER.md); the gate has checked
+            // the role and that every named cluster is the caller's.
+            "VOLUME_RUN" if self.role == crate::worker::Role::Core => {
+                if self.volume.store.is_none() {
+                    return no_store();
+                }
+                return self.forward_to_worker(t, msg, caller).await;
+            }
             "VOLUME_RUN" => return self.volume_run_msg(msg, caller).await,
             "VOLUME_PATTERN_CHECK" => return self.volume_pattern_check(msg, caller).await,
             "VOLUME_MONTHLY_ALL" => return self.volume_monthly_all(msg, caller).await,

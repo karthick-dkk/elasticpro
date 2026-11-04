@@ -228,7 +228,10 @@ A report may push more than one request per cluster at a time, under control:
   health poll come first, and `ES_BACKGROUND_RESERVE` still holds. The controller's ceiling is
   kept one under the gate's per-cluster cap (`ES_PER_CLUSTER`, default 4 → at most 3 report
   requests per cluster), so a cluster always has a slot for the poller and for people; raise
-  `ES_PER_CLUSTER` to let the ceiling reach 8. Background requests are never answered from the
+  `ES_PER_CLUSTER` to let the ceiling reach 8. That is role `all`. In the report worker
+  (docs/WORKER.md) the gate is the worker's own — no person's request and no health poll goes
+  through it — so the ceiling may use the whole of its per-cluster cap
+  (`ELASTICPRO_WORKER_GATE_PER_CLUSTER`, default 4). Background requests are never answered from the
   read cache or joined to another's (0.3.52's duplicate-request rule covers people's reads),
   and every composite page has a body of its own (`after_key`), so neither pages nor the
   thread-pool checks are held back.
@@ -247,14 +250,19 @@ A report may push more than one request per cluster at a time, under control:
 - `REPORT_SCHEDULE_GET {kind?}` → `{ok, kind, enabled, to, cc, bcc, schedule, at, period:
   "cadence"|"yesterday"|"monthSoFar", clusters, subject, lastSent, managed, timer,
   nextSendAt, mailConfigured, nextPeriod}`, plus `sheets` for volume and, for hosts,
-  `collection: {at, fields, keepMonths, maxPages, clientIdField, branchField, branchDefault}`.
+  `config: {collectAt, fields, keepMonths, maxPages, clientIdField, branchField, branchDefault,
+  mailMaxMb, managed}` (`managed`: the `UI_REPORT_HOSTS_*` keys config.txt locks). In role `core`
+  also `worker: {state, heartbeatAt, text, level}` (docs/WORKER.md). `lastSent` comes from
+  `report-schedule-state.json` (docs/WORKER.md, "Who owns what").
   `REPORT_SCHEDULE_SET {kind?, …, period?}` answers the same. `REPORT_SEND_NOW {kind?, period?}`.
 - `HOSTS_QUERY {clusterId, period?, q?, sort?, offset?, limit?}` (User; held to the caller's
   clusters, limited admins too) → `{ok, clusterId, period, fields, fill: {clientId,
-  branchDefault}, rows: [{day, index, source, host, docs, eventBytes, subBytes,
+  branchDefault}, clientIdField, branchField, rows: [{day, index, source, host, docs, eventBytes, subBytes,
   eventMissingDocs, clientId, branch, meta: {<field>: value}, incomplete}], total, offset,
   limit, totals: {docs, eventBytes, subBytes}, days: [{day, held, incomplete, rows, notes,
-  failed, collecting?}]}`. `sort` is a column (`day`, `index`, `source`, `host`, `docs`,
+  failed, collecting?}], incompleteDays: [day], notInMapping: [field]}` (`clientIdField` /
+  `branchField`: which of `fields` the two filled columns come from; `notInMapping`: configured
+  fields the held days' mappings did not have). `sort` is a column (`day`, `index`, `source`, `host`, `docs`,
   `eventBytes`, `subBytes`, `clientId`, `branch`), `-` first for descending; `limit` 1–200; a
   sorted view pages at most 100,000 rows deep.
 - The hosts collection's time is the hosts schedule's `at` (locked by `UI_REPORT_HOSTS_AT`).

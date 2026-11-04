@@ -71,6 +71,21 @@ Changes are read at start: `deploy/deploy.sh --apply-config` restarts the core.
 | `REPORT_CPU_SLOTS` (1-2, default 1) | blocking threads report files are built on, never the runtime's workers (docs/REPORT-TYPES.md "Isolation and failure") |
 | `UI_*` (the rest) | `managedDefaults` in the PING reply, below |
 
+### The report worker (environment only, docs/WORKER.md)
+
+Set in `deploy/docker-compose.yml` / `deploy/.env`, not in config.txt (they are per container):
+
+| Variable | Default | What it does |
+| --- | --- | --- |
+| `ELASTICPRO_ROLE` | `all` | `core`: people, the monitoring, every setting — report runs, sends, stops and collections are forwarded to the worker; `worker`: the daily volume collection, the report timer and queue, the hosts collection, report builds and mail, on an internal port only; `all` (unset, or any other word): everything in one process, as before 0.3.54. The shipped compose file runs `core` + `worker`. |
+| `ELASTICPRO_WORKER_URL` | `http://worker:8766` | where the core (role `core`) reaches the worker |
+| `ELASTICPRO_WORKER_PORT` | `8766` | the worker's internal port (`/run`, `/send-now`, `/stop`, `/queue`, `/health`) |
+| `ELASTICPRO_WORKER_GATE_CONCURRENCY` | `16` | the worker's own gate: requests at once, every cluster together (all Background) |
+| `ELASTICPRO_WORKER_GATE_PER_CLUSTER` | `4` | per cluster; in the worker the report controller's ceiling may use all of it |
+| `ELASTICPRO_WORKER_GATE_PER_JUMP_HOST` | `4` | per jump host |
+| `ELASTICPRO_WORKER_MEM_LIMIT` | `1g` | compose: the worker container's memory cap (its memory budget, reports share included, is sized from it) |
+| `ELASTICPRO_WORKER_CPUS` | `1.0` | compose: the worker container's CPU cap |
+
 The environment variables are set once, at the top of `main` in the bridge binary, before the
 async runtime starts and before anything reads the environment (`std::env::set_var` is only
 sound while the process is single-threaded). The desktop app has no settings file.

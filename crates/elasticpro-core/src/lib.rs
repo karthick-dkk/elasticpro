@@ -40,6 +40,7 @@ pub mod tasks;
 pub mod tls;
 pub mod vault_files;
 pub mod volume;
+pub mod worker;
 pub mod zabbix_api;
 pub mod zbx_link;
 pub mod zbx_push;

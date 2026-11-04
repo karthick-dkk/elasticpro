@@ -32,7 +32,8 @@
 #   2. names the new image elasticpro-core:<version>-<commit> (or takes --image), keeping
 #      the one running now for rollback, and backs up .env;
 #   3. builds it (a Rust build: long on a small server — see --image);
-#   4. points ELASTICPRO_IMAGE in .env at it and restarts only the core;
+#   4. points ELASTICPRO_IMAGE in .env at it and restarts only the core (and the report
+#      worker, the same image, when the compose file has one — docs/WORKER.md);
 #   5. waits for the core's health check. Not healthy in time: ELASTICPRO_IMAGE goes back to the
 #      previous image, the core is restarted on it, and the script fails.
 #
@@ -110,10 +111,33 @@ wait_healthy() {
   local t=0 h
   while [ "$t" -lt "$TIMEOUT" ]; do
     h=$(core_health)
-    case "$h" in healthy) return 0 ;; unhealthy|exited|dead|missing) [ "$t" -ge 20 ] && return 1 ;; esac
+    case "$h" in healthy) worker_check; return 0 ;; unhealthy|exited|dead|missing) [ "$t" -ge 20 ] && return 1 ;; esac
     sleep 5; t=$((t + 5))
   done
   return 1
+}
+
+# The services that run the ElasticPro image: the core, and the report worker when this
+# compose file has one (docs/WORKER.md). Both always move together — a worker on another
+# version than the core refuses its work (worker_version). A compose file from before 0.3.54
+# has no worker: its core runs everything (role all), exactly as before.
+app_services() {
+  if docker compose config --services 2>/dev/null | grep -qx worker; then echo "core worker"; else echo core; fi
+}
+# The worker's health, said after the core's. Not a reason to roll back: monitoring does not
+# depend on it (reports and collection wait for it, and say so in Exports).
+worker_check() {
+  case " $(app_services) " in *" worker "*) ;; *) return 0 ;; esac
+  [ "${DRY:-0}" = 1 ] && return 0
+  local t=0 id h
+  while [ "$t" -lt 90 ]; do
+    id=$(docker compose ps -q worker 2>/dev/null)
+    h=$([ -n "$id" ] && docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$id" 2>/dev/null || echo missing)
+    [ "$h" = healthy ] && { say "✓ report worker healthy"; return 0; }
+    sleep 5; t=$((t + 5))
+  done
+  say "! report worker not healthy ($h) — monitoring is unaffected; reports and collection wait for it: docker compose logs worker"
+  return 0
 }
 
 # --- config.txt: the one settings file ----------------------------------------------------
@@ -578,7 +602,9 @@ apply_config() {
 
   if [ "$mode" = restart ]; then
     say "== restarting the core (it reads $CONFIG at start; nobody is signed out)"
-    run docker compose up -d --force-recreate core
+    # The worker reads config.txt at start too.
+    # shellcheck disable=SC2046
+    run docker compose up -d --force-recreate $(app_services)
     if [ "$DRY" != 1 ]; then
       if wait_healthy; then say "✓ core healthy with the new settings"; else
         docker compose logs --tail 30 core || true
@@ -625,7 +651,8 @@ if [ "$ROLLBACK" = 1 ]; then
     say "   ${key#ELASTICPRO_}: $now → $old"
     env_set "$key" "$old"; env_set "${key}_PREVIOUS" "$now"; STACK=1
   done
-  if [ "$STACK" = 1 ]; then run docker compose up -d; else run docker compose up -d core; fi
+  # shellcheck disable=SC2046
+  if [ "$STACK" = 1 ]; then run docker compose up -d; else run docker compose up -d $(app_services); fi
   [ "$DRY" = 1 ] || { wait_healthy && say "✓ core healthy on $PREV"; } || fail "core not healthy on $PREV either — docker compose logs core"
   exit 0
 fi
@@ -795,8 +822,9 @@ fi
 env_set ELASTICPRO_IMAGE "$IMAGE"
 # This deploy moves the core alone; --rollback must not also undo an older upgrade's nginx.
 for key in $SUPPORT_KEYS; do env_del "${key}_PREVIOUS"; done
-say "== restarting $([ "$ALL" = 1 ] && echo "the stack" || echo "the core")"
-if [ "$ALL" = 1 ]; then run docker compose up -d; else run docker compose up -d core; fi
+say "== restarting $([ "$ALL" = 1 ] && echo "the stack" || app_services)"
+# shellcheck disable=SC2046
+if [ "$ALL" = 1 ]; then run docker compose up -d; else run docker compose up -d $(app_services); fi
 [ "$DRY" = 1 ] && { say "(dry run: nothing was changed)"; exit 0; }
 
 # --- 5. healthy, or back ------------------------------------------------------------------
@@ -815,7 +843,8 @@ if [ "$IMAGE" != "$CURRENT" ]; then
   env_set ELASTICPRO_IMAGE "$CURRENT"
   # This deploy never happened: --rollback keeps meaning what it meant before it.
   if [ -n "$PREVIOUS_BEFORE" ]; then env_set ELASTICPRO_IMAGE_PREVIOUS "$PREVIOUS_BEFORE"; else sed -i.tmp '/^ELASTICPRO_IMAGE_PREVIOUS=/d' .env && rm -f .env.tmp; fi
-  docker compose up -d core
+  # shellcheck disable=SC2046
+  docker compose up -d $(app_services)
   [ "$TIMEOUT" -ge 180 ] || TIMEOUT=180
   if wait_healthy; then say "✓ back on $CURRENT, healthy"; else say "✗ not healthy on $CURRENT either — docker compose logs core"; fi
 fi

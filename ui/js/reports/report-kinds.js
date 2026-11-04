@@ -17,7 +17,7 @@ import { toMs } from '../core/volume-daily.js';
 import { periodPresets, periodLabel, addressList, lastSentText, failText, refreshReports } from '../core/reports.js';
 import {
   KINDS, kindOf, CADENCES, SCHEDULE_PERIODS, HOSTS_MAX_CLUSTERS, runPeriods, scheduleOf, kindScheduleGet, kindScheduleSet,
-  kindSendNow, kindRun, runProblem, runFailText,
+  kindSendNow, kindRun, runProblem, runFailText, isWorkerRefusal,
 } from '../core/report-types.js';
 import { isAdmin, forgetMailInfo } from '../ui/report-jobs.js';
 
@@ -94,6 +94,16 @@ function schedulePart(kind) {
     h(`span${last.ok === false ? '.rm-bad' : last.ok ? '.rm-ok' : '.muted'}`, last.text),
     next !== null ? h('span.muted', ` · next send ${dt(next)}`) : null,
     s.mailConfigured === false ? h('span.rm-bad', ' · set up the Mail server in Config › Reports first') : null);
+  // Role core (docs/WORKER.md): the report worker runs schedules, collections and jobs. When it
+  // is not up, say so in amber with its last heartbeat; monitoring is not affected.
+  const w = s.worker;
+  const worker = w && !w.ok ? h('div.rt-worker.rj-warn', { id: `rt-${kind}-worker` },
+    w.text || 'The report worker is not running: reports and collection resume when it is back.',
+    w.heartbeatAt !== null ? ` Last heartbeat ${ago(w.heartbeatAt)}.` : ' No heartbeat seen.') : null;
+  // Volume by host: the daily collection's settings (config.txt), one line; unknown ones are left out.
+  const cfg = kind === 'hosts' && Array.isArray(s.config) ? s.config.filter((r) => r.known && ['collectAt', 'keepMonths', 'maxPages', 'fields'].includes(r.key)) : [];
+  const collection = cfg.length ? h('div.muted.rt-collect', { id: 'rt-hosts-collection', style: { fontSize: '11.5px' } },
+    'Collection: ', cfg.map((r) => `${r.label.toLowerCase()} ${r.value}${r.locked ? ' (config.txt)' : ''}`).join(' · ')) : null;
   return h('div.rm-body',
     h('label.rm-on', on, h('b', ' On'),
       h('span.muted', ` · off until an admin turns it on with recipients${kind === 'hosts' ? '; the daily collection runs whether or not the mail is on' : ''}`)),
@@ -109,7 +119,8 @@ function schedulePart(kind) {
       h('button.btn.sm.primary', { id: `rt-${kind}-save`, type: 'button', onclick: () => save(kind) }, 'Save'),
       h('button.btn.sm', { id: `rt-${kind}-send`, type: 'button', title: 'Send it now with the saved settings, as a background job', onclick: () => sendNow(kind) },
         last.ok === false ? 'Retry send' : 'Send now'),
-      status));
+      status),
+    worker, collection);
 }
 
 function readForm(kind) {
@@ -150,7 +161,7 @@ async function save(kind) {
 
 async function sendNow(kind) {
   const res = await kindSendNow(kind);
-  if (!res.ok) { setNote(kind, failText(res, 'Not sent'), 'banner err'); return; }
+  if (!res.ok) { setNote(kind, failText(res, 'Not sent'), isWorkerRefusal(res) ? 'banner warn' : 'banner err'); return; }
   refreshReports();
   setNote(kind, `${kindOf(kind).label} is running as a background job, with the saved settings.`);
 }
@@ -201,8 +212,10 @@ function runPart(kind) {
       h('button.btn.sm.primary', { id: `rt-${kind}-run`, type: 'button', disabled: !!problem, title: problem || '', onclick: () => run(kind) },
         `Run now · ${plural(r.picked.size, 'cluster')}`)),
     h('div.muted.rj-note', kind === 'hosts'
-      ? 'Days not yet held are collected first, then the file is built. Jobs run in the background; the file is in Generated reports.'
-      : 'One job per cluster. Jobs run in the background; the file is in Generated reports.'));
+      ? 'One job for the picked clusters: days not yet held are collected first, then one file is built. It runs in the background; the file is in Generated reports.'
+      : kind === 'indices'
+        ? 'One job and one file for the picked clusters. It runs in the background; the file is in Generated reports.'
+        : 'One job per cluster. Jobs run in the background; the file is in Generated reports.'));
 }
 
 async function run(kind) {
@@ -212,8 +225,9 @@ async function run(kind) {
   if (problem) { toast(problem, 'warn'); return; }
   const res = await kindRun(kind, { clusterIds: ids, period: r.period, format: r.format, mail: r.mail, collectAgain: r.collectAgain });
   if (!res.ok) {
-    // too_many_clusters: refused whole, nothing queued; said as the core says it.
-    setNote(kind, runFailText(res) || failText(res, 'Not started'), 'banner err');
+    // too_many_clusters: refused whole, nothing queued; said as the core says it. The worker
+    // not running (or a different version) is amber: nothing is wrong with the ask.
+    setNote(kind, runFailText(res) || failText(res, 'Not started'), isWorkerRefusal(res) ? 'banner warn' : 'banner err');
     return;
   }
   refreshReports();

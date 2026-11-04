@@ -790,6 +790,13 @@ await goOne('snapshots');
       doc.getElementById('rj-run').click();
       await settleFor(200);
       ok(doc.getElementById('rj-status').textContent.startsWith('ten mails an hour is the most'), 'reports: too_many_mails message not shown');
+      // The report worker is down (0.3.54, docs/WORKER.md): the core's sentence, amber, not red.
+      bound = { ok: false, kind: 'worker_unavailable', message: 'the report worker is not running — reports and collection resume when it is back' };
+      doc.getElementById('rj-run').click();
+      await settleFor(200);
+      const wst = doc.getElementById('rj-status');
+      ok(wst.textContent.startsWith('the report worker is not running') && wst.classList.contains('rj-warn') && !wst.classList.contains('rj-bad'),
+        `reports: worker_unavailable reads "${wst.textContent}" (${wst.className}), want the core's words in amber`);
       bound = null;
 
       // The list as the core moves it on: running, queued, done.
@@ -809,6 +816,28 @@ await goOne('snapshots');
       ok(/At most 3 run together/.test(txt), 'reports: the footnote does not say how many run together');
       // What the pill says is the poller's.
       ok(R.pillText(R.reports) === 'Reports · 1 running · 1 queued', `reports: the pill would read "${R.pillText(R.reports)}"`);
+
+      // An indices / hosts job (0.3.54): ONE job for the picked clusters, a line per cluster with
+      // its concurrency, halvings and last reason; a cluster it could not read named with why.
+      const hostsJob = { ...jobs[0], id: 'jh', reportKind: 'hosts', report: 'hosts', clusterId: 'a', clusterName: '3 clusters', clusterIds: ['a', 'b', 'c'],
+        status: 'running', createdAt: 3,
+        progress: { done: 1, total: 3, state: 'collecting', cluster: 'a', clusters: {
+          a: { state: 'collecting', day: '2026-11-03', pages: 40, rows: 900, retries: 1, concurrency: 3, partitions: { done: 1, total: 3 }, halvings: 1, lastReason: 'HTTP 429', days: { done: 2, total: 3 } },
+          b: { state: 'waiting', day: null, pages: 0, rows: 0, retries: 0, concurrency: 0, partitions: { done: 0, total: 0 }, halvings: 0, lastReason: null, days: { done: 0, total: 0 } } } },
+        failedClusters: [{ clusterId: 'c', reason: 'connection refused' }] };
+      jobs = [hostsJob, ...jobs];
+      await R.refreshReports();
+      await settleFor(50);
+      const hj = doc.querySelector('#rj-panel .rj-job[data-job="jh"]');
+      const cl = (id) => hj && hj.querySelector(`.rj-cl[data-cluster="${id}"]`);
+      ok(hj && /Volume by host · 3 clusters/.test(hj.textContent), `reports: the hosts job does not say its kind (${hj && hj.textContent})`);
+      ok(cl('a') && /3 at once/.test(cl('a').textContent) && /halved 1× \(HTTP 429\)/.test(cl('a').textContent) && /1\/3 partitions/.test(cl('a').textContent) && /2 of 3 days/.test(cl('a').textContent),
+        `reports: cluster a's line reads "${cl('a') && cl('a').textContent}"`);
+      ok(cl('b') && /waiting/.test(cl('b').textContent) && !/at once/.test(cl('b').textContent), `reports: a waiting cluster shows a concurrency (${cl('b') && cl('b').textContent})`);
+      ok(cl('c') && /failed: connection refused/.test(cl('c').textContent) && cl('c').classList.contains('rj-warn'), `reports: the failed cluster is not named with why (${cl('c') && cl('c').textContent})`);
+      jobs = jobs.filter((j) => j.id !== 'jh');
+      await R.refreshReports();
+      await settleFor(50);
 
       // Download: REPORT_DOWNLOAD, base64 to a file of the core's name.
       rsent.length = 0;
@@ -5775,7 +5804,8 @@ if (viaFleet) {
   const saved = {};
   let refuseRun = null;
   const rowsAll = Array.from({ length: 450 }, (_, i) => ({ day: '2026-11-01', index: `app-2026.11.01-${i}`, source: 'app', host: `h${i}`,
-    docs: 10 + i, eventBytes: i === 0 ? null : 1000 + i, subBytes: 500 + i, meta: { zone: 'dmz' } }));
+    docs: 10 + i, eventBytes: i === 0 ? null : 1000 + i, subBytes: 500 + i, eventMissingDocs: i === 1 ? 7 : 0,
+    clientId: 'C-1', branch: 'DC', incomplete: i === 0, meta: { zone: 'dmz', ClientID: 'C-1' } }));
   const answerK = (b) => {
     switch (b.type) {
       case 'REPORT_JOBS': return { ok: true, jobs: [], concurrency: 3, running: 0, queued: 0 };
@@ -5791,7 +5821,10 @@ if (viaFleet) {
         const [col, dir] = String(b.sort || 'day:asc').split(':');
         if (col === 'docs') rows = [...rows].sort((a, c) => (dir === 'desc' ? c.docs - a.docs : a.docs - c.docs));
         return { ok: true, rows: rows.slice(b.offset, b.offset + b.limit), total: rows.length, totals: { docs: rows.reduce((n, r) => n + r.docs, 0), eventBytes: null, subBytes: 123456 },
-          incompleteDays: ['2026-11-02'], fields: ['zone'], notInMapping: ['tag1'] };
+          incompleteDays: ['2026-11-02'], fields: ['zone', 'ClientID'], notInMapping: ['tag1'], fill: { clientId: 'C-1', branchDefault: 'DC' },
+          days: [{ day: '2026-11-01', held: true, incomplete: false, rows: 450, notes: [], failed: null },
+            { day: '2026-11-02', held: true, incomplete: true, rows: 0, notes: [], failed: null },
+            { day: '2026-11-03', held: false, incomplete: false, rows: null, notes: [], failed: 'HTTP 503 after 3 tries', collecting: false }] };
       }
       default: return { ok: false, kind: 'bad_message', message: `Unknown message type "${b.type}"` };
     }
@@ -5848,6 +5881,11 @@ if (viaFleet) {
     refuseRun = { ok: false, kind: 'too_many_clusters', message: 'Volume by host takes at most 5 clusters; nothing was queued' };
     doc.getElementById('rt-hosts-run').click();
     await waitFor(() => /nothing was queued/.test((doc.getElementById('rt-note') || { textContent: '' }).textContent), 'report types: too_many_clusters was not said');
+    // The report worker is down: the core's words, amber (banner warn), never the red of a refusal.
+    refuseRun = { ok: false, kind: 'worker_unavailable', message: 'the report worker is not running — reports and collection resume when it is back' };
+    doc.getElementById('rt-hosts-run').click();
+    await waitFor(() => /report worker is not running/.test((doc.getElementById('rt-note') || { textContent: '' }).textContent), 'report types: worker_unavailable was not said');
+    ok(doc.getElementById('rt-note').classList.contains('warn') && !doc.getElementById('rt-note').classList.contains('err'), `report types: worker_unavailable is not amber (${doc.getElementById('rt-note').className})`);
     refuseRun = null;
 
     // The view.
@@ -5855,7 +5893,12 @@ if (viaFleet) {
     press(doc.querySelector('.rp-nav a[data-section="hosts"]'));
     await waitFor(() => doc.querySelector('#hv-table table.hv-tbl'), 'volume by host: no table');
     const heads = () => [...doc.querySelectorAll('#hv-table thead th')].map((t) => t.textContent.replace(/[▲▼]/g, '').trim());
-    ok(JSON.stringify(heads()) === JSON.stringify(['Day', 'Index', 'Source', 'Host', 'Documents', 'Event size', 'Forwarded size', 'zone']), `volume by host: columns ${heads().join(' | ')}`);
+    ok(JSON.stringify(heads()) === JSON.stringify(['Day', 'Index', 'Source', 'Host', 'Documents', 'Event size', 'Forwarded size', 'zone', 'ClientID']), `volume by host: columns ${heads().join(' | ')}`);
+    // The ClientID column is the core's filled value and sorts on it (clientId), not on the raw field.
+    ok(!!doc.querySelector('#hv-table th[data-col="clientId"]'), 'volume by host: the ClientID column does not sort on the filled clientId');
+    ok(/incomplete/.test(doc.querySelector('#hv-table tbody tr').textContent), 'volume by host: an incomplete row is not marked');
+    ok(/7 without/.test(doc.querySelectorAll('#hv-table tbody tr')[1].textContent), 'volume by host: documents without an event size are not said');
+    ok(/2026-11-03 \(HTTP 503 after 3 tries\)/.test(doc.querySelector('.hv-failed') ? doc.querySelector('.hv-failed').textContent : ''), 'volume by host: a day not held is not named with why');
     ok(doc.querySelectorAll('#hv-table tbody tr').length === 201, `volume by host: ${doc.querySelectorAll('#hv-table tbody tr').length - 1} rows on a page of 200`);
     ok(/not measured/.test(doc.querySelector('#hv-table tbody tr').textContent) && doc.querySelector('#hv-table tbody tr .rp-na'), 'volume by host: an absent event size is not amber "not measured"');
     const tot = doc.querySelector('#hv-table tr.hv-totals');

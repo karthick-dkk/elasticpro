@@ -1728,6 +1728,14 @@ tr.vs-special td:first-child { font-style: italic; color: var(--text-secondary);
 .rj-adm { font-size: 11px; }
 .rj-sub { grid-column: 1 / -1; font-size: 11.5px; overflow-wrap: anywhere; padding-bottom: 2px; }
 .rj-warn { color: var(--warning-ink); }
+/* An indices / hosts job's clusters (0.3.54): one dense line each, under the job's row. */
+.rj-clusters { display: grid; gap: 0; padding-left: 10px; color: var(--text-muted); }
+.rj-cl { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; line-height: 17px; }
+.rj-cl b { color: var(--text-primary); font-weight: 600; }
+.rj-cl.rj-warn, .rj-cl.rj-warn b { color: var(--warning-ink); white-space: normal; }
+.rt-worker { font-size: 11.5px; }
+.hv-days { margin: 0 0 6px; font-size: 12px; }
+.hv-inc { color: var(--warning-ink); font-size: 10.5px; margin-left: 4px; }
 .rj-acts { display: flex; gap: 6px; justify-content: flex-end; }
 /* Config › Volume fields: Volume report by mail, Mail server (SMTP) */
 .rm-panels { display: grid; gap: 12px; }
