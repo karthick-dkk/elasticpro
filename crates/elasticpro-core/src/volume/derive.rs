@@ -19,23 +19,34 @@ use std::collections::BTreeMap;
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Totals {
     pub indices: u64,
-    pub pri_bytes: u64,
-    pub total_bytes: u64,
+    /// The whole day's size (`Day::sizes`): `None` while an index split by time counts on it.
+    pub pri_bytes: Option<u64>,
+    pub total_bytes: Option<u64>,
     pub docs: Option<u64>,
     pub event_bytes: Option<u64>,
     pub sub_bytes: Option<u64>,
+    /// Time-split indices whose size is not in the day's size (`Day::unmeasured_size_indices`).
+    pub unmeasured_size_indices: u64,
 }
 
 impl Totals {
     pub fn of(d: &Day, source: Option<&str>) -> Option<Totals> {
         match source {
-            None => Some(Totals {
-                indices: d.indices, pri_bytes: d.pri_bytes, total_bytes: d.total_bytes,
-                docs: d.docs, event_bytes: d.event_bytes, sub_bytes: d.sub_bytes,
-            }),
-            Some(s) => d.sources.get(s).map(|s| Totals {
-                indices: s.indices, pri_bytes: s.pri_bytes, total_bytes: s.total_bytes,
-                docs: s.docs, event_bytes: s.event_bytes, sub_bytes: s.sub_bytes,
+            None => {
+                let (pri, total) = d.sizes();
+                Some(Totals {
+                    indices: d.indices, pri_bytes: pri, total_bytes: total,
+                    docs: d.docs, event_bytes: d.event_bytes, sub_bytes: d.sub_bytes,
+                    unmeasured_size_indices: d.unmeasured_size_indices,
+                })
+            }
+            Some(s) => d.sources.get(s).map(|s| {
+                let (pri, total) = s.sizes();
+                Totals {
+                    indices: s.indices, pri_bytes: pri, total_bytes: total,
+                    docs: s.docs, event_bytes: s.event_bytes, sub_bytes: s.sub_bytes,
+                    unmeasured_size_indices: s.unmeasured_size_indices,
+                }
             }),
         }
     }
@@ -57,8 +68,8 @@ pub fn history(days: &[Day], source: Option<&str>) -> BTreeMap<NaiveDate, Totals
 /// **basis(d)**: what the graph and the cards plot.
 pub fn basis(t: &Totals, b: SizeBasis) -> Option<u64> {
     match b {
-        SizeBasis::Primary => Some(t.pri_bytes),
-        SizeBasis::Total => Some(t.total_bytes),
+        SizeBasis::Primary => t.pri_bytes,
+        SizeBasis::Total => t.total_bytes,
         SizeBasis::EventSize => t.event_bytes,
     }
 }
@@ -120,6 +131,7 @@ pub fn daily_row(d: &Day, t: &Totals, history: &BTreeMap<NaiveDate, Totals>, avg
         "day": d.day, "final": d.is_final, "live": d.live, "aggregatedAt": d.aggregated_at, "totalsAt": d.totals_at,
         "indices": t.indices, "priBytes": t.pri_bytes, "totalBytes": t.total_bytes,
         "docs": t.docs, "eventBytes": t.event_bytes, "subBytes": t.sub_bytes, "error": d.error,
+        "unmeasuredSizeIndices": t.unmeasured_size_indices,
         "basis": v, "avg": avg_bytes(avg), "changeVsAvgPct": change_vs_avg_pct(v, avg),
         "top": top,
     })
@@ -161,13 +173,15 @@ pub fn cards(history: &BTreeMap<NaiveDate, Totals>, today: NaiveDate, avg_days: 
 }
 
 /// The Daily table's totals row: Σ over the days shown. A figure no shown day measured
-/// stays `null`; it is not summed to 0.
+/// stays `null`; it is not summed to 0. `sizeUnmeasuredDays`: shown days whose size is
+/// not measured (split by time), left out of the size sums.
 pub fn window_totals(ts: &[&Totals]) -> Value {
     json!({
         "days": ts.len(),
         "indices": ts.iter().map(|t| t.indices).sum::<u64>(),
-        "priBytes": ts.iter().map(|t| t.pri_bytes).sum::<u64>(),
-        "totalBytes": ts.iter().map(|t| t.total_bytes).sum::<u64>(),
+        "priBytes": sum_opt(ts.iter().map(|t| t.pri_bytes)),
+        "totalBytes": sum_opt(ts.iter().map(|t| t.total_bytes)),
+        "sizeUnmeasuredDays": ts.iter().filter(|t| t.pri_bytes.is_none()).count(),
         "docs": sum_opt(ts.iter().map(|t| t.docs)),
         "eventBytes": sum_opt(ts.iter().map(|t| t.event_bytes)),
         "subBytes": sum_opt(ts.iter().map(|t| t.sub_bytes)),
@@ -211,8 +225,13 @@ pub struct MonthSummary {
     pub kept_days: u64,
     /// Days whose event bytes were measured: the divisor for an eventSize average.
     pub event_days: u64,
-    pub pri_bytes: u64,
-    pub total_bytes: u64,
+    /// Days whose size is not measured (`Day::sizes` is `None`: split by time). Left out of
+    /// the size sums and of the size averages' divisor. Absent (0) before 0.3.53.
+    #[serde(default)]
+    pub size_unmeasured_days: u64,
+    /// Σ of the days' sizes that were measured; `None` when none was.
+    pub pri_bytes: Option<u64>,
+    pub total_bytes: Option<u64>,
     pub docs: Option<u64>,
     pub event_bytes: Option<u64>,
     pub sub_bytes: Option<u64>,
@@ -238,13 +257,15 @@ pub fn month_summary(month: &str, days: &BTreeMap<String, Day>) -> MonthSummary 
         s.days_with_data += 1;
         if d.live { s.live_days += 1 } else { s.kept_days += 1 }
         s.event_days += d.event_bytes.is_some() as u64;
-        s.pri_bytes += d.pri_bytes;
-        s.total_bytes += d.total_bytes;
+        let (pri, total) = d.sizes();
+        s.size_unmeasured_days += pri.is_none() as u64;
+        s.pri_bytes = sum_opt([s.pri_bytes, pri].into_iter());
+        s.total_bytes = sum_opt([s.total_bytes, total].into_iter());
         s.docs = sum_opt([s.docs, d.docs].into_iter());
         s.event_bytes = sum_opt([s.event_bytes, d.event_bytes].into_iter());
         s.sub_bytes = sum_opt([s.sub_bytes, d.sub_bytes].into_iter());
-        peak(&mut s.peak_primary, &d.day, Some(d.pri_bytes));
-        peak(&mut s.peak_total, &d.day, Some(d.total_bytes));
+        peak(&mut s.peak_primary, &d.day, pri);
+        peak(&mut s.peak_total, &d.day, total);
         peak(&mut s.peak_event_size, &d.day, d.event_bytes);
         for key in FIELD_KEYS {
             let Some(f) = d.fields.get(key).filter(|f| f.error.is_none()) else { continue };
@@ -265,9 +286,10 @@ pub fn month_summary(month: &str, days: &BTreeMap<String, Day>) -> MonthSummary 
 
 /// **Month row**, under the basis in force now.
 pub fn month_row(s: &MonthSummary, b: SizeBasis, current_month: &str) -> Value {
+    let size_days = s.days_with_data.saturating_sub(s.size_unmeasured_days);
     let (sum, divisor, peak) = match b {
-        SizeBasis::Primary => (Some(s.pri_bytes), s.days_with_data, &s.peak_primary),
-        SizeBasis::Total => (Some(s.total_bytes), s.days_with_data, &s.peak_total),
+        SizeBasis::Primary => (s.pri_bytes, size_days, &s.peak_primary),
+        SizeBasis::Total => (s.total_bytes, size_days, &s.peak_total),
         SizeBasis::EventSize => (s.event_bytes, s.event_days, &s.peak_event_size),
     };
     let mean = |sum: Option<u64>, divisor: u64| sum.filter(|_| divisor > 0).map(|x| (x as f64 / divisor as f64).round() as u64);
@@ -289,7 +311,8 @@ pub fn month_row(s: &MonthSummary, b: SizeBasis, current_month: &str) -> Value {
         "eventBytes": s.event_bytes, "subBytes": s.sub_bytes,
         "basis": b, "basisBytes": sum, "avgPerDay": avg, "peakDay": peak,
         // On primary size whatever the basis: what a column named for primary size shows.
-        "avgPriPerDay": mean(Some(s.pri_bytes), s.days_with_data), "peakPrimary": s.peak_primary,
+        "avgPriPerDay": mean(s.pri_bytes, size_days), "peakPrimary": s.peak_primary,
+        "sizeUnmeasuredDays": s.size_unmeasured_days,
         "liveDays": s.live_days, "keptDays": s.kept_days, "top": top,
     })
 }
@@ -312,13 +335,15 @@ struct Acc {
 pub fn breakdown(days: &[&Day], key: &str, top: usize) -> Value {
     let mut values: BTreeMap<String, Acc> = BTreeMap::new();
     let (mut missing, mut other) = (Acc::default(), Acc::default());
-    let (mut total_docs, mut total_pri, mut measured_days) = (0u64, 0u64, 0u64);
+    let (mut total_docs, mut total_pri, mut measured_days, mut size_unmeasured) = (0u64, 0u64, 0u64, 0u64);
     let mut fields: Vec<String> = vec![];
     let mut error: Option<String> = None;
-    let add = |a: &mut Acc, docs: u64, ev: Option<u64>, day_docs: u64, pri: u64| {
+    // A day whose size is not measured (split by time) adds its documents and event bytes,
+    // and nothing to the estimate: there is no size to share out.
+    let add = |a: &mut Acc, docs: u64, ev: Option<u64>, day_docs: u64, pri: Option<u64>| {
         a.docs += docs;
         a.event = sum_opt([a.event, ev].into_iter());
-        a.est += docs as f64 / day_docs as f64 * pri as f64;
+        a.est += pri.map_or(0.0, |p| docs as f64 / day_docs as f64 * p as f64);
         a.days += (docs > 0) as u64;
     };
     for d in days {
@@ -335,12 +360,14 @@ pub fn breakdown(days: &[&Day], key: &str, top: usize) -> Value {
         }
         measured_days += 1;
         total_docs += day_docs;
-        total_pri += d.pri_bytes;
+        let pri = d.sizes().0;
+        total_pri += pri.unwrap_or(0);
+        size_unmeasured += pri.is_none() as u64;
         for t in &f.top {
-            add(values.entry(t.value.clone()).or_default(), t.docs, t.event_bytes, day_docs, d.pri_bytes);
+            add(values.entry(t.value.clone()).or_default(), t.docs, t.event_bytes, day_docs, pri);
         }
-        add(&mut missing, f.missing_docs, f.missing_event_bytes, day_docs, d.pri_bytes);
-        add(&mut other, f.other_docs, f.other_event_bytes, day_docs, d.pri_bytes);
+        add(&mut missing, f.missing_docs, f.missing_event_bytes, day_docs, pri);
+        add(&mut other, f.other_docs, f.other_event_bytes, day_docs, pri);
     }
     let mut ranked: Vec<(String, Acc)> = values.into_iter().collect();
     ranked.sort_by(|a, b| b.1.docs.cmp(&a.1.docs).then(a.0.cmp(&b.0)));
@@ -363,7 +390,8 @@ pub fn breakdown(days: &[&Day], key: &str, top: usize) -> Value {
     rows.push(row("all others", "other", &other));
     let mut out = json!({
         "field": key, "resolved": fields.last(), "resolvedAll": fields, "rows": rows,
-        "totals": { "docs": total_docs, "priBytes": total_pri, "estPriBytes": est_total.round() as u64, "days": measured_days },
+        "totals": { "docs": total_docs, "priBytes": total_pri, "estPriBytes": est_total.round() as u64, "days": measured_days,
+                    "sizeUnmeasuredDays": size_unmeasured },
     });
     if measured_days == 0 {
         out["error"] = json!(error.unwrap_or_else(|| "no aggregated day in this period".into()));
@@ -380,7 +408,7 @@ mod tests {
         parse_day(s).unwrap()
     }
     fn t(pri: u64, ev: Option<u64>) -> Totals {
-        Totals { indices: 1, pri_bytes: pri, total_bytes: pri * 2, docs: Some(pri / 10), event_bytes: ev, sub_bytes: None }
+        Totals { indices: 1, pri_bytes: Some(pri), total_bytes: Some(pri * 2), docs: Some(pri / 10), event_bytes: ev, sub_bytes: None, unmeasured_size_indices: 0 }
     }
     fn hist(rows: &[(&str, u64, Option<u64>)]) -> BTreeMap<NaiveDate, Totals> {
         rows.iter().map(|(k, p, e)| (d(k), t(*p, *e))).collect()
@@ -439,11 +467,15 @@ mod tests {
 
     #[test]
     fn window_totals_keep_unmeasured_null() {
-        let a = Totals { indices: 2, pri_bytes: 10, total_bytes: 20, docs: Some(5), event_bytes: None, sub_bytes: None };
-        let b = Totals { indices: 1, pri_bytes: 1, total_bytes: 2, docs: None, event_bytes: Some(7), sub_bytes: None };
-        let t = super::window_totals(&[&a, &b]);
-        assert_eq!(t, json!({ "days": 2, "indices": 3, "priBytes": 11, "totalBytes": 22,
-                              "docs": 5, "eventBytes": 7, "subBytes": null }));
+        let a = Totals { indices: 2, pri_bytes: Some(10), total_bytes: Some(20), docs: Some(5), event_bytes: None, sub_bytes: None, unmeasured_size_indices: 0 };
+        let b = Totals { indices: 1, pri_bytes: Some(1), total_bytes: Some(2), docs: None, event_bytes: Some(7), sub_bytes: None, unmeasured_size_indices: 0 };
+        // Split by time: documents and event bytes count, the size is not measured.
+        let c = Totals { indices: 1, pri_bytes: None, total_bytes: None, docs: Some(3), event_bytes: Some(1), sub_bytes: None, unmeasured_size_indices: 1 };
+        let t = super::window_totals(&[&a, &b, &c]);
+        assert_eq!(t, json!({ "days": 3, "indices": 4, "priBytes": 11, "totalBytes": 22, "sizeUnmeasuredDays": 1,
+                              "docs": 8, "eventBytes": 8, "subBytes": null }));
+        let none = super::window_totals(&[&c]);
+        assert_eq!((none["priBytes"].clone(), none["totalBytes"].clone()), (Value::Null, Value::Null), "not measured is null, never 0");
     }
 
     #[test]
@@ -455,7 +487,7 @@ mod tests {
     }
 
     fn day(k: &str, pri: u64, docs: Option<u64>, live: bool, tag: &[(&str, u64)], missing: u64, other: u64) -> Day {
-        let mut x = Day { day: k.into(), live, pri_bytes: pri, total_bytes: pri * 2, docs, event_bytes: docs.map(|n| n * 2), ..Day::default() };
+        let mut x = Day { day: k.into(), live, pri_bytes: Some(pri), total_bytes: Some(pri * 2), docs, event_bytes: docs.map(|n| n * 2), ..Day::default() };
         x.fields.insert("tag".into(), FieldAgg {
             field: Some("tag1".into()),
             top: tag.iter().map(|(v, n)| TopValue { value: v.to_string(), docs: *n, event_bytes: Some(n * 2), sub_bytes: None }).collect(),
@@ -491,7 +523,7 @@ mod tests {
         }
         let s = month_summary("2026-10", &days);
         assert_eq!((s.days_with_data, s.live_days, s.kept_days), (3, 2, 1));
-        assert_eq!((s.pri_bytes, s.docs, s.event_bytes), (600, Some(40), Some(80)));
+        assert_eq!((s.pri_bytes, s.docs, s.event_bytes), (Some(600), Some(40), Some(80)));
         assert_eq!(s.peak_primary, Some(Peak { day: "2026-10-02".into(), bytes: 300 }));
         assert_eq!(s.top["tag"], Some(TopSum { value: "px".into(), docs: 20 }), "by summed docs: px 20 > fw 13");
         assert_eq!(s.top["sourceHost"], None);
@@ -509,6 +541,41 @@ mod tests {
         assert_eq!(r["peakDay"]["bytes"], 60, "the basis peak is event bytes: day 2's 30 docs × 2");
         let t = month_row(&s, SizeBasis::Total, "2026-11");
         assert_eq!((t["avgPerDay"].as_u64(), t["avgPriPerDay"].as_u64()), (Some(400), Some(200)));
+    }
+
+    /// A day split by time has documents and event bytes but no size: the month's size sums
+    /// and averages leave it out and say how many they left out; nothing becomes 0.
+    #[test]
+    fn a_day_whose_size_is_not_measured_is_left_out_of_the_sizes() {
+        let mut days = BTreeMap::new();
+        let dated = day("2026-10-01", 100, Some(10), true, &[("fw", 10)], 0, 0);
+        let mut split = day("2026-10-02", 0, Some(30), true, &[("fw", 30)], 0, 0);
+        split.pri_bytes = None;
+        split.total_bytes = None;
+        split.unmeasured_size_indices = 1;
+        // Dated in part, split by time in part: the dated part is kept, not shown as the day's.
+        let mut mixed = day("2026-10-03", 500, Some(20), true, &[("fw", 20)], 0, 0);
+        mixed.unmeasured_size_indices = 2;
+        assert_eq!(mixed.sizes(), (None, None));
+        assert_eq!(dated.sizes(), (Some(100), Some(200)));
+        for x in [dated, split.clone(), mixed] {
+            days.insert(x.day.clone(), x);
+        }
+        let s = month_summary("2026-10", &days);
+        assert_eq!((s.pri_bytes, s.size_unmeasured_days, s.docs), (Some(100), 2, Some(60)));
+        assert_eq!(s.peak_primary, Some(Peak { day: "2026-10-01".into(), bytes: 100 }));
+        let r = month_row(&s, SizeBasis::Primary, "2026-11");
+        assert_eq!((r["avgPerDay"].as_u64(), r["avgPriPerDay"].as_u64(), r["sizeUnmeasuredDays"].as_u64()), (Some(100), Some(100), Some(2)),
+                   "the average is over the one day whose size was measured");
+        let only = month_summary("2026-10", &[("2026-10-02".to_string(), split.clone())].into_iter().collect());
+        assert_eq!(month_row(&only, SizeBasis::Primary, "2026-11")["priBytes"], Value::Null);
+        assert_eq!(month_row(&only, SizeBasis::Primary, "2026-11")["avgPerDay"], Value::Null);
+        let t = Totals::of(&split, None).unwrap();
+        assert_eq!((t.pri_bytes, t.docs, t.unmeasured_size_indices), (None, Some(30), 1));
+        assert_eq!(basis(&t, SizeBasis::Primary), None);
+        let b = breakdown(&[&split], "tag", 25);
+        assert_eq!((b["rows"][0]["docs"].as_u64(), b["rows"][0]["estPriBytes"].as_u64()), (Some(30), Some(0)));
+        assert_eq!(b["totals"]["sizeUnmeasuredDays"], 1);
     }
 
     #[test]

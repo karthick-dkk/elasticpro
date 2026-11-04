@@ -215,7 +215,19 @@ UI_MAX_LOG_ROWS=
 # locks its row in the volume settings for every cluster. Field lists are comma-separated
 # names tried left to right; the first one the mapping knows wins (a text field uses its
 # .keyword).
-# Which indices count: * is the source, YYYY.MM.DD the day. Default logstash-*-YYYY.MM.DD.
+# Which indices count: one or more comma-separated index patterns, no date part needed, e.g.
+# logstash-* or logstash-*,app-*,-app-test-* (a later pattern may exclude). Default logstash-*.
+# An index whose name carries YYYY.MM.DD counts on that day in full; one without is split
+# into days by its documents' time field (its documents and event bytes are counted per day,
+# its size per day is not measured).
+UI_VOLUME_INDEX_PATTERN=
+# name (default): dated names count on their date, the rest split by time. time: split every
+# index by its time field.
+UI_VOLUME_DAY_FROM=
+# The time field that splits indices into days (UTC days). Default @timestamp.
+UI_VOLUME_TIME_FIELD=
+# Legacy, before 0.3.53: * is the source, YYYY.MM.DD the day (logstash-*-YYYY.MM.DD); only
+# names that fit count. Used only when UI_VOLUME_INDEX_PATTERN is empty.
 UI_VOLUME_INDEX_FORMAT=
 # Breakdown fields. Defaults: tag1, labels.tag1, tags / fwd_tag, fwdtag, observer.name /
 # src_hostname, host.name / src_ip, source.ip, host.ip.
