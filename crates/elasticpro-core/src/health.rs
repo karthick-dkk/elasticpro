@@ -92,15 +92,25 @@ pub const THRESHOLDS: &[Threshold] = &[
 /// Messages whose handling time is somebody else's by definition: a cluster's (ES, a dataset
 /// held open for the poller), Zabbix's, a mail server's, or a password hash that is slow on
 /// purpose. They are in the per-type table; the "all types" p95 check leaves them out, so a
-/// slow cluster shows under *Request gate* and does not turn the core amber.
+/// slow cluster shows under *Request gate* and does not turn the core amber. Every type the
+/// core forwards to the report worker is left out as well ([`waits_elsewhere`]).
 pub const WAITS_ELSEWHERE: &[&str] = &[
     "ES", "CLUSTER_DATASET", "REFRESH", "PRIME", "TUNNEL_RECONNECT", "TRUST_CERT", "TRUST_HOSTKEY",
     "ZABBIX_SYNC", "ZABBIX_METRICS", "ZABBIX_LINK_TEST", "ZABBIX_PAIR_BEGIN", "ZABBIX_ROLEMAP_SET",
-    "MAIL_TEST", "REPORT_SEND_NOW", "HISTORY_STORE_TEST", "HISTORY_STORE_BACKFILL", "HISTORY_QUERY",
-    "VOLUME_PATTERN_CHECK", "VOLUME_FIELDS_CHECK", "VOLUME_RUN", "DELAY_SINK_RUN", "HOUSEKEEPING_RUN",
+    "MAIL_TEST", "HISTORY_STORE_TEST", "HISTORY_STORE_BACKFILL", "HISTORY_QUERY",
+    "VOLUME_PATTERN_CHECK", "VOLUME_FIELDS_CHECK", "DELAY_SINK_RUN", "HOUSEKEEPING_RUN",
     "LOGIN", "SSO_EXCHANGE", "BOOTSTRAP_ADMIN", "USER_ADD", "USER_SET_PASSWORD", "SEAL", "OPEN",
     "CONFIG_WRITE", "CLUSTER_SAVE", "CREDENTIAL_SET",
 ];
+
+/// Whether a message type's time is somebody else's: [`WAITS_ELSEWHERE`], or a type the core
+/// forwards to the report worker (`worker::endpoint`: REPORT_RUN, VOLUME_RUN, REPORT_STOP,
+/// REPORT_SEND_NOW, REPORT_CLEAR, REPORT_CONCURRENCY_SET — in role all they wait on a cluster or
+/// a mail server). A worker that is slow to answer, or down while its name is still being looked
+/// up, is the worker's check, never the core's message p95.
+pub fn waits_elsewhere(t: &str) -> bool {
+    WAITS_ELSEWHERE.contains(&t) || crate::worker::endpoint(t).is_some()
+}
 
 /* -------------------------------------------- level -------------------------------------------- */
 
@@ -684,7 +694,7 @@ pub struct TimingWindow {
     pub minutes: u64,
     /// Every type together.
     pub all: TypeStats,
-    /// Every type less [`WAITS_ELSEWHERE`]: what the p95 check reads.
+    /// Every type less those that wait elsewhere ([`waits_elsewhere`]): what the p95 check reads.
     pub own: TypeStats,
     /// Most used first.
     pub by_type: Vec<TypeStats>,
@@ -722,7 +732,7 @@ impl MessageTimes {
         let (mut all, mut own) = (Hist::default(), Hist::default());
         for (k, h) in &per {
             all.merge(h);
-            if !WAITS_ELSEWHERE.contains(k) {
+            if !waits_elsewhere(k) {
                 own.merge(h);
             }
         }
@@ -1184,6 +1194,13 @@ pub struct WorkerView {
     pub status: Option<WorkerStatus>,
 }
 
+/// Whether the worker's last heartbeat is late: [`HEARTBEAT_AMBER_SECS`] old or older. One line
+/// for both sides: the check turns amber there, and from there the core stops forwarding and
+/// answers `worker_unavailable` at once, instead of waiting on a name nobody answers to.
+pub fn heartbeat_late(heartbeat_at_ms: u64, now_ms: u64) -> bool {
+    now_ms.saturating_sub(heartbeat_at_ms) / 1000 >= HEARTBEAT_AMBER_SECS
+}
+
 /// Pure: the worker's state from the role, what its status file said and the clock.
 pub fn worker_view(role: &str, file: Result<Option<WorkerStatus>, String>, now_ms: u64, core_version: &str) -> WorkerView {
     if role == "all" {
@@ -1202,7 +1219,7 @@ pub fn worker_view(role: &str, file: Result<Option<WorkerStatus>, String>, now_m
         ("version", Level::Bad, format!("version {} — the core is {core_version}", if st.version.is_empty() { "not known" } else { &st.version }))
     } else if age >= HEARTBEAT_RED_SECS {
         ("down", Level::Bad, format!("no heartbeat for {}", secs_text(age)))
-    } else if age >= HEARTBEAT_AMBER_SECS {
+    } else if heartbeat_late(st.heartbeat_at, now_ms) {
         ("late", Level::Warn, format!("heartbeat {} ago", secs_text(age)))
     } else {
         ("up", Level::Ok, format!("up · heartbeat {} ago · {}", secs_text(age), st.version))
@@ -1338,7 +1355,7 @@ pub fn evaluate(i: &CheckInputs<'_>) -> Vec<Check> {
             let level = if p >= P95_RED_MS { Level::Bad } else if p >= P95_AMBER_MS { Level::Warn } else { Level::Ok };
             Check { id: "messages.p95".into(), threshold: "messages".into(), label: "Message p95 (5 min)".into(), level,
                 value: format!("{} over {} messages", ms_text(p), i.message_count),
-                text: if level.rank() > 0 { "The core itself is slow to answer (messages that wait on a cluster, Zabbix or mail are not counted here). Look at the slowest types below, and at memory and CPU first.".into() }
+                text: if level.rank() > 0 { "The core itself is slow to answer (messages that wait on a cluster, Zabbix, mail or the report worker are not counted here). Look at the slowest types below, and at memory and CPU first.".into() }
                       else { "The core answers quickly.".into() },
                 fix: (level.rank() > 0).then(|| "If CPU is throttled or memory near its limit, fix that first; otherwise lower ES_CONCURRENCY or the poller's concurrency (Config › Requests).".into()) }
         }
@@ -1675,6 +1692,44 @@ mod tests {
         let w = b.window(1, m0);
         assert_eq!(w.by_type.len(), MAX_TYPES_PER_MINUTE + 1);
         assert_eq!(w.by_type.iter().find(|x| x.kind == OTHER_TYPE).unwrap().count, 51);
+    }
+
+    #[test]
+    fn what_the_core_forwards_to_the_worker_never_feeds_its_own_p95() {
+        // With the worker container stopped, each forwarded action took ~3 s while its name
+        // failed to resolve, and turned the Core chip red with a fix about ES_CONCURRENCY.
+        let forwarded = ["REPORT_RUN", "REPORT_STOP", "REPORT_SEND_NOW", "REPORT_CLEAR", "REPORT_CONCURRENCY_SET", "VOLUME_RUN"];
+        for t in forwarded {
+            assert!(crate::worker::endpoint(t).is_some(), "{t} is forwarded");
+            assert!(waits_elsewhere(t), "{t} waits on the worker, not on the core");
+        }
+        assert!(waits_elsewhere("ES") && !waits_elsewhere("PING") && !waits_elsewhere("REPORT_JOBS"));
+        let mut t = MessageTimes::default();
+        let m0 = 1_000 * MINUTE_MS;
+        for i in 0..20 {
+            t.record("PING", 2, true, m0 + i);
+        }
+        for (i, kind) in forwarded.iter().enumerate() {
+            t.record(kind, 3_100, false, m0 + 100 + i as u64);
+        }
+        let w = t.window(5, m0 + 1_000);
+        assert_eq!(w.all.count, 26);
+        assert_eq!(w.own.count, 20, "{:?}", w.own);
+        assert_eq!(w.own.p95_ms, Some(2));
+        assert!(w.all.p95_ms.unwrap() >= 3_000, "the all-types figure still shows them");
+    }
+
+    #[test]
+    fn a_heartbeat_is_late_from_the_amber_line_on() {
+        let now = 1_000_000_000;
+        let amber = HEARTBEAT_AMBER_SECS * 1000;
+        assert!(!heartbeat_late(now, now));
+        assert!(!heartbeat_late(now - (amber - 1), now));
+        assert!(heartbeat_late(now - amber, now));
+        assert!(!heartbeat_late(now + 5_000, now), "a clock a little ahead is not late");
+        let st = |at: u64| Ok(Some(WorkerStatus { version: "1.0.0".into(), heartbeat_at: at, ..Default::default() }));
+        assert_eq!(worker_view("core", st(now - amber), now, "1.0.0").state, "late");
+        assert_eq!(worker_view("core", st(now - (amber - 1)), now, "1.0.0").state, "up");
     }
 
     fn s(t: u64) -> Sample {

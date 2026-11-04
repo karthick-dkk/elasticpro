@@ -14,7 +14,7 @@
 //! and a day file is renamed into place only when its last page is in.
 
 use super::control::{self, Controller};
-use super::hosts::{self, Checkpoint, ClusterHosts, DayEnd, DayHeader, HostsConfig, HostsDir};
+use super::hosts::{self, Checkpoint, ClusterHosts, DayEnd, DayHeader, HostsConfig, HostsDir, PageError};
 use super::indices;
 use super::jobs::{ClusterProgress, FailedCluster, FileRef, Format, Job, Kind, ReportKind, Status};
 use super::period;
@@ -85,8 +85,26 @@ pub(crate) struct HostsOutcome {
     pub days_collected: u64,
     pub failed_days: Vec<(String, String)>,
     pub interrupted: Option<String>,
-    /// The cluster could not be read at all (`_cat/indices`, `_field_caps`).
+    /// The cluster could not be read at all (`_cat/indices`, `_field_caps`), or answered a page
+    /// with something that is not a composite answer.
     pub error: Option<String>,
+    /// `error` would be the same on another try (a 200 of the wrong shape): the job does not
+    /// try the cluster once more at its end.
+    pub permanent: bool,
+}
+
+/// Why a cluster was not done in a round of `report_rounds`. `permanent`: another try would
+/// get the same answer, so the cluster is not tried once more at the end of the job.
+#[derive(Debug)]
+pub(crate) struct RoundError {
+    pub why: String,
+    pub permanent: bool,
+}
+
+impl From<String> for RoundError {
+    fn from(why: String) -> RoundError {
+        RoundError { why, permanent: false }
+    }
 }
 
 /// A cluster held for a hosts collection: its run flag (one collection per cluster, the
@@ -273,6 +291,15 @@ impl Core {
         let conc = concurrency_for(self.gate.limits().per_cluster, self.role);
         let mut ctl = Controller::new(conc.start, conc.max, conc.target_ms);
         let dir = HostsDir::new(store.root(), &id);
+        // What a run cut short left beside held days, and checkpoint writes a kill cut off:
+        // gone before anything is written (one collection per cluster holds from here).
+        let again_days: HashSet<String> = if opts.again { days.iter().map(|d| day_key(*d)).collect() } else { HashSet::new() };
+        let d2 = dir.clone();
+        if let Ok(n) = self.report_cpu(move || d2.tidy(|day| again_days.contains(day))).await {
+            if n > 0 {
+                tracing::info!(cluster = %id, files = n, "volume by host: leftover checkpoint files removed");
+            }
+        }
         let ind = match Indices::from_settings(&s) {
             Ok(i) => i,
             Err(e) => {
@@ -339,9 +366,13 @@ impl Core {
         }
         drop(fcj);
 
-        // The days: held ones skipped, checkpoints resumed, the rest begun.
+        // The days: held ones skipped, checkpoints resumed, the rest begun. `taken` is the
+        // progress's `days.total` — every day this run takes up: begun, resumed, written empty
+        // (no index on it) or failed to begin; a held day it skips is not one. `days.done` is
+        // `out.days_collected`, those of them now held. One set for both, so done ≤ total.
         let now = now_ms();
         let mut work: Vec<Work> = vec![];
+        let mut taken: u64 = 0;
         for d in days {
             // Stopped: the days begun so far keep their checkpoints (marked below).
             if (opts.stop)().is_some() {
@@ -356,6 +387,7 @@ impl Core {
             if opts.from_tick && existing.as_ref().is_some_and(|c| !c.resumable(now, RETRY_WAIT_MS)) {
                 continue;
             }
+            taken += 1;
             let resumed = match existing {
                 Some(cp) if cp.header.fields == header.fields && cp.header.resolved == header.resolved => {
                     let (d2, c2) = (dir.clone(), cp.clone());
@@ -395,9 +427,10 @@ impl Core {
             let n = cp.parts.len();
             work.push(Work { date: d, cp, dead: false, retries: vec![0; n] });
         }
-        let days_total = work.len() as u64;
+        let days_collected = out.days_collected;
         self.cluster_progress(job, &id, |c| {
-            c.days.total = days_total;
+            c.days.total = taken;
+            c.days.done = days_collected;
             c.partitions.total = work.iter().map(|w| w.cp.parts.len() as u64).sum();
             c.partitions.done = work.iter().map(|w| w.cp.parts_done() as u64).sum();
         });
@@ -420,6 +453,9 @@ impl Core {
         let mut stopping: Option<String> = None;
         let mut since_pool = 0u64;
         let mut first_page: HashSet<(usize, usize)> = HashSet::new();
+        // The progress's `lastReason`: the controller's last halving, or the last retry's why,
+        // whichever came later.
+        let (mut last_reason, mut seen_halvings): (Option<String>, u32) = (None, 0);
         loop {
             if stopping.is_none() {
                 stopping = (opts.stop)();
@@ -479,7 +515,7 @@ impl Core {
                 let done = self.report_cpu(move || {
                     let r = hosts::read_page(res.get("json").unwrap_or(&Value::Null), &r2, size).and_then(|p| {
                         let done = p.done;
-                        d2.append(&mut cp, pk, &p.rows, p.after, done, now).map(|_| done)
+                        d2.append(&mut cp, pk, &p.rows, p.after, done, now).map(|_| done).map_err(PageError::from)
                     });
                     (cp, r)
                 }).await;
@@ -492,7 +528,23 @@ impl Core {
                         w.cp.parts[pk].page_size = hosts::next_page_size(size, body_bytes, cfg.page_bytes);
                         since_pool += 1;
                     }
-                    Ok((cp, Err(e))) => {
+                    Ok((cp, Err(PageError::Shape(why)))) => {
+                        // A 200 that is not a composite answer: every page of this cluster would
+                        // get the same. The cluster fails once, with why; nothing is retried and
+                        // the job does not try it again at its end. Checkpoints stay as they were.
+                        work[di].cp = cp;
+                        set.abort_all();
+                        ready.clear();
+                        for w in work.iter_mut() {
+                            w.dead = true;
+                        }
+                        out.error = Some(format!("a page answered HTTP 200 but {why}: not asked again"));
+                        out.permanent = true;
+                        let why = out.error.clone();
+                        self.cluster_progress(job, &id, |c| c.last_reason = why);
+                        break;
+                    }
+                    Ok((cp, Err(PageError::Retry(e)))) => {
                         work[di].cp = cp;
                         failure = Some(e);
                     }
@@ -524,12 +576,17 @@ impl Core {
                 let n = w.retries[pk];
                 if n as usize <= backoff.len() {
                     ready.push_back((di, pk, backoff[n as usize - 1]));
+                    // Every retry says why, so a climbing retry count is never without a reason.
+                    last_reason = Some(format!("{why} — asked again ({n} of {})", backoff.len()));
+                    let reason = last_reason.clone();
                     self.cluster_progress(job, &id, |c| {
                         c.state = "retrying".into();
                         c.retries += 1;
+                        c.last_reason = reason;
                     });
                     continue;
                 }
+                last_reason = Some(why.clone());
                 // Still failing after its retries: the day is failed, with why, and kept to
                 // be taken up again (the next tick, up to three; or a person's Run now).
                 w.dead = true;
@@ -570,7 +627,12 @@ impl Core {
                 ready.push_back((di, pk, 0));
             }
             let (date, pages, rows) = (day_key(work[di].date), work[di].cp.pages(), work[di].cp.rows());
-            let (cur, halvings, reason) = (ctl.current(), ctl.halvings, ctl.last_reason.clone());
+            if ctl.halvings != seen_halvings {
+                // A halving since the last look: the controller's reason is the latest.
+                seen_halvings = ctl.halvings;
+                last_reason = ctl.last_reason.clone();
+            }
+            let (cur, halvings, reason) = (ctl.current(), ctl.halvings, last_reason.clone());
             let parts_done: u64 = work.iter().map(|w| w.cp.parts_done() as u64).sum();
             let collected = out.days_collected;
             self.cluster_progress(job, &id, |c| {
@@ -580,7 +642,11 @@ impl Core {
                 c.rows = rows;
                 c.concurrency = cur;
                 c.halvings = halvings;
-                c.last_reason = reason;
+                if reason.is_some() {
+                    // The last reason stays until a newer one: pages going well again do not
+                    // erase why the retries count climbed.
+                    c.last_reason = reason;
+                }
                 c.partitions.done = parts_done;
                 c.days.done = collected;
             });
@@ -598,8 +664,12 @@ impl Core {
         let oldest = vsched::oldest_kept_month(vsched::utc_day(now_ms()), cfg.keep_months);
         let d2 = dir.clone();
         let _ = self.report_cpu(move || d2.prune(oldest)).await;
-        let state = if out.interrupted.is_some() { "stopped" } else if out.failed_days.is_empty() { "done" } else { "failed" };
-        self.cluster_progress(job, &id, |c| c.state = state.into());
+        let state = if out.interrupted.is_some() { "stopped" } else if out.failed_days.is_empty() && out.error.is_none() { "done" } else { "failed" };
+        let collected = out.days_collected;
+        self.cluster_progress(job, &id, |c| {
+            c.state = state.into();
+            c.days.done = collected;
+        });
         tracing::info!(cluster = %id, days = out.days_collected, failed = out.failed_days.len(), halvings = ctl.halvings,
                        interrupted = out.interrupted.as_deref().unwrap_or(""), "volume by host: collected");
         out
@@ -765,14 +835,15 @@ impl Core {
 
     /// Run `work` for every cluster: clusters red by the poller's health go to the end of
     /// the job and are tried up to three times; a cluster that fails is tried once more at
-    /// the end. Returns what succeeded, and every cluster that did not with why. Stops
+    /// the end, unless its failure is permanent (`RoundError`). Returns what succeeded, and every cluster that did not with why. Stops
     /// between rounds when `stop` says so (the reason is the third value).
-    async fn report_rounds<T, F, Fut>(self: &Arc<Self>, job: &str, ids: &[String], stop: &Stop, work: F)
+    async fn report_rounds<T, E, F, Fut>(self: &Arc<Self>, job: &str, ids: &[String], stop: &Stop, work: F)
         -> (HashMap<String, T>, Vec<(String, String)>, Option<String>)
     where
         T: Send + 'static,
+        E: Into<RoundError> + Send + 'static,
         F: Fn(String) -> Fut,
-        Fut: Future<Output = Result<T, String>> + Send + 'static,
+        Fut: Future<Output = Result<T, E>> + Send + 'static,
     {
         let (mut done, mut failed) = (HashMap::new(), vec![]);
         let mut todo: Vec<String> = ids.to_vec();
@@ -815,10 +886,11 @@ impl Core {
                         done.insert(id, v);
                     }
                     Err(e) => {
+                        let e: RoundError = e.into();
                         let n = tries.entry(id.clone()).or_insert(0);
                         *n += 1;
-                        if *n > 1 || stop().is_some() {
-                            failed.push((id, e));
+                        if *n > 1 || e.permanent || stop().is_some() {
+                            failed.push((id, e.why));
                         } else {
                             next.push(id);
                         }
@@ -932,8 +1004,13 @@ impl Core {
                 });
                 let res = core.es_req(indices::cat_request(&id, &ind, timeout)).await;
                 let Some(rows) = collect::cat_rows(&res) else {
-                    core.cluster_progress(Some(&job_id), &id, |c| c.state = "retrying".into());
-                    return Err(indices::failure_reason(&res));
+                    let why = indices::failure_reason(&res);
+                    let reason = Some(why.clone());
+                    core.cluster_progress(Some(&job_id), &id, |c| {
+                        c.state = "retrying".into();
+                        c.last_reason = reason;
+                    });
+                    return Err(why);
                 };
                 drop(res);
                 let out = indices::read_rows(&rows, &ind);
@@ -1016,15 +1093,15 @@ impl Core {
             let (core, s, stop, job_id, days) = (core.clone(), settings2.get(&id).cloned().unwrap_or_default(), st2.clone(), job_id.clone(), days.clone());
             async move {
                 let out = core.hosts_collect(id, s, days, HostsOpts { again, from_tick: false, stop, job: Some(job_id) }).await;
-                if let Some(e) = out.error {
-                    return Err(e);
+                if let Some(why) = out.error {
+                    return Err(RoundError { why, permanent: out.permanent });
                 }
                 if let Some(r) = out.interrupted {
-                    return Err(r);
+                    return Err(r.into());
                 }
                 if !out.failed_days.is_empty() {
                     let list: Vec<String> = out.failed_days.iter().map(|(d, r)| format!("{d} ({r})")).collect();
-                    return Err(format!("{} day(s) not collected: {}", list.len(), list.join(", ")));
+                    return Err(format!("{} day(s) not collected: {}", list.len(), list.join(", ")).into());
                 }
                 Ok(())
             }
@@ -1209,12 +1286,12 @@ mod tests {
             }
             None
         });
-        let (done, failed, _) = core.report_rounds("job", &["redc".to_string()], &greens, move |_id: String| async { Ok(()) }).await;
+        let (done, failed, _) = core.report_rounds("job", &["redc".to_string()], &greens, move |_id: String| async { Ok::<(), String>(()) }).await;
         assert!(done.contains_key("redc") && failed.is_empty(), "{failed:?}");
 
         // A stop between rounds names what is left.
         let stopped: Stop = Arc::new(|| Some("stopped by ann".to_string()));
-        let (_, failed, why) = core.report_rounds("job", &["okc".to_string()], &stopped, move |_id: String| async { Ok(()) }).await;
+        let (_, failed, why) = core.report_rounds("job", &["okc".to_string()], &stopped, move |_id: String| async { Ok::<(), String>(()) }).await;
         assert_eq!(why.as_deref(), Some("stopped by ann"));
         assert_eq!(failed[0].0, "okc");
         std::fs::remove_dir_all(dir).ok();

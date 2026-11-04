@@ -53,6 +53,10 @@ struct Plan {
     cat_401: bool,
     /// Composite pages are answered this late.
     page_delay_ms: u64,
+    /// `_cat/indices` lists no undated index: a day without a dated index has nothing to ask.
+    no_undated: bool,
+    /// Composite pages answer 200 with no aggregation in the body (the old fixture mock).
+    no_composite: bool,
 }
 
 type Fixture = Arc<Mutex<Vec<(String, Vec<Row>)>>>;
@@ -116,7 +120,9 @@ async fn cluster(fx: Fixture, plan: Arc<Mutex<Plan>>) -> GaugedServer {
                         "pri.store.size": (docs * 1000).to_string(), "store.size": (docs * 2000).to_string(), "creation.date": "1793577600000" })
             }).collect();
             rows.push(json!({ "index": "logstash-gone-2020.01.01", "status": "close" }));
-            rows.push(json!({ "index": "logstash-nodate", "status": "open", "docs.count": "9", "pri.store.size": "90", "creation.date": "1793577600000" }));
+            if !plan.no_undated {
+                rows.push(json!({ "index": "logstash-nodate", "status": "open", "docs.count": "9", "pri.store.size": "90", "creation.date": "1793577600000" }));
+            }
             return (200, Value::Array(rows).to_string(), 0);
         }
         if hit.path.contains("/_field_caps") {
@@ -130,6 +136,9 @@ async fn cluster(fx: Fixture, plan: Arc<Mutex<Plan>>) -> GaugedServer {
         }
         if hit.path.contains("/_search") && hit.body.contains("\"composite\"") {
             let delay = plan.page_delay_ms;
+            if plan.no_composite {
+                return (200, r#"{"took":1,"timed_out":false,"_shards":{"total":1,"successful":1,"failed":0},"hits":{"total":{"value":0,"relation":"eq"},"hits":[]}}"#.into(), delay);
+            }
             if hit.body.contains("\"after\"") && plan.fail_after_pages > 0 {
                 plan.fail_after_pages -= 1;
                 return (500, r#"{"error":{"type":"search_phase_execution_exception"},"status":500}"#.into(), delay);
@@ -299,6 +308,10 @@ async fn a_failed_page_resumes_from_its_checkpoint_and_a_lost_cluster_does_not_c
     assert_eq!(p["ok"], true, "{p}");
     let job = run(&c, json!({ "type": "REPORT_RUN", "kind": "hosts", "clusterIds": ["prod", "lost"], "period": period(d1, d1), "format": "xlsx", "mail": false })).await;
     assert_eq!(job["status"], "done", "a job never fails whole for one cluster: {job}");
+    let prod = &job["progress"]["clusters"]["prod"];
+    assert!(prod["retries"].as_u64().unwrap() >= 3, "{prod}");
+    let reason = prod["lastReason"].as_str().unwrap_or_else(|| panic!("a retry always says why: {prod}"));
+    assert!(reason.contains("HTTP 500"), "{reason}");
     let pages = composites(&es);
     let linux: Vec<&Hit> = pages.iter().filter(|h| h.body.contains("logstash-linux")).collect();
     assert_eq!(linux.iter().filter(|h| !h.body.contains("\"after\"")).count(), 1, "the first page is never asked twice");
@@ -327,12 +340,15 @@ async fn a_failed_page_resumes_from_its_checkpoint_and_a_lost_cluster_does_not_c
 async fn the_watchdog_stops_between_pages_keeps_the_checkpoint_and_the_next_run_resumes() {
     let d1 = today() - Duration::days(1);
     let fx: Fixture = Arc::new(Mutex::new(vec![(format!("logstash-linux-{}", dot(d1)), rows(2500, Some("C1"), None))]));
-    let plan = Arc::new(Mutex::new(Plan { page_delay_ms: 300, ..Plan::default() }));
+    // The watchdog must fire after the first pages are in and before the last: pages take
+    // 800 ms, the watchdog 1200 ms. (400 / 300 ms fired before the day was begun on a loaded
+    // machine — the listing and the leftovers' tidy took the 400 ms — and left no checkpoint.)
+    let plan = Arc::new(Mutex::new(Plan { page_delay_ms: 800, ..Plan::default() }));
     let es = cluster(fx, plan.clone()).await;
     let dir = TempDir::new("report-hosts-watchdog");
     let c = Core::new_with_rounds(Some(dir.0.clone()), Edition::Portable, 1);
     c.set_report_backoff_for_tests([0, 0, 0]);
-    c.set_report_watchdog_for_tests(400);
+    c.set_report_watchdog_for_tests(1_200);
     let p = c.handle(json!({ "type": "PRIME", "readOnly": true, "clusters": [{ "id": "prod", "url": es.url() }] })).await;
     assert_eq!(p["ok"], true, "{p}");
     let job = run(&c, json!({ "type": "REPORT_RUN", "kind": "hosts", "clusterIds": ["prod"], "period": period(d1, d1) })).await;
@@ -355,6 +371,79 @@ async fn the_watchdog_stops_between_pages_keeps_the_checkpoint_and_the_next_run_
     assert!(hosts_dir.join(format!("{}.json.gz", key(d1))).is_file());
     let v = c.handle(json!({ "type": "HOSTS_QUERY", "clusterId": "prod", "period": period(d1, d1), "limit": 1 })).await;
     assert_eq!(v["total"], 2500);
+}
+
+#[tokio::test]
+async fn day_counts_agree_and_leftovers_beside_held_days_are_removed() {
+    // Three days, one with an index: the other two are written empty at once. A collect-again
+    // job once showed days {done: 31, total: 3} — total counted only days with partitions.
+    let (d1, d3) = (today() - Duration::days(1), today() - Duration::days(3));
+    let fx: Fixture = Arc::new(Mutex::new(vec![(format!("logstash-linux-{}", dot(d1)), rows(10, Some("C1"), None))]));
+    let es = cluster(fx, Arc::new(Mutex::new(Plan { no_undated: true, ..Plan::default() }))).await;
+    let dir = TempDir::new("report-hosts-days");
+    let c = Core::new_with_rounds(Some(dir.0.clone()), Edition::Portable, 1);
+    c.set_report_backoff_for_tests([0, 0, 0]);
+    let p = c.handle(json!({ "type": "PRIME", "readOnly": true, "clusters": [{ "id": "prod", "url": es.url() }] })).await;
+    assert_eq!(p["ok"], true, "{p}");
+    let job = run(&c, json!({ "type": "REPORT_RUN", "kind": "hosts", "clusterIds": ["prod"], "period": period(d3, d1) })).await;
+    assert_eq!(job["status"], "done", "{job}");
+    assert_eq!(job["progress"]["clusters"]["prod"]["days"], json!({ "done": 3, "total": 3 }), "{job}");
+    assert_eq!(composites(&es).len(), 1, "only the day with an index is asked");
+    let again = run(&c, json!({ "type": "REPORT_RUN", "kind": "hosts", "clusterIds": ["prod"], "period": period(d3, d1), "collectAgain": true })).await;
+    assert_eq!(again["progress"]["clusters"]["prod"]["days"], json!({ "done": 3, "total": 3 }), "{again}");
+    // Every day held: a normal run takes none up, and says so.
+    let held = run(&c, json!({ "type": "REPORT_RUN", "kind": "hosts", "clusterIds": ["prod"], "period": period(d3, d1) })).await;
+    assert_eq!(held["progress"]["clusters"]["prod"]["days"], json!({ "done": 0, "total": 0 }), "{held}");
+
+    // A collect-again cut short left a checkpoint, .part files and a half-written checkpoint
+    // beside the held d1, and a stray .tmp of a day not held. The next normal run removes them
+    // without asking d1 again; a resume point of a day not held stays.
+    let hosts_dir = dir.join("volume").join("prod").join("hosts");
+    let (k1, k10) = (key(d1), key(today() - Duration::days(10)));
+    for name in [format!("{k1}.partial.json"), format!("{k1}.p0.json.gz.part"), format!("{k1}.p1.json.gz.part"),
+                 format!("{k1}.json.gz.part"), format!("{k1}.partial.tmp"), format!("{k10}.partial.tmp"), format!("{k10}.partial.json")] {
+        std::fs::write(hosts_dir.join(name), b"{").unwrap();
+    }
+    let asked = composites(&es).len();
+    let tidy = run(&c, json!({ "type": "REPORT_RUN", "kind": "hosts", "clusterIds": ["prod"], "period": period(d3, d1) })).await;
+    assert_eq!(tidy["status"], "done", "{tidy}");
+    assert_eq!(composites(&es).len(), asked, "the held day is not asked again");
+    let mut left: Vec<String> = std::fs::read_dir(&hosts_dir).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+    left.sort();
+    let mut want: Vec<String> = (1..=3).map(|n| format!("{}.json.gz", key(today() - Duration::days(n)))).collect();
+    want.push(format!("{k10}.partial.json"));
+    want.sort();
+    assert_eq!(left, want, "the day files, and the resume point of a day not held");
+}
+
+#[tokio::test]
+async fn a_cluster_answering_200_without_a_composite_aggregation_fails_once_and_is_not_retried() {
+    // The old fixture mock: _search answers 200 with hits and no aggregation. It used to cost
+    // every day's pages three retries, twice, with no reason shown (186 retries, ~22 minutes).
+    let (d1, d7) = (today() - Duration::days(1), today() - Duration::days(7));
+    let fx: Fixture = Arc::new(Mutex::new((1..=7).map(|n| (format!("logstash-linux-{}", dot(today() - Duration::days(n))), rows(10, Some("C1"), None))).collect()));
+    let es = cluster(fx, Arc::new(Mutex::new(Plan { no_composite: true, ..Plan::default() }))).await;
+    let dir = TempDir::new("report-hosts-shape");
+    let c = Core::new_with_rounds(Some(dir.0.clone()), Edition::Portable, 1);
+    // Real waits between retries: a retry would show in the time this takes.
+    c.set_report_backoff_for_tests([2_000, 2_000, 2_000]);
+    let p = c.handle(json!({ "type": "PRIME", "readOnly": true, "clusters": [{ "id": "prod", "url": es.url() }] })).await;
+    assert_eq!(p["ok"], true, "{p}");
+    let started = std::time::Instant::now();
+    let job = run(&c, json!({ "type": "REPORT_RUN", "kind": "hosts", "clusterIds": ["prod"], "period": period(d7, d1), "collectAgain": true })).await;
+    assert!(started.elapsed() < std::time::Duration::from_secs(5), "took {:?}", started.elapsed());
+    assert_eq!(job["status"], "done", "the file is still made: {job}");
+    let failed = job["failedClusters"].as_array().unwrap_or_else(|| panic!("{job}"));
+    assert_eq!(failed.len(), 1, "{job}");
+    let why = failed[0]["reason"].as_str().unwrap();
+    assert!(why.contains("no composite aggregation"), "{why}");
+    let prod = &job["progress"]["clusters"]["prod"];
+    assert_eq!(prod["retries"], 0, "nothing retried: {prod}");
+    assert_eq!(prod["state"], "failed", "{prod}");
+    assert!(prod["lastReason"].as_str().unwrap_or("").contains("no composite aggregation"), "{prod}");
+    let pages = composites(&es).len();
+    assert!((1..=4).contains(&pages), "at most the pages already in flight: {pages}");
+    assert_eq!(es.hits().iter().filter(|h| h.path.starts_with("/_cat/indices")).count(), 1, "not tried once more at the end");
 }
 
 #[tokio::test]

@@ -13,9 +13,20 @@
 #      a hosts collection leaves PING and an ES read answering in their normal time; the core
 #      says worker_unavailable; the checkpoint survives and the collection finishes when the
 #      worker is back; the job names any cluster that failed
+#
+# Step 8's settings:
+#   TRIAL_ES_URL     a mock cluster to prime as trial-mock (tools/mock-es.mjs, MOCK_LATENCY_MS)
+#   TRIAL_CLUSTER_ID a cluster this stack can already read (instead of TRIAL_ES_URL)
+#   TRIAL_PERIOD     the hosts collection's period (default last7). A real cluster with no
+#                    documents in the last seven days collects nothing — name a period that
+#                    has data: previousMonth, month:YYYY-MM, monthSoFar, or a JSON object
+#                    '{"from":"YYYY-MM-DD","to":"YYYY-MM-DD"}' (REPORT_RUN's period)
 set -uo pipefail
 cd "$(dirname "$0")"
 LISTEN=${LISTEN:-443}
+TRIAL_PERIOD=${TRIAL_PERIOD:-last7}
+# A word is a named period ("last7"); anything starting with { is a period object, as is.
+case $TRIAL_PERIOD in \{*) PERIOD_JSON=$TRIAL_PERIOD ;; *) PERIOD_JSON="\"$TRIAL_PERIOD\"" ;; esac
 U=alice; PW='test-password-1'
 fail=0; ok(){ echo "  ✓ $1"; }; bad(){ echo "  ✗ $1"; fail=1; }
 
@@ -204,7 +215,7 @@ else
   # The worker learns the cluster from primed.json within its 30-s reload.
   JOB=; job=
   for i in $(seq 1 30); do
-    job=$(bridge "$JU" "{\"type\":\"REPORT_RUN\",\"kind\":\"hosts\",\"clusterIds\":[\"$C\"],\"period\":\"last7\",\"collectAgain\":true}" \
+    job=$(bridge "$JU" "{\"type\":\"REPORT_RUN\",\"kind\":\"hosts\",\"clusterIds\":[\"$C\"],\"period\":$PERIOD_JSON,\"collectAgain\":true}" \
           | python3 -c 'import json,sys;d=json.load(sys.stdin);j=(d.get("jobs") or [{}])[0];print(j.get("id") or "", d.get("kind") or "", json.dumps(d.get("refused") or []))')
     JOB=${job%% *}
     [ -n "$JOB" ] && break
@@ -221,7 +232,8 @@ print(((j.get('progress') or {}).get('pages')) or 0)")
     [ "${pages:-0}" -gt 0 ] && break
     sleep 1
   done
-  [ "${pages:-0}" -gt 0 ] && ok "collection under way ($pages page(s) in)" || bad "no page collected within 120 s"
+  [ "${pages:-0}" -gt 0 ] && ok "collection under way ($pages page(s) in)" \
+    || bad "no page collected within 120 s — the period ($TRIAL_PERIOD) may hold no data on $C: set TRIAL_PERIOD to one that does (see the header)"
   docker compose kill worker >/dev/null 2>&1
   ok "worker killed"
   # Monitoring answers in its normal time without the worker: PING within 2 s, the ES read
@@ -232,8 +244,18 @@ print(((j.get('progress') or {}).get('pages')) or 0)")
   if python3 -c "import sys; sys.exit(0 if float('$t_es') < float('$t_es0') + 2 else 1)" && grep -q '"ok":true' /tmp/trial-es.$$; then ok "an ES read answered in ${t_es}s with the worker down (${t_es0}s before the report)"
   else bad "ES read with the worker down: ${t_es}s (before: ${t_es0}s), $(head -c 200 /tmp/trial-es.$$)"; fi
   rm -f /tmp/trial-es.$$
-  down=$(bridge "$JU" '{"type":"REPORT_CONCURRENCY_SET","n":3}' | python3 -c 'import json,sys;print(json.load(sys.stdin).get("kind"))')
-  [ "$down" = worker_unavailable ] && ok "an action is refused as worker_unavailable" || bad "with the worker down an action answered '$down'"
+  # Refused, and quickly: the worker's name is not waited on for more than the connect timeout
+  # (1 s), and once its heartbeat is late it is not asked at all.
+  t_down=$(curl -sk -o /tmp/trial-down.$$ -w '%{time_total}' -b "$JU" -X POST "https://127.0.0.1:$LISTEN/bridge" -H 'content-type: application/json' \
+             -d '{"type":"REPORT_CONCURRENCY_SET","n":3}')
+  down=$(python3 -c 'import json,sys;print(json.load(sys.stdin).get("kind"))' < /tmp/trial-down.$$ 2>/dev/null)
+  rm -f /tmp/trial-down.$$
+  [ "$down" = worker_unavailable ] && ok "an action is refused as worker_unavailable (${t_down}s)" || bad "with the worker down an action answered '$down'"
+  python3 -c "import sys; sys.exit(0 if float('$t_down') < 2 else 1)" || bad "worker_unavailable took ${t_down}s (want under 2 s)"
+  # The refused actions wait on the worker, not on the core: the core's message p95 stays out of it.
+  mp=$(bridge "$JU" '{"type":"SYSTEM_HEALTH"}' | python3 -c 'import json,sys
+d = json.load(sys.stdin); print(next((c.get("level") for c in d.get("checks", []) if c.get("id") == "messages.p95"), "none"))')
+  [ "$mp" = ok ] && ok "the core's message p95 check stays ok with the worker down" || bad "the core's message p95 check is '$mp' with the worker down"
   cps=$(docker compose exec -T core sh -c "ls /app/data/volume/*/hosts/*.partial.json 2>/dev/null | wc -l" | tr -d ' \r')
   [ "${cps:-0}" -gt 0 ] && ok "$cps checkpoint(s) kept on the data volume" || bad "no hosts checkpoint on the data volume after the kill"
   docker compose start worker >/dev/null 2>&1
@@ -244,7 +266,7 @@ print(((j.get('progress') or {}).get('pages')) or 0)")
 d = json.load(sys.stdin); j = next((j for j in d.get('jobs', []) if j.get('id') == '$JOB'), {}); print(j.get('status'), j.get('error'))")
   case "$st" in failed*restarted*) ok "the cut-short job is marked by the restarted worker ($st)";; *) bad "the cut-short job reads '$st' (want failed, the server restarted)";; esac
   # Run again without collectAgain: it resumes from the checkpoints rather than starting over.
-  job2=$(bridge "$JU" "{\"type\":\"REPORT_RUN\",\"kind\":\"hosts\",\"clusterIds\":[\"$C\"${DOWN:+,\"$DOWN\"}],\"period\":\"last7\"}" \
+  job2=$(bridge "$JU" "{\"type\":\"REPORT_RUN\",\"kind\":\"hosts\",\"clusterIds\":[\"$C\"${DOWN:+,\"$DOWN\"}],\"period\":$PERIOD_JSON}" \
          | python3 -c 'import json,sys;d=json.load(sys.stdin);print(((d.get("jobs") or [{}])[0]).get("id") or "")')
   end=""
   for i in $(seq 1 300); do

@@ -93,14 +93,21 @@ impl Core {
 
     /// Role core: hand an action to the worker, as `caller` (the core has checked the role,
     /// the clusters and the limits). Worker down or unreachable: `worker_unavailable`, with the
-    /// last heartbeat — nothing else is affected.
+    /// last heartbeat — nothing else is affected. A worker whose heartbeat is late (the health
+    /// check's amber line, `health::heartbeat_late`) is not asked: the answer comes at once,
+    /// instead of after a lookup of a container name that no longer answers.
     pub(crate) async fn forward_to_worker(&self, t: &str, msg: &Value, caller: Option<&Caller>) -> Value {
         let Some(path) = worker::endpoint(t) else {
             return json!({ "ok": false, "kind": "bad_message", "message": format!("{t} is not forwarded to the report worker") });
         };
-        let heartbeat = || self.data_dir.as_deref().and_then(|d| WorkerStatus::read(d).ok().flatten()).map(|s| s.heartbeat_at);
+        let last = self.data_dir.as_deref().and_then(|d| WorkerStatus::read(d).ok().flatten()).map(|s| s.heartbeat_at);
+        let now = crate::fleet::now_ms();
+        if let Some(at) = last.filter(|at| health::heartbeat_late(*at, now)) {
+            let why = format!("no heartbeat for {} (worker/status.json): the worker was not asked", health::secs_text(now.saturating_sub(at) / 1000));
+            return worker::unavailable(&why, Some(at));
+        }
         let Some(token) = self.worker.token() else {
-            return worker::unavailable("no shared token: the core and the worker need the same data volume", heartbeat());
+            return worker::unavailable("no shared token: the core and the worker need the same data volume", last);
         };
         let mut m = msg.clone();
         if let Some(o) = m.as_object_mut() {
@@ -116,7 +123,7 @@ impl Core {
             }
             Err(e) => {
                 tracing::warn!(error = %e, msg_type = t, "report worker unreachable");
-                worker::unavailable(&e, heartbeat())
+                worker::unavailable(&e, last)
             }
         }
     }

@@ -179,6 +179,21 @@ Reports must never slow ElasticPro down or fail half-way.
   when every partition's last page is in. A day that still fails is marked failed with the
   reason; the timer takes it up again after 15 minutes, on at most 3 ticks, then it waits
   for a person (*Run now* always tries).
+- **Leftovers are removed** (0.3.54 VM findings). Before a cluster's collection starts (one
+  collection per cluster at a time, so nothing else writes there), `HostsDir::tidy` removes every
+  `*.tmp` in its hosts directory — a checkpoint write (`<day>.partial.tmp`) a kill cut off, never
+  read — and, beside a day file that is held, that day's checkpoint, `.part` files and
+  half-assembled `<day>.json.gz.part`, unless this run collects the day again (it starts it
+  afresh). A held day's checkpoint is never resumed, so they would only stay on disk; a day not
+  held keeps its checkpoint, which is its resume point. A day begun again with fewer partitions
+  drops the earlier start's extra `.part` files.
+- **A 200 of the wrong shape is permanent.** A page that answers 200 with no composite
+  aggregation (or no buckets) in it — a proxy page, a mock, a cluster that ignores the
+  aggregation — is not asked again: the cluster fails once with that reason (`HostsOutcome`
+  `permanent`), its other pages in flight are dropped, its checkpoints stay as they were, and the
+  job does not try it once more at its end (`RoundError::permanent`). Found on the VM: the old
+  fixture mock cost 31 days × 3 retries, twice (186 retries, about 22 minutes) with no reason
+  shown. Shards that failed and time-outs are still retried.
 - **A job never fails whole for one cluster.** A cluster that cannot be read is tried once
   more at the end of the job; the file and the mail are still made for the others, the
   cluster's sheet says why in its first row, the Summary/Totals and the mail name it, and the
@@ -194,7 +209,13 @@ Reports must never slow ElasticPro down or fail half-way.
   pages, rows, retries, clusters: {<id>: {state, day, pages, rows, retries, concurrency,
   partitions: {done, total}, halvings, lastReason, days: {done, total}}}, partitions,
   concurrency, halvings, lastReason}` — the top-level fields are the cluster under way's; every
-  job also carries `reportKind` (`volume`, `indices`, `hosts`).
+  job also carries `reportKind` (`volume`, `indices`, `hosts`). `days.total` is every day the
+  run takes up (begun, resumed, written empty because no index counts on it, or failed to
+  begin; a held day it skips is not one) and `days.done` those of them now held — one set for
+  both, so done never passes total (a collect-again once showed `{done: 31, total: 3}`: total
+  counted only the days with partitions). `lastReason` is the controller's last halving or the
+  last retry's reason, whichever came later; every retry sets it, and pages going well again do
+  not clear it.
 
 ## Concurrency
 

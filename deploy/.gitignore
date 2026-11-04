@@ -16,3 +16,7 @@ config.txt
 nginx/allow-ui/config-txt.conf
 nginx/allow-host/config-txt.conf
 nginx/rate-exempt/config-txt.conf
+
+# deploy.sh --upgrade: the compose file it replaced, and which one --rollback puts back.
+docker-compose.yml.bak-*
+.compose-previous

@@ -102,8 +102,12 @@ Decisions made while building, within the contract:
   *no CPU limit*.
 - **The message p95 check** reads "own" messages: every type less those whose time is somebody
   else's by definition (`WAITS_ELSEWHERE`: ES, CLUSTER_DATASET, REFRESH, Zabbix, mail, history
-  store tests and queries, password hashing …). A slow cluster shows under *Request gate*
-  (upstream p95, timeouts, 429s), not as a slow core. The tab shows both figures. Percentiles are
+  store tests and queries, password hashing …) and every type the core forwards to the report
+  worker (`worker::endpoint`: REPORT_RUN, VOLUME_RUN, REPORT_STOP, REPORT_SEND_NOW, REPORT_CLEAR,
+  REPORT_CONCURRENCY_SET) — one test, `health::waits_elsewhere`. A slow cluster shows under
+  *Request gate* (upstream p95, timeouts, 429s), not as a slow core; a stopped worker shows as
+  the worker's check, not as a slow core (found on the VM: forwards that waited ~3 s on a
+  stopped container's name made the Core chip red). The tab shows both figures. Percentiles are
   bucket upper bounds (1 ms … 60 s, then the slowest seen).
 - **Gate refusals over 1 h** come from the ring: each minute's sample keeps that minute's
   `overloaded` and `queue_timeout` (`Gate::window(60 s)`), so `gate.rs` is unchanged. Only
@@ -182,4 +186,5 @@ a `health::SelfMonitor` read once a minute (`read`, `sample`, `push`, persisted 
 `Ring::save(data, "worker")`) gives `memory`/`cpu` through `figures()`; `health::gate_figures("worker",
 &gate, &records, ring.refusals_within(now, 3_600_000), None)` gives `gate`; `health::job_line` of each
 running job gives `jobs`. A heartbeat 30 s old is amber, 90 s red; a `version` other than the core's
-is red.
+is red. The amber line is `health::heartbeat_late`, and it is also where the core stops forwarding
+actions to the worker and answers `worker_unavailable` at once (docs/WORKER.md).
