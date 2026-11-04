@@ -191,7 +191,7 @@ async fn a_prefix_change_does_not_strand_the_queue_and_a_refusal_does_not_stop_t
     assert_eq!(tick["refused"], json!(1), "the refused one is dropped and counted: {tick}");
     assert_eq!(tick["queue"], json!(0), "nothing is stuck: {tick}");
     let bulk = store.hits().into_iter().find(|x| x.path == "/_bulk").expect("the good one was sent");
-    assert!(bulk.body.contains(&format!(r#""_index":"ep-moved-volume-{}""#, &day[..7].replace('-', "."))), "under the prefix in force: {}", bulk.body);
+    assert!(bulk.body.contains(&format!(r#""_index":"ep-moved-volume-{}""#, day[..7].replace('-', "."))), "under the prefix in force: {}", bulk.body);
     assert!(!bulk.body.contains("elasticpro-history"), "{}", bulk.body);
     assert_eq!(get(&c, &s).await["status"]["refused"], json!(1));
 }
