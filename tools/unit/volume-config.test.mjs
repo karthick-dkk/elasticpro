@@ -220,7 +220,8 @@ test('Which indices count: the pattern, the day rule and the time field are vali
   assert.equal(ok.indexPattern, 'logstash-*', 'the default pattern needs no date part');
   assert.equal(ok.dayFrom, 'name');
   assert.equal(ok.timeField, '@timestamp');
-  assert.match(V.validateVolume({ ...ok, indexPattern: '' }).join(' '), /Index pattern: name at least one/);
+  assert.match(V.validateVolume({ ...ok, indexPattern: '', indexFormat: '' }).join(' '), /Index pattern: name at least one/);
+  assert.deepEqual(V.validateVolume({ ...ok, indexPattern: '' }), [], 'blank with the older format: the format stays in force');
   assert.match(V.validateVolume({ ...ok, indexPattern: 'a b*' }).join(' '), /not an index pattern/);
   assert.deepEqual(V.validateVolume({ ...ok, indexPattern: 'logstash-*, fw-*' }), [], 'comma-separated patterns');
   assert.match(V.validateVolume({ ...ok, dayFrom: 'sometimes' }).join(' '), /pick one of the two/);
