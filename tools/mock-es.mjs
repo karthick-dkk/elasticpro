@@ -286,6 +286,11 @@ const routes = [
     return names.flatMap((index) => [0, 1].map((shard) => ({
       index, shard: String(shard), stage: 'done', type: 'snapshot' })));
   }],
+  // The search thread pool, which the report collector looks at before a cluster starts and
+  // every 50 pages (docs/REPORT-TYPES.md "Concurrency"): calm, nothing rejected.
+  [(u) => u.startsWith('/_cat/thread_pool'), () => ([
+    { node_name: 'node-1', active: '1', queue: '0', queue_size: '1000', rejected: '0' },
+    { node_name: 'node-2', active: '0', queue: '0', queue_size: '1000', rejected: '0' }])],
   [(u) => u.startsWith('/_cat/shards'), () => ([
     { index: 'logstash-acme-2026.09.09', shard: '0', prirep: 'p', state: 'STARTED', node: 'node-1', store: '2500000000' },
     { index: 'logstash-acme-2026.09.09', shard: '0', prirep: 'r', state: 'STARTED', node: 'node-2', store: '2500000000' },
@@ -373,6 +378,8 @@ const routes = [
 
     // The volume collector's one search per day (docs/VOLUME.md, "Collection" step 3).
     if (body.aggs && body.aggs.by_index) return volumeSearch(hit.url, body);
+    // Volume by host: one composite page (docs/REPORT-TYPES.md "Collection").
+    if (body.aggs && body.aggs.h && body.aggs.h.composite) return hostsComposite(body);
 
     // The close-up: the newest documents for one device, looked up by hostname or by
     // address. Answered from the same DEVICES table the aggregation uses, so the fixture
@@ -523,7 +530,66 @@ const FIELD_TYPES = {
   src_hostname: 'keyword',
   event_logsize: 'long',
   log_type: 'keyword',
+  // Volume by host's metadata (docs/REPORT-TYPES.md): branch is text with a keyword under
+  // it; zone and ClientName are keywords; the rest of the script's list is absent, so the
+  // sheet names them once as "not in the mapping". fwd_log_size is the forwarded size.
+  branch: 'text',
+  zone: 'keyword',
+  ClientName: 'keyword',
+  fwd_log_size: 'long',
 };
+
+/**
+ * Volume by host (docs/REPORT-TYPES.md "Collection"): the composite aggregation over
+ * `_index` × source host, paged by `after_key`, for the volume indices the query names.
+ * Each index's documents are spread over the DEVICES, plus a missing-host bucket; ClientID
+ * is the device's tag upper-cased except on one device (`__missing__`, so the report's fill
+ * has a case), branch HQ/DR with one device missing (so `DC` shows).
+ */
+function hostsComposite(body) {
+  const q = body.query || {};
+  const named = (q.terms && q.terms._index) || (q.bool && q.bool.should && q.bool.should[0] && q.bool.should[0].terms
+    && q.bool.should[0].terms._index) || [];
+  const comp = body.aggs.h.composite;
+  const size = Number(comp.size) || 1000;
+  const after = comp.after || null;
+  const aggs = body.aggs.h.aggs || {};
+  const rows = [];
+  for (const i of VOLUME_INDICES.filter((x) => named.includes(x.index))) {
+    const docs = Number(i['docs.count']) || 0;
+    const day = (/(\d{4})\.(\d{2})\.(\d{2})/.exec(i.index) || []).slice(1).join('-');
+    const per = eventBytesPer(day);
+    const hosts = [[null, 0.02, 'none'], ...DEVICES.map(([name, , , tag], k) => [name, (6 - k) / 21 * 0.98, tag])];
+    for (const [host, share, tag] of hosts) {
+      const n = Math.round(docs * share);
+      const meta = {
+        ClientID: host === 'vpn-04' || host === null ? '__missing__' : String(tag).toUpperCase(),
+        'branch.keyword': host === 'switch-05' || host === null ? null : (tag === 'acme' ? 'HQ' : 'DR'),
+        zone: 'z1', ClientName: host === null ? null : `${tag} ltd`,
+      };
+      rows.push({ i: i.index, h: host, n, ev: n * per, sub: Math.round(n * per * 0.9), meta });
+    }
+  }
+  const cmp = (a, b) => (a.i < b.i ? -1 : a.i > b.i ? 1 : (a.h === b.h ? 0 : a.h === null ? -1 : b.h === null ? 1 : a.h < b.h ? -1 : 1));
+  rows.sort(cmp);
+  const start = after ? rows.findIndex((r) => cmp(r, { i: after.i, h: after.h === undefined ? null : after.h }) > 0) : 0;
+  const page = (start < 0 ? [] : rows.slice(start)).slice(0, size).map((r) => {
+    const b = { key: { i: r.i, h: r.h }, doc_count: r.n };
+    if (aggs.ev) b.ev = { value: r.ev };
+    if (aggs.m_ev) b.m_ev = { doc_count: 0 };
+    if (aggs.sub) b.sub = { value: aggs.sub.sum && aggs.sub.sum.field === 'fwd_log_size' ? r.sub : 0 };
+    for (const [name, a] of Object.entries(aggs)) {
+      if (!name.startsWith('md') || !a.terms) continue;
+      const v = r.meta[a.terms.field];
+      b[name] = { buckets: v ? [{ key: v, doc_count: r.n }] : [] };
+    }
+    return b;
+  });
+  const h = { buckets: page };
+  if (page.length) h.after_key = page[page.length - 1].key;
+  return { took: 3, timed_out: false, _shards: { total: 1, successful: 1, failed: 0 }, hits: { total: { value: 0 }, hits: [] },
+           aggregations: { h } };
+}
 
 /**
  * The values each volume field holds, with their weights. Shares are the same every day
