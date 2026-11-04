@@ -61,7 +61,7 @@ Hosted (the maintained build): see the README, "One-click installation" —
 > and `.rpm` ended with [0.3.51](https://github.com/karthick-dkk/elasticpro/releases/tag/v0.3.51). The Windows quick start, the other-platform
 > installer modes (`install.sh --portable`, which now exits with a deprecation message) and the
 > WebView2 notes were removed from this page; the 0.3.51 tag carries the old text. The `src-tauri/`
-> folder stays in the tree but is not built.
+> folder was removed from the tree in 0.3.54.
 
 ## Configuration
 
@@ -107,7 +107,7 @@ Command line: `elasticpro-<version>.exe --config C:\path\config_cluster.json` (o
 No Node.js anywhere: the UI is plain ES modules, the CLI is Rust.
 
 > **Deprecated: desktop builds.** `cargo tauri build` and `tools/build-windows-cross.sh` ended with
-> 0.3.52 (`src-tauri` is no longer a workspace member and the script exits with a message). The last
+> 0.3.52, and both `src-tauri/` and the script were removed from the tree in 0.3.54. The last
 > desktop release is [0.3.51](https://github.com/karthick-dkk/elasticpro/releases/tag/v0.3.51); check that tag out to rebuild it.
 
 **Run the UI in a browser** (development, tests):
@@ -140,7 +140,6 @@ ui/js/core/writes.js the UI's single copy of that unlock, shared by every acting
   crypto.rs          AES-256-GCM + PBKDF2-HMAC-SHA512 for secrets in the config file
   vault.rs           OS credential store (Windows Credential Manager) — opt-in
   bridge.rs          the JSON message API the UI talks to
-src-tauri/           DEPRECATED Tauri 2 desktop shell (0.3.52): kept in the tree, not built or released
 ui/                  the app UI: vanilla ES modules, no bundler
 tools/               check scripts, installers, release tooling
 docs/                HANDBOOK.md (full operator manual), screenshots

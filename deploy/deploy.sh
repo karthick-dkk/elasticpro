@@ -665,7 +665,7 @@ fi
 if [ -z "$IMAGE" ]; then
   VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' ../Cargo.toml | head -1)
   COMMIT=$(git -C .. rev-parse --short HEAD 2>/dev/null || date +%Y%m%d%H%M)
-  [ -z "$(git -C .. status --porcelain -- crates ui src-tauri Cargo.toml Cargo.lock deploy/Dockerfile 2>/dev/null)" ] || COMMIT=$COMMIT-dirty
+  [ -z "$(git -C .. status --porcelain -- crates ui Cargo.toml Cargo.lock deploy/Dockerfile 2>/dev/null)" ] || COMMIT=$COMMIT-dirty
   IMAGE=elasticpro-core:$VERSION-$COMMIT
 fi
 # nginx is given its config as a bind-mounted FILE, which goes wrong in two different ways
