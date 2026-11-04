@@ -16,7 +16,7 @@ import { toast } from '../ui/menu.js';
 import { navigateTo } from '../core/intent.js';
 import { workbook, XLSX_MIME } from '../lib/xlsx.js';
 import { utcDay, volumeMonthlyAll, monthlyAllEventCsvRows, reportDailyCsvRows, REPORT_DAILY_CSV, toMs } from '../core/volume-daily.js';
-import { reportScheduleGet, reportSendNow, lastSentText, failText, refreshReports } from '../core/reports.js';
+import { reportScheduleGet, reportSendNow, lastSentText, failText, failLevel, refreshReports } from '../core/reports.js';
 import { reportJobsMount, reportPanel, setReportPanelOpen, isAdmin } from '../ui/report-jobs.js';
 import { recordOf, RATE_DAYS } from './record.js';
 import { exportOverviewCsv, exportOverviewXlsx } from './overview.js';
@@ -105,7 +105,7 @@ function mailed() {
     type: 'button',
     onclick: async () => {
       const res = await reportSendNow();
-      if (!res.ok) { toast(failText(res, 'Not sent'), 'err', 6000); return; }
+      if (!res.ok) { toast(failText(res, 'Not sent'), failLevel(res), 6000); return; }
       toast('The mailed report is being built and sent in the background.', 'ok', 4000);
       refreshReports();
     },

@@ -32,6 +32,7 @@ import { configErrorOf,
   reportDailyCsvRows, reportMonthlyCsvRows, REPORT_DAILY_CSV, REPORT_MONTHLY_CSV,
 } from '../core/volume-daily.js';
 import { forgetRecords } from './record.js';
+import { isWorkerDown } from '../core/reports.js';
 
 /** While a collection runs the record is asked for again this often, for at most this long. */
 const POLL_MS = 3000;
@@ -242,7 +243,11 @@ async function refreshNow(c, { auto = false } = {}) {
   if (res.kind === 'no_store') { noStore = true; bump(); return; }
   if (!res.ok) {
     // config_unreadable: the core's message is the whole answer.
-    if (!auto) toast(res.kind === 'config_unreadable' ? res.message : `Could not start a collection: ${res.message || res.kind}`, 'err', 6000);
+    // The report worker not running is amber, in the core's words: collection resumes when it is back.
+    if (!auto) {
+      toast(res.kind === 'config_unreadable' || isWorkerDown(res) ? (res.message || res.kind) : `Could not start a collection: ${res.message || res.kind}`,
+        isWorkerDown(res) ? 'warn' : 'err', 6000);
+    }
     return;
   }
   if ((res.tooSoon || []).includes(c.id)) {

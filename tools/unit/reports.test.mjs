@@ -78,6 +78,20 @@ test('a job\'s client: its cluster, or the mailed report', () => {
   assert.equal(R.jobClient(job({ clusterName: 'Acme prod' })), 'Acme prod');
   assert.equal(R.jobClient(job({ kind: 'mailed', clusterId: '*', clusterName: '', clusterIds: ['a', 'b'] })), 'Mailed report · 2 clusters');
   assert.equal(R.jobClient(job({ clusterId: '*', clusterName: '' })), 'Mailed report');
+  // 0.3.54: the kind is named for the indices and hosts reports (every job carries reportKind).
+  assert.equal(R.jobClient(job({ reportKind: 'volume', clusterName: 'Acme prod' })), 'Acme prod');
+  assert.equal(R.jobClient(job({ reportKind: 'hosts', clusterName: '3 clusters' })), 'Volume by host · 3 clusters');
+  assert.equal(R.jobClient(job({ reportKind: 'indices', kind: 'mailed', clusterId: '*', clusterIds: ['a'] })), 'Mailed indices report · 1 cluster');
+});
+
+test('the report worker refusing is said as the core says it, amber; the new presets read as words', () => {
+  const down = { ok: false, kind: 'worker_unavailable', message: 'the report worker is not running' };
+  assert.equal(R.failText(down, 'Not sent'), 'the report worker is not running');
+  assert.equal(R.failLevel(down), 'warn');
+  assert.equal(R.failLevel({ ok: false, kind: 'bad_request' }), 'err');
+  assert.equal(R.isWorkerDown({ ok: false, kind: 'worker_version' }), true);
+  assert.equal(R.failText({ kind: 'too_many_clusters', message: 'at most 5' }, 'x'), 'at most 5');
+  assert.deepEqual(['monthSoFar', 'previousWeek', 'previousMonth'].map((p) => R.periodLabel(p)), ['Month so far', 'Previous week', 'Previous month']);
 });
 
 test('running first, the queue in order, the finished newest first', () => {

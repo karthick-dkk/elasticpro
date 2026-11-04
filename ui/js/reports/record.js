@@ -12,6 +12,7 @@
 import { state } from '../core/state.js';
 import { runBounded } from '../core/fleet.js';
 import { volumeDaily, volumeRun, perDayEventBytes } from '../core/volume-daily.js';
+import { isWorkerDown } from '../core/reports.js';
 import { dataNodeDisk, storagePlanRow, parseRetention, parseSize, volumeSettings, diskLastsDays } from '../core/volume.js';
 import { clusterKind } from '../core/cluster-kind.js';
 
@@ -66,7 +67,9 @@ export async function runCollection(ids) {
   const res = await volumeRun(ids);
   if (res.unsupported) { recordState.unsupported = true; changed(); return { ok: false, message: 'This server does not keep a daily record yet.' }; }
   if (res.kind === 'no_store') { recordState.noStore = true; changed(); return { ok: false, message: 'This server keeps no daily record.' }; }
-  if (!res.ok) return { ok: false, message: res.kind === 'config_unreadable' ? res.message : `Could not start a collection: ${res.message || res.kind}` };
+  // The report worker not running (or another version) is the core's sentence, in amber: collection resumes when it is back.
+  if (!res.ok && isWorkerDown(res)) return { ok: false, level: 'warn', message: res.message || 'The report worker is not running: collection resumes when it is back.' };
+  if (!res.ok) return { ok: false, level: 'err', message: res.kind === 'config_unreadable' ? res.message : `Could not start a collection: ${res.message || res.kind}` };
   follow(ids);
   return { ok: true, tooSoon: res.tooSoon || [], started: res.started || [], already: res.already || [] };
 }

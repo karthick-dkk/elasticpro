@@ -63,3 +63,50 @@ test('config.txt hosts keys: not reported stays unknown, locked ones are marked'
   assert.equal(by.keepMonths.locked, true);
   assert.equal(by.branchDefault.known, false);
 });
+
+test('HOSTS_QUERY as the core answers it: filled ClientID/branch, days, fill, and the fields the core fills', () => {
+  const r = T.hostsOf({ ok: true, fields: ['zone', 'ClientID', 'branch'], fill: { clientId: 'C-1', branchDefault: 'DC' },
+    rows: [{ day: '2026-11-01', index: 'a', host: 'h', docs: 3, eventBytes: 10, subBytes: null, eventMissingDocs: 2, clientId: 'C-1', branch: 'DC', incomplete: true, meta: { ClientID: 'C-1' } }],
+    total: 1, totals: { docs: 3, eventBytes: 10, subBytes: null },
+    days: [{ day: '2026-11-01', held: true, incomplete: true, rows: 1, notes: [], failed: null },
+      { day: '2026-11-02', held: false, incomplete: false, rows: null, notes: [], failed: 'HTTP 503', collecting: false },
+      { day: '2026-11-03', held: false, incomplete: false, rows: null, notes: [], failed: null, collecting: true }] });
+  const row = r.rows[0];
+  assert.deepEqual([row.clientId, row.branch, row.eventMissingDocs, row.incomplete], ['C-1', 'DC', 2, true]);
+  assert.deepEqual(r.incompleteDays, ['2026-11-01'], 'from days[] when incompleteDays is absent');
+  assert.deepEqual(r.failedDays.map((d) => [d.day, d.failed]), [['2026-11-02', 'HTTP 503']]);
+  assert.deepEqual(r.collectingDays.map((d) => d.day), ['2026-11-03']);
+  assert.equal(r.days[1].rows, null, 'a day not held has no row count, not 0');
+  assert.deepEqual([r.clientIdField, r.branchField], ['ClientID', 'branch']);
+  assert.deepEqual(r.fill, { clientId: 'C-1', branchDefault: 'DC' });
+  assert.equal(T.hostsOf({ ok: true, fields: ['zone', 'cid'], clientIdField: 'cid' }).clientIdField, 'cid', 'the reply names its field when it does');
+  assert.equal(T.hostsOf({ ok: true, fields: ['zone'] }).clientIdField, null);
+});
+
+test('an indices/hosts job: a line per cluster, failed clusters with why, concurrency only while reading', () => {
+  const job = { reportKind: 'hosts', clusterIds: ['a', 'b', 'c'], status: 'running',
+    progress: { done: 1, total: 3, clusters: {
+      a: { state: 'collecting', day: '2026-11-03', pages: 40, rows: 900, retries: 1, concurrency: 3, partitions: { done: 1, total: 3 }, halvings: 1, lastReason: 'HTTP 429', days: { done: 2, total: 3 } },
+      b: { state: 'waiting', day: null, pages: 0, rows: 0, retries: 0, concurrency: 0, partitions: { done: 0, total: 0 }, halvings: 0, lastReason: null, days: { done: 0, total: 0 } } } },
+    failedClusters: [{ clusterId: 'c', reason: 'connection refused' }] };
+  const lines = T.jobClusterLines(job, (id) => id.toUpperCase());
+  assert.deepEqual(lines.map((l) => [l.id, l.name, l.state]), [['a', 'A', 'collecting'], ['b', 'B', 'waiting'], ['c', 'C', 'failed']]);
+  assert.equal(lines[1].concurrency, null, 'a waiting cluster has no concurrency to show');
+  assert.equal(T.clusterLineText(lines[0]), 'collecting · day 2026-11-03 · 2 of 3 days · 1/3 partitions · 40 pages · 3 at once · halved 1× (HTTP 429) · 1 retry');
+  assert.equal(T.clusterLineText(lines[1]), 'waiting');
+  assert.equal(T.clusterLineText(lines[2]), 'failed: connection refused');
+  assert.deepEqual(T.jobClusterLines({ progress: { done: 1, total: 2 } }), [], 'a volume job has no cluster lines');
+  assert.equal(T.jobKindLabel(job), 'Volume by host');
+  assert.equal(T.jobKindLabel({}), 'Volume report');
+});
+
+test("the worker's refusals are said as the core says them, and are amber", () => {
+  const down = { ok: false, kind: 'worker_unavailable', message: 'the report worker is not running' };
+  assert.equal(T.isWorkerRefusal(down), true);
+  assert.equal(T.runFailText(down), 'the report worker is not running');
+  assert.match(T.workerRefusalText({ ok: false, kind: 'worker_version' }), /different ElasticPro version/);
+  assert.equal(T.isWorkerRefusal({ ok: false, kind: 'bad_request' }), false);
+  assert.equal(T.workerOf(undefined), null);
+  assert.deepEqual(T.workerOf({ state: 'down', heartbeatAt: 5, text: 'not running' }), { state: 'down', heartbeatAt: 5, text: 'not running', ok: false });
+  assert.equal(T.scheduleOf('hosts', { ok: true, worker: { state: 'up', heartbeatAt: 1 } }).worker.ok, true);
+});
