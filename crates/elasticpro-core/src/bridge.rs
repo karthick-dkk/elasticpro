@@ -227,6 +227,8 @@ pub struct Core {
     /// Each cluster's type, ULM bucket and whether SLM is expected (hosted). See `cluster_meta`.
     cluster_meta: crate::cluster_meta::ClusterMeta,
     saved_queries: crate::saved_queries::SavedQueries,
+    /// Reports › Planning's templates, shared by everyone (hosted: a file). See `plan_templates`.
+    pub(crate) plan_templates: crate::plan_templates::PlanTemplates,
     /// The housekeeping scheduler's settings and what it last did. See `housekeeping`.
     pub(crate) housekeeping: crate::housekeeping::Housekeeping,
     /// Whether the request figures are pushed to Zabbix, and how that last went. See
@@ -750,6 +752,7 @@ impl Core {
             silences: crate::silences::Silences::open(data_dir_for_notify.as_ref().map(|d| d.join("silences.json"))),
             cluster_meta: crate::cluster_meta::ClusterMeta::open(
                 data_dir_for_notify.as_ref().filter(|_| hosted).map(|d| d.join(crate::cluster_meta::META_FILE))),
+            plan_templates: Core::plan_templates_store(edition, data_dir_for_notify.as_deref()),
             saved_queries: crate::saved_queries::SavedQueries::open(data_dir_for_notify.as_ref().map(|d| d.join("saved-queries.json"))),
             notify: crate::notify::NotifyStore::open(data_dir_for_notify.map(|d| d.join("notifications.json"))),
             housekeeping: crate::housekeeping::Housekeeping::from_env(),
@@ -1322,6 +1325,7 @@ impl Core {
                 }
             }
             "CLUSTER_META_GET" | "CLUSTER_META_SET" => self.cluster_meta_msg(&t, &msg, caller.as_ref()),
+            "PLAN_TEMPLATES_GET" | "PLAN_TEMPLATES_SET" => self.plan_templates_msg(&t, &msg, caller.as_ref()),
             "SILENCE_LIST" => {
                 let list = self.silences_visible(caller.as_ref());
                 json!({ "ok": true, "silences": list })

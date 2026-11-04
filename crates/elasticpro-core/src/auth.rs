@@ -626,6 +626,11 @@ pub fn required_role(msg_type: &str) -> Option<Role> {
         | "VOLUME_MONTHLY_ALL" | "VOLUME_RUN" => Some(Role::User),
         // Which columns the volume tables show names no cluster; changing it changes what
         // everybody sees, so an operator's (audited).
+        // Plan templates (Reports › Planning): everyone who plans reads them; replacing them
+        // changes every plan, so an administrator's (audited; one limited to some clusters is
+        // refused in the handler). A display link reaches neither: not in PLAY_READS.
+        "PLAN_TEMPLATES_GET" => Some(Role::User),
+        "PLAN_TEMPLATES_SET" => Some(Role::Admin),
         "VOLUME_LAYOUT_GET" => Some(Role::Guest),
         "VOLUME_LAYOUT_SET" => Some(Role::Operator),
         // The Config card's preview of an index pattern before anybody saves it: an index

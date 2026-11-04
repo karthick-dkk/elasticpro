@@ -53,6 +53,8 @@ const POLLS: &[&str] = &[
     "HOUSEKEEPING_GET", "HOUSEKEEPING_RUN",
     // A Play wall asks for its state each minute, and reads (and offers) the shared measurements.
     "PLAY_STATE", "ACK_LIST", "PLAY_SHARE_GET", "PLAY_SHARE_PUT",
+    // Opening Planning reads the templates.
+    "PLAN_TEMPLATES_GET",
 ];
 
 /// One thing somebody did, already reduced to what may be written down.
@@ -83,7 +85,7 @@ fn category(action: &str) -> &'static str {
         "es" | "prime" | "forget" => "database",
         a if a.starts_with("config_") || a.starts_with("zabbix_") || a.starts_with("policy_")
             || a.starts_with("delay_sink_") || a.starts_with("key_") || a.starts_with("trust_")
-            || a.starts_with("untrust_") || a == "file_write" || a == "write_unlock" => "configuration",
+            || a.starts_with("untrust_") || a.starts_with("plan_templates_") || a == "file_write" || a == "write_unlock" => "configuration",
         _ => "process",
     }
 }
