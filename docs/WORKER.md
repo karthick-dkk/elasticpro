@@ -51,8 +51,11 @@ file that is mid-rename by retrying once.
 
 ## Requests to Elasticsearch from the worker
 
-- Its own gate instance, every request `Background`, caps: overall 4, per cluster 1, per jump
-  host 1 (`ELASTICPRO_WORKER_GATE_*`). So a cluster sees at most the core's cap + 1.
+- Its own gate instance, every request `Background`, caps: overall 16, per cluster 4, per
+  jump host 4 (`ELASTICPRO_WORKER_GATE_*`). How many of a cluster's 4 slots a report really
+  uses is decided by the adaptive controller (docs/REPORT-TYPES.md, "Concurrency"): it starts
+  at 2, grows while the cluster answers quickly and halves the moment it pushes back. The
+  core's own gate, and so every person's click and the health poll, is not shared with it.
 - Clusters, credentials (cluster-secrets, vault) and SSH keys come from the same mounts as the
   core, read-only except the data volume. The worker opens its own SSH tunnels.
 - The emergency stop holds it like the core's own jobs (read from `policy.json`).
