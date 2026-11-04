@@ -260,7 +260,9 @@ async fn a_job_collects_builds_mails_and_hands_back_the_file() {
         assert!(wb.contains(&format!("name=\"{s}\"")), "{wb}");
     }
     let daily = part(&parts, "xl/worksheets/sheet1.xml");
-    assert!(daily.contains("Primary size (bytes)") && daily.contains("Primary size GB"), "{daily}");
+    // The default layout (nobody saved one): event_logsize first, index size hidden, as on
+    // Reports › Daily & monthly (docs/VOLUME.md).
+    assert!(daily.contains("Event bytes (bytes)") && !daily.contains("Primary size"), "{daily}");
     assert!(daily.contains((today() - Duration::days(1)).format("%Y-%m-%d").to_string().as_str()));
     let breakdown = part(&parts, "xl/worksheets/sheet3.xml");
     assert!(breakdown.contains("fw&amp;&lt;co&gt;"), "a field value from the cluster is escaped: {breakdown}");

@@ -23,7 +23,6 @@ import { findIndexEverywhere } from '../core/snapshot-verify.js';
 import { restoreIndicesDialog, restoreSourceOf } from '../ui/snapshot-dialogs.js';
 import { pageSlice, pagerBar } from '../lib/pager.js';
 import { freshnessBar } from '../lib/freshness.js';
-import { volumeSummary, resetVolumeSummary, showReportJobs } from '../ui/volume-summary.js';
 import { templatesView } from '../ui/templates-view.js';
 import { takeFocus } from '../core/focus.js';
 
@@ -50,12 +49,9 @@ export function render(el) {
   host = el;
   el.classList.add('dense');   // long tables: fit more on one screen
   selected.clear();
-  resetVolumeSummary();        // Summary reads the daily record afresh on each visit
   // Opened from an alert about ILM errors (core/focus.js): only the indices in an error step.
   const f = takeFocus('indices');
   if (f && f.ilm) { ui.ilmOnly = true; ui.view = 'indices'; ui.page = 0; if (f.index) ui.text = f.index; }
-  // From the top-bar "Reports" pill: Summary › Monthly, with the report jobs open.
-  if (f && f.reports) { ui.view = 'summary'; showReportJobs(); }
   syncWrites().then(draw).catch(() => {});
   draw();
   load();
@@ -140,21 +136,18 @@ function draw() {
             onclick: () => { ui.ilmOnly = false; ui.page = 0; draw(); } }, 'clear'))
       : null,
 
-    ui.view === 'summary' ? summaryView(c) : null,
     ui.view === 'templates' ? templatesView(c, { draw }) : null,
-    ui.view === 'summary' || ui.view === 'templates' ? null :
+    ui.view === 'templates' ? null :
     tableCard(c, rows, all));
 }
 
 /**
- * Indices / Summary / Templates.
+ * Indices / Templates.
  *
- * Two jobs, one page. "Indices" is the working view — find an index, open it, close it,
- * delete it — and it is what the page opens on, because that is what people come here to
- * do. "Summary" is how much there is and where it came from: the same numbers, read
- * rather than acted on. They were stacked on top of each other, so the table everyone
- * wanted started four charts down the page. "Templates" is what new indices will be
- * created from — ui/templates-view.js.
+ * "Indices" is the working view — find an index, open it, close it, delete it — and it is
+ * what the page opens on. "Templates" is what new indices will be created from —
+ * ui/templates-view.js. The daily and monthly summary that was a third tab here moved to
+ * Reports › Daily & monthly in 0.3.53 (docs/REPORTS.md, board 7); one line says where.
  */
 function viewTabs() {
   const tab = (id, label, title) => h('button.btn.sm', {
@@ -162,19 +155,18 @@ function viewTabs() {
     title,
     onclick: () => { if (ui.view !== id) { ui.view = id; draw(); } },
   }, label);
-  return h('div.seg', { role: 'group', 'aria-label': 'Indices view', style: { marginBottom: '10px' } },
-    tab('indices', 'Indices', 'The index list, and the actions that manage it'),
-    tab('summary', 'Summary', 'Volume per day and per month, from the daily record the server keeps'),
-    tab('templates', 'Templates', 'Index, component and legacy templates — view, edit, simulate, compare across clusters'));
+  return h('div.ix-views',
+    h('div.seg', { role: 'group', 'aria-label': 'Indices view' },
+      tab('indices', 'Indices', 'The index list, and the actions that manage it'),
+      tab('templates', 'Templates', 'Index, component and legacy templates — view, edit, simulate, compare across clusters')),
+    h('span.ix-moved', 'Daily and monthly summary is now in ',
+      h('a#ix-to-reports', { href: '#/reports/daily', onclick: (e) => { e.preventDefault(); openReportsDaily(); } }, 'Reports › Daily & monthly ›')));
 }
 
-/**
- * Summary: the daily volume record the core keeps for this cluster, per day and per month
- * (ui/volume-summary.js, docs/VOLUME.md). It replaced the cards and charts worked out here
- * from the live index list, which could only ever see the days whose indices still exist.
- */
-function summaryView(c) {
-  return volumeSummary(c, { redraw: draw });
+/** The summary's new home, on the cluster this page shows. */
+function openReportsDaily() {
+  const c = cluster();
+  navigateTo('reports', { section: 'daily', mode: 'daily', cluster: c ? c.id : null }, { cluster: c ? c.id : null });
 }
 
 function sourceBar(c, sourceList, total) {

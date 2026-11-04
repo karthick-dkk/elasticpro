@@ -94,6 +94,8 @@ const groupBand = () => [...doc.querySelectorAll('table.sheet thead tr.group-hea
   .map((th) => `${th.textContent.trim()}×${th.getAttribute('colspan') || 1}`);
 
 async function go(id) { app.go(id); await settleFor(350); }
+/** A link pressed as a person would: the harness's anchor click() only captures downloads. */
+const press = (a) => a && a.dispatchEvent(new window.MouseEvent('click', { bubbles: true, cancelable: true }));
 
 /**
  * Wait, up to `ms`, for `find()` to give an element; a named problem and null when it never
@@ -132,7 +134,7 @@ async function backToFleet() {
 
 /* ------------- the status strip stays off the pages people work in ------------- */
 
-const STRIP_HIDDEN = ['overview', 'indices', 'console', 'logs', 'snapshots', 'shards', 'volume'];
+const STRIP_HIDDEN = ['overview', 'indices', 'console', 'logs', 'snapshots', 'shards', 'reports'];
 const STRIP_SHOWN = ['alerts'];
 
 for (const id of [...STRIP_HIDDEN, ...STRIP_SHOWN]) {
@@ -343,8 +345,9 @@ await go('overview');
 }
 
 await go('indices');
-// The Indices page is for managing indices. The volume breakdown moved to the Volume
-// report; what must be on THIS page is the table and the controls that act on it.
+// The Indices page is for managing indices. Its Summary tab moved to Reports › Daily &
+// monthly in 0.3.53 (docs/REPORTS.md, board 7); what must be on THIS page is the table, the
+// controls that act on it, and one line saying where the summary went.
 {
   const txt = doc.body.textContent;
   const btn = (label) => [...doc.querySelectorAll('button')].some((b) => b.textContent.trim() === label);
@@ -352,70 +355,78 @@ await go('indices');
   ok(btn('Live') && btn('Snapshot') && btn('Live + Snapshot'),
     'indices: the three search scopes (Live, Snapshot, Live + Snapshot) are not all present');
   ok(btn('‹ Previous') && btn('Next ›'), 'indices: the table is not paged');
-  // The breakdown lives behind the Summary tab, not stacked above the table.
-  ok(btn('Indices') && btn('Summary'), 'indices: the Indices/Summary tabs are missing');
-  ok(!/Volume analysis/.test(txt), 'indices: the volume analysis should sit behind the Summary tab');
-  ok(!/Store size by source/.test(txt), 'indices: the source breakdown should sit behind the Summary tab');
-  // ...and pressing Summary must actually produce it, or "not on the default view" is
-  // indistinguishable from "gone".
-  [...doc.querySelectorAll('button')].find((b) => b.textContent.trim() === 'Summary').click();
-  await settleFor(250);
-  // The bug this guards: the selected tab looked unselected — an accent border and
-  // unchanged text, which reads as "focused", not "you are here".
-  const pressed = [...doc.querySelectorAll('.seg .btn')].filter((b) => b.getAttribute('aria-pressed') === 'true');
-  ok(pressed.length && pressed.some((b) => b.textContent.trim() === 'Summary'),
-    'indices: the Summary tab is not marked selected after being pressed');
-  // 0.3.45: Summary is the daily volume record the core keeps (docs/VOLUME.md), Daily |
-  // Monthly. The cards and charts worked out from the live index list are gone.
+  const tabs = [...doc.querySelectorAll('.ix-views .seg .btn')].map((b) => b.textContent.trim());
+  ok(JSON.stringify(tabs) === JSON.stringify(['Indices', 'Templates']), `indices: the view tabs are ${tabs.join(' | ')}, want Indices | Templates`);
+  ok(!btn('Summary'), 'indices: the Summary tab is still there');
+  ok(!doc.querySelector('.vs'), 'indices: the daily record is still drawn on the Indices page');
+  ok(/Daily and monthly summary is now in Reports › Daily & monthly ›/.test(txt), 'indices: no line saying where the summary went');
+  const link = doc.getElementById('ix-to-reports');
+  ok(!!link, 'indices: the line has no link to Reports › Daily & monthly');
+  if (link) {
+    press(link);
+    await settleFor(400);
+    ok(app.currentPage ? app.currentPage() === 'reports' : true, 'indices: the link did not open Reports');
+    ok((doc.location.hash || '') === '#/reports/daily', `indices: the link went to ${doc.location.hash}`);
+    const on = doc.querySelector('.rp-nav a[aria-current="page"]');
+    ok(on && on.dataset.section === 'daily', 'indices: the link did not open the Daily & monthly section');
+  }
+}
+
+/* --------------------- Reports › Daily & monthly against the real core --------------------- */
+
+await go('reports');
+{
   const segBtn = (label) => [...doc.querySelectorAll('.vs .seg .btn')].find((b) => b.textContent.trim() === label);
-  ok(!!segBtn('Daily') && !!segBtn('Monthly'), 'indices: Summary has no Daily | Monthly switch');
-  ok(segBtn('Daily') && segBtn('Daily').getAttribute('aria-pressed') === 'true', 'indices: Summary should open on Daily');
-  const sum = doc.body.textContent;
-  ok(!/Store size by source/.test(sum) && !/Volume analysis/.test(sum),
-    'indices: the old Summary cards (Store size by source, Volume analysis) are still drawn');
+  const navTo = async (id) => { const a = doc.querySelector(`.rp-nav a[data-section="${id}"]`); if (a) { press(a); await settleFor(250); } return !!a; };
+  ok(await navTo('daily'), 'reports: no Daily & monthly in the section nav');
+  ok(!!segBtn('Daily') && !!segBtn('Monthly'), 'reports daily: no Daily | Monthly switch');
+  ok(segBtn('Daily') && segBtn('Daily').getAttribute('aria-pressed') === 'true', 'reports daily: should open on Daily');
   // Either the record or the plain "needs 0.3.45" state — never a crash, never zeros.
   const settled = await waitFor(() => doc.querySelector('.vs table.coltbl') || (/does not keep a daily volume record/.test(doc.body.textContent) ? doc.body : null),
-    'indices: Summary shows neither the daily record nor the "needs 0.3.45" state', 60000);
+    'reports daily: shows neither the daily record nor the "needs 0.3.45" state', 60000);
   const coreHasVolume = !!(settled && doc.querySelector('.vs table.coltbl'));
   if (!coreHasVolume) {
-    ok(/needs ElasticPro 0\.3\.45/.test(doc.body.textContent), 'indices: the "needs 0.3.45" state does not name the version');
-    ok(!doc.querySelector('.vs-cards'), 'indices: an older core still drew volume cards (they could only be zeros)');
+    ok(/needs ElasticPro 0\.3\.45/.test(doc.body.textContent), 'reports daily: the "needs 0.3.45" state does not name the version');
+    ok(!doc.querySelector('.vs-cards'), 'reports daily: an older core still drew volume cards (they could only be zeros)');
   } else {
-    // ---- Against the real core (0.3.45+) and tools/mock-es.mjs. These run once the core
-    // ---- answers VOLUME_*; with an older core the branch above runs instead.
-    // On the portable bridge opening Summary asks for a run (the record is empty), so wait
-    // for it to finish: the progress line goes and the rows are there.
+    // On the portable bridge opening the section asks for a run (the record is empty), so
+    // wait for it to finish: the progress line goes and the rows are there.
     await waitFor(() => !doc.querySelector('.vs-progress') && doc.querySelectorAll('.vs table.coltbl tbody tr').length >= 30 ? doc.body : null,
-      'indices: the daily record did not fill in after the run (30 days)', 120000);
-    const heads = [...doc.querySelectorAll('.vs table.coltbl thead th .colhead-name')].map((x) => x.textContent);
-    ok(JSON.stringify(heads) === JSON.stringify(['Index day', 'Indices', 'Documents', 'Primary size', 'Top Dataset',
-      'Event bytes', 'Sub size', 'vs 7-day avg', 'Top src_hostname', 'Top fwd_tag']),
-      `indices: the Daily table's default columns are ${heads.join(' | ')}`);
+      'reports daily: the daily record did not fill in after the run (30 days)', 120000);
+    const heads = [...doc.querySelectorAll('.vs table.coltbl thead th')].map((x) => (x.querySelector('.colhead-name') || x).textContent.trim());
+    ok(JSON.stringify(heads) === JSON.stringify(['Day', 'Indices', 'Documents', 'event_logsize', 'vs 7-day avg', 'Status']),
+      `reports daily: the Day by day columns are ${heads.join(' | ')}`);
     const t = doc.querySelector('.vs table.coltbl').textContent;
-    ok(/not measured/.test(t), 'indices: sub_size is absent in the mock, so Sub size should read "not measured"');
-    ok(/fwd-acme · \d+ %/.test(t), 'indices: the forwarder should resolve to fwdtag and show "fwd-acme · NN %"');
-    ok(/as of \d\d:\d\d/.test(t), 'indices: today\'s row does not say "as of HH:MM"');
-    ok(/Source/.test(doc.body.textContent) && [...doc.querySelectorAll('#vs-source option')].map((o) => o.value).join(',') === ',acme,beta',
-      'indices: the Source select should list All sources, acme, beta');
-    ok(!!doc.querySelector('.vs .line-chart path.lc-line') && !!doc.querySelector('.vs .lc-peak-label'),
-      'indices: the per-day line or its peak label is missing');
+    ok(/today so far/.test(t), 'reports daily: today\'s row does not say "today so far"');
+    ok(/final/.test(t), 'reports daily: no finished day reads "final"');
+    ok(!/Primary size/.test(doc.querySelector('.vs').textContent), 'reports daily: index store size is shown on Daily (it belongs to Measure size)');
+    for (const k of ['Yesterday ·', '7-day average', 'Peak day in period', 'Month so far']) ok(doc.querySelector('.vs-cards').textContent.includes(k), `reports daily: no "${k}" tile`);
+    ok([...doc.querySelectorAll('#vs-source option')].map((o) => o.value).join(',') === ',acme,beta',
+      'reports daily: the Source select should list All sources, acme, beta');
+    ok(!!doc.getElementById('vs-avg-days'), 'reports daily: no Average over select');
+    ok(!!doc.querySelector('.vs .line-chart path.lc-line'), 'reports daily: the Log size per day line is missing');
+    ok(/Log size per day/.test(doc.body.textContent), 'reports daily: no "Log size per day" chart');
+    ok(!/Indices logstash-\*|day from/.test(doc.querySelector('.vs').textContent), 'reports daily: a source line is back (docs/REPORTS.md: none)');
     const exp = [...doc.querySelectorAll('.vs button')].find((b) => b.textContent === 'Export CSV');
     if (exp) {
       exp.click();
       const f = files.at(-1);
-      ok(f && /^volume-daily-.+\.csv$/.test(f.name), `indices: the daily export is named "${f && f.name}"`);
-      ok(f && f.text.split('\n')[0] === 'cluster,day,indices,docs,primary_bytes,total_bytes,event_bytes,event_bytes_measured,sub_bytes,change_vs_avg_pct,avg_days',
-        `indices: the daily CSV header is "${f && f.text.split('\n')[0]}"`);
+      ok(f && /^reports-daily-.+\.csv$/.test(f.name), `reports daily: the daily export is named "${f && f.name}"`);
+      ok(f && f.text.split('\n')[0] === 'cluster,day,indices,docs,event_bytes,event_bytes_measured,change_vs_avg_pct,avg_days,status',
+        `reports daily: the daily CSV header is "${f && f.text.split('\n')[0]}"`);
     }
     segBtn('Monthly').click();
-    await waitFor(() => (doc.querySelector('.vs table.coltbl') && /Monthly volume/.test(doc.body.textContent) ? doc.body : null), 'indices: Monthly did not draw', 15000);
-    await waitFor(() => (/field resolved: src_hostname/.test(doc.body.textContent) ? doc.body : null), 'indices: the breakdown did not resolve src_hostname', 15000);
+    await waitFor(() => (doc.querySelector('.vs table.coltbl') && /Month by month/.test(doc.body.textContent) ? doc.body : null), 'reports daily: Monthly did not draw', 15000);
+    await waitFor(() => (doc.querySelector('.vs-hbars .vs-hb') ? doc.body : null), 'reports daily: the breakdown drew no bars', 15000);
+    const mh = [...doc.querySelectorAll('.vs table.coltbl thead th')].map((x) => (x.querySelector('.colhead-name') || x).textContent.trim());
+    ok(JSON.stringify(mh) === JSON.stringify(['Month', 'Days', 'Documents', 'event_logsize', 'Peak day', 'vs previous']),
+      `reports monthly: the Month by month columns are ${mh.join(' | ')}`);
     segBtn('Daily') && segBtn('Daily').click();
     await settleFor(150);
   }
 }
 
-/* ------------- Indices › Summary, driven against contract-shaped answers ------------- */
+/* ------------- Reports › Daily & monthly, driven against contract-shaped answers ------------- */
 
 // The same views, with the core's VOLUME_* answers stubbed to the shapes docs/VOLUME.md
 // gives (and the UI reads, core/volume-daily.js). This exercises every control whatever the
@@ -424,19 +435,21 @@ await go('indices');
   const realFetch = globalThis.fetch;
   const DAYMS = 86400000;
   const vDay = (n) => new Date(Date.now() - n * DAYMS).toISOString().slice(0, 10);
-  const settings = { sizeBasis: 'primary', extra: { name: 'Dataset', fields: ['event.dataset', 'log_type'] },
+  const settings = { sizeBasis: 'primary', extra: { name: 'Dataset', fields: ['event.dataset', 'log_type'] }, eventSize: ['event_logsize'],
     sourceHost: ['src_hostname', 'host.name'], forwarder: ['fwd_tag', 'fwdtag'], tag: ['tag1'], sourceIp: ['src_ip'] };
   const status = { lastRunAt: Date.now() - 60000, nextRunAt: null, running: false, progress: null, lastError: null, collectAt: '06:00' };
-  const row = (n) => ({ day: vDay(n), final: n > 0, live: true, totalsAt: Date.now() - 60000, aggregatedAt: Date.now() - 60000,
+  const row = (n) => ({ day: vDay(n), final: n > 0 && n !== 4, live: true, totalsAt: Date.now() - 60000, aggregatedAt: Date.now() - 60000,
+    error: n === 4 ? '2 of 28 shards failed (timeout): figures may be short; asked again on the next run' : null,
     indices: 2, docs: 5800000 - n * 1000, priBytes: n === 1 ? 1.3e10 : 8e9 + n * 1e7, totalBytes: 16e9 + n * 2e7,
-    eventBytes: n % 5 === 0 ? null : 3e9, subBytes: null, basis: n === 1 ? 1.3e10 : 8e9 + n * 1e7, avg: 8.1e9,
+    eventBytes: n === 1 ? 4.8e9 : n % 5 === 0 ? null : 3e9, subBytes: null, basis: n === 1 ? 1.3e10 : 8e9 + n * 1e7, avg: 8.1e9,
     changeVsAvgPct: n === 1 ? 61 : -2,
     top: { tag: { value: 'acme', share: 0.55 }, forwarder: { value: 'fwd-acme', share: 0.62 }, sourceHost: { value: 'fw-edge-01', share: 0.3 },
       sourceIp: { value: '10.0.0.1', share: 0.3 }, extra: { value: 'firewall', share: 0.5 } } });
   const ym = (i) => { const d = new Date(); return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() - i, 1)).toISOString().slice(0, 7); };
   const month = (i) => (i > 9 ? { month: ym(i), daysWithData: 0 } : {
-    month: ym(i), partial: i === 0, daysWithData: i === 0 ? 29 : i === 9 ? 12 : 30, liveDays: i < 2 ? 30 : 0, keptDays: i === 1 ? 12 : i < 2 ? 0 : 30,
-    priBytes: 2.4e11, totalBytes: 4.8e11, docs: 1.7e8, eventBytes: i === 3 ? null : 9e10, subBytes: null, avgPerDay: 8e9,
+    month: ym(i), partial: i === 0, daysWithData: i === 0 ? 3 : i === 9 ? 12 : new Date(Date.UTC(Number(ym(i).slice(0, 4)), Number(ym(i).slice(5, 7)), 0)).getUTCDate(),
+    liveDays: i < 2 ? 30 : 0, keptDays: i === 1 ? 12 : i < 2 ? 0 : 30,
+    priBytes: 2.4e11, totalBytes: 4.8e11, docs: 1.7e8, eventBytes: i === 3 ? null : 9e10 + i * 1e9, subBytes: null, avgPerDay: 8e9,
     peakDay: { day: `${ym(i)}-14`, basis: 1.3e10 }, top: { sourceHost: { value: 'fw-edge-01', share: 0.3 }, forwarder: { value: 'fwd-acme', share: 0.6 }, extra: { value: 'firewall', share: 0.5 } } });
   const vsent = [];
   const answer = (b) => {
@@ -446,16 +459,16 @@ await go('indices');
           monthSoFar: { month: ym(0), value: 2.3e11, days: 29 }, eventBytes30: { value: null, days: 30 } },
         days: Array.from({ length: (b.days || 30) + 1 }, (_, n) => row(n)),
         totals: { indices: 62, docs: 1.8e8, priBytes: 2.5e11, totalBytes: 5e11, eventBytes: null, subBytes: null } };
-      case 'VOLUME_MONTHLY': return { ok: true, status, months: Array.from({ length: b.months || 13 }, (_, i) => month(i)) };
+      case 'VOLUME_MONTHLY': return { ok: true, status, settings, months: Array.from({ length: b.months || 13 }, (_, i) => month(i)) };
       case 'VOLUME_BREAKDOWN': return { ok: true, field: b.field, resolved: 'src_hostname', totals: {}, rows: [
         { value: 'fw-edge-01', docs: 100, eventBytes: 5e8, estPriBytes: 2e9, sharePct: 40, daysSeen: 29 },
-        { kind: 'missing', docs: 5, eventBytes: null, estPriBytes: 1e8, sharePct: 2, daysSeen: 29 },
-        { kind: 'other', docs: 50, eventBytes: 2e8, estPriBytes: 1e9, sharePct: 20, daysSeen: 29 }] };
+        { kind: 'missing', docs: 5, eventBytes: 1e8, estPriBytes: 1e8, sharePct: 2, daysSeen: 29 },
+        { kind: 'other', docs: 50, eventBytes: 4e8, estPriBytes: 1e9, sharePct: 20, daysSeen: 29 }] };
       case 'VOLUME_RUN': return { ok: true, started: [], already: [], tooSoon: b.clusterIds || [] };
       case 'VOLUME_LAYOUT_GET': return { ok: true, layouts: { daily: null, monthly: null } };
       case 'VOLUME_LAYOUT_SET': return { ok: true, layouts: { [b.table]: b.layout } };
       case 'VOLUME_MONTHLY_ALL': return { ok: true, clusters: config.clusters.map((c, k) => ({ clusterId: c.name, name: c.name,
-        months: [{ month: ym(1), daysWithData: 30, priBytes: 2e11 + k }, { month: ym(0), daysWithData: 29, priBytes: 1.9e11, partial: true }, { month: ym(2), daysWithData: 0 }] })) };
+        months: [{ month: ym(1), daysWithData: 30, priBytes: 2e11 + k, eventBytes: 7e10 }, { month: ym(0), daysWithData: 29, priBytes: 1.9e11, eventBytes: 6e10, partial: true }, { month: ym(2), daysWithData: 0 }] })) };
       default: return null;
     }
   };
@@ -468,103 +481,86 @@ await go('indices');
   const segBtn = (label) => [...doc.querySelectorAll('.vs .seg .btn')].find((b) => b.textContent.trim() === label);
   try {
     await go('overview');
-    await go('indices');
-    [...doc.querySelectorAll('button')].find((b) => b.textContent.trim() === 'Summary').click();
-    await waitFor(() => doc.querySelector('.vs table.coltbl'), 'summary (stubbed): the Daily table did not draw');
-    const txt = () => doc.querySelector('.vs').textContent;
-    for (const k of ['Yesterday · primary', 'Average per day', 'This month so far', 'Event bytes · 30 days']) {
-      ok(txt().includes(k), `summary (stubbed): no "${k}" card`);
-    }
-    ok(/\+61\.0 %/.test(txt()) && /vs 7-day avg/.test(txt()), 'summary (stubbed): the Yesterday card does not show +61.0 % vs 7-day avg');
-    ok(!!doc.querySelector('.vs-cards .vs-notm'), 'summary (stubbed): Event bytes · 30 days should read "not measured" (null), not 0');
-    const avgBtns = [...doc.querySelectorAll('.vs-cards .seg .btn')];
-    ok(avgBtns.map((b) => b.textContent).join(' ') === '3D 7D 15D 30D 60D 180D', `summary (stubbed): the average buttons are ${avgBtns.map((b) => b.textContent).join(' ')}`);
-    ok(avgBtns.find((b) => b.textContent === '7D')?.getAttribute('aria-pressed') === 'true', 'summary (stubbed): 7D should be the default average');
-    ok(/Primary size per day · last 30 days/.test(txt()), 'summary (stubbed): no "Primary size per day · last 30 days" graph');
-    ok(/▲ .+ · .+ · \+61\.0 %/.test(doc.querySelector('.vs .lc-peak-label')?.textContent || ''), 'summary (stubbed): the peak label is not "▲ day · size · +x %"');
-    ok(!!doc.querySelector('.vs path.lc-avg'), 'summary (stubbed): no dashed average line');
-    // Today is not plotted: 30 finished days, one point each.
-    ok(doc.querySelectorAll('.vs .line-chart svg > rect').length === 30, `summary (stubbed): ${doc.querySelectorAll('.vs .line-chart svg > rect').length} points plotted, expected 30 finished days`);
-    const heads = () => [...doc.querySelectorAll('.vs table.coltbl thead th .colhead-name')].map((x) => x.textContent);
-    ok(heads().length === 10 && heads()[0] === 'Index day', `summary (stubbed): default columns ${heads().join(' | ')}`);
-    const firstRow = doc.querySelector('.vs table.coltbl tbody tr');
-    ok(firstRow && firstRow.classList.contains('today') && /as of \d\d:\d\d/.test(firstRow.textContent), 'summary (stubbed): the newest row is not today "as of HH:MM"');
-    ok(!!doc.querySelector('.vs table.coltbl tfoot tr.total'), 'summary (stubbed): no totals row from the core\'s totals');
-    ok(/fwd-acme · 62 %/.test(doc.querySelector('.vs table.coltbl').textContent), 'summary (stubbed): the top forwarder is not "fwd-acme · 62 %"');
-    ok(!!doc.querySelector('.vs table.coltbl .vs-high'), 'summary (stubbed): a change over +25 % is not marked');
-    ok(/Event bytes "not measured"/.test(txt()) && /never shown as 0/.test(txt()), 'summary (stubbed): no amber line under the table for unmeasured event bytes');
-    ok(/Columns \(10\/13\)/.test(txt()), 'summary (stubbed): the columns button does not read "Columns (10/13)"');
-
-    // The 30D button re-asks with the new window, and the select in the legend agrees.
-    vsent.length = 0;
-    avgBtns.find((b) => b.textContent === '30D').click();
+    await go('reports');
+    press(doc.querySelector('.rp-nav a[data-section="daily"]'));
     await settleFor(200);
-    ok(vsent.some((m) => m.type === 'VOLUME_DAILY' && m.avgDays === 30), 'summary (stubbed): choosing 30D did not ask VOLUME_DAILY with avgDays 30');
-    ok(doc.getElementById('vs-avg-days')?.value === '30', 'summary (stubbed): the legend\'s Average select did not follow the 30D button');
-    ok(heads().includes('vs 30-day avg'), 'summary (stubbed): the change column is not renamed to the 30-day average');
+    await waitFor(() => doc.querySelector('.vs table.coltbl'), 'daily (stubbed): the Day by day table did not draw');
+    const txt = () => doc.querySelector('.vs').textContent;
+    const tiles = doc.querySelector('.vs-cards').textContent;
+    for (const k of [`Yesterday · `, '7-day average', 'Peak day in period', 'Month so far']) ok(tiles.includes(k), `daily (stubbed): no "${k}" tile`);
+    ok(/event_logsize/.test(tiles) && /4\.47 GB/.test(tiles), `daily (stubbed): the Yesterday tile is not yesterday's event_logsize: ${tiles}`);
+    ok(/yesterday against the 7 days before it/.test(tiles), 'daily (stubbed): the 7-day average tile does not compare yesterday with it');
+    ok(!!doc.querySelector('.vs .line-chart path.lc-avg'), 'daily (stubbed): no dashed average line');
+    // Today is not plotted: 30 finished days, one point each.
+    ok(doc.querySelectorAll('.vs .line-chart svg > rect').length === 30, `daily (stubbed): ${doc.querySelectorAll('.vs .line-chart svg > rect').length} points plotted, expected 30 finished days`);
+    const heads = () => [...doc.querySelectorAll('.vs table.coltbl thead th')].map((x) => (x.querySelector('.colhead-name') || x).textContent.trim());
+    ok(JSON.stringify(heads()) === JSON.stringify(['Day', 'Indices', 'Documents', 'event_logsize', 'vs 7-day avg', 'Status']), `daily (stubbed): default columns ${heads().join(' | ')}`);
+    const firstRow = doc.querySelector('.vs table.coltbl tbody tr');
+    ok(firstRow && firstRow.classList.contains('today') && /today so far/.test(firstRow.textContent), 'daily (stubbed): the newest row is not "today so far"');
+    const tt = doc.querySelector('.vs table.coltbl').textContent;
+    ok(/2 of 28 shards failed · asked again/.test(tt), 'daily (stubbed): a day with failed shards does not say so');
+    ok(/not measured/.test(tt), 'daily (stubbed): a day without event_logsize does not read "not measured"');
+    ok(!!doc.querySelector('.vs table.coltbl .vs-high'), 'daily (stubbed): a change over +25 % is not marked');
+    ok(!doc.querySelector('.vs table.coltbl tfoot'), 'daily (stubbed): a totals row is drawn (not on the board)');
+    ok(!/never shown as 0/.test(txt()), 'daily (stubbed): the explanatory line under the table is back (docs/REPORTS.md: no captions)');
+
+    // Average over 30 days re-asks with enough days for it, and the column follows.
+    vsent.length = 0;
+    const avgSel = doc.getElementById('vs-avg-days');
+    avgSel.value = '30'; avgSel.dispatchEvent(new window.Event('change', { bubbles: true }));
+    await settleFor(250);
+    ok(vsent.some((m) => m.type === 'VOLUME_DAILY' && m.days >= 61), `daily (stubbed): Average over 30 days did not ask for enough days: ${JSON.stringify(vsent.map((m) => m.days))}`);
+    ok(heads().includes('vs 30-day avg'), 'daily (stubbed): the change column is not renamed to the 30-day average');
+    avgSel.value = '7'; avgSel.dispatchEvent(new window.Event('change', { bubbles: true }));
+    await settleFor(250);
 
     // Hide a column from its header menu: the shared layout is saved, the header goes.
     vsent.length = 0;
     const docsTh = [...doc.querySelectorAll('.vs table.coltbl thead th')].find((th) => th.dataset.col === 'docs');
     docsTh.querySelector('.colhead-menu').click();
     const hide = [...doc.querySelectorAll('.menu-pop button')].find((b) => b.textContent.includes('Hide column'));
-    ok(!!hide, 'summary (stubbed): the column menu has no "Hide column"');
+    ok(!!hide, 'daily (stubbed): the column menu has no "Hide column"');
     if (hide) hide.click();
     await settleFor(150);
     const set = vsent.find((m) => m.type === 'VOLUME_LAYOUT_SET');
-    ok(set && set.table === 'daily' && set.layout.hidden.includes('docs'), `summary (stubbed): hiding saved ${JSON.stringify(set)}`);
-    ok(!heads().includes('Documents'), 'summary (stubbed): the hidden column is still drawn');
+    ok(set && set.table === 'daily' && set.layout.hidden.includes('docs'), `daily (stubbed): hiding saved ${JSON.stringify(set)}`);
+    ok(!heads().includes('Documents'), 'daily (stubbed): the hidden column is still drawn');
 
-    // Rename inline, in the header.
-    const priTh = [...doc.querySelectorAll('.vs table.coltbl thead th')].find((th) => th.dataset.col === 'priBytes');
-    priTh.querySelector('.colhead-menu').click();
-    [...doc.querySelectorAll('.menu-pop button')].find((b) => b.textContent.includes('Edit name')).click();
-    const input = priTh.querySelector('input.colhead-input');
-    ok(!!input, 'summary (stubbed): Edit name did not open an input in the header');
-    if (input) {
-      input.value = 'Primary GB';
-      [...priTh.querySelectorAll('button')].find((b) => b.textContent === 'Save').click();
-      await settleFor(150);
-      ok(heads().includes('Primary GB'), `summary (stubbed): the rename did not show — ${heads().join(' | ')}`);
-    }
-
-    // Export follows the contract's daily columns.
+    // Export follows the Reports daily columns: event_logsize, no primary size.
     vsBtn('Export CSV').click();
     const f = files.at(-1);
-    ok(f && f.text.split('\n')[0] === 'cluster,day,indices,docs,primary_bytes,total_bytes,event_bytes,event_bytes_measured,sub_bytes,change_vs_avg_pct,avg_days',
-      `summary (stubbed): the daily CSV header is "${f && f.text.split('\n')[0]}"`);
+    ok(f && f.text.split('\n')[0] === 'cluster,day,indices,docs,event_bytes,event_bytes_measured,change_vs_avg_pct,avg_days,status',
+      `daily (stubbed): the daily CSV header is "${f && f.text.split('\n')[0]}"`);
 
-    // Refresh now, refused politely when it is too soon.
+    // Collect now, refused politely when it is too soon.
     vsent.length = 0;
-    vsBtn('↻ Refresh now').click();
+    vsBtn('↻ Collect now').click();
     await settleFor(200);
-    ok(vsent.some((m) => m.type === 'VOLUME_RUN'), 'summary (stubbed): Refresh now did not send VOLUME_RUN');
-    ok(/less than a minute ago/.test(doc.body.textContent), 'summary (stubbed): a too-soon run is not explained');
+    ok(vsent.some((m) => m.type === 'VOLUME_RUN'), 'daily (stubbed): Collect now did not send VOLUME_RUN');
+    ok(/less than a minute ago/.test(doc.body.textContent), 'daily (stubbed): a too-soon run is not explained');
 
-    // Monthly.
+    // Monthly: Month by month beside the Breakdown.
     segBtn('Monthly').click();
-    await waitFor(() => (/Monthly volume/.test(doc.querySelector('.vs')?.textContent || '') && /field resolved/.test(doc.querySelector('.vs').textContent) ? doc.body : null),
-      'summary (stubbed): Monthly did not draw with its breakdown');
+    await waitFor(() => (/Month by month/.test(doc.querySelector('.vs')?.textContent || '') && doc.querySelector('.vs-hbars') ? doc.body : null),
+      'daily (stubbed): Monthly did not draw with its breakdown');
     const mt = txt();
-    ok(/Primary size per month · last 13 months/.test(mt), 'summary (stubbed): no "Primary size per month · last 13 months" graph');
-    ok(/a month is the sum of its days/.test(mt), 'summary (stubbed): the Monthly sub-header is missing');
-    for (const w of ['live indices', 'kept record', '12 days kept record, 30 live', 'before the record began', 'so far']) {
-      ok(mt.includes(w), `summary (stubbed): the Monthly table never says "${w}"`);
-    }
-    ok(heads().join(' | ').startsWith('Month | Days with data | Primary size'), `summary (stubbed): Monthly columns ${heads().join(' | ')}`);
-    ok(/\(not set\)/.test(mt) && /all others/.test(mt), 'summary (stubbed): the breakdown does not list "(not set)" and "all others"');
-    ok(/field resolved: src_hostname/.test(mt), 'summary (stubbed): the breakdown does not name the resolved field');
-    ok(!!doc.querySelector('#vol-report-jobs'), 'summary (stubbed): the report-jobs mount point is missing from the Monthly toolbar');
+    ok(heads().join(' | ') === 'Month | Days | Documents | event_logsize | Peak day | vs previous', `daily (stubbed): Monthly columns ${heads().join(' | ')}`);
+    ok(/so far/.test(mt), 'daily (stubbed): the current month does not say "so far"');
+    ok(/3 of \d\d/.test(mt), 'daily (stubbed): a month with days missing does not say "N of M"');
+    ok(/[▲▼] \d+\.\d %/.test(mt), 'daily (stubbed): no month compares with the one before it');
+    ok(/no src_hostname/.test(mt) && /other hosts/.test(mt), 'daily (stubbed): the breakdown does not say "no src_hostname" and "… other hosts"');
+    ok(/%/.test(doc.querySelector('.vs-hbars').textContent), 'daily (stubbed): the breakdown bars carry no share');
+    ok(!doc.querySelector('#vol-report-jobs') || !doc.querySelector('.vs #vol-report-jobs'), 'daily (stubbed): Generate report is still on Monthly (it moved to Exports & schedules)');
     vsBtn('Export CSV').click();
     const fm = files.at(-1);
-    ok(fm && fm.text.split('\n')[0] === 'cluster,month,days_with_data,primary_bytes,avg_primary_bytes_per_day,peak_day,peak_primary_bytes,docs,event_bytes,from_kept_record_days',
-      `summary (stubbed): the monthly CSV header is "${fm && fm.text.split('\n')[0]}"`);
+    ok(fm && fm.text.split('\n')[0] === 'cluster,month,days_with_data,days_in_month,docs,event_bytes,peak_day,peak_event_bytes,vs_previous_pct',
+      `daily (stubbed): the monthly CSV header is "${fm && fm.text.split('\n')[0]}"`);
     segBtn('Daily').click();
     await settleFor(150);
   } finally {
     globalThis.fetch = realFetch;
   }
-  // Leave it as the next blocks expect: the Indices page re-reads on its next visit.
+  // Leave it as the next blocks expect: Reports re-reads on its next visit.
   await go('overview');
 }
 
@@ -603,7 +599,7 @@ await goOne('snapshots');
   ok([...doc.querySelectorAll('button')].some((b) => b.textContent.includes('Create snapshot')), 'snapshots: "+ Create snapshot" is not reachable in the opened repository');
 
   // Remembered for the tab: away and back lands on the same repository.
-  await go('volume');
+  await go('reports');
   await goOne('snapshots');
   ok(listCards().length > 0, 'snapshots: the opened repository was not remembered across a page change');
 
@@ -661,7 +657,8 @@ await goOne('snapshots');
 
 /* ------------- report jobs: Generate report, the job list and the top-bar pill ------------- */
 
-// Indices › Summary › Monthly › Generate report and the "Reports" pill (0.3.45), against the
+// Reports › Exports & schedules › Generate report (Indices › Summary › Monthly until 0.3.53)
+// and the "Reports" pill (0.3.45), against the
 // REPORT_* answers docs/VOLUME.md gives, stubbed at fetch so this runs whatever the core is.
 // Proves: the panel runs one job per picked cluster (the REPORT_RUN payload), the list shows
 // running / queued / done and Download saves the file, Stop is an admin's alone (REPORT_STOP),
@@ -710,11 +707,9 @@ await goOne('snapshots');
     // An older core: no pill, no Generate report, and the job list is not asked for again.
     R.resetReports();
     R.startReportsPoll();
-    await go('indices');
-    [...doc.querySelectorAll('button')].find((b) => b.textContent.trim() === 'Summary').click();
-    await settleFor(200);
-    const mb = [...doc.querySelectorAll('.vs .seg .btn')].find((b) => b.textContent.trim() === 'Monthly');
-    if (mb) { mb.click(); await settleFor(300); }
+    await go('reports');
+    press(doc.querySelector('.rp-nav a[data-section="exports"]'));
+    await settleFor(300);
     ok(R.reports.supported === false, 'reports: an unknown REPORT_JOBS was not taken for an older core');
     ok(!pill() || pill().hidden, 'reports: the pill shows on a core without reports');
     const mountEl = doc.getElementById('vol-report-jobs');
@@ -722,8 +717,6 @@ await goOne('snapshots');
     const asked = rsent.length;
     await R.refreshReports();
     ok(rsent.length === asked, 'reports: an older core is asked for the job list again');
-    const daily = [...doc.querySelectorAll('.vs .seg .btn')].find((b) => b.textContent.trim() === 'Daily');
-    if (daily) daily.click();
 
     // From here on, a core that runs reports. Whatever was said before, start over.
     older = false;
@@ -733,23 +726,20 @@ await goOne('snapshots');
     await waitFor(() => (pill() && !pill().hidden ? pill() : null), 'reports: the top-bar pill did not show for a core that runs reports');
     ok(pill() && pill().textContent === 'Reports · idle', `reports: the idle pill reads "${pill() && pill().textContent}"`);
 
-    await go('indices');
-    [...doc.querySelectorAll('button')].find((b) => b.textContent.trim() === 'Summary').click();
-    await settleFor(200);
-    const monthlyBtn = [...doc.querySelectorAll('.vs .seg .btn')].find((b) => b.textContent.trim() === 'Monthly');
-    if (monthlyBtn) monthlyBtn.click();
-    const open = await waitFor(() => doc.getElementById('rj-open'), 'reports: no Generate report button on Summary › Monthly');
-    const exportBtn = [...doc.querySelectorAll('.vs-bar button')].find((b) => b.textContent === 'Export CSV');
-    ok(!!open && !!exportBtn && open.closest('.vs-right') === exportBtn.closest('.vs-right'), 'reports: Generate report is not beside Export CSV');
+    await go('reports');
+    press(doc.querySelector('.rp-nav a[data-section="exports"]'));
+    await settleFor(300);
+    const open = await waitFor(() => doc.getElementById('rj-open'), 'reports: no Generate report button on Exports & schedules');
+    ok(!!open && !!open.closest('section.card') && /Generated reports/.test(open.closest('section.card').querySelector('h2').textContent),
+      'reports: Generate report is not on the Generated reports card');
     if (open) {
-      open.click();
-      await settleFor(100);
+      // The list of jobs is what the card is for: the panel is open on arrival.
       const panelEl = doc.getElementById('rj-panel');
-      ok(!!panelEl && !panelEl.hidden, 'reports: Generate report did not open the panel');
-      // Indices is an evidence page: only the open cluster is listed until "More clients…".
+      if (panelEl && panelEl.hidden) { open.click(); await settleFor(100); }
+      ok(!!panelEl && !panelEl.hidden, 'reports: the Generated reports card does not show the jobs');
+      // The first cluster shown is listed until "More clients…".
       const first = [...doc.querySelectorAll('#rj-panel .rj-client input')];
-      ok(first.length === 1, `reports: ${first.length} client boxes before More clients…, want only the open cluster`);
-      ok(!doc.getElementById('reports-pill'), 'reports: the pill is on an evidence page');
+      ok(first.length === 1, `reports: ${first.length} client boxes before More clients…, want only the first cluster`);
       const more = doc.getElementById('rj-more');
       ok(config.clusters.length < 2 || !!more, 'reports: no More clients… button');
       if (more) { more.click(); await settleFor(50); }
@@ -809,7 +799,7 @@ await goOne('snapshots');
       ok(txt.includes('Not mailed: mail is not set up'), 'reports: a mailError is not shown');
       ok(txt.includes('1 running · 1 queued · 1 done'), 'reports: the list header does not count the jobs');
       ok(/At most 3 run together/.test(txt), 'reports: the footnote does not say how many run together');
-      // (The pill itself is not on this evidence page; what it would say is the poller's.)
+      // What the pill says is the poller's.
       ok(R.pillText(R.reports) === 'Reports · 1 running · 1 queued', `reports: the pill would read "${R.pillText(R.reports)}"`);
 
       // Download: REPORT_DOWNLOAD, base64 to a file of the core's name.
@@ -842,18 +832,14 @@ await goOne('snapshots');
       st.caller = null;
       await R.refreshReports();
 
-      // Close it, leave, and come back through the pill: Monthly, the panel open.
+      // Close it, leave, and come back through the pill: Exports & schedules, the jobs open.
       [...doc.querySelectorAll('#rj-panel button')].find((b) => b.textContent === 'Close').click();
-      const vsMod = await load('ui/volume-summary.js');
-      vsMod.resetVolumeSummary();
       await go('overview');
       pill().click();
       await settleFor(500);
       const back = await waitFor(() => { const p = doc.getElementById('rj-panel'); return p && p.isConnected && !p.hidden ? p : null; },
-        'reports: the pill did not open Indices › Summary with the report panel');
-      ok(!!back && (doc.location.hash || '') === '#/indices', `reports: the pill went to ${doc.location.hash}`);
-      const pressed = [...doc.querySelectorAll('.vs .seg .btn')].find((b) => b.getAttribute('aria-pressed') === 'true');
-      ok(pressed && pressed.textContent.trim() === 'Monthly', 'reports: the pill did not land on Monthly');
+        'reports: the pill did not open Reports › Exports & schedules with the report jobs');
+      ok(!!back && (doc.location.hash || '') === '#/reports/exports', `reports: the pill went to ${doc.location.hash}`);
     }
   } finally {
     globalThis.fetch = realFetch;
@@ -864,148 +850,227 @@ await goOne('snapshots');
   await go('overview');
 }
 
-/* --------------------- the volume report and its two sheets --------------------- */
+/* --------------- Reports: section nav, Overview, Capacity, Measure size, Exports --------------- */
 
 await backToFleet();
-await go('volume');
-// Moved here from the Indices page — the assertion moves with them, so a future change
-// that drops them cannot pass by simply not rendering them anywhere.
+await go('reports');
 {
-  const txt = doc.body.textContent;
-}
-{
-  const viewBtn = (label) => [...doc.querySelectorAll('button')].find((b) => b.textContent === label);
-  // Three buttons, not a dropdown, and the summary is what the page opens on.
-  for (const label of ['Summary', 'Full report', 'Client plan']) {
-    ok(!!viewBtn(label), `volume: no "${label}" view button`);
+  const navLinks = () => [...doc.querySelectorAll('.rp-nav a')];
+  const current = () => (doc.querySelector('.rp-nav a[aria-current="page"]') || {}).dataset?.section;
+  const navTo = async (id) => { const a = doc.querySelector(`.rp-nav a[data-section="${id}"]`); if (a) { press(a); await settleFor(300); } return !!a; };
+  const btnIn = (root, label) => [...(root || doc).querySelectorAll('button')].find((b) => b.textContent.trim() === label);
+
+  // The page: title, subtitle, the six sections in order, Overview first; the tab reads Reports.
+  ok(/^Reports$/.test((doc.querySelector('.rp-head h1') || {}).textContent || ''), 'reports: no "Reports" title');
+  ok(/What each cluster takes in, what it keeps, and whether its storage holds it\./.test(doc.body.textContent), 'reports: the subtitle is missing');
+  ok(navLinks().map((a) => a.textContent).join(' · ') === 'Overview · Daily & monthly · Capacity & retention · Measure size · Planning · Exports & schedules',
+    `reports: the section nav reads ${navLinks().map((a) => a.textContent).join(' · ')}`);
+  ok(current() === 'overview', `reports: opens on ${current()}, want Overview`);
+  ok([...doc.querySelectorAll('#nav a, #nav button')].some((x) => x.dataset.page === "reports" && /Reports$/.test(x.textContent.trim())), 'reports: the tab is not labelled Reports');
+  ok(![...doc.querySelectorAll('#nav a, #nav button')].some((x) => /Volume report/.test(x.textContent)), 'reports: a "Volume report" tab is still there');
+  // Each section by the nav: the marker moves, the address follows, the body changes.
+  for (const id of ['daily', 'capacity', 'measure', 'planning', 'exports', 'overview']) {
+    ok(await navTo(id), `reports: no ${id} in the section nav`);
+    ok(current() === id, `reports: the nav marks ${current()} after choosing ${id}`);
+    ok((doc.location.hash || '') === `#/reports/${id}`, `reports: choosing ${id} left the address at ${doc.location.hash}`);
   }
-  ok(!!panel('Capacity by cluster'), 'volume: the page should open on the summary table');
-  ok(![...doc.querySelectorAll('.stat')].some((x) => /FLEET INGEST/i.test(x.textContent)),
-    'volume: the fleet stat tiles are back');
+  // The old address still opens the page, at the section it names.
+  doc.location.hash = '#/volume/capacity';
+  await settleFor(500);
+  ok(current() === 'capacity', `reports: #/volume/capacity opened ${current()}`);
+  ok((doc.location.hash || '').startsWith('#/reports'), `reports: #/volume did not become #/reports (${doc.location.hash})`);
+  doc.location.hash = '#/reports/overview';
+  await settleFor(400);
 
-  viewBtn('Full report').click();
-  await settleFor(220);
-
-  let h = sheetHeaders();
-  ok(h.some((x) => x.startsWith('Current live storage store upto')),
-    `volume: the renamed column is missing — got ${h.slice(5, 10).join(' | ')}`);
-  ok(!h.some((x) => x.includes('Free disk lasts')), 'volume: the old "Free disk lasts" label is still here');
-  ok(h.length === 36, `volume: the full sheet should have 36 columns, has ${h.length}`);
-
-  const exportBtn = () => [...doc.querySelectorAll('button')].find((b) => b.textContent === 'Export CSV');
-  ok(!!exportBtn(), 'volume: no Export CSV button');
-  exportBtn().click();
-  const full = files.at(-1);
-  ok(full && /^volume-resource-report-\d{4}-\d{2}-\d{2}\.csv$/.test(full.name),
-    `volume: the full export is named "${full && full.name}"`);
-  ok(full && full.text.split('\n')[0].split(',').length === 37,
-    `volume: the full CSV has ${full && full.text.split('\n')[0].split(',').length} headers, expected 36 + "Generated at"`);
-  ok(full && full.text.includes('Current live storage store upto (days)'),
-    'volume: the renamed column did not reach the CSV');
-
-  {
-    viewBtn('Client plan').click();
-    await settleFor(220);
-
-    const WANT = ['ClientName', 'ES Host', 'Current Per Day Volume', 'Daily Volume + buffer',
-      'Current Live Storage', 'Live Used', 'Current Live Storage Store Upto',
-      'Required Live Storage for 30days', 'Required Live Storage for 90days',
-      'Live Indices From', 'Live Indices To',
-      'Current Backup Storage', 'Backup Storage Type',
-      'Required Backup Storage for 365 days', 'Current Backup storage Store upto',
-      'Snapshot Indices From', 'Snapshot Indices To'];
-    h = sheetHeaders();
-    ok(h.length === 17, `volume: the client plan should have 17 columns, has ${h.length}`);
-    WANT.forEach((w, i) => ok(h[i] && h[i].startsWith(w),
-      `volume: client column ${i} is "${h[i]}", expected "${w}"`));
-    ok(JSON.stringify(groupBand()) === JSON.stringify(
-      ['Client×1', '×1', 'Volume×2', 'Live storage×7', 'Backup storage×6']),
-      `volume: the client plan's group band reads ${groupBand().join(' ')}`);
-
-    const rows = doc.querySelectorAll('table.sheet tbody tr').length;
-    ok(rows === config.clusters.length,
-      `volume: the client plan has ${rows} rows for ${config.clusters.length} cluster(s)`);
-
-    exportBtn().click();
-    const cli = files.at(-1);
-    ok(cli && /^client-storage-plan-\d{4}-\d{2}-\d{2}\.csv$/.test(cli.name),
-      `volume: the client export is named "${cli && cli.name}"`);
-    const hdr = cli ? cli.text.split('\n')[0].split(',') : [];
-    ok(hdr.length === 18, `volume: the client CSV has ${hdr.length} headers, expected 17 + "Generated at"`);
-    ok(hdr[0] === 'ClientName', `volume: the client CSV starts with "${hdr[0]}"`);
-    ok(hdr[2] === 'Current Per Day Volume (GB)', `volume: client CSV column 2 is "${hdr[2]}"`);
-    ok(hdr[14] === 'Current Backup storage Store upto (days)', `volume: client CSV column 14 is "${hdr[14]}"`);
-    ok(hdr[16] === 'Snapshot Indices To', `volume: client CSV column 16 is "${hdr[16]}"`);
-    ok(cli && cli.text.split('\n').length === config.clusters.length + 1,
-      `volume: the client CSV has ${cli && cli.text.split('\n').length} lines`);
-
-    viewBtn('Summary').click();
-    await settleFor(200);
-    ok(!!panel('Capacity by cluster'), 'volume: the summary view did not render');
+  // Overview: the five tiles, the two cards, the By cluster table; none of what the board left out.
+  await waitFor(() => (panel('By cluster') && !/…/.test(panel('By cluster').querySelector('tbody').textContent) ? panel('By cluster') : null),
+    'reports overview: the By cluster table did not settle', 30000);
+  const tiles = doc.querySelector('.rp-tiles') ? doc.querySelector('.rp-tiles').textContent : '';
+  for (const k of ['Ingested yesterday', '7-day daily average', 'Month so far', 'Disk runs out within 6 weeks', 'Backups that do not fit']) {
+    ok(tiles.includes(k), `reports overview: no "${k}" tile`);
   }
+  ok(!!panel('Daily volume') && !!panel('How long the free disk lasts'), 'reports overview: the Daily volume / free disk cards are missing');
+  ok(!doc.querySelector('.coverage, .cov-bar') && !btnIn(doc.getElementById('view'), 'Read all'), 'reports overview: a freshness strip / Read all is drawn (docs/REPORTS.md: none)');
+  ok(!/today not final/i.test(doc.getElementById('view').textContent), 'reports overview: a "today not final" pill is drawn');
+  const byHeads = () => [...panel('By cluster').querySelectorAll('thead th')].map((x) => x.textContent.trim());
+  ok(JSON.stringify(byHeads()) === JSON.stringify(['Cluster', 'Type', 'Yesterday', '7-day avg', 'vs avg', 'Month so far', 'Data-node disk used', 'Disk lasts', 'Live retention', 'Backups', 'Daily record']),
+    `reports overview: the By cluster columns are ${byHeads().join(' | ')}`);
+  ok(panel('By cluster').querySelectorAll('tbody tr').length === config.clusters.length, 'reports overview: not one line per cluster');
+  // The mock's three nodes are data nodes (node.role "dim"): the disk is measured, as a percentage.
+  ok(/\d+\.\d %/.test(panel('By cluster').querySelector('tbody tr td[data-col="diskUsed"]').textContent), 'reports overview: the data-node disk is not measured against the mock');
 
-  // Monthly (0.3.45): one row per cluster, a column per month of primary size, from
-  // VOLUME_MONTHLY_ALL. Against the real core first: the plain "needs 0.3.45" state on an
-  // older one, the table once the core has the message.
-  {
-    ok(!!viewBtn('Monthly'), 'volume: no "Monthly" view button');
-    viewBtn('Monthly').click();
-    await waitFor(() => (panel('Monthly volume by cluster') && !/Reading the monthly record/.test(panel('Monthly volume by cluster').textContent) ? doc.body : null),
-      'volume: the Monthly view did not settle', 15000);
-    const mv = panel('Monthly volume by cluster');
-    if (mv && /does not keep a daily volume record/.test(mv.textContent)) {
-      ok(/needs ElasticPro 0\.3\.45/.test(mv.textContent) || /0\.3\.45/.test(mv.textContent), 'volume: the Monthly "needs" state does not name 0.3.45');
-    } else if (mv) {
-      // ---- Real core (0.3.45+): a row per cluster the caller sees.
-      ok(mv.querySelectorAll('tbody tr').length === config.clusters.length,
-        `volume: the Monthly view has ${mv.querySelectorAll('tbody tr').length} rows for ${config.clusters.length} cluster(s)`);
+  // The Columns menu: hide, move, reset, and Save for everyone (VOLUME_LAYOUT_SET table overview).
+  const realFetch = globalThis.fetch;
+  const lsent = [];
+  globalThis.fetch = async (input, init) => {
+    const body = init && init.body ? JSON.parse(init.body) : {};
+    if (body.type === 'VOLUME_LAYOUT_SET' || body.type === 'VOLUME_RUN') lsent.push(body);
+    return realFetch(input, init);
+  };
+  try {
+    const colBtn = doc.getElementById('rp-cols-overview');
+    ok(!!colBtn, 'reports overview: no Columns button on By cluster');
+    if (colBtn) {
+      colBtn.click();
+      await settleFor(100);
+      const pop = () => doc.querySelector('.pop.colmenu');
+      ok(!!pop(), 'reports overview: Columns did not open its menu');
+      const item = (key) => pop() && pop().querySelector(`li[data-col="${key}"]`);
+      ok(item('cluster') && item('cluster').classList.contains('lock') && item('cluster').querySelector('input').disabled, 'reports overview: Cluster is not locked first');
+      ok(!!pop().querySelector('li .grip') && !!btnIn(pop(), '▲') && !!btnIn(pop(), '▼'), 'reports overview: the menu has no drag handle or ▲/▼');
+      // Hide Type.
+      const box = item('type').querySelector('input');
+      box.checked = false; box.dispatchEvent(new window.Event('change', { bubbles: true }));
+      await settleFor(150);
+      ok(!byHeads().includes('Type'), 'reports overview: unticking Type did not hide it');
+      // Move Yesterday down one.
+      item('yesterday').querySelector('button[aria-label^="Move Yesterday down"]').click();
+      await settleFor(150);
+      const hd = byHeads();
+      ok(hd.indexOf('7-day avg') < hd.indexOf('Yesterday'), `reports overview: ▼ did not move Yesterday after 7-day avg: ${hd.join(' | ')}`);
+      ok(/this browser only/.test(pop().textContent), 'reports overview: the menu does not say the arrangement is in this browser until saved');
+      // CSV follows the columns on screen.
+      btnIn(panel('By cluster'), 'Export CSV').click();
+      const f = files.at(-1);
+      ok(f && /^reports-overview-.+\.csv$/.test(f.name) && f.text.split('\n')[0].startsWith('Cluster,7-day avg (GB),Yesterday (GB)') && !/Type/.test(f.text.split('\n')[0]),
+        `reports overview: the CSV does not follow the columns on screen: ${f && f.text.split('\n')[0]}`);
+      // Save for everyone: the shared layout, table overview (the 0.3.53 core keeps it). It is
+      // really kept: VOLUME_LAYOUT_GET gives it back to anybody who asks.
+      lsent.length = 0;
+      btnIn(pop(), 'Save for everyone').click();
+      await settleFor(500);
+      const set = lsent.find((m) => m.type === 'VOLUME_LAYOUT_SET');
+      ok(set && set.table === 'overview' && set.layout.hidden.includes('type') && set.layout.order.indexOf('avg7') < set.layout.order.indexOf('yesterday'),
+        `reports overview: Save for everyone sent ${JSON.stringify(set)}`);
+      const said = pop() ? pop().textContent : '';
+      ok(/Saved for everyone/.test(said), `reports overview: Save for everyone was not saved: ${said}`);
+      const VD = await load('core/volume-daily.js');
+      const got = await VD.volumeLayoutGet();
+      const shared = got && got.layouts && got.layouts.overview;
+      ok(shared && shared.hidden.includes('type') && shared.order.indexOf('avg7') < shared.order.indexOf('yesterday') && shared.order[0] === 'cluster',
+        `reports overview: VOLUME_LAYOUT_GET does not give the saved layout back: ${JSON.stringify(shared)}`);
+      ok(!/this browser only/.test(said), 'reports overview: still "this browser only" after a save the core kept');
+      // Reset to default: every column back, in its place — and saved, so the next run starts clean.
+      btnIn(pop(), 'Reset to default').click();
+      await settleFor(150);
+      ok(JSON.stringify(byHeads().slice(0, 3)) === JSON.stringify(['Cluster', 'Type', 'Yesterday']), `reports overview: Reset did not restore the default: ${byHeads().join(' | ')}`);
+      btnIn(pop(), 'Save for everyone').click();
+      await settleFor(400);
+      const back = await VD.volumeLayoutGet();
+      ok(back && back.layouts && back.layouts.overview && !back.layouts.overview.hidden.includes('type'), `reports overview: the reset layout was not saved: ${JSON.stringify(back && back.layouts && back.layouts.overview)}`);
+      if (pop()) pop().querySelector('header button').click();
     }
 
-    // Contract-shaped answer, so the layout and the export are checked whatever the core is.
-    const realFetch = globalThis.fetch;
-    const ymAgo = (i) => { const d = new Date(); return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() - i, 1)).toISOString().slice(0, 7); };
-    // The stubbed rows carry a name the real record never has. Their shape cannot tell them
-    // apart: from the 1st of the month after tools/mock-es.mjs's 45 days first span three
-    // calendar months (2026-11-01: Sep, Oct, Nov), the real table is Cluster + three months
-    // too, the wait below took it, and the export was clicked while the refresh was still
-    // being asked — writing nothing, so files.at(-1) was the client plan's file.
-    const stubName = (c) => `${c.name} (stubbed)`;
-    globalThis.fetch = async (input, init) => {
-      const body = init && init.body ? JSON.parse(init.body) : {};
-      if (body.type === 'VOLUME_MONTHLY_ALL') {
-        return stubReply({ ok: true, clusters: config.clusters.map((c) => ({ clusterId: c.name, name: stubName(c), months: [
-          { month: ymAgo(2), daysWithData: 0 }, { month: ymAgo(1), daysWithData: 30, priBytes: 2e11 },
-          { month: ymAgo(0), daysWithData: 29, priBytes: 1.9e11, partial: true }] })) });
+    // Capacity & retention: the Storage plan, its group band, the disk bar, the switch.
+    await navTo('capacity');
+    const plan = await waitFor(() => panel('Storage plan'), 'reports capacity: no Storage plan');
+    const planHeads = () => [...panel('Storage plan').querySelectorAll('thead tr:last-child th')].map((x) => x.textContent.trim());
+    if (plan) {
+      ok(JSON.stringify(planHeads()) === JSON.stringify(['Cluster', 'Per day', '30% buffer', 'Live retention', 'Live retention policy', 'Live disk (data nodes)',
+        'Required live disk', 'Live disk shortfall', 'Backup policy', 'Backup disk (repository)', 'Required backup disk', 'Backup disk shortfall']),
+        `reports capacity: the Storage plan columns are ${planHeads().join(' | ')}`);
+      const band = () => [...panel('Storage plan').querySelectorAll('thead tr.rp-band th')].map((x) => `${x.textContent.trim()}×${x.getAttribute('colspan') || 1}`);
+      ok(JSON.stringify(band()) === JSON.stringify(['×3', 'Live×5', 'Archival / snapshot / backup×4']), `reports capacity: the group band reads ${band().join(' ')}`);
+      const bar = panel('Storage plan').querySelector('td[data-col="liveDisk"] .rp-disk');
+      ok(!!bar && /\d+ %/.test(bar.querySelector('.rp-dp').textContent) && / of .+, .+ avail/.test(bar.querySelector('.rp-dl').textContent),
+        'reports capacity: the live disk bar has no bold % or "used of total, avail" label');
+      ok(/not measured · set backupCapacity|in S3|size not measured/.test(panel('Storage plan').textContent), 'reports capacity: the backup disk does not say why it is unknown');
+      ok(!panel('Will the indices fit on disk?') && !panel('Will the backups fit?'), 'reports capacity: the fit cards are back (docs/REPORTS.md: none)');
+      // A reorder that mixes the groups hides the band.
+      doc.getElementById('rp-cols-capacity').click();
+      await settleFor(100);
+      const pop = doc.querySelector('.pop.colmenu');
+      for (let i = 0; i < 6 && pop; i++) {
+        const b = pop.isConnected && doc.querySelector('.pop.colmenu li[data-col="backupPolicy"] button[aria-label^="Move Backup policy up"]');
+        if (b) { b.click(); await settleFor(80); }
       }
-      return realFetch(input, init);
-    };
-    try {
-      [...doc.querySelectorAll('button')].find((b) => b.textContent === '↻ Refresh').click();
-      // Wait for the stubbed answer's table (its names, Cluster + three months), not the one the real
-      // record drew before the refresh: an export clicked while the reply is being asked
-      // again writes nothing, and files.at(-1) would be an earlier view's file.
-      const p = await waitFor(() => {
-        const x = panel('Monthly volume by cluster');
-        const first = x && x.querySelector('tbody tr td b');
-        return first && first.textContent === stubName(config.clusters[0]) && x.querySelectorAll('thead th').length === 4 ? x : null;
-      }, 'volume: the Monthly table did not draw from a VOLUME_MONTHLY_ALL answer');
-      if (p) {
-        const hd = [...p.querySelectorAll('thead th')].map((x) => x.textContent.trim());
-        ok(hd.length === 4 && hd[0] === 'Cluster', `volume: the Monthly columns are ${hd.join(' | ')}`);
-        ok(p.querySelectorAll('tbody tr').length === config.clusters.length, 'volume: the Monthly view should have one row per cluster');
-        ok(/—/.test(p.querySelector('tbody tr').textContent), 'volume: a month with no record should read "—", never 0');
-        exportBtn().click();
-        const f = files.at(-1);
-        ok(f && /^volume-monthly-by-cluster-\d{4}-\d{2}-\d{2}\.csv$/.test(f.name), `volume: the Monthly export is named "${f && f.name}"`);
-        ok(f && f.text.split('\n')[0] === `cluster,${ymAgo(2)},${ymAgo(1)},${ymAgo(0)}`, `volume: the Monthly CSV header is "${f && f.text.split('\n')[0]}"`);
-        ok(f && f.text.split('\n')[1].split(',')[1] === '', 'volume: a month with no record should be empty in the CSV, not 0');
+      ok(band().length === 0, `reports capacity: the band still shows over mixed groups: ${band().join(' ')}`);
+      {
+        const VD = await load('core/volume-daily.js');
+        const pm = doc.querySelector('.pop.colmenu');
+        lsent.length = 0;
+        if (pm) { btnIn(pm, 'Save for everyone').click(); await settleFor(500); }
+        const s2 = lsent.find((m) => m.type === 'VOLUME_LAYOUT_SET');
+        ok(s2 && s2.table === 'capacity', `reports capacity: Save for everyone sent ${JSON.stringify(s2)}`);
+        const g = await VD.volumeLayoutGet();
+        const cap = g && g.layouts && g.layouts.capacity;
+        ok(cap && cap.order[0] === 'cluster' && cap.order.indexOf('backupPolicy') < cap.order.indexOf('liveShortfall'),
+          `reports capacity: VOLUME_LAYOUT_GET does not give the saved layout back: ${JSON.stringify(cap)}`);
       }
-    } finally {
-      globalThis.fetch = realFetch;
+      const reset = doc.querySelector('.pop.colmenu') && btnIn(doc.querySelector('.pop.colmenu'), 'Reset to default');
+      if (reset) { reset.click(); await settleFor(120); }
+      ok(band().length === 3, 'reports capacity: Reset did not bring the band back');
+      if (doc.querySelector('.pop.colmenu')) { btnIn(doc.querySelector('.pop.colmenu'), 'Save for everyone').click(); await settleFor(400); }
+      if (doc.querySelector('.pop.colmenu')) doc.querySelector('.pop.colmenu header button').click();
+      // CSV follows the columns on screen.
+      btnIn(panel('Storage plan'), 'Export CSV').click();
+      const f = files.at(-1);
+      ok(f && /^reports-storage-plan-.+\.csv$/.test(f.name) && f.text.split('\n')[0].startsWith('Cluster,Per day (GB),30% buffer (GB),Live retention (days)'),
+        `reports capacity: the Storage plan CSV header is ${f && f.text.split('\n')[0]}`);
     }
-    viewBtn('Summary').click();
-    await settleFor(200);
-    ok(!!panel('Capacity by cluster'), 'volume: Summary did not come back after Monthly');
+    // The switch: Every parameter (36) and Client plan (17), from the same report columns.
+    const seg = (re) => [...doc.querySelectorAll('.rp-bar .seg .btn')].find((b) => re.test(b.textContent));
+    ok(!!seg(/^Plan$/) && !!seg(/^Every parameter \(36\)$/) && !!seg(/^Client plan \(17\)$/), 'reports capacity: the Plan / Every parameter / Client plan switch is missing');
+    if (seg(/^Every parameter/)) {
+      seg(/^Every parameter/).click();
+      await settleFor(250);
+      const h = sheetHeaders();
+      ok(h.length === 36 && h.some((x) => x.startsWith('Current live storage store upto')), `reports capacity: Every parameter has ${h.length} columns`);
+      btnIn(doc.getElementById('view'), 'Export CSV').click();
+      const full = files.at(-1);
+      ok(full && /^reports-every-parameter-\d{4}-\d{2}-\d{2}\.csv$/.test(full.name) && full.text.split('\n')[0].split(',').length === 37,
+        `reports capacity: the full export is "${full && full.name}" with ${full && full.text.split('\n')[0].split(',').length} headers`);
+      seg(/^Client plan/).click();
+      await settleFor(250);
+      const WANT = ['ClientName', 'ES Host', 'Current Per Day Volume', 'Daily Volume + buffer', 'Current Live Storage', 'Live Used',
+        'Current Live Storage Store Upto', 'Required Live Storage for 30days', 'Required Live Storage for 90days', 'Live Indices From', 'Live Indices To',
+        'Current Backup Storage', 'Backup Storage Type', 'Required Backup Storage for 365 days', 'Current Backup storage Store upto',
+        'Snapshot Indices From', 'Snapshot Indices To'];
+      const ch = sheetHeaders();
+      ok(ch.length === 17 && WANT.every((w, i) => ch[i] && ch[i].startsWith(w)), `reports capacity: the client plan columns are ${ch.join(' | ')}`);
+      ok(JSON.stringify(groupBand()) === JSON.stringify(['Client×1', '×1', 'Volume×2', 'Live storage×7', 'Backup storage×6']),
+        `reports capacity: the client plan's group band reads ${groupBand().join(' ')}`);
+      seg(/^Plan$/).click();
+      await settleFor(200);
+    }
+
+    // Measure size: the button sends VOLUME_RUN for the clusters shown — nothing new.
+    await navTo('measure');
+    const per = await waitFor(() => panel('Per cluster'), 'reports measure: no Per cluster table');
+    if (per) {
+      const mh = [...per.querySelectorAll('thead th')].map((x) => x.textContent.trim());
+      ok(JSON.stringify(mh) === JSON.stringify(['Cluster', 'Index size per day', 'event_logsize per day', 'Difference', 'Ratio', 'Compared']),
+        `reports measure: the Per cluster columns are ${mh.join(' | ')}`);
+      ok([...doc.querySelectorAll('#rp-measure-period option')].map((o) => o.textContent).join(' | ') === 'Last 7 days | Last 30 days | Yesterday',
+        'reports measure: the Period choices are wrong');
+      ok([...doc.querySelectorAll('section.card header h2')].some((x) => / · day by day$/.test(x.textContent)), 'reports measure: no day by day table for the selected cluster');
+      lsent.length = 0;
+      const btn = doc.getElementById('rp-measure');
+      ok(!!btn && btn.textContent === '↻ Measure size', 'reports measure: no "↻ Measure size" button');
+      if (btn) { btn.click(); await settleFor(400); }
+      const run = lsent.filter((m) => m.type === 'VOLUME_RUN');
+      ok(run.length === 1, `reports measure: Measure size sent ${run.length} VOLUME_RUN`);
+      const ids = (await load('core/state.js')).activeClusters().map((c) => c.id);
+      ok(run[0] && JSON.stringify([...run[0].clusterIds].sort()) === JSON.stringify([...ids].sort()), `reports measure: VOLUME_RUN named ${JSON.stringify(run[0] && run[0].clusterIds)}, want the clusters shown`);
+      ok(!lsent.some((m) => m.type !== 'VOLUME_RUN' && m.type !== 'VOLUME_LAYOUT_SET'), 'reports measure: a new kind of request was sent');
+    }
+
+    // Exports & schedules: the four downloads, every size event_logsize.
+    await navTo('exports');
+    const dl = await waitFor(() => panel('Download now'), 'reports exports: no Download now card');
+    if (dl) {
+      for (const t of ['Fleet overview', 'Daily record', 'Monthly record', 'Storage plan']) ok(dl.textContent.includes(t), `reports exports: no "${t}" download`);
+      ok(/every size is event_logsize/.test(dl.textContent), 'reports exports: the downloads do not say every size is event_logsize');
+      doc.getElementById('rp-x-daily-csv').click();
+      const f = files.at(-1);
+      ok(f && /^reports-daily-\d{4}-\d{2}-\d{2}\.csv$/.test(f.name) && f.text.split('\n')[0] === 'cluster,day,indices,docs,event_bytes,event_bytes_measured,change_vs_avg_pct,avg_days,status',
+        `reports exports: the daily record file is "${f && f.name}": ${f && f.text.split('\n')[0]}`);
+      doc.getElementById('rp-x-overview-xlsx').click();
+      ok(files.at(-1) && /^reports-overview-.+\.xlsx$/.test(files.at(-1).name), `reports exports: the fleet overview .xlsx is "${files.at(-1) && files.at(-1).name}"`);
+    }
+    ok(!!panel('Mailed reports') && !!panel('Generated reports'), 'reports exports: the Mailed reports / Generated reports cards are missing');
+  } finally {
+    globalThis.fetch = realFetch;
   }
 }
 
@@ -5345,6 +5410,6 @@ if (problems.length) {
   for (const p of problems) console.error('  ✗ ' + p);
   process.exit(1);
 }
-console.log('ok: strip, console, shards, the Clusters page (columns, name menu, unreachable rows, expand chevron, alerts link), volume, hand-off, refresh, snapshots, tasks, toasts, accounts split and pinned Zabbix roles, the log-delay preflight, a quiet Config page, Config › Volume fields, report jobs and the Reports pill, the mailed report and the mail server, the Request Centre and the redraw gate, the request policy, the coverage bar, the Tasks panel and the console tabs, template management, the Alerts page grouped by cluster with merged repeats, cluster type (badge, Type filter, edit dialog to file keys and CLUSTER_META_SET), Go to, playbooks and the bell, and the default credential (no password asked for a new cluster, promote, never replaced unticked), and Config › Play (links, revoke, exclusion, locked fields, watch rules), and Play (slides, keys, zoom, takeover, exclusion, display link, an older core)');
+console.log('ok: strip, console, shards, the Clusters page (columns, name menu, unreachable rows, expand chevron, alerts link), Reports (sections, Columns menu, Storage plan, Measure size, exports), Indices without Summary, hand-off, refresh, snapshots, tasks, toasts, accounts split and pinned Zabbix roles, the log-delay preflight, a quiet Config page, Config › Volume fields, report jobs and the Reports pill, the mailed report and the mail server, the Request Centre and the redraw gate, the request policy, the coverage bar, the Tasks panel and the console tabs, template management, the Alerts page grouped by cluster with merged repeats, cluster type (badge, Type filter, edit dialog to file keys and CLUSTER_META_SET), Go to, playbooks and the bell, and the default credential (no password asked for a new cluster, promote, never replaced unticked), and Config › Play (links, revoke, exclusion, locked fields, watch rules), and Play (slides, keys, zoom, takeover, exclusion, display link, an older core)');
 // The pages leave auto-refresh timers and a live tail running; nothing here waits on them.
 process.exit(0);

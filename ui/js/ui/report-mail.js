@@ -153,7 +153,7 @@ function scheduleBody() {
       h('span.rm-lab', 'Sheets'),
       ...SHEETS.map(([k, label]) => lockIf(M, 'sheets', checkbox(`rm-sheet-${k}`, label, sheets.has(k)))),
       lockNote(M, 'sheets')),
-    h('div.muted.rm-note', 'Each sheet uses the columns, names and order set on Indices › Summary. The mail body holds the key figures: yesterday, average per day, month so far.'),
+    h('div.muted.rm-note', 'Each sheet uses the columns, names and order set on Reports › Daily & monthly. The mail body holds the key figures: yesterday, average per day, month so far.'),
     h('div.rm-acts',
       h('button#rm-send-now.btn.sm', { type: 'button', title: 'Mail the report now with the saved settings, as a background job', onclick: sendNow }, 'Send report now'),
       downloadButton(),

@@ -92,12 +92,12 @@ export function settingsOf(res) {
 }
 
 /**
- * Open Indices › Summary › Monthly with the report panel open: the top-bar pill, and the
- * Config page after it starts a job. The hint is taken by the Indices page (core/focus.js).
+ * Open Reports › Exports & schedules with the report jobs: the top-bar pill, and the Config
+ * page after it starts a job. The hint is taken by the Reports page (core/focus.js).
  */
 export function openReportJobs() {
-  setFocus('indices', { reports: true });
-  navigateTo('indices');
+  setFocus('reports', { reports: true });
+  navigateTo('reports');
 }
 
 /* --------------------------------- the poller --------------------------------- */
