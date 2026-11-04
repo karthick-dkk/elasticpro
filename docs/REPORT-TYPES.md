@@ -192,7 +192,9 @@ Reports must never slow ElasticPro down or fail half-way.
   checkpoints, marked `interrupted`.
 - **Progress** for the UI is in the job's `progress`: `{done, total, state, cluster, day,
   pages, rows, retries, clusters: {<id>: {state, day, pages, rows, retries, concurrency,
-  partitionsDone, partitionsTotal, halvings, lastReason, daysDone, daysTotal}}}`.
+  partitions: {done, total}, halvings, lastReason, days: {done, total}}}, partitions,
+  concurrency, halvings, lastReason}` — the top-level fields are the cluster under way's; every
+  job also carries `reportKind` (`volume`, `indices`, `hosts`).
 
 ## Concurrency
 

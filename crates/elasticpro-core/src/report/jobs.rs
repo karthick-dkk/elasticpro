@@ -142,6 +142,16 @@ pub struct Progress {
     pub retries: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub state: Option<String>,
+    /// The cluster under way's partitions, controller limit, halvings and last reason (the
+    /// health tab reads these names; `clusters` has every cluster's).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub partitions: Option<Count>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub concurrency: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub halvings: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_reason: Option<String>,
     /// Per cluster of the job, how its collection goes (docs/REPORT-TYPES.md "Concurrency").
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub clusters: std::collections::BTreeMap<String, ClusterProgress>,
@@ -159,12 +169,17 @@ pub struct ClusterProgress {
     pub retries: u64,
     /// Requests the controller allows in flight now.
     pub concurrency: u32,
-    pub partitions_done: u64,
-    pub partitions_total: u64,
+    pub partitions: Count,
     pub halvings: u32,
     pub last_reason: Option<String>,
-    pub days_done: u64,
-    pub days_total: u64,
+    pub days: Count,
+}
+
+/// `{done, total}`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Count {
+    pub done: u64,
+    pub total: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

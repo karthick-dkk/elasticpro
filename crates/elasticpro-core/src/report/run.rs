@@ -55,6 +55,9 @@ pub(super) fn job_view(j: &Job) -> Value {
         o.remove("seq");
         o.remove("mailStartedAt");
         o.insert("stopping".into(), json!(j.stop_asked.is_some()));
+        // Which report, always named (`report` is left out of jobs.json for volume): what
+        // the health tab and the Exports list group jobs by.
+        o.insert("reportKind".into(), json!(j.report.as_str()));
     }
     v
 }

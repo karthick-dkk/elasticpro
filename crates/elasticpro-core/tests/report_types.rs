@@ -208,7 +208,11 @@ async fn a_hosts_job_pages_every_partition_builds_the_book_and_the_view_reads_it
     assert_eq!(job["status"], "done", "{job}");
     assert_eq!(job["report"], "hosts");
     assert_eq!(job["progress"]["clusters"]["prod"]["state"], "done", "{job}");
-    assert_eq!(job["progress"]["clusters"]["prod"]["daysDone"], 2);
+    assert_eq!(job["progress"]["clusters"]["prod"]["days"], json!({ "done": 2, "total": 2 }));
+    assert_eq!(job["reportKind"], "hosts");
+    let parts = &job["progress"]["partitions"];
+    assert_eq!((parts["done"].as_u64(), parts["total"].as_u64()), (Some(6), Some(6)), "{job}");
+    assert!(job["progress"]["concurrency"].as_u64().is_some() && job["progress"]["halvings"].is_u64());
     assert!(job["progress"]["clusters"]["prod"]["concurrency"].as_u64().unwrap() >= 1);
     let pages = composites(&es);
     // d1: three partitions (linux 2500 rows = 3 pages, win 1, the undated index split by time 1);

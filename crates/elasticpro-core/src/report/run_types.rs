@@ -161,6 +161,10 @@ impl Core {
             j.progress.rows = Some(c.rows);
             j.progress.retries = Some(c.retries);
             j.progress.state = Some(c.state);
+            j.progress.partitions = Some(c.partitions);
+            j.progress.concurrency = Some(c.concurrency);
+            j.progress.halvings = Some(c.halvings);
+            j.progress.last_reason = c.last_reason;
         }
     }
 
@@ -384,9 +388,9 @@ impl Core {
         }
         let days_total = work.len() as u64;
         self.cluster_progress(job, &id, |c| {
-            c.days_total = days_total;
-            c.partitions_total = work.iter().map(|w| w.cp.parts.len() as u64).sum();
-            c.partitions_done = work.iter().map(|w| w.cp.parts_done() as u64).sum();
+            c.days.total = days_total;
+            c.partitions.total = work.iter().map(|w| w.cp.parts.len() as u64).sum();
+            c.partitions.done = work.iter().map(|w| w.cp.parts_done() as u64).sum();
         });
 
         // Every partition of every day, a page at a time, as many in flight as the
@@ -568,8 +572,8 @@ impl Core {
                 c.concurrency = cur;
                 c.halvings = halvings;
                 c.last_reason = reason;
-                c.partitions_done = parts_done;
-                c.days_done = collected;
+                c.partitions.done = parts_done;
+                c.days.done = collected;
             });
         }
         if let Some(why) = stopping {
