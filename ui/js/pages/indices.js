@@ -7,6 +7,7 @@
  */
 
 import { h, mount, $, clear, activatable } from '../lib/dom.js';
+import { nodeCache } from '../lib/keyed.js';
 import { bytes, num, compact, dt, ago, toCsv, download } from '../lib/fmt.js';
 import { state, client, fetchIndices, activeClusters, datasetFreshness, fleetPolicy } from '../core/state.js';
 import { pauseFor } from '../core/policy.js';
@@ -98,7 +99,19 @@ function rowsFor(c) {
   return rows;
 }
 
+/**
+ * What the last draw put on screen (lib/keyed.js): the page redraws on every push from the
+ * core, and the source bar, the tabs and the table card that read the same are left in place —
+ * a push that changed nothing here used to rebuild the whole page under the mouse.
+ */
+const built = nodeCache();
+
 function draw() {
+  built.begin();
+  try { drawPage(); } finally { built.end(); }
+}
+
+function drawPage() {
   const c = cluster();
   if (!c) return mount(host, empty('No cluster selected'));
   const all = state.indices.get(c.id) || [];
@@ -113,7 +126,7 @@ function draw() {
   });
   const sourceList = [...sourcesMap.values()].sort((a, b) => b.size - a.size);
 
-  mount(host,
+  mount(host, ...built.sameAll('ix', [
     sourceBar(c, sourceList, all.length),
     // Paused is not a failure: nothing was asked, on purpose. Said as what it is.
     ui.error && ui.paused ? h('div.banner.warn', h('div', h('div.ttl', 'Emergency stop'), h('div', ui.error))) : null,
@@ -138,7 +151,7 @@ function draw() {
 
     ui.view === 'templates' ? templatesView(c, { draw }) : null,
     ui.view === 'templates' ? null :
-    tableCard(c, rows, all));
+    tableCard(c, rows, all)]));
 }
 
 /**
@@ -395,7 +408,8 @@ function tableCard(c, rows, all) {
     [h('span#idx-meta.muted', { style: { fontSize: '11.5px' } },
        `${num(slice.first)}–${num(slice.last)} of ${num(rows.length)} matching`),
      h('button.btn.sm', { onclick: () => download(`indices-${c.id}-${new Date().toISOString().slice(0, 10)}.csv`,
-        toCsv(rows.map((r) => ({ index: r.index, source: r.source || '', day: r.day || '', health: r.health, status: r.status,
+        // the rows matching now: the card is kept between redraws while it reads the same
+        toCsv(rowsFor(c).map((r) => ({ index: r.index, source: r.source || '', day: r.day || '', health: r.health, status: r.status,
           pri: r.pri, rep: r.rep, docs: r.docs, deleted: r.deleted, size_bytes: r.size, primary_bytes: r.priSize,
           created: r.created ? new Date(r.created).toISOString() : '' }))), 'text/csv') }, 'Export CSV')]);
 }

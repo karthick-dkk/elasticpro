@@ -13,7 +13,8 @@
  * these elements, and they redraw their own insides.
  */
 
-import { h, mount } from '../lib/dom.js';
+import { h, mount, reconcile } from '../lib/dom.js';
+import { nodeCache } from '../lib/keyed.js';
 import { downloadBytes } from '../lib/fmt.js';
 import { clusters, state } from '../core/state.js';
 import { toast } from './menu.js';
@@ -282,11 +283,31 @@ function renderJobs() {
   stopAllBtn.disabled = !jobs.some(isActive);
   panelEl.querySelector('#rj-clear').disabled = !jobs.some(isFinished);
   footEl.textContent = `At most ${reports.concurrency || 3} run together; the rest wait in the queue and start as slots free up. Only an admin can stop a job.`;
-  if (!jobs.length) { mount(listEl, h('div.muted.rj-empty', 'No report jobs yet.')); return; }
+  if (!jobs.length) { jobsBuilt.clear(); mount(listEl, h('div.muted.rj-empty', 'No report jobs yet.')); return; }
+  jobsBuilt.begin();
   mount(listEl, ...jobs.map((j) => jobRow(j, jobs, admin)));
+  jobsBuilt.end();
 }
 
+/**
+ * Each job's row, kept for as long as the job is listed (lib/keyed.js). The list is read every
+ * 2 s while a job runs and its progress moves each time: only the parts that changed — the
+ * status line, the bar, the per-cluster lines — are put back, so the Stop button under the
+ * mouse is the same button from one read to the next (a press that landed between the old
+ * button's down and the new one's up used to do nothing) and its hover does not blink.
+ */
+const jobsBuilt = nodeCache();
+
 function jobRow(j, all, admin) {
+  const parts = jobParts(j, all, admin);
+  const key = `job:${j.id}`;
+  const row = jobsBuilt.get(key, '', () => h('div.rj-job', { role: 'listitem', dataset: { job: String(j.id) } }));
+  if (row.dataset.status !== String(j.status)) row.dataset.status = String(j.status);
+  reconcile(row, jobsBuilt.sameAll(key, parts));
+  return row;
+}
+
+function jobParts(j, all, admin) {
   const pct = jobPct(j);
   const status = jobStatusText(j, all);
   const cls = j.status === 'failed' ? '.rj-bad' : j.status === 'done' ? '.rj-ok' : '';
@@ -305,7 +326,7 @@ function jobRow(j, all, admin) {
       onclick: (e) => download(j, e.currentTarget),
     }, 'Download');
   }
-  return h('div.rj-job', { role: 'listitem', dataset: { job: String(j.id), status: String(j.status) } },
+  return [
     h('span.rj-client-name', { title: jobClient(j) }, jobClient(j)),
     h('span.rj-period.muted', { title: periodLabel(j.period) }, periodLabel(j.period)),
     h(`span.rj-status${wrap}`,
@@ -317,7 +338,7 @@ function jobRow(j, all, admin) {
     h('span.rj-act', act),
     clusterProgress(j),
     j.warning ? h('div.rj-sub.rj-warn', String(j.warning)) : null,
-    j.mailError ? h('div.rj-sub.rj-warn', `Not mailed: ${j.mailError}`) : null);
+    j.mailError ? h('div.rj-sub.rj-warn', `Not mailed: ${j.mailError}`) : null];
 }
 
 const clusterName = (id) => (clusters().find((x) => x.id === id) || {}).name || id;

@@ -486,6 +486,7 @@ table.tbl tr.kv td.v { font-size: 12px; word-break: break-all; }
 /* The answer first (status + the Stop all traffic card), the limits as chips, then a table
    to scan: every column left-aligned, a path on one line with an ellipsis. */
 .rq-top { display: flex; flex-wrap: wrap; gap: 14px; align-items: stretch; margin-bottom: 12px; }
+.rq-sp { margin-top: 14px; }
 .rq-status, .rq-stop { background: var(--surface-1); border: 1px solid var(--border); border-radius: var(--radius); padding: 14px 16px; min-width: 0; }
 .rq-status { flex: 999 1 480px; display: flex; flex-direction: column; gap: 6px; }
 .rq-stop { flex: 1 1 400px; display: flex; flex-direction: column; gap: 8px; border-color: color-mix(in srgb, var(--critical) 35%, var(--border)); }

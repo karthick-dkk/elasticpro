@@ -521,7 +521,9 @@ function activityCard() {
             h('td.muted', (e.source && e.source.ip) || ''));
         }), { emptyText: ui.activityFailed ? 'No failed action.' : 'Nothing recorded yet.' })),
       h('div.muted', { style: { fontSize: '11.5px', marginTop: '6px' } }, where)),
-    [h('input', { type: 'search', placeholder: 'user', value: ui.activityUser, 'aria-label': 'Filter by user', style: { width: '120px' },
+    // An id, so a redraw while it is being typed into (the page redraws when the log is read)
+    // puts the keyboard back in it (lib/dom.js mount) instead of on the page.
+    [h('input#acct-activity-user', { type: 'search', placeholder: 'user', value: ui.activityUser, 'aria-label': 'Filter by user', style: { width: '120px' },
         onchange: (e) => { ui.activityUser = e.target.value; loadActivity(); } }),
      h('label', { style: { display: 'inline-flex', gap: '5px', alignItems: 'center', fontSize: '12px' } },
        h('input', { type: 'checkbox', checked: ui.activityFailed, onchange: (e) => { ui.activityFailed = e.target.checked; loadActivity(); } }),

@@ -9,6 +9,7 @@
  */
 
 import { h, mount } from '../lib/dom.js';
+import { nodeCache } from '../lib/keyed.js';
 import { activeClusters } from '../core/state.js';
 import { intent } from '../core/intent.js';
 import { takeFocus, revealFocus } from '../core/focus.js';
@@ -157,16 +158,30 @@ function body(list) {
   }
 }
 
+/**
+ * What the last draw put on screen. The page redraws on every push from the core — about once a
+ * second on a busy fleet — and most of the time nothing it shows has changed: the heading, the
+ * section links and an unchanged section are then left exactly as they are (lib/keyed.js).
+ */
+const built = nodeCache();
+
 function draw() {
   if (!alive()) return;
+  built.begin();
+  try { drawPage(); } finally { built.end(); }
+}
+
+function drawPage() {
   const list = activeClusters();
-  if (!list.length) { mount(host, header(), sectionNav(), empty('No cluster selected')); return; }
+  if (!list.length) { mount(host, ...built.sameAll('rp', [header(), sectionNav(), empty('No cluster selected')])); return; }
   // The fleet sections read every shown cluster's daily record; asked after this draw, and
   // the answers redraw (reports/record.js, at most four at once).
   if (FLEET.has(ui.section)) {
     const ids = list.map((c) => c.id);
     setTimeout(() => ensureRecords(ids), 0);
   }
-  mount(host, header(), sectionNav(), body(list));
+  // The sections keep their own pieces (Exports, Volume by host, Planning, Capacity): a section's
+  // export buttons hold the rows they were drawn with, so a section is not kept from outside.
+  mount(host, ...built.sameAll('rp', [header(), sectionNav()]), body(list));
   if (focusField && !focusRevealed && revealFocus(host, '[data-focus="field-volume"]')) focusRevealed = true;
 }
