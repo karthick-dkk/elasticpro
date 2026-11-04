@@ -649,6 +649,9 @@ pub fn required_role(msg_type: &str) -> Option<Role> {
         // they spend the server's capacity, hold a credential, or send cluster figures out of
         // the building. Clear and download check ownership in the handler.
         "REPORT_RUN" | "REPORT_JOBS" | "REPORT_CLEAR" | "REPORT_DOWNLOAD" => Some(Role::User),
+        // Volume by host in ElasticPro (docs/REPORT-TYPES.md "View"): the same kind of fact as the
+        // volume record's per-cluster reads, held to the caller's clusters by `gate_cluster`.
+        "HOSTS_QUERY" => Some(Role::User),
         "REPORT_STOP" | "REPORT_CONCURRENCY_SET" => Some(Role::Admin),
         "MAIL_SETTINGS_GET" | "MAIL_SETTINGS_SET" | "MAIL_TEST" => Some(Role::Admin),
         "REPORT_SCHEDULE_GET" | "REPORT_SCHEDULE_SET" | "REPORT_SEND_NOW" => Some(Role::Admin),

@@ -93,21 +93,29 @@ pub fn safe_sheet_name(name: &str, fallback: &str) -> String {
 /// name (case-insensitively), and cutting names to 31 characters is a good way to make two.
 pub fn unique_names(names: &[String]) -> Vec<String> {
     let mut used: Vec<String> = vec![];
-    let mut out = vec![];
-    for (i, n) in names.iter().enumerate() {
-        let base = safe_sheet_name(n, &format!("Sheet{}", i + 1));
-        let mut name = base.clone();
-        let mut k = 2;
-        while used.contains(&name.to_lowercase()) {
-            let suffix = format!(" {k}");
-            let keep = 31 - suffix.chars().count();
-            name = format!("{}{suffix}", base.chars().take(keep).collect::<String>().trim_end());
-            k += 1;
-        }
-        used.push(name.to_lowercase());
-        out.push(name);
+    names.iter().enumerate().map(|(i, n)| unique_name(&mut used, n, &format!("Sheet{}", i + 1))).collect()
+}
+
+/// One more name for a book whose names so far are `used` (lower case): safe, and unique.
+fn unique_name(used: &mut Vec<String>, n: &str, fallback: &str) -> String {
+    let base = safe_sheet_name(n, fallback);
+    let mut name = base.clone();
+    let mut k = 2;
+    while used.contains(&name.to_lowercase()) {
+        let suffix = format!(" {k}");
+        let keep = 31 - suffix.chars().count();
+        name = format!("{}{suffix}", base.chars().take(keep).collect::<String>().trim_end());
+        k += 1;
     }
-    out
+    used.push(name.to_lowercase());
+    name
+}
+
+/// The sheet after a full one: `<name> (2)`, `<name> (3)` … cut so it stays within 31.
+pub fn continued_name(name: &str, part: usize) -> String {
+    let suffix = format!(" ({part})");
+    let keep = 31usize.saturating_sub(suffix.chars().count());
+    format!("{}{suffix}", safe_sheet_name(name, "Sheet").chars().take(keep).collect::<String>().trim_end())
 }
 
 fn num(v: f64) -> String {
@@ -128,20 +136,9 @@ fn cell_xml(c: &Cell, col: usize, row: usize) -> String {
 
 /// Column widths from the longest value in each, so the file opens readable.
 fn cols_xml(rows: &[Vec<Cell>]) -> String {
-    let n = rows.iter().map(Vec::len).max().unwrap_or(0);
-    if n == 0 {
+    let w = cols_widths(rows);
+    if w.is_empty() {
         return String::new();
-    }
-    let mut w = vec![8usize; n];
-    for row in rows {
-        for (i, c) in row.iter().enumerate() {
-            let len = match c {
-                Cell::Text(s) | Cell::Head(s) => s.chars().count() + 2,
-                Cell::Int(v) | Cell::Dec(v) => num(*v).len() + 4,
-                Cell::Empty => 0,
-            };
-            w[i] = w[i].max(len.min(60));
-        }
     }
     let cols: String = w.iter().enumerate()
         .map(|(i, w)| format!(r#"<col min="{0}" max="{0}" width="{w}" customWidth="1"/>"#, i + 1)).collect();
@@ -182,11 +179,14 @@ const STYLES: &str = concat!(
     r#"</styleSheet>"#,
 );
 
-/// The bytes of an .xlsx with these sheets (names made safe and unique).
-pub fn workbook(sheets: &[Sheet]) -> Result<Vec<u8>, String> {
-    let names = unique_names(&sheets.iter().map(|s| s.name.clone()).collect::<Vec<_>>());
+/// The book's parts other than its sheets, for these sheet names (already safe and
+/// unique): `[Content_Types].xml`, `_rels/.rels`, `xl/workbook.xml`,
+/// `xl/_rels/workbook.xml.rels`, `xl/styles.xml`. One definition for the book built in
+/// memory and the one streamed to a file.
+fn book_parts(names: &[String]) -> Vec<Entry> {
     let head = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>"#;
-    let overrides: String = (1..=sheets.len()).map(|i| format!(
+    let n = names.len();
+    let overrides: String = (1..=n).map(|i| format!(
         r#"<Override PartName="/xl/worksheets/sheet{i}.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>"#
     )).collect();
     let content_types = format!(
@@ -200,25 +200,187 @@ pub fn workbook(sheets: &[Sheet]) -> Result<Vec<u8>, String> {
     let workbook = format!(
         r#"{head}<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets>{sheet_list}</sheets></workbook>"#
     );
-    let mut wb_rels: String = (1..=sheets.len()).map(|i| format!(
+    let mut wb_rels: String = (1..=n).map(|i| format!(
         r#"<Relationship Id="rId{i}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet{i}.xml"/>"#
     )).collect();
     wb_rels.push_str(&format!(
         r#"<Relationship Id="rId{}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>"#,
-        sheets.len() + 1
+        n + 1
     ));
     let wb_rels = format!(r#"{head}<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">{wb_rels}</Relationships>"#);
-    let mut entries = vec![
+    vec![
         Entry::new("[Content_Types].xml", content_types),
         Entry::new("_rels/.rels", rels),
         Entry::new("xl/workbook.xml", workbook),
         Entry::new("xl/_rels/workbook.xml.rels", wb_rels),
         Entry::new("xl/styles.xml", STYLES),
-    ];
+    ]
+}
+
+/// The bytes of an .xlsx with these sheets (names made safe and unique).
+pub fn workbook(sheets: &[Sheet]) -> Result<Vec<u8>, String> {
+    let names = unique_names(&sheets.iter().map(|s| s.name.clone()).collect::<Vec<_>>());
+    let mut entries = book_parts(&names);
     for (i, s) in sheets.iter().enumerate() {
         entries.push(Entry::new(format!("xl/worksheets/sheet{}.xml", i + 1), sheet_xml(&s.rows)));
     }
     zip::write(&entries)
+}
+
+/// Rows per sheet before a streamed sheet continues in `<name> (2)`: under Excel's
+/// 1,048,576 with room for the header (docs/REPORT-TYPES.md "Workbook").
+pub const SHEET_MAX_ROWS: usize = 1_000_000;
+
+const SHEET_HEAD: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetViews><sheetView workbookViewId="0"><pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/></sheetView></sheetViews>"#;
+
+/// The sheet being streamed.
+struct Open {
+    base: String,
+    part: usize,
+    header: Vec<Cell>,
+    widths: Vec<usize>,
+    /// Rows written, the header included.
+    rows: usize,
+}
+
+/// An .xlsx streamed to a writer, a row at a time: each row goes to the deflate stream as it
+/// is made, and nothing but the sheet names is kept (docs/REPORT-TYPES.md "Workbook" — a
+/// month of hosts for thirty clusters does not fit the core's memory). A sheet past
+/// `row_limit` rows continues in `<name> (2)`, `<name> (3)` … with its header again.
+/// Column widths are given up front: they come before the rows in the XML.
+pub struct StreamBook<W: std::io::Write> {
+    zip: zip::StreamZip<W>,
+    names: Vec<String>,
+    used: Vec<String>,
+    open: Option<Open>,
+    row_limit: usize,
+    buf: String,
+}
+
+impl<W: std::io::Write> StreamBook<W> {
+    pub fn new(w: W) -> StreamBook<W> {
+        StreamBook::with_row_limit(w, SHEET_MAX_ROWS)
+    }
+
+    /// With a smaller row limit: the tests' way to see a split without a million rows.
+    pub fn with_row_limit(w: W, row_limit: usize) -> StreamBook<W> {
+        StreamBook { zip: zip::StreamZip::new(w), names: vec![], used: vec![], open: None, row_limit: row_limit.max(1), buf: String::new() }
+    }
+
+    fn start(&mut self, name: &str, widths: &[usize]) -> Result<(), String> {
+        let final_name = unique_name(&mut self.used, name, &format!("Sheet{}", self.names.len() + 1));
+        self.names.push(final_name);
+        self.zip.begin(&format!("xl/worksheets/sheet{}.xml", self.names.len()))?;
+        let cols: String = widths.iter().enumerate()
+            .map(|(i, w)| format!(r#"<col min="{0}" max="{0}" width="{1}" customWidth="1"/>"#, i + 1, (*w).clamp(4, 60))).collect();
+        let mut head = String::from(SHEET_HEAD);
+        if !cols.is_empty() {
+            head.push_str(&format!("<cols>{cols}</cols>"));
+        }
+        head.push_str("<sheetData>");
+        self.zip.write(head.as_bytes())?;
+        Ok(())
+    }
+
+    fn put_row(&mut self, r: usize, cells: &[Cell]) -> Result<(), String> {
+        self.buf.clear();
+        self.buf.push_str(&format!(r#"<row r="{}">"#, r + 1));
+        for (c, cell) in cells.iter().enumerate() {
+            self.buf.push_str(&cell_xml(cell, c, r));
+        }
+        self.buf.push_str("</row>");
+        let b = std::mem::take(&mut self.buf);
+        let out = self.zip.write(b.as_bytes());
+        self.buf = b;
+        out
+    }
+
+    /// Begin a sheet (ending the one before) with its header row.
+    pub fn begin_sheet(&mut self, name: &str, header: Vec<Cell>, widths: Vec<usize>) -> Result<(), String> {
+        self.end_sheet()?;
+        self.start(name, &widths)?;
+        self.put_row(0, &header)?;
+        self.open = Some(Open { base: name.to_string(), part: 1, header, widths, rows: 1 });
+        Ok(())
+    }
+
+    /// One row of the open sheet; a full sheet continues in the next.
+    pub fn row(&mut self, cells: &[Cell]) -> Result<(), String> {
+        let full = match &self.open {
+            None => return Err("no sheet begun".into()),
+            Some(o) => o.rows > self.row_limit,
+        };
+        if full {
+            let o = self.open.take().ok_or("no sheet begun")?;
+            self.zip.write(b"</sheetData></worksheet>")?;
+            self.zip.end()?;
+            let part = o.part + 1;
+            self.start(&continued_name(&o.base, part), &o.widths)?;
+            self.put_row(0, &o.header)?;
+            self.open = Some(Open { part, rows: 1, ..o });
+        }
+        let r = self.open.as_ref().map_or(0, |o| o.rows);
+        self.put_row(r, cells)?;
+        if let Some(o) = self.open.as_mut() {
+            o.rows += 1;
+        }
+        Ok(())
+    }
+
+    /// A whole small sheet at once (a summary): the first row is its header.
+    pub fn sheet(&mut self, name: &str, rows: &[Vec<Cell>]) -> Result<(), String> {
+        let widths = cols_widths(rows);
+        let (head, rest) = rows.split_first().map(|(h, r)| (h.clone(), r)).unwrap_or((vec![], &[]));
+        self.begin_sheet(name, head, widths)?;
+        for r in rest {
+            self.row(r)?;
+        }
+        self.end_sheet()
+    }
+
+    pub fn end_sheet(&mut self) -> Result<(), String> {
+        if self.open.take().is_some() {
+            self.zip.write(b"</sheetData></worksheet>")?;
+            self.zip.end()?;
+        }
+        Ok(())
+    }
+
+    /// The sheet names so far, as the book will list them.
+    pub fn names(&self) -> &[String] {
+        &self.names
+    }
+
+    /// The other parts and the archive's directory; hands the writer back.
+    pub fn finish(mut self) -> Result<W, String> {
+        self.end_sheet()?;
+        if self.names.is_empty() {
+            self.start("Report", &[])?;
+            self.zip.write(b"</sheetData></worksheet>")?;
+            self.zip.end()?;
+        }
+        for e in book_parts(&self.names) {
+            self.zip.add(&e.name, &e.data)?;
+        }
+        self.zip.finish()
+    }
+}
+
+/// Column widths from the longest value in each (the in-memory sheet's rule).
+pub fn cols_widths(rows: &[Vec<Cell>]) -> Vec<usize> {
+    let n = rows.iter().map(Vec::len).max().unwrap_or(0);
+    let mut w = vec![8usize; n];
+    for row in rows {
+        for (i, c) in row.iter().enumerate() {
+            let len = match c {
+                Cell::Text(s) | Cell::Head(s) => s.chars().count() + 2,
+                Cell::Int(v) | Cell::Dec(v) => num(*v).len() + 4,
+                Cell::Empty => 0,
+            };
+            w[i] = w[i].max(len.min(60));
+        }
+    }
+    w
 }
 
 /// A minimal well-formedness check for the tests: every tag closes in order, attribute
@@ -316,5 +478,38 @@ mod tests {
         assert!(rels.contains("styles.xml"));
         assert!(well_formed("<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><a><b></a></b>").is_err());
         assert!(well_formed("<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><a>x & y</a>").is_err());
+    }
+
+    #[test]
+    fn a_streamed_book_opens_and_a_full_sheet_continues_in_the_next() {
+        let mut b = StreamBook::with_row_limit(Vec::new(), 3);
+        b.sheet("Summary", &[vec![Cell::head("Cluster"), Cell::head("Docs")], vec![Cell::text("a&b"), Cell::Int(5.0)]]).unwrap();
+        let long = "c".repeat(40);
+        b.begin_sheet(&long, vec![Cell::head("Day"), Cell::head("Docs")], vec![12, 10]).unwrap();
+        for i in 0..7 {
+            b.row(&[Cell::text(format!("2026-10-{:02}", i + 1)), Cell::Int(i as f64)]).unwrap();
+        }
+        b.begin_sheet("summary", vec![Cell::head("x")], vec![]).unwrap();
+        let names = b.names().to_vec();
+        let bytes = b.finish().unwrap();
+        assert_eq!(names.len(), 5, "{names:?}");
+        assert_eq!(names[1], "c".repeat(31));
+        assert_eq!(names[2], format!("{} (2)", "c".repeat(27)));
+        assert_eq!(names[3], format!("{} (3)", "c".repeat(27)));
+        assert_eq!(names[4], "summary 2", "unique ignoring case");
+        let parts = zip::read(&bytes).unwrap();
+        for (n, data) in &parts {
+            let text = std::str::from_utf8(data).unwrap();
+            well_formed(text).unwrap_or_else(|e| panic!("{n}: {e}\n{text}"));
+        }
+        let sheet = |i: usize| std::str::from_utf8(&parts.iter().find(|(n, _)| *n == format!("xl/worksheets/sheet{i}.xml")).unwrap().1).unwrap().to_string();
+        let (s2, s3, s4) = (sheet(2), sheet(3), sheet(4));
+        assert_eq!(s2.matches("<row ").count(), 4, "header and three rows: {s2}");
+        assert_eq!(s3.matches("<row ").count(), 4, "the header again, then the next three");
+        assert!(s3.contains(r#"<row r="1"><c r="A1" s="1""#) && s3.contains("2026-10-04"), "{s3}");
+        assert_eq!(s4.matches("<row ").count(), 2, "the seventh row");
+        assert!(sheet(1).contains("a&amp;b"));
+        let wb = std::str::from_utf8(&parts.iter().find(|(n, _)| n == "xl/workbook.xml").unwrap().1).unwrap();
+        assert!(wb.contains(r#"name="Summary" sheetId="1""#) && wb.contains(r#"sheetId="5""#), "{wb}");
     }
 }

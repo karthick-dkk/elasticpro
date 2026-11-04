@@ -211,6 +211,26 @@ impl Indices {
         }
     }
 
+    /// The day an index's name carries under the naming rule, and its source — whatever
+    /// `dayFrom` says about counting its documents. The indices report lists an index on
+    /// that day (docs/REPORT-TYPES.md "Indices report"); `None` for a name with no date
+    /// (or, under the legacy format, one that does not fit it).
+    pub fn name_day(&self, name: &str) -> Option<(NaiveDate, String)> {
+        match &self.naming {
+            Naming::Format(f) => f.parse(name),
+            Naming::Pattern(p) => name_date(name).map(|(d, r)| (d, p.source(name, Some(r)))),
+        }
+    }
+
+    /// An index's source (its name less its date), for any index the pattern lists: the
+    /// hosts report's `Source` column, one definition with the record's sources.
+    pub fn source_of(&self, name: &str) -> String {
+        match self.place(name) {
+            Placement::Dated(_, s) | Placement::TimeSplit(s) => s,
+            Placement::Skipped => name.to_string(),
+        }
+    }
+
     /// The legacy format with days from the names: the requests are the ones before
     /// 0.3.53, byte for byte (a day's search names that day's indices by name).
     fn legacy_format(&self) -> Option<&IndexFormat> {
@@ -285,7 +305,7 @@ pub fn field_caps_request(cluster: &str, ind: &Indices, s: &VolumeSettings, time
     ), None)
 }
 
-const SEARCH_QS: &str = "_search?ignore_unavailable=true&allow_no_indices=true";
+pub const SEARCH_QS: &str = "_search?ignore_unavailable=true&allow_no_indices=true";
 
 /// The time field between the start of `from` and the end of `to`, UTC days: exactly the
 /// buckets of a `date_histogram` with `calendar_interval: 1d` in UTC. One definition for
@@ -639,54 +659,56 @@ fn caps<'a>(fc: &'a Value, name: &str) -> Option<(Vec<&'a str>, bool)> {
 /// mapping knows wins. A `text` field uses `<name>.keyword` when that is a keyword; a sum
 /// row needs a numeric field. A row nothing resolves carries why, in `note`.
 pub fn resolve_rows(fc: &Value, s: &VolumeSettings) -> Vec<RowResolution> {
-    let mut out = vec![];
-    for key in FIELD_KEYS.iter().chain(["eventSize", "subSize"].iter()) {
-        let sum = matches!(*key, "eventSize" | "subSize");
-        let tried: Vec<String> = s.row(key).to_vec();
-        let mut row = RowResolution { key: key.to_string(), tried: tried.clone(), ..Default::default() };
-        let mut why: Vec<String> = vec![];
-        for name in &tried {
-            let Some((types, agg)) = caps(fc, name) else {
-                why.push(format!("{name}: not in the mapping"));
-                continue;
-            };
-            if sum {
-                if types.iter().all(|t| NUMERIC.contains(t)) && agg {
-                    row.resolved = Some(name.clone());
-                    row.kind = Some(types.join(","));
-                    row.note = "numeric".into();
-                    break;
-                }
-                why.push(format!("{name}: {} is not numeric", types.join(",")));
-                continue;
-            }
-            if agg {
+    FIELD_KEYS.iter().chain(["eventSize", "subSize"].iter())
+        .map(|key| resolve_row(fc, key, s.row(key), matches!(*key, "eventSize" | "subSize")))
+        .collect()
+}
+
+/// One row against a `_field_caps` answer, under `resolve_rows`'s rule. The hosts report's
+/// metadata fields resolve through this too (`report::hosts`): one rule for every field.
+pub fn resolve_row(fc: &Value, key: &str, tried: &[String], sum: bool) -> RowResolution {
+    let mut row = RowResolution { key: key.to_string(), tried: tried.to_vec(), ..Default::default() };
+    let mut why: Vec<String> = vec![];
+    for name in tried {
+        let Some((types, agg)) = caps(fc, name) else {
+            why.push(format!("{name}: not in the mapping"));
+            continue;
+        };
+        if sum {
+            if types.iter().all(|t| NUMERIC.contains(t)) && agg {
                 row.resolved = Some(name.clone());
                 row.kind = Some(types.join(","));
-                row.note = "aggregatable".into();
+                row.note = "numeric".into();
                 break;
             }
-            if types.contains(&"text") {
-                let kw = format!("{name}.keyword");
-                if let Some((kt, true)) = caps(fc, &kw) {
-                    if kt.iter().all(|t| *t == "keyword") {
-                        row.resolved = Some(kw);
-                        row.kind = Some("keyword".into());
-                        row.note = format!("{name} is text: using {name}.keyword");
-                        break;
-                    }
+            why.push(format!("{name}: {} is not numeric", types.join(",")));
+            continue;
+        }
+        if agg {
+            row.resolved = Some(name.clone());
+            row.kind = Some(types.join(","));
+            row.note = "aggregatable".into();
+            break;
+        }
+        if types.contains(&"text") {
+            let kw = format!("{name}.keyword");
+            if let Some((kt, true)) = caps(fc, &kw) {
+                if kt.iter().all(|t| *t == "keyword") {
+                    row.resolved = Some(kw);
+                    row.kind = Some("keyword".into());
+                    row.note = format!("{name} is text: using {name}.keyword");
+                    break;
                 }
-                why.push(format!("{name}: text with no .keyword"));
-                continue;
             }
-            why.push(format!("{name}: {} is not aggregatable", types.join(",")));
+            why.push(format!("{name}: text with no .keyword"));
+            continue;
         }
-        if row.resolved.is_none() {
-            row.note = if tried.is_empty() { "no field names set".into() } else { why.join("; ") };
-        }
-        out.push(row);
+        why.push(format!("{name}: {} is not aggregatable", types.join(",")));
     }
-    out
+    if row.resolved.is_none() {
+        row.note = if tried.is_empty() { "no field names set".into() } else { why.join("; ") };
+    }
+    row
 }
 
 /// The time field against a `_field_caps` answer: its type when it is a date (`date`,

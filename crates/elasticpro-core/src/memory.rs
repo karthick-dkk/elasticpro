@@ -12,7 +12,10 @@
 //!   cache       — L/4, or `ELASTICPRO_CACHE_MB` when it is set. Held bodies, all of them.
 //!   in flight   — L/4: response bodies being received, parsed or sent at once.
 //!   read cache  — L/16, at most 64 MiB: small, short-lived read-through copies.
-//! The rest (at least 3/8 of L) is the process itself, the replies being serialised from
+//!   reports     — L/8, at least 64 MiB: the hosts collection's pages and the report
+//!                 builds (docs/REPORT-TYPES.md "Isolation and failure"). Nothing there
+//!                 holds a cluster-day or a workbook; this caps the page a search may answer.
+//! The rest (at least 1/4 of L) is the process itself, the replies being serialised from
 //! the cache, and slack for the allocator. No limit at all (the desktop app, a bare
 //! binary): the 256 MiB cache that has always been the default, and the same for the rest.
 
@@ -32,6 +35,12 @@ pub const MIN_CACHE_MB: u64 = 16;
 pub const CACHE_OVERHEAD: u64 = 2;
 /// The process without any bodies: runtime, TLS, tunnels, the account and request stores.
 pub const BASE_RESERVE_MB: u64 = 128;
+/// The reports share's floor, and its size without a limit.
+pub const MIN_REPORTS_MB: u64 = 64;
+pub const DEFAULT_REPORTS_MB: u64 = 128;
+/// One page of the hosts collection may answer at most this fraction of the reports share:
+/// two clusters collect at once, and a parsed page costs a few times its bytes.
+pub const REPORTS_PAGE_FRACTION: u64 = 8;
 /// Above this a "limit" is the kernel's way of saying none (cgroup v1 reports ~2^63).
 const UNLIMITED_ABOVE: u64 = 1 << 50;
 
@@ -49,6 +58,8 @@ pub struct MemoryBudget {
     pub inflight_bytes: usize,
     /// Small read-through copies.
     pub read_cache_bytes: usize,
+    /// The hosts collection and the report builds.
+    pub reports_bytes: usize,
     /// Set when the operator's cache size cannot fit the limit with its overhead.
     pub warning: Option<String>,
 }
@@ -82,6 +93,7 @@ pub fn split(limit: Option<(u64, &'static str)>, cache_mb: Option<u64>) -> Memor
     let cache = cache_mb.map(|m| m.max(1) * MIB).unwrap_or(derived_cache);
     let inflight = lim.map(|l| l / 4).unwrap_or(DEFAULT_INFLIGHT_MB * MIB);
     let read_cache = lim.map(|l| (l / 16).min(READ_CACHE_MAX_MB * MIB)).unwrap_or(READ_CACHE_MAX_MB * MIB);
+    let reports = lim.map(|l| (l / 8).max(MIN_REPORTS_MB * MIB)).unwrap_or(DEFAULT_REPORTS_MB * MIB);
     let warning = match (lim, cache_mb) {
         (Some(l), Some(mb)) => {
             let need = cache * CACHE_OVERHEAD + inflight + read_cache + BASE_RESERVE_MB * MIB;
@@ -102,7 +114,16 @@ pub fn split(limit: Option<(u64, &'static str)>, cache_mb: Option<u64>) -> Memor
         cache_from_env: cache_mb.is_some(),
         inflight_bytes: inflight as usize,
         read_cache_bytes: read_cache as usize,
+        reports_bytes: reports as usize,
         warning,
+    }
+}
+
+impl MemoryBudget {
+    /// The most one page of the hosts collection may answer before the next page is asked
+    /// for at half the size (`report::hosts::next_page_size`).
+    pub fn report_page_bytes(&self) -> usize {
+        self.reports_bytes / REPORTS_PAGE_FRACTION as usize
     }
 }
 
@@ -128,6 +149,7 @@ pub fn log_budget() {
         cache_from = if b.cache_from_env { "ELASTICPRO_CACHE_MB" } else if b.limit_bytes.is_some() { "a quarter of the limit" } else { "default" },
         inflight_mib = b.inflight_bytes as u64 / MIB,
         read_cache_mib = b.read_cache_bytes as u64 / MIB,
+        reports_mib = b.reports_bytes as u64 / MIB,
         "memory budget"
     );
     if let Some(w) = &b.warning {
@@ -156,6 +178,15 @@ mod tests {
         assert_eq!((b.cache_bytes as u64, b.read_cache_bytes as u64), (64 * MIB, 16 * MIB));
         let b = split(Some((32 * MIB, "cgroup v2")), None);
         assert_eq!(b.cache_bytes as u64, MIN_CACHE_MB * MIB);
+    }
+
+    #[test]
+    fn the_reports_share_is_an_eighth_with_a_floor() {
+        assert_eq!(split(Some((G, "cgroup v2")), None).reports_bytes as u64, 128 * MIB);
+        assert_eq!(split(Some((G, "cgroup v2")), None).report_page_bytes() as u64, 16 * MIB);
+        assert_eq!(split(Some((4 * G, "cgroup v2")), None).reports_bytes as u64, 512 * MIB);
+        assert_eq!(split(Some((256 * MIB, "cgroup v2")), None).reports_bytes as u64, MIN_REPORTS_MB * MIB, "the floor");
+        assert_eq!(split(None, None).reports_bytes as u64, DEFAULT_REPORTS_MB * MIB);
     }
 
     #[test]

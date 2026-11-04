@@ -410,6 +410,10 @@ impl Transport {
         match rb.send().await {
             Ok(mut res) => {
                 let status = res.status();
+                // A cluster that sheds load says how long to wait (429/503 `Retry-After`, in
+                // seconds): the report collector's controller honours it.
+                let retry_after_s = res.headers().get(reqwest::header::RETRY_AFTER)
+                    .and_then(|v| v.to_str().ok()).and_then(|s| s.trim().parse::<u64>().ok());
                 let body = read_body(&mut res, limit, started + timeout + Duration::from_secs(1), m == reqwest::Method::HEAD).await;
                 drop(res);
                 let took = started.elapsed().as_millis() as u64;
@@ -452,6 +456,9 @@ impl Transport {
                     "message": if ok { String::new() } else { format!("HTTP {} {}", status.as_u16(), status.canonical_reason().unwrap_or("")) },
                     "bytes": body.len(),
                 });
+                if let Some(s) = retry_after_s.filter(|_| !ok) {
+                    out["retryAfterS"] = json!(s);
+                }
                 // Parsed straight from the bytes: no second copy of the body as text unless
                 // it is not JSON.
                 match serde_json::from_slice::<Value>(&body) {

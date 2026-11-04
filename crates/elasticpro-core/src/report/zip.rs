@@ -6,7 +6,7 @@
 //! few megabytes), no encryption, no extra fields. Times are fixed at 1980-01-01, the
 //! format's epoch, so the same data gives the same bytes.
 
-use std::io::Write as _;
+use std::io::Write;
 
 /// One entry before it is written.
 pub struct Entry {
@@ -94,6 +94,154 @@ pub fn write(entries: &[Entry]) -> Result<Vec<u8>, String> {
     Ok(out)
 }
 
+/// A writer that counts what went through it: the archive's offsets.
+struct Counting<W: Write> {
+    inner: W,
+    n: u64,
+}
+
+impl<W: Write> Write for Counting<W> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let k = self.inner.write(buf)?;
+        self.n += k as u64;
+        Ok(k)
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+/// The entry being written.
+struct Current<W: Write> {
+    enc: flate2::write::DeflateEncoder<Counting<W>>,
+    crc: flate2::Crc,
+    size: u64,
+    name: String,
+    offset: u64,
+    data_start: u64,
+}
+
+/// A ZIP written entry by entry, each deflated as it is written, to any writer — a file
+/// for the hosts report, whose sheets are far too large to hold (docs/REPORT-TYPES.md
+/// "Workbook"). The sizes and CRC of an entry are only known at its end, so each carries a
+/// data descriptor after its data (flag bit 3) and the central directory, written last,
+/// has them too. Same subset as `write` otherwise: no ZIP64 — an entry or the archive past
+/// 4 GiB is refused, not written wrong.
+pub struct StreamZip<W: Write> {
+    out: Option<Counting<W>>,
+    cur: Option<Current<W>>,
+    central: Vec<u8>,
+    entries: usize,
+}
+
+fn u32_fits(n: u64, what: &str) -> Result<u32, String> {
+    u32::try_from(n).map_err(|_| format!("{what}: too large for a ZIP without ZIP64 (over 4 GiB)"))
+}
+
+impl<W: Write> StreamZip<W> {
+    pub fn new(w: W) -> StreamZip<W> {
+        StreamZip { out: Some(Counting { inner: w, n: 0 }), cur: None, central: vec![], entries: 0 }
+    }
+
+    /// Start an entry; the one before it, if any, is ended first.
+    pub fn begin(&mut self, name: &str) -> Result<(), String> {
+        self.end()?;
+        if self.entries >= u16::MAX as usize {
+            return Err("too many entries for a ZIP without ZIP64".into());
+        }
+        let mut out = self.out.take().ok_or("the archive is finished")?;
+        let offset = out.n;
+        let flags: u16 = (1 << 3) | (1 << 11);
+        let mut h = Vec::with_capacity(30 + name.len());
+        h.extend_from_slice(&0x0403_4b50u32.to_le_bytes());
+        h.extend_from_slice(&20u16.to_le_bytes());
+        h.extend_from_slice(&flags.to_le_bytes());
+        h.extend_from_slice(&8u16.to_le_bytes());
+        h.extend_from_slice(&0u16.to_le_bytes());
+        h.extend_from_slice(&DOS_DATE_1980_01_01.to_le_bytes());
+        h.extend_from_slice(&[0u8; 12]); // crc, sizes: in the data descriptor
+        h.extend_from_slice(&(name.len() as u16).to_le_bytes());
+        h.extend_from_slice(&0u16.to_le_bytes());
+        h.extend_from_slice(name.as_bytes());
+        out.write_all(&h).map_err(|e| e.to_string())?;
+        let data_start = out.n;
+        self.cur = Some(Current {
+            enc: flate2::write::DeflateEncoder::new(out, flate2::Compression::default()),
+            crc: flate2::Crc::new(), size: 0, name: name.to_string(), offset, data_start,
+        });
+        Ok(())
+    }
+
+    /// More of the current entry.
+    pub fn write(&mut self, data: &[u8]) -> Result<(), String> {
+        let c = self.cur.as_mut().ok_or("no entry begun")?;
+        c.crc.update(data);
+        c.size += data.len() as u64;
+        c.enc.write_all(data).map_err(|e| e.to_string())
+    }
+
+    /// End the current entry (nothing when none is open).
+    pub fn end(&mut self) -> Result<(), String> {
+        let Some(c) = self.cur.take() else { return Ok(()) };
+        let mut out = c.enc.finish().map_err(|e| e.to_string())?;
+        let (sum, csize) = (c.crc.sum(), out.n - c.data_start);
+        let (csize, size, offset) = (u32_fits(csize, &c.name)?, u32_fits(c.size, &c.name)?, u32_fits(c.offset, &c.name)?);
+        let mut d = Vec::with_capacity(16);
+        d.extend_from_slice(&0x0807_4b50u32.to_le_bytes());
+        d.extend_from_slice(&sum.to_le_bytes());
+        d.extend_from_slice(&csize.to_le_bytes());
+        d.extend_from_slice(&size.to_le_bytes());
+        out.write_all(&d).map_err(|e| e.to_string())?;
+        let flags: u16 = (1 << 3) | (1 << 11);
+        let cd = &mut self.central;
+        cd.extend_from_slice(&0x0201_4b50u32.to_le_bytes());
+        cd.extend_from_slice(&20u16.to_le_bytes());
+        cd.extend_from_slice(&20u16.to_le_bytes());
+        cd.extend_from_slice(&flags.to_le_bytes());
+        cd.extend_from_slice(&8u16.to_le_bytes());
+        cd.extend_from_slice(&0u16.to_le_bytes());
+        cd.extend_from_slice(&DOS_DATE_1980_01_01.to_le_bytes());
+        cd.extend_from_slice(&sum.to_le_bytes());
+        cd.extend_from_slice(&csize.to_le_bytes());
+        cd.extend_from_slice(&size.to_le_bytes());
+        cd.extend_from_slice(&(c.name.len() as u16).to_le_bytes());
+        cd.extend_from_slice(&[0u8; 12]); // extra, comment, disk, internal and external attributes
+        cd.extend_from_slice(&offset.to_le_bytes());
+        cd.extend_from_slice(c.name.as_bytes());
+        self.entries += 1;
+        self.out = Some(out);
+        Ok(())
+    }
+
+    /// One whole entry.
+    pub fn add(&mut self, name: &str, data: &[u8]) -> Result<(), String> {
+        self.begin(name)?;
+        self.write(data)?;
+        self.end()
+    }
+
+    /// The central directory and the end record; hands the writer back.
+    pub fn finish(mut self) -> Result<W, String> {
+        self.end()?;
+        let mut out = self.out.take().ok_or("the archive is finished")?;
+        let cd_offset = u32_fits(out.n, "the archive")?;
+        let cd_size = u32_fits(self.central.len() as u64, "the central directory")?;
+        out.write_all(&self.central).map_err(|e| e.to_string())?;
+        let mut e = Vec::with_capacity(22);
+        e.extend_from_slice(&0x0605_4b50u32.to_le_bytes());
+        e.extend_from_slice(&0u16.to_le_bytes());
+        e.extend_from_slice(&0u16.to_le_bytes());
+        e.extend_from_slice(&(self.entries as u16).to_le_bytes());
+        e.extend_from_slice(&(self.entries as u16).to_le_bytes());
+        e.extend_from_slice(&cd_size.to_le_bytes());
+        e.extend_from_slice(&cd_offset.to_le_bytes());
+        e.extend_from_slice(&0u16.to_le_bytes());
+        out.write_all(&e).map_err(|e| e.to_string())?;
+        out.flush().map_err(|e| e.to_string())?;
+        Ok(out.inner)
+    }
+}
+
 /// Read an archive back through its central directory, checking every CRC and size. The
 /// proof that what was written opens is a reader that trusts nothing but the directory;
 /// public (hidden) so the integration tests can open what `REPORT_DOWNLOAD` hands back.
@@ -164,6 +312,26 @@ mod tests {
         assert_eq!(back[2].0, "é.txt", "UTF-8 names");
         assert!(z.len() < big.len() / 4, "the repetitive entry was deflated: {} bytes", z.len());
         assert_eq!(z, write(&entries()).unwrap(), "the same input, the same bytes");
+    }
+
+    #[test]
+    fn a_streamed_archive_reads_back_with_its_data_descriptors() {
+        let big = "row,of,text\n".repeat(5000);
+        let mut z = StreamZip::new(Vec::new());
+        z.begin("a.csv").unwrap();
+        for chunk in big.as_bytes().chunks(777) {
+            z.write(chunk).unwrap();
+        }
+        z.add("é.txt", b"").unwrap();
+        z.begin("b.txt").unwrap();
+        z.write(b"hello").unwrap();
+        let bytes = z.finish().unwrap();
+        let back = read(&bytes).unwrap();
+        assert_eq!(back.len(), 3);
+        assert_eq!((back[0].0.as_str(), back[0].1.as_slice()), ("a.csv", big.as_bytes()));
+        assert_eq!((back[1].0.as_str(), back[1].1.len()), ("é.txt", 0));
+        assert_eq!(back[2].1, b"hello", "the last entry is ended by finish");
+        assert!(bytes.len() < big.len() / 4, "deflated as it went");
     }
 
     #[test]
