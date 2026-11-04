@@ -12,6 +12,7 @@
 export const REPORT_SECTIONS = Object.freeze([
   { id: 'overview', label: 'Overview' },
   { id: 'daily', label: 'Daily & monthly' },
+  { id: 'hosts', label: 'Volume by host' },
   { id: 'capacity', label: 'Capacity & retention' },
   { id: 'measure', label: 'Measure size' },
   { id: 'planning', label: 'Planning' },

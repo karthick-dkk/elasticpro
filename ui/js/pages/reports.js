@@ -2,7 +2,7 @@
  * Page — Reports (0.3.53, was Volume report): what each cluster takes in, what it keeps, and
  * whether its storage holds it. docs/REPORTS.md is the contract.
  *
- * Sections, each its own module under ui/js/reports/: Overview, Daily & monthly, Capacity &
+ * Sections, each its own module under ui/js/reports/: Overview, Daily & monthly, Volume by host, Capacity &
  * retention, Measure size, Planning, Exports & schedules. The route is `#/reports/<section>`
  * (reports/route.js); `#/volume…` still opens it. Overview, Capacity, Measure and Exports are
  * fleet-wide — one line per cluster shown; Daily & monthly is one cluster.
@@ -20,6 +20,7 @@ import { overviewSection } from '../reports/overview.js';
 import { capacitySection, capacityReset } from '../reports/capacity.js';
 import { measureSection } from '../reports/measure.js';
 import { exportsSection, exportsReset } from '../reports/exports.js';
+import { hostsSection, hostsReset } from '../reports/hosts.js';
 import { planningSection } from '../reports/planning.js';
 import { volumeSummary, resetVolumeSummary, setSummaryMode } from '../reports/daily.js';
 import { volumeAnalysisCard, setVolumeAnalysisField } from '../ui/index-metrics.js';
@@ -53,6 +54,7 @@ export function render(el) {
     resetVolumeSummary();
     capacityReset();
     exportsReset();
+    hostsReset();
     planningNode = null;
     focusField = null;
   }
@@ -142,6 +144,10 @@ function body(list) {
       return h('div.rp-section',
         focusField ? h('div', { dataset: { focus: 'field-volume' }, style: { marginBottom: '10px' } }, volumeAnalysisCard(c, draw)) : null,
         volumeSummary(c, { redraw: draw, picker: dailyPicker(list, c) }));
+    }
+    case 'hosts': {
+      const c = dailyCluster(list);
+      return hostsSection({ cluster: c, picker: dailyPicker(list, c) });
     }
     case 'capacity': return capacitySection(ctx);
     case 'measure': return measureSection(ctx);
