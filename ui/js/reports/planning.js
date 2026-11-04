@@ -15,7 +15,7 @@ import { clusters as appClusters } from '../core/state.js';
 import { navigateTo } from '../core/intent.js';
 import * as volumeDailyShared from '../core/volume-daily.js';
 import { planTemplatesGet } from '../core/plan-templates.js';
-import { computePlan, planCsvRows, planPerDayBytes, inputsFromCluster, TARGET_LABEL, BACKUP_TARGETS, DEFAULT_INPUT } from '../core/plan.js';
+import { computePlan, planCsvRows, inputsFromCluster, TARGET_LABEL, BACKUP_TARGETS, DEFAULT_INPUT } from '../core/plan.js';
 
 const FIELDS = ['perDay', 'hotDays', 'warmDays', 'bkDays', 'buffer', 'replicas'];
 
@@ -101,8 +101,8 @@ export function planningSection(ctx = {}) {
     let res;
     try { res = await volumeDailyShared.volumeDaily(id, { days: 14 }); } catch (e) { res = { ok: false, message: e.message || String(e) }; }
     if (st.basedOn !== id) return;
-    // One definition of "per day" (docs/REPORTS.md): core/volume-daily.js perDayEventBytes once it exists.
-    const perDayBytes = res && res.ok !== false ? planPerDayBytes(res, volumeDailyShared, 7) : null;
+    // One definition of "per day" (docs/REPORTS.md): core/volume-daily.js perDayEventBytes, 7 finished days.
+    const perDayBytes = res && res.ok !== false ? volumeDailyShared.perDayEventBytes(res, 7) : null;
     const fill = inputsFromCluster({ perDayBytes, liveRetention: c.liveRetention });
     const said = [];
     if (fill.perDay != null) { st.input.perDay = fill.perDay; delete st.raw.perDay; said.push(`${fill.perDay} GB a day from the last 7 days`); }

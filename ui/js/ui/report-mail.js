@@ -1,5 +1,5 @@
 /**
- * Config › Volume fields › "Volume report by mail" and "Mail server (SMTP)" (0.3.45).
+ * Config › Reports › "Volume report by mail" and "Mail server (SMTP)" (0.3.45).
  *
  * Both are the server's settings, not the clusters file's: the mailed report lives in
  * `<data>/report-schedule.json` and the mail server in `<data>/mail.json`, and only an
@@ -13,7 +13,7 @@
  *
  * After the first load nothing here redraws the section: a save, a test or a started job
  * changes its own status or note line in place. A redraw would throw away whatever is
- * typed in the other panel, and in the Volume fields form above both.
+ * typed in the other panel, and in the Reports form above both.
  */
 
 import { h, $, mount } from '../lib/dom.js';
@@ -77,7 +77,7 @@ export function reportMailKeyLines() {
   return mailConfigTxtLines(rm.mail, rm.sched);
 }
 
-/** Both panels, stacked, for the Volume fields section. */
+/** Both panels, stacked, for the Reports section. */
 export function reportMailPanels() {
   return h('div.rm-panels', scheduleCard(), mailCard());
 }
@@ -153,7 +153,7 @@ function scheduleBody() {
       h('span.rm-lab', 'Sheets'),
       ...SHEETS.map(([k, label]) => lockIf(M, 'sheets', checkbox(`rm-sheet-${k}`, label, sheets.has(k)))),
       lockNote(M, 'sheets')),
-    h('div.muted.rm-note', 'Each sheet uses the columns, names and order set on Indices › Summary. The mail body holds the key figures: yesterday, average per day, month so far.'),
+    h('div.muted.rm-note', 'Each sheet uses the columns, names and order set on Reports › Daily & monthly. The mail body holds the key figures: yesterday, average per day, month so far.'),
     h('div.rm-acts',
       h('button#rm-send-now.btn.sm', { type: 'button', title: 'Mail the report now with the saved settings, as a background job', onclick: sendNow }, 'Send report now'),
       downloadButton(),

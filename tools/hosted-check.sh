@@ -80,7 +80,7 @@ check "clearing it needs a caller"     "$(post $B -d '{"type":"NOTIFY_CLEAR"}' |
 # Refresh now sends searches, so every message needs a caller; the roles are proved in-process
 # (tests/volume.rs). Its timer logs "volume daily: timer started" without a user, so the
 # audit count above is unchanged — and this instance has no data dir, so no timer at all.
-for t in VOLUME_SETTINGS VOLUME_FIELDS_CHECK VOLUME_DAILY VOLUME_MONTHLY VOLUME_BREAKDOWN VOLUME_MONTHLY_ALL VOLUME_RUN VOLUME_LAYOUT_GET VOLUME_LAYOUT_SET; do
+for t in VOLUME_SETTINGS VOLUME_FIELDS_CHECK VOLUME_DAILY VOLUME_MONTHLY VOLUME_BREAKDOWN VOLUME_MONTHLY_ALL VOLUME_RUN VOLUME_LAYOUT_GET VOLUME_LAYOUT_SET VOLUME_PATTERN_CHECK; do
   check "$t needs a caller"              "$(post $B -d "{\"type\":\"$t\",\"clusterId\":\"x\"}" | field kind)" "unauthenticated"
 done
 

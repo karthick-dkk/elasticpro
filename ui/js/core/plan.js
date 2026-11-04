@@ -181,29 +181,6 @@ export function planCsvRows(plan) {
 
 export const GB = 1e9;
 
-/**
- * The 7-day mean of event_logsize per day from a VOLUME_DAILY reply, in bytes, or null when
- * the record has no measured day. NOTE: docs/REPORTS.md names one definition for this,
- * `perDayEventBytes(record, days)` in core/volume-daily.js (added on the Reports branch). This
- * is the stand-in until that lands; `planPerDayBytes` already prefers it when present, so the
- * two converge on one definition without a change here.
- */
-export function meanEventBytes(reply, days = 7, today = new Date().toISOString().slice(0, 10)) {
-  const rows = ((reply && reply.days) || []).filter((d) => d && d.day < today && typeof d.eventBytes === 'number')
-    .sort((a, b) => (a.day < b.day ? -1 : 1)).slice(-days);
-  if (!rows.length) return null;
-  return rows.reduce((a, d) => a + d.eventBytes, 0) / rows.length;
-}
-
-/** `shared` is the namespace of core/volume-daily.js, so a later `perDayEventBytes` is used as soon as it exists. */
-export function planPerDayBytes(reply, shared, days = 7) {
-  if (shared && typeof shared.perDayEventBytes === 'function') {
-    const v = shared.perDayEventBytes(reply, days);
-    return typeof v === 'number' && Number.isFinite(v) ? v : null;
-  }
-  return meanEventBytes(reply, days);
-}
-
 /** A cluster's `liveRetention` ("30d", "4w", "90 days", 45) as whole days, or null when unset or unreadable. */
 export function retentionDays(v) {
   if (isNum(v)) return v > 0 ? Math.round(v) : null;

@@ -180,15 +180,7 @@ test('CSV: [set] stays [set]; the /backup column follows the target', () => {
   assert.ok(s3.every((r) => r.length === s3[0].length));
 });
 
-test('based on a cluster: the 7-day mean of event_logsize and the live retention policy', () => {
-  const day = (n, eventBytes) => ({ day: `2026-10-${String(n).padStart(2, '0')}`, eventBytes });
-  const reply = { days: [day(1, 1e12), day(20, 100e9), day(21, 200e9), day(22, 300e9), day(23, 400e9), day(24, 500e9), day(25, 600e9), day(26, 700e9), day(27, null)] };
-  // The last seven measured days (20..26) average 400 GB.
-  assert.equal(P.meanEventBytes(reply, 7, '2026-11-04'), 400e9);
-  assert.equal(P.meanEventBytes({ days: [] }), null);
-  assert.equal(P.meanEventBytes({ days: [day(30, 5)] }, 7, '2026-10-30'), null, 'today is still filling');
-  assert.equal(P.planPerDayBytes(reply, { perDayEventBytes: () => 123 }), 123, 'the shared definition wins once it exists');
-  assert.equal(P.planPerDayBytes(reply, {}, 7) != null, true);
+test('based on a cluster: the live retention policy as hot days, and the volume as GB', () => {
   assert.deepEqual(P.inputsFromCluster({ perDayBytes: 412.34e9, liveRetention: '45d' }), { perDay: 412.3, hotDays: 45 });
   assert.deepEqual(P.inputsFromCluster({ perDayBytes: null, liveRetention: '' }), {});
   assert.equal(P.retentionDays('4w'), 28);
@@ -196,4 +188,11 @@ test('based on a cluster: the 7-day mean of event_logsize and the live retention
   assert.equal(P.retentionDays('1y'), 365);
   assert.equal(P.retentionDays('soon'), null);
   assert.equal(P.retentionDays(60), 60);
+});
+
+test('the per-day rate is the shared definition: the mean of the last 7 finished days', async () => {
+  const D = await import(pathToFileURL(path.join(ROOT, 'ui/js/core/volume-daily.js')).href);
+  const day = (n, eventBytes) => ({ day: `2026-10-${String(n).padStart(2, '0')}`, eventBytes });
+  const rec = { days: [day(1, 1e12), day(20, 100e9), day(21, 200e9), day(22, 300e9), day(23, 400e9), day(24, 500e9), day(25, 600e9), day(26, 700e9), day(27, null)] };
+  assert.equal(D.perDayEventBytes(rec, 7, { today: '2026-10-28' }), 450e9, '21 to 27 asked, 21 to 26 measured');
 });

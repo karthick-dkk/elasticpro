@@ -71,7 +71,10 @@ const SIZES = [[1440, 900, false], [1280, 800, false], [1024, 768, false], [1280
 const FRAME_W = 1180;
 /** The buttons that change what a page shows without doing anything: segments, tabs, the Config page's sections. */
 const VIEW_SEL = '#view .seg button, #view .seg-btn, #view [role=tab], #view .tabs button, #view .subnav button';
-const PAGES = ['alerts', 'overview', 'indices', 'shards', 'logs', 'console', 'snapshots', 'volume', 'automation', 'requests', 'accounts', 'settings', 'play']
+// Reports is one page of six sections (docs/REPORTS.md); each section is its own route and is measured as a page.
+const PAGES = ['alerts', 'overview', 'indices', 'shards', 'logs', 'console', 'snapshots',
+  'reports/overview', 'reports/daily', 'reports/capacity', 'reports/measure', 'reports/planning', 'reports/exports',
+  'automation', 'requests', 'accounts', 'settings', 'play']
   .filter((id) => !PAGE_FILTER || PAGE_FILTER.split(',').includes(id));
 
 const pw = await loadPlaywright(ROOT, 'fit-check');
@@ -763,9 +766,9 @@ async function run(browserName, [vw, vh, framed]) {
       await closeAll();
     }
 
-    // the volume report's column notes: the first column and the last, which sits at the window's right edge
-    await goPage('volume');
-    await F.evaluate(() => { [...document.querySelectorAll('#view button')].find((b) => /^Full report$/.test(b.textContent.trim()))?.click(); });
+    // Reports › Capacity › Every parameter: the column notes, the first column and the last, which sits at the window's right edge
+    await goPage('reports/capacity');
+    await F.evaluate(() => { [...document.querySelectorAll('#view button')].find((b) => /^Every parameter/.test(b.textContent.trim()))?.click(); });
     await sleep(600); await quiet(500, 4000);
     for (const which of ['first', 'last']) {
       const ok = await F.evaluate((which) => {

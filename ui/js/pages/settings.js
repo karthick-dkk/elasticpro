@@ -1571,7 +1571,8 @@ async function loadVolume() {
   const res = await volumeSettings(id, volPayload(id));
   vol.unknown = !!res.unknown;
   const changed = JSON.stringify((vol.reply || {}).managed) !== JSON.stringify(res.ok ? res.managed : undefined)
-    || ((vol.reply || {}).configError || '') !== (res.ok ? res.configError || '' : '');
+    || ((vol.reply || {}).configError || '') !== (res.ok ? res.configError || '' : '')
+    || ((vol.reply || {}).patternSource || '') !== (res.ok ? res.patternSource || '' : '');
   vol.reply = res.ok ? res : null;
   // Redraw only when the answer changes what is shown, so a half-typed field is not wiped.
   if (changed || vol.unknown) { if (host && host.isConnected && activeSection() && activeSection().id === 'volume') draw(); }
@@ -1766,13 +1767,17 @@ function indicesCard() {
     return h('label.vf-opt', { class: on ? 'on' : '' }, input, h('span', h('b', title), h('br'), h('span.muted', { style: { fontSize: '12px' } }, help)));
   };
   const pick = vol.checked || (override ? vol.clusterId : state.selected) || (list[0] && list[0].id) || '';
-  const legacyOnly = m.locked.has('indexFormat') && !m.locked.has('indexPattern');
+  // Which of the two the collector obeys (the core's patternSource): "format" (the older indexFormat), "pattern" or "default".
+  const src = (vol.reply && vol.reply.patternSource) || '';
+  const legacy = src === 'format';
+  const patStart = legacy && !override && !m.locked.has('indexPattern') ? '' : start('indexPattern');
+  const inForce = { format: `In force: the older index name format ${m.values.indexFormat}${m.locked.has('indexFormat') ? ' (UI_VOLUME_INDEX_FORMAT in config.txt)' : ''}. Type an index pattern below and Save to switch to it.`,
+    pattern: 'In force: the index pattern below.', default: 'In force: the built-in pattern logstash-*.' }[src] || '';
   const lbl = { style: { fontWeight: '600', fontSize: '12.5px' } };
   const body = h('div', { style: { display: 'grid', gap: '12px' } },
-    legacyOnly ? h('div.banner.warn', { style: { margin: 0, fontSize: '12px' } },
-      `In force: UI_VOLUME_INDEX_FORMAT (${m.values.indexFormat}) from config.txt. Set UI_VOLUME_INDEX_PATTERN to use the pattern below instead.`) : null,
+    inForce ? h('div#vf-source', { class: legacy ? 'banner warn' : 'muted', 'data-source': src, style: { margin: 0, fontSize: '12px' } }, inForce) : null,
     h('div.vf-fld', h('label', { for: 'vf-pattern', ...lbl }, 'Index pattern'),
-      withPreview(lock('indexPattern', text('vf-pattern', start('indexPattern'), { mono: true, placeholder: shown('indexPattern') || 'logstash-*' }))),
+      withPreview(lock('indexPattern', text('vf-pattern', patStart, { mono: true, placeholder: shown('indexPattern') || 'logstash-*' }))),
       h('span.muted', { style: { fontSize: '12px' } }, 'The default. One or more patterns, comma-separated. No date part is needed in the pattern.'),
       note('indexPattern')),
     h('div.vf-fld', { role: 'radiogroup', 'aria-labelledby': 'vf-day-l' }, h('span#vf-day-l', lbl, 'Which day a document counts on'),
@@ -1857,7 +1862,7 @@ function volumeCard() {
     cell('Top values kept per field', num('vf-top', 'topValues', VOLUME_BOUNDS.topValues[0], VOLUME_BOUNDS.topValues[1]), 'topValues'),
     cell('Keep the daily record for (months)', num('vf-keep', 'keepMonths', VOLUME_BOUNDS.keepMonths[0], VOLUME_BOUNDS.keepMonths[1]), 'keepMonths'),
     cell('Collect once a day at (server time)', lock('collectAt', h('input.mono', { id: 'vf-at', type: 'time', value: String(start('collectAt')) })), 'collectAt',
-      'Every 24 h. "Refresh now" on Indices › Summary runs it at once.'));
+      'Every 24 h. "Collect now" on Reports › Daily & monthly runs it at once.'));
 
   const name = (list.find((c) => c.id === vol.clusterId) || {}).name || 'a cluster';
   return card('Volume fields',

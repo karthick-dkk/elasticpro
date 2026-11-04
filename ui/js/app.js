@@ -54,7 +54,8 @@ const saveExample = () => saveTextAs('clusters.yaml', EXAMPLE_YAML);
 
 import * as pOverview from './pages/overview.js';
 import * as pAlerts from './pages/alerts.js';
-import * as pVolume from './pages/volume.js';
+import * as pReports from './pages/reports.js';
+import { parseHash, pageAlias } from './reports/route.js';
 import * as pIndices from './pages/indices.js';
 import * as pLogs from './pages/logs.js';
 import * as pSnapshots from './pages/snapshots.js';
@@ -66,7 +67,7 @@ import * as pAccounts from './pages/accounts.js';
 import * as pRequests from './pages/requests.js';
 import * as pPlay from './pages/play.js';
 import { fullscreen } from './core/fullscreen.js';
-import { displaySecretOf, playExchange, pageOfHash } from './play/api.js';
+import { displaySecretOf, playExchange } from './play/api.js';
 import { loadSilences } from './core/silences.js';
 import { setRequestOrigin } from './core/es.js';
 import { UI_CODES, withCode, errorText } from './core/error-codes.js';
@@ -97,7 +98,8 @@ const PAGES = [
   { id: 'logs',      label: 'Live logs & Log delay', icon: '▶', mod: pLogs, multi: true,  minRole: 'user', live: true },
   { id: 'console',   label: 'REST console',   icon: '⌫', mod: pConsole,   multi: false, minRole: 'user', live: true },
   { id: 'snapshots', label: 'Snapshots',      icon: '↻', mod: pSnapshots, multi: true,  minRole: 'user' },
-  { id: 'volume',    label: 'Volume report',  icon: '▤', mod: pVolume,    multi: true,  minRole: 'user' },
+  // Was 'volume' / Volume report until 0.3.53; #/volume still opens it (reports/route.js PAGE_ALIAS).
+  { id: 'reports',   label: 'Reports',        icon: '▤', mod: pReports,   multi: true,  minRole: 'user' },
   // Not for read-only users: automation is run by operators and admins.
   { id: 'automation', label: 'Automation',    icon: '⟳', mod: pAutomation, multi: true, minRole: 'operator' },
   // An operator gets the emergency stop here; the request log itself stays an admin's.
@@ -151,7 +153,7 @@ function layout() {
  * on alerts, automation and the admin pages, where glancing is the point; the Clusters page
  * lost it on 2026-10-25 (its table is the dashboard, the band above it was in the way).
  */
-const STRIP_HIDDEN = new Set(['overview', 'indices', 'console', 'logs', 'snapshots', 'shards', 'volume']);
+const STRIP_HIDDEN = new Set(['overview', 'indices', 'console', 'logs', 'snapshots', 'shards', 'reports']);
 
 /* --------------------------------- theming ---------------------------------- */
 async function initTheme() {
@@ -319,7 +321,7 @@ async function openSnapshot(file) {
   try {
     await loadSnapshotFile(file);
     renderShell();
-    const wanted = (location.hash || '').replace('#/', '') || 'overview';
+    const wanted = parseHash(location.hash).page || 'overview';
     go(PAGES.some((p) => p.id === wanted) ? wanted : 'overview');
   } catch (e) {
     renderSetup({ status: 'error', error: `Could not read that snapshot — ${e.message}` });
@@ -928,6 +930,7 @@ function scrollPageTop() {
 let playReturn = '';
 
 export function go(id) {
+  id = pageAlias(id);
   // A hash typed by hand, or one left in the address bar by a previous session under a
   // different account, must not land on a tab this role does not have.
   const allowed = visiblePages();
@@ -958,7 +961,10 @@ export function go(id) {
   setRequestOrigin(`page:${page.id}`);
   // Drawn afresh from state below: whatever the gate was holding for the old drawing is in it.
   redrawGate.reset();
-  location.hash = `#/${page.id}`;
+  // A section of the same page (#/reports/capacity) stays in the address; anything else is the page.
+  const here = parseHash(location.hash);
+  const hash = here.page === page.id && here.rest ? `#/${page.id}/${here.rest}` : `#/${page.id}`;
+  if (location.hash !== hash) location.hash = hash;
   resolveSelection(page);
   syncEvidence();
   renderNav();
@@ -1009,8 +1015,8 @@ async function start(config, handle) {
     try { history.replaceState(null, '', withoutTrouble(location.href)); } catch (_) { /* sandboxed frame */ }
   }
   // Back where the person was, when Zabbix signed them in again under them (see waitForZabbix).
-  const back = embedded ? takeRememberedPage((id) => PAGES.some((p) => p.id === id)) : '';
-  const wanted = back || (target && target.page) || pageOfHash(location.hash) || 'overview';
+  const back = embedded ? pageAlias(takeRememberedPage((id) => PAGES.some((p) => p.id === pageAlias(id)))) : '';
+  const wanted = back || pageAlias(target && target.page) || parseHash(location.hash).page || 'overview';
   go(PAGES.some((p) => p.id === wanted) ? wanted : 'overview');
   if (!isSnapshotMode() && clustersNeedingCredential().length) {
     // a credential remembered in the OS vault (opt-in) signs in without a prompt;
@@ -1324,7 +1330,7 @@ for (const ev of ['pointerdown', 'keydown', 'wheel', 'touchstart']) {
 }
 
 window.addEventListener('ep:navigate', (e) => {
-  const id = e.detail && e.detail.page;
+  const id = pageAlias(e.detail && e.detail.page);
   if (!id || !PAGES.some((p) => p.id === id)) return;
   // Arriving with a cluster named means arriving AT that cluster. The fleet preference
   // has to give way or resolveSelection puts "All clusters" straight back on a page that
@@ -1338,8 +1344,11 @@ window.addEventListener('ep:navigate', (e) => {
 });
 
 window.addEventListener('hashchange', () => {
-  const wanted = pageOfHash(location.hash);
-  if (wanted && wanted !== currentPage && PAGES.some((p) => p.id === wanted)) go(wanted);
+  const wanted = parseHash(location.hash).page;
+  if (wanted && wanted !== currentPage && PAGES.some((p) => p.id === wanted)) { go(wanted); return; }
+  // Another section of the page on screen (#/reports/daily → #/reports/capacity).
+  const p = PAGES.find((x) => x.id === currentPage);
+  if (wanted === currentPage && p && p.mod.onRoute) { try { p.mod.onRoute(); } catch (err) { console.error(err); } }
 });
 
 document.addEventListener('keydown', (e) => {

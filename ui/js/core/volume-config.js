@@ -277,7 +277,8 @@ export function validateVolume(v, { partial = false } = {}) {
     const f = String(v.indexFormat || '');
     if (!f.includes('*') || !f.includes('YYYY.MM.DD')) bad.push('Index name: must contain * and YYYY.MM.DD, for example logstash-*-YYYY.MM.DD.');
   }
-  if (has(v.indexPattern) || !partial) {
+  // Blank is the older index name format alone (the core: no pattern set, the format rules); give one to leave it.
+  if (has(v.indexPattern) || (!partial && !has(v.indexFormat))) {
     const pats = toList(v.indexPattern);
     if (!pats.length) bad.push('Index pattern: name at least one, for example logstash-*.');
     for (const p of pats) if (!PATTERN_RE.test(p)) bad.push(`Index pattern: "${p}" is not an index pattern (letters, digits, _ . - and *).`);

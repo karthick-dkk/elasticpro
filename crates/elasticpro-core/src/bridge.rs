@@ -1046,8 +1046,12 @@ impl Core {
     ///   choosing.
     fn gate_cluster(&self, t: &str, msg: &Value, c: &Caller) -> Result<(), Value> {
         const VOLUME_ONE: &[&str] = &["VOLUME_SETTINGS", "VOLUME_FIELDS_CHECK", "VOLUME_DAILY", "VOLUME_MONTHLY", "VOLUME_BREAKDOWN"];
-        if !(matches!(t, "ES" | "ZABBIX_METRICS" | "CLUSTER_DATASET" | "REFRESH" | "VOLUME_RUN" | "REPORT_RUN") || VOLUME_ONE.contains(&t))
-            || c.role >= Role::Admin
+        // VOLUME_PATTERN_CHECK is an admin's, and an admin limited to some clusters may check
+        // only those: the one message here that stops a (limited) admin too.
+        let limited_admin_check = t == "VOLUME_PATTERN_CHECK" && c.limited();
+        if !(matches!(t, "ES" | "ZABBIX_METRICS" | "CLUSTER_DATASET" | "REFRESH" | "VOLUME_RUN" | "REPORT_RUN") || VOLUME_ONE.contains(&t)
+            || limited_admin_check)
+            || (c.role >= Role::Admin && !limited_admin_check)
         {
             return Ok(());
         }
@@ -1277,7 +1281,7 @@ impl Core {
             "HOUSEKEEPING_GET" | "HOUSEKEEPING_RUN" => self.housekeeping_msg(&t, &msg, caller.as_ref()).await,
             // The daily index-volume record (docs/VOLUME.md).
             "VOLUME_SETTINGS" | "VOLUME_FIELDS_CHECK" | "VOLUME_DAILY" | "VOLUME_MONTHLY" | "VOLUME_BREAKDOWN"
-            | "VOLUME_MONTHLY_ALL" | "VOLUME_RUN" | "VOLUME_LAYOUT_GET" | "VOLUME_LAYOUT_SET" => {
+            | "VOLUME_MONTHLY_ALL" | "VOLUME_RUN" | "VOLUME_LAYOUT_GET" | "VOLUME_LAYOUT_SET" | "VOLUME_PATTERN_CHECK" => {
                 self.volume_msg(&t, &msg, caller.as_ref()).await
             }
             // Volume reports and the mail that carries them (docs/VOLUME.md "Reports and mail").
