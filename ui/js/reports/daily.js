@@ -163,32 +163,14 @@ function roleMaySave() {
 }
 const canSave = () => layouts.state === 'ok' && roleMaySave();
 
-/**
- * The layout the core answers when nobody has saved one (its `layout_default`: every column
- * in the docs/VOLUME.md order, three hidden). That is "nobody decided", so the Reports
- * defaults — event_logsize first, index size hidden — apply rather than the 0.3.45 table.
- * Mirrors crates/elasticpro-core/src/volume/mod.rs DAILY_COLUMNS / DAILY_HIDDEN / MONTHLY_COLUMNS.
- */
-const CORE_DEFAULT = {
-  daily: { order: ['day', 'indices', 'docs', 'priBytes', 'topExtra', 'eventBytes', 'subBytes', 'changeVsAvg',
-    'topSourceHost', 'topForwarder', 'totalBytes', 'topTag', 'topSourceIp'], hidden: ['totalBytes', 'topTag', 'topSourceIp'] },
-  monthly: { order: ['month', 'daysWithData', 'priBytes', 'topExtra', 'avgPerDay', 'peakDay', 'docs', 'eventBytes',
-    'subBytes', 'topSourceHost', 'topForwarder', 'from'], hidden: [] },
-};
-export function undecidedLayout(table, l) {
-  const d = CORE_DEFAULT[table];
-  if (!l || !d) return l || null;
-  const same = (a, b) => Array.isArray(a) && a.length === b.length && a.every((x, i) => x === b[i]);
-  const noLabels = !l.labels || !Object.keys(l.labels).length;
-  return same(l.order, d.order) && same([...(l.hidden || [])].sort(), [...d.hidden].sort()) && noLabels ? null : l;
-}
-
 async function loadLayouts() {
   layouts.state = 'loading';
   const res = await volumeLayoutGet();
   if (res && res.ok) {
-    layouts.daily = undecidedLayout('daily', (res.layouts && res.layouts.daily) || null);
-    layouts.monthly = undecidedLayout('monthly', (res.layouts && res.layouts.monthly) || null);
+    // The core's own default when nobody has saved one is the Reports default (event_logsize
+    // first, index size hidden: crates/elasticpro-core/src/volume/mod.rs DAILY_COLUMNS).
+    layouts.daily = (res.layouts && res.layouts.daily) || null;
+    layouts.monthly = (res.layouts && res.layouts.monthly) || null;
     layouts.state = 'ok';
   } else {
     layouts.state = 'unavailable';
@@ -438,10 +420,19 @@ function topCell(top, key) {
 }
 
 const sizeCell = (v, field) => (v === null || v === undefined ? notMeasured(field) : bytes(v));
+/**
+ * Index store size, or "not measured" in amber: since 0.3.53 a day whose indices are split
+ * by the time field has no size per day (Elasticsearch reports size per index), and the
+ * record says null. bytes(null) would print "0 B", which reads as a day that took nothing.
+ */
+export function indexSizeCell(v) {
+  return typeof v === 'number' && Number.isFinite(v) ? bytes(v)
+    : h('span.vs-notm', { title: 'Index size is not measured here: these indices are split into days by the time field, and Elasticsearch reports size per index.' }, 'not measured');
+}
 const DAY_NAME = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 const dayLabel = (ymd) => `${DAY_NAME[new Date(`${ymd}T00:00:00Z`).getUTCDay()]} ${shortDay(ymd)}`;
 
-function dailyCellFor(reply) {
+export function dailyCellFor(reply) {
   const field = eventField(reply.settings);
   const today = utcDay();
   return (key, d) => {
@@ -451,8 +442,8 @@ function dailyCellFor(reply) {
       case 'docs': return d.docs === null || d.docs === undefined ? h('span.muted', { title: 'This day has not been aggregated yet' }, 'not yet') : num(d.docs);
       case 'eventBytes': return sizeCell(eventBytesOf(d), field);
       case 'subBytes': return sizeCell(d.subBytes, 'Sub size');
-      case 'priBytes': return bytes(d.priBytes);
-      case 'totalBytes': return bytes(d.totalBytes);
+      case 'priBytes': return indexSizeCell(d.priBytes);
+      case 'totalBytes': return indexSizeCell(d.totalBytes);
       case 'changeVsAvg': {
         if (d.day === today) return dash();
         const p = eventVsAvgPct(reply, d.day, vs.avgDays, { today });
@@ -596,7 +587,7 @@ function monthlyTable(c, rows, settings, peaks) {
         return p ? h('span', { title: `${shortDay(p.day)} · ${weekday(p.day)}` }, bytes(p.value)) : dash();
       }
       case 'subBytes': return sizeCell(m.subBytes, 'Sub size');
-      case 'priBytes': return bytes(m.priBytes);
+      case 'priBytes': return indexSizeCell(m.priBytes);
       case 'avgPerDay': return typeof m.avgPerDay === 'number' ? bytes(m.avgPerDay) : dash();
       case 'from': return m.keptDays && m.liveDays ? `${m.keptDays} kept, ${m.liveDays} live` : m.keptDays ? 'kept record' : 'live indices';
       default: return key in TOP_KEY ? topCell(m.top, key) : '';

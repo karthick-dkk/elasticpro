@@ -897,7 +897,7 @@ await go('reports');
     `reports overview: the By cluster columns are ${byHeads().join(' | ')}`);
   ok(panel('By cluster').querySelectorAll('tbody tr').length === config.clusters.length, 'reports overview: not one line per cluster');
   // The mock's three nodes are data nodes (node.role "dim"): the disk is measured, as a percentage.
-  ok(/\d+\.\d %/.test(panel('By cluster').querySelector('tbody tr td[data-col="disk"]').textContent), 'reports overview: the data-node disk is not measured against the mock');
+  ok(/\d+\.\d %/.test(panel('By cluster').querySelector('tbody tr td[data-col="diskUsed"]').textContent), 'reports overview: the data-node disk is not measured against the mock');
 
   // The Columns menu: hide, move, reset, and Save for everyone (VOLUME_LAYOUT_SET table overview).
   const realFetch = globalThis.fetch;
@@ -934,20 +934,30 @@ await go('reports');
       const f = files.at(-1);
       ok(f && /^reports-overview-.+\.csv$/.test(f.name) && f.text.split('\n')[0].startsWith('Cluster,7-day avg (GB),Yesterday (GB)') && !/Type/.test(f.text.split('\n')[0]),
         `reports overview: the CSV does not follow the columns on screen: ${f && f.text.split('\n')[0]}`);
-      // Save for everyone: the shared layout, table overview. A core without the table refuses,
-      // and the arrangement stays in this browser — said so in the menu.
+      // Save for everyone: the shared layout, table overview (the 0.3.53 core keeps it). It is
+      // really kept: VOLUME_LAYOUT_GET gives it back to anybody who asks.
       lsent.length = 0;
       btnIn(pop(), 'Save for everyone').click();
-      await settleFor(400);
+      await settleFor(500);
       const set = lsent.find((m) => m.type === 'VOLUME_LAYOUT_SET');
       ok(set && set.table === 'overview' && set.layout.hidden.includes('type') && set.layout.order.indexOf('avg7') < set.layout.order.indexOf('yesterday'),
         `reports overview: Save for everyone sent ${JSON.stringify(set)}`);
       const said = pop() ? pop().textContent : '';
-      ok(/Saved for everyone|this browser only/.test(said), `reports overview: the menu says nothing after Save for everyone: ${said}`);
-      // Reset to default: every column back, in its place.
+      ok(/Saved for everyone/.test(said), `reports overview: Save for everyone was not saved: ${said}`);
+      const VD = await load('core/volume-daily.js');
+      const got = await VD.volumeLayoutGet();
+      const shared = got && got.layouts && got.layouts.overview;
+      ok(shared && shared.hidden.includes('type') && shared.order.indexOf('avg7') < shared.order.indexOf('yesterday') && shared.order[0] === 'cluster',
+        `reports overview: VOLUME_LAYOUT_GET does not give the saved layout back: ${JSON.stringify(shared)}`);
+      ok(!/this browser only/.test(said), 'reports overview: still "this browser only" after a save the core kept');
+      // Reset to default: every column back, in its place — and saved, so the next run starts clean.
       btnIn(pop(), 'Reset to default').click();
       await settleFor(150);
       ok(JSON.stringify(byHeads().slice(0, 3)) === JSON.stringify(['Cluster', 'Type', 'Yesterday']), `reports overview: Reset did not restore the default: ${byHeads().join(' | ')}`);
+      btnIn(pop(), 'Save for everyone').click();
+      await settleFor(400);
+      const back = await VD.volumeLayoutGet();
+      ok(back && back.layouts && back.layouts.overview && !back.layouts.overview.hidden.includes('type'), `reports overview: the reset layout was not saved: ${JSON.stringify(back && back.layouts && back.layouts.overview)}`);
       if (pop()) pop().querySelector('header button').click();
     }
 
@@ -975,9 +985,22 @@ await go('reports');
         if (b) { b.click(); await settleFor(80); }
       }
       ok(band().length === 0, `reports capacity: the band still shows over mixed groups: ${band().join(' ')}`);
+      {
+        const VD = await load('core/volume-daily.js');
+        const pm = doc.querySelector('.pop.colmenu');
+        lsent.length = 0;
+        if (pm) { btnIn(pm, 'Save for everyone').click(); await settleFor(500); }
+        const s2 = lsent.find((m) => m.type === 'VOLUME_LAYOUT_SET');
+        ok(s2 && s2.table === 'capacity', `reports capacity: Save for everyone sent ${JSON.stringify(s2)}`);
+        const g = await VD.volumeLayoutGet();
+        const cap = g && g.layouts && g.layouts.capacity;
+        ok(cap && cap.order[0] === 'cluster' && cap.order.indexOf('backupPolicy') < cap.order.indexOf('liveShortfall'),
+          `reports capacity: VOLUME_LAYOUT_GET does not give the saved layout back: ${JSON.stringify(cap)}`);
+      }
       const reset = doc.querySelector('.pop.colmenu') && btnIn(doc.querySelector('.pop.colmenu'), 'Reset to default');
       if (reset) { reset.click(); await settleFor(120); }
       ok(band().length === 3, 'reports capacity: Reset did not bring the band back');
+      if (doc.querySelector('.pop.colmenu')) { btnIn(doc.querySelector('.pop.colmenu'), 'Save for everyone').click(); await settleFor(400); }
       if (doc.querySelector('.pop.colmenu')) doc.querySelector('.pop.colmenu header button').click();
       // CSV follows the columns on screen.
       btnIn(panel('Storage plan'), 'Export CSV').click();

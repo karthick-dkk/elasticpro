@@ -70,7 +70,7 @@ export function overviewDefs(openDaily) {
     { key: 'monthSoFar', label: 'Month so far', num: true, title: 'event_logsize of this month\'s finished days',
       cell: (r) => (r.month && r.month.days === 0 ? muted('—', 'No finished day this month yet') : size(r, r.month ? r.month.value : null)),
       csv: (r) => gbCell(r.month ? r.month.value : null), csvLabel: (n) => `${n} (GB)` },
-    { key: 'disk', label: 'Data-node disk used', num: true, title: 'Disk on data nodes only, used of total',
+    { key: 'diskUsed', label: 'Data-node disk used', num: true, title: 'Disk on data nodes only, used of total',
       cell: (r) => (r.disk.measured ? h('span', { title: `${bytes(r.disk.used)} of ${bytes(r.disk.total)} on ${plural(r.disk.nodes, 'data node')}` }, `${r.disk.percent.toFixed(1)} %`) : amber('not measured', r.disk.reason)),
       csv: (r) => (r.disk.measured ? Math.round(r.disk.percent * 10) / 10 : null), csvLabel: (n) => `${n} (%)` },
     { key: 'diskLasts', label: 'Disk lasts', num: true, title: `Free data-node disk ÷ event_logsize per day (${RATE_DAYS}-day average)`,
@@ -131,7 +131,7 @@ function dailyVolume(rows) {
     ...(rest.length ? [{ name: `${plural(rest.length, 'other')}`, color: 'var(--border-strong)', vals: days.map((_, i) => rest.reduce((a, s) => a + (s.vals[i] || 0), 0)) }] : [])];
   const totals = days.map((_, i) => series.reduce((a, s) => a + (s.vals[i] || 0), 0));
   const max = Math.max(1, ...totals);
-  const cols = days.map((d, i) => h('div.rp-col', { title: `${shortDay(d)} · ${bytes(totals[i])}` },
+  const cols = days.map((d, i) => h('div.rp-col', { title: `${shortDay(d)} · ${series.some((s) => s.vals[i] !== null && s.vals[i] !== undefined) ? bytes(totals[i]) : 'not measured'}` },
     ...series.map((s) => (s.vals[i] ? h('i', { style: { height: `${(s.vals[i] / max) * 100}%`, background: s.color }, title: `${s.name} · ${shortDay(d)} · ${bytes(s.vals[i])}` }) : null))));
   const ticks = [0, 7, 14, 21, DAYS - 1].map((i) => h('span', shortDay(days[i])));
   return h('div',

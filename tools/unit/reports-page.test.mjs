@@ -276,13 +276,26 @@ test('the group band shows while each group is one run, and hides when a reorder
   assert.deepEqual(C.groupBand(defs, hidden), [{ group: '', span: 2 }, { group: 'Live', span: 1 }, { group: 'Backup', span: 2 }]);
 });
 
-test('the core\'s untouched daily/monthly layout reads as "nobody decided", so the Reports defaults apply', async () => {
+
+test('a null index size (not measured since 0.3.53) renders "not measured" in amber, never "0 B"', async () => {
   const D = await import(pathToFileURL(path.join(ROOT, 'ui/js/reports/daily.js')).href);
-  const coreDaily = { order: ['day', 'indices', 'docs', 'priBytes', 'topExtra', 'eventBytes', 'subBytes', 'changeVsAvg',
-    'topSourceHost', 'topForwarder', 'totalBytes', 'topTag', 'topSourceIp'], hidden: ['totalBytes', 'topTag', 'topSourceIp'], labels: {} };
-  assert.equal(D.undecidedLayout('daily', coreDaily), null);
-  const arranged = { ...coreDaily, hidden: ['docs'] };
-  assert.equal(D.undecidedLayout('daily', arranged), arranged, 'a layout somebody saved is kept');
-  assert.equal(D.undecidedLayout('daily', { ...coreDaily, labels: { day: 'Date' } }).labels.day, 'Date', 'a rename is a decision');
-  assert.equal(D.undecidedLayout('monthly', null), null);
+  const nm = D.indexSizeCell(null);
+  assert.equal(nm.textContent, 'not measured');
+  assert.ok(nm.classList.contains('vs-notm'), 'amber');
+  assert.equal(D.indexSizeCell(undefined).textContent, 'not measured');
+  assert.equal(D.indexSizeCell(0), '0 B', 'a measured 0 is a 0');
+  const cell = D.dailyCellFor({ settings: {}, days: [] });
+  const day = { day: '2026-11-01', final: true, indices: 2, docs: 10, priBytes: null, totalBytes: null, eventBytes: 5 };
+  for (const k of ['priBytes', 'totalBytes']) {
+    const c = cell(k, day);
+    assert.equal(typeof c === 'string' ? c : c.textContent, 'not measured', k);
+  }
+  // Measure size: a null day is left out of the index size per day, never counted as 0.
+  const m = V.measureSize({ days: [{ day: '2026-11-03', priBytes: null, eventBytes: GB }, { day: '2026-11-02', priBytes: 2 * GB, eventBytes: GB }] }, 7, { today: TODAY });
+  assert.equal(m.indexPerDay, 2 * GB);
+  assert.deepEqual([m.rows[0].index, m.rows[0].diff, m.rows[0].ratio], [null, null, null]);
+  assert.equal(V.measureSize({ days: [{ day: '2026-11-03', priBytes: null, eventBytes: GB }] }, 7, { today: TODAY }).indexPerDay, null);
+  // The CSVs keep a null size empty.
+  assert.equal(V.monthlyCsvRows('c', [{ month: '2026-10', daysWithData: 3, priBytes: null, eventBytes: 9 }])[0].primary_bytes, null);
+  assert.equal(V.dailyCsvRows('c', { days: [day] }, 7)[0].primary_bytes, null);
 });

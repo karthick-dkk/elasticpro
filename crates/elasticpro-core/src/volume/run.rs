@@ -1228,7 +1228,7 @@ mod tests {
         assert_eq!(order.len(), DAILY_COLUMNS.len());
         assert_eq!(l["hidden"], json!(["topTag"]));
         assert_eq!(l["labels"], json!({ "docs": "Events" }));
-        assert_eq!(Core::layout_whole("monthly", None)["hidden"], json!([]));
+        assert_eq!(Core::layout_whole("monthly", None)["hidden"], json!(crate::volume::MONTHLY_HIDDEN));
         assert_eq!(Core::layout_whole("daily", None)["hidden"], json!(DAILY_HIDDEN));
     }
 }
