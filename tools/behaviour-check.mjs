@@ -871,7 +871,7 @@ await go('reports');
   // The page: title, subtitle, the six sections in order, Overview first; the tab reads Reports.
   ok(/^Reports$/.test((doc.querySelector('.rp-head h1') || {}).textContent || ''), 'reports: no "Reports" title');
   ok(/What each cluster takes in, what it keeps, and whether its storage holds it\./.test(doc.body.textContent), 'reports: the subtitle is missing');
-  ok(navLinks().map((a) => a.textContent).join(' · ') === 'Overview · Daily & monthly · Capacity & retention · Measure size · Planning · Exports & schedules',
+  ok(navLinks().map((a) => a.textContent).join(' · ') === 'Overview · Daily & monthly · Volume by host · Capacity & retention · Measure size · Planning · Exports & schedules',
     `reports: the section nav reads ${navLinks().map((a) => a.textContent).join(' · ')}`);
   ok(current() === 'overview', `reports: opens on ${current()}, want Overview`);
   ok([...doc.querySelectorAll('#nav a, #nav button')].some((x) => x.dataset.page === "reports" && /Reports$/.test(x.textContent.trim())), 'reports: the tab is not labelled Reports');
@@ -5656,6 +5656,127 @@ if (viaFleet) {
     globalThis.fetch = realFetch;
     hostEl.remove();
     try { localStorage.removeItem('elasticpro.planTemplates'); } catch { /* none */ }
+  }
+  await applyConfig({ load, configPath });
+  await go('overview');
+}
+
+
+/* ------- 0.3.54: Indices report and Volume by host — Exports & schedules, and the host view ------- */
+
+// The core's REPORT_SCHEDULE_* / REPORT_RUN / HOSTS_QUERY answers as docs/REPORT-TYPES.md gives
+// them, stubbed at fetch. Proves: a tab per kind with each kind's defaults and its size basis, a
+// schedule save and Run now send the kind (and collectAgain for hosts), too_many_clusters is said
+// as the core says it, and the host view pages, sorts and searches on the server, shows an absent
+// figure as amber "not measured" (never 0), flags incomplete days and names unmapped fields.
+{
+  const realFetch = globalThis.fetch;
+  const sentK = [];
+  const saved = {};
+  let refuseRun = null;
+  const rowsAll = Array.from({ length: 450 }, (_, i) => ({ day: '2026-11-01', index: `app-2026.11.01-${i}`, source: 'app', host: `h${i}`,
+    docs: 10 + i, eventBytes: i === 0 ? null : 1000 + i, subBytes: 500 + i, meta: { zone: 'dmz' } }));
+  const answerK = (b) => {
+    switch (b.type) {
+      case 'REPORT_JOBS': return { ok: true, jobs: [], concurrency: 3, running: 0, queued: 0 };
+      case 'REPORT_SCHEDULE_GET': return { ok: true, kind: b.kind, enabled: false, to: [], cc: [], bcc: [], managed: b.kind === 'hosts' ? ['UI_REPORT_HOSTS_AT'] : [],
+        mailConfigured: true, lastSent: null, ...(saved[b.kind] || {}),
+        ...(b.kind === 'hosts' ? { config: { fields: ['zone'], clientIdField: 'ClientID', keepMonths: 3, managed: ['UI_REPORT_HOSTS_KEEP_MONTHS'] } } : {}) };
+      case 'REPORT_SCHEDULE_SET': saved[b.kind] = { ...b }; return { ok: true };
+      case 'REPORT_SEND_NOW': return { ok: true, job: { id: 'j1' } };
+      case 'REPORT_RUN': return refuseRun || { ok: true, jobs: (b.clusterIds || []).map((id) => ({ id: `k${id}` })), refused: [] };
+      case 'HOSTS_QUERY': {
+        const q = (b.q || '').toLowerCase();
+        let rows = rowsAll.filter((r) => !q || r.host.includes(q) || r.index.includes(q));
+        const [col, dir] = String(b.sort || 'day:asc').split(':');
+        if (col === 'docs') rows = [...rows].sort((a, c) => (dir === 'desc' ? c.docs - a.docs : a.docs - c.docs));
+        return { ok: true, rows: rows.slice(b.offset, b.offset + b.limit), total: rows.length, totals: { docs: rows.reduce((n, r) => n + r.docs, 0), eventBytes: null, subBytes: 123456 },
+          incompleteDays: ['2026-11-02'], fields: ['zone'], notInMapping: ['tag1'] };
+      }
+      default: return { ok: false, kind: 'bad_message', message: `Unknown message type "${b.type}"` };
+    }
+  };
+  globalThis.fetch = async (input, init) => {
+    const body = init && init.body ? JSON.parse(init.body) : {};
+    if (/^(REPORT_|MAIL_|HOSTS_)/.test(String(body.type || ''))) { sentK.push(body); return stubReply(answerK(body)); }
+    return realFetch(input, init);
+  };
+  const fire = (el, type = 'change') => el.dispatchEvent(new window.Event(type, { bubbles: true }));
+  try {
+    await go('reports');
+    press(doc.querySelector('.rp-nav a[data-section="exports"]'));
+    const tab = (id) => doc.getElementById(`rt-tab-${id}`);
+    await waitFor(() => tab('hosts'), 'report types: no Volume by host tab on Exports & schedules');
+    ok(['volume', 'indices', 'hosts'].every((k) => !!tab(k)), 'report types: a kind has no tab');
+    // Indices: its own defaults and the size basis, said plainly.
+    press(tab('indices'));
+    await waitFor(() => doc.getElementById('rt-indices-at'), 'report types: the Indices schedule did not draw');
+    ok(doc.getElementById('rt-indices-at').value === '08:00', `report types: Indices opens at ${doc.getElementById('rt-indices-at').value}, want 08:00`);
+    ok(doc.getElementById('rt-indices-period').value === 'monthSoFar', 'report types: Indices does not default to Month so far');
+    ok(doc.getElementById('rt-indices-schedule').value === 'daily', 'report types: Indices does not default to daily');
+    ok(/index store size/.test(doc.getElementById('rt-sizes').textContent), 'report types: the Indices report does not say its sizes are index store size');
+    ok(doc.getElementById('rt-indices-enabled').checked === false, 'report types: Indices is on before an admin turned it on');
+    // Turning it on without a recipient is refused here, and says why.
+    doc.getElementById('rt-indices-enabled').checked = true; fire(doc.getElementById('rt-indices-enabled'));
+    sentK.length = 0;
+    doc.getElementById('rt-indices-save').click(); await settleFor(100);
+    ok(!sentK.some((m) => m.type === 'REPORT_SCHEDULE_SET'), 'report types: an enabled schedule with nobody to send to was sent');
+    ok(/at least one address/.test((doc.getElementById('rt-note') || { textContent: '' }).textContent), 'report types: no word about the missing recipient');
+    const to = doc.getElementById('rt-indices-to');
+    to.value = 'ops@example.com, lead@example.com'; fire(to, 'input');
+    doc.getElementById('rt-indices-save').click();
+    await waitFor(() => sentK.find((m) => m.type === 'REPORT_SCHEDULE_SET'), 'report types: Save sent nothing');
+    const set = sentK.find((m) => m.type === 'REPORT_SCHEDULE_SET');
+    ok(set && set.kind === 'indices' && set.enabled === true && set.at === '08:00' && set.period === 'monthSoFar' && set.to.length === 2,
+      `report types: Save sent ${JSON.stringify(set)}`);
+    // Volume by host: sizes basis, locked time, Run now with its two options.
+    press(tab('hosts'));
+    await waitFor(() => doc.getElementById('rt-hosts-at'), 'report types: the Volume by host schedule did not draw');
+    ok(doc.getElementById('rt-hosts-at').value === '06:00', 'report types: Volume by host does not open at 06:00');
+    ok(doc.getElementById('rt-hosts-at').disabled && /managed by config\.txt/.test(doc.querySelector('.rt-sched').textContent), 'report types: a locked time is not shown locked');
+    ok(/event_logsize/.test(doc.getElementById('rt-sizes').textContent), 'report types: Volume by host does not say its sizes are event_logsize');
+    ok(doc.getElementById('rt-hosts-run-period').value === 'monthSoFar', 'report types: Run now does not default to Month so far');
+    ok(!!doc.getElementById('rt-hosts-again') && !!doc.getElementById('rt-hosts-run-mail'), 'report types: Collect again or Mail it is missing');
+    doc.getElementById('rt-hosts-again').checked = true; fire(doc.getElementById('rt-hosts-again'));
+    sentK.length = 0;
+    doc.getElementById('rt-hosts-run').click();
+    await waitFor(() => sentK.find((m) => m.type === 'REPORT_RUN'), 'report types: Run now sent nothing');
+    const rr = sentK.find((m) => m.type === 'REPORT_RUN');
+    ok(rr && rr.kind === 'hosts' && rr.collectAgain === true && rr.mail === false && rr.period === 'monthSoFar' && rr.clusterIds.length >= 1,
+      `report types: Run now sent ${JSON.stringify(rr)}`);
+    // The core's own refusal is said as it says it.
+    refuseRun = { ok: false, kind: 'too_many_clusters', message: 'Volume by host takes at most 5 clusters; nothing was queued' };
+    doc.getElementById('rt-hosts-run').click();
+    await waitFor(() => /nothing was queued/.test((doc.getElementById('rt-note') || { textContent: '' }).textContent), 'report types: too_many_clusters was not said');
+    refuseRun = null;
+
+    // The view.
+    await go('reports');
+    press(doc.querySelector('.rp-nav a[data-section="hosts"]'));
+    await waitFor(() => doc.querySelector('#hv-table table.hv-tbl'), 'volume by host: no table');
+    const heads = () => [...doc.querySelectorAll('#hv-table thead th')].map((t) => t.textContent.replace(/[▲▼]/g, '').trim());
+    ok(JSON.stringify(heads()) === JSON.stringify(['Day', 'Index', 'Source', 'Host', 'Documents', 'Event size', 'Forwarded size', 'zone']), `volume by host: columns ${heads().join(' | ')}`);
+    ok(doc.querySelectorAll('#hv-table tbody tr').length === 201, `volume by host: ${doc.querySelectorAll('#hv-table tbody tr').length - 1} rows on a page of 200`);
+    ok(/not measured/.test(doc.querySelector('#hv-table tbody tr').textContent) && doc.querySelector('#hv-table tbody tr .rp-na'), 'volume by host: an absent event size is not amber "not measured"');
+    const tot = doc.querySelector('#hv-table tr.hv-totals');
+    ok(tot && /Total/.test(tot.textContent) && /not measured/.test(tot.textContent), 'volume by host: no totals row, or its absent figure reads as a number');
+    ok(/2026-11-02/.test(doc.querySelector('.hv-incomplete') ? doc.querySelector('.hv-incomplete').textContent : ''), 'volume by host: the incomplete day is not flagged');
+    ok(/tag1/.test(doc.querySelector('.hv-nomap') ? doc.querySelector('.hv-nomap').textContent : ''), 'volume by host: the field not in the mapping is not named');
+    ok(/1–200 of 450/.test(doc.querySelector('.hv-pager').textContent), `volume by host: pager reads "${doc.querySelector('.hv-pager').textContent}"`);
+    sentK.length = 0;
+    doc.getElementById('hv-next').click();
+    await waitFor(() => sentK.find((m) => m.type === 'HOSTS_QUERY' && m.offset === 200), 'volume by host: Next did not ask for offset 200');
+    ok(sentK.every((m) => m.limit === 200), 'volume by host: a page is not 200 rows');
+    sentK.length = 0;
+    doc.querySelector('#hv-table th[data-col="docs"] button').click();
+    await waitFor(() => sentK.find((m) => m.type === 'HOSTS_QUERY' && m.sort === 'docs:asc' && m.offset === 0), 'volume by host: sorting by Documents did not ask the server');
+    sentK.length = 0;
+    const q = doc.getElementById('hv-q'); q.value = 'h42'; fire(q, 'input');
+    await waitFor(() => sentK.find((m) => m.type === 'HOSTS_QUERY' && m.q === 'h42'), 'volume by host: the search did not reach the server', 3000);
+    await settleFor(150);
+    ok(doc.querySelectorAll('#hv-table tbody tr').length < 201, 'volume by host: the search left every row');
+  } finally {
+    globalThis.fetch = realFetch;
   }
   await applyConfig({ load, configPath });
   await go('overview');

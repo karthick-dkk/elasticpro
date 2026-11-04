@@ -74,8 +74,8 @@ if (configPath) {
 
 // play: the wall display (docs/PLAY.md). Drawn against whatever core this is — an older one
 // has no PLAY_* messages, and Play must still draw, saying what is missing.
-// reports: one page of six sections (docs/REPORTS.md), each drawn from its own route.
-const REPORT_SECTIONS = ['overview', 'daily', 'capacity', 'measure', 'planning', 'exports'];
+// reports: one page of seven sections (docs/REPORTS.md), each drawn from its own route.
+const REPORT_SECTIONS = ['overview', 'daily', 'hosts', 'capacity', 'measure', 'planning', 'exports'];
 const PAGES = ['alerts', 'overview', 'indices', 'shards', 'logs', 'console', 'snapshots',
   ...REPORT_SECTIONS.map((s) => `reports/${s}`), 'automation', 'requests', 'accounts', 'settings', 'play'];
 const view = window.document.createElement('div');

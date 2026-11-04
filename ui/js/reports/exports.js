@@ -22,6 +22,7 @@ import { recordOf, RATE_DAYS } from './record.js';
 import { exportOverviewCsv, exportOverviewXlsx } from './overview.js';
 import { storagePlanCsv, reportsOf, exportWide, exportTall, SHEET_VIEWS } from './capacity.js';
 import { amber, tag } from './cells.js';
+import { reportKindsCard, kindsReset } from './report-kinds.js';
 
 const sched = { state: 'idle', reply: null, error: '' };
 let openedOnce = false;
@@ -30,6 +31,7 @@ let redraw = () => {};
 export function exportsReset() {
   Object.assign(sched, { state: 'idle', reply: null, error: '' });
   openedOnce = false;
+  kindsReset();
 }
 
 async function loadSchedule() {
@@ -133,5 +135,5 @@ function generated(ctx) {
 /** @param ctx { clusters, redraw } */
 export function exportsSection(ctx) {
   redraw = ctx.redraw || redraw;
-  return h('div.rp-section', downloads(ctx), mailed(), generated(ctx));
+  return h('div.rp-section', downloads(ctx), mailed(), reportKindsCard(ctx), generated(ctx));
 }

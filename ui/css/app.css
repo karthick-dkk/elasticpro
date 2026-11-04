@@ -2143,3 +2143,18 @@ button.pn-link:hover { text-decoration: underline; }
 .ix-views { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin-bottom: 10px; }
 .ix-moved { color: var(--text-secondary); font-size: 12.5px; }
 #rp-cap-msg:empty { display: none; }
+/* Reports: report types (schedule + Run now) and Volume by host (0.3.54) */
+.rt { display: grid; gap: 8px; }
+.rt-tabs { justify-self: start; }
+.rt-sizes { font-size: 12px; }
+.rt-body { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 10px 20px; align-items: start; }
+.rt-sched .rm-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.rt-sched label.field { display: grid; gap: 3px; font-size: 11px; color: var(--text-muted); }
+.hv { display: grid; gap: 8px; }
+.hv-bar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.hv-bar input[type="search"] { min-width: 260px; height: 28px; }
+.hv-picker label.field { display: flex; align-items: center; gap: 6px; }
+.hv-sort { font: inherit; font-weight: 600; color: inherit; background: none; border: 0; padding: 0; cursor: pointer; text-align: inherit; }
+.hv-tbl tr.hv-totals th, .hv-tbl tr.hv-totals td { font-weight: 700; border-top: 2px solid var(--border); }
+.hv-pager { display: flex; align-items: center; gap: 8px; justify-content: flex-end; font-size: 12px; }
+.rm-cfg td { padding: 3px 8px; font-size: 12px; }
