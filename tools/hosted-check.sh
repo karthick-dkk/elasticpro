@@ -374,7 +374,7 @@ until curl -s -o /dev/null "http://127.0.0.1:$CP/"; do sleep 0.2; done
 check "the worker answers /health in role worker" "$(curl -s "http://127.0.0.1:$WP/health" | field role)" "worker"
 check "the worker serves no UI and no message API" "$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:$WP/bridge" -d '{}')" "404"
 check "an action without the shared token is refused" "$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:$WP/queue" -d '{}')" "401"
-check "one token for both, 0600" "$(stat -f '%Lp' "$DW/worker/token" 2>/dev/null || stat -c '%a' "$DW/worker/token")" "600"
+check "one token for both, 0600" "$(stat -c '%a' "$DW/worker/token" 2>/dev/null || stat -f '%Lp' "$DW/worker/token")" "600"
 check "the core forwards an action to the worker" "$(post "http://127.0.0.1:$CP/bridge" -d '{"type":"REPORT_CONCURRENCY_SET","n":4}' | field ok)" "True"
 got=; for _ in $(seq 1 25); do got=$(post "http://127.0.0.1:$CP/bridge" -d '{"type":"REPORT_JOBS"}' | field concurrency); [ "$got" = 4 ] && break; sleep 0.2; done
 check "and reads the worker's jobs.json back" "$got" "4"
