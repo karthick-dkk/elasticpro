@@ -136,7 +136,10 @@ Decisions made while building, within the contract:
   i.e. before every collection request and page.
 - **Reads in role core**: `REPORT_JOBS`, `REPORT_DOWNLOAD`, the health tab and the volume
   pages' "running" read `jobs.json` / `worker/status.json` (`Reports::snapshot`, read again once
-  if mid-rename). `Reports::open` in role core marks nothing and never writes `jobs.json`.
+  if mid-rename). `Reports::open` in role core marks nothing and never writes `jobs.json`. While a
+  job runs, the worker writes `jobs.json` every 2 s (otherwise only when a job starts or ends), so
+  the progress Exports reads from it is at most 2 s old — found on the first local Docker trial,
+  where the core showed a running job with no pages until it ended.
 - **Gate**: the worker's `Gate` is built from `worker::worker_limits` (16 / 4 / 4, reserve 0) over
   the core's other limits. The report controller's ceiling is `concurrency_for(per_cluster,
   role)`: the whole per-cluster cap in role `worker`, one under in role `all`.
@@ -158,5 +161,10 @@ Decisions made while building, within the contract:
   `core worker` together wherever it moved only the core (`app_services`), and reports the
   worker's health after the core's without rolling back for it. A compose file without the
   worker leaves the core in role `all`.
-- **Not yet measured**: core RSS and p95 message latency with and without the 06:00 run, and the
-  worker's RSS peak — to be taken on the test VM (Tests, above).
+- **Measured locally** (Docker Desktop, arm64, image from this branch, `deploy/trial.sh` against
+  `tools/mock-es.mjs` with `MOCK_LATENCY_MS=2000`; a hosts run over 7 days with collect-again, an
+  indices run and a volume run at once): core RSS 10.5 MiB (`VmHWM`; cgroup figure 3.0 → 3.4 MiB
+  during the run), client-side p95 through nginx 17.4 ms without a run and 22.7 ms during it (p50
+  12.0 → 12.4 ms; the core's own message p95 stayed 1 ms); worker RSS peak 10.5 MiB (`VmHWM`). The
+  mock is small: the figures that decide the limits are the test VM's against a real cluster
+  during the 06:00 run (Tests, above).

@@ -13,6 +13,9 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+/// Seconds between two writes of `jobs.json` while a job runs (its progress, for the core).
+const PROGRESS_EVERY_SECS: u64 = 2;
+
 /// The core/worker split as one process sees it.
 pub(crate) struct WorkerSide {
     data: Option<PathBuf>,
@@ -203,6 +206,20 @@ impl Core {
                 drop(core);
                 n += 1;
                 tokio::time::sleep(std::time::Duration::from_secs(worker::HEARTBEAT_SECS)).await;
+            }
+        });
+        // A running job's progress changes in memory, page by page; jobs.json is otherwise
+        // written only when a job starts or ends. The core reads progress from that file, so
+        // while anything runs it is written every 2 s (the writer coalesces).
+        let weak = Arc::downgrade(self);
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(PROGRESS_EVERY_SECS)).await;
+                let Some(core) = weak.upgrade() else { break };
+                let q = core.reports.queue.lock();
+                if q.running() > 0 {
+                    core.reports.save(&q);
+                }
             }
         });
         tracing::info!(target: "audit", "report worker: heartbeat started");
