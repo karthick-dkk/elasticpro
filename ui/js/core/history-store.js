@@ -114,8 +114,11 @@ export function destinationWarning(config, historyStore) {
   return '';
 }
 
-/** A daily or monthly row that came from the store. */
-export const fromHistory = (row) => !!(row && row.source === 'history');
+/** A daily or monthly row that came, wholly or partly (`historyDays`), from the store. */
+export const fromHistory = (row) => !!(row && (row.source === 'history' || Number(row.historyDays) > 0));
+
+/** The marker text for such a row: "history", and "incomplete" when the read-back stopped at its bound there. */
+export const historyMarkText = (row) => (fromHistory(row) ? ` · history${row.incomplete ? ' (incomplete)' : ''}` : '');
 
 /** "Days A to B: in the history store · not reachable[: why]", or '' when the store answered or was not asked. */
 export function historyUnreachableLine(history) {
@@ -123,4 +126,16 @@ export function historyUnreachableLine(history) {
   // The core's own words ("in the history store · not reachable: <why>"), with the days asked.
   const what = history.message || 'in the history store · not reachable';
   return `Days ${history.from} to ${history.to}: ${what}`;
+}
+
+/**
+ * The one amber line a history reply earns, or '': not reachable (with the core's words), a
+ * read-back that stopped at its bound (which days are not all shown), or a store nothing was
+ * ever written to. Unknown is not zero: each is said, none is drawn as an empty month.
+ */
+export function historyLine(history) {
+  if (!history) return '';
+  if (history.reachable === false) return historyUnreachableLine(history);
+  if (history.truncated || history.templateMissing) return history.message ? `Days ${history.from} to ${history.to}: ${history.message}` : '';
+  return '';
 }

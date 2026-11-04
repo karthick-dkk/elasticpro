@@ -306,13 +306,15 @@ impl Core {
                 return bad("not_found", format!("no cluster {id:?}"));
             }
             let r = self.volume_resolve(raw.as_ref(), Some(id), Some(msg));
+            // A display link never waits on the history store (docs/HISTORY.md "Reading back").
+            let read_back = !caller.is_some_and(Caller::play_only);
             match t {
                 "VOLUME_FIELDS_CHECK" => match &config_error {
                     Some(e) => return config_unreadable(e),
                     None => self.volume_fields_check(id, &r.settings, caller).await,
                 },
-                "VOLUME_DAILY" => self.volume_daily(id, &r.settings, msg).await,
-                "VOLUME_MONTHLY" => self.volume_monthly(id, &r.settings, msg).await,
+                "VOLUME_DAILY" => self.volume_daily(id, &r.settings, msg, read_back).await,
+                "VOLUME_MONTHLY" => self.volume_monthly(id, &r.settings, msg, read_back).await,
                 "VOLUME_BREAKDOWN" => self.volume_breakdown(id, msg),
                 _ => bad("bad_message", format!("Unknown message type {t:?}")),
             }
@@ -393,18 +395,20 @@ impl Core {
         out
     }
 
-    async fn volume_daily(self: &Arc<Self>, id: &str, s: &VolumeSettings, msg: &Value) -> Value {
+    /// `read_back`: whether days the local record does not hold may be asked of the history
+    /// store. Never for a display link: a wall is not held up by a store that is down.
+    async fn volume_daily(self: &Arc<Self>, id: &str, s: &VolumeSettings, msg: &Value, read_back: bool) -> Value {
         let Some(store) = &self.volume.store else { return no_store() };
         let days = int_arg(msg, "days", 30, 14, 400) as i64;
         let avg_days = int_arg(msg, "avgDays", derive::AVG_DAYS_DEFAULT as u64, 3, 180) as u32;
         let source = msg.get("source").and_then(Value::as_str).filter(|s| !s.is_empty());
         let today = schedule::utc_day(now_ms());
         // What the local record does not reach back to, from the history store (docs/HISTORY.md
-        // "Reading back"): one bounded search, and only for days before the record starts.
+        // "Reading back"): bounded, and only for days before the record starts.
         let missing = crate::history_store::missing_range(daily_reads_from(today, days, avg_days), today,
                                                           crate::history_store::oldest_local_day(store, id));
-        let read = match missing {
-            Some((f, t)) => self.history_read_volume(&[id.to_string()], f, t).await,
+        let read = match missing.filter(|_| read_back) {
+            Some((f, t)) => self.history_read_volume(&[id.to_string()], f, t, false).await,
             None => None,
         };
         let from_store = read.as_ref().and_then(|r| r.days.get(id).cloned()).unwrap_or_default();
@@ -430,26 +434,47 @@ impl Core {
         kept.into_iter().skip(skip).map(|m| derive::month_row(m, s.size_basis, current)).collect()
     }
 
-    /// The months shown from the store: the days it holds before the local record starts,
-    /// summarised by the same `derive` as the local ones, each row `source: "history"`.
-    fn history_month_rows(days: &[super::Day], s: &VolumeSettings, current: &str) -> Vec<Value> {
+    /// The months the store's days fall in, each merged **per day** with the local record's
+    /// days of that month (a local day wins) and summarised by the same `derive` as a local
+    /// month: so the month the local record starts in counts the store's earlier days too, and
+    /// Monthly agrees with Daily. A month with no local day is `source: "history"`; one with
+    /// both says how many of its days came from the store (`historyDays`). A month on or before
+    /// the day a bounded read-back stopped at is `incomplete` (unknown is not zero).
+    pub(crate) fn history_month_rows(store: &Store, id: &str, days: &[super::Day], s: &VolumeSettings, current: &str,
+                                     incomplete_before: Option<NaiveDate>) -> Vec<Value> {
         let mut by_month: BTreeMap<String, BTreeMap<String, super::Day>> = BTreeMap::new();
         for d in days {
             if let Some(date) = parse_day(&d.day) {
                 by_month.entry(month_key(date)).or_default().insert(d.day.clone(), d.clone());
             }
         }
-        by_month.iter().filter(|(m, _)| m.as_str() <= current).map(|(m, ds)| {
-            let mut row = derive::month_row(&derive::month_summary(m, ds), s.size_basis, current);
-            row["source"] = json!("history");
-            row
+        by_month.into_iter().filter(|(m, _)| m.as_str() <= current).filter_map(|(m, mut merged)| {
+            let local = store.read_month(id, &m).days;
+            let from_store = merged.keys().filter(|k| !local.contains_key(*k)).count();
+            if from_store == 0 {
+                return None;
+            }
+            let all_store = local.is_empty();
+            merged.extend(local);
+            let mut row = derive::month_row(&derive::month_summary(&m, &merged), s.size_basis, current);
+            if all_store {
+                row["source"] = json!("history");
+            } else {
+                row["historyDays"] = json!(from_store);
+            }
+            let start = NaiveDate::parse_from_str(&format!("{m}-01"), "%Y-%m-%d").ok();
+            if incomplete_before.zip(start).is_some_and(|(b, st)| st <= b) {
+                row["incomplete"] = json!(true);
+            }
+            Some(row)
         }).collect()
     }
 
-    /// Local month rows and the store's, a local month winning, the last `months` of them.
-    fn merge_month_rows(local: Vec<Value>, stored: Vec<Value>, months: usize) -> Vec<Value> {
+    /// Local month rows and the merged ones (`history_month_rows`, which replace a local row of
+    /// the same month), the last `months` of them.
+    fn merge_month_rows(local: Vec<Value>, merged: Vec<Value>, months: usize) -> Vec<Value> {
         let mut by: BTreeMap<String, Value> = BTreeMap::new();
-        for r in stored.into_iter().chain(local) {
+        for r in local.into_iter().chain(merged) {
             if let Some(m) = r["month"].as_str() {
                 by.insert(m.to_string(), r);
             }
@@ -458,26 +483,27 @@ impl Core {
         by.into_values().skip(skip).collect()
     }
 
-    /// The range the store is asked for when the Monthly view shows `months` months: from the
-    /// first of the oldest month shown to the day before the local record's first month.
-    fn monthly_missing(st: &ClusterState, today: NaiveDate, months: usize) -> Option<(NaiveDate, NaiveDate)> {
+    /// The range the store is asked for when the Monthly views show `months` months: from the
+    /// first of the oldest month shown to the day before the first day the local record covers
+    /// (`history_store::oldest_local_day`, the same definition as the Daily view's).
+    fn monthly_missing(store: &Store, id: &str, today: NaiveDate, months: usize) -> Option<(NaiveDate, NaiveDate)> {
         let first = schedule::oldest_kept_month(today, months as u32);
-        let oldest_local = st.months.keys().next().and_then(|m| NaiveDate::parse_from_str(&format!("{m}-01"), "%Y-%m-%d").ok());
-        crate::history_store::missing_range(first, today, oldest_local)
+        crate::history_store::missing_range(first, today, crate::history_store::oldest_local_day(store, id))
     }
 
-    async fn volume_monthly(self: &Arc<Self>, id: &str, s: &VolumeSettings, msg: &Value) -> Value {
+    async fn volume_monthly(self: &Arc<Self>, id: &str, s: &VolumeSettings, msg: &Value, read_back: bool) -> Value {
         let Some(store) = &self.volume.store else { return no_store() };
         let months = int_arg(msg, "months", 13, 1, 36) as usize;
         let today = schedule::utc_day(now_ms());
         let current = month_key(today);
         let st = store.read_state(id);
-        let read = match Core::monthly_missing(&st, today, months) {
-            Some((f, t)) => self.history_read_volume(&[id.to_string()], f, t).await,
+        let read = match Core::monthly_missing(store, id, today, months).filter(|_| read_back) {
+            Some((f, t)) => self.history_read_volume(&[id.to_string()], f, t, true).await,
             None => None,
         };
-        let stored = read.as_ref().and_then(|r| r.days.get(id)).map(|d| Core::history_month_rows(d, s, &current)).unwrap_or_default();
-        let rows = Core::merge_month_rows(Core::month_rows(&st, s, 36, &current), stored, months);
+        let merged = read.as_ref().and_then(|r| r.days.get(id).map(|d| (d, r.truncated_before)))
+            .map(|(d, cut)| Core::history_month_rows(store, id, d, s, &current, cut)).unwrap_or_default();
+        let rows = Core::merge_month_rows(Core::month_rows(&st, s, 36, &current), merged, months);
         json!({ "ok": true, "clusterId": id, "settings": s, "status": self.volume_status(id, s, &st),
                 "avgPerMonth": derive::avg_per_month(&rows), "months": rows,
                 "history": read.as_ref().map(|r| r.json()) })
@@ -495,29 +521,32 @@ impl Core {
         };
         let today = schedule::utc_day(now_ms());
         let ids = self.fleet_visible(caller);
-        // One search for every cluster whose local record starts after the oldest month shown.
+        let read_back = !caller.is_some_and(Caller::play_only);
+        // One bounded, paged read-back for every cluster whose local record starts after the
+        // oldest month shown.
         let states: Vec<ClusterState> = ids.iter().map(|id| store.read_state(id)).collect();
-        let missing: Vec<Option<(NaiveDate, NaiveDate)>> = states.iter().map(|st| Core::monthly_missing(st, today, months)).collect();
+        let missing: Vec<Option<(NaiveDate, NaiveDate)>> = ids.iter()
+            .map(|id| Core::monthly_missing(store, id, today, months).filter(|_| read_back)).collect();
         let asking: Vec<String> = ids.iter().zip(&missing).filter(|(_, m)| m.is_some()).map(|(id, _)| id.clone()).collect();
         let span = missing.iter().flatten().fold(None::<(NaiveDate, NaiveDate)>, |acc, (f, t)| {
             Some(acc.map_or((*f, *t), |(a, b)| (a.min(*f), b.max(*t))))
         });
         let read = match span {
-            Some((f, t)) => self.history_read_volume(&asking, f, t).await,
+            Some((f, t)) => self.history_read_volume(&asking, f, t, true).await,
             None => None,
         };
         let mut out = vec![];
         for ((id, st), miss) in ids.iter().zip(&states).zip(&missing) {
             let name = self.spec_for(id).and_then(|s| s.name).unwrap_or_else(|| id.clone());
             let r = self.volume_resolve(raw.as_ref(), Some(id), Some(msg));
-            let stored = match (miss, read.as_ref().and_then(|rb| rb.days.get(id))) {
-                (Some((f, t)), Some(days)) => {
+            let merged = match (miss, read.as_ref().and_then(|rb| rb.days.get(id).map(|d| (d, rb.truncated_before)))) {
+                (Some((f, t)), Some((days, cut))) => {
                     let mine: Vec<super::Day> = days.iter().filter(|d| parse_day(&d.day).is_some_and(|x| x >= *f && x <= *t)).cloned().collect();
-                    Core::history_month_rows(&mine, &r.settings, &current)
+                    Core::history_month_rows(store, id, &mine, &r.settings, &current, cut)
                 }
                 _ => vec![],
             };
-            let rows = Core::merge_month_rows(Core::month_rows(st, &r.settings, 36, &current), stored, months);
+            let rows = Core::merge_month_rows(Core::month_rows(st, &r.settings, 36, &current), merged, months);
             out.push(json!({ "clusterId": id, "name": name, "basis": r.settings.size_basis, "months": rows }));
         }
         let mut reply = json!({ "ok": true, "clusters": out, "history": read.as_ref().map(|r| r.json()) });

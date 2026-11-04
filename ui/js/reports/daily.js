@@ -22,7 +22,7 @@ import { state } from '../core/state.js';
 import { navigateTo } from '../core/intent.js';
 import { card, statTile, empty, unreadable, configErrorBanner } from '../pages/common.js';
 import { toast } from '../ui/menu.js';
-import { fromHistory, historyUnreachableLine } from '../core/history-store.js';
+import { fromHistory, historyMarkText, historyLine } from '../core/history-store.js';
 import { configErrorOf,
   volumeDaily, volumeMonthly, volumeBreakdown, volumeRun, volumeLayoutGet, volumeLayoutSet, isHosted,
   NEEDS_VERSION, collectDue, utcDay, monthName,
@@ -457,10 +457,10 @@ export function dailyCellFor(reply) {
 }
 
 /** A day or month the history store supplied (docs/HISTORY.md): a small muted marker. */
-const historyMark = (r) => (fromHistory(r) ? h('span.muted', { title: 'From the history store', style: { fontSize: '10.5px' } }, ' · history') : null);
+const historyMark = (r) => (fromHistory(r) ? h('span.muted', { title: 'From the history store', style: { fontSize: '10.5px' } }, historyMarkText(r)) : null);
 /** The history store was asked and could not be reached: said once, in amber; never zeros. */
 const historyBanner = (reply) => {
-  const t = historyUnreachableLine(reply && reply.history);
+  const t = historyLine(reply && reply.history);
   return t ? h('div.banner.warn.vs-history', h('div', t)) : null;
 };
 

@@ -337,12 +337,15 @@ impl Transport {
                 return Ok(c.clone());
             }
         }
-        let verifier = PinningVerifier::new(self.pins.clone(), route.tls, hk);
+        // The history store decides by its own TLS setting only, and never follows a redirect:
+        // a redirect would resend its credential and body to wherever the answer points.
+        let store = cluster == crate::history_store::STORE_ID;
+        let verifier = if store { PinningVerifier::own_mode(self.pins.clone(), route.tls, hk) } else { PinningVerifier::new(self.pins.clone(), route.tls, hk) };
         let mut b = reqwest::Client::builder()
             .use_preconfigured_tls(verifier.client_config())
             .connect_timeout(Duration::from_secs(10))
             .pool_idle_timeout(Duration::from_secs(60))
-            .redirect(reqwest::redirect::Policy::limited(3))
+            .redirect(if store { reqwest::redirect::Policy::none() } else { reqwest::redirect::Policy::limited(3) })
             .no_proxy()
             .user_agent(format!("ElasticPro-Desktop/{}", crate::VERSION));
         if let Some((_, port)) = route.tunnel {

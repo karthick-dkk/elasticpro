@@ -197,6 +197,21 @@ pub fn history_prefix_ok(prefix: &str) -> bool {
     !prefix.is_empty() && prefix.len() <= 100
         && !prefix.starts_with(['-', '_', '+', '.'])
         && prefix.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'.' | b'_' | b'-'))
+        && history_prefix_reserved(prefix).is_none()
+}
+
+/// The index families a `<prefix>-*` template could capture on a store that holds anything
+/// else: Elastic's data streams (`logs-*`, `metrics-*`, …), the Beats', Logstash's, Kibana's
+/// and Elastic's own. `Some(family)` when the prefix is one of them or starts one
+/// (`logs`, `logs-x`, `filebeat-anything`); `elasticpro` is not `elastic`.
+pub fn history_prefix_reserved(prefix: &str) -> Option<&'static str> {
+    const WORDS: &[&str] = &["logs", "metrics", "traces", "synthetics", "profiling", "apm", "logstash", "elastic", "kibana",
+                             "ilm-history", "slm-history", "security", "fleet", "ml"];
+    const STEMS: &[&str] = &["filebeat", "metricbeat", "heartbeat", "auditbeat", "packetbeat", "winlogbeat", "functionbeat", "journalbeat"];
+    if let Some(s) = STEMS.iter().find(|s| prefix.starts_with(**s)) {
+        return Some(s);
+    }
+    WORDS.iter().find(|w| prefix == **w || prefix.strip_prefix(**w).is_some_and(|r| r.starts_with(['-', '_', '.']))).copied()
 }
 
 /// An index name the history store may be written to: `<prefix>-` and then `[a-z0-9._-]`.
@@ -245,13 +260,16 @@ pub fn history_guard(writes: Writes, prefix: &str, method: &str, path: &str, bod
     match (m.as_str(), segs.as_slice()) {
         ("GET", []) => None,
         ("POST", ["_security", "user", "_has_privileges"]) if query.is_empty() => None,
+        // Is the template there, and is it ours (`_meta`)?
+        ("GET", ["_index_template", name]) if query.is_empty() && history_index_ok(prefix, name) => None,
         ("POST", [target, "_search"]) if history_pattern_ok(prefix, target) => {
             let fine = query.split('&').filter(|q| !q.is_empty()).all(|q| {
                 matches!(q.split('=').next().unwrap_or(""), "ignore_unavailable" | "allow_no_indices" | "filter_path" | "size" | "track_total_hits")
             });
             if fine { None } else { refuse("a parameter this search does not use") }
         }
-        ("PUT", ["_index_template", name]) if writes == Writes::HistoryWrite && query.is_empty() && history_index_ok(prefix, name) => {
+        // `create=true`, exactly: a template of the same name that is somebody else's is never replaced.
+        ("PUT", ["_index_template", name]) if writes == Writes::HistoryWrite && query == "create=true" && history_index_ok(prefix, name) => {
             match body.and_then(|b| serde_json::from_str::<serde_json::Value>(b).ok()) {
                 Some(v) if template_body_ok(prefix, &v) => None,
                 _ => refuse("an index template here holds index patterns inside the prefix and mappings, nothing else"),
@@ -282,8 +300,24 @@ fn template_body_ok(prefix: &str, v: &serde_json::Value) -> bool {
 
 /// Every action line of a bulk body: `index` or `create`, `_index` inside the prefix, no other
 /// key than `_index` and `_id`, each followed by one document line.
+///
+/// Read the way Elasticsearch reads it: the line after an action is its document whatever it
+/// holds, a blank line included, so no line may be blank (a blank "document" would make the
+/// next line an action of its own) and no `\r` may split one; the body ends with exactly one
+/// `\n`.
 fn bulk_body_ok(prefix: &str, body: &str) -> Result<(), String> {
-    let mut lines = body.lines().filter(|l| !l.trim().is_empty());
+    let Some(inner) = body.strip_suffix('\n') else { return Err("a bulk body ends with a newline".into()) };
+    if body.contains('\r') {
+        return Err("a bulk body with a carriage return".into());
+    }
+    let all: Vec<&str> = inner.split('\n').collect();
+    if all.iter().any(|l| l.trim().is_empty()) {
+        return Err("a blank line in a bulk body: Elasticsearch would read the next line as an action".into());
+    }
+    if !all.len().is_multiple_of(2) {
+        return Err("a bulk body is pairs of an action and its document".into());
+    }
+    let mut lines = all.into_iter();
     let mut n = 0usize;
     while let Some(action) = lines.next() {
         let v: serde_json::Value = serde_json::from_str(action).map_err(|_| "a bulk action line is not JSON".to_string())?;
@@ -424,10 +458,14 @@ mod tests {
             assert!(history_guard(writes, p, "POST", "/elasticpro-history-volume-*/_search?ignore_unavailable=true", Some("{}")).is_none());
         }
         assert!(history_guard(w, p, "POST", "/_bulk", Some(bulk)).is_none());
-        assert!(history_guard(w, p, "PUT", "/_index_template/elasticpro-history-template", Some(tpl)).is_none());
+        assert!(history_guard(w, p, "PUT", "/_index_template/elasticpro-history-template?create=true", Some(tpl)).is_none());
+        assert!(history_guard(w, p, "PUT", "/_index_template/elasticpro-history-template", Some(tpl)).is_some(), "never an overwrite");
+        assert!(history_guard(w, p, "PUT", "/_index_template/elasticpro-history-template?create=false", Some(tpl)).is_some());
+        assert!(history_guard(r, p, "GET", "/_index_template/elasticpro-history-template", None).is_none(), "is it there, is it ours");
+        assert!(history_guard(r, p, "GET", "/_index_template/logs", None).is_some());
         // Reads only until both gates are open.
         assert!(history_guard(r, p, "POST", "/_bulk", Some(bulk)).unwrap().contains("HISTORY_STORE_WRITES"));
-        assert!(history_guard(r, p, "PUT", "/_index_template/elasticpro-history-template", Some(tpl)).is_some());
+        assert!(history_guard(r, p, "PUT", "/_index_template/elasticpro-history-template?create=true", Some(tpl)).is_some());
         for (m, path, body) in [
             ("DELETE", "/elasticpro-history-volume-2026.11", None),
             ("DELETE", "/_index_template/elasticpro-history-template", None),
@@ -454,6 +492,14 @@ mod tests {
         assert!(history_guard(w, p, "POST", "/_bulk", Some(&mixed)).is_some());
         let outside = format!("{bulk}{{\"index\":{{\"_index\":\"logstash-2026.11.03\"}}}}\n{{}}\n");
         assert!(history_guard(w, p, "POST", "/_bulk", Some(&outside)).unwrap().contains("logstash"));
+        // A blank "document" smuggles the next line in as an action of its own.
+        let smuggled = "{\"index\":{\"_index\":\"elasticpro-history-volume-2026.11\",\"_id\":\"a\"}}\n\n{\"delete\":{\"_index\":\"elasticpro-history-volume-2026.11\",\"_id\":\"b\"}}\n{}\n";
+        assert!(history_guard(w, p, "POST", "/_bulk", Some(smuggled)).unwrap().contains("blank line"), "the smuggling case");
+        let crlf = bulk.replace('\n', "\r\n");
+        let doubled = format!("{bulk}\n");
+        for odd in [bulk.trim_end(), doubled.as_str(), crlf.as_str(), "{\"index\":{\"_index\":\"elasticpro-history-x\"}}\n"] {
+            assert!(history_guard(w, p, "POST", "/_bulk", Some(odd)).is_some(), "{odd:?}");
+        }
         let piped = "{\"index\":{\"_index\":\"elasticpro-history-volume-2026.11\",\"pipeline\":\"p\"}}\n{}\n";
         assert!(history_guard(w, p, "POST", "/_bulk", Some(piped)).is_some());
         let near = "{\"index\":{\"_index\":\"elasticpro-historyx-volume\"}}\n{}\n";
@@ -471,9 +517,13 @@ mod tests {
             assert!(d != r && d != w);
         }
         // A prefix that could widen a pattern refuses everything.
-        for bad in ["", "*", "a,b", "-x", ".x", "_x", "A", "a b"] {
+        for bad in ["", "*", "a,b", "-x", ".x", "_x", "A", "a b", "logs", "logs-history", "metrics", "traces-x", "logstash", "filebeat",
+                    "filebeat8", "metricbeat-x", "winlogbeat", "elastic", "elastic-x", "kibana", ".kibana", "synthetics"] {
             assert!(!history_prefix_ok(bad), "{bad:?}");
             assert!(history_guard(w, bad, "GET", "/", None).is_some());
+        }
+        for fine in ["elasticpro-history", "logsx", "ep-logs", "history"] {
+            assert!(history_prefix_ok(fine), "{fine:?}");
         }
     }
 }

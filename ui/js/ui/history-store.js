@@ -113,7 +113,8 @@ export function historyStoreCard() {
   return card('History store', armed ? 'writing' : 'not writing',
     h('div', { style: { display: 'grid', gap: '8px' } },
       h('div', row,
-        field('URL', text('hs-url', s.url, { mono: true, placeholder: 'https://history.example:9200', style: { width: '320px' } })),
+        field('URL', text('hs-url', s.url, { mono: true, placeholder: 'https://history.example:9200', style: { width: '320px' } }),
+          'A dedicated store, never a monitored cluster. A password or API key goes only to an https:// address; it is typed again after the address, TLS or kind of credential changes.'),
         field('Auth', authSelect(auth)),
         auth === 'basic' ? field('User', text('hs-user', s.user, { style: { width: '150px' } })) : null,
         auth === 'basic'
@@ -124,7 +125,7 @@ export function historyStoreCard() {
           : null),
       h('div', row,
         field('TLS', select('hs-tls', s.tls || 'auto', TLS_CHOICES),
-          'A certificate is pinned from Config › Jump hosts & trust, as for clusters.'),
+          'A certificate is pinned from Config › Jump hosts & trust, as for clusters. The global insecure TLS default does not apply here.'),
         field('Jump host', select('hs-via', s.via || '', [['', 'Direct'], ...(r.jumpHosts || []).map((id) => [id, id])])),
         field('Index prefix', text('hs-prefix', prefix, { mono: true, style: { width: '190px' } }),
           `Indices: ${indexNames(prefix).join(', ')}`)),
@@ -158,6 +159,9 @@ export function historyStoreCard() {
         kv('Last error', st.lastError ? `${st.lastError}${st.lastErrorAt ? ` · ${when(st.lastErrorAt)}` : ''}` : '—'),
         kv('Documents written', String(st.docsWritten || 0)),
         kv('Queued', String(st.queue || 0)),
+        (st.refused || st.rejected || st.dropped)
+          ? kv('Not sent', `${st.refused || 0} refused by the guard · ${st.rejected || 0} rejected by the store · ${st.dropped || 0} dropped (queue full)`)
+          : null,
         kv('Template created', when(st.templateAt)),
       ]),
       h('div.muted', { style: { fontSize: '11.5px' } },

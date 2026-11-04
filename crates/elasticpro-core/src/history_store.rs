@@ -10,32 +10,34 @@
 //!   scheduled run ends ─▶ capacity doc ──┼─▶ queue (bounded, on disk) ──tick 60 s──▶ _bulk
 //!   delay sink (destination: history) ──────────────────────────────── direct ──────▶ _bulk
 //!   Copy existing history ─▶ every local month file, in pages ────────── direct ──────▶ _bulk
-//!   VOLUME_DAILY / MONTHLY / MONTHLY_ALL, HISTORY_QUERY ─▶ one bounded _search ◀───── store
+//!   VOLUME_DAILY / MONTHLY / MONTHLY_ALL, HISTORY_QUERY ─▶ bounded _search pages ◀─── store
 //! ```
 //!
 //! **Writes are gated twice, by people, and by nothing else** (CLAUDE.md). The global
 //! `readOnly` is not used — opening it would open every monitored cluster. Instead:
 //!
 //! 1. `HISTORY_STORE_WRITES=true` in config.txt (hosted). Without it the store can be
-//!    configured and tested (reads only), never written.
+//!    configured and tested (reads only), never written. A start without it disarms (2).
 //! 2. An admin armed it (*Write history*), which is refused until a *Test connection* has
-//!    passed on the settings as they are now. Disarming stops writes at the next tick.
+//!    passed on the settings as they are now. Any change of address, route, TLS, prefix or
+//!    credential disarms. Disarming stops writes at the next bulk.
 //!
-//! Both are checked where the request is built **and** at the chokepoint: `Core::es_req`
-//! gives a store request `Writes::HistoryWrite` only while both stand, `Writes::HistoryRead`
-//! otherwise, and `guard::history_guard` holds either to exact shapes on the store's prefix.
-//! A store request goes to the store's own address whatever `cluster_id` it carries; a
-//! monitored cluster's request can never carry either permission.
+//! Both are checked where the request is built, at the chokepoint (`Core::es_req` gives a
+//! store request `Writes::HistoryWrite` only while both stand) and again after the request
+//! was admitted by the gate, right before it is sent (`Core::history_recheck`): a request
+//! that waited for a slot while somebody disarmed or moved the store is not sent.
+//! `guard::history_guard` holds every store request to exact shapes on the store's prefix.
 //!
 //! **Measures, not judgements.** The documents carry inputs (sizes, retention as typed, disk
 //! by data role); required disk, buffers and shortfalls stay in the UI, one definition.
 //!
 //! **Unknown is not zero.** A store that cannot be reached is "in the history store · not
-//! reachable", never a day of zeroes; a figure the core cannot measure is `null`.
+//! reachable", never a day of zeroes; a figure the core cannot measure is `null`; a read-back
+//! that stopped at its bound says which days it did not read.
 
 use crate::auth::Caller;
 use crate::bridge::Core;
-use crate::guard::history_prefix_ok;
+use crate::guard::{history_prefix_ok, history_prefix_reserved, Writes};
 use crate::http::{ClusterSpec, EsRequest};
 use crate::volume::schedule::{day_key, month_key, parse_day, utc_day};
 use crate::volume::{Day, SourceTotals};
@@ -65,12 +67,18 @@ pub const BULK_MAX_DOCS: usize = 500;
 pub const BULK_MAX_BYTES: usize = 4 * 1024 * 1024;
 /// Bulks one tick sends at most; the rest wait for the next.
 pub const BULKS_PER_TICK: usize = 20;
-/// Documents waiting at most. Past it the oldest are dropped, and the status says how many.
+/// Documents waiting at most. Past it the oldest days go, and the status says how many.
 pub const QUEUE_MAX: usize = 20_000;
-/// Days one read-back search returns at most (Elasticsearch's own default result window).
-pub const READ_BACK_MAX: usize = 10_000;
+/// Days one read-back page returns (Elasticsearch's own default result window) …
+pub const READ_BACK_PAGE: usize = 10_000;
+/// … and pages one read-back reads at most. Beyond them the reply says which days it did not read.
+pub const READ_BACK_PAGES: usize = 5;
 /// Documents one `HISTORY_QUERY` returns at most.
 pub const QUERY_MAX: usize = 5_000;
+/// A store that did not answer is not asked again by a page for this long.
+pub const UNREACHABLE_FOR_MS: u64 = 60_000;
+/// Times one document is offered after the store refused it as malformed, before it is given up.
+pub const REJECT_TRIES: u32 = 3;
 /// The index template's name, inside the prefix (`guard::history_guard` insists).
 pub fn template_name(prefix: &str) -> String {
     format!("{prefix}-template")
@@ -85,6 +93,16 @@ pub enum AuthKind {
     Basic,
     ApiKey,
     None,
+}
+
+impl AuthKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            AuthKind::Basic => "basic",
+            AuthKind::ApiKey => "apiKey",
+            AuthKind::None => "none",
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -105,6 +123,17 @@ fn yes() -> bool {
 impl Default for Streams {
     fn default() -> Streams {
         Streams { volume: true, capacity: true, delay: true }
+    }
+}
+
+impl Streams {
+    pub fn on(&self, stream: &str) -> bool {
+        match stream {
+            "volume" => self.volume,
+            "capacity" => self.capacity,
+            "delay" => self.delay,
+            _ => false,
+        }
     }
 }
 
@@ -137,7 +166,7 @@ pub struct TestResult {
 }
 
 /// What `history-store.json` holds. The password or API key only sealed, bound to the
-/// destination it was typed for.
+/// destination and the kind of credential it was typed for.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Stored {
@@ -149,11 +178,14 @@ pub struct Stored {
     pub auth: AuthKind,
     #[serde(default)]
     pub user: String,
-    /// `ClusterSecrets::seal_own`, associated data `seal_aad(destination)`.
+    /// `ClusterSecrets::seal_own`, associated data `seal_aad(destination, kind)`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sealed: Option<String>,
     #[serde(default)]
     pub sealed_for: String,
+    /// The kind of credential sealed: switching basic ↔ API key needs it typed again.
+    #[serde(default)]
+    pub sealed_auth: Option<AuthKind>,
     #[serde(default)]
     pub tls: String,
     #[serde(default)]
@@ -170,11 +202,6 @@ pub struct Stored {
     pub armed_at: Option<u64>,
     #[serde(default)]
     pub test: Option<TestResult>,
-    /// The prefix the index template was last created for, and when.
-    #[serde(default)]
-    pub template_for: Option<String>,
-    #[serde(default)]
-    pub template_at: Option<u64>,
 }
 
 impl Stored {
@@ -202,28 +229,51 @@ impl Stored {
         use sha2::{Digest, Sha256};
         let mut h = Sha256::new();
         for part in [self.url.as_str(), self.via.as_str(), self.tls(), self.prefix(), self.user.as_str(),
-                     self.sealed.as_deref().unwrap_or(""), match self.auth { AuthKind::Basic => "basic", AuthKind::ApiKey => "apiKey", AuthKind::None => "none" }] {
+                     self.sealed.as_deref().unwrap_or(""), self.auth.as_str()] {
             h.update(part.as_bytes());
             h.update([0u8]);
         }
         hex::encode(h.finalize())
     }
 
-    /// The secret no longer opens here: the address, route or certificate setting changed
-    /// since it was typed.
+    /// The secret no longer opens here: the address, route or certificate setting, or the kind
+    /// of credential, changed since it was typed.
     pub fn secret_stale(&self) -> bool {
-        self.sealed.is_some() && self.sealed_for != self.destination()
+        self.sealed.is_some() && (self.sealed_for != self.destination() || self.sealed_auth != Some(self.auth))
     }
 
     pub fn test_current(&self) -> bool {
         self.test.as_ref().is_some_and(|t| t.ok && t.fingerprint == self.fingerprint())
     }
+
+    /// Where the index template was verified: the store and the prefix together. A new
+    /// address with the same prefix is another store, whose template is not known to be there.
+    pub fn template_key(&self) -> String {
+        format!("{}|{}", self.destination(), self.prefix())
+    }
 }
 
-/// The associated data a store secret is sealed under: moved to another destination, it does
-/// not open.
-pub fn seal_aad(destination: &str) -> String {
-    format!("history-store|{destination}")
+/// The associated data a store secret is sealed under: moved to another destination, or read
+/// as another kind of credential, it does not open.
+pub fn seal_aad(destination: &str, kind: AuthKind) -> String {
+    format!("history-store|{}|{destination}", kind.as_str())
+}
+
+/// Why *Write history* cannot be turned on for these settings, or `None`. Pure: it is asked
+/// inside the settings lock, so the decision and the switch are one step.
+pub fn arm_blocked(s: &Stored, permitted: bool) -> Option<String> {
+    if !permitted {
+        return Some(PERMIT_HINT.into());
+    }
+    if !s.configured() {
+        return Some("set the store's URL and save".into());
+    }
+    match &s.test {
+        None => Some("run Test connection first".into()),
+        Some(t) if !t.ok => Some("the last Test connection failed: fix it and test again".into()),
+        Some(_) if !s.test_current() => Some("the settings changed since the last Test connection: test again".into()),
+        Some(_) => None,
+    }
 }
 
 /// What an admin sent in `HISTORY_STORE_SET`, checked. `Err` names what is wrong.
@@ -241,6 +291,12 @@ pub struct Incoming {
 
 pub fn parse_incoming(v: &Value) -> Result<Incoming, String> {
     let s = |k: &str| v.get(k).and_then(Value::as_str).map(str::trim).unwrap_or("").to_string();
+    let auth = match s("auth").as_str() {
+        "" | "basic" => AuthKind::Basic,
+        "apiKey" => AuthKind::ApiKey,
+        "none" => AuthKind::None,
+        other => return Err(format!("auth {other:?} is not basic, apiKey or none")),
+    };
     let url = s("url").trim_end_matches('/').to_string();
     if !url.is_empty() {
         let u = reqwest::Url::parse(&url).map_err(|e| format!("the URL does not parse: {e}"))?;
@@ -253,13 +309,10 @@ pub fn parse_incoming(v: &Value) -> Result<Incoming, String> {
         if u.host_str().is_none_or(str::is_empty) || u.query().is_some() || u.fragment().is_some() || u.path() != "/" {
             return Err("the URL is the store's address only: scheme, host and port".into());
         }
+        if u.scheme() == "http" && auth != AuthKind::None {
+            return Err("a credential is sent to the store only over https://: use an https:// URL, or no authentication".into());
+        }
     }
-    let auth = match s("auth").as_str() {
-        "" | "basic" => AuthKind::Basic,
-        "apiKey" => AuthKind::ApiKey,
-        "none" => AuthKind::None,
-        other => return Err(format!("auth {other:?} is not basic, apiKey or none")),
-    };
     let tls = match s("tls").as_str() {
         "" | "auto" => "auto",
         "system" => "system",
@@ -269,7 +322,10 @@ pub fn parse_incoming(v: &Value) -> Result<Incoming, String> {
     let prefix = match s("prefix") {
         p if p.is_empty() => DEFAULT_PREFIX.to_string(),
         p if history_prefix_ok(&p) => p,
-        p => return Err(format!("the prefix {p:?} must be lower case letters, digits, '.', '_' or '-', not starting with '-', '_', '+' or '.'")),
+        p => return Err(match history_prefix_reserved(&p) {
+            Some(f) => format!("the prefix {p:?} would name {f}… indices, which belong to something else on a store: choose another"),
+            None => format!("the prefix {p:?} must be lower case letters, digits, '.', '_' or '-', not starting with '-', '_', '+' or '.'"),
+        }),
     };
     let user = s("user");
     if user.chars().any(char::is_control) || user.len() > 256 {
@@ -310,15 +366,25 @@ pub struct Status {
     pub docs_written: u64,
     /// Why the last tick wrote nothing, when a gate was closed. Not an error.
     pub last_skipped: Option<String>,
-    /// Documents dropped because the queue was full.
+    /// Documents dropped because the queue was full (the oldest days first).
     pub dropped: u64,
+    /// Documents the guard refused to send (dropped, never retried).
+    pub refused: u64,
+    /// Documents the store rejected as malformed `REJECT_TRIES` times, then given up.
+    pub rejected: u64,
+    /// When the index template was last verified on this store under this prefix.
+    pub template_at: Option<u64>,
 }
 
-/// One document waiting: the index it goes to and its body.
+/// One document waiting: the day it is about (its index is worked out from the prefix in force
+/// when it is sent, so a prefix change never strands it) and its body.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Queued {
-    pub index: String,
+    pub day: String,
     pub doc: Value,
+    /// Times the store rejected it as malformed.
+    #[serde(default)]
+    pub tries: u32,
 }
 
 /// `(stream, cluster, _id)`: the order bulks are cut in, and the key a rewrite replaces.
@@ -330,15 +396,22 @@ pub struct HistoryStore {
     pub(crate) stored: RwLock<Stored>,
     pub(crate) status: Mutex<Status>,
     pub(crate) queue: Mutex<BTreeMap<QKey, Queued>>,
+    /// The queue changed since it was last written; the tick writes it, off the runtime.
+    queue_dirty: AtomicBool,
     pub(crate) backfill: Mutex<Option<Backfill>>,
     ticking: AtomicBool,
     /// One test at a time.
     testing: tokio::sync::Mutex<()>,
+    /// `Stored::template_key` of the store the template was verified on, in this process.
+    template_ok: Mutex<Option<String>>,
+    /// The store did not answer a read: `(destination, until, why)`.
+    unreachable: Mutex<Option<(String, u64, String)>>,
 }
 
 impl HistoryStore {
     /// Hosted keeps its settings and queue in the data directory; every other edition has
-    /// none and answers "hosted only".
+    /// none and answers "hosted only". A start whose config.txt no longer permits writes
+    /// disarms: putting the key back needs a new decision by an admin.
     pub fn open(data_dir: Option<&std::path::Path>, hosted: bool) -> HistoryStore {
         let dir = data_dir.filter(|_| hosted);
         let path = dir.map(|d| d.join(FILE));
@@ -346,15 +419,29 @@ impl HistoryStore {
         let stored: Stored = path.as_ref().and_then(|p| std::fs::read(p).ok()).and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
         let queue: Vec<(QKey, Queued)> = queue_path.as_ref().and_then(|p| std::fs::read(p).ok())
             .and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
-        HistoryStore {
+        let h = HistoryStore {
             path, queue_path,
             stored: RwLock::new(stored),
             status: Mutex::new(Status::default()),
             queue: Mutex::new(queue.into_iter().collect()),
+            queue_dirty: AtomicBool::new(false),
             backfill: Mutex::new(None),
             ticking: AtomicBool::new(false),
             testing: tokio::sync::Mutex::new(()),
+            template_ok: Mutex::new(None),
+            unreachable: Mutex::new(None),
+        };
+        if h.stored.read().armed && !permitted() {
+            let r = h.update(|s| {
+                s.armed = false;
+                s.armed_by = None;
+                s.armed_at = None;
+                Ok(())
+            });
+            tracing::warn!(target: "audit", saved = r.is_ok(),
+                           "history store: disarmed at start, config.txt does not set HISTORY_STORE_WRITES=true");
         }
+        h
     }
 
     pub fn supported(&self) -> bool {
@@ -367,31 +454,43 @@ impl HistoryStore {
         crate::volume::store::write_atomic(p, &bytes)
     }
 
-    /// Change the settings under the lock and write them; the change is kept only when the
-    /// file was written.
-    pub(crate) fn update(&self, f: impl FnOnce(&mut Stored)) -> Result<Stored, String> {
+    /// Change the settings under the lock and write them; the change is kept only when `f`
+    /// agreed to it and the file was written. Decisions about the settings are made in `f`,
+    /// inside the lock, so nothing can change them between the check and the change.
+    pub(crate) fn update(&self, f: impl FnOnce(&mut Stored) -> Result<(), String>) -> Result<Stored, String> {
         let mut g = self.stored.write();
         let mut next = g.clone();
-        f(&mut next);
+        f(&mut next)?;
         next.version = 1;
         self.save(&next)?;
         *g = next.clone();
         Ok(next)
     }
 
-    fn save_queue(&self) {
-        let Some(p) = &self.queue_path else { return };
+    /// The queue as a file, when it changed since it was last written.
+    fn queue_snapshot(&self) -> Option<(PathBuf, Vec<u8>)> {
+        let p = self.queue_path.clone()?;
+        if !self.queue_dirty.swap(false, Ordering::SeqCst) {
+            return None;
+        }
         let snapshot: Vec<(QKey, Queued)> = self.queue.lock().iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-        if let Ok(bytes) = serde_json::to_vec(&snapshot) {
-            if let Err(e) = crate::volume::store::write_atomic(p, &bytes) {
-                tracing::warn!(error = %e, "history store: the queue could not be written");
-            }
+        serde_json::to_vec(&snapshot).ok().map(|b| (p, b))
+    }
+
+    /// Write the queue file, off the async runtime, when it changed.
+    pub(crate) async fn flush_queue(&self) {
+        let Some((p, bytes)) = self.queue_snapshot() else { return };
+        let res = tokio::task::spawn_blocking(move || crate::volume::store::write_atomic(&p, &bytes)).await;
+        if !matches!(res, Ok(Ok(()))) {
+            self.queue_dirty.store(true, Ordering::SeqCst);
+            tracing::warn!("history store: the queue could not be written; tried again next tick");
         }
     }
 
     /// Put documents in the queue (a rewrite of a waiting one replaces it). Past `QUEUE_MAX`
-    /// the oldest keys go, counted.
+    /// the oldest days go, counted. A document whose day is not a day is not queued.
     pub fn enqueue(&self, items: Vec<(QKey, Queued)>) {
+        let items: Vec<(QKey, Queued)> = items.into_iter().filter(|(_, q)| parse_day(&q.day).is_some()).collect();
         if items.is_empty() {
             return;
         }
@@ -402,14 +501,27 @@ impl HistoryStore {
             }
             let over = q.len().saturating_sub(QUEUE_MAX);
             if over > 0 {
-                let drop: Vec<QKey> = q.keys().take(over).cloned().collect();
-                for k in drop {
+                let mut by_age: Vec<(String, QKey)> = q.iter().map(|(k, v)| (v.day.clone(), k.clone())).collect();
+                by_age.sort();
+                for (_, k) in by_age.into_iter().take(over) {
                     q.remove(&k);
                 }
                 self.status.lock().dropped += over as u64;
             }
         }
-        self.save_queue();
+        self.queue_dirty.store(true, Ordering::SeqCst);
+    }
+
+    /// Forget what is waiting for a stream that was turned off.
+    pub fn drop_stream(&self, stream: &str) -> usize {
+        let mut q = self.queue.lock();
+        let before = q.len();
+        q.retain(|k, _| k.0 != stream);
+        let gone = before - q.len();
+        if gone > 0 {
+            self.queue_dirty.store(true, Ordering::SeqCst);
+        }
+        gone
     }
 
     pub fn queue_len(&self) -> usize {
@@ -638,11 +750,14 @@ pub fn security_disabled(res: &Value) -> bool {
         || text.contains("security is disabled")
 }
 
-/// NDJSON for some documents, all `index` actions with their `_id`.
-pub fn bulk_body(items: &[(String, &Queued)]) -> String {
+
+/// NDJSON for queued documents, all `index` actions with their `_id`, each into the index its
+/// stream and day make under `prefix` — the prefix in force now, not when it was queued.
+pub fn bulk_body(prefix: &str, items: &[(&QKey, &Queued)]) -> String {
     let mut s = String::new();
-    for (id, q) in items {
-        s.push_str(&json!({ "index": { "_index": q.index, "_id": id } }).to_string());
+    for (k, q) in items {
+        let Some(index) = index_for_day(prefix, &k.0, &q.day) else { continue };
+        s.push_str(&json!({ "index": { "_index": index, "_id": k.2 } }).to_string());
         s.push('\n');
         s.push_str(&q.doc.to_string());
         s.push('\n');
@@ -658,7 +773,7 @@ pub fn cut_bulks(q: &BTreeMap<QKey, Queued>, max_bulks: usize) -> Vec<Vec<QKey>>
     let (mut bytes, mut group) = (0usize, None::<(String, String)>);
     for (k, v) in q {
         let g = (k.0.clone(), if k.0 == "volume" { k.1.clone() } else { String::new() });
-        let size = v.doc.to_string().len() + v.index.len() + k.2.len() + 40;
+        let size = v.doc.to_string().len() + k.0.len() + v.day.len() + k.2.len() + 80;
         if !cur.is_empty() && (group.as_ref() != Some(&g) || cur.len() >= BULK_MAX_DOCS || bytes + size > BULK_MAX_BYTES) {
             out.push(std::mem::take(&mut cur));
             bytes = 0;
@@ -676,26 +791,46 @@ pub fn cut_bulks(q: &BTreeMap<QKey, Queued>, max_bulks: usize) -> Vec<Vec<QKey>>
     out
 }
 
-/// Which items of a bulk answer were taken (by position), and the first reason one was not.
-pub fn bulk_items(res: &Value, n: usize) -> (Vec<bool>, Option<String>) {
-    let items = res.get("items").and_then(Value::as_array);
-    let mut ok = vec![false; n];
-    let mut first = None;
-    if let Some(items) = items {
-        for (i, it) in items.iter().enumerate().take(n) {
-            let r = it.get("index").or_else(|| it.get("create"));
-            match r.and_then(|r| r.get("error")) {
-                None if r.is_some() => ok[i] = true,
-                Some(e) => {
-                    first.get_or_insert_with(|| e.get("reason").and_then(Value::as_str).unwrap_or("rejected").to_string());
-                }
-                None => {}
+/// What the store did with one document of a bulk.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Item {
+    Taken,
+    /// Not taken this time for a reason that may pass (overloaded, unavailable, no answer).
+    Kept(String),
+    /// Refused as malformed: offering it again will not change the answer.
+    Rejected(String),
+}
+
+/// The error types that say the document itself is wrong.
+const PERMANENT: &[&str] = &["mapper_parsing_exception", "document_parsing_exception", "illegal_argument_exception",
+                             "strict_dynamic_mapping_exception", "invalid_index_name_exception", "parse_exception"];
+
+/// Each item of a bulk answer, by position.
+pub fn bulk_items(res: &Value, n: usize) -> Vec<Item> {
+    let mut out = vec![Item::Kept("not in the answer".into()); n];
+    let Some(items) = res.get("items").and_then(Value::as_array) else { return out };
+    for (i, it) in items.iter().enumerate().take(n) {
+        let Some(r) = it.get("index").or_else(|| it.get("create")) else { continue };
+        let status = r.get("status").and_then(Value::as_u64).unwrap_or(0);
+        out[i] = match r.get("error") {
+            None if (200..300).contains(&status) || status == 0 => Item::Taken,
+            None => Item::Kept(format!("status {status}")),
+            Some(e) => {
+                let kind = e.get("type").and_then(Value::as_str).unwrap_or("");
+                let reason = format!("{kind}: {}", e.get("reason").and_then(Value::as_str).unwrap_or("rejected"));
+                if PERMANENT.contains(&kind) || status == 400 { Item::Rejected(reason) } else { Item::Kept(reason) }
             }
-        }
-    } else if res.get("errors") == Some(&json!(false)) {
-        ok = vec![true; n];
+        };
     }
-    (ok, first)
+    out
+}
+
+/// A bulk that did not come back at all: refused by the guard before a socket (`refused`), or
+/// the store did not answer.
+#[derive(Debug)]
+pub struct BulkFailure {
+    pub refused: bool,
+    pub message: String,
 }
 
 /// What a store answer that did not come back fine says, as one line.
@@ -711,16 +846,24 @@ fn ok(res: &Value) -> bool {
     res.get("ok").and_then(Value::as_bool) == Some(true)
 }
 
+fn now() -> u64 {
+    crate::fleet::now_ms()
+}
+
 /* ------------------------------------------- read-back ------------------------------------------- */
 
-/// What one read-back search found, and how the page says so.
+/// What one read-back found, and how the page says so.
 #[derive(Debug, Default)]
 pub struct ReadBack {
     pub from: String,
     pub to: String,
     pub reachable: bool,
     pub message: Option<String>,
-    pub truncated: bool,
+    /// The bound was reached: days on or before this one may not all have been read.
+    pub truncated_before: Option<NaiveDate>,
+    /// The store answered with no day and has no ElasticPro index template under the prefix:
+    /// nothing was ever written there, which is not the same as "no days".
+    pub template_missing: bool,
     pub days: BTreeMap<String, Vec<Day>>,
 }
 
@@ -731,30 +874,49 @@ impl ReadBack {
 
     /// The reply's `history` object.
     pub fn json(&self) -> Value {
+        let message = if !self.reachable {
+            Some(format!("in the history store · not reachable{}", self.message.as_deref().map(|m| format!(": {m}")).unwrap_or_default()))
+        } else {
+            self.message.clone()
+        };
         json!({ "asked": true, "from": self.from, "to": self.to, "reachable": self.reachable,
-                "days": self.count(), "truncated": self.truncated,
-                "message": if self.reachable { self.message.clone() }
-                           else { Some(format!("in the history store · not reachable{}",
-                                               self.message.as_deref().map(|m| format!(": {m}")).unwrap_or_default())) } })
+                "days": self.count(), "truncated": self.truncated_before.is_some(),
+                "truncatedBefore": self.truncated_before.map(day_key),
+                "templateMissing": self.template_missing, "message": message })
     }
 }
 
-/// The read-back search: the days of these clusters in `[from, to]`, newest first.
-pub fn read_back_body(clusters: &[String], from: NaiveDate, to: NaiveDate) -> Value {
-    json!({
-        "size": READ_BACK_MAX, "track_total_hits": true, "sort": [{ "day": { "order": "desc" } }],
+/// One read-back page: the days of these clusters in `[from, to]`, newest first, unique by
+/// `(day, clusterId)` so `search_after` pages through them. `light` leaves the per-source
+/// figures out (the month views do not use them).
+pub fn read_back_body(clusters: &[String], from: NaiveDate, to: NaiveDate, light: bool, after: Option<&Value>) -> Value {
+    let mut b = json!({
+        "size": READ_BACK_PAGE, "track_total_hits": true,
+        "sort": [{ "day": { "order": "desc" } }, { "clusterId": { "order": "asc" } }],
         "query": { "bool": { "filter": [
             { "terms": { "clusterId": clusters } },
             { "range": { "day": { "gte": day_key(from), "lte": day_key(to), "format": "yyyy-MM-dd" } } },
         ] } },
-    })
+    });
+    if light {
+        b["_source"] = json!({ "excludes": ["sources"] });
+    }
+    if let Some(a) = after {
+        b["search_after"] = a.clone();
+    }
+    b
 }
 
-/// The first day of the local record for a cluster: where the history store's days stop
-/// being needed. `None` when it keeps nothing.
+/// The first day the local record covers for a cluster: where the history store's days stop
+/// being needed. The one definition the Daily and the Monthly views both use. `None` when it
+/// keeps nothing.
 pub fn oldest_local_day(store: &crate::volume::store::Store, cluster: &str) -> Option<NaiveDate> {
-    let first = store.months(cluster).into_iter().next()?;
-    store.read_month(cluster, &first).days.keys().filter_map(|k| parse_day(k)).min()
+    for m in store.months(cluster) {
+        if let Some(d) = store.read_month(cluster, &m).days.keys().filter_map(|k| parse_day(k)).min() {
+            return Some(d);
+        }
+    }
+    None
 }
 
 /// The days to ask the store for: from `from` to the day before the local record starts
@@ -779,6 +941,13 @@ impl Core {
         self.edition().schedules() && self.history_store.supported()
     }
 
+    /// The monitored cluster at the store's address, if there is one: the store is dedicated,
+    /// and a monitored cluster is never written by this feature.
+    fn history_store_is_a_cluster(&self, url: &str) -> Option<String> {
+        let hk = crate::http::host_key(url);
+        self.all_specs().into_iter().find(|c| crate::http::host_key(&c.url) == hk).map(|c| c.id)
+    }
+
     /// Where the store's requests go and with what: the store's own address, route,
     /// certificate setting and credential. `Err` says why there is no such place.
     pub(crate) fn history_spec(&self) -> Result<ClusterSpec, String> {
@@ -789,12 +958,21 @@ impl Core {
         if !s.configured() {
             return Err("the history store is not configured: set its URL in Config › History store".into());
         }
+        if let Some(id) = self.history_store_is_a_cluster(&s.url) {
+            return Err(format!("the history store's address is the monitored cluster {id:?}'s: the store must be a dedicated endpoint"));
+        }
+        if s.auth != AuthKind::None && s.url.starts_with("http://") {
+            return Err("a credential is sent to the store only over https://".into());
+        }
         let secret = match (&s.auth, &s.sealed) {
             (AuthKind::None, _) => None,
             (_, None) => return Err("the history store has no credential: type its password or API key in Config › History store".into()),
-            (_, Some(sealed)) => match self.cluster_secrets.open_own(&seal_aad(&s.destination()), sealed) {
+            (_, Some(_)) if s.secret_stale() => {
+                return Err("the store's address, route, TLS or kind of credential changed since its credential was typed: type it again".into())
+            }
+            (_, Some(sealed)) => match self.cluster_secrets.open_own(&seal_aad(&s.destination(), s.auth), sealed) {
                 Some(p) => Some(p),
-                None => return Err("the history store's address changed since its credential was typed: type it again".into()),
+                None => return Err("the history store's credential does not open with this server's key: type it again".into()),
             },
         };
         let auth_header = secret.map(|p| match s.auth {
@@ -835,27 +1013,32 @@ impl Core {
         Ok(())
     }
 
-    /// Why *Write history* cannot be turned on now, or `None`.
-    fn history_arm_blocked(&self) -> Option<String> {
-        if !self.history_supported() {
-            return Some("the history store is hosted only".into());
+    /// Right before a store request leaves, after it waited for its slot: still the same
+    /// store, address, route, certificate setting, credential and prefix as when it was
+    /// built, and the permission it may have now. `Err` when anything moved: not sent.
+    pub(crate) fn history_recheck(&self, req: &EsRequest, url: &str, auth: Option<&str>, via: Option<&str>,
+                                  tls: crate::tls::TlsMode) -> Result<Writes, String> {
+        let spec = self.history_spec()?;
+        let same = spec.url.trim_end_matches('/') == url.trim_end_matches('/')
+            && spec.auth_header.as_deref() == auth
+            && spec.via.as_deref() == via
+            && crate::tls::TlsMode::parse(spec.tls.as_deref()) == tls
+            && req.history_prefix.as_deref() == Some(self.history_store.stored.read().prefix());
+        if !same {
+            return Err("the history store's settings changed while this request waited for its turn: it was not sent".into());
         }
-        if !permitted() {
-            return Some(PERMIT_HINT.into());
+        let open = self.history_writes_open();
+        // A write whose gates closed while it waited is not a write the guard should judge as
+        // a read: it is simply not sent, and whatever it carried stays queued.
+        let wants_write = req.method.trim().eq_ignore_ascii_case("PUT") || req.path.split('?').next() == Some("/_bulk");
+        if let (true, Err(e)) = (wants_write, &open) {
+            return Err(format!("{e}: this write waited for its turn and was not sent"));
         }
-        let s = self.history_store.stored.read();
-        if !s.configured() {
-            return Some("set the store's URL and save".into());
-        }
-        match &s.test {
-            None => Some("run Test connection first".into()),
-            Some(t) if !t.ok => Some("the last Test connection failed: fix it and test again".into()),
-            Some(_) if !s.test_current() => Some("the settings changed since the last Test connection: test again".into()),
-            Some(_) => None,
-        }
+        Ok(if open.is_ok() { Writes::HistoryWrite } else { Writes::HistoryRead })
     }
 
-    /// A request to the store. `es_req` sends it to the store whatever else it says.
+    /// A write (or the test's reads) to the store: the core's own, in the background class.
+    /// `es_req` sends it to the store whatever else it says.
     pub(crate) fn history_req(&self, method: &str, path: String, body: Option<String>, timeout_ms: u64) -> EsRequest {
         EsRequest {
             cluster_id: STORE_ID.into(),
@@ -868,6 +1051,14 @@ impl Core {
             history_prefix: Some(self.history_store.stored.read().prefix().to_string()),
             ..EsRequest::default()
         }
+    }
+
+    /// A read a person is waiting for (a page's read-back, `HISTORY_QUERY`): the interactive
+    /// class, so it waits for a slot no longer than a person's request does, and a short timeout.
+    fn history_read_req(&self, path: String, body: Value) -> EsRequest {
+        let mut r = self.history_req("POST", path, Some(body.to_string()), 8_000);
+        r.class = crate::gate::Class::Interactive;
+        r
     }
 
     /// What `HISTORY_STORE_GET` answers: the settings without any secret, the gates, the last
@@ -886,6 +1077,7 @@ impl Core {
             }
             v
         });
+        let template_ok = self.history_store.template_ok.lock().as_deref() == Some(s.template_key().as_str());
         json!({
             "ok": true, "supported": true,
             "settings": {
@@ -896,13 +1088,13 @@ impl Core {
             "armed": s.armed, "armedBy": s.armed_by, "armedAt": s.armed_at,
             "permitted": permitted(), "permitHint": (!permitted()).then_some(PERMIT_HINT),
             "test": test,
-            "armBlocked": self.history_arm_blocked(),
+            "armBlocked": if self.history_supported() { arm_blocked(&s, permitted()) } else { Some("the history store is hosted only".into()) },
             "writing": self.history_writes_open().err(),
             "status": {
                 "lastSuccessAt": st.last_success_at, "lastError": st.last_error, "lastErrorAt": st.last_error_at,
                 "docsWritten": st.docs_written, "queue": self.history_store.queue_len(), "dropped": st.dropped,
-                "lastSkipped": st.last_skipped,
-                "templateAt": s.template_at.filter(|_| s.template_for.as_deref() == Some(s.prefix())),
+                "refused": st.refused, "rejected": st.rejected, "lastSkipped": st.last_skipped,
+                "templateAt": st.template_at.filter(|_| template_ok),
                 "backfill": backfill,
             },
             "jumpHosts": jump,
@@ -936,11 +1128,17 @@ impl Core {
             Ok(i) => i,
             Err(e) => return json!({ "ok": false, "kind": "bad_request", "message": e }),
         };
+        if !incoming.url.is_empty() {
+            if let Some(id) = self.history_store_is_a_cluster(&incoming.url) {
+                return json!({ "ok": false, "kind": "bad_request",
+                               "message": format!("that address is the monitored cluster {id:?}'s: the history store is a dedicated endpoint, never a monitored cluster") });
+            }
+        }
         let mut sealed_now: Option<(String, String)> = None;
         if let Some(secret) = &incoming.secret {
             let probe = Stored { url: incoming.url.clone(), via: incoming.via.clone(), tls: incoming.tls.clone(), ..Stored::default() };
             let dest = probe.destination();
-            match self.cluster_secrets.seal_own(&seal_aad(&dest), secret) {
+            match self.cluster_secrets.seal_own(&seal_aad(&dest, incoming.auth), secret) {
                 Ok(s) => sealed_now = Some((s, dest)),
                 Err(e) => return json!({ "ok": false, "kind": "bad_request", "message": format!("the credential cannot be kept: {e}") }),
             }
@@ -957,10 +1155,12 @@ impl Core {
             if let Some((sealed, dest)) = sealed_now {
                 s.sealed = Some(sealed);
                 s.sealed_for = dest;
+                s.sealed_auth = Some(s.auth);
             }
             if s.auth == AuthKind::None {
                 s.sealed = None;
                 s.sealed_for.clear();
+                s.sealed_auth = None;
             }
             // Other settings are not what the last test passed on, nor what arming agreed to:
             // the switch goes off and the next write waits for a new test and a new decision.
@@ -969,12 +1169,19 @@ impl Core {
                 s.armed_by = None;
                 s.armed_at = None;
             }
+            Ok(())
         });
         match res {
             Ok(s) => {
-                // The transport's client for the store is built again on the next request.
-                tracing::info!(target: "audit", user = %by, url = %s.url, prefix = %s.prefix(), auth = ?s.auth,
-                               streams = ?s.streams, "history store configured");
+                // What waits for a stream that is now off is not sent later.
+                let mut dropped = 0;
+                for stream in ["volume", "capacity"] {
+                    if !s.streams.on(stream) {
+                        dropped += self.history_store.drop_stream(stream);
+                    }
+                }
+                tracing::info!(target: "audit", user = %by, url = %s.url, prefix = %s.prefix(), auth = s.auth.as_str(),
+                               streams = ?s.streams, armed = s.armed, dropped, "history store configured");
                 self.history_view().await
             }
             Err(e) => json!({ "ok": false, "message": format!("could not save: {e}") }),
@@ -983,9 +1190,12 @@ impl Core {
 
     async fn history_test(self: &Arc<Self>, by: &str) -> Value {
         let _one = self.history_store.testing.lock().await;
+        // The settings the test runs on. Every request it sends is checked against the
+        // settings at the moment it leaves (`history_recheck`), and the result is kept only if
+        // the settings are still these when it ends.
         let s = self.history_store.stored.read().clone();
         let prefix = s.prefix().to_string();
-        let mut t = TestResult { at: crate::fleet::now_ms(), by: by.into(), fingerprint: s.fingerprint(), ..TestResult::default() };
+        let mut t = TestResult { at: now(), by: by.into(), fingerprint: s.fingerprint(), ..TestResult::default() };
         let mut extra = Map::new();
         if let Err(e) = self.history_spec() {
             t.message = Some(e);
@@ -1024,16 +1234,21 @@ impl Core {
                 }
             }
         }
-        let passed = t.ok;
-        let res = self.history_store.update(|st| st.test = Some(t.clone()));
+        let res = self.history_store.update(|st| {
+            if st.fingerprint() != t.fingerprint {
+                return Err("the settings changed while the test ran: test again".into());
+            }
+            st.test = Some(t.clone());
+            Ok(())
+        });
+        let passed = t.ok && res.is_ok();
         tracing::info!(target: "audit", user = %by, ok = passed, message = t.message.as_deref().unwrap_or(""), "history store tested");
         let mut out = self.history_view().await;
-        if let Err(e) = res {
-            out["message"] = json!(format!("the test ran but could not be saved: {e}"));
-        }
         out["ok"] = json!(passed);
-        if !passed {
-            out["message"] = json!(t.message.unwrap_or_else(|| "the test failed".into()));
+        if let Err(e) = res {
+            out["message"] = json!(e);
+        } else if !passed {
+            out["message"] = json!(t.message.clone().unwrap_or_else(|| "the test failed".into()));
         }
         if let Some(o) = out.as_object_mut() {
             o.extend(extra);
@@ -1043,19 +1258,22 @@ impl Core {
 
     async fn history_arm(&self, msg: &Value, by: &str) -> Value {
         let on = msg.get("on").and_then(Value::as_bool).unwrap_or(false);
-        if on {
-            if let Some(why) = self.history_arm_blocked() {
-                return refused(format!("Write history cannot be turned on: {why}"));
-            }
-        }
-        let now = crate::fleet::now_ms();
+        let at = now();
+        let permit = permitted();
+        // The check and the switch in one step, under the settings lock.
         let res = self.history_store.update(|s| {
+            if on {
+                if let Some(why) = arm_blocked(s, permit) {
+                    return Err(format!("Write history cannot be turned on: {why}"));
+                }
+            }
             s.armed = on;
             s.armed_by = on.then(|| by.to_string());
-            s.armed_at = on.then_some(now);
+            s.armed_at = on.then_some(at);
+            Ok(())
         });
         if let Err(e) = res {
-            return json!({ "ok": false, "message": format!("could not save: {e}") });
+            return refused(e);
         }
         tracing::info!(target: "audit", user = %by, armed = on, "history store write switch");
         self.history_view().await
@@ -1080,52 +1298,72 @@ impl Core {
         tracing::info!(target: "audit", "history store: timer started");
     }
 
-    /// Create the index template once per prefix (mappings only).
+    /// The index template, verified once per store and prefix in this process: created with
+    /// `create=true`, so a template of the same name is never replaced; one that is already
+    /// there is accepted only when it is ElasticPro's (`_meta.managedBy`, the same pattern).
     async fn history_ensure_template(self: &Arc<Self>) -> Result<(), String> {
-        let (prefix, done) = {
+        let (key, prefix) = {
             let s = self.history_store.stored.read();
-            (s.prefix().to_string(), s.template_for.as_deref() == Some(s.prefix()))
+            (s.template_key(), s.prefix().to_string())
         };
-        if done {
+        if self.history_store.template_ok.lock().as_deref() == Some(key.as_str()) {
             return Ok(());
         }
-        let res = self.es_req(self.history_req("PUT", format!("/_index_template/{}", template_name(&prefix)),
+        let name = template_name(&prefix);
+        let res = self.es_req(self.history_req("PUT", format!("/_index_template/{name}?create=true"),
                                                Some(template_body(&prefix).to_string()), 30_000)).await;
         if !ok(&res) {
-            return Err(format!("the index template: {}", why(&res)));
+            let reason = why(&res);
+            if !reason.contains("already exists") {
+                return Err(format!("the index template: {reason}"));
+            }
+            let got = self.es_req(self.history_req("GET", format!("/_index_template/{name}"), None, 15_000)).await;
+            if !ok(&got) {
+                return Err(format!("the index template {name} exists and could not be read: {}", why(&got)));
+            }
+            let t = got.pointer("/json/index_templates/0/index_template").cloned().unwrap_or(Value::Null);
+            let ours = t.pointer("/_meta/managedBy").and_then(Value::as_str) == Some("ElasticPro")
+                && t.get("index_patterns") == Some(&json!([format!("{prefix}-*")]));
+            if !ours {
+                return Err(format!("an index template named {name} already exists on the store and is not ElasticPro's \
+                                    (no _meta.managedBy ElasticPro for {prefix}-*): remove it or choose another prefix"));
+            }
         }
-        let now = crate::fleet::now_ms();
-        self.history_store.update(|s| {
-            s.template_for = Some(prefix.clone());
-            s.template_at = Some(now);
-        })?;
-        tracing::info!(target: "audit", prefix = %prefix, "history store: index template created");
+        *self.history_store.template_ok.lock() = Some(key);
+        self.history_store.status.lock().template_at = Some(now());
+        tracing::info!(target: "audit", prefix = %prefix, "history store: index template verified");
         Ok(())
     }
 
-    /// Send one bulk to the store; which items it took.
-    async fn history_send_bulk(self: &Arc<Self>, body: String, n: usize) -> Result<(Vec<bool>, Option<String>), String> {
-        let res = self.es_req(self.history_req("POST", "/_bulk".into(), Some(body), 60_000)).await;
+    /// Send one bulk of queued documents to the store, under the prefix in force now.
+    async fn history_send_bulk(self: &Arc<Self>, items: &[(&QKey, &Queued)]) -> Result<Vec<Item>, BulkFailure> {
+        let prefix = self.history_store.stored.read().prefix().to_string();
+        let res = self.es_req(self.history_req("POST", "/_bulk".into(), Some(bulk_body(&prefix, items)), 60_000)).await;
         if !ok(&res) {
-            return Err(why(&res));
+            return Err(BulkFailure { refused: res.get("kind").and_then(Value::as_str) == Some("blocked_readonly"), message: why(&res) });
         }
-        Ok(bulk_items(res.get("json").unwrap_or(&Value::Null), n))
+        Ok(bulk_items(res.get("json").unwrap_or(&Value::Null), items.len()))
     }
 
     fn history_note_error(&self, e: &str) {
         let mut st = self.history_store.status.lock();
         st.last_error = Some(e.to_string());
-        st.last_error_at = Some(crate::fleet::now_ms());
+        st.last_error_at = Some(now());
     }
 
     fn history_note_written(&self, n: u64) {
+        if n == 0 {
+            return;
+        }
         let mut st = self.history_store.status.lock();
         st.docs_written += n;
-        st.last_success_at = Some(crate::fleet::now_ms());
+        st.last_success_at = Some(now());
     }
 
-    /// One tick: when both gates are open, the template, then the queue in bulks. A bulk that
-    /// fails stays queued for the next tick; the local record is never held up by it.
+    /// One tick: when both gates are open, the template, then the queue in bulks. A bulk the
+    /// store did not answer stays queued and ends the tick; a bulk the guard refused is dropped
+    /// and counted, and the tick goes on; a document the store rejected as malformed is offered
+    /// `REJECT_TRIES` times, then given up and counted. The local record never waits.
     #[doc(hidden)]
     pub async fn history_tick(self: &Arc<Self>) -> Value {
         if self.history_store.ticking.swap(true, Ordering::SeqCst) {
@@ -1138,6 +1376,12 @@ impl Core {
             }
         }
         let _done = Done(&self.history_store.ticking);
+        let out = self.history_tick_inner().await;
+        self.history_store.flush_queue().await;
+        out
+    }
+
+    async fn history_tick_inner(self: &Arc<Self>) -> Value {
         if let Err(why) = self.history_writes_open() {
             self.history_store.status.lock().last_skipped = Some(why.clone());
             return json!({ "ok": false, "skipped": why });
@@ -1151,7 +1395,7 @@ impl Core {
             return json!({ "ok": false, "error": e });
         }
         let bulks = cut_bulks(&self.history_store.queue.lock(), BULKS_PER_TICK);
-        let (mut written, mut error) = (0u64, None::<String>);
+        let (mut written, mut refused_n, mut rejected_n, mut error) = (0u64, 0u64, 0u64, None::<String>);
         for keys in bulks {
             // Disarmed while this tick was sending: stop at once.
             if let Err(why) = self.history_writes_open() {
@@ -1165,53 +1409,79 @@ impl Core {
             if items.is_empty() {
                 continue;
             }
-            let refs: Vec<(String, &Queued)> = items.iter().map(|(k, v)| (k.2.clone(), v)).collect();
-            match self.history_send_bulk(bulk_body(&refs), items.len()).await {
-                Err(e) => {
-                    error = Some(format!("bulk: {e}; kept for the next tick"));
-                    break;
-                }
-                Ok((taken, first)) => {
+            let refs: Vec<(&QKey, &Queued)> = items.iter().map(|(k, v)| (k, v)).collect();
+            match self.history_send_bulk(&refs).await {
+                Err(f) if f.refused => {
+                    // The guard said no before a socket: sending it again would get the same
+                    // answer. Dropped, counted, and the rest of the queue goes on.
                     let mut q = self.history_store.queue.lock();
-                    for ((k, sent), took) in items.iter().zip(&taken) {
-                        // Taken, and not rewritten while it was on its way.
-                        if *took && q.get(k) == Some(sent) {
+                    for (k, sent) in &items {
+                        if q.get(k) == Some(sent) {
                             q.remove(k);
                         }
                     }
-                    drop(q);
-                    let n = taken.iter().filter(|t| **t).count() as u64;
-                    written += n;
-                    if let Some(f) = first {
-                        error = Some(format!("{} of {} documents rejected: {f}; kept for the next tick", items.len() as u64 - n, items.len()));
+                    refused_n += items.len() as u64;
+                    error = Some(format!("{} documents refused and dropped: {}", items.len(), f.message));
+                }
+                Err(f) => {
+                    error = Some(format!("bulk: {}; kept for the next tick", f.message));
+                    break;
+                }
+                Ok(results) => {
+                    let mut q = self.history_store.queue.lock();
+                    for ((k, sent), item) in items.iter().zip(&results) {
+                        // Not rewritten while it was on its way: what was sent is what is decided on.
+                        if q.get(k) != Some(sent) {
+                            continue;
+                        }
+                        match item {
+                            Item::Taken => {
+                                q.remove(k);
+                                written += 1;
+                            }
+                            Item::Rejected(why) => {
+                                let tries = sent.tries + 1;
+                                if tries >= REJECT_TRIES {
+                                    q.remove(k);
+                                    rejected_n += 1;
+                                    error = Some(format!("{} {}: given up after {tries} rejections: {why}", k.0, k.2));
+                                } else if let Some(v) = q.get_mut(k) {
+                                    v.tries = tries;
+                                    error.get_or_insert_with(|| format!("{} {}: rejected ({why}); offered again next tick", k.0, k.2));
+                                }
+                            }
+                            Item::Kept(why) => {
+                                error.get_or_insert_with(|| format!("{} {}: not taken ({why}); kept for the next tick", k.0, k.2));
+                            }
+                        }
                     }
+                    self.history_store.queue_dirty.store(true, Ordering::SeqCst);
                 }
             }
         }
-        if written > 0 {
-            self.history_note_written(written);
+        self.history_note_written(written);
+        {
+            let mut st = self.history_store.status.lock();
+            st.refused += refused_n;
+            st.rejected += rejected_n;
         }
         match &error {
             Some(e) => self.history_note_error(e),
             None => self.history_store.status.lock().last_error = None,
         }
-        self.history_store.save_queue();
         if written > 0 || error.is_some() {
-            tracing::info!(target: "audit", written, queue = self.history_store.queue_len(), error = error.as_deref().unwrap_or(""), "history store: bulk written");
+            tracing::info!(target: "audit", written, refused = refused_n, rejected = rejected_n, queue = self.history_store.queue_len(),
+                           error = error.as_deref().unwrap_or(""), "history store: bulk written");
         }
-        json!({ "ok": error.is_none(), "written": written, "queue": self.history_store.queue_len(), "error": error })
+        json!({ "ok": error.is_none(), "written": written, "refused": refused_n, "rejected": rejected_n,
+                "queue": self.history_store.queue_len(), "error": error })
     }
 
     /* ------------------------------------------- streams ------------------------------------------- */
 
     fn history_stream_on(&self, stream: &str) -> bool {
         let s = self.history_store.stored.read();
-        s.configured() && match stream {
-            "volume" => s.streams.volume,
-            "capacity" => s.streams.capacity,
-            "delay" => s.streams.delay,
-            _ => false,
-        }
+        s.configured() && s.streams.on(stream)
     }
 
     fn cluster_name(&self, id: &str) -> String {
@@ -1226,9 +1496,8 @@ impl Core {
             return;
         }
         let Some(store) = &self.volume.store else { return };
-        let prefix = self.history_store.stored.read().prefix().to_string();
         let name = self.cluster_name(cluster);
-        let now = crate::fleet::now_ms();
+        let at = now();
         let mut by_month: BTreeMap<String, Vec<&String>> = BTreeMap::new();
         for d in days {
             if let Some(date) = parse_day(d) {
@@ -1239,9 +1508,9 @@ impl Core {
         for (m, ds) in by_month {
             let file = store.read_month(cluster, &m);
             for d in ds {
-                let (Some(day), Some(index)) = (file.days.get(d), index_for_day(&prefix, "volume", d)) else { continue };
+                let Some(day) = file.days.get(d) else { continue };
                 items.push((("volume".into(), cluster.to_string(), day_id(cluster, d)),
-                            Queued { index, doc: volume_doc(cluster, &name, day, now) }));
+                            Queued { day: d.clone(), doc: volume_doc(cluster, &name, day, at), tries: 0 }));
             }
         }
         self.history_store.enqueue(items);
@@ -1252,7 +1521,7 @@ impl Core {
         if !self.history_stream_on("capacity") || self.history_writes_open().is_err() {
             return;
         }
-        let today = utc_day(crate::fleet::now_ms() as i64);
+        let today = utc_day(now() as i64);
         let raw = self.volume_config().await.ok().flatten();
         let entry = raw.as_ref().and_then(|r| r.get("clusters")).and_then(Value::as_array).and_then(|list| {
             let ids = crate::cluster_save::config_ids(list);
@@ -1287,11 +1556,10 @@ impl Core {
         let name = self.cluster_name(cluster);
         let doc = capacity_doc(&CapacityInputs {
             cluster, name: &name, day: today, nodes: nodes.as_ref(), alloc: alloc.as_ref(), nodes_fetched_at: fetched_at,
-            oldest_live, entry: entry.as_ref(), meta: meta.as_ref(), last7, now_ms: crate::fleet::now_ms(),
+            oldest_live, entry: entry.as_ref(), meta: meta.as_ref(), last7, now_ms: now(),
         });
-        let prefix = self.history_store.stored.read().prefix().to_string();
-        let Some(index) = index_for_day(&prefix, "capacity", &day_key(today)) else { return };
-        self.history_store.enqueue(vec![(("capacity".into(), cluster.to_string(), day_id(cluster, &day_key(today))), Queued { index, doc })]);
+        let day = day_key(today);
+        self.history_store.enqueue(vec![(("capacity".into(), cluster.to_string(), day_id(cluster, &day)), Queued { day, doc, tries: 0 })]);
     }
 
     /// The delay sink's destination when it is the history store: the index for this run's
@@ -1314,10 +1582,10 @@ impl Core {
         let n = ndjson.lines().filter(|l| !l.trim().is_empty()).count() / 2;
         let res = self.es_req(self.history_req("POST", "/_bulk".into(), Some(ndjson), 60_000)).await;
         if ok(&res) {
-            let (taken, first) = bulk_items(res.get("json").unwrap_or(&Value::Null), n);
-            self.history_note_written(taken.iter().filter(|t| **t).count() as u64);
-            if let Some(f) = first {
-                self.history_note_error(&format!("delay: {f}"));
+            let items = bulk_items(res.get("json").unwrap_or(&Value::Null), n);
+            self.history_note_written(items.iter().filter(|i| **i == Item::Taken).count() as u64);
+            if let Some(Item::Rejected(w) | Item::Kept(w)) = items.iter().find(|i| **i != Item::Taken) {
+                self.history_note_error(&format!("delay: {w}"));
             }
         } else {
             self.history_note_error(&format!("delay: {}", why(&res)));
@@ -1325,7 +1593,7 @@ impl Core {
         res
     }
 
-    /// `delayStore` for `DELAY_SINK_GET`: whether the history store could take the
+    /// `historyStore` for `DELAY_SINK_GET`: whether the history store could take the
     /// measurements now.
     pub(crate) fn history_for_delay(&self) -> Value {
         let s = self.history_store.stored.read();
@@ -1350,7 +1618,7 @@ impl Core {
             if b.as_ref().is_some_and(|b| b.running) {
                 return refused("a copy is already running");
             }
-            *b = Some(Backfill { running: true, started_at: crate::fleet::now_ms(), ..Backfill::default() });
+            *b = Some(Backfill { running: true, started_at: now(), ..Backfill::default() });
         }
         tracing::info!(target: "audit", user = %by, "history store: copying the existing daily record");
         let core = self.clone();
@@ -1380,32 +1648,32 @@ impl Core {
             error = Some(e);
         }
         'files: for (cluster, m) in work.iter().filter(|_| error.is_none()) {
-            let prefix = self.history_store.stored.read().prefix().to_string();
             let name = self.cluster_name(cluster);
-            let now = crate::fleet::now_ms();
+            let at = now();
             let file = store.read_month(cluster, m);
-            let items: Vec<(String, Queued)> = file.days.values().filter_map(|d| {
-                Some((day_id(cluster, &d.day), Queued { index: index_for_day(&prefix, "volume", &d.day)?, doc: volume_doc(cluster, &name, d, now) }))
+            let items: Vec<(QKey, Queued)> = file.days.values().map(|d| {
+                (("volume".to_string(), cluster.clone(), day_id(cluster, &d.day)),
+                 Queued { day: d.day.clone(), doc: volume_doc(cluster, &name, d, at), tries: 0 })
             }).collect();
             for page in items.chunks(BULK_MAX_DOCS) {
                 if let Err(why) = self.history_writes_open() {
                     error = Some(format!("stopped: {why}"));
                     break 'files;
                 }
-                let refs: Vec<(String, &Queued)> = page.iter().map(|(id, q)| (id.clone(), q)).collect();
-                match self.history_send_bulk(bulk_body(&refs), page.len()).await {
-                    Err(e) => {
-                        error = Some(format!("{cluster} {m}: {e}"));
+                let refs: Vec<(&QKey, &Queued)> = page.iter().map(|(k, q)| (k, q)).collect();
+                match self.history_send_bulk(&refs).await {
+                    Err(f) => {
+                        error = Some(format!("{cluster} {m}: {}", f.message));
                         break 'files;
                     }
-                    Ok((taken, first)) => {
-                        let n = taken.iter().filter(|t| **t).count() as u64;
+                    Ok(results) => {
+                        let n = results.iter().filter(|i| **i == Item::Taken).count() as u64;
                         self.history_note_written(n);
                         if let Some(b) = self.history_store.backfill.lock().as_mut() {
                             b.docs += n;
                         }
-                        if let Some(f) = first {
-                            error = Some(format!("{cluster} {m}: {} of {} rejected: {f}", page.len() as u64 - n, page.len()));
+                        if let Some(Item::Rejected(w) | Item::Kept(w)) = results.iter().find(|i| **i != Item::Taken) {
+                            error = Some(format!("{cluster} {m}: {} of {} not taken: {w}", page.len() as u64 - n, page.len()));
                             break 'files;
                         }
                     }
@@ -1421,7 +1689,7 @@ impl Core {
         let mut b = self.history_store.backfill.lock();
         if let Some(b) = b.as_mut() {
             b.running = false;
-            b.finished_at = Some(crate::fleet::now_ms());
+            b.finished_at = Some(now());
             b.error = error.clone();
             tracing::info!(target: "audit", files = b.done, docs = b.docs, error = error.as_deref().unwrap_or(""), "history store: copy finished");
         }
@@ -1429,39 +1697,87 @@ impl Core {
 
     /* ------------------------------------------- read-back ------------------------------------------- */
 
-    /// The volume days of these clusters in `[from, to]` from the store, in one search.
-    /// `None` when there is no store to ask (not hosted, not configured).
-    pub(crate) async fn history_read_volume(self: &Arc<Self>, clusters: &[String], from: NaiveDate, to: NaiveDate) -> Option<ReadBack> {
+    /// The volume days of these clusters in `[from, to]` from the store: pages of
+    /// `READ_BACK_PAGE` days, newest first, at most `READ_BACK_PAGES` of them; past the bound
+    /// the answer says on or before which day it did not read everything. Interactive class
+    /// (a person is waiting), and a store that did not answer is not asked again for
+    /// `UNREACHABLE_FOR_MS`. `None` when there is no store to ask (not hosted, not configured).
+    pub(crate) async fn history_read_volume(self: &Arc<Self>, clusters: &[String], from: NaiveDate, to: NaiveDate,
+                                            light: bool) -> Option<ReadBack> {
         if clusters.is_empty() || !self.history_supported() || !self.history_store.stored.read().configured() {
             return None;
         }
-        let prefix = self.history_store.stored.read().prefix().to_string();
+        let (dest, prefix) = {
+            let s = self.history_store.stored.read();
+            (s.destination(), s.prefix().to_string())
+        };
         let mut rb = ReadBack { from: day_key(from), to: day_key(to), ..ReadBack::default() };
-        let res = self.es_req(self.history_req("POST", format!("/{prefix}-volume-*/_search?ignore_unavailable=true&allow_no_indices=true"),
-                                               Some(read_back_body(clusters, from, to).to_string()), 10_000)).await;
-        if !ok(&res) {
-            rb.message = Some(why(&res));
-            return Some(rb);
+        let at = now();
+        if let Some((d, until, why)) = self.history_store.unreachable.lock().clone() {
+            if d == dest && at < until {
+                rb.message = Some(format!("{why} (asked again after {} s)", (until - at).div_ceil(1000)));
+                return Some(rb);
+            }
         }
-        rb.reachable = true;
-        let hits = res.pointer("/json/hits/hits").and_then(Value::as_array).cloned().unwrap_or_default();
-        let total = res.pointer("/json/hits/total/value").and_then(Value::as_u64).unwrap_or(hits.len() as u64);
-        rb.truncated = total > hits.len() as u64;
-        if rb.truncated {
-            rb.message = Some(format!("{} of {total} days read: the oldest are not shown", hits.len()));
-        }
-        for h in &hits {
-            if let Some((c, d)) = h.get("_source").and_then(day_from_doc) {
-                if clusters.contains(&c) {
-                    rb.days.entry(c).or_default().push(d);
+        let path = format!("/{prefix}-volume-*/_search?ignore_unavailable=true&allow_no_indices=true");
+        let mut after: Option<Value> = None;
+        let mut read = 0u64;
+        for page in 0..READ_BACK_PAGES {
+            let res = self.es_req(self.history_read_req(path.clone(), read_back_body(clusters, from, to, light, after.as_ref()))).await;
+            if !ok(&res) {
+                let w = why(&res);
+                if page == 0 {
+                    *self.history_store.unreachable.lock() = Some((dest, at + UNREACHABLE_FOR_MS, w.clone()));
+                    rb.message = Some(w);
+                    return Some(rb);
                 }
+                // Part was read: what was not is said, not guessed.
+                rb.truncated_before = rb.days.values().flatten().filter_map(|d| parse_day(&d.day)).min();
+                rb.message = Some(format!("the store stopped answering after {read} days ({w}): days on or before {} may be missing",
+                                          rb.truncated_before.map(day_key).unwrap_or_default()));
+                return Some(rb);
+            }
+            rb.reachable = true;
+            *self.history_store.unreachable.lock() = None;
+            let hits = res.pointer("/json/hits/hits").and_then(Value::as_array).cloned().unwrap_or_default();
+            let total = res.pointer("/json/hits/total/value").and_then(Value::as_u64).unwrap_or(hits.len() as u64);
+            for h in &hits {
+                if let Some((c, d)) = h.get("_source").and_then(day_from_doc) {
+                    if clusters.contains(&c) {
+                        rb.days.entry(c).or_default().push(d);
+                    }
+                }
+            }
+            read += hits.len() as u64;
+            if hits.len() < READ_BACK_PAGE || read >= total {
+                break;
+            }
+            after = hits.last().and_then(|h| h.get("sort")).cloned();
+            if page + 1 == READ_BACK_PAGES || after.is_none() {
+                let last = hits.last().and_then(|h| h.pointer("/_source/day")).and_then(Value::as_str).and_then(parse_day);
+                rb.truncated_before = last;
+                rb.message = Some(format!("{read} of {total} days read (the bound for one request): days on or before {} are not all shown",
+                                          last.map(day_key).unwrap_or_default()));
+            }
+        }
+        if rb.count() == 0 {
+            // No day: never written, or written and nothing in range? Said apart.
+            let got = self.es_req({
+                let mut r = self.history_req("GET", format!("/_index_template/{}", template_name(&prefix)), None, 8_000);
+                r.class = crate::gate::Class::Interactive;
+                r
+            }).await;
+            if got.get("status").and_then(Value::as_u64) == Some(404) {
+                rb.template_missing = true;
+                rb.message = Some(format!("nothing has been written to this store yet: it has no ElasticPro index template for {prefix}-*"));
             }
         }
         Some(rb)
     }
 
-    /// `HISTORY_QUERY {stream, clusterId, from?, to?}` (user; the gate keeps a scoped caller to
-    /// the clusters they see): the store's documents for one cluster, oldest first, bounded.
+    /// `HISTORY_QUERY {stream, clusterId, from?, to?}` (user; the gate keeps a scoped caller and
+    /// a limited admin to the clusters they see): the store's documents for one cluster that
+    /// exists, oldest first, bounded.
     pub(crate) async fn history_query(self: &Arc<Self>, msg: &Value) -> Value {
         if !self.history_supported() {
             return json!({ "ok": false, "supported": false, "message": "the history store is hosted only" });
@@ -1476,7 +1792,10 @@ impl Core {
         let Some(id) = msg.get("clusterId").and_then(Value::as_str).filter(|s| !s.is_empty()) else {
             return json!({ "ok": false, "kind": "bad_request", "message": "clusterId is required" });
         };
-        let today = utc_day(crate::fleet::now_ms() as i64);
+        if self.spec_for(id).is_none() {
+            return json!({ "ok": false, "kind": "not_found", "message": format!("no cluster {id:?}") });
+        }
+        let today = utc_day(now() as i64);
         let day_arg = |k: &str| msg.get(k).and_then(Value::as_str).map(|s| parse_day(s).ok_or(s.to_string()));
         let to = match day_arg("to") {
             None => today,
@@ -1502,8 +1821,7 @@ impl Core {
             "query": { "bool": { "filter": [ { "term": { cluster_field: id } }, { "range": range } ] } },
         });
         let prefix = self.history_store.stored.read().prefix().to_string();
-        let res = self.es_req(self.history_req("POST", format!("/{prefix}-{stream}-*/_search?ignore_unavailable=true&allow_no_indices=true"),
-                                               Some(body.to_string()), 15_000)).await;
+        let res = self.es_req(self.history_read_req(format!("/{prefix}-{stream}-*/_search?ignore_unavailable=true&allow_no_indices=true"), body)).await;
         if !ok(&res) {
             return json!({ "ok": false, "kind": "unreachable", "reachable": false,
                            "message": format!("in the history store · not reachable: {}", why(&res)) });
@@ -1523,6 +1841,10 @@ mod tests {
     fn day(d: &str) -> Day {
         Day { day: d.into(), live: true, is_final: true, indices: 3, pri_bytes: Some(100), total_bytes: Some(200),
               docs: Some(10), event_bytes: Some(50), sub_bytes: None, totals_at: 5, ..Day::default() }
+    }
+
+    fn q(day: &str) -> Queued {
+        Queued { day: day.into(), doc: json!({ "day": day }), tries: 0 }
     }
 
     #[test]
@@ -1592,44 +1914,51 @@ mod tests {
     }
 
     #[test]
-    fn bulks_are_cut_per_cluster_and_capped() {
-        let mut q = BTreeMap::new();
+    fn bulks_are_cut_per_cluster_capped_and_indexed_under_the_prefix_in_force() {
+        let mut queue = BTreeMap::new();
         for c in ["a", "b"] {
             for i in 0..(BULK_MAX_DOCS + 3) {
-                q.insert(("volume".into(), c.to_string(), format!("{c}|{i:05}")), Queued { index: "p-volume-2026.11".into(), doc: json!({ "i": i }) });
+                queue.insert(("volume".into(), c.to_string(), format!("{c}|{i:05}")), q("2026-11-03"));
             }
         }
-        q.insert(("capacity".into(), "a".into(), "a|d".into()), Queued { index: "p-capacity-2026.11".into(), doc: json!({}) });
-        q.insert(("capacity".into(), "b".into(), "b|d".into()), Queued { index: "p-capacity-2026.11".into(), doc: json!({}) });
-        let bulks = cut_bulks(&q, 100);
+        queue.insert(("capacity".into(), "a".into(), "a|d".into()), q("2026-11-04"));
+        queue.insert(("capacity".into(), "b".into(), "b|d".into()), q("2026-11-04"));
+        let bulks = cut_bulks(&queue, 100);
         // capacity (both clusters together), a: 500 + 3, b: 500 + 3
         assert_eq!(bulks.iter().map(Vec::len).collect::<Vec<_>>(), vec![2, BULK_MAX_DOCS, 3, BULK_MAX_DOCS, 3]);
         assert!(bulks[1].iter().all(|k| k.1 == "a") && bulks[3].iter().all(|k| k.1 == "b"), "one cluster per volume bulk");
-        assert_eq!(cut_bulks(&q, 2).len(), 2, "bounded per tick");
-        let items: Vec<(String, &Queued)> = q.iter().take(2).map(|(k, v)| (k.2.clone(), v)).collect();
-        let body = bulk_body(&items);
-        assert_eq!(body.lines().count(), 4);
-        assert!(body.starts_with(r#"{"index":{"_id":"a|d","_index":"p-capacity-2026.11"}}"#) || body.contains(r#""_id":"a|d""#), "{body}");
-        assert!(crate::guard::history_guard(crate::guard::Writes::HistoryWrite, "p", "POST", "/_bulk", Some(&body)).is_none(),
-                "what the writer builds is what the guard lets through");
+        assert_eq!(cut_bulks(&queue, 2).len(), 2, "bounded per tick");
+        let items: Vec<(&QKey, &Queued)> = queue.iter().take(2).collect();
+        // F1: the index comes from the prefix at send time, not the one when it was queued.
+        for prefix in ["elasticpro-history", "ep-other"] {
+            let body = bulk_body(prefix, &items);
+            assert_eq!(body.lines().count(), 4);
+            assert!(body.contains(&format!(r#""_index":"{prefix}-capacity-2026.11""#)), "{body}");
+            assert!(crate::guard::history_guard(Writes::HistoryWrite, prefix, "POST", "/_bulk", Some(&body)).is_none(),
+                    "what the writer builds is what the guard lets through");
+        }
     }
 
     #[test]
     fn the_template_passes_its_own_guard_and_holds_no_settings() {
         let t = template_body("elasticpro-history");
         assert!(t["template"].get("settings").is_none(), "retention is the store owner's");
-        assert!(crate::guard::history_guard(crate::guard::Writes::HistoryWrite, "elasticpro-history", "PUT",
-                &format!("/_index_template/{}", template_name("elasticpro-history")), Some(&t.to_string())).is_none());
+        assert!(crate::guard::history_guard(Writes::HistoryWrite, "elasticpro-history", "PUT",
+                &format!("/_index_template/{}?create=true", template_name("elasticpro-history")), Some(&t.to_string())).is_none());
     }
 
     #[test]
-    fn a_partly_rejected_bulk_keeps_the_rejected() {
+    fn a_bulk_answer_says_per_item_what_to_keep_and_what_to_give_up() {
         let res = json!({ "errors": true, "items": [
-            { "index": { "status": 201 } }, { "index": { "status": 400, "error": { "reason": "mapper_parsing_exception" } } } ] });
-        let (taken, first) = bulk_items(&res, 2);
-        assert_eq!(taken, vec![true, false]);
-        assert_eq!(first.as_deref(), Some("mapper_parsing_exception"));
-        assert_eq!(bulk_items(&json!({}), 2).0, vec![false, false], "an answer without items took nothing");
+            { "index": { "status": 201 } },
+            { "index": { "status": 400, "error": { "type": "mapper_parsing_exception", "reason": "bad" } } },
+            { "index": { "status": 429, "error": { "type": "es_rejected_execution_exception", "reason": "busy" } } } ] });
+        let items = bulk_items(&res, 4);
+        assert_eq!(items[0], Item::Taken);
+        assert!(matches!(&items[1], Item::Rejected(w) if w.contains("mapper_parsing_exception")));
+        assert!(matches!(&items[2], Item::Kept(w) if w.contains("busy")));
+        assert!(matches!(&items[3], Item::Kept(_)), "an item the answer does not mention is kept, not taken");
+        assert!(bulk_items(&json!({}), 2).iter().all(|i| matches!(i, Item::Kept(_))), "an answer without items took nothing");
     }
 
     #[test]
@@ -1648,43 +1977,90 @@ mod tests {
         assert_eq!(ok.url, "https://store:9200");
         assert_eq!(ok.prefix, DEFAULT_PREFIX);
         assert!(ok.secret.is_none(), "`*` keeps the one held");
-        let key = parse_incoming(&json!({ "url": "http://s:9200", "auth": "apiKey", "apiKey": "abc" })).unwrap();
+        let key = parse_incoming(&json!({ "url": "https://s:9200", "auth": "apiKey", "apiKey": "abc" })).unwrap();
         assert_eq!(key.secret.as_deref(), Some("abc"));
+        assert!(parse_incoming(&json!({ "url": "http://s:9200", "auth": "none" })).is_ok(), "plain http carries no credential");
         for bad in [json!({ "url": "ftp://x" }), json!({ "url": "https://u:p@x:9200" }), json!({ "url": "https://x/path" }),
-                    json!({ "prefix": "Logs" }), json!({ "prefix": "a,b" }), json!({ "tls": "maybe" }), json!({ "auth": "kerberos" })] {
+                    json!({ "prefix": "Logs" }), json!({ "prefix": "a,b" }), json!({ "tls": "maybe" }), json!({ "auth": "kerberos" }),
+                    // F15: a credential only over https.
+                    json!({ "url": "http://s:9200", "auth": "basic", "user": "w" }), json!({ "url": "http://s:9200", "auth": "apiKey" }),
+                    // F6: prefixes that would capture another family's indices.
+                    json!({ "prefix": "logs" }), json!({ "prefix": "metrics-ep" }), json!({ "prefix": "filebeat" }), json!({ "prefix": "logstash" })] {
             assert!(parse_incoming(&bad).is_err(), "{bad}");
         }
+        assert!(parse_incoming(&json!({ "prefix": "logs" })).err().unwrap().contains("logs"), "the refusal names the family");
     }
 
     #[test]
-    fn a_test_counts_only_for_the_settings_it_ran_on() {
+    fn a_test_counts_only_for_the_settings_it_ran_on_and_a_secret_for_its_kind() {
         let mut s = Stored { url: "https://a:9200".into(), prefix: "p".into(), ..Stored::default() };
         s.test = Some(TestResult { ok: true, fingerprint: s.fingerprint(), ..TestResult::default() });
         assert!(s.test_current());
+        assert_eq!(arm_blocked(&s, true), None);
+        assert_eq!(arm_blocked(&s, false).as_deref(), Some(PERMIT_HINT));
         s.url = "https://b:9200".into();
         assert!(!s.test_current(), "another address is another store");
+        assert!(arm_blocked(&s, true).unwrap().contains("test again"));
         s.url = "https://a:9200".into();
         s.prefix = "q".into();
         assert!(!s.test_current(), "another prefix is other indices");
         s.prefix = "p".into();
         s.sealed = Some("x".into());
         assert!(!s.test_current(), "another credential is other privileges");
+        // F15: a secret typed as a password is not an API key.
+        s.sealed_for = s.destination();
+        s.sealed_auth = Some(AuthKind::Basic);
+        assert!(!s.secret_stale());
+        s.auth = AuthKind::ApiKey;
+        assert!(s.secret_stale(), "switching the kind of credential needs it typed again");
+        assert_ne!(seal_aad("d", AuthKind::Basic), seal_aad("d", AuthKind::ApiKey));
+        // F2: the template is known per store and prefix, not per prefix.
+        let a = Stored { url: "https://a:9200".into(), ..Stored::default() };
+        let b = Stored { url: "https://b:9200".into(), ..Stored::default() };
+        assert_ne!(a.template_key(), b.template_key());
     }
 
     #[test]
     fn the_missing_range_stops_where_the_local_record_starts() {
         let d = |s: &str| parse_day(s).unwrap();
-        assert_eq!(missing_range(d("2026-01-01"), d("2026-11-04"), Some(d("2026-06-01"))), Some((d("2026-01-01"), d("2026-05-31"))));
+        assert_eq!(missing_range(d("2026-01-01"), d("2026-11-04"), Some(d("2026-06-15"))), Some((d("2026-01-01"), d("2026-06-14"))),
+                   "to the day before the first local day, not the month before it (F4)");
         assert_eq!(missing_range(d("2026-07-01"), d("2026-11-04"), Some(d("2026-06-01"))), None, "covered locally");
         assert_eq!(missing_range(d("2026-07-01"), d("2026-11-04"), None), Some((d("2026-07-01"), d("2026-11-04"))), "a new data directory");
     }
 
     #[test]
-    fn unreachable_says_so_and_carries_no_days() {
+    fn unreachable_truncated_and_never_written_are_said_apart() {
         let rb = ReadBack { from: "2026-01-01".into(), to: "2026-01-31".into(), reachable: false, message: Some("Connection refused".into()), ..ReadBack::default() };
         let v = rb.json();
         assert_eq!(v["reachable"], json!(false));
         assert_eq!(v["days"], json!(0));
-        assert!(v["message"].as_str().unwrap().starts_with("in the history store · not reachable"));
+        assert!(v["message"].as_str().unwrap().starts_with("in the history store · not reachable: Connection refused"));
+        let cut = ReadBack { reachable: true, truncated_before: parse_day("2025-03-02"), ..ReadBack::default() };
+        assert_eq!((cut.json()["truncated"].clone(), cut.json()["truncatedBefore"].clone()), (json!(true), json!("2025-03-02")));
+        let empty = ReadBack { reachable: true, template_missing: true, ..ReadBack::default() };
+        assert_eq!(empty.json()["templateMissing"], json!(true));
+        let body = read_back_body(&["a".into()], parse_day("2026-01-01").unwrap(), parse_day("2026-01-31").unwrap(), true, Some(&json!(["2026-01-05", "a"])));
+        assert_eq!(body["search_after"], json!(["2026-01-05", "a"]), "pages, not one capped search (F5)");
+        assert_eq!(body["sort"][1], json!({ "clusterId": { "order": "asc" } }), "a unique sort to page on");
+        assert_eq!(body["_source"]["excludes"], json!(["sources"]));
+    }
+
+    #[test]
+    fn the_queue_drops_the_oldest_days_and_skips_what_has_no_day() {
+        let h = HistoryStore::open(None, false);
+        let mut items = vec![];
+        for i in 0..(QUEUE_MAX + 2) {
+            // Keys in reverse of their days, so key order and age disagree.
+            let d = NaiveDate::from_ymd_opt(2020, 1, 1).unwrap() + Duration::days(i as i64);
+            items.push((("volume".to_string(), "c".to_string(), format!("{:08}", QUEUE_MAX + 2 - i)), q(&day_key(d))));
+        }
+        items.push((("volume".into(), "c".into(), "bad".into()), q("not a day")));
+        h.enqueue(items);
+        assert_eq!(h.queue_len(), QUEUE_MAX);
+        assert_eq!(h.status.lock().dropped, 2);
+        let oldest = h.queue.lock().values().map(|v| v.day.clone()).min().unwrap();
+        assert_eq!(oldest, "2020-01-03", "the two oldest days went, whatever their keys");
+        assert_eq!(h.drop_stream("volume"), QUEUE_MAX, "a stream turned off takes its queue with it");
     }
 }

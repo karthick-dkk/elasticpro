@@ -1049,7 +1049,9 @@ impl Core {
         const VOLUME_ONE: &[&str] = &["VOLUME_SETTINGS", "VOLUME_FIELDS_CHECK", "VOLUME_DAILY", "VOLUME_MONTHLY", "VOLUME_BREAKDOWN"];
         // VOLUME_PATTERN_CHECK is an admin's, and an admin limited to some clusters may check
         // only those: the one message here that stops a (limited) admin too.
-        let limited_admin_check = t == "VOLUME_PATTERN_CHECK" && c.limited();
+        // An admin limited to some clusters is held to them wherever a message names one: the
+        // pattern check, a history query, and the volume record's per-cluster reads.
+        let limited_admin_check = c.limited() && (matches!(t, "VOLUME_PATTERN_CHECK" | "HISTORY_QUERY") || VOLUME_ONE.contains(&t));
         if !(matches!(t, "ES" | "ZABBIX_METRICS" | "CLUSTER_DATASET" | "REFRESH" | "VOLUME_RUN" | "REPORT_RUN" | "HISTORY_QUERY") || VOLUME_ONE.contains(&t)
             || limited_admin_check)
             || (c.role >= Role::Admin && !limited_admin_check)
@@ -1278,7 +1280,7 @@ impl Core {
             "POLICY_GET" | "POLICY_SET" => self.policy_msg(&t, &msg, caller.as_ref()),
             "POLICY_PAUSE" | "POLICY_RESUME" => self.policy_pause_msg(&t, &msg, caller.as_ref()),
             "EVENTS_TICKET" => self.events_ticket_msg(caller.clone(), reauth),
-            "DELAY_SINK_GET" | "DELAY_SINK_SET" | "DELAY_SINK_RUN" => self.delay_sink_msg(&t, &msg).await,
+            "DELAY_SINK_GET" | "DELAY_SINK_SET" | "DELAY_SINK_RUN" => self.delay_sink_msg(&t, &msg, caller.as_ref()).await,
             // The history store (docs/HISTORY.md): a dedicated endpoint, never a monitored cluster.
             "HISTORY_STORE_GET" | "HISTORY_STORE_SET" | "HISTORY_STORE_TEST" | "HISTORY_STORE_ARM" | "HISTORY_STORE_BACKFILL" => {
                 self.history_store_msg(&t, &msg, caller.as_ref()).await
@@ -3749,7 +3751,8 @@ impl Core {
     async fn run_upstream(self: &Arc<Self>, ctx: Outgoing, rid: u64, abort: Option<&AbortReg>) -> Value {
         let mut rec = RecordGuard { core: self.clone(), rid, started: Instant::now(), done: false };
         let cfg = self.req_cfg.read().clone();
-        let cluster = ctx.req.cluster_id.as_str();
+        let cluster_id = ctx.req.cluster_id.clone();
+        let cluster = cluster_id.as_str();
         // Refused without a socket — and without taking a slot from anyone.
         if let Some(refused) = crate::http::refuse_early(&ctx.req, &ctx.url, ctx.writes) {
             rec.finish(&refused);
@@ -3775,6 +3778,26 @@ impl Core {
             }
         };
         let queued_ms = permit.queued_ms;
+        // A history store request waited for its slot: right before it leaves, the store must
+        // still be where it was, with the same credential and prefix, and it takes the
+        // permission both gates give *now* — a disarm or a move during the wait wins.
+        let mut ctx = ctx;
+        if ctx.req.history_prefix.is_some() {
+            let checked = self.history_recheck(&ctx.req, &ctx.url, ctx.auth.as_deref(), ctx.via.as_deref(), ctx.tls)
+                .map_err(|e| json!({ "ok": false, "status": 0, "kind": "history_store_changed", "message": e, "tookMs": 0 }))
+                .and_then(|w| match crate::http::refuse_early(&ctx.req, &ctx.url, w) {
+                    Some(r) => Err(r),
+                    None => Ok(w),
+                });
+            match checked {
+                Ok(w) => ctx.writes = w,
+                Err(out) => {
+                    drop(permit);
+                    rec.finish(&out);
+                    return out;
+                }
+            }
+        }
         self.requests.lock().running(rid, queued_ms);
         // Sent from a task of its own that holds the slot until the cluster has answered. A
         // caller that lets go — aborted, or its client gone — gets its answer at once, but
@@ -4730,7 +4753,13 @@ impl Core {
 
     /// `DELAY_SINK_GET` / `DELAY_SINK_SET` / `DELAY_SINK_RUN`. Admin only; see
     /// `auth::required_role`.
-    async fn delay_sink_msg(self: &Arc<Self>, t: &str, msg: &Value) -> Value {
+    async fn delay_sink_msg(self: &Arc<Self>, t: &str, msg: &Value, caller: Option<&Caller>) -> Value {
+        // The schedule measures and writes for the whole fleet: not an admin limited to some
+        // clusters' to change.
+        if t == "DELAY_SINK_SET" && caller.is_some_and(Caller::limited) {
+            return json!({ "ok": false, "kind": "forbidden",
+                           "message": "the scheduled log delay is fleet-wide: an admin limited to some clusters cannot change it" });
+        }
         if !self.edition.schedules() {
             return json!({ "ok": false, "supported": false,
                            "message": "scheduled measurement runs only in the hosted edition, \

@@ -61,6 +61,13 @@ test('an unreachable store is one line, and only when it was asked and did not a
     'Days 2026-01-01 to 2026-01-31: in the history store · not reachable');
   assert.equal(H.historyUnreachableLine({ reachable: false, from: 'a', to: 'b', message: 'in the history store · not reachable: Connection refused' }),
     'Days a to b: in the history store · not reachable: Connection refused');
+  assert.equal(H.fromHistory({ historyDays: 3 }), true, 'a month partly from the store');
+  assert.equal(H.historyMarkText({ source: 'history', incomplete: true }), ' · history (incomplete)');
+  assert.equal(H.historyMarkText({ source: 'cluster' }), '');
+  assert.equal(H.historyLine({ reachable: true }), '');
+  assert.match(H.historyLine({ reachable: true, truncated: true, from: 'a', to: 'b', message: 'days on or before x are not all shown' }), /not all shown/);
+  assert.match(H.historyLine({ reachable: true, templateMissing: true, from: 'a', to: 'b', message: 'nothing has been written to this store yet' }), /nothing has been written/);
+  assert.match(H.historyLine({ reachable: false, from: 'a', to: 'b' }), /not reachable/);
   assert.equal(H.fromHistory({ source: 'history' }), true);
   assert.equal(H.fromHistory({ source: 'cluster' }), false);
 });
