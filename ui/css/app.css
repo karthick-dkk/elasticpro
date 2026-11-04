@@ -1987,6 +1987,66 @@ html.play .main, html.play .page { padding: 0; margin: 0; max-width: none; }
 .pl-root.ctl .pl-fshint { display: none; }
 .pl-fshint-x { font: inherit; background: none; border: 0; color: var(--tv-text-2); cursor: pointer; }
 
+/* Reports › Planning (ui/reports/planning.js) and Config › Reports (plan templates, which indices count)
+   -------------------------------------------------------------------------------------------------------
+   Compact like the rest: 32 px rows, no new colours. Amber is "[set]" / not measured: an unknown, never a 0. */
+.pn-layout { display: flex; flex-wrap: wrap; gap: 14px; align-items: flex-start; }
+.pn-inputs { flex: 1 1 320px; max-width: 380px; }
+.pn-results { flex: 999 1 640px; min-width: 0; display: flex; flex-direction: column; gap: 14px; }
+.pn-page .fld { display: flex; flex-direction: column; gap: 4px; margin-bottom: 12px; }
+.pn-page .fld:last-child { margin-bottom: 0; }
+.pn-page .fld > label, .pn-page .fld > .lbl { font-size: 12.5px; color: var(--text-secondary); font-weight: 600; }
+.pn-page .fld .hint { font-size: 12px; color: var(--text-muted); }
+.pn-page .fld .hint.na, .pn-page .na { color: var(--warning-ink); }
+.pn-page .num input, .pn-page .num select { height: 32px; padding: 0 10px; border: 1px solid var(--border-strong); border-radius: var(--radius-sm);
+  background: var(--surface-1); color: inherit; font: inherit; width: 150px; box-sizing: border-box; }
+.pn-page .num select { width: 100%; }
+.pn-days { display: flex; gap: 8px; align-items: center; }
+.pn-tiles { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 10px; }
+.pn-tile { border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface-1); padding: 10px 12px; display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.pn-tile .l { font-size: 12px; color: var(--text-secondary); }
+.pn-tile .v { font-size: 21px; font-weight: 650; }
+.pn-tile .d { font-size: 12px; color: var(--text-muted); }
+.pn-table th, .pn-table td { white-space: nowrap; }
+.pn-table td, .pn-table th { height: 32px; padding-top: 0; padding-bottom: 0; }
+.pn-table tr.tot td { font-weight: 650; background: var(--surface-2); }
+.pn-table tr.off td { color: var(--text-muted); }
+.pn-table .rule { color: var(--text-secondary); font-size: 12.5px; }
+button.pn-link { font: inherit; background: none; border: 0; padding: 0; color: var(--accent); cursor: pointer; }
+button.pn-link:hover { text-decoration: underline; }
+@media (max-width: 900px) { .pn-tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+
+.vf-fld { display: flex; flex-direction: column; gap: 6px; }
+.vf-fld input[type="text"], .vf-fld input:not([type]) { width: 100%; box-sizing: border-box; }
+.vf-grid2 { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 12px; }
+.vf-opt { display: flex; gap: 8px; align-items: flex-start; padding: 8px 10px; border: 1px solid var(--border); border-radius: var(--radius-sm); cursor: pointer; margin-top: 6px; }
+.vf-opt.on { border-color: var(--accent); background: var(--accent-soft); }
+.vf-prev { border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface-1); }
+.vf-prev > div { display: flex; justify-content: space-between; gap: 10px; padding: 6px 12px; border-bottom: 1px solid var(--grid); font-size: 12.5px; }
+.vf-prev > div:last-child { border-bottom: 0; }
+.vf-warn { color: var(--warning-ink); }
+
+.pt-grid { display: flex; flex-wrap: wrap; gap: 14px; align-items: flex-start; }
+.pt-side { flex: 0 1 240px; border: 1px solid var(--border); border-radius: var(--radius-sm); overflow: hidden; }
+.pt-side-head { display: flex; align-items: center; justify-content: space-between; padding: 8px 10px; border-bottom: 1px solid var(--grid); }
+.pt-item { display: flex; flex-direction: column; padding: 8px 10px; border-bottom: 1px solid var(--grid); cursor: pointer; font-size: 12.5px; }
+.pt-item:last-child { border-bottom: 0; }
+.pt-item.on { background: var(--accent-soft); box-shadow: inset 3px 0 0 var(--accent); }
+.pt-item:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.pt-main { flex: 999 1 640px; min-width: 0; display: flex; flex-direction: column; gap: 10px; }
+.pt-title { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+.pt-target { display: flex; flex-wrap: wrap; align-items: center; gap: 14px; font-size: 12.5px; }
+.pt-table td, .pt-table th { white-space: nowrap; padding: 4px 8px; }
+.pt-table tr.dim td { background: var(--surface-2); }
+.pt-table .calc, .pt-target .calc { color: var(--text-muted); font-size: 12px; }
+.pt-table input.in, .pt-table select.in, .pt-title input.in { height: 28px; padding: 0 8px; border: 1px solid var(--border-strong); border-radius: var(--radius-sm);
+  background: var(--surface-1); color: inherit; font: inherit; font-size: 12.5px; box-sizing: border-box; }
+.pt-table input.in.n { width: 72px; text-align: right; }
+.pt-table input.in.unset { border-color: var(--warning); background: var(--warning-bg); }
+.pt-table input.in.unset::placeholder { color: var(--warning-ink); opacity: 1; }
+.pt-rules { display: grid; gap: 6px; }
+.pt-rule { display: flex; flex-direction: column; font-size: 12.5px; }
+.pt-rule > span { color: var(--text-secondary); }
 /* ---------------------------- Reports (0.3.53, docs/REPORTS.md) ---------------------------- */
 .rp-page .rp-head { display: flex; flex-wrap: wrap; align-items: flex-end; justify-content: space-between; gap: 12px; margin-bottom: 6px; }
 .rp-page .rp-head h1 { margin: 0; font-size: 20px; line-height: 1.2; }

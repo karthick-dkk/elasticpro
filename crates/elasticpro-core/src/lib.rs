@@ -27,6 +27,7 @@ pub mod http;
 pub mod inflight;
 pub mod memory;
 pub mod notify;
+pub mod plan_templates;
 pub mod play;
 pub mod report;
 pub mod silences;

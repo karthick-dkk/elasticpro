@@ -114,6 +114,13 @@ for t in CLUSTER_META_GET CLUSTER_META_SET; do
   check "$t needs a caller"              "$(post $B -d "{\"type\":\"$t\",\"clusterId\":\"x\",\"meta\":{\"type\":\"ci\"}}" | field kind)" "unauthenticated"
 done
 
+# Plan templates (0.3.53, plan_templates.rs): reading is a user's, replacing an administrator's —
+# never a caller-less request's. Roles, validation, the limited admin and the display link are
+# proved in-process (tests/plan_templates.rs).
+for t in PLAN_TEMPLATES_GET PLAN_TEMPLATES_SET; do
+  check "$t needs a caller"              "$(post $B -d "{\"type\":\"$t\",\"templates\":[{\"name\":\"x\",\"roles\":[]}]}" | field kind)" "unauthenticated"
+done
+
 # Play, the NOC wall display (docs/PLAY.md). Every message needs a caller but one: a TV trades
 # its display link's secret for a session (PLAY_EXCHANGE), and a made-up secret gets nothing —
 # no session, no cookie. What a display-link session may then send, allowFrom, revoke and

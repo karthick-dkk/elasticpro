@@ -11,6 +11,9 @@
 /** The built-in values (docs/VOLUME.md "Settings"). Copies are made with cloneVolume(). */
 export const VOLUME_DEFAULTS = {
   indexFormat: 'logstash-*-YYYY.MM.DD',
+  indexPattern: 'logstash-*',
+  dayFrom: 'name',
+  timeField: '@timestamp',
   tag: ['tag1', 'labels.tag1', 'tags'],
   forwarder: ['fwd_tag', 'fwdtag', 'observer.name'],
   sourceHost: ['src_hostname', 'host.name'],
@@ -40,6 +43,11 @@ export const FIELD_ROWS = [
  */
 export const VOLUME_KEYS = [
   { path: 'indexFormat',  managed: 'volumeIndexFormat',  env: 'UI_VOLUME_INDEX_FORMAT',     kind: 'text' },
+  // Which indices count (docs/REPORTS.md board 6). The managed names and the time field's key follow the
+  // existing pattern; UI_VOLUME_INDEX_PATTERN and UI_VOLUME_DAY_FROM are the core's, the time field's is assumed.
+  { path: 'indexPattern', managed: 'volumeIndexPattern', env: 'UI_VOLUME_INDEX_PATTERN',    kind: 'text' },
+  { path: 'dayFrom',      managed: 'volumeDayFrom',      env: 'UI_VOLUME_DAY_FROM',         kind: 'enum' },
+  { path: 'timeField',    managed: 'volumeTimeField',    env: 'UI_VOLUME_TIME_FIELD',       kind: 'text' },
   { path: 'tag',          managed: 'volumeTag',          env: 'UI_VOLUME_TAG_FIELDS',       kind: 'list' },
   { path: 'forwarder',    managed: 'volumeForwarder',    env: 'UI_VOLUME_FORWARDER_FIELDS', kind: 'list' },
   { path: 'sourceHost',   managed: 'volumeSourceHost',   env: 'UI_VOLUME_HOST_FIELDS',      kind: 'list' },
@@ -55,6 +63,9 @@ export const VOLUME_KEYS = [
 ];
 
 export const SIZE_BASES = ['primary', 'total', 'eventSize'];
+export const DAY_FROM = ['name', 'time'];
+/** One or more comma-separated index patterns: letters, digits and _ . - * only, no date part needed. */
+const PATTERN_RE = /^[A-Za-z0-9_.*-]+$/;
 export const BOUNDS = { topValues: [5, 100], keepMonths: [1, 36] };
 
 /** A field name: what Elasticsearch accepts in practice, no spaces, no commas. */
@@ -266,6 +277,14 @@ export function validateVolume(v, { partial = false } = {}) {
     const f = String(v.indexFormat || '');
     if (!f.includes('*') || !f.includes('YYYY.MM.DD')) bad.push('Index name: must contain * and YYYY.MM.DD, for example logstash-*-YYYY.MM.DD.');
   }
+  // Blank is the older index name format alone (the core: no pattern set, the format rules); give one to leave it.
+  if (has(v.indexPattern) || (!partial && !has(v.indexFormat))) {
+    const pats = toList(v.indexPattern);
+    if (!pats.length) bad.push('Index pattern: name at least one, for example logstash-*.');
+    for (const p of pats) if (!PATTERN_RE.test(p)) bad.push(`Index pattern: "${p}" is not an index pattern (letters, digits, _ . - and *).`);
+  }
+  if (has(v.dayFrom) && !DAY_FROM.includes(v.dayFrom)) bad.push('Which day a document counts on: pick one of the two.');
+  if (has(v.timeField) || !partial) fields('Time field', v.timeField);
   for (const r of FIELD_ROWS) if (has(getPath(v, r.key)) || !partial) fields(r.label, getPath(v, r.key));
   const ex = isObj(v.extra) ? v.extra : {};
   if (!partial && !String(ex.name || '').trim()) bad.push('Extra field: give it a name.');
@@ -340,6 +359,9 @@ export function yamlBlock(v) {
     'defaults:',
     '  volume:',
     `    indexFormat: ${v.indexFormat}`,
+    `    indexPattern: ${v.indexPattern}`,
+    `    dayFrom:     ${v.dayFrom}`,
+    `    timeField:   ${v.timeField}`,
     `    tag:         ${flow(v.tag)}`,
     `    forwarder:   ${flow(v.forwarder)}`,
     `    sourceHost:  ${flow(v.sourceHost)}`,
@@ -396,4 +418,25 @@ export function indicesCell(indices) {
 /** Whether a reply is an older core not knowing the message at all. */
 export function isUnknownType(res) {
   return !!res && res.ok === false && (res.kind === 'bad_message' || /unknown message/i.test(String(res.message || '')));
+}
+
+/* ------------------------------ Which indices count: the preview ------------------------------ */
+
+/**
+ * VOLUME_PATTERN_CHECK as the rows under "What this matches on": `{rows: [[label, text, cls?]]}`, or
+ * `{banner, bannerCls}` when there is nothing to list. A pattern that matches nothing says so.
+ */
+export function patternPreview(res, timeField = '@timestamp') {
+  if (!res) return { banner: 'No answer.', bannerCls: 'banner err' };
+  if (res.unknown) return { banner: res.message || 'The index preview needs ElasticPro 0.3.53', bannerCls: 'banner warn' };
+  if (res.ok === false) return { banner: `Preview failed: ${res.message || 'refused'}`, bannerCls: 'banner err' };
+  const n = (v) => Number(v) || 0;
+  const matched = n(res.matched), dated = n(res.dated), undated = n(res.undated);
+  const eg = (c, x) => (c ? `${c}${x ? ` · e.g. ${x}` : ''}` : '—');
+  return { rows: [
+    ['Indices matched', String(matched)],
+    ['Dated by name', eg(dated, res.datedExample)],
+    [`Split by ${timeField}`, eg(undated, res.undatedExample)],
+    ['Matched nothing', matched ? '—' : 'this pattern matches no index on this cluster', matched ? '' : 'vf-warn'],
+  ] };
 }
