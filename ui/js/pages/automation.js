@@ -1,6 +1,7 @@
 /** Page — automation: rules that watch continuously and propose work for a human to run. */
 
 import { h, mount } from '../lib/dom.js';
+import { nodeCache } from '../lib/keyed.js';
 import { bytes, num, ago } from '../lib/fmt.js';
 import { state, clusters, activeClusters, fetchIndices, fleetMode, coverage, askFleetDataset } from '../core/state.js';
 import { coverageBar } from '../lib/freshness.js';
@@ -80,8 +81,19 @@ async function check() {
   draw();
 }
 
+/**
+ * What the last draw put on screen (lib/keyed.js): the page redraws on every push from the
+ * core, and a tile, the toolbar or a rule's card that reads the same is left where it is.
+ */
+const built = nodeCache();
+
 function draw() {
   if (!host || !host.isConnected) return;
+  built.begin();
+  try { drawPage(); } finally { built.end(); }
+}
+
+function drawPage() {
   const list = activeClusters();
   if (!clusters().length) return mount(host, empty('No clusters configured.'));
 
@@ -91,7 +103,7 @@ function draw() {
   const arm = canArm();
   const ran = !!lastRunAt();
 
-  mount(host,
+  mount(host, ...built.sameAll('auto', [
     h('div.grid.c4', { style: { marginBottom: '10px' } },
       // Before the first check there is no count to show, only the absence of one.
       statTile('Proposed', ran ? String(proposals.length) : '–',
@@ -123,7 +135,7 @@ function draw() {
         h('div.ttl', arm.ok ? 'Arming available' : 'These rules propose. They never act on their own.'),
         h('div', arm.reason))),
 
-    ...activeRules().map((rule) => ruleCard(rule, list)));
+    ...activeRules().map((rule) => ruleCard(rule, list))]));
   if (focusRule && revealFocus(host, `[data-rule="${String(focusRule).replace(/["\\]/g, '\\$&')}"]`)) focusRule = null;
 }
 

@@ -61,7 +61,7 @@ Hosted (the maintained build): see the README, "One-click installation" —
 > and `.rpm` ended with [0.3.51](https://github.com/karthick-dkk/elasticpro/releases/tag/v0.3.51). The Windows quick start, the other-platform
 > installer modes (`install.sh --portable`, which now exits with a deprecation message) and the
 > WebView2 notes were removed from this page; the 0.3.51 tag carries the old text. The `src-tauri/`
-> folder stays in the tree but is not built.
+> folder was removed from the tree in 0.3.54.
 
 ## Configuration
 
@@ -107,7 +107,7 @@ Command line: `elasticpro-<version>.exe --config C:\path\config_cluster.json` (o
 No Node.js anywhere: the UI is plain ES modules, the CLI is Rust.
 
 > **Deprecated: desktop builds.** `cargo tauri build` and `tools/build-windows-cross.sh` ended with
-> 0.3.52 (`src-tauri` is no longer a workspace member and the script exits with a message). The last
+> 0.3.52, and both `src-tauri/` and the script were removed from the tree in 0.3.54. The last
 > desktop release is [0.3.51](https://github.com/karthick-dkk/elasticpro/releases/tag/v0.3.51); check that tag out to rebuild it.
 
 **Run the UI in a browser** (development, tests):
@@ -140,7 +140,6 @@ ui/js/core/writes.js the UI's single copy of that unlock, shared by every acting
   crypto.rs          AES-256-GCM + PBKDF2-HMAC-SHA512 for secrets in the config file
   vault.rs           OS credential store (Windows Credential Manager) — opt-in
   bridge.rs          the JSON message API the UI talks to
-src-tauri/           DEPRECATED Tauri 2 desktop shell (0.3.52): kept in the tree, not built or released
 ui/                  the app UI: vanilla ES modules, no bundler
 tools/               check scripts, installers, release tooling
 docs/                HANDBOOK.md (full operator manual), screenshots
@@ -230,6 +229,15 @@ adds one more. All of them are cheap metadata reads. Auto-refresh is **off by de
 you turn it on at the default 30 s that is about 28 requests a minute per cluster. Re-run
 the meter after adding a fetch to any page, so the number stays true.
 
+ElasticPro's **own** health is the Request Centre's second tab, **Requests › ElasticPro health**
+(`#/requests/health`, administrators): memory and CPU of the core and the report worker against
+their container limits, OOM kills and CPU throttling, the core's response time per message, the
+request gate, the fleet poller, report jobs with their concurrency, the data volume and 24 h
+trends, with amber/red checks that each name the setting that fixes them. It reads
+`SYSTEM_HEALTH` every 5 s while open and never asks a cluster anything; a dot on the Requests
+nav entry turns amber or red when a check does. The contract and the message's shape are in
+[HEALTH.md](HEALTH.md); the message is listed in [HANDBOOK.md](HANDBOOK.md).
+
 ## Disk balance
 
 With more than one data node, the Nodes page says whether the data is spread evenly and —
@@ -273,6 +281,41 @@ One honest limitation: **the size figures are estimates.** Elasticsearch reports
 per index, never per field value, so a value's share of the day's documents is applied to
 that day's index size. The document counts beside them are exact, and the distinction is
 stated on screen.
+
+## Indices report and volume by host (0.3.54)
+
+Two report kinds beside the volume workbook, in Reports › Exports and by mail
+([REPORT-TYPES.md](REPORT-TYPES.md) is the contract):
+
+- **Indices report** (`kind: "indices"`) — one row per index per day from a fresh
+  `_cat/indices` per cluster, dated by the cluster's naming rule, index store size
+  (`pri.store.size`) only; indices with no date in their name in a block of their own, days
+  whose indices were deleted from the daily record, closed indices without figures. Mailed
+  daily at 08:00 over the month so far once an admin turns it on.
+- **Volume by host** (`kind: "hosts"`) — collected every day at 06:00 for every cluster: a
+  composite aggregation per day × index × source host with event size, forwarded size and
+  metadata fields (ClientID, branch, …), kept on the server for three months and read back
+  as a workbook, a CSV bundle or the `HOSTS_QUERY` view. It pushes each cluster as hard as
+  the cluster answers well (an adaptive limit, thread-pool checks, `Retry-After`), resumes
+  where it stopped, and never holds a day or a workbook in memory.
+
+Messages: `REPORT_RUN`, `REPORT_SCHEDULE_GET/SET` and `REPORT_SEND_NOW` take `kind`
+(default `volume`); `HOSTS_QUERY {clusterId, period, q, sort, offset, limit}` (User, held to
+the caller's clusters). Settings: the `UI_REPORT_INDICES_*`, `UI_REPORT_HOSTS_*`,
+`UI_REPORT_CONCURRENCY_*` keys and `REPORT_CPU_SLOTS` in [SETTINGS.md](SETTINGS.md).
+
+### The report worker (0.3.54)
+
+The hosted stack runs the batch work in its own container ([WORKER.md](WORKER.md)): the same
+image as the core with `ELASTICPRO_ROLE=worker`, its own memory and CPU cap
+(`ELASTICPRO_WORKER_MEM_LIMIT`, default 1g; `ELASTICPRO_WORKER_CPUS`, default 1.0) and its own
+request gate. The core (`ELASTICPRO_ROLE=core`) checks who may do what and hands report runs,
+sends, stops and collections to it over the internal network; every read (Exports, Reports,
+the hosts view, downloads) stays in the core, from the files the worker writes. A worker that is
+down never touches monitoring: the core answers those actions `worker_unavailable` (EP-218)
+and scheduled work resumes when it is back. A worker of another version refuses work
+(`worker_version`, EP-219). The Request Centre shows the worker's requests labelled *worker*;
+Requests › ElasticPro health shows its memory, CPU, gate and running jobs.
 
 ## Hosted on a server
 

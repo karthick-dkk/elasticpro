@@ -1,6 +1,7 @@
 /** Page 7 — configuration, security posture and diagnostics. */
 
 import { h, mount, $ } from '../lib/dom.js';
+import { markupSig } from '../lib/keyed.js';
 import { bytes, dt, ago, download } from '../lib/fmt.js';
 import * as cfg from '../core/config.js';
 import { state, setConfig, refreshAll, clusters, client, hasSessionCredential, healthState,
@@ -255,7 +256,9 @@ function trustCard() {
 export function onData() {
   if (!host || !host.isConnected) return;
   for (const td of host.querySelectorAll('td[data-cluster-state]')) {
-    td.replaceChildren(clusterStatePill(client(td.dataset.clusterState), td.dataset.kind));
+    // Only when it reads differently: replaced on every push, the pill under the mouse lost its tooltip.
+    const pill = clusterStatePill(client(td.dataset.clusterState), td.dataset.kind);
+    if (td.childNodes.length !== 1 || markupSig(td.firstChild) !== markupSig(pill)) td.replaceChildren(pill);
   }
 }
 

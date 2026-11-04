@@ -41,6 +41,13 @@ test('labels name the asker in words', () => {
   assert.deepEqual(M.originChoices(log), ['console', 'page:indices', 'poller']);
 });
 
+test('the report worker’s requests are labelled worker', () => {
+  const rows = M.requestRows({ inflight: [], recent: [{ id: 1, origin: 'hosts-report', process: 'worker', ms: 5, ok: true, startedAt: 1 },
+    { id: 2, origin: 'page:indices', ms: 5, ok: true, startedAt: 2 }] }, M.NO_FILTER, 10);
+  assert.equal(rows.find((r) => r.id === 1).originLabel, 'worker · hosts-report');
+  assert.equal(rows.find((r) => r.id === 2).originLabel, 'Indices page');
+});
+
 test('per-cluster totals and the CSV follow the same rows', () => {
   const pc = M.perCluster(log);
   // equal counts keep first-seen order: 'a' holds the in-flight row, listed first

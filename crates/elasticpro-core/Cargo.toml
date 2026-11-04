@@ -84,3 +84,8 @@ keyring = { version = "3", optional = true, features = ["apple-native"] }
 # encrypted config file remains the way to keep a secret across restarts.
 [target.'cfg(target_os = "linux")'.dependencies]
 keyring = { version = "3", optional = true, features = ["linux-native"] }
+
+# statvfs for the data volume's free space (health.rs). Already in the tree through tokio and
+# keyring; named here because the core calls it directly.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

@@ -25,26 +25,38 @@
 # before anything changes; a version that is not published fails with nothing touched. The
 # images come from Docker Hub's karthickdk02/ unless ELASTICPRO_REGISTRY names another
 # namespace. Going to an older version is refused without --force (--rollback is the usual
-# way back).
+# way back). An image already on this machine under that name is used as it is (release tags
+# are never moved).
+#
+# The compose file (0.3.54): a docker-compose.yml with no `worker` service runs everything in
+# the core (role all, docs/WORKER.md). --upgrade then puts the release's docker-compose.yml in
+# place, fetched from ELASTICPRO_RELEASE_URL (default: the GitHub repository's raw files,
+# <url>/v<version>/deploy/docker-compose.yml; a mirror or file:///dir works too), keeping the
+# old one as docker-compose.yml.bak-<time> and naming it in .compose-previous, so --rollback
+# puts it back together with the images. .env and docker-compose.override.yml are never
+# touched. Only a file exactly as a release shipped it is replaced (the release running now,
+# or the one before it): an edited one stops the upgrade with nothing changed and says what to
+# do — --replace-compose replaces it anyway, the backup kept. --dry-run shows the difference.
 #
 # In order:
 #   1. checks: .env and the stack's secrets exist, Docker Compose v2 is there;
 #   2. names the new image elasticpro-core:<version>-<commit> (or takes --image), keeping
 #      the one running now for rollback, and backs up .env;
 #   3. builds it (a Rust build: long on a small server — see --image);
-#   4. points ELASTICPRO_IMAGE in .env at it and restarts only the core;
+#   4. points ELASTICPRO_IMAGE in .env at it and restarts only the core (and the report
+#      worker, the same image, when the compose file has one — docs/WORKER.md);
 #   5. waits for the core's health check. Not healthy in time: ELASTICPRO_IMAGE goes back to the
 #      previous image, the core is restarted on it, and the script fails.
 #
 # The rest of the stack (nginx, database) is left running as it is; `--all` restarts it too.
 # One exception: when deploy/nginx/nginx.conf differs from the config the running nginx has,
 # nginx is recreated — a bind-mounted file is not picked up by a restart or a reload.
-# Options: --pull, --image TAG, --upgrade[=VERSION], --force, --rollback, --all,
-#          --apply-config, --timeout SECONDS (default 180), --dry-run
+# Options: --pull, --image TAG, --upgrade[=VERSION], --force, --replace-compose, --rollback,
+#          --all, --apply-config, --timeout SECONDS (default 180), --dry-run
 set -euo pipefail
 cd "$(dirname "$0")"
 
-PULL=0; IMAGE=; ROLLBACK=0; ALL=0; TIMEOUT=180; DRY=0; UPGRADE=; FORCE=0; APPLY=0
+PULL=0; IMAGE=; ROLLBACK=0; ALL=0; TIMEOUT=180; DRY=0; UPGRADE=; FORCE=0; APPLY=0; REPLACE_COMPOSE=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --pull) PULL=1; shift ;;
@@ -53,6 +65,7 @@ while [ $# -gt 0 ]; do
     # `--upgrade 0.3.16` as well as `--upgrade=0.3.16`, but only when what follows is a version.
     --upgrade) if [ $# -gt 1 ] && printf '%s' "$2" | grep -Eq '^v?[0-9]+\.[0-9]+\.[0-9]+$'; then UPGRADE=$2; shift 2; else UPGRADE=latest; shift; fi ;;
     --force) FORCE=1; shift ;;
+    --replace-compose) REPLACE_COMPOSE=1; shift ;;
     --rollback) ROLLBACK=1; shift ;;
     --all) ALL=1; shift ;;
     --apply-config) APPLY=1; shift ;;
@@ -65,6 +78,7 @@ done
 
 [ -z "$UPGRADE" ] || [ -z "$IMAGE" ] || { echo "--upgrade and --image both pick the core image — use one" >&2; exit 2; }
 [ -z "$UPGRADE" ] || [ "$ROLLBACK" = 0 ] || { echo "--upgrade and --rollback go opposite ways — use one" >&2; exit 2; }
+[ "$REPLACE_COMPOSE" = 0 ] || [ -n "$UPGRADE" ] || { echo "--replace-compose goes with --upgrade" >&2; exit 2; }
 if [ "$APPLY" = 1 ] && { [ -n "$UPGRADE$IMAGE" ] || [ "$ROLLBACK$PULL$ALL" != 000 ]; }; then
   echo "--apply-config applies config.txt on its own — run it without the other options (a deploy applies it too)" >&2; exit 2
 fi
@@ -110,11 +124,109 @@ wait_healthy() {
   local t=0 h
   while [ "$t" -lt "$TIMEOUT" ]; do
     h=$(core_health)
-    case "$h" in healthy) return 0 ;; unhealthy|exited|dead|missing) [ "$t" -ge 20 ] && return 1 ;; esac
+    case "$h" in healthy) worker_check; return 0 ;; unhealthy|exited|dead|missing) [ "$t" -ge 20 ] && return 1 ;; esac
     sleep 5; t=$((t + 5))
   done
   return 1
 }
+
+# The services that run the ElasticPro image: the core, and the report worker when this
+# compose file has one (docs/WORKER.md). Both always move together — a worker on another
+# version than the core refuses its work (worker_version). A compose file from before 0.3.54
+# has no worker: its core runs everything (role all), exactly as before.
+app_services() {
+  if docker compose config --services 2>/dev/null | grep -qx worker; then echo "core worker"; else echo core; fi
+}
+# The worker's health, said after the core's. Not a reason to roll back: monitoring does not
+# depend on it (reports and collection wait for it, and say so in Exports).
+worker_check() {
+  case " $(app_services) " in *" worker "*) ;; *) return 0 ;; esac
+  [ "${DRY:-0}" = 1 ] && return 0
+  local t=0 id h
+  while [ "$t" -lt 90 ]; do
+    id=$(docker compose ps -q worker 2>/dev/null)
+    h=$([ -n "$id" ] && docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$id" 2>/dev/null || echo missing)
+    [ "$h" = healthy ] && { say "✓ report worker healthy"; return 0; }
+    sleep 5; t=$((t + 5))
+  done
+  say "! report worker not healthy ($h) — monitoring is unaffected; reports and collection wait for it: docker compose logs worker"
+  return 0
+}
+
+# --- the compose file: core + worker (0.3.54) -----------------------------------------------
+# A compose file from before 0.3.54 has no worker service, and its core runs everything (role
+# all). --upgrade brings in the release's file — only one exactly as a release shipped it, so
+# nobody's edits are lost — keeping the old one for --rollback. .env and override files stay.
+COMPOSE=docker-compose.yml
+COMPOSE_MARK=.compose-previous     # the backup --rollback puts back (one line: its file name)
+RELEASE_URL=${ELASTICPRO_RELEASE_URL:-https://raw.githubusercontent.com/karthick-dkk/elasticpro}
+COMPOSE_NEW=; COMPOSE_BACKUP=
+has_worker() { grep -Eq '^  worker:[[:space:]]*(#.*)?$' "$1"; }
+release_compose() {   # VERSION DEST — the docker-compose.yml that release shipped
+  local t
+  for t in "v${1#v}" "${1#v}"; do
+    curl -fsSL --max-time 20 "$RELEASE_URL/$t/deploy/$COMPOSE" -o "$2" 2>/dev/null && [ -s "$2" ] && return 0
+  done
+  return 1
+}
+# Decides whether this upgrade brings in TARGET's compose file (COMPOSE_NEW, a temporary copy),
+# and stops the script, nothing changed, when it cannot do so safely. $1 TARGET, $2 the version
+# running now (may be empty).
+compose_plan() {
+  has_worker "$COMPOSE" && return 0
+  [ -n "$CFG_TMP" ] || CFG_TMP=$(mktemp -d)
+  local new=$CFG_TMP/compose.release shipped=$CFG_TMP/compose.shipped v matched='' fetched=''
+  release_compose "$1" "$new" \
+    || fail "deploy/$COMPOSE has no report worker, and the $1 release's copy could not be fetched from $RELEASE_URL — nothing changed. Check the network, set ELASTICPRO_RELEASE_URL to a mirror (or file:///dir holding v$1/deploy/$COMPOSE), or see deploy/README.md (Updating)"
+  has_worker "$new" || return 0      # that release predates the worker: nothing to bring in
+  # Edited here? It must be byte for byte what a release shipped: the one running now, or the
+  # one before it (an older deploy.sh upgraded the images and left the file behind).
+  for v in "$2" "$(version_of "$(env_get ELASTICPRO_IMAGE_PREVIOUS)")"; do
+    [ -n "$v" ] || continue
+    release_compose "$v" "$shipped" || continue
+    fetched="$fetched $v"
+    if cmp -s "$COMPOSE" "$shipped"; then matched=$v; break; fi
+  done
+  if [ -z "$matched" ] && [ "$REPLACE_COMPOSE" != 1 ]; then
+    if [ -n "$fetched" ]; then
+      say "✗ deploy/$COMPOSE has no report worker, and it differs from the file ElasticPro${fetched} shipped: it was edited here." >&2
+    else
+      say "✗ deploy/$COMPOSE has no report worker, and whether it was edited here cannot be told: the file of the version running now (${2:-not known}) could not be fetched." >&2
+    fi
+    say "  The $1 file would replace it and lose any changes, so nothing was changed. Either:" >&2
+    say "   • move your changes into docker-compose.override.yml (compose reads it on top of the main file; deploy.sh never touches it)," >&2
+    say "     then run this again with --replace-compose — the current file is kept as $COMPOSE.bak-<time>; or" >&2
+    say "   • merge by hand: $RELEASE_URL/v$1/deploy/$COMPOSE is the $1 file — put it in place with your changes, then run --upgrade again." >&2
+    say "  Until then the core runs everything itself (role all), as before 0.3.54." >&2
+    exit 1
+  fi
+  COMPOSE_NEW=$new
+  if [ -n "$matched" ]; then say "   $COMPOSE: as $matched shipped it — the $1 file replaces it (adds the report worker)"
+  else say "   $COMPOSE: replaced by the $1 file although it was not as a release shipped it (--replace-compose)"; fi
+  if [ "$DRY" = 1 ]; then
+    say "   the change:"
+    diff -u --label "$COMPOSE (now)" --label "$COMPOSE ($1)" "$COMPOSE" "$new" | sed 's/^/     /' || true
+  fi
+}
+# Puts SOURCE in place as the compose file. The current one is kept as $COMPOSE.bak-<time>,
+# named in $COMPOSE_MARK for --rollback.
+compose_put() {
+  COMPOSE_BACKUP=$COMPOSE.bak-$(date +%Y%m%d-%H%M%S)
+  run cp -p "$COMPOSE" "$COMPOSE_BACKUP"
+  run cp "$1" "$COMPOSE"
+  if [ "$DRY" = 1 ]; then say "  would: write $COMPOSE_MARK ($COMPOSE_BACKUP: what --rollback puts back)"
+  else printf '%s\n' "$COMPOSE_BACKUP" > "$COMPOSE_MARK"; fi
+}
+# Takes the file just put in place back out again, when it did not load or the stack it started
+# was not healthy.
+compose_undo() {
+  [ -n "$COMPOSE_BACKUP" ] && [ -f "$COMPOSE_BACKUP" ] || return 0
+  cp -p "$COMPOSE_BACKUP" "$COMPOSE"
+  rm -f "$COMPOSE_MARK"
+  say "   $COMPOSE: the previous one is back (also kept as $COMPOSE_BACKUP)"
+}
+# A deploy that did not change the compose file: --rollback must not put an older one back.
+compose_forget() { [ ! -f "$COMPOSE_MARK" ] || run rm -f "$COMPOSE_MARK"; }
 
 # --- config.txt: the one settings file ----------------------------------------------------
 # config.txt.example is the single definition of the keys (and the rules, in its header);
@@ -302,6 +414,27 @@ UI_REPORT_TO text
 UI_REPORT_SCHEDULE enum monthly,weekly,daily,manual
 UI_REPORT_AT text
 UI_REPORT_SHEETS text
+UI_REPORT_INDICES_TO text
+UI_REPORT_INDICES_SCHEDULE enum monthly,weekly,daily,manual
+UI_REPORT_INDICES_AT text
+UI_REPORT_HOSTS_TO text
+UI_REPORT_HOSTS_SCHEDULE enum monthly,weekly,daily,manual
+UI_REPORT_HOSTS_AT text
+UI_REPORT_HOSTS_FIELDS text
+UI_REPORT_HOSTS_MAX_PAGES int 1 100000
+UI_REPORT_HOSTS_KEEP_MONTHS int 1 13
+UI_REPORT_HOSTS_REQUEST_TIMEOUT_S int 10 600
+UI_REPORT_HOSTS_PAGE_PAUSE_MS int 0 10000
+UI_REPORT_HOSTS_MAX_MINUTES int 5 1440
+UI_REPORT_CLIENT_ID_FIELD text
+UI_REPORT_BRANCH_FIELD text
+UI_REPORT_BRANCH_DEFAULT text
+UI_REPORT_MAIL_MAX_MB int 1 100
+UI_REPORT_CONCURRENCY_START int 1 8
+UI_REPORT_CONCURRENCY_MAX int 1 8
+UI_REPORT_PAGE_TARGET_MS int 100 120000
+UI_REPORT_CLUSTERS_AT_ONCE int 1 8
+REPORT_CPU_SLOTS int 1 2
 UI_PLAY_ENABLED bool
 UI_PLAY_DELAY_YELLOW_MIN int 1 1440
 UI_PLAY_DELAY_RED_MIN int 1 1440
@@ -363,7 +496,7 @@ cfg_check() {
       case ",$item," in *,,*) echo "has an empty pattern between commas"; return 1 ;; *,_*|*,+*|,-*) echo "a pattern cannot start with _ or +, and the first cannot be an exclusion (-)"; return 1 ;; esac ;;
     UI_VOLUME_TIME_FIELD)
       case $v in *[[:space:],\"*]*) echo "must be one field name, e.g. @timestamp"; return 1 ;; esac ;;
-    UI_VOLUME_COLLECT_AT|UI_REPORT_AT)
+    UI_VOLUME_COLLECT_AT|UI_REPORT_AT|UI_REPORT_INDICES_AT|UI_REPORT_HOSTS_AT)
       [[ $v =~ ^([01][0-9]|2[0-3]):[0-5][0-9]$ ]] || { echo "must be a time of day HH:MM, 00:00 to 23:59"; return 1; } ;;
     # The same rule as the core (settings.rs check_text, play::settings::spotlight_when_problem).
     UI_PLAY_SPOTLIGHT_WHEN)
@@ -385,7 +518,12 @@ cfg_check() {
       [[ $v =~ ^[^[:space:]/@?#]+$ ]] || { echo "must be a host name or an address, without a scheme or a path"; return 1; } ;;
     UI_SMTP_FROM)
       [[ $v == *@* ]] || { echo "must be a mail address, e.g. ElasticPro <elasticpro@example.com>"; return 1; } ;;
-    UI_REPORT_TO)
+    UI_REPORT_CLIENT_ID_FIELD|UI_REPORT_BRANCH_FIELD)
+      case $v in *[[:space:],\"*]*) echo "must be one field name, e.g. ClientID"; return 1 ;; esac ;;
+    UI_REPORT_HOSTS_FIELDS)
+      [ -n "$(cfg_list "$v")" ] || { echo "names no field"; return 1; }
+      case $v in *[\"*]*) echo "field names only: no quotes or *"; return 1 ;; esac ;;
+    UI_REPORT_TO|UI_REPORT_INDICES_TO|UI_REPORT_HOSTS_TO)
       while IFS= read -r item; do
         [[ $item == *?@?* ]] || { echo "\"$item\" is not a mail address"; return 1; }
       done < <(cfg_list "$v") ;;
@@ -552,7 +690,9 @@ apply_config() {
 
   if [ "$mode" = restart ]; then
     say "== restarting the core (it reads $CONFIG at start; nobody is signed out)"
-    run docker compose up -d --force-recreate core
+    # The worker reads config.txt at start too.
+    # shellcheck disable=SC2046
+    run docker compose up -d --force-recreate $(app_services)
     if [ "$DRY" != 1 ]; then
       if wait_healthy; then say "✓ core healthy with the new settings"; else
         docker compose logs --tail 30 core || true
@@ -583,7 +723,8 @@ PREVIOUS_BEFORE=$(env_get ELASTICPRO_IMAGE_PREVIOUS)
 
 # --- rollback only ----------------------------------------------------------------------
 # Every image the last deploy changed goes back: the core always, and nginx, PostgreSQL and
-# Redis too when it was an --upgrade that moved them.
+# Redis too when it was an --upgrade that moved them; and the compose file, when that upgrade
+# brought in a new one (.compose-previous names the old one).
 if [ "$ROLLBACK" = 1 ]; then
   PREV=$(env_get ELASTICPRO_IMAGE_PREVIOUS)
   [ -n "$PREV" ] || fail "no previous image recorded (ELASTICPRO_IMAGE_PREVIOUS in .env)"
@@ -599,7 +740,25 @@ if [ "$ROLLBACK" = 1 ]; then
     say "   ${key#ELASTICPRO_}: $now → $old"
     env_set "$key" "$old"; env_set "${key}_PREVIOUS" "$now"; STACK=1
   done
-  if [ "$STACK" = 1 ]; then run docker compose up -d; else run docker compose up -d core; fi
+  # The compose file goes back too; the one in place now is kept, and named, so a second
+  # --rollback goes forward again — as the images do.
+  if [ -f "$COMPOSE_MARK" ]; then
+    prev=$(head -1 "$COMPOSE_MARK")
+    case $prev in    # a backup beside it, by name — never a path from elsewhere
+      */*) prev= ;;
+      "$COMPOSE".bak-*) ;;
+      *) prev= ;;
+    esac
+    if [ -n "$prev" ] && [ -f "$prev" ]; then
+      say "   $COMPOSE: back to $prev"
+      compose_put "$prev"; STACK=1
+    else
+      say "! $COMPOSE_MARK does not name a backup that is here — $COMPOSE stays as it is"
+    fi
+  fi
+  # --remove-orphans: going back to a compose file without the worker takes its container away.
+  # shellcheck disable=SC2046
+  if [ "$STACK" = 1 ]; then run docker compose up -d --remove-orphans; else run docker compose up -d $(app_services); fi
   [ "$DRY" = 1 ] || { wait_healthy && say "✓ core healthy on $PREV"; } || fail "core not healthy on $PREV either — docker compose logs core"
   exit 0
 fi
@@ -612,7 +771,7 @@ fi
 if [ -z "$IMAGE" ]; then
   VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' ../Cargo.toml | head -1)
   COMMIT=$(git -C .. rev-parse --short HEAD 2>/dev/null || date +%Y%m%d%H%M)
-  [ -z "$(git -C .. status --porcelain -- crates ui src-tauri Cargo.toml Cargo.lock deploy/Dockerfile 2>/dev/null)" ] || COMMIT=$COMMIT-dirty
+  [ -z "$(git -C .. status --porcelain -- crates ui Cargo.toml Cargo.lock deploy/Dockerfile 2>/dev/null)" ] || COMMIT=$COMMIT-dirty
   IMAGE=elasticpro-core:$VERSION-$COMMIT
 fi
 # nginx is given its config as a bind-mounted FILE, which goes wrong in two different ways
@@ -695,13 +854,16 @@ if [ -n "$UPGRADE" ]; then
     now=$(image_of "$key"); new="$REG/elasticpro-$name:$TARGET"
     [ "$now" = "$new" ] || PLAN="$PLAN $key=$new"
   done
-  if [ -z "$PLAN" ]; then
+  if [ -n "$NOW" ] && older "$TARGET" "$NOW" && [ "$FORCE" != 1 ]; then
+    fail "$TARGET is older than the $NOW running now — use --rollback to go back, or add --force"
+  fi
+  # A compose file without the worker: the release's comes in too (or the script stops here,
+  # nothing changed, and says why).
+  compose_plan "$TARGET" "$NOW"
+  if [ -z "$PLAN" ] && [ -z "$COMPOSE_NEW" ]; then
     apply_config keep
     say "✓ already on $TARGET — nothing else to do (the core was not restarted: deploy.sh --apply-config does that)"
     exit 0
-  fi
-  if [ -n "$NOW" ] && older "$TARGET" "$NOW" && [ "$FORCE" != 1 ]; then
-    fail "$TARGET is older than the $NOW running now — use --rollback to go back, or add --force"
   fi
 
   # A bad config.txt stops the upgrade before anything is pulled.
@@ -709,6 +871,7 @@ if [ -n "$UPGRADE" ]; then
   say "== upgrading ${NOW:-$CURRENT} → $TARGET"
   for item in $PLAN; do
     img=${item#*=}
+    if docker image inspect "$img" >/dev/null 2>&1; then say "   $img is here already"; continue; fi
     say "   pulling $img"
     run docker pull -q "$img" >/dev/null || fail "$img is not published (or cannot be pulled) — nothing changed"
   done
@@ -717,6 +880,17 @@ if [ -n "$UPGRADE" ]; then
   apply_config keep
   BACKUP=.env.bak-$(date +%Y%m%d-%H%M%S)
   run cp .env "$BACKUP"
+  if [ -n "$COMPOSE_NEW" ]; then
+    compose_put "$COMPOSE_NEW"
+    # Loaded with this install's .env and override files before anything restarts.
+    if [ "$DRY" != 1 ] && ! err=$(docker compose config -q 2>&1); then
+      compose_undo
+      printf '  %s\n' "$err" | tail -5 >&2
+      fail "the $TARGET $COMPOSE does not load with this install's .env and override files — nothing else was changed"
+    fi
+  else
+    compose_forget
+  fi
   # The core's previous image is always recorded; a support image's only when it moves, and
   # a stale record from an older upgrade is dropped so --rollback undoes exactly this one.
   for key in $SUPPORT_KEYS; do env_del "${key}_PREVIOUS"; done
@@ -733,7 +907,7 @@ if [ -n "$UPGRADE" ]; then
   if wait_healthy; then
     say "✓ ElasticPro $TARGET is running and healthy"
     sync_nginx
-    say "  .env before this upgrade: $BACKUP   ·   undo: deploy/deploy.sh --rollback"
+    say "  .env before this upgrade: $BACKUP${COMPOSE_BACKUP:+   ·   $COMPOSE before: $COMPOSE_BACKUP}   ·   undo: deploy/deploy.sh --rollback"
     docker compose ps
     exit 0
   fi
@@ -741,7 +915,8 @@ if [ -n "$UPGRADE" ]; then
   docker compose logs --tail 30 core || true
   say "== putting back the .env from before the upgrade"
   cp "$BACKUP" .env
-  docker compose up -d
+  compose_undo
+  docker compose up -d --remove-orphans
   # The way back gets the full wait, whatever --timeout the attempt had.
   [ "$TIMEOUT" -ge 180 ] || TIMEOUT=180
   if wait_healthy; then say "✓ back on ${NOW:-$CURRENT}, healthy"; else say "✗ not healthy on ${NOW:-$CURRENT} either — docker compose logs core"; fi
@@ -767,10 +942,13 @@ fi
 # --- 4. switch --------------------------------------------------------------------------
 [ "$IMAGE" = "$CURRENT" ] || env_set ELASTICPRO_IMAGE_PREVIOUS "$CURRENT"
 env_set ELASTICPRO_IMAGE "$IMAGE"
-# This deploy moves the core alone; --rollback must not also undo an older upgrade's nginx.
+# This deploy moves the core alone; --rollback must not also undo an older upgrade's nginx,
+# nor its compose file.
 for key in $SUPPORT_KEYS; do env_del "${key}_PREVIOUS"; done
-say "== restarting $([ "$ALL" = 1 ] && echo "the stack" || echo "the core")"
-if [ "$ALL" = 1 ]; then run docker compose up -d; else run docker compose up -d core; fi
+compose_forget
+say "== restarting $([ "$ALL" = 1 ] && echo "the stack" || app_services)"
+# shellcheck disable=SC2046
+if [ "$ALL" = 1 ]; then run docker compose up -d; else run docker compose up -d $(app_services); fi
 [ "$DRY" = 1 ] && { say "(dry run: nothing was changed)"; exit 0; }
 
 # --- 5. healthy, or back ------------------------------------------------------------------
@@ -789,7 +967,8 @@ if [ "$IMAGE" != "$CURRENT" ]; then
   env_set ELASTICPRO_IMAGE "$CURRENT"
   # This deploy never happened: --rollback keeps meaning what it meant before it.
   if [ -n "$PREVIOUS_BEFORE" ]; then env_set ELASTICPRO_IMAGE_PREVIOUS "$PREVIOUS_BEFORE"; else sed -i.tmp '/^ELASTICPRO_IMAGE_PREVIOUS=/d' .env && rm -f .env.tmp; fi
-  docker compose up -d core
+  # shellcheck disable=SC2046
+  docker compose up -d $(app_services)
   [ "$TIMEOUT" -ge 180 ] || TIMEOUT=180
   if wait_healthy; then say "✓ back on $CURRENT, healthy"; else say "✗ not healthy on $CURRENT either — docker compose logs core"; fi
 fi

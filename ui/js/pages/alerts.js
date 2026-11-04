@@ -1,6 +1,6 @@
 /** Page — everything currently wrong across the fleet: unreachable clusters first, then grouped by cluster. */
 
-import { h, mount, $, tooltip } from '../lib/dom.js';
+import { h, mount, $, tooltip, reconcile } from '../lib/dom.js';
 import { nodeCache, objId } from '../lib/keyed.js';
 import { ago, dt, dur, toCsv, download, num } from '../lib/fmt.js';
 import { state, bus, mergedAlerts, invalidateAlerts, clusters, client, fetchOverview, refreshAll, clusterRev, fleetMode, coverage, askFleetDataset, askForPage, healthState } from '../core/state.js';
@@ -83,7 +83,8 @@ function coverageLines() {
   const cov = coverage(ids, DATASETS);
   const bar = coverageBar({
     cov, datasets: DATASETS, state: reading,
-    onReadAll: () => startReadAll(reading, { clusterIds: ids, datasets: DATASETS, ask: askFleetDataset,
+    // the clusters configured when pressed: the bar is kept between redraws while it reads the same
+    onReadAll: () => startReadAll(reading, { clusterIds: clusters().map((c) => c.id), datasets: DATASETS, ask: askFleetDataset,
       onChange: () => { if (host && host.isConnected) coverageLines(); } }),
   });
   return [bar];
@@ -171,6 +172,19 @@ function silenceLabel(s) {
   return s.until ? `silenced until ${new Date(s.until).toLocaleString([], { dateStyle: 'short', timeStyle: 'short' })}` : 'silenced until removed';
 }
 
+/** A kept element whose children are kept one by one (lib/keyed.js): never rebuilt around what it holds. */
+function keptBox(key, tag, kids, attrs = null) {
+  const el = built.get(`${key}:box`, tag, () => h(tag, attrs));
+  reconcile(el, built.sameAll(key, kids));
+  return el;
+}
+/**
+ * What Export CSV and Collapse all act on, as of the last draw. Their buttons are kept while
+ * they read the same, so they must not hold the alerts of the draw that built them.
+ */
+let lastMine = [];
+let lastFold = { keys: [], all: false };
+
 function draw() {
   if (!host || !host.isConnected) return;
   built.begin();
@@ -199,6 +213,8 @@ function draw() {
   // What Collapse all folds: the Unreachable group and every group that has a header.
   const foldKeys = [...(down.length ? [DOWN_KEY] : []), ...groups.filter(hasHeader).map(groupKey)];
   const allCollapsed = foldKeys.length > 0 && foldKeys.every((k) => collapsed.has(k));
+  lastMine = mine;
+  lastFold = { keys: foldKeys, all: allCollapsed };
   const segBtn = (label, on, onClick, title) => h('button.seg-btn', {
     type: 'button', 'aria-pressed': String(on), title: title || null, onclick: onClick,
   }, label);
@@ -207,8 +223,8 @@ function draw() {
     type: 'button', id, 'aria-pressed': String(pressed), title, onclick: onClick }, text);
 
   mount(host,
-    ...coverageLines(),
-    h('div.alerts-sum', { role: 'status', 'aria-label': 'Open alerts' },
+    ...built.sameAll('cov', coverageLines()),
+    built.same('sum', h('div.alerts-sum', { role: 'status', 'aria-label': 'Open alerts' },
       sumBtn('alerts-sum-critical', `${num(sum.critical)} critical`, 'crit', ui.level === 'critical',
         () => { ui.level = ui.level === 'critical' ? 'all' : 'critical'; draw(); },
         ui.level === 'critical' ? 'Showing critical only — press to show all' : 'Show the critical alerts only'),
@@ -226,7 +242,7 @@ function draw() {
       sumBtn('alerts-sum-acked', `${num(sum.acknowledged)} acknowledged`, 'ack', ui.handled,
         () => { ui.handled = !ui.handled; draw(); },
         ui.handled ? 'Showing acknowledged alerts too — press to hide them' : 'Show acknowledged alerts too'),
-      sum.silenced ? h('span.muted', `(${num(sum.silenced)} silenced)`) : null),
+      sum.silenced ? h('span.muted', `(${num(sum.silenced)} silenced)`) : null)),
 
     only
       ? h('div.banner', { style: { marginBottom: '10px' } },
@@ -234,7 +250,9 @@ function draw() {
           h('div.acts', h('button.btn.sm', { type: 'button', onclick: () => { ui.cluster = null; draw(); } }, 'Show all clusters')))
       : null,
 
-    h('div.toolbar.alerts-bar',
+    // Kept, and each of its parts kept: the search field is the same element while it is typed
+    // into (it used to be rebuilt with every key and every push, its focus put back each time).
+    keptBox('bar', 'div.toolbar.alerts-bar', [
       h('label.field', 'Search', h('input#alerts-search', { type: 'search', placeholder: 'Search alerts, clusters, nodes', value: ui.text,
         'aria-label': 'Search alerts', style: { minWidth: '240px' }, oninput: (e) => { ui.text = e.target.value; draw(); } })),
       h('div.field', h('span', 'Severity'),
@@ -255,24 +273,26 @@ function draw() {
         foldKeys.length
           ? h('button.btn.sm.ghost#alerts-collapse-all', { type: 'button',
               onclick: () => {
-                if (allCollapsed) foldKeys.forEach((k) => collapsed.delete(k));
-                else foldKeys.forEach((k) => collapsed.add(k));
+                if (lastFold.all) lastFold.keys.forEach((k) => collapsed.delete(k));
+                else lastFold.keys.forEach((k) => collapsed.add(k));
                 saveCollapsed(); draw();
               } }, allCollapsed ? 'Expand all' : 'Collapse all')
           : null,
-        h('button.btn.sm', { type: 'button', onclick: () => exportAlerts(mine) }, 'Export CSV'),
-        h('button.btn.sm', { type: 'button', onclick: () => refreshAll({ force: true, selected: true }) }, '↻ Refresh'))),
+        h('button.btn.sm', { type: 'button', onclick: () => exportAlerts(lastMine) }, 'Export CSV'),
+        h('button.btn.sm', { type: 'button', onclick: () => refreshAll({ force: true, selected: true }) }, '↻ Refresh'))]),
 
-    silencesCard(),
+    built.same('silences', silencesCard()),
 
+    // Kept: the group sections in it are kept by their own signatures, and moving them into a
+    // fresh box on every push took the row under the mouse out of the page and back.
     mine.length
-      ? h('div.agroups',
+      ? keptBox('agroups', 'div.agroups', [
           down.length ? downSection(down, all) : null,
           ...groupSections(groups, all),
           groups.length || down.length ? null : h('div.card', h('div.body', empty(
             ui.text.trim() || ui.level !== 'all' ? 'No alert matches the filter'
-              : 'Nothing open — every alert here is acknowledged or silenced. Tick “Show acknowledged” to see them.'))))
-      : (() => {
+              : 'Nothing open — every alert here is acknowledged or silenced. Tick “Show acknowledged” to see them.')))])
+      : built.same('empty', (() => {
           // Healthy only for the clusters that were read (fleet-summary.js alertsEmptyState).
           const e = alertsEmptyState({ total: list.length, read: clustersRead(list) });
           return card('Alerts', e.healthy ? 'nothing to report' : 'nothing raised — see why',
@@ -280,10 +300,10 @@ function draw() {
               h('div', { style: { fontSize: '26px', marginBottom: '6px' } }, e.healthy ? '✓' : '…'),
               h('div', { style: { fontWeight: 640 } }, e.title),
               h('div.muted', { style: { fontSize: '12.5px', marginTop: '3px' } }, e.detail)));
-        })(),
+        })()),
 
     mine.length
-      ? h('div.alerts-foot', footText(sum, hiddenHandled))
+      ? built.same('foot', h('div.alerts-foot', footText(sum, hiddenHandled)))
       : null);
   built.end();
 }
@@ -331,10 +351,16 @@ function groupSections(groups, all) {
       out.push(groupSection(g, all));
     }
   }
-  return out.map((x) => (Array.isArray(x)
-    ? h('section.agroup.singles', { 'aria-label': 'Clusters with one alert' }, ...x)
+  return out.map((x, i) => (Array.isArray(x)
+    ? keptBox(`singles:${ui.group}:${i}`, 'section.agroup.singles', x, { 'aria-label': 'Clusters with one alert' })
     : x));
 }
+
+/**
+ * Each group's alerts as of the last draw, by section key: a group's header is kept while it
+ * reads the same, and its Acknowledge all must act on the alerts in the group now.
+ */
+const groupNow = new Map();
 
 function groupSection(g, all) {
   const flat = ui.group === 'none';
@@ -346,6 +372,8 @@ function groupSection(g, all) {
   };
   const cluster = g.clusterId ? clusters().find((c) => c.id === g.clusterId) : null;
   const open = g.alerts.filter(isOpen);
+  const key = `sec:${ui.group}:${g.id}`;
+  groupNow.set(key, g);
 
   const header = flat ? null : h('div.agroup-head',
     h('span.adot', { class: g.critical ? 'crit' : g.high ? 'high' : 'warn', 'aria-hidden': 'true' }),
@@ -359,15 +387,20 @@ function groupSection(g, all) {
     h('span.agroup-spacer'),
     h('button.btn.sm.ghost', { type: 'button', disabled: !open.length,
       title: open.length ? `Acknowledge the ${open.length} open alert${open.length === 1 ? '' : 's'} in ${g.name}` : 'Nothing open to acknowledge',
-      onclick: () => ackGroup(g) }, 'Acknowledge all'),
+      onclick: () => ackGroup(groupNow.get(key) || g) }, 'Acknowledge all'),
     cluster ? silenceMenu(cluster) : null,
     h('button.btn.sm.ghost.agroup-toggle', { type: 'button', 'data-nav': '',
       'aria-expanded': String(!isCollapsed), 'aria-controls': bodyId,
       'aria-label': `${isCollapsed ? 'Expand' : 'Collapse'} ${g.name}`,
       title: isCollapsed ? 'Expand' : 'Collapse', onclick: toggle }, isCollapsed ? '▾' : '▴'));
 
-  return h(`section.agroup${g.critical ? '.has-crit' : g.high ? '.has-high' : ''}${flat ? '.flat' : ''}`, header,
-    isCollapsed ? null : h('div.agroup-body', { id: bodyId }, ...g.alerts.map((m) => alertRow(m, all))));
+  // The section, its header and its body are kept (the rows in it are kept by their own
+  // signatures), so a push that changed nothing here touches nothing here.
+  const tag = `section.agroup${g.critical ? '.has-crit' : g.high ? '.has-high' : ''}${flat ? '.flat' : ''}`;
+  const sec = built.get(key, tag, () => h(tag));
+  const body = isCollapsed ? null : keptBox(`${key}:body`, `div.agroup-body#${bodyId}`, g.alerts.map((m) => alertRow(m, all)));
+  reconcile(sec, built.sameAll(`${key}:part`, [header, body]));
+  return sec;
 }
 
 /** Silence a whole cluster: one quiet button, the durations behind it (1 h first). */
@@ -393,7 +426,11 @@ const diag = new Map();
  * Diagnose, Ack. These clusters are in no group below; their other alerts are held (said on
  * the line, listed dimmed when it opens, counted nowhere).
  */
+/** The unreachable clusters as of the last draw, for the kept header's Retry all and Acknowledge all. */
+let downNow = [];
+
 function downSection(down, all) {
+  downNow = down;
   const isCollapsed = collapsed.has(DOWN_KEY);
   const bodyId = 'agroup-unreachable';
   const open = down.filter((d) => isOpen(d.alert));
@@ -408,16 +445,18 @@ function downSection(down, all) {
     h('span.muted.adown-note', 'always first · one line per cluster · their other alerts are held until they answer'),
     h('span.agroup-spacer'),
     h('button.btn.sm#alerts-retry-all', { type: 'button', title: 'Ask every unreachable cluster again now',
-      onclick: (e) => act(e.currentTarget, () => Promise.all(down.map((d) => fetchOverview(d.clusterId)))) }, 'Retry all'),
+      onclick: (e) => act(e.currentTarget, () => Promise.all(downNow.map((d) => fetchOverview(d.clusterId)))) }, 'Retry all'),
     h('button.btn.sm.ghost#alerts-ack-down', { type: 'button', disabled: !open.length,
       title: open.length ? `Acknowledge the ${open.length} open unreachable alert${open.length === 1 ? '' : 's'}` : 'Nothing open to acknowledge',
-      onclick: () => ackGroup({ name: 'Unreachable', alerts: down.map((d) => d.alert) }) }, 'Acknowledge all'),
+      onclick: () => ackGroup({ name: 'Unreachable', alerts: downNow.map((d) => d.alert) }) }, 'Acknowledge all'),
     h('button.btn.sm.ghost.agroup-toggle', { type: 'button', 'data-nav': '',
       'aria-expanded': String(!isCollapsed), 'aria-controls': bodyId,
       'aria-label': `${isCollapsed ? 'Expand' : 'Collapse'} Unreachable`,
       title: isCollapsed ? 'Expand' : 'Collapse', onclick: toggle }, isCollapsed ? '▾' : '▴'));
-  return h('section.agroup.has-crit.adown', { 'aria-labelledby': 'agroup-unreachable-h' }, head,
-    isCollapsed ? null : h('div.agroup-body', { id: bodyId }, ...down.map((d) => downRow(d, all))));
+  const sec = built.get('sec:down', 'adown', () => h('section.agroup.has-crit.adown', { 'aria-labelledby': 'agroup-unreachable-h' }));
+  const body = isCollapsed ? null : keptBox('sec:down:body', `div.agroup-body#${bodyId}`, down.map((d) => downRow(d, all)));
+  reconcile(sec, built.sameAll('sec:down:part', [head, body]));
+  return sec;
 }
 
 function downRow(dn, all) {

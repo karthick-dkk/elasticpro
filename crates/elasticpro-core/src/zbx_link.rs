@@ -467,6 +467,15 @@ impl ZbxLink {
         }
     }
 
+    /// Read the link file again (the report worker, after the core paired or changed the link).
+    pub fn reload(&self) {
+        let Some(p) = &self.path else { return };
+        let file = std::fs::read(p).ok()
+            .and_then(|b| serde_json::from_slice::<LinkFile>(&b).map_err(|e| tracing::warn!("ignoring {LINK_FILE}: {e}")).ok())
+            .unwrap_or_default();
+        *self.file.write() = file;
+    }
+
     pub fn server(&self) -> &ServerZbx {
         &self.server
     }

@@ -2,13 +2,14 @@
  * Page — Reports (0.3.53, was Volume report): what each cluster takes in, what it keeps, and
  * whether its storage holds it. docs/REPORTS.md is the contract.
  *
- * Sections, each its own module under ui/js/reports/: Overview, Daily & monthly, Capacity &
+ * Sections, each its own module under ui/js/reports/: Overview, Daily & monthly, Volume by host, Capacity &
  * retention, Measure size, Planning, Exports & schedules. The route is `#/reports/<section>`
  * (reports/route.js); `#/volume…` still opens it. Overview, Capacity, Measure and Exports are
  * fleet-wide — one line per cluster shown; Daily & monthly is one cluster.
  */
 
 import { h, mount } from '../lib/dom.js';
+import { nodeCache } from '../lib/keyed.js';
 import { activeClusters } from '../core/state.js';
 import { intent } from '../core/intent.js';
 import { takeFocus, revealFocus } from '../core/focus.js';
@@ -20,6 +21,7 @@ import { overviewSection } from '../reports/overview.js';
 import { capacitySection, capacityReset } from '../reports/capacity.js';
 import { measureSection } from '../reports/measure.js';
 import { exportsSection, exportsReset } from '../reports/exports.js';
+import { hostsSection, hostsReset } from '../reports/hosts.js';
 import { planningSection } from '../reports/planning.js';
 import { volumeSummary, resetVolumeSummary, setSummaryMode } from '../reports/daily.js';
 import { volumeAnalysisCard, setVolumeAnalysisField } from '../ui/index-metrics.js';
@@ -53,6 +55,7 @@ export function render(el) {
     resetVolumeSummary();
     capacityReset();
     exportsReset();
+    hostsReset();
     planningNode = null;
     focusField = null;
   }
@@ -143,6 +146,10 @@ function body(list) {
         focusField ? h('div', { dataset: { focus: 'field-volume' }, style: { marginBottom: '10px' } }, volumeAnalysisCard(c, draw)) : null,
         volumeSummary(c, { redraw: draw, picker: dailyPicker(list, c) }));
     }
+    case 'hosts': {
+      const c = dailyCluster(list);
+      return hostsSection({ cluster: c, picker: dailyPicker(list, c) });
+    }
     case 'capacity': return capacitySection(ctx);
     case 'measure': return measureSection(ctx);
     case 'planning': return planningNode || (planningNode = planningSection({ clusters: list }));
@@ -151,16 +158,30 @@ function body(list) {
   }
 }
 
+/**
+ * What the last draw put on screen. The page redraws on every push from the core — about once a
+ * second on a busy fleet — and most of the time nothing it shows has changed: the heading, the
+ * section links and an unchanged section are then left exactly as they are (lib/keyed.js).
+ */
+const built = nodeCache();
+
 function draw() {
   if (!alive()) return;
+  built.begin();
+  try { drawPage(); } finally { built.end(); }
+}
+
+function drawPage() {
   const list = activeClusters();
-  if (!list.length) { mount(host, header(), sectionNav(), empty('No cluster selected')); return; }
+  if (!list.length) { mount(host, ...built.sameAll('rp', [header(), sectionNav(), empty('No cluster selected')])); return; }
   // The fleet sections read every shown cluster's daily record; asked after this draw, and
   // the answers redraw (reports/record.js, at most four at once).
   if (FLEET.has(ui.section)) {
     const ids = list.map((c) => c.id);
     setTimeout(() => ensureRecords(ids), 0);
   }
-  mount(host, header(), sectionNav(), body(list));
+  // The sections keep their own pieces (Exports, Volume by host, Planning, Capacity): a section's
+  // export buttons hold the rows they were drawn with, so a section is not kept from outside.
+  mount(host, ...built.sameAll('rp', [header(), sectionNav()]), body(list));
   if (focusField && !focusRevealed && revealFocus(host, '[data-focus="field-volume"]')) focusRevealed = true;
 }

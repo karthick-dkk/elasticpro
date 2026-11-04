@@ -7,12 +7,20 @@
  * It reads the core's own log (REQUEST_LOG) and nothing else: opening this page never
  * sends a cluster anything. While it is open it re-reads the log every two seconds — a
  * core round trip, not a cluster one — and stops the moment it is left.
+ *
+ * A second tab, ElasticPro health (`#/requests/health`, docs/HEALTH.md), is an
+ * administrator's: ElasticPro's own memory, CPU, response time, gate, poller, reports and
+ * disk, from SYSTEM_HEALTH every five seconds while it is open — and the log is not read
+ * meanwhile. Neither tab sends a cluster anything.
  */
 
-import { h, mount } from '../lib/dom.js';
+import { h, mount, reconcile } from '../lib/dom.js';
+import { nodeCache } from '../lib/keyed.js';
 import { num, dur, dt, toCsv, download } from '../lib/fmt.js';
 import { state, clusters, client, requestLoad, refreshRequestLoad, syncFleet } from '../core/state.js';
-import { requestLog, policyGet, policyPause, policyResume, housekeepingGet, housekeepingRun } from '../core/es.js';
+import { requestLog, policyGet, policyPause, policyResume, housekeepingGet, housekeepingRun, systemHealth } from '../core/es.js';
+import { REQUEST_TABS, tabOfHash, tabHash, HEALTH_POLL_MS, levelTone, levelWord } from '../core/system-health.js';
+import { healthView } from './requests-health.js';
 import { housekeepingView, housekeepingLine } from '../core/housekeeping.js';
 import { navigateTo } from '../core/intent.js';
 import { contractOf, taskRows, cancelPath, privilegeHint } from '../core/es-tasks.js';
@@ -20,7 +28,7 @@ import { ensureWrites, writesAllowed } from '../core/writes.js';
 import { confirmDialog } from '../ui/modal.js';
 import { isPaused, stopQuestion, pausedLine, mayStop, stopRefusal, STOP_MINUTES, gapLine, DATASETS } from '../core/policy.js';
 import { toast } from '../ui/menu.js';
-import { card, table, pill, statTile, empty } from './common.js';
+import { card, table, pill, statTile, empty, keptCard, keptTable } from './common.js';
 import { NO_FILTER, requestRows, originChoices, perCluster, requestCsvRows, CSV_HEADER, originLabel, gateFigures,
   requestStatus, modeText, limitChips, clockTime, classTag, resultTone, LOG_LIMIT, zabbixPushLine } from '../core/request-log.js';
 
@@ -50,18 +58,88 @@ let tasks = { cluster: null, rows: null, error: null, busy: false, at: 0, note: 
 let hk = null;
 let hkBusy = false;
 let hkTick = 0;
+/** Which tab is open ('log' or 'health'), from the hash; an operator only ever has the log's page. */
+let tab = 'log';
+/** SYSTEM_HEALTH's last answer, why the last read failed, and the tab's own 5-s timer. */
+let health = null;
+let healthError = null;
+let healthTimer = null;
+
+/**
+ * What the last draw put on screen (lib/keyed.js). The page redraws every two seconds (the
+ * health tab every five) and on every answer; each card, row and control is the one already
+ * there unless what it shows changed. Rebuilding the page each time replaced the row under
+ * the mouse, closed an open filter <select> and the folded "Every type" list, and moved the
+ * page under a reader for nothing.
+ */
+const built = nodeCache();
+/** The page's one box, kept: the tabs swap what is in it. */
+let pageEl = null;
+/** The rows on screen, for Export CSV: its button is kept between redraws, so it must not hold its own. */
+let shownRows = [];
 
 /** The log, its figures and housekeeping are an administrator's; anybody else gets the stop alone. */
 const isAdmin = () => !state.caller || state.caller.role === 'admin';
 
 export function render(el) {
   host = el;
-  draw();
-  poll();
+  tab = isAdmin() ? tabOfHash(hashNow()) : 'log';
   loadPolicy();
+  startTab();
+}
+
+/**
+ * Start the open tab's reads and stop the other's: the log every two seconds (and housekeeping
+ * on entry), or SYSTEM_HEALTH every five. One timer runs at a time.
+ */
+function startTab() {
+  clearInterval(timer); timer = null;
+  clearInterval(healthTimer); healthTimer = null;
+  draw();
+  if (tab === 'health') {
+    pollHealth();
+    healthTimer = setInterval(() => { if (host && host.isConnected) pollHealth(); else clearInterval(healthTimer); }, HEALTH_POLL_MS);
+    return;
+  }
+  poll();
   if (isAdmin()) loadHousekeeping();
-  clearInterval(timer);
   timer = setInterval(() => { if (host && host.isConnected) poll(); else clearInterval(timer); }, 2000);
+}
+
+/** Another tab of this page (#/requests ↔ #/requests/health). */
+export function onRoute() {
+  if (!host) return;
+  const want = isAdmin() ? tabOfHash(hashNow()) : 'log';
+  if (want === tab) return;
+  tab = want;
+  startTab();
+}
+
+/** The address's hash; '' where there is no address (a unit test's bare DOM). */
+const hashNow = () => (typeof location !== 'undefined' ? location.hash : '');
+
+function openTab(id) {
+  if (typeof location !== 'undefined' && location.hash !== tabHash(id)) location.hash = tabHash(id);   // the shell calls onRoute
+  else { tab = id; startTab(); }
+}
+
+async function pollHealth() {
+  try {
+    const r = await systemHealth();
+    if (r && r.ok) { health = r; healthError = null; } else { healthError = (r && r.message) || 'the core did not answer'; }
+  } catch (e) { healthError = e.message || String(e); }
+  if (host && host.isConnected && tab === 'health') draw();
+}
+
+/** The tab bar, an administrator's: Requests | ElasticPro health (with its level once read). */
+function tabsBar() {
+  return h('nav.subnav.rq-tabs', { 'aria-label': 'Request Centre' },
+    ...REQUEST_TABS.map((t) => h('button', {
+      type: 'button', title: t.label, dataset: { tab: t.id }, 'aria-current': tab === t.id ? 'page' : null,
+      onclick: () => openTab(t.id),
+    }, h('span', t.label),
+    t.id === 'health' && health && health.level && health.level !== 'ok'
+      ? h('i.hl-dot', { class: levelTone(health.level), title: `ElasticPro health: ${levelWord(health.level)}`, 'aria-label': `health ${levelWord(health.level)}` }) : null)));
 }
 
 export function onData() { /* the log is the core's; data events do not change it */ }
@@ -69,6 +147,7 @@ export function onData() { /* the log is the core's; data events do not change i
 /** Leaving the page stops the re-read; nothing is polled for a page nobody is looking at. */
 export function onLeave() {
   clearInterval(timer); timer = null;
+  clearInterval(healthTimer); healthTimer = null;
   // #view is one element for every page, so `host.isConnected` stays true after the page
   // has gone: a read still in flight (the log, the policy, housekeeping) would land on
   // whatever page had replaced this one. Forgetting the host is what makes draw() a no-op.
@@ -163,13 +242,28 @@ const stopped = () => policyKnown() && isPaused(policy) && !(policy.paused.until
 
 function draw() {
   if (!host) return;   // left the page while a read was in flight
+  if (!pageEl) pageEl = h('div.rq-page');
+  if (host.firstChild !== pageEl || host.childNodes.length !== 1) mount(host, pageEl);
+  built.begin();
+  try { mount(pageEl, ...pageKids()); } finally { built.end(); }
+}
+
+/** A box whose children are kept one by one (a strip of tiles). */
+function keptBox(key, tag, kids) {
+  const el = built.get(`${key}:box`, tag, () => h(tag));
+  reconcile(el, built.sameAll(key, kids));
+  return el;
+}
+
+function pageKids() {
   if (!isAdmin()) {
-    mount(host, h('div.rq-page',
+    return built.sameAll('op', [
       h('div.rq-top', stopCard()),
-      h('p.muted.rq-op-note', 'The request log, its figures and housekeeping are an administrator’s.')));
-    return;
+      h('p.muted.rq-op-note', 'The request log, its figures and housekeeping are an administrator’s.')]);
   }
+  if (tab === 'health') return [built.same('tabs', tabsBar()), healthView(health, { error: healthError, cache: built })];
   const rows = requestRows(log, filter);
+  shownRows = rows;
   const inflight = rows.filter((r) => r.inflight).length;
   const perMin = Object.values(requestLoad.clusters || {}).reduce((s, c) => s + (c.perMinute || 0), 0);
   const byCluster = perCluster(log);
@@ -182,13 +276,14 @@ function draw() {
     .map((c) => ({ cluster: c.id, count: 0, inflight: 0, queued: 0, failed: 0, refused: 0, slowestMs: 0 }))];
 
   const select = (key, options, labelOf = (x) => x) => h('select', { onchange: (e) => { filter[key] = e.target.value; draw(); } },
-    ...options.map(([v, l]) => h('option', { value: v, selected: String(filter[key]) === String(v) ? '' : null }, l)));
+    // `selected: ''` is a false property (h() sets properties), which showed the first option after every redraw
+    ...options.map(([v, l]) => h('option', { value: v, selected: String(filter[key]) === String(v) }, l)));
   const bar = h('div.toolbar', { style: { display: 'flex', gap: '8px', alignItems: 'flex-end', flexWrap: 'wrap', marginBottom: '10px' } },
     h('label.field', 'Cluster', select('cluster', [['all', 'All clusters'], ...byCluster.map((c) => [c.cluster, nameOf(c.cluster)])])),
     h('label.field', 'From', select('origin', [['all', 'Anything'], ...originChoices(log).map((o) => [o, o === 'poller' ? 'poller (background)' : originLabel(o)])])),
     h('label.field', 'Result', select('outcome', [['all', 'Any result'], ['inflight', 'In flight'], ['queued', 'Queued (waiting for a slot)'], ['ok', 'OK'], ['http-error', 'HTTP error'], ['failed', 'Failed / timed out'], ['refused', 'Refused by the gate']])),
     h('label.field', 'Slower than', select('slowerThanMs', [[0, 'Any time'], [500, '500 ms'], [2000, '2 s'], [10000, '10 s'], [30000, '30 s']])),
-    h('button.btn.sm', { style: { marginLeft: 'auto' }, onclick: () => download(`elasticpro-requests-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')}.csv`, toCsv(requestCsvRows(rows), CSV_HEADER), 'text/csv') }, 'Export CSV'),
+    h('button.btn.sm', { style: { marginLeft: 'auto' }, onclick: () => download(`elasticpro-requests-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')}.csv`, toCsv(requestCsvRows(shownRows), CSV_HEADER), 'text/csv') }, 'Export CSV'),
     h('button.btn.sm', { onclick: poll }, '↻ Refresh'));
 
   // The gate's figures. From an older core that does not measure them: "—", never 0.
@@ -197,7 +292,7 @@ function draw() {
   const lim = g.limits;
   const sentLast5m = requestLoad.at ? Object.values(requestLoad.clusters || {}).reduce((s, c) => s + (c.last5m || 0), 0) : null;
   const status = requestStatus(logRead ? log : null, { paused: policyKnown() ? stopped() : null, sentLast5m });
-  const tiles = h('div.tiles.rq-tiles',
+  const tiles = keptBox('tiles', 'div.tiles.rq-tiles', [
     statTile('In flight', status.inFlight == null ? '—' : num(status.inFlight), status.inFlight ? 'right now' : 'nothing being sent'),
     statTile('Waiting', g.queued == null ? '—' : num(g.queued),
       g.queued == null ? unknown : g.queued ? `oldest ${dur(g.oldestWaitMs || 0)}${lim ? ` · max ${num(lim.queueMax)}` : ''}` : `for a free slot${lim ? ` · ${num(lim.global)} slots, ${num(lim.perCluster)} per cluster` : ''}`),
@@ -207,14 +302,14 @@ function draw() {
       g.refused == null ? unknown : g.refused ? `${num(g.overloaded)} queue full · ${num(g.queueTimeout)} waited too long` : 'nothing, last 5 min'),
     statTile('Not sent again', g.known ? num(g.sharedOrCached) : '—',
       g.known ? `${num(g.shared)} shared · ${num(g.cacheHits)} from cache` : unknown),
-    statTile('Rate', sentLast5m == null ? '—' : `${perMin.toFixed(1)}/min`, sentLast5m == null ? 'not read yet' : `${num(sentLast5m)} requests, last 5 min`));
+    statTile('Rate', sentLast5m == null ? '—' : `${perMin.toFixed(1)}/min`, sentLast5m == null ? 'not read yet' : `${num(sentLast5m)} requests, last 5 min`)]);
 
   const stateIn = (r) => r.state === 'queued' ? pill('queued', 'grey') : r.state === 'shared' ? pill(`waiting on #${r.leader}`, 'grey') : pill('in flight', 'yellow');
   const trs = rows.slice(0, 500).map((r) => {
     const tag = classTag(r.class);
     const tone = resultTone(r);
     const full = dt(r.startedAt);
-    return h('tr', { class: r.inflight ? 'inflight' : (r.ok ? '' : 'failed') },
+    return built.same(`row:${r.id}`, h('tr', { class: r.inflight ? 'inflight' : (r.ok ? '' : 'failed') },
       h('td.rq-n', { title: full }, clockTime(r.startedAt)),
       h('td.rq-clip', { title: nameOf(r.cluster) + (r.via ? ` via ${r.via}` : '') }, h('b', nameOf(r.cluster)), r.via ? h('div.muted.rq-via', `via ${r.via}`) : null),
       h('td.rq-clip', { title: r.originLabel }, r.originLabel),
@@ -224,31 +319,32 @@ function draw() {
       h('td.rq-n', r.queuedMs ? dur(r.queuedMs) : (r.state === 'queued' ? pill(`${dur(r.elapsedMs)} so far`, 'grey') : '—')),
       h('td.rq-n', r.inflight ? (r.state === 'queued' ? '—' : pill(`${dur(r.elapsedMs)} so far`, 'yellow')) : dur(r.ms)),
       h('td.rq-res', r.inflight ? stateIn(r) : h('span.rq-result', { class: tone }, h('i.rq-rdot'), r.outcome),
-        r.answeredBy ? h('span.pill.grey', { style: { marginLeft: '4px' }, title: 'Answered without sending the cluster another request' }, r.answeredBy) : null));
+        r.answeredBy ? h('span.pill.grey', { style: { marginLeft: '4px' }, title: 'Answered without sending the cluster another request' }, r.answeredBy) : null)));
   });
   const reqTable = rows.length
-    ? table([{ label: 'Time', width: '78px' }, { label: 'Cluster', width: '21%' }, { label: 'From', width: '13%' }, { label: 'Class', width: '88px' },
+    ? keptTable(built, 'rq', [{ label: 'Time', width: '78px' }, { label: 'Cluster', width: '21%' }, { label: 'From', width: '13%' }, { label: 'Class', width: '88px' },
       { label: 'Method', width: '66px' }, 'Path', { label: 'Wait', width: '80px' }, { label: 'Took', width: '88px' }, { label: 'Result', width: '150px' }], trs, {})
     : empty('No requests match — or the core has sent none since it started.');
-  if (rows.length) reqTable.querySelector('table').classList.add('rq-tbl');
+  if (rows.length && !reqTable.querySelector('table.rq-tbl')) reqTable.querySelector('table').classList.add('rq-tbl');
 
-  mount(host, h('div.rq-page',
-    h('div.rq-top', statusCard(status), stopCard()),
-    error ? h('div.banner.err', h('div', h('div.ttl', 'Could not read the request log'), h('div', error))) : null,
-    tiles, limitsRow(lim ? limitChips(log) : null), pushRow(zabbixPushLine(log)), bar,
-    card('Requests', `${num(rows.length)} shown · in flight first, then newest · live while this page is open`, reqTable),
-    h('div', { style: { marginTop: '14px' } },
-      card('Per cluster', 'what the log holds for each cluster',
-        table(['Cluster', 'Automation', 'Requests', 'In flight', 'Queued', 'Failed', 'Refused', 'Slowest'], clusterRows.map((c) => h('tr',
+  const top = (key, node) => built.same(key, node);
+  return [
+    top('tabs', tabsBar()),
+    top('top', h('div.rq-top', statusCard(status), stopCard())),
+    error ? top('error', h('div.banner.err', h('div', h('div.ttl', 'Could not read the request log'), h('div', error)))) : null,
+    tiles, top('limits', limitsRow(lim ? limitChips(log) : null)), pushRow(zabbixPushLine(log)) ? top('push', pushRow(zabbixPushLine(log))) : null, top('bar', bar),
+    keptCard(built, 'requests', 'Requests', `${num(rows.length)} shown · in flight first, then newest · live while this page is open`, reqTable),
+    keptBox('pc', 'div.rq-sp', [keptCard(built, 'per-cluster', 'Per cluster', 'what the log holds for each cluster',
+        keptTable(built, 'per-cluster', ['Cluster', 'Automation', 'Requests', 'In flight', 'Queued', 'Failed', 'Refused', 'Slowest'], clusterRows.map((c) => built.same(`pcrow:${c.cluster}`, h('tr',
           h('td', h('b', nameOf(c.cluster))),
           h('td', automationOf(c.cluster)),
           h('td.num', num(c.count)), h('td.num', num(c.inflight)),
           h('td.num', c.queued ? pill(num(c.queued), 'grey') : '0'),
           h('td.num', c.failed ? pill(num(c.failed), 'red') : '0'),
-          h('td.num', c.refused ? pill(num(c.refused), 'yellow') : '0'), h('td.num', c.count ? dur(c.slowestMs) : '—'))), { emptyText: 'nothing yet' }))),
-    h('div', { style: { marginTop: '14px' } }, gapCard()),
-    h('div', { style: { marginTop: '14px' } }, tasksCard(nameOf)),
-    h('div', { style: { marginTop: '14px' } }, housekeepingCard())));
+          h('td.num', c.refused ? pill(num(c.refused), 'yellow') : '0'), h('td.num', c.count ? dur(c.slowestMs) : '—')))), { emptyText: 'nothing yet' }))]),
+    top('gap', h('div.rq-sp', gapCard())),
+    top('tasks', h('div.rq-sp', tasksCard(nameOf))),
+    top('housekeeping', h('div.rq-sp', housekeepingCard()))];
 }
 
 /**
@@ -487,7 +583,7 @@ async function cancelTask(c, row) {
 function tasksCard(nameOf) {
   const c = taskCluster();
   const picker = h('select', { onchange: (e) => { tasks = { ...tasks, cluster: e.target.value, rows: null, error: null, note: '' }; draw(); } },
-    ...clusters().map((x) => h('option', { value: x.id, selected: c && x.id === c.id ? '' : null }, x.name)));
+    ...clusters().map((x) => h('option', { value: x.id, selected: !!(c && x.id === c.id) }, x.name)));
   const head = h('div', { style: { display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap', marginBottom: '8px' } },
     h('label.field', 'Cluster', picker),
     h('button.btn.sm', { disabled: !c || tasks.busy, onclick: () => readTasks(c), 'data-act': 'read-tasks' }, tasks.busy ? 'Loading\u2026' : 'Read tasks'),

@@ -74,10 +74,10 @@ if (configPath) {
 
 // play: the wall display (docs/PLAY.md). Drawn against whatever core this is — an older one
 // has no PLAY_* messages, and Play must still draw, saying what is missing.
-// reports: one page of six sections (docs/REPORTS.md), each drawn from its own route.
-const REPORT_SECTIONS = ['overview', 'daily', 'capacity', 'measure', 'planning', 'exports'];
+// reports: one page of seven sections (docs/REPORTS.md), each drawn from its own route.
+const REPORT_SECTIONS = ['overview', 'daily', 'hosts', 'capacity', 'measure', 'planning', 'exports'];
 const PAGES = ['alerts', 'overview', 'indices', 'shards', 'logs', 'console', 'snapshots',
-  ...REPORT_SECTIONS.map((s) => `reports/${s}`), 'automation', 'requests', 'accounts', 'settings', 'play'];
+  ...REPORT_SECTIONS.map((s) => `reports/${s}`), 'automation', 'requests', 'requests/health', 'accounts', 'settings', 'play'];
 const view = window.document.createElement('div');
 window.document.body.append(view);
 
@@ -92,7 +92,13 @@ for (const name of PAGES) {
     await new Promise((r) => setTimeout(r, section ? 900 : 350));
     if (mod.onData) mod.onData();
     await new Promise((r) => setTimeout(r, 150));
-    if (section) {
+    // Requests › ElasticPro health (docs/HEALTH.md): drawn from the bridge's own SYSTEM_HEALTH.
+    if (page === 'requests' && section === 'health') {
+      const tab = view.querySelector('nav.rq-tabs button[aria-current="page"]');
+      if (!tab || tab.dataset.tab !== 'health') errors.push('requests/health: the tab bar does not mark ElasticPro health as the one shown');
+      if (!view.querySelector('.hl-strip .hl-chip[data-part="core"]')) errors.push('requests/health: no status strip with the core');
+      if (!view.querySelector('tr[data-check="core.memory"]')) errors.push('requests/health: no memory check');
+    } else if (section) {
       const on = view.querySelector('.rp-nav a[aria-current="page"]');
       if (!on || on.dataset.section !== section) errors.push(`${name}: the section nav does not mark ${section} as the one shown`);
     }

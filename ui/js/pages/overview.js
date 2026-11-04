@@ -300,10 +300,25 @@ function searchBox(all, shown) {
         onclick: () => { ui.dir = -ui.dir; draw(); } }, ui.sort === 'health' ? (ui.dir === -1 ? '\u25bc worst first' : '\u25b2 best first') : ui.dir === 1 ? '\u25b2 asc' : '\u25bc desc'),
       onlySel,
       typeSel,
-      h('span.muted', { style: { fontSize: '11.5px', whiteSpace: 'nowrap' } },
-        shown.length === all.length ? `${all.length} cluster${all.length === 1 ? '' : 's'}` : `${shown.length} of ${all.length} shown`),
-      filtered() ? h('button.btn.sm.ghost', { type: 'button', title: 'Clear the search, sort and filter',
-        onclick: () => { resetFilter(); draw(); } }, 'Clear') : null));
+      h('span.muted.cl-shown', { style: { fontSize: '11.5px', whiteSpace: 'nowrap' } }, shownText(all, shown)),
+      h('button.btn.sm.ghost.cl-clear', { type: 'button', title: 'Clear the search, sort and filter', hidden: !filtered(),
+        onclick: () => { resetFilter(); draw(); } }, 'Clear')));
+}
+
+const shownText = (all, shown) => (shown.length === all.length ? `${all.length} cluster${all.length === 1 ? '' : 's'}` : `${shown.length} of ${all.length} shown`);
+
+/**
+ * What typing changes in the box — the count shown and whether Clear is offered — changed in
+ * place. The box itself is rebuilt only with the controls' own choices: rebuilt on the first
+ * character typed (the box was keyed on the text and the count), it took the field being typed
+ * into with it, and the rest of the search went to the page.
+ */
+function paintSearchBox(box, all, shown) {
+  const t = box.querySelector('.cl-shown');
+  const text = shownText(all, shown);
+  if (t && t.textContent !== text) t.textContent = text;
+  const clear = box.querySelector('.cl-clear');
+  if (clear && clear.hidden !== !filtered()) clear.hidden = !filtered();
 }
 
 /**
@@ -673,8 +688,9 @@ function summaryCard(rows, all) {
   // …and with who is looking: "+ Add cluster" is in the shell, and only for a role that may.
   const shell = built.get('summary', `${isSnapshotMode()}|${mayEdit()}`, () => buildCard());
   const counts = healthCounts(all, (r) => healthState(r.d));
-  const box = built.get('searchbox', [ui.search, filtered(), !!ui.text, ui.sort, ui.dir, ui.only, ui.type, clusterKindRev(), all.map((r) => clusterKind(r.c).type).join(','), all.length, rows.length,
+  const box = built.get('searchbox', [ui.search || filtered(), ui.sort, ui.dir, ui.only, ui.type, clusterKindRev(), all.map((r) => clusterKind(r.c).type).join(','), all.length,
     counts.green, counts.yellow, counts.red, counts.unreachable].join('|'), () => searchBox(all, rows));
+  paintSearchBox(box, all, rows);
   const boxAt = shell.querySelector('.cl-searchbox');
   if (boxAt !== box) boxAt.replaceWith(box);
   paintAges();

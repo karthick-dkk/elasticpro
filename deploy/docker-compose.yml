@@ -8,6 +8,10 @@
 # authentication is optional: make-htpasswd.sh and the htpasswd mount are still here so
 # re-enabling auth_basic in nginx.conf is a two-line change, not a rebuild.
 # The core is reachable ONLY through nginx. Never publish port 8765.
+# The report worker (docs/WORKER.md) is the same image in role `worker`: the daily volume
+# collection, the report queue and schedules, the hosts collection, report builds and mail run
+# there, in their own memory and CPU limit, so a report can never slow down or take down the
+# monitoring. It listens on 8766 inside the compose network only; nginx never routes to it.
 services:
   core:
     # Defaults to a locally built image, so `docker compose up --build` works on a clone
@@ -27,6 +31,10 @@ services:
     group_add:
       - "${ELASTICPRO_GID:-1000}"
     environment:
+      # docs/WORKER.md: people, the monitoring and every setting; report runs, collections and
+      # mail go to the worker service below. A compose file without this line (one from
+      # before 0.3.54) runs everything in the core, as before.
+      ELASTICPRO_ROLE: core
       ELASTICPRO_BIND: 0.0.0.0
       ELASTICPRO_DATA_DIR: /app/data
       ELASTICPRO_CONFIG: /app/config/config_cluster.json
@@ -92,6 +100,59 @@ services:
       driver: json-file
       options: { max-size: "50m", max-file: "10" }
 
+  # The report worker (docs/WORKER.md): the same image as the core, in role `worker`. It reads
+  # the clusters, credentials, SSH keys, config and config.txt from the same mounts (read-only
+  # except the data volume, which it shares with the core: the core reads the jobs, reports,
+  # volume record and its heartbeat from there). Down or restarting, monitoring is untouched:
+  # the core answers report actions with `worker_unavailable` until it is back, and scheduled
+  # work picks up from jobs.json and the collection checkpoints.
+  worker:
+    image: ${ELASTICPRO_IMAGE:-elasticpro-core:latest}
+    # The same build as the core (one image, one tag): `docker compose up --build` builds it
+    # once — the second is a cache hit — and never tries to pull a locally built tag.
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    restart: unless-stopped
+    group_add:
+      - "${ELASTICPRO_GID:-1000}"
+    environment:
+      ELASTICPRO_ROLE: worker
+      ELASTICPRO_BIND: 0.0.0.0
+      ELASTICPRO_DATA_DIR: /app/data
+      ELASTICPRO_CONFIG: /app/config/config_cluster.json
+      ELASTICPRO_SETTINGS: /app/config.txt
+      RUST_LOG: info,audit=info
+      # The schedules and the 06:00 hosts collection run in this container's local time: the
+      # same TZ as the core.
+      TZ: ${TZ:-UTC}
+      # The worker's own request gate (docs/WORKER.md): every request Background, never shared
+      # with the core's gate that serves people and the health poll.
+      ELASTICPRO_WORKER_GATE_CONCURRENCY: ${ELASTICPRO_WORKER_GATE_CONCURRENCY:-16}
+      ELASTICPRO_WORKER_GATE_PER_CLUSTER: ${ELASTICPRO_WORKER_GATE_PER_CLUSTER:-4}
+      ELASTICPRO_WORKER_GATE_PER_JUMP_HOST: ${ELASTICPRO_WORKER_GATE_PER_JUMP_HOST:-4}
+    volumes:
+      - ./config:/app/config:ro
+      - ./config.txt:/app/config.txt:ro
+      - core-data:/app/data
+      - ${SSH_KEYS_DIR:-./ssh}:/app/ssh:ro
+      - ./secrets/redis:/run/elasticpro-secrets:ro
+    # Its own limits: a report that grows can only use these.
+    mem_limit: ${ELASTICPRO_WORKER_MEM_LIMIT:-1g}
+    cpus: ${ELASTICPRO_WORKER_CPUS:-1.0}
+    # The image's own healthcheck asks the core's port (8765), which the worker does not open.
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null -T 4 http://127.0.0.1:8766/health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    # No `ports:`: 8766 is reachable inside the compose network only, and nginx does not route it.
+    networks: [internal]
+    logging:
+      driver: json-file
+      options: { max-size: "50m", max-file: "10" }
+
   # Optional L2 cache shared across restarts (and, if you ever run more than the one
   # supported core replica, across replicas). The core works fully without it — the disk
   # cache under $ELASTICPRO_DATA_DIR/cache survives a core restart on its own; Redis mainly
@@ -105,7 +166,7 @@ services:
   redis:
     # One `apk upgrade` over redis:8-alpine, which clears the last zlib advisory.
     # Pulled rather than built, for the reason given on nginx above.
-    image: ${ELASTICPRO_REDIS_IMAGE:-karthickdk02/elasticpro-redis:0.3.53}
+    image: ${ELASTICPRO_REDIS_IMAGE:-karthickdk02/elasticpro-redis:0.3.54}
     restart: unless-stopped
     profiles: ["cache"]
     volumes:
@@ -137,7 +198,7 @@ services:
     # inside a build container, and on a host whose Docker bridge could not resolve DNS the
     # install died there. Build it yourself with:
     #   docker build -t elasticpro-nginx:local -f images/nginx.Dockerfile images
-    image: ${ELASTICPRO_NGINX_IMAGE:-karthickdk02/elasticpro-nginx:0.3.53}
+    image: ${ELASTICPRO_NGINX_IMAGE:-karthickdk02/elasticpro-nginx:0.3.54}
     restart: unless-stopped
     depends_on:
       core:
@@ -176,7 +237,7 @@ services:
     # and flattens the result so the old binary is not left behind in a lower layer.
     # PostgreSQL itself is untouched and still 16.15. Pulled rather than built, for the
     # reason given on nginx above.
-    image: ${ELASTICPRO_DB_IMAGE:-karthickdk02/elasticpro-postgres:0.3.53}
+    image: ${ELASTICPRO_DB_IMAGE:-karthickdk02/elasticpro-postgres:0.3.54}
     restart: unless-stopped
     environment:
       POSTGRES_DB: elasticpro

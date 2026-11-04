@@ -63,8 +63,28 @@ Changes are read at start: `deploy/deploy.sh --apply-config` restarts the core.
 | `UI_READ_ONLY` | the core's read-only guard, instead of what a browser sends in PRIME |
 | `UI_VOLUME_*` (13 keys) | the daily volume record's settings, over `defaults.volume` and every cluster override (docs/VOLUME.md); also in `managedDefaults`, below. `UI_VOLUME_INDEX_FORMAT` must contain `*` and `YYYY.MM.DD` once; `UI_VOLUME_COLLECT_AT` is `HH:MM` (00:00-23:59) in the core's local time — `TZ` in `deploy/.env`, UTC when unset; `UI_VOLUME_SIZE_BASIS` is `primary`, `total` or `eventSize`; `UI_VOLUME_TOP_VALUES` 5-100; `UI_VOLUME_KEEP_MONTHS` 1-36; the field lists are comma-separated |
 | `UI_SMTP_HOST`, `UI_SMTP_PORT` (1-65535), `UI_SMTP_SECURITY` (`starttls`, `tls`, `none`), `UI_SMTP_USER`, `UI_SMTP_PASSWORD_FILE`, `UI_SMTP_FROM` | the mail server for the volume report (docs/VOLUME.md "Reports and mail"), over `<data>/mail.json` field by field; named in `managed` of `MAIL_SETTINGS_GET`, not in PING. The password file is a path inside the core container, read when a mail is sent, and needs `UI_SMTP_HOST` (refused without it, by the core and by deploy.sh): while it is set, port, security and user come from config.txt (or 587/starttls) and are locked on the page, so that password goes only to a server config.txt names; `none` security is accepted only without a password. Server settings, not UI defaults |
-| `UI_REPORT_TO` (comma-separated addresses), `UI_REPORT_SCHEDULE` (`monthly`, `weekly`, `daily`, `manual`), `UI_REPORT_AT` (`HH:MM`, server local time; the periods themselves are UTC dates), `UI_REPORT_SHEETS` (`daily`, `monthly`, `breakdown`, comma-separated) | the mailed volume report, over `<data>/report-schedule.json`; named in `managed` of `REPORT_SCHEDULE_GET`, not in PING |
+| `UI_REPORT_TO` (comma-separated addresses), `UI_REPORT_SCHEDULE` (`monthly`, `weekly`, `daily`, `manual`), `UI_REPORT_AT` (`HH:MM`, server local time; the periods themselves are UTC dates), `UI_REPORT_SHEETS` (`daily`, `monthly`, `breakdown`, comma-separated) | the mailed volume report, over `<data>/report-schedule.json` (its `volume` entry); named in `managed` of `REPORT_SCHEDULE_GET`, not in PING |
+| `UI_REPORT_INDICES_TO`, `UI_REPORT_INDICES_SCHEDULE`, `UI_REPORT_INDICES_AT`, `UI_REPORT_HOSTS_TO`, `UI_REPORT_HOSTS_SCHEDULE`, `UI_REPORT_HOSTS_AT` (same forms as `UI_REPORT_*`) | the indices report's and volume by host's schedules (docs/REPORT-TYPES.md), the `indices` and `hosts` entries of `report-schedule.json`; each locks its field, named in `managed` of `REPORT_SCHEDULE_GET {kind}`. `UI_REPORT_HOSTS_AT` is also when volume by host is collected, every day, for every cluster |
+| `UI_REPORT_HOSTS_FIELDS` (comma-separated field names, at most 40), `UI_REPORT_HOSTS_MAX_PAGES` (1-100000, default 2000), `UI_REPORT_HOSTS_KEEP_MONTHS` (1-13, default 3), `UI_REPORT_HOSTS_REQUEST_TIMEOUT_S` (10-600, default 120), `UI_REPORT_HOSTS_PAGE_PAUSE_MS` (0-10000, default 200), `UI_REPORT_HOSTS_MAX_MINUTES` (5-1440, default 120), `UI_REPORT_CLIENT_ID_FIELD` (default `ClientID`), `UI_REPORT_BRANCH_FIELD` (default `branch`), `UI_REPORT_BRANCH_DEFAULT` (default `DC`, at most 60 characters) | volume by host's collection and fill, read where used (`report::hosts::HostsConfig`); shown in `collection` of `REPORT_SCHEDULE_GET {kind: "hosts"}` |
+| `UI_REPORT_MAIL_MAX_MB` (1-100, default 20) | the largest report file attached to a mail, every kind; a larger one is not attached and the mail says it is in Reports › Exports |
+| `UI_REPORT_CONCURRENCY_START` (1-8, default 2), `UI_REPORT_CONCURRENCY_MAX` (1-8, default 4; kept one under `ES_PER_CLUSTER`), `UI_REPORT_PAGE_TARGET_MS` (100-120000, default 5000), `UI_REPORT_CLUSTERS_AT_ONCE` (1-8, default 4) | how hard the indices and hosts reports push a cluster (docs/REPORT-TYPES.md "Concurrency") |
+| `REPORT_CPU_SLOTS` (1-2, default 1) | blocking threads report files are built on, never the runtime's workers (docs/REPORT-TYPES.md "Isolation and failure") |
 | `UI_*` (the rest) | `managedDefaults` in the PING reply, below |
+
+### The report worker (environment only, docs/WORKER.md)
+
+Set in `deploy/docker-compose.yml` / `deploy/.env`, not in config.txt (they are per container):
+
+| Variable | Default | What it does |
+| --- | --- | --- |
+| `ELASTICPRO_ROLE` | `all` | `core`: people, the monitoring, every setting — report runs, sends, stops and collections are forwarded to the worker; `worker`: the daily volume collection, the report timer and queue, the hosts collection, report builds and mail, on an internal port only; `all` (unset, or any other word): everything in one process, as before 0.3.54. The shipped compose file runs `core` + `worker`. |
+| `ELASTICPRO_WORKER_URL` | `http://worker:8766` | where the core (role `core`) reaches the worker |
+| `ELASTICPRO_WORKER_PORT` | `8766` | the worker's internal port (`/run`, `/send-now`, `/stop`, `/queue`, `/health`) |
+| `ELASTICPRO_WORKER_GATE_CONCURRENCY` | `16` | the worker's own gate: requests at once, every cluster together (all Background) |
+| `ELASTICPRO_WORKER_GATE_PER_CLUSTER` | `4` | per cluster; in the worker the report controller's ceiling may use all of it |
+| `ELASTICPRO_WORKER_GATE_PER_JUMP_HOST` | `4` | per jump host |
+| `ELASTICPRO_WORKER_MEM_LIMIT` | `1g` | compose: the worker container's memory cap (its memory budget, reports share included, is sized from it) |
+| `ELASTICPRO_WORKER_CPUS` | `1.0` | compose: the worker container's CPU cap |
 
 The environment variables are set once, at the top of `main` in the bridge binary, before the
 async runtime starts and before anything reads the environment (`std::env::set_var` is only

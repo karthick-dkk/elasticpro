@@ -131,8 +131,9 @@ impl Default for VolumeSettings {
             forwarder: list(&["fwd_tag", "fwdtag", "observer.name"]),
             source_host: list(&["src_hostname", "host.name"]),
             source_ip: list(&["src_ip", "source.ip", "host.ip"]),
-            event_size: list(&["event_logsize"]),
-            sub_size: list(&["sub_size"]),
+            // The operators' own scripts' names too (docs/REPORT-TYPES.md "Collection").
+            event_size: list(&["event_logsize", "event_log_size"]),
+            sub_size: list(&["sub_size", "fwd_log_size"]),
             extra: Extra { name: "Dataset".into(), fields: list(&["event.dataset", "log_type"]) },
             size_basis: SizeBasis::Primary,
             top_values: 25,

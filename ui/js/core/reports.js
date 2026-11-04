@@ -58,6 +58,9 @@ async function send(msg) {
   return res || { ok: false, kind: 'worker_error', message: 'the core did not answer' };
 }
 
+/** The one sender (core/report-types.js sends the kind-aware messages through it). */
+export { send as reportSend };
+
 /* -------------------------------- the messages -------------------------------- */
 
 /** One job per cluster. `period`: a preset ("month:2026-10", "yesterday", "last7") or {from, to}. */
@@ -248,11 +251,16 @@ export function queuePosition(job, jobs) {
 /** The client a job is for: its cluster, or "Mailed report" for the scheduled one (clusterId "*"). */
 export function jobClient(job) {
   if (!job) return '';
+  // Which report (0.3.54): every job carries `reportKind`; volume is the one this list always had.
+  const rk = job.reportKind || job.report;
+  const kindWord = rk === 'indices' ? 'Indices report' : rk === 'hosts' ? 'Volume by host' : null;
   if (job.kind === 'mailed' || job.clusterId === '*') {
     const n = Array.isArray(job.clusterIds) ? job.clusterIds.length : 0;
-    return n ? `Mailed report · ${n} cluster${n === 1 ? '' : 's'}` : 'Mailed report';
+    const what = kindWord ? `Mailed ${kindWord.replace(/^./, (c) => c.toLowerCase())}` : 'Mailed report';
+    return n ? `${what} · ${n} cluster${n === 1 ? '' : 's'}` : what;
   }
-  return job.clusterName || job.clusterId || '';
+  const who = job.clusterName || job.clusterId || '';
+  return kindWord ? `${kindWord} · ${who}` : who;
 }
 
 /** What a job row says about where it is. */
@@ -308,6 +316,10 @@ export function periodLabel(p, now = Date.now()) {
   if (m) return m[1] === utcDay(now).slice(0, 7) ? `${monthName(m[1])} (so far)` : monthName(m[1]);
   if (p === 'yesterday') return 'Yesterday';
   if (p === 'last7') return 'Last 7 days';
+  // The presets the core takes since 0.3.54 (docs/REPORT-TYPES.md "Messages").
+  if (p === 'monthSoFar') return 'Month so far';
+  if (p === 'previousWeek') return 'Previous week';
+  if (p === 'previousMonth') return 'Previous month';
   return String(p);
 }
 
@@ -322,11 +334,22 @@ export function nextPeriodOf(sched) {
 }
 
 /** Kinds whose message is the whole answer: the core says how many more fit, or when. */
-const BOUND_KINDS = new Set(['too_many_jobs', 'too_many_mails']);
+const BOUND_KINDS = new Set(['too_many_jobs', 'too_many_mails', 'too_many_clusters', 'worker_unavailable', 'worker_version']);
+
+/**
+ * The report worker cannot take the work now (0.3.54, docs/WORKER.md): not running, or a
+ * different version from the core. Amber, not red — nothing is wrong with the ask, and
+ * monitoring is not affected.
+ */
+export const isWorkerDown = (res) => !!res && res.ok === false && (res.kind === 'worker_unavailable' || res.kind === 'worker_version');
+
+/** The toast level for a refusal: amber for the worker's, red for the rest. */
+export const failLevel = (res) => (isWorkerDown(res) ? 'warn' : 'err');
 
 /**
  * A refused REPORT_RUN / REPORT_SEND_NOW in words. A bound the core enforces (too many
- * jobs, too many mails) is shown as the core says it; anything else gets `prefix`.
+ * jobs, too many mails, the 5-cluster cap) and the worker's refusals are shown as the core
+ * says them; anything else gets `prefix`.
  */
 export function failText(res, prefix) {
   const msg = (res && (res.message || res.kind)) || 'refused';

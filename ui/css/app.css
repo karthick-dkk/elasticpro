@@ -486,6 +486,7 @@ table.tbl tr.kv td.v { font-size: 12px; word-break: break-all; }
 /* The answer first (status + the Stop all traffic card), the limits as chips, then a table
    to scan: every column left-aligned, a path on one line with an ellipsis. */
 .rq-top { display: flex; flex-wrap: wrap; gap: 14px; align-items: stretch; margin-bottom: 12px; }
+.rq-sp { margin-top: 14px; }
 .rq-status, .rq-stop { background: var(--surface-1); border: 1px solid var(--border); border-radius: var(--radius); padding: 14px 16px; min-width: 0; }
 .rq-status { flex: 999 1 480px; display: flex; flex-direction: column; gap: 6px; }
 .rq-stop { flex: 1 1 400px; display: flex; flex-direction: column; gap: 8px; border-color: color-mix(in srgb, var(--critical) 35%, var(--border)); }
@@ -530,6 +531,45 @@ table.rq-tbl tr.inflight td { background: var(--accent-soft); }
 .rq-rdot { width: 8px; height: 8px; border-radius: 50%; background: var(--good); flex: none; }
 .rq-result.warn { color: var(--warning-ink); } .rq-result.warn .rq-rdot { background: var(--warning); }
 .rq-result.err { color: var(--critical-ink); font-weight: 600; } .rq-result.err .rq-rdot { background: var(--critical); }
+
+/* Request Centre tabs, and Requests › ElasticPro health (docs/HEALTH.md). Compact: 32 px rows,
+   existing tokens only. */
+.rq-tabs { margin-bottom: 10px; }
+.hl-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--text-muted); flex: none; }
+.hl-dot.green { background: var(--good); }
+.hl-dot.yellow { background: var(--warning); }
+.hl-dot.red { background: var(--critical); }
+.nav-health-dot { margin-left: 4px; }
+.hl-page { display: grid; gap: 12px; }
+.hl-head { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; font-size: 12.5px; }
+.hl-strip { display: flex; flex-wrap: wrap; gap: 6px; }
+.hl-chip { display: inline-flex; align-items: center; gap: 6px; min-height: 32px; padding: 0 10px; max-width: 100%;
+  border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface-1); font-size: 12px; }
+.hl-chip-t { color: var(--text-secondary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 420px; }
+.hl-chip[data-level="warn"] { border-color: color-mix(in srgb, var(--warning) 50%, transparent); background: var(--warning-bg); }
+.hl-chip[data-level="bad"] { border-color: color-mix(in srgb, var(--critical) 45%, transparent); background: var(--critical-bg); }
+.hl-page table.tbl td { vertical-align: top; }
+.hl-row-warn td { background: var(--warning-bg); }
+.hl-row-bad td { background: var(--critical-bg); }
+.hl-fix { margin-top: 2px; color: var(--text-primary); }
+.hl-sub { font-size: 11.5px; color: var(--text-secondary); margin-top: 2px; }
+.hl-note { font-size: 11.5px; margin: 6px 0 0; }
+.hl-h3 { font-size: 12px; margin: 10px 0 4px; text-transform: uppercase; letter-spacing: .06em; color: var(--text-muted); }
+.hl-thresholds { margin-top: 8px; }
+.hl-page details > summary { cursor: pointer; font-size: 12px; color: var(--text-secondary); padding: 6px 0; }
+.hl-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 420px), 1fr)); gap: 12px; align-items: start; }
+.hl-bar { height: 8px; border-radius: 4px; background: var(--surface-3); overflow: hidden; min-width: 80px; }
+.hl-bar > i { display: block; height: 100%; border-radius: 4px; background: var(--good); }
+.hl-bar.warn > i { background: var(--warning); }
+.hl-bar.bad > i { background: var(--critical); }
+.hl-bar.unknown > i { width: 0; }
+.hl-figs { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 8px; }
+.hl-fig .k, .hl-spark .k { font-size: 10.5px; text-transform: uppercase; letter-spacing: .06em; color: var(--text-muted); }
+.hl-fig .v { font-size: 16px; font-weight: 640; font-variant-numeric: tabular-nums; }
+.hl-fig .d, .hl-spark .d { font-size: 11.5px; color: var(--text-secondary); }
+.hl-sparks { display: flex; flex-wrap: wrap; gap: 16px; }
+.hl-spark svg { display: block; max-width: 100%; }
+.hl-spark-empty { height: 28px; font-size: 11.5px; color: var(--text-muted); display: flex; align-items: center; }
 
 /* ------------------------- Clusters page summary table ---------------------- */
 /* The table is part of the page: every row is in it and the page scrolls. It used to sit in
@@ -1689,6 +1729,14 @@ tr.vs-special td:first-child { font-style: italic; color: var(--text-secondary);
 .rj-adm { font-size: 11px; }
 .rj-sub { grid-column: 1 / -1; font-size: 11.5px; overflow-wrap: anywhere; padding-bottom: 2px; }
 .rj-warn { color: var(--warning-ink); }
+/* An indices / hosts job's clusters (0.3.54): one dense line each, under the job's row. */
+.rj-clusters { display: grid; gap: 0; padding-left: 10px; color: var(--text-muted); }
+.rj-cl { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; line-height: 17px; }
+.rj-cl b { color: var(--text-primary); font-weight: 600; }
+.rj-cl.rj-warn, .rj-cl.rj-warn b { color: var(--warning-ink); white-space: normal; }
+.rt-worker { font-size: 11.5px; }
+.hv-days { margin: 0 0 6px; font-size: 12px; }
+.hv-inc { color: var(--warning-ink); font-size: 10.5px; margin-left: 4px; }
 .rj-acts { display: flex; gap: 6px; justify-content: flex-end; }
 /* Config › Volume fields: Volume report by mail, Mail server (SMTP) */
 .rm-panels { display: grid; gap: 12px; }
@@ -2143,3 +2191,18 @@ button.pn-link:hover { text-decoration: underline; }
 .ix-views { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin-bottom: 10px; }
 .ix-moved { color: var(--text-secondary); font-size: 12.5px; }
 #rp-cap-msg:empty { display: none; }
+/* Reports: report types (schedule + Run now) and Volume by host (0.3.54) */
+.rt { display: grid; gap: 8px; }
+.rt-tabs { justify-self: start; }
+.rt-sizes { font-size: 12px; }
+.rt-body { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 10px 20px; align-items: start; }
+.rt-sched .rm-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.rt-sched label.field { display: grid; gap: 3px; font-size: 11px; color: var(--text-muted); }
+.hv { display: grid; gap: 8px; }
+.hv-bar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.hv-bar input[type="search"] { min-width: 260px; height: 28px; }
+.hv-picker label.field { display: flex; align-items: center; gap: 6px; }
+.hv-sort { font: inherit; font-weight: 600; color: inherit; background: none; border: 0; padding: 0; cursor: pointer; text-align: inherit; }
+.hv-tbl tr.hv-totals th, .hv-tbl tr.hv-totals td { font-weight: 700; border-top: 2px solid var(--border); }
+.hv-pager { display: flex; align-items: center; gap: 8px; justify-content: flex-end; font-size: 12px; }
+.rm-cfg td { padding: 3px 8px; font-size: 12px; }

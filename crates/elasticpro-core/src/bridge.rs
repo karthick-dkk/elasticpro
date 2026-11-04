@@ -22,6 +22,11 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+/// SYSTEM_HEALTH and the minute task (docs/HEALTH.md); a child module so it reads what the core
+/// holds without widening any field.
+mod system_health;
+pub(crate) mod worker_api;
+
 struct Primed {
     clusters: HashMap<String, ClusterSpec>,
     read_only: bool,
@@ -203,7 +208,7 @@ pub struct Core {
     /// The fleet cache and its poller. See `fleet`.
     pub(crate) fleet: crate::fleet::Fleet,
     /// Every request to Elasticsearch waits here for a slot. See `gate`.
-    gate: Arc<crate::gate::Gate>,
+    pub(crate) gate: Arc<crate::gate::Gate>,
     /// The gate's limits, the read cache, the response caps and the task reaper.
     req_cfg: RwLock<crate::gate::RequestConfig>,
     /// A person's reads, kept for a few seconds; and the ones on their way, shared.
@@ -244,6 +249,14 @@ pub struct Core {
     pub(crate) play: crate::play::Play,
     /// The history store: its settings, its queue and what it last did. See `history_store`.
     pub(crate) history_store: crate::history_store::HistoryStore,
+    /// ElasticPro's own health: message timing, the self monitor and its ring, what the minute
+    /// task holds. See `health` and `system_health`.
+    pub(crate) health: crate::health::Health,
+    /// What this process is (docs/WORKER.md): `core`, `worker` or `all`. Fixed at start.
+    pub(crate) role: crate::worker::Role,
+    /// The other side of the core/worker split: the token, what is watched for reloads, the
+    /// worker's requests ring. See `worker_api`.
+    pub(crate) worker: worker_api::WorkerSide,
 }
 
 /// What the last Zabbix sync found. The specs carry credentials and never leave the core;
@@ -455,11 +468,16 @@ pub fn opaque_id(instance: &str, origin: &str, cluster: &str, id: u64) -> String
 /// The file holding this install's instance id between runs: `{current, clusters}`.
 const INSTANCE_FILE: &str = "instance.json";
 
+/// The worker keeps its own instance file: the core's records the core's searches.
+fn instance_file(role: crate::worker::Role) -> &'static str {
+    if role == crate::worker::Role::Worker { "instance-worker.json" } else { INSTANCE_FILE }
+}
+
 /// This run's instance id, the last run's, and the clusters the last run still had reads
 /// out on. The file is rewritten with the new id at once.
-fn instance_ids(data_dir: Option<&std::path::Path>) -> (String, Option<String>, Vec<String>) {
+fn instance_ids(data_dir: Option<&std::path::Path>, role: crate::worker::Role) -> (String, Option<String>, Vec<String>) {
     let current = crate::auth::random_hex(4);
-    let Some(path) = data_dir.map(|d| d.join(INSTANCE_FILE)) else { return (current, None, vec![]) };
+    let Some(path) = data_dir.map(|d| d.join(instance_file(role))) else { return (current, None, vec![]) };
     let before: Value = std::fs::read_to_string(&path).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or(Value::Null);
     let previous = before.get("current").and_then(Value::as_str).filter(|p| crate::tasks::clean(p) == *p && !p.is_empty()).map(String::from);
     let clusters: Vec<String> = before.get("clusters").and_then(Value::as_array).into_iter().flatten()
@@ -642,16 +660,32 @@ impl Core {
     #[doc(hidden)]
     pub fn new_with_server_zbx(data_dir: Option<PathBuf>, edition: Edition, rounds: u32,
                                server: crate::zbx_link::ServerZbx) -> Arc<Core> {
+        Core::new_full(data_dir, edition, rounds, server, crate::worker::Role::from_env())
+    }
+
+    /// A core in a given role (docs/WORKER.md) rather than `ELASTICPRO_ROLE`'s. Tests only: the
+    /// environment is one per process.
+    #[doc(hidden)]
+    pub fn new_for_role(data_dir: Option<PathBuf>, edition: Edition, rounds: u32, role: crate::worker::Role) -> Arc<Core> {
+        let server = if edition == Edition::Hosted { crate::zbx_link::ServerZbx::from_env() } else { Default::default() };
+        Core::new_full(data_dir, edition, rounds, server, role)
+    }
+
+    fn new_full(data_dir: Option<PathBuf>, edition: Edition, rounds: u32,
+                server: crate::zbx_link::ServerZbx, role: crate::worker::Role) -> Arc<Core> {
+        // The report worker serves nobody: it keeps no accounts, sessions or tokens, records no
+        // activity and never makes the first account (the core does, once).
+        let batch_only = role == crate::worker::Role::Worker;
         let pins = PinStore::open(data_dir.as_ref().map(|d| d.join("pins.json")));
         // Portable keeps no accounts file at all, even if a data dir exists.
         let auth_path = |name: &str| {
-            data_dir.as_ref().filter(|_| edition.uses_accounts()).map(|d| d.join(name))
+            data_dir.as_ref().filter(|_| edition.uses_accounts() && !batch_only).map(|d| d.join(name))
         };
         let users = UserStore::open_with_rounds(auth_path("users.json"), rounds);
         // A fresh install gets the first account rather than an empty state and a
         // bootstrap screen. It opens with the shipped password until the administrator
         // changes it, and every start it still does says so.
-        if edition.uses_accounts() {
+        if edition.uses_accounts() && !batch_only {
             let override_file = std::env::var_os(auth::INITIAL_PASSWORD_ENV)
                 .filter(|v| !v.is_empty())
                 .map(PathBuf::from);
@@ -701,9 +735,16 @@ impl Core {
         let data_dir_for_volume = data_dir.clone();
         let data_dir_for_reports = data_dir.clone();
         let data_dir_for_history = data_dir.clone();
-        let activity = crate::activity::ActivityLog::new(crate::activity::ActivityConfig::from_env(data_dir.as_deref(), edition));
-        let (instance, previous_instance, restart_suspects) = instance_ids(data_dir.as_deref());
-        let req_cfg = crate::gate::config().clone();
+        let data_dir_for_health = data_dir.clone();
+        let data_dir_for_worker = data_dir.clone();
+        let activity = crate::activity::ActivityLog::new(crate::activity::ActivityConfig::from_env(
+            data_dir.as_deref().filter(|_| !batch_only), edition));
+        let (instance, previous_instance, restart_suspects) = instance_ids(data_dir.as_deref(), role);
+        let mut req_cfg = crate::gate::config().clone();
+        // The worker's own gate: its caps (ELASTICPRO_WORKER_GATE_*), every request Background.
+        if batch_only {
+            req_cfg.limits = crate::worker::worker_limits(&req_cfg.limits, |k| std::env::var(k).ok());
+        }
         let play = crate::play::Play::open(data_dir.as_deref(), edition);
         Arc::new(Core {
             edition,
@@ -761,9 +802,12 @@ impl Core {
             housekeeping: crate::housekeeping::Housekeeping::from_env(),
             zbx_push: parking_lot::Mutex::new(crate::zbx_push::PushStatus::default()),
             volume: crate::volume::Volume::open(data_dir_for_volume.as_deref()),
-            reports: crate::report::Reports::open(data_dir_for_reports.as_deref()),
+            reports: crate::report::Reports::open(data_dir_for_reports.as_deref(), role.runs_batch()),
             play,
             history_store: crate::history_store::HistoryStore::open(data_dir_for_history.as_deref(), hosted),
+            health: crate::health::Health::with_role(data_dir_for_health.as_deref(), crate::health::Sampler::default(), role.as_str()),
+            role,
+            worker: worker_api::WorkerSide::new(data_dir_for_worker.as_deref(), role),
         })
     }
 
@@ -805,7 +849,8 @@ impl Core {
             Ok(v) => {
                 // A primed.json written before 0.3.42 carries credentials in the clear: they are
                 // kept encrypted now, and the file is rewritten without them by the prime below.
-                let moved = self.keep_offered_credentials(&v, "primed.json");
+                // cluster-secrets.json is the core's too: only the core moves old credentials into it.
+                let moved = if self.role == crate::worker::Role::Worker { 0 } else { self.keep_offered_credentials(&v, "primed.json") };
                 if moved > 0 {
                     tracing::warn!(moved, "primed.json held credentials in the clear; they are kept encrypted now and the file no longer has them");
                 }
@@ -818,7 +863,8 @@ impl Core {
     }
 
     fn persist_prime(&self, msg: &Value, persist: bool) {
-        if self.edition != Edition::Hosted {
+        // primed.json is the core's: the worker reads it, never writes it.
+        if self.edition != Edition::Hosted || self.role == crate::worker::Role::Worker {
             return;
         }
         // `persist: false` meant "these were unlocked from sealed values; do not write them in
@@ -861,6 +907,9 @@ impl Core {
     }
 
     fn forget_persisted_prime(&self) {
+        if self.role == crate::worker::Role::Worker {
+            return;
+        }
         if let Some(p) = self.data_dir.as_ref().map(|d| d.join(PRIMED_FILE)) {
             let _ = std::fs::remove_file(p);
         }
@@ -1049,7 +1098,7 @@ impl Core {
     ///   asking the core to send that cluster's stored credential to an address of their
     ///   choosing.
     fn gate_cluster(&self, t: &str, msg: &Value, c: &Caller) -> Result<(), Value> {
-        const VOLUME_ONE: &[&str] = &["VOLUME_SETTINGS", "VOLUME_FIELDS_CHECK", "VOLUME_DAILY", "VOLUME_MONTHLY", "VOLUME_BREAKDOWN"];
+        const VOLUME_ONE: &[&str] = &["VOLUME_SETTINGS", "VOLUME_FIELDS_CHECK", "VOLUME_DAILY", "VOLUME_MONTHLY", "VOLUME_BREAKDOWN", "HOSTS_QUERY"];
         // VOLUME_PATTERN_CHECK is an admin's, and an admin limited to some clusters may check
         // only those: the one message here that stops a (limited) admin too.
         // An admin limited to some clusters is held to them wherever a message names one: the
@@ -1159,6 +1208,7 @@ impl Core {
             Reauth::Proxy(_) => "proxy",
             Reauth::None => "none",
         };
+        let began = Instant::now();
         let sent = msg.clone();
         let t = msg.get("type").and_then(|v| v.as_str()).unwrap_or("");
         let mut out = if t == "PLAY_EXCHANGE" && !caller.as_ref().is_some_and(Caller::play_only) {
@@ -1171,6 +1221,9 @@ impl Core {
             self.dispatch_reply(msg, caller.clone(), reauth).await
         };
         crate::errors::stamp(&mut out.value);
+        // Handling time per message type, once, here (docs/HEALTH.md "Response time").
+        self.health.record(sent.get("type").and_then(Value::as_str).unwrap_or(""), began.elapsed().as_millis() as u64,
+                           out.value.get("ok") != Some(&Value::Bool(false)));
         self.record_activity(&sent, caller.as_ref(), via, source, &out.value);
         out
     }
@@ -1298,7 +1351,7 @@ impl Core {
             // Volume reports and the mail that carries them (docs/VOLUME.md "Reports and mail").
             "REPORT_RUN" | "REPORT_JOBS" | "REPORT_STOP" | "REPORT_CLEAR" | "REPORT_DOWNLOAD" | "REPORT_CONCURRENCY_SET"
             | "MAIL_SETTINGS_GET" | "MAIL_SETTINGS_SET" | "MAIL_TEST" | "REPORT_SCHEDULE_GET" | "REPORT_SCHEDULE_SET"
-            | "REPORT_SEND_NOW" => self.report_msg(&t, &msg, caller.as_ref()).await,
+            | "REPORT_SEND_NOW" | "HOSTS_QUERY" => self.report_msg(&t, &msg, caller.as_ref()).await,
             "NOTIFY_PUT" | "NOTIFY_LIST" | "NOTIFY_CLEAR" => self.notify_msg(&t, &msg, caller.as_ref()),
             // Play, the NOC wall display (docs/PLAY.md), and the shared acknowledgements.
             // PLAY_EXCHANGE needs the client's address and is answered in handle_reply_as_from_at;
@@ -1468,6 +1521,7 @@ impl Core {
             // "are we stressing Elasticsearch", as a number.
             "REQUEST_STATS" => json!({ "ok": true, "requests": self.requests_for(caller.as_ref()) }),
             "REQUEST_LOG" => self.request_log_for(caller.as_ref(), &msg),
+            "SYSTEM_HEALTH" => self.system_health(caller.as_ref()).await,
             "PINS" => {
                 self.refresh_trust_switch().await;
                 json!({ "ok": true, "pins": self.pins_for(caller.as_ref()) })
@@ -2186,6 +2240,11 @@ impl Core {
         let managed = crate::settings::get();
         m.insert("managedDefaults".into(), managed.ping_defaults());
         m.insert("managedZabbixOptions".into(), managed.ping_zabbix_options());
+        // ElasticPro's own health, for the dot on the Request Centre's nav entry (docs/HEALTH.md):
+        // the level the minute task last worked out. An administrator's, like the tab.
+        if admin {
+            m.insert("health".into(), json!(self.health.level().ping()));
+        }
         out
     }
 
@@ -2222,6 +2281,17 @@ impl Core {
              log.recent.iter().rev().filter(|r| sees(r)).take(limit).cloned().collect())
         };
         inflight.sort_by_key(|r| r.started_at);
+        // Role core: the report worker's finished requests too, labelled `process: "worker"`,
+        // merged by when they started (docs/WORKER.md).
+        let worker = self.worker_requests(limit, |c| ids.as_ref().is_none_or(|s| s.contains(c)) && only.as_ref().is_none_or(|o| o == c));
+        let recent: Vec<Value> = if worker.is_empty() {
+            recent.iter().map(|r| serde_json::to_value(r).unwrap_or(Value::Null)).collect()
+        } else {
+            let mut all: Vec<Value> = recent.iter().map(|r| serde_json::to_value(r).unwrap_or(Value::Null)).chain(worker).collect();
+            all.sort_by_key(|r| std::cmp::Reverse(r.get("startedAt").and_then(Value::as_u64).unwrap_or(0)));
+            all.truncate(limit);
+            all
+        };
         let now = crate::fleet::now_ms();
         // How requests are being handled without anybody deciding: the poller's holds, the
         // clusters slowed for answering slowly, and whether a busy gate holds the poller.
@@ -4049,7 +4119,7 @@ impl Core {
         clusters.dedup();
         let mut written = self.instance_written.lock();
         if *written != clusters {
-            write_instance_file(&dir.join(INSTANCE_FILE), &self.instance, &clusters);
+            write_instance_file(&dir.join(instance_file(self.role)), &self.instance, &clusters);
             *written = clusters;
         }
     }
@@ -4238,7 +4308,11 @@ impl Core {
             return json!({ "ok": false, "kind": "not_configured",
                            "message": "the Zabbix API is not configured: pair with Zabbix in Config → Zabbix, or set ELASTICPRO_ZABBIX_API_URL and a token on the server" });
         }
-        let opts = self.zbx_options().await;
+        let mut opts = self.zbx_options().await;
+        // The worker reads Zabbix to know the clusters; making hosts is the core's alone.
+        if self.role == crate::worker::Role::Worker {
+            opts.create_hosts = false;
+        }
         let fetched = match zapi.clusters().await {
             Ok(x) => x,
             Err(e) => {

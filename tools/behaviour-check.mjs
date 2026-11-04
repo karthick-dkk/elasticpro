@@ -287,6 +287,24 @@ await go('shards');
     idxFilter.dispatchEvent(new window.Event('input', { bubbles: true }));
     await settleFor(250);
   }
+  // Typing into the Index filter keeps the field and the keyboard: the first key used to rebuild
+  // the card around it, and with no id to put focus back by, the rest of the typing went to the
+  // page (0.3.54 flicker pass).
+  if (idxFilter) {
+    idxFilter.focus();
+    for (const v of ['m', 'mo', 'moc']) {
+      idxFilter.value = v;
+      idxFilter.dispatchEvent(new window.Event('input', { bubbles: true }));
+      await settleFor(120);
+    }
+    const now = [...doc.querySelectorAll('input[type=search]')].find((x) => x.placeholder === 'filter by name');
+    ok(now === idxFilter && idxFilter.isConnected, 'shards: typing into the Index filter replaced the field');
+    ok(doc.activeElement === idxFilter, `shards: typing into the Index filter lost the keyboard to ${doc.activeElement && (doc.activeElement.id || doc.activeElement.tagName)}`);
+    idxFilter.value = '';
+    idxFilter.dispatchEvent(new window.Event('input', { bubbles: true }));
+    await settleFor(250);
+    idxFilter.blur();
+  }
 
   // Ticking a started shard offers a bulk move; ticking nothing offers nothing.
   ok(!/ticked/.test(doc.body.textContent), 'shards: the bulk bar is showing with nothing ticked');
@@ -790,6 +808,13 @@ await goOne('snapshots');
       doc.getElementById('rj-run').click();
       await settleFor(200);
       ok(doc.getElementById('rj-status').textContent.startsWith('ten mails an hour is the most'), 'reports: too_many_mails message not shown');
+      // The report worker is down (0.3.54, docs/WORKER.md): the core's sentence, amber, not red.
+      bound = { ok: false, kind: 'worker_unavailable', message: 'the report worker is not running — reports and collection resume when it is back' };
+      doc.getElementById('rj-run').click();
+      await settleFor(200);
+      const wst = doc.getElementById('rj-status');
+      ok(wst.textContent.startsWith('the report worker is not running') && wst.classList.contains('rj-warn') && !wst.classList.contains('rj-bad'),
+        `reports: worker_unavailable reads "${wst.textContent}" (${wst.className}), want the core's words in amber`);
       bound = null;
 
       // The list as the core moves it on: running, queued, done.
@@ -809,6 +834,45 @@ await goOne('snapshots');
       ok(/At most 3 run together/.test(txt), 'reports: the footnote does not say how many run together');
       // What the pill says is the poller's.
       ok(R.pillText(R.reports) === 'Reports · 1 running · 1 queued', `reports: the pill would read "${R.pillText(R.reports)}"`);
+
+      // The 2-s poll while a job runs moves its progress: the row and its Stop button stay the same
+      // elements, only the status line changes (0.3.54 flicker pass — the button under the mouse
+      // used to be replaced every 2 s, so its hover blinked and a slow click hit nothing).
+      {
+        const row0 = doc.querySelector('#rj-panel .rj-job[data-job="jr"]');
+        const stop0 = row0 && row0.querySelector('.rj-stop');
+        jobs = jobs.map((j) => (j.id === 'jr' ? { ...j, progress: { done: 40, total: 50 } } : j));
+        await R.refreshReports();
+        await settleFor(50);
+        const row1 = doc.querySelector('#rj-panel .rj-job[data-job="jr"]');
+        ok(row1 === row0 && row1.querySelector('.rj-stop') === stop0, 'reports: a progress poll rebuilt the running job\'s row or its Stop button');
+        ok(/Running · 80 %/.test(row1 ? row1.textContent : ''), `reports: the progress did not move on in place (${row1 && row1.textContent})`);
+        jobs = jobs.map((j) => (j.id === 'jr' ? { ...j, progress: { done: 31, total: 50 } } : j));
+        await R.refreshReports();
+        await settleFor(50);
+      }
+
+      // An indices / hosts job (0.3.54): ONE job for the picked clusters, a line per cluster with
+      // its concurrency, halvings and last reason; a cluster it could not read named with why.
+      const hostsJob = { ...jobs[0], id: 'jh', reportKind: 'hosts', report: 'hosts', clusterId: 'a', clusterName: '3 clusters', clusterIds: ['a', 'b', 'c'],
+        status: 'running', createdAt: 3,
+        progress: { done: 1, total: 3, state: 'collecting', cluster: 'a', clusters: {
+          a: { state: 'collecting', day: '2026-11-03', pages: 40, rows: 900, retries: 1, concurrency: 3, partitions: { done: 1, total: 3 }, halvings: 1, lastReason: 'HTTP 429', days: { done: 2, total: 3 } },
+          b: { state: 'waiting', day: null, pages: 0, rows: 0, retries: 0, concurrency: 0, partitions: { done: 0, total: 0 }, halvings: 0, lastReason: null, days: { done: 0, total: 0 } } } },
+        failedClusters: [{ clusterId: 'c', reason: 'connection refused' }] };
+      jobs = [hostsJob, ...jobs];
+      await R.refreshReports();
+      await settleFor(50);
+      const hj = doc.querySelector('#rj-panel .rj-job[data-job="jh"]');
+      const cl = (id) => hj && hj.querySelector(`.rj-cl[data-cluster="${id}"]`);
+      ok(hj && /Volume by host · 3 clusters/.test(hj.textContent), `reports: the hosts job does not say its kind (${hj && hj.textContent})`);
+      ok(cl('a') && /3 at once/.test(cl('a').textContent) && /halved 1× \(HTTP 429\)/.test(cl('a').textContent) && /1\/3 partitions/.test(cl('a').textContent) && /2 of 3 days/.test(cl('a').textContent),
+        `reports: cluster a's line reads "${cl('a') && cl('a').textContent}"`);
+      ok(cl('b') && /waiting/.test(cl('b').textContent) && !/at once/.test(cl('b').textContent), `reports: a waiting cluster shows a concurrency (${cl('b') && cl('b').textContent})`);
+      ok(cl('c') && /failed: connection refused/.test(cl('c').textContent) && cl('c').classList.contains('rj-warn'), `reports: the failed cluster is not named with why (${cl('c') && cl('c').textContent})`);
+      jobs = jobs.filter((j) => j.id !== 'jh');
+      await R.refreshReports();
+      await settleFor(50);
 
       // Download: REPORT_DOWNLOAD, base64 to a file of the core's name.
       rsent.length = 0;
@@ -871,7 +935,7 @@ await go('reports');
   // The page: title, subtitle, the six sections in order, Overview first; the tab reads Reports.
   ok(/^Reports$/.test((doc.querySelector('.rp-head h1') || {}).textContent || ''), 'reports: no "Reports" title');
   ok(/What each cluster takes in, what it keeps, and whether its storage holds it\./.test(doc.body.textContent), 'reports: the subtitle is missing');
-  ok(navLinks().map((a) => a.textContent).join(' · ') === 'Overview · Daily & monthly · Capacity & retention · Measure size · Planning · Exports & schedules',
+  ok(navLinks().map((a) => a.textContent).join(' · ') === 'Overview · Daily & monthly · Volume by host · Capacity & retention · Measure size · Planning · Exports & schedules',
     `reports: the section nav reads ${navLinks().map((a) => a.textContent).join(' · ')}`);
   ok(current() === 'overview', `reports: opens on ${current()}, want Overview`);
   ok([...doc.querySelectorAll('#nav a, #nav button')].some((x) => x.dataset.page === "reports" && /Reports$/.test(x.textContent.trim())), 'reports: the tab is not labelled Reports');
@@ -2979,8 +3043,135 @@ restoreConsole();
   ok(rows.length > 0, 'requests: no rows — the poller has been running, so the log cannot be empty');
   const origins = [...doc.querySelectorAll('section.card table tbody tr td:nth-child(3)')].map((td) => td.textContent.trim());
   ok(origins.some((o) => /^poller · /.test(o)), `requests: rows should name the poller as the asker, saw ${JSON.stringify(origins.slice(0, 3))}`);
+  // The two-second re-read touches only what changed (0.3.54 flicker pass): the tabs and the
+  // emergency stop are the same elements after it, and a filter shows the choice made — the
+  // options were built with selected: '' (a false property), so every redraw showed the first.
+  {
+    const tabBtn = doc.querySelector('nav.rq-tabs button');
+    const resultSel = [...doc.querySelectorAll('#view .toolbar select')].find((x) => [...x.options].some((o) => o.value === 'refused'));
+    ok(!!resultSel, 'requests: no Result filter');
+    if (resultSel) {
+      resultSel.value = 'ok'; resultSel.dispatchEvent(new window.Event('change', { bubbles: true }));
+      await settleFor(2600);
+      const again = [...doc.querySelectorAll('#view .toolbar select')].find((x) => [...x.options].some((o) => o.value === 'refused'));
+      ok(again && again.value === 'ok', `requests: after a re-read the Result filter shows "${again && again.value}", not the choice made`);
+      again.value = 'all'; again.dispatchEvent(new window.Event('change', { bubbles: true }));
+      await settleFor(300);
+    }
+    ok(tabBtn && tabBtn.isConnected && doc.querySelector('nav.rq-tabs button') === tabBtn, 'requests: the re-read rebuilt the tabs');
+  }
   await go('overview'); const after = sent.filter((m) => m.type === 'REQUEST_LOG').length; await settleFor(2600);
   ok(sent.filter((m) => m.type === 'REQUEST_LOG').length === after, 'requests: the log is still being re-read after leaving the page');
+}
+
+// Requests › ElasticPro health (docs/HEALTH.md): an administrator's tab, read from SYSTEM_HEALTH
+// every 5 s while open — the log is not read meanwhile and no cluster is ever asked; an amber or
+// red line carries its fix; a part that cannot report says "not known"; leaving stops the read;
+// an operator is not offered the tab, even at its address.
+{
+  const before = globalThis.fetch;
+  const hsent = [];
+  const now = Date.now();
+  const snap = {
+    ok: true, at: now, role: 'all', level: 'bad',
+    thresholds: [{ id: 'memory', check: 'Resident memory of limit (core, worker)', amber: '≥ 80%', red: '≥ 90%, or an OOM kill in 24 h' }],
+    checks: [
+      { id: 'core.memory', threshold: 'memory', label: 'Core memory of limit', level: 'bad', value: '93% · 952 MiB of 1.0 GiB',
+        text: 'Core is at 93% of its memory limit: close to being OOM-killed.', fix: 'Raise CORE_MEM_LIMIT in config.txt (ELASTICPRO_MEM_LIMIT in deploy/.env) and redeploy; or lower ELASTICPRO_CACHE_MB.' },
+      { id: 'gate.refused', threshold: 'gate', label: 'Requests turned away (5 min)', level: 'warn', value: '3',
+        text: '3 request(s) from people were refused by the gate.', fix: 'Raise ES_QUEUE_MAX / ES_QUEUE_WAIT_MS in config.txt.' },
+      { id: 'disk.free', threshold: 'disk', label: 'Data volume free', level: 'unknown', value: 'not known', text: 'The data volume’s space cannot be read.', fix: null },
+    ],
+    parts: [
+      { id: 'core', label: 'Core', level: 'bad', text: '0.3.54 · up 3 h', at: now - 3 * 3600e3 },
+      { id: 'worker', label: 'Report worker', level: 'off', text: 'not deployed — role all: this container runs reports and collection itself', at: null },
+      { id: 'database', label: 'Database', level: 'unknown', text: 'not known — the core does not connect to it', at: null },
+    ],
+    core: {
+      version: '0.3.54', uptimeSec: 10800,
+      memory: { rssBytes: 998244352, limitBytes: 1073741824, usedPct: 93, limitSource: 'cgroup v2', peakBytes24h: 1010000000, oomKills: 0, oomKills24h: 0 },
+      budget: { cache: { budgetBytes: 268435456, usedBytes: 100000000 }, inflight: { budgetBytes: 268435456, usedBytes: 0 }, readCache: { budgetBytes: 67108864, usedBytes: 1000 }, reports: null },
+      cpu: { pct1m: 40, limitCpus: null, throttledPct5m: null, nrPeriods: null },
+      messages: { w5m: { all: { count: 10, errors: 0, p50Ms: 5, p95Ms: 50, p99Ms: 100 }, own: { count: 9, errors: 0, p95Ms: 25 }, byType: [] },
+        w1h: { all: { count: 100 }, own: { count: 90 }, byType: [{ type: 'PING', count: 90, errors: 0, p50Ms: 2, p95Ms: 5, p99Ms: 10 }] },
+        slowest: [{ type: 'FLEET_STATE', count: 3, errors: 0, p50Ms: 25, p95Ms: 100, p99Ms: 100 }], sessions: 2, eventStreams: 1 },
+      gate: { label: 'core', slotsInUse: 1, slots: 24, perCluster: 4, perJump: 8, backgroundReserve: 2,
+        classes: [{ class: 'interactive', running: 1, waiting: 0, waitP95Ms: 0, overloaded5m: 3, queueTimeout5m: 0, overloaded1h: 3, queueTimeout1h: 0 }],
+        clusters: [{ cluster: 'c1', running: 1, waiting: 0, sent5m: 12, upstreamP95Ms: 340, timeouts5m: 0, rejected5m: 2 }] },
+      poller: { enabled: true, stopped: false, clusters: 2, down: 0, tracked: 20, due: 1, late: 0, latePct: 0, cycleMs: 3, cycleP95Ms: 9 },
+      disk: null, lastPrune: null,
+    },
+    worker: { state: 'not_deployed', level: 'off', text: 'not deployed — role all: this container runs reports and collection itself', status: null },
+    reports: { source: 'core', running: [{ id: 'j1', kind: 'hosts', clusterName: 'c1', progress: { done: 1, total: 4 }, day: '2026-11-03', concurrency: 2, halvings: 1, lastReason: '429 from c1' }],
+      queued: 0, queuedJobs: [], collection: [], schedules: [{ kind: 'volume', enabled: false, recipients: 0, nextAt: null, lastSent: null }], lastJob: {} },
+    trends: { fields: ['t', 'rss', 'p95Ms', 'waiting', 'workerRss', 'workerConcurrency'], points: [[now - 120e3, 900e6, 20, 0, null, null], [now - 60e3, 950e6, 25, 0, null, null]] },
+  };
+  globalThis.fetch = async (input, init) => {
+    const body = init && init.body ? JSON.parse(init.body) : {};
+    hsent.push(body);
+    if (body.type === 'SYSTEM_HEALTH') return stubReply(snap);
+    return before(input, init);
+  };
+  const count = (t) => hsent.filter((m) => m.type === t).length;
+  try {
+    await go('requests'); await settleFor(400);
+    const tab = doc.querySelector('nav.rq-tabs button[data-tab="health"]');
+    ok(!!tab, 'health: no "ElasticPro health" tab on the Request Centre');
+    if (tab) {
+      tab.click(); await settleFor(700);
+      ok(window.location.hash === '#/requests/health', `health: the tab is not at #/requests/health (${window.location.hash})`);
+      ok(count('SYSTEM_HEALTH') >= 1, 'health: opening the tab did not read SYSTEM_HEALTH');
+      ok(!hsent.some((m) => m.type === 'ES'), 'health: the tab sent a cluster something');
+      const fix = doc.querySelector('tr[data-check="core.memory"] .hl-fix');
+      ok(fix && /CORE_MEM_LIMIT/.test(fix.textContent), `health: the red memory line carries no fix: ${fix && fix.textContent}`);
+      ok(doc.querySelector('tr[data-check="gate.refused"].hl-row-warn .hl-fix'), 'health: the amber gate line is not marked or has no fix');
+      const db = doc.querySelector('.hl-chip[data-part="database"]');
+      ok(db && /not known/.test(db.textContent) && !db.querySelector('.hl-dot.green'), `health: a part that cannot report is not "not known": ${db && db.textContent}`);
+      const wk = doc.querySelector('.hl-chip[data-part="worker"]');
+      ok(wk && /not deployed — role all/.test(wk.textContent), 'health: no worker chip saying not deployed');
+      ok(/not known — this core has no reports share/.test(doc.body.textContent), 'health: the reports share is not said to be not known');
+      ok(/2 \(halved 1×: 429 from c1\)/.test(doc.body.textContent), 'health: a running job does not show its concurrency and halvings');
+      ok(doc.querySelector('.hl-spark polyline'), 'health: no trend drawn from two samples');
+      const logs = count('REQUEST_LOG'), reads = count('SYSTEM_HEALTH');
+      // A re-read whose answer did not change touches nothing (0.3.54 flicker pass): the row under
+      // the mouse is the same row, and a fold opened stays open.
+      const memRow = doc.querySelector('tr[data-check="core.memory"]');
+      const chip = doc.querySelector('.hl-chip[data-part="core"]');
+      const fold = doc.querySelector('.hl-page details[data-fold="thresholds"]');
+      if (fold) { fold.open = true; fold.dispatchEvent(new window.Event('toggle')); }
+      await settleFor(5300);
+      ok(doc.querySelector('tr[data-check="core.memory"]') === memRow && memRow.isConnected, 'health: an unchanged re-read replaced the check rows');
+      ok(doc.querySelector('.hl-chip[data-part="core"]') === chip, 'health: an unchanged re-read replaced the status chips');
+      const foldNow = doc.querySelector('.hl-page details[data-fold="thresholds"]');
+      ok(foldNow && foldNow.open, 'health: the Thresholds fold closed on a re-read');
+      ok(count('REQUEST_LOG') === logs, 'health: the request log is still read while the health tab is open');
+      ok(count('SYSTEM_HEALTH') > reads, 'health: the tab is not read again after 5 s');
+      // Back to the log tab, then away: the health read stops.
+      doc.querySelector('nav.rq-tabs button[data-tab="log"]').click(); await settleFor(500);
+      ok(window.location.hash === '#/requests' && doc.querySelector('.rq-tbl, .rq-tiles'), 'health: the Requests tab did not come back');
+      await go('overview');
+      const left = count('SYSTEM_HEALTH');
+      await settleFor(5300);
+      ok(count('SYSTEM_HEALTH') === left, 'health: SYSTEM_HEALTH is still read after leaving the page');
+    }
+    // An operator: no tab, not even at its address, and nothing asked.
+    const st = await load('core/state.js');
+    const was = st.state.caller;
+    try {
+      st.state.caller = { name: 'olga', role: 'operator' };
+      await go('overview');
+      window.history.replaceState(null, '', '#/requests/health');
+      const from = count('SYSTEM_HEALTH');
+      app.go('requests'); await settleFor(600);
+      ok(!doc.querySelector('nav.rq-tabs'), 'health: an operator is offered the Request Centre tabs');
+      ok(count('SYSTEM_HEALTH') === from, 'health: an operator\'s page read SYSTEM_HEALTH');
+      await go('overview');
+    } finally {
+      st.state.caller = was;
+    }
+  } finally {
+    globalThis.fetch = before;
+  }
 }
 
 // Housekeeping card on the Request Centre: read on entry, Dry run asks the core for a dry
@@ -4501,6 +4692,7 @@ consoleTabs: {
     press('All').click(); await settleFor(60);
     const search = doc.getElementById('alerts-search');
     search.value = 'bravo'; search.dispatchEvent(new window.Event('input', { bubbles: true })); await settleFor(60);
+    ok(doc.getElementById('alerts-search') === search, 'alerts: typing a search rebuilt the search field (it must be the same element while typed into)');
     ok(doc.querySelectorAll('#view .arow').length === 1 && /bravo-ci/.test(doc.querySelector('#view .arow').textContent) && !doc.querySelector('#view .adown'),
       `alerts: searching "bravo" left ${[...doc.querySelectorAll('#view .arow')].map((r) => r.textContent.slice(0, 30)).join(' | ')}`);
     doc.getElementById('alerts-search').value = '';
@@ -5656,6 +5848,141 @@ if (viaFleet) {
     globalThis.fetch = realFetch;
     hostEl.remove();
     try { localStorage.removeItem('elasticpro.planTemplates'); } catch { /* none */ }
+  }
+  await applyConfig({ load, configPath });
+  await go('overview');
+}
+
+
+/* ------- 0.3.54: Indices report and Volume by host — Exports & schedules, and the host view ------- */
+
+// The core's REPORT_SCHEDULE_* / REPORT_RUN / HOSTS_QUERY answers as docs/REPORT-TYPES.md gives
+// them, stubbed at fetch. Proves: a tab per kind with each kind's defaults and its size basis, a
+// schedule save and Run now send the kind (and collectAgain for hosts), too_many_clusters is said
+// as the core says it, and the host view pages, sorts and searches on the server, shows an absent
+// figure as amber "not measured" (never 0), flags incomplete days and names unmapped fields.
+{
+  const realFetch = globalThis.fetch;
+  const sentK = [];
+  const saved = {};
+  let refuseRun = null;
+  const rowsAll = Array.from({ length: 450 }, (_, i) => ({ day: '2026-11-01', index: `app-2026.11.01-${i}`, source: 'app', host: `h${i}`,
+    docs: 10 + i, eventBytes: i === 0 ? null : 1000 + i, subBytes: 500 + i, eventMissingDocs: i === 1 ? 7 : 0,
+    clientId: 'C-1', branch: 'DC', incomplete: i === 0, meta: { zone: 'dmz', ClientID: 'C-1' } }));
+  const answerK = (b) => {
+    switch (b.type) {
+      case 'REPORT_JOBS': return { ok: true, jobs: [], concurrency: 3, running: 0, queued: 0 };
+      case 'REPORT_SCHEDULE_GET': return { ok: true, kind: b.kind, enabled: false, to: [], cc: [], bcc: [], managed: b.kind === 'hosts' ? ['UI_REPORT_HOSTS_AT'] : [],
+        mailConfigured: true, lastSent: null, ...(saved[b.kind] || {}),
+        ...(b.kind === 'hosts' ? { config: { fields: ['zone'], clientIdField: 'ClientID', keepMonths: 3, managed: ['UI_REPORT_HOSTS_KEEP_MONTHS'] } } : {}) };
+      case 'REPORT_SCHEDULE_SET': saved[b.kind] = { ...b }; return { ok: true };
+      case 'REPORT_SEND_NOW': return { ok: true, job: { id: 'j1' } };
+      case 'REPORT_RUN': return refuseRun || { ok: true, jobs: (b.clusterIds || []).map((id) => ({ id: `k${id}` })), refused: [] };
+      case 'HOSTS_QUERY': {
+        const q = (b.q || '').toLowerCase();
+        let rows = rowsAll.filter((r) => !q || r.host.includes(q) || r.index.includes(q));
+        const [col, dir] = String(b.sort || 'day:asc').split(':');
+        if (col === 'docs') rows = [...rows].sort((a, c) => (dir === 'desc' ? c.docs - a.docs : a.docs - c.docs));
+        return { ok: true, rows: rows.slice(b.offset, b.offset + b.limit), total: rows.length, totals: { docs: rows.reduce((n, r) => n + r.docs, 0), eventBytes: null, subBytes: 123456 },
+          incompleteDays: ['2026-11-02'], fields: ['zone', 'ClientID'], notInMapping: ['tag1'], fill: { clientId: 'C-1', branchDefault: 'DC' },
+          days: [{ day: '2026-11-01', held: true, incomplete: false, rows: 450, notes: [], failed: null },
+            { day: '2026-11-02', held: true, incomplete: true, rows: 0, notes: [], failed: null },
+            { day: '2026-11-03', held: false, incomplete: false, rows: null, notes: [], failed: 'HTTP 503 after 3 tries', collecting: false }] };
+      }
+      default: return { ok: false, kind: 'bad_message', message: `Unknown message type "${b.type}"` };
+    }
+  };
+  globalThis.fetch = async (input, init) => {
+    const body = init && init.body ? JSON.parse(init.body) : {};
+    if (/^(REPORT_|MAIL_|HOSTS_)/.test(String(body.type || ''))) { sentK.push(body); return stubReply(answerK(body)); }
+    return realFetch(input, init);
+  };
+  const fire = (el, type = 'change') => el.dispatchEvent(new window.Event(type, { bubbles: true }));
+  try {
+    await go('reports');
+    press(doc.querySelector('.rp-nav a[data-section="exports"]'));
+    const tab = (id) => doc.getElementById(`rt-tab-${id}`);
+    await waitFor(() => tab('hosts'), 'report types: no Volume by host tab on Exports & schedules');
+    ok(['volume', 'indices', 'hosts'].every((k) => !!tab(k)), 'report types: a kind has no tab');
+    // Indices: its own defaults and the size basis, said plainly.
+    press(tab('indices'));
+    await waitFor(() => doc.getElementById('rt-indices-at'), 'report types: the Indices schedule did not draw');
+    ok(doc.getElementById('rt-indices-at').value === '08:00', `report types: Indices opens at ${doc.getElementById('rt-indices-at').value}, want 08:00`);
+    ok(doc.getElementById('rt-indices-period').value === 'monthSoFar', 'report types: Indices does not default to Month so far');
+    ok(doc.getElementById('rt-indices-schedule').value === 'daily', 'report types: Indices does not default to daily');
+    ok(/index store size/.test(doc.getElementById('rt-sizes').textContent), 'report types: the Indices report does not say its sizes are index store size');
+    ok(doc.getElementById('rt-indices-enabled').checked === false, 'report types: Indices is on before an admin turned it on');
+    // Turning it on without a recipient is refused here, and says why.
+    doc.getElementById('rt-indices-enabled').checked = true; fire(doc.getElementById('rt-indices-enabled'));
+    sentK.length = 0;
+    doc.getElementById('rt-indices-save').click(); await settleFor(100);
+    ok(!sentK.some((m) => m.type === 'REPORT_SCHEDULE_SET'), 'report types: an enabled schedule with nobody to send to was sent');
+    ok(/at least one address/.test((doc.getElementById('rt-note') || { textContent: '' }).textContent), 'report types: no word about the missing recipient');
+    const to = doc.getElementById('rt-indices-to');
+    to.value = 'ops@example.com, lead@example.com'; fire(to, 'input');
+    doc.getElementById('rt-indices-save').click();
+    await waitFor(() => sentK.find((m) => m.type === 'REPORT_SCHEDULE_SET'), 'report types: Save sent nothing');
+    const set = sentK.find((m) => m.type === 'REPORT_SCHEDULE_SET');
+    ok(set && set.kind === 'indices' && set.enabled === true && set.at === '08:00' && set.period === 'monthSoFar' && set.to.length === 2,
+      `report types: Save sent ${JSON.stringify(set)}`);
+    // Volume by host: sizes basis, locked time, Run now with its two options.
+    press(tab('hosts'));
+    await waitFor(() => doc.getElementById('rt-hosts-at'), 'report types: the Volume by host schedule did not draw');
+    ok(doc.getElementById('rt-hosts-at').value === '06:00', 'report types: Volume by host does not open at 06:00');
+    ok(doc.getElementById('rt-hosts-at').disabled && /managed by config\.txt/.test(doc.querySelector('.rt-sched').textContent), 'report types: a locked time is not shown locked');
+    ok(/event_logsize/.test(doc.getElementById('rt-sizes').textContent), 'report types: Volume by host does not say its sizes are event_logsize');
+    ok(doc.getElementById('rt-hosts-run-period').value === 'monthSoFar', 'report types: Run now does not default to Month so far');
+    ok(!!doc.getElementById('rt-hosts-again') && !!doc.getElementById('rt-hosts-run-mail'), 'report types: Collect again or Mail it is missing');
+    doc.getElementById('rt-hosts-again').checked = true; fire(doc.getElementById('rt-hosts-again'));
+    sentK.length = 0;
+    doc.getElementById('rt-hosts-run').click();
+    await waitFor(() => sentK.find((m) => m.type === 'REPORT_RUN'), 'report types: Run now sent nothing');
+    const rr = sentK.find((m) => m.type === 'REPORT_RUN');
+    ok(rr && rr.kind === 'hosts' && rr.collectAgain === true && rr.mail === false && rr.period === 'monthSoFar' && rr.clusterIds.length >= 1,
+      `report types: Run now sent ${JSON.stringify(rr)}`);
+    // The core's own refusal is said as it says it.
+    refuseRun = { ok: false, kind: 'too_many_clusters', message: 'Volume by host takes at most 5 clusters; nothing was queued' };
+    doc.getElementById('rt-hosts-run').click();
+    await waitFor(() => /nothing was queued/.test((doc.getElementById('rt-note') || { textContent: '' }).textContent), 'report types: too_many_clusters was not said');
+    // The report worker is down: the core's words, amber (banner warn), never the red of a refusal.
+    refuseRun = { ok: false, kind: 'worker_unavailable', message: 'the report worker is not running — reports and collection resume when it is back' };
+    doc.getElementById('rt-hosts-run').click();
+    await waitFor(() => /report worker is not running/.test((doc.getElementById('rt-note') || { textContent: '' }).textContent), 'report types: worker_unavailable was not said');
+    ok(doc.getElementById('rt-note').classList.contains('warn') && !doc.getElementById('rt-note').classList.contains('err'), `report types: worker_unavailable is not amber (${doc.getElementById('rt-note').className})`);
+    refuseRun = null;
+
+    // The view.
+    await go('reports');
+    press(doc.querySelector('.rp-nav a[data-section="hosts"]'));
+    await waitFor(() => doc.querySelector('#hv-table table.hv-tbl'), 'volume by host: no table');
+    const heads = () => [...doc.querySelectorAll('#hv-table thead th')].map((t) => t.textContent.replace(/[▲▼]/g, '').trim());
+    ok(JSON.stringify(heads()) === JSON.stringify(['Day', 'Index', 'Source', 'Host', 'Documents', 'Event size', 'Forwarded size', 'zone', 'ClientID']), `volume by host: columns ${heads().join(' | ')}`);
+    // The ClientID column is the core's filled value and sorts on it (clientId), not on the raw field.
+    ok(!!doc.querySelector('#hv-table th[data-col="clientId"]'), 'volume by host: the ClientID column does not sort on the filled clientId');
+    ok(/incomplete/.test(doc.querySelector('#hv-table tbody tr').textContent), 'volume by host: an incomplete row is not marked');
+    ok(/7 without/.test(doc.querySelectorAll('#hv-table tbody tr')[1].textContent), 'volume by host: documents without an event size are not said');
+    ok(/2026-11-03 \(HTTP 503 after 3 tries\)/.test(doc.querySelector('.hv-failed') ? doc.querySelector('.hv-failed').textContent : ''), 'volume by host: a day not held is not named with why');
+    ok(doc.querySelectorAll('#hv-table tbody tr').length === 201, `volume by host: ${doc.querySelectorAll('#hv-table tbody tr').length - 1} rows on a page of 200`);
+    ok(/not measured/.test(doc.querySelector('#hv-table tbody tr').textContent) && doc.querySelector('#hv-table tbody tr .rp-na'), 'volume by host: an absent event size is not amber "not measured"');
+    const tot = doc.querySelector('#hv-table tr.hv-totals');
+    ok(tot && /Total/.test(tot.textContent) && /not measured/.test(tot.textContent), 'volume by host: no totals row, or its absent figure reads as a number');
+    ok(/2026-11-02/.test(doc.querySelector('.hv-incomplete') ? doc.querySelector('.hv-incomplete').textContent : ''), 'volume by host: the incomplete day is not flagged');
+    ok(/tag1/.test(doc.querySelector('.hv-nomap') ? doc.querySelector('.hv-nomap').textContent : ''), 'volume by host: the field not in the mapping is not named');
+    ok(/1–200 of 450/.test(doc.querySelector('.hv-pager').textContent), `volume by host: pager reads "${doc.querySelector('.hv-pager').textContent}"`);
+    sentK.length = 0;
+    doc.getElementById('hv-next').click();
+    await waitFor(() => sentK.find((m) => m.type === 'HOSTS_QUERY' && m.offset === 200), 'volume by host: Next did not ask for offset 200');
+    ok(sentK.every((m) => m.limit === 200), 'volume by host: a page is not 200 rows');
+    sentK.length = 0;
+    doc.querySelector('#hv-table th[data-col="docs"] button').click();
+    await waitFor(() => sentK.find((m) => m.type === 'HOSTS_QUERY' && m.sort === 'docs:asc' && m.offset === 0), 'volume by host: sorting by Documents did not ask the server');
+    sentK.length = 0;
+    const q = doc.getElementById('hv-q'); q.value = 'h42'; fire(q, 'input');
+    await waitFor(() => sentK.find((m) => m.type === 'HOSTS_QUERY' && m.q === 'h42'), 'volume by host: the search did not reach the server', 3000);
+    await settleFor(150);
+    ok(doc.querySelectorAll('#hv-table tbody tr').length < 201, 'volume by host: the search left every row');
+  } finally {
+    globalThis.fetch = realFetch;
   }
   await applyConfig({ load, configPath });
   await go('overview');

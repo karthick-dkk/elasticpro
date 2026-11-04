@@ -152,9 +152,48 @@ deploy/deploy.sh --rollback           # back to the images that ran before
 `--upgrade` moves all four images together (core, nginx, PostgreSQL, and Redis when the cache
 profile is on) by setting `ELASTICPRO_IMAGE`, `ELASTICPRO_NGINX_IMAGE`, `ELASTICPRO_DB_IMAGE` and
 `ELASTICPRO_REDIS_IMAGE` in `.env`. It pulls everything first, so a version that is not published
-changes nothing. If the core is not healthy in time it puts the previous `.env` back and restarts
-on it. Going to an older version needs `--force`. `--dry-run` shows the plan. The images come from
-`karthickdk02/` unless `ELASTICPRO_REGISTRY` names another namespace.
+changes nothing (an image already on this host under the release's name is used as it is). If the
+core is not healthy in time it puts the previous `.env` back and restarts on it. Going to an older
+version needs `--force`. `--dry-run` shows the plan. The images come from `karthickdk02/` unless
+`ELASTICPRO_REGISTRY` names another namespace.
+
+### Upgrading to 0.3.54 or later: the compose file
+
+From 0.3.54 the stack runs a second container, the report worker (below), and that needs the
+release's `docker-compose.yml`. An install whose compose file has no `worker` service keeps
+running everything in the core (role `all`) — it works, but without the isolation. `--upgrade`
+brings the file in:
+
+- When `docker-compose.yml` has no `worker` service and the target release's file has one,
+  `--upgrade` fetches that file (`https://raw.githubusercontent.com/karthick-dkk/elasticpro/v<version>/deploy/docker-compose.yml`,
+  or under `ELASTICPRO_RELEASE_URL` — a mirror, or `file:///dir` holding `v<version>/deploy/docker-compose.yml`
+  on a host without internet access) before anything is pulled or changed.
+- It replaces the file **only if it is exactly as a release shipped it** (the version running
+  now, or the one before it). The old file is kept as `docker-compose.yml.bak-<time>` and named in
+  `.compose-previous`. `.env`, `config.txt` and `docker-compose.override.yml` are not touched; the
+  new file is loaded with them (`docker compose config`) before anything restarts, and a file that
+  does not load is put back with nothing else changed.
+- `--rollback` puts the previous compose file back together with the previous images (and takes
+  the worker container away, `--remove-orphans`). A failed upgrade does the same by itself.
+- `--dry-run` prints the difference between the two files.
+- **An edited compose file** (one that differs from what its release shipped, or one whose
+  release copy cannot be fetched) stops the upgrade before anything changes, with a message.
+  Either move your changes into `docker-compose.override.yml` — compose reads it on top of the
+  main file — and run `deploy.sh --upgrade --replace-compose` (the current file is still kept as a
+  `.bak`), or merge by hand: put the release's file in place with your changes, then run
+  `--upgrade` again (it then finds a worker and leaves the file alone).
+
+`--upgrade` runs the `deploy.sh` of the installed release. One from before 0.3.54 knows nothing
+of the compose file, so fetch the new script first, then upgrade:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/karthick-dkk/elasticpro/v0.3.54/deploy/deploy.sh -o deploy/deploy.sh
+deploy/deploy.sh --upgrade=0.3.54 --dry-run    # shows the images and the compose change
+deploy/deploy.sh --upgrade=0.3.54
+```
+
+(If an older `deploy.sh` already moved the images to 0.3.54, running the new one with
+`--upgrade=0.3.54` brings in just the compose file.)
 
 From this checkout instead (builds the core here):
 
@@ -163,6 +202,37 @@ git pull && docker compose up -d --build
 ```
 
 Trust decisions (`pins.json`) live in the `core-data` volume and survive rebuilds.
+
+## The report worker (0.3.54)
+
+Reports run in a container of their own, `worker`: the same image as the core with
+`ELASTICPRO_ROLE=worker` ([docs/WORKER.md](../docs/WORKER.md)). It runs the daily volume
+collection, the report queue and the mailed schedules, the 06:00 hosts collection, report builds
+and mail, under its own limits, so a report — however large, however it fails — can never slow
+down or take down the monitoring. The core runs `ELASTICPRO_ROLE=core` and hands those actions to
+it over the internal network; every page still reads from the core.
+
+| `.env` | Default | |
+|---|---|---|
+| `ELASTICPRO_WORKER_MEM_LIMIT` | `1g` | the worker's memory cap; its report memory share is sized from it |
+| `ELASTICPRO_WORKER_CPUS` | `1.0` | the worker's CPU cap |
+| `ELASTICPRO_WORKER_GATE_CONCURRENCY` / `_PER_CLUSTER` / `_PER_JUMP_HOST` | `16` / `4` / `4` | requests the worker sends at once: overall, per cluster, per jump host (all background) |
+
+- It mounts what the core mounts (the config, config.txt, the SSH keys, the `core-data` volume)
+  and opens its own SSH tunnels. Port 8766 is inside the compose network only; nginx never routes
+  it, and it refuses any action without the shared token in `core-data` (`worker/token`).
+- **Down or restarting**: monitoring carries on. Report actions answer *the report worker is not
+  running* (EP-218) within a second — at once when its heartbeat is 30 s old or more — and Exports
+  shows it in amber with the last heartbeat; scheduled reports and collections resume from where
+  they stopped when it is back. Requests › ElasticPro health turns the worker red, not the core.
+  `docker compose ps worker`, `docker compose logs worker`.
+- **Versions**: the worker refuses work from a core of another version (EP-219). `deploy.sh`
+  always moves and restarts `core` and `worker` together.
+- **A compose file from before 0.3.54** has no `worker` service: the core then runs everything
+  itself (role `all`), exactly as before, until the new compose file is in place —
+  `deploy.sh --upgrade` puts it there ("Upgrading to 0.3.54 or later: the compose file", above).
+- Requests › ElasticPro health shows the worker's memory, CPU, request gate and running jobs;
+  the Request Centre labels its requests *worker*.
 
 The Zabbix modules are not part of these images. They have their own version (shared by all the
 modules, separate from ElasticPro's), pinned with the commit in `deploy/zabbix/MODULES_REF` and

@@ -806,7 +806,7 @@ dependencies = [
 
 [[package]]
 name = "elasticpro-core"
-version = "0.3.53"
+version = "0.3.54"
 dependencies = [
  "aes-gcm 0.10.3",
  "axum",
@@ -819,6 +819,7 @@ dependencies = [
  "hmac 0.12.1",
  "keyring",
  "lettre",
+ "libc",
  "parking_lot",
  "pbkdf2 0.12.2",
  "rand 0.8.8",

@@ -8,13 +8,14 @@
  * and is it struggling" is asked at the same moment as "where is this shard".
  */
 
-import { h, mount } from '../lib/dom.js';
+import { h, mount, reconcile } from '../lib/dom.js';
+import { nodeCache } from '../lib/keyed.js';
 import { bytes, num, pct, compact } from '../lib/fmt.js';
 import { state, clusters, activeClusters, client, refreshAll, fetchIndices, fetchShards,
          datasetFreshness, diskAccounting, setDangling, danglingFor, demandDataset, fleetMode, askForPage, fleetPolicy } from '../core/state.js';
 import { pauseFor } from '../core/policy.js';
 import { freshnessBar } from '../lib/freshness.js';
-import { card, table, empty, pill, figure, connectionBanner } from './common.js';
+import { card, table, empty, pill, figure, connectionBanner, keptCard } from './common.js';
 import { navigateTo } from '../core/intent.js';
 import { modal, field, select, val, confirmDialog } from '../ui/modal.js';
 import { toast } from '../ui/menu.js';
@@ -50,7 +51,7 @@ function applyFocus() {
   else if (f.section === 'disk' || f.section === 'nodes') reveal = '[data-focus="nodes"]';
   if (f.node) { ui.node = f.node; ui.state = 'all'; ui.sort = 'store'; ui.dir = -1; }
 }
-const focusable = (el, name) => { el.dataset.focus = name; return el; };
+const focusable = (el, name) => { if (el.dataset.focus !== name) el.dataset.focus = name; return el; };
 
 export function render(el) {
   host = el;
@@ -144,11 +145,28 @@ async function load(c, force = true) {
   } catch (_) { /* the alert says to look here; it does not depend on this succeeding */ }
 }
 
+/**
+ * What the last draw put on screen (lib/keyed.js). The page redraws on every push from the
+ * core and on every key typed into the Index filter; a card that reads the same is the card
+ * already there, and the filter field is never rebuilt while it is typed into — it had no id,
+ * so the redraw its first character caused took the keyboard with it.
+ */
+const built = nodeCache();
+/** A kept element of `tag` under `key` whose children are `kids`, each kept while unchanged. */
+function keptBox(key, tag, attrs, kids) {
+  const el = built.get(`${key}:box`, tag, () => h(tag, attrs));
+  reconcile(el, built.sameAll(key, kids));
+  return el;
+}
+
 function draw() {
   if (!host || !host.isConnected) return;
   const list = activeClusters();
   if (!list.length) return mount(host, empty('No cluster selected'));
-  mount(host, ...list.map((c) => h('div', { style: { marginBottom: '14px' } }, block(c))));
+  built.begin();
+  try {
+    mount(host, ...list.map((c) => keptBox(`wrap:${c.id}`, 'div', { style: { marginBottom: '14px' } }, [block(c)])));
+  } finally { built.end(); }
   if (reveal && revealFocus(host, reveal)) reveal = null;
 }
 
@@ -179,10 +197,10 @@ function block(c) {
   // what the gauge and its legend say one card below — the same duplication that cost
   // the honeycomb its place. The figures that were only on the tiles moved into the
   // summary card instead.
-  return h('div', { style: { display: 'grid', gap: '10px' } },
+  return keptBox(`grid:${c.id}`, 'div', { style: { display: 'grid', gap: '10px' } }, [
     glanceCard(c, all, d, { nodes, moving, unassigned }),
     nodesAndLoadCard(c, d),
-    shardsCard(c, d, all, raw, started));
+    shardsCard(c, d, all, raw, started)]);
 }
 
 /** A task running longer than this is worth looking at rather than scrolling past. */
@@ -687,10 +705,10 @@ function shardsCard(c, d, all, raw, started) {
           }, 'Move…')
         : null))));
 
-  const controls = h('div.toolbar',
+  const controls = keptBox(`controls:${c.id}`, 'div.toolbar', null, [
     h('label.field', 'Index',
-      h('input', { type: 'search', value: ui.index, placeholder: 'filter by name', style: { width: '200px' },
-        oninput: (e) => { ui.index = e.target.value; draw(); } })),
+      h('input', { id: `shards-filter-${c.id}`, type: 'search', value: ui.index, placeholder: 'filter by name', style: { width: '200px' },
+        'aria-label': 'Filter shards by index name', oninput: (e) => { ui.index = e.target.value; draw(); } })),
     h('label.field', 'Node', (() => {
       const sel = h('select', { onchange: (e) => { ui.node = e.target.value; draw(); } },
         h('option', { value: 'all' }, 'any node'), ...nodeNames.map((n) => h('option', { value: n }, n)));
@@ -708,7 +726,7 @@ function shardsCard(c, d, all, raw, started) {
         onclick: () => retry(c),
       }, 'Retry failed allocations'),
       freshnessBar(datasetFreshness(c.id, 'shards'), () => load(c), { label: 'shards', busy: loading.has(c.id), dense: true }),
-      h('button.btn.sm', { onclick: () => load(c) }, '↻ Reload shards')));
+      h('button.btn.sm', { onclick: () => load(c) }, '↻ Reload shards'))]);
 
   const mine = [...picked.values()].filter((x) => x.clusterId === c.id);
   const bulkBar = mine.length
@@ -725,8 +743,8 @@ function shardsCard(c, d, all, raw, started) {
   const sub = `${num(filtered.length)} of ${num(all.length)} shard(s)`
     + (shown.length < filtered.length ? ` · showing the first ${num(shown.length)}` : '');
 
-  return focusable(card(`Shards — ${c.name}`, why || sub,
-    h('div', controls, bulkBar,
+  return focusable(keptCard(built, `shards:${c.id}`, `Shards — ${c.name}`, why || sub,
+    [controls, bulkBar,
       why ? h('div', { style: { padding: '14px' } }, empty(why)) : null,
       table([tickAll(shown.filter((x) => x.state === 'STARTED'), c),
            { label: 'Index', sort: 'index' }, { label: 'Shard', num: true, sort: 'shard' },
@@ -738,7 +756,7 @@ function shardsCard(c, d, all, raw, started) {
         ? h('div', { style: { padding: '10px', textAlign: 'center' } },
             h('button.btn.sm', { onclick: () => { ui.limit += 300; draw(); } },
               `Show more (${num(filtered.length - shown.length)} hidden)`))
-        : null)), 'shards');
+        : null]), 'shards');
 }
 
 /** The header tick: select every movable shard currently shown, or none of them. */
