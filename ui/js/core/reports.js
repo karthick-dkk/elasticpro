@@ -58,6 +58,9 @@ async function send(msg) {
   return res || { ok: false, kind: 'worker_error', message: 'the core did not answer' };
 }
 
+/** The one sender (core/report-types.js sends the kind-aware messages through it). */
+export { send as reportSend };
+
 /* -------------------------------- the messages -------------------------------- */
 
 /** One job per cluster. `period`: a preset ("month:2026-10", "yesterday", "last7") or {from, to}. */

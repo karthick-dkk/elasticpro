@@ -30,6 +30,7 @@ import {
   addressList, nextPeriodOf, periodLabel, failText,
 } from '../core/reports.js';
 import { isAdmin, forgetMailInfo } from './report-jobs.js';
+import { kindScheduleGet, scheduleOf } from '../core/report-types.js';
 
 const SCHEDULES = [
   ['monthly', 'Monthly · 1st of the month'], ['weekly', 'Weekly · Monday'],
@@ -47,6 +48,7 @@ const rm = {
   error: '',
   mail: null, mailManaged: new Set(),
   sched: null, schedManaged: new Set(),
+  hostsConfig: undefined,   // rows of the config.txt hosts keys; null = the core does not say
 };
 
 /**
@@ -68,6 +70,9 @@ export async function loadReportMail(redraw) {
     rm.mailManaged = managedFields(m.managed);
     rm.sched = settingsOf(s);
     rm.schedManaged = managedFields(s.managed);
+    // The hosts keys of config.txt (0.3.54) ride on the hosts schedule reply; an older core has none.
+    const hs = await kindScheduleGet('hosts');
+    rm.hostsConfig = hs.ok ? scheduleOf('hosts', hs).config : null;
   }
   if (redraw) redraw();
 }
@@ -79,7 +84,7 @@ export function reportMailKeyLines() {
 
 /** Both panels, stacked, for the Reports section. */
 export function reportMailPanels() {
-  return h('div.rm-panels', scheduleCard(), mailCard());
+  return h('div.rm-panels', scheduleCard(), hostsConfigCard(), mailCard());
 }
 
 /* ------------------------------- shared pieces ------------------------------- */
@@ -247,6 +252,27 @@ async function downloadXlsx() {
   setNote('rm-note', {
     text: `${n} report job${n === 1 ? '' : 's'} queued for ${periodLabel(period)}${refused ? `, ${refused} refused` : ''}. Each file is downloaded from the job list.`,
     cls: 'banner', open: true,
+  });
+}
+
+/* ------------------------- Volume by host: config.txt keys ------------------------- */
+
+/**
+ * The hosts settings that only config.txt holds (docs/REPORT-TYPES.md): shown, never edited
+ * here; there is no message that changes them. Each says "managed by config.txt" when the
+ * core says the key is set there, and "default" otherwise. A core that does not report them
+ * says so rather than showing blanks.
+ */
+function hostsConfigCard() {
+  return gate('Volume by host and Indices report', 'set in config.txt on the server', 'sees these settings', () => {
+    const rows = rm.hostsConfig;
+    if (!rows) return h('div.muted.rm-ro', 'This server does not report these settings (needs ElasticPro 0.3.54). They are the UI_REPORT_HOSTS_*, UI_REPORT_CLIENT_ID_FIELD, UI_REPORT_BRANCH_* and UI_REPORT_MAIL_MAX_MB keys of config.txt.');
+    return h('div.rm-body',
+      h('table.tbl.rm-cfg', h('tbody', ...rows.map((r) => h('tr', { dataset: { key: r.key } },
+        h('td', r.label), h('td.mono', r.known ? r.value : h('span.rp-na', 'not reported')),
+        h('td.muted', h('span.mono', r.env)),
+        h('td.muted', r.locked ? MANAGED_NOTE : 'default or set in config.txt'))))),
+      h('div.muted.rm-note', 'These are read-only here: change them in config.txt and restart. Each report\'s schedule is under Reports › Exports & schedules.'));
   });
 }
 
