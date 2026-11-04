@@ -78,6 +78,18 @@ pub fn previous_month(today: NaiveDate) -> Period {
     Period::new(f, t, format!("{y:04}-{m:02}"))
 }
 
+/// The month so far: the 1st of `today`'s month to yesterday. On the 1st, when the month
+/// has no finished day yet, the **whole previous month** — what the indices and the hosts
+/// report send every day (docs/REPORT-TYPES.md "Periods"). One definition for both
+/// schedules and *Run now*.
+pub fn month_so_far(today: NaiveDate) -> Period {
+    if today.day() == 1 {
+        return previous_month(today);
+    }
+    let (f, t) = (first_of(today.year(), today.month()).unwrap_or(today), today - Duration::days(1));
+    Period::new(f, t, format!("{:04}-{:02} (so far)", today.year(), today.month()))
+}
+
 /// Monday to Sunday of the week before `today`'s: what the weekly mail sends on Monday.
 pub fn previous_week(today: NaiveDate) -> Period {
     let this_monday = today - Duration::days(today.weekday().num_days_from_monday() as i64);
@@ -87,16 +99,18 @@ pub fn previous_week(today: NaiveDate) -> Period {
 }
 
 /// `period` as `REPORT_RUN` takes it: `{from, to}` or a preset (`"month:2026-10"`,
-/// `"yesterday"`, `"last7"`).
+/// `"yesterday"`, `"last7"`, `"monthSoFar"`, `"previousWeek"`, `"previousMonth"`).
 pub fn parse(v: &Value, today: NaiveDate) -> Result<Period, String> {
     match v {
         Value::String(s) => {
             let s = s.trim();
-            if s == "yesterday" {
-                return Ok(yesterday(today));
-            }
-            if s == "last7" {
-                return Ok(last7(today));
+            match s {
+                "yesterday" => return Ok(yesterday(today)),
+                "last7" => return Ok(last7(today)),
+                "monthSoFar" => return Ok(month_so_far(today)),
+                "previousWeek" => return Ok(previous_week(today)),
+                "previousMonth" => return Ok(previous_month(today)),
+                _ => {}
             }
             if let Some(m) = s.strip_prefix("month:") {
                 let b = m.as_bytes();
@@ -107,7 +121,7 @@ pub fn parse(v: &Value, today: NaiveDate) -> Result<Period, String> {
                     _ => Err(format!("{s:?}: a month is month:YYYY-MM")),
                 };
             }
-            Err(format!("{s:?} is not a period: use {{from, to}}, \"month:YYYY-MM\", \"yesterday\" or \"last7\""))
+            Err(format!("{s:?} is not a period: use {{from, to}}, \"month:YYYY-MM\", \"yesterday\", \"last7\", \"monthSoFar\", \"previousWeek\" or \"previousMonth\""))
         }
         Value::Object(o) => {
             let day = |k: &str| -> Result<NaiveDate, String> {
@@ -126,7 +140,7 @@ pub fn parse(v: &Value, today: NaiveDate) -> Result<Period, String> {
             }
             Ok(Period::new(from, to, format!("{} – {}", day_key(from), day_key(to))))
         }
-        _ => Err("period is required: {from, to}, \"month:YYYY-MM\", \"yesterday\" or \"last7\"".into()),
+        _ => Err("period is required: {from, to}, \"month:YYYY-MM\", \"yesterday\", \"last7\", \"monthSoFar\", \"previousWeek\" or \"previousMonth\"".into()),
     }
 }
 
@@ -175,6 +189,22 @@ mod tests {
         assert!(parse(&json!({ "from": "2020-01-01", "to": "2026-10-01" }), today).is_err(), "too long");
         assert!(parse(&json!({ "from": "2026-10-01" }), today).is_err());
         assert!(parse(&json!(null), today).is_err());
+    }
+
+    #[test]
+    fn month_so_far_is_the_1st_to_yesterday_and_the_whole_previous_month_on_the_1st() {
+        let p = month_so_far(d("2026-11-04"));
+        assert_eq!((span(&p), p.label.as_str()), (("2026-11-01", "2026-11-03"), "2026-11 (so far)"));
+        assert_eq!(span(&month_so_far(d("2026-11-02"))), ("2026-11-01", "2026-11-01"), "the 2nd: the 1st alone");
+        let first = month_so_far(d("2026-11-01"));
+        assert_eq!((span(&first), first.label.as_str()), (("2026-10-01", "2026-10-31"), "2026-10"), "on the 1st: the whole previous month");
+        // January: on the 1st the whole December of the year before; mid-month this January.
+        assert_eq!(span(&month_so_far(d("2027-01-01"))), ("2026-12-01", "2026-12-31"));
+        assert_eq!(span(&month_so_far(d("2027-01-15"))), ("2027-01-01", "2027-01-14"));
+        assert_eq!(span(&month_so_far(d("2028-03-01"))), ("2028-02-01", "2028-02-29"), "a leap February");
+        assert_eq!(parse(&json!("monthSoFar"), d("2026-11-04")).unwrap(), p);
+        assert_eq!(span(&parse(&json!("previousMonth"), d("2026-11-04")).unwrap()), ("2026-10-01", "2026-10-31"));
+        assert_eq!(span(&parse(&json!("previousWeek"), d("2026-11-04")).unwrap()), ("2026-10-26", "2026-11-01"));
     }
 
     #[test]

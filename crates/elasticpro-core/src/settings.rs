@@ -177,6 +177,32 @@ const SPECS: &[Spec] = &[
     spec("UI_REPORT_SCHEDULE", Kind::Enum(&["monthly", "weekly", "daily", "manual"]), To::Direct),
     spec("UI_REPORT_AT", Kind::Text, To::Direct),
     spec("UI_REPORT_SHEETS", Kind::Text, To::Direct),
+    // The indices report and volume by host (docs/REPORT-TYPES.md): each schedule's
+    // recipients, cadence and time lock its field like UI_REPORT_*; UI_REPORT_HOSTS_AT is the
+    // hosts collection's time too. The rest are read where used (report::hosts, report::run).
+    spec("UI_REPORT_INDICES_TO", Kind::Text, To::Direct),
+    spec("UI_REPORT_INDICES_SCHEDULE", Kind::Enum(&["monthly", "weekly", "daily", "manual"]), To::Direct),
+    spec("UI_REPORT_INDICES_AT", Kind::Text, To::Direct),
+    spec("UI_REPORT_HOSTS_TO", Kind::Text, To::Direct),
+    spec("UI_REPORT_HOSTS_SCHEDULE", Kind::Enum(&["monthly", "weekly", "daily", "manual"]), To::Direct),
+    spec("UI_REPORT_HOSTS_AT", Kind::Text, To::Direct),
+    spec("UI_REPORT_HOSTS_FIELDS", Kind::Text, To::Direct),
+    spec("UI_REPORT_HOSTS_MAX_PAGES", Kind::Int(1, 100_000), To::Direct),
+    spec("UI_REPORT_HOSTS_KEEP_MONTHS", Kind::Int(1, 13), To::Direct),
+    spec("UI_REPORT_HOSTS_REQUEST_TIMEOUT_S", Kind::Int(10, 600), To::Direct),
+    spec("UI_REPORT_HOSTS_PAGE_PAUSE_MS", Kind::Int(0, 10_000), To::Direct),
+    spec("UI_REPORT_HOSTS_MAX_MINUTES", Kind::Int(5, 1440), To::Direct),
+    spec("UI_REPORT_CLIENT_ID_FIELD", Kind::Text, To::Direct),
+    spec("UI_REPORT_BRANCH_FIELD", Kind::Text, To::Direct),
+    spec("UI_REPORT_BRANCH_DEFAULT", Kind::Text, To::Direct),
+    spec("UI_REPORT_MAIL_MAX_MB", Kind::Int(1, 100), To::Direct),
+    // How hard a report may push one cluster (docs/REPORT-TYPES.md "Concurrency").
+    spec("UI_REPORT_CONCURRENCY_START", Kind::Int(1, 8), To::Direct),
+    spec("UI_REPORT_CONCURRENCY_MAX", Kind::Int(1, 8), To::Direct),
+    spec("UI_REPORT_PAGE_TARGET_MS", Kind::Int(100, 120_000), To::Direct),
+    spec("UI_REPORT_CLUSTERS_AT_ONCE", Kind::Int(1, 8), To::Direct),
+    // Report builds in their own blocking slots, off the threads that serve the pages.
+    spec("REPORT_CPU_SLOTS", Kind::Int(1, 2), To::Direct),
     // Play, the NOC wall display (docs/PLAY.md "Play settings"). Each key locks its field on
     // Config › Play; UI_PLAY_EXCLUDE adds exclusions (cluster ids) the page cannot remove, and
     // UI_PLAY_ENABLED=false turns display links off. Read where used (play::settings).
@@ -466,7 +492,7 @@ fn check_text(key: &str, v: String) -> Result<String, String> {
             None => Ok(v),
             Some(why) => Err(format!("{v:?} {why}, e.g. @timestamp")),
         },
-        "UI_VOLUME_COLLECT_AT" | "UI_REPORT_AT" => match crate::volume::schedule::parse_hhmm(&v) {
+        "UI_VOLUME_COLLECT_AT" | "UI_REPORT_AT" | "UI_REPORT_INDICES_AT" | "UI_REPORT_HOSTS_AT" => match crate::volume::schedule::parse_hhmm(&v) {
             Some(_) => Ok(v),
             None => Err(format!("{v:?} is not a time of day HH:MM, 00:00 to 23:59")),
         },
@@ -478,13 +504,27 @@ fn check_text(key: &str, v: String) -> Result<String, String> {
             Ok(_) => Ok(v),
             Err(_) => Err(format!("{v:?} is not a mail address")),
         },
-        "UI_REPORT_TO" => {
+        "UI_REPORT_TO" | "UI_REPORT_INDICES_TO" | "UI_REPORT_HOSTS_TO" => {
             let list = crate::report::schedule::comma_list(&v);
             if list.is_empty() {
                 return Err("names no address".into());
             }
-            crate::report::mail::check_addresses(&list, "UI_REPORT_TO").map(|_| v)
+            crate::report::mail::check_addresses(&list, key).map(|_| v)
         }
+        "UI_REPORT_HOSTS_FIELDS" => {
+            let list = crate::report::schedule::comma_list(&v);
+            match list.iter().find(|f| crate::volume::settings::time_field_problem(f).is_some()) {
+                _ if list.is_empty() => Err("names no field".into()),
+                Some(f) => Err(format!("{f:?} is not a field name (no spaces, quotes or *)")),
+                None if list.len() > 40 => Err("at most 40 fields".into()),
+                None => Ok(list.join(",")),
+            }
+        }
+        "UI_REPORT_CLIENT_ID_FIELD" | "UI_REPORT_BRANCH_FIELD" => match crate::volume::settings::time_field_problem(&v) {
+            None => Ok(v),
+            Some(why) => Err(format!("{v:?} {why}")),
+        },
+        "UI_REPORT_BRANCH_DEFAULT" if v.chars().count() > 60 => Err("at most 60 characters".into()),
         "UI_REPORT_SHEETS" => crate::report::schedule::check_sheets(&crate::report::schedule::comma_list(&v)).map(|_| v),
         "UI_PLAY_SPOTLIGHT_WHEN" => match crate::play::settings::spotlight_when_problem(&v) {
             None => Ok(v),

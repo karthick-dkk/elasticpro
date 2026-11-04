@@ -78,8 +78,106 @@ pub enum Kind {
     Mailed,
 }
 
+/// Which report (docs/REPORT-TYPES.md): the volume workbook, the indices listing, or
+/// volume by host. Messages name it `kind`; a job carries it as `report`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ReportKind {
+    #[default]
+    Volume,
+    Indices,
+    Hosts,
+}
+
+impl ReportKind {
+    pub const ALL: [ReportKind; 3] = [ReportKind::Volume, ReportKind::Indices, ReportKind::Hosts];
+
+    pub fn parse(s: &str) -> Option<ReportKind> {
+        match s {
+            "volume" => Some(ReportKind::Volume),
+            "indices" => Some(ReportKind::Indices),
+            "hosts" => Some(ReportKind::Hosts),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ReportKind::Volume => "volume",
+            ReportKind::Indices => "indices",
+            ReportKind::Hosts => "hosts",
+        }
+    }
+
+    /// `kind` of a message: absent is `volume`; anything else unknown is refused.
+    pub fn of_message(msg: &serde_json::Value) -> Result<ReportKind, String> {
+        match msg.get("kind") {
+            None | Some(serde_json::Value::Null) => Ok(ReportKind::Volume),
+            Some(v) => v.as_str().and_then(ReportKind::parse).ok_or_else(|| "kind must be volume, indices or hosts".to_string()),
+        }
+    }
+}
+
+fn is_volume(k: &ReportKind) -> bool {
+    *k == ReportKind::Volume
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Progress {
+    pub done: u64,
+    pub total: u64,
+    /// Where an indices or hosts job is (docs/REPORT-TYPES.md "Isolation and failure"):
+    /// the cluster and day under way, pages and rows of that day so far, page retries,
+    /// and what it is doing (`collecting`, `retrying`, `building`, `mailing`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cluster: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub day: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pages: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rows: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retries: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<String>,
+    /// The cluster under way's partitions, controller limit, halvings and last reason (the
+    /// health tab reads these names; `clusters` has every cluster's).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub partitions: Option<Count>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub concurrency: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub halvings: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_reason: Option<String>,
+    /// Per cluster of the job, how its collection goes (docs/REPORT-TYPES.md "Concurrency").
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub clusters: std::collections::BTreeMap<String, ClusterProgress>,
+}
+
+/// One cluster's collection, as a job's progress shows it.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClusterProgress {
+    /// `waiting`, `collecting`, `retrying`, `deferred` (health red), `done`, `failed`, `stopped`.
+    pub state: String,
+    pub day: Option<String>,
+    pub pages: u64,
+    pub rows: u64,
+    pub retries: u64,
+    /// Requests the controller allows in flight now.
+    pub concurrency: u32,
+    pub partitions: Count,
+    pub halvings: u32,
+    pub last_reason: Option<String>,
+    pub days: Count,
+}
+
+/// `{done, total}`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Count {
     pub done: u64,
     pub total: u64,
 }
@@ -134,10 +232,27 @@ pub struct Job {
     /// be repeated by every restart).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mail_started_at: Option<i64>,
+    /// Which report this job builds. Absent (every job before 0.3.54) is the volume report.
+    #[serde(default, skip_serializing_if = "is_volume")]
+    pub report: ReportKind,
+    /// A hosts job asked to collect again the days already held (*Collect again*).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub collect_again: bool,
+    /// Clusters an indices or hosts job could not read, each with why: the file was built
+    /// for the others and names these (docs/REPORT-TYPES.md "Isolation and failure").
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub failed_clusters: Vec<FailedCluster>,
     /// Who asked a running job to stop. The worker sees it between days and ends the job
     /// `stopped`. Not persisted: a restart fails the job anyway.
     #[serde(skip)]
     pub stop_asked: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FailedCluster {
+    pub cluster_id: String,
+    pub reason: String,
 }
 
 impl Job {
@@ -148,8 +263,9 @@ impl Job {
         Job {
             id: String::new(), kind, cluster_id: cluster_ids.first().cloned().unwrap_or_default(), cluster_name,
             cluster_ids, period, format, mail, by: by.to_string(), created_at: now, started_at: None, ended_at: None,
-            status: Status::Queued, progress: Progress { done: 0, total: 1 }, file: None, error: None, mail_error: None,
-            stopped_by: None, warning: None, seq: 0, volume: None, sheets: vec![], mail_started_at: None, stop_asked: None,
+            status: Status::Queued, progress: Progress { done: 0, total: 1, ..Progress::default() }, file: None, error: None, mail_error: None,
+            stopped_by: None, warning: None, seq: 0, volume: None, sheets: vec![], mail_started_at: None, report: ReportKind::Volume,
+            collect_again: false, failed_clusters: vec![], stop_asked: None,
         }
     }
 }

@@ -87,9 +87,10 @@ done
 # Volume reports and mail (docs/VOLUME.md "Reports and mail"): generating a report reads the
 # record, downloading hands over a file, the mail settings hold a credential and MAIL_TEST
 # sends a mail — every one needs a caller. Roles and ownership are proved in-process
-# (tests/report.rs). The report timer, like the volume timer, logs without a user.
+# (tests/report.rs, tests/report_types.rs). The report timer, like the volume timer, logs
+# without a user. HOSTS_QUERY (0.3.54) reads volume by host's day files: a caller's too.
 for t in REPORT_RUN REPORT_JOBS REPORT_STOP REPORT_CLEAR REPORT_DOWNLOAD REPORT_CONCURRENCY_SET \
-         MAIL_SETTINGS_GET MAIL_SETTINGS_SET MAIL_TEST REPORT_SCHEDULE_GET REPORT_SCHEDULE_SET REPORT_SEND_NOW; do
+         MAIL_SETTINGS_GET MAIL_SETTINGS_SET MAIL_TEST REPORT_SCHEDULE_GET REPORT_SCHEDULE_SET REPORT_SEND_NOW HOSTS_QUERY; do
   check "$t needs a caller"              "$(post $B -d "{\"type\":\"$t\",\"clusterIds\":[\"x\"],\"to\":\"a@example.com\"}" | field kind)" "unauthenticated"
 done
 

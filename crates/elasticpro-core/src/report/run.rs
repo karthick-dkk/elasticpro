@@ -11,10 +11,10 @@
 //! `REPORT_STOP`.
 
 use super::build::{self, ClusterData};
-use super::jobs::{FileRef, Format, Job, Kind, Progress, Status, Which, MAX_CONCURRENCY, MIN_CONCURRENCY};
+use super::jobs::{FileRef, Format, Job, Kind, ReportKind, Status, Which, MAX_CONCURRENCY, MIN_CONCURRENCY};
 use super::mail::{self, Auth, MailFile, PasswordFrom, Ready};
 use super::period::{self, Period};
-use super::schedule::{self as rsched, Cadence, Clock, LastSent, ReportSchedule, Retry};
+use super::schedule::{self as rsched, Cadence, Clock, LastSent, ReportSchedule, Retry, ScheduleFile};
 use super::{xlsx, zip, MAX_DOWNLOAD_BYTES, SCHEDULE_BY};
 use crate::auth::{Caller, Edition, Role};
 use crate::bridge::Core;
@@ -25,11 +25,11 @@ use chrono::NaiveDateTime;
 use serde_json::{json, Value};
 use std::sync::Arc;
 
-fn now_ms() -> i64 {
+pub(super) fn now_ms() -> i64 {
     crate::fleet::now_ms() as i64
 }
 
-fn bad(kind: &str, message: impl Into<String>) -> Value {
+pub(super) fn bad(kind: &str, message: impl Into<String>) -> Value {
     json!({ "ok": false, "kind": kind, "message": message.into() })
 }
 
@@ -37,7 +37,7 @@ fn no_store() -> Value {
     bad("no_store", "this core keeps no files (no data directory), so it keeps no reports")
 }
 
-fn who(caller: Option<&Caller>) -> String {
+pub(super) fn who(caller: Option<&Caller>) -> String {
     caller.map(|c| c.name.clone()).unwrap_or_else(|| "local".into())
 }
 
@@ -48,43 +48,46 @@ fn is_admin(caller: Option<&Caller>) -> bool {
 
 /// A job as the pages see it: without the desktop settings it carries, with whether a stop
 /// was asked for.
-fn job_view(j: &Job) -> Value {
+pub(super) fn job_view(j: &Job) -> Value {
     let mut v = serde_json::to_value(j).unwrap_or(Value::Null);
     if let Some(o) = v.as_object_mut() {
         o.remove("volume");
         o.remove("seq");
         o.remove("mailStartedAt");
         o.insert("stopping".into(), json!(j.stop_asked.is_some()));
+        // Which report, always named (`report` is left out of jobs.json for volume): what
+        // the health tab and the Exports list group jobs by.
+        o.insert("reportKind".into(), json!(j.report.as_str()));
     }
     v
 }
 
 /// How a job ended, before it is written into the queue.
-struct JobEnd {
-    status: Status,
-    file: Option<FileRef>,
-    error: Option<String>,
-    mail_error: Option<String>,
-    warning: Option<String>,
-    stopped_by: Option<String>,
+pub(super) struct JobEnd {
+    pub(super) status: Status,
+    pub(super) file: Option<FileRef>,
+    pub(super) error: Option<String>,
+    pub(super) mail_error: Option<String>,
+    pub(super) warning: Option<String>,
+    pub(super) stopped_by: Option<String>,
     /// It ended because of the emergency stop: the schedule tries its period again.
-    retry: bool,
+    pub(super) retry: bool,
     /// The mail's recipients, when it got as far as the mail.
-    recipients: usize,
+    pub(super) recipients: usize,
 }
 
 impl JobEnd {
-    fn failed(e: impl Into<String>) -> JobEnd {
+    pub(super) fn failed(e: impl Into<String>) -> JobEnd {
         JobEnd { status: Status::Failed, file: None, error: Some(e.into()), mail_error: None, warning: None, stopped_by: None, retry: false, recipients: 0 }
     }
     /// Failed because the emergency stop is (or came) on.
-    fn held(e: impl Into<String>) -> JobEnd {
+    pub(super) fn held(e: impl Into<String>) -> JobEnd {
         JobEnd { retry: true, ..JobEnd::failed(e) }
     }
-    fn stopped(by: String) -> JobEnd {
+    pub(super) fn stopped(by: String) -> JobEnd {
         JobEnd { status: Status::Stopped, stopped_by: Some(by), error: None, ..JobEnd::failed("") }
     }
-    fn done(file: FileRef, warning: Option<String>) -> JobEnd {
+    pub(super) fn done(file: FileRef, warning: Option<String>) -> JobEnd {
         JobEnd { status: Status::Done, file: Some(file), error: None, warning, ..JobEnd::failed("") }
     }
 
@@ -151,9 +154,18 @@ impl Core {
             "MAIL_SETTINGS_GET" => self.mail_settings_get(),
             "MAIL_SETTINGS_SET" => self.mail_settings_set(msg, caller),
             "MAIL_TEST" => self.mail_test(msg, caller).await,
-            "REPORT_SCHEDULE_GET" => self.report_schedule_get(),
-            "REPORT_SCHEDULE_SET" => self.report_schedule_set(msg, caller),
-            "REPORT_SEND_NOW" => self.report_send_now(msg, caller),
+            "REPORT_SCHEDULE_GET" | "REPORT_SCHEDULE_SET" | "REPORT_SEND_NOW" => {
+                let kind = match ReportKind::of_message(msg) {
+                    Ok(k) => k,
+                    Err(e) => return bad("bad_request", e),
+                };
+                match t {
+                    "REPORT_SCHEDULE_GET" => self.report_schedule_get(kind),
+                    "REPORT_SCHEDULE_SET" => self.report_schedule_set(kind, msg, caller),
+                    _ => self.report_send_now(kind, msg, caller),
+                }
+            }
+            "HOSTS_QUERY" => self.hosts_query(msg, caller).await,
             _ => bad("bad_message", format!("Unknown message type {t:?}")),
         }
     }
@@ -171,12 +183,19 @@ impl Core {
     /// `MAX_MAILED_PER_HOUR` mailed ones are asked for an hour (`too_many_jobs`,
     /// `too_many_mails`): the whole request is refused, nothing is queued.
     async fn report_run(self: &Arc<Self>, msg: &Value, caller: Option<&Caller>) -> Value {
+        let kind = match ReportKind::of_message(msg) {
+            Ok(k) => k,
+            Err(e) => return bad("bad_request", e),
+        };
         let ids: Vec<String> = match msg.get("clusterIds").and_then(Value::as_array) {
             Some(a) if !a.is_empty() => a.iter().filter_map(Value::as_str).map(String::from).collect(),
             _ => return bad("bad_request", "clusterIds is required: one job per cluster"),
         };
         if ids.len() > 500 {
             return bad("bad_request", "at most 500 clusters at once");
+        }
+        if kind != ReportKind::Volume {
+            return self.report_run_kind(kind, ids, msg, caller);
         }
         let today = vsched::utc_day(now_ms());
         let period = match period::parse(msg.get("period").unwrap_or(&Value::Null), today) {
@@ -331,13 +350,14 @@ impl Core {
         }
     }
 
-    fn report_progress(&self, id: &str, done: u64, total: u64) {
+    pub(super) fn report_progress(&self, id: &str, done: u64, total: u64) {
         if let Some(j) = self.reports.queue.lock().get_mut(id) {
-            j.progress = Progress { done, total };
+            j.progress.done = done;
+            j.progress.total = total;
         }
     }
 
-    fn report_stop_asked(&self, id: &str) -> Option<String> {
+    pub(super) fn report_stop_asked(&self, id: &str) -> Option<String> {
         self.reports.queue.lock().get(id).and_then(|j| j.stop_asked.clone())
     }
 
@@ -345,9 +365,11 @@ impl Core {
 
     async fn report_work(self: Arc<Self>, id: String) {
         let Some(job) = self.reports.queue.lock().get(&id).cloned() else { return };
-        let end = match job.kind {
-            Kind::Cluster => self.report_cluster(&job).await,
-            Kind::Mailed => self.report_mailed(&job).await,
+        let end = match (job.report, job.kind) {
+            (ReportKind::Indices, _) => self.report_indices_job(&job).await,
+            (ReportKind::Hosts, _) => self.report_hosts_job(&job).await,
+            (ReportKind::Volume, Kind::Cluster) => self.report_cluster(&job).await,
+            (ReportKind::Volume, Kind::Mailed) => self.report_mailed(&job).await,
         };
         if job.kind == Kind::Mailed {
             // Every way a mailed job ends is its last send, sent or not; one the emergency
@@ -455,15 +477,19 @@ impl Core {
         Ok((got.error.map(|e| format!("{cluster}: {e}")), got.searched, got.total))
     }
 
-    fn report_store_file(&self, job_id: &str, name: &str, bytes: &[u8]) -> Result<FileRef, String> {
+    /// Keep a built file: written beside its place and renamed in, on a blocking thread.
+    pub(super) async fn report_store_file(&self, job_id: &str, name: &str, bytes: Vec<u8>) -> Result<FileRef, String> {
         let path = self.reports.file_path(job_id, name).ok_or("no data directory")?;
-        crate::volume::store::write_atomic(&path, bytes)?;
+        let n = bytes.len() as u64;
+        self.report_cpu(move || crate::volume::store::write_atomic(&path, &bytes)).await??;
         self.reports.prune_files(std::time::SystemTime::now());
-        Ok(FileRef { name: name.to_string(), bytes: bytes.len() as u64 })
+        Ok(FileRef { name: name.to_string(), bytes: n })
     }
 
     async fn report_cluster(self: &Arc<Self>, job: &Job) -> JobEnd {
-        let Some(store) = self.volume.store.as_ref() else { return JobEnd::failed("no data directory") };
+        if self.volume.store.is_none() {
+            return JobEnd::failed("no data directory");
+        }
         // A config file that cannot be read: neither collect nor build under built-in
         // settings, which may count other fields and plot another basis than it says.
         let raw = match self.volume_config().await {
@@ -481,22 +507,26 @@ impl Core {
             return JobEnd::stopped(by);
         }
         let today = vsched::utc_day(now_ms());
-        let data = ClusterData::load(store, &job.cluster_id, &job.cluster_name, s.clone(), &job.period);
-        let built = match job.format {
-            Format::Xlsx => {
-                let all: Vec<String> = build::SHEETS.iter().map(|s| s.to_string()).collect();
-                let sheets = build::sheets(&data, &job.period, &self.volume_layouts(), today, &all, false);
-                xlsx::workbook(&sheets).map(|b| (build::file_name(&job.cluster_id, &job.period, "xlsx"), b))
+        // The month files read and the file built on a report thread, not a runtime worker.
+        let (core, j, s2, layouts) = (self.clone(), job.clone(), s.clone(), self.volume_layouts());
+        let built = self.report_cpu(move || {
+            let Some(store) = core.volume.store.as_ref() else { return Err("no data directory".to_string()) };
+            let data = ClusterData::load(store, &j.cluster_id, &j.cluster_name, s2, &j.period);
+            match j.format {
+                Format::Xlsx => {
+                    let all: Vec<String> = build::SHEETS.iter().map(|s| s.to_string()).collect();
+                    let sheets = build::sheets(&data, &j.period, &layouts, today, &all, false);
+                    xlsx::workbook(&sheets).map(|b| (build::file_name(&j.cluster_id, &j.period, "xlsx"), b))
+                }
+                Format::CsvZip => zip::write(&build::csv_files(&data, &j.period, today))
+                    .map(|b| (build::file_name(&j.cluster_id, &j.period, "zip"), b)),
             }
-            Format::CsvZip => zip::write(&build::csv_files(&data, &job.period, today))
-                .map(|b| (build::file_name(&job.cluster_id, &job.period, "zip"), b)),
-        };
-        drop(data);
+        }).await.and_then(|r| r);
         let (name, bytes) = match built {
             Ok(x) => x,
             Err(e) => return JobEnd::failed(format!("the file could not be built: {e}")),
         };
-        let file = match self.report_store_file(&job.id, &name, &bytes) {
+        let file = match self.report_store_file(&job.id, &name, bytes).await {
             Ok(f) => f,
             Err(e) => return JobEnd::failed(format!("the file could not be kept: {e}")),
         };
@@ -507,13 +537,14 @@ impl Core {
                 end.stopped_by = Some(by);
                 return end;
             }
-            let (sched, _) = self.report_schedule_effective();
+            let (sched, _) = self.report_schedule_effective(ReportKind::Volume);
             let subject = format!("{} · {}", sched.subject_for(&job.period), job.cluster_name);
-            let body = format!(
-                "ElasticPro volume report · {} · {}\n\n{}\n{}",
-                job.cluster_name, job.period.label, build::mail_summary(store, &job.cluster_id, &job.cluster_name, &s, today), MAIL_FOOTER
-            );
-            if let Err(e) = self.report_mail(&job.by, &subject, &body, Some((&name, job.format.mime(), bytes))).await {
+            let summary = match self.volume.store.as_ref() {
+                Some(store) => build::mail_summary(store, &job.cluster_id, &job.cluster_name, &s, today),
+                None => String::new(),
+            };
+            let body = format!("ElasticPro volume report · {} · {}\n\n{}\n{}", job.cluster_name, job.period.label, summary, MAIL_FOOTER);
+            if let Err(e) = self.report_mail_file(ReportKind::Volume, &job.by, &subject, &body, (&job.id, &name, job.format.mime())).await {
                 end.mail_error = Some(e);
             }
         }
@@ -553,27 +584,34 @@ impl Core {
         let today = vsched::utc_day(now_ms());
         let layouts = self.volume_layouts();
         let which: Vec<String> = if job.sheets.is_empty() { build::SHEETS.iter().map(|s| s.to_string()).collect() } else { job.sheets.clone() };
-        let mut sheets = vec![];
-        let mut body = format!("ElasticPro volume report · {}\n\n", job.period.label);
-        for (id, s) in &each {
-            let name = self.spec_for(id).and_then(|x| x.name).unwrap_or_else(|| id.clone());
-            let data = ClusterData::load(store, id, &name, s.clone(), &job.period);
-            sheets.extend(build::sheets(&data, &job.period, &layouts, today, &which, true));
-            drop(data);
-            body.push_str(&build::mail_summary(store, id, &name, s, today));
-            body.push('\n');
-        }
-        body.push_str(MAIL_FOOTER);
-        if sheets.is_empty() {
-            return JobEnd::failed("no cluster to report on");
-        }
-        let name = format!("volume-report-{}_{}.xlsx", job.period.from, job.period.to);
-        let bytes = match xlsx::workbook(&sheets) {
-            Ok(b) => b,
-            Err(e) => return JobEnd::failed(format!("the file could not be built: {e}")),
+        let named: Vec<(String, String, VolumeSettings)> = each.iter()
+            .map(|(id, s)| (id.clone(), self.spec_for(id).and_then(|x| x.name).unwrap_or_else(|| id.clone()), s.clone())).collect();
+        let _ = store;
+        // The month files read and the book built on a report thread, not a runtime worker.
+        let (core, period) = (self.clone(), job.period.clone());
+        let built = self.report_cpu(move || {
+            let Some(store) = core.volume.store.as_ref() else { return Err("no data directory".to_string()) };
+            let mut sheets = vec![];
+            let mut body = format!("ElasticPro volume report · {}\n\n", period.label);
+            for (id, name, s) in &named {
+                let data = ClusterData::load(store, id, name, s.clone(), &period);
+                sheets.extend(build::sheets(&data, &period, &layouts, today, &which, true));
+                drop(data);
+                body.push_str(&build::mail_summary(store, id, name, s, today));
+                body.push('\n');
+            }
+            body.push_str(MAIL_FOOTER);
+            if sheets.is_empty() {
+                return Err("no cluster to report on".to_string());
+            }
+            xlsx::workbook(&sheets).map(|b| (b, body)).map_err(|e| format!("the file could not be built: {e}"))
+        }).await.and_then(|r| r);
+        let (bytes, body) = match built {
+            Ok(x) => x,
+            Err(e) => return JobEnd::failed(e),
         };
-        drop(sheets);
-        let file = match self.report_store_file(&job.id, &name, &bytes) {
+        let name = format!("volume-report-{}_{}.xlsx", job.period.from, job.period.to);
+        let file = match self.report_store_file(&job.id, &name, bytes).await {
             Ok(f) => f,
             Err(e) => return JobEnd::failed(format!("the file could not be kept: {e}")),
         };
@@ -584,26 +622,48 @@ impl Core {
             end.stopped_by = Some(by);
             return end;
         }
-        let (sched, _) = self.report_schedule_effective();
-        // Marked, and on disk, before the session: a restart from here on does not send the
-        // period again (it may have gone out).
-        self.reports.with(|q| {
-            if let Some(j) = q.get_mut(&job.id) {
-                j.mail_started_at = Some(now_ms());
-            }
-        });
-        let reports = self.clone();
-        let _ = tokio::task::spawn_blocking(move || reports.reports.flush()).await;
-        let sent = self.report_mail(&job.by, &sched.subject_for(&job.period), &body, Some((&name, xlsx::MIME, bytes))).await;
+        let (sched, _) = self.report_schedule_effective(ReportKind::Volume);
+        self.report_mail_started(&job.id).await;
+        let sent = self.report_mail_file(ReportKind::Volume, &job.by, &sched.subject_for(&job.period), &body, (&job.id, &name, xlsx::MIME)).await;
         let mut end = JobEnd::done(file, (!warnings.is_empty()).then(|| warnings.join("; ")));
         end.recipients = *sent.as_ref().unwrap_or(&sched.recipients());
         end.mail_error = sent.err();
         end
     }
 
+    /// A mailed job's session is about to begin: marked, and on disk, first — a restart from
+    /// here on does not send the period again (it may have gone out).
+    pub(super) async fn report_mail_started(self: &Arc<Self>, job_id: &str) {
+        self.reports.with(|q| {
+            if let Some(j) = q.get_mut(job_id) {
+                j.mail_started_at = Some(now_ms());
+            }
+        });
+        let reports = self.clone();
+        let _ = tokio::task::spawn_blocking(move || reports.reports.flush()).await;
+    }
+
+    /// Mail a kept report file to `kind`'s recipients. A file over `UI_REPORT_MAIL_MAX_MB`
+    /// (default 20) is not attached: the mail says where it is (Reports › Exports, 7 days).
+    pub(super) async fn report_mail_file(&self, kind: ReportKind, by: &str, subject: &str, body: &str, file: (&str, &str, &str)) -> Result<usize, String> {
+        let (job_id, name, mime) = file;
+        let path = self.reports.file_path(job_id, name).ok_or("no data directory")?;
+        let size = std::fs::metadata(&path).map_err(|e| format!("the file is gone: {e}"))?.len();
+        let cap_mb = crate::settings::get().text("UI_REPORT_MAIL_MAX_MB").and_then(|v| v.parse::<u64>().ok()).unwrap_or(MAIL_MAX_MB_DEFAULT);
+        if size > cap_mb * 1024 * 1024 {
+            let note = format!(
+                "{body}\nThe file {name} ({}) is larger than the {cap_mb} MB a mail may carry (UI_REPORT_MAIL_MAX_MB), so it is not attached: \
+                 download it from ElasticPro, Reports › Exports (kept {} days).\n",
+                build::human_bytes(Some(size)), super::KEEP_FILE_DAYS);
+            return self.report_mail(kind, by, subject, &note, None).await;
+        }
+        let bytes = self.report_cpu(move || std::fs::read(&path)).await?.map_err(|e| e.to_string())?;
+        self.report_mail(kind, by, subject, body, Some((name, mime, bytes))).await
+    }
+
     /* ---------------------------------------- mail ---------------------------------------- */
 
-    fn mail_effective(&self) -> mail::Effective {
+    pub(super) fn mail_effective(&self) -> mail::Effective {
         let file: MailFile = self.reports.read_json(mail::FILE);
         mail::effective(&file, crate::settings::get())
     }
@@ -638,17 +698,17 @@ impl Core {
 
     /// Send a report mail to the schedule's recipients. One audit line, whatever happens:
     /// who, how many recipients, whether it went — never the addresses, never the file.
-    async fn report_mail(&self, by: &str, subject: &str, body: &str, attachment: Option<(&str, &str, Vec<u8>)>) -> Result<usize, String> {
-        let (sched, _) = self.report_schedule_effective();
+    async fn report_mail(&self, kind: ReportKind, by: &str, subject: &str, body: &str, attachment: Option<(&str, &str, Vec<u8>)>) -> Result<usize, String> {
+        let (sched, _) = self.report_schedule_effective(kind);
         if sched.to.is_empty() {
-            return Err("no recipients: set them under Volume report by mail".into());
+            return Err(format!("no recipients: set them under the {} report's schedule", kind.as_str()));
         }
         let ready = self.mail_ready()?;
         let out = mail::message(&ready.from, &sched.to, &sched.cc, &sched.bcc, subject, body, attachment)?;
         let steps = mail::session(&ready, Some(&out)).await;
         let failed = steps.iter().find(|s| !s.ok).map(|s| format!("{}: {}", s.step, s.detail));
         let ok = failed.is_none() && steps.iter().any(|s| s.step == "send");
-        tracing::info!(target: "audit", user = %by, recipients = out.recipients, ok, "volume report mailed");
+        tracing::info!(target: "audit", user = %by, recipients = out.recipients, ok, report = kind.as_str(), "volume report mailed");
         match failed {
             None if ok => Ok(out.recipients),
             None => Err("the mail was not sent".into()),
@@ -835,13 +895,13 @@ impl Core {
 
     /* ---------------------------------------- the schedule ---------------------------------------- */
 
-    fn report_schedule_effective(&self) -> (ReportSchedule, Vec<&'static str>) {
-        let f: ReportSchedule = self.reports.read_json(rsched::FILE);
-        f.effective(crate::settings::get())
+    pub(super) fn report_schedule_effective(&self, kind: ReportKind) -> (ReportSchedule, Vec<&'static str>) {
+        let f: ScheduleFile = self.reports.read_json(rsched::FILE);
+        f.get(kind).effective(crate::settings::get())
     }
 
-    /// The clusters the mailed report covers: the schedule's list, or every cluster.
-    fn report_schedule_clusters(&self, s: &ReportSchedule) -> Vec<String> {
+    /// The clusters a schedule covers: its list, or every cluster.
+    pub(super) fn report_schedule_clusters(&self, s: &ReportSchedule) -> Vec<String> {
         let mut all: Vec<String> = self.all_specs().into_iter().map(|s| s.id).collect();
         all.sort();
         all.dedup();
@@ -851,27 +911,44 @@ impl Core {
         }
     }
 
-    fn report_schedule_get(&self) -> Value {
-        let (e, managed) = self.report_schedule_effective();
+    fn report_schedule_get(&self, kind: ReportKind) -> Value {
+        let (e, managed) = self.report_schedule_effective(kind);
         let next = self.edition().schedules().then(|| rsched::next_send(&e, Clock::now()).and_then(vsched::local_to_ms)).flatten();
-        json!({
-            "ok": true, "enabled": e.enabled, "to": e.to, "cc": e.cc, "bcc": e.bcc, "schedule": e.schedule, "at": e.at,
-            "clusters": e.clusters, "subject": e.subject, "sheets": e.sheets, "lastSent": e.last_sent,
+        let mut v = json!({
+            "ok": true, "kind": kind.as_str(), "enabled": e.enabled, "to": e.to, "cc": e.cc, "bcc": e.bcc, "schedule": e.schedule, "at": e.at,
+            "period": e.period, "clusters": e.clusters, "subject": e.subject, "lastSent": e.last_sent,
             "managed": managed, "timer": self.edition().schedules(), "nextSendAt": next,
             "mailConfigured": self.mail_effective().problem().is_none(),
             // What the next send covers, for the page's "Download .xlsx" (one definition).
             "nextPeriod": rsched::next_period(&e, Clock::now()),
-        })
+        });
+        if kind == ReportKind::Volume {
+            v["sheets"] = json!(e.sheets);
+        }
+        if kind == ReportKind::Hosts {
+            // The collection runs at the hosts schedule's time whether or not its mail is on.
+            let cfg = self.hosts_config();
+            let s = crate::settings::get();
+            let keys = ["UI_REPORT_HOSTS_FIELDS", "UI_REPORT_CLIENT_ID_FIELD", "UI_REPORT_BRANCH_FIELD", "UI_REPORT_BRANCH_DEFAULT",
+                        "UI_REPORT_HOSTS_AT", "UI_REPORT_HOSTS_KEEP_MONTHS", "UI_REPORT_HOSTS_MAX_PAGES", "UI_REPORT_MAIL_MAX_MB"];
+            let locked: Vec<&str> = keys.into_iter().filter(|k| s.text(k).is_some()).collect();
+            let mail_max = s.text("UI_REPORT_MAIL_MAX_MB").and_then(|v| v.parse::<u64>().ok()).unwrap_or(MAIL_MAX_MB_DEFAULT);
+            v["config"] = json!({ "collectAt": e.at, "fields": cfg.fields, "keepMonths": cfg.keep_months, "maxPages": cfg.max_pages,
+                                  "clientIdField": cfg.client_id_field, "branchField": cfg.branch_field, "branchDefault": cfg.branch_default,
+                                  "mailMaxMb": mail_max, "managed": locked });
+        }
+        v
     }
 
-    /// `REPORT_SCHEDULE_SET` (admin): the fields given. Lists are arrays (or a comma list).
-    fn report_schedule_set(&self, msg: &Value, caller: Option<&Caller>) -> Value {
+    /// `REPORT_SCHEDULE_SET {kind?}` (admin): the fields given. Lists are arrays (or a comma list).
+    fn report_schedule_set(&self, kind: ReportKind, msg: &Value, caller: Option<&Caller>) -> Value {
         let m = msg.get("settings").filter(|v| v.is_object()).unwrap_or(msg);
         let s = crate::settings::get();
         let by = who(caller);
         {
             let _g = self.reports.settings_lock.lock();
-            let mut file: ReportSchedule = self.reports.read_json(rsched::FILE);
+            let mut whole: ScheduleFile = self.reports.read_json(rsched::FILE);
+            let file = whole.get_mut(kind);
             let (before, managed) = file.effective(s);
             let locked = |field: &str, same: bool| -> Option<Value> {
                 (managed.contains(&field) && !same).then(|| bad("managed", format!("{field} is managed by config.txt")))
@@ -921,6 +998,12 @@ impl Core {
                 }
                 file.at = at.to_string();
             }
+            if let Some(v) = m.get("period") {
+                let Some(p) = v.as_str().and_then(rsched::PeriodChoice::parse) else {
+                    return bad("bad_request", "period must be cadence, yesterday or monthSoFar");
+                };
+                file.period = p;
+            }
             match m.get("clusters") {
                 None => {}
                 Some(Value::String(a)) if a == "all" => file.clusters = json!("all"),
@@ -951,6 +1034,7 @@ impl Core {
             match list("sheets") {
                 Err(r) => return r,
                 Ok(None) => {}
+                Ok(Some(_)) if kind != ReportKind::Volume => return bad("bad_request", "sheets: only the volume report has a choice of sheets"),
                 Ok(Some(v)) => {
                     let v = match rsched::check_sheets(&v) {
                         Ok(v) => v,
@@ -970,7 +1054,7 @@ impl Core {
             if after.enabled && after.to.is_empty() {
                 return bad("bad_request", "add at least one recipient (to) before switching the report on");
             }
-            if after.enabled && (!before.enabled || before.schedule != after.schedule || before.at != after.at) {
+            if after.enabled && (!before.enabled || before.schedule != after.schedule || before.at != after.at || before.period != after.period) {
                 let mut tmp = after.clone();
                 rsched::mark_passed(&mut tmp, Clock::now());
                 file.last_period = tmp.last_period;
@@ -981,24 +1065,27 @@ impl Core {
             file.seen_at = Some(after.at.clone());
             file.set_by = Some(by.clone());
             file.set_at = Some(now_ms());
-            if let Err(e) = self.reports.write_json(rsched::FILE, &file) {
+            if let Err(e) = self.reports.write_json(rsched::FILE, &whole) {
                 return bad("io_error", e);
             }
         }
-        tracing::info!(target: "audit", user = %by, "volume report schedule saved");
-        self.report_schedule_get()
+        tracing::info!(target: "audit", user = %by, report = kind.as_str(), "volume report schedule saved");
+        self.report_schedule_get(kind)
     }
 
-    /// Queue the mailed report (one job, one workbook for all its clusters). A person's
+    /// Queue a mailed report (one job, one workbook for all its clusters). A person's
     /// (`REPORT_SEND_NOW`) counts toward their waiting jobs; the schedule's does not.
-    fn report_queue_mailed(self: &Arc<Self>, ids: Vec<String>, p: Period, s: &ReportSchedule, by: &str) -> Result<String, (&'static str, String)> {
+    fn report_queue_mailed(self: &Arc<Self>, kind: ReportKind, ids: Vec<String>, p: Period, s: &ReportSchedule, by: &str) -> Result<String, (&'static str, String)> {
         let name = match ids.as_slice() {
             [one] => self.spec_for(one).and_then(|x| x.name).unwrap_or_else(|| one.clone()),
             many => format!("{} clusters", many.len()),
         };
         let mut job = Job::new(Kind::Mailed, ids, name, p, Format::Xlsx, true, by, now_ms());
         job.cluster_id = "*".into();
-        job.sheets = s.sheets.clone();
+        job.report = kind;
+        if kind == ReportKind::Volume {
+            job.sheets = s.sheets.clone();
+        }
         let id = self.reports.with(|q| {
             if by != SCHEDULE_BY {
                 q.room(by, 1, 0, now_ms())?;
@@ -1009,13 +1096,13 @@ impl Core {
         Ok(id)
     }
 
-    /// `REPORT_SEND_NOW {period?}` (admin): the mailed report for the current settings, at
-    /// once. Without a period: the schedule's (previous month, previous week, yesterday);
-    /// for a manual schedule, the current month so far.
-    fn report_send_now(self: &Arc<Self>, msg: &Value, caller: Option<&Caller>) -> Value {
-        let (e, _) = self.report_schedule_effective();
+    /// `REPORT_SEND_NOW {kind?, period?}` (admin): a kind's mailed report for the current
+    /// settings, at once. Without a period: the schedule's (previous month, previous week,
+    /// yesterday, or the month so far); for a manual schedule, its manual period.
+    fn report_send_now(self: &Arc<Self>, kind: ReportKind, msg: &Value, caller: Option<&Caller>) -> Value {
+        let (e, _) = self.report_schedule_effective(kind);
         if e.to.is_empty() {
-            return bad("bad_request", "no recipients: set them under Volume report by mail");
+            return bad("bad_request", "no recipients: set them in this report's schedule");
         }
         if let Some(p) = self.mail_effective().problem() {
             return bad("not_configured", p);
@@ -1026,31 +1113,27 @@ impl Core {
                 Ok(p) => p,
                 Err(err) => return bad("bad_request", err),
             },
-            // The schedule's period, from the UTC date like every period; a manual schedule's
-            // is the current UTC month so far.
-            None => match rsched::current(e.schedule, &e.at, Clock::now()) {
-                Some((p, _)) => p,
-                None => rsched::manual_period(today),
-            },
+            // The schedule's period, from the UTC date like every period.
+            None => rsched::send_now_period(&e, Clock::now()),
         };
         let ids = self.report_schedule_clusters(&e);
         if ids.is_empty() {
             return bad("bad_request", "no cluster to report on");
         }
         let by = who(caller);
-        let id = match self.report_queue_mailed(ids, p, &e, &by) {
+        let id = match self.report_queue_mailed(kind, ids, p, &e, &by) {
             Ok(id) => id,
-            Err((kind, message)) => return bad(kind, message),
+            Err((k, message)) => return bad(k, message),
         };
-        tracing::info!(target: "audit", user = %by, job = %id, "volume report: send now");
+        tracing::info!(target: "audit", user = %by, job = %id, report = kind.as_str(), "volume report: send now");
         let q = self.reports.queue.lock();
         json!({ "ok": true, "job": q.get(&id).map(job_view) })
     }
 
     /* ---------------------------------------- the timer ---------------------------------------- */
 
-    /// Queued jobs after a restart, the 7-day prune and the mailed schedule, once a minute.
-    /// Hosted only; started by the bridge binary.
+    /// Queued jobs after a restart, the 7-day prune, the mailed schedules and the daily hosts
+    /// collection, once a minute. Hosted only; started by the bridge binary.
     pub fn start_report_timer(self: &Arc<Self>) {
         if !self.edition().schedules() || self.reports.data_dir().is_none() {
             return;
@@ -1061,7 +1144,9 @@ impl Core {
             ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             loop {
                 ticker.tick().await;
-                core.report_tick(Clock::now()).await;
+                let clock = Clock::now();
+                core.hosts_tick_at(clock.local).await;
+                core.report_tick(clock).await;
             }
         });
         // No `user`: nobody asked. hosted-check counts audit lines that name one.
@@ -1069,19 +1154,27 @@ impl Core {
     }
 
     /// The day's scheduled collection has finished for every cluster the report covers (an
-    /// unreachable one is not waited for: its run is skipped until it is back).
-    fn report_daily_collected(&self, s: &ReportSchedule, local: NaiveDateTime) -> bool {
+    /// unreachable one is not waited for: its run is skipped until it is back). The volume
+    /// report waits for the daily volume run, the hosts report for the hosts collection; the
+    /// indices report reads the cluster afresh and waits for nothing.
+    fn report_daily_collected(&self, kind: ReportKind, s: &ReportSchedule, local: NaiveDateTime) -> bool {
         let Some(store) = &self.volume.store else { return false };
-        let today = day_key(local.date());
-        self.report_schedule_clusters(s).iter().all(|id| {
-            self.volume_unreachable(id) || (store.read_state(id).last_scheduled_day.as_deref() == Some(today.as_str())
-                && !self.volume.runs.lock().get(id).is_some_and(|r| r.running))
-        })
+        match kind {
+            ReportKind::Indices => true,
+            ReportKind::Hosts => self.hosts_collected(s, local),
+            ReportKind::Volume => {
+                let today = day_key(local.date());
+                self.report_schedule_clusters(s).iter().all(|id| {
+                    self.volume_unreachable(id) || (store.read_state(id).last_scheduled_day.as_deref() == Some(today.as_str())
+                        && !self.volume.runs.lock().get(id).is_some_and(|r| r.running))
+                })
+            }
+        }
     }
 
     /// One tick at the given server local time (with the server's UTC offset at that time).
-    /// Returns the mailed job queued, if the schedule was due. Public for the tests, which
-    /// cannot wait for the 1st.
+    /// Returns the mailed job queued, if a schedule was due (the first one, when several
+    /// were). Public for the tests, which cannot wait for the 1st.
     #[doc(hidden)]
     pub async fn report_tick_at(self: &Arc<Self>, local: NaiveDateTime) -> Option<String> {
         self.report_tick(Clock::at_local(local)).await
@@ -1101,45 +1194,58 @@ impl Core {
         let _done = Done(&self.reports.ticking);
         self.report_pump();
         self.reports.prune_files(std::time::SystemTime::now());
-        // config.txt changed the cadence or the time since the file last decided (it can
-        // only at a start): the period whose moment passed is handled, as a save would do.
+        // config.txt changed a cadence or a time since the file last decided (it can only at
+        // a start): the period whose moment passed is handled, as a save would do.
         {
             let _g = self.reports.settings_lock.lock();
-            let mut f: ReportSchedule = self.reports.read_json(rsched::FILE);
-            if rsched::reconcile(&mut f, crate::settings::get(), clock) {
+            let mut f: ScheduleFile = self.reports.read_json(rsched::FILE);
+            let mut changed = false;
+            for kind in ReportKind::ALL {
+                changed |= rsched::reconcile(f.get_mut(kind), crate::settings::get(), clock);
+            }
+            if changed {
                 if let Err(err) = self.reports.write_json(rsched::FILE, &f) {
                     tracing::warn!(error = %err, "volume report: the schedule could not be brought in line with config.txt; not sending, to avoid a late send");
                     return None;
                 }
-                tracing::info!(schedule = ?f.seen_schedule, at = f.seen_at.as_deref().unwrap_or(""), "volume report: config.txt changed the schedule; a period whose moment has passed counts as handled");
+                tracing::info!("volume report: config.txt changed a schedule; a period whose moment has passed counts as handled");
             }
         }
         // Stopped: nothing is marked, so the report goes out on the first tick after.
         if self.volume_stopped() {
             return None;
         }
-        let (e, _) = self.report_schedule_effective();
-        let collected = e.schedule != Cadence::Daily || self.report_daily_collected(&e, clock.local);
-        let p = rsched::due(&e, clock, collected)?;
-        let ids = self.report_schedule_clusters(&e);
-        if ids.is_empty() {
-            return None;
-        }
-        // Remembered before the job runs: a send that brings the process down must not be
-        // repeated by every restart.
-        {
-            let _g = self.reports.settings_lock.lock();
-            let mut f: ReportSchedule = self.reports.read_json(rsched::FILE);
-            f.last_period = Some(rsched::period_key(&p));
-            if let Err(err) = self.reports.write_json(rsched::FILE, &f) {
-                tracing::warn!(error = %err, "volume report: the schedule could not be marked; not sending, to avoid sending twice");
-                return None;
+        let mut first = None;
+        for kind in ReportKind::ALL {
+            let (e, _) = self.report_schedule_effective(kind);
+            let collected = e.schedule != Cadence::Daily || self.report_daily_collected(kind, &e, clock.local);
+            let Some(p) = rsched::due(&e, clock, collected) else { continue };
+            let ids = self.report_schedule_clusters(&e);
+            if ids.is_empty() {
+                continue;
+            }
+            // Remembered before the job runs: a send that brings the process down must not be
+            // repeated by every restart.
+            {
+                let _g = self.reports.settings_lock.lock();
+                let mut f: ScheduleFile = self.reports.read_json(rsched::FILE);
+                f.get_mut(kind).last_period = Some(rsched::period_key(&p));
+                if let Err(err) = self.reports.write_json(rsched::FILE, &f) {
+                    tracing::warn!(error = %err, "volume report: the schedule could not be marked; not sending, to avoid sending twice");
+                    continue;
+                }
+            }
+            tracing::info!(period = %p.label, clusters = ids.len(), report = kind.as_str(), "volume report: the mailed report is due");
+            if let Ok(id) = self.report_queue_mailed(kind, ids, p, &e, SCHEDULE_BY) {
+                first.get_or_insert(id);
             }
         }
-        tracing::info!(period = %p.label, clusters = ids.len(), "volume report: the mailed report is due");
-        self.report_queue_mailed(ids, p, &e, SCHEDULE_BY).ok()
+        first
     }
 }
+
+/// `UI_REPORT_MAIL_MAX_MB` when config.txt does not set it.
+pub(super) const MAIL_MAX_MB_DEFAULT: u64 = 20;
 
 const MAIL_FOOTER: &str = "The attachment has the period's days, months and breakdowns. Sizes are 1024-based \
 (GB = 1024³ bytes); \"not measured\" marks a figure Elasticsearch could not report, and the breakdown's \

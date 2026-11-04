@@ -26,6 +26,9 @@
 //! back to the schedule, so that tick tries it again.
 
 pub mod build;
+pub mod control;
+pub mod hosts;
+pub mod indices;
 pub mod jobs;
 pub mod mail;
 pub mod period;
@@ -33,10 +36,11 @@ pub mod schedule;
 pub mod xlsx;
 pub mod zip;
 mod run;
+mod run_types;
 
 use crate::volume::store::write_atomic;
 use jobs::{Job, Kind, Queue};
-use schedule::{LastSent, ReportSchedule, Retry};
+use schedule::{LastSent, Retry, ScheduleFile};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -58,6 +62,30 @@ pub struct Reports {
     pub(crate) settings_lock: parking_lot::Mutex<()>,
     /// Writes `jobs.json` off the caller's thread (`save`).
     writer: Arc<Writer>,
+    /// Report builds and day-file work run on blocking threads, at most this many at once
+    /// (`REPORT_CPU_SLOTS`, 1..2): never on a worker of the runtime that serves the pages.
+    pub(crate) cpu: Arc<tokio::sync::Semaphore>,
+    /// Clusters an indices or hosts collection reads at once (`UI_REPORT_CLUSTERS_AT_ONCE`).
+    pub(crate) collecting: Arc<tokio::sync::Semaphore>,
+    /// Clusters whose hosts collection runs now (the timer's or a job's).
+    pub(crate) hosts_running: parking_lot::Mutex<std::collections::HashSet<String>>,
+    /// The timer's attempts per cluster today: (local day, attempts, last at ms).
+    pub(crate) hosts_attempts: parking_lot::Mutex<std::collections::HashMap<String, (String, u32, i64)>>,
+    /// The waits before a failed page is asked again (2 s, 10 s, 30 s); the tests shorten them.
+    pub(crate) backoff_ms: parking_lot::Mutex<[u64; 3]>,
+    /// The hosts job watchdog in ms instead of `UI_REPORT_HOSTS_MAX_MINUTES` (the tests).
+    pub(crate) watchdog_ms: parking_lot::Mutex<Option<u64>>,
+}
+
+/// Blocking threads for report work (`REPORT_CPU_SLOTS`, default 1, at most 2).
+fn cpu_slots() -> usize {
+    crate::settings::get().text("REPORT_CPU_SLOTS").and_then(|v| v.parse().ok()).unwrap_or(1usize).clamp(1, 2)
+}
+
+/// Clusters collected at once by the indices and hosts reports (`UI_REPORT_CLUSTERS_AT_ONCE`).
+fn clusters_at_once() -> usize {
+    crate::settings::get().text("UI_REPORT_CLUSTERS_AT_ONCE").and_then(|v| v.parse().ok())
+        .unwrap_or(control::DEFAULT_CLUSTERS_AT_ONCE).clamp(1, 8)
 }
 
 /// The queue file's writer: one thread at a time, the latest body only. The queue changes
@@ -141,7 +169,11 @@ impl Reports {
         let now = crate::fleet::now_ms() as i64;
         let failed = q.restarted(now);
         let r = Reports { data, queue: parking_lot::Mutex::new(Queue::default()), ticking: Default::default(),
-                          settings_lock: Default::default(), writer: Default::default() };
+                          settings_lock: Default::default(), writer: Default::default(),
+                          cpu: Arc::new(tokio::sync::Semaphore::new(cpu_slots())),
+                          collecting: Arc::new(tokio::sync::Semaphore::new(clusters_at_once())),
+                          hosts_running: Default::default(), hosts_attempts: Default::default(),
+                          backoff_ms: parking_lot::Mutex::new([2_000, 10_000, 30_000]), watchdog_ms: Default::default() };
         if !failed.is_empty() {
             tracing::warn!(jobs = failed.len(), "volume report: jobs running when the core stopped were marked failed");
             r.save(&q);
@@ -164,10 +196,11 @@ impl Reports {
     /// did not queue them.
     pub(crate) fn mailed_ended(&self, job: &Job, last: LastSent, retry: Retry) -> bool {
         let _g = self.settings_lock.lock();
-        let mut f: ReportSchedule = self.read_json(schedule::FILE);
+        let mut file: ScheduleFile = self.read_json(schedule::FILE);
+        let f = file.get_mut(job.report);
         f.last_sent = Some(last);
-        let back = job.by == SCHEDULE_BY && schedule::give_back(&mut f, &schedule::period_key(&job.period), retry);
-        if let Err(e) = self.write_json(schedule::FILE, &f) {
+        let back = job.by == SCHEDULE_BY && schedule::give_back(f, &schedule::period_key(&job.period), retry);
+        if let Err(e) = self.write_json(schedule::FILE, &file) {
             tracing::warn!(error = %e, "volume report: the last send could not be recorded");
             return false;
         }
@@ -257,6 +290,7 @@ impl Reports {
 mod tests {
     use super::*;
     use jobs::{Format, Job, Kind};
+    use schedule::ReportSchedule;
 
     fn tmp() -> PathBuf {
         let p = std::env::temp_dir().join(format!("ep-reports-{}-{}", std::process::id(), rand::random::<u32>()));
@@ -328,7 +362,8 @@ mod tests {
             });
             drop(r);
             let again = Reports::open(Some(&d));
-            let f: ReportSchedule = again.read_json(schedule::FILE);
+            // The single schedule written before 0.3.54 was read as the volume report's.
+            let f = again.read_json::<ScheduleFile>(schedule::FILE).volume;
             let last = f.last_sent.clone().expect("recorded");
             assert!(!last.ok, "{last:?}");
             assert_eq!(f.last_period.is_none(), back, "by {by}, mail started {started}: {f:?}");
@@ -341,14 +376,16 @@ mod tests {
             if back {
                 // Queued again, running at the next restart: not given back a second time.
                 let r = Reports::open(Some(&d));
-                r.write_json(schedule::FILE, &ReportSchedule { last_period: Some(key.into()), ..r.read_json(schedule::FILE) }).unwrap();
+                let mut sf: ScheduleFile = r.read_json(schedule::FILE);
+                sf.volume.last_period = Some(key.into());
+                r.write_json(schedule::FILE, &sf).unwrap();
                 r.with(|q| {
                     q.push(mailed_job(by, false), "m2".into());
                     q.promote(3);
                 });
                 drop(r);
                 let third = Reports::open(Some(&d));
-                let f: ReportSchedule = third.read_json(schedule::FILE);
+                let f = third.read_json::<ScheduleFile>(schedule::FILE).volume;
                 assert_eq!(f.last_period.as_deref(), Some(key), "once per period: {f:?}");
             }
             std::fs::remove_dir_all(d).ok();

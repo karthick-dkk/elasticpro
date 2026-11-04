@@ -1058,7 +1058,7 @@ impl Core {
     ///   asking the core to send that cluster's stored credential to an address of their
     ///   choosing.
     fn gate_cluster(&self, t: &str, msg: &Value, c: &Caller) -> Result<(), Value> {
-        const VOLUME_ONE: &[&str] = &["VOLUME_SETTINGS", "VOLUME_FIELDS_CHECK", "VOLUME_DAILY", "VOLUME_MONTHLY", "VOLUME_BREAKDOWN"];
+        const VOLUME_ONE: &[&str] = &["VOLUME_SETTINGS", "VOLUME_FIELDS_CHECK", "VOLUME_DAILY", "VOLUME_MONTHLY", "VOLUME_BREAKDOWN", "HOSTS_QUERY"];
         // VOLUME_PATTERN_CHECK is an admin's, and an admin limited to some clusters may check
         // only those: the one message here that stops a (limited) admin too.
         // An admin limited to some clusters is held to them wherever a message names one: the
@@ -1311,7 +1311,7 @@ impl Core {
             // Volume reports and the mail that carries them (docs/VOLUME.md "Reports and mail").
             "REPORT_RUN" | "REPORT_JOBS" | "REPORT_STOP" | "REPORT_CLEAR" | "REPORT_DOWNLOAD" | "REPORT_CONCURRENCY_SET"
             | "MAIL_SETTINGS_GET" | "MAIL_SETTINGS_SET" | "MAIL_TEST" | "REPORT_SCHEDULE_GET" | "REPORT_SCHEDULE_SET"
-            | "REPORT_SEND_NOW" => self.report_msg(&t, &msg, caller.as_ref()).await,
+            | "REPORT_SEND_NOW" | "HOSTS_QUERY" => self.report_msg(&t, &msg, caller.as_ref()).await,
             "NOTIFY_PUT" | "NOTIFY_LIST" | "NOTIFY_CLEAR" => self.notify_msg(&t, &msg, caller.as_ref()),
             // Play, the NOC wall display (docs/PLAY.md), and the shared acknowledgements.
             // PLAY_EXCHANGE needs the client's address and is answered in handle_reply_as_from_at;

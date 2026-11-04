@@ -284,6 +284,52 @@ UI_REPORT_SCHEDULE=
 UI_REPORT_AT=
 UI_REPORT_SHEETS=
 
+# The indices report and volume by host (Reports > Exports; docs/REPORT-TYPES.md). Each
+# schedule's recipients, cadence (monthly, weekly, daily, manual) and time (HH:MM, server
+# local); each key set here locks its field. Both stay off until an admin switches them
+# on with recipients. Defaults: indices daily at 08:00, hosts daily at 06:00, both over the
+# month so far.
+UI_REPORT_INDICES_TO=
+UI_REPORT_INDICES_SCHEDULE=
+UI_REPORT_INDICES_AT=
+UI_REPORT_HOSTS_TO=
+UI_REPORT_HOSTS_SCHEDULE=
+# Also when volume by host is collected, every day for every cluster (default 06:00).
+UI_REPORT_HOSTS_AT=
+# Volume by host's metadata columns, comma-separated, in order. Default: parser_tag,
+# fwdtag, fwd_tag, src_ip, tag1, zone, ClientID, ClientName, branch, logtag, log_type,
+# observer_hostname. A field the mapping does not have is a column of "not in the mapping".
+UI_REPORT_HOSTS_FIELDS=
+# At most this many pages of 1000 rows per cluster per day (default 2000); a day that
+# reaches it is marked incomplete, never silently cut.
+UI_REPORT_HOSTS_MAX_PAGES=
+# Months of volume by host kept on the server, 1-13 (default 3).
+UI_REPORT_HOSTS_KEEP_MONTHS=
+# Per request, seconds (default 120); the pause between one partition's pages, ms (default
+# 200); and the longest a volume-by-host job runs before it stops between pages, keeping
+# what it collected for the next run (minutes, default 120).
+UI_REPORT_HOSTS_REQUEST_TIMEOUT_S=
+UI_REPORT_HOSTS_PAGE_PAUSE_MS=
+UI_REPORT_HOSTS_MAX_MINUTES=
+# ClientID and branch as the report fills them: a missing ClientID takes the cluster's first,
+# a missing branch becomes UI_REPORT_BRANCH_DEFAULT (default DC).
+UI_REPORT_CLIENT_ID_FIELD=
+UI_REPORT_BRANCH_FIELD=
+UI_REPORT_BRANCH_DEFAULT=
+# A report file larger than this (MB, default 20) is not attached to its mail: the mail says
+# it is in Reports > Exports.
+UI_REPORT_MAIL_MAX_MB=
+# How hard a report may push one cluster (docs/REPORT-TYPES.md "Concurrency"): requests in
+# flight per cluster to start with (default 2) and at most (default 4, 1-8; always one under
+# ES_PER_CLUSTER, so the health poll and people keep a slot), the page time that counts as
+# good (ms, default 5000), and clusters collected at once (default 4, 1-8).
+UI_REPORT_CONCURRENCY_START=
+UI_REPORT_CONCURRENCY_MAX=
+UI_REPORT_PAGE_TARGET_MS=
+UI_REPORT_CLUSTERS_AT_ONCE=
+# Threads that build report files, 1-2 (default 1): never the threads that serve the pages.
+REPORT_CPU_SLOTS=
+
 # Play, the NOC wall display (#/play; docs/PLAY.md). Each key set here locks its field on
 # Config > Play. Display links (a URL a TV opens without signing in) are on unless
 # UI_PLAY_ENABLED=false, which also ends every TV already showing one.

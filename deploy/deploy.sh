@@ -302,6 +302,27 @@ UI_REPORT_TO text
 UI_REPORT_SCHEDULE enum monthly,weekly,daily,manual
 UI_REPORT_AT text
 UI_REPORT_SHEETS text
+UI_REPORT_INDICES_TO text
+UI_REPORT_INDICES_SCHEDULE enum monthly,weekly,daily,manual
+UI_REPORT_INDICES_AT text
+UI_REPORT_HOSTS_TO text
+UI_REPORT_HOSTS_SCHEDULE enum monthly,weekly,daily,manual
+UI_REPORT_HOSTS_AT text
+UI_REPORT_HOSTS_FIELDS text
+UI_REPORT_HOSTS_MAX_PAGES int 1 100000
+UI_REPORT_HOSTS_KEEP_MONTHS int 1 13
+UI_REPORT_HOSTS_REQUEST_TIMEOUT_S int 10 600
+UI_REPORT_HOSTS_PAGE_PAUSE_MS int 0 10000
+UI_REPORT_HOSTS_MAX_MINUTES int 5 1440
+UI_REPORT_CLIENT_ID_FIELD text
+UI_REPORT_BRANCH_FIELD text
+UI_REPORT_BRANCH_DEFAULT text
+UI_REPORT_MAIL_MAX_MB int 1 100
+UI_REPORT_CONCURRENCY_START int 1 8
+UI_REPORT_CONCURRENCY_MAX int 1 8
+UI_REPORT_PAGE_TARGET_MS int 100 120000
+UI_REPORT_CLUSTERS_AT_ONCE int 1 8
+REPORT_CPU_SLOTS int 1 2
 UI_PLAY_ENABLED bool
 UI_PLAY_DELAY_YELLOW_MIN int 1 1440
 UI_PLAY_DELAY_RED_MIN int 1 1440
@@ -363,7 +384,7 @@ cfg_check() {
       case ",$item," in *,,*) echo "has an empty pattern between commas"; return 1 ;; *,_*|*,+*|,-*) echo "a pattern cannot start with _ or +, and the first cannot be an exclusion (-)"; return 1 ;; esac ;;
     UI_VOLUME_TIME_FIELD)
       case $v in *[[:space:],\"*]*) echo "must be one field name, e.g. @timestamp"; return 1 ;; esac ;;
-    UI_VOLUME_COLLECT_AT|UI_REPORT_AT)
+    UI_VOLUME_COLLECT_AT|UI_REPORT_AT|UI_REPORT_INDICES_AT|UI_REPORT_HOSTS_AT)
       [[ $v =~ ^([01][0-9]|2[0-3]):[0-5][0-9]$ ]] || { echo "must be a time of day HH:MM, 00:00 to 23:59"; return 1; } ;;
     # The same rule as the core (settings.rs check_text, play::settings::spotlight_when_problem).
     UI_PLAY_SPOTLIGHT_WHEN)
@@ -385,7 +406,12 @@ cfg_check() {
       [[ $v =~ ^[^[:space:]/@?#]+$ ]] || { echo "must be a host name or an address, without a scheme or a path"; return 1; } ;;
     UI_SMTP_FROM)
       [[ $v == *@* ]] || { echo "must be a mail address, e.g. ElasticPro <elasticpro@example.com>"; return 1; } ;;
-    UI_REPORT_TO)
+    UI_REPORT_CLIENT_ID_FIELD|UI_REPORT_BRANCH_FIELD)
+      case $v in *[[:space:],\"*]*) echo "must be one field name, e.g. ClientID"; return 1 ;; esac ;;
+    UI_REPORT_HOSTS_FIELDS)
+      [ -n "$(cfg_list "$v")" ] || { echo "names no field"; return 1; }
+      case $v in *[\"*]*) echo "field names only: no quotes or *"; return 1 ;; esac ;;
+    UI_REPORT_TO|UI_REPORT_INDICES_TO|UI_REPORT_HOSTS_TO)
       while IFS= read -r item; do
         [[ $item == *?@?* ]] || { echo "\"$item\" is not a mail address"; return 1; }
       done < <(cfg_list "$v") ;;
