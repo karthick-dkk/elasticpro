@@ -84,3 +84,79 @@ file that is mid-rename by retrying once.
   nginx; the four existing security properties still hold.
 - Measure on the VM during the 06:00 run: core RSS and p95 message latency with and without the
   run, worker RSS peak; figures in the PR.
+
+## As built (0.3.54)
+
+Where the code is: `crates/elasticpro-core/src/worker.rs` (the role and what it starts, the
+token, the worker's gate caps, the wire types, the replies, the requests ring — pure, tested),
+`src/bridge/worker_api.rs` (forwarding, the worker's API, its heartbeat and reloads),
+`src/bin/bridge.rs` (which timers and which listener a role starts), `src/report/schedule.rs`
+(`ScheduleState`, `merge`), `tests/worker.rs` and `tools/hosted-check.sh` ("the report worker").
+
+Decisions made while building, within the contract:
+
+- **What each role starts** is one table, `worker::starts(role)`, read by the bridge binary and
+  tested. Beyond the contract's table: the worker also restores the cluster setup
+  (`primed.json`) and runs the Zabbix sync on its interval — read-only (`createHosts` is forced
+  off in the worker) — because it needs the clusters and their credentials; it never writes
+  `primed.json` or `cluster-secrets.json`. It starts no poller, no health minute task, no
+  reaper, no delay sink, no history store, no Zabbix push and no UI.
+- **The worker keeps no accounts**: no `users.json`, sessions or tokens, no activity log, and it
+  never seeds the first account; its own instance file is `instance-worker.json`.
+- **Endpoints**: `POST /run` (`REPORT_RUN`, `VOLUME_RUN`), `/send-now` (`REPORT_SEND_NOW`),
+  `/stop` (`REPORT_STOP`) and, beyond the contract, `/queue` (`REPORT_CLEAR`,
+  `REPORT_CONCURRENCY_SET` — they write `jobs.json`, which is the worker's alone); `GET /health`
+  (`{ok, role, version, startedAt, running, queued}`, no token, for the compose healthcheck). A
+  body is `{type, msg, caller: {name, role, scope}}`; headers `x-elasticpro-worker-token` and
+  `x-elasticpro-version`. Wrong token → 401; another version → 409 `worker_version` (EP-219).
+  The worker then handles the message exactly as role `all` would, as the caller the core
+  vouched for (its name on the job, its clusters).
+- **The core's own checks before forwarding** (`report_precheck`): `REPORT_RUN` — kind, cluster
+  list, the 5-cluster limit, the per-person and mail limits against the `jobs.json` snapshot;
+  `REPORT_STOP` — the job exists; `REPORT_CONCURRENCY_SET` — 3..5; `REPORT_SEND_NOW` —
+  recipients and mail configured. The gate's role and cluster checks run first, as always. The
+  worker checks all of it again against the live queue.
+- **Unreachable** (connection refused, timeout of 15 s, a 401 because the two do not share the
+  volume): `worker_unavailable` (EP-218) with `lastHeartbeatAt` from `worker/status.json`.
+- **The token** is made with `worker::create_once`: written to a temporary file of the process's
+  own (0600, synced) and hard-linked into place, so of two containers starting at once one wins
+  and both read it. The cluster-secrets key file beside it is now made the same way.
+- **Schedule state**: `report-schedule-state.json` = `{volume, indices, hosts}` each `{lastSent,
+  lastPeriod, retriedPeriod, retried, seenSchedule, seenAt, appliedSetAt}`. Every decision reads
+  `schedule::merge(settings, state)`. A save (`REPORT_SCHEDULE_SET`, the core) no longer writes
+  `lastPeriod`: it writes its decision as `markPassed` with `setAt`, and the state takes it in
+  once (`appliedSetAt`). Migration: while no state file exists the settings' old fields are the
+  state; the worker's first tick writes the state file; the core strips the old fields from the
+  settings on its next save, and only once the state file exists (so a save made before the
+  worker ever ran loses nothing).
+- **Reloads**: the schedules, `mail.json`, config.txt-driven settings and the cluster config are
+  read from disk wherever they are used, so they are always current. `primed.json`, `pins.json`,
+  `cluster-secrets.json` and the Zabbix link are checked every 30 s by modification time and
+  reloaded (re-prime, re-sync). `policy.json` is checked (one `stat`) inside `volume_stopped`,
+  i.e. before every collection request and page.
+- **Reads in role core**: `REPORT_JOBS`, `REPORT_DOWNLOAD`, the health tab and the volume
+  pages' "running" read `jobs.json` / `worker/status.json` (`Reports::snapshot`, read again once
+  if mid-rename). `Reports::open` in role core marks nothing and never writes `jobs.json`.
+- **Gate**: the worker's `Gate` is built from `worker::worker_limits` (16 / 4 / 4, reserve 0) over
+  the core's other limits. The report controller's ceiling is `concurrency_for(per_cluster,
+  role)`: the whole per-cluster cap in role `worker`, one under in role `all`.
+- **Heartbeat** (every 10 s, `worker_heartbeat`): `WorkerStatus` with memory/CPU from the
+  worker's `SelfMonitor` (read once a minute, ring `health/worker.json` every 10 samples), the
+  worker's `gate_figures("worker", …)`, `job_line` of each running job, the queued count and the
+  collections (daily volume runs with their progress; hosts collections by cluster — their
+  concurrency is in the job lines). `worker/requests.jsonl` is rewritten (temp + rename) when it
+  changed: the newest 5000 finished requests, each with `process: "worker"`; the core merges
+  them into `REQUEST_LOG`'s `recent` by start time, held to the caller's clusters.
+- **What the worker does not know**: it runs no poller, so it does not see a cluster as down or
+  red from the poller's cache — the daily volume run does not skip an unreachable cluster up
+  front (the collector fails it and says so), and the "red goes to the end of the job" rule of
+  REPORT-TYPES.md does not fire in the worker. Everything else of "Isolation and failure"
+  applies unchanged.
+- **Deploy**: compose service `worker` as the contract says, plus the same `build:` as the core
+  (one tag, so `up --build` never tries to pull a locally built image) and a healthcheck on
+  `:8766/health` (the image's own checks the core's port). `deploy.sh` restarts and rolls back
+  `core worker` together wherever it moved only the core (`app_services`), and reports the
+  worker's health after the core's without rolling back for it. A compose file without the
+  worker leaves the core in role `all`.
+- **Not yet measured**: core RSS and p95 message latency with and without the 06:00 run, and the
+  worker's RSS peak — to be taken on the test VM (Tests, above).

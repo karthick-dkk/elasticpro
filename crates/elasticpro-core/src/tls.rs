@@ -134,6 +134,17 @@ impl PinStore {
         }
     }
 
+    /// Read `pins.json` again: the report worker, after the core trusted or forgot a certificate
+    /// or host key. A file that does not read leaves what is held.
+    pub fn reload(&self) {
+        let Some(p) = &self.path else { return };
+        match std::fs::read_to_string(p).ok().map(|t| serde_json::from_str::<PinFile>(&t)) {
+            Some(Ok(d)) => *self.data.write() = d,
+            None => *self.data.write() = PinFile::default(),
+            Some(Err(e)) => tracing::warn!(error = %e, "pins.json could not be read again; keeping the trust decisions held"),
+        }
+    }
+
     pub fn cert_pin(&self, host: &str) -> Option<Pin> {
         self.data.read().certs.get(host).cloned()
     }

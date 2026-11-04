@@ -164,6 +164,35 @@ git pull && docker compose up -d --build
 
 Trust decisions (`pins.json`) live in the `core-data` volume and survive rebuilds.
 
+## The report worker (0.3.54)
+
+Reports run in a container of their own, `worker`: the same image as the core with
+`ELASTICPRO_ROLE=worker` ([docs/WORKER.md](../docs/WORKER.md)). It runs the daily volume
+collection, the report queue and the mailed schedules, the 06:00 hosts collection, report builds
+and mail, under its own limits, so a report — however large, however it fails — can never slow
+down or take down the monitoring. The core runs `ELASTICPRO_ROLE=core` and hands those actions to
+it over the internal network; every page still reads from the core.
+
+| `.env` | Default | |
+|---|---|---|
+| `ELASTICPRO_WORKER_MEM_LIMIT` | `1g` | the worker's memory cap; its report memory share is sized from it |
+| `ELASTICPRO_WORKER_CPUS` | `1.0` | the worker's CPU cap |
+| `ELASTICPRO_WORKER_GATE_CONCURRENCY` / `_PER_CLUSTER` / `_PER_JUMP_HOST` | `16` / `4` / `4` | requests the worker sends at once: overall, per cluster, per jump host (all background) |
+
+- It mounts what the core mounts (the config, config.txt, the SSH keys, the `core-data` volume)
+  and opens its own SSH tunnels. Port 8766 is inside the compose network only; nginx never routes
+  it, and it refuses any action without the shared token in `core-data` (`worker/token`).
+- **Down or restarting**: monitoring carries on. Report actions answer *the report worker is not
+  running* (EP-218) and Exports shows it in amber with the last heartbeat; scheduled reports and
+  collections resume from where they stopped when it is back. `docker compose ps worker`,
+  `docker compose logs worker`.
+- **Versions**: the worker refuses work from a core of another version (EP-219). `deploy.sh`
+  always moves and restarts `core` and `worker` together.
+- **A compose file from before 0.3.54** has no `worker` service: the core then runs everything
+  itself (role `all`), exactly as before, until the new compose file is in place.
+- Requests › ElasticPro health shows the worker's memory, CPU, request gate and running jobs;
+  the Request Centre labels its requests *worker*.
+
 The Zabbix modules are not part of these images. They have their own version (shared by all the
 modules, separate from ElasticPro's), pinned with the commit in `deploy/zabbix/MODULES_REF` and
 shipped in the release as `elasticpro-zabbix-modules-<ver>.tar.gz`; see "Modules versioning" in

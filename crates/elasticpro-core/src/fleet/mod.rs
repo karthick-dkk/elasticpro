@@ -54,7 +54,7 @@ pub struct Fleet {
     /// The policy as the scheduler runs it; replaced whole by `POLICY_SET`.
     pub(crate) cfg: RwLock<Config>,
     pub(crate) policy: RwLock<Policy>,
-    policy_path: Option<std::path::PathBuf>,
+    pub(crate) policy_path: Option<std::path::PathBuf>,
     policy_warning: Option<String>,
     wake: tokio::sync::Notify,
     events: broadcast::Sender<FleetEvent>,
@@ -96,6 +96,20 @@ impl Fleet {
 }
 
 impl Fleet {
+    /// Read `policy.json` again (the report worker, when the core changed it): the emergency
+    /// stop and the policy as the core last wrote them. A file that does not read keeps what is
+    /// held, and says so.
+    pub(crate) fn reload_policy(&self) {
+        let (pol, warning) = Policy::load(self.policy_path.as_deref());
+        if let Some(w) = warning {
+            tracing::warn!(%w, "request policy: policy.json could not be read again; keeping the one held");
+            return;
+        }
+        *self.cfg.write() = Config::from_policy(&pol);
+        *self.policy.write() = pol;
+        tracing::info!("request policy reloaded from policy.json");
+    }
+
     /// The disk cache, for the housekeeping sweep.
     pub(crate) fn disk_store(&self) -> &Arc<store::DiskStore> {
         &self.disk

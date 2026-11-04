@@ -360,5 +360,30 @@ check "no header needed on loopback" "$(post http://127.0.0.1:$P2/bridge -d '{"t
 check "no scheduler off hosted"     "$(post http://127.0.0.1:$P2/bridge -d '{"type":"DELAY_SINK_GET"}' | field supported)" "False"
 # Nor a history store: it is written by the server, the one edition still running at night.
 check "no history store off hosted" "$(post http://127.0.0.1:$P2/bridge -d '{"type":"HISTORY_STORE_GET"}' | field supported)" "False"
+kill $PID; wait $PID 2>/dev/null || true
+
+# docs/WORKER.md, black-box: one binary in role worker, one in role core, the same data
+# directory (loopback, so no accounts: the one person is the administrator).
+echo "== the report worker =="
+DW=$(mktemp -d); WP=$(free_port); CP=$(free_port); OUTW=$(mktemp); OUTC=$(mktemp)
+ELASTICPRO_ROLE=worker ELASTICPRO_WORKER_PORT=$WP ELASTICPRO_DATA_DIR=$DW RUST_LOG=info "$BIN" ui 0 >"$OUTW" 2>&1 & PIDW=$!; disown
+ELASTICPRO_ROLE=core ELASTICPRO_WORKER_URL=http://127.0.0.1:$WP ELASTICPRO_DATA_DIR=$DW RUST_LOG=info "$BIN" ui "$CP" >"$OUTC" 2>&1 & PIDC=$!; disown
+trap 'kill $PIDW $PIDC 2>/dev/null; rm -rf "$DW" "$OUTW" "$OUTC"' EXIT
+until curl -s -o /dev/null "http://127.0.0.1:$WP/health"; do sleep 0.2; done
+until curl -s -o /dev/null "http://127.0.0.1:$CP/"; do sleep 0.2; done
+check "the worker answers /health in role worker" "$(curl -s "http://127.0.0.1:$WP/health" | field role)" "worker"
+check "the worker serves no UI and no message API" "$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:$WP/bridge" -d '{}')" "404"
+check "an action without the shared token is refused" "$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:$WP/queue" -d '{}')" "401"
+check "one token for both, 0600" "$(stat -f '%Lp' "$DW/worker/token" 2>/dev/null || stat -c '%a' "$DW/worker/token")" "600"
+check "the core forwards an action to the worker" "$(post "http://127.0.0.1:$CP/bridge" -d '{"type":"REPORT_CONCURRENCY_SET","n":4}' | field ok)" "True"
+got=; for _ in $(seq 1 25); do got=$(post "http://127.0.0.1:$CP/bridge" -d '{"type":"REPORT_JOBS"}' | field concurrency); [ "$got" = 4 ] && break; sleep 0.2; done
+check "and reads the worker's jobs.json back" "$got" "4"
+check "the core does not start the report timer" "$(grep -c 'volume report: timer started' "$OUTC" || true)" "0"
+check "the core says its role" "$(grep -c '"role":"core"' "$OUTC" | tr -d ' ' | sed 's/^[1-9][0-9]*$/yes/')" "yes"
+kill $PIDW; wait $PIDW 2>/dev/null || true
+check "worker down: an action is worker_unavailable" "$(post "http://127.0.0.1:$CP/bridge" -d '{"type":"REPORT_CONCURRENCY_SET","n":3}' | field kind)" "worker_unavailable"
+check "and PING still answers" "$(post "http://127.0.0.1:$CP/bridge" -d '{"type":"PING"}' | field ok)" "True"
+check "and the jobs are still read" "$(post "http://127.0.0.1:$CP/bridge" -d '{"type":"REPORT_JOBS"}' | field ok)" "True"
+kill $PIDC; wait $PIDC 2>/dev/null || true
 
 [ $fail -eq 0 ] && echo "ok: hosted-mode contract holds" || { echo "FAILED"; exit 1; }

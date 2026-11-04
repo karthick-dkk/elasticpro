@@ -1133,6 +1133,8 @@ pub fn query(c: &ClusterHosts, cfg: &HostsConfig, p: &Period, q: &str, sort: Opt
     }
     Ok(json!({
         "ok": true, "clusterId": c.id, "period": p, "fields": cfg.fields, "fill": { "clientId": fill.first_client, "branchDefault": fill.branch_default },
+        // Which of `fields` the ClientID and branch columns are filled from.
+        "clientIdField": cfg.client_id_field, "branchField": cfg.branch_field,
         "rows": rows, "total": total, "offset": offset, "limit": limit,
         "totals": { "docs": sums.docs, "eventBytes": sums.event_bytes, "subBytes": sums.sub_bytes },
         "days": days, "incompleteDays": incomplete_days, "notInMapping": not_in_mapping,

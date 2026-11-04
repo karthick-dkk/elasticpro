@@ -85,7 +85,7 @@ impl Core {
             Some(d) => {
                 let read = |f: &str| std::fs::read(d.join(f)).ok().and_then(|b| serde_json::from_slice::<Value>(&b).ok());
                 let file = read(crate::report::schedule::FILE).unwrap_or(Value::Null);
-                let state = read("report-schedule-state.json");
+                let state = read(crate::report::schedule::STATE_FILE);
                 health::schedules_from(&file, state.as_ref(), crate::report::schedule::Clock::now())
             }
             None => vec![],
@@ -115,14 +115,8 @@ impl Core {
     /// Running and queued report jobs: the worker's own list when it reports one (it has the
     /// concurrency), else the queue this process holds (role all) or `jobs.json` (role core).
     fn health_jobs(&self, worker: &WorkerView) -> (Vec<health::JobLine>, Vec<health::JobLine>, &'static str) {
-        let queue: Value = if self.health.role == "core" {
-            self.data_dir.as_deref()
-                .and_then(|d| std::fs::read(d.join("reports").join(crate::report::JOBS_FILE)).ok())
-                .and_then(|b| serde_json::from_slice(&b).ok())
-                .unwrap_or(Value::Null)
-        } else {
-            serde_json::to_value(&*self.reports.queue.lock()).unwrap_or(Value::Null)
-        };
+        // Role core: `jobs.json` as the worker last wrote it; else the queue held here.
+        let queue: Value = serde_json::to_value(self.reports.snapshot()).unwrap_or(Value::Null);
         let (running, queued) = health::jobs_from(&queue);
         match worker.status.as_ref().filter(|s| !s.jobs.is_empty()) {
             Some(s) => (s.jobs.clone(), queued, "worker"),
@@ -313,8 +307,11 @@ impl Core {
             "cache": { "budgetBytes": budget.cache_bytes, "usedBytes": cache_used },
             "inflight": { "budgetBytes": self.body_budget.total_bytes(), "usedBytes": self.body_budget.in_use_bytes() },
             "readCache": { "budgetBytes": cfg.read_cache_bytes, "usedBytes": rc_bytes, "entries": rc_entries },
-            // memory.rs has no reports share in this build: said so, never a zero.
-            "reports": Value::Null,
+            // The reports share of this process's budget (memory.rs). What it holds is not
+            // counted, so `usedBytes` is not known rather than a zero; in role core the reports
+            // run in the worker, under the worker's own limit.
+            "reports": { "budgetBytes": budget.reports_bytes, "usedBytes": Value::Null, "pageMaxBytes": budget.report_page_bytes(),
+                         "holder": if self.role == crate::worker::Role::Core { "worker" } else { "this process" } },
         });
 
         let (running, queued, source) = self.health_jobs(&worker);
@@ -326,7 +323,7 @@ impl Core {
         };
         let held = self.health.held.read().clone();
         let last_job = {
-            let q = self.reports.queue.lock();
+            let q = self.reports.snapshot();
             let mut by_kind: std::collections::BTreeMap<String, Value> = Default::default();
             for j in q.jobs.iter().filter(|j| j.status.finished()) {
                 let v = serde_json::to_value(j).unwrap_or(Value::Null);

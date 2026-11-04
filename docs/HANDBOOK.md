@@ -757,6 +757,17 @@ The short version of docs/VOLUME.md "Reports and mail". Code: `crates/elasticpro
 
 `Job = {id, kind: cluster|mailed, clusterId ("*" for mailed), clusterName, clusterIds, period: {from, to, label}, format, mail, by, createdAt, startedAt, endedAt, status, progress: {done, total}, file: {name, bytes} | null, error, mailError, stoppedBy, warning, sheets?, stopping}`.
 
+**With the report worker (role `core`, docs/WORKER.md).** `REPORT_RUN`, `REPORT_SEND_NOW`,
+`REPORT_STOP`, `REPORT_CLEAR`, `REPORT_CONCURRENCY_SET` and `VOLUME_RUN` are forwarded to the
+worker after the core's own checks (role, the caller's clusters, `too_many_clusters`, the
+per-person and mail limits against `jobs.json`, recipients and mail for a send) and answer what
+the worker answers — or `{ok: false, kind: "worker_unavailable", message, lastHeartbeatAt}`
+(EP-218) when it cannot be reached, or `kind: "worker_version"` (EP-219). `REPORT_JOBS`,
+`REPORT_DOWNLOAD`, `REPORT_SCHEDULE_GET/SET`, `MAIL_*` and `HOSTS_QUERY` are the core's, from the
+files: `REPORT_JOBS` and `REPORT_SCHEDULE_GET` then also carry `worker: {state, heartbeatAt,
+text, level}` (`up`, `late`, `down`, `missing`, `unreadable`, `version`). `REQUEST_LOG`'s `recent`
+includes the worker's finished requests with `process: "worker"`. Role `all` forwards nothing.
+
 ## Zabbix connection — the message contract
 
 Hosted edition only (every other edition answers `{ok: false, kind: "not_supported", supported: false}`

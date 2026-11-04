@@ -48,7 +48,7 @@ fn is_admin(caller: Option<&Caller>) -> bool {
 
 /// A job as the pages see it: without the desktop settings it carries, with whether a stop
 /// was asked for.
-pub(super) fn job_view(j: &Job) -> Value {
+pub(crate) fn job_view(j: &Job) -> Value {
     let mut v = serde_json::to_value(j).unwrap_or(Value::Null);
     if let Some(o) = v.as_object_mut() {
         o.remove("volume");
@@ -144,6 +144,14 @@ impl Core {
         if self.reports.data_dir().is_none() || self.volume.store.is_none() {
             return no_store();
         }
+        // Role core: actions go to the report worker, after the checks only the core can make;
+        // reads stay here, from the files the worker writes (docs/WORKER.md).
+        if self.role == crate::worker::Role::Core && crate::worker::endpoint(t).is_some() {
+            if let Some(refusal) = self.report_precheck(t, msg, caller) {
+                return refusal;
+            }
+            return self.forward_to_worker(t, msg, caller).await;
+        }
         match t {
             "REPORT_RUN" => self.report_run(msg, caller).await,
             "REPORT_JOBS" => self.report_jobs(caller),
@@ -167,6 +175,65 @@ impl Core {
             }
             "HOSTS_QUERY" => self.hosts_query(msg, caller).await,
             _ => bad("bad_message", format!("Unknown message type {t:?}")),
+        }
+    }
+
+    /// Role core, before an action goes to the worker: what the core can refuse itself, so a
+    /// refusal does not wait on (or depend on) the worker. The worker checks all of it again
+    /// against the live queue.
+    fn report_precheck(&self, t: &str, msg: &Value, caller: Option<&Caller>) -> Option<Value> {
+        let by = who(caller);
+        match t {
+            "REPORT_RUN" => {
+                let kind = match ReportKind::of_message(msg) {
+                    Ok(k) => k,
+                    Err(e) => return Some(bad("bad_request", e)),
+                };
+                let ids: Vec<String> = match msg.get("clusterIds").and_then(Value::as_array) {
+                    Some(a) if !a.is_empty() => a.iter().filter_map(Value::as_str).map(String::from).collect(),
+                    _ => return Some(bad("bad_request", "clusterIds is required: one job per cluster")),
+                };
+                let mut unique = ids.clone();
+                unique.sort();
+                unique.dedup();
+                if kind == ReportKind::Hosts && unique.len() > super::hosts::MAX_RUN_CLUSTERS {
+                    return Some(bad("too_many_clusters", format!("volume by host runs for at most {} clusters at a time; {} were asked for",
+                                                                super::hosts::MAX_RUN_CLUSTERS, unique.len())));
+                }
+                let mail = msg.get("mail").and_then(Value::as_bool).unwrap_or(false);
+                let n = if kind == ReportKind::Volume { unique.len() } else { 1 };
+                let mut q = self.reports.snapshot();
+                if let Err((k, m)) = q.room(&by, n, if mail { n } else { 0 }, now_ms()) {
+                    return Some(bad(k, m));
+                }
+                None
+            }
+            "REPORT_STOP" => {
+                if msg.get("all").and_then(Value::as_bool) == Some(true) {
+                    return None;
+                }
+                match msg.get("id").and_then(Value::as_str) {
+                    Some(id) if self.reports.snapshot().get(id).is_some() => None,
+                    Some(id) => Some(bad("not_found", format!("no job {id:?}"))),
+                    None => Some(bad("bad_request", "id or all:true is required")),
+                }
+            }
+            "REPORT_CONCURRENCY_SET" => {
+                let n = msg.get("n").and_then(Value::as_u64).unwrap_or(0) as usize;
+                (!(MIN_CONCURRENCY..=MAX_CONCURRENCY).contains(&n)).then(|| bad("bad_request", format!("n must be {MIN_CONCURRENCY} to {MAX_CONCURRENCY}")))
+            }
+            "REPORT_SEND_NOW" => {
+                let kind = match ReportKind::of_message(msg) {
+                    Ok(k) => k,
+                    Err(e) => return Some(bad("bad_request", e)),
+                };
+                let (e, _) = self.report_schedule_effective(kind);
+                if e.to.is_empty() {
+                    return Some(bad("bad_request", "no recipients: set them in this report's schedule"));
+                }
+                self.mail_effective().problem().map(|p| bad("not_configured", p))
+            }
+            _ => None,
         }
     }
 
@@ -243,13 +310,20 @@ impl Core {
 
     fn report_jobs(self: &Arc<Self>, caller: Option<&Caller>) -> Value {
         // A queue left by a restart starts here too (desktop has no timer).
-        self.report_pump();
+        if self.reports.writer() {
+            self.report_pump();
+        }
         let seen = self.report_visible(caller);
-        let q = self.reports.queue.lock();
+        // Role core: the worker's queue as it last wrote it.
+        let q = self.reports.snapshot();
         let mut jobs: Vec<&Job> = q.jobs.iter().filter(|j| seen(j)).collect();
         jobs.sort_by_key(|j| std::cmp::Reverse(j.seq));
-        json!({ "ok": true, "jobs": jobs.into_iter().map(job_view).collect::<Vec<_>>(),
-                "concurrency": q.concurrency, "running": q.running(), "queued": q.queued() })
+        let mut out = json!({ "ok": true, "jobs": jobs.into_iter().map(job_view).collect::<Vec<_>>(),
+                              "concurrency": q.concurrency, "running": q.running(), "queued": q.queued() });
+        if let Some(w) = self.worker_line() {
+            out["worker"] = w;
+        }
+        out
     }
 
     /// `REPORT_STOP {id}` or `{all:true}` (admin).
@@ -298,7 +372,7 @@ impl Core {
     /// `REPORT_DOWNLOAD {id}`: the starter's or an admin's, while the file is kept.
     fn report_download(&self, msg: &Value, caller: Option<&Caller>) -> Value {
         let Some(id) = msg.get("id").and_then(Value::as_str) else { return bad("bad_request", "id is required") };
-        let Some(job) = self.reports.queue.lock().get(id).cloned() else { return bad("not_found", format!("no job {id:?}")) };
+        let Some(job) = self.reports.snapshot().get(id).cloned() else { return bad("not_found", format!("no job {id:?}")) };
         if !self.report_visible(caller)(&job) {
             return bad("not_found", format!("no job {id:?}"));
         }
@@ -895,9 +969,10 @@ impl Core {
 
     /* ---------------------------------------- the schedule ---------------------------------------- */
 
+    /// A kind's schedule as decisions read it: its settings with the state over them, then
+    /// config.txt over both.
     pub(super) fn report_schedule_effective(&self, kind: ReportKind) -> (ReportSchedule, Vec<&'static str>) {
-        let f: ScheduleFile = self.reports.read_json(rsched::FILE);
-        f.get(kind).effective(crate::settings::get())
+        self.reports.schedule_view().get(kind).effective(crate::settings::get())
     }
 
     /// The clusters a schedule covers: its list, or every cluster.
@@ -922,6 +997,10 @@ impl Core {
             // What the next send covers, for the page's "Download .xlsx" (one definition).
             "nextPeriod": rsched::next_period(&e, Clock::now()),
         });
+        // Role core: whether the worker that sends it is there (Exports says so in amber).
+        if let Some(w) = self.worker_line() {
+            v["worker"] = w;
+        }
         if kind == ReportKind::Volume {
             v["sheets"] = json!(e.sheets);
         }
@@ -947,7 +1026,8 @@ impl Core {
         let by = who(caller);
         {
             let _g = self.reports.settings_lock.lock();
-            let mut whole: ScheduleFile = self.reports.read_json(rsched::FILE);
+            // The settings file alone: the state (last send, last period) is the worker's.
+            let mut whole: ScheduleFile = self.reports.schedule_settings();
             let file = whole.get_mut(kind);
             let (before, managed) = file.effective(s);
             let locked = |field: &str, same: bool| -> Option<Value> {
@@ -1054,10 +1134,14 @@ impl Core {
             if after.enabled && after.to.is_empty() {
                 return bad("bad_request", "add at least one recipient (to) before switching the report on");
             }
+            // The period whose moment has passed counts as handled: decided here, taken in once by
+            // whoever keeps the state (`schedule::merge`).
+            file.mark_passed = None;
             if after.enabled && (!before.enabled || before.schedule != after.schedule || before.at != after.at || before.period != after.period) {
                 let mut tmp = after.clone();
+                tmp.last_period = None;
                 rsched::mark_passed(&mut tmp, Clock::now());
-                file.last_period = tmp.last_period;
+                file.mark_passed = tmp.last_period;
             }
             // What was in force when this decision was made: config.txt changing it later is
             // noticed by the tick (`rsched::reconcile`).
@@ -1065,7 +1149,7 @@ impl Core {
             file.seen_at = Some(after.at.clone());
             file.set_by = Some(by.clone());
             file.set_at = Some(now_ms());
-            if let Err(e) = self.reports.write_json(rsched::FILE, &whole) {
+            if let Err(e) = self.reports.write_schedule_settings(&whole) {
                 return bad("io_error", e);
             }
         }
@@ -1196,19 +1280,23 @@ impl Core {
         self.reports.prune_files(std::time::SystemTime::now());
         // config.txt changed a cadence or a time since the file last decided (it can only at
         // a start): the period whose moment passed is handled, as a save would do.
+        // Written to the state file, which only this process writes; also where the old state
+        // fields of report-schedule.json are migrated, on the first tick after an upgrade.
         {
-            let _g = self.reports.settings_lock.lock();
-            let mut f: ScheduleFile = self.reports.read_json(rsched::FILE);
-            let mut changed = false;
-            for kind in ReportKind::ALL {
-                changed |= rsched::reconcile(f.get_mut(kind), crate::settings::get(), clock);
-            }
-            if changed {
-                if let Err(err) = self.reports.write_json(rsched::FILE, &f) {
+            let reconciled = self.reports.with_schedule_state(|f| {
+                let mut changed = false;
+                for kind in ReportKind::ALL {
+                    changed |= rsched::reconcile(f.get_mut(kind), crate::settings::get(), clock);
+                }
+                changed
+            });
+            match reconciled {
+                Ok(true) => tracing::info!("volume report: config.txt changed a schedule; a period whose moment has passed counts as handled"),
+                Ok(false) => {}
+                Err(err) => {
                     tracing::warn!(error = %err, "volume report: the schedule could not be brought in line with config.txt; not sending, to avoid a late send");
                     return None;
                 }
-                tracing::info!("volume report: config.txt changed a schedule; a period whose moment has passed counts as handled");
             }
         }
         // Stopped: nothing is marked, so the report goes out on the first tick after.
@@ -1226,14 +1314,9 @@ impl Core {
             }
             // Remembered before the job runs: a send that brings the process down must not be
             // repeated by every restart.
-            {
-                let _g = self.reports.settings_lock.lock();
-                let mut f: ScheduleFile = self.reports.read_json(rsched::FILE);
-                f.get_mut(kind).last_period = Some(rsched::period_key(&p));
-                if let Err(err) = self.reports.write_json(rsched::FILE, &f) {
-                    tracing::warn!(error = %err, "volume report: the schedule could not be marked; not sending, to avoid sending twice");
-                    continue;
-                }
+            if let Err(err) = self.reports.with_schedule_state(|f| f.get_mut(kind).last_period = Some(rsched::period_key(&p))) {
+                tracing::warn!(error = %err, "volume report: the schedule could not be marked; not sending, to avoid sending twice");
+                continue;
             }
             tracing::info!(period = %p.label, clusters = ids.len(), report = kind.as_str(), "volume report: the mailed report is due");
             if let Ok(id) = self.report_queue_mailed(kind, ids, p, &e, SCHEDULE_BY) {

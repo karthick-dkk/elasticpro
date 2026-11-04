@@ -8,6 +8,10 @@
 # authentication is optional: make-htpasswd.sh and the htpasswd mount are still here so
 # re-enabling auth_basic in nginx.conf is a two-line change, not a rebuild.
 # The core is reachable ONLY through nginx. Never publish port 8765.
+# The report worker (docs/WORKER.md) is the same image in role `worker`: the daily volume
+# collection, the report queue and schedules, the hosts collection, report builds and mail run
+# there, in their own memory and CPU limit, so a report can never slow down or take down the
+# monitoring. It listens on 8766 inside the compose network only; nginx never routes to it.
 services:
   core:
     # Defaults to a locally built image, so `docker compose up --build` works on a clone
@@ -27,6 +31,10 @@ services:
     group_add:
       - "${ELASTICPRO_GID:-1000}"
     environment:
+      # docs/WORKER.md: people, the monitoring and every setting; report runs, collections and
+      # mail go to the worker service below. A compose file without this line (one from
+      # before 0.3.54) runs everything in the core, as before.
+      ELASTICPRO_ROLE: core
       ELASTICPRO_BIND: 0.0.0.0
       ELASTICPRO_DATA_DIR: /app/data
       ELASTICPRO_CONFIG: /app/config/config_cluster.json
@@ -87,6 +95,59 @@ services:
     # an ELASTICPRO_REDIS_URL_FILE directly (the *_FILE convention the Vault/Zabbix secrets
     # already use — see hcvault.rs), this override can be dropped in favour of that.
     entrypoint: ["sh", "-c", "if [ -s /run/elasticpro-secrets/redis_password ]; then pw=$$(sed -e 's|%|%25|g' -e 's|/|%2F|g' -e 's|@|%40|g' -e 's|:|%3A|g' -e 's|?|%3F|g' -e 's|#|%23|g' /run/elasticpro-secrets/redis_password); export ELASTICPRO_REDIS_URL=\"redis://:$${pw}@redis:6379/0\"; fi; exec elasticpro-bridge /app/ui 8765"]
+    networks: [internal]
+    logging:
+      driver: json-file
+      options: { max-size: "50m", max-file: "10" }
+
+  # The report worker (docs/WORKER.md): the same image as the core, in role `worker`. It reads
+  # the clusters, credentials, SSH keys, config and config.txt from the same mounts (read-only
+  # except the data volume, which it shares with the core: the core reads the jobs, reports,
+  # volume record and its heartbeat from there). Down or restarting, monitoring is untouched:
+  # the core answers report actions with `worker_unavailable` until it is back, and scheduled
+  # work picks up from jobs.json and the collection checkpoints.
+  worker:
+    image: ${ELASTICPRO_IMAGE:-elasticpro-core:latest}
+    # The same build as the core (one image, one tag): `docker compose up --build` builds it
+    # once — the second is a cache hit — and never tries to pull a locally built tag.
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    restart: unless-stopped
+    group_add:
+      - "${ELASTICPRO_GID:-1000}"
+    environment:
+      ELASTICPRO_ROLE: worker
+      ELASTICPRO_BIND: 0.0.0.0
+      ELASTICPRO_DATA_DIR: /app/data
+      ELASTICPRO_CONFIG: /app/config/config_cluster.json
+      ELASTICPRO_SETTINGS: /app/config.txt
+      RUST_LOG: info,audit=info
+      # The schedules and the 06:00 hosts collection run in this container's local time: the
+      # same TZ as the core.
+      TZ: ${TZ:-UTC}
+      # The worker's own request gate (docs/WORKER.md): every request Background, never shared
+      # with the core's gate that serves people and the health poll.
+      ELASTICPRO_WORKER_GATE_CONCURRENCY: ${ELASTICPRO_WORKER_GATE_CONCURRENCY:-16}
+      ELASTICPRO_WORKER_GATE_PER_CLUSTER: ${ELASTICPRO_WORKER_GATE_PER_CLUSTER:-4}
+      ELASTICPRO_WORKER_GATE_PER_JUMP_HOST: ${ELASTICPRO_WORKER_GATE_PER_JUMP_HOST:-4}
+    volumes:
+      - ./config:/app/config:ro
+      - ./config.txt:/app/config.txt:ro
+      - core-data:/app/data
+      - ${SSH_KEYS_DIR:-./ssh}:/app/ssh:ro
+      - ./secrets/redis:/run/elasticpro-secrets:ro
+    # Its own limits: a report that grows can only use these.
+    mem_limit: ${ELASTICPRO_WORKER_MEM_LIMIT:-1g}
+    cpus: ${ELASTICPRO_WORKER_CPUS:-1.0}
+    # The image's own healthcheck asks the core's port (8765), which the worker does not open.
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null -T 4 http://127.0.0.1:8766/health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    # No `ports:`: 8766 is reachable inside the compose network only, and nginx does not route it.
     networks: [internal]
     logging:
       driver: json-file

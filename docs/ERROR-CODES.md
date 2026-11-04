@@ -45,6 +45,8 @@ A code keeps its meaning once it is given out. A new kind of failure gets a new 
 | EP-215 | `queue_timeout` | The request waited `ES_QUEUE_WAIT_MS` (or its own timeout, if shorter) for a free connection and got none. Nothing was sent. The Request Centre shows what holds the connections. |
 | EP-216 | `response_too_large` | The cluster's answer is larger than `ES_MAX_RESPONSE_MB` (a page's request) or `ES_MAX_FLEET_RESPONSE_MB` (the poller's), or than the memory the core may spend on answers at once. It was not read, and nothing of it is shown. Narrow the request (`filter_path`, a smaller `size`, fewer indices) or raise the limit. |
 | EP-217 | `too_many_clusters` | A report that collects per cluster was asked for more clusters than it runs at once (volume by host: 5). Nothing was queued; ask for fewer. |
+| EP-218 | `worker_unavailable` | The core (role `core`) could not reach the report worker (docs/WORKER.md) to hand it a report run, a send, a stop or a collection. Nothing was queued. Monitoring is not affected; scheduled reports and collections resume when the worker is back. `lastHeartbeatAt` says when it was last seen. Check `docker compose ps worker` and `docker compose logs worker`; both containers must share the data volume (the shared token is in it). |
+| EP-219 | `worker_version` | The report worker runs another ElasticPro version than the core, and refuses work until both are the same, so a half-upgraded stack never mixes record formats. Finish the upgrade: `deploy/deploy.sh` moves both together (`docker compose up -d core worker`). |
 
 ## Config, storage and secrets (3xx)
 

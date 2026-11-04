@@ -1049,7 +1049,8 @@ pub fn job_line(j: &Value) -> JobLine {
     let pick = |k: &str| j.get(k).filter(|v| !v.is_null()).or_else(|| p.and_then(|p| p.get(k)).filter(|v| !v.is_null()));
     JobLine {
         id: s("id"),
-        kind: j.get("reportKind").and_then(Value::as_str).map(String::from).unwrap_or_else(|| s("kind")),
+        // `reportKind` in a reply, `report` in jobs.json (left out for volume).
+        kind: j.get("reportKind").or_else(|| j.get("report")).and_then(Value::as_str).map(String::from).unwrap_or_else(|| s("kind")),
         cluster_id: s("clusterId"),
         cluster_name: s("clusterName"),
         by: s("by"),
@@ -1479,7 +1480,11 @@ pub struct Health {
 impl Health {
     /// The ring is loaded from `<data>/health/<role>.json`, so a restart keeps the day.
     pub fn new(data: Option<&Path>, sampler: Sampler) -> Health {
-        let role = role();
+        Health::with_role(data, sampler, role())
+    }
+
+    /// The same, for a process whose role is already decided (the core's `role`).
+    pub fn with_role(data: Option<&Path>, sampler: Sampler, role: &'static str) -> Health {
         let now = crate::fleet::now_ms();
         let ring = data.map(|d| Ring::load(d, role, now)).unwrap_or_default();
         Health {

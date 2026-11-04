@@ -117,11 +117,13 @@ pub struct ReportSchedule {
     pub subject: String,
     #[serde(default = "default_sheets")]
     pub sheets: Vec<String>,
-    #[serde(default)]
+    /// State, not a setting (docs/WORKER.md): kept in `report-schedule-state.json` by whoever
+    /// runs the reports; in this file only before 0.3.54, read once and migrated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_sent: Option<LastSent>,
     /// The key of the last period the schedule sent (or tried to). Not shown to anyone as a
-    /// setting; it is the memory that keeps a restart from sending twice.
-    #[serde(default)]
+    /// setting; it is the memory that keeps a restart from sending twice. State (as above).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_period: Option<String>,
     /// The cadence and time in force when the schedule last decided which period was handled
     /// (a save, or a tick that found config.txt changed). `None`: the file's own.
@@ -133,8 +135,13 @@ pub struct ReportSchedule {
     /// a job that brings the process down is retried once, not on every restart.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retried_period: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_zero")]
     pub retried: u32,
+    /// A save's decision that the period whose moment had passed counts as handled: the key
+    /// the state takes in once (for this `set_at`). Written by the core, which never writes
+    /// the state itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mark_passed: Option<String>,
     #[serde(default)]
     pub set_by: Option<String>,
     #[serde(default)]
@@ -147,6 +154,10 @@ pub struct ReportSchedule {
     /// kept inside the entry — the entry's key says it.
     #[serde(skip)]
     pub kind: ReportKind,
+}
+
+fn is_zero(n: &u32) -> bool {
+    *n == 0
 }
 
 fn default_at() -> String {
@@ -181,7 +192,7 @@ impl ReportSchedule {
         ReportSchedule {
             enabled: false, to: vec![], cc: vec![], bcc: vec![], schedule, at,
             clusters: default_clusters(), subject: default_subject_for(kind).into(), sheets: default_sheets(), last_sent: None,
-            last_period: None, seen_schedule: None, seen_at: None, retried_period: None, retried: 0, set_by: None, set_at: None,
+            last_period: None, seen_schedule: None, seen_at: None, retried_period: None, retried: 0, mark_passed: None, set_by: None, set_at: None,
             period, kind,
         }
     }
@@ -290,6 +301,132 @@ impl Serialize for ScheduleFile {
 impl<'de> Deserialize<'de> for ScheduleFile {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<ScheduleFile, D::Error> {
         Ok(ScheduleFile::from_value(&Value::deserialize(d)?))
+    }
+}
+
+/* -------------------------------------- settings and state -------------------------------------- */
+
+/// `report-schedule-state.json`: what happened to each schedule — the last send, the last
+/// period, the retries, what was in force when it last decided. Written only by the process
+/// that runs the reports (the worker, or role all); the core reads it for Exports.
+pub const STATE_FILE: &str = "report-schedule-state.json";
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ScheduleState {
+    pub last_sent: Option<LastSent>,
+    pub last_period: Option<String>,
+    pub retried_period: Option<String>,
+    pub retried: u32,
+    pub seen_schedule: Option<Cadence>,
+    pub seen_at: Option<String>,
+    /// The settings' `setAt` this state has taken in: a save's `markPassed` and `seen*` are
+    /// taken in once, by the first read after it.
+    pub applied_set_at: Option<i64>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct StateFile {
+    pub volume: ScheduleState,
+    pub indices: ScheduleState,
+    pub hosts: ScheduleState,
+}
+
+impl StateFile {
+    pub fn get(&self, kind: ReportKind) -> &ScheduleState {
+        match kind {
+            ReportKind::Volume => &self.volume,
+            ReportKind::Indices => &self.indices,
+            ReportKind::Hosts => &self.hosts,
+        }
+    }
+
+    pub fn get_mut(&mut self, kind: ReportKind) -> &mut ScheduleState {
+        match kind {
+            ReportKind::Volume => &mut self.volume,
+            ReportKind::Indices => &mut self.indices,
+            ReportKind::Hosts => &mut self.hosts,
+        }
+    }
+}
+
+impl ScheduleState {
+    /// The state a merged entry carries.
+    pub fn of(s: &ReportSchedule) -> ScheduleState {
+        ScheduleState {
+            last_sent: s.last_sent.clone(), last_period: s.last_period.clone(), retried_period: s.retried_period.clone(),
+            retried: s.retried, seen_schedule: s.seen_schedule, seen_at: s.seen_at.clone(), applied_set_at: s.set_at,
+        }
+    }
+
+    /// A settings entry from before 0.3.54 kept its state itself: that is the state until a
+    /// state file exists.
+    fn legacy(s: &ReportSchedule) -> ScheduleState {
+        ScheduleState { applied_set_at: None, ..ScheduleState::of(s) }
+    }
+
+    /// Take in a save the state has not seen: what was in force when it was made, and its
+    /// decision about the period whose moment had passed.
+    fn take_in(mut self, set: &ReportSchedule) -> ScheduleState {
+        if set.set_at.is_some() && set.set_at != self.applied_set_at {
+            if set.seen_schedule.is_some() {
+                self.seen_schedule = set.seen_schedule;
+            }
+            if set.seen_at.is_some() {
+                self.seen_at = set.seen_at.clone();
+            }
+            if let Some(m) = &set.mark_passed {
+                self.last_period = Some(m.clone());
+            }
+            self.applied_set_at = set.set_at;
+        }
+        self
+    }
+}
+
+/// The schedules as every decision reads them: the settings, with the state laid over them.
+/// `state` is `None` when no state file exists yet (a stack upgraded from before 0.3.54): the
+/// settings' own state fields are the state then — read once, and migrated by the first write.
+pub fn merge(settings: &ScheduleFile, state: Option<&StateFile>) -> ScheduleFile {
+    let mut out = settings.clone();
+    for kind in ReportKind::ALL {
+        let set = settings.get(kind);
+        let st = match state {
+            Some(f) => f.get(kind).clone(),
+            None => ScheduleState::legacy(set),
+        }
+        .take_in(set);
+        let e = out.get_mut(kind);
+        e.last_sent = st.last_sent;
+        e.last_period = st.last_period;
+        e.retried_period = st.retried_period;
+        e.retried = st.retried;
+        e.seen_schedule = st.seen_schedule;
+        e.seen_at = st.seen_at;
+        e.mark_passed = None;
+    }
+    out
+}
+
+/// The state of merged schedules, as the state file keeps it.
+pub fn state_of(merged: &ScheduleFile) -> StateFile {
+    StateFile {
+        volume: ScheduleState::of(&merged.volume),
+        indices: ScheduleState::of(&merged.indices),
+        hosts: ScheduleState::of(&merged.hosts),
+    }
+}
+
+/// The settings as the core writes them, without the state fields. Only once the state file
+/// exists: before, they are the state still to be migrated, and are left where they are.
+pub fn strip_state(f: &mut ScheduleFile) {
+    for kind in ReportKind::ALL {
+        let e = f.get_mut(kind);
+        e.last_sent = None;
+        e.last_period = None;
+        e.retried_period = None;
+        e.retried = 0;
     }
 }
 
@@ -829,5 +966,71 @@ mod tests {
         let (i, im) = f.indices.effective(&s);
         assert_eq!((i.schedule, im), (Cadence::Weekly, vec!["schedule"]));
         assert!(f.volume.effective(&s).1.is_empty(), "the volume report's keys are its own");
+    }
+}
+
+#[cfg(test)]
+mod state_tests {
+    use super::*;
+
+    fn monthly(at: i64) -> ReportSchedule {
+        ReportSchedule { enabled: true, to: vec!["a@b.c".into()], schedule: Cadence::Monthly, set_at: Some(at),
+                         ..ReportSchedule::default_for(ReportKind::Volume) }
+    }
+
+    #[test]
+    fn the_old_fields_are_read_once_and_then_the_state_file_wins() {
+        // A file from before 0.3.54: one object, its state inside.
+        let old = serde_json::json!({ "enabled": true, "to": ["a@b.c"], "schedule": "monthly", "lastPeriod": "2026-09-01..2026-09-30",
+                                      "lastSent": { "at": 5, "to": 1, "ok": true, "error": null }, "retried": 1, "retriedPeriod": "x" });
+        let settings = ScheduleFile::from_value(&old);
+        let view = merge(&settings, None);
+        assert_eq!(view.volume.last_period.as_deref(), Some("2026-09-01..2026-09-30"), "read from the settings while no state file exists");
+        assert_eq!(view.volume.last_sent.as_ref().map(|l| l.at), Some(5));
+        // Migrated: the state is written from the view; the settings lose the fields.
+        let mut state = state_of(&view);
+        assert_eq!(state.volume.retried, 1);
+        let mut stripped = settings.clone();
+        strip_state(&mut stripped);
+        let text = serde_json::to_string(&stripped).unwrap();
+        assert!(!text.contains("lastPeriod") && !text.contains("lastSent") && !text.contains("retried"), "{text}");
+        assert_eq!(merge(&stripped, Some(&state)).volume.last_period.as_deref(), Some("2026-09-01..2026-09-30"));
+        // A settings file that still has stale state fields: the state file wins.
+        state.volume.last_period = Some("2026-10-01..2026-10-31".into());
+        assert_eq!(merge(&settings, Some(&state)).volume.last_period.as_deref(), Some("2026-10-01..2026-10-31"));
+    }
+
+    #[test]
+    fn a_save_is_taken_in_once() {
+        let mut set = monthly(100);
+        set.mark_passed = Some("2026-10-01..2026-10-31".into());
+        set.seen_schedule = Some(Cadence::Monthly);
+        set.seen_at = Some("07:00".into());
+        let settings = ScheduleFile { volume: set.clone(), ..ScheduleFile::default() };
+        let mut state = StateFile::default();
+        state.volume.last_period = Some("2026-09-01..2026-09-30".into());
+        let view = merge(&settings, Some(&state));
+        assert_eq!(view.volume.last_period.as_deref(), Some("2026-10-01..2026-10-31"), "the save's decision");
+        assert_eq!(view.volume.seen_schedule, Some(Cadence::Monthly));
+        assert!(view.volume.mark_passed.is_none());
+        // The worker sends (or gives back) after taking it in: that is not undone by the same save.
+        let mut after = state_of(&view);
+        assert_eq!(after.volume.applied_set_at, Some(100));
+        after.volume.last_period = None;
+        assert_eq!(merge(&settings, Some(&after)).volume.last_period, None, "taken in once");
+        // A later save without a decision leaves the period alone.
+        let later = ScheduleFile { volume: ReportSchedule { mark_passed: None, set_at: Some(200), ..set }, ..ScheduleFile::default() };
+        after.volume.last_period = Some("k".into());
+        assert_eq!(merge(&later, Some(&after)).volume.last_period.as_deref(), Some("k"));
+    }
+
+    #[test]
+    fn a_save_made_before_the_worker_ever_ran_is_not_lost() {
+        // Role core, no state file yet: the save keeps the old fields and adds its decision.
+        let mut set = monthly(100);
+        set.last_period = Some("2026-08-01..2026-08-31".into());
+        set.mark_passed = Some("2026-10-01..2026-10-31".into());
+        let view = merge(&ScheduleFile { volume: set, ..ScheduleFile::default() }, None);
+        assert_eq!(view.volume.last_period.as_deref(), Some("2026-10-01..2026-10-31"));
     }
 }

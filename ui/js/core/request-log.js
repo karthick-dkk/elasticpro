@@ -63,7 +63,9 @@ export function requestRows(log, f = NO_FILTER, now = Date.now()) {
     && (!f.slowerThanMs || (r.ms == null ? now - (r.startedAt || now) : r.ms) >= f.slowerThanMs);
   return [...inflight, ...recent].filter(keep).map((r) => ({
     ...r, inflight: r.ms == null, elapsedMs: r.ms == null ? Math.max(0, now - (r.startedAt || now)) : r.ms,
-    originLabel: originLabel(r.origin), outcome: outcomeLabel(r, now), answeredBy: answeredBy(r),
+    // The report worker's requests (role core merges worker/requests.jsonl): said, so a slow
+    // report is never taken for a slow page.
+    originLabel: r.process === 'worker' ? `worker · ${originLabel(r.origin)}` : originLabel(r.origin), outcome: outcomeLabel(r, now), answeredBy: answeredBy(r),
   }));
 }
 
