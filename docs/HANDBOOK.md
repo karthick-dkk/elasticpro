@@ -2,8 +2,9 @@
 
 > **Deprecated as of 0.3.52: the Windows / desktop builds.** Only the hosted Docker build and the
 > Zabbix modules are maintained. The desktop sections below (steps to build, the Windows
-> cross-build, portable mode) describe 0.3.51 and are kept for reference; `src-tauri/` is no longer
-> a workspace member and `tools/build-windows-cross.sh` exits with a message.
+> cross-build, portable mode) describe 0.3.51 and are kept for reference only: `src-tauri/`,
+> `tools/build-windows-cross.sh` and the portable-mode files were removed from the tree in 0.3.54.
+> Check out the [v0.3.51](https://github.com/karthick-dkk/elasticpro/releases/tag/v0.3.51) tag to see or rebuild them.
 
 | | |
 |---|---|
@@ -40,7 +41,7 @@ server itself (clusters direct, `via:` omitted) — same build, same YAML format
 elasticpro-desktop/
 ├── crates/elasticpro-core/  Rust core: read-only guard, TLS pinning, SSH tunnels + SOCKS, HTTP, vault, message bridge
 │   └── src/bin/bridge.rs    dev bridge: serves ui/ over HTTP and exposes the core — run the app in a browser for tests
-├── src-tauri/               Tauri 2 shell: one `bridge` command, dialogs, icons, tauri.conf.json, capabilities
+├── src-tauri/               (removed in 0.3.54) Tauri 2 shell: one `bridge` command, dialogs, icons, tauri.conf.json, capabilities
 ├── ui/                      the app UI (vanilla ES modules — the extension's pages, transport swapped)
 ├── lab/                     example clusters.yaml files used by the tests
 └── .github/workflows/       CI: core tests on Linux, portable .exe + NSIS installer on Windows

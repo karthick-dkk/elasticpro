@@ -3,8 +3,8 @@
 Hosted Docker product (Rust core + unbundled vanilla ES modules, behind nginx) for monitoring
 multiple Elasticsearch clusters, including clusters reachable only through SSH jump hosts, with
 Zabbix frontend modules. The Docker images and the Zabbix modules are the only maintained builds.
-The Tauri desktop shell (`src-tauri/`) is deprecated as of 0.3.52: not built, linted or released;
-last released in 0.3.51.
+The Tauri desktop shell was deprecated in 0.3.52 and removed from the tree in 0.3.54 (`src-tauri/`,
+the Windows cross-build, the portable-mode files); last released in 0.3.51, whose tag still has it.
 
 ## Conventions that matter
 
