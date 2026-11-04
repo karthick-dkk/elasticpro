@@ -9,6 +9,7 @@
  */
 
 import { h, mount } from '../lib/dom.js';
+import { markupSig, objId } from '../lib/keyed.js';
 import { bytes, num, plural } from '../lib/fmt.js';
 import { empty } from '../pages/common.js';
 import { utcDay, monthName } from '../core/volume-daily.js';
@@ -33,7 +34,7 @@ let timer = null;
 export function hostsReset() {
   clearTimeout(timer);
   Object.assign(v, { clusterId: null, mode: 'month', month: null, day: null, q: '', sort: { col: 'day', dir: 'asc' }, offset: 0, state: 'idle', data: null, error: '', seq: 0 });
-  root = null; table = null; pickerSlot = null;
+  root = null; table = null; pickerSlot = null; paintedSig = '';
 }
 
 const months = (n = 13) => {
@@ -66,8 +67,15 @@ function headCell(c) {
     }, c.label, on ? (v.sort.dir === 'asc' ? ' ▲' : ' ▼') : ''));
 }
 
+/** What the table was last drawn from: the page redraws on every push from the core, and the table changes only with these. */
+let paintedSig = '';
+
 function paintTable() {
   if (!table) return;
+  // While the next page or sort is read the rows on screen stay, as they are: same table, same rows.
+  const sig = [v.state === 'loading' && v.data ? 'ok' : v.state, objId(v.data), v.error, v.q, v.sort.col, v.sort.dir, v.offset].join('|');
+  if (sig === paintedSig && table.firstChild) return;
+  paintedSig = sig;
   if (v.state === 'unsupported') { mount(table, empty('This server does not keep volume by host yet (needs ElasticPro 0.3.54).')); return; }
   if (v.state === 'error') { mount(table, empty('Volume by host could not be read.', { detail: h('span.mono', v.error) })); return; }
   if (!v.data) { mount(table, h('div.tbl-empty', 'Reading volume by host…')); return; }
@@ -128,6 +136,7 @@ function build() {
   if (!v.day) v.day = utcDay();
   pickerSlot = h('span.hv-picker');
   table = h('div#hv-table.hv-table');
+  paintedSig = '';
   const mode = (id, label) => h('button.btn.sm', { type: 'button', 'aria-pressed': String(v.mode === id), onclick: () => { v.mode = id; v.offset = 0; rebuild(); fetchRows(); } }, label);
   const monthSel = h('select#hv-month', { 'aria-label': 'Month', onchange: (e) => { v.month = e.target.value; v.offset = 0; fetchRows(); } },
     ...ms.map((m, i) => h('option', { value: m }, i === 0 ? `${monthName(m)} (so far)` : monthName(m))));
@@ -166,7 +175,10 @@ export function hostsSection({ cluster, picker }) {
     v.clusterId = cluster.id; v.offset = 0; v.data = null; v.state = 'idle'; v.seq++;
     build();
   }
-  if (pickerSlot) mount(pickerSlot, picker || h('b.hv-cl', cluster.name));
+  // The page builds its cluster chooser afresh each redraw; put in only when it reads differently,
+  // so an open chooser is not closed by a push from the core.
+  const pick = picker || h('b.hv-cl', cluster.name);
+  if (pickerSlot && (pickerSlot.childNodes.length !== 1 || markupSig(pickerSlot.firstChild) !== markupSig(pick))) mount(pickerSlot, pick);
   if (v.state === 'idle') { v.state = 'loading'; setTimeout(fetchRows, 0); }
   paintTable();
   return root;

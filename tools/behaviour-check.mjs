@@ -287,6 +287,24 @@ await go('shards');
     idxFilter.dispatchEvent(new window.Event('input', { bubbles: true }));
     await settleFor(250);
   }
+  // Typing into the Index filter keeps the field and the keyboard: the first key used to rebuild
+  // the card around it, and with no id to put focus back by, the rest of the typing went to the
+  // page (0.3.54 flicker pass).
+  if (idxFilter) {
+    idxFilter.focus();
+    for (const v of ['m', 'mo', 'moc']) {
+      idxFilter.value = v;
+      idxFilter.dispatchEvent(new window.Event('input', { bubbles: true }));
+      await settleFor(120);
+    }
+    const now = [...doc.querySelectorAll('input[type=search]')].find((x) => x.placeholder === 'filter by name');
+    ok(now === idxFilter && idxFilter.isConnected, 'shards: typing into the Index filter replaced the field');
+    ok(doc.activeElement === idxFilter, `shards: typing into the Index filter lost the keyboard to ${doc.activeElement && (doc.activeElement.id || doc.activeElement.tagName)}`);
+    idxFilter.value = '';
+    idxFilter.dispatchEvent(new window.Event('input', { bubbles: true }));
+    await settleFor(250);
+    idxFilter.blur();
+  }
 
   // Ticking a started shard offers a bulk move; ticking nothing offers nothing.
   ok(!/ticked/.test(doc.body.textContent), 'shards: the bulk bar is showing with nothing ticked');
@@ -816,6 +834,23 @@ await goOne('snapshots');
       ok(/At most 3 run together/.test(txt), 'reports: the footnote does not say how many run together');
       // What the pill says is the poller's.
       ok(R.pillText(R.reports) === 'Reports · 1 running · 1 queued', `reports: the pill would read "${R.pillText(R.reports)}"`);
+
+      // The 2-s poll while a job runs moves its progress: the row and its Stop button stay the same
+      // elements, only the status line changes (0.3.54 flicker pass — the button under the mouse
+      // used to be replaced every 2 s, so its hover blinked and a slow click hit nothing).
+      {
+        const row0 = doc.querySelector('#rj-panel .rj-job[data-job="jr"]');
+        const stop0 = row0 && row0.querySelector('.rj-stop');
+        jobs = jobs.map((j) => (j.id === 'jr' ? { ...j, progress: { done: 40, total: 50 } } : j));
+        await R.refreshReports();
+        await settleFor(50);
+        const row1 = doc.querySelector('#rj-panel .rj-job[data-job="jr"]');
+        ok(row1 === row0 && row1.querySelector('.rj-stop') === stop0, 'reports: a progress poll rebuilt the running job\'s row or its Stop button');
+        ok(/Running · 80 %/.test(row1 ? row1.textContent : ''), `reports: the progress did not move on in place (${row1 && row1.textContent})`);
+        jobs = jobs.map((j) => (j.id === 'jr' ? { ...j, progress: { done: 31, total: 50 } } : j));
+        await R.refreshReports();
+        await settleFor(50);
+      }
 
       // An indices / hosts job (0.3.54): ONE job for the picked clusters, a line per cluster with
       // its concurrency, halvings and last reason; a cluster it could not read named with why.
@@ -3008,6 +3043,23 @@ restoreConsole();
   ok(rows.length > 0, 'requests: no rows — the poller has been running, so the log cannot be empty');
   const origins = [...doc.querySelectorAll('section.card table tbody tr td:nth-child(3)')].map((td) => td.textContent.trim());
   ok(origins.some((o) => /^poller · /.test(o)), `requests: rows should name the poller as the asker, saw ${JSON.stringify(origins.slice(0, 3))}`);
+  // The two-second re-read touches only what changed (0.3.54 flicker pass): the tabs and the
+  // emergency stop are the same elements after it, and a filter shows the choice made — the
+  // options were built with selected: '' (a false property), so every redraw showed the first.
+  {
+    const tabBtn = doc.querySelector('nav.rq-tabs button');
+    const resultSel = [...doc.querySelectorAll('#view .toolbar select')].find((x) => [...x.options].some((o) => o.value === 'refused'));
+    ok(!!resultSel, 'requests: no Result filter');
+    if (resultSel) {
+      resultSel.value = 'ok'; resultSel.dispatchEvent(new window.Event('change', { bubbles: true }));
+      await settleFor(2600);
+      const again = [...doc.querySelectorAll('#view .toolbar select')].find((x) => [...x.options].some((o) => o.value === 'refused'));
+      ok(again && again.value === 'ok', `requests: after a re-read the Result filter shows "${again && again.value}", not the choice made`);
+      again.value = 'all'; again.dispatchEvent(new window.Event('change', { bubbles: true }));
+      await settleFor(300);
+    }
+    ok(tabBtn && tabBtn.isConnected && doc.querySelector('nav.rq-tabs button') === tabBtn, 'requests: the re-read rebuilt the tabs');
+  }
   await go('overview'); const after = sent.filter((m) => m.type === 'REQUEST_LOG').length; await settleFor(2600);
   ok(sent.filter((m) => m.type === 'REQUEST_LOG').length === after, 'requests: the log is still being re-read after leaving the page');
 }
@@ -3081,7 +3133,17 @@ restoreConsole();
       ok(/2 \(halved 1×: 429 from c1\)/.test(doc.body.textContent), 'health: a running job does not show its concurrency and halvings');
       ok(doc.querySelector('.hl-spark polyline'), 'health: no trend drawn from two samples');
       const logs = count('REQUEST_LOG'), reads = count('SYSTEM_HEALTH');
+      // A re-read whose answer did not change touches nothing (0.3.54 flicker pass): the row under
+      // the mouse is the same row, and a fold opened stays open.
+      const memRow = doc.querySelector('tr[data-check="core.memory"]');
+      const chip = doc.querySelector('.hl-chip[data-part="core"]');
+      const fold = doc.querySelector('.hl-page details[data-fold="thresholds"]');
+      if (fold) { fold.open = true; fold.dispatchEvent(new window.Event('toggle')); }
       await settleFor(5300);
+      ok(doc.querySelector('tr[data-check="core.memory"]') === memRow && memRow.isConnected, 'health: an unchanged re-read replaced the check rows');
+      ok(doc.querySelector('.hl-chip[data-part="core"]') === chip, 'health: an unchanged re-read replaced the status chips');
+      const foldNow = doc.querySelector('.hl-page details[data-fold="thresholds"]');
+      ok(foldNow && foldNow.open, 'health: the Thresholds fold closed on a re-read');
       ok(count('REQUEST_LOG') === logs, 'health: the request log is still read while the health tab is open');
       ok(count('SYSTEM_HEALTH') > reads, 'health: the tab is not read again after 5 s');
       // Back to the log tab, then away: the health read stops.
@@ -4630,6 +4692,7 @@ consoleTabs: {
     press('All').click(); await settleFor(60);
     const search = doc.getElementById('alerts-search');
     search.value = 'bravo'; search.dispatchEvent(new window.Event('input', { bubbles: true })); await settleFor(60);
+    ok(doc.getElementById('alerts-search') === search, 'alerts: typing a search rebuilt the search field (it must be the same element while typed into)');
     ok(doc.querySelectorAll('#view .arow').length === 1 && /bravo-ci/.test(doc.querySelector('#view .arow').textContent) && !doc.querySelector('#view .adown'),
       `alerts: searching "bravo" left ${[...doc.querySelectorAll('#view .arow')].map((r) => r.textContent.slice(0, 30)).join(' | ')}`);
     doc.getElementById('alerts-search').value = '';

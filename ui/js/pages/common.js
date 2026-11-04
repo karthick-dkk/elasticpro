@@ -1,5 +1,5 @@
 /** Shared page pieces. */
-import { h, mount, activatable } from '../lib/dom.js';
+import { h, mount, activatable, reconcile } from '../lib/dom.js';
 import { healthClass, ago, dt, diskUseText } from '../lib/fmt.js';
 import { diskAgainstWatermarks } from '../core/disk-balance.js';
 import { client, refreshAll } from '../core/state.js';
@@ -16,6 +16,42 @@ export function card(title, sub, body, actions) {
     h('header', h('h2', title), sub ? h('span.sub', sub) : null,
       actions ? h('div', { style: { marginLeft: 'auto', display: 'flex', gap: '6px' } }, actions) : null),
     h('div.body', body));
+}
+
+/**
+ * card(), kept between redraws in `cache` (lib/keyed.js nodeCache) under `key`: the same
+ * <section> for as long as the title does not change, its subtitle changed in place, and its
+ * body and actions put back with nodeCache.same — so a page that redraws on a timer touches
+ * only the parts of the card whose text changed. `sub` is text. A body node kept elsewhere
+ * (keptTable) can be passed as it is; never wrap one in a freshly built element, which would
+ * pull it out of the page while the new tree is being built.
+ */
+export function keptCard(cache, key, title, sub, body, actions) {
+  const shell = cache.get(`${key}:card`, `${title}|${actions ? 1 : 0}`, () => h('section.card',
+    h('header', h('h2', title), h('span.sub'),
+      actions ? h('div.card-acts', { style: { marginLeft: 'auto', display: 'flex', gap: '6px' } }) : null),
+    h('div.body')));
+  const subEl = shell.firstChild.children[1];
+  const text = sub ? String(sub) : '';
+  if (subEl.textContent !== text) subEl.textContent = text;
+  subEl.hidden = !text;
+  if (actions) reconcile(shell.firstChild.children[2], cache.sameAll(`${key}:act`, [actions]));
+  mount(shell.lastChild, ...cache.sameAll(`${key}:body`, [body]));
+  return shell;
+}
+
+/**
+ * table(), kept the same way: the table (head and scroll box) is kept for as long as its
+ * columns and whether it has rows stay the same, and `rows` are put into its kept <tbody> as
+ * they are — pass them through cache.sameAll / cache.same so an unchanged row is the row
+ * already on screen. No sorting headers (opts.sort) here.
+ */
+export function keptTable(cache, key, headers, rows, opts = {}) {
+  const none = !rows.length;
+  const heads = headers.map((c) => (c instanceof Node ? c.outerHTML : c));
+  const shell = cache.get(`${key}:table`, JSON.stringify([heads, none, opts.emptyText || '']), () => table(headers, [], opts));
+  if (!none) reconcile(shell.querySelector('tbody'), rows);
+  return shell;
 }
 
 /**
