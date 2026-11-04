@@ -145,6 +145,67 @@ async fn the_core_forwards_actions_and_reads_what_the_worker_wrote() {
     assert_eq!(r["ok"], json!(true), "{r}");
 }
 
+/// A port that takes connections and never answers: a forward that reached it would wait out
+/// the whole forward timeout. Counts the connections it took.
+async fn silent_port() -> (String, Arc<std::sync::atomic::AtomicUsize>) {
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = l.local_addr().unwrap();
+    let n = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let n2 = n.clone();
+    tokio::spawn(async move {
+        let mut held = vec![];
+        while let Ok((s, _)) = l.accept().await {
+            n2.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            held.push(s);
+        }
+    });
+    (format!("http://{addr}"), n)
+}
+
+#[tokio::test]
+async fn a_worker_whose_heartbeat_is_late_is_not_asked_and_a_dead_address_costs_a_second_at_most() {
+    let dir = TempDir::new("worker-late");
+    let worker = Core::new_for_role(Some(dir.0.clone()), Edition::Hosted, 1, ProcessRole::Worker);
+    let core = Core::new_for_role(Some(dir.0.clone()), Edition::Hosted, 1, ProcessRole::Core);
+    let (url, taken) = silent_port().await;
+    core.set_worker_url_for_tests(&url);
+    let late = elasticpro_core::fleet::now_ms() - elasticpro_core::health::HEARTBEAT_AMBER_SECS * 1000 - 1_000;
+    worker.worker_heartbeat(late, true);
+
+    // Late heartbeat (the health check's amber line): answered at once, nothing sent.
+    for t in [json!({ "type": "REPORT_CONCURRENCY_SET", "n": 4 }), json!({ "type": "VOLUME_RUN", "clusterIds": [] }),
+              json!({ "type": "REPORT_CLEAR" })] {
+        let started = std::time::Instant::now();
+        let r = core.handle_as(t.clone(), admin()).await;
+        let took = started.elapsed();
+        assert_eq!(r["kind"], json!("worker_unavailable"), "{t}: {r}");
+        assert_eq!(r["lastHeartbeatAt"], json!(late), "{r}");
+        assert!(r["detail"].as_str().unwrap().contains("no heartbeat"), "{r}");
+        assert!(took < std::time::Duration::from_millis(300), "{t} took {took:?}");
+    }
+    assert_eq!(taken.load(std::sync::atomic::Ordering::SeqCst), 0, "a late worker is never asked");
+
+    // A fresh heartbeat: the worker is asked again.
+    worker.worker_heartbeat(elasticpro_core::fleet::now_ms(), false);
+    let ask = { let c = core.clone(); tokio::spawn(async move { c.handle_as(json!({ "type": "REPORT_CONCURRENCY_SET", "n": 4 }), admin()).await }) };
+    for _ in 0..100 {
+        if taken.load(std::sync::atomic::Ordering::SeqCst) > 0 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert_eq!(taken.load(std::sync::atomic::Ordering::SeqCst), 1, "a worker with a fresh heartbeat is asked");
+    ask.abort();
+
+    // An address nothing answers on (no route): the connect gives up within its second.
+    core.set_worker_url_for_tests("http://10.255.255.1:8766");
+    let started = std::time::Instant::now();
+    let r = core.handle_as(json!({ "type": "REPORT_CONCURRENCY_SET", "n": 4 }), admin()).await;
+    let took = started.elapsed();
+    assert_eq!(r["kind"], json!("worker_unavailable"), "{r}");
+    assert!(took < std::time::Duration::from_millis(elasticpro_core::worker::CONNECT_TIMEOUT_MS + 1_500), "took {took:?}");
+}
+
 #[tokio::test]
 async fn role_core_never_writes_the_queue_and_the_worker_marks_what_a_restart_cut_short() {
     let dir = TempDir::new("worker-queue");

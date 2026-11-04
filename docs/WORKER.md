@@ -66,9 +66,9 @@ file that is mid-rename by retrying once.
   `mem_limit: ${ELASTICPRO_WORKER_MEM_LIMIT:-1g}`, `cpus: ${ELASTICPRO_WORKER_CPUS:-1.0}`,
   `restart: unless-stopped`, same `core-data`, `config`, `config.txt`, `ssh`, secrets mounts,
   `TZ`, network `internal`, healthcheck on `/health`. Core gets `ELASTICPRO_ROLE=core`.
-- `.env.example` and deploy/README.md document the two limits and the role; `deploy/upgrade`
-  paths handle a stack whose compose file predates the worker (it runs `all` until the new
-  compose file is in place).
+- `.env.example` and deploy/README.md document the two limits and the role; `deploy.sh
+  --upgrade` brings a stack whose compose file predates the worker to the new file (it runs `all`
+  until the new compose file is in place — "As built", Deploy).
 - The VM is upgraded without asking after release; production (0.3.21) needs an ask, and its
   `.env` must keep `TZ=Asia/Kolkata`.
 
@@ -118,6 +118,18 @@ Decisions made while building, within the contract:
   worker checks all of it again against the live queue.
 - **Unreachable** (connection refused, timeout of 15 s, a 401 because the two do not share the
   volume): `worker_unavailable` (EP-218) with `lastHeartbeatAt` from `worker/status.json`.
+- **Down, answered at once** (0.3.54 VM findings): with the worker container stopped, each
+  forwarded action took about 3 s — Docker's DNS is slow to fail a stopped container's name — and
+  those times turned the Core chip red in health with a fix about ES_CONCURRENCY. Now:
+  - a worker whose heartbeat is late (`health::heartbeat_late`: `HEARTBEAT_AMBER_SECS`, 30 s, the
+    line the health check turns amber at — one constant for both) is not asked: `worker_unavailable`
+    comes back at once, `detail` "no heartbeat for …: the worker was not asked". A missing status
+    file (never started) is still tried;
+  - the forward's connect, name lookup included, gives up after `worker::CONNECT_TIMEOUT_MS`
+    (1 s), so the first 30 s after a kill cost a second an action at most;
+  - every forwarded type (`worker::endpoint`) waits elsewhere (`health::waits_elsewhere`): its time
+    is in the per-type table but never in the core's own message p95. During a worker kill only
+    the worker's check turns red (docs/HEALTH.md).
 - **The token** is made with `worker::create_once`: written to a temporary file of the process's
   own (0600, synced) and hard-linked into place, so of two containers starting at once one wins
   and both read it. The cluster-secrets key file beside it is now made the same way.
@@ -161,6 +173,16 @@ Decisions made while building, within the contract:
   `core worker` together wherever it moved only the core (`app_services`), and reports the
   worker's health after the core's without rolling back for it. A compose file without the
   worker leaves the core in role `all`.
+- **Upgrade to the core + worker layout** (0.3.54 VM findings: `--upgrade` used to move only the
+  images, so an install upgraded that way stayed in role `all` for good): when the installed
+  `docker-compose.yml` has no `worker` service and the target release's has one, `deploy.sh
+  --upgrade` fetches that release's file (`ELASTICPRO_RELEASE_URL`, default the repository's raw
+  files) and puts it in place — only when the installed file is byte for byte what the running
+  release (or the one before it) shipped; otherwise it stops, nothing changed, and says how to
+  carry the edits over (`docker-compose.override.yml`, then `--replace-compose`). The old file is
+  kept as `docker-compose.yml.bak-<time>`, named in `.compose-previous`; `--rollback` and a failed
+  upgrade put it back (`up -d --remove-orphans`); `--dry-run` prints the diff; `.env` and override
+  files are never touched. deploy/README.md, "Upgrading to 0.3.54 or later: the compose file".
 - **Measured locally** (Docker Desktop, arm64, image from this branch, `deploy/trial.sh` against
   `tools/mock-es.mjs` with `MOCK_LATENCY_MS=2000`; a hosts run over 7 days with collect-again, an
   indices run and a volume run at once): core RSS 10.5 MiB (`VmHWM`; cgroup figure 3.0 → 3.4 MiB

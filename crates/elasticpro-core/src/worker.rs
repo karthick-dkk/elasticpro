@@ -37,6 +37,11 @@ pub const VERSION_HEADER: &str = "x-elasticpro-version";
 /// How long the core waits for the worker to accept an action (queueing is quick; the work
 /// itself is never waited for).
 pub const FORWARD_TIMEOUT_MS: u64 = 15_000;
+/// How long the core waits to connect to the worker, the name lookup included: on the
+/// internal network a live worker connects at once, and a stopped one's name can take
+/// seconds to fail in Docker's DNS. (A worker whose heartbeat is late is not asked at all —
+/// `health::heartbeat_late`.)
+pub const CONNECT_TIMEOUT_MS: u64 = 1_000;
 
 /// What this process is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -307,7 +312,7 @@ pub fn check(expected: &str, token: Option<&str>, version: Option<&str>, own_ver
 /// The HTTP client the core forwards with: plain HTTP on the internal network, no proxy.
 fn client() -> &'static reqwest::Client {
     static C: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
-    C.get_or_init(|| reqwest::Client::builder().no_proxy().connect_timeout(std::time::Duration::from_secs(3))
+    C.get_or_init(|| reqwest::Client::builder().no_proxy().connect_timeout(std::time::Duration::from_millis(CONNECT_TIMEOUT_MS))
         .build().unwrap_or_else(|_| reqwest::Client::new()))
 }
 

@@ -268,14 +268,42 @@ fn sum(b: &Value, name: &str) -> u64 {
     b.pointer(&format!("/{name}/value")).and_then(Value::as_f64).map(|f| f.max(0.0).round() as u64).unwrap_or(0)
 }
 
-/// Read one page's answer. Shards that failed or a time-out are an error (the page is asked
-/// again): a short page would be taken for the end, and its rows for the whole.
-pub fn read_page(res: &Value, r: &Resolved, size: usize) -> Result<Page, String> {
-    if let Some(p) = collect::partial_answer(res) {
-        return Err(p.split(':').next().unwrap_or("a partial answer").to_string());
+/// Why a page could not be read.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PageError {
+    /// Worth asking again: shards failed, the search timed out, the page could not be kept.
+    Retry(String),
+    /// The cluster answered 200 with something that is not a composite answer at all (no
+    /// aggregation, no buckets): asking again gets the same, so the cluster is failed once
+    /// with this reason and the job moves on.
+    Shape(String),
+}
+
+impl PageError {
+    pub fn reason(&self) -> &str {
+        match self {
+            PageError::Retry(s) | PageError::Shape(s) => s,
+        }
     }
-    let h = res.pointer("/aggregations/h").ok_or("the answer has no composite aggregation")?;
-    let buckets = h.get("buckets").and_then(Value::as_array).cloned().unwrap_or_default();
+}
+
+impl From<String> for PageError {
+    fn from(s: String) -> PageError {
+        PageError::Retry(s)
+    }
+}
+
+/// Read one page's answer. Shards that failed or a time-out are an error (the page is asked
+/// again): a short page would be taken for the end, and its rows for the whole. An answer
+/// with no composite aggregation in it is a [`PageError::Shape`].
+pub fn read_page(res: &Value, r: &Resolved, size: usize) -> Result<Page, PageError> {
+    if let Some(p) = collect::partial_answer(res) {
+        return Err(PageError::Retry(p.split(':').next().unwrap_or("a partial answer").to_string()));
+    }
+    let h = res.pointer("/aggregations/h").filter(|h| h.is_object())
+        .ok_or_else(|| PageError::Shape("the answer has no composite aggregation".into()))?;
+    let buckets = h.get("buckets").and_then(Value::as_array).cloned()
+        .ok_or_else(|| PageError::Shape("the composite aggregation has no buckets".into()))?;
     let mut rows = Vec::with_capacity(buckets.len());
     for b in &buckets {
         let Some(index) = b.pointer("/key/i").and_then(key_text) else { continue };
@@ -475,6 +503,11 @@ impl HostsDir {
             open_private(&self.part_path(&day, k), false)?.sync_all().map_err(|e| e.to_string())?;
             parts.push(PartState { indices, page_size, ..PartState::default() });
         }
+        // An earlier start of this day may have had more partitions: theirs are not this one's.
+        let mut k = parts.len();
+        while std::fs::remove_file(self.part_path(&day, k)).is_ok() {
+            k += 1;
+        }
         let cp = Checkpoint { day, header, parts, updated_at: now, ..Checkpoint::default() };
         self.save_checkpoint(&cp)?;
         Ok(cp)
@@ -573,6 +606,33 @@ impl HostsDir {
             }
         }
         days.len()
+    }
+
+    /// Leftovers, removed before a collection starts (one collection per cluster at a time,
+    /// so nothing else writes here meanwhile): every `*.tmp` — a checkpoint write
+    /// (`<day>.partial.tmp`) a crash or a kill cut short, never read by anything — and, beside a
+    /// day file that is held, that day's checkpoint, `.part` files and half-assembled day file,
+    /// unless `again(day)` (this run collects the day again and starts it afresh). A held day's
+    /// checkpoint is never resumed (a normal run skips the day, *Collect again* starts over), so
+    /// such files would only stay on disk. Returns how many files went.
+    pub fn tidy(&self, again: impl Fn(&str) -> bool) -> usize {
+        let mut gone = 0;
+        for e in std::fs::read_dir(&self.dir).into_iter().flatten().flatten() {
+            let name = e.file_name();
+            let Some(n) = name.to_str() else { continue };
+            let stale = if n.ends_with(".tmp") {
+                true
+            } else {
+                match n.get(..10).filter(|d| parse_day(d).is_some()) {
+                    Some(day) => n != format!("{day}.json.gz") && n.as_bytes().get(10) == Some(&b'.') && self.held(day) && !again(day),
+                    None => false,
+                }
+            };
+            if stale && std::fs::remove_file(e.path()).is_ok() {
+                gone += 1;
+            }
+        }
+        gone
     }
 
     pub fn read(&self, day: &str) -> Option<DayReader> {
@@ -1192,8 +1252,43 @@ mod tests {
         assert_eq!(p.rows[1].host, None, "the missing bucket is a row of its own");
         assert!(read_page(&page, &resolved(), 1000).unwrap().done, "fewer buckets than asked: the last page");
         assert!(read_page(&json!({ "aggregations": { "h": { "buckets": [] } } }), &resolved(), 1000).unwrap().done);
-        assert!(read_page(&json!({ "_shards": { "total": 2, "failed": 1 }, "aggregations": { "h": { "buckets": [] } } }), &resolved(), 10).is_err(),
-                "a partial answer is asked again, not taken for the end");
+        assert!(matches!(read_page(&json!({ "_shards": { "total": 2, "failed": 1 }, "aggregations": { "h": { "buckets": [] } } }), &resolved(), 10),
+                         Err(PageError::Retry(_))), "a partial answer is asked again, not taken for the end");
+        // A 200 that is not a composite answer: asking again gets the same.
+        let no_aggs = json!({ "took": 1, "timed_out": false, "hits": { "total": { "value": 0 }, "hits": [] } });
+        assert_eq!(read_page(&no_aggs, &resolved(), 10).err(), Some(PageError::Shape("the answer has no composite aggregation".into())));
+        assert!(matches!(read_page(&json!({ "aggregations": { "h": { "value": 3 } } }), &resolved(), 10), Err(PageError::Shape(_))));
+        assert!(matches!(read_page(&Value::Null, &resolved(), 10), Err(PageError::Shape(_))), "an empty or unparsed body");
+    }
+
+    #[test]
+    fn leftovers_beside_a_held_day_and_cut_short_writes_are_tidied() {
+        let root = tmp();
+        let d = HostsDir::new(&root, "prod");
+        d.write_empty(header("2026-11-01"), vec![], 1).unwrap();
+        d.write_empty(header("2026-11-02"), vec![], 1).unwrap();
+        // A collect-again of the 1st cut short, a checkpoint write killed half-way, and a day
+        // that is not held (its checkpoint is a resume point and stays).
+        let cp = d.begin(header("2026-11-01"), vec![vec!["a".into()], vec!["b".into()]], 1000, 2).unwrap();
+        std::fs::write(d.dir.join("2026-11-01.json.gz.part"), b"half").unwrap();
+        std::fs::write(d.dir.join("2026-11-01.partial.tmp"), b"{").unwrap();
+        std::fs::write(d.dir.join("2026-11-05.partial.tmp"), b"{").unwrap();
+        let open = d.begin(header("2026-11-03"), vec![vec!["c".into()]], 1000, 2).unwrap();
+        let cp2 = d.begin(header("2026-11-02"), vec![vec!["c".into()]], 1000, 2).unwrap();
+        assert_eq!((cp.parts.len(), open.parts.len(), cp2.parts.len()), (2, 1, 1));
+        // The 2nd is collected again by this run: its files are left for it.
+        let gone = d.tidy(|day| day == "2026-11-02");
+        assert_eq!(gone, 6, "the 1st's checkpoint, two .part files, the half day file, and both .tmp");
+        let mut left: Vec<String> = std::fs::read_dir(&d.dir).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+        left.sort();
+        assert_eq!(left, ["2026-11-01.json.gz", "2026-11-02.json.gz", "2026-11-02.p0.json.gz.part", "2026-11-02.partial.json",
+                          "2026-11-03.p0.json.gz.part", "2026-11-03.partial.json"]);
+        assert!(d.held("2026-11-01") && d.read("2026-11-01").is_some(), "the held day file itself stays");
+        // Begun again with fewer partitions: the earlier start's extra .part goes.
+        d.begin(header("2026-11-03"), vec![vec!["c".into()], vec!["d".into()], vec!["e".into()]], 1000, 3).unwrap();
+        d.begin(header("2026-11-03"), vec![vec!["c".into()]], 1000, 4).unwrap();
+        assert!(d.part_path("2026-11-03", 0).is_file() && !d.part_path("2026-11-03", 1).exists() && !d.part_path("2026-11-03", 2).exists());
+        std::fs::remove_dir_all(root).ok();
     }
 
     #[test]
