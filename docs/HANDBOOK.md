@@ -606,6 +606,49 @@ oldest) and never deleted.
 The Request Centre shows both as the **Housekeeping** card (last run, what each job cleaned, next
 run, **Dry run**, **Run now** — which asks first).
 
+## History store — the message contract
+
+A **dedicated** Elasticsearch endpoint (its own URL and credential; not a monitored cluster, not
+in the fleet, Play, alerts or the cluster list) that mirrors the daily volume record, a daily
+capacity record and, optionally, the scheduled log-delay measurement, with a long history.
+**docs/HISTORY.md is the contract.** Hosted only; the desktop editions answer
+`{ok: false, supported: false}`.
+
+Writes are gated twice, both by people: `HISTORY_STORE_WRITES=true` in config.txt, and an admin
+arming *Write history* after a passing *Test connection* on the settings as they are now
+(changing the URL, route, TLS, prefix or credential turns the switch off). The global `readOnly`
+is never used; a start without the key disarms. The store's requests take their own guard
+(`guard::history_guard`): `GET /`, `POST /_security/user/_has_privileges`,
+`GET /_index_template/<prefix>-template`, `POST /<prefix>-…/_search`, and — only with both gates
+open, checked again right before each request leaves — `PUT /_index_template/<prefix>-template?create=true`
+(mappings only; never an overwrite) and `POST /_bulk` of strict action/document pairs whose every
+action is `index`/`create` into `<prefix>-…`. Nothing else. The store is never a monitored
+cluster's address, takes a credential only over `https://`, follows no redirect, ignores the
+global insecure TLS default, and its prefix may not name another family's indices (`logs`,
+`metrics`, `logstash`, `filebeat…`, … — docs/HISTORY.md). The Request Centre lists its requests
+under origin `history-store`.
+
+| Message | Role | Answer |
+|---|---|---|
+| `HISTORY_STORE_GET` | admin | `{ok, supported, settings: {url, auth: "basic"\|"apiKey"\|"none", user, passwordSet, passwordStale, tls: "auto"\|"system"\|"insecure", via, prefix, streams: {volume, capacity, delay}}, armed, armedBy, armedAt, permitted, permitHint, test: null\|{at, by, ok, current, version, clusterName, securityEnabled, privileges: {create_doc, create_index, read, manage_index_templates}, message}, armBlocked, writing, status: {lastSuccessAt, lastError, lastErrorAt, docsWritten, queue, dropped, refused, rejected, lastSkipped, templateAt, backfill}, jumpHosts}`. Never a password or API key. `passwordStale`: the address, route, TLS or kind of credential changed since it was typed (it is sealed to them) — type it again. A limited admin may read it. |
+| `HISTORY_STORE_SET {settings: {url, auth, user, password?, apiKey?, tls, via, prefix, streams}}` | admin; a limited admin is refused (fleet-wide) | As GET. An empty or `*` password/API key keeps the one held. The URL is scheme, host and port only, no credential in it, `https://` when a credential is set, and not a configured cluster's `host:port`; the prefix is lower case `[a-z0-9._-]` and not a reserved family's. Changed settings disarm; a stream turned off drops what waits for it. |
+| `HISTORY_STORE_TEST` | admin; not a limited admin | As GET, `ok` = the test passed: `GET /` (version, cluster name) and `_has_privileges` for `create_doc`, `create_index`, `read` on `<prefix>-*` and the cluster privilege `manage_index_templates`, each `true`/`false`/`null` (not checked: security is off on the store, which passes). A connection failure carries the transport's `kind`, `cert`, `help`. Reads only. |
+| `HISTORY_STORE_ARM {on}` | admin; not a limited admin | As GET. `on: true` is refused (`kind: "refused"`, naming `HISTORY_STORE_WRITES=true` or the test) unless config.txt permits and the last test passed on the current settings. `on: false` always works; the next tick writes nothing. |
+| `HISTORY_STORE_BACKFILL` | admin; not a limited admin | As GET with `status.backfill.running`. *Copy existing history*: every local month file of every cluster, in bulks of at most 500, with progress (`done`/`total` files, `docs`). Refused unless both gates are open and the volume stream is on, or while one runs. |
+| `HISTORY_QUERY {stream: "volume"\|"capacity"\|"delay", clusterId, from?, to?}` | user; a scoped caller or a limited admin only on clusters they see; the cluster must exist | `{ok, stream, clusterId, from, to, total, truncated, docs}` — the store's documents, oldest first, at most 5000, one search (interactive class). Unreachable: `{ok: false, kind: "unreachable", message: "in the history store · not reachable: …"}`. |
+
+`DELAY_SINK_SET` takes `destination: "cluster"` (default; a file without it is unchanged) or
+`"history"` (to `<prefix>-delay-YYYY.MM` under the store's gates, every primed cluster measured);
+`DELAY_SINK_GET` adds `historyStore: {configured, armed, permitted, streamOn, prefix}`; a limited
+admin cannot `DELAY_SINK_SET` (fleet-wide).
+`VOLUME_DAILY`, `VOLUME_MONTHLY` and `VOLUME_MONTHLY_ALL` read days the local record does not hold
+from the store (docs/VOLUME.md "History store: write and read-back"; never for a display link):
+rows marked `source: "history"` (a month partly from it: `historyDays`; past a bounded read:
+`incomplete`), and a `history` object `{asked, from, to, reachable, days, truncated,
+truncatedBefore, templateMissing, message}`. Reports › Daily & monthly shows its message once,
+in amber, when the store is not reachable, the read stopped at its bound, or nothing was ever
+written there.
+
 ## Volume record — the message contract
 
 Index volume per day and per month, by field, for every cluster: the core collects it and keeps
@@ -619,8 +662,15 @@ short version.
   local date of the last scheduled run is kept in each cluster's `state.json`. **Refresh now**
   (`VOLUME_RUN`) runs at once, at most once a minute per cluster (`tooSoon`). Desktop has no
   timer; Indices › Summary asks for a run.
-- **What it sends**: `_cat/indices/<glob>`, `_field_caps`, then one aggregation `_search` per
-  day that is not final (and today, every run) — reads only, so it works under read-only.
+- **What counts** (0.3.53): `indexPattern` (default `logstash-*`, comma-separated, no date part
+  needed). An index whose name carries `YYYY.MM.DD` counts on that day in full; one without is
+  split into UTC days by `timeField` (default `@timestamp`), its documents and event bytes
+  measured, its size per day not (`null`, `unmeasuredSizeIndices`). `dayFrom: time` splits
+  every index. The legacy `indexFormat` keeps its old behaviour when it is the one in force
+  (docs/VOLUME.md "What counts").
+- **What it sends**: `_cat/indices/<pattern>`, `_field_caps`, one `date_histogram` search when
+  some index is split by time, then one aggregation `_search` per day that is not final (and
+  today, every run) — reads only, so it works under read-only.
   Background class, origin `volume-daily`, 60 s per request (capped by `ES_MAX_TIMEOUT_MS`), at
   most 2 clusters at once and one request at a time per cluster. The emergency stop holds it
   (the timer tries again next tick); an unreachable cluster is skipped.
@@ -635,15 +685,16 @@ short version.
 
 | Message | Role | Answer |
 |---|---|---|
-| `VOLUME_SETTINGS {clusterId?}` | user | `{settings, managed, source, overrides}` |
-| `VOLUME_FIELDS_CHECK {clusterId}` | user | `{glob, indices: {match, days, skipped, skippedCount}, rows: [{key, tried, resolved, type, note}]}` (asks the cluster now) |
-| `VOLUME_DAILY {clusterId, days?, avgDays?, source?}` | user | `{settings, status, cards, days, sources, source, topAvailable, skipped, skippedCount, matched, window}` |
+| `VOLUME_SETTINGS {clusterId?}` | user | `{settings, patternSource, managed, source, overrides}`; `patternSource` is `"pattern"`, `"format"` (the legacy `indexFormat` is in force) or `"default"` |
+| `VOLUME_FIELDS_CHECK {clusterId}` | user | `{glob, patternSource, dayFrom, indices: {match, days, skipped, skippedCount, dated, timeSplit}, timeField: {field, used, resolved, type, note}, rows: [{key, tried, resolved, type, note}]}` (asks the cluster now) |
+| `VOLUME_PATTERN_CHECK {clusterId, indexPattern, dayFrom?}` | admin (a limited admin only on clusters they see) | `{matched, dated, undated, datedExample, undatedExample, clusterId, indexPattern, dayFrom}` — the Config card's preview before a save: one `_cat/indices/<pattern>?format=json&h=index` through the gate as the caller (class `interactive`, origin `volume-pattern-check`). `matched: 0` is an answer; an unknown cluster or an Elasticsearch error is `ok: false` with `message` |
+| `VOLUME_DAILY {clusterId, days?, avgDays?, source?}` | user | `{settings, status, cards, days, sources, source, topAvailable, skipped, skippedCount, matched, timeSplit, window}`; a row whose size is not measured (split by time) has `priBytes`/`totalBytes` `null` and `unmeasuredSizeIndices` > 0 |
 | `VOLUME_MONTHLY {clusterId, months?}` | user | `{status, months}` |
 | `VOLUME_BREAKDOWN {clusterId, field, from?, to?, top?}` | user | `{field, resolved, resolvedAll, rows, totals, period}`; `error` when the field never resolved |
 | `VOLUME_MONTHLY_ALL {months?}` | user | `{clusters: [{clusterId, name, basis, months}]}` |
 | `VOLUME_RUN {clusterIds?}` | user | `{started, already, tooSoon, skipped: [{clusterId, reason}], stopped}` |
-| `VOLUME_LAYOUT_GET` | guest | `{layouts: {daily, monthly}}`, each `{order, hidden, labels}` |
-| `VOLUME_LAYOUT_SET {table, layout}` | operator | `{layouts}`; audited |
+| `VOLUME_LAYOUT_GET` | guest | `{layouts: {daily, monthly, capacity, overview}}`, each `{order, hidden, labels}` |
+| `VOLUME_LAYOUT_SET {table, layout}` | operator | `{layouts}`; audited. `table` is one of `daily`, `monthly`, `capacity`, `overview` (Reports; `cluster` first and never hidden); column keys in docs/VOLUME.md |
 
 `status = {lastRunAt, nextRunAt, running, progress: {done, total} | null, lastError, collectAt}`;
 `nextRunAt` is `null` where nothing schedules. Without a data directory every record message
@@ -873,6 +924,27 @@ alone. ULM and SLM follow the type until an admin changes them.
 |---|---|---|
 | `CLUSTER_META_GET` | user | `{ok, clusters: {<id>: {type, ulm: {enabled?, bucket}, slm?, source: "set"\|"zabbix-tag", setBy?, setAt?}}}` — the clusters the caller sees that have an entry or a tag; `enabled` / `slm` absent = follow the type. Desktop: `{ok: false, kind: "not_available"}`. |
 | `CLUSTER_META_SET {clusterId, meta: {type, ulm: {enabled: bool\|null, bucket}, slm: "expected"\|"none"\|null} \| null}` | admin | The same answer, after the change. `type` is required (`ci`, `di`, `onprem`; `CI`, `On-Prem` accepted); `bucket` empty or an S3 name (3–63 of `a-z 0-9 . -`, letter or digit at both ends, no `..`, not an IP). `meta: null` forgets the entry (back to the tag or the defaults). `forbidden` for a cluster the caller does not see, `bad_request` for a bad value. Audit line `cluster type set` (or `cleared`) with `cluster`, `kind`, `ulm`, `bucket`, `slm`. |
+
+## Plan templates — the message contract
+
+0.3.53. Reports › Planning sizes a new or existing cluster from a **plan template**
+(`docs/REPORTS.md`, "Planning (board 8) and Plan templates (board 10)"). Templates are shared
+settings: admins edit them (Config › Reports › Plan templates), everyone plans with them. Hosted:
+`<data>/plan-templates.json` (0600, tmp + rename); a missing file reads as the two seeded templates,
+**Standard** and **Small / lab**. Desktop: the page keeps the list in the browser
+(`localStorage`, `elasticpro.planTemplates`); the core answers from memory and holds nothing.
+
+A template is `{name, backup: "disk"|"s3"|"ulm", roles: [role]}`. A role is
+`{on, name, rule, cpu, ram, root, notes, ...}` with `rule` one of `volume` (`cap`: GB per day per
+server), `fixed` (`count`), `tier` (`tier`: `hot`|`warm`, `nodeTB`), `whenData` (`count` from `from`
+data nodes), `follows` (`of`: another role's name, `per`: one per N of it) or `target` (`target`:
+`s3`|`ulm`, `cap` for `ulm`). `cpu`, `ram` (GB), `root` (GB) and every rule number are a number
+>= 0 or `null`; `null` is "[set]" in the page and is never taken as 0.
+
+| Message | Role | Answer |
+|---|---|---|
+| `PLAN_TEMPLATES_GET` | user | `{ok, templates: [...], custom, updatedBy?, updatedAt?}`; `custom: false` = the seeds. A display link is refused. |
+| `PLAN_TEMPLATES_SET {templates}` | admin, no cluster limit | The whole list replaces the stored one; answers as GET. `bad_request` for a duplicate template name (case-insensitive) or role name, an unknown `rule`, `backup`, `tier` or `target`, a negative or non-numeric value, a `follows` that names no role or loops, an empty list, more than 50 templates or 60 roles, a body over 256 KB. `forbidden` for an administrator limited to some clusters (the templates serve every cluster, like Play's fleet-wide settings). Audit line `plan templates changed` (`templates`, `changed`); activity action `plan_templates_set`, category `configuration`. |
 
 ## Play (NOC wall display) — the message contract
 

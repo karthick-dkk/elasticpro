@@ -72,9 +72,17 @@ fn answer(listing: &[(String, u64)], hit: &Hit) -> (u16, String) {
                 "event_logsize": { "long": { "type": "long", "searchable": true, "aggregatable": true } },
             } }).to_string());
         }
-        if let Some(rest) = hit.path.strip_prefix("/logstash-*-") {
-            let day = rest.split('/').next().unwrap_or("");
-            let mine: Vec<&(String, u64)> = listing.iter().filter(|(n, _)| n.ends_with(day)).collect();
+        // The legacy format names the day in the path; the built-in pattern (logstash-*)
+        // names the day's indices in the query.
+        let asked: Option<Vec<String>> = match hit.path.strip_prefix("/logstash-*-") {
+            Some(rest) => {
+                let day = rest.split('/').next().unwrap_or("");
+                Some(listing.iter().filter(|(n, _)| n.ends_with(day)).map(|(n, _)| n.clone()).collect())
+            }
+            None => support::day_search(hit).map(|s| s.dated),
+        };
+        if let Some(asked) = asked {
+            let mine: Vec<&(String, u64)> = listing.iter().filter(|(n, _)| asked.contains(n)).collect();
             let docs: u64 = mine.iter().map(|(_, p)| *p).sum();
             let buckets: Vec<Value> = mine.iter().map(|(n, p)| json!({ "key": n, "doc_count": p, "ev": { "value": (*p * 3) as f64 } })).collect();
             return (200, json!({ "hits": { "total": { "value": docs, "relation": "eq" } }, "aggregations": {
@@ -252,7 +260,9 @@ async fn a_job_collects_builds_mails_and_hands_back_the_file() {
         assert!(wb.contains(&format!("name=\"{s}\"")), "{wb}");
     }
     let daily = part(&parts, "xl/worksheets/sheet1.xml");
-    assert!(daily.contains("Primary size (bytes)") && daily.contains("Primary size GB"), "{daily}");
+    // The default layout (nobody saved one): event_logsize first, index size hidden, as on
+    // Reports › Daily & monthly (docs/VOLUME.md).
+    assert!(daily.contains("Event bytes (bytes)") && !daily.contains("Primary size"), "{daily}");
     assert!(daily.contains((today() - Duration::days(1)).format("%Y-%m-%d").to_string().as_str()));
     let breakdown = part(&parts, "xl/worksheets/sheet3.xml");
     assert!(breakdown.contains("fw&amp;&lt;co&gt;"), "a field value from the cluster is escaped: {breakdown}");

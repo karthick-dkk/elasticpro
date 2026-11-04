@@ -1,5 +1,6 @@
 /**
- * Indices › Summary › Monthly › Generate report, and the list of report jobs (0.3.45).
+ * Reports › Exports & schedules › Generate report, and the list of report jobs (0.3.45; under
+ * Indices › Summary › Monthly until 0.3.53).
  *
  * One job per client (a client is a cluster). The core queues them, runs a few at once and
  * keeps the files; this panel picks what to ask for and shows what the core says about each
@@ -215,9 +216,9 @@ function renderForm() {
         h('div.seg', { role: 'group', 'aria-label': 'File format' },
           fmt('xlsx', '.xlsx', 'One workbook: Daily, Monthly and Breakdown sheets'),
           fmt('csvzip', '.csv (zip)', 'A zip of daily.csv, monthly.csv and breakdown.csv')))),
-    h('label.rj-check', { title: mailDisabled ? mailInfo.why : 'Sent to the recipients an admin set under Config › Volume fields' },
+    h('label.rj-check', { title: mailDisabled ? mailInfo.why : 'Sent to the recipients an admin set under Config › Reports' },
       h('input#rj-mail', { type: 'checkbox', checked: form.mail, disabled: mailDisabled, onchange: (e) => { form.mail = e.target.checked; } }),
-      h('span', 'Mail it to the report recipients (Config › Volume fields)',
+      h('span', 'Mail it to the report recipients (Config › Reports)',
         mailDisabled ? h('span.rj-why', ` · ${mailInfo.why}`) : null)),
     h('div.rj-row',
       h('button#rj-run.btn.sm.primary', { type: 'button', disabled: !form.picked.size, onclick: run }, runLabel())),
@@ -235,8 +236,8 @@ async function askMailInfo() {
   const res = await reportScheduleGet();
   if (!res || !res.ok) return;
   const to = [...(res.to || []), ...(res.cc || []), ...(res.bcc || [])];
-  if (res.mailConfigured === false) mailInfo = { asked: true, ok: false, why: 'set up Config › Volume fields › Mail server first' };
-  else if (!to.length) mailInfo = { asked: true, ok: false, why: 'no report recipients are set (Config › Volume fields)' };
+  if (res.mailConfigured === false) mailInfo = { asked: true, ok: false, why: 'set up Config › Reports › Mail server first' };
+  else if (!to.length) mailInfo = { asked: true, ok: false, why: 'no report recipients are set (Config › Reports)' };
   else mailInfo = { asked: true, ok: true, why: '' };
   renderForm();
 }

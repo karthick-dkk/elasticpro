@@ -225,8 +225,10 @@ pub struct Core {
     notify: crate::notify::NotifyStore,
     silences: crate::silences::Silences,
     /// Each cluster's type, ULM bucket and whether SLM is expected (hosted). See `cluster_meta`.
-    cluster_meta: crate::cluster_meta::ClusterMeta,
+    pub(crate) cluster_meta: crate::cluster_meta::ClusterMeta,
     saved_queries: crate::saved_queries::SavedQueries,
+    /// Reports › Planning's templates, shared by everyone (hosted: a file). See `plan_templates`.
+    pub(crate) plan_templates: crate::plan_templates::PlanTemplates,
     /// The housekeeping scheduler's settings and what it last did. See `housekeeping`.
     pub(crate) housekeeping: crate::housekeeping::Housekeeping,
     /// Whether the request figures are pushed to Zabbix, and how that last went. See
@@ -240,6 +242,8 @@ pub struct Core {
     /// Play, the NOC wall display: display links, its settings, node-name history, shared
     /// acknowledgements and the shared measurement cache. See `play`.
     pub(crate) play: crate::play::Play,
+    /// The history store: its settings, its queue and what it last did. See `history_store`.
+    pub(crate) history_store: crate::history_store::HistoryStore,
 }
 
 /// What the last Zabbix sync found. The specs carry credentials and never leave the core;
@@ -696,6 +700,7 @@ impl Core {
         let data_dir_for_notify = data_dir.clone();
         let data_dir_for_volume = data_dir.clone();
         let data_dir_for_reports = data_dir.clone();
+        let data_dir_for_history = data_dir.clone();
         let activity = crate::activity::ActivityLog::new(crate::activity::ActivityConfig::from_env(data_dir.as_deref(), edition));
         let (instance, previous_instance, restart_suspects) = instance_ids(data_dir.as_deref());
         let req_cfg = crate::gate::config().clone();
@@ -750,6 +755,7 @@ impl Core {
             silences: crate::silences::Silences::open(data_dir_for_notify.as_ref().map(|d| d.join("silences.json"))),
             cluster_meta: crate::cluster_meta::ClusterMeta::open(
                 data_dir_for_notify.as_ref().filter(|_| hosted).map(|d| d.join(crate::cluster_meta::META_FILE))),
+            plan_templates: Core::plan_templates_store(edition, data_dir_for_notify.as_deref()),
             saved_queries: crate::saved_queries::SavedQueries::open(data_dir_for_notify.as_ref().map(|d| d.join("saved-queries.json"))),
             notify: crate::notify::NotifyStore::open(data_dir_for_notify.map(|d| d.join("notifications.json"))),
             housekeeping: crate::housekeeping::Housekeeping::from_env(),
@@ -757,6 +763,7 @@ impl Core {
             volume: crate::volume::Volume::open(data_dir_for_volume.as_deref()),
             reports: crate::report::Reports::open(data_dir_for_reports.as_deref()),
             play,
+            history_store: crate::history_store::HistoryStore::open(data_dir_for_history.as_deref(), hosted),
         })
     }
 
@@ -1043,8 +1050,14 @@ impl Core {
     ///   choosing.
     fn gate_cluster(&self, t: &str, msg: &Value, c: &Caller) -> Result<(), Value> {
         const VOLUME_ONE: &[&str] = &["VOLUME_SETTINGS", "VOLUME_FIELDS_CHECK", "VOLUME_DAILY", "VOLUME_MONTHLY", "VOLUME_BREAKDOWN"];
-        if !(matches!(t, "ES" | "ZABBIX_METRICS" | "CLUSTER_DATASET" | "REFRESH" | "VOLUME_RUN" | "REPORT_RUN") || VOLUME_ONE.contains(&t))
-            || c.role >= Role::Admin
+        // VOLUME_PATTERN_CHECK is an admin's, and an admin limited to some clusters may check
+        // only those: the one message here that stops a (limited) admin too.
+        // An admin limited to some clusters is held to them wherever a message names one: the
+        // pattern check, a history query, and the volume record's per-cluster reads.
+        let limited_admin_check = c.limited() && (matches!(t, "VOLUME_PATTERN_CHECK" | "HISTORY_QUERY") || VOLUME_ONE.contains(&t));
+        if !(matches!(t, "ES" | "ZABBIX_METRICS" | "CLUSTER_DATASET" | "REFRESH" | "VOLUME_RUN" | "REPORT_RUN" | "HISTORY_QUERY") || VOLUME_ONE.contains(&t)
+            || limited_admin_check)
+            || (c.role >= Role::Admin && !limited_admin_check)
         {
             return Ok(());
         }
@@ -1270,11 +1283,16 @@ impl Core {
             "POLICY_GET" | "POLICY_SET" => self.policy_msg(&t, &msg, caller.as_ref()),
             "POLICY_PAUSE" | "POLICY_RESUME" => self.policy_pause_msg(&t, &msg, caller.as_ref()),
             "EVENTS_TICKET" => self.events_ticket_msg(caller.clone(), reauth),
-            "DELAY_SINK_GET" | "DELAY_SINK_SET" | "DELAY_SINK_RUN" => self.delay_sink_msg(&t, &msg).await,
+            "DELAY_SINK_GET" | "DELAY_SINK_SET" | "DELAY_SINK_RUN" => self.delay_sink_msg(&t, &msg, caller.as_ref()).await,
+            // The history store (docs/HISTORY.md): a dedicated endpoint, never a monitored cluster.
+            "HISTORY_STORE_GET" | "HISTORY_STORE_SET" | "HISTORY_STORE_TEST" | "HISTORY_STORE_ARM" | "HISTORY_STORE_BACKFILL" => {
+                self.history_store_msg(&t, &msg, caller.as_ref()).await
+            }
+            "HISTORY_QUERY" => self.history_query(&msg).await,
             "HOUSEKEEPING_GET" | "HOUSEKEEPING_RUN" => self.housekeeping_msg(&t, &msg, caller.as_ref()).await,
             // The daily index-volume record (docs/VOLUME.md).
             "VOLUME_SETTINGS" | "VOLUME_FIELDS_CHECK" | "VOLUME_DAILY" | "VOLUME_MONTHLY" | "VOLUME_BREAKDOWN"
-            | "VOLUME_MONTHLY_ALL" | "VOLUME_RUN" | "VOLUME_LAYOUT_GET" | "VOLUME_LAYOUT_SET" => {
+            | "VOLUME_MONTHLY_ALL" | "VOLUME_RUN" | "VOLUME_LAYOUT_GET" | "VOLUME_LAYOUT_SET" | "VOLUME_PATTERN_CHECK" => {
                 self.volume_msg(&t, &msg, caller.as_ref()).await
             }
             // Volume reports and the mail that carries them (docs/VOLUME.md "Reports and mail").
@@ -1318,6 +1336,7 @@ impl Core {
                 }
             }
             "CLUSTER_META_GET" | "CLUSTER_META_SET" => self.cluster_meta_msg(&t, &msg, caller.as_ref()),
+            "PLAN_TEMPLATES_GET" | "PLAN_TEMPLATES_SET" => self.plan_templates_msg(&t, &msg, caller.as_ref()),
             "SILENCE_LIST" => {
                 let list = self.silences_visible(caller.as_ref());
                 json!({ "ok": true, "silences": list })
@@ -1518,6 +1537,11 @@ impl Core {
     }
 
     fn record_request(&self, cluster: &str) {
+        // The history store is not a cluster: its requests are in the Request Centre's log
+        // (origin `history-store`), not among the clusters' rates.
+        if cluster == crate::history_store::STORE_ID {
+            return;
+        }
         let mut log = self.request_log.lock();
         let q = log.entry(cluster.to_string()).or_default();
         q.push_back(std::time::Instant::now());
@@ -3501,7 +3525,26 @@ impl Core {
     /// join the same request already on its way; else record it (queued), register its
     /// abort, wait at the gate, send. One guard closes the record however that ends.
     pub(crate) async fn es_req(self: &Arc<Self>, mut req: EsRequest) -> Value {
-        let (spec, read_only) = (self.spec_for(&req.cluster_id), self.primed.read().read_only);
+        // The history store (history_store.rs): its own address and credential, whatever the
+        // request names, and its own guard. Only the core sets `history_prefix`; nothing here
+        // can send a store request to a monitored cluster or a cluster's request to the store.
+        let history = req.history_prefix.is_some();
+        let (spec, read_only) = if history {
+            match self.history_spec() {
+                Ok(s) => {
+                    req.cluster_id = crate::history_store::STORE_ID.into();
+                    req.auth_header = None;
+                    req.url = None;
+                    req.allow_writes = false;
+                    req.verified_cancel = false;
+                    req.history_prefix = Some(self.history_store.stored.read().prefix().to_string());
+                    (Some(s), true)
+                }
+                Err(e) => return json!({ "ok": false, "status": 0, "kind": "not_configured", "message": e }),
+            }
+        } else {
+            (self.spec_for(&req.cluster_id), self.primed.read().read_only)
+        };
         // Like the extension: an explicit authHeader in the request wins (diagnostic
         // probes send "" for "no credential"); otherwise the primed one; none = re-prime.
         let (auth, url, via, tls) = match (&req.auth_header, &spec) {
@@ -3538,7 +3581,11 @@ impl Core {
         let timeout_ms = req.timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS).clamp(1, cfg.limits.max_timeout_ms);
         req.timeout_ms = Some(timeout_ms);
         let origin = req.origin.clone().unwrap_or_else(|| "core".into());
-        let writes = if req.verified_cancel && crate::guard::is_task_cancel(&req.method, &req.path) {
+        // A store request may write only while both of the store's gates stand (config.txt
+        // and an admin's arm after a passing test), checked again here at the chokepoint.
+        let writes = if history {
+            if self.history_writes_open().is_ok() { Writes::HistoryWrite } else { Writes::HistoryRead }
+        } else if req.verified_cancel && crate::guard::is_task_cancel(&req.method, &req.path) {
             Writes::VerifiedTaskCancel
         } else {
             Writes::decide(read_only, self.writes_unlocked(), req.allow_writes)
@@ -3708,7 +3755,8 @@ impl Core {
     async fn run_upstream(self: &Arc<Self>, ctx: Outgoing, rid: u64, abort: Option<&AbortReg>) -> Value {
         let mut rec = RecordGuard { core: self.clone(), rid, started: Instant::now(), done: false };
         let cfg = self.req_cfg.read().clone();
-        let cluster = ctx.req.cluster_id.as_str();
+        let cluster_id = ctx.req.cluster_id.clone();
+        let cluster = cluster_id.as_str();
         // Refused without a socket — and without taking a slot from anyone.
         if let Some(refused) = crate::http::refuse_early(&ctx.req, &ctx.url, ctx.writes) {
             rec.finish(&refused);
@@ -3734,6 +3782,26 @@ impl Core {
             }
         };
         let queued_ms = permit.queued_ms;
+        // A history store request waited for its slot: right before it leaves, the store must
+        // still be where it was, with the same credential and prefix, and it takes the
+        // permission both gates give *now* — a disarm or a move during the wait wins.
+        let mut ctx = ctx;
+        if ctx.req.history_prefix.is_some() {
+            let checked = self.history_recheck(&ctx.req, &ctx.url, ctx.auth.as_deref(), ctx.via.as_deref(), ctx.tls)
+                .map_err(|e| json!({ "ok": false, "status": 0, "kind": "history_store_changed", "message": e, "tookMs": 0 }))
+                .and_then(|w| match crate::http::refuse_early(&ctx.req, &ctx.url, w) {
+                    Some(r) => Err(r),
+                    None => Ok(w),
+                });
+            match checked {
+                Ok(w) => ctx.writes = w,
+                Err(out) => {
+                    drop(permit);
+                    rec.finish(&out);
+                    return out;
+                }
+            }
+        }
         self.requests.lock().running(rid, queued_ms);
         // Sent from a task of its own that holds the slot until the cluster has answered. A
         // caller that lets go — aborted, or its client gone — gets its answer at once, but
@@ -4564,6 +4632,11 @@ impl Core {
                     .into(),
             );
         }
+        // To the history store: its own two gates, never the monitored clusters' readOnly.
+        if cfg.destination == delay_sink::Destination::History {
+            let (y, m, _) = delay_sink::month_and_hour_bucket(delay_sink::now_ms());
+            return self.history_delay_index(y, m).err().map(|e| format!("the history store cannot take the measurements: {e}"));
+        }
         if !p.clusters.contains_key(&cfg.sink_cluster_id) {
             return Some(format!("the sink cluster {:?} is not one of the primed clusters", cfg.sink_cluster_id));
         }
@@ -4580,9 +4653,10 @@ impl Core {
     /// Which primed clusters this run measures.
     fn delay_sink_targets(&self, cfg: &SinkConfig) -> Vec<String> {
         let p = self.primed.read();
+        let to_history = cfg.destination == delay_sink::Destination::History;
         if cfg.clusters.is_empty() {
             let mut ids: Vec<String> =
-                p.clusters.keys().filter(|id| **id != cfg.sink_cluster_id).cloned().collect();
+                p.clusters.keys().filter(|id| to_history || **id != cfg.sink_cluster_id).cloned().collect();
             ids.sort();
             return ids;
         }
@@ -4608,7 +4682,16 @@ impl Core {
         }
 
         let (year, month, bucket) = delay_sink::month_and_hour_bucket(now);
-        let index = delay_sink::index_name(&cfg.index_prefix, year, month);
+        let to_history = cfg.destination == delay_sink::Destination::History;
+        let index = if to_history {
+            // Checked by the refusal above; asked again so the index is the store's prefix now.
+            match self.history_delay_index(year, month) {
+                Ok(i) => i,
+                Err(e) => return json!({ "ok": false, "skipped": e }),
+            }
+        } else {
+            delay_sink::index_name(&cfg.index_prefix, year, month)
+        };
         let targets = self.delay_sink_targets(&cfg);
         let mut measured = 0usize;
         let mut failed = 0usize;
@@ -4634,7 +4717,11 @@ impl Core {
                 continue;
             }
             let body = delay_sink::bulk_body(id, &ms, &index, &bucket);
-            let wrote = self.es_req(delay_sink::bulk_request(&cfg, body)).await;
+            let wrote = if to_history {
+                self.history_delay_bulk(body).await
+            } else {
+                self.es_req(delay_sink::bulk_request(&cfg, body)).await
+            };
             match delay_sink::bulk_failure(&wrote) {
                 None => measured += ms.len(),
                 Some(e) => {
@@ -4670,7 +4757,13 @@ impl Core {
 
     /// `DELAY_SINK_GET` / `DELAY_SINK_SET` / `DELAY_SINK_RUN`. Admin only; see
     /// `auth::required_role`.
-    async fn delay_sink_msg(self: &Arc<Self>, t: &str, msg: &Value) -> Value {
+    async fn delay_sink_msg(self: &Arc<Self>, t: &str, msg: &Value, caller: Option<&Caller>) -> Value {
+        // The schedule measures and writes for the whole fleet: not an admin limited to some
+        // clusters' to change.
+        if t == "DELAY_SINK_SET" && caller.is_some_and(Caller::limited) {
+            return json!({ "ok": false, "kind": "forbidden",
+                           "message": "the scheduled log delay is fleet-wide: an admin limited to some clusters cannot change it" });
+        }
         if !self.edition.schedules() {
             return json!({ "ok": false, "supported": false,
                            "message": "scheduled measurement runs only in the hosted edition, \
@@ -4680,7 +4773,7 @@ impl Core {
             "DELAY_SINK_GET" => {
                 let s = self.delay_sink.read();
                 json!({ "ok": true, "supported": true, "config": s.config, "state": s.state,
-                        "blocked": self.delay_sink_blocker(&s.config) })
+                        "blocked": self.delay_sink_blocker(&s.config), "historyStore": self.history_for_delay() })
             }
             "DELAY_SINK_SET" => {
                 let incoming = msg.get("config").cloned().unwrap_or(Value::Null);

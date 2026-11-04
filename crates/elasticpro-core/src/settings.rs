@@ -126,6 +126,9 @@ const SPECS: &[Spec] = &[
     spec("HOUSEKEEPING_DRY_RUN", Kind::Bool, To::Flag("ELASTICPRO_HOUSEKEEPING_DRY_RUN")),
     spec("SESSION_IDLE_DAYS", Kind::Int(0, 3650), To::Env("ELASTICPRO_SESSION_IDLE_DAYS")),
     spec("ACTIVITY_LOG_KEEP_DAYS", Kind::Int(0, 3650), To::Env("ELASTICPRO_ACTIVITY_LOG_KEEP_DAYS")),
+    // The history store's first gate (history_store.rs, docs/HISTORY.md): without it the store
+    // is configured and tested, never written. Read where used.
+    spec("HISTORY_STORE_WRITES", Kind::Bool, To::Direct),
     // UI defaults: not environment variables; PING carries them to the UI.
     spec("UI_READ_ONLY", Kind::Bool, To::Direct),
     spec("UI_AUTO_REFRESH", Kind::Bool, To::Direct),
@@ -144,6 +147,9 @@ const SPECS: &[Spec] = &[
     // The daily volume record (docs/VOLUME.md). Lists are comma-separated field names, tried
     // left to right; the two formats are checked further in `check_text`.
     spec("UI_VOLUME_INDEX_FORMAT", Kind::Text, To::Direct),
+    spec("UI_VOLUME_INDEX_PATTERN", Kind::Text, To::Direct),
+    spec("UI_VOLUME_DAY_FROM", Kind::Enum(&["name", "time"]), To::Direct),
+    spec("UI_VOLUME_TIME_FIELD", Kind::Text, To::Direct),
     spec("UI_VOLUME_TAG_FIELDS", Kind::Text, To::Direct),
     spec("UI_VOLUME_FORWARDER_FIELDS", Kind::Text, To::Direct),
     spec("UI_VOLUME_HOST_FIELDS", Kind::Text, To::Direct),
@@ -203,6 +209,9 @@ const UI_DEFAULTS: &[(&str, &str)] = &[
     ("UI_ROWS_PER_PAGE", "tableRowsPerPage"),
     ("UI_MAX_LOG_ROWS", "maxLogRows"),
     ("UI_VOLUME_INDEX_FORMAT", "volumeIndexFormat"),
+    ("UI_VOLUME_INDEX_PATTERN", "volumeIndexPattern"),
+    ("UI_VOLUME_DAY_FROM", "volumeDayFrom"),
+    ("UI_VOLUME_TIME_FIELD", "volumeTimeField"),
     ("UI_VOLUME_TAG_FIELDS", "volumeTag"),
     ("UI_VOLUME_FORWARDER_FIELDS", "volumeForwarder"),
     ("UI_VOLUME_HOST_FIELDS", "volumeSourceHost"),
@@ -448,6 +457,14 @@ fn check_text(key: &str, v: String) -> Result<String, String> {
         "UI_VOLUME_INDEX_FORMAT" => match crate::volume::settings::index_format_problem(&v) {
             None => Ok(v),
             Some(why) => Err(format!("{v:?} {why}, e.g. logstash-*-YYYY.MM.DD")),
+        },
+        "UI_VOLUME_INDEX_PATTERN" => match crate::volume::settings::index_pattern_problem(&v) {
+            None => Ok(crate::volume::settings::split_patterns(&v).join(",")),
+            Some(why) => Err(format!("{v:?}: {why}, e.g. logstash-* or logstash-*,app-*")),
+        },
+        "UI_VOLUME_TIME_FIELD" => match crate::volume::settings::time_field_problem(&v) {
+            None => Ok(v),
+            Some(why) => Err(format!("{v:?} {why}, e.g. @timestamp")),
         },
         "UI_VOLUME_COLLECT_AT" | "UI_REPORT_AT" => match crate::volume::schedule::parse_hhmm(&v) {
             Some(_) => Ok(v),

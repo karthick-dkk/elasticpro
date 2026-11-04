@@ -7,20 +7,47 @@ core's answers. None of them works a figure out again.
 
 ## What counts
 
-- **Only indices whose name fits `indexFormat`** (default `logstash-*-YYYY.MM.DD`, for
-  example `logstash-linux-2026.10.20`). `*` is the source (one or more characters, may
-  contain `-`). `YYYY.MM.DD` is the day. Anything else is not counted and is listed by
-  name as "skipped".
-- **A day is the date in the index name.** No time zone, no timestamp field. A breakdown
-  asks that day's indices by name (`logstash-*-2026.10.20`), so it adds up to that day.
+Since 0.3.53 (docs/REPORTS.md "Which indices count") the indices are named by
+**`indexPattern`**: one or more comma-separated index patterns, default **`logstash-*`**, no
+date part needed (`logstash-*,app-*,-app-test-*`: a later pattern may exclude). Every index
+`_cat/indices` lists for the pattern counts — data streams' backing indices included — and
+each one counts in one of two ways:
+
+- **Dated by name.** An index whose name carries `YYYY.MM.DD` (the first real date in the
+  name that is not part of a longer run of digits: `logstash-linux-2026.10.20`,
+  `.ds-logs-app-2026.10.20-000001`) counts **on that day in full**, as before: its sizes from
+  `_cat/indices`, all of its documents on that day.
+- **Split by time.** An index with no date in its name (`logstash-app`,
+  `logstash-linux-2026.10`) is split into days by its documents' **time field** (`timeField`,
+  default `@timestamp`): a document counts on the UTC day of its time field — the buckets of a
+  `date_histogram` with `calendar_interval: 1d` in UTC, the day the collector has always used.
+  Its documents, event bytes and sub size per day are measured; **its size per day is not**
+  (Elasticsearch reports size per index, not per day): the record says so
+  (`unmeasuredSizeIndices`, `priBytes`/`totalBytes` `null`), and nothing shares the index size
+  out over its days.
+- **`dayFrom: time`** (default `name`) splits **every** index by time, dated ones too.
+- **The source** of an index is its name less the date, a data stream's `.ds-` and rollover
+  generation (`-000001`) and the literal start of the pattern that names it (`logstash-*` →
+  `logstash-`): `logstash-linux-2026.10.20` is `linux`, as under the format;
+  `logstash-app` is `app`. A name with nothing left is its own source.
+- **Legacy `indexFormat`** (`logstash-*-YYYY.MM.DD`: `*` the source, `YYYY.MM.DD` the day)
+  still works: when the later layer that sets either sets `indexFormat` (for config.txt:
+  `UI_VOLUME_INDEX_FORMAT` set and `UI_VOLUME_INDEX_PATTERN` not), the collector behaves
+  exactly as before 0.3.53 — only names that fit count, the rest are listed by name as
+  "skipped", a day's search names its indices in the path (`logstash-*-2026.10.20`), and no
+  time field is asked about. One layer that sets both means the pattern. `patternSource`
+  (`VOLUME_SETTINGS`, `VOLUME_FIELDS_CHECK`, and in `settings`) says which is in force:
+  `"format"`, `"pattern"`, or `"default"` (the built-in pattern). `dayFrom: time` under the
+  format splits the names that fit by time.
 - **A day is finished** when its date is before today's UTC date. Today is collected too
-  but stays `final: false` and is shown "as of HH:MM".
+  but stays `final: false` and is shown "as of HH:MM". Records written before 0.3.53 are read
+  as they are and never rewritten.
 
 | Figure | Source | When it cannot be read | Kind |
 |---|---|---|---|
-| Primary size per day | `_cat/indices` `pri.store.size` of the day's indices, summed | — | measured |
-| Total size per day | `_cat/indices` `store.size` (with replicas) | — | measured |
-| Indices per day | count of the day's indices | — | measured |
+| Primary size per day | `_cat/indices` `pri.store.size` of the day's indices, summed | an index split by time counts on the day → `null` in every derived figure (the record keeps the dated part) | measured |
+| Total size per day | `_cat/indices` `store.size` (with replicas) | as above | measured |
+| Indices per day | count of the day's dated indices + time-split indices with documents on it | — | measured |
 | Documents per day | `hits.total` of the day's `_search` (`track_total_hits`) | day not aggregated yet → `null` | measured |
 | Event bytes | `sum` of the Event size field (default `event_logsize`) | no numeric field in the mapping → `null`, shown "not measured" | measured |
 | Sub size | `sum` of the Sub size field (default `sub_size`) | as above | measured |
@@ -34,7 +61,10 @@ core's answers. None of them works a figure out again.
 ```yaml
 defaults:
   volume:
-    indexFormat: logstash-*-YYYY.MM.DD
+    indexPattern: logstash-*            # one or more comma-separated patterns (0.3.53)
+    dayFrom:     name                   # name | time: where a dated index's day comes from
+    timeField:   "@timestamp"           # splits the indices with no date in their name
+    # indexFormat: logstash-*-YYYY.MM.DD   legacy: in force when a later layer sets it
     tag:         [ tag1, labels.tag1, tags ]
     forwarder:   [ fwd_tag, fwdtag, observer.name ]
     sourceHost:  [ src_hostname, host.name ]
@@ -84,7 +114,10 @@ defaults:
 
 | Key | Kind | Managed name (PING `managedDefaults`) |
 |---|---|---|
-| `UI_VOLUME_INDEX_FORMAT` | text, must contain `*` and `YYYY.MM.DD` | `volumeIndexFormat` |
+| `UI_VOLUME_INDEX_FORMAT` | text, must contain `*` and `YYYY.MM.DD` (legacy; in force only without `UI_VOLUME_INDEX_PATTERN`) | `volumeIndexFormat` |
+| `UI_VOLUME_INDEX_PATTERN` | text, comma list of index patterns (no spaces, `/`, `\`, `?`, `#`, `"`, `<`, `>`, `\|`, `:`; none starting with `_` or `+`; the first not an exclusion; at most 20) | `volumeIndexPattern` |
+| `UI_VOLUME_DAY_FROM` | enum name,time | `volumeDayFrom` |
+| `UI_VOLUME_TIME_FIELD` | text, one field name | `volumeTimeField` |
 | `UI_VOLUME_TAG_FIELDS` | text, comma list | `volumeTag` |
 | `UI_VOLUME_FORWARDER_FIELDS` | text, comma list | `volumeForwarder` |
 | `UI_VOLUME_HOST_FIELDS` | text, comma list | `volumeSourceHost` |
@@ -113,18 +146,53 @@ defaults:
   again; a scheduled run that completed, or failed for any other reason, counts as today's.
   The day is marked before the run so a crash is not repeated by every restart.
   At most 2 clusters at once, one request at a time per cluster, 60 s per request,
-  `gate::Class::Background`, origin `volume-daily` in the request log. Searches only:
-  works under read-only.
-- **Each run, per cluster**:
-  1. `GET /_cat/indices/<glob>?format=json&bytes=b&h=index,status,docs.count,pri.store.size,store.size`
-     where `<glob>` is `indexFormat` with `YYYY.MM.DD` → `*`. Group by name day; refresh
-     `indices`, `priBytes`, `totalBytes`, `sources` and `live: true` for every day that
-     still has indices; days no longer present become `live: false` and are never changed
-     again.
-  2. `GET /<glob>/_field_caps?fields=…&ignore_unavailable=true` to resolve each row.
-  3. For each day within `keepMonths` that has live open indices and is not yet
-     aggregated as final (plus today, every run), one search:
-     `POST /<indexFormat with the date>/_search?ignore_unavailable=true&allow_no_indices=true`
+  `gate::Class::Background`, origin `volume-daily` in the request log (a report job's
+  collection: `volume-report`). Searches only: works under read-only.
+- **Requests per run, per cluster**: one `_cat/indices`; when some index is split by time,
+  one `_field_caps` and one `date_histogram` search; else one `_field_caps` when any day is
+  to be searched; then one search per unfinished day (dated and time-split parts in the same
+  search). All sequential, all in the same class and origin. Under the legacy format with
+  `dayFrom: name` the requests are the ones before 0.3.53, byte for byte.
+- **Each run, per cluster** (`<expr>` is the `indexPattern`, or under the legacy format
+  `indexFormat` with `YYYY.MM.DD` → `*`):
+  1. `GET /_cat/indices/<expr>?format=json&bytes=b&h=index,status,docs.count,pri.store.size,store.size`.
+     A 404 `index_not_found_exception` (a pattern that names an index outright) is an empty
+     listing. Each index is dated by name or split by time ("What counts"). Group the dated
+     ones by name day; refresh `indices`, `priBytes`, `totalBytes`, `sources` and `live: true`
+     for every day that still has indices dated on it or time-split documents on it (step 2);
+     days no longer present become `live: false` and are never changed again.
+  2. When some index is split by time:
+     `GET /<expr>/_field_caps?fields=…,<timeField>&ignore_unavailable=true` first — the time
+     field must be a `date`/`date_nanos`, or the histogram would find no day and every
+     time-split day would look gone — then one search over the open time-split indices:
+     ```json
+     { "size": 0, "track_total_hits": false,
+       "query": { "bool": { "filter": [ { "terms": { "_index": [ "<time-split names>" ] } },
+         { "range": { "<timeField>": { "gte": "<first kept day>", "lt": "<tomorrow>", "format": "yyyy-MM-dd", "time_zone": "UTC" } } } ] } },
+       "aggs": { "days": { "date_histogram": { "field": "<timeField>", "calendar_interval": "1d",
+                                               "time_zone": "UTC", "min_doc_count": 1, "format": "yyyy-MM-dd" } } } }
+     ```
+     (a report job: its period). The days it lists have time-split documents. When the time
+     field is not a date, `_field_caps` or the histogram fails, or the histogram's answer is
+     partial, the split is **unknown** this run: no time-split day is searched or taken for
+     gone, and the run's `lastError` says why ("indices split by time not counted: …"). While
+     a time-split index is closed, a day missing from the histogram is not taken for gone.
+     Otherwise `GET /<expr>/_field_caps?fields=…&ignore_unavailable=true` when a day is to be
+     searched, to resolve each row.
+  3. For each day within `keepMonths` that is live with an open dated index or time-split
+     documents, and is not yet aggregated as final (plus today, every run), one search.
+     Legacy format, `dayFrom: name`:
+     `POST /<indexFormat with the date>/_search?ignore_unavailable=true&allow_no_indices=true`.
+     Otherwise `POST /<expr>/_search?ignore_unavailable=true&allow_no_indices=true` with the
+     body below plus a `query`: the day's dated indices in full and the time-split ones on
+     that UTC day (the histogram's bucket bounds):
+     ```json
+     { "bool": { "minimum_should_match": 1, "should": [
+         { "terms": { "_index": [ "<dated on the day>" ] } },
+         { "bool": { "filter": [ { "terms": { "_index": [ "<open time-split>" ] } },
+           { "range": { "<timeField>": { "gte": "2026-10-20", "lt": "2026-10-21", "format": "yyyy-MM-dd", "time_zone": "UTC" } } } ] } } ] } }
+     ```
+     (only one of the two parts when the day has only one). The aggregations:
      ```json
      { "size": 0, "track_total_hits": true,
        "aggs": {
@@ -140,7 +208,9 @@ defaults:
        } }
      ```
      `ev`/`sub` aggs are left out when that field is not resolved (the figure is `null`).
-     Terms aggs are left out for unresolved rows (the row carries `error`).
+     Terms aggs are left out for unresolved rows (the row carries `error`). The `by_index`
+     buckets of time-split indices with documents give `unmeasuredSizeIndices` (day and
+     source) and the time-split sources (`priBytes`/`totalBytes` `null`).
   4. Prune month files older than `keepMonths` — only after a run that finished without an
      error or a stop, under settings the record may be pruned by: the config file's, a
      desktop message's, or built-in on a hosted core with no config file. A desktop request
@@ -155,8 +225,19 @@ defaults:
     asked again on a later run while they are open";
   - its indices went before it was final → `live: false` for good, "its indices went before
     the day was aggregated as final: the figures are the last ones measured" (or "only the
-    sizes were measured").
-  A later whole answer makes the day final and clears `error`.
+    sizes were measured");
+  - the time split is unknown this run (above) and the day was searched for its dated
+    indices → figures kept, "the indices split by time were not counted: …; asked again on
+    the next run" (never final; the last count of time-split indices stands);
+  - the time split is unknown and the day has only time-split documents → not searched,
+    "not aggregated: …; asked again on the next run";
+  - a time-split index is closed and the histogram did not list the day → "not aggregated:
+    some of the indices split by time are closed; asked again on a later run while they are
+    open".
+  A later whole answer makes the day final and clears `error`. A time-split day is final
+  under the same rule as a dated one: its first whole answer after the day is over.
+- **`listedAt`** is set only by a run whose time split is known for every time-split index
+  (none closed, none unknown): a day with no record may otherwise still have documents.
 
 ### Store
 
@@ -167,8 +248,10 @@ the all-cluster Monthly view reads one small file per cluster. Written tmp + ren
 
 ```text
 Day = { day, final, live, aggregatedAt|null, totalsAt,
-        indices, priBytes, totalBytes, docs|null, eventBytes|null, subBytes|null,
-        sources: { "<source>": { indices, priBytes, totalBytes, docs|null, eventBytes|null, subBytes|null } },
+        indices, priBytes|null, totalBytes|null, docs|null, eventBytes|null, subBytes|null,
+        unmeasuredSizeIndices,
+        sources: { "<source>": { indices, priBytes|null, totalBytes|null, docs|null, eventBytes|null, subBytes|null,
+                                 unmeasuredSizeIndices } },
         fields:  { tag|forwarder|sourceHost|sourceIp|extra:
                    { field|null, error|null,
                      top: [ { value, docs, eventBytes|null, subBytes|null } ],
@@ -177,9 +260,51 @@ Day = { day, final, live, aggregatedAt|null, totalsAt,
         error|null }
 ```
 
+- `priBytes`/`totalBytes`: the `_cat/indices` sizes of the indices **dated by name** on the
+  day; `null` when it has none (every document came from indices split by time).
+- `unmeasuredSizeIndices` (0.3.53; absent, read as 0, on older records): time-split indices
+  that had documents on the day, from its search. Their documents and event bytes are in
+  `docs`/`eventBytes`/`subBytes`; their size is not in `priBytes`/`totalBytes`. While it is
+  above 0 the day's size is **not measured**: every derived figure (rows, totals, month sums,
+  cards, CSV, .xlsx) shows `null` for it, never the dated part as the day's size, never 0,
+  never an apportioned share (`Day::sizes`, the one definition). Per source the same.
+- `indices`: dated indices + `unmeasuredSizeIndices`.
+
+### History store: write and read-back (0.3.53, docs/HISTORY.md)
+
+- **Written** (hosted, only while `HISTORY_STORE_WRITES=true` and *Write history* is armed): after
+  every collection (the daily run, Refresh now, a report job's) the days it changed — totals
+  refreshed, searched, turned `live: false`, or a new `error` — go to the history store's queue as
+  one `volume` document each (`_id` `cluster|day`, index `<prefix>-volume-YYYY.MM`). Its sizes are
+  the whole-day figure (`Day::sizes`: `null` while the size is not measured), the same per source;
+  top values are not kept there. The local record is written first and never waits for the store.
+- **Read back** by `VOLUME_DAILY`, `VOLUME_MONTHLY` and `VOLUME_MONTHLY_ALL` for the days the
+  local record does not reach: from the first day the view reads (the Daily window, its averages
+  and cards; the first of the oldest month shown) to the day before the first day the local
+  record covers (`history_store::oldest_local_day`, one definition for both views) — older than
+  `keepMonths`, or a data directory that is new. Inside the local record a day without a record
+  had no indices: it is not asked for. Paged reads (`<prefix>-volume-*`, 10 000 days a page by
+  `search_after`, at most 5 pages, newest first; for `VOLUME_MONTHLY_ALL` one paged read for every
+  cluster that needs one), the interactive class with an 8 s timeout, no write gate needed, only
+  when a store URL is set, never for a display link. A local day always wins. Days from the store
+  go through the same `derive` as local ones; the Monthly views merge **per day** before summing,
+  so the month the local record starts in counts the store's earlier days and agrees with Daily.
+  Rows: `source: "history"` (wholly from the store), `historyDays: n` (a month partly from it),
+  `incomplete: true` (a month on or before the day a bounded read stopped). The reply's `history`
+  is `{asked, from, to, reachable, days, truncated, truncatedBefore, templateMissing, message}`. A
+  store that cannot be reached adds no day and no zero: `reachable: false`, `message` "in the
+  history store · not reachable: …", and it is not asked again for 60 s. A store with no day and
+  no ElasticPro template says nothing was ever written there (`templateMissing`).
+
 ## Derived figures (core, one definition each)
 
-- **basis(d)**: `priBytes` | `totalBytes` | `eventBytes` per `sizeBasis`.
+- **basis(d)**: `priBytes` | `totalBytes` | `eventBytes` per `sizeBasis` — the size ones as
+  `Day::sizes` gives them (`null` for a day whose size is not measured).
+- **Size not measured** (a day split by time, in whole or in part): left out of every size
+  sum, mean and peak, and counted beside it: `sizeUnmeasuredDays` in the totals row, the month
+  row (and `MonthSummary`; the size averages divide by `daysWithData − sizeUnmeasuredDays`)
+  and the breakdown's totals. A breakdown's size estimate takes nothing from such a day (its
+  documents and event bytes still count). Rows carry `unmeasuredSizeIndices`.
 - **Average over N days for day d**: mean of basis over the N calendar days before d that
   have a record (d itself excluded). `changeVsAvgPct = (basis(d) − avg) / avg × 100`,
   `null` when there is no earlier day.
@@ -218,24 +343,35 @@ config file cannot be read, the read-only replies (`VOLUME_SETTINGS`, `VOLUME_DA
 
 | Type | Role | Request | Reply |
 |---|---|---|---|
-| `VOLUME_SETTINGS` | User | `{clusterId?}` | `{settings, managed:[names], source:"file"\|"message"\|"builtin", overrides:[clusterIds]}` |
-| `VOLUME_FIELDS_CHECK` | User | `{clusterId}` | `{indices:{match, skipped:[names]}, rows:[{key, tried:[..], resolved\|null, type\|null, note}]}` |
-| `VOLUME_DAILY` | User | `{clusterId, days?:14..400, avgDays?:3..180, source?}` | `{settings, status, cards, days:[DailyRow], totals, sources:[names], skipped:[names]}` |
+| `VOLUME_SETTINGS` | User | `{clusterId?}` | `{settings, patternSource:"format"\|"pattern"\|"default", managed:[names], source:"file"\|"message"\|"builtin", overrides:[clusterIds]}` |
+| `VOLUME_FIELDS_CHECK` | User | `{clusterId}` | `{glob, patternSource, dayFrom, indices:{match, days, skipped:[names], skippedCount, dated, timeSplit}, timeField:{field, used, resolved, type\|null, note}, rows:[{key, tried:[..], resolved\|null, type\|null, note}]}` |
+| `VOLUME_PATTERN_CHECK` | Admin (a limited admin: only clusters they see) | `{clusterId, indexPattern, dayFrom?:"name"\|"time"}` | `{matched, dated, undated, datedExample\|null, undatedExample\|null, clusterId, indexPattern, dayFrom}`; one `_cat/indices/<pattern>?format=json&h=index`, class `interactive`, origin `volume-pattern-check`, as the caller; matching nothing is `ok: true, matched: 0`; an unknown cluster or an Elasticsearch error is `ok: false` with `message` |
+| `VOLUME_DAILY` | User | `{clusterId, days?:14..400, avgDays?:3..180, source?}` | `{settings, status, cards, days:[DailyRow], totals, sources:[names], skipped:[names], matched, timeSplit}` |
 | `VOLUME_MONTHLY` | User | `{clusterId, months?:1..36}` | `{settings, status, avgPerMonth, months:[MonthRow]}` |
 | `VOLUME_BREAKDOWN` | User | `{clusterId, field, from, to, top?}` | `{field, resolved, rows:[..], totals}` |
 | `VOLUME_MONTHLY_ALL` | User | `{months?}` | `{clusters:[{clusterId, name, months:[MonthRow]}]}` |
 | `VOLUME_RUN` | User | `{clusterIds?}` (absent = every cluster the caller sees) | `{started:[ids], already:[ids], tooSoon:[ids]}` |
-| `VOLUME_LAYOUT_GET` | Guest | `{}` | `{layouts:{daily, monthly}}` |
-| `VOLUME_LAYOUT_SET` | Operator | `{table, layout:{order:[keys], hidden:[keys], labels:{key:label}}}` | `{layouts}` |
+| `VOLUME_LAYOUT_GET` | Guest | `{}` | `{layouts:{daily, monthly, capacity, overview}}` |
+| `VOLUME_LAYOUT_SET` | Operator | `{table:"daily"\|"monthly"\|"capacity"\|"overview", layout:{order:[keys], hidden:[keys], labels:{key:label}}}` | `{layouts}`; any other table, an unknown key, `cluster` hidden or not first (capacity, overview) → `bad_request` |
 
 `status = {lastRunAt|null, nextRunAt|null, running, progress:{done,total}|null, lastError|null, collectAt}`
 
 `DailyRow = Day totals + {basis, avg, changeVsAvgPct, top:{tag,forwarder,sourceHost,sourceIp,extra: {value, share}|null}}`
 
-Columns (keys) of the Daily table: `day, indices, docs, priBytes, topExtra, eventBytes,
-subBytes, changeVsAvg, topSourceHost, topForwarder` (also available, hidden by default:
-`totalBytes, topTag, topSourceIp`). Monthly: `month, daysWithData, priBytes, topExtra,
-avgPerDay, peakDay, docs, eventBytes, subBytes, topSourceHost, topForwarder, from`.
+Columns (keys) of the Daily table, in their default order (0.3.53: event_logsize first, as
+Reports › Daily & monthly shows them; index store size belongs to Measure size): `day,
+indices, docs, eventBytes, changeVsAvg` (also available, hidden by default: `topExtra,
+topSourceHost, topForwarder, topTag, topSourceIp, subBytes, priBytes, totalBytes`).
+Monthly: `month, daysWithData, docs, eventBytes, peakDay` (hidden by default: `topExtra,
+topSourceHost, topForwarder, subBytes, from, priBytes, avgPerDay`). This default is what
+`VOLUME_LAYOUT_GET` answers while nobody has saved a layout, and what the .xlsx sheets use
+then (`volume::DAILY_COLUMNS` / `DAILY_HIDDEN`, `MONTHLY_COLUMNS` / `MONTHLY_HIDDEN`). A
+saved layout is kept as saved.
+Reports (docs/REPORTS.md), `cluster` locked first and never hidden — Capacity & retention:
+`cluster, perDay, buffered, liveRetention, livePolicy, liveDisk, liveRequired,
+liveShortfall, backupPolicy, backupDisk, backupRequired, backupShortfall`; Overview:
+`cluster, type, yesterday, avg7, vsAvg, monthSoFar, diskUsed, diskLasts, liveRetention,
+backups, daily` (`volume::CAPACITY_COLUMNS`, `OVERVIEW_COLUMNS`).
 
 ## CSV columns
 

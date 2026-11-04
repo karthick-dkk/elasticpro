@@ -1,4 +1,5 @@
 import { plural } from '../lib/fmt.js';
+import { nodeRoles } from './cluster-detail.js';
 /**
  * Capacity arithmetic: how much a cluster ingests per day, and what that means for the
  * disk it has and the retention it promises.
@@ -178,20 +179,34 @@ export const headroomPct = (r) => (r && r.vol && r.vol.settings ? r.vol.settings
  * @param data     state.data entry (disk, repos, snapshots, slm)
  * @param indices  state.indices entry
  * @param repoBytes  measured repository size, when the operator has asked for it
+ * @param opts     the Reports page's figures (docs/REPORTS.md): `perDayBytes`, the record's
+ *                 event_logsize per day (core/volume-daily.js perDayEventBytes; null = not
+ *                 measured), and `disk`, dataNodeDisk(data). Without them the report is the
+ *                 index-list figure it always was (the Zabbix plan feed, Play, the alert rules).
  */
-export function volumeReport(cluster, data = {}, indices = [], repoBytes = null) {
-  const vol = dailyVolume(indices, cluster);
-  const perDayGB = bytesToGB(vol.perDay);
+export function volumeReport(cluster, data = {}, indices = [], repoBytes = null, opts = {}) {
+  let vol = dailyVolume(indices, cluster);
+  const eventRate = Object.prototype.hasOwnProperty.call(opts || {}, 'perDayBytes');
+  if (eventRate) {
+    vol = { ...vol, perDay: opts.perDayBytes,
+      basis: opts.perDayBytes === null || opts.perDayBytes === undefined ? 'event_logsize not measured'
+        : 'event_logsize per day, mean of the last 7 finished days (the daily record)' };
+  }
+  // Unknown is not zero: an event rate the record could not give is NaN here, so every
+  // figure built on it prints "–" rather than a plan for a cluster that ingests nothing.
+  const perDayGB = eventRate && (opts.perDayBytes === null || opts.perDayBytes === undefined) ? NaN : bytesToGB(vol.perDay);
   // Planning headroom from config (volumeHeadroomPercent, default 30). Every "will it
   // fit" figure below is built on this one, so a cluster that provisions differently
   // changes one setting rather than being read against someone else's assumption.
   const headroomPercent = vol.settings.headroomPercent;
   const bufferedGB = perDayGB * (1 + headroomPercent / 100);
 
-  const disk = data.disk || {};
-  const liveTotalGB = bytesToGB(disk.total);
-  const liveUsedGB = bytesToGB(disk.used);
-  const liveFreeGB = bytesToGB(disk.avail);
+  // Data nodes only on Reports (dataNodeDisk); not measured is NaN, never 0 GB.
+  const dn = opts && opts.disk ? opts.disk : null;
+  const disk = dn ? (dn.measured ? dn : { total: NaN, used: NaN, avail: NaN, percent: NaN }) : (data.disk || {});
+  const liveTotalGB = dn && !dn.measured ? NaN : bytesToGB(disk.total);
+  const liveUsedGB = dn && !dn.measured ? NaN : bytesToGB(disk.used);
+  const liveFreeGB = dn && !dn.measured ? NaN : bytesToGB(disk.avail);
   const livePct = isFinite(disk.percent) ? disk.percent : null;
 
   // What the cluster actually enforces, read from ILM and SLM.
@@ -259,7 +274,7 @@ export function volumeReport(cluster, data = {}, indices = [], repoBytes = null)
       ? parseRetention(cluster.snapshotRetention).days === slmAppliedRetention.days : null,
 
     requiredLiveGB,
-    liveRetentionMet: live && liveTotalGB > 0 ? liveTotalGB >= requiredLiveGB : null,
+    liveRetentionMet: live && liveTotalGB > 0 && isFinite(requiredLiveGB) ? liveTotalGB >= requiredLiveGB : null,
     required30GB, required90GB, required365GB,
 
     liveLogsFrom: vol.oldestDay,
@@ -274,8 +289,8 @@ export function volumeReport(cluster, data = {}, indices = [], repoBytes = null)
     backupCapacityGB, backupCapacityLabel: backupCap ? backupCap.label : null,
     backupFreeGB, requiredSnapshotGB, backupNeedGB,
     // Room for what the policy requires. Unknown — not "no" — until the capacity is stated.
-    backupSpaceMet: backupCapacityGB === null ? null : backupCapacityGB >= backupNeedGB,
-    snapshotRetentionMet: snap && repoGB !== null ? repoGB >= bufferedGB * snap.days : null,
+    backupSpaceMet: backupCapacityGB === null || !isFinite(backupNeedGB) ? null : backupCapacityGB >= backupNeedGB,
+    snapshotRetentionMet: snap && repoGB !== null && isFinite(bufferedGB) ? repoGB >= bufferedGB * snap.days : null,
     // How many days of data the repository currently holds, at the same daily rate.
     backupSufficientDays: repoGB === null ? null : div(repoGB, perDayGB),
     // When the snapshots ran.
@@ -288,6 +303,125 @@ export function volumeReport(cluster, data = {}, indices = [], repoBytes = null)
     snapshotDataFrom: snapWindow.dataFrom,
     snapshotDataTo: snapWindow.dataTo,
     snapshotDataDays: snapWindow.dataDays,
+  };
+}
+
+/* ---------------------------- Reports: data nodes, storage plan ---------------------------- */
+
+/** The roles that hold data (docs/REPORTS.md, "Disk means data nodes"). */
+export const DATA_ROLES = ['data', 'data_content', 'data_hot', 'data_warm', 'data_cold', 'data_frozen'];
+
+/** A node's roles: `roles` (a list, from _nodes) or `node.role` (the letters _cat/nodes answers). null = not reported. */
+function rolesOfNode(n) {
+  if (!n) return null;
+  if (Array.isArray(n.roles)) return n.roles.map(String);
+  const code = n['node.role'] !== undefined ? n['node.role'] : n.role;
+  if (typeof code !== 'string' || !code.trim()) return null;
+  return nodeRoles(code);
+}
+
+/**
+ * Disk on data nodes only: the `_cat/allocation` rows (data.disk.nodes) joined by node name
+ * to the node list's roles (data.nodes), kept when the roles include a data role. The one
+ * definition for every disk total, used and free on Reports.
+ *
+ * `{measured, total, used, avail, percent, nodes, reason}`. Not measured — never a guess —
+ * when there is no allocation answer, no node list, or a node whose roles are not reported:
+ * counting it might put a master's disk in, leaving it out might drop a data node's.
+ */
+export function dataNodeDisk(data) {
+  const d = data || {};
+  const alloc = d.disk && Array.isArray(d.disk.nodes) ? d.disk.nodes : null;
+  const none = (reason) => ({ measured: false, total: null, used: null, avail: null, percent: null, nodes: 0, reason });
+  if (!alloc) return none('_cat/allocation has not answered yet');
+  const list = Array.isArray(d.nodes) ? d.nodes : [];
+  if (!list.length) return none('the node list (roles) has not answered yet');
+  const byName = new Map(list.map((n) => [String(n.name), n]));
+  let total = 0, used = 0, avail = 0, count = 0;
+  const unknown = [];
+  for (const r of alloc) {
+    if (!r || !r.node || r.node === 'UNASSIGNED') continue;
+    const roles = rolesOfNode(byName.get(String(r.node)));
+    if (roles === null) { unknown.push(String(r.node)); continue; }
+    if (!roles.some((x) => DATA_ROLES.includes(x))) continue;
+    total += Number(r['disk.total']) || 0;
+    used += Number(r['disk.used']) || 0;
+    avail += Number(r['disk.avail']) || 0;
+    count++;
+  }
+  if (unknown.length) return none(`roles not reported for ${plural(unknown.length, 'node')} (${unknown.slice(0, 3).join(', ')})`);
+  if (!count || !(total > 0)) return none('no data node is listed');
+  return { measured: true, total, used, avail, percent: (used / total) * 100, nodes: count, reason: null };
+}
+
+/** How many days the data-node disk's free space lasts at `perDayBytes`. null when either is unknown. */
+export function diskLastsDays(disk, perDayBytes) {
+  if (!disk || !disk.measured || !(perDayBytes > 0)) return null;
+  return Math.max(0, disk.avail) / perDayBytes;
+}
+
+/** Today's UTC date, as the index names count days. */
+const utcToday = () => new Date().toISOString().slice(0, 10);
+
+/**
+ * Days of live indices the cluster holds now: from the oldest dated live index to today
+ * (both counted), or the ILM delete age when no index name carries a date.
+ * `{days, from, source: 'indices'|'ILM'}` or null.
+ */
+export function liveHeldDays(indices, data = {}, today = utcToday()) {
+  let oldest = null;
+  for (const r of indices || []) if (r && r.day && r.day <= today && (oldest === null || r.day < oldest)) oldest = r.day;
+  if (oldest) return { days: spanDaysIso(oldest, today), from: oldest, source: 'indices' };
+  const ilm = data && data.appliedIlm ? parseRetention(data.appliedIlm.deleteAfter) : null;
+  return ilm ? { days: ilm.days, from: null, source: 'ILM' } : null;
+}
+
+/**
+ * One row of the Storage plan (docs/REPORTS.md, Capacity & retention), in bytes. Pure.
+ *
+ * @param o {
+ *   perDay        event_logsize per day (perDayEventBytes), null = not measured
+ *   headroomPercent  volumeHeadroomPercent (30 by default)
+ *   livePolicy    parseRetention(cluster.liveRetention): what a person set, null = not set
+ *   disk          dataNodeDisk(data)
+ *   ulm           true when backups go to S3 through ULM (CI/DI, core/cluster-kind.js)
+ *   backupPolicy  parseRetention(cluster.snapshotRetention), null = not set
+ *   backupCapacity  parseSize(cluster.backupCapacity), null = not set
+ *   repoBytes     measured repository size, null = not measured
+ * }
+ * Shortfalls: a number > 0 is the amount short, 0 is "none", null is unknown (`…Why` says why).
+ */
+export function storagePlanRow(o) {
+  const GBB = 1024 ** 3;
+  const perDay = typeof o.perDay === 'number' && isFinite(o.perDay) ? o.perDay : null;
+  const pct = isFinite(Number(o.headroomPercent)) ? Math.max(0, Number(o.headroomPercent)) : VOLUME_DEFAULTS.headroomPercent;
+  const buffered = perDay === null ? null : perDay * (1 + pct / 100);
+  const disk = o.disk || { measured: false };
+
+  const liveRequired = buffered !== null && o.livePolicy ? buffered * o.livePolicy.days : null;
+  let liveShortfall = null, liveWhy = null;
+  if (!o.livePolicy) liveWhy = 'not set';
+  else if (buffered === null) liveWhy = 'not measured';
+  else if (!disk.measured) liveWhy = 'disk not measured';
+  else liveShortfall = Math.max(0, liveRequired - disk.total);
+
+  const capacity = o.backupCapacity ? o.backupCapacity.gb * GBB : null;
+  const repo = typeof o.repoBytes === 'number' && isFinite(o.repoBytes) ? o.repoBytes : null;
+  let backupRequired = null, backupShortfall = null, backupWhy = null;
+  if (o.ulm) backupWhy = 'ulm';
+  else {
+    backupRequired = buffered !== null && o.backupPolicy ? buffered * o.backupPolicy.days : null;
+    if (!o.backupPolicy) backupWhy = 'not set';
+    else if (buffered === null) backupWhy = 'not measured';
+    else if (capacity === null) backupWhy = 'no capacity';
+    else backupShortfall = Math.max(0, backupRequired - capacity);
+  }
+  return {
+    perDay, buffered, headroomPercent: pct,
+    livePolicy: o.livePolicy || null, liveRequired, liveShortfall, liveWhy,
+    disk,
+    ulm: !!o.ulm, backupPolicy: o.backupPolicy || null, backupCapacity: capacity, repoBytes: repo,
+    backupRequired, backupShortfall, backupWhy,
   };
 }
 

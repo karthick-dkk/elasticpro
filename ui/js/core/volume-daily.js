@@ -345,3 +345,268 @@ export function monthlyAllCsvRows(reply) {
     }),
   };
 }
+
+/* ------------------------- event_logsize: the one size on Reports ------------------------- */
+// docs/REPORTS.md, "One size: event_logsize". Every size the Reports page shows, and every
+// file it writes, is the record's `eventBytes` (the sum of the Event size field). These are
+// the only functions that turn the record's days into a per-day rate, a day against its
+// average, a month so far or a peak, so the tiles, tables, charts and CSVs cannot disagree.
+// A day the record did not measure (`eventBytes: null`) is left out and counted as left
+// out; it is never a 0.
+
+const DAY_MS = 86400000;
+/** "2026-11-03" moved by `n` days, UTC. */
+export function addDays(ymd, n) {
+  return new Date(Date.parse(`${ymd}T00:00:00Z`) + n * DAY_MS).toISOString().slice(0, 10);
+}
+/** A day row's event_logsize, or null when the record did not measure it. */
+export const eventBytesOf = (d) => (d && typeof d.eventBytes === 'number' && Number.isFinite(d.eventBytes) ? d.eventBytes : null);
+const rowsOf = (record) => ((record && Array.isArray(record.days)) ? record.days : []).filter((d) => d && typeof d.day === 'string');
+
+/**
+ * The `days` calendar days before `before` (default: today, UTC), and the mean event_logsize
+ * of those that measured it. `{value|null, measured, of, from, to}`: `measured` of `of` days
+ * carried a figure. Today is never counted (it is still filling up).
+ */
+export function eventWindow(record, days = 7, { today = utcDay(), before = null } = {}) {
+  const n = Math.max(1, Math.floor(Number(days) || 7));
+  const to = addDays(before || today, -1);
+  const from = addDays(to, -(n - 1));
+  const vals = rowsOf(record)
+    .filter((d) => d.day >= from && d.day <= to && d.day < today)
+    .map(eventBytesOf).filter((v) => v !== null);
+  return { value: vals.length ? vals.reduce((a, v) => a + v, 0) / vals.length : null, measured: vals.length, of: n, from, to };
+}
+
+/**
+ * THE per-day rate (docs/REPORTS.md): mean event_logsize over the last `days` finished days,
+ * in bytes; null when none of them measured it. Overview, Capacity, Measure, Planning and
+ * their CSVs all read this.
+ */
+export function perDayEventBytes(record, days = 7, opts = {}) {
+  return eventWindow(record, days, opts).value;
+}
+
+/**
+ * A day's event_logsize against the `days` days before it, in percent (the core's row rule,
+ * docs/VOLUME.md "Average over N days for day d", on event_logsize). Null when the day or its
+ * average is not measured, or the average is 0.
+ */
+export function eventVsAvgPct(record, day, days = 7, { today = utcDay() } = {}) {
+  const row = rowsOf(record).find((d) => d.day === day);
+  const v = eventBytesOf(row);
+  if (v === null) return null;
+  const avg = perDayEventBytes(record, days, { today, before: day });
+  return avg ? ((v - avg) / avg) * 100 : null;
+}
+
+/** Yesterday's row: `{day, value|null, docs|null, row|null}`. */
+export function eventYesterday(record, { today = utcDay() } = {}) {
+  const day = addDays(today, -1);
+  const row = rowsOf(record).find((d) => d.day === day) || null;
+  return { day, value: eventBytesOf(row), docs: row && typeof row.docs === 'number' ? row.docs : null, row };
+}
+
+/**
+ * The current month's finished days (today left out): `{value|null, docs|null, from, to,
+ * days, measured}`. `days` is how many calendar days have finished this month; `measured`
+ * how many of them carried event_logsize. On the 1st there is no finished day: value null.
+ */
+export function eventMonthSoFar(record, { today = utcDay() } = {}) {
+  const from = `${today.slice(0, 7)}-01`;
+  const to = addDays(today, -1);
+  const days = Number(today.slice(8, 10)) - 1;
+  const rows = days ? rowsOf(record).filter((d) => d.day >= from && d.day <= to) : [];
+  const vals = rows.map(eventBytesOf).filter((v) => v !== null);
+  const docs = rows.map((d) => (typeof d.docs === 'number' ? d.docs : null)).filter((v) => v !== null);
+  return { value: vals.length ? vals.reduce((a, v) => a + v, 0) : null, docs: docs.length ? docs.reduce((a, v) => a + v, 0) : null,
+    from, to, days, measured: vals.length };
+}
+
+/** The heaviest finished day in the record (or in `[from, to]`): `{day, value}` or null. */
+export function eventPeak(record, { today = utcDay(), from = null, to = null } = {}) {
+  let best = null;
+  for (const d of rowsOf(record)) {
+    if (d.day >= today || (from && d.day < from) || (to && d.day > to)) continue;
+    const v = eventBytesOf(d);
+    if (v !== null && (!best || v > best.value)) best = { day: d.day, value: v };
+  }
+  return best;
+}
+
+/**
+ * The fleet's totals for the Overview tiles, from one record per cluster: Σ of each figure
+ * above over the clusters that measured it, and how many did not. `vsAvgPct` is yesterday
+ * against the 7 days before it, over the clusters that have both (the row rule).
+ */
+export function fleetEventTotals(records, { today = utcDay(), days = 7 } = {}) {
+  const out = { yesterday: null, yesterdayN: 0, vsAvgPct: null, avg: null, avgN: 0,
+    month: null, monthN: 0, monthFrom: `${today.slice(0, 7)}-01`, monthTo: addDays(today, -1),
+    monthDays: Number(today.slice(8, 10)) - 1, notMeasured: 0, of: 0 };
+  let y = 0, yBoth = 0, base = 0, a = 0, m = 0;
+  for (const r of records || []) {
+    out.of++;
+    const yy = eventYesterday(r, { today });
+    const av = perDayEventBytes(r, days, { today });
+    const before = perDayEventBytes(r, days, { today, before: yy.day });
+    const ms = eventMonthSoFar(r, { today });
+    if (yy.value === null && av === null) out.notMeasured++;
+    if (yy.value !== null) { y += yy.value; out.yesterdayN++; }
+    if (yy.value !== null && before) { yBoth += yy.value; base += before; }
+    if (av !== null) { a += av; out.avgN++; }
+    if (ms.value !== null) { m += ms.value; out.monthN++; }
+  }
+  if (out.yesterdayN) out.yesterday = y;
+  if (base) out.vsAvgPct = ((yBoth - base) / base) * 100;
+  if (out.avgN) out.avg = a;
+  if (out.monthN) out.month = m;
+  return out;
+}
+
+/** Index size against event_logsize: signed difference and ratio. Null when either is unknown. */
+export function sizeDifference(indexBytes, eventBytes) {
+  const ok = (v) => typeof v === 'number' && Number.isFinite(v);
+  if (!ok(indexBytes) || !ok(eventBytes)) return { diff: null, ratio: null };
+  return { diff: indexBytes - eventBytes, ratio: eventBytes > 0 ? indexBytes / eventBytes : null };
+}
+
+/** The Measure size periods (docs/REPORTS.md, board 9). */
+export const MEASURE_PERIODS = [
+  { id: 'last7', label: 'Last 7 days', days: 7 },
+  { id: 'last30', label: 'Last 30 days', days: 30 },
+  { id: 'yesterday', label: 'Yesterday', days: 1 },
+];
+
+/**
+ * Measure size for one cluster's record over the last `days` finished days:
+ * index size per day = mean `priBytes` of the days that report it; event_logsize per day =
+ * perDayEventBytes (the one rate). `rows` is day by day, newest first. `eventField: false`
+ * when no day in the period measured event_logsize (the field is not in the mapping).
+ */
+export function measureSize(record, days = 7, { today = utcDay() } = {}) {
+  const to = addDays(today, -1);
+  const from = addDays(to, -(Math.max(1, days) - 1));
+  const finite = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
+  const inPeriod = rowsOf(record).filter((d) => d.day >= from && d.day <= to).sort((a, b) => (a.day < b.day ? 1 : -1));
+  const pri = inPeriod.map((d) => finite(d.priBytes)).filter((v) => v !== null);
+  const indexPerDay = pri.length ? pri.reduce((a, v) => a + v, 0) / pri.length : null;
+  const eventPerDay = perDayEventBytes(record, days, { today });
+  const rows = inPeriod.map((d) => {
+    const index = finite(d.priBytes);
+    const event = eventBytesOf(d);
+    return { day: d.day, indices: finite(d.indices), index, event, ...sizeDifference(index, event) };
+  });
+  return { from, to, days: inPeriod.length, indexPerDay, eventPerDay, ...sizeDifference(indexPerDay, eventPerDay),
+    eventField: rows.some((r) => r.event !== null), rows };
+}
+
+/**
+ * A day row's status, as the Day by day table says it: final / today so far / "N of M shards
+ * failed · asked again" / not aggregated / not measured. `kind`: ok | today | warn | na.
+ */
+export function dayStatus(d, { today = utcDay() } = {}) {
+  if (!d) return { text: 'not measured', kind: 'na' };
+  if (d.day === today) return { text: 'today so far', kind: 'today' };
+  const err = d.error ? String(d.error) : '';
+  if (d.final === false) {
+    const m = /(\d+) of (\d+) shards failed/.exec(err);
+    if (m) return { text: `${m[1]} of ${m[2]} shards failed · asked again`, kind: 'warn', title: err };
+    if (/went before/.test(err)) return { text: 'indices went before final', kind: 'warn', title: err };
+    if (err) return { text: `${err.split(/[:;]/)[0]}${/asked again/.test(err) ? ' · asked again' : ''}`, kind: 'warn', title: err };
+    return { text: 'not aggregated yet', kind: 'warn' };
+  }
+  if (eventBytesOf(d) === null) return { text: 'not measured', kind: 'na', title: 'No event_logsize for this day: the field is not in the mapping.' };
+  return { text: 'final', kind: 'ok' };
+}
+
+/** A month's heaviest finished day, from a record that reaches back that far: `{day, value}` or null. */
+export function monthEventPeak(record, ym, { today = utcDay() } = {}) {
+  return eventPeak(record, { today, from: `${ym}-01`, to: `${ym}-${String(daysInMonth(ym)).padStart(2, '0')}` });
+}
+
+/**
+ * Each breakdown row's event_logsize as a share of the sum over every row the core listed
+ * (named values, "all others" and "not set"). Shares are null when nothing was measured.
+ */
+export function breakdownEventShares(reply) {
+  const rows = (reply && reply.rows) || [];
+  const total = rows.reduce((a, r) => a + (eventBytesOf(r) || 0), 0);
+  return rows.map((r) => {
+    const v = eventBytesOf(r);
+    return { row: r, value: v, share: total > 0 && v !== null ? (v / total) * 100 : null };
+  });
+}
+
+/**
+ * A month's event_logsize against the month before it, in percent. `null` for the current
+ * month (so far), for a month or a previous month with days missing (partial), and when
+ * either side is not measured: comparing a part of a month with a whole one is not a change.
+ */
+export function monthVsPrevious(m, prev) {
+  const full = (x) => x && x.daysWithData > 0 && x.daysWithData >= daysInMonth(x.month) && !x.partial
+    && typeof x.eventBytes === 'number';
+  if (!m || m.partial) return { pct: null, why: 'so far' };
+  if (!full(m)) return { pct: null, why: m.daysWithData > 0 ? 'partial' : '' };
+  if (!full(prev) || !prev.eventBytes) return { pct: null, why: '' };
+  return { pct: ((m.eventBytes - prev.eventBytes) / prev.eventBytes) * 100, why: '' };
+}
+
+/** Calendar days in "YYYY-MM". */
+export function daysInMonth(ym) {
+  const m = /^(\d{4})-(\d{2})$/.exec(String(ym || ''));
+  return m ? new Date(Date.UTC(Number(m[1]), Number(m[2]), 0)).getUTCDate() : 31;
+}
+
+/* Reports' own files: every size is event_logsize (docs/REPORTS.md), the columns as on screen. */
+export const REPORT_DAILY_CSV = ['cluster', 'day', 'indices', 'docs', 'event_bytes', 'event_bytes_measured',
+  'change_vs_avg_pct', 'avg_days', 'status'];
+export const REPORT_MONTHLY_CSV = ['cluster', 'month', 'days_with_data', 'days_in_month', 'docs', 'event_bytes',
+  'peak_day', 'peak_event_bytes', 'vs_previous_pct'];
+
+const round1 = (x) => (typeof x === 'number' && Number.isFinite(x) ? Math.round(x * 10) / 10 : null);
+
+/** One row per day of the record, newest first, as the Day by day table shows it. */
+export function reportDailyCsvRows(clusterName, record, avgDays = 7, { today = utcDay() } = {}) {
+  return rowsOf(record).slice().sort((a, b) => (a.day < b.day ? 1 : -1)).map((d) => ({
+    cluster: clusterName, day: d.day, indices: v(d.indices), docs: v(d.docs),
+    event_bytes: eventBytesOf(d), event_bytes_measured: eventBytesOf(d) === null ? 'false' : 'true',
+    change_vs_avg_pct: round1(eventVsAvgPct(record, d.day, avgDays, { today })), avg_days: avgDays,
+    status: dayStatus(d, { today }).text,
+  }));
+}
+
+/**
+ * One row per month, newest first, as Month by month shows it. `peaks` is a record that
+ * reaches back over the months (VOLUME_DAILY with enough days); without it the peak is empty.
+ */
+export function reportMonthlyCsvRows(clusterName, months, peaks = null, { today = utcDay() } = {}) {
+  const list = (months || []).slice().sort((a, b) => (a.month < b.month ? -1 : 1));
+  return list.map((m, i) => {
+    const has = m.daysWithData > 0;
+    const p = has && peaks ? monthEventPeak(peaks, m.month, { today }) : null;
+    return {
+      cluster: clusterName, month: m.month, days_with_data: v(m.daysWithData) ?? 0, days_in_month: daysInMonth(m.month),
+      docs: has ? v(m.docs) : null, event_bytes: has && typeof m.eventBytes === 'number' ? m.eventBytes : null,
+      peak_day: p ? p.day : null, peak_event_bytes: p ? p.value : null,
+      vs_previous_pct: round1(monthVsPrevious(m, list[i - 1]).pct),
+    };
+  }).reverse();
+}
+
+/** The all-cluster monthly CSV on event_logsize: one row per cluster, a column per month. */
+export function monthlyAllEventCsvRows(reply) {
+  const clusters = (reply && reply.clusters) || [];
+  const months = monthsAcross(clusters);
+  return {
+    headers: ['cluster', ...months],
+    rows: clusters.map((c) => {
+      const o = { cluster: c.name || c.clusterId };
+      const by = new Map((c.months || []).map((m) => [m.month, m]));
+      for (const ym of months) {
+        const m = by.get(ym);
+        o[ym] = m && m.daysWithData > 0 && typeof m.eventBytes === 'number' ? m.eventBytes : null;
+      }
+      return o;
+    }),
+  };
+}

@@ -261,6 +261,7 @@ HOUSEKEEPING_CACHE_DAYS int 1 3650
 HOUSEKEEPING_DRY_RUN bool
 SESSION_IDLE_DAYS int 0 3650
 ACTIVITY_LOG_KEEP_DAYS int 0 3650
+HISTORY_STORE_WRITES bool
 UI_READ_ONLY bool
 UI_AUTO_REFRESH bool
 UI_REFRESH_SECONDS int 5 3600
@@ -276,6 +277,9 @@ UI_DEFAULT_SCOPE enum last-selected,all
 UI_ROWS_PER_PAGE int 5 1000
 UI_MAX_LOG_ROWS int 10 10000
 UI_VOLUME_INDEX_FORMAT text
+UI_VOLUME_INDEX_PATTERN text
+UI_VOLUME_DAY_FROM enum name,time
+UI_VOLUME_TIME_FIELD text
 UI_VOLUME_TAG_FIELDS text
 UI_VOLUME_FORWARDER_FIELDS text
 UI_VOLUME_HOST_FIELDS text
@@ -351,6 +355,14 @@ cfg_check() {
         *) echo "must contain * (the source) and YYYY.MM.DD (the day), e.g. logstash-*-YYYY.MM.DD"; return 1 ;;
       esac
       case $v in *[[:space:],/\\?#\"\<\>\|]*) echo "must be one index pattern: no spaces, commas or slashes"; return 1 ;; esac ;;
+    # The core's rule (volume::settings::index_pattern_problem), its usual cases: comma-separated
+    # patterns, none empty, no spaces, slashes, quotes, ?, #, <, >, | or :, none starting with _ or +.
+    UI_VOLUME_INDEX_PATTERN)
+      item=$(printf '%s' "$v" | sed -E 's/[[:space:]]*,[[:space:]]*/,/g; s/^[[:space:]]+//; s/[[:space:]]+$//')
+      case $item in *[[:space:]/\\?#\"\<\>\|:]*) echo "no spaces, slashes, quotes, ?, #, <, >, | or :, e.g. logstash-*,app-*"; return 1 ;; esac
+      case ",$item," in *,,*) echo "has an empty pattern between commas"; return 1 ;; *,_*|*,+*|,-*) echo "a pattern cannot start with _ or +, and the first cannot be an exclusion (-)"; return 1 ;; esac ;;
+    UI_VOLUME_TIME_FIELD)
+      case $v in *[[:space:],\"*]*) echo "must be one field name, e.g. @timestamp"; return 1 ;; esac ;;
     UI_VOLUME_COLLECT_AT|UI_REPORT_AT)
       [[ $v =~ ^([01][0-9]|2[0-3]):[0-5][0-9]$ ]] || { echo "must be a time of day HH:MM, 00:00 to 23:59"; return 1; } ;;
     # The same rule as the core (settings.rs check_text, play::settings::spotlight_when_problem).

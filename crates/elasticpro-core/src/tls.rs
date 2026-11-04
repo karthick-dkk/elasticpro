@@ -274,6 +274,9 @@ pub struct PinningVerifier {
     mode: TlsMode,
     /// `host:port` the client was built for — `ServerName` carries no port.
     key: String,
+    /// Only `mode` decides, never the global `accept_all` switch: the history store, which
+    /// is sent a credential under its own TLS setting and nothing else (history_store.rs).
+    own_mode_only: bool,
 }
 
 impl std::fmt::Debug for PinningVerifier {
@@ -309,7 +312,15 @@ impl PinningVerifier {
         let inner = WebPkiServerVerifier::builder_with_provider(roots(), provider())
             .build()
             .expect("webpki verifier");
-        Arc::new(PinningVerifier { inner, pins, mode, key })
+        Arc::new(PinningVerifier { inner, pins, mode, key, own_mode_only: false })
+    }
+
+    /// As `new`, deciding by `mode` alone: `defaults.tls: insecure` does not reach it.
+    pub fn own_mode(pins: Arc<PinStore>, mode: TlsMode, key: String) -> Arc<PinningVerifier> {
+        let inner = WebPkiServerVerifier::builder_with_provider(roots(), provider())
+            .build()
+            .expect("webpki verifier");
+        Arc::new(PinningVerifier { inner, pins, mode, key, own_mode_only: true })
     }
 
     pub fn key(&self) -> &str {
@@ -342,7 +353,7 @@ impl ServerCertVerifier for PinningVerifier {
         let fp = info.sha256.clone();
         self.pins.record(&self.key, info);
 
-        if self.pins.accept_all() {
+        if self.pins.accept_all() && !self.own_mode_only {
             // One switch for every connection. Whatever would have stopped it is noted —
             // the OS store's refusal, unless the operator pinned this certificate earlier.
             let system = self.inner.verify_server_cert(end_entity, intermediates, server_name, ocsp, now);

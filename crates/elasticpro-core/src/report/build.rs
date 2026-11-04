@@ -423,7 +423,7 @@ mod tests {
     use crate::volume::{FieldAgg, TopValue};
 
     fn day(k: &str, pri: u64, docs: Option<u64>, ev: Option<u64>) -> Day {
-        let mut d = Day { day: k.into(), is_final: true, live: true, indices: 1, pri_bytes: pri, total_bytes: pri * 2, docs, event_bytes: ev, ..Day::default() };
+        let mut d = Day { day: k.into(), is_final: true, live: true, indices: 1, pri_bytes: Some(pri), total_bytes: Some(pri * 2), docs, event_bytes: ev, ..Day::default() };
         d.fields.insert("tag".into(), FieldAgg {
             field: Some("tag1".into()),
             top: vec![TopValue { value: "=cmd|' /C calc'!A0".into(), docs: docs.unwrap_or(0) / 2, event_bytes: None, sub_bytes: None }],
@@ -450,11 +450,33 @@ mod tests {
         serde_json::from_value(serde_json::json!({ "from": "2026-10-19", "to": "2026-10-20", "label": "x" })).unwrap()
     }
 
+    /// A layout somebody saved: every column the sheets can carry, primary size shown.
     fn layouts() -> Value {
         serde_json::json!({
-            "daily": { "order": crate::volume::DAILY_COLUMNS, "hidden": crate::volume::DAILY_HIDDEN, "labels": { "docs": "Events" } },
-            "monthly": { "order": crate::volume::MONTHLY_COLUMNS, "hidden": ["from"], "labels": {} },
+            "daily": { "order": ["day", "indices", "docs", "priBytes", "topExtra", "eventBytes", "subBytes", "changeVsAvg",
+                "topSourceHost", "topForwarder", "totalBytes", "topTag", "topSourceIp"],
+                "hidden": ["totalBytes", "topTag", "topSourceIp"], "labels": { "docs": "Events" } },
+            "monthly": { "order": ["month", "daysWithData", "priBytes", "topExtra", "avgPerDay", "peakDay", "docs", "eventBytes",
+                "subBytes", "topSourceHost", "topForwarder", "from"], "hidden": ["from"], "labels": {} },
         })
+    }
+
+    #[test]
+    fn the_default_layout_puts_event_bytes_first_and_hides_index_size() {
+        // What VOLUME_LAYOUT_GET answers while nobody has saved a layout (docs/VOLUME.md):
+        // the Reports pages' own default, so the file and the page start out alike.
+        let d = data();
+        let all: Vec<String> = SHEETS.iter().map(|s| s.to_string()).collect();
+        let def = serde_json::json!({
+            "daily": { "order": crate::volume::DAILY_COLUMNS, "hidden": crate::volume::DAILY_HIDDEN, "labels": {} },
+            "monthly": { "order": crate::volume::MONTHLY_COLUMNS, "hidden": crate::volume::MONTHLY_HIDDEN, "labels": {} },
+        });
+        let s = sheets(&d, &period(), &def, parse_day("2026-10-29").unwrap(), &all, false);
+        let head: Vec<String> = s[0].rows[0].iter().map(text).collect();
+        assert_eq!(head, ["Day", "Indices", "Documents", "Event bytes (bytes)", "Change vs average %"], "{head:?}");
+        let mh: Vec<String> = s[1].rows[0].iter().map(text).collect();
+        assert_eq!(&mh[..4], &["Month", "Days with data", "Documents", "Event bytes (bytes)"], "{mh:?}");
+        assert!(!mh.iter().chain(head.iter()).any(|h| h.starts_with("Primary size") || h.starts_with("Total size")), "index size is hidden: {mh:?}");
     }
 
     fn text(c: &Cell) -> String {

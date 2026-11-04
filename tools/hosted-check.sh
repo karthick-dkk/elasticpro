@@ -80,7 +80,7 @@ check "clearing it needs a caller"     "$(post $B -d '{"type":"NOTIFY_CLEAR"}' |
 # Refresh now sends searches, so every message needs a caller; the roles are proved in-process
 # (tests/volume.rs). Its timer logs "volume daily: timer started" without a user, so the
 # audit count above is unchanged — and this instance has no data dir, so no timer at all.
-for t in VOLUME_SETTINGS VOLUME_FIELDS_CHECK VOLUME_DAILY VOLUME_MONTHLY VOLUME_BREAKDOWN VOLUME_MONTHLY_ALL VOLUME_RUN VOLUME_LAYOUT_GET VOLUME_LAYOUT_SET; do
+for t in VOLUME_SETTINGS VOLUME_FIELDS_CHECK VOLUME_DAILY VOLUME_MONTHLY VOLUME_BREAKDOWN VOLUME_MONTHLY_ALL VOLUME_RUN VOLUME_LAYOUT_GET VOLUME_LAYOUT_SET VOLUME_PATTERN_CHECK; do
   check "$t needs a caller"              "$(post $B -d "{\"type\":\"$t\",\"clusterId\":\"x\"}" | field kind)" "unauthenticated"
 done
 
@@ -100,11 +100,25 @@ for t in CREDENTIAL_STATUS CREDENTIAL_SET CREDENTIAL_CLEAR CREDENTIAL_PROMOTE; d
   check "$t needs a caller"              "$(post $B -d "{\"type\":\"$t\",\"cluster\":\"*\",\"from\":\"x\"}" | field kind)" "unauthenticated"
 done
 
+# The history store (docs/HISTORY.md): where the core writes unattended, with a credential it
+# keeps. Every message needs a caller; the roles, the two gates and the guard are proved
+# in-process (tests/history_store.rs, tests/history_store_gate.rs).
+for t in HISTORY_STORE_GET HISTORY_STORE_SET HISTORY_STORE_TEST HISTORY_STORE_ARM HISTORY_STORE_BACKFILL HISTORY_QUERY; do
+  check "$t needs a caller"              "$(post $B -d "{\"type\":\"$t\",\"on\":true,\"clusterId\":\"x\",\"stream\":\"volume\",\"settings\":{\"url\":\"http://x:9200\"}}" | field kind)" "unauthenticated"
+done
+
 # Cluster type, ULM bucket and whether SLM is expected (0.3.47, cluster_meta.rs): reading it is a
 # user's, setting it an admin's — never a caller-less request's. Roles, validation, the Zabbix tag
 # seed and the 0600 store are proved in-process (tests/cluster_meta.rs).
 for t in CLUSTER_META_GET CLUSTER_META_SET; do
   check "$t needs a caller"              "$(post $B -d "{\"type\":\"$t\",\"clusterId\":\"x\",\"meta\":{\"type\":\"ci\"}}" | field kind)" "unauthenticated"
+done
+
+# Plan templates (0.3.53, plan_templates.rs): reading is a user's, replacing an administrator's —
+# never a caller-less request's. Roles, validation, the limited admin and the display link are
+# proved in-process (tests/plan_templates.rs).
+for t in PLAN_TEMPLATES_GET PLAN_TEMPLATES_SET; do
+  check "$t needs a caller"              "$(post $B -d "{\"type\":\"$t\",\"templates\":[{\"name\":\"x\",\"roles\":[]}]}" | field kind)" "unauthenticated"
 done
 
 # Play, the NOC wall display (docs/PLAY.md). Every message needs a caller but one: a TV trades
@@ -343,5 +357,7 @@ check "no header needed on loopback" "$(post http://127.0.0.1:$P2/bridge -d '{"t
 # Loopback is the portable edition: an app that is only running while somebody has it
 # open must not offer to do anything every two hours.
 check "no scheduler off hosted"     "$(post http://127.0.0.1:$P2/bridge -d '{"type":"DELAY_SINK_GET"}' | field supported)" "False"
+# Nor a history store: it is written by the server, the one edition still running at night.
+check "no history store off hosted" "$(post http://127.0.0.1:$P2/bridge -d '{"type":"HISTORY_STORE_GET"}' | field supported)" "False"
 
 [ $fail -eq 0 ] && echo "ok: hosted-mode contract holds" || { echo "FAILED"; exit 1; }

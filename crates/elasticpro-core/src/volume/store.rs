@@ -52,6 +52,9 @@ pub struct ClusterState {
     pub skipped: Vec<String>,
     #[serde(default)]
     pub skipped_count: u64,
+    /// Indices the last run split into days by time (docs/VOLUME.md "What counts").
+    #[serde(default)]
+    pub time_split: u64,
     #[serde(default)]
     pub months: BTreeMap<String, MonthSummary>,
 }
@@ -221,7 +224,7 @@ mod tests {
         let root = tmp("store");
         let s = Store::new(root.join("volume"));
         let mut f = MonthFile::default();
-        f.days.insert("2026-10-20".into(), Day { day: "2026-10-20".into(), live: true, pri_bytes: 5, ..Day::default() });
+        f.days.insert("2026-10-20".into(), Day { day: "2026-10-20".into(), live: true, pri_bytes: Some(5), ..Day::default() });
         s.write_month("a/../b", "2026-10", &f).unwrap();
         s.write_month("a/../b", "2025-09", &f).unwrap();
         let dir = root.join("volume").join("a%2F%2E%2E%2Fb");
@@ -231,7 +234,7 @@ mod tests {
             use std::os::unix::fs::PermissionsExt;
             assert_eq!(std::fs::metadata(dir.join("2026-10.json.gz")).unwrap().permissions().mode() & 0o777, 0o600);
         }
-        assert_eq!(s.read_month("a/../b", "2026-10").days["2026-10-20"].pri_bytes, 5);
+        assert_eq!(s.read_month("a/../b", "2026-10").days["2026-10-20"].pri_bytes, Some(5));
         assert_eq!(s.months("a/../b"), vec!["2025-09", "2026-10"]);
         s.update_state("a/../b", |st| {
             st.months.insert("2025-09".into(), MonthSummary::default());

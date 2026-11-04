@@ -600,6 +600,12 @@ pub fn required_role(msg_type: &str) -> Option<Role> {
         // Arming the scheduled measurement decides that this process will write
         // to a cluster unattended. Nothing below admin goes near it.
         "DELAY_SINK_GET" | "DELAY_SINK_SET" | "DELAY_SINK_RUN" => Some(Role::Admin),
+        // The history store: where the core writes unattended, with a credential it keeps.
+        // Reading its settings, testing, arming and copying are an admin's (a limited admin may
+        // read them, nothing more: history_store_msg). Its documents are the same facts as the
+        // volume record, so reading them back is a user's, on the clusters they see.
+        "HISTORY_STORE_GET" | "HISTORY_STORE_SET" | "HISTORY_STORE_TEST" | "HISTORY_STORE_ARM" | "HISTORY_STORE_BACKFILL" => Some(Role::Admin),
+        "HISTORY_QUERY" => Some(Role::User),
         // Housekeeping deletes files, sessions and cache entries: an administrator's to read
         // the state of and to run.
         "HOUSEKEEPING_GET" | "HOUSEKEEPING_RUN" => Some(Role::Admin),
@@ -626,8 +632,17 @@ pub fn required_role(msg_type: &str) -> Option<Role> {
         | "VOLUME_MONTHLY_ALL" | "VOLUME_RUN" => Some(Role::User),
         // Which columns the volume tables show names no cluster; changing it changes what
         // everybody sees, so an operator's (audited).
+        // Plan templates (Reports › Planning): everyone who plans reads them; replacing them
+        // changes every plan, so an administrator's (audited; one limited to some clusters is
+        // refused in the handler). A display link reaches neither: not in PLAY_READS.
+        "PLAN_TEMPLATES_GET" => Some(Role::User),
+        "PLAN_TEMPLATES_SET" => Some(Role::Admin),
         "VOLUME_LAYOUT_GET" => Some(Role::Guest),
         "VOLUME_LAYOUT_SET" => Some(Role::Operator),
+        // The Config card's preview of an index pattern before anybody saves it: an index
+        // listing of a pattern the caller types, so the settings' owner's — an admin's (a
+        // limited admin only on the clusters they see: bridge `gate_cluster`).
+        "VOLUME_PATTERN_CHECK" => Some(Role::Admin),
         // Volume reports: generating one is reading the record (a user's), and the queue is
         // shown to everyone who sees the clusters it covers. Stopping somebody's job, the
         // number of slots, the mail server and the mailed schedule are an administrator's:
@@ -2554,6 +2569,9 @@ mod tests {
         assert_eq!(required_role("VOLUME_LAYOUT_SET"), Some(Role::Operator));
         assert!(authorize(Role::User, "VOLUME_LAYOUT_SET", "", "").is_err());
         assert!(authorize(Role::Operator, "VOLUME_LAYOUT_SET", "", "").is_ok());
+        assert_eq!(required_role("VOLUME_PATTERN_CHECK"), Some(Role::Admin));
+        assert!(authorize(Role::Operator, "VOLUME_PATTERN_CHECK", "", "").is_err());
+        assert!(authorize(Role::Admin, "VOLUME_PATTERN_CHECK", "", "").is_ok());
     }
 
     #[test]

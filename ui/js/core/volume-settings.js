@@ -51,3 +51,16 @@ export async function volumeSettings(clusterId, volume) {
 export async function volumeFieldsCheck(clusterId, volume) {
   return send(await withVolume({ type: 'VOLUME_FIELDS_CHECK', clusterId }, volume));
 }
+
+/**
+ * The live preview under "Which indices count": what the pattern matches on one cluster.
+ * `{ok, matched, dated, undated, datedExample, undatedExample}`; an older core answers
+ * `{ok:false, unknown:true}` ("needs ElasticPro 0.3.53"). `dayFrom`: name | time.
+ */
+export async function volumePatternCheck(clusterId, indexPattern, dayFrom, volume) {
+  let res;
+  try { res = await bridge(await withVolume({ type: 'VOLUME_PATTERN_CHECK', clusterId, indexPattern, dayFrom }, volume)); }
+  catch (e) { return { ok: false, message: e.message || String(e) }; }
+  if (isUnknownType(res)) return { ok: false, unknown: true, message: 'The index preview needs ElasticPro 0.3.53' };
+  return res || { ok: false, message: 'the core did not answer' };
+}
