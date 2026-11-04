@@ -43,16 +43,22 @@ pub use settings::{SizeBasis, VolumeSettings};
 /// the operator chooses (`extra.name`).
 pub const FIELD_KEYS: [&str; 5] = ["tag", "forwarder", "sourceHost", "sourceIp", "extra"];
 
-/// Columns of the Daily table, in their default order, then the ones hidden by default.
+/// Columns of the Daily table, in their default order: the ones Reports › Daily & monthly
+/// shows first (docs/REPORTS.md: every size is event_logsize), then the ones hidden by
+/// default. Index store size (`priBytes`, `totalBytes`) belongs to Measure size and is hidden.
 pub const DAILY_COLUMNS: &[&str] = &[
-    "day", "indices", "docs", "priBytes", "topExtra", "eventBytes", "subBytes", "changeVsAvg",
-    "topSourceHost", "topForwarder", "totalBytes", "topTag", "topSourceIp",
+    "day", "indices", "docs", "eventBytes", "changeVsAvg",
+    "topExtra", "topSourceHost", "topForwarder", "topTag", "topSourceIp", "subBytes", "priBytes", "totalBytes",
 ];
-pub const DAILY_HIDDEN: &[&str] = &["totalBytes", "topTag", "topSourceIp"];
+pub const DAILY_HIDDEN: &[&str] = &[
+    "topExtra", "topSourceHost", "topForwarder", "topTag", "topSourceIp", "subBytes", "priBytes", "totalBytes",
+];
+/// Columns of the Monthly table, in their default order, the same way round.
 pub const MONTHLY_COLUMNS: &[&str] = &[
-    "month", "daysWithData", "priBytes", "topExtra", "avgPerDay", "peakDay", "docs", "eventBytes",
-    "subBytes", "topSourceHost", "topForwarder", "from",
+    "month", "daysWithData", "docs", "eventBytes", "peakDay",
+    "topExtra", "topSourceHost", "topForwarder", "subBytes", "from", "priBytes", "avgPerDay",
 ];
+pub const MONTHLY_HIDDEN: &[&str] = &["topExtra", "topSourceHost", "topForwarder", "subBytes", "from", "priBytes", "avgPerDay"];
 
 /// Columns of Reports › Capacity & retention's *Storage plan* table (docs/REPORTS.md
 /// board 4), in their default order. `cluster` is always first and cannot be hidden.
@@ -81,7 +87,7 @@ pub struct LayoutTable {
 /// Every table with a shared layout. Any other table name is refused.
 pub const LAYOUT_TABLES: &[LayoutTable] = &[
     LayoutTable { name: "daily", columns: DAILY_COLUMNS, hidden: DAILY_HIDDEN, locked: None },
-    LayoutTable { name: "monthly", columns: MONTHLY_COLUMNS, hidden: &[], locked: None },
+    LayoutTable { name: "monthly", columns: MONTHLY_COLUMNS, hidden: MONTHLY_HIDDEN, locked: None },
     LayoutTable { name: "capacity", columns: CAPACITY_COLUMNS, hidden: &[], locked: Some("cluster") },
     LayoutTable { name: "overview", columns: OVERVIEW_COLUMNS, hidden: &[], locked: Some("cluster") },
 ];

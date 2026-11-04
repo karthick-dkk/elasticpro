@@ -114,8 +114,8 @@ test('the rule beats the words', () => {
 test('a Zabbix-template problem, with no rule, is placed by its name', () => {
   const at = (problem) => e.troubleshootTarget(launch(`zbx_host=vm-2&problem=${encodeURIComponent(problem)}`), fleet, pageForProblem);
   assert.deepEqual(at('Elasticsearch: Health is YELLOW'), { page: 'shards', cluster: 'c2' });
-  assert.equal(at('ES Indices size above than avg').page, 'volume');
-  assert.equal(at('Client plan: live storage over 85% used').page, 'volume');
+  assert.equal(at('ES Indices size above than avg').page, 'reports');
+  assert.equal(at('Client plan: live storage over 85% used').page, 'reports');
   assert.equal(at('EC2 backup failed').page, 'snapshots');
   assert.equal(at('Elasticsearch: Service is down').page, 'overview');
 });

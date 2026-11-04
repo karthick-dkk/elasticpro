@@ -59,6 +59,8 @@ test('an unreachable store is one line, and only when it was asked and did not a
   assert.equal(H.historyUnreachableLine({ reachable: true }), '');
   assert.equal(H.historyUnreachableLine({ reachable: false, from: '2026-01-01', to: '2026-01-31' }),
     'Days 2026-01-01 to 2026-01-31: in the history store · not reachable');
+  assert.equal(H.historyUnreachableLine({ reachable: false, from: 'a', to: 'b', message: 'in the history store · not reachable: Connection refused' }),
+    'Days a to b: in the history store · not reachable: Connection refused');
   assert.equal(H.fromHistory({ source: 'history' }), true);
   assert.equal(H.fromHistory({ source: 'cluster' }), false);
 });

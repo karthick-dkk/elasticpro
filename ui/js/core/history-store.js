@@ -117,8 +117,10 @@ export function destinationWarning(config, historyStore) {
 /** A daily or monthly row that came from the store. */
 export const fromHistory = (row) => !!(row && row.source === 'history');
 
-/** "Days A to B: in the history store · not reachable", or '' when the store answered or was not asked. */
+/** "Days A to B: in the history store · not reachable[: why]", or '' when the store answered or was not asked. */
 export function historyUnreachableLine(history) {
   if (!history || history.reachable !== false) return '';
-  return `Days ${history.from} to ${history.to}: in the history store · not reachable`;
+  // The core's own words ("in the history store · not reachable: <why>"), with the days asked.
+  const what = history.message || 'in the history store · not reachable';
+  return `Days ${history.from} to ${history.to}: ${what}`;
 }

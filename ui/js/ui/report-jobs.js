@@ -1,5 +1,6 @@
 /**
- * Indices › Summary › Monthly › Generate report, and the list of report jobs (0.3.45).
+ * Reports › Exports & schedules › Generate report, and the list of report jobs (0.3.45; under
+ * Indices › Summary › Monthly until 0.3.53).
  *
  * One job per client (a client is a cluster). The core queues them, runs a few at once and
  * keeps the files; this panel picks what to ask for and shows what the core says about each

@@ -353,10 +353,15 @@ config file cannot be read, the read-only replies (`VOLUME_SETTINGS`, `VOLUME_DA
 
 `DailyRow = Day totals + {basis, avg, changeVsAvgPct, top:{tag,forwarder,sourceHost,sourceIp,extra: {value, share}|null}}`
 
-Columns (keys) of the Daily table: `day, indices, docs, priBytes, topExtra, eventBytes,
-subBytes, changeVsAvg, topSourceHost, topForwarder` (also available, hidden by default:
-`totalBytes, topTag, topSourceIp`). Monthly: `month, daysWithData, priBytes, topExtra,
-avgPerDay, peakDay, docs, eventBytes, subBytes, topSourceHost, topForwarder, from`.
+Columns (keys) of the Daily table, in their default order (0.3.53: event_logsize first, as
+Reports › Daily & monthly shows them; index store size belongs to Measure size): `day,
+indices, docs, eventBytes, changeVsAvg` (also available, hidden by default: `topExtra,
+topSourceHost, topForwarder, topTag, topSourceIp, subBytes, priBytes, totalBytes`).
+Monthly: `month, daysWithData, docs, eventBytes, peakDay` (hidden by default: `topExtra,
+topSourceHost, topForwarder, subBytes, from, priBytes, avgPerDay`). This default is what
+`VOLUME_LAYOUT_GET` answers while nobody has saved a layout, and what the .xlsx sheets use
+then (`volume::DAILY_COLUMNS` / `DAILY_HIDDEN`, `MONTHLY_COLUMNS` / `MONTHLY_HIDDEN`). A
+saved layout is kept as saved.
 Reports (docs/REPORTS.md), `cluster` locked first and never hidden — Capacity & retention:
 `cluster, perDay, buffered, liveRetention, livePolicy, liveDisk, liveRequired,
 liveShortfall, backupPolicy, backupDisk, backupRequired, backupShortfall`; Overview:

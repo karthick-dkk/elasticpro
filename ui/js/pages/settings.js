@@ -1792,7 +1792,7 @@ function volumeCard() {
     cell('Top values kept per field', num('vf-top', 'topValues', VOLUME_BOUNDS.topValues[0], VOLUME_BOUNDS.topValues[1]), 'topValues'),
     cell('Keep the daily record for (months)', num('vf-keep', 'keepMonths', VOLUME_BOUNDS.keepMonths[0], VOLUME_BOUNDS.keepMonths[1]), 'keepMonths'),
     cell('Collect once a day at (server time)', lock('collectAt', h('input.mono', { id: 'vf-at', type: 'time', value: String(start('collectAt')) })), 'collectAt',
-      'Every 24 h. "Refresh now" on Indices › Summary runs it at once.'));
+      'Every 24 h. "Collect now" on Reports › Daily & monthly runs it at once.'));
 
   const name = (list.find((c) => c.id === vol.clusterId) || {}).name || 'a cluster';
   return card('Volume fields',
