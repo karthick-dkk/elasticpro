@@ -35,7 +35,15 @@ fn dash(d: NaiveDate) -> String {
 
 /// A cluster with day indices. `with_event` decides whether the mapping has
 /// `event_logsize`; documents per index are its primary size, so shares are easy to read.
+/// An index without a day in its name has no documents in the kept months.
 async fn cluster(listing: Listing, with_event: bool) -> TestServer {
+    cluster_split(listing, with_event, vec![]).await
+}
+
+/// As `cluster`, with documents in indices split by time: `(index, YYYY-MM-DD, docs)`.
+/// Searches come as the legacy format sends them (the day in the path) or as an index
+/// pattern does (the indices, and the time-split ones' day, in the query).
+async fn cluster_split(listing: Listing, with_event: bool, split: Vec<(String, String, u64)>) -> TestServer {
     TestServer::with(move |hit| {
         let all = listing.lock().unwrap().clone();
         if hit.path.starts_with("/_cat/indices/") {
@@ -49,15 +57,35 @@ async fn cluster(listing: Listing, with_event: bool) -> TestServer {
             let mut fields = json!({
                 "tag1": { "keyword": { "type": "keyword", "searchable": true, "aggregatable": true } },
                 "sub_size": { "long": { "type": "long", "searchable": true, "aggregatable": true } },
+                "@timestamp": { "date": { "type": "date", "searchable": true, "aggregatable": true } },
             });
             if with_event {
                 fields["event_logsize"] = json!({ "long": { "type": "long", "searchable": true, "aggregatable": true } });
             }
             return (200, json!({ "indices": [], "fields": fields }).to_string());
         }
-        if let Some(rest) = hit.path.strip_prefix("/logstash-*-") {
-            let day = rest.split('/').next().unwrap_or("");
-            let mine: Vec<&(String, u64)> = all.iter().filter(|(n, _)| n.ends_with(day)).collect();
+        if let Some(names) = support::histogram_indices(hit) {
+            let mut days: Vec<&String> = split.iter().filter(|(n, _, c)| names.contains(n) && *c > 0).map(|(_, d, _)| d).collect();
+            days.sort();
+            days.dedup();
+            let buckets: Vec<Value> = days.iter().map(|d| json!({ "key_as_string": d, "key": 0, "doc_count": 1 })).collect();
+            return (200, json!({ "hits": { "total": { "value": 0 } }, "aggregations": { "days": { "buckets": buckets } } }).to_string());
+        }
+        type Asked = (Vec<String>, Vec<(String, u64)>);
+        let asked: Option<Asked> = match hit.path.strip_prefix("/logstash-*-") {
+            Some(rest) => {
+                let day = rest.split('/').next().unwrap_or("").to_string();
+                Some((all.iter().filter(|(n, _)| n.ends_with(&day)).map(|(n, _)| n.clone()).collect(), vec![]))
+            }
+            None => support::day_search(hit).map(|s| {
+                let day = s.day.unwrap_or_default();
+                let counted = split.iter().filter(|(n, d, _)| s.split.contains(n) && *d == day).map(|(n, _, c)| (n.clone(), *c)).collect();
+                (s.dated, counted)
+            }),
+        };
+        if let Some((dated, counted)) = asked {
+            let mut mine: Vec<(String, u64)> = all.iter().filter(|(n, _)| dated.contains(n)).cloned().collect();
+            mine.extend(counted);
             let docs: u64 = mine.iter().map(|(_, p)| *p).sum();
             let buckets: Vec<Value> = mine.iter().map(|(n, p)| json!({
                 "key": n, "doc_count": p, "sub": { "value": (*p / 10) as f64 }, "ev": { "value": (*p * 3) as f64 },
@@ -76,8 +104,11 @@ async fn cluster(listing: Listing, with_event: bool) -> TestServer {
     .await
 }
 
+/// Searches for day `d`: the legacy format names it in the path, the pattern in the query.
 fn searches_for(srv: &TestServer, d: NaiveDate) -> usize {
-    srv.hits().iter().filter(|h| h.path.contains("/_search") && h.path.contains(&dot(d))).count()
+    srv.hits().iter().filter(|h| h.path.contains("/_search")
+        && (h.path.contains(&dot(d)) || support::day_search(h).is_some_and(|s| s.dated.iter().any(|n| n.contains(&dot(d))) || s.day == Some(dash(d)))))
+        .count()
 }
 
 async fn portable(dir: &TempDir, url: &str) -> Arc<Core> {
@@ -130,8 +161,9 @@ async fn finished_days_once_today_every_run_and_a_deleted_day_is_kept() {
     for d in [t, d1, d2, d3] {
         assert_eq!(searches_for(&srv, d), 1, "{d} searched once on the first run");
     }
-    let search = srv.hits().into_iter().find(|h| h.path.contains("/_search")).unwrap();
-    assert!(search.path.starts_with("/logstash-*-") && search.path.contains("ignore_unavailable=true&allow_no_indices=true"), "{}", search.path);
+    // The built-in pattern logstash-*: the pattern in the path, the day's indices in the query.
+    let search = srv.hits().into_iter().find(|h| support::day_search(h).is_some()).unwrap();
+    assert_eq!(search.path, "/logstash-*/_search?ignore_unavailable=true&allow_no_indices=true");
     assert_eq!(search.header("x-opaque-id").map(|v| v.contains("volume-daily")), Some(true), "origin volume-daily in the request log");
     let body: Value = serde_json::from_str(&search.body).unwrap();
     assert!(body["aggs"].get("ev").is_none(), "event_logsize is not mapped: no ev agg: {body}");
@@ -167,7 +199,9 @@ async fn finished_days_once_today_every_run_and_a_deleted_day_is_kept() {
     assert_eq!(row(&daily, d1)["eventBytes"], Value::Null, "{}", row(&daily, d1));
     assert_eq!(row(&daily, d1)["subBytes"], 30);
     assert_eq!(daily["cards"]["eventBytes30"]["value"], Value::Null);
-    assert_eq!(daily["skipped"], json!(["logstash-linux-2026.10"]));
+    assert_eq!(daily["skipped"], json!([]), "a pattern skips nothing it matches");
+    assert_eq!(daily["timeSplit"], 1, "logstash-linux-2026.10 has no day in its name: split by time");
+    assert_eq!(daily["matched"], 5, "d3's index is gone");
     assert_eq!(daily["sources"], json!(["linux", "win-dc"]));
 
     // The cards and the change against the average (avgDays 3).
@@ -242,6 +276,113 @@ async fn a_measured_event_field_is_summed() {
     assert_eq!(daily["cards"]["eventBytes30"]["value"], 1200);
 }
 
+/// A clusters file (here: the desktop message) that names only the legacy `indexFormat`
+/// keeps the requests it always sent: the day's indices by name in the path, the names
+/// that do not fit skipped, nothing split by time.
+#[tokio::test]
+async fn the_legacy_index_format_keeps_its_requests() {
+    let t = today();
+    let listing: Listing = Arc::new(Mutex::new(vec![
+        (format!("logstash-linux-{}", dot(t - Duration::days(1))), 400),
+        ("logstash-linux-2026.10".into(), 7),
+    ]));
+    let srv = cluster(listing, true).await;
+    let dir = TempDir::new("volume-legacy");
+    let c = portable(&dir, &srv.url()).await;
+    let volume = json!({ "defaults": { "indexFormat": "logstash-*-YYYY.MM.DD" } });
+    let s = c.handle(json!({ "type": "VOLUME_SETTINGS", "clusterId": "prod", "volume": volume })).await;
+    assert_eq!(s["patternSource"], "format", "{s}");
+    let r = c.handle(json!({ "type": "VOLUME_RUN", "clusterIds": ["prod"], "volume": volume })).await;
+    assert_eq!(r["started"], json!(["prod"]), "{r}");
+    let daily = settle(&c, "prod").await;
+    let hits = srv.hits();
+    assert!(hits.iter().any(|h| h.path == "/_cat/indices/logstash-*-*?format=json&bytes=b&h=index,status,docs.count,pri.store.size,store.size"));
+    let search = hits.iter().find(|h| h.path.contains("/_search")).unwrap();
+    assert_eq!(search.path, format!("/logstash-*-{}/_search?ignore_unavailable=true&allow_no_indices=true", dot(t - Duration::days(1))));
+    assert!(!search.body.contains("\"query\""), "no query: the day is the path, as before");
+    assert!(!hits.iter().any(|h| h.body.contains("date_histogram")), "nothing split by time");
+    assert_eq!(daily["skipped"], json!(["logstash-linux-2026.10"]));
+    assert_eq!(row(&daily, t - Duration::days(1))["priBytes"], 400);
+}
+
+/// An index without a day in its name is counted per UTC day of its time field: one
+/// histogram finds the days, each day's search counts them; documents and event bytes are
+/// measured, the size of such a day is not (null, never 0, never shared out).
+#[tokio::test]
+async fn an_index_without_a_date_is_split_by_its_time_field() {
+    let t = today();
+    let (d1, d2) = (t - Duration::days(1), t - Duration::days(2));
+    let listing: Listing = Arc::new(Mutex::new(vec![
+        (format!("logstash-linux-{}", dot(d1)), 400),
+        ("logstash-app".into(), 9999),
+    ]));
+    let srv = cluster_split(listing, true, vec![
+        ("logstash-app".into(), dash(d1), 100),
+        ("logstash-app".into(), dash(d2), 50),
+    ]).await;
+    let dir = TempDir::new("volume-split");
+    let c = portable(&dir, &srv.url()).await;
+    let check = c.handle(json!({ "type": "VOLUME_FIELDS_CHECK", "clusterId": "prod" })).await;
+    assert_eq!((check["indices"]["dated"].as_u64(), check["indices"]["timeSplit"].as_u64()), (Some(1), Some(1)), "{check}");
+    assert_eq!(check["timeField"]["resolved"], true, "{check}");
+    c.handle(json!({ "type": "VOLUME_RUN" })).await;
+    let daily = settle(&c, "prod").await;
+    assert_eq!(daily["status"]["lastError"], Value::Null, "{}", daily["status"]);
+    let histograms = srv.hits().iter().filter(|h| support::histogram_indices(h).is_some()).count();
+    assert_eq!(histograms, 1, "one histogram per run");
+    // d1: dated in full (400) and 100 time-split documents; its size is not the day's.
+    let r1 = row(&daily, d1);
+    assert_eq!((r1["docs"].as_u64(), r1["eventBytes"].as_u64()), (Some(500), Some(1500)), "{r1}");
+    assert_eq!((r1["priBytes"].clone(), r1["unmeasuredSizeIndices"].as_u64(), r1["indices"].as_u64()), (Value::Null, Some(1), Some(2)));
+    assert_eq!(r1["final"], true);
+    // d2: only time-split documents.
+    let r2 = row(&daily, d2);
+    assert_eq!((r2["docs"].as_u64(), r2["priBytes"].clone(), r2["totalBytes"].clone()), (Some(50), Value::Null, Value::Null), "{r2}");
+    assert_eq!(daily["totals"]["sizeUnmeasuredDays"], 2);
+    // The source of an undated index is its name less the pattern's prefix.
+    assert_eq!(daily["sources"], json!(["app", "linux"]));
+    let app = c.handle(json!({ "type": "VOLUME_DAILY", "clusterId": "prod", "days": 14, "avgDays": 3, "source": "app" })).await;
+    assert_eq!(app["days"].as_array().unwrap().len(), 2, "{app}");
+    // Finished days are not asked again; the histogram is (it is how new days are found).
+    let before = searches_for(&srv, d2);
+    c.volume_tick_at(local(t, "06:00")).await;
+    settle(&c, "prod").await;
+    assert_eq!(searches_for(&srv, d2), before, "d2 was final");
+}
+
+/// The Config card's pattern preview: an admin's (a limited admin's only on their
+/// clusters), one names-only `_cat/indices` request as a person, matching nothing is an answer.
+#[tokio::test]
+async fn the_pattern_preview_counts_what_a_pattern_would_match() {
+    let t = today();
+    let listing: Listing = Arc::new(Mutex::new(vec![
+        (format!("logstash-linux-{}", dot(t)), 1), ("logstash-app".into(), 1),
+    ]));
+    let srv = cluster(listing, true).await;
+    let dir = TempDir::new("volume-preview");
+    let c = portable(&dir, &srv.url()).await;
+    let r = c.handle(json!({ "type": "VOLUME_PATTERN_CHECK", "clusterId": "prod", "indexPattern": "logstash-*" })).await;
+    assert_eq!(r["ok"], true, "{r}");
+    assert_eq!((r["matched"].as_u64(), r["dated"].as_u64(), r["undated"].as_u64()), (Some(2), Some(1), Some(1)));
+    assert_eq!((r["datedExample"].clone(), r["undatedExample"].clone()), (json!(format!("logstash-linux-{}", dot(t))), json!("logstash-app")));
+    let hit = srv.hits().into_iter().find(|h| h.path.starts_with("/_cat/indices/logstash-*")).unwrap();
+    assert_eq!(hit.path, "/_cat/indices/logstash-*?format=json&h=index");
+    assert!(hit.header("x-opaque-id").is_some_and(|v| v.contains("volume-pattern-check")), "a person asked");
+    let time = c.handle(json!({ "type": "VOLUME_PATTERN_CHECK", "clusterId": "prod", "indexPattern": "logstash-*", "dayFrom": "time" })).await;
+    assert_eq!((time["dated"].as_u64(), time["undated"].as_u64()), (Some(0), Some(2)));
+    let bad = c.handle(json!({ "type": "VOLUME_PATTERN_CHECK", "clusterId": "prod", "indexPattern": "a b" })).await;
+    assert_eq!(bad["kind"], "bad_request", "{bad}");
+    let unknown = c.handle(json!({ "type": "VOLUME_PATTERN_CHECK", "clusterId": "nope", "indexPattern": "x-*" })).await;
+    assert_eq!(unknown["ok"], false, "{unknown}");
+    // Elasticsearch refusing: ok false with the reason.
+    let down = TestServer::with(|_| (500, r#"{"error":{"type":"x","reason":"broken"}}"#.into())).await;
+    let dir2 = TempDir::new("volume-preview-down");
+    let c2 = portable(&dir2, &down.url()).await;
+    let e = c2.handle(json!({ "type": "VOLUME_PATTERN_CHECK", "clusterId": "prod", "indexPattern": "x-*" })).await;
+    assert_eq!(e["ok"], false, "{e}");
+    assert!(e["message"].as_str().unwrap().starts_with("_cat/indices:"), "{e}");
+}
+
 #[tokio::test]
 async fn nothing_is_sent_before_a_run_is_due_or_asked() {
     let listing: Listing = Arc::new(Mutex::new(vec![(format!("logstash-linux-{}", dot(today())), 1)]));
@@ -296,13 +437,27 @@ async fn the_shared_layout_is_validated_and_kept() {
         json!({ "table": "monthly", "layout": { "hidden": ["topTag"] } }),
         json!({ "table": "daily", "layout": { "labels": { "docs": "x".repeat(61) } } }),
         json!({ "table": "daily", "layout": { "labels": { "docs": "a\nb" } } }),
+        json!({ "table": "capacity", "layout": { "order": ["perDay", "cluster"] } }),
+        json!({ "table": "capacity", "layout": { "hidden": ["cluster"] } }),
+        json!({ "table": "overview", "layout": { "hidden": ["priBytes"] } }),
     ] {
         let mut m = bad.clone();
         m["type"] = json!("VOLUME_LAYOUT_SET");
         assert_eq!(c.handle(m).await["kind"], "bad_request", "{bad}");
     }
+    // The Reports tables (0.3.53): capacity and overview, cluster locked first.
+    let cap = c.handle(json!({ "type": "VOLUME_LAYOUT_SET", "table": "capacity",
+                               "layout": { "order": ["cluster", "backupDisk", "perDay"], "hidden": ["buffered"], "labels": { "perDay": "Per day (avg 7)" } } })).await;
+    assert_eq!(cap["ok"], true, "{cap}");
+    assert_eq!(cap["layouts"]["capacity"]["order"][1], "backupDisk");
+    assert_eq!(cap["layouts"]["capacity"]["hidden"], json!(["buffered"]));
+    let ov = c.handle(json!({ "type": "VOLUME_LAYOUT_SET", "table": "overview", "layout": { "hidden": ["type", "daily"] } })).await;
+    assert_eq!(ov["ok"], true, "{ov}");
+    assert_eq!(ov["layouts"]["overview"]["order"][0], "cluster");
+    assert_eq!(ov["layouts"]["daily"]["order"][0], "docs", "the other tables are left as they were");
     // Kept across a restart.
     let c2 = Core::new_with_rounds(Some(dir.0.clone()), Edition::Portable, 1);
+    assert_eq!(c2.handle(json!({ "type": "VOLUME_LAYOUT_GET" })).await["layouts"]["capacity"]["labels"], json!({ "perDay": "Per day (avg 7)" }));
     assert_eq!(c2.handle(json!({ "type": "VOLUME_LAYOUT_GET" })).await["layouts"]["daily"]["labels"], json!({ "docs": "Events" }));
 }
 
@@ -315,7 +470,7 @@ async fn on_hosted_every_message_needs_a_caller_with_the_right_role() {
     let dir = TempDir::new("volume-roles");
     let c = Core::new_with_rounds(Some(dir.0.clone()), Edition::Hosted, 1);
     for t in ["VOLUME_SETTINGS", "VOLUME_FIELDS_CHECK", "VOLUME_DAILY", "VOLUME_MONTHLY", "VOLUME_BREAKDOWN",
-              "VOLUME_MONTHLY_ALL", "VOLUME_RUN", "VOLUME_LAYOUT_GET", "VOLUME_LAYOUT_SET"] {
+              "VOLUME_MONTHLY_ALL", "VOLUME_RUN", "VOLUME_LAYOUT_GET", "VOLUME_LAYOUT_SET", "VOLUME_PATTERN_CHECK"] {
         let r = c.handle(json!({ "type": t, "clusterId": "prod" })).await;
         assert_eq!(r["kind"], "unauthenticated", "{t}: {r}");
     }
@@ -345,6 +500,20 @@ async fn on_hosted_every_message_needs_a_caller_with_the_right_role() {
     let mut as_op = set.clone();
     as_op["session"] = json!(sessions["otto"]);
     assert_eq!(c.handle(as_op).await["ok"], true);
+    // The pattern preview: an admin's; an admin limited to some Zabbix groups only on the
+    // clusters those groups map to (prod is mapped to none).
+    let check = json!({ "type": "VOLUME_PATTERN_CHECK", "clusterId": "prod", "indexPattern": "logstash-*" });
+    let mut as_op = check.clone();
+    as_op["session"] = json!(sessions["otto"]);
+    assert_eq!(c.handle(as_op).await["kind"], "forbidden");
+    let mut as_admin = check.clone();
+    as_admin["session"] = json!(s);
+    let a = c.handle(as_admin).await;
+    assert_eq!((a["ok"].clone(), a["matched"].clone()), (json!(true), json!(0)), "matching nothing is an answer: {a}");
+    let limited = elasticpro_core::auth::Caller { name: "lim".into(), role: elasticpro_core::auth::Role::Admin, must_change: false,
+                                                  scope: Some(vec!["team-a".into()]), play: None };
+    let l = c.handle_as(check.clone(), Some(limited)).await;
+    assert_eq!(l["kind"], "forbidden", "{l}");
     // Hosted with no config file (no ELASTICPRO_CONFIG): built-in, whatever the message says.
     let msg_settings = c.handle(json!({ "type": "VOLUME_SETTINGS", "session": sessions["ursula"],
                                         "volume": { "defaults": { "topValues": 99 } } })).await;

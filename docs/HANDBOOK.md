@@ -619,8 +619,15 @@ short version.
   local date of the last scheduled run is kept in each cluster's `state.json`. **Refresh now**
   (`VOLUME_RUN`) runs at once, at most once a minute per cluster (`tooSoon`). Desktop has no
   timer; Indices › Summary asks for a run.
-- **What it sends**: `_cat/indices/<glob>`, `_field_caps`, then one aggregation `_search` per
-  day that is not final (and today, every run) — reads only, so it works under read-only.
+- **What counts** (0.3.53): `indexPattern` (default `logstash-*`, comma-separated, no date part
+  needed). An index whose name carries `YYYY.MM.DD` counts on that day in full; one without is
+  split into UTC days by `timeField` (default `@timestamp`), its documents and event bytes
+  measured, its size per day not (`null`, `unmeasuredSizeIndices`). `dayFrom: time` splits
+  every index. The legacy `indexFormat` keeps its old behaviour when it is the one in force
+  (docs/VOLUME.md "What counts").
+- **What it sends**: `_cat/indices/<pattern>`, `_field_caps`, one `date_histogram` search when
+  some index is split by time, then one aggregation `_search` per day that is not final (and
+  today, every run) — reads only, so it works under read-only.
   Background class, origin `volume-daily`, 60 s per request (capped by `ES_MAX_TIMEOUT_MS`), at
   most 2 clusters at once and one request at a time per cluster. The emergency stop holds it
   (the timer tries again next tick); an unreachable cluster is skipped.
@@ -635,15 +642,16 @@ short version.
 
 | Message | Role | Answer |
 |---|---|---|
-| `VOLUME_SETTINGS {clusterId?}` | user | `{settings, managed, source, overrides}` |
-| `VOLUME_FIELDS_CHECK {clusterId}` | user | `{glob, indices: {match, days, skipped, skippedCount}, rows: [{key, tried, resolved, type, note}]}` (asks the cluster now) |
-| `VOLUME_DAILY {clusterId, days?, avgDays?, source?}` | user | `{settings, status, cards, days, sources, source, topAvailable, skipped, skippedCount, matched, window}` |
+| `VOLUME_SETTINGS {clusterId?}` | user | `{settings, patternSource, managed, source, overrides}`; `patternSource` is `"pattern"`, `"format"` (the legacy `indexFormat` is in force) or `"default"` |
+| `VOLUME_FIELDS_CHECK {clusterId}` | user | `{glob, patternSource, dayFrom, indices: {match, days, skipped, skippedCount, dated, timeSplit}, timeField: {field, used, resolved, type, note}, rows: [{key, tried, resolved, type, note}]}` (asks the cluster now) |
+| `VOLUME_PATTERN_CHECK {clusterId, indexPattern, dayFrom?}` | admin (a limited admin only on clusters they see) | `{matched, dated, undated, datedExample, undatedExample, clusterId, indexPattern, dayFrom}` — the Config card's preview before a save: one `_cat/indices/<pattern>?format=json&h=index` through the gate as the caller (class `interactive`, origin `volume-pattern-check`). `matched: 0` is an answer; an unknown cluster or an Elasticsearch error is `ok: false` with `message` |
+| `VOLUME_DAILY {clusterId, days?, avgDays?, source?}` | user | `{settings, status, cards, days, sources, source, topAvailable, skipped, skippedCount, matched, timeSplit, window}`; a row whose size is not measured (split by time) has `priBytes`/`totalBytes` `null` and `unmeasuredSizeIndices` > 0 |
 | `VOLUME_MONTHLY {clusterId, months?}` | user | `{status, months}` |
 | `VOLUME_BREAKDOWN {clusterId, field, from?, to?, top?}` | user | `{field, resolved, resolvedAll, rows, totals, period}`; `error` when the field never resolved |
 | `VOLUME_MONTHLY_ALL {months?}` | user | `{clusters: [{clusterId, name, basis, months}]}` |
 | `VOLUME_RUN {clusterIds?}` | user | `{started, already, tooSoon, skipped: [{clusterId, reason}], stopped}` |
-| `VOLUME_LAYOUT_GET` | guest | `{layouts: {daily, monthly}}`, each `{order, hidden, labels}` |
-| `VOLUME_LAYOUT_SET {table, layout}` | operator | `{layouts}`; audited |
+| `VOLUME_LAYOUT_GET` | guest | `{layouts: {daily, monthly, capacity, overview}}`, each `{order, hidden, labels}` |
+| `VOLUME_LAYOUT_SET {table, layout}` | operator | `{layouts}`; audited. `table` is one of `daily`, `monthly`, `capacity`, `overview` (Reports; `cluster` first and never hidden); column keys in docs/VOLUME.md |
 
 `status = {lastRunAt, nextRunAt, running, progress: {done, total} | null, lastError, collectAt}`;
 `nextRunAt` is `null` where nothing schedules. Without a data directory every record message
