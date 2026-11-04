@@ -1,5 +1,49 @@
 # Changelog
 
+## 0.3.54
+
+**Upgrading: fetch the new `deploy.sh` first.** 0.3.54 adds a second container, the report worker, so the compose file changes. `deploy.sh --upgrade` runs the installed release's script, and one from before 0.3.54 cannot bring in the new compose file. Download the 0.3.54 `deploy.sh` into `deploy/`, then run `deploy/deploy.sh --upgrade=0.3.54 --dry-run` and `deploy/deploy.sh --upgrade=0.3.54` (deploy/README.md, "Upgrading to 0.3.54 or later"). The script shows the compose change before writing it and keeps the current file as `.compose-previous`. `--rollback` puts the file back along with the images. A compose file you edited yourself is left alone unless you pass `--replace-compose`. `ELASTICPRO_RELEASE_URL` points it at a mirror, or at a `file:///` folder for hosts with no internet access.
+
+**Indices report and Volume by host.** Two new report kinds in Reports › Exports replace the operator's own cron scripts (docs/REPORT-TYPES.md):
+- **Indices report:** one row per index per day from `_cat/indices`, with documents and the index store size (`pri.store.size`). It is the one export that is not event_logsize. It is mailed daily at 08:00 with the month so far.
+- **Volume by host:** one row per day × index × source host, with event_logsize and forwarded size. It is collected daily at 06:00 for every cluster and mailed at 06:00 with the month so far. A missing ClientID is filled the way the script filled it (`UI_REPORT_CLIENT_ID_FIELD`, `UI_REPORT_BRANCH_FIELD` / `_DEFAULT`).
+- Reports › **Volume by host** shows the collected rows, with filter, sort, a day picker, paging and an xlsx download.
+- **Run now** takes at most 5 clusters at a time. A larger request is refused whole (EP-217, `too_many_clusters`), and nothing is queued.
+- The new period **Month so far** runs from the 1st to yesterday; on the 1st it is the whole previous month.
+- Settings:
+  - `UI_REPORT_INDICES_*` and `UI_REPORT_HOSTS_*`: time, recipients, schedule, page and time limits, months kept, fields, request timeout, pause between pages;
+  - `UI_REPORT_MAIL_MAX_MB`.
+
+**Reports collect faster without pressing a cluster.** A collection now sends more than one request per cluster at a time. It starts at `UI_REPORT_CONCURRENCY_START` (2), rises to `UI_REPORT_CONCURRENCY_MAX` (4) while pages come back within `UI_REPORT_PAGE_TARGET_MS`, and backs off as soon as they slow down or fail. Up to `UI_REPORT_CLUSTERS_AT_ONCE` clusters run at once. A collection keeps checkpoints as it goes, so a stopped or failed run resumes where it ended. Everything is still a read under the daily volume run's rules: Background class, the emergency stop, and one collection per cluster.
+
+**The report worker.** Report collections, builds and mail now run in their own container (`worker`, same image, `ELASTICPRO_ROLE=worker`), so a large or failing report cannot slow down monitoring. The core keeps the UI, polling, alerts, Play and Zabbix. The worker listens only inside the stack (port 8766, never routed by nginx) and takes work only with the shared token in the data volume (mode 0600). It accepts at most 16 requests in flight overall, 4 per cluster and 4 per jump host (`ELASTICPRO_WORKER_GATE_*`). Its memory and CPU are capped (`ELASTICPRO_WORKER_MEM_LIMIT`, `ELASTICPRO_WORKER_CPUS`). `ELASTICPRO_ROLE` unset (`all`) runs everything in one process as before, so a stack without the new service keeps working.
+- New error codes:
+  - **EP-218** `worker_unavailable`: the worker cannot be reached, or its heartbeat is 30 s old or more. Nothing is queued and monitoring is unaffected.
+  - **EP-219** `worker_version`: the core and worker versions differ, and the worker refuses work until both match.
+
+**ElasticPro's own health.** Request Centre has a second tab, **ElasticPro health** (`#/requests/health`), for admins only. It shows:
+- a status chip each for the core, the report worker, Redis, the database, Zabbix sync, mail and the history store;
+- memory against the container limit, with the 24 h peak and OOM kills;
+- what is queueing;
+- whether a report is pushing too hard.
+
+A worker heartbeat that is late turns amber. A part that cannot report says *not known*, never green. Opening the tab sends no cluster anything. A dot on the Request Centre entry turns amber or red when a check does.
+
+**Pages no longer flicker while they refresh.** Pages that redraw on a timer now keep every part that did not change, instead of rebuilding it on each poll:
+- the Index filter on Nodes & shards and the Clusters search no longer lose the keyboard after one character;
+- Request Centre's filters no longer jump back to their first option every 2 s;
+- on Exports, the Stop button of a running job stays under the mouse and answers a slow click;
+- the health tab's open sections stay open;
+- Alerts' Export, Acknowledge all and Retry all act on the data on screen when pressed.
+
+**The desktop app is removed from the tree.** `src-tauri/`, the Windows cross-build and the portable-mode files are gone; the v0.3.51 tag still has them.
+
+**Also fixed (from the test-VM run):**
+- The Volume by host collector asks again for a page that timed out or had failed shards. A cluster that answers with something that is not an aggregation at all fails once with that reason, and the job moves on instead of retrying forever.
+- Leftover checkpoint and part files from a crashed or stopped collection are removed before the next one starts.
+- The core gives up on an unreachable worker after 1 s instead of hanging.
+- `deploy/trial.sh` takes `TRIAL_PERIOD`, so a real cluster with no data in the last seven days can still be tested.
+
 ## 0.3.53
 
 **Reports replaces Volume report.** The tab is now **Reports** (`#/reports`; `#/volume` and Zabbix's `elasticpro.volume` still open it), redesigned from the approved design in six sections: **Overview** (yesterday, 7-day average, month so far, clusters whose disk runs out within 6 weeks, backups that do not fit; daily volume for the top 5 clusters; how long the free disk lasts; one row per cluster), **Daily & monthly** (moved here from Indices › Summary, which now points to it), **Capacity & retention** (the storage plan: per day, 30% buffer, live retention held and policy, data-node disk as a bar with its % and "used of total, avail", required disk and **Live disk shortfall**, backup policy, repository disk, required backup disk and **Backup disk shortfall**), **Measure size** (index size per day against event_logsize, per cluster and day by day; *Measure size* runs a collection), **Planning** and **Exports & schedules**. Every size on Reports and in every export (CSV, XLSX, report layout, mailed and generated reports) is **event_logsize**; index size appears only on Measure size. Disk means **data nodes only**, filtered by node role. Columns on Overview and Capacity can be shown, hidden and reordered (drag or ▲/▼), and *Save for everyone* keeps the layout on the server. A figure that cannot be read says *not measured* / *not set* in amber, never 0.
