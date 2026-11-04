@@ -73,6 +73,8 @@ pub struct Reports {
     pub(crate) hosts_attempts: parking_lot::Mutex<std::collections::HashMap<String, (String, u32, i64)>>,
     /// The waits before a failed page is asked again (2 s, 10 s, 30 s); the tests shorten them.
     pub(crate) backoff_ms: parking_lot::Mutex<[u64; 3]>,
+    /// The hosts job watchdog in ms instead of `UI_REPORT_HOSTS_MAX_MINUTES` (the tests).
+    pub(crate) watchdog_ms: parking_lot::Mutex<Option<u64>>,
 }
 
 /// Blocking threads for report work (`REPORT_CPU_SLOTS`, default 1, at most 2).
@@ -171,7 +173,7 @@ impl Reports {
                           cpu: Arc::new(tokio::sync::Semaphore::new(cpu_slots())),
                           collecting: Arc::new(tokio::sync::Semaphore::new(clusters_at_once())),
                           hosts_running: Default::default(), hosts_attempts: Default::default(),
-                          backoff_ms: parking_lot::Mutex::new([2_000, 10_000, 30_000]) };
+                          backoff_ms: parking_lot::Mutex::new([2_000, 10_000, 30_000]), watchdog_ms: Default::default() };
         if !failed.is_empty() {
             tracing::warn!(jobs = failed.len(), "volume report: jobs running when the core stopped were marked failed");
             r.save(&q);

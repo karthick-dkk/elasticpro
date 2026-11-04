@@ -132,6 +132,13 @@ impl Core {
         *self.reports.backoff_ms.lock() = ms;
     }
 
+    /// The hosts job watchdog in ms. Hidden: the tests cannot wait the five minutes that
+    /// `UI_REPORT_HOSTS_MAX_MINUTES` allows at least.
+    #[doc(hidden)]
+    pub fn set_report_watchdog_for_tests(&self, ms: u64) {
+        *self.reports.watchdog_ms.lock() = Some(ms);
+    }
+
     /// The cluster is red by the health the poller last read (no request of its own).
     pub(crate) fn report_cluster_red(&self, id: &str) -> bool {
         let st = self.fleet.state.lock();
@@ -323,9 +330,9 @@ impl Core {
         let now = now_ms();
         let mut work: Vec<Work> = vec![];
         for d in days {
-            if let Some(r) = (opts.stop)() {
-                out.interrupted = Some(r);
-                return out;
+            // Stopped: the days begun so far keep their checkpoints (marked below).
+            if (opts.stop)().is_some() {
+                break;
             }
             let k = day_key(d);
             if !opts.again && dir.held(&k) {
@@ -457,7 +464,7 @@ impl Core {
                 let body_bytes = res.get("bytes").and_then(Value::as_u64).unwrap_or(0);
                 let (d2, r2, mut cp) = (dir.clone(), resolved.clone(), std::mem::take(&mut work[di].cp));
                 let done = self.report_cpu(move || {
-                    let r = hosts::read_page(&res, &r2, size).and_then(|p| {
+                    let r = hosts::read_page(res.get("json").unwrap_or(&Value::Null), &r2, size).and_then(|p| {
                         let done = p.done;
                         d2.append(&mut cp, pk, &p.rows, p.after, done, now).map(|_| done)
                     });
@@ -813,11 +820,13 @@ impl Core {
     /// The job's stop: a person's, the emergency stop, and for a hosts job the watchdog.
     fn report_job_stop(self: &Arc<Self>, job: &Job, max_minutes: Option<u64>) -> Stop {
         let (core, id, started) = (self.clone(), job.id.clone(), std::time::Instant::now());
+        let limit_ms = max_minutes.map(|m| self.reports.watchdog_ms.lock().unwrap_or(m * 60_000));
         Arc::new(move || {
             core.report_stop_asked(&id).map(|by| format!("stopped by {by}"))
                 .or_else(|| core.volume_stopped().then(|| "the emergency stop came on".to_string()))
-                .or_else(|| max_minutes.filter(|m| started.elapsed().as_secs() >= m * 60).map(|m| format!(
-                    "ran longer than {m} minutes (UI_REPORT_HOSTS_MAX_MINUTES): stopped between pages; what was collected is kept and the next run resumes it")))
+                .or_else(|| limit_ms.filter(|ms| started.elapsed().as_millis() as u64 >= *ms).map(|_| format!(
+                    "ran longer than {} minutes (UI_REPORT_HOSTS_MAX_MINUTES): stopped between pages; what was collected is kept and the next run resumes it",
+                    max_minutes.unwrap_or(0))))
         })
     }
 
@@ -870,7 +879,7 @@ impl Core {
             self.report_mail_started(&job.id).await;
         }
         let subject = sched.subject_for(&job.period);
-        let sent = self.report_mail_file(job.report, &job.by, &subject, &body, &job.id, name, job.format.mime()).await;
+        let sent = self.report_mail_file(job.report, &job.by, &subject, &body, (&job.id, name, job.format.mime())).await;
         end.recipients = *sent.as_ref().unwrap_or(&sched.recipients());
         end.mail_error = sent.err();
         end
@@ -911,7 +920,7 @@ impl Core {
                 let res = core.es_req(indices::cat_request(&id, &ind, timeout)).await;
                 let Some(rows) = collect::cat_rows(&res) else {
                     core.cluster_progress(Some(&job_id), &id, |c| c.state = "retrying".into());
-                    return Err(format!("_cat/indices: {}", indices::failure_reason(&res)));
+                    return Err(indices::failure_reason(&res));
                 };
                 drop(res);
                 let out = indices::read_rows(&rows, &ind);
@@ -1125,5 +1134,82 @@ impl Core {
             Ok(v) => v,
             Err(e) => bad("io_error", e),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::auth::Edition;
+    use crate::fleet::catalogue::Dataset;
+    use crate::fleet::entry::{Body, Entry, Status as EntryStatus};
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    fn health(core: &Core, id: &str, status: &str) {
+        let mut e = Entry::never(1, None);
+        e.status = EntryStatus::Ok;
+        e.data = Some(Body::from_value(&json!({ "health": { "json": { "status": status } } })));
+        core.fleet.state.lock().entries.insert((id.to_string(), Dataset::Health), e);
+    }
+
+    #[tokio::test]
+    async fn a_red_cluster_goes_to_the_end_and_a_failed_one_is_tried_once_more() {
+        let dir = std::env::temp_dir().join(format!("ep-rounds-{}-{}", std::process::id(), rand::random::<u32>()));
+        let core = Core::new_with_rounds(Some(dir.clone()), Edition::Portable, 1);
+        core.set_report_backoff_for_tests([0, 1, 1]);
+        health(&core, "redc", "red");
+        health(&core, "okc", "green");
+        assert!(core.report_cluster_red("redc") && !core.report_cluster_red("okc") && !core.report_cluster_red("unknown"));
+        let names = ["okc", "redc", "flaky", "bad"];
+        let calls: Arc<HashMap<String, AtomicU32>> = Arc::new(names.iter().map(|k| (k.to_string(), AtomicU32::new(0))).collect());
+        let stop: Stop = Arc::new(|| None);
+        let c2 = calls.clone();
+        let ids: Vec<String> = names.iter().map(|s| s.to_string()).collect();
+        let (done, failed, stopped) = core.report_rounds("job", &ids, &stop, move |id: String| {
+            let n = c2[&id].fetch_add(1, Ordering::SeqCst) + 1;
+            async move {
+                match id.as_str() {
+                    "flaky" if n == 1 => Err("timed out".to_string()),
+                    "bad" => Err("HTTP 401".to_string()),
+                    _ => Ok(n),
+                }
+            }
+        }).await;
+        assert_eq!(stopped, None);
+        assert_eq!(done.get("okc"), Some(&1));
+        assert_eq!(done.get("flaky"), Some(&2), "a failed cluster is tried once more, at the end");
+        assert_eq!(calls["bad"].load(Ordering::SeqCst), 2, "and only once more");
+        assert_eq!(calls["redc"].load(Ordering::SeqCst), 0, "a red cluster is not asked");
+        let reasons: HashMap<&str, &str> = failed.iter().map(|(c, r)| (c.as_str(), r.as_str())).collect();
+        assert_eq!(reasons.get("bad"), Some(&"HTTP 401"));
+        assert!(reasons["redc"].contains("red"), "still red after three tries: named, not collected");
+
+        // Red at first, green before its tries run out: collected at the end of the job.
+        let flip = core.clone();
+        let tries = Arc::new(AtomicU32::new(0));
+        let t2 = tries.clone();
+        let greens: Stop = Arc::new(move || {
+            // Asked between rounds: the cluster turns green after the first.
+            if t2.fetch_add(1, Ordering::SeqCst) == 1 {
+                health(&flip, "redc", "green");
+            }
+            None
+        });
+        let (done, failed, _) = core.report_rounds("job", &["redc".to_string()], &greens, move |_id: String| async { Ok(()) }).await;
+        assert!(done.contains_key("redc") && failed.is_empty(), "{failed:?}");
+
+        // A stop between rounds names what is left.
+        let stopped: Stop = Arc::new(|| Some("stopped by ann".to_string()));
+        let (_, failed, why) = core.report_rounds("job", &["okc".to_string()], &stopped, move |_id: String| async { Ok(()) }).await;
+        assert_eq!(why.as_deref(), Some("stopped by ann"));
+        assert_eq!(failed[0].0, "okc");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn the_ceiling_leaves_one_gate_slot_per_cluster() {
+        let c = concurrency();
+        assert!(c.max >= 1 && c.max < crate::gate::limits().per_cluster.max(2) as u32, "{c:?}");
+        assert!(c.start <= c.max);
     }
 }

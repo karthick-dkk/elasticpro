@@ -379,7 +379,7 @@ mod tests {
         assert_eq!((n, docs, pri), (3, Some(55), Some(1_073_745_924)));
         assert!(note.contains("1 day(s) not measured"));
 
-        let sheets = sheets(&[c.clone()], &period());
+        let sheets = sheets(std::slice::from_ref(&c), &period());
         assert_eq!(sheets.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(), ["Totals", "Production"]);
         let flat = |s: &Sheet| s.rows.iter().flatten().filter_map(|c| match c { Cell::Text(t) | Cell::Head(t) => Some(t.clone()), _ => None }).collect::<Vec<_>>().join("|");
         let totals = flat(&sheets[0]);
@@ -400,7 +400,7 @@ mod tests {
         assert!(why.starts_with("HTTP 401") && !why.contains("secret"), "{why}");
         assert_eq!(failure_reason(&json!({ "ok": false, "status": 0, "kind": "timeout" })), "the request timed out");
         let c = failed("prod", "Production", why, &period(), &[]);
-        let s = sheets(&[c.clone()], &period());
+        let s = sheets(std::slice::from_ref(&c), &period());
         let first = &s[1].rows[1];
         assert!(matches!(&first[0], Cell::Text(t) if t.contains("did not answer: HTTP 401")));
         assert!(mail_text(&[c]).contains("did not answer"));

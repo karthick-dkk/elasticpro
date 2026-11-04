@@ -541,7 +541,7 @@ impl Core {
                 None => String::new(),
             };
             let body = format!("ElasticPro volume report · {} · {}\n\n{}\n{}", job.cluster_name, job.period.label, summary, MAIL_FOOTER);
-            if let Err(e) = self.report_mail_file(ReportKind::Volume, &job.by, &subject, &body, &job.id, &name, job.format.mime()).await {
+            if let Err(e) = self.report_mail_file(ReportKind::Volume, &job.by, &subject, &body, (&job.id, &name, job.format.mime())).await {
                 end.mail_error = Some(e);
             }
         }
@@ -621,7 +621,7 @@ impl Core {
         }
         let (sched, _) = self.report_schedule_effective(ReportKind::Volume);
         self.report_mail_started(&job.id).await;
-        let sent = self.report_mail_file(ReportKind::Volume, &job.by, &sched.subject_for(&job.period), &body, &job.id, &name, xlsx::MIME).await;
+        let sent = self.report_mail_file(ReportKind::Volume, &job.by, &sched.subject_for(&job.period), &body, (&job.id, &name, xlsx::MIME)).await;
         let mut end = JobEnd::done(file, (!warnings.is_empty()).then(|| warnings.join("; ")));
         end.recipients = *sent.as_ref().unwrap_or(&sched.recipients());
         end.mail_error = sent.err();
@@ -642,7 +642,8 @@ impl Core {
 
     /// Mail a kept report file to `kind`'s recipients. A file over `UI_REPORT_MAIL_MAX_MB`
     /// (default 20) is not attached: the mail says where it is (Reports › Exports, 7 days).
-    pub(super) async fn report_mail_file(&self, kind: ReportKind, by: &str, subject: &str, body: &str, job_id: &str, name: &str, mime: &str) -> Result<usize, String> {
+    pub(super) async fn report_mail_file(&self, kind: ReportKind, by: &str, subject: &str, body: &str, file: (&str, &str, &str)) -> Result<usize, String> {
+        let (job_id, name, mime) = file;
         let path = self.reports.file_path(job_id, name).ok_or("no data directory")?;
         let size = std::fs::metadata(&path).map_err(|e| format!("the file is gone: {e}"))?.len();
         let cap_mb = crate::settings::get().text("UI_REPORT_MAIL_MAX_MB").and_then(|v| v.parse::<u64>().ok()).unwrap_or(MAIL_MAX_MB_DEFAULT);
