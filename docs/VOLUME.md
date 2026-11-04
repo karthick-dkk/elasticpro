@@ -49,8 +49,8 @@ each one counts in one of two ways:
 | Total size per day | `_cat/indices` `store.size` (with replicas) | as above | measured |
 | Indices per day | count of the day's dated indices + time-split indices with documents on it | — | measured |
 | Documents per day | `hits.total` of the day's `_search` (`track_total_hits`) | day not aggregated yet → `null` | measured |
-| Event bytes | `sum` of the Event size field (default `event_logsize`) | no numeric field in the mapping → `null`, shown "not measured" | measured |
-| Sub size | `sum` of the Sub size field (default `sub_size`) | as above | measured |
+| Event bytes | `sum` of the Event size field (default `event_logsize`, then `event_log_size`) | no numeric field in the mapping → `null`, shown "not measured" | measured |
+| Sub size | `sum` of the Sub size field (default `sub_size`, then `fwd_log_size`) | as above | measured |
 | Documents per value | `terms` on the resolved field within the day's indices | field not found → `error`, never 0 | measured |
 | Primary size per value | Σ over days of (value docs ÷ day docs) × day primary size | — | **estimate**, always labelled "est." |
 
@@ -69,8 +69,8 @@ defaults:
     forwarder:   [ fwd_tag, fwdtag, observer.name ]
     sourceHost:  [ src_hostname, host.name ]
     sourceIp:    [ src_ip, source.ip, host.ip ]
-    eventSize:   [ event_logsize ]
-    subSize:     [ sub_size ]
+    eventSize:   [ event_logsize, event_log_size ]
+    subSize:     [ sub_size, fwd_log_size ]
     extra:       { name: Dataset, fields: [ event.dataset, log_type ] }
     sizeBasis:   primary        # primary | total | eventSize: what the graph and cards plot
     topValues:   25             # 5..100, values kept per field per day
@@ -384,6 +384,15 @@ backups, daily` (`volume::CAPACITY_COLUMNS`, `OVERVIEW_COLUMNS`).
 - breakdown: `cluster, field, field_resolved, value, period_from, period_to, docs, event_bytes, primary_bytes_estimated, share_pct, days_seen`
 
 ## Reports and mail
+
+This section is the **volume report** kind (`kind: "volume"`, the default). Two more kinds sit
+beside it since 0.3.54 — the indices report (`indices`) and volume by host (`hosts`) — with
+their own schedules in the same `report-schedule.json` (`{volume, indices, hosts}`; a file
+written before 0.3.54 is one object and reads as `volume`): docs/REPORT-TYPES.md. Every
+`REPORT_RUN`, `REPORT_SCHEDULE_GET/SET` and `REPORT_SEND_NOW` takes `kind`; each schedule has
+a `period` (`cadence` — this section's — `yesterday` or `monthSoFar`). The volume report's
+files are built on the report's own blocking slots too, and a file over
+`UI_REPORT_MAIL_MAX_MB` (default 20) is not attached to its mail.
 
 ### Report jobs (Indices › Summary › Monthly › Generate report)
 

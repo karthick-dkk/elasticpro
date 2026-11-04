@@ -44,6 +44,7 @@ A code keeps its meaning once it is given out. A new kind of failure gets a new 
 | EP-214 | `overloaded` | ElasticPro already holds as many requests waiting for a cluster as it allows (`ES_QUEUE_MAX`, or `ES_QUEUE_PER_USER` for one person). Nothing was sent. The reply carries `retryAfterMs`, and the page asks once more by itself after that long. |
 | EP-215 | `queue_timeout` | The request waited `ES_QUEUE_WAIT_MS` (or its own timeout, if shorter) for a free connection and got none. Nothing was sent. The Request Centre shows what holds the connections. |
 | EP-216 | `response_too_large` | The cluster's answer is larger than `ES_MAX_RESPONSE_MB` (a page's request) or `ES_MAX_FLEET_RESPONSE_MB` (the poller's), or than the memory the core may spend on answers at once. It was not read, and nothing of it is shown. Narrow the request (`filter_path`, a smaller `size`, fewer indices) or raise the limit. |
+| EP-217 | `too_many_clusters` | A report that collects per cluster was asked for more clusters than it runs at once (volume by host: 5). Nothing was queued; ask for fewer. |
 
 ## Config, storage and secrets (3xx)
 

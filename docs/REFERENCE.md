@@ -274,6 +274,28 @@ per index, never per field value, so a value's share of the day's documents is a
 that day's index size. The document counts beside them are exact, and the distinction is
 stated on screen.
 
+## Indices report and volume by host (0.3.54)
+
+Two report kinds beside the volume workbook, in Reports › Exports and by mail
+([REPORT-TYPES.md](REPORT-TYPES.md) is the contract):
+
+- **Indices report** (`kind: "indices"`) — one row per index per day from a fresh
+  `_cat/indices` per cluster, dated by the cluster's naming rule, index store size
+  (`pri.store.size`) only; indices with no date in their name in a block of their own, days
+  whose indices were deleted from the daily record, closed indices without figures. Mailed
+  daily at 08:00 over the month so far once an admin turns it on.
+- **Volume by host** (`kind: "hosts"`) — collected every day at 06:00 for every cluster: a
+  composite aggregation per day × index × source host with event size, forwarded size and
+  metadata fields (ClientID, branch, …), kept on the server for three months and read back
+  as a workbook, a CSV bundle or the `HOSTS_QUERY` view. It pushes each cluster as hard as
+  the cluster answers well (an adaptive limit, thread-pool checks, `Retry-After`), resumes
+  where it stopped, and never holds a day or a workbook in memory.
+
+Messages: `REPORT_RUN`, `REPORT_SCHEDULE_GET/SET` and `REPORT_SEND_NOW` take `kind`
+(default `volume`); `HOSTS_QUERY {clusterId, period, q, sort, offset, limit}` (User, held to
+the caller's clusters). Settings: the `UI_REPORT_INDICES_*`, `UI_REPORT_HOSTS_*`,
+`UI_REPORT_CONCURRENCY_*` keys and `REPORT_CPU_SLOTS` in [SETTINGS.md](SETTINGS.md).
+
 ## Hosted on a server
 
 The same core and UI can run on a Linux server and be used from a browser — three

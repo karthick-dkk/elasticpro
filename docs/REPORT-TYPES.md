@@ -13,9 +13,10 @@ is now the **Volume report** kind. These two are new kinds beside it:
 | `indices` | one row per index per day, the script's `_cat/indices` listing | **index store size only** (`pri.store.size`) — the one export that is not event_logsize (user decision) | daily at **08:00**, month so far |
 | `hosts` | one row per day × index × source host, with metadata | event_logsize, forwarded size | collection daily at **06:00**; mail daily at 06:00, month so far |
 
-Nothing here writes to a cluster. Every request is a read, under the same rules as the daily
-volume run (Background class, the emergency stop, one request at a time per cluster, at most
-two clusters collecting at once).
+Nothing here writes to a cluster. Every request is a read, under the daily volume run's rules
+(Background class, the emergency stop, one collection per cluster at a time) — and, since the
+user's change of 2026-11-04, more than one request per cluster under an adaptive controller
+and up to `UI_REPORT_CLUSTERS_AT_ONCE` clusters at once ("Concurrency", below).
 
 ## Periods
 
@@ -87,7 +88,12 @@ sorted by day then index. CSV zip: `totals.csv` + one CSV per cluster. GB = 1024
 - **Stored** per cluster per day: `<data>/volume/<cluster>/hosts/<YYYY-MM-DD>.json.gz`, rows
   streamed to the file page by page (production runs under a 1 GB limit — nothing holds a
   cluster-day in memory). Kept `UI_REPORT_HOSTS_KEEP_MONTHS` months (default 3, 1–13), pruned
-  with the volume prune.
+  with the volume prune. *As built:* gzip with one member per page, one JSON object per line —
+  `{"header":{v, day, fields, resolved, startedAt}}`, the rows `{i, h, d, e, s, me, m}`
+  (index, host, docs, event bytes, forwarded bytes, docs missing event size, metadata in the
+  header's field order), then `{"end":{rows, pages, incomplete, notes, collectedAt}}`. Pruned
+  after each cluster's hosts collection (which runs every day for every cluster) rather than
+  inside the volume run, which has its own keep.
 
 ### ClientID and branch (user decision: same as the script)
 
@@ -144,6 +150,112 @@ sorted by day then index. CSV zip: `totals.csv` + one CSV per cluster. GB = 1024
 - **Mail size:** an attachment over `UI_REPORT_MAIL_MAX_MB` (default 20) is not attached; the
   mail carries the Summary/Totals as text and says the file is in Reports › Exports (kept 7
   days, `REPORT_DOWNLOAD`). The script's 30-cluster workbook would not have fitted a mailbox.
+
+## Isolation and failure
+
+Reports must never slow ElasticPro down or fail half-way.
+
+- **CPU off the request threads.** Page rows, day-file writes and reads, and every report
+  file (xlsx, CSV zip — the volume report's too) are made in `spawn_blocking` behind a
+  dedicated semaphore (`REPORT_CPU_SLOTS`, default 1, at most 2): a build never occupies
+  more than one or two blocking threads and never a worker of the runtime that serves the
+  pages (`Core::report_cpu`).
+- **Memory ceiling.** `memory.rs` gives reports a share: L/8 of the container's limit, at
+  least 64 MiB (128 MiB without a limit). One composite page may answer at most an eighth of
+  it; a larger answer halves the next page's size (1000 → 500 → … → 100), and an answer the
+  gate refuses as too large is asked again at half the size. Day files are appended a page
+  at a time; workbooks stream to `<data>/reports/<job>-<name>.tmp` and are renamed when
+  complete. Nothing holds a cluster-day or a workbook.
+- **Outbound.** Every hosts and indices request is `Class::Background` through the gate,
+  with a per-request timeout (`UI_REPORT_HOSTS_REQUEST_TIMEOUT_S`, default 120) and a pause
+  between one partition's pages (`UI_REPORT_HOSTS_PAGE_PAUSE_MS`, default 200). How many are
+  in flight per cluster is the controller's (below, "Concurrency").
+- **Resume, never restart.** A cluster-day is collected into one `.part` file per partition
+  (`<day>.p<k>.json.gz.part`, a gzip member per page) and a checkpoint
+  `<day>.partial.json` holding each partition's `after_key`, rows, pages, page size and file
+  length, written after every page. A failed page is asked again three times (2 s, 10 s,
+  30 s); a restart or a failure resumes each partition from its checkpoint (a page written
+  but not checkpointed is cut off). The day file is assembled and renamed into place only
+  when every partition's last page is in. A day that still fails is marked failed with the
+  reason; the timer takes it up again after 15 minutes, on at most 3 ticks, then it waits
+  for a person (*Run now* always tries).
+- **A job never fails whole for one cluster.** A cluster that cannot be read is tried once
+  more at the end of the job; the file and the mail are still made for the others, the
+  cluster's sheet says why in its first row, the Summary/Totals and the mail name it, and the
+  job carries `failedClusters: [{clusterId, reason}]` and `warning`. A hosts job running
+  longer than `UI_REPORT_HOSTS_MAX_MINUTES` (default 120) stops between pages with that
+  reason, keeping its checkpoints; the file is built from what is held and the next run
+  resumes.
+- **The emergency stop and restarts** apply as for the volume report: a job that meets the
+  stop fails (`held`, the schedule gives its period back); a job running at a restart is
+  failed by `jobs.json` and a scheduled one is retried once; a collection cut short keeps its
+  checkpoints, marked `interrupted`.
+- **Progress** for the UI is in the job's `progress`: `{done, total, state, cluster, day,
+  pages, rows, retries, clusters: {<id>: {state, day, pages, rows, retries, concurrency,
+  partitionsDone, partitionsTotal, halvings, lastReason, daysDone, daysTotal}}}`.
+
+## Concurrency
+
+A report may push more than one request per cluster at a time, under control:
+
+- **Work units.** A cluster-day is split into partitions by index: the day's indices (and
+  the open indices split by time) in name order, cut into up to `N` runs balanced by
+  `docs.count` from `_cat/indices` (`control::partitions`; `N` is the concurrency ceiling).
+  Each partition is its own composite stream with its own checkpoint; partitions of several
+  missing days of one cluster run side by side. Runs of names keep the day file in index
+  order, which the ClientID fill reads. The indices report stays one `_cat/indices` per
+  cluster.
+- **The controller** (`control::Controller`, per cluster, pure — it takes `now`): starts at
+  `UI_REPORT_CONCURRENCY_START` (default 2), ceiling `UI_REPORT_CONCURRENCY_MAX` (default 4,
+  1–8), floor 1. The baseline is the median latency of the cluster's first 5 pages. +1 after
+  20 good pages in a row (latency ≤ 1.5× baseline and ≤ `UI_REPORT_PAGE_TARGET_MS`, default
+  5000). Halved on HTTP 429/503, `es_rejected_execution_exception`,
+  `circuit_breaking_exception` (which also halves that partition's page size), a time-out,
+  or a page slower than 3× baseline; `Retry-After` holds every request until it has passed;
+  no increase for 60 s after a halve.
+- **Cluster pressure.** Before a cluster starts and every 50 pages, one
+  `_cat/thread_pool/search?format=json&h=node_name,active,queue,queue_size,rejected`
+  (Background): any node's queue over half its size, or `rejected` grown since the last
+  look, halves. A cluster red by the fleet poller's cached health (no request of its own) is
+  put to the end of the job and tried up to 3 times; still red, it is named as not collected.
+  The timer skips a red cluster until a later tick.
+- **Clusters at once:** `UI_REPORT_CLUSTERS_AT_ONCE` (default 4, 1–8) for the indices and
+  hosts collections; the daily volume run keeps its two. One collection per cluster at a
+  time still holds (the volume run's flag is shared).
+- **The gate keeps priority.** All of it is `Class::Background`: people's requests and the
+  health poll come first, and `ES_BACKGROUND_RESERVE` still holds. The controller's ceiling is
+  kept one under the gate's per-cluster cap (`ES_PER_CLUSTER`, default 4 → at most 3 report
+  requests per cluster), so a cluster always has a slot for the poller and for people; raise
+  `ES_PER_CLUSTER` to let the ceiling reach 8. Background requests are never answered from the
+  read cache or joined to another's (0.3.52's duplicate-request rule covers people's reads),
+  and every composite page has a body of its own (`after_key`), so neither pages nor the
+  thread-pool checks are held back.
+
+## Messages (as built)
+
+- `REPORT_RUN {kind?: "volume"|"indices"|"hosts", clusterIds, period?, format?, mail?,
+  collectAgain?}`. `volume` is unchanged (one job per cluster). `indices` and `hosts` queue
+  **one** job for the clusters (one workbook); `period` defaults to `"monthSoFar"`; hosts
+  refuses more than 5 clusters whole (`too_many_clusters`, EP-217). Reply `{ok, jobs:[Job],
+  refused:[{clusterId, reason}]}`. Presets: `"yesterday"`, `"last7"`, `"monthSoFar"`,
+  `"previousWeek"`, `"previousMonth"`, `"month:YYYY-MM"`, or `{from, to}`.
+- `Job` gains `report: "indices"|"hosts"` (absent for volume), `collectAgain`,
+  `failedClusters`, and the `progress` above. Files: `indices-<cluster|N-clusters>-<from>_<to>.xlsx|zip`,
+  `hosts-…`.
+- `REPORT_SCHEDULE_GET {kind?}` → `{ok, kind, enabled, to, cc, bcc, schedule, at, period:
+  "cadence"|"yesterday"|"monthSoFar", clusters, subject, lastSent, managed, timer,
+  nextSendAt, mailConfigured, nextPeriod}`, plus `sheets` for volume and, for hosts,
+  `collection: {at, fields, keepMonths, maxPages, clientIdField, branchField, branchDefault}`.
+  `REPORT_SCHEDULE_SET {kind?, …, period?}` answers the same. `REPORT_SEND_NOW {kind?, period?}`.
+- `HOSTS_QUERY {clusterId, period?, q?, sort?, offset?, limit?}` (User; held to the caller's
+  clusters, limited admins too) → `{ok, clusterId, period, fields, fill: {clientId,
+  branchDefault}, rows: [{day, index, source, host, docs, eventBytes, subBytes,
+  eventMissingDocs, clientId, branch, meta: {<field>: value}, incomplete}], total, offset,
+  limit, totals: {docs, eventBytes, subBytes}, days: [{day, held, incomplete, rows, notes,
+  failed, collecting?}]}`. `sort` is a column (`day`, `index`, `source`, `host`, `docs`,
+  `eventBytes`, `subBytes`, `clientId`, `branch`), `-` first for descending; `limit` 1–200; a
+  sorted view pages at most 100,000 rows deep.
+- The hosts collection's time is the hosts schedule's `at` (locked by `UI_REPORT_HOSTS_AT`).
 
 ## What the scripts did that is not carried over
 
