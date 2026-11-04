@@ -163,6 +163,9 @@ async fn run() {
     // The request figures to a Zabbix trapper item, once a minute — only when
     // ZABBIX_METRICS_HOST names a host. See zbx_push.rs.
     core.start_zabbix_push();
+    // ElasticPro's own health (docs/HEALTH.md): one sample a minute of this process and the
+    // data volume, kept for a day. Reads no cluster.
+    core.start_health();
     let app = Router::new()
         .route("/bridge", post(bridge))
         // Fleet cache changes, pushed. Opened with a ticket from EVENTS_TICKET; see events().

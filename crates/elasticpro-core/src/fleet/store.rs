@@ -297,6 +297,10 @@ pub struct RedisStore {
     conn: tokio::sync::Mutex<Option<redis::aio::MultiplexedConnection>>,
     last_try: Mutex<Option<std::time::Instant>>,
     last_log: Mutex<Option<std::time::Instant>>,
+    /// The health tab's Redis chip (docs/HEALTH.md): when a command last succeeded, and the
+    /// last failure with when (unix ms). Counters, no extra round trip.
+    last_ok: std::sync::atomic::AtomicU64,
+    last_err: Mutex<Option<(u64, String)>>,
 }
 
 #[cfg(feature = "bridge")]
@@ -332,6 +336,8 @@ impl RedisStore {
             conn: tokio::sync::Mutex::new(None),
             last_try: Mutex::new(None),
             last_log: Mutex::new(None),
+            last_ok: std::sync::atomic::AtomicU64::new(0),
+            last_err: Mutex::new(None),
         }
     }
 
@@ -339,9 +345,16 @@ impl RedisStore {
         self.client.is_some()
     }
 
+    /// `(configured, last success, last failure)` — what the health tab says about Redis.
+    pub fn health(&self) -> (bool, Option<u64>, Option<(u64, String)>) {
+        let ok = self.last_ok.load(std::sync::atomic::Ordering::Relaxed);
+        (self.configured(), (ok > 0).then_some(ok), self.last_err.lock().clone())
+    }
+
     /// Redis being down is logged once a minute, not once per write: with a hundred
     /// clusters that would be the whole log.
     fn down(&self, what: &str, e: &dyn std::fmt::Display) {
+        *self.last_err.lock() = Some((super::now_ms(), format!("{what}: {e}")));
         let mut l = self.last_log.lock();
         if l.is_none_or(|t| t.elapsed() >= std::time::Duration::from_secs(60)) {
             *l = Some(std::time::Instant::now());
@@ -396,7 +409,10 @@ impl RedisStore {
         let mut c = self.conn().await?;
         let wait = std::time::Duration::from_millis((2_000 + (bytes as u64 >> 20) * 1_000).min(30_000));
         let lost = match tokio::time::timeout(wait, cmd.query_async::<T>(&mut c)).await {
-            Ok(Ok(v)) => return Some(v),
+            Ok(Ok(v)) => {
+                self.last_ok.store(super::now_ms(), std::sync::atomic::Ordering::Relaxed);
+                return Some(v);
+            }
             Ok(Err(e)) => {
                 self.down(what, &e);
                 // A reply Redis sent (a wrong type, an OOM refusal) leaves the connection

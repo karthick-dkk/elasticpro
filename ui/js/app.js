@@ -56,6 +56,7 @@ import * as pOverview from './pages/overview.js';
 import * as pAlerts from './pages/alerts.js';
 import * as pReports from './pages/reports.js';
 import { parseHash, pageAlias } from './reports/route.js';
+import { navDot } from './core/system-health.js';
 import * as pIndices from './pages/indices.js';
 import * as pLogs from './pages/logs.js';
 import * as pSnapshots from './pages/snapshots.js';
@@ -397,8 +398,12 @@ function renderNav() {
     });
     if (more.length) {
       nav.append(h('div.nav-sep'));
-      nav.append(rowMenu(() => more.map((p) => ({ label: p.label, icon: p.icon, onClick: () => go(p.id),
-        title: currentPage === p.id ? `${p.label} — this page` : `Open ${p.label}` })), {
+      nav.append(rowMenu(() => more.map((p) => {
+        // ElasticPro's own health, amber or red (PING `health`, docs/HEALTH.md): said on the entry too.
+        const dot = p.id === 'requests' ? navDot(coreInfo) : null;
+        return { label: p.label, icon: p.icon, onClick: () => go(p.id), note: dot ? (dot.tone === 'red' ? 'health: red' : 'health: amber') : null,
+          title: dot ? dot.title : currentPage === p.id ? `${p.label} — this page` : `Open ${p.label}` };
+      }), {
         trigger: 'button.nav-more', label: [h('span.ico', { 'aria-hidden': 'true' }, '☰'), h('span.nav-more-t', '')],
         title: more.map((p) => p.label).join(' · '),
         menuLabel: `More: ${more.map((p) => p.label).join(', ')}`,
@@ -413,6 +418,20 @@ function renderNav() {
     if (here) moreBtn.setAttribute('aria-current', 'page'); else moreBtn.removeAttribute('aria-current');
     const t = moreBtn.querySelector('.nav-more-t');
     if (t && t.textContent !== (here ? here.label : '')) t.textContent = here ? here.label : '';
+  }
+  // The dot on the Request Centre's entry — behind the ☰, so on the ☰ — when ElasticPro's own
+  // health is amber or red. From PING, so it moves every ten seconds without a page of its own.
+  {
+    const dot = navDot(coreInfo);
+    const host = nav.querySelector('button[data-page="requests"]') || moreBtn;
+    const had = nav.querySelector('.nav-health-dot');
+    const want = dot ? dot.tone : '';
+    if (had && (had.dataset.tone !== want || had.parentNode !== host)) had.remove();
+    if (dot && host && !nav.querySelector('.nav-health-dot')) {
+      const el = h('i.hl-dot.nav-health-dot', { class: dot.tone, title: dot.title, 'aria-label': dot.title, role: 'img' });
+      el.dataset.tone = dot.tone;
+      host.append(el);
+    }
   }
   for (const b of nav.querySelectorAll('button[data-page]')) {
     const id = b.dataset.page;
@@ -1214,7 +1233,7 @@ function connectNotificationStore(info) {
 // keep the side-foot tunnel line current
 setInterval(async () => {
   if (!state.config || isSnapshotMode()) return;
-  try { const st = await workerStatus(); if (st && st.ok) { coreInfo = st; renderSideFoot(); } } catch (_) { /* ignore */ }
+  try { const st = await workerStatus(); if (st && st.ok) { coreInfo = st; renderSideFoot(); renderNav(); } } catch (_) { /* ignore */ }
 }, 10000);
 
 // An expired or revoked session: back to the gate rather than a screen of stale numbers

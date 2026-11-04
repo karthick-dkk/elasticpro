@@ -160,7 +160,10 @@ impl Core {
         }
         tokio::spawn(async move {
             while let Some(core) = weak.upgrade() {
+                let pass = std::time::Instant::now();
                 core.fleet_tick().await;
+                // How long a pass takes: the health tab's "cycle time" (docs/HEALTH.md).
+                core.health.note_tick(pass.elapsed().as_millis() as u64);
                 tokio::select! {
                     _ = core.fleet.wake.notified() => {}
                     _ = tokio::time::sleep(Duration::from_secs(1)) => {}
@@ -189,6 +192,11 @@ impl Core {
     /// The newest `seq` handed out so far.
     pub fn fleet_seq(&self) -> u64 {
         self.fleet.state.lock().seq
+    }
+
+    /// Event streams (`/events`) open now: one subscriber each.
+    pub fn fleet_streams(&self) -> usize {
+        self.fleet.events.receiver_count()
     }
 
     /// Something is looking. See `scheduler::IDLE_MS`.

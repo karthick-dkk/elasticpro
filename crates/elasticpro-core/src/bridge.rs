@@ -22,6 +22,10 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+/// SYSTEM_HEALTH and the minute task (docs/HEALTH.md); a child module so it reads what the core
+/// holds without widening any field.
+mod system_health;
+
 struct Primed {
     clusters: HashMap<String, ClusterSpec>,
     read_only: bool,
@@ -244,6 +248,9 @@ pub struct Core {
     pub(crate) play: crate::play::Play,
     /// The history store: its settings, its queue and what it last did. See `history_store`.
     pub(crate) history_store: crate::history_store::HistoryStore,
+    /// ElasticPro's own health: message timing, the self monitor and its ring, what the minute
+    /// task holds. See `health` and `system_health`.
+    pub(crate) health: crate::health::Health,
 }
 
 /// What the last Zabbix sync found. The specs carry credentials and never leave the core;
@@ -701,6 +708,7 @@ impl Core {
         let data_dir_for_volume = data_dir.clone();
         let data_dir_for_reports = data_dir.clone();
         let data_dir_for_history = data_dir.clone();
+        let data_dir_for_health = data_dir.clone();
         let activity = crate::activity::ActivityLog::new(crate::activity::ActivityConfig::from_env(data_dir.as_deref(), edition));
         let (instance, previous_instance, restart_suspects) = instance_ids(data_dir.as_deref());
         let req_cfg = crate::gate::config().clone();
@@ -764,6 +772,7 @@ impl Core {
             reports: crate::report::Reports::open(data_dir_for_reports.as_deref()),
             play,
             history_store: crate::history_store::HistoryStore::open(data_dir_for_history.as_deref(), hosted),
+            health: crate::health::Health::new(data_dir_for_health.as_deref(), crate::health::Sampler::default()),
         })
     }
 
@@ -1159,6 +1168,7 @@ impl Core {
             Reauth::Proxy(_) => "proxy",
             Reauth::None => "none",
         };
+        let began = Instant::now();
         let sent = msg.clone();
         let t = msg.get("type").and_then(|v| v.as_str()).unwrap_or("");
         let mut out = if t == "PLAY_EXCHANGE" && !caller.as_ref().is_some_and(Caller::play_only) {
@@ -1171,6 +1181,9 @@ impl Core {
             self.dispatch_reply(msg, caller.clone(), reauth).await
         };
         crate::errors::stamp(&mut out.value);
+        // Handling time per message type, once, here (docs/HEALTH.md "Response time").
+        self.health.record(sent.get("type").and_then(Value::as_str).unwrap_or(""), began.elapsed().as_millis() as u64,
+                           out.value.get("ok") != Some(&Value::Bool(false)));
         self.record_activity(&sent, caller.as_ref(), via, source, &out.value);
         out
     }
@@ -1468,6 +1481,7 @@ impl Core {
             // "are we stressing Elasticsearch", as a number.
             "REQUEST_STATS" => json!({ "ok": true, "requests": self.requests_for(caller.as_ref()) }),
             "REQUEST_LOG" => self.request_log_for(caller.as_ref(), &msg),
+            "SYSTEM_HEALTH" => self.system_health(caller.as_ref()).await,
             "PINS" => {
                 self.refresh_trust_switch().await;
                 json!({ "ok": true, "pins": self.pins_for(caller.as_ref()) })
@@ -2186,6 +2200,11 @@ impl Core {
         let managed = crate::settings::get();
         m.insert("managedDefaults".into(), managed.ping_defaults());
         m.insert("managedZabbixOptions".into(), managed.ping_zabbix_options());
+        // ElasticPro's own health, for the dot on the Request Centre's nav entry (docs/HEALTH.md):
+        // the level the minute task last worked out. An administrator's, like the tab.
+        if admin {
+            m.insert("health".into(), json!(self.health.level().ping()));
+        }
         out
     }
 

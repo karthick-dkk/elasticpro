@@ -37,6 +37,9 @@ export async function withFreshReads(fn) {
 /** What the core sent recently and what is still in flight — the Request Centre's feed. */
 export const requestLog = (params = {}) => send({ type: 'REQUEST_LOG', ...params });
 
+/** ElasticPro's own health (docs/HEALTH.md): the core's and the worker's, never a cluster's. Admins only. */
+export const systemHealth = () => send({ type: 'SYSTEM_HEALTH' });
+
 export async function primeWorker(clusters, readOnly = true, jumpHosts = [], { persist = true, sharedAuthHeader = undefined, acceptAllCertificates = false, dropAnonymous = [] } = {}) {
   return send({
     type: 'PRIME',
