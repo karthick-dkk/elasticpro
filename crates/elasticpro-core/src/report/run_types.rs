@@ -1113,11 +1113,13 @@ impl Core {
             None => period::month_so_far(today),
         };
         let q = msg.get("q").and_then(Value::as_str).unwrap_or("").chars().take(200).collect::<String>();
+        let cfg = self.hosts_config();
         let sort = match msg.get("sort").and_then(Value::as_str).filter(|s| !s.is_empty()) {
             None => None,
-            Some(s) => match hosts::parse_sort(s) {
+            Some(s) => match hosts::parse_sort(s, &cfg.fields) {
                 Some(x) => Some(x),
-                None => return bad("bad_request", "sort is one of day, index, source, host, docs, eventBytes, subBytes, clientId, branch (- first: descending)"),
+                None => return bad("bad_request", "sort is one of day, index, source, host, docs, eventBytes, subBytes, clientId, branch or meta.<field>, \
+                                                   as \"<col>:asc\" / \"<col>:desc\" (or \"-<col>\" for descending)"),
             },
         };
         let offset = msg.get("offset").and_then(Value::as_u64).unwrap_or(0) as usize;
@@ -1133,7 +1135,6 @@ impl Core {
         let Some(store) = self.volume.store.as_ref() else { return bad("no_store", "no data directory") };
         let c = ClusterHosts { id: id.to_string(), name: self.report_name(id), dir: HostsDir::new(store.root(), id),
                                ind: Indices::from_settings(&s).ok(), failure: None };
-        let cfg = self.hosts_config();
         match self.report_cpu(move || hosts::query(&c, &cfg, &p, &q, sort, offset, limit)).await.and_then(|r| r) {
             Ok(v) => v,
             Err(e) => bad("io_error", e),

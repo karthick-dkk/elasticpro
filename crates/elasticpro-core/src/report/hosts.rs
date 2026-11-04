@@ -994,7 +994,8 @@ pub fn mail_text(clusters: &[ClusterHosts], cfg: &HostsConfig, p: &Period, faile
 
 /* ------------------------------------------ the view ------------------------------------------ */
 
-/// A `HOSTS_QUERY` sort: one of the sheet's columns, ascending or (`-` first) descending.
+/// A `HOSTS_QUERY` sort: one of the sheet's columns, or a metadata field (`meta.<field>`, by
+/// its place in `HostsConfig::fields`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SortKey {
     Day,
@@ -1006,13 +1007,21 @@ pub enum SortKey {
     SubBytes,
     ClientId,
     Branch,
+    Meta(usize),
 }
 
-pub fn parse_sort(s: &str) -> Option<(SortKey, bool)> {
-    let (desc, k) = match s.strip_prefix('-') {
-        Some(k) => (true, k),
-        None => (false, s),
+/// `"<col>:asc"` / `"<col>:desc"` (what the page sends), or `"<col>"` / `"-<col>"`.
+pub fn parse_sort(s: &str, fields: &[String]) -> Option<(SortKey, bool)> {
+    let (desc, k) = match (s.strip_prefix('-'), s.rsplit_once(':')) {
+        (Some(k), _) => (true, k),
+        (None, Some((k, "desc"))) => (true, k),
+        (None, Some((k, "asc"))) => (false, k),
+        (None, Some(_)) => return None,
+        (None, None) => (false, s),
     };
+    if let Some(f) = k.strip_prefix("meta.") {
+        return fields.iter().position(|x| x == f).map(|i| (SortKey::Meta(i), desc));
+    }
     let key = match k {
         "day" => SortKey::Day,
         "index" => SortKey::Index,
@@ -1039,6 +1048,7 @@ fn cmp_shown(a: &Shown, b: &Shown, key: SortKey) -> std::cmp::Ordering {
         SortKey::SubBytes => a.row.sub_bytes.cmp(&b.row.sub_bytes),
         SortKey::ClientId => a.client.cmp(&b.client),
         SortKey::Branch => a.branch.cmp(&b.branch),
+        SortKey::Meta(i) => a.meta.get(i).cmp(&b.meta.get(i)),
     };
     // File order breaks a tie, so pages never overlap.
     o.then_with(|| a.day.cmp(&b.day)).then_with(|| a.row.index.cmp(&b.row.index)).then_with(|| a.row.host.cmp(&b.row.host))
@@ -1092,21 +1102,40 @@ pub fn query(c: &ClusterHosts, cfg: &HostsConfig, p: &Period, q: &str, sort: Opt
         kept = kept.into_iter().skip(offset).take(limit).collect();
     }
     let rows: Vec<Value> = kept.iter().map(|s| {
-        let meta: Map<String, Value> = cfg.fields.iter().zip(&s.meta).map(|(f, v)| (f.clone(), json!(v))).collect();
+        // ClientID and branch filled here too, as in the workbook.
+        let meta: Map<String, Value> = cfg.fields.iter().zip(&s.meta).map(|(f, v)| {
+            let shown = if *f == cfg.client_id_field { json!(s.client) } else if *f == cfg.branch_field { json!(s.branch) } else { json!(v) };
+            (f.clone(), shown)
+        }).collect();
         json!({ "day": s.day, "index": s.row.index, "source": s.source, "host": s.row.host, "docs": s.row.docs,
                 "eventBytes": s.row.event_bytes, "subBytes": s.row.sub_bytes, "eventMissingDocs": s.row.event_missing,
                 "clientId": s.client, "branch": s.branch, "meta": meta, "incomplete": s.incomplete })
     }).collect();
+    let (mut incomplete_days, mut not_in_mapping): (Vec<String>, Vec<String>) = (vec![], vec![]);
     let days: Vec<Value> = day_flags(c, p).into_iter().map(|(day, end, cp)| match end {
-        Some(e) => json!({ "day": day, "held": true, "incomplete": e.incomplete, "rows": e.rows, "notes": e.notes, "failed": null }),
+        Some(e) => {
+            if e.incomplete {
+                incomplete_days.push(day.clone());
+            }
+            json!({ "day": day, "held": true, "incomplete": e.incomplete, "rows": e.rows, "notes": e.notes, "failed": null })
+        }
         None => json!({ "day": day, "held": false, "incomplete": false, "rows": null, "notes": [],
                         "failed": cp.as_ref().and_then(|c| c.failed.clone()), "collecting": cp.is_some_and(|c| c.failed.is_none()) }),
     }).collect();
+    // The configured fields the held days' mappings did not have.
+    for d in p.days() {
+        let Some(r) = c.dir.read(&day_key(d)) else { continue };
+        for (f, resolved) in r.header.fields.iter().zip(&r.header.resolved.meta) {
+            if resolved.is_none() && cfg.fields.contains(f) && !not_in_mapping.contains(f) {
+                not_in_mapping.push(f.clone());
+            }
+        }
+    }
     Ok(json!({
         "ok": true, "clusterId": c.id, "period": p, "fields": cfg.fields, "fill": { "clientId": fill.first_client, "branchDefault": fill.branch_default },
         "rows": rows, "total": total, "offset": offset, "limit": limit,
         "totals": { "docs": sums.docs, "eventBytes": sums.event_bytes, "subBytes": sums.sub_bytes },
-        "days": days,
+        "days": days, "incompleteDays": incomplete_days, "notInMapping": not_in_mapping,
     }))
 }
 
@@ -1294,6 +1323,12 @@ mod tests {
         // The view: search, sort, page, totals and the day flags.
         let v = query(&c, &cfg, &p, "b-2026", None, 0, 200).unwrap();
         assert_eq!((v["total"].as_u64(), v["rows"][0]["clientId"].as_str()), (Some(1), Some("C9")));
+        assert_eq!(parse_sort("day:desc", &cfg.fields), Some((SortKey::Day, true)));
+        assert_eq!(parse_sort("-day", &cfg.fields), Some((SortKey::Day, true)));
+        assert_eq!(parse_sort("docs", &cfg.fields), Some((SortKey::Docs, false)));
+        assert_eq!(parse_sort("meta.zone:asc", &cfg.fields), Some((SortKey::Meta(1), false)));
+        assert_eq!(parse_sort("meta.nope", &cfg.fields), None);
+        assert_eq!(parse_sort("day:up", &cfg.fields), None);
         let v = query(&c, &cfg, &p, "", Some((SortKey::Day, true)), 1, 2).unwrap();
         assert_eq!(v["total"], 4);
         assert_eq!(v["rows"].as_array().unwrap().iter().map(|r| r["index"].as_str().unwrap()).collect::<Vec<_>>(), ["b-2026.11.02", "a-2026.11.02"]);

@@ -238,7 +238,7 @@ async fn a_hosts_job_pages_every_partition_builds_the_book_and_the_view_reads_it
     assert!(sheet.contains(">linux<") && sheet.contains("zone"), "Source is the name less its date; metadata columns");
 
     // The view: the same files, filled the same way.
-    let v = c.handle(json!({ "type": "HOSTS_QUERY", "clusterId": "prod", "period": period(d2, d1), "limit": 5, "sort": "-docs" })).await;
+    let v = c.handle(json!({ "type": "HOSTS_QUERY", "clusterId": "prod", "period": period(d2, d1), "limit": 5, "sort": "docs:desc" })).await;
     assert_eq!(v["ok"], true, "{v}");
     assert_eq!(v["total"], 2504);
     assert_eq!(v["rows"].as_array().unwrap().len(), 5);
@@ -250,6 +250,12 @@ async fn a_hosts_job_pages_every_partition_builds_the_book_and_the_view_reads_it
     let q = c.handle(json!({ "type": "HOSTS_QUERY", "clusterId": "prod", "period": period(d2, d1), "q": "dc1" })).await;
     assert_eq!(q["total"], 1);
     assert_eq!((q["rows"][0]["clientId"].as_str(), q["rows"][0]["branch"].as_str()), (Some("C7"), Some("DC")));
+    assert_eq!((q["rows"][0]["meta"]["ClientID"].as_str(), q["rows"][0]["meta"]["branch"].as_str()), (Some("C7"), Some("DC")), "filled in meta too");
+    assert!(q["notInMapping"].as_array().unwrap().iter().any(|f| f == "parser_tag"), "{q}");
+    assert_eq!(q["incompleteDays"], json!([]));
+    let m = c.handle(json!({ "type": "HOSTS_QUERY", "clusterId": "prod", "period": period(d2, d1), "limit": 1, "sort": "meta.zone:asc" })).await;
+    assert_eq!(m["ok"], true, "{m}");
+    assert_eq!(c.handle(json!({ "type": "HOSTS_QUERY", "clusterId": "prod", "sort": "docs:sideways" })).await["kind"], "bad_request");
     assert_eq!(c.handle(json!({ "type": "HOSTS_QUERY", "clusterId": "prod", "limit": 500 })).await["kind"], "bad_request");
     assert_eq!(c.handle(json!({ "type": "HOSTS_QUERY", "clusterId": "nope" })).await["kind"], "not_found");
 
@@ -397,7 +403,8 @@ async fn schedules_are_per_kind_and_the_daily_collection_runs_from_the_hosts_tim
     assert_eq!((v["kind"].as_str(), v["schedule"].as_str(), v["at"].as_str()), (Some("volume"), Some("monthly"), Some("07:30")), "{v}");
     let h = c.handle(json!({ "type": "REPORT_SCHEDULE_GET", "kind": "hosts" })).await;
     assert_eq!((h["enabled"].as_bool(), h["schedule"].as_str(), h["at"].as_str(), h["period"].as_str()), (Some(false), Some("daily"), Some("06:00"), Some("monthSoFar")), "{h}");
-    assert!(h["collection"]["fields"].as_array().unwrap().iter().any(|f| f == "ClientID"));
+    assert!(h["config"]["fields"].as_array().unwrap().iter().any(|f| f == "ClientID"));
+    assert_eq!((h["config"]["collectAt"].as_str(), h["config"]["mailMaxMb"].as_u64()), (Some("06:00"), Some(20)));
     assert_eq!(h["nextPeriod"]["to"], ms.to.as_str());
     let i = c.handle(json!({ "type": "REPORT_SCHEDULE_GET", "kind": "indices" })).await;
     assert_eq!((i["at"].as_str(), i.get("sheets")), (Some("08:00"), None));

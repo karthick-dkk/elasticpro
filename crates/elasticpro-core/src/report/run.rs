@@ -928,8 +928,14 @@ impl Core {
         if kind == ReportKind::Hosts {
             // The collection runs at the hosts schedule's time whether or not its mail is on.
             let cfg = self.hosts_config();
-            v["collection"] = json!({ "at": e.at, "fields": cfg.fields, "keepMonths": cfg.keep_months, "maxPages": cfg.max_pages,
-                                      "clientIdField": cfg.client_id_field, "branchField": cfg.branch_field, "branchDefault": cfg.branch_default });
+            let s = crate::settings::get();
+            let keys = ["UI_REPORT_HOSTS_FIELDS", "UI_REPORT_CLIENT_ID_FIELD", "UI_REPORT_BRANCH_FIELD", "UI_REPORT_BRANCH_DEFAULT",
+                        "UI_REPORT_HOSTS_AT", "UI_REPORT_HOSTS_KEEP_MONTHS", "UI_REPORT_HOSTS_MAX_PAGES", "UI_REPORT_MAIL_MAX_MB"];
+            let locked: Vec<&str> = keys.into_iter().filter(|k| s.text(k).is_some()).collect();
+            let mail_max = s.text("UI_REPORT_MAIL_MAX_MB").and_then(|v| v.parse::<u64>().ok()).unwrap_or(MAIL_MAX_MB_DEFAULT);
+            v["config"] = json!({ "collectAt": e.at, "fields": cfg.fields, "keepMonths": cfg.keep_months, "maxPages": cfg.max_pages,
+                                  "clientIdField": cfg.client_id_field, "branchField": cfg.branch_field, "branchDefault": cfg.branch_default,
+                                  "mailMaxMb": mail_max, "managed": locked });
         }
         v
     }
