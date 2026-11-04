@@ -270,6 +270,27 @@ Day = { day, final, live, aggregatedAt|null, totalsAt,
   never an apportioned share (`Day::sizes`, the one definition). Per source the same.
 - `indices`: dated indices + `unmeasuredSizeIndices`.
 
+### History store: write and read-back (0.3.53, docs/HISTORY.md)
+
+- **Written** (hosted, only while `HISTORY_STORE_WRITES=true` and *Write history* is armed): after
+  every collection (the daily run, Refresh now, a report job's) the days it changed — totals
+  refreshed, searched, turned `live: false`, or a new `error` — go to the history store's queue as
+  one `volume` document each (`_id` `cluster|day`, index `<prefix>-volume-YYYY.MM`). Its sizes are
+  the whole-day figure (`Day::sizes`: `null` while the size is not measured), the same per source;
+  top values are not kept there. The local record is written first and never waits for the store.
+- **Read back** by `VOLUME_DAILY`, `VOLUME_MONTHLY` and `VOLUME_MONTHLY_ALL` for the days the
+  local record does not reach: from the first day the view reads (the Daily window, its averages
+  and cards; the first of the oldest month shown) to the day before the cluster's oldest local
+  day (its first month for the Monthly views) — older than `keepMonths`, or a data directory that
+  is new. Inside the local record a day without a record had no indices: it is not asked for.
+  One search per request (`<prefix>-volume-*`, at most 10 000 days, newest first; for
+  `VOLUME_MONTHLY_ALL` one search for every cluster that needs one), no write gate needed, only
+  when a store URL is set. A local day always wins. Days from the store go through the same
+  `derive` as local ones (rows, totals, cards, month rows) and carry `source: "history"`; the
+  reply's `history` is `{asked, from, to, reachable, days, truncated, message}`. A store that
+  cannot be reached adds no day and no zero: `reachable: false`, `message` "in the history store
+  · not reachable: …".
+
 ## Derived figures (core, one definition each)
 
 - **basis(d)**: `priBytes` | `totalBytes` | `eventBytes` per `sizeBasis` — the size ones as

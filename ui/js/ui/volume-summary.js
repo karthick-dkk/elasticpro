@@ -19,6 +19,7 @@ import { state } from '../core/state.js';
 import { navigateTo } from '../core/intent.js';
 import { card, statTile, table, empty, unreadable, configErrorBanner } from '../pages/common.js';
 import { toast } from './menu.js';
+import { fromHistory, historyUnreachableLine } from '../core/history-store.js';
 import { reportJobsMount, reportPanel, setReportPanelOpen } from './report-jobs.js';
 import { configErrorOf,
   volumeDaily, volumeMonthly, volumeBreakdown, volumeRun, volumeLayoutGet, volumeLayoutSet, isHosted,
@@ -407,6 +408,14 @@ function topCell(top, key) {
 
 const sizeCell = (v, what) => (v === null || v === undefined ? notMeasured(what) : bytes(v));
 
+/** A row the history store supplied (docs/HISTORY.md): a small muted marker, nothing else changes. */
+const historyMark = (r) => (fromHistory(r) ? h('span.muted', { title: 'From the history store', style: { fontSize: '10.5px' } }, ' · history') : null);
+/** One muted line when the store was asked and could not be reached; never zeros. */
+const historyNote = (reply) => {
+  const t = historyUnreachableLine(reply && reply.history);
+  return t ? h('div.vs-note.muted', t) : null;
+};
+
 function dailyCell(key, d) {
   if (d.__total) {
     if (key === 'day') return h('b', 'Total');
@@ -414,9 +423,9 @@ function dailyCell(key, d) {
   }
   switch (key) {
     case 'day':
-      if (d.day === utcDay()) return h('span', d.day, h('span.muted', ` · as of ${hhmm(d.totalsAt || d.aggregatedAt) || 'now'}`));
-      if (d.final === false) return h('span', d.day, h('span.muted', ` · ${d.error ? String(d.error) : 'not aggregated yet'}`));
-      return d.day;
+      if (d.day === utcDay()) return h('span', d.day, h('span.muted', ` · as of ${hhmm(d.totalsAt || d.aggregatedAt) || 'now'}`), historyMark(d));
+      if (d.final === false) return h('span', d.day, h('span.muted', ` · ${d.error ? String(d.error) : 'not aggregated yet'}`), historyMark(d));
+      return fromHistory(d) ? h('span', d.day, historyMark(d)) : d.day;
     case 'indices': return num(d.indices);
     case 'docs': return d.docs === null || d.docs === undefined ? h('span.muted', { title: 'This day has not been aggregated yet' }, 'not yet') : num(d.docs);
     case 'priBytes': return bytes(d.priBytes);
@@ -439,6 +448,7 @@ function dailyTable(c, reply) {
   const foot = reply.totals ? [{ ...reply.totals, __total: true }] : [];
   const unmeasured = rows.some((d) => d.eventBytes === null || d.eventBytes === undefined);
   return h('div', { style: { marginTop: '10px' } },
+    historyNote(reply),
     card('Daily volume', `newest first · ${num(rows.length)} days`,
       h('div',
         columnTable({ defs, layout, rows, cell: dailyCell, foot, canEdit: canSave(), onChange,
@@ -512,7 +522,7 @@ function monthlyView(c) {
   if (!reply) return [...out, h('div.tbl-empty', 'Reading the monthly record…')];
   const rows = monthRows(reply);
   const settings = reply.settings || {};
-  out.push(monthlyChart(reply, rows, settings), monthlyTable(c, rows, settings), breakdownCard(c, settings));
+  out.push(monthlyChart(reply, rows, settings), monthlyTable(c, rows, settings, reply), breakdownCard(c, settings));
   return out;
 }
 
@@ -564,14 +574,14 @@ function monthlyDefs(settings) {
   ];
 }
 
-function monthlyTable(c, rows, settings) {
+function monthlyTable(c, rows, settings, reply) {
   const defs = monthlyDefs(settings);
   const firstWith = (rows.find((m) => m.daysWithData > 0) || {}).month || null;
   const layout = layoutFor('monthly');
   const onChange = (next) => changeLayout('monthly', defs, next);
   const cell = (key, m) => {
     const has = m.daysWithData > 0;
-    if (key === 'month') return h('span', monthName(m.month), m.partial ? h('span.muted', ' · so far') : null);
+    if (key === 'month') return h('span', monthName(m.month), m.partial ? h('span.muted', ' · so far') : null, historyMark(m));
     if (key === 'from') return fromText(m, firstWith);
     if (key === 'daysWithData') return num(m.daysWithData || 0);
     if (!has) return dash();
@@ -586,6 +596,7 @@ function monthlyTable(c, rows, settings) {
     }
   };
   return h('div', { style: { marginTop: '10px' } },
+    historyNote(reply),
     card('Monthly volume', 'a month is the sum of its days · days whose indices were deleted come from the kept daily record',
       columnTable({ defs, layout, rows: [...rows].reverse(), cell, canEdit: canSave(), onChange }),
       [columnsButton({ defs, layout, onChange, id: 'vs-cols-monthly' })]));

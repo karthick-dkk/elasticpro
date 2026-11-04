@@ -85,3 +85,85 @@ Guard (only template/bulk/search on the prefix; everything else refused, monitor
 never written), gates (no write without both), deterministic ids, bulk building, read-back
 merge (local + history, overlap, unreachable), credentials never echoed, auth matrix, desktop
 (no store), hosted-check additions, a behaviour-check of the Config card.
+
+## Implementation notes (0.3.53, as built)
+
+Code: `crates/elasticpro-core/src/history_store.rs` (settings, documents, writer, read-back,
+messages), `guard.rs` (`history_guard`, `Writes::HistoryRead` / `Writes::HistoryWrite`),
+`bridge.rs` (`es_req` routing, the delay sink's destination), `volume/run.rs` (changed days,
+capacity hook, read-back). UI: `ui/js/ui/history-store.js`, `ui/js/core/history-store.js`.
+Tests: `tests/history_store.rs` (config.txt permits), `tests/history_store_gate.rs` (it does
+not), unit tests in `history_store.rs` and `guard.rs`.
+
+**Routing.** A store request is an `EsRequest` with `history_prefix` set — a field only the core
+sets (`#[serde(skip)]`, never read from the wire). `Core::es_req` then sends it to the store's own
+URL, route (`via`, a jump host from `jump_hosts`, as for clusters) and TLS setting with the
+store's own credential, whatever `cluster_id` the request carries, recorded under the id
+`@history-store` (an id `config_ids` cannot produce) and origin `history-store`. It is not counted
+among the clusters' request rates and is in no cluster list.
+
+**Guard, exactly.** `Writes::HistoryWrite` only while both gates stand (checked in `es_req`, at
+the chokepoint, on every request), else `Writes::HistoryRead`. Neither is ever produced by
+`Writes::decide`, and the ordinary `write_guard` refuses both outright. `history_guard` allows:
+
+| Request | Read | Write |
+|---|---|---|
+| `GET /` | yes | yes |
+| `POST /_security/user/_has_privileges` (no parameters) | yes | yes |
+| `POST /<prefix>-<[a-z0-9._*-]+>/_search`, parameters only `ignore_unavailable`, `allow_no_indices`, `filter_path`, `size`, `track_total_hits` | yes | yes |
+| `PUT /_index_template/<prefix>-<[a-z0-9._-]+>` (no parameters), body keys only `index_patterns` (each `<prefix>-…`), `template` (only `mappings`), `priority`, `_meta` | no | yes |
+| `POST /_bulk` (no parameters), every action `index` or `create`, keys only `_index` (`<prefix>-…`, no `*` or `,`) and `_id`, each followed by a JSON object | no | yes |
+| anything else (delete, update, `_delete_by_query`, ILM, `_cat`, `_doc`, a path with `%`, `\`, `#`, `.`/`..` segments, a list of indices) | no | no |
+
+A prefix that is not lower case `[a-z0-9._-]` (not starting with `-`, `_`, `+`, `.`) refuses
+everything. The template's name is `<prefix>-template`, created once per prefix before the first
+write (`templateAt`).
+
+**Gates.** (1) `HISTORY_STORE_WRITES=true` (settings.rs, `To::Direct`; deploy.sh validates it as a
+bool). (2) `armed`, which `HISTORY_STORE_ARM {on: true}` sets only when the last test passed with
+a fingerprint (SHA-256 of URL, route, TLS, prefix, auth kind, user and the sealed secret) equal to
+the settings now; `HISTORY_STORE_SET` that changes any of them disarms. Enforced in
+`history_writes_open` before anything is queued or sent and again in `es_req`.
+
+**Credential.** Sealed with `ClusterSecrets::seal_own` (the cluster-secrets key, the mail
+password's pattern) with associated data `history-store|<destination>` (`destination_of`: URL,
+route, TLS), in `history-store.json`; never returned (`passwordSet` / `passwordStale`). A new
+address, route or TLS setting means it does not open: type it again.
+
+**Writer.** A 60 s tick (hosted, started by the bridge binary). Documents are queued only while
+both gates are open — a closed gate is not a backlog (*Copy existing history* sends the past) —
+in `history-store-queue.json`, keyed `(stream, cluster, _id)` so a rewrite replaces, at most
+20 000 (the oldest dropped and counted). A tick sends at most 20 bulks of at most 500 documents
+and 4 MiB: one per cluster for `volume`, one per stream otherwise; a taken item leaves the
+queue, a rejected item or a failed bulk stays for the next tick. Disarming stops at the next bulk.
+
+**Documents as built.**
+
+- `volume` (`<prefix>-volume-YYYY.MM`, `_id` `cluster|day`): `clusterId, clusterName, day, final,
+  live, indices, docs, eventBytes, subBytes, priBytes, totalBytes, unmeasuredSizeIndices,
+  sources{<name>: {indices, priBytes, totalBytes, docs, eventBytes, subBytes,
+  unmeasuredSizeIndices}}, error, aggregatedAt, totalsAt, writtenAt`. Sizes are `Day::sizes`
+  (`null` while not measured) so a direct reader never takes the dated part for the day.
+- `capacity` (`<prefix>-capacity-YYYY.MM`, `_id` `cluster|day`, day = UTC day of the cluster's
+  scheduled daily run, written after that run only): `dataNodeDiskTotal/Used/Free, dataNodes,
+  dataNodeDiskAt` (fleet cache `nodes` dataset: rows whose `node.role` has `d s h w c f`, each
+  figure from `_cat/allocation` for the node else `_cat/nodes`; any unreadable data node makes
+  that sum `null`), `liveRetentionHeldDays` (days from the record's oldest `live` day to the
+  document's day) and `liveRetentionOldestDay`, `liveRetentionPolicy`, `snapshotRetention`,
+  `backupCapacity` (the cluster's config entry, as typed, else `null`), `repositoryBytes` (always
+  `null`: the core does not measure a repository), `clusterType`, `ulmBucket` (Config ›
+  cluster type), `perDayEventBytes7d` (the record's last seven finished days as
+  `[{day, eventBytes}]`: the inputs, so the rate is worked out by its one definition in the UI),
+  `writtenAt`.
+- `delay` (`<prefix>-delay-YYYY.MM`, `_id` `cluster|device|hour`): exactly what `delay_sink.rs`
+  writes, when the sink's `destination` is `history`.
+
+**Deviations from the contract above, and why.** The privilege check also asks the cluster
+privilege `manage_index_templates` (the template cannot be created without it), and the test
+passes only when all four are granted, or when security is off on the store (every privilege then
+`null`, "not checked"). `perDayEventBytes7d` holds the seven days rather than an average, and
+`repositoryBytes` is always `null` (both: one definition / unknown is not zero). Days are
+read back only before the local record's first day, never for gaps inside it (a day without a
+record there had no indices). A store that cannot be reached adds no rows: the reply's
+`history.reachable` is `false` and the page says "in the history store · not reachable" once,
+rather than one row per day it cannot know existed.

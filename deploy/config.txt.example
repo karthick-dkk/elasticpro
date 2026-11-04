@@ -176,6 +176,14 @@ HOUSEKEEPING_DRY_RUN=
 SESSION_IDLE_DAYS=
 # Days a rotated activity log (activity.jsonl.1, .2 ...) is kept; 0 (default) = by size only.
 ACTIVITY_LOG_KEEP_DAYS=
+# The history store (docs/HISTORY.md): a dedicated Elasticsearch endpoint, not a monitored
+# cluster, that keeps the daily volume, capacity and log-delay figures with a long history.
+# true: ElasticPro may write to it - the first of two gates; an admin must still arm
+# Config > History store > Write history after a passing Test connection. Empty or false
+# (default): the store can be configured and tested (reads only) and is never written.
+# Writes go only to that endpoint: an index template and bulk documents under its prefix,
+# never a delete, never ILM. Retention of the store's indices is the store owner's.
+HISTORY_STORE_WRITES=
 # Memory limit of the core container, e.g. 2g or 512m. Empty: 2g.
 CORE_MEM_LIMIT=
 

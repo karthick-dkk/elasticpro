@@ -82,7 +82,7 @@ fn category(action: &str) -> &'static str {
         a if a.starts_with("user_") || a.starts_with("token_") => "iam",
         "es" | "prime" | "forget" => "database",
         a if a.starts_with("config_") || a.starts_with("zabbix_") || a.starts_with("policy_")
-            || a.starts_with("delay_sink_") || a.starts_with("key_") || a.starts_with("trust_")
+            || a.starts_with("delay_sink_") || a.starts_with("history_store_") || a.starts_with("key_") || a.starts_with("trust_")
             || a.starts_with("untrust_") || a == "file_write" || a == "write_unlock" => "configuration",
         _ => "process",
     }

@@ -105,6 +105,13 @@ pub struct EsRequest {
     #[doc(hidden)]
     #[serde(skip)]
     pub verified_cancel: bool,
+    /// Set only by `history_store` for a request to the history store: its index prefix. The
+    /// core then sends it to the store's own address with the store's own credential —
+    /// whatever `cluster_id` says — under `guard::history_guard`, never under the monitored
+    /// clusters' guard. Never read from the wire.
+    #[doc(hidden)]
+    #[serde(skip)]
+    pub history_prefix: Option<String>,
 }
 
 impl Default for EsRequest {
@@ -125,6 +132,7 @@ impl Default for EsRequest {
             purpose: None,
             class: crate::gate::Class::default(),
             verified_cancel: false,
+            history_prefix: None,
         }
     }
 }
@@ -221,7 +229,12 @@ pub fn refuse_early(req: &EsRequest, base_url: &str, writes: Writes) -> Option<V
         return Some(json!({ "ok": false, "status": 0, "kind": "bad_request", "url": full, "tookMs": 0,
                             "message": "the path holds a space or a control character — percent-encode it" }));
     }
-    write_guard(writes, &method, &path).map(|msg| json!({ "ok": false, "status": 0, "kind": "blocked_readonly", "message": msg, "url": full, "tookMs": 0 }))
+    let refused = if matches!(writes, Writes::HistoryRead | Writes::HistoryWrite) {
+        crate::guard::history_guard(writes, req.history_prefix.as_deref().unwrap_or(""), &method, &path, req.body.as_deref())
+    } else {
+        write_guard(writes, &method, &path)
+    };
+    refused.map(|msg| json!({ "ok": false, "status": 0, "kind": "blocked_readonly", "message": msg, "url": full, "tookMs": 0 }))
 }
 
 /// Read a body in chunks, stopping at the cap, charging the byte budget as it goes.

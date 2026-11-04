@@ -84,6 +84,26 @@ pub struct SinkConfig {
     /// an unbounded request.
     #[serde(default = "default_max_devices")]
     pub max_devices: u64,
+    /// Where the measurements go: a monitored cluster (`sink_cluster_id`, as before 0.3.53)
+    /// or the history store (`<history prefix>-delay-YYYY.MM`, under the store's own two
+    /// gates). Absent in a file written before it: a monitored cluster, unchanged.
+    #[serde(default, skip_serializing_if = "Destination::is_cluster")]
+    pub destination: Destination,
+}
+
+/// Where the scheduled measurement writes.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Destination {
+    #[default]
+    Cluster,
+    History,
+}
+
+impl Destination {
+    pub fn is_cluster(&self) -> bool {
+        *self == Destination::Cluster
+    }
 }
 
 fn default_prefix() -> String { "elasticpro-log-delay".into() }
@@ -109,6 +129,7 @@ impl Default for SinkConfig {
             event_time_fields: default_event_fields(),
             arrival_field: default_arrival_field(),
             max_devices: default_max_devices(),
+            destination: Destination::Cluster,
         }
     }
 }
@@ -143,6 +164,10 @@ impl SinkConfig {
     /// so the refusal lands on the person who can fix it rather than in a log at 3am.
     pub fn refusal(&self) -> Option<String> {
         if !self.enabled {
+            return None;
+        }
+        // The history store is not a cluster: what it needs is checked against its own gates.
+        if self.destination == Destination::History {
             return None;
         }
         if self.sink_cluster_id.trim().is_empty() {
@@ -585,6 +610,16 @@ mod tests {
         // Disarmed, nothing is refused — an admin may save a half-finished setting.
         c.enabled = false;
         assert_eq!(c.refusal(), None);
+    }
+
+    #[test]
+    fn an_old_file_keeps_its_cluster_and_the_history_store_needs_no_sink_cluster() {
+        let old: SinkConfig = serde_json::from_value(json!({ "enabled": true, "sinkClusterId": "kibana" })).unwrap();
+        assert_eq!(old.destination, Destination::Cluster);
+        assert!(serde_json::to_value(&old).unwrap().get("destination").is_none(), "an existing setup saves as before");
+        let h: SinkConfig = serde_json::from_value(json!({ "enabled": true, "destination": "history" })).unwrap();
+        assert_eq!(h.destination, Destination::History);
+        assert_eq!(h.refusal(), None);
     }
 
     #[test]

@@ -100,6 +100,13 @@ for t in CREDENTIAL_STATUS CREDENTIAL_SET CREDENTIAL_CLEAR CREDENTIAL_PROMOTE; d
   check "$t needs a caller"              "$(post $B -d "{\"type\":\"$t\",\"cluster\":\"*\",\"from\":\"x\"}" | field kind)" "unauthenticated"
 done
 
+# The history store (docs/HISTORY.md): where the core writes unattended, with a credential it
+# keeps. Every message needs a caller; the roles, the two gates and the guard are proved
+# in-process (tests/history_store.rs, tests/history_store_gate.rs).
+for t in HISTORY_STORE_GET HISTORY_STORE_SET HISTORY_STORE_TEST HISTORY_STORE_ARM HISTORY_STORE_BACKFILL HISTORY_QUERY; do
+  check "$t needs a caller"              "$(post $B -d "{\"type\":\"$t\",\"on\":true,\"clusterId\":\"x\",\"stream\":\"volume\",\"settings\":{\"url\":\"http://x:9200\"}}" | field kind)" "unauthenticated"
+done
+
 # Cluster type, ULM bucket and whether SLM is expected (0.3.47, cluster_meta.rs): reading it is a
 # user's, setting it an admin's — never a caller-less request's. Roles, validation, the Zabbix tag
 # seed and the 0600 store are proved in-process (tests/cluster_meta.rs).
@@ -343,5 +350,7 @@ check "no header needed on loopback" "$(post http://127.0.0.1:$P2/bridge -d '{"t
 # Loopback is the portable edition: an app that is only running while somebody has it
 # open must not offer to do anything every two hours.
 check "no scheduler off hosted"     "$(post http://127.0.0.1:$P2/bridge -d '{"type":"DELAY_SINK_GET"}' | field supported)" "False"
+# Nor a history store: it is written by the server, the one edition still running at night.
+check "no history store off hosted" "$(post http://127.0.0.1:$P2/bridge -d '{"type":"HISTORY_STORE_GET"}' | field supported)" "False"
 
 [ $fail -eq 0 ] && echo "ok: hosted-mode contract holds" || { echo "FAILED"; exit 1; }
