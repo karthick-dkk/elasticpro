@@ -606,6 +606,49 @@ oldest) and never deleted.
 The Request Centre shows both as the **Housekeeping** card (last run, what each job cleaned, next
 run, **Dry run**, **Run now** — which asks first).
 
+## History store — the message contract
+
+A **dedicated** Elasticsearch endpoint (its own URL and credential; not a monitored cluster, not
+in the fleet, Play, alerts or the cluster list) that mirrors the daily volume record, a daily
+capacity record and, optionally, the scheduled log-delay measurement, with a long history.
+**docs/HISTORY.md is the contract.** Hosted only; the desktop editions answer
+`{ok: false, supported: false}`.
+
+Writes are gated twice, both by people: `HISTORY_STORE_WRITES=true` in config.txt, and an admin
+arming *Write history* after a passing *Test connection* on the settings as they are now
+(changing the URL, route, TLS, prefix or credential turns the switch off). The global `readOnly`
+is never used; a start without the key disarms. The store's requests take their own guard
+(`guard::history_guard`): `GET /`, `POST /_security/user/_has_privileges`,
+`GET /_index_template/<prefix>-template`, `POST /<prefix>-…/_search`, and — only with both gates
+open, checked again right before each request leaves — `PUT /_index_template/<prefix>-template?create=true`
+(mappings only; never an overwrite) and `POST /_bulk` of strict action/document pairs whose every
+action is `index`/`create` into `<prefix>-…`. Nothing else. The store is never a monitored
+cluster's address, takes a credential only over `https://`, follows no redirect, ignores the
+global insecure TLS default, and its prefix may not name another family's indices (`logs`,
+`metrics`, `logstash`, `filebeat…`, … — docs/HISTORY.md). The Request Centre lists its requests
+under origin `history-store`.
+
+| Message | Role | Answer |
+|---|---|---|
+| `HISTORY_STORE_GET` | admin | `{ok, supported, settings: {url, auth: "basic"\|"apiKey"\|"none", user, passwordSet, passwordStale, tls: "auto"\|"system"\|"insecure", via, prefix, streams: {volume, capacity, delay}}, armed, armedBy, armedAt, permitted, permitHint, test: null\|{at, by, ok, current, version, clusterName, securityEnabled, privileges: {create_doc, create_index, read, manage_index_templates}, message}, armBlocked, writing, status: {lastSuccessAt, lastError, lastErrorAt, docsWritten, queue, dropped, refused, rejected, lastSkipped, templateAt, backfill}, jumpHosts}`. Never a password or API key. `passwordStale`: the address, route, TLS or kind of credential changed since it was typed (it is sealed to them) — type it again. A limited admin may read it. |
+| `HISTORY_STORE_SET {settings: {url, auth, user, password?, apiKey?, tls, via, prefix, streams}}` | admin; a limited admin is refused (fleet-wide) | As GET. An empty or `*` password/API key keeps the one held. The URL is scheme, host and port only, no credential in it, `https://` when a credential is set, and not a configured cluster's `host:port`; the prefix is lower case `[a-z0-9._-]` and not a reserved family's. Changed settings disarm; a stream turned off drops what waits for it. |
+| `HISTORY_STORE_TEST` | admin; not a limited admin | As GET, `ok` = the test passed: `GET /` (version, cluster name) and `_has_privileges` for `create_doc`, `create_index`, `read` on `<prefix>-*` and the cluster privilege `manage_index_templates`, each `true`/`false`/`null` (not checked: security is off on the store, which passes). A connection failure carries the transport's `kind`, `cert`, `help`. Reads only. |
+| `HISTORY_STORE_ARM {on}` | admin; not a limited admin | As GET. `on: true` is refused (`kind: "refused"`, naming `HISTORY_STORE_WRITES=true` or the test) unless config.txt permits and the last test passed on the current settings. `on: false` always works; the next tick writes nothing. |
+| `HISTORY_STORE_BACKFILL` | admin; not a limited admin | As GET with `status.backfill.running`. *Copy existing history*: every local month file of every cluster, in bulks of at most 500, with progress (`done`/`total` files, `docs`). Refused unless both gates are open and the volume stream is on, or while one runs. |
+| `HISTORY_QUERY {stream: "volume"\|"capacity"\|"delay", clusterId, from?, to?}` | user; a scoped caller or a limited admin only on clusters they see; the cluster must exist | `{ok, stream, clusterId, from, to, total, truncated, docs}` — the store's documents, oldest first, at most 5000, one search (interactive class). Unreachable: `{ok: false, kind: "unreachable", message: "in the history store · not reachable: …"}`. |
+
+`DELAY_SINK_SET` takes `destination: "cluster"` (default; a file without it is unchanged) or
+`"history"` (to `<prefix>-delay-YYYY.MM` under the store's gates, every primed cluster measured);
+`DELAY_SINK_GET` adds `historyStore: {configured, armed, permitted, streamOn, prefix}`; a limited
+admin cannot `DELAY_SINK_SET` (fleet-wide).
+`VOLUME_DAILY`, `VOLUME_MONTHLY` and `VOLUME_MONTHLY_ALL` read days the local record does not hold
+from the store (docs/VOLUME.md "History store: write and read-back"; never for a display link):
+rows marked `source: "history"` (a month partly from it: `historyDays`; past a bounded read:
+`incomplete`), and a `history` object `{asked, from, to, reachable, days, truncated,
+truncatedBefore, templateMissing, message}`. Reports › Daily & monthly shows its message once,
+in amber, when the store is not reachable, the read stopped at its bound, or nothing was ever
+written there.
+
 ## Volume record — the message contract
 
 Index volume per day and per month, by field, for every cluster: the core collects it and keeps

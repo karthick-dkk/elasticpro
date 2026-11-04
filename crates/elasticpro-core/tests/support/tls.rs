@@ -43,29 +43,39 @@ pub struct TlsServer {
 
 impl TlsServer {
     pub async fn start(cert: &SelfSigned) -> TlsServer {
+        TlsServer::with(cert, |_| (200, r#"{"cluster_name":"secured","status":"green"}"#.to_string())).await
+    }
+
+    /// As `start`, answering each request with `f` (status, body).
+    pub async fn with<F>(cert: &SelfSigned, f: F) -> TlsServer
+    where
+        F: Fn(&Hit) -> (u16, String) + Send + Sync + 'static,
+    {
+        let f = Arc::new(f);
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.expect("bind");
         let port = listener.local_addr().expect("addr").port();
         let config = Arc::new(Mutex::new(server_config(cert)));
         let hits = Arc::new(Mutex::new(Vec::new()));
         let handshakes = Arc::new(AtomicUsize::new(0));
 
-        let (cfg, h, hs) = (config.clone(), hits.clone(), handshakes.clone());
+        let (cfg, h, hs, f) = (config.clone(), hits.clone(), handshakes.clone(), f);
         tokio::spawn(async move {
             loop {
                 let Ok((sock, _)) = listener.accept().await else { break };
                 let current = cfg.lock().expect("cfg").clone();
-                let (h, hs) = (h.clone(), hs.clone());
+                let (h, hs, f) = (h.clone(), hs.clone(), f.clone());
                 tokio::spawn(async move {
                     let acceptor = tokio_rustls::TlsAcceptor::from(current);
                     // A refused certificate fails here — that is the point of the test.
                     let Ok(mut stream) = acceptor.accept(sock).await else { return };
                     hs.fetch_add(1, Ordering::SeqCst);
                     if let Some(hit) = read_request(&mut stream).await {
+                        let (status, body) = f(&hit);
                         h.lock().expect("hits").push(hit);
-                        let body = r#"{"cluster_name":"secured","status":"green"}"#;
                         let res = format!(
-                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                            "HTTP/1.1 {status} {}\r\nContent-Type: application/json\r\n\
                              Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                            if status == 200 { "OK" } else { "Error" },
                             body.len()
                         );
                         let _ = stream.write_all(res.as_bytes()).await;

@@ -600,6 +600,12 @@ pub fn required_role(msg_type: &str) -> Option<Role> {
         // Arming the scheduled measurement decides that this process will write
         // to a cluster unattended. Nothing below admin goes near it.
         "DELAY_SINK_GET" | "DELAY_SINK_SET" | "DELAY_SINK_RUN" => Some(Role::Admin),
+        // The history store: where the core writes unattended, with a credential it keeps.
+        // Reading its settings, testing, arming and copying are an admin's (a limited admin may
+        // read them, nothing more: history_store_msg). Its documents are the same facts as the
+        // volume record, so reading them back is a user's, on the clusters they see.
+        "HISTORY_STORE_GET" | "HISTORY_STORE_SET" | "HISTORY_STORE_TEST" | "HISTORY_STORE_ARM" | "HISTORY_STORE_BACKFILL" => Some(Role::Admin),
+        "HISTORY_QUERY" => Some(Role::User),
         // Housekeeping deletes files, sessions and cache entries: an administrator's to read
         // the state of and to run.
         "HOUSEKEEPING_GET" | "HOUSEKEEPING_RUN" => Some(Role::Admin),

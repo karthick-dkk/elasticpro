@@ -85,3 +85,145 @@ Guard (only template/bulk/search on the prefix; everything else refused, monitor
 never written), gates (no write without both), deterministic ids, bulk building, read-back
 merge (local + history, overlap, unreachable), credentials never echoed, auth matrix, desktop
 (no store), hosted-check additions, a behaviour-check of the Config card.
+
+## Implementation notes (0.3.53, as built)
+
+Code: `crates/elasticpro-core/src/history_store.rs` (settings, documents, writer, read-back,
+messages), `guard.rs` (`history_guard`, `history_prefix_reserved`, `Writes::HistoryRead` /
+`Writes::HistoryWrite`), `bridge.rs` (`es_req` routing, the re-check after the gate, the delay
+sink's destination), `http.rs` / `tls.rs` (the store's client: no redirects, its own TLS setting
+only), `volume/run.rs` (changed days, capacity hook, read-back). UI: `ui/js/ui/history-store.js`,
+`ui/js/core/history-store.js`, the marker and the amber line in `ui/js/reports/daily.js`.
+Tests: `tests/history_store.rs` (config.txt permits), `tests/history_store_gate.rs` (it does
+not), unit tests in `history_store.rs` and `guard.rs`.
+
+**Routing.** A store request is an `EsRequest` with `history_prefix` set — a field only the core
+sets (`#[serde(skip)]`, never read from the wire). `Core::es_req` then sends it to the store's own
+URL, route (`via`, a jump host from `jump_hosts`, as for clusters) and TLS setting with the
+store's own credential, whatever `cluster_id` the request carries, recorded under the id
+`@history-store` (an id `config_ids` cannot produce) and origin `history-store`. It is not counted
+among the clusters' request rates and is in no cluster list. The store's HTTP client follows no
+redirect (a redirect would resend the credential and body elsewhere; clusters keep following up
+to three, unchanged) and decides certificates by the store's own `tls` setting only: the config's
+global `defaults.tls: insecure` does not reach it (`PinningVerifier::own_mode`).
+
+**Dedicated, really.** `HISTORY_STORE_SET` refuses, and every request refuses, a store URL whose
+`host:port` is a configured or Zabbix cluster's. A password or API key is accepted only for an
+`https://` URL. A prefix is refused when it names or starts another family's indices: `logs`,
+`metrics`, `traces`, `synthetics`, `profiling`, `apm`, `logstash`, `elastic`, `kibana`,
+`ilm-history`, `slm-history`, `security`, `fleet`, `ml` (the word, or the word followed by `-`, `_`
+or `.`) and anything starting `filebeat`, `metricbeat`, `heartbeat`, `auditbeat`, `packetbeat`,
+`winlogbeat`, `functionbeat`, `journalbeat`; names starting `.` were already refused.
+`elasticpro-…` is not `elastic`.
+
+**Guard, exactly.** `Writes::HistoryWrite` only while both gates stand, else
+`Writes::HistoryRead`; decided in `es_req` and **decided again after the request was admitted by
+the gate, right before it is sent** (`Core::history_recheck`): if the store's address, route,
+TLS, credential or prefix changed while it waited, or a write's gates closed, it is not sent
+(`kind: history_store_changed`) and what it carried stays queued. Neither permission is ever
+produced by `Writes::decide`, and the ordinary `write_guard` refuses both outright.
+`history_guard` allows:
+
+| Request | Read | Write |
+|---|---|---|
+| `GET /` | yes | yes |
+| `POST /_security/user/_has_privileges` (no parameters) | yes | yes |
+| `GET /_index_template/<prefix>-<[a-z0-9._-]+>` (no parameters) | yes | yes |
+| `POST /<prefix>-<[a-z0-9._*-]+>/_search`, parameters only `ignore_unavailable`, `allow_no_indices`, `filter_path`, `size`, `track_total_hits` | yes | yes |
+| `PUT /_index_template/<prefix>-<[a-z0-9._-]+>?create=true` (that parameter exactly), body keys only `index_patterns` (each `<prefix>-…`), `template` (only `mappings`), `priority`, `_meta` | no | yes |
+| `POST /_bulk` (no parameters): strict pairs — no blank line anywhere (Elasticsearch reads the line after an action as its document even when blank, so a blank "document" would smuggle the next line in as an action), no `\r`, exactly one trailing `\n`; every action `index` or `create`, keys only `_index` (`<prefix>-…`, no `*` or `,`) and `_id`, each followed by a JSON object | no | yes |
+| anything else (delete, update, `_delete_by_query`, ILM, `_cat`, `_doc`, a path with `%`, `\`, `#`, `.`/`..` segments, a list of indices) | no | no |
+
+A prefix that is not lower case `[a-z0-9._-]` (not starting with `-`, `_`, `+`, `.`) or that is
+reserved (above) refuses everything.
+
+**The template.** `<prefix>-template`, `create=true`: an existing template of that name is never
+replaced. "Already exists" is accepted only when `GET` shows it is ElasticPro's
+(`_meta.managedBy: ElasticPro` and `index_patterns: [<prefix>-*]`); otherwise nothing is written
+and the status says "already exists on the store and is not ElasticPro's". Verified once per
+process **per store and prefix** (`Stored::template_key`: destination + prefix), so a new store
+with the same prefix gets its own, and a restart checks again.
+
+**Gates.** (1) `HISTORY_STORE_WRITES=true` (settings.rs, `To::Direct`; deploy.sh validates it as a
+bool). A start that finds it absent disarms (2), so putting the key back needs a new decision.
+(2) `armed`, which `HISTORY_STORE_ARM {on: true}` sets only when the last test passed with a
+fingerprint (SHA-256 of URL, route, TLS, prefix, auth kind, user and the sealed secret) equal to
+the settings now — the check and the switch happen together inside the settings lock.
+`HISTORY_STORE_SET` that changes any of them disarms. A test is kept only if the settings are
+still the ones it started on when it ends ("the settings changed while the test ran: test again").
+
+**Credential.** Sealed with `ClusterSecrets::seal_own` (the cluster-secrets key, the mail
+password's pattern) with associated data `history-store|<kind>|<destination>` (`destination_of`:
+URL, route, TLS), in `history-store.json`; never returned (`passwordSet` / `passwordStale`). A new
+address, route, TLS setting **or kind of credential** (basic ↔ API key) means it does not open:
+type it again.
+
+**Writer.** A 60 s tick (hosted, started by the bridge binary). Documents are queued only while
+both gates are open — a closed gate is not a backlog (*Copy existing history* sends the past).
+The queue is keyed `(stream, cluster, _id)` and holds the **day**, not the index: the index is
+worked out from the prefix in force when the document is sent, so a prefix change never strands
+it. At most 20 000 documents; past that the oldest **days** go (counted, `dropped`). Turning a
+stream off drops what waits for it. The queue file (`history-store-queue.json`) is written by the
+tick, off the async runtime (`spawn_blocking`), when it changed — not on every enqueue; a crash
+loses at most a minute of queued days, which the next collection or a copy sends again. A tick
+sends at most 20 bulks of at most 500 documents and 4 MiB: one per cluster for `volume`, one per
+stream otherwise. Per bulk: a store that does not answer keeps everything for the next tick and
+ends the tick; a bulk the guard refuses is dropped and counted (`refused`) and the tick goes on;
+per item, a taken document leaves the queue, a transient refusal (429, 5xx) stays, and a document
+refused as malformed (`mapper_parsing_exception`, `document_parsing_exception`,
+`illegal_argument_exception`, … or status 400) is offered 3 times, then given up and counted
+(`rejected`). Disarming stops at the next bulk.
+
+**Documents as built.**
+
+- `volume` (`<prefix>-volume-YYYY.MM`, `_id` `cluster|day`): `clusterId, clusterName, day, final,
+  live, indices, docs, eventBytes, subBytes, priBytes, totalBytes, unmeasuredSizeIndices,
+  sources{<name>: {indices, priBytes, totalBytes, docs, eventBytes, subBytes,
+  unmeasuredSizeIndices}}, error, aggregatedAt, totalsAt, writtenAt`. Sizes are `Day::sizes`
+  (`null` while not measured) so a direct reader never takes the dated part for the day.
+- `capacity` (`<prefix>-capacity-YYYY.MM`, `_id` `cluster|day`, day = UTC day of the cluster's
+  scheduled daily run, written after that run only): `dataNodeDiskTotal/Used/Free, dataNodes,
+  dataNodeDiskAt` (fleet cache `nodes` dataset: rows whose `node.role` has `d s h w c f`, each
+  figure from `_cat/allocation` for the node else `_cat/nodes`; any unreadable data node makes
+  that sum `null`), `liveRetentionHeldDays` (days from the record's oldest `live` day to the
+  document's day) and `liveRetentionOldestDay`, `liveRetentionPolicy`, `snapshotRetention`,
+  `backupCapacity` (the cluster's config entry, as typed, else `null`), `repositoryBytes` (always
+  `null`: the core does not measure a repository), `clusterType`, `ulmBucket` (Config ›
+  cluster type), `perDayEventBytes7d` (the record's last seven finished days as
+  `[{day, eventBytes}]`: the inputs, so the rate is worked out by its one definition in the UI),
+  `writtenAt`.
+- `delay` (`<prefix>-delay-YYYY.MM`, `_id` `cluster|device|hour`): exactly what `delay_sink.rs`
+  writes, when the sink's `destination` is `history`.
+
+**Reading back.** One definition of where the store's days stop being needed:
+`history_store::oldest_local_day` (the first day of the cluster's oldest month file), used by the
+Daily and the Monthly views alike. The Monthly views merge **per day** before summing: the
+store's days of a month are laid under the local record's days of that month (a local day wins)
+and summarised by the same `derive`, so the month the local record starts in counts the store's
+earlier days and Monthly agrees with Daily; such a row carries `historyDays: n`, a month with no
+local day `source: "history"`. Reads are pages of 10 000 days (`search_after` on
+`day desc, clusterId asc`), at most 5 pages; past the bound the reply says
+`truncated: true, truncatedBefore: <day>` and month rows starting on or before that day are
+`incomplete: true` (the page marks them "history (incomplete)"). The month views leave `sources`
+out of the read. The reads are the **interactive** class (a person is waiting: a bounded queue
+wait, an 8 s timeout); a store that did not answer is not asked again by a page for 60 s ("asked
+again after N s"); a display link (Play) never reads the store back. A store that answers with no
+day and has no ElasticPro template says `templateMissing: true`, "nothing has been written to this
+store yet" — not the same as "no days". `HISTORY_QUERY` requires the cluster to exist; a limited
+admin, like a scoped user, is held to the clusters they see (and so for the volume record's
+per-cluster reads, a gap that existed before this feature, closed in the same line of
+`gate_cluster`).
+
+**Fleet-wide settings.** A limited admin cannot change the store (`SET`, `TEST`, `ARM`,
+`BACKFILL`) nor the scheduled log delay (`DELAY_SINK_SET`); they may read the store's settings.
+
+**Deviations from the contract above, and why.** The privilege check also asks the cluster
+privilege `manage_index_templates` (the template cannot be created without it), and the test
+passes only when all four are granted, or when security is off on the store (every privilege then
+`null`, "not checked"). `perDayEventBytes7d` holds the seven days rather than an average, and
+`repositoryBytes` is always `null` (both: one definition / unknown is not zero). Days are
+read back only before the local record's first day, never for gaps inside it (a day without a
+record there had no indices). A store that cannot be reached adds no rows: the reply's
+`history.reachable` is `false` and the page says "in the history store · not reachable" once, in
+amber, rather than one row per day it cannot know existed. The template is created with
+`create=true` and checked with a `GET` (not a `HEAD`: the `_meta` marker is in the body).

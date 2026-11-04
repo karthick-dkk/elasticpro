@@ -128,6 +128,9 @@ async fn run() {
     // the hosted binary, rather than in Core::new — a scheduler that starts itself
     // wherever a Core is built would run in the desktop app and in every test.
     core.start_delay_sink();
+    // The history store's writer (docs/HISTORY.md): a tick a minute that writes nothing until
+    // config.txt permits it and an admin armed it.
+    core.start_history_store();
     // Cleans what the core itself leaves behind. Started here for the same reason: a
     // scheduler that started itself in Core::new would run in every test.
     core.start_housekeeping();

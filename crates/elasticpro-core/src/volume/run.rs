@@ -76,6 +76,9 @@ pub(crate) struct Collected {
     pub error: Option<String>,
     /// Why it stopped early, when `stop` said so.
     pub interrupted: Option<String>,
+    /// The days this collection changed in the record (`YYYY-MM-DD`): what the history store
+    /// is sent (`history_store::history_volume_changed`).
+    pub changed_days: std::collections::BTreeSet<String>,
 }
 
 /// A request a person asked for (the field check, the pattern preview): their class and
@@ -115,16 +118,47 @@ fn int_arg(msg: &Value, key: &str, default: u64, lo: u64, hi: u64) -> u64 {
 /// and the cards. The record is read from as far back as either needs — a row's average
 /// reaches `avg_days` before the window, a card may reach to the first of the month or 30
 /// days back (`derive::cards_from`) — so a short window does not shrink a card.
+#[cfg(test)]
 pub(crate) fn daily_view(store: &Store, id: &str, s: &VolumeSettings, days: i64, avg_days: u32, source: Option<&str>, today: NaiveDate) -> Value {
+    daily_view_with(store, id, s, days, avg_days, source, today, vec![])
+}
+
+/// The first day the Daily view reads on `today`: its window, the rows' averages before it
+/// and the cards (`daily_view`).
+pub(crate) fn daily_reads_from(today: NaiveDate, days: i64, avg_days: u32) -> NaiveDate {
     let from = today - Duration::days(days - 1);
-    let hist_from = (from - Duration::days(avg_days as i64)).min(derive::cards_from(today, avg_days));
-    let kept = store.days_between(id, hist_from, today);
+    (from - Duration::days(avg_days as i64)).min(derive::cards_from(today, avg_days))
+}
+
+/// `daily_view`, with days read back from the history store for what the local record does
+/// not hold (`from_store`): a local day always wins, and a row from the store says
+/// `source: "history"`. One definition of every figure either way — the same `derive`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn daily_view_with(store: &Store, id: &str, s: &VolumeSettings, days: i64, avg_days: u32, source: Option<&str>, today: NaiveDate,
+                              from_store: Vec<super::Day>) -> Value {
+    let from = today - Duration::days(days - 1);
+    let hist_from = daily_reads_from(today, days, avg_days);
+    let mut kept = store.days_between(id, hist_from, today);
+    let local: std::collections::BTreeSet<String> = kept.iter().map(|d| d.day.clone()).collect();
+    let mut stored = std::collections::BTreeSet::new();
+    for d in from_store {
+        if !local.contains(&d.day) && parse_day(&d.day).is_some_and(|x| x >= hist_from && x <= today) && stored.insert(d.day.clone()) {
+            kept.push(d);
+        }
+    }
+    kept.sort_by(|a, b| a.day.cmp(&b.day));
     let history = derive::history(&kept, source);
     let window: Vec<&super::Day> = kept.iter().filter(|d| parse_day(&d.day).is_some_and(|x| x >= from)).collect();
     let sources: std::collections::BTreeSet<String> = window.iter().flat_map(|d| d.sources.keys().cloned()).collect();
     let shown: Vec<(&super::Day, Totals)> = window.iter().filter_map(|d| Some((*d, Totals::of(d, source)?))).collect();
     let rows: Vec<Value> = shown.iter()
-        .map(|(d, t)| derive::daily_row(d, t, &history, avg_days, s.size_basis, source))
+        .map(|(d, t)| {
+            let mut row = derive::daily_row(d, t, &history, avg_days, s.size_basis, source);
+            if stored.contains(&d.day) {
+                row["source"] = json!("history");
+            }
+            row
+        })
         .collect();
     let totals = derive::window_totals(&shown.iter().map(|(_, t)| t).collect::<Vec<_>>());
     let today_at = window.iter().find(|d| d.day == day_key(today)).map(|d| d.totals_at);
@@ -272,13 +306,15 @@ impl Core {
                 return bad("not_found", format!("no cluster {id:?}"));
             }
             let r = self.volume_resolve(raw.as_ref(), Some(id), Some(msg));
+            // A display link never waits on the history store (docs/HISTORY.md "Reading back").
+            let read_back = !caller.is_some_and(Caller::play_only);
             match t {
                 "VOLUME_FIELDS_CHECK" => match &config_error {
                     Some(e) => return config_unreadable(e),
                     None => self.volume_fields_check(id, &r.settings, caller).await,
                 },
-                "VOLUME_DAILY" => self.volume_daily(id, &r.settings, msg),
-                "VOLUME_MONTHLY" => self.volume_monthly(id, &r.settings, msg),
+                "VOLUME_DAILY" => self.volume_daily(id, &r.settings, msg, read_back).await,
+                "VOLUME_MONTHLY" => self.volume_monthly(id, &r.settings, msg, read_back).await,
                 "VOLUME_BREAKDOWN" => self.volume_breakdown(id, msg),
                 _ => bad("bad_message", format!("Unknown message type {t:?}")),
             }
@@ -359,12 +395,25 @@ impl Core {
         out
     }
 
-    fn volume_daily(&self, id: &str, s: &VolumeSettings, msg: &Value) -> Value {
+    /// `read_back`: whether days the local record does not hold may be asked of the history
+    /// store. Never for a display link: a wall is not held up by a store that is down.
+    async fn volume_daily(self: &Arc<Self>, id: &str, s: &VolumeSettings, msg: &Value, read_back: bool) -> Value {
         let Some(store) = &self.volume.store else { return no_store() };
         let days = int_arg(msg, "days", 30, 14, 400) as i64;
         let avg_days = int_arg(msg, "avgDays", derive::AVG_DAYS_DEFAULT as u64, 3, 180) as u32;
         let source = msg.get("source").and_then(Value::as_str).filter(|s| !s.is_empty());
-        let mut out = daily_view(store, id, s, days, avg_days, source, schedule::utc_day(now_ms()));
+        let today = schedule::utc_day(now_ms());
+        // What the local record does not reach back to, from the history store (docs/HISTORY.md
+        // "Reading back"): bounded, and only for days before the record starts.
+        let missing = crate::history_store::missing_range(daily_reads_from(today, days, avg_days), today,
+                                                          crate::history_store::oldest_local_day(store, id));
+        let read = match missing.filter(|_| read_back) {
+            Some((f, t)) => self.history_read_volume(&[id.to_string()], f, t, false).await,
+            None => None,
+        };
+        let from_store = read.as_ref().and_then(|r| r.days.get(id).cloned()).unwrap_or_default();
+        let mut out = daily_view_with(store, id, s, days, avg_days, source, today, from_store);
+        out["history"] = read.as_ref().map(|r| r.json()).unwrap_or(Value::Null);
         let st = store.read_state(id);
         if let Some(o) = out.as_object_mut() {
             o.insert("ok".into(), json!(true));
@@ -385,19 +434,84 @@ impl Core {
         kept.into_iter().skip(skip).map(|m| derive::month_row(m, s.size_basis, current)).collect()
     }
 
-    fn volume_monthly(&self, id: &str, s: &VolumeSettings, msg: &Value) -> Value {
+    /// The months the store's days fall in, each merged **per day** with the local record's
+    /// days of that month (a local day wins) and summarised by the same `derive` as a local
+    /// month: so the month the local record starts in counts the store's earlier days too, and
+    /// Monthly agrees with Daily. A month with no local day is `source: "history"`; one with
+    /// both says how many of its days came from the store (`historyDays`). A month on or before
+    /// the day a bounded read-back stopped at is `incomplete` (unknown is not zero).
+    pub(crate) fn history_month_rows(store: &Store, id: &str, days: &[super::Day], s: &VolumeSettings, current: &str,
+                                     incomplete_before: Option<NaiveDate>) -> Vec<Value> {
+        let mut by_month: BTreeMap<String, BTreeMap<String, super::Day>> = BTreeMap::new();
+        for d in days {
+            if let Some(date) = parse_day(&d.day) {
+                by_month.entry(month_key(date)).or_default().insert(d.day.clone(), d.clone());
+            }
+        }
+        by_month.into_iter().filter(|(m, _)| m.as_str() <= current).filter_map(|(m, mut merged)| {
+            let local = store.read_month(id, &m).days;
+            let from_store = merged.keys().filter(|k| !local.contains_key(*k)).count();
+            if from_store == 0 {
+                return None;
+            }
+            let all_store = local.is_empty();
+            merged.extend(local);
+            let mut row = derive::month_row(&derive::month_summary(&m, &merged), s.size_basis, current);
+            if all_store {
+                row["source"] = json!("history");
+            } else {
+                row["historyDays"] = json!(from_store);
+            }
+            let start = NaiveDate::parse_from_str(&format!("{m}-01"), "%Y-%m-%d").ok();
+            if incomplete_before.zip(start).is_some_and(|(b, st)| st <= b) {
+                row["incomplete"] = json!(true);
+            }
+            Some(row)
+        }).collect()
+    }
+
+    /// Local month rows and the merged ones (`history_month_rows`, which replace a local row of
+    /// the same month), the last `months` of them.
+    fn merge_month_rows(local: Vec<Value>, merged: Vec<Value>, months: usize) -> Vec<Value> {
+        let mut by: BTreeMap<String, Value> = BTreeMap::new();
+        for r in local.into_iter().chain(merged) {
+            if let Some(m) = r["month"].as_str() {
+                by.insert(m.to_string(), r);
+            }
+        }
+        let skip = by.len().saturating_sub(months);
+        by.into_values().skip(skip).collect()
+    }
+
+    /// The range the store is asked for when the Monthly views show `months` months: from the
+    /// first of the oldest month shown to the day before the first day the local record covers
+    /// (`history_store::oldest_local_day`, the same definition as the Daily view's).
+    fn monthly_missing(store: &Store, id: &str, today: NaiveDate, months: usize) -> Option<(NaiveDate, NaiveDate)> {
+        let first = schedule::oldest_kept_month(today, months as u32);
+        crate::history_store::missing_range(first, today, crate::history_store::oldest_local_day(store, id))
+    }
+
+    async fn volume_monthly(self: &Arc<Self>, id: &str, s: &VolumeSettings, msg: &Value, read_back: bool) -> Value {
         let Some(store) = &self.volume.store else { return no_store() };
         let months = int_arg(msg, "months", 13, 1, 36) as usize;
-        let current = month_key(schedule::utc_day(now_ms()));
+        let today = schedule::utc_day(now_ms());
+        let current = month_key(today);
         let st = store.read_state(id);
-        let rows = Core::month_rows(&st, s, months, &current);
+        let read = match Core::monthly_missing(store, id, today, months).filter(|_| read_back) {
+            Some((f, t)) => self.history_read_volume(&[id.to_string()], f, t, true).await,
+            None => None,
+        };
+        let merged = read.as_ref().and_then(|r| r.days.get(id).map(|d| (d, r.truncated_before)))
+            .map(|(d, cut)| Core::history_month_rows(store, id, d, s, &current, cut)).unwrap_or_default();
+        let rows = Core::merge_month_rows(Core::month_rows(&st, s, 36, &current), merged, months);
         json!({ "ok": true, "clusterId": id, "settings": s, "status": self.volume_status(id, s, &st),
-                "avgPerMonth": derive::avg_per_month(&rows), "months": rows })
+                "avgPerMonth": derive::avg_per_month(&rows), "months": rows,
+                "history": read.as_ref().map(|r| r.json()) })
     }
 
     /// Every cluster the caller sees, from `state.json` alone. On desktop each cluster's
     /// override comes from the message's `volume.clusters[id]`.
-    async fn volume_monthly_all(&self, msg: &Value, caller: Option<&Caller>) -> Value {
+    async fn volume_monthly_all(self: &Arc<Self>, msg: &Value, caller: Option<&Caller>) -> Value {
         let Some(store) = &self.volume.store else { return no_store() };
         let months = int_arg(msg, "months", 13, 1, 36) as usize;
         let current = month_key(schedule::utc_day(now_ms()));
@@ -405,15 +519,37 @@ impl Core {
             Ok(raw) => (raw, None),
             Err(e) => (None, Some(e)),
         };
+        let today = schedule::utc_day(now_ms());
+        let ids = self.fleet_visible(caller);
+        let read_back = !caller.is_some_and(Caller::play_only);
+        // One bounded, paged read-back for every cluster whose local record starts after the
+        // oldest month shown.
+        let states: Vec<ClusterState> = ids.iter().map(|id| store.read_state(id)).collect();
+        let missing: Vec<Option<(NaiveDate, NaiveDate)>> = ids.iter()
+            .map(|id| Core::monthly_missing(store, id, today, months).filter(|_| read_back)).collect();
+        let asking: Vec<String> = ids.iter().zip(&missing).filter(|(_, m)| m.is_some()).map(|(id, _)| id.clone()).collect();
+        let span = missing.iter().flatten().fold(None::<(NaiveDate, NaiveDate)>, |acc, (f, t)| {
+            Some(acc.map_or((*f, *t), |(a, b)| (a.min(*f), b.max(*t))))
+        });
+        let read = match span {
+            Some((f, t)) => self.history_read_volume(&asking, f, t, true).await,
+            None => None,
+        };
         let mut out = vec![];
-        for id in self.fleet_visible(caller) {
-            let name = self.spec_for(&id).and_then(|s| s.name).unwrap_or_else(|| id.clone());
-            let r = self.volume_resolve(raw.as_ref(), Some(&id), Some(msg));
-            let st = store.read_state(&id);
-            out.push(json!({ "clusterId": id, "name": name, "basis": r.settings.size_basis,
-                             "months": Core::month_rows(&st, &r.settings, months, &current) }));
+        for ((id, st), miss) in ids.iter().zip(&states).zip(&missing) {
+            let name = self.spec_for(id).and_then(|s| s.name).unwrap_or_else(|| id.clone());
+            let r = self.volume_resolve(raw.as_ref(), Some(id), Some(msg));
+            let merged = match (miss, read.as_ref().and_then(|rb| rb.days.get(id).map(|d| (d, rb.truncated_before)))) {
+                (Some((f, t)), Some((days, cut))) => {
+                    let mine: Vec<super::Day> = days.iter().filter(|d| parse_day(&d.day).is_some_and(|x| x >= *f && x <= *t)).cloned().collect();
+                    Core::history_month_rows(store, id, &mine, &r.settings, &current, cut)
+                }
+                _ => vec![],
+            };
+            let rows = Core::merge_month_rows(Core::month_rows(st, &r.settings, 36, &current), merged, months);
+            out.push(json!({ "clusterId": id, "name": name, "basis": r.settings.size_basis, "months": rows }));
         }
-        let mut reply = json!({ "ok": true, "clusters": out });
+        let mut reply = json!({ "ok": true, "clusters": out, "history": read.as_ref().map(|r| r.json()) });
         if let Some(e) = config_error {
             reply["configError"] = json!(e);
         }
@@ -670,7 +806,12 @@ impl Core {
                         });
                     }
                 }
-                Ok(_) => {}
+                // The day's capacity measurements, once a day: after the scheduled run only.
+                Ok(_) => {
+                    if scheduled.is_some() {
+                        core.history_capacity_after_run(&id).await;
+                    }
+                }
             }
             if let Some(r) = core.volume.runs.lock().get_mut(&id) {
                 r.running = false;
@@ -703,6 +844,14 @@ impl Core {
     /// Ending at the stop is `Ok` with `interrupted` set, whether before anything was sent
     /// or with days left; so is a request that failed while the stop came on.
     pub(crate) async fn volume_collect(self: &Arc<Self>, id: &str, s: &VolumeSettings, opts: &CollectOpts<'_>) -> Result<Collected, String> {
+        let out = self.volume_collect_days(id, s, opts).await?;
+        // The days it changed, to the history store's queue — only while its gates are open;
+        // the local record is written first and never waits for it.
+        self.history_volume_changed(id, &out.changed_days);
+        Ok(out)
+    }
+
+    async fn volume_collect_days(self: &Arc<Self>, id: &str, s: &VolumeSettings, opts: &CollectOpts<'_>) -> Result<Collected, String> {
         let store = self.volume.store.as_ref().ok_or("no data directory")?;
         let ind = Indices::from_settings(s)?;
         if self.volume_stopped() {
@@ -804,7 +953,13 @@ impl Core {
         let mut to_search: Vec<NaiveDate> = vec![];
         for m in &months {
             let mut file = store.read_month(id, m);
+            let was_live: std::collections::BTreeSet<String> = file.days.iter().filter(|(_, d)| d.live).map(|(k, _)| k.clone()).collect();
             let mut changed = collect::apply_totals(&mut file.days, m, &listing, &split, started);
+            for (k, d) in &file.days {
+                if d.totals_at == started || (was_live.contains(k) && !d.live) {
+                    out.changed_days.insert(k.clone());
+                }
+            }
             for (k, d) in file.days.iter_mut() {
                 let Some(date) = parse_day(k) else { continue };
                 if !in_period(date) {
@@ -817,6 +972,7 @@ impl Core {
                     // A past day that stays unfinished says why (docs/VOLUME.md "Store").
                     if d.error.as_deref() != Some(e.as_str()) {
                         d.error = Some(e);
+                        out.changed_days.insert(k.clone());
                         changed = true;
                     }
                 }
@@ -858,6 +1014,7 @@ impl Core {
                     for date in dates {
                         if let Some(day) = file.days.get_mut(&day_key(date)) {
                             day.error = Some(note.clone());
+                            out.changed_days.insert(day_key(date));
                         }
                     }
                     store.write_month(id, &m, &file)?;
@@ -902,6 +1059,7 @@ impl Core {
                         }
                     }
                     if let Some(day) = file.days.get_mut(&day_key(date)) {
+                        out.changed_days.insert(day_key(date));
                         if ok(&res) {
                             collect::apply_search(day, res.get("json").unwrap_or(&Value::Null), &rows, &group, today, now_ms());
                             if let Some(e) = &day.error {

@@ -457,7 +457,10 @@ await go('reports');
       case 'VOLUME_DAILY': return { ok: true, settings, status, sources: ['acme', 'beta'], skipped: ['metrics-2026.09'],
         cards: { yesterday: { day: vDay(1), value: 1.3e10, avg: 8e9, changeVsAvgPct: 61 }, average: { days: b.avgDays, value: 8.4e9 },
           monthSoFar: { month: ym(0), value: 2.3e11, days: 29 }, eventBytes30: { value: null, days: 30 } },
-        days: Array.from({ length: (b.days || 30) + 1 }, (_, n) => row(n)),
+        days: Array.from({ length: (b.days || 30) + 1 }, (_, n) => (n === 20 ? { ...row(n), source: 'history' } : row(n))),
+        // The history store was asked for older days and could not be reached (docs/HISTORY.md).
+        history: { asked: true, from: vDay(400), to: vDay(31), reachable: false, days: 0, truncated: false,
+          message: 'in the history store · not reachable: Connection refused' },
         totals: { indices: 62, docs: 1.8e8, priBytes: 2.5e11, totalBytes: 5e11, eventBytes: null, subBytes: null } };
       case 'VOLUME_MONTHLY': return { ok: true, status, settings, months: Array.from({ length: b.months || 13 }, (_, i) => month(i)) };
       case 'VOLUME_BREAKDOWN': return { ok: true, field: b.field, resolved: 'src_hostname', totals: {}, rows: [
@@ -503,6 +506,11 @@ await go('reports');
     ok(!!doc.querySelector('.vs table.coltbl .vs-high'), 'daily (stubbed): a change over +25 % is not marked');
     ok(!doc.querySelector('.vs table.coltbl tfoot'), 'daily (stubbed): a totals row is drawn (not on the board)');
     ok(!/never shown as 0/.test(txt()), 'daily (stubbed): the explanatory line under the table is back (docs/REPORTS.md: no captions)');
+    // The history store: a day from it is marked, and an unreachable store is said once, in amber.
+    const hb = doc.querySelectorAll('.vs .banner.warn.vs-history');
+    ok(hb.length === 1 && /in the history store · not reachable: Connection refused/.test(hb[0].textContent),
+      `daily (stubbed): the unreachable history store is not said once in amber (${hb.length}: ${hb[0] && hb[0].textContent})`);
+    ok((tt.match(/· history/g) || []).length === 1, 'daily (stubbed): the day from the history store carries no "history" marker');
 
     // Average over 30 days re-asks with enough days for it, and the column follows.
     vsent.length = 0;
@@ -1305,6 +1313,136 @@ await go('settings');
         'settings: the cluster being written to was the only one measured');
       ok(lastSet.eventTimeFields.length === 2,
         `settings: the event time fields travelled as ${JSON.stringify(lastSet.eventTimeFields)}`);
+    }
+  }
+  globalThis.fetch = realFetch;
+}
+
+/* ------------- the history store card, and the delay card's destination ------------- */
+
+await go('settings');
+{
+  const labels = [...doc.querySelectorAll('nav.subnav button')].map((b) => b.textContent);
+  ok(!labels.some((l) => /History store/.test(l)),
+    `settings: the History store tab appeared on a loopback (portable) bridge: ${labels.join(' | ')}`);
+}
+
+{
+  const realFetch = globalThis.fetch;
+  const sent = [];
+  let lastDelaySet = null;
+  const hist = {
+    supported: true,
+    settings: { url: 'https://history.example:9200', auth: 'basic', user: 'ep', passwordSet: true, passwordStale: false,
+                tls: 'auto', via: '', prefix: 'elasticpro-history', streams: { volume: true, capacity: true, delay: true } },
+    armed: false, permitted: false, permitHint: 'set HISTORY_STORE_WRITES=true in config.txt',
+    test: null, armBlocked: 'set HISTORY_STORE_WRITES=true in config.txt',
+    status: { lastSuccessAt: null, lastError: null, lastErrorAt: null, docsWritten: 0, queue: 0, templateAt: null, backfill: null },
+    jumpHosts: [],
+  };
+  const delayStub = {
+    supported: true,
+    config: { enabled: false, sinkClusterId: '', clusters: [], everyHours: 2, indexPrefix: 'elasticpro-log-delay',
+              indexPattern: 'logstash-*', deviceField: 'src_hostname.keyword', arrivalField: '@timestamp',
+              eventTimeFields: ['ingested_time'], maxDevices: 2000 },
+    state: { runs: 0, lastOk: false, lastMeasured: 0, lastFailed: 0, consecutiveFailures: 0 },
+    blocked: null,
+    historyStore: { configured: true, armed: false, permitted: false },
+  };
+  globalThis.fetch = async (input, init) => {
+    const body = init && init.body ? JSON.parse(init.body) : {};
+    const t = String(body.type || '');
+    if (t.startsWith('HISTORY_STORE')) {
+      sent.push(body);
+      if (t === 'HISTORY_STORE_TEST') {
+        hist.test = { at: Date.now(), by: 'admin', ok: true, current: true, version: '8.15.0', clusterName: 'history-es',
+                      securityEnabled: true, privileges: { create_doc: true, create_index: true, read: null }, message: null };
+        if (hist.permitted) hist.armBlocked = null;
+      }
+      if (t === 'HISTORY_STORE_ARM') { hist.armed = !!body.on; }
+      return stubReply({ ok: true, ...hist });
+    }
+    if (t.startsWith('DELAY_SINK')) {
+      if (t === 'DELAY_SINK_SET') { lastDelaySet = body.config; return stubReply({ ok: true, ...delayStub, config: body.config }); }
+      return stubReply({ ok: true, ...delayStub });
+    }
+    return realFetch(input, init);
+  };
+
+  await go('overview');
+  await go('settings');
+  await settleFor(400);
+
+  ok(await openSettingsTab('History store'), 'settings: no History store tab on a hosted core');
+  const hcard = () => [...doc.querySelectorAll('section.card')]
+    .find((sec) => (sec.querySelector('header h2') || {}).textContent === 'History store');
+  const click = async (c, label) => {
+    [...c.querySelectorAll('button')].find((b) => b.textContent === label).click();
+    await settleFor(250);
+  };
+  ok(!!hcard(), 'settings: no History store card on a hosted core');
+  if (hcard()) {
+    let c = hcard();
+    // Never pre-filled: the password field is empty and says only that one is held.
+    const pw = c.querySelector('#hs-password');
+    ok(pw && pw.value === '' && /set/.test(pw.getAttribute('placeholder') || ''),
+      'history: the password field is pre-filled or does not say one is held');
+    const arm = () => hcard().querySelector('#hs-arm');
+    ok(arm().disabled, 'history: Write history is switchable while writes are not permitted');
+    ok(/set HISTORY_STORE_WRITES=true in config\.txt/.test(hcard().textContent),
+      'history: the reason does not name HISTORY_STORE_WRITES in config.txt');
+    ok(hcard().querySelector('#hs-backfill').disabled, 'history: Copy existing history is enabled while not armed');
+
+    await click(c, 'Test connection');
+    c = hcard();
+    ok(sent.some((m) => m.type === 'HISTORY_STORE_TEST'), 'history: Test connection sent nothing');
+    const res = (c.querySelector('#hs-test-result') || {}).textContent || '';
+    ok(/8\.15\.0/.test(res) && /history-es/.test(res), `history: the test result lacks version and cluster: ${res}`);
+    ok(/create_doc[^:]*: yes/.test(res) && /read[^:]*: not checked/.test(res),
+      `history: the privilege lines are wrong: ${res}`);
+
+    // Permitted and tested: the switch is usable, and pressing it sends ARM {on:true}.
+    hist.permitted = true; hist.permitHint = null; hist.armBlocked = null;
+    await click(c, 'Test connection');
+    ok(!arm().disabled, 'history: Write history is still disabled once permitted and tested');
+    sent.length = 0;
+    arm().click();
+    await settleFor(250);
+    const armMsg = sent.find((m) => m.type === 'HISTORY_STORE_ARM');
+    ok(armMsg && armMsg.on === true, `history: pressing the switch sent ${JSON.stringify(armMsg)}`);
+    ok(!hcard().querySelector('#hs-backfill').disabled, 'history: Copy existing history stays disabled when armed');
+    sent.length = 0;
+    await click(hcard(), 'Copy existing history');
+    ok(sent.some((m) => m.type === 'HISTORY_STORE_BACKFILL'), 'history: Copy existing history sent nothing');
+    sent.length = 0;
+    await click(hcard(), 'Save');
+    const setMsg = sent.find((m) => m.type === 'HISTORY_STORE_SET');
+    ok(setMsg && setMsg.settings.url === hist.settings.url && !('password' in setMsg.settings),
+      `history: Save sent ${JSON.stringify(setMsg)} (an empty password must be left out)`);
+  }
+
+  // The delay card: the monitored cluster unless the admin says otherwise.
+  ok(await openSettingsTab('Scheduled log delay'), 'settings: no scheduler tab on a hosted core');
+  const dcard = [...doc.querySelectorAll('section.card')]
+    .find((sec) => (sec.querySelector('header h2') || {}).textContent === 'Scheduled log delay');
+  ok(!!dcard, 'settings: no scheduled log delay card on a hosted core');
+  if (dcard) {
+    const dest = dcard.querySelector('#sink-destination');
+    ok(dest && dest.value === 'cluster', `settings: the destination defaults to ${dest && dest.value}, expected the monitored cluster`);
+    ok(!dcard.querySelector('#sink-history-warn'), 'settings: a history warning shows while the destination is a cluster');
+    if (dest) {
+      dest.value = 'history';
+      dest.dispatchEvent(new window.Event('change', { bubbles: true }));
+      dcard.querySelector('#sink-enabled').checked = true;
+      [...dcard.querySelectorAll('input[id^="sink-pick-"]')].forEach((b, i) => { b.checked = i === 0; });
+      [...dcard.querySelectorAll('button')].find((b) => b.textContent === 'Save').click();
+      await settleFor(250);
+      ok(lastDelaySet && lastDelaySet.destination === 'history',
+        `settings: the destination travelled as ${lastDelaySet && lastDelaySet.destination}, expected history`);
+      const again = [...doc.querySelectorAll('section.card')]
+        .find((sec) => (sec.querySelector('header h2') || {}).textContent === 'Scheduled log delay');
+      ok(again && /not permit|switched off|not configured/.test((again.querySelector('#sink-history-warn') || {}).textContent || ''),
+        'settings: no warning while the history store is not armed');
     }
   }
   globalThis.fetch = realFetch;
@@ -5529,6 +5667,6 @@ if (problems.length) {
   for (const p of problems) console.error('  ✗ ' + p);
   process.exit(1);
 }
-console.log('ok: strip, console, shards, the Clusters page (columns, name menu, unreachable rows, expand chevron, alerts link), Reports (sections, Columns menu, Storage plan, Measure size, exports), Indices without Summary, hand-off, refresh, snapshots, tasks, toasts, accounts split and pinned Zabbix roles, the log-delay preflight, a quiet Config page, Config › Volume fields, report jobs and the Reports pill, the mailed report and the mail server, the Request Centre and the redraw gate, the request policy, the coverage bar, the Tasks panel and the console tabs, template management, the Alerts page grouped by cluster with merged repeats, cluster type (badge, Type filter, edit dialog to file keys and CLUSTER_META_SET), Go to, playbooks and the bell, and the default credential (no password asked for a new cluster, promote, never replaced unticked), and Config › Play (links, revoke, exclusion, locked fields, watch rules), and Play (slides, keys, zoom, takeover, exclusion, display link, an older core), and Reports (Planning recalculates, the backup target, Based on a cluster, CSV; plan templates save and delete; which indices count)');
+console.log('ok: strip, console, shards, the Clusters page (columns, name menu, unreachable rows, expand chevron, alerts link), Reports (sections, Columns menu, Storage plan, Measure size, exports), Indices without Summary, hand-off, refresh, snapshots, tasks, toasts, accounts split and pinned Zabbix roles, the log-delay preflight, a quiet Config page, Config › Volume fields, report jobs and the Reports pill, the mailed report and the mail server, the Request Centre and the redraw gate, the request policy, the coverage bar, the Tasks panel and the console tabs, template management, the Alerts page grouped by cluster with merged repeats, cluster type (badge, Type filter, edit dialog to file keys and CLUSTER_META_SET), Go to, playbooks and the bell, and the default credential (no password asked for a new cluster, promote, never replaced unticked), and Config › Play (links, revoke, exclusion, locked fields, watch rules), and Config › History store (gated switch, test, arm, delay destination), and Play (slides, keys, zoom, takeover, exclusion, display link, an older core), and Reports (Planning recalculates, the backup target, Based on a cluster, CSV; plan templates save and delete; which indices count)');
 // The pages leave auto-refresh timers and a live tail running; nothing here waits on them.
 process.exit(0);

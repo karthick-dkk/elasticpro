@@ -22,6 +22,7 @@ import { state } from '../core/state.js';
 import { navigateTo } from '../core/intent.js';
 import { card, statTile, empty, unreadable, configErrorBanner } from '../pages/common.js';
 import { toast } from '../ui/menu.js';
+import { fromHistory, historyMarkText, historyLine } from '../core/history-store.js';
 import { configErrorOf,
   volumeDaily, volumeMonthly, volumeBreakdown, volumeRun, volumeLayoutGet, volumeLayoutSet, isHosted,
   NEEDS_VERSION, collectDue, utcDay, monthName,
@@ -325,6 +326,7 @@ function dailyView(c, picker) {
   if (ent && ent.error && !reply) return [...out, unreadable('The daily volume record', ent.error)];
   if (!reply) return [...out, h('div.tbl-empty', 'Reading the daily record…')];
   const st = reply.status || {};
+  out.push(historyBanner(reply));
   if (st.lastError) out.push(h('div.banner.warn', h('div', h('div.ttl', 'The last collection did not finish'), h('div.mono', String(st.lastError)))));
   if (ent && ent.error) out.push(h('div.banner.err', h('div', h('div.ttl', 'Could not read the daily record'), h('div.mono', ent.error))));
   const rows = reply.days || [];
@@ -437,7 +439,7 @@ export function dailyCellFor(reply) {
   const today = utcDay();
   return (key, d) => {
     switch (key) {
-      case 'day': return h('span', { title: d.day }, dayLabel(d.day));
+      case 'day': return h('span', { title: d.day }, dayLabel(d.day), historyMark(d));
       case 'indices': return num(d.indices);
       case 'docs': return d.docs === null || d.docs === undefined ? h('span.muted', { title: 'This day has not been aggregated yet' }, 'not yet') : num(d.docs);
       case 'eventBytes': return sizeCell(eventBytesOf(d), field);
@@ -453,6 +455,14 @@ export function dailyCellFor(reply) {
     }
   };
 }
+
+/** A day or month the history store supplied (docs/HISTORY.md): a small muted marker. */
+const historyMark = (r) => (fromHistory(r) ? h('span.muted', { title: 'From the history store', style: { fontSize: '10.5px' } }, historyMarkText(r)) : null);
+/** The history store was asked and could not be reached: said once, in amber; never zeros. */
+const historyBanner = (reply) => {
+  const t = historyLine(reply && reply.history);
+  return t ? h('div.banner.warn.vs-history', h('div', t)) : null;
+};
 
 const STATUS_CLS = { ok: 'green', today: 'grey', warn: 'yellow', na: 'grey' };
 function statusCell(d) {
@@ -536,6 +546,7 @@ function monthlyView(c, picker) {
   if (!reply) return [...out, h('div.tbl-empty', 'Reading the monthly record…')];
   const rows = monthRows(reply);
   const settings = reply.settings || {};
+  out.push(historyBanner(reply));
   out.push(h('div.grid.c2.vs-split', monthlyTable(c, rows, settings, ent.peaks), breakdownCard(c, settings)));
   return out;
 }
@@ -568,7 +579,7 @@ function monthlyTable(c, rows, settings, peaks) {
   const prevOf = new Map(rows.map((m, i) => [m.month, rows[i - 1] || null]));
   const cell = (key, m) => {
     const has = m.daysWithData > 0;
-    if (key === 'month') return monthName(m.month);
+    if (key === 'month') return h('span', monthName(m.month), historyMark(m));
     if (key === 'daysWithData') {
       const all = daysInMonth(m.month);
       const short = has && (m.partial || m.daysWithData < all);

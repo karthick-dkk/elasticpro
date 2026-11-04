@@ -126,6 +126,9 @@ const SPECS: &[Spec] = &[
     spec("HOUSEKEEPING_DRY_RUN", Kind::Bool, To::Flag("ELASTICPRO_HOUSEKEEPING_DRY_RUN")),
     spec("SESSION_IDLE_DAYS", Kind::Int(0, 3650), To::Env("ELASTICPRO_SESSION_IDLE_DAYS")),
     spec("ACTIVITY_LOG_KEEP_DAYS", Kind::Int(0, 3650), To::Env("ELASTICPRO_ACTIVITY_LOG_KEEP_DAYS")),
+    // The history store's first gate (history_store.rs, docs/HISTORY.md): without it the store
+    // is configured and tested, never written. Read where used.
+    spec("HISTORY_STORE_WRITES", Kind::Bool, To::Direct),
     // UI defaults: not environment variables; PING carries them to the UI.
     spec("UI_READ_ONLY", Kind::Bool, To::Direct),
     spec("UI_AUTO_REFRESH", Kind::Bool, To::Direct),
