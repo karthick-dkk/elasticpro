@@ -124,3 +124,6 @@ if (errors.length) {
   process.exit(1);
 }
 console.log(`\nok: all ${PAGES.length} pages rendered without error`);
+// Done: the pages' own pollers (the report-jobs poll Reports › Exports starts, say) would keep
+// Node alive until they are stopped, which is not what a check should wait for.
+process.exit(0);
