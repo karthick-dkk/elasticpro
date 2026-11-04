@@ -7,12 +7,19 @@
  * It reads the core's own log (REQUEST_LOG) and nothing else: opening this page never
  * sends a cluster anything. While it is open it re-reads the log every two seconds — a
  * core round trip, not a cluster one — and stops the moment it is left.
+ *
+ * A second tab, ElasticPro health (`#/requests/health`, docs/HEALTH.md), is an
+ * administrator's: ElasticPro's own memory, CPU, response time, gate, poller, reports and
+ * disk, from SYSTEM_HEALTH every five seconds while it is open — and the log is not read
+ * meanwhile. Neither tab sends a cluster anything.
  */
 
 import { h, mount } from '../lib/dom.js';
 import { num, dur, dt, toCsv, download } from '../lib/fmt.js';
 import { state, clusters, client, requestLoad, refreshRequestLoad, syncFleet } from '../core/state.js';
-import { requestLog, policyGet, policyPause, policyResume, housekeepingGet, housekeepingRun } from '../core/es.js';
+import { requestLog, policyGet, policyPause, policyResume, housekeepingGet, housekeepingRun, systemHealth } from '../core/es.js';
+import { REQUEST_TABS, tabOfHash, tabHash, HEALTH_POLL_MS, levelTone, levelWord } from '../core/system-health.js';
+import { healthView } from './requests-health.js';
 import { housekeepingView, housekeepingLine } from '../core/housekeeping.js';
 import { navigateTo } from '../core/intent.js';
 import { contractOf, taskRows, cancelPath, privilegeHint } from '../core/es-tasks.js';
@@ -50,18 +57,75 @@ let tasks = { cluster: null, rows: null, error: null, busy: false, at: 0, note: 
 let hk = null;
 let hkBusy = false;
 let hkTick = 0;
+/** Which tab is open ('log' or 'health'), from the hash; an operator only ever has the log's page. */
+let tab = 'log';
+/** SYSTEM_HEALTH's last answer, why the last read failed, and the tab's own 5-s timer. */
+let health = null;
+let healthError = null;
+let healthTimer = null;
 
 /** The log, its figures and housekeeping are an administrator's; anybody else gets the stop alone. */
 const isAdmin = () => !state.caller || state.caller.role === 'admin';
 
 export function render(el) {
   host = el;
-  draw();
-  poll();
+  tab = isAdmin() ? tabOfHash(hashNow()) : 'log';
   loadPolicy();
+  startTab();
+}
+
+/**
+ * Start the open tab's reads and stop the other's: the log every two seconds (and housekeeping
+ * on entry), or SYSTEM_HEALTH every five. One timer runs at a time.
+ */
+function startTab() {
+  clearInterval(timer); timer = null;
+  clearInterval(healthTimer); healthTimer = null;
+  draw();
+  if (tab === 'health') {
+    pollHealth();
+    healthTimer = setInterval(() => { if (host && host.isConnected) pollHealth(); else clearInterval(healthTimer); }, HEALTH_POLL_MS);
+    return;
+  }
+  poll();
   if (isAdmin()) loadHousekeeping();
-  clearInterval(timer);
   timer = setInterval(() => { if (host && host.isConnected) poll(); else clearInterval(timer); }, 2000);
+}
+
+/** Another tab of this page (#/requests ↔ #/requests/health). */
+export function onRoute() {
+  if (!host) return;
+  const want = isAdmin() ? tabOfHash(hashNow()) : 'log';
+  if (want === tab) return;
+  tab = want;
+  startTab();
+}
+
+/** The address's hash; '' where there is no address (a unit test's bare DOM). */
+const hashNow = () => (typeof location !== 'undefined' ? location.hash : '');
+
+function openTab(id) {
+  if (typeof location !== 'undefined' && location.hash !== tabHash(id)) location.hash = tabHash(id);   // the shell calls onRoute
+  else { tab = id; startTab(); }
+}
+
+async function pollHealth() {
+  try {
+    const r = await systemHealth();
+    if (r && r.ok) { health = r; healthError = null; } else { healthError = (r && r.message) || 'the core did not answer'; }
+  } catch (e) { healthError = e.message || String(e); }
+  if (host && host.isConnected && tab === 'health') draw();
+}
+
+/** The tab bar, an administrator's: Requests | ElasticPro health (with its level once read). */
+function tabsBar() {
+  return h('nav.subnav.rq-tabs', { 'aria-label': 'Request Centre' },
+    ...REQUEST_TABS.map((t) => h('button', {
+      type: 'button', title: t.label, dataset: { tab: t.id }, 'aria-current': tab === t.id ? 'page' : null,
+      onclick: () => openTab(t.id),
+    }, h('span', t.label),
+    t.id === 'health' && health && health.level && health.level !== 'ok'
+      ? h('i.hl-dot', { class: levelTone(health.level), title: `ElasticPro health: ${levelWord(health.level)}`, 'aria-label': `health ${levelWord(health.level)}` }) : null)));
 }
 
 export function onData() { /* the log is the core's; data events do not change it */ }
@@ -69,6 +133,7 @@ export function onData() { /* the log is the core's; data events do not change i
 /** Leaving the page stops the re-read; nothing is polled for a page nobody is looking at. */
 export function onLeave() {
   clearInterval(timer); timer = null;
+  clearInterval(healthTimer); healthTimer = null;
   // #view is one element for every page, so `host.isConnected` stays true after the page
   // has gone: a read still in flight (the log, the policy, housekeeping) would land on
   // whatever page had replaced this one. Forgetting the host is what makes draw() a no-op.
@@ -169,6 +234,10 @@ function draw() {
       h('p.muted.rq-op-note', 'The request log, its figures and housekeeping are an administrator’s.')));
     return;
   }
+  if (tab === 'health') {
+    mount(host, h('div.rq-page', tabsBar(), healthView(health, { error: healthError })));
+    return;
+  }
   const rows = requestRows(log, filter);
   const inflight = rows.filter((r) => r.inflight).length;
   const perMin = Object.values(requestLoad.clusters || {}).reduce((s, c) => s + (c.perMinute || 0), 0);
@@ -233,6 +302,7 @@ function draw() {
   if (rows.length) reqTable.querySelector('table').classList.add('rq-tbl');
 
   mount(host, h('div.rq-page',
+    tabsBar(),
     h('div.rq-top', statusCard(status), stopCard()),
     error ? h('div.banner.err', h('div', h('div.ttl', 'Could not read the request log'), h('div', error))) : null,
     tiles, limitsRow(lim ? limitChips(log) : null), pushRow(zabbixPushLine(log)), bar,

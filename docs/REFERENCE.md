@@ -230,6 +230,15 @@ adds one more. All of them are cheap metadata reads. Auto-refresh is **off by de
 you turn it on at the default 30 s that is about 28 requests a minute per cluster. Re-run
 the meter after adding a fetch to any page, so the number stays true.
 
+ElasticPro's **own** health is the Request Centre's second tab, **Requests › ElasticPro health**
+(`#/requests/health`, administrators): memory and CPU of the core and the report worker against
+their container limits, OOM kills and CPU throttling, the core's response time per message, the
+request gate, the fleet poller, report jobs with their concurrency, the data volume and 24 h
+trends, with amber/red checks that each name the setting that fixes them. It reads
+`SYSTEM_HEALTH` every 5 s while open and never asks a cluster anything; a dot on the Requests
+nav entry turns amber or red when a check does. The contract and the message's shape are in
+[HEALTH.md](HEALTH.md); the message is listed in [HANDBOOK.md](HANDBOOK.md).
+
 ## Disk balance
 
 With more than one data node, the Nodes page says whether the data is spread evenly and —

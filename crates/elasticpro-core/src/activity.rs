@@ -55,6 +55,8 @@ const POLLS: &[&str] = &[
     "PLAY_STATE", "ACK_LIST", "PLAY_SHARE_GET", "PLAY_SHARE_PUT",
     // Opening Planning reads the templates.
     "PLAN_TEMPLATES_GET",
+    // The Request Centre's ElasticPro health tab reads it every 5 s while open (a read).
+    "SYSTEM_HEALTH",
 ];
 
 /// One thing somebody did, already reduced to what may be written down.

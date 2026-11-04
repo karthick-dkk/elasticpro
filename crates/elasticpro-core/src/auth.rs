@@ -557,6 +557,9 @@ pub fn required_role(msg_type: &str) -> Option<Role> {
         "TUNNELS" | "PINS" | "REQUEST_STATS" => Some(Role::User),
         // Every request on the clusters the caller may see, whoever asked: an administrator's view.
         "REQUEST_LOG" => Some(Role::Admin),
+        // ElasticPro's own health (docs/HEALTH.md): memory, CPU, the gate, the worker. Nothing of a
+        // cluster but per-cluster gate figures, narrowed to the caller's clusters in the handler.
+        "SYSTEM_HEALTH" => Some(Role::Admin),
         // Listing the archive names object keys, which carry client and branch names —
         // the same shape of fact as an index name, and gated the same way.
 

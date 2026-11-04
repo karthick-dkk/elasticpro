@@ -2983,6 +2983,106 @@ restoreConsole();
   ok(sent.filter((m) => m.type === 'REQUEST_LOG').length === after, 'requests: the log is still being re-read after leaving the page');
 }
 
+// Requests › ElasticPro health (docs/HEALTH.md): an administrator's tab, read from SYSTEM_HEALTH
+// every 5 s while open — the log is not read meanwhile and no cluster is ever asked; an amber or
+// red line carries its fix; a part that cannot report says "not known"; leaving stops the read;
+// an operator is not offered the tab, even at its address.
+{
+  const before = globalThis.fetch;
+  const hsent = [];
+  const now = Date.now();
+  const snap = {
+    ok: true, at: now, role: 'all', level: 'bad',
+    thresholds: [{ id: 'memory', check: 'Resident memory of limit (core, worker)', amber: '≥ 80%', red: '≥ 90%, or an OOM kill in 24 h' }],
+    checks: [
+      { id: 'core.memory', threshold: 'memory', label: 'Core memory of limit', level: 'bad', value: '93% · 952 MiB of 1.0 GiB',
+        text: 'Core is at 93% of its memory limit: close to being OOM-killed.', fix: 'Raise CORE_MEM_LIMIT in config.txt (ELASTICPRO_MEM_LIMIT in deploy/.env) and redeploy; or lower ELASTICPRO_CACHE_MB.' },
+      { id: 'gate.refused', threshold: 'gate', label: 'Requests turned away (5 min)', level: 'warn', value: '3',
+        text: '3 request(s) from people were refused by the gate.', fix: 'Raise ES_QUEUE_MAX / ES_QUEUE_WAIT_MS in config.txt.' },
+      { id: 'disk.free', threshold: 'disk', label: 'Data volume free', level: 'unknown', value: 'not known', text: 'The data volume’s space cannot be read.', fix: null },
+    ],
+    parts: [
+      { id: 'core', label: 'Core', level: 'bad', text: '0.3.54 · up 3 h', at: now - 3 * 3600e3 },
+      { id: 'worker', label: 'Report worker', level: 'off', text: 'not deployed — role all: this container runs reports and collection itself', at: null },
+      { id: 'database', label: 'Database', level: 'unknown', text: 'not known — the core does not connect to it', at: null },
+    ],
+    core: {
+      version: '0.3.54', uptimeSec: 10800,
+      memory: { rssBytes: 998244352, limitBytes: 1073741824, usedPct: 93, limitSource: 'cgroup v2', peakBytes24h: 1010000000, oomKills: 0, oomKills24h: 0 },
+      budget: { cache: { budgetBytes: 268435456, usedBytes: 100000000 }, inflight: { budgetBytes: 268435456, usedBytes: 0 }, readCache: { budgetBytes: 67108864, usedBytes: 1000 }, reports: null },
+      cpu: { pct1m: 40, limitCpus: null, throttledPct5m: null, nrPeriods: null },
+      messages: { w5m: { all: { count: 10, errors: 0, p50Ms: 5, p95Ms: 50, p99Ms: 100 }, own: { count: 9, errors: 0, p95Ms: 25 }, byType: [] },
+        w1h: { all: { count: 100 }, own: { count: 90 }, byType: [{ type: 'PING', count: 90, errors: 0, p50Ms: 2, p95Ms: 5, p99Ms: 10 }] },
+        slowest: [{ type: 'FLEET_STATE', count: 3, errors: 0, p50Ms: 25, p95Ms: 100, p99Ms: 100 }], sessions: 2, eventStreams: 1 },
+      gate: { label: 'core', slotsInUse: 1, slots: 24, perCluster: 4, perJump: 8, backgroundReserve: 2,
+        classes: [{ class: 'interactive', running: 1, waiting: 0, waitP95Ms: 0, overloaded5m: 3, queueTimeout5m: 0, overloaded1h: 3, queueTimeout1h: 0 }],
+        clusters: [{ cluster: 'c1', running: 1, waiting: 0, sent5m: 12, upstreamP95Ms: 340, timeouts5m: 0, rejected5m: 2 }] },
+      poller: { enabled: true, stopped: false, clusters: 2, down: 0, tracked: 20, due: 1, late: 0, latePct: 0, cycleMs: 3, cycleP95Ms: 9 },
+      disk: null, lastPrune: null,
+    },
+    worker: { state: 'not_deployed', level: 'off', text: 'not deployed — role all: this container runs reports and collection itself', status: null },
+    reports: { source: 'core', running: [{ id: 'j1', kind: 'hosts', clusterName: 'c1', progress: { done: 1, total: 4 }, day: '2026-11-03', concurrency: 2, halvings: 1, lastReason: '429 from c1' }],
+      queued: 0, queuedJobs: [], collection: [], schedules: [{ kind: 'volume', enabled: false, recipients: 0, nextAt: null, lastSent: null }], lastJob: {} },
+    trends: { fields: ['t', 'rss', 'p95Ms', 'waiting', 'workerRss', 'workerConcurrency'], points: [[now - 120e3, 900e6, 20, 0, null, null], [now - 60e3, 950e6, 25, 0, null, null]] },
+  };
+  globalThis.fetch = async (input, init) => {
+    const body = init && init.body ? JSON.parse(init.body) : {};
+    hsent.push(body);
+    if (body.type === 'SYSTEM_HEALTH') return stubReply(snap);
+    return before(input, init);
+  };
+  const count = (t) => hsent.filter((m) => m.type === t).length;
+  try {
+    await go('requests'); await settleFor(400);
+    const tab = doc.querySelector('nav.rq-tabs button[data-tab="health"]');
+    ok(!!tab, 'health: no "ElasticPro health" tab on the Request Centre');
+    if (tab) {
+      tab.click(); await settleFor(700);
+      ok(window.location.hash === '#/requests/health', `health: the tab is not at #/requests/health (${window.location.hash})`);
+      ok(count('SYSTEM_HEALTH') >= 1, 'health: opening the tab did not read SYSTEM_HEALTH');
+      ok(!hsent.some((m) => m.type === 'ES'), 'health: the tab sent a cluster something');
+      const fix = doc.querySelector('tr[data-check="core.memory"] .hl-fix');
+      ok(fix && /CORE_MEM_LIMIT/.test(fix.textContent), `health: the red memory line carries no fix: ${fix && fix.textContent}`);
+      ok(doc.querySelector('tr[data-check="gate.refused"].hl-row-warn .hl-fix'), 'health: the amber gate line is not marked or has no fix');
+      const db = doc.querySelector('.hl-chip[data-part="database"]');
+      ok(db && /not known/.test(db.textContent) && !db.querySelector('.hl-dot.green'), `health: a part that cannot report is not "not known": ${db && db.textContent}`);
+      const wk = doc.querySelector('.hl-chip[data-part="worker"]');
+      ok(wk && /not deployed — role all/.test(wk.textContent), 'health: no worker chip saying not deployed');
+      ok(/not known — this core has no reports share/.test(doc.body.textContent), 'health: the reports share is not said to be not known');
+      ok(/2 \(halved 1×: 429 from c1\)/.test(doc.body.textContent), 'health: a running job does not show its concurrency and halvings');
+      ok(doc.querySelector('.hl-spark polyline'), 'health: no trend drawn from two samples');
+      const logs = count('REQUEST_LOG'), reads = count('SYSTEM_HEALTH');
+      await settleFor(5300);
+      ok(count('REQUEST_LOG') === logs, 'health: the request log is still read while the health tab is open');
+      ok(count('SYSTEM_HEALTH') > reads, 'health: the tab is not read again after 5 s');
+      // Back to the log tab, then away: the health read stops.
+      doc.querySelector('nav.rq-tabs button[data-tab="log"]').click(); await settleFor(500);
+      ok(window.location.hash === '#/requests' && doc.querySelector('.rq-tbl, .rq-tiles'), 'health: the Requests tab did not come back');
+      await go('overview');
+      const left = count('SYSTEM_HEALTH');
+      await settleFor(5300);
+      ok(count('SYSTEM_HEALTH') === left, 'health: SYSTEM_HEALTH is still read after leaving the page');
+    }
+    // An operator: no tab, not even at its address, and nothing asked.
+    const st = await load('core/state.js');
+    const was = st.state.caller;
+    try {
+      st.state.caller = { name: 'olga', role: 'operator' };
+      await go('overview');
+      window.history.replaceState(null, '', '#/requests/health');
+      const from = count('SYSTEM_HEALTH');
+      app.go('requests'); await settleFor(600);
+      ok(!doc.querySelector('nav.rq-tabs'), 'health: an operator is offered the Request Centre tabs');
+      ok(count('SYSTEM_HEALTH') === from, 'health: an operator\'s page read SYSTEM_HEALTH');
+      await go('overview');
+    } finally {
+      st.state.caller = was;
+    }
+  } finally {
+    globalThis.fetch = before;
+  }
+}
+
 // Housekeeping card on the Request Centre: read on entry, Dry run asks the core for a dry
 // run and draws what came back, and Run now asks first (a real run deletes). The real run is
 // never pressed here: against a bridge with a real data dir it would clean it.

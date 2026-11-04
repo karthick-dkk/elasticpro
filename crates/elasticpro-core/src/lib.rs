@@ -21,6 +21,7 @@ pub mod fleet;
 pub mod gate;
 pub mod guard;
 pub mod hcvault;
+pub mod health;
 pub mod history_store;
 pub mod housekeeping;
 pub mod http;
