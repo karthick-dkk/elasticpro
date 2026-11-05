@@ -100,7 +100,7 @@ test('health counts, one bucket per row', () => {
 
 test('the open row: every tile, section and column shown by default except the node id', () => {
   const p = V.sanitizePrefs(null);
-  assert.deepEqual(V.detailShown(p, 'tiles').map((x) => x.id), ['url', 'jump', 'ilm', 'slm', 'shards', 'tasks', 'rate', 'bucket']);
+  assert.deepEqual(V.detailShown(p, 'tiles').map((x) => x.id), ['health', 'url', 'jump', 'bucket', 'shards', 'ilm', 'slm', 'tasks', 'rate']);
   assert.deepEqual(V.detailShown(p, 'sections').map((x) => x.id), ['repo', 'nodes']);
   assert.ok(!V.detailShown(p, 'nodes').some((x) => x.id === 'id'), 'the node id starts hidden');
   assert.equal(V.detailItems(p, 'repo')[0].fixed, true, 'the repository name is the row');

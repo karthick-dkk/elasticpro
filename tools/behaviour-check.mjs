@@ -362,6 +362,69 @@ await go('overview');
   }
 }
 
+/* ------------- the expanded row: boxes, four cards, nodes; the health list opens on hover ------------- */
+// Owner-approved board of 2026-11-05. The mock cluster is yellow (one index with an unassigned replica).
+{
+  await go('overview');
+  const rowEl = doc.querySelector('tr.cl-row');
+  const chev = rowEl && rowEl.querySelector('button.cl-chev');
+  if (chev && !rowEl.classList.contains('open')) { chev.click(); await settleFor(250); }
+  const det = await waitFor(() => doc.querySelector('.cl-detail'), 'overview: the expanded row');
+  if (det) {
+    const txt = (el) => el.textContent.replace(/\s+/g, ' ').trim();
+    const strip = det.querySelector('.cl-strip');
+    const labels = strip ? [...strip.querySelectorAll('.cl-box-k')].map(txt) : [];
+    ok(JSON.stringify(labels) === JSON.stringify(['Cluster health', 'Endpoint', 'Jump host', 'Log bucket (S3)']), `expanded row: the strip's boxes are ${labels.join(' | ')}`);
+    ok(!!strip && !!strip.querySelector('a.cl-report') && /Report/.test(txt(strip.querySelector('a.cl-report'))), 'expanded row: no Report button at the end of the strip');
+    ok(/None \(direct\)/.test(txt(strip || det)), 'expanded row: a directly reached cluster does not say "None (direct)" as its Jump host');
+    const cards = [...det.querySelectorAll('.cl-card')].map((c) => c.getAttribute('data-tile'));
+    ok(JSON.stringify(cards) === JSON.stringify(['shards', 'ilm', 'slm', 'activity']), `expanded row: the cards are ${cards.join(', ')}`);
+    ok(!det.querySelector('.cl-tile'), 'expanded row: the old tiles are still drawn');
+    ok([...det.querySelectorAll('.cl-card svg.cl-donut')].length === 2, 'expanded row: the Shard allocation and ILM cards are not donuts');
+    const shardHead = det.querySelector('.cl-card[data-tile="shards"] .cl-dhead');
+    ok(!!shardHead && /\d+(\.\d)?%\s*active/.test(txt(shardHead)), `expanded row: the shard headline is "${shardHead && txt(shardHead)}", not "NN.N% active" beside the ring`);
+    const bk = det.querySelector('.cl-card[data-tile="slm"]');
+    ok(!!bk && !!bk.querySelector('a.cl-card-t') && /Backups \(SLM\)/.test(txt(bk)), 'expanded row: the Backups (SLM) title is not a link');
+    const quick = [...det.querySelectorAll('.cl-strip a, .cl-cards a')].map(txt).filter((t) => /^(Indices|Snapshots|REST console|Nodes) ›$/.test(t));
+    ok(quick.length === 0, `expanded row: quick links are back: ${quick.join(', ')}`);
+    // The red/yellow list is a hover popover, fetched only when opened.
+    const hp = det.querySelector('.cl-hp');
+    const btn = hp && hp.querySelector('button.cl-hp-btn');
+    ok(!!btn && /yellow/i.test(btn.textContent), `expanded row: a yellow cluster has no "yellow indices" button (${btn && btn.textContent})`);
+    ok(!!hp && !hp.querySelector('table.cl-hp-tbl'), 'expanded row: the indices list was fetched before it was opened');
+    if (hp) {
+      hp.dispatchEvent(new window.MouseEvent('mouseenter', { bubbles: false }));
+      const tbl = await waitFor(() => hp.querySelector('table.cl-hp-tbl'), 'expanded row: the yellow indices list after hover');
+      if (tbl) {
+        const heads = [...tbl.querySelectorAll('th')].map(txt);
+        ok(JSON.stringify(heads) === JSON.stringify(['Index', 'Health', 'Primaries', 'Replicas', 'Unassigned', 'Reason']), `expanded row: the list's columns are ${heads.join(' | ')}`);
+        const rows = [...tbl.querySelectorAll(':scope > tbody > tr')];
+        ok(rows.length >= 1 && rows.every((tr) => /Yellow/i.test(txt(tr.children[1]))), 'expanded row: the yellow list holds a non-yellow index');
+        await waitFor(() => /replica/.test(txt(tbl)), 'expanded row: the unassigned replica in the list');
+        ok(/watermark|node left/i.test(txt(tbl)), `expanded row: the list gives no reason: ${txt(tbl)}`);
+      }
+      ok(!!hp.querySelector('.cl-hp-head a'), 'expanded row: the list has no "Open in Indices, health" link');
+    }
+    // Nodes: Version before IP, no Tier, Free size after Disk, data rows tinted.
+    const heads = [...det.querySelectorAll('[data-section="nodes"] thead th')].map(txt);
+    ok(heads.indexOf('Version') > -1 && heads.indexOf('Version') < heads.indexOf('IP'), `expanded row: Version is not before IP: ${heads.join(' | ')}`);
+    ok(!heads.includes('Tier'), 'expanded row: the Tier column is back');
+    ok(heads.indexOf('Free size') === heads.indexOf('Disk') + 1, `expanded row: Free size does not follow Disk: ${heads.join(' | ')}`);
+    ok(det.querySelectorAll('[data-section="nodes"] tbody tr.cl-data').length > 0, 'expanded row: no data node row is tinted');
+    ok(/Data node/.test(txt(det.querySelector('[data-section="nodes"] .cl-sec-h') || det)), 'expanded row: the Nodes header has no "Data node" key');
+    const nodeLinks = [...det.querySelectorAll('[data-section="nodes"] .cl-sec-h a')].map(txt);
+    ok(JSON.stringify(nodeLinks) === JSON.stringify(['Nodes & shards ›']), `expanded row: the Nodes header links are ${nodeLinks.join(', ')}`);
+    ok(/Data covered/.test(txt(det.querySelector('[data-section="repo"]') || det)), 'expanded row: the repositories table has no "Data covered" column');
+  }
+  // The summary line: disk % large with the index size, a 40 px bar with used / total.
+  const sizeCell = doc.querySelector('tr.cl-row.open td .cl-size-pct');
+  ok(!!sizeCell && /^\d+ %$/.test(sizeCell.textContent.trim()), 'summary: the Size cell does not lead with the disk used %');
+  ok(!!doc.querySelector('tr.cl-row td .cl-dbar') && /\//.test((doc.querySelector('tr.cl-row td .cl-dtext') || {}).textContent || ''), 'summary: the Disk usage cell is not a bar with "used / total"');
+  // Put it back, so the checks below start from the collapsed row they expect.
+  const open = doc.querySelector('tr.cl-row.open button.cl-chev');
+  if (open) { open.click(); await settleFor(150); }
+}
+
 await go('indices');
 // The Indices page is for managing indices. Its Summary tab moved to Reports › Daily &
 // monthly in 0.3.53 (docs/REPORTS.md, board 7); what must be on THIS page is the table, the
@@ -1568,8 +1631,8 @@ await go('overview');
       ok(after.querySelectorAll('table.cl-tbl > tbody > tr').length === before + 1,
         'overview: pressing the chevron did not open exactly one detail row');
       const detailRow = after.querySelector('tbody tr.cl-detail-row');
-      ok(detailRow && /Cluster URL/.test(detailRow.textContent) && /Repository\/Snapshot/.test(detailRow.textContent) && /Shard allocation/.test(detailRow.textContent),
-        'overview: the opened row does not show the details (URL, shard allocation, Repository/Snapshot)');
+      ok(detailRow && /Endpoint/.test(detailRow.textContent) && /Snapshot repositories/.test(detailRow.textContent) && /Shard allocation/.test(detailRow.textContent),
+        'overview: the opened row does not show the details (Endpoint, shard allocation, Snapshot repositories)');
       ok(detailRow && !/Cluster UUID|Lucene|path\.repo|Our requests/.test(detailRow.textContent),
         'overview: the open row still shows a tile the board removed');
       ok(detailRow && [...detailRow.querySelectorAll('.cl-role')].length >= 3, 'overview: the Nodes table has no role chips');
