@@ -1,5 +1,5 @@
 /**
- * Config › Reports › Plan templates (board 10): the list (New, Duplicate, Delete, Save template), the
+ * Config-Management › Reports › Plan templates (board 10): the list (New, Duplicate, Delete; Save is the page's save bar), the
  * backup target, one row per server role with amber `[set]` inputs for what is not given yet,
  * "+ Add server role", and the rules legend. docs/REPORTS.md is the contract; the arithmetic
  * these rules feed is core/plan.js, the storage core/plan-templates.js.
@@ -37,6 +37,40 @@ export async function loadPlanTemplates(redraw) {
 export function forgetPlanTemplates() { st.list = null; st.saved = ''; st.sel = 0; st.error = ''; st.note = null; }
 
 const cur = () => (st.list || [])[st.sel];
+
+/**
+ * What differs from what is saved, for Config-Management's save bar: one line per template
+ * added, removed or edited. The editor changes its working copy as it is typed into; nothing
+ * is sent until Save.
+ */
+export function planTemplatesChanges() {
+  if (!dirty()) return [];
+  let saved = [];
+  try { saved = JSON.parse(st.saved || '[]'); } catch (_) { saved = []; }
+  const byName = (list) => new Map(list.map((t) => [String(t.name || '').toLowerCase(), t]));
+  const was = byName(saved); const now = byName(st.list || []);
+  const out = [];
+  for (const [k, t] of now) {
+    if (!was.has(k)) out.push({ key: `pt:${k}`, label: t.name, text: `Plan template "${t.name || '(unnamed)'}" added` });
+    else if (JSON.stringify(was.get(k)) !== JSON.stringify(t)) out.push({ key: `pt:${k}`, label: t.name, text: `Plan template "${t.name}" edited` });
+  }
+  for (const [k, t] of was) if (!now.has(k)) out.push({ key: `pt:${k}`, label: t.name, text: `Plan template "${t.name}" removed or renamed` });
+  return out.length ? out : [{ key: 'pt', label: 'Plan templates', text: 'Plan templates: order changed' }];
+}
+
+/** The save bar's Discard: back to what is saved. */
+export function discardPlanTemplates() {
+  if (!st.saved) return;
+  try { st.list = JSON.parse(st.saved); } catch (_) { return; }
+  if (st.sel >= st.list.length) st.sel = 0;
+  st.note = null;
+}
+
+/** The save bar's Save (it was the card's "Save template"). True when the core took the list. */
+export async function savePlanTemplates(redraw) {
+  await save(redraw || (() => {}));
+  return !dirty() && !(st.note && /err/.test(st.note.cls));
+}
 
 async function save(redraw) {
   const problems = listProblems(st.list);
@@ -171,7 +205,6 @@ export function planTemplatesPanel(redraw) {
     h('button#pt-del.btn.sm', { disabled: !canEdit || st.list.length < 2, title: st.list.length < 2 ? 'Keep at least one template' : '', onclick: async () => {
       if (!(await confirmDialog('Delete this template?', `"${t.name}" is removed for everyone who plans with it.`, { yes: 'Delete', danger: true }))) return;
       st.list.splice(st.sel, 1); st.sel = Math.max(0, st.sel - 1); await save(redraw); } }, 'Delete'),
-    h('button#pt-save.btn.sm.primary', { disabled: !canEdit || st.busy, onclick: () => save(redraw) }, st.busy ? 'Saving…' : dirty() ? 'Save template' : 'Save template'),
   ];
   return h('div', { style: { display: 'grid', gap: '12px' } },
     card('Plan templates', sub, h('div', { style: { display: 'grid', gap: '10px' } }, ...body), actions),

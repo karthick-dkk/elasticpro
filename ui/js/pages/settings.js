@@ -1,8 +1,18 @@
-/** Page 7 — configuration, security posture and diagnostics. */
+/**
+ * Config-Management (the page `settings`; the approved board of 2026-11-05).
+ *
+ * One menu of nine pages on the left — each with its tabs underneath and a state on the right —
+ * a "Find a setting" search, one page header, one tab row, one save bar and one lock mark. The
+ * pages, tabs and who sees which are core/config-nav.js; the save bar is ui/change-tracker.js.
+ *
+ * Three tabs are whole app pages that left the page menu (Alerts › Automation, Requests ›
+ * Request Centre, Accounts). They keep their own app page id and are drawn here through
+ * `hostedPage()`, so every link and deep link to them still lands on them.
+ */
 
 import { h, mount, $ } from '../lib/dom.js';
 import { markupSig } from '../lib/keyed.js';
-import { bytes, dt, ago, download } from '../lib/fmt.js';
+import { bytes, dt, ago, toCsv, download } from '../lib/fmt.js';
 import * as cfg from '../core/config.js';
 import { state, setConfig, refreshAll, clusters, client, hasSessionCredential, healthState,
          sessionCredentialLabel, clearSessionCredential, clustersNeedingCredential, isReadOnly, syncFleet, reprime } from '../core/state.js';
@@ -19,26 +29,32 @@ import { showCredentialDialog, forgetVaultCredential } from '../ui/credential-di
 import { credentialsKeptOnServer, keptCredentials, keptLine, promoteCredential, promotableLabel, rejectedDefault } from '../core/server-credentials.js';
 import { EXAMPLE_YAML } from '../core/example.js';
 import { saveTextAs } from '../core/platform.js';
-import { editCluster, editJumpHost, editCredentials, editDefaults, unlockSealed, saveRaw, rawClusterOf, editsFileDirectly } from '../ui/config-editor.js';
+import { editCluster, editJumpHost, editCredentials, defaultsFields, saveDefaultsForm, unlockSealed, saveRaw, rawClusterOf, editsFileDirectly } from '../ui/config-editor.js';
 import { card, pill, table, empty, configErrorBanner } from './common.js';
 import { navigateTo, intent } from '../core/intent.js';
-import { ALERT_RULES, loadAlertSettings, isEnabled } from '../core/alert-rules.js';
+import { ALERT_RULES, loadAlertSettings, isEnabled, groupRules } from '../core/alert-rules.js';
 import { isManagedDefault, isManagedZabbixOption, managedZabbixOptions, managedDefaults, MANAGED_NOTE } from '../core/managed.js';
 import { toast } from '../ui/menu.js';
 import { bridge } from '../core/transport.js';
 import { isSnapshotMode } from '../core/snapshot.js';
 import { applyLoadedConfig } from '../ui/load-config.js';
-import { filePickerButton, canPickByPath, configHistory, readVersion } from '../ui/upload.js';
+import { filePickerButton, canPickByPath, configHistoryWithCurrent, readVersion } from '../ui/upload.js';
 import { confirmDialog, modal, field, text, select, checkbox, val, checked } from '../ui/modal.js';
-import { patternPreview, VOLUME_KEYS, FIELD_ROWS, BOUNDS as VOLUME_BOUNDS, fileVolume, desktopVolume, foldManaged, overrideIds, validateVolume, applyDefaults,
+import { patternPreview, VOLUME_KEYS, VOLUME_DEFAULTS, FIELD_ROWS, BOUNDS as VOLUME_BOUNDS, fileVolume, desktopVolume, foldManaged, overrideIds, validateVolume, applyDefaults,
   applyOverride, yamlBlock, configTxtLines, displayValue, checkCell, indicesCell, listText, toList, getPath, setPath } from '../core/volume-config.js';
 import { volumeSettings, volumeFieldsCheck, volumePatternCheck } from '../core/volume-settings.js';
-import { planTemplatesPanel, loadPlanTemplates } from '../ui/plan-templates-editor.js';
-import { reportMailPanels, loadReportMail, reportMailKeyLines } from '../ui/report-mail.js';
+import { planTemplatesPanel, loadPlanTemplates, planTemplatesChanges, savePlanTemplates, discardPlanTemplates } from '../ui/plan-templates-editor.js';
+import { reportMailPanels, mailDeliveryPanels, reportHostsPanel, reportMailHeaderActions, reportMailStrip, loadReportMail, reportMailKeyLines,
+  saveReportSchedule, saveMailServer, reportMailState } from '../ui/report-mail.js';
 import { rowMenu, ICON } from '../ui/menu.js';
-import { playSection, loadPlay } from '../ui/play-settings.js';
-import { historyStoreCard, loadHistoryStore, historySupported } from '../ui/history-store.js';
+import { playSection, loadPlay, savePlayWatch, playDisplayCount } from '../ui/play-settings.js';
+import { historyStoreCard, loadHistoryStore, historySupported, saveHistoryStore, discardHistoryStore, historyArmed } from '../ui/history-store.js';
 import { destinationOf, destinationWarning } from '../core/history-store.js';
+import { CFG_PAGES, HOSTED_TABS, LEGACY_SECTIONS, visibleConfig, subLine, resolveRoute, routeOfRest, tabHash, appPageOf,
+  findSettings, SETTING_INDEX } from '../core/config-nav.js';
+import { createTracker } from '../ui/change-tracker.js';
+import { parseHash } from '../reports/route.js';
+import { extLink, REPO, ISSUES, AUTHOR_NAME } from '../ui/about.js';
 
 /** What each credential source the Zabbix sync reports is called (bridge.rs zabbix_sync). */
 const CREDENTIAL_LABEL = {
@@ -58,6 +74,8 @@ let polNote = null;   // {text, cls} from the last save, shown inline under the 
 /* ------------------------- uploading a config, and its history ------------------- */
 
 let versions = [];
+/** CONFIG_HISTORY's `current`: who last saved the file on disk and what changed; null when not recorded. */
+let current = null;
 let historyOpen = false;
 
 /**
@@ -88,48 +106,11 @@ async function uploadConfig(text, err, name) {
 }
 
 async function loadHistory() {
-  try { versions = await configHistory(); } catch { versions = []; }
+  try { ({ versions, current } = await configHistoryWithCurrent()); } catch { versions = []; current = null; }
   const el = $('#cfg-history');
   if (el) mount(el, historyBody());
 }
 
-function historyBlock() {
-  // Fetched lazily: it is one more round trip and most visits to this page are not
-  // looking for it.
-  if (!versions.length && !historyOpen) loadHistory().then(() => { historyOpen = true; });
-  return h('div#cfg-history', { style: { marginTop: '10px' } }, historyBody());
-}
-
-function historyBody() {
-  if (!versions.length) {
-    return h('div.muted', { style: { fontSize: '11.5px' } },
-      'No earlier versions yet. One is kept each time the config is saved from here.');
-  }
-  return h('details.disc', { open: false },
-    h('summary', `Earlier versions (${versions.length})`),
-    h('div', { style: { paddingTop: '6px' } },
-      table(['Saved', 'By', 'What changed', 'File', { label: 'Size', num: true }, ''],
-        versions.map((v) => h('tr',
-          h('td', { title: new Date(v.saved_at * 1000).toISOString() }, ago(v.saved_at * 1000)),
-          // Recorded by the core when the version was saved (CONFIG_HISTORY saved_by /
-          // summary); a version from before the record existed shows "—", not a guess.
-          h('td', v.saved_by || '—'),
-          h('td', { style: { fontSize: '11.5px' }, title: v.summary || '' }, v.summary || '—'),
-          h('td.mono', { style: { fontSize: '11.5px' } }, v.source),
-          h('td.num', bytes(v.bytes)),
-          h('td', { style: { textAlign: 'right' } },
-            h('button.btn.sm', { onclick: () => restore(v) }, 'Load this')))),
-        {
-          // "None" was the whole message. This is a good empty state — nothing has gone
-          // wrong — so it says what would put something here rather than offering a button.
-          emptyText: empty('No earlier version saved yet.', {
-            detail: 'A copy is kept automatically each time the config is saved from this app.',
-          }),
-        })),
-    h('div.muted', { style: { fontSize: '11px', paddingTop: '6px' } },
-      'Loading an older version does not discard the current one — that is saved as a '
-      + 'version first, so this goes both ways.'));
-}
 
 async function restore(v) {
   const msg = $('#cfg-msg');
@@ -141,31 +122,423 @@ async function restore(v) {
   }
 }
 
-export function render(el) {
+/* ---------------------------------- the frame ---------------------------------- */
+
+/** Which page and tab are open. Kept across redraws so a save does not move you. */
+let route = { page: 'clusters', tab: 'clusters' };
+/** The app page this frame is drawn for: 'settings', or a hosted one ('automation', 'requests', 'accounts'). */
+let currentApp = 'settings';
+/** The hosted app page's module and the element it draws into, kept across frame redraws. */
+let hostedMod = null;
+let hostedBody = null;
+/** A field to focus once its tab is drawn ("Find a setting", or a link that named one). */
+let pendingField = null;
+/** The "Find a setting" box: what is typed. */
+let findText = '';
+/**
+ * The tab whose load() has run since this page was entered. A tab is loaded once per visit;
+ * the actions that change what it shows call its loader themselves. (draw() used to call the
+ * loader on every redraw, and the page redrew on every fleet event.)
+ */
+let loadedSection = null;
+
+/** The save bar (ui/change-tracker.js): one for the page, kept across redraws. */
+const tracker = createTracker({ root: () => host });
+
+const roleNow = () => (state.caller ? state.caller.role : null);
+
+/**
+ * What the core says it has, which decides the tabs that exist at all. The Phase 2 panels
+ * (Backup & restore, the Backend routing table, Zabbix roles from user groups) read flags no
+ * core sends yet, so their tabs and panels stay hidden — never a mock, never a guess.
+ */
+function supports() {
+  return {
+    // Accounts exist where somebody is signed in; and when the shell opened #/accounts itself
+    // (it gates that page by role), the tab it opened is there.
+    accounts: !!state.caller || currentApp === 'accounts',
+    history: historySupported(),
+    sink: !!(sink && sink.supported),
+    backup: backupSupported(),
+  };
+}
+const visible = () => visibleConfig(roleNow(), supports());
+const openKey = () => `${route.page}/${route.tab}`;
+const isOpen = (key) => !!host && host.isConnected && openKey() === key;
+
+/**
+ * PHASE 2 HOOK — System › Backup & restore (board 9). Shown only when PING says the core can
+ * take and restore backups (`backup: {supported: true}`); no core does yet.
+ */
+export function backupSupported() { return !!(core && core.backup && core.backup.supported === true); }
+/**
+ * PHASE 2 HOOK — Data › Backend "Where each kind of data goes" (board 10): History, Reports and
+ * Alerts each kept built-in, built-in + Elasticsearch, or Elasticsearch only. Shown only when
+ * PING reports `dataRouting: {supported: true}`; until then Backend is the history store alone.
+ */
+export function dataRoutingSupported() { return !!(core && core.dataRouting && core.dataRouting.supported === true); }
+/**
+ * PHASE 2 HOOK — Zabbix › "ElasticPro roles from Zabbix user groups" and "Zabbix users" (board 2).
+ * Shown only when ZABBIX_LINK_GET reports `roleMap: {supported: true}`; no core does yet.
+ */
+export function zabbixRolesSupported() { return !!(link && link.roleMap && link.roleMap.supported === true); }
+
+export function render(el) { arrive(el, 'settings', null); }
+
+/**
+ * An app page drawn as a tab of this frame: Alerts › Automation, Requests › Request Centre,
+ * Accounts. app.js registers each under its own id with this as its module, so the shell's
+ * hooks (onData, onLeave, onRoute, onKey) reach the page inside.
+ */
+export function hostedPage(id, mod) {
+  return {
+    render(el) { arrive(el, id, mod); },
+    onData() { if (hostedMod && hostedMod.onData) hostedMod.onData(); },
+    onLeave() { leaveHosted(); },
+    onRoute() { if (hostedMod && hostedMod.onRoute) hostedMod.onRoute(); },
+    onKey(e) { return !!(hostedMod && hostedMod.onKey && hostedMod.onKey(e)); },
+  };
+}
+
+function leaveHosted() {
+  if (hostedMod && hostedMod.onLeave) { try { hostedMod.onLeave(); } catch (_) { /* leaving must not block */ } }
+  hostedMod = null;
+  hostedBody = null;
+}
+
+export function onLeave() {
+  findText = '';
+  leaveHosted();
+}
+
+function arrive(el, appId, mod) {
+  if (currentApp !== appId || hostedMod !== mod) leaveHosted();
   host = el;
+  currentApp = appId;
   loadedSection = null;
-  // Arriving from another page that named a tab (the Request Centre's mode link) opens it.
-  if (intent.settings && intent.settings.section && SECTIONS.some((x) => x.id === intent.settings.section)) section = intent.settings.section;
-  intent.settings = null;
-  // draw() asks for whatever the open section needs. loadSink is the exception: its
-  // answer decides whether the Scheduled log delay tab exists at all, so it has to be
-  // asked before the bar can be drawn correctly — and it redraws when it lands.
+  tracker.resetAll();
+  if (mod) {
+    const [page, tab] = HOSTED_TABS[appId];
+    route = { page, tab };
+    hostedMod = mod;
+    hostedBody = h('div.cm-hosted', { dataset: { hosted: appId } });
+  } else {
+    // Arriving from another page that named a tab (the Request Centre's mode link, a report's
+    // "Edit in Config") opens it; a legacy section id (intent.settings.section) has its new home.
+    const it = intent.settings;
+    intent.settings = null;
+    if (it && it.section && LEGACY_SECTIONS[it.section]) {
+      const [page, tab] = LEGACY_SECTIONS[it.section];
+      route = { page, tab };
+      if (it.field) pendingField = it.section === 'volume' ? `vf-${it.field}` : it.field;
+    } else if (it && it.page) {
+      route = { page: it.page, tab: it.tab || '' };
+      if (it.field) pendingField = it.field;
+    } else {
+      const r = routeOfRest(parseHash(typeof location !== 'undefined' ? location.hash : '').rest);
+      if (r.page) route = r;
+      // A tab left open on a hosted page (Request Centre, Automation) is that page's, not this
+      // one's: arriving at #/settings itself starts on the first tab instead of going back there.
+      else if (appPageOf(route.page, route.tab) !== 'settings') route = { page: 'clusters', tab: '' };
+    }
+  }
+  // draw() asks for whatever the open tab needs. The sink, the history store and PING are
+  // asked on arrival: their answers decide which tabs exist (Data, System › Backup).
   draw();
+  if (mod) mod.render(hostedBody);
   loadSink();
-  loadHistoryStore(() => { if (host && host.isConnected) draw(); });
+  loadHistoryStore(() => { tracker.reset('history'); if (host && host.isConnected) draw(); });
+  loadCore();
+}
+
+/** The address moved within this page (#/settings/alerts/triggers → …/system/file). */
+export function onRoute() {
+  if (currentApp !== 'settings') return;
+  const r = routeOfRest(parseHash(location.hash).rest);
+  if (!r.page || (r.page === route.page && (r.tab || '') === (route.tab || ''))) return;
+  route = { page: r.page, tab: r.tab };
+  tracker.resetAll();
+  draw();
+}
+
+/** PING, once per visit: the version for the About card, the guard for Diagnostics, the Phase 2 flags. */
+async function loadCore() {
+  try { core = (await workerStatus()) || core; } catch (_) { /* no core: the card says so */ }
+  const v = host && host.querySelector('#cm-version');
+  if (v) v.textContent = core && core.version ? `v${core.version}` : 'version not reported';
+  if (backupSupported() && host && host.isConnected) draw();
+}
+
+/**
+ * Open a page and tab. A hosted tab is its own app page, so going there (or leaving one) is
+ * the shell's navigation; any other tab is a redraw here. Unsaved changes are asked about first.
+ */
+async function openTab(pageId, tabId, { field: f = null } = {}) {
+  const r = resolveRoute(visible(), pageId, tabId);
+  if (!r) return;
+  const same = r.page === route.page && r.tab === route.tab;
+  const n = tracker.changes().length;
+  if (!same && n && !(await confirmDialog('Leave without saving?',
+    `${n === 1 ? 'One change is' : `${n} changes are`} not saved yet. Leaving this tab discards ${n === 1 ? 'it' : 'them'}.`,
+    { yes: 'discard and leave', danger: true }))) return;
+  if (f) pendingField = f;
+  const app = appPageOf(r.page, r.tab);
+  if (app !== currentApp) {
+    intent.settings = app === 'settings' ? { page: r.page, tab: r.tab, field: f } : null;
+    navigateTo(app);
+    return;
+  }
+  if (same) { if (pendingField) focusField(); return; }
+  route = r;
+  tracker.resetAll();
+  polDraft = null;
+  draw();
+}
+
+/** The address says which tab is open, so a reload or a copied link comes back to it. */
+function syncHash() {
+  if (currentApp !== 'settings' || typeof location === 'undefined') return;
+  const want = tabHash(route.page, route.tab);
+  if (location.hash !== want) { try { window.history.replaceState(null, '', want); } catch (_) { /* sandboxed frame */ } }
+}
+
+/** A tab's builder, its loader and what its page header carries. */
+const TABS = {
+  'clusters/clusters': { build: () => clustersCard(), actions: () => clustersActions() },
+  'clusters/creds': { build: () => credentialsCard() },
+  'clusters/trust': { build: () => trustSection(), load: () => loadTrust() },
+  'zabbix/zabbix': { build: () => zabbixSection(), load: () => loadZabbix(), pill: () => zabbixPill(), actions: () => zabbixActions() },
+  'alerts/triggers': { build: () => alertRulesCard(), pill: () => alertsPill(),
+    actions: () => [h('button.btn', { type: 'button', onclick: () => openTab('alerts', 'automation') }, 'Write your own rule in Automation ›')] },
+  'alerts/automation': { pill: () => alertsPill() },
+  'requests/policy': { build: () => requestsCard(), load: () => loadPolicy(), pill: () => requestsPill(), actions: () => requestsActions() },
+  'requests/centre': { pill: () => requestsPill() },
+  'reports/fields': { build: () => fieldsTab(), load: () => loadVolumeSection() },
+  'reports/mail': { build: () => mailTab(), load: () => loadVolumeSection(), actions: () => reportMailHeaderActions(),
+    line: 'The volume report mailed as an .xlsx, and the mail server that sends it. Columns and sheet layout are set on Reports › Daily & monthly.' },
+  'reports/templates': { build: () => templatesTab(), load: () => loadVolumeSection() },
+  'data/backend': { build: () => backendTab() },
+  'data/schedule': { build: () => delaySinkCard() },
+  'play/play': { build: () => playSection(), load: () => loadPlay(() => { tracker.reset('play-watch'); draw(); }) },
+  'system/defaults': { build: () => defaultsCard() },
+  'system/file': { build: () => systemFileTab(), load: () => confirmCoreGuard(), actions: () => fileActions(),
+    line: 'Which file is loaded, its earlier versions, and whether the write protection holds.' },
+  'system/backup': { build: () => backupTab() },
+};
+
+/* The save path of every tracked form: what its Save button used to run. True when it saved. */
+tracker.register('alerts', { save: () => saveAlertRules(), discard: () => draw() });
+tracker.register('policy', { save: () => savePolicy(), discard: () => { polDraft = null; polNote = null; draw(); } });
+tracker.register('defaults', { save: () => saveDefaults(), discard: () => draw() });
+tracker.register('zabbix-link', { save: () => saveLink(), discard: () => { tokenReplace = false; draw(); } });
+tracker.register('zabbix-opts', { save: () => saveZabbixOptions(), discard: () => draw() });
+tracker.register('schedule', { save: () => saveSink(), discard: () => draw() });
+tracker.register('history', { save: () => saveHistoryStore(), discard: () => { discardHistoryStore(); draw(); } });
+tracker.register('volume', { save: () => saveVolume(), discard: () => { vol.note = null; draw(); } });
+tracker.register('report-mail', { save: () => saveReportSchedule(), discard: () => draw() });
+tracker.register('smtp', { save: () => saveMailServer(), discard: () => draw() });
+tracker.register('play-watch', { save: () => savePlayWatch(), discard: () => draw() });
+tracker.register('plan-templates', { save: () => savePlanTemplates(() => draw()), discard: () => { discardPlanTemplates(); draw(); }, changes: () => planTemplatesChanges() });
+
+function draw() {
+  if (!host) return;
+  const vis = visible();
+  if (!vis.length) {
+    mount(host, h('div.banner', h('div', h('div.ttl', 'Nothing here for this account'),
+      h('div', 'Config-Management is an administrator’s; an operator sees Clusters, Alerts › Automation and Requests › Request Centre.'))));
+    return;
+  }
+  const r = resolveRoute(vis, route.page, route.tab);
+  route = r;
+  const page = vis.find((p) => p.id === r.page);
+  const tab = page.tabs.find((t) => t.id === r.tab);
+  const app = appPageOf(r.page, r.tab);
+  // The tab asked for is another app page (an operator's first tab is Automation, say): go there.
+  if (app !== currentApp) {
+    mount(host, h('div.muted', 'Opening…'));
+    setTimeout(() => navigateTo(app), 0);
+    return;
+  }
+  const t = TABS[`${r.page}/${r.tab}`] || {};
+  const body = tab.appPage ? hostedBody : (t.build ? t.build() : null);
+  mount(host, h('div.cm',
+    sidebar(vis),
+    h('div.cm-main',
+      pageHeader(page, tab, t),
+      page.tabs.length > 1 ? tabRow(page) : null,
+      h('div.cm-body', { oninput: () => tracker.refresh(), onchange: () => tracker.refresh() }, body),
+      tracker.bar)));
+  syncHash();
+  // A tab that needs a round trip asks for it here rather than on page entry, and once per
+  // visit, so a redraw never asks again.
+  if (t.load && loadedSection !== openKey()) {
+    loadedSection = openKey();
+    t.load();
+  }
+  tracker.refresh();
+  if (pendingField) focusField();
+}
+
+/** Focus the field "Find a setting" (or a link) named, once it is on screen; its tab may still be loading. */
+function focusField(tries = 0) {
+  const id = pendingField;
+  const el = id && host && host.querySelector(`#${id}`);
+  if (!el) {
+    if (tries < 20 && id) setTimeout(() => { if (pendingField === id) focusField(tries + 1); }, 150);
+    else pendingField = null;
+    return;
+  }
+  pendingField = null;
+  const fold = el.closest('details');
+  if (fold && !fold.open) fold.open = true;
+  try { el.scrollIntoView({ block: 'center' }); } catch (_) { /* jsdom */ }
+  try { el.focus(); } catch (_) { /* not focusable */ }
+  const box = el.closest('label, td, .vf-fld') || el;
+  box.classList.remove('focus-flash');
+  void box.offsetWidth;
+  box.classList.add('focus-flash');
+}
+
+/* ------------------------------- sidebar, header, tabs ------------------------------- */
+
+/** The state on the right of a menu item: what is known now, never a guess. `[text, tone]`. */
+function pageMeta(id) {
+  switch (id) {
+    case 'clusters': return [String(clusters().length), 'off'];
+    case 'zabbix': {
+      if (!zbx || !link || link.hidden) return ['', 'off'];
+      if (zbx.error) return ['sync failed', 'bad'];
+      return zbx.configured ? ['synced', 'ok'] : ['not connected', 'off'];
+    }
+    case 'alerts': {
+      const settings = loadAlertSettings(state.config && state.config.raw);
+      const off = ALERT_RULES.filter((r) => !isEnabled(settings, r.id)).length;
+      return off ? [`${off} off`, 'warn'] : ['all on', 'off'];
+    }
+    case 'requests': {
+      if (!pol || pol.error) return ['', 'off'];
+      const p = normalisePolicy(pol.policy, polDefaults(), polBounds());
+      const preset = PRESETS.find((x) => x.id === activePreset(p, polDefaults(), polBounds()));
+      return [preset ? preset.name : p.mode, 'off'];
+    }
+    case 'reports': { const s = reportMailState(); return [s || '', 'off']; }
+    case 'data': return historySupported() ? [historyArmed() ? 'writing' : 'not writing', historyArmed() ? 'ok' : 'off'] : ['', 'off'];
+    case 'play': { const n = playDisplayCount(); return n == null ? ['', 'off'] : [`${n} TV${n === 1 ? '' : 's'}`, 'off']; }
+    case 'system': return isReadOnly() ? ['read-only', 'ok'] : ['writes on', 'warn'];
+    default: return ['', 'off'];
+  }
+}
+
+/** The search index with what pages add at run time: every alert rule by its name. */
+function runtimeIndex() {
+  return [...SETTING_INDEX,
+    ...ALERT_RULES.map((r) => ['alerts', 'triggers', r.label, `al-on-${r.id}`, `alert rule ${r.id} ${r.level}`])];
+}
+
+function findBox(vis) {
+  const results = h('div#cm-find-results.cm-find-results', { role: 'listbox', 'aria-label': 'Settings found', hidden: true });
+  const input = h('input#cm-find', {
+    type: 'search', placeholder: 'Find a setting…', autocomplete: 'off', 'aria-label': 'Find a setting', 'aria-controls': 'cm-find-results',
+    'data-untracked': '',
+  });
+  const show = (q) => {
+    findText = q;
+    const hits = findSettings(q, vis, { index: runtimeIndex() });
+    results.hidden = !q.trim();
+    results.replaceChildren(...(hits.length ? hits.map((x) => h('button.cm-find-hit', {
+      type: 'button', role: 'option',
+      onclick: () => { input.value = ''; findText = ''; results.hidden = true; openTab(x.page, x.tab, { field: x.field || null }); },
+    }, h('span', x.label), h('span.muted', x.where))) : [h('div.cm-find-none.muted', `Nothing matches “${q.trim()}”`)]));
+  };
+  input.addEventListener('input', (e) => show(e.target.value));
+  input.addEventListener('keydown', (e) => {
+    const hits = [...results.querySelectorAll('.cm-find-hit')];
+    if (e.key === 'Enter' && hits[0]) { e.preventDefault(); hits[0].click(); }
+    else if (e.key === 'ArrowDown' && hits[0]) { e.preventDefault(); hits[0].focus(); }
+    else if (e.key === 'Escape') { e.target.value = ''; show(''); }
+  });
+  results.addEventListener('keydown', (e) => {
+    const hits = [...results.querySelectorAll('.cm-find-hit')];
+    const i = hits.indexOf(document.activeElement);
+    if (e.key === 'ArrowDown' && i >= 0 && hits[i + 1]) { e.preventDefault(); hits[i + 1].focus(); }
+    if (e.key === 'ArrowUp') { e.preventDefault(); (i > 0 ? hits[i - 1] : input).focus(); }
+    if (e.key === 'Escape') { input.value = ''; show(''); input.focus(); }
+  });
+  input.value = findText;
+  if (findText) show(findText);
+  return h('div.cm-find', h('label', input, h('kbd', { 'aria-hidden': 'true' }, '/')), results);
+}
+
+function sidebar(vis) {
+  const role = roleNow();
+  return h('aside.cm-side', { 'aria-label': 'Config-Management' },
+    h('div.cm-side-head', h('span.cm-side-t', 'Config-Management'), role ? h('span.muted', role) : null),
+    findBox(vis),
+    h('nav.cm-nav', { 'aria-label': 'Config sections' },
+      ...vis.map((p) => {
+        const [meta, tone] = pageMeta(p.id);
+        const on = p.id === route.page;
+        return h('button.cm-item', {
+          type: 'button', title: p.label, dataset: { cmPage: p.id }, 'aria-current': on ? 'page' : null,
+          onclick: () => openTab(p.id, on ? route.tab : ''),
+        },
+        h('span.cm-item-t', h('span.cm-item-l', p.label), h('span.cm-item-s', subLine(p))),
+        meta ? h('span.cm-item-m', { class: `t-${tone}` }, meta) : null);
+      })),
+    h('section.cm-about', { 'aria-label': 'About ElasticPro' },
+      h('div.cm-about-h', h('b', 'ElasticPro'), h('span#cm-version.mono', core && core.version ? `v${core.version}` : '…')),
+      h('span', 'Author: ', extLink(AUTHOR_NAME, REPO, 'ElasticPro on GitHub')),
+      h('span.cm-about-links', extLink('GitHub ↗', REPO, 'Source code and releases'), extLink('Support ↗', ISSUES, 'Report a problem or ask a question'))));
+}
+
+function pageHeader(page, tab, t) {
+  const pillEl = t.pill ? t.pill() : null;
+  const actions = t.actions ? (t.actions() || []).filter(Boolean) : [];
+  return h('header.cm-head',
+    h('div.cm-head-t',
+      h('div.cm-crumb', 'Config-Management'),
+      h('h1', page.label, pillEl),
+      h('p', t.line || page.line)),
+    actions.length ? h('div.cm-actions', ...actions) : null);
+}
+
+/**
+ * The tab row. The same markup and `aria-current` as the window's own tabs, so it reads as
+ * navigation; a hosted tab (Automation, Request Centre) is its own address.
+ */
+function tabRow(page) {
+  return h('nav.subnav.cm-tabs', { 'aria-label': `Sections of ${page.label}` },
+    ...page.tabs.map((t) => h('button', {
+      type: 'button', title: t.label, dataset: { cmTab: t.id }, 'aria-current': t.id === route.tab ? 'page' : null,
+      onclick: () => openTab(page.id, t.id),
+    }, h('span', t.label))));
+}
+
+/** "/" focuses Find a setting while Config-Management is open (outside a field). */
+if (typeof document !== 'undefined') {
+  document.addEventListener('keydown', (e) => {
+    if (e.key !== '/' || e.metaKey || e.ctrlKey || e.altKey) return;
+    const t = e.target;
+    if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable)) return;
+    const box = host && host.isConnected && host.querySelector('#cm-find');
+    if (!box) return;
+    e.preventDefault();
+    box.focus();
+  });
 }
 
 /** Read the guard back from the core itself rather than trusting the UI's copy. */
 async function confirmCoreGuard() {
   const st = await workerStatus();
-  core = st;
-  const cell = [...document.querySelectorAll('#view td')]
-    .find((td) => td.previousElementSibling && td.previousElementSibling.textContent === 'Enforced by the core');
+  core = st || core;
+  const cell = host && host.querySelector('#cm-guard');
   if (!cell) return;
   const agrees = !!st && st.readOnly === isReadOnly();
-  cell.textContent = !st || st.readOnly === undefined ? 'core did not report'
-    : `${st.readOnly ? 'yes — writes blocked' : 'no — writes allowed'}${agrees ? '' : ' (MISMATCH with config)'}`;
-  const v = document.querySelector('#core-version');
+  cell.replaceChildren(!st || st.readOnly === undefined ? h('span.muted', 'core did not report')
+    : h('span', pill(st.readOnly ? 'yes' : 'no', st.readOnly ? 'green' : 'orange'), ' ',
+      h('span.muted', `${st.readOnly ? 'writes blocked' : 'writes allowed'}${agrees ? ' · matches the config' : ''}`),
+      agrees ? null : h('b', { style: { color: 'var(--critical-ink)' } }, ' (MISMATCH with config)')));
+  const v = host.querySelector('#core-version');
   if (v && st) v.textContent = `v${st.version}`;
 }
 
@@ -278,90 +651,151 @@ function clusterStatePill(cl, kind) {
 /* ------------------------------ alert triggers ------------------------------ */
 
 /**
- * Every alert this app can raise, with a switch and its thresholds.
+ * Every alert this app can raise, with a switch and its thresholds, grouped as the board has
+ * them (core/alert-rules.js RULE_GROUPS).
  *
  * The list is the registry, so a rule cannot exist in the code and be missing here.
  * Switching one off stops it being shown; it does not stop it being computed, and it does
  * not touch anything anybody acknowledged — the identity of an alert is unchanged by
  * being disabled, which is what makes retuning safe.
  *
- * Writing a genuinely new rule is the Automation page's job. There is one rule editor in
+ * Switches and thresholds wait for the save bar (they used to save on the spot), so a change
+ * of mind costs nothing and a run of changes is one write.
+ *
+ * Writing a genuinely new rule is the Automation tab's job. There is one rule editor in
  * this product and this is not a second one.
  */
+const alertView = { q: '', show: 'all' };
+
+function alertsPill() {
+  const settings = loadAlertSettings(state.config && state.config.raw);
+  const off = ALERT_RULES.filter((r) => !isEnabled(settings, r.id)).length;
+  return h('span.pill.grey', `${ALERT_RULES.length - off} on · ${off} off`);
+}
+
 function alertRulesCard() {
   const raw = state.config && state.config.raw;
   const settings = loadAlertSettings(raw);
   const admin = !!raw;
   const off = ALERT_RULES.filter((r) => !isEnabled(settings, r.id)).length;
 
-  const save = async (mutate) => {
-    if (!raw) { toast('No config loaded', 'warn'); return; }
-    if (!raw.alertRules || typeof raw.alertRules !== 'object') raw.alertRules = {};
-    mutate(raw.alertRules);
-    try {
-      await saveRaw(raw);
-      await setConfig(await cfg.normalize(raw, (state.config.fileMeta || {}).name || 'config'), state.handle);
-      toast('Alert settings saved');
-    } catch (e) {
-      toast(`Could not save: ${e.message}`, 'err', 5000);
-    }
-    draw();
-  };
-
-  const trs = ALERT_RULES.map((r) => {
+  const row = (r) => {
     const on = isEnabled(settings, r.id);
     const s = settings[r.id] || {};
-    return h('tr', { style: on ? null : { opacity: '.55' } },
-      h('td', h('input', { type: 'checkbox', checked: on, disabled: !admin,
+    return h('tr', { dataset: { rule: r.id }, class: on ? '' : 'cm-off' },
+      h('td', h('input.sw', { id: `al-on-${r.id}`, type: 'checkbox', role: 'switch', checked: on, disabled: !admin,
+        'data-label': r.label, 'aria-label': r.label,
         title: on ? `Stop showing ${r.label}` : `Show ${r.label} again`,
-        onchange: (e) => {
-          const want = e.target.checked;
-          save((a) => { a[r.id] = { ...(a[r.id] || {}), enabled: want }; });
-        } })),
+        onchange: (e) => { const tr = e.target.closest('tr'); if (tr) tr.classList.toggle('cm-off', !e.target.checked); } })),
       h('td', h('div', { style: { fontWeight: 620 } }, r.label),
-        h('div.muted', { style: { fontSize: '11px' } }, r.why)),
+        h('div.muted', { style: { fontSize: '11.5px' } }, r.why)),
       h('td', pill(r.level, { critical: 'red', high: 'high' }[r.level] || 'yellow')),
       h('td', (r.thresholds || []).length
-        ? h('div', { style: { display: 'flex', gap: '10px', flexWrap: 'wrap' } },
-            ...r.thresholds.map((t) => h('label', {
-              style: { display: 'inline-flex', gap: '4px', alignItems: 'center', fontSize: '11.5px' },
-            },
-              h('span.muted', t.label),
-              h('input', {
-                type: 'number', min: String(t.min), max: String(t.max), disabled: !admin || isManagedDefault(t.key),
-                value: String((isManagedDefault(t.key) ? undefined : (s.thresholds && s.thresholds[t.key])) ?? state.defaults[t.key] ?? ''),
-                style: { width: '68px' },
-                title: isManagedDefault(t.key) ? MANAGED_NOTE : `${t.min}–${t.max}${t.unit}`,
-                onchange: (e) => {
-                  const v = Number(e.target.value);
-                  if (!isFinite(v) || v < t.min || v > t.max) {
-                    toast(`${t.label} must be between ${t.min} and ${t.max}${t.unit}`, 'warn');
-                    draw(); return;
-                  }
-                  save((a) => {
-                    a[r.id] = { ...(a[r.id] || {}) };
-                    a[r.id].thresholds = { ...(a[r.id].thresholds || {}), [t.key]: v };
-                  });
-                },
-              }),
-              h('span.muted', t.unit))))
-        : h('span.muted', { style: { fontSize: '11.5px' } }, '\u2014')),
-      h('td.mono.muted', { style: { fontSize: '10.5px' } }, r.id));
-  });
+        ? h('div', { style: { display: 'flex', gap: '14px', flexWrap: 'wrap' } },
+            ...r.thresholds.map((t) => {
+              const lockedT = isManagedDefault(t.key);
+              return h('label', { style: { display: 'inline-flex', gap: '6px', alignItems: 'center', fontSize: '12px' } },
+                h('span.muted', t.label),
+                h('input.cm-num', {
+                  id: `al-th-${r.id}-${t.key}`, type: 'number', min: String(t.min), max: String(t.max), disabled: !admin || lockedT,
+                  'data-label': `${r.label}: ${t.label}`,
+                  value: String((lockedT ? undefined : (s.thresholds && s.thresholds[t.key])) ?? state.defaults[t.key] ?? ''),
+                  title: lockedT ? MANAGED_NOTE : `${t.min}–${t.max}${t.unit}`,
+                }),
+                h('span.muted', t.unit),
+                lockedT ? lockMark() : null);
+            }))
+        : h('span.muted', '—')),
+      h('td.mono.muted', { style: { fontSize: '11px' } }, r.id));
+  };
 
-  return card('Alert triggers',
-    `${ALERT_RULES.length} rule(s)${off ? ` \u00b7 ${off} switched off` : ' \u00b7 all on'}`,
-    h('div', { style: { display: 'grid', gap: '8px' } },
-      h('div.muted', { style: { fontSize: '12px' } },
-        'Switching a rule off stops it appearing on the Alerts page. Anything already '
-        + 'acknowledged keeps its history \u2014 disabling a rule does not change what its '
-        + 'alerts are called. To write a rule of your own, use ',
-        h('button.btn.sm.ghost', { onclick: () => navigateTo('automation') }, 'Automation'),
-        '.'),
-      !admin ? h('div.muted', { style: { fontSize: '11.5px' } }, 'Read-only \u2014 no config is loaded.') : null,
-      table(['', 'Alert', 'Level', 'Thresholds', 'id'], trs)));
+  // Filter and On/Off hide rows rather than leaving them out, so a hidden rule's unsaved switch
+  // still counts and still saves.
+  const applyFilter = (tbl) => {
+    const q = alertView.q.trim().toLowerCase();
+    for (const tr of tbl.querySelectorAll('tr[data-rule]')) {
+      const box = tr.querySelector('input[type=checkbox]');
+      const hit = !q || tr.textContent.toLowerCase().includes(q);
+      const want = alertView.show === 'all' || (alertView.show === 'on') === !!(box && box.checked);
+      tr.hidden = !(hit && want);
+    }
+    for (const g of tbl.querySelectorAll('tr.cm-grp')) {
+      let n = g.nextElementSibling; let any = false;
+      while (n && !n.classList.contains('cm-grp')) { if (!n.hidden) any = true; n = n.nextElementSibling; }
+      g.hidden = !any;
+    }
+  };
+  const groups = groupRules(ALERT_RULES);
+  const tbl = h('table.tbl.cm-rules',
+    h('thead', h('tr', h('th', { style: { width: '56px' } }, 'On'), h('th', 'Alert'), h('th', { style: { width: '110px' } }, 'Level'),
+      h('th', 'Thresholds'), h('th', { style: { width: '140px' } }, 'Id'))),
+    h('tbody', ...groups.flatMap((g) => [h('tr.cm-grp', h('td', { colSpan: 5 }, g.name)), ...g.rules.map(row)])));
+  const seg = (id, label) => h('button', { type: 'button', 'aria-pressed': String(alertView.show === id),
+    onclick: (e) => { alertView.show = id; for (const b of e.currentTarget.parentElement.children) b.setAttribute('aria-pressed', String(b === e.currentTarget)); applyFilter(tbl); } }, label);
+  applyFilter(tbl);
+
+  return h('section.card.cm-card', { dataset: { track: 'alerts', trackLabel: 'Alert triggers' } },
+    h('header', h('h2', 'Alert triggers'), h('span.sub', `${ALERT_RULES.length} rule(s)${off ? ` · ${off} switched off` : ' · all on'}`)),
+    h('div.cm-toolbar',
+      h('input', { type: 'search', placeholder: 'Filter rules', 'aria-label': 'Filter rules', value: alertView.q, 'data-untracked': '',
+        oninput: (e) => { alertView.q = e.target.value; applyFilter(tbl); } }),
+      h('div.cm-seg', { role: 'group', 'aria-label': 'Show' }, seg('all', `All ${ALERT_RULES.length}`), seg('on', 'On'), seg('off', 'Off')),
+      h('span.cm-toolbar-note', 'Switches and thresholds take effect after Save · ', lockMark(), ' means config.txt sets it')),
+    !admin ? h('div.muted', { style: { fontSize: '12px', padding: '8px 12px' } }, 'Read-only — no config is loaded.') : null,
+    h('div.tbl-wrap', tbl),
+    h('div.cm-foot', 'To write a rule of your own, use ',
+      h('button.btn.sm.ghost', { type: 'button', onclick: () => openTab('alerts', 'automation') }, 'Automation'), '.'));
 }
 
+/** The save bar's Save for Alert triggers: every switch and threshold on screen, checked, in one write. */
+async function saveAlertRules() {
+  const raw = state.config && state.config.raw;
+  if (!raw) { toast('No config loaded', 'warn'); return false; }
+  const next = { ...(raw.alertRules && typeof raw.alertRules === 'object' ? raw.alertRules : {}) };
+  for (const r of ALERT_RULES) {
+    const box = host && host.querySelector(`#al-on-${r.id}`);
+    if (!box) continue;
+    const entry = { ...(next[r.id] || {}), enabled: !!box.checked };
+    for (const t of r.thresholds || []) {
+      const el = host.querySelector(`#al-th-${r.id}-${t.key}`);
+      if (!el || el.disabled) continue;
+      const v = Number(el.value);
+      if (!isFinite(v) || v < t.min || v > t.max) {
+        toast(`${t.label} must be between ${t.min} and ${t.max}${t.unit}`, 'warn');
+        try { el.focus(); } catch (_) { /* jsdom */ }
+        return false;
+      }
+      entry.thresholds = { ...(entry.thresholds || {}), [t.key]: v };
+    }
+    next[r.id] = entry;
+  }
+  const before = raw.alertRules;
+  raw.alertRules = next;
+  try {
+    await saveRaw(raw);
+    await setConfig(await cfg.normalize(raw, (state.config.fileMeta || {}).name || 'config'), state.handle);
+    toast('Alert settings saved');
+  } catch (e) {
+    raw.alertRules = before;
+    toast(`Could not save: ${e.message}`, 'err', 5000);
+    return false;
+  }
+  draw();
+  return true;
+}
+
+/** The one lock mark: a value config.txt sets — shown, never editable, never written. */
+function lockMark(title = MANAGED_NOTE) {
+  return h('span.cm-lock', { title, role: 'img', 'aria-label': title });
+}
+
+/** card(), taking part in the save bar as `section` (ui/change-tracker.js). */
+function trackedCard(section, trackLabel, title, sub, body, actions) {
+  const el = card(title, sub, body, actions);
+  el.dataset.track = section;
+  el.dataset.trackLabel = trackLabel;
+  return el;
+}
 /* ----------------------- the scheduled log-delay measurement ----------------------- */
 
 /**
@@ -401,57 +835,63 @@ function sinkField(label, key, opts = {}) {
     }));
 }
 
+/** The sink form as typed. */
+function readSink() {
+  const list = clusters();
+  const v = (key) => { const el = $(`#sink-${key}`); return el ? el.value.trim() : ''; };
+  const chosen = list.map((x) => x.id).filter((id) => { const el = $(`#sink-pick-${id}`); return el && el.checked; });
+  return {
+    enabled: !!($('#sink-enabled') || {}).checked,
+    destination: (($('#sink-destination') || {}).value) === 'history' ? 'history' : 'cluster',
+    sinkClusterId: (($('#sink-target') || {}).value || '').trim(),
+    clusters: chosen,
+    everyHours: Number(v('everyHours')) || 2,
+    indexPrefix: v('indexPrefix'),
+    indexPattern: v('indexPattern'),
+    deviceField: v('deviceField'),
+    arrivalField: v('arrivalField'),
+    eventTimeFields: v('eventTimeFields').split(',').map((f) => f.trim()).filter(Boolean),
+    maxDevices: Number(v('maxDevices')) || 2000,
+  };
+}
+
+/** The save bar's Save for the scheduled measurement (it was the card's Save). True when saved. */
+async function saveSink() {
+  const c = (sink && sink.config) || {};
+  const next = readSink();
+  // Empty means "every cluster" to the core, which is right for a hand-edited file and
+  // wrong for a screen where somebody has just unticked the last box.
+  const toHistory = next.destination === 'history';
+  // A config that never had the field saves without it, exactly as before.
+  if (!toHistory && c.destination === undefined) delete next.destination;
+  if (toHistory) {
+    // The history store has its own destination; the cluster picker and prefix do not apply.
+    next.sinkClusterId = c.sinkClusterId || '';
+    next.indexPrefix = c.indexPrefix || '';
+  }
+  if (next.enabled && !next.clusters.length) { toast('Pick at least one cluster to measure', 'warn'); return false; }
+  if (next.enabled && !toHistory && next.clusters.length === 1 && next.clusters[0] === next.sinkClusterId) {
+    toast('The only cluster picked is the one being written to', 'warn'); return false;
+  }
+  try {
+    const res = await delaySinkSet(next);
+    if (!res || !res.ok) { toast(`Not saved: ${(res && res.message) || 'refused'}`, 'err', 6000); return false; }
+    sink = { ...res, supported: true };
+    toast(next.enabled ? 'Scheduled measurement armed' : 'Scheduled measurement switched off');
+    draw();
+    return true;
+  } catch (e) {
+    toast(`Could not save: ${e.message}`, 'err', 5000);
+    return false;
+  }
+}
+
 function delaySinkCard() {
   if (!sink || !sink.supported) return null;
   const c = sink.config || {};
   const st = sink.state || {};
   const list = clusters();
   const picked = new Set((c.clusters || []).length ? c.clusters : list.map((x) => x.id).filter((id) => id !== c.sinkClusterId));
-
-  const read = () => {
-    const v = (key) => { const el = $(`#sink-${key}`); return el ? el.value.trim() : ''; };
-    const chosen = list.map((x) => x.id).filter((id) => { const el = $(`#sink-pick-${id}`); return el && el.checked; });
-    return {
-      enabled: !!($('#sink-enabled') || {}).checked,
-      destination: (($('#sink-destination') || {}).value) === 'history' ? 'history' : 'cluster',
-      sinkClusterId: (($('#sink-target') || {}).value || '').trim(),
-      clusters: chosen,
-      everyHours: Number(v('everyHours')) || 2,
-      indexPrefix: v('indexPrefix'),
-      indexPattern: v('indexPattern'),
-      deviceField: v('deviceField'),
-      arrivalField: v('arrivalField'),
-      eventTimeFields: v('eventTimeFields').split(',').map((f) => f.trim()).filter(Boolean),
-      maxDevices: Number(v('maxDevices')) || 2000,
-    };
-  };
-
-  const save = async () => {
-    const next = read();
-    // Empty means "every cluster" to the core, which is right for a hand-edited file and
-    // wrong for a screen where somebody has just unticked the last box.
-    const toHistory = next.destination === 'history';
-    // A config that never had the field saves without it, exactly as before.
-    if (!toHistory && c.destination === undefined) delete next.destination;
-    if (toHistory) {
-      // The history store has its own destination; the cluster picker and prefix do not apply.
-      next.sinkClusterId = c.sinkClusterId || '';
-      next.indexPrefix = c.indexPrefix || '';
-    }
-    if (next.enabled && !next.clusters.length) { toast('Pick at least one cluster to measure', 'warn'); return; }
-    if (next.enabled && !toHistory && next.clusters.length === 1 && next.clusters[0] === next.sinkClusterId) {
-      toast('The only cluster picked is the one being written to', 'warn'); return;
-    }
-    try {
-      const res = await delaySinkSet(next);
-      if (!res || !res.ok) { toast(`Not saved: ${(res && res.message) || 'refused'}`, 'err', 6000); return; }
-      sink = { ...res, supported: true };
-      toast(next.enabled ? 'Scheduled measurement armed' : 'Scheduled measurement switched off');
-      draw();
-    } catch (e) {
-      toast(`Could not save: ${e.message}`, 'err', 5000);
-    }
-  };
 
   const runNow = async () => {
     toast('Measuring…');
@@ -480,7 +920,7 @@ function delaySinkCard() {
     const note = $('#sink-history-note'); if (note) note.style.display = toHistory ? '' : 'none';
   };
 
-  return card('Scheduled log delay',
+  return trackedCard('schedule', 'Scheduled log delay', 'Scheduled log delay',
     c.enabled ? `every ${c.everyHours}h \u2192 ${dest === 'history' ? 'the history store' : (c.sinkClusterId || 'nowhere')}` : 'switched off',
     h('div', { style: { display: 'grid', gap: '10px' } },
       h('div.muted', { style: { fontSize: '12px' } },
@@ -511,7 +951,7 @@ function delaySinkCard() {
         sinkField('Max devices per run', 'maxDevices', { type: 'number', min: 1, max: 10000, width: '110px' })),
       h('div.muted#sink-history-note', { style: { fontSize: '11.5px', display: dest === 'history' ? '' : 'none' } },
         'Measurements go to <history prefix>-delay-YYYY.MM on the history store, under its own two gates '
-        + '(HISTORY_STORE_WRITES and Write history) \u2014 see Config \u203a History store.'),
+        + '(HISTORY_STORE_WRITES and Write history) \u2014 see Data \u203a Backend.'),
       histWarn ? h('div.banner.warn', { id: 'sink-history-warn', style: { margin: 0, fontSize: '12px' } }, histWarn) : null,
       h('div', { style: { display: 'flex', gap: '14px', flexWrap: 'wrap', alignItems: 'end' } },
         sinkField('Indices to measure', 'indexPattern'),
@@ -533,9 +973,9 @@ function delaySinkCard() {
         kvRow('Next run', c.enabled && st.nextDueAt ? `${dt(st.nextDueAt)} (${ago(st.nextDueAt)})` : 'not scheduled'),
         kvRow('Runs since start', String(st.runs || 0)),
       ]),
-      h('div', { style: { display: 'flex', gap: '8px', flexWrap: 'wrap' } },
-        h('button.btn.primary', { onclick: save }, 'Save'),
-        h('button.btn', { onclick: runNow }, 'Run now'))));
+      h('div', { style: { display: 'flex', gap: '8px', flexWrap: 'wrap', alignItems: 'center' } },
+        h('button.btn', { onclick: runNow }, 'Run now'),
+        h('span.muted', { style: { fontSize: '11.5px' } }, 'Changes here wait for the save bar.'))));
 }
 /* ------------------------------- the request policy ------------------------------- */
 
@@ -553,7 +993,7 @@ async function loadPolicy() {
     pol = { error: e.message || String(e) };
   }
   polDraft = null;
-  if (host && host.isConnected && activeSection() && activeSection().id === 'requests') draw();
+  if (isOpen('requests/policy') || isOpen('requests/centre')) { tracker.reset('policy'); draw(); }
 }
 
 const polDefaults = () => (pol && pol.defaults) || FALLBACK_DEFAULTS;
@@ -660,7 +1100,7 @@ async function savePolicy() {
     polNote = { text: `Not saved: ${(res && res.message) || 'refused'}`, cls: 'banner err' };
     toast(polNote.text, 'err', 8000, { key: 'request-policy' });
     draw();
-    return;
+    return false;
   }
   pol = res; polDraft = null;
   syncFleet().catch(() => {});   // the top bar says paused (or not) now, not at the next sync
@@ -673,6 +1113,7 @@ async function savePolicy() {
   toast(problems.length ? 'Request policy saved — some values were adjusted' : 'Request policy saved',
     problems.length || res.warning ? 'warn' : 'ok', 5000, { key: 'request-policy' });
   draw();
+  return true;
 }
 
 /**
@@ -720,6 +1161,21 @@ function effectItem(name, e, { on = false, id = null } = {}) {
     h('div', h('span.pol-effect-k', 'When a page is open: '), e.open.text));
 }
 
+/** The Requests page header: the mode in force, in a pill. */
+function requestsPill() {
+  if (!pol || pol.error) return null;
+  const p = normalisePolicy(polDraft || pol.policy, polDefaults(), polBounds());
+  const stop = pol.policy && pol.policy.paused;
+  const stopOn = !!(stop && stop.all && (!stop.until || stop.until > Date.now()));
+  return h('span.pill.blue', `mode: ${p.mode}${stopOn ? ' · emergency stop' : ''}`);
+}
+
+function requestsActions() {
+  if (!pol || pol.error) return [];
+  return [h('button.btn', { type: 'button', onclick: resetPolicyForm, disabled: !isAdminCaller(),
+    title: 'Fill the form with the policy this build ships with; nothing is saved until Save' }, 'Reset to shipped')];
+}
+
 function requestsCard() {
   if (!pol) return card('Requests', 'Loading…', h('div.muted', 'Asking the core for its request policy…'));
   if (pol.error) {
@@ -733,14 +1189,14 @@ function requestsCard() {
   const p = normalisePolicy(polDraft || pol.policy, defaults, bounds);
   const preset = activePreset(p, defaults, bounds);
   const admin = isAdminCaller();
-  const num = (id, value, b, width = '90px', title = '') => h('input', {
+  const num = (id, value, b, width = '90px', title = '') => h('input.cm-num', {
     id, type: 'number', min: String(b.min), max: String(b.max), value: String(value), disabled: !admin,
     style: { width }, title: title || `${b.min}–${b.max}`,
   });
   // A concurrency field under a gate cap: typed past it, it shows the cap at once, and the
   // hint under it says where the cap comes from.
   const capped = (id, value, b) => {
-    const el = num(id, value, b, '90px', b.gate ? `${b.min}–${b.max}: at most what the request gate allows (${b.gate})` : '');
+    const el = num(id, value, b, '100%', b.gate ? `${b.min}–${b.max}: at most what the request gate allows (${b.gate})` : '');
     el.addEventListener('change', () => {
       const n = Number(el.value);
       if (el.value.trim() !== '' && Number.isFinite(n) && n > b.max) el.value = String(b.max);
@@ -748,17 +1204,14 @@ function requestsCard() {
     return el;
   };
   const capHint = (b, gateKey) => (pol.gate && Number.isInteger(pol.gate[gateKey])
-    ? `request gate: ${pol.gate[gateKey]}${b.gate ? ` (${b.gate})` : ''}` : null);
-  const labelled = (label, input, hint) => h('label', { style: { display: 'grid', gap: '3px', fontSize: '11.5px' } },
-    h('span.muted', label), input, hint ? h('span.muted', { style: { fontSize: '10.5px' } }, hint) : null);
-  const modeHint = h('div#pol-mode-desc.muted', { style: { fontSize: '11.5px' } }, describeMode(p.mode),
-    p.mode === 'auto' && pol.resolvedMode ? h('b', ` Running now: ${pol.resolvedMode}.`) : null);
+    ? `${b.min}–${b.max} · request gate: ${pol.gate[gateKey]}${b.gate ? ` (${b.gate})` : ''}` : `${b.min}–${b.max}`);
+  const labelled = (label, input, hint) => h('label.cm-lbl', h('span', label), input, hint ? h('span.cm-hint', hint) : null);
   const counts = fleetCounts();
   const mode = resolvedMode(p.mode, counts.clusters);
   const stored = pol.warning
-    ? h('span', { style: { color: 'var(--warning)' } }, pol.warning)
-    : pol.stored ? 'Kept in policy.json in the core’s data directory'
-    : 'Not saved yet — the shipped policy is running';
+    ? h('span', { style: { color: 'var(--warning-ink)' } }, pol.warning)
+    : pol.stored ? 'Kept in policy.json in the core’s data directory.'
+    : 'Not saved yet — the shipped policy is running.';
 
   // What each interval does under the mode in the form, for this many clusters
   // (effectiveClass, the core's rule). Under Client basis nothing is on a schedule: an
@@ -769,28 +1222,41 @@ function requestsCard() {
     const note = bg ? h('span', pill('on a schedule', 'green'), ' kept fresh for every cluster')
       : mode === 'on-demand' ? h('span.muted', 'not on a schedule: fetched when a page asks, then at this interval while it watches')
       : h('span.muted', 'fetched when a page asks, then at this interval while it watches');
+    const input = num(`pol-iv-${ds}`, p.intervalsSec[ds], b, '100px', `${b.min}–${b.max} seconds`);
+    input.dataset.label = `${DATASET_LABELS[ds]} every (s)`;
     return h(`tr${mode === 'on-demand' ? '.pol-iv-idle' : ''}`,
       h('td', DATASET_LABELS[ds], h('div.mono.muted', { style: { fontSize: '10.5px' } }, ds)),
-      h('td', num(`pol-iv-${ds}`, p.intervalsSec[ds], b, '100px', `${b.min}–${b.max} seconds`), h('span.muted', { style: { marginLeft: '4px' } }, 's')),
+      h('td', input, h('span.muted', { style: { marginLeft: '4px' } }, 's')),
       h('td.muted', { style: { fontSize: '11px' } }, `${defaults.intervalsSec ? defaults.intervalsSec[ds] : '—'} s`),
       h('td.pol-iv-note', note));
   });
   const modeName = mode === 'on-demand' ? 'Client basis' : mode === 'hybrid' ? 'Hybrid' : 'Background';
 
-  // Change 15: what each preset does with this fleet, from its own intervals; and the
-  // hand-made policy's, when the form is not one of them. Lower bounds (policyEffect).
+  // The presets are radio cards, each with what it sends to this fleet (lower bounds, from its
+  // own intervals: policyEffect). A hand-made policy gets its own card below them.
+  const presetCard = (x) => {
+    const on = preset === x.id;
+    const [, desc] = x.label.split(' — ');
+    return h('button.pol-preset', {
+      type: 'button', role: 'radio', 'aria-checked': String(on), 'aria-pressed': String(on), disabled: !admin, title: x.label,
+      onclick: () => choosePreset(x.id),
+    },
+    h('span.pol-preset-t', h('span.pol-preset-dot', { 'aria-hidden': 'true' }), x.name,
+      x.id === 'client' ? h('span.pill.green.pol-rec', '(recommended)') : null),
+    desc ? h('span.pol-preset-d', `${desc[0].toUpperCase()}${desc.slice(1)}.`) : null,
+    effectItem(x.name, policyEffect(applyPreset(p, x.id, defaults, bounds), counts), { on, id: x.id }));
+  };
   const effects = h('div#pol-effects.pol-effects',
+    h('div.pol-presets', { role: 'radiogroup', 'aria-label': 'Request policy presets' }, ...PRESETS.map(presetCard)),
+    preset ? null : effectItem('This policy (no preset)', policyEffect(p, counts), { on: true }),
     h('div.muted.pol-effects-note',
       `What each choice sends to your ${counts.clusters} cluster${counts.clusters === 1 ? '' : 's'}${counts.unreachable ? ` (${counts.unreachable} not answering now)` : ''}, `
-      + 'worked out from its intervals. Lower bounds: a poll can take more than one request.'),
-    h('div.pol-effect-list',
-      ...PRESETS.map((x) => effectItem(x.name, policyEffect(applyPreset(p, x.id, defaults, bounds), counts), { on: preset === x.id, id: x.id })),
-      preset ? null : effectItem('This policy (no preset)', policyEffect(p, counts), { on: true })));
+      + 'worked out from its intervals. Lower bounds: a poll can take more than one request.'));
 
-  // Change 16: the numbers fold behind "Fine-tune", one line when folded. The line follows
-  // what is typed, so a change made inside is still on it after folding.
+  // The numbers fold behind "Fine-tune", one line when folded. The line follows what is typed,
+  // so a change made inside is still on it after folding.
   const summaryText = h('span#pol-fine-sum.muted', fineTuneSummary(p, counts.clusters));
-  const fine = h('details#pol-fine.pol-fine', {
+  const fine = h('details#pol-fine.pol-fine.card', {
     open: fineOpen(),
     ontoggle: (e) => rememberFine(e.target.open),
     oninput: () => { summaryText.textContent = fineTuneSummary(fromForm(readPolicyForm(), defaults, bounds).policy, counts.clusters); },
@@ -798,170 +1264,120 @@ function requestsCard() {
   },
     h('summary', h('b', 'Fine-tune'), summaryText, envConcurrencyNote()),
     h('div.pol-fine-body',
-      h('div', { style: { display: 'flex', gap: '14px', flexWrap: 'wrap', alignItems: 'start' } },
-        labelled('Watch window (minutes)', num('pol-watch', p.watchMinutes, BOUNDS.watchMinutes),
-          'how long a page keeps an on-demand dataset fresh after it was last looked at'),
+      h('div.cm-form5',
+        labelled('Watch window (minutes)', num('pol-watch', p.watchMinutes, BOUNDS.watchMinutes, '100%'),
+          `${BOUNDS.watchMinutes.min}–${BOUNDS.watchMinutes.max} · how long a page keeps an on-demand dataset fresh after it was last looked at`),
         labelled('Concurrency — all clusters', capped('pol-global', p.concurrency.global, bounds.global), capHint(bounds.global, 'global')),
         labelled('Per cluster', capped('pol-per', p.concurrency.perCluster, bounds.perCluster), capHint(bounds.perCluster, 'perCluster')),
         labelled('Per jump host', capped('pol-tunnel', p.concurrency.tunnel, bounds.tunnel), capHint(bounds.tunnel, 'perJump')),
-        labelled('Timeout (ms)', num('pol-timeout', p.timeoutMs, BOUNDS.timeoutMs, '110px'))),
+        labelled('Timeout (ms)', num('pol-timeout', p.timeoutMs, BOUNDS.timeoutMs, '100%'), `${BOUNDS.timeoutMs.min}–${BOUNDS.timeoutMs.max}`)),
       table(['Dataset', 'Every', 'Shipped', `Under ${modeName}`], ivRows)));
 
   const stop = pol.policy && pol.policy.paused;
   const stopOn = !!(stop && stop.all && (!stop.until || stop.until > Date.now()));
-  return card('Requests', `mode: ${p.mode}${stopOn ? ' · emergency stop' : ''}`,
-    h('div', { style: { display: 'grid', gap: '12px' } },
-      h('div.muted', { style: { fontSize: '12px', lineHeight: 1.6 } },
-        'This decides when the core goes to the clusters on its own, how many requests it sends at once, and whether it '
-        + 'sends any at all. It does not change what a page shows — only when the data behind it was fetched. ',
-        h('button.btn.sm.ghost', { onclick: () => navigateTo('requests') }, 'Request Centre'),
-        ' shows what is actually being sent.'),
-      !admin ? h('div.muted', { style: { fontSize: '11.5px' } }, 'Read-only — an administrator changes the request policy.') : null,
-      h('div.seg', { role: 'group', 'aria-label': 'Request policy presets', style: { display: 'flex', flexWrap: 'wrap', gap: '6px' } },
-        ...PRESETS.map((x) => h('button.btn.sm', {
-          'aria-pressed': preset === x.id ? 'true' : 'false', disabled: !admin, title: x.label,
-          onclick: () => choosePreset(x.id),
-        }, x.label))),
-      h('div', { style: { display: 'grid', gap: '4px' } },
-        labelled('Mode', h('select#pol-mode', {
-          disabled: !admin, style: { maxWidth: '220px' },
-          // The mode changes the effects, the summary and what each interval does: redraw
-          // from the form as it stands, so nothing typed is lost.
-          onchange: () => { polDraft = fromForm(readPolicyForm(), defaults, bounds).policy; draw(); },
-        }, ...MODES.map((m) => h('option', { value: m, selected: m === p.mode }, m)))),
-        modeHint),
-      effects,
-      fine,
-      gapSection(p, admin, defaults),
-      playScheduleSection(p, admin, defaults),
-      h('div.muted#pol-auto', { style: { fontSize: '12px', lineHeight: 1.6 } },
-        stopOn ? h('div', h('b', pausedLine(stop))) : null,
-        'Slow and busy clusters are handled on their own: a cluster that answers in more than 8 s (or times out, or '
-        + 'answers 429) gets one request at a time and longer intervals until it answers quickly again, and while the '
-        + 'server is busy the background polling waits so people go first. Nobody waits more than 10 s for a page. '
-        + 'To hold everything for a while, use the emergency stop in ',
-        h('button.btn.sm.ghost', { onclick: () => navigateTo('requests') }, 'Request Centre'),
-        ' — it ends by itself after 15, 30 or 60 minutes.'),
-      polNote ? h(`div.${polNote.cls.split(' ').join('.')}#pol-msg`, { style: { margin: 0, fontSize: '12px' } }, polNote.text) : null,
-      h('div.muted', { style: { fontSize: '11.5px' } }, stored,
-        pol.running === false ? ' · the poller is not running on this core' : ''),
-      h('div', { style: { display: 'flex', gap: '8px', flexWrap: 'wrap' } },
-        h('button.btn.primary', { onclick: savePolicy, disabled: !admin }, 'Save'),
-        h('button.btn', { onclick: resetPolicyForm, disabled: !admin,
-          title: 'Fill the form with the policy this build ships with; nothing is saved until Save' }, 'Reset to shipped'))));
-}
-
-/* ---------------------------------- sections ---------------------------------- */
-
-/**
- * The Config page is eight unrelated jobs, and it used to be all eight at once: a single
- * scroll where "which certificate do we trust" sat under "what is the refresh interval"
- * and the thing you came for was somewhere in the middle. Nothing was hard to find
- * because it was hidden; it was hard to find because everything else was in the way.
- *
- * So they are tabs, in the same shape as the tabs at the top of the window. The bar is
- * the page's table of contents: you can see every job this page does without scrolling,
- * and you are only ever looking at one of them.
- *
- * A section may be absent — the schedule only exists on a build that can keep one — and
- * an absent section has no tab. An option you can never use is worse than no option.
- */
-const SECTIONS = [
-  { id: 'file',     label: 'Config file',  icon: '▤', build: fileCard },
-  { id: 'creds',    label: 'Credentials',  icon: '◈', build: credentialsCard },
-  { id: 'clusters', label: 'Clusters',     icon: '▦', build: clustersCard },
-  { id: 'zabbix',   label: 'Zabbix',       icon: '⇆', build: zabbixSection, load: loadZabbix },
-  { id: 'trust',    label: 'Jump hosts & trust', icon: '⇄', build: trustSection, load: loadTrust },
-  { id: 'alerts',   label: 'Alert triggers', icon: '⚠', build: alertRulesCard },
-  { id: 'schedule', label: 'Scheduled log delay', icon: '⏱', build: delaySinkCard,
-    when: () => !!(sink && sink.supported) },
-  { id: 'history',  label: 'History store', icon: '\u29d6', build: historyStoreCard,
-    when: () => historySupported() },
-  { id: 'requests', label: 'Requests',     icon: '⚡', build: requestsCard, load: loadPolicy },
-  { id: 'defaults', label: 'Defaults',     icon: '⚙', build: defaultsCard },
-  { id: 'volume',   label: 'Reports', icon: '▤', build: volumeSection, load: loadVolumeSection },
-  { id: 'play',     label: 'Play',         icon: '▶', build: playSection, load: () => loadPlay(draw) },
-  { id: 'diag',     label: 'Diagnostics',  icon: '✚', build: diagnosticsCard, load: confirmCoreGuard },
-];
-
-/** Which section is open. Remembered across redraws so a save does not move you. */
-let section = 'file';
-/**
- * The section whose load() has run since this page was entered. draw() used to call the
- * open section's loader on every redraw, and the page redrew on every fleet event — so
- * on a 32-cluster install the Jump hosts tab asked the core for TUNNELS and PINS every
- * couple of seconds, and the Zabbix tab never finished loading. A section is loaded once
- * per visit; the actions that change what it shows call its loader themselves.
- */
-let loadedSection = null;
-
-function visibleSections() {
-  return SECTIONS.filter((s) => !s.when || s.when());
-}
-
-function activeSection() {
-  const shown = visibleSections();
-  return shown.find((s) => s.id === section) || shown[0];
-}
-
-/**
- * The tab bar. Deliberately the same markup and the same `aria-current` as the window's
- * own tabs, so it reads as navigation rather than as a row of buttons that happen to be
- * next to each other — and so a screen reader calls it what it is.
- */
-function sectionNav() {
-  const active = activeSection();
-  const nav = h('nav.subnav');
-  visibleSections().forEach((s) => {
-    nav.append(h('button', {
-      'aria-current': active && active.id === s.id ? 'page' : null,
-      title: s.label,
-      onclick: () => { section = s.id; draw(); },
-    }, h('span.ico', s.icon), h('span', s.label)));
-  });
-  return nav;
+  return h('div.cm-stack', { dataset: { track: 'policy', trackLabel: 'Requests' } },
+    !admin ? h('div.muted', { style: { fontSize: '12px' } }, 'Read-only — an administrator changes the request policy.') : null,
+    effects,
+    h('div.pol-mode-row',
+      labelled('Mode', h('select#pol-mode', {
+        disabled: !admin, style: { maxWidth: '220px' },
+        // The mode changes the effects, the summary and what each interval does: redraw
+        // from the form as it stands, so nothing typed is lost.
+        onchange: () => { polDraft = fromForm(readPolicyForm(), defaults, bounds).policy; draw(); },
+      }, ...MODES.map((m) => h('option', { value: m, selected: m === p.mode }, m)))),
+      h('div#pol-mode-desc.muted', { style: { fontSize: '11.5px' } }, describeMode(p.mode),
+        p.mode === 'auto' && pol.resolvedMode ? h('b', ` Running now: ${pol.resolvedMode}.`) : null)),
+    fine,
+    h('div.cm-grid2.cm-grid2-r',
+      h('div.card.cm-sec', h('div.body', gapSection(p, admin, defaults))),
+      h('div.card.cm-sec', h('div.body', playScheduleSection(p, admin, defaults)))),
+    h('div.muted#pol-auto', { style: { fontSize: '12px', lineHeight: 1.6 } },
+      stopOn ? h('div', h('b', pausedLine(stop))) : null,
+      'Slow and busy clusters are handled on their own: a cluster that answers in more than 8 s (or times out, or '
+      + 'answers 429) gets one request at a time and longer intervals until it answers quickly again, and while the '
+      + 'server is busy the background polling waits so people go first. Nobody waits more than 10 s for a page. '
+      + 'To hold everything for a while, use the emergency stop in ',
+      h('button.btn.sm.ghost', { onclick: () => openTab('requests', 'centre') }, 'Request Centre'),
+      ' — it ends by itself after 15, 30 or 60 minutes. ', stored,
+      pol.running === false ? ' The poller is not running on this core.' : ''),
+    polNote ? h(`div.${polNote.cls.split(' ').join('.')}#pol-msg`, { style: { margin: 0, fontSize: '12px' } }, polNote.text) : null);
 }
 
 /* ------------------------------ the sections ------------------------------ */
 
 function fileCard() {
   const meta = (state.config && state.config.fileMeta) || {};
+  const plain = clusters().some((c) => c.credSource === 'shared' || c.credSource === 'cluster');
   return card('Config file', meta.name || 'not loaded',
     h('div', { style: { display: 'grid', gap: '10px' } },
       table([], [
         kvRow('File', meta.name || '–'),
+        kvRow('Path', meta.path || (meta.ephemeral ? 'loaded once — not remembered' : '–')),
+        kvRow('Format', state.config ? (state.config.format === 'json' ? 'JSON (config_cluster.json)' : 'YAML — edits from the UI are saved as config_cluster.json next to it') : '–'),
         kvRow('Size', meta.size ? bytes(meta.size) : '–'),
         kvRow('Last modified on disk', meta.lastModified ? dt(meta.lastModified) : '–'),
         kvRow('Loaded', state.config ? `${dt(state.config.loadedAt)} (${ago(state.config.loadedAt)})` : '–'),
-        kvRow('Path', meta.path || (meta.ephemeral ? 'loaded once — not remembered' : '–')),
-        kvRow('Format', state.config ? (state.config.format === 'json' ? 'JSON (config_cluster.json)' : 'YAML — edits from the UI are saved as config_cluster.json next to it') : '–'),
-        kvRow('Secrets in file', state.config ? (state.config.sealed ? 'encrypted (AES-256-GCM, PBKDF2-SHA512 master password)' : (clusters().some((c) => c.credSource === 'shared' || c.credSource === 'cluster') ? 'PLAIN TEXT — use "Store in config file (encrypted)" to fix' : 'none')) : '–'),
+        kvRow('Secrets in file', !state.config ? '–'
+          : state.config.sealed ? h('span', pill('encrypted', 'green'), h('span.muted', ' AES-256-GCM, PBKDF2-SHA512 master password'))
+          : plain ? h('span', pill('PLAIN TEXT', 'red'), h('span.muted', ' use "Store in config file (encrypted)" on Clusters › Credentials to fix'))
+          : 'none'),
         kvRow('Mode', isSnapshotMode()
           ? `snapshot — collected ${state.snapshot && state.snapshot.generatedAt ? dt(state.snapshot.generatedAt) : '?'}`
             + (state.snapshot && state.snapshot.host ? ` on ${state.snapshot.host}` : '')
           : 'live — the app connects to each cluster (directly or through a jump host)'),
       ]),
-      h('div#cfg-msg'),
-      historyBlock()),
-    // The actions this section is for, in the card's own footer rather than loose in the
-    // body — which is where the top of the page keeps its buttons, so they line up.
-    [
-      h('button.btn.sm.primary', { onclick: reload, disabled: !state.handle || isSnapshotMode() }, 'Reload from disk'),
-      // "Pick another file" asks the core for a path, which is the right question on a
-      // desktop and the wrong one on a server, where the file is on the operator's own
-      // machine.
-      canPickByPath()
-        ? h('button.btn.sm', { onclick: repick }, 'Pick another file…')
-        : filePickerButton('Upload a config…', {
-            accept: '.json,.yaml,.yml',
-            className: 'btn.sm',
-            onText: (txt, err, name) => uploadConfig(txt, err, name),
-          }),
-      h('button.btn.sm.ghost', { onclick: () => saveTextAs('clusters.yaml', EXAMPLE_YAML) }, 'Save example YAML…'),
-      h('button.btn.sm.danger', { onclick: forget }, 'Forget file & credentials'),
-    ]);
+      h('div#cfg-msg')));
 }
 
+/**
+ * Earlier versions of the config file, newest first. "By" and "What changed" are columns only
+ * when the core reports them for a version (PHASE 2 HOOK: today it keeps time, file and size).
+ */
+let versionsAll = false;
+function versionsCard() {
+  // Fetched lazily: it is one more round trip and most visits to this page are not looking for it.
+  if (!versions.length && !current && !historyOpen) loadHistory().then(() => { historyOpen = true; });
+  return card('Earlier versions', 'one is kept each time the config is saved from here · loading one first keeps the current as a version',
+    h('div#cfg-history', historyBody()));
+}
+
+function historyBody() {
+  if (!versions.length && !current) {
+    return h('div.muted', { style: { fontSize: '12px' } },
+      'No earlier versions yet. One is kept each time the config is saved from here.');
+  }
+  const list = versionsAll ? versions : versions.slice(0, 8);
+  // Recorded by the core when the version was saved (CONFIG_HISTORY saved_by / summary,
+  // docs/HANDBOOK.md "Config versions"); a version from before the record existed shows "—",
+  // not a guess. `current` is the file on disk now, when the core recorded its last save.
+  const when = (t) => h('td', { title: new Date(t * 1000).toISOString() }, `${dt(t * 1000)} (${ago(t * 1000)})`);
+  const what = (s) => h('td', { style: { fontSize: '11.5px' }, title: s || '' }, s || '—');
+  const rows = [
+    current ? h('tr.cm-current',
+      h('td', { title: new Date(current.saved_at * 1000).toISOString() }, `${dt(current.saved_at * 1000)} (${ago(current.saved_at * 1000)}) `, pill('current', 'blue')),
+      h('td', current.saved_by || '—'), what(current.summary),
+      h('td.mono', { style: { fontSize: '11.5px' } }, current.source || ''), h('td.num', ''), h('td')) : null,
+    ...list.map((v) => h('tr',
+      when(v.saved_at),
+      h('td', v.saved_by || '—'),
+      what(v.summary),
+      h('td.mono', { style: { fontSize: '11.5px' } }, v.source),
+      h('td.num', bytes(v.bytes)),
+      h('td', { style: { textAlign: 'right' } },
+        h('button.btn.sm', { onclick: () => restore(v) }, 'Load this')))),
+  ].filter(Boolean);
+  return h('div', { style: { display: 'grid', gap: '6px' } },
+    table(['Saved', 'By', 'What changed', 'File', { label: 'Size', num: true }, ''], rows, {
+      // A good empty state — nothing has gone wrong — so it says what would put something here.
+      emptyText: empty('No earlier version saved yet.', {
+        detail: 'A copy is kept automatically each time the config is saved from this app.',
+      }),
+    }),
+    h('div.muted', { style: { fontSize: '11.5px', display: 'flex', gap: '8px', alignItems: 'center' } },
+      'Loading an older version does not discard the current one — that is saved as a version first, so this goes both ways.',
+      versions.length > 8 ? h('button.btn.sm.ghost', { style: { marginLeft: 'auto' }, onclick: () => { versionsAll = !versionsAll; const el = $('#cfg-history'); if (el) mount(el, historyBody()); } },
+        versionsAll ? 'Show fewer' : `Show all ${versions.length}`) : null));
+}
 /**
  * Hosted, no default yet, but the server keeps a credential it could become (0.3.46): one a
  * cluster was given, or one Zabbix handed over. Making it the default types nothing — the
@@ -1079,42 +1495,129 @@ function trustSection() {
     h('div#trust-card', h('div.muted', 'Loading…')));
 }
 
-function clustersCard() {
-  const clusterRows = clusters().map((c) => {
-    const cl = client(c.id);
-    const fromZabbix = c.source === 'zabbix';
-    return h('tr',
-      h('td', h('div', { style: { fontWeight: 620 } }, c.name),
-        c.tags && c.tags.length ? h('div', { style: { display: 'flex', gap: '4px', marginTop: '3px' } }, ...c.tags.map((t) => h('span.pill.grey', t))) : null),
-      h('td.mono', { style: { fontSize: '11.5px' } }, c.url),
-      h('td', fromZabbix ? pill(c.zabbix && c.zabbix.credential === 'vault' ? 'Zabbix · Vault' : 'Zabbix macro',
-                                 c.zabbix && c.zabbix.credentialOk ? 'green' : 'red')
-            : c.credSource === 'shared' ? pill('shared (from file)', 'green')
-            : c.credSource === 'cluster' ? pill('per-cluster override', 'yellow')
-            : c.credSource === 'session' ? pill('typed this session', 'green')
-            : c.anonymous ? pill('anonymous', 'grey') : pill('missing', 'red')),
-      h('td.mono', { style: { fontSize: '11.5px' } }, c.username || '–'),
-      h('td.mono', { style: { fontSize: '11px' } }, c.logIndexPattern),
-      h('td', { 'data-cluster-state': c.id, 'data-kind': 'clusters' }, clusterStatePill(cl, 'clusters')),
-      h('td.muted', { style: { fontSize: '11.5px' } }, cl && cl.lastOkAt ? ago(cl.lastOkAt) : '–'),
-      // Zabbix wins: a cluster that is a Zabbix host is edited there, on its macros.
-      h('td', fromZabbix
-        ? h('button.btn.sm', { disabled: true, title: `Managed in Zabbix — host ${c.zabbix ? c.zabbix.host : ''}` }, 'In Zabbix')
-        : h('button.btn.sm', { onclick: async () => { if (await editCluster(rawClusterOf(c))) { draw(); loadTrust(); } } }, 'Edit')));
-  });
-  // disabled clusters are not in clusters(); list them too so they can be re-enabled
-  const disabledRows = ((state.config && state.config.clusters) || []).filter((c) => !c.enabled).map((c) => h('tr',
-    h('td', h('div', { style: { fontWeight: 620, color: 'var(--text-muted)' } }, c.name)),
-    h('td.mono', { style: { fontSize: '11.5px', color: 'var(--text-muted)' } }, c.url),
-    h('td', { colspan: 4 }, pill('disabled', 'grey')),
-    h('td', h('button.btn.sm', { onclick: async () => { if (await editCluster(rawClusterOf(c))) { draw(); loadTrust(); } } }, 'Edit'))));
+/** What the Clusters tab is filtered to; kept across redraws. */
+const clView = { q: '', show: 'all', source: 'any' };
 
-  return card('Clusters', `${clusters().length} enabled · ${disabledRows.length} disabled`,
-    table(['Name', 'URL', 'Credential', 'User', 'Log index pattern', 'Connection', 'Last success', ''],
-      [...clusterRows, ...disabledRows], { emptyText: 'No clusters yet — add one.' }),
-    [h('button.btn.sm.primary', { onclick: async () => { if (await editCluster(null)) { draw(); loadTrust(); } } }, '+ Add cluster')]);
+/** Where a cluster comes from, in the words of the Source column. */
+const sourceOf = (c) => (c.source === 'zabbix' ? 'Zabbix' : 'Config file');
+
+/** The Credential column's pill for a cluster. */
+function credentialPill(c) {
+  if (c.source === 'zabbix') {
+    return pill(c.zabbix && c.zabbix.credential === 'vault' ? 'Zabbix · Vault' : 'Zabbix macro', c.zabbix && c.zabbix.credentialOk ? 'green' : 'red');
+  }
+  return c.credSource === 'shared' ? pill('shared (from file)', 'green')
+    : c.credSource === 'cluster' ? pill('per-cluster override', 'yellow')
+    : c.credSource === 'session' ? pill('typed this session', 'green')
+    : c.anonymous ? pill('anonymous', 'grey') : pill('missing', 'red');
 }
 
+/** online · sign-in problem · not answering · unknown, from the cluster's live state. */
+function connectionKind(cl) {
+  if (!cl || cl.state === 'unknown') return 'unknown';
+  if (cl.state === 'online') return 'online';
+  return cl.state === 'auth_error' ? 'auth' : 'down';
+}
+
+function clustersActions() {
+  return [
+    h('button.btn', { type: 'button', onclick: exportClusters, title: 'The cluster list as a CSV file: name, source, address, route, credential, connection' }, 'Export list'),
+    h('button.btn.primary', { type: 'button', onclick: async () => { if (await editCluster(null)) { draw(); loadTrust(); } } }, '+ Add cluster'),
+  ];
+}
+
+/** The list as it is on screen (every cluster, the filter aside), as CSV. No secret is in it. */
+function exportClusters() {
+  const all = [...clusters().map((c) => ({ c, on: true })), ...disabledClusters().map((c) => ({ c, on: false }))];
+  const rows = all.map(({ c, on }) => {
+    const cl = on ? client(c.id) : null;
+    return {
+      name: c.name, source: sourceOf(c), address: c.url, route: c.via || 'direct', tags: (c.tags || []).join(' '),
+      credential: on ? credentialPill(c).textContent : '', user: c.username || '', logIndexPattern: c.logIndexPattern || '',
+      connection: on ? (cl ? cl.state : 'unknown') : 'disabled', lastSuccess: cl && cl.lastOkAt ? new Date(cl.lastOkAt).toISOString() : '',
+    };
+  });
+  download(`elasticpro-clusters-${new Date().toISOString().slice(0, 10)}.csv`, toCsv(rows), 'text/csv');
+}
+
+const disabledClusters = () => ((state.config && state.config.clusters) || []).filter((c) => !c.enabled);
+
+function clustersCard() {
+  const list = clusters();
+  const off = disabledClusters();
+  const kinds = list.map((c) => connectionKind(client(c.id)));
+  const n = (k) => kinds.filter((x) => x === k).length;
+  const fromZabbix = list.filter((c) => c.source === 'zabbix').length;
+  const problems = n('auth') + n('down');
+
+  const editBtn = (c) => h('button.btn.sm', { onclick: async () => { if (await editCluster(rawClusterOf(c))) { draw(); loadTrust(); } } }, 'Edit');
+  const clusterRows = list.map((c) => {
+    const cl = client(c.id);
+    const zabbixOwned = c.source === 'zabbix';
+    return h('tr', { dataset: { cl: c.id, source: zabbixOwned ? 'zabbix' : 'file', kind: connectionKind(cl) } },
+      h('td', h('b', c.name), ...(c.tags || []).map((t) => h('span.cm-tag', t))),
+      h('td', pill(sourceOf(c), zabbixOwned ? 'blue' : 'grey')),
+      h('td.mono', c.url),
+      h('td', c.via ? h('span.mono', c.via) : h('span.muted', 'direct')),
+      h('td', credentialPill(c), c.username ? h('span.muted.mono', { style: { marginLeft: '6px', fontSize: '11px' } }, c.username) : null),
+      h('td.mono.muted', { style: { fontSize: '11.5px' } }, c.logIndexPattern || '–'),
+      h('td', { 'data-cluster-state': c.id, 'data-kind': 'clusters' }, clusterStatePill(cl, 'clusters')),
+      h('td.muted', cl && cl.lastOkAt ? ago(cl.lastOkAt) : '–'),
+      // Zabbix wins: a cluster that is a Zabbix host is edited there, on its macros.
+      h('td', zabbixOwned
+        ? h('button.btn.sm', { disabled: true, title: `Managed in Zabbix — host ${c.zabbix ? c.zabbix.host : ''}` }, 'In Zabbix')
+        : editBtn(c)));
+  });
+  // Disabled clusters are not in clusters(); listed too so they can be enabled again.
+  const disabledRows = off.map((c) => h('tr.cm-off', { dataset: { cl: c.id || c.name, source: c.source === 'zabbix' ? 'zabbix' : 'file', kind: 'disabled' } },
+    h('td', h('b', c.name)),
+    h('td', pill(sourceOf(c), 'grey')),
+    h('td.mono', c.url),
+    h('td', c.via ? h('span.mono', c.via) : h('span.muted', 'direct')),
+    h('td', { colspan: 4 }, pill('disabled · not polled', 'grey')),
+    h('td', editBtn(c))));
+
+  const tbl = table(['Cluster', 'Source', 'Address', 'Route', 'Credential', 'Log indices', 'Connection', 'Last success', ''],
+    [...clusterRows, ...disabledRows], { emptyText: 'No clusters yet — add one.' });
+  const count = h('span.cm-toolbar-note');
+  const apply = () => {
+    const q = clView.q.trim().toLowerCase();
+    let shown = 0; const rows = tbl.querySelectorAll('tr[data-cl]');
+    for (const tr of rows) {
+      const k = tr.dataset.kind;
+      const want = clView.show === 'all' ? true : clView.show === 'disabled' ? k === 'disabled' : (k === 'auth' || k === 'down');
+      const src = clView.source === 'any' || tr.dataset.source === clView.source;
+      const hit = !q || tr.textContent.toLowerCase().includes(q);
+      tr.hidden = !(want && src && hit);
+      if (!tr.hidden) shown++;
+    }
+    count.textContent = `Showing ${shown} of ${rows.length}`;
+  };
+  const seg = (id, label) => h('button', { type: 'button', 'aria-pressed': String(clView.show === id),
+    onclick: (e) => { clView.show = id; for (const b of e.currentTarget.parentElement.children) b.setAttribute('aria-pressed', String(b === e.currentTarget)); apply(); } }, label);
+  apply();
+
+  const kpi = (value, text, tone) => h('div.cm-kpi', h('b', { class: tone ? `t-${tone}` : '' }, String(value)), h('span', text));
+  return h('div.cm-stack',
+    h('div.cm-kpis',
+      kpi(list.length, `clusters · ${fromZabbix} from Zabbix, ${list.length - fromZabbix} from the file`),
+      kpi(n('online'), 'online', 'ok'),
+      kpi(n('auth'), 'sign-in problems', n('auth') ? 'warn' : ''),
+      kpi(n('down'), 'not answering', n('down') ? 'bad' : ''),
+      kpi(off.length, 'disabled · kept in the file, not polled', 'off')),
+    h('section.card.cm-card',
+      h('div.cm-toolbar',
+        h('input', { type: 'search', placeholder: 'Filter by name, address or tag', 'aria-label': 'Filter clusters', value: clView.q,
+          oninput: (e) => { clView.q = e.target.value; apply(); } }),
+        h('div.cm-seg', { role: 'group', 'aria-label': 'Show' },
+          seg('all', `All ${list.length + off.length}`), seg('problems', `Problems ${problems}`), seg('disabled', `Disabled ${off.length}`)),
+        h('label.cm-inline', 'Source ', h('select', { 'aria-label': 'Source', onchange: (e) => { clView.source = e.target.value; apply(); } },
+          ...[['any', 'Any'], ['zabbix', 'Zabbix'], ['file', 'Config file']].map(([v, l]) => h('option', { value: v, selected: clView.source === v }, l)))),
+        count),
+      tbl,
+      h('div.cm-foot', 'Clusters from Zabbix are edited in Zabbix: Cluster Management. Sync settings are under ',
+        h('button.btn.sm.ghost', { type: 'button', onclick: () => openTab('zabbix', 'zabbix') }, 'Zabbix'), '.')));
+}
 /* ---------------------------------- Zabbix ---------------------------------- */
 
 let zbx = null;          // the last ZABBIX_CLUSTERS answer
@@ -1122,13 +1625,40 @@ let zbxBusy = false;
 
 async function loadZabbix() {
   await Promise.all([cfg.loadZabbixClusters().then((z) => { zbx = z; }), loadLink()]);
-  if (host && host.isConnected && activeSection() && activeSection().id === 'zabbix') mount(host, sectionNav(), h('div', { style: { marginTop: '12px' } }, zabbixSection()));
+  if (isOpen('zabbix/zabbix')) { tracker.reset('zabbix-link'); tracker.reset('zabbix-opts'); draw(); }
 }
 
+/**
+ * Zabbix, as the board draws it: the connection and the sync options side by side, then the
+ * cluster hosts. "Roles from Zabbix user groups" and "Zabbix users" are Phase 2
+ * (zabbixRolesSupported()) and are not drawn until the core reports them.
+ */
 function zabbixSection() {
-  return h('div', { style: { display: 'grid', gap: '12px' } }, zabbixLinkCard(), zabbixCard());
+  return h('div.cm-stack',
+    h('div.cm-grid2', zabbixLinkCard(), zabbixOptionsCard()),
+    zabbixCard());
 }
 
+/** The Zabbix page header: connected or not, and when it last synced. */
+function zabbixPill() {
+  if (!link || link.hidden || !link.supported) {
+    if (zbx && zbx.configured) return pill(`Connected${zbx.lastSync ? ` · synced ${ago(zbx.lastSync * 1000)}` : ''}`, zbx.error ? 'red' : 'green');
+    return null;
+  }
+  const sum = linkSummary(link);
+  const sync = link.sync || {};
+  return pill(`${sum.title}${sync.lastOk ? ` · synced ${ago(sync.lastOk * 1000)}` : ''}`, sum.tone);
+}
+
+function zabbixActions() {
+  const admin = !!link && !link.hidden && !!link.supported;
+  const summary = admin && linkView(link) === 'summary' && !linkEditing;
+  return [
+    admin ? h('button.btn', { type: 'button', onclick: testLink, disabled: linkBusy }, 'Test connection') : null,
+    zbx && zbx.configured ? h('button.btn', { type: 'button', onclick: syncZabbix, disabled: zbxBusy || linkBusy }, zbxBusy ? 'Syncing…' : '↻ Sync now') : null,
+    summary ? h('button.btn.primary', { type: 'button', onclick: () => { linkEditing = true; draw(); }, disabled: linkBusy }, 'Edit connection') : null,
+  ];
+}
 /* ------------------------- the Zabbix connection (admins) ------------------------- */
 
 let link = null;          // the last ZABBIX_LINK_GET; { hidden } for a non-admin, { supported:false } off hosted
@@ -1173,10 +1703,10 @@ async function saveLink() {
   const probs = formProblems(link, form);
   if (Object.keys(probs).length) {
     toast(`Not saved — ${Object.entries(probs).map(([k, v]) => `${LINK_LABEL[k] || k}: ${v}`).join('; ')}`, 'err', 9000, { key: 'zabbix-link' });
-    return;
+    return false;
   }
   const changes = linkChanges(link, form);
-  if (!Object.keys(changes).length) { toast('Nothing to save — no field changed', 'ok', 3000, { key: 'zabbix-link' }); return; }
+  if (!Object.keys(changes).length) { toast('Nothing to save — no field changed', 'ok', 3000, { key: 'zabbix-link' }); return true; }
   linkBusy = true; draw();
   let res;
   try { res = await zabbixLinkSet(changes); } catch (e) { res = { ok: false, message: e.message || String(e) }; }
@@ -1184,7 +1714,7 @@ async function saveLink() {
   if (!res.ok) {
     toast(`Zabbix connection not saved: ${res.message}`, 'err', 10000, { key: 'zabbix-link' });
     draw();
-    return;
+    return false;
   }
   link = res; tokenReplace = false; linkEditing = false;
   toast(`Zabbix connection saved: ${(res.changed || []).map((k) => LINK_LABEL[k] || k).join(', ') || 'no change'}`, 'ok', 5000, { key: 'zabbix-link' });
@@ -1194,6 +1724,7 @@ async function saveLink() {
   if ((res.changed || []).some((k) => ['zabbixUrl', 'apiUrl', 'apiToken', 'verifyTls'].includes(k)) && res.sync && res.sync.configured) {
     await syncZabbix();
   }
+  return true;
 }
 
 /** Test connection: one task card that says it started and then what it found. */
@@ -1336,69 +1867,55 @@ async function unpairLink() {
  * the summary→form flip the operator asked for.
  */
 function zabbixLinkCard() {
-  if (!link) return card('Zabbix connection', 'Loading…', h('div.muted', 'Loading…'));
+  if (!link) return card('Connection', 'Loading…', h('div.muted', 'Loading…'));
   if (link.hidden || (!link.supported && !link.error)) return null;
-  if (!link.supported) return card('Zabbix connection', 'unavailable', h('div.banner.err', { style: { margin: 0 } }, link.error));
+  if (!link.supported) return card('Connection', 'unavailable', h('div.banner.err', { style: { margin: 0 } }, link.error));
   if (linkView(link) === 'summary' && !linkEditing) return zabbixLinkSummaryCard(link);
   return zabbixLinkFormCard(link, linkView(link) === 'summary');
 }
 
-/** The "Recent changes" list, collapsed — it is looked up, not glanced at. */
-function zabbixEventsPanel(s) {
-  const events = (s.events || []).slice(0, 6);
-  if (!events.length) return null;
-  return h('details', h('summary', { style: { fontSize: '12px', cursor: 'pointer' } }, 'Recent changes'),
-    h('ul', { style: { margin: '4px 0 0', paddingLeft: '18px', fontSize: '11.5px' } },
-      ...events.map((e) => h('li', { style: { color: e.ok ? '' : 'var(--critical-ink)' } }, `${dt(e.at * 1000)} · ${eventLine(e)}`))));
-}
 
-/** "Current settings": read-only, once something is connected. */
+/**
+ * "Connection": read-only, once something is connected. Test, Sync and Edit are in the page
+ * header; Re-pair and Unpair stay here, Unpair last and in red.
+ */
 function zabbixLinkSummaryCard(s) {
   const sum = linkSummary(s);
   const ro = (f) => isManaged(s, f);
   // config.txt says so by name; anything else the server sets (a compose variable) does not.
   const managedNote = (f) => (s.managedBy && s.managedBy[f] === 'config.txt' ? MANAGED_NOTE : 'managed by server config');
   const tok = s.apiToken || {};
-  const tokenText = ro('apiToken') ? `set · ${managedNote('apiToken')}`
-    : tok.set ? `set · added ${tok.at ? dt(tok.at * 1000) : '–'}${tok.by ? ` by ${tok.by}` : ''}` : 'not set';
   const sync = s.sync || {};
-  const syncText = sync.error ? `failed — ${sync.error}`
-    : sync.lastOk ? `ok — ${ago(sync.lastOk * 1000)}`
-      : sync.configured ? 'not synced yet' : 'not syncing yet';
+  const syncText = sync.error ? h('span', pill('failed', 'red'), ` ${sync.error}`)
+    : sync.lastOk ? h('span', pill('ok', 'green'), h('span.muted', ` ${ago(sync.lastOk * 1000)} · ${sync.clusters || 0} cluster${sync.clusters === 1 ? '' : 's'}${sync.skipped ? `, ${sync.skipped} hosts skipped` : ''}`))
+      : h('span.muted', sync.configured ? 'not synced yet' : 'not syncing yet');
   const serverSecret = s.ssoSecret && s.ssoSecret.source === 'server';
   const canUnpair = s.paired || (tok.set && tok.source === 'ui') || (s.ssoSecret && s.ssoSecret.source === 'ui');
-  const row = (label, value, managedField) => field(label, h('div', { style: { fontSize: '12.5px' } }, value), managedField && ro(managedField) ? managedNote(managedField) : null);
-  return card('Zabbix connection', sum.title,
-    h('div', { style: { display: 'grid', gap: '12px' } },
-      h('div', { style: { display: 'grid', gap: '4px', padding: '8px 10px', border: '1px solid var(--border)', borderRadius: '6px' } },
-        h('div', { style: { display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap' } },
-          pill(sum.title, sum.tone), h('span', { style: { fontSize: '12.5px' } }, sum.detail)),
-        h('div.muted', { style: { fontSize: '11.5px' } },
-          `Sign-in from Zabbix: ${s.signIn ? 'on' : 'off'}${serverSecret ? ' (secret from server config)' : ''}`
-          + ` · may frame this app: ${s.frameAncestors}`
-          + (s.pairedAt ? ` · paired ${dt(s.pairedAt * 1000)}${s.pairedBy ? ` by ${s.pairedBy}` : ''}` : '')),
-        s.allowHttp ? h('div.banner.warn', { style: { margin: '4px 0 0' } }, 'Plain http is allowed: the API token crosses the network unencrypted. Lab only.') : null),
-      h('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))', gap: '10px' } },
-        row('Zabbix URL', s.zabbixUrl || '–', 'zabbixUrl'),
-        row('API URL', s.apiUrlIsDefault ? `${defaultApiUrl(s.zabbixUrl) || '–'} (default)` : (s.apiUrl || '–'), 'apiUrl'),
-        row('API token', tokenText, 'apiToken'),
-        row('Verify TLS', s.verifyTls !== false ? 'yes' : 'no', 'verifyTls'),
-        row('Allowed sources', (s.allowedSources || []).length ? (s.allowedSources || []).join(', ') : 'any', 'allowedSources'),
-        row('Sync interval', `${s.syncSecs || '–'}s`, 'syncSecs'),
-        s.paired ? row('Paired with', `${s.zabbixUrl}${s.pairedAt ? ` · ${dt(s.pairedAt * 1000)}` : ''}${s.pairedBy ? ` by ${s.pairedBy}` : ''}`) : null,
-        s.zabbixVersion ? row('Zabbix version', s.zabbixVersion) : null,
-        row('Last sync', syncText),
-        row('Clusters synced', sync.lastOk ? String(sync.clusters || 0) + (sync.skipped ? `, ${sync.skipped} skipped` : '') : '–')),
-      zabbixEventsPanel(s)),
-    [
-      h('button.btn.sm', { onclick: testLink, disabled: linkBusy }, 'Test connection'),
-      h('button.btn.sm', { onclick: syncZabbix, disabled: linkBusy || zbxBusy }, zbxBusy ? 'Syncing…' : 'Sync now'),
-      h('button.btn.sm', { onclick: () => { linkEditing = true; draw(); }, disabled: linkBusy }, 'Edit settings'),
+  const lockOf = (f) => (f && ro(f) ? h('span.cm-lockline', lockMark(managedNote(f)), managedNote(f)) : null);
+  const row = (label, value, f) => [h('dt', label), h('dd', value, lockOf(f))];
+  return h('section.card.cm-card',
+    h('header', h('h2', 'Connection'),
+      h('span.sub', s.pairedAt ? `paired ${dt(s.pairedAt * 1000)}${s.pairedBy ? ` by ${s.pairedBy}` : ''}` : sum.title)),
+    h('dl.cm-kv',
+      ...row('Zabbix URL', h('span.mono', s.zabbixUrl || '–'), 'zabbixUrl'),
+      ...row('API URL', s.apiUrlIsDefault ? h('span', h('span.mono', defaultApiUrl(s.zabbixUrl) || '–'), h('span.muted', ' (default)')) : h('span.mono', s.apiUrl || '–'), 'apiUrl'),
+      ...row('API token', ro('apiToken') ? 'set' : tok.set
+        ? h('span', pill('set', 'green'), h('span.muted', ` added ${tok.at ? dt(tok.at * 1000) : '–'}${tok.by ? ` by ${tok.by}` : ''} · write-only`))
+        : pill('not set', 'grey'), 'apiToken'),
+      ...row('Verify TLS', s.verifyTls !== false ? 'yes' : 'no', 'verifyTls'),
+      ...row('Allowed sources', (s.allowedSources || []).length ? h('span.mono', (s.allowedSources || []).join(', ')) : 'any', 'allowedSources'),
+      ...row('Sync interval', `${s.syncSecs || '–'} s`, 'syncSecs'),
+      ...(s.zabbixVersion ? row('Zabbix version', s.zabbixVersion) : []),
+      ...row('Sign-in from Zabbix', h('span', s.signIn ? 'on' : 'off', serverSecret ? h('span.muted', ' · secret from server config') : null,
+        h('span.muted', ` · may frame this app: ${s.frameAncestors}`))),
+      ...row('Last sync', syncText)),
+    s.allowHttp ? h('div.banner.warn', { style: { margin: '0 14px 10px' } }, 'Plain http is allowed: the API token crosses the network unencrypted. Lab only.') : null,
+    h('div.cm-foot',
       h('button.btn.sm', { onclick: pairLink, disabled: linkBusy || serverSecret,
         title: serverSecret ? 'The sign-in secret is set in the server configuration; pairing from here is off.' : 'Show a one-time code to paste into Zabbix' },
       'Re-pair…'),
       h('button.btn.sm.danger', { onclick: unpairLink, disabled: linkBusy || !canUnpair }, 'Unpair'),
-    ]);
+      h('span.cm-foot-note', 'Fields set in config.txt show a lock and cannot be edited here.')));
 }
 
 /** The setup form (not configured yet), or the same form reached via "Edit settings". */
@@ -1408,7 +1925,7 @@ function zabbixLinkFormCard(s, canCancel) {
   // config.txt says so by name; anything else the server sets (a compose variable) does not.
   const managedNote = (f) => (s.managedBy && s.managedBy[f] === 'config.txt' ? MANAGED_NOTE : 'managed by server config');
   const disable = (el, f) => { if (ro(f) || linkBusy) el.disabled = true; return el; };
-  const hint = (f, text) => (ro(f) ? managedNote(f) : text);
+  const hint = (f, text) => (ro(f) ? h('span.cm-lockline', lockMark(managedNote(f)), managedNote(f)) : text);
   const zurl = disable(text('zl-zurl', s.zabbixUrl || '', { placeholder: 'https://zabbix.example.com', mono: true }), 'zabbixUrl');
   const api = disable(text('zl-api', s.apiUrlIsDefault ? '' : (s.apiUrl || ''), { placeholder: defaultApiUrl(s.zabbixUrl) || 'https://zabbix.example.com/api_jsonrpc.php', mono: true }), 'apiUrl');
   // The API URL follows the Zabbix URL until somebody types one of their own.
@@ -1433,7 +1950,7 @@ function zabbixLinkFormCard(s, canCancel) {
   const sync = disable(text('zl-sync', String(s.syncSecs || ''), { mono: true, style: { width: '110px' } }), 'syncSecs');
   const serverSecret = s.ssoSecret && s.ssoSecret.source === 'server';
   const cancel = () => { linkEditing = false; tokenReplace = false; draw(); };
-  return card('Zabbix connection', canCancel ? 'Edit settings' : sum.title,
+  return trackedCard('zabbix-link', 'Zabbix connection', 'Connection', canCancel ? 'edit settings · changes wait for the save bar' : sum.title,
     h('div', { style: { display: 'grid', gap: '12px' } },
       canCancel ? null : h('div', { style: { display: 'grid', gap: '4px', padding: '8px 10px', border: '1px solid var(--border)', borderRadius: '6px' } },
         h('div', { style: { display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap' } },
@@ -1448,11 +1965,9 @@ function zabbixLinkFormCard(s, canCancel) {
         field('API token', tokenField, hint('apiToken', 'Write-only: never shown again once saved. Pairing sets it for you.')),
         field('Sync interval (seconds)', sync, hint('syncSecs', 'How often the Zabbix hosts are read. 30–86400.')),
         field('Allowed sources', src, hint('allowedSources', 'IPs or CIDRs that may call /sso/zabbix and /zabbix/pair. One per line.'))),
-      h('div', { style: { display: 'flex', gap: '18px', flexWrap: 'wrap' } }, tls, http),
-      canCancel ? null : zabbixEventsPanel(s)),
+      h('div', { style: { display: 'flex', gap: '18px', flexWrap: 'wrap' } }, tls, http)),
     [
-      h('button.btn.sm.primary', { onclick: saveLink, disabled: linkBusy }, linkBusy ? 'Saving…' : 'Save'),
-      h('button.btn.sm', { onclick: testLink, disabled: linkBusy }, 'Test connection'),
+      linkBusy ? h('span.muted', 'Saving…') : null,
       h('button.btn.sm', { onclick: pairLink, disabled: linkBusy || serverSecret,
         title: serverSecret ? 'The sign-in secret is set in the server configuration; pairing from here is off.' : 'Show a one-time code to paste into Zabbix' },
       s.paired ? 'Pair again…' : 'Pair with Zabbix…'),
@@ -1461,26 +1976,40 @@ function zabbixLinkFormCard(s, canCancel) {
     ]);
 }
 
+/** The two sync options, as config.txt and the file have them (config.txt last: it wins). */
+const zabbixOptionsNow = () => ({ ...((state.config && state.config.raw && state.config.raw.zabbix) || {}), ...managedZabbixOptions() });
+const ZABBIX_OPTIONS = ['useElasticProCredentials', 'createHosts'];
+
 /**
- * A Zabbix option, saved to the config file — where the core reads it from at every sync,
- * so the file stays the one place it is decided — then applied with a sync straight away.
+ * The save bar's Save for the sync options: saved to the config file — where the core reads
+ * them at every sync, so the file stays the one place they are decided — then applied with a
+ * sync straight away. A switch config.txt manages is drawn locked and never written.
  */
-async function setZabbixOption(key, on) {
+async function saveZabbixOptions() {
   const r = state.config && state.config.raw;
-  // The box is disabled; this is for anything that reaches the handler anyway. A write here
-  // would sit in the file under a value config.txt keeps overriding.
-  if (!r || isManagedZabbixOption(key)) return;
-  r.zabbix = { ...(r.zabbix || {}), [key]: on };
+  if (!r) { toast('No config loaded', 'warn'); return false; }
+  const now = zabbixOptionsNow();
+  const changed = {};
+  for (const key of ZABBIX_OPTIONS) {
+    const el = host && host.querySelector(`#zo-${key}`);
+    if (!el || el.disabled || isManagedZabbixOption(key)) continue;
+    if (!!el.checked !== !!now[key]) changed[key] = !!el.checked;
+  }
+  if (!Object.keys(changed).length) return true;
+  const before = r.zabbix;
+  r.zabbix = { ...(r.zabbix || {}), ...changed };
   try {
     await saveRaw({ silent: true });
   } catch (e) {
+    r.zabbix = before;
     toast(`Could not save the config: ${e.message}`, 'err', 8000, { key: 'zabbix-option' });
-    return;
+    return false;
   }
-  toast(`${key === 'createHosts' ? 'Creating Zabbix hosts' : 'ElasticPro credentials for Zabbix clusters'}: ${on ? 'on' : 'off'}`, 'ok', 4000, { key: 'zabbix-option' });
+  toast(Object.entries(changed).map(([k, on]) => `${k === 'createHosts' ? 'Creating Zabbix hosts' : 'ElasticPro credentials for Zabbix clusters'}: ${on ? 'on' : 'off'}`).join(' · '),
+    'ok', 4000, { key: 'zabbix-option' });
   await syncZabbix();
+  return true;
 }
-
 /** "Read: <template> (N hosts), …" — what the last sync searched, from its reply. */
 function templatesRead(templates) {
   const t = (templates || []).filter((x) => x && x.name);
@@ -1499,7 +2028,7 @@ async function syncZabbix() {
       const skipped = res.skipped || [];
       toast(`Zabbix sync: ${res.clusters} cluster${res.clusters === 1 ? '' : 's'}${skipped.length ? ` \u00b7 ${skipped.length} left out` : ''}`,
         res.clusters || !skipped.length ? 'ok' : 'warn', skipped.length || !res.clusters ? 8000 : 4000,
-        { key: 'zabbix-sync', detail: skipped.length || !res.clusters ? ['Config \u2192 Zabbix lists which hosts and why.'] : [] });
+        { key: 'zabbix-sync', detail: skipped.length || !res.clusters ? ['Config-Management \u203a Zabbix lists which hosts and why.'] : [] });
     }
     // The new list reaches every page the same way the first one did.
     await setConfig(state.config, state.handle);
@@ -1512,70 +2041,97 @@ async function syncZabbix() {
 }
 
 /**
+ * "Sync options": the two switches (they wait for the save bar), then what the last sync
+ * decided — recent changes, hosts not counted, config-file clusters set aside — folded.
+ */
+function zabbixOptionsCard() {
+  if (!zbx) return card('Sync options', 'Loading…', h('div.muted', 'Loading…'));
+  if (!zbx.configured) return null;
+  const zopt = zabbixOptionsNow();
+  const opt = (key, label, help, disabledWhy) => {
+    const lockedOpt = isManagedZabbixOption(key);
+    return h('label.cm-opt', { title: lockedOpt ? MANAGED_NOTE : (disabledWhy || '') },
+      h('input.sw', { id: `zo-${key}`, type: 'checkbox', role: 'switch', checked: !!zopt[key], 'data-label': label,
+        disabled: zbxBusy || !!disabledWhy || lockedOpt || !(state.config && state.config.raw) }),
+      h('span', h('b', label), h('span.cm-opt-help', help),
+        lockedOpt ? h('span.cm-lockline', lockMark(), MANAGED_NOTE) : disabledWhy ? h('span.cm-opt-why', disabledWhy) : null));
+  };
+  const fold = (title, count, items) => (items.length
+    ? h('details.cm-fold', h('summary', h('b', title), h('span.muted', ` · ${count}`)),
+      h('ul', ...items.map((x) => h('li', x))))
+    : null);
+  const shadowed = (state.config && state.config.shadowed) || [];
+  const events = (link && !link.hidden && link.supported && (link.events || []).slice(0, 6)) || [];
+  return trackedCard('zabbix-opts', 'Zabbix sync options', 'Sync options', 'apply on the next sync',
+    h('div', { style: { display: 'grid', gap: '10px' } },
+      opt('useElasticProCredentials', 'Use ElasticPro credentials for Zabbix clusters',
+        'Connect with the credential ElasticPro already has for the same address, or the config’s shared one — instead of the password in Vault. Off: Vault.'),
+      opt('createHosts', 'Create Zabbix hosts from this config',
+        'Each cluster here that Zabbix does not have yet becomes a Zabbix host with the cluster template; its password goes to Vault. Zabbix wins from then on.',
+        zbx.canCreateHosts ? '' : 'Needs the Zabbix write token and Vault writer on the server (see deploy/zabbix/README.md).'),
+      h('div.cm-folds',
+        events.length ? h('details.cm-fold', h('summary', h('b', 'Recent changes'), h('span.muted', ` · ${events.length}`)),
+          h('ul', ...events.map((e) => h('li', { style: { color: e.ok ? '' : 'var(--critical-ink)' } }, `${dt(e.at * 1000)} · ${eventLine(e)}`)))) : null,
+        fold('Host creation', (zbx.provisioned || []).length, zbx.provisioned || []),
+        fold('Hosts not counted as clusters, and why', (zbx.skipped || []).length, zbx.skipped || []),
+        fold('Config-file clusters set aside — Zabbix has them', shadowed.length,
+          shadowed.map((s) => `${s.name} (${s.url}) — now the Zabbix host ${s.by}`)))));
+}
+
+/** The Cluster hosts card's filter, kept across redraws. */
+let zhFilter = '';
+
+/**
  * Where Zabbix clusters come from and whether each can be used.
  *
  * A cluster is a Zabbix host carrying the cluster template; its macros say where it is and
  * how to sign in, and its password is a Vault macro read here and by Zabbix alike. A
  * cluster listed in the config file at the same address is set aside — Zabbix wins — and
- * named below so nobody edits the copy that is no longer used.
+ * named in Sync options so nobody edits the copy that is no longer used.
  */
 function zabbixCard() {
-  if (!zbx) return card('Zabbix', 'Loading…', h('div.muted', 'Loading…'));
+  if (!zbx) return card('Cluster hosts', 'Loading…', h('div.muted', 'Loading…'));
   if (!zbx.configured) {
     return card('Zabbix clusters', 'not connected',
       h('div.sec', { style: { lineHeight: 1.6 } },
         link && link.supported
-          ? 'This server is not connected to a Zabbix API yet. Enter the Zabbix URL above and press Pair with Zabbix — or paste an API token and Save. '
-          : 'This server is not connected to a Zabbix API. An administrator connects it in Config → Zabbix, or on the server with ',
+          ? 'This server is not connected to a Zabbix API yet. Enter the Zabbix URL above, then Pair with Zabbix — or paste an API token and save. '
+          : 'This server is not connected to a Zabbix API. An administrator connects it in Config-Management › Zabbix, or on the server with ',
         link && link.supported ? null : [h('code.inline', 'ELASTICPRO_ZABBIX_API_URL'), ' and ', h('code.inline', 'ELASTICPRO_ZABBIX_API_TOKEN_FILE'), '. '],
         'Passwords held as Vault macros also need ', h('code.inline', 'ELASTICPRO_VAULT_ADDR'),
         ' with an AppRole. See deploy/zabbix/README.md.'));
   }
   const rows = (zbx.clusters || []).map((z) => {
     const cl = client(z._id);
-    return h('tr',
-      h('td', h('b', z.name), h('div.muted', { style: { fontSize: '11px' } }, `host ${z.zabbixHost}${z.client ? ` · client ${z.client}` : ''}`)),
-      h('td.mono', { style: { fontSize: '11.5px' } }, z.url, z.via ? h('div.muted', `via ${z.via}`) : null),
+    return h('tr', { dataset: { zh: z._id || z.name } },
+      h('td', h('b', z.name), h('span.muted', ` · host ${z.zabbixHost}${z.client ? ` · client ${z.client}` : ''}`)),
+      h('td.mono', z.url, z.via ? h('span.muted', ` via ${z.via}`) : null),
       h('td', pill(CREDENTIAL_LABEL[z.credential] || 'none', z.credentialOk ? 'green' : 'red'),
         (z.notes || []).map((n) => h('div.muted', { style: { fontSize: '11px', marginTop: '3px' } }, n))),
-      h('td', { style: { fontSize: '11.5px' } }, (z.zabbixGroups || []).join(', ') || h('span.muted', 'no user group can read it')),
+      h('td', (z.zabbixGroups || []).join(', ') || h('span.muted', 'no user group can read it')),
       h('td', { 'data-cluster-state': z._id, 'data-kind': 'zabbix' }, clusterStatePill(cl, 'zabbix')));
   });
-  const shadowed = (state.config && state.config.shadowed) || [];
-  // config.txt last: what it manages is shown as it is in force, locked, with the reason.
-  const zopt = { ...((state.config && state.config.raw && state.config.raw.zabbix) || {}), ...managedZabbixOptions() };
-  const toggle = (key, label, help, disabledWhy) => h('label', { style: { display: 'flex', gap: '8px', alignItems: 'flex-start' },
-      title: isManagedZabbixOption(key) ? MANAGED_NOTE : (disabledWhy || '') },
-    h('input', { type: 'checkbox', checked: !!zopt[key], disabled: zbxBusy || !!disabledWhy || isManagedZabbixOption(key),
-      onchange: (e) => setZabbixOption(key, e.target.checked) }),
-    h('span', h('b', label), h('div.muted', { style: { fontSize: '11.5px' } }, isManagedZabbixOption(key) ? MANAGED_NOTE : (disabledWhy || help))));
+  const tbl = table(['Cluster host', 'Elasticsearch', 'Password', 'Zabbix user groups that see it', 'Connection'], rows,
+    { emptyText: 'No Zabbix host carries the cluster template yet.' });
+  const apply = () => {
+    const q = zhFilter.trim().toLowerCase();
+    for (const tr of tbl.querySelectorAll('tr[data-zh]')) tr.hidden = !!q && !tr.textContent.toLowerCase().includes(q);
+  };
+  apply();
   const pending = (state.config && state.config.zabbixPending) || [];
-  return card('Zabbix', `${(zbx.clusters || []).length} cluster host(s)${zbx.lastSync ? ` · synced ${ago(zbx.lastSync * 1000)}` : ''}`,
-    h('div', { style: { display: 'grid', gap: '10px' } },
-      h('div', { style: { display: 'grid', gap: '8px', padding: '8px 10px', border: '1px solid var(--border)', borderRadius: '6px' } },
-        toggle('useElasticProCredentials', 'Use ElasticPro credentials for Zabbix clusters',
-          'Connect with the credential ElasticPro already has for the same address, or the config\u2019s shared one — instead of the password in Vault. Off: Vault.'),
-        toggle('createHosts', 'Create Zabbix hosts from this config',
-          'Each cluster here that Zabbix does not have yet becomes a Zabbix host with the cluster template; its password goes to Vault. Zabbix wins from then on.',
-          zbx.canCreateHosts ? '' : 'Needs the Zabbix write token and Vault writer on the server (see deploy/zabbix/README.md).')),
-      (zbx.provisioned || []).length ? h('div', h('b', 'Host creation'),
-        h('ul', { style: { margin: '4px 0 0', paddingLeft: '18px', fontSize: '12px' } }, ...zbx.provisioned.map((s) => h('li', s)))) : null,
-      zbx.error ? h('div.banner.err', h('div', h('div.ttl', 'Last sync failed'), h('div', zbx.error), h('div.muted', 'Showing the list from the last sync that worked.'))) : null,
-      !zbx.vault ? h('div.banner.warn', 'Vault is not configured on this server, so passwords held as Vault macros cannot be read.') : null,
-      table(['Cluster host', 'Elasticsearch', 'Password', 'Zabbix user groups that see it', 'Connection'], rows,
-        { emptyText: 'No Zabbix host carries the cluster template yet.' }),
-      (zbx.templates || []).length ? h('div.muted', { style: { fontSize: '12px' } }, templatesRead(zbx.templates)) : null,
-      (zbx.skipped || []).length ? h('div', h('b', 'Hosts not counted as clusters, and why'),
-        h('ul', { style: { margin: '4px 0 0', paddingLeft: '18px', fontSize: '12px', maxHeight: '200px', overflowY: 'auto' } }, ...zbx.skipped.map((s) => h('li', s)))) : null,
-      pending.length ? h('div.banner.warn', h('div', h('div.ttl', 'Waiting for a working password'),
-        h('div', `${pending.map((p) => p.name).join(', ')} ${pending.length === 1 ? 'is' : 'are'} not used yet: the password could not be read. `
-          + 'Any config-file cluster at the same address stays in use until it can.'))) : null,
-      shadowed.length ? h('div', h('b', 'Config-file clusters set aside — Zabbix has them'),
-        h('ul', { style: { margin: '4px 0 0', paddingLeft: '18px', fontSize: '12px' } },
-          ...shadowed.map((s) => h('li', `${s.name} (${s.url}) — now the Zabbix host ${s.by}`)))) : null),
-    [h('button.btn.sm.primary', { onclick: syncZabbix, disabled: zbxBusy }, zbxBusy ? 'Syncing…' : '↻ Sync now')]);
+  const n = (zbx.clusters || []).length;
+  return h('section.card.cm-card',
+    h('header', h('h2', 'Cluster hosts'),
+      h('span.sub', `${n} host${n === 1 ? '' : 's'} carry the cluster template${zbx.lastSync ? ` · synced ${ago(zbx.lastSync * 1000)}` : ''}${(zbx.templates || []).length ? ` · ${templatesRead(zbx.templates)}` : ''}`),
+      h('div', { style: { marginLeft: 'auto' } },
+        h('input', { type: 'search', placeholder: 'Filter hosts', 'aria-label': 'Filter hosts', value: zhFilter, oninput: (e) => { zhFilter = e.target.value; apply(); } }))),
+    zbx.error ? h('div.banner.err', { style: { margin: '10px 14px 0' } }, h('div', h('div.ttl', 'Last sync failed'), h('div', zbx.error), h('div.muted', 'Showing the list from the last sync that worked.'))) : null,
+    !zbx.vault ? h('div.banner.warn', { style: { margin: '10px 14px 0' } }, 'Vault is not configured on this server, so passwords held as Vault macros cannot be read.') : null,
+    pending.length ? h('div.banner.warn', { style: { margin: '10px 14px 0' } }, h('div', h('div.ttl', 'Waiting for a working password'),
+      h('div', `${pending.map((p) => p.name).join(', ')} ${pending.length === 1 ? 'is' : 'are'} not used yet: the password could not be read. `
+        + 'Any config-file cluster at the same address stays in use until it can.'))) : null,
+    tbl);
 }
-
 /* ------------------------------- Volume fields ------------------------------- */
 
 /**
@@ -1614,7 +2170,7 @@ async function loadVolume() {
     || ((vol.reply || {}).patternSource || '') !== (res.ok ? res.patternSource || '' : '');
   vol.reply = res.ok ? res : null;
   // Redraw only when the answer changes what is shown, so a half-typed field is not wiped.
-  if (changed || vol.unknown) { if (host && host.isConnected && activeSection() && activeSection().id === 'volume') draw(); }
+  if (changed || vol.unknown) { if (isOpen('reports/fields')) { tracker.reset('volume'); draw(); } }
 }
 
 /**
@@ -1667,18 +2223,20 @@ function resetVolume() {
 }
 
 async function saveVolume() {
-  if (!editsFileDirectly()) { toast('Only an ElasticPro admin changes these settings', 'warn', 6000); return; }
+  if (!editsFileDirectly()) { toast('Only an ElasticPro admin changes these settings', 'warn', 6000); return false; }
   const override = vol.mode === 'override';
-  if (override && !vol.clusterId) { toast('Pick the cluster to override first', 'warn'); return; }
+  if (override && !vol.clusterId) { toast('Pick the cluster to override first', 'warn'); return false; }
   const m = volModel();
   const values = readVolumeForm();
   const problems = validateVolume(values, { partial: override });
   // A locked row is not the form's to judge: config.txt's value is what is in force.
   const mine = problems.filter((p) => ![...m.locked].some((path) => p.startsWith(LOCKED_LABEL[path] || '\u0000')));
-  if (mine.length) { vol.note = { text: mine.join(' '), cls: 'banner err' }; toast(mine[0], 'err', 6000); draw(); return; }
+  // Said in place: a redraw would put back the saved values over what was typed.
+  if (mine.length) { const n = $('#vf-note'); if (n) { n.textContent = mine.join(' '); n.style.color = 'var(--critical-ink)'; } toast(mine[0], 'err', 6000); return false; }
   const r = state.config && state.config.raw;
-  if (!r) { toast('No config is loaded', 'warn'); return; }
+  if (!r) { toast('No config is loaded', 'warn'); return false; }
   const before = r.defaults;
+  let ok = true;
   r.defaults = override
     ? applyOverride(before, vol.clusterId, values, m.values, m.locked)
     : applyDefaults(before, values, m.locked);
@@ -1687,11 +2245,13 @@ async function saveVolume() {
     vol.note = { text: 'Saved.', cls: 'banner' };
     toast(override ? 'Volume fields saved for this cluster' : 'Volume fields saved', 'ok', 4000);
   } catch (e) {
+    ok = false;
     r.defaults = before;
     vol.note = { text: `Not saved: ${e.message}`, cls: 'banner err' };
     toast(`Not saved: ${e.message}`, 'err', 8000);
   }
   draw();
+  return ok;
 }
 
 /** The label each validation message starts with, so a locked row's complaint can be set aside. */
@@ -1828,11 +2388,11 @@ function indicesCard() {
       h('div.vf-fld', h('label', { for: 'vf-time', ...lbl }, 'Time field'),
         withPreview(lock('timeField', text('vf-time', start('timeField'), { mono: true, placeholder: shown('timeField') || '@timestamp' }))), note('timeField')),
       h('div.vf-fld', h('label', { for: 'vf-tz', ...lbl }, 'Days end at'),
-        h('input#vf-tz', { value: '00:00 UTC', disabled: true, title: 'The collector counts days in UTC' }))),
+        h('input#vf-tz', { value: '00:00 UTC', disabled: true, 'data-untracked': '', title: 'The collector counts days in UTC' }))),
     h('div.vf-fld',
       h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' } },
         h('span', lbl, 'What this matches on'),
-        h('select#vf-pv-cluster', { 'aria-label': 'Cluster to preview against', onchange: () => previewPattern(true) },
+        h('select#vf-pv-cluster', { 'aria-label': 'Cluster to preview against', 'data-untracked': '', onchange: () => previewPattern(true) },
           ...list.map((c) => h('option', { value: c.id, selected: c.id === pick }, c.name))),
         h('button#vf-pv-go.btn.sm', { type: 'button', onclick: () => previewPattern(true), disabled: !list.length }, 'Preview')),
       h('div#vf-pv.vf-prev', { 'aria-live': 'polite' }, h('div.muted', { style: { padding: '6px 12px' } }, list.length ? 'Loading…' : 'No cluster to preview against.')),
@@ -1841,8 +2401,7 @@ function indicesCard() {
     h('div', { style: { display: 'flex', gap: '6px', flexWrap: 'wrap', alignItems: 'center' } },
       pill('indexPattern', 'UI_VOLUME_INDEX_PATTERN'), pill('dayFrom', 'UI_VOLUME_DAY_FROM'), pill('timeField', 'UI_VOLUME_TIME_FIELD')));
   setTimeout(() => previewPattern(true), 0);
-  return card('Which indices count', override ? 'override for one cluster: only what differs is saved' : 'Config › Reports', body,
-    [h('button#vf-pat-save.btn.sm.primary', { onclick: saveVolume, disabled: !canWrite, title: canWrite ? 'Saves every field of this section' : 'Only an admin can write the config file' }, 'Save')]);
+  return card('Which indices count', override ? 'override for one cluster: only what differs is saved' : 'changes wait for the save bar', body);
 }
 
 function volumeCard() {
@@ -1851,20 +2410,20 @@ function volumeCard() {
 
   const mode = (id, label) => h('button.seg-btn', {
     'aria-pressed': String(vol.mode === id),
-    onclick: () => { vol.mode = id; vol.note = null; draw(); loadVolume(); },
+    onclick: () => { vol.mode = id; vol.note = null; tracker.reset('volume'); draw(); loadVolume(); },
   }, label);
 
   const bar = h('div.vf-bar',
     h('div.seg-group', { role: 'group', 'aria-label': 'Which settings' },
       mode('defaults', 'Defaults · all clusters'), mode('override', 'Override for one cluster…')),
     override ? h('select#vf-cluster', {
-      'aria-label': 'Cluster to override',
-      onchange: (e) => { vol.clusterId = e.target.value; vol.note = null; draw(); loadVolume(); },
+      'aria-label': 'Cluster to override', 'data-untracked': '',
+      onchange: (e) => { vol.clusterId = e.target.value; vol.note = null; tracker.reset('volume'); draw(); loadVolume(); },
     }, ...list.map((c) => h('option', { value: c.id, selected: c.id === vol.clusterId }, c.name))) : null,
     h('span.muted', { style: { fontSize: '12px' } }, `${overrideIds(rawDefaultsNow()).length} of ${list.length} clusters override these fields`),
     h('span.vf-bar-right',
       h('span.muted', { style: { fontSize: '12px' } }, 'Check against'),
-      h('select#vf-check-cluster', { 'aria-label': 'Cluster to check against' },
+      h('select#vf-check-cluster', { 'aria-label': 'Cluster to check against', 'data-untracked': '' },
         ...list.map((c) => h('option', { value: c.id, selected: c.id === (vol.checked || (override ? vol.clusterId : state.selected)) }, c.name))),
       h('button#vf-check.btn.sm', { onclick: (e) => checkVolume(e.currentTarget), disabled: !list.length }, 'Check fields')));
 
@@ -1917,24 +2476,25 @@ function volumeCard() {
       h('div#vf-note.muted', { style: { fontSize: '12px' } }),
       fieldsTable, grid,
       vol.note ? h('div', { class: vol.note.cls, style: { margin: 0, fontSize: '12px' } }, vol.note.text) : null),
-    [h('button#vf-reset.btn.sm', { onclick: resetVolume }, 'Reset to defaults'),
-      h('button#vf-save.btn.sm.primary', { onclick: saveVolume, disabled: !canWrite, title: canWrite ? '' : 'Only an admin can write the config file' }, 'Save')]);
+    [h('button#vf-reset.btn.sm', { onclick: () => { resetVolume(); tracker.refresh(); } }, 'Reset to defaults')]);
 }
 
 /** The section's two loads: the fields, and the mailed report with its mail server (ui/report-mail.js). */
 function loadVolumeSection() {
   loadVolume();
-  loadPlanTemplates(() => { if (host && host.isConnected && activeSection() && activeSection().id === 'volume') draw(); });
-  loadReportMail(() => { if (host && host.isConnected && activeSection() && activeSection().id === 'volume') draw(); });
+  const onReports = () => route.page === 'reports' && !!host && host.isConnected;
+  loadPlanTemplates(() => { if (onReports()) { tracker.reset('plan-templates'); draw(); } });
+  loadReportMail(() => { if (onReports()) { tracker.reset('report-mail'); tracker.reset('smtp'); draw(); } });
 }
 
-function volumeSection() {
+/* ------------------------------- Reports: the three tabs ------------------------------- */
+
+/** Reports › Indices & volume fields: which indices count, the fields, the config.txt-only keys. */
+function fieldsTab() {
   const v = volModel().values;
-  return h('div', { style: { display: 'grid', gap: '12px' } },
-    indicesCard(),
-    volumeCard(),
-    reportMailPanels(),
-    planTemplatesPanel(() => { if (host && host.isConnected && activeSection() && activeSection().id === 'volume') draw(); }),
+  return h('div.cm-stack',
+    h('div.cm-stack', { dataset: { track: 'volume', trackLabel: 'Volume fields' } }, indicesCard(), volumeCard()),
+    reportHostsPanel(),
     h('div.vf-info',
       card('Same settings in the clusters file', 'what Save writes', h('pre.vf-pre', yamlBlock(v))),
       card('Hosted: config.txt keys', 'one line per setting',
@@ -1943,51 +2503,121 @@ function volumeSection() {
             `A key set in config.txt locks its row: it shows "${MANAGED_NOTE}" here and is never written to the file.`)))));
 }
 
+/** Reports › Mail delivery: the status line, the mailed report and the mail server (ui/report-mail.js). */
+function mailTab() {
+  return mailDeliveryPanels();
+}
+
+/** Reports › Plan templates (ui/plan-templates-editor.js); its edits wait for the save bar like the rest. */
+function templatesTab() {
+  return h('div', { dataset: { track: 'plan-templates', trackLabel: 'Plan templates' } },
+    planTemplatesPanel(() => { if (isOpen('reports/templates')) draw(); }));
+}
+
+/* --------------------------------------- Data --------------------------------------- */
+
+/**
+ * Data › Backend: the history store as the optional Elasticsearch backend. The board's "Where
+ * each kind of data goes" table (History / Reports / Alerts, each built-in, built-in + ES, or ES
+ * only) and the built-in store's size are Phase 2 (dataRoutingSupported()): nothing reports them
+ * yet, so nothing is drawn for them.
+ */
+function backendTab() {
+  return h('div.cm-stack', { dataset: { track: 'history', trackLabel: 'History store' } }, historyStoreCard());
+}
+
+/* -------------------------------------- System -------------------------------------- */
+
+/**
+ * PHASE 2 HOOK — System › Backup & restore (board 9). The tab exists only when the core reports
+ * backup support (backupSupported()); no core does yet, and this build does not draw the panel.
+ */
+function backupTab() {
+  return card('Backup & restore', 'reported by the core',
+    h('div.muted', 'This ElasticPro core reports backup support; this page does not draw it yet.'));
+}
+
+/**
+ * System › Defaults, edited in place (it was a dialog). The fields and their save are the same
+ * ones the dialog used (ui/config-editor.js defaultsFields / saveDefaultsForm); a default
+ * config.txt manages is drawn locked with the reason and never written.
+ */
 function defaultsCard() {
   const d = state.defaults;
-  return card('Effective defaults', 'from the defaults block, with built-in fallbacks',
-    table([], Object.entries(d).map(([k, v]) => kvRow(k, displayValue(v)))),
-    [h('button.btn.sm', { onclick: async () => { if (await editDefaults()) draw(); } }, 'Edit defaults…')]);
+  // The fields read the file's defaults (a config with no file behind it yet gets an empty one).
+  const fields = defaultsFields();
+  const canWrite = editsFileDirectly() && !!state.config;
+  if (!canWrite) fields.forEach((row) => row.querySelectorAll('input, select').forEach((el) => { el.disabled = true; }));
+  return h('div.cm-stack',
+    card('Defaults', 'apply to every cluster unless a cluster overrides them',
+      h('div', { dataset: { track: 'defaults', trackLabel: 'Defaults' }, style: { display: 'grid', gap: '10px' } },
+        canWrite ? null : h('div.banner.warn', { style: { margin: 0, fontSize: '12px' } }, 'Only an ElasticPro admin changes the defaults, or whoever edits config.txt on the server.'),
+        ...fields,
+        h('div#cm-defaults-msg.muted', { style: { fontSize: '12px' } }))),
+    h('details.disc.cm-effective',
+      h('summary', `Every effective default (${Object.keys(d).length}) — from the defaults block, with built-in fallbacks`),
+      table([], Object.entries(d).map(([k, v]) => kvRow(k, displayValue(v))))));
+}
+
+async function saveDefaults() {
+  const res = await saveDefaultsForm();
+  const msgEl = host && host.querySelector('#cm-defaults-msg');
+  if (!res.ok) {
+    if (msgEl) { msgEl.textContent = res.message; msgEl.style.color = 'var(--critical-ink)'; }
+    toast(res.message, 'warn', 6000);
+    return false;
+  }
+  toast('Defaults saved', 'ok', 3000);
+  draw();
+  return true;
+}
+
+/** The System › Config file header: replace the file, or read it again. */
+function fileActions() {
+  return [
+    // "Pick another file" asks the core for a path, which is the right question on a desktop
+    // and the wrong one on a server, where the file is on the operator's own machine.
+    canPickByPath()
+      ? h('button.btn', { type: 'button', onclick: repick }, 'Pick another file…')
+      : filePickerButton('Upload a config…', { accept: '.json,.yaml,.yml', className: 'btn', onText: (txt, err, name) => uploadConfig(txt, err, name) }),
+    h('button.btn.primary', { type: 'button', onclick: reload, disabled: !state.handle || isSnapshotMode() }, 'Reload from disk'),
+  ];
+}
+
+/** System › Config file: the file, Diagnostics beside it, its earlier versions, and Forget last. */
+function systemFileTab() {
+  return h('div.cm-stack',
+    h('div.cm-grid2', fileCard(), diagnosticsCard()),
+    versionsCard(),
+    h('section.cm-danger', { 'aria-labelledby': 'cm-forget-h' },
+      h('div',
+        h('h2#cm-forget-h', 'Forget file & credentials'),
+        h('p', 'Clears the remembered file, the credentials held in memory and any credential kept in the OS vault, then reloads. '
+          + 'Clusters stop being watched until a config is loaded again. The file on disk is not touched.')),
+      h('button.btn.danger', { type: 'button', onclick: forget }, 'Forget…')));
 }
 
 function diagnosticsCard() {
   const d = state.defaults;
-  return card('Diagnostics & shortcuts', '',
-    h('div', { style: { display: 'grid', gap: '10px' } },
-      table([], [
-        kvRow('Write protection', isReadOnly() ? 'read-only — GET/HEAD + search POSTs only' : 'DISABLED — writes permitted (readOnly: false)'),
-        kvRow('Enforced by the core', 'Loading…'),
-        kvRow('Routes', `${clusters().filter((c) => c.via).length} via jump host · ${clusters().filter((c) => !c.via).length} direct`),
-        kvRow('App version', h('span#core-version', '…')),
-        kvRow('Last refresh', state.lastRefresh ? ago(state.lastRefresh) : 'never'),
-        kvRow('Auto-refresh', state.autoRefresh ? `every ${d.refreshIntervalSec}s` : 'paused'),
-      ]),
-      // Advertise what exists. The number keys that used to jump between pages were
-      // removed — a stray digit moving the page out from under somebody was worse than
-      // the shortcut was worth — and this line kept offering them for eleven pages that
-      // never had them.
-      h('div', { style: { fontSize: '12px' } },
-        h('b', 'Keyboard: '), h('code.inline', 'r'), ' refresh · ',
-        h('code.inline', 'Ctrl/⌘+Enter'), ' run the request in the console')),
+  const routes = `${clusters().filter((c) => c.via).length} via a jump host · ${clusters().filter((c) => !c.via).length} direct`;
+  return card('Diagnostics', '',
+    table([], [
+      kvRow('Write protection', isReadOnly() ? h('span', pill('read-only', 'green'), h('span.muted', ' GET/HEAD and search POSTs only'))
+        : h('span', pill('DISABLED', 'orange'), h('span.muted', ' writes permitted (readOnly: false)'))),
+      kvRow('Enforced by the core', h('span#cm-guard', 'Loading…')),
+      kvRow('Routes', routes),
+      kvRow('App version', h('span#core-version', core && core.version ? `v${core.version}` : '…')),
+      kvRow('Last refresh', `${state.lastRefresh ? ago(state.lastRefresh) : 'never'} · auto-refresh ${state.autoRefresh ? `every ${d.refreshIntervalSec}s` : 'paused'}`),
+      // Advertise what exists. The number keys that used to jump between pages were removed —
+      // a stray digit moving the page out from under somebody was worse than the shortcut.
+      kvRow('Keyboard', h('span', h('kbd', 'r'), ' refresh · ', h('kbd', '/'), ' find a setting · ', h('kbd', 'Ctrl/⌘+Enter'), ' run in REST')),
+    ]),
     [
-      h('button.btn.sm', { onclick: () => saveTextAs('clusters.example.yaml', EXAMPLE_YAML) }, 'Save example YAML…'),
       isSnapshotMode() ? null : h('button.btn.sm', { onclick: () => refreshAll({ force: true }) }, 'Force refresh all'),
-      h('button.btn.sm', { onclick: () => navigateTo('console') }, 'Open REST console'),
+      h('button.btn.sm', { onclick: () => navigateTo('console') }, 'Open REST'),
+      h('button.btn.sm', { onclick: () => saveTextAs('clusters.example.yaml', EXAMPLE_YAML) }, 'Save example YAML…'),
     ].filter(Boolean));
 }
-
-function draw() {
-  const active = activeSection();
-  mount(host, sectionNav(), h('div', { style: { marginTop: '12px' } }, active ? active.build() : null));
-  // A section that needs a round trip asks for it here rather than on page entry, so
-  // opening Config no longer fires every request the page could ever need — and once per
-  // visit, so a redraw never asks again.
-  if (active && active.load && loadedSection !== active.id) {
-    loadedSection = active.id;
-    active.load();
-  }
-}
-
 /** The raw file entry behind a normalised cluster (matched by name, then url). */
 function kvRow(k, v) {
   return h('tr.kv', h('td.k', k), h('td.v.mono', v));

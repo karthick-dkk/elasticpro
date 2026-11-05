@@ -1,5 +1,5 @@
 /**
- * Config › History store (0.3.53, docs/HISTORY.md): the dedicated Elasticsearch endpoint
+ * Config-Management › Data › Backend: the history store (0.3.53, docs/HISTORY.md): the dedicated Elasticsearch endpoint
  * that keeps ElasticPro's own volume, capacity and delay history.
  *
  * Messages and pure helpers: core/history-store.js. Hosted only: a desktop core answers
@@ -79,6 +79,18 @@ const call = async (fn, okText, { keepDraft = true } = {}) => {
 };
 
 const save = () => call(() => historySet(readForm()), 'History store saved', { keepDraft: false });
+
+/** Config-Management's save bar runs this (it was the card's Save). True when the core took it. */
+export async function saveHistoryStore() {
+  const res = await save();
+  return !!res && res.ok !== false;
+}
+
+/** The save bar's Discard: forget what was typed; the next draw shows what the core holds. */
+export function discardHistoryStore() { hs.draft = null; }
+
+/** Whether Write history is on (for Config-Management's menu). */
+export const historyArmed = () => !!(hs.reply && hs.reply.armed);
 const test = () => call(() => historyTest(), null);
 const backfill = () => call(() => historyBackfill(), 'Copying existing history');
 const arm = (on) => call(() => historyArm(on), on ? 'Write history is on' : 'Write history is off');
@@ -110,7 +122,7 @@ export function historyStoreCard() {
   const row = { style: { display: 'flex', gap: '14px', flexWrap: 'wrap', alignItems: 'end' } };
   const lines = privilegeLines(t, r.settings && r.settings.prefix);
 
-  return card('History store', armed ? 'writing' : 'not writing',
+  return card('History store', `the optional Elasticsearch backend \u00b7 ${armed ? 'writing' : 'not writing'}`,
     h('div', { style: { display: 'grid', gap: '8px' } },
       h('div', row,
         field('URL', text('hs-url', s.url, { mono: true, placeholder: 'https://history.example:9200', style: { width: '320px' } }),
@@ -125,7 +137,7 @@ export function historyStoreCard() {
           : null),
       h('div', row,
         field('TLS', select('hs-tls', s.tls || 'auto', TLS_CHOICES),
-          'A certificate is pinned from Config › Jump hosts & trust, as for clusters. The global insecure TLS default does not apply here.'),
+          'A certificate is pinned from Clusters › Jump hosts & trust, as for clusters. The global insecure TLS default does not apply here.'),
         field('Jump host', select('hs-via', s.via || '', [['', 'Direct'], ...(r.jumpHosts || []).map((id) => [id, id])])),
         field('Index prefix', text('hs-prefix', prefix, { mono: true, style: { width: '190px' } }),
           `Indices: ${indexNames(prefix).join(', ')}`)),
@@ -134,8 +146,8 @@ export function historyStoreCard() {
         ...STREAMS.map((k) => h('label', { style: { display: 'inline-flex', gap: '5px', alignItems: 'center' } },
           h('input', { id: `hs-stream-${k}`, type: 'checkbox', checked: !!streams[k] }), k))),
       h('div', { style: { display: 'flex', gap: '8px', flexWrap: 'wrap' } },
-        h('button.btn.primary', { id: 'hs-save', onclick: save }, 'Save'),
-        h('button.btn', { id: 'hs-test', onclick: test }, 'Test connection')),
+        h('button.btn', { id: 'hs-test', onclick: test }, 'Test connection'),
+        h('span.muted', { style: { fontSize: '11.5px', alignSelf: 'center' } }, 'A dedicated store, never a monitored cluster. Changes wait for the save bar.')),
       t
         ? h('div', { id: 'hs-test-result', style: { fontSize: '12px', display: 'grid', gap: '2px' } },
             h('div', { style: { fontWeight: '600' } }, `Test ${testHeadline(t)}`, h('span.muted', { style: { fontWeight: '400' } }, t.at ? ` · ${when(t.at)}` : '')),
@@ -145,7 +157,7 @@ export function historyStoreCard() {
       h('div', { style: { display: 'flex', gap: '14px', alignItems: 'center', flexWrap: 'wrap', fontSize: '12.5px' } },
         h('label', { style: { display: 'inline-flex', gap: '6px', alignItems: 'center' } },
           h('input', {
-            id: 'hs-arm', type: 'checkbox', checked: armed, disabled: !!reason,
+            id: 'hs-arm', type: 'checkbox', checked: armed, disabled: !!reason, 'data-untracked': '',
             onchange: (e) => arm(!!e.target.checked),
           }), h('b', 'Write history')),
         reason ? h('span.muted', { id: 'hs-arm-reason', style: { fontSize: '12px' } }, reason) : null,
