@@ -169,6 +169,14 @@ release_compose() {   # VERSION DEST — the docker-compose.yml that release shi
   done
   return 1
 }
+# The release a compose file came from, read from its own default image pins
+# (elasticpro-nginx/-postgres/-redis:X.Y.Z, which every release sets to itself); empty unless
+# they all name the same version. The core's line is left out: a comment there names 0.2.0.
+pinned_version() {
+  local vs
+  vs=$(grep -Eo 'elasticpro-(nginx|postgres|redis):[0-9]+\.[0-9]+\.[0-9]+' "$1" 2>/dev/null | sed 's/.*://' | sort -u)
+  [ -n "$vs" ] && [ "$(printf '%s\n' "$vs" | wc -l)" -eq 1 ] && printf '%s' "$vs"
+}
 # Decides whether this upgrade brings in TARGET's compose file (COMPOSE_NEW, a temporary copy),
 # and stops the script, nothing changed, when it cannot do so safely. $1 TARGET, $2 the version
 # running now (may be empty).
@@ -179,17 +187,20 @@ compose_plan() {
   release_compose "$1" "$new" \
     || fail "deploy/$COMPOSE has no report worker, and the $1 release's copy could not be fetched from $RELEASE_URL — nothing changed. Check the network, set ELASTICPRO_RELEASE_URL to a mirror (or file:///dir holding v$1/deploy/$COMPOSE), or see deploy/README.md (Updating)"
   has_worker "$new" || return 0      # that release predates the worker: nothing to bring in
-  # Edited here? It must be byte for byte what a release shipped: the one running now, or the
-  # one before it (an older deploy.sh upgraded the images and left the file behind).
-  for v in "$2" "$(version_of "$(env_get ELASTICPRO_IMAGE_PREVIOUS)")"; do
+  # Edited here? It must be byte for byte what a release shipped: the one running now, the one
+  # before it, or the one its own image pins name — a deploy.sh from before 0.3.54 upgraded the
+  # images and left the file behind, so an install upgraded several times still has the file it
+  # was installed (or last replaced) with.
+  for v in "$2" "$(version_of "$(env_get ELASTICPRO_IMAGE_PREVIOUS)")" "$(pinned_version "$COMPOSE")"; do
     [ -n "$v" ] || continue
+    case " $fetched " in *" $v "*) continue ;; esac
     release_compose "$v" "$shipped" || continue
     fetched="$fetched $v"
     if cmp -s "$COMPOSE" "$shipped"; then matched=$v; break; fi
   done
   if [ -z "$matched" ] && [ "$REPLACE_COMPOSE" != 1 ]; then
     if [ -n "$fetched" ]; then
-      say "✗ deploy/$COMPOSE has no report worker, and it differs from the file ElasticPro${fetched} shipped: it was edited here." >&2
+      say "✗ deploy/$COMPOSE has no report worker, and it differs from the file each of these releases shipped:$fetched — it was edited here." >&2
     else
       say "✗ deploy/$COMPOSE has no report worker, and whether it was edited here cannot be told: the file of the version running now (${2:-not known}) could not be fetched." >&2
     fi
