@@ -15,6 +15,8 @@ import { openExternal } from '../core/platform.js';
 import { modal } from './modal.js';
 
 export const AUTHOR = 'karthickdk';
+/** The author as Config-Management's About card names them. */
+export const AUTHOR_NAME = 'Karthick Dk';
 export const REPO = 'https://github.com/karthick-dkk/elasticpro';
 export const ISSUES = `${REPO}/issues`;
 export const NEW_ISSUE = `${REPO}/issues/new`;
@@ -71,7 +73,7 @@ export function aboutDialog(version) {
       h('div', { style: { fontSize: '12.5px', lineHeight: '1.7' } },
         // The version is shown in one place only — Config → Diagnostics — so it is named here
         // as a place, not repeated as a number.
-        line('Version', 'Config → Diagnostics → App version'),
+        line('Version', 'Config-Management › About (and System › Config file)'),
         line('Author', extLink(AUTHOR, 'https://github.com/karthick-dkk')),
         line('Source', extLink(REPO.replace('https://', ''), REPO)),
         line('Support', extLink('Report a problem or ask a question', NEW_ISSUE)),
@@ -81,7 +83,7 @@ export function aboutDialog(version) {
         h('div',
           h('div.ttl', 'If you are reporting a problem'),
           h('div',
-            'Include the app version (Config → Diagnostics) and what the status strip showed. Never paste your '
+            'Include the app version (Config-Management › About) and what the status strip showed. Never paste your '
             + 'config file or a screenshot of the Config page — both carry the cluster '
             + 'credential, and an issue is public.'))),
     ],
