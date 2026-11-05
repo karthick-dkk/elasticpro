@@ -33,6 +33,7 @@ node tools/unit-check.mjs                             # pure arithmetic, no DOM
 node tools/render-check.mjs --config <fixture.json>   # all 11 pages render
 node tools/behaviour-check.mjs --config <fixture.json> # and the ones with behaviour
 tools/hosted-check.sh                                 # the hosted message contract
+tools/compose-upgrade-check.sh                        # deploy.sh --upgrade and the compose file (dry run)
 node tools/fit-check.mjs --config tools/fit-fixture.json  # no page, dialog or panel needs a sideways scrollbar (WebKit + Chromium; bridge + mocks up, see its header)
 cargo test --workspace && cargo clippy --workspace --all-targets -- -D warnings
 deploy/trial.sh                                       # hosted stack, four security properties

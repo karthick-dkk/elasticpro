@@ -168,8 +168,11 @@ brings the file in:
   `--upgrade` fetches that file (`https://raw.githubusercontent.com/karthick-dkk/elasticpro/v<version>/deploy/docker-compose.yml`,
   or under `ELASTICPRO_RELEASE_URL` — a mirror, or `file:///dir` holding `v<version>/deploy/docker-compose.yml`
   on a host without internet access) before anything is pulled or changed.
-- It replaces the file **only if it is exactly as a release shipped it** (the version running
-  now, or the one before it). The old file is kept as `docker-compose.yml.bak-<time>` and named in
+- It replaces the file **only if it is exactly as a release shipped it**: the version running
+  now, the one before it, or the release the file's own image pins name (`elasticpro-nginx`,
+  `-postgres` and `-redis` defaults, all the same version). A `deploy.sh` from before 0.3.54
+  upgraded the images and left the file behind, so an install upgraded several times still has
+  the file it was installed with; the pins say which that was. The old file is kept as `docker-compose.yml.bak-<time>` and named in
   `.compose-previous`. `.env`, `config.txt` and `docker-compose.override.yml` are not touched; the
   new file is loaded with them (`docker compose config`) before anything restarts, and a file that
   does not load is put back with nothing else changed.

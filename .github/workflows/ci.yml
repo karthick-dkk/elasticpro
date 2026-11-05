@@ -91,6 +91,11 @@ jobs:
       - name: hosted-mode contract
         run: tools/hosted-check.sh
 
+      # deploy.sh --upgrade brings in a release's compose file only when the installed one is
+      # as some release shipped it. Dry runs against a release mirror on disk: nothing pulled.
+      - name: deploy.sh compose upgrade
+        run: tools/compose-upgrade-check.sh
+
       - name: render every page, then drive the ones with behaviour
         run: |
           node tools/mock-es.mjs 9299 &

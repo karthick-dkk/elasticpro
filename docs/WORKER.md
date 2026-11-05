@@ -178,7 +178,8 @@ Decisions made while building, within the contract:
   `docker-compose.yml` has no `worker` service and the target release's has one, `deploy.sh
   --upgrade` fetches that release's file (`ELASTICPRO_RELEASE_URL`, default the repository's raw
   files) and puts it in place — only when the installed file is byte for byte what the running
-  release (or the one before it) shipped; otherwise it stops, nothing changed, and says how to
+  release, the one before it, or the release its own image pins name (a `deploy.sh` from
+  before 0.3.54 left the installed file behind across upgrades) shipped; otherwise it stops, nothing changed, and says how to
   carry the edits over (`docker-compose.override.yml`, then `--replace-compose`). The old file is
   kept as `docker-compose.yml.bak-<time>`, named in `.compose-previous`; `--rollback` and a failed
   upgrade put it back (`up -d --remove-orphans`); `--dry-run` prints the diff; `.env` and override
