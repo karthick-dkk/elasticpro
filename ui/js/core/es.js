@@ -385,7 +385,7 @@ export class EsClient {
 
   /**
    * The Cluster health button of the open Clusters row, asked only when the button is opened
-   * (never on the poll): the indices of one health, their shards (the unassigned ones carry a
+   * (never on the poll): the indices of one health, the cluster's shard states (the unassigned ones carry a
    * reason code), and Elasticsearch's own explanation of ONE unassigned shard — a GET with no
    * body explains the first one it finds; choosing the shard is a POST the core does not treat
    * as a read.
@@ -393,8 +393,9 @@ export class EsClient {
   indicesOfHealth(health) {
     return this.json('GET', `/_cat/indices?format=json&bytes=b&health=${encodeURIComponent(health)}&expand_wildcards=open,closed&h=index,health,status,pri,rep`);
   }
-  shardsOfIndices(names) {
-    return this.json('GET', `/_cat/shards/${names.map(encodeURIComponent).join(',')}?format=json&h=index,shard,prirep,state,unassigned.reason`);
+  // One listing, not one path per index name (long names overflow the URL); the caller keeps the unassigned ones of the indices it lists.
+  shardStates() {
+    return this.json('GET', '/_cat/shards?format=json&h=index,shard,prirep,state,unassigned.reason');
   }
   allocationExplain() { return this.json('GET', '/_cluster/allocation/explain'); }
 

@@ -2,8 +2,8 @@
  * What the expanded Clusters row (overview.js `detail`) is drawn from, as plain data — pure,
  * so the page and tools/unit/cluster-boxes.test.mjs read ONE definition of each figure:
  *
- * - the disk lines (amber 85, red 90) and the level a percentage is on: the summary's Size
- *   cell, the nodes table and Play all colour a disk reading from here;
+ * - (disk levels are NOT defined here: the Size cell, the Disk usage cell and the nodes table all
+ *   ask core/disk-balance.js diskAgainstWatermarks, the cluster's own watermarks);
  * - a node's free size and whether it is a data node;
  * - which indices the Cluster health button lists (red cluster: red ones; yellow: yellow),
  *   their unassigned shards and the reason ElasticPro can honestly give for each;
@@ -19,16 +19,6 @@ import { ilmCoverage, ilmErrorsOf, slmCoverage, logsOf } from './lifecycle-error
 
 /* ----------------------------------- disks ----------------------------------- */
 
-/** Where a disk reading turns amber (`warn`) and red (`crit`), in % used. Elasticsearch's own default watermarks. */
-export const DISK_LINES = { warn: 85, crit: 90 };
-
-/** 'ok' | 'low' (amber) | 'high' (red) | 'unknown' for a % used. */
-export function diskLevel(p) {
-  const n = Number(p);
-  if (p === null || p === undefined || p === '' || !isFinite(n)) return 'unknown';
-  return n >= DISK_LINES.crit ? 'high' : n >= DISK_LINES.warn ? 'low' : 'ok';
-}
-
 const fin = (v) => (v === null || v === undefined || v === '' ? NaN : Number(v));
 
 /**
@@ -41,9 +31,6 @@ export function nodeFreeBytes(n) {
   const avail = fin(n && n['disk.avail']);
   return isFinite(avail) ? Math.max(0, avail) : null;
 }
-
-/** The level a node's free-size cell takes: the one its disk % is on. */
-export const freeLevel = (n) => diskLevel(fin(n && n['disk.used_percent']));
 
 /** A node that holds shards: the plain `data` role or any `data_*` tier / content role. */
 export const isDataNode = (roles) => (roles || []).some((r) => r === 'data' || String(r).startsWith('data_'));
@@ -111,12 +98,15 @@ export const problemButtonText = (health, n) => `${n} ${health} ${n === 1 ? 'ind
 
 /**
  * Unassigned shards per index from a `_cat/shards` answer
- * ({ index, shard, prirep, state, 'unassigned.reason' }). → Map(index → { primaries, replicas, codes })
+ * ({ index, shard, prirep, state, 'unassigned.reason' }), for the indices in `only` (an iterable of
+ * names; all when omitted). → Map(index → { primaries, replicas, codes })
  */
-export function unassignedByIndex(shards) {
+export function unassignedByIndex(shards, only) {
   const out = new Map();
+  const keep = only ? new Set(only) : null;
   for (const s of Array.isArray(shards) ? shards : []) {
     if (String(s.state || '').toUpperCase() !== 'UNASSIGNED') continue;
+    if (keep && !keep.has(s.index)) continue;
     const e = out.get(s.index) || { primaries: 0, replicas: 0, codes: [] };
     if (s.prirep === 'p') e.primaries += 1; else e.replicas += 1;
     const code = String(s['unassigned.reason'] || '').toUpperCase();

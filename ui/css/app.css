@@ -2307,3 +2307,4 @@ td.num.bad { color: var(--critical-ink); font-weight: 600; }
 /* The section and popover tables read like the board: plain headers, not the page's small caps; the index name stays on one line. */
 .cl-sec .tbl th, .cl-hp-tbl th { text-transform: none; letter-spacing: 0; font-size: 11.5px; font-weight: 600; color: var(--text-secondary); }
 .cl-hp-tbl td.mono { white-space: nowrap; }
+.cl-mini i.unk { background: var(--text-muted); }

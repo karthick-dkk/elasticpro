@@ -8,10 +8,17 @@ const ROOT = path.resolve(import.meta.dirname, '../..');
 const B = await import(pathToFileURL(path.join(ROOT, 'ui/js/core/cluster-boxes.js')).href);
 const LC = await import(pathToFileURL(path.join(ROOT, 'ui/js/core/lifecycle-errors.js')).href);
 
-test('disk level: amber from 85, red from 90, unknown is not ok', () => {
-  assert.deepEqual([84.9, 85, 89.9, 90, 100].map(B.diskLevel), ['ok', 'low', 'low', 'high', 'high']);
-  for (const v of [NaN, null, undefined, '', 'x']) assert.equal(B.diskLevel(v), 'unknown', String(v));
-  assert.equal(B.diskLevel('91'), 'high', 'a string figure from _cat is read');
+const DW = await import(pathToFileURL(path.join(ROOT, 'ui/js/core/disk-balance.js')).href);
+const K = (n) => `cluster.routing.allocation.disk.watermark.${n}`;
+
+test('disk level is the cluster\'s own watermarks (one definition: Size %, Disk bar and nodes agree); unread settings give no level', () => {
+  const lvl = (pct, settings) => DW.diskAgainstWatermarks({ percent: pct }, settings).level;
+  const dflt = { persistent: {}, transient: {}, defaults: { [K('low')]: '85%', [K('high')]: '90%', [K('flood_stage')]: '95%' } };
+  assert.deepEqual([84.9, 85, 89.9, 90].map((p) => lvl(p, dflt)), ['ok', 'low', 'low', 'high']);
+  const own = { persistent: { [K('low')]: '70%', [K('high')]: '80%' }, transient: {}, defaults: dflt.defaults };
+  assert.deepEqual([69, 75, 85].map((p) => lvl(p, own)), ['ok', 'low', 'high'], 'a cluster with its own watermarks is coloured by them, not by 85/90');
+  assert.equal(lvl(91, undefined), 'unknown', 'settings never read: no colour, not a guess');
+  assert.equal(lvl(NaN, dflt), 'unknown');
 });
 
 test('free size: total minus used, else avail, else unknown (never 0 B)', () => {
@@ -21,9 +28,6 @@ test('free size: total minus used, else avail, else unknown (never 0 B)', () => 
   assert.equal(B.nodeFreeBytes({ 'disk.total': '', 'disk.used': '', 'disk.avail': '55' }), 55, 'empty strings are not 0');
   assert.equal(B.nodeFreeBytes({}), null);
   assert.equal(B.nodeFreeBytes(null), null);
-  assert.equal(B.freeLevel({ 'disk.used_percent': '91' }), 'high');
-  assert.equal(B.freeLevel({ 'disk.used_percent': '86' }), 'low');
-  assert.equal(B.freeLevel({}), 'unknown');
 });
 
 test('a data node is one with data or any data_* role', () => {
@@ -77,6 +81,8 @@ test('unassigned shards per index, in words, with the reason code or explain sen
     { index: 'b', shard: '0', prirep: 'p', state: 'UNASSIGNED', 'unassigned.reason': 'ALLOCATION_FAILED' },
     { index: 'b', shard: '0', prirep: 'r', state: 'UNASSIGNED', 'unassigned.reason': 'REPLICA_ADDED' },
   ]);
+  const only = B.unassignedByIndex([{ index: 'a', prirep: 'r', state: 'UNASSIGNED' }, { index: 'z', prirep: 'r', state: 'UNASSIGNED' }], ['a']);
+  assert.deepEqual([...only.keys()], ['a'], 'one cluster-wide listing, filtered to the indices the list shows');
   assert.equal(B.unassignedText(m.get('a')), '2 replicas');
   assert.equal(B.unassignedText(m.get('b')), '1 primary, 1 replica');
   assert.equal(B.unassignedText(undefined), null);

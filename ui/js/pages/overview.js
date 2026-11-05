@@ -28,7 +28,7 @@ import { diskAgainstWatermarks } from '../core/disk-balance.js';
 // Why a cluster cannot be reached: one definition, shared with the Alerts page's unreachable lines.
 import { unreachableReason } from '../core/alert-groups.js';
 import { ilmErrorsOf, slmErrorsOf, ilmErrorTitle, slmErrorTitle, lifecycleView, logPatternOf } from '../core/lifecycle-errors.js';
-import { DISK_LINES, diskLevel, nodeFreeBytes, freeLevel, isDataNode, roleChips, nodesSummary, problemIndices, problemButtonText,
+import { nodeFreeBytes, isDataNode, roleChips, nodesSummary, problemIndices, problemButtonText,
          unassignedByIndex, unassignedText, explainLine, reasonFor, donutSegments, shardCard, ilmCard, slmCard } from '../core/cluster-boxes.js';
 import { repoOverview } from '../core/snapshot-evidence.js';
 
@@ -550,11 +550,11 @@ const CELLS = {
   },
   // Centred, and every cell below clips to its column (.cl-clip): nothing overlaps its neighbour.
   nodes: (r) => h('td.num', h('span.cl-clip', r.d.health ? `${r.d.health.number_of_nodes} (${r.d.health.number_of_data_nodes} data)` : '–')),
-  // The disk used % large (amber from 85, red from 90 — cluster-boxes.js DISK_LINES), the index size small after it.
+  // The disk used % large, coloured against the cluster's OWN watermarks like the bar beside it (diskAgainstWatermarks; none while its settings are unread), the index size small after it.
   size: (r) => {
     const sz = clusterSize(r), p = r.d.disk && r.d.disk.percent;
-    const lvl = diskLevel(p);
-    const pct = lvl === 'unknown' ? null : h(`span.cl-size-pct${lvl === 'high' ? '.bad' : lvl === 'low' ? '.warn' : ''}`, `${Math.round(p)} %`);
+    const lvl = diskAgainstWatermarks(r.d.disk, r.d.clusterSettings).level;
+    const pct = !(isFinite(p) && p !== null) ? null : h(`span.cl-size-pct${lvl === 'high' ? '.bad' : lvl === 'low' ? '.warn' : ''}`, `${Math.round(p)} %`);
     const idx = sz >= 0 ? h('span.cl-size-idx', bytes(sz)) : null;
     return h('td.num', { title: `${pct ? `Disk used ${Math.round(p)} %, ` : ''}${sz >= 0 ? `index size ${bytes(sz)} (store size of the indices on this cluster)` : 'index size not known'}` },
       h('span.cl-clip', pct || idx ? [pct, idx] : h('span.muted', '–')));
@@ -1177,8 +1177,8 @@ function loadProblems(c, health, repaint) {
       repaint();
       const names = P.rows.slice(0, PROBLEM_MAX).map((x) => x.index);
       if (names.length) {
-        const [sh, ex] = await Promise.allSettled([cl.shardsOfIndices(names), cl.allocationExplain()]);
-        if (sh.status === 'fulfilled') P.unassigned = unassignedByIndex(sh.value);
+        const [sh, ex] = await Promise.allSettled([cl.shardStates(), cl.allocationExplain()]);
+        if (sh.status === 'fulfilled') P.unassigned = unassignedByIndex(sh.value, names);
         else P.shardsError = (sh.reason && sh.reason.message) || 'not readable';
         // No unassigned shard to explain is a 400, not a fault: the reason column falls back to the code.
         if (ex.status === 'fulfilled') P.explained = explainLine(ex.value);
@@ -1497,7 +1497,7 @@ function repoSection(c, d) {
  * Where a node's CPU, heap and disk turn amber ('low') and red ('high'). One definition: the node
  * table here and Play's spotlight colour the same reading the same way.
  */
-export const NODE_LOAD_LEVELS = { cpu: { warn: 80, crit: 90 }, heap: { warn: 75, crit: 90 }, disk: DISK_LINES };
+export const NODE_LOAD_LEVELS = { cpu: { warn: 80, crit: 90 }, heap: { warn: 75, crit: 90 }, disk: { warn: 85, crit: 90 } };
 export function nodeLoadLevel(p, which) {
   const t = NODE_LOAD_LEVELS[which] || NODE_LOAD_LEVELS.cpu;
   return p >= t.crit ? 'high' : p >= t.warn ? 'low' : 'ok';
@@ -1522,25 +1522,27 @@ function nodesSection(c, d) {
   if (!nodes.length) return h('div.cl-sec', { 'data-section': 'nodes' }, secHead('Nodes', null), empty('No node list yet'));
   const cols = detailShown(prefs, 'nodes');
   const shardsOf = new Map(((d.disk && d.disk.nodes) || []).map((x) => [x.node, Number(x.shards)]));
+  // A node's disk level is the cluster's own watermarks, as the Disk usage cell reads them (none while they are unread).
+  const diskLvl = (p) => diskAgainstWatermarks({ percent: isFinite(p) ? p : null }, d.clusterSettings).level;
   const bar = (p, cls) => h('div.cl-mini', { role: 'img', 'aria-label': `${Math.round(p)} percent` },
     h(`i.${cls}`, { style: { width: `${Math.max(1.5, Math.min(100, p))}%` } }));
   // A reading over its line (red CPU / disk, heap past the High alert) carries the troubleshooting page, in its cell.
   const pctCell = (p, sub, which, doc) => {
     if (!isFinite(p)) return h('span.muted', '–');
-    const cls = which === 'heap' ? heapLevel(p) : nodeLoadLevel(p, which);
+    const cls = which === 'heap' ? heapLevel(p) : which === 'disk' ? diskLvl(p) : nodeLoadLevel(p, which);
     const over = which === 'heap' ? cls === 'over' || cls === 'high' : cls === 'high';
     return h('span.cl-pc', h('span.cl-pcn' + (over ? '.bad' : cls === 'low' || cls === 'over' ? '.warn' : ''), `${Math.round(p)} %`),
-      bar(p, cls), sub ? h('span.muted.cl-sub', sub) : null, over ? docLink(doc.href, doc.text) : null);
+      bar(p, cls === 'unknown' ? 'unk' : cls), sub ? h('span.muted.cl-sub', sub) : null, over ? docLink(doc.href, doc.text) : null);
   };
   const lists = nodes.map((n) => nodeRoles(n['node.role']));
   const over = (n) => nodeLoadLevel(Number(n.cpu), 'cpu') === 'high' || ['over', 'high'].includes(heapLevel(Number(n['heap.percent'])))
-    || diskLevel(Number(n['disk.used_percent'])) === 'high';
+    || diskLvl(Number(n['disk.used_percent'])) === 'high';
   const trs = nodes.map((n, i) => {
     const roles = lists[i];
     const isMaster = String(n.master || '').trim() === '*';
     const data = isDataNode(roles);
     const free = nodeFreeBytes(n);
-    const lvl = freeLevel(n);
+    const lvl = diskLvl(Number(n['disk.used_percent']));
     const cell = {
       name: () => h('td.cl-nm', h('span.mono', n.name), isMaster ? h('span.cl-star', { title: 'Elected master', 'aria-label': 'elected master' }, ' ★') : null),
       version: () => h('td.mono', n.version || '–'),

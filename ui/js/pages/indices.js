@@ -46,6 +46,11 @@ const SCOPES = [
 ];
 const ev = { scope: 'live', term: '', running: false, result: null, error: null, picked: new Set() };
 
+/** Back to an unfiltered list (what the toolbar's Clear does, and a hint from another page starts from). */
+function resetFilters() {
+  ui.ilmOnly = false; ui.noPolicy = null; ui.sourceFilter = 'all'; ui.text = ''; ui.status = 'all'; ui.from = ''; ui.to = ''; ui.page = 0;
+}
+
 export function render(el) {
   host = el;
   el.classList.add('dense');   // long tables: fit more on one screen
@@ -53,6 +58,8 @@ export function render(el) {
   // Opened from an alert about ILM errors (core/focus.js): only the indices in an error step.
   const f = takeFocus('indices');
   ui.noPolicy = null;
+  // A hint from the Clusters row is the whole question: drop what an earlier visit left set, so the result is not silently intersected with it.
+  if (f && (f.noPolicy || f.health)) resetFilters();
   // From the Clusters row: the indices of one health (the Cluster health button), or the log
   // indices that have no ILM policy (the ILM card).
   if (f && (f.health === 'red' || f.health === 'yellow')) { ui.status = f.health; ui.view = 'indices'; ui.page = 0; }

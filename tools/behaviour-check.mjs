@@ -425,6 +425,21 @@ await go('overview');
   if (open) { open.click(); await settleFor(150); }
 }
 
+// A hint from the Clusters row ("Open in Indices, health: yellow") starts from an unfiltered list:
+// a search left from an earlier visit must not be intersected with it.
+{
+  await go('indices');
+  const box = doc.getElementById('idx-search');
+  if (box) { box.value = 'zzz-nothing-matches'; box.dispatchEvent(new window.Event('input', { bubbles: true })); await settleFor(150); }
+  (await load('core/focus.js')).setFocus('indices', { health: 'yellow' });
+  await go('indices');
+  const b2 = doc.getElementById('idx-search');
+  ok(!!b2 && b2.value === '', `indices: a health hint kept the earlier search "${b2 && b2.value}"`);
+  await waitFor(() => /logstash-beta-2026\.09\.09/.test((doc.getElementById('view') || {}).textContent || ''), 'indices: the yellow index after the health hint');
+  const clear = [...doc.querySelectorAll('button')].find((b) => b.textContent.trim() === 'Clear');
+  if (clear) { clear.click(); await settleFor(150); }
+}
+
 await go('indices');
 // The Indices page is for managing indices. Its Summary tab moved to Reports › Daily &
 // monthly in 0.3.53 (docs/REPORTS.md, board 7); what must be on THIS page is the table, the
