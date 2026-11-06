@@ -92,7 +92,7 @@ function downloads() {
 const WHEN = { monthly: '1st of the month', weekly: 'Mondays', daily: 'Every day', manual: 'Only when sent by hand' };
 
 function mailed() {
-  const head = [h('button.btn.sm', { type: 'button', onclick: () => navigateTo('settings', { section: 'volume' }) }, 'Edit in Config')];
+  const head = [h('button.btn.sm', { type: 'button', onclick: () => navigateTo('settings', { page: 'reports', tab: 'mail' }) }, 'Edit in Config-Management')];
   if (!isAdmin()) {
     return card('Mailed reports', 'an .xlsx attachment on a schedule', h('div.tbl-empty', 'Only an admin can see and change the mailed report.'));
   }
@@ -120,11 +120,11 @@ function mailed() {
     h('td', h('b', s.subject ? String(s.subject).replace('{period}', (s.nextPeriod && s.nextPeriod.label) || '…') : 'Volume report')),
     h('td', clusters),
     h('td', `${WHEN[s.schedule] || s.schedule || '—'}${s.schedule && s.schedule !== 'manual' ? `, ${s.at || '07:00'}` : ''}`),
-    h('td', to.length ? `${to[0]}${to.length > 1 ? ` +${to.length - 1}` : ''}` : amber('nobody', 'Add an address in Config › Reports')),
+    h('td', to.length ? `${to[0]}${to.length > 1 ? ` +${to.length - 1}` : ''}` : amber('nobody', 'Add an address in Config-Management › Reports › Mail delivery')),
     h('td', s.lastSent && toMs(s.lastSent.at) ? ago(toMs(s.lastSent.at)) : '—'),
     h('td', status),
     h('td', send));
-  return card('Mailed reports', `an .xlsx attachment on a schedule · ${s.mailConfigured === false ? 'the mail server is not set (Config › Reports)' : 'mail server set in Config › Reports'}`,
+  return card('Mailed reports', `an .xlsx attachment on a schedule · ${s.mailConfigured === false ? 'the mail server is not set (Config-Management › Reports › Mail delivery)' : 'mail server set in Config-Management › Reports'}`,
     h('div.tbl-wrap', h('table.tbl',
       h('thead', h('tr', ...['Report', 'Clusters', 'When', 'To', 'Last sent', 'Status', ''].map((t) => h('th', t)))),
       h('tbody', tr))), head);

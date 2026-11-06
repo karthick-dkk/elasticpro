@@ -93,7 +93,7 @@ function schedulePart(kind) {
   const status = h('div.rm-status', { id: `rt-${kind}-status` },
     h(`span${last.ok === false ? '.rm-bad' : last.ok ? '.rm-ok' : '.muted'}`, last.text),
     next !== null ? h('span.muted', ` · next send ${dt(next)}`) : null,
-    s.mailConfigured === false ? h('span.rm-bad', ' · set up the Mail server in Config › Reports first') : null);
+    s.mailConfigured === false ? h('span.rm-bad', ' · set up the mail server in Config-Management › Reports › Mail delivery first') : null);
   // Role core (docs/WORKER.md): the report worker runs schedules, collections and jobs. When it
   // is not up, say so in amber with its last heartbeat; monitoring is not affected.
   const w = s.worker;

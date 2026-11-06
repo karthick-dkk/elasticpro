@@ -221,7 +221,7 @@ export const PLAYBOOKS = {
              : { text: 'Check that SLM is running.', request: read('/_slm/status', 'Prepare the SLM status in the REST console') },
         { text: 'Take a snapshot now by running the policy. Prepared, not sent.',
           request: write('POST', `/_slm/policy/${p || 'POLICY'}/_execute`, '', 'Prepare the run in the REST console') },
-        { text: `It counts as stale after ${ctx.defaults && ctx.defaults.snapshotStaleHours ? `${ctx.defaults.snapshotStaleHours} h` : 'the configured number of hours'} without a success (Config → alert rules).` },
+        { text: `It counts as stale after ${ctx.defaults && ctx.defaults.snapshotStaleHours ? `${ctx.defaults.snapshotStaleHours} h` : 'the configured number of hours'} without a success (Config-Management › Alerts › Triggers).` },
       ],
     };
   },

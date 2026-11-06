@@ -332,7 +332,7 @@ function headerChips(ctx) {
   const out = [];
   if (engine && engine.paused) out.push(h('span.pl-hchip', 'paused'));
   const missing = [];
-  if (support.play === false) missing.push('no node-left tracking', 'no Config › Play settings');
+  if (support.play === false) missing.push('no node-left tracking', 'no Config-Management › Play settings');
   if (support.acks === false) missing.push('acknowledgements are this browser’s');
   if (measurer && measurer.shared() === false) missing.push('measurements not shared');
   if (missing.length) {
@@ -348,7 +348,7 @@ function paintHead(ctx) {
   const cur = SLIDE.get(shownId()) || SLIDES[0];
   if (els.title.textContent !== cur.title) els.title.textContent = cur.title;
   mount(els.chips, ...headerChips(ctx), cur.id === 'fleet'
-    ? h('span.pl-hchip', { title: `Fleet wall order (Config › Play): ${sFleet.orderTitle(ps.display.fleetOrder)}` }, `Order: ${sFleet.orderText(ps.display.fleetOrder)}`) : null);
+    ? h('span.pl-hchip', { title: `Fleet wall order (Config-Management › Play): ${sFleet.orderTitle(ps.display.fleetOrder)}` }, `Order: ${sFleet.orderText(ps.display.fleetOrder)}`) : null);
   els.root.classList.toggle('takeover', !!(take && take.active));
   // dots: one per slide in the order; a skipped one is dim
   const order = engine.order;

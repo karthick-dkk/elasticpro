@@ -218,9 +218,9 @@ function renderForm() {
         h('div.seg', { role: 'group', 'aria-label': 'File format' },
           fmt('xlsx', '.xlsx', 'One workbook: Daily, Monthly and Breakdown sheets'),
           fmt('csvzip', '.csv (zip)', 'A zip of daily.csv, monthly.csv and breakdown.csv')))),
-    h('label.rj-check', { title: mailDisabled ? mailInfo.why : 'Sent to the recipients an admin set under Config › Reports' },
+    h('label.rj-check', { title: mailDisabled ? mailInfo.why : 'Sent to the recipients an admin set under Config-Management › Reports › Mail delivery' },
       h('input#rj-mail', { type: 'checkbox', checked: form.mail, disabled: mailDisabled, onchange: (e) => { form.mail = e.target.checked; } }),
-      h('span', 'Mail it to the report recipients (Config › Reports)',
+      h('span', 'Mail it to the report recipients (Config-Management › Reports)',
         mailDisabled ? h('span.rj-why', ` · ${mailInfo.why}`) : null)),
     h('div.rj-row',
       h('button#rj-run.btn.sm.primary', { type: 'button', disabled: !form.picked.size, onclick: run }, runLabel())),
@@ -238,8 +238,8 @@ async function askMailInfo() {
   const res = await reportScheduleGet();
   if (!res || !res.ok) return;
   const to = [...(res.to || []), ...(res.cc || []), ...(res.bcc || [])];
-  if (res.mailConfigured === false) mailInfo = { asked: true, ok: false, why: 'set up Config › Reports › Mail server first' };
-  else if (!to.length) mailInfo = { asked: true, ok: false, why: 'no report recipients are set (Config › Reports)' };
+  if (res.mailConfigured === false) mailInfo = { asked: true, ok: false, why: 'set up the mail server in Config-Management › Reports › Mail delivery first' };
+  else if (!to.length) mailInfo = { asked: true, ok: false, why: 'no report recipients are set (Config-Management › Reports › Mail delivery)' };
   else mailInfo = { asked: true, ok: true, why: '' };
   renderForm();
 }

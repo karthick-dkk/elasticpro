@@ -373,7 +373,7 @@ function openDialog(reason, status) {
                 ? 'The ElasticPro server keeps it as the own credential of these clusters (AES-256-GCM, its own key); the default stays as it is. '
                 : 'The ElasticPro server keeps it as the default credential for every cluster without one of its own (AES-256-GCM, its own key), ',
               'and uses it for everyone allowed to see those clusters — nobody is asked again, not on a page load and not after a restart. ',
-              'It is not written to the config file and is never sent back to any browser. Config → Credentials changes or forgets it.')
+              'It is not written to the config file and is never sent back to any browser. Config-Management › Clusters › Credentials changes or forgets it.')
           : h('div.cd-note',
               h('b', 'Kept in memory. '),
               'This credential lives in the app process for as long as it is open and is not written to clusters.yaml. ',
