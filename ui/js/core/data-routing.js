@@ -35,6 +35,8 @@ export const MODES = [
 ];
 export const DEFAULT_MODE = 'builtin';
 /** The one-line rule under the table (the approved board's words). */
+/** Beside the *Carry the file* switch: what a reader of the store's report indices then sees. */
+export const REPORT_FILES_NOTE = 'With the file carried, anyone who can read <prefix>-reports-* on the Elasticsearch store sees every cluster\'s report content (never a credential). Files up to 2 MB are carried; larger ones are named only.';
 export const ES_ONLY_NOTE = '"Elasticsearch only" needs the cluster below to be connected and writing; until it is, ElasticPro keeps writing to its built-in store so nothing is lost.';
 
 async function send(msg) {

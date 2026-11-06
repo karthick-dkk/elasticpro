@@ -283,12 +283,38 @@ drains the spool first — queuing or dropping each record by the routing in for
 the worker needs neither the queue nor the store. Alerts are the core's own and go straight to
 the queue.
 
+**Capacity and abuse.** The queue is the history store's (`QUEUE_MAX` 20 000). Alerts have
+their own share of it (`ALERTS_QUEUE_MAX` 2 000, the oldest alerts out first) and when the
+whole queue is full alerts go first — history and reports are never evicted to make room for
+an alert; what went is counted per stream (`dropped_by_stream`, `store.dropped` per kind in the
+status). A document over 1 MiB is never queued (counted). Bulks are cut in turns across the
+streams (`cut_bulks`: one each, round after round, up to `BULKS_PER_TICK`), so a stream with a
+long queue cannot starve the others; a stream whose template cannot be verified is passed over
+for that tick with its error kept by stream (`stream_errors`), and the rest is sent.
+`ALERT_EVENTS_PUT` is bounded per account — 200 events per 15 minutes over every message,
+counted as sent, then `too_many` — and takes only keys whose rule family is one the pages raise
+(`ALERT_RULE_IDS`, held equal to `ui/js/core/alert-rules.js` by a unit test, plus Play's
+`node-left`); duplicates are per (reporter, event, key) within 15 minutes, remembered up to
+50 000 with the oldest forgotten first; a page's `at` is believed within 48 h back and 5 min
+ahead. A queued report record carries a reference to its file (name, size, sha256), never the
+content: the file is read when the bulk is cut, checked against the digest and carried as
+`fileContent{name, base64, sha256}`, or named in `fileNote` when it is gone (`KEEP_FILE_DAYS`)
+or changed. The spool holds 32 MiB at most, and a spool file is removed only after the queue
+that took its record was written to disk. **Opting out** takes effect at once: a kind routed
+back to `builtin` lets go of what was queued for it (audited), the tick lets go of records
+whose kind no longer sends (`unrouted`), and `reportFiles` turned off takes the references out
+of the queued report records. With the file carried, anyone who can read `<prefix>-reports-*`
+on the store sees every cluster's report content (never a credential); the page says so beside
+the switch.
+
 **Status (`DATA_ROUTING_STATUS`).** Per kind: the mode, *kept for* (built-in as above; store:
 "the store owner's ILM"), *size now* (built-in bytes from a bounded walk of the kind's files — a
 floor when cut short, `null` when there is no such place; store document count via one
 `_search?size=0&track_total_hits=true` per pattern, cached a minute, `null` with the reason when
-not asked or not answered), and the status line. Plus the built-in store's own size and the free
-space on its disk (`statvfs`). Never a secret.
+not asked or not answered), the status line, and `store.{queued, dropped, writing, why}` — `why`
+names the closed gate or that stream's last error. Nothing is asserted about the built-in
+record's own writes (unknown is not ok). Plus the built-in store's own size and the free space
+on its disk (`statvfs`). Never a secret.
 
 **Messages** (docs/HANDBOOK.md "Backend — the message contract"): `DATA_ROUTING_GET` /
 `DATA_ROUTING_SET {routing}` / `DATA_ROUTING_STATUS` (admin; SET refused for a limited admin,

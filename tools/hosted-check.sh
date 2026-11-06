@@ -404,7 +404,14 @@ check "and kept in the built-in store"             "$(python3 -c 'import json,sy
 rs() { python3 -c 'import json,sys;d=json.load(sys.stdin);a=d["kinds"]["alerts"];print(d.get("ok"),a["state"],a["store"]["queued"],a["store"]["writing"],"built-in store" in a["line"])'; }
 check "and queued for the store, saying so"         "$(cookie -d '{"type":"DATA_ROUTING_STATUS"}' | rs)" "True queued 1 False True"
 check "and nothing was written to a monitored cluster" "$(cookie -d '{"type":"REQUEST_LOG"}' | python3 -c 'import json,sys;d=json.load(sys.stdin);print(len([r for r in (d.get("recent") or [])+(d.get("inflight") or []) if str(r.get("method","GET")).upper()!="GET"]))')" "0"
-cookie -d '{"type":"DATA_ROUTING_SET","routing":{"alerts":"builtin"}}' >/dev/null
+# A page may report only what the pages raise: a flood of made-up keys is refused by name,
+# queues nothing and evicts nothing; the account is then over its budget (200 in 15 minutes).
+FLOOD=$(python3 -c 'import json;print(json.dumps({"type":"ALERT_EVENTS_PUT","events":[{"event":"raised","key":"hc-es:junk-%d"%i} for i in range(150)]}))')
+check "a flood of junk alert keys is refused"       "$(cookie -d "$FLOOD" | field kind)" "bad_request"
+check "and the queued record is still there"       "$(cookie -d '{"type":"DATA_ROUTING_STATUS"}' | rs)" "True queued 1 False True"
+MORE=$(python3 -c 'import json;print(json.dumps({"type":"ALERT_EVENTS_PUT","events":[{"event":"raised","key":"hc-es:heap:n%d"%i} for i in range(60)]}))')
+check "and the account is over its budget"         "$(cookie -d "$MORE" | field kind)" "too_many"
+check "alerts back to built-in lets the queue go"  "$(cookie -d '{"type":"DATA_ROUTING_SET","routing":{"alerts":"builtin"}}' >/dev/null; cookie -d '{"type":"DATA_ROUTING_STATUS"}' | python3 -c 'import json,sys;a=json.load(sys.stdin)["kinds"]["alerts"];print(a["state"],a["store"]["queued"],a["store"]["dropped"])')" "builtin 0 1"
 OUTH=$(curl -s -D - -o /dev/null -X POST "$B5" -H 'content-type: application/json' -H "cookie: ep_session=$TOK" -d '{"type":"LOGOUT"}' | tr -d '\r' | grep -i '^set-cookie:' || true)
 case "$OUTH" in *ep_session=\;*Max-Age=0*) ok "signing out clears the cookie";; *) bad "logout cookie (got '$OUTH')";; esac
 check "and ends the session"                 "$(cookie -d '{"type":"WHOAMI"}' | python3 -c 'import json,sys;print(json.load(sys.stdin).get("caller"))')" "None"

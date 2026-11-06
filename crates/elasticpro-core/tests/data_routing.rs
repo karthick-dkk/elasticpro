@@ -96,7 +96,7 @@ async fn es_only_keeps_the_builtin_record_queues_while_the_store_is_not_writing_
     assert_eq!(st["kinds"]["history"]["keptFor"]["store"], json!("the store owner's ILM"));
 
     // Elasticsearch only, with no store at all: the built-in record is written and the record waits.
-    let set = route(&c, &s, json!({ "alerts": "es", "reports": "es" })).await;
+    let set = route(&c, &s, json!({ "alerts": "es", "reports": "es", "reportFiles": true })).await;
     assert_eq!(set["ok"], json!(true), "{set}");
     assert_eq!(set["routing"]["alerts"], json!("es"));
     assert_eq!(set["routing"]["changedBy"], json!("Admin"));
@@ -124,9 +124,16 @@ async fn es_only_keeps_the_builtin_record_queues_while_the_store_is_not_writing_
     let job = ended(&c, &s, &job_id).await;
     assert_eq!(job["status"], json!("done"), "{job}");
     let spool = dir.join("history-store-spool");
-    wait_for("the report record to be spooled", || std::fs::read_dir(&spool).map(|d| d.count() > 0).unwrap_or(false)).await;
+    // A finished record only: the write is tmp + rename, and the tick takes `.json` files.
+    let json_files = || std::fs::read_dir(&spool).into_iter().flatten().flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|x| x == "json")).collect::<Vec<_>>();
+    wait_for("the report record to be spooled", || !json_files().is_empty()).await;
+    let spooled: String = json_files().into_iter().map(|p| std::fs::read_to_string(p).unwrap()).collect();
+    assert!(spooled.contains("\"fileRef\"") && spooled.contains("\"sha256\"") && !spooled.contains("base64"),
+            "the spool holds a reference to the file, never its content: {spooled}");
     c.history_tick().await;
-    assert_eq!(std::fs::read_dir(&spool).unwrap().count(), 0, "the tick drains the spool");
+    assert_eq!(std::fs::read_dir(&spool).unwrap().count(), 0, "the tick drains the spool once the queue is on disk");
+    let queued = std::fs::read_to_string(dir.join("history-store-queue.json")).unwrap();
+    assert!(queued.contains("\"fileRef\"") && !queued.contains("base64"), "the queue on disk holds the reference too: {queued}");
     let st = status(&c, &s).await;
     assert_eq!(st["kinds"]["reports"]["store"]["queued"], json!(1), "{st}");
     assert!(st["kinds"]["reports"]["builtin"]["size"]["bytes"].as_u64().unwrap() > 0, "the report file is on disk: {st}");
@@ -149,7 +156,8 @@ async fn es_only_keeps_the_builtin_record_queues_while_the_store_is_not_writing_
     assert!(all.contains(&format!(r#""_index":"{PREFIX}-reports-{year}""#)), "{all}");
     assert!(all.contains(&format!(r#""jobId":"{job_id}""#)) && all.contains(r#""report":"volume""#) && all.contains(r#""status":"done""#), "{all}");
     assert!(all.contains(r#""rows":null"#), "a volume report counts days, not rows: {all}");
-    assert!(!all.contains("fileContent"), "the file is carried only when asked");
+    assert!(all.contains(r#""fileContent":{"base64":""#) && all.contains(r#""sha256":""#) && !all.contains("fileRef"),
+            "the file is read and carried when the record is sent, with its digest, and the reference stays home: {all}");
     let templates: Vec<String> = store.hits().into_iter().filter(|x| x.method == "PUT").map(|x| x.body).collect();
     for t in &templates {
         assert!(!t.contains("settings") && !t.contains("lifecycle"), "mappings only: {t}");
@@ -178,6 +186,34 @@ async fn es_only_keeps_the_builtin_record_queues_while_the_store_is_not_writing_
     assert_eq!(st["kinds"]["alerts"]["store"]["docs"], json!(0), "the fake store answers its count: {st}");
     assert!(st["kinds"]["reports"]["store"]["docs"].is_u64(), "{st}");
     assert_eq!(st["kinds"]["history"]["store"]["docs"], Value::Null, "not asked for a kind kept built-in: {st}");
+
+    // Abuse: a key that names no alert rule is refused by name and queues nothing; an account
+    // past its budget is refused `too_many` (the junk counted against it).
+    let before = c.handle(json!({ "type": "DATA_ROUTING_STATUS", "session": &s })).await["kinds"]["alerts"]["store"]["queued"].clone();
+    let junk: Vec<Value> = (0..150).map(|i| json!({ "event": "raised", "key": format!("prod:pwned-{i}") })).collect();
+    let r = c.handle(json!({ "type": "ALERT_EVENTS_PUT", "session": &s, "events": junk })).await;
+    assert_eq!(r["kind"], json!("bad_request"), "{r}");
+    assert!(r["message"].as_str().unwrap().contains("names no alert rule"), "{r}");
+    let fine: Vec<Value> = (0..60).map(|i| json!({ "event": "raised", "key": format!("prod:heap:n{i}") })).collect();
+    let r = c.handle(json!({ "type": "ALERT_EVENTS_PUT", "session": &s, "events": fine })).await;
+    assert_eq!(r["kind"], json!("too_many"), "{r}");
+    let after = c.handle(json!({ "type": "DATA_ROUTING_STATUS", "session": &s })).await["kinds"]["alerts"]["store"]["queued"].clone();
+    assert_eq!(after, before, "nothing queued by either");
+
+    // Opting out: an acknowledgement queued, then alerts routed back to built-in — the queue
+    // lets it go, counted, and nothing of the kind is sent afterwards.
+    let ack = c.handle(json!({ "type": "ACK_SET", "session": &s, "key": "prod:heap", "note": "later" })).await;
+    assert_eq!(ack["ok"], json!(true), "{ack}");
+    assert_eq!(status(&c, &s).await["kinds"]["alerts"]["store"]["queued"], json!(1));
+    let set = route(&c, &s, json!({ "alerts": "builtin" })).await;
+    assert_eq!(set["ok"], json!(true), "{set}");
+    let st = status(&c, &s).await;
+    assert_eq!(st["kinds"]["alerts"]["store"]["queued"], json!(0), "{st}");
+    assert_eq!(st["kinds"]["alerts"]["store"]["dropped"], json!(1), "{st}");
+    assert!(st["kinds"]["alerts"]["builtin"].get("writing").is_none(), "no claim about the built-in record is asserted: {st}");
+    let n = bulks(&store).len();
+    c.history_tick().await;
+    assert_eq!(bulks(&store).len(), n, "nothing more went out");
 
     // The monitored cluster: searched by the report, never written.
     assert!(h::writes(&prod).is_empty(), "the monitored cluster is never written: {:?}", h::writes(&prod));

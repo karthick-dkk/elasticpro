@@ -69,6 +69,13 @@ pub const BULK_MAX_BYTES: usize = 4 * 1024 * 1024;
 pub const BULKS_PER_TICK: usize = 20;
 /// Documents waiting at most. Past it the oldest days go, and the status says how many.
 pub const QUEUE_MAX: usize = 20_000;
+/// The alerts stream's own share of the queue (`data_routing`): a page can report alerts at
+/// any rate, so past this the oldest alerts go — and when the whole queue is full, alerts go
+/// first. No other stream is ever evicted to make room for an alert.
+pub const ALERTS_QUEUE_MAX: usize = 2_000;
+/// One queued document at most (its JSON): bigger is not queued, counted and logged. A report
+/// file is never inside a queued document (a reference is; the file is read when it is sent).
+pub const QUEUED_DOC_MAX_BYTES: usize = 1024 * 1024;
 /// Days one read-back page returns (Elasticsearch's own default result window) …
 pub const READ_BACK_PAGE: usize = 10_000;
 /// … and pages one read-back reads at most. Beyond them the reply says which days it did not read.
@@ -374,6 +381,14 @@ pub struct Status {
     pub rejected: u64,
     /// When the index template was last verified on this store under this prefix.
     pub template_at: Option<u64>,
+    /// Documents dropped, per stream: the queue full, the stream's share full, a document too
+    /// big, or a kind routed back to built-in (`data_routing`).
+    #[serde(default)]
+    pub dropped_by_stream: BTreeMap<String, u64>,
+    /// The last thing that stopped a stream's bulks (its template, mostly), by stream; cleared
+    /// when a bulk of that stream is taken. One stream's trouble does not stop the others.
+    #[serde(default)]
+    pub stream_errors: BTreeMap<String, String>,
 }
 
 /// One document waiting: the day it is about (its index is worked out from the prefix in force
@@ -478,20 +493,43 @@ impl HistoryStore {
         serde_json::to_vec(&snapshot).ok().map(|b| (p, b))
     }
 
-    /// Write the queue file, off the async runtime, when it changed.
-    pub(crate) async fn flush_queue(&self) {
-        let Some((p, bytes)) = self.queue_snapshot() else { return };
+    /// Write the queue file, off the async runtime, when it changed. `true` when what is in
+    /// memory is on disk afterwards (written now, or nothing had changed); `false` when the
+    /// write failed — it is tried again next tick, and nothing that fed the queue (the spool)
+    /// should be let go of until then.
+    pub(crate) async fn flush_queue(&self) -> bool {
+        let Some((p, bytes)) = self.queue_snapshot() else { return self.queue_path.is_none() || !self.queue_dirty.load(Ordering::SeqCst) };
         let res = tokio::task::spawn_blocking(move || crate::volume::store::write_atomic(&p, &bytes)).await;
         if !matches!(res, Ok(Ok(()))) {
             self.queue_dirty.store(true, Ordering::SeqCst);
             tracing::warn!("history store: the queue could not be written; tried again next tick");
+            return false;
         }
+        true
     }
 
-    /// Put documents in the queue (a rewrite of a waiting one replaces it). Past `QUEUE_MAX`
-    /// the oldest days go, counted. A document whose day is not a day is not queued.
+    /// Put documents in the queue (a rewrite of a waiting one replaces it). A document whose
+    /// day is not a day, or whose JSON is over `QUEUED_DOC_MAX_BYTES`, is not queued (counted).
+    /// Past `ALERTS_QUEUE_MAX` alerts, the oldest alerts go; past `QUEUE_MAX` in all, alerts go
+    /// first, then the oldest days of the rest — counted, per stream.
     pub fn enqueue(&self, items: Vec<(QKey, Queued)>) {
-        let items: Vec<(QKey, Queued)> = items.into_iter().filter(|(_, q)| parse_day(&q.day).is_some()).collect();
+        let mut too_big: BTreeMap<String, u64> = BTreeMap::new();
+        let items: Vec<(QKey, Queued)> = items.into_iter().filter(|(_, q)| parse_day(&q.day).is_some()).filter(|(k, q)| {
+            let size = q.doc.to_string().len();
+            if size > QUEUED_DOC_MAX_BYTES {
+                *too_big.entry(k.0.clone()).or_insert(0) += 1;
+                tracing::warn!(stream = %k.0, id = %k.2, size, "history store: a document too big to queue was dropped");
+                return false;
+            }
+            true
+        }).collect();
+        if !too_big.is_empty() {
+            let mut st = self.status.lock();
+            for (stream, n) in &too_big {
+                st.dropped += n;
+                *st.dropped_by_stream.entry(stream.clone()).or_insert(0) += n;
+            }
+        }
         if items.is_empty() {
             return;
         }
@@ -500,17 +538,37 @@ impl HistoryStore {
             for (k, v) in items {
                 q.insert(k, v);
             }
-            let over = q.len().saturating_sub(QUEUE_MAX);
-            if over > 0 {
-                let mut by_age: Vec<(String, QKey)> = q.iter().map(|(k, v)| (v.day.clone(), k.clone())).collect();
-                by_age.sort();
-                for (_, k) in by_age.into_iter().take(over) {
-                    q.remove(&k);
+            let evicted = evict(&mut q);
+            if !evicted.is_empty() {
+                let mut st = self.status.lock();
+                for (stream, n) in evicted {
+                    st.dropped += n;
+                    *st.dropped_by_stream.entry(stream).or_insert(0) += n;
                 }
-                self.status.lock().dropped += over as u64;
             }
         }
         self.queue_dirty.store(true, Ordering::SeqCst);
+    }
+
+    /// Take the report file references and content out of every queued report document
+    /// (*Carry the file* turned off, `data_routing`): how many documents changed.
+    pub fn strip_report_files(&self) -> usize {
+        let mut q = self.queue.lock();
+        let mut n = 0;
+        for (k, v) in q.iter_mut() {
+            if k.0 != crate::data_routing::REPORTS_STREAM {
+                continue;
+            }
+            if let Some(o) = v.doc.as_object_mut() {
+                if o.remove("fileRef").is_some() | o.remove("fileContent").is_some() {
+                    n += 1;
+                }
+            }
+        }
+        if n > 0 {
+            self.queue_dirty.store(true, Ordering::SeqCst);
+        }
+        n
     }
 
     /// Forget what is waiting for a stream that was turned off.
@@ -784,28 +842,85 @@ pub fn bulk_body(prefix: &str, items: &[(&QKey, &Queued)]) -> String {
     s
 }
 
+/// Make room: the alerts stream down to `ALERTS_QUEUE_MAX` (oldest first), then the whole
+/// queue down to `QUEUE_MAX` — alerts first, then the oldest days of everything else. What
+/// went, per stream.
+pub fn evict(q: &mut BTreeMap<QKey, Queued>) -> BTreeMap<String, u64> {
+    let mut gone: BTreeMap<String, u64> = BTreeMap::new();
+    let alerts = crate::data_routing::ALERTS_STREAM;
+    let remove = |q: &mut BTreeMap<QKey, Queued>, keys: Vec<QKey>, gone: &mut BTreeMap<String, u64>| {
+        for k in keys {
+            if q.remove(&k).is_some() {
+                *gone.entry(k.0.clone()).or_insert(0) += 1;
+            }
+        }
+    };
+    let oldest = |q: &BTreeMap<QKey, Queued>, stream: Option<&str>, n: usize| -> Vec<QKey> {
+        let mut by_age: Vec<(String, QKey)> = q.iter().filter(|(k, _)| stream.is_none_or(|s| k.0 == s)).map(|(k, v)| (v.day.clone(), k.clone())).collect();
+        by_age.sort();
+        by_age.into_iter().take(n).map(|(_, k)| k).collect()
+    };
+    let n_alerts = q.keys().filter(|k| k.0 == alerts).count();
+    if n_alerts > ALERTS_QUEUE_MAX {
+        let keys = oldest(q, Some(alerts), n_alerts - ALERTS_QUEUE_MAX);
+        remove(q, keys, &mut gone);
+    }
+    let over = q.len().saturating_sub(QUEUE_MAX);
+    if over > 0 {
+        let keys = oldest(q, Some(alerts), over);
+        let took = keys.len();
+        remove(q, keys, &mut gone);
+        if over > took {
+            let keys = oldest(q, None, over - took);
+            remove(q, keys, &mut gone);
+        }
+    }
+    gone
+}
+
 /// Cut queued documents into bulks: the volume stream one per cluster, the others one per
-/// stream; each at most `BULK_MAX_DOCS` documents and `BULK_MAX_BYTES` bytes.
+/// stream; each at most `BULK_MAX_DOCS` documents and `BULK_MAX_BYTES` bytes. At most
+/// `max_bulks`, taken in turns across the streams (one each, round after round), so a stream
+/// with a long queue — alerts a page keeps reporting — never keeps the others waiting.
 pub fn cut_bulks(q: &BTreeMap<QKey, Queued>, max_bulks: usize) -> Vec<Vec<QKey>> {
-    let mut out: Vec<Vec<QKey>> = vec![];
+    // Per stream, its bulks in queue order; a stream stops being cut once it has `max_bulks`
+    // (it could not be given more in one tick anyway).
+    let mut per: BTreeMap<String, Vec<Vec<QKey>>> = BTreeMap::new();
     let mut cur: Vec<QKey> = vec![];
     let (mut bytes, mut group) = (0usize, None::<(String, String)>);
+    let flush = |per: &mut BTreeMap<String, Vec<Vec<QKey>>>, cur: &mut Vec<QKey>| {
+        if let Some(first) = cur.first() {
+            let stream = first.0.clone();
+            per.entry(stream).or_default().push(std::mem::take(cur));
+        }
+    };
     for (k, v) in q {
+        if per.get(&k.0).is_some_and(|b| b.len() >= max_bulks) {
+            continue;
+        }
         let g = (k.0.clone(), if k.0 == "volume" { k.1.clone() } else { String::new() });
         let size = v.doc.to_string().len() + k.0.len() + v.day.len() + k.2.len() + 80;
         if !cur.is_empty() && (group.as_ref() != Some(&g) || cur.len() >= BULK_MAX_DOCS || bytes + size > BULK_MAX_BYTES) {
-            out.push(std::mem::take(&mut cur));
+            flush(&mut per, &mut cur);
             bytes = 0;
-            if out.len() >= max_bulks {
-                return out;
-            }
         }
         group = Some(g);
         bytes += size;
         cur.push(k.clone());
     }
-    if !cur.is_empty() && out.len() < max_bulks {
-        out.push(cur);
+    flush(&mut per, &mut cur);
+    // Round-robin across the streams.
+    let mut queues: Vec<std::collections::VecDeque<Vec<QKey>>> = per.into_values().map(std::collections::VecDeque::from).collect();
+    let mut out: Vec<Vec<QKey>> = vec![];
+    while out.len() < max_bulks && queues.iter().any(|d| !d.is_empty()) {
+        for d in queues.iter_mut() {
+            if out.len() >= max_bulks {
+                break;
+            }
+            if let Some(b) = d.pop_front() {
+                out.push(b);
+            }
+        }
     }
     out
 }
@@ -1411,27 +1526,38 @@ impl Core {
             }
         }
         let _done = Done(&self.history_store.ticking);
-        let out = self.history_tick_inner().await;
-        self.history_store.flush_queue().await;
+        let (out, spooled) = self.history_tick_inner().await;
+        // The spool's files go only once the queue that took their records is on disk: a
+        // crash between the two loses nothing, the record is queued again next tick (same key).
+        if self.history_store.flush_queue().await {
+            for p in spooled {
+                let _ = std::fs::remove_file(p);
+            }
+        }
         out
     }
 
-    async fn history_tick_inner(self: &Arc<Self>) -> Value {
+    async fn history_tick_inner(self: &Arc<Self>) -> (Value, Vec<PathBuf>) {
         // Records another process left (the report worker's): queued, or not, by the routing
         // in force now — whatever the gates say, so an "Elasticsearch only" record waits here
-        // rather than being lost (data_routing.rs). Files: off the runtime.
+        // rather than being lost (data_routing.rs). Files: off the runtime. The files whose
+        // records were queued are handed back, to be removed once the queue is written.
         let core = self.clone();
-        let _ = tokio::task::spawn_blocking(move || core.routing_drain_spool()).await;
+        let spooled = tokio::task::spawn_blocking(move || core.routing_drain_spool()).await.unwrap_or_default();
         if let Err(why) = self.history_writes_open() {
             self.history_store.status.lock().last_skipped = Some(why.clone());
-            return json!({ "ok": false, "skipped": why, "queue": self.history_store.queue_len() });
+            return (json!({ "ok": false, "skipped": why, "queue": self.history_store.queue_len() }), spooled);
         }
         self.history_store.status.lock().last_skipped = None;
         if self.history_store.queue_len() == 0 {
-            return json!({ "ok": true, "written": 0 });
+            return (json!({ "ok": true, "written": 0 }), spooled);
         }
         let bulks = cut_bulks(&self.history_store.queue.lock(), BULKS_PER_TICK);
-        let (mut written, mut refused_n, mut rejected_n, mut error) = (0u64, 0u64, 0u64, None::<String>);
+        let (mut written, mut refused_n, mut rejected_n, mut unrouted_n, mut error) = (0u64, 0u64, 0u64, 0u64, None::<String>);
+        // A stream whose template could not be verified this tick: its bulks are passed over,
+        // the others go on (its error is kept by stream).
+        let mut skipped: BTreeSet<String> = BTreeSet::new();
+        let routing = self.routing();
         for keys in bulks {
             // Disarmed while this tick was sending: stop at once.
             if let Err(why) = self.history_writes_open() {
@@ -1445,12 +1571,52 @@ impl Core {
             if items.is_empty() {
                 continue;
             }
-            // A bulk is one stream's; its indices' template first (verified once per process).
-            if let Err(e) = self.history_ensure_template_for(&items[0].0 .0).await {
-                error = Some(e);
-                break;
+            let stream = items[0].0 .0.clone();
+            if skipped.contains(&stream) {
+                continue;
             }
-            let refs: Vec<(&QKey, &Queued)> = items.iter().map(|(k, v)| (k, v)).collect();
+            // The kind no longer goes to the store (routed back to built-in since it was
+            // queued): its records are let go, counted, never sent.
+            if let Some(kind) = crate::data_routing::Kind::of_stream(&stream) {
+                if !routing.mode(kind).sends_to_store() {
+                    let mut q = self.history_store.queue.lock();
+                    for (k, sent) in &items {
+                        if q.get(k) == Some(sent) {
+                            q.remove(k);
+                        }
+                    }
+                    self.history_store.queue_dirty.store(true, Ordering::SeqCst);
+                    let n = items.len() as u64;
+                    unrouted_n += n;
+                    let mut st = self.history_store.status.lock();
+                    st.dropped += n;
+                    *st.dropped_by_stream.entry(stream.clone()).or_insert(0) += n;
+                    continue;
+                }
+            }
+            // A bulk is one stream's; its indices' template first (verified once per process).
+            if let Err(e) = self.history_ensure_template_for(&stream).await {
+                self.history_store.status.lock().stream_errors.insert(stream.clone(), e.clone());
+                error.get_or_insert(e);
+                skipped.insert(stream);
+                continue;
+            }
+            // A report's file is read now, not when it was queued (`data_routing::materialise`):
+            // what is sent is the document with its file, what is compared is what was queued.
+            let to_send: Vec<(QKey, Queued)> = if stream == crate::data_routing::REPORTS_STREAM {
+                // The file's path is the report module's one rule (`Reports::file_path`); the read is off the runtime.
+                let with_paths: Vec<(QKey, Queued, Option<PathBuf>)> = items.iter().cloned().map(|(k, v)| {
+                    let name = v.doc.pointer("/fileRef/name").and_then(Value::as_str).map(str::to_string);
+                    let path = name.and_then(|n| self.reports.file_path(&k.2, &n));
+                    (k, v, path)
+                }).collect();
+                tokio::task::spawn_blocking(move || {
+                    with_paths.into_iter().map(|(k, mut v, p)| { v.doc = crate::data_routing::materialise_report_doc(v.doc, p.as_deref()); (k, v) }).collect()
+                }).await.unwrap_or_else(|_| items.clone())
+            } else {
+                items.clone()
+            };
+            let refs: Vec<(&QKey, &Queued)> = to_send.iter().map(|(k, v)| (k, v)).collect();
             match self.history_send_bulk(&refs).await {
                 Err(f) if f.refused => {
                     // The guard said no before a socket: sending it again would get the same
@@ -1470,6 +1636,7 @@ impl Core {
                 }
                 Ok(results) => {
                     let mut q = self.history_store.queue.lock();
+                    let mut taken = false;
                     for ((k, sent), item) in items.iter().zip(&results) {
                         // Not rewritten while it was on its way: what was sent is what is decided on.
                         if q.get(k) != Some(sent) {
@@ -1479,6 +1646,7 @@ impl Core {
                             Item::Taken => {
                                 q.remove(k);
                                 written += 1;
+                                taken = true;
                             }
                             Item::Rejected(why) => {
                                 let tries = sent.tries + 1;
@@ -1497,6 +1665,9 @@ impl Core {
                         }
                     }
                     self.history_store.queue_dirty.store(true, Ordering::SeqCst);
+                    if taken {
+                        self.history_store.status.lock().stream_errors.remove(&stream);
+                    }
                 }
             }
         }
@@ -1510,12 +1681,15 @@ impl Core {
             Some(e) => self.history_note_error(e),
             None => self.history_store.status.lock().last_error = None,
         }
+        if unrouted_n > 0 {
+            tracing::info!(target: "audit", dropped = unrouted_n, "history store: queued records of a kind routed back to built-in were let go");
+        }
         if written > 0 || error.is_some() {
             tracing::info!(target: "audit", written, refused = refused_n, rejected = rejected_n, queue = self.history_store.queue_len(),
                            error = error.as_deref().unwrap_or(""), "history store: bulk written");
         }
-        json!({ "ok": error.is_none(), "written": written, "refused": refused_n, "rejected": rejected_n,
-                "queue": self.history_store.queue_len(), "error": error })
+        (json!({ "ok": error.is_none(), "written": written, "refused": refused_n, "rejected": rejected_n, "unrouted": unrouted_n,
+                 "queue": self.history_store.queue_len(), "error": error }), spooled)
     }
 
     /* ------------------------------------------- streams ------------------------------------------- */
@@ -2107,5 +2281,60 @@ mod tests {
         let oldest = h.queue.lock().values().map(|v| v.day.clone()).min().unwrap();
         assert_eq!(oldest, "2020-01-03", "the two oldest days went, whatever their keys");
         assert_eq!(h.drop_stream("volume"), QUEUE_MAX, "a stream turned off takes its queue with it");
+    }
+
+    #[test]
+    fn alerts_have_their_own_share_and_never_push_another_stream_out() {
+        let alerts = crate::data_routing::ALERTS_STREAM;
+        let h = HistoryStore::open(None, false);
+        let vol = |n: usize, from: usize| -> Vec<(QKey, Queued)> {
+            (from..from + n).map(|i| (("volume".to_string(), "c".to_string(), format!("v{i:08}")), q("2026-01-02"))).collect()
+        };
+        let al = |n: usize| -> Vec<(QKey, Queued)> {
+            (0..n).map(|i| ((alerts.to_string(), "c".to_string(), format!("a{i:08}")), q(&day_key(NaiveDate::from_ymd_opt(2026, 1, 1).unwrap() + Duration::days((i % 5) as i64))))).collect()
+        };
+        // Room to spare: alerts keep their own share, the oldest beyond it go.
+        h.enqueue(vol(1_000, 0));
+        h.enqueue(al(ALERTS_QUEUE_MAX + 500));
+        let counts = h.queue_counts();
+        assert_eq!(counts.get(alerts).copied(), Some(ALERTS_QUEUE_MAX));
+        assert_eq!(counts.get("volume").copied(), Some(1_000));
+        assert_eq!(h.status.lock().dropped_by_stream.get(alerts).copied(), Some(500));
+        // The queue fills with history: alerts go first, history is never evicted for them.
+        h.enqueue(vol(QUEUE_MAX - 1_000, 1_000));
+        let counts = h.queue_counts();
+        assert_eq!(counts.get("volume").copied(), Some(QUEUE_MAX), "every history document is still there");
+        assert_eq!(counts.get(alerts).copied(), None, "the alerts made room");
+        h.enqueue(al(10));
+        assert_eq!(h.queue_counts().get(alerts).copied(), None, "a full queue takes no alert at history's expense");
+        assert_eq!(h.queue_counts().get("volume").copied(), Some(QUEUE_MAX));
+        assert_eq!(h.status.lock().dropped_by_stream.get("volume").copied(), None, "no history document was ever dropped");
+        // A document too big to queue is not queued, and counted.
+        let big = Queued { day: "2026-01-02".into(), doc: json!({ "x": "y".repeat(QUEUED_DOC_MAX_BYTES + 1) }), tries: 0 };
+        h.enqueue(vec![(("capacity".into(), "c".into(), "big".into()), big)]);
+        assert_eq!(h.queue_counts().get("capacity").copied(), None);
+        assert_eq!(h.status.lock().dropped_by_stream.get("capacity").copied(), Some(1));
+        // Turning the file off takes references and content out of the queued report records.
+        h.drop_stream("volume");
+        h.enqueue(vec![(("reports".into(), "c".into(), "j1".into()), Queued { day: "2026-01-02".into(), doc: json!({ "jobId": "j1", "fileRef": { "name": "r", "bytes": 1, "sha256": "x" } }), tries: 0 })]);
+        assert_eq!(h.strip_report_files(), 1);
+        assert_eq!(h.queue.lock().get(&("reports".into(), "c".into(), "j1".into())).unwrap().doc, json!({ "jobId": "j1" }));
+    }
+
+    #[test]
+    fn bulks_are_taken_in_turns_across_the_streams() {
+        let mut queue = BTreeMap::new();
+        // 30 alert bulks' worth would come first alphabetically; capacity and volume still get their turn.
+        for i in 0..(BULK_MAX_DOCS * 3) {
+            queue.insert(("alerts".to_string(), "c".to_string(), format!("a{i:06}")), q("2026-11-03"));
+        }
+        queue.insert(("capacity".into(), "a".into(), "a|d".into()), q("2026-11-04"));
+        for c in 0..30 {
+            queue.insert(("volume".into(), format!("c{c:02}"), "d".into()), q("2026-11-03"));
+        }
+        let bulks = cut_bulks(&queue, 4);
+        let streams: Vec<&str> = bulks.iter().map(|b| b[0].0.as_str()).collect();
+        assert_eq!(streams, vec!["alerts", "capacity", "volume", "alerts"], "one each in turn, then round again");
+        assert_eq!(cut_bulks(&queue, 40).len(), 3 + 1 + 30, "everything, when it fits");
     }
 }

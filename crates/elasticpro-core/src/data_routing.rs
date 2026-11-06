@@ -45,10 +45,36 @@ pub const HISTORY_STREAMS: [&str; 3] = ["volume", "capacity", "delay"];
 pub const REPORT_FILE_MAX_BYTES: u64 = 2 * 1024 * 1024;
 /// Spool files one tick drains at most.
 pub const SPOOL_PER_TICK: usize = 1000;
-/// A page's `raised` or `cleared` for the same alert within this window is the same event.
+/// A page's `raised` or `cleared` for the same alert, from the same person, within this
+/// window is the same event.
 pub const ALERT_EVENT_DEDUPE_MS: u64 = 15 * 60_000;
 /// Events one `ALERT_EVENTS_PUT` may carry.
 pub const ALERT_EVENTS_MAX: usize = 200;
+/// Events one account may report in `ALERT_EVENTS_WINDOW_MS`, over every message (counted as
+/// sent, accepted or not): past it the message is refused `too_many` and nothing is queued.
+pub const ALERT_EVENTS_PER_WINDOW: usize = 200;
+pub const ALERT_EVENTS_WINDOW_MS: u64 = 15 * 60_000;
+/// Remembered `(reporter, event, key)` at most; past it the oldest are forgotten first.
+pub const ALERT_RECENT_MAX: usize = 50_000;
+/// A page's own `at` is believed within this window around now; outside it, now is used.
+pub const ALERT_AT_PAST_MS: u64 = 48 * 3_600_000;
+pub const ALERT_AT_FUTURE_MS: u64 = 5 * 60_000;
+/// The spool holds at most this much; a record that would take it over is not spooled.
+pub const SPOOL_MAX_BYTES: u64 = 32 * 1024 * 1024;
+/// The alert rule families the pages raise (`ui/js/core/alert-rules.js` ids — one list, the
+/// unit test holds the two together) plus Play's `node-left`. An alert key is
+/// `<clusterId>:<family>[:<instance>]`; a key whose family is not one of these is refused.
+pub const ALERT_RULE_IDS: [&str; 18] = [
+    "unreachable", "health", "disk", "disk-balance", "disk-unaccounted", "capacity", "no-master", "master-changed",
+    "ilm", "slm-mode", "slm-fail", "slm-stale", "repo", "log-delay", "heap", "automation", "volume",
+    crate::play::NODE_LEFT_ACK,
+];
+
+/// The rule family an alert key names (`<clusterId>:<family>…`), when it is a known one.
+pub fn known_alert_family(key: &str) -> Option<&'static str> {
+    let family = key.split(':').nth(1)?;
+    ALERT_RULE_IDS.iter().copied().find(|f| *f == family)
+}
 /// The directory walk for "size now" stops here (the figure is then a floor, and says so).
 pub const SIZE_WALK_CAP: usize = 200_000;
 /// A document count read from the store is kept this long before it is asked again.
@@ -221,8 +247,12 @@ pub struct DataRouting {
     /// a copy while *Write history* is armed — what arming meant before this feature — else
     /// built-in; the other kinds are built-in.
     saved: std::sync::atomic::AtomicBool,
-    /// `(event, key)` → when a page last reported it: a second report inside the window is the same event.
-    recent_alerts: Mutex<BTreeMap<(String, String), u64>>,
+    /// `(reporter, event, key)` → when that page last reported it: a second report inside
+    /// the window is the same event. Entries past the window go; past `ALERT_RECENT_MAX` the
+    /// oldest go first.
+    recent_alerts: Mutex<BTreeMap<(String, String, String), u64>>,
+    /// Per account: `(window start, events sent in it)` for `ALERT_EVENTS_PUT`.
+    alert_rate: Mutex<BTreeMap<String, (u64, usize)>>,
     /// Document counts read from the store, per pattern: `(at, count)`; `None` = not answered.
     counts: Mutex<BTreeMap<String, (u64, Option<u64>)>>,
 }
@@ -238,7 +268,7 @@ impl DataRouting {
         let on_disk: Option<Routing> = path.as_ref().and_then(|p| std::fs::read(p).ok()).and_then(|b| serde_json::from_slice(&b).ok());
         let saved = std::sync::atomic::AtomicBool::new(on_disk.is_some());
         DataRouting { path, spool, writer, stored: RwLock::new(on_disk.unwrap_or_default()), saved,
-                      recent_alerts: Mutex::new(BTreeMap::new()), counts: Mutex::new(BTreeMap::new()) }
+                      recent_alerts: Mutex::new(BTreeMap::new()), alert_rate: Mutex::new(BTreeMap::new()), counts: Mutex::new(BTreeMap::new()) }
     }
 
     pub fn supported(&self) -> bool {
@@ -283,12 +313,22 @@ impl DataRouting {
     }
 
     /// Leave a record for the writer's tick to queue (`Spooled`), one file, written whole.
+    /// Refused when the record is over `QUEUED_DOC_MAX_BYTES` or the spool would pass
+    /// `SPOOL_MAX_BYTES` (the tick drains it every minute; a spool that grows is a core that
+    /// is not ticking, and more files would not help).
     pub fn spool(&self, s: &Spooled) -> Result<(), String> {
         let dir = self.spool.as_ref().ok_or("no data directory")?;
         std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+        let bytes = serde_json::to_vec(s).map_err(|e| e.to_string())?;
+        if bytes.len() > crate::history_store::QUEUED_DOC_MAX_BYTES {
+            return Err(format!("the record is {} bytes, over the {} allowed", bytes.len(), crate::history_store::QUEUED_DOC_MAX_BYTES));
+        }
+        let held: u64 = std::fs::read_dir(dir).into_iter().flatten().flatten().filter_map(|e| e.metadata().ok()).map(|m| m.len()).sum();
+        if held + bytes.len() as u64 > SPOOL_MAX_BYTES {
+            return Err(format!("the spool holds {held} bytes, its limit is {SPOOL_MAX_BYTES}: is the core's history-store tick running?"));
+        }
         let safe: String = s.id.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '_' }).take(80).collect();
         let name = format!("{}-{safe}-{}.json", s.stream, s.at);
-        let bytes = serde_json::to_vec(s).map_err(|e| e.to_string())?;
         crate::volume::store::write_atomic(&dir.join(name), &bytes)
     }
 
@@ -303,20 +343,38 @@ impl DataRouting {
             .map(|p| { let s = std::fs::read(&p).ok().and_then(|b| serde_json::from_slice(&b).ok()); (p, s) }).collect()
     }
 
-    /// Whether a page's `raised`/`cleared` for `key` is new, and remember it. Pure but for the clock.
-    pub fn alert_event_is_new(&self, event: &str, key: &str, now_ms: u64) -> bool {
+    /// Whether `by`'s page reporting `event` for `key` is new, and remember it. Entries older
+    /// than the window are forgotten; past `ALERT_RECENT_MAX` the oldest go first (never all).
+    pub fn alert_event_is_new(&self, by: &str, event: &str, key: &str, now_ms: u64) -> bool {
         let mut m = self.recent_alerts.lock();
         m.retain(|_, at| now_ms.saturating_sub(*at) < ALERT_EVENT_DEDUPE_MS);
-        if m.len() > 50_000 {
-            m.clear();
+        let k = (by.to_string(), event.to_string(), key.to_string());
+        if m.contains_key(&k) {
+            return false;
         }
-        match m.get(&(event.to_string(), key.to_string())) {
-            Some(_) => false,
-            None => {
-                m.insert((event.to_string(), key.to_string()), now_ms);
-                true
+        if m.len() >= ALERT_RECENT_MAX {
+            let mut by_age: Vec<(u64, (String, String, String))> = m.iter().map(|(k, at)| (*at, k.clone())).collect();
+            by_age.sort();
+            for (_, k) in by_age.into_iter().take(m.len() + 1 - ALERT_RECENT_MAX) {
+                m.remove(&k);
             }
         }
+        m.insert(k, now_ms);
+        true
+    }
+
+    /// Count `n` events against `by`'s window: `Err(message)` when the account is past
+    /// `ALERT_EVENTS_PER_WINDOW` in `ALERT_EVENTS_WINDOW_MS` (the events still count).
+    pub fn alert_events_allow(&self, by: &str, n: usize, now_ms: u64) -> Result<(), String> {
+        let mut m = self.alert_rate.lock();
+        m.retain(|_, (start, _)| now_ms.saturating_sub(*start) < ALERT_EVENTS_WINDOW_MS);
+        let e = m.entry(by.to_string()).or_insert((now_ms, 0));
+        e.1 = e.1.saturating_add(n);
+        if e.1 > ALERT_EVENTS_PER_WINDOW {
+            let left = (e.0 + ALERT_EVENTS_WINDOW_MS).saturating_sub(now_ms) / 60_000 + 1;
+            return Err(format!("too many alert events from this account: at most {ALERT_EVENTS_PER_WINDOW} in {} minutes (try again in {left} min)", ALERT_EVENTS_WINDOW_MS / 60_000));
+        }
+        Ok(())
     }
 
     /// A count read from the store, if read within `COUNT_FOR_MS`: `Some(answer)`.
@@ -399,16 +457,58 @@ fn ms_day(ms: i64) -> String {
     day_key(utc_day(ms))
 }
 
-/// A report file carried inside its record.
-pub struct FileCarried<'a> {
-    pub name: &'a str,
-    pub base64: String,
+/// A report file as its record refers to it until it is sent: name, size and digest. The
+/// content is read when the bulk is cut (`materialise_report_doc`), never kept in the queue
+/// or the spool.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct FileRef {
+    pub name: String,
+    pub bytes: u64,
+    pub sha256: String,
+}
+
+/// `sha256` of a file, hex, with its size.
+pub fn file_digest(path: &Path) -> std::io::Result<(u64, String)> {
+    use sha2::Digest as _;
+    let bytes = std::fs::read(path)?;
+    Ok((bytes.len() as u64, hex::encode(sha2::Sha256::digest(&bytes))))
+}
+
+/// A queued report document on its way out: its `fileRef`, if any, becomes `fileContent`
+/// (the file read now, checked against the size and digest recorded when the job ended) or,
+/// when the file is gone or changed, a `fileNote` saying so. The reference itself never
+/// reaches the store.
+pub fn materialise_report_doc(mut doc: Value, path: Option<&Path>) -> Value {
+    let Some(r) = doc.get("fileRef").cloned().and_then(|v| serde_json::from_value::<FileRef>(v).ok()) else {
+        if let Some(o) = doc.as_object_mut() { o.remove("fileRef"); }
+        return doc;
+    };
+    if let Some(o) = doc.as_object_mut() {
+        o.remove("fileRef");
+    }
+    let note = match path.map(file_digest) {
+        None => format!("the file {} was not carried: no such path on the server", r.name),
+        Some(Err(_)) => format!("the file {} is no longer on the server (report files are kept {} days)", r.name, crate::report::KEEP_FILE_DAYS),
+        Some(Ok((len, digest))) if len != r.bytes || digest != r.sha256 => format!("the file {} changed since the report ended: not carried", r.name),
+        Some(Ok(_)) => {
+            use base64::Engine as _;
+            match path.and_then(|p| std::fs::read(p).ok()) {
+                Some(b) => {
+                    doc["fileContent"] = json!({ "name": r.name, "base64": base64::engine::general_purpose::STANDARD.encode(b), "sha256": r.sha256 });
+                    return doc;
+                }
+                None => format!("the file {} could not be read", r.name),
+            }
+        }
+    };
+    doc["fileNote"] = json!(note);
+    doc
 }
 
 /// One report job as its record on the store: what it was, what it made, what it measured.
 /// `figures` are the job's own counts, `null` where the job did not count (a volume report
 /// counts days, not rows).
-pub fn report_doc(j: &Job, file: Option<FileCarried<'_>>, now_ms: u64) -> Value {
+pub fn report_doc(j: &Job, file: Option<FileRef>, now_ms: u64) -> Value {
     let ended = j.ended_at.unwrap_or(now_ms as i64);
     let rows: Option<u64> = (!j.progress.clusters.is_empty()).then(|| j.progress.clusters.values().map(|c| c.rows).sum());
     let clusters_done = (!j.progress.clusters.is_empty()).then(|| j.progress.clusters.values().filter(|c| c.state == "done").count() as u64);
@@ -430,7 +530,7 @@ pub fn report_doc(j: &Job, file: Option<FileCarried<'_>>, now_ms: u64) -> Value 
         "writtenAt": now_ms,
     });
     if let Some(f) = file {
-        doc["fileContent"] = json!({ "name": f.name, "base64": f.base64 });
+        doc["fileRef"] = json!(f);
     }
     doc
 }
@@ -488,7 +588,11 @@ pub fn parse_alert_events(v: &Value, reported_by: &str, now_ms: u64) -> Result<V
             return Err(format!("event: {event:?} is not raised or cleared"));
         }
         let key = crate::play::acks::check_key(e.get("key").and_then(Value::as_str).unwrap_or(""))?.to_string();
-        let at = e.get("at").and_then(Value::as_u64).filter(|a| *a > 0 && *a <= now_ms + 86_400_000).unwrap_or(now_ms);
+        if known_alert_family(&key).is_none() {
+            return Err(format!("key: {key:?} names no alert rule (<clusterId>:<rule>…)"));
+        }
+        let at = e.get("at").and_then(Value::as_u64)
+            .filter(|a| *a + ALERT_AT_PAST_MS >= now_ms && *a <= now_ms + ALERT_AT_FUTURE_MS).unwrap_or(now_ms);
         let bounded = |o: Option<String>| o.filter(|x| x.len() <= 200 && !x.chars().any(char::is_control));
         out.push(AlertEvent {
             event, key, at,
@@ -538,7 +642,8 @@ pub fn reports_template_body(prefix: &str) -> Value {
         ("format", kw.clone()), ("mail", boolean.clone()), ("by", kw.clone()),
         ("createdAt", ms.clone()), ("startedAt", ms.clone()), ("endedAt", ms.clone()), ("day", day.clone()), ("durationMs", long.clone()),
         ("file", json!({ "properties": { "name": kw.clone(), "bytes": long.clone() } })),
-        ("fileContent", json!({ "properties": { "name": kw.clone(), "base64": { "type": "binary" } } })),
+        ("fileContent", json!({ "properties": { "name": kw.clone(), "base64": { "type": "binary" }, "sha256": kw.clone() } })),
+        ("fileNote", text.clone()),
         ("error", text.clone()), ("mailError", text.clone()), ("warning", text.clone()), ("stoppedBy", kw.clone()),
         ("sheets", kw.clone()),
         ("failedClusters", json!({ "properties": { "clusterId": kw.clone(), "reason": text.clone() } })),
@@ -605,24 +710,28 @@ impl Core {
     }
 
     /// Records another process left in the spool (the report worker's): each is queued when
-    /// the routing admits it now, else let go — and its file removed either way.
-    pub(crate) fn routing_drain_spool(&self) {
+    /// the routing admits it now, else let go (its file removed). The files of the records
+    /// queued are handed back: the tick removes them once the queue is on disk, so a crash in
+    /// between loses nothing (the record is queued again, under the same key).
+    pub(crate) fn routing_drain_spool(&self) -> Vec<PathBuf> {
         if !self.routing_supported() {
-            return;
+            return vec![];
         }
-        let mut taken = 0usize;
+        let mut taken = vec![];
         for (path, rec) in self.data_routing.spooled() {
             if let Some(kind) = rec.as_ref().and_then(|s| Kind::of_stream(&s.stream)) {
                 if self.routing_admits(kind) {
                     self.history_store.enqueue(vec![rec.expect("a parsed record").into_queued()]);
-                    taken += 1;
+                    taken.push(path);
+                    continue;
                 }
             }
             let _ = std::fs::remove_file(&path);
         }
-        if taken > 0 {
-            tracing::info!(target: "audit", queued = taken, "backend routing: spooled records queued for the store");
+        if !taken.is_empty() {
+            tracing::info!(target: "audit", queued = taken.len(), "backend routing: spooled records queued for the store");
         }
+        taken
     }
 
     /// A report job ended (`report_work`): its record goes to the spool for the writer's tick —
@@ -637,13 +746,11 @@ impl Core {
             return;
         }
         let now = now_ms();
+        // Carried as a reference (name, size, digest): the file is read when the record is sent.
         let carried = job.file.as_ref().filter(|_| routing.report_files).filter(|f| f.bytes <= REPORT_FILE_MAX_BYTES)
             .and_then(|f| self.reports.file_path(&job.id, &f.name).map(|p| (f.name.clone(), p)))
-            .and_then(|(name, p)| std::fs::read(p).ok().map(|b| (name, b)));
-        let doc = report_doc(job, carried.as_ref().map(|(name, b)| {
-            use base64::Engine as _;
-            FileCarried { name, base64: base64::engine::general_purpose::STANDARD.encode(b) }
-        }), now);
+            .and_then(|(name, p)| file_digest(&p).ok().map(|(bytes, sha256)| FileRef { name, bytes, sha256 }));
+        let doc = report_doc(job, carried, now);
         let day = doc["day"].as_str().unwrap_or_default().to_string();
         let s = Spooled { stream: REPORTS_STREAM.into(), cluster: job.cluster_id.clone(), id: job.id.clone(), day, at: now, doc };
         match self.data_routing.spool(&s) {
@@ -685,10 +792,38 @@ impl Core {
                     Ok(r) => r,
                     Err(e) => return refused("bad_request", e),
                 };
+                let before = self.routing();
                 match self.data_routing.set(next, &by, now_ms()) {
                     Ok(r) => {
                         tracing::info!(target: "audit", user = %by, history = r.history.as_str(), reports = r.reports.as_str(),
                                        alerts = r.alerts.as_str(), report_files = r.report_files, "backend routing set");
+                        // Opting out takes effect now: what was waiting for the store of a kind
+                        // routed back to built-in goes (counted, audited); files no longer
+                        // carried come out of the queued report records.
+                        for k in Kind::ALL {
+                            if before.mode(k).sends_to_store() && !r.mode(k).sends_to_store() {
+                                let streams: Vec<&str> = match k { Kind::History => HISTORY_STREAMS.to_vec(), Kind::Reports => vec![REPORTS_STREAM], Kind::Alerts => vec![ALERTS_STREAM] };
+                                let mut dropped = 0usize;
+                                for s in &streams {
+                                    let n = self.history_store.drop_stream(s);
+                                    if n > 0 {
+                                        let mut st = self.history_store.status.lock();
+                                        st.dropped += n as u64;
+                                        *st.dropped_by_stream.entry((*s).into()).or_insert(0) += n as u64;
+                                        dropped += n;
+                                    }
+                                }
+                                if dropped > 0 {
+                                    tracing::info!(target: "audit", user = %by, kind = k.as_str(), dropped, "backend routing: queued records let go, the kind is kept built-in");
+                                }
+                            }
+                        }
+                        if before.report_files && !r.report_files {
+                            let n = self.history_store.strip_report_files();
+                            if n > 0 {
+                                tracing::info!(target: "audit", user = %by, records = n, "backend routing: report files taken out of the queued records");
+                            }
+                        }
                         self.routing_view()
                     }
                     Err(e) => json!({ "ok": false, "message": format!("could not save: {e}") }),
@@ -767,6 +902,7 @@ impl Core {
         let store_configured = store["configured"] == json!(true);
         let not_writing = self.history_writes_open().err();
         let counts = self.history_store.queue_counts();
+        let (stream_errors, dropped_by) = { let st = self.history_store.status.lock(); (st.stream_errors.clone(), st.dropped_by_stream.clone()) };
         let prefix = self.history_store.stored.read().prefix().to_string();
         let mut kinds = Map::new();
         for k in Kind::ALL {
@@ -777,6 +913,8 @@ impl Core {
                 Kind::Alerts => vec![ALERTS_STREAM],
             };
             let queued: usize = streams.iter().map(|s| counts.get(*s).copied().unwrap_or(0)).sum();
+            let dropped: u64 = streams.iter().map(|s| dropped_by.get(*s).copied().unwrap_or(0)).sum();
+            let stream_error = streams.iter().find_map(|s| stream_errors.get(*s).cloned());
             let (state, line) = status_line(mode, not_writing.as_deref(), queued);
             // Documents on the store: asked only when something of this kind is routed there
             // and a store is configured; unknown otherwise, never 0.
@@ -803,8 +941,10 @@ impl Core {
             kinds.insert(k.as_str().into(), json!({
                 "mode": mode, "label": mode.label(), "state": state, "line": line,
                 "keptFor": { "builtin": kept_builtin, "store": STORE_KEPT_FOR },
-                "builtin": { "size": per.get(&k).cloned().unwrap_or_default(), "writing": true },
-                "store": { "docs": docs, "docsNote": docs_note, "queued": queued, "writing": not_writing.is_none(), "why": not_writing },
+                // The built-in record's own result is not measured here: no claim is made about it.
+                "builtin": { "size": per.get(&k).cloned().unwrap_or_default() },
+                "store": { "docs": docs, "docsNote": docs_note, "queued": queued, "dropped": dropped,
+                           "writing": not_writing.is_none() && stream_error.is_none(), "why": not_writing.clone().or(stream_error) },
             }));
         }
         json!({
@@ -829,6 +969,11 @@ impl Core {
         }
         let by = caller.map(|c| c.name.clone()).unwrap_or_else(|| "local".into());
         let now = now_ms();
+        // Counted as sent, before anything is looked at: a flood of junk is a flood.
+        let sent = msg.get("events").and_then(Value::as_array).map(Vec::len).unwrap_or(1).max(1);
+        if let Err(e) = self.data_routing.alert_events_allow(&by, sent, now) {
+            return refused("too_many", e);
+        }
         let events = match parse_alert_events(msg, &by, now) {
             Ok(e) => e,
             Err(e) => return refused("bad_request", e),
@@ -843,7 +988,7 @@ impl Core {
         for mut e in events {
             let Some(cluster) = crate::silences::cluster_of("alert", &e.key, &known) else { unknown += 1; continue };
             e.cluster_id = Some(cluster.clone());
-            if !self.data_routing.alert_event_is_new(&e.event, &e.key, now) {
+            if !self.data_routing.alert_event_is_new(&by, &e.event, &e.key, now) {
                 dropped += 1;
                 continue;
             }
@@ -922,11 +1067,16 @@ mod tests {
         assert_eq!(reports_template_body("ep")["index_patterns"], json!(["ep-reports-*"]));
         // Every field a document carries is in its template (dynamic: false would otherwise lose it from search).
         let j = sample_job();
-        let doc = report_doc(&j, Some(FileCarried { name: "r.xlsx", base64: "AAAA".into() }), 5);
+        let doc = report_doc(&j, Some(FileRef { name: "r.xlsx".into(), bytes: 4, sha256: "x".into() }), 5);
+        assert!(doc.get("fileRef").is_some() && doc.get("fileContent").is_none(), "queued: a reference, never the content");
         let props = &reports_template_body("ep")["template"]["mappings"]["properties"];
-        for k in doc.as_object().unwrap().keys() {
+        // As sent (the reference becomes content or a note), every field is mapped.
+        let gone = materialise_report_doc(doc.clone(), Some(Path::new("/nonexistent/ep-report.xlsx")));
+        assert!(gone.get("fileRef").is_none() && gone["fileNote"].as_str().unwrap().contains("no longer on the server"), "{gone}");
+        for k in gone.as_object().unwrap().keys() {
             assert!(props.get(k).is_some(), "report field {k} is not mapped");
         }
+        assert!(props["fileContent"]["properties"].get("sha256").is_some());
         let a = alert_doc(&AlertEvent { event: "silenced".into(), key: "c1".into(), by: "kd".into(), at: 1_700_000_000_000, ..AlertEvent::default() }, 5);
         let props = &alerts_template_body("ep")["template"]["mappings"]["properties"];
         for k in a.as_object().unwrap().keys() {
@@ -954,7 +1104,7 @@ mod tests {
         assert_eq!(d["figures"]["rows"], Value::Null, "a volume report counts days, not rows: unknown, not 0");
         assert_eq!(d["figures"]["clustersDone"], Value::Null);
         assert_eq!(d["day"], json!("2025-11-06"), "the UTC day the job ended");
-        assert!(d.get("fileContent").is_none(), "no file unless asked");
+        assert!(d.get("fileContent").is_none() && d.get("fileRef").is_none(), "no file unless asked");
         assert_eq!(d["durationMs"], json!(1_762_400_000_000i64 - 2_000));
     }
 
@@ -971,13 +1121,79 @@ mod tests {
         assert_eq!(alert_id(&ev[0]), format!("raised|c1:disk|{}", now - 5));
         assert!(parse_alert_events(&json!({ "events": [{ "event": "acknowledged", "key": "c1:x" }] }), "ann", now).is_err(), "a page reports only what it sees");
         assert!(parse_alert_events(&json!({ "events": [{ "event": "raised", "key": "" }] }), "ann", now).is_err());
-        let many: Vec<Value> = (0..=ALERT_EVENTS_MAX).map(|i| json!({ "event": "raised", "key": format!("c:{i}") })).collect();
+        let many: Vec<Value> = (0..=ALERT_EVENTS_MAX).map(|i| json!({ "event": "raised", "key": format!("c{i}:disk") })).collect();
         assert!(parse_alert_events(&json!({ "events": many }), "ann", now).is_err());
+        // A key must name a rule family the pages raise; free text is refused by name.
+        let junk = parse_alert_events(&json!({ "events": [{ "event": "raised", "key": "c1:pwned-by-script" }] }), "ann", now).unwrap_err();
+        assert!(junk.contains("names no alert rule"), "{junk}");
+        assert!(parse_alert_events(&json!({ "events": [{ "event": "raised", "key": "c1" }] }), "ann", now).is_err(), "no family at all");
+        assert!(parse_alert_events(&json!({ "events": [{ "event": "raised", "key": "c1:slm-stale:daily" }] }), "ann", now).is_ok(), "an instance suffix is fine");
+        assert!(parse_alert_events(&json!({ "events": [{ "event": "cleared", "key": "c1:node-left" }] }), "ann", now).is_ok(), "Play's node-left");
+        // `at`: believed within 48 h back and 5 min ahead, else now.
+        let at = |a: u64| parse_alert_events(&json!({ "events": [{ "event": "raised", "key": "c1:disk", "at": a }] }), "ann", now).unwrap()[0].at;
+        assert_eq!(at(now - ALERT_AT_PAST_MS + 1), now - ALERT_AT_PAST_MS + 1);
+        assert_eq!(at(now - ALERT_AT_PAST_MS - 1), now, "too far back");
+        assert_eq!(at(now + ALERT_AT_FUTURE_MS), now + ALERT_AT_FUTURE_MS);
+        assert_eq!(at(now + ALERT_AT_FUTURE_MS + 1), now, "too far ahead");
+        // The same event from the same page is one; from another person it is theirs.
         let r = DataRouting::open(None, true, true);
-        assert!(r.alert_event_is_new("raised", "c1:disk", now));
-        assert!(!r.alert_event_is_new("raised", "c1:disk", now + 60_000), "the same event from another page");
-        assert!(r.alert_event_is_new("cleared", "c1:disk", now + 60_000));
-        assert!(r.alert_event_is_new("raised", "c1:disk", now + ALERT_EVENT_DEDUPE_MS + 1), "later: a new episode");
+        assert!(r.alert_event_is_new("ann", "raised", "c1:disk", now));
+        assert!(!r.alert_event_is_new("ann", "raised", "c1:disk", now + 60_000), "the same event from the same page");
+        assert!(r.alert_event_is_new("bob", "raised", "c1:disk", now + 60_000), "another person's page");
+        assert!(r.alert_event_is_new("ann", "cleared", "c1:disk", now + 60_000));
+        assert!(r.alert_event_is_new("ann", "raised", "c1:disk", now + ALERT_EVENT_DEDUPE_MS + 1), "later: a new episode");
+        // Past the cap the oldest go first, never everything.
+        for i in 0..ALERT_RECENT_MAX {
+            r.alert_event_is_new("ann", "raised", &format!("c{i}:heap"), now + 1 + i as u64 % 1000);
+        }
+        assert!(!r.alert_event_is_new("ann", "raised", "c1:disk", now + 1001), "a recent one is still remembered after the trim");
+        assert_eq!(r.recent_alerts.lock().len(), ALERT_RECENT_MAX);
+    }
+
+    #[test]
+    fn an_account_may_report_only_so_many_events_in_a_window() {
+        let r = DataRouting::open(None, true, true);
+        let now = 1_700_000_000_000u64;
+        assert!(r.alert_events_allow("ann", ALERT_EVENTS_PER_WINDOW, now).is_ok());
+        let e = r.alert_events_allow("ann", 1, now + 1).unwrap_err();
+        assert!(e.contains("too many alert events"), "{e}");
+        assert!(r.alert_events_allow("bob", 1, now + 1).is_ok(), "another account's window");
+        assert!(r.alert_events_allow("ann", 1, now + ALERT_EVENTS_WINDOW_MS).is_ok(), "the window passed");
+    }
+
+    #[test]
+    fn the_rule_families_are_the_pages_alert_rules() {
+        // One list: the Rust side names the families the UI's alert-rules.js produces, plus Play's node-left.
+        let js = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../ui/js/core/alert-rules.js")).expect("ui/js/core/alert-rules.js");
+        let re = regex::Regex::new(r"\{\s*id:\s*'([a-z-]+)'").unwrap();
+        let mut from_js: Vec<&str> = re.captures_iter(&js).map(|c| c.get(1).unwrap().as_str()).collect();
+        from_js.push(crate::play::NODE_LEFT_ACK);
+        from_js.sort();
+        from_js.dedup();
+        let mut here: Vec<&str> = ALERT_RULE_IDS.to_vec();
+        here.sort();
+        assert_eq!(here, from_js, "ALERT_RULE_IDS and ui/js/core/alert-rules.js disagree");
+        assert_eq!(known_alert_family("vm-1:slm-stale:daily"), Some("slm-stale"));
+        assert_eq!(known_alert_family("vm-1"), None);
+        assert_eq!(known_alert_family("vm-1:DISK"), None, "exact");
+    }
+
+    #[test]
+    fn a_report_file_is_carried_as_sent_when_it_is_still_what_it_was() {
+        let dir = std::env::temp_dir().join(format!("ep-routing-file-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("r.csv");
+        std::fs::write(&p, b"a,b\n1,2\n").unwrap();
+        let (bytes, sha256) = file_digest(&p).unwrap();
+        let doc = report_doc(&sample_job(), Some(FileRef { name: "r.csv".into(), bytes, sha256: sha256.clone() }), 5);
+        let sent = materialise_report_doc(doc.clone(), Some(&p));
+        assert_eq!(sent["fileContent"]["sha256"], json!(sha256));
+        assert_eq!(sent["fileContent"]["base64"], json!("YSxiCjEsMgo="));
+        assert!(sent.get("fileRef").is_none() && sent.get("fileNote").is_none());
+        std::fs::write(&p, b"changed").unwrap();
+        let changed = materialise_report_doc(doc, Some(&p));
+        assert!(changed.get("fileContent").is_none() && changed["fileNote"].as_str().unwrap().contains("changed since"), "{changed}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
