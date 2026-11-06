@@ -1585,7 +1585,7 @@ await go('settings');
     status: { lastSuccessAt: null, lastError: null, lastErrorAt: null, docsWritten: 0, queue: 0, templateAt: null, backfill: null },
     jumpHosts: [],
   };
-  const routingStub = { refuse: null, routing: { history: 'copy', reports: 'builtin', alerts: 'builtin', reportFiles: false, changedBy: null, changedAt: null } };
+  const routingStub = { backup: false, refuse: null, routing: { history: 'copy', reports: 'builtin', alerts: 'builtin', reportFiles: false, changedBy: null, changedAt: null } };
   const MODES_STUB = [{ id: 'builtin', label: 'ElasticPro built-in' }, { id: 'copy', label: 'ElasticPro + Elasticsearch (copy)' }, { id: 'es', label: 'Elasticsearch only' }];
   const routingReply = (withStatus) => {
     const r = routingStub.routing;
@@ -1633,7 +1633,8 @@ await go('settings');
       const r = await realFetch(input, init);
       let j = {};
       try { j = JSON.parse(await r.text()); } catch (_) { return r; }
-      return stubReply({ ...j, dataRouting: { supported: true } });
+      // Backup support is stated here, not inherited from whatever core the check runs against.
+      return stubReply({ ...j, dataRouting: { supported: true }, backup: { supported: routingStub.backup === true } });
     }
     if (t.startsWith('DATA_ROUTING')) {
       sent.push(body);
@@ -1739,7 +1740,7 @@ await go('settings');
         'backend: an unsaved routing does not say history follows the store');
       const bcard = [...doc.querySelectorAll('section.card')].find((x) => (x.querySelector('header h2') || {}).textContent === 'ElasticPro built-in');
       ok(bcard && /1\.00 GB/.test(bcard.textContent) && /free on that disk/.test(bcard.textContent), `backend: the built-in card lacks size and free space: ${bcard && bcard.textContent}`);
-      ok(bcard && !bcard.querySelector('#dr-backup-link'), 'backend: a Backed up link shows while PING reports no backup support');
+      ok(bcard && !bcard.querySelector('#dr-backup-link'), 'backend: a Backed up link shows while PING says backup.supported is false');
 
       // Reports to the store: the switch and its warning appear; the save bar names the change.
       sel('reports').value = 'copy'; sel('reports').dispatchEvent(new window.Event('change', { bubbles: true }));
@@ -1775,6 +1776,21 @@ await go('settings');
       if (d2) { d2.click(); await settleFor(250); }
       ok(sel('alerts').value === 'es', 'backend: Discard did not return the saved choice');
     }
+  }
+
+  // The same card on a core that can take backups: the link is there and goes to Backup & restore.
+  {
+    routingStub.backup = true;
+    await go('overview');
+    await go('settings');
+    await settleFor(300);
+    ok(await openSettingsTab('History store'), 'backend: the Backend tab did not open on a backup-capable core');
+    await settleFor(300);
+    const bcard = [...doc.querySelectorAll('section.card')].find((x) => (x.querySelector('header h2') || {}).textContent === 'ElasticPro built-in');
+    const link = bcard && bcard.querySelector('#dr-backup-link');
+    ok(!!link, 'backend: no Backed up link while PING says backup.supported is true');
+    ok(link && link.getAttribute('href') === '#/settings/system/backup', `backend: the Backed up link goes to ${link && link.getAttribute('href')}`);
+    routingStub.backup = false;
   }
 
   // The delay card: the monitored cluster unless the admin says otherwise.
