@@ -620,6 +620,12 @@ pub fn required_role(msg_type: &str) -> Option<Role> {
         // Housekeeping deletes files, sessions and cache entries: an administrator's to read
         // the state of and to run.
         "HOUSEKEEPING_GET" | "HOUSEKEEPING_RUN" => Some(Role::Admin),
+        // Backup and restore (docs/HANDBOOK.md "Backup and restore — the message contract"): a
+        // backup holds every cluster, the credentials sealed, and the server's own settings; a
+        // restore rewrites them. An administrator's, and the handler refuses one limited to
+        // some clusters. A display link reaches none of it: not in PLAY_READS.
+        "BACKUP_STATUS" | "BACKUP_CREATE" | "BACKUP_DOWNLOAD" | "BACKUP_DELETE" | "BACKUP_SCHEDULE_SET"
+        | "BACKUP_PREVIEW" | "BACKUP_RESTORE" => Some(Role::Admin),
 
         // The caller's own notification history. Not a write to any cluster, so no write
         // unlock; anybody signed in, and the handler only ever uses the caller's own name.

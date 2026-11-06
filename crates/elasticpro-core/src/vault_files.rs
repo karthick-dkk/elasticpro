@@ -392,6 +392,40 @@ impl ConfigHistory {
         out
     }
 
+    /// Put a version back from a backup, with its record. `Ok(false)` when a version of that id
+    /// is here already (a restore never overwrites history); the id must be one `keep_before`
+    /// could have made. Best effort on the sidecar, like `keep_before`.
+    pub fn import(&self, id: &str, text: &str, saved_by: Option<&str>, summary: Option<&str>) -> Result<bool, String> {
+        let dir = self.dir.as_ref().ok_or("no data directory")?;
+        let id = safe_name(id)?;
+        let id = id.as_str();
+        let (ts, _) = id.split_once('-').filter(|(ts, _)| ts.parse::<u64>().is_ok()).ok_or("not a version id")?;
+        if !Self::is_version_name(id) {
+            return Err("not a version id".into());
+        }
+        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
+        }
+        let dest = dir.join(id);
+        if dest.exists() {
+            return Ok(false);
+        }
+        if !Self::write_private(&dest, text) {
+            return Err(format!("cannot write {}", dest.display()));
+        }
+        if let (Some(by), Some(sum)) = (saved_by, summary) {
+            let meta = SaveMeta { saved_at: ts.parse().unwrap_or(0), saved_by: by.to_string(), summary: sum.to_string() };
+            if let Ok(s) = serde_json::to_string(&meta) {
+                Self::write_private(&dir.join(format!("{id}{META_SUFFIX}")), &s);
+            }
+        }
+        self.trim();
+        Ok(true)
+    }
+
     /// The stored text of one version.
     pub fn read(&self, id: &str) -> Result<String, String> {
         let dir = self.dir.as_ref().ok_or("no data directory")?;

@@ -140,6 +140,11 @@ async fn run() {
     if starts.history_store {
         core.start_history_store();
     }
+    // The daily backup of ElasticPro's own settings (docs/HANDBOOK.md "Backup and restore"):
+    // hosted only, writes nothing but files under <data>/backups/.
+    if starts.backup {
+        core.start_backup_timer();
+    }
     // Cleans what the core itself leaves behind. Started here for the same reason: a
     // scheduler that started itself in Core::new would run in every test.
     if starts.housekeeping {

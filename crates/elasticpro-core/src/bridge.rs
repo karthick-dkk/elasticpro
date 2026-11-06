@@ -110,7 +110,7 @@ pub fn serialize_config(raw: &Value, yaml: bool) -> String {
 /// half a file. 0600 for a file being created, but never a downgrade of one that already
 /// exists: forcing it unconditionally once locked the operator out of their own config
 /// file — the hosted stack deliberately shares it between the container and the host user.
-async fn write_text_atomic(p: &std::path::Path, text: &str) -> Result<(), String> {
+pub(crate) async fn write_text_atomic(p: &std::path::Path, text: &str) -> Result<(), String> {
     let tmp = p.with_extension("tmp");
     if let Some(dir) = p.parent() {
         let _ = tokio::fs::create_dir_all(dir).await;
@@ -126,11 +126,11 @@ async fn write_text_atomic(p: &std::path::Path, text: &str) -> Result<(), String
 }
 
 /// The server's config file, found and parsed (`Core::locate_config`).
-struct LocatedConfig {
-    path: PathBuf,
+pub(crate) struct LocatedConfig {
+    pub(crate) path: PathBuf,
     /// The file is YAML, and a save keeps it so.
-    yaml: bool,
-    raw: Value,
+    pub(crate) yaml: bool,
+    pub(crate) raw: Value,
 }
 
 pub(crate) struct Route1 {
@@ -201,7 +201,7 @@ impl ZbxPeople {
 }
 
 pub struct Core {
-    pins: Arc<PinStore>,
+    pub(crate) pins: Arc<PinStore>,
     transport: Transport,
     primed: RwLock<Primed>,
     pub(crate) tunnels: tokio::sync::RwLock<HashMap<String, Route1>>,
@@ -227,14 +227,16 @@ pub struct Core {
     started: std::time::Instant,
     /// Which build this is. Portable has no accounts and never asks anyone to log in.
     edition: Edition,
-    users: UserStore,
+    pub(crate) users: UserStore,
     pub(crate) sessions: Sessions,
     tokens: TokenStore,
-    keys: crate::vault_files::KeyStore,
-    history: crate::vault_files::ConfigHistory,
+    pub(crate) keys: crate::vault_files::KeyStore,
+    pub(crate) history: crate::vault_files::ConfigHistory,
     /// The scheduled log-delay measurement. Hosted only, disarmed until an admin says
     /// otherwise, and the only thing in this process that acts without being asked.
     delay_sink: RwLock<Sink>,
+    /// Backup and restore: the schedule and one restore at a time. See `backup`.
+    pub(crate) backup: crate::backup::core::BackupState,
     /// Signing in from Zabbix. Hosted only; off until a secret is configured.
     zbx: ZabbixSso,
     /// Elasticsearch passwords the Zabbix module handed over (`POST /sso/zabbix/cluster-secret`),
@@ -247,7 +249,7 @@ pub struct Core {
     zbx_api: RwLock<Arc<Zabbix>>,
     /// The Zabbix connection as configured from the UI, under the server's own settings.
     /// See `zbx_link`.
-    zbx_link: crate::zbx_link::ZbxLink,
+    pub(crate) zbx_link: crate::zbx_link::ZbxLink,
     vault: Vault,
     zbx_sync: RwLock<ZbxSync>,
     /// The two writers, used for nothing but `zabbix.createHosts`. Separate credentials, so
@@ -671,7 +673,7 @@ fn host_port(url: &str) -> Option<(String, String)> {
 }
 
 /// A config file's text, JSON or YAML, as a value.
-pub(crate) fn parse_config_text(text: &str) -> Result<Value, String> {
+pub fn parse_config_text(text: &str) -> Result<Value, String> {
     let t = text.trim_start_matches('\u{feff}');
     if t.trim_start().starts_with('{') {
         serde_json::from_str(t).map_err(|e| e.to_string())
@@ -841,6 +843,7 @@ impl Core {
                 config: read_sink_config(data_dir_for_sink.as_deref(), edition),
                 state: SinkState::default(),
             }),
+            backup: crate::backup::core::BackupState::open(data_dir_for_sink.as_deref(), edition),
             zbx,
             cluster_secrets: if hosted { crate::cluster_secrets::ClusterSecrets::open(data_dir_for_secrets.as_deref()) }
                              else { crate::cluster_secrets::ClusterSecrets::in_memory() },
@@ -1463,6 +1466,9 @@ impl Core {
             }
             "CLUSTER_META_GET" | "CLUSTER_META_SET" => self.cluster_meta_msg(&t, &msg, caller.as_ref()),
             "PLAN_TEMPLATES_GET" | "PLAN_TEMPLATES_SET" => self.plan_templates_msg(&t, &msg, caller.as_ref()),
+            "BACKUP_STATUS" | "BACKUP_CREATE" | "BACKUP_DOWNLOAD" | "BACKUP_DELETE" | "BACKUP_SCHEDULE_SET" | "BACKUP_PREVIEW" | "BACKUP_RESTORE" => {
+                self.backup_msg(&t, &msg, caller.as_ref()).await
+            }
             "SILENCE_LIST" => {
                 let list = self.silences_visible(caller.as_ref());
                 json!({ "ok": true, "silences": list })
@@ -2059,33 +2065,16 @@ impl Core {
                     Some(Ok(t)) => t,
                     _ => return json!({ "ok": false, "kind": "bad_request", "message": "role must be admin, operator, user, guest or none (no access)" }),
                 };
-                if name.eq_ignore_ascii_case(&me) && target != Some(Role::Admin) {
-                    return json!({ "ok": false, "kind": "bad_request", "message": "you cannot take away your own administrator role" });
-                }
-                let Some(role) = target else {
-                    let mut out = done(self.users.set_no_access(&name));
-                    if out["ok"] == json!(true) {
-                        // Refused from now on, so their open sessions go too: a tab that is
-                        // open stays open, and every request from it is refused (the gate).
-                        self.sessions.end_all_for(&name);
-                        tracing::info!(target: "audit", user = %me, subject = %name, role = "none", pinned = true, "role changed: no access");
-                        out["pinned"] = json!(true);
-                        out["noAccess"] = json!(true);
+                match self.apply_role(&name, target, &me) {
+                    Ok((pinned, no_access)) => {
+                        let mut out = done(Ok(()));
+                        // Said back so the page can tell the admin the change will stick.
+                        out["pinned"] = json!(pinned);
+                        out["noAccess"] = json!(no_access);
+                        out
                     }
-                    return out;
-                };
-                let mut out = done(self.users.set_role(&name, role));
-                if out["ok"] == json!(true) {
-                    // Their open sessions take the new role now, without signing them out.
-                    let acct = self.users.list().into_iter().find(|a| a.name.eq_ignore_ascii_case(&name));
-                    let pinned = acct.as_ref().is_some_and(|a| a.role_pinned);
-                    self.sessions.refresh_for(&name, role, acct.and_then(|a| a.scope));
-                    tracing::info!(target: "audit", user = %me, subject = %name, role = role.as_str(), pinned, "role changed");
-                    // Said back so the page can tell the admin the change will stick.
-                    out["pinned"] = json!(pinned);
-                    out["noAccess"] = json!(false);
+                    Err(refusal) => refusal,
                 }
-                out
             }
             "USER_UNPIN_ROLE" => {
                 let out = done(self.users.unpin_role(&name));
@@ -2360,6 +2349,9 @@ impl Core {
             "sharedAcks": self.edition == Edition::Hosted,
             // Data › Backend (docs/HISTORY.md "Backend routing"): DATA_ROUTING_GET / SET / STATUS.
             "dataRouting": { "supported": self.edition == Edition::Hosted },
+            // System › Backup & restore (docs/HANDBOOK.md "Backup and restore"): BACKUP_* exist;
+            // `scheduled` says kept backups and the daily schedule exist on this server.
+            "backup": { "supported": true, "scheduled": self.edition.schedules() },
         });
         if self.edition.uses_accounts() && caller.is_none() {
             return out;
@@ -2549,7 +2541,7 @@ impl Core {
     /// directory only when there is no such file. Creating it in the data directory while
     /// ELASTICPRO_CONFIG named another place was an admin with thirty clusters and every
     /// operator with none — CONFIG_VIEW read the one, the admin had written the other.
-    fn server_config_path(&self) -> Option<std::path::PathBuf> {
+    pub(crate) fn server_config_path(&self) -> Option<std::path::PathBuf> {
         self.config_hint.clone().map(std::path::PathBuf::from).or_else(|| self.data_dir.as_ref().map(|d| d.join("config_cluster.json")))
     }
 
@@ -2575,7 +2567,7 @@ impl Core {
     /// The named file (ELASTICPRO_CONFIG), unless it lists no cluster and the stray one
     /// from an older install does — then that one, so a save from here goes back where the
     /// clusters were read from.
-    async fn locate_config(&self) -> Result<LocatedConfig, Value> {
+    pub(crate) async fn locate_config(&self) -> Result<LocatedConfig, Value> {
         let Some(hint) = self.config_hint.clone() else {
             return Err(json!({ "ok": false, "kind": "no_config",
                                "message": "this server was started without a config file (ELASTICPRO_CONFIG)" }));
@@ -2608,7 +2600,7 @@ impl Core {
 
     /// Write a changed config back where it was read from, keeping the version before it
     /// and the record of who (`by`) saved this one and what it changed.
-    async fn store_config(&self, found: &LocatedConfig, by: &str) -> Result<bool, Value> {
+    pub(crate) async fn store_config(&self, found: &LocatedConfig, by: &str) -> Result<bool, Value> {
         let text = serialize_config(&found.raw, found.yaml);
         let pending = self.history.keep_before(&found.path, &text, by);
         write_text_atomic(&found.path, &text).await
@@ -2621,7 +2613,7 @@ impl Core {
     /// Who a config save is recorded as: the caller's account, or — when no person asked —
     /// `local` on the edition without accounts (one person, like `notify`) and `system`
     /// where accounts exist but the core wrote on its own.
-    fn saver_name(&self, caller: Option<&Caller>) -> String {
+    pub(crate) fn saver_name(&self, caller: Option<&Caller>) -> String {
         match caller {
             Some(c) => c.name.clone(),
             None if !self.edition.uses_accounts() => "local".into(),
@@ -3362,6 +3354,38 @@ impl Core {
         self.read_cache.clear();
         self.forget_connections();
         self.persist_current_prime().await;
+    }
+
+    /// One rule for a role set by hand — `USER_SET_ROLE` and a backup's restore of the roles
+    /// set by hand (`backup`): `None` is No access (the store takes it for an account another
+    /// system signs in and refuses the rest), nobody takes away their own administrator role,
+    /// and the person's open sessions follow at once — refreshed to the new role, or ended for
+    /// No access. Audited under `by`. `Ok((pinned, noAccess))`; `Err` is the refusal as the
+    /// message API answers it.
+    pub(crate) fn apply_role(&self, name: &str, target: Option<Role>, by: &str) -> Result<(bool, bool), Value> {
+        if name.eq_ignore_ascii_case(by) && target != Some(Role::Admin) {
+            return Err(json!({ "ok": false, "kind": "bad_request", "message": "you cannot take away your own administrator role" }));
+        }
+        let refused = |e: crate::auth::AuthError| json!({ "ok": false, "kind": e.kind(), "message": e.to_string() });
+        match target {
+            None => {
+                self.users.set_no_access(name).map_err(refused)?;
+                // Refused from now on, so their open sessions go too: a tab that is open stays
+                // open, and every request from it is refused (the gate).
+                self.sessions.end_all_for(name);
+                tracing::info!(target: "audit", user = %by, subject = %name, role = "none", pinned = true, "role changed: no access");
+                Ok((true, true))
+            }
+            Some(role) => {
+                self.users.set_role(name, role).map_err(refused)?;
+                // Their open sessions take the new role now, without signing them out.
+                let acct = self.users.list().into_iter().find(|a| a.name.eq_ignore_ascii_case(name));
+                let pinned = acct.as_ref().is_some_and(|a| a.role_pinned);
+                self.sessions.refresh_for(name, role, acct.and_then(|a| a.scope));
+                tracing::info!(target: "audit", user = %by, subject = %name, role = role.as_str(), pinned, "role changed");
+                Ok((pinned, false))
+            }
+        }
     }
 
     /// `CREDENTIAL_STATUS` / `CREDENTIAL_SET` / `CREDENTIAL_CLEAR` / `CREDENTIAL_PROMOTE`
@@ -4561,11 +4585,11 @@ impl Core {
 /// Where the armed setting lives between restarts. Hosted keeps it; the other editions
 /// never schedule anything, so they are given the disarmed default and never write a
 /// file — a portable copy carried to another machine cannot bring a timer with it.
-fn sink_path(data_dir: Option<&std::path::Path>, edition: Edition) -> Option<PathBuf> {
+pub(crate) fn sink_path(data_dir: Option<&std::path::Path>, edition: Edition) -> Option<PathBuf> {
     data_dir.filter(|_| edition.schedules()).map(|d| d.join("delay-sink.json"))
 }
 
-fn read_sink_config(data_dir: Option<&std::path::Path>, edition: Edition) -> SinkConfig {
+pub(crate) fn read_sink_config(data_dir: Option<&std::path::Path>, edition: Edition) -> SinkConfig {
     let Some(path) = sink_path(data_dir, edition) else { return SinkConfig::default() };
     match std::fs::read_to_string(&path) {
         Ok(text) => match serde_json::from_str::<SinkConfig>(&text) {
@@ -5369,22 +5393,8 @@ impl Core {
                 if let Some(why) = cfg.refusal() {
                     return json!({ "ok": false, "message": why });
                 }
-                if let Some(path) = sink_path(self.data_dir.as_deref(), self.edition) {
-                    if let Err(e) = std::fs::write(&path, serde_json::to_vec_pretty(&cfg).unwrap_or_default()) {
-                        return json!({ "ok": false, "message": format!("could not save: {e}") });
-                    }
-                }
-                let now = delay_sink::now_ms();
-                {
-                    let mut s = self.delay_sink.write();
-                    let every = cfg.every_hours;
-                    let armed = cfg.enabled;
-                    s.config = cfg;
-                    // Arming schedules the first run one interval out, never immediately:
-                    // a person setting this up should not have a write leave the process
-                    // while they are still typing. "Run now" is a separate button.
-                    s.state.next_due_at = armed.then(|| delay_sink::next_due(now, every, 0));
-                    s.state.consecutive_failures = 0;
+                if let Err(e) = self.set_delay_sink_config(cfg) {
+                    return json!({ "ok": false, "message": e });
                 }
                 let s = self.delay_sink.read();
                 tracing::info!(target: "audit", message = "delay sink configured", enabled = s.config.enabled);
@@ -5401,6 +5411,32 @@ impl Core {
                 out
             }
         }
+    }
+}
+
+impl Core {
+    /// The scheduled log-delay settings as held (a backup reads them from here).
+    pub(crate) fn delay_sink_config(&self) -> SinkConfig {
+        self.delay_sink.read().config.clone()
+    }
+
+    /// Keep a sink config: the file (hosted), then the timer's copy. Shared by `DELAY_SINK_SET`
+    /// and a restore, so arming follows one rule: the first run is one interval out, never
+    /// immediately — a person setting this up should not have a write leave the process while
+    /// they are still typing. "Run now" is a separate button.
+    pub(crate) fn set_delay_sink_config(&self, cfg: SinkConfig) -> Result<(), String> {
+        if let Some(path) = sink_path(self.data_dir.as_deref(), self.edition) {
+            crate::volume::store::write_atomic(&path, &serde_json::to_vec_pretty(&cfg).unwrap_or_default())
+                .map_err(|e| format!("could not save: {e}"))?;
+        }
+        let now = delay_sink::now_ms();
+        let mut s = self.delay_sink.write();
+        let every = cfg.every_hours;
+        let armed = cfg.enabled;
+        s.config = cfg;
+        s.state.next_due_at = armed.then(|| delay_sink::next_due(now, every, 0));
+        s.state.consecutive_failures = 0;
+        Ok(())
     }
 }
 
@@ -5430,7 +5466,7 @@ impl Core {
 
     /// After any change to the link: a new API client, and the sign-in secret the
     /// resolution now names — or none.
-    fn apply_link(&self) {
+    pub(crate) fn apply_link(&self) {
         let r = self.zbx_link.resolved();
         *self.zbx_api.write() = Arc::new(Core::zabbix_from(&r, Some(self.pins.clone())));
         self.zbx_metrics_cache.lock().clear();
@@ -5446,7 +5482,7 @@ impl Core {
     }
 
     /// Sync in the background, so the message that caused it answers at once.
-    fn sync_soon(self: &Arc<Self>) {
+    pub(crate) fn sync_soon(self: &Arc<Self>) {
         if !self.zbx_api().configured() {
             return;
         }

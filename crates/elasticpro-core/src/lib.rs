@@ -10,6 +10,7 @@
 
 pub mod activity;
 pub mod auth;
+pub mod backup;
 pub mod bridge;
 pub mod cluster_meta;
 pub mod cluster_save;

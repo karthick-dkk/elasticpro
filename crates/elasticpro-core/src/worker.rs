@@ -96,6 +96,9 @@ pub struct Starts {
     pub delay_sink: bool,
     pub history_store: bool,
     pub housekeeping: bool,
+    /// The daily backup of ElasticPro's own settings (`backup`): writes files under
+    /// `<data>/backups/` and nothing else.
+    pub backup: bool,
     pub zabbix_sync: bool,
     pub fleet_poller: bool,
     pub volume_daily: bool,
@@ -118,6 +121,7 @@ pub fn starts(role: Role) -> Starts {
         delay_sink: core,
         history_store: core,
         housekeeping: core,
+        backup: core,
         zabbix_sync: core,
         fleet_poller: core,
         volume_daily: batch,
@@ -492,13 +496,13 @@ mod tests {
         assert!(all.fleet_poller && all.report_timer && all.volume_daily && all.public_http && all.health);
         assert!(!all.worker_http && !all.worker_loops, "role all runs no worker port");
         let core = starts(Role::Core);
-        assert!(core.fleet_poller && core.delay_sink && core.history_store && core.housekeeping && core.zabbix_sync
+        assert!(core.fleet_poller && core.delay_sink && core.history_store && core.housekeeping && core.backup && core.zabbix_sync
             && core.request_reaper && core.zabbix_push && core.health && core.public_http);
         assert!(!core.report_timer && !core.volume_daily, "the core never starts the report timer in role core");
         assert!(!core.worker_http);
         let w = starts(Role::Worker);
         assert!(w.report_timer && w.volume_daily && w.worker_http && w.worker_loops);
-        assert!(!w.public_http && !w.fleet_poller && !w.delay_sink && !w.history_store && !w.zabbix_push && !w.zabbix_sync,
+        assert!(!w.public_http && !w.fleet_poller && !w.delay_sink && !w.history_store && !w.backup && !w.zabbix_push && !w.zabbix_sync,
                 "the worker serves nobody and polls nothing");
     }
 

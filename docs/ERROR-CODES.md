@@ -61,6 +61,14 @@ A code keeps its meaning once it is given out. A new kind of failure gets a new 
 | EP-305 | `no_creds` | No credential for this cluster. |
 | EP-306 | `not_configured` | A feature that needs setting up first (Zabbix sign-in, Vault). |
 | EP-307 | `fleet_off` | The fleet cache is turned off. |
+| EP-308 | `weak_password` | A backup password needs at least 12 characters (docs/HANDBOOK.md, "Backup and restore"). Leave it empty to make a backup without credentials. |
+| EP-309 | `bad_password` | The backup password is not the one this file's credentials were sealed with. Nothing was restored. |
+| EP-310 | `password_needed` | This backup's credentials are sealed with a backup password and none was given. Type it, or restore with `skipCredentials: true` (the settings alone; the clusters ask for their credentials again). |
+| EP-311 | `server_key`, `no_server_key` | The backup's credentials are sealed under another server's key (a scheduled or before-restore backup from another install): the settings restore, the credentials cannot. `no_server_key`: this server has no key to seal a kept backup's credentials with (`cluster-secrets.key` could not be made). |
+| EP-312 | `not_a_backup` | The file is not an ElasticPro backup (`.epbak`, `format: elasticpro-backup`). |
+| EP-313 | `newer_format` | The backup was made by a newer ElasticPro whose format this server does not read. Upgrade first; a restore never guesses at a format it does not know. |
+| EP-314 | `corrupt`, `tampered` | The file's digest does not match its contents (damaged or edited), or its credentials belong to another backup. Nothing was restored. |
+| EP-315 | `too_large` | The backup file is over 16 MB. |
 
 ## Reaching a cluster (4xx)
 

@@ -21,7 +21,9 @@ field() { python3 -c "import json,sys;print(json.load(sys.stdin).get('$1'))"; }
 fail=0
 ok()   { echo "  ✓ $1"; }
 bad()  { echo "  ✗ $1"; fail=1; }
-check(){ if [ "$2" = "$3" ]; then ok "$1"; else bad "$1 (got '$2', want '$3')"; fi; }
+# Exactly three arguments, or the check is vacuous: under bash 3.2 (macOS) escaped-quote JSON
+# inside "$( )" brace-expands, and a check given its answer in pieces compared two of them.
+check(){ [ $# -eq 3 ] || { bad "$1 (check got $# args)"; return; }; if [ "$2" = "$3" ]; then ok "$1"; else bad "$1 (got '$2', want '$3')"; fi; }
 
 echo "== hosted mode =="
 P=$(free_port); OUT=$(mktemp)
@@ -90,7 +92,7 @@ check "reading it needs a caller"           "$(post $B -d '{"type":"SNAPSHOT_RUN
 # (tests/volume.rs). Its timer logs "volume daily: timer started" without a user, so the
 # audit count above is unchanged — and this instance has no data dir, so no timer at all.
 for t in VOLUME_SETTINGS VOLUME_FIELDS_CHECK VOLUME_DAILY VOLUME_MONTHLY VOLUME_BREAKDOWN VOLUME_MONTHLY_ALL VOLUME_RUN VOLUME_LAYOUT_GET VOLUME_LAYOUT_SET VOLUME_PATTERN_CHECK; do
-  check "$t needs a caller"              "$(post $B -d "{\"type\":\"$t\",\"clusterId\":\"x\"}" | field kind)" "unauthenticated"
+  check "$t needs a caller"              "$(post $B -d '{"type":"'"$t"'","clusterId":"x"}' | field kind)" "unauthenticated"
 done
 
 # Volume reports and mail (docs/VOLUME.md "Reports and mail"): generating a report reads the
@@ -100,35 +102,35 @@ done
 # without a user. HOSTS_QUERY (0.3.54) reads volume by host's day files: a caller's too.
 for t in REPORT_RUN REPORT_JOBS REPORT_STOP REPORT_CLEAR REPORT_DOWNLOAD REPORT_CONCURRENCY_SET \
          MAIL_SETTINGS_GET MAIL_SETTINGS_SET MAIL_TEST REPORT_SCHEDULE_GET REPORT_SCHEDULE_SET REPORT_SEND_NOW HOSTS_QUERY; do
-  check "$t needs a caller"              "$(post $B -d "{\"type\":\"$t\",\"clusterIds\":[\"x\"],\"to\":\"a@example.com\"}" | field kind)" "unauthenticated"
+  check "$t needs a caller"              "$(post $B -d '{"type":"'"$t"'","clusterIds":["x"],"to":"a@example.com"}' | field kind)" "unauthenticated"
 done
 
 # The credentials the server keeps (0.3.42; CREDENTIAL_PROMOTE since 0.3.46): an admin's, so
 # never a caller-less request's. Roles and the promote itself are proved in-process
 # (tests/cluster_save.rs, tests/default_credential.rs).
 for t in CREDENTIAL_STATUS CREDENTIAL_SET CREDENTIAL_CLEAR CREDENTIAL_PROMOTE; do
-  check "$t needs a caller"              "$(post $B -d "{\"type\":\"$t\",\"cluster\":\"*\",\"from\":\"x\"}" | field kind)" "unauthenticated"
+  check "$t needs a caller"              "$(post $B -d '{"type":"'"$t"'","cluster":"*","from":"x"}' | field kind)" "unauthenticated"
 done
 
 # The history store (docs/HISTORY.md): where the core writes unattended, with a credential it
 # keeps. Every message needs a caller; the roles, the two gates and the guard are proved
 # in-process (tests/history_store.rs, tests/history_store_gate.rs).
 for t in HISTORY_STORE_GET HISTORY_STORE_SET HISTORY_STORE_TEST HISTORY_STORE_ARM HISTORY_STORE_BACKFILL HISTORY_QUERY; do
-  check "$t needs a caller"              "$(post $B -d "{\"type\":\"$t\",\"on\":true,\"clusterId\":\"x\",\"stream\":\"volume\",\"settings\":{\"url\":\"http://x:9200\"}}" | field kind)" "unauthenticated"
+  check "$t needs a caller"              "$(post $B -d '{"type":"'"$t"'","on":true,"clusterId":"x","stream":"volume","settings":{"url":"http://x:9200"}}' | field kind)" "unauthenticated"
 done
 
 # Cluster type, ULM bucket and whether SLM is expected (0.3.47, cluster_meta.rs): reading it is a
 # user's, setting it an admin's — never a caller-less request's. Roles, validation, the Zabbix tag
 # seed and the 0600 store are proved in-process (tests/cluster_meta.rs).
 for t in CLUSTER_META_GET CLUSTER_META_SET; do
-  check "$t needs a caller"              "$(post $B -d "{\"type\":\"$t\",\"clusterId\":\"x\",\"meta\":{\"type\":\"ci\"}}" | field kind)" "unauthenticated"
+  check "$t needs a caller"              "$(post $B -d '{"type":"'"$t"'","clusterId":"x","meta":{"type":"ci"}}' | field kind)" "unauthenticated"
 done
 
 # Plan templates (0.3.53, plan_templates.rs): reading is a user's, replacing an administrator's —
 # never a caller-less request's. Roles, validation, the limited admin and the display link are
 # proved in-process (tests/plan_templates.rs).
 for t in PLAN_TEMPLATES_GET PLAN_TEMPLATES_SET; do
-  check "$t needs a caller"              "$(post $B -d "{\"type\":\"$t\",\"templates\":[{\"name\":\"x\",\"roles\":[]}]}" | field kind)" "unauthenticated"
+  check "$t needs a caller"              "$(post $B -d '{"type":"'"$t"'","templates":[{"name":"x","roles":[]}]}' | field kind)" "unauthenticated"
 done
 
 # Play, the NOC wall display (docs/PLAY.md). Every message needs a caller but one: a TV trades
@@ -139,7 +141,7 @@ check "PING offers display links"        "$(post $B -d '{"type":"PING"}' | field
 check "PING offers shared acks"          "$(post $B -d '{"type":"PING"}' | field sharedAcks)" "True"
 for t in PLAY_LINK_CREATE PLAY_LINK_LIST PLAY_LINK_REVOKE PLAY_LINK_SET PLAY_CONFIG_GET PLAY_CONFIG_SET \
          PLAY_NODE_FORGET PLAY_STATE PLAY_ZOOM_SET PLAY_SHARE_GET PLAY_SHARE_PUT ACK_LIST ACK_SET ACK_CLEAR; do
-  check "$t needs a caller"              "$(post $B -d "{\"type\":\"$t\",\"id\":\"x\",\"name\":\"tv\",\"key\":\"x:y\",\"kind\":\"delay\",\"clusterId\":\"x\"}" | field kind)" "unauthenticated"
+  check "$t needs a caller"              "$(post $B -d '{"type":"'"$t"'","id":"x","name":"tv","key":"x:y","kind":"delay","clusterId":"x"}' | field kind)" "unauthenticated"
 done
 check "a made-up display secret is refused" "$(post $B -d '{"type":"PLAY_EXCHANGE","secret":"epdisplay_00"}' | field kind)" "bad_credentials"
 check "and sets no cookie"               "$(curl -s -o /dev/null -D - -X POST $B -H 'content-type: application/json' -d '{"type":"PLAY_EXCHANGE","secret":"epdisplay_00"}' | grep -ci '^set-cookie' || true)" "0"
@@ -155,7 +157,7 @@ check "the cluster view needs a caller"        "$(post $B -d '{"type":"CONFIG_VI
 # needs a caller — an admin, which the in-process tests sign in as.
 check "PING offers the zabbix link"            "$(post $B -d '{"type":"PING"}' | field zabbixLink)" "True"
 for t in ZABBIX_LINK_GET ZABBIX_LINK_SET ZABBIX_LINK_TEST ZABBIX_PAIR_BEGIN ZABBIX_UNPAIR; do
-  check "$t needs a caller"                    "$(post $B -d "{\"type\":\"$t\"}" | field kind)" "unauthenticated"
+  check "$t needs a caller"                    "$(post $B -d '{"type":"'"$t"'"}' | field kind)" "unauthenticated"
 done
 check "a header with no account is nobody"     "$(post $B -H 'x-auth-user: mallory' -d '{"type":"ZABBIX_LINK_GET"}' | field kind)" "unauthenticated"
 
@@ -163,7 +165,8 @@ check "a header with no account is nobody"     "$(post $B -H 'x-auth-user: mallo
 # nginx used to fill it from any client's Basic header, unchecked: Admin for the asking.
 PD=$(free_port); OUTD=$(mktemp); DD=$(mktemp -d)
 ELASTICPRO_BIND=0.0.0.0 ELASTICPRO_DATA_DIR="$DD" RUST_LOG=warn,audit=info "$BIN" ui "$PD" >"$OUTD" 2>&1 & PIDD=$!; disown
-for _ in $(seq 1 100); do curl -s -o /dev/null "http://127.0.0.1:$PD/" && break; sleep 0.2; done
+# A debug build takes over a minute to come up (the first admin password is derived at start).
+for _ in $(seq 1 900); do curl -s -o /dev/null "http://127.0.0.1:$PD/" && break; sleep 0.2; done
 check "X-Auth-User is ignored by default"      "$(post "http://127.0.0.1:$PD/bridge" -H 'x-auth-user: Admin' -d '{"type":"USER_LIST"}' | field kind)" "unauthenticated"
 # With a data directory the volume timer starts, says so once, and names nobody.
 check "the volume timer announces itself"      "$(grep -c 'volume daily: timer started' "$OUTD" || true)" "1"
@@ -412,6 +415,52 @@ check "and the queued record is still there"       "$(cookie -d '{"type":"DATA_R
 MORE=$(python3 -c 'import json;print(json.dumps({"type":"ALERT_EVENTS_PUT","events":[{"event":"raised","key":"hc-es:heap:n%d"%i} for i in range(60)]}))')
 check "and the account is over its budget"         "$(cookie -d "$MORE" | field kind)" "too_many"
 check "alerts back to built-in lets the queue go"  "$(cookie -d '{"type":"DATA_ROUTING_SET","routing":{"alerts":"builtin"}}' >/dev/null; cookie -d '{"type":"DATA_ROUTING_STATUS"}' | python3 -c 'import json,sys;a=json.load(sys.stdin)["kinds"]["alerts"];print(a["state"],a["store"]["queued"],a["store"]["dropped"])')" "builtin 0 1"
+# Backup and restore (docs/HANDBOOK.md "Backup and restore — the message contract"): an
+# administrator's and nobody else's; a backup made without a password carries no secret and a
+# sealed one none in the clear; the wrong password is refused; a preview writes nothing; a
+# restore keeps the current state first; the Zabbix API token is never in a backup. The
+# sections, merge and replace, the format checks and the timer are proved in-process
+# (tests/backup.rs).
+check "PING offers backup & restore"            "$(post $B5 -d '{"type":"PING"}' | python3 -c 'import json,sys;print(json.load(sys.stdin).get("backup",{}).get("supported"))')" "True"
+check "the backup status needs a caller"        "$(post $B5 -d '{"type":"BACKUP_STATUS"}' | field kind)" "unauthenticated"
+check "an operator may not take a backup"       "$(as_jar "$JOP" -d '{"type":"BACKUP_CREATE"}' | field kind)" "forbidden"
+check "nor restore one"                         "$(as_jar "$JOP" -d '{"type":"BACKUP_RESTORE","mode":"merge","file":"{}"}' | field kind)" "forbidden"
+check "a display link may not either"           "$(as_jar "$JTV" -d '{"type":"BACKUP_STATUS"}' | field kind)" "forbidden"
+BPW="hc-backup-secret-$RANDOM$RANDOM"; ZTOK="$(printf 'ab%.0s' $(seq 1 32))"
+# Single-quoted JSON with the variable spliced in: under bash 3.2 (macOS) the escaped-quote form
+# brace-expands inside "$( )", check gets its answer in pieces and compares two of them.
+check "a credential is kept for the test"       "$(cookie -d '{"type":"CREDENTIAL_SET","cluster":"*","username":"elastic","password":"'"$BPW"'"}' | field ok)" "True"
+check "a Zabbix token is kept for the test"     "$(cookie -d '{"type":"ZABBIX_LINK_SET","zabbixUrl":"https://zbx.example.com/","apiToken":"'"$ZTOK"'"}' | field ok)" "True"
+BK0=$(cookie -d '{"type":"BACKUP_CREATE"}')
+check "a backup without a password is made"     "$(echo "$BK0" | field ok)" "True"
+check "and holds no credentials"                "$(echo "$BK0" | field credentials)" "none"
+check "not the cluster password"                "$(echo "$BK0" | grep -c "$BPW" || true)" "0"
+check "not the Zabbix token"                    "$(echo "$BK0" | grep -c "$ZTOK" || true)" "0"
+check "and says what it left out"               "$(echo "$BK0" | python3 -c 'import json,sys;d=json.load(sys.stdin);print(d.get("leftOut"), d.get("notes"))')" "1 []"
+check "a short backup password is refused"      "$(cookie -d '{"type":"BACKUP_CREATE","password":"short"}' | field kind)" "weak_password"
+BK1=$(cookie -d '{"type":"BACKUP_CREATE","password":"hosted-check-backup-pw"}')
+check "a sealed backup is made"                 "$(echo "$BK1" | field credentials)" "password"
+check "with no secret in the clear"             "$(echo "$BK1" | grep -c -e "$BPW" -e "$ZTOK" || true)" "0"
+BKF=$(mktemp); echo "$BK1" | python3 -c 'import json,sys;print(json.dumps({"type":"BACKUP_PREVIEW","password":sys.argv[1],"file":json.load(sys.stdin)["file"]}))' hosted-check-backup-px >"$BKF"
+check "the wrong password is refused"           "$(cookie --data-binary "@$BKF" | field kind)" "bad_password"
+MARK="$D5/.hc-mark"; touch "$MARK"; sleep 1
+echo "$BK1" | python3 -c 'import json,sys;print(json.dumps({"type":"BACKUP_PREVIEW","password":sys.argv[1],"file":json.load(sys.stdin)["file"]}))' hosted-check-backup-pw >"$BKF"
+check "the right one previews"                  "$(cookie --data-binary "@$BKF" | python3 -c 'import json,sys;d=json.load(sys.stdin);print(d.get("ok"),d.get("credentials",{}).get("state"))')" "True opened"
+# Settings files only: the session store, the health samples and the activity log move on their own.
+check "and a preview writes nothing"            "$(find "$D5" -type f -newer "$MARK" \( -name '*.json' -o -path '*/backups/*' -o -path '*/config-history/*' \) ! -name sessions.json ! -path '*/health/*' ! -path '*/worker/*' ! -path '*/cache/*' | wc -l | tr -d ' ')" "0"
+echo "$BK1" | python3 -c 'import json,sys;print(json.dumps({"type":"BACKUP_RESTORE","mode":"merge","sections":["clusters"],"password":sys.argv[1],"file":json.load(sys.stdin)["file"]}))' hosted-check-backup-pw >"$BKF"
+RS=$(cookie --data-binary "@$BKF")
+check "a restore answers ok"                    "$(echo "$RS" | field ok)" "True"
+BEFORE=$(echo "$RS" | field beforeRestore)
+check "and kept the current state first"        "$([ -n "$BEFORE" ] && [ -f "$D5/backups/$BEFORE" ] && echo yes || echo "no ('$BEFORE')")" "yes"
+check "kept 0600"                               "$(stat -c '%a' "$D5/backups/$BEFORE" 2>/dev/null || stat -f '%Lp' "$D5/backups/$BEFORE")" "600"
+check "in a 0700 directory"                     "$(stat -c '%a' "$D5/backups" 2>/dev/null || stat -f '%Lp' "$D5/backups")" "700"
+check "the kept copy has no secret in the clear" "$(grep -c -e "$BPW" -e "$ZTOK" "$D5/backups/$BEFORE" || true)" "0"
+check "the kept copy is sealed under the server key" "$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get("credentials",{}).get("scheme"))' "$D5/backups/$BEFORE")" "server"
+check "a restore is audited by name"            "$(grep '"target":"audit"' "$OUT5" | grep 'backup restored' | grep -c '"user":"Admin"')" "1"
+check "and the backup password never reaches the log" "$(grep -c 'hosted-check-backup-pw' "$OUT5" || true)" "0"
+check "the backup timer announces itself"       "$(grep -c 'backup: timer started' "$OUT5" | sed 's/^[1-9][0-9]*$/yes/')" "yes"
+rm -f "$BKF" "$MARK"
 OUTH=$(curl -s -D - -o /dev/null -X POST "$B5" -H 'content-type: application/json' -H "cookie: ep_session=$TOK" -d '{"type":"LOGOUT"}' | tr -d '\r' | grep -i '^set-cookie:' || true)
 case "$OUTH" in *ep_session=\;*Max-Age=0*) ok "signing out clears the cookie";; *) bad "logout cookie (got '$OUTH')";; esac
 check "and ends the session"                 "$(cookie -d '{"type":"WHOAMI"}' | python3 -c 'import json,sys;print(json.load(sys.stdin).get("caller"))')" "None"
@@ -427,6 +476,8 @@ check "no header needed on loopback" "$(post http://127.0.0.1:$P2/bridge -d '{"t
 check "no scheduler off hosted"     "$(post http://127.0.0.1:$P2/bridge -d '{"type":"DELAY_SINK_GET"}' | field supported)" "False"
 # Nor a history store: it is written by the server, the one edition still running at night.
 check "no history store off hosted" "$(post http://127.0.0.1:$P2/bridge -d '{"type":"HISTORY_STORE_GET"}' | field supported)" "False"
+# Backups can be downloaded here, but nothing is kept or scheduled: a kept backup is a server's.
+check "backups: download only off hosted" "$(post http://127.0.0.1:$P2/bridge -d '{"type":"BACKUP_STATUS"}' | python3 -c 'import json,sys;d=json.load(sys.stdin);print(d.get("supported"),d.get("keeps"))')" "True False"
 kill $PID; wait $PID 2>/dev/null || true
 
 # docs/WORKER.md, black-box: one binary in role worker, one in role core, the same data
