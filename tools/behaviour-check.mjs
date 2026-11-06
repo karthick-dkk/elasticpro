@@ -6574,6 +6574,268 @@ if (viaFleet) {
 }
 
 
+/* ------------------------------- Config › System › Backup & restore ------------------------------- */
+// The dev bridge is the portable edition: it takes a backup, previews and restores, but keeps none and
+// has no timer. So the first half runs against the real core (create → download → preview → Merge →
+// the result), and the second half stubs the hosted answers (schedule, kept backups, Delete) at fetch.
+await go('settings');
+await settleFor(300);
+{
+  const sentBk = () => sent.filter((m) => /^BACKUP_/.test(m.type));
+  const modalOf = (re) => [...doc.querySelectorAll('.modal')].find((m) => re.test(m.textContent));
+  const modalBtn = (m, label) => m && [...m.querySelectorAll('button')].find((b) => b.textContent.trim() === label);
+  const headerBtn = (label) => [...doc.querySelectorAll('.cm-actions button, .cm-actions label')].find((b) => b.textContent.trim() === label);
+  const fakeFile = (name, text) => ({ name, size: text.length, text: async () => text });
+  const chooseFile = async (f) => {
+    const input = doc.querySelector('.cm-actions input[type="file"]');
+    Object.defineProperty(input, 'files', { value: [f], configurable: true });
+    input.dispatchEvent(new window.Event('change', { bubbles: true }));
+  };
+
+  ok(await openCfg('system', 'backup'), 'backup: the System › Backup & restore tab is not offered although PING says backup.supported');
+  await waitFor(() => doc.getElementById('bk-root'), 'backup: the tab did not draw');
+  const titles = [...doc.querySelectorAll('#bk-root section.card h2')].map((e) => e.textContent);
+  ok(titles.includes('What a backup holds') && titles.includes('Restore'), `backup: cards are ${titles.join(' | ')}`);
+  ok(sentBk().some((m) => m.type === 'BACKUP_STATUS'), 'backup: the tab did not ask BACKUP_STATUS');
+  const ticks = [...doc.querySelectorAll('#bk-root input[data-section]')];
+  ok(ticks.length === 9, `backup: ${ticks.length} sections in the tick list, expected 9`);
+  ok(ticks.filter((t) => t.checked).length === 8 && !doc.querySelector('input[data-section="versions"]').checked, 'backup: the earlier config versions should start unticked and the other eight ticked');
+  ok(/32|\d+ cluster/.test(doc.querySelector('input[data-section="clusters"]').closest('label').textContent), 'backup: the clusters row carries no count');
+  ok(!!headerBtn('Restore from a file…') && !!headerBtn('Download backup now'), 'backup: the page header lacks Restore from a file… or Download backup now');
+  ok(/Never in a backup/.test(doc.getElementById('bk-root').textContent), 'backup: no "never in a backup" note');
+  ok(!doc.querySelector('#bk-root [data-track="backup-schedule"]') && /nothing to schedule/.test(doc.getElementById('bk-root').textContent),
+    'backup: a portable core (keeps nothing) should say there is nothing to schedule, not draw a schedule form');
+
+  // Download: the password rules first — nothing is sent until they hold.
+  const before = sentBk().length;
+  headerBtn('Download backup now').click(); await settleFor(120);
+  ok(sentBk().length === before && /backup password/.test((doc.getElementById('bk-problem') || {}).textContent || ''), 'backup: Download with credentials on and no password was sent, or said nothing');
+  const set = (id, v) => { const e = doc.getElementById(id); e.value = v; e.dispatchEvent(new window.Event('input', { bubbles: true })); };
+  set('bk-pw', 'short'); set('bk-pw2', 'short');
+  headerBtn('Download backup now').click(); await settleFor(120);
+  ok(sentBk().length === before && /At least 12/.test((doc.getElementById('bk-problem') || {}).textContent || ''), 'backup: a 5-character password was not refused in words');
+  set('bk-pw', 'correct-horse-battery'); set('bk-pw2', 'correct-horse-batterY');
+  headerBtn('Download backup now').click(); await settleFor(120);
+  ok(sentBk().length === before && /differ/.test((doc.getElementById('bk-problem') || {}).textContent || ''), 'backup: two different passwords were not refused');
+
+  // A real backup: two sections, password-sealed.
+  for (const t of doc.querySelectorAll('#bk-root input[data-section]')) {
+    const want = ['play', 'requests'].includes(t.dataset.section);
+    if (t.checked !== want) { t.checked = want; t.dispatchEvent(new window.Event('change', { bubbles: true })); }
+  }
+  set('bk-pw', 'correct-horse-battery'); set('bk-pw2', 'correct-horse-battery');
+  const nFiles = files.length;
+  headerBtn('Download backup now').click();
+  await waitFor(() => files.length > nFiles, 'backup: Download backup now saved no file', 90000);
+  const made = files.at(-1);
+  ok(made && /^elasticpro-backup-.*\.epbak$/.test(made.name), `backup: the file is named ${made && made.name}`);
+  const create = sentBk().filter((m) => m.type === 'BACKUP_CREATE').at(-1);
+  ok(create && create.password === 'correct-horse-battery' && JSON.stringify(create.sections) === JSON.stringify(['requests', 'play']),
+    `backup: BACKUP_CREATE carried ${JSON.stringify(create && { ...create, password: create.password && '<set>' })}`);
+  ok(made && !made.text.includes('correct-horse-battery'), 'backup: the password is inside the downloaded file');
+  ok(doc.getElementById('bk-pw').value === '' && doc.getElementById('bk-pw2').value === '', 'backup: the password boxes were not emptied after the download');
+  ok(!/correct-horse-battery/.test(doc.body.textContent) && /Downloaded elasticpro-backup/.test((doc.getElementById('bk-made') || {}).textContent || ''),
+    'backup: the page does not say what was downloaded, or it echoes the password');
+
+  // Restore from that file: the preview needs the password (sealed), asks for it, then shows the table.
+  await chooseFile(fakeFile('mine.epbak', made.text));
+  await waitFor(() => doc.getElementById('bk-restore'), 'backup: choosing a file opened no Restore card', 90000);
+  await waitFor(() => doc.getElementById('bk-rs-check'), 'backup: a password-sealed file did not ask for its password', 90000);
+  ok(/unverified/.test((doc.getElementById('bk-says') || {}).textContent || '') && /taken by local/.test((doc.getElementById('bk-says') || {}).textContent || ''), 'backup: the file\'s own claims are not shown as "says … unverified"');
+  const pv1 = sentBk().filter((m) => m.type === 'BACKUP_PREVIEW');
+  ok(pv1.length === 1 && pv1[0].file === made.text && !('password' in pv1[0]), 'backup: the first preview should carry the file and no password');
+  doc.getElementById('bk-rs-pw').value = 'wrong-password-here';
+  doc.getElementById('bk-rs-check').click();
+  await waitFor(() => /not the password/.test((doc.getElementById('bk-rs-error') || {}).textContent || ''), 'backup: a wrong password was not said in plain words', 90000);
+  ok(/EP-309/.test(doc.getElementById('bk-rs-error').textContent), 'backup: the wrong-password message has no code');
+  ok(doc.getElementById('bk-rs-pw').value === '', 'backup: the restore password box was not emptied after use');
+  doc.getElementById('bk-rs-pw').value = 'correct-horse-battery';
+  doc.getElementById('bk-rs-check').click();
+  await waitFor(() => doc.querySelector('#bk-restore table tbody tr[data-section]'), 'backup: the right password drew no preview table', 90000);
+  const rows = [...doc.querySelectorAll('#bk-restore tr[data-section]')].map((r) => r.dataset.section);
+  ok(rows.join() === 'requests,play', `backup: the preview rows are ${rows.join()}`);
+  ok(/Merge/.test(doc.getElementById('bk-restore').textContent) && /Replace everything/.test(doc.getElementById('bk-restore').textContent), 'backup: no Merge / Replace everything choice');
+  ok(doc.querySelector('#bk-restore input[name="bk-mode"][value="merge"]').checked, 'backup: Merge is not the default');
+
+  // Merge: behind a confirm, one BACKUP_RESTORE with mode merge and the password.
+  const nRestore = sentBk().filter((m) => m.type === 'BACKUP_RESTORE').length;
+  doc.getElementById('bk-restore-go').click();
+  const dlgM = await waitFor(() => modalOf(/Merge this backup/), 'backup: Restore… opened no confirm');
+  ok(sentBk().filter((m) => m.type === 'BACKUP_RESTORE').length === nRestore, 'backup: Restore went to the core before the confirm was answered');
+  if (dlgM) { modalBtn(dlgM, 'Cancel').click(); await settleFor(100); }
+  ok(sentBk().filter((m) => m.type === 'BACKUP_RESTORE').length === nRestore, 'backup: Cancel on the confirm still restored');
+  doc.getElementById('bk-rs-pw').value = 'correct-horse-battery';
+  doc.getElementById('bk-restore-go').click();
+  const dlgM2 = await waitFor(() => modalOf(/Merge this backup/), 'backup: second Restore… opened no confirm');
+  ok(dlgM2 && /Merge/.test(modalBtn(dlgM2, 'Merge') ? 'Merge' : ''), 'backup: the confirm has no Merge button');
+  if (dlgM2) modalBtn(dlgM2, 'Merge').click();
+  await waitFor(() => doc.getElementById('bk-rs-result'), 'backup: the restore showed no result', 90000);
+  const rmsg = sentBk().filter((m) => m.type === 'BACKUP_RESTORE').at(-1);
+  ok(rmsg && rmsg.mode === 'merge' && rmsg.password === 'correct-horse-battery' && rmsg.file === made.text && !rmsg.skipCredentials,
+    `backup: BACKUP_RESTORE carried ${JSON.stringify(rmsg && { ...rmsg, file: '…', password: rmsg.password && '<set>' })}`);
+  ok(/Restored \(merge\)/.test(doc.getElementById('bk-rs-result').textContent) && /Request policy and Defaults/.test(doc.getElementById('bk-rs-result').textContent), 'backup: the result does not list applied sections');
+  ok(((doc.getElementById('bk-rs-pw') || { value: '' }).value) === '', 'backup: the password box kept the password after the restore');
+  press(doc.getElementById('bk-rs-close')); await settleFor(100);
+
+  // Errors in words: a file that is not a backup, and one that was edited.
+  await chooseFile(fakeFile('notes.txt', '{"hello": 1}'));
+  await waitFor(() => /not an ElasticPro backup/.test((doc.getElementById('bk-rs-error') || {}).textContent || ''), 'backup: a non-backup file was not refused in words');
+  ok(/EP-312/.test(doc.getElementById('bk-rs-error').textContent), 'backup: not_a_backup carries no code');
+  ok(!doc.getElementById('bk-restore-go'), 'backup: Restore… is offered for a file that did not preview');
+  await chooseFile(fakeFile('edited.epbak', made.text.replace('"play"', '"plax"')));
+  await waitFor(() => /EP-31[24]/.test((doc.getElementById('bk-rs-error') || {}).textContent || ''), 'backup: an edited file was not refused');
+  press(doc.getElementById('bk-rs-close')); await settleFor(100);
+
+  // A name from a file is text, never markup.
+  const evil = made.text.replace('"takenBy": "local"', '"takenBy": "<img src=x onerror=window.__pwned=1>"');
+  await chooseFile(fakeFile('<b>x</b>.epbak', evil));
+  await settleFor(8000);
+  ok(!doc.querySelector('#bk-restore img') && !window.__pwned, 'backup: takenBy from the file was drawn as markup');
+  press(doc.getElementById('bk-rs-close')); await settleFor(100);
+
+  // Passwords do not outlive the tab: typed, then left for another tab and come back, the boxes are empty.
+  set('bk-pw', 'left-behind-password'); set('bk-pw2', 'left-behind-password');
+  ok(await openCfg('system', 'defaults'), 'backup: could not leave for System › Defaults');
+  ok(await openCfg('system', 'backup'), 'backup: could not come back to Backup & restore');
+  await waitFor(() => doc.getElementById('bk-pw'), 'backup: the tab did not come back with its password box');
+  ok(doc.getElementById('bk-pw') && doc.getElementById('bk-pw').value === '' && doc.getElementById('bk-pw2').value === '', 'backup: a typed backup password survived leaving the tab');
+}
+
+// The hosted half, stubbed: schedule through the save bar, the kept list, Restore… and Delete on a kept backup.
+{
+  const realFetch = globalThis.fetch;
+  const modalOf = (re) => [...doc.querySelectorAll('.modal')].find((m) => re.test(m.textContent));
+  const modalBtn = (m, label) => m && [...m.querySelectorAll('button')].find((b) => b.textContent.trim() === label);
+  const hsent = [];
+  const now = Date.now();
+  const sections = ['clusters', 'trust', 'alerts', 'requests', 'zabbix', 'reports', 'play', 'data', 'versions'];
+  let status = {
+    ok: true, supported: true, keeps: true, dir: '/data/backups', serverSealing: true, minPassword: 12,
+    sections: sections.map((id) => ({ id, label: id })),
+    schedule: { enabled: true, every: 'day', at: '02:00', keep: 14, keepMax: 90, sections, last: { at: now - 3600e3, ok: true, name: 's.epbak', bytes: 421888, localDay: '' }, next: now + 3600e3 * 20 },
+    kept: [
+      { name: 'a-scheduled.epbak', bytes: 421888, takenAt: now - 3600e3, takenBy: 'schedule', kind: 'scheduled', kindLabel: 'scheduled', sections, credentials: 'server', credentialsCount: 3, coreVersion: '0.3.54', readable: true },
+      { name: 'b-hand.epbak', bytes: 405504, takenAt: now - 7200e3, takenBy: '<i>admin</i>', kind: 'manual', kindLabel: 'by hand', sections: ['clusters', 'play'], credentials: 'none', credentialsCount: 0, coreVersion: '0.3.54', readable: true },
+      { name: 'c-before.epbak', bytes: 1000, takenAt: now - 9000e3, takenBy: 'admin', kind: 'before-restore', kindLabel: 'before a restore', sections, credentials: 'server', credentialsCount: 1, coreVersion: '0.3.54', readable: false, problem: 'damaged' },
+    ],
+  };
+  const preview = (name) => ({
+    ok: true, name, formatVersion: 1,
+    backup: { formatVersion: 1, coreVersion: '0.3.54', takenAt: now - 3600e3, takenBy: 'schedule', kind: 'scheduled', kindLabel: 'scheduled', sections: ['clusters', 'requests'], unknownSections: [], credentials: { count: 3, scheme: 'server' }, bytes: 421888,
+      says: { takenBy: 'schedule', takenAt: now - 3600e3, coreVersion: '0.3.54', verified: false } },
+    credentials: { state: 'opened', count: 3 },
+    preview: [
+      { id: 'clusters', label: 'Clusters and their settings', present: true, add: ['new-1', 'new-2'], change: ['old-1'], same: 4, onlyHere: ['mine-1', 'mine-2', 'mine-3'], keptAnyway: [] },
+      { id: 'requests', label: 'Request policy and Defaults', present: true, add: [], change: [], same: 1, onlyHere: [], keptAnyway: ['policy'] },
+      { id: 'play', label: 'Play', present: false, add: [], change: [], same: 0, onlyHere: [], keptAnyway: [] },
+    ],
+  });
+  globalThis.fetch = async (input, init) => {
+    const body = init && init.body ? JSON.parse(init.body) : {};
+    if (String(body.type || '').startsWith('BACKUP_')) {
+      hsent.push(body);
+      switch (body.type) {
+        case 'BACKUP_STATUS': return stubReply(status);
+        case 'BACKUP_SCHEDULE_SET': status = { ...status, schedule: { ...status.schedule, ...body.schedule } }; return stubReply(status);
+        case 'BACKUP_DELETE': status = { ...status, kept: status.kept.filter((k) => k.name !== body.name) }; return stubReply(status);
+        case 'BACKUP_DOWNLOAD': return stubReply({ ok: true, name: body.name, bytes: 5, file: 'FILE!' });
+        case 'BACKUP_PREVIEW': return stubReply(preview(body.name));
+        case 'BACKUP_RESTORE':
+          return stubReply({ ok: true, mode: body.mode, name: body.name, beforeRestore: 'x-before-restore.epbak', credentials: 'opened', backup: preview(body.name).backup,
+            applied: [{ id: 'clusters', label: 'Clusters and their settings', added: 2, changed: 1, removed: body.mode === 'replace' ? 3 : 0, notes: ['<b>one</b> pin skipped'] }] });
+        default: return stubReply({ ok: false, kind: 'bad_message', message: 'unknown' });
+      }
+    }
+    return realFetch(input, init);
+  };
+  try {
+    await go('overview');
+    await go('settings');
+    await settleFor(300);
+    ok(await openCfg('system', 'backup'), 'backup (hosted stub): tab not offered');
+    await waitFor(() => doc.querySelector('#bk-root [data-track="backup-schedule"]'), 'backup (hosted stub): no schedule card');
+    const g = (id) => doc.getElementById(id);
+    ok(g('bk-sch-enabled').checked && g('bk-sch-every').value === 'day' && g('bk-sch-at').value === '02:00' && g('bk-sch-keep').value === '14', 'backup (hosted stub): the schedule form does not show the saved schedule');
+    ok(/Last:\s*ok/.test(g('bk-sch-line').textContent) && /next/.test(g('bk-sch-line').textContent), `backup (hosted stub): the schedule line reads "${g('bk-sch-line').textContent}"`);
+    ok(![...doc.querySelectorAll('[data-track="backup-schedule"] button')].some((b) => /save/i.test(b.textContent)), 'backup (hosted stub): the schedule card has its own Save button');
+    // The kept table.
+    const rowsK = [...doc.querySelectorAll('#bk-root tr[data-backup]')];
+    ok(rowsK.length === 3, `backup (hosted stub): ${rowsK.length} kept rows`);
+    ok(/<i>admin<\/i>/.test(rowsK[1].textContent) && !rowsK[1].cells[1].querySelector('*'), 'backup (hosted stub): takenBy is not shown as plain text');
+    ok(/everything · credentials encrypted/.test(rowsK[0].textContent) && /clusters|Clusters/.test(rowsK[1].textContent) && /no credentials/.test(rowsK[1].textContent), 'backup (hosted stub): the Holds column is wrong');
+    ok(/412 KB/.test(rowsK[0].textContent) && /scheduled/.test(rowsK[0].textContent) && /by hand/.test(rowsK[1].textContent), 'backup (hosted stub): size or kind columns wrong');
+    ok(rowsK[2].querySelector('[data-act="restore"]').disabled && /damaged/.test(rowsK[2].textContent), 'backup (hosted stub): an unreadable backup can be restored');
+    ok(rowsK.every((r) => r.querySelector('[data-act="delete"].danger') && r.querySelector('[data-act="restore"].danger')), 'backup (hosted stub): Restore… and Delete are not red');
+    // Save the schedule through the one bar.
+    g('bk-sch-every').value = 'week'; g('bk-sch-keep').value = '30'; g('bk-sch-at').value = '03:15';
+    ok(await saveViaBar(200), 'backup (hosted stub): editing the schedule brought no save bar');
+    const sch = hsent.filter((m) => m.type === 'BACKUP_SCHEDULE_SET').at(-1);
+    ok(sch && JSON.stringify(sch.schedule) === JSON.stringify({ enabled: true, every: 'week', at: '03:15', keep: 30 }), `backup (hosted stub): BACKUP_SCHEDULE_SET carried ${JSON.stringify(sch)}`);
+    ok(g('bk-sch-every').value === 'week' && g('bk-sch-keep').value === '30', 'backup (hosted stub): the saved schedule is not shown');
+    // Typing elsewhere does not lose an unsaved schedule edit.
+    g('bk-sch-keep').value = '9'; g('bk-sch-keep').dispatchEvent(new window.Event('input', { bubbles: true }));
+    doc.querySelector('input[data-section="alerts"]').click(); await settleFor(100);
+    const credsSw = g('bk-creds'); credsSw.checked = false; credsSw.dispatchEvent(new window.Event('change', { bubbles: true })); await settleFor(100);
+    ok(g('bk-sch-keep').value === '9', 'backup (hosted stub): flipping the credentials switch dropped an unsaved schedule edit');
+    ok(!g('bk-pw'), 'backup (hosted stub): the password boxes stay with credentials off');
+    const disc = doc.querySelector('#cm-savebar button[data-act="discard"]'); if (disc) { disc.click(); await settleFor(150); }
+    // Download with credentials off: no password key, keep: true (this server keeps copies).
+    [...doc.querySelectorAll('.cm-actions button')].find((b) => b.textContent.trim() === 'Download backup now').click();
+    await waitFor(() => hsent.some((m) => m.type === 'BACKUP_CREATE'), 'backup (hosted stub): credentials-off download sent nothing');
+    // (the stub does not answer BACKUP_CREATE: the page must say so, not hang)
+    await settleFor(200);
+    // Restore… on a kept backup: preview by name, Replace names what it removes, red, confirm.
+    const row0 = () => doc.querySelector('tr[data-backup="a-scheduled.epbak"]');
+    row0().querySelector('[data-act="restore"]').click();
+    await waitFor(() => doc.querySelector('#bk-restore tr[data-section]'), 'backup (hosted stub): Restore… on a kept backup drew no preview');
+    const pv = hsent.filter((m) => m.type === 'BACKUP_PREVIEW').at(-1);
+    ok(pv && pv.name === 'a-scheduled.epbak' && !('file' in pv), `backup (hosted stub): the preview of a kept backup carried ${JSON.stringify(pv)}`);
+    const cells = [...doc.querySelector('#bk-restore tr[data-section="clusters"]').cells].map((c) => c.textContent.trim());
+    ok(cells[1] === '2' && cells[2] === '1' && cells[3].startsWith('3'), `backup (hosted stub): clusters row reads ${cells.join(' | ')}`);
+    ok(/\+1 kept anyway/.test(doc.querySelector('#bk-restore tr[data-section="requests"]').textContent), 'backup (hosted stub): keptAnyway is not listed as "kept anyway"');
+    ok(/the 3 items only here now are removed/.test(doc.getElementById('bk-restore').textContent), 'backup (hosted stub): the Replace caption lacks the preview count');
+    ok(/Not in the file/.test(doc.getElementById('bk-restore').textContent) && /unverified/.test(doc.getElementById('bk-says').textContent), 'backup (hosted stub): missing sections or the says line are not stated');
+    ok(doc.getElementById('bk-restore-go').classList.contains('danger'), 'backup (hosted stub): Restore… is not red');
+    doc.querySelector('#bk-restore input[value="replace"]').click(); doc.querySelector('#bk-restore input[value="replace"]').dispatchEvent(new window.Event('change', { bubbles: true }));
+    const nRs = hsent.filter((m) => m.type === 'BACKUP_RESTORE').length;
+    doc.getElementById('bk-restore-go').click();
+    doc.getElementById('bk-restore-go').click();
+    await settleFor(150);
+    ok([...doc.querySelectorAll('.modal')].filter((m) => /Replace everything\?/.test(m.textContent)).length === 1, 'backup (hosted stub): two clicks on Restore… opened two confirms');
+    const dR = await waitFor(() => modalOf(/Replace everything\?/), 'backup (hosted stub): Replace asked no confirm');
+    ok(dR && /Clusters and their settings: 3 removed \(mine-1, mine-2, mine-3\)/.test(dR.textContent) && /kept anyway/.test(dR.textContent) && /before a restore/.test(dR.textContent), `backup (hosted stub): the Replace confirm reads "${dR && dR.textContent.replace(/\s+/g, ' ').slice(0, 300)}"`);
+    ok(dR && modalBtn(dR, 'Replace everything') && modalBtn(dR, 'Replace everything').classList.contains('danger'), 'backup (hosted stub): the Replace confirm button is not red');
+    ok(dR && /Credentials|credential/.test(dR.textContent), 'backup (hosted stub): the confirm says nothing about credentials');
+    if (dR) modalBtn(dR, 'Replace everything').click();
+    await waitFor(() => g('bk-rs-result'), 'backup (hosted stub): Replace showed no result');
+    ok(hsent.filter((m) => m.type === 'BACKUP_RESTORE').length === nRs + 1, 'backup (hosted stub): two clicks sent more than one BACKUP_RESTORE');
+    const rr = hsent.filter((m) => m.type === 'BACKUP_RESTORE').at(-1);
+    ok(rr && rr.mode === 'replace' && rr.name === 'a-scheduled.epbak', `backup (hosted stub): BACKUP_RESTORE carried ${JSON.stringify(rr)}`);
+    const rt = g('bk-rs-result').textContent;
+    ok(/2 added, 1 changed, 3 removed/.test(rt) && /x-before-restore\.epbak/.test(rt) && /<b>one<\/b> pin skipped/.test(rt) && !g('bk-rs-result').querySelector('b b'), `backup (hosted stub): the result reads "${rt}"`);
+    press(g('bk-rs-close')); await settleFor(100);
+    // Delete: a confirm, then BACKUP_DELETE, then the row is gone.
+    doc.querySelector('tr[data-backup="b-hand.epbak"] [data-act="delete"]').click();
+    const dD = await waitFor(() => modalOf(/Delete b-hand\.epbak\?/), 'backup (hosted stub): Delete asked no confirm');
+    ok(!hsent.some((m) => m.type === 'BACKUP_DELETE'), 'backup (hosted stub): Delete went to the core before the confirm');
+    if (dD) modalBtn(dD, 'Delete').click();
+    await waitFor(() => !doc.querySelector('tr[data-backup="b-hand.epbak"]'), 'backup (hosted stub): the deleted backup is still listed');
+    ok(hsent.some((m) => m.type === 'BACKUP_DELETE' && m.name === 'b-hand.epbak'), 'backup (hosted stub): no BACKUP_DELETE for the named file');
+    // Download a kept one.
+    const nf = files.length;
+    doc.querySelector('tr[data-backup="a-scheduled.epbak"] [data-act="download"]').click();
+    await waitFor(() => files.length > nf, 'backup (hosted stub): Download on a kept backup saved no file');
+    ok(files.at(-1).name === 'a-scheduled.epbak' && files.at(-1).text === 'FILE!', 'backup (hosted stub): the kept download is not the core\'s file');
+    // Find a setting reaches the new labels.
+    const find = g('cm-find');
+    find.value = 'backup password'; find.dispatchEvent(new window.Event('input', { bubbles: true })); await settleFor(150);
+    ok(/Backup password/.test((g('cm-find-results') || {}).textContent || ''), 'backup (hosted stub): Find a setting does not index "Backup password"');
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+  await go('overview');
+}
+
 if (problems.length) {
   console.error(`\n${problems.length} problem(s):`);
   for (const p of problems) console.error('  ✗ ' + p);
