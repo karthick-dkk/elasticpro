@@ -144,3 +144,15 @@ test('a token that cannot read users is said so, with the fix; other reasons are
   assert.match(Z.groupsFromNote({ groupsFrom: 'lastSignIn', zabbixError: 'the Zabbix API is not paired' }), /last sign-in said: the Zabbix API is not paired/);
   assert.equal(Z.groupsFromNote({ groupsFrom: 'zabbix' }), '');
 });
+
+test('names are trimmed like the core does; a changed server map under an edit is noticed; hand mode needs a real hand', () => {
+  assert.deepEqual(Z.normGroup(' NOC '), { id: null, name: 'NOC' });
+  assert.ok(Z.sameGroup(Z.normGroup('NOC '), Z.normGroup({ name: ' NOC' })));
+  const a = Z.draftOf(MAP);
+  assert.equal(Z.mapsDiffer(a, Z.cloneDraft(a)), false);
+  assert.equal(Z.mapsDiffer(a, Z.addGroup(a, 'guest', { name: 'Auditors' })), true);
+  assert.ok(Z.previewView({ ok: true, adminsAfter: 1, changes: [] }).notes.includes('Unsaved changes made by hand are not included.'));
+  const users = [U({ username: 'x' }), U({ username: 'y', pinned: true, byHand: 'user' })];
+  assert.deepEqual(Z.filterUsers(users, '', 'hand', new Map([['x@zabbix', '']])).map((u) => u.username), ['y']);
+  assert.deepEqual(Z.filterUsers(users, '', 'hand', new Map([['y@zabbix', '']])).map((u) => u.username), ['y']);
+});

@@ -30,9 +30,9 @@ export const roleLabel = (r) => ROLE_LABEL[r] || (r ? String(r) : 'No access');
 export function normGroup(e) {
   if (e && typeof e === 'object') {
     const id = e.id != null && e.id !== '' ? String(e.id) : e.usrgrpid != null && e.usrgrpid !== '' ? String(e.usrgrpid) : null;
-    return { id, name: String(e.name == null ? '' : e.name) };
+    return { id, name: String(e.name == null ? '' : e.name).trim() };
   }
-  return { id: null, name: String(e == null ? '' : e) };
+  return { id: null, name: String(e == null ? '' : e).trim() };
 }
 
 /** The same group: by id when both sides have one, else by name — exactly, as Zabbix compares them. */
@@ -140,9 +140,13 @@ export function previewView(res) {
     notes.push('Judged on the groups each person had at their last sign-in: Zabbix could not be asked.');
   }
   if (res.zabbixError) notes.push(String(res.zabbixError));
+  notes.push('Unsaved changes made by hand are not included.');
   notes.push('Pinned people (No access included) never appear: a role set by hand wins over the map. People whose groups were never recorded cannot be judged and are left out.');
   return { failed: false, lockout, headline, adminsAfter, rows, notes };
 }
+
+/** Did the server's map change under an edit in progress? (`before` and `after` are drafts.) */
+export const mapsDiffer = (before, after) => !!before && !!after && mapChanges(before, after).length > 0;
 
 /** The sentence for a refused save, plainly. The core's own message follows it (it carries the code). */
 export function refusalText(res) {

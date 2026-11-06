@@ -30,7 +30,7 @@ const st = {
   hand: new Map(),      // account → value, for rows the admin touched
   filter: '', mode: 'all',
   preview: null, previewBusy: false,
-  refusal: '', busy: false,
+  refusal: '', handRefusal: '', serverChanged: false, busy: false,
 };
 
 /** The core knows the group map (docs/ROLES.md): both cards are drawn. */
@@ -48,13 +48,13 @@ export function zabbixRolesChanges() {
 export function discardZabbixRoles() {
   if (st.saved) st.draft = Z.cloneDraft(st.saved);
   st.hand = new Map();
-  st.preview = null; st.refusal = '';
+  st.preview = null; st.refusal = ''; st.handRefusal = ''; st.serverChanged = false;
 }
 
 /** Forget everything (tests, and a change of who is signed in). */
 export function forgetZabbixRoles() {
   Object.assign(st, { supported: false, loaded: false, error: '', res: null, saved: null, draft: null, usersRes: null,
-    hand: new Map(), filter: '', mode: 'all', preview: null, previewBusy: false, refusal: '', busy: false });
+    hand: new Map(), filter: '', mode: 'all', preview: null, previewBusy: false, refusal: '', handRefusal: '', serverChanged: false, busy: false });
 }
 
 /**
@@ -68,6 +68,7 @@ export async function loadZabbixRoles(redraw) {
     st.res = map;
     const fresh = Z.draftOf(map.roleMap);
     const editing = st.draft && Z.mapChanges(st.saved, st.draft).length > 0;
+    if (editing && Z.mapsDiffer(st.saved, fresh)) { st.serverChanged = true; st.preview = null; }
     st.saved = fresh;
     if (!editing) st.draft = Z.cloneDraft(fresh);
   } else if (map && map.ok === false && !['unknown_message', 'unknown', 'not_supported', 'unsupported', 'bad_message', 'forbidden'].includes(map.kind)) {
@@ -88,7 +89,7 @@ export async function loadZabbixRoles(redraw) {
  */
 export async function saveZabbixRoles(redraw) {
   if (st.busy || !st.draft) return false;
-  st.busy = true; st.refusal = '';
+  st.busy = true; st.refusal = ''; st.handRefusal = '';
   let all = true;
   try {
     if (Z.mapChanges(st.saved, st.draft).length) {
@@ -101,7 +102,7 @@ export async function saveZabbixRoles(redraw) {
       }
       st.saved = Z.draftOf(res.roleMap);
       st.draft = Z.cloneDraft(st.saved);
-      st.preview = null;
+      st.preview = null; st.serverChanged = false;
       toast('Roles from Zabbix user groups saved', 'ok', 6000, { key: 'zabbix-roles',
         detail: ['It applies from each person’s next sign-in; nobody’s open session changes.', `Administrators after: ${res.adminsAfter}`] });
     }
@@ -113,7 +114,7 @@ export async function saveZabbixRoles(redraw) {
     }
     if (failed.length) {
       all = false;
-      st.refusal = failed.join(' · ');
+      st.handRefusal = failed.join(' · ');
       toast(`${failed.length} role${failed.length === 1 ? '' : 's'} set by hand not saved`, 'err', 12000, { key: 'zabbix-hand', detail: failed });
     }
   } finally {
@@ -203,6 +204,7 @@ function rolesCard(redraw) {
         ? h('div.zr-banner', 'No group is mapped yet: people get the role from their Zabbix user role (the older role-name map, under Accounts) until a group is listed here and saved.') : null,
       res.zabbixGroupsError ? h('div.zr-banner', { 'data-zr': 'groups-error' }, `Zabbix’s user groups could not be listed (${res.zabbixGroupsError}). Type a group’s name exactly as Zabbix has it.`) : null,
       st.error ? h('div.zr-banner.zr-bad', st.error) : null,
+      st.serverChanged ? h('div.zr-banner', { 'data-zr': 'server-changed' }, 'The role map changed on the server while you were editing — your edit is shown against the new map.') : null,
       st.refusal ? h('div.zr-banner.zr-bad', { role: 'alert', 'data-zr': 'refusal' }, st.refusal) : null,
       h('div.tbl-wrap', h('table.tbl.zr-tbl',
         h('thead', h('tr', h('th', { style: { width: '120px' } }, 'ElasticPro role'), h('th', 'Zabbix user groups'),
@@ -267,6 +269,7 @@ function usersCard(redraw) {
   const el = card('Zabbix users',
     `${r.total != null ? r.total : users.length} people have signed in from Zabbix · ${r.byHand != null ? r.byHand : handN} with a role set by hand`,
     h('div',
+      st.handRefusal ? h('div.zr-banner.zr-bad', { role: 'alert', 'data-zr': 'hand-refusal' }, st.handRefusal) : null,
       r.ok === false ? h('div.zr-banner.zr-bad', `The people could not be read: ${r.message || 'no answer'}`) : null,
       tokenProblem ? h('div.zr-banner', { 'data-zr': 'token-problem' }, tokenProblem)
         : note ? h('div.zr-banner', { 'data-zr': 'groups-from' }, note) : null,
