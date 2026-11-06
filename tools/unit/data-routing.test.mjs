@@ -69,3 +69,24 @@ test('the amber line appears once, for ES-only kinds the store is not taking', (
   assert.match(w, /built-in store meanwhile · 3 queued/);
   assert.equal(R.esOnlyWarning(undefined), '');
 });
+
+test('store stream rows name a stream that is not writing and what was dropped', () => {
+  const st = { kinds: {
+    history: { mode: 'copy', store: { writing: true, dropped: 0 } },
+    reports: { mode: 'es', store: { writing: false, why: 'the reports template was refused', queued: 3, dropped: 2 } },
+    alerts: { mode: 'builtin', store: { writing: false, why: 'ignored' } },
+  } };
+  assert.deepEqual(R.storeStreamRows(st), [
+    ['Reports stream', 'not writing: the reports template was refused \u00b7 3 queued'],
+    ['Reports dropped', '2 records dropped (queue full or routed back to built-in)'],
+  ]);
+  assert.deepEqual(R.storeStreamRows(null), []);
+});
+
+test('only changed fields are sent, and going back to built-in is named', () => {
+  const routing = { history: 'copy', reports: 'builtin', alerts: 'es', reportFiles: false };
+  assert.deepEqual(R.routingChanges(routing, { history: 'copy', reports: 'es', alerts: 'builtin', reportFiles: true }),
+    { reports: 'es', alerts: 'builtin', reportFiles: true });
+  assert.deepEqual(R.routingChanges(routing, {}), {});
+  assert.deepEqual(R.letGoKinds(routing, { history: 'builtin', alerts: 'es', reports: 'builtin' }), ['History']);
+});

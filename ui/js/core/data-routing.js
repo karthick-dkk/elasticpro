@@ -122,3 +122,34 @@ export function esOnlyWarning(status) {
   const n = queued.reduce((a, k) => a + ((k.store && k.store.queued) || 0), 0);
   return `Not writing to Elasticsearch: ${why}. ElasticPro keeps writing to its built-in store meanwhile · ${num(n)} queued.`;
 }
+
+/**
+ * Extra lines for the Elasticsearch cluster card's status table, from DATA_ROUTING_STATUS: one
+ * per kind that is kept on the store and is not writing (its own reason: one stream's trouble
+ * is not the others'), and one per kind that has dropped records. `[label, text]` pairs.
+ */
+export function storeStreamRows(status) {
+  const kinds = (status && status.kinds) || {};
+  const out = [];
+  for (const [id, label] of KINDS) {
+    const k = kinds[id];
+    if (!k || (k.mode !== 'es' && k.mode !== 'copy')) continue;
+    const s = k.store || {};
+    if (s.writing === false) out.push([`${label} stream`, `not writing: ${s.why || 'no reason given'}${s.queued ? ` · ${num(s.queued)} queued` : ''}`]);
+    if (s.dropped) out.push([`${label} dropped`, `${num(s.dropped)} records dropped (queue full or routed back to built-in)`]);
+  }
+  return out;
+}
+
+/** The kinds that were on the store and are being set back to built-in: that lets go of what was queued for them. */
+export function letGoKinds(routing, draft) {
+  return KINDS.filter(([id]) => modeOf(routing, id) !== 'builtin' && draft[id] === 'builtin').map(([, label]) => label);
+}
+
+/** The fields of `draft` that differ from `routing`: the body of DATA_ROUTING_SET. */
+export function routingChanges(routing, draft) {
+  const out = {};
+  for (const [id] of KINDS) if (draft[id] !== undefined && draft[id] !== modeOf(routing, id)) out[id] = draft[id];
+  if (draft.reportFiles !== undefined && !!draft.reportFiles !== !!(routing && routing.reportFiles)) out.reportFiles = !!draft.reportFiles;
+  return out;
+}

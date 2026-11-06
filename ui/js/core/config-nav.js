@@ -261,6 +261,17 @@ export const ZABBIX_ROLES_INDEX = Object.freeze([
   ['zabbix', 'zabbix', 'Zabbix users', '', 'people role set by hand pinned reset no access last sign-in gone unverifiable lowered at sync'],
 ]);
 
+/** Rows added when the core routes its records (PING dataRouting.supported): Data › Backend's table. */
+export const DATA_ROUTING_INDEX = Object.freeze([
+  ['data', 'backend', 'Where each kind of data goes', 'dr-mode-history', 'backend storage routing built-in elasticsearch copy kept in'],
+  ['data', 'backend', 'History kept in', 'dr-mode-history', 'volume capacity log delay records built-in elasticsearch copy only'],
+  ['data', 'backend', 'Reports kept in', 'dr-mode-reports', 'generated files job history built-in elasticsearch copy only'],
+  ['data', 'backend', 'Alerts kept in', 'dr-mode-alerts', 'raised acknowledged silenced cleared built-in elasticsearch copy only'],
+  ['data', 'backend', 'Carry the report file', 'dr-reportFiles', 'reports file 2 MB elasticsearch content'],
+  ['data', 'backend', 'ElasticPro built-in', '', 'default data directory size free disk backed up'],
+  ['data', 'backend', 'Elasticsearch cluster', 'hs-url', 'history store dedicated optional'],
+]);
+
 const norm = (s) => String(s || '').toLowerCase().replace(/[—–]/g, '-');
 
 /**
