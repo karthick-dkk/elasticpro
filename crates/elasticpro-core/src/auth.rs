@@ -826,11 +826,13 @@ pub struct Account {
     /// local account's role is always the one set here anyway. `USER_UNPIN_ROLE` clears it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub role_pinned: bool,
-    /// An admin set this external account's role by hand to **No access**: not signed in, and
-    /// every request from a session it still holds is refused — whatever Zabbix and the role
-    /// map say. Pinned like a role (`role_pinned` is set with it) and cleared the same way,
-    /// by `USER_UNPIN_ROLE`; setting a real role by hand replaces it. `role` keeps its last
-    /// value underneath, so Reset shows what they were.
+    /// This external account has no access: not signed in, and every request from a session it
+    /// still holds is refused. Two ways here. **By hand**, with `role_pinned` set too: an admin
+    /// chose No access, and it stays — whatever Zabbix and the role map say — until
+    /// `USER_UNPIN_ROLE` or a real role set by hand. **By a sync**, with `role_pinned` false: a
+    /// Zabbix sync found the person's live groups give them nothing under the map
+    /// (`UserStore::lower_at_sync`); their next *signed* sign-in decides again. `role` keeps
+    /// its last value underneath, so Reset shows what they were.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub no_access: bool,
     /// What Zabbix last said about this account at a sign-in — its user type, role name and
@@ -838,6 +840,10 @@ pub struct Account {
     /// what each person would become, without a Zabbix round trip.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub zabbix: Option<ZabbixFacts>,
+    /// The last time a Zabbix sync lowered this account's role (`UserStore::lower_at_sync`):
+    /// what it was, what it became and why — shown in the Zabbix users table.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_sync_change: Option<SyncChange>,
     /// Zabbix user groups this account is limited to; `None` sees every cluster.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scope: Option<Vec<String>>,
@@ -889,6 +895,23 @@ impl ZabbixFacts {
     }
 }
 
+/// A role lowered at a Zabbix sync (docs/ROLES.md, "At every sync"): what it was, what it
+/// became (`"none"` for no access), and why — the group that gave the lower role, or the rule
+/// that gave none.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SyncChange {
+    pub at: u64,
+    pub from: String,
+    pub to: String,
+    pub why: String,
+}
+
+impl SyncChange {
+    pub fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({ "at": self.at, "from": self.from, "to": self.to, "why": self.why })
+    }
+}
+
 impl Account {
     /// What an admin is allowed to see about an account. Never the hash or the salt:
     /// they are of no use to the UI and every copy is one more place to leak from.
@@ -903,6 +926,7 @@ impl Account {
             "rolePinned": self.role_pinned,
             "noAccess": self.no_access,
             "roleInForce": self.role_in_force(),
+            "syncChange": self.last_sync_change.as_ref().map(SyncChange::to_json),
             "scope": self.scope,
             "locked": self.locked,
             "lockedUntil": self.locked_until.filter(|t| *t > now()),
@@ -1236,6 +1260,7 @@ impl UserStore {
                 role_pinned: false,
                 no_access: false,
                 zabbix: None,
+                last_sync_change: None,
                 scope: None,
                 locked: false,
                 locked_until: None,
@@ -1293,11 +1318,14 @@ impl UserStore {
                     if facts.is_some() {
                         a.zabbix = facts;
                     }
-                    if a.no_access {
+                    if a.no_access && a.role_pinned {
                         drop(list);
                         let _ = self.save();
                         return Err(AuthError::NoAccess);
                     }
+                    // No access a sync imposed is not a pin: the signed claim decides again
+                    // (the caller resolved `role` from it — a claim with no role never gets here).
+                    a.no_access = false;
                     if a.disabled {
                         return Err(AuthError::Blocked);
                     }
@@ -1328,6 +1356,7 @@ impl UserStore {
                         role_pinned: false,
                         no_access: false,
                         zabbix: facts,
+                        last_sync_change: None,
                         scope,
                         locked: false,
                         locked_until: None,
@@ -1468,6 +1497,41 @@ impl UserStore {
     /// Blocked accounts are refused everything, signed in or not.
     pub fn is_blocked(&self, name: &str) -> bool {
         self.accounts.read().iter().any(|a| a.name.eq_ignore_ascii_case(name) && a.disabled)
+    }
+
+    /// A Zabbix sync found this unpinned account's live groups give `target` under the map
+    /// (`None`: no access). Lower the role in force when `target` is lower — never raise it: a
+    /// raise waits for the next signed sign-in — and record the change. `facts` (the live groups)
+    /// are kept either way. Nothing happens to a pinned account, one already without access, or
+    /// a blocked one; `LastAdmin` when the person is the only administrator able to sign in.
+    /// `Ok(Some(change))` when something was lowered.
+    pub fn lower_at_sync(&self, name: &str, target: Option<Role>, facts: ZabbixFacts, why: String) -> Result<Option<SyncChange>, AuthError> {
+        let out = {
+            let mut list = self.accounts.write();
+            let admins = list.iter().filter(|a| a.active_admin()).count();
+            let Some(a) = list.iter_mut().find(|a| a.name.eq_ignore_ascii_case(name) && a.source.is_some()) else {
+                return Err(AuthError::NotFound(name.to_string()));
+            };
+            a.zabbix = Some(facts);
+            if a.role_pinned || a.no_access || a.disabled || target.is_some_and(|t| t >= a.role) {
+                None
+            } else if a.active_admin() && admins <= 1 {
+                drop(list);
+                let _ = self.save();
+                return Err(AuthError::LastAdmin);
+            } else {
+                let from = a.role.as_str().to_string();
+                match target {
+                    Some(t) => a.role = t,
+                    None => a.no_access = true,
+                }
+                let change = SyncChange { at: now(), from, to: target.map(Role::as_str).unwrap_or("none").to_string(), why };
+                a.last_sync_change = Some(change.clone());
+                Some(change)
+            }
+        };
+        self.save()?;
+        Ok(out)
     }
 
     /// Record what a source said about an account that already exists for that source — a

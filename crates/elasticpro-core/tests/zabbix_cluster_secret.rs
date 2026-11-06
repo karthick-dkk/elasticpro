@@ -68,6 +68,7 @@ async fn secret_macros_are_polled_only_with_a_password_the_core_was_handed() {
             ]),
             "host.get" => json!([]),
             "usergroup.get" => json!([]),
+            "user.get" => json!([]),
             other => panic!("unexpected Zabbix call {other} {p}"),
         };
         (200, json!({ "jsonrpc": "2.0", "result": result, "id": 1 }).to_string())

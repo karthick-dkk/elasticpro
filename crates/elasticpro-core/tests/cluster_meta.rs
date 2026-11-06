@@ -52,6 +52,8 @@ async fn cluster_type_is_seeded_from_the_zabbix_tag_and_set_by_an_admin() {
             "usergroup.get" => json!([
                 { "name": "G-ci", "users_status": "0", "hostgroup_rights": [{ "id": "30", "permission": "2" }] },
             ]),
+            // The sync re-checks roles from live groups; nobody from Zabbix here, so nothing moves.
+            "user.get" => json!([]),
             other => panic!("unexpected Zabbix call {other} {p}"),
         };
         (200, json!({ "jsonrpc": "2.0", "result": result, "id": 1 }).to_string())

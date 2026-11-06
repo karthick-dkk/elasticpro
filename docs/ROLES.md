@@ -31,6 +31,22 @@ ElasticPro only *reads* Zabbix group membership; it never changes a Zabbix user,
 Which clusters a person sees is a separate question (`zabbix.scopeUsersByGroup`, host-group
 rights in Zabbix) and is not touched by any of this.
 
+**At every sync — down only.** Each Zabbix sync (the timer and `ZABBIX_SYNC`) lists Zabbix's
+users with their groups (`user.get`) and re-runs the same `resolve_claim` for every *unpinned*
+Zabbix account. A role the live groups no longer justify is **lowered at once** — to the lower
+role, or to no access (`noAccess: true` with `pinned: false`) — and the person's sessions end.
+Nothing is ever **raised** at a sync: a raise waits for the next signed sign-in, the only claim
+the core trusts upwards. The step fails closed towards *no change*: when `user.get` is refused
+(a token without it), fails, answers nothing, or names none of the accounts this core knows,
+nobody moves. A person absent from an answer that does name others counts as in no groups (the
+unmapped rule decides, with their recorded Zabbix role and type). Pinned people, No access by
+hand, blocked accounts and the last administrator able to sign in are never touched (the last
+admin case is logged: `role kept at sync`). A no access the sync imposed is lifted by the next
+signed sign-in that gives a role, by Reset, or by a role set by hand. Each lowering is audited
+(`role lowered at sync`, with from → to and why), kept on the account (`syncChange` in
+`ZABBIX_USERS` and `USER_LIST`) and listed in the sync's answer and in `ZABBIX_LINK_GET`
+(`roleChanges`, admin only). The worker never does this; only the core.
+
 **Migration.** A config written before the group map has `names`/`types` only. It behaves
 exactly as before until an administrator saves the group table: `groups` are empty and
 `unmapped` is `zabbixRole`, so step 2 never matches and step 3 is the old rule. Saving the
@@ -137,13 +153,16 @@ were never recorded cannot be judged and are left out.
     "pinned": false, "noAccess": false,
     "inForce": "operator",                      // what their sessions have now ("none" = No access)
     "disabled": false, "locked": false,
-    "lastSignIn": 1762345678, "factsAt": 1762345678 } ] }
+    "lastSignIn": 1762345678, "factsAt": 1762345678,
+    "syncChange": null | { "at": 1762345678, "from": "operator", "to": "user", "why": "the highest of their Zabbix user groups now gives user (NOC)" } } ] }
 ```
 
 - `groups[].role` is what the map gives that group (`null`: not mapped) — the page's "(not
   mapped)" mark. `fromGroups.matched` is every mapped group they are in, highest first — the
   page's "highest of User, Operator". `fromGroups.source` is `zabbixRole` when the fallback
   decided and `unmapped` when it refuses (`role: null`).
+- `byHand: "none"` with `pinned: true` is No access by hand. `noAccess: true` with `pinned:
+  false` is no access a sync imposed (see "At every sync"); `syncChange` says when and why.
 - `inForce` can differ from `fromGroups.role` when the map changed since the person last signed
   in: the preview is what shows that.
 - `known: false`: this account signed in before groups were recorded; its `groups` are empty
