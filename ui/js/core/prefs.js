@@ -41,15 +41,25 @@ export function prefsSupported() {
  * Read the account's settings (falling back to the browser's), carry the browser's over to
  * the account once, and return what to apply.
  */
+/**
+ * Set in this browser once the hand-over has been done for the first account the browser met
+ * on a core that keeps settings: a second person on the same browser starts from their own
+ * account, not from the first person's choices (migrationPatch).
+ */
+const MIGRATED_KEY = 'prefsMigrated';
+
 export async function loadPrefs() {
   const browser = await browserCopy();
   account = readAnswer(await ask({ type: 'PREFS_GET' }));
   if (account.supported) {
-    const patch = migrationPatch(account.prefs, browser);
+    let migrated = false;
+    try { migrated = (await idb.getKV(MIGRATED_KEY)) === true; } catch { migrated = false; }
+    const patch = migrationPatch(account.prefs, browser, { migrated });
     if (patch) {
       const moved = readAnswer(await ask({ type: 'PREFS_SET', prefs: patch }));
       if (moved.supported) account = moved;
     }
+    if (!migrated) { try { await idb.setKV(MIGRATED_KEY, true); } catch { /* memory only: asked again next time */ } }
   }
   return { ...effective(account.prefs, browser), supported: account.supported === true };
 }
