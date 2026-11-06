@@ -124,6 +124,15 @@ async fn a_person_in_several_mapped_groups_signs_in_with_the_highest_role() {
     // A Zabbix Super admin (type 3) in only the Auditors group is a guest: the groups decide.
     let (_, out, _) = sign_in(&c, "auditor", 3, Some("Super admin role"), &[("5", "Auditors")]).await;
     assert_eq!(out["role"], json!("guest"), "{out}");
+    // The role lookup answers the account's role and the map's answer for the groups asked about,
+    // separately: a.kumar holds operator; asked with NOC alone, the map says user (the module acts
+    // on the lower of the two when the role is not pinned).
+    let q = serde_json::to_vec(&json!({ "zabbix_user": "a.kumar", "zabbix_user_type": 1, "zabbix_role": "User role",
+                                        "user_groups": [{ "id": "3", "name": "NOC" }], "ts": now(), "nonce": nonce() })).unwrap();
+    let reply = c.zabbix_sso_role_from(&q, &ZabbixSso::sign(SECRET.as_bytes(), &q), None);
+    let body: Value = serde_json::from_slice(&reply.body).unwrap();
+    assert_eq!((body["role"].clone(), body["map_role"].clone(), body["zabbix_role"].clone(), body["pinned"].clone(), body["role_source"].clone()),
+               (json!("operator"), json!("user"), json!("user"), json!(false), json!("group")), "{body}");
     // Membership changes apply at the next sign-in, to the open session too.
     let (_, out, s2) = sign_in(&c, "a.kumar", 1, Some("User role"), &[("3", "NOC")]).await;
     assert_eq!(out["role"], json!("user"), "{out}");
@@ -157,6 +166,21 @@ async fn in_no_mapped_group_the_fallback_rule_decides_and_can_be_no_access() {
     // Even a Super admin in no mapped group.
     let (status, _, _) = sign_in(&c, "super", 3, Some("Super admin role"), &[]).await;
     assert_eq!(status, 403);
+    // The role lookup Cluster Management asks about such a newcomer says "none" in every field the
+    // module could read — never null, which an older module takes as "use the Zabbix user type".
+    let q = serde_json::to_vec(&json!({ "zabbix_user": "newbie", "zabbix_user_type": 2, "zabbix_role": "Admin role",
+                                        "user_groups": [{ "id": "9", "name": "Zabbix users" }], "ts": now(), "nonce": nonce() })).unwrap();
+    let reply = c.zabbix_sso_role_from(&q, &ZabbixSso::sign(SECRET.as_bytes(), &q), None);
+    let body: Value = serde_json::from_slice(&reply.body).unwrap();
+    assert_eq!((body["role"].clone(), body["zabbix_role"].clone(), body["map_role"].clone(), body["role_source"].clone(), body["no_access"].clone()),
+               (json!("none"), json!("none"), json!("none"), json!("unmapped"), json!(false)), "{body}");
+    // A known, unpinned account keeps its own role in the answer, and the map's part says none
+    // beside it (map_role) — which the module denies on, since the role is not pinned.
+    let q = serde_json::to_vec(&json!({ "zabbix_user": "d.new", "zabbix_user_type": 2, "user_groups": [{ "id": "9", "name": "Zabbix users" }], "ts": now(), "nonce": nonce() })).unwrap();
+    let reply = c.zabbix_sso_role_from(&q, &ZabbixSso::sign(SECRET.as_bytes(), &q), None);
+    let body: Value = serde_json::from_slice(&reply.body).unwrap();
+    assert_eq!((body["role"].clone(), body["zabbix_role"].clone(), body["map_role"].clone(), body["pinned"].clone()),
+               (json!("operator"), json!("none"), json!("none"), json!(false)), "{body}");
     // A mapped group still gets in.
     let (status, out, _) = sign_in(&c, "n.shift", 1, None, &[("3", "NOC")]).await;
     assert_eq!((status, out["role"].clone()), (200, json!("user")), "{out}");
@@ -187,6 +211,11 @@ async fn a_role_set_by_hand_beats_the_map_including_a_map_that_would_refuse() {
     set_map(&c, &a, json!({ "unmapped": "none" })).await;
     let (status, out, _) = sign_in(&c, "b.singh", 1, None, &[("9", "Nothing mapped")]).await;
     assert_eq!((status, out["role"].clone()), (200, json!("operator")), "{out}");
+    // And the role lookup says so unambiguously: the pinned role, the map's none, pinned true.
+    let q = serde_json::to_vec(&json!({ "zabbix_user": "b.singh", "zabbix_user_type": 1, "user_groups": [{ "id": "9", "name": "Nothing mapped" }], "ts": now(), "nonce": nonce() })).unwrap();
+    let reply = c.zabbix_sso_role_from(&q, &ZabbixSso::sign(SECRET.as_bytes(), &q), None);
+    let body: Value = serde_json::from_slice(&reply.body).unwrap();
+    assert_eq!((body["role"].clone(), body["map_role"].clone(), body["pinned"].clone()), (json!("operator"), json!("none"), json!(true)), "{body}");
     // Reset: the map decides again — and it refuses.
     let r = c.handle(json!({ "type": "USER_UNPIN_ROLE", "session": a, "name": "b.singh@zabbix" })).await;
     assert_eq!(r["ok"], json!(true), "{r}");
@@ -416,8 +445,9 @@ async fn the_zabbix_users_table_and_the_preview_are_an_admins_and_describe_each_
 /* ------------------------------ at every sync: down only ------------------------------ */
 
 /// A Zabbix whose `user.get` answers what the test puts in `users` (`Null`: a JSON-RPC error),
-/// and whose cluster side is one template with no hosts.
-async fn fake_zabbix(users: Arc<Mutex<Value>>) -> TestServer {
+/// whose token belongs to a user of type `my_type` (3: Super admin, so the list is complete; 0:
+/// `user.checkAuthentication` fails), and whose cluster side is one template with no hosts.
+async fn fake_zabbix(users: Arc<Mutex<Value>>, my_type: Arc<Mutex<i64>>) -> TestServer {
     TestServer::with(move |hit| {
         let b: Value = serde_json::from_str(&hit.body).unwrap();
         let m = |k: &str, v: &str, t: &str| json!({ "macro": k, "value": v, "type": t });
@@ -426,6 +456,15 @@ async fn fake_zabbix(users: Arc<Mutex<Value>>) -> TestServer {
                 m("{$ELASTICSEARCH.HOST}", "<SET ELASTICSEARCH HOST>", "0"), m("{$ELASTICSEARCH.PORT}", "9200", "0"),
                 m("{$ELASTICSEARCH.SCHEME}", "https", "0"), m("{$ELASTICSEARCH.PASSWORD}", "", "1")] }]),
             "host.get" | "usermacro.get" | "usergroup.get" | "item.get" => json!([]),
+            "user.checkAuthentication" => {
+                assert_eq!(b["params"]["token"], json!("zbx-token"), "the token is the parameter: {b}");
+                assert!(hit.header("authorization").is_none(), "no bearer on checkAuthentication");
+                let t = *my_type.lock().unwrap();
+                if t == 0 {
+                    return (200, json!({ "jsonrpc": "2.0", "error": { "code": -32602, "message": "Not authorized.", "data": "" }, "id": 1 }).to_string());
+                }
+                json!({ "userid": "42", "username": "elasticpro-sync", "type": t.to_string() })
+            }
             "user.get" => {
                 assert_eq!(b["params"]["selectUsrgrps"], json!(["usrgrpid", "name"]), "{b}");
                 let u = users.lock().unwrap().clone();
@@ -451,7 +490,10 @@ fn zuser(name: &str, ty: i64, groups: &[(&str, &str)]) -> Value {
 async fn a_sync_lowers_a_role_the_live_groups_no_longer_give_and_never_raises_one() {
     let _turn = ENV.lock().await;
     let users = Arc::new(Mutex::new(json!([])));
-    let zbx = fake_zabbix(users.clone()).await;
+    // A sync token of the Super admin type (the shipped ElasticPro sync role): the list is
+    // complete, and groups are judged. Switched to the Admin type where a partial list is wanted.
+    let my_type = Arc::new(Mutex::new(3_i64));
+    let zbx = fake_zabbix(users.clone(), my_type.clone()).await;
     let dir = TempDir::new("roles-sync");
     std::fs::write(dir.join("zbx-token"), "zbx-token\n").unwrap();
     std::env::set_var("ELASTICPRO_ZABBIX_API_URL", format!("{}/api_jsonrpc.php", zbx.url()));
@@ -482,7 +524,7 @@ async fn a_sync_lowers_a_role_the_live_groups_no_longer_give_and_never_raises_on
     assert_eq!(role_of(&kumar).await, json!("operator"), "nobody lost anything on missing data");
 
     // Live: a.kumar left NOC leads; b.singh (pinned) is in nothing; d.new unchanged.
-    set_users(json!([zuser("a.kumar", 1, &[("3", "NOC")]), zuser("b.singh", 1, &[]), zuser("d.new", 1, &[("9", "Zabbix users")])]));
+    set_users(json!([zuser("a.kumar", 1, &[("3", "NOC")]), zuser("b.singh", 1, &[("9", "Zabbix users")]), zuser("d.new", 1, &[("9", "Zabbix users")])]));
     let r = c.zabbix_sync().await;
     let ch = r["roleChanges"].as_array().unwrap();
     assert_eq!(ch.len(), 1, "{r}");
@@ -505,7 +547,7 @@ async fn a_sync_lowers_a_role_the_live_groups_no_longer_give_and_never_raises_on
     assert_eq!(st["roleChanges"], json!([]), "{st}");
 
     // Never up: a.kumar is now in the admin group too — the sync leaves user; the next signed sign-in raises.
-    set_users(json!([zuser("a.kumar", 1, &[("3", "NOC"), ("1", "ElasticPro admins")]), zuser("b.singh", 1, &[]), zuser("d.new", 1, &[("9", "Zabbix users")])]));
+    set_users(json!([zuser("a.kumar", 1, &[("3", "NOC"), ("1", "ElasticPro admins")]), zuser("b.singh", 1, &[("9", "Zabbix users")]), zuser("d.new", 1, &[("9", "Zabbix users")])]));
     assert_eq!(c.zabbix_sync().await["roleChanges"], json!([]));
     let (_, _, kumar) = sign_in(&c, "a.kumar", 1, Some("User role"), &[("3", "NOC")]).await;
     assert_eq!(role_of(kumar.as_ref().unwrap()).await, json!("user"), "the signed claim says NOC only");
@@ -527,35 +569,175 @@ async fn a_sync_lowers_a_role_the_live_groups_no_longer_give_and_never_raises_on
     let (status, out, _) = sign_in(&c, "d.new", 1, Some("User role"), &[("3", "NOC")]).await;
     assert_eq!((status, out["role"].clone()), (200, json!("user")), "{out}");
     // The role lookup says no access, unpinned, while it holds.
-    set_users(json!([zuser("a.kumar", 1, &[("1", "ElasticPro admins")]), zuser("d.new", 1, &[])]));
+    set_users(json!([zuser("a.kumar", 1, &[("1", "ElasticPro admins")]), zuser("d.new", 1, &[("9", "Zabbix users")])]));
     c.zabbix_sync().await;
     let q = serde_json::to_vec(&json!({ "zabbix_user": "d.new", "zabbix_user_type": 1, "ts": now(), "nonce": nonce() })).unwrap();
     let reply = c.zabbix_sso_role_from(&q, &ZabbixSso::sign(SECRET.as_bytes(), &q), None);
     let body: Value = serde_json::from_slice(&reply.body).unwrap();
     assert_eq!((body["role"].clone(), body["no_access"].clone(), body["pinned"].clone()), (json!("none"), json!(true), json!(false)), "{body}");
 
-    // Absent from an otherwise good list (a sync token that sees only some users, or deleted in
-    // Zabbix): no evidence about their groups, so nothing moves — not even under unmapped "none".
+    // Absent from a PARTIAL list (the sync token is not a Super admin, so it sees only some
+    // users): no evidence about their groups, so the role stays — not even under unmapped "none"
+    // — but they are unverified, and after three such syncs their sessions end. A partial list
+    // judges nobody's groups either: a.kumar, listed in the admin group only, is not raised
+    // (never is) and would not be lowered.
+    *my_type.lock().unwrap() = 2;
     let (_, _, dnew) = sign_in(&c, "d.new", 1, Some("User role"), &[("3", "NOC")]).await;
     let dnew = dnew.unwrap();
-    set_users(json!([zuser("a.kumar", 1, &[("1", "ElasticPro admins")]), zuser("b.singh", 1, &[])]));
+    set_users(json!([zuser("a.kumar", 1, &[("1", "ElasticPro admins")]), zuser("b.singh", 1, &[("9", "Zabbix users")])]));
     let r = c.zabbix_sync().await;
-    assert_eq!(r["roleChanges"], json!([]), "absence is not evidence: {r}");
+    assert_eq!((r["roleChanges"].clone(), r["userListComplete"].clone(), r["unverifiable"].clone()), (json!([]), json!(false), json!(["d.new"])), "absence is not evidence: {r}");
     assert_eq!(role_of(&dnew).await, json!("user"), "d.new keeps the role and the session");
+    let zu = c.handle(json!({ "type": "ZABBIX_USERS", "session": a })).await;
+    let d = user(&zu, "d.new@zabbix");
+    assert_eq!((d["unverifiable"].clone(), d["absentSyncs"].clone(), d["inForce"].clone()), (json!(true), json!(1), json!("user")), "{d}");
+    c.zabbix_sync().await;
+    assert_eq!(role_of(&dnew).await, json!("user"), "two absences: still signed in");
+    let r = c.zabbix_sync().await;
+    assert_eq!(r["unverifiable"], json!(["d.new"]));
+    assert!(c.handle(json!({ "type": "WHOAMI", "session": dnew })).await["caller"].is_null(), "three absences: the session is gone");
+    let zu = c.handle(json!({ "type": "ZABBIX_USERS", "session": a })).await;
+    let d = user(&zu, "d.new@zabbix");
+    assert_eq!((d["inForce"].clone(), d["noAccess"].clone(), d["absentSyncs"].clone(), d["syncChange"]["to"].clone()), (json!("user"), json!(false), json!(3), json!("none")), "the role never moved (the syncChange is the earlier one): {d}");
+    let st = c.handle(json!({ "type": "ZABBIX_CLUSTERS", "session": a })).await;
+    assert_eq!((st["userListComplete"].clone(), st["unverifiable"].clone()), (json!(false), json!(["d.new"])), "{st}");
+    // A signed sign-in is Zabbix vouching for them: verified again.
+    let (_, _, _) = sign_in(&c, "d.new", 1, Some("User role"), &[("3", "NOC")]).await;
+    let zu = c.handle(json!({ "type": "ZABBIX_USERS", "session": a })).await;
+    assert_eq!(user(&zu, "d.new@zabbix")["absentSyncs"], json!(0));
+    // Being listed again verifies them too.
+    c.zabbix_sync().await;
+    set_users(json!([zuser("a.kumar", 1, &[("1", "ElasticPro admins")]), zuser("b.singh", 1, &[("9", "Zabbix users")]), zuser("d.new", 1, &[("3", "NOC")])]));
+    c.zabbix_sync().await;
+    let zu = c.handle(json!({ "type": "ZABBIX_USERS", "session": a })).await;
+    assert_eq!(user(&zu, "d.new@zabbix")["unverifiable"], json!(false));
+    // A partial list never lowers anybody: a.kumar is admin by the signed claim; the list says NOC only.
+    let (_, _, kumar) = sign_in(&c, "a.kumar", 1, Some("User role"), &[("1", "ElasticPro admins")]).await;
+    let kumar = kumar.unwrap();
+    set_users(json!([zuser("a.kumar", 1, &[("3", "NOC")]), zuser("b.singh", 1, &[("9", "Zabbix users")]), zuser("d.new", 1, &[("3", "NOC")])]));
+    let r = c.zabbix_sync().await;
+    assert_eq!((r["userListComplete"].clone(), r["roleChanges"].clone()), (json!(false), json!([])), "groups are not judged from a partial list: {r}");
+    assert_eq!(role_of(&kumar).await, json!("admin"));
+    // Nor a complete one in which nobody has a group (a token that cannot read them).
+    *my_type.lock().unwrap() = 3;
+    set_users(json!([zuser("a.kumar", 1, &[]), zuser("b.singh", 1, &[]), zuser("d.new", 1, &[])]));
+    let r = c.zabbix_sync().await;
+    assert_eq!(r["roleChanges"], json!([]), "no groups for anybody is no evidence: {r}");
+    assert_eq!(role_of(&kumar).await, json!("admin"));
+    // A single listed user with no groups is skipped, the others judged.
+    set_users(json!([zuser("a.kumar", 1, &[]), zuser("b.singh", 1, &[("9", "Zabbix users")]), zuser("d.new", 1, &[("3", "NOC")])]));
+    let r = c.zabbix_sync().await;
+    assert_eq!(r["roleChanges"], json!([]), "{r}");
+    assert_eq!(role_of(&kumar).await, json!("admin"), "a.kumar, listed with no groups, was not judged");
+    // Two Zabbix users whose names differ only in case fold to one account here: not judged.
+    set_users(json!([zuser("a.kumar", 1, &[("3", "NOC")]), zuser("A.Kumar", 1, &[("1", "ElasticPro admins")]), zuser("d.new", 1, &[("3", "NOC")])]));
+    let r = c.zabbix_sync().await;
+    assert_eq!((r["roleChanges"].clone(), r["ambiguous"].clone()), (json!([]), json!(["a.kumar"])), "{r}");
+    assert_eq!(role_of(&kumar).await, json!("admin"));
 
     // The last administrator able to sign in is never lowered: a.kumar is admin; the local Admin goes.
     let (_, _, kumar) = sign_in(&c, "a.kumar", 1, Some("User role"), &[("1", "ElasticPro admins")]).await;
     let kumar = kumar.unwrap();
     c.handle(json!({ "type": "USER_REMOVE", "session": kumar, "name": "Admin" })).await;
-    set_users(json!([zuser("a.kumar", 1, &[("3", "NOC")]), zuser("b.singh", 1, &[])]));
+    set_users(json!([zuser("a.kumar", 1, &[("3", "NOC")]), zuser("b.singh", 1, &[("9", "Zabbix users")]), zuser("d.new", 1, &[("3", "NOC")])]));
     let r = c.zabbix_sync().await;
     assert_eq!(r["roleChanges"], json!([]), "the last admin is kept: {r}");
     assert_eq!(role_of(&kumar).await, json!("admin"));
-    // With another admin pinned, the sync lowers a.kumar.
+    // Another admin pinned, but absent from a partial list: unverified, yet still counted as an
+    // administrator (the guards never discount what they cannot see — an unverified sole admin
+    // must not make every change refusable for ever). A partial list judges nobody anyway.
     c.handle(json!({ "type": "USER_SET_ROLE", "session": kumar, "name": "b.singh@zabbix", "role": "admin" })).await;
+    *my_type.lock().unwrap() = 2;
+    set_users(json!([zuser("a.kumar", 1, &[("3", "NOC")])]));
+    let r = c.zabbix_sync().await;
+    assert_eq!(r["roleChanges"], json!([]), "{r}");
+    assert!(r["unverifiable"].as_array().unwrap().contains(&json!("b.singh")), "{r}");
+    assert_eq!(role_of(&kumar).await, json!("admin"));
+    let p = c.handle(json!({ "type": "ZABBIX_ROLEMAP_PREVIEW", "session": kumar, "roleMap": { "groups": { "admin": ["Nobody"] } } })).await;
+    assert_eq!((p["adminsAfter"].clone(), p["lockout"].clone()), (json!(1), json!(false)), "the pinned admin counts although unverified: {p}");
+    let zu = c.handle(json!({ "type": "ZABBIX_USERS", "session": kumar })).await;
+    assert_eq!(user(&zu, "b.singh@zabbix")["unverifiable"], json!(true), "but the table says nobody could vouch for them");
+    // Complete again, b.singh listed: a.kumar is lowered — b.singh is the admin that remains.
+    *my_type.lock().unwrap() = 3;
+    set_users(json!([zuser("a.kumar", 1, &[("3", "NOC")]), zuser("b.singh", 1, &[("9", "Zabbix users")]), zuser("d.new", 1, &[("3", "NOC")])]));
     let r = c.zabbix_sync().await;
     assert_eq!((r["roleChanges"][0]["username"].clone(), r["roleChanges"][0]["to"].clone()), (json!("a.kumar"), json!("user")), "{r}");
     assert!(c.handle(json!({ "type": "WHOAMI", "session": kumar })).await["caller"].is_null());
+
+    std::env::remove_var("ELASTICPRO_ZABBIX_API_URL");
+    std::env::remove_var("ELASTICPRO_ZABBIX_API_TOKEN_FILE");
+}
+
+#[tokio::test]
+async fn a_complete_user_list_tells_a_deleted_person_from_an_unseen_one() {
+    let _turn = ENV.lock().await;
+    let users = Arc::new(Mutex::new(json!([])));
+    let my_type = Arc::new(Mutex::new(3_i64));
+    let zbx = fake_zabbix(users.clone(), my_type.clone()).await;
+    let dir = TempDir::new("roles-sync-complete");
+    std::fs::write(dir.join("zbx-token"), "zbx-token\n").unwrap();
+    std::env::set_var("ELASTICPRO_ZABBIX_API_URL", format!("{}/api_jsonrpc.php", zbx.url()));
+    std::env::set_var("ELASTICPRO_ZABBIX_API_TOKEN_FILE", dir.join("zbx-token"));
+    let (c, _) = hosted(&dir, &config(json!({})));
+    let a = admin(&c).await;
+    set_map(&c, &a, group_map()).await;
+    let set_users = |v: Value| *users.lock().unwrap() = v;
+    let (_, _, kumar) = sign_in(&c, "a.kumar", 1, Some("User role"), &[("3", "NOC"), ("2", "NOC leads")]).await;
+    let (_, _, singh) = sign_in(&c, "b.singh", 1, Some("User role"), &[("4", "Client A team")]).await;
+    c.handle(json!({ "type": "USER_SET_ROLE", "session": a, "name": "b.singh@zabbix", "role": "operator" })).await;
+    let (_, _, dnew) = sign_in(&c, "d.new", 1, Some("User role"), &[("3", "NOC")]).await;
+    let (kumar, singh, dnew) = (kumar.unwrap(), singh.unwrap(), dnew.unwrap());
+    let who = |s: &str| { let c = c.clone(); let s = s.to_string(); async move { c.handle(json!({ "type": "WHOAMI", "session": s })).await["caller"].clone() } };
+
+    // The sync token is a Super admin: the list is complete. d.new is gone from it: deleted.
+    set_users(json!([zuser("a.kumar", 1, &[("3", "NOC"), ("2", "NOC leads")]), zuser("b.singh", 1, &[("4", "Client A team")])]));
+    let r = c.zabbix_sync().await;
+    assert_eq!((r["userListComplete"].clone(), r["unverifiable"].clone(), r["deleted"].clone()), (json!(true), json!([]), json!(["d.new"])), "{r}");
+    let ch = r["roleChanges"].as_array().unwrap();
+    assert_eq!(ch.len(), 1, "{r}");
+    assert_eq!((ch[0]["username"].clone(), ch[0]["from"].clone(), ch[0]["to"].clone(), ch[0]["why"].clone()),
+               (json!("d.new"), json!("user"), json!("none"), json!("not in Zabbix any more")), "{r}");
+    assert!(who(&dnew).await.is_null(), "the deleted person's session is gone");
+    assert_eq!(who(&kumar).await["role"], json!("operator"));
+    assert_eq!(who(&singh).await["role"], json!("operator"));
+    let zu = c.handle(json!({ "type": "ZABBIX_USERS", "session": a })).await;
+    let d = user(&zu, "d.new@zabbix");
+    assert_eq!((d["inForce"].clone(), d["noAccess"].clone(), d["pinned"].clone(), d["unverifiable"].clone()), (json!("none"), json!(true), json!(false), json!(true)), "deleted: no access, not a pin, and nobody can vouch for them: {d}");
+    // Not a pin: were the person recreated in Zabbix, a signed sign-in with a mapped group gets in — and verifies them.
+    let (status, out, _) = sign_in(&c, "d.new", 1, Some("User role"), &[("3", "NOC")]).await;
+    assert_eq!((status, out["role"].clone()), (200, json!("user")), "{out}");
+    let zu = c.handle(json!({ "type": "ZABBIX_USERS", "session": a })).await;
+    assert_eq!(user(&zu, "d.new@zabbix")["unverifiable"], json!(false));
+    // A pinned person gone from a complete list: the sessions end, the pin stays, and they are
+    // not an able administrator any more.
+    set_users(json!([zuser("a.kumar", 1, &[("3", "NOC"), ("2", "NOC leads")]), zuser("d.new", 1, &[("3", "NOC")])]));
+    let r = c.zabbix_sync().await;
+    assert_eq!((r["roleChanges"].clone(), r["deleted"].clone()), (json!([]), json!(["b.singh"])), "a pin is never moved by a sync: {r}");
+    assert!(who(&singh).await.is_null(), "but the deleted pinned person's session is gone");
+    let zu = c.handle(json!({ "type": "ZABBIX_USERS", "session": a })).await;
+    let b = user(&zu, "b.singh@zabbix");
+    assert_eq!((b["inForce"].clone(), b["pinned"].clone(), b["unverifiable"].clone()), (json!("operator"), json!(true), json!(true)), "{b}");
+    // The last administrator able to sign in is kept even when a complete list says they are gone.
+    let (_, _, zed) = sign_in(&c, "zed", 3, Some("Super admin role"), &[("1", "ElasticPro admins")]).await;
+    let zed = zed.unwrap();
+    c.handle(json!({ "type": "USER_REMOVE", "session": zed, "name": "Admin" })).await;
+    set_users(json!([zuser("a.kumar", 1, &[("3", "NOC"), ("2", "NOC leads")]), zuser("d.new", 1, &[("3", "NOC")])]));
+    let r = c.zabbix_sync().await;
+    assert_eq!(r["roleChanges"], json!([]), "the last admin keeps the role: {r}");
+    assert!(r["deleted"].as_array().unwrap().contains(&json!("zed")), "listed as gone all the same (b.singh, still gone, is listed too): {r}");
+    assert!(c.handle(json!({ "type": "WHOAMI", "session": zed })).await["caller"].is_null(), "the sessions still end");
+    // The local Admin is gone, so only a fresh signed sign-in (Zabbix vouching again) can read the table.
+    let (_, out, zed) = sign_in(&c, "zed", 3, Some("Super admin role"), &[("1", "ElasticPro admins")]).await;
+    assert_eq!(out["role"], json!("admin"), "the role was kept: {out}");
+    let zu = c.handle(json!({ "type": "ZABBIX_USERS", "session": zed.unwrap() })).await;
+    assert_eq!((user(&zu, "zed@zabbix")["inForce"].clone(), user(&zu, "zed@zabbix")["unverifiable"].clone()), (json!("admin"), json!(false)));
+    // When the token's type cannot be read, the list counts as partial: nobody is deleted.
+    *my_type.lock().unwrap() = 0;
+    let (_, _, _) = sign_in(&c, "d.new", 1, Some("User role"), &[("3", "NOC")]).await;
+    set_users(json!([zuser("a.kumar", 1, &[("3", "NOC"), ("2", "NOC leads")])]));
+    let r = c.zabbix_sync().await;
+    assert_eq!((r["userListComplete"].clone(), r["roleChanges"].clone()), (json!(false), json!([])), "{r}");
+    assert!(r["unverifiable"].as_array().unwrap().iter().any(|u| u == "d.new"), "{r}");
 
     std::env::remove_var("ELASTICPRO_ZABBIX_API_URL");
     std::env::remove_var("ELASTICPRO_ZABBIX_API_TOKEN_FILE");

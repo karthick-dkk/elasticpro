@@ -567,6 +567,30 @@ impl Zabbix {
         })).collect())
     }
 
+    /// Whether the paired token's own user is of the Super admin type — the one type whose
+    /// `user.get` lists every user, so an absence from its answer means the user is gone. Asked
+    /// with `user.checkAuthentication {token}` (no bearer: the token is the parameter), which
+    /// names the user and, on 7.0, its `type`; when it does not, the user's own `role.type`
+    /// through `user.get` (everybody sees themselves). Any failure is an error, which the caller
+    /// takes as "not known to be complete". The token is in no error and no log.
+    pub async fn token_user_is_super_admin(&self) -> Result<bool, String> {
+        if self.token.is_empty() {
+            return Err("no API token".into());
+        }
+        let me = self.call_as("user.checkAuthentication", json!({ "token": self.token }), false).await.map_err(|e| e.message)?;
+        let ty = int_field(&me["type"]);
+        if ty > 0 {
+            return Ok(ty == 3);
+        }
+        let userid = me["userid"].as_str().filter(|s| !s.is_empty()).ok_or("user.checkAuthentication named no user")?;
+        let v = self.call("user.get", json!({ "userids": [userid], "output": ["userid"], "selectRole": ["type"] })).await?;
+        let ty = int_field(&v[0]["role"]["type"]);
+        if ty == 0 {
+            return Err("the token's own user type could not be read".into());
+        }
+        Ok(ty == 3)
+    }
+
     /// Every Zabbix user with their user groups and role — what the Zabbix users table and the
     /// role-map preview read, so a person's groups are as Zabbix has them now, not as they were
     /// at their last sign-in. Needs `user.get` on the paired token (modules 2.1.20; a site paired

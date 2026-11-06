@@ -87,12 +87,13 @@ impl GroupRef {
     pub const MAX_NAME: usize = 255;
     pub const MAX_ID: usize = 20;
 
-    /// Whether this map entry names that group of the claim: the same id when both have one,
-    /// else the same name, exactly (Zabbix compares group names case-sensitively, so a map
-    /// entry must too — "NOC" and "noc" can both exist).
+    /// Whether this map entry names that group of the claim: by id alone when both have one (a
+    /// group deleted and recreated under the same name is another group), else by name, exactly
+    /// (Zabbix compares group names case-sensitively, so a map entry must too — "NOC" and "noc"
+    /// can both exist).
     pub fn matches(&self, other: &GroupRef) -> bool {
         match (&self.id, &other.id) {
-            (Some(a), Some(b)) => a == b || self.name.trim() == other.name.trim(),
+            (Some(a), Some(b)) => a == b,
             _ => self.name.trim() == other.name.trim(),
         }
     }
@@ -1091,7 +1092,7 @@ mod tests {
     fn a_group_is_known_by_its_id_across_a_rename_and_by_name_without_one() {
         let m = group_map();
         assert_eq!(m.resolve_claim(None, 1, &[gid("7", "Zabbix admins (renamed)")]).role, Some(Role::Admin), "the id survives a rename");
-        assert_eq!(m.resolve_claim(None, 1, &[gid("99", "Zabbix administrators")]).role, Some(Role::Admin), "the name still matches a recreated group");
+        assert_eq!(m.resolve_claim(None, 1, &[gid("99", "Zabbix administrators")]).role, Some(Role::User), "both sides have an id and they differ: another group, whatever its name — the fallback decides");
         assert_eq!(m.resolve_claim(None, 1, &[gid("42", "NOC")]).role, Some(Role::User), "a map entry without an id matches by name");
         assert_eq!(m.resolve_claim(None, 1, &[gid("7", "Other")]).role, Some(Role::Admin));
         assert_eq!(m.resolve_claim(None, 1, &[g("Zabbix administrators")]).role, Some(Role::Admin), "a claim without ids (an older module) matches by name");

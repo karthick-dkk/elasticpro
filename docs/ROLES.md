@@ -38,16 +38,49 @@ role, or to no access (`noAccess: true` with `pinned: false`) — and the person
 Nothing is ever **raised** at a sync: a raise waits for the next signed sign-in, the only claim
 the core trusts upwards. The step fails closed towards *no change*: when `user.get` is refused
 (a token without it), fails, answers nothing, or names none of the accounts this core knows,
-nobody moves. Only people the answer actually lists are judged, on the groups it lists for them;
-a person absent from an otherwise good answer is left as they are (a sync token that is not of
-the Super admin type sees only some users, and absence is not evidence — a user deleted in
-Zabbix cannot sign in again anyway). Pinned people, No access by
-hand, blocked accounts and the last administrator able to sign in are never touched (the last
-admin case is logged: `role kept at sync`). A no access the sync imposed is lifted by the next
-signed sign-in that gives a role, by Reset, or by a role set by hand. Each lowering is audited
-(`role lowered at sync`, with from → to and why), kept on the account (`syncChange` in
-`ZABBIX_USERS` and `USER_LIST`) and listed in the sync's answer and in `ZABBIX_LINK_GET`
-(`roleChanges`, admin only). The worker never does this; only the core.
+nobody moves. People the answer lists are judged on the groups it lists for them. People it does
+**not** list depend on whether the list is complete — the sync token's own user is of the Super
+admin type (`user.checkAuthentication {token}`, else that user's `role.type`), the one type whose
+`user.get` sees every user; `userListComplete` in the sync's answer says which:
+
+- **Complete** and absent → deleted in Zabbix: their sessions end at once and, unless pinned,
+  they get no access (`noAccess: true`, `pinned: false`; a deleted user cannot produce a signed
+  sign-in, and were they recreated, one that gives a role lifts it). Recorded as a `syncChange`
+  with `why: "not in Zabbix any more"` and listed under `deleted`. A pinned person keeps the
+  pin but loses the sessions, and is marked unverifiable so they count as no administrator.
+  The absent are handled before the listed, so an administrator the list cannot vouch for is
+  discounted before any listed one is judged against the last-admin guard.
+- **Partial**, or not known to be complete, and absent → nothing is known about them: the role
+  is kept, they are listed as `unverifiable` (sync answer, `ZABBIX_CLUSTERS`, and
+  `unverifiable: true` / `absentSyncs` on their `ZABBIX_USERS` and `USER_LIST` rows), an
+  audit warning is logged, and after **`ABSENT_SYNCS_BEFORE_SIGN_OUT` = 3** consecutive absent
+  syncs their sessions end so the next request needs a fresh signed sign-in. Being listed by a
+  later sync, or signing in, verifies them again (`absentSyncs` back to 0).
+
+**What a list can and cannot say.** Groups are judged only from a **complete** list: a token
+that is not a Super admin is answered `usrgrps: []` for users it may not see, so a listed user
+with no groups is skipped (logged, never evidence), and an answer in which every listed account
+has no groups is unusable as a whole — nothing moves, nobody is marked. Zabbix user names are
+case-sensitive while ElasticPro accounts compare names without case; when two Zabbix users fold
+to one account the account is not judged (listed under `ambiguous`). The sync's answer and
+`ZABBIX_CLUSTERS` carry `userListComplete`, `roleChanges`, `deleted`, `unverifiable` and
+`ambiguous` (admin only).
+
+**Admin counting.** Conservative in both directions. An *unverifiable* account (absent from a
+partial list) still counts as an administrator for every last-admin guard — the map's
+(`adminsAfter`, `last_admin`), and `USER_SET_ROLE`/block/lock/No access/remove — so a sync token
+that sees only some users cannot make every change refusable for ever; `unverifiable` is shown,
+not acted on. A *deleted* account (absent from a complete list) is set to no access and so
+counts for nothing, unless it was the last administrator, in which case it is kept and logged
+(the site then needs a local administrator). Hand pins are never flipped by a sync.
+
+Pinned people, No access by hand, blocked accounts and the last administrator able to sign in
+are never lowered (the last admin case is logged: `role kept at sync`). A no access the sync
+imposed is lifted by the next signed sign-in that gives a role, by Reset, or by a role set by
+hand. Each lowering is audited (`role lowered at sync`, with from → to and why), kept on the
+account (`syncChange` in `ZABBIX_USERS` and `USER_LIST`) and listed in the sync's answer and in
+`ZABBIX_CLUSTERS` (`roleChanges`, `userListComplete`, `unverifiable`; admin only). The worker
+never does this; only the core.
 
 **Migration.** A config written before the group map has `names`/`types` only. It behaves
 exactly as before until an administrator saves the group table: `groups` are empty and
@@ -156,7 +189,8 @@ were never recorded cannot be judged and are left out.
     "inForce": "operator",                      // what their sessions have now ("none" = No access)
     "disabled": false, "locked": false,
     "lastSignIn": 1762345678, "factsAt": 1762345678,
-    "syncChange": null | { "at": 1762345678, "from": "operator", "to": "user", "why": "the highest of their Zabbix user groups now gives user (NOC)" } } ] }
+    "syncChange": null | { "at": 1762345678, "from": "operator", "to": "user", "why": "the highest of their Zabbix user groups now gives user (NOC)" },
+    "unverifiable": false, "absentSyncs": 0 } ] }
 ```
 
 - `groups[].role` is what the map gives that group (`null`: not mapped) — the page's "(not
@@ -201,9 +235,19 @@ edit") both carry the person's user groups with ids:
 
 `groups` (names) stays for the cluster scope and for cores older than 0.3.55, which ignore
 `user_groups`. A module older than 2.1.20 sends names only; the core then matches the group map
-by name. The role lookup's answer gains `no_access` (bool) and `role_source`; for a person set
-to No access it answers `role: "none"` **and** `zabbix_role: "none"`, so a module that takes an
-unknown role string as "no role" cannot fall through to the Zabbix user type.
+by name. The role lookup's answer gains `no_access` (bool) and `role_source` (`group` |
+`zabbixRole` | `unmapped`), and says **"none"** wherever it gives no role — `zabbix_role:
+"none"` when the map gives nothing (a role name mapped to none, or the unmapped rule), and
+`role: "none"` too for a person set to No access or one never seen whom the map refuses — never
+`null`, which the module takes as "the core did not say" and answers from the Zabbix user type.
+`map_role` carries the map's raw answer for the person as they are now (`"none"` or a role)
+beside the account's own `role` and `pinned`: modules 2.1.20 **deny when `map_role` is `"none"`
+and the role is not pinned**, even while `role` still carries what an earlier sign-in gave
+(a held role does not outlive the map), deny on `no_access`, treat a `null` beside a
+`role_source`/`map_role` as no role, and keep the user-type fallback only for a core too old to
+send either. A pinned role is the administrator's word and wins. Zabbix user names are case-sensitive;
+ElasticPro account names are compared without case, so `Alice` and `alice` in Zabbix are one
+account here (the sync refuses to judge such an account).
 
 The paired **ElasticPro sync** role needs `user.get` for the live `ZABBIX_USERS` read
 (`usergroup.get` it had already). A site paired before modules 2.1.20 gets it by pairing

@@ -156,6 +156,21 @@ struct ZbxPeople {
     error: Option<String>,
 }
 
+/// What one sync's role re-check found (`Core::lower_roles_at_sync`).
+#[derive(Default)]
+struct SyncRoles {
+    /// One entry per role lowered: the account's `SyncChange` plus `account` and `username`.
+    changes: Vec<Value>,
+    /// Whether Zabbix's user list named everybody (the token's user is a Super admin).
+    complete: bool,
+    /// Usernames a partial list did not name: role kept, not vouched for.
+    unverifiable: Vec<String>,
+    /// Usernames a complete list did not name: deleted in Zabbix; sessions ended.
+    deleted: Vec<String>,
+    /// Accounts more than one Zabbix user folds to (names differing only in case): not judged.
+    ambiguous: Vec<String>,
+}
+
 impl ZbxPeople {
     /// The people whose role in force would change under `draft` — at their next sign-in —
     /// against what they hold now. A pinned person (No access included) never changes: the pin
@@ -314,6 +329,10 @@ struct ZbxSync {
     /// Roles the last sync lowered from live group membership (`lower_roles_at_sync`), newest
     /// run only — the Zabbix page's recent changes; each account keeps its own last change.
     role_changes: Vec<Value>,
+    /// Whether the last sync's user list was complete (the token's user is a Super admin), and
+    /// the accounts it could not vouch for (absent from a partial list).
+    user_list_complete: bool,
+    unverifiable: Vec<String>,
     /// Each cluster template the last sync read, with how many hosts it held.
     templates: Vec<Value>,
     /// The type each Zabbix cluster's host tag `elasticpro:type` names, by cluster id —
@@ -2900,6 +2919,8 @@ impl Core {
                 "lastSignIn": a.last_login,
                 "factsAt": facts.map(|z| z.at),
                 "syncChange": a.last_sync_change.as_ref().map(auth::SyncChange::to_json),
+                "unverifiable": a.zabbix_unverified(),
+                "absentSyncs": a.absent_syncs,
             })
         }).collect();
         users.sort_by(|a, b| a["username"].as_str().cmp(&b["username"].as_str()));
@@ -3509,7 +3530,9 @@ impl Core {
         // What a first sign-in would make this person, under the map as it is now — from
         // their user groups when the module sent them (2.1.20), else from the Zabbix role.
         let res = self.zbx_options_now().role_map.resolve_claim(q.zabbix_role.as_deref(), q.zabbix_user_type, &q.group_refs());
-        let zabbix_role = res.role.map(|r| r.as_str());
+        // "none" when the map gives nothing — never null, which an older module takes as "the
+        // core did not say" and answers from the Zabbix user type.
+        let zabbix_role = res.role.map(|r| r.as_str()).unwrap_or("none");
         // Only an account a Zabbix sign-in made counts. A local account that happens to have
         // the namespaced name is somebody else's, exactly as the sign-in refuses to take it over.
         let acct = self.users.list().into_iter()
@@ -3518,14 +3541,20 @@ impl Core {
             // No access says so in every field the module could fall back on: `role` and
             // `zabbix_role` both "none", so an older module (which takes an unknown role
             // string as "no role") does not fall through to the Zabbix user type.
+            // `map_role` is the map's raw answer for this person as they are now, beside the
+            // account's own role: the module denies on map_role "none" unless the role is pinned,
+            // so a role held from an earlier sign-in cannot outlive the map that gave it.
             Some(a) if a.no_access => json!({ "ok": true, "account": a.name, "role": "none", "pinned": a.role_pinned, "no_access": true,
                                              "source": zbx_sso::SOURCE, "disabled": a.disabled, "locked": a.is_locked(auth::now()),
-                                             "zabbix_role": "none", "role_source": res.source.as_str() }),
+                                             "zabbix_role": "none", "map_role": zabbix_role, "role_source": res.source.as_str() }),
             Some(a) => json!({ "ok": true, "account": a.name, "role": a.role.as_str(), "pinned": a.role_pinned, "no_access": false,
                                "source": zbx_sso::SOURCE, "disabled": a.disabled, "locked": a.is_locked(auth::now()),
-                               "zabbix_role": zabbix_role, "role_source": res.source.as_str() }),
-            None => json!({ "ok": true, "account": name, "role": null, "pinned": false, "no_access": false, "source": null,
-                            "disabled": false, "locked": false, "zabbix_role": zabbix_role, "role_source": res.source.as_str() }),
+                               "zabbix_role": zabbix_role, "map_role": zabbix_role, "role_source": res.source.as_str() }),
+            // Never seen, and the map would refuse them: role "none" too, so every field the
+            // module could read says so.
+            None => json!({ "ok": true, "account": name, "role": if res.role.is_none() { json!("none") } else { Value::Null },
+                            "pinned": false, "no_access": false, "source": null,
+                            "disabled": false, "locked": false, "zabbix_role": zabbix_role, "map_role": zabbix_role, "role_source": res.source.as_str() }),
         };
         // Echoed so the module can check the answer is to the question it asked; the
         // signature over them is what makes the echo worth anything.
@@ -4575,8 +4604,13 @@ impl Core {
         }
         // Roles first, and only downwards: a person whose live groups give less than they
         // hold loses it now, not at their next sign-in (docs/ROLES.md, "At every sync").
-        let role_changes = if self.role == crate::worker::Role::Worker { vec![] } else { self.lower_roles_at_sync(&zapi, &opts.role_map).await };
-        self.zbx_sync.write().role_changes = role_changes.clone();
+        let roles = if self.role == crate::worker::Role::Worker { SyncRoles::default() } else { self.lower_roles_at_sync(&zapi, &opts.role_map, opts.scope_users_by_group).await };
+        {
+            let mut z = self.zbx_sync.write();
+            z.role_changes = roles.changes.clone();
+            z.user_list_complete = roles.complete;
+            z.unverifiable = roles.unverifiable.clone();
+        }
         let fetched = match zapi.clusters().await {
             Ok(x) => x,
             Err(e) => {
@@ -4718,7 +4752,9 @@ impl Core {
         tracing::info!(target: "audit", clusters = n, skipped = skipped.len(), problems,
                        credentials = if opts.use_elasticpro_credentials { "elasticpro" } else { "zabbix" }, "zabbix sync");
         json!({ "ok": true, "clusters": n, "inUse": in_use, "skipped": skipped, "problems": problems, "provisioned": provisioned, "templates": templates,
-                "roleChanges": role_changes, "credentials": if opts.use_elasticpro_credentials { "elasticpro" } else { "zabbix" } })
+                "roleChanges": roles.changes, "userListComplete": roles.complete, "unverifiable": roles.unverifiable, "deleted": roles.deleted,
+                "ambiguous": roles.ambiguous,
+                "credentials": if opts.use_elasticpro_credentials { "elasticpro" } else { "zabbix" } })
     }
 
     /// Demote-only re-evaluation of every unpinned Zabbix account from the groups Zabbix lists
@@ -4730,42 +4766,121 @@ impl Core {
     ///
     /// Fails closed towards *no change*: when `user.get` is refused (a token without it: modules
     /// before 2.1.20), fails, answers nothing, or names none of the accounts this core knows, no
-    /// role moves. Only accounts the answer actually lists are judged, on the groups it lists for
-    /// them; a person absent from an otherwise good answer is left as they are — a sync token
-    /// that is not of the Super admin type sees only some users, and absence is not evidence
-    /// (a user deleted in Zabbix cannot sign in again anyway). The last administrator able to
-    /// sign in is never lowered; that is logged instead. Returns one entry per account lowered.
-    async fn lower_roles_at_sync(&self, zapi: &Zabbix, map: &zbx_sso::RoleMap) -> Vec<Value> {
+    /// role moves. A person the answer lists is judged on the groups it lists. A person it does
+    /// not list depends on whether the list is **complete** — the token's own user is of the
+    /// Super admin type (`token_user_is_super_admin`), the one type that sees every user:
+    ///
+    /// * complete: they are gone from Zabbix. Their sessions end and, unless pinned, they get no
+    ///   access (not a pin; a deleted user cannot sign in again) — the last-admin guard still
+    ///   applies and is logged;
+    /// * partial, or not known to be complete: nothing is known about them. The role is kept,
+    ///   they are listed as *unverifiable* (`Account::absent_syncs`), and at
+    ///   `ABSENT_SYNCS_BEFORE_SIGN_OUT` consecutive absences their sessions end so the next
+    ///   request needs a fresh signed sign-in.
+    ///
+    /// The groups themselves are judged only from a complete list: a token that is not a Super
+    /// admin is answered `usrgrps: []` for users it may not see, and an empty group list is never
+    /// evidence — a listed user with no groups is skipped (and said so), and an answer in which
+    /// every listed user has none is unusable as a whole. Two Zabbix users whose names differ
+    /// only in case fold to one account here (accounts compare names case-insensitively, Zabbix
+    /// does not); such an account is not judged by whichever comes first — it is skipped.
+    async fn lower_roles_at_sync(&self, zapi: &Zabbix, map: &zbx_sso::RoleMap, scope_by_group: bool) -> SyncRoles {
+        let mut out = SyncRoles::default();
         let known: Vec<auth::Account> = self.users.list().into_iter()
-            .filter(|a| a.source.as_deref() == Some(zbx_sso::SOURCE) && !a.role_pinned && !a.no_access && !a.disabled)
+            .filter(|a| a.source.as_deref() == Some(zbx_sso::SOURCE) && !a.disabled)
             .collect();
         if known.is_empty() {
-            return vec![];
+            return out;
         }
         let users = match zapi.users().await {
             Ok(u) => u,
             Err(e) => {
                 tracing::debug!(error = %e, "roles not re-checked at sync: Zabbix's users could not be listed");
-                return vec![];
+                return out;
             }
         };
         let short = |a: &auth::Account| a.name.strip_suffix(zbx_sso::SUFFIX).unwrap_or(&a.name).to_string();
-        let seen = |name: &str| users.iter().find(|u| u.username.eq_ignore_ascii_case(name));
-        if users.is_empty() || !known.iter().any(|a| seen(&short(a)).is_some()) {
+        let matching = |name: &str| users.iter().filter(|u| u.username.eq_ignore_ascii_case(name)).collect::<Vec<_>>();
+        if users.is_empty() || !known.iter().any(|a| !matching(&short(a)).is_empty()) {
             // An empty or unfamiliar answer is not evidence that anybody lost a group.
             tracing::warn!(target: "audit", listed = users.len(), known = known.len(),
                            "roles not re-checked at sync: Zabbix's user list names none of the accounts this core knows");
-            return vec![];
+            return out;
         }
-        let now = auth::now();
-        let mut out = vec![];
+        let mut listed: Vec<(&auth::Account, &crate::zabbix_api::ZbxUser)> = vec![];
+        let mut absent: Vec<&auth::Account> = vec![];
         for a in &known {
+            match matching(&short(a)).as_slice() {
+                [] => absent.push(a),
+                [u] => listed.push((a, u)),
+                several => {
+                    tracing::warn!(target: "audit", subject = %a.name, zabbix_users = ?several.iter().map(|u| u.username.as_str()).collect::<Vec<_>>(),
+                                   "not judged at sync: more than one Zabbix user folds to this account (Zabbix user names are case-sensitive, accounts are not)");
+                    out.ambiguous.push(short(a));
+                }
+            }
+        }
+        if !listed.is_empty() && listed.iter().all(|(_, u)| u.groups.is_empty()) {
+            // A token that may not see the groups is answered none for everybody: not a list to act on.
+            tracing::warn!(target: "audit", listed = listed.len(), "roles not re-checked at sync: Zabbix lists no group for anybody this core knows (a token that cannot read user groups?)");
+            return out;
+        }
+        out.complete = match zapi.token_user_is_super_admin().await {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::debug!(error = %e, "the sync token's user type could not be read: the user list is taken as partial");
+                false
+            }
+        };
+        let now = auth::now();
+        // Three passes, because the last-admin guard counts administrators as they stand: first
+        // everybody the list names is confirmed (verified again), then everybody it does not
+        // name is marked or deleted, and only then are the listed judged against the count —
+        // else the order of the accounts could decide who is kept.
+        for (a, _) in &listed {
+            self.users.note_seen(&a.name);
+        }
+        for a in absent {
             let name = short(a);
             let old = a.zabbix.clone().unwrap_or_default();
-            let Some(u) = seen(&name) else {
-                tracing::debug!(subject = %a.name, "not in Zabbix's user list this sync: left as they are");
+            if !out.complete {
+                match self.users.note_absent(&a.name) {
+                    Ok(n) => {
+                        tracing::warn!(target: "audit", subject = %a.name, absent_syncs = n,
+                                       "not in Zabbix's user list, which is partial (the sync token is not a Super admin): role kept, unverified");
+                        if n >= auth::ABSENT_SYNCS_BEFORE_SIGN_OUT {
+                            self.sessions.end_all_for(&a.name);
+                            tracing::warn!(target: "audit", subject = %a.name, absent_syncs = n, "sessions ended: unverified for too many syncs; a fresh signed sign-in is needed");
+                        }
+                        out.unverifiable.push(name);
+                    }
+                    Err(e) => tracing::warn!(subject = %a.name, error = %e, "absence not recorded"),
+                }
                 continue;
-            };
+            }
+            // Gone from a list that names everybody: deleted in Zabbix. The sessions go whatever
+            // the pin says; the role, unless pinned, goes below (the last-admin guard first, with
+            // the person still counted — then they are marked, so they count no more).
+            self.sessions.end_all_for(&a.name);
+            let facts = auth::ZabbixFacts { user_type: old.user_type, role: old.role, groups: vec![], at: now };
+            let why = "not in Zabbix any more".to_string();
+            self.apply_lowering(&mut out, a, &name, None, facts, why, false, None);
+            if let Err(e) = self.users.note_absent(&a.name) {
+                tracing::warn!(subject = %a.name, error = %e, "absence not recorded");
+            }
+            out.deleted.push(name);
+        }
+        if !out.complete {
+            tracing::debug!("groups not judged at sync: the user list is partial (the sync token is not a Super admin)");
+            return out;
+        }
+        for (a, u) in listed {
+            let name = short(a);
+            if u.groups.is_empty() {
+                tracing::warn!(target: "audit", subject = %a.name, "not judged at sync: Zabbix lists no user group for them, which is never evidence");
+                continue;
+            }
+            let old = a.zabbix.clone().unwrap_or_default();
             let facts = auth::ZabbixFacts {
                 user_type: if u.user_type > 0 { u.user_type } else { old.user_type },
                 role: u.role.clone().or(old.role), groups: u.groups.clone(), at: now,
@@ -4777,23 +4892,36 @@ impl Core {
                 (zbx_sso::Source::ZabbixRole, None) => "in none of the mapped user groups, and their Zabbix role gives no role".to_string(),
                 (zbx_sso::Source::Unmapped, _) => "in none of the mapped user groups, and the map gives those users no access".to_string(),
             };
-            match self.users.lower_at_sync(&a.name, res.role, facts, why.clone()) {
-                Ok(Some(change)) => {
-                    self.sessions.end_all_for(&a.name);
-                    tracing::warn!(target: "audit", user = "zabbix-sync", subject = %a.name, from = %change.from, to = %change.to, why = %why, "role lowered at sync");
-                    let mut v = change.to_json();
-                    v["account"] = json!(a.name);
-                    v["username"] = json!(name);
-                    out.push(v);
-                }
-                Ok(None) => {}
-                Err(auth::AuthError::LastAdmin) => {
-                    tracing::warn!(target: "audit", subject = %a.name, why = %why, "role kept at sync: the last administrator able to sign in");
-                }
-                Err(e) => tracing::warn!(subject = %a.name, error = %e, "role not re-checked at sync"),
-            }
+            // The scope follows the live groups as a sign-in's would, for the role they end with.
+            let names: Vec<String> = u.groups.iter().map(|g| g.name.clone()).collect();
+            let ends_with = res.role.map_or(a.role, |t| t.min(a.role));
+            let scope = zbx_sso::scope_for(ends_with, &names, scope_by_group);
+            self.apply_lowering(&mut out, a, &name, res.role, facts, why, true, Some(scope));
         }
         out
+    }
+
+    /// One account's lowering at a sync (`UserStore::lower_at_sync`), with the sessions, the
+    /// audit line and the sync's record that go with it.
+    #[allow(clippy::too_many_arguments)]
+    fn apply_lowering(&self, out: &mut SyncRoles, a: &auth::Account, name: &str, target: Option<Role>, facts: auth::ZabbixFacts, why: String,
+                      confirmed: bool, scope: Option<Option<Vec<String>>>) {
+        match self.users.lower_at_sync(&a.name, target, facts, why.clone(), confirmed, scope.clone()) {
+            Ok(Some(change)) => {
+                self.sessions.end_all_for(&a.name);
+                tracing::warn!(target: "audit", user = "zabbix-sync", subject = %a.name, from = %change.from, to = %change.to, why = %why, "role lowered at sync");
+                let mut v = change.to_json();
+                v["account"] = json!(a.name);
+                v["username"] = json!(name);
+                out.changes.push(v);
+            }
+            // Nothing lowered: the open sessions still take the live scope, as after a sign-in.
+            Ok(None) => if let Some(s) = scope { self.sessions.refresh_for(&a.name, a.role, s) },
+            Err(auth::AuthError::LastAdmin) => {
+                tracing::warn!(target: "audit", subject = %a.name, why = %why, "role kept at sync: the last administrator able to sign in");
+            }
+            Err(e) => tracing::warn!(subject = %a.name, error = %e, "role not re-checked at sync"),
+        }
     }
 
     /// `zabbix.createHosts`: one Zabbix host per config cluster that Zabbix does not have.
@@ -4979,6 +5107,8 @@ impl Core {
             "canCreateHosts": self.zbx_writer.configured(),
             "provisioned": if admin { json!(z.provisioned) } else { json!([]) },
             "roleChanges": if admin { json!(z.role_changes) } else { json!([]) },
+            "userListComplete": z.user_list_complete,
+            "unverifiable": if admin { json!(z.unverifiable) } else { json!([]) },
             "clusters": clusters, "lastSync": z.last_ok,
             "error": if admin { json!(z.error) } else { Value::Null },
             "skipped": if admin { json!(z.skipped) } else { json!([]) },
