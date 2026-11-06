@@ -81,7 +81,7 @@ const REPORT_SECTIONS = ['overview', 'daily', 'hosts', 'capacity', 'measure', 'p
 // the way the shell draws them (hostedPage). A tab the bridge does not support (Data, Backup) is
 // left out of the frame by the page itself, which draws the first tab it does have.
 const CONFIG_TABS = ['clusters/clusters', 'clusters/creds', 'clusters/trust', 'zabbix/zabbix', 'alerts/triggers',
-  'requests/policy', 'reports/fields', 'reports/mail', 'reports/templates', 'play/play', 'system/defaults', 'system/file'];
+  'requests/policy', 'reports/fields', 'reports/mail', 'reports/templates', 'play/play', 'system/defaults', 'system/file', 'system/backup'];
 const HOSTED = new Set(['automation', 'requests', 'accounts']);
 const PAGES = ['alerts', 'overview', 'indices', 'shards', 'logs', 'console', 'snapshots',
   ...REPORT_SECTIONS.map((s) => `reports/${s}`), 'automation', 'requests', 'requests/health', 'accounts', 'settings',

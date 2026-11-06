@@ -57,6 +57,8 @@ import { isSupported as routingSupportedBy, storeStreamRows } from '../core/data
 import { createTracker } from '../ui/change-tracker.js';
 import { zabbixRolesCards, zabbixRolesSupported as rolesSupported, loadZabbixRoles, saveZabbixRoles, discardZabbixRoles, zabbixRolesChanges } from '../ui/zabbix-roles.js';
 import { parseHash } from '../reports/route.js';
+import { backupBody, backupHeaderActions, leaveBackup, loadBackup, saveBackupSchedule, discardBackupSchedule } from '../ui/backup-panel.js';
+import { BACKUP_INDEX } from '../core/backup-flow.js';
 import { extLink, REPO, ISSUES, AUTHOR_NAME } from '../ui/about.js';
 
 /** What each credential source the Zabbix sync reports is called (bridge.rs zabbix_sync). */
@@ -210,7 +212,7 @@ export function hostedPage(id, mod) {
   return {
     render(el) { arrive(el, id, mod); },
     onData() { if (hostedMod && hostedMod.onData) hostedMod.onData(); },
-    onLeave() { leaveHosted(); host = null; },
+    onLeave() { leaveHosted(); leaveBackup(); host = null; },
     onRoute() { if (hostedMod && hostedMod.onRoute) hostedMod.onRoute(); },
     onKey(e) { return !!(hostedMod && hostedMod.onKey && hostedMod.onKey(e)); },
     unsavedChanges,
@@ -227,6 +229,7 @@ function leaveHosted() {
 export function onLeave() {
   findText = '';
   leaveHosted();
+  leaveBackup();
   // #view is every page's: a loader answering after this (Zabbix, the policy, the sink, the
   // history store, a sync) must not paint Config-Management over the page now on screen.
   host = null;
@@ -306,6 +309,7 @@ export function onRoute() {
   if (currentApp !== 'settings') return;
   const r = routeOfRest(parseHash(location.hash).rest);
   if (!r.page || (r.page === route.page && (r.tab || '') === (route.tab || ''))) return;
+  if (route.page === 'system' && route.tab === 'backup') leaveBackup();
   route = { page: r.page, tab: r.tab };
   tracker.resetAll();
   discardDataRouting();
@@ -347,6 +351,7 @@ async function openTab(pageId, tabId, { field: f = null } = {}) {
     return;
   }
   if (same) { if (pendingField) focusField(); return; }
+  if (route.page === 'system' && route.tab === 'backup') leaveBackup();
   route = r;
   tracker.resetAll();
   discardDataRouting();
@@ -382,7 +387,9 @@ const TABS = {
   'system/defaults': { build: () => defaultsCard() },
   'system/file': { build: () => systemFileTab(), load: () => confirmCoreGuard(), actions: () => fileActions(),
     line: 'Which file is loaded, its earlier versions, and whether the write protection holds.' },
-  'system/backup': { build: () => backupTab() },
+  'system/backup': { build: () => backupTab(), load: () => loadBackup(() => draw(), () => tracker.reset('backup-schedule'), { clusters: `${clusters().length} cluster${clusters().length === 1 ? '' : 's'}` }),
+    actions: () => backupHeaderActions(),
+    line: 'Everything ElasticPro knows about your clusters in one file: keep it, move it to a new server, or load it back. Your Elasticsearch data is not in it; snapshots cover that.' },
 };
 
 /* The save path of every tracked form: what its Save button used to run. True when it saved. */
@@ -394,6 +401,7 @@ tracker.register('zabbix-roles', { save: () => saveZabbixRoles(() => draw()), di
 tracker.register('zabbix-opts', { save: () => saveZabbixOptions(), discard: () => draw() });
 tracker.register('schedule', { save: () => saveSink(), discard: () => draw() });
 tracker.register('routing', { save: () => saveDataRouting(), discard: () => { discardDataRouting(); draw(); } });
+tracker.register('backup-schedule', { save: () => saveBackupSchedule(), discard: () => { discardBackupSchedule(); draw(); } });
 tracker.register('history', { save: () => saveHistoryStore(), discard: () => { discardHistoryStore(); draw(); } });
 tracker.register('volume', { save: () => saveVolume(), discard: () => { vol.note = null; draw(); } });
 tracker.register('report-mail', { save: () => saveReportSchedule(), discard: () => draw() });
@@ -495,6 +503,7 @@ function pageMeta(id) {
 function runtimeIndex() {
   return [...SETTING_INDEX, ...(zabbixRolesSupported() && isAdminCaller() ? ZABBIX_ROLES_INDEX : []),
     ...(dataRoutingSupported() && isAdminCaller() ? DATA_ROUTING_INDEX : []),
+    ...(backupSupported() && isAdminCaller() ? BACKUP_INDEX : []),
     ...ALERT_RULES.map((r) => ['alerts', 'triggers', r.label, `al-on-${r.id}`, `alert rule ${r.id} ${r.level}`])];
 }
 
@@ -2600,13 +2609,9 @@ function backendTab() {
 
 /* -------------------------------------- System -------------------------------------- */
 
-/**
- * PHASE 2 HOOK — System › Backup & restore (board 9). The tab exists only when the core reports
- * backup support (backupSupported()); no core does yet, and this build does not draw the panel.
- */
+/** System › Backup & restore (ui/backup-panel.js): the tab exists only when PING says backup.supported. */
 function backupTab() {
-  return card('Backup & restore', 'reported by the core',
-    h('div.muted', 'This ElasticPro core reports backup support; this page does not draw it yet.'));
+  return backupBody();
 }
 
 /**
