@@ -28,11 +28,15 @@ pub enum Dataset {
     SnapshotsFull,
     Indices,
     Shards,
+    /// Which snapshots are running right now (`/_snapshot/_status`, no repository named):
+    /// one small request that answers only the snapshots in progress. For the dot on the
+    /// page menu's Snapshots entry; `SNAPSHOT_RUNNING` reads it from the cache.
+    SnapshotStatus,
 }
 
-pub const ALL: [Dataset; 9] = [
+pub const ALL: [Dataset; 10] = [
     Dataset::Health, Dataset::Nodes, Dataset::IlmErrors, Dataset::Policies, Dataset::IlmAssign,
-    Dataset::Snapshots, Dataset::SnapshotsFull, Dataset::Indices, Dataset::Shards,
+    Dataset::Snapshots, Dataset::SnapshotsFull, Dataset::Indices, Dataset::Shards, Dataset::SnapshotStatus,
 ];
 
 /// How long an unreachable cluster waits between health probes, before jitter.
@@ -91,6 +95,10 @@ pub fn snapshots_full_path(repo: &str) -> String {
 /// Where the repository names come from: the `repos` answer of the `policies` dataset.
 pub const REPOS_PATH: &str = "/_snapshot?local=false";
 
+/// The snapshots in progress, cluster-wide: `_snapshot/_status` with no repository returns
+/// only the running ones, and `filter_path` keeps the per-index detail out of the answer.
+pub const SNAPSHOT_STATUS_PATH: &str = "/_snapshot/_status?filter_path=snapshots.snapshot,snapshots.repository,snapshots.state,snapshots.stats.start_time_in_millis,snapshots.stats.time_in_millis,snapshots.shards_stats";
+
 impl Dataset {
     pub fn name(self) -> &'static str {
         match self {
@@ -103,6 +111,7 @@ impl Dataset {
             Dataset::SnapshotsFull => "snapshots_full",
             Dataset::Indices => "indices",
             Dataset::Shards => "shards",
+            Dataset::SnapshotStatus => "snapshot_status",
         }
     }
 
@@ -130,6 +139,7 @@ impl Dataset {
             Dataset::SnapshotsFull => 1800,
             Dataset::Indices => 600,
             Dataset::Shards => 300,
+            Dataset::SnapshotStatus => 300,
         }
     }
 
@@ -182,6 +192,9 @@ impl Dataset {
                 q("threadPools", "/_cat/thread_pool/search,write,get,bulk?format=json&h=node_name,name,active,queue,rejected,completed".into(), t),
                 q("pendingTasks", "/_cluster/pending_tasks".into(), t),
             ],
+            // Only the fields the dot needs: without `filter_path` the answer lists every
+            // index of every running snapshot, shard by shard.
+            Dataset::SnapshotStatus => vec![q("status", SNAPSHOT_STATUS_PATH.into(), t)],
             Dataset::Snapshots | Dataset::SnapshotsFull => vec![],
         }
     }
@@ -247,9 +260,9 @@ pub fn datasets_for_write(method: &str, path: &str) -> Vec<Dataset> {
     let segs: Vec<&str> = bare.split('/').filter(|s| !s.is_empty()).collect();
     let Some(first) = segs.first() else { return vec![] };
     match *first {
-        "_snapshot" => vec![Snapshots, SnapshotsFull, Policies],
+        "_snapshot" => vec![Snapshots, SnapshotsFull, Policies, SnapshotStatus],
         // Executing an SLM policy takes a snapshot, so the listings change too.
-        "_slm" if segs.last() == Some(&"_execute") => vec![Policies, IlmErrors, Snapshots, SnapshotsFull],
+        "_slm" if segs.last() == Some(&"_execute") => vec![Policies, IlmErrors, Snapshots, SnapshotsFull, SnapshotStatus],
         "_slm" | "_ilm" => vec![Policies, IlmErrors],
         "_cluster" => match segs.get(1).copied() {
             Some("settings") => vec![Policies],
@@ -323,6 +336,11 @@ mod tests {
         assert_eq!(Dataset::Policies.stale_after_ms(3600), 3 * 3_600_000);
         assert_eq!(Dataset::Indices.class(), Class::OnDemand);
         assert_eq!(Dataset::Snapshots.class(), Class::Background);
+        assert_eq!(Dataset::SnapshotStatus.class(), Class::Background, "polled for every cluster under Background, so the dot works on any page");
+        assert_eq!(Dataset::SnapshotStatus.default_interval_secs(180), 300);
+        assert_eq!(Dataset::SnapshotStatus.queries(None).len(), 1, "one request, cluster-wide");
+        assert!(Dataset::SnapshotStatus.queries(None)[0].path.starts_with("/_snapshot/_status?filter_path="));
+        assert!(!Dataset::SnapshotStatus.guest_may_read(), "names repositories: not a guest's");
         for d in ALL {
             assert_eq!(Dataset::parse(d.name()), Some(d));
         }
@@ -359,8 +377,8 @@ mod tests {
         use Dataset::*;
         assert_eq!(datasets_for_write("GET", "/_snapshot/r/s"), vec![]);
         assert_eq!(datasets_for_write("POST", "/logs-*/_search"), vec![], "a search is a read");
-        assert_eq!(datasets_for_write("PUT", "/_snapshot/r/s?wait_for_completion=false"), vec![Snapshots, SnapshotsFull, Policies]);
-        assert_eq!(datasets_for_write("POST", "/_slm/policy/daily/_execute"), vec![Policies, IlmErrors, Snapshots, SnapshotsFull]);
+        assert_eq!(datasets_for_write("PUT", "/_snapshot/r/s?wait_for_completion=false"), vec![Snapshots, SnapshotsFull, Policies, SnapshotStatus]);
+        assert_eq!(datasets_for_write("POST", "/_slm/policy/daily/_execute"), vec![Policies, IlmErrors, Snapshots, SnapshotsFull, SnapshotStatus]);
         assert_eq!(datasets_for_write("PUT", "/_slm/policy/daily"), vec![Policies, IlmErrors]);
         assert_eq!(datasets_for_write("PUT", "/_cluster/settings"), vec![Policies]);
         assert_eq!(datasets_for_write("POST", "/_cluster/reroute?retry_failed=true"), vec![Shards, Nodes]);

@@ -108,9 +108,13 @@ function historyBody() {
   return h('details.disc', { open: false },
     h('summary', `Earlier versions (${versions.length})`),
     h('div', { style: { paddingTop: '6px' } },
-      table(['Saved', 'File', { label: 'Size', num: true }, ''],
+      table(['Saved', 'By', 'What changed', 'File', { label: 'Size', num: true }, ''],
         versions.map((v) => h('tr',
           h('td', { title: new Date(v.saved_at * 1000).toISOString() }, ago(v.saved_at * 1000)),
+          // Recorded by the core when the version was saved (CONFIG_HISTORY saved_by /
+          // summary); a version from before the record existed shows "—", not a guess.
+          h('td', v.saved_by || '—'),
+          h('td', { style: { fontSize: '11.5px' }, title: v.summary || '' }, v.summary || '—'),
           h('td.mono', { style: { fontSize: '11.5px' } }, v.source),
           h('td.num', bytes(v.bytes)),
           h('td', { style: { textAlign: 'right' } },

@@ -13,7 +13,7 @@
 //! read back through the same API it was written by is a private key with an extra copy
 //! in every browser that asks.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 
@@ -170,12 +170,43 @@ impl KeyStore {
 #[derive(Serialize, Debug)]
 pub struct VersionInfo {
     pub id: String,
+    /// When this version was first written — the save that produced it, when that is known
+    /// (`saved_by` is set); else when it was set aside for the save that replaced it.
     pub saved_at: u64,
     pub bytes: u64,
     /// The file this was a version of, so a history built from more than one path still
     /// says which is which.
     pub source: String,
+    /// Who saved this version: an account name, or `system`/`local` when the core wrote it
+    /// without a person. `None` for a version kept before this was recorded — the UI shows
+    /// "—", not a guess.
+    pub saved_by: Option<String>,
+    /// What this version changed against the one before it (`config_diff::summarize`),
+    /// computed by the core when it was saved. `None` when not recorded.
+    pub summary: Option<String>,
 }
+
+/// The live file's own record: who saved what is on disk now, and what that save changed.
+/// The same facts the versions carry, for the row the UI marks "current".
+#[derive(Serialize, Debug, Clone, PartialEq)]
+pub struct CurrentInfo {
+    pub saved_at: u64,
+    pub saved_by: String,
+    pub summary: String,
+    pub source: String,
+}
+
+/// The sidecar kept next to a version (`<id>.meta.json`), and, as `current-<stem>.meta.json`,
+/// next to nothing: the record of the save that produced the live file. Private shape.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+struct SaveMeta {
+    saved_at: u64,
+    saved_by: String,
+    summary: String,
+}
+
+const META_SUFFIX: &str = ".meta.json";
+const CURRENT_PREFIX: &str = "current-";
 
 pub struct ConfigHistory {
     dir: Option<PathBuf>,
@@ -186,17 +217,42 @@ impl ConfigHistory {
         ConfigHistory { dir: data_dir.map(|d| d.join("config-history")) }
     }
 
-    /// Keep what is currently at `path` before something replaces it.
-    ///
-    /// Best effort on purpose: a history that cannot be written must never stop a save
-    /// the operator asked for. It returns whether it kept anything so the caller can say
-    /// so, and nothing more.
-    pub fn snapshot(&self, path: &Path) -> bool {
-        let Some(dir) = &self.dir else { return false };
-        let Ok(text) = std::fs::read_to_string(path) else { return false };
-        if text.trim().is_empty() {
+    fn stem_of(path: &Path) -> &str {
+        path.file_name().and_then(|s| s.to_str()).unwrap_or("config")
+    }
+
+    fn write_private(dest: &Path, text: &str) -> bool {
+        if std::fs::write(dest, text).is_err() {
             return false;
         }
+        // These are copies of a file that holds cluster credentials. Same protection as
+        // the original, or the history is the weak point.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(dest, std::fs::Permissions::from_mode(0o600));
+        }
+        true
+    }
+
+    fn read_meta(&self, name: &str) -> Option<SaveMeta> {
+        let dir = self.dir.as_ref()?;
+        serde_json::from_str(&std::fs::read_to_string(dir.join(name)).ok()?).ok()
+    }
+
+    /// Keep what is currently at `path` before something replaces it, and record who is
+    /// replacing it with `new_text` and what that changes.
+    ///
+    /// Best effort on purpose: a history that cannot be written must never stop a save
+    /// the operator asked for. It returns whether it kept a version so the caller can say
+    /// so, and nothing more.
+    ///
+    /// The version set aside is the content the *previous* save produced, so the record of
+    /// that save (kept as `current-<stem>.meta.json` since then) moves over to it, and a new
+    /// current record is written for this save. A version from before these records
+    /// existed simply has none.
+    pub fn keep(&self, path: &Path, new_text: &str, by: &str) -> bool {
+        let Some(dir) = &self.dir else { return false };
         if std::fs::create_dir_all(dir).is_err() {
             return false;
         }
@@ -205,21 +261,39 @@ impl ConfigHistory {
             use std::os::unix::fs::PermissionsExt;
             let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
         }
-        let stem = path.file_name().and_then(|s| s.to_str()).unwrap_or("config");
-        let id = format!("{}-{}", now(), stem);
-        let dest = dir.join(&id);
-        if std::fs::write(&dest, &text).is_err() {
-            return false;
-        }
-        // These are copies of a file that holds cluster credentials. Same protection as
-        // the original, or the history is the weak point.
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o600));
+        let stem = Self::stem_of(path);
+        let old_text = std::fs::read_to_string(path).unwrap_or_default();
+        let current_name = format!("{CURRENT_PREFIX}{stem}{META_SUFFIX}");
+        let kept = if old_text.trim().is_empty() {
+            false
+        } else {
+            let id = format!("{}-{}", now(), stem);
+            if Self::write_private(&dir.join(&id), &old_text) {
+                if let Some(prev) = self.read_meta(&current_name) {
+                    if let Ok(s) = serde_json::to_string(&prev) {
+                        Self::write_private(&dir.join(format!("{id}{META_SUFFIX}")), &s);
+                    }
+                }
+                true
+            } else {
+                false
+            }
+        };
+        let meta = SaveMeta {
+            saved_at: now(),
+            saved_by: by.trim().to_string(),
+            summary: crate::config_diff::summarize_text(&old_text, new_text),
+        };
+        if let Ok(s) = serde_json::to_string(&meta) {
+            Self::write_private(&dir.join(&current_name), &s);
         }
         self.trim();
-        true
+        kept
+    }
+
+    /// Whether a directory entry is a version (not a sidecar, not the current record).
+    fn is_version_name(name: &str) -> bool {
+        !name.ends_with(META_SUFFIX) && !name.starts_with(CURRENT_PREFIX) && !name.starts_with('.')
     }
 
     fn trim(&self) {
@@ -229,7 +303,7 @@ impl ConfigHistory {
             .flatten()
             .filter_map(|e| e.ok())
             .map(|e| e.path())
-            .filter(|p| p.is_file())
+            .filter(|p| p.is_file() && p.file_name().and_then(|n| n.to_str()).is_some_and(Self::is_version_name))
             .collect();
         if all.len() <= HISTORY_KEEP {
             return;
@@ -237,6 +311,9 @@ impl ConfigHistory {
         all.sort();
         for p in all.iter().take(all.len() - HISTORY_KEEP) {
             let _ = std::fs::remove_file(p);
+            if let Some(name) = p.file_name().and_then(|n| n.to_str()) {
+                let _ = std::fs::remove_file(dir.join(format!("{name}{META_SUFFIX}")));
+            }
         }
     }
 
@@ -249,16 +326,50 @@ impl ConfigHistory {
             .filter(|e| e.path().is_file())
             .filter_map(|e| {
                 let id = e.file_name().to_str()?.to_string();
+                if !Self::is_version_name(&id) {
+                    return None;
+                }
                 let (ts, source) = id.split_once('-')?;
+                let meta = self.read_meta(&format!("{id}{META_SUFFIX}"));
                 Some(VersionInfo {
-                    saved_at: ts.parse().ok()?,
+                    // The save that produced this content, when recorded; else when it was set aside.
+                    saved_at: meta.as_ref().map(|m| m.saved_at).unwrap_or(ts.parse().ok()?),
                     bytes: e.metadata().ok()?.len(),
                     source: source.to_string(),
+                    saved_by: meta.as_ref().map(|m| m.saved_by.clone()),
+                    summary: meta.map(|m| m.summary),
                     id,
                 })
             })
             .collect();
-        out.sort_by_key(|a| std::cmp::Reverse(a.saved_at));
+        // Newest first; the id (set-aside time, then name) breaks ties within one second.
+        out.sort_by(|a, b| b.saved_at.cmp(&a.saved_at).then_with(|| b.id.cmp(&a.id)));
+        out
+    }
+
+    /// The record of the save that produced the live file at `path`, when one was made.
+    pub fn current(&self, path: &Path) -> Option<CurrentInfo> {
+        let stem = Self::stem_of(path);
+        let m = self.read_meta(&format!("{CURRENT_PREFIX}{stem}{META_SUFFIX}"))?;
+        Some(CurrentInfo { saved_at: m.saved_at, saved_by: m.saved_by, summary: m.summary, source: stem.to_string() })
+    }
+
+    /// Every current record there is, whatever the file: for a CONFIG_HISTORY that does not
+    /// name a path. Newest first.
+    pub fn currents(&self) -> Vec<CurrentInfo> {
+        let Some(dir) = &self.dir else { return vec![] };
+        let mut out: Vec<CurrentInfo> = std::fs::read_dir(dir)
+            .into_iter()
+            .flatten()
+            .filter_map(|e| e.ok())
+            .filter_map(|e| {
+                let name = e.file_name().to_str()?.to_string();
+                let stem = name.strip_prefix(CURRENT_PREFIX)?.strip_suffix(META_SUFFIX)?;
+                let m = self.read_meta(&name)?;
+                Some(CurrentInfo { saved_at: m.saved_at, saved_by: m.saved_by, summary: m.summary, source: stem.to_string() })
+            })
+            .collect();
+        out.sort_by_key(|c| std::cmp::Reverse(c.saved_at));
         out
     }
 
@@ -339,11 +450,18 @@ mod tests {
         let h = ConfigHistory::new(Some(&t.0));
         let cfg = t.0.join("config_cluster.json");
 
+        // Nothing on disk yet: no version, but the save is recorded as the current one.
+        assert!(!h.keep(&cfg, r#"{"v":1}"#, "ann"));
         std::fs::write(&cfg, r#"{"v":1}"#).unwrap();
-        assert!(h.snapshot(&cfg));
+        let cur = h.current(&cfg).unwrap();
+        assert_eq!((cur.saved_by.as_str(), cur.summary.as_str()), ("ann", "v added"));
+
         std::thread::sleep(std::time::Duration::from_millis(1100));
+        assert!(h.keep(&cfg, r#"{"v":2}"#, "bob"));
         std::fs::write(&cfg, r#"{"v":2}"#).unwrap();
-        assert!(h.snapshot(&cfg));
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        assert!(h.keep(&cfg, r#"{"v":3}"#, "ann"));
+        std::fs::write(&cfg, r#"{"v":3}"#).unwrap();
 
         let list = h.list();
         assert_eq!(list.len(), 2);
@@ -351,32 +469,76 @@ mod tests {
         assert_eq!(h.read(&list[0].id).unwrap(), r#"{"v":2}"#);
         assert_eq!(h.read(&list[1].id).unwrap(), r#"{"v":1}"#);
         assert!(list.iter().all(|v| v.source == "config_cluster.json"));
+        // Each version carries the record of the save that produced it.
+        assert_eq!((list[0].saved_by.as_deref(), list[0].summary.as_deref()), (Some("bob"), Some("v 1 → 2")));
+        assert_eq!((list[1].saved_by.as_deref(), list[1].summary.as_deref()), (Some("ann"), Some("v added")));
+        let cur = h.current(&cfg).unwrap();
+        assert_eq!((cur.saved_by.as_str(), cur.summary.as_str()), ("ann", "v 2 → 3"));
+        assert_eq!(h.currents().len(), 1);
+    }
+
+    #[test]
+    fn a_version_from_before_the_records_has_none() {
+        let t = Tmp::new("old");
+        let h = ConfigHistory::new(Some(&t.0));
+        let dir = t.0.join("config-history");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("1700000000-c.json"), r#"{"v":0}"#).unwrap();
+        let list = h.list();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].saved_at, 1_700_000_000);
+        assert!(list[0].saved_by.is_none() && list[0].summary.is_none(), "unknown, not invented");
+        assert!(h.current(&t.0.join("c.json")).is_none());
+    }
+
+    #[test]
+    fn no_secret_reaches_a_record() {
+        let t = Tmp::new("secret");
+        let h = ConfigHistory::new(Some(&t.0));
+        let cfg = t.0.join("c.json");
+        std::fs::write(&cfg, r#"{"credentials":{"username":"e","password":"old-pw"}}"#).unwrap();
+        h.keep(&cfg, r#"{"credentials":{"username":"e","password":"new-pw"}}"#, "ann");
+        let cur = h.current(&cfg).unwrap();
+        assert_eq!(cur.summary, "Credentials · credential changed");
+        for f in std::fs::read_dir(t.0.join("config-history")).unwrap() {
+            let p = f.unwrap().path();
+            if p.to_string_lossy().ends_with(".meta.json") {
+                let s = std::fs::read_to_string(&p).unwrap();
+                assert!(!s.contains("old-pw") && !s.contains("new-pw"), "{s}");
+            }
+        }
     }
 
     #[test]
     fn an_empty_or_missing_file_is_not_worth_keeping() {
         let t = Tmp::new("empty");
         let h = ConfigHistory::new(Some(&t.0));
-        assert!(!h.snapshot(&t.0.join("nope.json")), "nothing to snapshot");
+        assert!(!h.keep(&t.0.join("nope.json"), "{}", "x"), "nothing to snapshot");
         let cfg = t.0.join("blank.json");
         std::fs::write(&cfg, "   \n").unwrap();
-        assert!(!h.snapshot(&cfg), "an empty file is not a version worth restoring");
+        assert!(!h.keep(&cfg, "{}", "x"), "an empty file is not a version worth restoring");
         assert!(h.list().is_empty());
     }
 
     #[test]
-    fn history_is_bounded() {
+    fn history_is_bounded_and_sidecars_go_with_their_versions() {
         let t = Tmp::new("trim");
         let h = ConfigHistory::new(Some(&t.0));
         let cfg = t.0.join("c.json");
-        // Written directly rather than through snapshot(), which is second-granular.
+        // Written directly rather than through keep(), which is second-granular.
         let dir = t.0.join("config-history");
         std::fs::create_dir_all(&dir).unwrap();
         for i in 0..(HISTORY_KEEP + 5) {
             std::fs::write(dir.join(format!("{:010}-c.json", 1_000_000 + i)), "{}").unwrap();
+            std::fs::write(dir.join(format!("{:010}-c.json.meta.json", 1_000_000 + i)),
+                           r#"{"saved_at":1,"saved_by":"x","summary":"s"}"#).unwrap();
         }
         std::fs::write(&cfg, "{}").unwrap();
-        h.snapshot(&cfg);
+        h.keep(&cfg, "{}", "x");
         assert!(h.list().len() <= HISTORY_KEEP, "history grew to {}", h.list().len());
+        let metas = std::fs::read_dir(&dir).unwrap().filter(|e| e.as_ref().unwrap().file_name().to_string_lossy().ends_with(".meta.json")).count();
+        // One sidecar per kept version at most, plus the current record.
+        assert!(metas <= HISTORY_KEEP + 1, "{metas} sidecars left");
+        assert!(!dir.join("0001000000-c.json.meta.json").exists(), "the oldest sidecar went with its version");
     }
 }

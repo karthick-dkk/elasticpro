@@ -232,6 +232,8 @@ pub struct Core {
     /// Each cluster's type, ULM bucket and whether SLM is expected (hosted). See `cluster_meta`.
     pub(crate) cluster_meta: crate::cluster_meta::ClusterMeta,
     saved_queries: crate::saved_queries::SavedQueries,
+    /// Each person's "Your settings": menu position, theme, what opens first. See `user_prefs`.
+    user_prefs: crate::user_prefs::UserPrefs,
     /// Reports › Planning's templates, shared by everyone (hosted: a file). See `plan_templates`.
     pub(crate) plan_templates: crate::plan_templates::PlanTemplates,
     /// The housekeeping scheduler's settings and what it last did. See `housekeeping`.
@@ -606,7 +608,7 @@ fn host_port(url: &str) -> Option<(String, String)> {
 }
 
 /// A config file's text, JSON or YAML, as a value.
-fn parse_config_text(text: &str) -> Result<Value, String> {
+pub(crate) fn parse_config_text(text: &str) -> Result<Value, String> {
     let t = text.trim_start_matches('\u{feff}');
     if t.trim_start().starts_with('{') {
         serde_json::from_str(t).map_err(|e| e.to_string())
@@ -798,6 +800,7 @@ impl Core {
                 data_dir_for_notify.as_ref().filter(|_| hosted).map(|d| d.join(crate::cluster_meta::META_FILE))),
             plan_templates: Core::plan_templates_store(edition, data_dir_for_notify.as_deref()),
             saved_queries: crate::saved_queries::SavedQueries::open(data_dir_for_notify.as_ref().map(|d| d.join("saved-queries.json"))),
+            user_prefs: crate::user_prefs::UserPrefs::open(data_dir_for_notify.as_ref().map(|d| d.join(crate::user_prefs::FILE))),
             notify: crate::notify::NotifyStore::open(data_dir_for_notify.map(|d| d.join("notifications.json"))),
             housekeeping: crate::housekeeping::Housekeeping::from_env(),
             zbx_push: parking_lot::Mutex::new(crate::zbx_push::PushStatus::default()),
@@ -1353,6 +1356,8 @@ impl Core {
             | "MAIL_SETTINGS_GET" | "MAIL_SETTINGS_SET" | "MAIL_TEST" | "REPORT_SCHEDULE_GET" | "REPORT_SCHEDULE_SET"
             | "REPORT_SEND_NOW" | "HOSTS_QUERY" => self.report_msg(&t, &msg, caller.as_ref()).await,
             "NOTIFY_PUT" | "NOTIFY_LIST" | "NOTIFY_CLEAR" => self.notify_msg(&t, &msg, caller.as_ref()),
+            "PREFS_GET" | "PREFS_SET" => self.prefs_msg(&t, &msg, caller.as_ref()),
+            "SNAPSHOT_RUNNING" => self.snapshot_running_msg(&msg, caller.as_ref()),
             // Play, the NOC wall display (docs/PLAY.md), and the shared acknowledgements.
             // PLAY_EXCHANGE needs the client's address and is answered in handle_reply_as_from_at;
             // reached here (no address known) a link limited to some addresses is refused.
@@ -1554,8 +1559,9 @@ impl Core {
                 }
                 let p = std::path::PathBuf::from(path);
                 // Keep what is there before replacing it. A config edited from the UI is
-                // edited by hand no longer, so an undo has to come from somewhere.
-                let kept = if t == "CONFIG_WRITE" { self.history.snapshot(&p) } else { false };
+                // edited by hand no longer, so an undo has to come from somewhere. The
+                // record of who saved and what changed is made here, from the two texts.
+                let kept = if t == "CONFIG_WRITE" { self.history.keep(&p, text, &self.saver_name(caller.as_ref())) } else { false };
                 match write_text_atomic(&p, text).await {
                     Ok(()) => json!({ "ok": true, "path": path, "bytes": text.len(), "keptVersion": kept }),
                     Err(message) => json!({ "ok": false, "message": message }),
@@ -2113,7 +2119,9 @@ impl Core {
 
     fn history_msg(self: &Arc<Self>, t: &str, msg: &Value) -> Value {
         match t {
-            "CONFIG_HISTORY" => json!({ "ok": true, "versions": self.history.list() }),
+            // `current`: the record of the save that produced the live file (who, what changed),
+            // when one was made — null for a file last written before this record existed, or by hand.
+            "CONFIG_HISTORY" => json!({ "ok": true, "versions": self.history.list(), "current": self.history.currents().first() }),
             "CONFIG_RESTORE" => {
                 let id = msg.get("id").and_then(|v| v.as_str()).unwrap_or("");
                 match self.history.read(id) {
@@ -2180,6 +2188,31 @@ impl Core {
         }
     }
 
+    /// PREFS_GET / PREFS_SET: "Your settings", always the caller's own (user_prefs.rs).
+    ///
+    /// The user is never read from the message, as for `notify_msg`: portable has one person,
+    /// "local"; every other edition has a caller by now, and a missing one is refused the
+    /// way the gate would refuse it. A display link never reaches here (not in PLAY_READS).
+    fn prefs_msg(&self, t: &str, msg: &Value, caller: Option<&Caller>) -> Value {
+        let user = match caller {
+            Some(c) => c.name.clone(),
+            None if !self.edition.uses_accounts() => "local".to_string(),
+            None => return json!({ "ok": false, "kind": "unauthenticated", "message": "sign in to continue" }),
+        };
+        let answer = |p: Option<crate::user_prefs::Prefs>| {
+            let p = p.unwrap_or_default();
+            json!({ "ok": true, "user": user, "prefs": p.public(), "updatedAt": p.updated_at, "choices": crate::user_prefs::choices() })
+        };
+        match t {
+            "PREFS_GET" => answer(self.user_prefs.get(&user)),
+            "PREFS_SET" => match self.user_prefs.set(&user, msg.get("prefs").unwrap_or(&Value::Null)) {
+                Ok(p) => answer(Some(p)),
+                Err(why) => json!({ "ok": false, "kind": "bad_message", "message": why }),
+            },
+            _ => json!({ "ok": false, "kind": "bad_message", "message": format!("unknown settings message {t}") }),
+        }
+    }
+
     /// Write out the notification history now rather than after its debounce.
     pub fn flush_notifications(&self) {
         self.notify.flush();
@@ -2202,6 +2235,11 @@ impl Core {
             // The bell keeps its history here as well as in the browser when this is true.
             "notifyStore": true,
             "notifyDays": self.notify.days(),
+            // "Your settings" are kept with the account here (PREFS_GET / PREFS_SET); a UI that
+            // sees no flag (an older core) keeps them in the browser.
+            "userPrefs": true,
+            // SNAPSHOT_RUNNING answers from the fleet cache's `snapshot_status` dataset.
+            "snapshotRunning": true,
             // Config → Zabbix can set up the connection (admins; ZABBIX_LINK_GET).
             "zabbixLink": self.edition == Edition::Hosted,
             // Play (docs/PLAY.md): display links exist on this server (hosted, not switched off
@@ -2454,12 +2492,25 @@ impl Core {
         Ok(LocatedConfig { path: path.to_path_buf(), yaml, raw })
     }
 
-    /// Write a changed config back where it was read from, keeping the version before it.
-    async fn store_config(&self, found: &LocatedConfig) -> Result<bool, Value> {
-        let kept = self.history.snapshot(&found.path);
-        write_text_atomic(&found.path, &serialize_config(&found.raw, found.yaml)).await
+    /// Write a changed config back where it was read from, keeping the version before it
+    /// and the record of who (`by`) saved this one and what it changed.
+    async fn store_config(&self, found: &LocatedConfig, by: &str) -> Result<bool, Value> {
+        let text = serialize_config(&found.raw, found.yaml);
+        let kept = self.history.keep(&found.path, &text, by);
+        write_text_atomic(&found.path, &text).await
             .map_err(|message| json!({ "ok": false, "kind": "io_error", "message": message }))?;
         Ok(kept)
+    }
+
+    /// Who a config save is recorded as: the caller's account, or — when no person asked —
+    /// `local` on the edition without accounts (one person, like `notify`) and `system`
+    /// where accounts exist but the core wrote on its own.
+    fn saver_name(&self, caller: Option<&Caller>) -> String {
+        match caller {
+            Some(c) => c.name.clone(),
+            None if !self.edition.uses_accounts() => "local".into(),
+            None => "system".into(),
+        }
     }
 
     /// `CLUSTER_SAVE`: one cluster added, changed or switched off by an operator (or an
@@ -2487,7 +2538,7 @@ impl Core {
                 return r.to_json();
             }
         };
-        let kept = match self.store_config(&found).await {
+        let kept = match self.store_config(&found, &self.saver_name(caller)).await {
             Ok(k) => k,
             Err(refusal) => return refusal,
         };
@@ -2515,7 +2566,7 @@ impl Core {
                 return r.to_json();
             }
         };
-        let kept = match self.store_config(&found).await {
+        let kept = match self.store_config(&found, &self.saver_name(caller)).await {
             Ok(k) => k,
             Err(refusal) => return refusal,
         };
@@ -2660,7 +2711,7 @@ impl Core {
         if let Some(z) = found.raw["zabbix"].as_object_mut() {
             z.remove("role_map");
         }
-        let kept = match self.store_config(&found).await {
+        let kept = match self.store_config(&found, &self.saver_name(caller)).await {
             Ok(k) => k,
             Err(refusal) => return refusal,
         };

@@ -616,6 +616,13 @@ pub fn required_role(msg_type: &str) -> Option<Role> {
         // The caller's own notification history. Not a write to any cluster, so no write
         // unlock; anybody signed in, and the handler only ever uses the caller's own name.
         "NOTIFY_PUT" | "NOTIFY_LIST" | "NOTIFY_CLEAR" => Some(Role::Guest),
+        // "Your settings" (user_prefs.rs): menu position, theme, what opens first — the
+        // caller's own, by the same rule; the handler never takes a user from the message.
+        "PREFS_GET" | "PREFS_SET" => Some(Role::Guest),
+        // Which snapshots are running now, from the `snapshot_status` dataset the poller
+        // holds: it names repositories and snapshots, the same facts as the Snapshots page,
+        // so a user's; narrowed to the caller's clusters in the handler. Never a fetch.
+        "SNAPSHOT_RUNNING" => Some(Role::User),
         // Silences: everyone who sees alerts may see why some are quiet; setting or removing
         // one changes what the whole team is shown, so an operator's (it is audited).
         "SILENCE_LIST" => Some(Role::User),

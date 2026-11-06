@@ -76,6 +76,15 @@ check "listing it needs a caller"      "$(post $B -d '{"type":"NOTIFY_LIST"}' | 
 check "adding to it needs a caller"    "$(post $B -d '{"type":"NOTIFY_PUT","message":"m","kind":"ok"}' | field kind)" "unauthenticated"
 check "clearing it needs a caller"     "$(post $B -d '{"type":"NOTIFY_CLEAR"}' | field kind)" "unauthenticated"
 
+# "Your settings" are kept with the account (user_prefs.rs) and the running-snapshot reading
+# comes from the fleet cache (SNAPSHOT_RUNNING). PING offers both before anyone signs in; every
+# message about them needs a caller (the signed-in checks are in the sessions section below).
+check "PING offers account settings"        "$(post $B -d '{"type":"PING"}' | field userPrefs)" "True"
+check "reading them needs a caller"         "$(post $B -d '{"type":"PREFS_GET"}' | field kind)" "unauthenticated"
+check "setting them needs a caller"         "$(post $B -d '{"type":"PREFS_SET","prefs":{"theme":"warm"}}' | field kind)" "unauthenticated"
+check "PING offers the running-snapshot reading" "$(post $B -d '{"type":"PING"}' | field snapshotRunning)" "True"
+check "reading it needs a caller"           "$(post $B -d '{"type":"SNAPSHOT_RUNNING"}' | field kind)" "unauthenticated"
+
 # The daily volume record (docs/VOLUME.md). Reading it names sources and field values, and
 # Refresh now sends searches, so every message needs a caller; the roles are proved in-process
 # (tests/volume.rs). Its timer logs "volume daily: timer started" without a user, so the
@@ -341,6 +350,21 @@ check "but not on another field"                       "$(as_jar "$JTV" -d "$(es
 check "nor with a wildcard"                            "$(as_jar "$JTV" -d "$(es_tv ',{"terms":{"src_hostname.keyword":["fw-*"]}}')" | gate)" "refused"
 check "nor with a second filter"                       "$(as_jar "$JTV" -d "$(es_tv ',{"terms":{"src_hostname.keyword":["a"]}},{"terms":{"src_hostname.keyword":["b"]}}')" | gate)" "refused"
 check "nor with a script"                              "$(as_jar "$JTV" -d "$(es_tv ',{"script":{"script":"true"}}')" | gate)" "refused"
+# "Your settings" (user_prefs.rs): kept with the account, the caller's own and nobody else's — a
+# guest's too; unset is null, not a default; a patch the store does not take saves nothing; a
+# display link has none. The running-snapshot reading: any signed-in user, not a display link,
+# and with no cluster it answers at once, empty — it never fetches.
+pref() { python3 -c 'import json,sys;p=json.load(sys.stdin)["prefs"];print(p["theme"],p["menu"],p["opensOn"])'; }
+check "unset is null, not a default"            "$(as_jar "$JUS" -d '{"type":"PREFS_GET"}' | pref)" "None None None"
+as_jar "$JUS" -d '{"type":"PREFS_SET","prefs":{"theme":"warm","menu":"left"}}' >/dev/null
+check "a setting is kept with the account"      "$(as_jar "$JUS" -d '{"type":"PREFS_GET"}' | pref)" "warm left None"
+check "another account has its own"             "$(as_jar "$JOP" -d '{"type":"PREFS_GET"}' | pref)" "None None None"
+check "a value the store does not take is refused" "$(as_jar "$JUS" -d '{"type":"PREFS_SET","prefs":{"theme":"neon","menu":"top"}}' | field kind)" "bad_message"
+check "and the refused patch saved nothing"     "$(as_jar "$JUS" -d '{"type":"PREFS_GET"}' | pref)" "warm left None"
+check "the message cannot name a user"          "$(as_jar "$JOP" -d '{"type":"PREFS_SET","prefs":{"user":"hc-user","theme":"dark"}}' | field kind)" "bad_message"
+check "a display link has no settings"          "$(as_jar "$JTV" -d '{"type":"PREFS_GET"}' | field kind)" "forbidden"
+check "a user reads the running-snapshot reading" "$(as_jar "$JUS" -d '{"type":"SNAPSHOT_RUNNING"}' | python3 -c 'import json,sys;d=json.load(sys.stdin);print(d["ok"], d["unknown"], d["running"])')" "True [] []"
+check "a display link does not"                 "$(as_jar "$JTV" -d '{"type":"SNAPSHOT_RUNNING"}' | field kind)" "forbidden"
 for _ in $(seq 1 25); do
   N=$(grep '"target":"audit"' "$OUT5" | grep '"user":"hc-op"' | grep -c 'emergency stop' || true); [ "$N" -ge 2 ] && break; sleep 0.2
 done

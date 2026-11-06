@@ -988,7 +988,10 @@ export async function refreshModule(module, { selected = true } = {}) {
 function moduleDatasets(module) {
   if (module === 'health') return ['health'];
   if (module === 'indices') return ['indices'];
-  if (module === 'snapshots') return ['policies', 'snapshots', ...(fleet.onDemand.has('snapshots_full') ? ['snapshots_full'] : [])];
+  // `snapshot_status` too: while this page is open (and for the watch window after) the core
+  // keeps the running-snapshot reading fresh, which is what the page menu's dot reads
+  // (core/snapshot-running.js) under a policy that fetches nothing on its own.
+  if (module === 'snapshots') return ['policies', 'snapshots', 'snapshot_status', ...(fleet.onDemand.has('snapshots_full') ? ['snapshots_full'] : [])];
   return backgroundNames();
 }
 
@@ -1210,9 +1213,10 @@ export const FLEET_KEYS = {
   ilm_errors: ['ilmErr'],
   policies: ['repos', 'slm', 'slmStatus', 'ilm', 'ilmPolicies', 'repoPaths', 'clusterSettings'],
   ilm_assign: ['ilmOfIndices'],
+  snapshot_status: ['status'],
 };
 /** What FLEET_STATE sends without `include` — until its own catalogue says otherwise. */
-const BACKGROUND = ['health', 'nodes', 'ilm_errors', 'policies', 'ilm_assign', 'snapshots'];
+const BACKGROUND = ['health', 'nodes', 'ilm_errors', 'policies', 'ilm_assign', 'snapshots', 'snapshot_status'];
 const ON_DEMAND = new Set(['snapshots_full', 'indices', 'shards']);
 /**
  * Whether the running policy fetches a dataset only while a page looks at it. The core's

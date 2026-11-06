@@ -19,6 +19,7 @@ export const DATASET_LABELS = {
   snapshots_full: 'Snapshots (full)',
   indices: 'Indices',
   shards: 'Shards & tasks',
+  snapshot_status: 'Snapshots (running now)',
 };
 export const DATASETS = Object.keys(DATASET_LABELS);
 
@@ -102,7 +103,7 @@ export function boundsUnder(gate) {
 export const FALLBACK_DEFAULTS = {
   mode: CLIENT_BASIS.mode,
   intervalsSec: { health: 180, nodes: 300, ilm_errors: 900, policies: 3600, ilm_assign: 3600,
-                  snapshots: 1800, snapshots_full: 1800, indices: 600, shards: 300 },
+                  snapshots: 1800, snapshots_full: 1800, indices: 600, shards: 300, snapshot_status: 300 },
   watchMinutes: 15,
   concurrency: { global: CLIENT_BASIS.global, perCluster: CLIENT_BASIS.perCluster, tunnel: 6 },
   timeoutMs: 30000,
