@@ -304,6 +304,9 @@ pub struct Core {
     pub(crate) play: crate::play::Play,
     /// The history store: its settings, its queue and what it last did. See `history_store`.
     pub(crate) history_store: crate::history_store::HistoryStore,
+    /// Where each kind of record is kept — built-in, a copy on the history store, or the store
+    /// only (Data › Backend). See `data_routing`.
+    pub(crate) data_routing: crate::data_routing::DataRouting,
     /// ElasticPro's own health: message timing, the self monitor and its ring, what the minute
     /// task holds. See `health` and `system_health`.
     pub(crate) health: crate::health::Health,
@@ -867,6 +870,7 @@ impl Core {
             volume: crate::volume::Volume::open(data_dir_for_volume.as_deref()),
             reports: crate::report::Reports::open(data_dir_for_reports.as_deref(), role.runs_batch()),
             play,
+            data_routing: crate::data_routing::DataRouting::open(data_dir_for_history.as_deref(), hosted, role.serves_people()),
             history_store: crate::history_store::HistoryStore::open(data_dir_for_history.as_deref(), hosted),
             health: crate::health::Health::with_role(data_dir_for_health.as_deref(), crate::health::Sampler::default(), role.as_str()),
             role,
@@ -1406,6 +1410,9 @@ impl Core {
                 self.history_store_msg(&t, &msg, caller.as_ref()).await
             }
             "HISTORY_QUERY" => self.history_query(&msg).await,
+            // Backend routing (docs/HISTORY.md "Backend routing"): where each kind of record goes.
+            "DATA_ROUTING_GET" | "DATA_ROUTING_SET" | "DATA_ROUTING_STATUS" => self.data_routing_msg(&t, &msg, caller.as_ref()).await,
+            "ALERT_EVENTS_PUT" => self.alert_events_put(&msg, caller.as_ref()),
             "HOUSEKEEPING_GET" | "HOUSEKEEPING_RUN" => self.housekeeping_msg(&t, &msg, caller.as_ref()).await,
             // The daily index-volume record (docs/VOLUME.md).
             "VOLUME_SETTINGS" | "VOLUME_FIELDS_CHECK" | "VOLUME_DAILY" | "VOLUME_MONTHLY" | "VOLUME_BREAKDOWN"
@@ -1470,6 +1477,7 @@ impl Core {
                 match self.silences.add(scope, target, minutes, msg.get("reason").and_then(Value::as_str).unwrap_or(""), &by) {
                     Ok(s) => {
                         tracing::info!(target: "audit", user = %by, scope = %s.scope, target = %s.target, until = ?s.until, reason = %s.reason, "alert silenced");
+                        self.routing_alert_event(self.silence_event("silenced", &s));
                         json!({ "ok": true, "silence": s, "silences": self.silences_visible(caller.as_ref()) })
                     }
                     Err(e) => json!({ "ok": false, "kind": "bad_request", "message": e }),
@@ -1485,6 +1493,7 @@ impl Core {
                     Some(_) => match self.silences.remove(id) {
                         Ok(Some(s)) => {
                             tracing::info!(target: "audit", user = %by, scope = %s.scope, target = %s.target, "alert silence removed");
+                            self.routing_alert_event(crate::data_routing::AlertEvent { by: by.clone(), at: crate::fleet::now_ms(), ..self.silence_event("unsilenced", &s) });
                             json!({ "ok": true, "silences": self.silences_visible(caller.as_ref()) })
                         }
                         Ok(None) => json!({ "ok": false, "kind": "not_found", "message": "no such silence (it may have ended)" }),
@@ -1847,6 +1856,19 @@ impl Core {
 
     /// Whether this caller may silence (or un-silence) that target: the cluster that owns it,
     /// resolved among every known cluster id (silences::cluster_of), must be one they see.
+    /// A silence as an alert event for the store (data_routing.rs): the key is the alert's for
+    /// an alert silence, the cluster id for a cluster-wide one.
+    fn silence_event(&self, event: &str, s: &crate::silences::Silence) -> crate::data_routing::AlertEvent {
+        let known: Vec<String> = self.all_specs().into_iter().map(|c| c.id).collect();
+        crate::data_routing::AlertEvent {
+            event: event.into(), key: s.target.clone(),
+            cluster_id: crate::silences::cluster_of(&s.scope, &s.target, &known).cloned(),
+            scope: Some(s.scope.clone()), target: Some(s.target.clone()),
+            by: s.by.clone(), at: s.at, reason: Some(s.reason.clone()).filter(|r| !r.is_empty()), until: s.until,
+            ..crate::data_routing::AlertEvent::default()
+        }
+    }
+
     fn silence_allowed(&self, caller: Option<&Caller>, scope: &str, target: &str) -> bool {
         let known: Vec<String> = self.all_specs().into_iter().map(|s| s.id).collect();
         let visible: std::collections::HashSet<String> = self.fleet_visible(caller).into_iter().collect();
@@ -2336,6 +2358,8 @@ impl Core {
             // by UI_PLAY_ENABLED), and acknowledgements are the team's (ACK_*), not the browser's.
             "playLinks": self.edition == Edition::Hosted && crate::play::settings::links_enabled(crate::settings::get()),
             "sharedAcks": self.edition == Edition::Hosted,
+            // Data › Backend (docs/HISTORY.md "Backend routing"): DATA_ROUTING_GET / SET / STATUS.
+            "dataRouting": { "supported": self.edition == Edition::Hosted },
         });
         if self.edition.uses_accounts() && caller.is_none() {
             return out;

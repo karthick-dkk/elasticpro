@@ -470,6 +470,12 @@ impl Core {
             }
         });
         tracing::info!(job = %id, status = ?status, "volume report: job ended");
+        // The reports record (data_routing.rs): the job as it ended, spooled for the writer's
+        // tick — off the runtime, since it may read the file to carry it.
+        if let Some(ended) = self.reports.queue.lock().get(&id).cloned() {
+            let core = self.clone();
+            tokio::task::spawn_blocking(move || core.routing_report_ended(&ended));
+        }
         self.report_pump();
     }
 

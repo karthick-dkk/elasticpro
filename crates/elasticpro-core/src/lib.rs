@@ -16,6 +16,7 @@ pub mod cluster_save;
 pub mod cluster_secrets;
 pub mod config_diff;
 pub mod crypto;
+pub mod data_routing;
 pub mod delay_sink;
 pub mod errors;
 pub mod fleet;

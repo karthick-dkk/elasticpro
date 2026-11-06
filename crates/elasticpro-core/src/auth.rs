@@ -610,6 +610,13 @@ pub fn required_role(msg_type: &str) -> Option<Role> {
         // volume record, so reading them back is a user's, on the clusters they see.
         "HISTORY_STORE_GET" | "HISTORY_STORE_SET" | "HISTORY_STORE_TEST" | "HISTORY_STORE_ARM" | "HISTORY_STORE_BACKFILL" => Some(Role::Admin),
         "HISTORY_QUERY" => Some(Role::User),
+        // Backend routing (data_routing.rs): where the core keeps what it records — reading it,
+        // its sizes and whether the store is reached, and changing it, are an admin's (a limited
+        // admin may read; SET is refused in the handler).
+        "DATA_ROUTING_GET" | "DATA_ROUTING_SET" | "DATA_ROUTING_STATUS" => Some(Role::Admin),
+        // A page reporting the alerts it saw raised and cleared, for the alerts record: a
+        // user's, on the clusters they see (the handler refuses a key naming another).
+        "ALERT_EVENTS_PUT" => Some(Role::User),
         // Housekeeping deletes files, sessions and cache entries: an administrator's to read
         // the state of and to run.
         "HOUSEKEEPING_GET" | "HOUSEKEEPING_RUN" => Some(Role::Admin),
