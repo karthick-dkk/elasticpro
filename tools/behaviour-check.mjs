@@ -401,13 +401,26 @@ await go('overview');
     ok(!!hp && !hp.querySelector('table.cl-hp-tbl'), 'expanded row: the indices list was fetched before it was opened');
     if (hp) {
       hp.dispatchEvent(new window.MouseEvent('mouseenter', { bubbles: false }));
-      const tbl = await waitFor(() => hp.querySelector('table.cl-hp-tbl'), 'expanded row: the yellow indices list after hover');
+      // The list is painted three times as its answers land (indices, then shards + explanation),
+      // each time as a new table in the popover, and the page may redraw the whole row on a push.
+      // So never hold the table found first: look it up again each time, and wait for the final
+      // state (no "…" placeholder left in it), not for the first draw.
+      const liveTbl = () => {
+        const pop = doc.querySelector('.cl-detail .cl-hp .cl-hp-pop') || hp.querySelector('.cl-hp-pop');
+        return pop && pop.querySelector('table.cl-hp-tbl');
+      };
+      const settled = () => {
+        const t = liveTbl();
+        const loading = t && [...t.querySelectorAll('.muted')].some((m) => m.textContent.trim() === '…');
+        return t && !loading && /replica/.test(txt(t)) ? t : null;
+      };
+      const first = await waitFor(liveTbl, 'expanded row: the yellow indices list after hover');
+      const tbl = first && await waitFor(settled, 'expanded row: the unassigned replica and its reason in the list', 10000);
       if (tbl) {
         const heads = [...tbl.querySelectorAll('th')].map(txt);
         ok(JSON.stringify(heads) === JSON.stringify(['Index', 'Health', 'Primaries', 'Replicas', 'Unassigned', 'Reason']), `expanded row: the list's columns are ${heads.join(' | ')}`);
         const rows = [...tbl.querySelectorAll(':scope > tbody > tr')];
         ok(rows.length >= 1 && rows.every((tr) => /Yellow/i.test(txt(tr.children[1]))), 'expanded row: the yellow list holds a non-yellow index');
-        await waitFor(() => /replica/.test(txt(tbl)), 'expanded row: the unassigned replica in the list');
         ok(/watermark|node left/i.test(txt(tbl)), `expanded row: the list gives no reason: ${txt(tbl)}`);
       }
       ok(!!hp.querySelector('.cl-hp-head a'), 'expanded row: the list has no "Open in Indices, health" link');
