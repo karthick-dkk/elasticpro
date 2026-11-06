@@ -24,6 +24,8 @@ A code keeps its meaning once it is given out. A new kind of failure gets a new 
 | EP-105 | `disabled` | The account is blocked. | An administrator unblocks it on the Accounts page. |
 | EP-106 | `locked` | The account is locked, by an administrator or after too many wrong passwords. | An administrator unlocks it on the Accounts page; a self-lock also clears after 15 minutes. |
 | EP-107 | `rate_limited` | Too many sign-in requests, or the last admin after 5 wrong passwords (one try per 30 seconds). | Wait, then try again. |
+| EP-108 | `no_access` | An administrator set this account's role by hand to **No access** (Config → Zabbix, Zabbix users). Refused at sign-in and on every request. | An administrator presses Reset or sets a role on that row. |
+| EP-109 | `last_admin` | The role map would leave nobody able to sign in as an administrator, so it was not saved. | Keep a group that makes an administrator who has signed in, pin a person as admin, or keep a local admin; a Zabbix admin who last signed in before 0.3.55 counts only after signing in again. |
 | EP-110 | `forbidden` | Your role may not do this, or the cluster is not one you may see. | Ask an administrator for the access. |
 | EP-111 | `no_token` | An API call without a token. | Send the token. |
 | EP-112 | `session_expired` | The session timed out. | Sign in again. |
@@ -88,7 +90,7 @@ A code keeps its meaning once it is given out. A new kind of failure gets a new 
 | EP-510 | `bad_signature` | Zabbix sign-in: the two sides' pairing secrets differ. Re-pair under Administration → ElasticPro. |
 | EP-511 | `stale` | Zabbix sign-in: the request is too old; the two hosts' clocks disagree. |
 | EP-512 | `replayed` | Zabbix sign-in: that request was already used. |
-| EP-513 | `no_role` | Zabbix sign-in: a Zabbix guest has no ElasticPro role. |
+| EP-513 | `no_role` | Zabbix sign-in: the role map gives this person no role — a Zabbix guest, a Zabbix role mapped to none, or (with the unmapped rule *no access*) a person in none of the mapped user groups; the message names their groups. |
 
 ## In the browser (6xx)
 

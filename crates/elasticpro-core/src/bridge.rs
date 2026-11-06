@@ -147,6 +147,44 @@ pub struct RoleReply {
     pub signature: Option<String>,
 }
 
+/// Every account with the Zabbix accounts' facts as current as they can be had
+/// (`Core::zabbix_people`): `from` says whether the groups came from Zabbix now (`"zabbix"`) or
+/// from each person's last sign-in (`"lastSignIn"`), and `error` why not Zabbix.
+struct ZbxPeople {
+    accounts: Vec<auth::Account>,
+    from: &'static str,
+    error: Option<String>,
+}
+
+impl ZbxPeople {
+    /// The people whose role in force would change under `draft` — at their next sign-in —
+    /// against what they hold now. A pinned person (No access included) never changes: the pin
+    /// wins over any map. A person whose groups were never recorded cannot be judged and is
+    /// left out (the table marks them `known: false`).
+    fn changes(&self, draft: &zbx_sso::RoleMap) -> Vec<Value> {
+        let mut out: Vec<Value> = self.accounts.iter()
+            .filter(|a| a.source.as_deref() == Some(zbx_sso::SOURCE) && !a.role_pinned && !a.no_access)
+            .filter_map(|a| {
+                let z = a.zabbix.as_ref()?;
+                let res = draft.resolve_claim(z.role.as_deref(), z.user_type, &z.groups);
+                let to = res.role.map(Role::as_str).unwrap_or("none");
+                (to != a.role_in_force()).then(|| json!({
+                    "account": a.name,
+                    "username": a.name.strip_suffix(zbx_sso::SUFFIX).unwrap_or(&a.name),
+                    "from": a.role_in_force(),
+                    "to": to,
+                    "source": res.source.as_str(),
+                    "via": match &res.source { zbx_sso::Source::Group(g) => Some(g.clone()), _ => None },
+                    "groups": z.groups.iter().map(|g| g.name.clone()).collect::<Vec<_>>(),
+                    "disabled": a.disabled,
+                }))
+            })
+            .collect();
+        out.sort_by(|a, b| a["username"].as_str().cmp(&b["username"].as_str()));
+        out
+    }
+}
+
 pub struct Core {
     pins: Arc<PinStore>,
     transport: Transport,
@@ -1004,7 +1042,7 @@ impl Core {
         self.users
             .list()
             .into_iter()
-            .find(|a| a.name.eq_ignore_ascii_case(name) && !a.disabled)
+            .find(|a| a.name.eq_ignore_ascii_case(name) && !a.disabled && !a.no_access)
             .map(|a| Caller { name: a.name, role: a.role, must_change: a.must_change, scope: a.scope, play: None })
     }
 
@@ -1072,13 +1110,14 @@ impl Core {
             }));
         }
 
-        // Blocked: refused everything from the moment an admin says so. The session is not
-        // ended — nobody is signed out — it just does nothing until it is unblocked.
-        if !matches!(t, "PING" | "WHOAMI" | "LOGOUT") && self.users.is_blocked(&c.name) {
-            return Err(json!({
-                "ok": false, "kind": "disabled",
-                "message": "this account is blocked — ask an ElasticPro administrator",
-            }));
+        // Blocked, or set to No access: refused everything from the moment an admin says so.
+        // A blocked session is not ended — nobody is signed out — it just does nothing until
+        // it is unblocked; No access ends the sessions too (users_msg), and this catches one
+        // that was resolved before it did.
+        if !matches!(t, "PING" | "WHOAMI" | "LOGOUT") {
+            if let Some(e) = self.users.refused(&c.name) {
+                return Err(json!({ "ok": false, "kind": e.kind(), "message": e.to_string() }));
+            }
         }
 
         let method = msg.get("method").and_then(|v| v.as_str()).unwrap_or("");
@@ -1576,7 +1615,8 @@ impl Core {
             }
             "CLUSTER_SAVE" => self.cluster_save(&msg, caller.as_ref()).await,
             "AUTOMATIONS_SAVE" => self.automations_save(&msg, caller.as_ref()).await,
-            "ZABBIX_ROLEMAP_GET" | "ZABBIX_ROLEMAP_SET" => self.rolemap_msg(&t, &msg, caller.as_ref()).await,
+            "ZABBIX_ROLEMAP_GET" | "ZABBIX_ROLEMAP_SET" | "ZABBIX_ROLEMAP_PREVIEW" => self.rolemap_msg(&t, &msg, caller.as_ref()).await,
+            "ZABBIX_USERS" => self.zabbix_users_msg().await,
             "SEAL" => {
                 let plain = msg.get("plain").and_then(|v| v.as_str()).unwrap_or("");
                 let master = msg.get("master").and_then(|v| v.as_str()).unwrap_or("");
@@ -1969,13 +2009,27 @@ impl Core {
                 out
             }
             "USER_SET_ROLE" => {
-                let role = match role_arg() {
-                    Ok(r) => r,
-                    Err(m) => return json!({ "ok": false, "kind": "bad_request", "message": m }),
+                // "none" (No access) is a target here too: a pin that refuses the person
+                // everywhere until Reset. Only for an account another system signs in.
+                let target = match msg.get("role").and_then(|v| v.as_str()).map(zbx_sso::RoleMap::parse_target) {
+                    Some(Ok(t)) => t,
+                    _ => return json!({ "ok": false, "kind": "bad_request", "message": "role must be admin, operator, user, guest or none (no access)" }),
                 };
-                if name.eq_ignore_ascii_case(&me) && role != Role::Admin {
+                if name.eq_ignore_ascii_case(&me) && target != Some(Role::Admin) {
                     return json!({ "ok": false, "kind": "bad_request", "message": "you cannot take away your own administrator role" });
                 }
+                let Some(role) = target else {
+                    let mut out = done(self.users.set_no_access(&name));
+                    if out["ok"] == json!(true) {
+                        // Refused from now on, so their open sessions go too: a tab that is
+                        // open stays open, and every request from it is refused (the gate).
+                        self.sessions.end_all_for(&name);
+                        tracing::info!(target: "audit", user = %me, subject = %name, role = "none", pinned = true, "role changed: no access");
+                        out["pinned"] = json!(true);
+                        out["noAccess"] = json!(true);
+                    }
+                    return out;
+                };
                 let mut out = done(self.users.set_role(&name, role));
                 if out["ok"] == json!(true) {
                     // Their open sessions take the new role now, without signing them out.
@@ -1985,6 +2039,7 @@ impl Core {
                     tracing::info!(target: "audit", user = %me, subject = %name, role = role.as_str(), pinned, "role changed");
                     // Said back so the page can tell the admin the change will stick.
                     out["pinned"] = json!(pinned);
+                    out["noAccess"] = json!(false);
                 }
                 out
             }
@@ -2693,25 +2748,50 @@ impl Core {
         self.persist_prime(&json!({ "readOnly": read_only, "clusters": clusters, "jumpHosts": jumps, "sharedAuthHeader": shared }), true);
     }
 
-    /// `ZABBIX_ROLEMAP_GET` / `ZABBIX_ROLEMAP_SET`: which Zabbix role signs in as which
-    /// ElasticPro role. Kept in the server's config file (`zabbix.roleMap`), read at every
-    /// sign-in, so a change applies to the next one; pinned accounts keep their pin.
+    /// `ZABBIX_ROLEMAP_GET` / `ZABBIX_ROLEMAP_SET` / `ZABBIX_ROLEMAP_PREVIEW`: which Zabbix user
+    /// group (or, for people in none, which Zabbix role) signs in as which ElasticPro role.
+    /// Kept in the server's config file (`zabbix.roleMap`), read at every sign-in, so a change
+    /// applies to the next one; pinned accounts keep their pin. docs/ROLES.md is the contract.
+    ///
+    /// A map that would leave nobody able to sign in as an administrator is refused
+    /// (`last_admin`): local admins, pinned Zabbix admins and Zabbix accounts the new map makes
+    /// admin — from their groups as Zabbix lists them now when it can be asked, else as their
+    /// last sign-in said — are counted; zero refuses. The preview says the same count without
+    /// writing anything.
     async fn rolemap_msg(self: &Arc<Self>, t: &str, msg: &Value, caller: Option<&Caller>) -> Value {
         let found = self.locate_config().await;
+        let current = match &found {
+            Ok(c) => ZbxOptions::from_config(&c.raw).role_map,
+            Err(_) => zbx_sso::RoleMap::default(),
+        };
         if t == "ZABBIX_ROLEMAP_GET" {
-            let (map, file) = match &found {
-                Ok(c) => (ZbxOptions::from_config(&c.raw).role_map, true),
-                Err(_) => (zbx_sso::RoleMap::default(), false),
-            };
             let zabbix_roles = self.zabbix_roles().await;
-            return json!({ "ok": true, "roleMap": map.to_json(), "defaults": zbx_sso::RoleMap::default().to_json(),
-                           "file": file, "zabbixRoles": zabbix_roles.as_ref().ok(), "zabbixError": zabbix_roles.err() });
+            let zabbix_groups = self.zabbix_groups().await;
+            return json!({ "ok": true, "roleMap": current.to_json(), "defaults": zbx_sso::RoleMap::default().to_json(),
+                           "file": found.is_ok(), "groupMapSaved": current.group_map_saved(),
+                           "zabbixRoles": zabbix_roles.as_ref().ok(), "zabbixError": zabbix_roles.err(),
+                           "zabbixGroups": zabbix_groups.as_ref().ok(), "zabbixGroupsError": zabbix_groups.err() });
         }
-        let map = match msg.get("roleMap").map(zbx_sso::RoleMap::from_message) {
+        let map = match msg.get("roleMap").map(|v| zbx_sso::RoleMap::from_message(v, &current)) {
             Some(Ok(m)) => m,
             Some(Err(e)) => return json!({ "ok": false, "kind": "bad_message", "message": e }),
-            None => return json!({ "ok": false, "kind": "bad_message", "message": "ZABBIX_ROLEMAP_SET needs a roleMap" }),
+            None => return json!({ "ok": false, "kind": "bad_message", "message": format!("{t} needs a roleMap") }),
         };
+        let people = self.zabbix_people().await;
+        let admins_after = map.admins_able(&people.accounts);
+        if t == "ZABBIX_ROLEMAP_PREVIEW" {
+            let changes = people.changes(&map);
+            return json!({ "ok": true, "roleMap": map.to_json(), "changes": changes, "adminsAfter": admins_after,
+                           "lockout": admins_after == 0, "groupsFrom": people.from, "zabbixError": people.error });
+        }
+        if admins_after == 0 {
+            tracing::warn!(target: "audit", user = %caller.map(|c| c.name.as_str()).unwrap_or("-"), "zabbix role map refused: it would leave no administrator able to sign in");
+            return json!({ "ok": false, "kind": "last_admin", "adminsAfter": 0,
+                           "message": "this map would leave nobody able to sign in as an administrator — keep a group that makes an \
+                                       administrator (one somebody who has signed in is in), set a person's role to admin by hand, or \
+                                       keep a local administrator account. A Zabbix administrator who last signed in before this \
+                                       version is not counted until they sign in again." });
+        }
         let mut found = match found {
             Ok(c) => c,
             Err(refusal) => return refusal,
@@ -2730,8 +2810,8 @@ impl Core {
             Ok(k) => k,
             Err(refusal) => return refusal,
         };
-        tracing::info!(target: "audit", user = %caller.map(|c| c.name.as_str()).unwrap_or("-"), map = %map.to_json(), "zabbix role map changed");
-        json!({ "ok": true, "roleMap": map.to_json(), "keptVersion": kept })
+        tracing::info!(target: "audit", user = %caller.map(|c| c.name.as_str()).unwrap_or("-"), map = %map.to_json(), admins_after, "zabbix role map changed");
+        json!({ "ok": true, "roleMap": map.to_json(), "keptVersion": kept, "adminsAfter": admins_after, "groupMapSaved": map.group_map_saved() })
     }
 
     /// The roles Zabbix has, for the Accounts page to offer by name. Best effort: no
@@ -2742,6 +2822,86 @@ impl Core {
             return Err("the Zabbix API is not paired (Config → Zabbix), so the role names cannot be listed; type them".into());
         }
         zapi.roles().await
+    }
+
+    /// The user groups Zabbix has, for the role map's "+ Add group". Best effort, like the roles.
+    async fn zabbix_groups(&self) -> Result<Vec<Value>, String> {
+        let zapi = self.zbx_api();
+        if !zapi.configured() {
+            return Err("the Zabbix API is not paired (Config → Zabbix), so the user groups cannot be listed; type them".into());
+        }
+        zapi.user_groups().await
+    }
+
+    /// Every account, with each Zabbix account's groups, role and type as Zabbix lists them now
+    /// (`user.get`) laid over what its last sign-in recorded — or only the latter when Zabbix
+    /// cannot be asked (not paired, down, or the paired token lacks `user.get`: modules before
+    /// 2.1.20). One fact source for the Zabbix users table, the preview and the last-admin rule,
+    /// so all three answer about the same people.
+    async fn zabbix_people(&self) -> ZbxPeople {
+        let mut accounts = self.users.list();
+        let zapi = self.zbx_api();
+        let live = if zapi.configured() {
+            zapi.users().await
+        } else {
+            Err("the Zabbix API is not paired (Config → Zabbix): groups are as each person's last sign-in said".to_string())
+        };
+        match live {
+            Ok(users) => {
+                let now = auth::now();
+                for a in accounts.iter_mut().filter(|a| a.source.as_deref() == Some(zbx_sso::SOURCE)) {
+                    let Some(short) = a.name.strip_suffix(zbx_sso::SUFFIX) else { continue };
+                    if let Some(u) = users.iter().find(|u| u.username.eq_ignore_ascii_case(short)) {
+                        let old = a.zabbix.take().unwrap_or_default();
+                        a.zabbix = Some(auth::ZabbixFacts {
+                            user_type: if u.user_type > 0 { u.user_type } else { old.user_type },
+                            role: u.role.clone().or(old.role),
+                            groups: u.groups.clone(),
+                            at: now,
+                        });
+                    }
+                }
+                ZbxPeople { accounts, from: "zabbix", error: None }
+            }
+            Err(e) => ZbxPeople { accounts, from: "lastSignIn", error: Some(e) },
+        }
+    }
+
+    /// `ZABBIX_USERS`: each person who signed in from Zabbix — their user groups (with the role
+    /// the map gives each), the role the groups give them (and which group gave it), the role
+    /// set by hand, the role in force, last sign-in. Admin only; nothing is written.
+    async fn zabbix_users_msg(self: &Arc<Self>) -> Value {
+        let map = self.zbx_options_now().role_map;
+        let people = self.zabbix_people().await;
+        let mut users: Vec<Value> = people.accounts.iter().filter(|a| a.source.as_deref() == Some(zbx_sso::SOURCE)).map(|a| {
+            let facts = a.zabbix.as_ref();
+            let from_groups = facts.map(|z| map.resolve_claim(z.role.as_deref(), z.user_type, &z.groups));
+            let groups: Vec<Value> = facts.map(|z| z.groups.iter().map(|g| json!({
+                "id": g.id, "name": g.name, "role": map.role_of_group(g).map(Role::as_str),
+            })).collect()).unwrap_or_default();
+            let by_hand = a.role_pinned.then(|| a.role_in_force());
+            json!({
+                "account": a.name,
+                "username": a.name.strip_suffix(zbx_sso::SUFFIX).unwrap_or(&a.name),
+                "known": facts.is_some(),
+                "groups": groups,
+                "zabbixUserType": facts.map(|z| z.user_type),
+                "zabbixRole": facts.and_then(|z| z.role.clone()),
+                "fromGroups": from_groups.as_ref().map(zbx_sso::Resolution::to_json),
+                "byHand": by_hand,
+                "pinned": a.role_pinned,
+                "noAccess": a.no_access,
+                "inForce": a.role_in_force(),
+                "disabled": a.disabled,
+                "locked": a.is_locked(auth::now()),
+                "lastSignIn": a.last_login,
+                "factsAt": facts.map(|z| z.at),
+            })
+        }).collect();
+        users.sort_by(|a, b| a["username"].as_str().cmp(&b["username"].as_str()));
+        let by_hand = users.iter().filter(|u| u["pinned"] == json!(true)).count();
+        json!({ "ok": true, "users": users, "total": users.len(), "byHand": by_hand, "groupMapSaved": map.group_map_saved(),
+                "groupsFrom": people.from, "zabbixError": people.error })
     }
 
     /// The `zabbix:` options as the server's config file (`server_config_path`) says them
@@ -2840,7 +3000,8 @@ impl Core {
         let refused = json!({ "ok": false, "kind": "bad_credentials",
                               "message": "that sign-in link has expired or was already used — open ElasticPro from Zabbix again" });
         let Some(name) = self.zbx.redeem(code) else { return refused };
-        let Some(acct) = self.users.list().into_iter().find(|a| a.name == name && !a.disabled) else { return refused };
+        // Blocked or set to No access between the code and its use: no session.
+        let Some(acct) = self.users.list().into_iter().find(|a| a.name == name && !a.disabled && !a.no_access) else { return refused };
         // The frame keeps this token in page memory, so a reload orphans it: marked, so
         // housekeeping can tell it from a session somebody will come back to.
         let token = self.sessions.begin_frame(&acct);
@@ -2896,14 +3057,30 @@ impl Core {
             }
         };
         let opts = self.zbx_options_now();
-        let Some(role) = opts.role_map.resolve(claim.zabbix_role.as_deref(), claim.zabbix_user_type) else {
-            let e = zbx_sso::SsoError::NoRole(zbx_sso::RoleMap::describe(claim.zabbix_role.as_deref(), claim.zabbix_user_type));
-            tracing::warn!(target: "audit", user = %claim.username, reason = %e, "zabbix sign-in refused");
-            return (403, json!({ "ok": false, "kind": "no_role", "message": e.to_string() }));
+        let groups = claim.group_refs();
+        let res = opts.role_map.resolve_claim(claim.zabbix_role.as_deref(), claim.zabbix_user_type, &groups);
+        let name = zbx_sso::account_name(&claim.username);
+        let facts = auth::ZabbixFacts { user_type: claim.zabbix_user_type, role: claim.zabbix_role.clone(), groups: groups.clone(), at: auth::now() };
+        // A role an admin pinned here wins over the map — including a map that would refuse
+        // this person; a No access pin is refused by the store below, whatever the map says.
+        let pinned = self.users.list().into_iter()
+            .find(|a| a.name.eq_ignore_ascii_case(&name) && a.source.as_deref() == Some(zbx_sso::SOURCE) && a.role_pinned && !a.no_access)
+            .map(|a| a.role);
+        let role = match (res.role, pinned) {
+            (_, Some(p)) => p,
+            (Some(r), None) => r,
+            (None, None) => {
+                // What Zabbix said is still worth keeping for the Zabbix users table — on an
+                // account that exists; a refused stranger makes no account.
+                self.users.note_facts(&name, zbx_sso::SOURCE, facts);
+                let e = zbx_sso::SsoError::NoRole(zbx_sso::RoleMap::describe_refusal(claim.zabbix_role.as_deref(), claim.zabbix_user_type, &groups, &res));
+                self.users.record_login(&name, "zabbix", Err(&auth::AuthError::NoAccess));
+                tracing::warn!(target: "audit", user = %claim.username, reason = %e, source = res.source.as_str(), "zabbix sign-in refused");
+                return (403, json!({ "ok": false, "kind": "no_role", "message": e.to_string() }));
+            }
         };
         let scope = zbx_sso::scope_for(role, &claim.groups, opts.scope_users_by_group);
-        let name = zbx_sso::account_name(&claim.username);
-        let result = self.users.upsert_external(&name, zbx_sso::SOURCE, role, scope.clone());
+        let result = self.users.upsert_external_with(&name, zbx_sso::SOURCE, role, scope.clone(), Some(facts));
         self.users.record_login(&name, "zabbix", result.as_ref().map(|_| ()));
         match result {
             Ok(acct) => {
@@ -2911,11 +3088,16 @@ impl Core {
                 // unless it is told; Zabbix having just said otherwise is the telling.
                 self.sessions.refresh_for(&acct.name, acct.role, acct.scope.clone());
                 let code = self.zbx.issue_code(&acct.name);
-                tracing::info!(target: "audit", user = %acct.name, role = acct.role.as_str(),
+                tracing::info!(target: "audit", user = %acct.name, role = acct.role.as_str(), pinned = acct.role_pinned,
+                               source = res.source.as_str(), via = ?match &res.source { zbx_sso::Source::Group(g) => Some(g.as_str()), _ => None },
                                zabbix_role = ?claim.zabbix_role, zabbix_user_type = claim.zabbix_user_type,
-                               groups = ?claim.groups, "zabbix sign-in code issued");
+                               groups = ?groups.iter().map(|g| g.name.as_str()).collect::<Vec<_>>(), "zabbix sign-in code issued");
                 (200, json!({ "ok": true, "sso_code": code, "account": acct.name, "role": acct.role.as_str(),
-                              "scoped": acct.scope.is_some() }))
+                              "scoped": acct.scope.is_some(), "pinned": acct.role_pinned, "source": res.source.as_str() }))
+            }
+            Err(e @ auth::AuthError::NoAccess) => {
+                tracing::warn!(target: "audit", user = %name, reason = e.kind(), "zabbix sign-in refused");
+                (403, json!({ "ok": false, "kind": e.kind(), "message": format!("{name}: {e}") }))
             }
             Err(auth::AuthError::Exists(n)) => {
                 tracing::warn!(target: "audit", user = %n, "zabbix sign-in refused: a local account has that name");
@@ -3320,18 +3502,26 @@ impl Core {
             }
         };
         let name = zbx_sso::account_name(&q.zabbix_user);
-        // What a first sign-in would make this person, under the map as it is now.
-        let zabbix_role = self.zbx_options_now().role_map.resolve(q.zabbix_role.as_deref(), q.zabbix_user_type).map(|r| r.as_str());
+        // What a first sign-in would make this person, under the map as it is now — from
+        // their user groups when the module sent them (2.1.20), else from the Zabbix role.
+        let res = self.zbx_options_now().role_map.resolve_claim(q.zabbix_role.as_deref(), q.zabbix_user_type, &q.group_refs());
+        let zabbix_role = res.role.map(|r| r.as_str());
         // Only an account a Zabbix sign-in made counts. A local account that happens to have
         // the namespaced name is somebody else's, exactly as the sign-in refuses to take it over.
         let acct = self.users.list().into_iter()
             .find(|a| a.name.eq_ignore_ascii_case(&name) && a.source.as_deref() == Some(zbx_sso::SOURCE));
         let mut out = match &acct {
-            Some(a) => json!({ "ok": true, "account": a.name, "role": a.role.as_str(), "pinned": a.role_pinned,
+            // No access says so in every field the module could fall back on: `role` and
+            // `zabbix_role` both "none", so an older module (which takes an unknown role
+            // string as "no role") does not fall through to the Zabbix user type.
+            Some(a) if a.no_access => json!({ "ok": true, "account": a.name, "role": "none", "pinned": true, "no_access": true,
+                                             "source": zbx_sso::SOURCE, "disabled": a.disabled, "locked": a.is_locked(auth::now()),
+                                             "zabbix_role": "none", "role_source": res.source.as_str() }),
+            Some(a) => json!({ "ok": true, "account": a.name, "role": a.role.as_str(), "pinned": a.role_pinned, "no_access": false,
                                "source": zbx_sso::SOURCE, "disabled": a.disabled, "locked": a.is_locked(auth::now()),
-                               "zabbix_role": zabbix_role }),
-            None => json!({ "ok": true, "account": name, "role": null, "pinned": false, "source": null,
-                            "disabled": false, "locked": false, "zabbix_role": zabbix_role }),
+                               "zabbix_role": zabbix_role, "role_source": res.source.as_str() }),
+            None => json!({ "ok": true, "account": name, "role": null, "pinned": false, "no_access": false, "source": null,
+                            "disabled": false, "locked": false, "zabbix_role": zabbix_role, "role_source": res.source.as_str() }),
         };
         // Echoed so the module can check the answer is to the question it asked; the
         // signature over them is what makes the echo worth anything.

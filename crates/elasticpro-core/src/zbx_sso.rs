@@ -41,11 +41,17 @@
 //! A newer embed module also names the Zabbix *role* ("Admin role", or one the site made);
 //! a name the map knows wins over the type, so a site can hand one custom Zabbix role to
 //! ElasticPro admins without making its holders Zabbix Super admins.
+//!
+//! Since the user-group map (`RoleMap::groups`, modules 2.1.20) the table above is only the
+//! *fallback*: each ElasticPro role holds any number of Zabbix user groups, a person in several
+//! gets the highest, and a person in none gets the table above — or nothing, when the admin
+//! chose `unmapped: none`. A role an admin set by hand on the Accounts page (pinned, "No
+//! access" included) wins over all of it; `auth::UserStore` holds those.
 
-use crate::auth::{ct_eq, random_hex, Role};
+use crate::auth::{ct_eq, random_hex, Account, Role};
 use hmac::{Hmac, Mac};
 use parking_lot::{Mutex, RwLock};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -61,11 +67,89 @@ pub const MIN_SECRET_LEN: usize = 32;
 pub const SUFFIX: &str = "@zabbix";
 pub const SOURCE: &str = "zabbix";
 
+/// A Zabbix user group as a claim or the role map names it: always by name, and by id when the
+/// embed module knows it (2.1.20 on). Group names are unique in Zabbix, so a name alone
+/// identifies a group; the id survives a rename. Accepted from JSON as `"NOC"`,
+/// `{"id": "7", "name": "NOC"}` or Zabbix's own `{"usrgrpid": "7", "name": "NOC"}`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct GroupRef {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    pub name: String,
+}
+
+impl GroupRef {
+    pub fn named(name: &str) -> GroupRef {
+        GroupRef { id: None, name: name.trim().to_string() }
+    }
+
+    /// The longest group name Zabbix allows (usrgrp.name is 255), and the longest id taken.
+    pub const MAX_NAME: usize = 255;
+    pub const MAX_ID: usize = 20;
+
+    /// Whether this map entry names that group of the claim: the same id when both have one,
+    /// else the same name, exactly (Zabbix compares group names case-sensitively, so a map
+    /// entry must too — "NOC" and "noc" can both exist).
+    pub fn matches(&self, other: &GroupRef) -> bool {
+        match (&self.id, &other.id) {
+            (Some(a), Some(b)) => a == b || self.name.trim() == other.name.trim(),
+            _ => self.name.trim() == other.name.trim(),
+        }
+    }
+
+    /// Why this reference cannot be used, if it cannot.
+    pub fn check(&self) -> Result<(), String> {
+        let n = self.name.trim();
+        if n.is_empty() || n.len() > GroupRef::MAX_NAME || n.chars().any(char::is_control) {
+            return Err(format!("a Zabbix user group name must be 1–{} characters with no control characters", GroupRef::MAX_NAME));
+        }
+        if let Some(id) = &self.id {
+            if id.is_empty() || id.len() > GroupRef::MAX_ID || !id.chars().all(|c| c.is_ascii_digit()) {
+                return Err(format!("{n:?}: a Zabbix user group id is a number"));
+            }
+        }
+        Ok(())
+    }
+
+    /// As the config file and the pages carry it: the name alone when there is no id.
+    pub fn to_json(&self) -> serde_json::Value {
+        match &self.id {
+            Some(id) => serde_json::json!({ "id": id, "name": self.name }),
+            None => serde_json::Value::String(self.name.clone()),
+        }
+    }
+
+    pub fn from_value(v: &serde_json::Value) -> Option<GroupRef> {
+        match v {
+            serde_json::Value::String(s) => Some(GroupRef::named(s)),
+            serde_json::Value::Object(m) => {
+                let name = m.get("name")?.as_str()?.trim().to_string();
+                let id = m.get("id").or_else(|| m.get("usrgrpid")).and_then(|v| match v {
+                    serde_json::Value::String(s) => Some(s.trim().to_string()),
+                    serde_json::Value::Number(n) => Some(n.to_string()),
+                    _ => None,
+                }).filter(|s| !s.is_empty());
+                Some(GroupRef { id, name })
+            }
+            _ => None,
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for GroupRef {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<GroupRef, D::Error> {
+        let v = serde_json::Value::deserialize(d)?;
+        GroupRef::from_value(&v).ok_or_else(|| serde::de::Error::custom("a user group is a name, or {id, name}"))
+    }
+}
+
 /// What Zabbix vouches for.
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct Claim {
     pub username: String,
     pub zabbix_user_type: i64,
+    /// The names of the user's Zabbix user groups: the sign-in scope, and — for a module
+    /// older than 2.1.20, which sends no `user_groups` — the groups the role map matches.
     #[serde(default)]
     pub groups: Vec<String>,
     /// The Zabbix role's name ("Admin role", …). Sent by embed modules from 2.1.13; an
@@ -74,8 +158,43 @@ pub struct Claim {
     pub zabbix_role: Option<String>,
     #[serde(default)]
     pub zabbix_roleid: Option<i64>,
+    /// The user's Zabbix user groups with their ids (modules 2.1.20 on): what the role map
+    /// (`RoleMap::groups`) decides on.
+    #[serde(default)]
+    pub user_groups: Vec<GroupRef>,
     pub ts: u64,
     pub nonce: String,
+}
+
+impl Claim {
+    /// The groups the role map matches: `user_groups` when the module sent them, else the
+    /// names in `groups`.
+    pub fn group_refs(&self) -> Vec<GroupRef> {
+        group_refs(&self.user_groups, &self.groups)
+    }
+}
+
+/// `user_groups` when there are any, else the names: one definition for the claim and the
+/// role lookup.
+pub fn group_refs(with_ids: &[GroupRef], names: &[String]) -> Vec<GroupRef> {
+    if !with_ids.is_empty() {
+        return with_ids.to_vec();
+    }
+    names.iter().map(|n| GroupRef::named(n)).filter(|g| !g.name.is_empty()).collect()
+}
+
+/// Why a list of groups in a signed body is refused, if it is.
+fn check_groups(names: &[String], with_ids: &[GroupRef]) -> Result<(), SsoError> {
+    if names.len() > 500 || names.iter().any(|g| g.len() > GroupRef::MAX_NAME) {
+        return Err(SsoError::BadBody("too many groups, or a group name over 255 characters".into()));
+    }
+    if with_ids.len() > 500 {
+        return Err(SsoError::BadBody("too many user_groups".into()));
+    }
+    if let Some(why) = with_ids.iter().find_map(|g| g.check().err()) {
+        return Err(SsoError::BadBody(format!("user_groups: {why}")));
+    }
+    Ok(())
 }
 
 /// "What is this Zabbix user's ElasticPro role?" — the signed body of a role lookup.
@@ -88,8 +207,20 @@ pub struct RoleQuery {
     /// The Zabbix role's name, when the module knows to send it (2.1.13 on).
     #[serde(default)]
     pub zabbix_role: Option<String>,
+    /// The user's Zabbix user groups (2.1.20 on), so the answer for a person never seen here
+    /// can come from the group map, as their first sign-in would.
+    #[serde(default)]
+    pub groups: Vec<String>,
+    #[serde(default)]
+    pub user_groups: Vec<GroupRef>,
     pub ts: u64,
     pub nonce: String,
+}
+
+impl RoleQuery {
+    pub fn group_refs(&self) -> Vec<GroupRef> {
+        group_refs(&self.user_groups, &self.groups)
+    }
 }
 
 /// "Keep this Elasticsearch password for this cluster" — the signed body the Zabbix module
@@ -162,15 +293,110 @@ pub fn role_for(zabbix_user_type: i64) -> Option<Role> {
 /// ```
 ///
 /// A value is `admin`, `operator`, `user`, `guest` or `none`.
+///
+/// The user-group map on top (Config → Zabbix, "ElasticPro roles from Zabbix user groups"):
+///
+/// ```yaml
+/// zabbix:
+///   roleMap:
+///     groups:
+///       admin: ["ElasticPro admins", { id: "7", name: "Zabbix administrators" }]
+///       operator: ["NOC leads"]
+///       user: ["NOC"]
+///       guest: []
+///     unmapped: zabbixRole      # or none: people in no listed group are not signed in
+/// ```
+///
+/// A person in several listed groups gets the highest role. A person in none gets what
+/// `names`/`types` say (`unmapped: zabbixRole`, the default — so a file without `groups`
+/// behaves exactly as before) or nothing (`unmapped: none`).
 #[derive(Debug, Clone, PartialEq)]
 pub struct RoleMap {
     pub names: Vec<(String, Option<Role>)>,
     pub types: Vec<(i64, Option<Role>)>,
+    /// Each ElasticPro role's Zabbix user groups, highest role first — always all four, so
+    /// the file and the page show every row.
+    pub groups: Vec<(Role, Vec<GroupRef>)>,
+    /// What a person in none of the listed groups gets.
+    pub unmapped: Unmapped,
+}
+
+/// The rule for a person in none of the mapped user groups.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Unmapped {
+    /// Today's rule: the Zabbix role's name (`names`), else the user type (`types`).
+    ZabbixRole,
+    /// No access: not signed in at all.
+    None,
+}
+
+impl Unmapped {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Unmapped::ZabbixRole => "zabbixRole",
+            Unmapped::None => "none",
+        }
+    }
+
+    pub fn parse(s: &str) -> Result<Unmapped, String> {
+        match s.trim().to_ascii_lowercase().replace(['_', ' ', '-'], "").as_str() {
+            "zabbixrole" | "zabbix" | "role" | "" => Ok(Unmapped::ZabbixRole),
+            "none" | "noaccess" => Ok(Unmapped::None),
+            _ => Err(format!("{s:?} is not an unmapped rule (zabbixRole or none)")),
+        }
+    }
+}
+
+/// Where a sign-in's role came from, for the log, the Zabbix users table and the refusal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Source {
+    /// A mapped user group gave it — this one (the highest, when several).
+    Group(String),
+    /// In no mapped group: the Zabbix role's name or user type decided (`unmapped: zabbixRole`).
+    ZabbixRole,
+    /// In no mapped group, and the map gives those people no access (`unmapped: none`).
+    Unmapped,
+}
+
+impl Source {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Source::Group(_) => "group",
+            Source::ZabbixRole => "zabbixRole",
+            Source::Unmapped => "unmapped",
+        }
+    }
+}
+
+/// What the map says about one person: the role (`None`: not signed in), where it came from,
+/// and every mapped group they are in with the role it gives, highest first — so a page can
+/// say "Operator (highest of User, Operator)".
+#[derive(Debug, Clone, PartialEq)]
+pub struct Resolution {
+    pub role: Option<Role>,
+    pub source: Source,
+    pub matched: Vec<(String, Role)>,
+}
+
+impl Resolution {
+    pub fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "role": self.role.map(Role::as_str),
+            "source": self.source.as_str(),
+            "via": match &self.source { Source::Group(g) => Some(g.as_str()), _ => None },
+            "matched": self.matched.iter().map(|(g, r)| serde_json::json!({ "group": g, "role": r.as_str() })).collect::<Vec<_>>(),
+        })
+    }
 }
 
 impl Default for RoleMap {
     fn default() -> RoleMap {
-        RoleMap { names: vec![], types: vec![(1, Some(Role::User)), (2, Some(Role::Operator)), (3, Some(Role::Admin))] }
+        RoleMap {
+            names: vec![],
+            types: vec![(1, Some(Role::User)), (2, Some(Role::Operator)), (3, Some(Role::Admin))],
+            groups: RoleMap::ROLES.iter().map(|r| (*r, vec![])).collect(),
+            unmapped: Unmapped::ZabbixRole,
+        }
     }
 }
 
@@ -179,8 +405,12 @@ impl RoleMap {
     /// an admin can write into the config through `ZABBIX_ROLEMAP_SET`.
     pub const MAX_NAMES: usize = 64;
     pub const MAX_NAME_LEN: usize = 128;
+    /// The most user groups the four rows may hold between them.
+    pub const MAX_GROUPS: usize = 256;
     /// The Zabbix user types a `types` entry may name.
     pub const USER_TYPES: [i64; 3] = [1, 2, 3];
+    /// The rows of the group table, highest first.
+    pub const ROLES: [Role; 4] = [Role::Admin, Role::Operator, Role::User, Role::Guest];
 
     /// "admin" | "operator" | "user" | "guest" → that role; "none" (or "") → no access;
     /// anything else is a mistake.
@@ -228,28 +458,71 @@ impl RoleMap {
             }
         }
         map.types.sort_by_key(|(t, _)| *t);
+        if let Some(groups) = rm.get("groups").and_then(|v| v.as_object()) {
+            let mut n = 0;
+            for (role, list) in groups {
+                let Some(role) = Role::parse(role) else { continue };
+                let Some(list) = list.as_array() else { continue };
+                let row = map.groups.iter_mut().find(|(r, _)| *r == role).expect("every role has a row");
+                row.1.clear();
+                for g in list.iter().filter_map(GroupRef::from_value) {
+                    if g.check().is_err() || n >= RoleMap::MAX_GROUPS {
+                        continue;
+                    }
+                    n += 1;
+                    row.1.push(g);
+                }
+            }
+        }
+        if let Some(u) = rm.get("unmapped").and_then(|v| v.as_str()) {
+            // A typo here keeps today's rule rather than locking everybody out.
+            map.unmapped = Unmapped::parse(u).unwrap_or(Unmapped::ZabbixRole);
+        }
         map
     }
 
-    /// The map as it is written to the config and shown on the Accounts page.
+    /// The map as it is written to the config and shown on the Config page.
     pub fn to_json(&self) -> serde_json::Value {
         let names: serde_json::Map<String, serde_json::Value> =
             self.names.iter().map(|(n, r)| (n.clone(), serde_json::Value::String(RoleMap::target_str(*r).into()))).collect();
         let types: serde_json::Map<String, serde_json::Value> =
             self.types.iter().map(|(t, r)| (t.to_string(), serde_json::Value::String(RoleMap::target_str(*r).into()))).collect();
-        serde_json::json!({ "names": names, "types": types })
+        let groups: serde_json::Map<String, serde_json::Value> = self.groups.iter()
+            .map(|(r, gs)| (r.as_str().to_string(), serde_json::Value::Array(gs.iter().map(GroupRef::to_json).collect()))).collect();
+        serde_json::json!({ "names": names, "types": types, "groups": groups, "unmapped": self.unmapped.as_str() })
     }
 
-    /// Check a map an admin sent (`ZABBIX_ROLEMAP_SET`), strictly: every key and value
-    /// must be right, or the whole thing is refused with the first reason.
-    pub fn from_message(v: &serde_json::Value) -> Result<RoleMap, String> {
-        let Some(m) = v.as_object() else { return Err("roleMap must be an object with names and types".into()) };
-        let mut map = RoleMap { names: vec![], types: vec![] };
+    /// Whether an admin has set up the group map: any group listed, or the unmapped rule
+    /// changed. Until then the sign-in is exactly the name/type map's — the migration is that
+    /// nothing changes until somebody saves the new table.
+    pub fn group_map_saved(&self) -> bool {
+        self.groups.iter().any(|(_, g)| !g.is_empty()) || self.unmapped == Unmapped::None
+    }
+
+    /// The groups the four rows list, flat: `(role, group)`.
+    pub fn listed_groups(&self) -> impl Iterator<Item = (Role, &GroupRef)> {
+        self.groups.iter().flat_map(|(r, gs)| gs.iter().map(move |g| (*r, g)))
+    }
+
+    /// The role the map gives one user group, if it lists it.
+    pub fn role_of_group(&self, g: &GroupRef) -> Option<Role> {
+        self.listed_groups().filter(|(_, m)| m.matches(g)).map(|(r, _)| r).max()
+    }
+
+    /// Check a map an admin sent (`ZABBIX_ROLEMAP_SET`, `ZABBIX_ROLEMAP_PREVIEW`), strictly:
+    /// every key and value must be right, or the whole thing is refused with the first reason.
+    /// A partial update over `base`, the map as it is now: a section the message leaves out
+    /// (`names`, `types`, `groups`, `unmapped`) stays as it is; one it names is replaced whole.
+    /// So a page that draws only the group table never drops a site's older role-name map.
+    pub fn from_message(v: &serde_json::Value, base: &RoleMap) -> Result<RoleMap, String> {
+        let Some(m) = v.as_object() else { return Err("roleMap must be an object with groups, unmapped, names and types".into()) };
+        let mut map = base.clone();
         if let Some(names) = m.get("names") {
             let Some(names) = names.as_object() else { return Err("names must be an object: Zabbix role name → ElasticPro role".into()) };
             if names.len() > RoleMap::MAX_NAMES {
                 return Err(format!("at most {} Zabbix role names", RoleMap::MAX_NAMES));
             }
+            map.names.clear();
             for (k, v) in names {
                 let k = k.trim();
                 if k.is_empty() || k.len() > RoleMap::MAX_NAME_LEN || k.chars().any(char::is_control) {
@@ -262,23 +535,55 @@ impl RoleMap {
                 map.names.push((k.to_string(), target));
             }
         }
-        let defaults = RoleMap::default();
-        for ty in RoleMap::USER_TYPES {
-            let given = m.get("types").and_then(|t| t.get(ty.to_string()));
-            let target = match given {
-                Some(v) => RoleMap::parse_target(v.as_str().ok_or_else(|| format!("types.{ty}: the role must be a string"))?)?,
-                None => defaults.types.iter().find(|(t, _)| *t == ty).and_then(|(_, r)| *r),
-            };
-            map.types.push((ty, target));
+        if let Some(types) = m.get("types") {
+            let Some(given) = types.as_object() else { return Err("types must be an object: Zabbix user type → ElasticPro role".into()) };
+            if let Some(extra) = given.keys().find(|k| !k.trim().parse::<i64>().is_ok_and(|n| RoleMap::USER_TYPES.contains(&n))) {
+                return Err(format!("types.{extra}: Zabbix user types are 1 (User), 2 (Admin) and 3 (Super admin)"));
+            }
+            let mut out = vec![];
+            for ty in RoleMap::USER_TYPES {
+                let target = match given.get(&ty.to_string()) {
+                    Some(v) => RoleMap::parse_target(v.as_str().ok_or_else(|| format!("types.{ty}: the role must be a string"))?)?,
+                    None => base.types.iter().find(|(t, _)| *t == ty).and_then(|(_, r)| *r),
+                };
+                out.push((ty, target));
+            }
+            map.types = out;
         }
-        if let Some(extra) = m.get("types").and_then(|t| t.as_object()).and_then(|t| t.keys().find(|k| !k.trim().parse::<i64>().is_ok_and(|n| RoleMap::USER_TYPES.contains(&n)))) {
-            return Err(format!("types.{extra}: Zabbix user types are 1 (User), 2 (Admin) and 3 (Super admin)"));
+        if let Some(groups) = m.get("groups") {
+            let Some(given) = groups.as_object() else { return Err("groups must be an object: ElasticPro role → list of Zabbix user groups".into()) };
+            if let Some(bad) = given.keys().find(|k| Role::parse(k).is_none()) {
+                return Err(format!("groups.{bad}: the rows are admin, operator, user and guest (no access is the unmapped rule, not a row)"));
+            }
+            let mut rows: Vec<(Role, Vec<GroupRef>)> = RoleMap::ROLES.iter().map(|r| (*r, vec![])).collect();
+            let mut seen: Vec<GroupRef> = vec![];
+            for (k, list) in given {
+                let role = Role::parse(k).expect("checked above");
+                let Some(list) = list.as_array() else { return Err(format!("groups.{k} must be a list of Zabbix user groups")) };
+                for v in list {
+                    let g = GroupRef::from_value(v).ok_or_else(|| format!("groups.{k}: a user group is a name, or {{id, name}}"))?;
+                    g.check()?;
+                    if seen.iter().any(|s| s.matches(&g)) {
+                        return Err(format!("the user group {:?} is listed twice — a group belongs to one role; a person in several groups gets the highest", g.name.trim()));
+                    }
+                    seen.push(g.clone());
+                    if seen.len() > RoleMap::MAX_GROUPS {
+                        return Err(format!("at most {} Zabbix user groups in the map", RoleMap::MAX_GROUPS));
+                    }
+                    rows.iter_mut().find(|(r, _)| *r == role).expect("four rows").1.push(g);
+                }
+            }
+            map.groups = rows;
+        }
+        if let Some(u) = m.get("unmapped") {
+            map.unmapped = Unmapped::parse(u.as_str().ok_or("unmapped must be \"zabbixRole\" or \"none\"")?)?;
         }
         Ok(map)
     }
 
-    /// The ElasticPro role for a sign-in: by the Zabbix role's name when the module sent
-    /// one and the map knows it, else by the user type. `None`: not signed in.
+    /// The ElasticPro role for a sign-in by the Zabbix role alone: the role's name when the
+    /// module sent one and the map knows it, else the user type. `None`: not signed in. The
+    /// fallback half of `resolve_claim`, and the whole answer before the group map existed.
     pub fn resolve(&self, zabbix_role: Option<&str>, zabbix_user_type: i64) -> Option<Role> {
         if let Some(name) = zabbix_role.map(str::trim).filter(|n| !n.is_empty()) {
             if let Some((_, r)) = self.names.iter().find(|(n, _)| n.eq_ignore_ascii_case(name)) {
@@ -288,12 +593,57 @@ impl RoleMap {
         self.types.iter().find(|(t, _)| *t == zabbix_user_type).and_then(|(_, r)| *r)
     }
 
+    /// The whole answer for one person: the highest role of the mapped user groups they are
+    /// in; in none, the unmapped rule — the Zabbix role (`resolve`) or no access. The one
+    /// definition the sign-in, the role lookup, the Zabbix users table and the preview use.
+    pub fn resolve_claim(&self, zabbix_role: Option<&str>, zabbix_user_type: i64, groups: &[GroupRef]) -> Resolution {
+        let mut matched: Vec<(String, Role)> = vec![];
+        for g in groups {
+            if let Some(r) = self.role_of_group(g) {
+                let name = g.name.trim().to_string();
+                if !matched.iter().any(|(n, _)| *n == name) {
+                    matched.push((name, r));
+                }
+            }
+        }
+        matched.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        if let Some((name, role)) = matched.first() {
+            return Resolution { role: Some(*role), source: Source::Group(name.clone()), matched };
+        }
+        match self.unmapped {
+            Unmapped::ZabbixRole => Resolution { role: self.resolve(zabbix_role, zabbix_user_type), source: Source::ZabbixRole, matched },
+            Unmapped::None => Resolution { role: None, source: Source::Unmapped, matched },
+        }
+    }
+
     /// How a refused sign-in names what had no role, for the log and the 403.
     pub fn describe(zabbix_role: Option<&str>, zabbix_user_type: i64) -> String {
         match zabbix_role.map(str::trim).filter(|n| !n.is_empty()) {
             Some(n) => format!("Zabbix role {n:?} (user type {zabbix_user_type})"),
             None => format!("Zabbix user type {zabbix_user_type}"),
         }
+    }
+
+    /// The refusal for a claim `resolve_claim` gave no role, naming the rule that refused.
+    pub fn describe_refusal(zabbix_role: Option<&str>, zabbix_user_type: i64, groups: &[GroupRef], res: &Resolution) -> String {
+        match res.source {
+            Source::Unmapped => {
+                let listed: Vec<String> = groups.iter().map(|g| format!("{:?}", g.name.trim())).collect();
+                format!("a user in none of the Zabbix user groups the role map lists (in: {}), and the map gives those users no access",
+                        if listed.is_empty() { "no groups".to_string() } else { listed.join(", ") })
+            }
+            _ => RoleMap::describe(zabbix_role, zabbix_user_type),
+        }
+    }
+
+    /// How many accounts could still sign in as an administrator if this were the map: local
+    /// admins; Zabbix accounts an admin pinned as admin; and Zabbix accounts whose last signed
+    /// claim this map makes admin. Blocked, locked and no-access accounts count for nothing,
+    /// and so does a Zabbix account whose groups were never recorded (an older module, or a
+    /// sign-in before 0.3.55): what it would become is not known, so it is not counted.
+    /// `ZABBIX_ROLEMAP_SET` refuses a map that leaves this at zero.
+    pub fn admins_able(&self, accounts: &[Account]) -> usize {
+        accounts.iter().filter(|a| a.active() && a.administers_under(self)).count()
     }
 }
 
@@ -433,6 +783,7 @@ impl ZabbixSso {
         if name.is_empty() || name.len() > 128 || name.chars().any(|ch| ch.is_control()) {
             return Err(SsoError::BadBody("zabbix_user is empty, too long or has control characters".into()));
         }
+        check_groups(&q.groups, &q.user_groups)?;
         self.fresh_once(q.ts, &q.nonce, now_secs)?;
         Ok(q)
     }
@@ -486,9 +837,7 @@ impl ZabbixSso {
         if c.nonce.len() < 16 || c.nonce.len() > 128 {
             return Err(SsoError::BadBody("nonce must be 16–128 characters".into()));
         }
-        if c.groups.len() > 500 || c.groups.iter().any(|g| g.len() > 255) {
-            return Err(SsoError::BadBody("too many groups, or a group name over 255 characters".into()));
-        }
+        check_groups(&c.groups, &c.user_groups)?;
         if c.zabbix_role.as_deref().is_some_and(|r| r.len() > RoleMap::MAX_NAME_LEN || r.chars().any(char::is_control)) {
             return Err(SsoError::BadBody("zabbix_role is too long or has control characters".into()));
         }
@@ -682,7 +1031,8 @@ mod tests {
 
     #[test]
     fn a_map_from_an_admin_is_checked_strictly() {
-        let ok = RoleMap::from_message(&serde_json::json!({ "names": { "ES owners": "admin" }, "types": { "2": "admin" } })).unwrap();
+        let base = RoleMap::default();
+        let ok = RoleMap::from_message(&serde_json::json!({ "names": { "ES owners": "admin" }, "types": { "2": "admin" } }), &base).unwrap();
         assert_eq!(ok.resolve(None, 2), Some(Role::Admin));
         assert_eq!(ok.resolve(None, 1), Some(Role::User), "types left out keep their defaults");
         assert_eq!(ok.types.len(), 3);
@@ -693,11 +1043,138 @@ mod tests {
             (serde_json::json!({ "names": { "A": "admin", "a": "user" } }), "the same name twice"),
             (serde_json::json!({ "types": { "4": "user" } }), "guest type"),
             (serde_json::json!({ "types": { "2": 3 } }), "a number for a role"),
+            (serde_json::json!({ "groups": { "none": ["NOC"] } }), "no access is not a row"),
+            (serde_json::json!({ "groups": { "admin": ["NOC"], "user": ["NOC"] } }), "a group in two rows"),
+            (serde_json::json!({ "groups": { "admin": [{ "id": "7", "name": "A" }], "user": [{ "id": "7", "name": "B" }] } }), "one id in two rows"),
+            (serde_json::json!({ "groups": { "admin": [""] } }), "an empty group name"),
+            (serde_json::json!({ "groups": { "admin": [{ "id": "x7", "name": "A" }] } }), "an id that is not a number"),
+            (serde_json::json!({ "groups": { "admin": "NOC" } }), "a row that is not a list"),
+            (serde_json::json!({ "unmapped": "emperor" }), "an unmapped rule that is neither"),
+            (serde_json::json!({ "unmapped": 1 }), "an unmapped rule that is not a string"),
         ] {
-            assert!(RoleMap::from_message(&bad).is_err(), "{why}");
+            assert!(RoleMap::from_message(&bad, &base).is_err(), "{why}");
         }
         assert_eq!(RoleMap::parse_target("none"), Ok(None));
         assert_eq!(RoleMap::parse_target(" Operator "), Ok(Some(Role::Operator)));
+    }
+
+    fn g(name: &str) -> GroupRef {
+        GroupRef::named(name)
+    }
+
+    fn gid(id: &str, name: &str) -> GroupRef {
+        GroupRef { id: Some(id.into()), name: name.into() }
+    }
+
+    fn group_map() -> RoleMap {
+        RoleMap::from_message(&serde_json::json!({ "groups": {
+            "admin": ["ElasticPro admins", { "id": "7", "name": "Zabbix administrators" }],
+            "operator": ["NOC leads"], "user": ["NOC", "Client A team"], "guest": ["Auditors"] } }), &RoleMap::default()).unwrap()
+    }
+
+    #[test]
+    fn a_person_in_several_mapped_groups_gets_the_highest_role() {
+        let m = group_map();
+        let r = m.resolve_claim(Some("User role"), 1, &[g("NOC"), g("NOC leads")]);
+        assert_eq!((r.role, r.source.clone()), (Some(Role::Operator), Source::Group("NOC leads".into())));
+        assert_eq!(r.matched, vec![("NOC leads".to_string(), Role::Operator), ("NOC".to_string(), Role::User)], "highest first: {r:?}");
+        assert_eq!(m.resolve_claim(None, 1, &[g("Auditors"), g("Client A team"), g("ElasticPro admins")]).role, Some(Role::Admin));
+        assert_eq!(m.resolve_claim(None, 3, &[g("Auditors")]).role, Some(Role::Guest), "a Super admin in only the guest group is a guest: the groups decide, not the type");
+        // Groups are matched exactly, as Zabbix names them.
+        assert_eq!(m.resolve_claim(None, 1, &[g("noc")]).matched, vec![], "case matters: \"noc\" is not \"NOC\"");
+        assert_eq!(m.resolve_claim(None, 1, &[g(" NOC ")]).role, Some(Role::User), "but surrounding blanks do not");
+        let j = r.to_json();
+        assert_eq!((j["role"].clone(), j["source"].clone(), j["via"].clone()), (serde_json::json!("operator"), serde_json::json!("group"), serde_json::json!("NOC leads")));
+    }
+
+    #[test]
+    fn a_group_is_known_by_its_id_across_a_rename_and_by_name_without_one() {
+        let m = group_map();
+        assert_eq!(m.resolve_claim(None, 1, &[gid("7", "Zabbix admins (renamed)")]).role, Some(Role::Admin), "the id survives a rename");
+        assert_eq!(m.resolve_claim(None, 1, &[gid("99", "Zabbix administrators")]).role, Some(Role::Admin), "the name still matches a recreated group");
+        assert_eq!(m.resolve_claim(None, 1, &[gid("42", "NOC")]).role, Some(Role::User), "a map entry without an id matches by name");
+        assert_eq!(m.resolve_claim(None, 1, &[gid("7", "Other")]).role, Some(Role::Admin));
+        assert_eq!(m.resolve_claim(None, 1, &[g("Zabbix administrators")]).role, Some(Role::Admin), "a claim without ids (an older module) matches by name");
+        // What it round-trips to.
+        let j = m.to_json();
+        assert_eq!(j["groups"]["admin"], serde_json::json!(["ElasticPro admins", { "id": "7", "name": "Zabbix administrators" }]));
+        assert_eq!(j["groups"]["guest"], serde_json::json!(["Auditors"]));
+        assert_eq!(j["unmapped"], serde_json::json!("zabbixRole"));
+        assert_eq!(RoleMap::from_config(&serde_json::json!({ "roleMap": j })), m, "the file reads back to the same map");
+        // Zabbix's own shape is accepted on the way in.
+        let z = RoleMap::from_message(&serde_json::json!({ "groups": { "user": [{ "usrgrpid": 12, "name": "NOC" }] } }), &RoleMap::default()).unwrap();
+        assert_eq!(z.groups.iter().find(|(r, _)| *r == Role::User).unwrap().1, vec![gid("12", "NOC")]);
+    }
+
+    #[test]
+    fn in_no_mapped_group_the_unmapped_rule_decides() {
+        let m = group_map();
+        // The default rule is today's: the Zabbix role name, else the user type.
+        let r = m.resolve_claim(None, 2, &[g("Zabbix users")]);
+        assert_eq!((r.role, r.source.clone()), (Some(Role::Operator), Source::ZabbixRole));
+        assert_eq!(m.resolve_claim(None, 4, &[]).role, None, "a guest type still gets nothing");
+        let mut named = m.clone();
+        named.names.push(("ES owners".into(), Some(Role::Admin)));
+        assert_eq!(named.resolve_claim(Some("ES owners"), 1, &[g("Zabbix users")]).role, Some(Role::Admin), "the older role-name map still works underneath");
+        // Or no access.
+        let strict = RoleMap::from_message(&serde_json::json!({ "unmapped": "none" }), &m).unwrap();
+        let r = strict.resolve_claim(Some("Super admin role"), 3, &[g("Zabbix users")]);
+        assert_eq!((r.role, r.source.clone()), (None, Source::Unmapped), "even a Super admin: {r:?}");
+        assert!(RoleMap::describe_refusal(None, 3, &[g("Zabbix users")], &r).contains("\"Zabbix users\""));
+        assert_eq!(strict.resolve_claim(None, 3, &[g("NOC")]).role, Some(Role::User), "a mapped group still gets in");
+        assert_eq!(strict.to_json()["unmapped"], serde_json::json!("none"));
+        assert_eq!(Unmapped::parse("no access"), Ok(Unmapped::None));
+        assert_eq!(Unmapped::parse("zabbix_role"), Ok(Unmapped::ZabbixRole));
+    }
+
+    #[test]
+    fn until_a_group_map_is_saved_the_sign_in_is_exactly_the_old_maps() {
+        // Migration: a config with only the role-name map, as every site has today.
+        let old = RoleMap::from_config(&serde_json::json!({ "roleMap": { "names": { "ES owners": "admin" }, "types": { "2": "user" } } }));
+        assert!(!old.group_map_saved());
+        assert_eq!(old.resolve_claim(Some("ES owners"), 1, &[g("Anything")]).role, Some(Role::Admin));
+        assert_eq!(old.resolve_claim(None, 2, &[g("Anything")]).role, Some(Role::User));
+        assert_eq!(old.resolve_claim(None, 3, &[]).role, Some(Role::Admin));
+        for (ty, g_) in [(1, vec![]), (2, vec![g("X")]), (3, vec![g("Y"), g("Z")]), (4, vec![])] {
+            assert_eq!(old.resolve_claim(None, ty, &g_).role, old.resolve(None, ty), "type {ty}: the group map changes nothing while empty");
+        }
+        // Saving the group table keeps the old names and types underneath.
+        let new = RoleMap::from_message(&serde_json::json!({ "groups": { "operator": ["NOC leads"] } }), &old).unwrap();
+        assert!(new.group_map_saved());
+        assert_eq!(new.names, old.names, "the role-name map is kept when the message does not mention it");
+        assert_eq!(new.types, old.types);
+        assert_eq!(new.resolve_claim(Some("ES owners"), 1, &[]).role, Some(Role::Admin));
+        assert_eq!(new.resolve_claim(Some("ES owners"), 1, &[g("NOC leads")]).role, Some(Role::Operator), "a mapped group wins over the role name");
+        // An explicit empty names table clears it.
+        let cleared = RoleMap::from_message(&serde_json::json!({ "names": {} }), &new).unwrap();
+        assert!(cleared.names.is_empty() && cleared.groups == new.groups);
+        // A file with a malformed groups entry falls back to no group for it, never a lock-out.
+        let odd = RoleMap::from_config(&serde_json::json!({ "roleMap": { "groups": { "admin": [7, "", "ok"], "emperor": ["x"] }, "unmapped": "typo" } }));
+        assert_eq!(odd.groups.iter().find(|(r, _)| *r == Role::Admin).unwrap().1, vec![g("ok")]);
+        assert_eq!(odd.unmapped, Unmapped::ZabbixRole);
+    }
+
+    #[test]
+    fn the_admins_a_map_leaves_able_to_sign_in_are_counted_from_what_is_known() {
+        use crate::auth::{UserStore, ZabbixFacts};
+        let s = UserStore::open_with_rounds(None, 1);
+        s.add("root", "correct-horse", Role::Admin).unwrap();
+        let facts = |ty: i64, groups: &[&str]| Some(ZabbixFacts { user_type: ty, role: None, groups: groups.iter().map(|g_| g(g_)).collect(), at: 1 });
+        s.upsert_external_with("zed@zabbix", "zabbix", Role::Admin, None, facts(3, &["Zabbix administrators"])).unwrap();
+        s.upsert_external_with("olga@zabbix", "zabbix", Role::Operator, None, facts(2, &["NOC leads"])).unwrap();
+        s.upsert_external_with("old@zabbix", "zabbix", Role::Admin, None, None).unwrap();
+        let m = group_map();
+        assert_eq!(m.admins_able(&s.list()), 2, "root and zed; old's groups are unknown, so it is not counted");
+        // Without the local admin, a map that gives zed's group nothing leaves nobody.
+        s.remove("root").unwrap();
+        assert_eq!(m.admins_able(&s.list()), 1);
+        let strict = RoleMap::from_message(&serde_json::json!({ "groups": { "admin": ["Nobody here"] }, "unmapped": "none" }), &m).unwrap();
+        assert_eq!(strict.admins_able(&s.list()), 0);
+        // A pin counts as it is, whatever the map says; no access counts for nothing.
+        s.set_role("olga@zabbix", Role::Admin).unwrap();
+        assert_eq!(strict.admins_able(&s.list()), 1);
+        s.set_no_access("zed@zabbix").unwrap();
+        assert_eq!(m.admins_able(&s.list()), 1, "zed, set to No access, is not able to sign in");
     }
 
     #[test]

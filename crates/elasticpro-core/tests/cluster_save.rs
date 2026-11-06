@@ -259,7 +259,10 @@ async fn the_role_map_in_the_config_decides_what_a_zabbix_sign_in_becomes() {
     let r = c.handle(json!({ "type": "ZABBIX_ROLEMAP_SET", "session": op, "roleMap": { "names": { "ES owners": "operator" }, "types": { "2": "operator" } } })).await;
     assert_eq!(r["ok"], json!(true), "{r}");
     let v = file(&path).1;
-    assert_eq!(v["zabbix"]["roleMap"], json!({ "names": { "ES owners": "operator" }, "types": { "1": "user", "2": "operator", "3": "admin" } }));
+    // The group table (0.3.55) is written beside the older names and types — empty, and the
+    // unmapped rule today's, when nobody has saved it: the old shape still saves.
+    assert_eq!(v["zabbix"]["roleMap"], json!({ "names": { "ES owners": "operator" }, "types": { "1": "user", "2": "operator", "3": "admin" },
+                                              "groups": { "admin": [], "operator": [], "user": [], "guest": [] }, "unmapped": "zabbixRole" }));
     assert_eq!(v["clusters"][0]["apiKey"], json!("alpha-api-key"), "the rest of the file is as it was");
 
     // The next sign-in follows the new map; an account an admin pinned does not.

@@ -369,6 +369,21 @@ for _ in $(seq 1 25); do
   N=$(grep '"target":"audit"' "$OUT5" | grep '"user":"hc-op"' | grep -c 'emergency stop' || true); [ "$N" -ge 2 ] && break; sleep 0.2
 done
 check "begun and ended are audited by name"     "$N" "2"
+# Roles from Zabbix user groups and the No access pin (docs/ROLES.md): the map, its preview and
+# the Zabbix users table are an administrator's; a draft is checked like a save; No access is for
+# accounts another system signs in, never one's own, and never the last administrator. The
+# sign-in itself, pins beating the map and the lock-out rule are proved in-process
+# (tests/zabbix_roles.rs).
+check "the Zabbix users table is an admin's"        "$(as_jar "$JOP" -d '{"type":"ZABBIX_USERS"}' | field kind)" "forbidden"
+check "so is the role-map preview"                  "$(as_jar "$JOP" -d '{"type":"ZABBIX_ROLEMAP_PREVIEW","roleMap":{}}' | field kind)" "forbidden"
+check "nor may a user read the map"                 "$(as_jar "$JUS" -d '{"type":"ZABBIX_ROLEMAP_GET"}' | field kind)" "forbidden"
+check "an admin reads the table (nobody from Zabbix yet)" "$(cookie -d '{"type":"ZABBIX_USERS"}' | python3 -c 'import json,sys;d=json.load(sys.stdin);print(d.get("ok"),d.get("total"),d.get("groupsFrom"))')" "True 0 lastSignIn"
+check "a draft with one group under two roles is refused" "$(cookie -d '{"type":"ZABBIX_ROLEMAP_PREVIEW","roleMap":{"groups":{"admin":["NOC"],"user":["NOC"]}}}' | field kind)" "bad_message"
+check "a sound draft previews without writing"      "$(cookie -d '{"type":"ZABBIX_ROLEMAP_PREVIEW","roleMap":{"groups":{"operator":["NOC leads"]},"unmapped":"none"}}' | python3 -c 'import json,sys;d=json.load(sys.stdin);print(d.get("ok"),d.get("lockout"),d.get("changes"))')" "True False []"
+check "no access is a role only for an account another system signs in" "$(cookie -d '{"type":"USER_SET_ROLE","name":"hc-user","role":"none"}' | field kind)" "bad_request"
+check "and never one's own"                         "$(cookie -d '{"type":"USER_SET_ROLE","name":"Admin","role":"none"}' | field kind)" "bad_request"
+check "a role that is not one is refused"           "$(cookie -d '{"type":"USER_SET_ROLE","name":"hc-user","role":"emperor"}' | field kind)" "bad_request"
+check "the accounts list says what is in force"     "$(cookie -d '{"type":"USER_LIST"}' | python3 -c 'import json,sys;u=[x for x in json.load(sys.stdin)["users"] if x["name"]=="hc-user"][0];print(u.get("noAccess"),u.get("roleInForce"))')" "False user"
 OUTH=$(curl -s -D - -o /dev/null -X POST "$B5" -H 'content-type: application/json' -H "cookie: ep_session=$TOK" -d '{"type":"LOGOUT"}' | tr -d '\r' | grep -i '^set-cookie:' || true)
 case "$OUTH" in *ep_session=\;*Max-Age=0*) ok "signing out clears the cookie";; *) bad "logout cookie (got '$OUTH')";; esac
 check "and ends the session"                 "$(cookie -d '{"type":"WHOAMI"}' | python3 -c 'import json,sys;print(json.load(sys.stdin).get("caller"))')" "None"
