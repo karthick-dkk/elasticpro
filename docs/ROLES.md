@@ -38,8 +38,10 @@ role, or to no access (`noAccess: true` with `pinned: false`) — and the person
 Nothing is ever **raised** at a sync: a raise waits for the next signed sign-in, the only claim
 the core trusts upwards. The step fails closed towards *no change*: when `user.get` is refused
 (a token without it), fails, answers nothing, or names none of the accounts this core knows,
-nobody moves. A person absent from an answer that does name others counts as in no groups (the
-unmapped rule decides, with their recorded Zabbix role and type). Pinned people, No access by
+nobody moves. Only people the answer actually lists are judged, on the groups it lists for them;
+a person absent from an otherwise good answer is left as they are (a sync token that is not of
+the Super admin type sees only some users, and absence is not evidence — a user deleted in
+Zabbix cannot sign in again anyway). Pinned people, No access by
 hand, blocked accounts and the last administrator able to sign in are never touched (the last
 admin case is logged: `role kept at sync`). A no access the sync imposed is lifted by the next
 signed sign-in that gives a role, by Reset, or by a role set by hand. Each lowering is audited

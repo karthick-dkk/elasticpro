@@ -534,12 +534,14 @@ async fn a_sync_lowers_a_role_the_live_groups_no_longer_give_and_never_raises_on
     let body: Value = serde_json::from_slice(&reply.body).unwrap();
     assert_eq!((body["role"].clone(), body["no_access"].clone(), body["pinned"].clone()), (json!("none"), json!(true), json!(false)), "{body}");
 
-    // Gone from Zabbix's list while others are there: in no group → the unmapped rule (none here).
-    let (_, _, _) = sign_in(&c, "d.new", 1, Some("User role"), &[("3", "NOC")]).await;
+    // Absent from an otherwise good list (a sync token that sees only some users, or deleted in
+    // Zabbix): no evidence about their groups, so nothing moves — not even under unmapped "none".
+    let (_, _, dnew) = sign_in(&c, "d.new", 1, Some("User role"), &[("3", "NOC")]).await;
+    let dnew = dnew.unwrap();
     set_users(json!([zuser("a.kumar", 1, &[("1", "ElasticPro admins")]), zuser("b.singh", 1, &[])]));
     let r = c.zabbix_sync().await;
-    assert_eq!(r["roleChanges"][0]["username"], json!("d.new"), "{r}");
-    assert_eq!(r["roleChanges"][0]["to"], json!("none"));
+    assert_eq!(r["roleChanges"], json!([]), "absence is not evidence: {r}");
+    assert_eq!(role_of(&dnew).await, json!("user"), "d.new keeps the role and the session");
 
     // The last administrator able to sign in is never lowered: a.kumar is admin; the local Admin goes.
     let (_, _, kumar) = sign_in(&c, "a.kumar", 1, Some("User role"), &[("1", "ElasticPro admins")]).await;

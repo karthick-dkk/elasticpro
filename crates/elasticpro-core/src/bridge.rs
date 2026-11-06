@@ -4730,10 +4730,11 @@ impl Core {
     ///
     /// Fails closed towards *no change*: when `user.get` is refused (a token without it: modules
     /// before 2.1.20), fails, answers nothing, or names none of the accounts this core knows, no
-    /// role moves. A person absent from an answer that does name others is treated as in no
-    /// groups (deleted in Zabbix, or dropped from every group): the unmapped rule decides, with
-    /// their recorded role name and type. The last administrator able to sign in is never
-    /// lowered; that is logged instead. Returns one entry per account lowered.
+    /// role moves. Only accounts the answer actually lists are judged, on the groups it lists for
+    /// them; a person absent from an otherwise good answer is left as they are — a sync token
+    /// that is not of the Super admin type sees only some users, and absence is not evidence
+    /// (a user deleted in Zabbix cannot sign in again anyway). The last administrator able to
+    /// sign in is never lowered; that is logged instead. Returns one entry per account lowered.
     async fn lower_roles_at_sync(&self, zapi: &Zabbix, map: &zbx_sso::RoleMap) -> Vec<Value> {
         let known: Vec<auth::Account> = self.users.list().into_iter()
             .filter(|a| a.source.as_deref() == Some(zbx_sso::SOURCE) && !a.role_pinned && !a.no_access && !a.disabled)
@@ -4761,13 +4762,13 @@ impl Core {
         for a in &known {
             let name = short(a);
             let old = a.zabbix.clone().unwrap_or_default();
-            let facts = match seen(&name) {
-                Some(u) => auth::ZabbixFacts {
-                    user_type: if u.user_type > 0 { u.user_type } else { old.user_type },
-                    role: u.role.clone().or(old.role), groups: u.groups.clone(), at: now,
-                },
-                // Gone from Zabbix's list while others are there: in no group.
-                None => auth::ZabbixFacts { user_type: old.user_type, role: old.role, groups: vec![], at: now },
+            let Some(u) = seen(&name) else {
+                tracing::debug!(subject = %a.name, "not in Zabbix's user list this sync: left as they are");
+                continue;
+            };
+            let facts = auth::ZabbixFacts {
+                user_type: if u.user_type > 0 { u.user_type } else { old.user_type },
+                role: u.role.clone().or(old.role), groups: u.groups.clone(), at: now,
             };
             let res = map.resolve_claim(facts.role.as_deref(), facts.user_type, &facts.groups);
             let why = match (&res.source, res.role) {
