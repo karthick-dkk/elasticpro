@@ -60,7 +60,10 @@ pub fn open(value: &str, master: &str) -> Result<String, OpenError> {
     let salt = B64.decode(parts[1]).map_err(|_| OpenError::Malformed)?;
     let nonce = B64.decode(parts[2]).map_err(|_| OpenError::Malformed)?;
     let ct = B64.decode(parts[3]).map_err(|_| OpenError::Malformed)?;
-    if nonce.len() != 12 || !(1000..=10_000_000).contains(&rounds) {
+    // Never more rounds than this project seals with: a sealed value is only ever ours, and a
+    // round count typed into a file (a backup somebody edited) would otherwise set how long
+    // every attempt to open it keeps a core busy.
+    if nonce.len() != 12 || !(1000..=ROUNDS).contains(&rounds) {
         return Err(OpenError::Malformed);
     }
     let key = derive(master, &salt, rounds);
@@ -105,6 +108,18 @@ pub fn open_with_key(value: &str, key: &[u8; 32], aad: &str) -> Result<String, O
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_round_count_above_ours_is_refused_before_any_work() {
+        let sealed = seal("hello", "correct-horse-battery").unwrap();
+        let rest = sealed.strip_prefix(PREFIX).unwrap();
+        let mut parts: Vec<&str> = rest.split(':').collect();
+        let raised = (ROUNDS + 1).to_string();
+        parts[0] = &raised;
+        let edited = format!("{PREFIX}{}", parts.join(":"));
+        assert_eq!(open(&edited, "correct-horse-battery").unwrap_err(), OpenError::Malformed);
+        assert_eq!(open(&sealed, "correct-horse-battery").unwrap(), "hello");
+    }
     #[test]
     fn roundtrip_and_wrong_master() {
         let s = seal("p@ss wörd", "master-1").unwrap();

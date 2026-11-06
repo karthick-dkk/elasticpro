@@ -11,7 +11,7 @@ failure": the in-process protections the worker also runs under).
 
 | Role | Starts | HTTP |
 |---|---|---|
-| `core` | UI and message API, fleet poller, alerts, Play, delay sink, history store, housekeeping, Zabbix sync/push, request reaper | public (behind nginx), as today |
+| `core` | UI and message API, fleet poller, alerts, Play, delay sink, history store, housekeeping, the daily settings backup (`start_backup_timer`), Zabbix sync/push, request reaper | public (behind nginx), as today |
 | `worker` | daily volume collection (`start_volume_daily`), the report timer and queue (`start_report_timer`: volume, indices, hosts schedules and jobs), the 06:00 host collection, report builds and mail | internal only, port 8766, not routed by nginx |
 | `all` (default when unset) | everything, as before 0.3.54 | public |
 

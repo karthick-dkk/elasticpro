@@ -31,6 +31,8 @@ pub fn is_secret_key(key: &str) -> bool {
     k.contains("password") || k.contains("passwd") || k.contains("passphrase") || k.contains("secret") || k.contains("token")
         || k.contains("apikey") || k.contains("api_key") || k.contains("authorization") || k.contains("credential")
         || k.contains("privatekey") || k.contains("private_key") || k.contains("sshkey") || k.contains("ssh_key")
+        // A cluster's `authHeader` / the shared one, and a bare `bearer`: the header itself.
+        || k.contains("authheader") || k.contains("auth_header") || k.contains("bearer")
         // `x-api-key`, `service_key`, … — a key named "…key" holds one; `keyFile` names a path.
         || k.ends_with("-key") || k.ends_with("_key")
         || matches!(k.as_str(), "auth" | "headers" | "master" | "basic" | "pass" | "key")

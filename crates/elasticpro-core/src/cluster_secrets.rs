@@ -449,6 +449,23 @@ impl ClusterSecrets {
         crate::crypto::seal_with_key(plain, &self.key, aad)
     }
 
+    /// Seal something larger than a password under the server's key (a backup's credentials
+    /// blob, `backup`). Same key and sealing as `seal_own`, without its password-sized cap.
+    pub(crate) fn seal_blob(&self, aad: &str, plain: &str) -> Result<String, String> {
+        self.can_seal_own()?;
+        crate::crypto::seal_with_key(plain, &self.key, aad)
+    }
+
+    /// Every entry, opened: for a backup's credentials blob, and nowhere else. `bound` is the
+    /// destination each is tied to (empty: unbound). Entries the key does not open are skipped.
+    pub(crate) fn export(&self) -> Vec<(String, Held, String)> {
+        let st = self.stored.read();
+        st.clusters.iter().filter_map(|(name, e)| {
+            let password = crate::crypto::open_with_key(&e.sealed, &self.key, name).ok()?;
+            Some((name.clone(), Held { user: e.user.clone(), password }, e.bound.clone()))
+        }).collect()
+    }
+
     /// The inverse of `seal_own`; `None` when it does not open (another key, another `aad`).
     pub fn open_own(&self, aad: &str, sealed: &str) -> Option<String> {
         crate::crypto::open_with_key(sealed, &self.key, aad).ok()

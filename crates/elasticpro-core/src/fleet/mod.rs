@@ -1030,15 +1030,35 @@ impl Core {
         if !incoming.is_object() {
             return json!({ "ok": false, "kind": "bad_request", "message": "policy must be an object" });
         }
+        let (pol, saved) = match self.policy_apply(incoming) {
+            Ok(x) => x,
+            Err(refusal) => return refusal,
+        };
+        tracing::info!(
+            target: "audit",
+            user = caller.map(|c| c.name.as_str()).unwrap_or(""),
+            mode = pol.mode.as_str(), paused_all = pol.paused.all, paused_until = pol.paused.until,
+            per_cluster = pol.concurrency.per_cluster, global = pol.concurrency.global,
+            min_gap_sec = pol.min_gap_sec, play = ?pol.play,
+            saved = saved.is_ok(),
+            "request policy changed"
+        );
+        self.fleet.wake.notify_one();
+        self.policy_reply(Some(saved))
+    }
+
+    /// Make `incoming` the policy: the rule `POLICY_SET` and a backup's restore share. The
+    /// policy as applied and whether the file took it, or the refusal to answer with.
+    pub(crate) fn policy_apply(&self, incoming: Value) -> Result<(Policy, Result<(), String>), Value> {
         // A field config.txt locks is config.txt's: sent with its value it is accepted, with
         // another it is refused (and nothing else is applied either).
         let current = self.fleet.policy.read().clone();
         if let Err(e) = Policy::check_managed(&incoming, &current, crate::settings::get()) {
-            return json!({ "ok": false, "kind": "managed", "message": e });
+            return Err(json!({ "ok": false, "kind": "managed", "message": e }));
         }
         let pol: Policy = match serde_json::from_value(incoming) {
             Ok(p) => p,
-            Err(e) => return json!({ "ok": false, "kind": "bad_request", "message": format!("policy: {e}") }),
+            Err(e) => return Err(json!({ "ok": false, "kind": "bad_request", "message": format!("policy: {e}") })),
         };
         let mut pol = pol.normalised();
         // The emergency stop is not POLICY_SET's: it has its own messages (POLICY_PAUSE,
@@ -1059,17 +1079,7 @@ impl Core {
             None => Err("no data directory: the policy applies to this run only".to_string()),
         };
         *self.fleet.cfg.write() = Config::from_policy(&pol);
-        tracing::info!(
-            target: "audit",
-            user = caller.map(|c| c.name.as_str()).unwrap_or(""),
-            mode = pol.mode.as_str(), paused_all = pol.paused.all, paused_until = pol.paused.until,
-            per_cluster = pol.concurrency.per_cluster, global = pol.concurrency.global,
-            min_gap_sec = pol.min_gap_sec, play = ?pol.play,
-            saved = saved.is_ok(),
-            "request policy changed"
-        );
-        self.fleet.wake.notify_one();
-        self.policy_reply(Some(saved))
+        Ok((pol, saved))
     }
 
     /// `POLICY_PAUSE {minutes}` and `POLICY_RESUME`: the emergency stop begun or ended, and

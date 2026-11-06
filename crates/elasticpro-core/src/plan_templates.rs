@@ -260,7 +260,17 @@ impl PlanTemplates {
         }
     }
 
-    fn replace(&self, templates: Vec<Value>, by: &str, at: u64) -> Result<(), String> {
+    /// The templates as kept, or `None` while the seeds serve (nothing saved yet).
+    pub(crate) fn kept(&self) -> Option<Vec<Value>> {
+        self.kept.lock().as_ref().map(|s| s.templates.clone())
+    }
+
+    /// Validate a list the way `PLAN_TEMPLATES_SET` does.
+    pub(crate) fn check(list: &Value) -> Result<Vec<Value>, String> {
+        parse(list)
+    }
+
+    pub(crate) fn replace(&self, templates: Vec<Value>, by: &str, at: u64) -> Result<(), String> {
         let mut g = self.kept.lock();
         if let Some(p) = &self.path {
             let body = serde_json::to_vec_pretty(&json!({ "templates": templates, "updatedBy": by, "updatedAt": at })).map_err(|e| e.to_string())?;

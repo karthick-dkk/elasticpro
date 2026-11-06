@@ -1150,6 +1150,89 @@ cluster answers.
 `UI_PLAY_EXCLUDE` adds exclusions (reason *set in config.txt*, `managed: true`) the page cannot
 remove; `UI_PLAY_ENABLED=false` turns display links off.
 
+## Backup and restore — the message contract
+
+0.3.55. System › Backup & restore puts everything ElasticPro knows about the clusters into one
+file, `.epbak`, to keep, to carry to a new server, or to load back. Elasticsearch data is not in
+it — snapshots cover that. Administrators only, and not one limited to some clusters: a backup
+holds every cluster and the server's own settings. A display link reaches none of it. `PING`
+says `backup: {supported: true, scheduled}` (`scheduled`: kept backups and the timer exist on
+this edition — hosted).
+
+**Sections** (tick what to include; `sections` absent = all). Each section is a map of named
+items, so a preview can say per item what a restore would do and the same rules merge and
+replace every section.
+
+| Section id | Label | Read from / written back through |
+|---|---|---|
+| `clusters` | Clusters and their settings | config `clusters` (by `name`) with each cluster's type and ULM bucket (`cluster_meta`), the shared `credentials`; hosted: the credentials kept on the server (`cluster-secrets.json`). Written through the config write path and `ClusterSecrets::set_bound`. |
+| `trust` | Jump hosts, pinned host keys and certificates | config `jump_hosts` (map or list), `pins.json` (`cert:`/`hostkey:` items), uploaded jump-host keys (`key:` items; the key text is a credential). |
+| `alerts` | Alert triggers and Automation rules | config `alerts` (or `alertRules`/`alert_rules`, the key is remembered in `meta.triggersKey`) as `trigger:` items, `automations` as `rule:` items (validated by `cluster_save::apply_automations`). |
+| `requests` | Request policy and Defaults | the request policy (`policy.json`, without the emergency stop; applied through `policy_apply`, so a managed field is still refused), config `defaults` without `volume`. |
+| `zabbix` | Zabbix connection, role mapping, roles set by hand | hosted: `zabbix-link.json` as `link` (URL, API URL, TLS, sources, sync period — **never the API token, the pairing secret or the pairing record**), config `zabbix` as `options` and `roleMap`, and `role:<name>` for every account whose role was set by hand (`USER_SET_ROLE` / No access). |
+| `reports` | Reports: indices, volume fields, mail, plan templates | `mail` (SMTP settings; the password is a credential, bound to its server), `schedules` (report schedules), `template:` items (plan templates, only when custom ones are kept), `volume` (config `defaults.volume`). |
+| `play` | Play: displays, watch rules, exclusions | `play-settings.json`: `watch`, `exclude`, `defaultDisplay`, `display:<id>` — never the display links or their secrets. Written through `play::settings::apply_change`. |
+| `data` | History store and scheduled log delay settings | `historyStore` (URL, auth kind, user, TLS, via, prefix, streams; the secret is a credential) and `logDelay` (the sink config without `enabled`). **Both restore disarmed**: the two gates are taken again by hand. |
+| `versions` | Earlier config versions | `config-history/`, each version redacted the same way as the live config, with its who/what record. Only ever added by a restore, never overwritten or trimmed. |
+
+**The file.** JSON: `{format: "elasticpro-backup", formatVersion: 1, coreVersion, takenAt,
+takenBy, kind: manual|scheduled|before-restore, sections: {id: {items, meta?}}, credentials?,
+digest}`. `digest` is `sha256:` over the canonical `sections`; a file whose digest does not match
+is refused unread (`corrupt`), a `formatVersion` above the server's is refused (`newer_format`:
+upgrade first, a restore never guesses), a section id the server does not know is left alone and
+named in `unknownSections`. Over 16 MB: `too_large`.
+
+**Credentials never travel in the clear.** Every secret in the sections — cluster passwords and
+API keys (a `password`, `apiKey`, `token`, `secret`… field or a URL's `user:pass@`), the shared
+credential, the server-kept credentials, the SMTP password, the history store's secret, uploaded
+jump-host keys — is pulled out into one `credentials` blob, `{count, scheme, sealed}`, which is
+either **left out** (no password typed: the file has `credentials: null` and the reply says how
+many were `leftOut`) or **sealed**: `scheme: "password"` with the backup password the admin typed
+(at least 12 characters, `weak_password` otherwise; `crypto::seal` — PBKDF2-HMAC-SHA512, 600 000
+rounds, AES-256-GCM, the same sealing as the config master password) or `scheme: "server"` under
+this server's own key (`cluster-secrets.key`, AES-256-GCM) for a copy that stays on this server.
+The sealed text carries the digest of the sections it belongs to, so a blob spliced onto another
+backup is refused (`tampered`). **Never in a backup**, whatever is ticked: the Zabbix API token,
+the Zabbix pairing secret, display-link secrets, accounts, sessions, API tokens — a restored
+server pairs and issues again. The backup password is never stored, logged or echoed; the
+schedule holds none (`BACKUP_SCHEDULE_SET` refuses a `password` key).
+
+**Kept backups** (hosted): `<data>/backups/elasticpro-backup-YYYYMMDD-HHMMSS-<kind>.epbak`, 0600
+in a 0700 directory, credentials sealed under the server's key — the download of a manual backup
+carries the password-sealed text the admin asked for, the kept copy is the server's. The name
+sorts by local time; a second in the same second gets `-2`. **Schedule** (`backups/schedule.json`,
+shipped on): every `day` at `02:00` server time (`TZ`), the last `14` kept (1–90), every section;
+checked once a minute, runs once per local day (or once per seven days for `week`) — a server
+that was down at 02:00 runs it at the next tick. Rotation removes the oldest beyond `keep` and is
+audited (`backup rotated out`). **Every restore first keeps the current state** as a
+`before-restore` backup (every section, server-sealed), so it can be undone by restoring that; if
+that copy cannot be written — or this server has no key to seal its credentials with
+(`no_server_key`) — nothing is restored. The same refusal stops a scheduled or `keep: true`
+backup: a kept copy is never silently written without its credentials.
+
+| Message | Role | Answer |
+|---|---|---|
+| `BACKUP_STATUS` | admin | `{ok, supported, keeps, dir, serverSealing, minPassword, sections: [{id, label}], schedule: {enabled, every, at, keep, keepMax, sections, last: {at, ok, name?, bytes, message?, localDay}?, next}, kept: [{name, bytes, takenAt, takenBy, kind, kindLabel, sections, credentials: password\|server\|none, credentialsCount, coreVersion, readable, problem?}]}`. `keeps: false` (desktop, or no data directory): download only, `kept` is empty. A damaged kept file stays in the list as `readable: false`. |
+| `BACKUP_CREATE {sections?, password?, keep?}` | admin | → `{ok, name, bytes, file, credentials: password\|none, secrets, leftOut, kept, notes, sections}`. `file` is the backup's text (the browser saves it as `name`). `password` (≥ 12 characters) seals the credentials; none leaves them out. `keep: true` also keeps a server-sealed copy and rotates (`unsupported` where nothing is kept). `notes` say what could not be included (a jump-host key that could not be read, a stored password the server key does not open) — said, never guessed. Audit line `backup created` (`user`, `kind`, `sections`, `credentials`, `secrets`, `bytes`, `kept`). |
+| `BACKUP_DOWNLOAD {name}` | admin | A kept backup's text: `{ok, name, bytes, file}`. `bad_request` for a name that is not one of ours, `not_found` when it is gone. Audit line `backup downloaded`. |
+| `BACKUP_DELETE {name}` | admin | Removes a kept backup; answers as `BACKUP_STATUS`. Audit line `backup deleted`. |
+| `BACKUP_SCHEDULE_SET {schedule: {enabled?, every?: day\|week, at?: "HH:MM", keep?, sections?}}` | admin | Absent keeps a field; any other key (`last`, `password`) is `bad_request`. Saves, rotates to the new `keep`, answers as `BACKUP_STATUS`. `unsupported` off hosted. Audit line `backup schedule changed`. |
+| `BACKUP_PREVIEW {file \| name, password?, skipCredentials?, sections?}` | admin | **Writes nothing.** `file` is uploaded text, `name` a kept backup. → `{ok, name, backup: {formatVersion, coreVersion, takenAt, takenBy, kind, kindLabel, sections, unknownSections, credentials: {count, scheme}?, bytes}, credentials: {state}, preview: [{id, label, present, add: [item], change: [item], same, onlyHere: [item], keptAnyway: [item]}], formatVersion}`. `backup.says` = `{takenBy, takenAt, coreVersion, verified: false}`: the file's own account of itself. `credentials.state`: `none` (the file has none), `skipped`, `opened` (+ `count`: the password or the server key opened them — they are dropped again, a preview never says what they are), `locked` (+ `kind`: `password_needed` or `server_key`, + `message`). A wrong password is `bad_password` and the preview is refused; `present: false` is a section the file lacks. |
+| `BACKUP_RESTORE {file \| name, mode: merge\|replace, sections?, password?, skipCredentials?}` | admin, no cluster limit | First the `before-restore` backup, then the sections (only those the file holds; `bad_request` when it holds none asked for). **Merge** adds and updates and keeps what is only here now — including a credential the backup did not bring (a file made without a password, or an older one): what this server holds is filled back in, so a merge never costs a cluster its live password; **Replace** makes each ticked section the backup's, so what is only here now is removed — exactly the items the preview listed under `onlyHere` (`Section::replace_removes`: records in lists, the shared credential, Zabbix options and role map, `defaults.volume`, Play's exclusions); the preview's `keptAnyway` (the request policy, Defaults, the Zabbix link, mail, report schedules, watch rules, history store, delay sink, versions) survives a Replace that brings none, and `removed` counts only the former. A trust pin whose `sha256` is not a SHA-256 certificate digest (64 hex characters) or an OpenSSH `SHA256:` host-key fingerprint is skipped and named. Roles set by hand go through the same rule as `USER_SET_ROLE` (never the restorer's own administrator role, No access only for an account another system signs in, open sessions refreshed or ended). The config is changed in memory and written once through the config write path (a version kept, `saved_by` the restorer, the record says what changed); the stores with setters of their own go through them (policy, Play, delay sink, history store, mail, plan templates, pins, keys, roles). Opened credentials are re-sealed under this server's key; `skipCredentials: true` or a file without any restores the settings alone and the clusters ask again. A mail or history-store secret typed for another server is not restored and said so. The Zabbix link comes back **without its token** (pair again); roles set by hand apply to accounts that exist here, the rest are named. → `{ok, mode, name, beforeRestore, credentials, backup, applied: [{id, label, added, changed, removed, notes}]}`. A refusal mid-way answers with `beforeRestore` set, so the kept copy is known. Audit lines `backup restored` (`user`, `mode`, `from`, `taken_at`, `taken_by`, `credentials`, `sections`, `before`) and `backup restore refused`. |
+
+Refusal kinds, with their codes in `docs/ERROR-CODES.md`: `weak_password` (EP-308),
+`bad_password` (EP-309), `password_needed` (EP-310), `server_key` / `no_server_key` (EP-311),
+`not_a_backup` (EP-312), `newer_format` (EP-313), `corrupt` / `tampered` (EP-314), `too_large`
+(EP-315); `forbidden` for anybody below admin or an admin limited to some clusters; `unsupported`
+where nothing is kept. Activity actions `backup_*`, category `configuration`. One backup-and-keep
+or restore runs at a time (two restores interleaved would each keep the other's half-written state
+as "before"). Proved by `tests/backup.rs` (in-process: sections, merge and replace, the format
+checks, the timer and rotation) and `tools/hosted-check.sh` (over HTTP: admin only, no secret
+without a password, the wrong password refused, a preview writes nothing, the before-restore copy
+with its modes, the Zabbix token never in a file, the password never in the log). The page's pure
+helpers are `ui/js/core/backup-rules.js` (`tools/unit/backup-rules.test.mjs` reads the section
+table back out of the core so the two cannot drift).
+
 ## Security model
 
 | | |
@@ -1160,6 +1243,8 @@ remove; `UI_PLAY_ENABLED=false` turns display links off.
 | TLS | rustls; OS trust store + Mozilla roots; per-address SHA-256 pin on explicit consent; pin mismatch → credential not sent |
 | SOCKS listener | loopback only, ephemeral port, accepts loopback peers only, CONNECT only — nothing else on the machine is told about it |
 | Data written by the app | `pins.json`, the remembered config path, theme, console history |
+| Backups | `<data>/backups/*.epbak` (0600): the sections an admin ticked, credentials only sealed (backup password: PBKDF2-HMAC-SHA512 + AES-256-GCM; kept copies: the server's own key) or left out; never the Zabbix API token, the pairing secret, display-link secrets, accounts or sessions. A restore keeps the current state first and goes through the config write path. See "Backup and restore" |
+| Backup with a password | **By design**: `BACKUP_CREATE {password}` exports every credential this server keeps — cluster passwords and API keys, the shared and the server-kept credentials, the SMTP and history-store secrets, **uploaded jump-host private keys** — in a form the backup password opens (the same KDF and cipher as the config master password, ≥ 12 characters). Administrators only, refused for one limited to some clusters, audited (`backup created` with `credentials=password`, `secrets=N`). The file's `takenBy`/`takenAt` are what the file says (`says.verified: false`): the digest proves the sections were not edited, not who wrote them. A sealed value with more KDF rounds than this project uses is refused unread (no round count typed into a file can set how long a preview keeps a core busy) |
 
 ## Verified (what the tests actually exercised)
 
@@ -1184,6 +1269,13 @@ clone alone (see `lab/README.md`):
   test covers every snapshot, repository, SLM and index-management call the UI makes
 - every page rendered against the real core in jsdom (`tools/render-check.mjs`), and the
   config reload path driven end to end with a sealed credential
+- backup and restore (`tests/backup.rs`, `tools/hosted-check.sh`): an operator and a display
+  link refused; a backup made without a password holds not one secret and names what it left
+  out; a sealed one has none in the clear; the wrong password refused; a preview writes no file
+  and no config; a merge keeps what is only here, a replace removes it, each after a
+  `before-restore` copy (0600, server-sealed) that this server opens again; the config written
+  through the history path with the restorer's name; the Zabbix token neither in the file nor
+  cleared by a restore; the timer once a local day, rotating to `keep`
 - the full UI (all 7 pages) in a browser through the dev bridge, and the real Tauri app on
   Linux under Xvfb: config → tunnel → trust prompts → 3/3 clusters online
 - the Windows (mingw) build of the core under Wine: same tunnel / pin / guard flow, plus

@@ -158,7 +158,7 @@ impl Play {
         }
     }
 
-    fn save_settings(&self, s: &settings::PlaySettings) -> Result<(), String> {
+    pub(crate) fn save_settings(&self, s: &settings::PlaySettings) -> Result<(), String> {
         if let Some(p) = &self.settings_path {
             let body = serde_json::to_vec_pretty(s).map_err(|e| e.to_string())?;
             write_private(p, &body)?;
