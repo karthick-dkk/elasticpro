@@ -1,6 +1,6 @@
 //! Plan templates (docs/REPORTS.md "Planning"): who may read and replace them, what is kept,
-//! what is refused, and the audit line. Its own binary: the audit capture is a thread-local
-//! subscriber (see play_audit.rs for why that wants a process to itself).
+//! what is refused, and the audit line. The audit capture is the process's one global
+//! subscriber (see `capture`), not a thread-local one: other tests here share the callsite.
 
 mod support;
 
@@ -9,12 +9,13 @@ use elasticpro_core::fleet::events::Reauth;
 use elasticpro_core::Core;
 use serde_json::{json, Value};
 use std::net::IpAddr;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use support::TempDir;
 
 const PASSWORD: &str = "correct-horse-battery";
 
 fn hosted(dir: &TempDir) -> Arc<Core> {
+    capture(); // before any test reaches the audit callsite
     Core::new_with_rounds(Some(dir.0.clone()), Edition::Hosted, 1)
 }
 
@@ -46,15 +47,33 @@ impl std::io::Write for Lines {
     }
 }
 
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Lines {
+    type Writer = Lines;
+    fn make_writer(&'a self) -> Lines {
+        self.clone()
+    }
+}
+
+/// The process's one subscriber, installed once. A thread-local `set_default` is what raced:
+/// a parallel test reaching the "plan templates changed" callsite first (no subscriber on its
+/// thread) made tracing-core cache the callsite as never-interesting for every thread, and the
+/// capture missed the line (see play_audit.rs). Other tests' lines land in the same buffer; the
+/// assertion looks for its own (the unique template name "Mine").
+fn capture() -> &'static Lines {
+    static CAP: OnceLock<Lines> = OnceLock::new();
+    CAP.get_or_init(|| {
+        let l = Lines::default();
+        tracing_subscriber::fmt().json().with_writer(l.clone()).with_max_level(tracing::Level::INFO).init();
+        l
+    })
+}
+
 #[tokio::test]
 async fn seeds_then_save_validate_audit_and_survive_a_restart() {
     let dir = TempDir::new("plan-templates");
     let c = hosted(&dir);
     let s = admin_session(&c).await;
-    let lines = Lines::default();
-    let sub = tracing_subscriber::fmt().json().with_writer({ let l = lines.clone(); move || l.clone() })
-        .with_max_level(tracing::Level::INFO).finish();
-    let _guard = tracing::subscriber::set_default(sub);
+    let lines = capture();
 
     // No file: the two seeded templates.
     let g = call(&c, &s, json!({ "type": "PLAN_TEMPLATES_GET" })).await;
