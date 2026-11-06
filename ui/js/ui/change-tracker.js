@@ -96,8 +96,12 @@ export function readTracked(root) {
  *   refresh()                      after a draw and on every input: re-read, redraw the bar
  *   reset(id) / resetAll()         take what is on screen as saved (after a load, a tab switch)
  *   changes()                      the current changes
+ *
+ * `beforeSave` / `afterSave` bracket the saves: the page holds its redraws in between, so a
+ * redraw in one section's save cannot put back the saved values over another section's typed
+ * ones before that section's save reads them, and redraws once at the end.
  */
-export function createTracker({ root }) {
+export function createTracker({ root, beforeSave = () => {}, afterSave = () => {} }) {
   const sections = new Map();
   let baselines = new Map();      // section → Map(key → field)
   let current = [];
@@ -154,6 +158,7 @@ export function createTracker({ root }) {
     if (!touched.length) return true;
     busy = true; drawBar();
     let all = true;
+    beforeSave();
     try {
       for (const id of touched) {
         const s = sections.get(id);
@@ -165,7 +170,7 @@ export function createTracker({ root }) {
       }
     } finally {
       busy = false;
-      refresh();
+      try { afterSave(); } finally { refresh(); }
     }
     return all;
   }

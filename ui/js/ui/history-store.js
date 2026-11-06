@@ -25,11 +25,17 @@ const hs = { reply: null, draft: null, redraw: () => {} };
 export const historySupported = () => isSupported(hs.reply);
 
 /** The section's load; `redraw` repaints the page. An older core or a desktop one leaves no tab. */
-export async function loadHistoryStore(redraw) {
+/**
+ * `fresh` is called when the form is about to show what the core holds afresh (this load), and
+ * not on the card's other redraws (a test, a change of the kind of credential): the page's save
+ * bar starts again from it then, and only then.
+ */
+export async function loadHistoryStore(redraw, fresh) {
   hs.redraw = redraw || hs.redraw;
   const res = await historyGet();
   hs.reply = isSupported(res) ? res : null;
   hs.draft = null;
+  if (fresh) fresh();
   hs.redraw();
 }
 

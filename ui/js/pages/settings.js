@@ -32,7 +32,7 @@ import { saveTextAs } from '../core/platform.js';
 import { editCluster, editJumpHost, editCredentials, defaultsFields, saveDefaultsForm, unlockSealed, saveRaw, rawClusterOf, editsFileDirectly } from '../ui/config-editor.js';
 import { card, pill, table, empty, configErrorBanner } from './common.js';
 import { navigateTo, intent } from '../core/intent.js';
-import { ALERT_RULES, loadAlertSettings, isEnabled, groupRules } from '../core/alert-rules.js';
+import { ALERT_RULES, loadAlertSettings, isEnabled, groupRules, nextRuleSettings } from '../core/alert-rules.js';
 import { isManagedDefault, isManagedZabbixOption, managedZabbixOptions, managedDefaults, MANAGED_NOTE } from '../core/managed.js';
 import { toast } from '../ui/menu.js';
 import { bridge } from '../core/transport.js';
@@ -143,7 +143,19 @@ let findText = '';
 let loadedSection = null;
 
 /** The save bar (ui/change-tracker.js): one for the page, kept across redraws. */
-const tracker = createTracker({ root: () => host });
+const tracker = createTracker({
+  root: () => host,
+  // While the save bar runs the sections' saves one after another, their redraws are held and
+  // done once at the end: a redraw in the first section's save (Zabbix connection) would put
+  // back the saved values over what was typed in the next (the sync options) before it is read.
+  beforeSave: () => { drawHeld += 1; },
+  afterSave: () => { drawHeld -= 1; if (!drawHeld && drawWanted) { drawWanted = false; draw(); } },
+});
+/** draw() calls held while the save bar saves (see beforeSave). */
+let drawHeld = 0;
+let drawWanted = false;
+/** Set once leaving this page was already confirmed (openTab), so the shell does not ask twice. */
+let leaveConfirmed = false;
 
 const roleNow = () => (state.caller ? state.caller.role : null);
 
@@ -194,9 +206,11 @@ export function hostedPage(id, mod) {
   return {
     render(el) { arrive(el, id, mod); },
     onData() { if (hostedMod && hostedMod.onData) hostedMod.onData(); },
-    onLeave() { leaveHosted(); },
+    onLeave() { leaveHosted(); host = null; },
     onRoute() { if (hostedMod && hostedMod.onRoute) hostedMod.onRoute(); },
     onKey(e) { return !!(hostedMod && hostedMod.onKey && hostedMod.onKey(e)); },
+    unsavedChanges,
+    hashNow,
   };
 }
 
@@ -209,6 +223,31 @@ function leaveHosted() {
 export function onLeave() {
   findText = '';
   leaveHosted();
+  // #view is every page's: a loader answering after this (Zabbix, the policy, the sink, the
+  // history store, a sync) must not paint Config-Management over the page now on screen.
+  host = null;
+}
+
+/**
+ * How many changes the save bar holds: the shell asks before it leaves this page (go(), a
+ * reload), with the same question openTab asks.
+ */
+export function unsavedChanges() {
+  if (leaveConfirmed || !host || !host.isConnected) return 0;
+  return tracker.changes().length;
+}
+
+/** The address of what is open, for the shell to put back when leaving is cancelled. */
+export function hashNow() {
+  return currentApp === 'settings' ? tabHash(route.page, route.tab) : `#/${currentApp}`;
+}
+
+if (typeof window !== 'undefined') {
+  window.addEventListener('beforeunload', (e) => {
+    if (!unsavedChanges()) return;
+    e.preventDefault();
+    e.returnValue = '';
+  });
 }
 
 function arrive(el, appId, mod) {
@@ -216,6 +255,7 @@ function arrive(el, appId, mod) {
   host = el;
   currentApp = appId;
   loadedSection = null;
+  leaveConfirmed = false;
   tracker.resetAll();
   if (mod) {
     const [page, tab] = HOSTED_TABS[appId];
@@ -246,8 +286,12 @@ function arrive(el, appId, mod) {
   // asked on arrival: their answers decide which tabs exist (Data, System › Backup).
   draw();
   if (mod) mod.render(hostedBody);
-  loadSink();
-  loadHistoryStore(() => { tracker.reset('history'); if (host && host.isConnected) draw(); });
+  if (isAdminCaller()) {
+    loadSink();
+    // The baseline starts again only when the store was read, not on every redraw of the card
+    // (changing the kind of credential redraws it, and that change must still count).
+    loadHistoryStore(() => { if (host && host.isConnected) draw(); }, () => tracker.reset('history'));
+  }
   loadCore();
 }
 
@@ -284,8 +328,9 @@ async function openTab(pageId, tabId, { field: f = null } = {}) {
   if (f) pendingField = f;
   const app = appPageOf(r.page, r.tab);
   if (app !== currentApp) {
-    intent.settings = app === 'settings' ? { page: r.page, tab: r.tab, field: f } : null;
-    navigateTo(app);
+    if (n) leaveConfirmed = true;   // asked above; the shell's go() must not ask again
+    // navigateTo sets intent.settings from its payload (core/intent.js): it is the one hand-off.
+    navigateTo(app, app === 'settings' ? { page: r.page, tab: r.tab, field: f } : undefined);
     return;
   }
   if (same) { if (pendingField) focusField(); return; }
@@ -342,6 +387,7 @@ tracker.register('plan-templates', { save: () => savePlanTemplates(() => draw())
 
 function draw() {
   if (!host) return;
+  if (drawHeld) { drawWanted = true; return; }
   const vis = visible();
   if (!vis.length) {
     mount(host, h('div.banner', h('div', h('div.ttl', 'Nothing here for this account'),
@@ -755,7 +801,7 @@ async function saveAlertRules() {
   for (const r of ALERT_RULES) {
     const box = host && host.querySelector(`#al-on-${r.id}`);
     if (!box) continue;
-    const entry = { ...(next[r.id] || {}), enabled: !!box.checked };
+    const typed = {};
     for (const t of r.thresholds || []) {
       const el = host.querySelector(`#al-th-${r.id}-${t.key}`);
       if (!el || el.disabled) continue;
@@ -765,9 +811,11 @@ async function saveAlertRules() {
         try { el.focus(); } catch (_) { /* jsdom */ }
         return false;
       }
-      entry.thresholds = { ...(entry.thresholds || {}), [t.key]: v };
+      typed[t.key] = v;
     }
-    next[r.id] = entry;
+    // Only what differs is written: a threshold left at the shared default stays unset.
+    const entry = nextRuleSettings(next[r.id], r, { on: !!box.checked, typed }, state.defaults);
+    if (entry) next[r.id] = entry; else delete next[r.id];
   }
   const before = raw.alertRules;
   raw.alertRules = next;

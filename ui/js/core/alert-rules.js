@@ -105,6 +105,29 @@ export const RULE_GROUPS = Object.freeze([
   { name: 'Logs, JVM and automation', ids: ['log-delay', 'heap', 'automation', 'volume'] },
 ]);
 
+/**
+ * What Config-Management's Alert triggers Save writes for one rule (its `alertRules[id]` entry),
+ * from what is on screen: `on` (the switch) and `typed` ({thresholdKey: number}, only the inputs
+ * that can be changed). Only what differs is written, so a rule nobody touched stays as it is —
+ * above all a threshold left at the shared default stays unset, and System › Defaults goes on
+ * deciding it; a value stored before is kept, or changed when it was changed.
+ * Returns the entry, or undefined when there is nothing to keep for the rule.
+ */
+export function nextRuleSettings(stored, rule, { on, typed = {} }, defaults = {}) {
+  const entry = { ...(stored && typeof stored === 'object' ? stored : {}) };
+  if (entry.enabled !== undefined || on === false) entry.enabled = !!on;
+  const was = entry.thresholds && typeof entry.thresholds === 'object' ? entry.thresholds : {};
+  const th = { ...was };
+  for (const t of (rule && rule.thresholds) || []) {
+    if (!Object.prototype.hasOwnProperty.call(typed, t.key)) continue;
+    const v = typed[t.key];
+    if (Object.prototype.hasOwnProperty.call(was, t.key)) { if (v !== was[t.key]) th[t.key] = v; }
+    else if (v !== defaults[t.key]) th[t.key] = v;
+  }
+  if (Object.keys(th).length) entry.thresholds = th; else delete entry.thresholds;
+  return Object.keys(entry).length ? entry : undefined;
+}
+
 /** `[{name, rules}]` in group order, each rule exactly once, registry order within a group. */
 export function groupRules(rules = ALERT_RULES) {
   const placed = new Set();

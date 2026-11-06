@@ -29,6 +29,7 @@ import { EVIDENCE_PAGES, evidenceLayout, evidenceSelection, createHeldNotices } 
 import { setHostedEdition } from './core/server-credentials.js';
 import { pausedPill, pausedKey } from './ui/paused-pill.js';
 import { reportsPill } from './ui/reports-pill.js';
+import { confirmDialog } from './ui/modal.js';
 import { reports as reportJobs, onReports, jobCounts, pillText as reportJobsText } from './core/reports.js';
 import { openYourSettings, closeYourSettings, normaliseMenuPosition } from './ui/your-settings.js';
 import { loadPrefs, savePref } from './core/prefs.js';
@@ -1031,6 +1032,9 @@ function scrollPageTop() {
 /** The page Play was opened from, for its Exit. */
 let playReturn = '';
 
+/** Set while go() runs after the person said yes to leaving with unsaved changes. */
+let leavingConfirmed = false;
+
 export function go(id) {
   id = pageAlias(id);
   // A hash typed by hand, or one left in the address bar by a previous session under a
@@ -1038,6 +1042,22 @@ export function go(id) {
   const allowed = visiblePages();
   const page = allowed.find((p) => p.id === id) || allowed[0] || PAGES[0];
   const changed = currentPage !== page.id;
+  // Config-Management's save bar holds changes nobody saved: asked first, as its own tabs ask.
+  // No: back where it was, address included.
+  if (changed && currentPage && !leavingConfirmed) {
+    const prev = PAGES.find((p) => p.id === currentPage);
+    const n = prev && prev.mod.unsavedChanges ? prev.mod.unsavedChanges() : 0;
+    if (n) {
+      confirmDialog('Leave without saving?',
+        `${n === 1 ? 'One change is' : `${n} changes are`} not saved yet. Leaving this page discards ${n === 1 ? 'it' : 'them'}.`,
+        { yes: 'discard and leave', danger: true }).then((yes) => {
+        if (yes) { leavingConfirmed = true; try { go(page.id); } finally { leavingConfirmed = false; } return; }
+        const back = prev.mod.hashNow ? prev.mod.hashNow() : `#/${currentPage}`;
+        if (location.hash !== back) { try { window.history.replaceState(null, '', back); } catch (_) { /* sandboxed frame */ } }
+      });
+      return;
+    }
+  }
   // The page being left is told so, before anything of the next one is drawn: a live tail
   // or a timer belongs to the page that started it. (Live logs exported onLeave() for this
   // and nothing called it — the tail ran on under whatever page came next.)

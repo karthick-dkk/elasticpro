@@ -166,3 +166,31 @@ test('a section with its own model of what changed', () => {
   assert.equal(c.section, 'pt');
   assert.match(t.bar.textContent, /Plan template "A" edited/);
 });
+
+test('redraws are held while the sections save, so one section cannot wipe the next one\'s typing', async () => {
+  // Two sections, like Zabbix's connection and its sync options: the first one's save redraws
+  // the whole page from what is saved, which would put the second one's old value back.
+  const held = { n: 0, wanted: false };
+  let store = { url: 'a', opt: false };
+  const page = () => {
+    if (held.n) { held.wanted = true; return; }
+    root.innerHTML = `<div data-track="link"><label class="field">URL<input id="z-url" value="${store.url}"></label></div>`
+      + `<div data-track="opts"><label><input id="z-opt" type="checkbox" ${store.opt ? 'checked' : ''}><span>Create hosts</span></label></div>`;
+  };
+  page();
+  const t = T.createTracker({
+    root: () => root,
+    beforeSave: () => { held.n += 1; },
+    afterSave: () => { held.n -= 1; if (!held.n && held.wanted) { held.wanted = false; page(); } },
+  });
+  t.register('link', { save: async () => { store = { ...store, url: document.getElementById('z-url').value }; page(); return true; } });
+  t.register('opts', { save: async () => { store = { ...store, opt: document.getElementById('z-opt').checked }; page(); return true; } });
+  t.refresh();
+  document.getElementById('z-url').value = 'b';
+  document.getElementById('z-opt').checked = true;
+  assert.equal(t.refresh().length, 2);
+  assert.equal(await t.save(), true);
+  assert.deepEqual(store, { url: 'b', opt: true }, 'the second section\'s change was lost to the first one\'s redraw');
+  assert.deepEqual(t.changes(), []);
+  assert.equal(document.getElementById('z-opt').checked, true, 'the page was not redrawn once at the end');
+});
