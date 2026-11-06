@@ -111,7 +111,7 @@ function authSelect(auth) {
 const when = (t) => (t ? `${dt(t)} (${ago(t)})` : '—');
 const kv = (k, v) => h('tr.kv', h('td.k', k), h('td.v', v));
 
-export function historyStoreCard() {
+export function historyStoreCard({ extraRows = [] } = {}) {
   const r = hs.reply;
   if (!r || !r.supported) return null;
   const s = settings();
@@ -128,7 +128,7 @@ export function historyStoreCard() {
   const row = { style: { display: 'flex', gap: '14px', flexWrap: 'wrap', alignItems: 'end' } };
   const lines = privilegeLines(t, r.settings && r.settings.prefix);
 
-  return card('History store', `the optional Elasticsearch backend \u00b7 ${armed ? 'writing' : 'not writing'}`,
+  return card('Elasticsearch cluster', `optional \u00b7 a dedicated store, never a monitored cluster \u00b7 ${armed ? 'writing' : 'not writing'}`,
     h('div', { style: { display: 'grid', gap: '8px' } },
       h('div', row,
         field('URL', text('hs-url', s.url, { mono: true, placeholder: 'https://history.example:9200', style: { width: '320px' } }),
@@ -181,6 +181,7 @@ export function historyStoreCard() {
           ? kv('Not sent', `${st.refused || 0} refused by the guard · ${st.rejected || 0} rejected by the store · ${st.dropped || 0} dropped (queue full)`)
           : null,
         kv('Template created', when(st.templateAt)),
+        ...extraRows.map(([k, v]) => kv(k, v)),
       ]),
       h('div.muted', { style: { fontSize: '11.5px' } },
         'Retention of the store’s indices is the store owner’s: ElasticPro creates an index template (mappings only) '

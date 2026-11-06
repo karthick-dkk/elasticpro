@@ -8,7 +8,7 @@ import { createRedrawGate, onRefreshed, normalisePolicy, normaliseScope, opening
 import * as cfg from './core/config.js';
 import { state, bus, setConfig, refreshAll, refreshModule, REFRESH_MODULES, startAutoRefresh, clusters, fleetMode,
          alerts, cachedAlerts, worstHealth, requestLoad, fleetPolicy, fetchesOnlyOnAsk,
-         clustersNeedingCredential, clustersWithAuthError, hasSessionCredential, isReadOnly, healthState, activeClusters, openAlertsNow, openAlertCounts, syncFleet } from './core/state.js';
+         clustersNeedingCredential, clustersWithAuthError, hasSessionCredential, isReadOnly, healthState, activeClusters, openAlertsNow, mergedAlerts, openAlertCounts, syncFleet } from './core/state.js';
 import { rowMenu, toast, notificationBell, setNotificationSink, dropNotification, closePopover, dismissToasts } from './ui/menu.js';
 import { showCredentialDialog, serverHoldsCredentials, serverCredentialMessage } from './ui/credential-dialog.js';
 import { loadSnapshotFile, isSnapshotMode } from './core/snapshot.js';
@@ -21,6 +21,8 @@ import { createNewConfig, editCluster, unlockSealed } from './ui/config-editor.j
 import { applyLoadedConfig } from './ui/load-config.js';
 import { authState, loginScreen, signOut } from './ui/login.js';
 import { aboutMini } from './ui/about.js';
+import { createReporter, createLease, sessionStore } from './core/alert-events.js';
+import { alertEventsPut, isSupported as routingSupported } from './core/data-routing.js';
 import { announceNewAlerts, announceSnapshotOutcomes, resetAnnounced } from './core/notify.js';
 import { onSessionLost, bridge, setSession, setSignedIn, abortPage } from './core/transport.js';
 import { readLaunch, withoutCode, withoutTrouble, troubleshootTarget, themeFor, exchangeCode, rememberEmbedTheme, askZabbixToSignIn, rememberPageForReauth, takeRememberedPage } from './core/embed.js';
@@ -1387,12 +1389,41 @@ function waitForZabbix() {
   return true;
 }
 
+/**
+ * Alerts raised and cleared, told to the core for the alerts record (Data › Backend). Only a
+ * signed-in person's page does (never a display link, a snapshot file or an embedded frame),
+ * only on a core that routes records, and the reporter itself keeps to transitions, batches,
+ * a debounce and a stop on `too_many` (core/alert-events.js).
+ */
+const alertReporter = createReporter({
+  send: (events) => alertEventsPut(events),
+  enabled: () => !embedded && !!me && me.role !== 'guest' && !isDisplay() && !isSnapshotMode() && routingSupported(coreInfo),
+  store: sessionStore(),
+  lease: createLease({ storage: (() => { try { return localStorage; } catch (_) { return null; } })() }),
+});
+function reportAlertEvents() {
+  try {
+    if (!me) return;
+    const levels = new Map();
+    const merged = mergedAlerts();
+    for (const m of merged) for (const k of m.keys || []) levels.set(k, m.level);
+    // What is known of each configured cluster: an alert that merely stopped being evaluated
+    // (cluster down, being rebuilt, out of scope) is not a cleared one.
+    const known = new Map(clusters().map((c) => {
+      const d = state.data.get(c.id);
+      return [c.id, !d || d.healthUnknown ? 'unknown' : d.reachable ? 'up' : 'down'];
+    }));
+    alertReporter.observe(merged, { levelOf: (k) => levels.get(k), status: (id) => known.get(id) }).catch(() => {});
+  } catch (_) { /* reporting is a convenience; never stop a refresh */ }
+}
+
 bus.on('refreshing', () => { tickStatus(); });
 bus.on('refreshed', (ev) => {
   maybeOfferAuthRecovery(); renderTopbar(); renderSideFoot(); renderNav();
   // After the nav, so the tab badge and the toast agree about what is open.
   // Zabbix announces problems itself; a toast here would be the same news twice.
   if (!embedded) announceNewAlerts({ notify: announce });
+  reportAlertEvents();
   // Snapshots finish long after the dialog that started them closed, so the outcome is
   // announced from the refresh that first sees it rather than by whoever happens to be
   // on the Snapshots page.

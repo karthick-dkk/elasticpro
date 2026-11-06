@@ -51,7 +51,9 @@ import { playSection, loadPlay, savePlayWatch, playDisplayCount } from '../ui/pl
 import { historyStoreCard, loadHistoryStore, historySupported, saveHistoryStore, discardHistoryStore, historyArmed } from '../ui/history-store.js';
 import { destinationOf, destinationWarning } from '../core/history-store.js';
 import { CFG_PAGES, HOSTED_TABS, LEGACY_SECTIONS, visibleConfig, subLine, resolveRoute, routeOfRest, tabHash, appPageOf,
-  findSettings, SETTING_INDEX, ZABBIX_ROLES_INDEX } from '../core/config-nav.js';
+  findSettings, SETTING_INDEX, ZABBIX_ROLES_INDEX, DATA_ROUTING_INDEX } from '../core/config-nav.js';
+import { dataRoutingCard, builtinCard, loadDataRouting, saveDataRouting, discardDataRouting, routingStatusNow } from '../ui/data-routing.js';
+import { isSupported as routingSupportedBy, storeStreamRows } from '../core/data-routing.js';
 import { createTracker } from '../ui/change-tracker.js';
 import { zabbixRolesCards, zabbixRolesSupported as rolesSupported, loadZabbixRoles, saveZabbixRoles, discardZabbixRoles, zabbixRolesChanges } from '../ui/zabbix-roles.js';
 import { parseHash } from '../reports/route.js';
@@ -189,7 +191,7 @@ export function backupSupported() { return !!(core && core.backup && core.backup
  * Alerts each kept built-in, built-in + Elasticsearch, or Elasticsearch only. Shown only when
  * PING reports `dataRouting: {supported: true}`; until then Backend is the history store alone.
  */
-export function dataRoutingSupported() { return !!(core && core.dataRouting && core.dataRouting.supported === true); }
+export function dataRoutingSupported() { return routingSupportedBy(core); }
 /**
  * Zabbix › "ElasticPro roles from Zabbix user groups" and "Zabbix users" (board 2). Shown only
  * when the core knows the group map: ZABBIX_ROLEMAP_GET answers with `groupMapSaved` (docs/ROLES.md;
@@ -253,12 +255,14 @@ if (typeof window !== 'undefined') {
 }
 
 function arrive(el, appId, mod) {
+  routingAsked = false;      // a visit reads the routing afresh
   if (currentApp !== appId || hostedMod !== mod) leaveHosted();
   host = el;
   currentApp = appId;
   loadedSection = null;
   leaveConfirmed = false;
   tracker.resetAll();
+  discardDataRouting();
   if (mod) {
     const [page, tab] = HOSTED_TABS[appId];
     route = { page, tab };
@@ -304,6 +308,7 @@ export function onRoute() {
   if (!r.page || (r.page === route.page && (r.tab || '') === (route.tab || ''))) return;
   route = { page: r.page, tab: r.tab };
   tracker.resetAll();
+  discardDataRouting();
   draw();
 }
 
@@ -313,7 +318,13 @@ async function loadCore() {
   const v = host && host.querySelector('#cm-version');
   if (v) v.textContent = core && core.version ? `v${core.version}` : 'version not reported';
   if (backupSupported() && host && host.isConnected) draw();
+  // The routing panel asks once PING says the core routes its records (admin only).
+  if (dataRoutingSupported() && isAdminCaller() && !routingAsked) {
+    routingAsked = true;
+    loadDataRouting(() => { if (host && host.isConnected) draw(); }, () => tracker.reset('routing'));
+  }
 }
+let routingAsked = false;
 
 /**
  * Open a page and tab. A hosted tab is its own app page, so going there (or leaving one) is
@@ -338,6 +349,7 @@ async function openTab(pageId, tabId, { field: f = null } = {}) {
   if (same) { if (pendingField) focusField(); return; }
   route = r;
   tracker.resetAll();
+  discardDataRouting();
   polDraft = null;
   draw();
 }
@@ -381,6 +393,7 @@ tracker.register('zabbix-link', { save: () => saveLink(), discard: () => { token
 tracker.register('zabbix-roles', { save: () => saveZabbixRoles(() => draw()), discard: () => { discardZabbixRoles(); draw(); }, changes: () => zabbixRolesChanges() });
 tracker.register('zabbix-opts', { save: () => saveZabbixOptions(), discard: () => draw() });
 tracker.register('schedule', { save: () => saveSink(), discard: () => draw() });
+tracker.register('routing', { save: () => saveDataRouting(), discard: () => { discardDataRouting(); draw(); } });
 tracker.register('history', { save: () => saveHistoryStore(), discard: () => { discardHistoryStore(); draw(); } });
 tracker.register('volume', { save: () => saveVolume(), discard: () => { vol.note = null; draw(); } });
 tracker.register('report-mail', { save: () => saveReportSchedule(), discard: () => draw() });
@@ -481,6 +494,7 @@ function pageMeta(id) {
 /** The search index with what pages add at run time: every alert rule by its name. */
 function runtimeIndex() {
   return [...SETTING_INDEX, ...(zabbixRolesSupported() && isAdminCaller() ? ZABBIX_ROLES_INDEX : []),
+    ...(dataRoutingSupported() && isAdminCaller() ? DATA_ROUTING_INDEX : []),
     ...ALERT_RULES.map((r) => ['alerts', 'triggers', r.label, `al-on-${r.id}`, `alert rule ${r.id} ${r.level}`])];
 }
 
@@ -2570,13 +2584,18 @@ function templatesTab() {
 /* --------------------------------------- Data --------------------------------------- */
 
 /**
- * Data › Backend: the history store as the optional Elasticsearch backend. The board's "Where
- * each kind of data goes" table (History / Reports / Alerts, each built-in, built-in + ES, or ES
- * only) and the built-in store's size are Phase 2 (dataRoutingSupported()): nothing reports them
- * yet, so nothing is drawn for them.
+ * Data › Backend: the board's "Where each kind of data goes" table (History / Reports / Alerts,
+ * each built-in, built-in + ES, or ES only), the ElasticPro built-in card, and the history store
+ * as the "Elasticsearch cluster" card. The first two exist only on a core whose PING says
+ * dataRouting.supported (dataRoutingSupported()), for an admin; an older core is the cluster card alone.
  */
 function backendTab() {
-  return h('div.cm-stack', { dataset: { track: 'history', trackLabel: 'History store' } }, historyStoreCard());
+  const routing = dataRoutingSupported() && isAdminCaller();
+  return h('div.cm-stack',
+    routing ? dataRoutingCard() : null,
+    routing ? builtinCard({ backup: backupSupported() }) : null,
+    h('div', { dataset: { track: 'history', trackLabel: 'Elasticsearch cluster' } },
+      historyStoreCard({ extraRows: routing ? storeStreamRows(routingStatusNow()) : [] })));
 }
 
 /* -------------------------------------- System -------------------------------------- */

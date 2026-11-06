@@ -1585,6 +1585,27 @@ await go('settings');
     status: { lastSuccessAt: null, lastError: null, lastErrorAt: null, docsWritten: 0, queue: 0, templateAt: null, backfill: null },
     jumpHosts: [],
   };
+  const routingStub = { backup: false, refuse: null, routing: { history: 'copy', reports: 'builtin', alerts: 'builtin', reportFiles: false, changedBy: null, changedAt: null } };
+  const MODES_STUB = [{ id: 'builtin', label: 'ElasticPro built-in' }, { id: 'copy', label: 'ElasticPro + Elasticsearch (copy)' }, { id: 'es', label: 'Elasticsearch only' }];
+  const routingReply = (withStatus) => {
+    const r = routingStub.routing;
+    const out = { ok: true, supported: true, routing: { ...r }, modes: MODES_STUB, store: { configured: true, armed: false, writing: 'Write history is off' } };
+    if (!withStatus) return out;
+    const kinds = {};
+    for (const k of ['history', 'reports', 'alerts']) {
+      const mode = r[k];
+      const onStore = mode !== 'builtin';
+      kinds[k] = {
+        mode, label: mode, state: mode === 'builtin' ? 'builtin' : mode === 'es' ? 'queued' : 'paused',
+        line: mode === 'builtin' ? 'ElasticPro built-in only' : 'waiting for the store',
+        keptFor: { builtin: k === 'history' ? '13 months' : 'as today', store: "owner's ILM" },
+        // reports: the built-in size could not be read; unknown must not read as 0
+        builtin: { size: { bytes: k === 'reports' ? null : 820000000, files: 3, truncated: false } },
+        store: { docs: null, docsNote: onStore ? 'the store did not answer' : 'kept built-in', queued: onStore ? 7 : 0, dropped: 0, writing: !onStore, why: onStore ? 'Write history is off' : null },
+      };
+    }
+    return { ...out, builtin: { dir: '/var/lib/elasticpro', size: { bytes: 1073741824, files: 40, truncated: false }, diskTotal: 500e9, diskFree: 212e9 }, kinds };
+  };
   const delayStub = {
     supported: true,
     config: { enabled: false, sinkClusterId: '', clusters: [], everyHours: 2, indexPrefix: 'elasticpro-log-delay',
@@ -1607,6 +1628,22 @@ await go('settings');
       if (t === 'HISTORY_STORE_ARM') { hist.armed = !!body.on; }
       return stubReply({ ok: true, ...hist });
     }
+    if (t === 'PING') {
+      // The hosted core also says it routes its records (docs/HANDBOOK.md "Backend — the message contract").
+      const r = await realFetch(input, init);
+      let j = {};
+      try { j = JSON.parse(await r.text()); } catch (_) { return r; }
+      // Backup support is stated here, not inherited from whatever core the check runs against.
+      return stubReply({ ...j, dataRouting: { supported: true }, backup: { supported: routingStub.backup === true } });
+    }
+    if (t.startsWith('DATA_ROUTING')) {
+      sent.push(body);
+      if (t === 'DATA_ROUTING_SET') {
+        if (routingStub.refuse) return stubReply({ ok: false, kind: 'bad_request', message: routingStub.refuse });
+        Object.assign(routingStub.routing, body.routing, { changedBy: 'admin', changedAt: Date.now() });
+      }
+      return stubReply(routingReply(t === 'DATA_ROUTING_STATUS'));
+    }
     if (t.startsWith('DELAY_SINK')) {
       if (t === 'DELAY_SINK_SET') { lastDelaySet = body.config; return stubReply({ ok: true, ...delayStub, config: body.config }); }
       return stubReply({ ok: true, ...delayStub });
@@ -1620,12 +1657,12 @@ await go('settings');
 
   ok(await openSettingsTab('History store'), 'settings: no History store tab on a hosted core');
   const hcard = () => [...doc.querySelectorAll('section.card')]
-    .find((sec) => (sec.querySelector('header h2') || {}).textContent === 'History store');
+    .find((sec) => (sec.querySelector('header h2') || {}).textContent === 'Elasticsearch cluster');
   const click = async (c, label) => {
     [...c.querySelectorAll('button')].find((b) => b.textContent === label).click();
     await settleFor(250);
   };
-  ok(!!hcard(), 'settings: no History store card on a hosted core');
+  ok(!!hcard(), 'settings: no Elasticsearch cluster card on a hosted core');
   if (hcard()) {
     // Changing the kind of credential redraws the card; the change still counts for the save bar.
     {
@@ -1677,6 +1714,83 @@ await go('settings');
     const setMsg = sent.find((m) => m.type === 'HISTORY_STORE_SET');
     ok(setMsg && setMsg.settings.url === hist.settings.url && !('password' in setMsg.settings),
       `history: Save sent ${JSON.stringify(setMsg)} (an empty password must be left out)`);
+  }
+
+  // Data > Backend: where each kind of data goes, and the built-in card.
+  {
+    const rcard = () => [...doc.querySelectorAll('section.card')]
+      .find((sec) => (sec.querySelector('header h2') || {}).textContent === 'Where each kind of data goes');
+    await settleFor(300);
+    ok(!!rcard(), 'backend: no "Where each kind of data goes" card on a core that routes its records');
+    const sel = (k) => doc.getElementById(`dr-mode-${k}`);
+    // A value set from code fires no input event: tell the page, as typing would, without pressing Save.
+    const openBar = async () => { const body = doc.querySelector('#view .cm-body'); if (body) body.dispatchEvent(new window.Event('input', { bubbles: true })); await settleFor(60); };
+    if (rcard()) {
+      ok(rcard().querySelectorAll('tbody tr').length === 3, 'backend: the table does not have History, Reports and Alerts rows');
+      ok(sel('history').value === 'copy' && sel('reports').value === 'builtin' && sel('alerts').value === 'builtin',
+        `backend: the selects show ${['history', 'reports', 'alerts'].map((k) => sel(k).value)}`);
+      ok([...sel('alerts').options].map((o) => o.textContent).join('|') === 'ElasticPro built-in|ElasticPro + Elasticsearch (copy)|Elasticsearch only',
+        'backend: the Kept in options are not the board\'s three');
+      const reportsRow = rcard().querySelector('tr[data-kind="reports"]');
+      ok(/unknown/.test(reportsRow.querySelector('[data-cell="size"]').textContent) && !/\b0 B\b/.test(reportsRow.textContent),
+        `backend: an unreadable size is not shown as unknown: ${reportsRow.textContent}`);
+      ok(![...rcard().querySelectorAll('button')].some((b) => /save/i.test(b.textContent)), 'backend: the card has its own Save button');
+      ok(!doc.getElementById('dr-reportFiles'), 'backend: the report file switch shows while reports are built-in');
+      ok(!!doc.getElementById('dr-changed') && /history follows/i.test(doc.getElementById('dr-changed').textContent),
+        'backend: an unsaved routing does not say history follows the store');
+      const bcard = [...doc.querySelectorAll('section.card')].find((x) => (x.querySelector('header h2') || {}).textContent === 'ElasticPro built-in');
+      ok(bcard && /1\.00 GB/.test(bcard.textContent) && /free on that disk/.test(bcard.textContent), `backend: the built-in card lacks size and free space: ${bcard && bcard.textContent}`);
+      ok(bcard && !bcard.querySelector('#dr-backup-link'), 'backend: a Backed up link shows while PING says backup.supported is false');
+
+      // Reports to the store: the switch and its warning appear; the save bar names the change.
+      sel('reports').value = 'copy'; sel('reports').dispatchEvent(new window.Event('change', { bubbles: true }));
+      sel('alerts').value = 'es'; sel('alerts').dispatchEvent(new window.Event('change', { bubbles: true }));
+      await settleFor(250);
+      ok(!!doc.getElementById('dr-reportFiles') && /reports-\*/.test(doc.getElementById('dr-reportfiles-note').textContent),
+        'backend: the report file switch and its note did not appear for reports on the store');
+      await openBar();
+      const bar = doc.getElementById('cm-savebar');
+      ok(bar && !bar.hidden && /Reports kept in/.test(bar.textContent) && /Alerts kept in/.test(bar.textContent),
+        `backend: the save bar does not name the routing changes: ${bar && bar.textContent}`);
+      // A refusal is shown plainly and nothing is lost.
+      routingStub.refuse = 'the history store is not configured';
+      sent.length = 0;
+      await saveViaBar(300);
+      ok(sent.some((m) => m.type === 'DATA_ROUTING_SET'), 'backend: Save sent no DATA_ROUTING_SET');
+      ok(/history store is not configured/.test((doc.getElementById('dr-refusal') || {}).textContent || ''), 'backend: the core\'s refusal is not shown');
+      ok(sel('alerts').value === 'es', 'backend: a refused save lost what was chosen');
+      // Accepted: only the changed fields travel, the bar goes, the warning shows for es + not writing.
+      routingStub.refuse = null;
+      sent.length = 0;
+      await saveViaBar(400);
+      const setMsg = sent.find((m) => m.type === 'DATA_ROUTING_SET');
+      ok(setMsg && JSON.stringify(setMsg.routing) === JSON.stringify({ reports: 'copy', alerts: 'es' }), `backend: Save sent ${JSON.stringify(setMsg)}`);
+      ok(doc.getElementById('cm-savebar').hidden, 'backend: the save bar stays up after a saved routing');
+      ok(/Not writing to Elasticsearch/.test((doc.getElementById('dr-es-warning') || {}).textContent || ''), 'backend: Elasticsearch only with a closed store shows no warning');
+      // Discard returns the choice.
+      sel('alerts').value = 'builtin'; sel('alerts').dispatchEvent(new window.Event('change', { bubbles: true }));
+      await settleFor(200);
+      ok(!!doc.getElementById('dr-letgo'), 'backend: setting a kind back to built-in does not say it lets go of the queue');
+      await openBar();
+      const d2 = doc.querySelector('#cm-savebar:not([hidden]) button[data-act="discard"]');
+      if (d2) { d2.click(); await settleFor(250); }
+      ok(sel('alerts').value === 'es', 'backend: Discard did not return the saved choice');
+    }
+  }
+
+  // The same card on a core that can take backups: the link is there and goes to Backup & restore.
+  {
+    routingStub.backup = true;
+    await go('overview');
+    await go('settings');
+    await settleFor(300);
+    ok(await openSettingsTab('History store'), 'backend: the Backend tab did not open on a backup-capable core');
+    await settleFor(300);
+    const bcard = [...doc.querySelectorAll('section.card')].find((x) => (x.querySelector('header h2') || {}).textContent === 'ElasticPro built-in');
+    const link = bcard && bcard.querySelector('#dr-backup-link');
+    ok(!!link, 'backend: no Backed up link while PING says backup.supported is true');
+    ok(link && link.getAttribute('href') === '#/settings/system/backup', `backend: the Backed up link goes to ${link && link.getAttribute('href')}`);
+    routingStub.backup = false;
   }
 
   // The delay card: the monitored cluster unless the admin says otherwise.
