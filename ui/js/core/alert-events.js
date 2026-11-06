@@ -23,6 +23,10 @@ export const FLUSH_MS = 20000;
 export const GRACE_PASSES = 2;
 /** After the core says alerts are kept built-in (`routed: false`) nothing is sent for this long. */
 export const UNROUTED_PAUSE_MS = 10 * 60000;
+/** The core's quota window: 200 events per account per 15 minutes. `too_many` pauses for it. */
+export const ALERT_EVENTS_WINDOW_MS = 15 * 60000;
+export const LEASE_MS = 45000;
+const LEASE_KEY = 'ep.alertEvents.lease';
 const STORE_KEY = 'ep.alertEvents.seen';
 
 /** A key the core will accept: `<clusterId>:<rule>[:<instance>]` with a rule the pages know (or Play's node-left). */
@@ -42,17 +46,31 @@ export function keysOf(merged) {
   return out;
 }
 
+/** The cluster a key belongs to. */
+export const clusterOfKey = (key) => String(key || '').split(':')[0];
+const ruleOfKey = (key) => String(key || '').split(':')[1] || '';
+
 /**
  * One pass against the last. `seen` is a Map(key → passes absent) or null before the first
- * pass. Returns the events and the next `seen`.
+ * pass. `status(clusterId)` says what is known of the cluster now: 'up' (answered; its alerts
+ * were evaluated), 'down' (unreachable: only its `unreachable` key is evaluated, the rest are
+ * held or aged out), 'unknown' (not read yet, or being rebuilt) or anything else / undefined
+ * (no longer configured, disabled or out of this person's scope).
+ *
+ * A key that merely stopped being evaluated is not a cleared alert: keys of a down or unknown
+ * cluster are carried forward untouched, and keys of a cluster that is gone are dropped
+ * silently (no `cleared`). Returns the events and the next `seen`.
  */
-export function transitions(seen, keys, { grace = GRACE_PASSES, levelOf = () => undefined, at = Date.now() } = {}) {
+export function transitions(seen, keys, { grace = GRACE_PASSES, levelOf = () => undefined, at = Date.now(), status = () => 'up' } = {}) {
   const now = new Map([...keys].map((k) => [k, 0]));
   if (seen === null) return { events: [], seen: now };
   const events = [];
   for (const k of keys) if (!seen.has(k)) events.push(mk('raised', k, levelOf(k), at));
   for (const [k, gone] of seen) {
     if (keys.has(k)) continue;
+    const st = status(clusterOfKey(k));
+    if (st === 'unknown' || (st === 'down' && ruleOfKey(k) !== 'unreachable')) { now.set(k, gone); continue; }
+    if (st !== 'up' && st !== 'down') continue;                // gone or out of scope: forgotten, not cleared
     if (gone + 1 >= grace) events.push(mk('cleared', k, levelOf(k), at));
     else now.set(k, gone + 1);
   }
@@ -84,17 +102,44 @@ export function coalesce(queue) {
 }
 
 /**
+ * One reporting tab per browser: every tab sharing the account would otherwise spend the same
+ * 200-per-15-minutes quota. A lease in localStorage `{id, until}`; the holder renews it on
+ * every pass, anyone may take it once it has expired. `storage` is a localStorage-shaped
+ * object; with none, every tab reports (the single-tab case).
+ */
+export function createLease({ storage = null, id = Math.random().toString(36).slice(2), now = () => Date.now(), ttl = LEASE_MS } = {}) {
+  return {
+    id,
+    acquire() {
+      if (!storage) return true;
+      try {
+        const cur = JSON.parse(storage.getItem(LEASE_KEY) || 'null');
+        if (cur && cur.id !== id && cur.until > now()) return false;
+        storage.setItem(LEASE_KEY, JSON.stringify({ id, until: now() + ttl }));
+        const back = JSON.parse(storage.getItem(LEASE_KEY) || 'null');
+        return !!back && back.id === id;
+      } catch (_) { return true; }
+    },
+    release() {
+      if (!storage) return;
+      try { const cur = JSON.parse(storage.getItem(LEASE_KEY) || 'null'); if (cur && cur.id === id) storage.removeItem(LEASE_KEY); } catch (_) { /* gone */ }
+    },
+  };
+}
+
+/**
  * The reporter. `send(events)` resolves to the core's reply (`{ok, routed, kind}`), never throws.
  * `store` is `{get(), set(arr)}` or null. `enabled()` is asked on every pass: false for a display
  * link, a snapshot file, an older core, no signed-in user.
  */
-export function createReporter({ send, enabled = () => true, now = () => Date.now(), store = null, flushMs = FLUSH_MS } = {}) {
+export function createReporter({ send, enabled = () => true, now = () => Date.now(), store = null, flushMs = FLUSH_MS, lease = null } = {}) {
   let seen = null;
   let queue = [];
   let lastFlush = 0;
   let stopped = false;
   let pausedUntil = 0;
   let busy = false;
+  const blocked = new Set();      // clusters the core said this person may not report on
   if (store) {
     try { const prev = store.get(); if (Array.isArray(prev)) seen = new Map(prev.map((k) => [k, 0])); } catch (_) { /* no storage */ }
   }
@@ -108,10 +153,21 @@ export function createReporter({ send, enabled = () => true, now = () => Date.no
       const todo = coalesce(queue);
       queue = [];
       for (const b of batches(todo)) {
-        const res = await send(b);
-        if (res && res.ok === false && (res.kind === 'too_many' || res.kind === 'forbidden' || res.supported === false || res.unknown)) {
-          stopped = true; queue = []; return;
+        let res = await send(b);
+        if (res && res.ok === false && res.kind === 'forbidden') {
+          // The core names no cluster: ask per cluster, drop the one(s) refused, carry on.
+          const by = new Map();
+          for (const e of b) { const c = clusterOfKey(e.key); (by.get(c) || by.set(c, []).get(c)).push(e); }
+          res = { ok: true };
+          for (const [c, evs] of by) {
+            const r = await send(evs);
+            if (r && r.ok === false && r.kind === 'forbidden') blocked.add(c);
+            else if (r && r.ok === false) { res = r; break; }
+            else if (r && r.ok === true && r.routed === false) res = r;
+          }
         }
+        if (res && res.ok === false && res.kind === 'too_many') { pausedUntil = now() + ALERT_EVENTS_WINDOW_MS; queue = []; return; }
+        if (res && res.ok === false && (res.supported === false || res.unknown)) { stopped = true; queue = []; return; }
         if (res && res.ok === true && res.routed === false) { pausedUntil = now() + UNROUTED_PAUSE_MS; return; }
       }
     } finally { busy = false; }
@@ -119,16 +175,20 @@ export function createReporter({ send, enabled = () => true, now = () => Date.no
 
   return {
     /** One refresh's merged alerts. Resolves after any flush it caused. */
-    async observe(merged, { levelOf } = {}) {
+    async observe(merged, { levelOf, status } = {}) {
       if (stopped || !enabled()) return;
       const keys = keysOf(merged);
-      const r = transitions(seen, keys, { levelOf, at: now() });
+      const r = transitions(seen, keys, { levelOf, status, at: now() });
       seen = r.seen;
       if (store) { try { store.set([...seen.keys()]); } catch (_) { /* no storage */ } }
-      if (r.events.length && now() >= pausedUntil) queue.push(...r.events);
-      await flush();
+      // A tab that does not hold the lease keeps its picture current and reports nothing.
+      const mine = !lease || lease.acquire();
+      if (mine && now() >= pausedUntil) queue.push(...r.events.filter((e) => !blocked.has(clusterOfKey(e.key))));
+      if (mine) await flush();
     },
     get stopped() { return stopped; },
+    get pausedUntil() { return pausedUntil; },
+    get blocked() { return [...blocked]; },
     get queued() { return queue.length; },
   };
 }

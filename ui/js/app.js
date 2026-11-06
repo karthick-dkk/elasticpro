@@ -21,7 +21,7 @@ import { createNewConfig, editCluster, unlockSealed } from './ui/config-editor.j
 import { applyLoadedConfig } from './ui/load-config.js';
 import { authState, loginScreen, signOut } from './ui/login.js';
 import { aboutMini } from './ui/about.js';
-import { createReporter, sessionStore } from './core/alert-events.js';
+import { createReporter, createLease, sessionStore } from './core/alert-events.js';
 import { alertEventsPut, isSupported as routingSupported } from './core/data-routing.js';
 import { announceNewAlerts, announceSnapshotOutcomes, resetAnnounced } from './core/notify.js';
 import { onSessionLost, bridge, setSession, setSignedIn, abortPage } from './core/transport.js';
@@ -1399,6 +1399,7 @@ const alertReporter = createReporter({
   send: (events) => alertEventsPut(events),
   enabled: () => !embedded && !!me && me.role !== 'guest' && !isDisplay() && !isSnapshotMode() && routingSupported(coreInfo),
   store: sessionStore(),
+  lease: createLease({ storage: (() => { try { return localStorage; } catch (_) { return null; } })() }),
 });
 function reportAlertEvents() {
   try {
@@ -1406,7 +1407,13 @@ function reportAlertEvents() {
     const levels = new Map();
     const merged = mergedAlerts();
     for (const m of merged) for (const k of m.keys || []) levels.set(k, m.level);
-    alertReporter.observe(merged, { levelOf: (k) => levels.get(k) }).catch(() => {});
+    // What is known of each configured cluster: an alert that merely stopped being evaluated
+    // (cluster down, being rebuilt, out of scope) is not a cleared one.
+    const known = new Map(clusters().map((c) => {
+      const d = state.data.get(c.id);
+      return [c.id, !d || d.healthUnknown ? 'unknown' : d.reachable ? 'up' : 'down'];
+    }));
+    alertReporter.observe(merged, { levelOf: (k) => levels.get(k), status: (id) => known.get(id) }).catch(() => {});
   } catch (_) { /* reporting is a convenience; never stop a refresh */ }
 }
 

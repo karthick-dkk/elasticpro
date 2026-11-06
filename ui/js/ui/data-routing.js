@@ -43,8 +43,9 @@ export async function loadDataRouting(redraw, fresh) {
   const [get, status] = await Promise.all([routingGet(), routingStatus()]);
   dr.get = get && get.ok !== false && get.supported !== false ? get : null;
   dr.status = status && status.ok !== false && status.supported !== false ? status : null;
-  dr.draft = null; dr.refusal = '';
-  if (fresh) fresh();
+  // A choice made and not saved yet is kept over a re-read (it is the person's); otherwise the
+  // screen starts again from what the core holds.
+  if (!dr.draft) { dr.refusal = ''; if (fresh) fresh(); }
   dr.redraw();
 }
 
@@ -72,7 +73,7 @@ function readControls() {
   return out;
 }
 
-/** The bar's Discard. */
+/** The bar's Discard, and leaving the page or tab: what was chosen and not saved is forgotten. */
 export function discardDataRouting() { dr.draft = null; dr.refusal = ''; }
 
 /** The save bar runs this. True when the core took it; its refusal is shown otherwise. */

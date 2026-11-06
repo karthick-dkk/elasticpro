@@ -73,7 +73,8 @@ export const modeOf = (routing, kind) => {
  */
 export function statusCell(kindStatus) {
   const k = kindStatus || {};
-  const state = k.state || 'builtin';
+  if (!k.state) return { tone: 'muted', text: 'status unknown' };
+  const state = k.state;
   const tone = state === 'writing' || state === 'builtin' ? 'ok' : state === 'queued' || state === 'paused' ? 'warn' : 'muted';
   return { tone, text: k.line || (state === 'builtin' ? 'ElasticPro built-in only' : state) };
 }
@@ -119,8 +120,10 @@ export function esOnlyWarning(status) {
   const queued = Object.values(kinds).filter((k) => k && k.mode === 'es' && k.state === 'queued');
   if (!queued.length) return '';
   const why = (queued[0].store && queued[0].store.why) || 'the store is not writing';
-  const n = queued.reduce((a, k) => a + ((k.store && k.store.queued) || 0), 0);
-  return `Not writing to Elasticsearch: ${why}. ElasticPro keeps writing to its built-in store meanwhile · ${num(n)} queued.`;
+  const counted = queued.filter((k) => k.store && Number.isFinite(k.store.queued));
+  const n = counted.reduce((a, k) => a + k.store.queued, 0);
+  const tail = counted.length ? ` \u00b7 ${num(n)} queued` : '';
+  return `Not writing to Elasticsearch: ${why}. ElasticPro keeps writing to its built-in store meanwhile${tail}.`;
 }
 
 /**

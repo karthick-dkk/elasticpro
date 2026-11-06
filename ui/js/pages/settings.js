@@ -255,12 +255,14 @@ if (typeof window !== 'undefined') {
 }
 
 function arrive(el, appId, mod) {
+  routingAsked = false;      // a visit reads the routing afresh
   if (currentApp !== appId || hostedMod !== mod) leaveHosted();
   host = el;
   currentApp = appId;
   loadedSection = null;
   leaveConfirmed = false;
   tracker.resetAll();
+  discardDataRouting();
   if (mod) {
     const [page, tab] = HOSTED_TABS[appId];
     route = { page, tab };
@@ -306,6 +308,7 @@ export function onRoute() {
   if (!r.page || (r.page === route.page && (r.tab || '') === (route.tab || ''))) return;
   route = { page: r.page, tab: r.tab };
   tracker.resetAll();
+  discardDataRouting();
   draw();
 }
 
@@ -346,6 +349,7 @@ async function openTab(pageId, tabId, { field: f = null } = {}) {
   if (same) { if (pendingField) focusField(); return; }
   route = r;
   tracker.resetAll();
+  discardDataRouting();
   polDraft = null;
   draw();
 }

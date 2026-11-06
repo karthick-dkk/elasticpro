@@ -33,7 +33,8 @@ test('the status cell is the core\'s line with a tone', () => {
   assert.deepEqual(R.statusCell({ state: 'builtin', line: 'ElasticPro built-in only' }), { tone: 'ok', text: 'ElasticPro built-in only' });
   assert.equal(R.statusCell({ state: 'queued', line: 'not writing …' }).tone, 'warn');
   assert.equal(R.statusCell({ state: 'paused', line: 'not copying …' }).tone, 'warn');
-  assert.deepEqual(R.statusCell(undefined), { tone: 'ok', text: 'ElasticPro built-in only' });
+  assert.deepEqual(R.statusCell(undefined), { tone: 'muted', text: 'status unknown' }, 'no state is unknown, not built-in');
+  assert.deepEqual(R.statusCell({ mode: 'es' }), { tone: 'muted', text: 'status unknown' });
 });
 
 test('kept for names both sides only when the kind goes to the store', () => {
@@ -89,4 +90,12 @@ test('only changed fields are sent, and going back to built-in is named', () => 
     { reports: 'es', alerts: 'builtin', reportFiles: true });
   assert.deepEqual(R.routingChanges(routing, {}), {});
   assert.deepEqual(R.letGoKinds(routing, { history: 'builtin', alerts: 'es', reports: 'builtin' }), ['History']);
+});
+
+test('the warning omits a count the core did not give', () => {
+  const w = R.esOnlyWarning({ kinds: { alerts: { mode: 'es', state: 'queued', store: { why: 'gate closed' } } } });
+  assert.match(w, /gate closed/);
+  assert.doesNotMatch(w, /queued\./);
+  assert.doesNotMatch(w, /0 queued/);
+  assert.match(R.esOnlyWarning({ kinds: { alerts: { mode: 'es', state: 'queued', store: { why: 'x', queued: 4 } } } }), /4 queued/);
 });
