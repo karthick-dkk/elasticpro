@@ -174,5 +174,5 @@ export function builtinCard({ backup = false } = {}) {
         ? kv('Backed up', h('span', 'Yes, in ', h('a#dr-backup-link', { href: tabHash('system', 'backup') }, 'Backup & restore')))
         : null,
       kv('Search it', 'From ElasticPro pages only'),
-    ]));
+    ].filter(Boolean)));
 }
