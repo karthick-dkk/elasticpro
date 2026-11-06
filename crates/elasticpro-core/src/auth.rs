@@ -1566,9 +1566,10 @@ impl UserStore {
     /// `absent_syncs` and `gone`; false for a person a complete list no longer names. `scope`:
     /// the cluster scope the live groups give (`zbx_sso::scope_for`), rewritten like a sign-in
     /// rewrites it so the proxy path, which reads `Account::scope`, sees the live groups; `None`
-    /// leaves it — and a pinned account's is never touched: a sync does nothing to a pinned
-    /// person. The outcome carries the account's role and scope as they are *now*, read under
-    /// the lock, for the caller to push into open sessions — never a snapshot from before.
+    /// leaves it. A pin covers the role only: a pinned account's scope follows the live groups
+    /// like anybody's (the caller computes it for the pinned role, so a pinned admin's is None).
+    /// The outcome carries the account's role and scope as they are *now*, read under the lock,
+    /// for the caller to push into open sessions — never a snapshot from before.
     pub fn lower_at_sync(&self, name: &str, target: Option<Role>, facts: ZabbixFacts, why: String, confirmed: bool,
                          scope: Option<Option<Vec<String>>>) -> Result<SyncOutcome, AuthError> {
         let out = {
@@ -1582,7 +1583,7 @@ impl UserStore {
                 a.absent_syncs = 0;
                 a.gone = false;
             }
-            if let (Some(s), false) = (scope, a.role_pinned) {
+            if let Some(s) = scope {
                 a.scope = s;
             }
             let change = if a.role_pinned || a.no_access || a.disabled || target.is_some_and(|t| t >= a.role) {

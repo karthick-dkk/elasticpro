@@ -784,26 +784,45 @@ async fn a_sync_never_touches_a_pinned_persons_scope_and_follows_the_live_groups
         let l = c.handle(json!({ "type": "USER_LIST", "session": s })).await;
         l["users"].as_array().unwrap().iter().map(|u| (u["name"].as_str().unwrap().to_string(), u["scope"].clone(), u["role"].clone())).collect::<Vec<_>>()
     } };
-    // a.kumar: a user in NOC, scoped to it. b.singh: pinned admin, whose sign-in as an admin set no scope.
+    // a.kumar: a user in NOC, scoped to it. b.singh: pinned admin, whose sign-in as an admin set no
+    // scope. c.ops: a user in NOC and Client A team, pinned *user* (an admin's choice to keep them
+    // a user whatever the groups say). o.pin: pinned operator.
     let (_, out, kumar) = sign_in(&c, "a.kumar", 1, Some("User role"), &[("3", "NOC")]).await;
     assert_eq!(out["scoped"], json!(true), "{out}");
     sign_in(&c, "b.singh", 1, Some("User role"), &[("4", "Client A team")]).await;
     c.handle(json!({ "type": "USER_SET_ROLE", "session": a, "name": "b.singh@zabbix", "role": "admin" })).await;
     let (_, out, singh) = sign_in(&c, "b.singh", 1, Some("User role"), &[("4", "Client A team")]).await;
     assert_eq!((out["role"].clone(), out["scoped"].clone()), (json!("admin"), json!(false)), "{out}");
+    let (_, _, cops) = sign_in(&c, "c.ops", 1, Some("User role"), &[("3", "NOC"), ("4", "Client A team")]).await;
+    c.handle(json!({ "type": "USER_SET_ROLE", "session": a, "name": "c.ops@zabbix", "role": "user" })).await;
+    sign_in(&c, "o.pin", 1, Some("User role"), &[("3", "NOC")]).await;
+    c.handle(json!({ "type": "USER_SET_ROLE", "session": a, "name": "o.pin@zabbix", "role": "operator" })).await;
     let before = scope_of(&a).await;
     assert!(before.iter().any(|(n, s, r)| n == "a.kumar@zabbix" && *s == json!(["NOC"]) && *r == json!("user")), "{before:?}");
     assert!(before.iter().any(|(n, s, r)| n == "b.singh@zabbix" && s.is_null() && *r == json!("admin")), "{before:?}");
+    assert!(before.iter().any(|(n, s, r)| n == "c.ops@zabbix" && *s == json!(["Client A team", "NOC"]) && *r == json!("user")), "{before:?}");
+    assert!(before.iter().any(|(n, s, r)| n == "o.pin@zabbix" && *s == json!(["NOC"]) && *r == json!("operator")), "pinned after a user's sign-in, the scope is stale until something rewrites it: {before:?}");
 
-    // Live: b.singh is in Client A team only (mapped to user); a.kumar gained Client A team.
-    set_users(json!([zuser("a.kumar", 1, &[("3", "NOC"), ("4", "Client A team")]), zuser("b.singh", 1, &[("4", "Client A team")])]));
+    // Live: b.singh is in Client A team only (mapped to user); a.kumar gained Client A team;
+    // c.ops was removed from Client A team; o.pin is in NOC still.
+    set_users(json!([zuser("a.kumar", 1, &[("3", "NOC"), ("4", "Client A team")]), zuser("b.singh", 1, &[("4", "Client A team")]),
+                     zuser("c.ops", 1, &[("3", "NOC")]), zuser("o.pin", 1, &[("3", "NOC")])]));
     let r = c.zabbix_sync().await;
-    assert_eq!(r["roleChanges"], json!([]), "{r}");
+    assert_eq!(r["roleChanges"], json!([]), "no pinned role moves, and nobody else's is lower: {r}");
     let after = scope_of(&a).await;
-    // The pinned admin: scope still None, still admin, session untouched.
-    assert!(after.iter().any(|(n, s, r)| n == "b.singh@zabbix" && s.is_null() && *r == json!("admin")), "a pinned person is never touched: {after:?}");
+    // The pinned admin: scope None (an administrator is never narrowed), still admin, session untouched.
+    assert!(after.iter().any(|(n, s, r)| n == "b.singh@zabbix" && s.is_null() && *r == json!("admin")), "a pinned admin is never narrowed: {after:?}");
     let who = c.handle(json!({ "type": "WHOAMI", "session": singh.clone().unwrap() })).await;
     assert_eq!((who["caller"]["role"].clone(), who["caller"]["scoped"].clone()), (json!("admin"), json!(false)), "{who}");
+    // The pinned user: the role stays pinned, but the clusters follow the live groups — the pin
+    // covers the role only — in the account and in the open session.
+    assert!(after.iter().any(|(n, s, r)| n == "c.ops@zabbix" && *s == json!(["NOC"]) && *r == json!("user")), "a pinned user's scope narrows with the groups: {after:?}");
+    let who = c.handle(json!({ "type": "WHOAMI", "session": cops.unwrap() })).await;
+    assert_eq!((who["caller"]["role"].clone(), who["caller"]["scoped"].clone()), (json!("user"), json!(true)), "{who}");
+    let zu = c.handle(json!({ "type": "ZABBIX_USERS", "session": a })).await;
+    assert_eq!((user(&zu, "c.ops@zabbix")["pinned"].clone(), user(&zu, "c.ops@zabbix")["inForce"].clone()), (json!(true), json!("user")));
+    // The pinned operator: operators see every cluster, so the stale user scope is lifted (None).
+    assert!(after.iter().any(|(n, s, r)| n == "o.pin@zabbix" && s.is_null() && *r == json!("operator")), "scope computed for the role in force: {after:?}");
     // The unpinned user: the scope follows the live groups (it may widen — scope is not a role),
     // in the account and in the open session (the caller says only whether it is scoped; the
     // account row carries the list).

@@ -4899,15 +4899,14 @@ impl Core {
                 (zbx_sso::Source::ZabbixRole, None) => "in none of the mapped user groups, and their Zabbix role gives no role".to_string(),
                 (zbx_sso::Source::Unmapped, _) => "in none of the mapped user groups, and the map gives those users no access".to_string(),
             };
-            // The scope follows the live groups as a sign-in's would, for the role they end with
-            // — for an unpinned person; a pinned person is not touched by a sync at all.
-            let scope = if a.role_pinned {
-                None
-            } else {
-                let names: Vec<String> = u.groups.iter().map(|g| g.name.clone()).collect();
-                let ends_with = res.role.map_or(a.role, |t| t.min(a.role));
-                Some(zbx_sso::scope_for(ends_with, &names, scope_by_group))
-            };
+            // The scope follows the live groups as a sign-in's would, for the role they end with.
+            // A pin covers the role only: a pinned person's role is not moved, but which clusters
+            // they see is still what their Zabbix groups say now — a pinned user removed from a
+            // group loses its clusters. A pinned admin's scope is None whatever the groups say
+            // (scope_for), so an administrator is never narrowed.
+            let names: Vec<String> = u.groups.iter().map(|g| g.name.clone()).collect();
+            let ends_with = if a.role_pinned { a.role } else { res.role.map_or(a.role, |t| t.min(a.role)) };
+            let scope = Some(zbx_sso::scope_for(ends_with, &names, scope_by_group));
             self.apply_lowering(&mut out, a, &name, res.role, facts, why, true, scope);
         }
         out

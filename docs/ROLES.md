@@ -36,9 +36,12 @@ users with their groups (`user.get`) and re-runs the same `resolve_claim` for ev
 Zabbix account. A role the live groups no longer justify is **lowered at once** — to the lower
 role, or to no access (`noAccess: true` with `pinned: false`) — and the person's sessions end.
 **No role is ever raised** at a sync: a raise waits for the next signed sign-in, the only claim
-the core trusts upwards. (The cluster *scope* of an unpinned person follows the live groups as a
-sign-in's would, and may widen — scope is not a role. A pinned person is not touched at all,
-role or scope.) The step fails closed towards *no change*: when `user.get` is refused
+the core trusts upwards. The cluster *scope* is not a role: for every listed person, pinned or
+not, it follows the live groups as a sign-in's would, computed for the role in force after the
+sync (`scope_for`), and may widen or narrow — a pin covers the **role only**, so a pinned user
+removed from a Zabbix group loses that group's clusters at the sync, while a pinned (or any)
+administrator's scope is always None and is never narrowed. The step fails closed towards *no
+change*: when `user.get` is refused
 (a token without it), fails, answers nothing, or names none of the accounts this core knows,
 nobody moves. People the answer lists are judged on the groups it lists for them. People it does
 **not** list depend on whether the list is complete — the sync token's own user is of the Super
@@ -80,7 +83,8 @@ that sees only some users cannot make every change refusable for ever; `unverifi
 not acted on. A *gone* account (absent from a complete list) counts for nothing in every guard,
 pinned or not: a deleted user cannot sign in. An unpinned one is also set to no access — unless
 it was the last administrator, in which case the role is kept and logged (the site then needs
-a local administrator). Hand pins are never flipped by a sync.
+a local administrator). Hand pins are never flipped by a sync (their scope still follows the
+groups, as above).
 
 Pinned people, No access by hand, blocked accounts and the last administrator able to sign in
 are never lowered (the last admin case is logged: `role kept at sync`). A no access the sync
