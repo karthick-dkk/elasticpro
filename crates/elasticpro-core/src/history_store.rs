@@ -402,8 +402,9 @@ pub struct HistoryStore {
     ticking: AtomicBool,
     /// One test at a time.
     testing: tokio::sync::Mutex<()>,
-    /// `Stored::template_key` of the store the template was verified on, in this process.
-    template_ok: Mutex<Option<String>>,
+    /// `Stored::template_key` + `|` + the template's name, for each template verified on the
+    /// store in this process (the history template, the reports' and the alerts').
+    template_ok: Mutex<BTreeSet<String>>,
     /// The store did not answer a read: `(destination, until, why)`.
     unreachable: Mutex<Option<(String, u64, String)>>,
 }
@@ -428,7 +429,7 @@ impl HistoryStore {
             backfill: Mutex::new(None),
             ticking: AtomicBool::new(false),
             testing: tokio::sync::Mutex::new(()),
-            template_ok: Mutex::new(None),
+            template_ok: Mutex::new(BTreeSet::new()),
             unreachable: Mutex::new(None),
         };
         if h.stored.read().armed && !permitted() {
@@ -527,6 +528,20 @@ impl HistoryStore {
     pub fn queue_len(&self) -> usize {
         self.queue.lock().len()
     }
+
+    /// Documents waiting, per stream.
+    pub fn queue_counts(&self) -> BTreeMap<String, usize> {
+        let mut out = BTreeMap::new();
+        for k in self.queue.lock().keys() {
+            *out.entry(k.0.clone()).or_insert(0) += 1;
+        }
+        out
+    }
+
+    /// Whether the index template `name` was verified on this store under this prefix, in this process.
+    pub(crate) fn template_verified(&self, s: &Stored, name: &str) -> bool {
+        self.template_ok.lock().contains(&format!("{}|{name}", s.template_key()))
+    }
 }
 
 /// Whether config.txt permits writes to the store: the first gate.
@@ -536,8 +551,12 @@ pub fn permitted() -> bool {
 
 /* ------------------------------------------ documents ------------------------------------------ */
 
-/// `<prefix>-<stream>-YYYY.MM` for a `YYYY-MM-DD` day.
+/// `<prefix>-<stream>-YYYY.MM` for a `YYYY-MM-DD` day — the reports and alerts streams
+/// (`data_routing`) are yearly, `<prefix>-<stream>-YYYY`.
 pub fn index_for_day(prefix: &str, stream: &str, day: &str) -> Option<String> {
+    if matches!(stream, crate::data_routing::REPORTS_STREAM | crate::data_routing::ALERTS_STREAM) {
+        return crate::data_routing::year_index(prefix, stream, day);
+    }
     let d = parse_day(day)?;
     Some(format!("{prefix}-{stream}-{}", month_key(d).replace('-', ".")))
 }
@@ -1077,7 +1096,7 @@ impl Core {
             }
             v
         });
-        let template_ok = self.history_store.template_ok.lock().as_deref() == Some(s.template_key().as_str());
+        let template_ok = self.history_store.template_verified(&s, &template_name(s.prefix()));
         json!({
             "ok": true, "supported": true,
             "settings": {
@@ -1298,24 +1317,38 @@ impl Core {
         tracing::info!(target: "audit", "history store: timer started");
     }
 
-    /// The index template, verified once per store and prefix in this process: created with
-    /// `create=true`, so a template of the same name is never replaced; one that is already
-    /// there is accepted only when it is ElasticPro's (`_meta.managedBy`, the same pattern).
+    /// The history template (volume, capacity, delay), verified once per store and prefix in
+    /// this process. See `history_ensure_template_for`.
     async fn history_ensure_template(self: &Arc<Self>) -> Result<(), String> {
+        self.history_ensure_template_for("volume").await
+    }
+
+    /// The index template a stream's indices take — the history template for the three
+    /// history streams, the reports' or the alerts' (`data_routing`) — verified once per store,
+    /// prefix and template in this process: created with `create=true`, so a template of the
+    /// same name is never replaced; one that is already there is accepted only when it is
+    /// ElasticPro's (`_meta.managedBy`, the same pattern).
+    async fn history_ensure_template_for(self: &Arc<Self>, stream: &str) -> Result<(), String> {
         let (key, prefix) = {
             let s = self.history_store.stored.read();
             (s.template_key(), s.prefix().to_string())
         };
-        if self.history_store.template_ok.lock().as_deref() == Some(key.as_str()) {
+        let (name, body, pattern) = match stream {
+            crate::data_routing::REPORTS_STREAM => (crate::data_routing::reports_template_name(&prefix),
+                                                   crate::data_routing::reports_template_body(&prefix), format!("{prefix}-{stream}-*")),
+            crate::data_routing::ALERTS_STREAM => (crate::data_routing::alerts_template_name(&prefix),
+                                                  crate::data_routing::alerts_template_body(&prefix), format!("{prefix}-{stream}-*")),
+            _ => (template_name(&prefix), template_body(&prefix), format!("{prefix}-*")),
+        };
+        let mark = format!("{key}|{name}");
+        if self.history_store.template_ok.lock().contains(&mark) {
             return Ok(());
         }
-        let name = template_name(&prefix);
-        let res = self.es_req(self.history_req("PUT", format!("/_index_template/{name}?create=true"),
-                                               Some(template_body(&prefix).to_string()), 30_000)).await;
+        let res = self.es_req(self.history_req("PUT", format!("/_index_template/{name}?create=true"), Some(body.to_string()), 30_000)).await;
         if !ok(&res) {
             let reason = why(&res);
             if !reason.contains("already exists") {
-                return Err(format!("the index template: {reason}"));
+                return Err(format!("the index template {name}: {reason}"));
             }
             let got = self.es_req(self.history_req("GET", format!("/_index_template/{name}"), None, 15_000)).await;
             if !ok(&got) {
@@ -1323,15 +1356,17 @@ impl Core {
             }
             let t = got.pointer("/json/index_templates/0/index_template").cloned().unwrap_or(Value::Null);
             let ours = t.pointer("/_meta/managedBy").and_then(Value::as_str) == Some("ElasticPro")
-                && t.get("index_patterns") == Some(&json!([format!("{prefix}-*")]));
+                && t.get("index_patterns") == Some(&json!([pattern.clone()]));
             if !ours {
                 return Err(format!("an index template named {name} already exists on the store and is not ElasticPro's \
-                                    (no _meta.managedBy ElasticPro for {prefix}-*): remove it or choose another prefix"));
+                                    (no _meta.managedBy ElasticPro for {pattern}): remove it or choose another prefix"));
             }
         }
-        *self.history_store.template_ok.lock() = Some(key);
-        self.history_store.status.lock().template_at = Some(now());
-        tracing::info!(target: "audit", prefix = %prefix, "history store: index template verified");
+        self.history_store.template_ok.lock().insert(mark);
+        if name == template_name(&prefix) {
+            self.history_store.status.lock().template_at = Some(now());
+        }
+        tracing::info!(target: "audit", prefix = %prefix, template = %name, "history store: index template verified");
         Ok(())
     }
 
@@ -1382,17 +1417,18 @@ impl Core {
     }
 
     async fn history_tick_inner(self: &Arc<Self>) -> Value {
+        // Records another process left (the report worker's): queued, or not, by the routing
+        // in force now — whatever the gates say, so an "Elasticsearch only" record waits here
+        // rather than being lost (data_routing.rs). Files: off the runtime.
+        let core = self.clone();
+        let _ = tokio::task::spawn_blocking(move || core.routing_drain_spool()).await;
         if let Err(why) = self.history_writes_open() {
             self.history_store.status.lock().last_skipped = Some(why.clone());
-            return json!({ "ok": false, "skipped": why });
+            return json!({ "ok": false, "skipped": why, "queue": self.history_store.queue_len() });
         }
         self.history_store.status.lock().last_skipped = None;
         if self.history_store.queue_len() == 0 {
             return json!({ "ok": true, "written": 0 });
-        }
-        if let Err(e) = self.history_ensure_template().await {
-            self.history_note_error(&e);
-            return json!({ "ok": false, "error": e });
         }
         let bulks = cut_bulks(&self.history_store.queue.lock(), BULKS_PER_TICK);
         let (mut written, mut refused_n, mut rejected_n, mut error) = (0u64, 0u64, 0u64, None::<String>);
@@ -1408,6 +1444,11 @@ impl Core {
             };
             if items.is_empty() {
                 continue;
+            }
+            // A bulk is one stream's; its indices' template first (verified once per process).
+            if let Err(e) = self.history_ensure_template_for(&items[0].0 .0).await {
+                error = Some(e);
+                break;
             }
             let refs: Vec<(&QKey, &Queued)> = items.iter().map(|(k, v)| (k, v)).collect();
             match self.history_send_bulk(&refs).await {
@@ -1484,15 +1525,16 @@ impl Core {
         s.configured() && s.streams.on(stream)
     }
 
-    fn cluster_name(&self, id: &str) -> String {
+    pub(crate) fn cluster_name(&self, id: &str) -> String {
         self.spec_for(id).and_then(|s| s.name).unwrap_or_else(|| id.to_string())
     }
 
-    /// After a volume collection: the days it changed go in the queue. Only while both gates
-    /// are open — a closed gate is not a backlog that floods the store the moment it opens
-    /// (*Copy existing history* is how the past gets there).
+    /// After a volume collection: the days it changed go in the queue when the routing admits
+    /// them (data_routing.rs): as a copy only while both gates are open — a closed gate is not
+    /// a backlog that floods the store the moment it opens (*Copy existing history* is how the
+    /// past gets there); as "Elasticsearch only" whatever the gates say, so nothing is lost.
     pub(crate) fn history_volume_changed(&self, cluster: &str, days: &BTreeSet<String>) {
-        if days.is_empty() || !self.history_stream_on("volume") || self.history_writes_open().is_err() {
+        if days.is_empty() || !self.history_stream_on("volume") || !self.routing_admits(crate::data_routing::Kind::History) {
             return;
         }
         let Some(store) = &self.volume.store else { return };
@@ -1518,7 +1560,7 @@ impl Core {
 
     /// After a cluster's scheduled daily run: its capacity document for today, once a day.
     pub(crate) async fn history_capacity_after_run(&self, cluster: &str) {
-        if !self.history_stream_on("capacity") || self.history_writes_open().is_err() {
+        if !self.history_stream_on("capacity") || !self.routing_admits(crate::data_routing::Kind::History) {
             return;
         }
         let today = utc_day(now() as i64);
@@ -1566,6 +1608,9 @@ impl Core {
     /// month. `Err` says which gate is closed.
     pub(crate) fn history_delay_index(&self, year: i64, month: i64) -> Result<String, String> {
         self.history_writes_open()?;
+        if !self.routing().history.sends_to_store() {
+            return Err("history is kept in ElasticPro's built-in store only (Data › Backend)".into());
+        }
         if !self.history_stream_on("delay") {
             return Err("the history store's delay stream is off (Config › History store)".into());
         }

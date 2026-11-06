@@ -227,3 +227,80 @@ record there had no indices). A store that cannot be reached adds no rows: the r
 `history.reachable` is `false` and the page says "in the history store · not reachable" once, in
 amber, rather than one row per day it cannot know existed. The template is created with
 `create=true` and checked with a `GET` (not a `HEAD`: the `_meta` marker is in the body).
+
+## Backend routing (0.3.55)
+
+Data › Backend (board 10 of the Config-Management redesign, approved 2026-11-05): **where
+ElasticPro keeps what it records.** Three kinds of data, each kept in one of three places. The
+Elasticsearch side is **always the history store above** — the dedicated endpoint, its own
+credential, its guard and its two gates — never a monitored cluster (`history_store_is_a_cluster`
+still refuses one). Code: `crates/elasticpro-core/src/data_routing.rs`; settings in
+`<data>/data-routing.json`; UI helpers `ui/js/core/data-routing.js`.
+
+| Kind | What | Built-in record (as today, unchanged) | On the store |
+|---|---|---|---|
+| **history** | volume, capacity, log-delay records | the volume record's month files (`keepMonths`, default 13); the delay measurement is written to a cluster or the store, never kept locally | `<prefix>-volume-YYYY.MM`, `-capacity-YYYY.MM`, `-delay-YYYY.MM`, as above |
+| **reports** | generated report files and the job history | `<data>/reports/` (`KEEP_FILE_DAYS` 7 for files, `KEEP_FINISHED` 200 jobs in `jobs.json`) | `<prefix>-reports-YYYY`, `_id` = the job id, one document per job that ended |
+| **alerts** | acknowledged, silenced, and what the pages saw raised and cleared | `acks.json`, `silences.json` (the live state) | `<prefix>-alerts-YYYY`, `_id` = `<event>\|<key>\|<at>` |
+
+| Mode | Meaning |
+|---|---|
+| `builtin` (**default for every kind**) | nothing of this kind goes to the store. For history that also refuses the delay sink's `destination: "history"` ("history is kept in ElasticPro's built-in store only"). |
+| `copy` | built-in **and** the store. Queued for the store only while both gates are open — a closed gate is not a backlog (the 0.3.53 rule; *Copy existing history* sends the past). **Until an admin has saved a routing, history follows the store**: `copy` while *Write history* is armed (what arming meant before this feature, so nothing an admin set up stops), `builtin` otherwise; a saved choice then holds. |
+| `es` | the store is where the record is kept for good. While the store is not connected and writing (a gate closed, the test failed, the store unreachable), the record is queued **anyway** — the history store's bounded on-disk queue (`QUEUE_MAX` 20 000, the oldest days out first and counted `dropped`) — and the **built-in store keeps writing**, so nothing is lost; the status says so. When the store is back, the next tick sends the queue. History with no store configured at all is not queued — its month files are the record and *Copy existing history* sends them once a store is set up; reports and alerts queue from their first record. The delay measurement is written to its destination or not taken (it is never kept locally), so a closed gate skips it, as before. |
+
+**One definition.** `data_routing::admits(mode, gates_open)` decides, for every kind alike,
+whether a record is queued now; `status_line(mode, not_writing, queued)` says for every kind
+alike what its status is: `writing` · `queued` (es, the store cannot be written now) · `paused`
+(copy, the same) · `builtin`. The built-in store's retention is unchanged in every mode: this
+feature deletes nothing, on the server or on the store (the store's retention is its owner's ILM;
+the templates hold mappings only, no settings, no lifecycle).
+
+**Documents and templates.** Two more index templates on the store, each `create=true` (never
+an overwrite; an existing one is accepted only when it is ElasticPro's for that very pattern),
+`priority: 300` (above the history template's 200), `dynamic: false` with every field listed,
+`_meta.managedBy: ElasticPro`, verified once per process per store, prefix and template:
+
+- `<prefix>-reports-template` for `<prefix>-reports-*`: `jobId, kind (cluster|mailed), report
+  (volume|indices|hosts), status, clusterIds, clusterName, period{from, to, label}, format,
+  mail, by, createdAt, startedAt, endedAt, day, durationMs, file{name, bytes}, fileContent{name,
+  base64} (binary; only when *Carry the file* is on and the file is ≤ 2 MiB), error, mailError,
+  warning, stoppedBy, sheets, failedClusters[{clusterId, reason}], figures{daysDone, daysTotal,
+  rows, clustersDone, clustersFailed}, writtenAt`. Figures are the job's own counts — `rows` is
+  `null` for a volume report, which counts days, not rows.
+- `<prefix>-alerts-template` for `<prefix>-alerts-*`: `event, key, clusterId, scope, target,
+  rule, level, by, at, day, reason, note, until, approx, reportedBy, writtenAt`. Events the core
+  witnesses: `acknowledged` / `unacknowledged` / `ack_cleared` (`ACK_SET`, `ACK_CLEAR`,
+  `PLAY_NODE_FORGET`), `silenced` / `unsilenced` (`SILENCE_SET`, `SILENCE_CLEAR`; the key is the
+  alert's for an alert silence, the cluster id for a cluster-wide one). The core evaluates no
+  alert itself, so `raised` and `cleared` come from the page that saw them (`ALERT_EVENTS_PUT`,
+  below): `reportedBy` names whose page, `approx` says the start may have been missed, and the
+  same event for the same key from another page within 15 minutes is dropped as a duplicate.
+
+**The report worker.** A report may end in another process (docs/WORKER.md). Its record is
+written to `<data>/history-store-spool/` (one file per record) and the core's history-store tick
+drains the spool first — queuing or dropping each record by the routing in force **then** — so
+the worker needs neither the queue nor the store. Alerts are the core's own and go straight to
+the queue.
+
+**Status (`DATA_ROUTING_STATUS`).** Per kind: the mode, *kept for* (built-in as above; store:
+"the store owner's ILM"), *size now* (built-in bytes from a bounded walk of the kind's files — a
+floor when cut short, `null` when there is no such place; store document count via one
+`_search?size=0&track_total_hits=true` per pattern, cached a minute, `null` with the reason when
+not asked or not answered), and the status line. Plus the built-in store's own size and the free
+space on its disk (`statvfs`). Never a secret.
+
+**Messages** (docs/HANDBOOK.md "Backend — the message contract"): `DATA_ROUTING_GET` /
+`DATA_ROUTING_SET {routing}` / `DATA_ROUTING_STATUS` (admin; SET refused for a limited admin,
+fleet-wide), `ALERT_EVENTS_PUT {events}` (user, on the clusters they see), and PING's
+`dataRouting: {supported}`. All audited (`backend routing set`, `alert events reported by a
+page`).
+
+**Tests.** `tests/data_routing.rs` (permit on: ES-only queues with the gates closed and the
+built-in record still written; the queue goes out after arming, each stream after its own
+template; acks, silences, a page's events and a report's end are the records; a copy does not
+queue while the gates are closed; roles; the desktop has none of it); unit tests in
+`data_routing.rs` (admits, status lines, document ↔ template field coverage, the guard accepts
+the templates and the count); `tools/hosted-check.sh` (admin-only, ES-only with gates closed
+keeps the built-in record and says so, nothing written to a monitored cluster);
+`tools/unit/data-routing.test.mjs` (the page's formatting never shows an unknown as 0).

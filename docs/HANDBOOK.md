@@ -750,6 +750,36 @@ truncatedBefore, templateMissing, message}`. Reports › Daily & monthly shows i
 in amber, when the store is not reachable, the read stopped at its bound, or nothing was ever
 written there.
 
+## Backend — the message contract
+
+Data › Backend (docs/HISTORY.md "Backend routing"): **where ElasticPro keeps what it records.**
+Three kinds — `history` (volume, capacity, log-delay records), `reports` (generated files and
+job history), `alerts` (acknowledged, silenced, and what the pages saw raised and cleared) —
+each `builtin` (the data directory, the default), `copy` (built-in and the history store) or
+`es` (the history store is where it is kept for good). The Elasticsearch side is always the
+dedicated history store above, under its two gates and its guard; never a monitored cluster.
+In `es`, while the store is not connected and writing, the record is queued (the store's
+bounded on-disk queue) and the built-in store keeps writing, so nothing is lost; in `copy` a
+closed gate is not a backlog. Nothing is ever deleted by this feature. Hosted only; the
+desktop answers `{ok: false, supported: false}`; PING carries `dataRouting: {supported}`.
+
+| Message | Role | Answer |
+|---|---|---|
+| `DATA_ROUTING_GET` | admin (a limited admin may read) | `{ok, supported, routing: {history, reports, alerts, reportFiles, changedBy, changedAt}, modes: [{id, label}], store: {configured, url, prefix, permitted, armed, testOk, writing: null\|"<why not>", lastSuccessAt, lastError, lastErrorAt, queue, dropped}}`. Until an admin has saved a routing (`changedBy` null) history follows the store: `copy` while it is armed, else `builtin`. Never a secret. |
+| `DATA_ROUTING_SET {routing: {history?, reports?, alerts?, reportFiles?}}` | admin; a limited admin is refused (fleet-wide) | As GET. A field left out keeps its value; a mode that is not `builtin`, `copy` or `es`, or a field that is not one of the four, is refused by name (`kind: "bad_request"`). `reportFiles: true` carries each report file (≤ 2 MiB) inside its record. Audited. |
+| `DATA_ROUTING_STATUS` | admin (a limited admin may read) | `{ok, supported, routing, builtin: {dir, size: {bytes, files, truncated}, diskTotal, diskFree}, store (as GET), kinds: {<kind>: {mode, label, state: "writing"\|"queued"\|"paused"\|"builtin", line, keptFor: {builtin, store}, builtin: {size: {bytes, files, truncated}, writing: true}, store: {docs, docsNote, queued, writing, why}}}}`. `bytes` is a floor when `truncated`, `null` when there is no such place; `docs` is `null` with `docsNote` when the kind is kept built-in, no store is configured, or the store did not answer (asked again after a minute). Reads only: one bounded `_search` per pattern, interactive class. |
+| `ALERT_EVENTS_PUT {events: [{event: "raised"\|"cleared", key, rule?, level?, at?, approx?}]}` | user; a scoped caller only on clusters they see | `{ok, supported, accepted, dropped, unknown, routed}`. At most 200 events; a key naming no cluster counts as `unknown` and is never written; one naming a cluster the caller cannot see is `forbidden`; the same event for the same key within 15 minutes is `dropped`. `routed: false` says alerts are kept built-in (the events were taken and go nowhere). The core evaluates no alert itself: this is how the alerts record learns what the pages saw. |
+
+The records: `<prefix>-reports-YYYY` (`_id` the job id: kind, report, status, clusters, period,
+format, by, times, file name and size, error, warning, failed clusters, the job's own figures —
+`rows` is `null` for a volume report — and optionally the file) and `<prefix>-alerts-YYYY`
+(`_id` `<event>|<key>|<at>`: acknowledged / unacknowledged / ack_cleared / silenced / unsilenced
+from the core's own messages, raised / cleared from `ALERT_EVENTS_PUT` with `reportedBy`). Each
+under its own index template (`<prefix>-reports-template`, `<prefix>-alerts-template`:
+`create=true`, mappings only, `dynamic: false`, priority 300), written by the history store's
+tick with the volume and capacity bulks. A report that ended in the worker process reaches the
+tick through `<data>/history-store-spool/`.
+
 ## Volume record — the message contract
 
 Index volume per day and per month, by field, for every cluster: the core collects it and keeps

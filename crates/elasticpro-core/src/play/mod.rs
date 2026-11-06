@@ -532,6 +532,13 @@ impl Core {
         let ack_key = format!("{id}:{NODE_LEFT_ACK}");
         let ack_cleared = matches!(self.play.acks.clear(&ack_key), Ok(Some(_)));
         tracing::info!(target: "audit", user = %who(caller), cluster = %id, node = %node, ack_cleared, "node forgotten by Play");
+        if ack_cleared {
+            // The alerts record (data_routing.rs): the acknowledgement went with the node.
+            self.routing_alert_event(crate::data_routing::AlertEvent {
+                event: "ack_cleared".into(), key: ack_key, cluster_id: Some(id.to_string()),
+                by: who(caller), at: now_ms(), ..crate::data_routing::AlertEvent::default()
+            });
+        }
         json!({ "ok": true, "clusterId": id, "node": node, "ackCleared": ack_cleared })
     }
 
@@ -666,6 +673,12 @@ impl Core {
                 Ok(a) => {
                     tracing::info!(target: "audit", user = %by, key = %key, acked = a.acked(), note_chars = a.note.as_ref().map(|n| n.chars().count()).unwrap_or(0),
                         "alert acknowledgement set");
+                    // The alerts record (data_routing.rs): who acknowledged, or took it back.
+                    self.routing_alert_event(crate::data_routing::AlertEvent {
+                        event: if a.acked() { "acknowledged" } else { "unacknowledged" }.into(), key: key.to_string(),
+                        cluster_id: crate::silences::cluster_of("alert", key, &known).cloned(),
+                        by: by.clone(), at: a.at, note: a.note.clone(), ..crate::data_routing::AlertEvent::default()
+                    });
                     json!({ "ok": true, "key": key, "ack": a })
                 }
                 Err(e) => bad(e),
@@ -674,6 +687,10 @@ impl Core {
             match self.play.acks.clear(key) {
                 Ok(Some(_)) => {
                     tracing::info!(target: "audit", user = %by, key = %key, "alert acknowledgement cleared");
+                    self.routing_alert_event(crate::data_routing::AlertEvent {
+                        event: "ack_cleared".into(), key: key.to_string(), cluster_id: crate::silences::cluster_of("alert", key, &known).cloned(),
+                        by: by.clone(), at: now_ms(), ..crate::data_routing::AlertEvent::default()
+                    });
                     json!({ "ok": true, "key": key })
                 }
                 Ok(None) => json!({ "ok": true, "key": key, "cleared": false }),

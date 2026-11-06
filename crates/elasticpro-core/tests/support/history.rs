@@ -36,8 +36,10 @@ pub fn local_late() -> chrono::NaiveDateTime {
 pub struct Fake {
     /// Answered to every volume search (newest first is not simulated: as listed).
     pub docs: Vec<Value>,
-    /// The index template once PUT (or set up front: "already there, ours").
+    /// The history index template once PUT (or set up front: "already there, ours").
     pub template: Option<Value>,
+    /// The other templates PUT (the reports' and the alerts', data_routing.rs), by name.
+    pub templates: std::collections::BTreeMap<String, Value>,
     /// A template of the same name that is somebody else's.
     pub foreign: bool,
     /// Every bulk item is refused as malformed.
@@ -85,11 +87,18 @@ pub fn respond(f: &Shared, hit: &Hit) -> (u16, String) {
         }
         ("PUT", p) if p.starts_with("/_index_template/") => {
             assert_eq!(q, "create=true", "a template is only ever created, never overwritten");
-            if f.foreign || f.template.is_some() {
-                let name = p.trim_start_matches("/_index_template/");
+            let name = p.trim_start_matches("/_index_template/").to_string();
+            let history = name == format!("{PREFIX}-template");
+            let exists = f.foreign || if history { f.template.is_some() } else { f.templates.contains_key(&name) };
+            if exists {
                 return (400, json!({ "error": { "type": "illegal_argument_exception", "reason": format!("index template [{name}] already exists") }, "status": 400 }).to_string());
             }
-            f.template = serde_json::from_str(&hit.body).ok();
+            let body: Option<Value> = serde_json::from_str(&hit.body).ok();
+            if history {
+                f.template = body;
+            } else if let Some(b) = body {
+                f.templates.insert(name, b);
+            }
             (200, r#"{"acknowledged":true}"#.into())
         }
         ("GET", p) if p.starts_with("/_index_template/") => {
@@ -97,7 +106,8 @@ pub fn respond(f: &Shared, hit: &Hit) -> (u16, String) {
             if f.foreign {
                 return (200, json!({ "index_templates": [{ "name": name, "index_template": { "index_patterns": [format!("{PREFIX}-*")], "template": {} } }] }).to_string());
             }
-            match &f.template {
+            let held = if name == format!("{PREFIX}-template") { f.template.clone() } else { f.templates.get(&name).cloned() };
+            match held {
                 Some(t) => (200, json!({ "index_templates": [{ "name": name, "index_template": t }] }).to_string()),
                 None => missing(&name),
             }

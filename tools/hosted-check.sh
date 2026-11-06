@@ -384,6 +384,27 @@ check "no access is a role only for an account another system signs in" "$(cooki
 check "and never one's own"                         "$(cookie -d '{"type":"USER_SET_ROLE","name":"Admin","role":"none"}' | field kind)" "bad_request"
 check "a role that is not one is refused"           "$(cookie -d '{"type":"USER_SET_ROLE","name":"hc-user","role":"emperor"}' | field kind)" "bad_request"
 check "the accounts list says what is in force"     "$(cookie -d '{"type":"USER_LIST"}' | python3 -c 'import json,sys;u=[x for x in json.load(sys.stdin)["users"] if x["name"]=="hc-user"][0];print(u.get("noAccess"),u.get("roleInForce"))')" "False user"
+# Backend routing (docs/HISTORY.md "Backend routing"): where each kind of record is kept —
+# built-in, a copy on the history store, or the store only. An admin's to read and set; a user
+# and an operator get neither. This instance has no HISTORY_STORE_WRITES, so the store's gates
+# are closed: "Elasticsearch only" still writes the built-in record, queues the store's copy and
+# says so, and no monitored cluster is ever written. The store side is proved in-process
+# (tests/data_routing.rs).
+rt() { python3 -c 'import json,sys;d=json.load(sys.stdin);r=d.get("routing") or {};print(d.get("ok"),r.get("history"),r.get("reports"),r.get("alerts"))'; }
+check "routing: PING says the core has it"          "$(cookie -d '{"type":"PING"}' | python3 -c 'import json,sys;print(json.load(sys.stdin)["dataRouting"]["supported"])')" "True"
+check "routing: built-in is the default for all"    "$(cookie -d '{"type":"DATA_ROUTING_GET"}' | rt)" "True builtin builtin builtin"
+check "routing: a user may not read it"             "$(as_jar "$JUS" -d '{"type":"DATA_ROUTING_GET"}' | field kind)" "forbidden"
+check "routing: an operator may not set it"         "$(as_jar "$JOP" -d '{"type":"DATA_ROUTING_SET","routing":{"alerts":"es"}}' | field kind)" "forbidden"
+check "routing: nor read its status"                "$(as_jar "$JOP" -d '{"type":"DATA_ROUTING_STATUS"}' | field kind)" "forbidden"
+check "routing: a mode that is not one is refused"  "$(cookie -d '{"type":"DATA_ROUTING_SET","routing":{"alerts":"cluster"}}' | field kind)" "bad_request"
+check "routing: an admin sends alerts to ES only"   "$(cookie -d '{"type":"DATA_ROUTING_SET","routing":{"alerts":"es"}}' | rt)" "True builtin builtin es"
+cookie -d '{"type":"PRIME","readOnly":true,"clusters":[{"id":"hc-es","url":"http://127.0.0.1:9"}]}' >/dev/null
+check "ES only, gates closed: the silence is taken" "$(cookie -d '{"type":"SILENCE_SET","scope":"cluster","target":"hc-es","minutes":5,"reason":"hosted-check"}' | field ok)" "True"
+check "and kept in the built-in store"             "$(python3 -c 'import json,sys;print(len(json.load(open(sys.argv[1]))))' "$D5/silences.json")" "1"
+rs() { python3 -c 'import json,sys;d=json.load(sys.stdin);a=d["kinds"]["alerts"];print(d.get("ok"),a["state"],a["store"]["queued"],a["store"]["writing"],"built-in store" in a["line"])'; }
+check "and queued for the store, saying so"         "$(cookie -d '{"type":"DATA_ROUTING_STATUS"}' | rs)" "True queued 1 False True"
+check "and nothing was written to a monitored cluster" "$(cookie -d '{"type":"REQUEST_LOG"}' | python3 -c 'import json,sys;d=json.load(sys.stdin);print(len([r for r in (d.get("recent") or [])+(d.get("inflight") or []) if str(r.get("method","GET")).upper()!="GET"]))')" "0"
+cookie -d '{"type":"DATA_ROUTING_SET","routing":{"alerts":"builtin"}}' >/dev/null
 OUTH=$(curl -s -D - -o /dev/null -X POST "$B5" -H 'content-type: application/json' -H "cookie: ep_session=$TOK" -d '{"type":"LOGOUT"}' | tr -d '\r' | grep -i '^set-cookie:' || true)
 case "$OUTH" in *ep_session=\;*Max-Age=0*) ok "signing out clears the cookie";; *) bad "logout cookie (got '$OUTH')";; esac
 check "and ends the session"                 "$(cookie -d '{"type":"WHOAMI"}' | python3 -c 'import json,sys;print(json.load(sys.stdin).get("caller"))')" "None"
