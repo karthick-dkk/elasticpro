@@ -2,9 +2,9 @@
  * "Your settings" (board 8, LeftMenu.dc.html): the page menu on the Top or on the Left, the
  * theme, and which cluster the app opens on — one person's own choices, opened from their name.
  *
- * Phase 1 keeps them the way the theme has always been kept: in this browser (IndexedDB, via
- * app.js). Phase 2 moves them to the account so they follow the person to any browser; the
- * panel says which is true today rather than promising the account.
+ * Kept with the account where the core keeps them (core/prefs.js, PREFS_GET / PREFS_SET), and
+ * always in this browser too; the panel says which is true for this core rather than promising
+ * the account to an older one.
  *
  * Applies at once; there is nothing to save. A dialog that closes on Escape or a click outside.
  */
@@ -12,7 +12,8 @@
 import { h } from '../lib/dom.js';
 
 export const MENU_POSITIONS = Object.freeze([['top', 'Top'], ['left', 'Left']]);
-export const OPENS_ON = Object.freeze([['', 'As the defaults say (System › Defaults)'], ['last-selected', 'The cluster last chosen in this browser'], ['all', 'All clusters']]);
+/** core/prefs-rules.js OPENS_ON, with '' for "not chosen": the config's default for everyone applies. */
+export const OPENS_ON = Object.freeze([['', 'As the defaults say (System › Defaults)'], ['last', 'The cluster last chosen in this browser'], ['all', 'All clusters']]);
 
 /** A menu position as stored, made safe: 'top' unless it is exactly 'left'. */
 export const normaliseMenuPosition = (v) => (v === 'left' ? 'left' : 'top');
@@ -30,13 +31,14 @@ export function closeYourSettings() {
 /**
  * Open the panel next to `anchor`.
  *
- *   prefs     {menu, theme, openOn}
+ *   prefs     {menu, theme, opensOn}   opensOn '' = not chosen
+ *   supported whether the core keeps them with the account (else this browser only)
  *   themes    [{id, label}] (app.js THEMES); null hides the theme (inside Zabbix it is Zabbix's)
  *   who       {name, role} or null (no accounts)
  *   onChange  (key, value) => void — applied at once by the shell
  *   onSignOut () => void, or null where signing out is not this app's (inside Zabbix, no accounts)
  */
-export function openYourSettings(anchor, { prefs, themes, who, onChange, onSignOut }) {
+export function openYourSettings(anchor, { prefs, supported = false, themes, who, onChange, onSignOut }) {
   if (open) { const same = open.anchor === anchor; closeYourSettings(); if (same) return; }
   const seg = h('span.ys-seg', { role: 'group', 'aria-label': 'Page menu position' },
     ...MENU_POSITIONS.map(([id, label]) => h('button', {
@@ -48,8 +50,8 @@ export function openYourSettings(anchor, { prefs, themes, who, onChange, onSignO
     }, label)));
   const theme = themes ? h('select#ys-theme', { onchange: (e) => onChange('theme', e.target.value) },
     ...themes.map((t) => h('option', { value: t.id, selected: t.id === prefs.theme }, t.label.replace(/^\S+\s/, '')))) : null;
-  const opensOn = h('select#ys-open', { onchange: (e) => onChange('openOn', e.target.value) },
-    ...OPENS_ON.map(([v, l]) => h('option', { value: v, selected: v === (prefs.openOn || '') }, l)));
+  const opensOn = h('select#ys-open', { onchange: (e) => onChange('opensOn', e.target.value) },
+    ...OPENS_ON.map(([v, l]) => h('option', { value: v, selected: v === (prefs.opensOn || '') }, l)));
   const el = h('section.ys-pop', { role: 'dialog', 'aria-labelledby': 'ys-h' },
     h('div.ys-head', h('h2#ys-h', 'Your settings'), h('span.muted', who ? `${who.name} · ${who.role}` : 'only for you')),
     h('div.ys-body',
@@ -58,7 +60,8 @@ export function openYourSettings(anchor, { prefs, themes, who, onChange, onSignO
       theme ? h('label.ys-row', h('span.ys-l', 'Theme'), theme) : null,
       h('label.ys-row', h('span.ys-l', 'Opens on'), opensOn)),
     h('div.ys-foot',
-      h('span', 'Kept in this browser; applies at once, nothing to save.'),
+      h('span', supported ? 'Kept with your account, so it follows you to any browser. Applies at once; nothing to save.'
+        : 'Kept in this browser (this server does not keep them with the account). Applies at once; nothing to save.'),
       onSignOut ? h('button.btn.sm', { type: 'button', onclick: () => { closeYourSettings(); onSignOut(); } }, '⏻ Sign out') : null));
   document.body.append(el);
   // Under the name in the top bar; above it when the name is at the foot of the left menu.

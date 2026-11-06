@@ -31,6 +31,8 @@ import { pausedPill, pausedKey } from './ui/paused-pill.js';
 import { reportsPill } from './ui/reports-pill.js';
 import { reports as reportJobs, onReports, jobCounts, pillText as reportJobsText } from './core/reports.js';
 import { openYourSettings, closeYourSettings, normaliseMenuPosition } from './ui/your-settings.js';
+import { loadPrefs, savePref } from './core/prefs.js';
+import { snapshotDot, snapshotNote } from './core/snapshot-running.js';
 import { pauseFor, pausedLine, mayStop, stopRefusal } from './core/policy.js';
 
 let coreInfo = { version: '?' };
@@ -128,16 +130,23 @@ registerPages(PAGES);
 const tabOf = (id) => { const p = PAGES.find((x) => x.id === id); return p && p.home ? p.home : id; };
 
 /**
- * The page menu's position (Your settings): 'top' or 'left'. Kept in this browser like the
- * theme (idb 'menuPosition'); Phase 2 moves both to the account.
+ * Your settings — the page menu's position, the theme and what the app opens on — kept with
+ * the account (core/prefs.js, docs/HANDBOOK.md "Your settings"): the account's choice, else
+ * this browser's copy, else the shipped default. `source` says which, per setting.
  */
+let prefs = { menu: 'top', theme: 'system', opensOn: 'last', source: {}, supported: false };
 let menuPosition = 'top';
-/** Which cluster this person opens on (Your settings), '' to follow defaults.defaultScope. */
-let openOn = '';
-function applyMenuPosition(v, { persist = true } = {}) {
+function applyMenuPosition(v) {
   menuPosition = normaliseMenuPosition(v);
   document.documentElement.dataset.menu = menuPosition;
-  if (persist) idb.setKV('menuPosition', menuPosition);
+}
+/**
+ * The scope the app opens on: this person's own choice when they made one, else the config's
+ * default for everyone (System › Defaults › Opens on).
+ */
+function openingScope() {
+  if (prefs.source && prefs.source.opensOn && prefs.source.opensOn !== 'default') return prefs.opensOn === 'all' ? 'all' : 'last-selected';
+  return normaliseScope(state.defaults.defaultScope);
 }
 
 /**
@@ -180,14 +189,21 @@ function layout() {
 const STRIP_HIDDEN = new Set(['overview', 'indices', 'console', 'logs', 'snapshots', 'shards', 'reports']);
 
 /* --------------------------------- theming ---------------------------------- */
+/**
+ * Before sign-in only this browser's copy can be read, so the first paint uses it; the
+ * account's choice replaces it once loadPrefs() has answered (boot, after the gate).
+ */
 async function initTheme() {
-  const t = (await idb.getKV('theme')) || 'system';
-  applyTheme(t);
+  let t = null;
+  let m = null;
+  try { t = await idb.getKV('theme'); m = await idb.getKV('menu'); } catch (_) { /* no store: defaults */ }
+  applyTheme(t || 'system');
+  applyMenuPosition(m);
 }
-function applyTheme(t, { persist = true } = {}) {
-  if (t === 'system') document.documentElement.removeAttribute('data-theme');
+/** Paint a theme. Saving it is savePref's (the account and this browser's copy). */
+function applyTheme(t) {
+  if (!t || t === 'system') document.documentElement.removeAttribute('data-theme');
   else document.documentElement.setAttribute('data-theme', t);
-  if (persist) idb.setKV('theme', t);
 }
 /**
  * The themes, in the order Your settings lists them.
@@ -212,7 +228,8 @@ const THEMES = [
 function yourSettings(anchor) {
   const theme = document.documentElement.getAttribute('data-theme') || 'system';
   openYourSettings(anchor, {
-    prefs: { menu: menuPosition, theme, openOn },
+    prefs: { menu: menuPosition, theme, opensOn: prefs.source && prefs.source.opensOn !== 'default' ? prefs.opensOn : '' },
+    supported: prefs.supported,
     // Inside Zabbix the theme follows the Zabbix user's; a choice here would be one that the
     // next page load undoes.
     themes: embedded ? null : THEMES,
@@ -220,7 +237,8 @@ function yourSettings(anchor) {
     onChange: (key, value) => {
       if (key === 'theme') { applyTheme(value); topbarKey = ''; renderTopbar(); }
       if (key === 'menu') { applyMenuPosition(value); navBuiltFor = ''; topbarKey = ''; closeYourSettings(); renderNav(); renderTopbar(); }
-      if (key === 'openOn') { openOn = value || ''; idb.setKV('openOn', openOn); }
+      // Applied at once; kept with the account when the core keeps them, and in this browser always.
+      savePref(key, value || null).then((p) => { prefs = p; }).catch((e) => toast(`Not kept: ${e.message}`, 'warn', 5000));
     },
     // Only where accounts exist. The portable build has nobody to sign out, and inside
     // Zabbix it is Zabbix you sign out of — a frame signing itself out would leave a
@@ -425,11 +443,22 @@ function renderShell() {
 let navBuiltFor = '';
 
 /**
- * PHASE 2 HOOK — the green dot on Snapshots while a snapshot runs on the chosen cluster(s)
- * (board 7). It needs a _snapshot/_status poll the core does not do yet; until it does this
- * says nothing, and no dot is drawn — never a guess.
+ * The green dot on Snapshots while a snapshot runs on the chosen cluster (or any, under "All"):
+ * the core's SNAPSHOT_RUNNING answer, asked on the PING cadence when PING says
+ * `snapshotRunning` (docs/HANDBOOK.md "Snapshot running"). A cluster whose state is not known
+ * draws nothing — never "none"; the reason is the tab's tooltip (snapshotNote).
  */
-function snapshotRunningTitle() { return null; }
+let snapshotReply = null;
+async function readSnapshotRunning() {
+  if (!coreInfo || coreInfo.snapshotRunning !== true || isSnapshotMode() || isDisplay()) { snapshotReply = null; return; }
+  try { snapshotReply = await bridge({ type: 'SNAPSHOT_RUNNING' }); } catch (_) { snapshotReply = null; }
+}
+function snapshotRunningTitle() {
+  if (!snapshotReply) return null;
+  const names = Object.fromEntries(clusters().map((c) => [c.id, c.name]));
+  const dot = snapshotDot(snapshotReply, state.selected, { names });
+  return dot ? dot.title : null;
+}
 
 /** The green dot on Reports while a report job runs or waits (core/reports.js, the one poller). */
 function reportRunningTitle() {
@@ -486,7 +515,13 @@ function renderNav() {
     }
   }
   runningDot(nav.querySelector('button[data-page="reports"]'), ev ? null : reportRunningTitle());
-  runningDot(nav.querySelector('button[data-page="snapshots"]'), ev ? null : snapshotRunningTitle());
+  {
+    const snapBtn = nav.querySelector('button[data-page="snapshots"]');
+    runningDot(snapBtn, ev ? null : snapshotRunningTitle());
+    // No dot: what is known and what is not, on hover (an older core says nothing).
+    const note = !ev && snapshotReply && !snapshotRunningTitle() ? snapshotNote(snapshotReply, state.selected) : null;
+    if (snapBtn && (snapBtn.title || '') !== (note || '')) { if (note) snapBtn.title = note; else snapBtn.removeAttribute('title'); }
+  }
   const here = tabOf(currentPage);
   for (const b of nav.querySelectorAll('button[data-page]')) {
     const id = b.dataset.page;
@@ -1071,7 +1106,7 @@ async function start(config, handle) {
     const last = await idb.getKV('lastCluster');
     if (typeof last === 'string') lastCluster = last;
     // This person's own choice (Your settings) first, then the config's default for everyone.
-    const open = openingSelection({ scope: normaliseScope(openOn || state.defaults.defaultScope), last, clusters: clusters() });
+    const open = openingSelection({ scope: openingScope(), last, clusters: clusters() });
     if (open !== 'all') { state.selected = open; fleetView = false; }
   }
   renderShell();
@@ -1225,22 +1260,29 @@ function takeFrameShape() {
   document.documentElement.classList.add('embedded');
   const t = themeFor(launch.zabbixTheme);
   rememberEmbedTheme(t);
-  if (t) applyTheme(t, { persist: false });
+  if (t) applyTheme(t);
   return !!t;
 }
 
 async function boot() {
-  if (!takeFrameShape()) await initTheme();
-  // Your settings, kept in this browser (Phase 2: with the account).
-  try { applyMenuPosition(await idb.getKV('menuPosition'), { persist: false }); } catch (_) { applyMenuPosition('top', { persist: false }); }
-  try { const o = await idb.getKV('openOn'); openOn = o === 'all' || o === 'last-selected' ? o : ''; } catch (_) { openOn = ''; }
+  // True when Zabbix handed over its theme: that one wins over anything kept here.
+  const framed = takeFrameShape();
+  if (!framed) await initTheme();
   if (await arriveFromDisplayLink()) return;
   await arriveFromZabbix();
   await gateOnAuth();
+  // Your settings, now that the core knows who this is: the account's, else this browser's
+  // (and the browser's carried over to the account once). Not for a TV's display link.
+  if (!isDisplay()) {
+    try { prefs = await loadPrefs(); } catch (_) { /* the browser's copy stands */ }
+    if (!framed) applyTheme(prefs.theme);
+    applyMenuPosition(prefs.menu);
+  }
   // `scoped` and `playOnly` decide whether the emergency stop is offered (policy.js mayStop).
   state.caller = me ? { name: me.name, role: me.role, scoped: !!me.scoped, playOnly: isDisplay() } : null;
   pPlay.configure({ display: isDisplay(), onExit: () => go(playReturn && playReturn !== 'play' ? playReturn : 'overview') });
   try { coreInfo = (await workerStatus()) || coreInfo; } catch (_) { /* dev bridge missing */ }
+  await readSnapshotRunning();
   // A display link reads only what Play needs: the bell's server copy is not among it.
   if (isDisplay()) setNotificationSink(null); else connectNotificationStore(coreInfo);
   if (readsServerView()) {
@@ -1285,7 +1327,7 @@ function connectNotificationStore(info) {
 // keep the side-foot tunnel line current
 setInterval(async () => {
   if (!state.config || isSnapshotMode()) return;
-  try { const st = await workerStatus(); if (st && st.ok) { coreInfo = st; renderSideFoot(); renderNav(); } } catch (_) { /* ignore */ }
+  try { const st = await workerStatus(); if (st && st.ok) { coreInfo = st; await readSnapshotRunning(); renderSideFoot(); renderNav(); } } catch (_) { /* ignore */ }
 }, 10000);
 
 // An expired or revoked session: back to the gate rather than a screen of stale numbers
