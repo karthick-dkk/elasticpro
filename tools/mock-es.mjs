@@ -275,8 +275,16 @@ const routes = [
   [(u) => u.startsWith('/_cat/indices'), ({ url }) => {
     const target = decodeURIComponent((url.split('?')[0].split('/_cat/indices/')[1] || '*'));
     const keep = globTest(target);
-    return CAT_INDICES.filter((i) => keep(i.index));
+    // `?health=yellow` (the Clusters row's health list) narrows the answer, as Elasticsearch does.
+    const only = new URL(url, 'http://x').searchParams.get('health');
+    return CAT_INDICES.filter((i) => keep(i.index) && (!only || i.health === only));
   }],
+  // The no-body form explains the first unassigned shard it finds (the one the fixture's _cat/shards lists).
+  [(u) => u.startsWith('/_cluster/allocation/explain'), () => ({ index: 'logstash-beta-2026.09.09', shard: 0, primary: false, current_state: 'unassigned',
+    unassigned_info: { reason: 'NODE_LEFT', details: 'node_left' }, can_allocate: 'no',
+    allocate_explanation: 'Elasticsearch isn\'t allowed to allocate this shard to any of the nodes in the cluster.',
+    node_allocation_decisions: [{ node_name: 'node-1', node_decision: 'no', deciders: [
+      { decider: 'disk_threshold', decision: 'NO', explanation: 'the node is above the high watermark' }] }] })],
   // /_cat/recovery, which restorePoll watches after a restore. Without a route here the
   // catch-all answered {acknowledged:true} — an object, not a list of shards — and the
   // poller died with "rows.map is not a function" after five tries. Every shard reports

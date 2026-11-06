@@ -3,7 +3,7 @@
 import { h, svg, mount, reconcile } from '../lib/dom.js';
 import { nodeCache, objId } from '../lib/keyed.js';
 import { bytes, num, pct, ago, dt, toCsv, download } from '../lib/fmt.js';
-import { state, activeClusters, client, healthState, refreshAll, openAlertsNow, requestsFor, requestLoad, jvmSummary, clusterRev, askForPage } from '../core/state.js';
+import { state, activeClusters, client, healthState, refreshAll, openAlertsNow, requestsFor, requestLoad, jvmSummary, clusterRev, askForPage, fleetMode, datasetFreshness } from '../core/state.js';
 import { card, table, diskCell, lastSnapshotOf, snapshotCellFor, empty } from './common.js';
 import { CLUSTER_TYPES, clusterKind, clusterKindRev } from '../core/cluster-kind.js';
 import { heapOverHigh, HEAP_HIGH_PERCENT, HEAP_CLEAR_PERCENT, HEAP_RAISE_READINGS } from '../core/alert-rules.js';
@@ -14,7 +14,7 @@ import { compareNames } from '../lib/cluster-order.js';
 import { readPrefs, writePrefs, resolveColumns, visibleColumns, setColumnShown, moveColumn, moveColumnBy,
          renameColumn, resetColumns, MAX_NAME, DETAIL_GROUPS, detailItems, detailShown, setDetailShown,
          expandByDefault, setExpandByDefault } from '../core/cluster-view.js';
-import { nodeRoles, nodeTier, roleKind, shardAllocation, taskSummary, statsCounters, rateBetween, slmForRepo,
+import { nodeRoles, roleKind, taskSummary, statsCounters, rateBetween, slmForRepo,
          repoSizeFromCache, refreshAge, healthCounts } from '../core/cluster-detail.js';
 import { privilegeHint } from '../core/es-tasks.js';
 import { restoreSnapshotDialog } from '../ui/snapshot-dialogs.js';
@@ -22,12 +22,15 @@ import { rowMenu, popover, ICON, toast } from '../ui/menu.js';
 import { roleMayWrite, roleMayManageClusters } from '../core/writes.js';
 import { editCluster, editClusterKind, rawClusterOf } from '../ui/config-editor.js';
 import { credentialsKeptOnServer } from '../core/server-credentials.js';
-import { takeFocus, revealFocus } from '../core/focus.js';
+import { takeFocus, revealFocus, setFocus } from '../core/focus.js';
 import { openClusterAlerts } from '../core/alert-goto.js';
 import { diskAgainstWatermarks } from '../core/disk-balance.js';
 // Why a cluster cannot be reached: one definition, shared with the Alerts page's unreachable lines.
 import { unreachableReason } from '../core/alert-groups.js';
-import { ilmErrorsOf, slmErrorsOf, ilmErrorTitle, slmErrorTitle, lifecycleView, ilmCoverage, logPatternOf } from '../core/lifecycle-errors.js';
+import { ilmErrorsOf, slmErrorsOf, ilmErrorTitle, slmErrorTitle, lifecycleView, logPatternOf } from '../core/lifecycle-errors.js';
+import { nodeFreeBytes, isDataNode, roleChips, nodesSummary, problemIndices, problemButtonText,
+         unassignedByIndex, unassignedText, explainLine, reasonFor, donutSegments, shardCard, ilmCard, slmCard } from '../core/cluster-boxes.js';
+import { repoOverview } from '../core/snapshot-evidence.js';
 
 let host = null;
 /** Rows the operator opened or closed by hand; what the rest show is the preference. */
@@ -545,14 +548,22 @@ const CELLS = {
       : null;
     return h('td', healthFlag(r), via);
   },
-  nodes: (r) => h('td.num', r.d.health ? `${r.d.health.number_of_nodes} (${r.d.health.number_of_data_nodes} data)` : '–'),
-  size: (r) => h('td.num', { title: 'Store size of the indices on this cluster' },
-    clusterSize(r) >= 0 ? bytes(clusterSize(r)) : h('span.muted', '–')),
+  // Centred, and every cell below clips to its column (.cl-clip): nothing overlaps its neighbour.
+  nodes: (r) => h('td.num', h('span.cl-clip', r.d.health ? `${r.d.health.number_of_nodes} (${r.d.health.number_of_data_nodes} data)` : '–')),
+  // The disk used % large, coloured against the cluster's OWN watermarks like the bar beside it (diskAgainstWatermarks; none while its settings are unread), the index size small after it.
+  size: (r) => {
+    const sz = clusterSize(r), p = r.d.disk && r.d.disk.percent;
+    const lvl = diskAgainstWatermarks(r.d.disk, r.d.clusterSettings).level;
+    const pct = !(isFinite(p) && p !== null) ? null : h(`span.cl-size-pct${lvl === 'high' ? '.bad' : lvl === 'low' ? '.warn' : ''}`, `${Math.round(p)} %`);
+    const idx = sz >= 0 ? h('span.cl-size-idx', bytes(sz)) : null;
+    return h('td.num', { title: `${pct ? `Disk used ${Math.round(p)} %, ` : ''}${sz >= 0 ? `index size ${bytes(sz)} (store size of the indices on this cluster)` : 'index size not known'}` },
+      h('span.cl-clip', pct || idx ? [pct, idx] : h('span.muted', '–')));
+  },
   disk: (r) => h('td.cl-disk-td', isDown(r)
     // Not answering: what the disk held at the last answer is not what it holds now. No bar,
     // no tick, no threshold colour — and it says why.
     ? h('span.muted', { title: 'The cluster is not answering, so its disk use is not known now.' }, 'unknown while unreachable')
-    : diskCell(r.d.disk, r.d.clusterSettings, { dataNodes: true })),
+    : h('span.cl-clip', diskCell(r.d.disk, r.d.clusterSettings, { dataNodes: true, compact: true }))),
   // A button, as in 0.3.2: Running in green only when it looks after the log indices, red
   // otherwise (0.3.44), a red dot beside it when a log index is in an ILM error step
   // (lifecycle-errors.js — the one definition). Click opens the row.
@@ -1103,112 +1114,314 @@ function isWebUrl(u) {
   try { const p = new URL(String(u)).protocol; return p === 'http:' || p === 'https:'; } catch (_) { return false; }
 }
 
-function tile(label, value, opts = {}) {
-  return h(`div.cl-tile${opts.wide ? '.wide' : ''}`, { 'data-tile': opts.id || null },
-    h('div.k', label),
-    h('div.v', opts.title ? { title: opts.title } : null, value));
+/* ------------------------------ the expanded row ------------------------------ */
+
+/**
+ * Whether this cluster's repositories and SLM policies have been read (the Snapshots page asks the
+ * same way). Under the fleet cache an unread list is empty: that is "not read yet", never "none".
+ */
+const policiesRead = (id) => !fleetMode() || datasetFreshness(id, 'policies').ts > 0;
+
+/** A short clock for a run: the time today, the date otherwise; the full stamp is in the tooltip. */
+function clock(ts) {
+  const d = new Date(Number(ts));
+  if (!isFinite(d.getTime())) return '–';
+  const sameDay = d.toDateString() === new Date().toDateString();
+  return sameDay ? d.toTimeString().slice(0, 5) : d.toLocaleDateString(undefined, { month: 'short', day: '2-digit' });
 }
 
-/** The shard allocation gauge: a half ring for the active share, a stacked bar for the counts. */
-function shardTile(d) {
-  const a = shardAllocation(d.health);
-  if (!a) return tile('Shard allocation', h('span.muted', '–'), { id: 'shards' });
-  const R = 36, len = Math.PI * R;
-  const share = a.pct === null ? 0 : Math.max(0, Math.min(1, a.pct / 100));
-  const gauge = svg('svg', { class: `cl-gauge ${a.level}`, width: 84, height: 46, viewBox: '0 0 84 46', role: 'img',
-    'aria-label': a.pct === null ? 'active share unknown' : `${a.pct.toFixed(1)} % of shards active` },
-    svg('path', { d: `M6 42 A${R} ${R} 0 0 1 78 42`, fill: 'none', stroke: 'var(--surface-3)', 'stroke-width': 8, 'stroke-linecap': 'round' }),
-    svg('path', { d: `M6 42 A${R} ${R} 0 0 1 78 42`, fill: 'none', stroke: 'currentColor', 'stroke-width': 8, 'stroke-linecap': 'round',
-      'stroke-dasharray': `${(share * len).toFixed(1)} ${len.toFixed(1)}` }));
-  const seg = (k, n) => (a.total ? h(`i.cl-seg.${k}`, { style: { width: `${(n / a.total) * 100}%` } }) : null);
-  const leg = (k, label, n) => h('span.cl-leg', h(`i.cl-seg.${k}`), `${label} `, h('b', String(n)));
-  return h('div.cl-tile.wide', { 'data-tile': 'shards' },
-    h('div.k', `Shard allocation · ${a.total} total`),
-    h('div.cl-shards',
-      h('div.cl-gauge-box', gauge, h('div.cl-gauge-n', a.pct === null ? '–' : `${a.pct.toFixed(1)}%`), h('div.cl-gauge-t', 'active')),
-      h('div.cl-shards-r',
-        h('div.cl-stack', { role: 'img', 'aria-label': `${a.active} active, ${a.relocating} relocating, ${a.initializing} initializing, ${a.unassigned} unassigned` },
-          seg('active', a.active), seg('reloc', a.relocating), seg('init', a.initializing), seg('unas', a.unassigned)),
-        h('div.cl-legs', leg('active', 'Active', a.active), leg('reloc', 'Relocating', a.relocating),
-          leg('init', 'Initializing', a.initializing), leg('unas', 'Unassigned', a.unassigned)))));
+const ELASTIC_DOCS = 'https://www.elastic.co/docs';
+export const DOCS = {
+  repos: `${ELASTIC_DOCS}/deploy-manage/tools/snapshot-and-restore/manage-snapshot-repositories`,
+  cpu: `${ELASTIC_DOCS}/troubleshoot/elasticsearch/high-cpu-usage`,
+  heap: `${ELASTIC_DOCS}/troubleshoot/elasticsearch/high-jvm-memory-pressure`,
+  watermark: `${ELASTIC_DOCS}/troubleshoot/elasticsearch/fix-watermark-errors`,
+};
+
+/** An elastic.co link: new tab, never hands the page to the target. */
+const docLink = (href, text, title) => h('a.cl-doc', { href, target: '_blank', rel: 'noopener noreferrer', title: title || null }, `${text} ↗`);
+
+/** A link to an ElasticPro page: same tab, the cluster already chosen (core/intent.js navigateTo). */
+function pageLink(text, page, payload, c, opts = {}) {
+  if (!canOpenPage(page)) return null;
+  return h('a.cl-lnk', { href: `#/${page}`, title: opts.title || null,
+    onclick: (e) => { e.preventDefault(); if (opts.focus) setFocus(page, opts.focus); navigateTo(page, payload || null, { cluster: c.id }); } }, `${text} ›`);
 }
 
-/** Beside the ILM tile's pill: how many open log indices have a policy, when that is known. */
-function ilmTileNote(d, pattern, v) {
-  const c = ilmCoverage(d, pattern);
-  if (!c.known || v.word !== 'Running') return '';
-  return c.total ? `${c.managed} of ${c.total} log indices managed` : 'no open log index';
+/** One box of the strip: a small label over its value. */
+const box = (id, label, ...body) => h('div.cl-box', { 'data-tile': id }, h('span.cl-box-k', label), h('span.cl-box-v', ...body));
+
+/* -- Cluster health: the pill, and the list of what is not green, on hover only -- */
+
+/**
+ * The list behind the health button is asked for when it is opened, never on the poll:
+ * `_cat/indices?health=…`, then the shards of those indices and one allocation explanation.
+ * Kept per cluster and health, a minute at a time, so moving the pointer over and off again
+ * does not ask again.
+ */
+const problems = new Map();
+/** The popover of each cluster:health currently built, so a late answer paints the one on the page. */
+const livePops = new Map();
+const PROBLEM_TTL = 60000, PROBLEM_MAX = 25;
+function loadProblems(c, health, repaint) {
+  const key = `${c.id}:${health}`;
+  let P = problems.get(key);
+  if (P && (P.busy || Date.now() - P.at < PROBLEM_TTL)) return P;
+  P = { rows: null, unassigned: null, explained: null, error: null, shardsError: null, busy: true, at: 0 };
+  problems.set(key, P);
+  const cl = client(c.id);
+  (async () => {
+    try {
+      const pi = problemIndices(health, await cl.indicesOfHealth(health));
+      P.rows = pi ? pi.rows : [];
+      repaint();
+      const names = P.rows.slice(0, PROBLEM_MAX).map((x) => x.index);
+      if (names.length) {
+        const [sh, ex] = await Promise.allSettled([cl.shardStates(), cl.allocationExplain()]);
+        if (sh.status === 'fulfilled') P.unassigned = unassignedByIndex(sh.value, names);
+        else P.shardsError = (sh.reason && sh.reason.message) || 'not readable';
+        // No unassigned shard to explain is a 400, not a fault: the reason column falls back to the code.
+        if (ex.status === 'fulfilled') P.explained = explainLine(ex.value);
+      }
+    } catch (e) {
+      P.error = (e && e.message) || 'not readable';
+    }
+    P.busy = false; P.at = Date.now();
+    repaint();
+  })();
+  return P;
 }
+
+function paintProblems(pop, c, health) {
+  const P = problems.get(`${c.id}:${health}`);
+  const Word = health[0].toUpperCase() + health.slice(1);
+  const pill = h(`span.pill.${health}`, Word);
+  const body = [];
+  if (!P || (P.rows === null && !P.error)) body.push(h('div.cl-hp-note', 'Loading the indices…'));
+  else if (P.error && P.rows === null) body.push(h('div.cl-hp-note', `Could not read the indices: ${P.error}`));
+  else if (!P.rows.length) body.push(h('div.cl-hp-note', `No ${health} index listed — the cluster may have changed since the last refresh.`));
+  else {
+    const shown = P.rows.slice(0, PROBLEM_MAX);
+    const trs = shown.map((x) => {
+      const u = P.unassigned ? P.unassigned.get(x.index) : null;
+      const why = P.unassigned || P.shardsError ? reasonFor(x.index, P.unassigned, P.explained) : null;
+      return h('tr',
+        h('td.mono', x.index), h('td', pill.cloneNode(true)),
+        h('td.num.mono', isFinite(x.pri) ? String(x.pri) : '–'), h('td.num.mono', isFinite(x.rep) ? String(x.rep) : '–'),
+        h('td', P.unassigned ? (unassignedText(u) || h('span.muted', 'none')) : h('span.muted', { title: P.shardsError || 'Loading…' }, P.shardsError ? 'not readable' : '…')),
+        h('td.cl-hp-why', why ? h('span', { title: `From ${why.source}${why.source === 'unassigned.reason' ? ' (allocation explain names one shard at a time)' : ''}` }, why.text)
+          : P.unassigned || P.shardsError ? h('span.muted', { title: 'Elasticsearch gave no reason for this index' }, 'not reported') : h('span.muted', '…')));
+    });
+    body.push(h('table.cl-hp-tbl', h('thead', h('tr', h('th', 'Index'), h('th', 'Health'), h('th.num', 'Primaries'), h('th.num', 'Replicas'), h('th', 'Unassigned'), h('th', 'Reason'))),
+      h('tbody', trs)));
+    if (P.rows.length > shown.length) body.push(h('div.cl-hp-note', `+${P.rows.length - shown.length} more — open Indices for the rest`));
+  }
+  pop.replaceChildren(
+    h('div.cl-hp-head', h('b', `${Word} indices`),
+      h('span.muted', P && P.rows ? `${P.rows.length} · ${health === 'red' ? 'a primary shard is unassigned' : 'every primary assigned, some replicas not'}` : ''),
+      pageLink(`Open in Indices, health: ${health}`, 'indices', null, c, { focus: { health } })),
+    ...body);
+}
+
+function healthBox(r) {
+  const { c, d } = r;
+  const st = healthState(d);
+  const word = st === 'loading' ? 'loading' : st[0].toUpperCase() + st.slice(1);
+  const pill = h(`span.pill.${HEALTH_PILL[st]}.cl-health-pill`, h('i.dot'), word);
+  if (st !== 'yellow' && st !== 'red') {
+    return box('health', 'Cluster health', pill, st === 'green' ? h('span.muted', 'All indices green') : null);
+  }
+  const pop = h('div.cl-hp-pop', { role: 'tooltip' });
+  const known = problems.get(`${c.id}:${st}`);
+  const label = known && known.rows ? problemButtonText(st, known.rows.length) : `${st[0].toUpperCase()}${st.slice(1)} indices`;
+  const btn = h(`button.cl-hp-btn.${st}`, { type: 'button', 'aria-label': `${label}: list them`, 'aria-haspopup': 'true' }, label);
+  // The page redraws on every push, so the list may land after the node that asked was replaced:
+  // repaint whichever popover for this cluster and health is on the page now.
+  const key = `${c.id}:${st}`;
+  livePops.set(key, { pop, btn });
+  const repaint = () => {
+    const L = livePops.get(key);
+    if (!L || !L.pop.isConnected) return;
+    paintProblems(L.pop, c, st);
+    const P = problems.get(key);
+    if (P && P.rows) L.btn.textContent = problemButtonText(st, P.rows.length);
+  };
+  const open = () => { loadProblems(c, st, repaint); paintProblems(pop, c, st); };
+  if (known) paintProblems(pop, c, st);
+  // Hover and keyboard focus only: nothing is asked until the pointer or the keyboard gets here.
+  const wrap = h('span.cl-hp', { onmouseenter: open, onfocusin: open }, btn, pop);
+  return box('health', 'Cluster health', pill, wrap);
+}
+
+/* -- Endpoint, Jump host, Log bucket -- */
+
+function endpointBox(c, d) {
+  // A link only for a web scheme: the address is operator-written config, and a cluster that
+  // reached the list through Zabbix is still text somebody typed somewhere.
+  const uuid = `Cluster UUID: ${(d.info && d.info.cluster_uuid) || 'unknown'}`;
+  return box('url', 'Endpoint',
+    isWebUrl(c.url) ? h('a.mono.cl-url-a', { href: c.url, target: '_blank', rel: 'noopener', title: uuid }, c.url) : h('span.mono', { title: uuid }, c.url),
+    h('button.btn.sm.ghost.cl-copy', { type: 'button', 'aria-label': 'Copy endpoint', title: 'Copy the address',
+      onclick: async () => {
+        try { await navigator.clipboard.writeText(c.url); toast('URL copied', 'ok', 1800, { key: 'cl-copy' }); }
+        catch (_) { toast('The browser would not copy — select the URL and copy it', 'warn', 3000, { key: 'cl-copy' }); }
+      } }, 'Copy'));
+}
+
+function bucketBox(c) {
+  const k = clusterKind(c);
+  const zabbixKind = c.source === 'zabbix' && mayEdit() && roleMayWrite() && credentialsKeptOnServer();
+  const edit = !k.ulm.bucket && (mayEditCluster(c) || zabbixKind)
+    ? h('button.cl-lnk.cl-lnkbtn', { type: 'button', title: 'Set the bucket on the cluster (admins)',
+        onclick: async () => { if (zabbixKind ? await editClusterKind(c) : await openEditor(c)) draw(); } }, 'Set in Config ›')
+    : null;
+  return box('bucket', 'Log bucket (S3)',
+    k.ulm.bucket ? h('span.mono', { title: 'Enriched and raw logs share this bucket.' }, k.ulm.bucket)
+      : h('span.muted', { title: 'Set it on the cluster: edit cluster → ULM S3 bucket' }, 'not set'),
+    k.ulm.enabled ? h('span.pill.green.cl-ulm', 'ULM on') : null, edit);
+}
+
+/* -- the four cards -- */
+
+const SEG_COLOR = { active: 'var(--good)', init: 'var(--warning)', unas: 'var(--critical)', reloc: 'var(--accent)', ok: 'var(--good)', err: 'var(--critical)', none: 'var(--surface-3)' };
+
+/** A 64 px donut: the share of each part, an empty ring when there is nothing to share. */
+function donut(parts, label) {
+  const R = 15.915;
+  return svg('svg', { class: 'cl-donut', width: 64, height: 64, viewBox: '0 0 42 42', role: 'img', 'aria-label': label },
+    svg('circle', { cx: 21, cy: 21, r: R, fill: 'none', stroke: 'var(--surface-3)', 'stroke-width': 6 }),
+    ...donutSegments(parts).map((s) => svg('circle', { cx: 21, cy: 21, r: R, fill: 'none', stroke: SEG_COLOR[s.key], 'stroke-width': 6,
+      'stroke-dasharray': s.dash, 'stroke-dashoffset': s.offset.toFixed(2) })));
+}
+
+/** Ring on the left; the headline figure and the legend beside it (never inside the ring). */
+function donutBody(parts, figure, word, label) {
+  return h('div.cl-dwrap', donut(parts, label),
+    h('div.cl-dleg', h('div.cl-dhead', h('b', figure), h('span.muted', word)),
+      ...parts.map((p) => h(`div.cl-dl${p.n === 0 && p.key !== 'active' && p.key !== 'ok' ? '.zero' : ''}`,
+        h('i.cl-dot', { style: { background: SEG_COLOR[p.key] } }), h('span.cl-dn', p.label), h('span.mono.cl-dc', num(p.n))))));
+}
+
+const cardHead = (title, pill) => h('div.cl-card-h', title, pill ? h(`span.pill.${pill.tone === 'yellow' ? 'yellow' : pill.tone}.cl-card-pill`, pill.text) : null);
+const card4 = (id, cls, ...kids) => h(`div.cl-card${cls ? `.${cls}` : ''}`, { 'data-tile': id }, ...kids);
+
+function shardsCard(d) {
+  const s = shardCard(d.health);
+  if (!s) return card4('shards', '', cardHead('Shard allocation', { tone: 'grey', text: 'Unknown' }), h('div.cl-card-note', 'Cluster health has not been read.'));
+  const n = (k) => (s.parts.find((p) => p.key === k) || { n: 0 }).n;
+  return card4('shards', '', cardHead('Shard allocation', s.pill),
+    donutBody(s.parts, s.figure === null ? '–' : s.figure, 'active',
+      `${num(n('active'))} active, ${num(n('init'))} initializing, ${num(n('unas'))} unassigned of ${num(s.total)} shards`));
+}
+
+function ilmCardOf(r) {
+  const { c, d } = r;
+  const v = ilmCard(d, logPattern(r));
+  if (!v.known) {
+    return card4('ilm', '', cardHead('ILM', v.pill), donutBody([], '–', 'managed', 'ILM coverage unknown'),
+      h('div.cl-card-note', { title: v.why }, v.why));
+  }
+  const e = ilmErrorsOf(d, logPattern(r));
+  const link = v.link ? pageLink('Indices without a policy', 'indices', null, c, { focus: { noPolicy: v.noPolicy }, title: v.noPolicy.slice(0, 8).join('\n') }) : null;
+  return card4('ilm', '', cardHead('ILM', v.pill),
+    donutBody(v.parts, `${v.managed}/${v.total}`, 'managed', `${v.parts[0].n} managed without error, ${v.errors} in ILM error, ${v.noPolicy.length} without a policy, of ${v.total} log indices`),
+    // Errors name themselves in the tooltip of the pill; no link then (owner, 2026-11-05).
+    e.count ? null : link ? h('div.cl-card-links', link) : null);
+}
+
+function backupsCard(r) {
+  const { c, d } = r;
+  const view = lifecycleView('SLM', d, logPattern(r), c);
+  const v = slmCard(d, view, logPattern(r), clusterKind(c).ulm);
+  const title = canOpenPage('snapshots')
+    ? h('a.cl-card-t', { href: '#/snapshots', title: 'Snapshots › SLM policies',
+        onclick: (e) => { e.preventDefault(); setFocus('snapshots', { section: 'policies' }); navigateTo('snapshots', { view: 'summary' }, { cluster: c.id }); } }, 'Backups (SLM) ›')
+    : 'Backups (SLM)';
+  const head = h('div.cl-card-h', title, h(`span.pill.${v.pill.tone}.cl-card-pill`, v.pill.text));
+  const noRepo = policiesRead(c.id) && Array.isArray(d.repos) && !d.repos.length;
+  if (v.kind === 'unused') {
+    const off = card4('slm', 'off', head,
+      h('div.cl-big.muted', 'Not used'),
+      h('div.cl-card-note', 'Logs archived by ULM', v.bucket ? [' to ', h('span.mono', v.bucket)] : null));
+    off.title = 'ULM is on for this cluster, so SLM snapshots are not used';
+    return off;
+  }
+  if (v.kind === 'ok') {
+    const tone = v.status === 'Success' ? 'good' : v.status === 'Failed' ? 'bad' : 'none';
+    return card4('slm', '', head,
+      h('div.cl-big-row',
+        h(`span.cl-big.${tone}`, v.status || 'Not run yet'),
+        v.at ? h('span.muted.cl-when', { title: dt(v.at) }, clock(v.at)) : null),
+      h('div.cl-card-note.mono', { title: v.others > 0 ? `+${v.others} more policy take the log indices` : null }, v.policy));
+  }
+  if (v.kind === 'none') {
+    return card4('slm', '', head,
+      h('div.cl-big.bad', 'No policy for ', h('span.mono', v.logs)),
+      h('div.cl-card-note', 'Checked as a wildcard: a policy on ', h('span.mono', 'logstash-*'), ', ', h('span.mono', 'logstash-2026*'), ' or a named logstash- index counts.'),
+      noRepo ? h('div.cl-card-links', docLink(DOCS.repos, 'Register a repository')) : null);
+  }
+  return card4('slm', '', head,
+    h('div.cl-big.muted', v.kind === 'stopped' ? 'SLM is stopped' : '–'),
+    h('div.cl-card-note', v.kind === 'unread' ? 'Its policies could not be read (needs manage_slm or read_slm).' : v.why || 'Nothing is snapshotted until SLM is started again.'));
+}
+
+const rateText = (rt) => `${rt.qps >= 100 ? Math.round(rt.qps) : rt.qps.toFixed(1)} q/s · ${rt.dps >= 1000 ? `${(rt.dps / 1000).toFixed(1)}k` : rt.dps >= 100 ? Math.round(rt.dps) : rt.dps.toFixed(1)} docs/s`;
+
+function activityCard(c, L, shown) {
+  const t = shown.has('tasks') ? L && L.tasks : null, rt = shown.has('rate') ? L && L.rate : null;
+  let pill;
+  if (shown.has('tasks') && t) pill = t.slow ? { tone: 'yellow', text: `${t.slow} slow` } : { tone: 'green', text: 'Normal' };
+  else if (shown.has('tasks') && L && L.tasksError) pill = { tone: 'grey', text: 'Not readable' };
+  else pill = { tone: 'grey', text: 'Loading…' };
+  const main = [];
+  if (shown.has('tasks')) {
+    main.push(t ? h('span.cl-big', `${t.running} task${t.running === 1 ? '' : 's'}`)
+      : L && L.tasksError ? h('span.cl-big.muted', { title: L.tasksError }, '–') : h('span.cl-big.muted', '…'));
+    if (t && t.slow) main.push(h('span.cl-warnink', `${t.slow} over 60 s`));
+  }
+  if (shown.has('rate')) {
+    main.push(rt ? h('span.muted.cl-when', { title: 'Shard-level: query_total counts once per shard' }, rateText(rt))
+      : L && L.rateError ? h('span.muted.cl-when', { title: L.rateError }, 'rate not readable')
+      : h('span.muted.cl-when', { title: 'Two readings of _nodes/stats, ten seconds apart, make a rate' }, 'measuring…'));
+  }
+  const link = pageLink('GET _tasks', 'console', { method: 'GET', path: '/_tasks?detailed=true&group_by=parents' }, c, { title: 'REST console with the request typed in, not sent' });
+  return card4('activity', '', cardHead('Activity', pill), h('div.cl-big-row', ...main), link ? h('div.cl-card-links', link) : null);
+}
+
 function detail(r) {
   const { c, d } = r;
-  const box = h('div.cl-detail');
+  const root = h('div.cl-detail');
   const shown = new Set(detailShown(prefs, 'tiles').map((x) => x.id));
   const sections = new Set(detailShown(prefs, 'sections').map((x) => x.id));
   const L = shown.has('tasks') || shown.has('rate') ? ensureLive(c) : null;
 
-  const tiles = [];
-  if (shown.has('url')) {
-    // A link only for a web scheme: the address is operator-written config, and a cluster
-    // that reached the list through Zabbix is still text somebody typed somewhere.
-    const uuid = `Cluster UUID: ${(d.info && d.info.cluster_uuid) || 'unknown'}`;
-    tiles.push(tile('Cluster URL', h('span.cl-url',
-      isWebUrl(c.url)
-        ? h('a.mono', { href: c.url, target: '_blank', rel: 'noopener', title: uuid }, c.url)
-        : h('span.mono', { title: uuid }, c.url),
-      h('button.btn.sm.ghost.cl-copy', { type: 'button', 'aria-label': 'Copy cluster URL', title: 'Copy URL',
-        onclick: async () => {
-          try { await navigator.clipboard.writeText(c.url); toast('URL copied', 'ok', 1800, { key: 'cl-copy' }); }
-          catch (_) { toast('The browser would not copy — select the URL and copy it', 'warn', 3000, { key: 'cl-copy' }); }
-        } }, svg('svg', { width: 12, height: 12, viewBox: '0 0 16 16', fill: 'none', stroke: 'currentColor', 'stroke-width': 1.6, 'aria-hidden': 'true' },
-        svg('rect', { x: 5, y: 5, width: 9, height: 9, rx: 1.5 }), svg('path', { d: 'M3 11V3h8' })))), { id: 'url' }));
-  }
+  const boxes = [];
+  if (shown.has('health')) boxes.push(healthBox(r));
+  if (shown.has('url')) boxes.push(endpointBox(c, d));
   if (shown.has('jump')) {
-    tiles.push(tile('Jump host', c.via ? h('span.mono', { title: jumpTitle(c) }, c.via) : h('span.muted', { title: 'Reached directly, no SSH tunnel' }, 'direct'), { id: 'jump' }));
+    boxes.push(box('jump', 'Jump host', c.via ? h('span.mono', { title: jumpTitle(c) }, c.via)
+      : h('span.muted', { title: 'Reached directly, no SSH tunnel' }, 'None (direct)')));
   }
-  if (shown.has('ilm')) {
-    const e = ilmErrorsOf(d, logPattern(r));
-    const v = lifecycleView('ILM', d, logPattern(r));
-    tiles.push(tile('ILM', !d.ilm ? h('span.muted', 'unknown')
-      : h('span.mono', h(`span.pill.${v.tone}`, { title: v.why }, v.word), ' ', h('span.muted', { style: { fontSize: '11px' }, title: v.why }, ilmTileNote(d, logPattern(r), v)),
-          e.count ? [' ', h('i.cl-errdot', { title: ilmErrorTitle(e), role: 'img', 'aria-label': 'errors' }),
-            h('span.muted', { style: { fontSize: '11px' } }, ` ${e.names.slice(0, 3).join(', ')}${e.count > 3 ? ', \u2026' : ''}`)] : null), { id: 'ilm' }));
-  }
-  if (shown.has('slm')) {
-    const e = slmErrorsOf(d, logPattern(r));
-    const np = (d.slm || []).length;
-    const v = lifecycleView('SLM', d, logPattern(r), c);
-    tiles.push(tile('SLM', d.slmStatus
-      ? h('span.mono', h(`span.pill.${v.tone}`, { title: v.why }, v.word), h('span.muted', { style: { fontSize: '11px' }, title: v.why }, ` \u00b7 ${np} polic${np === 1 ? 'y' : 'ies'}`),
-          e.count ? [' ', h('i.cl-errdot', { title: slmErrorTitle(e), role: 'img', 'aria-label': 'errors' }),
-            h('span.muted', { style: { fontSize: '11px' } }, ` ${e.names.join(', ')}`)] : null)
-      : h('span.mono', d.slmSupported === false ? 'not supported' : 'unknown'), { id: 'slm' }));
-  }
-  if (shown.has('shards')) tiles.push(shardTile(d));
-  if (shown.has('tasks')) {
-    const t = L && L.tasks;
-    tiles.push(tile('ES tasks', t ? h('span.mono', `${t.running} running`, t.slow ? [' · ', h('span.q.warn', `${t.slow} > 60s`)] : null)
-      : L && L.tasksError ? h('span.muted', { title: L.tasksError }, 'not readable')
-      : h('span.muted', 'Loading…'),
-      { id: 'tasks', title: 'GET _tasks — tasks running on every node right now; "> 60s" counts the ones running longer than a minute' }));
-  }
-  if (shown.has('rate')) {
-    const rt = L && L.rate;
-    tiles.push(tile('Search / index rate', rt ? h('span.mono', `${rt.qps.toFixed(1)} q/s · ${rt.dps >= 100 ? Math.round(rt.dps) : rt.dps.toFixed(1)} docs/s`)
-      : L && L.rateError ? h('span.muted', { title: L.rateError }, 'not readable')
-      : h('span.muted', { title: 'Two readings of _nodes/stats, ten seconds apart, make a rate' }, 'measuring…'),
-      { id: 'rate', title: 'The change in _nodes/stats search.query_total and indexing.index_total between two readings, per second. query_total counts once per shard, so this is shard-level.' }));
-  }
-  if (shown.has('bucket')) {
-    const k = clusterKind(c);
-    tiles.push(tile('S3 log bucket', k.ulm.bucket ? h('span.mono', { title: `Enriched and raw logs share this bucket. ULM ${k.ulm.enabled ? 'on' : 'off'}.` }, k.ulm.bucket)
-      : h('span.muted', { title: 'Set it on the cluster: edit cluster → ULM S3 bucket' }, k.ulm.enabled ? 'ULM on, bucket not set' : 'not set'), { id: 'bucket' }));
-  }
-  if (tiles.length) box.append(h('div.cl-tiles', ...tiles));
+  if (shown.has('bucket')) boxes.push(bucketBox(c));
+  // The Report button is the strip's own, not a box a person can hide: it is how Reports is reached from here.
+  const report = canOpenPage('reports')
+    ? h('a.cl-report', { href: '#/reports', title: 'Reports, this cluster chosen',
+        onclick: (e) => { e.preventDefault(); navigateTo('reports', { section: 'daily', cluster: c.id }, { cluster: c.id }); } }, 'Report ›')
+    : null;
+  if (boxes.length || report) root.append(h('div.cl-strip', ...boxes, report ? h('span.cl-strip-end', report) : null));
 
-  if (sections.has('repo')) box.append(repoSection(c, d));
-  if (sections.has('nodes')) box.append(nodesSection(d));
-  return box;
+  const cards = [];
+  if (shown.has('shards')) cards.push(shardsCard(d));
+  if (shown.has('ilm')) cards.push(ilmCardOf(r));
+  if (shown.has('slm')) cards.push(backupsCard(r));
+  if (shown.has('tasks') || shown.has('rate')) cards.push(activityCard(c, L, shown));
+  if (cards.length) root.append(h('div.cl-cards', ...cards));
+
+  if (sections.has('repo')) root.append(repoSection(c, d));
+  if (sections.has('nodes')) root.append(nodesSection(c, d));
+  return root;
 }
+
 
 /** Last snapshot status as a pill: Success, Partial, Failed, In progress. */
 function statusPill(s) {
@@ -1219,47 +1432,66 @@ function statusPill(s) {
   return h(`span.pill.${cls}`, { title: `Latest snapshot ${s.id} · ${st || 'state unknown'}` }, h('i.dot'), word);
 }
 
+/** A section header: bold title, a count or summary, and its links at the right end. */
+const secHead = (title, sub, ...rest) => h('div.cl-sec-h', h('b', title), sub ? h('span.muted.cl-sec-sub', sub) : null, ...rest);
+
 function repoSection(c, d) {
   const repos = d.repos || [];
-  if (!repos.length) return card('Repository/Snapshot', '', empty('No repositories registered on this cluster'));
+  const snapshotsLink = pageLink('Snapshots', 'snapshots', { view: 'summary' }, c);
+  // Nothing registered: one line, no table, no empty band (and not a fault: an unread list is not "none").
+  if (policiesRead(c.id) && Array.isArray(d.repos) && !repos.length) {
+    return h('div.cl-sec.cl-sec-bar', { 'data-section': 'repo' },
+      h('span.cl-sec-chev', { 'aria-hidden': 'true' }, '▸'), h('b', 'Snapshot repositories'), h('span.muted.cl-sec-sub', 'None registered'),
+      h('span.cl-sec-links', snapshotsLink, docLink(DOCS.repos, 'Register a repository')));
+  }
+  if (!repos.length) return h('div.cl-sec', { 'data-section': 'repo' }, secHead('Snapshot repositories', 'not read yet'));
   const cols = detailShown(prefs, 'repo');
   const cache = sizeCacheFor(c);
   const mayRestore = roleMayWrite() && !isSnapshotMode();
   const trs = repos.map((rp) => {
     const snaps = (d.snapshots && d.snapshots[rp.name]) || [];
-    const newest = snaps[0], oldest = snaps[snaps.length - 1];
+    const newest = snaps[0];
     const policies = slmForRepo(d.slm, rp.name);
     const size = repoSizeFromCache(rp.name, snaps, cache.map);
+    const span = repoOverview(rp, d.snapshots ? snaps : null, d.slm || []).span;
     const cell = {
       name: () => h('td', h('span.mono', rp.name)),
       type: () => h('td', h(`span.pill.${rp.type === 's3' ? 'orange' : 'grey'}`, { title: `Repository type ${rp.type || 'unknown'}` }, rp.type || '?')),
       location: () => h('td.mono.cl-detail-loc', { title: rp.location }, rp.location || '–'),
       policy: () => h('td', policies.length
-        ? h('div.cl-pols', ...policies.slice(0, 2).map((p) => h('span.cl-two', h('span.mono', p.id),
-            h('span.muted.cl-sub', { title: p.lastAt ? `last run ${dt(p.lastAt)}` : 'never run' }, `${p.pattern || ''}${p.lastSnapshot ? ` → ${p.lastSnapshot}` : ''}`))),
+        ? h('div.cl-pols', ...policies.slice(0, 2).map((p) => h('span.mono', { title: `${p.pattern || ''}${p.lastSnapshot ? ` → ${p.lastSnapshot}` : ''}${p.lastAt ? `\nlast run ${dt(p.lastAt)}` : '\nnever run'}` }, p.id)),
             policies.length > 2 ? h('span.muted.cl-sub', `+${policies.length - 2} more`) : null)
         : h('span.muted', { title: 'No SLM policy writes to this repository' }, 'none')),
       count: () => h('td.num', { title: snaps.slice(0, 12).map((x) => x.id).join('\n') + (snaps.length > 12 ? `\n+${snaps.length - 12} more` : '') }, num(snaps.length)),
-      oldest: () => h('td', oldest ? h('span', { title: dt(oldest.start) }, dt(oldest.start).slice(0, 12)) : h('span.muted', '–')),
-      newest: () => h('td', newest ? h('span', { title: dt(newest.start) }, `${dt(newest.start).slice(0, 12)} (${ago(newest.start)})`) : h('span.muted', '–')),
-      status: () => h('td', statusPill(newest)),
+      // The days of log data inside the snapshots, read from the dates in their index names (not when they ran).
+      // A listing that names no indices (_cat) cannot say: unknown, never "none".
+      covered: () => h('td', span.from
+        ? h('span', { title: `${span.days} day(s) of dated indices${span.unknown ? ' — some snapshots not yet read in full' : ''}` }, `${span.from} → ${span.to}`)
+        : span.unknown ? h('span.muted', { title: 'This repository was read with _cat, which does not name the indices. The Snapshots page reads them in full.' }, 'unknown')
+        : h('span.muted', { title: 'No index in these snapshots carries a date in its name' }, '–')),
+      last: () => h('td', newest
+        ? [statusPill(newest), ' ', h('span.muted', { title: `Snapshot ${newest.id} started ${dt(newest.start)}` }, `${clock(newest.start)} · ${ago(newest.start)}`)]
+        : h('span.muted', 'none')),
       // Unknown is not a figure: a size is shown only once every snapshot has been measured.
-      size: () => h('td', size !== null ? h('span.mono', { title: `Sum of the incremental bytes of ${snaps.length} snapshot(s), measured on the Volume report` }, bytes(size))
-        : h('div.cl-two', h('span.muted', '—'), h('span.muted.cl-sub', { title: 'Sizing a repository is an expensive call: the Volume report measures it on demand, and this reads that measurement' }, 'not measured yet'))),
-      actions: () => h('td', h('div.cl-acts',
+      size: () => h('td.num', size !== null ? h('span.mono', { title: `Sum of the incremental bytes of ${snaps.length} snapshot(s), measured on the Reports page` }, bytes(size))
+        : h('span.muted', { title: 'Sizing a repository is an expensive call: the Reports page measures it on demand (Measure size), and this reads that measurement' }, 'not measured')),
+      actions: () => h('td.num', h('div.cl-acts',
         canOpenPage('snapshots')
-          ? h('a.btn.sm.primary', { href: '#/snapshots', title: 'Open Snapshots: list, take, restore, delete, SLM policies',
-              onclick: (e) => { e.preventDefault(); navigateTo('snapshots', { view: 'snapshots' }, { cluster: c.id }); } }, 'Manage')
+          ? h('a.cl-lnk', { href: '#/snapshots', title: 'Open Snapshots: list, take, restore, delete, SLM policies',
+              onclick: (e) => { e.preventDefault(); navigateTo('snapshots', { view: 'snapshots' }, { cluster: c.id }); } }, 'Manage ›')
           : null,
         mayRestore && newest
-          ? h('button.btn.sm', { type: 'button', title: `Restore indices from ${newest.id}`,
+          ? h('button.cl-lnk.cl-lnkbtn', { type: 'button', title: `Restore indices from ${newest.id}`,
               onclick: () => restoreSnapshotDialog(c, rp.name, newest.id, { onChanged: () => refreshAll({ force: true, selected: true }) }) }, 'Restore…')
           : null)),
     };
     return h('tr', ...cols.map((col) => cell[col.id]()));
   });
-  return card('Repository/Snapshot', '', table(cols.map((col) => ({ label: col.label, num: col.num })), trs));
+  return h('div.cl-sec', { 'data-section': 'repo' },
+    secHead('Snapshot repositories', String(repos.length), h('span.cl-sec-links', snapshotsLink)),
+    table(cols.map((col) => ({ label: col.label, num: col.num })), trs));
 }
+
 
 /**
  * Where a node's CPU, heap and disk turn amber ('low') and red ('high'). One definition: the node
@@ -1284,46 +1516,62 @@ export const HEAP_TITLE = `JVM heap used. Amber from ${NODE_LOAD_LEVELS.heap.war
 
 /** The chip a node role takes: Elasticsearch's own name, coloured by what it does. */
 const roleChip = (role) => h(`span.cl-role.${roleKind(role)}`, role);
-const TIER_PILL = { hot: 'red', warm: 'yellow', cold: 'blue', frozen: 'blue', data: 'grey' };
 
-function nodesSection(d) {
+function nodesSection(c, d) {
   const nodes = d.nodes || [];
-  if (!nodes.length) return card('Nodes', '', empty('No node list yet'));
-  const cols = detailShown(prefs, 'nodes').filter((x) => x.id !== 'legend');
-  const legend = detailShown(prefs, 'nodes').some((x) => x.id === 'legend');
+  if (!nodes.length) return h('div.cl-sec', { 'data-section': 'nodes' }, secHead('Nodes', null), empty('No node list yet'));
+  const cols = detailShown(prefs, 'nodes');
   const shardsOf = new Map(((d.disk && d.disk.nodes) || []).map((x) => [x.node, Number(x.shards)]));
+  // A node's disk level is the cluster's own watermarks, as the Disk usage cell reads them (none while they are unread).
+  const diskLvl = (p) => diskAgainstWatermarks({ percent: isFinite(p) ? p : null }, d.clusterSettings).level;
   const bar = (p, cls) => h('div.cl-mini', { role: 'img', 'aria-label': `${Math.round(p)} percent` },
     h(`i.${cls}`, { style: { width: `${Math.max(1.5, Math.min(100, p))}%` } }));
-  const pctCell = (p, sub, which) => (isFinite(p)
-    ? h('div.cl-two', h('span', `${Math.round(p)} %`, sub ? h('span.muted.cl-sub', ` · ${sub}`) : null), bar(p, which === 'heap' ? heapLevel(p) : nodeLoadLevel(p, which)))
-    : h('span.muted', '–'));
-  const trs = nodes.map((n) => {
-    const roles = nodeRoles(n['node.role']);
-    const tier = nodeTier(roles);
+  // A reading over its line (red CPU / disk, heap past the High alert) carries the troubleshooting page, in its cell.
+  const pctCell = (p, sub, which, doc) => {
+    if (!isFinite(p)) return h('span.muted', '–');
+    const cls = which === 'heap' ? heapLevel(p) : which === 'disk' ? diskLvl(p) : nodeLoadLevel(p, which);
+    const over = which === 'heap' ? cls === 'over' || cls === 'high' : cls === 'high';
+    return h('span.cl-pc', h('span.cl-pcn' + (over ? '.bad' : cls === 'low' || cls === 'over' ? '.warn' : ''), `${Math.round(p)} %`),
+      bar(p, cls === 'unknown' ? 'unk' : cls), sub ? h('span.muted.cl-sub', sub) : null, over ? docLink(doc.href, doc.text) : null);
+  };
+  const lists = nodes.map((n) => nodeRoles(n['node.role']));
+  const over = (n) => nodeLoadLevel(Number(n.cpu), 'cpu') === 'high' || ['over', 'high'].includes(heapLevel(Number(n['heap.percent'])))
+    || diskLvl(Number(n['disk.used_percent'])) === 'high';
+  const trs = nodes.map((n, i) => {
+    const roles = lists[i];
     const isMaster = String(n.master || '').trim() === '*';
+    const data = isDataNode(roles);
+    const free = nodeFreeBytes(n);
+    const lvl = diskLvl(Number(n['disk.used_percent']));
     const cell = {
-      name: () => h('td', h('span.mono', n.name), isMaster ? h('span.cl-star', { title: 'Elected master', 'aria-label': 'elected master' }, ' ★') : null),
+      name: () => h('td.cl-nm', h('span.mono', n.name), isMaster ? h('span.cl-star', { title: 'Elected master', 'aria-label': 'elected master' }, ' ★') : null),
+      version: () => h('td.mono', n.version || '–'),
       ip: () => h('td.mono', n.ip || '–'),
       id: () => h('td.mono', { title: n.id || '' }, n.id ? String(n.id).slice(0, 8) : '–'),
-      tier: () => h('td', tier ? h(`span.pill.${TIER_PILL[tier] || 'grey'}`, { title: tier === 'data' ? 'A data node with no tier role: every tier at once' : `Tier from node.roles (data_${tier}); ILM allocates the ${tier} phase here` }, tier[0].toUpperCase() + tier.slice(1))
-        : h('span.muted', { title: 'No data role' }, '–')),
-      roles: () => h('td', h('div.cl-roles', roles.length ? roles.map(roleChip) : h('span.cl-role.other', { title: 'node.roles: [] — coordinating-only' }, 'coordinating'))),
-      version: () => h('td.mono', n.version || '–'),
+      roles: () => {
+        const rc = roleChips(roles);
+        return h('td', h('div.cl-roles', ...rc.chips.map((k) => (k.kind ? h(`span.cl-role.${k.kind}`, { title: k.roles.length > 1 ? k.roles.join(', ') : null }, k.label)
+          : k.roles.length ? roleChip(k.label) : h('span.cl-role.other', { title: 'node.roles: [] — coordinating-only' }, k.label))),
+        rc.more.length ? h('span.cl-role.other', { title: rc.more.join(', ') }, `+${rc.more.length}`) : null));
+      },
       jdk: () => h('td.mono', n.jdk || '–'),
-      cpu: () => h('td', pctCell(Number(n.cpu), '', 'cpu')),
-      heap: () => h('td', pctCell(Number(n['heap.percent']), n['heap.current'] && n['heap.max'] ? `${bytes(Number(n['heap.current']))} / ${bytes(Number(n['heap.max']))}` : '', 'heap')),
-      disk: () => h('td', pctCell(Number(n['disk.used_percent']), n['disk.used'] && n['disk.total'] ? `${bytes(Number(n['disk.used']))} / ${bytes(Number(n['disk.total']))}` : '', 'disk')),
+      cpu: () => h('td', pctCell(Number(n.cpu), '', 'cpu', { href: DOCS.cpu, text: 'High CPU' })),
+      heap: () => h('td', pctCell(Number(n['heap.percent']), n['heap.current'] && n['heap.max'] ? `${bytes(Number(n['heap.current']))} of ${bytes(Number(n['heap.max']))}` : '', 'heap', { href: DOCS.heap, text: 'Why high?' })),
+      disk: () => h('td', pctCell(Number(n['disk.used_percent']), n['disk.used'] && n['disk.total'] ? `${bytes(Number(n['disk.used']))} of ${bytes(Number(n['disk.total']))}` : '', 'disk', { href: DOCS.watermark, text: 'Watermark' })),
+      // disk.total − disk.used (else disk.avail), coloured with the disk level; not reported is a dash, never 0 B.
+      free: () => h('td.num.mono' + (lvl === 'high' ? '.bad' : lvl === 'low' ? '.warn' : ''),
+        free === null ? h('span.muted', { title: 'This node did not report its disk' }, '–')
+          : h('span', { title: n['disk.used'] && n['disk.total'] ? `${bytes(Number(n['disk.used']))} of ${bytes(Number(n['disk.total']))} used` : null }, bytes(free))),
       load: () => h('td.num.mono', n.load_1m ?? '–'),
       shards: () => h('td.num', shardsOf.has(n.name) ? num(shardsOf.get(n.name)) : h('span.muted', { title: 'Not in _cat/allocation: no shards here' }, '–')),
-      uptime: () => h('td.mono', n.uptime || '–'),
+      uptime: () => h('td.num.mono', n.uptime || '–'),
     };
-    return h('tr', ...cols.map((col) => cell[col.id]()));
+    return h(`tr${data ? '.cl-data' : ''}${data && over(n) ? '.over' : ''}`, ...cols.map((col) => cell[col.id]()));
   });
-  const body = [table(cols.map((col) => ({ label: col.label, num: col.num, title: col.id === 'heap' ? HEAP_TITLE : null })), trs)];
-  if (legend) {
-    body.push(h('div.cl-legend', { 'aria-label': 'Role colours' }, h('span.muted', 'node.roles:'),
-      ...['master', 'data_hot', 'data_warm', 'data_cold', 'data_frozen', 'data_content', 'ingest', 'ml', 'transform', 'remote_cluster_client'].map(roleChip),
-      h('span.cl-role.other', { title: 'node.roles: [] — coordinating-only node' }, '[] coordinating-only')));
-  }
-  return card('Nodes', `${nodes.length} node(s)`, body);
+  const summary = nodesSummary(lists, nodes.some((n) => String(n.master || '').trim() === '*'));
+  return h('div.cl-sec', { 'data-section': 'nodes' },
+    secHead('Nodes', summary,
+      h('span.cl-key', h('i.cl-key-sw'), 'Data node'),
+      h('span.cl-sec-links', pageLink('Nodes & shards', 'shards', null, c))),
+    table(cols.map((col) => ({ label: col.label, num: col.num, title: col.id === 'heap' ? HEAP_TITLE : null })), trs));
 }

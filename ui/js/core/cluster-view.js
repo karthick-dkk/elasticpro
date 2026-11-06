@@ -34,19 +34,24 @@ export const SUMMARY_COLUMNS = [
 ];
 
 /**
- * What an open row shows, in the same show/hide panel as the columns: the tiles across the
- * top, the two sections under them, and the columns of each section's table. One
- * choice for every cluster row. `fixed`: the name column of a table is the row.
+ * What an open row shows, in the same show/hide panel as the columns: the boxes of the strip
+ * and the four cards under it (the ids are the old tiles', so a stored choice still applies:
+ * health/url/jump/bucket are strip boxes, shards/ilm/slm/tasks+rate the cards; tasks and rate
+ * are the two halves of the Activity card), the two sections under them, and the columns of
+ * each section's table. One choice for every cluster row. `fixed`: the name column of a
+ * table is the row. Columns of earlier versions (tier, role legend, oldest, newest, status)
+ * are not in the lists any more; a stored choice for one is ignored.
  */
 export const DETAIL_TILES = [
-  { id: 'url', label: 'Cluster URL' },
+  { id: 'health', label: 'Cluster health' },
+  { id: 'url', label: 'Endpoint' },
   { id: 'jump', label: 'Jump host' },
-  { id: 'ilm', label: 'ILM' },
-  { id: 'slm', label: 'SLM' },
+  { id: 'bucket', label: 'Log bucket (S3)' },
   { id: 'shards', label: 'Shard allocation' },
-  { id: 'tasks', label: 'ES tasks' },
-  { id: 'rate', label: 'Search / index rate' },
-  { id: 'bucket', label: 'S3 log bucket' },
+  { id: 'ilm', label: 'ILM' },
+  { id: 'slm', label: 'Backups (SLM)' },
+  { id: 'tasks', label: 'Activity: ES tasks' },
+  { id: 'rate', label: 'Activity: search / index rate' },
 ];
 export const DETAIL_SECTIONS = [
   { id: 'repo', label: 'Repository/Snapshot section' },
@@ -58,28 +63,26 @@ export const REPO_COLUMNS = [
   { id: 'location', label: 'Location / bucket' },
   { id: 'policy', label: 'SLM policy' },
   { id: 'count', label: 'Snapshots', num: true },
-  { id: 'oldest', label: 'Oldest' },
-  { id: 'newest', label: 'Newest' },
-  { id: 'status', label: 'Last snapshot status' },
-  { id: 'size', label: 'Size' },
+  { id: 'covered', label: 'Data covered' },
+  { id: 'last', label: 'Last snapshot' },
+  { id: 'size', label: 'Size', num: true },
   { id: 'actions', label: 'Actions' },
 ];
 export const NODE_COLUMNS = [
   { id: 'name', label: 'Node', fixed: true },
+  { id: 'version', label: 'Version' },
   { id: 'ip', label: 'IP' },
   { id: 'id', label: 'Node ID', hidden: true },
-  { id: 'tier', label: 'Tier' },
   { id: 'roles', label: 'Roles' },
-  { id: 'version', label: 'Version' },
   { id: 'jdk', label: 'JDK' },
   // A figure with a bar under it reads left, like text; only the bare numbers sit right.
   { id: 'cpu', label: 'CPU' },
   { id: 'heap', label: 'Heap' },
   { id: 'disk', label: 'Disk' },
+  { id: 'free', label: 'Free size', num: true },
   { id: 'load', label: 'Load 1m', num: true },
   { id: 'shards', label: 'Shards', num: true },
-  { id: 'uptime', label: 'Uptime' },
-  { id: 'legend', label: 'Role legend' },
+  { id: 'uptime', label: 'Uptime', num: true },
 ];
 /** The groups the panel offers, keyed the way the stored preferences are. */
 export const DETAIL_GROUPS = { tiles: DETAIL_TILES, sections: DETAIL_SECTIONS, repo: REPO_COLUMNS, nodes: NODE_COLUMNS };

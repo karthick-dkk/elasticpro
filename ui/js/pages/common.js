@@ -1,6 +1,6 @@
 /** Shared page pieces. */
 import { h, mount, activatable, reconcile } from '../lib/dom.js';
-import { healthClass, ago, dt, diskUseText } from '../lib/fmt.js';
+import { healthClass, ago, dt, diskUseText, bytes } from '../lib/fmt.js';
 import { diskAgainstWatermarks } from '../core/disk-balance.js';
 import { client, refreshAll } from '../core/state.js';
 import { idb } from '../lib/idb.js';
@@ -423,7 +423,7 @@ function fullestNode(d) {
  * only signal. With the watermarks unknown there is no tick and no threshold colour, and the
  * tooltip says which data would provide them.
  */
-export function diskCell(d, settings, { dataNodes = false } = {}) {
+export function diskCell(d, settings, { dataNodes = false, compact = false } = {}) {
   if (!d || !isFinite(d.percent)) return h('span.muted', '\u2013');
   const w = diskAgainstWatermarks(d, settings);
   // The bar is green until the low watermark, amber from there, red from the high one; a
@@ -443,6 +443,16 @@ export function diskCell(d, settings, { dataNodes = false } = {}) {
     : `Disk ${d.percent.toFixed(1)} % used. ${w.why}`)
     + (node ? ` Fullest node: ${node.name} ${node.percent.toFixed(0)} % (watermarks apply per node).` : '')
     + (n ? ` Summed over the ${n} data node${n === 1 ? '' : 's'} _cat/allocation lists; master-only and coordinating-only nodes hold no shards and are not counted.` : '');
+  // The Clusters summary's cell (board 2026-11-05): a 40 px bar and "used / total" on one line,
+  // clipped to the cell; the % lives in the Size cell beside it, the whole story in the tooltip.
+  if (compact) {
+    const u = bytes(d.used), t = bytes(d.total);
+    const same = u !== '–' && t !== '–' && u.split(' ')[1] === t.split(' ')[1];
+    const text = t === '–' ? `${Math.round(d.percent)} %` : `${u === '–' ? '–' : same ? u.split(' ')[0] : u} / ${t}`;
+    return h('span.cl-dcell', { title, 'aria-label': title },
+      h('span.cl-dbar', h(`i.disk-fill.${level}`, { style: { width: `${Math.min(100, Math.max(1.5, d.percent))}%` } })),
+      h('span.cl-dtext', text));
+  }
   // The figure on the first line; the watermark note and the node count on a second, so a
   // cell at 85 %+ grows down into its own row, never sideways into the next column.
   const sub = [];

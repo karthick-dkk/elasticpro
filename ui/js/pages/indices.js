@@ -28,7 +28,7 @@ import { templatesView } from '../ui/templates-view.js';
 import { takeFocus } from '../core/focus.js';
 
 let host = null;
-const ui = { ilmOnly: false, sourceFilter: 'all', text: '', status: 'all', sort: 'size', dir: -1, from: '', to: '', loading: false, error: null, page: 0, view: 'indices' };
+const ui = { ilmOnly: false, noPolicy: null, sourceFilter: 'all', text: '', status: 'all', sort: 'size', dir: -1, from: '', to: '', loading: false, error: null, page: 0, view: 'indices' };
 /** Index names ticked in the table, for the bulk actions. Cleared when the data reloads. */
 const selected = new Set();
 /** Volume-analysis UI state: which field, how far back, and whether a run is in flight. */
@@ -46,12 +46,24 @@ const SCOPES = [
 ];
 const ev = { scope: 'live', term: '', running: false, result: null, error: null, picked: new Set() };
 
+/** Back to an unfiltered list (what the toolbar's Clear does, and a hint from another page starts from). */
+function resetFilters() {
+  ui.ilmOnly = false; ui.noPolicy = null; ui.sourceFilter = 'all'; ui.text = ''; ui.status = 'all'; ui.from = ''; ui.to = ''; ui.page = 0;
+}
+
 export function render(el) {
   host = el;
   el.classList.add('dense');   // long tables: fit more on one screen
   selected.clear();
   // Opened from an alert about ILM errors (core/focus.js): only the indices in an error step.
   const f = takeFocus('indices');
+  ui.noPolicy = null;
+  // A hint from the Clusters row is the whole question: drop what an earlier visit left set, so the result is not silently intersected with it.
+  if (f && (f.noPolicy || f.health)) resetFilters();
+  // From the Clusters row: the indices of one health (the Cluster health button), or the log
+  // indices that have no ILM policy (the ILM card).
+  if (f && (f.health === 'red' || f.health === 'yellow')) { ui.status = f.health; ui.view = 'indices'; ui.page = 0; }
+  if (f && Array.isArray(f.noPolicy)) { ui.noPolicy = new Set(f.noPolicy); ui.view = 'indices'; ui.page = 0; }
   if (f && f.ilm) { ui.ilmOnly = true; ui.view = 'indices'; ui.page = 0; if (f.index) ui.text = f.index; }
   syncWrites().then(draw).catch(() => {});
   draw();
@@ -82,6 +94,7 @@ function rowsFor(c) {
   let rows = state.indices.get(c.id) || [];
   if (ui.sourceFilter === '__none') rows = rows.filter((r) => !r.source);
   else if (ui.sourceFilter !== 'all') rows = rows.filter((r) => r.source === ui.sourceFilter);
+  if (ui.noPolicy) rows = rows.filter((r) => ui.noPolicy.has(r.index));
   if (ui.ilmOnly) { const errs = (state.data.get(c.id) || {}).ilmErrors || {}; rows = rows.filter((r) => r.index in errs); }
   if (ui.status !== 'all') rows = rows.filter((r) => (ui.status === 'open' || ui.status === 'close') ? r.status === ui.status : r.health === ui.status);
   if (ui.from) rows = rows.filter((r) => !r.day || r.day >= ui.from);
@@ -142,6 +155,13 @@ function drawPage() {
             onclick: () => { ui.sourceFilter = 'all'; ui.page = 0; draw(); } }, 'clear'))
       : null,
 
+    ui.view === 'indices' && ui.noPolicy
+      ? h('div.muted', { style: { fontSize: '11.5px', marginBottom: '8px' } },
+          'Only log indices with no ILM policy',
+          h('button.btn.sm.ghost', { style: { marginLeft: '6px' }, title: 'Show every index again',
+            onclick: () => { ui.noPolicy = null; ui.page = 0; draw(); } }, 'clear'))
+      : null,
+
     ui.view === 'indices' && ui.ilmOnly
       ? h('div.muted', { style: { fontSize: '11.5px', marginBottom: '8px' } },
           'Only indices in an ILM error step',
@@ -200,7 +220,7 @@ function sourceBar(c, sourceList, total) {
       // already fetched, so how old that is decides whether it is still true.
       freshnessBar(scrubFresh(datasetFreshness(c.id, 'indices'), c), () => load(true), { label: 'Indices', busy: ui.loading }),
       writeToggle(draw),
-      h('button.btn.sm', { onclick: () => { ui.ilmOnly = false; ui.sourceFilter = 'all'; ui.text = ''; ui.status = 'all'; ui.from = ''; ui.to = ''; ui.page = 0; draw(); } }, 'Clear'),
+      h('button.btn.sm', { onclick: () => { ui.ilmOnly = false; ui.noPolicy = null; ui.sourceFilter = 'all'; ui.text = ''; ui.status = 'all'; ui.from = ''; ui.to = ''; ui.page = 0; draw(); } }, 'Clear'),
       h('button.btn.sm', { onclick: () => load(true) }, '↻ Reload')));
 }
 

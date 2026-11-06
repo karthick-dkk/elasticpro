@@ -147,7 +147,7 @@ export function slmCoverage(d, pattern) {
   return { known: true, ok: policies.length > 0, policies, others };
 }
 
-const logsOf = (pattern) => patternsOf(pattern).join(', ');
+export const logsOf = (pattern) => patternsOf(pattern).join(', ');
 const listOf = (a, n = 5) => `${a.slice(0, n).join(', ')}${a.length > n ? `, +${a.length - n} more` : ''}`;
 
 /**
@@ -161,10 +161,11 @@ const listOf = (a, n = 5) => `${a.slice(0, n).join(', ')}${a.length > n ? `, +${
 export function lifecycleView(kind, d, pattern, cluster = null) {
   // SLM on a cluster whose logs ULM archives and that takes no snapshots (cluster-kind.js
   // slmExempt): stopped, or no policy for the logs, is its normal state — grey "Not used",
-  // never red. A green one stays green; a failing policy still shows its red dot.
+  // never red.
   if (kind === 'SLM' && cluster && slmExempt(cluster)) {
-    const v = lifecycleView(kind, d, pattern);
-    return v.tone === 'green' ? v : { tone: 'grey', word: 'Not used', covered: null, why: `${ulmLabel(cluster)}. ${ULM_WHY}` };
+    // Whatever SLM is doing (owner's decision, 2026-11-05): ULM on means SLM is "Not used",
+    // running or not. A failing policy still shows its red dot (slmErrorsOf, drawn beside it).
+    return { tone: 'grey', word: 'Not used', covered: null, why: `${ulmLabel(cluster)}. ${ULM_WHY}` };
   }
   const mode = kind === 'ILM' ? d && d.ilm && d.ilm.operation_mode : d && d.slmStatus && d.slmStatus.operation_mode;
   if (!mode) return { tone: 'grey', word: 'Unknown', covered: null, why: `${kind} status has not been read.` };

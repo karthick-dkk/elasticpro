@@ -1505,14 +1505,12 @@ table.cl-tbl > tbody > tr.cl-row { cursor: pointer; }
    (0.3.44): the row tinted with the accent, an accent edge running from it down the whole
    details, the details on the recessed ground with their summary tiles in a box of their own.
    No extra height: the edge and the tint do the separating, not padding. */
-table.cl-tbl > tbody > tr.cl-row.open > td { background: var(--accent-soft); border-bottom-color: transparent; }
-table.cl-tbl > tbody > tr.cl-row.open > td:first-child { box-shadow: inset 3px 0 0 var(--accent); }
+/* (the open row's outline is drawn at the end of this file) */
 table.cl-tbl > tbody > tr.cl-detail-row > td,
 table.cl-tbl > tbody > tr.cl-detail-row:hover > td {
-  background: var(--surface-0); box-shadow: inset 3px 0 0 var(--accent);
+  background: var(--surface-0);
   border-bottom: 1px solid var(--border-strong); padding: 8px 12px 10px 16px;
 }
-.cl-detail .cl-tiles { background: var(--surface-1); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 8px 12px; }
 .cl-detail .card { box-shadow: none; background: var(--surface-1); }
 .cl-detail .card > header { background: var(--surface-2); padding-top: 6px; padding-bottom: 6px; }
 /* A two-line cell (last snapshot, SLM) sits under its head as one block, lines centred. */
@@ -1541,33 +1539,6 @@ table.cl-tbl > tbody > tr.cl-detail-row > td { text-align: left; }
 .cl-detail .tbl th, .cl-detail .tbl td { text-align: left; }
 .cl-detail .tbl th.num, .cl-detail .tbl td.num { text-align: right; }
 .cl-detail .cl-two { justify-items: start; }
-.cl-tiles { display: flex; flex-wrap: wrap; gap: 10px 28px; align-items: flex-start; }
-.cl-tile { min-width: 0; flex: 0 1 auto; }
-.cl-tile.wide { flex-basis: 440px; max-width: 100%; }
-.cl-tile .k { font-size: 10.5px; text-transform: uppercase; letter-spacing: .05em; color: var(--text-muted); white-space: nowrap; }
-.cl-tile .v { font-size: 12px; margin-top: 2px; white-space: nowrap; }
-.cl-tile[data-tile="bucket"] .v { white-space: normal; overflow-wrap: anywhere; max-width: 260px; }
-.cl-url { display: inline-flex; align-items: center; gap: 4px; min-width: 0; max-width: 100%; }
-.cl-url a { color: var(--accent); text-decoration: none; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: min(360px, 60vw); display: inline-block; vertical-align: bottom; }
-.cl-url a:hover { text-decoration: underline; }
-.cl-copy { width: 22px; height: 22px; padding: 0; display: inline-flex; align-items: center; justify-content: center; flex: none; }
-.cl-shards { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-top: 2px; }
-.cl-gauge-box { position: relative; width: 84px; height: 46px; flex: none; }
-.cl-gauge { display: block; color: var(--good); }
-.cl-gauge.warn { color: var(--warning); }
-.cl-gauge.bad { color: var(--critical); }
-.cl-gauge-n { position: absolute; left: 0; right: 0; bottom: 8px; text-align: center; font-size: 12.5px; font-weight: 650; font-variant-numeric: tabular-nums; }
-.cl-gauge-t { position: absolute; left: 0; right: 0; bottom: -4px; text-align: center; font-size: 9.5px; color: var(--text-muted); }
-.cl-shards-r { display: grid; gap: 5px; min-width: 0; }
-.cl-stack { display: flex; width: 130px; max-width: 100%; height: 7px; border-radius: 4px; overflow: hidden; background: var(--surface-3); }
-.cl-stack .cl-seg { display: block; height: 100%; }
-.cl-seg.active { background: var(--good); }
-.cl-seg.reloc { background: var(--accent); }
-.cl-seg.init { background: var(--warning); }
-.cl-seg.unas { background: var(--critical); }
-.cl-legs { display: flex; gap: 10px; flex-wrap: wrap; font-size: 11px; color: var(--text-secondary); }
-.cl-leg { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
-.cl-leg .cl-seg { width: 8px; height: 8px; border-radius: 2px; }
 .cl-detail .tbl th, .cl-detail .tbl td { padding: 4px 8px; }
 .cl-pols { display: grid; gap: 4px; }
 .cl-acts { display: inline-flex; gap: 6px; align-items: center; white-space: nowrap; }
@@ -1589,7 +1560,6 @@ table.cl-tbl > tbody > tr.cl-detail-row > td { text-align: left; }
 .cl-role.cold { color: var(--accent); background: var(--accent-soft); border-color: color-mix(in srgb, var(--accent) 40%, transparent); }
 .cl-role.ingest { color: #0f766e; background: color-mix(in srgb, #14b8a6 14%, transparent); border-color: color-mix(in srgb, #14b8a6 45%, transparent); }
 .pill.blue { color: var(--accent); background: var(--accent-soft); border-color: color-mix(in srgb, var(--accent) 40%, transparent); }
-.cl-legend { display: flex; gap: 5px; flex-wrap: wrap; align-items: center; padding: 8px 2px 0; font-size: 11px; }
 /* The Show / hide panel: four groups side by side, narrower when the window is. */
 .pop.cl-cols { width: min(980px, calc(100vw - 16px)); max-width: none; }
 .cl-cols-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 0 14px; }
@@ -2206,3 +2176,135 @@ button.pn-link:hover { text-decoration: underline; }
 .hv-tbl tr.hv-totals th, .hv-tbl tr.hv-totals td { font-weight: 700; border-top: 2px solid var(--border); }
 .hv-pager { display: flex; align-items: center; gap: 8px; justify-content: flex-end; font-size: 12px; }
 .rm-cfg td { padding: 3px 8px; font-size: 12px; }
+
+/* ===================== the Clusters page: summary cells and the expanded row =====================
+   Owner-approved board of 2026-11-05 (docs: the expanded-row redesign). Colours are the tokens
+   above, so every theme follows. */
+
+/* Summary: Nodes and Size centred; every figure clips to its cell (nothing overlaps its neighbour). */
+.cl-clip { display: block; min-width: 0; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cl-size-pct { font-size: 13.5px; font-weight: 600; color: var(--text-primary); margin-right: 5px; font-variant-numeric: tabular-nums; }
+.cl-size-pct.warn { color: var(--warning-ink); }
+.cl-size-pct.bad { color: var(--critical-ink); }
+.cl-size-idx { font-size: 11px; color: var(--text-muted); font-family: var(--mono); }
+.cl-dcell { display: flex; gap: 6px; align-items: center; min-width: 0; max-width: 200px; margin: 0 auto; }
+.cl-dbar { position: relative; flex: none; display: inline-block; width: 40px; height: 5px; border-radius: 3px; background: var(--surface-3); }
+.cl-dtext { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11.5px; color: var(--text-secondary); font-family: var(--mono); }
+.cl-disk-td { text-align: left; }
+
+/* The open row: a 2 px accent outline round the summary line and the details, accent-soft on the line. */
+table.cl-tbl > tbody > tr.cl-row.open > td { background: var(--accent-soft); border-bottom-color: var(--border); box-shadow: inset 0 2px 0 var(--accent); }
+table.cl-tbl > tbody > tr.cl-row.open > td:first-child { box-shadow: inset 2px 0 0 var(--accent), inset 0 2px 0 var(--accent); }
+table.cl-tbl > tbody > tr.cl-row.open > td:last-child { box-shadow: inset -2px 0 0 var(--accent), inset 0 2px 0 var(--accent); }
+table.cl-tbl > tbody > tr.cl-detail-row > td,
+table.cl-tbl > tbody > tr.cl-detail-row:hover > td {
+  box-shadow: inset 2px 0 0 var(--accent), inset -2px 0 0 var(--accent), inset 0 -2px 0 var(--accent);
+  padding: 10px 14px 12px 14px;
+}
+.cl-detail { gap: 10px; }
+
+/* The strip of boxes, Report at its right end. */
+.cl-strip { display: flex; align-items: stretch; flex-wrap: wrap; gap: 8px; padding: 8px; background: var(--accent-soft);
+  border: 1px solid color-mix(in srgb, var(--accent) 25%, var(--border)); border-radius: var(--radius-sm); font-size: 12.5px; }
+.cl-box { display: flex; flex-direction: column; gap: 2px; padding: 5px 10px; min-width: 200px; background: var(--surface-1);
+  border: 1px solid color-mix(in srgb, var(--accent) 22%, var(--border)); border-radius: var(--radius-sm); }
+.cl-box-k { font-size: 11px; color: var(--text-secondary); }
+.cl-box-v { display: flex; gap: 8px; align-items: center; min-height: 22px; min-width: 0; }
+.cl-url-a { color: var(--accent); text-decoration: none; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: min(360px, 60vw); }
+.cl-url-a:hover { text-decoration: underline; }
+.cl-copy { height: 20px; padding: 0 6px; font-size: 11px; flex: none; }
+.cl-ulm { font-size: 11px; }
+.cl-strip-end { margin-left: auto; align-self: center; padding-right: 4px; }
+.cl-report { display: inline-flex; align-items: center; height: 24px; padding: 0 10px; border: 1px solid var(--accent); border-radius: 4px;
+  background: var(--accent); color: var(--on-accent); font-weight: 600; text-decoration: none; }
+.cl-report:hover { filter: brightness(1.08); }
+.cl-report:focus-visible, .cl-lnk:focus-visible, .cl-hp-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+/* Links: › an ElasticPro page, ↗ elastic.co. */
+.cl-lnk, .cl-doc { color: var(--accent); text-decoration: none; font-size: 12px; white-space: nowrap; }
+.cl-lnk:hover, .cl-doc:hover { text-decoration: underline; }
+.cl-lnkbtn { background: none; border: 0; padding: 0; cursor: pointer; font-family: inherit; }
+.cl-doc { font-size: 11.5px; }
+
+/* Cluster health: the list is a popover on hover and keyboard focus only. */
+.cl-hp { position: relative; display: inline-flex; }
+.cl-hp-btn { height: 22px; padding: 0 8px; border-radius: 4px; font-size: 11.5px; font-weight: 600; cursor: pointer; font-family: inherit; border: 1px solid; }
+.cl-hp-btn.yellow { background: var(--warning-bg); color: var(--warning-ink); border-color: color-mix(in srgb, var(--warning) 55%, transparent); }
+.cl-hp-btn.red { background: var(--critical-bg); color: var(--critical-ink); border-color: color-mix(in srgb, var(--critical) 45%, transparent); }
+.cl-hp-pop { display: none; position: absolute; top: calc(100% + 6px); left: 0; z-index: 30; width: min(780px, 80vw); background: var(--surface-1);
+  border: 1px solid var(--border-strong); border-radius: var(--radius-sm); overflow: hidden; box-shadow: var(--shadow); font-size: 12px; white-space: normal; }
+.cl-hp:hover .cl-hp-pop, .cl-hp:focus-within .cl-hp-pop { display: block; }
+.cl-hp-head { display: flex; align-items: center; gap: 10px; min-height: 28px; padding: 0 10px; background: var(--surface-2); border-bottom: 1px solid var(--border); }
+.cl-hp-head > :last-child { margin-left: auto; }
+.cl-hp-note { padding: 8px 10px; color: var(--text-secondary); }
+.cl-hp-tbl { width: 100%; border-collapse: collapse; }
+.cl-hp-tbl th { height: 26px; padding: 0 10px; font-size: 11.5px; font-weight: 600; color: var(--text-secondary); text-align: left; }
+.cl-hp-tbl td { height: 28px; padding: 0 10px; border-top: 1px solid var(--grid); }
+.cl-hp-tbl th.num, .cl-hp-tbl td.num { text-align: right; }
+.cl-hp-why { color: var(--text-secondary); }
+
+/* The four cards. */
+.cl-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 8px; }
+.cl-card { border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 8px 10px; display: flex; flex-direction: column; gap: 5px; min-width: 0; background: var(--surface-1); }
+.cl-card.off { background: var(--surface-0); border-color: var(--grid); color: var(--text-muted); }
+.cl-card-h { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-weight: 600; font-size: 12px; color: var(--text-secondary); }
+.cl-card-t { color: var(--accent); text-decoration: none; font-weight: 600; font-size: 12px; }
+.cl-card.off .cl-card-t { color: var(--text-muted); }
+.cl-card-t:hover { text-decoration: underline; }
+.cl-card-pill { font-size: 11px; font-weight: 400; }
+.cl-card-note { font-size: 11.5px; color: var(--text-secondary); }
+.cl-card.off .cl-card-note { color: var(--text-muted); }
+.cl-card-links { display: flex; gap: 10px; font-size: 11.5px; }
+.cl-big-row { display: flex; align-items: baseline; gap: 6px; flex-wrap: wrap; }
+.cl-big { font-size: 16px; font-weight: 600; white-space: nowrap; }
+.cl-big.good { color: var(--good-ink); }
+.cl-big.bad { color: var(--critical-ink); }
+.cl-big.muted { color: var(--text-muted); }
+.cl-when { font-size: 12px; }
+.cl-warnink { font-size: 12px; color: var(--warning-ink); font-weight: 600; }
+.cl-dwrap { display: flex; align-items: center; gap: 12px; }
+.cl-donut { flex: none; transform: rotate(-90deg); }
+.cl-dleg { flex: 1; min-width: 0; min-height: 64px; display: flex; flex-direction: column; justify-content: center; gap: 1px; font-size: 12px; line-height: 14px; }
+.cl-dhead { display: flex; align-items: baseline; gap: 5px; line-height: 16px; }
+.cl-dhead b { font-size: 13.5px; }
+.cl-dhead .muted { font-size: 11.5px; }
+.cl-dl { display: flex; align-items: center; gap: 6px; }
+.cl-dl.zero { color: var(--text-muted); }
+.cl-dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
+.cl-dn { flex: 1; min-width: 0; }
+.cl-dc { font-variant-numeric: tabular-nums; }
+
+/* Repositories and Nodes: one bordered section each, a 34 px header. */
+.cl-sec { border: 1px solid var(--border); border-radius: var(--radius-sm); overflow: hidden; background: var(--surface-1); }
+.cl-sec-h { display: flex; align-items: center; gap: 10px; min-height: 34px; padding: 0 12px; background: var(--surface-2); border-bottom: 1px solid var(--border); flex-wrap: wrap; }
+.cl-sec-h b { font-size: 12.5px; }
+.cl-sec-sub { font-size: 12px; }
+.cl-sec-links { margin-left: auto; display: flex; gap: 14px; align-items: center; }
+.cl-sec-bar { display: flex; align-items: center; gap: 10px; min-height: 30px; padding: 0 12px; background: var(--surface-2); }
+.cl-sec-bar b { font-size: 12.5px; }
+.cl-sec-chev { color: var(--text-secondary); }
+.cl-key { display: inline-flex; align-items: center; gap: 5px; font-size: 11.5px; color: var(--text-secondary); margin-left: 6px; }
+.cl-key-sw { width: 10px; height: 10px; border-radius: 2px; background: color-mix(in srgb, var(--accent) 14%, var(--surface-1)); box-shadow: inset 3px 0 0 var(--accent); }
+.cl-sec .tbl-wrap { border: 0; border-radius: 0; }
+.cl-sec .tbl th, .cl-sec .tbl td { padding: 0 8px; height: 32px; }
+.cl-sec .tbl th { height: 30px; }
+.cl-sec .tbl tr:last-child td { border-bottom: 0; }
+.cl-sec .tbl th:first-child, .cl-sec .tbl td:first-child { padding-left: 12px; }
+.cl-sec .tbl th:last-child, .cl-sec .tbl td:last-child { padding-right: 12px; }
+.cl-pols { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+
+/* Nodes: data nodes tinted, a blue bar on the name (amber when a reading is over its line). */
+.cl-sec .tbl tr.cl-data > td { background: color-mix(in srgb, var(--accent) 12%, var(--surface-1)); }
+.cl-sec .tbl tr.cl-data > td:first-child { box-shadow: inset 3px 0 0 var(--accent); }
+.cl-sec .tbl tr.cl-data.over > td:first-child { box-shadow: inset 3px 0 0 var(--warning); }
+.cl-pc { display: inline-flex; align-items: center; gap: 8px; white-space: nowrap; }
+.cl-pcn { display: inline-block; min-width: 34px; font-variant-numeric: tabular-nums; }
+.cl-pcn.warn { color: var(--warning-ink); font-weight: 600; }
+.cl-pcn.bad { color: var(--critical-ink); font-weight: 600; }
+.cl-pc .cl-mini { width: 70px; margin: 0; flex: none; }
+.cl-pc .cl-sub { color: var(--text-muted); font-size: 11.5px; }
+td.num.warn { color: var(--warning-ink); font-weight: 600; }
+td.num.bad { color: var(--critical-ink); font-weight: 600; }
+/* The section and popover tables read like the board: plain headers, not the page's small caps; the index name stays on one line. */
+.cl-sec .tbl th, .cl-hp-tbl th { text-transform: none; letter-spacing: 0; font-size: 11.5px; font-weight: 600; color: var(--text-secondary); }
+.cl-hp-tbl td.mono { white-space: nowrap; }
+.cl-mini i.unk { background: var(--text-muted); }
