@@ -51,8 +51,9 @@ import { playSection, loadPlay, savePlayWatch, playDisplayCount } from '../ui/pl
 import { historyStoreCard, loadHistoryStore, historySupported, saveHistoryStore, discardHistoryStore, historyArmed } from '../ui/history-store.js';
 import { destinationOf, destinationWarning } from '../core/history-store.js';
 import { CFG_PAGES, HOSTED_TABS, LEGACY_SECTIONS, visibleConfig, subLine, resolveRoute, routeOfRest, tabHash, appPageOf,
-  findSettings, SETTING_INDEX } from '../core/config-nav.js';
+  findSettings, SETTING_INDEX, ZABBIX_ROLES_INDEX } from '../core/config-nav.js';
 import { createTracker } from '../ui/change-tracker.js';
+import { zabbixRolesCards, zabbixRolesSupported as rolesSupported, loadZabbixRoles, saveZabbixRoles, discardZabbixRoles, zabbixRolesChanges } from '../ui/zabbix-roles.js';
 import { parseHash } from '../reports/route.js';
 import { extLink, REPO, ISSUES, AUTHOR_NAME } from '../ui/about.js';
 
@@ -190,10 +191,11 @@ export function backupSupported() { return !!(core && core.backup && core.backup
  */
 export function dataRoutingSupported() { return !!(core && core.dataRouting && core.dataRouting.supported === true); }
 /**
- * PHASE 2 HOOK — Zabbix › "ElasticPro roles from Zabbix user groups" and "Zabbix users" (board 2).
- * Shown only when ZABBIX_LINK_GET reports `roleMap: {supported: true}`; no core does yet.
+ * Zabbix › "ElasticPro roles from Zabbix user groups" and "Zabbix users" (board 2). Shown only
+ * when the core knows the group map: ZABBIX_ROLEMAP_GET answers with `groupMapSaved` (docs/ROLES.md;
+ * ZABBIX_LINK_GET carries no such flag). An older core answers an unknown message and neither card is drawn.
  */
-export function zabbixRolesSupported() { return !!(link && link.roleMap && link.roleMap.supported === true); }
+export function zabbixRolesSupported() { return rolesSupported(); }
 
 export function render(el) { arrive(el, 'settings', null); }
 
@@ -376,6 +378,7 @@ tracker.register('alerts', { save: () => saveAlertRules(), discard: () => draw()
 tracker.register('policy', { save: () => savePolicy(), discard: () => { polDraft = null; polNote = null; draw(); } });
 tracker.register('defaults', { save: () => saveDefaults(), discard: () => draw() });
 tracker.register('zabbix-link', { save: () => saveLink(), discard: () => { tokenReplace = false; draw(); } });
+tracker.register('zabbix-roles', { save: () => saveZabbixRoles(() => draw()), discard: () => { discardZabbixRoles(); draw(); }, changes: () => zabbixRolesChanges() });
 tracker.register('zabbix-opts', { save: () => saveZabbixOptions(), discard: () => draw() });
 tracker.register('schedule', { save: () => saveSink(), discard: () => draw() });
 tracker.register('history', { save: () => saveHistoryStore(), discard: () => { discardHistoryStore(); draw(); } });
@@ -477,7 +480,7 @@ function pageMeta(id) {
 
 /** The search index with what pages add at run time: every alert rule by its name. */
 function runtimeIndex() {
-  return [...SETTING_INDEX,
+  return [...SETTING_INDEX, ...(zabbixRolesSupported() && isAdminCaller() ? ZABBIX_ROLES_INDEX : []),
     ...ALERT_RULES.map((r) => ['alerts', 'triggers', r.label, `al-on-${r.id}`, `alert rule ${r.id} ${r.level}`])];
 }
 
@@ -1672,18 +1675,20 @@ let zbx = null;          // the last ZABBIX_CLUSTERS answer
 let zbxBusy = false;
 
 async function loadZabbix() {
-  await Promise.all([cfg.loadZabbixClusters().then((z) => { zbx = z; }), loadLink()]);
+  await Promise.all([cfg.loadZabbixClusters().then((z) => { zbx = z; }), loadLink(),
+    isAdminCaller() ? loadZabbixRoles() : null]);
   if (isOpen('zabbix/zabbix')) { tracker.reset('zabbix-link'); tracker.reset('zabbix-opts'); draw(); }
 }
 
 /**
  * Zabbix, as the board draws it: the connection and the sync options side by side, then the
- * cluster hosts. "Roles from Zabbix user groups" and "Zabbix users" are Phase 2
- * (zabbixRolesSupported()) and are not drawn until the core reports them.
+ * cluster hosts. "Roles from Zabbix user groups" and "Zabbix users" sit between them, and
+ * are drawn only when the core knows the group map (zabbixRolesSupported()).
  */
 function zabbixSection() {
   return h('div.cm-stack',
     h('div.cm-grid2', zabbixLinkCard(), zabbixOptionsCard()),
+    isAdminCaller() ? zabbixRolesCards(() => draw()) : null,
     zabbixCard());
 }
 
