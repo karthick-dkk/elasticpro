@@ -35,8 +35,10 @@ rights in Zabbix) and is not touched by any of this.
 users with their groups (`user.get`) and re-runs the same `resolve_claim` for every *unpinned*
 Zabbix account. A role the live groups no longer justify is **lowered at once** — to the lower
 role, or to no access (`noAccess: true` with `pinned: false`) — and the person's sessions end.
-Nothing is ever **raised** at a sync: a raise waits for the next signed sign-in, the only claim
-the core trusts upwards. The step fails closed towards *no change*: when `user.get` is refused
+**No role is ever raised** at a sync: a raise waits for the next signed sign-in, the only claim
+the core trusts upwards. (The cluster *scope* of an unpinned person follows the live groups as a
+sign-in's would, and may widen — scope is not a role. A pinned person is not touched at all,
+role or scope.) The step fails closed towards *no change*: when `user.get` is refused
 (a token without it), fails, answers nothing, or names none of the accounts this core knows,
 nobody moves. People the answer lists are judged on the groups it lists for them. People it does
 **not** list depend on whether the list is complete — the sync token's own user is of the Super
@@ -47,9 +49,14 @@ admin type (`user.checkAuthentication {token}`, else that user's `role.type`), t
   they get no access (`noAccess: true`, `pinned: false`; a deleted user cannot produce a signed
   sign-in, and were they recreated, one that gives a role lifts it). Recorded as a `syncChange`
   with `why: "not in Zabbix any more"` and listed under `deleted`. A pinned person keeps the
-  pin but loses the sessions, and is marked unverifiable so they count as no administrator.
-  The absent are handled before the listed, so an administrator the list cannot vouch for is
-  discounted before any listed one is judged against the last-admin guard.
+  pin but loses the sessions. Either way the account is marked **`gone`**, and a gone account
+  counts as no administrator for every guard (a deleted pinned admin cannot be the one the
+  guards rely on). `gone` is cleared when a list names them again, when they sign in (a
+  recreated user), and by Reset. The absent are handled before the listed, so an administrator
+  the list cannot vouch for is discounted before any listed one is judged against the guard.
+  Note: pointing the Zabbix link at **another Zabbix instance** makes every account that
+  instance does not know "gone" at the next sync (sessions end; unpinned ones get no access);
+  Reset on each row, or a sign-in from the instance that knows them, reverses it.
 - **Partial**, or not known to be complete, and absent → nothing is known about them: the role
   is kept, they are listed as `unverifiable` (sync answer, `ZABBIX_CLUSTERS`, and
   `unverifiable: true` / `absentSyncs` on their `ZABBIX_USERS` and `USER_LIST` rows), an
@@ -70,9 +77,10 @@ to one account the account is not judged (listed under `ambiguous`). The sync's 
 partial list) still counts as an administrator for every last-admin guard — the map's
 (`adminsAfter`, `last_admin`), and `USER_SET_ROLE`/block/lock/No access/remove — so a sync token
 that sees only some users cannot make every change refusable for ever; `unverifiable` is shown,
-not acted on. A *deleted* account (absent from a complete list) is set to no access and so
-counts for nothing, unless it was the last administrator, in which case it is kept and logged
-(the site then needs a local administrator). Hand pins are never flipped by a sync.
+not acted on. A *gone* account (absent from a complete list) counts for nothing in every guard,
+pinned or not: a deleted user cannot sign in. An unpinned one is also set to no access — unless
+it was the last administrator, in which case the role is kept and logged (the site then needs
+a local administrator). Hand pins are never flipped by a sync.
 
 Pinned people, No access by hand, blocked accounts and the last administrator able to sign in
 are never lowered (the last admin case is logged: `role kept at sync`). A no access the sync
@@ -190,7 +198,7 @@ were never recorded cannot be judged and are left out.
     "disabled": false, "locked": false,
     "lastSignIn": 1762345678, "factsAt": 1762345678,
     "syncChange": null | { "at": 1762345678, "from": "operator", "to": "user", "why": "the highest of their Zabbix user groups now gives user (NOC)" },
-    "unverifiable": false, "absentSyncs": 0 } ] }
+    "unverifiable": false, "absentSyncs": 0, "gone": false } ] }
 ```
 
 - `groups[].role` is what the map gives that group (`null`: not mapped) — the page's "(not

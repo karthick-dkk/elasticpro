@@ -729,8 +729,31 @@ async fn a_complete_user_list_tells_a_deleted_person_from_an_unseen_one() {
     // The local Admin is gone, so only a fresh signed sign-in (Zabbix vouching again) can read the table.
     let (_, out, zed) = sign_in(&c, "zed", 3, Some("Super admin role"), &[("1", "ElasticPro admins")]).await;
     assert_eq!(out["role"], json!("admin"), "the role was kept: {out}");
-    let zu = c.handle(json!({ "type": "ZABBIX_USERS", "session": zed.unwrap() })).await;
-    assert_eq!((user(&zu, "zed@zabbix")["inForce"].clone(), user(&zu, "zed@zabbix")["unverifiable"].clone()), (json!("admin"), json!(false)));
+    let zu = c.handle(json!({ "type": "ZABBIX_USERS", "session": zed.clone().unwrap() })).await;
+    assert_eq!((user(&zu, "zed@zabbix")["inForce"].clone(), user(&zu, "zed@zabbix")["unverifiable"].clone(), user(&zu, "zed@zabbix")["gone"].clone()),
+               (json!("admin"), json!(false), json!(false)));
+    // A deleted pinned administrator counts for nothing: b.singh, pinned admin and gone from a
+    // complete list, is not the admin that lets zed (admin by group) be lowered — zed is kept as
+    // the last able one. Once b.singh is listed again (gone cleared), zed is lowered.
+    let zed = zed.unwrap();
+    let r = c.handle(json!({ "type": "USER_SET_ROLE", "session": zed, "name": "b.singh@zabbix", "role": "admin" })).await;
+    assert_eq!(r["ok"], json!(true), "{r}");
+    let zu = c.handle(json!({ "type": "ZABBIX_USERS", "session": zed })).await;
+    assert_eq!((user(&zu, "b.singh@zabbix")["gone"].clone(), user(&zu, "b.singh@zabbix")["inForce"].clone()), (json!(true), json!("admin")), "{zu}");
+    set_users(json!([zuser("a.kumar", 1, &[("3", "NOC"), ("2", "NOC leads")]), zuser("zed", 3, &[("3", "NOC")]), zuser("d.new", 1, &[("3", "NOC")])]));
+    let r = c.zabbix_sync().await;
+    assert_eq!(r["roleChanges"], json!([]), "zed is the last able admin — b.singh, pinned but gone, does not count: {r}");
+    let p = c.handle(json!({ "type": "ZABBIX_ROLEMAP_PREVIEW", "session": zed, "roleMap": { "groups": { "admin": ["Nobody"] }, "unmapped": "none" } })).await;
+    assert_eq!((p["adminsAfter"].clone(), p["lockout"].clone()), (json!(0), json!(true)), "nor for the map guard: {p}");
+    let r = c.handle(json!({ "type": "USER_SET_ROLE", "session": zed, "name": "zed@zabbix", "role": "user" })).await;
+    assert_eq!(r["kind"], json!("bad_request"), "own role, and in any case the last: {r}");
+    set_users(json!([zuser("a.kumar", 1, &[("3", "NOC"), ("2", "NOC leads")]), zuser("zed", 3, &[("3", "NOC")]), zuser("b.singh", 1, &[("4", "Client A team")]), zuser("d.new", 1, &[("3", "NOC")])]));
+    let r = c.zabbix_sync().await;
+    assert_eq!((r["roleChanges"][0]["username"].clone(), r["roleChanges"][0]["to"].clone()), (json!("zed"), json!("user")), "b.singh is back and counts: {r}");
+    let (_, _, bs) = sign_in(&c, "b.singh", 1, Some("User role"), &[("4", "Client A team")]).await;
+    let zu = c.handle(json!({ "type": "ZABBIX_USERS", "session": bs.unwrap() })).await;
+    assert_eq!(user(&zu, "b.singh@zabbix")["gone"], json!(false));
+
     // When the token's type cannot be read, the list counts as partial: nobody is deleted.
     *my_type.lock().unwrap() = 0;
     let (_, _, _) = sign_in(&c, "d.new", 1, Some("User role"), &[("3", "NOC")]).await;
@@ -738,6 +761,55 @@ async fn a_complete_user_list_tells_a_deleted_person_from_an_unseen_one() {
     let r = c.zabbix_sync().await;
     assert_eq!((r["userListComplete"].clone(), r["roleChanges"].clone()), (json!(false), json!([])), "{r}");
     assert!(r["unverifiable"].as_array().unwrap().iter().any(|u| u == "d.new"), "{r}");
+
+    std::env::remove_var("ELASTICPRO_ZABBIX_API_URL");
+    std::env::remove_var("ELASTICPRO_ZABBIX_API_TOKEN_FILE");
+}
+
+#[tokio::test]
+async fn a_sync_never_touches_a_pinned_persons_scope_and_follows_the_live_groups_for_the_rest() {
+    let _turn = ENV.lock().await;
+    let users = Arc::new(Mutex::new(json!([])));
+    let zbx = fake_zabbix(users.clone(), Arc::new(Mutex::new(3_i64))).await;
+    let dir = TempDir::new("roles-sync-scope");
+    std::fs::write(dir.join("zbx-token"), "zbx-token\n").unwrap();
+    std::env::set_var("ELASTICPRO_ZABBIX_API_URL", format!("{}/api_jsonrpc.php", zbx.url()));
+    std::env::set_var("ELASTICPRO_ZABBIX_API_TOKEN_FILE", dir.join("zbx-token"));
+    // Zabbix Users are limited to the clusters their user groups may read.
+    let (c, _) = hosted(&dir, &config(json!({ "scopeUsersByGroup": true })));
+    let a = admin(&c).await;
+    set_map(&c, &a, group_map()).await;
+    let set_users = |v: Value| *users.lock().unwrap() = v;
+    let scope_of =|s: &str| { let c = c.clone(); let s = s.to_string(); async move {
+        let l = c.handle(json!({ "type": "USER_LIST", "session": s })).await;
+        l["users"].as_array().unwrap().iter().map(|u| (u["name"].as_str().unwrap().to_string(), u["scope"].clone(), u["role"].clone())).collect::<Vec<_>>()
+    } };
+    // a.kumar: a user in NOC, scoped to it. b.singh: pinned admin, whose sign-in as an admin set no scope.
+    let (_, out, kumar) = sign_in(&c, "a.kumar", 1, Some("User role"), &[("3", "NOC")]).await;
+    assert_eq!(out["scoped"], json!(true), "{out}");
+    sign_in(&c, "b.singh", 1, Some("User role"), &[("4", "Client A team")]).await;
+    c.handle(json!({ "type": "USER_SET_ROLE", "session": a, "name": "b.singh@zabbix", "role": "admin" })).await;
+    let (_, out, singh) = sign_in(&c, "b.singh", 1, Some("User role"), &[("4", "Client A team")]).await;
+    assert_eq!((out["role"].clone(), out["scoped"].clone()), (json!("admin"), json!(false)), "{out}");
+    let before = scope_of(&a).await;
+    assert!(before.iter().any(|(n, s, r)| n == "a.kumar@zabbix" && *s == json!(["NOC"]) && *r == json!("user")), "{before:?}");
+    assert!(before.iter().any(|(n, s, r)| n == "b.singh@zabbix" && s.is_null() && *r == json!("admin")), "{before:?}");
+
+    // Live: b.singh is in Client A team only (mapped to user); a.kumar gained Client A team.
+    set_users(json!([zuser("a.kumar", 1, &[("3", "NOC"), ("4", "Client A team")]), zuser("b.singh", 1, &[("4", "Client A team")])]));
+    let r = c.zabbix_sync().await;
+    assert_eq!(r["roleChanges"], json!([]), "{r}");
+    let after = scope_of(&a).await;
+    // The pinned admin: scope still None, still admin, session untouched.
+    assert!(after.iter().any(|(n, s, r)| n == "b.singh@zabbix" && s.is_null() && *r == json!("admin")), "a pinned person is never touched: {after:?}");
+    let who = c.handle(json!({ "type": "WHOAMI", "session": singh.clone().unwrap() })).await;
+    assert_eq!((who["caller"]["role"].clone(), who["caller"]["scoped"].clone()), (json!("admin"), json!(false)), "{who}");
+    // The unpinned user: the scope follows the live groups (it may widen — scope is not a role),
+    // in the account and in the open session (the caller says only whether it is scoped; the
+    // account row carries the list).
+    assert!(after.iter().any(|(n, s, _)| n == "a.kumar@zabbix" && *s == json!(["Client A team", "NOC"])), "{after:?}");
+    let who = c.handle(json!({ "type": "WHOAMI", "session": kumar.unwrap() })).await;
+    assert_eq!((who["caller"]["role"].clone(), who["caller"]["scoped"].clone()), (json!("user"), json!(true)), "{who}");
 
     std::env::remove_var("ELASTICPRO_ZABBIX_API_URL");
     std::env::remove_var("ELASTICPRO_ZABBIX_API_TOKEN_FILE");

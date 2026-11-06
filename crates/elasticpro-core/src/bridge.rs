@@ -2921,6 +2921,7 @@ impl Core {
                 "syncChange": a.last_sync_change.as_ref().map(auth::SyncChange::to_json),
                 "unverifiable": a.zabbix_unverified(),
                 "absentSyncs": a.absent_syncs,
+                "gone": a.gone,
             })
         }).collect();
         users.sort_by(|a, b| a["username"].as_str().cmp(&b["username"].as_str()));
@@ -4865,6 +4866,12 @@ impl Core {
             let facts = auth::ZabbixFacts { user_type: old.user_type, role: old.role, groups: vec![], at: now };
             let why = "not in Zabbix any more".to_string();
             self.apply_lowering(&mut out, a, &name, None, facts, why, false, None);
+            // Marked gone after the guard above has had the person counted: from here on they
+            // are no administrator, pinned or not (a deleted pinned admin must not be the one the
+            // guards rely on).
+            if let Err(e) = self.users.note_gone(&a.name) {
+                tracing::warn!(subject = %a.name, error = %e, "absence not recorded");
+            }
             if let Err(e) = self.users.note_absent(&a.name) {
                 tracing::warn!(subject = %a.name, error = %e, "absence not recorded");
             }
@@ -4892,11 +4899,16 @@ impl Core {
                 (zbx_sso::Source::ZabbixRole, None) => "in none of the mapped user groups, and their Zabbix role gives no role".to_string(),
                 (zbx_sso::Source::Unmapped, _) => "in none of the mapped user groups, and the map gives those users no access".to_string(),
             };
-            // The scope follows the live groups as a sign-in's would, for the role they end with.
-            let names: Vec<String> = u.groups.iter().map(|g| g.name.clone()).collect();
-            let ends_with = res.role.map_or(a.role, |t| t.min(a.role));
-            let scope = zbx_sso::scope_for(ends_with, &names, scope_by_group);
-            self.apply_lowering(&mut out, a, &name, res.role, facts, why, true, Some(scope));
+            // The scope follows the live groups as a sign-in's would, for the role they end with
+            // — for an unpinned person; a pinned person is not touched by a sync at all.
+            let scope = if a.role_pinned {
+                None
+            } else {
+                let names: Vec<String> = u.groups.iter().map(|g| g.name.clone()).collect();
+                let ends_with = res.role.map_or(a.role, |t| t.min(a.role));
+                Some(zbx_sso::scope_for(ends_with, &names, scope_by_group))
+            };
+            self.apply_lowering(&mut out, a, &name, res.role, facts, why, true, scope);
         }
         out
     }
@@ -4907,7 +4919,7 @@ impl Core {
     fn apply_lowering(&self, out: &mut SyncRoles, a: &auth::Account, name: &str, target: Option<Role>, facts: auth::ZabbixFacts, why: String,
                       confirmed: bool, scope: Option<Option<Vec<String>>>) {
         match self.users.lower_at_sync(&a.name, target, facts, why.clone(), confirmed, scope.clone()) {
-            Ok(Some(change)) => {
+            Ok(auth::SyncOutcome { change: Some(change), .. }) => {
                 self.sessions.end_all_for(&a.name);
                 tracing::warn!(target: "audit", user = "zabbix-sync", subject = %a.name, from = %change.from, to = %change.to, why = %why, "role lowered at sync");
                 let mut v = change.to_json();
@@ -4915,8 +4927,14 @@ impl Core {
                 v["username"] = json!(name);
                 out.changes.push(v);
             }
-            // Nothing lowered: the open sessions still take the live scope, as after a sign-in.
-            Ok(None) => if let Some(s) = scope { self.sessions.refresh_for(&a.name, a.role, s) },
+            // Nothing lowered: the open sessions still take the live scope, as after a sign-in —
+            // with the role and scope the account holds now (read under the store's lock), never
+            // the snapshot this pass started from, which could re-raise a role changed meanwhile.
+            Ok(auth::SyncOutcome { change: None, role, scope: now_scope, no_access }) => {
+                if scope.is_some() && !no_access {
+                    self.sessions.refresh_for(&a.name, role, now_scope);
+                }
+            }
             Err(auth::AuthError::LastAdmin) => {
                 tracing::warn!(target: "audit", subject = %a.name, why = %why, "role kept at sync: the last administrator able to sign in");
             }

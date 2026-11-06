@@ -851,6 +851,12 @@ pub struct Account {
     /// request needs a fresh signed sign-in. Reset when a sync lists them or they sign in.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub absent_syncs: u32,
+    /// A *complete* Zabbix user list (a Super admin sync token) did not name this account: the
+    /// user is gone from Zabbix. Counts as no administrator (`active`) — pinned or not — so a
+    /// deleted pinned admin cannot be the one the last-admin guards rely on. Cleared when a list
+    /// names them again or they sign in (a recreated user), and by Reset.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub gone: bool,
     /// Zabbix user groups this account is limited to; `None` sees every cluster.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scope: Option<Vec<String>>,
@@ -929,6 +935,16 @@ impl SyncChange {
     }
 }
 
+/// What `UserStore::lower_at_sync` did and left: the change, if any, and the account's role,
+/// scope and no-access state as they stand afterwards — what open sessions are told.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SyncOutcome {
+    pub change: Option<SyncChange>,
+    pub role: Role,
+    pub scope: Option<Vec<String>>,
+    pub no_access: bool,
+}
+
 impl Account {
     /// What an admin is allowed to see about an account. Never the hash or the salt:
     /// they are of no use to the UI and every copy is one more place to leak from.
@@ -946,6 +962,7 @@ impl Account {
             "syncChange": self.last_sync_change.as_ref().map(SyncChange::to_json),
             "unverifiable": self.zabbix_unverified(),
             "absentSyncs": self.absent_syncs,
+            "gone": self.gone,
             "scope": self.scope,
             "locked": self.locked,
             "lockedUntil": self.locked_until.filter(|t| *t > now()),
@@ -976,9 +993,12 @@ impl Account {
     }
 
     /// Whether this account could sign in at all: not blocked, not locked by an admin, not set
-    /// to No access. A self-lock after wrong passwords is not counted — it passes in minutes.
+    /// to No access, and not gone from Zabbix (`gone`: a complete user list no longer names it —
+    /// a deleted user cannot sign in, pinned or not). A self-lock after wrong passwords is not
+    /// counted — it passes in minutes. An *unverified* account (absent from a partial list)
+    /// still counts: nobody knows, and the guards must not become refusable for ever.
     pub fn active(&self) -> bool {
-        !self.disabled && !self.locked && !self.no_access
+        !self.disabled && !self.locked && !self.no_access && !self.gone
     }
 
     /// An administrator who can act: the one count behind every "last admin" refusal
@@ -1289,6 +1309,7 @@ impl UserStore {
                 zabbix: None,
                 last_sync_change: None,
                 absent_syncs: 0,
+                gone: false,
                 scope: None,
                 locked: false,
                 locked_until: None,
@@ -1346,9 +1367,10 @@ impl UserStore {
                     if facts.is_some() {
                         a.zabbix = facts;
                     }
-                    // A signed claim is Zabbix vouching for them: whatever a partial user list
-                    // could not see, they exist.
+                    // A signed claim is Zabbix vouching for them: whatever a user list could
+                    // not see, they exist (or exist again).
                     a.absent_syncs = 0;
+                    a.gone = false;
                     if a.no_access && a.role_pinned {
                         drop(list);
                         let _ = self.save();
@@ -1389,6 +1411,7 @@ impl UserStore {
                         zabbix: facts,
                         last_sync_change: None,
                         absent_syncs: 0,
+                        gone: false,
                         scope,
                         locked: false,
                         locked_until: None,
@@ -1481,11 +1504,14 @@ impl UserStore {
             if a.active_admin() && admins <= 1 {
                 return Err(AuthError::LastAdmin);
             }
-            if !a.role_pinned && !a.no_access {
+            if !a.role_pinned && !a.no_access && !a.gone {
                 return Ok(());
             }
             a.role_pinned = false;
             a.no_access = false;
+            // Reset also forgets that a sync found them gone — the admin's way back when the
+            // Zabbix link was pointed at another instance for a while.
+            a.gone = false;
         }
         self.save()
     }
@@ -1537,12 +1563,14 @@ impl UserStore {
     /// are kept either way. Nothing happens to a pinned account, one already without access, or
     /// a blocked one; `LastAdmin` when the person is the only administrator able to sign in.
     /// `confirmed`: Zabbix listed this person (the facts are theirs now), which clears
-    /// `absent_syncs`; false for a person a complete list no longer names. `scope`: the cluster
-    /// scope the live groups give (`zbx_sso::scope_for`), rewritten like a sign-in rewrites it
-    /// — pinned or not — so the proxy path, which reads `Account::scope`, sees the live groups;
-    /// `None` leaves it. `Ok(Some(change))` when something was lowered.
+    /// `absent_syncs` and `gone`; false for a person a complete list no longer names. `scope`:
+    /// the cluster scope the live groups give (`zbx_sso::scope_for`), rewritten like a sign-in
+    /// rewrites it so the proxy path, which reads `Account::scope`, sees the live groups; `None`
+    /// leaves it — and a pinned account's is never touched: a sync does nothing to a pinned
+    /// person. The outcome carries the account's role and scope as they are *now*, read under
+    /// the lock, for the caller to push into open sessions — never a snapshot from before.
     pub fn lower_at_sync(&self, name: &str, target: Option<Role>, facts: ZabbixFacts, why: String, confirmed: bool,
-                         scope: Option<Option<Vec<String>>>) -> Result<Option<SyncChange>, AuthError> {
+                         scope: Option<Option<Vec<String>>>) -> Result<SyncOutcome, AuthError> {
         let out = {
             let mut list = self.accounts.write();
             let admins = list.iter().filter(|a| a.active_admin()).count();
@@ -1552,11 +1580,12 @@ impl UserStore {
             a.zabbix = Some(facts);
             if confirmed {
                 a.absent_syncs = 0;
+                a.gone = false;
             }
-            if let Some(s) = scope {
+            if let (Some(s), false) = (scope, a.role_pinned) {
                 a.scope = s;
             }
-            if a.role_pinned || a.no_access || a.disabled || target.is_some_and(|t| t >= a.role) {
+            let change = if a.role_pinned || a.no_access || a.disabled || target.is_some_and(|t| t >= a.role) {
                 None
             } else if a.active_admin() && admins <= 1 {
                 drop(list);
@@ -1571,10 +1600,27 @@ impl UserStore {
                 let change = SyncChange { at: now(), from, to: target.map(Role::as_str).unwrap_or("none").to_string(), why };
                 a.last_sync_change = Some(change.clone());
                 Some(change)
-            }
+            };
+            SyncOutcome { change, role: a.role, scope: a.scope.clone(), no_access: a.no_access }
         };
         self.save()?;
         Ok(out)
+    }
+
+    /// A complete Zabbix user list did not name this account: gone from Zabbix. Pinned or not,
+    /// they count as no administrator from now on (`Account::gone`).
+    pub fn note_gone(&self, name: &str) -> Result<(), AuthError> {
+        {
+            let mut list = self.accounts.write();
+            let Some(a) = list.iter_mut().find(|a| a.name.eq_ignore_ascii_case(name) && a.source.is_some()) else {
+                return Err(AuthError::NotFound(name.to_string()));
+            };
+            if a.gone {
+                return Ok(());
+            }
+            a.gone = true;
+        }
+        self.save()
     }
 
     /// Record what a source said about an account that already exists for that source — a
@@ -1584,7 +1630,7 @@ impl UserStore {
         let changed = {
             let mut list = self.accounts.write();
             match list.iter_mut().find(|a| a.name.eq_ignore_ascii_case(name.trim()) && a.source.as_deref() == Some(source)) {
-                Some(a) => { a.zabbix = Some(facts); a.absent_syncs = 0; true }
+                Some(a) => { a.zabbix = Some(facts); a.absent_syncs = 0; a.gone = false; true }
                 None => false,
             }
         };
@@ -1593,12 +1639,13 @@ impl UserStore {
         }
     }
 
-    /// A sync's user list named this Zabbix account: it exists, so it is verified again.
+    /// A sync's user list named this Zabbix account: it exists, so it is verified again (and no
+    /// longer gone, if a complete list had said so).
     pub fn note_seen(&self, name: &str) {
         let changed = {
             let mut list = self.accounts.write();
-            match list.iter_mut().find(|a| a.name.eq_ignore_ascii_case(name) && a.source.is_some() && a.absent_syncs > 0) {
-                Some(a) => { a.absent_syncs = 0; true }
+            match list.iter_mut().find(|a| a.name.eq_ignore_ascii_case(name) && a.source.is_some() && (a.absent_syncs > 0 || a.gone)) {
+                Some(a) => { a.absent_syncs = 0; a.gone = false; true }
                 None => false,
             }
         };
