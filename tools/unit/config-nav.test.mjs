@@ -123,8 +123,17 @@ test('Find a setting: every word must match, best first, visible tabs only', () 
 });
 
 test('every index row points at a page and tab that exist', () => {
-  for (const [page, tab, label] of N.SETTING_INDEX) {
+  for (const [page, tab, label] of [...N.SETTING_INDEX, ...N.ZABBIX_ROLES_INDEX]) {
     const p = N.CFG_PAGES.find((x) => x.id === page);
     assert.ok(p && p.tabs.some((t) => t.id === tab), `${label} → ${page}/${tab}`);
   }
+});
+
+test('the Zabbix roles labels are found only when the page adds them', () => {
+  const vis = N.visibleConfig('admin', ALL);
+  assert.deepEqual(N.findSettings('user groups', vis).filter((x) => /roles from/i.test(x.label)), []);
+  const withRoles = [...N.SETTING_INDEX, ...N.ZABBIX_ROLES_INDEX];
+  assert.equal(N.findSettings('roles from zabbix', vis, { index: withRoles })[0].label, 'ElasticPro roles from Zabbix user groups');
+  assert.equal(N.findSettings('zabbix users', vis, { index: withRoles })[0].label, 'Zabbix users');
+  assert.equal(N.findSettings('preview who changes', vis, { index: withRoles })[0].page, 'zabbix');
 });

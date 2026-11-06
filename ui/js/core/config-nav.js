@@ -255,6 +255,12 @@ export const SETTING_INDEX = Object.freeze([
   ['system', 'file', 'Forget file & credentials', '', 'danger'],
 ]);
 
+/** Rows added when the core knows the Zabbix group map (docs/ROLES.md): the page appends them then, never before. */
+export const ZABBIX_ROLES_INDEX = Object.freeze([
+  ['zabbix', 'zabbix', 'ElasticPro roles from Zabbix user groups', '', 'role map admin operator user guest group chips add group none of these unmapped preview who changes'],
+  ['zabbix', 'zabbix', 'Zabbix users', '', 'people role set by hand pinned reset no access last sign-in gone unverifiable lowered at sync'],
+]);
+
 const norm = (s) => String(s || '').toLowerCase().replace(/[—–]/g, '-');
 
 /**

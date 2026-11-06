@@ -3443,6 +3443,202 @@ restoreConsole();
   ok(pills.length === shown, `config: ${pills.length} state pills for ${shown} clusters`);
 }
 
+// Config › Zabbix › roles from user groups and Zabbix users (ui/zabbix-roles.js, docs/ROLES.md).
+// The dev bridge has no Zabbix, so the core's ZABBIX_ROLEMAP_* / ZABBIX_USERS / USER_SET_ROLE /
+// USER_UNPIN_ROLE are a small stateful fake here; everything else goes to the real bridge.
+{
+  const zr = await load('ui/zabbix-roles.js');
+  const realFetch = globalThis.fetch;
+  const live = [['7', 'Zabbix administrators'], ['3', 'NOC'], ['2', 'NOC leads'], ['5', 'ElasticPro admins'], ['9', 'Client A team'], ['12', 'Auditors'], ['13', 'Odd <b>name</b>']]
+    .map(([usrgrpid, name]) => ({ usrgrpid, name, disabled: false }));
+  const nowS = Math.floor(Date.now() / 1000);
+  const core = {
+    unknownMessage: false, refuseAdmin: false, usersErr: null, sent: [],
+    map: { groups: { admin: ['ElasticPro admins'], operator: ['NOC leads'], user: ['NOC'], guest: ['Retired group'] }, unmapped: 'zabbixRole' },
+    users: [
+      { account: 'a.kumar@zabbix', username: 'a.kumar', known: true, groups: [{ id: '3', name: 'NOC', role: 'user' }, { id: '2', name: 'NOC leads', role: 'operator' }],
+        zabbixRole: 'User role', fromGroups: { role: 'operator', source: 'group', via: 'NOC leads', matched: [{ group: 'NOC leads', role: 'operator' }, { group: 'NOC', role: 'user' }] },
+        byHand: null, pinned: false, noAccess: false, inForce: 'operator', lastSignIn: nowS - 600 },
+      { account: 'b.singh@zabbix', username: 'b.singh', known: true, groups: [{ id: '9', name: 'Client A team', role: null }], fromGroups: { role: 'user', source: 'zabbixRole', matched: [] },
+        byHand: 'operator', pinned: true, noAccess: false, inForce: 'operator', lastSignIn: nowS - 3600 },
+      { account: 'c.ops@zabbix', username: 'c.ops', known: true, groups: [{ id: '3', name: 'NOC', role: 'user' }], fromGroups: { role: 'user', source: 'group', matched: [{ group: 'NOC', role: 'user' }] },
+        byHand: 'none', pinned: true, noAccess: true, inForce: 'none', lastSignIn: null },
+      { account: 'gone.person@zabbix', username: 'gone.person', known: true, groups: [{ id: '13', name: 'Odd <b>name</b>', role: null }], fromGroups: { role: 'none', source: 'unmapped', matched: [] },
+        byHand: null, pinned: false, noAccess: true, inForce: 'none', gone: true, lastSignIn: 1762345678,
+        syncChange: { at: 1762345678, from: 'user', to: 'none', why: 'not in Zabbix any more' } },
+      { account: 'absent@zabbix', username: 'absent', known: true, groups: [{ id: '3', name: 'NOC', role: 'user' }], fromGroups: { role: 'user', source: 'group', matched: [{ group: 'NOC', role: 'user' }] },
+        byHand: null, pinned: false, noAccess: false, inForce: 'user', unverifiable: true, absentSyncs: 2, lastSignIn: 1762345678 },
+      { account: 'lowered@zabbix', username: 'lowered', known: true, groups: [{ id: '3', name: 'NOC', role: 'user' }], fromGroups: { role: 'user', source: 'group', matched: [{ group: 'NOC', role: 'user' }] },
+        byHand: null, pinned: false, noAccess: false, inForce: 'user', lastSignIn: 1762345678,
+        syncChange: { at: 1762345678, from: 'operator', to: 'user', why: 'the highest of their Zabbix user groups now gives user (NOC)' } },
+    ],
+  };
+  const mapJson = () => ({ groups: core.map.groups, unmapped: core.map.unmapped, names: {}, types: { 1: 'user', 2: 'operator', 3: 'admin' } });
+  globalThis.fetch = async (input, init) => {
+    const body = init && init.body ? JSON.parse(init.body) : {};
+    const t = body.type;
+    if (!/^(ZABBIX_ROLEMAP_|ZABBIX_USERS|USER_SET_ROLE|USER_UNPIN_ROLE)/.test(String(t))) return realFetch(input, init);
+    core.sent.push(body);
+    if (core.unknownMessage && t.startsWith('ZABBIX_')) return stubReply({ ok: false, kind: 'unknown_message', message: `unknown message ${t}` });
+    if (t === 'ZABBIX_ROLEMAP_GET') {
+      return stubReply({ ok: true, roleMap: mapJson(), defaults: { groups: {}, unmapped: 'zabbixRole' }, file: true, groupMapSaved: true, zabbixGroups: live, zabbixGroupsError: null, zabbixRoles: [], zabbixError: null });
+    }
+    if (t === 'ZABBIX_ROLEMAP_SET') {
+      if (core.refuseAdmin) return stubReply({ ok: false, kind: 'last_admin', message: 'the save would leave no administrator who can sign in (adminsAfter 0) (EP-109)' });
+      core.map = { groups: body.roleMap.groups, unmapped: body.roleMap.unmapped };
+      return stubReply({ ok: true, roleMap: mapJson(), keptVersion: 'v1', adminsAfter: 2, groupMapSaved: true });
+    }
+    if (t === 'ZABBIX_ROLEMAP_PREVIEW') {
+      return stubReply({ ok: true, roleMap: body.roleMap, adminsAfter: core.refuseAdmin ? 0 : 2, lockout: core.refuseAdmin, groupsFrom: 'zabbix', zabbixError: null,
+        changes: core.refuseAdmin ? [] : [{ account: 'a.kumar@zabbix', username: 'a.kumar', from: 'operator', to: 'user', source: 'group', via: 'NOC', groups: ['NOC'], disabled: false }] });
+    }
+    if (t === 'ZABBIX_USERS') {
+      return stubReply({ ok: true, total: core.users.length, byHand: core.users.filter((u) => u.pinned).length, groupMapSaved: true,
+        groupsFrom: core.usersErr ? 'lastSignIn' : 'zabbix', zabbixError: core.usersErr, users: core.users });
+    }
+    const u = core.users.find((x) => x.account === body.name);
+    if (!u) return stubReply({ ok: false, kind: 'not_found', message: 'no such account' });
+    if (t === 'USER_SET_ROLE') {
+      u.pinned = true; u.byHand = body.role; u.inForce = body.role; u.noAccess = body.role === 'none';
+      return stubReply({ ok: true, pinned: true, noAccess: u.noAccess, users: [] });
+    }
+    u.pinned = false; u.byHand = null; u.noAccess = false;
+    return stubReply({ ok: true, users: [] });
+  };
+  const typeInto = (el, v) => { el.value = v; el.dispatchEvent(new window.Event('input', { bubbles: true })); };
+  const changeTo = (el, v) => { el.value = v; el.dispatchEvent(new window.Event('change', { bubbles: true })); };
+  const rolesCard = () => panel('ElasticPro roles from Zabbix user groups');
+  const usersCard = () => panel('Zabbix users');
+  const bar = () => doc.getElementById('cm-savebar');
+  const barText = () => (bar() && !bar().hidden ? bar().textContent : '');
+  const optionOf = (sel, text) => [...sel.options].find((o) => o.textContent === text);
+  const addTo = (role, text) => { const s = rolesCard().querySelector(`select.zr-add[data-role="${role}"]`); const o = s && optionOf(s, text); if (o) changeTo(s, o.value); return !!o; };
+  const rowOf = (name) => usersCard().querySelector(`tr[data-user="${name}@zabbix"]`);
+  const sentOf = (type) => core.sent.filter((m) => m.type === type);
+  const previewBtn = () => [...rolesCard().querySelectorAll('button')].find((b) => /Preview who changes/.test(b.textContent));
+  const shownRows = () => [...usersCard().querySelectorAll('tr[data-user]')].map((r) => r.dataset.user).join();
+  try {
+    zr.forgetZabbixRoles();
+    await go('settings');
+    ok(await openCfg('zabbix', 'zabbix'), 'zabbix roles: could not open Config › Zabbix');
+    await settleFor(500);
+    ok(!!rolesCard() && !!usersCard(), 'zabbix roles: the two cards are not on Config › Zabbix when the core knows the group map');
+    if (rolesCard() && usersCard()) {
+      for (const c of [rolesCard(), usersCard()]) {
+        ok(![...c.querySelectorAll('button')].some((b) => /^save/i.test(b.textContent.trim())), 'zabbix roles: a card has its own Save button (edits go through the one save bar)');
+      }
+      const rows = [...rolesCard().querySelectorAll('tr[data-role-row]')].map((r) => r.dataset.roleRow);
+      ok(rows.join() === 'admin,operator,user,guest,unmapped', `zabbix roles: rows are ${rows.join()}`);
+      ok(!!rolesCard().querySelector('tr[data-role-row="admin"] .zr-chip[data-group="ElasticPro admins"]'), 'zabbix roles: no ElasticPro admins chip under Admin');
+      const retired = rolesCard().querySelector('tr[data-role-row="guest"] .zr-chip[data-group="Retired group"]');
+      ok(retired && /unknown group/.test(retired.textContent), 'zabbix roles: a saved group Zabbix does not list is not marked "unknown group"');
+      ok(!rolesCard().querySelector('tr[data-role-row="user"] .zr-chip[data-group="NOC"] .zr-warn'), 'zabbix roles: a listed group is marked unknown');
+      ok(!barText(), 'zabbix roles: the save bar is showing before anything was changed');
+      // "+ Add group" offers the groups no role has, and a group added shows in the bar.
+      const sel = rolesCard().querySelector('select.zr-add[data-role="user"]');
+      const offered = sel ? [...sel.options].map((o) => o.textContent) : [];
+      ok(offered.includes('Client A team') && !offered.includes('NOC') && !offered.includes('ElasticPro admins'), `zabbix roles: + Add group offers ${offered.join(' | ')}`);
+      ok(addTo('user', 'Client A team'), 'zabbix roles: Client A team is not offered');
+      await settleFor(100);
+      ok(!!rolesCard().querySelector('tr[data-role-row="user"] .zr-chip[data-group="Client A team"]'), 'zabbix roles: the added group did not become a chip');
+      ok(/1 unsaved change/.test(barText()) && /User: \+ Client A team/.test(barText()), `zabbix roles: the bar says "${barText()}"`);
+      // Preview asks the core about the draft, writes nothing, and lists who changes.
+      const setsBefore = sentOf('ZABBIX_ROLEMAP_SET').length;
+      press(previewBtn());
+      await settleFor(300);
+      const pv = rolesCard().querySelector('[data-zr="preview"]');
+      ok(pv && /1 person changes/.test(pv.textContent) && /a\.kumar/.test(pv.textContent) && /Administrators able to sign in after: 2/.test(pv.textContent), `zabbix roles: preview reads "${pv && pv.textContent}"`);
+      const pvMsg = sentOf('ZABBIX_ROLEMAP_PREVIEW').pop();
+      ok(pvMsg && pvMsg.roleMap.groups.user.some((g) => g && g.id === '9' && g.name === 'Client A team'), 'zabbix roles: the preview did not send the chosen group as {id, name}');
+      ok(sentOf('ZABBIX_ROLEMAP_SET').length === setsBefore, 'zabbix roles: previewing wrote the map');
+      // Remove a chip: two changes; Save sends one SET and the bar clears.
+      press(rolesCard().querySelector('.zr-chip[data-group="NOC leads"] .zr-x'));
+      await settleFor(100);
+      ok(/2 unsaved changes/.test(barText()) && /Operator: − NOC leads/.test(barText()), `zabbix roles: the bar says "${barText()}" after a removal`);
+      ok(!rolesCard().querySelector('[data-zr="preview"]'), 'zabbix roles: a stale preview stayed after an edit');
+      await saveViaBar();
+      const set = sentOf('ZABBIX_ROLEMAP_SET').pop();
+      ok(set && set.roleMap.groups.operator.length === 0 && set.roleMap.groups.user.length === 2 && set.roleMap.unmapped === 'zabbixRole', `zabbix roles: SET sent ${JSON.stringify(set && set.roleMap)}`);
+      ok(!barText(), `zabbix roles: the bar stayed after a successful save: "${barText()}"`);
+      // "In none of these", and a refused (last admin) save stays plainly on the card.
+      const un = rolesCard().querySelector('select[data-zr="unmapped"]');
+      ok(!!un, 'zabbix roles: no "In none of these" select');
+      if (un) changeTo(un, 'none');
+      await settleFor(100);
+      ok(/In none of these: no access/.test(barText()), `zabbix roles: the bar says "${barText()}" for the unmapped rule`);
+      press(rolesCard().querySelector('.zr-chip[data-group="ElasticPro admins"] .zr-x'));
+      await settleFor(100);
+      core.refuseAdmin = true;
+      press(previewBtn());
+      await settleFor(300);
+      ok(/Refused: .*nobody able to sign in as an administrator/.test((rolesCard().querySelector('[data-zr="preview"]') || {}).textContent || ''), 'zabbix roles: a lock-out preview is not a plain refusal');
+      await saveViaBar();
+      const refusal = rolesCard().querySelector('[data-zr="refusal"]');
+      ok(refusal && /Not saved: this would leave nobody able to sign in as an administrator/.test(refusal.textContent) && /EP-109/.test(refusal.textContent), `zabbix roles: refusal reads "${refusal && refusal.textContent}"`);
+      ok(/unsaved change/.test(barText()), 'zabbix roles: a refused save dropped the changes');
+      core.refuseAdmin = false;
+      press(bar().querySelector('button[data-act="discard"]'));
+      await settleFor(150);
+      ok(!barText() && !!rolesCard().querySelector('.zr-chip[data-group="ElasticPro admins"]') && rolesCard().querySelector('select[data-zr="unmapped"]').value === 'zabbixRole', 'zabbix roles: Discard did not put the map back');
+      // Untrusted names are text, never markup.
+      ok(![...usersCard().querySelectorAll('b')].some((b) => b.textContent === 'name'), 'zabbix roles: a group name became markup');
+      ok(/Odd <b>name<\/b>/.test(rowOf('gone.person').textContent), 'zabbix roles: a group name with markup is not shown as typed');
+
+      // The people: badges and notes.
+      ok(rowOf('b.singh') && rowOf('b.singh').querySelector('[data-badge="pinned"]'), 'zabbix users: b.singh has no pinned badge');
+      ok(rowOf('c.ops').querySelector('[data-badge="pinned"]') && /no access by hand/.test(rowOf('c.ops').textContent), 'zabbix users: c.ops is not shown as No access by hand');
+      ok(/not in Zabbix any more/.test((rowOf('gone.person').querySelector('[data-badge="gone"]') || {}).textContent || ''), 'zabbix users: no gone badge');
+      ok(/absent 2 syncs/.test((rowOf('absent').querySelector('[data-badge="unverifiable"]') || {}).textContent || ''), 'zabbix users: no "absent 2 syncs" badge');
+      ok(/lowered at sync: Operator → User/.test((rowOf('lowered').querySelector('[data-badge="syncChange"]') || {}).textContent || '') && /highest of their Zabbix user groups/.test(rowOf('lowered').textContent), 'zabbix users: a sync lowering and its reason are not shown');
+      ok(/highest of User, Operator/.test(rowOf('a.kumar').textContent), 'zabbix users: "highest of User, Operator" missing');
+      ok(/never/.test(rowOf('c.ops').textContent) && /Client A team/.test(rowOf('b.singh').textContent) && /not mapped/.test(rowOf('b.singh').textContent), 'zabbix users: last sign-in "never" or "(not mapped)" missing');
+      ok(!usersCard().querySelector('[data-zr="groups-from"], [data-zr="token-problem"]'), 'zabbix users: a live read shows a last-sign-in note');
+      // By hand goes through the bar: No access for a.kumar, Reset for b.singh.
+      changeTo(rowOf('a.kumar').querySelector('select.zr-hand'), 'none');
+      await settleFor(100);
+      press(rowOf('b.singh').querySelector('button.zr-reset'));
+      await settleFor(100);
+      ok(/2 unsaved changes/.test(barText()) && /a\.kumar: No access by hand/.test(barText()) && /b\.singh: back to the groups/.test(barText()), `zabbix users: the bar says "${barText()}"`);
+      await saveViaBar();
+      const setRole = sentOf('USER_SET_ROLE').pop(); const unpin = sentOf('USER_UNPIN_ROLE').pop();
+      ok(setRole && setRole.name === 'a.kumar@zabbix' && setRole.role === 'none', `zabbix users: USER_SET_ROLE ${JSON.stringify(setRole)}`);
+      ok(unpin && unpin.name === 'b.singh@zabbix', `zabbix users: USER_UNPIN_ROLE ${JSON.stringify(unpin)}`);
+      ok(!barText(), `zabbix users: the bar stayed after saving: "${barText()}"`);
+      ok(/no access by hand/.test(rowOf('a.kumar').textContent) && !rowOf('b.singh').querySelector('[data-badge="pinned"]'), 'zabbix users: rows were not refreshed after the save');
+      // Filter and the All / Set by hand toggle.
+      typeInto(usersCard().querySelector('input[data-zr="filter"]'), 'singh');
+      await settleFor(60);
+      ok(shownRows() === 'b.singh@zabbix', `zabbix users: filter "singh" shows ${shownRows()}`);
+      typeInto(usersCard().querySelector('input[data-zr="filter"]'), '');
+      press(usersCard().querySelector('button[data-mode="hand"]'));
+      await settleFor(100);
+      ok(shownRows() === 'a.kumar@zabbix,c.ops@zabbix', `zabbix users: Set by hand shows ${shownRows()}`);
+      press(usersCard().querySelector('button[data-mode="all"]'));
+      await settleFor(60);
+
+      // A token that cannot read users: said, with what fixes it.
+      core.usersErr = 'Zabbix refused user.get: no permission to call the method';
+      ok(await openCfg('requests', 'policy'), 'zabbix roles: could not leave Zabbix');  // a tab that loads, so coming back loads again
+      ok(await openCfg('zabbix', 'zabbix'), 'zabbix roles: could not come back to Zabbix');
+      await settleFor(500);
+      const tp = usersCard() && usersCard().querySelector('[data-zr="token-problem"]');
+      ok(tp && /cannot read users \(user\.get\)/.test(tp.textContent) && /2\.1\.20/.test(tp.textContent), `zabbix users: token note reads "${tp && tp.textContent}"`);
+      core.usersErr = null;
+    }
+    // An older core does not know the group map: neither card, no error.
+    core.unknownMessage = true;
+    zr.forgetZabbixRoles();
+    ok(await openCfg('requests', 'policy'), 'zabbix roles: could not leave Zabbix (older core)');
+    ok(await openCfg('zabbix', 'zabbix'), 'zabbix roles: could not open Zabbix (older core)');
+    await settleFor(500);
+    ok(!rolesCard() && !usersCard(), 'zabbix roles: an older core still shows the roles cards');
+    ok(!!doc.querySelector('#view .cm-body'), 'zabbix roles: the Zabbix page itself did not draw on an older core');
+  } finally {
+    globalThis.fetch = realFetch;
+    zr.forgetZabbixRoles();
+  }
+}
+
 // Config page: saving something there leaves you on the Config page. A save re-reads and
 // re-applies the whole config (setConfig, the Zabbix clusters, a refresh), and "back to
 // Clusters" is where start() falls when it has nothing better — which is where people were

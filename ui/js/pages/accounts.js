@@ -26,7 +26,7 @@ const ui = { users: [], tokens: [], caller: null, apiTokens: false, err: '', fre
   activity: [], activityFile: null, activityUser: '', activityFailed: false, activityErr: '',
   // The Zabbix role map (hosted only): what the core holds, the shipped defaults, the role
   // names Zabbix lists when its API is paired, and why it could not when it is not.
-  roleMap: null, roleDefaults: null, zabbixRoles: [], roleMapNote: '', roleMapErr: '', roleMapSaving: false };
+  roleMap: null, groupMap: false, groupMapSaved: false, roleDefaults: null, zabbixRoles: [], roleMapNote: '', roleMapErr: '', roleMapSaving: false };
 /** Cluster accounts are read per cluster, on demand — one call each, not on every render. */
 const cu = { byCluster: {}, loading: new Set() };
 
@@ -82,6 +82,10 @@ async function loadRoleMap() {
   const r = await bridge({ type: 'ZABBIX_ROLEMAP_GET' });
   if (!r || !r.ok) { ui.roleMapErr = (r && r.message) || 'Could not read the role map.'; return; }
   ui.roleMap = { names: { ...(r.roleMap && r.roleMap.names) }, types: { ...(r.roleMap && r.roleMap.types) } };
+  // The core that knows the group map says so (docs/ROLES.md): the name map below is then the
+  // fallback for people in none of the mapped groups, and lives under a fold.
+  ui.groupMap = typeof r.groupMapSaved === 'boolean';
+  ui.groupMapSaved = r.groupMapSaved === true;
   ui.roleDefaults = r.defaults || null;
   ui.zabbixRoles = Array.isArray(r.zabbixRoles) ? r.zabbixRoles : [];
   ui.roleMapNote = r.zabbixError || '';
@@ -150,6 +154,21 @@ function roleMapCard() {
         'A role name wins over its user type when the Zabbix module sends it (modules 2.1.13 on). ',
         ui.roleMapNote ? h('span', { title: ui.roleMapNote }, roleListNote(ui.roleMapNote)) : null)),
     [h('button.btn.sm.primary', { disabled: ui.roleMapSaving, onclick: saveRoleMap }, ui.roleMapSaving ? 'Working…' : 'Save role map')]);
+}
+
+/**
+ * The name map as the core that has the group map shows it: folded under "Older role-name map",
+ * since the user groups decide first and these names only decide for people in none of them
+ * (docs/ROLES.md). An older core has no group map, so the card stands as it was.
+ */
+function olderRoleMap() {
+  if (!ui.groupMap) return roleMapCard();
+  return h('details.cm-fold', { 'data-fold': 'older-role-map' },
+    h('summary', h('b', 'Older role-name map'),
+      h('span.muted', ui.groupMapSaved ? ' · the fallback for people in none of the mapped Zabbix user groups' : ' · still decides, until user groups are mapped')),
+    h('div.muted', { style: { fontSize: '12px', margin: '6px 0' } },
+      'Who becomes what is now set from Zabbix user groups, under Config › Zabbix. This map only answers for people in none of those groups, when “In none of these” is set to the role from their Zabbix user role.'),
+    roleMapCard());
 }
 
 /**
@@ -453,7 +472,7 @@ function draw() {
 
     ui.apiTokens ? h('div', { style: { marginTop: '10px' } }, tokensCard()) : notHostedNote(),
     // Zabbix signs people in only on the hosted build; elsewhere there is nothing to map.
-    ui.apiTokens ? h('div', { style: { marginTop: '10px' } }, roleMapCard()) : null,
+    ui.apiTokens ? h('div', { style: { marginTop: '10px' } }, olderRoleMap()) : null,
 
     // A visible line between the two, because everything above it is a credential for
     // this app and everything below it is a credential for a cluster. They are stored in
