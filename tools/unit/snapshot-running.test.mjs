@@ -72,4 +72,9 @@ test('the dataset exists on both sides under one name, in the background class',
   const st = fs.readFileSync(path.join(ROOT, 'ui/js/core/state.js'), 'utf8');
   assert.match(st, /snapshot_status: \['status'\]/, 'FLEET_KEYS names the one request');
   assert.match(st, /if \(module === 'snapshots'\) return \['policies', 'snapshots', 'snapshot_status'/, 'the Snapshots page watches it');
+  // A plain refresh leaves it out unless the policy polls it on its own — both sides say so.
+  assert.match(st, /export const POLICY_ONLY = new Set\(\['snapshot_status'\]\)/);
+  assert.match(st, /entry\.effectiveClass === 'background'/, 'backgroundNames() keeps it only under Background');
+  const mod = fs.readFileSync(path.join(ROOT, 'crates/elasticpro-core/src/fleet/mod.rs'), 'utf8');
+  assert.match(mod, /\*d != Dataset::SnapshotStatus \|\| cfg\.effective_class\(\*d, known\) == Class::Background/, 'refresh_msg agrees');
 });

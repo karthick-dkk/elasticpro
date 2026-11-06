@@ -105,6 +105,23 @@ async fn settings_follow_the_account_and_reach_nobody_else() {
 }
 
 #[tokio::test]
+async fn an_api_token_has_no_settings_and_its_prefix_is_never_written() {
+    let dir = TempDir::new("prefs-token");
+    let c = core(&dir);
+    let admin = admin_session(&c).await;
+    let made = c.handle(json!({ "type": "TOKEN_CREATE", "session": admin, "name": "zabbix", "role": "user" })).await;
+    assert_eq!(made["ok"], json!(true), "{made}");
+    let secret = made["token"].as_str().or_else(|| made["secret"].as_str()).expect("the token's secret").to_string();
+    let who = c.caller_for_token(&secret).expect("the token names a caller");
+    assert!(who.name.starts_with("token:"));
+    for t in ["PREFS_GET", "PREFS_SET"] {
+        let r = c.handle_as(json!({ "type": t, "prefs": { "theme": "warm" } }), Some(who.clone())).await;
+        assert_eq!(r["kind"], json!("forbidden"), "{t}: {r}");
+    }
+    assert!(!dir.0.join("user-prefs.json").exists(), "nothing was written for a token");
+}
+
+#[tokio::test]
 async fn the_edition_without_accounts_has_one_person() {
     let dir = TempDir::new("prefs-portable");
     let c = Core::new_with_rounds(Some(dir.0.clone()), Edition::Portable, 1);

@@ -205,6 +205,15 @@ struct SaveMeta {
     summary: String,
 }
 
+/// What `keep_before` did and what `record` will write once the caller's write succeeded.
+#[derive(Debug)]
+pub struct PendingSave {
+    /// A version of the previous content was set aside.
+    pub kept: bool,
+    current_name: String,
+    meta: Option<SaveMeta>,
+}
+
 const META_SUFFIX: &str = ".meta.json";
 const CURRENT_PREFIX: &str = "current-";
 
@@ -240,55 +249,65 @@ impl ConfigHistory {
         serde_json::from_str(&std::fs::read_to_string(dir.join(name)).ok()?).ok()
     }
 
-    /// Keep what is currently at `path` before something replaces it, and record who is
-    /// replacing it with `new_text` and what that changes.
+    /// Keep what is currently at `path` before something replaces it, and prepare the record
+    /// of who is replacing it with `new_text` and what that changes. The record itself is
+    /// written by `record`, once the caller's write has succeeded — a save that fails must
+    /// not leave a "current" record describing a file that is not there.
     ///
     /// Best effort on purpose: a history that cannot be written must never stop a save
-    /// the operator asked for. It returns whether it kept a version so the caller can say
-    /// so, and nothing more.
+    /// the operator asked for. `kept` says whether a version was set aside, nothing more.
     ///
     /// The version set aside is the content the *previous* save produced, so the record of
-    /// that save (kept as `current-<stem>.meta.json` since then) moves over to it, and a new
-    /// current record is written for this save. A version from before these records
-    /// existed simply has none.
-    pub fn keep(&self, path: &Path, new_text: &str, by: &str) -> bool {
-        let Some(dir) = &self.dir else { return false };
+    /// that save (kept as `current-<stem>.meta.json` since then) is copied to it. A version
+    /// from before these records existed simply has none.
+    pub fn keep_before(&self, path: &Path, new_text: &str, by: &str) -> PendingSave {
+        let stem = Self::stem_of(path);
+        let current_name = format!("{CURRENT_PREFIX}{stem}{META_SUFFIX}");
+        let mut pending = PendingSave { kept: false, current_name, meta: None };
+        let Some(dir) = &self.dir else { return pending };
         if std::fs::create_dir_all(dir).is_err() {
-            return false;
+            return pending;
         }
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
         }
-        let stem = Self::stem_of(path);
         let old_text = std::fs::read_to_string(path).unwrap_or_default();
-        let current_name = format!("{CURRENT_PREFIX}{stem}{META_SUFFIX}");
-        let kept = if old_text.trim().is_empty() {
-            false
-        } else {
+        if !old_text.trim().is_empty() {
             let id = format!("{}-{}", now(), stem);
             if Self::write_private(&dir.join(&id), &old_text) {
-                if let Some(prev) = self.read_meta(&current_name) {
+                if let Some(prev) = self.read_meta(&pending.current_name) {
                     if let Ok(s) = serde_json::to_string(&prev) {
                         Self::write_private(&dir.join(format!("{id}{META_SUFFIX}")), &s);
                     }
                 }
-                true
-            } else {
-                false
+                pending.kept = true;
             }
-        };
-        let meta = SaveMeta {
+        }
+        pending.meta = Some(SaveMeta {
             saved_at: now(),
             saved_by: by.trim().to_string(),
             summary: crate::config_diff::summarize_text(&old_text, new_text),
-        };
-        if let Ok(s) = serde_json::to_string(&meta) {
-            Self::write_private(&dir.join(&current_name), &s);
-        }
+        });
         self.trim();
-        kept
+        pending
+    }
+
+    /// Write the record `keep_before` prepared, now that the file it describes is on disk.
+    pub fn record(&self, pending: &PendingSave) {
+        let (Some(dir), Some(meta)) = (&self.dir, &pending.meta) else { return };
+        if let Ok(s) = serde_json::to_string(meta) {
+            Self::write_private(&dir.join(&pending.current_name), &s);
+        }
+    }
+
+    /// `keep_before` and `record` in one step, for a caller whose write cannot fail in
+    /// between (tests; a history whose file is written by somebody else).
+    pub fn keep(&self, path: &Path, new_text: &str, by: &str) -> bool {
+        let p = self.keep_before(path, new_text, by);
+        self.record(&p);
+        p.kept
     }
 
     /// Whether a directory entry is a version (not a sidecar, not the current record).
@@ -475,6 +494,27 @@ mod tests {
         let cur = h.current(&cfg).unwrap();
         assert_eq!((cur.saved_by.as_str(), cur.summary.as_str()), ("ann", "v 2 → 3"));
         assert_eq!(h.currents().len(), 1);
+    }
+
+    #[test]
+    fn a_failed_write_leaves_no_record_of_it() {
+        let t = Tmp::new("pending");
+        let h = ConfigHistory::new(Some(&t.0));
+        let cfg = t.0.join("c.json");
+        std::fs::write(&cfg, r#"{"v":1}"#).unwrap();
+        assert!(h.keep(&cfg, r#"{"v":1}"#, "ann"));
+        let before = h.current(&cfg).unwrap();
+        // The write that follows keep_before fails: record() is never called.
+        let p = h.keep_before(&cfg, r#"{"v":2}"#, "bob");
+        assert!(p.kept);
+        assert_eq!(h.current(&cfg).unwrap(), before, "the live file is still v1, and its record says so");
+        // The version set aside keeps its own record, copied, not moved.
+        let newest = &h.list()[0];
+        assert_eq!(newest.saved_by.as_deref(), Some("ann"));
+        // Then a write that succeeds records.
+        h.record(&p);
+        assert_eq!(h.current(&cfg).unwrap().saved_by, "bob");
+        assert_eq!(h.current(&cfg).unwrap().summary, "v 1 → 2");
     }
 
     #[test]

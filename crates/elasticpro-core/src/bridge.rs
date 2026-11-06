@@ -1561,9 +1561,16 @@ impl Core {
                 // Keep what is there before replacing it. A config edited from the UI is
                 // edited by hand no longer, so an undo has to come from somewhere. The
                 // record of who saved and what changed is made here, from the two texts.
-                let kept = if t == "CONFIG_WRITE" { self.history.keep(&p, text, &self.saver_name(caller.as_ref())) } else { false };
+                let pending = (t == "CONFIG_WRITE").then(|| self.history.keep_before(&p, text, &self.saver_name(caller.as_ref())));
+                let kept = pending.as_ref().is_some_and(|k| k.kept);
                 match write_text_atomic(&p, text).await {
-                    Ok(()) => json!({ "ok": true, "path": path, "bytes": text.len(), "keptVersion": kept }),
+                    Ok(()) => {
+                        // Recorded only now: a save that failed must not be in the history as a save.
+                        if let Some(k) = &pending {
+                            self.history.record(k);
+                        }
+                        json!({ "ok": true, "path": path, "bytes": text.len(), "keptVersion": kept })
+                    }
                     Err(message) => json!({ "ok": false, "message": message }),
                 }
             }
@@ -2195,6 +2202,12 @@ impl Core {
     /// way the gate would refuse it. A display link never reaches here (not in PLAY_READS).
     fn prefs_msg(&self, t: &str, msg: &Value, caller: Option<&Caller>) -> Value {
         let user = match caller {
+            // An API token is not a person: it has no browser to lay out, and its name is a
+            // prefix of the secret, which must not be written to a file. A display link neither.
+            Some(c) if c.play.is_some() || c.name.starts_with("token:") => {
+                return json!({ "ok": false, "kind": "forbidden",
+                               "message": "settings belong to a signed-in person; an API token or display link has none" });
+            }
             Some(c) => c.name.clone(),
             None if !self.edition.uses_accounts() => "local".to_string(),
             None => return json!({ "ok": false, "kind": "unauthenticated", "message": "sign in to continue" }),
@@ -2496,10 +2509,12 @@ impl Core {
     /// and the record of who (`by`) saved this one and what it changed.
     async fn store_config(&self, found: &LocatedConfig, by: &str) -> Result<bool, Value> {
         let text = serialize_config(&found.raw, found.yaml);
-        let kept = self.history.keep(&found.path, &text, by);
+        let pending = self.history.keep_before(&found.path, &text, by);
         write_text_atomic(&found.path, &text).await
             .map_err(|message| json!({ "ok": false, "kind": "io_error", "message": message }))?;
-        Ok(kept)
+        // Recorded only now: a save that failed must not be in the history as a save.
+        self.history.record(&pending);
+        Ok(pending.kept)
     }
 
     /// Who a config save is recorded as: the caller's account, or — when no person asked —

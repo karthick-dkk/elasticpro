@@ -1262,9 +1262,23 @@ export function setFleetMode(mode) {
 /** Whether the core holds this cluster (true until it has said which ones it holds). */
 function fleetKnows(id) { return !fleet.ids || fleet.ids.has(id); }
 
+/**
+ * The datasets a plain refresh (the button, `r`, Retry, a trust action) asks for, and the
+ * FLEET_STATE default. `snapshot_status` is left out unless the running policy fetches it on
+ * its own (`effectiveClass: 'background'`): under Client basis and Hybrid only the Snapshots
+ * page asks for it (moduleDatasets), so a refresh elsewhere does not send a request the page
+ * does not show. Keep in step with `refresh_msg` in fleet/mod.rs.
+ */
+export const POLICY_ONLY = new Set(['snapshot_status']);
 function backgroundNames() {
-  const bg = (fleet.catalogue || []).filter((c) => c.class === 'background').map((c) => c.dataset);
-  return bg.length ? bg : BACKGROUND;
+  const cat = fleet.catalogue || [];
+  const bg = cat.filter((c) => c.class === 'background').map((c) => c.dataset);
+  const names = bg.length ? bg : BACKGROUND;
+  return names.filter((d) => {
+    if (!POLICY_ONLY.has(d)) return true;
+    const entry = cat.find((c) => c.dataset === d);
+    return !!(entry && entry.effectiveClass === 'background');
+  });
 }
 
 /** A core timestamp as ours. */

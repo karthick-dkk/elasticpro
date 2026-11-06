@@ -35,6 +35,8 @@ pub struct SavedQuery {
 pub struct SavedQueries {
     path: Option<PathBuf>,
     list: RwLock<Vec<SavedQuery>>,
+    /// One save at a time: two people saving at once must not race on the tmp file.
+    saving: parking_lot::Mutex<()>,
 }
 
 /// What a save asks for.
@@ -54,11 +56,14 @@ impl SavedQueries {
             .and_then(|p| std::fs::read_to_string(p).ok())
             .and_then(|s| serde_json::from_str::<Vec<SavedQuery>>(&s).ok())
             .unwrap_or_default();
-        SavedQueries { path, list: RwLock::new(list) }
+        SavedQueries { path, list: RwLock::new(list), saving: parking_lot::Mutex::new(()) }
     }
 
     fn save(&self) -> Result<(), String> {
         let Some(p) = &self.path else { return Ok(()) };
+        // Held across serialise and rename, so a later save never carries an earlier list
+        // and the two never meet on the tmp file.
+        let _one_at_a_time = self.saving.lock();
         let body = serde_json::to_vec_pretty(&*self.list.read()).map_err(|e| e.to_string())?;
         if let Some(d) = p.parent() {
             std::fs::create_dir_all(d).map_err(|e| e.to_string())?;

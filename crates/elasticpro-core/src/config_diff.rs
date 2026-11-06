@@ -28,9 +28,32 @@ pub const NO_VALUE_CHANGE: &str = "no change in values";
 /// path and is not.
 pub fn is_secret_key(key: &str) -> bool {
     let k = key.to_ascii_lowercase();
-    k.contains("password") || k.contains("passwd") || k.contains("secret") || k.contains("token")
+    k.contains("password") || k.contains("passwd") || k.contains("passphrase") || k.contains("secret") || k.contains("token")
         || k.contains("apikey") || k.contains("api_key") || k.contains("authorization") || k.contains("credential")
-        || matches!(k.as_str(), "auth" | "headers" | "master" | "basic" | "pass")
+        || k.contains("privatekey") || k.contains("private_key") || k.contains("sshkey") || k.contains("ssh_key")
+        // `x-api-key`, `service_key`, … — a key named "…key" holds one; `keyFile` names a path.
+        || k.ends_with("-key") || k.ends_with("_key")
+        || matches!(k.as_str(), "auth" | "headers" | "master" | "basic" | "pass" | "key")
+}
+
+/// Whether a string carries `user:password@` — a URL with credentials in it, or the bare
+/// authority of one. Such a value never reaches a summary as it is.
+fn has_userinfo(s: &str) -> bool {
+    let rest = s.split_once("://").map(|(_, r)| r).unwrap_or(s);
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    authority.contains('@')
+}
+
+/// A URL with its `user:password@` removed, so a cluster can still be named by its address.
+/// Anything without userinfo comes back unchanged.
+pub fn redact_url(s: &str) -> String {
+    let Some((scheme, rest)) = s.split_once("://") else {
+        return if has_userinfo(s) { s.rsplit_once('@').map(|(_, h)| h.to_string()).unwrap_or_default() } else { s.to_string() };
+    };
+    let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let (authority, tail) = rest.split_at(end);
+    let host = authority.rsplit_once('@').map(|(_, h)| h).unwrap_or(authority);
+    format!("{scheme}://{host}{tail}")
 }
 
 /// The section name a person knows a top-level key by.
@@ -59,7 +82,9 @@ fn short(v: &Value) -> Option<String> {
         Value::Number(n) => Some(n.to_string()),
         Value::String(s) => {
             let s = s.trim();
-            (!s.is_empty() && s.chars().count() <= MAX_SHOWN && !s.contains('\n')).then(|| s.to_string())
+            // A value with `user:password@` in it is a credential whatever its key is called:
+            // "changed", never the text.
+            (!s.is_empty() && s.chars().count() <= MAX_SHOWN && !s.contains('\n') && !has_userinfo(s)).then(|| s.to_string())
         }
         Value::Array(a) if a.iter().all(|x| !x.is_object() && !x.is_array()) => {
             let parts: Vec<String> = a.iter().filter_map(short).collect();
@@ -80,7 +105,10 @@ fn scalar_change(field: &str, old: &Value, new: &Value) -> String {
 
 /// How a list entry is named: a cluster by its name or id, a jump host by its host, a rule by its id.
 fn identity(v: &Value) -> Option<String> {
-    ["id", "name", "host", "url"].iter().find_map(|k| v.get(*k).and_then(Value::as_str)).map(str::trim).filter(|s| !s.is_empty()).map(String::from)
+    ["id", "name", "host", "url"].iter()
+        .find_map(|k| v.get(*k).and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()))
+        // A cluster named only by a URL that carries `user:password@` is named by its address.
+        .map(redact_url)
 }
 
 /// The fields of one object that differ from another, secrets collapsed to "credential".
@@ -333,12 +361,39 @@ mod tests {
 
     #[test]
     fn the_secret_key_rule() {
-        for k in ["password", "Password", "apiKey", "api_key", "zabbixToken", "secret", "Authorization", "auth", "headers", "credentials"] {
+        for k in ["password", "Password", "apiKey", "api_key", "zabbixToken", "secret", "Authorization", "auth", "headers", "credentials",
+                  "passphrase", "keyPassphrase", "privateKey", "private_key", "sshKey", "ssh_key", "x-api-key", "service_key", "X-Api-Key", "key"] {
             assert!(is_secret_key(k), "{k}");
         }
-        for k in ["keyFile", "url", "name", "username", "host", "tokens_dir_note"] {
+        for k in ["keyFile", "key_file", "url", "name", "username", "host", "tokens_dir_note", "keys"] {
             // `tokens_dir_note` contains "token": it is treated as secret — better hidden than shown.
             assert_eq!(is_secret_key(k), k == "tokens_dir_note", "{k}");
         }
+    }
+
+    #[test]
+    fn a_url_with_credentials_never_reaches_a_summary() {
+        assert_eq!(redact_url("https://elastic:hunter2@es.example:9200/_cat"), "https://es.example:9200/_cat");
+        assert_eq!(redact_url("http://es.example:9200"), "http://es.example:9200");
+        assert_eq!(redact_url("elastic:hunter2@es.example:9200"), "es.example:9200");
+        assert_eq!(redact_url("user@mail.example"), "mail.example", "an address alone is redacted too: it may carry a login");
+        assert!(has_userinfo("http://a:b@h") && !has_userinfo("http://h/x@y"), "an @ in the path is not userinfo");
+        // Named by URL only: the address, not the login.
+        let old = json!({ "clusters": [{ "url": "http://elastic:pw1@h:9200" }] });
+        let new = json!({ "clusters": [{ "url": "http://elastic:pw1@h:9200" }, { "url": "http://elastic:pw2@h2:9200" }] });
+        let s = summarize(&old, &new);
+        assert_eq!(s, "Clusters · http://h2:9200 added");
+        // A scalar with userinfo is "changed", never shown — even under an innocent key.
+        let old = json!({ "defaults": { "endpoint": "http://elastic:pw1@h:9200", "note": "ask bob@ops" } });
+        let new = json!({ "defaults": { "endpoint": "http://elastic:pw2@h:9200", "note": "ask ann@ops" } });
+        let s = summarize(&old, &new);
+        assert_eq!(s, "Defaults · endpoint changed; Defaults · note changed");
+        for leak in ["pw1", "pw2", "elastic", "bob", "ann"] {
+            assert!(!s.contains(leak), "{leak} leaked into {s:?}");
+        }
+        // A cluster whose only change is its URL credential: the field is named, not the value.
+        let old = json!({ "clusters": [{ "name": "c1", "url": "http://e:pw1@h" }] });
+        let new = json!({ "clusters": [{ "name": "c1", "url": "http://e:pw2@h" }] });
+        assert_eq!(summarize(&old, &new), "Clusters · c1 changed (url)");
     }
 }

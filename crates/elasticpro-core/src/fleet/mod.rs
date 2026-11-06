@@ -908,12 +908,20 @@ impl Core {
                 .filter(|id| visible.contains(id)).collect(),
             _ => visible,
         };
-        let datasets = dataset_list(msg.get("datasets")).unwrap_or_else(background);
         let play = msg.get("watcher").and_then(Value::as_str) == Some("play");
         let user = caller.map(|c| c.name.clone()).unwrap_or_default();
         let known = self.all_specs().len();
         let now = now_ms();
         let cfg = self.fleet.cfg.read().clone();
+        // A plain refresh (no `datasets`) asks for the background set — less `snapshot_status`
+        // unless the running policy polls it on its own: under Client basis and Hybrid only
+        // the Snapshots page names it, so a refresh elsewhere sends nothing that page does not
+        // show. Named explicitly it is always honoured (ui/js/core/state.js backgroundNames).
+        let datasets = dataset_list(msg.get("datasets")).unwrap_or_else(|| {
+            background().into_iter()
+                .filter(|d| *d != Dataset::SnapshotStatus || cfg.effective_class(*d, known) == Class::Background)
+                .collect()
+        });
         let mut queued = 0;
         let mut skipped = vec![];
         {

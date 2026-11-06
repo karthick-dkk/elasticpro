@@ -593,6 +593,13 @@ Without a session on an edition with accounts they answer `unauthenticated`.
 | `PREFS_GET` | guest | `{ok, user, prefs: {menu, theme, opensOn}, updatedAt, choices}`. Each value is a string from `choices`, or `null` when this person never set it — the UI then keeps what the browser had, then the shipped default; a store that was never asked does not answer "system". `choices` = `{menu: ["top","left"], theme: ["system","light","dark","dark-blue","warm"], opensOn: ["last","all"]}`; `updatedAt` ms, 0 = never. |
 | `PREFS_SET {prefs: {menu?, theme?, opensOn?}}` | guest | The same answer, after the patch. Each key given replaces that value; `null` unsets it; keys left out are kept. An unknown key, a value outside `choices`, a non-string, or an empty or missing `prefs` ⇒ `{ok: false, kind: "bad_message", message}` and **nothing is saved** (the valid half of a refused patch is not kept). The store holds at most 5000 accounts. |
 
+Both answer `{ok: false, kind: "forbidden"}` to an API token (`token:…` is not a person, and its
+name is a prefix of the secret, which is never written to a file) and to a display link. Saves
+are serialised under one lock (mutate, serialise, rename), so two people saving at once cannot
+collide on the tmp file. A `user-prefs.json` that does not parse is moved aside as
+`user-prefs.json.corrupt-<unix>` and logged (target `audit`), and the store starts empty, rather
+than being overwritten by the next save.
+
 The UI side (`ui/js/core/prefs.js`, rules in `core/prefs-rules.js`): on start `loadPrefs()` sends
 `PREFS_GET`; each `null` falls back to the browser's IndexedDB copy (`theme` is the key that
 existed before 0.3.55; `menu` and `opensOn` are new), then to the default (`top`, `system`,
@@ -608,13 +615,17 @@ Each time the config is saved from the app — `CONFIG_WRITE`, `CLUSTER_SAVE`, `
 0600, newest 20; `vault_files::ConfigHistory`) and records, from the two texts, **who** saved
 and **what changed** (`config_diff.rs`): `<id>.meta.json` beside each version, and
 `current-<file>.meta.json` for the file on disk now. The summary is machine-made and never taken
-from the browser. It never holds a credential: any key that looks like one (password, token,
-apiKey, secret, authorization, auth, headers, credentials, …) reads "credential changed", and a
-value is shown only when it is a short scalar — "Defaults · watchMinutes 15 → 20"; a list entry
-by its name or id — "Clusters · client-f-stage added", "Clusters · client-b changed (url, tags)";
-a mapping's child by its key — "Jump hosts · jumpwin changed (host)". At most four changes are
-named, then "+N more", 240 characters at most. A text that does not parse reads "config text
-changed"; two texts with the same values "no change in values".
+from the browser. It never holds a credential: any key that looks like one (password, passphrase,
+token, apiKey, secret, authorization, auth, headers, credentials, privateKey, sshKey, anything
+ending in `-key`/`_key` such as `x-api-key`, …) reads "credential changed"; a string carrying
+`user:password@` under any key is "changed", never shown, and a cluster named only by such a URL
+is named by its address with the login removed (`config_diff::redact_url`). A value is shown only
+when it is a short scalar — "Defaults · watchMinutes 15 → 20"; a list entry by its name or id —
+"Clusters · client-f-stage added", "Clusters · client-b changed (url, tags)"; a mapping's child by
+its key — "Jump hosts · jumpwin changed (host)". At most four changes are named, then "+N more",
+240 characters at most. A text that does not parse reads "config text changed"; two texts with the
+same values "no change in values". The record of a save is written only after the config file
+itself was written (`keep_before` / `record`): a save that failed is not in the history as a save.
 
 `CONFIG_HISTORY` (admin) → `{ok, versions: [{id, saved_at, saved_by, summary, bytes, source}], current}`,
 newest first. `saved_by` is the account name, or `system` (the core wrote without a person;
@@ -652,6 +663,11 @@ cluster, or on any visible cluster under "All"; `unknown` draws nothing — neve
   snapshot" — once it is stale or was never made. The shell never asks on its own: that would be
   the shell polling every cluster under a policy whose promise is that nothing is polled unasked.
   `snapshotNote()` says so in the tooltip ("…read only while the Snapshots page is open").
+- A plain refresh — the button, `r`, Retry, a trust action, i.e. `REFRESH` with no `datasets` —
+  asks for the background set **less `snapshot_status`** unless the running policy polls it on
+  its own (`effectiveClass: background`): `refresh_msg` in fleet/mod.rs and `backgroundNames()` in
+  state.js (`POLICY_ONLY`) agree. Only the Snapshots page (`moduleDatasets`) and the Background-mode
+  poller ask for it; named explicitly in `REFRESH.datasets` it is always honoured.
 - A write to `/_snapshot/…` or `/_slm/…/_execute` through the REST console marks the dataset due
   at once (`datasets_for_write`), so a snapshot an operator starts shows on the next poll.
 - **Emergency stop**: nothing is fetched; readings go stale and the dot goes away.

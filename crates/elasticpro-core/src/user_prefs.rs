@@ -85,11 +85,27 @@ fn now_ms() -> u64 {
 }
 
 impl UserPrefs {
+    /// Open the store. A file that does not parse is moved aside as
+    /// `user-prefs.json.corrupt-<unix>` and said so in the log, so the next save does not
+    /// quietly replace everyone's settings with one person's; the store starts empty.
     pub fn open(path: Option<PathBuf>) -> UserPrefs {
-        let map = path.as_ref()
-            .and_then(|p| std::fs::read_to_string(p).ok())
-            .and_then(|s| serde_json::from_str::<BTreeMap<String, Prefs>>(&s).ok())
-            .unwrap_or_default();
+        let mut map = BTreeMap::new();
+        if let Some(p) = &path {
+            if let Ok(text) = std::fs::read_to_string(p) {
+                match serde_json::from_str::<BTreeMap<String, Prefs>>(&text) {
+                    Ok(m) => map = m,
+                    Err(e) if text.trim().is_empty() => {
+                        let _ = e;
+                    }
+                    Err(e) => {
+                        let aside = p.with_extension(format!("json.corrupt-{}", now_ms() / 1000));
+                        let moved = std::fs::rename(p, &aside);
+                        tracing::warn!(target: "audit", file = %p.display(), aside = %aside.display(), moved = moved.is_ok(), error = %e,
+                            "user-prefs.json does not parse: set aside, starting with no settings");
+                    }
+                }
+            }
+        }
         UserPrefs { path, map: RwLock::new(map) }
     }
 
@@ -136,24 +152,24 @@ impl UserPrefs {
             }
         }
         next.updated_at = now_ms();
-        {
-            let mut m = self.map.write();
-            if next.is_empty() {
-                m.remove(user);
-            } else {
-                if !m.contains_key(user) && m.len() >= MAX_USERS {
-                    return Err(format!("the settings store holds {MAX_USERS} accounts already"));
-                }
-                m.insert(user.to_string(), next.clone());
+        // One lock across mutate, serialise and rename: two people saving at once must not
+        // race on the tmp file, nor may a later rename carry an earlier map.
+        let mut m = self.map.write();
+        if next.is_empty() {
+            m.remove(user);
+        } else {
+            if !m.contains_key(user) && m.len() >= MAX_USERS {
+                return Err(format!("the settings store holds {MAX_USERS} accounts already"));
             }
+            m.insert(user.to_string(), next.clone());
         }
-        self.save()?;
+        Self::save(self.path.as_deref(), &m)?;
         Ok(next)
     }
 
-    fn save(&self) -> Result<(), String> {
-        let Some(p) = &self.path else { return Ok(()) };
-        let body = serde_json::to_vec_pretty(&*self.map.read()).map_err(|e| e.to_string())?;
+    fn save(path: Option<&std::path::Path>, map: &BTreeMap<String, Prefs>) -> Result<(), String> {
+        let Some(p) = path else { return Ok(()) };
+        let body = serde_json::to_vec_pretty(map).map_err(|e| e.to_string())?;
         if let Some(d) = p.parent() {
             std::fs::create_dir_all(d).map_err(|e| e.to_string())?;
         }
@@ -250,6 +266,50 @@ mod tests {
         let s = UserPrefs::open(Some(path));
         assert_eq!(s.get("ann").unwrap().theme.as_deref(), Some("warm"));
         assert_eq!(s.get("bob").unwrap().menu.as_deref(), Some("left"));
+    }
+
+    #[test]
+    fn a_corrupt_file_is_set_aside_not_overwritten() {
+        let t = Tmp::new("corrupt");
+        let path = t.0.join(FILE);
+        std::fs::write(&path, "{ this is not json").unwrap();
+        let s = UserPrefs::open(Some(path.clone()));
+        assert!(s.get("ann").is_none());
+        let aside: Vec<_> = std::fs::read_dir(&t.0).unwrap().filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().to_string()).filter(|n| n.contains(".corrupt-")).collect();
+        assert_eq!(aside.len(), 1, "the unreadable file is kept aside: {aside:?}");
+        assert_eq!(std::fs::read_to_string(t.0.join(&aside[0])).unwrap(), "{ this is not json");
+        s.set("ann", &json!({ "theme": "warm" })).unwrap();
+        let back = UserPrefs::open(Some(path));
+        assert_eq!(back.get("ann").unwrap().theme.as_deref(), Some("warm"));
+        // An empty file is simply empty.
+        let t2 = Tmp::new("empty");
+        std::fs::write(t2.0.join(FILE), "").unwrap();
+        UserPrefs::open(Some(t2.0.join(FILE)));
+        assert!(std::fs::read_dir(&t2.0).unwrap().all(|e| !e.unwrap().file_name().to_string_lossy().contains(".corrupt-")));
+    }
+
+    #[test]
+    fn concurrent_saves_do_not_collide() {
+        let t = Tmp::new("race");
+        let s = std::sync::Arc::new(UserPrefs::open(Some(t.0.join(FILE))));
+        let threads: Vec<_> = (0..8).map(|i| {
+            let s = s.clone();
+            std::thread::spawn(move || {
+                for j in 0..25 {
+                    let theme = THEMES[(i + j) % THEMES.len()];
+                    s.set(&format!("user{i}"), &json!({ "theme": theme })).unwrap_or_else(|e| panic!("save failed: {e}"));
+                }
+            })
+        }).collect();
+        for th in threads {
+            th.join().unwrap();
+        }
+        let back = UserPrefs::open(Some(t.0.join(FILE)));
+        for i in 0..8 {
+            assert!(back.get(&format!("user{i}")).is_some(), "user{i} lost");
+        }
+        assert!(!t.0.join("user-prefs.json.tmp").exists(), "no tmp file left behind");
     }
 
     #[test]

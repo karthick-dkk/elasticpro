@@ -114,6 +114,24 @@ async fn under_client_basis_nothing_is_fetched_and_the_answer_says_unknown_until
     assert_eq!(r["running"], json!([]));
     assert!(es.hits().iter().all(|h| !h.path.starts_with("/_snapshot/_status")), "SNAPSHOT_RUNNING must never fetch");
 
+    // A plain refresh (the button, `r`, Retry, a trust action: REFRESH with no datasets) asks
+    // for the background set, which under Client basis leaves snapshot_status out: only the
+    // Snapshots page names it. The other background datasets are requested.
+    let r = c.handle(json!({ "type": "REFRESH", "clusterIds": ["c1"] })).await;
+    assert_eq!(r["ok"], json!(true), "{r}");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while es.hits().iter().all(|h| !h.path.starts_with("/_cluster/health")) {
+        assert!(Instant::now() < deadline, "the refresh never reached the cluster");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(es.hits().iter().all(|h| !h.path.starts_with("/_snapshot/_status")),
+            "a plain refresh under Client basis must not fetch snapshot_status: {:?}",
+            es.hits().iter().map(|h| h.path.clone()).collect::<Vec<_>>());
+    assert!(c.fleet_pending("c1").iter().all(|d| d != "snapshot_status"));
+    let r = c.handle(json!({ "type": "SNAPSHOT_RUNNING" })).await;
+    assert_eq!(r["clusters"]["c1"]["why"], json!("not fetched yet"));
+
     // The Snapshots page asks for the dataset (state.js moduleDatasets): then it is known.
     let d = c.handle(json!({ "type": "CLUSTER_DATASET", "clusterId": "c1", "dataset": "snapshot_status", "wait": true })).await;
     assert_eq!(d["ok"], json!(true), "{d}");
