@@ -102,7 +102,7 @@ async fn the_background_set_arrives_and_snapshots_use_the_cat_listing_per_repo()
     assert!(cl["datasets"].get("indices").is_none(), "on-demand datasets are not in the default set");
     assert_eq!(cl["datasets"]["snapshots"]["data"]["byRepo"]["repo1"]["json"][0]["id"], json!("snap-1"));
     assert!(es.hits().iter().any(|h| h.path.starts_with("/logs-*/_settings?filter_path=")), "the cluster's own log pattern");
-    assert!(state["catalogue"].as_array().unwrap().len() == 9);
+    assert!(state["catalogue"].as_array().unwrap().len() == 10);
 
     // `since` returns only what changed after it.
     let seq = state["seq"].as_u64().unwrap();
@@ -203,11 +203,11 @@ async fn a_write_that_went_through_re_reads_what_it_changed() {
     c.handle(json!({ "type": "ES", "clusterId": "w", "method": "DELETE", "path": "/logs-2026.01.01" })).await;
     assert_eq!(c.fleet_pending("w"), vec!["health", "indices", "shards"]);
     c.handle(json!({ "type": "ES", "clusterId": "w", "method": "PUT", "path": "/_snapshot/repo1/snap?wait_for_completion=false", "body": "{}" })).await;
-    assert_eq!(c.fleet_pending("w"), vec!["health", "indices", "policies", "shards", "snapshots", "snapshots_full"]);
+    assert_eq!(c.fleet_pending("w"), vec!["health", "indices", "policies", "shards", "snapshot_status", "snapshots", "snapshots_full"]);
 
     // Executing an SLM policy takes a snapshot: the listings are re-read too.
     c.handle(json!({ "type": "ES", "clusterId": "s", "method": "POST", "path": "/_slm/policy/daily/_execute" })).await;
-    assert_eq!(c.fleet_pending("s"), vec!["ilm_errors", "policies", "snapshots", "snapshots_full"]);
+    assert_eq!(c.fleet_pending("s"), vec!["ilm_errors", "policies", "snapshot_status", "snapshots", "snapshots_full"]);
 
     // A write the guard refused changed nothing.
     let dir2 = TempDir::new("fleet-write-ro");

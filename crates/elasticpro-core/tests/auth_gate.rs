@@ -634,6 +634,13 @@ async fn saving_a_config_keeps_the_one_it_replaced() {
     let hist = c.handle(json!({ "type": "CONFIG_HISTORY", "session": admin })).await;
     let versions = hist["versions"].as_array().unwrap();
     assert_eq!(versions.len(), 1, "{hist}");
+    // Who saved the kept version and what it changed, recorded by the core from the two
+    // texts — and the same for the file on disk now.
+    assert_eq!(versions[0]["saved_by"], json!("Admin"), "{hist}");
+    assert_eq!(versions[0]["summary"], json!("v added"), "{hist}");
+    assert_eq!(hist["current"]["saved_by"], json!("Admin"), "{hist}");
+    assert_eq!(hist["current"]["summary"], json!("v 1 → 2"), "{hist}");
+    assert_eq!(hist["current"]["source"], json!("config_cluster.json"));
 
     let id = versions[0]["id"].as_str().unwrap();
     let back = c.handle(json!({ "type": "CONFIG_RESTORE", "session": admin, "id": id })).await;

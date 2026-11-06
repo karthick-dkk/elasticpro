@@ -332,7 +332,8 @@ impl PlaySchedule {
             Dataset::Policies | Dataset::IlmErrors | Dataset::IlmAssign => Some(self.lifecycle_sec),
             Dataset::Snapshots | Dataset::SnapshotsFull => Some(self.snapshots_sec),
             Dataset::Indices => Some(self.indices_sec),
-            Dataset::Shards => None,
+            // Play has no snapshot-running dot; the page menu does (SNAPSHOT_RUNNING).
+            Dataset::Shards | Dataset::SnapshotStatus => None,
         }
     }
 }

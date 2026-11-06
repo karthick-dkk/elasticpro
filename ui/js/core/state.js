@@ -988,7 +988,10 @@ export async function refreshModule(module, { selected = true } = {}) {
 function moduleDatasets(module) {
   if (module === 'health') return ['health'];
   if (module === 'indices') return ['indices'];
-  if (module === 'snapshots') return ['policies', 'snapshots', ...(fleet.onDemand.has('snapshots_full') ? ['snapshots_full'] : [])];
+  // `snapshot_status` too: while this page is open (and for the watch window after) the core
+  // keeps the running-snapshot reading fresh, which is what the page menu's dot reads
+  // (core/snapshot-running.js) under a policy that fetches nothing on its own.
+  if (module === 'snapshots') return ['policies', 'snapshots', 'snapshot_status', ...(fleet.onDemand.has('snapshots_full') ? ['snapshots_full'] : [])];
   return backgroundNames();
 }
 
@@ -1210,9 +1213,10 @@ export const FLEET_KEYS = {
   ilm_errors: ['ilmErr'],
   policies: ['repos', 'slm', 'slmStatus', 'ilm', 'ilmPolicies', 'repoPaths', 'clusterSettings'],
   ilm_assign: ['ilmOfIndices'],
+  snapshot_status: ['status'],
 };
 /** What FLEET_STATE sends without `include` — until its own catalogue says otherwise. */
-const BACKGROUND = ['health', 'nodes', 'ilm_errors', 'policies', 'ilm_assign', 'snapshots'];
+const BACKGROUND = ['health', 'nodes', 'ilm_errors', 'policies', 'ilm_assign', 'snapshots', 'snapshot_status'];
 const ON_DEMAND = new Set(['snapshots_full', 'indices', 'shards']);
 /**
  * Whether the running policy fetches a dataset only while a page looks at it. The core's
@@ -1258,9 +1262,23 @@ export function setFleetMode(mode) {
 /** Whether the core holds this cluster (true until it has said which ones it holds). */
 function fleetKnows(id) { return !fleet.ids || fleet.ids.has(id); }
 
+/**
+ * The datasets a plain refresh (the button, `r`, Retry, a trust action) asks for, and the
+ * FLEET_STATE default. `snapshot_status` is left out unless the running policy fetches it on
+ * its own (`effectiveClass: 'background'`): under Client basis and Hybrid only the Snapshots
+ * page asks for it (moduleDatasets), so a refresh elsewhere does not send a request the page
+ * does not show. Keep in step with `refresh_msg` in fleet/mod.rs.
+ */
+export const POLICY_ONLY = new Set(['snapshot_status']);
 function backgroundNames() {
-  const bg = (fleet.catalogue || []).filter((c) => c.class === 'background').map((c) => c.dataset);
-  return bg.length ? bg : BACKGROUND;
+  const cat = fleet.catalogue || [];
+  const bg = cat.filter((c) => c.class === 'background').map((c) => c.dataset);
+  const names = bg.length ? bg : BACKGROUND;
+  return names.filter((d) => {
+    if (!POLICY_ONLY.has(d)) return true;
+    const entry = cat.find((c) => c.dataset === d);
+    return !!(entry && entry.effectiveClass === 'background');
+  });
 }
 
 /** A core timestamp as ours. */

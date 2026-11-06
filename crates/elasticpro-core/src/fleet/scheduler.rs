@@ -790,7 +790,7 @@ mod tests {
         let first = st.plan(&s, 0, &HashSet::new(), &cfg());
         // At t=0 only the first cluster is due.
         assert!(first.iter().all(|c| c.cluster == "c00"), "{first:?}");
-        assert_eq!(first.len(), 6, "every background dataset of it: {first:?}");
+        assert_eq!(first.len(), 7, "every background dataset of it: {first:?}");
         assert_eq!(st.first_due["c01"], 45_000);
         let later = st.plan(&s, 45_000, &HashSet::new(), &cfg());
         assert!(later.iter().any(|c| c.cluster == "c01"));
@@ -914,7 +914,7 @@ mod tests {
         let plan = st.plan(&s, IDLE_MS + 1, &HashSet::new(), &cfg());
         assert_eq!(plan.iter().map(|c| c.dataset).collect::<Vec<_>>(), vec![Dataset::Health]);
         st.last_activity = IDLE_MS;
-        assert_eq!(st.plan(&s, IDLE_MS + 1, &HashSet::new(), &cfg()).len(), 6);
+        assert_eq!(st.plan(&s, IDLE_MS + 1, &HashSet::new(), &cfg()).len(), 7);
     }
 
     #[test]

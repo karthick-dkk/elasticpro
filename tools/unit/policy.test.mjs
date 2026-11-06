@@ -175,13 +175,14 @@ test('the effect of each preset, for 24 clusters, from the shipped intervals', (
 
   const bg = effectOf('background', n24);
   // health 1/3 + nodes 1/5 + ilm_errors 1/15 + policies 1/60 + ilm_assign 1/60 + snapshots 1/30
-  // = 2/3 of a poll a minute per cluster; indices, shards and snapshots_full never on a schedule.
-  assert.ok(Math.abs(bg.open.perMinute - 16) < 1e-9, String(bg.open.perMinute));
-  assert.match(bg.open.text, /^at least 16 a minute \(6 datasets kept fresh for each of 24 clusters\)/);
+  // + snapshot_status 1/5 = 13/15 of a poll a minute per cluster; indices, shards and
+  // snapshots_full never on a schedule.
+  assert.ok(Math.abs(bg.open.perMinute - 24 * 13 / 15) < 1e-9, String(bg.open.perMinute));
+  assert.match(bg.open.text, /^at least 20 a minute \(7 datasets kept fresh for each of 24 clusters\)/);
   assert.match(bg.open.text, /indices, shards and full snapshot listings are fetched when a page asks/);
   // The core polls health only once nobody has asked for ten minutes (scheduler.rs idle()).
   assert.equal(bg.idle.perMinute, 8);
-  assert.match(bg.idle.text, /^at least 8 a minute \(health every 3 min × 24\) once no page has asked for 10 min; at least 16 a minute until then\.$/);
+  assert.match(bg.idle.text, /^at least 8 a minute \(health every 3 min × 24\) once no page has asked for 10 min; at least 20 a minute until then\.$/);
 
   const auto = effectOf('auto', n24);
   assert.equal(auto.mode, 'background');
@@ -206,8 +207,8 @@ test('the bound uses the policy\'s own intervals, is rounded down, and counts wh
   assert.equal(effectOf('hybrid', { clusters: 1 }).idle.text, 'at least 20 an hour (health every 3 min × 1).');
   // A cluster that does not answer gets one probe every 2 min and nothing else.
   const down = effectOf('background', { clusters: 24, unreachable: 4 });
-  assert.ok(Math.abs(down.open.perMinute - (20 * 2 / 3 + 4 * 0.5)) < 1e-9);
-  assert.match(down.open.text, /^at least 15 a minute \(6 datasets kept fresh for each of 20 clusters, and a probe every 2 min × 4 not answering\)/);
+  assert.ok(Math.abs(down.open.perMinute - (20 * 13 / 15 + 4 * 0.5)) < 1e-9);
+  assert.match(down.open.text, /^at least 19 a minute \(7 datasets kept fresh for each of 20 clusters, and a probe every 2 min × 4 not answering\)/);
   // The emergency stop stops everything.
   const all = P.policyEffect(P.setPausedAll(P.applyPreset(null, 'background', D), true), { clusters: 24 });
   assert.equal(all.idle.perMinute, 0);
@@ -240,7 +241,7 @@ test('the Fine-tune line, folded (change 16)', () => {
   assert.equal(P.fineTuneSummary(P.applyPreset(null, 'hybrid', D), 24),
     'All clusters 16 · per cluster 2 · per jump host 6 · timeout 30 s · health every 3 min, the rest while a page watches');
   assert.equal(P.fineTuneSummary(P.applyPreset(null, 'auto', D), 24),
-    'All clusters 16 · per cluster 2 · per jump host 6 · timeout 30 s · 6 datasets on a schedule, health every 3 min');
+    'All clusters 16 · per cluster 2 · per jump host 6 · timeout 30 s · 7 datasets on a schedule, health every 3 min');
   assert.match(P.fineTuneSummary({ ...P.applyPreset(null, 'client', D), timeoutMs: 1500 }, 24), /timeout 1500 ms/);
   assert.equal(P.everyText(3600), '1 h');
   assert.equal(P.everyText(90), '90 s');

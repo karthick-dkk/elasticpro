@@ -186,7 +186,9 @@ asks the clusters directly, as before.
 `health` (`/`, `/_cluster/health`, 180 s), `nodes` (300 s), `ilm_errors` (900 s), `policies`
 (snapshot repos, SLM, ILM status and policies, `path.repo`, watermarks — 3600 s),
 `ilm_assign` (the cluster's `logIndexPattern`, 3600 s), `snapshots` (`_cat/snapshots/<repo>`
-per repo, 1800 s) — the background set, kept for every cluster; and `snapshots_full`
+per repo, 1800 s), `snapshot_status` (`/_snapshot/_status` with a `filter_path`, one request,
+only the snapshots in progress, 300 s — see "Snapshot running" below) — the background set,
+kept for every cluster; and `snapshots_full`
 (verbose `_snapshot/<repo>/_all`, `_cat` fallback), `indices`, `shards` (+ tasks, thread
 pools, pending tasks) — on demand, polled only while somebody asked in the last 15 minutes.
 The request paths are the ones `ui/js/core/es.js` built, so the bodies are the same.
@@ -574,6 +576,103 @@ The UI sends `NOTIFY_PUT` fire-and-forget for every notice it shows (a task's si
 ticks only when their kind changes), merges `NOTIFY_LIST` with its local copy when the bell
 opens (same key/id ⇒ the server's record wins), and sends `NOTIFY_CLEAR` with "Clear all".
 An older core, a snapshot file or a `file://` render has no store and the bell stays local.
+
+## Your settings — the message contract
+
+Where the page menu sits, the theme and what the app opens on are kept with the account
+(`crates/elasticpro-core/src/user_prefs.rs`): `<data dir>/user-prefs.json`, 0600, written by
+tmp + rename; no data dir ⇒ in memory for the life of the process. `PING` says `userPrefs: true`
+when the core keeps them. The owner is always the caller — a session's user, a proxy user, an
+API token's `token:…` name, or `local` on the edition without accounts — and is never read from
+the message, so nobody reads or sets anyone else's. A display link can send neither (not in
+`PLAY_READS`). These are not writes to a cluster: no `WRITE_UNLOCK`, no read-only guard.
+Without a session on an edition with accounts they answer `unauthenticated`.
+
+| Message | Role | Answer |
+|---|---|---|
+| `PREFS_GET` | guest | `{ok, user, prefs: {menu, theme, opensOn}, updatedAt, choices}`. Each value is a string from `choices`, or `null` when this person never set it — the UI then keeps what the browser had, then the shipped default; a store that was never asked does not answer "system". `choices` = `{menu: ["top","left"], theme: ["system","light","dark","dark-blue","warm"], opensOn: ["last","all"]}`; `updatedAt` ms, 0 = never. |
+| `PREFS_SET {prefs: {menu?, theme?, opensOn?}}` | guest | The same answer, after the patch. Each key given replaces that value; `null` unsets it; keys left out are kept. An unknown key, a value outside `choices`, a non-string, or an empty or missing `prefs` ⇒ `{ok: false, kind: "bad_message", message}` and **nothing is saved** (the valid half of a refused patch is not kept). The store holds at most 5000 accounts. |
+
+Both answer `{ok: false, kind: "forbidden"}` to an API token (`token:…` is not a person, and its
+name is a prefix of the secret, which is never written to a file) and to a display link. Saves
+are serialised under one lock (mutate, serialise, rename), so two people saving at once cannot
+collide on the tmp file. A `user-prefs.json` that does not parse is moved aside as
+`user-prefs.json.corrupt-<unix>` and logged (target `audit`), and the store starts empty, rather
+than being overwritten by the next save.
+
+The UI side (`ui/js/core/prefs.js`, rules in `core/prefs-rules.js`): on start `loadPrefs()` sends
+`PREFS_GET`; each `null` falls back to the browser's IndexedDB copy (`theme` is the key that
+existed before 0.3.55; `menu` and `opensOn` are new), then to the default (`top`, `system`,
+`last`). When the account has no value and the browser has one, the browser's goes to the
+account once, as the first `PREFS_SET` (`migrationPatch`) — never over a choice the account
+already made. `savePref(key, value)` sends `PREFS_SET` and also writes the browser copy, which
+is what an older core (no `userPrefs` flag), a snapshot file or a `file://` render reads.
+
+## Config versions — who saved, what changed
+
+Each time the config is saved from the app — `CONFIG_WRITE`, `CLUSTER_SAVE`, `AUTOMATIONS_SAVE`,
+`ZABBIX_ROLEMAP_SET` — the core keeps the file as it was (`<data dir>/config-history/<unix>-<file>`,
+0600, newest 20; `vault_files::ConfigHistory`) and records, from the two texts, **who** saved
+and **what changed** (`config_diff.rs`): `<id>.meta.json` beside each version, and
+`current-<file>.meta.json` for the file on disk now. The summary is machine-made and never taken
+from the browser. It never holds a credential: any key that looks like one (password, passphrase,
+token, apiKey, secret, authorization, auth, headers, credentials, privateKey, sshKey, anything
+ending in `-key`/`_key` such as `x-api-key`, …) reads "credential changed"; a string carrying
+`user:password@` under any key is "changed", never shown, and a cluster named only by such a URL
+is named by its address with the login removed (`config_diff::redact_url`). A value is shown only
+when it is a short scalar — "Defaults · watchMinutes 15 → 20"; a list entry by its name or id —
+"Clusters · client-f-stage added", "Clusters · client-b changed (url, tags)"; a mapping's child by
+its key — "Jump hosts · jumpwin changed (host)". At most four changes are named, then "+N more",
+240 characters at most. A text that does not parse reads "config text changed"; two texts with the
+same values "no change in values". The record of a save is written only after the config file
+itself was written (`keep_before` / `record`): a save that failed is not in the history as a save.
+
+`CONFIG_HISTORY` (admin) → `{ok, versions: [{id, saved_at, saved_by, summary, bytes, source}], current}`,
+newest first. `saved_by` is the account name, or `system` (the core wrote without a person;
+hosted) / `local` (the edition without accounts). `saved_by` and `summary` are `null` for a
+version kept before this was recorded — the UI shows "—", never a made-up name. `saved_at` is
+the save that produced the version when recorded, else when it was set aside. `current` =
+`{saved_at, saved_by, summary, source}` for the live file, or `null` when it was last written
+by hand or by an older core. `CONFIG_RESTORE {id}` is unchanged: it hands the text back, and
+loading it saves through `CONFIG_WRITE`, so a restore is recorded like any save (the summary
+is then the diff against what it replaced).
+
+## Snapshot running — the message contract
+
+The fleet cache has a tenth dataset, `snapshot_status`: `/_snapshot/_status` with no
+repository (so only the snapshots in progress) and a `filter_path` that keeps the per-index,
+per-shard detail out — one small request per cluster, 300 s shipped, Background class.
+`SNAPSHOT_RUNNING` reads what the cache holds and **never fetches**; `PING` says
+`snapshotRunning: true`. One definition of "running" and of "fresh enough":
+`fleet/snapshot_running.rs`.
+
+| Message | Role | Answer |
+|---|---|---|
+| `SNAPSHOT_RUNNING {clusterId?}` | user | `{ok, now, poller, intervalSec, effectiveClass, clusters: {<id>: {known, why, fetchedAt, staleAfterMs, running: [{repository, snapshot, state, started, elapsedMs, shards}]}}, running: [{cluster, repository, snapshot, state, started, elapsedMs, shards}], unknown: [<id>]}` for the caller's clusters (Zabbix group scope applies), or the one named — an id the caller cannot see ⇒ `not_found`. `known: false` (and the id in `unknown`) when there is no fresh successful reading: not fetched yet, the last fetch failed, read back from disk and not re-fetched, or older than `staleAfterMs` (two intervals) — `why` says which. A fresh reading with nothing running is `known: true, running: []`. `state` is Elasticsearch's (`STARTED`, `INIT`, …); a snapshot is running unless its state is `SUCCESS`, `FAILED`, `ABORTED`, `PARTIAL` or `MISSING`. `effectiveClass` is `background` or `onDemand`, as the running policy makes of the dataset. |
+
+How the dot on the page menu's Snapshots entry behaves (`ui/js/core/snapshot-running.js`:
+`snapshotDot(reply, selection)` is green only while a known running snapshot is on the chosen
+cluster, or on any visible cluster under "All"; `unknown` draws nothing — never "none"):
+
+- **Background** (and Automatic with ≤ 25 clusters): the dataset is polled for every cluster
+  every `intervalSec`, so the dot is right on every page, within one interval.
+- **Hybrid** and **Client basis** (`effectiveClass: onDemand`): nothing is fetched until a page
+  asks. The Snapshots page asks (`state.js` `moduleDatasets('snapshots')`), so the reading is
+  fresh while that page is open and for the watch window (15 min shipped) after; on other pages
+  the dot shows only while that reading is still fresh, and goes away — as *unknown*, not as "no
+  snapshot" — once it is stale or was never made. The shell never asks on its own: that would be
+  the shell polling every cluster under a policy whose promise is that nothing is polled unasked.
+  `snapshotNote()` says so in the tooltip ("…read only while the Snapshots page is open").
+- A plain refresh — the button, `r`, Retry, a trust action, i.e. `REFRESH` with no `datasets` —
+  asks for the background set **less `snapshot_status`** unless the running policy polls it on
+  its own (`effectiveClass: background`): `refresh_msg` in fleet/mod.rs and `backgroundNames()` in
+  state.js (`POLICY_ONLY`) agree. Only the Snapshots page (`moduleDatasets`) and the Background-mode
+  poller ask for it; named explicitly in `REFRESH.datasets` it is always honoured.
+- A write to `/_snapshot/…` or `/_slm/…/_execute` through the REST console marks the dataset due
+  at once (`datasets_for_write`), so a snapshot an operator starts shows on the next poll.
+- **Emergency stop**: nothing is fetched; readings go stale and the dot goes away.
+- A cluster that does not answer gets no `snapshot_status` probe (health only), so it is
+  `unknown`, with the last error as `why`.
 
 ## Housekeeping — the message contract
 
