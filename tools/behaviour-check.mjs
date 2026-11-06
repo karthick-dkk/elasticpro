@@ -93,7 +93,14 @@ const sheetHeaders = () => [...doc.querySelectorAll('table.sheet thead tr:last-c
 const groupBand = () => [...doc.querySelectorAll('table.sheet thead tr.group-head th')]
   .map((th) => `${th.textContent.trim()}×${th.getAttribute('colspan') || 1}`);
 
-async function go(id) { app.go(id); await settleFor(350); }
+async function go(id) {
+  // A case that moves on is done with what it typed: Config-Management would ask before leaving
+  // with unsaved changes (that question has its own case, through the page menu), so drop them.
+  const bar = doc.getElementById('cm-savebar');
+  const discard = bar && !bar.hidden && bar.querySelector('button[data-act="discard"]');
+  if (discard) { discard.click(); await settleFor(150); }
+  app.go(id); await settleFor(350);
+}
 /** A link pressed as a person would: the harness's anchor click() only captures downloads. */
 const press = (a) => a && a.dispatchEvent(new window.MouseEvent('click', { bubbles: true, cancelable: true }));
 
@@ -1347,6 +1354,44 @@ await go('settings');
     const again = doc.querySelector(`#${sw.id}`);
     ok(again && again.checked === was, 'alerts: Discard did not put the switch back');
   }
+
+  // From a hosted tab (Alerts › Automation is the app's own #/automation page) a tab, a menu
+  // item or a search result opens that tab of Config-Management, not its first page.
+  await go('automation'); await settleFor(400);
+  ok(cfgOpen().page === 'alerts' && cfgOpen().tab === 'automation', `hosted: #/automation is not Alerts › Automation (${JSON.stringify(cfgOpen())})`);
+  const trig = doc.querySelector('nav.cm-tabs button[data-cm-tab="triggers"]');
+  if (trig) { trig.click(); await settleFor(600); }
+  ok(cfgOpen().page === 'alerts' && cfgOpen().tab === 'triggers', `hosted: Triggers from Automation opened ${JSON.stringify(cfgOpen())}`);
+  await go('requests'); await settleFor(400);
+  const find2 = doc.getElementById('cm-find');
+  if (find2) { find2.value = 'watch window'; find2.dispatchEvent(new window.Event('input', { bubbles: true })); }
+  const hit2 = doc.querySelector('.cm-find-hit');
+  if (hit2) { hit2.click(); await settleFor(1200); }
+  ok(cfgOpen().page === 'requests' && cfgOpen().tab === 'policy', `hosted: Find a setting from the Request Centre opened ${JSON.stringify(cfgOpen())}`);
+  ok((doc.activeElement || {}).id === 'pol-watch', `hosted: Find a setting from the Request Centre did not focus the field (focus on ${(doc.activeElement || {}).id})`);
+
+  // Leaving Config-Management by the page menu with unsaved changes asks first; No stays.
+  await openSettingsTab('Defaults');
+  const ri0 = doc.getElementById('ce-ri');
+  if (ri0) {
+    ri0.value = String(Number(ri0.value || 30) + 7); ri0.dispatchEvent(new window.Event('input', { bubbles: true }));
+    await settleFor(50);
+    const alertsTab = doc.querySelector('#nav button[data-page="alerts"]');
+    if (alertsTab) { alertsTab.click(); await settleFor(300); }
+    const ask = [...doc.querySelectorAll('.modal')].find((m) => /Leave without saving/.test(m.textContent));
+    ok(!!ask, 'leave: the page menu left Config-Management with unsaved changes and did not ask');
+    const no = ask && [...ask.querySelectorAll('button')].find((b) => b.textContent.trim() === 'No');
+    if (no) { no.click(); await settleFor(300); }
+    ok(cfgOpen().page === 'system' && cfgOpen().tab === 'defaults' && (window.location.hash || '') === '#/settings/system/defaults',
+      `leave: answering No did not stay on System › Defaults (${JSON.stringify(cfgOpen())}, ${window.location.hash})`);
+    const discard2 = doc.querySelector('#cm-savebar button[data-act="discard"]');
+    if (discard2) { discard2.click(); await settleFor(200); }
+  }
+
+  // A page that was left lets go of #view: a loader answering afterwards paints nothing over the next page.
+  await openSettingsTab('Zabbix');
+  await go('overview'); await settleFor(1500);
+  ok(!doc.querySelector('#view .cm'), 'late loader: Config-Management was painted over the Clusters page');
 }
 
 /* --------- nodes & shards opens on one cluster, and honours an explicit "all" --------- */
@@ -1582,6 +1627,17 @@ await go('settings');
   };
   ok(!!hcard(), 'settings: no History store card on a hosted core');
   if (hcard()) {
+    // Changing the kind of credential redraws the card; the change still counts for the save bar.
+    {
+      const au = hcard().querySelector('#hs-auth');
+      if (au) {
+        au.value = 'none'; au.dispatchEvent(new window.Event('change', { bubbles: true })); await settleFor(200);
+        const bar = doc.getElementById('cm-savebar');
+        ok(bar && !bar.hidden && /Auth/.test(bar.textContent), `history: Basic → None is not on the save bar: ${bar && bar.textContent}`);
+        const d = bar && bar.querySelector('button[data-act="discard"]');
+        if (d) { d.click(); await settleFor(250); }
+      }
+    }
     let c = hcard();
     // Never pre-filled: the password field is empty and says only that one is held.
     const pw = c.querySelector('#hs-password');
