@@ -240,14 +240,16 @@ The **Zabbix connection** card now shows **paired with https://&lt;zabbix-host&g
 
 ## Step 7 — Users and roles, on both sides
 
-**How Zabbix users become ElasticPro users.** The user's **user type** in Zabbix decides their role in ElasticPro; Zabbix 7.0 sets the user type through the user's **role**. The ElasticPro account is created on first sign-in as `<zabbix-username>@zabbix`, has no password of its own, and its groups are refreshed from Zabbix at every sign-in. So is its role, until an ElasticPro admin changes it on the Accounts page: that change is pinned and later Zabbix sign-ins keep it (**Follow Zabbix again** in the role editor hands it back). ElasticPro's role is also what decides who may edit Cluster Management — see deploy/zabbix/INTEGRATION.md, Step 10.
+**How Zabbix users become ElasticPro users.** The ElasticPro account is created on first sign-in as `<zabbix-username>@zabbix`, has no password of its own, and its groups are refreshed from Zabbix at every sign-in. Its role comes from ElasticPro's **role map** (Config → Zabbix, *ElasticPro roles from Zabbix user groups*; docs/ROLES.md): each ElasticPro role lists any number of Zabbix **user groups**, a person in several gets the highest, and a person in none gets the rule you choose for them — the role from their Zabbix user role (the table below, the default) or no access. Until an admin saves that table, the Zabbix user role alone decides, as it always has. An ElasticPro admin can also set one person's role by hand on the *Zabbix users* table (including **No access**, which refuses them everywhere): that choice is pinned and later Zabbix sign-ins keep it until someone presses **Reset**. ElasticPro's role is also what decides who may edit Cluster Management — see deploy/zabbix/INTEGRATION.md, Step 10. ElasticPro only reads Zabbix group membership; it never changes a Zabbix user, group or role.
 
-| Zabbix user type | ElasticPro role | Clusters they see |
+| Zabbix user type (the rule for people in no mapped group) | ElasticPro role | Clusters they see |
 |---|---|---|
 | User | `user` (read-only) | only clusters whose Zabbix host group one of their user groups can **read** |
 | Admin | `operator` | all; may write, behind the write unlock; may begin and end the emergency stop |
 | Super admin | `admin` | all; also administers the app |
 | Guest | not signed in | none |
+
+Nothing can leave zero administrators able to sign in: a role map, a role change or a No access pin that would is refused and says why.
 
 **7a. Zabbix: a user group that can see the clusters.** Go to **Users → User groups → Create user group**. Give it a name, for example `ES prod team`. On **Host permissions**, click **Add**, pick the host group that holds your Elasticsearch cluster hosts, and select **Read**. Click **Add**.
 

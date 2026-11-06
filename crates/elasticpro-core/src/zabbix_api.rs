@@ -60,6 +60,21 @@ pub enum PasswordRef {
     Missing,
 }
 
+/// A Zabbix user as `user.get` lists them, for the role tables.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ZbxUser {
+    pub username: String,
+    /// The role's type (1 User, 2 Admin, 3 Super admin); 0 when the answer carried none.
+    pub user_type: i64,
+    pub role: Option<String>,
+    pub groups: Vec<crate::zbx_sso::GroupRef>,
+}
+
+/// Zabbix returns numbers as strings ("3"); some mocks as numbers. Either way, or 0.
+fn int_field(v: &Value) -> i64 {
+    v.as_str().and_then(|t| t.parse::<i64>().ok()).or_else(|| v.as_i64()).unwrap_or(0)
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct ZbxCluster {
     pub hostid: String,
@@ -537,8 +552,66 @@ impl Zabbix {
         Ok(v.as_array().cloned().unwrap_or_default().into_iter().map(|r| json!({
             "roleid": r["roleid"].as_str().unwrap_or(""),
             "name": r["name"].as_str().unwrap_or(""),
-            "type": r["type"].as_str().and_then(|t| t.parse::<i64>().ok()).or_else(|| r["type"].as_i64()).unwrap_or(0),
+            "type": int_field(&r["type"]),
         })).collect())
+    }
+
+    /// Every Zabbix user group, by id and name — for the role map's "+ Add group" picker. Needs
+    /// `usergroup.get` on the paired token (sync-role.json has had it since the first pairing).
+    pub async fn user_groups(&self) -> Result<Vec<Value>, String> {
+        let v = self.call("usergroup.get", json!({ "output": ["usrgrpid", "name", "users_status"], "sortfield": "name" })).await?;
+        Ok(v.as_array().cloned().unwrap_or_default().into_iter().map(|g| json!({
+            "usrgrpid": g["usrgrpid"].as_str().unwrap_or(""),
+            "name": g["name"].as_str().unwrap_or(""),
+            "disabled": int_field(&g["users_status"]) == 1,
+        })).collect())
+    }
+
+    /// Whether the paired token's own user is of the Super admin type — the one type whose
+    /// `user.get` lists every user, so an absence from its answer means the user is gone. Asked
+    /// with `user.checkAuthentication {token}` (no bearer: the token is the parameter), which
+    /// names the user and, on 7.0, its `type`; when it does not, the user's own `role.type`
+    /// through `user.get` (everybody sees themselves). Any failure is an error, which the caller
+    /// takes as "not known to be complete". The token is in no error and no log.
+    pub async fn token_user_is_super_admin(&self) -> Result<bool, String> {
+        if self.token.is_empty() {
+            return Err("no API token".into());
+        }
+        let me = self.call_as("user.checkAuthentication", json!({ "token": self.token }), false).await.map_err(|e| e.message)?;
+        let ty = int_field(&me["type"]);
+        if ty > 0 {
+            return Ok(ty == 3);
+        }
+        let userid = me["userid"].as_str().filter(|s| !s.is_empty()).ok_or("user.checkAuthentication named no user")?;
+        let v = self.call("user.get", json!({ "userids": [userid], "output": ["userid"], "selectRole": ["type"] })).await?;
+        let ty = int_field(&v[0]["role"]["type"]);
+        if ty == 0 {
+            return Err("the token's own user type could not be read".into());
+        }
+        Ok(ty == 3)
+    }
+
+    /// Every Zabbix user with their user groups and role — what the Zabbix users table and the
+    /// role-map preview read, so a person's groups are as Zabbix has them now, not as they were
+    /// at their last sign-in. Needs `user.get` on the paired token (modules 2.1.20; a site paired
+    /// earlier pairs again or adds it by hand). The role's type is the user type.
+    pub async fn users(&self) -> Result<Vec<ZbxUser>, String> {
+        let v = self.call("user.get", json!({
+            "output": ["userid", "username", "roleid"],
+            "selectUsrgrps": ["usrgrpid", "name"],
+            "selectRole": ["roleid", "name", "type"],
+        })).await?;
+        Ok(v.as_array().cloned().unwrap_or_default().into_iter().filter_map(|u| {
+            let username = u["username"].as_str().or_else(|| u["alias"].as_str())?.to_string();
+            let groups = u["usrgrps"].as_array().cloned().unwrap_or_default().iter()
+                .filter_map(crate::zbx_sso::GroupRef::from_value).collect();
+            Some(ZbxUser {
+                username,
+                user_type: int_field(&u["role"]["type"]),
+                role: u["role"]["name"].as_str().map(str::to_string).filter(|s| !s.is_empty()),
+                groups,
+            })
+        }).collect())
     }
 
     pub async fn clusters(&self) -> Result<(Vec<ZbxCluster>, Vec<String>, Vec<(String, usize)>), String> {

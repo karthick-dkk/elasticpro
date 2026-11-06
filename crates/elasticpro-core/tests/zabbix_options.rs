@@ -60,6 +60,7 @@ async fn zabbix_options_from_the_config() {
             "hostgroup.create" => json!({ "groupids": [format!("g-{}", b["params"]["name"].as_str().unwrap())] }),
             "host.create" => json!({ "hostids": ["555"] }),
             "usergroup.update" => json!({ "usrgrpids": ["7"] }),
+            "user.get" => json!([]),
             other => panic!("unexpected Zabbix call {other}"),
         };
         (200, json!({ "jsonrpc": "2.0", "result": result, "id": 1 }).to_string())

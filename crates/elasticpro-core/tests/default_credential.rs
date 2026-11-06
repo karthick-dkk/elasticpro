@@ -130,6 +130,7 @@ async fn fake_zabbix(own_url: &str, new_url: &str) -> TestServer {
             ]),
             "host.get" => json!([]),
             "usergroup.get" => json!([]),
+            "user.get" => json!([]),
             other => panic!("unexpected Zabbix call {other} {p}"),
         };
         (200, json!({ "jsonrpc": "2.0", "result": result, "id": 1 }).to_string())

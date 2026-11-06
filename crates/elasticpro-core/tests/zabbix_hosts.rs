@@ -96,6 +96,7 @@ async fn zabbix_hosts_become_clusters() {
                 { "name": "ES vm-1", "users_status": "0", "hostgroup_rights": [{ "id": "30", "permission": "2" }] },
                 { "name": "Other", "users_status": "0", "hostgroup_rights": [{ "id": "40", "permission": "2" }] },
             ]),
+            "user.get" => json!([]),
             other => panic!("unexpected Zabbix call {other}"),
         };
         (200, json!({ "jsonrpc": "2.0", "result": result, "id": 1 }).to_string())

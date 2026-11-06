@@ -574,9 +574,10 @@ pub fn required_role(msg_type: &str) -> Option<Role> {
         // The automations list, likewise: rules an operator writes that propose what an
         // admin then runs. Plain data, bounded, no credential (cluster_save.rs).
         "AUTOMATIONS_SAVE" => Some(Role::Operator),
-        // Which Zabbix role becomes which ElasticPro role at sign-in: who gets in, and as
-        // what. An administrator's, like the accounts themselves.
-        "ZABBIX_ROLEMAP_GET" | "ZABBIX_ROLEMAP_SET" => Some(Role::Admin),
+        // Which Zabbix user group (or role) becomes which ElasticPro role at sign-in: who gets
+        // in, and as what. An administrator's, like the accounts themselves — the preview and
+        // the Zabbix users table too, which name every person and their groups.
+        "ZABBIX_ROLEMAP_GET" | "ZABBIX_ROLEMAP_SET" | "ZABBIX_ROLEMAP_PREVIEW" | "ZABBIX_USERS" => Some(Role::Admin),
         // The credentials the hosted server keeps for its clusters (cluster_secrets): an admin's.
         "CREDENTIAL_STATUS" | "CREDENTIAL_SET" | "CREDENTIAL_CLEAR" | "CREDENTIAL_PROMOTE" => Some(Role::Admin),
         "PRIME" | "FORGET" => Some(Role::Admin),
@@ -825,6 +826,37 @@ pub struct Account {
     /// local account's role is always the one set here anyway. `USER_UNPIN_ROLE` clears it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub role_pinned: bool,
+    /// This external account has no access: not signed in, and every request from a session it
+    /// still holds is refused. Two ways here. **By hand**, with `role_pinned` set too: an admin
+    /// chose No access, and it stays — whatever Zabbix and the role map say — until
+    /// `USER_UNPIN_ROLE` or a real role set by hand. **By a sync**, with `role_pinned` false: a
+    /// Zabbix sync found the person's live groups give them nothing under the map
+    /// (`UserStore::lower_at_sync`); their next *signed* sign-in decides again. `role` keeps
+    /// its last value underneath, so Reset shows what they were.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub no_access: bool,
+    /// What Zabbix last said about this account at a sign-in — its user type, role name and
+    /// user groups — so the role map can be previewed and the last-admin rule checked against
+    /// what each person would become, without a Zabbix round trip.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub zabbix: Option<ZabbixFacts>,
+    /// The last time a Zabbix sync lowered this account's role (`UserStore::lower_at_sync`):
+    /// what it was, what it became and why — shown in the Zabbix users table.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_sync_change: Option<SyncChange>,
+    /// Consecutive Zabbix syncs whose user list — a *partial* one, from a token that is not of
+    /// the Super admin type — did not name this account. Nothing is known about such a person's
+    /// groups, so the role is kept, but they are *unverified*: not counted as an administrator
+    /// able to sign in, and at `ABSENT_SYNCS_BEFORE_SIGN_OUT` their sessions end so the next
+    /// request needs a fresh signed sign-in. Reset when a sync lists them or they sign in.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub absent_syncs: u32,
+    /// A *complete* Zabbix user list (a Super admin sync token) did not name this account: the
+    /// user is gone from Zabbix. Counts as no administrator (`active`) — pinned or not — so a
+    /// deleted pinned admin cannot be the one the last-admin guards rely on. Cleared when a list
+    /// names them again or they sign in (a recreated user), and by Reset.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub gone: bool,
     /// Zabbix user groups this account is limited to; `None` sees every cluster.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scope: Option<Vec<String>>,
@@ -849,6 +881,70 @@ pub struct Account {
     pub last_login: Option<u64>,
 }
 
+/// What a Zabbix sign-in vouched for, kept with the account (`Account::zabbix`).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct ZabbixFacts {
+    #[serde(default)]
+    pub user_type: i64,
+    /// The Zabbix role's name, when the module sent one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+    /// The user groups, with ids when the module sent them.
+    #[serde(default)]
+    pub groups: Vec<crate::zbx_sso::GroupRef>,
+    /// When these were said (unix seconds).
+    #[serde(default)]
+    pub at: u64,
+}
+
+impl ZabbixFacts {
+    pub fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "userType": self.user_type,
+            "role": self.role,
+            "groups": self.groups.iter().map(|g| serde_json::json!({ "id": g.id, "name": g.name })).collect::<Vec<_>>(),
+            "at": self.at,
+        })
+    }
+}
+
+/// How many consecutive syncs a Zabbix account may be missing from a *partial* user list before
+/// its sessions end (docs/ROLES.md, "At every sync"). Three: one missed sync is noise, three in a
+/// row (fifteen minutes at the default interval) is somebody the core cannot vouch for any more.
+/// The role itself is never changed on missing data; only the sessions end.
+pub const ABSENT_SYNCS_BEFORE_SIGN_OUT: u32 = 3;
+
+fn is_zero(n: &u32) -> bool {
+    *n == 0
+}
+
+/// A role lowered at a Zabbix sync (docs/ROLES.md, "At every sync"): what it was, what it
+/// became (`"none"` for no access), and why — the group that gave the lower role, or the rule
+/// that gave none.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SyncChange {
+    pub at: u64,
+    pub from: String,
+    pub to: String,
+    pub why: String,
+}
+
+impl SyncChange {
+    pub fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({ "at": self.at, "from": self.from, "to": self.to, "why": self.why })
+    }
+}
+
+/// What `UserStore::lower_at_sync` did and left: the change, if any, and the account's role,
+/// scope and no-access state as they stand afterwards — what open sessions are told.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SyncOutcome {
+    pub change: Option<SyncChange>,
+    pub role: Role,
+    pub scope: Option<Vec<String>>,
+    pub no_access: bool,
+}
+
 impl Account {
     /// What an admin is allowed to see about an account. Never the hash or the salt:
     /// they are of no use to the UI and every copy is one more place to leak from.
@@ -861,6 +957,12 @@ impl Account {
             "mustChange": self.must_change,
             "source": self.source,
             "rolePinned": self.role_pinned,
+            "noAccess": self.no_access,
+            "roleInForce": self.role_in_force(),
+            "syncChange": self.last_sync_change.as_ref().map(SyncChange::to_json),
+            "unverifiable": self.zabbix_unverified(),
+            "absentSyncs": self.absent_syncs,
+            "gone": self.gone,
             "scope": self.scope,
             "locked": self.locked,
             "lockedUntil": self.locked_until.filter(|t| *t > now()),
@@ -873,6 +975,49 @@ impl Account {
     /// Locked now, by an admin or by itself.
     pub fn is_locked(&self, at: u64) -> bool {
         self.locked || self.locked_until.is_some_and(|t| t > at)
+    }
+
+    /// The role this account acts with: its role, or `"none"` when an admin set it to No
+    /// access. The one string the Accounts page, the Zabbix users table and the role lookup
+    /// show for "role in force".
+    pub fn role_in_force(&self) -> &'static str {
+        if self.no_access { "none" } else { self.role.as_str() }
+    }
+
+    /// A Zabbix account the last syncs could not find in a partial user list (`absent_syncs`):
+    /// nobody can say whether it still exists or what its groups are. Shown, never acted on by
+    /// the guards: an unverified sole administrator still counts as one (`active`), so a sync
+    /// token that sees only some users cannot make every change refusable for ever.
+    pub fn zabbix_unverified(&self) -> bool {
+        self.source.is_some() && self.absent_syncs > 0
+    }
+
+    /// Whether this account could sign in at all: not blocked, not locked by an admin, not set
+    /// to No access, and not gone from Zabbix (`gone`: a complete user list no longer names it —
+    /// a deleted user cannot sign in, pinned or not). A self-lock after wrong passwords is not
+    /// counted — it passes in minutes. An *unverified* account (absent from a partial list)
+    /// still counts: nobody knows, and the guards must not become refusable for ever.
+    pub fn active(&self) -> bool {
+        !self.disabled && !self.locked && !self.no_access && !self.gone
+    }
+
+    /// An administrator who can act: the one count behind every "last admin" refusal
+    /// (remove, demote, block, lock, No access, hand back to Zabbix, the role map).
+    pub fn active_admin(&self) -> bool {
+        self.role == Role::Admin && self.active()
+    }
+
+    /// Whether this account would be an administrator under `map`: a local admin always; a
+    /// pinned Zabbix account as pinned; an unpinned one as the map makes its last signed
+    /// claim — and not at all when that claim was never recorded.
+    pub fn administers_under(&self, map: &crate::zbx_sso::RoleMap) -> bool {
+        if self.source.is_none() || self.role_pinned {
+            return self.role == Role::Admin;
+        }
+        match &self.zabbix {
+            Some(z) => map.resolve_claim(z.role.as_deref(), z.user_type, &z.groups).role == Some(Role::Admin),
+            None => false,
+        }
     }
 }
 
@@ -925,6 +1070,8 @@ pub enum AuthError {
     Blocked,
     /// The last admin after too many wrong passwords: wait this many seconds between tries.
     Throttled(u64),
+    /// An admin set this account's role to No access: not signed in, from anywhere.
+    NoAccess,
 }
 
 impl AuthError {
@@ -940,6 +1087,7 @@ impl AuthError {
             AuthError::Locked => "locked",
             AuthError::Blocked => "disabled",
             AuthError::Throttled(_) => "rate_limited",
+            AuthError::NoAccess => "no_access",
         }
     }
 }
@@ -956,6 +1104,7 @@ impl std::fmt::Display for AuthError {
             AuthError::Locked => write!(f, "this account is locked — an ElasticPro administrator can unlock it on the Accounts page"),
             AuthError::Blocked => write!(f, "this account is blocked — ask an ElasticPro administrator"),
             AuthError::Throttled(secs) => write!(f, "too many wrong passwords — wait {secs} seconds before the next try"),
+            AuthError::NoAccess => write!(f, "this account's ElasticPro role is set to No access — an ElasticPro administrator can change that on the Accounts page"),
         }
     }
 }
@@ -1101,7 +1250,7 @@ impl UserStore {
     }
 
     pub fn count_admins(&self) -> usize {
-        self.accounts.read().iter().filter(|a| a.role == Role::Admin && !a.disabled).count()
+        self.accounts.read().iter().filter(|a| a.active_admin()).count()
     }
 
     fn save(&self) -> Result<(), AuthError> {
@@ -1156,6 +1305,11 @@ impl UserStore {
                 must_change,
                 source: None,
                 role_pinned: false,
+                no_access: false,
+                zabbix: None,
+                last_sync_change: None,
+                absent_syncs: 0,
+                gone: false,
                 scope: None,
                 locked: false,
                 locked_until: None,
@@ -1189,6 +1343,16 @@ impl UserStore {
     pub fn upsert_external(&self, name: &str, source: &str, role: Role, scope: Option<Vec<String>>)
         -> Result<Account, AuthError>
     {
+        self.upsert_external_with(name, source, role, scope, None)
+    }
+
+    /// `upsert_external`, also recording what the source said (`Account::zabbix`) — kept even
+    /// when the sign-in is refused for a pin, so the tables show the person as they are now.
+    /// An account set to No access is refused (`AuthError::NoAccess`) whatever `role` says:
+    /// that pin beats everything.
+    pub fn upsert_external_with(&self, name: &str, source: &str, role: Role, scope: Option<Vec<String>>, facts: Option<ZabbixFacts>)
+        -> Result<Account, AuthError>
+    {
         let name = name.trim();
         if name.is_empty() {
             return Err(AuthError::Weak("the account needs a name".into()));
@@ -1200,12 +1364,27 @@ impl UserStore {
                     if a.source.as_deref() != Some(source) {
                         return Err(AuthError::Exists(name.to_string()));
                     }
+                    if facts.is_some() {
+                        a.zabbix = facts;
+                    }
+                    // A signed claim is Zabbix vouching for them: whatever a user list could
+                    // not see, they exist (or exist again).
+                    a.absent_syncs = 0;
+                    a.gone = false;
+                    if a.no_access && a.role_pinned {
+                        drop(list);
+                        let _ = self.save();
+                        return Err(AuthError::NoAccess);
+                    }
                     if a.disabled {
                         return Err(AuthError::Blocked);
                     }
                     if a.is_locked(now()) {
                         return Err(AuthError::Locked);
                     }
+                    // No access a sync imposed is not a pin: the signed claim decides again
+                    // (the caller resolved `role` from it — a claim with no role never gets here).
+                    a.no_access = false;
                     a.last_login = Some(now());
                     if !a.role_pinned {
                         a.role = role;
@@ -1228,6 +1407,11 @@ impl UserStore {
                         must_change: false,
                         source: Some(source.to_string()),
                         role_pinned: false,
+                        no_access: false,
+                        zabbix: facts,
+                        last_sync_change: None,
+                        absent_syncs: 0,
+                        gone: false,
                         scope,
                         locked: false,
                         locked_until: None,
@@ -1250,8 +1434,8 @@ impl UserStore {
             let Some(i) = list.iter().position(|a| a.name.eq_ignore_ascii_case(name)) else {
                 return Err(AuthError::NotFound(name.to_string()));
             };
-            let admins = list.iter().filter(|a| a.role == Role::Admin && !a.disabled).count();
-            if list[i].role == Role::Admin && !list[i].disabled && admins <= 1 {
+            let admins = list.iter().filter(|a| a.active_admin()).count();
+            if list[i].active_admin() && admins <= 1 {
                 return Err(AuthError::LastAdmin);
             }
             list.remove(i);
@@ -1262,43 +1446,72 @@ impl UserStore {
     pub fn set_role(&self, name: &str, role: Role) -> Result<(), AuthError> {
         {
             let mut list = self.accounts.write();
-            let admins = list.iter().filter(|a| a.role == Role::Admin && !a.disabled).count();
+            let admins = list.iter().filter(|a| a.active_admin()).count();
             let Some(a) = list.iter_mut().find(|a| a.name.eq_ignore_ascii_case(name)) else {
                 return Err(AuthError::NotFound(name.to_string()));
             };
-            if a.role == Role::Admin && role != Role::Admin && admins <= 1 {
+            if a.active_admin() && role != Role::Admin && admins <= 1 {
                 return Err(AuthError::LastAdmin);
             }
             a.role = role;
-            // An admin chose this role for an account another system signs in: it sticks.
+            // An admin chose this role for an account another system signs in: it sticks —
+            // and replaces No access, when that was the choice before.
             if a.source.is_some() {
                 a.role_pinned = true;
+                a.no_access = false;
             }
         }
         self.save()
     }
 
+    /// Set an external account's role by hand to **No access**: refused at sign-in and on every
+    /// request until `unpin_role` or a real role set here. Only for an account another system
+    /// signs in — a local account is blocked instead (`set_disabled`), one mechanism each.
+    /// Never the last administrator able to sign in.
+    pub fn set_no_access(&self, name: &str) -> Result<(), AuthError> {
+        {
+            let mut list = self.accounts.write();
+            let admins = list.iter().filter(|a| a.active_admin()).count();
+            let Some(a) = list.iter_mut().find(|a| a.name.eq_ignore_ascii_case(name)) else {
+                return Err(AuthError::NotFound(name.to_string()));
+            };
+            if a.source.is_none() {
+                return Err(AuthError::Weak(format!("{} is a local account: block it instead (No access is for accounts another system signs in)", a.name)));
+            }
+            if a.active_admin() && admins <= 1 {
+                return Err(AuthError::LastAdmin);
+            }
+            a.no_access = true;
+            a.role_pinned = true;
+        }
+        self.save()
+    }
+
     /// Let the account's source set its role again, from its next sign-in. The role stays
-    /// what it is until then. Refused for a local account (nothing to follow) and, while
-    /// this is the only working admin, for an admin: the next sign-in could demote it and
-    /// leave nobody able to administer.
+    /// what it is until then (No access is lifted at once: there is nothing to keep). Refused
+    /// for a local account (nothing to follow) and, while this is the only working admin, for
+    /// an admin: the next sign-in could demote it and leave nobody able to administer.
     pub fn unpin_role(&self, name: &str) -> Result<(), AuthError> {
         {
             let mut list = self.accounts.write();
-            let admins = list.iter().filter(|a| a.role == Role::Admin && !a.disabled).count();
+            let admins = list.iter().filter(|a| a.active_admin()).count();
             let Some(a) = list.iter_mut().find(|a| a.name.eq_ignore_ascii_case(name)) else {
                 return Err(AuthError::NotFound(name.to_string()));
             };
             if a.source.is_none() {
                 return Err(AuthError::Weak(format!("{} is a local account: its role is set here and follows nothing else", a.name)));
             }
-            if a.role == Role::Admin && !a.disabled && admins <= 1 {
+            if a.active_admin() && admins <= 1 {
                 return Err(AuthError::LastAdmin);
             }
-            if !a.role_pinned {
+            if !a.role_pinned && !a.no_access && !a.gone {
                 return Ok(());
             }
             a.role_pinned = false;
+            a.no_access = false;
+            // Reset also forgets that a sync found them gone — the admin's way back when the
+            // Zabbix link was pointed at another instance for a while.
+            a.gone = false;
         }
         self.save()
     }
@@ -1306,11 +1519,11 @@ impl UserStore {
     pub fn set_disabled(&self, name: &str, disabled: bool) -> Result<(), AuthError> {
         {
             let mut list = self.accounts.write();
-            let admins = list.iter().filter(|a| a.role == Role::Admin && !a.disabled).count();
+            let admins = list.iter().filter(|a| a.active_admin()).count();
             let Some(a) = list.iter_mut().find(|a| a.name.eq_ignore_ascii_case(name)) else {
                 return Err(AuthError::NotFound(name.to_string()));
             };
-            if a.role == Role::Admin && disabled && admins <= 1 {
+            if a.active_admin() && disabled && admins <= 1 {
                 return Err(AuthError::LastAdmin);
             }
             a.disabled = disabled;
@@ -1323,11 +1536,11 @@ impl UserStore {
     pub fn set_locked(&self, name: &str, locked: bool) -> Result<(), AuthError> {
         {
             let mut list = self.accounts.write();
-            let admins = list.iter().filter(|a| a.role == Role::Admin && !a.disabled && !a.locked).count();
+            let admins = list.iter().filter(|a| a.active_admin()).count();
             let Some(a) = list.iter_mut().find(|a| a.name.eq_ignore_ascii_case(name)) else {
                 return Err(AuthError::NotFound(name.to_string()));
             };
-            if a.role == Role::Admin && locked && !a.locked && admins <= 1 {
+            if a.active_admin() && locked && admins <= 1 {
                 return Err(AuthError::LastAdmin);
             }
             a.locked = locked;
@@ -1342,6 +1555,134 @@ impl UserStore {
     /// Blocked accounts are refused everything, signed in or not.
     pub fn is_blocked(&self, name: &str) -> bool {
         self.accounts.read().iter().any(|a| a.name.eq_ignore_ascii_case(name) && a.disabled)
+    }
+
+    /// A Zabbix sync found this unpinned account's live groups give `target` under the map
+    /// (`None`: no access). Lower the role in force when `target` is lower — never raise it: a
+    /// raise waits for the next signed sign-in — and record the change. `facts` (the live groups)
+    /// are kept either way. Nothing happens to a pinned account, one already without access, or
+    /// a blocked one; `LastAdmin` when the person is the only administrator able to sign in.
+    /// `confirmed`: Zabbix listed this person (the facts are theirs now), which clears
+    /// `absent_syncs` and `gone`; false for a person a complete list no longer names. `scope`:
+    /// the cluster scope the live groups give (`zbx_sso::scope_for`), rewritten like a sign-in
+    /// rewrites it so the proxy path, which reads `Account::scope`, sees the live groups; `None`
+    /// leaves it. A pin covers the role only: a pinned account's scope follows the live groups
+    /// like anybody's (the caller computes it for the pinned role, so a pinned admin's is None).
+    /// The outcome carries the account's role and scope as they are *now*, read under the lock,
+    /// for the caller to push into open sessions — never a snapshot from before.
+    pub fn lower_at_sync(&self, name: &str, target: Option<Role>, facts: ZabbixFacts, why: String, confirmed: bool,
+                         scope: Option<Option<Vec<String>>>) -> Result<SyncOutcome, AuthError> {
+        let out = {
+            let mut list = self.accounts.write();
+            let admins = list.iter().filter(|a| a.active_admin()).count();
+            let Some(a) = list.iter_mut().find(|a| a.name.eq_ignore_ascii_case(name) && a.source.is_some()) else {
+                return Err(AuthError::NotFound(name.to_string()));
+            };
+            a.zabbix = Some(facts);
+            if confirmed {
+                a.absent_syncs = 0;
+                a.gone = false;
+            }
+            if let Some(s) = scope {
+                a.scope = s;
+            }
+            let change = if a.role_pinned || a.no_access || a.disabled || target.is_some_and(|t| t >= a.role) {
+                None
+            } else if a.active_admin() && admins <= 1 {
+                drop(list);
+                let _ = self.save();
+                return Err(AuthError::LastAdmin);
+            } else {
+                let from = a.role.as_str().to_string();
+                match target {
+                    Some(t) => a.role = t,
+                    None => a.no_access = true,
+                }
+                let change = SyncChange { at: now(), from, to: target.map(Role::as_str).unwrap_or("none").to_string(), why };
+                a.last_sync_change = Some(change.clone());
+                Some(change)
+            };
+            SyncOutcome { change, role: a.role, scope: a.scope.clone(), no_access: a.no_access }
+        };
+        self.save()?;
+        Ok(out)
+    }
+
+    /// A complete Zabbix user list did not name this account: gone from Zabbix. Pinned or not,
+    /// they count as no administrator from now on (`Account::gone`).
+    pub fn note_gone(&self, name: &str) -> Result<(), AuthError> {
+        {
+            let mut list = self.accounts.write();
+            let Some(a) = list.iter_mut().find(|a| a.name.eq_ignore_ascii_case(name) && a.source.is_some()) else {
+                return Err(AuthError::NotFound(name.to_string()));
+            };
+            if a.gone {
+                return Ok(());
+            }
+            a.gone = true;
+        }
+        self.save()
+    }
+
+    /// Record what a source said about an account that already exists for that source — a
+    /// sign-in the map refused still tells the Zabbix users table who this person is now (and
+    /// that they exist). Makes no account: a refused stranger leaves nothing behind.
+    pub fn note_facts(&self, name: &str, source: &str, facts: ZabbixFacts) {
+        let changed = {
+            let mut list = self.accounts.write();
+            match list.iter_mut().find(|a| a.name.eq_ignore_ascii_case(name.trim()) && a.source.as_deref() == Some(source)) {
+                Some(a) => { a.zabbix = Some(facts); a.absent_syncs = 0; a.gone = false; true }
+                None => false,
+            }
+        };
+        if changed {
+            let _ = self.save();
+        }
+    }
+
+    /// A sync's user list named this Zabbix account: it exists, so it is verified again (and no
+    /// longer gone, if a complete list had said so).
+    pub fn note_seen(&self, name: &str) {
+        let changed = {
+            let mut list = self.accounts.write();
+            match list.iter_mut().find(|a| a.name.eq_ignore_ascii_case(name) && a.source.is_some() && (a.absent_syncs > 0 || a.gone)) {
+                Some(a) => { a.absent_syncs = 0; a.gone = false; true }
+                None => false,
+            }
+        };
+        if changed {
+            let _ = self.save();
+        }
+    }
+
+    /// A sync's *partial* user list did not name this Zabbix account: one more consecutive
+    /// absence. Returns the count; the caller ends the sessions at `ABSENT_SYNCS_BEFORE_SIGN_OUT`.
+    pub fn note_absent(&self, name: &str) -> Result<u32, AuthError> {
+        let n = {
+            let mut list = self.accounts.write();
+            let Some(a) = list.iter_mut().find(|a| a.name.eq_ignore_ascii_case(name) && a.source.is_some()) else {
+                return Err(AuthError::NotFound(name.to_string()));
+            };
+            a.absent_syncs = a.absent_syncs.saturating_add(1);
+            a.absent_syncs
+        };
+        self.save()?;
+        Ok(n)
+    }
+
+    /// Why an account's every request is refused, if it is: blocked, or set to No access. The
+    /// gate asks this for every message from a session, so a pin takes effect on the tab the
+    /// person already has open, not only at their next sign-in.
+    pub fn refused(&self, name: &str) -> Option<AuthError> {
+        let list = self.accounts.read();
+        let a = list.iter().find(|a| a.name.eq_ignore_ascii_case(name))?;
+        if a.no_access {
+            Some(AuthError::NoAccess)
+        } else if a.disabled {
+            Some(AuthError::Blocked)
+        } else {
+            None
+        }
     }
 
     /// Note a sign-in attempt for the Accounts page.
@@ -2175,6 +2516,65 @@ mod tests {
         assert_eq!(s.upsert_external("ada@zabbix", "zabbix", Role::Operator, None).unwrap().role, Role::Operator);
         // Unpinning what is not pinned is not an error.
         assert!(s.unpin_role("ada@zabbix").is_ok());
+    }
+
+    #[test]
+    fn no_access_set_by_hand_refuses_the_sign_in_and_is_lifted_by_reset_or_a_real_role() {
+        let s = store();
+        s.add("root", "correct-horse", Role::Admin).unwrap();
+        s.upsert_external("ada@zabbix", "zabbix", Role::Operator, None).unwrap();
+        s.set_no_access("ada@zabbix").unwrap();
+        let a = s.list().into_iter().find(|a| a.name == "ada@zabbix").unwrap();
+        assert!(a.no_access && a.role_pinned, "No access is a pin");
+        assert_eq!((a.role, a.role_in_force()), (Role::Operator, "none"), "the last role stays underneath; in force is none");
+        assert_eq!(a.public()["roleInForce"], serde_json::json!("none"));
+        assert_eq!(a.public()["noAccess"], serde_json::json!(true));
+        // Zabbix says Super admin: refused all the same, and what Zabbix said is still recorded.
+        let facts = ZabbixFacts { user_type: 3, role: Some("Super admin role".into()), groups: vec![crate::zbx_sso::GroupRef::named("NOC")], at: 5 };
+        assert_eq!(s.upsert_external_with("ada@zabbix", "zabbix", Role::Admin, None, Some(facts.clone())).err(), Some(AuthError::NoAccess));
+        let a = s.list().into_iter().find(|a| a.name == "ada@zabbix").unwrap();
+        assert_eq!(a.zabbix, Some(facts));
+        assert_eq!((a.role, a.no_access), (Role::Operator, true), "the refused sign-in changed nothing else");
+        assert_eq!(s.refused("ada@zabbix"), Some(AuthError::NoAccess), "and every request from an open session is refused");
+        assert_eq!(s.refused("root"), None);
+        assert_eq!(AuthError::NoAccess.kind(), "no_access");
+        // Reset lifts it: the next sign-in follows Zabbix again.
+        s.unpin_role("ada@zabbix").unwrap();
+        let a = s.list().into_iter().find(|a| a.name == "ada@zabbix").unwrap();
+        assert!(!a.no_access && !a.role_pinned);
+        assert_eq!(s.upsert_external("ada@zabbix", "zabbix", Role::User, None).unwrap().role, Role::User);
+        // A real role set by hand replaces No access.
+        s.set_no_access("ada@zabbix").unwrap();
+        s.set_role("ada@zabbix", Role::Guest).unwrap();
+        let a = s.list().into_iter().find(|a| a.name == "ada@zabbix").unwrap();
+        assert_eq!((a.no_access, a.role_pinned, a.role), (false, true, Role::Guest));
+        // A local account is blocked, not set to No access.
+        s.add("bob", "correct-horse", Role::User).unwrap();
+        assert!(matches!(s.set_no_access("bob"), Err(AuthError::Weak(_))));
+        assert_eq!(s.set_no_access("nobody"), Err(AuthError::NotFound("nobody".into())));
+    }
+
+    #[test]
+    fn the_last_admin_able_to_sign_in_cannot_be_set_to_no_access() {
+        let s = store();
+        s.upsert_external("ada@zabbix", "zabbix", Role::Admin, None).unwrap();
+        assert_eq!(s.set_no_access("ada@zabbix"), Err(AuthError::LastAdmin));
+        // A second admin who is blocked, locked or already without access does not count.
+        s.upsert_external("bob@zabbix", "zabbix", Role::Admin, None).unwrap();
+        s.set_locked("bob@zabbix", true).unwrap();
+        assert_eq!(s.set_no_access("ada@zabbix"), Err(AuthError::LastAdmin), "a locked admin cannot sign in");
+        s.set_locked("bob@zabbix", false).unwrap();
+        s.set_no_access("bob@zabbix").unwrap();
+        assert_eq!(s.set_no_access("ada@zabbix"), Err(AuthError::LastAdmin), "nor one set to No access");
+        assert_eq!(s.count_admins(), 1);
+        // Nor demoted, blocked, locked or handed back while bob is out.
+        assert_eq!(s.set_role("ada@zabbix", Role::User), Err(AuthError::LastAdmin));
+        assert_eq!(s.set_disabled("ada@zabbix", true), Err(AuthError::LastAdmin));
+        assert_eq!(s.set_locked("ada@zabbix", true), Err(AuthError::LastAdmin));
+        // Lifting bob's pin is allowed (it adds an admin), after which ada may go.
+        s.unpin_role("bob@zabbix").unwrap();
+        assert_eq!(s.count_admins(), 2);
+        s.set_no_access("ada@zabbix").unwrap();
     }
 
     #[test]

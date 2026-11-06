@@ -29,6 +29,8 @@ const TABLE: &[(&str, &str)] = &[
     ("disabled", "EP-105"),
     ("locked", "EP-106"),
     ("rate_limited", "EP-107"),
+    ("no_access", "EP-108"),
+    ("last_admin", "EP-109"),
     ("forbidden", "EP-110"),
     ("no_token", "EP-111"),
     ("session_expired", "EP-112"),

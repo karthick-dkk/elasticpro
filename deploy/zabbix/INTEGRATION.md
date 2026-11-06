@@ -533,14 +533,31 @@ Nothing extra to run — this step is bookkeeping in Zabbix you should not skip.
 | Super admin | `admin` | all | yes (PUT/POST/DELETE), and administers the app |
 | Guest | — | not signed in | — |
 
+The table is the rule for people in **no mapped user group**. Since ElasticPro 0.3.55 the role
+map (Config → Zabbix, *ElasticPro roles from Zabbix user groups*; `zabbix.roleMap.groups`) lists
+Zabbix **user groups** under each ElasticPro role: a person in several gets the highest, a person
+in none gets the table above or — when the admin sets the unmapped rule to *no access* — is not
+signed in. Until an admin saves the group table the Zabbix user role alone decides, exactly as
+before. The embed module (2.1.20) sends the groups with their ids in the signed claim
+(`user_groups`), so a group renamed in Zabbix keeps its mapping; an older module sends names only
+and the map matches by name. docs/ROLES.md in the ElasticPro repository is the contract.
+
 Accounts are created on first sign-in as `<zabbix name>@zabbix` — so a Zabbix user named
 `admin` can never become the local `admin`. Groups are rewritten from Zabbix at **every
 sign-in**: move someone between Zabbix groups and it applies next time they open the page, no
 restart needed. The role is rewritten the same way **until an ElasticPro admin changes it** on
-the Accounts page: that change is *pinned* (a "pinned" pill in the Origin column) and later
-Zabbix sign-ins keep it. **Follow Zabbix again** in the role editor clears the pin; Zabbix's
-role then applies from that person's next sign-in. The only working admin cannot be handed back
-(its next sign-in could demote it).
+the Accounts page or the *Zabbix users* table: that change is *pinned* (a "pinned" pill in the
+Origin column) and later Zabbix sign-ins keep it. One of the choices is **No access**: the
+person is refused at sign-in and on every request, whatever Zabbix and the map say, until
+**Reset**. **Follow Zabbix again** / **Reset** clears the pin; the map then applies from that
+person's next sign-in. The only working admin cannot be handed back, demoted, blocked or set to
+No access (its next sign-in could demote it), and a role map that would leave nobody able to
+sign in as an administrator is refused (`last_admin`, EP-109).
+
+The paired **ElasticPro sync** role needs `user.get` (modules 2.1.20) for the *Zabbix users*
+table and *Preview who changes* to read each person's groups as Zabbix has them now; a site paired
+earlier pairs again or adds it by hand, as for `role.get` in 2.1.14. Without it the tables show
+each person's groups as their last sign-in said, and say so.
 
 **Who may edit Cluster Management.** ElasticPro's role decides (decision of 2026-10-22; Zabbix
 still owns hosts and host groups). A Zabbix Super admin always may. A Zabbix Admin or User may
@@ -557,10 +574,10 @@ Server to server, read-only — no account is made or refreshed, no session or c
 
 | | |
 |---|---|
-| Request | `GET {core_url}/sso/zabbix/role?claim=<url-encoded JSON>`; JSON exactly `{"zabbix_user":"alice","zabbix_user_type":2,"ts":<unix s>,"nonce":"<32 hex>"}` |
+| Request | `GET {core_url}/sso/zabbix/role?claim=<url-encoded JSON>`; JSON exactly `{"zabbix_user":"alice","zabbix_user_type":2,"zabbix_role":"Admin role","user_groups":[{"id":"7","name":"NOC"}],"ts":<unix s>,"nonce":"<32 hex>"}` (`zabbix_role` from modules 2.1.13, `user_groups` from 2.1.20; both optional) |
 | Request signature | `X-Zabbix-Module-Signature: hex(HMAC-SHA256(module_secret, <the JSON's exact bytes>))` — the same secret and scheme as `POST /sso/zabbix` |
 | Replay window | `ts` within ±60 s of the core's clock; each nonce once (401 `replayed` otherwise) |
-| Answer (200) | `{"ok":true,"account":"alice@zabbix","role":"admin"\|"operator"\|"user"\|"guest"\|null,"pinned":bool,"source":"zabbix"\|null,"disabled":bool,"locked":bool,"zabbix_role":…,"ts":<echo>,"nonce":"<echo>"}`. `role: null` = ElasticPro has never seen this person sign in (the module then uses the Zabbix mapping, so a non-Super-admin is not an admin). A local account that happens to be called `alice@zabbix` is not counted. |
+| Answer (200) | `{"ok":true,"account":"alice@zabbix","role":"admin"\|"operator"\|"user"\|"guest"\|"none"\|null,"pinned":bool,"no_access":bool,"source":"zabbix"\|null,"disabled":bool,"locked":bool,"zabbix_role":…,"map_role":"none"\|<role>,"role_source":"group"\|"zabbixRole"\|"unmapped","ts":<echo>,"nonce":"<echo>"}`. `role: null` = ElasticPro has never seen this person sign in; `zabbix_role`/`map_role` is what the role map makes them now (from `user_groups` when sent, else the Zabbix role) and the module uses that — `"none"` when the map gives nothing, and the module then denies unless `pinned` is true (a role held from an earlier sign-in does not outlive the map). A person set to **No access** is answered `role: "none"`, `zabbix_role: "none"`, `no_access: true` and is never elevated. A local account that happens to be called `alice@zabbix` is not counted. |
 | Answer signature | `X-ElasticPro-Signature: hex(HMAC-SHA256(module_secret, "<ts>\n<nonce>\n" + <exact body bytes>))`, using the request's ts and nonce. Only a verified request gets one. |
 | Errors | 400 `bad_request`, 401 `bad_signature` / `stale` / `replayed`, 403 source not in `allowedSources`, 404 not the hosted build, 429 over the per-source budget (the sign-in's: 600/min, the listed Zabbix frontend exempt), 503 no secret set |
 | Logging | debug level only (`RUST_LOG=elasticpro_core=debug`); never the signature or the body |

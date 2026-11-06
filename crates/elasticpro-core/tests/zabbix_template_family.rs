@@ -39,6 +39,7 @@ async fn an_earlier_template_of_the_family_is_found_and_a_stray_host_is_named() 
             "host.get" if p["hostids"].is_array() => json!([
                 { "hostid": "12", "host": "odd-one", "name": "odd-one", "parentTemplates": [{ "host": "Some other template" }] }]),
             "usergroup.get" => json!([]),
+            "user.get" => json!([]),
             other => panic!("unexpected Zabbix call {other} {p}"),
         };
         (200, json!({ "jsonrpc": "2.0", "result": result, "id": 1 }).to_string())
