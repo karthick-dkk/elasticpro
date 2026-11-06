@@ -876,5 +876,5 @@ function snapshotNotice(what) {
       h('div', 'You are viewing a snapshot file collected elsewhere, so there is no cluster to query. ',
         'Everything that was collected — cluster health, disk, indices, nodes, snapshots and SLM — is on the other pages.'),
       h('div.sec', { style: { fontSize: '12px', marginTop: '5px' } },
-        'To use this page, load clusters.yaml instead (Config → Pick another file) and connect directly.')));
+        'To use this page, load clusters.yaml instead (Config-Management › System › Config file › Pick another file) and connect directly.')));
 }

@@ -57,10 +57,15 @@ export function effective(account, browser) {
 /**
  * The one-time hand-over: values the browser had that the account has not — the theme a
  * person chose before 0.3.55 — go to the account, as the first PREFS_SET. `null` when there is
- * nothing to carry over, so nothing is sent. Never overwrites a choice the account already made.
+ * nothing to carry over, so nothing is sent. Never overwrites a choice the account already made,
+ * and never happens twice from one browser (`migrated`: the browser's flag, set after the first
+ * account it met).
  */
-export function migrationPatch(account, browser) {
-  if (!browser) return null;
+export function migrationPatch(account, browser, { migrated = false } = {}) {
+  // Once per browser: after the first account it carried over to, the browser's copy is that
+  // person's choice too (savePref writes it), and must not become the next person's on a shared
+  // browser.
+  if (!browser || migrated) return null;
   const patch = {};
   for (const k of KEYS) {
     const has = account && isChoice(k, account[k]);

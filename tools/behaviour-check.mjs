@@ -93,7 +93,14 @@ const sheetHeaders = () => [...doc.querySelectorAll('table.sheet thead tr:last-c
 const groupBand = () => [...doc.querySelectorAll('table.sheet thead tr.group-head th')]
   .map((th) => `${th.textContent.trim()}×${th.getAttribute('colspan') || 1}`);
 
-async function go(id) { app.go(id); await settleFor(350); }
+async function go(id) {
+  // A case that moves on is done with what it typed: Config-Management would ask before leaving
+  // with unsaved changes (that question has its own case, through the page menu), so drop them.
+  const bar = doc.getElementById('cm-savebar');
+  const discard = bar && !bar.hidden && bar.querySelector('button[data-act="discard"]');
+  if (discard) { discard.click(); await settleFor(150); }
+  app.go(id); await settleFor(350);
+}
 /** A link pressed as a person would: the harness's anchor click() only captures downloads. */
 const press = (a) => a && a.dispatchEvent(new window.MouseEvent('click', { bubbles: true, cancelable: true }));
 
@@ -1226,45 +1233,89 @@ await go('reports');
 
 /* --------------------- alert triggers are listed and switchable --------------------- */
 
-/** The Config page is tabbed; open one by its label. */
+/**
+ * Config-Management (the board of 2026-11-05): nine pages in a menu on the left, tabs under
+ * each. Yesterday's tab labels, and where each went — the cases below still name them.
+ */
+const CFG_HOME = {
+  'Config file': ['system', 'file'], Diagnostics: ['system', 'file'], Credentials: ['clusters', 'creds'],
+  Clusters: ['clusters', 'clusters'], Zabbix: ['zabbix', 'zabbix'], 'Jump hosts & trust': ['clusters', 'trust'],
+  'Alert triggers': ['alerts', 'triggers'], 'Scheduled log delay': ['data', 'schedule'], 'History store': ['data', 'backend'],
+  Requests: ['requests', 'policy'], Defaults: ['system', 'defaults'], Reports: ['reports', 'fields'], Play: ['play', 'play'],
+  'Mail delivery': ['reports', 'mail'], 'Plan templates': ['reports', 'templates'],
+};
+/** The page and tab open now, as the menu and the tab row mark them. */
+function cfgOpen() {
+  const page = doc.querySelector('.cm-nav .cm-item[aria-current="page"]');
+  const tab = doc.querySelector('nav.cm-tabs button[aria-current="page"]');
+  return { page: page ? page.dataset.cmPage : '', tab: tab ? tab.dataset.cmTab : '' };
+}
+/** Open a page and tab of Config-Management through its menu and tab row; true when it is open. */
+async function openCfg(page, tab) {
+  const item = doc.querySelector(`.cm-nav .cm-item[data-cm-page="${page}"]`);
+  if (!item) return false;
+  // Leaving a tab with unsaved changes asks first; a case that left some behind is a bug in
+  // the case (or the page), said here and answered No so nothing is lost and nothing hangs.
+  const asked = () => {
+    const m = [...doc.querySelectorAll('.modal')].find((x) => /Leave without saving/.test(x.textContent));
+    if (!m) return false;
+    ok(false, `config: leaving for ${page}/${tab} asked about unsaved changes: ${(doc.getElementById('cm-savebar') || {}).textContent}`);
+    const no = [...m.querySelectorAll('button')].find((b) => b.textContent.trim() === 'No');
+    if (no) no.click();
+    return true;
+  };
+  if (cfgOpen().page !== page) { item.click(); await settleFor(300); if (asked()) { await settleFor(100); return false; } }
+  if (tab) {
+    const t = doc.querySelector(`nav.cm-tabs button[data-cm-tab="${tab}"]`);
+    if (t && t.getAttribute('aria-current') !== 'page') { t.click(); await settleFor(300); if (asked()) { await settleFor(100); return false; } }
+  }
+  const now = cfgOpen();
+  return now.page === page && (!tab || now.tab === tab || !doc.querySelector('nav.cm-tabs'));
+}
+/** Open one by yesterday's label (CFG_HOME). */
 async function openSettingsTab(label) {
-  const nav = doc.querySelector('nav.subnav');
-  const btn = nav && [...nav.querySelectorAll('button')].find((b) => b.textContent.includes(label));
-  if (btn) { btn.click(); await settleFor(300); }
-  return !!btn;
+  const home = CFG_HOME[label];
+  return home ? openCfg(home[0], home[1]) : false;
+}
+/**
+ * Press the save bar's "Save changes". A value set from code fires no input event, so the page
+ * is told first, the way typing would; false when there was nothing to save (no bar).
+ */
+async function saveViaBar(wait = 400) {
+  const body = doc.querySelector('#view .cm-body');
+  if (body) body.dispatchEvent(new window.Event('input', { bubbles: true }));
+  await settleFor(30);
+  const b = doc.querySelector('#cm-savebar:not([hidden]) button[data-act="save"]');
+  if (b) { b.click(); await settleFor(wait); }
+  return !!b;
 }
 
 await go('settings');
 {
-  // The bar is the page's table of contents: every job it does, visible without
-  // scrolling, exactly one of them open.
-  const nav = doc.querySelector('nav.subnav');
-  ok(!!nav, 'settings: no section tab bar');
-  if (nav) {
-    const tabs = [...nav.querySelectorAll('button')];
-    ok(tabs.length >= 7, `settings: ${tabs.length} section tabs, expected the page's several jobs`);
-    const current = tabs.filter((b) => b.getAttribute('aria-current') === 'page');
-    ok(current.length === 1, `settings: ${current.length} tabs marked current, expected exactly 1`);
-    // One section at a time — the whole point of the bar.
-    const cards = [...doc.querySelectorAll('section.card')].length;
-    ok(cards === 1, `settings: ${cards} cards on screen, expected the one open section`);
-    // Switching moves the marker and changes what is shown.
-    const other = tabs.find((b) => b.getAttribute('aria-current') !== 'page');
-    const otherLabel = other.textContent;
-    const wasTitle = (doc.querySelector('section.card header h2') || {}).textContent;
-    other.click();
-    await settleFor(300);
-    const nowTitle = (doc.querySelector('section.card header h2') || {}).textContent;
-    ok(nowTitle !== wasTitle, `settings: switching tab left "${wasTitle}" on screen`);
-    // The bar is redrawn, so find the tab again by its label: the marker has to be on
-    // the one that was pressed, not merely on exactly one of them.
-    const after = [...doc.querySelectorAll('nav.subnav button')];
-    const pressed = after.find((b) => b.textContent === otherLabel);
-    ok(pressed && pressed.getAttribute('aria-current') === 'page',
-      `settings: the current marker did not move to "${otherLabel}"`);
-    ok(after.filter((b) => b.getAttribute('aria-current') === 'page').length === 1,
-      'settings: more than one tab marked current');
-  }
+  // The menu is the page's table of contents: nine pages, each with its tabs named under it
+  // and a state on the right; exactly one is open, and the address says which.
+  const items = [...doc.querySelectorAll('.cm-nav .cm-item')];
+  ok(items.length >= 6, `config: ${items.length} pages in the Config-Management menu, expected the board's nine (less what this core lacks)`);
+  ok(items.filter((b) => b.getAttribute('aria-current') === 'page').length === 1, 'config: not exactly one page marked open');
+  ok(!!doc.getElementById('cm-find'), 'config: no "Find a setting" box');
+  ok(/Author:/.test((doc.querySelector('.cm-about') || {}).textContent || '') && !!doc.querySelector('.cm-about a[href$="/issues"]'),
+    'config: the About card lacks the author or the Support link');
+  ok(!/config_cluster\.json/.test((doc.querySelector('.cm-side') || {}).textContent || ''), 'config: the menu names the config file');
+  // One page at a time, with its header and the tab row; switching moves the marker.
+  ok(await openCfg('clusters', 'clusters'), 'config: Clusters does not open');
+  const wasTitle = (doc.querySelector('.cm-head h1') || {}).textContent;
+  ok(await openCfg('system', 'file'), 'config: System › Config file does not open');
+  ok((doc.querySelector('.cm-head h1') || {}).textContent !== wasTitle, 'config: switching page left the old header');
+  ok((window.location.hash || '') === '#/settings/system/file', `config: the address is ${window.location.hash}, not the open tab`);
+  ok(!!doc.querySelector('.cm-danger') && doc.querySelector('.cm-body').lastElementChild.contains(doc.querySelector('.cm-danger')),
+    'config: Forget file & credentials is not last, apart, in the danger zone');
+  // "Find a setting": typing names the setting; choosing it opens its page and tab.
+  const find = doc.getElementById('cm-find');
+  find.value = 'watch window'; find.dispatchEvent(new window.Event('input', { bubbles: true }));
+  const hit = doc.querySelector('.cm-find-hit');
+  ok(hit && /Watch window/.test(hit.textContent) && /Requests › Policy/.test(hit.textContent), `config: Find a setting offered ${hit && hit.textContent}`);
+  if (hit) { hit.click(); await settleFor(900); }
+  ok(cfgOpen().page === 'requests' && cfgOpen().tab === 'policy', `config: the search result opened ${JSON.stringify(cfgOpen())}`);
 
   ok(await openSettingsTab('Alert triggers'), 'settings: no Alert triggers tab');
   const titles = [...doc.querySelectorAll('section.card header h2')].map((x) => x.textContent);
@@ -1273,9 +1324,10 @@ await go('settings');
   const ar = await load('core/alert-rules.js');
   const card = [...doc.querySelectorAll('section.card')]
     .find((sec) => (sec.querySelector('header h2') || {}).textContent === 'Alert triggers');
-  const rows = card ? card.querySelectorAll('table.tbl tbody tr').length : 0;
+  const rows = card ? card.querySelectorAll('table.tbl tbody tr[data-rule]').length : 0;
   ok(rows === ar.ALERT_RULES.length,
     `settings: ${rows} trigger rows for ${ar.ALERT_RULES.length} rules — the table must be the registry`);
+  ok(card && card.querySelectorAll('tr.cm-grp').length >= 4, 'settings: the triggers are not grouped');
 
   // Every rule has a switch, and the ones with thresholds expose them as numbers.
   const boxes = card ? card.querySelectorAll('input[type=checkbox]').length : 0;
@@ -1287,6 +1339,59 @@ await go('settings');
   // It points at the one rule editor rather than being a second one.
   ok(card && /Automation/.test(card.textContent),
     'settings: the triggers card should send new-rule authoring to Automation');
+
+  // A switch waits for Save now (it used to save at once): the bar names it, Discard puts it back.
+  const sw = card && card.querySelector('input[type=checkbox]:not([disabled])');
+  if (sw) {
+    const was = sw.checked;
+    sw.checked = !sw.checked; sw.dispatchEvent(new window.Event('change', { bubbles: true })); await settleFor(200);
+    const bar = doc.getElementById('cm-savebar');
+    ok(bar && !bar.hidden && /1 unsaved change/.test(bar.textContent) && bar.textContent.includes(sw.dataset.label),
+      `alerts: the save bar does not name the switch: ${bar && bar.textContent}`);
+    const discard = bar && bar.querySelector('button[data-act="discard"]');
+    if (discard) { discard.click(); await settleFor(200); }
+    ok(doc.getElementById('cm-savebar').hidden, 'alerts: Discard left the save bar up');
+    const again = doc.querySelector(`#${sw.id}`);
+    ok(again && again.checked === was, 'alerts: Discard did not put the switch back');
+  }
+
+  // From a hosted tab (Alerts › Automation is the app's own #/automation page) a tab, a menu
+  // item or a search result opens that tab of Config-Management, not its first page.
+  await go('automation'); await settleFor(400);
+  ok(cfgOpen().page === 'alerts' && cfgOpen().tab === 'automation', `hosted: #/automation is not Alerts › Automation (${JSON.stringify(cfgOpen())})`);
+  const trig = doc.querySelector('nav.cm-tabs button[data-cm-tab="triggers"]');
+  if (trig) { trig.click(); await settleFor(600); }
+  ok(cfgOpen().page === 'alerts' && cfgOpen().tab === 'triggers', `hosted: Triggers from Automation opened ${JSON.stringify(cfgOpen())}`);
+  await go('requests'); await settleFor(400);
+  const find2 = doc.getElementById('cm-find');
+  if (find2) { find2.value = 'watch window'; find2.dispatchEvent(new window.Event('input', { bubbles: true })); }
+  const hit2 = doc.querySelector('.cm-find-hit');
+  if (hit2) { hit2.click(); await settleFor(1200); }
+  ok(cfgOpen().page === 'requests' && cfgOpen().tab === 'policy', `hosted: Find a setting from the Request Centre opened ${JSON.stringify(cfgOpen())}`);
+  ok((doc.activeElement || {}).id === 'pol-watch', `hosted: Find a setting from the Request Centre did not focus the field (focus on ${(doc.activeElement || {}).id})`);
+
+  // Leaving Config-Management by the page menu with unsaved changes asks first; No stays.
+  await openSettingsTab('Defaults');
+  const ri0 = doc.getElementById('ce-ri');
+  if (ri0) {
+    ri0.value = String(Number(ri0.value || 30) + 7); ri0.dispatchEvent(new window.Event('input', { bubbles: true }));
+    await settleFor(50);
+    const alertsTab = doc.querySelector('#nav button[data-page="alerts"]');
+    if (alertsTab) { alertsTab.click(); await settleFor(300); }
+    const ask = [...doc.querySelectorAll('.modal')].find((m) => /Leave without saving/.test(m.textContent));
+    ok(!!ask, 'leave: the page menu left Config-Management with unsaved changes and did not ask');
+    const no = ask && [...ask.querySelectorAll('button')].find((b) => b.textContent.trim() === 'No');
+    if (no) { no.click(); await settleFor(300); }
+    ok(cfgOpen().page === 'system' && cfgOpen().tab === 'defaults' && (window.location.hash || '') === '#/settings/system/defaults',
+      `leave: answering No did not stay on System › Defaults (${JSON.stringify(cfgOpen())}, ${window.location.hash})`);
+    const discard2 = doc.querySelector('#cm-savebar button[data-act="discard"]');
+    if (discard2) { discard2.click(); await settleFor(200); }
+  }
+
+  // A page that was left lets go of #view: a loader answering afterwards paints nothing over the next page.
+  await openSettingsTab('Zabbix');
+  await go('overview'); await settleFor(1500);
+  ok(!doc.querySelector('#view .cm'), 'late loader: Config-Management was painted over the Clusters page');
 }
 
 /* --------- nodes & shards opens on one cluster, and honours an explicit "all" --------- */
@@ -1378,7 +1483,7 @@ await go('shards');
 // bridge on a routable address.
 await go('settings');
 {
-  const labels = [...doc.querySelectorAll('nav.subnav button')].map((b) => b.textContent);
+  const labels = [...doc.querySelectorAll('.cm-nav .cm-item, nav.cm-tabs button')].map((b) => b.textContent);
   ok(!labels.some((l) => /Scheduled log delay/.test(l)),
     `settings: the scheduler tab appeared on a loopback (portable) bridge, where it cannot run: ${labels.join(' | ')}`);
 }
@@ -1431,8 +1536,7 @@ await go('settings');
     // Arming it without naming a destination must not reach the core at all.
     card.querySelector('#sink-enabled').checked = true;
     [...card.querySelectorAll('input[id^="sink-pick-"]')].forEach((b) => { b.checked = false; });
-    [...card.querySelectorAll('button')].find((b) => b.textContent === 'Save').click();
-    await settleFor(120);
+    ok(await saveViaBar(120), 'settings: the save bar did not come up for the scheduled measurement');
     ok(lastSet === null, 'settings: saving with no cluster picked was sent to the core anyway');
 
     // With a destination and a cluster that is not the destination, what is sent is what
@@ -1443,8 +1547,7 @@ await go('settings');
     const first = card.querySelector(`#sink-pick-${config.clusters[0].id}`);
     if (first) first.checked = true;
     card.querySelector('#sink-everyHours').value = '6';
-    [...card.querySelectorAll('button')].find((b) => b.textContent === 'Save').click();
-    await settleFor(200);
+    await saveViaBar(200);
     ok(lastSet !== null, 'settings: a complete setting was not sent to the core');
     if (lastSet) {
       ok(lastSet.enabled === true, 'settings: the armed switch did not travel');
@@ -1464,8 +1567,8 @@ await go('settings');
 
 await go('settings');
 {
-  const labels = [...doc.querySelectorAll('nav.subnav button')].map((b) => b.textContent);
-  ok(!labels.some((l) => /History store/.test(l)),
+  const labels = [...doc.querySelectorAll('.cm-nav .cm-item, nav.cm-tabs button')].map((b) => b.textContent);
+  ok(!labels.some((l) => /History store|Backend/.test(l)),
     `settings: the History store tab appeared on a loopback (portable) bridge: ${labels.join(' | ')}`);
 }
 
@@ -1524,6 +1627,17 @@ await go('settings');
   };
   ok(!!hcard(), 'settings: no History store card on a hosted core');
   if (hcard()) {
+    // Changing the kind of credential redraws the card; the change still counts for the save bar.
+    {
+      const au = hcard().querySelector('#hs-auth');
+      if (au) {
+        au.value = 'none'; au.dispatchEvent(new window.Event('change', { bubbles: true })); await settleFor(200);
+        const bar = doc.getElementById('cm-savebar');
+        ok(bar && !bar.hidden && /Auth/.test(bar.textContent), `history: Basic → None is not on the save bar: ${bar && bar.textContent}`);
+        const d = bar && bar.querySelector('button[data-act="discard"]');
+        if (d) { d.click(); await settleFor(250); }
+      }
+    }
     let c = hcard();
     // Never pre-filled: the password field is empty and says only that one is held.
     const pw = c.querySelector('#hs-password');
@@ -1557,7 +1671,9 @@ await go('settings');
     await click(hcard(), 'Copy existing history');
     ok(sent.some((m) => m.type === 'HISTORY_STORE_BACKFILL'), 'history: Copy existing history sent nothing');
     sent.length = 0;
-    await click(hcard(), 'Save');
+    // Save is the page's save bar now: it comes up for a change, and sends the form.
+    hcard().querySelector('#hs-prefix').value = 'elasticpro-history-x';
+    ok(await saveViaBar(250), 'history: the save bar did not come up for a changed prefix');
     const setMsg = sent.find((m) => m.type === 'HISTORY_STORE_SET');
     ok(setMsg && setMsg.settings.url === hist.settings.url && !('password' in setMsg.settings),
       `history: Save sent ${JSON.stringify(setMsg)} (an empty password must be left out)`);
@@ -1577,8 +1693,7 @@ await go('settings');
       dest.dispatchEvent(new window.Event('change', { bubbles: true }));
       dcard.querySelector('#sink-enabled').checked = true;
       [...dcard.querySelectorAll('input[id^="sink-pick-"]')].forEach((b, i) => { b.checked = i === 0; });
-      [...dcard.querySelectorAll('button')].find((b) => b.textContent === 'Save').click();
-      await settleFor(250);
+      await saveViaBar(250);
       ok(lastDelaySet && lastDelaySet.destination === 'history',
         `settings: the destination travelled as ${lastDelaySet && lastDelaySet.destination}, expected history`);
       const again = [...doc.querySelectorAll('section.card')]
@@ -3292,13 +3407,14 @@ restoreConsole();
 {
   await go('settings');
   const bus = (await load('core/state.js')).bus;
-  const tab = (label) => [...doc.querySelectorAll('nav.subnav button')].find((b) => b.title === label);
+  const tab = (label) => (CFG_HOME[label] && doc.querySelector(`.cm-nav .cm-item[data-cm-page="${CFG_HOME[label][0]}"]`)
+    ? { click: () => openSettingsTab(label) } : null);
   const countOf = (type) => sent.filter((m) => m.type === type).length;
   const fire = async () => { for (const c of config.clusters) bus.emit('data', c.id); await settleFor(700); };
   const trust = tab('Jump hosts & trust');
   ok(!!trust, 'config: no Jump hosts & trust tab');
   if (trust) {
-    trust.click(); await settleFor(500);
+    await trust.click(); await settleFor(300);
     const tunnels = countOf('TUNNELS'), pins = countOf('PINS');
     ok(tunnels >= 1, 'config: opening Jump hosts & trust should ask the core for TUNNELS once');
     const card = doc.querySelector('#trust-card');
@@ -3309,17 +3425,19 @@ restoreConsole();
   }
   const zbx = tab('Zabbix');
   if (zbx) {
-    zbx.click(); await settleFor(500);
+    await zbx.click(); await settleFor(300);
     const asked = countOf('ZABBIX_CLUSTERS');
     const url = doc.querySelector('#zl-zurl');
+    const was = url ? url.value : '';
     if (url) { url.value = 'https://zabbix.typing.test'; }
     await fire();
     ok(countOf('ZABBIX_CLUSTERS') === asked, 'config: a fleet event re-asked ZABBIX_CLUSTERS');
     if (url) ok(doc.querySelector('#zl-zurl') === url && url.value === 'https://zabbix.typing.test',
       'config: a fleet event wiped the Zabbix form while it was being typed into');
+    if (url) url.value = was;
   }
   // The one thing fleet data does change — a cluster's state pill — still updates in place.
-  tab('Clusters').click(); await settleFor(300);
+  await tab('Clusters').click(); await settleFor(300);
   const shown = (await load('core/state.js')).clusters().length;   // enabled clusters only, like the table
   const pills = doc.querySelectorAll('td[data-cluster-state]');
   ok(pills.length === shown, `config: ${pills.length} state pills for ${shown} clusters`);
@@ -3334,6 +3452,10 @@ restoreConsole();
   await go('settings');
   const realFetch = globalThis.fetch;
   let written = null;
+  // What config.txt manages for the managed case below. Every PING says it (managed.js
+  // setManaged) and the dev bridge manages nothing, so a PING landing mid-case — the app asks
+  // one every 10 s — would undo it; the bridge's answer goes back with the case's own list.
+  let managedNow = null;
   globalThis.fetch = async (input, init) => {
     const body = init && init.body ? JSON.parse(init.body) : {};
     if (body.type === 'CONFIG_WRITE') {
@@ -3343,9 +3465,13 @@ restoreConsole();
     if (body.type === 'CONFIG_READ' && written !== null) {
       return stubReply({ ok: true, text: written, size: written.length, lastModified: Date.now() });
     }
+    if (body.type === 'PING' && managedNow) {
+      const j = await (await realFetch(input, init)).json();
+      return stubReply({ ...j, managedDefaults: { ...managedNow }, managedZabbixOptions: {} });
+    }
     return realFetch(input, init);
   };
-  const stays = (what) => ok((window.location.hash || '') === '#/settings',
+  const stays = (what) => ok((window.location.hash || '').startsWith('#/settings'),
     `config: ${what} left the Config page — now at "${window.location.hash}"`);
   const press = async (root, label) => {
     const b = [...root.querySelectorAll('button')].find((x) => x.textContent.trim() === label);
@@ -3353,39 +3479,70 @@ restoreConsole();
     return !!b;
   };
   try {
-    const tabButton = (label) => [...doc.querySelectorAll('nav.subnav button')].find((b) => b.title === label);
-    // Defaults → Edit defaults… → Save
-    tabButton('Defaults').click(); await settleFor(300);
-    ok(await press(doc.querySelector('#view'), 'Edit defaults…'), 'config: no Edit defaults button');
-    const dialog = doc.querySelector('.modal');
-    ok(!!dialog, 'config: the Defaults dialog did not open');
-    if (dialog) {
-      ok(await press(dialog, 'Save'), 'config: no Save in the Defaults dialog');
-      ok(written !== null, 'config: saving the Defaults dialog never wrote the config');
-      ok(!doc.querySelector('.modal'), `config: the Defaults dialog stayed open after a good save: ${(doc.querySelector('.modal-msg') || {}).textContent}`);
+    const tabButton = (label) => ({ click: () => openSettingsTab(label) });
+    // System › Defaults, edited in place (it was a dialog) → the save bar's Save
+    await openSettingsTab('Defaults');
+    const ri = doc.querySelector('#ce-ri');
+    ok(!!ri && !ri.disabled, 'config: the Defaults are not edited in place');
+    if (ri) {
+      ri.value = String(Number(ri.value || 30) + 1);
+      ok(await saveViaBar(900), 'config: no save bar for a changed default');
+      ok(written !== null, 'config: saving the Defaults never wrote the config');
+      ok(doc.getElementById('cm-savebar').hidden, 'config: the save bar stayed up after a good save');
       stays('saving Defaults');
     }
-    // A default config.txt manages is locked in the dialog with the reason, and a save does
-    // not write it (config.txt would keep overriding a value nobody could see take effect).
+    // A number out of range is refused with the same words the dialog used, and nothing is written.
+    {
+      written = null;
+      const dw = doc.querySelector('#ce-dw');
+      if (dw) {
+        dw.value = '500';
+        await saveViaBar(400);
+        ok(written === null, 'config: an out-of-range default was written');
+        ok(/Check the numeric fields/.test((doc.querySelector('#cm-defaults-msg') || {}).textContent || ''), 'config: an out-of-range default does not say why');
+        const discard = doc.querySelector('#cm-savebar button[data-act="discard"]');
+        if (discard) { discard.click(); await settleFor(200); }
+      }
+    }
+    // A default config.txt manages is locked in place with the reason, and a save does not
+    // write it (config.txt would keep overriding a value nobody could see take effect).
     {
       const managed = await load('core/managed.js');
-      managed.setManaged({ ok: true, managedDefaults: { diskWarnPercent: 71 }, managedZabbixOptions: {} });
+      managedNow = { diskWarnPercent: 71 };
+      managed.setManaged({ ok: true, managedDefaults: { ...managedNow }, managedZabbixOptions: {} });
       written = null;
-      ok(await press(doc.querySelector('#view'), 'Edit defaults…'), 'config: no Edit defaults button (managed)');
-      const dlg = doc.querySelector('.modal');
-      const dw = dlg && dlg.querySelector('#ce-dw');
+      // Through Clusters, not System › Config file: that tab asks the core for PING, whose
+      // answer (the dev bridge manages nothing) would undo the managed list set here.
+      await openCfg('clusters', 'clusters'); await openSettingsTab('Defaults');
+      const dw = doc.querySelector('#ce-dw');
       ok(!!dw && dw.disabled && dw.value === '71', `config: a managed default is not shown locked at its managed value (${dw && dw.disabled}, ${dw && dw.value})`);
       ok(!!dw && dw.closest('label').textContent.includes('managed by config.txt'), 'config: a managed default does not say it is managed by config.txt');
-      ok(!!dlg && !dlg.querySelector('#ce-dc').disabled, 'config: a default config.txt does not manage was locked');
-      if (dlg) {
-        await press(dlg, 'Save');
+      // The dialog (still used where a page wants one) locks it the same way.
+      // Set again: the app's own PING every 10 s says what the dev bridge manages (nothing).
+      managed.setManaged({ ok: true, managedDefaults: { diskWarnPercent: 71 }, managedZabbixOptions: {} });
+      // Off the Defaults tab first: the dialog's fields carry the same ids as the in-place ones.
+      await openCfg('clusters', 'clusters');
+      managed.setManaged({ ok: true, managedDefaults: { ...managedNow }, managedZabbixOptions: {} });
+      const editor = await load('ui/config-editor.js');
+      editor.editDefaults();   // drawn at once; looked at before anything else can run
+      const dlg = [...doc.querySelectorAll('.modal')].at(-1);
+      const ddw = dlg && dlg.querySelector('#ce-dw');
+      ok(!!ddw && ddw.disabled && ddw.value === '71', `config: the Defaults dialog does not lock a managed default (${!!dlg} ${dlg && dlg.querySelector('h2') && dlg.querySelector('h2').textContent} ${ddw && ddw.disabled} ${ddw && ddw.value})`);
+      doc.querySelectorAll('.modal-overlay').forEach((m) => m.remove());
+      await openSettingsTab('Defaults');
+      const dc = doc.querySelector('#ce-dc');
+      ok(!!dc && !dc.disabled, 'config: a default config.txt does not manage was locked');
+      if (dc) {
+        dc.value = String(Number(dc.value || 90) - 1);
+        await saveViaBar(900);
         ok(written !== null && !/"?diskWarnPercent"?\s*[:=]\s*71\b/.test(written), 'config: saving wrote a managed default into the config');
       }
+      managedNow = null;
       managed.setManaged({ ok: true, managedDefaults: {}, managedZabbixOptions: {} });
       doc.querySelectorAll('.modal').forEach((m) => m.remove());
     }
     // Clusters → Edit → Save
-    tabButton('Clusters').click(); await settleFor(300);
+    await tabButton('Clusters').click(); await settleFor(300);
     written = null;
     const edit = [...doc.querySelectorAll('#view button')].find((b) => b.textContent.trim() === 'Edit');
     if (edit) {
@@ -3397,16 +3554,18 @@ restoreConsole();
         stays('saving a cluster');
       }
     }
-    // The Zabbix options save the config and then sync; both ends of that must stay put too.
-    tabButton('Zabbix').click(); await settleFor(600);
-    const box = doc.querySelector('#view input[type="checkbox"]:not([disabled])');
+    // The Zabbix options wait for the save bar, then save the config and sync; both ends of that must stay put too.
+    await tabButton('Zabbix').click(); await settleFor(600);
+    const box = doc.querySelector('#zo-useElasticProCredentials:not([disabled])');
     if (box) {
       written = null;
-      box.checked = !box.checked; box.dispatchEvent(new window.Event('change', { bubbles: true })); await settleFor(1200);
-      stays('toggling a Zabbix option');
-      const again = doc.querySelector('#view input[type="checkbox"]:not([disabled])');
-      if (again) { again.checked = !again.checked; again.dispatchEvent(new window.Event('change', { bubbles: true })); await settleFor(1200); }
-      stays('toggling a Zabbix option back');
+      box.checked = !box.checked; box.dispatchEvent(new window.Event('change', { bubbles: true })); await settleFor(200);
+      ok(written === null, 'config: a Zabbix option saved before Save');
+      await saveViaBar(1200);
+      stays('saving a Zabbix option');
+      const again = doc.querySelector('#zo-useElasticProCredentials:not([disabled])');
+      if (again) { again.checked = !again.checked; await saveViaBar(1200); }
+      stays('saving a Zabbix option back');
     }
   } finally {
     globalThis.fetch = realFetch;
@@ -3588,7 +3747,9 @@ restoreConsole();
     return realFetch(input, init);
   };
   let managedNow = null;
+  // Save is the page's save bar now (Config-Management): "Save" presses it.
   const press = async (label, root = doc.querySelector('#view')) => {
+    if (label === 'Save') return saveViaBar(700);
     const b = [...root.querySelectorAll('button')].find((x) => x.textContent.trim() === label);
     if (b) { b.click(); await settleFor(700); }
     return !!b;
@@ -3637,7 +3798,7 @@ restoreConsole();
     ok(!!file && Array.isArray(file.defaults.volume && file.defaults.volume.tag) && file.defaults.volume.tag.join() === 'tag1,my.tag',
       `volume fields: Save did not write defaults.volume.tag (${written && JSON.stringify(file.defaults)})`);
     ok(!!file && file.defaults.volumeFields === undefined, 'volume fields: the legacy volumeFields was kept');
-    ok((doc.location.hash || '') === '#/settings', 'volume fields: saving left the Config page');
+    ok((doc.location.hash || '').startsWith('#/settings'), 'volume fields: saving left the Config page');
 
     // A bad value is refused before anything is written.
     await openSettingsTab('Reports');
@@ -3670,6 +3831,8 @@ restoreConsole();
     ok(!!top && top.disabled && top.value === '40', `volume fields: a managed value is not shown locked (${top && top.disabled}, ${top && top.value})`);
     ok(doc.querySelector('#view').textContent.includes('managed by config.txt'), 'volume fields: a locked row does not say it is managed by config.txt');
     written = null;
+    // The save bar comes up for a change: make one elsewhere, so Save has something to send.
+    await type('vf-tag', 'tag1, managed.case1');
     await press('Save');
     await written_();
     ok(written !== null, 'volume fields: Save with a managed value wrote nothing');
@@ -3682,6 +3845,7 @@ restoreConsole();
     const stillLocked = doc.getElementById('vf-top');
     ok(!!stillLocked && stillLocked.disabled, 'volume fields: the locked field was redrawn before Save (the case needs it drawn locked)');
     written = null;
+    await type('vf-tag', 'tag1, managed.case2');
     await press('Save');
     await written_();
     ok(written === null || !/"topValues"\s*:\s*40/.test(written),
@@ -3735,18 +3899,24 @@ restoreConsole();
   const last = (type) => sent.filter((m) => m.type === type).at(-1);
   try {
     await go('settings');
-    ok(await openSettingsTab('Reports'), 'mail: no Volume fields tab');
+    ok(await openSettingsTab('Reports'), 'mail: no Reports page');
+    await settleFor(300);
+    // The config.txt keys (mail ones too) are on Indices & volume fields; the forms on Mail delivery.
+    const keysText = (panel('Hosted: config.txt keys') || {}).textContent || '';
+    ok(await openSettingsTab('Mail delivery'), 'mail: no Mail delivery tab');
     await waitFor(() => byId('ms-host'), 'mail: the Mail server (SMTP) form did not load');
-    ok(!!panel('Volume report by mail') && !!panel('Mail server (SMTP)'), 'mail: the two panels are not both on Volume fields');
+    ok(!!panel('Volume report by mail') && !!panel('Mail server (SMTP)'), 'mail: the two panels are not both on Mail delivery');
+    ok(!!doc.querySelector('.cm-strip') && /Mail server/.test(doc.querySelector('.cm-strip').textContent), 'mail: no status line over the forms');
+    ok(!!doc.querySelector('.cm-actions #rm-send-now') && !!doc.querySelector('.cm-actions #rm-download'), 'mail: Send report now and Download .xlsx are not in the page header');
     ok(byId('ms-host').value === 'smtp.example.com' && byId('ms-port').value === '587', 'mail: the mail server form does not show what the core holds');
     ok(byId('ms-password').value === '' && byId('ms-password').placeholder === '' && byId('ms-password').type === 'password',
       'mail: the password box is not empty, or says stored for a password typed for another server');
     // A managed field: locked, says why, and left out of Save.
     ok(byId('ms-from').disabled && panel('Mail server (SMTP)').textContent.includes('managed by config.txt'), 'mail: a managed From is not locked with the reason');
     ok(byId('rm-at').disabled && panel('Volume report by mail').textContent.includes('managed by config.txt'), 'mail: a managed At is not locked with the reason');
-    ok(/last sent .+ to 1 address/.test(panel('Volume report by mail').textContent) && /next send/.test(panel('Volume report by mail').textContent),
+    ok(/last sent .+ to 1 address/.test(doc.querySelector('.cm-strip').textContent) && /next send/.test(doc.querySelector('.cm-strip').textContent),
       'mail: the report status does not say when it was last sent and when it goes next');
-    ok(panel('Hosted: config.txt keys').textContent.includes('UI_SMTP_HOST=smtp.example.com') && panel('Hosted: config.txt keys').textContent.includes('UI_REPORT_SCHEDULE='),
+    ok(keysText.includes('UI_SMTP_HOST=smtp.example.com') && keysText.includes('UI_REPORT_SCHEDULE='),
       'mail: the config.txt card has no UI_SMTP_* / UI_REPORT_* lines');
 
     ok(byId('ms-pw-stale') && !byId('ms-pw-stale').hidden && byId('ms-pw-stale').textContent === 'The mail server changed: type the password again.',
@@ -3754,15 +3924,14 @@ restoreConsole();
 
     // Save, password untouched: no password in what goes.
     setVal('ms-host', 'relay.example.com');
-    byId('ms-save').click();
-    await settleFor(300);
+    ok(await saveViaBar(300), 'mail: no save bar for a changed mail server');
     const m1 = last('MAIL_SETTINGS_SET');
     ok(!!m1 && m1.host === 'relay.example.com' && !('password' in m1) && !('from' in m1),
       `mail: Save with the password untouched sent ${JSON.stringify(m1)}`);
     // Typed: it goes.
     setVal('ms-password', 's3cret');
-    byId('ms-save').click();
-    await settleFor(300);
+    ok(!doc.getElementById('cm-savebar').textContent.includes('s3cret'), 'mail: the save bar shows a typed password');
+    await saveViaBar(300);
     ok(last('MAIL_SETTINGS_SET') && last('MAIL_SETTINGS_SET').password === 's3cret', 'mail: a typed password was not sent');
     ok(byId('ms-pw-stale').hidden, 'mail: the stale-password note stayed after the password was typed and saved');
     ok(byId('ms-password').value === '', 'mail: the typed password stayed in the box after saving');
@@ -3771,8 +3940,7 @@ restoreConsole();
     await settleFor(20);
     ok(byId('ms-auth').value === 'none' && byId('ms-auth').disabled && byId('ms-user').disabled && byId('ms-port').value === '25',
       'mail: Security "None" did not force No sign-in (and port 25)');
-    byId('ms-save').click();
-    await settleFor(300);
+    await saveViaBar(300);
     ok(last('MAIL_SETTINGS_SET').security === 'none' && last('MAIL_SETTINGS_SET').auth === 'none', `mail: "None" saved ${JSON.stringify(last('MAIL_SETTINGS_SET'))}`);
 
     // Send test mail: every step, the failed one with its reason.
@@ -3789,8 +3957,7 @@ restoreConsole();
     setVal('rm-to', 'ops@example.com, lead@example.com');
     setVal('rm-cc', 'boss@example.com');
     byId('rm-sheet-breakdown').checked = false;
-    byId('rm-save').click();
-    await settleFor(300);
+    await saveViaBar(300);
     const s1 = last('REPORT_SCHEDULE_SET');
     ok(!!s1 && JSON.stringify(s1.to) === '["ops@example.com","lead@example.com"]' && JSON.stringify(s1.cc) === '["boss@example.com"]'
       && JSON.stringify(s1.sheets) === '["daily","monthly"]' && !('at' in s1) && s1.clusters === 'all',
@@ -3806,21 +3973,21 @@ restoreConsole();
     `mail: Download .xlsx sent ${JSON.stringify(run)}`);
     // An older core says no period: the button is off, with a title saying why.
     noNext = true;
-    byId('rm-save').click();
-    await settleFor(300);
+    setVal('rm-cc', 'boss2@example.com');
+    await saveViaBar(300);
     ok(byId('rm-download').disabled && /does not say/.test(byId('rm-download').title), 'mail: Download .xlsx is on without a nextPeriod');
     noNext = false;
     byId('rm-send-now').click();
     await settleFor(300);
     ok(!!last('REPORT_SEND_NOW'), 'mail: Send report now sent nothing');
 
-    // Anybody else: a note, no form, nothing asked.
+    // Anybody else: an operator's Config-Management has no Reports page, and nothing is asked.
     st.caller = { name: 'reader', role: 'operator' };
     sent.length = 0;
-    await openSettingsTab('Defaults'); await openSettingsTab('Reports');
+    await go('overview'); await go('settings');
     await settleFor(300);
-    ok(!byId('ms-host') && /Only an ElasticPro admin sets up the mail server/.test(panel('Mail server (SMTP)').textContent),
-      'mail: a non-admin sees the mail server form');
+    ok(!byId('ms-host') && !doc.querySelector('.cm-nav .cm-item[data-cm-page="reports"]'),
+      'mail: an operator reaches the mail server form');
     ok(!sent.some((m) => m.type === 'MAIL_SETTINGS_GET' || m.type === 'REPORT_SCHEDULE_GET'), 'mail: a non-admin page asked for the admin settings');
   } finally {
     st.caller = null;
@@ -3875,11 +4042,11 @@ restoreConsole();
   const button = (label, scope = doc) => [...scope.querySelectorAll('button')].find((b) => b.textContent.trim() === label);
 
   await go('settings');
-  const tab = [...doc.querySelectorAll('nav.subnav button')].find((b) => b.title === 'Requests');
-  ok(!!tab, 'policy: no Requests tab on the Config page');
+  const tab = doc.querySelector('.cm-nav .cm-item[data-cm-page="requests"]') ? { click: () => openSettingsTab('Requests') } : null;
+  ok(!!tab, 'policy: no Requests page in Config-Management');
   if (tab) {
     const gets = countOf('POLICY_GET');
-    tab.click(); await settleFor(500);
+    await tab.click(); await settleFor(300);
     ok(countOf('POLICY_GET') === gets + 1, `policy: opening Requests sent ${countOf('POLICY_GET') - gets} POLICY_GET, expected exactly 1`);
     const asked = countOf('POLICY_GET');
     await fire(); await fire();
@@ -3894,8 +4061,11 @@ restoreConsole();
       ok(per && Number(per.max) === Math.min(8, gate.perCluster), `policy: per-cluster input allows up to ${per && per.max}, the gate ${gate.perCluster}`);
       ok(per && per.closest('label').textContent.includes(`request gate: ${gate.perCluster}`), 'policy: the per-cluster input does not show the gate\'s cap');
       if (per) {
+        const perWas = per.value;
         per.value = '8'; per.dispatchEvent(new window.Event('change', { bubbles: true }));
         ok(per.value === String(Math.min(8, gate.perCluster)), `policy: typing 8 per cluster left ${per.value} under a gate of ${gate.perCluster}`);
+        // Put back: an unsaved change would be asked about when the case leaves the tab.
+        per.value = perWas; per.dispatchEvent(new window.Event('change', { bubbles: true }));
       }
       const all = doc.getElementById('pol-global');
       ok(all && Number(all.max) === Math.min(256, gate.global), `policy: overall input allows up to ${all && all.max}, the gate ${gate.global}`);
@@ -3937,8 +4107,7 @@ restoreConsole();
       // Opened, it stays open after the page is drawn again, and is put back as it was.
       fine.open = !wasOpen; fine.dispatchEvent(new window.Event('toggle'));
       ok((window.localStorage.getItem(key) === '1') === !wasOpen, 'fine-tune: the fold\'s state is not remembered');
-      const other = [...doc.querySelectorAll('nav.subnav button')].find((b) => b.title === 'Defaults');
-      if (other) { other.click(); await settleFor(200); tab.click(); await settleFor(500); }
+      await openSettingsTab('Defaults'); await tab.click(); await settleFor(300);
       const again = doc.getElementById('pol-fine');
       ok(again && again.open === !wasOpen, `fine-tune: after a redraw the fold is ${again && again.open ? 'open' : 'folded'}, expected ${!wasOpen ? 'open' : 'folded'}`);
       if (again) { again.open = wasOpen; again.dispatchEvent(new window.Event('toggle')); }
@@ -3959,12 +4128,21 @@ restoreConsole();
       ok(/shipped policy is running/.test(doc.body.textContent), 'policy: the page does not say that nothing is saved');
     }
     if (client) {
-      client.click(); await settleFor(200);
+      if (client.getAttribute('aria-pressed') === 'true') {
+        const cur = await es.policyGet();
+        await es.policySet({ ...cur.policy, mode: 'background' });
+        // A fresh visit reads the policy again; press only once it shows what was saved.
+        await go('overview'); await go('settings'); await openSettingsTab('Requests');
+        await waitFor(() => ((doc.getElementById('pol-mode') || {}).value === 'background' ? doc.body : null), 'policy: the saved Background policy did not show');
+        await settleFor(200);
+      }
+      const client2 = [...doc.querySelectorAll('button')].find((b) => b.textContent.startsWith('Client basis'));
+      if (client2) client2.click();
+      await settleFor(200);
       const pressed = [...doc.querySelectorAll('button')].find((b) => b.textContent.startsWith('Client basis'));
       ok(pressed && pressed.getAttribute('aria-pressed') === 'true', 'policy: the chosen preset is not marked aria-pressed');
       const sets = countOf('POLICY_SET');
-      const save = button('Save'); ok(!!save, 'policy: no Save button');
-      if (save) { save.click(); await settleFor(500); }
+      ok(await saveViaBar(500), 'policy: no save bar after choosing a preset');
       const m = lastOf('POLICY_SET');
       ok(countOf('POLICY_SET') === sets + 1 && m && m.policy.mode === 'on-demand' && m.policy.concurrency.perCluster === 1,
         `policy: Save after "Client basis" sent ${JSON.stringify(m && m.policy)}`);
@@ -3996,15 +4174,14 @@ restoreConsole();
     if (gapIn && input('healthSec') && !gapIn.disabled) {
       const was = { gap: gapIn.value, health: input('healthSec').value };
       gapIn.value = '90'; input('healthSec').value = '600';
-      const save = button('Save');
-      if (save) { save.click(); await settleFor(500); }
+      await saveViaBar(500);
       const m = lastOf('POLICY_SET');
       ok(m && m.policy.minGapSec === 90 && m.policy.play && m.policy.play.healthSec === 600 && m.policy.play.delayLateSec === now.policy.play.delayLateSec,
         `gap: Save sent ${JSON.stringify(m && { minGapSec: m.policy.minGapSec, play: m.policy.play })}`);
       const back = await es.policyGet();
       ok(back.policy.minGapSec === 90 && back.policy.play.healthSec === 600, `gap: the core kept ${JSON.stringify({ g: back.policy.minGapSec, h: back.policy.play.healthSec })}`);
       const g2 = doc.getElementById('pol-gap'); const h2 = doc.getElementById('pol-play-healthSec');
-      if (g2 && h2) { g2.value = was.gap; h2.value = was.health; const s2 = button('Save'); if (s2) { s2.click(); await settleFor(500); } }
+      if (g2 && h2) { g2.value = was.gap; h2.value = was.health; await saveViaBar(500); }
     }
     // config.txt locks the gap and Play's health interval: both drawn locked, saying so; the rest stay editable.
     const realFetch = globalThis.fetch;
@@ -4019,8 +4196,7 @@ restoreConsole();
     // A fresh visit to Config › Requests: the policy is read once per visit.
     const revisit = async () => {
       await go('overview'); await go('settings');
-      const t = [...doc.querySelectorAll('nav.subnav button')].find((b) => b.title === 'Requests');
-      if (t) { t.click(); await settleFor(700); }
+      await openSettingsTab('Requests'); await settleFor(400);
     };
     try {
       await revisit();
@@ -4160,8 +4336,7 @@ restoreConsole();
 
   // Config → Requests no longer pauses anything; it says what happens on its own instead.
   await go('settings');
-  const reqTab = [...doc.querySelectorAll('nav.subnav button')].find((b) => b.title === 'Requests');
-  if (reqTab) { reqTab.click(); await settleFor(500); }
+  await openSettingsTab('Requests'); await settleFor(300);
   ok(!doc.getElementById('pol-all') && !doc.querySelector('input[data-pol-cluster]'), 'automation: Config → Requests still has pause boxes');
   ok(/handled on their own/.test((doc.getElementById('pol-auto') || {}).textContent || ''), 'automation: Config → Requests does not say slow and busy clusters are handled on their own');
   await go('requests'); await settleFor(300);
@@ -4201,8 +4376,8 @@ restoreConsole();
   ok(!!modeLink, 'status: the mode is not a link');
   if (modeLink) {
     modeLink.dispatchEvent(new window.MouseEvent('click', { bubbles: true, cancelable: true })); await settleFor(900);
-    const cur = doc.querySelector('nav.subnav button[aria-current="page"]');
-    ok(cur && cur.title === 'Requests', `status: the mode link did not open Config > Requests (open tab: ${cur && cur.title})`);
+    const cur = cfgOpen();
+    ok(cur.page === 'requests' && cur.tab === 'policy', `status: the mode link did not open Config-Management › Requests › Policy (open: ${JSON.stringify(cur)})`);
     await go('requests'); await settleFor(300);
   }
   await go('overview');
@@ -4950,6 +5125,9 @@ if (viaFleet) {
   await applyConfig({ load, configPath, raw: fleet24 });
   const all = st.clusters();
   ok(all.length === 24, `evidence: expected 24 clusters in the fixture, saw ${all.length}`);
+  // The four on port 9 are found unreachable when the core's first answer for them lands, which
+  // on a busy machine can be after applyConfig returns: wait for it (at most 10 s) before counting.
+  for (let i = 0; i < 40 && !all.some((c) => st.healthState(st.state.data.get(c.id)) === 'unreachable'); i++) await settleFor(250);
   const down = all.filter((c) => st.healthState(st.state.data.get(c.id)) === 'unreachable');
   ok(down.length >= 1, `evidence: the fixture has no unreachable cluster (${down.length}) - it would prove nothing about them`);
   const byName = (n) => all.find((c) => c.name.startsWith(n));
@@ -5009,7 +5187,7 @@ if (viaFleet) {
     if (pick) { pick.value = main.id; pick.dispatchEvent(new window.Event('change', { bubbles: true })); await settleFor(500); }
   }
 
-  for (const [id, label] of [['snapshots', 'Snapshots'], ['console', 'REST console'], ['indices', 'Indices']]) {
+  for (const [id, label] of [['snapshots', 'Snapshots'], ['console', 'REST'], ['indices', 'Indices']]) {
     if (id === 'console') {
       // The harness's in-memory IndexedDB never completes a transaction, so the history is handed
       // to the page the way the real store would. A request recorded against another cluster
@@ -5219,9 +5397,8 @@ if (viaFleet) {
     server.promotable = [{ id: 'Local-ES-Cluster', cluster: 'Local-ES-Cluster', source: 'zabbix', user: 'zabbix', kind: 'basic', setBy: 'zabbix-admin', setAt: 1793000000 }];
     credSent.length = 0;
     await go('settings');
-    const tab = [...doc.querySelectorAll('nav.subnav button')].find((b) => b.title === 'Credentials');
-    ok(!!tab, 'promote: no Credentials tab on the Config page');
-    if (tab) { tab.click(); await settleFor(400); }
+    ok(await openSettingsTab('Credentials'), 'promote: no Credentials tab in Config-Management');
+    await settleFor(200);
     const promote = doc.getElementById('kc-promote');
     ok(promote && /Use Local-ES-Cluster’s credential \(user zabbix\) as the default for every cluster without its own/.test(promote.textContent),
       `promote: the Credentials card does not offer the kept credential as the default (${promote ? promote.textContent : 'no button'})`);
@@ -5577,7 +5754,8 @@ if (viaFleet) {
     type('pl-yellow', '20');
     doc.getElementById('pl-when-yellow').checked = true;
     sent.length = 0;
-    await pressIn(view(), /^Save$/);
+    ok(!doc.getElementById('pl-watch-save'), 'play: the watch rules have a Save of their own beside the save bar');
+    await saveViaBar(500);
     const ws0 = sent.find((m) => m.type === 'PLAY_CONFIG_SET');
     const ws = ws0 && ws0.settings;
     ok(!!ws && ws.watch && ws.watch.delayYellowFromMin === 20 && !('delayRedAboveMin' in ws.watch), `play: watch save sent ${JSON.stringify(ws0)}`);
@@ -5889,11 +6067,14 @@ if (viaFleet) {
     // ---- Config > Reports: Which indices count, Plan templates ----
     sentP.length = 0;
     await go('settings');
-    ok(await openSettingsTab('Reports'), 'reports config: no Reports tab');
+    ok(await openSettingsTab('Plan templates'), 'reports config: no Reports › Plan templates tab');
     await waitFor(() => doc.getElementById('pt-list') && doc.getElementById('pt-list').children.length >= 2, 'plan templates: the template list did not load');
     const names = [...doc.querySelectorAll('#pt-list .pt-item b')].map((b) => b.textContent);
     ok(names[0] === 'Standard' && names.includes('Small / lab'), `plan templates: the list reads ${names.join(' | ')}`);
     ok(doc.querySelectorAll('.pt-table input.unset').length > 10, 'plan templates: values not set yet are not amber');
+    ok(!doc.getElementById('pt-save'), 'plan templates: a Save of its own is back beside the save bar');
+    ok(await openSettingsTab('Reports'), 'reports config: no Reports › Indices & volume fields tab');
+    await settleFor(200);
     ok(!!doc.getElementById('vf-pattern') && doc.getElementById('vf-pattern').disabled, 'which indices: UI_VOLUME_INDEX_PATTERN is managed but its input is not locked');
     ok(/config\.txt: UI_VOLUME_INDEX_PATTERN/.test(doc.querySelector('#view').textContent), 'which indices: no "config.txt: UI_VOLUME_INDEX_PATTERN" pill');
     await waitFor(() => (/In force: the index pattern/.test(txt('vf-source')) ? doc.body : null), 'which indices: the card does not say which source is in force (patternSource)');
@@ -5902,14 +6083,17 @@ if (viaFleet) {
     const pcheck = sentP.find((m) => m.type === 'VOLUME_PATTERN_CHECK');
     ok(pcheck && pcheck.indexPattern === 'logstash-*' && pcheck.dayFrom === 'name', `which indices: the preview sent ${JSON.stringify(pcheck)}`);
 
-    // New, rename, backups to S3, Save template: the whole list is sent.
+    // New, rename, backups to S3, Save (the save bar): the whole list is sent.
+    ok(await openSettingsTab('Plan templates'), 'plan templates: the tab did not open again');
+    await settleFor(200);
     doc.getElementById('pt-new').click();
     await settleFor(100);
     const nm = doc.getElementById('pt-name');
     nm.value = 'Edge site'; fire(nm);
     const s3 = doc.querySelector('input[name="pt-bt"][value="s3"]');
     s3.checked = true; fire(s3, 'change');
-    doc.getElementById('pt-save').click();
+    ok(/Plan template "Edge site" added/.test((doc.getElementById('cm-savebar') || {}).textContent || ''), `plan templates: the save bar does not name the new template: ${(doc.getElementById('cm-savebar') || {}).textContent}`);
+    await saveViaBar(300);
     await waitFor(() => sentP.find((m) => m.type === 'PLAN_TEMPLATES_SET'), 'plan templates: Save template did not send PLAN_TEMPLATES_SET');
     const set = sentP.find((m) => m.type === 'PLAN_TEMPLATES_SET');
     ok(set && set.templates.length === 3 && set.templates[2].name === 'Edge site' && set.templates[2].backup === 's3',

@@ -128,7 +128,7 @@ export function planningSection(ctx = {}) {
           h('div.num', h('select#pn-t', { onchange: (e) => { st.templateName = e.target.value; drawResults(); } },
             ...names.map((n) => h('option', { value: n, selected: n === (template() || {}).name }, n)))),
           h('span.hint', 'Roles, sizing rules and server specs. ',
-            h('button.pn-link', { type: 'button', onclick: () => navigateTo('settings', { section: 'volume' }) }, 'Edit templates'))),
+            h('button.pn-link', { type: 'button', onclick: () => navigateTo('settings', { page: 'reports', tab: 'templates' }) }, 'Edit templates'))),
         h('div.fld', h('label', { for: 'pn-cl' }, 'Based on'),
           h('div.num', h('select#pn-cl', { onchange: (e) => pickCluster(e.target.value) },
             h('option', { value: '', selected: !st.basedOn }, 'A new cluster'),

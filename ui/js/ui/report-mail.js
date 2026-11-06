@@ -1,5 +1,5 @@
 /**
- * Config › Reports › "Volume report by mail" and "Mail server (SMTP)" (0.3.45).
+ * Config-Management › Reports › Mail delivery: "Volume report by mail" and "Mail server (SMTP)" (0.3.45).
  *
  * Both are the server's settings, not the clusters file's: the mailed report lives in
  * `<data>/report-schedule.json` and the mail server in `<data>/mail.json`, and only an
@@ -87,6 +87,53 @@ export function reportMailPanels() {
   return h('div.rm-panels', scheduleCard(), hostsConfigCard(), mailCard());
 }
 
+/**
+ * Config-Management › Reports › Mail delivery: the status line, then the mailed report and the
+ * mail server, each a form the page's save bar saves (saveReportSchedule / saveMailServer).
+ */
+export function mailDeliveryPanels() {
+  const sched = scheduleCard();
+  const mail = mailCard();
+  if (isAdmin() && rm.state === 'ok') {
+    sched.dataset.track = 'report-mail'; sched.dataset.trackLabel = 'Volume report by mail';
+    mail.dataset.track = 'smtp'; mail.dataset.trackLabel = 'Mail server';
+  }
+  return h('div.rm-panels', reportMailStrip(), sched, mail);
+}
+
+/** "Volume by host and Indices report": the config.txt-only keys (Reports › Indices & volume fields). */
+export function reportHostsPanel() { return hostsConfigCard(); }
+
+/** The Mail delivery header's buttons: the .xlsx for the next period, and Send report now. */
+export function reportMailHeaderActions() {
+  if (!isAdmin() || rm.state !== 'ok') return [];
+  return [downloadButton(),
+    h('button#rm-send-now.btn.primary', { type: 'button', title: 'Mail the report now with the saved settings, as a background job', onclick: sendNow }, 'Send report now')];
+}
+
+/** The line over the forms: on or off, last and next send, whether the mail server is set up. */
+export function reportMailStrip() {
+  if (!isAdmin() || rm.state !== 'ok') return null;
+  const s = rm.sched || {};
+  const m = rm.mail || {};
+  return h('div.cm-strip', { role: 'status' },
+    s.enabled ? h('span.pill.green', 'on') : h('span.pill.grey', 'off'),
+    scheduleStatus(s),
+    h('span', 'Mail server ', m.configured ? h('span.pill.green', 'configured') : m.problem ? h('span.pill.red', 'problem') : h('span.pill.grey', 'not set up')),
+    h('button.btn.sm.ghost', { type: 'button', style: { marginLeft: 'auto' }, onclick: () => openReportJobs() }, 'Open report jobs \u203a'));
+}
+
+/** The menu's word for Reports: when the volume report is mailed, or '' before it is known. */
+export function reportMailState() {
+  if (rm.state !== 'ok' || !rm.sched) return '';
+  if (!rm.sched.enabled) return 'mail off';
+  return { monthly: 'monthly', weekly: 'weekly', daily: 'daily', manual: 'by hand' }[rm.sched.schedule] || '';
+}
+
+/** Config-Management's save bar runs these (they were the cards' Save buttons). True when saved. */
+export const saveReportSchedule = () => saveSchedule();
+export const saveMailServer = () => saveMail();
+
 /* ------------------------------- shared pieces ------------------------------- */
 
 const val = (id) => { const el = $(`#${id}`); return el ? el.value.trim() : ''; };
@@ -128,8 +175,7 @@ function setNote(id, n) {
 /* --------------------------- Volume report by mail --------------------------- */
 
 function scheduleCard() {
-  return gate('Volume report by mail', 'sends an .xlsx attachment', 'sets up mailed reports', scheduleBody,
-    [h('button#rm-save.btn.sm.primary', { type: 'button', onclick: saveSchedule }, 'Save')]);
+  return gate('Volume report by mail', 'sends an .xlsx attachment', 'sets up mailed reports', scheduleBody);
 }
 
 function scheduleBody() {
@@ -159,10 +205,6 @@ function scheduleBody() {
       ...SHEETS.map(([k, label]) => lockIf(M, 'sheets', checkbox(`rm-sheet-${k}`, label, sheets.has(k)))),
       lockNote(M, 'sheets')),
     h('div.muted.rm-note', 'Each sheet uses the columns, names and order set on Reports › Daily & monthly. The mail body holds the key figures: yesterday, average per day, month so far.'),
-    h('div.rm-acts',
-      h('button#rm-send-now.btn.sm', { type: 'button', title: 'Mail the report now with the saved settings, as a background job', onclick: sendNow }, 'Send report now'),
-      downloadButton(),
-      scheduleStatus(s)),
     h('div#rm-note'));
 }
 
@@ -171,7 +213,7 @@ const DOWNLOAD_TITLE = 'Make an .xlsx for the period the next scheduled mail cov
 /** "Download .xlsx": only with the period the core names; an older core does not. */
 function downloadButton() {
   const p = nextPeriodOf(rm.sched);
-  return h('button#rm-download.btn.sm', {
+  return h('button#rm-download.btn', {
     type: 'button', disabled: !p, onclick: downloadXlsx,
     title: p ? `${DOWNLOAD_TITLE} (${periodLabel(p)})` : 'This server does not say which period the next mail covers (needs a newer ElasticPro core)',
   }, p ? `Download .xlsx · ${periodLabel(p)}` : 'Download .xlsx');
@@ -213,9 +255,9 @@ function scheduleProblems(v) {
 async function saveSchedule() {
   const v = readSchedule();
   const problems = scheduleProblems(v);
-  if (problems.length) { setNote('rm-note', { text: problems.join(' '), cls: 'banner err' }); return; }
+  if (problems.length) { setNote('rm-note', { text: problems.join(' '), cls: 'banner err' }); return false; }
   const res = await reportScheduleSet(v);
-  if (!res.ok) { setNote('rm-note', { text: `Not saved: ${res.message || res.kind || 'refused'}`, cls: 'banner err' }); return; }
+  if (!res.ok) { setNote('rm-note', { text: `Not saved: ${res.message || res.kind || 'refused'}`, cls: 'banner err' }); return false; }
   // What is in force now (next send, managed values) is the core's to say: read it back
   // into the model and change only the status line.
   const back = await reportScheduleGet();
@@ -228,6 +270,7 @@ async function saveSchedule() {
   setNote('rm-note', { text: 'Saved.', cls: 'banner' });
   toast('Volume report by mail saved', 'ok', 4000);
   forgetMailInfo();
+  return true;
 }
 
 async function sendNow() {
@@ -279,8 +322,7 @@ function hostsConfigCard() {
 /* ------------------------------ Mail server (SMTP) ------------------------------ */
 
 function mailCard() {
-  return gate('Mail server (SMTP)', 'used by volume reports', 'sets up the mail server', mailBody,
-    [h('button#ms-save.btn.sm.primary', { type: 'button', onclick: saveMail }, 'Save')]);
+  return gate('Mail server (SMTP)', 'used by every mailed report', 'sets up the mail server', mailBody);
 }
 
 const pwPlaceholder = (m) => (m.passwordFrom === 'config.txt' ? 'from config.txt' : m.passwordSet ? 'stored' : '');
@@ -314,7 +356,7 @@ function mailBody() {
     h('div.rm-acts',
       h('button#ms-test.btn.sm', { type: 'button', 'aria-expanded': 'false', onclick: toggleTest }, 'Send test mail'),
       h('span#ms-test-row.rm-test', { hidden: true },
-        text('ms-test-to', '', { type: 'email', placeholder: 'to@example.com' }),
+        (() => { const i = text('ms-test-to', '', { type: 'email', placeholder: 'to@example.com' }); i.dataset.untracked = ''; i.setAttribute('aria-label', 'Test mail recipient'); return i; })(),
         h('button#ms-test-send.btn.sm.primary', { type: 'button', onclick: sendTest }, 'Send')),
       mailStatus(m)),
     h('div#ms-steps.rm-steps', { hidden: true }),
@@ -377,12 +419,12 @@ function readMail() {
 
 async function saveMail() {
   const v = readMail();
-  if (v.port !== undefined && !(v.port >= 1 && v.port <= 65535)) { setNote('ms-note', { text: 'Port must be 1 to 65535.', cls: 'banner err' }); return; }
+  if (v.port !== undefined && !(v.port >= 1 && v.port <= 65535)) { setNote('ms-note', { text: 'Port must be 1 to 65535.', cls: 'banner err' }); return false; }
   const res = await mailSettingsSet(v);
   if (!res.ok) {
     const why = res.kind === 'cannot_store_password' ? ((rm.mail && rm.mail.passwordStoreProblem) || res.message) : res.message;
     setNote('ms-note', { text: `Not saved: ${why || res.kind || 'refused'}`, cls: 'banner err' });
-    return;
+    return false;
   }
   toast('Mail server saved', 'ok', 4000);
   forgetMailInfo();
@@ -397,6 +439,7 @@ async function saveMail() {
   const stale = $('#ms-pw-stale');
   if (stale) stale.replaceWith(staleNote(rm.mail || {}));
   setNote('ms-note', { text: 'Saved.', cls: 'banner' });
+  return true;
 }
 
 function toggleTest() {

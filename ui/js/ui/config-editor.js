@@ -574,7 +574,7 @@ export async function editCluster(existing = null) {
             if (kindErr) return ctx.msg(kindErr);
             // Saved, but nothing to sign in with: say who sets it, rather than leave a cluster
             // that silently fails. Nobody below admin is offered a form for it.
-            if (how === 'none') toast('No default credential is set; an admin sets it in Config → Credentials.', 'warn', 9000, { key: 'no-default-credential' });
+            if (how === 'none') toast('No default credential is set; an admin sets it in Config-Management › Clusters › Credentials.', 'warn', 9000, { key: 'no-default-credential' });
             ctx.done(true);
             return;
           }
@@ -832,56 +832,80 @@ async function editDefaultCredential(r) {
   return !!saved;
 }
 
-export async function editDefaults() {
-  const r = raw();
-  if (!r) return false;
-  // What config.txt manages shows as what it is — the value in force, locked, with the
-  // reason — and is never written: the file would keep a value nobody can see take effect.
+/**
+ * The Defaults fields: four rows of three, the ids the save below reads. A default config.txt
+ * manages shows as what it is — the value in force, locked, with the reason — and is never
+ * written: the file would keep a value nobody can see take effect. Drawn in place on
+ * Config-Management › System › Defaults, and in the Defaults dialog (editDefaults).
+ */
+export function defaultsFields() {
+  const r = raw() || {};
   const managed = managedDefaults();
   const d = { ...cfg.DEFAULTS, ...r.defaults, ...managed };
   const f = (label, key, input, hint) => {
     if (!(key in managed)) return field(label, input, hint);
     input.disabled = true;
-    return field(label, input, MANAGED_NOTE);
+    input.title = MANAGED_NOTE;
+    return h('div.cm-locked', field(label, input, MANAGED_NOTE));
   };
-  const body = [
-    h('div', { style: { display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1fr)', gap: '10px' } },
+  const grid = (...cells) => h('div', { style: { display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1fr)', gap: '10px' } }, ...cells);
+  return [
+    grid(
       f('Read-only', 'readOnly', select('ce-ro', d.readOnly === false ? 'no' : 'yes', [['yes', 'yes — GET/HEAD + search POSTs only'], ['no', 'no — writes allowed']])),
       f('Auto-refresh', 'autoRefresh', select('ce-ar', d.autoRefresh ? 'yes' : 'no', [['no', 'off'], ['yes', 'on']])),
       f('Refresh every (s)', 'refreshIntervalSec', text('ce-ri', d.refreshIntervalSec, { mono: true }))),
-    h('div', { style: { display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1fr)', gap: '10px' } },
+    grid(
       f('Disk warn %', 'diskWarnPercent', text('ce-dw', d.diskWarnPercent, { mono: true })),
       f('Disk critical %', 'diskCritPercent', text('ce-dc', d.diskCritPercent, { mono: true })),
       f('Snapshot stale (h)', 'snapshotStaleHours', text('ce-ss', d.snapshotStaleHours, { mono: true }))),
-    h('div', { style: { display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1fr)', gap: '10px' } },
+    grid(
       f('Log index pattern', 'logIndexPattern', text('ce-lp', d.logIndexPattern, { mono: true })),
       f('Time field', 'timeField', text('ce-tf', d.timeField, { mono: true })),
       f('Certificates', 'tls', select('ce-dtls', d.tls || 'auto', [['auto', 'auto — OS store, else ask & pin'], ['system', 'system — OS store only'], ['insecure', 'insecure — accept any, on every cluster']]),
         'insecure applies to all at once: every cluster whatever its own setting, every jump-host SSH key and the Zabbix API. What it lets through is listed in one notification.')),
-    h('div', { style: { display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1fr)', gap: '10px' } },
+    grid(
       f('Live redraw', 'liveRedraw', select('ce-lr', d.liveRedraw || 'pending', [
         ['pending', 'pending — draw new data when you pause'],
         ['live', 'live — repaint as data lands'],
         ['manual', 'manual — only Refresh or a new page redraws']])),
       f('Opens on', 'defaultScope', select('ce-ds', d.defaultScope || 'last-selected', [
         ['last-selected', 'the cluster last chosen in this browser'],
-        ['all', 'All clusters']])),
+        ['all', 'All clusters']]), 'Everyone’s default. Each person can choose their own under Your settings.'),
       f('Request timeout (ms)', 'requestTimeoutMs', text('ce-to', d.requestTimeoutMs, { mono: true }))),
   ];
-  const saved = await modal('Defaults', 'Apply to every cluster unless a cluster overrides them.', body,
+}
+
+/**
+ * Read the Defaults fields and write them: `{ok: true}`, or `{ok: false, message}` with nothing
+ * written ("Check the numeric fields." for a number out of range). Managed keys are left out.
+ */
+export async function saveDefaultsForm() {
+  const r = raw();
+  if (!r) return { ok: false, message: 'No config loaded' };
+  const managed = managedDefaults();
+  const n = (id, min, max) => { const v = Number(val(id)); return Number.isFinite(v) && v >= min && v <= max ? v : null; };
+  const ri = n('ce-ri', 5, 3600), dw = n('ce-dw', 1, 100), dc = n('ce-dc', 1, 100), ss = n('ce-ss', 1, 24 * 90), to = n('ce-to', 1000, 600000);
+  const needed = { refreshIntervalSec: ri, diskWarnPercent: dw, diskCritPercent: dc, snapshotStaleHours: ss, requestTimeoutMs: to };
+  if (Object.entries(needed).some(([k, v]) => v == null && !(k in managed))) return { ok: false, message: 'Check the numeric fields.' };
+  const next = { readOnly: val('ce-ro') === 'yes', autoRefresh: val('ce-ar') === 'yes', refreshIntervalSec: ri,
+    diskWarnPercent: dw, diskCritPercent: dc, snapshotStaleHours: ss, requestTimeoutMs: to,
+    logIndexPattern: val('ce-lp').trim() || 'logstash-*', timeField: val('ce-tf').trim() || '@timestamp', tls: val('ce-dtls'),
+    liveRedraw: val('ce-lr'), defaultScope: val('ce-ds') };
+  for (const k of Object.keys(managed)) delete next[k];
+  const before = r.defaults;
+  r.defaults = { ...r.defaults, ...next };
+  try { await saveRaw(); } catch (e) { r.defaults = before; return { ok: false, message: `Save failed: ${e.message}` }; }
+  return { ok: true };
+}
+
+export async function editDefaults() {
+  if (!raw()) return false;
+  const saved = await modal('Defaults', 'Apply to every cluster unless a cluster overrides them.', defaultsFields(),
     (ctx) => [h('div', { style: { marginLeft: 'auto', display: 'flex', gap: '8px' } },
       h('button.btn', { onclick: () => ctx.done(null) }, 'Cancel'),
       h('button.btn.primary', { onclick: async () => {
-        const n = (id, min, max) => { const v = Number(val(id)); return Number.isFinite(v) && v >= min && v <= max ? v : null; };
-        const ri = n('ce-ri', 5, 3600), dw = n('ce-dw', 1, 100), dc = n('ce-dc', 1, 100), ss = n('ce-ss', 1, 24 * 90), to = n('ce-to', 1000, 600000);
-        if ([ri, dw, dc, ss, to].some((v) => v == null)) return ctx.msg('Check the numeric fields.');
-        const next = { readOnly: val('ce-ro') === 'yes', autoRefresh: val('ce-ar') === 'yes', refreshIntervalSec: ri,
-          diskWarnPercent: dw, diskCritPercent: dc, snapshotStaleHours: ss, requestTimeoutMs: to,
-          logIndexPattern: val('ce-lp').trim() || 'logstash-*', timeField: val('ce-tf').trim() || '@timestamp', tls: val('ce-dtls'),
-          liveRedraw: val('ce-lr'), defaultScope: val('ce-ds') };
-        for (const k of Object.keys(managed)) delete next[k];
-        r.defaults = { ...r.defaults, ...next };
-        try { await saveRaw(); ctx.done(true); } catch (e) { ctx.msg(`Save failed: ${e.message}`); }
+        const res = await saveDefaultsForm();
+        if (res.ok) ctx.done(true); else ctx.msg(res.message);
       } }, 'Save'))],
     // Wide enough that the choices read in full; the
     // grid's minmax(0, 1fr) columns still shrink on a narrow window instead of scrolling.

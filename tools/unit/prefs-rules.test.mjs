@@ -47,6 +47,10 @@ test('the migration carries the browser\'s choice to an account that has none, a
   assert.equal(R.migrationPatch(null, null), null);
   assert.equal(R.migrationPatch(null, { theme: undefined }), null);
   assert.equal(R.migrationPatch(null, { theme: 'neon' }), null, 'a value the core refuses is not sent');
+  // Once per browser: a second person on a shared browser does not get the first one's choices.
+  assert.equal(R.migrationPatch({ menu: null, theme: null, opensOn: null }, { theme: 'dark-blue', menu: 'left' }, { migrated: true }), null,
+    'the browser copy went to an account after it had already been handed over once');
+  assert.deepEqual(R.migrationPatch(null, { menu: 'left' }, { migrated: false }), { menu: 'left' });
 });
 
 test('a change is checked before it is sent', () => {

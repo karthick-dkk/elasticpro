@@ -87,6 +87,17 @@ export async function configHistory() {
   return (res && res.ok && res.versions) || [];
 }
 
+/**
+ * The same, with `current` (docs/HANDBOOK.md "Config versions"): `{versions, current}`, where
+ * `current` is `{saved_at, saved_by, summary, source}` for the file on disk now, or null when it
+ * was last written by hand or by an older core.
+ */
+export async function configHistoryWithCurrent() {
+  const res = await bridge({ type: 'CONFIG_HISTORY' });
+  const ok = !!(res && res.ok);
+  return { versions: (ok && res.versions) || [], current: (ok && res.current && typeof res.current === 'object') ? res.current : null };
+}
+
 /** The stored text of one version. The caller loads it the same way it loads any config. */
 export async function readVersion(id) {
   const res = await bridge({ type: 'CONFIG_RESTORE', id });

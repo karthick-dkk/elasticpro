@@ -399,7 +399,7 @@ async function copyText(text) {
 function statusCard(st) {
   const mode = policy && !policy.error ? modeText(policy.mode) : { label: null, because: 'the core did not say which mode it runs' };
   const link = h('a', {
-    href: '#/settings', title: 'Open Config › Requests',
+    href: '#/settings/requests/policy', title: 'Open Config-Management › Requests › Policy',
     onclick: (e) => { e.preventDefault(); navigateTo('settings', { section: 'requests' }); },
   }, mode.label || 'not known');
   return h('section.rq-status', { role: 'status' },

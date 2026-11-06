@@ -29,6 +29,11 @@ import { EVIDENCE_PAGES, evidenceLayout, evidenceSelection, createHeldNotices } 
 import { setHostedEdition } from './core/server-credentials.js';
 import { pausedPill, pausedKey } from './ui/paused-pill.js';
 import { reportsPill } from './ui/reports-pill.js';
+import { confirmDialog } from './ui/modal.js';
+import { reports as reportJobs, onReports, jobCounts, pillText as reportJobsText } from './core/reports.js';
+import { openYourSettings, closeYourSettings, normaliseMenuPosition } from './ui/your-settings.js';
+import { loadPrefs, savePref } from './core/prefs.js';
+import { snapshotDot, snapshotNote } from './core/snapshot-running.js';
 import { pauseFor, pausedLine, mayStop, stopRefusal } from './core/policy.js';
 
 let coreInfo = { version: '?' };
@@ -87,6 +92,8 @@ import { refreshAge } from './core/cluster-detail.js';
 const PAGES = [
   // Order is the order of a shift: what is wrong, then what it is wrong on, then the
   // things you reach for to fix it, then the things you only change deliberately.
+  // The page menu (board of 2026-11-05): Alerts · Clusters · Indices · Nodes & shards · Logs &
+  // Delay · REST · Snapshots · Reports · Config-Management.
   { id: 'alerts',    label: 'Alerts',         icon: '⚠', mod: pAlerts,    multi: true,  minRole: 'user' },
   { id: 'overview',  label: 'Clusters',       icon: '▦', mod: pOverview,  multi: true,  minRole: 'guest' },
   { id: 'indices',   label: 'Indices',        icon: '≡', mod: pIndices,   multi: false, minRole: 'user' },
@@ -96,17 +103,22 @@ const PAGES = [
   // collapsing the fleet selection on the way in.
   // live: the page is the stream — a tail, a console, the request log. Data events reach
   // it whatever the redraw policy says; the pending gate is for pages people read.
-  { id: 'logs',      label: 'Live logs & Log delay', icon: '▶', mod: pLogs, multi: true,  minRole: 'user', live: true },
-  { id: 'console',   label: 'REST console',   icon: '⌫', mod: pConsole,   multi: false, minRole: 'user', live: true },
+  { id: 'logs',      label: 'Logs & Delay',   icon: '▶', mod: pLogs,      multi: true,  minRole: 'user', live: true },
+  { id: 'console',   label: 'REST',           icon: '⌫', mod: pConsole,   multi: false, minRole: 'user', live: true },
   { id: 'snapshots', label: 'Snapshots',      icon: '↻', mod: pSnapshots, multi: true,  minRole: 'user' },
   // Was 'volume' / Volume report until 0.3.53; #/volume still opens it (reports/route.js PAGE_ALIAS).
   { id: 'reports',   label: 'Reports',        icon: '▤', mod: pReports,   multi: true,  minRole: 'user' },
+  // Config-Management: an admin's, and an operator's for Clusters, Alerts › Automation and
+  // Requests › Request Centre only (core/config-nav.js decides which tabs inside).
+  { id: 'settings',  label: 'Config-Management', icon: '⚙', mod: pSettings, multi: true, minRole: 'operator' },
+  // Three pages that left the page menu and live in Config-Management as tabs (`home`). Each
+  // keeps its id, so #/automation, #/requests, #/accounts, an alert's "go to" and every
+  // navigateTo() still land on it — drawn inside Config-Management (pages/settings.js hostedPage).
   // Not for read-only users: automation is run by operators and admins.
-  { id: 'automation', label: 'Automation',    icon: '⟳', mod: pAutomation, multi: true, minRole: 'operator' },
+  { id: 'automation', label: 'Automation',    icon: '⟳', mod: pSettings.hostedPage('automation', pAutomation), multi: true, minRole: 'operator', noTab: true, home: 'settings' },
   // An operator gets the emergency stop here; the request log itself stays an admin's.
-  { id: 'requests',  label: 'Requests',       icon: '⚡', mod: pRequests,  multi: true,  minRole: 'operator', live: true },
-  { id: 'accounts',  label: 'Accounts',       icon: '☺', mod: pAccounts,  multi: true,  minRole: 'admin', accountsOnly: true },
-  { id: 'settings',  label: 'Config',         icon: '⚙', mod: pSettings,  multi: true,  minRole: 'admin' },
+  { id: 'requests',  label: 'Requests',       icon: '⚡', mod: pSettings.hostedPage('requests', pRequests), multi: true, minRole: 'operator', live: true, noTab: true, home: 'settings' },
+  { id: 'accounts',  label: 'Accounts',       icon: '☺', mod: pSettings.hostedPage('accounts', pAccounts), multi: true, minRole: 'admin', accountsOnly: true, noTab: true, home: 'settings' },
   // The NOC wall display (docs/PLAY.md): full screen, no tab — the "▶ Play" button in the top
   // bar opens it, and a display link opens nothing else.
   { id: 'play',      label: 'Play',           icon: '▶', mod: pPlay,      multi: true,  minRole: 'user', live: true, noTab: true },
@@ -114,8 +126,29 @@ const PAGES = [
 
 // The one place a page is named; the pages that link to another read its name from here.
 registerPages(PAGES);
-/** The tabs that fold behind the ☰ at the end of the row. */
-const NAV_MORE = new Set(['automation', 'requests', 'accounts', 'settings']);
+
+/** The tab a page is shown under: its own, or Config-Management's for the pages that live there. */
+const tabOf = (id) => { const p = PAGES.find((x) => x.id === id); return p && p.home ? p.home : id; };
+
+/**
+ * Your settings — the page menu's position, the theme and what the app opens on — kept with
+ * the account (core/prefs.js, docs/HANDBOOK.md "Your settings"): the account's choice, else
+ * this browser's copy, else the shipped default. `source` says which, per setting.
+ */
+let prefs = { menu: 'top', theme: 'system', opensOn: 'last', source: {}, supported: false };
+let menuPosition = 'top';
+function applyMenuPosition(v) {
+  menuPosition = normaliseMenuPosition(v);
+  document.documentElement.dataset.menu = menuPosition;
+}
+/**
+ * The scope the app opens on: this person's own choice when they made one, else the config's
+ * default for everyone (System › Defaults › Opens on).
+ */
+function openingScope() {
+  if (prefs.source && prefs.source.opensOn && prefs.source.opensOn !== 'default') return prefs.opensOn === 'all' ? 'all' : 'last-selected';
+  return normaliseScope(state.defaults.defaultScope);
+}
 
 /**
  * A session made from a display link (PLAY_EXCHANGE): caller `display:<name>`, scope
@@ -157,17 +190,24 @@ function layout() {
 const STRIP_HIDDEN = new Set(['overview', 'indices', 'console', 'logs', 'snapshots', 'shards', 'reports']);
 
 /* --------------------------------- theming ---------------------------------- */
+/**
+ * Before sign-in only this browser's copy can be read, so the first paint uses it; the
+ * account's choice replaces it once loadPrefs() has answered (boot, after the gate).
+ */
 async function initTheme() {
-  const t = (await idb.getKV('theme')) || 'system';
-  applyTheme(t);
+  let t = null;
+  let m = null;
+  try { t = await idb.getKV('theme'); m = await idb.getKV('menu'); } catch (_) { /* no store: defaults */ }
+  applyTheme(t || 'system');
+  applyMenuPosition(m);
 }
-function applyTheme(t, { persist = true } = {}) {
-  if (t === 'system') document.documentElement.removeAttribute('data-theme');
+/** Paint a theme. Saving it is savePref's (the account and this browser's copy). */
+function applyTheme(t) {
+  if (!t || t === 'system') document.documentElement.removeAttribute('data-theme');
   else document.documentElement.setAttribute('data-theme', t);
-  if (persist) idb.setKV('theme', t);
 }
 /**
- * The themes, in the order the button walks through them.
+ * The themes, in the order Your settings lists them.
  *
  * One list, so the button's label, its cycle and the stylesheet cannot disagree about
  * what exists — adding a fourth theme used to mean editing three places and finding the
@@ -181,15 +221,43 @@ const THEMES = [
   { id: 'warm',      label: '\u25D0 Warm' },
 ];
 
-function themeLabel(id) {
-  return (THEMES.find((t) => t.id === id) || THEMES[0]).label;
+
+/**
+ * "Your settings" (ui/your-settings.js), opened from the person's name: the page menu Top or
+ * Left, the theme, and which cluster the app opens on. Applied at once.
+ */
+function yourSettings(anchor) {
+  const theme = document.documentElement.getAttribute('data-theme') || 'system';
+  openYourSettings(anchor, {
+    prefs: { menu: menuPosition, theme, opensOn: prefs.source && prefs.source.opensOn !== 'default' ? prefs.opensOn : '' },
+    supported: prefs.supported,
+    // Inside Zabbix the theme follows the Zabbix user's; a choice here would be one that the
+    // next page load undoes.
+    themes: embedded ? null : THEMES,
+    who: me ? { name: me.name, role: me.role } : null,
+    onChange: (key, value) => {
+      if (key === 'theme') { applyTheme(value); topbarKey = ''; renderTopbar(); }
+      if (key === 'menu') { applyMenuPosition(value); navBuiltFor = ''; topbarKey = ''; closeYourSettings(); renderNav(); renderTopbar(); }
+      // Applied at once; kept with the account when the core keeps them, and in this browser always.
+      savePref(key, value || null).then((p) => { prefs = p; }).catch((e) => toast(`Not kept: ${e.message}`, 'warn', 5000));
+    },
+    // Only where accounts exist. The portable build has nobody to sign out, and inside
+    // Zabbix it is Zabbix you sign out of — a frame signing itself out would leave a
+    // login screen asking for a password a Zabbix account does not have.
+    onSignOut: me && !embedded ? async () => { await signOut(); me = null; location.reload(); } : null,
+  });
 }
 
-function cycleTheme() {
-  const cur = document.documentElement.getAttribute('data-theme') || 'system';
-  const i = THEMES.findIndex((t) => t.id === cur);
-  applyTheme(THEMES[(i + 1) % THEMES.length].id);
-  renderTopbar();
+/** The person's name (or "Your settings" where there are no accounts): opens Your settings. */
+function meButton() {
+  const label = me ? me.name : 'Your settings';
+  const initials = me ? String(me.name).replace(/@.*/, '').split(/[\s._-]+/).filter(Boolean).slice(0, 2).map((x) => x[0].toUpperCase()).join('') || '?' : '\u2699';
+  const b = h('button.btn.sm.ghost.me-btn', {
+    type: 'button', 'aria-haspopup': 'dialog',
+    title: me ? `Signed in as ${me.name} (${me.role}) \u2014 your settings${embedded ? '' : ' and sign out'}` : 'Your settings: page menu, theme, opens on',
+    onclick: (e) => yourSettings(e.currentTarget),
+  }, h('span.me-av', { 'aria-hidden': 'true' }, initials), h('span.me-name', label));
+  return b;
 }
 
 /* -------------------------------- setup view -------------------------------- */
@@ -224,7 +292,7 @@ function renderSetup(res) {
 
     h('div.card', h('div.body',
       h('ol.steps',
-        h('li', h('div', h('b', 'Create the config in the app'), h('div.sec', 'Add clusters, jump hosts and the shared credential from the Config page. Saved as ',
+        h('li', h('div', h('b', 'Create the config in the app'), h('div.sec', 'Add clusters, jump hosts and the shared credential from Config-Management. Saved as ',
           h('code.inline', 'config_cluster.json'), '; passwords are encrypted with a master password you choose.'))),
         h('li', h('div', h('b', '…or open a file you already have'), h('div.sec', 'JSON or YAML (the extension\u2019s clusters.yaml works unchanged). ',
           h('button.btn.sm', { style: { marginLeft: '4px' }, onclick: saveExample }, 'Save YAML example…')))),
@@ -265,11 +333,11 @@ function renderSetup(res) {
 function renderNoClusters(res) {
   const scoped = me && me.scoped;
   const why = res.status === 'no_file'
-    ? withCode('No clusters are configured on this server yet. An ElasticPro administrator adds them on the Config page.', UI_CODES.no_clusters)
+    ? withCode('No clusters are configured on this server yet. An ElasticPro administrator adds them in Config-Management.', UI_CODES.no_clusters)
     : scoped && res.empty
       ? withCode('Your account can see only the clusters mapped to your Zabbix user groups, and none of your groups is mapped to a cluster. Ask a Zabbix administrator to add you to the right user group, or an ElasticPro administrator to add your group to a cluster’s zabbixGroups (or turn off zabbix.scopeUsersByGroup).', UI_CODES.no_clusters)
       : res.empty
-        ? withCode(`No cluster is visible to ${me ? me.name : 'this account'} yet. The server's cluster list is empty for this account and Zabbix gave none. An ElasticPro administrator adds clusters on the Config page, or links Zabbix there.`, UI_CODES.no_clusters)
+        ? withCode(`No cluster is visible to ${me ? me.name : 'this account'} yet. The server's cluster list is empty for this account and Zabbix gave none. An ElasticPro administrator adds clusters in Config-Management, or links Zabbix there.`, UI_CODES.no_clusters)
         : `The cluster list could not be loaded: ${errorText(res.error ? { message: res.error, errorCode: res.errorCode } : null, 'no answer from the server')}`;
   mount(root, h('div.setup',
     h('div', { style: { display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '14px' } },
@@ -374,6 +442,40 @@ function renderShell() {
  * count change.
  */
 let navBuiltFor = '';
+
+/**
+ * The green dot on Snapshots while a snapshot runs on the chosen cluster (or any, under "All"):
+ * the core's SNAPSHOT_RUNNING answer, asked on the PING cadence when PING says
+ * `snapshotRunning` (docs/HANDBOOK.md "Snapshot running"). A cluster whose state is not known
+ * draws nothing — never "none"; the reason is the tab's tooltip (snapshotNote).
+ */
+let snapshotReply = null;
+async function readSnapshotRunning() {
+  if (!coreInfo || coreInfo.snapshotRunning !== true || isSnapshotMode() || isDisplay()) { snapshotReply = null; return; }
+  try { snapshotReply = await bridge({ type: 'SNAPSHOT_RUNNING' }); } catch (_) { snapshotReply = null; }
+}
+function snapshotRunningTitle() {
+  if (!snapshotReply) return null;
+  const names = Object.fromEntries(clusters().map((c) => [c.id, c.name]));
+  const dot = snapshotDot(snapshotReply, state.selected, { names });
+  return dot ? dot.title : null;
+}
+
+/** The green dot on Reports while a report job runs or waits (core/reports.js, the one poller). */
+function reportRunningTitle() {
+  const c = jobCounts(reportJobs);
+  return reportJobs.supported === true && c.running + c.queued > 0 ? `A report is running: ${reportJobsText(reportJobs)}` : null;
+}
+
+/** A tab's running dot, in place: shown with `title`, gone without. */
+function runningDot(btn, title) {
+  if (!btn) return;
+  let dot = btn.querySelector('.nav-run-dot');
+  if (!title) { if (dot) dot.remove(); return; }
+  if (!dot) { dot = h('i.nav-run-dot', { role: 'img' }); btn.append(dot); }
+  if (dot.title !== title) { dot.title = title; dot.setAttribute('aria-label', title); }
+}
+
 function renderNav() {
   const nav = $('#nav');
   if (!nav) return;
@@ -385,45 +487,25 @@ function renderNav() {
   // The tab's colour is the worst open level: red, orange for High, else yellow.
   const tone = crit ? 'red' : counts && counts.high ? 'high' : 'yellow';
   const shown = visiblePages().filter((p) => !p.noTab);
-  const key = shown.map((p) => p.id).join(',');
+  const key = [menuPosition, me && me.name, ...shown.map((p) => p.id)].join(',');
   if (navBuiltFor !== key || !nav.firstChild) {
     clear(nav);
     navBuiltFor = key;
-    // The pages of a shift are tabs; the ones only changed deliberately — Automation,
-    // Requests, Accounts, Config — sit behind one ☰, so the row is one line at any width.
-    const more = shown.filter((p) => NAV_MORE.has(p.id));
-    shown.filter((p) => !NAV_MORE.has(p.id)).forEach((p) => {
+    // One row of the pages of a shift, Config-Management last (the ☰ that held Automation,
+    // Requests, Accounts and Config is gone: those live in Config-Management now). With the
+    // menu on the left the brand heads it and the person's name sits at its foot.
+    if (menuPosition === 'left') nav.append(h('div.nav-brand', h('img', { src: 'icons/icon48.png', alt: '' }), h('b', 'ElasticPro')));
+    shown.forEach((p) => {
       nav.append(h('button', { dataset: { page: p.id }, onclick: () => go(p.id) },
         h('span.ico', p.icon), h('span', p.label)));
     });
-    if (more.length) {
-      nav.append(h('div.nav-sep'));
-      nav.append(rowMenu(() => more.map((p) => {
-        // ElasticPro's own health, amber or red (PING `health`, docs/HEALTH.md): said on the entry too.
-        const dot = p.id === 'requests' ? navDot(coreInfo) : null;
-        return { label: p.label, icon: p.icon, onClick: () => go(p.id), note: dot ? (dot.tone === 'red' ? 'health: red' : 'health: amber') : null,
-          title: dot ? dot.title : currentPage === p.id ? `${p.label} — this page` : `Open ${p.label}` };
-      }), {
-        trigger: 'button.nav-more', label: [h('span.ico', { 'aria-hidden': 'true' }, '☰'), h('span.nav-more-t', '')],
-        title: more.map((p) => p.label).join(' · '),
-        menuLabel: `More: ${more.map((p) => p.label).join(', ')}`,
-      }));
-      nav.lastChild.setAttribute('aria-label', `More: ${more.map((p) => p.label).join(', ')}`);
-    }
+    if (menuPosition === 'left' && !(me && layout().evidence)) nav.append(h('div.nav-me', meButton()));
   }
-  // Where you are, when it is one of the pages behind the ☰: the ☰ says so, with the name.
-  const moreBtn = nav.querySelector('button.nav-more');
-  if (moreBtn) {
-    const here = NAV_MORE.has(currentPage) ? PAGES.find((p) => p.id === currentPage) : null;
-    if (here) moreBtn.setAttribute('aria-current', 'page'); else moreBtn.removeAttribute('aria-current');
-    const t = moreBtn.querySelector('.nav-more-t');
-    if (t && t.textContent !== (here ? here.label : '')) t.textContent = here ? here.label : '';
-  }
-  // The dot on the Request Centre's entry — behind the ☰, so on the ☰ — when ElasticPro's own
-  // health is amber or red. From PING, so it moves every ten seconds without a page of its own.
+  // ElasticPro's own health, amber or red (PING `health`, docs/HEALTH.md), on the tab of the
+  // Request Centre's page — Config-Management. From PING, so it moves every ten seconds.
   {
     const dot = navDot(coreInfo);
-    const host = nav.querySelector('button[data-page="requests"]') || moreBtn;
+    const host = nav.querySelector('button[data-page="settings"]');
     const had = nav.querySelector('.nav-health-dot');
     const want = dot ? dot.tone : '';
     if (had && (had.dataset.tone !== want || had.parentNode !== host)) had.remove();
@@ -433,9 +515,18 @@ function renderNav() {
       host.append(el);
     }
   }
+  runningDot(nav.querySelector('button[data-page="reports"]'), ev ? null : reportRunningTitle());
+  {
+    const snapBtn = nav.querySelector('button[data-page="snapshots"]');
+    runningDot(snapBtn, ev ? null : snapshotRunningTitle());
+    // No dot: what is known and what is not, on hover (an older core says nothing).
+    const note = !ev && snapshotReply && !snapshotRunningTitle() ? snapshotNote(snapshotReply, state.selected) : null;
+    if (snapBtn && (snapBtn.title || '') !== (note || '')) { if (note) snapBtn.title = note; else snapBtn.removeAttribute('title'); }
+  }
+  const here = tabOf(currentPage);
   for (const b of nav.querySelectorAll('button[data-page]')) {
     const id = b.dataset.page;
-    if (currentPage === id) { if (b.getAttribute('aria-current') !== 'page') b.setAttribute('aria-current', 'page'); }
+    if (here === id) { if (b.getAttribute('aria-current') !== 'page') b.setAttribute('aria-current', 'page'); }
     else if (b.hasAttribute('aria-current')) b.removeAttribute('aria-current');
     // The alert count belongs on the tab: it is the reason to go there. Nothing else
     // gets a badge — the tabs used to show a shortcut number that no longer exists.
@@ -453,6 +544,8 @@ function renderNav() {
     }
   }
 }
+// A report job starting or ending moves the dot on Reports without waiting for a refresh.
+onReports(() => renderNav());
 
 /**
  * What the topbar shows, as one string: when it has not changed, neither has the bar.
@@ -554,7 +647,7 @@ function markUnreachable(sel) {
 /** Who goes to the clusters, as the top bar's live/quiet pill says it. */
 function serverLead() {
   return fetchesOnlyOnAsk()
-    ? 'The server goes to a cluster only when a page asks for it (Config → Requests, Client basis) and pushes what arrives here'
+    ? 'The server goes to a cluster only when a page asks for it (Config-Management › Requests, Client basis) and pushes what arrives here'
     : 'The server polls every cluster itself and pushes what changes here';
 }
 
@@ -579,7 +672,7 @@ function renderTopbar() {
   const key = JSON.stringify([page.id, page.multi, state.selected, healthSig, clusters().map((c) => `${c.id}\u0001${c.name}`),
     a.length, crit, needCreds.length, badCreds.length, serverHoldsCredentials(),
     theme, isSnapshotMode(), fleetMode(), state.autoRefresh, state.defaults.refreshIntervalSec, redrawPolicy(),
-    me && me.name, embedded, state.snapshot && state.snapshot.host, ev, L.needsCluster, pausedKey(state.selected)]);
+    me && me.name, embedded, state.snapshot && state.snapshot.host, ev, L.needsCluster, pausedKey(state.selected), menuPosition]);
   if (key === topbarKey && bar.firstChild) { tickStatus(); markUnreachable($('#cluster-select')); return; }
   topbarKey = key;
 
@@ -620,7 +713,7 @@ function renderTopbar() {
     // already on the status strip, where ambient state belongs.
     h('div.brand', h('img', { src: 'icons/icon48.png', alt: '' }),
       h('div', h('b', 'ElasticPro'))),
-    h('h1', page.label),
+    h('h1', page.home ? (PAGES.find((p) => p.id === page.home) || page).label : page.label),
     // Evidence: the same chooser, one cluster at a time — no "All clusters", no finder (its
     // placeholder counts the fleet) and the dot is that cluster's, not the fleet's.
     ev && !evCluster ? null
@@ -670,12 +763,12 @@ function renderTopbar() {
       ? (redrawPolicy() === 'live'
         ? h('span.pill.green', { title: `${serverLead()}; `
             + 'the page repaints as it lands. Refresh asks it to fetch the clusters on screen now. '
-            + 'Config → Defaults → Live redraw changes this.' }, h('i.dot'), 'live')
+            + 'Config-Management › System › Defaults › Live redraw changes this.' }, h('i.dot'), 'live')
         : h('span.pill.grey', { title: `${serverLead()}. `
             + (redrawPolicy() === 'pending'
               ? 'The page does not move while you are using it; what has landed is drawn a few seconds after you pause'
               : 'The page keeps what it shows until you press Refresh or open another page')
-            + '. Refresh asks it to fetch the clusters on screen now. Config → Defaults → Live redraw changes this.' },
+            + '. Refresh asks it to fetch the clusters on screen now. Config-Management › System › Defaults › Live redraw changes this.' },
           h('i.dot'), redrawPolicy() === 'pending' ? 'quiet' : 'manual'))
       : null,
     h('button.btn.sm', {
@@ -727,19 +820,10 @@ function renderTopbar() {
       : h('button.btn.sm#play-btn', { type: 'button', onclick: () => { try { fullscreen().request().catch(() => {}); } catch (_) { /* no API: Play opens in the window */ } go('play'); },
           title: 'Play: the fleet as a wall display, full screen, slide after slide (Esc leaves)' }, '\u25B6 Play'),
     ev ? null : notificationBell(),
-    embedded ? null : h('button.btn.sm.ghost', { onclick: cycleTheme, title: `Theme: ${theme} \u2014 click for the next one${theme === 'warm' ? ' (warm emits the least blue light)' : ''}` },
-      themeLabel(theme)),
-    // Only where accounts exist. The portable build has nobody to sign out, and inside
-    // Zabbix it is Zabbix you sign out of — a frame signing itself out would leave a
-    // login screen asking for a password a Zabbix account does not have.
-    me && (embedded || ev)
-      ? null
-      : me
-      ? h('button.btn.sm.ghost', {
-          title: `Signed in as ${me.name} (${me.role}) \u2014 sign out`,
-          onclick: async () => { await signOut(); me = null; location.reload(); },
-        }, `\u23FB ${me.name}`)
-      : null);
+    // Your settings (page menu, theme, opens on, sign out), from the person's name. With the
+    // menu on the left the name sits at the foot of the menu instead. Not on an evidence page
+    // where accounts exist: the name is not part of a client's screenshot.
+    (me && ev) || menuPosition === 'left' ? null : meButton());
   tickStatus();
 }
 
@@ -790,7 +874,7 @@ function renderSideFoot() {
       { title: meta ? (meta.path || meta.name) : '' }),
     row('Clusters', String(clusters().length)),
     row('Health', worstHealth()),
-    // No version here: it is shown in one place only, Config → Diagnostics (App version).
+    // No version here: it is in Config-Management (the About card, and System › Config file).
     // Our own load on the fleet, so "are we stressing Elasticsearch" has a number.
     (() => {
       return row('Requests', h('a', { href: '#/requests', title: 'Requests this app sent to every cluster in the last 5 minutes — open the Request Centre' },
@@ -806,8 +890,8 @@ function renderSideFoot() {
     pol && ((pol.resolvedMode || pol.mode) === 'hybrid' || (pol.resolvedMode || pol.mode) === 'on-demand')
       ? h('span.row.muted', {
           title: (pol.resolvedMode || pol.mode) === 'hybrid'
-            ? `Only health is fetched in the background; the rest is fetched while a page shows it${pol.mode === 'auto' ? ' — automatic, because the fleet is larger than 25 clusters' : ''} (Config → Requests)`
-            : 'Nothing is fetched in the background; each page asks for what it shows when it opens (Config → Requests)',
+            ? `Only health is fetched in the background; the rest is fetched while a page shows it${pol.mode === 'auto' ? ' — automatic, because the fleet is larger than 25 clusters' : ''} (Config-Management › Requests)`
+            : 'Nothing is fetched in the background; each page asks for what it shows when it opens (Config-Management › Requests)',
         }, `mode: ${pol.mode === 'auto' ? `auto → ${pol.resolvedMode}` : pol.mode}`)
       : null,
     // one per jump host: "jumpwin ● up"
@@ -948,6 +1032,9 @@ function scrollPageTop() {
 /** The page Play was opened from, for its Exit. */
 let playReturn = '';
 
+/** Set while go() runs after the person said yes to leaving with unsaved changes. */
+let leavingConfirmed = false;
+
 export function go(id) {
   id = pageAlias(id);
   // A hash typed by hand, or one left in the address bar by a previous session under a
@@ -955,6 +1042,22 @@ export function go(id) {
   const allowed = visiblePages();
   const page = allowed.find((p) => p.id === id) || allowed[0] || PAGES[0];
   const changed = currentPage !== page.id;
+  // Config-Management's save bar holds changes nobody saved: asked first, as its own tabs ask.
+  // No: back where it was, address included.
+  if (changed && currentPage && !leavingConfirmed) {
+    const prev = PAGES.find((p) => p.id === currentPage);
+    const n = prev && prev.mod.unsavedChanges ? prev.mod.unsavedChanges() : 0;
+    if (n) {
+      confirmDialog('Leave without saving?',
+        `${n === 1 ? 'One change is' : `${n} changes are`} not saved yet. Leaving this page discards ${n === 1 ? 'it' : 'them'}.`,
+        { yes: 'discard and leave', danger: true }).then((yes) => {
+        if (yes) { leavingConfirmed = true; try { go(page.id); } finally { leavingConfirmed = false; } return; }
+        const back = prev.mod.hashNow ? prev.mod.hashNow() : `#/${currentPage}`;
+        if (location.hash !== back) { try { window.history.replaceState(null, '', back); } catch (_) { /* sandboxed frame */ } }
+      });
+      return;
+    }
+  }
   // The page being left is told so, before anything of the next one is drawn: a live tail
   // or a timer belongs to the page that started it. (Live logs exported onLeave() for this
   // and nothing called it — the tail ran on under whatever page came next.)
@@ -1022,7 +1125,8 @@ async function start(config, handle) {
   if (!isSnapshotMode()) {
     const last = await idb.getKV('lastCluster');
     if (typeof last === 'string') lastCluster = last;
-    const open = openingSelection({ scope: normaliseScope(state.defaults.defaultScope), last, clusters: clusters() });
+    // This person's own choice (Your settings) first, then the config's default for everyone.
+    const open = openingSelection({ scope: openingScope(), last, clusters: clusters() });
     if (open !== 'all') { state.selected = open; fleetView = false; }
   }
   renderShell();
@@ -1141,7 +1245,7 @@ async function arriveFromDisplayLink() {
     }
     const why = res && res.unsupported ? 'this ElasticPro server does not have display links (needs 0.3.47)'
       : errorText(res, 'no answer from the server');
-    displayRefused(why, 'Trying again every minute. An ElasticPro administrator manages display links in Config \u203A Play.');
+    displayRefused(why, 'Trying again every minute. An ElasticPro administrator manages display links in Config-Management \u203A Play.');
     await new Promise((r) => setTimeout(r, 60000));
   }
 }
@@ -1176,19 +1280,29 @@ function takeFrameShape() {
   document.documentElement.classList.add('embedded');
   const t = themeFor(launch.zabbixTheme);
   rememberEmbedTheme(t);
-  if (t) applyTheme(t, { persist: false });
+  if (t) applyTheme(t);
   return !!t;
 }
 
 async function boot() {
-  if (!takeFrameShape()) await initTheme();
+  // True when Zabbix handed over its theme: that one wins over anything kept here.
+  const framed = takeFrameShape();
+  if (!framed) await initTheme();
   if (await arriveFromDisplayLink()) return;
   await arriveFromZabbix();
   await gateOnAuth();
+  // Your settings, now that the core knows who this is: the account's, else this browser's
+  // (and the browser's carried over to the account once). Not for a TV's display link.
+  if (!isDisplay()) {
+    try { prefs = await loadPrefs(); } catch (_) { /* the browser's copy stands */ }
+    if (!framed) applyTheme(prefs.theme);
+    applyMenuPosition(prefs.menu);
+  }
   // `scoped` and `playOnly` decide whether the emergency stop is offered (policy.js mayStop).
   state.caller = me ? { name: me.name, role: me.role, scoped: !!me.scoped, playOnly: isDisplay() } : null;
   pPlay.configure({ display: isDisplay(), onExit: () => go(playReturn && playReturn !== 'play' ? playReturn : 'overview') });
   try { coreInfo = (await workerStatus()) || coreInfo; } catch (_) { /* dev bridge missing */ }
+  await readSnapshotRunning();
   // A display link reads only what Play needs: the bell's server copy is not among it.
   if (isDisplay()) setNotificationSink(null); else connectNotificationStore(coreInfo);
   if (readsServerView()) {
@@ -1233,7 +1347,7 @@ function connectNotificationStore(info) {
 // keep the side-foot tunnel line current
 setInterval(async () => {
   if (!state.config || isSnapshotMode()) return;
-  try { const st = await workerStatus(); if (st && st.ok) { coreInfo = st; renderSideFoot(); renderNav(); } } catch (_) { /* ignore */ }
+  try { const st = await workerStatus(); if (st && st.ok) { coreInfo = st; await readSnapshotRunning(); renderSideFoot(); renderNav(); } } catch (_) { /* ignore */ }
 }, 10000);
 
 // An expired or revoked session: back to the gate rather than a screen of stale numbers
@@ -1248,7 +1362,7 @@ onSessionLost(() => {
     state.caller = null;
     document.documentElement.classList.remove('play');
     displayRefused('the link was revoked, has expired, or display links were switched off on this server',
-      'Open the new link an ElasticPro administrator gives you (Config \u203A Play).');
+      'Open the new link an ElasticPro administrator gives you (Config-Management \u203A Play).');
     return;
   }
   state.caller = null;

@@ -1,5 +1,5 @@
 /**
- * Config › Play (0.3.47): display links, the watch rules every display shares, and the
+ * Config-Management › Play (0.3.47): display links, the watch rules every display shares, and the
  * clusters left out of Play. Messages and pure helpers: core/play-config.js.
  *
  * Kept out of pages/settings.js, which only lists the section. Compact density: 32 px
@@ -252,8 +252,11 @@ function watchCard() {
     row('Nobody in it', 'whenEmpty', lockIt('whenEmpty', sel('pl-empty', w.spotlight.whenEmpty,
       [['skip', 'Skip the slide'], ['allHealthy', 'Show "All clusters healthy"'], ['everyCluster', 'Every cluster in turn']]))),
     pl.note ? note(pl.note.text, pl.note.cls) : null);
-  return card('Watch rules (server side, every display)', 'one set for all', body,
-    admin && !pl.unknown ? [h('button#pl-watch-save.btn.sm.primary', { onclick: saveWatch }, 'Save')] : null);
+  const el = card('Watch rules (server side, every display)', admin ? 'one set for all · changes wait for the save bar' : 'one set for all', body);
+  // Config-Management's save bar saves this card (saveWatch, below); it has no Save of its own.
+  el.dataset.track = 'play-watch';
+  el.dataset.trackLabel = 'Watch rules';
+  return el;
 }
 
 function readWatch() {
@@ -271,13 +274,20 @@ function readWatch() {
 async function saveWatch() {
   const w = readWatch();
   const problems = watchProblems(w);
-  if (problems.length) { pl.note = { text: problems.join(' '), cls: 'banner err' }; toast(problems[0], 'err', 6000); pl.redraw(); return; }
+  if (problems.length) { pl.note = { text: problems.join(' '), cls: 'banner err' }; toast(problems[0], 'err', 6000); return false; }
   const r = await playConfigSet({ watch: watchPayload(w, locked()) });
-  if (!r.ok) { pl.note = { text: `Not saved: ${r.message || 'refused'}`, cls: 'banner err' }; toast(`Not saved: ${r.message || 'refused'}`, 'err', 7000); pl.redraw(); return; }
+  if (!r.ok) { pl.note = { text: `Not saved: ${r.message || 'refused'}`, cls: 'banner err' }; toast(`Not saved: ${r.message || 'refused'}`, 'err', 7000); return false; }
   pl.note = { text: 'Saved.', cls: 'banner' };
   toast('Watch rules saved', 'ok', 3000);
-  reload();
+  await reload();
+  return true;
 }
+
+/** Config-Management's save bar runs this for the watch rules. True when the core took them. */
+export const savePlayWatch = () => saveWatch();
+
+/** How many display links there are, or null before the admin's list is read (for the menu). */
+export const playDisplayCount = () => (Array.isArray(pl.links) ? pl.links.length : null);
 
 /* ------------------------------- exclusions ----------------------------------- */
 
@@ -295,9 +305,10 @@ function excludedCard() {
         : admin ? h('button.btn.sm.pl-include', { onclick: () => include(x) }, 'Include again') : null));
   });
   const pick = sel('pl-ex-cluster', '', [['', 'Choose a cluster…'], ...clusters().filter((c) => !left.has(c.id)).map((c) => [c.id, c.name])]);
+  pick.dataset.untracked = '';
   return card('Excluded clusters', 'left out of every slide, count and total on every display', h('div', { style: { display: 'grid', gap: '8px' } },
     admin && !pl.unknown ? h('div.pl-exclude', pick,
-      h('input#pl-ex-reason', { type: 'text', placeholder: 'Reason (required)', 'aria-label': 'Reason', style: { flex: '1 1 220px' } }),
+      h('input#pl-ex-reason', { type: 'text', placeholder: 'Reason (required)', 'aria-label': 'Reason', 'data-untracked': '', style: { flex: '1 1 220px' } }),
       h('button#pl-exclude.btn.sm.danger', { onclick: exclude }, 'Exclude from Play')) : null,
     pl.exNote ? note(pl.exNote, 'banner err') : null,
     h('div.tbl-wrap', table(['Cluster', 'Reason', 'Who and when', ''], rows.length ? rows

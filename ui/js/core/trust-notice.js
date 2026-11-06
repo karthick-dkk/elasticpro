@@ -46,7 +46,7 @@ export function acceptedNotice(accepted) {
       : plural(certs.length, 'certificate'));
   }
   if (keys.length) parts.push(plural(keys.length, 'jump-host key'));
-  const message = `Accepted without checking: ${parts.join(' and ')} — Config → Defaults → Certificates is set to insecure`;
+  const message = `Accepted without checking: ${parts.join(' and ')} — Config-Management › System › Defaults › Certificates is set to insecure`;
   const detail = list.map((a) => {
     const who = (a.clusters || []).map((c) => c.name).join(', ');
     const what = a.kind === 'host_key' ? `SSH key of jump host ${a.target}` : `certificate of ${a.target}${a.subject ? ` (${a.subject})` : ''}`;

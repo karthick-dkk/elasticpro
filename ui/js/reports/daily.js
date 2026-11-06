@@ -150,7 +150,7 @@ function eventField(settings) {
 
 /** "not measured", in amber, with what would measure it. */
 function notMeasured(field = 'event_logsize') {
-  return h('span.vs-notm', { title: `${field} is not measured: no numeric field for it in the mapping. Set it in Config › Reports.` }, 'not measured');
+  return h('span.vs-notm', { title: `${field} is not measured: no numeric field for it in the mapping. Set it in Config-Management › Reports.` }, 'not measured');
 }
 const dash = () => h('span.muted', '—');
 
@@ -340,7 +340,7 @@ function dailyView(c, picker) {
       detail: Math.max(Number(reply.skippedCount) || 0, (reply.skipped || []).length)
         ? `No index name fits the index pattern; ${num(Math.max(Number(reply.skippedCount) || 0, reply.skipped.length))} were skipped (for example ${(reply.skipped || []).slice(0, 3).join(', ')}).`
         : 'A collection fills this in: press Collect now.',
-      actions: [h('button.btn.sm', { type: 'button', onclick: () => openVolumeFields('indexFormat') }, 'Config › Reports')],
+      actions: [h('button.btn.sm', { type: 'button', onclick: () => openVolumeFields('indexFormat') }, 'Config-Management › Reports')],
     })];
   }
   out.push(dailyCards(reply), dailyChart(reply), dailyTable(c, reply));
@@ -354,7 +354,7 @@ const dayRange = (from, to) => (from === to ? shortDay(from) : `${Number(from.sl
 
 /** A tile's value: the figure, or "not measured" naming where to set the field. */
 function tileValue(v, field) {
-  return v === null ? h('button.linkish.vs-notm', { type: 'button', title: `Set the Event size field (${field}) in Config › Reports`,
+  return v === null ? h('button.linkish.vs-notm', { type: 'button', title: `Set the Event size field (${field}) in Config-Management › Reports`,
     onclick: () => openVolumeFields('eventSize') }, 'not measured') : bytes(v);
 }
 
@@ -686,7 +686,7 @@ function breakdownCard(c, settings) {
   if (ent && ent.error) body = unreadable('The breakdown', ent.error);
   else if (!reply) body = h('div.tbl-empty', 'Reading the breakdown…');
   else if (reply.error) body = empty('This field cannot be broken down.', { detail: String(reply.error),
-    actions: [h('button.btn.sm', { type: 'button', onclick: () => openVolumeFields(vs.bd.field) }, 'Config › Reports')] });
+    actions: [h('button.btn.sm', { type: 'button', onclick: () => openVolumeFields(vs.bd.field) }, 'Config-Management › Reports')] });
   else {
     const shares = breakdownEventShares(reply);
     const noun = NOUN[vs.bd.field] || 'values';
