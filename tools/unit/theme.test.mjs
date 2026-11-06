@@ -155,7 +155,7 @@ test('the accent clears AA as text on its own card surface', () => {
 test('the keyboard hints name only shortcuts that exist', () => {
   const appJs = fs.readFileSync(path.join(ROOT, 'ui/js/app.js'), 'utf8');
   const settings = fs.readFileSync(path.join(ROOT, 'ui/js/pages/settings.js'), 'utf8');
-  const hint = settings.slice(settings.indexOf("h('b', 'Keyboard: ')"));
+  const hint = settings.slice(settings.indexOf("kvRow('Keyboard'"));
   const line = hint.slice(0, hint.indexOf('),\n'));
 
   const claimsDigits = /switch pages/.test(line);

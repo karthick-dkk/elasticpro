@@ -76,16 +76,26 @@ if (configPath) {
 // has no PLAY_* messages, and Play must still draw, saying what is missing.
 // reports: one page of seven sections (docs/REPORTS.md), each drawn from its own route.
 const REPORT_SECTIONS = ['overview', 'daily', 'hosts', 'capacity', 'measure', 'planning', 'exports'];
+// Config-Management (pages/settings.js): every tab it draws itself, each from its own route; and
+// the three app pages it hosts as tabs (Automation, Request Centre, Accounts), drawn inside its frame
+// the way the shell draws them (hostedPage). A tab the bridge does not support (Data, Backup) is
+// left out of the frame by the page itself, which draws the first tab it does have.
+const CONFIG_TABS = ['clusters/clusters', 'clusters/creds', 'clusters/trust', 'zabbix/zabbix', 'alerts/triggers',
+  'requests/policy', 'reports/fields', 'reports/mail', 'reports/templates', 'play/play', 'system/defaults', 'system/file'];
+const HOSTED = new Set(['automation', 'requests', 'accounts']);
 const PAGES = ['alerts', 'overview', 'indices', 'shards', 'logs', 'console', 'snapshots',
-  ...REPORT_SECTIONS.map((s) => `reports/${s}`), 'automation', 'requests', 'requests/health', 'accounts', 'settings', 'play'];
+  ...REPORT_SECTIONS.map((s) => `reports/${s}`), 'automation', 'requests', 'requests/health', 'accounts', 'settings',
+  ...CONFIG_TABS.map((t) => `settings/${t}`), 'play'];
 const view = window.document.createElement('div');
 window.document.body.append(view);
 
 for (const name of PAGES) {
   const before = errors.length;
   try {
-    const [page, section] = name.split('/');
-    const mod = await load(`pages/${page}.js`);
+    const [page, section, tab] = name.split('/');
+    const own = await load(`pages/${page}.js`);
+    // A page that lives in Config-Management is drawn inside its frame, as the shell does.
+    const mod = HOSTED.has(page) ? (await load('pages/settings.js')).hostedPage(page, own) : own;
     while (view.firstChild) view.removeChild(view.firstChild);
     window.history.replaceState(null, '', `#/${name}`);
     mod.render(view);
@@ -98,6 +108,14 @@ for (const name of PAGES) {
       if (!tab || tab.dataset.tab !== 'health') errors.push('requests/health: the tab bar does not mark ElasticPro health as the one shown');
       if (!view.querySelector('.hl-strip .hl-chip[data-part="core"]')) errors.push('requests/health: no status strip with the core');
       if (!view.querySelector('tr[data-check="core.memory"]')) errors.push('requests/health: no memory check');
+    } else if (page === 'settings' && section) {
+      // Config-Management: the menu marks the page, the tab row (when there is one) the tab.
+      const item = view.querySelector('.cm-nav .cm-item[aria-current="page"]');
+      if (!item || item.dataset.cmPage !== section) errors.push(`${name}: the Config-Management menu does not mark ${section}`);
+      const row = view.querySelector('nav.cm-tabs');
+      const cur = row && row.querySelector('button[aria-current="page"]');
+      if (row && (!cur || cur.dataset.cmTab !== tab)) errors.push(`${name}: the tab row does not mark ${tab}`);
+      if (!view.querySelector('.cm-about #cm-version')) errors.push(`${name}: no About card with the version`);
     } else if (section) {
       const on = view.querySelector('.rp-nav a[aria-current="page"]');
       if (!on || on.dataset.section !== section) errors.push(`${name}: the section nav does not mark ${section} as the one shown`);
@@ -107,6 +125,7 @@ for (const name of PAGES) {
       if ([...view.querySelectorAll('.seg button')].some((b) => b.textContent.trim() === 'Summary')) errors.push('indices: the Summary tab is still there');
       if (!/Daily and monthly summary is now in/.test(view.textContent)) errors.push('indices: no line saying the summary moved to Reports');
     }
+    if (HOSTED.has(page) && !view.querySelector('.cm-side')) errors.push(`${name}: not drawn inside Config-Management`);
     // Leave the page the way the app does, so a page that re-reads on a timer stops.
     if (mod.onLeave) mod.onLeave();
     const nodes = view.querySelectorAll('*').length;

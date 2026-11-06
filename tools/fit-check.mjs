@@ -69,12 +69,16 @@ const SIZES = [[1440, 900, false], [1280, 800, false], [1024, 768, false], [1280
     ? arg('--sizes', '').split(',').includes(framed ? 'f' : String(w))
     : PLAY_ONLY ? w >= 1920 : w < 1920));
 const FRAME_W = 1180;
-/** The buttons that change what a page shows without doing anything: segments, tabs, the Config page's sections. */
-const VIEW_SEL = '#view .seg button, #view .seg-btn, #view [role=tab], #view .tabs button, #view .subnav button';
+/** The buttons that change what a page shows without doing anything: segments, tabs, Config-Management's pages and tabs. */
+const VIEW_SEL = '#view .seg button, #view .seg-btn, #view [role=tab], #view .tabs button, #view .subnav button, #view .cm-seg button';
 // Reports is one page of six sections (docs/REPORTS.md); each section is its own route and is measured as a page.
 const PAGES = ['alerts', 'overview', 'indices', 'shards', 'logs', 'console', 'snapshots',
   'reports/overview', 'reports/daily', 'reports/capacity', 'reports/measure', 'reports/planning', 'reports/exports',
-  'automation', 'requests', 'accounts', 'settings', 'play']
+  'automation', 'requests', 'accounts', 'settings',
+  // Config-Management: each page and tab is its own route (pages/settings.js), measured as a page.
+  'settings/clusters/creds', 'settings/clusters/trust', 'settings/zabbix/zabbix', 'settings/alerts/triggers', 'settings/requests/policy',
+  'settings/reports/fields', 'settings/reports/mail', 'settings/reports/templates', 'settings/data/backend', 'settings/data/schedule',
+  'settings/play/play', 'settings/system/defaults', 'settings/system/file', 'play']
   .filter((id) => !PAGE_FILTER || PAGE_FILTER.split(',').includes(id));
 
 const pw = await loadPlaywright(ROOT, 'fit-check');
@@ -274,9 +278,9 @@ async function run(browserName, [vw, vh, framed]) {
       await escape(); await sleep(120);
     }
   };
-  /** The Config page shows one section at a time. */
+  /** Config-Management shows one page at a time: open one by its menu item. */
   const section = async (label) => {
-    await F.evaluate((l) => { [...document.querySelectorAll('#view .subnav button')].find((b) => b.textContent.includes(l))?.click(); }, label);
+    await F.evaluate((l) => { [...document.querySelectorAll('#view .cm-nav .cm-item')].find((b) => b.title === l)?.click(); }, label);
     await sleep(500); await quiet(500, 4000);
   };
   const overlays = () => F.evaluate(() => document.querySelectorAll('.modal-overlay').length);
