@@ -513,10 +513,16 @@ impl Core {
         }
         let sizes = self.logdelay_store().map(|st| st.sizes()).unwrap_or_default();
         let cfg: SinkConfig = self.delay_sink_config();
+        // A limited admin sees the clusters they may see, in the overrides and in the schedule alike.
+        let mut shown = s.clone();
+        if let Some(v) = &visible {
+            shown.clusters.retain(|id, _| v.contains(id));
+        }
+        let sched_clusters: Vec<String> = cfg.clusters.iter().filter(|id| visible.as_ref().is_none_or(|v| v.contains(*id))).cloned().collect();
         json!({
             "ok": true, "supported": self.edition().schedules(),
-            "settings": s, "resolved": resolved,
-            "schedule": { "enabled": cfg.enabled, "everyHours": cfg.every_hours, "destination": cfg.destination, "clusters": cfg.clusters,
+            "settings": shown, "resolved": resolved,
+            "schedule": { "enabled": cfg.enabled, "everyHours": cfg.every_hours, "destination": cfg.destination, "clusters": sched_clusters,
                           "maxDevices": cfg.max_devices, "state": self.delay_sink_state_json(), "blocked": self.delay_sink_blocked_now() },
             "builtinStore": { "keepDays": 90, "bytes": sizes.bytes, "sizes": sizes, "recentDays": state::RECENT_MS / 86_400_000, "dir": store::DIR },
             "extrasDefault": EXTRAS_DEFAULT,

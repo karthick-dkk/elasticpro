@@ -252,8 +252,13 @@ rules: [ { pattern, step, readFrom, recommendation } ×6 ] }`.
                 "clusters": { "client-a-prod": { "levels": {…}, "fields": {…} } }, "setBy": "Admin", "setAt": 0 },
   "resolved": [ { "id": "…", "name": "…", "levels": {…}, "levelsFrom": "settings|configFile|default", "fields": { "pattern": "logstash-*", "device": "src_hostname.keyword", "arrival": "@timestamp", "eventTime": [..], "extras": [..] } } ],
   "schedule": { "enabled": true, "everyHours": 2, "destination": "builtin|history|cluster", "clusters": [], "maxDevices": 2000, "state": {…}, "blocked": null },
-  "builtinStore": { "keepDays": 90, "bytes": 123456, "dir": "logdelay" }, "extrasDefault": [..], "uiCopy": "…" }
+  "builtinStore": { "keepDays": 90, "bytes": 123456, "recentDays": 31, "dir": "logdelay",
+                    "sizes": { "bytes": 123456, "trackersBytes": 0, "dailyBytes": 0, "dayFilesBytes": 0, "dayFiles": 0, "clusters": 0 } },
+  "extrasDefault": [..], "uiCopy": "…" }
 ```
+
+A limited admin (Zabbix-group scope) gets `settings.clusters`, `resolved` and
+`schedule.clusters` narrowed to the clusters they see; `SET` stays full-admin only.
 
 `SET` takes a partial `settings` object (top-level keys replace: `levels`, `silentAfterHours`
 1–168, `fields`, `clusters`); refused `bad_request` naming a bad field name or unknown cluster.
