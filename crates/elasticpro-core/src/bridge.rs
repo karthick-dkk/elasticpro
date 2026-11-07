@@ -1408,6 +1408,9 @@ impl Core {
             "POLICY_PAUSE" | "POLICY_RESUME" => self.policy_pause_msg(&t, &msg, caller.as_ref()),
             "EVENTS_TICKET" => self.events_ticket_msg(caller.clone(), reauth),
             "DELAY_SINK_GET" | "DELAY_SINK_SET" | "DELAY_SINK_RUN" => self.delay_sink_msg(&t, &msg, caller.as_ref()).await,
+            // The log delay report (docs/LOGDELAY.md): read from the built-in store; settings an admin's.
+            "LOGDELAY_SUMMARY" | "LOGDELAY_CLUSTER" | "LOGDELAY_DEVICE" | "LOGDELAY_SEARCH" | "LOGDELAY_FIXES"
+            | "LOGDELAY_SETTINGS_GET" | "LOGDELAY_SETTINGS_SET" => self.logdelay_msg(&t, &msg, caller.as_ref()).await,
             // The history store (docs/HISTORY.md): a dedicated endpoint, never a monitored cluster.
             "HISTORY_STORE_GET" | "HISTORY_STORE_SET" | "HISTORY_STORE_TEST" | "HISTORY_STORE_ARM" | "HISTORY_STORE_BACKFILL" => {
                 self.history_store_msg(&t, &msg, caller.as_ref()).await
@@ -3815,7 +3818,7 @@ impl Core {
     /// What a display link may measure this cluster with (`auth::DelayShape`): the cluster's
     /// own settings, the clusters file's `defaults:` (a Zabbix host has nothing else), then
     /// config.txt and the shipped values — resolved as the UI resolves them.
-    async fn delay_shape_for(&self, id: &str) -> auth::DelayShape {
+    pub(crate) async fn delay_shape_for(&self, id: &str) -> auth::DelayShape {
         let spec = self.spec_for(id);
         let file = self.read_config_file().await.map(|raw| auth::DelayDefaults::from_config(&raw)).unwrap_or_default();
         let managed = crate::settings::get();
@@ -5241,6 +5244,10 @@ impl Core {
                     .into(),
             );
         }
+        // The built-in store: the server's own files, nothing written to any cluster.
+        if cfg.destination == delay_sink::Destination::Builtin {
+            return self.logdelay_store().is_none().then(|| "no data directory: the built-in store needs one".to_string());
+        }
         // To the history store: its own two gates, never the monitored clusters' readOnly.
         if cfg.destination == delay_sink::Destination::History {
             let (y, m, _) = delay_sink::month_and_hour_bucket(delay_sink::now_ms());
@@ -5262,7 +5269,8 @@ impl Core {
     /// Which primed clusters this run measures.
     fn delay_sink_targets(&self, cfg: &SinkConfig) -> Vec<String> {
         let p = self.primed.read();
-        let to_history = cfg.destination == delay_sink::Destination::History;
+        // Only a sink cluster is left out of its own measurement.
+        let to_history = cfg.destination != delay_sink::Destination::Cluster;
         if cfg.clusters.is_empty() {
             let mut ids: Vec<String> =
                 p.clusters.keys().filter(|id| to_history || **id != cfg.sink_cluster_id).cloned().collect();
@@ -5290,24 +5298,34 @@ impl Core {
             return json!({ "ok": false, "skipped": why });
         }
 
-        let (year, month, bucket) = delay_sink::month_and_hour_bucket(now);
+        let (year, month, _) = delay_sink::month_and_hour_bucket(now);
         let to_history = cfg.destination == delay_sink::Destination::History;
-        let index = if to_history {
-            // Checked by the refusal above; asked again so the index is the store's prefix now.
-            match self.history_delay_index(year, month) {
-                Ok(i) => i,
+        let to_builtin = cfg.destination == delay_sink::Destination::Builtin;
+        // The destination's prefix: the store's `<prefix>-delay`, or the sink's own. The index
+        // names come from it (logdelay::docs). Checked by the refusal above; asked again so
+        // the prefix is the store's now.
+        let prefix = if to_history {
+            match self.history_delay_prefix() {
+                Ok(p) => p,
                 Err(e) => return json!({ "ok": false, "skipped": e }),
             }
         } else {
-            delay_sink::index_name(&cfg.index_prefix, year, month)
+            cfg.index_prefix.clone()
         };
+        let index = delay_sink::index_name(&prefix, year, month);
         let targets = self.delay_sink_targets(&cfg);
+        let settings = self.logdelay_settings();
+        let in_file = self.read_config_file().await.map(|raw| crate::logdelay::thresholds_in_config(&raw)).unwrap_or_default();
         let mut measured = 0usize;
         let mut failed = 0usize;
         let mut first_error: Option<String> = None;
+        let mut opened = 0usize;
+        let mut solved = 0usize;
 
         for id in &targets {
-            let res = self.es_req(delay_sink::search_request(id, &cfg)).await;
+            let fields = self.logdelay_fields(id, &settings).await;
+            let body = crate::logdelay::measure::search_body(&fields, cfg.every_hours, cfg.max_devices);
+            let res = self.es_req(delay_sink::search_request_for(id, &fields.pattern, body)).await;
             if res.get("ok").and_then(|v| v.as_bool()) != Some(true) {
                 failed += 1;
                 first_error.get_or_insert_with(|| {
@@ -5319,26 +5337,45 @@ impl Core {
                 continue;
             }
             let payload = res.get("json").cloned().unwrap_or(Value::Null);
-            let ms = delay_sink::measurements(&payload, &cfg);
-            if ms.is_empty() {
-                // No device could be measured. That is a fact about the cluster, not a
-                // failure of the job, and it is not written as a row of zeroes.
+            let readings = crate::logdelay::measure::readings(&payload, &fields);
+            let (levels, _) = crate::logdelay::levels_for(&settings, id, in_file.get(id));
+            // The memory between runs: periods opened and solved, silent devices, the day's
+            // totals — kept on the server whatever the destination (the pages read it).
+            let (applied, daily, _) = match self.logdelay_apply(id, readings, now, &levels, &settings) {
+                Ok(x) => x,
+                Err(e) => {
+                    failed += 1;
+                    first_error.get_or_insert(format!("{id}: the built-in store could not be written: {e}"));
+                    continue;
+                }
+            };
+            opened += applied.opened.len();
+            solved += applied.solved.len();
+            if applied.rows.is_empty() {
+                // No device at all: a fact about the cluster, not a failure of the job, and
+                // not written as a row of zeroes.
                 continue;
             }
-            let body = delay_sink::bulk_body(id, &ms, &index, &bucket);
+            if to_builtin {
+                measured += applied.rows.len();
+                continue;
+            }
+            let body = self.logdelay_bulk(id, &applied, &daily, &prefix, now);
             let wrote = if to_history {
                 self.history_delay_bulk(body).await
             } else {
                 self.es_req(delay_sink::bulk_request(&cfg, body)).await
             };
             match delay_sink::bulk_failure(&wrote) {
-                None => measured += ms.len(),
+                None => measured += applied.rows.len(),
                 Some(e) => {
                     failed += 1;
                     first_error.get_or_insert(format!("{id}: {e}"));
                 }
             }
         }
+        // The recommended fixes, from what is now stored and what the poller last read.
+        self.logdelay_refresh_fixes(now, cfg.every_hours);
 
         let ok = failed == 0;
         {
@@ -5357,11 +5394,22 @@ impl Core {
         tracing::info!(
             target: "audit",
             message = "delay sink run",
-            clusters = targets.len(), measured, failed, index = %index,
+            clusters = targets.len(), measured, failed, opened, solved, index = %index, destination = ?cfg.destination,
             error = first_error.as_deref().unwrap_or(""),
         );
-        json!({ "ok": ok, "measured": measured, "failed": failed, "clusters": targets.len(),
-                "index": index, "error": first_error })
+        json!({ "ok": ok, "measured": measured, "failed": failed, "clusters": targets.len(), "opened": opened, "solved": solved,
+                "index": index, "destination": cfg.destination, "error": first_error })
+    }
+
+    /// The schedule's state as JSON, for the log delay pages.
+    pub(crate) fn delay_sink_state_json(&self) -> Value {
+        serde_json::to_value(&self.delay_sink.read().state).unwrap_or(Value::Null)
+    }
+
+    /// What stands in the way of the armed schedule now, if anything.
+    pub(crate) fn delay_sink_blocked_now(&self) -> Option<String> {
+        let cfg = self.delay_sink.read().config.clone();
+        self.delay_sink_blocker(&cfg)
     }
 
     /// `DELAY_SINK_GET` / `DELAY_SINK_SET` / `DELAY_SINK_RUN`. Admin only; see

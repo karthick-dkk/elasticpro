@@ -604,6 +604,12 @@ pub fn required_role(msg_type: &str) -> Option<Role> {
         // Arming the scheduled measurement decides that this process will write
         // to a cluster unattended. Nothing below admin goes near it.
         "DELAY_SINK_GET" | "DELAY_SINK_SET" | "DELAY_SINK_RUN" => Some(Role::Admin),
+        // The log delay report (docs/LOGDELAY.md): the figures are the same facts as the delay
+        // measurement a user runs by hand, read back from the store on the clusters they see, so a
+        // user's; the levels, fields and silence limit decide what "late" means fleet-wide, so an
+        // admin's (a limited admin may read them; SET is refused in the handler).
+        "LOGDELAY_SUMMARY" | "LOGDELAY_CLUSTER" | "LOGDELAY_DEVICE" | "LOGDELAY_SEARCH" | "LOGDELAY_FIXES" => Some(Role::User),
+        "LOGDELAY_SETTINGS_GET" | "LOGDELAY_SETTINGS_SET" => Some(Role::Admin),
         // The history store: where the core writes unattended, with a credential it keeps.
         // Reading its settings, testing, arming and copying are an admin's (a limited admin may
         // read them, nothing more: history_store_msg). Its documents are the same facts as the
