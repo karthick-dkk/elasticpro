@@ -1204,7 +1204,7 @@ impl Core {
                 let applied = match self.backup_apply(&parsed, secrets.as_ref(), mode, &sections, &by).await {
                     Ok(a) => a,
                     Err(r) => {
-                        tracing::warn!(target: "audit", user = %by, kind = r.kind, reason = %r.message, before = ?before, "backup restore refused");
+                        tracing::warn!(target: "audit", user = %by, kind = r.kind, reason = %r.message, before = before.as_deref(), "backup restore refused");
                         let mut out = r.to_json();
                         out["beforeRestore"] = json!(before);
                         return out;
@@ -1212,7 +1212,7 @@ impl Core {
                 };
                 tracing::info!(target: "audit", user = %by, mode = mode.id(), from = %name.as_deref().unwrap_or("upload"),
                                taken_at = parsed.taken_at, taken_by = %parsed.taken_by, credentials,
-                               sections = %sections.iter().map(|s| s.id()).collect::<Vec<_>>().join(","), before = ?before, "backup restored");
+                               sections = %sections.iter().map(|s| s.id()).collect::<Vec<_>>().join(","), before = before.as_deref(), "backup restored");
                 json!({ "ok": true, "mode": mode.id(), "name": name, "beforeRestore": before, "credentials": credentials,
                         "backup": parsed.header(), "applied": applied })
             }

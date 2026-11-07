@@ -4,6 +4,7 @@
 
 **Backup fixes from the 0.3.55 test-VM run.**
 - Every kept backup that rotation removes is audited (`backup rotated out`, with the file's `name` and the `user` who caused it, or `system` for the timer). A schedule change lowering *keep* and a manual *keep* used to remove files without a line; all four paths now go through one prune. A second backup in the same second is now the newer one: it was sorted as the older and could be rotated out the moment it was kept.
+- Audit lines give an optional field's plain value, or leave the field out when there is none, instead of Rust's `Some("…")`: `before` on `backup restored` and `backup restore refused`, `via` and `zabbix_role` on `zabbix sign-in code issued`, `source` on the display-link and sign-in refusals, `until`, `was`, `slm`, `ulm` and `expires_at`. The field names are unchanged.
 
 ## 0.3.55
 

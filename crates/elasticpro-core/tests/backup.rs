@@ -528,8 +528,16 @@ async fn every_backup_rotated_out_is_audited_by_name_and_by_whom() {
     let from = captured_len();
     let at = chrono::NaiveDateTime::parse_from_str("2099-01-01 02:00", "%Y-%m-%d %H:%M").unwrap();
     let name = c.backup_tick_at(at).await.expect("due").expect("ok");
-    assert_eq!(epbak(), vec![name]);
+    assert_eq!(epbak(), vec![name.clone()]);
     let lines = audit_since(from);
     assert_eq!(rotated(&lines), gone(&before, &epbak(), "system"));
+
+    // A restore names its before-restore copy as the file name, not as Rust's `Some("…")`.
+    let from = captured_len();
+    let r = send(&c, &s, json!({ "type": "BACKUP_RESTORE", "name": name, "mode": "merge", "sections": ["play"] })).await;
+    assert_eq!(r["ok"], json!(true), "{r}");
+    let lines = audit_since(from);
+    let restored = lines.iter().find(|l| l["fields"]["message"] == "backup restored").unwrap_or_else(|| panic!("{lines:?}"));
+    assert_eq!(restored["fields"]["before"], r["beforeRestore"], "{restored}");
     assert!(!lines.iter().any(|l| l.to_string().contains("Some(")), "no Debug Option in an audit line: {lines:?}");
 }
