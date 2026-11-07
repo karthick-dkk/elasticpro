@@ -3,7 +3,7 @@ members = ["crates/elasticpro-core"]
 resolver = "2"
 
 [workspace.package]
-version = "0.3.54"
+version = "0.3.55"
 edition = "2021"
 license = "MIT"
 
