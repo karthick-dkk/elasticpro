@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- **Planning shows disk as it is bought:** /live disk each, /backup disk, the S3 / ULM size, the tiles and the CSV round up to a whole TB (2.79 TB → 3 TB, 19.5 TB → 20 TB), never down; the /live disk tile is the rows' sum (7 × 3 TB = 21 TB).
+- **The Planning bill of materials fits in one view:** no sideways scrollbar from 1024 px up (Chromium and WebKit); headers wrap to two lines, number columns take only their width, and below 1180 px the results move under the inputs.
+
 ## 0.3.58
 
 - **Log delay, re-checked:** the worker no longer builds reports from a days-old tracker (the cached tracker is checked against the file on every read); the Forwarder/Parser fix rule counts only devices measured while the group was late, and claims "the others were on time" only when at least one of them was; an admin limited to some clusters no longer reads a run error, skip reason or sink cluster about a cluster outside their view (run notes are recorded with the cluster they are about, and every DELAY_SINK_* and LOGDELAY_* answer goes through one per-caller view); the device page's "Delay by cluster" panel reads each cluster's daily totals instead of every tracker.

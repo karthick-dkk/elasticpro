@@ -1994,7 +1994,7 @@ html.play .main, html.play .page { padding: 0; margin: 0; max-width: none; }
    Compact like the rest: 32 px rows, no new colours. Amber is "[set]" / not measured: an unknown, never a 0. */
 .pn-layout { display: flex; flex-wrap: wrap; gap: 14px; align-items: flex-start; }
 .pn-inputs { flex: 1 1 320px; max-width: 380px; }
-.pn-results { flex: 999 1 640px; min-width: 0; display: flex; flex-direction: column; gap: 14px; }
+.pn-results { flex: 999 1 740px; min-width: 0; display: flex; flex-direction: column; gap: 14px; }
 .pn-page .fld { display: flex; flex-direction: column; gap: 4px; margin-bottom: 12px; }
 .pn-page .fld:last-child { margin-bottom: 0; }
 .pn-page .fld > label, .pn-page .fld > .lbl { font-size: 12.5px; color: var(--text-secondary); font-weight: 600; }
@@ -2009,8 +2009,17 @@ html.play .main, html.play .page { padding: 0; margin: 0; max-width: none; }
 .pn-tile .l { font-size: 12px; color: var(--text-secondary); }
 .pn-tile .v { font-size: 21px; font-weight: 650; }
 .pn-tile .d { font-size: 12px; color: var(--text-muted); }
-.pn-table th, .pn-table td { white-space: nowrap; }
-.pn-table td, .pn-table th { height: 32px; padding-top: 0; padding-bottom: 0; }
+/* The bill of materials fits its card in one view, no sideways scrollbar (owner, 2026-11-07):
+   headers wrap to two lines ("CPU / each"), number columns take only their content (width 1%)
+   and leave the rest to the role and the sizing rule, which wrap when they must; a number and
+   its unit stay one token. The results sit beside the inputs only when 740 px is left for them,
+   the table's width, and move under the inputs otherwise (1024 px). */
+.pn-table td { white-space: nowrap; }
+.pn-table td, .pn-table th { height: 32px; padding: 0 8px; }
+table.tbl.pn-table th, table.tbl.pn-table th.num { white-space: normal; letter-spacing: 0; line-height: 1.25; vertical-align: bottom; padding-top: 6px; padding-bottom: 6px; }
+.pn-table td:nth-child(1), .pn-table td:nth-child(2) { white-space: normal; }
+.pn-table th.num, .pn-table td.num { width: 1%; }
+.pn-table td:nth-child(2) { min-width: 16ch; }
 .pn-table tr.tot td { font-weight: 650; background: var(--surface-2); }
 .pn-table tr.off td { color: var(--text-muted); }
 .pn-table .rule { color: var(--text-secondary); font-size: 12.5px; }

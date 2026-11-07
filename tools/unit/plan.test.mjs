@@ -34,7 +34,9 @@ test('the board defaults: 500 GB a day, 30 hot days, disk backups', () => {
   // 500 x 30 x 1.3 = 19500 GB on hot; one 8 TB node would not hold it: ceil(19.5 / 8) = 3.
   assert.equal(row(p, 'Elasticsearch hot').count, 3);
   assert.equal(p.totals.liveGB, 19500);
-  assert.equal(p.totals.liveText, '19.5 TB');
+  // Each node needs 6.5 TB, bought as 7 TB: the tile is the rows' sum, 3 x 7 TB.
+  assert.equal(row(p, 'Elasticsearch hot').liveText, '7 TB');
+  assert.equal(p.totals.liveText, '21 TB');
   // Forwarder and parser: ceil(500 / 150) = 4 each.
   assert.equal(row(p, 'Forwarder').count, 4);
   assert.equal(row(p, 'Parser').cpuT, 32);
@@ -59,7 +61,7 @@ test('replicas multiply the live disk, never the backup', () => {
   assert.equal(p.totals.liveGB, 500 * 30 * 1.3 * 2);
   assert.equal(p.totals.backupGB, 500 * 30 * 1.3);
   assert.equal(row(p, 'Elasticsearch hot').bkGB, 500 * 30 * 1.3);
-  assert.equal(row(p, 'Elasticsearch hot').bkText, '19.5 TB shared');
+  assert.equal(row(p, 'Elasticsearch hot').bkText, '20 TB shared');
 });
 
 test('one data node holds every role: no dedicated master, single-node note', () => {
@@ -112,7 +114,7 @@ test('backup target: disk shows /backup on the hot row; S3 and ULM hide it', () 
   assert.equal(row(s3, 'Elasticsearch hot').bkText, '—');
   const bucket = row(s3, 'S3 backup');
   assert.equal(bucket.countText, 'bucket');
-  assert.equal(bucket.rule, 'S3 bucket: 15.0 TB (volume × backup days)');
+  assert.equal(bucket.rule, 'S3 bucket: 15 TB (volume × backup days)');
   assert.equal(s3.totals.backupGB, 500 * 30, 'S3 holds volume x days, no buffer');
   assert.equal(s3.totals.backupLabel, 'S3 backup');
   assert.equal(s3.totals.servers, 15, 'a bucket is not a server');
@@ -122,7 +124,7 @@ test('backup target: disk shows /backup on the hot row; S3 and ULM hide it', () 
   const u = row(ulm, 'ULM');
   assert.equal(u.off, false);
   assert.equal(u.count, null, 'ULM GB per day per server is [set]');
-  assert.match(u.rule, /archives 15\.0 TB to S3/);
+  assert.match(u.rule, /archives 15 TB to S3/);
   assert.equal(row(ulm, 'S3 backup').off, true);
   const ulmSet = P.computePlan({ roles: [role('ULM', 'target', { target: 'ulm', cap: 400 })] }, { backup: 'ulm' });
   assert.equal(ulmSet.rows[0].count, 2);
@@ -174,7 +176,9 @@ test('CSV: [set] stays [set]; the /backup column follows the target', () => {
   assert.equal(rows[rows.length - 1][0], 'Total');
   assert.equal(rows[rows.length - 1][2], '15 +3');
   const hot = rows.find((r) => r[0] === 'Elasticsearch hot');
-  assert.equal(hot[7], '19.5 TB shared');
+  assert.equal(hot[6], '7 TB');
+  assert.equal(hot[7], '20 TB shared');
+  assert.equal(rows[rows.length - 1][6], '21 TB');
   const s3 = P.planCsvRows(P.computePlan(STANDARD, { backup: 's3' }));
   assert.ok(!s3[0].includes('backup_disk'));
   assert.ok(s3.every((r) => r.length === s3[0].length));
@@ -195,4 +199,26 @@ test('the per-day rate is the shared definition: the mean of the last 7 finished
   const day = (n, eventBytes) => ({ day: `2026-10-${String(n).padStart(2, '0')}`, eventBytes });
   const rec = { days: [day(1, 1e12), day(20, 100e9), day(21, 200e9), day(22, 300e9), day(23, 400e9), day(24, 500e9), day(25, 600e9), day(26, 700e9), day(27, null)] };
   assert.equal(D.perDayEventBytes(rec, 7, { today: '2026-10-28' }), 450e9, '21 to 27 asked, 21 to 26 measured');
+});
+
+test('disk sizes are shown rounded up: never less than the arithmetic needs', () => {
+  assert.equal(P.diskGB(2785.7), 3000);
+  assert.equal(P.diskGB(19500), 20000);
+  assert.equal(P.diskGB(500 * 30 * 1.3), 20000, 'float noise does not buy an extra TB');
+  assert.equal(P.diskGB(3000.0000000001), 3000);
+  assert.equal(P.diskGB(999.5), 1000);
+  assert.equal(P.diskGB(479.2), 480);
+  assert.equal(P.fmtGB(2785.7), '3 TB');
+  assert.equal(P.fmtGB(999.5), '1 TB');
+  assert.equal(P.fmtGB(479.2), '480 GB');
+  // The reported page: 3 TB hot nodes, 500 GB a day, 30 days, 30 % buffer -> 19.5 TB over 7 nodes.
+  const p = P.computePlan({ backup: 'disk', roles: [role('Elasticsearch hot', 'tier', { tier: 'hot', nodeTB: 3 })] }, {});
+  const hot = row(p, 'Elasticsearch hot');
+  assert.equal(hot.count, 7);
+  assert.equal(hot.liveText, '3 TB', 'was 2.79 TB');
+  assert.equal(hot.bkText, '20 TB shared', 'was 19.5 TB shared');
+  assert.equal(p.totals.liveText, '21 TB');
+  assert.equal(p.totals.liveBuyGB, 21000);
+  assert.equal(p.totals.liveGB, 19500, 'the requirement itself is unchanged');
+  assert.equal(p.totals.backupText, '20 TB');
 });

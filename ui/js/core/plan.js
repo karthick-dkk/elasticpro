@@ -42,9 +42,24 @@ export function normaliseInput(i = {}) {
   };
 }
 
-/** 1500 -> "1.50 TB", 12000 -> "12.0 TB", 480 -> "480 GB". */
+/**
+ * A disk size as it is bought: rounded UP, to a whole TB from 1 TB, to a whole GB below it, so a
+ * plan never shows less disk than the arithmetic needs. 2790 -> 3000, 19500 -> 20000, 479.2 -> 480,
+ * 999.5 -> 1000. The exact figure is cut to 6 decimals first, so float noise (19500.000000000004)
+ * does not buy a whole extra TB.
+ */
+export function diskGB(gb) {
+  const g = Math.round(gb * 1e6) / 1e6;
+  const up = Math.ceil(g);
+  return up >= 1000 ? Math.ceil(g / 1000) * 1000 : up;
+}
+
+/** A size that is already whole: 3000 -> "3 TB", 1440 -> "1.44 TB", 480 -> "480 GB". */
+const fmtSize = (gb) => (gb >= 1000 ? `${Math.round(gb / 10) / 100} TB` : `${gb} GB`);
+
+/** A disk size as the plan shows it, rounded up by diskGB: 2790 -> "3 TB", 19500 -> "20 TB", 480 -> "480 GB". */
 export function fmtGB(gb) {
-  return gb >= 1000 ? `${(gb / 1000).toFixed(gb >= 10000 ? 1 : 2)} TB` : `${Math.round(gb)} GB`;
+  return fmtSize(diskGB(gb));
 }
 
 const plus = (n, what) => (n ? `+ ${n} role${n === 1 ? '' : 's'} without ${what}` : 'every role counted');
@@ -97,7 +112,9 @@ export function computePlan(template, rawInput) {
     return c;
   };
 
-  let servers = 0, cpuTotal = 0, ramTotal = 0, unsetCpu = 0, unsetRam = 0, unsetCount = 0, liveGB = 0;
+  // liveGB is what the policy needs; liveBuyGB is what the rows buy (each node's disk rounded up x count),
+  // so the /live disk tile is the sum of the rows it sits above.
+  let servers = 0, cpuTotal = 0, ramTotal = 0, unsetCpu = 0, unsetRam = 0, unsetCount = 0, liveGB = 0, liveBuyGB = 0;
   const offRow = (r, rule, count = 0) => ({ role: r.name, rule, off: true, kind: r.rule, count, countText: String(count), cpu: null, ram: null, root: null,
     liveGB: null, liveText: '—', bkGB: null, bkText: '—', cpuT: null, ramT: null, unset: { count: false, cpu: false, ram: false, root: false } });
 
@@ -113,6 +130,7 @@ export function computePlan(template, rawInput) {
       rowLive = tierGB[r.tier];
       liveText = count ? fmtGB(rowLive / count) : `${fmtGB(rowLive)} in all`;
       liveGB += rowLive;
+      liveBuyGB += count ? count * diskGB(rowLive / count) : diskGB(rowLive);
       if (r === backupRow && backup === 'disk') { rowBk = bkGB; bkText = `${fmtGB(bkGB)} shared`; }
     }
     if (r.rule === 'whenData') {
@@ -148,7 +166,7 @@ export function computePlan(template, rawInput) {
     servers, unsetCount, serversText: servers + (unsetCount ? ` +${unsetCount}` : ''),
     cpu: cpuTotal, unsetCpu, cpuNote: plus(unsetCpu, 'a CPU spec'),
     ram: ramTotal, unsetRam, ramNote: plus(unsetRam, 'a RAM spec'),
-    liveGB, liveText: fmtGB(liveGB),
+    liveGB, liveBuyGB, liveText: fmtSize(liveBuyGB),
     backupLabel: backup === 'disk' ? '/backup disk' : backup === 's3' ? 'S3 backup' : 'ULM archive in S3',
     backupGB: backup === 'disk' ? bkGB : s3GB, backupText: fmtGB(backup === 'disk' ? bkGB : s3GB),
     showBackupCol: backup === 'disk', dataNodes,
