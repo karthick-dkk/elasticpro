@@ -50,7 +50,7 @@ import { rowMenu, ICON } from '../ui/menu.js';
 import { playSection, loadPlay, savePlayWatch, playDisplayCount } from '../ui/play-settings.js';
 import { historyStoreCard, loadHistoryStore, historySupported, saveHistoryStore, discardHistoryStore, historyArmed } from '../ui/history-store.js';
 import { destinationOf, destinationWarning } from '../core/history-store.js';
-import { CFG_PAGES, HOSTED_TABS, LEGACY_SECTIONS, visibleConfig, subLine, resolveRoute, routeOfRest, tabHash, appPageOf,
+import { CFG_PAGES, HOSTED_TABS, LEGACY_SECTIONS, visibleConfig, subLine, resolveRoute, routeShown, needsOf, routeOfRest, tabHash, appPageOf,
   findSettings, SETTING_INDEX, ZABBIX_ROLES_INDEX, DATA_ROUTING_INDEX } from '../core/config-nav.js';
 import { dataRoutingCard, builtinCard, loadDataRouting, saveDataRouting, discardDataRouting, routingStatusNow } from '../ui/data-routing.js';
 import { isSupported as routingSupportedBy, storeStreamRows } from '../core/data-routing.js';
@@ -70,6 +70,10 @@ const CREDENTIAL_LABEL = {
 let host = null;
 
 let core = null;      // last PING
+// The address's route while a tab it names waits on an answer (needsOf, config-nav.js), and
+// which answers are still on their way: `backup` is PING's, `sink` and `history` their loaders'.
+let wanted = null;
+const pending = new Set();
 let trust = null;     // last PINS + TUNNELS
 let sink = null;      // last DELAY_SINK_GET; null until asked, {supported:false} off hosted
 let pol = null;       // last POLICY_GET / POLICY_SET reply; null until asked, {error} if refused
@@ -292,16 +296,46 @@ function arrive(el, appId, mod) {
     }
   }
   // draw() asks for whatever the open tab needs. The sink, the history store and PING are
-  // asked on arrival: their answers decide which tabs exist (Data, System › Backup).
+  // asked on arrival: their answers decide which tabs exist (Data, System › Backup) — so a
+  // route the address names on one of those is kept aside until they have answered.
+  wanted = null;
+  pending.clear();
+  pending.add('backup');
+  if (isAdminCaller()) { pending.add('sink'); pending.add('history'); }
   draw();
   if (mod) mod.render(hostedBody);
   if (isAdminCaller()) {
     loadSink();
     // The baseline starts again only when the store was read, not on every redraw of the card
     // (changing the kind of credential redraws it, and that change must still count).
-    loadHistoryStore(() => { if (host && host.isConnected) draw(); }, () => tracker.reset('history'));
+    loadHistoryStore(() => { if (!answered('history') && host && host.isConnected) draw(); }, () => tracker.reset('history'));
   }
   loadCore();
+}
+
+/**
+ * Resolve the route among what is visible now, keeping the one asked for when a tab it names
+ * is still being asked about (it is not visible until its answer lands).
+ */
+function settleRoute(vis) {
+  if (!routeShown(vis, route) && needsOf(route.page, route.tab).some((n) => pending.has(n))) wanted = { ...route };
+  route = resolveRoute(vis, route.page, route.tab);
+}
+
+/**
+ * An answer landed. Once every answer the route kept aside waits on is in, open it if it is
+ * visible now (a page named without a tab then opens on its first tab, not on whichever tab
+ * answered first); true when that redrew.
+ */
+function answered(need) {
+  pending.delete(need);
+  if (!wanted || needsOf(wanted.page, wanted.tab).some((n) => pending.has(n))) return false;
+  const open = routeShown(visible(), wanted);
+  if (open) route = wanted;
+  wanted = null;
+  if (open) draw();
+  else syncHash();   // not there after all: the address names what is shown, not what was asked
+  return open;
 }
 
 /** The address moved within this page (#/settings/alerts/triggers → …/system/file). */
@@ -311,6 +345,7 @@ export function onRoute() {
   if (!r.page || (r.page === route.page && (r.tab || '') === (route.tab || ''))) return;
   if (route.page === 'system' && route.tab === 'backup') leaveBackup();
   route = { page: r.page, tab: r.tab };
+  wanted = null;   // a choice made while an answer was awaited wins over the one kept aside
   tracker.resetAll();
   discardDataRouting();
   draw();
@@ -321,7 +356,7 @@ async function loadCore() {
   try { core = (await workerStatus()) || core; } catch (_) { /* no core: the card says so */ }
   const v = host && host.querySelector('#cm-version');
   if (v) v.textContent = core && core.version ? `v${core.version}` : 'version not reported';
-  if (backupSupported() && host && host.isConnected) draw();
+  if (!answered('backup') && backupSupported() && host && host.isConnected) draw();
   // The routing panel asks once PING says the core routes its records (admin only).
   if (dataRoutingSupported() && isAdminCaller() && !routingAsked) {
     routingAsked = true;
@@ -353,6 +388,7 @@ async function openTab(pageId, tabId, { field: f = null } = {}) {
   if (same) { if (pendingField) focusField(); return; }
   if (route.page === 'system' && route.tab === 'backup') leaveBackup();
   route = r;
+  wanted = null;   // a click while an answer was awaited wins over the tab kept aside
   tracker.resetAll();
   discardDataRouting();
   polDraft = null;
@@ -362,6 +398,7 @@ async function openTab(pageId, tabId, { field: f = null } = {}) {
 /** The address says which tab is open, so a reload or a copied link comes back to it. */
 function syncHash() {
   if (currentApp !== 'settings' || typeof location === 'undefined') return;
+  if (wanted) return;   // the address names what is still being asked about: a reload must keep it
   const want = tabHash(route.page, route.tab);
   if (location.hash !== want) { try { window.history.replaceState(null, '', want); } catch (_) { /* sandboxed frame */ } }
 }
@@ -418,8 +455,8 @@ function draw() {
       h('div', 'Config-Management is an administrator’s; an operator sees Clusters, Alerts › Automation and Requests › Request Centre.'))));
     return;
   }
-  const r = resolveRoute(vis, route.page, route.tab);
-  route = r;
+  settleRoute(vis);
+  const r = route;
   const page = vis.find((p) => p.id === r.page);
   const tab = page.tabs.find((t) => t.id === r.tab);
   const app = appPageOf(r.page, r.tab);
@@ -892,7 +929,7 @@ async function loadSink() {
     // way there is nothing to offer.
     sink = null;
   }
-  if (host && host.isConnected) draw();
+  if (!answered('sink') && host && host.isConnected) draw();
 }
 
 function sinkField(label, key, opts = {}) {

@@ -146,7 +146,17 @@ export async function bootApp({ JSDOM, uiRoot, bridgeUrl, fleet = true }) {
   };
 
   const realError = console.error;
-  console.error = (...a) => { errors.push('console.error: ' + a.map(String).join(' ').split('\n')[0]); };
+  // Node prints its own process warnings through console.error too — "(node:PID) [CODE]
+  // Warning: …". The one that lands here is MODULE_TYPELESS_PACKAGE_JSON: the UI's modules
+  // are loaded straight into Node by `load`, the repo has no package.json to say they are
+  // ES modules (Node stays out of the app's own build), and Node 25 warns about every
+  // first such file. That is Node talking about the harness, not the page: it goes to the
+  // real stderr, not into `errors`.
+  console.error = (...a) => {
+    const line = a.map(String).join(' ').split('\n')[0];
+    if (/^\(node:\d+\) /.test(line)) { realError(...a); return; }
+    errors.push('console.error: ' + line);
+  };
 
   return {
     window,
