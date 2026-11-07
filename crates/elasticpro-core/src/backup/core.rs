@@ -76,12 +76,17 @@ impl BackupState {
     fn write_kept(&self, name: &str, text: &str) -> Result<String, String> {
         let d = self.dir.as_ref().ok_or("no data directory")?;
         let stem = name.strip_suffix(EXT).unwrap_or(name);
-        // Above every copy made in the same second, never in a gap rotation left: a reused
-        // lower number would sort as the older one and be the next rotated out.
+        // Above every copy made in the same second, of any kind, never in a gap rotation left:
+        // a reused lower number, or a tie with another kind (which then falls to name order,
+        // before-restore < manual < scheduled), would sort as the older one and be the next
+        // rotated out. `age_key` is the one reading of a name's second and number.
+        let (second, _, _) = age_key(name);
         let taken = std::fs::read_dir(d).into_iter().flatten().filter_map(|e| e.ok())
             .filter_map(|e| {
-                let n = e.file_name().to_str()?.strip_prefix(stem)?.strip_suffix(EXT)?.to_string();
-                if n.is_empty() { Some(1) } else { n.strip_prefix('-')?.parse::<u32>().ok() }
+                let f = e.file_name().to_str()?.to_string();
+                if !f.starts_with(NAME_PREFIX) || !f.ends_with(EXT) { return None; }
+                let (t, n, _) = age_key(&f);
+                (t == second).then_some(n)
             })
             .max();
         let chosen = match taken {
@@ -1269,5 +1274,28 @@ impl Core {
                 core.backup_tick_at(crate::volume::schedule::local_now()).await;
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A manual backup kept in the same second as a scheduled one is the newer of the two, so
+    /// a keep of 1 removes the scheduled one, never the copy just made (by name order alone,
+    /// `-manual` sorts before `-scheduled` and was the one rotated out).
+    #[test]
+    fn a_kept_backup_is_newer_than_another_kind_from_the_same_second() {
+        let root = std::env::temp_dir().join(format!("ep-bk-kinds-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let st = BackupState::open(Some(&root), Edition::Hosted);
+        std::fs::create_dir_all(st.dir().unwrap()).unwrap();
+        let sched = st.write_kept(&format!("{NAME_PREFIX}20261107-020000-scheduled{EXT}"), "{}").unwrap();
+        let manual = st.write_kept(&format!("{NAME_PREFIX}20261107-020000-manual{EXT}"), "{}").unwrap();
+        assert_eq!(manual, format!("{NAME_PREFIX}20261107-020000-manual-2{EXT}"));
+        let removed = st.prune(1, "Admin");
+        assert_eq!(removed, vec![sched], "the scheduled copy is the older one");
+        assert!(st.dir().unwrap().join(&manual).exists(), "the copy just made was rotated out");
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
