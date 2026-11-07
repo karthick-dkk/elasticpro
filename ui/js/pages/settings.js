@@ -334,6 +334,7 @@ function answered(need) {
   if (open) route = wanted;
   wanted = null;
   if (open) draw();
+  else syncHash();   // not there after all: the address names what is shown, not what was asked
   return open;
 }
 
@@ -344,6 +345,7 @@ export function onRoute() {
   if (!r.page || (r.page === route.page && (r.tab || '') === (route.tab || ''))) return;
   if (route.page === 'system' && route.tab === 'backup') leaveBackup();
   route = { page: r.page, tab: r.tab };
+  wanted = null;   // a choice made while an answer was awaited wins over the one kept aside
   tracker.resetAll();
   discardDataRouting();
   draw();
@@ -386,6 +388,7 @@ async function openTab(pageId, tabId, { field: f = null } = {}) {
   if (same) { if (pendingField) focusField(); return; }
   if (route.page === 'system' && route.tab === 'backup') leaveBackup();
   route = r;
+  wanted = null;   // a click while an answer was awaited wins over the tab kept aside
   tracker.resetAll();
   discardDataRouting();
   polDraft = null;
