@@ -7,6 +7,8 @@
 - Audit lines give an optional field's plain value, or leave the field out when there is none, instead of Rust's `Some("…")`: `before` on `backup restored` and `backup restore refused`, `via` and `zabbix_role` on `zabbix sign-in code issued`, `source` on the display-link and sign-in refusals, `until`, `was`, `slm`, `ulm` and `expires_at`. The field names are unchanged.
 - docs/HANDBOOK.md said a backup made without a password has `credentials: null` in the file. The file has no `credentials` key; a preview shows `backup.credentials: null` and the `BACKUP_CREATE` reply says `credentials: "none"`, which is what the page and `tools/hosted-check.sh` read. The handbook now says so.
 
+**Clusters, the open row (owner-approved revision).** The strip is one thin row: each box (Cluster health, Endpoint, Jump host, Log bucket) shows its label and value side by side, and the Report button is gone from its end. Tighter spacing: 6 px inside the panel, 4 px between strip, cards and tables, 4 px between cards. Backups (SLM) says only *No policy for logstash-\** (the wildcard matching is unchanged). Nodes: a data node shows one plain `data` chip, its tiers in the chip's tooltip, and the *Data node* legend is gone. ILM: *No policy* (red, with *Indices without a policy ›*) only when Elasticsearch confirms no log index has one; when which policy each index has could not be read, a grey *Not known*, with the permission it needs in the tooltip. The card and the summary's ILM cell read one definition of the two (`ilmPolicyState`).
+
 ## 0.3.55
 
 **Upgrade notes**
