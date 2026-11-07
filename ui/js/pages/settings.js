@@ -58,6 +58,7 @@ import { createTracker } from '../ui/change-tracker.js';
 import { zabbixRolesCards, zabbixRolesSupported as rolesSupported, loadZabbixRoles, saveZabbixRoles, discardZabbixRoles, zabbixRolesChanges } from '../ui/zabbix-roles.js';
 import { parseHash } from '../reports/route.js';
 import { backupBody, backupHeaderActions, leaveBackup, loadBackup, saveBackupSchedule, discardBackupSchedule } from '../ui/backup-panel.js';
+import { logDelayCards, loadLogDelaySettings, saveLevels as saveLdLevels, saveFields as saveLdFields, saveReport as saveLdReport, discardLogDelay } from '../ui/logdelay-settings.js';
 import { BACKUP_INDEX } from '../core/backup-flow.js';
 import { extLink, REPO, ISSUES, AUTHOR_NAME } from '../ui/about.js';
 
@@ -419,7 +420,9 @@ const TABS = {
     line: 'The volume report mailed as an .xlsx, and the mail server that sends it. Columns and sheet layout are set on Reports › Daily & monthly.' },
   'reports/templates': { build: () => templatesTab(), load: () => loadVolumeSection() },
   'data/backend': { build: () => backendTab() },
-  'data/schedule': { build: () => delaySinkCard() },
+  // The measurement (DELAY_SINK_*), then the log delay report's levels, fields and generator (0.3.57, LOGDELAY_SETTINGS_*).
+  'data/schedule': { build: () => [delaySinkCard(), ...logDelayCards(trackedCard, () => draw())],
+    load: () => loadLogDelaySettings(() => { for (const k of ['ld-levels', 'ld-fields', 'ld-report']) tracker.reset(k); if (isOpen('data/schedule')) draw(); }) },
   'play/play': { build: () => playSection(), load: () => loadPlay(() => { tracker.reset('play-watch'); draw(); }) },
   'system/defaults': { build: () => defaultsCard() },
   'system/file': { build: () => systemFileTab(), load: () => confirmCoreGuard(), actions: () => fileActions(),
@@ -437,6 +440,9 @@ tracker.register('zabbix-link', { save: () => saveLink(), discard: () => { token
 tracker.register('zabbix-roles', { save: () => saveZabbixRoles(() => draw()), discard: () => { discardZabbixRoles(); draw(); }, changes: () => zabbixRolesChanges() });
 tracker.register('zabbix-opts', { save: () => saveZabbixOptions(), discard: () => draw() });
 tracker.register('schedule', { save: () => saveSink(), discard: () => draw() });
+tracker.register('ld-levels', { save: () => saveLdLevels(), discard: () => { discardLogDelay(); draw(); } });
+tracker.register('ld-fields', { save: () => saveLdFields(), discard: () => { discardLogDelay(); draw(); } });
+tracker.register('ld-report', { save: () => saveLdReport(), discard: () => draw() });
 tracker.register('routing', { save: () => saveDataRouting(), discard: () => { discardDataRouting(); draw(); } });
 tracker.register('backup-schedule', { save: () => saveBackupSchedule(), discard: () => { discardBackupSchedule(); draw(); } });
 tracker.register('history', { save: () => saveHistoryStore(), discard: () => { discardHistoryStore(); draw(); } });
@@ -953,7 +959,7 @@ function readSink() {
   const chosen = list.map((x) => x.id).filter((id) => { const el = $(`#sink-pick-${id}`); return el && el.checked; });
   return {
     enabled: !!($('#sink-enabled') || {}).checked,
-    destination: (($('#sink-destination') || {}).value) === 'history' ? 'history' : 'cluster',
+    destination: ((v0) => (v0 === 'history' || v0 === 'builtin' ? v0 : 'cluster'))((($('#sink-destination') || {}).value)),
     sinkClusterId: (($('#sink-target') || {}).value || '').trim(),
     clusters: chosen,
     everyHours: Number(v('everyHours')) || 2,
@@ -972,7 +978,7 @@ async function saveSink() {
   const next = readSink();
   // Empty means "every cluster" to the core, which is right for a hand-edited file and
   // wrong for a screen where somebody has just unticked the last box.
-  const toHistory = next.destination === 'history';
+  const toHistory = next.destination === 'history' || next.destination === 'builtin';
   // A config that never had the field saves without it, exactly as before.
   if (!toHistory && c.destination === undefined) delete next.destination;
   if (toHistory) {
@@ -1026,13 +1032,13 @@ function delaySinkCard() {
   const histWarn = destinationWarning(c, sink.historyStore);
   const lock = () => {
     // Choosing the history store hides what only a cluster destination uses.
-    const toHistory = ($('#sink-destination') || {}).value === 'history';
+    const toHistory = ['history', 'builtin'].includes(($('#sink-destination') || {}).value);
     for (const id of ['sink-target-field', 'sink-indexPrefix-field']) { const el = $(`#${id}`); if (el) el.style.display = toHistory ? 'none' : ''; }
-    const note = $('#sink-history-note'); if (note) note.style.display = toHistory ? '' : 'none';
+    const note = $('#sink-history-note'); if (note) note.style.display = ($('#sink-destination') || {}).value === 'history' ? '' : 'none';
   };
 
   return trackedCard('schedule', 'Scheduled log delay', 'Scheduled log delay',
-    c.enabled ? `every ${c.everyHours}h \u2192 ${dest === 'history' ? 'the history store' : (c.sinkClusterId || 'nowhere')}` : 'switched off',
+    c.enabled ? `every ${c.everyHours}h \u2192 ${dest === 'history' ? 'the history store' : dest === 'builtin' ? 'ElasticPro built-in only' : (c.sinkClusterId || 'nowhere')}` : 'switched off',
     h('div', { style: { display: 'grid', gap: '10px' } },
       h('div.muted', { style: { fontSize: '12px' } },
         'The bridge measures each cluster\u2019s log delay on a timer and writes the raw '
@@ -1051,14 +1057,15 @@ function delaySinkCard() {
           h('span.muted', 'Destination'),
           h('select#sink-destination', { onchange: lock },
             h('option', { value: 'cluster', selected: dest === 'cluster' }, 'A monitored cluster (as today)'),
-            h('option', { value: 'history', selected: dest === 'history' }, 'The history store'))),
-        h('label#sink-target-field', { style: { display: dest === 'history' ? 'none' : 'grid', gap: '3px', fontSize: '11.5px' } },
+            h('option', { value: 'history', selected: dest === 'history' }, 'The history store'),
+            h('option', { value: 'builtin', selected: dest === 'builtin' }, 'ElasticPro built-in only (kept 90 days)'))),
+        h('label#sink-target-field', { style: { display: dest !== 'cluster' ? 'none' : 'grid', gap: '3px', fontSize: '11.5px' } },
           h('span.muted', 'Write measurements to'),
           h('select#sink-target', {},
             h('option', { value: '' }, '\u2014 pick a cluster \u2014'),
             ...list.map((x) => h('option', { value: x.id, selected: x.id === c.sinkClusterId }, x.name)))),
         sinkField('Every (hours)', 'everyHours', { type: 'number', min: 1, max: 24, width: '80px' }),
-        sinkField('Index prefix', 'indexPrefix', { title: 'Indices are <prefix>-YYYY.MM', id: 'sink-indexPrefix-field', hidden: dest === 'history' }),
+        sinkField('Index prefix', 'indexPrefix', { title: 'Indices are <prefix>-YYYY.MM', id: 'sink-indexPrefix-field', hidden: dest !== 'cluster' }),
         sinkField('Max devices per run', 'maxDevices', { type: 'number', min: 1, max: 10000, width: '110px' })),
       h('div.muted#sink-history-note', { style: { fontSize: '11.5px', display: dest === 'history' ? '' : 'none' } },
         'Measurements go to <history prefix>-delay-YYYY.MM on the history store, under its own two gates '

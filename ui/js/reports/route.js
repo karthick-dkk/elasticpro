@@ -4,6 +4,7 @@
  *
  *   #/reports            → Overview
  *   #/reports/<section>  → that section
+ *   #/reports/log-delay/… → Log delay, one of its views (core/logdelay-report.js ldRoute)
  *   #/volume, #/volume/… → the same (the page was "Volume report" until 0.3.53; the Zabbix
  *                          menu entry elasticpro.volume and saved links still open #/volume)
  */
@@ -16,6 +17,8 @@ export const REPORT_SECTIONS = Object.freeze([
   { id: 'capacity', label: 'Capacity & retention' },
   { id: 'measure', label: 'Measure size' },
   { id: 'planning', label: 'Planning' },
+  // 0.3.57: the log delay report (docs/LOGDELAY.md) — its own views under #/reports/log-delay/….
+  { id: 'log-delay', label: 'Log delay' },
   { id: 'exports', label: 'Exports & schedules' },
 ]);
 export const DEFAULT_SECTION = 'overview';

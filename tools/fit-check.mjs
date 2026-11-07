@@ -49,6 +49,7 @@
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadPlaywright } from './lib/playwright.mjs';
+import { logDelayAnswer, logDelayData } from './lib/logdelay-fixture.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const arg = (name, fallback) => {
@@ -74,6 +75,8 @@ const VIEW_SEL = '#view .seg button, #view .seg-btn, #view [role=tab], #view .ta
 // Reports is one page of six sections (docs/REPORTS.md); each section is its own route and is measured as a page.
 const PAGES = ['alerts', 'overview', 'indices', 'shards', 'logs', 'console', 'snapshots',
   'reports/overview', 'reports/daily', 'reports/capacity', 'reports/measure', 'reports/planning', 'reports/exports',
+  // Reports › Log delay (0.3.57): its four views, filled from tools/lib/logdelay-fixture.mjs (@c / @d: the first cluster and its worst device).
+  'reports/log-delay', 'reports/log-delay/cluster/@c', 'reports/log-delay/device/@c/@d', 'reports/log-delay/fixes',
   'automation', 'requests', 'accounts', 'settings',
   // Config-Management: each page and tab is its own route (pages/settings.js), measured as a page.
   'settings/clusters/creds', 'settings/clusters/trust', 'settings/zabbix/zabbix', 'settings/alerts/triggers', 'settings/requests/policy',
@@ -210,7 +213,9 @@ async function run(browserName, [vw, vh, framed]) {
   // Answers the fixture cannot give. WHOAMI: a signed-in administrator on the hosted build, so
   // the Accounts page and the API-token dialog are there to be measured. The two Zabbix
   // answers: a certificate to decide about and a pairing code, which a real core would mint.
+  let ldList = [];
   const stub = {
+    DELAY_SINK_GET: { ok: true, supported: true, config: { enabled: true, everyHours: 2, destination: 'builtin', clusters: [], maxDevices: 2000 }, state: { runs: 1, lastOk: true } },
     WHOAMI: { ok: true, authRequired: true, needsBootstrap: false, apiTokens: true, edition: 'hosted', caller: { name: 'qa', role: 'admin' } },
     ZABBIX_LINK_GET: {
       ok: true, supported: true, paired: true, zabbixUrl: 'https://zabbix.corp.internal.example.com', apiUrlIsDefault: true,
@@ -240,6 +245,12 @@ async function run(browserName, [vw, vh, framed]) {
     if (req.method() === 'POST' && req.url() === `${BASE}/bridge`) {
       const t = ((req.postData() || '').match(/"type"\s*:\s*"([A-Z_]+)"/) || [])[1];
       if (t && stub[t]) return route.fulfill({ json: stub[t] });
+      // The log delay report's store is empty on a fresh data directory: its answers come from the fixture.
+      if (t && ldList.length && (t.startsWith('LOGDELAY_') || t.startsWith('REPORT_'))) {
+        let body = {}; try { body = JSON.parse(req.postData() || '{}'); } catch { /* not ours */ }
+        const a = logDelayAnswer(body, ldList);
+        if (a) return route.fulfill({ json: a });
+      }
       return route.continue();
     }
     if (framed && req.resourceType() === 'document') {
@@ -266,6 +277,13 @@ async function run(browserName, [vw, vh, framed]) {
     function done() { mo.disconnect(); clearTimeout(cap); clearTimeout(t); res(); }
   }), { ms, max });
   const goPage = async (id) => {
+    if (id.startsWith('reports/log-delay') && !ldList.length) {
+      ldList = await F.evaluate(async () => (await import('/js/core/state.js')).clusters().map((c) => ({ id: c.id, name: c.name })));
+    }
+    if (id.includes('@c')) {
+      const first = logDelayData(ldList).per[0];
+      id = id.replace('@c', encodeURIComponent(first ? first.c.id : '')).replace('@d', encodeURIComponent(first ? first.rows[0].device : ''));
+    }
     await F.evaluate((id) => { location.hash = `#/${id}`; }, id);
     await sleep(900); await quiet(700, 5000);
     await readWrite();

@@ -7,7 +7,8 @@
 
 import { h } from '../lib/dom.js';
 import { alertCounts } from '../core/alert-tuning.js';
-import { classify, STATUS } from '../core/log-delay.js';
+import { STATUS } from '../core/log-delay.js';
+import { statusFor } from '../core/delay-levels.js';
 import { kpi, unknown, minutes, fitRows, openFor, clockText } from './parts.js';
 import { heldLine } from '../core/alert-groups.js';
 import { toneOfCounts } from '../core/alert-levels.js';
@@ -100,7 +101,7 @@ function tile(ctx, c) {
   const present = nodes && Array.isArray(nodes.present) ? nodes.present.length : (d.health ? d.health.number_of_nodes : null);
   const expected = nodes && Array.isArray(nodes.expected) && nodes.expected.length ? nodes.expected.length : null;
   const delayMin = tileDelayMinutes(ctx, c);
-  const delayTone = delayMin !== null ? STATUS[classify(delayMin, ctx.delayT)].cls : 'grey';
+  const delayTone = delayMin !== null ? STATUS[statusFor(delayMin, ctx.delayT)].cls : 'grey';
   const blink = tileBlink(s, ctx.blink(c.id));
   return h(`div.pl-tile.${s.tone}${blink ? `.${blink}` : ''}`, { dataset: { cluster: c.id } },
     h('div.pl-tname', { title: c.name }, c.name),

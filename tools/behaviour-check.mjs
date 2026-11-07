@@ -1036,7 +1036,7 @@ await go('reports');
   // The page: title, subtitle, the six sections in order, Overview first; the tab reads Reports.
   ok(/^Reports$/.test((doc.querySelector('.rp-head h1') || {}).textContent || ''), 'reports: no "Reports" title');
   ok(/What each cluster takes in, what it keeps, and whether its storage holds it\./.test(doc.body.textContent), 'reports: the subtitle is missing');
-  ok(navLinks().map((a) => a.textContent).join(' · ') === 'Overview · Daily & monthly · Volume by host · Capacity & retention · Measure size · Planning · Exports & schedules',
+  ok(navLinks().map((a) => a.textContent).join(' · ') === 'Overview · Daily & monthly · Volume by host · Capacity & retention · Measure size · Planning · Log delay · Exports & schedules',
     `reports: the section nav reads ${navLinks().map((a) => a.textContent).join(' · ')}`);
   ok(current() === 'overview', `reports: opens on ${current()}, want Overview`);
   ok([...doc.querySelectorAll('#nav a, #nav button')].some((x) => x.dataset.page === "reports" && /Reports$/.test(x.textContent.trim())), 'reports: the tab is not labelled Reports');
@@ -6842,11 +6842,176 @@ await settleFor(300);
   await go('overview');
 }
 
+/* ---------- Reports › Log delay (0.3.57): the four views, their links and filters, and its settings ---------- */
+{
+  // A fresh data directory has an empty store (only the hosted timer fills it), so the filled
+  // pages are answered from tools/lib/logdelay-fixture.mjs, shaped as docs/LOGDELAY.md says.
+  const { logDelayAnswer } = await import(pathToFileURL(path.join(ROOT, 'tools/lib/logdelay-fixture.mjs')).href);
+  const S = await load('core/state.js');
+  const list = S.clusters().map((c) => ({ id: c.id, name: c.name }));
+  const realFetch = globalThis.fetch;
+  const lsent = [];
+  globalThis.fetch = async (input, init) => {
+    const body = init && init.body ? JSON.parse(init.body) : {};
+    if (body.type === 'DELAY_SINK_GET') {
+      return stubReply({ ok: true, supported: true, config: { enabled: true, everyHours: 2, destination: 'builtin', clusters: [], maxDevices: 2000 }, state: { runs: 1, lastOk: true } });
+    }
+    const a = logDelayAnswer(body, list);
+    if (a) { lsent.push(body); return stubReply(a); }
+    return realFetch(input, init);
+  };
+  const view = () => doc.getElementById('view');
+  const ldView = () => { const s = view().querySelector('.ld[data-ld]'); return s ? s.dataset.ld : ''; };
+  const g = (id) => doc.getElementById(id);
+  try {
+    await go('reports');
+    const nav = [...doc.querySelectorAll('.rp-nav a')].find((a) => a.dataset.section === 'log-delay');
+    ok(!!nav, 'log delay: no Log delay in the Reports section nav');
+    press(nav);
+    await waitFor(() => ldView() === 'fleet' && g('ld-by-cluster'), 'log delay: the fleet page did not draw');
+    ok(location.hash === '#/reports/log-delay', `log delay: the address reads ${location.hash}`);
+    const fleet = view();
+    ok(lsent.some((m) => m.type === 'LOGDELAY_SUMMARY' && m.days === 30), 'log delay: the fleet did not ask LOGDELAY_SUMMARY for 30 days');
+    for (const k of ['devices', 'late', 'onTime', 'pct', 'reduced']) ok(!!fleet.querySelector(`[data-kpi="${k}"]`), `log delay: no ${k} tile`);
+    ok(fleet.querySelectorAll('.ld-red').length === 5, 'log delay: the delay-reduced graph is not 2/4/6/12/24 h');
+    ok(fleet.querySelectorAll('.ld-day').length === 30, `log delay: day by day has ${fleet.querySelectorAll('.ld-day').length} days, not 30`);
+    ok(fleet.querySelector('.ld-day.ld-gap'), 'log delay: a day without totals is not drawn as a gap');
+    ok(fleet.querySelectorAll('.ld-ring').length === list.length + 1, 'log delay: not one ring per cluster plus All clusters');
+    if (!g('ld-by-cluster')) throw new Error(`log delay: no fleet page — ${problems.slice(-3).join(' | ')}`);
+    const heads = [...g('ld-by-cluster').querySelectorAll('thead th')].map((t) => t.textContent);
+    ok(heads.join('|') === 'Cluster|Devices|Late now|Today|Below 30 min|30–60 min|Above 60 min|Below 30 min, previous 30 days|Last 30 days|Worst device',
+      `log delay: the By cluster columns read ${heads.join(' · ')}`);
+    ok(g('ld-by-cluster').classList.contains('ld-ctr'), 'log delay: the By cluster table is not centred');
+    ok(/never measured/.test(g('ld-by-cluster').textContent), 'log delay: a cluster never measured does not say so');
+    // Unknown is not zero: the silent and the unmeasurable device.
+    const rowOf = (re) => [...g('ld-devices').querySelectorAll('tbody tr')].find((tr) => re.test(tr.textContent));
+    const silent = rowOf(/silent/); const cant = rowOf(/can.t measure/);
+    ok(silent && !/\b0 min\b/.test(silent.cells[3].textContent) && /—/.test(silent.cells[3].textContent), 'log delay: a silent device shows a delay figure');
+    ok(cant && /can.t measure/.test(cant.cells[3].textContent) && /unknown/.test(cant.cells[8].textContent), 'log delay: a device that cannot be measured reads as measured');
+    ok(/no logs since/.test(silent ? silent.textContent : ''), 'log delay: a silent device does not say since when');
+    // The Devices filter.
+    const before = g('ld-devices').querySelectorAll('tbody tr').length;
+    const f = g('ld-dev-filter'); f.focus(); f.value = 'proxy'; f.dispatchEvent(new window.Event('input', { bubbles: true })); await settleFor(120);
+    const after = [...g('ld-devices').querySelectorAll('tbody tr')];
+    ok(after.length > 0 && after.length < before && after.every((tr) => /proxy/.test(tr.textContent)), `log delay: the device filter left ${after.length} of ${before} rows`);
+    ok(doc.activeElement === g('ld-dev-filter'), 'log delay: typing in the device filter lost the focus');
+    g('ld-dev-filter').value = ''; g('ld-dev-filter').dispatchEvent(new window.Event('input', { bubbles: true })); await settleFor(120);
+    // The period asks again.
+    const per = g('ld-period'); per.value = 'last7'; per.dispatchEvent(new window.Event('change', { bubbles: true })); await settleFor(200);
+    ok(lsent.some((m) => m.type === 'LOGDELAY_SUMMARY' && m.days === 7), 'log delay: Last 7 days did not ask for 7 days');
+    await waitFor(() => g('ld-by-cluster'), 'log delay: the fleet did not draw again after the period');
+    // Export .xlsx is the log_delay report job.
+    g('ld-export').click(); await settleFor(150);
+    ok(lsent.some((m) => m.type === 'REPORT_RUN' && m.kind === 'log_delay' && m.mail === false), 'log delay: Export .xlsx did not queue a log_delay report');
+    // A cluster name opens the cluster.
+    const c0 = list[0].id;
+    press(g('ld-by-cluster').querySelector(`tr[data-cluster="${c0}"] td a`));
+    await waitFor(() => ldView() === 'cluster' && g('ld-cluster-devices'), 'log delay: the cluster link did not open the cluster');
+    ok(location.hash === `#/reports/log-delay/cluster/${encodeURIComponent(c0)}`, `log delay: the cluster address reads ${location.hash}`);
+    const ch = [...g('ld-cluster-devices').querySelectorAll('thead th')].map((t) => t.textContent);
+    for (const col of ['Zone', 'tag1', '@timestamp', 'event_created']) ok(ch.includes(col), `log delay: the cluster devices have no ${col} column (${ch.join(' · ')})`);
+    ok([...doc.querySelectorAll('.rp-nav a')].find((a) => a.dataset.section === 'log-delay').getAttribute('aria-current') === 'page', 'log delay: the section nav does not mark Log delay on the cluster page');
+    // A device opens the device page.
+    const devLink = g('ld-cluster-devices').querySelector('tbody tr td a');
+    const devName = devLink ? devLink.textContent : '';
+    press(devLink);
+    await waitFor(() => ldView() === 'device' && g('ld-graph'), 'log delay: the device link did not open the device');
+    ok(lsent.some((m) => m.type === 'LOGDELAY_DEVICE' && m.device === devName && m.clusterId === c0), 'log delay: the device page did not ask LOGDELAY_DEVICE for that device');
+    const dv = view();
+    ok(!!g('ld-recommendation') && /Forwarder/.test(g('ld-recommendation').textContent), 'log delay: the device page has no Recommendation card');
+    ok(dv.querySelectorAll('.ld-band').length >= 1, 'log delay: no shaded delay band on the graph (the open delay, last 7 days)');
+    ok(/▲/.test(dv.querySelector('.ld-marks').textContent) && /●/.test(dv.querySelector('.ld-marks').textContent), 'log delay: no start/solve markers');
+    ok(dv.querySelectorAll('.ld-ins').length === 5, 'log delay: the insights strip is not five cells');
+    ok(dv.querySelectorAll('.ld-mini').length >= 1, 'log delay: no per-cluster mini charts');
+    ok(g('ld-periods') && /still late/.test(g('ld-periods').textContent), 'log delay: Every delay does not show the open delay as still late');
+    // The filter bar: src_device / wildcards, cluster, dates.
+    const opts = [...g('ld-q-field').options].map((o) => o.value);
+    ok(opts.includes('src_hostname') && opts.includes('src_device'), `log delay: Search by offers ${opts.join(', ')}`);
+    g('ld-q-name').value = ''; g('ld-q-name').dispatchEvent(new window.Event('input', { bubbles: true }));
+    g('ld-q-value').value = 'proxy-*'; g('ld-q-value').dispatchEvent(new window.Event('input', { bubbles: true }));
+    g('ld-q-cluster').value = ''; g('ld-q-cluster').dispatchEvent(new window.Event('change', { bubbles: true }));
+    g('ld-q-show').click();
+    await waitFor(() => g('ld-matches'), 'log delay: Show gave no matches line');
+    const q = lsent.filter((m) => m.type === 'LOGDELAY_SEARCH').at(-1);
+    ok(q && q.field === 'src_hostname' && q.value === 'proxy-*' && !q.clusterIds && q.from && q.to, `log delay: LOGDELAY_SEARCH carried ${JSON.stringify(q)}`);
+    ok(/Matches \d+ devices?/.test(g('ld-matches').textContent) && g('ld-matches').querySelectorAll('a').length > 0, `log delay: the matches read "${g('ld-matches').textContent}"`);
+    // From/To narrow the device page itself.
+    ok(lsent.filter((m) => m.type === 'LOGDELAY_DEVICE').at(-1).from === q.from, 'log delay: Show did not narrow the device to the dates');
+    // All recommendations › opens the fixes.
+    press([...view().querySelectorAll('a')].find((a) => a.textContent === 'All recommendations ›'));
+    await waitFor(() => ldView() === 'fixes' && g('ld-rules'), 'log delay: All recommendations did not open the fixes');
+    ok(lsent.some((m) => m.type === 'LOGDELAY_FIXES' && Array.isArray(m.clusterIds) && m.clusterIds[0] === c0), 'log delay: the fixes were not asked for the cluster');
+    ok(view().querySelectorAll('.ld-fix').length >= 2, 'log delay: no group findings');
+    ok(g('ld-rules').querySelectorAll('tbody tr').length === 6, 'log delay: the rules table is not the six rules');
+    ok(/Not enough evidence|Not known yet/.test(view().textContent), 'log delay: an unknown finding is not said as such');
+    const fd = g('ld-fix-devices').querySelector('tbody tr td a');
+    press(fd);
+    await waitFor(() => ldView() === 'device', 'log delay: a device in Each device did not open its page');
+    // The crumb goes back to the fleet.
+    press([...view().querySelectorAll('.ld-crumbs a')].find((a) => /Log delay/.test(a.textContent)));
+    await waitFor(() => ldView() === 'fleet', 'log delay: the crumb did not go back to the fleet');
+    // The worst-device link on the By cluster table.
+    const worst = g('ld-by-cluster') && g('ld-by-cluster').querySelector('td.mono a');
+    press(worst);
+    await waitFor(() => ldView() === 'device', 'log delay: the worst device link did not open the device');
+
+    /* Config-Management › Data › Scheduled log delay: levels, fields, the report generator. */
+    await go('settings');
+    await settleFor(300);
+    ok(await openCfg('data', 'schedule'), 'log delay settings: no Data › Scheduled log delay');
+    await waitFor(() => g('ldc-delayFrom') && g('ldc-r-to'), 'log delay settings: the levels and the report generator did not draw');
+    ok(!/Check against an index/.test(view().textContent), 'log delay settings: "Check against an index" is offered but the contract has no such message');
+    ok(!g('ldc-r-pdf') && !view().querySelector('#ldc-report input[type="checkbox"][data-label*="PDF"]'), 'log delay settings: a PDF attachment is offered but not built');
+    // Levels that do not climb are refused here, and never reach the core.
+    const n0 = lsent.filter((m) => m.type === 'LOGDELAY_SETTINGS_SET').length;
+    g('ldc-criticalOver').value = '20';
+    await saveViaBar(200);
+    ok(lsent.filter((m) => m.type === 'LOGDELAY_SETTINGS_SET').length === n0, 'log delay settings: levels that do not climb were sent');
+    g('ldc-criticalOver').value = '90'; g('ldc-delayFrom').value = '25';
+    await saveViaBar(250);
+    const lset = lsent.filter((m) => m.type === 'LOGDELAY_SETTINGS_SET').at(-1);
+    ok(lset && lset.settings.levels && lset.settings.levels.delayFrom === 25 && lset.settings.levels.criticalOver === 90 && lset.settings.levels.noDelayUnder === 15,
+      `log delay settings: the levels travelled as ${JSON.stringify(lset && lset.settings)}`);
+    ok(lset && lset.settings.silentAfterHours === 2 && !lset.settings.fields, 'log delay settings: the levels save carried more than the levels');
+    // Fields: an extra column added with Enter, one removed.
+    const add = g('ldc-f-add'); add.value = 'Branch';
+    add.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Enter', bubbles: true })); await settleFor(60);
+    const rm = doc.querySelector('.ldc-chip[data-extra="tag1"] button'); if (rm) rm.click(); await settleFor(60);
+    await saveViaBar(250);
+    const fset = lsent.filter((m) => m.type === 'LOGDELAY_SETTINGS_SET').at(-1);
+    ok(fset && fset.settings.fields && fset.settings.fields.extras.includes('Branch') && !fset.settings.fields.extras.includes('tag1') && !fset.settings.levels,
+      `log delay settings: the fields travelled as ${JSON.stringify(fset && fset.settings)}`);
+    // The report generator: the options as a log_delay schedule.
+    await waitFor(() => g('ldc-r-csv'), 'log delay settings: the report generator is gone after saving');
+    g('ldc-r-to').value = 'noc@example.com, ops@example.com';
+    g('ldc-r-csv').checked = false;
+    g('ldc-r-group').value = 'Zone';
+    g('ldc-r-devices').value = 'all';
+    const col = g('ldc-r-col-median'); if (col) col.checked = true;
+    g('ldc-r-enabled').checked = true;
+    await saveViaBar(250);
+    const rset = lsent.filter((m) => m.type === 'REPORT_SCHEDULE_SET').at(-1);
+    ok(rset && rset.kind === 'log_delay' && rset.enabled === true && rset.to.length === 2 && rset.options && rset.options.csv === false && rset.options.xlsx === true
+      && rset.options.groupBy === 'Zone' && rset.options.devices === 'all' && rset.options.columns.includes('median'),
+      `log delay settings: REPORT_SCHEDULE_SET carried ${JSON.stringify(rset)}`);
+    g('ldc-r-download').click(); await settleFor(150);
+    const run = lsent.filter((m) => m.type === 'REPORT_RUN').at(-1);
+    ok(run && run.kind === 'log_delay' && run.options && run.options.groupBy === 'Zone', `log delay settings: Download now sent ${JSON.stringify(run)}`);
+    // Find a setting reaches the levels.
+    const find = g('cm-find');
+    if (find) { find.value = 'delay levels'; find.dispatchEvent(new window.Event('input', { bubbles: true })); await settleFor(150); }
+    ok(/Delay levels/.test((g('cm-find-results') || {}).textContent || ''), 'log delay settings: Find a setting does not index Delay levels');
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+  await go('overview');
+}
+
 if (problems.length) {
   console.error(`\n${problems.length} problem(s):`);
   for (const p of problems) console.error('  ✗ ' + p);
   process.exit(1);
 }
-console.log('ok: strip, console, shards, the Clusters page (columns, name menu, unreachable rows, expand chevron, alerts link), Reports (sections, Columns menu, Storage plan, Measure size, exports), Indices without Summary, hand-off, refresh, snapshots, tasks, toasts, accounts split and pinned Zabbix roles, the log-delay preflight, a quiet Config page, Config › Volume fields, report jobs and the Reports pill, the mailed report and the mail server, the Request Centre and the redraw gate, the request policy, the coverage bar, the Tasks panel and the console tabs, template management, the Alerts page grouped by cluster with merged repeats, cluster type (badge, Type filter, edit dialog to file keys and CLUSTER_META_SET), Go to, playbooks and the bell, and the default credential (no password asked for a new cluster, promote, never replaced unticked), and Config › Play (links, revoke, exclusion, locked fields, watch rules), and Config › History store (gated switch, test, arm, delay destination), and Play (slides, keys, zoom, takeover, exclusion, display link, an older core), and Reports (Planning recalculates, the backup target, Based on a cluster, CSV; plan templates save and delete; which indices count)');
+console.log('ok: strip, console, shards, the Clusters page (columns, name menu, unreachable rows, expand chevron, alerts link), Reports (sections, Columns menu, Storage plan, Measure size, exports), Indices without Summary, hand-off, refresh, snapshots, tasks, toasts, accounts split and pinned Zabbix roles, the log-delay preflight, a quiet Config page, Config › Volume fields, report jobs and the Reports pill, the mailed report and the mail server, the Request Centre and the redraw gate, the request policy, the coverage bar, the Tasks panel and the console tabs, template management, the Alerts page grouped by cluster with merged repeats, cluster type (badge, Type filter, edit dialog to file keys and CLUSTER_META_SET), Go to, playbooks and the bell, and the default credential (no password asked for a new cluster, promote, never replaced unticked), and Config › Play (links, revoke, exclusion, locked fields, watch rules), and Config › History store (gated switch, test, arm, delay destination), and Play (slides, keys, zoom, takeover, exclusion, display link, an older core), and Reports (Planning recalculates, the backup target, Based on a cluster, CSV; plan templates save and delete; which indices count), and Reports › Log delay (fleet, cluster, device, fixes: links, filters, unknown not zero) with its settings (levels, fields, the report generator)');
 // The pages leave auto-refresh timers and a live tail running; nothing here waits on them.
 process.exit(0);

@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+**Reports › Log delay** (docs/LOGDELAY.md, the owner-approved Main, Cluster, Device and Fix boards): the fleet (totals, the without-delay share, delay reduced over 2/4/6/12/24 h, day by day, delayed devices by cluster, the By cluster table and every device), one cluster with its ECS columns, one device (find by name, src_hostname/src_device or an extra column with wildcards, cluster and dates; insights, start/solve markers, delay by cluster, the recommendation) and the recommended fixes, at `#/reports/log-delay/…`. Silent, can't-measure and days without totals are shown as such, never as 0 or on time. **Config-Management › Data › Scheduled log delay** gains the delay levels, the fields and the log delay report generator (xlsx/csv; no PDF, which the core does not build), and the *ElasticPro built-in only* destination. The UI no longer keeps its own delay thresholds: the Logs & Delay page, Play's cluster alerts and the headless scrape classify on the core's levels, and a cluster whose levels the core has not said reads "levels unknown".
+
 - The bottom status strip (config, clusters, health, request rate, polling mode, tunnels, credits) is removed from every page. Its signals live elsewhere: the top bar keeps the emergency stop with its Resume control and the snapshot pill; Config-Management shows the polling mode, request load, jump-host tunnels, the config path ("loaded once — not remembered") and the About card with the GitHub and Support links.
 
 ## 0.3.56

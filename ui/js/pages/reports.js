@@ -26,6 +26,7 @@ import { planningSection } from '../reports/planning.js';
 import { volumeSummary, resetVolumeSummary, setSummaryMode } from '../reports/daily.js';
 import { volumeAnalysisCard, setVolumeAnalysisField } from '../ui/index-metrics.js';
 import { setReportPanelOpen } from '../ui/report-jobs.js';
+import { logDelaySection, logDelayReset } from '../reports/logdelay.js';
 
 let host = null;
 let visiting = false;
@@ -56,6 +57,7 @@ export function render(el) {
     capacityReset();
     exportsReset();
     hostsReset();
+    logDelayReset();
     planningNode = null;
     focusField = null;
   }
@@ -75,6 +77,7 @@ export function render(el) {
   if (f && f.reports) { ui.section = 'exports'; setReportPanelOpen(true); }
   if (f && f.section && REPORT_SECTIONS.some((s) => s.id === f.section)) ui.section = f.section;
   syncHash();
+  lastHash = location.hash;
   draw();
 }
 
@@ -84,14 +87,19 @@ export function onLeave() { visiting = false; stopFollowing(); }
 /** The shell saw the hash change to another section of this page. */
 export function onRoute() {
   const s = sectionOfHash(location.hash);
-  const moved = s !== ui.section;
+  // Log delay has views under its section (#/reports/log-delay/cluster/<id>, …): a move between them redraws too.
+  const moved = s !== ui.section || (s === 'log-delay' && location.hash !== lastHash);
   ui.section = s;
   syncHash();                   // #/volume/… reads as #/reports/… from here on
+  lastHash = location.hash;
   if (moved) draw();
 }
+let lastHash = '';
 
 function syncHash() {
   const want = sectionHash(ui.section);
+  // A Log delay view keeps its own address under the section's.
+  if (ui.section === 'log-delay' && location.hash.startsWith(`${want}/`)) return;
   if (location.hash !== want) {
     try { history.replaceState(null, '', want); } catch (_) { location.hash = want; }
   }
@@ -154,6 +162,7 @@ function body(list) {
     case 'measure': return measureSection(ctx);
     case 'planning': return planningNode || (planningNode = planningSection({ clusters: list }));
     case 'exports': return exportsSection(ctx);
+    case 'log-delay': return logDelaySection(ctx);
     default: return overviewSection(ctx);
   }
 }
