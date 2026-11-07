@@ -295,8 +295,7 @@ mod tests {
         assert_eq!(s.clusters(), vec![id.to_string()], "the directory name is not the id");
         let first = s.read_tracker(id);
         assert!(first.devices.is_empty());
-        let mut t = Tracker::default();
-        t.last_run_ms = Some(42);
+        let t = Tracker { last_run_ms: Some(42), ..Default::default() };
         s.write_tracker(id, &t).unwrap();
         assert_eq!(s.read_tracker(id).last_run_ms, Some(42), "a write replaces the cached copy");
         assert!(Arc::ptr_eq(&s.read_tracker(id), &s.read_tracker(id)), "reads share one parsed copy");

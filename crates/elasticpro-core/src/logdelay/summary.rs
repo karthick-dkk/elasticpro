@@ -464,7 +464,7 @@ mod tests {
         let a_week_ago = t0 + 30 * 60_000 - crate::logdelay::state::FORGET_MS;
         t.apply(a_week_ago, vec![reading("gone", Some(50.0), a_week_ago, "dc1")], &l, 2 * H);
         t.apply(t0 + 5 * H, vec![reading("ok", Some(1.0), t0 + 5 * H, "dc1")], &l, 2 * H);
-        assert!(t.devices.get("gone").is_none() && t.episodes[0].ended_ms == Some(t0 + 5 * H));
+        assert!(!t.devices.contains_key("gone") && t.episodes[0].ended_ms == Some(t0 + 5 * H));
         let c = ClusterInput { id: "p".into(), name: "P".into(), tracker: Arc::new(t), daily: BTreeMap::new(), levels: l };
         let late_now = windows(&[c.tracker.as_ref()], time::local_date(now), 2, (t0 + 7 * H).max(now)).iter()
             .filter(|w| w["from"].as_i64().unwrap() >= t0 + 6 * H).map(|w| w["stillLate"].as_u64().unwrap()).sum::<u64>();
