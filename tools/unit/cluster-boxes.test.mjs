@@ -154,7 +154,16 @@ test('ILM card: managed / error / no policy, the pill and when the Indices link 
   assert.equal(B.ilmCard({ ilm: { operation_mode: 'STOPPED' } }, 'logstash-*').pill.text, 'Stopped', 'stopped is known even when the policies are not');
   assert.equal(B.ilmCard({ ilm: { operation_mode: 'STOPPED' } }, 'logstash-*').headline, 'Not known');
   assert.deepEqual([B.ilmCard({}, 'logstash-*').pill.text, B.ilmCard({}, 'logstash-*').pill.tone], ['Not known', 'grey']);
-  assert.equal(B.ilmCard(ilmData({ 'other-1': 'p' }), 'logstash-*').pill.text, 'No log index');
+  // No log index listed is not "none": _settings lists only what the account may see (a missing privilege answers {}).
+  for (const of of [{}, { 'other-1': 'p' }]) {
+    const c = B.ilmCard(ilmData(of), 'logstash-*');
+    assert.deepEqual([c.known, c.state, c.pill.tone, c.pill.text, c.headline], [false, 'unknown', 'grey', 'Not known', 'Not known'], JSON.stringify(of));
+    assert.match(c.pill.title, /^No open logstash-\* index was listed.*view_index_metadata on logstash-\*/);
+  }
+  // The latest ask failed: the earlier answer is kept but never shown as current.
+  const failed = B.ilmCard({ ...ilmData({ 'logstash-1': null }), ilmOfIndexFailed: true }, 'logstash-*');
+  assert.deepEqual([failed.state, failed.pill.text], ['unknown', 'Not known']);
+  assert.match(failed.why, /^The latest ask .* failed/);
 });
 
 const slmData = (policies, mode = 'RUNNING') => ({ slmStatus: { operation_mode: mode }, slm: policies });

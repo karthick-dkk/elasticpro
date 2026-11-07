@@ -135,22 +135,37 @@ export function ilmCoverage(d, pattern) {
     managed: names.length - unmanaged.length, unmanaged, policies };
 }
 
+/** What every ILM/SLM pill and headline says when the answer is not known (cell, card, sort). */
+export const NOT_KNOWN = 'Not known';
+
 /**
  * Do the log indices have an ILM policy? The ONE definition of "not known" versus "none": the
  * Clusters ILM cell (lifecycleView) and the open row's ILM card (cluster-boxes.js ilmCard) both
  * read it, so neither can call an unread answer "No policy".
  *   unknown — which policy each index has could not be read (ilmOfIndex null: no answer, or one
- *             that leaves the indices without a policy out). Never shown as "none".
- *   empty   — read, and there is no open log index.
- *   none    — read: Elasticsearch confirms no open log index has a policy.
+ *             that leaves the indices without a policy out); or the latest ask failed and only
+ *             an earlier answer is kept (state.js `ilmOfIndexFailed`); or NO log index was
+ *             listed. That last one is not "there is none": `_settings` on a wildcard lists only
+ *             the indices this account may see, so a missing view_index_metadata answers `{}`
+ *             with HTTP 200, and nothing on the page lists the indices without that filter.
+ *   none    — read: Elasticsearch listed the open log indices and none has a policy.
  *   some    — read: some have one, some do not.
  *   all     — read: every open log index has one.
- * → { state, cov (ilmCoverage), unread: the permission sentence, for a tooltip, when unknown }
+ * → { state, cov (ilmCoverage), unread: why it is not known (a clause, for a tooltip) or null }
  */
 export function ilmPolicyState(d, pattern) {
   const cov = ilmCoverage(d, pattern);
+  const logs = logsOf(pattern);
   if (!cov.known) return { state: 'unknown', cov, unread: ilmUnreadWhy(pattern) };
-  const state = !cov.total ? 'empty' : !cov.managed ? 'none' : cov.unmanaged.length ? 'some' : 'all';
+  if (d.ilmOfIndexFailed) {
+    return { state: 'unknown', cov,
+      unread: `the latest ask for which policy each ${logs} index has failed, and the earlier answer is not shown as current` };
+  }
+  if (!cov.total) {
+    return { state: 'unknown', cov,
+      unread: `no open ${logs} index was listed, and Elasticsearch lists only the indices this account may see, so "none" cannot be told from a missing view_index_metadata on ${logs}` };
+  }
+  const state = !cov.managed ? 'none' : cov.unmanaged.length ? 'some' : 'all';
   return { state, cov, unread: null };
 }
 
@@ -193,7 +208,7 @@ export function lifecycleView(kind, d, pattern, cluster = null) {
     return { tone: 'grey', word: 'Not used', covered: null, why: `${ulmLabel(cluster)}. ${ULM_WHY}` };
   }
   const mode = kind === 'ILM' ? d && d.ilm && d.ilm.operation_mode : d && d.slmStatus && d.slmStatus.operation_mode;
-  if (!mode) return { tone: 'grey', word: 'Unknown', covered: null, why: `${kind} status has not been read.` };
+  if (!mode) return { tone: 'grey', word: NOT_KNOWN, covered: null, why: `${kind} status has not been read.` };
   const word = modeWord(mode);
   if (!isRunning(mode)) return { tone: 'red', word, covered: false, why: `${kind} is ${word.toLowerCase()}: nothing is managed until it is started again.` };
   const logs = logsOf(pattern);
@@ -201,7 +216,6 @@ export function lifecycleView(kind, d, pattern, cluster = null) {
     // The cell stays a short pill; the sentence is its tooltip (the card reads the same state).
     const { state, cov: c, unread } = ilmPolicyState(d, pattern);
     if (state === 'unknown') return { tone: 'grey', word: 'Running ?', covered: null, why: `ILM is running, but ${unread}.` };
-    if (state === 'empty') return { tone: 'red', word, covered: false, why: `ILM is running, but there is no open ${logs} index for it to manage.` };
     if (state === 'none' || state === 'some') return { tone: 'red', word, covered: false,
       why: `ILM is running, but ${c.unmanaged.length} of ${c.total} open ${logs} indices ${c.unmanaged.length === 1 ? 'has' : 'have'} no ILM policy: ${listOf(c.unmanaged)}` };
     return { tone: 'green', word, covered: true,

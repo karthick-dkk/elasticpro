@@ -27,7 +27,7 @@ import { openClusterAlerts } from '../core/alert-goto.js';
 import { diskAgainstWatermarks } from '../core/disk-balance.js';
 // Why a cluster cannot be reached: one definition, shared with the Alerts page's unreachable lines.
 import { unreachableReason } from '../core/alert-groups.js';
-import { ilmErrorsOf, slmErrorsOf, ilmErrorTitle, slmErrorTitle, lifecycleView, logPatternOf } from '../core/lifecycle-errors.js';
+import { ilmErrorsOf, slmErrorsOf, ilmErrorTitle, slmErrorTitle, lifecycleView, logPatternOf, NOT_KNOWN } from '../core/lifecycle-errors.js';
 import { nodeFreeBytes, isDataNode, roleChips, nodesSummary, problemIndices, problemButtonText,
          unassignedByIndex, unassignedText, explainLine, reasonFor, donutSegments, shardCard, ilmCard, slmCard } from '../core/cluster-boxes.js';
 import { repoOverview } from '../core/snapshot-evidence.js';
@@ -69,7 +69,7 @@ export const SORTS = {
 /** The cluster's own log index pattern (logstash-* unless it says otherwise). */
 export const logPattern = (r) => logPatternOf(r.c, state.defaults);
 /** The pill's word, then red (not looking after the logs) ahead of green, then errors ahead of clean. */
-const lifecycleSortKey = (v, errs) => (v.word === 'Unknown' ? null : `${v.word}|${v.tone === 'red' ? 0 : v.tone === 'grey' ? 1 : 2}|${errs ? 0 : 1}`);
+const lifecycleSortKey = (v, errs) => (v.word === NOT_KNOWN ? null : `${v.word}|${v.tone === 'red' ? 0 : v.tone === 'grey' ? 1 : 2}|${errs ? 0 : 1}`);
 const known = (v) => (typeof v === 'number' && v >= 0 ? v : null);
 /** The sort keys that still mean something for a cluster that is not answering. */
 const DOWN_KEEPS = new Set(['name', 'health', 'alerts']);

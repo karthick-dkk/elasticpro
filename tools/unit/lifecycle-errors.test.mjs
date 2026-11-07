@@ -101,15 +101,18 @@ test('ILM is green only when every open log index has a policy; unknown is grey,
   assert.deepEqual([some.tone, some.word, some.covered], ['red', 'Running', false]);
   assert.match(some.why, /2 of 3 open logstash-\* indices have no ILM policy: logstash-b, logstash-c/);
   assert.match(v({ ...managed(['logstash-a']), 'logstash-b': null }).why, /1 of 2 open logstash-\* indices has no ILM policy: logstash-b/);
+  // No log index listed: possibly a missing privilege (_settings answers {} with 200), so not known — not red.
   const none = v(managed(['metrics-1']));
-  assert.deepEqual([none.tone, none.covered], ['red', false]);
-  assert.match(none.why, /no open logstash-\* index/);
+  assert.deepEqual([none.tone, none.word, none.covered], ['grey', 'Running ?', null]);
+  assert.match(none.why, /no open logstash-\* index was listed.*view_index_metadata/);
+  assert.equal(v({}).covered, null, 'an empty _settings answer is not known');
   const unknown = v(null);
   assert.deepEqual([unknown.tone, unknown.word, unknown.covered], ['grey', 'Running ?', null]);
   assert.match(unknown.why, /view_index_metadata/);
   assert.deepEqual([v(managed(['logstash-a']), { operation_mode: 'STOPPED' }).tone, v(managed(['logstash-a']), { operation_mode: 'STOPPED' }).word], ['red', 'Stopped']);
   assert.equal(v(managed(['logstash-a']), { operation_mode: 'STOPPING' }).word, 'Stopping');
-  assert.deepEqual([L.lifecycleView('ILM', {}, 'logstash-*').tone, L.lifecycleView('ILM', {}, 'logstash-*').word], ['grey', 'Unknown']);
+  assert.deepEqual([L.lifecycleView('ILM', {}, 'logstash-*').tone, L.lifecycleView('ILM', {}, 'logstash-*').word], ['grey', 'Not known']);
+  assert.equal(L.lifecycleView('SLM', {}, 'logstash-*').word, 'Not known');
   // The cluster's own pattern decides, and a comma list counts every part.
   assert.equal(L.ilmCoverage({ ilmOfIndex: { 'filebeat-1': null, 'logstash-1': 'p' } }, 'logstash-*').ok, true);
   assert.equal(L.ilmCoverage({ ilmOfIndex: { 'filebeat-1': null, 'logstash-1': 'p' } }, 'logstash-*, filebeat-*').ok, false);
@@ -120,17 +123,32 @@ test('ILM policy state: one definition of "not known" versus "none", read by the
   assert.equal(st(null).state, 'unknown', 'not read is not known');
   assert.match(st(null).unread, /view_index_metadata on logstash-\*/);
   assert.equal(st(undefined).state, 'unknown');
-  assert.equal(st({ 'metrics-1': 'p' }).state, 'empty');
+  // {} is what a missing view_index_metadata answers (HTTP 200): not known, never "empty" or "none".
+  assert.equal(st({}).state, 'unknown');
+  assert.match(st({}).unread, /no open logstash-\* index was listed.*view_index_metadata on logstash-\*/);
+  assert.equal(st({ 'metrics-1': 'p' }).state, 'unknown', 'none of the pattern listed: not known');
+  assert.equal(L.ilmPolicyState({ ilm: RUN, ilmOfIndex: { 'logstash-a': null }, ilmOfIndexFailed: true }, 'logstash-*').state, 'unknown',
+    'the latest ask failed: the kept answer is not current');
   assert.equal(st({ 'logstash-a': null, 'logstash-b': null, 'metrics-1': 'p' }).state, 'none', 'Elasticsearch listed them, none has a policy');
   assert.equal(st({ 'logstash-a': 'p', 'logstash-b': null }).state, 'some');
   assert.equal(st({ 'logstash-a': 'p' }).state, 'all');
   assert.equal(st({ 'logstash-a': 'p' }).unread, null);
-  // The cell and the card agree on every state: the cell's grey "Running ?" is the card's "Not known".
-  for (const of of [null, { 'metrics-1': 'p' }, { 'logstash-a': null }, { 'logstash-a': 'p', 'logstash-b': null }, { 'logstash-a': 'p' }]) {
-    const d = { ilm: RUN, ilmOfIndex: of };
-    const view = L.lifecycleView('ILM', d, 'logstash-*'), card = B.ilmCard(d, 'logstash-*');
-    assert.equal(view.covered === null, card.state === 'unknown', `cell and card disagree for ${JSON.stringify(of)}`);
-    assert.equal(card.pill.text === 'No policy', L.ilmPolicyState(d, 'logstash-*').state === 'none');
+  // The cell and the card agree in every mode — running, stopped, stopping, not read — and every coverage:
+  // grey on one is grey on the other, Not known is said by both, Stopped by both, No policy only when confirmed.
+  for (const mode of [RUN, { operation_mode: 'STOPPED' }, { operation_mode: 'STOPPING' }, undefined]) {
+    for (const of of [null, {}, { 'metrics-1': 'p' }, { 'logstash-a': null }, { 'logstash-a': 'p', 'logstash-b': null }, { 'logstash-a': 'p' }]) {
+      for (const failed of [false, true]) {
+        const d = { ilm: mode, ilmOfIndex: of, ilmOfIndexFailed: failed && !!of };
+        const view = L.lifecycleView('ILM', d, 'logstash-*'), card = B.ilmCard(d, 'logstash-*');
+        const at = `${JSON.stringify(mode)} ${JSON.stringify(of)} failed=${failed}`;
+        assert.equal(view.tone === 'grey', card.pill.tone === 'grey', `tone: cell ${view.tone} / card ${card.pill.tone} for ${at}`);
+        if (card.pill.text === 'Not known') assert.ok(['Not known', 'Running ?'].includes(view.word), `cell says ${view.word} for ${at}`);
+        if (view.word === 'Not known') assert.equal(card.pill.text, 'Not known', at);
+        assert.equal(view.word === 'Stopped' || view.word === 'Stopping', card.pill.text === 'Stopped', `stopped: cell ${view.word} / card ${card.pill.text} for ${at}`);
+        if (view.covered === null) assert.equal(card.state, 'unknown', `cell not known, card ${card.state} for ${at}`);
+        assert.equal(card.pill.text === 'No policy', L.ilmPolicyState(d, 'logstash-*').state === 'none' && view.word === 'Running', at);
+      }
+    }
   }
 });
 
@@ -183,9 +201,29 @@ test('ilmOfIndex: the uuid says the index was listed; an answer without it (an o
   assert.deepEqual(S.ilmOfIndex(res({ a: { settings: { index: { uuid: 'u1', lifecycle: { name: 'p' } } } }, b: { settings: { index: { uuid: 'u2' } } } })),
     { a: 'p', b: null });
   assert.equal(S.ilmOfIndex(res({ a: { settings: { index: { lifecycle: { name: 'p' } } } } })), null, 'no uuid: the unmanaged ones were filtered out');
-  assert.deepEqual(S.ilmOfIndex(res({})), {}, 'no open log index at all is known: none');
+  assert.deepEqual(S.ilmOfIndex(res({})), {}, 'an empty listing stays empty here; ilmPolicyState calls it not known');
   assert.equal(S.ilmOfIndex({ ok: false }), null);
   assert.equal(S.ilmOfIndex(null), null);
+});
+
+test('a failed ilm_assign keeps the last answer but flags it; not fetched yet is not a failure', () => {
+  const none = { ok: false, unknown: true };
+  const raw = (ilmOfIndices) => ({ root: { ok: true, value: {} }, health: { ok: true, value: { status: 'green' } }, alloc: none, nodes: none,
+    repos: none, slm: none, slmStatus: none, ilm: { ok: true, value: RUN }, ilmErr: none, repoPaths: none, ilmPolicies: none,
+    clusterSettings: none, ilmOfIndices });
+  const listed = { ok: true, value: { 'logstash-a': { settings: { index: { uuid: 'u' } } } } };
+  const first = S.buildClusterData('c1', {}, raw(listed));
+  assert.deepEqual([first.ilmOfIndex, first.ilmOfIndexFailed], [{ 'logstash-a': null }, false]);
+  assert.equal(L.ilmPolicyState(first, 'logstash-*').state, 'none');
+  const failed = S.buildClusterData('c1', first, raw({ ok: false, error: new Error('403') }));
+  assert.deepEqual([failed.ilmOfIndex, failed.ilmOfIndexFailed], [{ 'logstash-a': null }, true], 'kept, flagged');
+  assert.equal(L.ilmPolicyState(failed, 'logstash-*').state, 'unknown', 'never "No policy" from an answer the latest ask could not confirm');
+  const stale = S.buildClusterData('c1', first, raw({ ...listed, stale: 'error' }));
+  assert.equal(stale.ilmOfIndexFailed, true, 'the fleet cache kept its last good body after a failed fetch');
+  const notYet = S.buildClusterData('c1', first, raw({ ok: false, unknown: true }));
+  assert.equal(notYet.ilmOfIndexFailed, false, 'not fetched yet is not a failure');
+  const again = S.buildClusterData('c1', failed, raw(listed));
+  assert.equal(again.ilmOfIndexFailed, false, 'a good answer clears it');
 });
 
 test('the CSV says whether each covers the log indices: yes, no, or empty when not known', () => {
