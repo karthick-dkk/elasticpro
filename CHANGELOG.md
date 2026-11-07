@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- **Log delay, re-checked:** the worker no longer builds reports from a days-old tracker (the cached tracker is checked against the file on every read); the Forwarder/Parser fix rule counts only devices measured while the group was late, and claims "the others were on time" only when at least one of them was; an admin limited to some clusters no longer reads a run error naming a cluster outside their view; the device page's "Delay by cluster" panel reads each cluster's daily totals instead of every tracker.
+
 ## 0.3.57
 
 **Upgrade notes**
