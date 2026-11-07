@@ -282,7 +282,11 @@ export function clusterLineText(l) {
 }
 
 /** The report a job builds, in words: every job carries `reportKind` (absent before 0.3.54: the volume report). */
-export const jobKindLabel = (job) => kindOf((job && (job.reportKind || job.report)) || 'volume').label;
+export const jobKindLabel = (job) => {
+  const k = (job && (job.reportKind || job.report)) || 'volume';
+  // The log delay report (0.3.57) is built from Reports › Log delay and Config › Data, not from this list.
+  return k === 'log_delay' ? 'Log delay report' : kindOf(k).label;
+};
 
 /** The sort string for a column and direction. */
 export const sortKey = (col, dir) => `${col}:${dir === 'desc' ? 'desc' : 'asc'}`;
