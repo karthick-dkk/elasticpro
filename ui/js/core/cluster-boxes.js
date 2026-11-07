@@ -15,7 +15,7 @@
  */
 
 import { shardAllocation, nodeTier, TIERS } from './cluster-detail.js';
-import { ilmCoverage, ilmErrorsOf, slmCoverage, logsOf } from './lifecycle-errors.js';
+import { ilmPolicyState, ilmErrorsOf, slmCoverage, logsOf } from './lifecycle-errors.js';
 
 /* ----------------------------------- disks ----------------------------------- */
 
@@ -209,22 +209,29 @@ export function shardCard(health) {
 }
 
 /**
- * The ILM card for the cluster's log indices (`pattern`).
- * → { known: false, pill } when what each index has could not be read, else
- *   { known: true, pill, managed, total, parts, noPolicy: [names], errors: n, link: bool }.
+ * The ILM card for the cluster's log indices (`pattern`). "Not known" and "No policy" come from
+ * ONE definition, lifecycle-errors.js ilmPolicyState, which the summary's ILM cell reads too:
+ * an answer that could not be read is never shown as "No policy" (unknown is not zero).
+ * → { known: false, state: 'unknown', pill, headline: 'Not known', why } when ILM's mode or which
+ *     policy each log index has could not be read — `why` goes in a tooltip, not on the card;
+ *   { known: true, state: 'none', pill: No policy (red), headline: 'No policy for <logs>', logs, … }
+ *     when Elasticsearch confirms no open log index has a policy;
+ *   { known: true, state, pill, managed, total, parts, noPolicy: [names], errors: n, link: bool } else.
  * `managed` counts every log index under a policy (as the board's "42/42 managed" does); the
  * donut splits those into without-error and in-error. The Indices link is only offered when
  * some log index has no policy and none is in error (the owner's call, 2026-11-05).
  */
 export function ilmCard(d, pattern) {
+  const notKnown = (why) => ({ tone: 'grey', text: 'Not known', title: why });
   const mode = d && d.ilm && d.ilm.operation_mode;
-  if (!mode) return { known: false, pill: { tone: 'grey', text: 'Unknown' }, why: 'ILM status has not been read.' };
+  if (!mode) return { known: false, state: 'unknown', pill: notKnown('ILM status has not been read.'), headline: 'Not known', why: 'ILM status has not been read.' };
   const running = String(mode).toUpperCase() === 'RUNNING';
-  const cov = ilmCoverage(d, pattern);
+  const st = ilmPolicyState(d, pattern);
+  const cov = st.cov;
   const errs = ilmErrorsOf(d, pattern);
-  if (!cov.known) {
-    return { known: false, pill: running ? { tone: 'grey', text: 'Running ?' } : { tone: 'red', text: 'Stopped' },
-      why: `Which policy each ${logsOf(pattern)} index has could not be read (it needs view_index_metadata on ${logsOf(pattern)}).` };
+  if (st.state === 'unknown') {
+    const why = `${st.unread.charAt(0).toUpperCase()}${st.unread.slice(1)}.`;
+    return { known: false, state: 'unknown', pill: running ? notKnown(why) : { tone: 'red', text: 'Stopped' }, headline: 'Not known', why };
   }
   const withoutError = Math.max(0, cov.managed - errs.count);
   const parts = [{ key: 'ok', label: 'Managed', n: withoutError }, { key: 'err', label: 'ILM error', n: errs.count },
@@ -232,11 +239,14 @@ export function ilmCard(d, pattern) {
   let pill;
   if (!running) pill = { tone: 'red', text: 'Stopped' };
   else if (errs.count) pill = { tone: 'yellow', text: plural(errs.count, 'error', 'errors') };
-  else if (!cov.total) pill = { tone: 'red', text: 'No log index' };
-  else if (cov.unmanaged.length) pill = { tone: 'red', text: 'Logs not covered' };
+  else if (st.state === 'empty') pill = { tone: 'red', text: 'No log index' };
+  else if (st.state === 'none') pill = { tone: 'red', text: 'No policy' };
+  else if (st.state === 'some') pill = { tone: 'red', text: 'Logs not covered' };
   else pill = { tone: 'green', text: 'Healthy' };
-  return { known: true, pill, managed: cov.managed, total: cov.total, parts, noPolicy: cov.unmanaged, errors: errs.count,
+  const out = { known: true, state: st.state, pill, managed: cov.managed, total: cov.total, parts, noPolicy: cov.unmanaged, errors: errs.count,
     link: cov.unmanaged.length > 0 && errs.count === 0 };
+  if (st.state === 'none') { out.logs = logsOf(pattern); out.headline = `No policy for ${out.logs}`; }
+  return out;
 }
 
 /* --------------------------------- Backups (SLM) --------------------------------- */

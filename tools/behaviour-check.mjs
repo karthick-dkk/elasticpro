@@ -389,7 +389,20 @@ await go('overview');
     const cards = [...det.querySelectorAll('.cl-card')].map((c) => c.getAttribute('data-tile'));
     ok(JSON.stringify(cards) === JSON.stringify(['shards', 'ilm', 'slm', 'activity']), `expanded row: the cards are ${cards.join(', ')}`);
     ok(!det.querySelector('.cl-tile'), 'expanded row: the old tiles are still drawn');
-    ok([...det.querySelectorAll('.cl-card svg.cl-donut')].length === 2, 'expanded row: the Shard allocation and ILM cards are not donuts');
+    ok(!!det.querySelector('.cl-card[data-tile="shards"] svg.cl-donut'), 'expanded row: the Shard allocation card is not a donut');
+    // ILM: a donut when Elasticsearch said which policy each log index has; "Not known" (grey, the
+    // permission sentence in its tooltip) when it could not be read — never "No policy" then.
+    // The mock's _settings answer carries no index uuid, so its ILM coverage is unknown.
+    const ilmC = det.querySelector('.cl-card[data-tile="ilm"]');
+    const ilmPill = ilmC && ilmC.querySelector('.cl-card-pill');
+    if (ilmC && !ilmC.querySelector('svg.cl-donut')) {
+      const unknownIlm = ilmPill && /^Not known$/.test(txt(ilmPill));
+      ok(unknownIlm || /No policy/.test(txt(ilmC)) || /Stopped/.test(txt(ilmC)), `expanded row: the ILM card has no donut and says "${ilmC && txt(ilmC)}"`);
+      if (unknownIlm) {
+        ok(ilmPill.classList.contains('grey') && /view_index_metadata/.test(ilmPill.title || ''), 'expanded row: the ILM "Not known" pill is not grey with the permission in its tooltip');
+        ok(!/No policy|could not be read/.test(txt(ilmC)), `expanded row: the unknown ILM card says "${txt(ilmC)}"`);
+      }
+    }
     const shardHead = det.querySelector('.cl-card[data-tile="shards"] .cl-dhead');
     ok(!!shardHead && /\d+(\.\d)?%\s*active/.test(txt(shardHead)), `expanded row: the shard headline is "${shardHead && txt(shardHead)}", not "NN.N% active" beside the ring`);
     const bk = det.querySelector('.cl-card[data-tile="slm"]');

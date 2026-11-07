@@ -136,6 +136,31 @@ export function ilmCoverage(d, pattern) {
 }
 
 /**
+ * Do the log indices have an ILM policy? The ONE definition of "not known" versus "none": the
+ * Clusters ILM cell (lifecycleView) and the open row's ILM card (cluster-boxes.js ilmCard) both
+ * read it, so neither can call an unread answer "No policy".
+ *   unknown — which policy each index has could not be read (ilmOfIndex null: no answer, or one
+ *             that leaves the indices without a policy out). Never shown as "none".
+ *   empty   — read, and there is no open log index.
+ *   none    — read: Elasticsearch confirms no open log index has a policy.
+ *   some    — read: some have one, some do not.
+ *   all     — read: every open log index has one.
+ * → { state, cov (ilmCoverage), unread: the permission sentence, for a tooltip, when unknown }
+ */
+export function ilmPolicyState(d, pattern) {
+  const cov = ilmCoverage(d, pattern);
+  if (!cov.known) return { state: 'unknown', cov, unread: ilmUnreadWhy(pattern) };
+  const state = !cov.total ? 'empty' : !cov.managed ? 'none' : cov.unmanaged.length ? 'some' : 'all';
+  return { state, cov, unread: null };
+}
+
+/** Why "which policy" is not known: "which policy each logstash-* index has could not be read (it needs view_index_metadata on logstash-*)". */
+export function ilmUnreadWhy(pattern) {
+  const logs = logsOf(pattern);
+  return `which policy each ${logs} index has could not be read (it needs view_index_metadata on ${logs})`;
+}
+
+/**
  * Does SLM look after the log indices: a scheduled policy whose indices take them?
  * `d.slm` is the policy list (undefined when not read). → { known, ok, policies: [ids], others: [ids] }
  */
@@ -173,11 +198,11 @@ export function lifecycleView(kind, d, pattern, cluster = null) {
   if (!isRunning(mode)) return { tone: 'red', word, covered: false, why: `${kind} is ${word.toLowerCase()}: nothing is managed until it is started again.` };
   const logs = logsOf(pattern);
   if (kind === 'ILM') {
-    const c = ilmCoverage(d, pattern);
-    if (!c.known) return { tone: 'grey', word: 'Running ?', covered: null,
-      why: `ILM is running, but which policy each ${logs} index has could not be read (it needs view_index_metadata on ${logs}).` };
-    if (!c.total) return { tone: 'red', word, covered: false, why: `ILM is running, but there is no open ${logs} index for it to manage.` };
-    if (c.unmanaged.length) return { tone: 'red', word, covered: false,
+    // The cell stays a short pill; the sentence is its tooltip (the card reads the same state).
+    const { state, cov: c, unread } = ilmPolicyState(d, pattern);
+    if (state === 'unknown') return { tone: 'grey', word: 'Running ?', covered: null, why: `ILM is running, but ${unread}.` };
+    if (state === 'empty') return { tone: 'red', word, covered: false, why: `ILM is running, but there is no open ${logs} index for it to manage.` };
+    if (state === 'none' || state === 'some') return { tone: 'red', word, covered: false,
       why: `ILM is running, but ${c.unmanaged.length} of ${c.total} open ${logs} indices ${c.unmanaged.length === 1 ? 'has' : 'have'} no ILM policy: ${listOf(c.unmanaged)}` };
     return { tone: 'green', word, covered: true,
       why: `ILM is running and all ${c.total} open ${logs} indices are under a policy (${listOf(c.policies, 3)}).` };

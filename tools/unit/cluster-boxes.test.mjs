@@ -138,12 +138,22 @@ test('ILM card: managed / error / no policy, the pill and when the Indices link 
   const err = B.ilmCard(ilmData(all, { 'logstash-2': { step: 'ERROR' } }), 'logstash-*');
   assert.deepEqual([err.pill, err.managed, err.parts.map((p) => p.n), err.link], [{ tone: 'yellow', text: '1 error' }, 3, [2, 1, 0], false]);
   const none = B.ilmCard(ilmData({ 'logstash-1': null, 'logstash-2': null, 'logstash-3': null }), 'logstash-*');
-  assert.deepEqual([none.pill.text, none.managed, none.total, none.link, none.noPolicy.length], ['Logs not covered', 0, 3, true, 3]);
+  assert.deepEqual([none.state, none.pill, none.headline, none.managed, none.total, none.link, none.noPolicy.length],
+    ['none', { tone: 'red', text: 'No policy' }, 'No policy for logstash-*', 0, 3, true, 3], 'confirmed by Elasticsearch: No policy, red, with the link');
+  const some = B.ilmCard(ilmData({ 'logstash-1': 'p', 'logstash-2': null }), 'logstash-*');
+  assert.deepEqual([some.state, some.pill.text, some.headline, some.link], ['some', 'Logs not covered', undefined, true], 'partly covered keeps the donut');
   const both = B.ilmCard(ilmData({ 'logstash-1': 'p', 'logstash-2': null }, { 'logstash-1': { step: 'ERROR' } }), 'logstash-*');
   assert.equal(both.link, false, 'no link when a log index is in error (owner)');
   assert.equal(B.ilmCard(ilmData(all, {}, 'STOPPED'), 'logstash-*').pill.text, 'Stopped');
-  assert.equal(B.ilmCard({ ilm: { operation_mode: 'RUNNING' } }, 'logstash-*').known, false, 'which policy each index has is not known: no donut figures');
-  assert.equal(B.ilmCard({}, 'logstash-*').pill.text, 'Unknown');
+  // Unknown is not zero: an unread answer is "Not known" (grey), never "No policy"; the permission sentence is a tooltip.
+  const unread = B.ilmCard({ ilm: { operation_mode: 'RUNNING' } }, 'logstash-*');
+  assert.deepEqual([unread.known, unread.state, unread.pill.tone, unread.pill.text, unread.headline], [false, 'unknown', 'grey', 'Not known', 'Not known'],
+    'which policy each index has is not known: no donut figures, no "No policy"');
+  assert.match(unread.pill.title, /^Which policy each logstash-\* index has could not be read \(it needs view_index_metadata on logstash-\*\)\.$/);
+  assert.equal(unread.why, unread.pill.title);
+  assert.equal(B.ilmCard({ ilm: { operation_mode: 'STOPPED' } }, 'logstash-*').pill.text, 'Stopped', 'stopped is known even when the policies are not');
+  assert.equal(B.ilmCard({ ilm: { operation_mode: 'STOPPED' } }, 'logstash-*').headline, 'Not known');
+  assert.deepEqual([B.ilmCard({}, 'logstash-*').pill.text, B.ilmCard({}, 'logstash-*').pill.tone], ['Not known', 'grey']);
   assert.equal(B.ilmCard(ilmData({ 'other-1': 'p' }), 'logstash-*').pill.text, 'No log index');
 });
 

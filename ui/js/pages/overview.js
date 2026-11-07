@@ -1302,7 +1302,7 @@ function donutBody(parts, figure, word, label) {
         h('i.cl-dot', { style: { background: SEG_COLOR[p.key] } }), h('span.cl-dn', p.label), h('span.mono.cl-dc', num(p.n))))));
 }
 
-const cardHead = (title, pill) => h('div.cl-card-h', title, pill ? h(`span.pill.${pill.tone === 'yellow' ? 'yellow' : pill.tone}.cl-card-pill`, pill.text) : null);
+const cardHead = (title, pill) => h('div.cl-card-h', title, pill ? h(`span.pill.${pill.tone === 'yellow' ? 'yellow' : pill.tone}.cl-card-pill`, { title: pill.title || null }, pill.text) : null);
 const card4 = (id, cls, ...kids) => h(`div.cl-card${cls ? `.${cls}` : ''}`, { 'data-tile': id }, ...kids);
 
 function shardsCard(d) {
@@ -1314,22 +1314,33 @@ function shardsCard(d) {
       `${num(n('active'))} active, ${num(n('init'))} initializing, ${num(n('unas'))} unassigned of ${num(s.total)} shards`));
 }
 
-function ilmCardOf(r) {
+/**
+ * The ILM card. Not known (grey, the permission sentence in its tooltip) and No policy (red,
+ * Elasticsearch confirmed it) are told apart by ONE definition, lifecycle-errors.js
+ * ilmPolicyState, which the summary's ILM cell reads too. Exported for tools/unit.
+ */
+export function ilmCardOf(r) {
   const { c, d } = r;
   const v = ilmCard(d, logPattern(r));
   if (!v.known) {
-    return card4('ilm', '', cardHead('ILM', v.pill), donutBody([], '–', 'managed', 'ILM coverage unknown'),
-      h('div.cl-card-note', { title: v.why }, v.why));
+    return card4('ilm', '', cardHead('ILM', v.pill),
+      h('div.cl-big.muted', { title: v.why }, v.headline));
   }
   const e = ilmErrorsOf(d, logPattern(r));
   const link = v.link ? pageLink('Indices without a policy', 'indices', null, c, { focus: { noPolicy: v.noPolicy }, title: v.noPolicy.slice(0, 8).join('\n') }) : null;
+  if (v.state === 'none') {
+    return card4('ilm', '', cardHead('ILM', v.pill),
+      h('div.cl-big.bad', { title: `${v.total} open ${v.logs} ${v.total === 1 ? 'index has' : 'indices have'} no ILM policy` }, 'No policy for ', h('span.mono', v.logs)),
+      link ? h('div.cl-card-links', link) : null);
+  }
   return card4('ilm', '', cardHead('ILM', v.pill),
     donutBody(v.parts, `${v.managed}/${v.total}`, 'managed', `${v.parts[0].n} managed without error, ${v.errors} in ILM error, ${v.noPolicy.length} without a policy, of ${v.total} log indices`),
     // Errors name themselves in the tooltip of the pill; no link then (owner, 2026-11-05).
     e.count ? null : link ? h('div.cl-card-links', link) : null);
 }
 
-function backupsCard(r) {
+/** The Backups (SLM) card. Exported for tools/unit. */
+export function backupsCard(r) {
   const { c, d } = r;
   const view = lifecycleView('SLM', d, logPattern(r), c);
   const v = slmCard(d, view, logPattern(r), clusterKind(c).ulm);
