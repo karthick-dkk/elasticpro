@@ -2211,6 +2211,9 @@ table.cl-tbl > tbody > tr.cl-detail-row:hover > td {
   border: 1px solid color-mix(in srgb, var(--accent) 22%, var(--border)); border-radius: var(--radius-sm); }
 .cl-box-k { font-size: 11px; color: var(--text-secondary); flex: none; }
 .cl-box-v { display: flex; gap: 8px; align-items: center; min-height: 22px; min-width: 0; white-space: nowrap; }
+/* One line never runs past the strip: a box is at most the strip's width, and a long name in it is cut with … (its title has it whole). */
+.cl-box { max-width: 100%; box-sizing: border-box; }
+.cl-box-v > .mono { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .cl-url-a { color: var(--accent); text-decoration: none; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: min(360px, 60vw); }
 .cl-url-a:hover { text-decoration: underline; }
 .cl-copy { height: 20px; padding: 0 6px; font-size: 11px; flex: none; }

@@ -1276,7 +1276,7 @@ function bucketBox(c) {
         onclick: async () => { if (zabbixKind ? await editClusterKind(c) : await openEditor(c)) draw(); } }, 'Set in Config ›')
     : null;
   return box('bucket', 'Log bucket (S3)',
-    k.ulm.bucket ? h('span.mono', { title: 'Enriched and raw logs share this bucket.' }, k.ulm.bucket)
+    k.ulm.bucket ? h('span.mono', { title: `${k.ulm.bucket}: enriched and raw logs share this bucket.` }, k.ulm.bucket)
       : h('span.muted', { title: 'Set it on the cluster: edit cluster → ULM S3 bucket' }, 'not set'),
     k.ulm.enabled ? h('span.pill.green.cl-ulm', 'ULM on') : null, edit);
 }
