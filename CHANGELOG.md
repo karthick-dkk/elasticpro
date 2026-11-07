@@ -1,6 +1,13 @@
 # Changelog
 
-## Unreleased
+## 0.3.57
+
+**Upgrade notes**
+- **Log delay is measured every 2 hours by default** and kept in a built-in store under `<data>/logdelay/` (90 days). The Elasticsearch copy goes to the history store only under its two switches (or to the sink cluster as before). Settings: Config-Management › Data › Scheduled log delay.
+- **Delay levels** now come from the core: no delay under 15 min, little delay 15–30, delay 30–60, critical over 60. A cluster's own thresholds still override.
+- **Check the event-time field per cluster** (`event_created` or `ingested_time`) in the new Fields card; a field that can't be read shows "can't measure", never 0.
+
+**Log delay report, core** (docs/LOGDELAY.md, #129): delay periods with start and solve, silent devices, daily totals, the extra ECS fields (tag1, fwd_tag, parser_tag, Zone), recommended fixes as plain rules with their evidence, LOGDELAY_* messages limited to each caller's clusters, and the `log_delay` report kind with an .xlsx (Fixes sheet), a .csv and a multipart HTML + text mail. No PDF yet.
 
 **Reports › Log delay** (docs/LOGDELAY.md, the owner-approved Main, Cluster, Device and Fix boards): the fleet (totals, the without-delay share, delay reduced over 2/4/6/12/24 h, day by day, delayed devices by cluster, the By cluster table and every device), one cluster with its ECS columns, one device (find by name, src_hostname/src_device or an extra column with wildcards, cluster and dates; insights, start/solve markers, delay by cluster, the recommendation) and the recommended fixes, at `#/reports/log-delay/…`. Silent, can't-measure and days without totals are shown as such, never as 0 or on time. **Config-Management › Data › Scheduled log delay** gains the delay levels, the fields and the log delay report generator (xlsx/csv; no PDF, which the core does not build), and the *ElasticPro built-in only* destination. The UI no longer keeps its own delay thresholds: the Logs & Delay page, Play's cluster alerts and the headless scrape classify on the core's levels, and a cluster whose levels the core has not said reads "levels unknown".
 
