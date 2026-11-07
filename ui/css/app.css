@@ -207,15 +207,13 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .app { display: flex; flex-direction: column; min-height: 100vh; }
 
 /* No box of its own. A sticky element sticks only inside its parent, and this wrapper is
-   exactly as tall as the topbar, the tabs and the status strip — so .head-fix used to
+   exactly as tall as the topbar and the tabs — so .head-fix used to
    scroll away with it after the first hundred pixels. With the wrapper out of the box
-   tree, .head-fix and the strip are children of .app, which is as tall as the page. */
+   tree, .head-fix is a child of .app, which is as tall as the page. */
 .header { display: contents; }
 
 /* The part of the header that actually stays put while a page scrolls: the topbar and the
-   tabs. The status strip (config name, fleet health, request counts) is a sibling AFTER
-   this, not inside it, so it scrolls away underneath instead of holding a permanent band
-   of every page hostage — see renderShell() in app.js. Fully opaque, unlike the old
+   tabs — see renderShell() in app.js. Fully opaque, unlike the old
    `.header`'s translucent blur: a table's rows scrolling past behind a see-through header
    read as the header being broken, not as depth. */
 .head-fix {
@@ -287,17 +285,6 @@ button, input, select, textarea { font: inherit; color: inherit; }
 
 /* A vertical rule before Config, where the divider used to be. */
 .nav-sep { width: 1px; background: var(--border); margin: 8px 7px; flex: none; }
-
-/* Status that used to live in the sidebar foot, now a strip under the tabs. */
-.status-strip {
-  display: flex; flex-wrap: wrap; gap: 4px 14px; align-items: center;
-  padding: 5px 16px; border-top: 1px solid var(--border);
-  font-size: 11px; color: var(--text-muted); background: var(--surface-1);
-}
-.status-strip .row { display: inline-flex; gap: 5px; align-items: center; }
-.status-strip .row b { color: var(--text-secondary); font-weight: 600; }
-/* Pushes the credits to the far end without collapsing the strip when it wraps. */
-.status-strip .strip-spacer { flex: 1 1 auto; min-width: 0; }
 
 /* ------------------------------- credits (mini) ------------------------------ */
 /* Quieter than the live state it sits beside: this is provenance, not a reading. */
@@ -1766,7 +1753,7 @@ tr.vs-special td:first-child { font-style: italic; color: var(--text-secondary);
 }
 html.play { font-size: min(calc(100vw / 120), calc(100vh / 67.5)); overflow: hidden; background: #0b0d10; }
 html.play body { overflow: hidden; background: #0b0d10; }
-html.play .head-fix, html.play .status-strip, html.play .toast-wrap, html.play .pop, html.play .menu-pop { display: none !important; }
+html.play .head-fix, html.play .toast-wrap, html.play .pop, html.play .menu-pop { display: none !important; }
 html.play .main, html.play .page { padding: 0; margin: 0; max-width: none; }
 .pl-root { position: fixed; inset: 0; display: flex; flex-direction: column; background: var(--tv-bg); color: var(--tv-text);
   font-family: var(--sans); font-variant-numeric: tabular-nums; overflow: hidden; cursor: none; }

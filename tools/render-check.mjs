@@ -102,6 +102,8 @@ for (const name of PAGES) {
     await new Promise((r) => setTimeout(r, section ? 900 : 350));
     if (mod.onData) mod.onData();
     await new Promise((r) => setTimeout(r, 150));
+    // The bottom status strip was removed; no page may bring it back.
+    if (window.document.querySelector('#side-foot, .status-strip')) errors.push(`${name}: a bottom status strip is on the page`);
     // Requests › ElasticPro health (docs/HEALTH.md): drawn from the bridge's own SYSTEM_HEALTH.
     if (page === 'requests' && section === 'health') {
       const tab = view.querySelector('nav.rq-tabs button[aria-current="page"]');

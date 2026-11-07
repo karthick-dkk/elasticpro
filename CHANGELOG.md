@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- The bottom status strip (config, clusters, health, request rate, polling mode, tunnels, credits) is removed from every page. Its signals live elsewhere: the top bar keeps the emergency stop with its Resume control and the snapshot pill; Config-Management shows the polling mode, request load, jump-host tunnels, the config path ("loaded once — not remembered") and the About card with the GitHub and Support links.
+
 ## 0.3.56
 
 **Backup fixes from the 0.3.55 test-VM run.**

@@ -76,7 +76,7 @@ const app = await load('app.js');
   // loading — neither is what any of this is about.
   const mk = (tag, cls, id) => { const e = doc.createElement(tag); e.className = cls; e.id = id; return e; };
   const header = doc.createElement('header');
-  header.append(mk('div', 'topbar', 'topbar'), mk('nav', 'nav', 'nav'), mk('div', 'status-strip', 'side-foot'));
+  header.append(mk('div', 'topbar', 'topbar'), mk('nav', 'nav', 'nav'));
   const main = doc.createElement('main');
   main.append(mk('div', 'page', 'view'));
   doc.body.append(header, main);
@@ -139,26 +139,16 @@ async function backToFleet() {
   await go('overview');
 }
 
-/* ------------- the status strip stays off the pages people work in ------------- */
+/* ------------- there is no bottom status strip, on any page ------------- */
 
-const STRIP_HIDDEN = ['overview', 'indices', 'console', 'logs', 'snapshots', 'shards', 'reports'];
-const STRIP_SHOWN = ['alerts'];
-
-for (const id of [...STRIP_HIDDEN, ...STRIP_SHOWN]) {
+// The strip (config, clusters, health, request rate, mode, tunnels, credits) was removed;
+// its signals live in the top bar and in Config-Management. It must not come back.
+for (const id of ['overview', 'indices', 'console', 'logs', 'snapshots', 'shards', 'reports', 'alerts', 'automation', 'requests', 'accounts', 'settings']) {
   await go(id);
-  const strip = doc.getElementById('side-foot');
-  if (!strip) { problems.push(`${id}: the shell has no #side-foot at all`); continue; }
-  const want = STRIP_HIDDEN.includes(id);
-  ok(strip.hidden === want, `${id}: status strip hidden=${strip.hidden}, expected ${want}`);
+  await settleFor(60);
+  ok(!doc.querySelector('#side-foot, .status-strip'), `${id}: a bottom status strip is on the page`);
+  ok(!(await load('app.js')).renderSideFoot, 'app.js still exports renderSideFoot');
 }
-
-// A refresh rebuilds the strip from an event that fires whatever page is open. Deciding
-// its visibility anywhere but in that rebuild means it reappears on the next tick.
-await go('indices');
-app.renderSideFoot();
-await settleFor(80);
-ok(doc.getElementById('side-foot').hidden === true,
-  'indices: the status strip came back when the strip was rebuilt');
 
 /* ------------------------ the REST console names its target ------------------------ */
 
@@ -4737,7 +4727,6 @@ if (viaFleet) {
   for (const cur of st.fleet.raw.values()) delete cur.datasets.snapshots;
   await go('overview');
   ok(!doc.querySelector('#view .banner.coverage'), 'coverage: the Clusters page shows the coverage bar again (removed 2026-10-25)');
-  ok(!doc.querySelector('#side-foot:not([hidden])'), 'coverage: the status strip is back on the Clusters page');
   // The Alerts page keeps the bar and Read all.
   await go('overview');
   let before = sent.length;
@@ -5494,7 +5483,7 @@ if (viaFleet) {
     ok(!pickEl || ![...pickEl.options].some((o) => o.value === 'all'), `evidence ${where}: the chooser offers "All clusters"`);
     ok(!/updated|live|quiet|manual/.test(bar.textContent.replace(/Refresh/g, '')), `evidence ${where}: a fleet freshness claim is in the top bar: "${bar.textContent}"`);
     ok(!doc.querySelector('#nav button[data-page="alerts"] .pill'), `evidence ${where}: the Alerts tab carries a count`);
-    ok(doc.getElementById('side-foot').hidden === true, `evidence ${where}: the Config/Clusters/Health/Requests strip is showing`);
+    ok(!doc.getElementById('side-foot'), `evidence ${where}: the Config/Clusters/Health/Requests strip is showing`);
     ok(!doc.querySelector('.banner.coverage'), `evidence ${where}: the "Showing cached data for N clusters" banner is showing`);
     ok(!/Showing cached data for \d+ clusters|oldest .* unreachable/.test(text()), `evidence ${where}: fleet coverage wording is on the page`);
     // The stamp (cluster, data time, capture time, version, user) and its stale banner went in
@@ -5511,9 +5500,7 @@ if (viaFleet) {
     ok(/\d+\s+(green|yellow|red|unreachable)/.test(bar), `evidence control: Clusters has no fleet chip, so the absence checks prove nothing: "${bar}"`);
     ok(!!doc.querySelector('#topbar .bell'), 'evidence control: Clusters has no bell');
     ok(!!doc.getElementById('cluster-select'), 'evidence control: Clusters has no picker');
-    // The Clusters page keeps the strip off by design (2026-10-25); Alerts is where it shows.
-    ok(doc.getElementById('side-foot').hidden === true, 'evidence control: the status strip is back on the Clusters page');
-    await go('alerts'); ok(doc.getElementById('side-foot').hidden === false, 'evidence control: Alerts has no status strip'); await go('overview');
+    await go('alerts'); ok(!doc.getElementById('side-foot'), 'evidence control: Alerts has a status strip again'); await go('overview');
   }
 
   // Snapshots with "All clusters": picks one cluster by itself (the first, nothing chosen yet),
@@ -5620,7 +5607,7 @@ if (viaFleet) {
     ok(!!doc.getElementById('cluster-select'), 'evidence: the picker did not come back on Clusters');
     // The top bar has no alerts chip any more (the board of 2026-10-25): the Alerts tab carries the count.
     ok(![...doc.querySelectorAll('#topbar button')].some((b) => /^\d+ alerts?$/.test(b.textContent.trim())), 'evidence: an alerts chip is back in the top bar');
-    ok(doc.getElementById('side-foot').hidden === true, 'evidence: the status strip is back on the Clusters page');
+    ok(!doc.getElementById('side-foot'), 'evidence: the status strip is back');
     ok(!!doc.querySelector('#nav button[data-page="alerts"] .pill'), 'evidence: the Alerts tab count did not come back');
   }
 

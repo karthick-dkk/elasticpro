@@ -1,8 +1,8 @@
 /**
  * "Emergency stop" in the top bar, on every page (0.3.43; timed since 0.3.44).
  *
- * The stop holds the core from fetching anything new. The only sign of a pause used to be
- * a pill in the status strip, which the Clusters page and the evidence pages hide, so a
+ * The stop holds the core from fetching anything new. The sign of a pause used to be
+ * a pill in a footer strip that several pages hid, so a
  * fleet paused by somebody who then forgot sat still for three days while every page
  * looked normal. Now a stop always ends by itself (15, 30 or 60 minutes), and the top bar,
  * which is on every page, says until when; an operator or an admin can end it sooner from
