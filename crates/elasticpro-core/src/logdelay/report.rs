@@ -618,6 +618,28 @@ mod tests {
     }
 
     #[test]
+    fn a_hostile_device_name_is_inert_in_the_mail_and_the_csv() {
+        let now = chrono::Utc::now().timestamp_millis();
+        let mut t = Tracker::default();
+        let l = Levels::default();
+        let evil = "=HYPERLINK(\"http://x\")<script>alert('1')</script>, \"q\"";
+        let rd = Reading { device: evil.into(), docs: 5, arrival_ms: Some(now), event_ms: Some(now - 90 * 60_000), delay_minutes: Some(90.0), extras: BTreeMap::new() };
+        t.apply(now, vec![rd], &l, 2 * H);
+        let clusters = vec![ClusterInput { id: "prod".into(), name: "<b>Prod</b>".into(), tracker: std::sync::Arc::new(t), daily: BTreeMap::new(), levels: l }];
+        let r = Range::last_days(now, 7);
+        let opts = Options::default();
+        let i = Inputs { clusters: &clusters, range: &r, now, every_hours: 2, findings: &[], options: &opts, extras: &[], app_url: None };
+        let b = build(&i).unwrap();
+        assert!(!b.html.contains("<script>") && b.html.contains("&lt;script&gt;"), "{}", b.html);
+        assert!(!b.html.contains("<b>Prod</b>") && b.html.contains("&lt;b&gt;Prod"), "{}", b.html);
+        let csv = String::from_utf8(b.csv.unwrap()).unwrap();
+        let line = csv.lines().nth(1).unwrap();
+        assert!(line.starts_with("\"'=HYPERLINK("), "a leading = is neutralised and the cell quoted: {line}");
+        assert!(line.contains("\"\"q\"\""), "quotes are doubled: {line}");
+        assert_eq!(csv.lines().count(), 2, "no cell starts a new record: {csv}");
+    }
+
+    #[test]
     fn options_take_the_boards_choices_and_refuse_unknown_columns() {
         let extras = vec!["Zone".to_string(), "tag1".to_string()];
         let o = Options::default().apply(&json!({ "devices": "all", "groupBy": "Zone", "columns": ["device", "Zone", "nowMinutes"], "sections": ["summary", "fixes"], "csv": false }), &extras).unwrap();
