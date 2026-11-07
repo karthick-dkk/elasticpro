@@ -169,7 +169,9 @@ async fn a_run_sends_one_search_and_one_bulk_per_cluster() {
     assert_eq!(run["ok"], json!(true), "{run}");
     // "prod" is measured; "kibana" is the sink and is not measured as well.
     assert_eq!(run["clusters"], json!(1), "{run}");
-    assert_eq!(run["measured"], json!(1), "one of the two devices could be measured: {run}");
+    // Both devices are written (0.3.57): the one whose event time is missing as "can't measure".
+    assert_eq!(run["measured"], json!(2), "two devices written, one of them unmeasurable: {run}");
+    assert_eq!(run["opened"], json!(1), "41 min opens a delay period: {run}");
 
     let hits = srv.hits();
     let searches: Vec<_> = hits.iter().filter(|h| h.path.contains("/_search")).collect();
@@ -180,8 +182,12 @@ async fn a_run_sends_one_search_and_one_bulk_per_cluster() {
 
     let body = &bulks[0].body;
     assert!(body.contains(r#""delay_minutes":41"#), "the delay is the subtraction, not a verdict: {body}");
-    assert!(!body.contains("fw-2"), "the device missing a timestamp is absent, not zero: {body}");
-    assert!(!body.contains("status"), "no classification is shipped: {body}");
+    // The device missing a timestamp is written as can't measure, never as zero (0.3.57).
+    let fw2 = body.lines().find(|l| l.contains(r#""device":"fw-2""#)).expect("fw-2 is a row");
+    assert!(fw2.contains(r#""delay_minutes":null"#) && fw2.contains(r#""state":"unmeasured""#), "{fw2}");
+    assert!(!body.contains("status"), "no verdict beyond the state: {body}");
+    assert!(body.contains(r#""record":"period""#), "the opened period is written beside the measurements: {body}");
+    assert!(body.contains(r#""record":"daily""#), "and the day's totals: {body}");
     assert!(body.contains("elasticpro-log-delay-"), "{body}");
 
     // A second run inside the same hour writes the same ids, so it overwrites.

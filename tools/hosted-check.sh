@@ -39,6 +39,16 @@ B="http://127.0.0.1:$P/bridge"
 # estate: it once returned the cluster list, the config path and the request rates to a
 # bare curl, which is how that went unnoticed.
 check "no header is refused"        "$(post $B -d '{"type":"CONFIG_READ"}' | field kind)" "unauthenticated"
+
+# The log delay report (0.3.57, docs/LOGDELAY.md): the figures read from the built-in store are a
+# user's on the clusters they see, the levels and fields an admin's — and every one needs a
+# caller. Roles (user reads, operator refused the settings, limited admin refused SET) are
+# proved in-process (tests/logdelay.rs).
+for t in LOGDELAY_SUMMARY LOGDELAY_CLUSTER LOGDELAY_DEVICE LOGDELAY_SEARCH LOGDELAY_FIXES LOGDELAY_SETTINGS_GET LOGDELAY_SETTINGS_SET; do
+  check "$t needs a caller"              "$(post $B -d '{"type":"'"$t"'","clusterId":"x","device":"d","name":"d","settings":{"levels":{"delayFrom":30}}}' | field kind)" "unauthenticated"
+done
+check "the log delay report kind needs a caller" "$(post $B -d '{"type":"REPORT_RUN","kind":"log_delay","clusterIds":["x"]}' | field kind)" "unauthenticated"
+check "its schedule needs a caller"            "$(post $B -d '{"type":"REPORT_SCHEDULE_SET","kind":"log_delay","options":{"devices":"all"}}' | field kind)" "unauthenticated"
 check "blank header is refused"     "$(post $B -H 'x-auth-user:  ' -d '{"type":"CONFIG_READ"}' | field kind)" "unauthenticated"
 check "the handshake still answers" "$(post $B -d '{"type":"PING"}' | field ok)" "True"
 check "the handshake names nothing" "$(post $B -d '{"type":"PING"}' | python3 -c '
@@ -448,8 +458,8 @@ echo "$BK1" | python3 -c 'import json,sys;print(json.dumps({"type":"BACKUP_PREVI
 check "the right one previews"                  "$(cookie --data-binary "@$BKF" | python3 -c 'import json,sys;d=json.load(sys.stdin);print(d.get("ok"),d.get("credentials",{}).get("state"))')" "True opened"
 # Settings files only: the session store, the health samples and the activity log move on their own,
 # and so do the files the minute timers own (the history-store queue retrying the alert queued above,
-# its spool, a cluster's volume state). A slow sealed preview on CI is wide enough to catch a tick.
-check "and a preview writes nothing"            "$(find "$D5" -type f -newer "$MARK" \( -name '*.json' -o -path '*/backups/*' -o -path '*/config-history/*' \) ! -name sessions.json ! -name history-store-queue.json ! -path '*/history-store-spool/*' ! -path '*/volume/*/state.json' ! -path '*/health/*' ! -path '*/worker/*' ! -path '*/cache/*' | wc -l | tr -d ' ')" "0"
+# its spool, a cluster's volume state, the log delay store its run keeps). A slow sealed preview on CI is wide enough to catch a tick.
+check "and a preview writes nothing"            "$(find "$D5" -type f -newer "$MARK" \( -name '*.json' -o -path '*/backups/*' -o -path '*/config-history/*' \) ! -name sessions.json ! -name history-store-queue.json ! -path '*/history-store-spool/*' ! -path '*/volume/*/state.json' ! -path '*/logdelay/*' ! -path '*/health/*' ! -path '*/worker/*' ! -path '*/cache/*' | wc -l | tr -d ' ')" "0"
 echo "$BK1" | python3 -c 'import json,sys;print(json.dumps({"type":"BACKUP_RESTORE","mode":"merge","sections":["clusters"],"password":sys.argv[1],"file":json.load(sys.stdin)["file"]}))' hosted-check-backup-pw >"$BKF"
 RS=$(cookie --data-binary "@$BKF")
 check "a restore answers ok"                    "$(echo "$RS" | field ok)" "True"

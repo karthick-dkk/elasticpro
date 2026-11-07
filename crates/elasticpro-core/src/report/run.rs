@@ -442,6 +442,7 @@ impl Core {
         let end = match (job.report, job.kind) {
             (ReportKind::Indices, _) => self.report_indices_job(&job).await,
             (ReportKind::Hosts, _) => self.report_hosts_job(&job).await,
+            (ReportKind::LogDelay, _) => self.report_logdelay_job(&job).await,
             (ReportKind::Volume, Kind::Cluster) => self.report_cluster(&job).await,
             (ReportKind::Volume, Kind::Mailed) => self.report_mailed(&job).await,
         };
@@ -741,6 +742,38 @@ impl Core {
         self.report_mail(kind, by, subject, body, Some((name, mime, bytes))).await
     }
 
+    /// Mail several kept files, with an HTML body and its plain-text copy. Files over
+    /// `UI_REPORT_MAIL_MAX_MB` together are left out and the text says where they are.
+    pub(super) async fn report_mail_parts(&self, kind: ReportKind, by: &str, subject: &str, text: &str, html: Option<&str>,
+                                          files: Vec<(String, String, Vec<u8>)>) -> Result<usize, String> {
+        let cap_mb = crate::settings::get().text("UI_REPORT_MAIL_MAX_MB").and_then(|v| v.parse::<u64>().ok()).unwrap_or(MAIL_MAX_MB_DEFAULT);
+        let total: u64 = files.iter().map(|(_, _, b)| b.len() as u64).sum();
+        let (files, text) = if total > cap_mb * 1024 * 1024 {
+            let names: Vec<&str> = files.iter().map(|(n, _, _)| n.as_str()).collect();
+            (vec![], format!("{text}
+The files {} ({}) are larger than the {cap_mb} MB a mail may carry (UI_REPORT_MAIL_MAX_MB), so they are not attached: \
+                              download them from ElasticPro, Reports › Exports (kept {} days).
+", names.join(", "), build::human_bytes(Some(total)), super::KEEP_FILE_DAYS))
+        } else {
+            (files, text.to_string())
+        };
+        let (sched, _) = self.report_schedule_effective(kind);
+        if sched.to.is_empty() {
+            return Err(format!("no recipients: set them under the {} report's schedule", kind.as_str()));
+        }
+        let ready = self.mail_ready()?;
+        let out = mail::message_parts(&ready.from, &sched.to, &sched.cc, &sched.bcc, subject, &text, html, files)?;
+        let steps = mail::session(&ready, Some(&out)).await;
+        let failed = steps.iter().find(|s| !s.ok).map(|s| format!("{}: {}", s.step, s.detail));
+        let ok = failed.is_none() && steps.iter().any(|s| s.step == "send");
+        tracing::info!(target: "audit", user = %by, recipients = out.recipients, ok, report = kind.as_str(), "volume report mailed");
+        match failed {
+            None if ok => Ok(out.recipients),
+            None => Err("the mail was not sent".into()),
+            Some(e) => Err(e),
+        }
+    }
+
     /* ---------------------------------------- mail ---------------------------------------- */
 
     pub(super) fn mail_effective(&self) -> mail::Effective {
@@ -1010,6 +1043,16 @@ impl Core {
         if kind == ReportKind::Volume {
             v["sheets"] = json!(e.sheets);
         }
+        if kind == ReportKind::LogDelay {
+            // The options in force (the defaults where the file names none), and what they may be.
+            let s = self.logdelay_settings();
+            let extras = self.logdelay_extras_union(&s);
+            let opts = crate::logdelay::report::Options::default().apply(&e.options, &extras).unwrap_or_default();
+            v["options"] = serde_json::to_value(&opts).unwrap_or(Value::Null);
+            v["optionsChoices"] = json!({ "devices": ["delayed", "little", "all"], "groupBy": std::iter::once("cluster".to_string()).chain(extras.iter().cloned()).collect::<Vec<_>>(),
+                                          "columns": crate::logdelay::report::BASE_COLUMNS.iter().map(|c| c.to_string()).chain(extras.iter().cloned()).collect::<Vec<_>>(),
+                                          "sections": crate::logdelay::report::SECTIONS, "pdf": "not built: no PDF writer in this build" });
+        }
         if kind == ReportKind::Hosts {
             // The collection runs at the hosts schedule's time whether or not its mail is on.
             let cfg = self.hosts_config();
@@ -1132,6 +1175,18 @@ impl Core {
                     file.sheets = v;
                 }
             }
+            if let Some(o) = m.get("options") {
+                if kind != ReportKind::LogDelay {
+                    return bad("bad_request", "options: only the log delay report has options");
+                }
+                let ls = self.logdelay_settings();
+                let extras = self.logdelay_extras_union(&ls);
+                let current = crate::logdelay::report::Options::default().apply(&file.options, &extras).unwrap_or_default();
+                match current.apply(o, &extras) {
+                    Ok(opts) => file.options = serde_json::to_value(&opts).unwrap_or(Value::Null),
+                    Err(e) => return bad("bad_request", e),
+                }
+            }
             if let Some(v) = m.get("enabled") {
                 let Some(on) = v.as_bool() else { return bad("bad_request", "enabled must be true or false") };
                 file.enabled = on;
@@ -1250,7 +1305,9 @@ impl Core {
     fn report_daily_collected(&self, kind: ReportKind, s: &ReportSchedule, local: NaiveDateTime) -> bool {
         let Some(store) = &self.volume.store else { return false };
         match kind {
-            ReportKind::Indices => true,
+            // The indices report reads the cluster afresh; the log delay report reads the built-in
+            // store as it is: neither waits for anything.
+            ReportKind::Indices | ReportKind::LogDelay => true,
             ReportKind::Hosts => self.hosts_collected(s, local),
             ReportKind::Volume => {
                 let today = day_key(local.date());

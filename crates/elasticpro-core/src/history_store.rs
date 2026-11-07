@@ -1453,6 +1453,9 @@ impl Core {
                                                    crate::data_routing::reports_template_body(&prefix), format!("{prefix}-{stream}-*")),
             crate::data_routing::ALERTS_STREAM => (crate::data_routing::alerts_template_name(&prefix),
                                                   crate::data_routing::alerts_template_body(&prefix), format!("{prefix}-{stream}-*")),
+            // The log delay's three records (docs/LOGDELAY.md): their own template on `<prefix>-delay-*`,
+            // above the general one, so new delay indices take its mappings after an upgrade.
+            "logdelay" => (format!("{prefix}-delay-template"), crate::logdelay::docs::template_body(&format!("{prefix}-delay")), format!("{prefix}-delay-*")),
             _ => (template_name(&prefix), template_body(&prefix), format!("{prefix}-*")),
         };
         let mark = format!("{key}|{name}");
@@ -1792,9 +1795,21 @@ impl Core {
         Ok(format!("{prefix}-delay-{year:04}.{month:02}"))
     }
 
+    /// The prefix the log delay's indices take on the store: `<prefix>-delay` (the measurement
+    /// index `<prefix>-delay-YYYY.MM` as before 0.3.57, the periods and daily totals beside it).
+    pub(crate) fn history_delay_prefix(&self) -> Result<String, String> {
+        let (y, m, _) = crate::delay_sink::month_and_hour_bucket(crate::delay_sink::now_ms());
+        self.history_delay_index(y, m)?;
+        Ok(format!("{}-delay", self.history_store.stored.read().prefix()))
+    }
+
     /// The delay sink's bulk, to the store. Counted in the store's status like its own.
     pub(crate) async fn history_delay_bulk(self: &Arc<Self>, ndjson: String) -> Value {
         if let Err(e) = self.history_ensure_template().await {
+            self.history_note_error(&e);
+            return json!({ "ok": false, "kind": "history_store", "message": e });
+        }
+        if let Err(e) = self.history_ensure_template_for("logdelay").await {
             self.history_note_error(&e);
             return json!({ "ok": false, "kind": "history_store", "message": e });
         }
@@ -2037,7 +2052,10 @@ impl Core {
         let sort_field = if stream == "delay" { "@timestamp" } else { "day" };
         let body = json!({
             "size": QUERY_MAX, "track_total_hits": true, "sort": [{ sort_field: { "order": "asc" } }],
-            "query": { "bool": { "filter": [ { "term": { cluster_field: id } }, { "range": range } ] } },
+            // The delay stream's period and daily documents (0.3.57) share the prefix: a read of the
+            // measurements leaves them out by `record` (a document from before 0.3.57 has none).
+            "query": { "bool": { "filter": [ { "term": { cluster_field: id } }, { "range": range } ],
+                                 "must_not": if stream == "delay" { json!([{ "terms": { "record": ["period", "daily"] } }]) } else { json!([]) } } },
         });
         let prefix = self.history_store.stored.read().prefix().to_string();
         let res = self.es_req(self.history_read_req(format!("/{prefix}-{stream}-*/_search?ignore_unavailable=true&allow_no_indices=true"), body)).await;

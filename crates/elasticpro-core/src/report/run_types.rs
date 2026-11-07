@@ -195,7 +195,7 @@ impl Core {
         }
     }
 
-    fn job_state(&self, job: &str, state: &str) {
+    pub(super) fn job_state(&self, job: &str, state: &str) {
         if let Some(j) = self.reports.queue.lock().get_mut(job) {
             j.progress.state = Some(state.to_string());
         }
@@ -817,6 +817,18 @@ impl Core {
         let mut job = Job::new(Kind::Cluster, ok_ids, name, period.clone(), format, mail, &by, now_ms());
         job.report = kind;
         job.collect_again = again && kind == ReportKind::Hosts;
+        if kind == ReportKind::LogDelay {
+            // The run's options over the schedule's: what the page chose for this file.
+            let s = self.logdelay_settings();
+            let extras = self.logdelay_extras_union(&s);
+            let (sched, _) = self.report_schedule_effective(kind);
+            let base = crate::logdelay::report::Options::default().apply(&sched.options, &extras).unwrap_or_default();
+            let opts = match msg.get("options").filter(|o| o.is_object()) {
+                Some(o) => match base.apply(o, &extras) { Ok(x) => x, Err(e) => return bad("bad_request", e) },
+                None => base,
+            };
+            job.options = serde_json::to_value(&opts).ok();
+        }
         let queued = self.reports.with(|q| {
             let mailed = if mail { 1 } else { 0 };
             q.room(&by, 1, mailed, now_ms())?;

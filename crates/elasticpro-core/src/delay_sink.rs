@@ -98,6 +98,10 @@ pub enum Destination {
     #[default]
     Cluster,
     History,
+    /// Nowhere but the built-in store (0.3.57): the server keeps the measurements, periods and
+    /// daily totals in its data directory and writes to no cluster at all. Needs only arming
+    /// and a primed cluster to read.
+    Builtin,
 }
 
 impl Destination {
@@ -167,7 +171,8 @@ impl SinkConfig {
             return None;
         }
         // The history store is not a cluster: what it needs is checked against its own gates.
-        if self.destination == Destination::History {
+        // The built-in store needs no cluster at all.
+        if self.destination != Destination::Cluster {
             return None;
         }
         if self.sink_cluster_id.trim().is_empty() {
@@ -272,7 +277,7 @@ pub fn measurements(res: &Value, cfg: &SinkConfig) -> Vec<Measurement> {
     out
 }
 
-fn bucket_key(b: &Value) -> Option<String> {
+pub(crate) fn bucket_key(b: &Value) -> Option<String> {
     match b.get("key") {
         Some(Value::String(s)) if !s.is_empty() => Some(s.clone()),
         Some(Value::Number(n)) => Some(n.to_string()),
@@ -281,7 +286,7 @@ fn bucket_key(b: &Value) -> Option<String> {
 }
 
 /// `a.b.c` against a `_source`, which may nest it or may hold it under the dotted name.
-fn dotted<'a>(v: &'a Value, path: &str) -> Option<&'a Value> {
+pub(crate) fn dotted<'a>(v: &'a Value, path: &str) -> Option<&'a Value> {
     if let Some(flat) = v.get(path) {
         return Some(flat);
     }
@@ -295,7 +300,7 @@ fn dotted<'a>(v: &'a Value, path: &str) -> Option<&'a Value> {
 /// Elasticsearch renders a date field as RFC3339, unless the mapping asked for epoch
 /// millis, in which case it is a number. Anything else is unreadable, and unreadable is
 /// `None` all the way up.
-fn to_ms(v: Option<&Value>) -> Option<i64> {
+pub(crate) fn to_ms(v: Option<&Value>) -> Option<i64> {
     match v? {
         Value::String(s) => parse_rfc3339_ms(s),
         Value::Number(n) => n.as_i64().or_else(|| n.as_f64().map(|f| f as i64)),
@@ -337,6 +342,24 @@ pub fn search_request(cluster_id: &str, cfg: &SinkConfig) -> EsRequest {
         method: "POST".into(),
         path: format!("/{}/_search?ignore_unavailable=true&allow_no_indices=true", cfg.index_pattern),
         body: Some(search_body(cfg).to_string()),
+        auth_header: None,
+        timeout_ms: Some(60_000),
+        allow_writes: false,
+        origin: Some("delay-sink".into()),
+        class: crate::gate::Class::Background,
+        ..Default::default()
+    }
+}
+
+/// The same search with the cluster's own pattern and a body built elsewhere (the log delay
+/// report's `logdelay::measure::search_body`, with the extra columns).
+pub fn search_request_for(cluster_id: &str, pattern: &str, body: Value) -> EsRequest {
+    EsRequest {
+        cluster_id: cluster_id.to_string(),
+        url: None,
+        method: "POST".into(),
+        path: format!("/{pattern}/_search?ignore_unavailable=true&allow_no_indices=true"),
+        body: Some(body.to_string()),
         auth_header: None,
         timeout_ms: Some(60_000),
         allow_writes: false,

@@ -31,12 +31,14 @@ pub const FILE: &str = "report-schedule.json";
 pub const DEFAULT_SUBJECT: &str = "ElasticPro volume report · {period}";
 pub const DEFAULT_SUBJECT_INDICES: &str = "ElasticPro indices report · {period}";
 pub const DEFAULT_SUBJECT_HOSTS: &str = "ElasticPro volume by host · {period}";
+pub const DEFAULT_SUBJECT_LOGDELAY: &str = "Log delay · {period}";
 
 pub fn default_subject_for(kind: ReportKind) -> &'static str {
     match kind {
         ReportKind::Volume => DEFAULT_SUBJECT,
         ReportKind::Indices => DEFAULT_SUBJECT_INDICES,
         ReportKind::Hosts => DEFAULT_SUBJECT_HOSTS,
+        ReportKind::LogDelay => DEFAULT_SUBJECT_LOGDELAY,
     }
 }
 
@@ -150,6 +152,10 @@ pub struct ReportSchedule {
     /// the indices and hosts reports' is the month so far.
     #[serde(default)]
     pub period: PeriodChoice,
+    /// The log delay report's options (`logdelay::report::Options`), that kind only; `Null` for
+    /// the others and for a schedule never set, which means the defaults.
+    #[serde(default, skip_serializing_if = "Value::is_null")]
+    pub options: Value,
     /// Which report this schedule is for: set when the file is read (`ScheduleFile`), never
     /// kept inside the entry — the entry's key says it.
     #[serde(skip)]
@@ -188,12 +194,14 @@ impl ReportSchedule {
             ReportKind::Volume => (Cadence::Manual, default_at(), PeriodChoice::Cadence),
             ReportKind::Indices => (Cadence::Daily, "08:00".to_string(), PeriodChoice::MonthSoFar),
             ReportKind::Hosts => (Cadence::Daily, "06:00".to_string(), PeriodChoice::MonthSoFar),
+            // Daily at 07:00 over yesterday (the Plan board's pick), off until somebody adds recipients.
+            ReportKind::LogDelay => (Cadence::Daily, "07:00".to_string(), PeriodChoice::Yesterday),
         };
         ReportSchedule {
             enabled: false, to: vec![], cc: vec![], bcc: vec![], schedule, at,
             clusters: default_clusters(), subject: default_subject_for(kind).into(), sheets: default_sheets(), last_sent: None,
             last_period: None, seen_schedule: None, seen_at: None, retried_period: None, retried: 0, mark_passed: None, set_by: None, set_at: None,
-            period, kind,
+            period, kind, options: Value::Null,
         }
     }
 }
@@ -215,12 +223,18 @@ pub const MANAGED_KEYS_HOSTS: &[(&str, &str)] = &[
     ("UI_REPORT_HOSTS_SCHEDULE", "schedule"),
     ("UI_REPORT_HOSTS_AT", "at"),
 ];
+pub const MANAGED_KEYS_LOGDELAY: &[(&str, &str)] = &[
+    ("UI_REPORT_LOGDELAY_TO", "to"),
+    ("UI_REPORT_LOGDELAY_SCHEDULE", "schedule"),
+    ("UI_REPORT_LOGDELAY_AT", "at"),
+];
 
 pub fn managed_keys(kind: ReportKind) -> &'static [(&'static str, &'static str)] {
     match kind {
         ReportKind::Volume => MANAGED_KEYS,
         ReportKind::Indices => MANAGED_KEYS_INDICES,
         ReportKind::Hosts => MANAGED_KEYS_HOSTS,
+        ReportKind::LogDelay => MANAGED_KEYS_LOGDELAY,
     }
 }
 
@@ -233,6 +247,7 @@ pub struct ScheduleFile {
     pub volume: ReportSchedule,
     pub indices: ReportSchedule,
     pub hosts: ReportSchedule,
+    pub log_delay: ReportSchedule,
 }
 
 impl Default for ScheduleFile {
@@ -241,6 +256,7 @@ impl Default for ScheduleFile {
             volume: ReportSchedule::default_for(ReportKind::Volume),
             indices: ReportSchedule::default_for(ReportKind::Indices),
             hosts: ReportSchedule::default_for(ReportKind::Hosts),
+            log_delay: ReportSchedule::default_for(ReportKind::LogDelay),
         }
     }
 }
@@ -264,6 +280,7 @@ impl ScheduleFile {
                 volume: entry(ReportKind::Volume, v.get("volume")),
                 indices: entry(ReportKind::Indices, v.get("indices")),
                 hosts: entry(ReportKind::Hosts, v.get("hosts")),
+                log_delay: entry(ReportKind::LogDelay, v.get("log_delay")),
             }
         } else {
             ScheduleFile { volume: entry(ReportKind::Volume, Some(v)), ..ScheduleFile::default() }
@@ -275,6 +292,7 @@ impl ScheduleFile {
             ReportKind::Volume => &self.volume,
             ReportKind::Indices => &self.indices,
             ReportKind::Hosts => &self.hosts,
+            ReportKind::LogDelay => &self.log_delay,
         }
     }
 
@@ -283,6 +301,7 @@ impl ScheduleFile {
             ReportKind::Volume => &mut self.volume,
             ReportKind::Indices => &mut self.indices,
             ReportKind::Hosts => &mut self.hosts,
+            ReportKind::LogDelay => &mut self.log_delay,
         }
     }
 }
@@ -290,10 +309,11 @@ impl ScheduleFile {
 impl Serialize for ScheduleFile {
     fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeMap;
-        let mut m = s.serialize_map(Some(3))?;
+        let mut m = s.serialize_map(Some(4))?;
         m.serialize_entry("volume", &self.volume)?;
         m.serialize_entry("indices", &self.indices)?;
         m.serialize_entry("hosts", &self.hosts)?;
+        m.serialize_entry("log_delay", &self.log_delay)?;
         m.end()
     }
 }
@@ -331,6 +351,8 @@ pub struct StateFile {
     pub volume: ScheduleState,
     pub indices: ScheduleState,
     pub hosts: ScheduleState,
+    #[serde(default)]
+    pub log_delay: ScheduleState,
 }
 
 impl StateFile {
@@ -339,6 +361,7 @@ impl StateFile {
             ReportKind::Volume => &self.volume,
             ReportKind::Indices => &self.indices,
             ReportKind::Hosts => &self.hosts,
+            ReportKind::LogDelay => &self.log_delay,
         }
     }
 
@@ -347,6 +370,7 @@ impl StateFile {
             ReportKind::Volume => &mut self.volume,
             ReportKind::Indices => &mut self.indices,
             ReportKind::Hosts => &mut self.hosts,
+            ReportKind::LogDelay => &mut self.log_delay,
         }
     }
 }
@@ -415,6 +439,7 @@ pub fn state_of(merged: &ScheduleFile) -> StateFile {
         volume: ScheduleState::of(&merged.volume),
         indices: ScheduleState::of(&merged.indices),
         hosts: ScheduleState::of(&merged.hosts),
+        log_delay: ScheduleState::of(&merged.log_delay),
     }
 }
 
