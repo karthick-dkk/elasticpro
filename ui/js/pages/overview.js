@@ -1356,8 +1356,8 @@ function backupsCard(r) {
   }
   if (v.kind === 'none') {
     return card4('slm', '', head,
+      // Only the headline (owner, 2026-11-07); a policy on any overlapping wildcard still counts (lifecycle-errors.js slmCoversPattern).
       h('div.cl-big.bad', 'No policy for ', h('span.mono', v.logs)),
-      h('div.cl-card-note', 'Checked as a wildcard: a policy on ', h('span.mono', 'logstash-*'), ', ', h('span.mono', 'logstash-2026*'), ' or a named logstash- index counts.'),
       noRepo ? h('div.cl-card-links', docLink(DOCS.repos, 'Register a repository')) : null);
   }
   return card4('slm', '', head,
