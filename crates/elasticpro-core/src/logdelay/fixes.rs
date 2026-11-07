@@ -187,16 +187,21 @@ pub fn findings(cluster: &str, t: &Tracker, from: i64, to: i64, now: i64, every_
             if late.len() < 2 || late.len() * 2 < all.len() {
                 continue; // at least two late, and at least half of that group
             }
-            // The others on the same column: mostly on time, or it is not this group's fault.
+            // The others on the same column must exist and be mostly on time: with nobody else
+            // to compare against, "others were on time" cannot be said, so nothing is claimed.
             let (others_all, others_late): (usize, usize) = groups.iter().filter(|(v, _)| *v != value)
                 .fold((0, 0), |(a, l), (_, g)| (a + g.0.len(), l + g.1.len()));
-            if others_all > 0 && others_late * 5 > others_all {
+            if others_all == 0 || others_late * 5 > others_all {
                 continue;
             }
+            let mut missing = vec![];
             if step == Step::Parser {
                 let fwds: BTreeSet<String> = late.iter().filter_map(|d| extras_of(d).get("fwd_tag").cloned()).collect();
                 if have("fwd_tag") && fwds.len() < 2 {
                     continue; // one forwarder's devices: the forwarder rule has it
+                }
+                if !have("fwd_tag") {
+                    missing.push("fwd_tag on these devices: \"across forwarders\" could not be checked, this may be one forwarder".to_string());
                 }
             }
             let (why, fix) = match step {
@@ -214,7 +219,7 @@ pub fn findings(cluster: &str, t: &Tracker, from: i64, to: i64, now: i64, every_
                 cluster: cluster.into(), step, devices: late.iter().cloned().collect(), group: Some((col.to_string(), value.clone())), why, fix,
                 evidence: json!({ "sharing": late.len(), "ofGroup": all.len(), "othersLate": others_late, "othersAll": others_all,
                                   "dropAtOnce": queue_shape }),
-                missing: vec![],
+                missing,
             });
             claimed.extend(late.iter().cloned());
         }
@@ -444,6 +449,30 @@ mod tests {
         assert_eq!(f.len(), 1, "{f:?}");
         assert_eq!(f[0].step, Step::DeviceLink);
         assert_eq!(f[0].evidence["burstMinutes"], 90.0);
+    }
+
+    #[test]
+    fn one_group_with_nobody_to_compare_against_claims_nothing_and_a_parser_without_fwd_tag_says_so() {
+        // Every device on one forwarder, all late: no "others were on time" to read.
+        let mut t = Tracker::default();
+        for i in 0..2 {
+            let at = i * 2 * H;
+            run(&mut t, at, (0..3).map(|n| reading(&format!("a-{n}"), Some(50.0), at, "syslog-1", "")).collect());
+        }
+        let f = findings("prod", &t, 0, 10 * H, 3 * H, 2 * H, &ClusterFacts::default());
+        assert!(f.iter().all(|x| x.step != Step::Forwarder), "{f:?}");
+        assert_eq!(f.iter().find(|x| x.step == Step::Unknown).map(|x| x.devices.len()), Some(3));
+        // One parser late, another on time, no fwd_tag anywhere: a parser finding, with the gap named.
+        let mut t = Tracker::default();
+        for i in 0..2 {
+            let at = i * 2 * H;
+            let mut rs: Vec<Reading> = (0..3).map(|n| reading(&format!("p-{n}"), Some(50.0), at, "", "fortigate-grok")).collect();
+            rs.extend((0..4).map(|n| reading(&format!("q-{n}"), Some(1.0), at, "", "cisco")));
+            run(&mut t, at, rs);
+        }
+        let f = findings("prod", &t, 0, 10 * H, 3 * H, 2 * H, &ClusterFacts::default());
+        let p = f.iter().find(|x| x.step == Step::Parser).expect("a parser finding");
+        assert!(p.missing.iter().any(|m| m.contains("fwd_tag")), "{:?}", p.missing);
     }
 
     #[test]
