@@ -102,7 +102,7 @@ export function backfillLine(b) {
 }
 
 /** The delay card's destination: anything but "history" is the monitored cluster, as before. */
-export const destinationOf = (config) => (config && config.destination === 'history' ? 'history' : 'cluster');
+export const destinationOf = (config) => (config && (config.destination === 'history' || config.destination === 'builtin') ? config.destination : 'cluster');
 
 /** The one-line warning on the delay card when the history store is not ready, else ''. */
 export function destinationWarning(config, historyStore) {
