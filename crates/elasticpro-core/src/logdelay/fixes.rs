@@ -187,11 +187,32 @@ pub fn findings(cluster: &str, t: &Tracker, from: i64, to: i64, now: i64, every_
             if late.len() < 2 || late.len() * 2 < all.len() {
                 continue; // at least two late, and at least half of that group
             }
-            // The others on the same column must exist and be mostly on time: with nobody else
-            // to compare against, "others were on time" cannot be said, so nothing is claimed.
-            let (others_all, others_late): (usize, usize) = groups.iter().filter(|(v, _)| *v != value)
-                .fold((0, 0), |(a, l), (_, g)| (a + g.0.len(), l + g.1.len()));
-            if others_all == 0 || others_late * 5 > others_all {
+            // The others on the same column must have been measured while this group was late,
+            // and been mostly on time then. A silent or can't-measure device is neither on time
+            // nor late (unknown is not zero), so it is not counted at all: with no measured
+            // device on time to compare against, "others were on time" cannot be said, and
+            // nothing is claimed.
+            let moments: Vec<(i64, i64)> = episodes.iter().filter(|e| late.contains(&e.device))
+                .map(|e| (e.started_ms.max(from), e.solved_ms.or(e.ended_ms).unwrap_or(i64::MAX).min(to))).collect();
+            let (mut others_all, mut others_late, mut others_on_time) = (0usize, 0usize, 0usize);
+            for (_, (members, _)) in groups.iter().filter(|(v, _)| *v != value) {
+                for name in members {
+                    let Some(d) = t.devices.get(name) else { continue };
+                    let then: Vec<State> = d.recent.iter()
+                        .filter(|p| moments.iter().any(|(a, b)| p.t >= *a && p.t < *b))
+                        .map(|p| p.s).filter(|s| s.late() || s.on_time()).collect();
+                    if then.is_empty() {
+                        continue; // not measured at those moments: unknown, not on time
+                    }
+                    others_all += 1;
+                    if then.iter().any(|s| s.late()) {
+                        others_late += 1;
+                    } else {
+                        others_on_time += 1;
+                    }
+                }
+            }
+            if others_on_time == 0 || others_late * 5 > others_all {
                 continue;
             }
             let mut missing = vec![];
@@ -206,7 +227,7 @@ pub fn findings(cluster: &str, t: &Tracker, from: i64, to: i64, now: i64, every_
             }
             let (why, fix) = match step {
                 Step::Forwarder => (
-                    format!("one forwarder is holding logs back ({col} {value}); devices on the other {col}s were on time at the same moments"),
+                    format!("one forwarder is holding logs back ({col} {value}); devices measured on the other {col}s were on time at the same moments"),
                     format!("check {value}: its queue or disk buffer, and the link to Logstash"),
                 ),
                 _ => (
@@ -217,7 +238,7 @@ pub fn findings(cluster: &str, t: &Tracker, from: i64, to: i64, now: i64, every_
             let queue_shape = episodes.iter().filter(|e| late.contains(&e.device) && e.solved_ms.is_some() && e.worst_minutes >= e.last_minutes + 20.0).count();
             out.push(Finding {
                 cluster: cluster.into(), step, devices: late.iter().cloned().collect(), group: Some((col.to_string(), value.clone())), why, fix,
-                evidence: json!({ "sharing": late.len(), "ofGroup": all.len(), "othersLate": others_late, "othersAll": others_all,
+                evidence: json!({ "sharing": late.len(), "ofGroup": all.len(), "othersLate": others_late, "othersAll": others_all, "othersOnTime": others_on_time,
                                   "dropAtOnce": queue_shape }),
                 missing,
             });
@@ -480,6 +501,39 @@ mod tests {
         let f = findings("prod", &t, 0, 10 * H, 3 * H, 2 * H, &ClusterFacts::default());
         let p = f.iter().find(|x| x.step == Step::Parser).expect("a parser finding");
         assert!(p.missing.iter().any(|m| m.contains("fwd_tag")), "{:?}", p.missing);
+    }
+
+    #[test]
+    fn others_that_were_silent_or_unmeasured_are_not_counted_as_on_time() {
+        // Run 0: everyone on time. Runs 1–3: syslog-1's devices late, syslog-2's silent (and
+        // one that never had a readable time): nobody on the other forwarder was measured
+        // while syslog-1 was late, so "the others were on time" cannot be said.
+        let silent_after = 2 * H;
+        let mut t = Tracker::default();
+        let mut rs: Vec<Reading> = (0..3).map(|n| reading(&format!("a-{n}"), Some(1.0), 0, "syslog-1", "grok")).collect();
+        rs.extend((0..4).map(|n| reading(&format!("b-{n}"), Some(1.0), 0, "syslog-2", "grok")));
+        t.apply(0, rs, &Levels::default(), silent_after);
+        for i in 1..4 {
+            let at = i * 2 * H;
+            let mut rs: Vec<Reading> = (0..3).map(|n| reading(&format!("a-{n}"), Some(50.0), at, "syslog-1", "grok")).collect();
+            rs.push(reading("c-0", None, at, "syslog-2", "grok"));
+            t.apply(at, rs, &Levels::default(), silent_after);
+        }
+        assert!(t.devices.iter().filter(|(n, _)| n.starts_with("b-")).all(|(_, d)| d.state == State::Silent), "the other forwarder is silent");
+        let f = findings("prod", &t, 0, 10 * H, 7 * H, 2 * H, &ClusterFacts::default());
+        assert!(f.iter().all(|x| x.step != Step::Forwarder && x.step != Step::Parser), "{f:?}");
+        assert_eq!(f.iter().find(|x| x.step == Step::Unknown).map(|x| x.devices.len()), Some(3), "{f:?}");
+        // One measured device on time on the other forwarder at those moments: now it can be said.
+        let mut t2 = t.clone();
+        for i in 4..6 {
+            let at = i * 2 * H;
+            let mut rs: Vec<Reading> = (0..3).map(|n| reading(&format!("a-{n}"), Some(50.0), at, "syslog-1", "grok")).collect();
+            rs.push(reading("b-0", Some(1.0), at, "syslog-2", "grok"));
+            t2.apply(at, rs, &Levels::default(), silent_after);
+        }
+        let g = findings("prod", &t2, 0, 12 * H, 11 * H, 2 * H, &ClusterFacts::default());
+        let fwd = g.iter().find(|x| x.step == Step::Forwarder).expect("a forwarder finding");
+        assert_eq!((fwd.evidence["othersAll"].as_u64(), fwd.evidence["othersOnTime"].as_u64()), (Some(1), Some(1)), "{fwd:?}");
     }
 
     #[test]
