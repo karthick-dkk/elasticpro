@@ -309,12 +309,13 @@ pub fn findings(cluster: &str, t: &Tracker, from: i64, to: i64, now: i64, every_
     out
 }
 
-/// Each device's own line: the first group finding it is in, in the order the groups came.
-pub fn per_device(findings: &[Finding]) -> BTreeMap<String, Finding> {
+/// Each device's own line, keyed by `(cluster, device)` — the same hostname may send to two
+/// clusters: the first group finding it is in, in the order the groups came.
+pub fn per_device(findings: &[Finding]) -> BTreeMap<(String, String), Finding> {
     let mut out = BTreeMap::new();
     for f in findings {
         for d in &f.devices {
-            out.entry(d.clone()).or_insert_with(|| Finding { devices: vec![d.clone()], ..f.clone() });
+            out.entry((f.cluster.clone(), d.clone())).or_insert_with(|| Finding { devices: vec![d.clone()], ..f.clone() });
         }
     }
     out
@@ -399,8 +400,14 @@ mod tests {
         assert_eq!(f[0].devices.len(), 4);
         assert!(f[0].fix.contains("syslog-1"));
         let each = per_device(&f);
-        assert_eq!(each["a-2"].step, Step::Forwarder);
-        assert!(!each.contains_key("b-0"), "an on-time device has no finding");
+        assert_eq!(each[&("prod".to_string(), "a-2".to_string())].step, Step::Forwarder);
+        assert!(!each.contains_key(&("prod".to_string(), "b-0".to_string())), "an on-time device has no finding");
+        // The same hostname on another cluster keeps its own finding.
+        let mut two = f.clone();
+        two.push(Finding { cluster: "other".into(), step: Step::Unknown, ..f[0].clone() });
+        let each = per_device(&two);
+        assert_eq!(each[&("other".to_string(), "a-2".to_string())].step, Step::Unknown);
+        assert_eq!(each[&("prod".to_string(), "a-2".to_string())].step, Step::Forwarder);
     }
 
     #[test]

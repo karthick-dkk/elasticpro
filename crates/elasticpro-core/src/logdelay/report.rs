@@ -315,7 +315,7 @@ fn sheets(i: &Inputs<'_>, fleet: &Value, rows: &[DeviceRow], windows: &[Value], 
                 line.push(Cell::text(row.extras.get(&i.options.group_by).cloned().unwrap_or_else(|| "—".into())));
             }
             line.extend(i.options.columns.iter().map(|c| column_cell(c, row, now)));
-            match each.get(&row.device).filter(|f| f.cluster == row.cluster) {
+            match each.get(&(row.cluster.clone(), row.device.clone())) {
                 Some(f) => { line.push(Cell::text(f.step.label())); line.push(Cell::text(&f.why)); line.push(Cell::text(&f.fix)); }
                 None => { line.push(Cell::Empty); line.push(Cell::Empty); line.push(Cell::Empty); }
             }
@@ -396,7 +396,7 @@ fn csv(i: &Inputs<'_>, rows: &[DeviceRow]) -> String {
             line.push(csv_escape(r.extras.get(&i.options.group_by).map(String::as_str).unwrap_or("")));
         }
         line.extend(i.options.columns.iter().map(|c| csv_escape(&cell_text(&column_cell(c, r, i.now)))));
-        let f = each.get(&r.device).filter(|f| f.cluster == r.cluster);
+        let f = each.get(&(r.cluster.clone(), r.device.clone()));
         line.push(csv_escape(f.map(|f| f.step.label()).unwrap_or("")));
         line.push(csv_escape(f.map(|f| f.why.as_str()).unwrap_or("")));
         line.push(csv_escape(f.map(|f| f.fix.as_str()).unwrap_or("")));

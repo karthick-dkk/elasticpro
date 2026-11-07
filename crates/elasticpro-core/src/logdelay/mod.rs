@@ -423,7 +423,7 @@ impl Core {
                 let Some(c) = inputs.first() else { return bad("not_found", format!("no cluster {id:?}")) };
                 let fr = Range::last_days(now, 7);
                 let findings = self.logdelay_findings(&[id.to_string()], &fr, now, every);
-                let mine = fixes::per_device(&findings).remove(dev);
+                let mine = fixes::per_device(&findings).remove(&(id.to_string(), dev.to_string()));
                 let Some(mut v) = summary::device(c, dev, &r, now, every, mine.as_ref()) else {
                     return bad("not_found", format!("no device {dev:?} measured on {id:?} (the store keeps 90 days; a device not seen for a week is forgotten)"));
                 };
@@ -474,7 +474,7 @@ impl Core {
                 let mut rows: Vec<Value> = vec![];
                 for c in &inputs {
                     for row in summary::device_rows(c, &r, now) {
-                        if let Some(f) = each.get(&row.device).filter(|f| f.cluster == c.id) {
+                        if let Some(f) = each.get(&(c.id.clone(), row.device.clone())) {
                             rows.push(json!({ "device": row.device, "cluster": c.id, "clusterName": c.name, "state": row.state, "nowMinutes": row.now_minutes,
                                               "step": f.step, "stepLabel": f.step.label(), "why": f.why, "fix": f.fix, "group": f.group }));
                         }
