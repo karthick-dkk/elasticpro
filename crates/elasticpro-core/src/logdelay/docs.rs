@@ -66,7 +66,7 @@ pub fn episode_doc(cluster: &str, e: &Episode, now: i64) -> Value {
         "started": e.started_ms,
         "solved": e.solved_ms,
         "lasted_minutes": (e.lasted_ms(now) as f64 / 60_000.0).round(),
-        "open": e.solved_ms.is_none(),
+        "open": e.solved_ms.is_none() && e.ended_ms.is_none(),
         "worst_minutes": e.worst_minutes,
         "worst_state": e.worst_state.as_str(),
         "last_minutes": e.last_minutes,
@@ -158,7 +158,7 @@ mod tests {
     fn ids_repeat_so_a_rerun_overwrites() {
         let mut extras = BTreeMap::new();
         extras.insert("fwd_tag".to_string(), "syslog-1".to_string());
-        let e = Episode { device: "fw".into(), started_ms: 1_000, solved_ms: None, worst_minutes: 45.0, worst_state: State::Delay,
+        let e = Episode { device: "fw".into(), started_ms: 1_000, solved_ms: None, ended_ms: None, worst_minutes: 45.0, worst_state: State::Delay,
                           last_minutes: 45.0, last_state: State::Delay, measurements: 1, whole_hour: 0, extras: extras.clone() };
         assert_eq!(episode_id("prod", &e), "prod|fw|1000");
         let mut solved = e.clone();

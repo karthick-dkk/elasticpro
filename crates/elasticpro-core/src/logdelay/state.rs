@@ -62,6 +62,10 @@ pub struct Episode {
     pub started_ms: i64,
     #[serde(default)]
     pub solved_ms: Option<i64>,
+    /// Set when the device was forgotten (a week unseen) while this was open: the period ended
+    /// then, unsolved. Such a period lasts until `ended_ms`, and is never "still late" after it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ended_ms: Option<i64>,
     pub worst_minutes: f64,
     pub worst_state: State,
     /// The last measured delay (the one that solved it, for a solved period).
@@ -78,14 +82,25 @@ pub struct Episode {
 }
 
 impl Episode {
+    /// When it ended: solved, or ended with the device forgotten, or still open at `now`.
+    pub fn end_ms(&self, now: i64) -> i64 {
+        self.solved_ms.or(self.ended_ms).unwrap_or(now)
+    }
+
+    /// Late at instant `at`: begun before it, not solved before it, and not yet ended by
+    /// forgetting (a device nobody has heard from in a week is not "still late", it is gone).
+    pub fn late_at(&self, at: i64) -> bool {
+        self.started_ms < at && self.solved_ms.is_none_or(|s| s >= at) && self.ended_ms.is_none_or(|e| e > at)
+    }
+
     /// How long it lasted, or has lasted so far at `now`.
     pub fn lasted_ms(&self, now: i64) -> i64 {
-        (self.solved_ms.unwrap_or(now) - self.started_ms).max(0)
+        (self.end_ms(now) - self.started_ms).max(0)
     }
 
     /// How much of it fell inside `[from, to)`, in ms.
     pub fn overlap_ms(&self, from: i64, to: i64, now: i64) -> i64 {
-        let end = self.solved_ms.unwrap_or(now);
+        let end = self.end_ms(now);
         (end.min(to) - self.started_ms.max(from)).max(0)
     }
 
@@ -295,7 +310,7 @@ impl Tracker {
                     }
                     None if state.late() => {
                         let ep = Episode {
-                            device: r.device.clone(), started_ms: run_ms, solved_ms: None, worst_minutes: m, worst_state: state,
+                            device: r.device.clone(), started_ms: run_ms, solved_ms: None, ended_ms: None, worst_minutes: m, worst_state: state,
                             last_minutes: m, last_state: state, measurements: 1, whole_hour: whole_hour(m) as u32, extras: d.extras.clone(),
                         };
                         out.opened.push(ep.clone());
@@ -338,8 +353,10 @@ impl Tracker {
         }
         for name in forget {
             if let Some(d) = self.devices.remove(&name) {
-                // Its open period ends unsolved: nobody measured it back under the line.
-                if let Some(ep) = d.open {
+                // Its open period ends here, unsolved: nobody measured it back under the line,
+                // and nobody counts it as late from now on.
+                if let Some(mut ep) = d.open {
+                    ep.ended_ms = Some(run_ms);
                     self.episodes.push(ep);
                 }
                 if let Some(s) = d.silence {
@@ -358,7 +375,7 @@ impl Tracker {
         for d in self.devices.values_mut() {
             d.recent.retain(|p| now - p.t < RECENT_MS);
         }
-        self.episodes.retain(|e| now - e.solved_ms.unwrap_or(e.started_ms) < KEEP_MS);
+        self.episodes.retain(|e| now - e.solved_ms.or(e.ended_ms).unwrap_or(e.started_ms) < KEEP_MS);
         self.silences.retain(|s| now - s.to_ms.unwrap_or(s.from_ms) < KEEP_MS);
         self.episodes.sort_by_key(|e| e.started_ms);
         self.silences.sort_by_key(|s| s.from_ms);
@@ -535,6 +552,9 @@ mod tests {
         assert!(t.devices.is_empty());
         assert_eq!(t.episodes.len(), 1);
         assert_eq!(t.episodes[0].solved_ms, None);
+        assert_eq!(t.episodes[0].ended_ms, Some(FORGET_MS + H), "ended when forgotten, so it stops lasting");
+        assert_eq!(t.episodes[0].lasted_ms(FORGET_MS + 50 * H), FORGET_MS + H);
+        assert!(!t.episodes[0].late_at(FORGET_MS + 2 * H) && t.episodes[0].late_at(H));
     }
 
     #[test]

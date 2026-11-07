@@ -89,7 +89,7 @@ pub fn many(measured: usize) -> usize {
 /// The findings for one cluster over `[from, to)`. `every_ms` is the measurement interval.
 pub fn findings(cluster: &str, t: &Tracker, from: i64, to: i64, now: i64, every_ms: i64, facts: &ClusterFacts) -> Vec<Finding> {
     let episodes: Vec<Episode> = t.all_episodes().into_iter()
-        .filter(|e| e.started_ms < to && e.solved_ms.unwrap_or(now) >= from).collect();
+        .filter(|e| e.started_ms < to && e.end_ms(now) >= from).collect();
     if episodes.is_empty() {
         return vec![];
     }
@@ -105,7 +105,7 @@ pub fn findings(cluster: &str, t: &Tracker, from: i64, to: i64, now: i64, every_
         let step = every_ms.max(1);
         let mut by_window: BTreeMap<i64, BTreeSet<String>> = BTreeMap::new();
         for e in &episodes {
-            let end = e.solved_ms.unwrap_or(now).min(to);
+            let end = e.end_ms(now).min(to);
             let mut w = (e.started_ms.max(from) / step) * step;
             while w < end {
                 by_window.entry(w).or_default().insert(e.device.clone());

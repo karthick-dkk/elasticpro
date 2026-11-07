@@ -147,7 +147,7 @@ pub fn device_rows(c: &ClusterInput, r: &Range, now: i64) -> Vec<DeviceRow> {
     let eps = c.tracker.all_episodes();
     let mut out = vec![];
     for (name, d) in &c.tracker.devices {
-        let mine: Vec<&Episode> = eps.iter().filter(|e| &e.device == name && e.started_ms < r.to_ms && e.solved_ms.unwrap_or(now) >= r.from_ms).collect();
+        let mine: Vec<&Episode> = eps.iter().filter(|e| &e.device == name && e.started_ms < r.to_ms && e.end_ms(now) >= r.from_ms).collect();
         let mut in_range: Vec<f64> = d.recent.iter().filter(|p| p.t >= r.from_ms && p.t < r.to_ms).filter_map(|p| p.m).collect();
         let max = in_range.iter().cloned().fold(None, |m: Option<f64>, x| Some(m.map_or(x, |m| m.max(x))));
         let last = mine.last();
@@ -187,7 +187,7 @@ pub fn windows(trackers: &[&Tracker], day: NaiveDate, every_hours: u64, now: i64
         let newly = eps.iter().filter(|e| e.started_ms >= from && e.started_ms < to).count();
         let solved = eps.iter().filter(|e| e.solved_ms.is_some_and(|s| s >= from && s < to)).count();
         let end = to.min(now);
-        let still = eps.iter().filter(|e| e.started_ms < end && e.solved_ms.is_none_or(|s| s >= end)).count();
+        let still = eps.iter().filter(|e| e.late_at(end)).count();
         json!({ "from": from, "to": to, "label": time::window_label(from, to), "newlyLate": newly, "solved": solved, "stillLate": still,
                 "complete": now >= to })
     }).collect()
@@ -334,7 +334,7 @@ pub fn cluster(c: &ClusterInput, r: &Range, now: i64, every_hours: u64, fields: 
 pub fn device(c: &ClusterInput, name: &str, r: &Range, now: i64, every_hours: u64, finding: Option<&Finding>) -> Option<Value> {
     let d = c.tracker.devices.get(name)?;
     let row = device_rows(c, r, now).into_iter().find(|x| x.device == name)?;
-    let eps: Vec<Episode> = c.tracker.all_episodes().into_iter().filter(|e| e.device == name && e.started_ms < r.to_ms && e.solved_ms.unwrap_or(now) >= r.from_ms).collect();
+    let eps: Vec<Episode> = c.tracker.all_episodes().into_iter().filter(|e| e.device == name && e.started_ms < r.to_ms && e.end_ms(now) >= r.from_ms).collect();
     let points: Vec<Value> = d.recent.iter().filter(|p| p.t >= r.from_ms && p.t < r.to_ms).map(|p| json!({ "t": p.t, "m": p.m, "s": p.s })).collect();
     let measured: Vec<(i64, f64)> = d.recent.iter().filter(|p| p.t >= r.from_ms && p.t < r.to_ms).filter_map(|p| p.m.map(|m| (p.t, m))).collect();
     let peak = measured.iter().cloned().fold(None, |best: Option<(i64, f64)>, (t, m)| match best { Some((_, b)) if b >= m => best, _ => Some((t, m)) });
@@ -366,7 +366,7 @@ pub fn device(c: &ClusterInput, name: &str, r: &Range, now: i64, every_hours: u6
         "extras": d.extras, "lastArrival": d.last_arrival_ms, "lastEvent": d.last_event_ms, "firstSeen": d.first_seen_ms,
         "points": points,
         "periods": eps.iter().map(|e| json!({
-            "started": e.started_ms, "solved": e.solved_ms, "lastedMs": e.lasted_ms(now), "worstMinutes": e.worst_minutes, "worstState": e.worst_state,
+            "started": e.started_ms, "solved": e.solved_ms, "ended": e.ended_ms, "lastedMs": e.lasted_ms(now), "worstMinutes": e.worst_minutes, "worstState": e.worst_state,
             "lastMinutes": e.last_minutes, "lastState": e.last_state, "measurements": e.measurements, "pattern": e.pattern(), "extras": e.extras,
         })).collect::<Vec<_>>(),
         "silences": silences,
@@ -452,6 +452,26 @@ mod tests {
         let today = time::local_day_key(now);
         daily.insert(today.clone(), super::super::state::daily(&t, &today, time::day_bounds(time::local_date(now)).0, time::day_bounds(time::local_date(now)).1, now));
         ClusterInput { id: "prod".into(), name: "Production".into(), tracker: Arc::new(t), daily, levels: l }
+    }
+
+    #[test]
+    fn a_forgotten_device_stops_counting_as_late_in_windows_and_totals() {
+        let now = chrono::Utc::now().timestamp_millis();
+        let (t0, _) = time::day_bounds(time::local_date(now));
+        // Begun at 00:30 today, open, then forgotten at 05:00 today (its last arrival a week before).
+        let mut t = Tracker::default();
+        let l = Levels::default();
+        let a_week_ago = t0 + 30 * 60_000 - crate::logdelay::state::FORGET_MS;
+        t.apply(a_week_ago, vec![reading("gone", Some(50.0), a_week_ago, "dc1")], &l, 2 * H);
+        t.apply(t0 + 5 * H, vec![reading("ok", Some(1.0), t0 + 5 * H, "dc1")], &l, 2 * H);
+        assert!(t.devices.get("gone").is_none() && t.episodes[0].ended_ms == Some(t0 + 5 * H));
+        let c = ClusterInput { id: "p".into(), name: "P".into(), tracker: Arc::new(t), daily: BTreeMap::new(), levels: l };
+        let late_now = windows(&[c.tracker.as_ref()], time::local_date(now), 2, (t0 + 7 * H).max(now)).iter()
+            .filter(|w| w["from"].as_i64().unwrap() >= t0 + 6 * H).map(|w| w["stillLate"].as_u64().unwrap()).sum::<u64>();
+        assert_eq!(late_now, 0, "after it ended, no window counts it as still late");
+        let d = crate::logdelay::state::daily(&c.tracker, "today", t0, t0 + 86_400_000, t0 + 20 * H);
+        assert_eq!(d.late_hours, 5.0, "it was late from midnight until it was forgotten at 05:00, not until now");
+        assert_eq!(device_rows(&c, &Range::last_days(now, 30), now).iter().filter(|r| r.device == "gone").count(), 0);
     }
 
     #[test]

@@ -211,7 +211,7 @@ Tiles: `totals.devices`, `totals.late` (`delay`/`critical`), `pctOnTime`, `start
   "worst": { "minutes": 212.0, "at": 1760891400000 }, "episodes": 5, "solved": 4, "lateMs": 67200000, "latePct": 2.6, "docsPerDay": 41000,
   "lastSilence": 1761720000000, "extras": {…}, "lastArrival": 0, "lastEvent": 0, "firstSeen": 0,
   "points": [ { "t": 1762250400000, "m": 94.0, "s": "critical" }, { "t": 0, "m": null, "s": "silent" } ],
-  "periods": [ { "started": 0, "solved": null, "lastedMs": 9900000, "worstMinutes": 94.0, "worstState": "critical", "lastMinutes": 94.0, "lastState": "critical",
+  "periods": [ { "started": 0, "solved": null, "ended": null, "lastedMs": 9900000, "worstMinutes": 94.0, "worstState": "critical", "lastMinutes": 94.0, "lastState": "critical",
                  "measurements": 11, "pattern": null, "extras": {…} } ],
   "silences": [ { "from": 0, "to": 0, "burstDocs": 6800, "burstMinutes": 90.0 } ],
   "insights": { "peak": { "minutes": 212.0, "at": 0 }, "average": { "minutes": 9.0, "measurements": 360 },
@@ -225,7 +225,9 @@ Tiles: `totals.devices`, `totals.late` (`delay`/`critical`), `pctOnTime`, `start
 `points` is the graph (one per run, 31 days held in the tracker; `m: null` = silent/can't
 measure, draw no dot); `periods` are the shaded bands and the *Every delay* table (`pattern`
 = "Looks like": `"a whole hour off: time zone"`, `"clock ahead"` or null = "—"); `insights.*`
-null = not known (no solved period → no "Solved in"). `olderMeasurements` appears only when
+null = not known (no solved period → no "Solved in"). A period with `solved: null` and
+`ended` set ended unsolved when its device was forgotten: not open, not "still late", and it
+lasted until `ended`. `olderMeasurements` appears only when
 the range reaches past the tracker's 31 days (read from the day files, ≤ 20 000).
 `not_found` when the device is not in the tracker (forgotten after 7 days unseen).
 
