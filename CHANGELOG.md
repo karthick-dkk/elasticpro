@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.56
 
 **Backup fixes from the 0.3.55 test-VM run.**
 - Every kept backup that rotation removes is audited (`backup rotated out`, with the file's `name` and the `user` who caused it, or `system` for the timer). A schedule change lowering *keep* and a manual *keep* used to remove files without a line; all four paths now go through one prune. A second backup in the same second is now the newer one: it was sorted as the older and could be rotated out the moment it was kept.
@@ -8,6 +8,8 @@
 - docs/HANDBOOK.md said a backup made without a password has `credentials: null` in the file. The file has no `credentials` key; a preview shows `backup.credentials: null` and the `BACKUP_CREATE` reply says `credentials: "none"`, which is what the page and `tools/hosted-check.sh` read. The handbook now says so.
 
 **Clusters, the open row (owner-approved revision).** The strip is one thin row: each box (Cluster health, Endpoint, Jump host, Log bucket) shows its label and value side by side, and the Report button is gone from its end. Tighter spacing: 6 px inside the panel, 4 px between strip, cards and tables, 4 px between cards. Backups (SLM) says only *No policy for logstash-\** (the wildcard matching is unchanged). Nodes: a data node shows one plain `data` chip, its tiers in the chip's tooltip, and the *Data node* legend is gone. ILM: *No policy* (red, with *Indices without a policy ›*) only when Elasticsearch confirms no log index has one; when which policy each index has could not be read, a grey *Not known*, with the permission it needs in the tooltip. The card and the summary's ILM cell read one definition of the two (`ilmPolicyState`).
+
+**Tests.** `tools/hosted-check.sh` no longer fails after "ok": its exit traps ran under `set -e`, so a `kill` of a server that had already stopped failed the run.
 
 ## 0.3.55
 
