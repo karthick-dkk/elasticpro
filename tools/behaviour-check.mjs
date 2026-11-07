@@ -3788,9 +3788,13 @@ restoreConsole();
     if (body.type === 'CONFIG_READ' && written !== null) {
       return stubReply({ ok: true, text: written, size: written.length, lastModified: Date.now() });
     }
-    if (body.type === 'PING' && managedNow) {
+    // Decided when the answer comes back, not when the question went out: a PING already in
+    // flight when the case sets managedNow (the side foot's, the last Save's) would otherwise
+    // land unpatched after setManaged and unlock the field the case just locked — seen once,
+    // on a loaded machine, as "(false, 80)" for a default managed at 71.
+    if (body.type === 'PING') {
       const j = await (await realFetch(input, init)).json();
-      return stubReply({ ...j, managedDefaults: { ...managedNow }, managedZabbixOptions: {} });
+      return stubReply(managedNow ? { ...j, managedDefaults: { ...managedNow }, managedZabbixOptions: {} } : j);
     }
     return realFetch(input, init);
   };
@@ -4062,10 +4066,12 @@ restoreConsole();
     // manages nothing — so a PING landing while the managed case below runs (the Config page
     // asks one on open, Save asks one, the side foot every 10 s) undid what it set up, and
     // whether it did was a matter of timing. The bridge's answer, with the case's own list.
-    if (body.type === 'PING' && managedNow) {
+    // Decided at reply time (see the Config page's stub above): a PING in flight when the case
+    // sets managedNow must not land unpatched after it.
+    if (body.type === 'PING') {
       const res = await realFetch(input, init);
       const j = await res.json();
-      return stubReply({ ...j, managedDefaults: { ...managedNow }, managedZabbixOptions: {} });
+      return stubReply(managedNow ? { ...j, managedDefaults: { ...managedNow }, managedZabbixOptions: {} } : j);
     }
     return realFetch(input, init);
   };
