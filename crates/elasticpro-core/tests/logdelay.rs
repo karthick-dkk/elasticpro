@@ -350,9 +350,17 @@ async fn a_limited_admin_sees_only_their_clusters_in_the_settings_and_the_summar
     let sum = c.handle_as(json!({ "type": "LOGDELAY_SUMMARY" }), Some(limited.clone())).await;
     assert_eq!(sum["byCluster"].as_array().unwrap().len(), 1, "{sum}");
     assert_eq!(sum["totals"]["devices"], json!(3));
-    let fixes = c.handle_as(json!({ "type": "LOGDELAY_FIXES" }), Some(limited)).await;
+    let fixes = c.handle_as(json!({ "type": "LOGDELAY_FIXES" }), Some(limited.clone())).await;
     assert!(fixes["matchedAt"].is_i64(), "served from the run's findings: {fixes}");
     assert!(fixes["findings"].as_array().unwrap().iter().all(|f| f["cluster"] == "one"), "{fixes}");
+    // The device page's "Delay by cluster" panel: the caller's clusters only, from daily.json.
+    let dev = c.handle_as(json!({ "type": "LOGDELAY_DEVICE", "clusterId": "one", "device": "fw-1" }), Some(limited)).await;
+    assert_eq!(dev["ok"], json!(true), "{dev}");
+    let panel = dev["clusters"].as_array().unwrap();
+    assert_eq!(panel.len(), 1, "{dev}");
+    assert_eq!(panel[0]["id"], json!("one"));
+    assert_eq!(panel[0]["lateNow"], json!(1), "fw-1 at 45 min over cluster one's 40: {dev}");
+    assert!(panel[0]["lateAsOf"].is_string() && panel[0]["sparkline"].is_array(), "{dev}");
     let other = c.handle_as(json!({ "type": "LOGDELAY_DEVICE", "clusterId": "two", "device": "fw-1" }),
                             Some(Caller { name: "x".into(), role: Role::User, must_change: false, scope: Some(vec!["ES one".into()]), play: None })).await;
     assert_eq!(other["kind"], json!("not_found"), "a cluster outside the scope does not exist for the caller: {other}");
