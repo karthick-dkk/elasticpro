@@ -1555,9 +1555,6 @@ table.cl-tbl > tbody > tr.cl-detail-row > td { text-align: left; }
   border: 1px solid var(--border); background: var(--surface-2); color: var(--text-secondary); white-space: nowrap;
 }
 .cl-role.master { color: #6d28d9; background: color-mix(in srgb, #7c3aed 12%, transparent); border-color: color-mix(in srgb, #7c3aed 40%, transparent); }
-.cl-role.hot { color: var(--critical-ink); background: var(--critical-bg); border-color: color-mix(in srgb, var(--critical) 35%, transparent); }
-.cl-role.warm { color: var(--warning-ink); background: var(--warning-bg); border-color: color-mix(in srgb, var(--warning) 45%, transparent); }
-.cl-role.cold { color: var(--accent); background: var(--accent-soft); border-color: color-mix(in srgb, var(--accent) 40%, transparent); }
 .cl-role.ingest { color: #0f766e; background: color-mix(in srgb, #14b8a6 14%, transparent); border-color: color-mix(in srgb, #14b8a6 45%, transparent); }
 .pill.blue { color: var(--accent); background: var(--accent-soft); border-color: color-mix(in srgb, var(--accent) 40%, transparent); }
 /* The Show / hide panel: four groups side by side, narrower when the window is. */
