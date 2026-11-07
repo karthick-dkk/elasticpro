@@ -2585,6 +2585,7 @@ select.zr-hand { height: 26px; max-width: 150px; font-size: 12px; }
 .ld-title .ld-wide-p { max-width: 980px; }
 .ld-h-sub { font-size: 13px; font-weight: 400; color: var(--text-secondary); }
 .ld-dev-h { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.ld-dev-h > .mono { font-size: inherit; }
 .ld-crumbs { font-size: 11.5px; color: var(--text-muted); }
 .ld-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
 .ld-actions a.btn { text-decoration: none; display: inline-flex; align-items: center; }

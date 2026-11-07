@@ -74,8 +74,12 @@ if (configPath) {
 
 // play: the wall display (docs/PLAY.md). Drawn against whatever core this is — an older one
 // has no PLAY_* messages, and Play must still draw, saying what is missing.
-// reports: one page of seven sections (docs/REPORTS.md), each drawn from its own route.
-const REPORT_SECTIONS = ['overview', 'daily', 'hosts', 'capacity', 'measure', 'planning', 'exports'];
+// reports: one page of eight sections (docs/REPORTS.md, docs/LOGDELAY.md), each drawn from its own route.
+const REPORT_SECTIONS = ['overview', 'daily', 'hosts', 'capacity', 'measure', 'planning', 'log-delay', 'exports'];
+// Reports › Log delay (0.3.57) has views under its section: the fixes, one cluster, and a device the
+// store does not hold (a fresh data directory has none), which must say so rather than draw blank.
+const LD_FIRST = configured ? ((await load('core/state.js')).clusters()[0] || null) : null;
+const LD_VIEWS = ['log-delay/fixes', ...(LD_FIRST ? [`log-delay/cluster/${encodeURIComponent(LD_FIRST.id)}`, `log-delay/device/${encodeURIComponent(LD_FIRST.id)}/no-such-device`] : [])];
 // Config-Management (pages/settings.js): every tab it draws itself, each from its own route; and
 // the three app pages it hosts as tabs (Automation, Request Centre, Accounts), drawn inside its frame
 // the way the shell draws them (hostedPage). A tab the bridge does not support (Data, Backup) is
@@ -84,7 +88,7 @@ const CONFIG_TABS = ['clusters/clusters', 'clusters/creds', 'clusters/trust', 'z
   'requests/policy', 'reports/fields', 'reports/mail', 'reports/templates', 'play/play', 'system/defaults', 'system/file', 'system/backup'];
 const HOSTED = new Set(['automation', 'requests', 'accounts']);
 const PAGES = ['alerts', 'overview', 'indices', 'shards', 'logs', 'console', 'snapshots',
-  ...REPORT_SECTIONS.map((s) => `reports/${s}`), 'automation', 'requests', 'requests/health', 'accounts', 'settings',
+  ...REPORT_SECTIONS.map((s) => `reports/${s}`), ...LD_VIEWS.map((s) => `reports/${s}`), 'automation', 'requests', 'requests/health', 'accounts', 'settings',
   ...CONFIG_TABS.map((t) => `settings/${t}`), 'play'];
 const view = window.document.createElement('div');
 window.document.body.append(view);
