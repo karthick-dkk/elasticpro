@@ -633,7 +633,8 @@ pub fn check_password(pw: &str) -> Result<(), Refusal> {
 }
 
 /// The file as text. `collected.secrets` go in only with a `sealer`; without one they are left
-/// out and the header says so (`credentials: null`).
+/// out and the file has no `credentials` key (`Parsed::header` then says `credentials: null`;
+/// the `BACKUP_CREATE` reply says `credentials: "none"`).
 pub fn build(header: &Header, collected: &Collected, sealer: Option<Sealer>) -> Result<String, Refusal> {
     let sections: BTreeMap<String, SectionData> = collected.sections.iter().map(|(s, d)| (s.id().to_string(), d.clone())).collect();
     let digest = digest_of(&sections);
@@ -1151,8 +1152,11 @@ mod tests {
         let h = Header { core_version: "0.3.55", taken_at: 1, taken_by: "kd", kind: Kind::Manual };
         let text = build(&h, &sample(), None).unwrap();
         assert!(!text.contains("hunter2"), "{text}");
+        let raw: Value = serde_json::from_str(&text).unwrap();
+        assert!(raw.get("credentials").is_none(), "no credentials key in the file: {text}");
         let p = parse(&text).unwrap();
         assert!(p.credentials.is_none());
+        assert_eq!(p.header()["credentials"], Value::Null, "a preview says null");
         assert_eq!(p.sections[&Section::Clusters].items["prod"]["name"], "prod");
         assert_eq!(open_credentials(&p, Some(Opener::Password("whatever-12345"))).unwrap(), None);
     }
