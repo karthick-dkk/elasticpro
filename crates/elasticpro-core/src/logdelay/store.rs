@@ -15,8 +15,11 @@
 //! as the volume record's month files are. Kept 90 days (`state::KEEP_MS`); the prune runs
 //! after every measurement.
 //!
-//! A tracker is parsed once and kept in memory (`Arc`), replaced when it is written: the
-//! pages read it on every call, the run rewrites it every two hours.
+//! A tracker is parsed once and kept in memory (`Arc`): the pages read it on every call, the
+//! run rewrites it every two hours. The copy is checked against the file on every read (its
+//! modified time, length and inode), because the run and the reports are not always the same
+//! process: with the worker split, measurements run in the core and reports build in the
+//! worker, and a copy refreshed only by its own process's writes goes stale in the other.
 
 use super::state::{Daily, Tracker, KEEP_MS};
 use crate::volume::store::write_atomic;
@@ -31,9 +34,29 @@ pub const SETTINGS_FILE: &str = "logdelay.json";
 pub const DIR: &str = "logdelay";
 const INDEX: &str = "clusters.json";
 
-/// Parsed trackers by file path, process-wide (a test runs many cores on many directories).
-fn cache() -> &'static Mutex<HashMap<PathBuf, Arc<Tracker>>> {
-    static CACHE: OnceLock<Mutex<HashMap<PathBuf, Arc<Tracker>>>> = OnceLock::new();
+/// What identifies one version of a file on disk: modified time, length and (on Unix) the
+/// inode, which `write_atomic`'s rename replaces on every write. `None`: no file.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Stamp {
+    modified: Option<std::time::SystemTime>,
+    len: u64,
+    ino: u64,
+}
+
+fn stamp(p: &Path) -> Option<Stamp> {
+    let m = std::fs::metadata(p).ok()?;
+    #[cfg(unix)]
+    let ino = std::os::unix::fs::MetadataExt::ino(&m);
+    #[cfg(not(unix))]
+    let ino = 0;
+    Some(Stamp { modified: m.modified().ok(), len: m.len(), ino })
+}
+
+/// Parsed trackers by file path, with the stamp they were parsed at, process-wide (a test
+/// runs many cores on many directories).
+type Cached = (Option<Stamp>, Arc<Tracker>);
+fn cache() -> &'static Mutex<HashMap<PathBuf, Cached>> {
+    static CACHE: OnceLock<Mutex<HashMap<PathBuf, Cached>>> = OnceLock::new();
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -88,13 +111,20 @@ impl Store {
         out
     }
 
+    /// The cluster's tracker: the parsed copy while the file is the one it was parsed from,
+    /// else parsed again (another process — the worker, the core — may have written it).
     pub fn read_tracker(&self, cluster: &str) -> Arc<Tracker> {
         let path = self.cluster_dir(cluster).join("tracker.json");
-        if let Some(t) = cache().lock().get(&path) {
-            return t.clone();
+        let now = stamp(&path);
+        if let Some((at, t)) = cache().lock().get(&path) {
+            if *at == now {
+                return t.clone();
+            }
         }
         let t: Arc<Tracker> = Arc::new(read_json(&path).unwrap_or_default());
-        cache().lock().insert(path, t.clone());
+        // A file changed between the stamp and the read is stamped as it was before: the next
+        // read sees a different stamp and parses again, never keeps the newer copy as older.
+        cache().lock().insert(path, (now, t.clone()));
         t
     }
 
@@ -103,7 +133,8 @@ impl Store {
         std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
         let path = dir.join("tracker.json");
         write_atomic(&path, &serde_json::to_vec(t).map_err(|e| e.to_string())?)?;
-        cache().lock().insert(path, Arc::new(t.clone()));
+        let at = stamp(&path);
+        cache().lock().insert(path, (at, Arc::new(t.clone())));
         let mut index = self.index();
         if index.get(&Self::dir_name(cluster)).map(String::as_str) != Some(cluster) {
             index.insert(Self::dir_name(cluster), cluster.to_string());
@@ -299,6 +330,29 @@ mod tests {
         s.write_tracker(id, &t).unwrap();
         assert_eq!(s.read_tracker(id).last_run_ms, Some(42), "a write replaces the cached copy");
         assert!(Arc::ptr_eq(&s.read_tracker(id), &s.read_tracker(id)), "reads share one parsed copy");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_tracker_written_by_another_store_is_read_fresh_not_from_the_cached_copy() {
+        // Two Store instances on one directory stand for the core (which measures) and the
+        // worker (which builds reports): each keeps the parsed copy, the file is the truth.
+        let dir = tmp("two-stores");
+        let core = Store::new(&dir);
+        let worker = Store::new(&dir);
+        core.write_tracker("prod", &Tracker { last_run_ms: Some(1), ..Default::default() }).unwrap();
+        assert_eq!(worker.read_tracker("prod").last_run_ms, Some(1));
+        // The cache entry is replaced behind the worker's back, as another process's write
+        // would leave it: the file changes, this process's copy does not.
+        let path = dir.join(DIR).join("prod").join("tracker.json");
+        let newer = Tracker { last_run_ms: Some(1_000_000), ..Default::default() };
+        write_atomic(&path, &serde_json::to_vec(&newer).unwrap()).unwrap();
+        assert_eq!(worker.read_tracker("prod").last_run_ms, Some(1_000_000), "the newer file is read, not the cached copy");
+        core.write_tracker("prod", &Tracker { last_run_ms: Some(7), ..Default::default() }).unwrap();
+        assert_eq!(worker.read_tracker("prod").last_run_ms, Some(7));
+        // A deleted file is no tracker, not the last one seen.
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(worker.read_tracker("prod").last_run_ms, None);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
