@@ -180,17 +180,6 @@ function layout() {
   return evidenceLayout(currentPage, sel, clusters().some((c) => c.id === sel));
 }
 
-/**
- * Pages the status strip stays out of the way on.
- *
- * The strip is ambient state — config name, fleet health, how hard we are hitting the
- * clusters — which is worth a glance from a dashboard and is a band of text in the way
- * when you are reading a wide table, typing a request or watching a live tail. It stays
- * on alerts, automation and the admin pages, where glancing is the point; the Clusters page
- * lost it on 2026-10-25 (its table is the dashboard, the band above it was in the way).
- */
-const STRIP_HIDDEN = new Set(['overview', 'indices', 'console', 'logs', 'snapshots', 'shards', 'reports']);
-
 /* --------------------------------- theming ---------------------------------- */
 /**
  * Before sign-in only this browser's copy can be read, so the first paint uses it; the
@@ -372,7 +361,6 @@ async function createNew() {
     if (!added) go('settings');
     await refreshAll({ force: true });
     startAutoRefresh();
-    renderSideFoot();
   } catch (e) {
     renderSetup({ status: 'error', error: e.message });
   }
@@ -415,23 +403,17 @@ async function loadOnce(file) {
 function renderShell() {
   // Everything chrome-like lives across the top, so a wide table gets the whole window.
   //
-  // Only the topbar and the tabs stay pinned while a page scrolls; the status strip is a
-  // sibling in normal flow, not inside the sticky wrapper, so it scrolls away underneath
-  // them instead of eating a permanent band of the viewport on every page. See .head-fix
-  // in app.css for the opaque background that makes that overlap read as a header rather
-  // than page content showing through.
+  // The topbar and the tabs stay pinned while a page scrolls. See .head-fix in app.css.
   const header = h('header.header',
     h('div.head-fix',
       h('div.topbar#topbar'),
-      h('nav.nav#nav')),
-    h('div.status-strip#side-foot'));
+      h('nav.nav#nav')));
 
   const main = h('main.main', h('div.page#view'));
 
   mount(root, h('div.app', header, main));
   renderNav();
   renderTopbar();
-  renderSideFoot();
 }
 
 /**
@@ -710,9 +692,7 @@ function renderTopbar() {
   const evCluster = ev && !L.needsCluster ? clusters().find((c) => c.id === state.selected) : null;
 
   mount(bar,
-    // The product name, and nothing else. The config filename used to sit under it, which
-    // made the brand block report an implementation detail — and the same filename is
-    // already on the status strip, where ambient state belongs.
+    // The product name, and nothing else: the config filename is an implementation detail.
     h('div.brand', h('img', { src: 'icons/icon48.png', alt: '' }),
       h('div', h('b', 'ElasticPro'))),
     h('h1', page.home ? (PAGES.find((p) => p.id === page.home) || page).label : page.label),
@@ -848,73 +828,6 @@ function tickStatus() {
     ? `Last refreshed ${new Date(state.lastRefresh).toLocaleString()}${fleetMode() ? '' : state.autoRefresh ? ` · next in ${dur(left)}` : ' · manual'}`
     : '';
   if (btn) btn.setAttribute('aria-label', state.lastRefresh ? `Refresh — last refreshed ${ago(state.lastRefresh)}` : 'Refresh');
-}
-
-/** The status the sidebar foot used to carry, now a strip under the tabs. */
-let sideFootKey = '';
-function renderSideFoot() {
-  const el = $('#side-foot');
-  if (!el) return;
-  // Decided here rather than at navigation: the strip is rebuilt from refresh events that
-  // fire whatever page is open, so a decision made anywhere else comes undone on the next
-  // tick. Hidden, not unbuilt — the content is cheap and stays correct for the way back.
-  el.hidden = STRIP_HIDDEN.has(currentPage) || layout().evidence;
-  const meta = state.config && state.config.fileMeta;
-  const row = (label, value, opts = {}) => h('span.row', opts, h('b', label), value);
-  const total = Object.values(requestLoad.clusters).reduce((n, r) => n + (r.last5m || 0), 0);
-  const perMin = Object.values(requestLoad.clusters).reduce((n, r) => n + (r.perMinute || 0), 0);
-  const pol = fleetPolicy();
-  // Rebuilt only when something on it changed; see renderTopbar.
-  const key = JSON.stringify([meta && meta.name, meta && meta.path, meta && meta.ephemeral, clusters().length, worstHealth(),
-    coreInfo.version, total, perMin.toFixed(1), (coreInfo.tunnels || []).map((t) => [t.id, t.status, t.user, t.host, t.port]),
-    isSnapshotMode(), state.snapshot && state.snapshot.host, pol && pol.mode, pol && pol.resolvedMode, pol && pol.pausedAll]);
-  if (key === sideFootKey && el.firstChild) return;
-  sideFootKey = key;
-
-  mount(el,
-    row('Config', h('span.trunc', { style: { maxWidth: '260px' } }, meta ? meta.name : '—'),
-      { title: meta ? (meta.path || meta.name) : '' }),
-    row('Clusters', String(clusters().length)),
-    row('Health', worstHealth()),
-    // No version here: it is in Config-Management (the About card, and System › Config file).
-    // Our own load on the fleet, so "are we stressing Elasticsearch" has a number.
-    (() => {
-      return row('Requests', h('a', { href: '#/requests', title: 'Requests this app sent to every cluster in the last 5 minutes — open the Request Centre' },
-        `${total} in 5m · ${perMin.toFixed(1)}/min`));
-    })(),
-    // Said here because a stopped or on-demand core looks, from any page, like a fleet that
-    // has stopped updating — the strip is where somebody looks to find out why.
-    pauseFor(pol)
-      ? h('span.pill.grey', { title: pausedLine(pauseFor(pol)) }, 'emergency stop')
-      : null,
-    // What the poller is actually doing: "auto" resolves to background or hybrid by fleet size,
-    // and the shipped Client basis is on-demand.
-    pol && ((pol.resolvedMode || pol.mode) === 'hybrid' || (pol.resolvedMode || pol.mode) === 'on-demand')
-      ? h('span.row.muted', {
-          title: (pol.resolvedMode || pol.mode) === 'hybrid'
-            ? `Only health is fetched in the background; the rest is fetched while a page shows it${pol.mode === 'auto' ? ' — automatic, because the fleet is larger than 25 clusters' : ''} (Config-Management › Requests)`
-            : 'Nothing is fetched in the background; each page asks for what it shows when it opens (Config-Management › Requests)',
-        }, `mode: ${pol.mode === 'auto' ? `auto → ${pol.resolvedMode}` : pol.mode}`)
-      : null,
-    // one per jump host: "jumpwin ● up"
-    ...((coreInfo.tunnels || []).map((t) => {
-      const st = (t.status && t.status.state) || 'idle';
-      const color = st === 'up' ? 'var(--good)' : st === 'connecting' ? 'var(--warning)' : st === 'down' ? 'var(--critical)' : 'var(--text-muted)';
-      return row(`Tunnel ${t.id}`,
-        h('span', { style: { display: 'inline-flex', alignItems: 'center', gap: '5px' } },
-          h('i', { style: { width: '7px', height: '7px', borderRadius: '50%', background: color, display: 'inline-block' } }), st),
-        { title: st === 'down' && t.status.error ? t.status.error : `${t.user}@${t.host}:${t.port}` });
-    })),
-    isSnapshotMode()
-      ? h('span.row', { style: { color: 'var(--accent)' } },
-          'snapshot' + (state.snapshot && state.snapshot.host ? ' from ' + state.snapshot.host : ''))
-      : null,
-    meta && meta.ephemeral ? h('span.row', { style: { color: 'var(--warning)' } }, 'loaded once — not remembered') : null,
-    // Pushed to the far end: the strip's left side is live state someone is watching, and
-    // the credits must not sit among it competing for the same glance.
-    h('span.strip-spacer'),
-    aboutMini(coreInfo.version));
-
 }
 
 /* ------------------------------ evidence layout ------------------------------ */
@@ -1093,7 +1006,6 @@ export function go(id) {
   syncEvidence();
   renderNav();
   renderTopbar();
-  renderSideFoot();
   const view = $('#view');
   if (!view) return;
   // Only when the page actually changed. go() is also how a page redraws itself after a
@@ -1346,10 +1258,10 @@ function connectNotificationStore(info) {
   setNotificationSink({ send: (msg) => bridge(msg), active: () => !isSnapshotMode(), days: Number(info.notifyDays) || 30 });
 }
 
-// keep the side-foot tunnel line current
+// keep coreInfo (version, tunnels, snapshot-running) current
 setInterval(async () => {
   if (!state.config || isSnapshotMode()) return;
-  try { const st = await workerStatus(); if (st && st.ok) { coreInfo = st; await readSnapshotRunning(); renderSideFoot(); renderNav(); } } catch (_) { /* ignore */ }
+  try { const st = await workerStatus(); if (st && st.ok) { coreInfo = st; await readSnapshotRunning(); renderNav(); } } catch (_) { /* ignore */ }
 }, 10000);
 
 // An expired or revoked session: back to the gate rather than a screen of stale numbers
@@ -1419,7 +1331,7 @@ function reportAlertEvents() {
 
 bus.on('refreshing', () => { tickStatus(); });
 bus.on('refreshed', (ev) => {
-  maybeOfferAuthRecovery(); renderTopbar(); renderSideFoot(); renderNav();
+  maybeOfferAuthRecovery(); renderTopbar(); renderNav();
   // After the nav, so the tab badge and the toast agree about what is open.
   // Zabbix announces problems itself; a toast here would be the same news twice.
   if (!embedded) announceNewAlerts({ notify: announce });
@@ -1482,8 +1394,8 @@ const redrawGate = createRedrawGate({ apply: () => scheduleDataRedraw(), policy:
 const scheduleNavRedraw = coalesce(() => renderNav());
 // Acknowledging or silencing changes what counts as open: the badge and the bar say so at once.
 bus.on('alerts-changed', () => { renderNav(); topbarKey = ''; renderTopbar(); });
-// Stopped or resumed: the top bar's pill, the status strip, and the page (which asks again on a resume).
-bus.on('pause-changed', () => { topbarKey = ''; renderTopbar(); renderSideFoot(); bus.emit('data'); });
+// Stopped or resumed: the top bar's pill and the page (which asks again on a resume).
+bus.on('pause-changed', () => { topbarKey = ''; renderTopbar(); bus.emit('data'); });
 bus.on('data', () => {
   scheduleNavRedraw();
   const p = PAGES.find((x) => x.id === currentPage);
@@ -1541,12 +1453,11 @@ window.addEventListener('focus', async () => {
       // focus — a dialog nobody asked for would be a surprise; the cached master
       // password still reopens sealed secrets silently.
       await applyLoadedConfig(next, state.handle, { prompt: false });
-      renderSideFoot();
       renderTopbar();
       go(currentPage);
     }
   } catch (_) { /* file gone or unreadable right now; the user will see it on next action */ }
 });
 
-export { renderTopbar, renderSideFoot, boot, PAGES };
+export { renderTopbar, boot, PAGES };
 boot();

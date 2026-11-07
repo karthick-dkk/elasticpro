@@ -1,7 +1,7 @@
 /**
  * Who made this, where it lives, and where to ask for help.
  *
- * One definition of the project's identity. The status strip, the setup screen and the
+ * One definition of the project's identity. The setup screen and the
  * About dialog all read these constants, so the repository URL cannot end up saying two
  * different things — which is exactly how a support link goes stale.
  *
@@ -40,11 +40,9 @@ export function extLink(label, url, title) {
 }
 
 /**
- * The mini view: one compact group for the status strip.
+ * The mini view: one compact group for the setup screen.
  *
- * Deliberately three short items and no icons — the strip already carries the config
- * name, cluster count, health, build and request load, and this must not compete with
- * any of them for attention.
+ * Deliberately a few short items and no icons.
  */
 export function aboutMini(version) {
   return h('span.row.credits',
@@ -83,7 +81,7 @@ export function aboutDialog(version) {
         h('div',
           h('div.ttl', 'If you are reporting a problem'),
           h('div',
-            'Include the app version (Config-Management › About) and what the status strip showed. Never paste your '
+            'Include the app version (Config-Management › About) and what the page showed. Never paste your '
             + 'config file or a screenshot of the Config page — both carry the cluster '
             + 'credential, and an issue is public.'))),
     ],

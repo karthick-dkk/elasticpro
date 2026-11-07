@@ -216,7 +216,7 @@ back" without opening two pages.
 
 ## Our own load on each cluster
 
-The status strip shows how many requests **this app** sent to the whole fleet in the last
+The Request Centre shows how many requests **this app** sent to the whole fleet in the last
 five minutes, and the Clusters page shows the figure per cluster with the rate it implies.
 The core counts every request the moment it goes out; a request the read-only guard refused
 never reached a socket and is not counted. It exists so "are we stressing Elasticsearch" is
