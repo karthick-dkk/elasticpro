@@ -254,7 +254,10 @@ async function run(browserName, [vw, vh, framed]) {
   const p = await ctx.newPage();
   let F = p;
   const errors = [];
-  p.on('pageerror', (e) => errors.push(e.message));
+  // The name and the first frame too: WebKit's message for a cross-origin frame error is the
+  // tail of a sentence ("/127.0.0.1:8765'."), which says nothing on its own.
+  p.on('pageerror', (e) => errors.push([e.name, e.message].filter(Boolean).join(': ')
+    + (e.stack && !String(e.stack).includes(e.message) ? ` — ${String(e.stack).split('\n')[0]}` : '')));
 
   const quiet = (ms = 500, max = 4000) => F.evaluate(({ ms, max }) => new Promise((res) => {
     let t = setTimeout(done, ms); const cap = setTimeout(done, max);
@@ -293,7 +296,10 @@ async function run(browserName, [vw, vh, framed]) {
   /* ---- load, wait for the reachable clusters to answer ---- */
   if (framed) {
     await p.goto('about:blank');
-    await p.setContent(`<body style="margin:0"><div style="height:60px;background:#333"></div><iframe src="${BASE}/#/alerts" style="display:block;width:${FRAME_W}px;height:calc(100vh - 60px);border:0"></iframe></body>`);
+    // The frame carries what the Zabbix modules' frames carry (allow="clipboard-write; fullscreen",
+    // allowfullscreen): without it WebKit reports "Permission policy 'Fullscreen' check failed"
+    // as a page error when Play's full-screen support is looked up, which no real frame does.
+    await p.setContent(`<body style="margin:0"><div style="height:60px;background:#333"></div><iframe src="${BASE}/#/alerts" allow="clipboard-write; fullscreen" allowfullscreen style="display:block;width:${FRAME_W}px;height:calc(100vh - 60px);border:0"></iframe></body>`);
     for (let i = 0; i < 100 && !p.frames().some((x) => x.url().startsWith(BASE)); i++) await sleep(100);
     F = p.frames().find((x) => x.url().startsWith(BASE));
   } else await p.goto(`${BASE}/#/alerts`);
@@ -439,19 +445,30 @@ async function run(browserName, [vw, vh, framed]) {
       const sels = await F.evaluate(() => {
         const ss = [...document.querySelectorAll('#view select')].filter((s) => s.options.length > 1 && s.options.length <= 6 && s.offsetParent);
         ss.forEach((s, i) => s.setAttribute('data-fit-psel', String(i)));
-        return ss.map((s, i) => ({ i, id: s.id || `select ${i + 1}`, opts: [...s.options].map((o) => [o.value, (o.textContent || '').trim().slice(0, 28)]) }));
+        return ss.map((s, i) => ({ i, sid: s.id || '', id: s.id || `select ${i + 1}`, was: s.value, opts: [...s.options].map((o) => [o.value, (o.textContent || '').trim().slice(0, 28)]) }));
       });
+      // By id when it has one: a change can redraw the card, and the redrawn select has no stamp.
+      const pick = ({ i, sid, v }) => { const el = (sid && document.getElementById(sid)) || document.querySelector(`#view [data-fit-psel="${i}"]`); if (!el || el.value === v) return false;
+        el.value = v; el.dispatchEvent(new Event('change', { bubbles: true })); return true; };
       for (const s of sels.slice(0, 4)) {
         for (const [v, ol] of s.opts) {
-          const done = await F.evaluate(({ i, v }) => { const el = document.querySelector(`#view [data-fit-psel="${i}"]`); if (!el || el.value === v) return false;
-            el.value = v; el.dispatchEvent(new Event('change', { bubbles: true })); return true; }, { i: s.i, v });
+          const done = await F.evaluate(pick, { i: s.i, sid: s.sid, v });
           if (!done) continue;
           await sleep(500); await quiet(500, 4000);
           const mv = await F.evaluate(pageFit);
           check(`page ${label}`, `${s.id}=${ol}`, mv.sw <= mv.cw + 1 && mv.bw <= mv.cw + 1,
             `document is ${mv.sw} wide in ${mv.cw}${mv.culprits.length ? ' — ' + mv.culprits.join('; ') : ''}`);
         }
-        // put it back where it was: the next page visit redraws anyway, but a later select shares this page
+        // Put it back where it was. A later select shares this page — and on Config-Management a
+        // select left on another option is an unsaved change: the save bar counts it, and leaving
+        // the page for the next one asks "Leave without saving?", which closeAll answers No. The
+        // Accounts dialogs "did not open" for exactly that: the page never got there.
+        if (await F.evaluate(pick, { i: s.i, sid: s.sid, v: s.was })) { await sleep(300); await quiet(300, 3000); }
+      }
+      // And whatever the visit still left unsaved (a select whose card redrew without its id),
+      // the page's own Discard puts back: nothing a visit did here is meant to be kept.
+      if (await F.evaluate(() => { const b = document.querySelector('#cm-savebar:not([hidden]) button[data-act="discard"]'); if (!b) return false; b.click(); return true; })) {
+        await sleep(400); await quiet(300, 3000);
       }
     }
   }
@@ -597,7 +614,18 @@ async function run(browserName, [vw, vh, framed]) {
         if (o.fn) await F.evaluate(o.fn, o.arg || null);
         else await o.ui(F);
       } catch (e) { rec(area, o.name, 'FAIL', `could not open it: ${e.message.split('\n')[0]}`); continue; }
-      if (!(await waitOverlay(before))) { rec(area, o.name, 'FAIL', `did not open${errors.length ? ` (page error: ${errors[errors.length - 1]})` : ''}`); continue; }
+      if (!(await waitOverlay(before))) {
+        // Say where the page was: a dialog that "did not open" is usually a page that was never
+        // reached (an unsaved change asked "Leave without saving?", a tab that was not the one).
+        const where = await F.evaluate(() => ({
+          hash: location.hash,
+          cm: document.querySelector('#view .cm-nav .cm-item[aria-current="page"]')?.dataset.cmPage || null,
+          bar: (document.getElementById('cm-savebar')?.hidden === false ? document.getElementById('cm-savebar').textContent.trim().slice(0, 60) : ''),
+          modals: [...document.querySelectorAll('.modal h2')].map((x) => x.textContent.trim().slice(0, 40)),
+        })).catch(() => null);
+        rec(area, o.name, 'FAIL', `did not open${errors.length ? ` (page error: ${errors[errors.length - 1]})` : ''} — at ${JSON.stringify(where)}`);
+        continue;
+      }
       await measureDialog(area, o.name);
       if (o.then) {
         const n = await overlays();
