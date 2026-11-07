@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.59
 
 - **Planning shows disk as it is bought:** /live disk each, /backup disk, the S3 / ULM size, the tiles and the CSV round up to a whole TB (2.79 TB → 3 TB, 19.5 TB → 20 TB), never down; the /live disk tile is the rows' sum (7 × 3 TB = 21 TB).
 - **The Planning bill of materials fits in one view:** no sideways scrollbar from 1024 px up (Chromium and WebKit); headers wrap to two lines, number columns take only their width, and below 1180 px the results move under the inputs.
