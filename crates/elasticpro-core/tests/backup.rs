@@ -4,7 +4,8 @@
 //! write path, and that the daily timer runs once a day and rotates.
 //!
 //! Its own test binary: it needs ELASTICPRO_CONFIG, which is process-wide, so the tests take
-//! turns on one lock and each sets its own file.
+//! turns on one lock and each sets its own file. The audit capture is the process's one global
+//! subscriber (see `capture`, the same shape as plan_templates.rs), never a thread-local one.
 
 mod support;
 
@@ -14,7 +15,7 @@ use elasticpro_core::Core;
 use elasticpro_core::backup::SectionData;
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 use support::TempDir;
 
 static TURN: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
@@ -42,7 +43,52 @@ fn config() -> Value {
     })
 }
 
+#[derive(Clone, Default)]
+struct Lines(Arc<Mutex<Vec<u8>>>);
+impl std::io::Write for Lines {
+    fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(b);
+        Ok(b.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Lines {
+    type Writer = Lines;
+    fn make_writer(&'a self) -> Lines {
+        self.clone()
+    }
+}
+
+/// The process's one subscriber, installed once, before any test reaches an audit callsite
+/// (`hosted` calls it): a thread-local `set_default` lets a parallel test's thread cache the
+/// callsite as never-interesting and the capture misses the line.
+fn capture() -> &'static Lines {
+    static CAP: OnceLock<Lines> = OnceLock::new();
+    CAP.get_or_init(|| {
+        let l = Lines::default();
+        tracing_subscriber::fmt().json().with_writer(l.clone()).with_max_level(tracing::Level::INFO).init();
+        l
+    })
+}
+
+/// The audit lines logged since `from` (a byte offset into the capture).
+fn audit_since(from: usize) -> Vec<Value> {
+    let buf = capture().0.lock().unwrap();
+    String::from_utf8_lossy(&buf[from..]).lines()
+        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+        .filter(|v| v["target"] == "audit")
+        .collect()
+}
+
+fn captured_len() -> usize {
+    capture().0.lock().unwrap().len()
+}
+
 fn hosted(dir: &TempDir, cfg: &Value) -> (Arc<Core>, std::path::PathBuf) {
+    capture();
     let path = dir.join("config_cluster.json");
     std::fs::write(&path, serde_json::to_string_pretty(cfg).unwrap()).unwrap();
     std::env::set_var("ELASTICPRO_CONFIG", &path);
@@ -427,4 +473,63 @@ async fn without_a_server_key_nothing_is_kept_credential_less() {
     assert_eq!(st["schedule"]["last"]["ok"], json!(false), "{st}");
     assert!(st["schedule"]["last"]["message"].as_str().unwrap().contains("no key"), "{st}");
     assert_eq!(st["kept"].as_array().unwrap().len(), 0);
+}
+
+/// Every way a kept backup is pruned says so in the audit log, by name and by whom: a schedule
+/// change lowering `keep` (the administrator), a manual `keep: true` (the administrator), a
+/// scheduled run (`system`). One prune function does all three (`BackupState::prune`).
+#[tokio::test]
+async fn every_backup_rotated_out_is_audited_by_name_and_by_whom() {
+    let _turn = TURN.lock().await;
+    let dir = TempDir::new("backup-rotate-audit");
+    let (c, _) = hosted(&dir, &config());
+    let s = admin(&c).await;
+    let backups = dir.join("backups");
+    let epbak = || names_in(&backups).into_iter().filter(|n| n.ends_with(".epbak")).collect::<Vec<_>>();
+    for _ in 0..3 {
+        let r = send(&c, &s, json!({ "type": "BACKUP_CREATE", "keep": true })).await;
+        assert_eq!(r["ok"], json!(true), "{r}");
+    }
+    assert_eq!(epbak().len(), 3);
+    // What a line says about one removal: who, and the file.
+    let rotated = |lines: &[Value]| -> Vec<(String, String)> {
+        let mut v: Vec<(String, String)> = lines.iter().filter(|l| l["fields"]["message"] == "backup rotated out")
+            .map(|l| (l["fields"]["user"].as_str().unwrap_or("").to_string(), l["fields"]["name"].as_str().unwrap_or("").to_string()))
+            .collect();
+        v.sort();
+        v
+    };
+    let gone = |before: &[String], after: &[String], who: &str| -> Vec<(String, String)> {
+        before.iter().filter(|n| !after.contains(n)).map(|n| (who.to_string(), n.clone())).collect()
+    };
+
+    // A schedule change lowering keep: two removed, each one logged as the admin's.
+    let before = epbak();
+    let from = captured_len();
+    let r = send(&c, &s, json!({ "type": "BACKUP_SCHEDULE_SET", "schedule": { "keep": 1 } })).await;
+    assert_eq!(r["ok"], json!(true), "{r}");
+    let after = epbak();
+    assert_eq!(after.len(), 1, "{after:?}");
+    let want = gone(&before, &after, "Admin");
+    assert_eq!(want.len(), 2);
+    assert_eq!(rotated(&audit_since(from)), want, "a keep-lowering removal is audited");
+
+    // A manual keep: the previous one goes, logged as the admin's.
+    let before = epbak();
+    let from = captured_len();
+    let r = send(&c, &s, json!({ "type": "BACKUP_CREATE", "keep": true })).await;
+    assert_eq!(r["ok"], json!(true), "{r}");
+    let after = epbak();
+    assert_eq!(after.len(), 1, "{after:?}");
+    assert_eq!(rotated(&audit_since(from)), gone(&before, &after, "Admin"));
+
+    // A scheduled run (dated after the manual ones, so it is the newest): logged as `system`.
+    let before = epbak();
+    let from = captured_len();
+    let at = chrono::NaiveDateTime::parse_from_str("2099-01-01 02:00", "%Y-%m-%d %H:%M").unwrap();
+    let name = c.backup_tick_at(at).await.expect("due").expect("ok");
+    assert_eq!(epbak(), vec![name]);
+    let lines = audit_since(from);
+    assert_eq!(rotated(&lines), gone(&before, &epbak(), "system"));
+    assert!(!lines.iter().any(|l| l.to_string().contains("Some(")), "no Debug Option in an audit line: {lines:?}");
 }

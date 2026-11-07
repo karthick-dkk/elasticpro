@@ -51,6 +51,19 @@ impl BackupState {
         self.scheduled && self.dir.is_some()
     }
 
+    /// Remove the oldest kept backups beyond `keep`, each removal audited (`backup rotated out`:
+    /// the file's `name`, the `keep` it was cut to, and `user`: the administrator whose action
+    /// caused it, or `system` for the timer). The one way a kept backup is pruned: a schedule
+    /// change lowering `keep`, a scheduled run, a manual `keep: true` and a before-restore copy
+    /// all come through here.
+    pub(crate) fn prune(&self, keep: usize, by: &str) -> Vec<String> {
+        let removed = self.dir.as_deref().map(|d| rotate(d, keep)).unwrap_or_default();
+        for name in &removed {
+            tracing::info!(target: "audit", user = %by, name = %name, keep, "backup rotated out");
+        }
+        removed
+    }
+
     fn save_schedule(&self, s: &Schedule) -> Result<(), String> {
         let d = self.dir.as_ref().ok_or("no data directory")?;
         crate::volume::store::write_atomic(&d.join(SCHEDULE_FILE), &serde_json::to_vec_pretty(s).map_err(|e| e.to_string())?)?;
@@ -63,12 +76,18 @@ impl BackupState {
     fn write_kept(&self, name: &str, text: &str) -> Result<String, String> {
         let d = self.dir.as_ref().ok_or("no data directory")?;
         let stem = name.strip_suffix(EXT).unwrap_or(name);
-        let mut chosen = name.to_string();
-        let mut i = 2;
-        while d.join(&chosen).exists() {
-            chosen = format!("{stem}-{i}{EXT}");
-            i += 1;
-        }
+        // Above every copy made in the same second, never in a gap rotation left: a reused
+        // lower number would sort as the older one and be the next rotated out.
+        let taken = std::fs::read_dir(d).into_iter().flatten().filter_map(|e| e.ok())
+            .filter_map(|e| {
+                let n = e.file_name().to_str()?.strip_prefix(stem)?.strip_suffix(EXT)?.to_string();
+                if n.is_empty() { Some(1) } else { n.strip_prefix('-')?.parse::<u32>().ok() }
+            })
+            .max();
+        let chosen = match taken {
+            None => name.to_string(),
+            Some(n) => format!("{stem}-{}{EXT}", n + 1),
+        };
         crate::volume::store::write_atomic(&d.join(&chosen), text.as_bytes())?;
         Ok(chosen)
     }
@@ -400,10 +419,7 @@ impl Core {
         }
         let (text, collected, _) = self.backup_text(sections, kind, by, None, true).await?;
         let name = self.backup.write_kept(&file_name(local, kind), &text).map_err(|e| Refusal::new("io", format!("the backup could not be written: {e}")))?;
-        let removed = self.backup.dir().map(|d| rotate(d, keep)).unwrap_or_default();
-        for r in &removed {
-            tracing::info!(target: "audit", name = %r, "backup rotated out");
-        }
+        self.backup.prune(keep, by);
         Ok((name, text.len() as u64, collected.secrets.len()))
     }
 
@@ -1065,9 +1081,7 @@ impl Core {
                         Err(e) => return bad("io", format!("the backup could not be kept: {e}")),
                     }
                     let keep_n = self.backup.schedule.read().keep;
-                    if let Some(d) = self.backup.dir() {
-                        rotate(d, keep_n);
-                    }
+                    self.backup.prune(keep_n, &by);
                     kept = true;
                 }
                 tracing::info!(target: "audit", user = %by, kind = "manual", sections = %sections.iter().map(|s| s.id()).collect::<Vec<_>>().join(","),
@@ -1117,9 +1131,7 @@ impl Core {
                 if let Err(e) = self.backup.save_schedule(&next) {
                     return bad("io", format!("the schedule could not be saved: {e}"));
                 }
-                if let Some(d) = self.backup.dir() {
-                    rotate(d, next.keep);
-                }
+                self.backup.prune(next.keep, &by);
                 tracing::info!(target: "audit", user = %by, enabled = next.enabled, every = ?next.every, at = %next.at, keep = next.keep,
                                sections = %next.sections.iter().map(|s| s.id()).collect::<Vec<_>>().join(","), "backup schedule changed");
                 self.backup_status()
