@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.3.55
+
+**Upgrade notes**
+- **Re-pair the Zabbix modules once.** The ElasticPro sync role gains `user.get`, which roles from Zabbix user groups need. A site paired before modules 2.1.20 gets it by pairing again (the pairing updates the role), or by adding `user.get` to the role's API methods by hand. Until then the tables show each person's groups as their last sign-in said (docs/ROLES.md).
+- **Zabbix modules 2.1.20 come with this release** (`deploy/zabbix/MODULES_REF`). Zabbix sends group ids, which roles from user groups use.
+- **The daily backup is on by default in hosted mode:** 02:00 server time, the last 14 kept, every section, under `<data>/backups/` (docs/HANDBOOK.md). Change or turn it off under Config-Management › System › Backup & restore.
+- **The menu has new names.** **Config** is now **Config-Management**, **Live logs & Log delay** is **Logs & Delay**, and **REST console** is **REST**. **Accounts, Automation and Requests** no longer have their own menu entries; they are tabs inside Config-Management, and every old link and deep link still lands on them. Operators see Clusters, Alerts › Automation and Requests › Request Centre there; users and guests see nothing.
+
+**Config-Management.** The thirteen Config tabs become nine pages with tabs (Clusters, Accounts, Zabbix, Alerts, Requests, Reports, Data, Play, System), in a menu on the left with a state on the right. Every form takes part in one save bar that names each change and runs the section's own save; leaving with unsaved changes asks first. **Find a setting** searches every label. Defaults are edited in place. Hints elsewhere in the app now name the page and tab a setting lives on.
+
+**Your settings.** The person's name opens Your settings: page menu Top or Left, theme and opening page, kept with the account (the browser's copy is carried over once per browser).
+
+**Roles from Zabbix user groups.** Each ElasticPro role holds any number of Zabbix user groups; a person in several gets the highest, and a person in none gets the *In none of these* rule (the Zabbix-role map, or no access). Preview shows who would change. A role set by hand wins over the map, including the new per-person **No access**. Each Zabbix sync re-checks roles and lowers them, never raises them; users deleted in Zabbix lose their sessions. Nothing can leave zero administrators able to sign in (EP-108 `no_access`, EP-109 `last_admin`). Config-Management › Zabbix has the group table and the Zabbix users table (docs/ROLES.md).
+
+**Backup & restore** (admin only). One `.epbak` file of ticked sections. Credentials are left out or sealed with a backup password (12 characters or more); a kept copy is sealed under the server's key. Download now, scheduled backups, restore from a file or a kept backup with a preview, then Merge or Replace. Every restore keeps a before-restore backup first. The Zabbix API token, pairing secret and display-link secrets are never included. New error codes EP-308 to EP-315.
+
+**Backend routing.** Config-Management › Data › Backend sets, for history, reports and alerts separately, whether each is kept built-in, copied to the history store, or kept on the store only. The store keeps its own two gates (config and admin arm), and nothing is deleted on either side. Alerts raised and cleared are reported from the page that saw them, once per browser. A size or state that cannot be read says *unknown*, never 0 (docs/HISTORY.md).
+
+**Clusters.** The expanded row is rebuilt to the approved design.
+
+**Settings and config history.** Settings go with your account; config versions record who changed what and when; a running snapshot is read as running.
+
+**deploy.sh** recognises a compose file an older release shipped, by its own image pins, so `--upgrade` no longer treats it as edited.
+
+**Config-Management fixes from the release's browser pass** (#123). The save bar's Discard and Save now work in a real browser (a field's change on blur used to rebuild the bar under the mouse, so the click never landed). A reload or bookmark of a tab that depends on the server's answer (System › Backup & restore, Data › Backend) now opens that tab instead of the first one, and a tab picked while that answer is awaited is kept.
+
+**Tests.** Three flakes fixed (the plan-templates audit capture, the health-list hover, and the hosted "a backup preview writes nothing" check, which counted the minute timers' own files).
+
 ## 0.3.54
 
 **Upgrading: fetch the new `deploy.sh` first.** 0.3.54 adds a second container, the report worker, so the compose file changes. `deploy.sh --upgrade` runs the installed release's script, and one from before 0.3.54 cannot bring in the new compose file. Download the 0.3.54 `deploy.sh` into `deploy/`, then run `deploy/deploy.sh --upgrade=0.3.54 --dry-run` and `deploy/deploy.sh --upgrade=0.3.54` (deploy/README.md, "Upgrading to 0.3.54 or later"). The script shows the compose change before writing it and keeps the current file as `.compose-previous`. `--rollback` puts the file back along with the images. A compose file you edited yourself is left alone unless you pass `--replace-compose`. `ELASTICPRO_RELEASE_URL` points it at a mirror, or at a `file:///` folder for hosts with no internet access.
