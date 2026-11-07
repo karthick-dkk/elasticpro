@@ -52,26 +52,27 @@ export function nodesSummary(roleLists, hasElected) {
 /* ---------------------------------- role chips ---------------------------------- */
 
 /**
- * The chips a node's roles take in one table line. Three or more data roles fold into one
- * chip ("data: hot·warm·content"); at most `max` chips are drawn and the rest are counted
- * ("+3"), their names in `more`. Coordinating-only (no roles) is its own chip.
- * → { chips: [{ label, kind, roles }], more: [role names] }
+ * The chips a node's roles take in one table line. Every data role (`data`, `data_hot`,
+ * `data_content`, …) is ONE plain `data` chip — no tier chip, no "data: hot·warm·…" label
+ * (owner, 2026-11-07); which tiers it holds is in that chip's `title`. At most `max` chips are
+ * drawn and the rest are counted ("+3"), their names in `more`. Coordinating-only (no roles)
+ * is its own chip.
+ * → { chips: [{ label, kind, roles, title }], more: [role names] }
  */
 export function roleChips(roles, max = 3) {
   const list = roles || [];
-  if (!list.length) return { chips: [{ label: 'coordinating', kind: 'other', roles: [] }], more: [] };
+  if (!list.length) return { chips: [{ label: 'coordinating', kind: 'other', roles: [], title: null }], more: [] };
   const dataRoles = list.filter((r) => r === 'data' || String(r).startsWith('data_'));
-  const fold = dataRoles.length >= 3;
+  const tiers = dataRoles.filter((r) => r !== 'data').map((r) => r.slice(5));
   const chips = [];
   let placed = false;
   for (const r of list) {
-    if (fold && dataRoles.includes(r)) {
+    if (dataRoles.includes(r)) {
       if (placed) continue;
       placed = true;
-      chips.push({ label: `data: ${dataRoles.map((x) => (x === 'data' ? 'all' : x.slice(5))).join('·')}`,
-        kind: dataRoles.includes('data_hot') || dataRoles.includes('data') ? 'hot' : dataRoles.includes('data_warm') ? 'warm' : 'cold',
-        roles: dataRoles });
-    } else chips.push({ label: r, kind: null, roles: [r] });
+      chips.push({ label: 'data', kind: 'other', roles: dataRoles,
+        title: tiers.length ? `Data tiers: ${tiers.join(', ')}${dataRoles.includes('data') ? ' (and the generic data role)' : ''}` : 'data (every tier)' });
+    } else chips.push({ label: r, kind: null, roles: [r], title: null });
   }
   const shown = chips.slice(0, max), rest = chips.slice(max);
   return { chips: shown, more: rest.flatMap((c) => c.roles) };

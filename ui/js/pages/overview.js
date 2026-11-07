@@ -1546,8 +1546,8 @@ function nodesSection(c, d) {
       id: () => h('td.mono', { title: n.id || '' }, n.id ? String(n.id).slice(0, 8) : '–'),
       roles: () => {
         const rc = roleChips(roles);
-        return h('td', h('div.cl-roles', ...rc.chips.map((k) => (k.kind ? h(`span.cl-role.${k.kind}`, { title: k.roles.length > 1 ? k.roles.join(', ') : null }, k.label)
-          : k.roles.length ? roleChip(k.label) : h('span.cl-role.other', { title: 'node.roles: [] — coordinating-only' }, k.label))),
+        return h('td', h('div.cl-roles', ...rc.chips.map((k) => (!k.roles.length ? h('span.cl-role.other', { title: 'node.roles: [] — coordinating-only' }, k.label)
+          : k.kind ? h(`span.cl-role.${k.kind}`, { title: k.title }, k.label) : roleChip(k.label))),
         rc.more.length ? h('span.cl-role.other', { title: rc.more.join(', ') }, `+${rc.more.length}`) : null));
       },
       jdk: () => h('td.mono', n.jdk || '–'),
@@ -1567,7 +1567,6 @@ function nodesSection(c, d) {
   const summary = nodesSummary(lists, nodes.some((n) => String(n.master || '').trim() === '*'));
   return h('div.cl-sec', { 'data-section': 'nodes' },
     secHead('Nodes', summary,
-      h('span.cl-key', h('i.cl-key-sw'), 'Data node'),
       h('span.cl-sec-links', pageLink('Nodes & shards', 'shards', null, c))),
     table(cols.map((col) => ({ label: col.label, num: col.num, title: col.id === 'heap' ? HEAP_TITLE : null })), trs));
 }

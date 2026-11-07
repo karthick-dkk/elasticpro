@@ -433,7 +433,10 @@ await go('overview');
     ok(!heads.includes('Tier'), 'expanded row: the Tier column is back');
     ok(heads.indexOf('Free size') === heads.indexOf('Disk') + 1, `expanded row: Free size does not follow Disk: ${heads.join(' | ')}`);
     ok(det.querySelectorAll('[data-section="nodes"] tbody tr.cl-data').length > 0, 'expanded row: no data node row is tinted');
-    ok(/Data node/.test(txt(det.querySelector('[data-section="nodes"] .cl-sec-h') || det)), 'expanded row: the Nodes header has no "Data node" key');
+    // 2026-11-07: no "Data node" legend, and a data node shows one plain "data" chip (tiers in its tooltip).
+    ok(!/Data node/.test(txt(det.querySelector('[data-section="nodes"] .cl-sec-h') || det)) && !det.querySelector('.cl-key'), 'expanded row: the "Data node" key is back in the Nodes header');
+    const chips = [...det.querySelectorAll('[data-section="nodes"] .cl-role')].map(txt);
+    ok(chips.includes('data') && !chips.some((t) => /^data[:_]|hot·|·warm/.test(t)), `expanded row: the Roles column lists data tiers: ${chips.join(', ')}`);
     const nodeLinks = [...det.querySelectorAll('[data-section="nodes"] .cl-sec-h a')].map(txt);
     ok(JSON.stringify(nodeLinks) === JSON.stringify(['Nodes & shards ›']), `expanded row: the Nodes header links are ${nodeLinks.join(', ')}`);
     ok(/Data covered/.test(txt(det.querySelector('[data-section="repo"]') || det)), 'expanded row: the repositories table has no "Data covered" column');

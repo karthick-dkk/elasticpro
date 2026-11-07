@@ -39,15 +39,23 @@ test('a data node is one with data or any data_* role', () => {
   assert.equal(B.isDataNode([]), false, 'coordinating-only holds no data');
 });
 
-test('role chips: three or more data roles fold into one chip; the rest is counted', () => {
+test('role chips: every data role is one plain "data" chip, tiers only in its tooltip; the rest is counted', () => {
   assert.deepEqual(B.roleChips([]).chips.map((c) => c.label), ['coordinating']);
   const one = B.roleChips(['master']);
   assert.deepEqual([one.chips.map((c) => c.label), one.more], [['master'], []]);
   const hot = B.roleChips(['data_hot', 'data_content', 'ingest']);
-  assert.deepEqual(hot.chips.map((c) => c.label), ['data_hot', 'data_content', 'ingest'], 'two data roles stay separate');
+  assert.deepEqual(hot.chips.map((c) => c.label), ['data', 'ingest'], 'two data roles are one data chip');
+  assert.equal(hot.chips[0].kind, 'other', 'plain: no tier colour');
+  assert.equal(hot.chips[0].title, 'Data tiers: hot, content');
   const all = B.roleChips(['master', 'data_hot', 'data_warm', 'data_cold', 'data_frozen', 'data_content', 'ingest', 'ml', 'transform', 'remote_cluster_client']);
-  assert.deepEqual(all.chips.map((c) => c.label), ['master', 'data: hot·warm·cold·frozen·content', 'ingest']);
+  assert.deepEqual(all.chips.map((c) => c.label), ['master', 'data', 'ingest']);
+  assert.ok(!all.chips.some((c) => /hot|warm|cold|frozen|·/.test(c.label)), 'no tier is listed on a chip');
+  assert.equal(all.chips[1].title, 'Data tiers: hot, warm, cold, frozen, content');
+  assert.deepEqual(all.chips[1].roles, ['data_hot', 'data_warm', 'data_cold', 'data_frozen', 'data_content']);
   assert.deepEqual(all.more, ['ml', 'transform', 'remote_cluster_client'], '+3 and the names for the tooltip');
+  const plain = B.roleChips(['data', 'master']);
+  assert.deepEqual([plain.chips.map((c) => c.label), plain.chips[0].title], [['data', 'master'], 'data (every tier)']);
+  assert.equal(B.roleChips(['data', 'data_hot']).chips[0].title, 'Data tiers: hot (and the generic data role)');
 });
 
 test('the nodes header: counts, master-eligible, data with tiers, the elected master', () => {

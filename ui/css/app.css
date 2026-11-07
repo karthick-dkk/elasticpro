@@ -2279,8 +2279,6 @@ table.cl-tbl > tbody > tr.cl-detail-row:hover > td {
 .cl-sec-bar { display: flex; align-items: center; gap: 10px; min-height: 30px; padding: 0 12px; background: var(--surface-2); }
 .cl-sec-bar b { font-size: 12.5px; }
 .cl-sec-chev { color: var(--text-secondary); }
-.cl-key { display: inline-flex; align-items: center; gap: 5px; font-size: 11.5px; color: var(--text-secondary); margin-left: 6px; }
-.cl-key-sw { width: 10px; height: 10px; border-radius: 2px; background: color-mix(in srgb, var(--accent) 14%, var(--surface-1)); box-shadow: inset 3px 0 0 var(--accent); }
 .cl-sec .tbl-wrap { border: 0; border-radius: 0; }
 .cl-sec .tbl th, .cl-sec .tbl td { padding: 0 8px; height: 32px; }
 .cl-sec .tbl th { height: 30px; }
