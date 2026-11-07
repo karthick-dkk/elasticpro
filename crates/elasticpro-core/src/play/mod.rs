@@ -240,7 +240,7 @@ impl Core {
         let p = caller.and_then(|c| c.play.as_ref())?;
         if !p.allow_from.is_empty() && !source.is_some_and(|ip| crate::zbx_link::source_allowed(&p.allow_from, ip)) {
             tracing::warn!(target: "audit", user = caller.map(|c| c.name.as_str()).unwrap_or(""), link = %p.link,
-                source = ?source, "display link used from an address it does not allow");
+                source = source.map(tracing::field::display), "display link used from an address it does not allow");
             return Some(json!({ "ok": false, "kind": "forbidden", "playOnly": true,
                                 "message": "this display link may not be used from this address" }));
         }
@@ -261,20 +261,20 @@ impl Core {
         let refused = json!({ "ok": false, "kind": "bad_credentials",
                               "message": "that display link is not valid, has expired, or has been revoked — ask an ElasticPro administrator for a new one" });
         let Some(link) = self.play.links.by_secret(s(msg, "secret")) else {
-            tracing::warn!(target: "audit", source = ?source, "display link refused: unknown secret");
+            tracing::warn!(target: "audit", source = source.map(tracing::field::display), "display link refused: unknown secret");
             return refused;
         };
         if link.expired(now_ms()) {
-            tracing::warn!(target: "audit", link = %link.id, name = %link.name, source = ?source, "display link refused: expired");
+            tracing::warn!(target: "audit", link = %link.id, name = %link.name, source = source.map(tracing::field::display), "display link refused: expired");
             return refused;
         }
         if !link.allow_from.is_empty() && !source.is_some_and(|ip| crate::zbx_link::source_allowed(&link.allow_from, ip)) {
-            tracing::warn!(target: "audit", link = %link.id, name = %link.name, source = ?source, "display link refused: address not allowed");
+            tracing::warn!(target: "audit", link = %link.id, name = %link.name, source = source.map(tracing::field::display), "display link refused: address not allowed");
             return json!({ "ok": false, "kind": "forbidden", "message": "this display link may not be used from this address" });
         }
         let token = self.sessions.begin_display(&link.caller_name(), link.clusters.scope(), &link.id);
         self.play.links.touch(&link.id, now_ms(), source);
-        tracing::info!(target: "audit", user = %link.caller_name(), link = %link.id, source = ?source, "display link opened");
+        tracing::info!(target: "audit", user = %link.caller_name(), link = %link.id, source = source.map(tracing::field::display), "display link opened");
         let caller = Caller {
             name: link.caller_name(), role: Role::User, must_change: false, scope: link.clusters.scope(),
             play: Some(crate::auth::PlayCaller { link: link.id.clone(), clusters: link.clusters.ids(), allow_from: link.allow_from.clone() }),
@@ -356,7 +356,7 @@ impl Core {
             }
         }
         tracing::info!(target: "audit", user = %by, link = %link.id, name = %link.name, clusters = %json!(link.clusters),
-            allow_from = %link.allow_from.join(","), expires_at = ?link.expires_at, "display link created");
+            allow_from = %link.allow_from.join(","), expires_at = link.expires_at, "display link created");
         let base = self.zabbix_link().server().public_url.clone().unwrap_or_default();
         let mut out = link.public(now);
         out["url"] = json!(format!("{}/#/play?display={secret}", base.trim_end_matches('/')));

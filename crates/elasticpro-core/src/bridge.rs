@@ -1482,7 +1482,7 @@ impl Core {
                 let minutes = msg.get("minutes").and_then(Value::as_u64);
                 match self.silences.add(scope, target, minutes, msg.get("reason").and_then(Value::as_str).unwrap_or(""), &by) {
                     Ok(s) => {
-                        tracing::info!(target: "audit", user = %by, scope = %s.scope, target = %s.target, until = ?s.until, reason = %s.reason, "alert silenced");
+                        tracing::info!(target: "audit", user = %by, scope = %s.scope, target = %s.target, until = s.until, reason = %s.reason, "alert silenced");
                         self.routing_alert_event(self.silence_event("silenced", &s));
                         json!({ "ok": true, "silence": s, "silences": self.silences_visible(caller.as_ref()) })
                     }
@@ -1910,8 +1910,8 @@ impl Core {
                 return json!({ "ok": false, "kind": "io", "message": e });
             }
             match &meta {
-                Some(m) => tracing::info!(target: "audit", user = %by, cluster = %id, kind = %m.kind, ulm = ?m.ulm.enabled,
-                                          bucket = %m.ulm.bucket, slm = ?m.slm, "cluster type set"),
+                Some(m) => tracing::info!(target: "audit", user = %by, cluster = %id, kind = %m.kind, ulm = m.ulm.enabled,
+                                          bucket = %m.ulm.bucket, slm = m.slm.as_deref(), "cluster type set"),
                 None => tracing::info!(target: "audit", user = %by, cluster = %id, "cluster type cleared"),
             }
         }
@@ -2651,7 +2651,7 @@ impl Core {
             Err(refusal) => return refusal,
         };
         let credential = self.adopt_saved_cluster(&saved, &found.raw).await;
-        tracing::info!(target: "audit", user = %who, cluster = %saved.name, was = ?saved.was, action = saved.action,
+        tracing::info!(target: "audit", user = %who, cluster = %saved.name, was = saved.was.as_deref(), action = saved.action,
                        credential, "cluster saved");
         json!({ "ok": true, "action": saved.action, "name": saved.name, "was": saved.was, "keptVersion": kept, "credential": credential })
     }
@@ -3080,7 +3080,7 @@ impl Core {
         }
         // The Zabbix frontend named in allowedSources is the administrator's own: not counted.
         if !self.zbx_link.trusted_source(source) && !self.zbx_link.rate_ok("sso", source, crate::zbx_link::SSO_PER_MIN) {
-            tracing::warn!(target: "audit", source = ?source, "zabbix sign-in refused: rate limited");
+            tracing::warn!(target: "audit", source = source.map(tracing::field::display), "zabbix sign-in refused: rate limited");
             return (429, json!({ "ok": false, "kind": "rate_limited", "message": "too many sign-in requests — wait a minute" }));
         }
         let claim = match self.zbx.verify(body, signature, auth::now()) {
@@ -3131,8 +3131,8 @@ impl Core {
                 self.sessions.refresh_for(&acct.name, acct.role, acct.scope.clone());
                 let code = self.zbx.issue_code(&acct.name);
                 tracing::info!(target: "audit", user = %acct.name, role = acct.role.as_str(), pinned = acct.role_pinned,
-                               source = res.source.as_str(), via = ?match &res.source { zbx_sso::Source::Group(g) => Some(g.as_str()), _ => None },
-                               zabbix_role = ?claim.zabbix_role, zabbix_user_type = claim.zabbix_user_type,
+                               source = res.source.as_str(), via = match &res.source { zbx_sso::Source::Group(g) => Some(g.as_str()), _ => None },
+                               zabbix_role = claim.zabbix_role.as_deref(), zabbix_user_type = claim.zabbix_user_type,
                                groups = ?groups.iter().map(|g| g.name.as_str()).collect::<Vec<_>>(), "zabbix sign-in code issued");
                 (200, json!({ "ok": true, "sso_code": code, "account": acct.name, "role": acct.role.as_str(),
                               "scoped": acct.scope.is_some(), "pinned": acct.role_pinned, "source": res.source.as_str() }))

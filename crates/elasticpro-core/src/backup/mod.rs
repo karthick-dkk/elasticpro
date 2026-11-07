@@ -633,7 +633,8 @@ pub fn check_password(pw: &str) -> Result<(), Refusal> {
 }
 
 /// The file as text. `collected.secrets` go in only with a `sealer`; without one they are left
-/// out and the header says so (`credentials: null`).
+/// out and the file has no `credentials` key (`Parsed::header` then says `credentials: null`;
+/// the `BACKUP_CREATE` reply says `credentials: "none"`).
 pub fn build(header: &Header, collected: &Collected, sealer: Option<Sealer>) -> Result<String, Refusal> {
     let sections: BTreeMap<String, SectionData> = collected.sections.iter().map(|(s, d)| (s.id().to_string(), d.clone())).collect();
     let digest = digest_of(&sections);
@@ -821,13 +822,25 @@ pub fn list_kept(dir: &std::path::Path) -> Vec<Kept> {
             })
         })
         .collect();
-    // Newest first by name: the name starts with the local time it was taken.
-    out.sort_by(|a, b| b.name.cmp(&a.name));
+    out.sort_by(|a, b| age_key(&b.name).cmp(&age_key(&a.name)));
     out
 }
 
-/// Remove the oldest kept backups beyond `keep`; returns the names removed.
-pub fn rotate(dir: &std::path::Path, keep: usize) -> Vec<String> {
+/// The order kept backups were made in, from the name: the local time it starts with, then the
+/// `-2`, `-3`… that a second one in the same second gets. Plain name order is wrong there
+/// (`-manual-2.epbak` sorts before `-manual.epbak`), and rotation then removed the copy just
+/// made. One definition for the listing (newest first) and for rotation (oldest first).
+fn age_key(name: &str) -> (&str, u32, &str) {
+    let rest = name.strip_prefix(NAME_PREFIX).unwrap_or(name);
+    let stem = rest.strip_suffix(EXT).unwrap_or(rest);
+    let time = stem.get(..15).unwrap_or(stem);
+    let n = stem.rsplit_once('-').and_then(|(_, n)| n.parse::<u32>().ok()).unwrap_or(1);
+    (time, n, name)
+}
+
+/// Remove the oldest kept backups beyond `keep`; returns the names removed. Not audited here:
+/// every caller goes through `BackupState::prune` (core.rs), which logs each removal.
+fn rotate(dir: &std::path::Path, keep: usize) -> Vec<String> {
     let mut names: Vec<String> = std::fs::read_dir(dir)
         .into_iter()
         .flatten()
@@ -835,7 +848,7 @@ pub fn rotate(dir: &std::path::Path, keep: usize) -> Vec<String> {
         .filter_map(|e| e.file_name().to_str().map(String::from))
         .filter(|n| safe_name(n).is_ok())
         .collect();
-    names.sort();
+    names.sort_by(|a, b| age_key(a).cmp(&age_key(b)));
     let excess = names.len().saturating_sub(keep.max(MIN_KEEP));
     let mut removed = vec![];
     for n in names.into_iter().take(excess) {
@@ -1139,8 +1152,11 @@ mod tests {
         let h = Header { core_version: "0.3.55", taken_at: 1, taken_by: "kd", kind: Kind::Manual };
         let text = build(&h, &sample(), None).unwrap();
         assert!(!text.contains("hunter2"), "{text}");
+        let raw: Value = serde_json::from_str(&text).unwrap();
+        assert!(raw.get("credentials").is_none(), "no credentials key in the file: {text}");
         let p = parse(&text).unwrap();
         assert!(p.credentials.is_none());
+        assert_eq!(p.header()["credentials"], Value::Null, "a preview says null");
         assert_eq!(p.sections[&Section::Clusters].items["prod"]["name"], "prod");
         assert_eq!(open_credentials(&p, Some(Opener::Password("whatever-12345"))).unwrap(), None);
     }
@@ -1245,6 +1261,21 @@ mod tests {
         assert!(removed[0].contains("20261101"));
         assert_eq!(list_kept(&dir).len(), 2);
         assert!(rotate(&dir, 0).len() == 1, "keep is never below MIN_KEEP");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_second_backup_in_the_same_second_is_the_newer_one() {
+        let dir = std::env::temp_dir().join(format!("elasticpro-backup-same-{}-{}", std::process::id(), crate::fleet::now_ms()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let h = Header { core_version: "0.3.55", taken_at: 5, taken_by: "kd", kind: Kind::Manual };
+        let text = build(&h, &sample(), None).unwrap();
+        for n in ["elasticpro-backup-20261107-090227-manual.epbak", "elasticpro-backup-20261107-090227-manual-2.epbak",
+                  "elasticpro-backup-20261107-090227-manual-10.epbak"] {
+            std::fs::write(dir.join(n), &text).unwrap();
+        }
+        assert_eq!(list_kept(&dir)[0].name, "elasticpro-backup-20261107-090227-manual-10.epbak", "newest first");
+        assert_eq!(rotate(&dir, 1), vec!["elasticpro-backup-20261107-090227-manual.epbak", "elasticpro-backup-20261107-090227-manual-2.epbak"]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

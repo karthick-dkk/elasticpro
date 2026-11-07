@@ -30,7 +30,7 @@ P=$(free_port); OUT=$(mktemp)
 # X-Auth-User counts only with PROXY_AUTH on and the proxy named; this instance plays the
 # authenticating proxy from loopback. The second instance below checks the default: ignored.
 ELASTICPRO_BIND=0.0.0.0 ELASTICPRO_PROXY_AUTH=1 ELASTICPRO_TRUSTED_PROXIES=127.0.0.1/32 RUST_LOG=info "$BIN" ui "$P" >"$OUT" 2>&1 & PID=$!; disown
-trap 'kill $PID 2>/dev/null; rm -f "$OUT"' EXIT
+trap 'kill $PID 2>/dev/null || true; rm -f "$OUT"' EXIT
 until curl -s -o /dev/null "http://127.0.0.1:$P/"; do sleep 0.2; done
 B="http://127.0.0.1:$P/bridge"
 
@@ -198,7 +198,7 @@ echo "== hosted mode, allowed sources and a server frame-ancestors =="
 P4=$(free_port); OUT4=$(mktemp)
 ELASTICPRO_BIND=0.0.0.0 ELASTICPRO_ZABBIX_ALLOWED_SOURCES="10.99.0.0/16" ELASTICPRO_FRAME_ANCESTORS="https://zbx.example.com" \
   ELASTICPRO_ZABBIX_SSO_SECRET="allowed-sources-secret-0123456789abcdef" RUST_LOG=info "$BIN" ui "$P4" >"$OUT4" 2>&1 & PID4=$!; disown
-trap 'kill $PID $PID4 2>/dev/null; rm -f "$OUT" "$OUT4"' EXIT
+trap 'kill $PID $PID4 2>/dev/null || true; rm -f "$OUT" "$OUT4"' EXIT
 until curl -s -o /dev/null "http://127.0.0.1:$P4/"; do sleep 0.2; done
 check "pairing from outside the list is 403"   "$(code_of http://127.0.0.1:$P4/zabbix/pair -d '{}')" "403"
 check "sign-in from outside the list is 403"   "$(code_of http://127.0.0.1:$P4/sso/zabbix -d '{}')" "403"
@@ -211,7 +211,7 @@ echo "== hosted mode, zabbix sign-in on =="
 SECRET="hosted-check-secret-0123456789abcdef"
 P3=$(free_port); OUT3=$(mktemp)
 ELASTICPRO_BIND=0.0.0.0 ELASTICPRO_ZABBIX_SSO_SECRET="$SECRET" RUST_LOG=info "$BIN" ui "$P3" >"$OUT3" 2>&1 & PID3=$!; disown
-trap 'kill $PID $PID3 2>/dev/null; rm -f "$OUT" "$OUT3"' EXIT
+trap 'kill $PID $PID3 2>/dev/null || true; rm -f "$OUT" "$OUT3"' EXIT
 until curl -s -o /dev/null "http://127.0.0.1:$P3/"; do sleep 0.2; done
 S3="http://127.0.0.1:$P3/sso/zabbix"
 body() { printf '{"username":"%s","zabbix_user_type":%s,"groups":[],"ts":%s,"nonce":"%s"}' "$1" "$2" "$(date +%s)" "hc-$RANDOM$RANDOM$RANDOM$RANDOM"; }
@@ -287,7 +287,7 @@ P5=$(free_port); OUT5=$(mktemp); D5=$(mktemp -d); JAR=$(mktemp)
 start5() { ELASTICPRO_BIND=0.0.0.0 ELASTICPRO_DATA_DIR="$D5" "$BIN" ui "$P5" >>"$OUT5" 2>&1 & PID5=$!; disown
            until curl -s -o /dev/null "http://127.0.0.1:$P5/"; do sleep 0.2; done; }
 start5
-trap 'kill $PID $PID5 2>/dev/null; rm -rf "$OUT" "$OUT5" "$D5" "$JAR"' EXIT
+trap 'kill $PID $PID5 2>/dev/null || true; rm -rf "$OUT" "$OUT5" "$D5" "$JAR"' EXIT
 B5="http://127.0.0.1:$P5/bridge"
 HDR=$(curl -s -D - -o /tmp/ep-login.$$ -X POST "$B5" -H 'content-type: application/json' -c "$JAR" \
         -d '{"type":"LOGIN","name":"Admin","password":"elastic"}' | tr -d '\r' | grep -i '^set-cookie:' || true)
@@ -309,7 +309,7 @@ check "a restart keeps the session"          "$(cookie -d '{"type":"WHOAMI"}' | 
 # admin's, and POLICY_SET leaves the stop as it is. A user and a display link are refused. Limited operators, the other fields and the
 # lengths are proved in-process (tests/policy.rs).
 JOP=$(mktemp); JUS=$(mktemp); JTV=$(mktemp)
-trap 'kill $PID $PID5 2>/dev/null; rm -rf "$OUT" "$OUT5" "$D5" "$JAR" "$JOP" "$JUS" "$JTV"' EXIT
+trap 'kill $PID $PID5 2>/dev/null || true; rm -rf "$OUT" "$OUT5" "$D5" "$JAR" "$JOP" "$JUS" "$JTV"' EXIT
 cookie -d '{"type":"USER_ADD","name":"hc-op","password":"hc-operator-pw-0123","role":"operator"}' >/dev/null
 cookie -d '{"type":"USER_ADD","name":"hc-user","password":"hc-user-pw-0123456","role":"user"}' >/dev/null
 post "$B5" -c "$JOP" -d '{"type":"LOGIN","name":"hc-op","password":"hc-operator-pw-0123"}' >/dev/null
@@ -488,7 +488,7 @@ echo "== the report worker =="
 DW=$(mktemp -d); WP=$(free_port); CP=$(free_port); OUTW=$(mktemp); OUTC=$(mktemp)
 ELASTICPRO_ROLE=worker ELASTICPRO_WORKER_PORT=$WP ELASTICPRO_DATA_DIR=$DW RUST_LOG=info "$BIN" ui 0 >"$OUTW" 2>&1 & PIDW=$!; disown
 ELASTICPRO_ROLE=core ELASTICPRO_WORKER_URL=http://127.0.0.1:$WP ELASTICPRO_DATA_DIR=$DW RUST_LOG=info "$BIN" ui "$CP" >"$OUTC" 2>&1 & PIDC=$!; disown
-trap 'kill $PIDW $PIDC 2>/dev/null; rm -rf "$DW" "$OUTW" "$OUTC"' EXIT
+trap 'kill $PIDW $PIDC 2>/dev/null || true; rm -rf "$DW" "$OUTW" "$OUTC"' EXIT
 until curl -s -o /dev/null "http://127.0.0.1:$WP/health"; do sleep 0.2; done
 until curl -s -o /dev/null "http://127.0.0.1:$CP/"; do sleep 0.2; done
 check "the worker answers /health in role worker" "$(curl -s "http://127.0.0.1:$WP/health" | field role)" "worker"
