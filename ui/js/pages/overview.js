@@ -1148,7 +1148,7 @@ function pageLink(text, page, payload, c, opts = {}) {
     onclick: (e) => { e.preventDefault(); if (opts.focus) setFocus(page, opts.focus); navigateTo(page, payload || null, { cluster: c.id }); } }, `${text} ›`);
 }
 
-/** One box of the strip: a small label over its value. */
+/** One box of the strip: its label and its value side by side, on one line. */
 const box = (id, label, ...body) => h('div.cl-box', { 'data-tile': id }, h('span.cl-box-k', label), h('span.cl-box-v', ...body));
 
 /* -- Cluster health: the pill, and the list of what is not green, on hover only -- */
@@ -1403,12 +1403,8 @@ function detail(r) {
       : h('span.muted', { title: 'Reached directly, no SSH tunnel' }, 'None (direct)')));
   }
   if (shown.has('bucket')) boxes.push(bucketBox(c));
-  // The Report button is the strip's own, not a box a person can hide: it is how Reports is reached from here.
-  const report = canOpenPage('reports')
-    ? h('a.cl-report', { href: '#/reports', title: 'Reports, this cluster chosen',
-        onclick: (e) => { e.preventDefault(); navigateTo('reports', { section: 'daily', cluster: c.id }, { cluster: c.id }); } }, 'Report ›')
-    : null;
-  if (boxes.length || report) root.append(h('div.cl-strip', ...boxes, report ? h('span.cl-strip-end', report) : null));
+  // One thin row of boxes, label beside value; no Report button at its end any more (owner, 2026-11-07).
+  if (boxes.length) root.append(h('div.cl-strip', ...boxes));
 
   const cards = [];
   if (shown.has('shards')) cards.push(shardsCard(d));

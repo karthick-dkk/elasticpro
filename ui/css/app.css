@@ -623,10 +623,10 @@ table.cl-tbl > tbody > tr > td { white-space: nowrap; }
 table.cl-tbl > tbody > tr.cl-detail-row > td { white-space: normal; }
 /* …and, when the table is wider than the window (1024 px) and scrolls, no wider than the part
    in view, pinned to its left edge: the columns scroll, the details stay put. --cl-view-w is
-   the scroll box's width (overview.js syncHeads); 20px is the cell's own padding. */
+   the scroll box's width (overview.js syncHeads); 16px is the cell's own padding. */
 .cl-detail {
-  width: 0; min-width: min(100%, calc(var(--cl-view-w, 100vw) - 20px)); box-sizing: border-box;
-  position: sticky; left: 10px; display: grid; gap: 12px; padding: 4px 0;
+  width: 0; min-width: min(100%, calc(var(--cl-view-w, 100vw) - 16px)); box-sizing: border-box;
+  position: sticky; left: 8px; display: grid; gap: 4px; padding: 0;
 }
 .cl-detail-kv { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(240px, 100%), 1fr)); gap: 10px 16px; }
 .cl-detail-kv > div { min-width: 0; }
@@ -2199,26 +2199,23 @@ table.cl-tbl > tbody > tr.cl-row.open > td:last-child { box-shadow: inset -2px 0
 table.cl-tbl > tbody > tr.cl-detail-row > td,
 table.cl-tbl > tbody > tr.cl-detail-row:hover > td {
   box-shadow: inset 2px 0 0 var(--accent), inset -2px 0 0 var(--accent), inset 0 -2px 0 var(--accent);
-  padding: 10px 14px 12px 14px;
+  /* 6 px inside the 2 px accent line (owner, 2026-11-07): strip, cards and tables 4 px apart. */
+  padding: 8px;
 }
-.cl-detail { gap: 10px; }
+.cl-detail { gap: 4px; }
 
-/* The strip of boxes, Report at its right end. */
-.cl-strip { display: flex; align-items: stretch; flex-wrap: wrap; gap: 8px; padding: 8px; background: var(--accent-soft);
+/* The strip of boxes: one thin row, each box its label and value side by side on one line. */
+.cl-strip { display: flex; align-items: stretch; flex-wrap: wrap; gap: 4px; padding: 4px; background: var(--accent-soft);
   border: 1px solid color-mix(in srgb, var(--accent) 25%, var(--border)); border-radius: var(--radius-sm); font-size: 12.5px; }
-.cl-box { display: flex; flex-direction: column; gap: 2px; padding: 5px 10px; min-width: 200px; background: var(--surface-1);
+.cl-box { display: flex; flex-direction: row; align-items: center; gap: 8px; padding: 2px 10px; min-width: 0; white-space: nowrap; background: var(--surface-1);
   border: 1px solid color-mix(in srgb, var(--accent) 22%, var(--border)); border-radius: var(--radius-sm); }
-.cl-box-k { font-size: 11px; color: var(--text-secondary); }
-.cl-box-v { display: flex; gap: 8px; align-items: center; min-height: 22px; min-width: 0; }
+.cl-box-k { font-size: 11px; color: var(--text-secondary); flex: none; }
+.cl-box-v { display: flex; gap: 8px; align-items: center; min-height: 22px; min-width: 0; white-space: nowrap; }
 .cl-url-a { color: var(--accent); text-decoration: none; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: min(360px, 60vw); }
 .cl-url-a:hover { text-decoration: underline; }
 .cl-copy { height: 20px; padding: 0 6px; font-size: 11px; flex: none; }
 .cl-ulm { font-size: 11px; }
-.cl-strip-end { margin-left: auto; align-self: center; padding-right: 4px; }
-.cl-report { display: inline-flex; align-items: center; height: 24px; padding: 0 10px; border: 1px solid var(--accent); border-radius: 4px;
-  background: var(--accent); color: var(--on-accent); font-weight: 600; text-decoration: none; }
-.cl-report:hover { filter: brightness(1.08); }
-.cl-report:focus-visible, .cl-lnk:focus-visible, .cl-hp-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.cl-lnk:focus-visible, .cl-hp-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 /* Links: › an ElasticPro page, ↗ elastic.co. */
 .cl-lnk, .cl-doc { color: var(--accent); text-decoration: none; font-size: 12px; white-space: nowrap; }
 .cl-lnk:hover, .cl-doc:hover { text-decoration: underline; }
@@ -2243,8 +2240,8 @@ table.cl-tbl > tbody > tr.cl-detail-row:hover > td {
 .cl-hp-why { color: var(--text-secondary); }
 
 /* The four cards. */
-.cl-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 8px; }
-.cl-card { border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 8px 10px; display: flex; flex-direction: column; gap: 5px; min-width: 0; background: var(--surface-1); }
+.cl-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 4px; }
+.cl-card { border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 5px 8px; display: flex; flex-direction: column; gap: 3px; min-width: 0; background: var(--surface-1); }
 .cl-card.off { background: var(--surface-0); border-color: var(--grid); color: var(--text-muted); }
 .cl-card-h { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-weight: 600; font-size: 12px; color: var(--text-secondary); }
 .cl-card-t { color: var(--accent); text-decoration: none; font-weight: 600; font-size: 12px; }

@@ -382,7 +382,9 @@ await go('overview');
     const strip = det.querySelector('.cl-strip');
     const labels = strip ? [...strip.querySelectorAll('.cl-box-k')].map(txt) : [];
     ok(JSON.stringify(labels) === JSON.stringify(['Cluster health', 'Endpoint', 'Jump host', 'Log bucket (S3)']), `expanded row: the strip's boxes are ${labels.join(' | ')}`);
-    ok(!!strip && !!strip.querySelector('a.cl-report') && /Report/.test(txt(strip.querySelector('a.cl-report'))), 'expanded row: no Report button at the end of the strip');
+    // 2026-11-07: the Report button left the strip; each box is its label and value on one line.
+    ok(!!strip && !strip.querySelector('a.cl-report') && ![...strip.querySelectorAll('a, button')].some((a) => /^Report/.test(txt(a))), 'expanded row: the Report button is back in the strip');
+    ok(!!strip && [...strip.querySelectorAll('.cl-box')].every((b) => b.firstElementChild && b.firstElementChild.classList.contains('cl-box-k') && b.children.length === 2), 'expanded row: a strip box is not "label value"');
     ok(/None \(direct\)/.test(txt(strip || det)), 'expanded row: a directly reached cluster does not say "None (direct)" as its Jump host');
     const cards = [...det.querySelectorAll('.cl-card')].map((c) => c.getAttribute('data-tile'));
     ok(JSON.stringify(cards) === JSON.stringify(['shards', 'ilm', 'slm', 'activity']), `expanded row: the cards are ${cards.join(', ')}`);
