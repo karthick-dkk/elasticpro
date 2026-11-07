@@ -107,6 +107,15 @@ export function createTracker({ root, beforeSave = () => {}, afterSave = () => {
   let current = [];
   let busy = false;
   const bar = h('div#cm-savebar.cm-savebar', { role: 'region', 'aria-label': 'Unsaved changes', hidden: true });
+  // The bar's parts are kept nodes: a refresh changes their text, never the nodes. The page
+  // refreshes on every `input` and `change`, and a field's `change` fires on blur — which is
+  // the mousedown on Discard or Save. A bar rebuilt at that moment put a new button under
+  // the pointer before mouseup, and a press whose down and up land on different nodes is
+  // not a click: Discard did nothing in a real browser (jsdom fires no change on blur).
+  const text = h('span.cm-savebar-text');
+  const discardBtn = h('button.btn.ghost', { type: 'button', dataset: { act: 'discard' }, onclick: () => discard() }, 'Discard');
+  const saveBtn = h('button.btn.primary', { type: 'button', dataset: { act: 'save' }, onclick: () => save() }, 'Save changes');
+  bar.append(h('span.cm-savebar-dot', { 'aria-hidden': 'true' }), text, h('span.cm-savebar-acts', discardBtn, saveBtn));
 
   function read() {
     const all = readTracked(root());
@@ -135,15 +144,11 @@ export function createTracker({ root, beforeSave = () => {}, afterSave = () => {
   function drawBar() {
     const s = changeSummary(current);
     bar.hidden = !s.count;
-    bar.replaceChildren();
-    if (!s.count) return;
-    bar.append(
-      h('span.cm-savebar-dot', { 'aria-hidden': 'true' }),
-      h('span.cm-savebar-text', { title: s.title },
-        h('b', s.head), s.list ? h('span', ` · ${s.list}`) : null),
-      h('span.cm-savebar-acts',
-        h('button.btn.ghost', { type: 'button', dataset: { act: 'discard' }, disabled: busy, onclick: discard }, 'Discard'),
-        h('button.btn.primary', { type: 'button', dataset: { act: 'save' }, disabled: busy, onclick: save }, busy ? 'Saving…' : 'Save changes')));
+    text.title = s.count ? s.title : '';
+    text.replaceChildren(...(s.count ? [h('b', s.head), s.list ? h('span', ` · ${s.list}`) : ''] : []));
+    discardBtn.disabled = busy;
+    saveBtn.disabled = busy;
+    saveBtn.textContent = busy ? 'Saving…' : 'Save changes';
   }
 
   function refresh() {

@@ -153,6 +153,30 @@ test('the tracker: hidden until a change, names it, saves only the sections invo
   assert.equal(document.getElementById('ms-password').value, '');
 });
 
+test('the bar\'s buttons are kept nodes: a refresh between mousedown and mouseup does not swap them', () => {
+  // The page refreshes the tracker on every `change`, and a field's change fires on blur —
+  // the mousedown on Discard. A bar rebuilt then put a new button under the pointer before
+  // mouseup, and a press whose down and up hit different nodes is not a click (0.3.55 gate).
+  saved = { watch: '15', on: true, day: 'name' };
+  draw();
+  const t = T.createTracker({ root: () => root });
+  t.register('policy', { save: async () => true, discard: () => draw() });
+  root.append(t.bar);
+  t.refresh();
+  document.getElementById('pol-watch').value = '20';
+  t.refresh();
+  const discard = t.bar.querySelector('button[data-act="discard"]');
+  const save = t.bar.querySelector('button[data-act="save"]');
+  assert.ok(discard && save && !t.bar.hidden);
+  t.refresh();                                   // the blur's change, mid-press
+  assert.equal(t.bar.querySelector('button[data-act="discard"]'), discard, 'Discard was rebuilt by a refresh');
+  assert.equal(t.bar.querySelector('button[data-act="save"]'), save, 'Save was rebuilt by a refresh');
+  discard.click();                               // the mouseup lands on the same node
+  assert.deepEqual(t.changes(), []);
+  assert.equal(document.getElementById('pol-watch').value, '15', 'Discard did not redraw from what is saved');
+  assert.equal(t.bar.hidden, true);
+});
+
 test('a section with its own model of what changed', () => {
   draw();
   let dirty = false;
