@@ -516,34 +516,6 @@ impl Core {
                 "lastRunAt": state.get("lastRunAt").cloned(), "state": state })
     }
 
-    /// The schedule's state as `caller` may see it: whole for anyone who sees every cluster;
-    /// for a caller limited to some, a message naming a cluster outside their view is
-    /// replaced by one that says so (the run still reads as failed, never as fine).
-    pub(crate) fn delay_sink_state_for(&self, caller: Option<&Caller>) -> Value {
-        let mut v = self.delay_sink_state_json();
-        if let Some(visible) = self.visible_ids(caller) {
-            let sink = self.delay_sink_config().sink_cluster_id;
-            if let Some(m) = v.as_object_mut() {
-                if let Some(e) = m.get("lastError").and_then(Value::as_str) {
-                    m.insert("lastError".into(), json!(error_as_seen(e, &visible)));
-                }
-                if let Some(e) = m.get("lastSkipped").and_then(Value::as_str) {
-                    m.insert("lastSkipped".into(), json!(note_as_seen(e, &sink, &visible)));
-                }
-            }
-        }
-        v
-    }
-
-    /// Why the armed schedule cannot run now, as `caller` may see it (see `delay_sink_state_for`).
-    pub(crate) fn delay_sink_blocked_for(&self, caller: Option<&Caller>) -> Option<String> {
-        let b = self.delay_sink_blocked_now()?;
-        Some(match self.visible_ids(caller) {
-            Some(visible) => note_as_seen(&b, &self.delay_sink_config().sink_cluster_id, &visible),
-            None => b,
-        })
-    }
-
     async fn logdelay_settings_view(&self, caller: Option<&Caller>) -> Value {
         let s = self.logdelay_settings();
         let in_file = self.read_config_file().await.map(|raw| thresholds_in_config(&raw)).unwrap_or_default();
@@ -563,39 +535,16 @@ impl Core {
         if let Some(v) = &visible {
             shown.clusters.retain(|id, _| v.contains(id));
         }
-        let sched_clusters: Vec<String> = cfg.clusters.iter().filter(|id| visible.as_ref().is_none_or(|v| v.contains(*id))).cloned().collect();
+        let sched = self.sink_view(caller).config(&cfg);
         json!({
             "ok": true, "supported": self.edition().schedules(),
             "settings": shown, "resolved": resolved,
-            "schedule": { "enabled": cfg.enabled, "everyHours": cfg.every_hours, "destination": cfg.destination, "clusters": sched_clusters,
+            "schedule": { "enabled": cfg.enabled, "everyHours": cfg.every_hours, "destination": cfg.destination, "clusters": sched["clusters"],
                           "maxDevices": cfg.max_devices, "state": self.delay_sink_state_for(caller), "blocked": self.delay_sink_blocked_for(caller) },
             "builtinStore": { "keepDays": 90, "bytes": sizes.bytes, "sizes": sizes, "recentDays": state::RECENT_MS / 86_400_000, "dir": store::DIR },
             "extrasDefault": EXTRAS_DEFAULT,
             "uiCopy": "ui/js/core/log-delay.js DEFAULT_THRESHOLDS/thresholds()/classify(): to be removed, read `levels` here instead",
         })
-    }
-}
-
-/// What a caller limited to `visible` clusters is shown in place of a run's error that does
-/// not name one of theirs. Every run error is `"{cluster id}: {why}"` (bridge.rs
-/// `run_delay_sink`), so one is shown only when it starts with a visible id.
-pub const ERROR_OUTSIDE_VIEW: &str = "the last run failed on a cluster outside your view; an administrator who sees every cluster can read the error";
-
-pub(crate) fn error_as_seen(e: &str, visible: &std::collections::HashSet<String>) -> String {
-    if visible.iter().any(|id| e.strip_prefix(id.as_str()).is_some_and(|rest| rest.starts_with(": "))) {
-        e.to_string()
-    } else {
-        ERROR_OUTSIDE_VIEW.to_string()
-    }
-}
-
-/// A skip or block reason, for a caller limited to `visible`: the one that names a cluster
-/// (the sink cluster not primed) is hidden unless the caller sees that cluster.
-pub(crate) fn note_as_seen(note: &str, sink: &str, visible: &std::collections::HashSet<String>) -> String {
-    if !sink.is_empty() && !visible.contains(sink) && note.contains(&format!("{sink:?}")) {
-        "the sink cluster is not one of the primed clusters (it is outside your view)".to_string()
-    } else {
-        note.to_string()
     }
 }
 
@@ -628,19 +577,6 @@ mod tests {
         let odd: Settings = serde_json::from_value(json!({ "fields": { "device": "src host" } })).unwrap();
         assert!(odd.refusal().unwrap().contains("src host"));
         assert_eq!(Settings::default().extras_for("x"), EXTRAS_DEFAULT.iter().map(|s| s.to_string()).collect::<Vec<_>>());
-    }
-
-    #[test]
-    fn a_run_error_is_shown_only_when_it_names_a_cluster_the_caller_sees() {
-        let visible: std::collections::HashSet<String> = ["one".to_string(), "two".to_string()].into();
-        assert_eq!(error_as_seen("two: search failed", &visible), "two: search failed");
-        assert_eq!(error_as_seen("three: search failed", &visible), ERROR_OUTSIDE_VIEW);
-        assert_eq!(error_as_seen("one-b: search failed", &visible), ERROR_OUTSIDE_VIEW, "a prefix of a visible id is not that id");
-        assert_eq!(error_as_seen("twofold", &visible), ERROR_OUTSIDE_VIEW);
-        let note = format!("the sink cluster {:?} is not one of the primed clusters", "three");
-        assert!(!note_as_seen(&note, "three", &visible).contains("three"));
-        assert_eq!(note_as_seen(&note.replace("three", "one"), "one", &visible), note.replace("three", "one"));
-        assert_eq!(note_as_seen("the config is read-only", "three", &visible), "the config is read-only");
     }
 
     #[test]

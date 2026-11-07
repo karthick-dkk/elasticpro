@@ -367,57 +367,90 @@ async fn a_limited_admin_sees_only_their_clusters_in_the_settings_and_the_summar
 }
 
 #[tokio::test]
-async fn a_run_error_naming_a_cluster_outside_a_limited_admins_view_is_not_shown_to_them() {
+async fn a_limited_admin_reads_nothing_of_a_cluster_outside_their_view_in_any_schedule_answer() {
     use elasticpro_core::auth::{Caller, Role};
     use std::sync::atomic::{AtomicBool, Ordering};
+    const HIDDEN: &str = "secret-c3";
+    const HIDDEN_NAME: &str = "Secret Three";
     let dir = TempDir::new("logdelay-lasterror");
-    // Each cluster's search fails while its switch is on.
+    // Each cluster's search (and bulk) fails while its switch is on.
     let serve = |fail: Arc<AtomicBool>| TestServer::with(move |hit| {
+        let failing = fail.load(Ordering::SeqCst);
+        if hit.path.starts_with("/_bulk") {
+            return if failing { (500, r#"{"error":"bulk refused"}"#.into()) } else { (200, r#"{"took":3,"errors":false,"items":[]}"#.into()) };
+        }
         if hit.path.contains("/_search") {
-            return if fail.load(Ordering::SeqCst) { (500, r#"{"error":"boom"}"#.into()) } else { (200, devices(2.0).to_string()) };
+            return if failing { (500, r#"{"error":"boom"}"#.into()) } else { (200, devices(2.0).to_string()) };
         }
         (200, r#"{"cluster_name":"test","status":"green"}"#.into())
     });
-    let (two_fails, three_fails) = (Arc::new(AtomicBool::new(false)), Arc::new(AtomicBool::new(true)));
-    let (s1, s2, s3) = (serve(Arc::new(AtomicBool::new(false))).await, serve(two_fails.clone()).await, serve(three_fails.clone()).await);
+    let (two_fails, hidden_fails) = (Arc::new(AtomicBool::new(false)), Arc::new(AtomicBool::new(true)));
+    let (s1, s2, s3) = (serve(Arc::new(AtomicBool::new(false))).await, serve(two_fails.clone()).await, serve(hidden_fails.clone()).await);
     let c = Core::new_with_rounds(Some(dir.0.clone()), Edition::Hosted, 1);
     let root = Caller { name: "root".into(), role: Role::Admin, must_change: false, scope: None, play: None };
-    let p = c.handle_as(json!({ "type": "PRIME", "readOnly": true, "clusters": [
+    let p = c.handle_as(json!({ "type": "PRIME", "readOnly": false, "clusters": [
         { "id": "one", "name": "One", "url": s1.url(), "zabbixGroups": ["ES one"] },
         { "id": "two", "name": "Two", "url": s2.url(), "zabbixGroups": ["ES two"] },
-        { "id": "three", "name": "Three", "url": s3.url(), "zabbixGroups": ["ES three"] } ] }), Some(root.clone())).await;
+        { "id": HIDDEN, "name": HIDDEN_NAME, "url": s3.url(), "zabbixGroups": ["ES three"] } ] }), Some(root.clone())).await;
     assert_eq!(p["ok"], json!(true), "{p}");
-    let sched = c.handle_as(json!({ "type": "DELAY_SINK_SET", "config": { "enabled": true, "destination": "builtin", "clusters": ["one", "two", "three"] } }), Some(root.clone())).await;
+    let limited = Caller { name: "zadmin@zabbix".into(), role: Role::Admin, must_change: false,
+                           scope: Some(vec!["ES one".into(), "ES two".into()]), play: None };
+    // Every schedule answer a limited admin can ask for, as whole JSON text.
+    let bodies = |who: Caller| {
+        let c = c.clone();
+        async move {
+            let mut out = vec![];
+            for t in ["DELAY_SINK_GET", "DELAY_SINK_RUN", "LOGDELAY_SETTINGS_GET", "LOGDELAY_SUMMARY"] {
+                let v = c.handle_as(json!({ "type": t }), Some(who.clone())).await;
+                assert!(v["state"].is_object() || v["schedule"].is_object(), "{t}: {v}");
+                out.push((t, v.to_string()));
+            }
+            out
+        }
+    };
+    let assert_clean = |bodies: &[(&str, String)]| {
+        for (t, b) in bodies {
+            assert!(!b.contains(HIDDEN) && !b.contains(HIDDEN_NAME), "{t} names the hidden cluster: {b}");
+        }
+    };
+
+    // 1. A read error on the hidden cluster.
+    let sched = c.handle_as(json!({ "type": "DELAY_SINK_SET", "config": { "enabled": true, "destination": "builtin", "clusters": ["one", "two", HIDDEN] } }), Some(root.clone())).await;
     assert_eq!(sched["ok"], json!(true), "{sched}");
     let run = c.handle_as(json!({ "type": "DELAY_SINK_RUN" }), Some(root.clone())).await;
     assert_eq!(run["failed"], json!(1), "{run}");
+    assert!(run["error"].as_str().unwrap_or_default().starts_with(&format!("{HIDDEN}: ")), "a full admin reads it: {run}");
+    let seen = bodies(limited.clone()).await;
+    assert_clean(&seen);
+    let get: Value = serde_json::from_str(&seen[0].1).unwrap();
+    assert_eq!(get["config"]["clusters"], json!(["one", "two"]), "{get}");
+    assert!(get["state"]["lastError"].as_str().unwrap_or_default().contains("outside your view"), "{get}");
+    assert_eq!(get["state"]["lastOk"], json!(false), "still a failed run, not a fine one: {get}");
+    let full = bodies(root.clone()).await;
+    for (t, b) in &full {
+        assert!(b.contains(&format!("{HIDDEN}: ")), "a full admin reads the error in {t}: {b}");
+    }
 
-    // An admin who sees every cluster reads the error as it is.
-    let whole = c.handle_as(json!({ "type": "LOGDELAY_SETTINGS_GET" }), Some(root.clone())).await;
-    let e = whole["schedule"]["state"]["lastError"].as_str().unwrap_or_default().to_string();
-    assert!(e.starts_with("three: "), "{whole}");
-    let sum = c.handle_as(json!({ "type": "LOGDELAY_SUMMARY" }), Some(root.clone())).await;
-    assert_eq!(sum["schedule"]["state"]["lastError"], json!(e), "{sum}");
-
-    // An admin limited to two of the three clusters does not see the third one's name.
-    let limited = Caller { name: "zadmin@zabbix".into(), role: Role::Admin, must_change: false,
-                           scope: Some(vec!["ES one".into(), "ES two".into()]), play: None };
-    let g = c.handle_as(json!({ "type": "LOGDELAY_SETTINGS_GET" }), Some(limited.clone())).await;
-    assert_eq!(g["resolved"].as_array().unwrap().len(), 2, "{g}");
-    let shown = g["schedule"]["state"]["lastError"].as_str().unwrap_or_default();
-    assert!(!shown.contains("three") && shown.contains("outside your view"), "{g}");
-    assert_eq!(g["schedule"]["state"]["lastOk"], json!(false), "still a failed run, not a fine one: {g}");
-    let sum = c.handle_as(json!({ "type": "LOGDELAY_SUMMARY" }), Some(limited.clone())).await;
-    let shown = sum["schedule"]["state"]["lastError"].as_str().unwrap_or_default();
-    assert!(!shown.contains("three") && shown.contains("outside your view"), "{sum}");
-    let get = c.handle_as(json!({ "type": "DELAY_SINK_GET" }), Some(limited.clone())).await;
-    assert!(!get["state"]["lastError"].as_str().unwrap_or_default().contains("three"), "{get}");
-
-    // A failure on a cluster the limited admin sees is theirs to read.
-    three_fails.store(false, Ordering::SeqCst);
+    // 2. A read error on a cluster the limited admin sees is theirs to read.
+    hidden_fails.store(false, Ordering::SeqCst);
     two_fails.store(true, Ordering::SeqCst);
     let run = c.handle_as(json!({ "type": "DELAY_SINK_RUN" }), Some(root.clone())).await;
     assert_eq!(run["failed"], json!(1), "{run}");
-    let g = c.handle_as(json!({ "type": "LOGDELAY_SETTINGS_GET" }), Some(limited)).await;
-    assert!(g["schedule"]["state"]["lastError"].as_str().unwrap_or_default().starts_with("two: "), "{g}");
+    let seen = bodies(limited.clone()).await;
+    assert_clean(&seen);
+    assert!(seen.iter().all(|(_, b)| b.contains("two: ")), "{seen:?}");
+    two_fails.store(false, Ordering::SeqCst);
+
+    // 3. Visible clusters written into a hidden sink cluster that refuses the bulk: the write
+    //    error is about the sink, so it is hidden, and so is the sink's id in the config.
+    hidden_fails.store(true, Ordering::SeqCst);
+    let sched = c.handle_as(json!({ "type": "DELAY_SINK_SET", "config": { "enabled": true, "destination": "cluster", "sinkClusterId": HIDDEN, "clusters": ["one", "two"] } }), Some(root.clone())).await;
+    assert_eq!(sched["ok"], json!(true), "{sched}");
+    let run = c.handle_as(json!({ "type": "DELAY_SINK_RUN" }), Some(root.clone())).await;
+    assert!(run["error"].as_str().unwrap_or_default().starts_with("one: "), "a write error, about cluster one: {run}");
+    let seen = bodies(limited.clone()).await;
+    assert_clean(&seen);
+    assert!(seen.iter().all(|(_, b)| b.contains("outside your view")), "{seen:?}");
+    let full = c.handle_as(json!({ "type": "DELAY_SINK_GET" }), Some(root)).await;
+    assert_eq!(full["config"]["sinkClusterId"], json!(HIDDEN), "a full admin reads the config whole: {full}");
 }
