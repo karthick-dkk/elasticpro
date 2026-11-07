@@ -239,7 +239,10 @@ both apply when both given. `{ ok, matches, truncated, clusters[], devices[Devic
 
 ### `LOGDELAY_FIXES {clusterIds?, from?, to?}` (default last 7 days) — Fix board
 
-`{ ok, from, to, now, findings[Finding + stepLabel + clusterName] (most devices first),
+Without `from`/`to`/`days`, served from `findings.json` (what the last run matched over its
+last 7 days, narrowed to the caller's clusters); with them, matched now. `matchedAt` = when.
+
+`{ ok, from, to, now, matchedAt, findings[Finding + stepLabel + clusterName] (most devices first),
 devices: [ { device, cluster, clusterName, state, nowMinutes, step, stepLabel, why, fix, group } ] (worst first),
 rules: [ { pattern, step, readFrom, recommendation } ×6 ] }`.
 

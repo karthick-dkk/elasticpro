@@ -313,3 +313,47 @@ async fn the_log_delay_report_kind_builds_mails_and_keeps_its_options() {
     assert!(m.contains("elasticpro-log-delay-") && m.contains("-devices.csv"), "the workbook and the CSV are attached: {m}");
     assert!(m.contains("1 devices late, 1 critical"), "the subject carries the headline: {m}");
 }
+
+#[tokio::test]
+async fn a_limited_admin_sees_only_their_clusters_in_the_settings_and_the_summary() {
+    use elasticpro_core::auth::{Caller, Role};
+    let dir = TempDir::new("logdelay-limited");
+    let knob: Knob = Arc::new(Mutex::new(45.0));
+    let srv = cluster(knob.clone()).await;
+    let c = Core::new_with_rounds(Some(dir.0.clone()), Edition::Hosted, 1);
+    let root = Caller { name: "root".into(), role: Role::Admin, must_change: false, scope: None, play: None };
+    // Two clusters, each in its own Zabbix group.
+    let p = c.handle_as(json!({ "type": "PRIME", "readOnly": true, "clusters": [
+        { "id": "one", "name": "One", "url": srv.url(), "zabbixGroups": ["ES one"] },
+        { "id": "two", "name": "Two", "url": srv.url(), "zabbixGroups": ["ES two"] } ] }), Some(root.clone())).await;
+    assert_eq!(p["ok"], json!(true), "{p}");
+    let set = c.handle_as(json!({ "type": "LOGDELAY_SETTINGS_SET", "settings": { "clusters": {
+        "one": { "levels": { "delayFrom": 40 } }, "two": { "levels": { "delayFrom": 50 } } } } }), Some(root.clone())).await;
+    assert_eq!(set["ok"], json!(true), "{set}");
+    let sched = c.handle_as(json!({ "type": "DELAY_SINK_SET", "config": { "enabled": true, "destination": "builtin", "clusters": ["one", "two"] } }), Some(root.clone())).await;
+    assert_eq!(sched["ok"], json!(true), "{sched}");
+    let run = c.handle_as(json!({ "type": "DELAY_SINK_RUN" }), Some(root.clone())).await;
+    assert_eq!(run["clusters"], json!(2), "{run}");
+
+    let limited = Caller { name: "zadmin@zabbix".into(), role: Role::Admin, must_change: false, scope: Some(vec!["ES one".into()]), play: None };
+    let g = c.handle_as(json!({ "type": "LOGDELAY_SETTINGS_GET" }), Some(limited.clone())).await;
+    assert_eq!(g["ok"], json!(true), "{g}");
+    assert_eq!(g["resolved"].as_array().unwrap().len(), 1, "{g}");
+    assert_eq!(g["resolved"][0]["id"], json!("one"));
+    assert_eq!(g["settings"]["clusters"].as_object().unwrap().keys().collect::<Vec<_>>(), vec!["one"], "the other cluster's override is not shown: {g}");
+    assert_eq!(g["schedule"]["clusters"], json!(["one"]), "{g}");
+    assert!(g["builtinStore"]["sizes"]["dayFiles"].as_u64().unwrap() >= 2, "{g}");
+    let refused = c.handle_as(json!({ "type": "LOGDELAY_SETTINGS_SET", "settings": { "silentAfterHours": 4 } }), Some(limited.clone())).await;
+    assert_eq!(refused["kind"], json!("forbidden"), "{refused}");
+    let whole = c.handle_as(json!({ "type": "LOGDELAY_SETTINGS_GET" }), Some(root.clone())).await;
+    assert_eq!(whole["settings"]["clusters"].as_object().unwrap().len(), 2, "the file itself keeps both");
+    let sum = c.handle_as(json!({ "type": "LOGDELAY_SUMMARY" }), Some(limited.clone())).await;
+    assert_eq!(sum["byCluster"].as_array().unwrap().len(), 1, "{sum}");
+    assert_eq!(sum["totals"]["devices"], json!(3));
+    let fixes = c.handle_as(json!({ "type": "LOGDELAY_FIXES" }), Some(limited)).await;
+    assert!(fixes["matchedAt"].is_i64(), "served from the run's findings: {fixes}");
+    assert!(fixes["findings"].as_array().unwrap().iter().all(|f| f["cluster"] == "one"), "{fixes}");
+    let other = c.handle_as(json!({ "type": "LOGDELAY_DEVICE", "clusterId": "two", "device": "fw-1" }),
+                            Some(Caller { name: "x".into(), role: Role::User, must_change: false, scope: Some(vec!["ES one".into()]), play: None })).await;
+    assert_eq!(other["kind"], json!("not_found"), "a cluster outside the scope does not exist for the caller: {other}");
+}

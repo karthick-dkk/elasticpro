@@ -469,7 +469,18 @@ impl Core {
                 let inputs = self.logdelay_inputs(caller, only.as_deref()).await;
                 let ids: Vec<String> = inputs.iter().map(|c| c.id.clone()).collect();
                 let names: BTreeMap<String, String> = inputs.iter().map(|c| (c.id.clone(), c.name.clone())).collect();
-                let findings = self.logdelay_findings(&ids, &r, now, every);
+                // The default range is what the run last matched (findings.json, written after
+                // every measurement): served as kept, narrowed to the caller's clusters. A range
+                // of the caller's own is matched now.
+                let asked_range = msg.get("from").is_some() || msg.get("to").is_some() || msg.get("days").is_some();
+                let kept = (!asked_range).then(|| self.logdelay_store().map(|st| st.read_findings())).flatten().filter(|v| v["findings"].is_array());
+                let day = |d: chrono::NaiveDate| d.format("%Y-%m-%d").to_string();
+                let (findings, matched_at, from, to) = match kept {
+                    Some(k) => (serde_json::from_value::<Vec<fixes::Finding>>(k["findings"].clone()).unwrap_or_default()
+                                    .into_iter().filter(|f| ids.contains(&f.cluster)).collect::<Vec<_>>(), k["at"].as_i64(),
+                                k["from"].as_str().map(String::from).unwrap_or_else(|| day(r.from)), k["to"].as_str().map(String::from).unwrap_or_else(|| day(r.to))),
+                    None => (self.logdelay_findings(&ids, &r, now, every), Some(now), day(r.from), day(r.to)),
+                };
                 let each = fixes::per_device(&findings);
                 // Each device's line, with its delay now, worst first.
                 let mut rows: Vec<Value> = vec![];
@@ -482,7 +493,7 @@ impl Core {
                     }
                 }
                 rows.sort_by(|a, b| b["nowMinutes"].as_f64().unwrap_or(-1.0).partial_cmp(&a["nowMinutes"].as_f64().unwrap_or(-1.0)).unwrap_or(std::cmp::Ordering::Equal));
-                json!({ "ok": true, "from": r.from.format("%Y-%m-%d").to_string(), "to": r.to.format("%Y-%m-%d").to_string(), "now": now,
+                json!({ "ok": true, "from": from, "to": to, "now": now, "matchedAt": matched_at,
                         "findings": findings.iter().map(|f| { let mut v = serde_json::to_value(f).unwrap_or(Value::Null);
                             v["stepLabel"] = json!(f.step.label()); v["clusterName"] = json!(names.get(&f.cluster)); v }).collect::<Vec<_>>(),
                         "devices": rows,
