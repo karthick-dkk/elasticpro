@@ -185,22 +185,118 @@ impl SinkConfig {
     }
 }
 
+/// Which half of a run a note is about: reading a measured cluster, or writing the result.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Phase {
+    Read,
+    Write,
+}
+
+/// One run error or skip reason, with the clusters it is about recorded when it happened
+/// (never read back from the config, which may have changed since).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SinkNote {
+    /// The cluster the note is about; `None` for one about no cluster (read-only, unprimed).
+    pub cluster_id: Option<String>,
+    pub phase: Phase,
+    /// For a write: the cluster written to, when the destination is a cluster.
+    pub sink_id: Option<String>,
+    /// The reason, without the cluster's id (`text` adds it).
+    pub message: String,
+}
+
+impl SinkNote {
+    /// A note about no cluster.
+    pub fn general(message: impl Into<String>) -> SinkNote {
+        SinkNote { cluster_id: None, phase: Phase::Read, sink_id: None, message: message.into() }
+    }
+
+    /// Reading cluster `id` failed.
+    pub fn read(id: &str, message: impl Into<String>) -> SinkNote {
+        SinkNote { cluster_id: Some(id.to_string()), phase: Phase::Read, sink_id: None, message: message.into() }
+    }
+
+    /// Writing failed: cluster `id`'s result (if about one), into `sink` (if a cluster).
+    pub fn write(id: Option<&str>, sink: Option<&str>, message: impl Into<String>) -> SinkNote {
+        SinkNote { cluster_id: id.map(String::from), phase: Phase::Write, sink_id: sink.map(String::from), message: message.into() }
+    }
+
+    /// The words an admin who sees every cluster reads: `"{id}: {message}"`.
+    pub fn text(&self) -> String {
+        match &self.cluster_id {
+            Some(id) => format!("{id}: {}", self.message),
+            None => self.message.clone(),
+        }
+    }
+
+    /// Whether a caller who sees the clusters `sees` says yes to may read it: the cluster it
+    /// is about, by exact id, and for a write the cluster written to as well.
+    pub fn readable_by(&self, sees: impl Fn(&str) -> bool) -> bool {
+        self.cluster_id.as_deref().is_none_or(&sees) && (self.phase == Phase::Read || self.sink_id.as_deref().is_none_or(&sees))
+    }
+}
+
+/// What a caller limited to some clusters reads in place of a note about one outside them.
+pub const NOTE_OUTSIDE_VIEW: &str = "about a cluster outside your view; an administrator who sees every cluster can read it";
+
 /// What the last run did, so "it is scheduled" is something an admin can see rather than
-/// something they have to believe.
-#[derive(Clone, Debug, Default, Serialize)]
-#[serde(rename_all = "camelCase")]
+/// something they have to believe. Not serialised as is: every answer goes through
+/// `SinkView`, which knows who is asking.
+#[derive(Clone, Debug, Default)]
 pub struct SinkState {
     pub runs: u64,
     pub last_run_at: Option<i64>,
     pub last_ok: bool,
     /// Why the last attempt did nothing — disarmed, not primed, config is read-only.
     /// Distinct from `last_error`, which is a run that tried and failed.
-    pub last_skipped: Option<String>,
-    pub last_error: Option<String>,
+    pub last_skipped: Option<SinkNote>,
+    pub last_error: Option<SinkNote>,
     pub last_measured: usize,
     pub last_failed: usize,
     pub consecutive_failures: u32,
     pub next_due_at: Option<i64>,
+}
+
+/// What one caller may read of the scheduled measurement: the one place its notes, state and
+/// config become an answer (DELAY_SINK_*, LOGDELAY_SETTINGS_GET, LOGDELAY_SUMMARY).
+/// `visible: None` sees every cluster and reads everything.
+#[derive(Clone, Debug, Default)]
+pub struct SinkView {
+    pub visible: Option<std::collections::HashSet<String>>,
+}
+
+impl SinkView {
+    pub fn sees(&self, id: &str) -> bool {
+        self.visible.as_ref().is_none_or(|v| v.contains(id))
+    }
+
+    pub fn note(&self, n: &SinkNote) -> String {
+        if n.readable_by(|id| self.sees(id)) { n.text() } else { NOTE_OUTSIDE_VIEW.to_string() }
+    }
+
+    pub fn note_opt(&self, n: Option<&SinkNote>) -> Value {
+        n.map(|n| json!(self.note(n))).unwrap_or(Value::Null)
+    }
+
+    pub fn state(&self, s: &SinkState) -> Value {
+        json!({ "runs": s.runs, "lastRunAt": s.last_run_at, "lastOk": s.last_ok,
+                "lastSkipped": self.note_opt(s.last_skipped.as_ref()), "lastError": self.note_opt(s.last_error.as_ref()),
+                "lastMeasured": s.last_measured, "lastFailed": s.last_failed, "consecutiveFailures": s.consecutive_failures,
+                "nextDueAt": s.next_due_at })
+    }
+
+    /// The config without the clusters the caller does not see: the measured list narrowed,
+    /// the sink cluster blank when it is not theirs.
+    pub fn config(&self, c: &SinkConfig) -> Value {
+        let mut c = c.clone();
+        if self.visible.is_some() {
+            c.clusters.retain(|id| self.sees(id));
+            if !self.sees(&c.sink_cluster_id) {
+                c.sink_cluster_id = String::new();
+            }
+        }
+        serde_json::to_value(&c).unwrap_or(Value::Null)
+    }
 }
 
 /// When to try again. A failing run backs off — doubling, capped at a day — so a sink
@@ -503,6 +599,25 @@ pub fn month_and_hour_bucket(ms: i64) -> (i64, i64, String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_note_is_read_by_exact_cluster_id_and_a_write_also_by_the_sink() {
+        let limited = SinkView { visible: Some(["one".to_string(), "two".to_string()].into()) };
+        let all = SinkView::default();
+        let hidden_read = SinkNote::read("one-b", "search failed");
+        assert_eq!(limited.note(&hidden_read), NOTE_OUTSIDE_VIEW, "a visible id's prefix is not that id");
+        assert_eq!(all.note(&hidden_read), "one-b: search failed");
+        assert_eq!(limited.note(&SinkNote::read("two", "search failed")), "two: search failed");
+        // A write from a visible cluster into a hidden sink carries the sink's answer: hidden.
+        assert_eq!(limited.note(&SinkNote::write(Some("one"), Some("secret"), "rejected by secret")), NOTE_OUTSIDE_VIEW);
+        assert_eq!(limited.note(&SinkNote::write(Some("one"), None, "the built-in store could not be written")), "one: the built-in store could not be written");
+        assert_eq!(limited.note(&SinkNote::write(Some("one"), Some("two"), "x")), "one: x");
+        assert_eq!(limited.note(&SinkNote::general("the config is read-only")), "the config is read-only");
+        let c = SinkConfig { sink_cluster_id: "secret".into(), clusters: vec!["one".into(), "secret".into()], ..SinkConfig::default() };
+        let shown = limited.config(&c);
+        assert_eq!((shown["sinkClusterId"].clone(), shown["clusters"].clone()), (json!(""), json!(["one"])));
+        assert_eq!(all.config(&c)["sinkClusterId"], json!("secret"));
+    }
 
     fn cfg() -> SinkConfig {
         SinkConfig { sink_cluster_id: "kibana".into(), ..SinkConfig::default() }

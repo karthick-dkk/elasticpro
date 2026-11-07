@@ -294,21 +294,27 @@ impl Core {
         }
     }
 
-    /// Clusters the caller sees, in id order, with their store inputs. `only` narrows them.
-    async fn logdelay_inputs(&self, caller: Option<&Caller>, only: Option<&[String]>) -> Vec<ClusterInput> {
-        let Some(st) = self.logdelay_store() else { return vec![] };
-        let s = self.logdelay_settings();
-        let in_file = self.read_config_file().await.map(|raw| thresholds_in_config(&raw)).unwrap_or_default();
+    /// Clusters the caller sees, in id order, as `(id, name)`. `only` narrows them.
+    fn logdelay_visible(&self, caller: Option<&Caller>, only: Option<&[String]>) -> Vec<(String, String)> {
         let visible = self.visible_ids(caller);
         let mut specs = self.all_specs();
         specs.sort_by(|a, b| a.id.cmp(&b.id));
         specs.into_iter()
             .filter(|c| visible.as_ref().is_none_or(|v| v.contains(&c.id)))
             .filter(|c| only.is_none_or(|o| o.iter().any(|x| x == &c.id)))
-            .map(|c| ClusterInput {
-                levels: levels_for(&s, &c.id, in_file.get(&c.id)).0,
-                tracker: st.read_tracker(&c.id), daily: st.read_daily(&c.id),
-                name: c.name.clone().unwrap_or_else(|| c.id.clone()), id: c.id,
+            .map(|c| (c.id.clone(), c.name.clone().unwrap_or(c.id)))
+            .collect()
+    }
+
+    /// Clusters the caller sees, in id order, with their store inputs. `only` narrows them.
+    async fn logdelay_inputs(&self, caller: Option<&Caller>, only: Option<&[String]>) -> Vec<ClusterInput> {
+        let Some(st) = self.logdelay_store() else { return vec![] };
+        let s = self.logdelay_settings();
+        let in_file = self.read_config_file().await.map(|raw| thresholds_in_config(&raw)).unwrap_or_default();
+        self.logdelay_visible(caller, only).into_iter()
+            .map(|(id, name)| ClusterInput {
+                levels: levels_for(&s, &id, in_file.get(&id)).0,
+                tracker: st.read_tracker(&id), daily: st.read_daily(&id), name, id,
             })
             .collect()
     }
@@ -401,7 +407,7 @@ impl Core {
                 let max = msg.get("maxDevices").and_then(Value::as_u64).map(|n| n as usize).unwrap_or(MAX_DEVICES).clamp(1, MAX_DEVICES);
                 let mut v = summary::fleet(&inputs, &r, now, every, max);
                 v["ok"] = json!(true);
-                v["schedule"] = self.logdelay_schedule_line();
+                v["schedule"] = self.logdelay_schedule_line(caller);
                 v
             }
             "LOGDELAY_CLUSTER" => {
@@ -419,27 +425,26 @@ impl Core {
                 let Some(id) = msg.get("clusterId").and_then(Value::as_str).filter(|s| !s.is_empty()) else { return bad("bad_request", "clusterId is required") };
                 let Some(dev) = msg.get("device").and_then(Value::as_str).filter(|s| !s.is_empty()) else { return bad("bad_request", "device is required") };
                 let r = match Self::logdelay_range(msg, now, 30) { Ok(r) => r, Err(e) => return bad("bad_request", e) };
-                // One read of the caller's clusters: this one's device, and every one's line in
-                // the "Delay by cluster" panel (trackers come from the store's parsed copies).
-                let all = self.logdelay_inputs(caller, None).await;
-                let Some(c) = all.iter().find(|x| x.id == id) else { return bad("not_found", format!("no cluster {id:?}")) };
+                // This cluster's tracker for the device; the other clusters' daily totals alone
+                // for the "Delay by cluster" panel.
+                let mine = self.logdelay_inputs(caller, Some(&[id.to_string()])).await;
+                let Some(c) = mine.first() else { return bad("not_found", format!("no cluster {id:?}")) };
                 let fr = Range::last_days(now, 7);
                 let findings = self.logdelay_findings(&[id.to_string()], &fr, now, every);
-                let mine = fixes::per_device(&findings).remove(&(id.to_string(), dev.to_string()));
-                let Some(mut v) = summary::device(c, dev, &r, now, every, mine.as_ref()) else {
+                let found = fixes::per_device(&findings).remove(&(id.to_string(), dev.to_string()));
+                let Some(mut v) = summary::device(c, dev, &r, now, every, found.as_ref()) else {
                     return bad("not_found", format!("no device {dev:?} measured on {id:?} (the store keeps 90 days; a device not seen for a week is forgotten)"));
                 };
-                // The "Delay by cluster" panel: every visible cluster's late devices per day.
-                v["clusters"] = json!(all.iter().map(|x| {
-                    let t = summary::totals(x);
-                    let spark = summary::sparkline(x, &r);
-                    let peak = spark.iter().enumerate().filter_map(|(i, n)| n.as_u64().map(|n| (n, i))).max();
-                    json!({ "id": x.id, "name": x.name, "lateNow": t.late(), "sparkline": spark, "days": r.day_keys(),
-                            "peak": peak.map(|(n, _)| n), "peakDay": peak.and_then(|(_, i)| r.day_keys().get(i).cloned()) })
+                // The "Delay by cluster" panel: every visible cluster's late devices per day,
+                // read from daily.json only (no other cluster's tracker is parsed for it).
+                let st = self.logdelay_store();
+                v["clusters"] = json!(self.logdelay_visible(caller, None).iter().map(|(cid, name)| {
+                    let daily = if cid == &c.id { c.daily.clone() } else { st.as_ref().map(|st| st.read_daily(cid)).unwrap_or_default() };
+                    summary::cluster_line(cid, name, &daily, &r)
                 }).collect::<Vec<_>>());
                 // Beyond the tracker's month, the day files hold the rest of the range.
                 if (now - r.from_ms) > state::RECENT_MS {
-                    if let Some(st) = self.logdelay_store() {
+                    if let Some(st) = &st {
                         let (older, truncated) = st.read_measurements(id, Some(dev), &r.from.format("%Y-%m-%d").to_string(), &r.to.format("%Y-%m-%d").to_string(), 20_000);
                         v["olderMeasurements"] = json!(older.into_iter().map(|m| json!({ "t": m["measured_at"], "m": m["delay_minutes"], "s": m["state"] })).collect::<Vec<_>>());
                         v["olderTruncated"] = json!(truncated);
@@ -504,10 +509,11 @@ impl Core {
     }
 
     /// The scheduled measurement as the pages state it beside the figures.
-    fn logdelay_schedule_line(&self) -> Value {
+    fn logdelay_schedule_line(&self, caller: Option<&Caller>) -> Value {
         let cfg = self.delay_sink_config();
+        let state = self.delay_sink_state_for(caller);
         json!({ "supported": self.edition().schedules(), "enabled": cfg.enabled, "everyHours": cfg.every_hours, "destination": cfg.destination,
-                "lastRunAt": self.delay_sink_state_json().get("lastRunAt").cloned(), "state": self.delay_sink_state_json() })
+                "lastRunAt": state.get("lastRunAt").cloned(), "state": state })
     }
 
     async fn logdelay_settings_view(&self, caller: Option<&Caller>) -> Value {
@@ -529,12 +535,12 @@ impl Core {
         if let Some(v) = &visible {
             shown.clusters.retain(|id, _| v.contains(id));
         }
-        let sched_clusters: Vec<String> = cfg.clusters.iter().filter(|id| visible.as_ref().is_none_or(|v| v.contains(*id))).cloned().collect();
+        let sched = self.sink_view(caller).config(&cfg);
         json!({
             "ok": true, "supported": self.edition().schedules(),
             "settings": shown, "resolved": resolved,
-            "schedule": { "enabled": cfg.enabled, "everyHours": cfg.every_hours, "destination": cfg.destination, "clusters": sched_clusters,
-                          "maxDevices": cfg.max_devices, "state": self.delay_sink_state_json(), "blocked": self.delay_sink_blocked_now() },
+            "schedule": { "enabled": cfg.enabled, "everyHours": cfg.every_hours, "destination": cfg.destination, "clusters": sched["clusters"],
+                          "maxDevices": cfg.max_devices, "state": self.delay_sink_state_for(caller), "blocked": self.delay_sink_blocked_for(caller) },
             "builtinStore": { "keepDays": 90, "bytes": sizes.bytes, "sizes": sizes, "recentDays": state::RECENT_MS / 86_400_000, "dir": store::DIR },
             "extrasDefault": EXTRAS_DEFAULT,
             "uiCopy": "ui/js/core/log-delay.js DEFAULT_THRESHOLDS/thresholds()/classify(): to be removed, read `levels` here instead",

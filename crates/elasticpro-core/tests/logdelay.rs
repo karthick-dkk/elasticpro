@@ -350,10 +350,107 @@ async fn a_limited_admin_sees_only_their_clusters_in_the_settings_and_the_summar
     let sum = c.handle_as(json!({ "type": "LOGDELAY_SUMMARY" }), Some(limited.clone())).await;
     assert_eq!(sum["byCluster"].as_array().unwrap().len(), 1, "{sum}");
     assert_eq!(sum["totals"]["devices"], json!(3));
-    let fixes = c.handle_as(json!({ "type": "LOGDELAY_FIXES" }), Some(limited)).await;
+    let fixes = c.handle_as(json!({ "type": "LOGDELAY_FIXES" }), Some(limited.clone())).await;
     assert!(fixes["matchedAt"].is_i64(), "served from the run's findings: {fixes}");
     assert!(fixes["findings"].as_array().unwrap().iter().all(|f| f["cluster"] == "one"), "{fixes}");
+    // The device page's "Delay by cluster" panel: the caller's clusters only, from daily.json.
+    let dev = c.handle_as(json!({ "type": "LOGDELAY_DEVICE", "clusterId": "one", "device": "fw-1" }), Some(limited)).await;
+    assert_eq!(dev["ok"], json!(true), "{dev}");
+    let panel = dev["clusters"].as_array().unwrap();
+    assert_eq!(panel.len(), 1, "{dev}");
+    assert_eq!(panel[0]["id"], json!("one"));
+    assert_eq!(panel[0]["lateNow"], json!(1), "fw-1 at 45 min over cluster one's 40: {dev}");
+    assert!(panel[0]["lateAsOf"].is_string() && panel[0]["sparkline"].is_array(), "{dev}");
     let other = c.handle_as(json!({ "type": "LOGDELAY_DEVICE", "clusterId": "two", "device": "fw-1" }),
                             Some(Caller { name: "x".into(), role: Role::User, must_change: false, scope: Some(vec!["ES one".into()]), play: None })).await;
     assert_eq!(other["kind"], json!("not_found"), "a cluster outside the scope does not exist for the caller: {other}");
+}
+
+#[tokio::test]
+async fn a_limited_admin_reads_nothing_of_a_cluster_outside_their_view_in_any_schedule_answer() {
+    use elasticpro_core::auth::{Caller, Role};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    const HIDDEN: &str = "secret-c3";
+    const HIDDEN_NAME: &str = "Secret Three";
+    let dir = TempDir::new("logdelay-lasterror");
+    // Each cluster's search (and bulk) fails while its switch is on.
+    let serve = |fail: Arc<AtomicBool>| TestServer::with(move |hit| {
+        let failing = fail.load(Ordering::SeqCst);
+        if hit.path.starts_with("/_bulk") {
+            return if failing { (500, r#"{"error":"bulk refused"}"#.into()) } else { (200, r#"{"took":3,"errors":false,"items":[]}"#.into()) };
+        }
+        if hit.path.contains("/_search") {
+            return if failing { (500, r#"{"error":"boom"}"#.into()) } else { (200, devices(2.0).to_string()) };
+        }
+        (200, r#"{"cluster_name":"test","status":"green"}"#.into())
+    });
+    let (two_fails, hidden_fails) = (Arc::new(AtomicBool::new(false)), Arc::new(AtomicBool::new(true)));
+    let (s1, s2, s3) = (serve(Arc::new(AtomicBool::new(false))).await, serve(two_fails.clone()).await, serve(hidden_fails.clone()).await);
+    let c = Core::new_with_rounds(Some(dir.0.clone()), Edition::Hosted, 1);
+    let root = Caller { name: "root".into(), role: Role::Admin, must_change: false, scope: None, play: None };
+    let p = c.handle_as(json!({ "type": "PRIME", "readOnly": false, "clusters": [
+        { "id": "one", "name": "One", "url": s1.url(), "zabbixGroups": ["ES one"] },
+        { "id": "two", "name": "Two", "url": s2.url(), "zabbixGroups": ["ES two"] },
+        { "id": HIDDEN, "name": HIDDEN_NAME, "url": s3.url(), "zabbixGroups": ["ES three"] } ] }), Some(root.clone())).await;
+    assert_eq!(p["ok"], json!(true), "{p}");
+    let limited = Caller { name: "zadmin@zabbix".into(), role: Role::Admin, must_change: false,
+                           scope: Some(vec!["ES one".into(), "ES two".into()]), play: None };
+    // Every schedule answer a limited admin can ask for, as whole JSON text.
+    let bodies = |who: Caller| {
+        let c = c.clone();
+        async move {
+            let mut out = vec![];
+            for t in ["DELAY_SINK_GET", "DELAY_SINK_RUN", "LOGDELAY_SETTINGS_GET", "LOGDELAY_SUMMARY"] {
+                let v = c.handle_as(json!({ "type": t }), Some(who.clone())).await;
+                assert!(v["state"].is_object() || v["schedule"].is_object(), "{t}: {v}");
+                out.push((t, v.to_string()));
+            }
+            out
+        }
+    };
+    let assert_clean = |bodies: &[(&str, String)]| {
+        for (t, b) in bodies {
+            assert!(!b.contains(HIDDEN) && !b.contains(HIDDEN_NAME), "{t} names the hidden cluster: {b}");
+        }
+    };
+
+    // 1. A read error on the hidden cluster.
+    let sched = c.handle_as(json!({ "type": "DELAY_SINK_SET", "config": { "enabled": true, "destination": "builtin", "clusters": ["one", "two", HIDDEN] } }), Some(root.clone())).await;
+    assert_eq!(sched["ok"], json!(true), "{sched}");
+    let run = c.handle_as(json!({ "type": "DELAY_SINK_RUN" }), Some(root.clone())).await;
+    assert_eq!(run["failed"], json!(1), "{run}");
+    assert!(run["error"].as_str().unwrap_or_default().starts_with(&format!("{HIDDEN}: ")), "a full admin reads it: {run}");
+    let seen = bodies(limited.clone()).await;
+    assert_clean(&seen);
+    let get: Value = serde_json::from_str(&seen[0].1).unwrap();
+    assert_eq!(get["config"]["clusters"], json!(["one", "two"]), "{get}");
+    assert!(get["state"]["lastError"].as_str().unwrap_or_default().contains("outside your view"), "{get}");
+    assert_eq!(get["state"]["lastOk"], json!(false), "still a failed run, not a fine one: {get}");
+    let full = bodies(root.clone()).await;
+    for (t, b) in &full {
+        assert!(b.contains(&format!("{HIDDEN}: ")), "a full admin reads the error in {t}: {b}");
+    }
+
+    // 2. A read error on a cluster the limited admin sees is theirs to read.
+    hidden_fails.store(false, Ordering::SeqCst);
+    two_fails.store(true, Ordering::SeqCst);
+    let run = c.handle_as(json!({ "type": "DELAY_SINK_RUN" }), Some(root.clone())).await;
+    assert_eq!(run["failed"], json!(1), "{run}");
+    let seen = bodies(limited.clone()).await;
+    assert_clean(&seen);
+    assert!(seen.iter().all(|(_, b)| b.contains("two: ")), "{seen:?}");
+    two_fails.store(false, Ordering::SeqCst);
+
+    // 3. Visible clusters written into a hidden sink cluster that refuses the bulk: the write
+    //    error is about the sink, so it is hidden, and so is the sink's id in the config.
+    hidden_fails.store(true, Ordering::SeqCst);
+    let sched = c.handle_as(json!({ "type": "DELAY_SINK_SET", "config": { "enabled": true, "destination": "cluster", "sinkClusterId": HIDDEN, "clusters": ["one", "two"] } }), Some(root.clone())).await;
+    assert_eq!(sched["ok"], json!(true), "{sched}");
+    let run = c.handle_as(json!({ "type": "DELAY_SINK_RUN" }), Some(root.clone())).await;
+    assert!(run["error"].as_str().unwrap_or_default().starts_with("one: "), "a write error, about cluster one: {run}");
+    let seen = bodies(limited.clone()).await;
+    assert_clean(&seen);
+    assert!(seen.iter().all(|(_, b)| b.contains("outside your view")), "{seen:?}");
+    let full = c.handle_as(json!({ "type": "DELAY_SINK_GET" }), Some(root)).await;
+    assert_eq!(full["config"]["sinkClusterId"], json!(HIDDEN), "a full admin reads the config whole: {full}");
 }

@@ -3,7 +3,7 @@
 //! decisions, config file, vault).
 
 use crate::auth::{self, Caller, Edition, Role, Sessions, TokenStore, UserStore};
-use crate::delay_sink::{self, SinkConfig, SinkState};
+use crate::delay_sink::{self, SinkConfig, SinkNote, SinkState};
 use crate::fleet::events::Reauth;
 use crate::guard::Writes;
 use crate::gate::Class;
@@ -5221,7 +5221,7 @@ impl Core {
     /// Only meaningful for a schedule that is armed. A disarmed job is not blocked from
     /// running — nobody asked it to — and saying "cannot run right now" about something
     /// switched off puts a warning on a fresh install before anyone has touched it.
-    fn delay_sink_blocker(&self, cfg: &SinkConfig) -> Option<String> {
+    fn delay_sink_blocker(&self, cfg: &SinkConfig) -> Option<SinkNote> {
         if !cfg.enabled {
             return None;
         }
@@ -5233,35 +5233,37 @@ impl Core {
     ///
     /// Unlike `delay_sink_blocker` this applies to a disarmed config too: pressing "Run
     /// now" is asking for a run, and a run with no destination still has nowhere to go.
-    fn delay_sink_refusal(&self, cfg: &SinkConfig) -> Option<String> {
+    fn delay_sink_refusal(&self, cfg: &SinkConfig) -> Option<SinkNote> {
         if let Some(r) = cfg.refusal() {
-            return Some(r);
+            return Some(SinkNote::general(r));
         }
         let p = self.primed.read();
         if p.clusters.is_empty() {
-            return Some(
-                "nothing is primed: the core has no cluster credentials until somebody opens the app"
-                    .into(),
-            );
+            return Some(SinkNote::general(
+                "nothing is primed: the core has no cluster credentials until somebody opens the app",
+            ));
         }
         // The built-in store: the server's own files, nothing written to any cluster.
         if cfg.destination == delay_sink::Destination::Builtin {
-            return self.logdelay_store().is_none().then(|| "no data directory: the built-in store needs one".to_string());
+            return self.logdelay_store().is_none().then(|| SinkNote::general("no data directory: the built-in store needs one"));
         }
         // To the history store: its own two gates, never the monitored clusters' readOnly.
         if cfg.destination == delay_sink::Destination::History {
             let (y, m, _) = delay_sink::month_and_hour_bucket(delay_sink::now_ms());
-            return self.history_delay_index(y, m).err().map(|e| format!("the history store cannot take the measurements: {e}"));
+            return self.history_delay_index(y, m).err()
+                .map(|e| SinkNote::write(None, None, format!("the history store cannot take the measurements: {e}")));
         }
         if !p.clusters.contains_key(&cfg.sink_cluster_id) {
-            return Some(format!("the sink cluster {:?} is not one of the primed clusters", cfg.sink_cluster_id));
+            // About the sink cluster, as it was named when this was decided.
+            let sink = cfg.sink_cluster_id.as_str();
+            return Some(SinkNote::write(Some(sink), Some(sink), "the sink cluster is not one of the primed clusters"));
         }
         // The session unlock is never persisted and no background task may hold it, so
         // the only gate left is the config's own. See guard.rs.
         if crate::guard::Writes::decide(p.read_only, false, true) == crate::guard::Writes::Blocked {
-            return Some(
-                "the config is read-only: set readOnly to false to let measurements be written".into(),
-            );
+            return Some(SinkNote::general(
+                "the config is read-only: set readOnly to false to let measurements be written",
+            ));
         }
         None
     }
@@ -5282,7 +5284,7 @@ impl Core {
 
     /// Measure every target once and ship the result. Also the body of the admin's
     /// "run it now" button, which is why it does not look at the schedule itself.
-    async fn run_delay_sink(self: &Arc<Self>) -> Value {
+    async fn run_delay_sink(self: &Arc<Self>) -> SinkRun {
         let cfg = self.delay_sink.read().config.clone();
         let now = delay_sink::now_ms();
 
@@ -5294,8 +5296,8 @@ impl Core {
             // It is retried at the normal interval, by which time somebody may have
             // primed the app or turned off read-only.
             s.state.next_due_at = Some(delay_sink::next_due(now, cfg.every_hours, 0));
-            tracing::info!(target: "audit", message = "delay sink skipped", reason = %why);
-            return json!({ "ok": false, "skipped": why });
+            tracing::info!(target: "audit", message = "delay sink skipped", reason = %why.text());
+            return SinkRun { body: json!({ "ok": false }), skipped: Some(why), error: None };
         }
 
         let (year, month, _) = delay_sink::month_and_hour_bucket(now);
@@ -5307,7 +5309,7 @@ impl Core {
         let prefix = if to_history {
             match self.history_delay_prefix() {
                 Ok(p) => p,
-                Err(e) => return json!({ "ok": false, "skipped": e }),
+                Err(e) => return SinkRun { body: json!({ "ok": false }), skipped: Some(SinkNote::write(None, None, e)), error: None },
             }
         } else {
             cfg.index_prefix.clone()
@@ -5318,7 +5320,7 @@ impl Core {
         let in_file = self.read_config_file().await.map(|raw| crate::logdelay::thresholds_in_config(&raw)).unwrap_or_default();
         let mut measured = 0usize;
         let mut failed = 0usize;
-        let mut first_error: Option<String> = None;
+        let mut first_error: Option<SinkNote> = None;
         let mut opened = 0usize;
         let mut solved = 0usize;
 
@@ -5329,10 +5331,7 @@ impl Core {
             if res.get("ok").and_then(|v| v.as_bool()) != Some(true) {
                 failed += 1;
                 first_error.get_or_insert_with(|| {
-                    format!(
-                        "{id}: {}",
-                        res.get("message").and_then(|v| v.as_str()).unwrap_or("search failed")
-                    )
+                    SinkNote::read(id, res.get("message").and_then(|v| v.as_str()).unwrap_or("search failed"))
                 });
                 continue;
             }
@@ -5345,7 +5344,7 @@ impl Core {
                 Ok(x) => x,
                 Err(e) => {
                     failed += 1;
-                    first_error.get_or_insert(format!("{id}: the built-in store could not be written: {e}"));
+                    first_error.get_or_insert(SinkNote::write(Some(id), None, format!("the built-in store could not be written: {e}")));
                     continue;
                 }
             };
@@ -5370,7 +5369,9 @@ impl Core {
                 None => measured += applied.rows.len(),
                 Some(e) => {
                     failed += 1;
-                    first_error.get_or_insert(format!("{id}: {e}"));
+                    // Into the sink cluster (as named for this run), or the history store.
+                    let sink = (!to_history).then_some(cfg.sink_cluster_id.as_str());
+                    first_error.get_or_insert(SinkNote::write(Some(id), sink, e));
                 }
             }
         }
@@ -5395,21 +5396,31 @@ impl Core {
             target: "audit",
             message = "delay sink run",
             clusters = targets.len(), measured, failed, opened, solved, index = %index, destination = ?cfg.destination,
-            error = first_error.as_deref().unwrap_or(""),
+            error = first_error.as_ref().map(SinkNote::text).unwrap_or_default(),
         );
-        json!({ "ok": ok, "measured": measured, "failed": failed, "clusters": targets.len(), "opened": opened, "solved": solved,
-                "index": index, "destination": cfg.destination, "error": first_error })
+        SinkRun {
+            body: json!({ "ok": ok, "measured": measured, "failed": failed, "clusters": targets.len(), "opened": opened, "solved": solved,
+                          "index": index, "destination": cfg.destination }),
+            skipped: None, error: first_error,
+        }
     }
 
-    /// The schedule's state as JSON, for the log delay pages.
-    pub(crate) fn delay_sink_state_json(&self) -> Value {
-        serde_json::to_value(&self.delay_sink.read().state).unwrap_or(Value::Null)
+    /// What `caller` may read of the scheduled measurement (`delay_sink::SinkView`): every
+    /// answer about it — DELAY_SINK_*, LOGDELAY_SETTINGS_GET, LOGDELAY_SUMMARY — goes through
+    /// this, so a caller limited to some clusters reads no note, id or name of another's.
+    pub(crate) fn sink_view(&self, caller: Option<&Caller>) -> delay_sink::SinkView {
+        delay_sink::SinkView { visible: self.visible_ids(caller) }
     }
 
-    /// What stands in the way of the armed schedule now, if anything.
-    pub(crate) fn delay_sink_blocked_now(&self) -> Option<String> {
+    /// The schedule's state as `caller` may read it.
+    pub(crate) fn delay_sink_state_for(&self, caller: Option<&Caller>) -> Value {
+        self.sink_view(caller).state(&self.delay_sink.read().state)
+    }
+
+    /// What stands in the way of the armed schedule now, if anything, as `caller` may read it.
+    pub(crate) fn delay_sink_blocked_for(&self, caller: Option<&Caller>) -> Value {
         let cfg = self.delay_sink.read().config.clone();
-        self.delay_sink_blocker(&cfg)
+        self.sink_view(caller).note_opt(self.delay_sink_blocker(&cfg).as_ref())
     }
 
     /// `DELAY_SINK_GET` / `DELAY_SINK_SET` / `DELAY_SINK_RUN`. Admin only; see
@@ -5428,9 +5439,9 @@ impl Core {
         }
         match t {
             "DELAY_SINK_GET" => {
-                let s = self.delay_sink.read();
-                json!({ "ok": true, "supported": true, "config": s.config, "state": s.state,
-                        "blocked": self.delay_sink_blocker(&s.config), "historyStore": self.history_for_delay() })
+                let config = self.sink_view(caller).config(&self.delay_sink.read().config);
+                json!({ "ok": true, "supported": true, "config": config, "state": self.delay_sink_state_for(caller),
+                        "blocked": self.delay_sink_blocked_for(caller), "historyStore": self.history_for_delay() })
             }
             "DELAY_SINK_SET" => {
                 let incoming = msg.get("config").cloned().unwrap_or(Value::Null);
@@ -5444,18 +5455,24 @@ impl Core {
                 if let Err(e) = self.set_delay_sink_config(cfg) {
                     return json!({ "ok": false, "message": e });
                 }
-                let s = self.delay_sink.read();
-                tracing::info!(target: "audit", message = "delay sink configured", enabled = s.config.enabled);
-                json!({ "ok": true, "config": s.config, "state": s.state,
-                        "blocked": self.delay_sink_blocker(&s.config) })
+                let view = self.sink_view(caller);
+                let config = self.delay_sink.read().config.clone();
+                tracing::info!(target: "audit", message = "delay sink configured", enabled = config.enabled);
+                json!({ "ok": true, "config": view.config(&config), "state": self.delay_sink_state_for(caller),
+                        "blocked": self.delay_sink_blocked_for(caller) })
             }
             _ => {
                 // DELAY_SINK_RUN: the operator pressing it is what makes this one legible
                 // — it is the same work the timer does, at a moment somebody chose.
-                let out = self.run_delay_sink().await;
-                let s = self.delay_sink.read();
-                let mut out = out;
-                out["state"] = serde_json::to_value(&s.state).unwrap_or(Value::Null);
+                let run = self.run_delay_sink().await;
+                let view = self.sink_view(caller);
+                let mut out = run.body;
+                if let Some(n) = &run.skipped {
+                    out["skipped"] = json!(view.note(n));
+                } else {
+                    out["error"] = view.note_opt(run.error.as_ref());
+                }
+                out["state"] = self.delay_sink_state_for(caller);
                 out
             }
         }
@@ -5484,8 +5501,18 @@ impl Core {
         s.config = cfg;
         s.state.next_due_at = armed.then(|| delay_sink::next_due(now, every, 0));
         s.state.consecutive_failures = 0;
+        // A skip reason was about the config it was decided under; this one is new.
+        s.state.last_skipped = None;
         Ok(())
     }
+}
+
+/// One scheduled measurement's outcome: the answer's figures, and its skip reason or first
+/// error as notes, which `SinkView` turns into words for whoever asked.
+pub(crate) struct SinkRun {
+    pub body: Value,
+    pub skipped: Option<SinkNote>,
+    pub error: Option<SinkNote>,
 }
 
 /* --------------------------- the Zabbix link (Config → Zabbix) --------------------------- */

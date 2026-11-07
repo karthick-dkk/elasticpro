@@ -245,7 +245,24 @@ pub fn below_share(c: &ClusterInput, r: &Range) -> Option<f64> {
 
 /// Late devices per day of the range, for a sparkline: `null` for a day without totals.
 pub fn sparkline(c: &ClusterInput, r: &Range) -> Vec<Value> {
-    r.day_keys().iter().map(|k| c.daily.get(k).map(|d| json!(d.delayed + d.critical)).unwrap_or(Value::Null)).collect()
+    sparkline_of(&c.daily, r)
+}
+
+/// `sparkline` from the daily totals alone.
+pub fn sparkline_of(daily: &BTreeMap<String, Daily>, r: &Range) -> Vec<Value> {
+    r.day_keys().iter().map(|k| daily.get(k).map(|d| json!(d.delayed + d.critical)).unwrap_or(Value::Null)).collect()
+}
+
+/// One cluster's line in the device page's "Delay by cluster" panel, from its daily totals
+/// alone (daily.json, not the tracker): late devices per day of the range, the peak, and how
+/// many were late on the last day measured — `null`, not 0, when no day is kept.
+pub fn cluster_line(id: &str, name: &str, daily: &BTreeMap<String, Daily>, r: &Range) -> Value {
+    let spark = sparkline_of(daily, r);
+    let days = r.day_keys();
+    let peak = spark.iter().enumerate().filter_map(|(i, n)| n.as_u64().map(|n| (n, i))).max();
+    let last = daily.iter().next_back();
+    json!({ "id": id, "name": name, "lateNow": last.map(|(_, d)| d.delayed + d.critical), "lateAsOf": last.map(|(k, _)| k),
+            "sparkline": spark, "peak": peak.map(|(n, _)| n), "peakDay": peak.and_then(|(_, i)| days.get(i).cloned()), "days": days })
 }
 
 /// Periods solved in the last `hours`, over clusters.
