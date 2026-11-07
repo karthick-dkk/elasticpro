@@ -117,6 +117,10 @@ server-side settings (admins edit, everyone plans).
 - Output: tiles (Servers, CPU, RAM, /live disk, backup) and a bill of materials: Role, Sizing
   rule, Count, CPU each, RAM each, / disk each, /live disk each, /backup disk (only when backups
   go to disk), CPU total, RAM total, plus a Total row. Export CSV. No explanatory note.
+- Disk sizes (/live disk each, /backup disk, the S3 / ULM size, the tiles, the CSV) are shown
+  as they are bought: **rounded up** to a whole TB from 1 TB, a whole GB below (2.79 TB → 3 TB,
+  19.5 TB → 20 TB), never down. The /live disk tile and Total are the rows' sum, count × each
+  node's rounded disk (7 × 3 TB = 21 TB), so the tile never disagrees with the table.
 - Template = name + backup target + roles. A role: on/off, name, sizing rule, per-server
   capacity or count, CPU, RAM (GB), / disk (GB), notes. Sizing rules:
   1. **Scales with daily volume** — count = ⌈volume ÷ GB/day per server⌉, at least 1.
