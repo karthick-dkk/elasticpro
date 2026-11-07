@@ -87,16 +87,20 @@ pub enum ReportKind {
     Volume,
     Indices,
     Hosts,
+    /// The log delay report (docs/LOGDELAY.md): from the built-in store, no cluster asked.
+    #[serde(rename = "log_delay")]
+    LogDelay,
 }
 
 impl ReportKind {
-    pub const ALL: [ReportKind; 3] = [ReportKind::Volume, ReportKind::Indices, ReportKind::Hosts];
+    pub const ALL: [ReportKind; 4] = [ReportKind::Volume, ReportKind::Indices, ReportKind::Hosts, ReportKind::LogDelay];
 
     pub fn parse(s: &str) -> Option<ReportKind> {
         match s {
             "volume" => Some(ReportKind::Volume),
             "indices" => Some(ReportKind::Indices),
             "hosts" => Some(ReportKind::Hosts),
+            "log_delay" | "logdelay" | "logDelay" => Some(ReportKind::LogDelay),
             _ => None,
         }
     }
@@ -106,6 +110,7 @@ impl ReportKind {
             ReportKind::Volume => "volume",
             ReportKind::Indices => "indices",
             ReportKind::Hosts => "hosts",
+            ReportKind::LogDelay => "log_delay",
         }
     }
 
@@ -113,7 +118,7 @@ impl ReportKind {
     pub fn of_message(msg: &serde_json::Value) -> Result<ReportKind, String> {
         match msg.get("kind") {
             None | Some(serde_json::Value::Null) => Ok(ReportKind::Volume),
-            Some(v) => v.as_str().and_then(ReportKind::parse).ok_or_else(|| "kind must be volume, indices or hosts".to_string()),
+            Some(v) => v.as_str().and_then(ReportKind::parse).ok_or_else(|| "kind must be volume, indices, hosts or log_delay".to_string()),
         }
     }
 }
@@ -242,6 +247,10 @@ pub struct Job {
     /// for the others and names these (docs/REPORT-TYPES.md "Isolation and failure").
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub failed_clusters: Vec<FailedCluster>,
+    /// A log delay job's options (`logdelay::report::Options`): the devices filter, the group,
+    /// the columns, the sections, the attachments. Absent for every other kind.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub options: Option<serde_json::Value>,
     /// Who asked a running job to stop. The worker sees it between days and ends the job
     /// `stopped`. Not persisted: a restart fails the job anyway.
     #[serde(skip)]
@@ -265,7 +274,7 @@ impl Job {
             cluster_ids, period, format, mail, by: by.to_string(), created_at: now, started_at: None, ended_at: None,
             status: Status::Queued, progress: Progress { done: 0, total: 1, ..Progress::default() }, file: None, error: None, mail_error: None,
             stopped_by: None, warning: None, seq: 0, volume: None, sheets: vec![], mail_started_at: None, report: ReportKind::Volume,
-            collect_again: false, failed_clusters: vec![], stop_asked: None,
+            collect_again: false, failed_clusters: vec![], options: None, stop_asked: None,
         }
     }
 }

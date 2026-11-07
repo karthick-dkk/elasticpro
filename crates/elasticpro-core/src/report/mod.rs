@@ -35,6 +35,7 @@ pub mod period;
 pub mod schedule;
 pub mod xlsx;
 pub mod zip;
+mod logdelay_job;
 mod run;
 mod run_types;
 pub(crate) use run::job_view;

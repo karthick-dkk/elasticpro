@@ -336,6 +336,39 @@ pub struct Outgoing {
     pub recipients: usize,
 }
 
+/// Build a mail with a plain-text body, an HTML copy of it when given (`multipart/alternative`,
+/// text first, so a reader without HTML sees the text), and any number of attachments.
+#[allow(clippy::too_many_arguments)]
+pub fn message_parts(from: &str, to: &[String], cc: &[String], bcc: &[String], subject: &str, text: &str, html: Option<&str>,
+                     attachments: Vec<(String, String, Vec<u8>)>) -> Result<Outgoing, String> {
+    let mb = |a: &str| a.parse::<Mailbox>().map_err(|e| format!("{a:?} is not an address: {e}"));
+    let mut b = lettre::Message::builder().from(mb(from)?).subject(subject);
+    for a in to {
+        b = b.to(mb(a)?);
+    }
+    for a in cc {
+        b = b.cc(mb(a)?);
+    }
+    for a in bcc {
+        b = b.bcc(mb(a)?);
+    }
+    let body = match html {
+        Some(h) => MultiPart::alternative_plain_html(text.to_string(), h.to_string()),
+        None => MultiPart::mixed().singlepart(SinglePart::plain(text.to_string())),
+    };
+    let msg = if attachments.is_empty() {
+        b.multipart(body)
+    } else {
+        let mut mixed = MultiPart::mixed().multipart(body);
+        for (name, mime, data) in attachments {
+            let ct = ContentType::parse(&mime).map_err(|e| e.to_string())?;
+            mixed = mixed.singlepart(Attachment::new(name).body(data, ct));
+        }
+        b.multipart(mixed)
+    }.map_err(|e| format!("the mail could not be built: {e}"))?;
+    Ok(Outgoing { envelope: msg.envelope().clone(), bytes: msg.formatted(), recipients: to.len() + cc.len() + bcc.len() })
+}
+
 /// Build a mail: plain text body and, optionally, one attachment.
 pub fn message(from: &str, to: &[String], cc: &[String], bcc: &[String], subject: &str, body: &str,
                attachment: Option<(&str, &str, Vec<u8>)>) -> Result<Outgoing, String> {
