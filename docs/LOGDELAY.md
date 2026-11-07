@@ -83,13 +83,15 @@ Code: `crates/elasticpro-core/src/logdelay/` (`levels`, `measure`, `state`, `sto
 
 ```text
 <data>/logdelay.json                          settings
-<data>/logdelay/<cluster>/tracker.json        per-device state, open period, open silence, 31 days of points; solved periods and silences (90 days)
+<data>/logdelay/clusters.json                 directory name → cluster id (a directory name is a file-safe rendering of the id)
+<data>/logdelay/<cluster>/tracker.json        per-device state, open period, open silence, 31 days of points as [t, m, s]; solved periods and silences (90 days)
 <data>/logdelay/<cluster>/daily.json          day → totals (90 days)
 <data>/logdelay/<cluster>/m/YYYY-MM-DD.ndjson one measurement document per device per run (90 days)
 <data>/logdelay/findings.json                 the fixes as last matched (last 7 days)
 ```
 
-Kept **90 days** (Storage board); pruned after every run. Days are **server-local** days
+Kept **90 days** (Storage board); pruned after every run. A tracker is parsed once and held
+in memory, replaced when the run writes it; the pages never re-read the file. Days are **server-local** days
 (`TZ`, IST on our stacks): daily totals, windows, "today", "14:00–18:00".
 
 ### Elasticsearch (history store or sink cluster; `logdelay/docs.rs`)

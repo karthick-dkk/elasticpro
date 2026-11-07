@@ -22,13 +22,36 @@ use std::collections::BTreeMap;
 
 /// One measurement of one device, as the tracker keeps the recent ones (31 days) for the
 /// device graph, the medians and the daily totals, without reading the day files back.
+/// Written as `[t, m, s]`, not an object: a cluster of 2000 devices holds 740 000 of these.
+/// An object-form point (`{t, m, s}`) still reads.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(from = "PointRepr", into = "(i64, Option<f64>, State)")]
 pub struct Point {
     /// The run's time, epoch ms.
     pub t: i64,
     /// `None`: silent or can't measure.
     pub m: Option<f64>,
     pub s: State,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum PointRepr {
+    Tuple(i64, Option<f64>, State),
+    Object { t: i64, #[serde(default)] m: Option<f64>, s: State },
+}
+
+impl From<PointRepr> for Point {
+    fn from(r: PointRepr) -> Point {
+        match r {
+            PointRepr::Tuple(t, m, s) | PointRepr::Object { t, m, s } => Point { t, m, s },
+        }
+    }
+}
+impl From<Point> for (i64, Option<f64>, State) {
+    fn from(p: Point) -> (i64, Option<f64>, State) {
+        (p.t, p.m, p.s)
+    }
 }
 
 /// One delay period: open while `solved_ms` is `None`.
@@ -146,7 +169,8 @@ pub struct Tracker {
 /// How long the built-in store keeps a solved period, a silence, a day file (Storage board:
 /// "Kept 90 days").
 pub const KEEP_MS: i64 = 90 * 86_400_000;
-/// How long a device's recent points are kept in the tracker (a month of graph).
+/// How long a device's recent points are kept in the tracker: a month, so the 30-day pages'
+/// medians, maxima and graph are measured over the whole range, not part of it.
 pub const RECENT_MS: i64 = 31 * 86_400_000;
 /// A device not seen for this long is forgotten: it is no longer "silent", it is gone.
 pub const FORGET_MS: i64 = 7 * 86_400_000;
@@ -490,6 +514,15 @@ mod tests {
         assert_eq!(a.silences_ended.len(), 1);
         assert_eq!(a.silences_ended[0].burst_minutes, Some(90.0));
         assert_eq!(a.silences_ended[0].to_ms, Some(6 * H));
+    }
+
+    #[test]
+    fn points_are_written_compact_and_both_forms_read() {
+        let p = Point { t: 1_000, m: Some(94.0), s: State::Critical };
+        assert_eq!(serde_json::to_string(&p).unwrap(), "[1000,94.0,\"critical\"]");
+        assert_eq!(serde_json::from_str::<Point>("[1000,94.0,\"critical\"]").unwrap(), p);
+        assert_eq!(serde_json::from_str::<Point>("{\"t\":1000,\"m\":94.0,\"s\":\"critical\"}").unwrap(), p);
+        assert_eq!(serde_json::from_str::<Point>("{\"t\":5,\"s\":\"silent\"}").unwrap(), Point { t: 5, m: None, s: State::Silent });
     }
 
     #[test]

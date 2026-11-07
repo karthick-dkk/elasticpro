@@ -242,7 +242,7 @@ pub fn build(i: &Inputs<'_>) -> Result<Built, String> {
     let fleet = summary::fleet(i.clusters, i.range, i.now, i.every_hours, super::MAX_DEVICES);
     let rows = device_rows(i);
     let last_day = i.range.to.min(time::local_date(i.now));
-    let trackers: Vec<&super::state::Tracker> = i.clusters.iter().map(|c| &c.tracker).collect();
+    let trackers: Vec<&super::state::Tracker> = i.clusters.iter().map(|c| c.tracker.as_ref()).collect();
     let windows = summary::windows(&trackers, last_day, i.every_hours, i.now);
     let mut top: Vec<&DeviceRow> = rows.iter().filter(|r| r.state.late()).collect();
     top.sort_by(|a, b| b.now_minutes.partial_cmp(&a.now_minutes).unwrap_or(std::cmp::Ordering::Equal));
@@ -614,7 +614,7 @@ mod tests {
         let (f, to) = time::day_bounds(time::local_date(now));
         let mut daily = BTreeMap::new();
         daily.insert(key.clone(), crate::logdelay::state::daily(&t, &key, f, to, now));
-        ClusterInput { id: "prod".into(), name: "Production".into(), tracker: t, daily, levels: l }
+        ClusterInput { id: "prod".into(), name: "Production".into(), tracker: std::sync::Arc::new(t), daily, levels: l }
     }
 
     #[test]

@@ -13,12 +13,13 @@ use chrono::NaiveDate;
 use serde::Serialize;
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
-/// One cluster's inputs.
+/// One cluster's inputs. The tracker is the store's cached copy.
 pub struct ClusterInput {
     pub id: String,
     pub name: String,
-    pub tracker: Tracker,
+    pub tracker: Arc<Tracker>,
     pub daily: BTreeMap<String, Daily>,
     pub levels: Levels,
 }
@@ -256,7 +257,7 @@ pub fn reduced(trackers: &[&Tracker], now: i64, hours: &[i64]) -> Vec<Value> {
 /// The fleet summary (Main board).
 pub fn fleet(clusters: &[ClusterInput], r: &Range, now: i64, every_hours: u64, max_devices: usize) -> Value {
     let refs: Vec<&ClusterInput> = clusters.iter().collect();
-    let trackers: Vec<&Tracker> = clusters.iter().map(|c| &c.tracker).collect();
+    let trackers: Vec<&Tracker> = clusters.iter().map(|c| c.tracker.as_ref()).collect();
     let mut all = Totals::default();
     let mut per_cluster = vec![];
     let mut rows: Vec<DeviceRow> = vec![];
@@ -323,7 +324,7 @@ pub fn cluster(c: &ClusterInput, r: &Range, now: i64, every_hours: u64, fields: 
         "started": eps.iter().filter(|e| e.started_ms >= r.from_ms && e.started_ms < r.to_ms).count(),
         "solved": eps.iter().filter(|e| e.solved_ms.is_some_and(|s| s >= r.from_ms && s < r.to_ms)).count(),
         "medianNow": percentile(&mut nows, 0.5), "medianPrevious": percentile(&mut prev_medians, 0.5),
-        "windows": windows(&[&c.tracker], today, every_hours, now),
+        "windows": windows(&[c.tracker.as_ref()], today, every_hours, now),
         "days": days(&[c], r),
         "devices": rows,
     })
@@ -450,7 +451,7 @@ mod tests {
         let mut daily = BTreeMap::new();
         let today = time::local_day_key(now);
         daily.insert(today.clone(), super::super::state::daily(&t, &today, time::day_bounds(time::local_date(now)).0, time::day_bounds(time::local_date(now)).1, now));
-        ClusterInput { id: "prod".into(), name: "Production".into(), tracker: t, daily, levels: l }
+        ClusterInput { id: "prod".into(), name: "Production".into(), tracker: Arc::new(t), daily, levels: l }
     }
 
     #[test]

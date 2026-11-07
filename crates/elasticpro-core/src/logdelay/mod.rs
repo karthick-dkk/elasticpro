@@ -220,7 +220,7 @@ impl Core {
     pub(crate) fn logdelay_apply(&self, cluster: &str, readings: Vec<Reading>, run_ms: i64, levels: &Levels, s: &Settings)
         -> Result<(Applied, Daily, Tracker), String> {
         let st = self.logdelay_store().ok_or("no data directory")?;
-        let mut t = st.read_tracker(cluster);
+        let mut t = (*st.read_tracker(cluster)).clone();
         let applied = t.apply(run_ms, readings, levels, (s.silent_after_hours as i64) * 3_600_000);
         st.write_tracker(cluster, &t)?;
         let day = time::local_date(run_ms);
@@ -419,8 +419,10 @@ impl Core {
                 let Some(id) = msg.get("clusterId").and_then(Value::as_str).filter(|s| !s.is_empty()) else { return bad("bad_request", "clusterId is required") };
                 let Some(dev) = msg.get("device").and_then(Value::as_str).filter(|s| !s.is_empty()) else { return bad("bad_request", "device is required") };
                 let r = match Self::logdelay_range(msg, now, 30) { Ok(r) => r, Err(e) => return bad("bad_request", e) };
-                let inputs = self.logdelay_inputs(caller, Some(&[id.to_string()])).await;
-                let Some(c) = inputs.first() else { return bad("not_found", format!("no cluster {id:?}")) };
+                // One read of the caller's clusters: this one's device, and every one's line in
+                // the "Delay by cluster" panel (trackers come from the store's parsed copies).
+                let all = self.logdelay_inputs(caller, None).await;
+                let Some(c) = all.iter().find(|x| x.id == id) else { return bad("not_found", format!("no cluster {id:?}")) };
                 let fr = Range::last_days(now, 7);
                 let findings = self.logdelay_findings(&[id.to_string()], &fr, now, every);
                 let mine = fixes::per_device(&findings).remove(&(id.to_string(), dev.to_string()));
@@ -428,7 +430,6 @@ impl Core {
                     return bad("not_found", format!("no device {dev:?} measured on {id:?} (the store keeps 90 days; a device not seen for a week is forgotten)"));
                 };
                 // The "Delay by cluster" panel: every visible cluster's late devices per day.
-                let all = self.logdelay_inputs(caller, None).await;
                 v["clusters"] = json!(all.iter().map(|x| {
                     let t = summary::totals(x);
                     let spark = summary::sparkline(x, &r);
@@ -510,14 +511,14 @@ impl Core {
             let fields = self.logdelay_fields(&c.id, &s).await;
             resolved.push(json!({ "id": c.id, "name": c.name.clone().unwrap_or_else(|| c.id.clone()), "levels": levels, "levelsFrom": from, "fields": fields }));
         }
-        let store_bytes = self.logdelay_store().map(|st| st.size_bytes());
+        let sizes = self.logdelay_store().map(|st| st.sizes()).unwrap_or_default();
         let cfg: SinkConfig = self.delay_sink_config();
         json!({
             "ok": true, "supported": self.edition().schedules(),
             "settings": s, "resolved": resolved,
             "schedule": { "enabled": cfg.enabled, "everyHours": cfg.every_hours, "destination": cfg.destination, "clusters": cfg.clusters,
                           "maxDevices": cfg.max_devices, "state": self.delay_sink_state_json(), "blocked": self.delay_sink_blocked_now() },
-            "builtinStore": { "keepDays": 90, "bytes": store_bytes, "dir": store::DIR },
+            "builtinStore": { "keepDays": 90, "bytes": sizes.bytes, "sizes": sizes, "recentDays": state::RECENT_MS / 86_400_000, "dir": store::DIR },
             "extrasDefault": EXTRAS_DEFAULT,
             "uiCopy": "ui/js/core/log-delay.js DEFAULT_THRESHOLDS/thresholds()/classify(): to be removed, read `levels` here instead",
         })
