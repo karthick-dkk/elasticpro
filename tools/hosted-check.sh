@@ -458,8 +458,8 @@ echo "$BK1" | python3 -c 'import json,sys;print(json.dumps({"type":"BACKUP_PREVI
 check "the right one previews"                  "$(cookie --data-binary "@$BKF" | python3 -c 'import json,sys;d=json.load(sys.stdin);print(d.get("ok"),d.get("credentials",{}).get("state"))')" "True opened"
 # Settings files only: the session store, the health samples and the activity log move on their own,
 # and so do the files the minute timers own (the history-store queue retrying the alert queued above,
-# its spool, a cluster's volume state). A slow sealed preview on CI is wide enough to catch a tick.
-check "and a preview writes nothing"            "$(find "$D5" -type f -newer "$MARK" \( -name '*.json' -o -path '*/backups/*' -o -path '*/config-history/*' \) ! -name sessions.json ! -name history-store-queue.json ! -path '*/history-store-spool/*' ! -path '*/volume/*/state.json' ! -path '*/health/*' ! -path '*/worker/*' ! -path '*/cache/*' | wc -l | tr -d ' ')" "0"
+# its spool, a cluster's volume state, the log delay store its run keeps). A slow sealed preview on CI is wide enough to catch a tick.
+check "and a preview writes nothing"            "$(find "$D5" -type f -newer "$MARK" \( -name '*.json' -o -path '*/backups/*' -o -path '*/config-history/*' \) ! -name sessions.json ! -name history-store-queue.json ! -path '*/history-store-spool/*' ! -path '*/volume/*/state.json' ! -path '*/logdelay/*' ! -path '*/health/*' ! -path '*/worker/*' ! -path '*/cache/*' | wc -l | tr -d ' ')" "0"
 echo "$BK1" | python3 -c 'import json,sys;print(json.dumps({"type":"BACKUP_RESTORE","mode":"merge","sections":["clusters"],"password":sys.argv[1],"file":json.load(sys.stdin)["file"]}))' hosted-check-backup-pw >"$BKF"
 RS=$(cookie --data-binary "@$BKF")
 check "a restore answers ok"                    "$(echo "$RS" | field ok)" "True"

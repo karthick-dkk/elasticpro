@@ -285,7 +285,7 @@ pub fn fleet(clusters: &[ClusterInput], r: &Range, now: i64, every_hours: u64, m
         rows.extend(crows);
     }
     per_cluster.sort_by(|a, b| b["latePct"].as_f64().unwrap_or(0.0).partial_cmp(&a["latePct"].as_f64().unwrap_or(0.0)).unwrap_or(std::cmp::Ordering::Equal));
-    rows.sort_by(|a, b| b.late_ms.cmp(&a.late_ms));
+    rows.sort_by_key(|r| std::cmp::Reverse(r.late_ms));
     let truncated = rows.len() > max_devices;
     rows.truncate(max_devices);
     let eps: Vec<Episode> = trackers.iter().flat_map(|t| t.all_episodes()).collect();
