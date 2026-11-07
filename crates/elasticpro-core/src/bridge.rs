@@ -5428,9 +5428,10 @@ impl Core {
         }
         match t {
             "DELAY_SINK_GET" => {
-                let s = self.delay_sink.read();
-                json!({ "ok": true, "supported": true, "config": s.config, "state": s.state,
-                        "blocked": self.delay_sink_blocker(&s.config), "historyStore": self.history_for_delay() })
+                let config = self.delay_sink.read().config.clone();
+                // A limited admin reads the state with errors naming others' clusters hidden.
+                json!({ "ok": true, "supported": true, "config": config, "state": self.delay_sink_state_for(caller),
+                        "blocked": self.delay_sink_blocked_for(caller), "historyStore": self.history_for_delay() })
             }
             "DELAY_SINK_SET" => {
                 let incoming = msg.get("config").cloned().unwrap_or(Value::Null);
@@ -5452,10 +5453,11 @@ impl Core {
             _ => {
                 // DELAY_SINK_RUN: the operator pressing it is what makes this one legible
                 // — it is the same work the timer does, at a moment somebody chose.
-                let out = self.run_delay_sink().await;
-                let s = self.delay_sink.read();
-                let mut out = out;
-                out["state"] = serde_json::to_value(&s.state).unwrap_or(Value::Null);
+                let mut out = self.run_delay_sink().await;
+                out["state"] = self.delay_sink_state_for(caller);
+                if let (Some(visible), Some(e)) = (self.visible_ids(caller), out["error"].as_str()) {
+                    out["error"] = json!(crate::logdelay::error_as_seen(e, &visible));
+                }
                 out
             }
         }

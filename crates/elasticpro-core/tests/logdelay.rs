@@ -357,3 +357,59 @@ async fn a_limited_admin_sees_only_their_clusters_in_the_settings_and_the_summar
                             Some(Caller { name: "x".into(), role: Role::User, must_change: false, scope: Some(vec!["ES one".into()]), play: None })).await;
     assert_eq!(other["kind"], json!("not_found"), "a cluster outside the scope does not exist for the caller: {other}");
 }
+
+#[tokio::test]
+async fn a_run_error_naming_a_cluster_outside_a_limited_admins_view_is_not_shown_to_them() {
+    use elasticpro_core::auth::{Caller, Role};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let dir = TempDir::new("logdelay-lasterror");
+    // Each cluster's search fails while its switch is on.
+    let serve = |fail: Arc<AtomicBool>| TestServer::with(move |hit| {
+        if hit.path.contains("/_search") {
+            return if fail.load(Ordering::SeqCst) { (500, r#"{"error":"boom"}"#.into()) } else { (200, devices(2.0).to_string()) };
+        }
+        (200, r#"{"cluster_name":"test","status":"green"}"#.into())
+    });
+    let (two_fails, three_fails) = (Arc::new(AtomicBool::new(false)), Arc::new(AtomicBool::new(true)));
+    let (s1, s2, s3) = (serve(Arc::new(AtomicBool::new(false))).await, serve(two_fails.clone()).await, serve(three_fails.clone()).await);
+    let c = Core::new_with_rounds(Some(dir.0.clone()), Edition::Hosted, 1);
+    let root = Caller { name: "root".into(), role: Role::Admin, must_change: false, scope: None, play: None };
+    let p = c.handle_as(json!({ "type": "PRIME", "readOnly": true, "clusters": [
+        { "id": "one", "name": "One", "url": s1.url(), "zabbixGroups": ["ES one"] },
+        { "id": "two", "name": "Two", "url": s2.url(), "zabbixGroups": ["ES two"] },
+        { "id": "three", "name": "Three", "url": s3.url(), "zabbixGroups": ["ES three"] } ] }), Some(root.clone())).await;
+    assert_eq!(p["ok"], json!(true), "{p}");
+    let sched = c.handle_as(json!({ "type": "DELAY_SINK_SET", "config": { "enabled": true, "destination": "builtin", "clusters": ["one", "two", "three"] } }), Some(root.clone())).await;
+    assert_eq!(sched["ok"], json!(true), "{sched}");
+    let run = c.handle_as(json!({ "type": "DELAY_SINK_RUN" }), Some(root.clone())).await;
+    assert_eq!(run["failed"], json!(1), "{run}");
+
+    // An admin who sees every cluster reads the error as it is.
+    let whole = c.handle_as(json!({ "type": "LOGDELAY_SETTINGS_GET" }), Some(root.clone())).await;
+    let e = whole["schedule"]["state"]["lastError"].as_str().unwrap_or_default().to_string();
+    assert!(e.starts_with("three: "), "{whole}");
+    let sum = c.handle_as(json!({ "type": "LOGDELAY_SUMMARY" }), Some(root.clone())).await;
+    assert_eq!(sum["schedule"]["state"]["lastError"], json!(e), "{sum}");
+
+    // An admin limited to two of the three clusters does not see the third one's name.
+    let limited = Caller { name: "zadmin@zabbix".into(), role: Role::Admin, must_change: false,
+                           scope: Some(vec!["ES one".into(), "ES two".into()]), play: None };
+    let g = c.handle_as(json!({ "type": "LOGDELAY_SETTINGS_GET" }), Some(limited.clone())).await;
+    assert_eq!(g["resolved"].as_array().unwrap().len(), 2, "{g}");
+    let shown = g["schedule"]["state"]["lastError"].as_str().unwrap_or_default();
+    assert!(!shown.contains("three") && shown.contains("outside your view"), "{g}");
+    assert_eq!(g["schedule"]["state"]["lastOk"], json!(false), "still a failed run, not a fine one: {g}");
+    let sum = c.handle_as(json!({ "type": "LOGDELAY_SUMMARY" }), Some(limited.clone())).await;
+    let shown = sum["schedule"]["state"]["lastError"].as_str().unwrap_or_default();
+    assert!(!shown.contains("three") && shown.contains("outside your view"), "{sum}");
+    let get = c.handle_as(json!({ "type": "DELAY_SINK_GET" }), Some(limited.clone())).await;
+    assert!(!get["state"]["lastError"].as_str().unwrap_or_default().contains("three"), "{get}");
+
+    // A failure on a cluster the limited admin sees is theirs to read.
+    three_fails.store(false, Ordering::SeqCst);
+    two_fails.store(true, Ordering::SeqCst);
+    let run = c.handle_as(json!({ "type": "DELAY_SINK_RUN" }), Some(root.clone())).await;
+    assert_eq!(run["failed"], json!(1), "{run}");
+    let g = c.handle_as(json!({ "type": "LOGDELAY_SETTINGS_GET" }), Some(limited)).await;
+    assert!(g["schedule"]["state"]["lastError"].as_str().unwrap_or_default().starts_with("two: "), "{g}");
+}
