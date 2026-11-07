@@ -33,6 +33,8 @@
  * Checking the base name instead of this one is the mistake that makes a preflight pass
  * and the query that follows return nothing.
  */
+import { statusFor, levelsOf } from './delay-levels.js';
+
 const IP_LIKE = /(^|[._])(ip|addr|address)([._]|$)/i;
 const ALREADY_KEYWORD = /\.keyword$/;
 const LITERAL = new Set(['ClientID']);
@@ -144,32 +146,15 @@ export async function preflight(client, cluster) {
 
 /* ------------------------------- classification ------------------------------- */
 
-/** Defaults from the tool this is ported from; overridable per cluster. */
-export const DEFAULT_THRESHOLDS = {
-  delayMinutes: 30,
-  criticalMinutes: 60,
-  tzToleranceMinutes: 3,
-  veryLongMinutes: 24 * 60,
-};
-
-export function thresholds(cluster) {
-  const t = (cluster && cluster.delayThresholds) || {};
-  return {
-    delayMinutes: num(t.delayMinutes, DEFAULT_THRESHOLDS.delayMinutes),
-    criticalMinutes: num(t.criticalMinutes, DEFAULT_THRESHOLDS.criticalMinutes),
-    tzToleranceMinutes: num(t.tzToleranceMinutes, DEFAULT_THRESHOLDS.tzToleranceMinutes),
-    veryLongMinutes: num(t.veryLongMinutes, DEFAULT_THRESHOLDS.veryLongMinutes),
-  };
-}
-const num = (v, d) => (typeof v === 'number' && isFinite(v) ? v : d);
-
 /**
- * What a delay means.
+ * What a delay means is the core's: its levels per cluster (docs/LOGDELAY.md "Levels"), read
+ * by core/delay-levels.js and never kept here. `levels` below is always such a set —
+ * {noDelayUnder, delayFrom, criticalOver} — from levelsOf(clusterId), or Play's own watch
+ * rules on the wall. A cluster whose levels the core has not said is UNKNOWN, never OK.
  *
- * Order matters. A negative delay is not a small delay — it is a device whose clock is
- * ahead of real time, which is a different fault with a different fix, so it is tested
- * before the "is it big" questions. A delay that cannot be computed at all is ERROR, and
- * a device that sent nothing is NO_DATA; neither is zero.
+ * Order matters (delay-levels.js levelState): clock ahead is tested first, critical is strictly
+ * above the critical line (exactly 60 min is still delayed), a delay that cannot be computed
+ * is ERROR and a device that sent nothing is NO_DATA; neither is zero.
  */
 export const STATUS = {
   OK: { label: 'ok', cls: 'green' },
@@ -178,17 +163,11 @@ export const STATUS = {
   CLOCK_AHEAD: { label: 'clock ahead', cls: 'orange' },
   ERROR: { label: 'error', cls: 'grey' },
   NO_DATA: { label: 'no data', cls: 'grey' },
+  UNKNOWN: { label: 'levels unknown', cls: 'grey' },
 };
 
-export function classify(delayMinutes, t = DEFAULT_THRESHOLDS) {
-  if (delayMinutes === null || delayMinutes === undefined || !isFinite(delayMinutes)) return 'ERROR';
-  if (delayMinutes <= -t.delayMinutes) return 'CLOCK_AHEAD';
-  // Red is strictly above the critical line: exactly 60 min is still yellow (the owner's rule,
-  // 2026-10-31: under 30 green, 30 to 60 yellow, over 60 red), here and on Play alike.
-  if (delayMinutes > t.criticalMinutes) return 'CRITICAL';
-  if (delayMinutes >= t.delayMinutes) return 'DELAYED';
-  return 'OK';
-}
+/** The shape of a delay, not its size: how close to a whole hour, and what counts as very long. */
+export const PATTERN = Object.freeze({ tzToleranceMinutes: 3, veryLongMinutes: 24 * 60 });
 
 /** Why it is in that state, in the words an operator would use. */
 export function reasonFor(status, trend = 'NO_TREND') {
@@ -251,7 +230,7 @@ export function trend(series, minChangePct = 20) {
  * its clock or its parser in the wrong zone, and telling someone to tune their forwarder
  * would send them to fix the wrong thing.
  */
-export function analysePattern(delayMinutes, t = DEFAULT_THRESHOLDS) {
+export function analysePattern(delayMinutes, t = PATTERN) {
   if (delayMinutes === null || delayMinutes === undefined || !isFinite(delayMinutes)) {
     return { pattern: '-', note: '' };
   }
@@ -282,7 +261,7 @@ export function analysePattern(delayMinutes, t = DEFAULT_THRESHOLDS) {
  * A document missing either timestamp yields a null delay and ERROR — never a zero, which
  * would sort as healthy and read as measured.
  */
-export function recordFrom(bucket, resolved, t = DEFAULT_THRESHOLDS) {
+export function recordFrom(bucket, resolved, levels = null) {
   const hit = ((((bucket || {}).latest || {}).hits || {}).hits || [])[0];
   const src = (hit && hit._source) || {};
   const arrival = Date.parse(dotted(src, resolved.arrival));
@@ -290,8 +269,8 @@ export function recordFrom(bucket, resolved, t = DEFAULT_THRESHOLDS) {
 
   const ok = isFinite(arrival) && isFinite(event);
   const delayMinutes = ok ? (arrival - event) / 60000 : null;
-  const status = classify(delayMinutes, t);
-  const { pattern, note } = analysePattern(delayMinutes, t);
+  const status = statusFor(delayMinutes, levels);
+  const { pattern, note } = analysePattern(delayMinutes);
 
   return {
     device: bucket.key,
@@ -345,7 +324,7 @@ export function buildSearchBody(resolved, { from, to, size = 500 } = {}) {
 
 /* ------------------------------ the late list ------------------------------ */
 
-/** The statuses that put a device on the late list: at or past the yellow line (classify). */
+/** The statuses that put a device on the late list: at or past the yellow line (statusFor). */
 export const LATE_STATUSES = new Set(['DELAYED', 'CRITICAL']);
 /** The most devices one re-check may name (the measurement's own terms size; auth.rs DELAY_LATE_MAX). */
 export const LATE_MAX = 500;
@@ -363,12 +342,13 @@ export function recheckable(name) {
 }
 
 /**
- * The late list: the devices of a measurement at or past the yellow line (`classify` on `t`,
- * the one definition), worst first, at most LATE_MAX — the names a re-check asks about.
+ * The late list: the devices of a measurement at or past the yellow line (`statusFor` on
+ * `levels`, the one definition), worst first, at most LATE_MAX — the names a re-check asks about.
+ * Unknown levels name no device.
  */
-export function lateList(records, t = DEFAULT_THRESHOLDS) {
+export function lateList(records, levels) {
   return (records || [])
-    .filter((r) => r && LATE_STATUSES.has(classify(r.delayMinutes, t)) && recheckable(r.device))
+    .filter((r) => r && LATE_STATUSES.has(statusFor(r.delayMinutes, levels)) && recheckable(r.device))
     .sort((a, b) => b.delayMinutes - a.delayMinutes)
     .slice(0, LATE_MAX)
     .map((r) => String(r.device));
@@ -389,10 +369,10 @@ export function buildLateSearchBody(resolved, devices, opts = {}) {
  * The late devices of one cluster, measured again in one request. Returns the fresh records
  * of the devices that answered; one that sent nothing in the window is not in it.
  */
-export async function measureLate(esClient, cluster, pre, devices, hours = 24) {
+export async function measureLate(esClient, cluster, pre, devices, hours = 24, levels = levelsOf(cluster.id)) {
   const names = (devices || []).filter(recheckable).slice(0, LATE_MAX);
   if (!names.length) return { records: [] };
-  const t = thresholds(cluster);
+  const t = levels;
   const body = buildLateSearchBody(pre.resolved, names, { from: `now-${hours}h`, to: 'now', size: 500 });
   const res = await esClient.search(cluster.logIndexPattern || 'logstash-*', body,
     { qs: 'ignore_unavailable=true&allow_no_indices=true', timeoutMs: 60000 });
@@ -413,14 +393,17 @@ export async function measureLate(esClient, cluster, pre, devices, hours = 24) {
  */
 export const DELAY_ITEMS = [
   { key: 'devices', label: 'Devices measured', units: '', value: (s) => s.devices },
-  { key: 'late', label: 'Devices late (delayed + critical)', units: '', value: (s) => (s.by.DELAYED || 0) + (s.by.CRITICAL || 0) },
-  { key: 'delayed', label: 'Devices delayed', units: '', value: (s) => s.by.DELAYED || 0 },
-  { key: 'critical', label: 'Devices critical', units: '', value: (s) => s.by.CRITICAL || 0 },
-  { key: 'clock_ahead', label: 'Devices with clock ahead', units: '', value: (s) => s.by.CLOCK_AHEAD || 0 },
+  // A count that needs the levels is unknown — not sent — while any device's levels are (UNKNOWN).
+  { key: 'late', label: 'Devices late (delayed + critical)', units: '', value: (s) => levelled(s, (s.by.DELAYED || 0) + (s.by.CRITICAL || 0)) },
+  { key: 'delayed', label: 'Devices delayed', units: '', value: (s) => levelled(s, s.by.DELAYED || 0) },
+  { key: 'critical', label: 'Devices critical', units: '', value: (s) => levelled(s, s.by.CRITICAL || 0) },
+  { key: 'clock_ahead', label: 'Devices with clock ahead', units: '', value: (s) => levelled(s, s.by.CLOCK_AHEAD || 0) },
   { key: 'median', label: 'Median delay', units: 's', value: (s) => (s.median === null || s.median === undefined ? null : Math.round(s.median * 60)) },
   { key: 'worst', label: 'Worst delay', units: 's',
     value: (s) => (s.worst && s.worst.delayMinutes !== null && s.worst.delayMinutes !== undefined ? Math.round(s.worst.delayMinutes * 60) : null) },
 ];
+
+function levelled(s, n) { return s.by.UNKNOWN ? null : n; }
 
 /** `summarise()` output → `[{ key, value }]`, unknowns left out; plus the worst device's name. */
 export function delayItemValues(summary) {
@@ -435,8 +418,8 @@ export function delayItemValues(summary) {
  * so the page and the headless scraper (tools/elasticpro-scrape.mjs) ask the same question.
  * `pre` is what `preflight` resolved for this cluster.
  */
-export async function measureDelay(esClient, cluster, pre, hours = 24) {
-  const t = thresholds(cluster);
+export async function measureDelay(esClient, cluster, pre, hours = 24, levels = levelsOf(cluster.id)) {
+  const t = levels;
   const body = buildSearchBody(pre.resolved, { from: `now-${hours}h`, to: 'now', size: 500 });
   const res = await esClient.search(cluster.logIndexPattern || 'logstash-*', body,
     { qs: 'ignore_unavailable=true&allow_no_indices=true', timeoutMs: 60000 });
@@ -450,7 +433,7 @@ export async function measureDelay(esClient, cluster, pre, hours = 24) {
 }
 
 export function summarise(records) {
-  const by = { OK: 0, DELAYED: 0, CRITICAL: 0, CLOCK_AHEAD: 0, ERROR: 0, NO_DATA: 0 };
+  const by = { OK: 0, DELAYED: 0, CRITICAL: 0, CLOCK_AHEAD: 0, ERROR: 0, NO_DATA: 0, UNKNOWN: 0 };
   let worst = null;
   for (const r of records) {
     by[r.status] = (by[r.status] || 0) + 1;
@@ -588,7 +571,7 @@ export function buildDeviceQuery(resolved, { device, size = 15, fields = null } 
  * still listed — it is evidence, and dropping it would make the list look cleaner than
  * the data is. It is the aggregate figures that exclude it, never the row.
  */
-export function documentDelays(hits, resolved, t = DEFAULT_THRESHOLDS) {
+export function documentDelays(hits, resolved, levels = null) {
   return (hits || []).map((hit) => {
     const src = (hit && hit._source) || {};
     const arrival = Date.parse(dotted(src, resolved.arrival));
@@ -601,7 +584,7 @@ export function documentDelays(hits, resolved, t = DEFAULT_THRESHOLDS) {
       arrival: isFinite(arrival) ? arrival : null,
       event: isFinite(event) ? event : null,
       delayMinutes,
-      status: classify(delayMinutes, t),
+      status: statusFor(delayMinutes, levels),
       meta: Object.fromEntries((resolved.metadata || []).map((m) => {
         const plain = String(m).replace(/\.keyword$/, '');
         return [plain, dotted(src, plain) ?? dotted(src, m) ?? ''];
@@ -618,13 +601,13 @@ export function documentDelays(hits, resolved, t = DEFAULT_THRESHOLDS) {
  * one place and OK in the other. `trend` needs four measurable samples and says
  * NO_TREND below that rather than guessing from two.
  */
-export function deviceSnapshot(docs, t = DEFAULT_THRESHOLDS) {
+export function deviceSnapshot(docs, levels = null) {
   const measurable = (docs || []).filter((d) => d.delayMinutes !== null);
   const unreadable = (docs || []).length - measurable.length;
   if (!measurable.length) {
     return {
       documents: (docs || []).length, measurable: 0, unreadable,
-      latest: null, status: classify(null, t), trend: 'NO_TREND',
+      latest: null, status: statusFor(null, levels), trend: 'NO_TREND',
       min: null, max: null, median: null,
     };
   }
@@ -636,7 +619,7 @@ export function deviceSnapshot(docs, t = DEFAULT_THRESHOLDS) {
     measurable: measurable.length,
     unreadable,
     latest: values[0],
-    status: classify(values[0], t),
+    status: statusFor(values[0], levels),
     // Oldest to newest, which is the direction trend() reads.
     trend: trend([...values].reverse()),
     min: sorted[0],

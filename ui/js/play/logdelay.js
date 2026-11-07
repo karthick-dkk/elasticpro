@@ -15,7 +15,8 @@
  */
 
 import { h } from '../lib/dom.js';
-import { classify, summarise, STATUS } from '../core/log-delay.js';
+import { summarise, STATUS } from '../core/log-delay.js';
+import { statusFor } from '../core/delay-levels.js';
 import { kpi, unknown, minutes, fitRows, clockText } from './parts.js';
 import { tierLine } from './measure.js';
 
@@ -27,7 +28,7 @@ export const DATASETS = [];
  * The class a cluster's row in "Top 10 clusters by delay" takes: it blinks when its median
  * delay is red — classify's CRITICAL, over the red line (60 min unless Config › Play moves it).
  */
-export const delayRowBlink = (median, t) => (median !== null && median !== undefined && classify(median, t) === 'CRITICAL' ? '.blink-crit' : '');
+export const delayRowBlink = (median, t) => (median !== null && median !== undefined && statusFor(median, t) === 'CRITICAL' ? '.blink-crit' : '');
 
 const measured = (ctx) => ctx.clusters.filter((c) => { const x = ctx.delay.get(c.id); return x && x.records; });
 export const isEmpty = (ctx) => !measured(ctx).length;
@@ -36,7 +37,7 @@ export const isEmpty = (ctx) => !measured(ctx).length;
 export function fleetRecords(ctx) {
   const out = [];
   for (const c of measured(ctx)) {
-    for (const r of ctx.delay.get(c.id).records) out.push({ ...r, status: classify(r.delayMinutes, ctx.delayT), cluster: c.name, clusterId: c.id });
+    for (const r of ctx.delay.get(c.id).records) out.push({ ...r, status: statusFor(r.delayMinutes, ctx.delayT), cluster: c.name, clusterId: c.id });
   }
   return out;
 }
@@ -61,7 +62,7 @@ export function render(ctx) {
     .sort((a, b) => (b.sum.median ?? -Infinity) - (a.sum.median ?? -Infinity)).slice(0, 10);
   const clRows = per.map(({ c, sum }) => h(`tr${delayRowBlink(sum.median, ctx.delayT)}`,
     h('td', c.name),
-    h(`td.num.${sum.median === null ? 'grey' : tone(classify(sum.median, ctx.delayT))}`, sum.median === null ? unknown('–') : minutes(sum.median)),
+    h(`td.num.${sum.median === null ? 'grey' : tone(statusFor(sum.median, ctx.delayT))}`, sum.median === null ? unknown('–') : minutes(sum.median)),
     h('td.num', String((sum.by.DELAYED || 0) + (sum.by.CRITICAL || 0)))));
   const devBox = h('div.pl-half', h('div.pl-ahead', 'Top 10 devices by delay'),
     h('table.pl-tbl', h('thead', h('tr', h('th', 'Device'), h('th', 'Cluster'), h('th.num', 'Delay'), h('th.num', 'Last event'),
@@ -80,6 +81,6 @@ export function render(ctx) {
       kpi(`Over ${t.delayRedAboveMin} min`, String(s.by.CRITICAL || 0), null, s.by.CRITICAL ? 'red' : ''),
       kpi('Worst device', s.worst && s.worst.delayMinutes !== null ? minutes(s.worst.delayMinutes) : unknown('none'),
         s.worst && s.worst.delayMinutes !== null ? `${s.worst.device} · ${s.worst.cluster}` : null,
-        s.worst ? tone(classify(s.worst.delayMinutes, ctx.delayT)) : '')),
+        s.worst ? tone(statusFor(s.worst.delayMinutes, ctx.delayT)) : '')),
     h('div.pl-split', devBox, clBox));
 }

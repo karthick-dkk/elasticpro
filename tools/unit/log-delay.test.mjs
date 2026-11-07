@@ -6,35 +6,72 @@ import { pathToFileURL } from 'node:url';
 
 const ROOT = path.resolve(import.meta.dirname, '../..');
 const ld = await import(pathToFileURL(path.join(ROOT, 'ui/js/core/log-delay.js')).href);
-const T = ld.DEFAULT_THRESHOLDS;
+const lv = await import(pathToFileURL(path.join(ROOT, 'ui/js/core/delay-levels.js')).href);
+// The core's shipped levels (docs/LOGDELAY.md), as LOGDELAY_SETTINGS_GET reports them: test data, not a UI copy.
+const T = { noDelayUnder: 15, delayFrom: 30, criticalOver: 60 };
+const classify = lv.statusFor;
 
 test('classify: the ordinary bands', () => {
-  assert.equal(ld.classify(0, T), 'OK');
-  assert.equal(ld.classify(29.9, T), 'OK');
-  assert.equal(ld.classify(30, T), 'DELAYED', 'the threshold itself is delayed');
-  assert.equal(ld.classify(59.9, T), 'DELAYED');
-  assert.equal(ld.classify(60, T), 'DELAYED', 'exactly 60 min is still yellow (30 to 60 inclusive)');
-  assert.equal(ld.classify(60.1, T), 'CRITICAL', 'over 60 min is red');
-  assert.equal(ld.classify(6000, T), 'CRITICAL');
+  assert.equal(classify(0, T), 'OK');
+  assert.equal(classify(29.9, T), 'OK');
+  assert.equal(classify(30, T), 'DELAYED', 'the threshold itself is delayed');
+  assert.equal(classify(59.9, T), 'DELAYED');
+  assert.equal(classify(60, T), 'DELAYED', 'exactly 60 min is still yellow (30 to 60 inclusive)');
+  assert.equal(classify(60.1, T), 'CRITICAL', 'over 60 min is red');
+  assert.equal(classify(6000, T), 'CRITICAL');
 });
 
 test('classify: a negative delay is a clock, not a small delay', () => {
-  assert.equal(ld.classify(-5, T), 'OK', 'a little early is still fine');
-  assert.equal(ld.classify(-30, T), 'CLOCK_AHEAD');
-  assert.equal(ld.classify(-120, T), 'CLOCK_AHEAD', 'a big negative must never read as CRITICAL');
+  assert.equal(classify(-5, T), 'OK', 'a little early is still fine');
+  assert.equal(classify(-30, T), 'CLOCK_AHEAD');
+  assert.equal(classify(-120, T), 'CLOCK_AHEAD', 'a big negative must never read as CRITICAL');
 });
 
 test('classify: unmeasurable is ERROR, never zero', () => {
   for (const v of [null, undefined, NaN, Infinity, 'x']) {
-    assert.equal(ld.classify(v, T), 'ERROR', `${String(v)} should be ERROR`);
+    assert.equal(classify(v, T), 'ERROR', `${String(v)} should be ERROR`);
   }
 });
 
+test('classify: levels the core has not said are unknown, never on time', () => {
+  assert.equal(classify(5, null), 'UNKNOWN');
+  assert.equal(classify(90, undefined), 'UNKNOWN');
+  assert.equal(classify(90, { delayFrom: 30 }), 'UNKNOWN', 'an incomplete set is not a set');
+  const sum = ld.summarise([{ delayMinutes: 90, status: classify(90, null) }]);
+  const items = Object.fromEntries(ld.delayItemValues(sum).map((v) => [v.key, v.value]));
+  assert.equal(items.late, undefined, 'late is not sent while the levels are unknown');
+  assert.equal(items.devices, 1);
+});
+
+test('classify: the core states, and the Logs page names for them', () => {
+  assert.equal(lv.levelState(10, T), 'no_delay');
+  assert.equal(lv.levelState(15, T), 'little', 'noDelayUnder itself is a little delay');
+  assert.equal(lv.levelState(29.9, T), 'little');
+  assert.equal(lv.levelState(30, T), 'delay');
+  assert.equal(lv.levelState(60, T), 'delay');
+  assert.equal(lv.levelState(60.1, T), 'critical');
+  assert.equal(lv.levelState(-30, T), 'clock_ahead');
+  assert.equal(lv.levelState(null, T), 'unmeasured');
+  assert.equal(classify(20, T), 'OK', 'little delay is on time on the Logs page');
+});
+
+test('levels: remembered from what the core says, per cluster', () => {
+  lv.forgetLevels();
+  assert.equal(lv.levelsOf('a'), null);
+  lv.rememberLevels({ ok: true, byCluster: [{ id: 'a', levels: { noDelayUnder: 10, delayFrom: 20, criticalOver: 40 } }, { id: 'b', levels: null }] });
+  assert.deepEqual(lv.levelsOf('a'), { noDelayUnder: 10, delayFrom: 20, criticalOver: 40 });
+  assert.equal(lv.levelsOf('b'), null, 'no levels said: none kept');
+  lv.rememberLevels({ ok: true, resolved: [{ id: 'b', levels: T }], settings: { levels: T } });
+  assert.deepEqual(lv.levelsOf('b'), T);
+  assert.deepEqual(lv.fleetLevels(), T);
+  lv.forgetLevels();
+});
+
 test('classify: thresholds are per cluster', () => {
-  const strict = { ...T, delayMinutes: 5, criticalMinutes: 10 };
-  assert.equal(ld.classify(6, strict), 'DELAYED');
-  assert.equal(ld.classify(11, strict), 'CRITICAL');
-  assert.equal(ld.classify(6, T), 'OK', 'the same value is fine under the default');
+  const strict = { noDelayUnder: 5, delayFrom: 5, criticalOver: 10 };
+  assert.equal(classify(6, strict), 'DELAYED');
+  assert.equal(classify(11, strict), 'CRITICAL');
+  assert.equal(classify(6, T), 'OK', 'the same value is fine under the default');
 });
 
 test('trend: needs enough samples to mean anything', () => {
@@ -56,27 +93,27 @@ test('trend: a flat near-zero series is not a 400% rise', () => {
 });
 
 test('pattern: a whole-hour offset is a timezone, not a queue', () => {
-  const p = ld.analysePattern(60, T);
+  const p = ld.analysePattern(60);
   assert.equal(p.pattern, 'timezone');
   assert.match(p.note, /1h behind/);
-  assert.equal(ld.analysePattern(300, T).pattern, 'timezone', '5h exactly');
-  assert.equal(ld.analysePattern(-120, T).pattern, 'timezone', 'ahead counts too');
-  assert.match(ld.analysePattern(-120, T).note, /ahead/);
+  assert.equal(ld.analysePattern(300).pattern, 'timezone', '5h exactly');
+  assert.equal(ld.analysePattern(-120).pattern, 'timezone', 'ahead counts too');
+  assert.match(ld.analysePattern(-120).note, /ahead/);
 });
 
 test('pattern: near a whole hour counts, away from it does not', () => {
-  assert.equal(ld.analysePattern(62, T).pattern, 'timezone', 'within tolerance');
-  assert.equal(ld.analysePattern(75, T).pattern, '-', '15 min off the hour is a queue');
-  assert.equal(ld.analysePattern(330, T).pattern, '-', '5h30 is not an offset');
+  assert.equal(ld.analysePattern(62).pattern, 'timezone', 'within tolerance');
+  assert.equal(ld.analysePattern(75).pattern, '-', '15 min off the hour is a queue');
+  assert.equal(ld.analysePattern(330).pattern, '-', '5h30 is not an offset');
 });
 
 test('pattern: under an hour is never a timezone', () => {
-  assert.equal(ld.analysePattern(2, T).pattern, '-');
-  assert.equal(ld.analysePattern(0, T).pattern, '-');
+  assert.equal(ld.analysePattern(2).pattern, '-');
+  assert.equal(ld.analysePattern(0).pattern, '-');
 });
 
 test('pattern: unmeasurable has no pattern', () => {
-  assert.equal(ld.analysePattern(null, T).pattern, '-');
+  assert.equal(ld.analysePattern(null).pattern, '-');
 });
 
 test('aggregatableName: the rule the preflight depends on', () => {
@@ -245,7 +282,7 @@ test('a document whose clocks cannot be read is listed, not dropped', () => {
   const docs = ld.documentDelays([
     hit('2026-09-19T12:41:00Z', '2026-09-19T12:00:00Z'),
     hit('2026-09-19T12:30:00Z', 'not a date'),
-  ], R);
+  ], R, T);
   assert.equal(docs.length, 2, 'the unreadable document is evidence, not noise');
   assert.equal(docs[0].delayMinutes, 41);
   assert.equal(docs[1].delayMinutes, null);
@@ -260,7 +297,7 @@ test('the close-up takes its status from the newest document', () => {
     hit('2026-09-19T12:45:00Z', '2026-09-19T12:00:00Z'),   // 45 — delayed
     hit('2026-09-19T12:40:00Z', '2026-09-19T12:39:00Z'),   // 1
     hit('2026-09-19T12:35:00Z', '2026-09-19T12:34:00Z'),   // 1
-  ], R));
+  ], R, T), T);
   assert.equal(s.latest, 45);
   assert.equal(s.status, 'DELAYED');
   assert.equal(s.median, 1);
@@ -275,7 +312,7 @@ test('unreadable documents are counted but never averaged in', () => {
     hit('2026-09-19T12:41:00Z', '2026-09-19T12:00:00Z'),
     hit('2026-09-19T12:30:00Z', ''),
     hit('2026-09-19T12:20:00Z', ''),
-  ], R));
+  ], R, T), T);
   assert.equal(s.documents, 3);
   assert.equal(s.measurable, 1);
   assert.equal(s.unreadable, 2);
@@ -283,7 +320,7 @@ test('unreadable documents are counted but never averaged in', () => {
 });
 
 test('a device with nothing readable is unknown, not fine', () => {
-  const s = ld.deviceSnapshot(ld.documentDelays([hit('nope', 'nope')], R));
+  const s = ld.deviceSnapshot(ld.documentDelays([hit('nope', 'nope')], R, T), T);
   assert.equal(s.latest, null);
   assert.equal(s.median, null);
   assert.equal(s.status, 'ERROR');
@@ -291,7 +328,7 @@ test('a device with nothing readable is unknown, not fine', () => {
 });
 
 test('a device with no documents at all is not a zero delay', () => {
-  const s = ld.deviceSnapshot([]);
+  const s = ld.deviceSnapshot([], T);
   assert.equal(s.documents, 0);
   assert.equal(s.latest, null);
   assert.equal(s.status, 'ERROR');
@@ -304,6 +341,6 @@ test('the trend reads oldest to newest, not the order the query returned', () =>
     hit('2026-09-19T12:55:00Z', '2026-09-19T12:00:00Z'),  // 55
     hit('2026-09-19T12:20:00Z', '2026-09-19T12:15:00Z'),  // 5
     hit('2026-09-19T12:10:00Z', '2026-09-19T12:08:00Z'),  // 2
-  ], R));
+  ], R, T), T);
   assert.equal(rising.trend, 'WORSENING', `a climbing delay read as ${rising.trend}`);
 });

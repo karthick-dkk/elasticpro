@@ -25,7 +25,8 @@ import { isSnapshotMode } from '../core/snapshot.js';
 import { runBounded } from '../core/fleet.js';
 import { volumeReport } from '../core/volume.js';
 import { volumeDaily } from '../core/volume-daily.js';
-import { classify, summarise, DEFAULT_THRESHOLDS } from '../core/log-delay.js';
+import { summarise } from '../core/log-delay.js';
+import { statusFor, loadLevels } from '../core/delay-levels.js';
 import { healthState } from '../core/state.js';
 import { playState, readPlayState, defaultPlayState, shareGet, zoomSet } from '../play/api.js';
 import { loadAcks, isAcked, acksOnServer } from '../core/acks.js';
@@ -124,19 +125,20 @@ function zoomBy(dir) {
 /** The clusters this display shows: every one the shell has, less the ones Config › Play excludes. */
 const visible = () => clusters().filter((c) => !ps.excluded.has(c.id));
 
+/** Play's own levels, from its watch rules (Config › Play): yellow from, red above. No "little" band on the wall. */
 function delayT() {
-  return { ...DEFAULT_THRESHOLDS, delayMinutes: ps.watch.delayYellowFromMin, criticalMinutes: ps.watch.delayRedAboveMin };
+  return { noDelayUnder: ps.watch.delayYellowFromMin, delayFrom: ps.watch.delayYellowFromMin, criticalOver: ps.watch.delayRedAboveMin };
 }
 
 /** The cluster's measurement with its summary on Play's thresholds, kept while neither changes. */
 function delayOf(id, t) {
   const m = measurer && measurer.get(id);
   if (!m) return null;
-  const key = `${m.measuredAt}|${t.delayMinutes}|${t.criticalMinutes}|${m.error || ''}`;
+  const key = `${m.measuredAt}|${t.delayFrom}|${t.criticalOver}|${m.error || ''}`;
   const hit = delayMemo.get(id);
   if (hit && hit.key === key && hit.src === m) return hit.v;
   const v = m.records
-    ? { ...m, summary: summarise(m.records.map((r) => ({ ...r, status: classify(r.delayMinutes, t) }))) }
+    ? { ...m, summary: summarise(m.records.map((r) => ({ ...r, status: statusFor(r.delayMinutes, t) }))) }
     : { ...m, summary: null, records: null };
   delayMemo.set(id, { key, src: m, v });
   return v;
@@ -573,6 +575,8 @@ export function render(el) {
   engine = createEngine({ order: orderOf(), now: Date.now(), isEmpty: isEmptySlide, dwellFor });
   take = null;
   openedAt = Date.now();
+  // The clusters' own levels (the core's) decide each cluster's delay alert; the wall's late list is on its watch rules.
+  loadLevels();
   measurer = createMeasurer({
     clusters: visible,
     client: (id) => client(id),
@@ -580,7 +584,7 @@ export function render(el) {
     now: serverNow,
     onChange: () => { if (host && host.isConnected) draw(); },
     // The late list is decided on the wall's own yellow line (Config › Play).
-    thresholds: () => delayT(),
+    levels: () => delayT(),
   });
   listen(document, 'keydown', onKeyDown);
   offFs = fullscreen().subscribe(paintFs);

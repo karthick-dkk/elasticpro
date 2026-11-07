@@ -35,7 +35,8 @@ const Al = await import(url('ui/js/play/alerts.js'));
 const Sp = await import(url('ui/js/play/spotlight.js'));
 const Ld = await import(url('ui/js/play/logdelay.js'));
 const V = await import(url('ui/js/play/volume.js'));
-const { DEFAULT_THRESHOLDS } = await import(url('ui/js/core/log-delay.js'));
+// The core's shipped levels as LOGDELAY_SETTINGS_GET reports them (test data; the UI keeps none).
+const DEFAULT_THRESHOLDS = { noDelayUnder: 15, delayFrom: 30, criticalOver: 60 };
 
 /* ------------------------------- the levels themselves ------------------------------- */
 

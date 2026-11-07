@@ -248,7 +248,8 @@ test('the Reports CSVs carry event_logsize and leave unmeasured cells empty', ()
 /* ------------------------------------ route, band ------------------------------------ */
 
 test('the route: #/reports/<section>, Overview by default, #/volume is an alias', () => {
-  assert.deepEqual(R.REPORT_SECTIONS.map((s) => s.label), ['Overview', 'Daily & monthly', 'Volume by host', 'Capacity & retention', 'Measure size', 'Planning', 'Exports & schedules']);
+  assert.deepEqual(R.REPORT_SECTIONS.map((s) => s.label), ['Overview', 'Daily & monthly', 'Volume by host', 'Capacity & retention', 'Measure size', 'Planning', 'Log delay', 'Exports & schedules']);
+  assert.equal(R.sectionOfHash('#/reports/log-delay/device/a/b'), 'log-delay', 'a Log delay view is the Log delay section');
   assert.equal(R.sectionOfHash('#/reports'), 'overview');
   assert.equal(R.sectionOfHash('#/reports/capacity'), 'capacity');
   assert.equal(R.sectionOfHash('#/volume'), 'overview');

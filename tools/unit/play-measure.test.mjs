@@ -41,7 +41,7 @@ const url = (p) => pathToFileURL(path.join(ROOT, p)).href;
 const M = await import(url('ui/js/play/measure.js'));
 const L = await import(url('ui/js/core/log-delay.js'));
 
-const T = { ...L.DEFAULT_THRESHOLDS };   // yellow 30, red above 60
+const T = { noDelayUnder: 30, delayFrom: 30, criticalOver: 60 };   // yellow 30, red above 60 (levels, as the core says them)
 const MIN = 60000;
 const rec = (device, delayMinutes) => ({ device, delayMinutes, arrival: 1, event: 1, docs: 1 });
 
@@ -74,7 +74,7 @@ test('the late list is classify\'s yellow line and above, worst first — one de
   const recs = [rec('ok', 29.9), rec('yellow', 30), rec('edge', 60), rec('red', 61), rec('ahead', -45), rec('unknown', null), rec('wild*', 90)];
   assert.deepEqual(L.lateList(recs, T), ['red', 'edge', 'yellow'],
     'at 30 min a device is late; ahead of time, unmeasured and an unaskable name are not');
-  assert.deepEqual(L.lateList(recs, { ...T, delayMinutes: 10 }), ['red', 'edge', 'yellow', 'ok'], 'on the wall\'s own yellow line');
+  assert.deepEqual(L.lateList(recs, { ...T, noDelayUnder: 10, delayFrom: 10 }), ['red', 'edge', 'yellow', 'ok'], 'on the wall\'s own yellow line');
   assert.equal(L.lateList(Array.from({ length: 600 }, (_, i) => rec(`d${i}`, 40)), T).length, L.LATE_MAX);
   assert.ok(L.recheckable('fe80::1') && L.recheckable('edge router 7'));
   assert.ok(!L.recheckable('') && !L.recheckable('a?b') && !L.recheckable('x'.repeat(257)) && !L.recheckable('a\u0007b'));
@@ -156,7 +156,7 @@ test('a display measures on the two tiers, shares both times, and asks only what
   };
   const c = { id: 'c1', name: 'one', logIndexPattern: 'logs-*', delayFields: { device: 'src_hostname', eventTime: ['event.created'] } };
   const m = M.createMeasurer({ clusters: () => [c], client: () => es, reachable: () => true, now: () => now, onChange: () => {},
-    schedule: () => ({ fullMs: 120 * MIN, lateMs: 15 * MIN }), thresholds: () => T });
+    schedule: () => ({ fullMs: 120 * MIN, lateMs: 15 * MIN }), levels: () => T });
   await m.cycle();
   assert.deepEqual(searches, ['full']);
   assert.deepEqual(m.get('c1').late, ['fw3', 'fw1']);
@@ -173,7 +173,7 @@ test('a display measures on the two tiers, shares both times, and asks only what
   // Another display reads the shared record and measures nothing: one display measures.
   const other = [];
   const m2 = M.createMeasurer({ clusters: () => [c], client: () => ({ ...es, search: async () => { other.push(1); return {}; } }), reachable: () => true,
-    now: () => now, onChange: () => {}, schedule: () => ({ fullMs: 120 * MIN, lateMs: 15 * MIN }), thresholds: () => T });
+    now: () => now, onChange: () => {}, schedule: () => ({ fullMs: 120 * MIN, lateMs: 15 * MIN }), levels: () => T });
   await m2.cycle();
   assert.deepEqual(other, [], 'the shared record was fresh');
   assert.deepEqual([m2.get('c1').fullAt, m2.get('c1').lateAt, m2.get('c1').late], [now - 15 * MIN, now, ['fw3']]);

@@ -144,6 +144,7 @@ const { state, setConfig, fetchOverview, fetchIndices, activeClusters } =
 const { runAutomation, resultsFor, activeRules } = await import(path.join(UI, 'core/automation.js'));
 const { client, alerts, setDelaySummary, delaySummaryFor } = await import(path.join(UI, 'core/state.js'));
 const { preflight, measureDelay, summarise, delayItemValues } = await import(path.join(UI, 'core/log-delay.js'));
+const { loadLevels } = await import(path.join(UI, 'core/delay-levels.js'));
 const { zabbixAlertsToSend, zabbixAlertsCleared, alertHostsToClear, ZABBIX_ALERT_RULES } = await import(path.join(UI, 'core/zabbix-alerts.js'));
 const { volumeReport, clientPlanValues, measureRepoBytes } = await import(path.join(UI, 'core/volume.js'));
 
@@ -214,6 +215,9 @@ for (const c of activeClusters()) {
 // Only a measurement taken in this run is sent to Zabbix — resending the last one every
 // minute would put fifteen copies of one reading into its history.
 const measuredNow = new Set();
+// What late means is the core's levels (docs/LOGDELAY.md): asked once per run; unanswered, the
+// late counts are not sent (unknown), never 0.
+let levelsAsked = false;
 for (const c of activeClusters()) {
   const data = state.data.get(c.id) || {};
   const last = delaySummaryFor(c.id);
@@ -221,6 +225,7 @@ for (const c of activeClusters()) {
   try {
     const pre = await preflight(client(c.id), c);
     if (!pre.ok || pre.unknown) continue;
+    if (!levelsAsked) { levelsAsked = true; await loadLevels(); }
     const r = await measureDelay(client(c.id), c, pre, 24);
     const sum = summarise(r.records);
     // Only what the alert reads is kept; the device list stays in the app.

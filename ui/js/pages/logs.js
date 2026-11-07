@@ -13,7 +13,8 @@ import { timeHistogram, histogramEmptyText } from '../lib/charts.js';
 import { card, empty, pill, table, figure } from './common.js';
 import { preflight, measureDelay, summarise, delayCoverage,
          buildDeviceQuery, documentDelays, deviceSnapshot, looksLikeIp,
-         thresholds, STATUS } from '../core/log-delay.js';
+         STATUS } from '../core/log-delay.js';
+import { levelsOf, loadLevels } from '../core/delay-levels.js';
 import { runBounded, cancellation, partialNote } from '../core/fleet.js';
 import { reportSheets, reportFilename } from '../core/delay-report.js';
 import { navigateTo } from '../core/intent.js';
@@ -391,6 +392,9 @@ function analysable() {
 async function fetchDelay() {
   const targets = analysable();
   if (!targets.length || delay.fetching) return;
+  // What late means is the core's (LOGDELAY_SETTINGS_GET / _SUMMARY levels): asked before the
+  // records are classified, kept for a few minutes. Unanswered, a device reads "levels unknown".
+  await loadLevels();
   const token = cancellation();
   delay.token = token;
   delay.fetching = true;
@@ -654,9 +658,9 @@ async function pollWatch() {
     });
     const res = await client(c.id).search(c.logIndexPattern || 'logstash-*', body,
       { qs: 'ignore_unavailable=true&allow_no_indices=true', timeoutMs: 30000 });
-    const docs = documentDelays(((res.hits || {}).hits) || [], entry.pre.resolved, thresholds(c));
+    const docs = documentDelays(((res.hits || {}).hits) || [], entry.pre.resolved, levelsOf(c.id));
     w.docs = docs;
-    w.snap = deviceSnapshot(docs, thresholds(c));
+    w.snap = deviceSnapshot(docs, levelsOf(c.id));
     w.total = ((res.hits || {}).total || {}).value ?? null;
     w.error = null;
     w.at = Date.now();

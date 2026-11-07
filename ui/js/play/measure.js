@@ -23,7 +23,8 @@
  * cluster's own thresholds.
  */
 
-import { preflight, measureDelay, measureLate, lateList, summarise, classify, thresholds } from '../core/log-delay.js';
+import { preflight, measureDelay, measureLate, lateList, summarise } from '../core/log-delay.js';
+import { statusFor, levelsOf } from '../core/delay-levels.js';
 import { setDelaySummary, fleetPolicy } from '../core/state.js';
 import { runBounded, cancellation } from '../core/fleet.js';
 import { shareGet, sharePut } from './api.js';
@@ -164,8 +165,8 @@ export function tierLine(recs, clock) {
  * @param o.reachable   (id) → whether to try it now
  * @param o.now         () → the server's clock
  * @param o.onChange    () → something new to draw
- * @param o.thresholds  (cluster) → the yellow and red lines the late list is decided on
- *                       (Play's watch rules); the cluster's own when not given
+ * @param o.levels      (cluster) → the levels {noDelayUnder, delayFrom, criticalOver} the late list is
+ *                       decided on (Play's watch rules); the core's for the cluster when not given
  * @param o.schedule    () → {fullMs, lateMs}; the request policy's (scheduleFrom) when not given
  */
 export function createMeasurer(o) {
@@ -178,7 +179,7 @@ export function createMeasurer(o) {
   let token = null;
   let running = false;
   const sched = () => (o.schedule ? o.schedule() : scheduleFrom(fleetPolicy()));
-  const lateT = (c) => (o.thresholds ? o.thresholds(c) : thresholds(c));
+  const lateT = (c) => (o.levels ? o.levels(c) : levelsOf(c.id));
 
   /** A record set as the rest of the app reads it, and the cluster's alert from it. */
   function adopt(c, rec, source) {
@@ -188,9 +189,9 @@ export function createMeasurer(o) {
     const late = Array.isArray(rec.late) ? rec.late : lateList(records, lateT(c));
     byCluster.set(c.id, { measuredAt: rec.measuredAt, fullAt: rec.fullAt || rec.measuredAt, lateAt: rec.lateAt || 0, late,
       records, truncated: rec.truncated || 0, error: null, source });
-    // As the Logs page does with its own: the cluster's thresholds decide its alert.
-    const t = thresholds(c);
-    setDelaySummary(c.id, summarise(records.map((r) => ({ ...r, status: classify(r.delayMinutes, t) }))), rec.measuredAt);
+    // As the Logs page does with its own: the cluster's levels (the core's) decide its alert.
+    const t = levelsOf(c.id);
+    setDelaySummary(c.id, summarise(records.map((r) => ({ ...r, status: statusFor(r.delayMinutes, t) }))), rec.measuredAt);
     return true;
   }
 
