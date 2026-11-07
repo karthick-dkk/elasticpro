@@ -382,12 +382,22 @@ await go('overview');
     const strip = det.querySelector('.cl-strip');
     const labels = strip ? [...strip.querySelectorAll('.cl-box-k')].map(txt) : [];
     ok(JSON.stringify(labels) === JSON.stringify(['Cluster health', 'Endpoint', 'Jump host', 'Log bucket (S3)']), `expanded row: the strip's boxes are ${labels.join(' | ')}`);
-    ok(!!strip && !!strip.querySelector('a.cl-report') && /Report/.test(txt(strip.querySelector('a.cl-report'))), 'expanded row: no Report button at the end of the strip');
+    // 2026-11-07: the Report button left the strip; each box is its label and value on one line.
+    ok(!!strip && !strip.querySelector('a.cl-report') && ![...strip.querySelectorAll('a, button')].some((a) => /^Report/.test(txt(a))), 'expanded row: the Report button is back in the strip');
+    ok(!!strip && [...strip.querySelectorAll('.cl-box')].every((b) => b.firstElementChild && b.firstElementChild.classList.contains('cl-box-k') && b.children.length === 2), 'expanded row: a strip box is not "label value"');
     ok(/None \(direct\)/.test(txt(strip || det)), 'expanded row: a directly reached cluster does not say "None (direct)" as its Jump host');
     const cards = [...det.querySelectorAll('.cl-card')].map((c) => c.getAttribute('data-tile'));
     ok(JSON.stringify(cards) === JSON.stringify(['shards', 'ilm', 'slm', 'activity']), `expanded row: the cards are ${cards.join(', ')}`);
     ok(!det.querySelector('.cl-tile'), 'expanded row: the old tiles are still drawn');
-    ok([...det.querySelectorAll('.cl-card svg.cl-donut')].length === 2, 'expanded row: the Shard allocation and ILM cards are not donuts');
+    ok(!!det.querySelector('.cl-card[data-tile="shards"] svg.cl-donut'), 'expanded row: the Shard allocation card is not a donut');
+    // ILM: a donut when Elasticsearch said which policy each log index has — as the mock does (its
+    // _settings answer names each index's uuid and policy, every log index managed, one in error).
+    // The grey "Not known" (unread) and the red "No policy" (confirmed) cards are drawn and checked
+    // in tools/unit/lifecycle-errors.test.mjs; here: the known case is neither of them.
+    const ilmC = det.querySelector('.cl-card[data-tile="ilm"]');
+    const ilmPill = ilmC && ilmC.querySelector('.cl-card-pill');
+    ok(!!ilmC && !!ilmC.querySelector('svg.cl-donut'), `expanded row: the ILM card is not a donut although the mock says which policy each index has: "${ilmC && txt(ilmC)}"`);
+    ok(!!ilmPill && !/^(Not known|No policy)$/.test(txt(ilmPill)), `expanded row: the ILM pill says "${ilmPill && txt(ilmPill)}" for a cluster whose log indices are all managed`);
     const shardHead = det.querySelector('.cl-card[data-tile="shards"] .cl-dhead');
     ok(!!shardHead && /\d+(\.\d)?%\s*active/.test(txt(shardHead)), `expanded row: the shard headline is "${shardHead && txt(shardHead)}", not "NN.N% active" beside the ring`);
     const bk = det.querySelector('.cl-card[data-tile="slm"]');
@@ -431,7 +441,10 @@ await go('overview');
     ok(!heads.includes('Tier'), 'expanded row: the Tier column is back');
     ok(heads.indexOf('Free size') === heads.indexOf('Disk') + 1, `expanded row: Free size does not follow Disk: ${heads.join(' | ')}`);
     ok(det.querySelectorAll('[data-section="nodes"] tbody tr.cl-data').length > 0, 'expanded row: no data node row is tinted');
-    ok(/Data node/.test(txt(det.querySelector('[data-section="nodes"] .cl-sec-h') || det)), 'expanded row: the Nodes header has no "Data node" key');
+    // 2026-11-07: no "Data node" legend, and a data node shows one plain "data" chip (tiers in its tooltip).
+    ok(!/Data node/.test(txt(det.querySelector('[data-section="nodes"] .cl-sec-h') || det)) && !det.querySelector('.cl-key'), 'expanded row: the "Data node" key is back in the Nodes header');
+    const chips = [...det.querySelectorAll('[data-section="nodes"] .cl-role')].map(txt);
+    ok(chips.includes('data') && !chips.some((t) => /^data[:_]|hot·|·warm/.test(t)), `expanded row: the Roles column lists data tiers: ${chips.join(', ')}`);
     const nodeLinks = [...det.querySelectorAll('[data-section="nodes"] .cl-sec-h a')].map(txt);
     ok(JSON.stringify(nodeLinks) === JSON.stringify(['Nodes & shards ›']), `expanded row: the Nodes header links are ${nodeLinks.join(', ')}`);
     ok(/Data covered/.test(txt(det.querySelector('[data-section="repo"]') || det)), 'expanded row: the repositories table has no "Data covered" column');

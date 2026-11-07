@@ -39,15 +39,23 @@ test('a data node is one with data or any data_* role', () => {
   assert.equal(B.isDataNode([]), false, 'coordinating-only holds no data');
 });
 
-test('role chips: three or more data roles fold into one chip; the rest is counted', () => {
+test('role chips: every data role is one plain "data" chip, tiers only in its tooltip; the rest is counted', () => {
   assert.deepEqual(B.roleChips([]).chips.map((c) => c.label), ['coordinating']);
   const one = B.roleChips(['master']);
   assert.deepEqual([one.chips.map((c) => c.label), one.more], [['master'], []]);
   const hot = B.roleChips(['data_hot', 'data_content', 'ingest']);
-  assert.deepEqual(hot.chips.map((c) => c.label), ['data_hot', 'data_content', 'ingest'], 'two data roles stay separate');
+  assert.deepEqual(hot.chips.map((c) => c.label), ['data', 'ingest'], 'two data roles are one data chip');
+  assert.equal(hot.chips[0].kind, 'other', 'plain: no tier colour');
+  assert.equal(hot.chips[0].title, 'Data tiers: hot, content');
   const all = B.roleChips(['master', 'data_hot', 'data_warm', 'data_cold', 'data_frozen', 'data_content', 'ingest', 'ml', 'transform', 'remote_cluster_client']);
-  assert.deepEqual(all.chips.map((c) => c.label), ['master', 'data: hot·warm·cold·frozen·content', 'ingest']);
+  assert.deepEqual(all.chips.map((c) => c.label), ['master', 'data', 'ingest']);
+  assert.ok(!all.chips.some((c) => /hot|warm|cold|frozen|·/.test(c.label)), 'no tier is listed on a chip');
+  assert.equal(all.chips[1].title, 'Data tiers: hot, warm, cold, frozen, content');
+  assert.deepEqual(all.chips[1].roles, ['data_hot', 'data_warm', 'data_cold', 'data_frozen', 'data_content']);
   assert.deepEqual(all.more, ['ml', 'transform', 'remote_cluster_client'], '+3 and the names for the tooltip');
+  const plain = B.roleChips(['data', 'master']);
+  assert.deepEqual([plain.chips.map((c) => c.label), plain.chips[0].title], [['data', 'master'], 'data (every tier)']);
+  assert.equal(B.roleChips(['data', 'data_hot']).chips[0].title, 'Data tiers: hot (and the generic data role)');
 });
 
 test('the nodes header: counts, master-eligible, data with tiers, the elected master', () => {
@@ -130,13 +138,32 @@ test('ILM card: managed / error / no policy, the pill and when the Indices link 
   const err = B.ilmCard(ilmData(all, { 'logstash-2': { step: 'ERROR' } }), 'logstash-*');
   assert.deepEqual([err.pill, err.managed, err.parts.map((p) => p.n), err.link], [{ tone: 'yellow', text: '1 error' }, 3, [2, 1, 0], false]);
   const none = B.ilmCard(ilmData({ 'logstash-1': null, 'logstash-2': null, 'logstash-3': null }), 'logstash-*');
-  assert.deepEqual([none.pill.text, none.managed, none.total, none.link, none.noPolicy.length], ['Logs not covered', 0, 3, true, 3]);
+  assert.deepEqual([none.state, none.pill, none.headline, none.managed, none.total, none.link, none.noPolicy.length],
+    ['none', { tone: 'red', text: 'No policy' }, 'No policy for logstash-*', 0, 3, true, 3], 'confirmed by Elasticsearch: No policy, red, with the link');
+  const some = B.ilmCard(ilmData({ 'logstash-1': 'p', 'logstash-2': null }), 'logstash-*');
+  assert.deepEqual([some.state, some.pill.text, some.headline, some.link], ['some', 'Logs not covered', undefined, true], 'partly covered keeps the donut');
   const both = B.ilmCard(ilmData({ 'logstash-1': 'p', 'logstash-2': null }, { 'logstash-1': { step: 'ERROR' } }), 'logstash-*');
   assert.equal(both.link, false, 'no link when a log index is in error (owner)');
   assert.equal(B.ilmCard(ilmData(all, {}, 'STOPPED'), 'logstash-*').pill.text, 'Stopped');
-  assert.equal(B.ilmCard({ ilm: { operation_mode: 'RUNNING' } }, 'logstash-*').known, false, 'which policy each index has is not known: no donut figures');
-  assert.equal(B.ilmCard({}, 'logstash-*').pill.text, 'Unknown');
-  assert.equal(B.ilmCard(ilmData({ 'other-1': 'p' }), 'logstash-*').pill.text, 'No log index');
+  // Unknown is not zero: an unread answer is "Not known" (grey), never "No policy"; the permission sentence is a tooltip.
+  const unread = B.ilmCard({ ilm: { operation_mode: 'RUNNING' } }, 'logstash-*');
+  assert.deepEqual([unread.known, unread.state, unread.pill.tone, unread.pill.text, unread.headline], [false, 'unknown', 'grey', 'Not known', 'Not known'],
+    'which policy each index has is not known: no donut figures, no "No policy"');
+  assert.match(unread.pill.title, /^Which policy each logstash-\* index has could not be read \(it needs view_index_metadata on logstash-\*\)\.$/);
+  assert.equal(unread.why, unread.pill.title);
+  assert.equal(B.ilmCard({ ilm: { operation_mode: 'STOPPED' } }, 'logstash-*').pill.text, 'Stopped', 'stopped is known even when the policies are not');
+  assert.equal(B.ilmCard({ ilm: { operation_mode: 'STOPPED' } }, 'logstash-*').headline, 'Not known');
+  assert.deepEqual([B.ilmCard({}, 'logstash-*').pill.text, B.ilmCard({}, 'logstash-*').pill.tone], ['Not known', 'grey']);
+  // No log index listed is not "none": _settings lists only what the account may see (a missing privilege answers {}).
+  for (const of of [{}, { 'other-1': 'p' }]) {
+    const c = B.ilmCard(ilmData(of), 'logstash-*');
+    assert.deepEqual([c.known, c.state, c.pill.tone, c.pill.text, c.headline], [false, 'unknown', 'grey', 'Not known', 'Not known'], JSON.stringify(of));
+    assert.match(c.pill.title, /^No open logstash-\* index was listed.*view_index_metadata on logstash-\*/);
+  }
+  // The latest ask failed: the earlier answer is kept but never shown as current.
+  const failed = B.ilmCard({ ...ilmData({ 'logstash-1': null }), ilmOfIndexFailed: true }, 'logstash-*');
+  assert.deepEqual([failed.state, failed.pill.text], ['unknown', 'Not known']);
+  assert.match(failed.why, /^The latest ask .* failed/);
 });
 
 const slmData = (policies, mode = 'RUNNING') => ({ slmStatus: { operation_mode: mode }, slm: policies });

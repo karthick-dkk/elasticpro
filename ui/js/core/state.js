@@ -542,7 +542,15 @@ export function buildClusterData(id, prev, raw) {
 
   out.clusterSettings = clusterSettings && clusterSettings.ok ? clusterSettings.value : prev.clusterSettings || null;
   out.appliedIlm = appliedIlm(ilmPolicies, ilmOfIndices) || prev.appliedIlm || null;
-  out.ilmOfIndex = ilmOfIndex(ilmOfIndices) || prev.ilmOfIndex || null;
+  // The last answer is kept (the page still has something to name), but when the latest ask
+  // failed, or answered something unusable, it is flagged: lifecycle-errors.js ilmPolicyState
+  // then says "Not known" rather than presenting the earlier answer as current. A fleet entry
+  // whose last fetch failed keeps its last good body marked `stale: 'error'` (fleetPairs); a
+  // dataset not fetched yet (`unknown`) is not a failure.
+  const ofNow = ilmOfIndex(ilmOfIndices);
+  out.ilmOfIndex = ofNow || prev.ilmOfIndex || null;
+  out.ilmOfIndexFailed = !!(out.ilmOfIndex && ilmOfIndices
+    && (ilmOfIndices.stale === 'error' || (!ofNow && !ilmOfIndices.unknown)));
   out.appliedSlm = appliedSlm(out.slm) || prev.appliedSlm || null;
 
   return out;

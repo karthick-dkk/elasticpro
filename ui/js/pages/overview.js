@@ -27,7 +27,7 @@ import { openClusterAlerts } from '../core/alert-goto.js';
 import { diskAgainstWatermarks } from '../core/disk-balance.js';
 // Why a cluster cannot be reached: one definition, shared with the Alerts page's unreachable lines.
 import { unreachableReason } from '../core/alert-groups.js';
-import { ilmErrorsOf, slmErrorsOf, ilmErrorTitle, slmErrorTitle, lifecycleView, logPatternOf } from '../core/lifecycle-errors.js';
+import { ilmErrorsOf, slmErrorsOf, ilmErrorTitle, slmErrorTitle, lifecycleView, logPatternOf, NOT_KNOWN } from '../core/lifecycle-errors.js';
 import { nodeFreeBytes, isDataNode, roleChips, nodesSummary, problemIndices, problemButtonText,
          unassignedByIndex, unassignedText, explainLine, reasonFor, donutSegments, shardCard, ilmCard, slmCard } from '../core/cluster-boxes.js';
 import { repoOverview } from '../core/snapshot-evidence.js';
@@ -69,7 +69,7 @@ export const SORTS = {
 /** The cluster's own log index pattern (logstash-* unless it says otherwise). */
 export const logPattern = (r) => logPatternOf(r.c, state.defaults);
 /** The pill's word, then red (not looking after the logs) ahead of green, then errors ahead of clean. */
-const lifecycleSortKey = (v, errs) => (v.word === 'Unknown' ? null : `${v.word}|${v.tone === 'red' ? 0 : v.tone === 'grey' ? 1 : 2}|${errs ? 0 : 1}`);
+const lifecycleSortKey = (v, errs) => (v.word === NOT_KNOWN ? null : `${v.word}|${v.tone === 'red' ? 0 : v.tone === 'grey' ? 1 : 2}|${errs ? 0 : 1}`);
 const known = (v) => (typeof v === 'number' && v >= 0 ? v : null);
 /** The sort keys that still mean something for a cluster that is not answering. */
 const DOWN_KEEPS = new Set(['name', 'health', 'alerts']);
@@ -1148,7 +1148,7 @@ function pageLink(text, page, payload, c, opts = {}) {
     onclick: (e) => { e.preventDefault(); if (opts.focus) setFocus(page, opts.focus); navigateTo(page, payload || null, { cluster: c.id }); } }, `${text} ›`);
 }
 
-/** One box of the strip: a small label over its value. */
+/** One box of the strip: its label and its value side by side, on one line. */
 const box = (id, label, ...body) => h('div.cl-box', { 'data-tile': id }, h('span.cl-box-k', label), h('span.cl-box-v', ...body));
 
 /* -- Cluster health: the pill, and the list of what is not green, on hover only -- */
@@ -1276,7 +1276,7 @@ function bucketBox(c) {
         onclick: async () => { if (zabbixKind ? await editClusterKind(c) : await openEditor(c)) draw(); } }, 'Set in Config ›')
     : null;
   return box('bucket', 'Log bucket (S3)',
-    k.ulm.bucket ? h('span.mono', { title: 'Enriched and raw logs share this bucket.' }, k.ulm.bucket)
+    k.ulm.bucket ? h('span.mono', { title: `${k.ulm.bucket}: enriched and raw logs share this bucket.` }, k.ulm.bucket)
       : h('span.muted', { title: 'Set it on the cluster: edit cluster → ULM S3 bucket' }, 'not set'),
     k.ulm.enabled ? h('span.pill.green.cl-ulm', 'ULM on') : null, edit);
 }
@@ -1302,7 +1302,7 @@ function donutBody(parts, figure, word, label) {
         h('i.cl-dot', { style: { background: SEG_COLOR[p.key] } }), h('span.cl-dn', p.label), h('span.mono.cl-dc', num(p.n))))));
 }
 
-const cardHead = (title, pill) => h('div.cl-card-h', title, pill ? h(`span.pill.${pill.tone === 'yellow' ? 'yellow' : pill.tone}.cl-card-pill`, pill.text) : null);
+const cardHead = (title, pill) => h('div.cl-card-h', title, pill ? h(`span.pill.${pill.tone === 'yellow' ? 'yellow' : pill.tone}.cl-card-pill`, { title: pill.title || null }, pill.text) : null);
 const card4 = (id, cls, ...kids) => h(`div.cl-card${cls ? `.${cls}` : ''}`, { 'data-tile': id }, ...kids);
 
 function shardsCard(d) {
@@ -1314,22 +1314,33 @@ function shardsCard(d) {
       `${num(n('active'))} active, ${num(n('init'))} initializing, ${num(n('unas'))} unassigned of ${num(s.total)} shards`));
 }
 
-function ilmCardOf(r) {
+/**
+ * The ILM card. Not known (grey, the permission sentence in its tooltip) and No policy (red,
+ * Elasticsearch confirmed it) are told apart by ONE definition, lifecycle-errors.js
+ * ilmPolicyState, which the summary's ILM cell reads too. Exported for tools/unit.
+ */
+export function ilmCardOf(r) {
   const { c, d } = r;
   const v = ilmCard(d, logPattern(r));
   if (!v.known) {
-    return card4('ilm', '', cardHead('ILM', v.pill), donutBody([], '–', 'managed', 'ILM coverage unknown'),
-      h('div.cl-card-note', { title: v.why }, v.why));
+    return card4('ilm', '', cardHead('ILM', v.pill),
+      h('div.cl-big.muted', { title: v.why }, v.headline));
   }
   const e = ilmErrorsOf(d, logPattern(r));
   const link = v.link ? pageLink('Indices without a policy', 'indices', null, c, { focus: { noPolicy: v.noPolicy }, title: v.noPolicy.slice(0, 8).join('\n') }) : null;
+  if (v.state === 'none') {
+    return card4('ilm', '', cardHead('ILM', v.pill),
+      h('div.cl-big.bad', { title: `${v.total} open ${v.logs} ${v.total === 1 ? 'index has' : 'indices have'} no ILM policy` }, 'No policy for ', h('span.mono', v.logs)),
+      link ? h('div.cl-card-links', link) : null);
+  }
   return card4('ilm', '', cardHead('ILM', v.pill),
     donutBody(v.parts, `${v.managed}/${v.total}`, 'managed', `${v.parts[0].n} managed without error, ${v.errors} in ILM error, ${v.noPolicy.length} without a policy, of ${v.total} log indices`),
     // Errors name themselves in the tooltip of the pill; no link then (owner, 2026-11-05).
     e.count ? null : link ? h('div.cl-card-links', link) : null);
 }
 
-function backupsCard(r) {
+/** The Backups (SLM) card. Exported for tools/unit. */
+export function backupsCard(r) {
   const { c, d } = r;
   const view = lifecycleView('SLM', d, logPattern(r), c);
   const v = slmCard(d, view, logPattern(r), clusterKind(c).ulm);
@@ -1356,8 +1367,8 @@ function backupsCard(r) {
   }
   if (v.kind === 'none') {
     return card4('slm', '', head,
+      // Only the headline (owner, 2026-11-07); a policy on any overlapping wildcard still counts (lifecycle-errors.js slmCoversPattern).
       h('div.cl-big.bad', 'No policy for ', h('span.mono', v.logs)),
-      h('div.cl-card-note', 'Checked as a wildcard: a policy on ', h('span.mono', 'logstash-*'), ', ', h('span.mono', 'logstash-2026*'), ' or a named logstash- index counts.'),
       noRepo ? h('div.cl-card-links', docLink(DOCS.repos, 'Register a repository')) : null);
   }
   return card4('slm', '', head,
@@ -1403,12 +1414,8 @@ function detail(r) {
       : h('span.muted', { title: 'Reached directly, no SSH tunnel' }, 'None (direct)')));
   }
   if (shown.has('bucket')) boxes.push(bucketBox(c));
-  // The Report button is the strip's own, not a box a person can hide: it is how Reports is reached from here.
-  const report = canOpenPage('reports')
-    ? h('a.cl-report', { href: '#/reports', title: 'Reports, this cluster chosen',
-        onclick: (e) => { e.preventDefault(); navigateTo('reports', { section: 'daily', cluster: c.id }, { cluster: c.id }); } }, 'Report ›')
-    : null;
-  if (boxes.length || report) root.append(h('div.cl-strip', ...boxes, report ? h('span.cl-strip-end', report) : null));
+  // One thin row of boxes, label beside value; no Report button at its end any more (owner, 2026-11-07).
+  if (boxes.length) root.append(h('div.cl-strip', ...boxes));
 
   const cards = [];
   if (shown.has('shards')) cards.push(shardsCard(d));
@@ -1550,8 +1557,8 @@ function nodesSection(c, d) {
       id: () => h('td.mono', { title: n.id || '' }, n.id ? String(n.id).slice(0, 8) : '–'),
       roles: () => {
         const rc = roleChips(roles);
-        return h('td', h('div.cl-roles', ...rc.chips.map((k) => (k.kind ? h(`span.cl-role.${k.kind}`, { title: k.roles.length > 1 ? k.roles.join(', ') : null }, k.label)
-          : k.roles.length ? roleChip(k.label) : h('span.cl-role.other', { title: 'node.roles: [] — coordinating-only' }, k.label))),
+        return h('td', h('div.cl-roles', ...rc.chips.map((k) => (!k.roles.length ? h('span.cl-role.other', { title: 'node.roles: [] — coordinating-only' }, k.label)
+          : k.kind ? h(`span.cl-role.${k.kind}`, { title: k.title }, k.label) : roleChip(k.label))),
         rc.more.length ? h('span.cl-role.other', { title: rc.more.join(', ') }, `+${rc.more.length}`) : null));
       },
       jdk: () => h('td.mono', n.jdk || '–'),
@@ -1571,7 +1578,6 @@ function nodesSection(c, d) {
   const summary = nodesSummary(lists, nodes.some((n) => String(n.master || '').trim() === '*'));
   return h('div.cl-sec', { 'data-section': 'nodes' },
     secHead('Nodes', summary,
-      h('span.cl-key', h('i.cl-key-sw'), 'Data node'),
       h('span.cl-sec-links', pageLink('Nodes & shards', 'shards', null, c))),
     table(cols.map((col) => ({ label: col.label, num: col.num, title: col.id === 'heap' ? HEAP_TITLE : null })), trs));
 }
