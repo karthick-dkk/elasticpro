@@ -124,6 +124,25 @@ export function resolveRoute(visible, pageId, tabId) {
   return { page: page.id, tab: tab.id };
 }
 
+/** Whether `visible` holds exactly the route asked for: the page, and the tab when one is named. */
+export function routeShown(visible, { page, tab }) {
+  const p = (visible || []).find((x) => x.id === page);
+  return !!p && (!tab || p.tabs.some((t) => t.id === tab));
+}
+
+/**
+ * The `needs` a route waits on before it can be shown: those of the tab named, or of every tab
+ * of the page when none is. A tab that `needs` an answer (PING for Backup, the sink, the history
+ * store) is not in `visible` until the answer lands, so a reload at `#/settings/system/backup`
+ * resolved to Defaults and rewrote the address before PING came back. The page keeps such a
+ * route aside while any of these is still being asked, and opens it when it appears.
+ */
+export function needsOf(pageId, tabId) {
+  const p = CFG_PAGES.find((x) => x.id === pageId);
+  if (!p) return [];
+  return [...new Set(p.tabs.filter((t) => !tabId || t.id === tabId).map((t) => t.needs).filter(Boolean))];
+}
+
 /** `{page, tab}` from what follows `#/settings/`, e.g. 'requests/policy'; also a legacy id ('volume'). */
 export function routeOfRest(rest) {
   const [a, b] = String(rest || '').split('?')[0].split('/').filter(Boolean);

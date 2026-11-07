@@ -37,6 +37,26 @@ test('an admin (or a build without accounts) sees every supported tab', () => {
     'requests:policy+centre', 'reports:fields+mail+templates', 'play:play', 'system:defaults+file']);
 });
 
+test('a route on a tab that waits on an answer: what it needs, and whether it is shown yet', () => {
+  // A reload at #/settings/system/backup arrives before PING has said the core takes backups:
+  // the tab is not visible yet, and the page keeps the route aside until the answer lands.
+  assert.deepEqual(N.needsOf('system', 'backup'), ['backup']);
+  assert.deepEqual(N.needsOf('system', 'file'), []);
+  assert.deepEqual(N.needsOf('data', ''), ['history', 'sink'], 'a page named without a tab waits on every tab\'s answer');
+  assert.deepEqual(N.needsOf('data', 'backend'), ['history']);
+  assert.deepEqual(N.needsOf('nope', 'zz'), []);
+  const before = N.visibleConfig('admin', { ...ALL, backup: false, history: false, sink: false });
+  const after = N.visibleConfig('admin', ALL);
+  assert.equal(N.routeShown(before, { page: 'system', tab: 'backup' }), false);
+  assert.equal(N.routeShown(after, { page: 'system', tab: 'backup' }), true);
+  assert.equal(N.routeShown(before, { page: 'data', tab: '' }), false, 'the Data page is not there until one of its tabs is');
+  assert.equal(N.routeShown(after, { page: 'data', tab: '' }), true);
+  assert.equal(N.routeShown(after, { page: 'system', tab: 'file' }), true);
+  assert.equal(N.routeShown(after, { page: 'system', tab: 'zz' }), false);
+  // Meanwhile the fallback is drawn, as before.
+  assert.deepEqual(N.resolveRoute(before, 'system', 'backup'), { page: 'system', tab: 'defaults' });
+});
+
 test('an operator sees Clusters, Automation and the Request Centre only', () => {
   assert.deepEqual(ids(N.visibleConfig('operator', ALL)), ['clusters:clusters', 'alerts:automation', 'requests:centre']);
 });
