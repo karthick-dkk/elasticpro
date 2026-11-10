@@ -701,6 +701,26 @@ impl Core {
         })
     }
 
+    /// When the daily hosts collection starts: the hosts schedule's `at` (`UI_REPORT_HOSTS_AT`),
+    /// 06:00 when it says nothing readable.
+    fn hosts_at(&self) -> chrono::NaiveTime {
+        let (sched, _) = self.report_schedule_effective(ReportKind::Hosts);
+        vsched::parse_hhmm(&sched.at).unwrap_or_else(|| chrono::NaiveTime::from_hms_opt(6, 0, 0).unwrap_or_default())
+    }
+
+    /// When the daily hosts collection next starts, epoch ms: today's `at` if it has not come
+    /// yet, else tomorrow's (after it, a cluster still missing days is tried each minute, at
+    /// most three times a day). `None` off hosted.
+    pub(crate) fn hosts_next_at(&self) -> Option<i64> {
+        if !self.edition().schedules() {
+            return None;
+        }
+        let at = self.hosts_at();
+        let local = vsched::local_now();
+        let begun_today = (local.time() >= at).then_some(local.date());
+        vsched::local_to_ms(vsched::next_run(local, at, begun_today))
+    }
+
     /// One tick of the daily hosts collection at the given server local time: from the hosts
     /// schedule's `at` (`UI_REPORT_HOSTS_AT`, 06:00) on, every cluster that is missing days
     /// of the month so far — never held, interrupted, or failed fewer than three times — is
@@ -712,8 +732,7 @@ impl Core {
         if self.volume.store.is_none() || self.reports.data_dir().is_none() || self.volume_stopped() {
             return vec![];
         }
-        let (sched, _) = self.report_schedule_effective(ReportKind::Hosts);
-        let at = vsched::parse_hhmm(&sched.at).unwrap_or_else(|| chrono::NaiveTime::from_hms_opt(6, 0, 0).unwrap_or_default());
+        let at = self.hosts_at();
         if local.time() < at {
             return vec![];
         }
@@ -753,14 +772,34 @@ impl Core {
                 }
                 e.1 += 1;
                 e.2 = now;
+                // On disk too, so a restart does not hand the cluster three more tries today.
+                if let Some(d) = self.reports.data_dir() {
+                    if let Err(err) = crate::jobs::save_hosts_tries(d, &attempts, &local_day) {
+                        tracing::warn!(error = %err, "volume by host: the day's tries could not be written");
+                    }
+                }
             }
             let s = self.volume_resolve(raw.as_ref(), Some(&id), None).settings;
             let core = self.clone();
             let stop_core = self.clone();
             let stop: Stop = Arc::new(move || stop_core.volume_stopped().then(|| "the emergency stop came on".to_string()));
             let cid = id.clone();
+            // One run of the hosts collection for the clusters this and later ticks start while
+            // some still collect (docs/JOBS.md).
+            let part = self.jobs.join(crate::jobs::HOSTS_COLLECT, crate::jobs::Trigger::Timer, &id, crate::fleet::now_ms());
             tokio::spawn(async move {
-                core.hosts_collect(cid, s, missing, HostsOpts { again: false, from_tick: true, stop, job: None }).await;
+                let out = core.hosts_collect(cid, s, missing, HostsOpts { again: false, from_tick: true, stop, job: None }).await;
+                use crate::jobs::Outcome;
+                let days = Some(out.days_collected);
+                part.end(if let Some(e) = out.error {
+                    Outcome::failed(e, days)
+                } else if let Some(why) = out.interrupted {
+                    Outcome::deferred(why, days)
+                } else if let Some((day, why)) = out.failed_days.first() {
+                    Outcome::failed(format!("{} day(s) failed, first {day}: {why}", out.failed_days.len()), days)
+                } else {
+                    Outcome::completed(days)
+                });
             });
             started.push(id);
         }

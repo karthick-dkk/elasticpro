@@ -1237,7 +1237,16 @@ impl Core {
             return None;
         }
         let _one = self.backup.busy.lock().await;
+        // The run log (docs/JOBS.md); `busy` above already holds one at a time.
+        let logged = self.jobs.begin(crate::jobs::SETTINGS_BACKUP, crate::jobs::Trigger::Timer, vec![], crate::fleet::now_ms()).ok();
         let result = self.backup_keep(&s.sections, Kind::Scheduled, "system", s.keep, local).await;
+        if let Some(run) = logged {
+            run.end(match &result {
+                // One file, of these sections: the count of what it holds is not a figure it keeps.
+                Ok((name, bytes, _)) => crate::jobs::Outcome::completed(None).with_note(Some(format!("{name}, {bytes} bytes"))),
+                Err(r) => crate::jobs::Outcome::failed(r.message.clone(), None),
+            });
+        }
         let day = crate::volume::schedule::day_key(local.date());
         let mut next = self.backup.schedule.read().clone();
         next.last = Some(match &result {

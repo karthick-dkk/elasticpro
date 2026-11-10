@@ -29,6 +29,7 @@ pub mod history_store;
 pub mod housekeeping;
 pub mod http;
 pub mod inflight;
+pub mod jobs;
 pub mod logdelay;
 pub mod memory;
 pub mod notify;

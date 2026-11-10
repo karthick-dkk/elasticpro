@@ -239,10 +239,12 @@ impl Core {
 
     /* ---------------------------------------- the queue ---------------------------------------- */
 
-    /// A job is shown to whoever sees every cluster it covers.
+    /// A job is shown to whoever sees every cluster it covers; one whose clusters are not known
+    /// only to an administrator who sees every cluster (`jobs::may_read`, JOBS_LIST's rule too).
     fn report_visible(&self, caller: Option<&Caller>) -> impl Fn(&Job) -> bool {
         let vis = self.visible_ids(caller);
-        move |j: &Job| vis.as_ref().is_none_or(|v| j.cluster_ids.iter().all(|c| v.contains(c)))
+        let admin = caller.is_none_or(|c| c.role >= Role::Admin);
+        move |j: &Job| super::jobs::may_read(vis.as_ref(), admin, j.covered().as_deref())
     }
 
     /// `REPORT_RUN {clusterIds, period, format, mail}`: one job per cluster. At most
@@ -1025,9 +1027,16 @@ The files {} ({}) are larger than the {cap_mb} MB a mail may carry (UI_REPORT_MA
         }
     }
 
+    /// When the mailed schedule of `kind` next sends, epoch ms: `None` off hosted, or when it is
+    /// off or has no recipients. One definition, for REPORT_SCHEDULE_GET and JOBS_LIST.
+    pub(crate) fn report_next_send_at(&self, kind: ReportKind) -> Option<i64> {
+        let (e, _) = self.report_schedule_effective(kind);
+        self.edition().schedules().then(|| rsched::next_send(&e, Clock::now()).and_then(vsched::local_to_ms)).flatten()
+    }
+
     fn report_schedule_get(&self, kind: ReportKind) -> Value {
         let (e, managed) = self.report_schedule_effective(kind);
-        let next = self.edition().schedules().then(|| rsched::next_send(&e, Clock::now()).and_then(vsched::local_to_ms)).flatten();
+        let next = self.report_next_send_at(kind);
         let mut v = json!({
             "ok": true, "kind": kind.as_str(), "enabled": e.enabled, "to": e.to, "cc": e.cc, "bcc": e.bcc, "schedule": e.schedule, "at": e.at,
             "period": e.period, "clusters": e.clusters, "subject": e.subject, "lastSent": e.last_sent,

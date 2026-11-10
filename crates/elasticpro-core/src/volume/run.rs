@@ -255,12 +255,29 @@ impl Core {
         self.volume.runs.lock().get(id).cloned().unwrap_or_default()
     }
 
-    fn volume_status(&self, id: &str, s: &VolumeSettings, st: &ClusterState) -> Value {
-        let run = self.volume_run_state(id);
-        let next = self.edition().schedules().then(|| {
+    /// When a cluster's scheduled run is next, epoch ms; `None` off hosted. One definition, for
+    /// VOLUME_SETTINGS and JOBS_LIST.
+    pub(crate) fn volume_next_run_at(&self, s: &VolumeSettings, st: &ClusterState) -> Option<i64> {
+        self.edition().schedules().then(|| {
             let last = st.last_scheduled_day.as_deref().and_then(parse_day);
             schedule::local_to_ms(schedule::next_run(schedule::local_now(), s.collect_time(), last))
-        }).flatten();
+        }).flatten()
+    }
+
+    /// The earliest next scheduled run of any cluster; `Ok(None)` when there is none (no data
+    /// directory, no cluster, off hosted). `Err` when the config file cannot be read.
+    pub(crate) async fn volume_next_run_any(&self) -> Result<Option<i64>, String> {
+        let Some(store) = &self.volume.store else { return Ok(None) };
+        let raw = self.volume_config().await?;
+        Ok(self.all_specs().iter().filter_map(|spec| {
+            let r = self.volume_resolve(raw.as_ref(), Some(&spec.id), None);
+            self.volume_next_run_at(&r.settings, &store.read_state(&spec.id))
+        }).min())
+    }
+
+    fn volume_status(&self, id: &str, s: &VolumeSettings, st: &ClusterState) -> Value {
+        let run = self.volume_run_state(id);
+        let next = self.volume_next_run_at(s, st);
         json!({
             "lastRunAt": st.last_run_at,
             "nextRunAt": next,
@@ -776,7 +793,7 @@ impl Core {
                 _ => {
                     let r = self.volume_resolve(raw.as_ref(), Some(&id), Some(msg));
                     let prune = self.volume_prunes(&r);
-                    self.volume_spawn(id.clone(), r.settings, prune, None);
+                    self.volume_spawn(id.clone(), r.settings, prune, None, None);
                     started.push(id);
                 }
             }
@@ -793,7 +810,9 @@ impl Core {
     /// for its turn, before `_cat`, or with days left — puts that back, so the first tick
     /// after the stop runs the cluster again. A run that finished, or failed for any other
     /// reason, leaves today marked: at most one scheduled run a day.
-    fn volume_spawn(self: &Arc<Self>, id: String, s: VolumeSettings, prune: bool, scheduled: Option<Option<String>>) {
+    /// `logged`: the scheduled run's part for this cluster in the run log (docs/JOBS.md); a
+    /// Refresh now is not a run of the daily job.
+    fn volume_spawn(self: &Arc<Self>, id: String, s: VolumeSettings, prune: bool, scheduled: Option<Option<String>>, logged: Option<crate::jobs::Run>) {
         let core = self.clone();
         tokio::spawn(async move {
             let permit = core.volume.permits.clone().acquire_owned().await;
@@ -830,6 +849,18 @@ impl Core {
                         core.history_capacity_after_run(&id).await;
                     }
                 }
+            }
+            if let Some(run) = logged {
+                use crate::jobs::Outcome;
+                run.end(match &result {
+                    Err(e) => Outcome::failed(e.clone(), None),
+                    // The emergency stop: the scheduled run is tried again when it is over.
+                    Ok(c) if c.interrupted.is_some() => Outcome::deferred(c.error.clone().or_else(|| c.interrupted.clone()).unwrap_or_default(), Some(c.searched)),
+                    Ok(c) => match &c.error {
+                        Some(e) => Outcome::failed(e.clone(), Some(c.searched)),
+                        None => Outcome::completed(Some(c.searched)),
+                    },
+                });
             }
             if let Some(r) = core.volume.runs.lock().get_mut(&id) {
                 r.running = false;
@@ -1222,7 +1253,10 @@ impl Core {
                 continue;
             }
             let prune = self.volume_prunes(&r);
-            self.volume_spawn(id.clone(), r.settings, prune, Some(prev));
+            // One run of the daily job for the clusters it starts, joined by any it starts while
+            // some still collect (clusters may have different collectAt).
+            let part = self.jobs.join(crate::jobs::VOLUME_DAILY, crate::jobs::Trigger::Timer, &id, crate::fleet::now_ms());
+            self.volume_spawn(id.clone(), r.settings, prune, Some(prev), Some(part));
             started.push(id);
         }
         started

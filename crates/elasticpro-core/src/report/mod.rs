@@ -75,7 +75,8 @@ pub struct Reports {
     pub(crate) collecting: Arc<tokio::sync::Semaphore>,
     /// Clusters whose hosts collection runs now (the timer's or a job's).
     pub(crate) hosts_running: parking_lot::Mutex<std::collections::HashSet<String>>,
-    /// The timer's attempts per cluster today: (local day, attempts, last at ms).
+    /// The timer's attempts per cluster today: (local day, attempts, last at ms). Kept in
+    /// `<data>/job-runs/hosts-tries.json` too, so a restart does not reset the three a day.
     pub(crate) hosts_attempts: parking_lot::Mutex<std::collections::HashMap<String, (String, u32, i64)>>,
     /// The waits before a failed page is asked again (2 s, 10 s, 30 s); the tests shorten them.
     pub(crate) backoff_ms: parking_lot::Mutex<[u64; 3]>,
@@ -98,9 +99,10 @@ fn clusters_at_once() -> usize {
 /// on every promotion, end and stop — from async code, under the queue's lock — so a write
 /// is handed over here instead of being made where the change is: no worker of the async
 /// runtime waits on the disk, and a burst of changes is one write of the last state. The
-/// thread exists only while there is something to write.
+/// thread exists only while there is something to write. The job run log (`crate::jobs`)
+/// writes its files the same way.
 #[derive(Default)]
-struct Writer {
+pub(crate) struct Writer {
     state: parking_lot::Mutex<WriterState>,
     idle: parking_lot::Condvar,
 }
@@ -112,7 +114,7 @@ struct WriterState {
 }
 
 impl Writer {
-    fn hand(self: &Arc<Self>, path: PathBuf, body: Vec<u8>) {
+    pub(crate) fn hand(self: &Arc<Self>, path: PathBuf, body: Vec<u8>) {
         let mut st = self.state.lock();
         st.pending = Some((path, body));
         if st.running {
@@ -142,13 +144,13 @@ impl Writer {
                 }
             };
             if let Err(e) = write_atomic(&next.0, &next.1) {
-                tracing::warn!(error = %e, "volume report: the queue could not be written");
+                tracing::warn!(error = %e, file = %next.0.display(), "a file could not be written");
             }
         }
     }
 
     /// Wait until everything handed over is on disk.
-    fn flush(&self) {
+    pub(crate) fn flush(&self) {
         let mut st = self.state.lock();
         while st.running || st.pending.is_some() {
             self.idle.wait(&mut st);
@@ -175,11 +177,18 @@ impl Reports {
         let now = crate::fleet::now_ms() as i64;
         // Role core: the queue is the worker's, as it last wrote it; nothing is marked here.
         let failed = if writer { q.restarted(now) } else { vec![] };
+        let tries = match (&data, writer) {
+            (Some(d), true) => crate::jobs::load_hosts_tries(d),
+            _ => Default::default(),
+        };
         let r = Reports { data, writer, queue: parking_lot::Mutex::new(Queue::default()), ticking: Default::default(),
                           settings_lock: Default::default(), queue_writer: Default::default(),
                           cpu: Arc::new(tokio::sync::Semaphore::new(cpu_slots())),
                           collecting: Arc::new(tokio::sync::Semaphore::new(clusters_at_once())),
-                          hosts_running: Default::default(), hosts_attempts: Default::default(),
+                          hosts_running: Default::default(),
+                          // The tries the hosts collection made today, as its process last wrote them
+                          // (only the process that runs it reads them back).
+                          hosts_attempts: parking_lot::Mutex::new(tries),
                           backoff_ms: parking_lot::Mutex::new([2_000, 10_000, 30_000]), watchdog_ms: Default::default() };
         if !failed.is_empty() {
             tracing::warn!(jobs = failed.len(), "volume report: jobs running when the core stopped were marked failed");

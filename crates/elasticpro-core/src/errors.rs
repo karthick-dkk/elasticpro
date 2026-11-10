@@ -51,6 +51,7 @@ const TABLE: &[(&str, &str)] = &[
     ("too_many_clusters", "EP-217"),
     ("worker_unavailable", "EP-218"),
     ("worker_version", "EP-219"),
+    ("already_running", "EP-220"),
     // 3xx: config, storage and secrets
     ("no_config", "EP-301"),
     ("parse_error", "EP-302"),

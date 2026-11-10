@@ -560,6 +560,10 @@ pub fn required_role(msg_type: &str) -> Option<Role> {
         // ElasticPro's own health (docs/HEALTH.md): memory, CPU, the gate, the worker. Nothing of a
         // cluster but per-cluster gate figures, narrowed to the caller's clusters in the handler.
         "SYSTEM_HEALTH" => Some(Role::Admin),
+        // Jobs (docs/JOBS.md): what runs, when it ran, how it ended. A user's — not a guest's,
+        // whose page is cluster health only: runs name clusters and carry their errors. A
+        // caller limited to some clusters reads only the runs about theirs (the handler).
+        "JOBS_LIST" => Some(Role::User),
         // Listing the archive names object keys, which carry client and branch names —
         // the same shape of fact as an index name, and gated the same way.
 

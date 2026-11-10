@@ -49,6 +49,7 @@ A code keeps its meaning once it is given out. A new kind of failure gets a new 
 | EP-217 | `too_many_clusters` | A report that collects per cluster was asked for more clusters than it runs at once (volume by host: 5). Nothing was queued; ask for fewer. |
 | EP-218 | `worker_unavailable` | The core (role `core`) could not reach the report worker (docs/WORKER.md) to hand it a report run, a send, a stop or a collection — or did not try, because the worker's heartbeat (`worker/status.json`) is 30 s old or more (`detail` says which). Nothing was queued. Monitoring is not affected; scheduled reports and collections resume when the worker is back. `lastHeartbeatAt` says when it was last seen. Check `docker compose ps worker` and `docker compose logs worker`; both containers must share the data volume (the shared token is in it). |
 | EP-219 | `worker_version` | The report worker runs another ElasticPro version than the core, and refuses work until both are the same, so a half-upgraded stack never mixes record formats. Finish the upgrade: `deploy/deploy.sh` moves both together (`docker compose up -d core worker`). |
+| EP-220 | `already_running` | A job was asked to run while a run of it is still going (docs/JOBS.md, one run per job at a time): a log delay *Run now* during the timer's run, housekeeping during housekeeping, a Zabbix sync when the one going has not ended within a minute. Nothing was started. `runId` names the run that is going; it shows on the Jobs list (`JOBS_LIST`). Wait for it to end. |
 
 ## Config, storage and secrets (3xx)
 

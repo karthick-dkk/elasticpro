@@ -22,6 +22,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+/// JOBS_LIST (docs/JOBS.md): the job registry, the run log and each job's next run.
+mod jobs_api;
 /// SYSTEM_HEALTH and the minute task (docs/HEALTH.md); a child module so it reads what the core
 /// holds without widening any field.
 mod system_health;
@@ -317,6 +319,8 @@ pub struct Core {
     /// The other side of the core/worker split: the token, what is watched for reloads, the
     /// worker's requests ring. See `worker_api`.
     pub(crate) worker: worker_api::WorkerSide,
+    /// Every job's runs and the one-run-at-a-time guard (docs/JOBS.md). See `jobs`.
+    pub(crate) jobs: Arc<crate::jobs::Jobs>,
 }
 
 /// What the last Zabbix sync found. The specs carry credentials and never leave the core;
@@ -353,6 +357,11 @@ struct Sink {
     config: SinkConfig,
     state: SinkState,
 }
+
+/// How long `ZABBIX_SYNC` waits for a sync already going before answering `already_running`.
+const ZBX_SYNC_WAIT_PERSON: std::time::Duration = std::time::Duration::from_secs(60);
+/// How long the sync after a link change waits for one already going.
+const ZBX_SYNC_WAIT_FOLLOW_UP: std::time::Duration = std::time::Duration::from_secs(120);
 
 /// The window the request counter reports over.
 pub const REQUEST_WINDOW: std::time::Duration = std::time::Duration::from_secs(5 * 60);
@@ -804,6 +813,7 @@ impl Core {
         let data_dir_for_history = data_dir.clone();
         let data_dir_for_health = data_dir.clone();
         let data_dir_for_worker = data_dir.clone();
+        let data_dir_for_jobs = data_dir.clone();
         let activity = crate::activity::ActivityLog::new(crate::activity::ActivityConfig::from_env(
             data_dir.as_deref().filter(|_| !batch_only), edition));
         let (instance, previous_instance, restart_suspects) = instance_ids(data_dir.as_deref(), role);
@@ -878,6 +888,7 @@ impl Core {
             health: crate::health::Health::with_role(data_dir_for_health.as_deref(), crate::health::Sampler::default(), role.as_str()),
             role,
             worker: worker_api::WorkerSide::new(data_dir_for_worker.as_deref(), role),
+            jobs: crate::jobs::Jobs::open(data_dir_for_jobs.as_deref(), role, crate::fleet::now_ms()),
         })
     }
 
@@ -1361,7 +1372,12 @@ impl Core {
             "SSO_EXCHANGE" => self.sso_exchange(&msg),
             "CONFIG_VIEW" => self.config_view(caller.as_ref()).await,
             "ZABBIX_CLUSTERS" => self.zabbix_clusters(caller.as_ref()),
-            "ZABBIX_SYNC" => self.zabbix_sync().await,
+            // A sync already going (the timer's, or one a link change started) is waited for —
+            // it may have read the old state — then this one runs (docs/JOBS.md).
+            "ZABBIX_SYNC" => {
+                let who = crate::jobs::Trigger::manual(caller.as_ref().map(|c| c.name.as_str()).unwrap_or("local"));
+                self.zabbix_sync_after_open(who, ZBX_SYNC_WAIT_PERSON).await
+            }
             "ZABBIX_METRICS" => self.zabbix_metrics(&msg).await,
             "ZABBIX_LINK_GET" | "ZABBIX_LINK_SET" | "ZABBIX_LINK_TEST" | "ZABBIX_PAIR_BEGIN" | "ZABBIX_UNPAIR" => {
                 self.zabbix_link_msg(&t, &msg, caller.as_ref()).await
@@ -1606,6 +1622,8 @@ impl Core {
             "REQUEST_STATS" => json!({ "ok": true, "requests": self.requests_for(caller.as_ref()) }),
             "REQUEST_LOG" => self.request_log_for(caller.as_ref(), &msg),
             "SYSTEM_HEALTH" => self.system_health(caller.as_ref()).await,
+            // Jobs (docs/JOBS.md): the registry, each job's state and the run log.
+            "JOBS_LIST" => self.jobs_list(&msg, caller.as_ref()).await,
             "PINS" => {
                 self.refresh_trust_switch().await;
                 json!({ "ok": true, "pins": self.pins_for(caller.as_ref()) })
@@ -4636,13 +4654,53 @@ impl Core {
                        configured = self.zbx_api().configured(), template = self.zbx_api().template(), "zabbix sync: timer started");
     }
 
+    /// A sync that must see what is configured now: one already going is waited for, at most
+    /// `wait`, and then this one runs; still going after `wait`, the answer is `already_running`.
+    pub(crate) async fn zabbix_sync_after_open(self: &Arc<Self>, trigger: crate::jobs::Trigger, wait: std::time::Duration) -> Value {
+        let until = std::time::Instant::now() + wait;
+        loop {
+            let out = self.zabbix_sync_as(trigger.clone()).await;
+            if out["kind"] != json!("already_running") || std::time::Instant::now() >= until {
+                return out;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        }
+    }
+
+    /// A sync the product started on its own (its timer, the start, a reload). See
+    /// `zabbix_sync_as`.
+    pub async fn zabbix_sync(self: &Arc<Self>) -> Value {
+        self.zabbix_sync_as(crate::jobs::Trigger::Timer).await
+    }
+
+    /// One Zabbix sync, recorded in the run log (docs/JOBS.md): one at a time — a second asked
+    /// for while one runs answers `already_running` with its run id. An API that is not
+    /// configured is not a run: nothing is attempted and nothing recorded.
+    pub(crate) async fn zabbix_sync_as(self: &Arc<Self>, trigger: crate::jobs::Trigger) -> Value {
+        if !self.zbx_api().configured() {
+            return self.zabbix_sync_run().await;
+        }
+        let run = match self.jobs.begin(crate::jobs::ZABBIX_SYNC, trigger, vec![], crate::fleet::now_ms()) {
+            Ok(r) => r,
+            Err(busy) => return busy.answer("a Zabbix sync"),
+        };
+        let mut out = self.zabbix_sync_run().await;
+        out["runId"] = json!(run.id());
+        run.end(if out["ok"] == json!(true) {
+            crate::jobs::Outcome::completed(out["clusters"].as_u64())
+        } else {
+            crate::jobs::Outcome::failed(out["message"].as_str().unwrap_or("the sync failed"), None)
+        });
+        out
+    }
+
     /// Ask Zabbix which hosts are clusters, and Vault for their passwords.
     ///
     /// A cluster whose password cannot be read this time keeps the credential it had, as
     /// long as its address has not changed — Vault being briefly unreachable must not take
     /// every cluster offline. A failed sync keeps the previous list for the same reason,
     /// and says so.
-    pub async fn zabbix_sync(self: &Arc<Self>) -> Value {
+    async fn zabbix_sync_run(self: &Arc<Self>) -> Value {
         self.refresh_trust_switch().await;
         let zapi = self.zbx_api();
         if !zapi.configured() {
@@ -5213,7 +5271,8 @@ impl Core {
         if now < due {
             return;
         }
-        self.run_delay_sink().await;
+        // A run somebody started by hand is still going: this tick leaves it be.
+        self.run_delay_sink(crate::jobs::Trigger::Timer).await;
     }
 
     /// What to show an admin as standing in the way, if anything.
@@ -5282,9 +5341,37 @@ impl Core {
         cfg.clusters.iter().filter(|id| p.clusters.contains_key(*id)).cloned().collect()
     }
 
+    /// One run of the scheduled measurement, recorded in the run log (docs/JOBS.md): one at a
+    /// time, so a "Run now" pressed while the timer's run goes answers `already_running` with
+    /// that run's id instead of measuring (and writing) the same hour twice at once.
+    async fn run_delay_sink(self: &Arc<Self>, trigger: crate::jobs::Trigger) -> SinkRun {
+        let run = match self.jobs.begin(crate::jobs::LOGDELAY_MEASURE, trigger, vec![], crate::fleet::now_ms()) {
+            Ok(r) => r,
+            Err(busy) => return SinkRun { body: busy.answer("the scheduled log delay measurement"), skipped: None, error: None },
+        };
+        let (out, clusters) = self.measure_delay_sink().await;
+        run.clusters(&clusters);
+        let note_ids = |n: &SinkNote| n.cluster_id.iter().chain(n.sink_id.iter()).cloned().collect::<Vec<String>>();
+        let outcome = if let Some(n) = &out.skipped {
+            run.clusters(&note_ids(n));
+            crate::jobs::Outcome::skipped(n.text())
+        } else if out.body["ok"] == json!(true) {
+            crate::jobs::Outcome::completed(out.body["measured"].as_u64())
+        } else {
+            if let Some(n) = &out.error {
+                run.clusters(&note_ids(n));
+            }
+            crate::jobs::Outcome::failed(out.error.as_ref().map(SinkNote::text).unwrap_or_else(|| "the run failed".into()),
+                                         out.body["measured"].as_u64())
+        };
+        run.end(outcome);
+        out
+    }
+
     /// Measure every target once and ship the result. Also the body of the admin's
-    /// "run it now" button, which is why it does not look at the schedule itself.
-    async fn run_delay_sink(self: &Arc<Self>) -> SinkRun {
+    /// "run it now" button, which is why it does not look at the schedule itself. Returns the
+    /// clusters it measured and wrote to, for the run log.
+    async fn measure_delay_sink(self: &Arc<Self>) -> (SinkRun, Vec<String>) {
         let cfg = self.delay_sink.read().config.clone();
         let now = delay_sink::now_ms();
 
@@ -5297,7 +5384,7 @@ impl Core {
             // primed the app or turned off read-only.
             s.state.next_due_at = Some(delay_sink::next_due(now, cfg.every_hours, 0));
             tracing::info!(target: "audit", message = "delay sink skipped", reason = %why.text());
-            return SinkRun { body: json!({ "ok": false }), skipped: Some(why), error: None };
+            return (SinkRun { body: json!({ "ok": false }), skipped: Some(why), error: None }, vec![]);
         }
 
         let (year, month, _) = delay_sink::month_and_hour_bucket(now);
@@ -5309,7 +5396,7 @@ impl Core {
         let prefix = if to_history {
             match self.history_delay_prefix() {
                 Ok(p) => p,
-                Err(e) => return SinkRun { body: json!({ "ok": false }), skipped: Some(SinkNote::write(None, None, e)), error: None },
+                Err(e) => return (SinkRun { body: json!({ "ok": false }), skipped: Some(SinkNote::write(None, None, e)), error: None }, vec![]),
             }
         } else {
             cfg.index_prefix.clone()
@@ -5398,11 +5485,16 @@ impl Core {
             clusters = targets.len(), measured, failed, opened, solved, index = %index, destination = ?cfg.destination,
             error = first_error.as_ref().map(SinkNote::text).unwrap_or_default(),
         );
-        SinkRun {
+        // The clusters the run read, and the one it wrote to when that is a cluster.
+        let mut touched = targets.clone();
+        if cfg.destination == delay_sink::Destination::Cluster {
+            touched.push(cfg.sink_cluster_id.clone());
+        }
+        (SinkRun {
             body: json!({ "ok": ok, "measured": measured, "failed": failed, "clusters": targets.len(), "opened": opened, "solved": solved,
                           "index": index, "destination": cfg.destination }),
             skipped: None, error: first_error,
-        }
+        }, touched)
     }
 
     /// What `caller` may read of the scheduled measurement (`delay_sink::SinkView`): every
@@ -5464,7 +5556,8 @@ impl Core {
             _ => {
                 // DELAY_SINK_RUN: the operator pressing it is what makes this one legible
                 // — it is the same work the timer does, at a moment somebody chose.
-                let run = self.run_delay_sink().await;
+                let who = caller.map(|c| c.name.as_str()).unwrap_or("local");
+                let run = self.run_delay_sink(crate::jobs::Trigger::manual(who)).await;
                 let view = self.sink_view(caller);
                 let mut out = run.body;
                 if let Some(n) = &run.skipped {
@@ -5563,7 +5656,8 @@ impl Core {
         }
         let core = self.clone();
         tokio::spawn(async move {
-            let out = core.zabbix_sync().await;
+            // A sync already going read the old link: wait for it (bounded), then sync again.
+            let out = core.zabbix_sync_after_open(crate::jobs::Trigger::Timer, ZBX_SYNC_WAIT_FOLLOW_UP).await;
             tracing::info!(result = %out, "zabbix sync after a link change");
         });
     }
