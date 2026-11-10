@@ -2781,7 +2781,7 @@ impl Core {
         let by = self.saver_name(caller);
         let set_keys: Vec<String> = set.keys().cloned().collect();
         let host = row["zabbixHost"].as_str().unwrap_or("").to_string();
-        let kept = match self.zbx_overlay.change(host_id, &host, &id, set, &reset, &by, auth::now()) {
+        let kept = match self.zbx_overlay.change(host_id, (&host, &id), set, &reset, &by, auth::now()) {
             Ok(k) => k,
             Err(e) => return json!({ "ok": false, "kind": "io_error", "message": e }),
         };

@@ -342,9 +342,10 @@ impl Overlays {
 
     /// Set some fields and reset others on one host's overlay (already checked: `parse_change`).
     /// An overlay left with no field is removed. `host` and `id` are the host's technical name
-    /// and cluster id now. Returns the overlay as it is kept, or `None` when none is left.
-    pub fn change(&self, host_id: &str, host: &str, id: &str, set: BTreeMap<String, Value>, reset: &[String], by: &str, at: u64)
+    /// and cluster id now (`seen_as`). Returns the overlay as it is kept, or `None` when none is left.
+    pub fn change(&self, host_id: &str, seen_as: (&str, &str), set: BTreeMap<String, Value>, reset: &[String], by: &str, at: u64)
         -> Result<Option<Overlay>, String> {
+        let (host, id) = seen_as;
         let host_id = host_id.trim();
         if host_id.is_empty() || host_id.len() > 64 {
             return Err("hostId must name a Zabbix host".into());
@@ -489,7 +490,7 @@ mod tests {
     fn an_overlay_survives_syncs_and_restarts_and_a_reset_removes_one_field() {
         let p = tmp();
         let s = Overlays::open(Some(p.clone()));
-        let kept = s.change("10101", "es-prod", "zbx-es-prod", set(json!({ "name": "Prod EU", "note": "on call: team A", "via": "" })), &[], "sara", 5).unwrap().unwrap();
+        let kept = s.change("10101", ("es-prod", "zbx-es-prod"), set(json!({ "name": "Prod EU", "note": "on call: team A", "via": "" })), &[], "sara", 5).unwrap().unwrap();
         assert_eq!(kept.fields.len(), 3);
         #[cfg(unix)]
         {
@@ -503,12 +504,12 @@ mod tests {
         let again = Overlays::open(Some(p.clone()));
         assert_eq!(again.get("10101"), Some(kept));
         // "Use Zabbix's value" for the name only.
-        let after = again.change("10101", "es-prod", "zbx-es-prod", BTreeMap::new(), &["name".into()], "otto", 9).unwrap().unwrap();
+        let after = again.change("10101", ("es-prod", "zbx-es-prod"), BTreeMap::new(), &["name".into()], "otto", 9).unwrap().unwrap();
         assert_eq!(after.fields.keys().cloned().collect::<Vec<_>>(), vec!["note", "via"]);
         assert_eq!(name(Some(&after), "es-prod-renamed-in-zabbix"), "es-prod-renamed-in-zabbix", "Zabbix's name again");
         assert_eq!(after.set_by, "otto");
         // The last fields reset: no overlay left, on disk too.
-        assert_eq!(again.change("10101", "es-prod", "zbx-es-prod", BTreeMap::new(), &["note".into(), "via".into()], "otto", 10).unwrap(), None);
+        assert_eq!(again.change("10101", ("es-prod", "zbx-es-prod"), BTreeMap::new(), &["note".into(), "via".into()], "otto", 10).unwrap(), None);
         assert!(Overlays::open(Some(p.clone())).get("10101").is_none());
         let _ = std::fs::remove_dir_all(p.parent().unwrap());
     }
@@ -517,8 +518,8 @@ mod tests {
     fn an_orphan_is_kept_until_its_host_returns() {
         let p = tmp();
         let s = Overlays::open(Some(p.clone()));
-        s.change("1", "a", "zbx-a", set(json!({ "name": "A" })), &[], "sara", 1).unwrap();
-        s.change("2", "b", "zbx-b", set(json!({ "name": "B" })), &[], "sara", 1).unwrap();
+        s.change("1", ("a", "zbx-a"), set(json!({ "name": "A" })), &[], "sara", 1).unwrap();
+        s.change("2", ("b", "zbx-b"), set(json!({ "name": "B" })), &[], "sara", 1).unwrap();
         // Host 2 is gone from Zabbix: nothing removes it.
         let present: HashSet<String> = ["1".to_string()].into();
         assert_eq!(s.orphans(&present), vec!["2"]);
