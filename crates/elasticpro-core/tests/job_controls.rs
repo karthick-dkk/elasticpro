@@ -168,7 +168,8 @@ async fn two_job_runs_start_one_run_and_the_old_button_is_the_same_run() {
     let id = first["runId"].as_str().unwrap().to_string();
     let second = c.handle(json!({ "type": "JOB_RUN", "session": &s, "jobId": "logdelay.measure" })).await;
     assert_eq!((second["kind"].clone(), second["runId"].clone()), (json!("already_running"), json!(id)), "{second}");
-    // The page's own button (DELAY_SINK_RUN) meets the same run.
+    // The page's own button (DELAY_SINK_RUN) meets the same run, once it is measuring.
+    wait_for("the measurement at the cluster", || srv.holding() > 0).await;
     let old = c.handle(json!({ "type": "DELAY_SINK_RUN", "session": &s })).await;
     assert_eq!((old["kind"].clone(), old["runId"].clone()), (json!("already_running"), json!(id)), "{old}");
     let r = ended_run(&c, Some(&s), &id).await;
@@ -184,7 +185,7 @@ async fn two_job_runs_start_one_run_and_the_old_button_is_the_same_run() {
     assert_eq!(c.handle(json!({ "type": "JOB_RUN", "session": &s, "jobId": "nope" })).await["kind"], json!("not_found"));
 
     // A manual backup (BACKUP_CREATE) is a run of the settings backup now, by its person.
-    let b = c.handle(json!({ "type": "BACKUP_CREATE", "session": &s, "sections": ["settings"] })).await;
+    let b = c.handle(json!({ "type": "BACKUP_CREATE", "session": &s, "sections": ["clusters"] })).await;
     let list = c.handle(json!({ "type": "JOBS_LIST", "session": &s, "jobId": "settings.backup" })).await;
     let runs = list["runs"].as_array().unwrap();
     assert_eq!(runs.len(), 1, "{b} {list}");
@@ -369,8 +370,8 @@ async fn several_created_schedules_per_kind_and_the_built_in_one_is_untouched() 
     for k in ["enabled", "to", "schedule", "at", "clusters", "managed"] {
         assert_eq!(builtin_before[k], builtin_after[k], "{k}");
     }
-    assert!(!dir.join("reports/report-schedule.json").exists(), "the built-in schedule's file was not written");
-    assert!(dir.join("reports/report-schedules-created.json").exists());
+    assert!(!dir.join("report-schedule.json").exists(), "the built-in schedule's file was not written");
+    assert!(dir.join("report-schedules-created.json").exists());
 
     // Tomorrow at 06:30 the first one is due: a job of its own, mapped to its own job id.
     let tomorrow = today() + Duration::days(1);

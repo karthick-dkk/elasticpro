@@ -292,8 +292,8 @@ enabled?}`: a mailed schedule of its own (hosted). `report` volume, indices, hos
 `clusters` `"all"` or a list; `schedule` daily, weekly or monthly; `at` HH:MM, server local time;
 `to` at least one address. Several per kind; each a job of its own, `report.schedule.<12 hex>`
 (stable), in `JOBS_LIST` with its settings (`created`; recipients to administrators only) and its
-runs. Kept in `reports/report-schedules-created.json` (the core's), their state in
-`reports/report-schedules-created-state.json` (the worker's). The period whose moment has already
+runs. Kept in `<data>/report-schedules-created.json` (the core's), their state in
+`<data>/report-schedules-created-state.json` (the worker's), beside the built-in schedules' files. The period whose moment has already
 passed when it is made counts as handled, as a save of the built-in schedule does. The built-in
 schedule of each kind (`report-schedule.json`, `UI_REPORT_*` in config.txt) is untouched: a key
 in config.txt still locks the built-in one, and only it. A created log delay schedule uses the
