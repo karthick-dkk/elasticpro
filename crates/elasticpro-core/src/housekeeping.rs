@@ -634,6 +634,13 @@ impl Core {
     /// Run every job once. `None` when a run is already going.
     pub async fn housekeeping_run(self: &Arc<Self>, req: RunRequest) -> Option<RunReport> {
         let _running = self.housekeeping.begin()?;
+        // The run log (docs/JOBS.md). `begin` above already holds one run at a time.
+        let trigger = match (&req.trigger, &req.by) {
+            (Trigger::Manual, Some(c)) => crate::jobs::Trigger::manual(&c.name),
+            (Trigger::Manual, None) => crate::jobs::Trigger::manual("local"),
+            _ => crate::jobs::Trigger::Timer,
+        };
+        let logged = self.jobs.begin(crate::jobs::HOUSEKEEPING, trigger, vec![], req.now).ok();
         let cfg = self.housekeeping.config();
         let dry = cfg.dry_run || req.dry_run;
         let started_at = req.now;
@@ -689,6 +696,18 @@ impl Core {
         }
         tracing::info!(target: "audit", trigger = report.trigger, dry_run = dry, items = report.items, bytes = report.bytes,
                        errors = report.errors, "housekeeping: run finished");
+        if let Some(run) = logged {
+            let note = Some(format!("{}{}", kb(report.bytes), if dry { " (dry run: nothing removed)" } else { "" }));
+            run.end(if report.errors == 0 {
+                crate::jobs::Outcome::completed(Some(report.items)).with_note(note)
+            } else {
+                // Which of its jobs failed; why (paths, which may name a cluster) is the
+                // administrator's, in HOUSEKEEPING_GET.
+                let failed: Vec<&str> = report.jobs.iter().filter(|j| !j.ok).map(|j| j.label).collect();
+                crate::jobs::Outcome::failed(format!("failed: {} (Request Centre › Housekeeping says why)", failed.join(", ")),
+                                             Some(report.items)).with_note(note)
+            });
+        }
         self.hk_record_activity(&report, req.by.as_ref());
         Some(report)
     }
@@ -930,7 +949,8 @@ impl Core {
                     report.items, kb(report.bytes), if report.errors > 0 { format!("; {} job(s) failed", report.errors) } else { String::new() }));
                 out
             }
-            None => json!({ "ok": false, "kind": "busy", "message": "housekeeping is already running; try again in a moment" }),
+            None => json!({ "ok": false, "kind": "already_running", "runId": self.jobs.running(crate::jobs::HOUSEKEEPING),
+                            "message": "housekeeping is already running; try again in a moment" }),
         }
     }
 }

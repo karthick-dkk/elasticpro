@@ -1025,9 +1025,16 @@ The files {} ({}) are larger than the {cap_mb} MB a mail may carry (UI_REPORT_MA
         }
     }
 
+    /// When the mailed schedule of `kind` next sends, epoch ms: `None` off hosted, or when it is
+    /// off or has no recipients. One definition, for REPORT_SCHEDULE_GET and JOBS_LIST.
+    pub(crate) fn report_next_send_at(&self, kind: ReportKind) -> Option<i64> {
+        let (e, _) = self.report_schedule_effective(kind);
+        self.edition().schedules().then(|| rsched::next_send(&e, Clock::now()).and_then(vsched::local_to_ms)).flatten()
+    }
+
     fn report_schedule_get(&self, kind: ReportKind) -> Value {
         let (e, managed) = self.report_schedule_effective(kind);
-        let next = self.edition().schedules().then(|| rsched::next_send(&e, Clock::now()).and_then(vsched::local_to_ms)).flatten();
+        let next = self.report_next_send_at(kind);
         let mut v = json!({
             "ok": true, "kind": kind.as_str(), "enabled": e.enabled, "to": e.to, "cc": e.cc, "bcc": e.bcc, "schedule": e.schedule, "at": e.at,
             "period": e.period, "clusters": e.clusters, "subject": e.subject, "lastSent": e.last_sent,

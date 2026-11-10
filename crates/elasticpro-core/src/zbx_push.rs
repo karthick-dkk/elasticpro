@@ -272,6 +272,8 @@ impl Core {
                 return every;
             }
         };
+        // A push is a run (docs/JOBS.md); an idle minute is not. One loop, so one at a time.
+        let logged = self.jobs.begin(crate::jobs::ZABBIX_PUSH, crate::jobs::Trigger::Timer, vec![], now_ms()).ok();
         // Read, then let go of everything, then push.
         let figures = self.push_figures(every);
         let value = payload(&figures).to_string();
@@ -284,6 +286,12 @@ impl Core {
             Ok(Err(e)) => Err(e.message),
             Err(_) => Err(format!("no answer within {} s", PUSH_TIMEOUT.as_secs())),
         };
+        if let Some(run) = logged {
+            run.end(match &res {
+                Ok(()) => crate::jobs::Outcome::completed(Some(1)),
+                Err(e) => crate::jobs::Outcome::failed(e.clone(), None),
+            });
+        }
         let mut s = self.zbx_push.lock();
         s.idle = None;
         s.last_attempt_at = Some(started);

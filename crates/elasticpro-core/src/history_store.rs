@@ -1555,6 +1555,9 @@ impl Core {
         if self.history_store.queue_len() == 0 {
             return (json!({ "ok": true, "written": 0 }), spooled);
         }
+        // A tick with something to send is a run (docs/JOBS.md); an idle or gated tick is not.
+        // The `ticking` flag already holds one at a time.
+        let logged = self.jobs.begin(crate::jobs::HISTORY_MIRROR, crate::jobs::Trigger::Timer, vec![], crate::fleet::now_ms()).ok();
         let bulks = cut_bulks(&self.history_store.queue.lock(), BULKS_PER_TICK);
         let (mut written, mut refused_n, mut rejected_n, mut unrouted_n, mut error) = (0u64, 0u64, 0u64, 0u64, None::<String>);
         // A stream whose template could not be verified this tick: its bulks are passed over,
@@ -1690,6 +1693,13 @@ impl Core {
         if written > 0 || error.is_some() {
             tracing::info!(target: "audit", written, refused = refused_n, rejected = rejected_n, queue = self.history_store.queue_len(),
                            error = error.as_deref().unwrap_or(""), "history store: bulk written");
+        }
+        if let Some(run) = logged {
+            let note = Some(format!("refused {refused_n}, rejected {rejected_n}, let go {unrouted_n}, {} still queued", self.history_store.queue_len()));
+            run.end(match &error {
+                None => crate::jobs::Outcome::completed(Some(written)).with_note(note),
+                Some(e) => crate::jobs::Outcome::failed(e.clone(), Some(written)).with_note(note),
+            });
         }
         (json!({ "ok": error.is_none(), "written": written, "refused": refused_n, "rejected": rejected_n, "unrouted": unrouted_n,
                  "queue": self.history_store.queue_len(), "error": error }), spooled)
