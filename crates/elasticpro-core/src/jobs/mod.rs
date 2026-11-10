@@ -147,6 +147,9 @@ pub struct Descriptor {
     pub requests: Requests,
     /// The report a mailed schedule sends.
     pub report: Option<ReportKind>,
+    /// Its runs are about clusters: a run of it that names none has clusters not known, and
+    /// is an administrator's (`report::jobs::may_read`), never everybody's.
+    pub cluster_scoped: bool,
     /// Why its runs failed, and their notes, are an administrator's — as the job's own status
     /// message is (HOUSEKEEPING_GET, BACKUP_STATUS, HISTORY_STORE_GET, the Zabbix sync's error).
     /// Anybody else reads the status and the counts.
@@ -160,6 +163,7 @@ impl Descriptor {
             "nextRun": self.next_run, "priority": self.priority, "pausable": self.pausable, "requests": self.requests,
             "report": self.report.map(ReportKind::as_str),
             "detailsFor": if self.admin_details { "admin" } else { "user" },
+            "clusterScoped": self.cluster_scoped,
         })
     }
 }
@@ -196,7 +200,7 @@ const fn mailed(id: &'static str, name: &'static str, kind: ReportKind) -> Descr
     Descriptor {
         id, name, kind: JobKind::Automatic, owner: Owner::Worker,
         schedule: "the mailed schedule (Reports › Exports, REPORT_SCHEDULE_SET): daily, weekly or monthly at its time, server local time",
-        next_run: NextRun::MailedSchedule, priority: Priority::Medium, pausable: true, requests: req(1, 4), report: Some(kind), admin_details: false,
+        next_run: NextRun::MailedSchedule, priority: Priority::Medium, pausable: true, requests: req(1, 4), report: Some(kind), cluster_scoped: true, admin_details: false,
     }
 }
 
@@ -205,22 +209,22 @@ pub static REGISTRY: [Descriptor; 13] = [
     Descriptor {
         id: LOGDELAY_MEASURE, name: "Log delay measurement", kind: JobKind::Automatic, owner: Owner::Core,
         schedule: "every everyHours while armed (Config-Management › Data › Scheduled log delay, DELAY_SINK_SET); a failing run backs off",
-        next_run: NextRun::DelaySink, priority: Priority::High, pausable: true, requests: req(1, 4), report: None, admin_details: false,
+        next_run: NextRun::DelaySink, priority: Priority::High, pausable: true, requests: req(1, 4), report: None, cluster_scoped: false, admin_details: false,
     },
     Descriptor {
         id: VOLUME_DAILY, name: "Daily volume collection", kind: JobKind::Automatic, owner: Owner::Worker,
         schedule: "once a day at each cluster's collectAt, server local time (volume settings)",
-        next_run: NextRun::VolumeDaily, priority: Priority::Medium, pausable: true, requests: req(1, 4), report: None, admin_details: false,
+        next_run: NextRun::VolumeDaily, priority: Priority::Medium, pausable: true, requests: req(1, 4), report: None, cluster_scoped: true, admin_details: false,
     },
     Descriptor {
         id: HOSTS_COLLECT, name: "Hosts collection", kind: JobKind::Automatic, owner: Owner::Worker,
         schedule: "daily from UI_REPORT_HOSTS_AT (06:00) for clusters missing days of the month, at most three tries a cluster a day",
-        next_run: NextRun::HostsDaily, priority: Priority::Medium, pausable: true, requests: req(1, 2), report: None, admin_details: false,
+        next_run: NextRun::HostsDaily, priority: Priority::Medium, pausable: true, requests: req(1, 2), report: None, cluster_scoped: true, admin_details: false,
     },
     Descriptor {
         id: REPORT_RUN, name: "Report runs", kind: JobKind::Manual, owner: Owner::Worker,
         schedule: "when a person asks (Reports, REPORT_RUN); queued, 3 to 5 at once (REPORT_CONCURRENCY_SET)",
-        next_run: NextRun::OnRequest, priority: Priority::Medium, pausable: false, requests: req(1, 4), report: None, admin_details: false,
+        next_run: NextRun::OnRequest, priority: Priority::Medium, pausable: false, requests: req(1, 4), report: None, cluster_scoped: true, admin_details: false,
     },
     mailed(MAILED_VOLUME, "Mailed volume report", ReportKind::Volume),
     mailed(MAILED_INDICES, "Mailed indices report", ReportKind::Indices),
@@ -229,27 +233,27 @@ pub static REGISTRY: [Descriptor; 13] = [
     Descriptor {
         id: HISTORY_MIRROR, name: "History store mirror", kind: JobKind::Automatic, owner: Owner::Core,
         schedule: "every minute while HISTORY_STORE_WRITES and the admin switch are both on and something is queued",
-        next_run: NextRun::EveryMinute, priority: Priority::Low, pausable: true, requests: req(1, 2), report: None, admin_details: true,
+        next_run: NextRun::EveryMinute, priority: Priority::Low, pausable: true, requests: req(1, 2), report: None, cluster_scoped: false, admin_details: true,
     },
     Descriptor {
         id: HOUSEKEEPING, name: "Housekeeping", kind: JobKind::Automatic, owner: Owner::Core,
         schedule: "every ELASTICPRO_HOUSEKEEPING_MINUTES (0 switches the timer off)",
-        next_run: NextRun::Housekeeping, priority: Priority::Low, pausable: true, requests: req(1, 1), report: None, admin_details: true,
+        next_run: NextRun::Housekeeping, priority: Priority::Low, pausable: true, requests: req(1, 1), report: None, cluster_scoped: false, admin_details: true,
     },
     Descriptor {
         id: SETTINGS_BACKUP, name: "Settings backup", kind: JobKind::Automatic, owner: Owner::Core,
         schedule: "the backup schedule (Config-Management › Backup, BACKUP_SCHEDULE_SET), server local time",
-        next_run: NextRun::Backup, priority: Priority::Medium, pausable: true, requests: req(1, 4), report: None, admin_details: true,
+        next_run: NextRun::Backup, priority: Priority::Medium, pausable: true, requests: req(1, 4), report: None, cluster_scoped: false, admin_details: true,
     },
     Descriptor {
         id: ZABBIX_SYNC, name: "Zabbix sync", kind: JobKind::Automatic, owner: Owner::Core,
         schedule: "every sync interval (Config → Zabbix) while the Zabbix API is configured; also at start and after the link changes",
-        next_run: NextRun::ZabbixSync, priority: Priority::Low, pausable: true, requests: req(1, 2), report: None, admin_details: true,
+        next_run: NextRun::ZabbixSync, priority: Priority::Low, pausable: true, requests: req(1, 2), report: None, cluster_scoped: false, admin_details: true,
     },
     Descriptor {
         id: ZABBIX_PUSH, name: "Zabbix push", kind: JobKind::Automatic, owner: Owner::Core,
         schedule: "every minute while ZABBIX_METRICS_HOST names a host",
-        next_run: NextRun::ZabbixPush, priority: Priority::Low, pausable: true, requests: req(1, 2), report: None, admin_details: true,
+        next_run: NextRun::ZabbixPush, priority: Priority::Low, pausable: true, requests: req(1, 2), report: None, cluster_scoped: false, admin_details: true,
     },
 ];
 
@@ -800,8 +804,8 @@ pub fn from_report_job(j: &Job) -> RunRecord {
         started_at: j.started_at.map(ms), ended_at: j.ended_at.map(ms),
         done: counted.then_some(j.progress.done), total: counted.then_some(j.progress.total),
         records: j.progress.rows, error: j.error.clone().or_else(|| j.mail_error.clone()),
-        // Exactly the list REPORT_JOBS decides visibility on, so the two answers agree.
-        clusters: j.cluster_ids.clone(), note,
+        // Exactly what REPORT_JOBS decides visibility on (`Job::covered`); not known is `*`.
+        clusters: j.covered().unwrap_or_else(|| vec![crate::report::jobs::ALL_CLUSTERS.to_string()]), note,
     }
 }
 
@@ -819,11 +823,15 @@ pub struct Reader<'a> {
 }
 
 /// A run as `who` may read it, or `None` when they may not: only a caller who sees every
-/// cluster the run touched reads it at all (`report::jobs::sees_every`, the REPORT_JOBS rule);
-/// a run about no cluster is everybody's who may read the list. An admin-only job's error and
+/// cluster the run touched reads it at all (`report::jobs::may_read`, the REPORT_JOBS rule); a
+/// run of a job about no cluster is everybody's who may read the list; a run whose clusters are
+/// not known (`*`, or none on a cluster-scoped job) is an administrator's who sees every cluster. An admin-only job's error and
 /// note go to administrators only. `progress` is percent, or null when the total is not known.
 pub fn run_view(owner: Owner, r: &RunRecord, who: Reader<'_>) -> Option<Value> {
-    if !crate::report::jobs::sees_every(who.view.visible.as_ref(), &r.clusters) {
+    // A cluster-scoped job's run (or an unknown job's) that names no cluster: not known.
+    let unknown = r.clusters.is_empty() && descriptor(&r.job_id).is_none_or(|d| d.cluster_scoped);
+    let covered = (!unknown).then_some(r.clusters.as_slice());
+    if !crate::report::jobs::may_read(who.view.visible.as_ref(), who.admin, covered) {
         return None;
     }
     let hidden = !who.admin && descriptor(&r.job_id).is_some_and(|d| d.admin_details);
@@ -1154,7 +1162,20 @@ mod tests {
         }
         assert_eq!(run_view(Owner::Worker, &one_of_two, admin).unwrap()["clusters"], json!(["prod", "prod-b"]));
         // The same rule as REPORT_JOBS: one function.
-        assert!(!crate::report::jobs::sees_every(limited_view.visible.as_ref(), &["prod".into(), "prod-b".into()]));
+        assert!(!crate::report::jobs::may_read(limited_view.visible.as_ref(), true, Some(&["prod".into(), "prod-b".into()])));
+
+        // Clusters not known fail closed: `*`, or none on a cluster-scoped job, is an
+        // administrator's who sees every cluster — not a limited admin's, not a user's.
+        let user_all = Reader { view: &all_view, admin: false };
+        let star = rec(REPORT_RUN, "s", 5, RunStatus::Completed, &["*"]);
+        let blank = rec(VOLUME_DAILY, "b", 6, RunStatus::Completed, &[]);
+        for r in [&star, &blank] {
+            assert!(run_view(Owner::Worker, r, admin).is_some(), "{}", r.id);
+            assert!(run_view(Owner::Worker, r, limited).is_none(), "{}: a limited admin", r.id);
+            assert!(run_view(Owner::Worker, r, user_all).is_none(), "{}: a user", r.id);
+        }
+        assert!(run_view(Owner::Core, &rec(HOUSEKEEPING, "h", 7, RunStatus::Completed, &[]), user_all).is_some(),
+                "a job about no cluster stays everybody's");
 
         // The page, the open run and the last run go through the same view.
         let runs = vec![(Owner::Core, fleet), (Owner::Worker, both_seen), (Owner::Worker, theirs), (Owner::Worker, one_of_two)];
@@ -1221,6 +1242,35 @@ mod tests {
         assert_eq!((s.job_id.as_str(), s.trigger.clone(), s.status), (REPORT_RUN, Trigger::manual("Admin"), RunStatus::Cancelled));
         assert_eq!(s.note.as_deref(), Some("stopped by root"));
         assert_eq!(s.clusters, vec!["a", "b"]);
+
+        // A job from before `clusterIds`: its one `clusterId` is what it covers.
+        let sv = SinkView { visible: Some(["a".to_string()].into()) };
+        let limited = Reader { view: &sv, admin: false };
+        j.cluster_ids = vec![];
+        j.cluster_id = "a".into();
+        assert_eq!(j.covered(), Some(vec!["a".to_string()]));
+        let legacy = from_report_job(&j);
+        assert_eq!(legacy.clusters, vec!["a"]);
+        assert!(run_view(Owner::Worker, &legacy, limited).is_some(), "they see a");
+        j.cluster_id = "b".into();
+        assert!(run_view(Owner::Worker, &from_report_job(&j), limited).is_none(), "not b's, which they do not see");
+        // No cluster named at all, or `*`: not known — an administrator's who sees every cluster.
+        let all = SinkView::default();
+        let admin = Reader { view: &all, admin: true };
+        let user = Reader { view: &all, admin: false };
+        for (ids, one) in [(vec![], ""), (vec!["*".to_string()], "a"), (vec![], "*")] {
+            j.cluster_ids = ids;
+            j.cluster_id = one.into();
+            assert_eq!(j.covered(), None, "{:?} / {one:?}", j.cluster_ids);
+            let r = from_report_job(&j);
+            assert_eq!(r.clusters, vec!["*"]);
+            assert!(run_view(Owner::Worker, &r, admin).is_some());
+            assert!(run_view(Owner::Worker, &r, user).is_none(), "a user who sees every cluster still does not read it");
+            assert!(run_view(Owner::Worker, &r, limited).is_none());
+            // REPORT_JOBS's rule is the same function.
+            assert!(!crate::report::jobs::may_read(None, false, j.covered().as_deref()));
+            assert!(crate::report::jobs::may_read(None, true, j.covered().as_deref()));
+        }
     }
 
     #[test]

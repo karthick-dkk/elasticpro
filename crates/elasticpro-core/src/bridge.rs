@@ -358,6 +358,11 @@ struct Sink {
     state: SinkState,
 }
 
+/// How long `ZABBIX_SYNC` waits for a sync already going before answering `already_running`.
+const ZBX_SYNC_WAIT_PERSON: std::time::Duration = std::time::Duration::from_secs(60);
+/// How long the sync after a link change waits for one already going.
+const ZBX_SYNC_WAIT_FOLLOW_UP: std::time::Duration = std::time::Duration::from_secs(120);
+
 /// The window the request counter reports over.
 pub const REQUEST_WINDOW: std::time::Duration = std::time::Duration::from_secs(5 * 60);
 
@@ -1367,7 +1372,12 @@ impl Core {
             "SSO_EXCHANGE" => self.sso_exchange(&msg),
             "CONFIG_VIEW" => self.config_view(caller.as_ref()).await,
             "ZABBIX_CLUSTERS" => self.zabbix_clusters(caller.as_ref()),
-            "ZABBIX_SYNC" => self.zabbix_sync_as(crate::jobs::Trigger::manual(caller.as_ref().map(|c| c.name.as_str()).unwrap_or("local"))).await,
+            // A sync already going (the timer's, or one a link change started) is waited for —
+            // it may have read the old state — then this one runs (docs/JOBS.md).
+            "ZABBIX_SYNC" => {
+                let who = crate::jobs::Trigger::manual(caller.as_ref().map(|c| c.name.as_str()).unwrap_or("local"));
+                self.zabbix_sync_after_open(who, ZBX_SYNC_WAIT_PERSON).await
+            }
             "ZABBIX_METRICS" => self.zabbix_metrics(&msg).await,
             "ZABBIX_LINK_GET" | "ZABBIX_LINK_SET" | "ZABBIX_LINK_TEST" | "ZABBIX_PAIR_BEGIN" | "ZABBIX_UNPAIR" => {
                 self.zabbix_link_msg(&t, &msg, caller.as_ref()).await
@@ -4644,6 +4654,19 @@ impl Core {
                        configured = self.zbx_api().configured(), template = self.zbx_api().template(), "zabbix sync: timer started");
     }
 
+    /// A sync that must see what is configured now: one already going is waited for, at most
+    /// `wait`, and then this one runs; still going after `wait`, the answer is `already_running`.
+    pub(crate) async fn zabbix_sync_after_open(self: &Arc<Self>, trigger: crate::jobs::Trigger, wait: std::time::Duration) -> Value {
+        let until = std::time::Instant::now() + wait;
+        loop {
+            let out = self.zabbix_sync_as(trigger.clone()).await;
+            if out["kind"] != json!("already_running") || std::time::Instant::now() >= until {
+                return out;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        }
+    }
+
     /// A sync the product started on its own (its timer, the start, a reload). See
     /// `zabbix_sync_as`.
     pub async fn zabbix_sync(self: &Arc<Self>) -> Value {
@@ -5634,14 +5657,7 @@ impl Core {
         let core = self.clone();
         tokio::spawn(async move {
             // A sync already going read the old link: wait for it (bounded), then sync again.
-            let mut out = core.zabbix_sync().await;
-            for _ in 0..120 {
-                if out["kind"] != json!("already_running") {
-                    break;
-                }
-                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-                out = core.zabbix_sync().await;
-            }
+            let out = core.zabbix_sync_after_open(crate::jobs::Trigger::Timer, ZBX_SYNC_WAIT_FOLLOW_UP).await;
             tracing::info!(result = %out, "zabbix sync after a link change");
         });
     }

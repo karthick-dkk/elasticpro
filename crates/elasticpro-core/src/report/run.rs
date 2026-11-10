@@ -239,10 +239,12 @@ impl Core {
 
     /* ---------------------------------------- the queue ---------------------------------------- */
 
-    /// A job is shown to whoever sees every cluster it covers.
+    /// A job is shown to whoever sees every cluster it covers; one whose clusters are not known
+    /// only to an administrator who sees every cluster (`jobs::may_read`, JOBS_LIST's rule too).
     fn report_visible(&self, caller: Option<&Caller>) -> impl Fn(&Job) -> bool {
         let vis = self.visible_ids(caller);
-        move |j: &Job| super::jobs::sees_every(vis.as_ref(), &j.cluster_ids)
+        let admin = caller.is_none_or(|c| c.role >= Role::Admin);
+        move |j: &Job| super::jobs::may_read(vis.as_ref(), admin, j.covered().as_deref())
     }
 
     /// `REPORT_RUN {clusterIds, period, format, mail}`: one job per cluster. At most

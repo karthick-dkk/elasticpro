@@ -265,6 +265,20 @@ pub struct FailedCluster {
 }
 
 impl Job {
+    /// The clusters the job covers: `cluster_ids`, or the single `cluster_id` of a job written
+    /// before the list existed. `None` when neither names one, or either holds `*`: a report is
+    /// always about clusters, so not knowing which is not "none" (see `may_read`).
+    pub fn covered(&self) -> Option<Vec<String>> {
+        let ids = if !self.cluster_ids.is_empty() {
+            self.cluster_ids.clone()
+        } else if !self.cluster_id.trim().is_empty() {
+            vec![self.cluster_id.clone()]
+        } else {
+            vec![]
+        };
+        (!ids.is_empty() && !ids.iter().any(|c| c == ALL_CLUSTERS || c.trim().is_empty())).then_some(ids)
+    }
+
     /// A job as it is queued. `id` and `seq` are set by `Queue::push`. Every argument is
     /// one of the contract's fields; a builder would only rename them.
     #[allow(clippy::too_many_arguments)]
@@ -279,11 +293,25 @@ impl Job {
     }
 }
 
+/// What stands for "every cluster" in a list of clusters: never a cluster a limited caller sees.
+pub const ALL_CLUSTERS: &str = "*";
+
 /// Whether a caller who sees `visible` (`None`: every cluster) may read something about
 /// `cluster_ids`: only when they see every one of them. Something about no cluster is
-/// everybody's. The one rule for a report job (REPORT_JOBS) and a job run (JOBS_LIST).
+/// everybody's. Pure set arithmetic; `may_read` is the rule built on it.
 pub fn sees_every(visible: Option<&std::collections::HashSet<String>>, cluster_ids: &[String]) -> bool {
     visible.is_none_or(|v| cluster_ids.iter().all(|c| v.contains(c)))
+}
+
+/// The one rule for a report job (REPORT_JOBS) and a job run (JOBS_LIST). `covered`: the
+/// clusters it is about — `Some(&[])` for something about no cluster (everybody's), `None` when
+/// they are not known (a cluster-scoped record with none, or `*`). Not known fails closed: an
+/// administrator who sees every cluster reads it, nobody else.
+pub fn may_read(visible: Option<&std::collections::HashSet<String>>, admin: bool, covered: Option<&[String]>) -> bool {
+    match covered {
+        Some(ids) if !ids.iter().any(|c| c == ALL_CLUSTERS) => sees_every(visible, ids),
+        _ => admin && visible.is_none(),
+    }
 }
 
 /// The error of a job that was running when the process ended.

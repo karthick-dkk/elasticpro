@@ -55,9 +55,11 @@ Each process holds one run per job open at most. Asked for a second, it answers
 ```
 
 `DELAY_SINK_RUN` while the timer's run goes (before, both ran at once and wrote the same hour
-twice), `ZABBIX_SYNC` while a sync runs, and `HOUSEKEEPING_RUN` while housekeeping runs (which
-answered `kind: "busy"` before). A timer tick that meets an open run leaves it be. The Zabbix
-sync after a link change waits for an open sync to end (at most two minutes), then syncs.
+twice) and `HOUSEKEEPING_RUN` while housekeeping runs (which answered `kind: "busy"` before). A
+timer tick that meets an open run leaves it be. A Zabbix sync must see what is configured now,
+so `ZABBIX_SYNC` waits for a sync already going (at most a minute) and then runs its own,
+answering `already_running` only if that one is still going; the sync after a link change does
+the same with two minutes. They no longer run side by side.
 
 The hosts collection's tries per cluster (three a day, 15 minutes apart) are kept in
 `<data>/job-runs/hosts-tries.json`: a restart no longer hands every cluster three more.
@@ -122,7 +124,7 @@ name clusters and carry their errors). Read-only; not in the activity log (a pol
     { "id": "logdelay.measure", "name": "Log delay measurement", "kind": "automatic", "owner": "core",
       "schedule": "every everyHours while armed (…, DELAY_SINK_SET); a failing run backs off",
       "nextRun": "delay_sink", "priority": "high", "pausable": true, "requests": { "min": 1, "max": 4 },
-      "report": null, "detailsFor": "user",
+      "report": null, "detailsFor": "user", "clusterScoped": false,
       "state": { "enabled": true, "paused": false,
                  "current": null, "activeRuns": 0,
                  "lastRun": { "id": "9f2c51ab03de4e17", "jobId": "logdelay.measure", "status": "completed", "…": "…" },
@@ -168,8 +170,13 @@ as every `DELAY_SINK_*` and `LOGDELAY_*` answer):
 
 - A run is listed only to a caller who sees **every** cluster in its `clusters`. A run about
   some of theirs and some not is not listed at all — there is no partial view of a run.
-- A run about no cluster (housekeeping, the history store, a backup, Zabbix) is listed to
+- A run of a job about no cluster (`clusterScoped: false`: the log delay measurement's
+  refusals, housekeeping, the history store, a backup, Zabbix) that names none is listed to
   everybody who may send `JOBS_LIST`.
+- **Not known fails closed.** A run whose clusters are not known — a cluster-scoped job's run
+  that names none, or one that names `*` — is listed only to an administrator who sees every
+  cluster. A report job covers its `clusterIds`, or, written before that list existed, its one
+  `clusterId` (`Job::covered`, the same for `REPORT_JOBS`); a report job naming neither is `*`.
 - The same holds for a job's `state.current`, `activeRuns` and `state.lastRun`: they are the
   newest runs the caller may read, so a limited caller may see an older last run, or none.
 - Jobs with `detailsFor: "admin"` (history store, housekeeping, settings backup, Zabbix sync and
