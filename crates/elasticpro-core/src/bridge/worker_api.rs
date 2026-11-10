@@ -30,6 +30,8 @@ pub(crate) struct WorkerSide {
     pub(crate) secrets: Watch,
     pub(crate) link: Watch,
     pub(crate) policy: Watch,
+    /// Edits made in ElasticPro to Zabbix clusters (`zbx_overlay`): the worker polls with them too.
+    pub(crate) overlay: Watch,
     started: AtomicBool,
     pub(crate) started_at: u64,
 }
@@ -51,6 +53,7 @@ impl WorkerSide {
             secrets: watch(crate::cluster_secrets::FILE),
             link: watch(crate::zbx_link::LINK_FILE),
             policy: watch(crate::fleet::policy::FILE_NAME),
+            overlay: watch(crate::zbx_overlay::FILE),
             started: AtomicBool::new(false),
             started_at: crate::fleet::now_ms(),
         };
@@ -309,8 +312,14 @@ impl Core {
         if self.worker.primed.changed(&d.join(super::PRIMED_FILE)) || secrets {
             self.restore_prime().await;
         }
+        let overlay = self.worker.overlay.changed(&d.join(crate::zbx_overlay::FILE));
+        if overlay {
+            self.zbx_overlay.reload();
+        }
         if (link || secrets) && self.zbx_api().configured() {
             self.zabbix_sync().await;
+        } else if overlay {
+            self.zabbix_rebuild().await;
         }
         self.fleet_policy_reload();
     }

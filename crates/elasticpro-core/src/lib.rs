@@ -49,6 +49,7 @@ pub mod volume;
 pub mod worker;
 pub mod zabbix_api;
 pub mod zbx_link;
+pub mod zbx_overlay;
 pub mod zbx_push;
 pub mod zbx_sso;
 #[cfg(feature = "vault")]
