@@ -517,9 +517,12 @@ impl Queue {
         out
     }
 
-    /// A job that does the same as `j` and has not ended (`JOB_CREATE`, `REPORT_RUN`): the
-    /// same report and kind, clusters, dates, file format, mail and collection choice. Asking
-    /// again joins it instead of queueing a second (docs/JOBS.md "Duplicates").
+    /// A job that does the same as `j` and has not ended (`JOB_CREATE`, `REPORT_RUN`): asked
+    /// for by the same person (or the same schedule), with the same report and kind, clusters,
+    /// dates, file format, mail, sheets, options and collection choice. Asking again joins it
+    /// instead of queueing a second (docs/JOBS.md "Duplicates"). Never another person's job:
+    /// its file, its download, its mail and its stop are its requester's, so a second person
+    /// always gets a job of their own.
     pub fn same_open(&self, j: &Job) -> Option<&Job> {
         let ids = |x: &Job| {
             let mut v = x.covered().unwrap_or_default();
@@ -527,7 +530,8 @@ impl Queue {
             v
         };
         let want = ids(j);
-        self.jobs.iter().find(|x| !x.status.finished() && x.report == j.report && x.kind == j.kind && ids(x) == want
+        self.jobs.iter().find(|x| !x.status.finished() && x.by == j.by && x.report == j.report && x.kind == j.kind && ids(x) == want
+            && x.sheets == j.sheets
             && x.period.from == j.period.from && x.period.to == j.period.to && x.format == j.format && x.mail == j.mail
             && x.collect_again == j.collect_again && x.options == j.options && x.schedule_id == j.schedule_id)
     }
@@ -563,6 +567,31 @@ mod tests {
     }
     fn status(q: &Queue, id: &str) -> Status {
         q.get(id).unwrap().status
+    }
+
+    #[test]
+    fn only_the_same_persons_same_job_is_joined() {
+        let mut q = Queue::default();
+        q.push(job("prod", "ann"), "a1".into());
+        assert_eq!(q.same_open(&job("prod", "ann")).map(|x| x.id.as_str()), Some("a1"), "the same person, the same report: joined");
+        assert!(q.same_open(&job("prod", "bob")).is_none(), "another person: a job of their own");
+        assert!(q.same_open(&job("dr", "ann")).is_none(), "another cluster");
+        let mut mailed = job("prod", "ann");
+        mailed.mail = true;
+        assert!(q.same_open(&mailed).is_none(), "another mail choice");
+        // A schedule's jobs: the same schedule only (its recipients are the schedule's).
+        let mut s1 = job("prod", crate::report::SCHEDULE_BY);
+        s1.kind = Kind::Mailed;
+        s1.schedule_id = Some("s1".into());
+        q.push(s1.clone(), "m1".into());
+        let mut s2 = s1.clone();
+        s2.schedule_id = Some("s2".into());
+        assert!(q.same_open(&s2).is_none(), "another schedule, other recipients");
+        s2.schedule_id = None;
+        assert!(q.same_open(&s2).is_none(), "the built-in schedule is another one");
+        assert_eq!(q.same_open(&s1).map(|x| x.id.as_str()), Some("m1"));
+        q.get_mut("a1").unwrap().status = Status::Done;
+        assert!(q.same_open(&job("prod", "ann")).is_none(), "an ended job is not joined");
     }
 
     #[test]

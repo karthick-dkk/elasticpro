@@ -528,10 +528,12 @@ async fn a_scheduled_report_the_emergency_stop_cuts_short_is_recorded_and_tried_
     assert_eq!((g["lastSent"]["ok"].as_bool(), g["lastSent"]["to"].as_u64()), (Some(true), Some(1)), "{g}");
 
     // A mailed report somebody stops while it waits is recorded too. Three jobs hold the
-    // three slots (this month runs to today, so each asks the cluster, one at a time).
-    let month = format!("month:{}", t.format("%Y-%m"));
-    for _ in 0..3 {
-        let r = c.handle(json!({ "type": "REPORT_RUN", "session": admin, "clusterIds": ["prod"], "period": month, "format": "csvzip" })).await;
+    // three slots (each period runs to today, so each asks the cluster, one at a time; three
+    // different periods, since the same report asked again joins the one queued).
+    for n in 1..=3 {
+        let from = (t - Duration::days(n)).format("%Y-%m-%d").to_string();
+        let to = t.format("%Y-%m-%d").to_string();
+        let r = c.handle(json!({ "type": "REPORT_RUN", "session": admin, "clusterIds": ["prod"], "period": { "from": from, "to": to }, "format": "csvzip" })).await;
         assert_eq!(r["ok"], true, "{r}");
     }
     let now = c.handle(json!({ "type": "REPORT_SEND_NOW", "session": admin, "period": "yesterday" })).await;
