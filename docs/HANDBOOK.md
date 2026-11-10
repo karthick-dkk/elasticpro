@@ -880,7 +880,7 @@ The short version of docs/VOLUME.md "Reports and mail". Code: `crates/elasticpro
 
 | Message | Role | Answer |
 |---|---|---|
-| `REPORT_RUN {clusterIds, period, format?, mail?}` | user | `{jobs: [Job], refused: [{clusterId, reason}]}`; `period` = `{from, to}`, `"month:YYYY-MM"`, `"yesterday"`, `"last7"`; `kind: too_many_jobs` / `too_many_mails` refuses the whole request |
+| `REPORT_RUN {clusterIds, period, format?, mail?}` | user | `{jobs: [Job], refused: [{clusterId, reason}], joined?}`; `period` = `{from, to}`, `"month:YYYY-MM"`, `"yesterday"`, `"last7"`; `kind: too_many_jobs` / `too_many_mails` refuses the whole request. The same report already queued or running is joined, not queued again (`joined: ["report-<id>"]`; docs/JOBS.md "Duplicates") |
 | `REPORT_JOBS` | user | `{jobs, concurrency, running, queued}` — jobs of the clusters the caller sees, newest first |
 | `REPORT_STOP {id}` / `{all: true}` | admin | `{stopped: [ids ended now], stopping: [ids asked]}`; audited |
 | `REPORT_CLEAR` | user | `{removed}` — the caller's finished jobs (admin: all) and their files |
@@ -891,7 +891,10 @@ The short version of docs/VOLUME.md "Reports and mail". Code: `crates/elasticpro
 | `MAIL_TEST {to}` | admin | `{ok, steps: [{step: connect\|tls\|auth\|send, ok, detail}]}`, `kind: smtp_failed` and `message` when a step failed |
 | `REPORT_SCHEDULE_GET` | admin | `{enabled, to, cc, bcc, schedule, at, clusters, subject, sheets, lastSent, managed, timer, nextSendAt, mailConfigured, nextPeriod: {from, to, label}}` — `nextPeriod` is what the next send covers (manual: `REPORT_SEND_NOW`'s default) |
 | `REPORT_SCHEDULE_SET {…}` | admin | as GET |
-| `REPORT_SEND_NOW {period?}` | admin | `{job}` — the schedule's period, or the current month so far for a manual one |
+| `REPORT_SEND_NOW {period?}` | admin | `{job, runId}` — the schedule's period, or the current month so far for a manual one |
+
+Schedules of their own beside the built-in one of each kind, run now, cancel, retry and pause:
+the job controls, docs/JOBS.md "Controls" (`JOB_*`).
 
 `Job = {id, kind: cluster|mailed, clusterId ("*" for mailed), clusterName, clusterIds, period: {from, to, label}, format, mail, by, createdAt, startedAt, endedAt, status, progress: {done, total}, file: {name, bytes} | null, error, mailError, stoppedBy, warning, sheets?, stopping}`.
 

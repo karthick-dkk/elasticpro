@@ -272,6 +272,11 @@ impl Core {
                 return every;
             }
         };
+        // Paused (docs/JOBS.md): nothing is pushed, and not a run.
+        if let Some(h) = self.jobs.held(crate::jobs::ZABBIX_PUSH) {
+            self.zbx_push.lock().idle = Some(h.text());
+            return every;
+        }
         // A push is a run (docs/JOBS.md); an idle minute is not. One loop, so one at a time.
         let logged = self.jobs.begin(crate::jobs::ZABBIX_PUSH, crate::jobs::Trigger::Timer, vec![], now_ms()).ok();
         // Read, then let go of everything, then push.

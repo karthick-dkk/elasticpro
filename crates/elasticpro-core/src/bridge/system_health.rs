@@ -42,6 +42,8 @@ impl Core {
     }
 
     fn health_sample_now(&self, now: u64) {
+        // Role core: the busy clusters for the worker, which has no poller (docs/JOBS.md).
+        self.publish_busy(now);
         let n = self.health.samples.fetch_add(1, Ordering::SeqCst);
         let worker = self.health_worker(now);
         let own_p95 = self.health.times.lock().window(1, now).own.p95_ms;

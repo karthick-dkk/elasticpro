@@ -292,22 +292,33 @@ impl Core {
             job.volume = volume.clone();
             jobs.push(job);
         }
-        let queued: Result<Vec<String>, (&str, String)> = self.reports.with(|q| {
-            let n = jobs.len();
+        // A cluster whose same report is already queued or running joins it (docs/JOBS.md
+        // "Duplicates"); the rest queue.
+        type Queued = (Vec<String>, Vec<String>);
+        let queued: Result<Queued, (&str, String)> = self.reports.with(|q| {
+            let (same, fresh): (Vec<Job>, Vec<Job>) = jobs.into_iter().partition(|j| q.same_open(j).is_some());
+            let joined: Vec<String> = same.iter().filter_map(|j| q.same_open(j)).map(|x| x.id.clone()).collect();
+            let n = fresh.len();
             let mailed = if mail { n } else { 0 };
-            q.room(&by, n, mailed, now_ms())?;
-            q.note_mailed(&by, mailed, now_ms());
-            Ok(jobs.into_iter().map(|j| q.push(j, crate::auth::random_hex(8))).collect())
+            if n > 0 {
+                q.room(&by, n, mailed, now_ms())?;
+                q.note_mailed(&by, mailed, now_ms());
+            }
+            Ok((fresh.into_iter().map(|j| q.push(j, crate::auth::random_hex(8))).chain(joined.clone()).collect(), joined))
         });
-        let ids = match queued {
-            Ok(ids) => ids,
+        let (ids, joined) = match queued {
+            Ok(x) => x,
             Err((kind, message)) => return bad(kind, message),
         };
         self.report_pump();
         tracing::info!(user = %by, jobs = ids.len(), period = %period.label, "volume report: queued");
         let q = self.reports.queue.lock();
         let out: Vec<Value> = ids.iter().filter_map(|id| q.get(id)).map(job_view).collect();
-        json!({ "ok": true, "jobs": out, "refused": refused })
+        let mut v = json!({ "ok": true, "jobs": out, "refused": refused });
+        if !joined.is_empty() {
+            v["joined"] = json!(joined.iter().map(|id| format!("report-{id}")).collect::<Vec<_>>());
+        }
+        v
     }
 
     fn report_jobs(self: &Arc<Self>, caller: Option<&Caller>) -> Value {
@@ -329,7 +340,7 @@ impl Core {
     }
 
     /// `REPORT_STOP {id}` or `{all:true}` (admin).
-    fn report_stop(&self, msg: &Value, caller: Option<&Caller>) -> Value {
+    pub(crate) fn report_stop(&self, msg: &Value, caller: Option<&Caller>) -> Value {
         let by = who(caller);
         let which = if msg.get("all").and_then(Value::as_bool) == Some(true) {
             Which::All
@@ -1230,6 +1241,14 @@ The files {} ({}) are larger than the {cap_mb} MB a mail may carry (UI_REPORT_MA
     /// Queue a mailed report (one job, one workbook for all its clusters). A person's
     /// (`REPORT_SEND_NOW`) counts toward their waiting jobs; the schedule's does not.
     fn report_queue_mailed(self: &Arc<Self>, kind: ReportKind, ids: Vec<String>, p: Period, s: &ReportSchedule, by: &str) -> Result<String, (&'static str, String)> {
+        self.report_queue_mailed_for(kind, ids, p, s, by, None)
+    }
+
+    /// `report_queue_mailed` for a created schedule (`schedule`: its id) or the built-in one
+    /// (`None`). A schedule's job for a period its last job of the same schedule did not send
+    /// (the period was given back) is recorded as that job's retry (docs/JOBS.md "Retry").
+    pub(super) fn report_queue_mailed_for(self: &Arc<Self>, kind: ReportKind, ids: Vec<String>, p: Period, s: &ReportSchedule, by: &str,
+                                          schedule: Option<&str>) -> Result<String, (&'static str, String)> {
         let name = match ids.as_slice() {
             [one] => self.spec_for(one).and_then(|x| x.name).unwrap_or_else(|| one.clone()),
             many => format!("{} clusters", many.len()),
@@ -1237,12 +1256,18 @@ The files {} ({}) are larger than the {cap_mb} MB a mail may carry (UI_REPORT_MA
         let mut job = Job::new(Kind::Mailed, ids, name, p, Format::Xlsx, true, by, now_ms());
         job.cluster_id = "*".into();
         job.report = kind;
+        job.schedule_id = schedule.map(String::from);
         if kind == ReportKind::Volume {
             job.sheets = s.sheets.clone();
         }
         let id = self.reports.with(|q| {
             if by != SCHEDULE_BY {
                 q.room(by, 1, 0, now_ms())?;
+            } else if let Some(prev) = q.jobs.iter().filter(|x| x.kind == Kind::Mailed && x.by == SCHEDULE_BY && x.report == kind
+                    && x.schedule_id == job.schedule_id && x.period.from == job.period.from && x.period.to == job.period.to
+                    && matches!(x.status, Status::Failed | Status::Stopped)).max_by_key(|x| x.seq) {
+                job.retry_of = Some(prev.id.clone());
+                job.attempt = prev.attempt + 1;
             }
             Ok(q.push(job, crate::auth::random_hex(8)))
         })?;
@@ -1253,7 +1278,69 @@ The files {} ({}) are larger than the {cap_mb} MB a mail may carry (UI_REPORT_MA
     /// `REPORT_SEND_NOW {kind?, period?}` (admin): a kind's mailed report for the current
     /// settings, at once. Without a period: the schedule's (previous month, previous week,
     /// yesterday, or the month so far); for a manual schedule, its manual period.
-    fn report_send_now(self: &Arc<Self>, kind: ReportKind, msg: &Value, caller: Option<&Caller>) -> Value {
+    /// `JOB_RUN report.schedule.<id>`: a created schedule's report, at once, for its own
+    /// clusters, period and recipients (as `REPORT_SEND_NOW` is for the built-in one).
+    pub(crate) fn report_send_now_created(self: &Arc<Self>, id: &str, caller: Option<&Caller>) -> Value {
+        let Some((c, e)) = self.reports.created_view().into_iter().find(|(c, _)| c.job_id() == id || c.id == id) else {
+            return bad("not_found", format!("no created schedule {id:?}"));
+        };
+        if let Some(p) = self.mail_effective().problem() {
+            return bad("not_configured", p);
+        }
+        let ids = self.report_schedule_clusters(&e);
+        if ids.is_empty() {
+            return bad("bad_request", "no cluster to report on");
+        }
+        let by = who(caller);
+        let p = rsched::send_now_period(&e, Clock::now());
+        match self.report_queue_mailed_for(c.report, ids, p, &e, &by, Some(&c.id)) {
+            Ok(jid) => {
+                tracing::info!(target: "audit", user = %by, job = %jid, schedule = %c.id, "report schedule: send now");
+                let q = self.reports.queue.lock();
+                json!({ "ok": true, "job": q.get(&jid).map(job_view), "runId": format!("report-{jid}") })
+            }
+            Err((k, m)) => bad(k, m),
+        }
+    }
+
+    /// `JOB_RETRY report-<id>`: a failed or stopped report job queued again with the same
+    /// clusters, dates, format, mail and options, `trigger: retry`, within the retry policy
+    /// (`retry`: the attempt it would be and when it may start).
+    pub(crate) fn report_retry(self: &Arc<Self>, id: &str, caller: Option<&Caller>, policy: &crate::jobs::controls::Overall) -> Value {
+        let Some(j) = self.reports.snapshot().get(id).cloned() else { return bad("not_found", format!("no run report-{id}")) };
+        if !matches!(j.status, Status::Failed | Status::Stopped) {
+            return bad("bad_request", format!("only a failed or cancelled run is tried again; report-{id} is {:?}", j.status).to_lowercase());
+        }
+        if let Some(r) = crate::jobs::retry_refusal(j.attempt, j.ended_at.map(|t| t.max(0) as u64), policy, crate::fleet::now_ms()) {
+            return r;
+        }
+        let by = who(caller);
+        let mut n = Job::new(j.kind, j.cluster_ids.clone(), j.cluster_name.clone(), j.period.clone(), j.format, j.mail, &by, now_ms());
+        n.cluster_id = j.cluster_id.clone();
+        n.report = j.report;
+        n.sheets = j.sheets.clone();
+        n.collect_again = j.collect_again;
+        n.options = j.options.clone();
+        n.volume = j.volume.clone();
+        n.schedule_id = j.schedule_id.clone();
+        n.retry_of = Some(j.id.clone());
+        n.attempt = j.attempt + 1;
+        let queued = self.reports.with(|q| {
+            q.room(&by, 1, usize::from(n.mail), now_ms())?;
+            q.note_mailed(&by, usize::from(n.mail), now_ms());
+            Ok::<String, (&'static str, String)>(q.push(n, crate::auth::random_hex(8)))
+        });
+        let nid = match queued {
+            Ok(x) => x,
+            Err((k, m)) => return bad(k, m),
+        };
+        self.report_pump();
+        tracing::info!(target: "audit", user = %by, job = %nid, retry_of = %id, "report: retried");
+        let q = self.reports.queue.lock();
+        json!({ "ok": true, "runId": format!("report-{nid}"), "retryOf": format!("report-{id}"), "job": q.get(&nid).map(job_view) })
+    }
+
+    pub(crate) fn report_send_now(self: &Arc<Self>, kind: ReportKind, msg: &Value, caller: Option<&Caller>) -> Value {
         let (e, _) = self.report_schedule_effective(kind);
         if e.to.is_empty() {
             return bad("bad_request", "no recipients: set them in this report's schedule");
@@ -1281,7 +1368,7 @@ The files {} ({}) are larger than the {cap_mb} MB a mail may carry (UI_REPORT_MA
         };
         tracing::info!(target: "audit", user = %by, job = %id, report = kind.as_str(), "volume report: send now");
         let q = self.reports.queue.lock();
-        json!({ "ok": true, "job": q.get(&id).map(job_view) })
+        json!({ "ok": true, "job": q.get(&id).map(job_view), "runId": format!("report-{id}") })
     }
 
     /* ---------------------------------------- the timer ---------------------------------------- */
@@ -1377,6 +1464,11 @@ The files {} ({}) are larger than the {cap_mb} MB a mail may carry (UI_REPORT_MA
         }
         let mut first = None;
         for kind in ReportKind::ALL {
+            // Paused or off (docs/JOBS.md): not marked, so a period still current when it is
+            // resumed goes out then.
+            if self.jobs.held(crate::jobs::mailed_id(kind)).is_some() {
+                continue;
+            }
             let (e, _) = self.report_schedule_effective(kind);
             let collected = e.schedule != Cadence::Daily || self.report_daily_collected(kind, &e, clock.local);
             let Some(p) = rsched::due(&e, clock, collected) else { continue };
@@ -1392,6 +1484,26 @@ The files {} ({}) are larger than the {cap_mb} MB a mail may carry (UI_REPORT_MA
             }
             tracing::info!(period = %p.label, clusters = ids.len(), report = kind.as_str(), "volume report: the mailed report is due");
             if let Ok(id) = self.report_queue_mailed(kind, ids, p, &e, SCHEDULE_BY) {
+                first.get_or_insert(id);
+            }
+        }
+        // The schedules people created (JOB_CREATE): the same rules, each its own state.
+        for (c, e) in self.reports.created_view() {
+            if self.jobs.held(&c.job_id()).is_some() {
+                continue;
+            }
+            let collected = e.schedule != Cadence::Daily || self.report_daily_collected(c.report, &e, clock.local);
+            let Some(p) = rsched::due(&e, clock, collected) else { continue };
+            let ids = self.report_schedule_clusters(&e);
+            if ids.is_empty() {
+                continue;
+            }
+            if let Err(err) = self.reports.with_created_state(&c.id, |f| f.last_period = Some(rsched::period_key(&p))) {
+                tracing::warn!(error = %err, schedule = %c.id, "report schedule: could not be marked; not sending, to avoid sending twice");
+                continue;
+            }
+            tracing::info!(period = %p.label, clusters = ids.len(), report = c.report.as_str(), schedule = %c.id, "report schedule: due");
+            if let Ok(id) = self.report_queue_mailed_for(c.report, ids, p, &e, SCHEDULE_BY, Some(&c.id)) {
                 first.get_or_insert(id);
             }
         }

@@ -42,7 +42,8 @@ file that is mid-rename by retrying once.
   the first container to start writes to `<data>/worker/token` (0600, random 32 bytes; the
   other reads it). Endpoints: `POST /run` (REPORT_RUN, VOLUME_RUN, hosts Run now — the core
   checks permissions, visibility and the per-person/mail/5-cluster limits first and passes
-  `by`), `POST /send-now`, `POST /stop` (a job), `GET /health`.
+  `by`), `POST /send-now`, `POST /stop` (a job), `POST /job` (the job controls of the worker's
+  jobs, docs/JOBS.md), `GET /health`.
 - Reads never go to the worker: the core reads the files above.
 - **Worker down or unreachable**: the core answers `worker_unavailable` ("the report worker is
   not running — reports and collection resume when it is back"); Exports and Reports show it in
@@ -107,7 +108,10 @@ Decisions made while building, within the contract:
   never seeds the first account; its own instance file is `instance-worker.json`.
 - **Endpoints**: `POST /run` (`REPORT_RUN`, `VOLUME_RUN`), `/send-now` (`REPORT_SEND_NOW`),
   `/stop` (`REPORT_STOP`) and, beyond the contract, `/queue` (`REPORT_CLEAR`,
-  `REPORT_CONCURRENCY_SET` — they write `jobs.json`, which is the worker's alone); `GET /health`
+  `REPORT_CONCURRENCY_SET` — they write `jobs.json`, which is the worker's alone), `/job`
+  (`JOB_RUN`, `JOB_CANCEL`, `JOB_RETRY` of the worker's jobs and runs — docs/JOBS.md
+  "Controls"; the settings, `job-runs/controls.json`, are the core's file, which the worker's
+  timers read); `GET /health`
   (`{ok, role, version, startedAt, running, queued}`, no token, for the compose healthcheck). A
   body is `{type, msg, caller: {name, role, scope}}`; headers `x-elasticpro-worker-token` and
   `x-elasticpro-version`. Wrong token → 401; another version → 409 `worker_version` (EP-219).

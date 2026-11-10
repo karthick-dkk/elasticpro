@@ -23,6 +23,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 /// JOBS_LIST (docs/JOBS.md): the job registry, the run log and each job's next run.
+mod job_controls;
 mod jobs_api;
 /// SYSTEM_HEALTH and the minute task (docs/HEALTH.md); a child module so it reads what the core
 /// holds without widening any field.
@@ -327,6 +328,9 @@ pub struct Core {
     pub(crate) worker: worker_api::WorkerSide,
     /// Every job's runs and the one-run-at-a-time guard (docs/JOBS.md). See `jobs`.
     pub(crate) jobs: Arc<crate::jobs::Jobs>,
+    /// What this process saw of each cluster's load (`jobs::load`): busy clusters defer
+    /// background work, never a person's request.
+    pub(crate) load: crate::jobs::load::LoadView,
 }
 
 /// What the last Zabbix sync found. The specs carry credentials and never leave the core;
@@ -907,6 +911,7 @@ impl Core {
             role,
             worker: worker_api::WorkerSide::new(data_dir_for_worker.as_deref(), role),
             jobs: crate::jobs::Jobs::open(data_dir_for_jobs.as_deref(), role, crate::fleet::now_ms()),
+            load: crate::jobs::load::LoadView::default(),
         })
     }
 
@@ -1642,6 +1647,9 @@ impl Core {
             "SYSTEM_HEALTH" => self.system_health(caller.as_ref()).await,
             // Jobs (docs/JOBS.md): the registry, each job's state and the run log.
             "JOBS_LIST" => self.jobs_list(&msg, caller.as_ref()).await,
+            // The job controls (docs/JOBS.md): run now, pause, resume, cancel, retry, create, settings.
+            "JOB_RUN" | "JOB_PAUSE" | "JOB_RESUME" | "JOB_CANCEL" | "JOB_RETRY" | "JOB_CREATE" | "JOB_DELETE"
+            | "JOB_SETTINGS_GET" | "JOB_SETTINGS_SET" => self.job_msg(&t, &msg, caller.as_ref()).await,
             "PINS" => {
                 self.refresh_trust_switch().await;
                 json!({ "ok": true, "pins": self.pins_for(caller.as_ref()) })
@@ -4158,6 +4166,14 @@ impl Core {
         // never answered from a reading, never joined to somebody else's request.
         let exempt = req.purpose.as_deref().is_some_and(crate::fleet::policy::gap_exempt) || origin == "console";
         let shareable = req.class == Class::Interactive && read && req.auth_header.is_none() && own_address && !req.allow_writes && !exempt;
+        // Background reads (docs/JOBS.md "Duplicates"): two identical reads to the same cluster
+        // in flight at the same moment — the same method, path, body, address and credential —
+        // share one answer. Only reads (GET, HEAD, a search), never a write, never a request
+        // with a credential of its own or to another address, never the history store; and
+        // only with another background read (a key of their own), so a person's request never
+        // waits behind background work. Never cached: in flight only.
+        let background_shared = req.class == Class::Background && read && req.auth_header.is_none() && own_address
+            && !req.allow_writes && req.history_prefix.is_none() && !history;
         // Never cached: the task list (it is about right now), and `/` — the connection
         // probe, which must notice a cluster that went away or a certificate that changed
         // the moment it happens.
@@ -4165,6 +4181,7 @@ impl Core {
         let cacheable = shareable && (method == "GET" || method == "HEAD")
             && !bare.starts_with("/_tasks") && !bare.is_empty() && bare != "/";
         let key = shareable.then(|| crate::inflight::key(&req.cluster_id, &url, &method, &req.path, req.body.as_deref(), auth.as_deref()));
+        let background_key = background_shared.then(|| crate::inflight::background_key(&req.cluster_id, &url, &method, &req.path, req.body.as_deref(), auth.as_deref(), req.user.as_deref()));
         // Duplicate requests: the same read answered less than the gap ago is that reading,
         // whatever max age the page named (a Retry, a Refresh); past the gap the read cache's
         // own few seconds (ES_READ_CACHE_SECONDS), which a page can only shorten.
@@ -4183,9 +4200,10 @@ impl Core {
             req, url, auth, via, tunnel, tls: TlsMode::parse(tls.as_deref()), writes, origin, timeout_ms, read,
             cache_key: key.filter(|_| cacheable),
         };
-        match key {
-            Some(k) => self.es_shared(k, ctx).await,
-            None => self.es_inline(ctx).await,
+        match (key, background_key) {
+            (Some(k), _) => self.es_shared(k, ctx).await,
+            (None, Some(k)) => self.es_shared(k, ctx).await,
+            (None, None) => self.es_inline(ctx).await,
         }
     }
 
@@ -4224,7 +4242,9 @@ impl Core {
     /// own timeout and abort. Leaving never cancels it for the others; the last one out does.
     async fn es_shared(self: &Arc<Self>, key: crate::inflight::Key, ctx: Outgoing) -> Value {
         let started = Instant::now();
-        let reg = self.abort_reg(ctx.req.user.as_deref(), &ctx.origin);
+        // A person's page can let go of its request; background work has no page.
+        let person = ctx.req.class == Class::Interactive;
+        let reg = person.then(|| self.abort_reg(ctx.req.user.as_deref(), &ctx.origin));
         let me = ctx.clone();
         // Recorded first, as the request that will go if nobody else's is on its way; turned
         // into a "shared" record below if somebody's is. Nothing is locked while the flights
@@ -4243,7 +4263,9 @@ impl Core {
             task.abort_handle()
         });
         let leader = joined.leader;
-        self.fleet_note_ask(DIRECT_READS, if joined.follower { crate::fleet::asks::Answered::Shared } else { crate::fleet::asks::Answered::Sent });
+        if person {
+            self.fleet_note_ask(DIRECT_READS, if joined.follower { crate::fleet::asks::Answered::Shared } else { crate::fleet::asks::Answered::Sent });
+        }
         let seat = crate::inflight::Seat::new(self.flights.clone(), key, leader);
         let mut follower = joined.follower.then(|| {
             self.requests.lock().amend(rid, |r| { r.state = "shared"; r.shared = true; r.leader = Some(leader); });
@@ -4269,7 +4291,7 @@ impl Core {
                 Some(_) => Got::Lost,
                 None => Got::Timeout,
             },
-            _ = self.until_aborted(Some(&reg)) => Got::Aborted,
+            _ = self.until_aborted(reg.as_ref()) => Got::Aborted,
         };
         let elapsed = started.elapsed().as_millis() as u64;
         let ended = |out: Value, status: &str, follower: Option<RecordGuard>, seat: crate::inflight::Seat| {
@@ -4394,6 +4416,11 @@ impl Core {
         }
         rec.finish(&out);
         self.record_request(cluster);
+        // The cluster's load as this answer shows it (a 429, an answer over 8 s): what background
+        // work consults before it asks a busy cluster again (docs/JOBS.md "Busy clusters").
+        self.load.note_answer(cluster, out.get("status").and_then(Value::as_u64).unwrap_or(0),
+                              out.get("tookMs").and_then(Value::as_u64).unwrap_or(0),
+                              out.get("retryAfterS").and_then(Value::as_u64).map(|s| s.min(3600) * 1000), crate::fleet::now_ms());
         if out.get("kind").and_then(Value::as_str) == Some("response_too_large") {
             self.gate.note_too_large();
         }
@@ -4773,8 +4800,10 @@ impl Core {
         tokio::spawn(async move {
             loop {
                 let every = core.zbx_link.resolved().sync_secs;
+                // When the timer starts it next: JOBS_LIST's nextRunAt, known from the start.
+                core.jobs.set_next_at(crate::jobs::ZABBIX_SYNC, crate::fleet::now_ms() + every.saturating_mul(1000));
                 tokio::time::sleep(std::time::Duration::from_secs(every)).await;
-                if core.zbx_api().configured() {
+                if core.zbx_api().configured() && core.jobs.held(crate::jobs::ZABBIX_SYNC).is_none() {
                     core.zabbix_sync().await;
                 }
             }
@@ -5498,6 +5527,10 @@ impl Core {
         if now < due {
             return;
         }
+        // Paused, or its automatic runs off (docs/JOBS.md): the timer does not start it.
+        if self.jobs.held(crate::jobs::LOGDELAY_MEASURE).is_some() {
+            return;
+        }
         // A run somebody started by hand is still going: this tick leaves it be.
         self.run_delay_sink(crate::jobs::Trigger::Timer).await;
     }
@@ -5579,7 +5612,9 @@ impl Core {
         let (out, clusters) = self.measure_delay_sink().await;
         run.clusters(&clusters);
         let note_ids = |n: &SinkNote| n.cluster_id.iter().chain(n.sink_id.iter()).cloned().collect::<Vec<String>>();
-        let outcome = if let Some(n) = &out.skipped {
+        let outcome = if let Some(by) = run.cancel_asked() {
+            crate::jobs::Outcome::cancelled(&by, out.body["measured"].as_u64())
+        } else if let Some(n) = &out.skipped {
             run.clusters(&note_ids(n));
             crate::jobs::Outcome::skipped(n.text())
         } else if out.body["ok"] == json!(true) {
@@ -5639,6 +5674,10 @@ impl Core {
         let mut solved = 0usize;
 
         for id in &targets {
+            // A person's JOB_CANCEL: stop between clusters (the run's safe point).
+            if self.jobs.cancel_asked(crate::jobs::LOGDELAY_MEASURE).is_some() {
+                break;
+            }
             let fields = self.logdelay_fields(id, &settings).await;
             let body = crate::logdelay::measure::search_body(&fields, cfg.every_hours, cfg.max_devices);
             let res = self.es_req(delay_sink::search_request_for(id, &fields.pattern, body)).await;

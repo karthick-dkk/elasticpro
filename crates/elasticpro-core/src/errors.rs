@@ -52,6 +52,8 @@ const TABLE: &[(&str, &str)] = &[
     ("worker_unavailable", "EP-218"),
     ("worker_version", "EP-219"),
     ("already_running", "EP-220"),
+    ("retry_limit", "EP-221"),
+    ("retry_wait", "EP-222"),
     // 3xx: config, storage and secrets
     ("no_config", "EP-301"),
     ("parse_error", "EP-302"),

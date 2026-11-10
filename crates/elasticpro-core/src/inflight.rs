@@ -1,7 +1,8 @@
 //! Asking a cluster once for what several people want at the same moment.
 //!
-//! Two pieces, both for a person's reads only (the poller keeps its own per-dataset
-//! dedupe, and a write is never anybody else's business):
+//! Two pieces, for a person's reads (the poller keeps its own per-dataset dedupe, and a write
+//! is never anybody else's business); the first also joins identical background reads in
+//! flight at the same moment, under keys of their own (`background_key`):
 //!
 //! * [`Flights`] — single-flight. The first request for a key goes to the cluster as its
 //!   own task; anyone asking the same while it is on its way waits for that answer instead
@@ -38,6 +39,27 @@ pub fn key(cluster: &str, url: &str, method: &str, path: &str, body: Option<&str
             }
             None => h.update([0u8]),
         }
+    }
+    h.finalize().into()
+}
+
+/// The identity of a background read: as `key`, in a space of its own, so a background read is
+/// joined only by another background read — never by a person's, who must not wait behind the
+/// background class's slots (docs/JOBS.md "Duplicates"). `on_behalf_of`: the person a
+/// background read is done for (a report job's starter), so two people's jobs never share an
+/// answer even where both may see it — the work of nobody (`None`) shares only with nobody's.
+pub fn background_key(cluster: &str, url: &str, method: &str, path: &str, body: Option<&str>, credential: Option<&str>,
+                      on_behalf_of: Option<&str>) -> Key {
+    let mut h = Sha256::new();
+    h.update(b"background\0");
+    h.update(key(cluster, url, method, path, body, credential));
+    match on_behalf_of {
+        Some(u) => {
+            h.update([1u8]);
+            h.update((u.len() as u64).to_le_bytes());
+            h.update(u.as_bytes());
+        }
+        None => h.update([0u8]),
     }
     h.finalize().into()
 }
@@ -264,6 +286,17 @@ impl ReadCache {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn a_background_key_is_never_a_persons_and_never_another_credentials() {
+        let b = |cred: Option<&str>, who: Option<&str>| background_key("c", "http://h:9200", "GET", "/_cat/indices", None, cred, who);
+        assert_eq!(b(Some("Basic a"), None), b(Some("Basic a"), None), "identical background reads share");
+        assert_ne!(b(Some("Basic a"), None), b(Some("Basic b"), None), "never across credentials");
+        assert_ne!(b(Some("Basic a"), Some("ann")), b(Some("Basic a"), Some("bob")), "never across the people a job is done for");
+        assert_ne!(b(Some("Basic a"), None), b(Some("Basic a"), Some("ann")));
+        assert_ne!(b(Some("Basic a"), None), key("c", "http://h:9200", "GET", "/_cat/indices", None, Some("Basic a")),
+                   "a person's read is never joined to background work");
+    }
 
     #[test]
     fn the_key_covers_everything_that_decides_the_answer() {

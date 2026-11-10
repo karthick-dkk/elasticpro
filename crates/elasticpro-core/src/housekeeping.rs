@@ -625,7 +625,7 @@ impl Core {
     /// One look at the clock: run if the timer says so. Returns the report when it ran.
     #[doc(hidden)]
     pub async fn housekeeping_tick(self: &Arc<Self>, now: u64) -> Option<RunReport> {
-        if !self.housekeeping.due(now) {
+        if !self.housekeeping.due(now) || self.jobs.held(crate::jobs::HOUSEKEEPING).is_some() {
             return None;
         }
         self.housekeeping_run(RunRequest::schedule(now)).await

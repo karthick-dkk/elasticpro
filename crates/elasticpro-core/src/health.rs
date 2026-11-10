@@ -1129,6 +1129,10 @@ pub struct WorkerStatus {
     pub queued: u64,
     /// Collections in progress.
     pub collection: Vec<CollectionLine>,
+    /// Clusters the worker found busy itself (docs/JOBS.md "Busy clusters"): the core joins
+    /// them to its own view for `JOBS_LIST`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub busy: Vec<crate::jobs::load::Busy>,
 }
 
 impl WorkerStatus {

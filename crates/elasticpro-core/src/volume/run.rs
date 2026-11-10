@@ -748,6 +748,15 @@ impl Core {
     /// but cannot be read refuses the lot (`config_unreadable`): nothing is collected under
     /// built-in settings in its place.
     async fn volume_run_msg(self: &Arc<Self>, msg: &Value, caller: Option<&Caller>) -> Value {
+        let who = caller.map(|c| c.name.as_str()).unwrap_or("local");
+        self.volume_run_now(msg, caller, crate::jobs::Trigger::manual(who), crate::jobs::RunMeta::default()).await
+    }
+
+    /// Refresh now (`VOLUME_RUN`) and `JOB_RUN volume.daily`: the clusters asked for, each a
+    /// part of the daily job's run (docs/JOBS.md) — joined to one already open, or a new run
+    /// started by `trigger`.
+    pub(crate) async fn volume_run_now(self: &Arc<Self>, msg: &Value, caller: Option<&Caller>, trigger: crate::jobs::Trigger,
+                                       meta: crate::jobs::RunMeta) -> Value {
         if self.volume.store.is_none() {
             return no_store();
         }
@@ -761,6 +770,7 @@ impl Core {
             None => visible.clone(),
         };
         let (mut started, mut already, mut too_soon, mut skipped) = (vec![], vec![], vec![], vec![]);
+        let mut run_id = None;
         let stopped = self.volume_stopped();
         let now = crate::fleet::now_ms();
         for id in ids {
@@ -793,13 +803,16 @@ impl Core {
                 _ => {
                     let r = self.volume_resolve(raw.as_ref(), Some(&id), Some(msg));
                     let prune = self.volume_prunes(&r);
-                    self.volume_spawn(id.clone(), r.settings, prune, None, None);
+                    let part = self.jobs.join_with(crate::jobs::VOLUME_DAILY, trigger.clone(), &id, crate::fleet::now_ms(), meta.clone());
+                    run_id.get_or_insert_with(|| part.id().to_string());
+                    self.volume_spawn(id.clone(), r.settings, prune, None, Some(part));
                     started.push(id);
                 }
             }
         }
+        let run_id = run_id.or_else(|| self.jobs.running(crate::jobs::VOLUME_DAILY));
         json!({ "ok": true, "started": started, "already": already, "tooSoon": too_soon,
-                "skipped": skipped, "stopped": stopped })
+                "skipped": skipped, "stopped": stopped, "runId": run_id })
     }
 
     /// Run one cluster in the background, behind the two-at-once limit. The caller has
@@ -823,7 +836,27 @@ impl Core {
                 core.volume_run_cluster(&id, &s, prune).await
             };
             drop(permit);
+            // Asked to stop by a person (JOB_CANCEL): stopped at a safe point, and the day stays
+            // marked — the timer does not run it again today.
+            let cancelled = logged.as_ref().and_then(crate::jobs::Run::cancel_asked)
+                .filter(|_| matches!(&result, Ok(c) if c.interrupted.is_some()));
+            // Failed while its cluster is busy (a 429, answers over 8 s, a full search queue):
+            // deferred, and a scheduled run is tried again once the cluster eases.
+            let failed = match &result {
+                Err(_) => true,
+                Ok(c) => c.error.is_some() && c.interrupted.is_none(),
+            };
+            let busy = if failed { core.cluster_busy(&id) } else { None };
+            if let (Some(_), Some(prev), Some(store)) = (&busy, &scheduled, &core.volume.store) {
+                let _ = store.update_state(&id, |st| st.last_scheduled_day = prev.clone());
+            }
             match &result {
+                _ if cancelled.is_some() => {
+                    if let Some(store) = &core.volume.store {
+                        let by = cancelled.clone().unwrap_or_default();
+                        let _ = store.update_state(&id, |st| st.last_error = Some(format!("cancelled by {by}")));
+                    }
+                }
                 Err(e) => {
                     tracing::warn!(cluster = %id, error = %e, "volume daily: run did not finish");
                     if let Some(store) = &core.volume.store {
@@ -852,7 +885,15 @@ impl Core {
             }
             if let Some(run) = logged {
                 use crate::jobs::Outcome;
+                let rid = run.id().to_string();
+                let searched = result.as_ref().ok().map(|c| c.searched);
                 run.end(match &result {
+                    _ if cancelled.is_some() => Outcome::cancelled(cancelled.as_deref().unwrap_or(""), searched),
+                    _ if busy.is_some() => {
+                        let b = busy.clone().unwrap_or_else(|| crate::jobs::load::Busy { cluster: id.clone(), signal: String::new(), reason: String::new(), since: None });
+                        core.jobs.mark_waiting(crate::jobs::VOLUME_DAILY, &id, &rid);
+                        Outcome::deferred(format!("{id} is busy: {}; tried again when it eases", b.reason), searched)
+                    }
                     Err(e) => Outcome::failed(e.clone(), None),
                     // The emergency stop: the scheduled run is tried again when it is over.
                     Ok(c) if c.interrupted.is_some() => Outcome::deferred(c.error.clone().or_else(|| c.interrupted.clone()).unwrap_or_default(), Some(c.searched)),
@@ -878,7 +919,10 @@ impl Core {
     /// One cluster, start to finish (docs/VOLUME.md "Each run, per cluster"): the daily run
     /// and Refresh now.
     async fn volume_run_cluster(self: &Arc<Self>, id: &str, s: &VolumeSettings, prune: bool) -> Result<Collected, String> {
-        let stop = || self.volume_stopped().then(|| "the emergency stop came on".to_string());
+        // The emergency stop, or a person's JOB_CANCEL of the run: both checked between
+        // requests and days (the run's safe points).
+        let stop = || self.volume_stopped().then(|| "the emergency stop came on".to_string())
+            .or_else(|| self.jobs.cancel_asked(crate::jobs::VOLUME_DAILY).map(|by| format!("cancelled by {by}")));
         let progress = |done, total| self.volume_progress(id, done, total);
         let opts = CollectOpts { origin: "volume-daily", period: None, stop: &stop, progress: &progress, prune };
         self.volume_collect(id, s, &opts).await
@@ -1197,7 +1241,8 @@ impl Core {
         }
         let _done = Done(&self.volume.ticking);
         // Stopped: nothing is marked, so the run happens on the first tick after the stop ends.
-        if self.volume_stopped() {
+        // Paused (docs/JOBS.md): likewise — the day's run happens on the first tick after resume.
+        if self.volume_stopped() || self.jobs.held(crate::jobs::VOLUME_DAILY).is_some() {
             return vec![];
         }
         let mut specs = self.all_specs();
@@ -1230,6 +1275,14 @@ impl Core {
             if !schedule::is_due(local, r.settings.collect_time(), last) || self.volume_unreachable(&id) {
                 continue;
             }
+            // Busy (docs/JOBS.md "Busy clusters"): not marked, so it waits, with one deferred
+            // run saying why, and is collected on the first tick after it eases; the other
+            // clusters carry on.
+            if let Some(b) = self.cluster_busy(&id) {
+                self.jobs.defer(crate::jobs::VOLUME_DAILY, crate::jobs::Trigger::Timer, &b, crate::fleet::now_ms());
+                continue;
+            }
+            self.jobs.eased(crate::jobs::VOLUME_DAILY, &id);
             let begin = {
                 let mut runs = self.volume.runs.lock();
                 let r = runs.entry(id.clone()).or_default();

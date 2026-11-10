@@ -564,6 +564,11 @@ pub fn required_role(msg_type: &str) -> Option<Role> {
         // whose page is cluster health only: runs name clusters and carry their errors. A
         // caller limited to some clusters reads only the runs about theirs (the handler).
         "JOBS_LIST" => Some(Role::User),
+        // The job controls: starting, pausing, cancelling and retrying fleet-wide work, and the
+        // limits it runs under. An administrator's; the handler refuses one limited to some
+        // clusters (every change but JOB_SETTINGS_GET).
+        "JOB_RUN" | "JOB_PAUSE" | "JOB_RESUME" | "JOB_CANCEL" | "JOB_RETRY" | "JOB_CREATE" | "JOB_DELETE"
+        | "JOB_SETTINGS_GET" | "JOB_SETTINGS_SET" => Some(Role::Admin),
         // Listing the archive names object keys, which carry client and branch names —
         // the same shape of fact as an index name, and gated the same way.
 

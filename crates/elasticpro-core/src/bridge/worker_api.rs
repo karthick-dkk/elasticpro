@@ -180,6 +180,8 @@ impl Core {
         };
         let mut out = if fwd.kind == "VOLUME_RUN" {
             self.volume_msg(&fwd.kind, &fwd.msg, caller.as_ref()).await
+        } else if fwd.kind.starts_with("JOB_") {
+            self.job_msg(&fwd.kind, &fwd.msg, caller.as_ref()).await
         } else {
             self.report_msg(&fwd.kind, &fwd.msg, caller.as_ref()).await
         };
@@ -279,6 +281,7 @@ impl Core {
         let st = WorkerStatus {
             schema: health::WORKER_STATUS_SCHEMA, role: "worker".into(), version: crate::VERSION.into(), pid: Some(std::process::id()),
             started_at: self.worker.started_at, heartbeat_at: now, memory, cpu, gate: Some(gate), jobs, queued, collection,
+            busy: self.load.own_busy(now),
         };
         if let Err(e) = st.write(d) {
             tracing::warn!(error = %e, "report worker: the status file could not be written");
