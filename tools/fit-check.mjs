@@ -508,6 +508,22 @@ async function run(browserName, [vw, vh, framed]) {
         via: 'jump-windows-datacenter-frankfurt-1', tls: 'insecure', tags: ['production', 'eu-central-1', 'pci-scope', 'customer-facing'],
         liveRetention: '30d', snapshotRetention: '6M', username: 'svc-elasticpro-readonly-frankfurt', password: 'x' });
     });
+    // A cluster from Zabbix, edited in ElasticPro: the URL read-only, per-field "Set in ElasticPro" marks
+    // with Zabbix's value beside them, and the admin's own-credential block (hosted).
+    dlg('Config · Edit Zabbix cluster (overrides, own credential)', 'settings', async () => {
+      (await import('/js/core/server-credentials.js')).setHostedEdition(true);
+      (await import('/js/ui/config-editor.js')).editZabbixCluster({
+        id: 'zbx-es-logging-frankfurt-01-corp-internal', source: 'zabbix', name: 'Frankfurt logging (renamed in ElasticPro for the NOC wall)',
+        url: 'https://es-logging-frankfurt-01.corp.internal.example.com:9200', via: 'jump-windows-datacenter-frankfurt-1', tls: 'insecure',
+        enabled: true, tags: ['zabbix', 'production', 'eu-central-1', 'pci-scope', 'customer-facing'],
+        note: 'On call: platform team Frankfurt, escalation through the regional duty manager', liveRetention: '30d',
+        snapshotRetention: '6M', backupCapacity: '12TB', volumeWindowDays: 14, volumeTopDays: 3, volumeHeadroomPercent: 30, username: 'svc-elasticpro-readonly',
+        zabbix: { host: 'es-logging-frankfurt-01.corp.internal.example.com', hostId: '10101', client: 'acme-corporation-international',
+          credential: 'vault', credentialOk: true, notes: [], ownCredential: true, ownCredentialMoved: true,
+          overridden: ['name', 'via', 'tls', 'tags', 'note', 'liveRetention', 'backupCapacity', 'volumeWindowDays'],
+          values: { name: 'es-logging-frankfurt-01.corp.internal.example.com', via: null, tags: ['acme-corporation-international'] } },
+      });
+    });
     dlg('Config · Add jump host', 'settings', async () => { (await import('/js/ui/config-editor.js')).editJumpHost(null); });
     dlg('Config · Edit jump host', 'settings', async () => { (await import('/js/ui/config-editor.js')).editJumpHost('jump-windows-datacenter-frankfurt-1'); });
     // WHOAMI says hosted, so this is the server's default credential (kept encrypted on the server).

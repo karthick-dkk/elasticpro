@@ -25,6 +25,7 @@ import { credentialsKeptOnServer, keptCredentials, keptFor, keepCredential, forg
          initialCredentialChoice } from '../core/server-credentials.js';
 import { toast } from './menu.js';
 import { CLUSTER_TYPES, clusterKind, typeDefaults, bucketProblem, saveClusterMeta } from '../core/cluster-kind.js';
+import { overlayChange, movesDestination, changesSomething, zabbixCredentialLabel } from '../core/zabbix-overlay.js';
 
 let masterInMemory = null;      // master password for this session only (needed to seal new secrets)
 
@@ -670,6 +671,185 @@ export async function editCluster(existing = null) {
           const undo = place();
           try { await saveRaw(); ctx.done(true); } catch (e) { undo(); ctx.msg(`Save failed: ${e.message}`); }
         } }, existing ? 'Save' : 'Add cluster'))]);
+  return !!saved;
+}
+
+/**
+ * A cluster that comes from Zabbix, edited in ElasticPro (hosted): everything the Edit dialog
+ * has for a config-file cluster but the address, which is always Zabbix's. What is changed is
+ * kept by the core as an overlay over the Zabbix host (ZABBIX_CLUSTER_SAVE, an operator's or an
+ * admin's) — Zabbix is never written to — and wins over what Zabbix says until "Use Zabbix's
+ * value" takes the one field back. Its own credential (an admin's) is kept encrypted on the
+ * server, bound to this address, like a config cluster's; its type, ULM and SLM are the admin's
+ * CLUSTER_META_SET, as in the config cluster's dialog. Returns whether anything was saved.
+ */
+export async function editZabbixCluster(c) {
+  if (!c || c.source !== 'zabbix' || !c.zabbix) return false;
+  const z = c.zabbix;
+  const r = raw() || {};
+  const jumps = jumpHostList(r).map(([id]) => id);
+  const d = { ...cfg.DEFAULTS, ...(r.defaults || {}) };
+  const overridden = new Set(z.overridden || []);
+  const zv = z.values || {};
+  const admin = roleMayWrite();
+  const onServer = credentialsKeptOnServer();
+  const kept = admin && onServer ? await keptCredentials().catch(() => null) : null;
+  const keptOwn = kept ? keptFor(kept, c.id) : null;
+  const resets = new Set();
+  // Every editable field: its control, how to read it (null = empty), the value at open and
+  // what Zabbix says for it (shown when it is set here, and put back by "Use Zabbix's value").
+  const tagsOf = (list) => (list || []).filter((t) => String(t).toLowerCase() !== 'zabbix');
+  const listText = (list) => tagsOf(list).join(', ');
+  const numOr = (v) => (Number.isFinite(v) ? String(v) : '');
+  const defs = [];
+  const def = (key, label, input, { read, zabbix = null, zabbixText = '', put, hint = null }) => {
+    const markBox = h('span.ce-zmark');
+    const drawMark = () => {
+      if (resets.has(key)) {
+        markBox.replaceChildren(h('span', 'Zabbix’s value is used when you save.'));
+      } else if (overridden.has(key)) {
+        markBox.replaceChildren(h('b', 'Set in ElasticPro'), zabbixText ? ` · Zabbix: ${zabbixText} · ` : ' · ',
+          h('button.btn.sm.ghost', { type: 'button', id: `ce-z-reset-${key}`, style: { padding: '0 4px', minHeight: 0 },
+            onclick: (e) => { e.preventDefault(); resets.add(key); put(zabbix); drawMark(); } }, 'Use Zabbix’s value'));
+      } else {
+        markBox.replaceChildren(zabbixText ? 'From Zabbix.' : '');
+      }
+    };
+    drawMark();
+    const was = read();
+    defs.push({ key, read, was });
+    return field(label, input, h('span', hint ? [hint, ' '] : null, markBox));
+  };
+  const textField = (key, label, id, value, opts = {}) => {
+    const input = text(id, value || '', opts);
+    return def(key, label, input, { read: () => { const v = input.value.trim(); return v || null; },
+      put: (v) => { input.value = v == null ? '' : v; }, zabbix: opts.zabbix ?? null, zabbixText: opts.zabbixText || '', hint: opts.hint });
+  };
+  const numField = (key, label, id, value, placeholder, hint) => {
+    const input = text(id, numOr(value), { mono: true, placeholder });
+    return def(key, label, input, { read: () => { const v = input.value.trim(); return v === '' ? null : Number(v); },
+      put: () => { input.value = ''; }, hint });
+  };
+  const url = text('ce-url', c.url, { mono: true });
+  url.readOnly = true; url.setAttribute('aria-readonly', 'true');
+  const viaSel = select('ce-via', c.via || '', [['', 'direct'], ...jumps.map((j) => [j, `via ${j}`]),
+    ...(c.via && !jumps.includes(c.via) ? [[c.via, `via ${c.via}`]] : [])]);
+  const tlsSel = select('ce-tls', overridden.has('tls') ? (c.tls || '') : '',
+    [['', 'default (from defaults.tls)'], ['auto', 'auto — OS store, else ask & pin'], ['system', 'system — OS store only'], ['insecure', 'insecure — lab only']]);
+  const enabledSel = select('ce-enabled', c.enabled === false ? 'no' : 'yes', [['yes', 'yes'], ['no', 'no (listed, not polled)']]);
+  const tagsInput = text('ce-tags', listText(c.tags), { placeholder: 'prod, onprem' });
+  const kindEditable = admin;
+  const kind = kindSection(c, { editable: kindEditable });
+
+  const credBlock = () => {
+    if (!(admin && onServer)) {
+      return h('div.muted.ce-managed-cred', { style: { fontSize: '11.5px' } },
+        h('b', 'Credential: '), `Zabbix’s (${zabbixCredentialLabel(z.credential)}), or one of its own an administrator sets here. Neither is shown.`);
+    }
+    const choice0 = keptOwn || z.ownCredential ? 'own' : 'zabbix';
+    const show = (v) => { const o = $('#ce-cred-ownblock'); if (o) o.hidden = v !== 'own'; };
+    const radio = (value, label) => h('label', { style: { display: 'flex', gap: '7px', alignItems: 'center', fontSize: '12.5px', cursor: 'pointer' } },
+      h('input', { type: 'radio', name: 'ce-cred', id: `ce-cred-${value}`, value, checked: choice0 === value, onchange: () => show(value) }),
+      h('b', label));
+    const pair = (...nodes) => h('div', { style: { display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 1fr)', gap: '10px' } }, ...nodes);
+    const own = h('div#ce-cred-ownblock', { style: { display: 'grid', gap: '6px', padding: '0 0 2px 22px' } },
+      h('div.muted', { style: { fontSize: '11.5px' } },
+        z.ownCredentialMoved ? [h('b', 'Kept for another route or certificate setting, so not used now. '), 'Type it again, or save to keep it for where the cluster is now.']
+          : keptOwn ? [h('b', 'The server keeps one for this cluster: '), keptLine(keptOwn), '. Type a new one to replace it.']
+          : 'Kept encrypted on the server (AES-256-GCM), for this address only; never shown again. Zabbix is not changed.'),
+      pair(field('Username', text('ce-cu', '', { placeholder: (keptOwn && keptOwn.user) || c.username || '', autocomplete: 'off' })),
+        field('Password', text('ce-cp', '', { type: 'password', placeholder: keptOwn ? '(kept on the server — leave empty to keep)' : '' }))));
+    own.hidden = choice0 !== 'own';
+    return h('fieldset.ce-cred', { style: { border: '1px solid var(--border)', borderRadius: '6px', padding: '8px 10px', display: 'grid', gap: '6px', margin: 0 } },
+      h('legend', { style: { fontSize: '12px', padding: '0 4px' } }, 'Credential'),
+      radio('zabbix', `Zabbix’s credential (${z.ownCredential ? 'as set on the Zabbix host' : zabbixCredentialLabel(z.credential)})`),
+      radio('own', 'Its own credential, set here'), own);
+  };
+
+  const body = [
+    h('div', { style: { display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 2fr)', gap: '10px' } },
+      textField('name', 'Name', 'ce-name', c.name, { placeholder: zv.name || '', zabbix: zv.name || '', zabbixText: zv.name || '' }),
+      field('URL', url, h('span', h('b', 'From Zabbix. '), `Change it on the host ${z.host || ''} ({$ELASTICSEARCH.HOST}, PORT, SCHEME); it is never set here.`))),
+    h('div', { style: { display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1fr)', gap: '10px' } },
+      def('via', 'Route', viaSel, { read: () => viaSel.value, put: (v) => { viaSel.value = v || ''; }, zabbix: zv.via || '', zabbixText: zv.via ? `via ${zv.via}` : 'direct',
+        hint: jumps.length ? null : 'No jump hosts defined yet.' }),
+      def('tls', 'Certificates', tlsSel, { read: () => tlsSel.value || null, put: () => { tlsSel.value = ''; } }),
+      def('enabled', 'Enabled', enabledSel, { read: () => enabledSel.value !== 'no', put: () => { enabledSel.value = 'yes'; } })),
+    h('div', { style: { display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 1fr)', gap: '10px' } },
+      def('tags', 'Tags', tagsInput, { read: () => tagsInput.value.split(',').map((t) => t.trim()).filter(Boolean),
+        put: (v) => { tagsInput.value = listText(v); }, zabbix: zv.tags || [], zabbixText: listText(zv.tags) || 'none' }),
+      textField('liveRetention', 'Live retention', 'ce-live', overridden.has('liveRetention') ? c.liveRetention : '', { placeholder: '30d', hint: 'How long logs stay on the cluster. 30d, 3M, 1y.' }),
+      textField('snapshotRetention', 'Snapshot retention', 'ce-snapret', overridden.has('snapshotRetention') ? c.snapshotRetention : '', { placeholder: '6M', hint: 'How long snapshots are kept.' }),
+      textField('backupCapacity', 'Backup capacity', 'ce-backupcap', overridden.has('backupCapacity') ? c.backupCapacity : '', { placeholder: '2TB',
+        hint: 'Total size of the snapshot repository; Elasticsearch cannot report it.' }),
+      textField('note', 'Note', 'ce-note', c.note)),
+    kind.node,
+    h('div', { style: { display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1fr)', gap: '10px' } },
+      numField('volumeWindowDays', 'Volume window (days)', 'ce-volwin', overridden.has('volumeWindowDays') ? c.volumeWindowDays : null, String(d.volumeWindowDays),
+        `1–90, empty uses ${d.volumeWindowDays}.`),
+      numField('volumeTopDays', 'Heaviest days counted', 'ce-voltop', overridden.has('volumeTopDays') ? c.volumeTopDays : null, String(d.volumeTopDays),
+        `Empty uses ${d.volumeTopDays}.`),
+      numField('volumeHeadroomPercent', 'Planning headroom (%)', 'ce-volhead', overridden.has('volumeHeadroomPercent') ? c.volumeHeadroomPercent : null,
+        String(d.volumeHeadroomPercent), `0–200, empty uses ${d.volumeHeadroomPercent}%.`)),
+    credBlock(),
+  ];
+  const saved = await modal(`Edit cluster ${c.name || ''}`,
+    `From Zabbix (host ${z.host || ''}). Changes are kept in ElasticPro and win over Zabbix’s values; Zabbix is not changed.`, body,
+    (ctx) => [h('div', { style: { marginLeft: 'auto', display: 'flex', gap: '8px' } },
+      h('button.btn', { onclick: () => ctx.done(null) }, 'Cancel'),
+      h('button.btn.primary', { id: 'ce-z-save', onclick: async () => {
+        const entries = defs.map((x) => ({ key: x.key, now: x.read(), was: x.was, overridden: overridden.has(x.key), reset: resets.has(x.key) }));
+        const now = Object.fromEntries(entries.map((e) => [e.key, e.reset ? null : e.now]));
+        if (!resets.has('name') && !now.name) return ctx.msg('Give the cluster a name, or use Zabbix’s.');
+        for (const k of ['liveRetention', 'snapshotRetention']) {
+          if (now[k] && !parseRetention(now[k])) return ctx.msg(`${k}: use a form like 30d, 90 days, 3M, 6 months or 1y.`);
+        }
+        if (now.backupCapacity && !parseSize(now.backupCapacity)) return ctx.msg('backupCapacity: use a form like 2TB, 500GB or a bare number of GB.');
+        for (const f of VOLUME_FIELDS) {
+          const n = now[f.key];
+          if (n !== null && n !== undefined && (!Number.isInteger(n) || n < f.min || n > f.max)) return ctx.msg(`${f.label}: a whole number from ${f.min} to ${f.max}.`);
+        }
+        const effWin = Number(now.volumeWindowDays ?? d.volumeWindowDays);
+        const effTop = Number(now.volumeTopDays ?? d.volumeTopDays);
+        if (effTop > effWin) return ctx.msg(`Heaviest days counted (${effTop}) cannot be more than the volume window (${effWin} days).`);
+        const kindRead = kind.read();
+        if (kindRead.error) return ctx.msg(kindRead.error);
+        const change = overlayChange(entries);
+        // The credential, an admin's: typed, kept, forgotten — asked before anything is sent.
+        const choice = admin && onServer ? (checked('ce-cred-own') ? 'own' : 'zabbix') : null;
+        const cu = choice === 'own' ? val('ce-cu').trim() : '', cp = choice === 'own' ? val('ce-cp') : '';
+        if ((cu || cp) && !(cu && cp)) return ctx.msg('Enter both the username and the password, or leave both empty.');
+        const typed = cu && cp ? { username: cu, password: cp } : null;
+        if (choice === 'own' && !typed && !keptOwn) return ctx.msg('Type its own username and password, or choose Zabbix’s credential.');
+        const forget = choice === 'zabbix' && !!keptOwn;
+        if (forget && !(await confirmDialog(`Use Zabbix’s credential for ${c.name}?`,
+          `Its own credential (${keptLine(keptOwn)}) is forgotten, and ${c.name} signs in with what Zabbix gives.`, { yes: 'use Zabbix’s' }))) return;
+        const rebind = !!keptOwn && !typed && !forget && (movesDestination(change) || z.ownCredentialMoved)
+          && await confirmDialog('Keep this cluster’s own credential?',
+            `The server keeps a credential of ${c.name}’s own (${keptLine(keptOwn)}), given for its route and certificate setting before. `
+            + 'Send it where the cluster is now? If not, it signs in with Zabbix’s credential until its own is typed again.', { yes: 'keep it' });
+        let did = false;
+        try {
+          if (changesSomething(change)) {
+            const res = await bridge({ type: 'ZABBIX_CLUSTER_SAVE', hostId: z.hostId, set: change.set, reset: change.reset });
+            if (!res || !res.ok) return ctx.msg(`Save failed: ${(res && res.message) || 'the core refused it'}`);
+            did = true;
+          }
+          if (typed) { await keepCredential(c.id, typed); did = true; }
+          else if (forget) { await forgetCredential(c.id); did = true; }
+          else if (rebind) { await rebindCredential(c.id); did = true; }
+          if (kindEditable && kindRead.changed) { await saveClusterMeta(c.id, kindRead.meta); did = true; }
+        } catch (e) {
+          return ctx.msg(`${did ? 'Partly saved' : 'Save failed'}: ${e.message}`);
+        }
+        if (did) {
+          await setConfig(state.config, state.handle);
+          bus.emit('config', state.config);
+          bus.emit('data');
+          refreshAll({ force: true });
+        }
+        ctx.done(did);
+      } }, 'Save'))]);
   return !!saved;
 }
 
