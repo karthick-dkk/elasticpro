@@ -10,7 +10,7 @@
 
 import { h, mount } from '../lib/dom.js';
 import { nodeCache } from '../lib/keyed.js';
-import { activeClusters } from '../core/state.js';
+import { activeClusters, bus } from '../core/state.js';
 import { intent } from '../core/intent.js';
 import { takeFocus, revealFocus } from '../core/focus.js';
 import { empty } from './common.js';
@@ -47,6 +47,7 @@ onLayouts(() => { if (alive()) draw(); });
 export function render(el) {
   host = el;
   el.classList.add('dense', 'rp-page');
+  const arriving = !visiting;
   if (!visiting) {
     // Each visit reads the record and the shared layouts as they are now.
     visiting = true;
@@ -76,6 +77,8 @@ export function render(el) {
   // From the top-bar Reports pill: the report jobs. From a playbook: the section it names.
   if (f && f.reports) { ui.section = 'exports'; setReportPanelOpen(true); }
   if (f && f.section && REPORT_SECTIONS.some((s) => s.id === f.section)) ui.section = f.section;
+  // Arriving on Overview shows every cluster, unless the link that brought you named one.
+  if (arriving && ui.section === 'overview' && !(asked && asked.cluster)) bus.emit('fleet-view');
   syncHash();
   lastHash = location.hash;
   draw();
@@ -89,6 +92,7 @@ export function onRoute() {
   const s = sectionOfHash(location.hash);
   // Log delay has views under its section (#/reports/log-delay/cluster/<id>, …): a move between them redraws too.
   const moved = s !== ui.section || (s === 'log-delay' && location.hash !== lastHash);
+  if (s === 'overview' && ui.section !== 'overview') bus.emit('fleet-view');
   ui.section = s;
   syncHash();                   // #/volume/… reads as #/reports/… from here on
   lastHash = location.hash;
@@ -107,6 +111,7 @@ function syncHash() {
 
 function goSection(id) {
   if (!REPORT_SECTIONS.some((s) => s.id === id)) return;
+  if (id === 'overview' && ui.section !== 'overview') bus.emit('fleet-view');
   ui.section = id;
   syncHash();
   draw();

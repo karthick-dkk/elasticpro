@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- **Reports › Overview opens on All clusters:** arriving there, or switching to it from another section, shows the whole fleet even when another page had one cluster chosen; a link that names a cluster, or a cluster picked while on Overview, is kept.
+
 ## 0.3.59
 
 - **Planning shows disk as it is bought:** /live disk each, /backup disk, the S3 / ULM size, the tiles and the CSV round up to a whole TB (2.79 TB → 3 TB, 19.5 TB → 20 TB), never down; the /live disk tile is the rows' sum (7 × 3 TB = 21 TB).
