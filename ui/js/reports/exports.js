@@ -12,7 +12,8 @@
 import { h, mount } from '../lib/dom.js';
 import { nodeCache } from '../lib/keyed.js';
 import { ago, toCsv, download, downloadBytes, plural } from '../lib/fmt.js';
-import { card, empty } from '../pages/common.js';
+import { card, empty, table } from '../pages/common.js';
+import { tableSort } from '../lib/table-sort.js';
 import { toast } from '../ui/menu.js';
 import { navigateTo } from '../core/intent.js';
 import { workbook, XLSX_MIME } from '../lib/xlsx.js';
@@ -116,18 +117,30 @@ function mailed() {
       refreshReports();
     },
   }, last.ok === false ? 'Retry' : 'Send now');
-  const tr = h('tr',
-    h('td', h('b', s.subject ? String(s.subject).replace('{period}', (s.nextPeriod && s.nextPeriod.label) || '…') : 'Volume report')),
-    h('td', clusters),
+  // One schedule today; a list of them sorts like every other table (lib/table-sort.js).
+  const subject = s.subject ? String(s.subject).replace('{period}', (s.nextPeriod && s.nextPeriod.label) || '…') : 'Volume report';
+  const lastAt = s.lastSent && toMs(s.lastSent.at) ? toMs(s.lastSent.at) : null;
+  const statusWord = !s.enabled ? 'off' : last.ok === false ? 'failed' : last.ok ? 'sent' : 'not sent yet';
+  const sort = tableSort('reports.mailed', { onChange: () => redraw() });
+  const rows = sort.apply([{ s, subject, clusters, to, lastAt, statusWord }], {
+    report: { type: 'text', value: (r) => r.subject },
+    clusters: { type: 'text', value: (r) => r.clusters },
+    when: { type: 'text', value: (r) => r.s.schedule },
+    to: { type: 'text', value: (r) => r.to[0] || null },
+    last: { type: 'date', value: (r) => r.lastAt },
+    status: { type: 'text', value: (r) => r.statusWord },
+  });
+  const trs = rows.map((r) => h('tr',
+    h('td', h('b', r.subject)),
+    h('td', r.clusters),
     h('td', `${WHEN[s.schedule] || s.schedule || '—'}${s.schedule && s.schedule !== 'manual' ? `, ${s.at || '07:00'}` : ''}`),
     h('td', to.length ? `${to[0]}${to.length > 1 ? ` +${to.length - 1}` : ''}` : amber('nobody', 'Add an address in Config-Management › Reports › Mail delivery')),
-    h('td', s.lastSent && toMs(s.lastSent.at) ? ago(toMs(s.lastSent.at)) : '—'),
+    h('td', r.lastAt ? ago(r.lastAt) : '—'),
     h('td', status),
-    h('td', send));
+    h('td', send)));
   return card('Mailed reports', `an .xlsx attachment on a schedule · ${s.mailConfigured === false ? 'the mail server is not set (Config-Management › Reports › Mail delivery)' : 'mail server set in Config-Management › Reports'}`,
-    h('div.tbl-wrap', h('table.tbl',
-      h('thead', h('tr', ...['Report', 'Clusters', 'When', 'To', 'Last sent', 'Status', ''].map((t) => h('th', t)))),
-      h('tbody', tr))), head);
+    table([{ label: 'Report', sort: 'report' }, { label: 'Clusters', sort: 'clusters' }, { label: 'When', sort: 'when' }, { label: 'To', sort: 'to' },
+      { label: 'Last sent', sort: 'last' }, { label: 'Status', sort: 'status' }, ''], trs, { sort }), head);
 }
 
 /**

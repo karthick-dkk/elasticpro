@@ -5,13 +5,30 @@
  * follows the columns on screen").
  *
  * A def: `{ key, label, num?, locked?, hidden?, group?, title?, cell(row) → Node|string,
- * csv(row) → string|number|null, csvLabel? }`.
+ * csv(row) → string|number|null, csvLabel?, sortType?, sortValue(row)?, sort? }`.
+ *
+ * Sorting (lib/table-sort.js): pass `sort` (a tableSort()) and the rows already in its order —
+ * `sort.apply(rows, layoutSortCols(defs))`, after any filter — so the CSV, written from the
+ * same rows, comes out in the order on screen. A column sorts on `sortValue(row)` when it has
+ * one, else on its CSV value (the figure, not the text drawn), as `sortType` (default `number`
+ * for a numeric column, `text` otherwise); `sort: false` leaves a column unsortable.
  */
 
 import { h } from '../lib/dom.js';
 import { visibleColumns, groupBand } from '../lib/columns.js';
+import { sortTh } from '../lib/table-sort.js';
 
-export function layoutTable({ defs, layout, rows, band = false, rowAttrs = null, emptyText = 'Nothing to show', cls = '' }) {
+/** The sort columns of a layout table, for tableSort().apply — every def, shown or not. */
+export function layoutSortCols(defs) {
+  const out = {};
+  for (const d of defs) {
+    if (d.sort === false || (!d.sortValue && !d.csv)) continue;
+    out[d.key] = { type: d.sortType || (d.num ? 'number' : 'text'), value: d.sortValue || d.csv, start: d.sortStart || 1 };
+  }
+  return out;
+}
+
+export function layoutTable({ defs, layout, rows, band = false, rowAttrs = null, emptyText = 'Nothing to show', cls = '', sort = null }) {
   const byKey = new Map(defs.map((d) => [d.key, d]));
   const cols = visibleColumns(defs, layout).map((c) => ({ ...c, def: byKey.get(c.key) }));
   const runs = band ? groupBand(defs, layout) : null;
@@ -27,8 +44,11 @@ export function layoutTable({ defs, layout, rows, band = false, rowAttrs = null,
       return th;
     })));
   }
-  head.push(h('tr', ...cols.map((c, i) => h(`th${c.num ? '.num' : ''}${starts.has(i) ? '.rp-gl' : ''}`,
-    { dataset: { col: c.key }, title: c.def.title || c.name, scope: 'col' }, c.name))));
+  const sortable = sort ? layoutSortCols(defs) : {};
+  head.push(h('tr', ...cols.map((c, i) => (sortable[c.key]
+    ? sortTh(sort, c.key, c.name, { num: !!c.num, cls: starts.has(i) ? 'rp-gl' : null, attrs: { dataset: { col: c.key }, scope: 'col' }, title: c.def.title ? `${c.def.title} — click to sort` : null })
+    : h(`th${c.num ? '.num' : ''}${starts.has(i) ? '.rp-gl' : ''}`,
+      { dataset: { col: c.key }, title: c.def.title || c.name, scope: 'col' }, c.name)))));
   const body = h('tbody', ...rows.map((r) => h('tr', rowAttrs ? rowAttrs(r) : null,
     ...cols.map((c, i) => {
       const v = c.def.cell(r);

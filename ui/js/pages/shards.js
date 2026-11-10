@@ -9,6 +9,7 @@
  */
 
 import { h, mount, reconcile } from '../lib/dom.js';
+import { tableSort } from '../lib/table-sort.js';
 import { nodeCache } from '../lib/keyed.js';
 import { bytes, num, pct, compact } from '../lib/fmt.js';
 import { state, clusters, activeClusters, client, refreshAll, fetchIndices, fetchShards,
@@ -26,7 +27,22 @@ import { parseRetention } from '../core/volume.js';
 import { takeFocus, revealFocus } from '../core/focus.js';
 
 let host = null;
-const ui = { index: '', node: 'all', state: 'all', limit: 300, sort: 'index', dir: 1 };
+const ui = { index: '', node: 'all', state: 'all', limit: 300 };
+/**
+ * The shard table's column sort (lib/table-sort.js): by index until a header says otherwise,
+ * remembered per browser. A link to one node's shards asks for the largest first. Applied
+ * after the filters and before "Show more".
+ */
+const SHARD_SORT = tableSort('shards', { initial: { key: 'index', dir: 1 }, onChange: () => draw() });
+const SHARD_COLS = {
+  index: { type: 'text', value: (x) => x.index },
+  shard: { type: 'number', value: (x) => x.shard },
+  type: { type: 'number', value: (x) => (x.primary ? 0 : 1) },
+  state: { type: 'text', value: (x) => x.state },
+  node: { type: 'text', value: (x) => x.node || null },
+  store: { type: 'bytes', value: (x) => x.store },
+  docs: { type: 'number', value: (x) => x.docs },
+};
 /** Shards ticked for a bulk move, keyed `index/shard/p|r`. */
 const picked = new Map();
 /**
@@ -41,15 +57,18 @@ const loading = new Set();
 /**
  * A link that opened this page with a problem in view (core/focus.js): `unassigned` shows
  * only the shards with nowhere to go, `disk`/`nodes` bring the node table into view, and a
- * `node` narrows the shard table to that node, largest first. Applied once, on arrival.
+ * `node` narrows the shard table to that node, largest first — for that visit only; the
+ * remembered order is not touched. Applied once, on arrival.
  */
 let reveal = null;
 function applyFocus() {
   const f = takeFocus('shards');
+  SHARD_SORT.forVisit(null);      // an order a link asked for lasts one visit
   if (!f) return;
   if (f.section === 'unassigned') { ui.state = 'UNASSIGNED'; ui.node = 'all'; reveal = '[data-focus="shards"]'; }
   else if (f.section === 'disk' || f.section === 'nodes') reveal = '[data-focus="nodes"]';
-  if (f.node) { ui.node = f.node; ui.state = 'all'; ui.sort = 'store'; ui.dir = -1; }
+  // Largest first for this visit only: the remembered Shards order is left as it is.
+  if (f.node) { ui.node = f.node; ui.state = 'all'; SHARD_SORT.forVisit({ key: 'store', dir: -1 }); }
 }
 const focusable = (el, name) => { if (el.dataset.focus !== name) el.dataset.focus = name; return el; };
 
@@ -666,16 +685,7 @@ function shardsCard(c, d, all, raw, started) {
     if (ui.state !== 'all' && s.state !== ui.state) return false;
     return true;
   });
-  const SHARD_SORTS = {
-    index: (x) => x.index, shard: (x) => x.shard, type: (x) => (x.primary ? 0 : 1),
-    state: (x) => x.state, node: (x) => x.node || '\uffff', store: (x) => x.store, docs: (x) => x.docs,
-  };
-  const sortKey = SHARD_SORTS[ui.sort] || SHARD_SORTS.index;
-  const sorted = [...filtered].sort((a, b) => {
-    const av = sortKey(a), bv = sortKey(b);
-    if (typeof av === 'number' && typeof bv === 'number') return (av - bv) * ui.dir;
-    return String(av).localeCompare(String(bv)) * ui.dir;
-  });
+  const sorted = SHARD_SORT.apply(filtered, SHARD_COLS);
   const shown = sorted.slice(0, ui.limit);
 
   const key = (x) => `${x.index}/${x.shard}/${x.primary ? 'p' : 'r'}`;
@@ -751,7 +761,9 @@ function shardsCard(c, d, all, raw, started) {
            { label: 'Type', sort: 'type' }, { label: 'State', sort: 'state' },
            { label: 'Node', sort: 'node' }, { label: 'Store', num: true, sort: 'store' },
            { label: 'Docs', num: true, sort: 'docs' }, 'Unassigned reason', ''],
-        trs, { emptyText: all.length ? 'No shard matches the filter' : 'No shards reported' }),
+        // One order for every cluster's table, but each head its own id (focus comes back to the right one).
+        trs, { emptyText: all.length ? 'No shard matches the filter' : 'No shards reported',
+          sort: { id: `shards-${c.id}`, get key() { return SHARD_SORT.key; }, get dir() { return SHARD_SORT.dir; }, on: SHARD_SORT.on } }),
       shown.length < filtered.length
         ? h('div', { style: { padding: '10px', textAlign: 'center' } },
             h('button.btn.sm', { onclick: () => { ui.limit += 300; draw(); } },

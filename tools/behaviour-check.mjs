@@ -230,6 +230,36 @@ await go('shards');
   }
   ok(/master/i.test(doc.body.textContent), 'shards: the master node is not marked');
 
+  // A header press is remembered; a link to one node's shards (largest first) lasts that
+  // visit only and leaves the remembered order alone.
+  {
+    const head = (k) => doc.querySelector(`th.sortable[data-sort="${k}"]`);
+    const KEY = 'elasticpro.sort.shards';
+    press(head('docs')); await settleFor(150);
+    const remembered = window.localStorage.getItem(KEY);
+    ok(remembered === JSON.stringify({ key: 'docs', dir: 1 }), `shards: a header press was not remembered (${remembered})`);
+    // From a shard table (the one whose heads sort by node), not the node table beside it.
+    const nodeCell = [...doc.querySelectorAll('table.tbl')].filter((t) => t.querySelector('th[data-sort="node"]'))
+      .flatMap((t) => [...t.tBodies[0].rows]).map((tr) => tr.children[5])
+      .find((td) => td && td.textContent.trim() && td.textContent.trim() !== '–');
+    ok(!!nodeCell, 'shards: no shard row names a node');
+    if (nodeCell) {
+      (await load('core/focus.js')).setFocus('shards', { node: nodeCell.textContent.trim() });
+      await go('console'); await go('shards');
+      ok(head('store') && head('store').getAttribute('aria-sort') === 'descending', `shards: a link to one node's shards is not largest first (${head('store') && head('store').getAttribute('aria-sort')})`);
+      ok(window.localStorage.getItem(KEY) === remembered, `shards: the link overwrote the remembered order (${window.localStorage.getItem(KEY)})`);
+      await go('console'); await go('shards');
+      ok(head('docs') && head('docs').getAttribute('aria-sort') === 'ascending' && head('store').getAttribute('aria-sort') === 'none',
+        'shards: the next ordinary visit is not in the remembered order');
+    }
+    // Back to how the page was for what follows: any node (the link's node filter stays, as it
+    // always has), sorted by index.
+    const nodeSel = [...doc.querySelectorAll('select')].find((x) => [...x.options].some((o) => o.value === 'all' && o.textContent === 'any node'));
+    if (nodeSel && nodeSel.value !== 'all') { nodeSel.value = 'all'; nodeSel.dispatchEvent(new window.Event('change', { bubbles: true })); await settleFor(150); }
+    press(head('index')); await settleFor(150);
+    window.localStorage.removeItem(KEY);
+  }
+
   // The honeycomb is gone: several hundred hexagons answered "how many are wrong" at a
   // glance, and the split gauge in Cluster at a glance answers the same question in a tenth
   // of the height. Two pictures of one fact is one too many.
@@ -1981,6 +2011,15 @@ await go('overview');
     if (summary().querySelector('.cl-head .cl-hcell[data-col="name"]').getAttribute('aria-sort') !== 'ascending') {
       press(summary().querySelector('.cl-head .cl-hcell[data-col="name"]')); await settleFor(120);
     }
+    // An order is not a filter: sorted by name (not the default), with no search text and no
+    // filter, the 🔍 is not lit and there is no Clear — after a reload of the page too.
+    const lit = () => doc.getElementById('clusters-search-btn');
+    const clearShown = () => [...summary().querySelectorAll('.cl-clear')].some((b) => !b.hidden);
+    ok(lit() && !lit().classList.contains('on') && !clearShown(), 'overview: a sort alone lights the search button or shows Clear');
+    ok(/"name"/.test(window.localStorage.getItem('elasticpro.sort.overview.clusters') || ''), 'overview: the order is not remembered');
+    await go('console'); await go('overview');
+    ok(summary().querySelector('.cl-head .cl-hcell[data-col="name"]').getAttribute('aria-sort') === 'ascending', 'overview: the remembered order did not come back');
+    ok(lit() && !lit().classList.contains('on') && !clearShown(), 'overview: a remembered sort lights the search button or shows Clear on arrival');
   }
 
   // The rows are in the page: no box of their own.
@@ -6566,7 +6605,7 @@ if (viaFleet) {
     await waitFor(() => sentK.find((m) => m.type === 'HOSTS_QUERY' && m.offset === 200), 'volume by host: Next did not ask for offset 200');
     ok(sentK.every((m) => m.limit === 200), 'volume by host: a page is not 200 rows');
     sentK.length = 0;
-    doc.querySelector('#hv-table th[data-col="docs"] button').click();
+    doc.querySelector('#hv-table th[data-col="docs"]').click();
     await waitFor(() => sentK.find((m) => m.type === 'HOSTS_QUERY' && m.sort === 'docs:asc' && m.offset === 0), 'volume by host: sorting by Documents did not ask the server');
     sentK.length = 0;
     const q = doc.getElementById('hv-q'); q.value = 'h42'; fire(q, 'input');

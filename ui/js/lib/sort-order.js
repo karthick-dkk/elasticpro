@@ -1,3 +1,5 @@
+import { compareSortValues } from '../core/sort.js';
+
 /**
  * One sort order for a table: `{ key, dir }`, with `dir` 1 ascending or -1 descending.
  *
@@ -49,13 +51,12 @@ export function parseSort(value, sorts, fallback) {
 export function sortValue(sort) { return `${sort.key}:${sort.dir}`; }
 
 /**
- * Compare two values with `null`/`undefined` always last, whichever way the sort runs:
- * an unknown is not a small value, so it never floats to the top when the order flips.
+ * Compare two values with `null`/`undefined`/NaN always last, whichever way the sort runs:
+ * an unknown is not a small value, so it never floats to the top when the order flips. The
+ * rule and the text order (natural: snap-2 before snap-10) are core/sort.js's, the one every
+ * table uses.
  */
 export function compareNullLast(a, b, dir) {
-  const an = a == null, bn = b == null;
-  if (an && bn) return 0;
-  if (an) return 1;
-  if (bn) return -1;
-  return a < b ? -dir : a > b ? dir : 0;
+  const known = (v) => (v == null || (typeof v === 'number' && Number.isNaN(v)) ? null : v);
+  return compareSortValues(known(a), known(b), dir);
 }

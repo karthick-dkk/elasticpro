@@ -179,7 +179,9 @@ Board figures: tiles = `totals` (`devices`, `late`/`delay`/`critical`, `onTime`,
 (`onTimeAll`, `delayed`, `critical`); *Delayed devices by cluster* = `byCluster` sorted by
 `latePct` (`latePct`, `lateNow` of `devices`); *By cluster* table = `byCluster` (`below` +
 `belowPct`, `delay`, `critical`, `belowPctPrevious` = previous equal-length range, `sparkline`
-over `sparklineDays`, `worst`); *Devices* = `devices` sorted by time late. `sparkline` entries
+over `sparklineDays`, `worst`); *Devices* = `devices` sorted by time late until a column heading
+is pressed (every Log delay table sorts by any column, remembered in the browser; a state sorts
+worst first, "can't measure" last). `sparkline` entries
 are `null` for a day without totals — draw a gap, not zero. `byCluster[].lastRunAt: null` =
 never measured — say so.
 

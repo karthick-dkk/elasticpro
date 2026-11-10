@@ -15,6 +15,7 @@ import { empty } from '../pages/common.js';
 import { utcDay, monthName } from '../core/volume-daily.js';
 import { HOSTS_PAGE, hostsQuery, hostsOf, monthRange, sortKey } from '../core/report-types.js';
 import { amber } from './cells.js';
+import { tableSort, sortTh } from '../lib/table-sort.js';
 
 const FIXED = [
   { col: 'day', label: 'Day' }, { col: 'index', label: 'Index' }, { col: 'source', label: 'Source' }, { col: 'host', label: 'Host' },
@@ -22,8 +23,18 @@ const FIXED = [
   { col: 'subBytes', label: 'Forwarded size', num: true, title: 'the forwarded size' },
 ];
 
+/**
+ * The order is the server's (it pages there), so only the header is shared (lib/table-sort.js
+ * sortTh) and the choice remembered — for the fixed columns, which every cluster has.
+ */
+const HOST_SORT = tableSort('reports.hosts', { initial: { key: 'day', dir: 1 } });
+const initialSort = () => {
+  const s = HOST_SORT.sort;
+  return s && FIXED.some((c) => c.col === s.key) ? { col: s.key, dir: s.dir === -1 ? 'desc' : 'asc' } : { col: 'day', dir: 'asc' };
+};
+
 const v = {
-  clusterId: null, mode: 'month', month: null, day: null, q: '', sort: { col: 'day', dir: 'asc' }, offset: 0,
+  clusterId: null, mode: 'month', month: null, day: null, q: '', sort: initialSort(), offset: 0,
   state: 'idle', data: null, error: '', seq: 0,
 };
 let root = null;
@@ -33,7 +44,7 @@ let timer = null;
 
 export function hostsReset() {
   clearTimeout(timer);
-  Object.assign(v, { clusterId: null, mode: 'month', month: null, day: null, q: '', sort: { col: 'day', dir: 'asc' }, offset: 0, state: 'idle', data: null, error: '', seq: 0 });
+  Object.assign(v, { clusterId: null, mode: 'month', month: null, day: null, q: '', sort: initialSort(), offset: 0, state: 'idle', data: null, error: '', seq: 0 });
   root = null; table = null; pickerSlot = null; paintedSig = '';
 }
 
@@ -58,13 +69,21 @@ async function fetchRows() {
 
 const cellOf = (val, fmtFn) => (val === null || val === undefined ? amber('not measured', 'Elasticsearch did not report this figure') : fmtFn(val));
 
+/** The server's sort as the shared header reads it: a press asks the server again from the first row. */
+const serverSort = {
+  id: 'hosts',
+  get key() { return v.sort.col; },
+  get dir() { return v.sort.dir === 'desc' ? -1 : 1; },
+  on(col) {
+    v.sort = { col, dir: v.sort.col === col && v.sort.dir === 'asc' ? 'desc' : 'asc' };
+    HOST_SORT.set({ key: v.sort.col, dir: v.sort.dir === 'desc' ? -1 : 1 });
+    v.offset = 0;
+    fetchRows();
+  },
+};
+
 function headCell(c) {
-  const on = v.sort.col === c.col;
-  return h(`th${c.num ? '.num' : ''}`, { scope: 'col', title: c.title || null, 'aria-sort': on ? (v.sort.dir === 'asc' ? 'ascending' : 'descending') : 'none', dataset: { col: c.col } },
-    h('button.linkish.hv-sort', {
-      type: 'button',
-      onclick: () => { v.sort = { col: c.col, dir: on && v.sort.dir === 'asc' ? 'desc' : 'asc' }; v.offset = 0; fetchRows(); },
-    }, c.label, on ? (v.sort.dir === 'asc' ? ' ▲' : ' ▼') : ''));
+  return sortTh(serverSort, c.col, c.label, { num: !!c.num, attrs: { scope: 'col', dataset: { col: c.col } }, title: c.title ? `${c.title} — click to sort` : null });
 }
 
 /** What the table was last drawn from: the page redraws on every push from the core, and the table changes only with these. */

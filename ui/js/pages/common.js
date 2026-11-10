@@ -1,5 +1,6 @@
 /** Shared page pieces. */
 import { h, mount, activatable, reconcile } from '../lib/dom.js';
+import { sortTh, paintSortHeads } from '../lib/table-sort.js';
 import { healthClass, ago, dt, diskUseText, bytes } from '../lib/fmt.js';
 import { diskAgainstWatermarks } from '../core/disk-balance.js';
 import { client, refreshAll } from '../core/state.js';
@@ -44,12 +45,15 @@ export function keptCard(cache, key, title, sub, body, actions) {
  * table(), kept the same way: the table (head and scroll box) is kept for as long as its
  * columns and whether it has rows stay the same, and `rows` are put into its kept <tbody> as
  * they are — pass them through cache.sameAll / cache.same so an unchanged row is the row
- * already on screen. No sorting headers (opts.sort) here.
+ * already on screen. A sorting head (opts.sort, a tableSort()) is kept too and brought up to
+ * date in place — its arrow and aria-sort — so a sort never replaces the head under the
+ * pointer; the rows, kept by their own keys, are only moved.
  */
 export function keptTable(cache, key, headers, rows, opts = {}) {
   const none = !rows.length;
   const heads = headers.map((c) => (c instanceof Node ? c.outerHTML : c));
-  const shell = cache.get(`${key}:table`, JSON.stringify([heads, none, opts.emptyText || '']), () => table(headers, [], opts));
+  const shell = cache.get(`${key}:table`, JSON.stringify([heads, none, opts.emptyText || '', opts.sort ? opts.sort.id || 1 : 0]), () => table(headers, [], opts));
+  if (opts.sort) paintSortHeads(shell, opts.sort);
   if (!none) reconcile(shell.querySelector('tbody'), rows);
   return shell;
 }
@@ -198,29 +202,21 @@ export function figure(label, value, sub, { alert = false } = {}) {
  * A table, optionally sortable by clicking its headers.
  *
  * A header carries `sort: 'key'` to become clickable, and `opts.sort` says which key is
- * active, which way, and what to do about a click: `{ key, dir, on(key) }`. Clicking the
- * active column reverses it, which is what every table anyone has used does.
- *
- * Here rather than in each page because "can I sort by this column" should not depend on
- * which page the table is on, and because the arrow, the aria-sort and the reverse-on-
- * second-click are three things that were going to be re-implemented slightly differently
- * every time.
+ * active, which way, and what to do about a click: a tableSort() (lib/table-sort.js), or any
+ * `{ key, dir, on(key), id? }`. The head itself is lib/table-sort.js sortTh — the one column
+ * head every sortable table draws — so the arrow, the aria-sort, the keyboard and the
+ * reverse-on-second-click are the same on every page.
  */
 export function table(headers, rows, opts = {}) {
   const sort = opts.sort || null;
   const thead = h('thead', h('tr', ...headers.map((c) => {
     const key = c && c.sort;
-    const active = key && sort && sort.key === key;
-    const cls = [c.num ? 'num' : '', key && sort ? 'sortable' : ''].filter(Boolean).join('.');
-    return h(cls ? `th.${cls}` : 'th', {
-      style: c.width ? { width: c.width } : null,
-      title: (c && c.title) || (key && sort ? `Sort by ${c.label || c}` : null),
-      'aria-sort': active ? (sort.dir === 1 ? 'ascending' : 'descending') : (key && sort ? 'none' : null),
-      ...(key && sort ? activatable(() => sort.on(key), { role: null }) : {}),
+    const style = c && c.width ? { width: c.width } : null;
     // A label can be a node — a select-all tick, for instance — so it is appended rather
     // than concatenated. Concatenating stringified an element into "[object HTMLInputElement]".
-    }, c.label instanceof Node ? c.label : String(c.label ?? c),
-       active ? (sort.dir === 1 ? ' ▲' : ' ▼') : null);
+    const label = c && c.label instanceof Node ? c.label : String((c && c.label) ?? c);
+    if (key && sort) return sortTh(sort, key, label, { num: !!c.num, attrs: { style }, title: c.title || null });
+    return h(c && c.num ? 'th.num' : 'th', { style, title: (c && c.title) || null }, label);
   })));
   const tbody = h('tbody');
   if (!rows.length) tbody.append(h('tr', h('td', { colspan: headers.length }, empty(opts.emptyText || 'Nothing to show'))));

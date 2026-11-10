@@ -8,6 +8,7 @@
 import { h, svg, reconcile, mount } from '../lib/dom.js';
 import { num, dt, ago } from '../lib/fmt.js';
 import { card, table, pill, empty, keptCard, keptTable } from './common.js';
+import { tableSort } from '../lib/table-sort.js';
 import { levelTone, levelWord, memoryLine, oomText, cpuLine, throttleLine, shareLine, sizeText, msText, pctText,
   trendSeries, sparkPath, problems, jobProgress, concurrencyText } from '../core/system-health.js';
 
@@ -24,6 +25,22 @@ let C = null;
 const K = (key, title, sub, body, actions) => (C ? keptCard(C, `hl:${key}`, title, sub, body, actions) : card(title, sub, body, actions));
 /** A table: kept, its rows each kept while unchanged (keptTable), else table(). */
 const T = (key, headers, rows, opts) => (C ? keptTable(C, `hl:${key}`, headers, C.sameAll(`hl:${key}:row`, rows), opts) : table(headers, rows, opts));
+/** What redraws the page after a header is pressed (healthView's `redraw`). */
+let R = () => {};
+/**
+ * A table whose heads sort (lib/table-sort.js): `cols` is `[label | {label, width}, sortKey | null,
+ * { type, value(item) } | null]`, the items are put in the header's order (the core's own order
+ * until one is pressed), then `limit`ed, then drawn by `row`.
+ */
+const ST = (key, cols, items, row, opts = {}) => {
+  const sort = tableSort(`requests.health.${key}`, { onChange: () => R() });
+  const spec = Object.fromEntries(cols.filter((c) => c[1]).map((c) => [c[1], c[2]]));
+  const shown = sort.apply(items || [], spec).slice(0, opts.limit || Infinity);
+  const headers = cols.map(([l, k]) => (typeof l === 'object' ? { ...l, sort: k } : { label: l, sort: k }));
+  return T(key, headers, shown.map(row), { ...opts, sort });
+};
+const LEVEL_RANK = { bad: 3, warn: 2, ok: 1, off: 0 };
+const msOf = (k) => ({ type: 'number', value: (x) => x[k] });
 /** Two cards side by side, in a kept grid (a kept card must never go into a fresh element). */
 const grid = (key, ...cards) => {
   if (!C) return h('div.hl-grid', ...cards);
@@ -77,15 +94,19 @@ function strip(parts) {
 
 function checksCard(snap) {
   const bad = problems(snap.checks);
-  const rows = (snap.checks || []).map((c) => h('tr', { class: c.level === 'bad' || c.level === 'warn' ? `hl-row-${c.level}` : '', dataset: { check: c.id } },
+  const row = (c) => h('tr', { class: c.level === 'bad' || c.level === 'warn' ? `hl-row-${c.level}` : '', dataset: { check: c.id } },
     h('td', h('b', c.label)),
     h('td', levelPill(c.level)),
     h('td.mono', c.value),
-    h('td', h('div', c.text), c.fix ? h('div.hl-fix', h('b', 'Fix: '), c.fix) : null)));
+    h('td', h('div', c.text), c.fix ? h('div.hl-fix', h('b', 'Fix: '), c.fix) : null));
+  const text = (k) => ({ type: 'text', value: (x) => x[k] });
   const thresholds = fold('thresholds', 'Thresholds',
-    T('thresholds', ['Check', 'Amber', 'Red'], (snap.thresholds || []).map((t) => h('tr', h('td', t.check), h('td', t.amber), h('td', t.red)))));
+    ST('thresholds', [['Check', 'check', text('check')], ['Amber', 'amber', text('amber')], ['Red', 'red', text('red')]], snap.thresholds,
+      (t) => h('tr', h('td', t.check), h('td', t.amber), h('td', t.red))));
   const sub = bad.length ? `${bad.length} need${bad.length === 1 ? 's' : ''} attention` : 'all within their thresholds';
-  return K('checks', 'Checks', sub, [T('checks', [{ label: 'Check', width: '22%' }, { label: 'Status', width: '96px' }, { label: 'Value', width: '22%' }, 'What it means'], rows), thresholds]);
+  return K('checks', 'Checks', sub, [ST('checks', [[{ label: 'Check', width: '22%' }, 'label', text('label')],
+    [{ label: 'Status', width: '96px' }, 'level', { type: 'number', value: (c) => (c.level in LEVEL_RANK ? LEVEL_RANK[c.level] : null), start: -1 }],
+    [{ label: 'Value', width: '22%' }, 'value', text('value')], ['What it means', 'text', text('text')]], snap.checks, row), thresholds]);
 }
 
 function memoryCard(snap) {
@@ -132,10 +153,11 @@ function timesCard(snap) {
   const summary = T('times', head, [
     line('All types, 5 min', m.w5m && m.w5m.all), line('All types, 1 h', m.w1h && m.w1h.all),
     line('The core’s own, 5 min', m.w5m && m.w5m.own), line('The core’s own, 1 h', m.w1h && m.w1h.own)]);
-  const slowest = T('slowest', ['Slowest types (5 min)', 'p50', 'p95', 'p99', 'Count', 'Errors'],
-    (m.slowest || []).map((t) => line(h('span.mono', t.type), t)), { emptyText: 'no messages in 5 min' });
+  const typeCols = (first) => [[first, 'type', { type: 'text', value: (t) => t.type }], ['p50', 'p50', msOf('p50Ms')], ['p95', 'p95', msOf('p95Ms')],
+    ['p99', 'p99', msOf('p99Ms')], ['Count', 'count', { type: 'number', value: (t) => t.count || 0 }], ['Errors', 'errors', { type: 'number', value: (t) => t.errors || 0 }]];
+  const slowest = ST('slowest', typeCols('Slowest types (5 min)'), m.slowest, (t) => line(h('span.mono', t.type), t), { emptyText: 'no messages in 5 min' });
   const all = fold('types', `Every type (1 h, ${((m.w1h && m.w1h.byType) || []).length})`,
-    T('types', ['Type', 'p50', 'p95', 'p99', 'Count', 'Errors'], ((m.w1h && m.w1h.byType) || []).map((t) => line(h('span.mono', t.type), t))));
+    ST('types', typeCols('Type'), (m.w1h && m.w1h.byType) || [], (t) => line(h('span.mono', t.type), t)));
   return K('times', 'Response time', `the core’s handling time per message · ${num(m.sessions || 0)} sessions · ${num(m.eventStreams || 0)} event streams open`,
     [summary, slowest, all,
       h('p.muted.hl-note', '“Own” leaves out messages that wait on a cluster, Zabbix, mail or a password hash; the p95 check reads it. Percentiles are bucket bounds.')]);
@@ -143,15 +165,19 @@ function timesCard(snap) {
 
 function gateTables(g, who) {
   if (!g) return [h('p.muted', 'not known')];
-  const classes = T(`gate-classes-${who}`, ['Class', 'In use', 'Waiting', 'Wait p95 (5 min)', 'Overloaded 5 min / 1 h', 'Queue timeout 5 min / 1 h'],
-    (g.classes || []).map((c) => h('tr', h('td', c.class), h('td.mono', num(c.running)), h('td.mono', c.waiting ? pill(num(c.waiting), 'grey') : '0'),
+  const n = (k) => ({ type: 'number', value: (x) => x[k] });
+  const classes = ST(`gate-classes-${who}`, [['Class', 'class', { type: 'text', value: (c) => c.class }], ['In use', 'running', n('running')], ['Waiting', 'waiting', n('waiting')],
+    ['Wait p95 (5 min)', 'waitP95', n('waitP95Ms')], ['Overloaded 5 min / 1 h', 'overloaded', n('overloaded5m')], ['Queue timeout 5 min / 1 h', 'queueTimeout', n('queueTimeout5m')]],
+    g.classes, (c) => h('tr', h('td', c.class), h('td.mono', num(c.running)), h('td.mono', c.waiting ? pill(num(c.waiting), 'grey') : '0'),
       h('td.mono', msText(c.waitP95Ms)),
       h('td.mono', `${num(c.overloaded5m)} / ${c.overloaded1h === null || c.overloaded1h === undefined ? '—' : num(c.overloaded1h)}`),
-      h('td.mono', `${num(c.queueTimeout5m)} / ${c.queueTimeout1h === null || c.queueTimeout1h === undefined ? '—' : num(c.queueTimeout1h)}`))));
-  const clusters = T(`gate-clusters-${who}`, ['Cluster', 'In use', 'Waiting', 'Sent (5 min)', 'Upstream p95', 'Timeouts', '429s'],
-    (g.clusters || []).slice(0, 15).map((c) => h('tr', h('td', h('b', c.cluster)), h('td.mono', num(c.running)), h('td.mono', num(c.waiting)), h('td.mono', num(c.sent5m)),
-      h('td.mono', msText(c.upstreamP95Ms)), h('td.mono', c.timeouts5m ? pill(num(c.timeouts5m), 'red') : '0'), h('td.mono', c.rejected5m ? pill(num(c.rejected5m), 'yellow') : '0'))),
-    { emptyText: 'no cluster asked in 5 min' });
+      h('td.mono', `${num(c.queueTimeout5m)} / ${c.queueTimeout1h === null || c.queueTimeout1h === undefined ? '—' : num(c.queueTimeout1h)}`)));
+  // The first 15 in the header's order (the core's busiest-first until one is pressed).
+  const clusters = ST(`gate-clusters-${who}`, [['Cluster', 'cluster', { type: 'text', value: (c) => c.cluster }], ['In use', 'running', n('running')], ['Waiting', 'waiting', n('waiting')],
+    ['Sent (5 min)', 'sent', n('sent5m')], ['Upstream p95', 'upstream', n('upstreamP95Ms')], ['Timeouts', 'timeouts', n('timeouts5m')], ['429s', 'rejected', n('rejected5m')]],
+    g.clusters, (c) => h('tr', h('td', h('b', c.cluster)), h('td.mono', num(c.running)), h('td.mono', num(c.waiting)), h('td.mono', num(c.sent5m)),
+      h('td.mono', msText(c.upstreamP95Ms)), h('td.mono', c.timeouts5m ? pill(num(c.timeouts5m), 'red') : '0'), h('td.mono', c.rejected5m ? pill(num(c.rejected5m), 'yellow') : '0')),
+    { emptyText: 'no cluster asked in 5 min', limit: 15 });
   return [h('div.hl-sub', `${num(g.slotsInUse)} of ${num(g.slots)} slots in use · ${num(g.perCluster)} per cluster · ${num(g.perJump)} per jump host · ${num(g.backgroundReserve)} kept for background`),
     classes, clusters];
 }
@@ -175,17 +201,24 @@ function pollerCard(snap) {
 
 function reportsCard(snap) {
   const r = snap.reports || {};
-  const running = T('running', ['Job', 'Cluster', 'Progress', 'Concurrency', 'Started'], (r.running || []).map((j) => h('tr',
+  const t = (f) => ({ type: 'text', value: f });
+  const done = (x) => (x.progress && x.progress.total ? x.progress.done / x.progress.total : null);
+  const running = ST('running', [['Job', 'kind', t((j) => j.kind || 'volume')], ['Cluster', 'cluster', t((j) => j.clusterName || j.clusterId)],
+    ['Progress', 'progress', { type: 'number', value: done }], ['Concurrency', 'concurrency', t((j) => concurrencyText(j))], ['Started', 'started', { type: 'date', value: (j) => j.startedAt || null }]],
+  r.running, (j) => h('tr',
     h('td', h('span.mono', j.kind || 'volume'), h('div.hl-sub', j.by || '')),
     h('td', j.clusterName || j.clusterId || '—'),
     h('td', jobProgress(j) || '—'),
     h('td', concurrencyText(j)),
-    h('td', j.startedAt ? ago(j.startedAt) : '—'))), { emptyText: 'nothing running' });
-  const coll = (r.collection || []).length ? T('collection', ['Collecting', 'Kind', 'Progress', 'Concurrency'], r.collection.map((c) => h('tr',
+    h('td', j.startedAt ? ago(j.startedAt) : '—')), { emptyText: 'nothing running' });
+  const coll = (r.collection || []).length ? ST('collection', [['Collecting', 'cluster', t((c) => c.clusterId)], ['Kind', 'kind', t((c) => c.kind)],
+    ['Progress', 'progress', { type: 'number', value: done }], ['Concurrency', 'concurrency', t((c) => concurrencyText(c))]], r.collection, (c) => h('tr',
     h('td', c.clusterId), h('td', c.kind), h('td.mono', c.progress && c.progress.total ? `${c.progress.done}/${c.progress.total}` : '—'),
-    h('td', concurrencyText(c))))) : null;
+    h('td', concurrencyText(c)))) : null;
   const last = r.lastJob || {};
-  const sched = T('schedules', ['Kind', 'Schedule', 'Next run', 'Last send', 'Last job'], (r.schedules || []).map((s) => {
+  const sched = ST('schedules', [['Kind', 'kind', t((s) => s.kind)], ['Schedule', 'schedule', t((s) => (s.enabled ? `${s.cadence || ''} ${s.at || ''}` : null))],
+    ['Next run', 'next', t((s) => s.nextAt || null)], ['Last send', 'lastSend', { type: 'date', value: (s) => (s.lastSent ? s.lastSent.at : null) }],
+    ['Last job', 'lastJob', t((s) => (last[s.kind] ? last[s.kind].status : null))]], r.schedules, (s) => {
     const ls = s.lastSent;
     const lj = last[s.kind];
     return h('tr', h('td', h('b', s.kind)),
@@ -193,7 +226,7 @@ function reportsCard(snap) {
       h('td', s.nextAt || h('span.muted', 'not scheduled')),
       h('td', ls ? [ls.ok ? pill('sent', 'green') : pill('failed', 'red'), ` ${dt(ls.at)}`, ls.error ? h('div.hl-sub', ls.error) : null] : h('span.muted', 'never')),
       h('td', lj ? [pill(lj.status, lj.status === 'done' ? 'green' : lj.status === 'failed' ? 'red' : 'grey'), lj.endedAt ? ` ${ago(lj.endedAt)}` : '', lj.error ? h('div.hl-sub', lj.error) : null] : h('span.muted', 'none kept')));
-  }), { emptyText: 'no schedule file' });
+  }, { emptyText: 'no schedule file' });
   return K('reports', 'Reports and collection', `${num((r.running || []).length)} running · ${num(r.queued || 0)} queued · from ${r.source || 'not known'}`, [running, coll, sched]);
 }
 
@@ -206,7 +239,8 @@ function diskCard(snap) {
   return K('disk', 'Disk', d.path || 'the data volume', [
     bar(used, check && check.level),
     h('div.hl-sub', d.totalBytes ? `${sizeText(d.usedBytes)} used · ${sizeText(d.freeBytes)} free (${pctText(d.freePct)}) of ${sizeText(d.totalBytes)}` : 'space not known (no statvfs here)'),
-    T('areas', ['Area', 'Size', 'Files'], (d.areas || []).map((a) => h('tr', h('td', a.label), h('td.mono', `${a.atLeast ? 'at least ' : ''}${sizeText(a.bytes)}`), h('td.mono', num(a.files))))),
+    ST('areas', [['Area', 'label', { type: 'text', value: (a) => a.label }], ['Size', 'bytes', { type: 'bytes', value: (a) => a.bytes }], ['Files', 'files', { type: 'number', value: (a) => a.files }]],
+      d.areas, (a) => h('tr', h('td', a.label), h('td.mono', `${a.atLeast ? 'at least ' : ''}${sizeText(a.bytes)}`), h('td.mono', num(a.files)))),
     h('div.hl-sub', d.areasAt ? `areas measured ${ago(d.areasAt)}` : 'areas not measured yet',
       ' · last prune: ', prune ? `${ago(prune.finishedAt || prune.startedAt)}${prune.dryRun ? ' (dry run)' : ''}` : 'none since start')]);
 }
@@ -252,7 +286,8 @@ function head(snap) {
  * end(), to keep what did not change from one read to the next — the tab is then one kept
  * element.
  */
-export function healthView(snap, { error = null, cache = null } = {}) {
+export function healthView(snap, { error = null, cache = null, redraw = null } = {}) {
+  if (redraw) R = redraw;
   if (!snap) {
     return h('div.hl-page', error ? h('div.banner.err', h('div', h('div.ttl', 'Could not read ElasticPro health'), h('div', error)))
       : h('p.muted', 'Reading ElasticPro health…'));

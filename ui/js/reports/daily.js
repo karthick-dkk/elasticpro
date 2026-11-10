@@ -18,6 +18,7 @@ import { h } from '../lib/dom.js';
 import { bytes, num, toCsv, download } from '../lib/fmt.js';
 import { lineChart, signedPct } from '../lib/charts.js';
 import { columnsButton, columnTable, sanitizeLayout } from '../lib/columns.js';
+import { tableSort } from '../lib/table-sort.js';
 import { state } from '../core/state.js';
 import { navigateTo } from '../core/intent.js';
 import { card, statTile, empty, unreadable, configErrorBanner } from '../pages/common.js';
@@ -479,14 +480,32 @@ function dailyTable(c, reply) {
   const defs = dailyDefs(reply);
   const today = utcDay();
   const from = addDays(today, -SHOWN_DAYS);
-  const rows = [...(reply.days || [])].filter((d) => d.day >= from).sort((a, b) => (a.day < b.day ? 1 : -1));
+  const sort = tableSort('reports.daily', { initial: { key: 'day', dir: -1 }, onChange: bump });
+  const sortCols = dailySortCols(reply, today);
+  const rows = sort.apply([...(reply.days || [])].filter((d) => d.day >= from).sort((a, b) => (a.day < b.day ? 1 : -1)), sortCols);
   const layout = layoutFor('daily');
   const onChange = (next) => changeLayout('daily', defs, next);
   return card('Day by day', null,
-    columnTable({ defs, layout, rows, cell: dailyCellFor(reply), canEdit: canSave(), onChange,
+    columnTable({ defs, layout, rows, cell: dailyCellFor(reply), canEdit: canSave(), onChange, sort, sortCols,
       after: [{ label: 'Status', cell: statusCell }],
       rowAttrs: (d) => (d.day === today ? { class: 'today' } : null) }),
     [columnsButton({ defs, layout, onChange, id: 'vs-cols-daily' })]);
+}
+
+/** What each Day by day column sorts on: the figure, not the text drawn (core/sort.js). */
+function dailySortCols(reply, today) {
+  const top = (k) => ({ type: 'text', value: (d) => (d.top && d.top[TOP_KEY[k]] ? d.top[TOP_KEY[k]].value : null) });
+  return {
+    day: { type: 'date', value: (d) => d.day },
+    indices: { type: 'number', value: (d) => d.indices },
+    docs: { type: 'number', value: (d) => d.docs },
+    eventBytes: { type: 'bytes', value: (d) => eventBytesOf(d) },
+    changeVsAvg: { type: 'percent', value: (d) => (d.day === today ? null : eventVsAvgPct(reply, d.day, vs.avgDays, { today })) },
+    subBytes: { type: 'bytes', value: (d) => d.subBytes },
+    priBytes: { type: 'bytes', value: (d) => d.priBytes },
+    totalBytes: { type: 'bytes', value: (d) => d.totalBytes },
+    ...Object.fromEntries(Object.keys(TOP_KEY).map((k) => [k, top(k)])),
+  };
 }
 
 function exportDaily(c, reply) {
@@ -614,8 +633,24 @@ function monthlyTable(c, rows, settings, peaks) {
     if (r.pct === null) return r.why ? h('span.muted', r.why) : dash();
     return h(`span.${r.pct >= 0 ? 'vs-up' : 'vs-dn'}`, `${r.pct >= 0 ? '▲' : '▼'} ${Math.abs(r.pct).toFixed(1)} %`);
   };
+  // A month with no day in the record has no figures: unknown, so it sorts last either way.
+  const known = (f) => (m) => (m.daysWithData > 0 ? f(m) : null);
+  const top = (k) => ({ type: 'text', value: known((m) => (m.top && m.top[TOP_KEY[k]] ? m.top[TOP_KEY[k]].value : null)) });
+  const sortCols = {
+    month: { type: 'text', value: (m) => m.month },
+    daysWithData: { type: 'number', value: (m) => m.daysWithData || 0 },
+    docs: { type: 'number', value: known((m) => m.docs) },
+    eventBytes: { type: 'bytes', value: known((m) => m.eventBytes) },
+    peakDay: { type: 'bytes', value: known((m) => { const p = peaks ? monthEventPeak(peaks, m.month) : null; return p ? p.value : null; }) },
+    subBytes: { type: 'bytes', value: known((m) => m.subBytes) },
+    priBytes: { type: 'bytes', value: known((m) => m.priBytes) },
+    avgPerDay: { type: 'bytes', value: known((m) => m.avgPerDay) },
+    from: { type: 'text', value: known((m) => (m.keptDays && m.liveDays ? 'kept and live' : m.keptDays ? 'kept record' : 'live indices')) },
+    ...Object.fromEntries(['topExtra', 'topSourceHost', 'topForwarder'].map((k) => [k, top(k)])),
+  };
+  const sort = tableSort('reports.monthly', { initial: { key: 'month', dir: -1 }, onChange: bump });
   return card('Month by month', null,
-    columnTable({ defs, layout, rows: [...rows].reverse(), cell, canEdit: canSave(), onChange,
+    columnTable({ defs, layout, rows: sort.apply([...rows].reverse(), sortCols), cell, canEdit: canSave(), onChange, sort, sortCols,
       after: [{ label: 'vs previous', num: true, cell: vsPrev }] }),
     [columnsButton({ defs, layout, onChange, id: 'vs-cols-monthly' })]);
 }
