@@ -36,7 +36,10 @@ schedule created with `JOB_CREATE` is a job of its own, `report.schedule.<id>` (
 
 **What counts as a run.** A tick that does nothing is not a run: the history store's minute when
 nothing is queued or a switch is off, the push when no host is named, the Zabbix sync while the
-API is not configured. A scheduled measurement refused before it started (not primed, read-only,
+API is not configured — nor the rebuild of the Zabbix cluster list after an edit made in
+ElasticPro (`ZABBIX_CLUSTER_SAVE`, `zabbix_rebuild`), which asks Zabbix nothing. A sync (the
+fetch from Zabbix and the build over it) is a run, by the timer, the start, a link change or a
+person. A scheduled measurement refused before it started (not primed, read-only,
 no destination) *is* a run, `skipped`, because it was due. The two collections start one cluster
 at a time: the clusters a tick starts — and any a later tick starts while some still collect —
 are **one run**, its progress the clusters ended of those begun. A *Refresh now* (`VOLUME_RUN`)
