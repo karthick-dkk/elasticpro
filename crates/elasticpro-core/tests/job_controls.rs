@@ -259,6 +259,8 @@ async fn cancel_of_queued_and_running_report_jobs_and_the_ask_survives_a_restart
     let dir = TempDir::new("jc-cancel-report");
     let ids = ["a", "b", "c", "d"];
     let c = portable(&dir, ids.iter().map(|i| (*i, srv.url())).collect()).await;
+    // Three at once (overall.mostAtOnce, which REPORT_CONCURRENCY_SET writes; the default is 4).
+    assert_eq!(c.handle(json!({ "type": "REPORT_CONCURRENCY_SET", "n": 3 })).await["ok"], json!(true));
     let day = |n: i64| (today() - Duration::days(n)).format("%Y-%m-%d").to_string();
     let period = json!({ "from": day(9), "to": day(0) });
     let mut runs = vec![];

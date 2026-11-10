@@ -11,7 +11,8 @@
 //!   crosses its threshold (people waiting, CPU throttled, CPU over the admin's `cpuPct`, memory
 //!   over `memoryPct`, most of the clusters in work rejecting); never below the running jobs'
 //!   minimums, never above `workerTotal`. A signal that cannot be read moves the rule neither
-//!   way (and is shown null — never a guessed zero).
+//!   way (and is shown null — never a guessed zero) — except people waiting: not known holds the
+//!   total where it is, since people come first.
 //! * **The sharing** (`share`): every running job keeps its minimum (slowed, never starved); a
 //!   job whose `auto` is off gets its maximum, within `workerTotal`; what is left of the total
 //!   goes by priority, High before Medium before Low, one request at a time round the jobs of a
@@ -112,11 +113,13 @@ pub fn pressure(s: &Signals, o: &Overall) -> Option<Reason> {
     }
 }
 
-/// Calm enough to grow. A signal not known does not stop it (it is shown null).
+/// Calm enough to grow. People must be known not to wait (a worker that cannot see the core's
+/// gate does not push harder on a guess); CPU, memory and throttling not known (no cgroup, no
+/// limit) do not stop it — they are shown null.
 pub fn calm(s: &Signals) -> bool {
     s.cpu_pct.is_none_or(|p| p < CALM_CPU_PCT)
         && s.memory_pct.is_none_or(|p| p < CALM_MEMORY_PCT)
-        && s.people_waiting.is_none_or(|n| n == 0)
+        && s.people_waiting == Some(0)
         && s.throttled_pct.is_none_or(|p| p < THROTTLED_PCT)
         && !s.rejecting
 }
@@ -526,8 +529,10 @@ mod tests {
         // Between calm and the thresholds: held.
         let warm = Signals { cpu_pct: Some(70.0), ..calm_signals() };
         assert_eq!(step(8, &warm, &o(), 2), (8, None));
-        // Not known moves nothing either way.
-        assert_eq!(step(8, &Signals::default(), &o(), 2), (9, Some(Reason::Calm)), "nothing known says no pressure");
+        // Not known: no pressure, so nothing halves; people not known holds the total.
+        assert_eq!(step(8, &Signals::default(), &o(), 2), (8, None), "people not known: held");
+        let no_cgroup = Signals { people_waiting: Some(0), ..Signals::default() };
+        assert_eq!(step(8, &no_cgroup, &o(), 2), (9, Some(Reason::Calm)), "CPU and memory not known do not stop it");
     }
 
     #[test]

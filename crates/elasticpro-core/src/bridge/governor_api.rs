@@ -42,7 +42,8 @@ impl Core {
     /// Run `f` as part of the run `key` of `job_id`: every request it sends waits in the run's lane.
     pub(crate) async fn governed<F: Future>(&self, key: &str, job_id: &str, f: F) -> F::Output {
         let g = self.job_lane(key, job_id);
-        governor::within(Some(g.lane()), f).await
+        // On the heap: a job's future is large, and is polled on a runtime thread's stack.
+        governor::within(Some(g.lane()), Box::pin(f)).await
     }
 
     /// The worker's jobs running now: report jobs and the two collections' open runs. One
@@ -298,5 +299,13 @@ impl Core {
             out.insert(name.into(), json!({ "value": v, "lockedBy": gate_locked(key).then_some(format!("config.txt {key}")), "min": lo, "max": hi }));
         }
         Value::Object(out)
+    }
+
+    /* ------------------------------------------ the tests ------------------------------------------ */
+
+    /// The lane a run of `job_id` gets: (fixed, limit). Tests only.
+    #[doc(hidden)]
+    pub async fn governor_probe_for_tests(&self, job_id: &str) -> (bool, u32) {
+        self.governed("probe", job_id, async { governor::current().map(|l| (l.fixed, l.limit())).unwrap_or((false, 0)) }).await
     }
 }
