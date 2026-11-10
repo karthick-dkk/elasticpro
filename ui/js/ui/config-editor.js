@@ -839,26 +839,28 @@ export async function editZabbixCluster(c) {
           && await confirmDialog('Keep this cluster’s own credential?',
             `The server keeps a credential of ${c.name}’s own (${keptLine(keptOwn)}), given for its route and certificate setting before. `
             + 'Send it where the cluster is now? If not, it signs in with Zabbix’s credential until its own is typed again.', { yes: 'keep it' });
-        let did = false;
+        // `reload`: the core rebuilt the cluster (overlay or credential), so the Zabbix list is read
+        // again; the type alone is the meta store's, which saveClusterMeta keeps current.
+        let did = false, reload = false;
         try {
           if (changesSomething(change)) {
             const res = await bridge({ type: 'ZABBIX_CLUSTER_SAVE', hostId: z.hostId, set: change.set, reset: change.reset });
             if (!res || !res.ok) return ctx.msg(`Save failed: ${(res && res.message) || 'the core refused it'}`);
-            did = true;
+            did = reload = true;
           }
-          if (typed) { await keepCredential(c.id, typed); did = true; }
-          else if (forget) { await forgetCredential(c.id); did = true; }
-          else if (rebind) { await rebindCredential(c.id); did = true; }
+          if (typed) { await keepCredential(c.id, typed); did = reload = true; }
+          else if (forget) { await forgetCredential(c.id); did = reload = true; }
+          else if (rebind) { await rebindCredential(c.id); did = reload = true; }
           if (kindEditable && kindRead.changed) { await saveClusterMeta(c.id, kindRead.meta); did = true; }
         } catch (e) {
           return ctx.msg(`${did ? 'Partly saved' : 'Save failed'}: ${e.message}`);
         }
-        if (did) {
+        if (reload) {
           await setConfig(state.config, state.handle);
           bus.emit('config', state.config);
-          bus.emit('data');
           refreshAll({ force: true });
         }
+        if (did) bus.emit('data');
         ctx.done(did);
       } }, 'Save'))]);
   return !!saved;
