@@ -442,7 +442,8 @@ files are built on the report's own blocking slots too, and a file over
   desktop each job applies its cluster's override from the message's `volume.clusters[id]`.
 - A job's mail goes to the mailed report's `to/cc/bcc` (below), which only an admin sets:
   `REPORT_RUN` takes no addresses, so a user cannot send cluster figures anywhere else.
-- At most `concurrency` jobs run at once (3..5, default 3, admin `REPORT_CONCURRENCY_SET {n}`);
+- At most `concurrency` jobs run at once: `overall.mostAtOnce` (default 4) less the collections
+  running, at least one — docs/JOBS.md "Governor"; admin `REPORT_CONCURRENCY_SET {n}` (3..5) writes it;
   the rest wait in FIFO order and start as slots free. Persisted in `<data>/reports/jobs.json`
   (compact, written by a writer thread so no async worker waits on the disk; a burst of
   changes is one write of the last state; at most 200 finished + 200 waiting entries). A

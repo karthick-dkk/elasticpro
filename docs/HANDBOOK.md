@@ -847,8 +847,9 @@ The short version of docs/VOLUME.md "Reports and mail". Code: `crates/elasticpro
   through the volume collector (same rules: Background class, origin `volume-report`, one
   collection per cluster at a time and two clusters at once, the daily run included), builds
   the file from `volume::derive` (no figure computed twice), keeps it in `<data>/reports/`
-  (0600, pruned after 7 days) and mails it when `mail` is set. 3..5 jobs at once (default 3,
-  `REPORT_CONCURRENCY_SET`), the rest FIFO; the queue is `<data>/reports/jobs.json`, and a job
+  (0600, pruned after 7 days) and mails it when `mail` is set. As many jobs at once as
+  `JOB_SETTINGS_SET overall.mostAtOnce` leaves (default 4, less the collections running, at
+  least one; `REPORT_CONCURRENCY_SET` writes it — docs/JOBS.md "Governor"), the rest FIFO; the queue is `<data>/reports/jobs.json`, and a job
   running at a restart is marked `failed: "the server restarted"`. One person may have 15
   jobs waiting or running (`too_many_jobs`) and ask for 10 mailed ones an hour
   (`too_many_mails`).
@@ -885,7 +886,7 @@ The short version of docs/VOLUME.md "Reports and mail". Code: `crates/elasticpro
 | `REPORT_STOP {id}` / `{all: true}` | admin | `{stopped: [ids ended now], stopping: [ids asked]}`; audited |
 | `REPORT_CLEAR` | user | `{removed}` — the caller's finished jobs (admin: all) and their files |
 | `REPORT_DOWNLOAD {id}` | user (starter or admin) | `{name, mime, bytes, base64}` |
-| `REPORT_CONCURRENCY_SET {n}` | admin | `{concurrency}`, 3..5 |
+| `REPORT_CONCURRENCY_SET {n}` | admin | `{concurrency}`, 3..5 — writes `overall.mostAtOnce` (docs/JOBS.md "Governor") |
 | `MAIL_SETTINGS_GET` | admin | `{host, port, security, auth, user, from, passwordSet, passwordStale, passwordFrom, managed, configured, problem, canStorePassword, passwordStoreProblem}` |
 | `MAIL_SETTINGS_SET {…, password?, clearPassword?}` | admin | as GET; a managed field may be sent unchanged, not changed (`managed`) |
 | `MAIL_TEST {to}` | admin | `{ok, steps: [{step: connect\|tls\|auth\|send, ok, detail}]}`, `kind: smtp_failed` and `message` when a step failed |
@@ -899,7 +900,7 @@ the job controls, docs/JOBS.md "Controls" (`JOB_*`).
 `Job = {id, kind: cluster|mailed, clusterId ("*" for mailed), clusterName, clusterIds, period: {from, to, label}, format, mail, by, createdAt, startedAt, endedAt, status, progress: {done, total}, file: {name, bytes} | null, error, mailError, stoppedBy, warning, sheets?, stopping}`.
 
 **With the report worker (role `core`, docs/WORKER.md).** `REPORT_RUN`, `REPORT_SEND_NOW`,
-`REPORT_STOP`, `REPORT_CLEAR`, `REPORT_CONCURRENCY_SET` and `VOLUME_RUN` are forwarded to the
+`REPORT_STOP`, `REPORT_CLEAR` and `VOLUME_RUN` are forwarded to the
 worker after the core's own checks (role, the caller's clusters, `too_many_clusters`, the
 per-person and mail limits against `jobs.json`, recipients and mail for a send) and answer what
 the worker answers — or `{ok: false, kind: "worker_unavailable", message, lastHeartbeatAt}`
