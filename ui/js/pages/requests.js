@@ -29,6 +29,7 @@ import { confirmDialog } from '../ui/modal.js';
 import { isPaused, stopQuestion, pausedLine, mayStop, stopRefusal, STOP_MINUTES, gapLine, DATASETS } from '../core/policy.js';
 import { toast } from '../ui/menu.js';
 import { card, table, pill, statTile, empty, keptCard, keptTable } from './common.js';
+import { tableSort } from '../lib/table-sort.js';
 import { NO_FILTER, requestRows, originChoices, perCluster, requestCsvRows, CSV_HEADER, originLabel, gateFigures,
   requestStatus, modeText, limitChips, clockTime, classTag, resultTone, LOG_LIMIT, zabbixPushLine } from '../core/request-log.js';
 
@@ -255,14 +256,38 @@ function keptBox(key, tag, kids) {
   return el;
 }
 
+/**
+ * Each table's column sort (lib/table-sort.js). None opens sorted by a column: the request
+ * log keeps "in flight first, then newest" until a header is pressed (a third press brings
+ * it back), the per-cluster table its cluster order, housekeeping and tasks theirs.
+ */
+const SORTS = {
+  log: tableSort('requests.log', { onChange: () => draw() }),
+  perCluster: tableSort('requests.per-cluster', { onChange: () => draw() }),
+  jobs: tableSort('requests.housekeeping', { onChange: () => draw() }),
+  tasks: tableSort('requests.tasks', { onChange: () => draw() }),
+};
+const RESULT_RANK = { queued: 0, shared: 1, inflight: 2 };
+
 function pageKids() {
   if (!isAdmin()) {
     return built.sameAll('op', [
       h('div.rq-top', stopCard()),
       h('p.muted.rq-op-note', 'The request log, its figures and housekeeping are an administrator’s.')]);
   }
-  if (tab === 'health') return [built.same('tabs', tabsBar()), healthView(health, { error: healthError, cache: built })];
-  const rows = requestRows(log, filter);
+  if (tab === 'health') return [built.same('tabs', tabsBar()), healthView(health, { error: healthError, cache: built, redraw: draw })];
+  // Filter, then the header's order, then the first 500: the CSV is the rows in this order.
+  const rows = SORTS.log.apply(requestRows(log, filter), {
+    time: { type: 'date', value: (r) => r.startedAt },
+    cluster: { type: 'text', value: (r) => (clusters().find((c) => c.id === r.cluster) || {}).name || r.cluster },
+    from: { type: 'text', value: (r) => r.originLabel },
+    cls: { type: 'text', value: (r) => { const t = classTag(r.class); return t ? t.label : null; } },
+    method: { type: 'text', value: (r) => r.method },
+    path: { type: 'text', value: (r) => r.path },
+    wait: { type: 'duration', value: (r) => (r.queuedMs ? r.queuedMs : r.state === 'queued' ? r.elapsedMs : null) },
+    took: { type: 'duration', value: (r) => (r.inflight ? (r.state === 'queued' ? null : r.elapsedMs) : r.ms) },
+    result: { type: 'text', value: (r) => (r.inflight ? `~${RESULT_RANK[r.state] ?? 2}` : r.outcome) },
+  });
   shownRows = rows;
   const inflight = rows.filter((r) => r.inflight).length;
   const perMin = Object.values(requestLoad.clusters || {}).reduce((s, c) => s + (c.perMinute || 0), 0);
@@ -322,8 +347,9 @@ function pageKids() {
         r.answeredBy ? h('span.pill.grey', { style: { marginLeft: '4px' }, title: 'Answered without sending the cluster another request' }, r.answeredBy) : null)));
   });
   const reqTable = rows.length
-    ? keptTable(built, 'rq', [{ label: 'Time', width: '78px' }, { label: 'Cluster', width: '21%' }, { label: 'From', width: '13%' }, { label: 'Class', width: '88px' },
-      { label: 'Method', width: '66px' }, 'Path', { label: 'Wait', width: '80px' }, { label: 'Took', width: '88px' }, { label: 'Result', width: '150px' }], trs, {})
+    ? keptTable(built, 'rq', [{ label: 'Time', width: '78px', sort: 'time' }, { label: 'Cluster', width: '21%', sort: 'cluster' }, { label: 'From', width: '13%', sort: 'from' },
+      { label: 'Class', width: '88px', sort: 'cls' }, { label: 'Method', width: '66px', sort: 'method' }, { label: 'Path', sort: 'path' }, { label: 'Wait', width: '80px', sort: 'wait' },
+      { label: 'Took', width: '88px', sort: 'took' }, { label: 'Result', width: '150px', sort: 'result' }], trs, { sort: SORTS.log })
     : empty('No requests match — or the core has sent none since it started.');
   if (rows.length && !reqTable.querySelector('table.rq-tbl')) reqTable.querySelector('table').classList.add('rq-tbl');
 
@@ -333,15 +359,22 @@ function pageKids() {
     top('top', h('div.rq-top', statusCard(status), stopCard())),
     error ? top('error', h('div.banner.err', h('div', h('div.ttl', 'Could not read the request log'), h('div', error)))) : null,
     tiles, top('limits', limitsRow(lim ? limitChips(log) : null)), pushRow(zabbixPushLine(log)) ? top('push', pushRow(zabbixPushLine(log))) : null, top('bar', bar),
-    keptCard(built, 'requests', 'Requests', `${num(rows.length)} shown · in flight first, then newest · live while this page is open`, reqTable),
+    keptCard(built, 'requests', 'Requests', `${num(rows.length)} shown · ${SORTS.log.sort ? 'sorted by the marked column' : 'in flight first, then newest'} · live while this page is open`, reqTable),
     keptBox('pc', 'div.rq-sp', [keptCard(built, 'per-cluster', 'Per cluster', 'what the log holds for each cluster',
-        keptTable(built, 'per-cluster', ['Cluster', 'Automation', 'Requests', 'In flight', 'Queued', 'Failed', 'Refused', 'Slowest'], clusterRows.map((c) => built.same(`pcrow:${c.cluster}`, h('tr',
+        keptTable(built, 'per-cluster', [{ label: 'Cluster', sort: 'cluster' }, { label: 'Automation', sort: 'automation' }, { label: 'Requests', sort: 'count' },
+          { label: 'In flight', sort: 'inflight' }, { label: 'Queued', sort: 'queued' }, { label: 'Failed', sort: 'failed' }, { label: 'Refused', sort: 'refused' }, { label: 'Slowest', sort: 'slowest' }],
+        SORTS.perCluster.apply(clusterRows, {
+          cluster: { type: 'text', value: (c) => nameOf(c.cluster) },
+          automation: { type: 'text', value: (c) => (log.slowed && log.slowed[c.cluster] ? 'slowed' : log.throttled && log.throttled[c.cluster] ? 'throttled' : 'normal') },
+          count: { type: 'number' }, inflight: { type: 'number' }, queued: { type: 'number' }, failed: { type: 'number' }, refused: { type: 'number' },
+          slowest: { type: 'duration', value: (c) => (c.count ? c.slowestMs : null) },
+        }).map((c) => built.same(`pcrow:${c.cluster}`, h('tr',
           h('td', h('b', nameOf(c.cluster))),
           h('td', automationOf(c.cluster)),
           h('td.num', num(c.count)), h('td.num', num(c.inflight)),
           h('td.num', c.queued ? pill(num(c.queued), 'grey') : '0'),
           h('td.num', c.failed ? pill(num(c.failed), 'red') : '0'),
-          h('td.num', c.refused ? pill(num(c.refused), 'yellow') : '0'), h('td.num', c.count ? dur(c.slowestMs) : '—')))), { emptyText: 'nothing yet' }))]),
+          h('td.num', c.refused ? pill(num(c.refused), 'yellow') : '0'), h('td.num', c.count ? dur(c.slowestMs) : '—')))), { emptyText: 'nothing yet', sort: SORTS.perCluster }))]),
     top('gap', h('div.rq-sp', gapCard())),
     top('tasks', h('div.rq-sp', tasksCard(nameOf))),
     top('housekeeping', h('div.rq-sp', housekeepingCard()))];
@@ -522,7 +555,11 @@ function housekeepingFull(v) {
       ? h('span', 'Last run ', h('b', dt(last.at)), ` ${last.trigger}${last.dryRun ? ' (dry run)' : ''}: ${last.summary}`,
         last.errors ? pill(`${last.errors} failed`, 'red') : null)
       : h('span.muted', 'Not run since the core started.'));
-  const rows = v.jobs.map((j) => h('tr', { 'data-job': j.id },
+  const rows = SORTS.jobs.apply(v.jobs, {
+    job: { type: 'text', value: (j) => j.label },
+    state: { type: 'text', value: (j) => j.state },
+    result: { type: 'text', value: (j) => j.text },
+  }).map((j) => h('tr', { 'data-job': j.id },
     h('td', h('b', j.label)),
     h('td', j.state === 'err' ? pill('failed', 'red') : j.state === 'ok' ? pill(v.last && v.last.dryRun ? 'would remove' : 'removed', 'green') : j.state === 'skip' ? pill('skipped', 'grey') : pill('clean', 'grey')),
     h('td', { style: { fontSize: '12px' } }, j.text, ...j.notes.map((n) => h('div.muted', { style: { fontSize: '11px' } }, n)))));
@@ -532,7 +569,8 @@ function housekeepingFull(v) {
     : null;
   return card(title, sub, h('div',
     head,
-    v.jobs.length ? table(['Job', '', 'Result'], rows, {}) : empty('Run it once to see what each job does.'),
+    v.jobs.length ? table([{ label: 'Job', sort: 'job' }, { label: '', sort: 'state', title: 'Sort by what the last run did' }, { label: 'Result', sort: 'result' }], rows, { sort: SORTS.jobs })
+      : empty('Run it once to see what each job does.'),
     h('div.muted', { style: { fontSize: '11.5px', marginTop: '8px' } }, `Removes ${v.rules.join('; ')}.`),
     kept), actions);
 }
@@ -596,7 +634,14 @@ function tasksCard(nameOf) {
       ? empty('Not read yet \u2014 press Read tasks. Listing needs the cluster privilege "monitor"; this sends one request to the cluster you chose.')
       : rows.length === 0
         ? empty('No search running on this cluster right now.')
-        : table(['Task', 'Who', 'Running', 'Action', 'Description', ''], rows.map((r) => h('tr',
+        : table([{ label: 'Task', sort: 'id' }, { label: 'Who', sort: 'who' }, { label: 'Running', sort: 'running', num: true }, { label: 'Action', sort: 'action' },
+          { label: 'Description', sort: 'description' }, ''], SORTS.tasks.apply(rows, {
+          id: { type: 'text', value: (r) => r.id },
+          who: { type: 'text', value: (r) => (r.ours ? `ours ${r.origin || 'core'}` : 'someone else') },
+          running: { type: 'duration', value: (r) => r.runningMs },
+          action: { type: 'text', value: (r) => r.action },
+          description: { type: 'text', value: (r) => r.description },
+        }).map((r) => h('tr',
           h('td.mono', { style: { fontSize: '11.5px' } }, r.id, r.node ? h('div.muted', { style: { fontSize: '11px' } }, r.node) : null),
           h('td', r.ours ? pill(`ours \u00b7 ${r.origin || 'core'}${r.run === 'previous' ? ' \u00b7 before the restart' : r.run === 'other' ? ' \u00b7 another install' : ''}`, 'green') : pill('someone else', 'grey'),
             r.opaqueId ? h('div.mono.muted', { style: { fontSize: '10.5px', wordBreak: 'break-all' } }, r.opaqueId) : null),
@@ -605,7 +650,7 @@ function tasksCard(nameOf) {
           h('td', { style: { fontSize: '12px', wordBreak: 'break-all' } }, r.description),
           h('td', { style: { textAlign: 'right' } }, r.cancellable
             ? h('button.btn.sm', { 'data-act': 'cancel-task', title: 'POST _tasks/<id>/_cancel \u2014 a write, under the guard', onclick: () => cancelTask(c, r) }, 'Cancel')
-            : h('span.muted', { style: { fontSize: '11px' } }, 'not cancellable')))), {});
+            : h('span.muted', { style: { fontSize: '11px' } }, 'not cancellable')))), { sort: SORTS.tasks });
   return card('Tasks on the cluster', 'what Elasticsearch is running for anyone right now \u2014 ours carry our X-Opaque-Id',
     h('div', head, tasks.note ? h('div.banner', { style: { marginBottom: '8px' } }, tasks.note) : null, body));
 }

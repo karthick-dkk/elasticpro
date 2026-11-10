@@ -13,6 +13,7 @@
 import { h, mount } from '../lib/dom.js';
 import { bridge } from '../core/transport.js';
 import { card, pill, statTile, empty, table } from './common.js';
+import { tableSort } from '../lib/table-sort.js';
 import { modal, field, text, select, val, confirmDialog } from '../ui/modal.js';
 import { clusters, activeClusters, state } from '../core/state.js';
 import { fetchClusterUsers, createDialog, removeClusterUser, editDialog } from '../ui/cluster-users.js';
@@ -29,6 +30,23 @@ const ui = { users: [], tokens: [], caller: null, apiTokens: false, err: '', fre
   roleMap: null, groupMap: false, groupMapSaved: false, roleDefaults: null, zabbixRoles: [], roleMapNote: '', roleMapErr: '', roleMapSaving: false };
 /** Cluster accounts are read per cluster, on demand — one call each, not on every render. */
 const cu = { byCluster: {}, loading: new Set() };
+
+/**
+ * Each table's column sort (lib/table-sort.js), remembered per browser. Users, cluster users and
+ * tokens open in the order the server lists them; sign-ins and activity newest first. The
+ * Zabbix role map is a form (its rows are inputs, a type before a name), so it does not sort.
+ */
+const SORTS = {
+  users: tableSort('accounts.users', { onChange: () => draw() }),
+  logins: tableSort('accounts.logins', { onChange: () => draw() }),
+  activity: tableSort('accounts.activity', { onChange: () => draw() }),
+  tokens: tableSort('accounts.tokens', { onChange: () => draw() }),
+  clusterUsers: tableSort('accounts.cluster-users', { onChange: () => draw() }),
+  matrix: tableSort('accounts.cluster-user-matrix', { initial: { key: 'name', dir: 1 }, onChange: () => draw() }),
+};
+const ROLE_RANK = { admin: 3, operator: 2, user: 1, guest: 0 };
+const roleSort = (k = 'role') => ({ type: 'number', value: (x) => (x[k] in ROLE_RANK ? ROLE_RANK[x[k]] : null), start: -1 });
+const userStatus = (u) => (u.disabled ? 'blocked' : u.locked || u.lockedUntil ? 'locked' : 'active');
 
 export function render(el) {
   host = el;
@@ -311,7 +329,11 @@ function clusterUserDetail(c) {
       h('div', { style: { fontSize: '12px', color: 'var(--warning)' } }, got.error),
       got.fix ? h('div.muted', { style: { fontSize: '11.5px', marginTop: '4px' } }, got.fix) : null);
   } else {
-    const trs = got.users.map((u) => h('tr',
+    const trs = SORTS.clusterUsers.apply(got.users, {
+      name: { type: 'text', value: (u) => u.name },
+      roles: { type: 'text', value: (u) => (u.roles || []).join(', ') },
+      who: { type: 'text', value: (u) => u.fullName || u.email || null },
+    }).map((u) => h('tr',
       h('td', h('b', u.name),
         u.reserved ? h('span.muted', { style: { marginLeft: '6px', fontSize: '10.5px' } }, '(built-in)') : null,
         !u.enabled ? h('span.muted', { style: { marginLeft: '6px', fontSize: '10.5px' } }, '(disabled)') : null),
@@ -332,7 +354,8 @@ function clusterUserDetail(c) {
           title: u.reserved ? 'Built-in accounts cannot be removed' : `Remove ${u.name} from ${c.name}`,
           onclick: () => removeClusterUser(c.id, u.name, { onDone: reload }),
         }, ICON.delete))));
-    body = table(['Name', 'Roles', '', ''], trs, {
+    body = table([{ label: 'Name', sort: 'name' }, { label: 'Roles', sort: 'roles' }, { label: '', sort: 'who', title: 'Sort by full name or e-mail' }, ''], trs, {
+      sort: SORTS.clusterUsers,
       emptyText: empty('No accounts are defined on this cluster.', {
         detail: 'Only native-realm accounts appear here. Accounts from an LDAP, SAML or '
               + 'file realm are managed where that realm lives, not in Elasticsearch.',
@@ -364,13 +387,17 @@ function clusterUserMatrix(all) {
     const got = cu.byCluster[c.id];
     if (got && !got.error) got.users.forEach((u) => names.add(u.name));
   }
-  const sorted = [...names].sort((a, b) => a.localeCompare(b));
-
   const known = (c) => {
     const got = cu.byCluster[c.id];
     return got && !got.error ? new Set(got.users.map((u) => u.name)) : null;
   };
   const sets = all.map((c) => ({ c, set: known(c) }));
+  // By name until a header says otherwise; a cluster's column sorts YES before NO, and a
+  // cluster that could not be read is unknown — last either way, never NO.
+  const sorted = SORTS.matrix.apply([...names], {
+    name: { type: 'text', value: (n) => n },
+    ...Object.fromEntries(sets.map(({ c, set }) => [`c:${c.id}`, { type: 'number', value: (n) => (set === null ? null : set.has(n) ? 1 : 0), start: -1 }])),
+  });
   const unreadable = sets.filter((x) => !x.set).map((x) => x.c.name);
 
   const trs = sorted.map((name) => h('tr',
@@ -389,7 +416,8 @@ function clusterUserMatrix(all) {
         ? h('div.muted', { style: { fontSize: '11.5px', marginBottom: '8px' } },
             `Could not read: ${unreadable.join(', ')} — those columns show “—”, not NO.`)
         : null,
-      table(['User', ...all.map((c) => c.name)], trs, {
+      table([{ label: 'User', sort: 'name' }, ...all.map((c) => ({ label: c.name, sort: `c:${c.id}` }))], trs, {
+        sort: SORTS.matrix,
         emptyText: empty('No accounts read yet.', {
           detail: 'Select a single cluster to read and manage its accounts, or refresh below.',
         }),
@@ -440,7 +468,14 @@ function draw() {
 
     h('div', { style: { marginTop: '10px' } },
       card('ElasticPro users', `${ui.users.length} who can sign in to this app`,
-        table(['Name', 'Access', 'Status', 'Origin', 'Last sign-in', ''], ui.users.map((u) => h('tr',
+        table([{ label: 'Name', sort: 'name' }, { label: 'Access', sort: 'role' }, { label: 'Status', sort: 'status' }, { label: 'Origin', sort: 'origin' },
+          { label: 'Last sign-in', sort: 'lastLogin' }, ''], SORTS.users.apply(ui.users, {
+          name: { type: 'text', value: (u) => u.name },
+          role: roleSort(),
+          status: { type: 'text', value: userStatus },
+          origin: { type: 'text', value: (u) => (u.source === 'zabbix' ? 'zabbix' : 'local') },
+          lastLogin: { type: 'number', value: (u) => u.lastLogin || null },
+        }).map((u) => h('tr',
           h('td', h('b', u.name),
             h('div.muted', { style: { fontSize: '11px' } }, u.createdAt ? `created ${new Date(u.createdAt * 1000).toISOString().slice(0, 10)}` : '')),
           h('td', roleCell(u.role)),
@@ -465,7 +500,7 @@ function draw() {
               disabled: isSelf(u),
               onclick: () => removeUser(u),
             }, '×')))),
-          { emptyText: 'No accounts yet.' }))),
+          { emptyText: 'No accounts yet.', sort: SORTS.users }))),
 
     h('div', { style: { marginTop: '10px' } }, loginsCard()),
     h('div', { style: { marginTop: '10px' } }, activityCard()),
@@ -494,13 +529,18 @@ function loginsCard() {
   return card('Sign-in activity', `${ui.logins.length} attempts since the core started · ${failed} refused · `
       + `${ui.lockAfter} wrong passwords in a row lock an account for ${ui.lockMinutes} minutes`,
     h('div', { style: { maxHeight: '320px', overflowY: 'auto' } },
-      table(['When', 'Name', 'Via', 'Result'], rows.slice(0, 200).map((e) => h('tr',
+      table([{ label: 'When', sort: 'at' }, { label: 'Name', sort: 'name' }, { label: 'Via', sort: 'via' }, { label: 'Result', sort: 'result' }], SORTS.logins.apply(rows, {
+        at: { type: 'number', value: (e) => e.at || null },
+        name: { type: 'text', value: (e) => e.name || null },
+        via: { type: 'text', value: (e) => (e.via === 'zabbix' ? 'Zabbix' : 'password') },
+        result: { type: 'text', value: (e) => (e.ok ? ' signed in' : e.code || 'refused') },
+      }).slice(0, 200).map((e) => h('tr',
         h('td.muted', { style: { fontSize: '11.5px', whiteSpace: 'nowrap' } }, when(e.at)),
         h('td', h('b', e.name || '—')),
         h('td.muted', e.via === 'zabbix' ? 'Zabbix' : 'password'),
         h('td', e.ok ? pill('signed in', 'green')
           : h('span', pill(e.code || 'refused', 'red'), h('span.muted', { style: { marginLeft: '6px', fontSize: '11.5px' } }, LOGIN_KIND[e.kind] || e.kind))))),
-        { emptyText: ui.failedOnly ? 'No refused sign-in.' : 'No sign-in since the core started.' })),
+        { emptyText: ui.failedOnly ? 'No refused sign-in.' : 'No sign-in since the core started.', sort: SORTS.logins })),
     [h('label', { style: { display: 'inline-flex', gap: '5px', alignItems: 'center', fontSize: '12px' } },
       h('input', { type: 'checkbox', checked: ui.failedOnly, onchange: (e) => { ui.failedOnly = e.target.checked; draw(); } }),
       'Refused only')]);
@@ -526,7 +566,16 @@ function activityCard() {
     h('div',
       ui.activityErr ? h('div.muted', { style: { color: 'var(--red, #c0392b)' } }, ui.activityErr) : null,
       h('div', { style: { maxHeight: '360px', overflowY: 'auto' } },
-        table(['When', 'User', 'Action', 'Cluster', 'Request', 'Result', 'Source IP'], ui.activity.map((e) => {
+        table([{ label: 'When', sort: 'at' }, { label: 'User', sort: 'user' }, { label: 'Action', sort: 'action' }, { label: 'Cluster', sort: 'cluster' },
+          { label: 'Request', sort: 'request' }, { label: 'Result', sort: 'result' }, { label: 'Source IP', sort: 'ip' }], SORTS.activity.apply(ui.activity, {
+          at: { type: 'date', value: (e) => e['@timestamp'] || null },
+          user: { type: 'text', value: (e) => (e.user && e.user.name) || null },
+          action: { type: 'text', value: (e) => (e.event && e.event.action) || null },
+          cluster: { type: 'text', value: (e) => (e.elasticpro && e.elasticpro.cluster) || null },
+          request: { type: 'text', value: (e) => (e.url && e.url.path) || null },
+          result: { type: 'text', value: (e) => ((e.event || {}).outcome === 'success' ? ' ok' : (e.error && e.error.code) || 'failed') },
+          ip: { type: 'text', value: (e) => (e.source && e.source.ip) || null },
+        }).map((e) => {
           const ev = e.event || {};
           const req = e.http && e.http.request ? `${e.http.request.method} ${(e.url && e.url.path) || ''}` : '';
           return h('tr',
@@ -538,7 +587,7 @@ function activityCard() {
             h('td', ev.outcome === 'success' ? pill('ok', 'green')
               : h('span', { title: ev.reason || '' }, pill((e.error && e.error.code) || 'failed', 'red'))),
             h('td.muted', (e.source && e.source.ip) || ''));
-        }), { emptyText: ui.activityFailed ? 'No failed action.' : 'Nothing recorded yet.' })),
+        }), { emptyText: ui.activityFailed ? 'No failed action.' : 'Nothing recorded yet.', sort: SORTS.activity })),
       h('div.muted', { style: { fontSize: '11.5px', marginTop: '6px' } }, where)),
     // An id, so a redraw while it is being typed into (the page redraws when the log is read)
     // puts the keyboard back in it (lib/dom.js mount) instead of on the page.
@@ -604,14 +653,20 @@ function tokensCard() {
               h('button.btn.sm', { onclick: () => { ui.freshSecret = null; draw(); } }, 'I have copied it'))))
       : null,
     card('API tokens', 'for Zabbix and scripts — not people',
-      table(['Name', 'Role', 'Created', 'Last used', ''], ui.tokens.map((t) => h('tr',
+      table([{ label: 'Name', sort: 'name' }, { label: 'Role', sort: 'role' }, { label: 'Created', sort: 'created' }, { label: 'Last used', sort: 'lastUsed' }, ''],
+        SORTS.tokens.apply(ui.tokens, {
+          name: { type: 'text', value: (t) => t.name },
+          role: roleSort(),
+          created: { type: 'number', value: (t) => t.createdAt || null },
+          lastUsed: { type: 'number', value: (t) => t.lastUsed || null },
+        }).map((t) => h('tr',
         h('td', h('b', t.name)),
         h('td', roleCell(t.role)),
         h('td.muted', { style: { fontSize: '11.5px' } }, t.createdAt ? new Date(t.createdAt * 1000).toISOString().slice(0, 10) : ''),
         h('td.muted', { style: { fontSize: '11.5px' } }, t.lastUsed ? new Date(t.lastUsed * 1000).toISOString().slice(0, 16).replace('T', ' ') : 'never'),
         h('td', { style: { textAlign: 'right' } },
           h('button.btn.sm.ghost', { onclick: () => revokeToken(t) }, 'Revoke')))),
-        { emptyText: 'No tokens yet.' }),
+        { emptyText: 'No tokens yet.', sort: SORTS.tokens }),
       h('button.btn.sm.primary', { onclick: newToken }, '+ New token')));
 }
 
