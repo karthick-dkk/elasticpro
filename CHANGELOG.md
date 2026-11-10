@@ -3,6 +3,7 @@
 ## Unreleased
 
 - **Reports › Overview opens on All clusters:** arriving there, or switching to it from another section, shows the whole fleet even when another page had one cluster chosen; a link that names a cluster, or a cluster picked while on Overview, is kept.
+- **Jobs: one registry and a run log** (docs/JOBS.md): every job ElasticPro runs — log delay measurement, daily volume and hosts collections, report runs and the mailed schedules, history store mirror, housekeeping, settings backup, Zabbix sync and push — is listed once with its owner, schedule, next run and priority, and every run is recorded (trigger, start, end, status, progress where it is counted — null where it is not — records, error, clusters), kept across restarts (50 per job) and read with `JOBS_LIST` (users and up; a caller limited to some clusters reads only the runs about theirs). One run per job at a time: a log delay *Run now*, a Zabbix sync or housekeeping asked for while one goes answers `already_running` (EP-220) with that run's id — the manual log delay run no longer overlaps the timer's — and the hosts collection's three tries a day survive a restart.
 
 ## 0.3.59
 

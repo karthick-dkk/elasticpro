@@ -30,6 +30,8 @@ file runs `core` + `worker`.
 | `policy.json` (emergency stop) | core | worker, checked before every request and every page |
 | `worker/status.json` (role, version, started, current jobs, last heartbeat) | worker, every 10 s | core |
 | `worker/requests.jsonl` (bounded ring, 5000 lines) | worker | core (Request Centre merges it, labelled *worker*) |
+| `job-runs/worker.json` (the worker's jobs' runs), `job-runs/hosts-tries.json` (the hosts collection's tries today) | worker | core (`JOBS_LIST`, docs/JOBS.md) |
+| `job-runs/core.json` (the core's jobs' runs) | core | — (role `all` writes both run files) |
 
 All writes are atomic (temp + rename), as `volume::store::write_atomic`. Readers tolerate a
 file that is mid-rename by retrying once.

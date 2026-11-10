@@ -307,3 +307,6 @@ The schedule itself (every N hours, destination, clusters) stays `DELAY_SINK_SET
   answers `opened`, `solved`, `destination` as well.
 * The measurement now writes **every** device of a run (silent and can't-measure included);
   `measured` in `DELAY_SINK_RUN` counts rows written.
+* One run at a time (docs/JOBS.md): `DELAY_SINK_RUN` while a run goes — the timer's or another
+  person's — answers `{ok: false, kind: "already_running", runId}` and measures nothing. Every
+  run, the timer's and the pressed ones, is in the run log (`JOBS_LIST`, job `logdelay.measure`).

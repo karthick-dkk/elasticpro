@@ -702,7 +702,7 @@ oldest) and never deleted.
 | Message | Role | Answer |
 |---|---|---|
 | `HOUSEKEEPING_GET` | admin | `{ok, enabled, minutes, dryRun, cacheDays, backgroundCacheDays, sessionIdleDays, activityKeepDays, running, nextRunAt, lastRun, recent}`. `lastRun` is `{startedAt, finishedAt, trigger: "schedule"\|"manual", by, dryRun, items, bytes, errors, jobs: [{id, label, ok, skipped, items, bytes, error, notes}], reportOnly: [{id, label, files, bytes, oldestAgeDays, note}]}`; `null` until a run since start. |
-| `HOUSEKEEPING_RUN {dryRun?}` | admin | Runs every job now and answers like `HOUSEKEEPING_GET` plus `run` (that report) and `message`. `dryRun: true` lists what would go and removes nothing; the configured `HOUSEKEEPING_DRY_RUN` can force a dry run, never lift one. A run already going ⇒ `{ok: false, kind: "busy"}`. Does not move the schedule. |
+| `HOUSEKEEPING_RUN {dryRun?}` | admin | Runs every job now and answers like `HOUSEKEEPING_GET` plus `run` (that report) and `message`. `dryRun: true` lists what would go and removes nothing; the configured `HOUSEKEEPING_DRY_RUN` can force a dry run, never lift one. A run already going ⇒ `{ok: false, kind: "already_running", runId}` (`busy` before the run log; docs/JOBS.md). Does not move the schedule. |
 
 The Request Centre shows both as the **Housekeeping** card (last run, what each job cleaned, next
 run, **Dry run**, **Run now** — which asks first).
