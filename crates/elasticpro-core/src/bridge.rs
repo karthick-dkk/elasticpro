@@ -3420,7 +3420,13 @@ impl Core {
             }
         }
         let default = self.cluster_secrets.header_for(DEFAULT);
+        // A Zabbix cluster's own credential is typed in its Edit dialog (CREDENTIAL_SET), never
+        // taken from what a browser primes under its id: that would make it the Zabbix cluster's.
+        let zabbix_ids: std::collections::HashSet<String> = self.zbx_sync.read().dests.keys().cloned().collect();
         for c in &p.clusters {
+            if zabbix_ids.contains(&c.id) {
+                continue;
+            }
             let Some(h) = c.auth_header.as_deref().map(str::trim).filter(|h| !h.is_empty()) else { continue };
             if Some(h) == shared || default.as_deref() == Some(h) {
                 continue;
@@ -4920,6 +4926,7 @@ impl Core {
                 s.auth_header.as_ref().filter(|a| !a.is_empty()).map(|a| (s.url.trim_end_matches('/').to_ascii_lowercase(), a.clone()))
             }).collect(), p.shared_auth.clone())
         };
+        let primed_ids: std::collections::HashSet<String> = self.primed.read().clusters.keys().cloned().collect();
         let kept_users: HashMap<String, Option<String>> = if hosted {
             self.cluster_secrets.list().into_iter().map(|l| (l.name, l.user)).collect()
         } else {
@@ -4978,7 +4985,10 @@ impl Core {
             // A credential of its own typed in ElasticPro, for this destination: it wins.
             let own_key = crate::cluster_secrets::config_key(&id);
             let own = if hosted { self.cluster_secrets.header_at(&own_key, &dest) } else { None };
-            let own_elsewhere = own.is_none() && hosted && self.cluster_secrets.bound_of(&own_key).is_some();
+            // Kept for another destination — unless it is a primed config cluster's under the same id
+            // (that cluster's own, at its own address, not this one's moved away).
+            let own_elsewhere = own.is_none() && hosted && self.cluster_secrets.bound_of(&own_key).is_some()
+                && !primed_ids.contains(&id);
             if own_elsewhere {
                 notes.push("its own credential, set in ElasticPro, was kept for another address, route or certificate setting \
                             and is not sent here; Zabbix's is used until it is typed again".into());
