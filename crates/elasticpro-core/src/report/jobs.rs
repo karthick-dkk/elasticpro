@@ -279,6 +279,13 @@ impl Job {
     }
 }
 
+/// Whether a caller who sees `visible` (`None`: every cluster) may read something about
+/// `cluster_ids`: only when they see every one of them. Something about no cluster is
+/// everybody's. The one rule for a report job (REPORT_JOBS) and a job run (JOBS_LIST).
+pub fn sees_every(visible: Option<&std::collections::HashSet<String>>, cluster_ids: &[String]) -> bool {
+    visible.is_none_or(|v| cluster_ids.iter().all(|c| v.contains(c)))
+}
+
 /// The error of a job that was running when the process ended.
 pub const RESTARTED: &str = "the server restarted";
 

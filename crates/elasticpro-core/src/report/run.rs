@@ -242,7 +242,7 @@ impl Core {
     /// A job is shown to whoever sees every cluster it covers.
     fn report_visible(&self, caller: Option<&Caller>) -> impl Fn(&Job) -> bool {
         let vis = self.visible_ids(caller);
-        move |j: &Job| vis.as_ref().is_none_or(|v| j.cluster_ids.iter().all(|c| v.contains(c)))
+        move |j: &Job| super::jobs::sees_every(vis.as_ref(), &j.cluster_ids)
     }
 
     /// `REPORT_RUN {clusterIds, period, format, mail}`: one job per cluster. At most

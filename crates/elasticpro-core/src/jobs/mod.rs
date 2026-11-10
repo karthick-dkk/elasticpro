@@ -17,7 +17,7 @@
 //!
 //! Nothing here sends a cluster anything.
 
-use crate::delay_sink::{SinkView, NOTE_OUTSIDE_VIEW};
+use crate::delay_sink::SinkView;
 use crate::report::jobs::{Job, Kind as ReportJobKind, ReportKind, Status as ReportStatus};
 use crate::worker::Role;
 use serde::{Deserialize, Serialize};
@@ -800,7 +800,8 @@ pub fn from_report_job(j: &Job) -> RunRecord {
         started_at: j.started_at.map(ms), ended_at: j.ended_at.map(ms),
         done: counted.then_some(j.progress.done), total: counted.then_some(j.progress.total),
         records: j.progress.rows, error: j.error.clone().or_else(|| j.mail_error.clone()),
-        clusters: if j.cluster_ids.is_empty() { vec![j.cluster_id.clone()] } else { j.cluster_ids.clone() }, note,
+        // Exactly the list REPORT_JOBS decides visibility on, so the two answers agree.
+        clusters: j.cluster_ids.clone(), note,
     }
 }
 
@@ -817,30 +818,26 @@ pub struct Reader<'a> {
     pub admin: bool,
 }
 
-/// A run as `who` may read it, or `None` when it is about no cluster they see. A run about no
-/// cluster is everybody's; one about some clusters they see and some they do not is shown with
-/// only theirs, and its error and records — which may be about the others — withheld
-/// (`partial: true`). An admin-only job's error and note go to administrators only.
-/// `progress` is percent, or null when the total is not known.
+/// A run as `who` may read it, or `None` when they may not: only a caller who sees every
+/// cluster the run touched reads it at all (`report::jobs::sees_every`, the REPORT_JOBS rule);
+/// a run about no cluster is everybody's who may read the list. An admin-only job's error and
+/// note go to administrators only. `progress` is percent, or null when the total is not known.
 pub fn run_view(owner: Owner, r: &RunRecord, who: Reader<'_>) -> Option<Value> {
-    let seen: Vec<&String> = r.clusters.iter().filter(|c| who.view.sees(c)).collect();
-    if !r.clusters.is_empty() && seen.is_empty() {
+    if !crate::report::jobs::sees_every(who.view.visible.as_ref(), &r.clusters) {
         return None;
     }
-    let partial = seen.len() < r.clusters.len();
     let hidden = !who.admin && descriptor(&r.job_id).is_some_and(|d| d.admin_details);
     Some(json!({
         "id": r.id, "jobId": r.job_id, "owner": owner, "trigger": r.trigger, "status": r.status,
         "createdAt": r.created_at, "startedAt": r.started_at, "endedAt": r.ended_at,
         "progress": progress_pct(r.done, r.total), "done": r.done, "total": r.total,
-        "records": if partial { Value::Null } else { json!(r.records) },
-        "error": match (&r.error, partial, hidden) {
-            (Some(_), true, _) => json!(NOTE_OUTSIDE_VIEW),
-            (Some(_), _, true) => json!(DETAIL_ADMIN),
-            (e, _, _) => json!(e),
+        "records": r.records,
+        "error": match (&r.error, hidden) {
+            (Some(_), true) => json!(DETAIL_ADMIN),
+            (e, _) => json!(e),
         },
-        "note": if partial || hidden { Value::Null } else { json!(r.note) },
-        "clusters": seen, "partial": partial,
+        "note": if hidden { Value::Null } else { json!(r.note) },
+        "clusters": r.clusters,
     }))
 }
 
@@ -1134,39 +1131,49 @@ mod tests {
     }
 
     #[test]
-    fn a_limited_caller_reads_only_runs_about_their_clusters() {
-        let limited_view = SinkView { visible: Some(["prod".to_string()].into()) };
+    fn a_caller_reads_a_run_only_when_they_see_every_cluster_it_touched() {
+        let limited_view = SinkView { visible: Some(["prod".to_string(), "dr".to_string()].into()) };
         let all_view = SinkView::default();
         let limited = Reader { view: &limited_view, admin: true };
-        let all = Reader { view: &all_view, admin: true };
+        let admin = Reader { view: &all_view, admin: true };
         let fleet = rec(HOUSEKEEPING, "f", 1, RunStatus::Completed, &[]);
-        let mine = rec(VOLUME_DAILY, "m", 2, RunStatus::Failed, &["prod"]);
+        let both_seen = rec(VOLUME_DAILY, "m", 2, RunStatus::Failed, &["prod", "dr"]);
         let theirs = rec(VOLUME_DAILY, "t", 3, RunStatus::Failed, &["prod-b"]);
-        let mixed = rec(VOLUME_DAILY, "x", 4, RunStatus::Failed, &["prod", "prod-b"]);
-        assert!(run_view(Owner::Core, &fleet, limited).is_some(), "a run about no cluster is everybody's");
-        let m = run_view(Owner::Worker, &mine, limited).unwrap();
-        assert_eq!((m["error"].clone(), m["records"].clone(), m["partial"].clone()), (json!("prod-b: search failed"), json!(7), json!(false)));
-        assert!(run_view(Owner::Worker, &theirs, limited).is_none(), "a run about another's cluster is not listed");
-        let x = run_view(Owner::Worker, &mixed, limited).unwrap();
-        assert_eq!(x["clusters"], json!(["prod"]), "only theirs");
-        assert_eq!(x["error"], json!(NOTE_OUTSIDE_VIEW), "an error that may name the other is withheld");
-        assert_eq!((x["records"].clone(), x["note"].clone(), x["partial"].clone()), (Value::Null, Value::Null, json!(true)));
-        assert_eq!(run_view(Owner::Worker, &mixed, all).unwrap()["clusters"], json!(["prod", "prod-b"]));
+        let one_of_two = rec(VOLUME_DAILY, "x", 4, RunStatus::Running, &["prod", "prod-b"]);
+        // Sees every cluster of it: the whole run.
+        let m = run_view(Owner::Worker, &both_seen, limited).unwrap();
+        assert_eq!((m["error"].clone(), m["records"].clone(), m["clusters"].clone()), (json!("prod-b: search failed"), json!(7), json!(["prod", "dr"])));
+        // Sees one of two, or none: not listed at all — no partial view.
+        assert!(run_view(Owner::Worker, &one_of_two, limited).is_none(), "one of two clusters is not enough");
+        assert!(run_view(Owner::Worker, &theirs, limited).is_none());
+        // About no cluster: everybody's who may read the list.
+        assert!(run_view(Owner::Core, &fleet, limited).is_some());
+        // An administrator who sees every cluster: everything, as is.
+        for r in [&fleet, &both_seen, &theirs, &one_of_two] {
+            assert!(run_view(Owner::Worker, r, admin).is_some(), "{}", r.id);
+        }
+        assert_eq!(run_view(Owner::Worker, &one_of_two, admin).unwrap()["clusters"], json!(["prod", "prod-b"]));
+        // The same rule as REPORT_JOBS: one function.
+        assert!(!crate::report::jobs::sees_every(limited_view.visible.as_ref(), &["prod".into(), "prod-b".into()]));
 
-        // And the page and the job states go through the same view.
-        let runs = vec![(Owner::Core, fleet), (Owner::Worker, mine), (Owner::Worker, theirs), (Owner::Worker, mixed)];
+        // The page, the open run and the last run go through the same view.
+        let runs = vec![(Owner::Core, fleet), (Owner::Worker, both_seen), (Owner::Worker, theirs), (Owner::Worker, one_of_two)];
         let (seen, _) = page(runs.clone(), &Page { limit: 10, ..Page::default() }, limited);
         let ids: Vec<&str> = seen.iter().map(|v| v["id"].as_str().unwrap()).collect();
-        assert_eq!(ids, vec!["x", "m", "f"]);
+        assert_eq!(ids, vec!["m", "f"]);
         let states = job_states(&runs, limited);
-        assert_eq!(states[VOLUME_DAILY].2.as_ref().unwrap()["id"], json!("x"));
-        assert_eq!(job_states(&runs, all)[VOLUME_DAILY].2.as_ref().unwrap()["id"], json!("x"));
+        assert_eq!(states[VOLUME_DAILY].0, None, "the open run is about a cluster they do not see");
+        assert_eq!(states[VOLUME_DAILY].1, 0);
+        assert_eq!(states[VOLUME_DAILY].2.as_ref().unwrap()["id"], json!("m"), "and the last run is the newest they may read");
+        let all = job_states(&runs, admin);
+        assert_eq!(all[VOLUME_DAILY].0.as_ref().unwrap()["id"], json!("x"));
+        assert_eq!(all[VOLUME_DAILY].2.as_ref().unwrap()["id"], json!("t"));
 
         // An admin-only job's error is an administrator's; everybody reads its status.
         let user = Reader { view: &all_view, admin: false };
         let hk = run_view(Owner::Core, &runs[0].1, user).unwrap();
         assert_eq!((hk["status"].clone(), hk["error"].clone(), hk["note"].clone()), (json!("completed"), json!(DETAIL_ADMIN), Value::Null));
-        assert_eq!(run_view(Owner::Core, &runs[0].1, all).unwrap()["error"], json!("prod-b: search failed"));
+        assert_eq!(run_view(Owner::Core, &runs[0].1, admin).unwrap()["error"], json!("prod-b: search failed"));
         assert_eq!(run_view(Owner::Worker, &runs[1].1, user).unwrap()["error"], json!("prod-b: search failed"), "a user's job's error is theirs");
     }
 

@@ -95,7 +95,6 @@ if any was, else `cancelled`, else `completed`; its `note` counts each.
 | `error` | why it failed, deferred or was skipped |
 | `clusters` | the clusters it read from or wrote to |
 | `note` | anything else (a backup's file and size, housekeeping's bytes, a report's warning) |
-| `partial` | true when some of `clusters` are outside the caller's view (below) |
 
 **Kept:** the last 50 finished runs per job, 2000 per file; an open run is never dropped. A run
 open when its process stopped ends `failed`, "the server restarted while this ran", at the next
@@ -136,7 +135,7 @@ name clusters and carry their errors). Read-only; not in the activity log (a pol
     { "id": "4b0e…", "jobId": "volume.daily", "owner": "worker", "trigger": "timer", "status": "running",
       "createdAt": 1793944800000, "startedAt": 1793944800000, "endedAt": null,
       "progress": 40, "done": 2, "total": 5, "records": null, "error": null,
-      "note": null, "clusters": ["prod", "dr", "logs-a", "logs-b", "siem"], "partial": false }
+      "note": null, "clusters": ["prod", "dr", "logs-a", "logs-b", "siem"] }
   ],
   "next": "1793944800000:4b0e…",
   "process": {
@@ -163,14 +162,16 @@ name clusters and carry their errors). Read-only; not in the activity log (a pol
   the worker's last heartbeat (`state` `up`, `late`, `down`, `missing`, `version`, `unreadable`).
 - `problems`: a run file that could not be read (its runs are missing from the list, not none).
 
-**Who reads what** — through the one per-caller view of the scheduled work (`Core::sink_view`,
+**Who reads what** — one rule, the one `REPORT_JOBS` uses (`report::jobs::sees_every`), with
+the clusters a caller sees from the one per-caller view of the scheduled work (`Core::sink_view`,
 as every `DELAY_SINK_*` and `LOGDELAY_*` answer):
 
-- A run about no cluster (housekeeping, the history store, a backup, Zabbix) is listed to all.
-- A run about clusters the caller does not see at all is not listed.
-- A run about some of theirs and some not is listed with only theirs in `clusters`, `partial:
-  true`, and its `error` (which may be about the others) replaced by "about a cluster outside
-  your view…", its `records` and `note` null.
+- A run is listed only to a caller who sees **every** cluster in its `clusters`. A run about
+  some of theirs and some not is not listed at all — there is no partial view of a run.
+- A run about no cluster (housekeeping, the history store, a backup, Zabbix) is listed to
+  everybody who may send `JOBS_LIST`.
+- The same holds for a job's `state.current`, `activeRuns` and `state.lastRun`: they are the
+  newest runs the caller may read, so a limited caller may see an older last run, or none.
 - Jobs with `detailsFor: "admin"` (history store, housekeeping, settings backup, Zabbix sync and
   push) give their runs' `error` and `note` to administrators only, as their own status messages
   do; anybody else reads "an administrator can read why".
