@@ -21,6 +21,8 @@ use std::sync::Arc;
 /// Where the credential store's entries go in the secrets map (never a section item's path).
 const STORE_PREFIX: &str = "credential-store/";
 const SHARED_ITEM: &str = "shared-credential";
+/// A Zabbix cluster's overlay (`zbx_overlay`) in the Clusters section: `zabbix:<host id>`.
+const OVERLAY_PREFIX: &str = "zabbix:";
 const TRIGGER_KEYS: [&str; 3] = ["alerts", "alertRules", "alert_rules"];
 
 pub struct BackupState {
@@ -205,6 +207,10 @@ impl Core {
                     }
                     if let Some(shared) = raw.get("credentials").filter(|v| !v.is_null()) {
                         data.items.insert(SHARED_ITEM.into(), strip_into(shared, &item_prefix(s, SHARED_ITEM), &mut out.secrets));
+                    }
+                    // What was changed in ElasticPro about Zabbix clusters, orphans too. No secret in it.
+                    for (host_id, o) in self.zbx_overlay.all() {
+                        data.items.insert(format!("{OVERLAY_PREFIX}{host_id}"), json!({ "zabbixOverride": o }));
                     }
                     if hosted {
                         let entries = self.cluster_secrets.export();
@@ -663,6 +669,30 @@ impl Core {
                                 let _ = self.cluster_meta.set(k, None);
                             }
                         }
+                    }
+                    // Edits made in ElasticPro to Zabbix clusters.
+                    let overlays = self.zbx_overlay.all();
+                    let mut put = 0;
+                    for (key, item) in &inc.items {
+                        let Some(host_id) = key.strip_prefix(OVERLAY_PREFIX) else { continue };
+                        match item.get("zabbixOverride").map(|o| serde_json::from_value::<crate::zbx_overlay::Overlay>(o.clone())) {
+                            Some(Ok(o)) => match self.zbx_overlay.put(host_id, Some(o)) {
+                                Ok(()) => put += 1,
+                                Err(e) => note(&mut applied, s, format!("{key}: Zabbix cluster edits not kept ({e})")),
+                            },
+                            Some(Err(e)) => note(&mut applied, s, format!("{key}: Zabbix cluster edits not understood ({e})")),
+                            None => {}
+                        }
+                    }
+                    if mode == Mode::Replace {
+                        for host_id in overlays.keys() {
+                            if !inc.items.contains_key(&format!("{OVERLAY_PREFIX}{host_id}")) {
+                                let _ = self.zbx_overlay.put(host_id, None);
+                            }
+                        }
+                    }
+                    if put > 0 || (mode == Mode::Replace && !overlays.is_empty()) {
+                        self.zabbix_rebuild().await;
                     }
                     // Credentials kept on the server, re-sealed under this server's key.
                     if hosted {

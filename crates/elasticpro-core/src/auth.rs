@@ -575,6 +575,9 @@ pub fn required_role(msg_type: &str) -> Option<Role> {
         // holds the rule). An operator runs the fleet day to day; this is the part of the
         // config that is day-to-day work. The file itself stays an admin's to read.
         "CLUSTER_SAVE" => Some(Role::Operator),
+        // The same, for a cluster that comes from Zabbix: an overlay kept in ElasticPro
+        // (zbx_overlay.rs), never a write to Zabbix — no address, no credential.
+        "ZABBIX_CLUSTER_SAVE" => Some(Role::Operator),
         // The automations list, likewise: rules an operator writes that propose what an
         // admin then runs. Plain data, bounded, no credential (cluster_save.rs).
         "AUTOMATIONS_SAVE" => Some(Role::Operator),

@@ -412,6 +412,20 @@ export async function loadZabbixClusters() {
 const urlKey = (u) => String(u || '').replace(/\/+$/, '').toLowerCase();
 
 /**
+ * A ZABBIX_CLUSTERS row as a config-file entry, for normalize(): the effective values the core
+ * built (Zabbix's, with what was set in ElasticPro laid over). A core without overlays sends
+ * no `tags`: the client is the tag, as it always was. `zabbix` marks every one of them.
+ */
+export function zabbixEntry(z) {
+  const tags = Array.isArray(z.tags) ? z.tags : (z.client ? [z.client] : []);
+  const e = { _id: z._id, name: z.name, url: z.url, zabbixGroups: z.zabbixGroups || [],
+    tags: ['zabbix', ...tags.filter((t) => String(t).toLowerCase() !== 'zabbix')], enabled: z.enabled !== false };
+  for (const k of ['note', 'liveRetention', 'snapshotRetention', 'backupCapacity', 'tls']) if (z[k]) e[k] = z[k];
+  for (const k of ['volumeWindowDays', 'volumeTopDays', 'volumeHeadroomPercent']) if (Number.isFinite(z[k])) e[k] = z[k];
+  return e;
+}
+
+/**
  * Fold Zabbix clusters into a loaded config.
  *
  * Zabbix wins. A config-file cluster at the same address as a Zabbix host is set aside —
@@ -426,18 +440,23 @@ const urlKey = (u) => String(u || '').replace(/\/+$/, '').toLowerCase();
  * rather than used: it would replace a config cluster that works with one that cannot
  * sign in. It takes over the moment its credential does work — the next sync after the
  * password lands in Vault.
+ *
+ * What was changed about a Zabbix cluster in ElasticPro (the core's overlay, zbx_overlay.rs)
+ * arrives in its row already applied — name, route, certificates, enabled, and the fields the
+ * pages read: tags, note, retention, backup capacity, volume window — and goes through
+ * normalize() like a file entry's. A cluster switched off in ElasticPro is listed (disabled),
+ * not held back. The address is always Zabbix's.
  */
 export function mergeZabbixClusters(config, list) {
   if (!config) return config;
   const own = (config.clusters || []).filter((c) => c.source !== 'zabbix').concat(config.shadowedClusters || []);
   const all = Array.isArray(list) ? list : [];
-  const rows = all.filter((z) => z.credentialOk !== false);
-  config.zabbixPending = all.filter((z) => z.credentialOk === false);
+  const rows = all.filter((z) => z.credentialOk !== false || z.enabled === false);
+  config.zabbixPending = all.filter((z) => z.credentialOk === false && z.enabled !== false);
   let zbx = [];
   if (rows.length) {
     zbx = normalize({ defaults: config.raw && config.raw.defaults,
-      clusters: rows.map((z) => ({ _id: z._id, name: z.name, url: z.url,
-        zabbixGroups: z.zabbixGroups || [], tags: ['zabbix', ...(z.client ? [z.client] : [])] })) }, 'zabbix')
+      clusters: rows.map((z) => zabbixEntry(z)) }, 'zabbix')
       .clusters.map((c, i) => ({
         ...c,
         via: rows[i].via || '',
@@ -447,7 +466,13 @@ export function mergeZabbixClusters(config, list) {
         authHeader: null,
         username: rows[i].username || '',
         zabbix: { host: rows[i].zabbixHost, hostId: rows[i].zabbixHostId, client: rows[i].client || '',
-                  credential: rows[i].credential, credentialOk: rows[i].credentialOk !== false, notes: rows[i].notes || [] },
+                  credential: rows[i].credential, credentialOk: rows[i].credentialOk !== false, notes: rows[i].notes || [],
+                  overridden: Array.isArray(rows[i].overridden) ? rows[i].overridden : [],
+                  values: rows[i].zabbixValues || null,
+                  overriddenBy: rows[i].overriddenBy || '', overriddenAt: rows[i].overriddenAt || 0,
+                  ownCredential: !!rows[i].ownCredential, ownCredentialMoved: !!rows[i].ownCredentialMoved,
+                  // Unknown (an older core) counts as its own: the route is then left to an admin.
+                  credentialIsOwn: rows[i].credentialIsOwn !== false },
       }));
   }
   const byUrl = new Map(zbx.map((c) => [urlKey(c.url), c]));
@@ -478,7 +503,8 @@ export function zabbixDrift(coreIds, config) {
   const known = new Set([...(config.clusters || []), ...(config.shadowedClusters || [])].map((c) => String(c.id)));
   for (const z of config.zabbixPending || []) if (z && z._id) known.add(String(z._id));
   const added = [...core].filter((id) => !known.has(id)).sort();
-  const removed = (config.clusters || []).filter((c) => c.source === 'zabbix' && !core.has(String(c.id)))
+  // A Zabbix cluster switched off in ElasticPro is listed and not polled: not a difference.
+  const removed = (config.clusters || []).filter((c) => c.source === 'zabbix' && c.enabled !== false && !core.has(String(c.id)))
     .map((c) => String(c.id)).sort();
   if (!added.length && !removed.length) return '';
   return `+${added.join(',')}|-${removed.join(',')}`;

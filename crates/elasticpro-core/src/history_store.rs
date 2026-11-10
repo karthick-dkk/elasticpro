@@ -1755,7 +1755,8 @@ impl Core {
         let entry = raw.as_ref().and_then(|r| r.get("clusters")).and_then(Value::as_array).and_then(|list| {
             let ids = crate::cluster_save::config_ids(list);
             ids.iter().position(|i| i == cluster).and_then(|p| list.get(p).cloned())
-        });
+        // A Zabbix cluster has no entry in the file: what was set for it in ElasticPro (zbx_overlay).
+        }).or_else(|| self.zabbix_entry(cluster));
         let (nodes, alloc, fetched_at) = {
             let st = self.fleet.state.lock();
             match st.entries.get(&(cluster.to_string(), crate::fleet::catalogue::Dataset::Nodes)) {

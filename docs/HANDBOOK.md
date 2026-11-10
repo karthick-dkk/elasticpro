@@ -254,6 +254,8 @@ Zabbix one it shows, it re-reads `ZABBIX_CLUSTERS` once per difference (`zabbixD
 `FLEET_STATE`, `EVENTS_TICKET` and the stream are scoped by the person's Zabbix user groups;
 `/events` goes from the frame to ElasticPro's nginx, not through Zabbix
 (`deploy/zabbix/README.md`, "the fleet cache, live updates, task cards").
+A Zabbix cluster edited in ElasticPro is polled as edited — name, route, certificate setting,
+switched off, its own credential (*Zabbix clusters edited in ElasticPro*, below).
 
 ## Request management — the message contract
 
@@ -1025,7 +1027,8 @@ page shows no *Sign in (N clusters)*, no startup prompt and no form. With no def
 Add dialog offers to set it once there (typed) or to use a credential the server already keeps
 (`promotable`); Config → Credentials offers the same as one button. A cluster that rejects the
 default (401/403) is named — *The default credential was rejected by …* — with **Set its own
-credential…** (a Zabbix cluster's own password is set in Cluster Management). The sign-in dialog
+credential…** (for a Zabbix cluster it opens the cluster's Edit dialog; Cluster Management's
+*Change password* still works too). The sign-in dialog
 never replaces an existing default unless **Replace the default credential** is ticked; unticked,
 what is typed is kept as the own credential of exactly the clusters it lists. On hosted the page
 never holds what was typed: the server keeps it and the page reconnects. A cluster connected
@@ -1036,7 +1039,7 @@ meanwhile, never replaces one.
 
 | Message | Role | Answer |
 |---|---|---|
-| `CREDENTIAL_STATUS` | admin | `{ok, default: {id: "*", user, kind: "basic"\|"header", setBy, setAt, moved}\|null, clusters: [same, per config cluster id], promotable: [{id, cluster, source: "config"\|"zabbix", user, kind, setBy, setAt}], problem}`. `promotable` lists, while there is no default, every kept entry the server's key opens; `id` is the entry's name in the store (`cfg:<id>` or the Zabbix host). Empty once a default exists. |
+| `CREDENTIAL_STATUS` | admin | `{ok, default: {id: "*", user, kind: "basic"\|"header", setBy, setAt, moved}\|null, clusters: [same, per config cluster id — and per Zabbix cluster id (`zbx-…`) with an own credential set in ElasticPro], promotable: [{id, cluster, source: "config"\|"zabbix", user, kind, setBy, setAt}], problem}`. `promotable` lists, while there is no default, every kept entry the server's key opens; `id` is the entry's name in the store (`cfg:<id>` or the Zabbix host). Empty once a default exists. |
 | `CREDENTIAL_SET {cluster, username+password \| apiKey \| bearer \| rebind, onlyIfAbsent?}` | admin | `{ok, cluster, setAt}`. `cluster: "*"` sets the default. With `onlyIfAbsent: true` (the Add dialog's) an existing default is not replaced: `{ok: false, kind: "exists", user, setBy, message}`. |
 | `CREDENTIAL_CLEAR {cluster}` | admin | `{ok, cluster, cleared}` — the cluster then uses the default. Clearing `"*"` also marks the default as forgotten (who, when; kept in `cluster-secrets.json`): until CREDENTIAL_SET or CREDENTIAL_PROMOTE of `"*"`, no PRIME's `sharedAuthHeader` is kept as the default or used in its place. |
 | `CREDENTIAL_PROMOTE {from, replace?}` | admin | Copies a kept entry to the default without the password being typed: `{ok, cluster: "*", from, user, kind, replaced, setAt}`. `from` is a `promotable` id (a config cluster's bare id is accepted). An existing default is refused — `{ok: false, kind: "exists", message}` naming its user — unless `replace: true`. `not_found` for an unknown entry, `unreadable` for one the key does not open. Audit line `kept credential made the default` with `user`, `from`, `replaced`; never the secret. |
@@ -1072,6 +1075,62 @@ alone. ULM and SLM follow the type until an admin changes them.
 |---|---|---|
 | `CLUSTER_META_GET` | user | `{ok, clusters: {<id>: {type, ulm: {enabled?, bucket}, slm?, source: "set"\|"zabbix-tag", setBy?, setAt?}}}` — the clusters the caller sees that have an entry or a tag; `enabled` / `slm` absent = follow the type. Desktop: `{ok: false, kind: "not_available"}`. |
 | `CLUSTER_META_SET {clusterId, meta: {type, ulm: {enabled: bool\|null, bucket}, slm: "expected"\|"none"\|null} \| null}` | admin | The same answer, after the change. `type` is required (`ci`, `di`, `onprem`; `CI`, `On-Prem` accepted); `bucket` empty or an S3 name (3–63 of `a-z 0-9 . -`, letter or digit at both ends, no `..`, not an IP). `meta: null` forgets the entry (back to the tag or the defaults). `forbidden` for a cluster the caller does not see, `bad_request` for a bad value. Audit line `cluster type set` (or `cleared`) with `cluster`, `kind`, `ulm`, `bucket`, `slm`. |
+
+## Zabbix clusters edited in ElasticPro — the message contract
+
+Hosted only. A cluster that comes from Zabbix (a host on the cluster template) is built
+from the host at every sync. Config-Management › Clusters › **Edit** (and the Clusters page's name
+menu) now opens the same dialog a config-file cluster has, for a Zabbix cluster too — with the
+**URL read-only, "From Zabbix"**: the address is never set in ElasticPro. It always comes from the
+host's `{$ELASTICSEARCH.HOST}`, `PORT`, `SCHEME`, so a config-file cluster at that address stays
+shadowed (*Zabbix wins*), and a credential bound to the old address is not sent to a new one.
+
+**Zabbix is never written to.** What is changed is kept by the core as an **overlay**, keyed by
+the Zabbix **host id** (stable when the host's name or technical name changes), in
+`<data>/zabbix-overrides.json` (0600, tmp + rename) beside `cluster-meta.json`, and in the backup's
+*Clusters* section (items `zabbix:<host id>`). At every sync the overlay is laid over what Zabbix
+says, and **the overlay wins**: when Zabbix changes a field the overlay also sets, the overlay's
+value is used. The dialog marks each such field **Set in ElasticPro**, with Zabbix's value and a
+**Use Zabbix's value** button that removes just that override.
+
+| Field | Applied by |
+|---|---|
+| `name`, `via` (a jump host id, `""` = direct), `tls` (`auto`, `system`, `insecure`), `enabled` | the core: what is polled, and how (`enabled: false` — listed, not polled) |
+| `liveRetention`, `snapshotRetention`, `backupCapacity` | the core's capacity document (history store) and the pages' volume report |
+| `tags` (the client tag is Zabbix's value; `zabbix` is always added), `note`, `volumeWindowDays` (1–90), `volumeTopDays` (1–90), `volumeHeadroomPercent` (0–200) | the pages, from the `ZABBIX_CLUSTERS` row |
+
+The cluster type, ULM and SLM stay `CLUSTER_META_SET` (an admin's, part of the same dialog).
+
+**Its own credential.** An admin may type a credential for a Zabbix cluster in the dialog (*Its
+own credential, set here*). It goes to the same encrypted store as a config cluster's own
+(`cluster-secrets.json`, `cfg:<cluster id>`, `CREDENTIAL_SET`), bound to the cluster's destination —
+the address from Zabbix, the route and the certificate setting — and is never sent back. While it
+is kept for the current destination it wins over Zabbix's (Vault, a macro, one Cluster Management
+handed over, or the default); the row says `credential: "elasticpro-own"`. When Zabbix moves the
+cluster, or the route changes, it is not sent (`ownCredentialMoved: true`, and Zabbix's is used); an
+admin re-binds it (`CREDENTIAL_SET {rebind: true}`, asked in the dialog) or types it again. *Zabbix's
+credential* in the dialog forgets it (`CREDENTIAL_CLEAR`). A rename of the host's technical name
+(a new cluster id) moves the kept credential with it.
+
+**Who.** The same as a config cluster: an operator or an admin, on a cluster they see — through
+the role gate (`auth::required_role`), as `CLUSTER_SAVE`. (`Writes::decide` gates writes *to a
+cluster*; neither save writes to one.) Below admin, two things are refused: **certificates off**
+(`tls: insecure`, kind `tls_insecure`) on any cluster — the same now holds for a config cluster's
+`CLUSTER_SAVE`, where an operator can no longer newly make a cluster insecure (one already insecure
+stays so); and the **route or certificate setting** (set or reset) of a cluster that signs in with a
+credential of its own (`credential_destination`): a password from Vault, a password macro, one Cluster
+Management handed over for the host, one kept in ElasticPro (even for another destination), or — with
+ElasticPro's credentials in use — a config cluster's own at the address. One on the default or on
+ElasticPro's shared credential, or with none, an operator may route. A credential is an admin's.
+
+**A host that disappears** from Zabbix keeps its overlay (an orphan), shown nowhere; when the host
+returns — under any name, the host id is the key — the overlay applies again. A *Replace* restore of
+the *Clusters* section removes overlays the backup does not hold, like everything else in it.
+
+| Message | Role | Answer |
+|---|---|---|
+| `ZABBIX_CLUSTER_SAVE {hostId, set?: {field: value}, reset?: [field]}` | operator | `{ok, clusterId, hostId, overridden: [field], cluster: <the ZABBIX_CLUSTERS row after the change>}` — applied at once from the last sync's reading, without asking Zabbix. Refusals: `url_from_zabbix` (`url`, `host`, `port`, `scheme`…), `credential` (`username`, `password`, `apiKey`, `bearer`…: `CREDENTIAL_SET`), `cluster_type` (`type`, `ulm`, `slm`: `CLUSTER_META_SET`), `unknown_field`, `bad_request` (a value out of range; an empty value — reset instead), `unknown_jump`, `name_taken`, `credential_destination` and `tls_insecure` (below admin), `forbidden`, `not_found` (no such host in the last sync), `bad_message`. Audit line `zabbix cluster edited in ElasticPro` with `user`, `cluster`, `host`, `set` (field names), `reset`. |
+| `ZABBIX_CLUSTERS` (row fields) | guest | Effective `name`, `via`, `tls`, `enabled`, `tags`, `note`, `liveRetention`, `snapshotRetention`, `backupCapacity`, `volume*` (null when not set — never a guess); `overridden: [field]`, `zabbixValues: {name, via, tags}`, `overriddenBy`, `overriddenAt`, `ownCredential`, `ownCredentialMoved`, `credentialIsOwn` (its credential is its own — Zabbix's per-cluster or ElasticPro's — so its route is an admin's). |
 
 ## Plan templates — the message contract
 
@@ -1165,7 +1224,7 @@ replace every section.
 
 | Section id | Label | Read from / written back through |
 |---|---|---|
-| `clusters` | Clusters and their settings | config `clusters` (by `name`) with each cluster's type and ULM bucket (`cluster_meta`), the shared `credentials`; hosted: the credentials kept on the server (`cluster-secrets.json`). Written through the config write path and `ClusterSecrets::set_bound`. |
+| `clusters` | Clusters and their settings | config `clusters` (by `name`) with each cluster's type and ULM bucket (`cluster_meta`), the shared `credentials`; hosted: the credentials kept on the server (`cluster-secrets.json`) and the edits made in ElasticPro to Zabbix clusters (`zabbix:<host id>`, `zabbix-overrides.json`). Written through the config write path and `ClusterSecrets::set_bound`. |
 | `trust` | Jump hosts, pinned host keys and certificates | config `jump_hosts` (map or list), `pins.json` (`cert:`/`hostkey:` items), uploaded jump-host keys (`key:` items; the key text is a credential). |
 | `alerts` | Alert triggers and Automation rules | config `alerts` (or `alertRules`/`alert_rules`, the key is remembered in `meta.triggersKey`) as `trigger:` items, `automations` as `rule:` items (validated by `cluster_save::apply_automations`). |
 | `requests` | Request policy and Defaults | the request policy (`policy.json`, without the emergency stop; applied through `policy_apply`, so a managed field is still refused), config `defaults` without `volume`. |

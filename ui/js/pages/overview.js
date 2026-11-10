@@ -20,7 +20,7 @@ import { privilegeHint } from '../core/es-tasks.js';
 import { restoreSnapshotDialog } from '../ui/snapshot-dialogs.js';
 import { rowMenu, popover, ICON, toast } from '../ui/menu.js';
 import { roleMayWrite, roleMayManageClusters } from '../core/writes.js';
-import { editCluster, editClusterKind, rawClusterOf } from '../ui/config-editor.js';
+import { editCluster, editClusterKind, editZabbixCluster, rawClusterOf } from '../ui/config-editor.js';
 import { credentialsKeptOnServer } from '../core/server-credentials.js';
 import { takeFocus, revealFocus, setFocus } from '../core/focus.js';
 import { openClusterAlerts } from '../core/alert-goto.js';
@@ -454,10 +454,10 @@ async function openEditor(c) {
 function nameMenu(c) {
   const items = () => {
     const edit = !mayEdit() ? null
-      // A Zabbix cluster: its type, ULM and SLM are set here (an admin's, hosted); the rest in Zabbix.
-      : c.source === 'zabbix' && roleMayWrite() && credentialsKeptOnServer()
-        ? { label: 'Edit', icon: ICON.edit, note: 'cluster type', title: `Managed in Zabbix — host ${(c.zabbix && c.zabbix.host) || ''}; its type, ULM and SLM are set here`,
-            onClick: async () => { if (await editClusterKind(c)) draw(); } }
+      // A Zabbix cluster (hosted): everything but its address is set here and kept in ElasticPro.
+      : c.source === 'zabbix' && credentialsKeptOnServer()
+        ? { label: 'Edit', icon: ICON.edit, note: 'cluster settings', title: `From Zabbix — host ${(c.zabbix && c.zabbix.host) || ''}; the address stays Zabbix's`,
+            onClick: async () => { if (await editZabbixCluster(c)) draw(); } }
       : c.source === 'zabbix' ? { label: 'Edit', icon: ICON.edit, note: 'in Zabbix', disabled: true,
           title: `Managed in Zabbix — host ${(c.zabbix && c.zabbix.host) || ''}` }
       : !rawClusterOf(c) ? { label: 'Edit', icon: ICON.edit, note: 'cluster settings', disabled: true, title: 'Not in the config file' }

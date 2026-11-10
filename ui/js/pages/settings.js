@@ -29,7 +29,8 @@ import { showCredentialDialog, forgetVaultCredential } from '../ui/credential-di
 import { credentialsKeptOnServer, keptCredentials, keptLine, promoteCredential, promotableLabel, rejectedDefault } from '../core/server-credentials.js';
 import { EXAMPLE_YAML } from '../core/example.js';
 import { saveTextAs } from '../core/platform.js';
-import { editCluster, editJumpHost, editCredentials, defaultsFields, saveDefaultsForm, unlockSealed, saveRaw, rawClusterOf, editsFileDirectly } from '../ui/config-editor.js';
+import { editCluster, editZabbixCluster, editJumpHost, editCredentials, defaultsFields, saveDefaultsForm, unlockSealed, saveRaw, rawClusterOf, editsFileDirectly } from '../ui/config-editor.js';
+import { roleMayManageClusters } from '../core/writes.js';
 import { card, pill, table, empty, configErrorBanner } from './common.js';
 import { navigateTo, intent } from '../core/intent.js';
 import { ALERT_RULES, loadAlertSettings, isEnabled, groupRules, nextRuleSettings } from '../core/alert-rules.js';
@@ -1544,7 +1545,10 @@ function keptCredentialsCard() {
       ...rejected.map((c) => h('div.kc-rejected', { style: { display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap' } },
         h('span', { style: { color: 'var(--critical-ink)' } }, `The default credential was rejected by ${c.name}.`),
         c.source === 'zabbix'
-          ? h('span.muted', 'Its own password is set in Zabbix: Cluster Management → the client’s page → Change password.')
+          // Its own credential can be set here too (kept on the server, for this address); Zabbix's
+          // is used while none is. Or in Zabbix, as before.
+          ? [h('button.btn.sm', { onclick: async () => { if (await editZabbixCluster(c)) draw(); } }, 'Set its own credential…'),
+             h('span.muted', 'or in Zabbix: Cluster Management → the client’s page → Change password.')]
           : h('button.btn.sm', { onclick: async () => { if (await editCluster(rawClusterOf(c))) draw(); } }, 'Set its own credential…'))),
       needing ? h('div', { style: { color: 'var(--critical-ink)' } }, `${needing} cluster(s) have no credential the server can use.`) : '');
   });
@@ -1622,6 +1626,7 @@ const sourceOf = (c) => (c.source === 'zabbix' ? 'Zabbix' : 'Config file');
 /** The Credential column's pill for a cluster. */
 function credentialPill(c) {
   if (c.source === 'zabbix') {
+    if (c.zabbix && c.zabbix.ownCredential) return pill('own · set in ElasticPro', 'green');
     return pill(c.zabbix && c.zabbix.credential === 'vault' ? 'Zabbix · Vault' : 'Zabbix macro', c.zabbix && c.zabbix.credentialOk ? 'green' : 'red');
   }
   return c.credSource === 'shared' ? pill('shared (from file)', 'green')
@@ -1668,12 +1673,19 @@ function clustersCard() {
   const fromZabbix = list.filter((c) => c.source === 'zabbix').length;
   const problems = n('auth') + n('down');
 
-  const editBtn = (c) => h('button.btn.sm', { onclick: async () => { if (await editCluster(rawClusterOf(c))) { draw(); loadTrust(); } } }, 'Edit');
+  // A Zabbix cluster is edited here too: kept in ElasticPro as an overlay, the address always Zabbix's.
+  const editBtn = (c) => (c.source === 'zabbix'
+    ? h('button.btn.sm', { disabled: !roleMayManageClusters(), dataset: { zbxEdit: c.id },
+        title: `From Zabbix (host ${c.zabbix ? c.zabbix.host : ''}): the address stays Zabbix's; the rest is kept in ElasticPro`,
+        onclick: async () => { if (await editZabbixCluster(c)) { draw(); loadTrust(); } } }, 'Edit')
+    : h('button.btn.sm', { onclick: async () => { if (await editCluster(rawClusterOf(c))) { draw(); loadTrust(); } } }, 'Edit'));
+  const editedHere = (c) => (c.source === 'zabbix' && c.zabbix && (c.zabbix.overridden || []).length
+    ? h('span.cm-tag', { title: `Set in ElasticPro: ${c.zabbix.overridden.join(', ')}${c.zabbix.overriddenBy ? ` (by ${c.zabbix.overriddenBy})` : ''}` }, 'edited here') : null);
   const clusterRows = list.map((c) => {
     const cl = client(c.id);
     const zabbixOwned = c.source === 'zabbix';
     return h('tr', { dataset: { cl: c.id, source: zabbixOwned ? 'zabbix' : 'file', kind: connectionKind(cl) } },
-      h('td', h('b', c.name), ...(c.tags || []).map((t) => h('span.cm-tag', t))),
+      h('td', h('b', c.name), ...(c.tags || []).map((t) => h('span.cm-tag', t)), editedHere(c)),
       h('td', pill(sourceOf(c), zabbixOwned ? 'blue' : 'grey')),
       h('td.mono', c.url),
       h('td', c.via ? h('span.mono', c.via) : h('span.muted', 'direct')),
@@ -1681,14 +1693,11 @@ function clustersCard() {
       h('td.mono.muted', { style: { fontSize: '11.5px' } }, c.logIndexPattern || '–'),
       h('td', { 'data-cluster-state': c.id, 'data-kind': 'clusters' }, clusterStatePill(cl, 'clusters')),
       h('td.muted', cl && cl.lastOkAt ? ago(cl.lastOkAt) : '–'),
-      // Zabbix wins: a cluster that is a Zabbix host is edited there, on its macros.
-      h('td', zabbixOwned
-        ? h('button.btn.sm', { disabled: true, title: `Managed in Zabbix — host ${c.zabbix ? c.zabbix.host : ''}` }, 'In Zabbix')
-        : editBtn(c)));
+      h('td', editBtn(c)));
   });
   // Disabled clusters are not in clusters(); listed too so they can be enabled again.
   const disabledRows = off.map((c) => h('tr.cm-off', { dataset: { cl: c.id || c.name, source: c.source === 'zabbix' ? 'zabbix' : 'file', kind: 'disabled' } },
-    h('td', h('b', c.name)),
+    h('td', h('b', c.name), editedHere(c)),
     h('td', pill(sourceOf(c), 'grey')),
     h('td.mono', c.url),
     h('td', c.via ? h('span.mono', c.via) : h('span.muted', 'direct')),
@@ -1722,7 +1731,7 @@ function clustersCard() {
       kpi(n('online'), 'online', 'ok'),
       kpi(n('auth'), 'sign-in problems', n('auth') ? 'warn' : ''),
       kpi(n('down'), 'not answering', n('down') ? 'bad' : ''),
-      kpi(off.length, 'disabled · kept in the file, not polled', 'off')),
+      kpi(off.length, 'disabled · listed, not polled', 'off')),
     h('section.card.cm-card',
       h('div.cm-toolbar',
         h('input', { type: 'search', placeholder: 'Filter by name, address or tag', 'aria-label': 'Filter clusters', value: clView.q,
@@ -1733,7 +1742,7 @@ function clustersCard() {
           ...[['any', 'Any'], ['zabbix', 'Zabbix'], ['file', 'Config file']].map(([v, l]) => h('option', { value: v, selected: clView.source === v }, l)))),
         count),
       tbl,
-      h('div.cm-foot', 'Clusters from Zabbix are edited in Zabbix: Cluster Management. Sync settings are under ',
+      h('div.cm-foot', 'Clusters from Zabbix: the address is always Zabbix’s; anything else changed here is kept in ElasticPro and wins over Zabbix (Zabbix is not changed). Sync settings are under ',
         h('button.btn.sm.ghost', { type: 'button', onclick: () => openTab('zabbix', 'zabbix') }, 'Zabbix'), '.')));
 }
 /* ---------------------------------- Zabbix ---------------------------------- */

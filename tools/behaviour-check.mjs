@@ -4001,7 +4001,8 @@ restoreConsole();
       }
     }
 
-    // Hosted: a Zabbix cluster is edited in the meta part only, through CLUSTER_META_SET.
+    // Hosted: a Zabbix cluster opens its own Edit dialog — everything but the address, which is
+    // read-only from Zabbix — and its type still goes through CLUSTER_META_SET.
     sc.setHostedEdition(true);
     ck.setClusterMeta({});
     const live = st.state.config.clusters.find((c) => c.id === target.id);
@@ -4010,11 +4011,11 @@ restoreConsole();
     try {
       await go('overview');
       const item = await menuItem('Edit');
-      ok(item && /cluster type/.test(item.textContent), 'cluster type: a Zabbix cluster offers no Edit for its type to an admin (hosted)');
+      ok(item && /cluster settings/.test(item.textContent), 'cluster type: a Zabbix cluster offers no Edit to an admin (hosted)');
       press(item); await settleFor(300);
       dlg = doc.querySelector('.modal-overlay .modal');
-      ok(dlg && dlg.querySelector('#ce-type-di') && !dlg.querySelector('#ce-name') && !dlg.querySelector('#ce-url'),
-        'cluster type: a Zabbix cluster’s dialog is not the meta part only');
+      ok(dlg && dlg.querySelector('#ce-type-di') && dlg.querySelector('#ce-name') && dlg.querySelector('#ce-url') && dlg.querySelector('#ce-url').readOnly,
+        'cluster type: a Zabbix cluster’s dialog is not its Edit dialog with the URL read-only and the type part');
       if (dlg && dlg.querySelector('#ce-type-di')) {
         press(dlg.querySelector('#ce-type-di')); await settleFor(60);
         dlg.querySelector('#ce-ulm-bucket').value = 'zbx-logs';

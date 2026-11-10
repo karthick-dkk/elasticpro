@@ -254,6 +254,12 @@ pub struct Core {
     pub(crate) zbx_link: crate::zbx_link::ZbxLink,
     vault: Vault,
     zbx_sync: RwLock<ZbxSync>,
+    /// One build of the Zabbix cluster list at a time: a sync, or an edit's rebuild from what the
+    /// last sync read (`zabbix_rebuild`), never two writing the list from different readings.
+    zbx_build: tokio::sync::Mutex<()>,
+    /// What operators and admins changed about Zabbix clusters in ElasticPro (hosted). See
+    /// `zbx_overlay`.
+    pub(crate) zbx_overlay: crate::zbx_overlay::Overlays,
     /// The two writers, used for nothing but `zabbix.createHosts`. Separate credentials, so
     /// the sync that runs every few minutes can read and never write.
     zbx_writer: Zabbix,
@@ -347,6 +353,15 @@ struct ZbxSync {
     /// The type each Zabbix cluster's host tag `elasticpro:type` names, by cluster id —
     /// what CLUSTER_META_GET answers for a cluster with no entry of its own.
     kinds: HashMap<String, String>,
+    /// The hosts the last successful read of Zabbix found — what an edit made in ElasticPro is
+    /// laid over again at once (`zabbix_rebuild`), without asking Zabbix.
+    found: Vec<crate::zabbix_api::ZbxCluster>,
+    /// Where each Zabbix cluster's requests go (address from Zabbix, route, certificate setting),
+    /// by cluster id — polled or not: what a credential of its own is bound to (CREDENTIAL_SET).
+    dests: HashMap<String, String>,
+    /// Whether each Zabbix cluster signs in with a credential of its own (`zbx_overlay::signs_in_with_own`),
+    /// by cluster id: then only an administrator changes where its requests go.
+    own_cred: HashMap<String, bool>,
 }
 
 /// What the job is set to do, and what it last did. Kept together because an admin
@@ -861,6 +876,9 @@ impl Core {
             zbx_link,
             vault,
             zbx_sync: RwLock::new(ZbxSync::default()),
+            zbx_build: tokio::sync::Mutex::new(()),
+            zbx_overlay: crate::zbx_overlay::Overlays::open(
+                data_dir_for_notify.as_ref().filter(|_| hosted).map(|d| d.join(crate::zbx_overlay::FILE))),
             zbx_writer,
             vault_writer,
             zbx_metrics_cache: parking_lot::Mutex::new(HashMap::new()),
@@ -1672,6 +1690,7 @@ impl Core {
                 }
             }
             "CLUSTER_SAVE" => self.cluster_save(&msg, caller.as_ref()).await,
+            "ZABBIX_CLUSTER_SAVE" => self.zabbix_cluster_save(&msg, caller.as_ref()).await,
             "AUTOMATIONS_SAVE" => self.automations_save(&msg, caller.as_ref()).await,
             "ZABBIX_ROLEMAP_GET" | "ZABBIX_ROLEMAP_SET" | "ZABBIX_ROLEMAP_PREVIEW" => self.rolemap_msg(&t, &msg, caller.as_ref()).await,
             "ZABBIX_USERS" => self.zabbix_users_msg().await,
@@ -2660,7 +2679,8 @@ impl Core {
         let who = caller.map(|c| c.name.as_str()).unwrap_or("-");
         let kept_own = |id: &str| self.edition == Edition::Hosted
             && self.cluster_secrets.status(&crate::cluster_secrets::config_key(id)).is_some();
-        let saved = match crate::cluster_save::apply(&mut found.raw, incoming, replace, &sees, &kept_own) {
+        let admin = caller.is_none_or(|c| c.role >= Role::Admin);
+        let saved = match crate::cluster_save::apply(&mut found.raw, incoming, replace, &sees, &kept_own, admin) {
             Ok(s) => s,
             Err(r) => {
                 tracing::warn!(target: "audit", user = %who, kind = r.kind, reason = %r.message, "cluster save refused");
@@ -2701,6 +2721,95 @@ impl Core {
         };
         tracing::info!(target: "audit", user = %who, count, "automations saved");
         json!({ "ok": true, "count": count, "keptVersion": kept })
+    }
+
+    /// `ZABBIX_CLUSTER_SAVE {hostId, set?: {field: value}, reset?: [field]}` (operator, hosted):
+    /// an edit made in ElasticPro to a cluster that comes from Zabbix, kept as an overlay
+    /// (`zbx_overlay`) and laid over the host at once and at every sync. Zabbix is never written
+    /// to. The address is refused (`url_from_zabbix`), a credential too (`CREDENTIAL_SET`, an
+    /// admin's, keeps a Zabbix cluster's own as it keeps a config cluster's). The same door and the
+    /// same rules as `CLUSTER_SAVE`: an operator, on a cluster they see, may change everything else
+    /// except the route and certificate setting of a cluster that signs in with a credential of
+    /// its own — that credential is bound to where the cluster is now. Answers the cluster's row.
+    async fn zabbix_cluster_save(self: &Arc<Self>, msg: &Value, caller: Option<&Caller>) -> Value {
+        if self.edition != Edition::Hosted {
+            return json!({ "ok": false, "kind": "not_available", "message": "clusters come from Zabbix only in the hosted build" });
+        }
+        let who = caller.map(|c| c.name.as_str()).unwrap_or("-");
+        let Some(host_id) = msg.get("hostId").and_then(Value::as_str).map(str::trim).filter(|h| !h.is_empty()) else {
+            return json!({ "ok": false, "kind": "bad_message", "message": "say which Zabbix host (hostId)" });
+        };
+        let (row, others, own_cred) = {
+            let z = self.zbx_sync.read();
+            let row = z.view.iter().find(|v| v["zabbixHostId"].as_str() == Some(host_id)).cloned();
+            let others: Vec<String> = z.view.iter().filter(|v| v["zabbixHostId"].as_str() != Some(host_id))
+                .filter_map(|v| v["name"].as_str().map(String::from)).collect();
+            (row, others, z.own_cred.clone())
+        };
+        let Some(row) = row else {
+            return json!({ "ok": false, "kind": "not_found", "message": format!("the last Zabbix sync found no cluster host with id {host_id:?}") });
+        };
+        let id = row["_id"].as_str().unwrap_or("").to_string();
+        let groups: Vec<String> = row["zabbixGroups"].as_array().into_iter().flatten().filter_map(|g| g.as_str().map(String::from)).collect();
+        if !caller.is_none_or(|c| c.sees_cluster(&id, &groups)) {
+            return json!({ "ok": false, "kind": "forbidden", "message": "that is not a cluster you can see" });
+        }
+        let refused = |r: crate::cluster_save::Refusal| {
+            tracing::warn!(target: "audit", user = %who, cluster = %id, kind = r.kind, reason = %r.message, "zabbix cluster edit refused");
+            r.to_json()
+        };
+        let (set, reset) = match crate::zbx_overlay::parse_change(msg.get("set"), msg.get("reset")) {
+            Ok(x) => x,
+            Err(r) => return refused(r),
+        };
+        let refusal = |kind: &'static str, message: String| crate::cluster_save::Refusal { kind, message };
+        if let Some(j) = set.get("via").and_then(Value::as_str).filter(|j| !j.is_empty()) {
+            if !self.tunnels.read().await.contains_key(j) {
+                return refused(refusal("unknown_jump", format!("via: {j:?} is not one of ElasticPro's jump hosts")));
+            }
+        }
+        if let Some(n) = set.get("name").and_then(Value::as_str) {
+            let taken = others.iter().any(|o| o.eq_ignore_ascii_case(n))
+                || self.primed.read().clusters.values().any(|c| c.name.as_deref().is_some_and(|x| x.eq_ignore_ascii_case(n)));
+            if taken {
+                return refused(refusal("name_taken", format!("another cluster is already called {n:?}")));
+            }
+        }
+        // Below admin: never certificates off, and never the route of a cluster whose credential is
+        // its own — from Zabbix (Vault, a password macro, one handed over) or kept in ElasticPro,
+        // even one kept for another destination. Not known from the last build: its own.
+        let admin = caller.is_none_or(|c| c.role >= Role::Admin);
+        let own = own_cred.get(&id).copied().unwrap_or(true)
+            || self.cluster_secrets.status(&crate::cluster_secrets::config_key(&id)).is_some();
+        if !admin {
+            if let Some(r) = crate::zbx_overlay::below_admin_refusal(&set, &reset, own) {
+                return refused(r);
+            }
+        }
+        let by = self.saver_name(caller);
+        let set_keys: Vec<String> = set.keys().cloned().collect();
+        let host = row["zabbixHost"].as_str().unwrap_or("").to_string();
+        let kept = match self.zbx_overlay.change(host_id, (&host, &id), set, &reset, &by, auth::now()) {
+            Ok(k) => k,
+            Err(e) => return json!({ "ok": false, "kind": "io_error", "message": e }),
+        };
+        tracing::info!(target: "audit", user = %who, cluster = %id, host = %host, set = ?set_keys, reset = ?reset, "zabbix cluster edited in ElasticPro");
+        self.zabbix_rebuild().await;
+        let mut after = self.zabbix_clusters(caller)["clusters"].as_array().into_iter().flatten()
+            .find(|v| v["zabbixHostId"].as_str() == Some(host_id)).cloned().unwrap_or(Value::Null);
+        if after.is_null() {
+            after = row;
+        }
+        json!({ "ok": true, "clusterId": id, "hostId": host_id,
+                "overridden": kept.map(|k| k.fields.keys().cloned().collect::<Vec<_>>()).unwrap_or_default(),
+                "cluster": after })
+    }
+
+    /// The overlay of a Zabbix cluster's settings as the config file would spell them on a
+    /// cluster's entry (`liveRetention`, `snapshotRetention`, `backupCapacity`, …): its row from
+    /// the last build. `None` for a cluster that is not a Zabbix one.
+    pub(crate) fn zabbix_entry(&self, id: &str) -> Option<Value> {
+        self.zbx_sync.read().view.iter().find(|v| v["_id"].as_str() == Some(id)).cloned()
     }
 
     /// Make a saved cluster the fleet's business now, without waiting for an admin's PRIME.
@@ -3311,7 +3420,13 @@ impl Core {
             }
         }
         let default = self.cluster_secrets.header_for(DEFAULT);
+        // A Zabbix cluster's own credential is typed in its Edit dialog (CREDENTIAL_SET), never
+        // taken from what a browser primes under its id: that would make it the Zabbix cluster's.
+        let zabbix_ids: std::collections::HashSet<String> = self.zbx_sync.read().dests.keys().cloned().collect();
         for c in &p.clusters {
+            if zabbix_ids.contains(&c.id) {
+                continue;
+            }
             let Some(h) = c.auth_header.as_deref().map(str::trim).filter(|h| !h.is_empty()) else { continue };
             if Some(h) == shared || default.as_deref() == Some(h) {
                 continue;
@@ -3420,7 +3535,12 @@ impl Core {
                            "message": "credentials are kept on the server only in the hosted build; this one keeps them in the config file" });
         }
         let who = caller.map(|c| c.name.as_str()).unwrap_or("-");
-        let dests: HashMap<String, String> = self.primed.read().clusters.iter().map(|(id, c)| (id.clone(), spec_destination(c))).collect();
+        // Config clusters where they are polled, and Zabbix clusters — polled or not, one whose
+        // Zabbix password cannot be read above all — where they would be (`zabbix_build`).
+        let mut dests: HashMap<String, String> = self.primed.read().clusters.iter().map(|(id, c)| (id.clone(), spec_destination(c))).collect();
+        let zbx_dests = self.zbx_sync.read().dests.clone();
+        dests.extend(zbx_dests.clone());
+        let zabbix_one = |c: &str| zbx_dests.contains_key(c);
         let line = |l: &crate::cluster_secrets::Listed, id: &str| json!({
             "id": id, "user": l.user, "kind": if l.user.is_some() { "basic" } else { "header" },
             "setBy": l.set_by, "setAt": l.set_at,
@@ -3457,6 +3577,9 @@ impl Core {
                 Ok(had) => {
                     tracing::info!(target: "audit", user = %who, cluster, had, "kept credential cleared");
                     self.apply_kept_credentials().await;
+                    if zabbix_one(cluster) {
+                        self.zabbix_rebuild().await;
+                    }
                     if cluster == DEFAULT {
                         self.sync_soon();
                     }
@@ -3483,6 +3606,9 @@ impl Core {
                 Ok(true) => {
                     tracing::info!(target: "audit", user = %who, cluster, "kept credential bound to the cluster's new address");
                     self.apply_kept_credentials().await;
+                    if zabbix_one(cluster) {
+                        self.zabbix_rebuild().await;
+                    }
                     json!({ "ok": true, "cluster": cluster, "rebound": true })
                 }
                 Ok(false) => json!({ "ok": false, "kind": "not_found", "message": "no credential is kept for that cluster" }),
@@ -3514,6 +3640,9 @@ impl Core {
             Ok(()) => {
                 tracing::info!(target: "audit", user = %who, cluster, "credential kept encrypted on the server");
                 self.apply_kept_credentials().await;
+                if zabbix_one(cluster) {
+                    self.zabbix_rebuild().await;
+                }
                 if cluster == DEFAULT {
                     self.sync_soon();
                 }
@@ -4738,6 +4867,52 @@ impl Core {
             fetched
         };
         let templates: Vec<Value> = templates.iter().map(|(n, k)| json!({ "name": n, "hosts": k })).collect();
+        let (n, in_use, problems) = {
+            let _one = self.zbx_build.lock().await;
+            {
+                let mut z = self.zbx_sync.write();
+                z.last_ok = Some(auth::now());
+                z.error = None;
+                z.skipped = skipped.clone();
+                z.options = opts.clone();
+                z.provisioned = provisioned.clone();
+                z.templates = templates.clone();
+                z.found = found.clone();
+            }
+            self.zabbix_build(found, &opts).await
+        };
+        tracing::info!(target: "audit", clusters = n, skipped = skipped.len(), problems,
+                       credentials = if opts.use_elasticpro_credentials { "elasticpro" } else { "zabbix" }, "zabbix sync");
+        json!({ "ok": true, "clusters": n, "inUse": in_use, "skipped": skipped, "problems": problems, "provisioned": provisioned, "templates": templates,
+                "roleChanges": roles.changes, "userListComplete": roles.complete, "unverifiable": roles.unverifiable, "deleted": roles.deleted,
+                "ambiguous": roles.ambiguous,
+                "credentials": if opts.use_elasticpro_credentials { "elasticpro" } else { "zabbix" } })
+    }
+
+    /// Lay what was changed in ElasticPro over the hosts the last sync read, now — after an edit
+    /// (`ZABBIX_CLUSTER_SAVE`) or a credential of a Zabbix cluster's own was set or cleared —
+    /// without asking Zabbix again. Nothing before the first successful sync.
+    pub(crate) async fn zabbix_rebuild(self: &Arc<Self>) {
+        let _one = self.zbx_build.lock().await;
+        let (found, opts, synced) = {
+            let z = self.zbx_sync.read();
+            (z.found.clone(), z.options.clone(), z.last_ok.is_some())
+        };
+        if synced {
+            self.zabbix_build(found, &opts).await;
+        }
+    }
+
+    /// The Zabbix clusters, built from the hosts Zabbix gave and what ElasticPro keeps about them:
+    /// the credential (Vault, a macro, one the module handed over, ElasticPro's own), the route,
+    /// and the overlay of edits made in ElasticPro (`zbx_overlay`) — whose `name`, `via`, `tls`
+    /// and `enabled` decide what is polled, and whose other fields ride on the row for the pages.
+    /// The address is always Zabbix's. A cluster's own credential kept in ElasticPro
+    /// (`cfg:<id>`, bound to its destination) wins over Zabbix's, at that destination only.
+    /// Returns (clusters, polled, with problems). The caller holds `zbx_build`.
+    async fn zabbix_build(self: &Arc<Self>, found: Vec<crate::zabbix_api::ZbxCluster>, opts: &ZbxOptions) -> (usize, usize, usize) {
+        use crate::zbx_overlay as overlay;
+        let hosted = self.edition == Edition::Hosted;
         let jumps: Vec<(String, String, u16)> = self.tunnels.read().await.iter()
             .map(|(id, r)| (id.clone(), r.tunnel.spec.host.clone(), r.tunnel.spec.port)).collect();
         let jump_ids: std::collections::HashSet<String> = jumps.iter().map(|j| j.0.clone()).collect();
@@ -4751,97 +4926,158 @@ impl Core {
                 s.auth_header.as_ref().filter(|a| !a.is_empty()).map(|a| (s.url.trim_end_matches('/').to_ascii_lowercase(), a.clone()))
             }).collect(), p.shared_auth.clone())
         };
+        let primed_ids: std::collections::HashSet<String> = self.primed.read().clusters.keys().cloned().collect();
+        let kept_users: HashMap<String, Option<String>> = if hosted {
+            self.cluster_secrets.list().into_iter().map(|l| (l.name, l.user)).collect()
+        } else {
+            HashMap::new()
+        };
         let mut specs = HashMap::new();
         let mut view = Vec::new();
         let mut kinds = HashMap::new();
+        let mut dests = HashMap::new();
+        let mut own_cred = HashMap::new();
         let mut problems = 0;
         for c in found {
             let id = c.id();
             if let Some(k) = c.kind.as_deref() {
                 kinds.insert(id.clone(), k.to_string());
             }
-            let mut notes: Vec<String> = vec![];
-            let mut user_override: Option<String> = None;
-            let own = held_by_url.get(&c.url.trim_end_matches('/').to_ascii_lowercase()).cloned().or_else(|| shared.clone());
-            let (credential, secret) = if opts.use_elasticpro_credentials {
-                // The config says so: ElasticPro's credential, not Vault's. The header is
-                // taken as it is; there is no password to combine with a username.
-                match &own {
-                    Some(_) => ("elasticpro", None),
-                    None => {
-                        notes.push("ElasticPro has no credential for this address — add `credentials:` to the config, \
-                                    or add it as a cluster and sign in once".into());
-                        ("elasticpro", None)
-                    }
-                }
-            } else { match &c.password {
-                PasswordRef::Vault(r) => match self.vault.read(r).await {
-                    Ok(p) => ("vault", Some(p)),
-                    Err(e) => { notes.push(format!("password: {e}")); ("vault", None) }
-                },
-                PasswordRef::Plain(p) => ("plain-macro", Some(p.clone())),
-                PasswordRef::SecretMacro => {
-                    // Zabbix never returns a Secret macro; what the module handed over is used instead.
-                    let (credential, held, note) = secret_macro_credential(&c, self.held_secret(&c.host, c.password_on_host));
-                    if let Some(n) = note { notes.push(n); }
-                    match held {
-                        Some(h) => {
-                            if !h.user.is_empty() { user_override = Some(h.user.clone()); }
-                            (credential, Some(h.password))
-                        }
-                        None => (credential, None),
-                    }
-                }
-                PasswordRef::Missing => ("none", None),
-            } };
-            let username = user_override.clone().unwrap_or_else(|| c.username.clone());
-            let mut auth = if opts.use_elasticpro_credentials { own.clone() } else { secret.as_ref().map(|p| basic(&username, p)) };
-            // The last good password carries on only through a Vault outage. ElasticPro's own
-            // credential is local and definite: when it is gone, an admin removed it.
-            // Never for "password not set": nobody gave the core one, so there is nothing to carry on.
-            if auth.is_none() && credential != "none" && credential != "password-not-set" && !opts.use_elasticpro_credentials {
-                if let Some(old) = previous.get(&id).filter(|o| o.url == c.url) {
-                    auth = old.auth_header.clone();
-                    if auth.is_some() {
-                        notes.push("using the last password that could be read".into());
-                    }
+            let ov = self.zbx_overlay.get(&c.hostid);
+            // The host's technical name changed since the overlay last saw it: the credential kept
+            // under the old id follows (still bound to the same destination). The core's alone.
+            if ov.is_some() && self.role != crate::worker::Role::Worker {
+                match self.zbx_overlay.seen(&c.hostid, &id, &c.host) {
+                    Ok(Some(was)) => self.move_kept_credential(&was, &id),
+                    Ok(None) => {}
+                    Err(e) => tracing::warn!(cluster = %id, error = %e, "zabbix overlay: the host's new name was not recorded"),
                 }
             }
-            let via = match c.jump.as_deref() {
+            let ov = ov.as_ref();
+            let mut notes: Vec<String> = vec![];
+            // The route: Zabbix's, matched to one of ElasticPro's jump hosts — unless the overlay says.
+            let mut via_notes: Vec<String> = vec![];
+            let zabbix_via = match c.jump.as_deref() {
                 Some(j) if jump_ids.contains(j) => Some(j.to_string()),
-                Some(j) => { notes.push(format!("jump host {j:?} is not in ElasticPro's jump_hosts")); None }
+                Some(j) => { via_notes.push(format!("jump host {j:?} is not in ElasticPro's jump_hosts")); None }
                 // Behind the Windows jump host Zabbix uses: the same host here, when there is one.
                 None => match &c.jump_addr {
                     Some(a) => {
                         let found = crate::zabbix_api::match_jump(a, jumps.iter().map(|(i, h, p)| (i.as_str(), h.as_str(), *p)));
                         if found.is_none() {
-                            notes.push(format!("behind jump host {}:{} (Zabbix goes through it over SSH); add it under jump_hosts to reach it from here", a.0, a.1));
+                            via_notes.push(format!("behind jump host {}:{} (Zabbix goes through it over SSH); add it under jump_hosts to reach it from here", a.0, a.1));
                         }
                         found
                     }
                     None => None,
                 },
             };
+            let (via, via_note, via_set) = overlay::route(ov, zabbix_via.clone(), &jump_ids);
+            if !via_set {
+                notes.append(&mut via_notes);
+            }
+            notes.extend(via_note);
+            let tls = overlay::tls(ov);
+            let name = overlay::name(ov, &c.name);
+            let enabled = overlay::enabled(ov);
+            let dest = destination_of(&c.url, via.as_deref(), tls.as_deref());
+            dests.insert(id.clone(), dest.clone());
+            // A credential of its own typed in ElasticPro, for this destination: it wins.
+            let own_key = crate::cluster_secrets::config_key(&id);
+            let own = if hosted { self.cluster_secrets.header_at(&own_key, &dest) } else { None };
+            // Kept for another destination — unless it is a primed config cluster's under the same id
+            // (that cluster's own, at its own address, not this one's moved away).
+            let own_elsewhere = own.is_none() && hosted && self.cluster_secrets.bound_of(&own_key).is_some()
+                && !primed_ids.contains(&id);
+            if own_elsewhere {
+                notes.push("its own credential, set in ElasticPro, was kept for another address, route or certificate setting \
+                            and is not sent here; Zabbix's is used until it is typed again".into());
+            }
+            let mut user_override: Option<String> = None;
+            // With ElasticPro's credentials: a config cluster's own header at this address, not the shared one.
+            let per_address = opts.use_elasticpro_credentials && held_by_url.contains_key(&c.url.trim_end_matches('/').to_ascii_lowercase());
+            let (credential, auth) = if let Some(h) = own {
+                user_override = Some(kept_users.get(&own_key).cloned().flatten().unwrap_or_else(|| "(api key or token)".into()));
+                ("elasticpro-own", Some(h))
+            } else {
+                let own_url = held_by_url.get(&c.url.trim_end_matches('/').to_ascii_lowercase()).cloned().or_else(|| shared.clone());
+                let (credential, secret) = if opts.use_elasticpro_credentials {
+                    // The config says so: ElasticPro's credential, not Vault's. The header is
+                    // taken as it is; there is no password to combine with a username.
+                    if own_url.is_none() {
+                        notes.push("ElasticPro has no credential for this address — add `credentials:` to the config, \
+                                    or add it as a cluster and sign in once".into());
+                    }
+                    ("elasticpro", None)
+                } else { match &c.password {
+                    PasswordRef::Vault(r) => match self.vault.read(r).await {
+                        Ok(p) => ("vault", Some(p)),
+                        Err(e) => { notes.push(format!("password: {e}")); ("vault", None) }
+                    },
+                    PasswordRef::Plain(p) => ("plain-macro", Some(p.clone())),
+                    PasswordRef::SecretMacro => {
+                        // Zabbix never returns a Secret macro; what the module handed over is used instead.
+                        let (credential, held, note) = secret_macro_credential(&c, self.held_secret(&c.host, c.password_on_host));
+                        if let Some(n) = note { notes.push(n); }
+                        match held {
+                            Some(h) => {
+                                if !h.user.is_empty() { user_override = Some(h.user.clone()); }
+                                (credential, Some(h.password))
+                            }
+                            None => (credential, None),
+                        }
+                    }
+                    PasswordRef::Missing => ("none", None),
+                } };
+                let username = user_override.clone().unwrap_or_else(|| c.username.clone());
+                let mut auth = if opts.use_elasticpro_credentials { own_url.clone() } else { secret.as_ref().map(|p| basic(&username, p)) };
+                // The last good password carries on only through a Vault outage. ElasticPro's own
+                // credential is local and definite: when it is gone, an admin removed it.
+                // Never for "password not set": nobody gave the core one, so there is nothing to carry on.
+                // Never to another destination: the address is Zabbix's, the route and certificates may be ElasticPro's.
+                if auth.is_none() && credential != "none" && credential != "password-not-set" && !opts.use_elasticpro_credentials {
+                    if let Some(old) = previous.get(&id).filter(|o| o.url == c.url && spec_destination(o) == dest) {
+                        auth = old.auth_header.clone();
+                        if auth.is_some() {
+                            notes.push("using the last password that could be read".into());
+                        }
+                    }
+                }
+                (credential, auth)
+            };
+            let signs_in_own = overlay::signs_in_with_own(credential, per_address);
+            own_cred.insert(id.clone(), signs_in_own);
             let usable = auth.is_some() || credential == "none";
-            if !usable || !notes.is_empty() {
+            if enabled && (!usable || !notes.is_empty()) {
                 problems += 1;
+            }
+            if !enabled {
+                notes.push("switched off in ElasticPro: listed, not polled".into());
             }
             // Only a cluster the core can sign in to is polled and reachable. One whose
             // credential cannot be read stays in the listing below, with why — polling it
             // meant a 401 on every interval (69 an hour on one cluster), each one a failed
-            // sign-in against the cluster's own account.
-            if usable {
+            // sign-in against the cluster's own account. One switched off in ElasticPro is
+            // listed and not polled.
+            if usable && enabled {
                 specs.insert(id.clone(), ClusterSpec {
-                    id: id.clone(), name: Some(c.name.clone()), url: c.url.clone(), auth_header: auth, via: via.clone(), tls: None,
+                    id: id.clone(), name: Some(name.clone()), url: c.url.clone(), auth_header: auth, via: via.clone(), tls: tls.clone(),
                     zabbix_groups: c.readers.clone(), log_index_pattern: None, time_field: None, delay_fields: None,
                 });
             }
-            view.push(json!({
-                "_id": id, "name": c.name, "url": c.url, "via": via, "source": "zabbix",
+            let mut row = json!({
+                "_id": id, "name": name, "url": c.url, "via": via, "source": "zabbix",
                 "zabbixHost": c.host, "zabbixHostId": c.hostid, "client": c.client,
-                "zabbixGroups": c.readers, "username": c.username,
+                "zabbixGroups": c.readers, "username": user_override.unwrap_or_else(|| c.username.clone()),
                 "credential": credential, "credentialOk": usable, "notes": notes, "type": c.kind,
-            }));
+                "ownCredential": credential == "elasticpro-own", "ownCredentialMoved": own_elsewhere,
+                // Its credential is its own (Zabbix's or ElasticPro's): only an admin changes its route.
+                "credentialIsOwn": signs_in_own || own_elsewhere,
+            });
+            if let Some(m) = row.as_object_mut() {
+                m.extend(overlay::row_fields(ov, &c.name, zabbix_via.as_deref(), c.client.as_deref()));
+            }
+            view.push(row);
         }
         view.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
         let n = view.len();
@@ -4850,21 +5086,12 @@ impl Core {
             let mut z = self.zbx_sync.write();
             z.specs = specs;
             z.view = view;
-            z.last_ok = Some(auth::now());
-            z.error = None;
-            z.skipped = skipped.clone();
-            z.options = opts.clone();
-            z.provisioned = provisioned.clone();
-            z.templates = templates.clone();
             z.kinds = kinds;
+            z.dests = dests;
+            z.own_cred = own_cred;
         }
         self.forget_connections();
-        tracing::info!(target: "audit", clusters = n, skipped = skipped.len(), problems,
-                       credentials = if opts.use_elasticpro_credentials { "elasticpro" } else { "zabbix" }, "zabbix sync");
-        json!({ "ok": true, "clusters": n, "inUse": in_use, "skipped": skipped, "problems": problems, "provisioned": provisioned, "templates": templates,
-                "roleChanges": roles.changes, "userListComplete": roles.complete, "unverifiable": roles.unverifiable, "deleted": roles.deleted,
-                "ambiguous": roles.ambiguous,
-                "credentials": if opts.use_elasticpro_credentials { "elasticpro" } else { "zabbix" } })
+        (n, in_use, problems)
     }
 
     /// Demote-only re-evaluation of every unpinned Zabbix account from the groups Zabbix lists
