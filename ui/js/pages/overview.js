@@ -133,8 +133,17 @@ function clusterSize(r) {
 export const DEFAULT_SORT = { key: 'health', dir: -1 };
 // `type`: CI / DI / On-Prem, or 'all' (core/cluster-kind.js).
 const ui = { text: '', sort: DEFAULT_SORT.key, dir: DEFAULT_SORT.dir, only: 'all', type: 'all', search: false };
-const filtered = () => !!(ui.text || ui.only !== 'all' || ui.type !== 'all' || ui.sort !== DEFAULT_SORT.key || ui.dir !== DEFAULT_SORT.dir);
-const resetFilter = () => { ui.text = ''; ui.only = 'all'; ui.type = 'all'; ui.sort = DEFAULT_SORT.key; ui.dir = DEFAULT_SORT.dir; };
+/**
+ * Whether the list is narrowed: search text, a health or a type filter. The order is not a
+ * filter — it is remembered per browser, and a list in another order still shows every
+ * cluster — so a sort alone neither keeps the search box open nor shows Clear.
+ */
+export const isFiltered = (u) => !!(u.text || u.only !== 'all' || u.type !== 'all');
+const filtered = () => isFiltered(ui);
+/** The filters only: what closing the 🔍 box drops. */
+const clearFilters = () => { ui.text = ''; ui.only = 'all'; ui.type = 'all'; };
+/** Clear, pressed: the filters and the order back to the page's own. */
+const resetFilter = () => { clearFilters(); ui.sort = DEFAULT_SORT.key; ui.dir = DEFAULT_SORT.dir; };
 
 /**
  * The summary's order, remembered per browser (lib/table-sort.js). `ui.sort`/`ui.dir` are the
@@ -286,7 +295,7 @@ function searchBox(all, shown) {
     type: 'button', 'aria-expanded': open ? 'true' : 'false', 'aria-controls': 'clusters-search-box',
     'aria-label': 'Search, sort and filter clusters', title: 'Search / sort / filter',
     onclick: () => {
-      if (open && filtered()) { resetFilter(); ui.search = false; }
+      if (open && filtered()) { clearFilters(); ui.search = false; }
       else { ui.search = !ui.search; focusSearch = ui.search; }
       draw();
     },

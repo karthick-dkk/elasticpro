@@ -57,15 +57,18 @@ const loading = new Set();
 /**
  * A link that opened this page with a problem in view (core/focus.js): `unassigned` shows
  * only the shards with nowhere to go, `disk`/`nodes` bring the node table into view, and a
- * `node` narrows the shard table to that node, largest first. Applied once, on arrival.
+ * `node` narrows the shard table to that node, largest first — for that visit only; the
+ * remembered order is not touched. Applied once, on arrival.
  */
 let reveal = null;
 function applyFocus() {
   const f = takeFocus('shards');
+  SHARD_SORT.forVisit(null);      // an order a link asked for lasts one visit
   if (!f) return;
   if (f.section === 'unassigned') { ui.state = 'UNASSIGNED'; ui.node = 'all'; reveal = '[data-focus="shards"]'; }
   else if (f.section === 'disk' || f.section === 'nodes') reveal = '[data-focus="nodes"]';
-  if (f.node) { ui.node = f.node; ui.state = 'all'; SHARD_SORT.set({ key: 'store', dir: -1 }); }
+  // Largest first for this visit only: the remembered Shards order is left as it is.
+  if (f.node) { ui.node = f.node; ui.state = 'all'; SHARD_SORT.forVisit({ key: 'store', dir: -1 }); }
 }
 const focusable = (el, name) => { if (el.dataset.focus !== name) el.dataset.focus = name; return el; };
 
@@ -758,7 +761,9 @@ function shardsCard(c, d, all, raw, started) {
            { label: 'Type', sort: 'type' }, { label: 'State', sort: 'state' },
            { label: 'Node', sort: 'node' }, { label: 'Store', num: true, sort: 'store' },
            { label: 'Docs', num: true, sort: 'docs' }, 'Unassigned reason', ''],
-        trs, { emptyText: all.length ? 'No shard matches the filter' : 'No shards reported', sort: SHARD_SORT }),
+        // One order for every cluster's table, but each head its own id (focus comes back to the right one).
+        trs, { emptyText: all.length ? 'No shard matches the filter' : 'No shards reported',
+          sort: { id: `shards-${c.id}`, get key() { return SHARD_SORT.key; }, get dir() { return SHARD_SORT.dir; }, on: SHARD_SORT.on } }),
       shown.length < filtered.length
         ? h('div', { style: { padding: '10px', textAlign: 'center' } },
             h('button.btn.sm', { onclick: () => { ui.limit += 300; draw(); } },

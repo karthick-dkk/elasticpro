@@ -54,8 +54,10 @@ export function tableSort(id, { initial = null, onChange = null } = {}) {
     return s;
   }
   let state;            // undefined until read from storage
+  let visit = null;     // an order a link asked for, for this visit only (never stored)
   let cols = null;      // the columns of the last apply(): types, values, first directions
   const current = () => {
+    if (visit) return visit;
     if (state === undefined) {
       const stored = readStored(id);
       state = stored === undefined ? (initial ? { ...initial } : null) : stored;
@@ -79,14 +81,23 @@ export function tableSort(id, { initial = null, onChange = null } = {}) {
     on(key) {
       const col = cols && cols[key];
       state = nextSort(current(), key, { start: (col && col.start) || 1, natural: !initial });
+      visit = null;       // a choice made by hand is remembered, and ends the link's order
       writeStored(id, state);
       if (s.onChange) s.onChange(state);
     },
     /** Set the order outright (a Sort select, a Clear button). */
     set(sort) {
       state = sort ? validSort(sort) : null;
+      visit = null;
       writeStored(id, state);
     },
+    /**
+     * An order a link asks for (one node's shards, largest first): shown for this visit only,
+     * never written — the next ordinary visit opens in the remembered order. `null` ends it.
+     */
+    forVisit(sort) { visit = sort ? validSort(sort) : null; },
+    /** Whether the order on screen is a link's, not the remembered one. */
+    get visiting() { return !!visit; },
   };
   registry.set(id, s);
   return s;

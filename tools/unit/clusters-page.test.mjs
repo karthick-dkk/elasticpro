@@ -186,3 +186,12 @@ test('the disk cell keeps the watermark note and the node count on a second line
   const bare = C.diskCell({ percent: 56, used: 156 * GB, total: 279 * GB }, settings);
   assert.equal(bare.querySelector('.disk-note'), null, 'nothing to say: no second line');
 });
+
+test('a sort is not a filter: only search text, health and type narrow the list', () => {
+  const base = { text: '', only: 'all', type: 'all', sort: 'health', dir: -1 };
+  assert.equal(P.isFiltered(base), false);
+  assert.equal(P.isFiltered({ ...base, sort: 'name', dir: 1 }), false, 'a remembered order alone must not light the search box or show Clear');
+  assert.equal(P.isFiltered({ ...base, text: 'prod' }), true);
+  assert.equal(P.isFiltered({ ...base, only: 'red' }), true);
+  assert.equal(P.isFiltered({ ...base, type: 'ci' }), true);
+});
