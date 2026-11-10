@@ -359,6 +359,9 @@ struct ZbxSync {
     /// Where each Zabbix cluster's requests go (address from Zabbix, route, certificate setting),
     /// by cluster id — polled or not: what a credential of its own is bound to (CREDENTIAL_SET).
     dests: HashMap<String, String>,
+    /// Whether each Zabbix cluster signs in with a credential of its own (`zbx_overlay::signs_in_with_own`),
+    /// by cluster id: then only an administrator changes where its requests go.
+    own_cred: HashMap<String, bool>,
 }
 
 /// What the job is set to do, and what it last did. Kept together because an admin
@@ -2676,7 +2679,8 @@ impl Core {
         let who = caller.map(|c| c.name.as_str()).unwrap_or("-");
         let kept_own = |id: &str| self.edition == Edition::Hosted
             && self.cluster_secrets.status(&crate::cluster_secrets::config_key(id)).is_some();
-        let saved = match crate::cluster_save::apply(&mut found.raw, incoming, replace, &sees, &kept_own) {
+        let admin = caller.is_none_or(|c| c.role >= Role::Admin);
+        let saved = match crate::cluster_save::apply(&mut found.raw, incoming, replace, &sees, &kept_own, admin) {
             Ok(s) => s,
             Err(r) => {
                 tracing::warn!(target: "audit", user = %who, kind = r.kind, reason = %r.message, "cluster save refused");
@@ -2735,12 +2739,12 @@ impl Core {
         let Some(host_id) = msg.get("hostId").and_then(Value::as_str).map(str::trim).filter(|h| !h.is_empty()) else {
             return json!({ "ok": false, "kind": "bad_message", "message": "say which Zabbix host (hostId)" });
         };
-        let (row, others) = {
+        let (row, others, own_cred) = {
             let z = self.zbx_sync.read();
             let row = z.view.iter().find(|v| v["zabbixHostId"].as_str() == Some(host_id)).cloned();
             let others: Vec<String> = z.view.iter().filter(|v| v["zabbixHostId"].as_str() != Some(host_id))
                 .filter_map(|v| v["name"].as_str().map(String::from)).collect();
-            (row, others)
+            (row, others, z.own_cred.clone())
         };
         let Some(row) = row else {
             return json!({ "ok": false, "kind": "not_found", "message": format!("the last Zabbix sync found no cluster host with id {host_id:?}") });
@@ -2771,12 +2775,16 @@ impl Core {
                 return refused(refusal("name_taken", format!("another cluster is already called {n:?}")));
             }
         }
+        // Below admin: never certificates off, and never the route of a cluster whose credential is
+        // its own — from Zabbix (Vault, a password macro, one handed over) or kept in ElasticPro,
+        // even one kept for another destination. Not known from the last build: its own.
         let admin = caller.is_none_or(|c| c.role >= Role::Admin);
-        let own_kept = self.cluster_secrets.status(&crate::cluster_secrets::config_key(&id)).is_some();
-        let moves = crate::zbx_overlay::DESTINATION.iter().any(|k| set.contains_key(*k) || reset.iter().any(|r| r == k));
-        if !admin && own_kept && moves {
-            return refused(refusal("credential_destination",
-                "this cluster signs in with a credential of its own, kept for its current route and certificate setting: an administrator moves it".into()));
+        let own = own_cred.get(&id).copied().unwrap_or(true)
+            || self.cluster_secrets.status(&crate::cluster_secrets::config_key(&id)).is_some();
+        if !admin {
+            if let Some(r) = crate::zbx_overlay::below_admin_refusal(&set, &reset, own) {
+                return refused(r);
+            }
         }
         let by = self.saver_name(caller);
         let set_keys: Vec<String> = set.keys().cloned().collect();
@@ -4921,6 +4929,7 @@ impl Core {
         let mut view = Vec::new();
         let mut kinds = HashMap::new();
         let mut dests = HashMap::new();
+        let mut own_cred = HashMap::new();
         let mut problems = 0;
         for c in found {
             let id = c.id();
@@ -4975,6 +4984,8 @@ impl Core {
                             and is not sent here; Zabbix's is used until it is typed again".into());
             }
             let mut user_override: Option<String> = None;
+            // With ElasticPro's credentials: a config cluster's own header at this address, not the shared one.
+            let per_address = opts.use_elasticpro_credentials && held_by_url.contains_key(&c.url.trim_end_matches('/').to_ascii_lowercase());
             let (credential, auth) = if let Some(h) = own {
                 user_override = Some(kept_users.get(&own_key).cloned().flatten().unwrap_or_else(|| "(api key or token)".into()));
                 ("elasticpro-own", Some(h))
@@ -5024,6 +5035,8 @@ impl Core {
                 }
                 (credential, auth)
             };
+            let signs_in_own = overlay::signs_in_with_own(credential, per_address);
+            own_cred.insert(id.clone(), signs_in_own);
             let usable = auth.is_some() || credential == "none";
             if enabled && (!usable || !notes.is_empty()) {
                 problems += 1;
@@ -5048,6 +5061,8 @@ impl Core {
                 "zabbixGroups": c.readers, "username": user_override.unwrap_or_else(|| c.username.clone()),
                 "credential": credential, "credentialOk": usable, "notes": notes, "type": c.kind,
                 "ownCredential": credential == "elasticpro-own", "ownCredentialMoved": own_elsewhere,
+                // Its credential is its own (Zabbix's or ElasticPro's): only an admin changes its route.
+                "credentialIsOwn": signs_in_own || own_elsewhere,
             });
             if let Some(m) = row.as_object_mut() {
                 m.extend(overlay::row_fields(ov, &c.name, zabbix_via.as_deref(), c.client.as_deref()));
@@ -5063,6 +5078,7 @@ impl Core {
             z.view = view;
             z.kinds = kinds;
             z.dests = dests;
+            z.own_cred = own_cred;
         }
         self.forget_connections();
         (n, in_use, problems)

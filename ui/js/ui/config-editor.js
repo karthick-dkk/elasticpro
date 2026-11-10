@@ -25,7 +25,7 @@ import { credentialsKeptOnServer, keptCredentials, keptFor, keepCredential, forg
          initialCredentialChoice } from '../core/server-credentials.js';
 import { toast } from './menu.js';
 import { CLUSTER_TYPES, clusterKind, typeDefaults, bucketProblem, saveClusterMeta } from '../core/cluster-kind.js';
-import { overlayChange, movesDestination, changesSomething, zabbixCredentialLabel } from '../core/zabbix-overlay.js';
+import { overlayChange, movesDestination, changesSomething, zabbixCredentialLabel, DESTINATION_FIELDS } from '../core/zabbix-overlay.js';
 
 let masterInMemory = null;      // master password for this session only (needed to seal new secrets)
 
@@ -448,7 +448,9 @@ export async function editCluster(existing = null) {
     h('div', { style: { display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1fr)', gap: '10px' } },
       field('Route', select('ce-via', c.via || c.jump || '', [['', 'direct'], ...jumps.map((j) => [j, `via ${j}`])]),
         jumps.length ? null : 'No jump hosts defined yet — add one on the Config page.'),
-      field('Certificates', select('ce-tls', c.tls || '', [['', 'default (from defaults.tls)'], ['auto', 'auto — OS store, else ask & pin'], ['system', 'system — OS store only'], ['insecure', 'insecure — lab only']]),
+      // Certificates off is an administrator's (cluster_save.rs); an operator keeps one already off.
+      field('Certificates', select('ce-tls', c.tls || '', [['', 'default (from defaults.tls)'], ['auto', 'auto — OS store, else ask & pin'], ['system', 'system — OS store only'],
+        ...(direct || roleMayWrite() || String(c.tls || '').toLowerCase() === 'insecure' ? [['insecure', 'insecure — lab only']] : [])]),
         String((r.defaults && r.defaults.tls) || '').toLowerCase() === 'insecure'
           ? 'Not in effect: Defaults → Certificates is insecure, which accepts any certificate on every cluster.' : null),
       field('Enabled', select('ce-enabled', c.enabled === false ? 'no' : 'yes', [['yes', 'yes'], ['no', 'no (kept in file, not polled)']]))),
@@ -692,6 +694,7 @@ export async function editZabbixCluster(c) {
   const overridden = new Set(z.overridden || []);
   const zv = z.values || {};
   const admin = roleMayWrite();
+  const routeLocked = !admin && z.credentialIsOwn !== false;
   const onServer = credentialsKeptOnServer();
   const kept = admin && onServer ? await keptCredentials().catch(() => null) : null;
   const keptOwn = kept ? keptFor(kept, c.id) : null;
@@ -707,6 +710,8 @@ export async function editZabbixCluster(c) {
     const drawMark = () => {
       if (resets.has(key)) {
         markBox.replaceChildren(h('span', 'Zabbix’s value is used when you save.'));
+      } else if (overridden.has(key) && routeLocked && DESTINATION_FIELDS.includes(key)) {
+        markBox.replaceChildren(h('b', 'Set in ElasticPro'), zabbixText ? ` · Zabbix: ${zabbixText}` : '');
       } else if (overridden.has(key)) {
         markBox.replaceChildren(h('b', 'Set in ElasticPro'), zabbixText ? ` · Zabbix: ${zabbixText} · ` : ' · ',
           h('button.btn.sm.ghost', { type: 'button', id: `ce-z-reset-${key}`, style: { padding: '0 4px', minHeight: 0 },
@@ -734,8 +739,13 @@ export async function editZabbixCluster(c) {
   url.readOnly = true; url.setAttribute('aria-readonly', 'true');
   const viaSel = select('ce-via', c.via || '', [['', 'direct'], ...jumps.map((j) => [j, `via ${j}`]),
     ...(c.via && !jumps.includes(c.via) ? [[c.via, `via ${c.via}`]] : [])]);
-  const tlsSel = select('ce-tls', overridden.has('tls') ? (c.tls || '') : '',
-    [['', 'default (from defaults.tls)'], ['auto', 'auto — OS store, else ask & pin'], ['system', 'system — OS store only'], ['insecure', 'insecure — lab only']]);
+  // Below admin: certificates are never turned off, and the route of a cluster whose credential is
+  // its own (from Zabbix or kept here) is an admin's — the core refuses both (zbx_overlay.rs).
+  const tlsNow = overridden.has('tls') ? (c.tls || '') : '';
+  const tlsSel = select('ce-tls', tlsNow,
+    [['', 'default (from defaults.tls)'], ['auto', 'auto — OS store, else ask & pin'], ['system', 'system — OS store only'],
+     ...(admin || tlsNow === 'insecure' ? [['insecure', 'insecure — lab only']] : [])]);
+  if (routeLocked) { viaSel.disabled = true; tlsSel.disabled = true; }
   const enabledSel = select('ce-enabled', c.enabled === false ? 'no' : 'yes', [['yes', 'yes'], ['no', 'no (listed, not polled)']]);
   const tagsInput = text('ce-tags', listText(c.tags), { placeholder: 'prod, onprem' });
   const kindEditable = admin;
@@ -773,7 +783,8 @@ export async function editZabbixCluster(c) {
     h('div', { style: { display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1fr)', gap: '10px' } },
       def('via', 'Route', viaSel, { read: () => viaSel.value, put: (v) => { viaSel.value = v || ''; }, zabbix: zv.via || '', zabbixText: zv.via ? `via ${zv.via}` : 'direct',
         hint: jumps.length ? null : 'No jump hosts defined yet.' }),
-      def('tls', 'Certificates', tlsSel, { read: () => tlsSel.value || null, put: () => { tlsSel.value = ''; } }),
+      def('tls', 'Certificates', tlsSel, { read: () => tlsSel.value || null, put: () => { tlsSel.value = ''; },
+        hint: routeLocked ? 'Route and certificates: an administrator’s — it signs in with a credential of its own.' : null }),
       def('enabled', 'Enabled', enabledSel, { read: () => enabledSel.value !== 'no', put: () => { enabledSel.value = 'yes'; } })),
     h('div', { style: { display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 1fr)', gap: '10px' } },
       def('tags', 'Tags', tagsInput, { read: () => tagsInput.value.split(',').map((t) => t.trim()).filter(Boolean),

@@ -31,13 +31,18 @@ async fn zsession(c: &Arc<Core>, user: &str, ty: i64) -> String {
     c.handle(json!({ "type": "SSO_EXCHANGE", "code": out["sso_code"] })).await["session"].as_str().unwrap().to_string()
 }
 
-/// The fake Zabbix's hosts: (hostid, technical name, visible name, ES host macro, Secret password?).
-type Hosts = Arc<Mutex<Vec<(String, String, String, String, bool)>>>;
+/// The fake Zabbix's hosts: (hostid, technical name, visible name, ES host macro, password:
+/// "secret" a Secret macro, "plain" a password macro, "none" no password at all).
+type Hosts = Arc<Mutex<Vec<(String, String, String, String, &'static str)>>>;
 
-fn host_json(h: &(String, String, String, String, bool)) -> Value {
+fn host_json(h: &(String, String, String, String, &'static str)) -> Value {
     let m = |k: &str, v: &str| json!({ "macro": k, "value": v, "type": "0" });
     let mut macros = vec![m("{$ELASTICSEARCH.HOST}", &h.3), m("{$ELASTICSEARCH.SCHEME}", "http"), m("{$ELASTICSEARCH.USERNAME}", "svc")];
-    macros.push(if h.4 { json!({ "macro": "{$ELASTICSEARCH.PASSWORD}", "type": "1" }) } else { m("{$ELASTICSEARCH.PASSWORD}", "pw") });
+    match h.4 {
+        "secret" => macros.push(json!({ "macro": "{$ELASTICSEARCH.PASSWORD}", "type": "1" })),
+        "plain" => macros.push(m("{$ELASTICSEARCH.PASSWORD}", "pw")),
+        _ => {}
+    }
     json!({ "hostid": h.0, "host": h.1, "name": h.2, "hostgroups": [], "tags": [], "macros": macros })
 }
 
@@ -53,8 +58,9 @@ async fn save(c: &Arc<Core>, s: &str, host_id: &str, set: Value, reset: Value) -
 #[tokio::test]
 async fn zabbix_clusters_are_edited_in_elasticpro_and_the_edit_survives_every_sync() {
     let hosts: Hosts = Arc::new(Mutex::new(vec![
-        ("101".into(), "es-prod".into(), "es-prod".into(), "10.0.0.1".into(), true),
-        ("102".into(), "es-dev".into(), "es-dev".into(), "10.0.0.2".into(), false),
+        ("101".into(), "es-prod".into(), "es-prod".into(), "10.0.0.1".into(), "secret"),
+        ("102".into(), "es-dev".into(), "es-dev".into(), "10.0.0.2".into(), "plain"),
+        ("103".into(), "es-open".into(), "es-open".into(), "10.0.0.3".into(), "none"),
     ]));
     let methods = Arc::new(Mutex::new(Vec::<String>::new()));
     let (hs, ms) = (hosts.clone(), methods.clone());
@@ -84,7 +90,7 @@ async fn zabbix_clusters_are_edited_in_elasticpro_and_the_edit_survives_every_sy
     c.zabbix_sso().set_secret(SECRET).unwrap();
 
     let sync = c.zabbix_sync().await;
-    assert_eq!((sync["clusters"].clone(), sync["inUse"].clone()), (json!(2), json!(1)), "es-prod's Secret macro was never handed over: {sync}");
+    assert_eq!((sync["clusters"].clone(), sync["inUse"].clone()), (json!(3), json!(2)), "es-prod's Secret macro was never handed over: {sync}");
     let admin = zsession(&c, "sara", 3).await;
     let oper = zsession(&c, "otto", 2).await;
     let user = zsession(&c, "uma", 1).await;
@@ -106,8 +112,21 @@ async fn zabbix_clusters_are_edited_in_elasticpro_and_the_edit_survives_every_sy
 
     // --- an edit applies at once, without asking Zabbix.
     let calls = methods.lock().unwrap().len();
-    let r = save(&c, &oper, "102", json!({ "name": "Dev EU", "tags": ["eu", "dev"], "note": "team A", "liveRetention": "30d", "tls": "system" }), json!([])).await;
+    let r = save(&c, &oper, "102", json!({ "name": "Dev EU", "tags": ["eu", "dev"], "note": "team A", "liveRetention": "30d" }), json!([])).await;
     assert_eq!(r["ok"], json!(true), "{r}");
+    // es-dev signs in with its own password macro: where it is sent is an admin's to change.
+    for set in [json!({ "tls": "system" }), json!({ "via": "" })] {
+        let r = save(&c, &oper, "102", set.clone(), json!([])).await;
+        assert_eq!(r["kind"], json!("credential_destination"), "{set}: {r}");
+    }
+    // Certificates off: never below admin, not even on a cluster with no credential at all.
+    let r = save(&c, &oper, "103", json!({ "tls": "insecure" }), json!([])).await;
+    assert_eq!(r["kind"], json!("tls_insecure"), "{r}");
+    // A cluster with no credential of its own: the operator may route it.
+    let r = save(&c, &oper, "103", json!({ "tls": "system", "via": "" }), json!([])).await;
+    assert_eq!(r["ok"], json!(true), "{r}");
+    let r = save(&c, &admin, "102", json!({ "tls": "system" }), json!([])).await;
+    assert_eq!(r["ok"], json!(true), "an admin may: {r}");
     assert_eq!(methods.lock().unwrap().len(), calls, "applied from the last sync's reading");
     let d = row(&c, &oper, "102").await;
     assert_eq!((d["name"].clone(), d["tags"].clone(), d["note"].clone(), d["liveRetention"].clone(), d["tls"].clone()),
@@ -131,6 +150,10 @@ async fn zabbix_clusters_are_edited_in_elasticpro_and_the_edit_survives_every_sy
     assert_eq!((d["name"].clone(), d["note"].clone()), (json!("es-dev-2"), json!("team A")), "only the name went back: {d}");
 
     // --- an admin types es-prod's own credential: kept bound to the address, polled with it.
+    // es-prod (a Secret macro nobody handed over, so no credential yet): the operator may route it.
+    let r = save(&c, &oper, "101", json!({ "tls": "system" }), json!([])).await;
+    assert_eq!(r["ok"], json!(true), "{r}");
+    save(&c, &oper, "101", json!({}), json!(["tls"])).await;
     let r = c.handle(json!({ "type": "CREDENTIAL_SET", "session": oper, "cluster": "zbx-es-prod", "username": "svc", "password": "own-pw" })).await;
     assert_eq!(r["ok"], json!(false), "a credential is an admin's: {r}");
     let r = c.handle(json!({ "type": "CREDENTIAL_SET", "session": admin, "cluster": "zbx-es-prod", "username": "svc-own", "password": "own-pw" })).await;

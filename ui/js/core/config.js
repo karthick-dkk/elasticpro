@@ -470,7 +470,9 @@ export function mergeZabbixClusters(config, list) {
                   overridden: Array.isArray(rows[i].overridden) ? rows[i].overridden : [],
                   values: rows[i].zabbixValues || null,
                   overriddenBy: rows[i].overriddenBy || '', overriddenAt: rows[i].overriddenAt || 0,
-                  ownCredential: !!rows[i].ownCredential, ownCredentialMoved: !!rows[i].ownCredentialMoved },
+                  ownCredential: !!rows[i].ownCredential, ownCredentialMoved: !!rows[i].ownCredentialMoved,
+                  // Unknown (an older core) counts as its own: the route is then left to an admin.
+                  credentialIsOwn: rows[i].credentialIsOwn !== false },
       }));
   }
   const byUrl = new Map(zbx.map((c) => [urlKey(c.url), c]));

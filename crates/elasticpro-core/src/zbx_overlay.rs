@@ -216,6 +216,40 @@ pub fn parse_change(set: Option<&Value>, reset: Option<&Value>) -> Result<(BTree
     Ok((out, reset))
 }
 
+/* ------------------------------------ who may change what ------------------------------------ */
+
+/// Whether a Zabbix cluster signs in with a credential of its own — one that belongs to this
+/// cluster rather than to every cluster, so where it is sent is an administrator's decision: a
+/// password read from Vault (`vault`), a password macro (`plain-macro`), one the module handed over
+/// for this host (`core-secret`), one typed in ElasticPro (`elasticpro-own`), or, with ElasticPro's
+/// credentials in use, a config cluster's own header for the same address (`per_address`). The
+/// shared ones — the default (`core-default`), ElasticPro's shared credential — and none at all
+/// are not. `credential` is the row's (`bridge::zabbix_build`). Unknown is treated as its own.
+pub fn signs_in_with_own(credential: &str, per_address: bool) -> bool {
+    match credential {
+        "core-default" | "none" | "password-not-set" => false,
+        "elasticpro" => per_address,
+        _ => true,
+    }
+}
+
+/// What a caller below admin may not change, or `None`: certificates set to `insecure` (any
+/// credential would then go to whoever answers, whatever the cluster's), and — for a cluster that
+/// signs in with a credential of its own — its route or certificate setting (`DESTINATION`), set
+/// or reset: that credential would go where the operator points it. The same rule as a config
+/// cluster's (`cluster_save::apply`).
+pub fn below_admin_refusal(set: &BTreeMap<String, Value>, reset: &[String], own: bool) -> Option<Refusal> {
+    if set.get("tls").and_then(Value::as_str) == Some("insecure") {
+        return Some(refusal("tls_insecure", "only an administrator turns certificate checks off (tls: insecure)"));
+    }
+    let moves = DESTINATION.iter().any(|k| set.contains_key(*k) || reset.iter().any(|r| r == k));
+    if own && moves {
+        return Some(refusal("credential_destination",
+            "this cluster signs in with a credential of its own (from Zabbix or kept in ElasticPro): only an administrator changes its route or certificate setting"));
+    }
+    None
+}
+
 /* -------------------------------- what the sync applies -------------------------------- */
 
 /// The name the cluster goes by: the overlay's, else Zabbix's.
@@ -484,6 +518,37 @@ mod tests {
         let (s, r) = parse_change(Some(&json!({ "name": "  Prod  ", "volumeHeadroomPercent": 0, "backupCapacity": "2 TB" })), Some(&json!(["note"]))).unwrap();
         assert_eq!(s["name"], json!("Prod"));
         assert_eq!((s["volumeHeadroomPercent"].clone(), s["backupCapacity"].clone(), r), (json!(0), json!("2 TB"), vec!["note".to_string()]));
+    }
+
+    #[test]
+    fn below_admin_the_route_of_a_cluster_with_its_own_credential_and_insecure_certificates_are_refused() {
+        let via = set(json!({ "via": "" }));
+        let tls = set(json!({ "tls": "system" }));
+        let note = set(json!({ "note": "x" }));
+        // Its own: Vault, a password macro, one handed over for the host, one kept in ElasticPro,
+        // a config cluster's own header at the address.
+        for (cred, per_address) in [("vault", false), ("plain-macro", false), ("core-secret", false), ("elasticpro-own", false),
+                                    ("elasticpro", true), ("something-new", false)] {
+            let own = signs_in_with_own(cred, per_address);
+            assert!(own, "{cred}");
+            for s in [&via, &tls] {
+                assert_eq!(below_admin_refusal(s, &[], own).map(|r| r.kind), Some("credential_destination"), "{cred}: {s:?}");
+            }
+            assert_eq!(below_admin_refusal(&BTreeMap::new(), &["via".into()], own).map(|r| r.kind), Some("credential_destination"), "a reset moves it too");
+            assert!(below_admin_refusal(&note, &["note".into()], own).is_none(), "{cred}: everything else stays the operator's");
+        }
+        // Shared or none: the route may change.
+        for (cred, per_address) in [("core-default", false), ("elasticpro", false), ("none", false), ("password-not-set", false)] {
+            let own = signs_in_with_own(cred, per_address);
+            assert!(!own, "{cred}");
+            assert!(below_admin_refusal(&via, &[], own).is_none(), "{cred}");
+            assert!(below_admin_refusal(&tls, &[], own).is_none(), "{cred}");
+        }
+        // Insecure certificates: never below admin, whatever the credential.
+        let insecure = set(json!({ "tls": "insecure" }));
+        for own in [false, true] {
+            assert_eq!(below_admin_refusal(&insecure, &[], own).map(|r| r.kind), Some("tls_insecure"));
+        }
     }
 
     #[test]

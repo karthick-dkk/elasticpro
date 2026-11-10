@@ -1114,8 +1114,14 @@ credential* in the dialog forgets it (`CREDENTIAL_CLEAR`). A rename of the host'
 
 **Who.** The same as a config cluster: an operator or an admin, on a cluster they see — through
 the role gate (`auth::required_role`), as `CLUSTER_SAVE`. (`Writes::decide` gates writes *to a
-cluster*; neither save writes to one.) An operator may not change the route or certificate setting
-of a cluster that signs in with a credential of its own; a credential is an admin's.
+cluster*; neither save writes to one.) Below admin, two things are refused: **certificates off**
+(`tls: insecure`, kind `tls_insecure`) on any cluster — the same now holds for a config cluster's
+`CLUSTER_SAVE`, where an operator can no longer newly make a cluster insecure (one already insecure
+stays so); and the **route or certificate setting** (set or reset) of a cluster that signs in with a
+credential of its own (`credential_destination`): a password from Vault, a password macro, one Cluster
+Management handed over for the host, one kept in ElasticPro (even for another destination), or — with
+ElasticPro's credentials in use — a config cluster's own at the address. One on the default or on
+ElasticPro's shared credential, or with none, an operator may route. A credential is an admin's.
 
 **A host that disappears** from Zabbix keeps its overlay (an orphan), shown nowhere; when the host
 returns — under any name, the host id is the key — the overlay applies again. A *Replace* restore of
@@ -1123,8 +1129,8 @@ the *Clusters* section removes overlays the backup does not hold, like everythin
 
 | Message | Role | Answer |
 |---|---|---|
-| `ZABBIX_CLUSTER_SAVE {hostId, set?: {field: value}, reset?: [field]}` | operator | `{ok, clusterId, hostId, overridden: [field], cluster: <the ZABBIX_CLUSTERS row after the change>}` — applied at once from the last sync's reading, without asking Zabbix. Refusals: `url_from_zabbix` (`url`, `host`, `port`, `scheme`…), `credential` (`username`, `password`, `apiKey`, `bearer`…: `CREDENTIAL_SET`), `cluster_type` (`type`, `ulm`, `slm`: `CLUSTER_META_SET`), `unknown_field`, `bad_request` (a value out of range; an empty value — reset instead), `unknown_jump`, `name_taken`, `credential_destination` (operator), `forbidden`, `not_found` (no such host in the last sync), `bad_message`. Audit line `zabbix cluster edited in ElasticPro` with `user`, `cluster`, `host`, `set` (field names), `reset`. |
-| `ZABBIX_CLUSTERS` (row fields) | guest | Effective `name`, `via`, `tls`, `enabled`, `tags`, `note`, `liveRetention`, `snapshotRetention`, `backupCapacity`, `volume*` (null when not set — never a guess); `overridden: [field]`, `zabbixValues: {name, via, tags}`, `overriddenBy`, `overriddenAt`, `ownCredential`, `ownCredentialMoved`. |
+| `ZABBIX_CLUSTER_SAVE {hostId, set?: {field: value}, reset?: [field]}` | operator | `{ok, clusterId, hostId, overridden: [field], cluster: <the ZABBIX_CLUSTERS row after the change>}` — applied at once from the last sync's reading, without asking Zabbix. Refusals: `url_from_zabbix` (`url`, `host`, `port`, `scheme`…), `credential` (`username`, `password`, `apiKey`, `bearer`…: `CREDENTIAL_SET`), `cluster_type` (`type`, `ulm`, `slm`: `CLUSTER_META_SET`), `unknown_field`, `bad_request` (a value out of range; an empty value — reset instead), `unknown_jump`, `name_taken`, `credential_destination` and `tls_insecure` (below admin), `forbidden`, `not_found` (no such host in the last sync), `bad_message`. Audit line `zabbix cluster edited in ElasticPro` with `user`, `cluster`, `host`, `set` (field names), `reset`. |
+| `ZABBIX_CLUSTERS` (row fields) | guest | Effective `name`, `via`, `tls`, `enabled`, `tags`, `note`, `liveRetention`, `snapshotRetention`, `backupCapacity`, `volume*` (null when not set — never a guess); `overridden: [field]`, `zabbixValues: {name, via, tags}`, `overriddenBy`, `overriddenAt`, `ownCredential`, `ownCredentialMoved`, `credentialIsOwn` (its credential is its own — Zabbix's per-cluster or ElasticPro's — so its route is an admin's). |
 
 ## Plan templates — the message contract
 
