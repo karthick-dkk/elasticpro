@@ -292,6 +292,9 @@ impl Core {
         let cfg = self.hosts_config();
         let conc = concurrency_for(self.gate.limits().per_cluster, self.role);
         let mut ctl = Controller::new(conc.start, conc.max, conc.target_ms);
+        // The job's lane (docs/JOBS.md "Governor"): its allocation caps this cluster's
+        // controller, and every page is sent in it (spawned pages carry it along).
+        let lane = crate::jobs::governor::current();
         let dir = HostsDir::new(store.root(), &id);
         // What a run cut short left beside held days, and checkpoint writes a kill cut off:
         // gone before anything is written (one collection per cluster holds from here).
@@ -463,6 +466,9 @@ impl Core {
                 stopping = (opts.stop)();
             }
             if stopping.is_none() {
+                if let Some(l) = &lane {
+                    ctl.set_cap(l.limit());
+                }
                 let limit = ctl.limit(now_ms()) as usize;
                 while set.len() < limit {
                     let Some((di, pk, delay)) = ready.pop_front() else { break };
@@ -483,12 +489,12 @@ impl Core {
                     let req = hosts::page_request(&id, &ind, &body, timeout);
                     let pause = if first_page.insert((di, pk)) { delay } else { delay.max(cfg.page_pause_ms) };
                     let core = self.clone();
-                    set.spawn(async move {
+                    set.spawn(crate::jobs::governor::within(lane.clone(), async move {
                         sleep_ms(pause).await;
                         let t = std::time::Instant::now();
                         let res = core.es_req(req).await;
                         (di, pk, res, t.elapsed().as_millis() as u64)
-                    });
+                    }));
                 }
                 if set.is_empty() {
                     if ready.is_empty() {
@@ -736,6 +742,11 @@ impl Core {
         {
             return vec![];
         }
+        // Most jobs at once (docs/JOBS.md "Governor"): no new run while the worker runs as many
+        // as `mostAtOnce` allows; the next tick tries again. A run already open takes more in.
+        if !self.governor_room(crate::jobs::HOSTS_COLLECT) {
+            return vec![];
+        }
         let at = self.hosts_at();
         if local.time() < at {
             return vec![];
@@ -813,7 +824,9 @@ impl Core {
         let run_id = part.id().to_string();
         tokio::spawn(async move {
             let cid = id.clone();
-            let out = core.hosts_collect(cid, s, missing, HostsOpts { again: false, from_tick, stop, job: None }).await;
+            // The run's lane: every cluster the run collects shares its allocation.
+            let out = core.governed(part.id(), crate::jobs::HOSTS_COLLECT,
+                                    core.hosts_collect(cid, s, missing, HostsOpts { again: false, from_tick, stop, job: None })).await;
             use crate::jobs::Outcome;
             let days = Some(out.days_collected);
             let busy = out.error.is_some().then(|| core.cluster_busy(&id)).flatten();
@@ -1011,7 +1024,8 @@ impl Core {
                     continue;
                 }
                 let fut = work(id.clone());
-                set.spawn(async move { (id, fut.await) });
+                // The job's lane goes with the cluster's work (a spawned task does not inherit it).
+                set.spawn(crate::jobs::governor::within(crate::jobs::governor::current(), async move { (id, fut.await) }));
             }
             while let Some(j) = set.join_next().await {
                 let Ok((id, r)) = j else { continue };

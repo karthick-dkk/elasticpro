@@ -282,6 +282,7 @@ impl Core {
             schema: health::WORKER_STATUS_SCHEMA, role: "worker".into(), version: crate::VERSION.into(), pid: Some(std::process::id()),
             started_at: self.worker.started_at, heartbeat_at: now, memory, cpu, gate: Some(gate), jobs, queued, collection,
             busy: self.load.own_busy(now),
+            governor: self.governor.state.lock().view.clone(),
         };
         if let Err(e) = st.write(d) {
             tracing::warn!(error = %e, "report worker: the status file could not be written");

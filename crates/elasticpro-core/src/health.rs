@@ -105,7 +105,7 @@ pub const WAITS_ELSEWHERE: &[&str] = &[
 
 /// Whether a message type's time is somebody else's: [`WAITS_ELSEWHERE`], or a type the core
 /// forwards to the report worker (`worker::endpoint`: REPORT_RUN, VOLUME_RUN, REPORT_STOP,
-/// REPORT_SEND_NOW, REPORT_CLEAR, REPORT_CONCURRENCY_SET — in role all they wait on a cluster or
+/// REPORT_SEND_NOW, REPORT_CLEAR — in role all they wait on a cluster or
 /// a mail server). A worker that is slow to answer, or down while its name is still being looked
 /// up, is the worker's check, never the core's message p95.
 pub fn waits_elsewhere(t: &str) -> bool {
@@ -1133,6 +1133,10 @@ pub struct WorkerStatus {
     /// them to its own view for `JOBS_LIST`.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub busy: Vec<crate::jobs::load::Busy>,
+    /// The governor as the worker's last tick left it (docs/JOBS.md "Governor"): what
+    /// `JOBS_LIST.governor` shows in role core, and each worker job's allocation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub governor: Option<crate::jobs::governor::View>,
 }
 
 impl WorkerStatus {
@@ -1702,7 +1706,7 @@ mod tests {
     fn what_the_core_forwards_to_the_worker_never_feeds_its_own_p95() {
         // With the worker container stopped, each forwarded action took ~3 s while its name
         // failed to resolve, and turned the Core chip red with a fix about ES_CONCURRENCY.
-        let forwarded = ["REPORT_RUN", "REPORT_STOP", "REPORT_SEND_NOW", "REPORT_CLEAR", "REPORT_CONCURRENCY_SET", "VOLUME_RUN"];
+        let forwarded = ["REPORT_RUN", "REPORT_STOP", "REPORT_SEND_NOW", "REPORT_CLEAR", "VOLUME_RUN"];
         for t in forwarded {
             assert!(crate::worker::endpoint(t).is_some(), "{t} is forwarded");
             assert!(waits_elsewhere(t), "{t} waits on the worker, not on the core");
@@ -1717,7 +1721,7 @@ mod tests {
             t.record(kind, 3_100, false, m0 + 100 + i as u64);
         }
         let w = t.window(5, m0 + 1_000);
-        assert_eq!(w.all.count, 26);
+        assert_eq!(w.all.count, 20 + forwarded.len() as u64);
         assert_eq!(w.own.count, 20, "{:?}", w.own);
         assert_eq!(w.own.p95_ms, Some(2));
         assert!(w.all.p95_ms.unwrap() >= 3_000, "the all-types figure still shows them");

@@ -439,9 +439,10 @@ impl Queue {
     }
 
     /// Start queued jobs, oldest first, while fewer than `concurrency` run. Returns the
-    /// ids that are now running and need a worker.
+    /// ids that are now running and need a worker. `concurrency` is what the governor's
+    /// `mostAtOnce` leaves for reports (`Core::report_slots`), 1 to `MOST_AT_ONCE_MAX`.
     pub fn promote(&mut self, now: i64) -> Vec<String> {
-        let cap = self.concurrency.clamp(MIN_CONCURRENCY, MAX_CONCURRENCY);
+        let cap = self.concurrency.clamp(1, crate::jobs::controls::MOST_AT_ONCE_MAX as usize);
         let mut free = cap.saturating_sub(self.running());
         let mut waiting: Vec<(u64, String)> = self.jobs.iter().filter(|j| j.status == Status::Queued).map(|j| (j.seq, j.id.clone())).collect();
         waiting.sort();
@@ -605,12 +606,14 @@ mod tests {
         q.get_mut("j1").unwrap().status = Status::Done;
         assert_eq!(q.promote(12), vec!["j3"]);
         assert_eq!(q.get("j3").unwrap().started_at, Some(12));
-        // Raising the cap starts more, still in order; a cap out of range is held to 3..5.
+        // Raising the cap starts more, still in order; a cap out of range is held to 1..32.
         q.concurrency = 5;
         assert_eq!(q.promote(13), vec!["j4", "j5"]);
-        q.concurrency = 99;
+        q.concurrency = 0;
         q.push(job("c9", "ann"), "j9".into());
-        assert!(q.promote(14).is_empty(), "5 running is the most, whatever the setting says: {}", q.running());
+        assert!(q.promote(14).is_empty(), "never below one: {}", q.running());
+        q.concurrency = 99;
+        assert_eq!(q.promote(15), vec!["j9"], "32 at most, whatever the setting says");
         assert_eq!(status(&q, &ids[0]), Status::Running);
     }
 

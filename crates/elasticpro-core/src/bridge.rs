@@ -23,6 +23,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 /// JOBS_LIST (docs/JOBS.md): the job registry, the run log and each job's next run.
+mod governor_api;
 mod job_controls;
 mod jobs_api;
 /// SYSTEM_HEALTH and the minute task (docs/HEALTH.md); a child module so it reads what the core
@@ -331,6 +332,9 @@ pub struct Core {
     /// What this process saw of each cluster's load (`jobs::load`): busy clusters defer
     /// background work, never a person's request.
     pub(crate) load: crate::jobs::load::LoadView,
+    /// The running jobs' lanes and the rule that sizes them (docs/JOBS.md "Governor"). See
+    /// `jobs::governor` and `governor_api`.
+    pub(crate) governor: Arc<crate::jobs::governor::Governor>,
 }
 
 /// What the last Zabbix sync found. The specs carry credentials and never leave the core;
@@ -912,6 +916,7 @@ impl Core {
             worker: worker_api::WorkerSide::new(data_dir_for_worker.as_deref(), role),
             jobs: crate::jobs::Jobs::open(data_dir_for_jobs.as_deref(), role, crate::fleet::now_ms()),
             load: crate::jobs::load::LoadView::default(),
+            governor: Arc::new(crate::jobs::governor::Governor::default()),
         })
     }
 
@@ -4196,9 +4201,11 @@ impl Core {
                 }
             }
         }
+        // Taken here, in the caller's task: a shared request runs in a task of its own.
+        let lane = (req.class == Class::Background).then(crate::jobs::governor::current).flatten();
         let ctx = Outgoing {
             req, url, auth, via, tunnel, tls: TlsMode::parse(tls.as_deref()), writes, origin, timeout_ms, read,
-            cache_key: key.filter(|_| cacheable),
+            cache_key: key.filter(|_| cacheable), lane,
         };
         match (key, background_key) {
             (Some(k), _) => self.es_shared(k, ctx).await,
@@ -4346,6 +4353,12 @@ impl Core {
             return refused;
         }
         let wait = (ctx.req.class == Class::Interactive).then(|| Duration::from_millis(cfg.limits.queue_wait_ms.min(ctx.timeout_ms)));
+        // A job's request waits in its lane first: the job never has more in flight than the
+        // governor gave it (docs/JOBS.md "Governor"). Held with the slot, to the answer.
+        let lane = match ctx.lane.clone() {
+            Some(l) => Some(l.acquire(cluster).await),
+            None => None,
+        };
         let permit = tokio::select! {
             r = self.gate.admit(ctx.req.class, cluster, ctx.via.as_deref(), ctx.req.user.as_deref(), wait) => match r {
                 Ok(p) => p,
@@ -4397,6 +4410,7 @@ impl Core {
             };
             tokio::spawn(async move {
                 let _slot = permit;
+                let _lane = lane;
                 let route = Route { tunnel: ctx.tunnel.as_ref().map(|(t, p)| (t, *p)), tls: ctx.tls };
                 let limit = BodyLimit { cap_bytes, setting, budget: Some(&core.body_budget) };
                 core.transport.request(&ctx.req, &ctx.url, ctx.auth.as_deref(), ctx.writes, route, &limit).await
@@ -4526,6 +4540,9 @@ struct Outgoing {
     read: bool,
     /// Where to keep the answer in the read cache, if it may be kept.
     cache_key: Option<crate::inflight::Key>,
+    /// The lane of the job a background request is part of (`jobs::governor`): it waits there
+    /// for room before it asks the gate for a slot.
+    lane: Option<Arc<crate::jobs::governor::Lane>>,
 }
 
 /* ------------------------------------- the reapers ------------------------------------- */
@@ -5609,7 +5626,8 @@ impl Core {
             Ok(r) => r,
             Err(busy) => return SinkRun { body: busy.answer("the scheduled log delay measurement"), skipped: None, error: None },
         };
-        let (out, clusters) = self.measure_delay_sink().await;
+        // A job of the core: its requests in a lane fixed at its maximum (docs/JOBS.md "Governor").
+        let (out, clusters) = self.governed(run.id(), crate::jobs::LOGDELAY_MEASURE, self.measure_delay_sink()).await;
         run.clusters(&clusters);
         let note_ids = |n: &SinkNote| n.cluster_id.iter().chain(n.sink_id.iter()).cloned().collect::<Vec<String>>();
         let outcome = if let Some(by) = run.cancel_asked() {

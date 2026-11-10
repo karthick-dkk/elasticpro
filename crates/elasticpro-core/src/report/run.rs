@@ -218,10 +218,6 @@ impl Core {
                     None => Some(bad("bad_request", "id or all:true is required")),
                 }
             }
-            "REPORT_CONCURRENCY_SET" => {
-                let n = msg.get("n").and_then(Value::as_u64).unwrap_or(0) as usize;
-                (!(MIN_CONCURRENCY..=MAX_CONCURRENCY).contains(&n)).then(|| bad("bad_request", format!("n must be {MIN_CONCURRENCY} to {MAX_CONCURRENCY}")))
-            }
             "REPORT_SEND_NOW" => {
                 let kind = match ReportKind::of_message(msg) {
                     Ok(k) => k,
@@ -331,8 +327,10 @@ impl Core {
         let q = self.reports.snapshot();
         let mut jobs: Vec<&Job> = q.jobs.iter().filter(|j| seen(j)).collect();
         jobs.sort_by_key(|j| std::cmp::Reverse(j.seq));
+        // `concurrency` is the setting (`overall.mostAtOnce`, which REPORT_CONCURRENCY_SET writes).
+        let most = self.jobs.controls().overall.most_at_once;
         let mut out = json!({ "ok": true, "jobs": jobs.into_iter().map(job_view).collect::<Vec<_>>(),
-                              "concurrency": q.concurrency, "running": q.running(), "queued": q.queued() });
+                              "concurrency": most, "running": q.running(), "queued": q.queued() });
         if let Some(w) = self.worker_line() {
             out["worker"] = w;
         }
@@ -409,22 +407,33 @@ impl Core {
         }
     }
 
-    /// `REPORT_CONCURRENCY_SET {n}` (admin): 3..5.
+    /// `REPORT_CONCURRENCY_SET {n}` (admin): 3..5 — the older name of `JOB_SETTINGS_SET
+    /// {overall: {mostAtOnce}}`, which it writes (docs/JOBS.md "Governor": one setting). The core's
+    /// file: handled where `JOB_SETTINGS_SET` is, never forwarded.
     fn report_concurrency(self: &Arc<Self>, msg: &Value, caller: Option<&Caller>) -> Value {
         let n = msg.get("n").and_then(Value::as_u64).unwrap_or(0) as usize;
         if !(MIN_CONCURRENCY..=MAX_CONCURRENCY).contains(&n) {
             return bad("bad_request", format!("n must be {MIN_CONCURRENCY} to {MAX_CONCURRENCY}"));
         }
-        self.reports.with(|q| q.concurrency = n);
-        tracing::info!(target: "audit", user = %who(caller), concurrency = n, "volume report: concurrency set");
+        let by = who(caller);
+        let set = json!({ "overall": { "mostAtOnce": n } });
+        if let Err(e) = self.jobs.update_controls(&by, |c| c.apply(&set, |_| false)) {
+            return bad("io_error", e);
+        }
+        tracing::info!(target: "audit", user = %by, concurrency = n, "volume report: concurrency set (overall.mostAtOnce)");
         self.report_pump();
         json!({ "ok": true, "concurrency": n })
     }
 
-    /// Start whatever the queue lets start.
+    /// Start whatever the queue lets start: as many as `mostAtOnce` leaves (`report_slots`).
     pub(crate) fn report_pump(self: &Arc<Self>) {
+        if !self.reports.writer() {
+            return;
+        }
+        let slots = self.report_slots();
         let started = {
             let mut q = self.reports.queue.lock();
+            q.concurrency = slots;
             let s = q.promote(now_ms());
             if !s.is_empty() {
                 self.reports.save(&q);
@@ -452,13 +461,17 @@ impl Core {
 
     async fn report_work(self: Arc<Self>, id: String) {
         let Some(job) = self.reports.queue.lock().get(&id).cloned() else { return };
-        let end = match (job.report, job.kind) {
-            (ReportKind::Indices, _) => self.report_indices_job(&job).await,
-            (ReportKind::Hosts, _) => self.report_hosts_job(&job).await,
-            (ReportKind::LogDelay, _) => self.report_logdelay_job(&job).await,
-            (ReportKind::Volume, Kind::Cluster) => self.report_cluster(&job).await,
-            (ReportKind::Volume, Kind::Mailed) => self.report_mailed(&job).await,
+        // The job's lane (docs/JOBS.md "Governor"): every request it sends waits there for room.
+        let work = async {
+            match (job.report, job.kind) {
+                (ReportKind::Indices, _) => self.report_indices_job(&job).await,
+                (ReportKind::Hosts, _) => self.report_hosts_job(&job).await,
+                (ReportKind::LogDelay, _) => self.report_logdelay_job(&job).await,
+                (ReportKind::Volume, Kind::Cluster) => self.report_cluster(&job).await,
+                (ReportKind::Volume, Kind::Mailed) => self.report_mailed(&job).await,
+            }
         };
+        let end = self.governed(&format!("report-{id}"), &crate::jobs::report_job_id(&job), work).await;
         if job.kind == Kind::Mailed {
             // Every way a mailed job ends is its last send, sent or not; one the emergency
             // stop cut short gives the schedule its period back, so the next tick retries.
