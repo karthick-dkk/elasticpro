@@ -210,11 +210,12 @@ async fn run() {
             .route("/send-now", post(worker_action))
             .route("/stop", post(worker_action))
             .route("/queue", post(worker_action))
+            .route("/job", post(worker_action))
             .route("/health", get(worker_health))
             .layer(axum::extract::DefaultBodyLimit::max(256 * 1024))
             .with_state(core);
         let addr = std::net::SocketAddr::from((bind, port));
-        println!("elasticpro-bridge: report worker on http://{addr}/  (internal only: /run /send-now /stop /queue /health)");
+        println!("elasticpro-bridge: report worker on http://{addr}/  (internal only: /run /send-now /stop /queue /job /health)");
         let l = tokio::net::TcpListener::bind(addr).await.expect("bind");
         axum::serve(l, app).await.expect("serve");
         return;

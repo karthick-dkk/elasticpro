@@ -1097,6 +1097,13 @@ impl Core {
                     return bad("unsupported", "this edition keeps no backups on the server: download it instead");
                 }
                 let _one = self.backup.busy.lock().await;
+                // A run of the settings backup, by this person (docs/JOBS.md): recorded, one at a
+                // time with the timer's.
+                let run = match self.jobs.begin(crate::jobs::SETTINGS_BACKUP, crate::jobs::Trigger::manual(&by), vec![], crate::fleet::now_ms()) {
+                    Ok(r) => r,
+                    Err(b) => return b.answer("a settings backup"),
+                };
+                let out: Value = async {
                 let (text, collected, scheme) = match self.backup_text(&sections, Kind::Manual, &by, password, false).await {
                     Ok(x) => x,
                     Err(r) => return r.to_json(),
@@ -1126,6 +1133,14 @@ impl Core {
                         "leftOut": if scheme == "none" { collected.secrets.len() } else { 0 },
                         "kept": kept, "notes": collected.notes,
                         "sections": sections.iter().map(|s| s.id()).collect::<Vec<_>>() })
+                }.await;
+                run.end(if out["ok"] == json!(true) {
+                    let kept = if out["kept"] == json!(true) { ", kept on the server" } else { ", downloaded only" };
+                    crate::jobs::Outcome::completed(None).with_note(Some(format!("{}, {} bytes{kept}", out["name"].as_str().unwrap_or(""), out["bytes"])))
+                } else {
+                    crate::jobs::Outcome::failed(out["message"].as_str().unwrap_or("the backup failed"), None)
+                });
+                out
             }
             "BACKUP_DOWNLOAD" => {
                 let Some(name) = msg.get("name").and_then(Value::as_str) else { return bad("bad_request", "name: a kept backup") };
@@ -1255,6 +1270,32 @@ impl Core {
         }
     }
 
+    /// `JOB_RUN settings.backup`: what the timer does — the schedule's sections, kept on the
+    /// server under its keep — now, recorded with `trigger`.
+    pub(crate) async fn backup_run_now(self: &Arc<Self>, trigger: crate::jobs::Trigger, by: &str) -> Value {
+        if !self.backup.keeps() {
+            return bad("unsupported", "backups are kept only on a hosted server with a data directory");
+        }
+        let s = self.backup.schedule.read().clone();
+        let _one = self.backup.busy.lock().await;
+        let run = match self.jobs.begin(crate::jobs::SETTINGS_BACKUP, trigger, vec![], crate::fleet::now_ms()) {
+            Ok(r) => r,
+            Err(b) => return b.answer("a settings backup"),
+        };
+        let result = self.backup_keep(&s.sections, Kind::Manual, by, s.keep, crate::volume::schedule::local_now()).await;
+        match result {
+            Ok((name, bytes, secrets)) => {
+                run.end(crate::jobs::Outcome::completed(None).with_note(Some(format!("{name}, {bytes} bytes"))));
+                tracing::info!(target: "audit", user = %by, kind = "manual", name = %name, bytes, secrets, "backup created");
+                json!({ "ok": true, "name": name, "bytes": bytes })
+            }
+            Err(r) => {
+                run.end(crate::jobs::Outcome::failed(r.message.clone(), None));
+                r.to_json()
+            }
+        }
+    }
+
     /* --------------------------------------- the timer --------------------------------------- */
 
     /// What the timer does at `local`: a backup when the schedule says so, and the record of it.
@@ -1263,7 +1304,7 @@ impl Core {
             return None;
         }
         let s = self.backup.schedule.read().clone();
-        if !s.due(local) {
+        if !s.due(local) || self.jobs.held(crate::jobs::SETTINGS_BACKUP).is_some() {
             return None;
         }
         let _one = self.backup.busy.lock().await;

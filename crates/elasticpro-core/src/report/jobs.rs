@@ -252,9 +252,24 @@ pub struct Job {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub options: Option<serde_json::Value>,
     /// Who asked a running job to stop. The worker sees it between days and ends the job
-    /// `stopped`. Not persisted: a restart fails the job anyway.
-    #[serde(skip)]
+    /// `stopped`. Kept in `jobs.json`, so a restart ends the job `stopped`, not `failed`
+    /// (docs/JOBS.md "Cancel").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stop_asked: Option<String>,
+    /// The job this one tries again (`JOB_RETRY`, or the mailed schedule giving a period back),
+    /// and which try it is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_of: Option<String>,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub attempt: u32,
+    /// The created schedule (`JOB_CREATE`) that queued it; `None` for the built-in schedule
+    /// of its kind, and for a person's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schedule_id: Option<String>,
+}
+
+fn is_zero(n: &u32) -> bool {
+    *n == 0
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -288,7 +303,8 @@ impl Job {
             cluster_ids, period, format, mail, by: by.to_string(), created_at: now, started_at: None, ended_at: None,
             status: Status::Queued, progress: Progress { done: 0, total: 1, ..Progress::default() }, file: None, error: None, mail_error: None,
             stopped_by: None, warning: None, seq: 0, volume: None, sheets: vec![], mail_started_at: None, report: ReportKind::Volume,
-            collect_again: false, failed_clusters: vec![], options: None, stop_asked: None,
+            collect_again: false, failed_clusters: vec![], options: None, stop_asked: None, retry_of: None, attempt: 0,
+            schedule_id: None,
         }
     }
 }
@@ -483,15 +499,37 @@ impl Queue {
     }
 
     /// After a restart: what was running cannot be, any more. Returns the jobs so failed.
+    /// A job a person had asked to stop ends `stopped` (the ask was kept): it is not one to
+    /// fail, nor to give a mailed period back for.
     pub fn restarted(&mut self, now: i64) -> Vec<Job> {
         let mut out = vec![];
         for j in self.jobs.iter_mut().filter(|j| j.status == Status::Running) {
+            j.ended_at = Some(now);
+            if let Some(by) = j.stop_asked.take() {
+                j.status = Status::Stopped;
+                j.stopped_by = Some(by);
+                continue;
+            }
             j.status = Status::Failed;
             j.error = Some(RESTARTED.into());
-            j.ended_at = Some(now);
             out.push(j.clone());
         }
         out
+    }
+
+    /// A job that does the same as `j` and has not ended (`JOB_CREATE`, `REPORT_RUN`): the
+    /// same report and kind, clusters, dates, file format, mail and collection choice. Asking
+    /// again joins it instead of queueing a second (docs/JOBS.md "Duplicates").
+    pub fn same_open(&self, j: &Job) -> Option<&Job> {
+        let ids = |x: &Job| {
+            let mut v = x.covered().unwrap_or_default();
+            v.sort();
+            v
+        };
+        let want = ids(j);
+        self.jobs.iter().find(|x| !x.status.finished() && x.report == j.report && x.kind == j.kind && ids(x) == want
+            && x.period.from == j.period.from && x.period.to == j.period.to && x.format == j.format && x.mail == j.mail
+            && x.collect_again == j.collect_again && x.options == j.options && x.schedule_id == j.schedule_id)
     }
 
     /// Keep at most `KEEP_FINISHED` finished jobs, dropping the oldest finished.

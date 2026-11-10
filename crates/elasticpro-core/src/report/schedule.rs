@@ -392,7 +392,7 @@ impl ScheduleState {
 
     /// Take in a save the state has not seen: what was in force when it was made, and its
     /// decision about the period whose moment had passed.
-    fn take_in(mut self, set: &ReportSchedule) -> ScheduleState {
+    pub(crate) fn take_in(mut self, set: &ReportSchedule) -> ScheduleState {
         if set.set_at.is_some() && set.set_at != self.applied_set_at {
             if set.seen_schedule.is_some() {
                 self.seen_schedule = set.seen_schedule;
@@ -431,6 +431,21 @@ pub fn merge(settings: &ScheduleFile, state: Option<&StateFile>) -> ScheduleFile
         e.mark_passed = None;
     }
     out
+}
+
+/// One schedule's settings with its state laid over them (a created schedule's: it has no
+/// legacy state to migrate).
+pub fn overlay(set: &ReportSchedule, state: Option<&ScheduleState>) -> ReportSchedule {
+    let st = state.cloned().unwrap_or_default().take_in(set);
+    let mut e = set.clone();
+    e.last_sent = st.last_sent;
+    e.last_period = st.last_period;
+    e.retried_period = st.retried_period;
+    e.retried = st.retried;
+    e.seen_schedule = st.seen_schedule;
+    e.seen_at = st.seen_at;
+    e.mark_passed = None;
+    e
 }
 
 /// The state of merged schedules, as the state file keeps it.

@@ -57,8 +57,8 @@ const POLLS: &[&str] = &[
     "PLAN_TEMPLATES_GET",
     // The Request Centre's ElasticPro health tab reads it every 5 s while open (a read).
     "SYSTEM_HEALTH",
-    // The Jobs page reads the registry and the run log on a timer (a read).
-    "JOBS_LIST",
+    // The Jobs page reads the registry and the run log on a timer (a read), and the settings.
+    "JOBS_LIST", "JOB_SETTINGS_GET",
 ];
 
 /// One thing somebody did, already reduced to what may be written down.

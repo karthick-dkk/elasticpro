@@ -1519,6 +1519,11 @@ impl Core {
     /// `REJECT_TRIES` times, then given up and counted. The local record never waits.
     #[doc(hidden)]
     pub async fn history_tick(self: &Arc<Self>) -> Value {
+        self.history_tick_as(crate::jobs::Trigger::Timer).await
+    }
+
+    /// `history_tick`, started by `trigger` (a person's `JOB_RUN` is not held by a pause).
+    pub(crate) async fn history_tick_as(self: &Arc<Self>, trigger: crate::jobs::Trigger) -> Value {
         if self.history_store.ticking.swap(true, Ordering::SeqCst) {
             return json!({ "ok": false, "skipped": "a tick is already running" });
         }
@@ -1529,7 +1534,7 @@ impl Core {
             }
         }
         let _done = Done(&self.history_store.ticking);
-        let (out, spooled) = self.history_tick_inner().await;
+        let (out, spooled) = self.history_tick_inner(trigger).await;
         // The spool's files go only once the queue that took their records is on disk: a
         // crash between the two loses nothing, the record is queued again next tick (same key).
         if self.history_store.flush_queue().await {
@@ -1540,7 +1545,7 @@ impl Core {
         out
     }
 
-    async fn history_tick_inner(self: &Arc<Self>) -> (Value, Vec<PathBuf>) {
+    async fn history_tick_inner(self: &Arc<Self>, trigger: crate::jobs::Trigger) -> (Value, Vec<PathBuf>) {
         // Records another process left (the report worker's): queued, or not, by the routing
         // in force now — whatever the gates say, so an "Elasticsearch only" record waits here
         // rather than being lost (data_routing.rs). Files: off the runtime. The files whose
@@ -1555,9 +1560,15 @@ impl Core {
         if self.history_store.queue_len() == 0 {
             return (json!({ "ok": true, "written": 0 }), spooled);
         }
+        // Paused (docs/JOBS.md): the queue waits, nothing is sent; not a run.
+        if trigger == crate::jobs::Trigger::Timer {
+            if let Some(h) = self.jobs.held(crate::jobs::HISTORY_MIRROR) {
+                return (json!({ "ok": true, "written": 0, "held": h.text(), "queue": self.history_store.queue_len() }), spooled);
+            }
+        }
         // A tick with something to send is a run (docs/JOBS.md); an idle or gated tick is not.
         // The `ticking` flag already holds one at a time.
-        let logged = self.jobs.begin(crate::jobs::HISTORY_MIRROR, crate::jobs::Trigger::Timer, vec![], crate::fleet::now_ms()).ok();
+        let logged = self.jobs.begin(crate::jobs::HISTORY_MIRROR, trigger, vec![], crate::fleet::now_ms()).ok();
         let bulks = cut_bulks(&self.history_store.queue.lock(), BULKS_PER_TICK);
         let (mut written, mut refused_n, mut rejected_n, mut unrouted_n, mut error) = (0u64, 0u64, 0u64, 0u64, None::<String>);
         // A stream whose template could not be verified this tick: its bulks are passed over,

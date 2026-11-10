@@ -27,6 +27,7 @@
 
 pub mod build;
 pub mod control;
+pub mod created;
 pub mod hosts;
 pub mod indices;
 pub mod jobs;
@@ -211,11 +212,19 @@ impl Reports {
     /// back. `REPORT_SEND_NOW` jobs are recorded but never give a period back: the schedule
     /// did not queue them.
     pub(crate) fn mailed_ended(&self, job: &Job, last: LastSent, retry: Retry) -> bool {
-        let done = self.with_schedule_state(|file| {
-            let f = file.get_mut(job.report);
-            f.last_sent = Some(last);
-            job.by == SCHEDULE_BY && schedule::give_back(f, &schedule::period_key(&job.period), retry)
-        });
+        let key = schedule::period_key(&job.period);
+        let done = match &job.schedule_id {
+            // A created schedule's job: its own state, never the built-in schedule's.
+            Some(sid) => self.with_created_state(sid, |f| {
+                f.last_sent = Some(last);
+                job.by == SCHEDULE_BY && schedule::give_back(f, &key, retry)
+            }),
+            None => self.with_schedule_state(|file| {
+                let f = file.get_mut(job.report);
+                f.last_sent = Some(last);
+                job.by == SCHEDULE_BY && schedule::give_back(f, &key, retry)
+            }),
+        };
         let back = match done {
             Ok(b) => b,
             Err(e) => {
@@ -282,6 +291,51 @@ impl Reports {
             self.write_json(schedule::STATE_FILE, &next)?;
         }
         Ok(out)
+    }
+
+    /// The schedules people created (`JOB_CREATE`), as the core last wrote them.
+    pub(crate) fn created_settings(&self) -> created::CreatedFile {
+        self.data.as_ref().and_then(|d| crate::worker::read_json_retry::<created::CreatedFile>(&d.join(created::FILE)).ok().flatten())
+            .unwrap_or_default().normalised()
+    }
+
+    /// The created schedules' state, as the process that runs the reports last wrote it.
+    pub(crate) fn created_state(&self) -> created::CreatedState {
+        self.data.as_ref().and_then(|d| crate::worker::read_json_retry::<created::CreatedState>(&d.join(created::STATE_FILE)).ok().flatten())
+            .unwrap_or_default()
+    }
+
+    /// Every created schedule with its state over it.
+    pub(crate) fn created_view(&self) -> Vec<(created::Created, schedule::ReportSchedule)> {
+        let st = self.created_state();
+        self.created_settings().schedules.into_iter().map(|c| {
+            let e = created::merged(&c, Some(&st));
+            (c, e)
+        }).collect()
+    }
+
+    /// Change one created schedule's state (its last period, its last send) and write it. Only
+    /// the process that runs the reports does; the state of a schedule no longer there goes.
+    pub(crate) fn with_created_state<R>(&self, id: &str, f: impl FnOnce(&mut schedule::ReportSchedule) -> R) -> Result<R, String> {
+        if !self.writer {
+            return Err("the schedules' state is the report worker's".into());
+        }
+        let _g = self.settings_lock.lock();
+        let settings = self.created_settings();
+        let c = settings.get(id).ok_or_else(|| format!("no created schedule {id}"))?;
+        let mut st = self.created_state();
+        let mut e = created::merged(c, Some(&st));
+        let out = f(&mut e);
+        st.states.insert(c.id.clone(), schedule::ScheduleState::of(&e));
+        st.states.retain(|k, _| settings.schedules.iter().any(|x| &x.id == k));
+        self.write_json(created::STATE_FILE, &st)?;
+        Ok(out)
+    }
+
+    /// Write the created schedules (the core's: `JOB_CREATE`, `JOB_DELETE`).
+    pub(crate) fn write_created(&self, file: &created::CreatedFile) -> Result<(), String> {
+        let _g = self.settings_lock.lock();
+        self.write_json(created::FILE, file)
     }
 
     /// Write the settings (`REPORT_SCHEDULE_SET`), without the state fields once the state file

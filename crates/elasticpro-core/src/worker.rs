@@ -108,7 +108,7 @@ pub struct Starts {
     pub health: bool,
     /// The UI and the message API, behind nginx.
     pub public_http: bool,
-    /// Port 8766: `/run`, `/send-now`, `/stop`, `/queue`, `/health`.
+    /// Port 8766: `/run`, `/send-now`, `/stop`, `/queue`, `/job`, `/health`.
     pub worker_http: bool,
     /// `worker/status.json` every 10 s, `worker/requests.jsonl`, the settings reload.
     pub worker_loops: bool,
@@ -270,6 +270,8 @@ pub fn endpoint(t: &str) -> Option<&'static str> {
         "REPORT_SEND_NOW" => Some("/send-now"),
         "REPORT_STOP" => Some("/stop"),
         "REPORT_CLEAR" | "REPORT_CONCURRENCY_SET" => Some("/queue"),
+        // The job controls of the worker's jobs (docs/JOBS.md): run now, cancel, retry.
+        "JOB_RUN" | "JOB_CANCEL" | "JOB_RETRY" => Some("/job"),
         _ => None,
     }
 }
@@ -562,6 +564,8 @@ mod tests {
         assert_eq!(endpoint("REPORT_STOP"), Some("/stop"));
         assert_eq!(endpoint("REPORT_CLEAR"), Some("/queue"));
         assert_eq!(endpoint("REPORT_JOBS"), None, "reads never go to the worker");
+        assert_eq!(endpoint("JOB_CANCEL"), Some("/job"));
+        assert_eq!(endpoint("JOB_SETTINGS_SET"), None, "settings are the core's file");
         assert!(accepts("/run", "VOLUME_RUN") && !accepts("/run", "REPORT_STOP"));
         let c = crate::auth::Caller { name: "ann".into(), role: crate::auth::Role::Operator, must_change: false, scope: Some(vec!["g".into()]), play: None };
         let back = WireCaller::of(&c).caller().unwrap();

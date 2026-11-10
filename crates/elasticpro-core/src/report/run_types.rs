@@ -259,6 +259,8 @@ impl Core {
             return (None, last);
         }
         let (why, rejected) = control::pool_pressure(res.get("json").unwrap_or(&Value::Null), last);
+        // The one per-cluster load view (docs/JOBS.md "Busy clusters") takes every reading.
+        self.load.note_pool(id, why.clone(), crate::fleet::now_ms());
         (why, Some(rejected))
     }
 
@@ -729,7 +731,9 @@ impl Core {
     /// Returns the clusters started. Public for the tests.
     #[doc(hidden)]
     pub async fn hosts_tick_at(self: &Arc<Self>, local: NaiveDateTime) -> Vec<String> {
-        if self.volume.store.is_none() || self.reports.data_dir().is_none() || self.volume_stopped() {
+        if self.volume.store.is_none() || self.reports.data_dir().is_none() || self.volume_stopped()
+            || self.jobs.held(crate::jobs::HOSTS_COLLECT).is_some()
+        {
             return vec![];
         }
         let at = self.hosts_at();
@@ -752,6 +756,13 @@ impl Core {
             if self.reports.hosts_running.lock().contains(&id) || self.volume_unreachable(&id) || self.report_cluster_red(&id) {
                 continue;
             }
+            // Busy (docs/JOBS.md "Busy clusters"): no try is spent; one deferred run says why,
+            // and the first tick after it eases collects it. The other clusters carry on.
+            if let Some(b) = self.cluster_busy(&id) {
+                self.jobs.defer(crate::jobs::HOSTS_COLLECT, crate::jobs::Trigger::Timer, &b, crate::fleet::now_ms());
+                continue;
+            }
+            self.jobs.eased(crate::jobs::HOSTS_COLLECT, &id);
             {
                 let attempts = self.reports.hosts_attempts.lock();
                 if let Some((day, n, last)) = attempts.get(&id) {
@@ -780,33 +791,95 @@ impl Core {
                 }
             }
             let s = self.volume_resolve(raw.as_ref(), Some(&id), None).settings;
-            let core = self.clone();
-            let stop_core = self.clone();
-            let stop: Stop = Arc::new(move || stop_core.volume_stopped().then(|| "the emergency stop came on".to_string()));
-            let cid = id.clone();
-            // One run of the hosts collection for the clusters this and later ticks start while
-            // some still collect (docs/JOBS.md).
-            let part = self.jobs.join(crate::jobs::HOSTS_COLLECT, crate::jobs::Trigger::Timer, &id, crate::fleet::now_ms());
-            tokio::spawn(async move {
-                let out = core.hosts_collect(cid, s, missing, HostsOpts { again: false, from_tick: true, stop, job: None }).await;
-                use crate::jobs::Outcome;
-                let days = Some(out.days_collected);
-                part.end(if let Some(e) = out.error {
-                    Outcome::failed(e, days)
-                } else if let Some(why) = out.interrupted {
-                    Outcome::deferred(why, days)
-                } else if let Some((day, why)) = out.failed_days.first() {
-                    Outcome::failed(format!("{} day(s) failed, first {day}: {why}", out.failed_days.len()), days)
-                } else {
-                    Outcome::completed(days)
-                });
-            });
+            self.hosts_start(id.clone(), s, missing, true, crate::jobs::Trigger::Timer, crate::jobs::RunMeta::default());
             started.push(id);
         }
         if !started.is_empty() {
             tracing::info!(clusters = started.len(), "volume by host: the daily collection started");
         }
         started
+    }
+
+    /// Collect one cluster's missing days in the background, as a part of the hosts
+    /// collection's run (docs/JOBS.md): one run for the clusters started while some still
+    /// collect. Stops at its safe points for the emergency stop and for `JOB_CANCEL`.
+    fn hosts_start(self: &Arc<Self>, id: String, s: VolumeSettings, missing: Vec<NaiveDate>, from_tick: bool,
+                   trigger: crate::jobs::Trigger, meta: crate::jobs::RunMeta) -> String {
+        let core = self.clone();
+        let stop_core = self.clone();
+        let stop: Stop = Arc::new(move || stop_core.volume_stopped().then(|| "the emergency stop came on".to_string())
+            .or_else(|| stop_core.jobs.cancel_asked(crate::jobs::HOSTS_COLLECT).map(|by| format!("cancelled by {by}"))));
+        let part = self.jobs.join_with(crate::jobs::HOSTS_COLLECT, trigger, &id, crate::fleet::now_ms(), meta);
+        let run_id = part.id().to_string();
+        tokio::spawn(async move {
+            let cid = id.clone();
+            let out = core.hosts_collect(cid, s, missing, HostsOpts { again: false, from_tick, stop, job: None }).await;
+            use crate::jobs::Outcome;
+            let days = Some(out.days_collected);
+            let busy = out.error.is_some().then(|| core.cluster_busy(&id)).flatten();
+            let outcome = if let (Some(by), Some(_)) = (part.cancel_asked(), &out.interrupted) {
+                Outcome::cancelled(&by, days)
+            } else if let Some(b) = busy {
+                core.jobs.mark_waiting(crate::jobs::HOSTS_COLLECT, &id, part.id());
+                Outcome::deferred(format!("{id} is busy: {}; tried again when it eases", b.reason), days)
+            } else if let Some(e) = out.error {
+                Outcome::failed(e, days)
+            } else if let Some(why) = out.interrupted {
+                Outcome::deferred(why, days)
+            } else if let Some((day, why)) = out.failed_days.first() {
+                Outcome::failed(format!("{} day(s) failed, first {day}: {why}", out.failed_days.len()), days)
+            } else {
+                Outcome::completed(days)
+            };
+            part.end(outcome);
+        });
+        run_id
+    }
+
+    /// `JOB_RUN hosts.collect {clusterIds?}`: the month's missing days of each cluster asked
+    /// for (every cluster the caller sees when none is named), now, without spending the
+    /// timer's three tries. One already collecting is left be (`already`).
+    pub(crate) async fn hosts_run_now(self: &Arc<Self>, msg: &Value, caller: Option<&Caller>, trigger: crate::jobs::Trigger,
+                                      meta: crate::jobs::RunMeta) -> Value {
+        if self.volume.store.is_none() || self.reports.data_dir().is_none() {
+            return bad("not_configured", "no data directory: nothing can be collected");
+        }
+        if self.volume_stopped() {
+            return bad("bad_request", "the emergency stop is on: nothing is collected until it is over");
+        }
+        let raw = match self.volume_config().await {
+            Ok(raw) => raw,
+            Err(e) => return bad("io_error", format!("the config file could not be read: {e}")),
+        };
+        let visible = self.fleet_visible(caller);
+        let ids: Vec<String> = match msg.get("clusterIds").and_then(Value::as_array) {
+            Some(a) => a.iter().filter_map(Value::as_str).map(String::from).collect(),
+            None => visible.clone(),
+        };
+        let today = vsched::utc_day(now_ms());
+        let days = period::month_so_far(today).days();
+        let now = now_ms();
+        let (mut started, mut already, mut skipped, mut run_id) = (vec![], vec![], vec![], None);
+        for id in ids {
+            if !visible.contains(&id) {
+                skipped.push(json!({ "clusterId": id, "reason": "unknown" }));
+            } else if self.reports.hosts_running.lock().contains(&id) {
+                already.push(id);
+            } else if self.volume_unreachable(&id) {
+                skipped.push(json!({ "clusterId": id, "reason": "unreachable" }));
+            } else {
+                let missing = self.hosts_missing(&id, &days, now);
+                if missing.is_empty() {
+                    skipped.push(json!({ "clusterId": id, "reason": "nothing missing this month" }));
+                    continue;
+                }
+                let s = self.volume_resolve(raw.as_ref(), Some(&id), None).settings;
+                run_id.get_or_insert(self.hosts_start(id.clone(), s, missing, false, trigger.clone(), meta.clone()));
+                started.push(id);
+            }
+        }
+        let run_id = run_id.or_else(|| self.jobs.running(crate::jobs::HOSTS_COLLECT));
+        json!({ "ok": true, "started": started, "already": already, "skipped": skipped, "runId": run_id })
     }
 
     /* ------------------------------------------- jobs ------------------------------------------- */
@@ -868,16 +941,26 @@ impl Core {
             };
             job.options = serde_json::to_value(&opts).ok();
         }
+        // The same report already queued or running joins it (docs/JOBS.md "Duplicates").
         let queued = self.reports.with(|q| {
+            if let Some(same) = q.same_open(&job) {
+                return Ok::<(String, bool), (&'static str, String)>((same.id.clone(), true));
+            }
             let mailed = if mail { 1 } else { 0 };
             q.room(&by, 1, mailed, now_ms())?;
             q.note_mailed(&by, mailed, now_ms());
-            Ok::<String, (&'static str, String)>(q.push(job, crate::auth::random_hex(8)))
+            Ok((q.push(job, crate::auth::random_hex(8)), false))
         });
-        let id = match queued {
-            Ok(id) => id,
+        let (id, joined) = match queued {
+            Ok(x) => x,
             Err((k, m)) => return bad(k, m),
         };
+        if joined {
+            tracing::info!(user = %by, report = kind.as_str(), job = %id, "volume report: joined the same report already queued");
+            let q = self.reports.queue.lock();
+            return json!({ "ok": true, "joined": true, "runId": format!("report-{id}"),
+                           "jobs": q.get(&id).map(job_view).into_iter().collect::<Vec<_>>(), "refused": refused });
+        }
         self.report_pump();
         tracing::info!(user = %by, report = kind.as_str(), period = %period.label, "volume report: queued");
         let q = self.reports.queue.lock();

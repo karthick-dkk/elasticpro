@@ -17,6 +17,9 @@
 //!
 //! Nothing here sends a cluster anything.
 
+pub mod controls;
+pub mod load;
+
 use crate::delay_sink::SinkView;
 use crate::report::jobs::{Job, Kind as ReportJobKind, ReportKind, Status as ReportStatus};
 use crate::worker::Role;
@@ -88,12 +91,23 @@ pub enum JobKind {
     Manual,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Priority {
     High,
     Medium,
     Low,
+}
+
+impl Priority {
+    pub fn parse(s: &str) -> Option<Priority> {
+        match s {
+            "high" => Some(Priority::High),
+            "medium" => Some(Priority::Medium),
+            "low" => Some(Priority::Low),
+            _ => None,
+        }
+    }
 }
 
 /// How a job's next run is worked out — each is one existing rule, never a second copy of it
@@ -261,6 +275,27 @@ pub fn descriptor(id: &str) -> Option<&'static Descriptor> {
     REGISTRY.iter().find(|d| d.id == id)
 }
 
+/// A report schedule a person created (`JOB_CREATE`): its job id is `report.schedule.<id>`.
+pub const CREATED_PREFIX: &str = "report.schedule.";
+
+/// Whether `id` has the shape of a created schedule's job id (whether one exists is the
+/// schedules file's to say).
+pub fn is_created_id(id: &str) -> bool {
+    id.strip_prefix(CREATED_PREFIX).is_some_and(|rest| !rest.is_empty() && rest.len() <= 32 && rest.chars().all(|c| c.is_ascii_hexdigit()))
+}
+
+/// The defaults a created schedule's job has: a mailed schedule's.
+pub const fn created_descriptor_defaults() -> Descriptor {
+    mailed("report.schedule", "Created report schedule", ReportKind::Volume)
+}
+
+/// Whether `JOB_RUN` can start the job now. Not the report runs (a run names its clusters
+/// and dates: `JOB_CREATE {once: true, …}` or `REPORT_RUN`), nor the Zabbix push (every
+/// minute already; there is nothing more to send at a moment a person picks).
+pub fn on_demand(id: &str) -> bool {
+    id != REPORT_RUN && id != ZABBIX_PUSH && (descriptor(id).is_some() || is_created_id(id))
+}
+
 /* ------------------------------------------ a run ------------------------------------------ */
 
 /// Who started a run: `timer` (the product, on its own — its timer, or the follow-up to a
@@ -365,6 +400,29 @@ pub struct RunRecord {
     /// Anything else the job says about the run (a backup's file, a report's warning).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
+    /// `JOB_CANCEL` asked it to stop, by whom: it stops at its next safe point. Kept in the
+    /// run file, so a restart ends it `cancelled`, not `failed`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cancel_asked: Option<String>,
+    /// The run this one tries again (`trigger: retry`), and which try it is (1 = the first retry).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_of: Option<String>,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub attempt: u32,
+    /// A run held back for a busy cluster (`deferred`): which, why, since when.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deferred: Option<load::Busy>,
+}
+
+fn is_zero(n: &u32) -> bool {
+    *n == 0
+}
+
+/// What a run tries again, for `begin_with`.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RunMeta {
+    pub retry_of: Option<String>,
+    pub attempt: u32,
 }
 
 /// Progress in percent, from `done` of `total` when the total is known and above zero. `None`
@@ -397,6 +455,10 @@ impl Outcome {
     }
     pub fn deferred(why: impl Into<String>, records: Option<u64>) -> Outcome {
         Outcome { status: RunStatus::Deferred, records, error: Some(why.into()), note: None }
+    }
+    /// Stopped at a safe point because `JOB_CANCEL` asked.
+    pub fn cancelled(by: &str, records: Option<u64>) -> Outcome {
+        Outcome { status: RunStatus::Cancelled, records, error: None, note: Some(format!("cancelled by {by}")) }
     }
     pub fn with_note(mut self, note: Option<String>) -> Outcome {
         self.note = note;
@@ -452,12 +514,21 @@ impl RunFile {
     }
 
     /// Runs left open by a process that ended end `failed`, now. Returns how many.
+    /// A run a person had asked to cancel ends `cancelled`: the ask outlives the process.
     pub fn restarted(&mut self, now: u64) -> usize {
         let mut n = 0;
         for r in self.runs.iter_mut().filter(|r| !r.status.finished()) {
-            r.status = RunStatus::Failed;
             r.ended_at = Some(now);
-            r.error.get_or_insert_with(|| RESTARTED.to_string());
+            match &r.cancel_asked {
+                Some(by) => {
+                    r.status = RunStatus::Cancelled;
+                    r.note = Some(format!("cancelled by {by}; the server restarted before it reached a safe point"));
+                }
+                None => {
+                    r.status = RunStatus::Failed;
+                    r.error.get_or_insert_with(|| RESTARTED.to_string());
+                }
+            }
             n += 1;
         }
         n
@@ -478,6 +549,11 @@ struct Open {
     records: Option<u64>,
     first_error: Option<String>,
     note: Option<String>,
+    /// Begun by `reserve` for a person's `JOB_RUN`: the job's own code adopts it with its
+    /// first non-timer `begin`, instead of being refused.
+    reserved: bool,
+    /// `JOB_CANCEL`: who asked.
+    cancel: Option<String>,
 }
 
 /// A second run of a job asked for while one is open: the open run's id.
@@ -497,7 +573,18 @@ impl Busy {
 struct Inner {
     /// The runs of each owner this process runs. Another owner's are read from its file.
     logs: HashMap<Owner, RunFile>,
-    open: HashMap<&'static str, Open>,
+    open: HashMap<String, Open>,
+    /// A job's cluster held back as busy: the run that says so, one per wait (not one a tick).
+    waiting: HashMap<(String, String), String>,
+    /// When a job's timer next starts it, where the timer keeps no other record (Zabbix sync).
+    next_at: HashMap<String, u64>,
+}
+
+/// `controls.json` as last read, with the file time it was read at.
+#[derive(Default)]
+struct ControlsCache {
+    seen: Option<Option<std::time::SystemTime>>,
+    controls: controls::Controls,
 }
 
 /// The run log and the single-flight guard of one process. Owned by `Core`, as an `Arc` so a
@@ -507,6 +594,7 @@ pub struct Jobs {
     role: Role,
     inner: parking_lot::Mutex<Inner>,
     writers: HashMap<Owner, Arc<crate::report::Writer>>,
+    controls: parking_lot::Mutex<ControlsCache>,
 }
 
 impl Jobs {
@@ -526,7 +614,10 @@ impl Jobs {
             logs.insert(owner, f);
             writers.insert(owner, Arc::new(crate::report::Writer::default()));
         }
-        let jobs = Arc::new(Jobs { dir, role, inner: parking_lot::Mutex::new(Inner { logs, open: HashMap::new() }), writers });
+        let jobs = Arc::new(Jobs {
+            dir, role, writers, controls: parking_lot::Mutex::new(ControlsCache::default()),
+            inner: parking_lot::Mutex::new(Inner { logs, open: HashMap::new(), waiting: HashMap::new(), next_at: HashMap::new() }),
+        });
         {
             let inner = jobs.inner.lock();
             for owner in inner.logs.keys() {
@@ -565,20 +656,182 @@ impl Jobs {
 
     /// Begin a run of `job` — or, when one is open, refuse with its id (single flight). The
     /// run is recorded when this process runs the job's owner; elsewhere (the worker's own
-    /// Zabbix sync, which only reads) only the guard holds.
-    pub fn begin(self: &Arc<Self>, job: &'static str, trigger: Trigger, clusters: Vec<String>, now: u64) -> Result<Run, Busy> {
+    /// Zabbix sync, which only reads) only the guard holds. A run `reserve` began for a
+    /// person is adopted by the first `begin` that is not the timer's.
+    pub fn begin(self: &Arc<Self>, job: &str, trigger: Trigger, clusters: Vec<String>, now: u64) -> Result<Run, Busy> {
+        let mut inner = self.inner.lock();
+        if let Some(o) = inner.open.get_mut(job) {
+            if o.reserved && trigger != Trigger::Timer {
+                o.reserved = false;
+                let id = o.run_id.clone();
+                drop(inner);
+                let run = Run { jobs: self.clone(), job: job.to_string(), id, ended: false };
+                run.clusters(&clusters);
+                return Ok(run);
+            }
+            return Err(Busy { run_id: o.run_id.clone() });
+        }
+        let id = self.start(&mut inner, job, trigger, clusters, now, false, RunMeta::default());
+        Ok(Run { jobs: self.clone(), job: job.to_string(), id, ended: false })
+    }
+
+    /// Begin a run for a person (`JOB_RUN`, `JOB_RETRY`) before the job's own code starts,
+    /// so the answer can name it: that code's first non-timer `begin` adopts it. A run never
+    /// adopted is ended by `release` (nothing to do).
+    pub fn reserve(self: &Arc<Self>, job: &str, trigger: Trigger, clusters: Vec<String>, meta: RunMeta, now: u64) -> Result<String, Busy> {
         let mut inner = self.inner.lock();
         if let Some(o) = inner.open.get(job) {
             return Err(Busy { run_id: o.run_id.clone() });
         }
-        let id = self.start(&mut inner, job, trigger, clusters, now, false);
-        Ok(Run { jobs: self.clone(), job, id, ended: false })
+        let id = self.start(&mut inner, job, trigger, clusters, now, false, meta);
+        if let Some(o) = inner.open.get_mut(job) {
+            o.reserved = true;
+        }
+        Ok(id)
+    }
+
+    /// The job's code returned without adopting the run `reserve` began: it found nothing to
+    /// do (or refused before starting). The run ends `skipped`, saying `why`.
+    pub fn release(&self, job: &str, id: &str, why: &str) {
+        let reserved = self.inner.lock().open.get(job).is_some_and(|o| o.run_id == id && o.reserved);
+        if reserved {
+            self.end_part(job, id, Outcome::skipped(why), crate::fleet::now_ms());
+        }
+    }
+
+    /// `JOB_CANCEL` of a run open in this process: asked, kept in the run file. `false` when
+    /// no open run here has that id.
+    pub fn cancel(&self, run_id: &str, by: &str) -> bool {
+        let mut guard = self.inner.lock();
+        let inner = &mut *guard;
+        let Some((job, owner)) = inner.open.iter_mut().find(|(_, o)| o.run_id == run_id).map(|(j, o)| {
+            o.cancel = Some(by.to_string());
+            (j.clone(), o.owner)
+        }) else {
+            return false;
+        };
+        if let Some(owner) = owner {
+            if let Some(r) = inner.logs.get_mut(&owner).and_then(|f| f.get_mut(run_id)) {
+                r.cancel_asked = Some(by.to_string());
+            }
+            self.save(inner, owner);
+        }
+        tracing::info!(target: "audit", job = %job, run = %run_id, user = %by, "job: cancel asked");
+        true
+    }
+
+    /// Who asked the open run of `job` to stop, if anybody: the job's safe points look here.
+    pub fn cancel_asked(&self, job: &str) -> Option<String> {
+        self.inner.lock().open.get(job).and_then(|o| o.cancel.clone())
+    }
+
+    /// A cluster of `job` held back because it is busy: one `deferred` run says so (cluster,
+    /// reason, since) for the whole wait, however many ticks it lasts. `eased` ends the wait.
+    pub fn defer(&self, job: &str, trigger: Trigger, b: &load::Busy, now: u64) -> Option<String> {
+        let mut guard = self.inner.lock();
+        let inner = &mut *guard;
+        let key = (job.to_string(), b.cluster.clone());
+        if let Some(id) = inner.waiting.get(&key) {
+            return Some(id.clone());
+        }
+        let owner = descriptor(job).map(|d| d.owner).filter(|o| inner.logs.contains_key(o))?;
+        let id = crate::auth::random_hex(8);
+        let rec = RunRecord {
+            id: id.clone(), job_id: job.to_string(), trigger, status: RunStatus::Deferred, created_at: now, started_at: None,
+            ended_at: Some(now), done: None, total: None, records: None,
+            error: Some(format!("{} is busy: {}; tried again when it eases", b.cluster, b.reason)),
+            clusters: vec![b.cluster.clone()], note: None, cancel_asked: None, retry_of: None, attempt: 0, deferred: Some(b.clone()),
+        };
+        if let Some(f) = inner.logs.get_mut(&owner) {
+            f.push(rec);
+        }
+        self.save(inner, owner);
+        inner.waiting.insert(key, id.clone());
+        tracing::info!(job, cluster = %b.cluster, reason = %b.reason, "job: deferred, the cluster is busy");
+        Some(id)
+    }
+
+    /// A run (part) of `job` ended `deferred` for its busy cluster: that is the wait's record,
+    /// so the ticks that find it still busy add none.
+    pub fn mark_waiting(&self, job: &str, cluster: &str, run_id: &str) {
+        self.inner.lock().waiting.insert((job.to_string(), cluster.to_string()), run_id.to_string());
+    }
+
+    /// The cluster is no longer busy for `job`: the next deferral is a new wait.
+    pub fn eased(&self, job: &str, cluster: &str) {
+        self.inner.lock().waiting.remove(&(job.to_string(), cluster.to_string()));
+    }
+
+    /// When the timer next starts `job`, for a timer that keeps it nowhere else.
+    pub fn set_next_at(&self, job: &str, at: u64) {
+        self.inner.lock().next_at.insert(job.to_string(), at);
+    }
+
+    pub fn next_at(&self, job: &str) -> Option<u64> {
+        self.inner.lock().next_at.get(job).copied()
+    }
+
+    /* ------------------------------ the settings (controls.json) ------------------------------ */
+
+    fn controls_path(&self) -> Option<PathBuf> {
+        self.dir.as_ref().map(|d| d.join(controls::FILE))
+    }
+
+    /// The settings as last written (read again when the file changed: the worker reads what
+    /// the core wrote). A file that cannot be read is the defaults, said in the log.
+    pub fn controls(&self) -> controls::Controls {
+        let mut c = self.controls.lock();
+        if let Some(p) = self.controls_path() {
+            let now = crate::worker::mtime(&p);
+            if c.seen.as_ref() != Some(&now) {
+                match controls::Controls::load(&p) {
+                    Ok(v) => c.controls = v,
+                    Err(e) => tracing::warn!(error = %e, "jobs: the settings could not be read; the last ones read stand"),
+                }
+                c.seen = Some(now);
+            }
+        }
+        c.controls.clone()
+    }
+
+    /// Why the timer must not start `job` now (paused, or automatic runs off), if so. Every
+    /// timer asks before every run.
+    pub fn held(&self, job: &str) -> Option<controls::Held> {
+        self.controls().held(job)
+    }
+
+    /// Change the settings and write them. Only the process that serves people writes them.
+    pub fn update_controls<R>(&self, by: &str, f: impl FnOnce(&mut controls::Controls) -> Result<R, String>) -> Result<(R, controls::Controls), String> {
+        if !self.role.serves_people() {
+            return Err("the jobs' settings are the core's to change".into());
+        }
+        let mut c = self.controls.lock();
+        let path = self.controls_path();
+        let mut next = match &path {
+            Some(p) => controls::Controls::load(p)?,
+            None => c.controls.clone(),
+        };
+        let out = f(&mut next)?;
+        next.version = 1;
+        next.set_by = Some(by.to_string());
+        next.set_at = Some(crate::fleet::now_ms());
+        if let Some(p) = &path {
+            next.save(p)?;
+            c.seen = Some(crate::worker::mtime(p));
+        }
+        c.controls = next.clone();
+        Ok((out, next))
     }
 
     /// Join the open run of `job` with one more part (a cluster), or begin one with it. For the
     /// collections, which start clusters one at a time and may start more while some still
     /// run: one run, its progress the clusters ended of those begun.
-    pub fn join(self: &Arc<Self>, job: &'static str, trigger: Trigger, cluster: &str, now: u64) -> Run {
+    pub fn join(self: &Arc<Self>, job: &str, trigger: Trigger, cluster: &str, now: u64) -> Run {
+        self.join_with(job, trigger, cluster, now, RunMeta::default())
+    }
+
+    /// `join`, saying what a run it begins tries again (`JOB_RETRY` of a collection).
+    pub fn join_with(self: &Arc<Self>, job: &str, trigger: Trigger, cluster: &str, now: u64, meta: RunMeta) -> Run {
         let mut inner = self.inner.lock();
         let id = match inner.open.get_mut(job) {
             Some(o) => {
@@ -597,25 +850,28 @@ impl Jobs {
                 }
                 id
             }
-            None => self.start(&mut inner, job, trigger, vec![cluster.to_string()], now, true),
+            None => self.start(&mut inner, job, trigger, vec![cluster.to_string()], now, true, meta),
         };
-        Run { jobs: self.clone(), job, id, ended: false }
+        Run { jobs: self.clone(), job: job.to_string(), id, ended: false }
     }
 
-    fn start(&self, inner: &mut Inner, job: &'static str, trigger: Trigger, clusters: Vec<String>, now: u64, counted: bool) -> String {
+    #[allow(clippy::too_many_arguments)]
+    fn start(&self, inner: &mut Inner, job: &str, trigger: Trigger, clusters: Vec<String>, now: u64, counted: bool, meta: RunMeta) -> String {
         let id = crate::auth::random_hex(8);
-        let owner = descriptor(job).map(|d| d.owner).filter(|o| inner.logs.contains_key(o));
+        let owner = descriptor(job).map(|d| d.owner).or_else(|| is_created_id(job).then_some(Owner::Worker))
+            .filter(|o| inner.logs.contains_key(o));
         if let Some(owner) = owner {
             let rec = RunRecord {
                 id: id.clone(), job_id: job.to_string(), trigger, status: RunStatus::Running, created_at: now, started_at: Some(now),
                 ended_at: None, done: counted.then_some(0), total: counted.then_some(1), records: None, error: None, clusters, note: None,
+                cancel_asked: None, retry_of: meta.retry_of, attempt: meta.attempt, deferred: None,
             };
             if let Some(f) = inner.logs.get_mut(&owner) {
                 f.push(rec);
             }
             self.save(inner, owner);
         }
-        inner.open.insert(job, Open { run_id: id.clone(), owner, parts: 1, counted, ..Open::default() });
+        inner.open.insert(job.to_string(), Open { run_id: id.clone(), owner, parts: 1, counted, ..Open::default() });
         id
     }
 
@@ -690,6 +946,14 @@ impl Jobs {
                 } else {
                     o.note.clone()
                 };
+                // Asked to stop, and ended otherwise: it had no safe point left. Said, not hidden.
+                if let (Some(by), true) = (&o.cancel, r.status != RunStatus::Cancelled) {
+                    let said = format!("cancel asked by {by}; it ended before its next safe point");
+                    r.note = Some(match r.note.take() {
+                        Some(n) => format!("{n}; {said}"),
+                        None => said,
+                    });
+                }
                 if r.status == RunStatus::Completed {
                     r.error = None;
                 }
@@ -735,7 +999,7 @@ impl Jobs {
 /// A run in progress (or one part of it). End it with `end`; dropped without, it ends `failed`.
 pub struct Run {
     jobs: Arc<Jobs>,
-    job: &'static str,
+    job: String,
     id: String,
     ended: bool,
 }
@@ -745,9 +1009,14 @@ impl Run {
         &self.id
     }
 
+    /// Who asked this run to stop (`JOB_CANCEL`), if anybody: checked at the job's safe points.
+    pub fn cancel_asked(&self) -> Option<String> {
+        self.jobs.inner.lock().open.get(&self.job).filter(|o| o.run_id == self.id).and_then(|o| o.cancel.clone())
+    }
+
     /// Where a plain run is: `done` of `total`.
     pub fn progress(&self, done: u64, total: u64) {
-        self.jobs.update(self.job, &self.id, |r| {
+        self.jobs.update(&self.job, &self.id, |r| {
             r.done = Some(done);
             r.total = Some(total);
         });
@@ -755,7 +1024,7 @@ impl Run {
 
     /// The clusters the run touches, once it knows them.
     pub fn clusters(&self, ids: &[String]) {
-        self.jobs.update(self.job, &self.id, |r| {
+        self.jobs.update(&self.job, &self.id, |r| {
             for id in ids {
                 if !r.clusters.contains(id) {
                     r.clusters.push(id.clone());
@@ -766,16 +1035,33 @@ impl Run {
 
     pub fn end(mut self, out: Outcome) {
         self.ended = true;
-        self.jobs.end_part(self.job, &self.id, out, crate::fleet::now_ms());
+        self.jobs.end_part(&self.job, &self.id, out, crate::fleet::now_ms());
     }
 }
 
 impl Drop for Run {
     fn drop(&mut self) {
         if !self.ended {
-            self.jobs.end_part(self.job, &self.id, Outcome::failed(NO_RESULT, None), crate::fleet::now_ms());
+            self.jobs.end_part(&self.job, &self.id, Outcome::failed(NO_RESULT, None), crate::fleet::now_ms());
         }
     }
+}
+
+/* ------------------------------------------ retry ------------------------------------------ */
+
+/// Whether a run that ended at `ended_at` (unix ms), being try `attempt` (0 = the first run),
+/// may be tried again now under `policy`: `None` when it may, else the refusal — `retry_limit`
+/// when it was tried `retryLimit` times already, `retry_wait` (with `retryAt`) within
+/// `retryWaitMinutes` of its end. The one rule for every `JOB_RETRY`.
+pub fn retry_refusal(attempt: u32, ended_at: Option<u64>, policy: &controls::Overall, now: u64) -> Option<Value> {
+    if attempt >= policy.retry_limit {
+        return Some(json!({ "ok": false, "kind": "retry_limit", "attempt": attempt, "retryLimit": policy.retry_limit,
+            "message": format!("this run was tried again {attempt} time(s) already and the retry limit is {} (JOB_SETTINGS_SET overall.retryLimit): run the job afresh instead (JOB_RUN)", policy.retry_limit) }));
+    }
+    let at = ended_at?.saturating_add(policy.retry_wait_minutes.saturating_mul(60_000));
+    (now < at).then(|| json!({ "ok": false, "kind": "retry_wait", "retryAt": at,
+        "message": format!("tries are {} minute(s) apart (JOB_SETTINGS_SET overall.retryWaitMinutes): this one may be tried again in {} s",
+                           policy.retry_wait_minutes, at.saturating_sub(now).div_ceil(1000)) }))
 }
 
 /* ------------------------------------------ report jobs ------------------------------------------ */
@@ -783,8 +1069,18 @@ impl Drop for Run {
 /// A report job of `jobs.json` as a run: the queue is its record, so it is mapped, not copied.
 /// Its id is `report-<job id>`. A queued job's progress is not known yet.
 pub fn from_report_job(j: &Job) -> RunRecord {
-    let job_id = if j.kind == ReportJobKind::Mailed { mailed_id(j.report) } else { REPORT_RUN };
-    let trigger = if j.by == crate::report::SCHEDULE_BY { Trigger::Timer } else { Trigger::manual(&j.by) };
+    let job_id = match (&j.schedule_id, j.kind) {
+        (Some(sid), _) => format!("{CREATED_PREFIX}{sid}"),
+        (None, ReportJobKind::Mailed) => mailed_id(j.report).to_string(),
+        _ => REPORT_RUN.to_string(),
+    };
+    let trigger = if j.retry_of.is_some() {
+        Trigger::Retry
+    } else if j.by == crate::report::SCHEDULE_BY {
+        Trigger::Timer
+    } else {
+        Trigger::manual(&j.by)
+    };
     let status = match j.status {
         ReportStatus::Queued => RunStatus::Queued,
         ReportStatus::Running => RunStatus::Running,
@@ -800,12 +1096,14 @@ pub fn from_report_job(j: &Job) -> RunRecord {
         _ => None,
     };
     RunRecord {
-        id: format!("report-{}", j.id), job_id: job_id.to_string(), trigger, status, created_at: ms(j.created_at),
+        id: format!("report-{}", j.id), job_id, trigger, status, created_at: ms(j.created_at),
         started_at: j.started_at.map(ms), ended_at: j.ended_at.map(ms),
         done: counted.then_some(j.progress.done), total: counted.then_some(j.progress.total),
         records: j.progress.rows, error: j.error.clone().or_else(|| j.mail_error.clone()),
         // Exactly what REPORT_JOBS decides visibility on (`Job::covered`); not known is `*`.
         clusters: j.covered().unwrap_or_else(|| vec![crate::report::jobs::ALL_CLUSTERS.to_string()]), note,
+        cancel_asked: j.stop_asked.clone(), retry_of: j.retry_of.as_ref().map(|r| format!("report-{r}")), attempt: j.attempt,
+        deferred: None,
     }
 }
 
@@ -846,6 +1144,8 @@ pub fn run_view(owner: Owner, r: &RunRecord, who: Reader<'_>) -> Option<Value> {
         },
         "note": if hidden { Value::Null } else { json!(r.note) },
         "clusters": r.clusters,
+        "cancelAsked": r.cancel_asked.is_some(), "retryOf": r.retry_of, "attempt": r.attempt,
+        "deferred": r.deferred,
     }))
 }
 
@@ -874,7 +1174,7 @@ impl Page {
         };
         let job = match msg.get("jobId") {
             None | Some(Value::Null) => None,
-            Some(Value::String(s)) if descriptor(s).is_some() => Some(s.clone()),
+            Some(Value::String(s)) if descriptor(s).is_some() || is_created_id(s) => Some(s.clone()),
             Some(_) => return Err("jobId is not a job (see jobs[].id)".into()),
         };
         Ok(Page { before, limit, job })
@@ -977,6 +1277,7 @@ mod tests {
             id: id.into(), job_id: job.into(), trigger: Trigger::Timer, status, created_at: at, started_at: Some(at),
             ended_at: status.finished().then_some(at + 1), done: None, total: None, records: Some(7),
             error: Some("prod-b: search failed".into()), clusters: clusters.iter().map(|s| s.to_string()).collect(), note: Some("n".into()),
+            cancel_asked: None, retry_of: None, attempt: 0, deferred: None,
         }
     }
 
@@ -1271,6 +1572,77 @@ mod tests {
             assert!(!crate::report::jobs::may_read(None, false, j.covered().as_deref()));
             assert!(crate::report::jobs::may_read(None, true, j.covered().as_deref()));
         }
+    }
+
+    #[test]
+    fn a_reserved_run_is_adopted_by_the_jobs_own_code_not_by_the_timer() {
+        let jobs = Jobs::open(None, Role::All, 1);
+        let id = jobs.reserve(HOUSEKEEPING, Trigger::manual("Admin"), vec![], RunMeta::default(), 1).unwrap();
+        assert_eq!(jobs.reserve(HOUSEKEEPING, Trigger::manual("Bob"), vec![], RunMeta::default(), 2).err(), Some(Busy { run_id: id.clone() }),
+                   "a second press is the same run");
+        assert!(jobs.begin(HOUSEKEEPING, Trigger::Timer, vec![], 2).is_err(), "the timer does not take a person's run");
+        let run = jobs.begin(HOUSEKEEPING, Trigger::manual("Admin"), vec![], 2).unwrap();
+        assert_eq!(run.id(), id, "adopted");
+        jobs.release(HOUSEKEEPING, &id, "nothing");
+        assert_eq!(jobs.running(HOUSEKEEPING), Some(id.clone()), "an adopted run is not released");
+        run.end(Outcome::completed(None));
+        // Never adopted: released, skipped.
+        let id2 = jobs.reserve(HOUSEKEEPING, Trigger::Retry, vec![], RunMeta { retry_of: Some(id.clone()), attempt: 1 }, 3).unwrap();
+        jobs.release(HOUSEKEEPING, &id2, "nothing to do");
+        let r = jobs.own_runs().into_iter().find(|(_, r)| r.id == id2).unwrap().1;
+        assert_eq!((r.status, r.trigger, r.retry_of.as_deref(), r.attempt), (RunStatus::Skipped, Trigger::Retry, Some(id.as_str()), 1));
+    }
+
+    #[test]
+    fn a_cancel_ask_is_kept_and_a_restart_ends_the_run_cancelled() {
+        let d = tmp("cancel");
+        {
+            let jobs = Jobs::open(Some(&d), Role::Core, 1);
+            let run = jobs.begin(LOGDELAY_MEASURE, Trigger::Timer, vec![], 1).unwrap();
+            assert!(jobs.cancel(run.id(), "Admin"));
+            assert_eq!(run.cancel_asked().as_deref(), Some("Admin"));
+            assert_eq!(jobs.cancel_asked(LOGDELAY_MEASURE).as_deref(), Some("Admin"));
+            assert!(!jobs.cancel("nope", "Admin"));
+            jobs.flush();
+            std::mem::forget(run);
+        }
+        let jobs = Jobs::open(Some(&d), Role::Core, 9);
+        let r = jobs.own_runs().into_iter().next().unwrap().1;
+        assert_eq!((r.status, r.cancel_asked.as_deref()), (RunStatus::Cancelled, Some("Admin")), "{r:?}");
+        // A run that had no safe point left ends as it ended, saying the ask came too late.
+        let run = jobs.begin(HOUSEKEEPING, Trigger::Timer, vec![], 10).unwrap();
+        jobs.cancel(run.id(), "Bob");
+        let id = run.id().to_string();
+        run.end(Outcome::completed(None));
+        let r = jobs.own_runs().into_iter().find(|(_, r)| r.id == id).unwrap().1;
+        assert_eq!(r.status, RunStatus::Completed);
+        assert!(r.note.unwrap().contains("cancel asked by Bob"));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn retry_keeps_to_the_limit_and_the_wait() {
+        let p = controls::Overall::default();
+        assert!(retry_refusal(0, Some(1_000), &p, 1_000 + 5 * 60_000).is_none(), "five minutes on: may");
+        let w = retry_refusal(0, Some(1_000), &p, 2_000).unwrap();
+        assert_eq!((w["kind"].clone(), w["retryAt"].clone()), (json!("retry_wait"), json!(1_000 + 5 * 60_000)));
+        assert_eq!(retry_refusal(3, Some(0), &p, u64::MAX).unwrap()["kind"], json!("retry_limit"));
+        assert!(retry_refusal(2, None, &p, 0).is_none(), "no end time: no wait to keep");
+    }
+
+    #[test]
+    fn a_busy_wait_is_one_record_however_many_ticks() {
+        let jobs = Jobs::open(None, Role::Worker, 1);
+        let b = load::Busy { cluster: "a".into(), signal: "429".into(), reason: "the cluster answered 429".into(), since: Some(5) };
+        let one = jobs.defer(VOLUME_DAILY, Trigger::Timer, &b, 10).unwrap();
+        assert_eq!(jobs.defer(VOLUME_DAILY, Trigger::Timer, &b, 70).unwrap(), one, "the same wait");
+        jobs.eased(VOLUME_DAILY, "a");
+        assert_ne!(jobs.defer(VOLUME_DAILY, Trigger::Timer, &b, 130).unwrap(), one, "a new wait");
+        let runs = jobs.own_runs();
+        assert_eq!(runs.len(), 2);
+        let r = &runs[0].1;
+        assert_eq!((r.status, r.deferred.as_ref().map(|d| d.cluster.as_str()), r.clusters.clone()), (RunStatus::Deferred, Some("a"), vec!["a".to_string()]));
+        assert!(jobs.defer(HOUSEKEEPING, Trigger::Timer, &b, 1).is_none(), "not this process's job to record");
     }
 
     #[test]

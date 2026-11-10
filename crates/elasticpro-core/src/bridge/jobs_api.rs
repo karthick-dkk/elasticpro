@@ -10,6 +10,12 @@ use crate::jobs::{self, NextRun, Owner, Page};
 use crate::worker::Role;
 use serde_json::{json, Value};
 
+/// A worker run still open while the worker's heartbeat is late: `stale: true`.
+fn mark_stale(r: &mut Value, late: bool) {
+    let open = matches!(r["status"].as_str(), Some("running" | "queued"));
+    r["stale"] = json!(late && open && r["owner"] == json!("worker"));
+}
+
 impl Core {
     /// Wait until the run log's last change is on disk. Tests only.
     #[doc(hidden)]
@@ -32,26 +38,59 @@ impl Core {
         let (mut runs, problems) = self.jobs.all_runs();
         // Report jobs: `jobs.json` is their record (the worker's queue, or the one held here).
         runs.extend(self.reports.snapshot().jobs.iter().map(|j| (Owner::Worker, jobs::from_report_job(j))));
-        let states = jobs::job_states(&runs, who);
+        // Role core: a worker run still "running" while the worker's heartbeat is late (or
+        // never came) may have ended with the worker — shown `stale: true`, never ended here.
+        let stale = self.role == Role::Core && self.worker_heartbeat_late();
+        let mut states = jobs::job_states(&runs, who);
+        let controls = self.jobs.controls();
         let mut list = vec![];
-        for d in jobs::REGISTRY.iter() {
-            let (current, active, last) = states.get(d.id).cloned().unwrap_or_default();
-            let (next, why) = self.job_next_run(d).await;
-            let mut v = d.to_json();
+        let created = self.created_job_entries(view.visible.as_ref(), who.admin);
+        let entries = jobs::REGISTRY.iter().map(|d| (d.id.to_string(), d.to_json(), Some(d)))
+            .chain(created.into_iter().map(|v| (v["id"].as_str().unwrap_or("").to_string(), v, None)));
+        for (id, mut v, d) in entries.collect::<Vec<_>>() {
+            let (mut current, active, last) = states.remove(&id).unwrap_or_default();
+            if let Some(c) = current.as_mut() {
+                mark_stale(c, stale);
+            }
+            let (next, why) = match d {
+                Some(d) => self.job_next_run(d).await,
+                None => self.created_next_send(&id),
+            };
+            let set = controls.job(&id);
+            // Paused or off: no time — the note says why, and who paused it.
+            let (next, why) = match controls.held(&id) {
+                Some(h) if d.is_none_or(|d| d.kind == jobs::JobKind::Automatic) => (None, Some(h.text())),
+                _ => (next, why),
+            };
             v["state"] = json!({
-                // PR 3 (JOB_PAUSE / JOB_SETTINGS_SET) sets these; until then every job is on.
-                "enabled": true, "paused": false,
+                "enabled": set.enabled.unwrap_or(true), "paused": set.paused, "pausedBy": set.paused_by, "pausedAt": set.paused_at,
                 "current": current, "activeRuns": active, "lastRun": last,
                 "nextRunAt": next, "nextRunNote": why,
             });
             list.push(v);
         }
-        let (page, next) = jobs::page(runs, &p, who);
+        let (mut page, next) = jobs::page(runs, &p, who);
+        for r in &mut page {
+            mark_stale(r, stale);
+        }
+        // Busy clusters (docs/JOBS.md "Busy clusters"): the caller's only.
+        let busy: Vec<Value> = self.busy_now().into_values().filter(|b| view.sees(&b.cluster))
+            .map(|b| json!({ "cluster": b.cluster, "signal": b.signal, "reason": b.reason, "since": b.since })).collect();
         // A run log that could not be read is said (its runs are missing, not none); where it
         // is on disk is an administrator's.
         let problems: Vec<String> = if who.admin { problems } else { problems.iter().map(|_| "a run log could not be read".to_string()).collect() };
-        json!({ "ok": true, "role": self.role.as_str(), "jobs": list, "runs": page, "next": next,
+        json!({ "ok": true, "role": self.role.as_str(), "jobs": list, "runs": page, "next": next, "busy": busy,
                 "process": self.jobs_process(), "problems": problems })
+    }
+
+    /// Role core: the worker's heartbeat is late, down, or never came (its runs may be stale).
+    fn worker_heartbeat_late(&self) -> bool {
+        let Some(d) = self.data_dir.as_deref() else { return false };
+        match WorkerStatus::read(d) {
+            Ok(Some(st)) => health::heartbeat_late(st.heartbeat_at, crate::fleet::now_ms()),
+            Ok(None) => true,
+            Err(_) => false,
+        }
     }
 
     /// When a job runs next (epoch ms), or `None` with why. Each is the job's own rule, read
@@ -115,15 +154,12 @@ impl Core {
                 if !self.zbx_api().configured() {
                     return none("the Zabbix API is not configured (Config → Zabbix)");
                 }
-                // The timer waits the interval after each of its own runs.
-                let every = self.zbx_link.resolved().sync_secs.saturating_mul(1000);
-                let last = self.jobs.own_runs().into_iter()
-                    .filter(|(_, r)| r.job_id == jobs::ZABBIX_SYNC && r.trigger == jobs::Trigger::Timer)
-                    .filter_map(|(_, r)| r.ended_at).max();
-                match (self.role.serves_people(), last) {
+                // The timer says when it wakes next, each time it goes to sleep — from the start,
+                // so a restart has a time at once.
+                match (self.role.serves_people(), self.jobs.next_at(jobs::ZABBIX_SYNC)) {
                     (false, _) => none("the core runs it"),
-                    (true, Some(t)) => (at(Some(t.saturating_add(every))), None),
-                    (true, None) => none("not run by the timer yet in this process"),
+                    (true, Some(t)) => (at(Some(t)), None),
+                    (true, None) => none("the timer has not started in this process"),
                 }
             }
             NextRun::ZabbixPush => {
