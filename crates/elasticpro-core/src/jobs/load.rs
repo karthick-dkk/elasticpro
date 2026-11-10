@@ -200,7 +200,7 @@ mod tests {
         assert_eq!(b["c"].signal, "pool");
         assert_eq!(b["f"].since, None, "not known, not a guess");
         // The 429 passes with its Retry-After; the slow one after three quick answers.
-        assert!(busy(&HashMap::new(), &HashMap::new(), &v.own_busy(now + 1_001), now + 1_001).get("a").is_none());
+        assert!(!busy(&HashMap::new(), &HashMap::new(), &v.own_busy(now + 1_001), now + 1_001).contains_key("a"));
         for _ in 0..3 {
             v.note_answer("b", 200, 10, None, now);
         }

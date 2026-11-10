@@ -149,7 +149,7 @@ impl Controls {
     /// from the registry (`registry` is `None` for a created schedule: the mailed defaults).
     pub fn job_view(&self, id: &str) -> Value {
         let s = self.job(id);
-        let d = descriptor(id).copied().unwrap_or_else(|| super::created_descriptor_defaults());
+        let d = descriptor(id).copied().unwrap_or_else(super::created_descriptor_defaults);
         json!({
             "jobId": id,
             "enabled": s.enabled.unwrap_or(true), "paused": s.paused, "pausedBy": s.paused_by, "pausedAt": s.paused_at,
@@ -167,7 +167,7 @@ impl Controls {
         let mut next = self.clone();
         if let Some(id) = msg.get("jobId").filter(|v| !v.is_null()) {
             let id = id.as_str().filter(|i| job_known(i)).ok_or("jobId is not a job (see JOBS_LIST jobs[].id)")?;
-            let d = descriptor(id).copied().unwrap_or_else(|| super::created_descriptor_defaults());
+            let d = descriptor(id).copied().unwrap_or_else(super::created_descriptor_defaults);
             let s = next.jobs.entry(id.to_string()).or_default();
             if let Some(v) = msg.get("enabled") {
                 let on = v.as_bool().ok_or("enabled must be true or false")?;

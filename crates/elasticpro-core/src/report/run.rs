@@ -294,7 +294,8 @@ impl Core {
         }
         // A cluster whose same report is already queued or running joins it (docs/JOBS.md
         // "Duplicates"); the rest queue.
-        let queued: Result<(Vec<String>, Vec<String>), (&str, String)> = self.reports.with(|q| {
+        type Queued = (Vec<String>, Vec<String>);
+        let queued: Result<Queued, (&str, String)> = self.reports.with(|q| {
             let (same, fresh): (Vec<Job>, Vec<Job>) = jobs.into_iter().partition(|j| q.same_open(j).is_some());
             let joined: Vec<String> = same.iter().filter_map(|j| q.same_open(j)).map(|x| x.id.clone()).collect();
             let n = fresh.len();
