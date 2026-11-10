@@ -81,7 +81,7 @@ const PAGES = [
     setup: async (F) => { await F.evaluate(() => [...document.querySelectorAll('#view [title^="Open "]')][0]?.click()); }, hover: ['#view tbody tr', '#view .pill', '#view .btn'] },
   { id: 'reports/overview', search: null, hover: ['#view tbody tr', '#view .btn', '#view .pill'] },
   { id: 'reports/daily', search: null, hover: ['#view tbody tr', '#view .btn'] },
-  { id: 'reports/hosts', search: '#hv-q', hover: ['#view .hv-tbl tbody tr', '#view .hv-sort', '#view .btn'] },
+  { id: 'reports/hosts', search: '#hv-q', hover: ['#view .hv-tbl tbody tr', '#view .hv-tbl th.sortable', '#view .btn'] },
   { id: 'reports/capacity', search: null, hover: ['#view tbody tr', '#view .btn'] },
   { id: 'reports/measure', search: null, hover: ['#view .btn', '#view tbody tr'] },
   { id: 'reports/planning', search: null, hover: ['#view tbody tr', '#view .btn'] },

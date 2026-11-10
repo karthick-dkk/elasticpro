@@ -6,7 +6,8 @@
  * one cluster holds many sources.
  */
 
-import { h, mount, $, clear, activatable } from '../lib/dom.js';
+import { h, mount, $, clear } from '../lib/dom.js';
+import { tableSort, sortTh } from '../lib/table-sort.js';
 import { nodeCache } from '../lib/keyed.js';
 import { bytes, num, compact, dt, ago, toCsv, download } from '../lib/fmt.js';
 import { state, client, fetchIndices, activeClusters, datasetFreshness, fleetPolicy } from '../core/state.js';
@@ -28,7 +29,19 @@ import { templatesView } from '../ui/templates-view.js';
 import { takeFocus } from '../core/focus.js';
 
 let host = null;
-const ui = { ilmOnly: false, noPolicy: null, sourceFilter: 'all', text: '', status: 'all', sort: 'size', dir: -1, from: '', to: '', loading: false, error: null, page: 0, view: 'indices' };
+const ui = { ilmOnly: false, noPolicy: null, sourceFilter: 'all', text: '', status: 'all', from: '', to: '', loading: false, error: null, page: 0, view: 'indices' };
+/**
+ * The index table's column sort (lib/table-sort.js): largest first until a header says
+ * otherwise, and a new column starts high-to-low, as it always has here. Remembered per
+ * browser; a sort goes back to the first page. Applied after the filters, before the page.
+ */
+const IDX_SORT = tableSort('indices', { initial: { key: 'size', dir: -1 }, onChange: () => { ui.page = 0; redrawTable(); } });
+const HEALTH_RANK = { red: 3, yellow: 2, green: 1 };
+const IDX_COLS = Object.fromEntries([
+  ['health', 'number', (r) => (r.health in HEALTH_RANK ? HEALTH_RANK[r.health] : null)],
+  ['index', 'text'], ['source', 'text'], ['day', 'date'], ['status', 'text'],
+  ['pri', 'number'], ['docs', 'number'], ['deleted', 'number'], ['size', 'bytes'], ['priSize', 'bytes'], ['created', 'date'],
+].map(([key, type, value]) => [key, { type, value: value || ((r) => r[key]), start: -1 }]));
 /** Index names ticked in the table, for the bulk actions. Cleared when the data reloads. */
 const selected = new Set();
 /** Volume-analysis UI state: which field, how far back, and whether a run is in flight. */
@@ -103,13 +116,7 @@ function rowsFor(c) {
     const t = ui.text.trim().toLowerCase();
     rows = rows.filter((r) => r.index.toLowerCase().includes(t));
   }
-  const key = ui.sort;
-  rows = [...rows].sort((a, b) => {
-    const av = a[key], bv = b[key];
-    if (typeof av === 'number' && typeof bv === 'number') return (av - bv) * ui.dir;
-    return String(av ?? '').localeCompare(String(bv ?? '')) * ui.dir;
-  });
-  return rows;
+  return IDX_SORT.apply(rows, IDX_COLS);
 }
 
 /**
@@ -224,19 +231,8 @@ function sourceBar(c, sourceList, total) {
       h('button.btn.sm', { onclick: () => load(true) }, '↻ Reload')));
 }
 
-function th(label, key, numeric) {
-  const sort = () => { ui.dir = ui.sort === key ? -ui.dir : -1; ui.sort = key; ui.page = 0; redrawTable(); };
-  const active = ui.sort === key;
-  return h('th', {
-    // mount() restores focus across a rebuild by id, and sorting rebuilds the whole table.
-    // Without an id a keyboard user is thrown back to the top of the page on every sort.
-    id: `idx-th-${key}`,
-    class: `${numeric ? 'num ' : ''}sortable`,
-    // role stays columnheader; aria-sort is what tells a screen reader the direction.
-    'aria-sort': active ? (ui.dir === 1 ? 'ascending' : 'descending') : 'none',
-    ...activatable(sort, { role: null }),
-  }, label + (active ? (ui.dir === 1 ? ' ▲' : ' ▼') : ''));
-}
+/** A column head that sorts (lib/table-sort.js): its id keeps keyboard focus across the redraw a sort causes. */
+const th = (label, key, numeric) => sortTh(IDX_SORT, key, label, { num: !!numeric });
 
 function redrawTable() {
   const c = cluster(); if (!c) return;

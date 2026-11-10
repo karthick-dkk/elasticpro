@@ -1,6 +1,7 @@
 /** Page 5 — snapshots, SLM policies and repositories: what exists, and managing it. */
 
 import { h, mount, $ } from '../lib/dom.js';
+import { tableSort } from '../lib/table-sort.js';
 import { nodeCache, objId } from '../lib/keyed.js';
 import { num, dt, dur, ago, bytes, eachDay, ymdDots, toCsv, download, plural } from '../lib/fmt.js';
 import { state, client, activeClusters, fetchSnapshots, fetchOverview, ensureFullSnapshots, expectChange,
@@ -36,6 +37,8 @@ let host = null;
 // `sort` is per cluster, like the search; `hiddenCols` is one choice for the tab — the
 // columns a person wants to see do not change with the cluster they look at.
 const ui = { open: {}, days: 60, page: {}, q: {}, perPage: SNAPSHOT_PAGE_SIZES[0], sort: {}, hiddenCols: new Set() };
+/** The snapshot list's remembered order (lib/table-sort.js); its Sort select and headers set it. */
+const SNAP_SORT = tableSort('snapshots', { initial: DEFAULT_SNAPSHOT_SORT });
 
 /** Which section an alert's link wants open and in view (core/focus.js): repos | policies. */
 let focusSection = null;
@@ -214,8 +217,10 @@ function repoSelect(c, repos, selected) {
 function snapshotsView(c, repos, selected, snaps) {
   const holder = h('div');
   const sub = h('span', '');
-  const sortOf = () => ui.sort[c.id] || DEFAULT_SNAPSHOT_SORT;
-  const setSort = (next) => { ui.sort[c.id] = next; ui.page[c.id] = 0; sortSel.value = sortValue(next); repaint(); };
+  // The last order chosen on any cluster is remembered per browser (lib/table-sort.js) and is
+  // where a cluster not sorted yet this session opens.
+  const sortOf = () => ui.sort[c.id] || SNAP_SORT.sort || DEFAULT_SNAPSHOT_SORT;
+  const setSort = (next) => { ui.sort[c.id] = next; SNAP_SORT.set(next); ui.page[c.id] = 0; sortSel.value = sortValue(next); repaint(); };
   const repaint = () => {
     const sort = sortOf();
     const { rows, slice } = snapshotPage(snaps, { text: ui.q[c.id] || '', page: ui.page[c.id] || 0, perPage: ui.perPage, sort });
@@ -537,7 +542,7 @@ function snapTable(c, repo, snaps, { searching = false, sort = DEFAULT_SNAPSHOT_
   // A header whose column has an order sorts on click; `table()` draws the arrow and aria-sort.
   const headers = [...cols.map((col) => ({ label: col.label, sort: col.sort, num: col.num })), ''];
   return table(headers, trs,
-    { sort: onSort ? { key: sort.key, dir: sort.dir, on: (key) => onSort(cycleSort(sort, key, SNAPSHOT_SORTS)) } : null,
+    { sort: onSort ? { id: 'snapshots', key: sort.key, dir: sort.dir, on: (key) => onSort(cycleSort(sort, key, SNAPSHOT_SORTS)) } : null,
       emptyText: listingEmptyText({ searching, fetched: Array.isArray((state.data.get(c.id) || {}).repos) && policiesRead(c.id),
                                        repos: (state.data.get(c.id) || {}).repos || [], error: unreadableReason(c) }) });
 }

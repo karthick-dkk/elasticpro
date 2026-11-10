@@ -444,8 +444,12 @@ table.tbl th {
   text-transform: uppercase; color: var(--text-muted); padding: 8px 10px;
   border-bottom: 1px solid var(--border); position: sticky; top: 0; background: var(--surface-1); z-index: 1;
 }
-table.tbl th.sortable { cursor: pointer; user-select: none; }
-table.tbl th.sortable:hover { color: var(--text-primary); }
+/* The one sortable column head (ui/js/lib/table-sort.js), on every table that sorts. */
+th.sortable { cursor: pointer; user-select: none; }
+th.sortable:hover { color: var(--text-primary); }
+th.sortable:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+th.sortable .sort-arrow { margin-left: 3px; font-size: .9em; }
+th.sortable .sort-arrow:empty { display: none; }
 table.tbl td { padding: 7px 10px; border-bottom: 1px solid var(--grid); vertical-align: middle; }
 table.tbl tbody tr:hover td { background: var(--surface-2); }
 /* A number and its unit are one token. Left to wrap, a narrow column breaks "143 GB"
@@ -2165,7 +2169,6 @@ button.pn-link:hover { text-decoration: underline; }
 .hv-bar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .hv-bar input[type="search"] { min-width: 260px; height: 28px; }
 .hv-picker label.field { display: flex; align-items: center; gap: 6px; }
-.hv-sort { font: inherit; font-weight: 600; color: inherit; background: none; border: 0; padding: 0; cursor: pointer; text-align: inherit; }
 .hv-tbl tr.hv-totals th, .hv-tbl tr.hv-totals td { font-weight: 700; border-top: 2px solid var(--border); }
 .hv-pager { display: flex; align-items: center; gap: 8px; justify-content: flex-end; font-size: 12px; }
 .rm-cfg td { padding: 3px 8px; font-size: 12px; }

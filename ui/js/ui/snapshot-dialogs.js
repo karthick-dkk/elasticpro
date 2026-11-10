@@ -6,7 +6,8 @@
  * `allowWrites`. The core refuses it otherwise — see core/writes.js and the Rust guard.
  */
 
-import { h, mount, $, activatable } from '../lib/dom.js';
+import { h, mount, $ } from '../lib/dom.js';
+import { tableSort, sortTh } from '../lib/table-sort.js';
 import { bytes, num, dt, dur, ago, download, healthClass } from '../lib/fmt.js';
 import { modal, confirmDialog, nameList, field, text, select, checkbox, val, checked } from './modal.js';
 import { toast } from './menu.js';
@@ -619,7 +620,9 @@ export async function snapshotIndicesDialog(cluster, repo, snap, opts = {}) {
   const filter = { text: '' };
   // The order on screen. Export CSV and Copy as text follow it, so what is handed over
   // reads the way it was looked at.
-  let sort = { ...DEFAULT_EVIDENCE_SORT };
+  // Remembered per browser (lib/table-sort.js): the next evidence opens in the order last used.
+  const remembered = tableSort('snapshots.evidence', { initial: DEFAULT_EVIDENCE_SORT });
+  let sort = EVIDENCE_SORTS[(remembered.sort || {}).key] ? { ...remembered.sort } : { ...DEFAULT_EVIDENCE_SORT };
   // The facts start folded behind a thin bar; Details opens on them, they are its point.
   let factsOpen = !!opts.details;
 
@@ -678,13 +681,9 @@ export async function snapshotIndicesDialog(cluster, repo, snap, opts = {}) {
 
   // A column head that sorts: click or Enter/Space, aria-sort saying which way. The id
   // keeps keyboard focus on it across the redraw a sort causes.
-  const sortTh = (key, label, style) => {
-    const active = sort.key === key;
-    return h('th.sortable', { id: `ev-sort-${key}`, style, title: `Sort by ${EVIDENCE_SORTS[key].label}`,
-      'aria-sort': active ? (sort.dir === 1 ? 'ascending' : 'descending') : 'none',
-      ...activatable(() => { sort = cycleSort(sort, key, EVIDENCE_SORTS); paintTable(); }, { role: null }) },
-      label, active ? (sort.dir === 1 ? ' ▲' : ' ▼') : null);
-  };
+  const evSort = { id: 'evidence', get key() { return sort.key; }, get dir() { return sort.dir; },
+    on: (key) => { sort = cycleSort(sort, key, EVIDENCE_SORTS); remembered.set(sort); paintTable(); } };
+  const evTh = (key, label, style) => sortTh(evSort, key, label, { attrs: { style }, title: `Sort by ${EVIDENCE_SORTS[key].label}` });
 
   function paintTable() {
     if (!ev.names) {
@@ -698,8 +697,8 @@ export async function snapshotIndicesDialog(cluster, repo, snap, opts = {}) {
     const shown = q ? rows.filter((r) => r.index.toLowerCase().includes(q) || (r.day || '').includes(q)) : rows;
     mount(count, `${num(shown.length)} of ${num(rows.length)} indices · ${sortCaption(sort, EVIDENCE_SORTS)}`);
     mount(tableHost, h('table.tbl',
-      h('thead', h('tr', h('th.num', { style: { width: '48px' } }, '#'), sortTh('index', 'Index'),
-        sortTh('day', 'Data date', { width: '150px' }), sortTh('status', 'Shards', { width: '130px' }))),
+      h('thead', h('tr', h('th.num', { style: { width: '48px' } }, '#'), evTh('index', 'Index'),
+        evTh('day', 'Data date', { width: '150px' }), evTh('status', 'Shards', { width: '130px' }))),
       h('tbody', ...(shown.length ? shown.map((r) => h('tr',
         h('td.num.muted', String(r.n)),
         h('td.mono', { style: { wordBreak: 'break-all' } }, r.index),

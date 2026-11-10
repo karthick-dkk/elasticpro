@@ -11,6 +11,8 @@ import { isSnapshotMode } from '../core/snapshot.js';
 import { navigateTo, canOpenPage } from '../core/intent.js';
 import { repoSizeCache } from '../lib/idb.js';
 import { compareNames } from '../lib/cluster-order.js';
+import { compareSortValues, ariaSort as ariaSortOf, sortArrow } from '../core/sort.js';
+import { tableSort } from '../lib/table-sort.js';
 import { readPrefs, writePrefs, resolveColumns, visibleColumns, setColumnShown, moveColumn, moveColumnBy,
          renameColumn, resetColumns, MAX_NAME, DETAIL_GROUPS, detailItems, detailShown, setDetailShown,
          expandByDefault, setExpandByDefault } from '../core/cluster-view.js';
@@ -99,11 +101,11 @@ export function sortRows(rows, key, dir = 1) {
     return bd - ad;
   };
   const tie = key === 'health' ? (a, b) => byDisk(a, b) || byName(a, b) : byName;
+  // core/sort.js: unknown last whichever way it runs, numbers as numbers, text natural.
+  const unknown = (v) => v === null || v === undefined || (typeof v === 'number' && Number.isNaN(v));
   return rows.map((r) => ({ r, v: get(r) })).sort((a, b) => {
-    const an = a.v === null || a.v === undefined, bn = b.v === null || b.v === undefined;
-    if (an || bn) return an && bn ? byName(a, b) : an ? 1 : -1;
-    const c = typeof a.v === 'number' && typeof b.v === 'number' ? a.v - b.v : compareNames(a.v, b.v);
-    return c * dir || tie(a, b);
+    if (unknown(a.v) && unknown(b.v)) return byName(a, b);
+    return compareSortValues(unknown(a.v) ? null : a.v, unknown(b.v) ? null : b.v, dir) || tie(a, b);
   }).map((x) => x.r);
 }
 
@@ -133,6 +135,23 @@ export const DEFAULT_SORT = { key: 'health', dir: -1 };
 const ui = { text: '', sort: DEFAULT_SORT.key, dir: DEFAULT_SORT.dir, only: 'all', type: 'all', search: false };
 const filtered = () => !!(ui.text || ui.only !== 'all' || ui.type !== 'all' || ui.sort !== DEFAULT_SORT.key || ui.dir !== DEFAULT_SORT.dir);
 const resetFilter = () => { ui.text = ''; ui.only = 'all'; ui.type = 'all'; ui.sort = DEFAULT_SORT.key; ui.dir = DEFAULT_SORT.dir; };
+
+/**
+ * The summary's order, remembered per browser (lib/table-sort.js). `ui.sort`/`ui.dir` are the
+ * working copy every control (headers, the Sort select, its direction button, Clear) changes;
+ * the first draw reads the remembered one, and every draw after writes it back if it changed.
+ */
+const CL_SORT = tableSort('overview.clusters', { initial: DEFAULT_SORT });
+let orderRead = false;
+function rememberOrder() {
+  const s = CL_SORT.sort;
+  if (!orderRead) {
+    orderRead = true;
+    if (s && SORTS[s.key]) { ui.sort = s.key; ui.dir = s.dir; }
+    return;
+  }
+  if (!s || s.key !== ui.sort || s.dir !== ui.dir) CL_SORT.set({ key: ui.sort, dir: ui.dir });
+}
 
 /** offline worst, then red > yellow > green — so "sort by health" surfaces trouble. */
 function healthRank(r) {
@@ -249,6 +268,7 @@ function visibleRows(all) {
   // One cluster type, as the badge beside the name says it.
   if (ui.type !== 'all') rows = rows.filter((r) => clusterKind(r.c).type === ui.type);
 
+  rememberOrder();
   return sortRows(rows, ui.sort, ui.dir);
 }
 
@@ -772,8 +792,11 @@ function paintAges() {
  * lines up with its columns at any width; a sideways wheel over the strip scrolls the box.
  */
 function buildTable(cols, trs, { sort, dir, onSort, emptyText }) {
-  const arrow = (col) => (sort === col.id ? (dir === 1 ? ' ▲' : ' ▼') : null);
-  const ariaSort = (col) => (sort === col.id ? (dir === 1 ? 'ascending' : 'descending') : 'none');
+  // The arrow and aria-sort every sortable head uses (core/sort.js); this strip is its own
+  // shape only because it is pinned outside the scroll box.
+  const st = { key: sort, dir };
+  const arrow = (col) => (sortArrow(st, col.id) ? ` ${sortArrow(st, col.id)}` : null);
+  const ariaSort = (col) => ariaSortOf(st, col.id);
   // The first column is the expand chevron: no name, nothing to sort by.
   const thead = h('thead.cl-thead', h('tr',
     h('th.cl-xth', { 'aria-label': 'Expand' }, h('span.cl-th-in', '')),

@@ -6566,7 +6566,7 @@ if (viaFleet) {
     await waitFor(() => sentK.find((m) => m.type === 'HOSTS_QUERY' && m.offset === 200), 'volume by host: Next did not ask for offset 200');
     ok(sentK.every((m) => m.limit === 200), 'volume by host: a page is not 200 rows');
     sentK.length = 0;
-    doc.querySelector('#hv-table th[data-col="docs"] button').click();
+    doc.querySelector('#hv-table th[data-col="docs"]').click();
     await waitFor(() => sentK.find((m) => m.type === 'HOSTS_QUERY' && m.sort === 'docs:asc' && m.offset === 0), 'volume by host: sorting by Documents did not ask the server');
     sentK.length = 0;
     const q = doc.getElementById('hv-q'); q.value = 'h42'; fire(q, 'input');
