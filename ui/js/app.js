@@ -1396,6 +1396,10 @@ const scheduleNavRedraw = coalesce(() => renderNav());
 bus.on('alerts-changed', () => { renderNav(); topbarKey = ''; renderTopbar(); });
 // Stopped or resumed: the top bar's pill and the page (which asks again on a resume).
 bus.on('pause-changed', () => { topbarKey = ''; renderTopbar(); bus.emit('data'); });
+// Reports › Overview opens on the whole fleet (owner, 2026-11-10): a cluster chosen on another page
+// would otherwise narrow it to one. Only the selection moves: the cluster last chosen is still what
+// an evidence page picks, and a cluster picked here afterwards is kept.
+bus.on('fleet-view', () => { if (state.selected === 'all') return; state.selected = 'all'; topbarKey = ''; renderTopbar(); });
 bus.on('data', () => {
   scheduleNavRedraw();
   const p = PAGES.find((x) => x.id === currentPage);
