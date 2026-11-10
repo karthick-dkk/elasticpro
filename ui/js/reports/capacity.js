@@ -9,7 +9,7 @@
  * same two figures, so every size here is event_logsize and every disk is data nodes.
  */
 
-import { h, mount, $, activatable } from '../lib/dom.js';
+import { h, mount, $ } from '../lib/dom.js';
 import { nodeCache, objId } from '../lib/keyed.js';
 import { bytes, toCsv, download, plural } from '../lib/fmt.js';
 import { state, client, fetchIndices, ensureFullSnapshots, demandDataset, fleetMode, isOnDemand, clusterRev } from '../core/state.js';
@@ -23,12 +23,16 @@ import { sharePut } from '../play/api.js';
 import { columnsMenu } from '../lib/columns.js';
 import { clusterFigures, repoBytes, RATE_DAYS, recordState } from './record.js';
 import { layoutOf, setLocalLayout, layoutNote, canShare, shareWhy, shareLayout } from './layouts.js';
-import { layoutTable, layoutCsv } from './table.js';
+import { layoutTable, layoutCsv, layoutSortCols } from './table.js';
+import { tableSort, sortTh } from '../lib/table-sort.js';
 import { amber, muted, tag, loading, diskBar, gbCell } from './cells.js';
 
 const TABLE = 'capacity';
-const ui = { view: 'plan', sort: 'Cluster name', dir: 1, measuring: new Set() };
+const ui = { view: 'plan', measuring: new Set() };
 let redraw = () => {};
+// The Storage plan opens in the order the clusters are picked in; the two sheets by cluster name.
+const PLAN_SORT = tableSort('reports.capacity.plan', { onChange: () => redraw() });
+const SHEET_SORT = tableSort('reports.capacity.sheet', { initial: { key: 'Cluster name', dir: 1 }, onChange: () => redraw() });
 
 /* ----------------------------------- the data ----------------------------------- */
 
@@ -125,13 +129,14 @@ export function capacityDefs(rows = []) {
       cell: (r) => (r.held === undefined ? loading()
         : r.held === null ? amber('not measured', 'No index name carries a date and no ILM delete phase applies')
           : h('span', { title: r.held.source === 'ILM' ? 'ILM delete age' : `oldest live index day ${r.held.from}` }, `${plural(Math.round(r.held.days), 'day')}${r.held.source === 'ILM' ? ' (ILM)' : ''}`)),
-      csv: (r) => (r.held ? Math.round(r.held.days) : null), csvLabel: (n) => `${n} (days)` },
+      csv: (r) => (r.held ? Math.round(r.held.days) : null), csvLabel: (n) => `${n} (days)`, sortType: 'number' },
     { key: 'livePolicy', label: 'Live retention policy', group: GROUP_LIVE, title: 'Set on the cluster by a person (Edit cluster › Live retention)',
       cell: (r) => (r.plan.livePolicy ? String(r.cluster.liveRetention) : amber('not set', 'Set liveRetention on the cluster')),
       csv: (r) => (r.plan.livePolicy ? String(r.cluster.liveRetention) : 'not set') },
     { key: 'liveDisk', label: 'Live disk (data nodes)', group: GROUP_LIVE, title: 'Disk on data nodes only: used of total',
       cell: (r) => (r.disk.measured ? diskBar(r.disk.used, r.disk.total, { what: 'Live disk on data nodes' }) : amber('not measured', r.disk.reason)),
-      csv: (r) => (r.disk.measured ? `${gbCell(r.disk.used)} of ${gbCell(r.disk.total)} GB, ${gbCell(r.disk.avail)} GB avail` : 'not measured') },
+      csv: (r) => (r.disk.measured ? `${gbCell(r.disk.used)} of ${gbCell(r.disk.total)} GB, ${gbCell(r.disk.avail)} GB avail` : 'not measured'),
+      sortType: 'percent', sortValue: (r) => (r.disk.measured && r.disk.total ? (r.disk.used / r.disk.total) * 100 : null) },
     { key: 'liveRequired', label: 'Required live disk', num: true, group: GROUP_LIVE, title: 'Per day × live retention policy × buffer',
       cell: (r) => (r.plan.liveRequired !== null ? bytes(r.plan.liveRequired)
         : r.plan.livePolicy ? waitingSize(r) : amber('needs a policy', 'Set liveRetention on the cluster')),
@@ -139,14 +144,16 @@ export function capacityDefs(rows = []) {
     { key: 'liveShortfall', label: 'Live disk shortfall', group: GROUP_LIVE, title: 'Required live disk minus live disk total; none when it fits',
       cell: (r) => (r.plan.liveShortfall === null ? amber(r.plan.liveWhy === 'disk not measured' ? 'disk not measured' : r.plan.liveWhy || 'not measured', r.plan.liveWhy === 'disk not measured' ? r.disk.reason : null)
         : r.plan.liveShortfall > 0 ? h('b.rp-short', bytes(r.plan.liveShortfall)) : h('span.rp-none', 'none')),
-      csv: (r) => (r.plan.liveShortfall === null ? r.plan.liveWhy : gbCell(r.plan.liveShortfall)), csvLabel: gb },
+      csv: (r) => (r.plan.liveShortfall === null ? r.plan.liveWhy : gbCell(r.plan.liveShortfall)), csvLabel: gb,
+      sortType: 'bytes', sortValue: (r) => r.plan.liveShortfall },
     { key: 'backupPolicy', label: 'Backup policy', group: GROUP_BACKUP, title: 'Set on the cluster by a person: where backups go and how long they are kept',
       cell: (r) => backupPolicyText(r).node, csv: (r) => backupPolicyText(r).text },
     { key: 'backupDisk', label: 'Backup disk (repository)', group: GROUP_BACKUP, title: 'The snapshot repository: its size now against its capacity (backupCapacity)',
       cell: (r) => backupDiskCell(r),
       csv: (r) => (r.plan.ulm ? 'in S3' : r.plan.backupCapacity === null ? 'not measured · set backupCapacity'
         : r.plan.repoBytes === null ? `size not measured of ${gbCell(r.plan.backupCapacity)} GB`
-          : `${gbCell(r.plan.repoBytes)} of ${gbCell(r.plan.backupCapacity)} GB`) },
+          : `${gbCell(r.plan.repoBytes)} of ${gbCell(r.plan.backupCapacity)} GB`),
+      sortType: 'bytes', sortValue: (r) => (r.plan.ulm ? null : r.plan.repoBytes) },
     { key: 'backupRequired', label: 'Required backup disk', num: true, group: GROUP_BACKUP, title: 'Per day × backup retention × buffer',
       cell: (r) => (r.plan.ulm ? muted('—', 'Archived to S3 by ULM') : r.plan.backupRequired !== null ? bytes(r.plan.backupRequired)
         : r.plan.backupPolicy ? waitingSize(r) : amber('needs a policy', 'Set snapshotRetention on the cluster')),
@@ -156,7 +163,7 @@ export function capacityDefs(rows = []) {
         ? amber(r.plan.backupWhy === 'not measured' ? 'not measured' : 'not set', r.plan.backupWhy === 'no capacity' ? 'Set backupCapacity on the cluster' : r.plan.backupWhy === 'not set' ? 'Set snapshotRetention on the cluster' : null)
         : r.plan.backupShortfall > 0 ? h('b.rp-short', bytes(r.plan.backupShortfall)) : h('span.rp-none', 'none')),
       csv: (r) => (r.plan.ulm ? 'ULM · S3' : r.plan.backupShortfall === null ? (r.plan.backupWhy === 'not measured' ? 'not measured' : 'not set') : gbCell(r.plan.backupShortfall)),
-      csvLabel: gb },
+      csvLabel: gb, sortType: 'bytes', sortValue: (r) => (r.plan.ulm ? null : r.plan.backupShortfall) },
   ];
 }
 
@@ -188,8 +195,9 @@ function backupDiskCell(r) {
 let menuState = null;
 let menuBtn = null;
 
-function planView(ctx, rows) {
-  const defs = capacityDefs(rows);
+function planView(ctx, all) {
+  const defs = capacityDefs(all);
+  const rows = PLAN_SORT.apply(all, layoutSortCols(defs));
   const layout = layoutOf(TABLE);
   if (!menuState) {
     menuState = { id: 'rp-cols-capacity',
@@ -198,7 +206,7 @@ function planView(ctx, rows) {
   }
   Object.assign(menuState, { defs, layout, note: layoutNote(TABLE), canSave: canShare(TABLE), saveWhy: shareWhy(TABLE) });
   return card('Storage plan', `${plural(rows.length, 'cluster')} · daily rate from the ${RATE_DAYS}-day average of event_logsize`,
-    layoutTable({ defs, layout, rows, band: true, cls: 'rp-plan', emptyText: 'No cluster is selected' }),
+    layoutTable({ defs, layout, rows, band: true, cls: 'rp-plan', emptyText: 'No cluster is selected', sort: PLAN_SORT }),
     [menuBtn || (menuBtn = columnsMenu(menuState)),
       h('button#rp-capacity-csv.btn.sm', { type: 'button', onclick: () => exportPlan(defs, layout, rows) }, 'Export CSV')]);
 }
@@ -230,15 +238,11 @@ export function reportsOf(clusters) {
   });
 }
 
+/** The sheet's columns as sort columns (core/sort.js), by label: numbers as numbers, YES/NO as 1/0. */
+const sheetSortCols = (col) => Object.fromEntries(col.map((c) => [c.label, { type: c.kind === 'text' ? 'text' : 'number', value: c.get }]));
+
 function sortReports(reports, col) {
-  return [...reports].sort((a, b) => {
-    const c = col.find((x) => x.label === ui.sort) || col[0];
-    const av = c.get(a), bv = c.get(b);
-    if (av === null || av === undefined) return 1;
-    if (bv === null || bv === undefined) return -1;
-    if (typeof av === 'number' && typeof bv === 'number') return (av - bv) * ui.dir;
-    return String(av).localeCompare(String(bv)) * ui.dir;
-  });
+  return SHEET_SORT.apply(reports, sheetSortCols(col));
 }
 
 /** Each band label centred on the visible part of its section (see pages/volume.js history). */
@@ -300,14 +304,11 @@ function sheetView(reports, view) {
   });
   const head = h('thead',
     h('tr.group-head', ...groupCells),
-    h('tr', ...col.map((c, i) => h('th', {
-      id: `vol-th-${i}`,
-      class: [i === 0 ? 'stick' : '', i > 0 && starts.has(i) ? 'gstart' : ''].filter(Boolean).join(' '),
-      style: { cursor: 'pointer' },
+    h('tr', ...col.map((c, i) => sortTh(SHEET_SORT, c.label, c.label, {
+      cls: [i === 0 ? 'stick' : '', i > 0 && starts.has(i) ? 'gstart' : ''],
       title: `${c.group} — click to sort by this column`,
-      'aria-sort': ui.sort === c.label ? (ui.dir === 1 ? 'ascending' : 'descending') : 'none',
-      ...activatable(() => { ui.dir = ui.sort === c.label ? -ui.dir : 1; ui.sort = c.label; redraw(); }, { role: null }),
-    }, c.label + (ui.sort === c.label ? (ui.dir === 1 ? ' ▲' : ' ▼') : ''), columnInfo(c), c.unit ? h('span.unit', c.unit) : null))));
+      after: [columnInfo(c), c.unit ? h('span.unit', c.unit) : null],
+    }))));
   const body = h('tbody', ...sorted.map((r) => h('tr', ...col.map((c, i) => {
     const text = sheetCell(c, r);
     const cls = [i === 0 ? 'stick' : '', i > 0 && starts.has(i) ? 'gstart' : '', c.kind === 'num' ? 'num' : '',
@@ -377,7 +378,7 @@ export function capacitySection(ctx) {
 const built = nodeCache();
 /** Everything a view is drawn from, so a redraw with nothing new reuses the drawn table. */
 function dataSig(list) {
-  return [ui.sort, ui.dir, recordState.rev, layoutNote(TABLE), JSON.stringify(layoutOf(TABLE)), [...ui.measuring].join(','),
+  return [JSON.stringify(PLAN_SORT.sort), JSON.stringify(SHEET_SORT.sort), recordState.rev, layoutNote(TABLE), JSON.stringify(layoutOf(TABLE)), [...ui.measuring].join(','),
     ...list.map((c) => [c.id, clusterRev(c.id), objId(state.data.get(c.id)), objId(state.indices.get(c.id)), objId(c),
       repoBytes.has(c.id) ? repoBytes.get(c.id) : '-'].join(':')), new Date().toISOString().slice(0, 10)].join('|');
 }

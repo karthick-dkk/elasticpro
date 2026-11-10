@@ -10,6 +10,7 @@
 
 import { h, svg } from '../lib/dom.js';
 import { card, empty } from '../pages/common.js';
+import { sortTh, tableSort } from '../lib/table-sort.js';
 import { toast } from '../ui/menu.js';
 import { confirmDialog } from '../ui/modal.js';
 import { clusters } from '../core/state.js';
@@ -48,6 +49,41 @@ export function logDelayReset() {
 }
 
 const bump = () => { S.ver += 1; redraw(); };
+
+/* ------------------------------ the tables' column sort ------------------------------ */
+
+/** A head row from `[key | null, label, num]`: a key sorts with `sort` (lib/table-sort.js). */
+const sortHead = (sort, cols) => h('thead', h('tr', ...cols.map(([key, label, num]) => (key ? sortTh(sort, key, label, { num: !!num }) : h(num ? 'th.num' : 'th', label)))));
+/** Each table's order: none remembered, the order the page gives (worst first, newest first). */
+const sorts = {
+  clusters: tableSort('logdelay.clusters', { onChange: bump }),
+  devices: tableSort('logdelay.devices', { onChange: bump }),
+  clusterDevices: tableSort('logdelay.cluster-devices', { onChange: bump }),
+  periods: tableSort('logdelay.periods', { onChange: bump }),
+  fixDevices: tableSort('logdelay.fix-devices', { onChange: bump }),
+  rules: tableSort('logdelay.rules', { onChange: bump }),
+};
+/** How bad a state is, for sorting "Now": worst highest; can't measure is unknown. */
+const STATE_RANK = { critical: 5, delay: 4, clock_ahead: 3, silent: 2, little: 1, no_delay: 0 };
+const stateRank = (s) => (s in STATE_RANK ? STATE_RANK[s] : null);
+/** When the last delay (or silence) began: what "Last delay: started → solved" sorts on. */
+const lastDelayAt = (r) => (r.state === 'silent' && finite(r.silentSince) ? r.silentSince : finite(r.lateSince) ? r.lateSince : finite(r.lastStarted) ? r.lastStarted : null);
+/** The device tables' columns (core/sort.js), on the figures rather than the text. */
+const deviceCols = (extras = []) => ({
+  device: { type: 'text', value: (r) => r.device },
+  cluster: { type: 'text', value: (r) => r.clusterName || nameOf(r.cluster) },
+  state: { type: 'number', value: (r) => stateRank(r.state), start: -1 },
+  now: { type: 'number', value: (r) => r.nowMinutes },
+  median: { type: 'number', value: (r) => r.medianMinutes },
+  max: { type: 'number', value: (r) => r.maxMinutes },
+  episodes: { type: 'number', value: (r) => r.episodes },
+  lateMs: { type: 'duration', value: (r) => r.lateMs },
+  last: { type: 'date', value: lastDelayAt },
+  docs: { type: 'number', value: (r) => r.docsPerDay },
+  arrival: { type: 'date', value: (r) => r.lastArrival },
+  event: { type: 'date', value: (r) => r.lastEvent },
+  ...Object.fromEntries(extras.map((x) => [`x:${x}`, { type: 'text', value: (r) => (r.extras ? r.extras[x] : null) }])),
+});
 
 /** Read `key` once with `fn`; the answer redraws the section. */
 function need(key, fn) {
@@ -238,7 +274,19 @@ function fleetView() {
     [legend(key(C.pink, `Delayed (${b.late})`), key(C.green, b.below))]);
 
   const n = periodDays(res.from, res.to) || 30;
-  const cl = (res.byCluster || []).map((c) => {
+  // A cluster never measured has no figures: unknown, so it sorts last either way.
+  const seen = (f) => (c) => (c.lastRunAt === null || c.lastRunAt === undefined ? null : f(c));
+  const cl = sorts.clusters.apply(res.byCluster || [], {
+    name: { type: 'text', value: (c) => c.name || nameOf(c.id) },
+    devices: { type: 'number', value: (c) => c.devices },
+    lateNow: { type: 'number', value: seen((c) => c.lateNow) },
+    newToday: { type: 'number', value: seen((c) => c.newToday) },
+    below: { type: 'number', value: seen((c) => c.below) },
+    delay: { type: 'number', value: seen((c) => c.delay) },
+    critical: { type: 'number', value: seen((c) => c.critical) },
+    previous: { type: 'percent', value: seen((c) => c.belowPctPrevious) },
+    worst: { type: 'number', value: seen((c) => (c.worst && c.worst.device ? c.worst.minutes : null)) },
+  }).map((c) => {
     const cb = bands(c.levels);
     const neverRun = c.lastRunAt === null || c.lastRunAt === undefined;
     return h('tr', { dataset: { cluster: c.id } },
@@ -258,8 +306,8 @@ function fleetView() {
   });
   const clusterCard = card('By cluster', `${b.below.toLowerCase()} = devices under ${b.late} of delay now, and their share in the ${n} days before · a cluster name or its line opens the cluster`,
     h('div.tbl-wrap', h('table.tbl.ld-ctr#ld-by-cluster',
-      h('thead', h('tr', ...['Cluster', 'Devices', 'Late now', 'Today', b.below, b.mid, b.high, `${b.below}, previous ${n} days`, `Last ${n} days`, 'Worst device']
-        .map((x, i) => h(i && i < 8 ? 'th.num' : 'th', x)))),
+      sortHead(sorts.clusters, [['name', 'Cluster'], ['devices', 'Devices', 1], ['lateNow', 'Late now', 1], ['newToday', 'Today', 1], ['below', b.below, 1],
+        ['delay', b.mid, 1], ['critical', b.high, 1], ['previous', `${b.below}, previous ${n} days`, 1], [null, `Last ${n} days`], ['worst', 'Worst device']]),
       h('tbody', ...(cl.length ? cl : [h('tr', h('td', { colspan: 10 }, empty('No cluster you can see is measured.')))])))));
 
   const devCard = devicesCard(res.devices, { total: res.devicesTotal, truncated: res.devicesTruncated, now: res.now });
@@ -268,7 +316,8 @@ function fleetView() {
 }
 
 function devicesCard(rows, { total, truncated, now }) {
-  const sorted = byTimeLate(filterRows(rows, S.devFilter));
+  // Filter, then the header's order (time spent late until one is chosen), then the page.
+  const sorted = sorts.devices.apply(byTimeLate(filterRows(rows, S.devFilter)), deviceCols());
   const shown = S.devAll ? sorted : sorted.slice(0, PAGE_ROWS);
   const filter = h('input#ld-dev-filter', { type: 'search', placeholder: 'Filter devices', 'aria-label': 'Filter devices', value: S.devFilter,
     oninput: (e) => { S.devFilter = e.target.value; bump(); } });
@@ -279,10 +328,10 @@ function devicesCard(rows, { total, truncated, now }) {
     h('td.num', nowText(r)), h('td.num', minutesText(r.maxMinutes)), h('td.num', countText(r.episodes)),
     h('td.num', durationText(r.lateMs)), h('td', startedSolvedText(r, now)), h('td.num', docsText(r.docsPerDay)),
     h('td', link(deviceHref(r), 'Graph ›'))));
-  return card('Devices', `${countText(total ?? (rows || []).length)} · sorted by time spent late`,
+  return card('Devices', `${countText(total ?? (rows || []).length)} · ${sorts.devices.sort ? 'sorted by the marked column' : 'sorted by time spent late'}`,
     [h('div.tbl-wrap', h('table.tbl#ld-devices',
-      h('thead', h('tr', ...['Device', 'Cluster', 'Now', 'Delay now', 'Max', 'Delays', 'Time late', 'Last delay: started → solved', 'Logs a day', 'Graph']
-        .map((x, i) => h([3, 4, 5, 6, 8].includes(i) ? 'th.num' : 'th', x)))),
+      sortHead(sorts.devices, [['device', 'Device'], ['cluster', 'Cluster'], ['state', 'Now'], ['now', 'Delay now', 1], ['max', 'Max', 1], ['episodes', 'Delays', 1],
+        ['lateMs', 'Time late', 1], ['last', 'Last delay: started → solved'], ['docs', 'Logs a day', 1], [null, 'Graph']]),
       h('tbody', ...(body.length ? body : [h('tr', h('td', { colspan: 10 }, empty(S.devFilter ? 'No device matches the filter.' : 'No device measured in this period.')))])))),
     footer(`Showing ${countText(shown.length)} of ${countText(sorted.length)}`,
       sorted.length > shown.length ? [' · ', h('button.linkish#ld-dev-all', { type: 'button', onclick: () => { S.devAll = true; bump(); } }, 'Show all')] : null,
@@ -324,7 +373,7 @@ function clusterView(id) {
   const extras = Array.isArray(f.extras) ? f.extras : [];
   const arrival = f.arrival || 'arrival';
   const event = (Array.isArray(f.eventTime) && f.eventTime[0]) || 'event time';
-  const sorted = byTimeLate(filterRows(res.devices, S.cdFilter));
+  const sorted = sorts.clusterDevices.apply(byTimeLate(filterRows(res.devices, S.cdFilter)), deviceCols(extras));
   const shown = S.cdAll ? sorted : sorted.slice(0, PAGE_ROWS);
   const rows = shown.map((r) => h('tr', { dataset: { device: r.device } },
     h('td.mono', link(deviceHref({ ...r, cluster: r.cluster || id }), r.device)),
@@ -332,12 +381,13 @@ function clusterView(id) {
     h('td.num', countText(r.episodes)), h('td.num', durationText(r.lateMs)), h('td', startedSolvedText(r, res.now)),
     ...extras.map((x) => { const v = r.extras ? r.extras[x] : null; return h('td', v === null || v === undefined || v === '' ? h('span.muted', '—') : String(v)); }),
     h('td.mono', whenText(r.lastArrival, res.now, { seconds: true })), h('td.mono', whenText(r.lastEvent, res.now, { seconds: true }))));
-  const heads = ['Device', 'Now', 'Delay now', 'Median', 'Max', 'Delays', 'Time late', 'Last delay: started → solved', ...extras, arrival, event];
+  const heads = [['device', 'Device'], ['state', 'Now'], ['now', 'Delay now', 1], ['median', 'Median', 1], ['max', 'Max', 1], ['episodes', 'Delays', 1], ['lateMs', 'Time late', 1],
+    ['last', 'Last delay: started → solved'], ...extras.map((x) => [`x:${x}`, x]), ['arrival', arrival], ['event', event]];
   const filter = h('input#ld-cd-filter', { type: 'search', placeholder: 'Filter devices', 'aria-label': 'Filter devices', value: S.cdFilter,
     oninput: (e) => { S.cdFilter = e.target.value; bump(); } });
-  const devCard = card('Devices in this cluster', `${countText((res.devices || []).length)} · sorted by time spent late · a device opens its delay details`,
+  const devCard = card('Devices in this cluster', `${countText((res.devices || []).length)} · ${sorts.clusterDevices.sort ? 'sorted by the marked column' : 'sorted by time spent late'} · a device opens its delay details`,
     [h('div.tbl-wrap', h('table.tbl#ld-cluster-devices',
-      h('thead', h('tr', ...heads.map((x, i) => h(i >= 2 && i <= 6 ? 'th.num' : 'th', x)))),
+      sortHead(sorts.clusterDevices, heads),
       h('tbody', ...(rows.length ? rows : [h('tr', h('td', { colspan: heads.length }, empty(S.cdFilter ? 'No device matches the filter.' : 'No device measured in this period.')))])))),
     footer(`ECS fields from the device’s latest log: ${[...extras, `${arrival} (arrival)`, `${event} (event time)`].join(', ')} · delay = ${arrival} − ${event}`
       + (f.device ? ` · device field ${f.device}` : '') + (f.pattern ? ` · indices ${f.pattern}` : ''),
@@ -517,7 +567,15 @@ function clustersCard(res) {
 }
 
 function periodsCard(res, every) {
-  const rows = (res.periods || []).slice().sort((a, b) => (b.started || 0) - (a.started || 0)).map((p) => h(`tr${p.solved ? '' : '.ld-open'}`,
+  const rows = sorts.periods.apply((res.periods || []).slice().sort((a, b) => (b.started || 0) - (a.started || 0)), {
+    started: { type: 'date', value: (p) => p.started },
+    solved: { type: 'date', value: (p) => p.solved },
+    lasted: { type: 'duration', value: (p) => p.lastedMs },
+    worst: { type: 'number', value: (p) => p.worstMinutes },
+    state: { type: 'number', value: (p) => stateRank(p.worstState), start: -1 },
+    pattern: { type: 'text', value: (p) => p.pattern },
+    measurements: { type: 'number', value: (p) => p.measurements },
+  }).map((p) => h(`tr${p.solved ? '' : '.ld-open'}`,
     h('td', whenText(p.started, res.now)),
     h('td', p.solved ? whenText(p.solved, res.now) : pillOf('critical', 'still late')),
     h('td.num', `${durationText(p.lastedMs)}${p.solved ? '' : ' so far'}`),
@@ -526,7 +584,7 @@ function periodsCard(res, every) {
   const sil = (res.silences || []).map((s) => `${whenText(s.from, res.now)} → ${finite(s.to) ? whenText(s.to, res.now) : 'still silent'}${finite(s.burstDocs) ? ` (then ${countText(s.burstDocs)} logs${finite(s.burstMinutes) ? `, ${minutesText(s.burstMinutes)} late` : ''})` : ''}`);
   return card('Every delay', 'started = first measurement at the delay level or later · solved = first measurement back under it',
     [h('div.tbl-wrap', h('table.tbl#ld-periods',
-      h('thead', h('tr', ...['Started', 'Solved', 'Lasted', 'Worst delay', 'Worst state', 'Looks like', 'Measurements'].map((x, i) => h([2, 3, 6].includes(i) ? 'th.num' : 'th', x)))),
+      sortHead(sorts.periods, [['started', 'Started'], ['solved', 'Solved'], ['lasted', 'Lasted', 1], ['worst', 'Worst delay', 1], ['state', 'Worst state'], ['pattern', 'Looks like'], ['measurements', 'Measurements', 1]]),
       h('tbody', ...(rows.length ? rows : [h('tr', h('td', { colspan: 7 }, empty('No delay in this period.')))])))),
     footer(`A start or solve time is accurate to the ${every ? `${every}-hour ` : ''}measurement. `,
       sil.length ? `Silences (no logs at all) are listed separately: ${sil.join('; ')}.` : 'No silence in this period.',
@@ -576,13 +634,18 @@ function fixesView(clusterId) {
   const fixCard = card(`Recommended fixes · ${scope} · ${res.from} → ${res.to}`, 'most devices affected first',
     findings.length ? h('div.ld-fixes', ...findings) : empty('No recommendation: nothing was late in the stored delay periods of this range.'));
 
-  const devs = filterRows(res.devices, S.fixFilter);
+  const devs = sorts.fixDevices.apply(filterRows(res.devices, S.fixFilter), {
+    ...deviceCols(),
+    step: { type: 'text', value: (d) => stepLabel(d) },
+    why: { type: 'text', value: (d) => d.why },
+    fix: { type: 'text', value: (d) => d.fix },
+  });
   const shown = S.fixAll ? devs : devs.slice(0, PAGE_ROWS);
   const filter = h('input#ld-fix-filter', { type: 'search', placeholder: 'Filter devices', 'aria-label': 'Filter devices', value: S.fixFilter,
     oninput: (e) => { S.fixFilter = e.target.value; bump(); } });
   const devCard = card('Each device', 'every late device with its own recommendation · worst first · a device opens its page',
     [h('div.tbl-wrap', h('table.tbl#ld-fix-devices',
-      h('thead', h('tr', h('th', 'Device'), h('th', 'Cluster'), h('th.num', 'Delay now'), h('th', 'Step'), h('th', 'Likely why'), h('th', 'Fix'))),
+      sortHead(sorts.fixDevices, [['device', 'Device'], ['cluster', 'Cluster'], ['now', 'Delay now', 1], ['step', 'Step'], ['why', 'Likely why'], ['fix', 'Fix']]),
       h('tbody', ...(shown.length ? shown.map((d) => h('tr', { dataset: { device: d.device } },
         h('td.mono', link(deviceHref(d), d.device)), h('td', link(clusterHref(d.cluster), d.clusterName || nameOf(d.cluster))),
         h('td.num', nowText(d)), h('td', h(`span.pill.ld-pill.${STEP_TONE[d.step] || 'grey'}`, h('i.dot'), stepLabel(d))),
@@ -595,8 +658,13 @@ function fixesView(clusterId) {
 
   const rules = card('How a pattern is matched', 'plain rules on stored data; each one names its step on the path',
     h('div.tbl-wrap', h('table.tbl#ld-rules',
-      h('thead', h('tr', h('th', 'Pattern in the delays'), h('th', 'Step'), h('th', 'Read from'), h('th', 'Recommendation'))),
-      h('tbody', ...(res.rules || []).map((r) => h('tr', h('td.ld-wrap', r.pattern), h('td', stepLabel(r)), h('td.ld-wrap', r.readFrom), h('td.ld-wrap', r.recommendation)))))));
+      sortHead(sorts.rules, [['pattern', 'Pattern in the delays'], ['step', 'Step'], ['readFrom', 'Read from'], ['recommendation', 'Recommendation']]),
+      h('tbody', ...sorts.rules.apply(res.rules || [], {
+        pattern: { type: 'text', value: (r) => r.pattern },
+        step: { type: 'text', value: (r) => stepLabel(r) },
+        readFrom: { type: 'text', value: (r) => r.readFrom },
+        recommendation: { type: 'text', value: (r) => r.recommendation },
+      }).map((r) => h('tr', h('td.ld-wrap', r.pattern), h('td', stepLabel(r)), h('td.ld-wrap', r.readFrom), h('td.ld-wrap', r.recommendation)))))));
   return h('div.rp-section.ld', { dataset: { ld: 'fixes' } }, head, path, fixCard, devCard, rules);
 }
 

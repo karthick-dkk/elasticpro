@@ -11,6 +11,7 @@
 import { h, mount } from '../lib/dom.js';
 import { download, toCsv } from '../lib/fmt.js';
 import { card } from '../pages/common.js';
+import { sortTh, tableSort } from '../lib/table-sort.js';
 import { clusters as appClusters } from '../core/state.js';
 import { navigateTo } from '../core/intent.js';
 import * as volumeDailyShared from '../core/volume-daily.js';
@@ -34,12 +35,27 @@ export function planningSection(ctx = {}) {
     const t = template();
     if (!t) { mount(results, h('div.muted', { style: { fontSize: '12px' } }, st.error || 'Loading the plan templates…')); return; }
     const plan = computePlan(t, st.input);
-    const { totals: T, rows } = plan;
+    const { totals: T } = plan;
+    // The roles in the template's order until a header says otherwise; Total stays last.
+    const sort = tableSort('reports.planning.bom', { onChange: drawResults });
+    const on = (f) => (r) => (r.off ? null : f(r));
+    const rows = sort.apply(plan.rows, {
+      role: { type: 'text', value: (r) => r.role },
+      rule: { type: 'text', value: (r) => r.rule },
+      count: { type: 'number', value: (r) => (r.bucket ? null : r.count) },
+      cpu: { type: 'number', value: on((r) => (r.bucket ? null : r.cpu)) },
+      ram: { type: 'number', value: on((r) => (r.bucket ? null : r.ram)) },
+      root: { type: 'number', value: on((r) => (r.bucket ? null : r.root)) },
+      live: { type: 'bytes', value: on((r) => r.liveText) },
+      backup: { type: 'bytes', value: on((r) => r.bkText) },
+      cpuT: { type: 'number', value: on((r) => r.cpuT) },
+      ramT: { type: 'number', value: on((r) => r.ramT) },
+    });
     const tile = (id, label, value, note) => h('div.pn-tile', h('span.l', label), h('span.v', { id }, value), h('span.d', note));
     const cell = (v, unit = '') => (v == null ? h('span.na', '[set]') : `${v}${unit}`);
-    const th = (c, num) => h('th', { class: num ? 'num' : '' }, c);
-    const head = [th('Role'), th('Sizing rule'), th('Count', 1), th('CPU each', 1), th('RAM each', 1), th('/ disk each', 1), th('/live disk each', 1),
-      T.showBackupCol ? th('/backup disk', 1) : null, th('CPU total', 1), th('RAM total', 1)];
+    const th = (key, c, num) => sortTh(sort, key, c, { num: !!num });
+    const head = [th('role', 'Role'), th('rule', 'Sizing rule'), th('count', 'Count', 1), th('cpu', 'CPU each', 1), th('ram', 'RAM each', 1), th('root', '/ disk each', 1), th('live', '/live disk each', 1),
+      T.showBackupCol ? th('backup', '/backup disk', 1) : null, th('cpuT', 'CPU total', 1), th('ramT', 'RAM total', 1)];
     const body = rows.map((r) => {
       if (r.off) {
         return h('tr.off', h('td', h('b', r.role)), h('td', h('span.rule', r.rule)), h('td.num', r.countText), h('td.num', '—'), h('td.num', '—'), h('td.num', '—'),

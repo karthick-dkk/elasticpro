@@ -16,6 +16,7 @@
  */
 
 import { h } from './dom.js';
+import { sortTh } from './table-sort.js';
 import { popover, rowMenu } from '../ui/menu.js';
 
 /** Longest name a column may be given. A header is not a paragraph. */
@@ -341,12 +342,20 @@ export function columnTable(o) {
   const cols = visibleColumns(o.defs, o.layout);
   const change = (next) => o.onChange(next);
 
+  // `sort` (a tableSort(), lib/table-sort.js) and `sortCols` ({ key: { type, value } }): the
+  // heads named in sortCols sort on a click; the caller passes the rows already in its order.
+  const sortable = (key) => !!(o.sort && o.sortCols && o.sortCols[key]);
   const head = cols.map((c, i) => {
-    const th = h(`th.colhead${c.num ? '.num' : ''}`, { dataset: { col: c.key }, title: c.renamed ? `${c.name} (${c.label})` : c.name });
+    const title = c.renamed ? `${c.name} (${c.label})` : c.name;
+    const th = sortable(c.key)
+      ? sortTh(o.sort, c.key, '', { num: !!c.num, cls: 'colhead', attrs: { dataset: { col: c.key } }, title: `${title} — click to sort` })
+      : h(`th.colhead${c.num ? '.num' : ''}`, { dataset: { col: c.key }, title });
+    const arrow = th.querySelector('.sort-arrow');
     const label = h('span.colhead-name', c.name);
     const fill = () => {
       th.textContent = '';
       th.append(label);
+      if (arrow) th.append(arrow);
       if (!o.canEdit) return;
       th.append(rowMenu(() => [
         { label: 'Edit name', onClick: () => editName() },

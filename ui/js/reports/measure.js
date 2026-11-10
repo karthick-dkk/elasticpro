@@ -12,6 +12,7 @@
 import { h } from '../lib/dom.js';
 import { bytes, num, ago, plural, toCsv, download } from '../lib/fmt.js';
 import { card } from '../pages/common.js';
+import { sortTh, tableSort } from '../lib/table-sort.js';
 import { toast } from '../ui/menu.js';
 import { measureSize, MEASURE_PERIODS, shortDay, utcDay } from '../core/volume-daily.js';
 import { recordOf, recordEntry, recordState, runCollection, lastRunOf } from './record.js';
@@ -59,7 +60,7 @@ function clusterRow(c, m, picked) {
 }
 
 function dayRows(m) {
-  return m.rows.map((d) => h('tr',
+  return DAY_SORT.apply(m.rows, DAY_COLS).map((d) => h('tr',
     h('td', shortDay(d.day)),
     h('td.num', d.indices === null ? muted('—') : num(d.indices)),
     h('td.num', d.index === null ? amber('not measured') : bytes(d.index)),
@@ -70,6 +71,27 @@ function dayRows(m) {
 }
 
 const TH = (label, num, title) => h(`th${num ? '.num' : ''}`, { title: title || null, scope: 'col' }, label);
+/** A head that sorts (lib/table-sort.js): `sort` the table's tableSort(), `key` its column. */
+const STH = (sort, key, label, num, title) => sortTh(sort, key, label, { num: !!num, attrs: { scope: 'col' }, title: title ? `${title} — click to sort` : null });
+
+// Per cluster opens in the order the clusters are picked in; day by day oldest first, as the record lists it.
+const CLUSTER_SORT = tableSort('reports.measure.clusters', { onChange: () => redraw() });
+const DAY_SORT = tableSort('reports.measure.days', { onChange: () => redraw() });
+const CLUSTER_COLS = {
+  cluster: { type: 'text', value: (x) => x.c.name },
+  index: { type: 'bytes', value: (x) => (x.m ? x.m.indexPerDay : null) },
+  event: { type: 'bytes', value: (x) => (x.m ? x.m.eventPerDay : null) },
+  diff: { type: 'number', value: (x) => (x.m ? x.m.diff : null) },
+  ratio: { type: 'number', value: (x) => (x.m ? x.m.ratio : null) },
+};
+const DAY_COLS = {
+  day: { type: 'date', value: (d) => d.day },
+  indices: { type: 'number', value: (d) => d.indices },
+  index: { type: 'bytes', value: (d) => d.index },
+  event: { type: 'bytes', value: (d) => d.event },
+  diff: { type: 'number', value: (d) => d.diff },
+  ratio: { type: 'number', value: (d) => d.ratio },
+};
 
 /** The per cluster figures as CSV (the Measure size table). */
 function exportMeasure(clusters, p) {
@@ -123,14 +145,16 @@ export function measureSection(ctx) {
         measure)),
     card('Per cluster', `average per day over the period · ${p.label.toLowerCase()} · click a cluster for its days below`,
       h('div.tbl-wrap', h('table.tbl.rp-measure-tbl',
-        h('thead', h('tr', TH('Cluster'), TH('Index size per day', true, 'Primary store size of each day\'s indices (_cat/indices), averaged'),
-          TH('event_logsize per day', true, 'Sum of event_logsize inside the same days\' documents, averaged'),
-          TH('Difference', true, 'Index size minus event_logsize'), TH('Ratio', true, 'Index size ÷ event_logsize'), TH('Compared'))),
-        h('tbody', ...ctx.clusters.map((c) => clusterRow(c, figures.get(c.id), c.id === ui.picked)))))),
+        h('thead', h('tr', STH(CLUSTER_SORT, 'cluster', 'Cluster'), STH(CLUSTER_SORT, 'index', 'Index size per day', true, 'Primary store size of each day\'s indices (_cat/indices), averaged'),
+          STH(CLUSTER_SORT, 'event', 'event_logsize per day', true, 'Sum of event_logsize inside the same days\' documents, averaged'),
+          STH(CLUSTER_SORT, 'diff', 'Difference', true, 'Index size minus event_logsize'), STH(CLUSTER_SORT, 'ratio', 'Ratio', true, 'Index size ÷ event_logsize'), TH('Compared'))),
+        h('tbody', ...CLUSTER_SORT.apply(ctx.clusters.map((c) => ({ c, m: figures.get(c.id) })), CLUSTER_COLS)
+          .map(({ c, m }) => clusterRow(c, m, c.id === ui.picked)))))),
     picked ? card(`${picked.name} · day by day`, p.label.toLowerCase(),
       pm && pm.rows.length
         ? h('div.tbl-wrap', h('table.tbl',
-          h('thead', h('tr', TH('Day'), TH('Indices', true), TH('Index size', true), TH('event_logsize', true), TH('Difference', true), TH('Ratio', true), TH('Compared'))),
+          h('thead', h('tr', STH(DAY_SORT, 'day', 'Day'), STH(DAY_SORT, 'indices', 'Indices', true), STH(DAY_SORT, 'index', 'Index size', true),
+            STH(DAY_SORT, 'event', 'event_logsize', true), STH(DAY_SORT, 'diff', 'Difference', true), STH(DAY_SORT, 'ratio', 'Ratio', true), TH('Compared'))),
           h('tbody', ...dayRows(pm))))
         : h('div.tbl-empty', pm ? 'No day recorded in this period.' : 'Reading the daily record…')) : null);
 }

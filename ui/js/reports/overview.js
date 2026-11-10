@@ -14,7 +14,8 @@ import { utcDay, addDays, shortDay, eventBytesOf, eventYesterday, eventVsAvgPct,
 import { workbook, XLSX_MIME } from '../lib/xlsx.js';
 import { clusterFigures, recordEntry, recordState, RATE_DAYS } from './record.js';
 import { layoutOf, setLocalLayout, layoutNote, canShare, shareWhy, shareLayout } from './layouts.js';
-import { layoutTable, layoutCsv } from './table.js';
+import { layoutTable, layoutCsv, layoutSortCols } from './table.js';
+import { tableSort } from '../lib/table-sort.js';
 import { columnsMenu } from '../lib/columns.js';
 import { amber, muted, tag, loading, sizeOr, change, changeText, daysText, runwayLevel, gbCell } from './cells.js';
 
@@ -81,7 +82,7 @@ export function overviewDefs(openDaily) {
     { key: 'backups', label: 'Backups', cell: (r) => backupFit(r).node, csv: (r) => backupFit(r).text },
     { key: 'daily', label: 'Daily record', title: 'Open this cluster\'s daily record',
       cell: (r) => h('button.linkish', { type: 'button', onclick: () => openDaily(r.cluster.id), 'aria-label': `Daily record of ${r.cluster.name}` }, 'Daily ›'),
-      csv: () => null },
+      csv: () => null, sort: false },
   ];
 }
 
@@ -172,8 +173,9 @@ let menuBtn = null;
  * @param ctx { clusters, redraw, openDaily(id), goSection(id) }
  */
 export function overviewSection(ctx) {
-  const rows = ctx.clusters.map(rowOf);
   const defs = overviewDefs(ctx.openDaily);
+  // The clusters in the order the header asks for (none: the order they are picked in).
+  const rows = tableSort('reports.overview', { onChange: ctx.redraw }).apply(ctx.clusters.map(rowOf), layoutSortCols(defs));
   const layout = layoutOf(TABLE);
   if (!menuState) {
     menuState = { defs, layout, id: 'rp-cols-overview',
@@ -197,7 +199,7 @@ export function overviewSection(ctx) {
       card('How long the free disk lasts', `data nodes only · at each cluster's ${RATE_DAYS}-day rate`, runway(rows),
         [h('button.linkish', { type: 'button', onclick: () => ctx.goSection('capacity') }, 'Capacity ›')])),
     card('By cluster', `${plural(rows.length, 'cluster')} · one line each`,
-      layoutTable({ defs, layout, rows, emptyText: 'No cluster is selected' }),
+      layoutTable({ defs, layout, rows, emptyText: 'No cluster is selected', sort: tableSort('reports.overview') }),
       [menuBtn || (menuBtn = columnsMenu(menuState)),
         h('button#rp-overview-csv.btn.sm', { type: 'button', onclick: () => exportOverview(defs, layout, rows) }, 'Export CSV')]));
 }
