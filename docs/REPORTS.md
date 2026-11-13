@@ -57,6 +57,25 @@ disagree, this file wins and the difference is a bug in one of them: fix it.
   rules are unchanged (docs/VOLUME.md).
 - Controls: Daily | Monthly, Source, Average over, Collect now, Export CSV. No source line
   (no "Indices logstash-* · day from…"), no table captions.
+- **Collect now** (`ui/js/reports/collect.js`, the one definition, also behind Measure size):
+  `VOLUME_RUN` answers at once and the collection runs on the server. The page says what the
+  answer was — collecting (with the run id), already collecting (that run is followed), collected
+  less than a minute ago, unreachable, the emergency stop, not one of your clusters — and follows
+  the run in `JOBS_LIST {jobId: "volume.daily"}` every 3 s for as long as it runs (at most two
+  hours), whatever page is open; the toolbar shows the cluster's days done of total. When it
+  ends: *Collection finished · N days searched*, or failed / deferred / cancelled with the run
+  log's error and *Try again*. A run the caller may not read in the run log (it also covers a
+  cluster they do not see) is followed through the cluster's own status. A run already going
+  when the section opens (the timer's, another person's) is followed too.
+- **An empty record says why** (`core/volume-daily.js recordEmptyWhy`, the one definition for
+  Daily and Overview): a collection running (days done of total), no index of the chosen source
+  in these days, never collected (and when the timer runs), the last collection did not finish
+  (its error, and where the record ends), no index matches the pattern (with skipped names), or
+  every matching index older than the window ("the record ends on …"); on Overview also
+  "event_logsize is not measured on this cluster". Never only "nothing recorded".
+- **A source chosen on another cluster** (or another visit) that the cluster shown has no index
+  of in these days is not kept as a filter that empties the page: Daily shows all sources and
+  says "Source X has no index on <cluster> in these days: showing all sources".
 - Daily: four tiles (Yesterday, 7-day average, Peak day, Month so far — all event_logsize,
   docs in the detail line), *Log size per day* line chart with 7-day average, *Day by day*
   table: Day, Indices, Documents, event_logsize, vs 7-day avg, Status (final / today so far /

@@ -274,6 +274,66 @@ async fn a_measured_event_field_is_summed() {
     let daily = settle(&c, "prod").await;
     assert_eq!(row(&daily, t - Duration::days(1))["eventBytes"], 1200);
     assert_eq!(daily["cards"]["eventBytes30"]["value"], 1200);
+    // The local record's newest day, so an empty window can say where the record ends.
+    assert_eq!(daily["newestDay"], json!(dash(t - Duration::days(1))), "{daily}");
+}
+
+/// A day whose search a proxy or jump host turned away (502/503/504) or that timed out is
+/// asked again within the run — three tries in all — instead of waiting for the next run; a
+/// refusal that will not pass (a 400) is not.
+#[tokio::test]
+async fn a_day_search_that_may_pass_is_tried_again_in_the_run() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let t = today();
+    let (good, bad) = (t - Duration::days(1), t - Duration::days(2));
+    let names = [format!("logstash-linux-{}", dot(good)), format!("logstash-linux-{}", dot(bad))];
+    let turned_away = Arc::new(AtomicUsize::new(0));
+    let ta = turned_away.clone();
+    let srv = TestServer::with(move |hit| {
+        if hit.path.starts_with("/_cat/indices/") {
+            let rows: Vec<Value> = names.iter().map(|n| json!({ "index": n, "status": "open", "docs.count": "10",
+                "pri.store.size": "10", "store.size": "20" })).collect();
+            return (200, Value::Array(rows).to_string());
+        }
+        if hit.path.contains("/_field_caps") {
+            return (200, json!({ "indices": [], "fields": {
+                "event_logsize": { "long": { "type": "long", "searchable": true, "aggregatable": true } } } }).to_string());
+        }
+        if let Some(s) = support::day_search(hit) {
+            if s.dated.iter().any(|n| n.ends_with(&dot(bad))) {
+                return (400, r#"{"error":"bad query"}"#.into());
+            }
+            // The first ask for `good` is turned away by the proxy; the second goes through.
+            if ta.fetch_add(1, Ordering::SeqCst) == 0 {
+                return (503, "<html>503 Service Temporarily Unavailable</html>".into());
+            }
+            let buckets: Vec<Value> = s.dated.iter().map(|n| json!({ "key": n, "doc_count": 10, "ev": { "value": 30.0 } })).collect();
+            return (200, json!({ "hits": { "total": { "value": 10, "relation": "eq" } }, "aggregations": {
+                "ev": { "value": 30.0 }, "by_index": { "sum_other_doc_count": 0, "buckets": buckets } } }).to_string());
+        }
+        (404, r#"{"error":"not here"}"#.into())
+    })
+    .await;
+    let dir = TempDir::new("volume-retry");
+    let c = portable(&dir, &srv.url()).await;
+    let r = c.handle(json!({ "type": "VOLUME_RUN" })).await;
+    assert_eq!(r["started"], json!(["prod"]), "{r}");
+    assert!(r["runId"].is_string(), "the run's id, for following it in JOBS_LIST: {r}");
+    let mut daily = Value::Null;
+    for _ in 0..600 {
+        daily = c.handle(json!({ "type": "VOLUME_DAILY", "clusterId": "prod", "days": 14, "avgDays": 3 })).await;
+        if daily["status"]["running"] == json!(false) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    assert_eq!(daily["status"]["running"], json!(false), "the run did not finish: {daily}");
+    assert_eq!(searches_for(&srv, good), 2, "turned away once, asked again in the same run");
+    assert_eq!(row(&daily, good)["final"], json!(true), "{daily}");
+    assert_eq!(row(&daily, good)["eventBytes"], json!(30));
+    assert_eq!(searches_for(&srv, bad), 1, "a 400 will not pass: not asked again");
+    let e = row(&daily, bad)["error"].as_str().unwrap_or_default().to_string();
+    assert!(e.contains("asked again on the next run") && !e.contains("tries"), "{e}");
 }
 
 /// A clusters file (here: the desktop message) that names only the legacy `indexFormat`

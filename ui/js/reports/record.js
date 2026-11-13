@@ -11,8 +11,8 @@
 
 import { state } from '../core/state.js';
 import { runBounded } from '../core/fleet.js';
-import { volumeDaily, volumeRun, perDayEventBytes } from '../core/volume-daily.js';
-import { isWorkerDown } from '../core/reports.js';
+import { volumeDaily, perDayEventBytes } from '../core/volume-daily.js';
+import { collectNow, collecting, reportStatus, FOLLOW_LIMIT_MS } from './collect.js';
 import { dataNodeDisk, storagePlanRow, parseRetention, parseSize, volumeSettings, diskLastsDays } from '../core/volume.js';
 import { clusterKind } from '../core/cluster-kind.js';
 
@@ -22,7 +22,6 @@ export const RECORD_DAYS = 40;
 export const RATE_DAYS = 7;
 
 const POLL_MS = 3000;
-const POLL_LIMIT_MS = 5 * 60 * 1000;
 
 /** id → { loading, reply, error, at } */
 const records = new Map();
@@ -45,7 +44,7 @@ async function loadOne(id, force) {
   if (res.unsupported) recordState.unsupported = true;
   else if (res.kind === 'no_store') recordState.noStore = true;
   else if (!res.ok) ent.error = res.message || res.kind || 'no answer';
-  else { ent.reply = res; ent.at = Date.now(); }
+  else { ent.reply = res; ent.at = Date.now(); reportStatus(id, res.status); }
 }
 
 /** Ask for the records of these clusters that are not here yet. Redraws through onRecords. */
@@ -60,30 +59,28 @@ export async function ensureRecords(ids, { force = false } = {}) {
 
 /**
  * Collect now / Measure size: VOLUME_RUN for these clusters (the same request either way,
- * docs/REPORTS.md), then the records again until the runs end or five minutes pass.
- * `{ok, message?, tooSoon:[ids]}`.
+ * docs/REPORTS.md) through reports/collect.js, which follows the run; the records are read
+ * again while it runs. `{ok, level?, message, lines, started, already, tooSoon, skipped}`.
  */
 export async function runCollection(ids) {
-  const res = await volumeRun(ids);
-  if (res.unsupported) { recordState.unsupported = true; changed(); return { ok: false, message: 'This server does not keep a daily record yet.' }; }
-  if (res.kind === 'no_store') { recordState.noStore = true; changed(); return { ok: false, message: 'This server keeps no daily record.' }; }
-  // The report worker not running (or another version) is the core's sentence, in amber: collection resumes when it is back.
-  if (!res.ok && isWorkerDown(res)) return { ok: false, level: 'warn', message: res.message || 'The report worker is not running: collection resumes when it is back.' };
-  if (!res.ok) return { ok: false, level: 'err', message: res.kind === 'config_unreadable' ? res.message : `Could not start a collection: ${res.message || res.kind}` };
-  follow(ids);
-  return { ok: true, tooSoon: res.tooSoon || [], started: res.started || [], already: res.already || [] };
+  const res = await collectNow(ids);
+  if (res.unsupported) { recordState.unsupported = true; changed(); return res; }
+  if (res.noStore) { recordState.noStore = true; changed(); return res; }
+  if (!res.ok) return res;
+  if (res.started.length || res.already.length) follow(ids);
+  return res;
 }
 
 function follow(ids) {
   if (recordState.polling) clearTimeout(recordState.polling.timer);
-  const p = { until: Date.now() + POLL_LIMIT_MS, timer: null, ids };
+  const p = { until: Date.now() + FOLLOW_LIMIT_MS, timer: null, ids };
   recordState.polling = p;
   changed();
   const tick = async () => {
     p.timer = null;
     if (recordState.polling !== p) return;
     await runBounded(ids, (id) => loadOne(id, true), { limit: 4 });
-    const running = ids.some((id) => { const r = recordOf(id); return r && r.status && r.status.running; });
+    const running = ids.some((id) => { const r = recordOf(id); return collecting(id) || (r && r.status && r.status.running); });
     if (running && Date.now() < p.until) { p.timer = setTimeout(tick, POLL_MS); changed(); return; }
     recordState.polling = null;
     changed();

@@ -10,7 +10,7 @@
 import { h } from '../lib/dom.js';
 import { bytes, num, toCsv, download, downloadBytes, plural } from '../lib/fmt.js';
 import { card, statTile, empty } from '../pages/common.js';
-import { utcDay, addDays, shortDay, eventBytesOf, eventYesterday, eventVsAvgPct, eventMonthSoFar, fleetEventTotals, NEEDS_VERSION } from '../core/volume-daily.js';
+import { utcDay, addDays, shortDay, eventBytesOf, eventYesterday, eventVsAvgPct, eventMonthSoFar, fleetEventTotals, recordEmptyWhy, NEEDS_VERSION } from '../core/volume-daily.js';
 import { workbook, XLSX_MIME } from '../lib/xlsx.js';
 import { clusterFigures, recordEntry, recordState, RATE_DAYS } from './record.js';
 import { layoutOf, setLocalLayout, layoutNote, canShare, shareWhy, shareLayout } from './layouts.js';
@@ -32,14 +32,18 @@ function rowOf(c) {
     ...f,
     waiting: !f.record && (!ent || ent.loading),
     recordError: ent && ent.error ? ent.error : null,
+    // Why there is no event_logsize to show for it (unknown is not zero): one definition with Daily.
+    why: f.record ? recordEmptyWhy(f.record, { event: true }) : null,
     yesterday: y ? y.value : null,
     vsAvg: f.record ? eventVsAvgPct(f.record, y.day, RATE_DAYS, { today }) : null,
     month: f.record ? eventMonthSoFar(f.record, { today }) : null,
   };
 }
 
-const unknownSize = (r) => (r.waiting ? loading() : amber('not measured', r.recordError
-  ? `The daily record could not be read: ${r.recordError}` : 'No event_logsize in the record: the field is not in the mapping, or nothing was collected yet.'));
+/** Why a cluster's line has no figure, in one sentence: what the record says, else what it could be. */
+const whyText = (r) => (r.recordError ? `The daily record could not be read: ${r.recordError}`
+  : r.why ? `${r.why.reason} ${r.why.detail}` : 'No event_logsize in the record: the field is not in the mapping, or nothing was collected yet.');
+const unknownSize = (r) => (r.waiting ? loading() : amber('not measured', whyText(r)));
 const size = (r, v) => (typeof v === 'number' ? bytes(v) : unknownSize(r));
 
 function liveFit(r) {
@@ -125,7 +129,7 @@ function dailyVolume(rows) {
     const vals = days.map((d) => by.get(d) ?? null);
     return { name: r.cluster.name, vals, sum: vals.reduce((a, x) => a + (x || 0), 0) };
   }).filter((s) => s.sum > 0).sort((a, b) => b.sum - a.sum);
-  if (!per.length) return empty('No event_logsize recorded for the last 30 days.', { detail: 'The daily record fills this in once a day; Collect now on Daily & monthly asks for it at once.' });
+  if (!per.length) return noVolume(rows);
   const top = per.slice(0, 5);
   const rest = per.slice(5);
   const series = [...top.map((s, i) => ({ ...s, color: STACK[i] })),
@@ -139,6 +143,23 @@ function dailyVolume(rows) {
     h('div.rp-cols', { role: 'img', 'aria-label': `Stacked event_logsize per day for the last ${DAYS} days; highest day ${bytes(max)}` }, ...cols),
     h('div.rp-axis', ...ticks),
     h('div.legend', ...series.map((s) => h('span', h('i', { style: { background: s.color } }), s.name))));
+}
+
+/**
+ * No event_logsize in the last 30 days: why, per cluster (core/volume-daily.js recordEmptyWhy),
+ * not a bare "nothing". One cluster shown: its reason. Several: the first three, by name.
+ */
+function noVolume(rows) {
+  const generic = 'The daily record fills this in once a day; Collect now on Daily & monthly asks for it at once.';
+  if (rows.some((r) => r.waiting)) return empty('Reading the daily record…');
+  const said = rows.map((r) => ({ name: r.cluster.name, text: r.recordError ? `the daily record could not be read: ${r.recordError}` : r.why ? r.why.reason : null, why: r.why }))
+    .filter((x) => x.text);
+  if (rows.length === 1 && said.length === 1) {
+    return empty(said[0].why ? said[0].why.reason : 'The daily record could not be read.', { detail: said[0].why ? said[0].why.detail : said[0].text });
+  }
+  if (!said.length) return empty(`No ${rows.length === 1 ? '' : 'cluster has '}event_logsize recorded for the last 30 days.`, { detail: generic });
+  const shown = said.slice(0, 3).map((x) => `${x.name}: ${x.text}`).join(' · ');
+  return empty('No event_logsize recorded for the last 30 days.', { detail: `${shown}${said.length > 3 ? ` · and ${plural(said.length - 3, 'more cluster')}` : ''}` });
 }
 
 /** Free data-node disk at each cluster's 7-day rate, soonest first. */
