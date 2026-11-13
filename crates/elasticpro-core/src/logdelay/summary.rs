@@ -428,7 +428,7 @@ pub fn device(c: &ClusterInput, name: &str, r: &Range, now: i64, every_hours: u6
     let silences: Vec<Value> = c.tracker.silences.iter().chain(c.tracker.open_silences()).filter(|s| s.device == name && s.from_ms < r.to_ms && s.to_ms.unwrap_or(now) >= r.from_ms)
         .map(|s| json!({ "from": s.from_ms, "to": s.to_ms, "burstDocs": s.burst_docs, "burstMinutes": s.burst_minutes })).collect();
     let range_ms = (r.to_ms.min(now) - r.from_ms).max(1);
-    Some(json!({
+    let mut v = json!({
         "device": name, "cluster": c.id, "clusterName": c.name, "from": r.from.format("%Y-%m-%d").to_string(), "to": r.to.format("%Y-%m-%d").to_string(),
         "label": r.label(), "now": now, "everyHours": every_hours, "levels": c.levels,
         "state": d.state, "nowMinutes": row.now_minutes, "lateSince": row.late_since, "silentSince": row.silent_since,
@@ -436,7 +436,7 @@ pub fn device(c: &ClusterInput, name: &str, r: &Range, now: i64, every_hours: u6
         "episodes": eps.len(), "solved": solved.len(), "lateMs": row.late_ms,
         "latePct": ((row.late_ms as f64 / range_ms as f64) * 1000.0).round() / 10.0,
         "docsPerDay": row.docs_per_day, "lastSilence": silences.last().and_then(|s| s.get("from").cloned()),
-        "extras": d.extras, "zone": row.zone, "tag1": row.tag1, "inLastRun": row.in_last_run, "lastArrival": d.last_arrival_ms, "lastEvent": d.last_event_ms, "firstSeen": d.first_seen_ms,
+        "extras": d.extras, "lastArrival": d.last_arrival_ms, "lastEvent": d.last_event_ms, "firstSeen": d.first_seen_ms,
         "points": points,
         "periods": eps.iter().map(|e| json!({
             "started": e.started_ms, "solved": e.solved_ms, "ended": e.ended_ms, "lastedMs": e.lasted_ms(now), "worstMinutes": e.worst_minutes, "worstState": e.worst_state,
@@ -451,7 +451,12 @@ pub fn device(c: &ClusterInput, name: &str, r: &Range, now: i64, every_hours: u6
             "lateMostOften": most,
         },
         "finding": finding,
-    }))
+    });
+    // Beside the rest (one json! of this size is at the macro's recursion limit).
+    v["zone"] = json!(row.zone);
+    v["tag1"] = json!(row.tag1);
+    v["inLastRun"] = json!(row.in_last_run);
+    Some(v)
 }
 
 /// `*` and `?` wildcards, case-insensitive, whole value.
