@@ -261,6 +261,9 @@ pub struct Core {
     /// What operators and admins changed about Zabbix clusters in ElasticPro (hosted). See
     /// `zbx_overlay`.
     pub(crate) zbx_overlay: crate::zbx_overlay::Overlays,
+    /// Zabbix hosts at the address of a cluster that exists already: held for an administrator's
+    /// review, and what was decided (hosted). See `zbx_conflicts`.
+    pub(crate) zbx_conflicts: crate::zbx_conflicts::Conflicts,
     /// The two writers, used for nothing but `zabbix.createHosts`. Separate credentials, so
     /// the sync that runs every few minutes can read and never write.
     zbx_writer: Zabbix,
@@ -366,6 +369,33 @@ struct ZbxSync {
     /// Whether each Zabbix cluster signs in with a credential of its own (`zbx_overlay::signs_in_with_own`),
     /// by cluster id: then only an administrator changes where its requests go.
     own_cred: HashMap<String, bool>,
+    /// Hosts at the address of a cluster that exists already, as the last build resolved them
+    /// (`zbx_conflicts`): waiting, skipped, or let in — the review's list.
+    held: Vec<Value>,
+}
+
+/// One build of the Zabbix clusters (`zabbix_assemble`), kept by `zabbix_build` or compared by a
+/// dry run.
+struct ZbxBuilt {
+    specs: HashMap<String, ClusterSpec>,
+    view: Vec<Value>,
+    kinds: HashMap<String, String>,
+    dests: HashMap<String, String>,
+    own_cred: HashMap<String, bool>,
+    problems: usize,
+    review: Vec<Value>,
+}
+
+/// What the review shows of a Zabbix host, and — with no overlay — what its fingerprint is made
+/// of (`zbx_conflicts::fingerprint`): Zabbix's own values. With the overlay laid over: the cluster
+/// as it is in use, for the side another host conflicts with.
+fn review_values(c: &crate::zabbix_api::ZbxCluster, ov: Option<&crate::zbx_overlay::Overlay>) -> Value {
+    use crate::zbx_overlay as overlay;
+    let via = c.jump.clone().or_else(|| c.jump_addr.as_ref().map(|(h, p)| format!("{h}:{p}")));
+    let tags = ov.and_then(|o| o.get("tags").cloned()).unwrap_or_else(|| json!(overlay::zabbix_tags(c.client.as_deref())));
+    json!({ "name": overlay::name(ov, &c.name), "url": crate::zbx_conflicts::without_credential(&c.url), "host": c.host,
+            "via": via, "username": c.username, "client": c.client, "tags": tags,
+            "tls": overlay::tls(ov), "enabled": overlay::enabled(ov) })
 }
 
 /// What the job is set to do, and what it last did. Kept together because an admin
@@ -883,6 +913,8 @@ impl Core {
             zbx_build: tokio::sync::Mutex::new(()),
             zbx_overlay: crate::zbx_overlay::Overlays::open(
                 data_dir_for_notify.as_ref().filter(|_| hosted).map(|d| d.join(crate::zbx_overlay::FILE))),
+            zbx_conflicts: crate::zbx_conflicts::Conflicts::open(
+                data_dir_for_notify.as_ref().filter(|_| hosted).map(|d| d.join(crate::zbx_conflicts::FILE))),
             zbx_writer,
             vault_writer,
             zbx_metrics_cache: parking_lot::Mutex::new(HashMap::new()),
@@ -1699,6 +1731,8 @@ impl Core {
             }
             "CLUSTER_SAVE" => self.cluster_save(&msg, caller.as_ref()).await,
             "ZABBIX_CLUSTER_SAVE" => self.zabbix_cluster_save(&msg, caller.as_ref()).await,
+            "ZABBIX_CONFLICT_DECIDE" => self.zabbix_conflict_decide(&msg, caller.as_ref()).await,
+            "ZABBIX_SYNC_PREVIEW" => self.zabbix_sync_preview(caller.as_ref()).await,
             "AUTOMATIONS_SAVE" => self.automations_save(&msg, caller.as_ref()).await,
             "ZABBIX_ROLEMAP_GET" | "ZABBIX_ROLEMAP_SET" | "ZABBIX_ROLEMAP_PREVIEW" => self.rolemap_msg(&t, &msg, caller.as_ref()).await,
             "ZABBIX_USERS" => self.zabbix_users_msg().await,
@@ -4938,10 +4972,100 @@ impl Core {
     /// and `enabled` decide what is polled, and whose other fields ride on the row for the pages.
     /// The address is always Zabbix's. A cluster's own credential kept in ElasticPro
     /// (`cfg:<id>`, bound to its destination) wins over Zabbix's, at that destination only.
-    /// Returns (clusters, polled, with problems). The caller holds `zbx_build`.
+    /// A host at the address of a cluster that exists already is held for review, not built
+    /// (`zbx_conflicts`). Returns (clusters, polled, with problems). The caller holds `zbx_build`.
     async fn zabbix_build(self: &Arc<Self>, found: Vec<crate::zabbix_api::ZbxCluster>, opts: &ZbxOptions) -> (usize, usize, usize) {
+        let b = self.zabbix_assemble(found, opts, false).await;
+        let out = (b.view.len(), b.specs.len(), b.problems);
+        {
+            let mut z = self.zbx_sync.write();
+            z.specs = b.specs;
+            z.view = b.view;
+            z.kinds = b.kinds;
+            z.dests = b.dests;
+            z.own_cred = b.own_cred;
+            z.held = b.review;
+        }
+        self.forget_connections();
+        out
+    }
+
+    /// The clusters that exist already, as the review compares a Zabbix host with them: the
+    /// config file's (the ids its pages give them), then any primed cluster the file does not
+    /// name. Zabbix's own (`zbx-…`) are not among them.
+    async fn config_known(&self) -> Vec<crate::zbx_conflicts::Known> {
+        use crate::zbx_conflicts::{legacy_key, url_key, without_credential, Known};
+        let mut out: Vec<Known> = vec![];
+        if let Ok(raw) = self.read_config_file().await {
+            let list = raw.get("clusters").or_else(|| raw.get("hosts")).and_then(Value::as_array).cloned().unwrap_or_default();
+            let ids = crate::cluster_save::config_ids(&list);
+            for (c, id) in list.iter().zip(ids) {
+                let Some(url) = c.get("url").and_then(Value::as_str) else { continue };
+                if id.starts_with("zbx-") {
+                    continue;
+                }
+                let via = crate::cluster_save::route_of(c);
+                out.push(Known {
+                    kind: "config", id: id.clone(), host_id: String::new(), identity: url_key(url), legacy: legacy_key(url),
+                    values: json!({ "name": c.get("name").and_then(Value::as_str).unwrap_or(&id), "url": without_credential(url),
+                                    "via": if via.is_empty() { Value::Null } else { json!(via) },
+                                    "tls": c.get("tls").cloned().unwrap_or(Value::Null), "tags": c.get("tags").cloned().unwrap_or(json!([])),
+                                    "enabled": c.get("enabled") != Some(&json!(false)),
+                                    "username": c.get("username").cloned().unwrap_or(Value::Null) }),
+                });
+            }
+        }
+        let mut primed: Vec<ClusterSpec> = self.primed.read().clusters.values().filter(|s| !s.id.starts_with("zbx-")).cloned().collect();
+        primed.sort_by(|a, b| a.id.cmp(&b.id));
+        for s in primed {
+            if out.iter().any(|k| k.id == s.id) {
+                continue;
+            }
+            out.push(Known {
+                kind: "config", id: s.id.clone(), host_id: String::new(), identity: url_key(&s.url), legacy: legacy_key(&s.url),
+                values: json!({ "name": s.name.clone().unwrap_or_else(|| s.id.clone()), "url": without_credential(&s.url),
+                                "via": s.via, "tls": s.tls, "tags": [], "enabled": true, "username": Value::Null }),
+            });
+        }
+        out
+    }
+
+    /// Build the Zabbix clusters from what Zabbix gave, without keeping them: `zabbix_build` keeps
+    /// what this returns; a dry run (`ZABBIX_SYNC_PREVIEW`) only compares it. A dry run changes
+    /// nothing anywhere — no record of conflicts, no overlay, no credential moved.
+    async fn zabbix_assemble(self: &Arc<Self>, found: Vec<crate::zabbix_api::ZbxCluster>, opts: &ZbxOptions, dry: bool) -> ZbxBuilt {
+        use crate::zbx_conflicts as zc;
         use crate::zbx_overlay as overlay;
         let hosted = self.edition == Edition::Hosted;
+        // Which hosts are clusters: one at the address of a cluster that exists already waits for
+        // an administrator (zbx_conflicts). The core keeps the record; the worker only reads it.
+        let known = self.config_known().await;
+        let prev_used: std::collections::HashSet<String> = self.zbx_sync.read().view.iter()
+            .filter_map(|v| v["zabbixHostId"].as_str().map(String::from)).collect();
+        let candidates: Vec<zc::Found> = found.iter().map(|c| {
+            let ov = self.zbx_overlay.get(&c.hostid);
+            zc::Found { host_id: c.hostid.clone(), host: c.host.clone(), id: c.id(), identity: zc::url_key(&c.url),
+                        legacy: zc::legacy_key(&c.url), values: review_values(c, None), effective: review_values(c, ov.as_ref()) }
+        }).collect();
+        let first_run = self.zbx_conflicts.first_run();
+        let resolved = zc::resolve(&known, &candidates, &prev_used, &self.zbx_conflicts.all(), first_run, auth::now());
+        if !dry && self.role != crate::worker::Role::Worker {
+            if resolved.changed || first_run {
+                if let Err(e) = self.zbx_conflicts.commit(resolved.entries.clone()) {
+                    tracing::warn!(error = %e, "zabbix sync: the review record was not written; conflicts stay held");
+                }
+            }
+            for h in &resolved.newly_held {
+                let e = resolved.entries.get(h);
+                tracing::warn!(target: "audit", host_id = %h, host = %e.map(|e| e.host.as_str()).unwrap_or(""),
+                               against = %e.map(|e| format!("{} {}", e.against.kind, e.against.id)).unwrap_or_default(),
+                               address = %e.map(|e| e.identity.as_str()).unwrap_or(""),
+                               "zabbix sync: a host at an existing cluster's address is held for review; nothing about that cluster changed");
+            }
+        }
+        let known_by_id: HashMap<&str, &zc::Known> = known.iter().map(|k| (k.id.as_str(), k)).collect();
+        let found_name: HashMap<String, (String, String)> = found.iter()
+            .map(|c| (c.hostid.clone(), (overlay::name(self.zbx_overlay.get(&c.hostid).as_ref(), &c.name), c.url.clone()))).collect();
         let jumps: Vec<(String, String, u16)> = self.tunnels.read().await.iter()
             .map(|(id, r)| (id.clone(), r.tunnel.spec.host.clone(), r.tunnel.spec.port)).collect();
         let jump_ids: std::collections::HashSet<String> = jumps.iter().map(|j| j.0.clone()).collect();
@@ -4952,7 +5076,7 @@ impl Core {
         let (held_by_url, shared): (HashMap<String, String>, Option<String>) = {
             let p = self.primed.read();
             (p.clusters.values().filter_map(|s| {
-                s.auth_header.as_ref().filter(|a| !a.is_empty()).map(|a| (s.url.trim_end_matches('/').to_ascii_lowercase(), a.clone()))
+                s.auth_header.as_ref().filter(|a| !a.is_empty()).map(|a| (zc::url_key(&s.url), a.clone()))
             }).collect(), p.shared_auth.clone())
         };
         let primed_ids: std::collections::HashSet<String> = self.primed.read().clusters.keys().cloned().collect();
@@ -4968,6 +5092,12 @@ impl Core {
         let mut own_cred = HashMap::new();
         let mut problems = 0;
         for c in found {
+            // Held for review, or taken over by a host an administrator let in: not a cluster now.
+            let (replaces, decision) = match resolved.fate.get(&c.hostid) {
+                Some(zc::Fate::Held) | Some(zc::Fate::Replaced { .. }) => continue,
+                Some(zc::Fate::Build { replaces, decision }) => (replaces.clone(), *decision),
+                None => (None, None),
+            };
             let id = c.id();
             if let Some(k) = c.kind.as_deref() {
                 kinds.insert(id.clone(), k.to_string());
@@ -4975,7 +5105,7 @@ impl Core {
             let ov = self.zbx_overlay.get(&c.hostid);
             // The host's technical name changed since the overlay last saw it: the credential kept
             // under the old id follows (still bound to the same destination). The core's alone.
-            if ov.is_some() && self.role != crate::worker::Role::Worker {
+            if ov.is_some() && self.role != crate::worker::Role::Worker && !dry {
                 match self.zbx_overlay.seen(&c.hostid, &id, &c.host) {
                     Ok(Some(was)) => self.move_kept_credential(&was, &id),
                     Ok(None) => {}
@@ -5024,12 +5154,12 @@ impl Core {
             }
             let mut user_override: Option<String> = None;
             // With ElasticPro's credentials: a config cluster's own header at this address, not the shared one.
-            let per_address = opts.use_elasticpro_credentials && held_by_url.contains_key(&c.url.trim_end_matches('/').to_ascii_lowercase());
+            let per_address = opts.use_elasticpro_credentials && held_by_url.contains_key(&zc::url_key(&c.url));
             let (credential, auth) = if let Some(h) = own {
                 user_override = Some(kept_users.get(&own_key).cloned().flatten().unwrap_or_else(|| "(api key or token)".into()));
                 ("elasticpro-own", Some(h))
             } else {
-                let own_url = held_by_url.get(&c.url.trim_end_matches('/').to_ascii_lowercase()).cloned().or_else(|| shared.clone());
+                let own_url = held_by_url.get(&zc::url_key(&c.url)).cloned().or_else(|| shared.clone());
                 let (credential, secret) = if opts.use_elasticpro_credentials {
                     // The config says so: ElasticPro's credential, not Vault's. The header is
                     // taken as it is; there is no password to combine with a username.
@@ -5102,25 +5232,29 @@ impl Core {
                 "ownCredential": credential == "elasticpro-own", "ownCredentialMoved": own_elsewhere,
                 // Its credential is its own (Zabbix's or ElasticPro's): only an admin changes its route.
                 "credentialIsOwn": signs_in_own || own_elsewhere,
+                // The address as the review compares it (zbx_conflicts::url_identity): the pages read it
+                // from here rather than keep a definition of their own.
+                "identity": zc::url_key(&c.url),
             });
             if let Some(m) = row.as_object_mut() {
                 m.extend(overlay::row_fields(ov, &c.name, zabbix_via.as_deref(), c.client.as_deref()));
+                if let Some(d) = decision {
+                    m.insert("review".into(), json!(d.as_str()));
+                }
+                // Let in by an administrator's **update**: the cluster it took over. A config-file one
+                // the pages set aside; a Zabbix one is not built.
+                if let Some(a) = replaces {
+                    let (name, url) = match a.kind.as_str() {
+                        "config" => known_by_id.get(a.id.as_str()).map(|k| (k.values["name"].clone(), k.values["url"].clone())),
+                        _ => found_name.get(&a.host_id).map(|(n, u)| (json!(n), json!(u))),
+                    }.unwrap_or((json!(a.id), Value::Null));
+                    m.insert("replaces".into(), json!({ "kind": a.kind, "id": a.id, "hostId": a.host_id, "name": name, "url": url }));
+                }
             }
             view.push(row);
         }
         view.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
-        let n = view.len();
-        let in_use = specs.len();
-        {
-            let mut z = self.zbx_sync.write();
-            z.specs = specs;
-            z.view = view;
-            z.kinds = kinds;
-            z.dests = dests;
-            z.own_cred = own_cred;
-        }
-        self.forget_connections();
-        (n, in_use, problems)
+        ZbxBuilt { specs, view, kinds, dests, own_cred, problems, review: resolved.review }
     }
 
     /// Demote-only re-evaluation of every unpinned Zabbix account from the groups Zabbix lists
@@ -5314,12 +5448,20 @@ impl Core {
     /// and it decides by those permissions.
     ///
     /// Returns one line per cluster considered: "created …", or why not.
+    /// The primed config clusters Zabbix has no host at the address of — what `createHosts` makes
+    /// hosts for, and what a dry run says it would.
+    fn provision_candidates(&self, in_zabbix: &[crate::zabbix_api::ZbxCluster]) -> Vec<ClusterSpec> {
+        use crate::zbx_conflicts::url_key;
+        let have: std::collections::HashSet<String> = in_zabbix.iter().map(|c| url_key(&c.url)).collect();
+        let mut out: Vec<ClusterSpec> = self.primed.read().clusters.values()
+            .filter(|s| !s.id.starts_with("zbx-") && !have.contains(&url_key(&s.url))).cloned().collect();
+        out.sort_by(|a, b| a.id.cmp(&b.id));
+        out
+    }
+
     async fn provision_hosts(&self, in_zabbix: &[crate::zabbix_api::ZbxCluster], opts: &ZbxOptions) -> Vec<String> {
         use crate::zabbix_api::{slug, split_url, technical_name, NewHost};
-        let key = |u: &str| u.trim_end_matches('/').to_ascii_lowercase();
-        let have: std::collections::HashSet<String> = in_zabbix.iter().map(|c| key(&c.url)).collect();
-        let candidates: Vec<ClusterSpec> = self.primed.read().clusters.values()
-            .filter(|s| !s.id.starts_with("zbx-") && !have.contains(&key(&s.url))).cloned().collect();
+        let candidates = self.provision_candidates(in_zabbix);
         if candidates.is_empty() {
             return vec![];
         }
@@ -5394,6 +5536,11 @@ impl Core {
                         let _ = self.zbx_writer.grant_read(g, &client_group).await;
                     }
                     tracing::info!(target: "audit", cluster = %name, hostid = %id, "zabbix host created from the config");
+                    // The host is at this cluster's address on purpose: it takes the cluster over, as
+                    // createHosts asks — recorded as that decision, not held for review.
+                    if let Err(e) = self.zbx_conflicts.preapprove(&id, &host, &crate::zbx_conflicts::url_key(&s.url), &s.id, auth::now()) {
+                        tracing::warn!(cluster = %name, error = %e, "createHosts: the decision for the new host was not recorded; it is held for review");
+                    }
                     out.push(format!("created {host:?} for {name}{note}"));
                 }
                 Err(e) => out.push(format!("{name}: {e}")),
@@ -5464,6 +5611,7 @@ impl Core {
     fn zabbix_clusters(&self, caller: Option<&Caller>) -> Value {
         let z = self.zbx_sync.read();
         let admin = caller.is_none_or(|c| c.role >= Role::Admin);
+        let reviewer = admin && !caller.is_some_and(Caller::limited);
         let clusters: Vec<Value> = z.view.iter().filter(|v| {
             let groups: Vec<String> = v["zabbixGroups"].as_array().into_iter().flatten()
                 .filter_map(|g| g.as_str().map(String::from)).collect();
@@ -5495,7 +5643,124 @@ impl Core {
             "error": if admin { json!(z.error) } else { Value::Null },
             "skipped": if admin { json!(z.skipped) } else { json!([]) },
             "templates": if admin { json!(z.templates) } else { json!([]) },
+            // Hosts held for review (zbx_conflicts): an administrator's of the whole fleet — they name
+            // hosts and addresses whatever the caller's scope — so not for one limited to some.
+            "held": if reviewer { json!(z.held) } else { json!([]) },
+            "reviewNeeded": if reviewer { z.held.iter().filter(|e| e["state"] != json!("decided")).count() } else { 0 },
         })
+    }
+
+    /// `ZABBIX_CONFLICT_DECIDE {hostId, decision: "skip"|"update"|"keepBoth", fingerprint}` (admin, not
+    /// limited, hosted): an administrator's decision on a Zabbix host held because it is at the
+    /// address of a cluster that exists already (`zbx_conflicts`). Made on the values the review
+    /// showed (`fingerprint`); applied at once from the last sync's reading, without asking Zabbix,
+    /// and kept for every later sync until Zabbix's values for the host change. Zabbix is never
+    /// written to, nor the config file.
+    async fn zabbix_conflict_decide(self: &Arc<Self>, msg: &Value, caller: Option<&Caller>) -> Value {
+        if self.edition != Edition::Hosted {
+            return json!({ "ok": false, "kind": "not_available", "message": "clusters come from Zabbix only in the hosted build" });
+        }
+        let who = caller.map(|c| c.name.as_str()).unwrap_or("-");
+        let refused = |kind: &str, message: String| {
+            tracing::warn!(target: "audit", user = %who, kind, reason = %message, "zabbix conflict decision refused");
+            json!({ "ok": false, "kind": kind, "message": message })
+        };
+        if caller.is_some_and(Caller::limited) {
+            return refused("forbidden", "a conflict concerns the whole fleet: an administrator limited to some clusters cannot decide it".into());
+        }
+        let Some(host_id) = msg.get("hostId").and_then(Value::as_str).map(str::trim).filter(|h| !h.is_empty()) else {
+            return refused("bad_message", "say which Zabbix host (hostId)".into());
+        };
+        let Some(decision) = msg.get("decision").and_then(Value::as_str).and_then(crate::zbx_conflicts::Decision::parse) else {
+            return refused("bad_message", "decision: skip, update or keepBoth".into());
+        };
+        let Some(seen) = msg.get("fingerprint").and_then(Value::as_str).filter(|f| !f.trim().is_empty()) else {
+            return refused("bad_message", "fingerprint: the values the review showed".into());
+        };
+        let (entry, others) = {
+            let z = self.zbx_sync.read();
+            (z.held.iter().find(|e| e["hostId"].as_str() == Some(host_id)).cloned(), z.held.clone())
+        };
+        let Some(entry) = entry else {
+            return refused("not_found", format!("the last Zabbix sync holds no host {host_id:?} for review"));
+        };
+        if decision == crate::zbx_conflicts::Decision::Update {
+            let taken = others.iter().find(|o| o["hostId"].as_str() != Some(host_id) && o["decision"] == json!("update")
+                && o["existing"]["kind"] == entry["existing"]["kind"] && o["existing"]["id"] == entry["existing"]["id"]);
+            if let Some(o) = taken {
+                return refused("already_updated", format!("the Zabbix host {} already took that cluster over: skip this one, keep both, or change that decision first",
+                                                          o["host"].as_str().unwrap_or("")));
+            }
+        }
+        let was = entry["decision"].clone();
+        let by = self.saver_name(caller);
+        let kept = match self.zbx_conflicts.decide(host_id, decision, seen, &by, auth::now()) {
+            Ok(k) => k,
+            Err(r) => return refused(r.kind, r.message),
+        };
+        tracing::info!(target: "audit", user = %who, host_id = %host_id, host = %kept.host, decision = decision.as_str(),
+                       previous = %was, against = %format!("{} {}", kept.against.kind, kept.against.id), address = %kept.identity,
+                       "zabbix conflict decided");
+        self.zabbix_rebuild().await;
+        let after = self.zbx_sync.read().held.iter().find(|e| e["hostId"].as_str() == Some(host_id)).cloned().unwrap_or(Value::Null);
+        json!({ "ok": true, "hostId": host_id, "decision": decision.as_str(), "entry": after })
+    }
+
+    /// `ZABBIX_SYNC_PREVIEW` (admin, not limited): what a sync would do now — the clusters it would
+    /// add, change and remove, the hosts it would hold for review, the hosts `createHosts` would
+    /// make — without doing any of it. Zabbix (and Vault) are read; nothing is written anywhere:
+    /// not the cluster list, not the review record, not an overlay, not Zabbix, and no run is
+    /// recorded.
+    async fn zabbix_sync_preview(self: &Arc<Self>, caller: Option<&Caller>) -> Value {
+        if caller.is_some_and(Caller::limited) {
+            return json!({ "ok": false, "kind": "forbidden", "message": "a sync concerns the whole fleet: an administrator limited to some clusters cannot preview it" });
+        }
+        let zapi = self.zbx_api();
+        if !zapi.configured() {
+            return json!({ "ok": false, "kind": "not_configured", "message": "the Zabbix API is not configured" });
+        }
+        let opts = self.zbx_options().await;
+        let (found, skipped, _) = match zapi.clusters().await {
+            Ok(x) => x,
+            Err(e) => return json!({ "ok": false, "kind": "zabbix_error", "message": e }),
+        };
+        let would_create: Vec<Value> = if opts.create_hosts && self.role != crate::worker::Role::Worker {
+            self.provision_candidates(&found).iter().map(|s| json!({ "id": s.id, "name": s.name.clone().unwrap_or_else(|| s.id.clone()),
+                                                                   "url": crate::zbx_conflicts::without_credential(&s.url) })).collect()
+        } else {
+            vec![]
+        };
+        let built = {
+            let _one = self.zbx_build.lock().await;
+            self.zabbix_assemble(found, &opts, true).await
+        };
+        let now: Vec<Value> = self.zbx_sync.read().view.clone();
+        let by_host = |list: &[Value]| -> HashMap<String, Value> {
+            list.iter().filter_map(|v| v["zabbixHostId"].as_str().map(|h| (h.to_string(), v.clone()))).collect()
+        };
+        let (before, after) = (by_host(&now), by_host(&built.view));
+        let brief = |v: &Value| json!({ "hostId": v["zabbixHostId"], "id": v["_id"], "name": v["name"], "url": v["url"], "host": v["zabbixHost"] });
+        let add: Vec<Value> = built.view.iter().filter(|v| v["zabbixHostId"].as_str().is_some_and(|h| !before.contains_key(h))).map(brief).collect();
+        let remove: Vec<Value> = now.iter().filter(|v| v["zabbixHostId"].as_str().is_some_and(|h| !after.contains_key(h))).map(brief).collect();
+        let mut change = vec![];
+        let mut unchanged = 0;
+        for v in &built.view {
+            let Some(old) = v["zabbixHostId"].as_str().and_then(|h| before.get(h)) else { continue };
+            let fields: Vec<Value> = ["name", "url", "via", "tls", "enabled", "client", "credential", "credentialOk", "zabbixGroups", "replaces"].iter()
+                .filter(|k| old.get(**k).unwrap_or(&Value::Null) != v.get(**k).unwrap_or(&Value::Null))
+                .map(|k| json!({ "field": k, "from": old.get(*k).cloned().unwrap_or(Value::Null), "to": v.get(*k).cloned().unwrap_or(Value::Null) }))
+                .collect();
+            if fields.is_empty() {
+                unchanged += 1;
+            } else {
+                change.push(json!({ "hostId": v["zabbixHostId"], "id": v["_id"], "name": v["name"], "fields": fields }));
+            }
+        }
+        let hold: Vec<Value> = built.review.iter().filter(|e| e["decision"].is_null() || e["decision"] == json!("skip") || e["state"] == json!("changed"))
+            .cloned().collect();
+        json!({ "ok": true, "dryRun": true, "at": auth::now(), "lastSync": self.zbx_sync.read().last_ok,
+                "add": add, "change": change, "remove": remove, "hold": hold, "unchanged": unchanged,
+                "skipped": skipped, "wouldCreate": would_create, "clusters": built.view.len(), "inUse": built.specs.len() })
     }
 
     pub fn start_delay_sink(self: &Arc<Self>) {

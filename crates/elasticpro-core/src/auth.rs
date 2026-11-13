@@ -583,6 +583,11 @@ pub fn required_role(msg_type: &str) -> Option<Role> {
         // The same, for a cluster that comes from Zabbix: an overlay kept in ElasticPro
         // (zbx_overlay.rs), never a write to Zabbix — no address, no credential.
         "ZABBIX_CLUSTER_SAVE" => Some(Role::Operator),
+        // A Zabbix host at an existing cluster's address, held for review (zbx_conflicts.rs):
+        // whether it takes that cluster over, is skipped, or both stay — which clusters exist, so
+        // an administrator's, like ZABBIX_SYNC. The preview reads Zabbix and writes nothing, but
+        // names every host and address: an administrator's too.
+        "ZABBIX_CONFLICT_DECIDE" | "ZABBIX_SYNC_PREVIEW" => Some(Role::Admin),
         // The automations list, likewise: rules an operator writes that propose what an
         // admin then runs. Plain data, bounded, no credential (cluster_save.rs).
         "AUTOMATIONS_SAVE" => Some(Role::Operator),
