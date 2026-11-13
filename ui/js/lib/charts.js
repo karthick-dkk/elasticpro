@@ -6,7 +6,8 @@ import { bytes, num, pct } from './fmt.js';
 
 export const SERIES = ['var(--series-1)','var(--series-2)','var(--series-3)','var(--series-4)',
                        'var(--series-5)','var(--series-6)','var(--series-7)','var(--series-8)'];
-export const STATUS = { good: 'var(--good)', warning: 'var(--warning)', serious: 'var(--serious)', critical: 'var(--critical)' };
+/** Status in a chart: the owner's chart colours (light green, orange, pink), never red with yellow. */
+export const STATUS = { good: 'var(--chart-good)', warning: 'var(--chart-warn)', serious: 'var(--chart-warn)', critical: 'var(--chart-bad)' };
 
 /** Stable color for an entity name: colour follows the entity, never its rank. */
 const colorMemo = new Map();
@@ -570,7 +571,7 @@ export function capacityChart(capacity, needs, opts = {}) {
 
   rows.forEach((r) => {
     const fits = opts.capacityUnknown ? null : r.value <= cap;
-    const color = fits === null ? 'var(--series-1)' : fits ? 'var(--good)' : 'var(--critical)';
+    const color = fits === null ? 'var(--series-1)' : fits ? STATUS.good : STATUS.critical;
     const over = fits === false ? r.value - cap : 0;
 
     el.append(h('div.cap-row', {
@@ -592,16 +593,16 @@ export function capacityChart(capacity, needs, opts = {}) {
       h('span', { style: { fontSize: '11.5px', fontVariantNumeric: 'tabular-nums', minWidth: '150px', textAlign: 'right', display: 'flex', gap: '6px', justifyContent: 'flex-end' } },
         h('span', format(r.value)),
         h('span.cap-verdict', over > 0
-          ? h('span', { style: { color: 'var(--critical)', fontWeight: 640 } }, `short ${format(over)}`)
-          : fits === true ? h('span', { style: { color: 'var(--good)' } }, 'fits') : null))));
+          ? h('span', { style: { color: 'var(--critical-ink)', fontWeight: 640 } }, `short ${format(over)}`)
+          : fits === true ? h('span', { style: { color: 'var(--good-ink)' } }, 'fits') : null))));
   });
 
   if (!opts.capacityUnknown) {
     el.append(h('div.legend',
       h('span', h('i', { style: { background: 'var(--text-primary)', opacity: '.7', width: '2px' } }),
         `${capacity.label || 'capacity'} — ${format(cap)}`),
-      h('span', h('i', { style: { background: 'var(--good)' } }), 'fits'),
-      h('span', h('i', { style: { background: 'var(--critical)' } }), 'does not fit')));
+      h('span', h('i', { style: { background: STATUS.good } }), 'fits'),
+      h('span', h('i', { style: { background: STATUS.critical } }), 'does not fit')));
   }
   return el;
 }

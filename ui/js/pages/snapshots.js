@@ -375,7 +375,7 @@ function repoTable(c, d, repos) {
       h('td',
         h('a', { href: '#', style: { fontWeight: 640, color: 'var(--accent)', textDecoration: 'none' },
           title: `Open ${r.name}: its snapshots`, onclick: (e) => { e.preventDefault(); open(r.name); } }, r.name),
-        r.error ? h('div.muted', { style: { fontSize: '11px', color: 'var(--critical)' }, title: hideAddress(r.error, c) }, 'unreadable') : null),
+        r.error ? h('div.muted', { style: { fontSize: '11px', color: 'var(--critical-ink)' }, title: hideAddress(r.error, c) }, 'unreadable') : null),
       h('td', pill(r.type || '?', 'grey')),
       h('td.num', o.count === null ? h('span.muted', { title: 'The snapshot listing has not been read yet' }, '–') : num(o.count)),
       h('td.nowrap', { style: { fontSize: '11.5px' } }, o.newest

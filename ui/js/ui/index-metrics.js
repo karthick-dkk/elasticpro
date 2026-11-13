@@ -115,7 +115,7 @@ function spikeBanner(c, spikes) {
         ...spikes.slice(0, 6).map((t) => h('div', { style: { fontSize: '12px' } },
           h('b.mono', t.term), ' — ',
           `${num(t.latest.docs)} docs on ${t.latestDay} against a ${Math.round(t.baseline).toLocaleString()} average`,
-          h('span', { style: { color: 'var(--critical)', fontWeight: 640 } }, `  +${Math.round(t.changePct)}%`))),
+          h('span', { style: { color: 'var(--critical-ink)', fontWeight: 640 } }, `  +${Math.round(t.changePct)}%`))),
         spikes.length > 6 ? h('div.muted', { style: { fontSize: '11.5px' } }, `…and ${spikes.length - 6} more`) : null)));
 }
 
@@ -140,7 +140,7 @@ function analysisBody(c, a) {
     h('td.num', t.latest ? compact(t.latest.docs) : '–'),
     h('td.num.muted', t.baseline ? compact(Math.round(t.baseline)) : '–'),
     h('td.num', t.changePct === null ? h('span.muted', '–')
-      : h('span', { style: { color: t.spiked ? 'var(--critical)' : t.changePct < -25 ? 'var(--warning)' : 'inherit',
+      : h('span', { style: { color: t.spiked ? 'var(--critical-ink)' : t.changePct < -25 ? 'var(--warning-ink)' : 'inherit',
                              fontWeight: t.spiked ? 640 : 400 } },
           `${t.changePct >= 0 ? '+' : ''}${Math.round(t.changePct)}%`)),
     h('td.num.muted', { title: 'Estimated from this value’s share of the day’s documents' },

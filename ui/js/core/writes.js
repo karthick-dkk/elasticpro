@@ -108,7 +108,7 @@ export function writeToggle(onchange) {
         ? 'Actions you take by hand will be sent to the cluster. Background refreshes stay read-only.'
         : 'The core refuses anything but GET/HEAD and search POSTs. Tick to allow the actions you take here.',
       style: { display: 'inline-flex', alignItems: 'center', gap: '5px', cursor: 'pointer',
-               fontSize: '11px', fontWeight: 600, color: unlocked ? 'var(--warning)' : 'var(--text-muted)' } },
+               fontSize: '11px', fontWeight: 600, color: unlocked ? 'var(--warning-ink)' : 'var(--text-muted)' } },
     h('input', { type: 'checkbox', checked: unlocked, style: { cursor: 'pointer' },
       onchange: async (e) => {
         const ok = await setWritesUnlocked(e.target.checked);

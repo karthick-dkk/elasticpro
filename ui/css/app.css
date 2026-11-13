@@ -13,8 +13,14 @@
 
   --text-primary:   #0b0b0b;
   --text-secondary: #52514e;
-  --text-muted:     #7a7973;
+  /* Darkened from #7a7973, which read 4.25:1 on a card and 3.73:1 on a hovered row: every
+     muted line, every column head and every date in a table sat under AA. */
+  --text-muted:     #63625d;
   --text-invert:    #ffffff;
+  /* A field's edge. --border-strong (#bab9b3) drew text boxes and selects at 1.9:1 against the
+     card they sit on, under the 3:1 a control's boundary needs. Its own token, so the card and
+     table rules that use --border-strong keep their quiet line. */
+  --field-border:   #858480;
 
   /* Darkened from #2a78d6, which read 4.30:1 as link text on a card and 4.42:1
      behind a white button label — both under AA. Same blue, one step down. */
@@ -24,9 +30,14 @@
      white or near-black wins depends entirely on how light the accent is. */
   --on-accent:   #ffffff;
 
-  /* categorical (light steps) */
-  --series-1: #2a78d6; --series-2: #eb6834; --series-3: #1baf7a; --series-4: #eda100;
-  --series-5: #e87ba4; --series-6: #008300; --series-7: #4a3aa7; --series-8: #e34948;
+  /* Categorical. Owner rule: a chart never shows red and yellow together, so neither is a
+     series colour — blue, orange, green, pink first, then violet, teal, sky and sand. */
+  --series-1: #3b82d6; --series-2: #f0943f; --series-3: #4caf6a; --series-4: #e57ba8;
+  --series-5: #8b7be0; --series-6: #2fa8a0; --series-7: #6fb0ea; --series-8: #b8946a;
+  /* Status in a chart or a bar (a meter, a coverage strip, a donut): light green, blue, pink
+     and orange — the owner's chart colours — never the red and yellow of the status fills.
+     A shade deeper here than in the dark themes so a bar still stands off its track. */
+  --chart-good: #6cc070; --chart-info: #5b9be6; --chart-bad: #e57ba8; --chart-warn: #f0943f;
 
   /* sequential blue ramp */
   --seq-100: #cde2fb; --seq-250: #86b6ef; --seq-400: #3987e5; --seq-550: #1c5cab; --seq-700: #0d366b;
@@ -39,9 +50,21 @@
   /* Status INKS - the same status rendered as TEXT on its own -bg. A fill colour and a
      text colour have different jobs, and #fab219 on #fdf3dc is 1.48:1 - a warning pill
      nobody can read. Inks are themed, because ink must contrast with what it sits on. */
-  --good-ink: #0a7a0a; --warning-ink: #8a5300; --serious-ink: #a03c14; --critical-ink: #b02525;
+  /* A step darker than they were (#0a7a0a, #8a5300, #a03c14, #b02525): a pill's edge is now
+     its own ink, and at the old values that edge fell under 3:1 against a hovered row. */
+  --good-ink: #0a6e0a; --warning-ink: #7d4b00; --serious-ink: #953811; --critical-ink: #a82323;
   /* High, the level between warning and critical (core/alert-levels.js): orange. */
-  --high-bg: #ffeedd; --high-ink: #b5380e;   /* 5.2:1 on --high-bg; redder than --warning-ink so the two pills part */
+  --high-bg: #ffeedd; --high-ink: #a8340d;   /* redder than --warning-ink so the two pills part */
+  /* The log delay report's tones (reports/logdelay.js): pink late, blue delayed, green on
+     time, orange clock ahead. Ink for text, -bg for a pill's fill — themed like every other
+     tone. They used to be scoped to .ld and set for light and dark only, so Dark blue and
+     Warm drew the light inks (dark pink, dark green) on a pink- or green-tinted navy. */
+  --ld-pink-ink: #9c2a5f;  --ld-pink-bg: color-mix(in srgb, #f2a7c3 28%, var(--surface-1));
+  --ld-blue-ink: #1b4a88;  --ld-blue-bg: color-mix(in srgb, #a9c8f0 28%, var(--surface-1));
+  --ld-green-ink: #276b27; --ld-green-bg: color-mix(in srgb, #bfe6bf 28%, var(--surface-1));
+  --ld-orange-ink: #8f4a0b; --ld-orange-bg: color-mix(in srgb, #f5b77a 28%, var(--surface-1));
+  /* Node roles on Overview (.cl-role). */
+  --role-master-ink: #6d28d9; --role-ingest-ink: #0b5e57;
 
   --grid: #e6e5e1;
   --shadow: 0 1px 2px rgba(11,11,11,.06), 0 8px 24px rgba(11,11,11,.06);
@@ -62,17 +85,24 @@
     --border-strong: #4d4d49;
     --text-primary:   #ffffff;
     --text-secondary: #c3c2b7;
-    --text-muted:     #8f8e85;
+    --text-muted:     #9a998f;
     --text-invert:    #0b0b0b;
-    --accent:      #3987e5;
+    --field-border:   #6f6f6b;
+    --accent:      #4b92ea;
     --accent-soft: #16283f;
-  --on-accent: #0b0b0b;
-    --series-1: #3987e5; --series-2: #d95926; --series-3: #199e70; --series-4: #c98500;
-    --series-5: #d55181; --series-6: #008300; --series-7: #9085e9; --series-8: #e66767;
+    --on-accent: #0b0b0b;
+    --series-1: #7fb0ec; --series-2: #f5b77a; --series-3: #9fd89f; --series-4: #f2a7c3;
+    --series-5: #b9aef5; --series-6: #7fd3c9; --series-7: #a9c8f0; --series-8: #d7bfa0;
+    --chart-good: #9fd89f; --chart-info: #a9c8f0; --chart-bad: #f2a7c3; --chart-warn: #f5b77a;
     --seq-100: #184f95; --seq-250: #256abf; --seq-400: #3987e5; --seq-550: #86b6ef; --seq-700: #cde2fb;
     --good-bg: #122a12; --warning-bg: #3a2f10; --critical-bg: #3a1717; --serious-bg: #3a2418;
-    --good-ink: var(--good); --warning-ink: #f5c451; --serious-ink: var(--serious); --critical-ink: #ef6a6a;
+    --good-ink: #3fbf3f; --warning-ink: #f5c451; --serious-ink: var(--serious); --critical-ink: #ef6a6a;
     --high-bg: #3a2414; --high-ink: #ff9f5f;
+    --ld-pink-ink: #f2a7c3;  --ld-pink-bg: color-mix(in srgb, #f2a7c3 16%, var(--surface-1));
+    --ld-blue-ink: #a9c8f0;  --ld-blue-bg: color-mix(in srgb, #a9c8f0 16%, var(--surface-1));
+    --ld-green-ink: #9fd89f; --ld-green-bg: color-mix(in srgb, #bfe6bf 16%, var(--surface-1));
+    --ld-orange-ink: #f5b77a; --ld-orange-bg: color-mix(in srgb, #f5b77a 16%, var(--surface-1));
+    --role-master-ink: #c4b5fd; --role-ingest-ink: #5eead4;
     --grid: #2b2b29;
     --shadow: 0 1px 2px rgba(0,0,0,.4), 0 8px 24px rgba(0,0,0,.35);
   }
@@ -87,17 +117,24 @@
   --border-strong: #4d4d49;
   --text-primary:   #ffffff;
   --text-secondary: #c3c2b7;
-  --text-muted:     #8f8e85;
+  --text-muted:     #9a998f;
   --text-invert:    #0b0b0b;
-  --accent:      #3987e5;
+  --field-border:   #6f6f6b;
+  --accent:      #4b92ea;
   --accent-soft: #16283f;
   --on-accent: #0b0b0b;
-  --series-1: #3987e5; --series-2: #d95926; --series-3: #199e70; --series-4: #c98500;
-  --series-5: #d55181; --series-6: #008300; --series-7: #9085e9; --series-8: #e66767;
+  --series-1: #7fb0ec; --series-2: #f5b77a; --series-3: #9fd89f; --series-4: #f2a7c3;
+  --series-5: #b9aef5; --series-6: #7fd3c9; --series-7: #a9c8f0; --series-8: #d7bfa0;
+  --chart-good: #9fd89f; --chart-info: #a9c8f0; --chart-bad: #f2a7c3; --chart-warn: #f5b77a;
   --seq-100: #184f95; --seq-250: #256abf; --seq-400: #3987e5; --seq-550: #86b6ef; --seq-700: #cde2fb;
   --good-bg: #122a12; --warning-bg: #3a2f10; --critical-bg: #3a1717; --serious-bg: #3a2418;
-  --good-ink: var(--good); --warning-ink: #f5c451; --serious-ink: var(--serious); --critical-ink: #ef6a6a;
+  --good-ink: #3fbf3f; --warning-ink: #f5c451; --serious-ink: var(--serious); --critical-ink: #ef6a6a;
   --high-bg: #3a2414; --high-ink: #ff9f5f;
+  --ld-pink-ink: #f2a7c3;  --ld-pink-bg: color-mix(in srgb, #f2a7c3 16%, var(--surface-1));
+  --ld-blue-ink: #a9c8f0;  --ld-blue-bg: color-mix(in srgb, #a9c8f0 16%, var(--surface-1));
+  --ld-green-ink: #9fd89f; --ld-green-bg: color-mix(in srgb, #bfe6bf 16%, var(--surface-1));
+  --ld-orange-ink: #f5b77a; --ld-orange-bg: color-mix(in srgb, #f5b77a 16%, var(--surface-1));
+  --role-master-ink: #c4b5fd; --role-ingest-ink: #5eead4;
   --grid: #2b2b29;
   --shadow: 0 1px 2px rgba(0,0,0,.4), 0 8px 24px rgba(0,0,0,.35);
 }
@@ -123,17 +160,24 @@
   --border-strong: #3c4f74;
   --text-primary:   #dde5f2;
   --text-secondary: #aab8cf;
-  --text-muted:     #8090a8;
+  --text-muted:     #8d9cb3;   /* was #8090a8: 4.48:1 on a selected row, 4.11:1 on --surface-3 */
   --text-invert:    #0a111f;
+  --field-border:   #5f7193;   /* fields were drawn in --border-strong, 2.1:1 on a card */
   --accent:      #5c9ef6;
   --accent-soft: #14294a;
   --on-accent: #0a111f;
-  --series-1: #5c9ef6; --series-2: #e3794a; --series-3: #35b58c; --series-4: #d9a43c;
-  --series-5: #dd7aa6; --series-6: #46b04a; --series-7: #9b8ef0; --series-8: #ea7070;
+  --series-1: #7fb0ec; --series-2: #f5b77a; --series-3: #9fd89f; --series-4: #f2a7c3;
+  --series-5: #b9aef5; --series-6: #7fd3c9; --series-7: #a9c8f0; --series-8: #d7bfa0;
+  --chart-good: #9fd89f; --chart-info: #a9c8f0; --chart-bad: #f2a7c3; --chart-warn: #f5b77a;
   --seq-100: #17325c; --seq-250: #24518f; --seq-400: #3d7fd4; --seq-550: #79aaea; --seq-700: #c6ddf8;
   --good-bg: #10281f; --warning-bg: #322a12; --critical-bg: #331a20; --serious-bg: #33241a;
   --good-ink: #52c78a; --warning-ink: #e8bf5f; --serious-ink: #ef9a72; --critical-ink: #f07b83;
   --high-bg: #33231a; --high-ink: #ffa166;
+  --ld-pink-ink: #f2a7c3;  --ld-pink-bg: color-mix(in srgb, #f2a7c3 16%, var(--surface-1));
+  --ld-blue-ink: #a9c8f0;  --ld-blue-bg: color-mix(in srgb, #a9c8f0 16%, var(--surface-1));
+  --ld-green-ink: #9fd89f; --ld-green-bg: color-mix(in srgb, #bfe6bf 16%, var(--surface-1));
+  --ld-orange-ink: #f5b77a; --ld-orange-bg: color-mix(in srgb, #f5b77a 16%, var(--surface-1));
+  --role-master-ink: #c4b5fd; --role-ingest-ink: #5eead4;
   --grid: #1d2a42;
   --shadow: 0 1px 2px rgba(0,0,0,.45), 0 8px 24px rgba(0,0,0,.4);
 }
@@ -157,19 +201,27 @@
   --border-strong: #54452f;
   --text-primary:   #f2e6d2;
   --text-secondary: #cbb99c;
-  --text-muted:     #9d8c73;
+  --text-muted:     #a6967d;   /* was #9d8c73: 4.23:1 on a selected row */
   --text-invert:    #16120c;
+  --field-border:   #7a6c58;
   --accent:      #e3a44e;
   --accent-soft: #3a2a12;
   --on-accent:   #16120c;
-  /* Categorical steps, kept apart by hue without reaching for blue. */
-  --series-1: #e3a44e; --series-2: #e07a4a; --series-3: #8fbf6a; --series-4: #d9b64a;
-  --series-5: #dd8f8f; --series-6: #7fae5a; --series-7: #c08fa8; --series-8: #ea8570;
+  /* Categorical steps. The owner's chart colours hold here too (no red, no yellow); blue
+     is kept, at the soft step, because a chart's series must stay apart by hue. */
+  --series-1: #a9c8f0; --series-2: #f5b77a; --series-3: #9fd89f; --series-4: #f2a7c3;
+  --series-5: #c9b6e8; --series-6: #8fcfc0; --series-7: #e3c59a; --series-8: #d7bfa0;
+  --chart-good: #9fd89f; --chart-info: #a9c8f0; --chart-bad: #f2a7c3; --chart-warn: #f5b77a;
   /* The sequential ramp is amber here rather than blue — it is a ramp, not a brand. */
   --seq-100: #3d2e14; --seq-250: #6b5220; --seq-400: #a67c2e; --seq-550: #d1a552; --seq-700: #f0d49a;
   --good-bg: #14240f; --warning-bg: #2e2410; --critical-bg: #2e1813; --serious-bg: #2e2014;
   --good-ink: #6fbf73; --warning-ink: #e8c168; --serious-ink: #eda179; --critical-ink: #f08a7a;
   --high-bg: #2e1f12; --high-ink: #f6a064;
+  --ld-pink-ink: #f2a7c3;  --ld-pink-bg: color-mix(in srgb, #f2a7c3 16%, var(--surface-1));
+  --ld-blue-ink: #a9c8f0;  --ld-blue-bg: color-mix(in srgb, #a9c8f0 16%, var(--surface-1));
+  --ld-green-ink: #9fd89f; --ld-green-bg: color-mix(in srgb, #bfe6bf 16%, var(--surface-1));
+  --ld-orange-ink: #f5b77a; --ld-orange-bg: color-mix(in srgb, #f5b77a 16%, var(--surface-1));
+  --role-master-ink: #c4b5fd; --role-ingest-ink: #5eead4;
   --grid: #2b2318;
   --shadow: 0 1px 2px rgba(0,0,0,.5), 0 8px 24px rgba(0,0,0,.42);
 }
@@ -261,7 +313,7 @@ button, input, select, textarea { font: inherit; color: inherit; }
   color: var(--accent); font-weight: 640; border-bottom-color: var(--accent);
   background: var(--accent-soft);
 }
-.nav .ico { opacity: .9; }
+.nav .ico { opacity: 1; }
 /* ------------------------------ in-page section tabs ------------------------------ */
 /* A page with several unrelated jobs gets its own tab bar, in the window's own idiom so
    it reads as navigation. Slightly smaller than the top tabs, and it sits on a rule, so
@@ -281,7 +333,7 @@ button, input, select, textarea { font: inherit; color: inherit; }
   color: var(--accent); font-weight: 640; border-bottom-color: var(--accent);
   background: var(--accent-soft);
 }
-.subnav .ico { opacity: .9; }
+.subnav .ico { opacity: 1; }
 
 /* A vertical rule before Config, where the divider used to be. */
 .nav-sep { width: 1px; background: var(--border); margin: 8px 7px; flex: none; }
@@ -344,14 +396,15 @@ table.tbl tbody tr:focus-visible,
 .btn:disabled { opacity: .5; cursor: not-allowed; }
 .btn.primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); font-weight: 600; }
 .btn.primary:hover { filter: brightness(1.08); }
-.btn.danger { color: var(--critical); border-color: var(--critical); background: transparent; }
+.btn.danger { color: var(--critical-ink); border-color: var(--critical-ink); background: transparent; }
 .btn.ghost { border-color: transparent; background: transparent; color: var(--text-secondary); }
 .btn.ghost:hover { background: var(--surface-2); }
 .btn.sm { padding: 3px 8px; font-size: 11.5px; }
 
 input[type="text"], input[type="search"], input[type="date"], input[type="datetime-local"],
 input[type="number"], select, textarea {
-  background: var(--surface-1); border: 1px solid var(--border-strong);
+  /* The value is text: primary ink, never the muted ink of the label.field it sits in. */
+  background: var(--surface-1); border: 1px solid var(--field-border); color: var(--text-primary);
   border-radius: var(--radius-sm); padding: 6px 9px; outline: none;
 }
 input:focus, select:focus, textarea:focus { border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent); }
@@ -409,7 +462,7 @@ label.field > select { text-overflow: ellipsis; }
 .stat .v { font-size: 22px; font-weight: 660; letter-spacing: -.02em; margin-top: 2px; font-variant-numeric: tabular-nums; }
 .stat .d { font-size: 11px; color: var(--text-secondary); margin-top: 2px; }
 .stat.bad { border-color: color-mix(in srgb, var(--critical) 55%, var(--border)); }
-.stat.bad .v { color: var(--critical); }
+.stat.bad .v { color: var(--critical-ink); }
 .stat .d.names { overflow-wrap: anywhere; }
 .stat .top-errs { display: grid; gap: 3px; margin-top: 4px; font-size: 11.5px; }
 .stat .top-errs > div { display: flex; align-items: baseline; gap: 6px; min-width: 0; }
@@ -425,16 +478,24 @@ label.field > select { text-overflow: ellipsis; }
   border-radius: 999px; font-size: 11px; font-weight: 600; border: 1px solid transparent;
   white-space: nowrap;
 }
+/* A toned pill's edge is its own ink, three quarters strong over its fill. The fills are soft
+   by design, so the fill alone barely parts from the surface (1.1-1.9:1 in every theme) and the
+   old edges, a third of the status FILL colour, did no better: a grey "silent" pill on navy was
+   a word floating in space. The ink edge clears 3:1 on a card, a hovered row and a chosen row. */
+.pill.green, .pill.yellow, .pill.orange, .pill.high, .pill.red, .pill.grey, .pill.blue,
+.pill.ld-pink, .pill.ld-blue, .pill.ld-green, .pill.ld-orange {
+  border-color: color-mix(in srgb, currentColor 75%, transparent);
+}
 .pill .dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; flex: none; }
-.pill.green  { color: var(--good-ink);     background: var(--good-bg);     border-color: color-mix(in srgb, var(--good) 35%, transparent); }
-.pill.yellow { color: var(--warning-ink);  background: var(--warning-bg);  border-color: color-mix(in srgb, var(--warning) 45%, transparent); }
-.pill.orange { color: var(--serious-ink);  background: var(--serious-bg);  border-color: color-mix(in srgb, var(--serious) 45%, transparent); }
-.pill.high   { color: var(--high-ink);     background: var(--high-bg);     border-color: color-mix(in srgb, var(--high) 45%, transparent); }
+.pill.green  { color: var(--good-ink);     background: var(--good-bg); }
+.pill.yellow { color: var(--warning-ink);  background: var(--warning-bg); }
+.pill.orange { color: var(--serious-ink);  background: var(--serious-bg); }
+.pill.high   { color: var(--high-ink);     background: var(--high-bg); }
 /* Top bar: requests paused, with Resume for an admin (ui/paused-pill.js). */
 .btn.paused-btn { color: var(--serious-ink); background: var(--serious-bg); border-color: color-mix(in srgb, var(--serious) 45%, transparent); white-space: nowrap; }
 .btn.paused-btn:hover { border-color: var(--serious); }
-.pill.red    { color: var(--critical-ink); background: var(--critical-bg); border-color: color-mix(in srgb, var(--critical) 35%, transparent); }
-.pill.grey   { color: var(--text-secondary); background: var(--surface-2); border-color: var(--border); }
+.pill.red    { color: var(--critical-ink); background: var(--critical-bg); }
+.pill.grey   { color: var(--text-secondary); background: var(--surface-2); }
 
 /* --------------------------------- tables ---------------------------------- */
 .tbl-wrap { overflow-x: auto; }
@@ -550,9 +611,9 @@ table.rq-tbl tr.inflight td { background: var(--accent-soft); }
 .hl-page details > summary { cursor: pointer; font-size: 12px; color: var(--text-secondary); padding: 6px 0; }
 .hl-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 420px), 1fr)); gap: 12px; align-items: start; }
 .hl-bar { height: 8px; border-radius: 4px; background: var(--surface-3); overflow: hidden; min-width: 80px; }
-.hl-bar > i { display: block; height: 100%; border-radius: 4px; background: var(--good); }
-.hl-bar.warn > i { background: var(--warning); }
-.hl-bar.bad > i { background: var(--critical); }
+.hl-bar > i { display: block; height: 100%; border-radius: 4px; background: var(--chart-good); }
+.hl-bar.warn > i { background: var(--chart-warn); }
+.hl-bar.bad > i { background: var(--chart-bad); }
 .hl-bar.unknown > i { width: 0; }
 .hl-figs { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 8px; }
 .hl-fig .k, .hl-spark .k { font-size: 10.5px; text-transform: uppercase; letter-spacing: .06em; color: var(--text-muted); }
@@ -770,7 +831,7 @@ table.cl-tbl > tbody > tr.cl-detail-row > td { white-space: normal; }
 .figure-alert { padding: 6px 10px; margin: -6px 0; border-radius: var(--radius-sm);
   background: color-mix(in srgb, var(--critical) 14%, transparent);
   border: 1px solid color-mix(in srgb, var(--critical) 45%, transparent); }
-.figure-alert > div:nth-child(2) { color: var(--critical); }
+.figure-alert > div:nth-child(2) { color: var(--critical-ink); }
 .figure-alert > .muted { color: color-mix(in srgb, var(--critical) 70%, var(--text-secondary)); }
 /* Alerts page: an alert's detail in two lines; a click opens it (alerts.js alertRow). */
 .alert-detail { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2;
@@ -805,7 +866,8 @@ a.agroup-name:hover { text-decoration: underline; }
 .adot.crit { background: var(--critical); }
 .adot.warn { background: var(--warning); }
 .adot.high { background: var(--high); }
-.apill { display: inline-block; font-size: 11.5px; line-height: 1.5; padding: 0 8px; border-radius: 10px; white-space: nowrap; }
+.apill { display: inline-block; font-size: 11.5px; line-height: 1.5; padding: 0 8px; border-radius: 10px; white-space: nowrap;
+         box-shadow: inset 0 0 0 1px color-mix(in srgb, currentColor 75%, transparent); }   /* the pill's edge, as .pill's */
 .apill.crit { color: var(--critical-ink); background: var(--critical-bg); }
 .apill.warn { color: var(--warning-ink); background: var(--warning-bg); }
 .apill.high { color: var(--high-ink); background: var(--high-bg); }
@@ -939,8 +1001,8 @@ pre.json {
   overflow: auto; padding: 12px; background: var(--surface-2); border-radius: var(--radius-sm);
   max-height: 62vh;
 }
-.j-key { color: var(--series-1); } .j-str { color: var(--series-3); }
-.j-num { color: var(--series-2); } .j-bool { color: var(--series-7); } .j-null { color: var(--text-muted); }
+.j-key { color: var(--accent); } .j-str { color: var(--good-ink); }
+.j-num { color: var(--serious-ink); } .j-bool { color: var(--role-master-ink); } .j-null { color: var(--text-muted); }
 
 /* --------------------------------- charts ---------------------------------- */
 .chart { position: relative; }
@@ -1096,7 +1158,7 @@ html:has(.modal-overlay) { overflow: hidden; scrollbar-gutter: stable; }
 }
 .menu-pop button:hover:not(:disabled) { background: var(--surface-2); }
 .menu-pop button:disabled { opacity: .45; cursor: not-allowed; }
-.menu-pop button.danger { color: var(--critical); }
+.menu-pop button.danger { color: var(--critical-ink); }
 .menu-pop button .ico { width: 15px; flex: none; text-align: center; font-size: 13px; }
 .menu-pop .sep { height: 1px; margin: 4px 2px; background: var(--border); }
 .menu-pop .hint { padding: 2px 9px 6px; font-size: 10.5px; color: var(--text-muted); }
@@ -1241,7 +1303,7 @@ html:has(.modal-overlay) { overflow: hidden; scrollbar-gutter: stable; }
   overflow-wrap: anywhere; animation: toast-in .16s ease-out;
 }
 .toast-x { flex: none; margin: -3px -5px 0 2px; width: 22px; height: 22px; border: 0; border-radius: 4px;
-  background: transparent; color: var(--text-muted); font-size: 16px; line-height: 1; cursor: pointer; }
+  background: transparent; color: var(--text-secondary); font-size: 16px; line-height: 1; cursor: pointer; }
 .toast-x:hover { background: var(--surface-2); color: var(--text-primary); }
 .toast-ico { flex: none; width: 18px; height: 18px; border-radius: 50%; display: grid; place-items: center;
              font-size: 11px; font-weight: 700; color: #fff; margin-top: 1px; }
@@ -1300,7 +1362,7 @@ html:has(.modal-overlay) { overflow: hidden; scrollbar-gutter: stable; }
 /* Freshness — "fetched N ago" + Refresh. Muted by default; a stale reading is marked
    rather than left to be inferred from a timestamp nobody reads. */
 .freshness { display: inline-flex; align-items: center; gap: 8px; font-size: 11.5px; }
-.freshness .stale { color: var(--warning); }
+.freshness .stale { color: var(--warning-ink); }
 
 /* ------------------------------ inside Zabbix ------------------------------ */
 /* Zabbix shows who is signed in and its menu opens the main pages, so the logo and the page
@@ -1422,7 +1484,7 @@ html:has(.modal-overlay) { overflow: hidden; scrollbar-gutter: stable; }
 .console-tab.on .console-tab-label .m { color: var(--accent); }
 .console-tab-label .t { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--mono); font-size: 11.5px; }
 .console-tab-x { border: 0; background: transparent; cursor: pointer; color: var(--text-muted); padding: 0 8px; font-size: 14px; line-height: 1; }
-.console-tab-x:hover { color: var(--critical); }
+.console-tab-x:hover { color: var(--critical-ink); }
 .console-tab-add { min-width: 30px; }
 .console-tab-count { align-self: center; font-size: 11px; margin-left: 4px; }
 
@@ -1518,10 +1580,10 @@ button.pill.cl-pillbtn:focus-visible { outline: 2px solid var(--accent); outline
 .cl-health:not([title]) { cursor: default; }
 .cl-disk-td .disk-cell { margin: 0 auto; max-width: 200px; min-width: 120px !important; overflow: hidden; }
 .cl-disk-td .disk-text { display: block; overflow: hidden; text-overflow: ellipsis; }
-.disk-fill { background: var(--good); }
-.disk-fill.ok { background: var(--good); }
-.disk-fill.low { background: var(--warning); }
-.disk-fill.high { background: var(--critical); }
+.disk-fill { background: var(--chart-good); }
+.disk-fill.ok { background: var(--chart-good); }
+.disk-fill.low { background: var(--chart-warn); }
+.disk-fill.high { background: var(--chart-bad); }
 .cl-tbl .cl-alink { padding-right: 4px; }
 /* An open row reads left to right like a form, whatever the summary table centres: the
    tiles across the top pack at their own widths (no ragged second row of equal columns),
@@ -1535,19 +1597,19 @@ table.cl-tbl > tbody > tr.cl-detail-row > td { text-align: left; }
 .cl-acts { display: inline-flex; gap: 6px; align-items: center; white-space: nowrap; }
 .cl-acts .btn { text-decoration: none; }
 .cl-mini { position: relative; width: 80px; max-width: 100%; height: 5px; border-radius: 3px; background: var(--surface-3); margin: 2px auto 0; }
-.cl-mini i { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 3px; background: var(--good); }
-.cl-mini i.low { background: var(--warning); }
-.cl-mini i.high { background: var(--critical); }
-.cl-mini i.over { background: var(--high); }   /* heap past the High alert's line (overview.js heapLevel) */
+.cl-mini i { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 3px; background: var(--chart-good); }
+.cl-mini i.low { background: var(--chart-warn); }
+.cl-mini i.high { background: var(--chart-bad); }
+.cl-mini i.over { background: var(--chart-warn); }   /* heap past the High alert's line (overview.js heapLevel) */
 .cl-star { color: var(--warning-ink); }
 .cl-roles { display: inline-flex; gap: 3px; flex-wrap: wrap; justify-content: center; }
 .cl-role {
   display: inline-block; padding: 0 6px; border-radius: 999px; font-size: 10.5px; line-height: 16px;
   border: 1px solid var(--border); background: var(--surface-2); color: var(--text-secondary); white-space: nowrap;
 }
-.cl-role.master { color: #6d28d9; background: color-mix(in srgb, #7c3aed 12%, transparent); border-color: color-mix(in srgb, #7c3aed 40%, transparent); }
-.cl-role.ingest { color: #0f766e; background: color-mix(in srgb, #14b8a6 14%, transparent); border-color: color-mix(in srgb, #14b8a6 45%, transparent); }
-.pill.blue { color: var(--accent); background: var(--accent-soft); border-color: color-mix(in srgb, var(--accent) 40%, transparent); }
+.cl-role.master { color: var(--role-master-ink); background: color-mix(in srgb, #7c3aed 12%, transparent); border-color: color-mix(in srgb, var(--role-master-ink) 55%, transparent); }
+.cl-role.ingest { color: var(--role-ingest-ink); background: color-mix(in srgb, #14b8a6 14%, transparent); border-color: color-mix(in srgb, var(--role-ingest-ink) 55%, transparent); }
+.pill.blue { color: var(--accent); background: var(--accent-soft); }
 /* The Show / hide panel: four groups side by side, narrower when the window is. */
 .pop.cl-cols { width: min(980px, calc(100vw - 16px)); max-width: none; }
 .cl-cols-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 0 14px; }
@@ -1619,7 +1681,7 @@ table.coltbl th.colhead .colhead-name { vertical-align: middle; }
 table.coltbl th.colhead[draggable="true"] { cursor: grab; }
 table.coltbl th.colhead.dragging { opacity: .5; }
 table.coltbl th.colhead.drop { box-shadow: inset 2px 0 0 var(--accent); }
-.btn.colhead-menu { padding: 0 4px; margin-left: 3px; font-size: 11px; line-height: 14px; border-color: transparent; background: transparent; opacity: .55; }
+.btn.colhead-menu { padding: 0 4px; margin-left: 3px; font-size: 11px; line-height: 14px; border-color: transparent; background: transparent; opacity: .7; }   /* .55 drew the glyph at 4.3:1 */
 th.colhead:hover .btn.colhead-menu, .btn.colhead-menu:focus-visible, .btn.colhead-menu[aria-expanded="true"] { opacity: 1; border-color: var(--border); }
 .colhead-edit { display: inline-flex; gap: 4px; align-items: center; text-transform: none; letter-spacing: 0; }
 .colhead-edit input { width: 130px; height: 22px; font-size: 12px; }
@@ -1643,7 +1705,7 @@ tr.vs-special td:first-child { font-style: italic; color: var(--text-secondary);
    in their own cell, and a long client list scrolls inside its own box, never the page. */
 /* the top-bar pill: accent while something runs or waits, grey when idle */
 .pill.rp-pill { cursor: pointer; font: inherit; font-size: 11px; font-weight: 600; }
-.pill.rp-pill.rp-busy { color: var(--accent); background: var(--accent-soft); border-color: color-mix(in srgb, var(--accent) 35%, transparent); }
+.pill.rp-pill.rp-busy { color: var(--accent); background: var(--accent-soft); border-color: color-mix(in srgb, currentColor 75%, transparent); }
 .pill.rp-pill:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 /* Generate report */
 .vs-jobs .btn[aria-pressed="true"] { background: var(--accent-soft); border-color: var(--accent); }
@@ -2004,7 +2066,7 @@ html.play .main, html.play .page { padding: 0; margin: 0; max-width: none; }
 .pn-page .fld > label, .pn-page .fld > .lbl { font-size: 12.5px; color: var(--text-secondary); font-weight: 600; }
 .pn-page .fld .hint { font-size: 12px; color: var(--text-muted); }
 .pn-page .fld .hint.na, .pn-page .na { color: var(--warning-ink); }
-.pn-page .num input, .pn-page .num select { height: 32px; padding: 0 10px; border: 1px solid var(--border-strong); border-radius: var(--radius-sm);
+.pn-page .num input, .pn-page .num select { height: 32px; padding: 0 10px; border: 1px solid var(--field-border); border-radius: var(--radius-sm);
   background: var(--surface-1); color: inherit; font: inherit; width: 150px; box-sizing: border-box; }
 .pn-page .num select { width: 100%; }
 .pn-days { display: flex; gap: 8px; align-items: center; }
@@ -2089,14 +2151,14 @@ button.pn-link:hover { text-decoration: underline; }
 .rp-page .linkish:disabled { color: var(--text-muted); cursor: default; text-decoration: none; }
 .rp-tbl td, .rp-tbl th { white-space: nowrap; }
 .rp-tbl tr.rp-band th { text-align: center; background: var(--surface-2); color: var(--text-primary); letter-spacing: .05em; font-size: 11px; height: 24px; }
-.rp-tbl tr.rp-band th:not(.rp-grp) { background: transparent; }
+.rp-tbl tr.rp-band th:not(.rp-grp) { background: var(--surface-1); }   /* sticky: opaque, or rows show through */
 .rp-tbl .rp-gl { border-left: 1px solid var(--border); }
 /* the disk bar: used against total, the bold percentage beside it, "used of total, avail" after */
 .rp-disk { display: flex; align-items: center; gap: 8px; }
 .rp-dt { width: 110px; height: 9px; background: var(--surface-3); border-radius: 3px; overflow: hidden; flex: none; display: block; }
 .rp-df { display: block; height: 100%; background: var(--series-1); }
-.rp-df.warn { background: var(--warning); }
-.rp-df.crit { background: var(--critical); }
+.rp-df.warn { background: var(--chart-warn); }
+.rp-df.crit { background: var(--chart-bad); }
 .rp-dp { font-weight: 650; font-size: 12px; min-width: 34px; font-variant-numeric: tabular-nums; }
 .rp-dl { font-size: 12px; color: var(--text-secondary); font-variant-numeric: tabular-nums; }
 .rp-dl b { color: var(--text-primary); font-weight: 600; }
@@ -2135,7 +2197,7 @@ button.pn-link:hover { text-decoration: underline; }
 .vs-hb.other .nm { font-family: var(--sans); color: var(--text-secondary); }
 .vs-hb.missing .nm { font-family: var(--sans); color: var(--warning-ink); }
 .vs-hb.other .vs-share-bar i { background: var(--border-strong); }
-.vs-hb.missing .vs-share-bar i { background: var(--warning); }
+.vs-hb.missing .vs-share-bar i { background: var(--chart-warn); }
 .vs-hb .n, .vs-hb .p { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .vs-hb .p { color: var(--text-muted); }
 /* the Columns menu (lib/columns.js columnsMenu) */
@@ -2558,7 +2620,7 @@ tr.zr-none-row td { background: var(--surface-0); font-size: 12px; white-space: 
 .zr-note { font-size: 11.5px; margin-top: 4px; }
 .zr-small { font-size: 11px; }
 .zr-badge { display: inline-flex; align-items: center; height: 18px; padding: 0 6px; margin-left: 6px; border-radius: 4px; font-size: 10.5px; font-weight: 600; vertical-align: 1px;
-  background: var(--surface-2); color: var(--text-secondary); }
+  background: var(--surface-2); color: var(--text-secondary); box-shadow: inset 0 0 0 1px color-mix(in srgb, currentColor 75%, transparent); }
 .zr-badge.blue { background: var(--accent-soft); color: var(--accent); }
 .zr-badge.yellow { background: var(--warning-bg); color: var(--warning-ink); }
 .zr-badge.red { background: var(--critical-bg); color: var(--critical-ink); }
@@ -2574,16 +2636,14 @@ select.zr-hand { height: 26px; max-width: 150px; font-size: 12px; }
 /* ---------------- Reports › Log delay (0.3.57, reports/logdelay.js) ----------------
  * Chart colours: light green #bfe6bf, blue #a9c8f0, pink #f2a7c3, orange — never red with yellow.
  * Compact: 32 px rows. Figures in pink ink for late, blue ink for 30–60, green ink for on time. */
-.ld { --ld-pink-ink: #a8326a; --ld-blue-ink: #1d4f91; --ld-green-ink: #2f7a2f; --ld-orange-ink: #a65a14; }
-@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) .ld { --ld-pink-ink: #f2a7c3; --ld-blue-ink: #a9c8f0; --ld-green-ink: #9fd89f; --ld-orange-ink: #f5b77a; } }
-:root[data-theme="dark"] .ld { --ld-pink-ink: #f2a7c3; --ld-blue-ink: #a9c8f0; --ld-green-ink: #9fd89f; --ld-orange-ink: #f5b77a; }
+/* The inks and fills (--ld-*-ink, --ld-*-bg) are theme tokens, at the top of this file. */
 .ld .ld-pink { color: var(--ld-pink-ink); font-weight: 600; }
 .ld .ld-blue { color: var(--ld-blue-ink); font-weight: 600; }
 .ld .ld-green { color: var(--ld-green-ink); }
-.ld .pill.ld-pink { color: var(--ld-pink-ink); background: color-mix(in srgb, #f2a7c3 30%, var(--surface-1)); border-color: #f2a7c3; }
-.ld .pill.ld-blue { color: var(--ld-blue-ink); background: color-mix(in srgb, #a9c8f0 30%, var(--surface-1)); border-color: #a9c8f0; }
-.ld .pill.ld-green { color: var(--ld-green-ink); background: color-mix(in srgb, #bfe6bf 35%, var(--surface-1)); border-color: #bfe6bf; }
-.ld .pill.ld-orange { color: var(--ld-orange-ink); background: color-mix(in srgb, #f5b77a 30%, var(--surface-1)); border-color: #f5b77a; }
+.ld .pill.ld-pink { color: var(--ld-pink-ink); background: var(--ld-pink-bg); }
+.ld .pill.ld-blue { color: var(--ld-blue-ink); background: var(--ld-blue-bg); }
+.ld .pill.ld-green { color: var(--ld-green-ink); background: var(--ld-green-bg); }
+.ld .pill.ld-orange { color: var(--ld-orange-ink); background: var(--ld-orange-bg); }
 .ld .pill.ld-pill { white-space: nowrap; font-weight: 600; }
 .ld table.tbl td { height: 32px; padding-top: 0; padding-bottom: 0; white-space: nowrap; }
 .ld table.tbl td.ld-wrap { white-space: normal; min-width: 180px; max-width: 420px; padding-top: 5px; padding-bottom: 5px; }
@@ -2690,7 +2750,7 @@ select.zr-hand { height: 26px; max-width: 150px; font-size: 12px; }
 .ldc-level { display: flex; flex-direction: column; gap: 3px; padding: 6px 8px; border: 1px solid var(--grid); border-radius: 6px; font-size: 12px; min-width: 0; }
 .ldc-level b { font-size: 12px; }
 .ldc-level span { display: flex; gap: 4px; align-items: center; flex-wrap: wrap; }
-.ldc-level input { width: 60px; height: 26px; }
+.ldc-level input { width: 60px; height: 26px; border-color: var(--text-muted); }   /* on a tinted level: the plain field edge is under 3:1 there */
 .ldc-form { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px 14px; }
 @media (max-width: 900px) { .ldc-form { grid-template-columns: minmax(0, 1fr); } }
 .ldc-form .ldc-span { grid-column: 1 / -1; }

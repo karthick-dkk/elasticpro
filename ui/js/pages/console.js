@@ -832,7 +832,7 @@ function historyCard() {
     // The star is its own button inside the row; a click on it must not also load the row.
     ...activatable((e) => { if (e.target.closest && e.target.closest('button')) return; load(x); }),
   },
-    h('td', h('button.btn.sm.ghost', { title: x.fav ? 'Unstar' : 'Star', style: { padding: '0 4px', color: x.fav ? 'var(--warning)' : 'var(--text-muted)' },
+    h('td', h('button.btn.sm.ghost', { title: x.fav ? 'Unstar' : 'Star', style: { padding: '0 4px', color: x.fav ? 'var(--warning-ink)' : 'var(--text-muted)' },
       onclick: async () => { x.fav = x.fav ? 0 : 1; remember(() => idb.putQuery(x)); drawHistory(); } }, x.fav ? '★' : '☆')),
     h('td.muted', { style: { fontSize: '11px', whiteSpace: 'nowrap' }, title: dt(x.ts) }, ago(x.ts)),
     h('td.mono', { style: { fontSize: '11px', fontWeight: 700, color: 'var(--accent)' } }, x.method),
@@ -851,7 +851,7 @@ function historyCard() {
         h('input#c-histfilter', { type: 'search', placeholder: 'filter by path, method or body…', value: ui.filter, style: { flex: '1', maxWidth: '420px' },
           oninput: (e) => { ui.filter = e.target.value; drawHistory(); } }),
         h('button.btn.sm', { onclick: () => { ui.showFav = !ui.showFav; drawHistory(); },
-          style: ui.showFav ? { color: 'var(--warning)', borderColor: 'var(--warning)' } : null }, '★ favourites only'),
+          style: ui.showFav ? { color: 'var(--warning-ink)', borderColor: 'var(--warning-ink)' } : null }, '★ favourites only'),
         h('span.muted', { style: { fontSize: '11px', marginLeft: 'auto' } }, 'click a row to load it into the query')),
       rows.length
         ? h('div', { style: { maxHeight: '40vh', overflow: 'auto' } },
