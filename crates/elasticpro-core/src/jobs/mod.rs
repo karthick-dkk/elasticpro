@@ -238,7 +238,7 @@ pub static REGISTRY: [Descriptor; 13] = [
     },
     Descriptor {
         id: REPORT_RUN, name: "Report runs", kind: JobKind::Manual, owner: Owner::Worker,
-        schedule: "when a person asks (Reports, REPORT_RUN); queued, 3 to 5 at once (REPORT_CONCURRENCY_SET)",
+        schedule: "when a person asks (Reports, REPORT_RUN); queued; as many at once as mostAtOnce leaves (default 4, less the collections running, at least one)",
         next_run: NextRun::OnRequest, priority: Priority::Medium, pausable: false, requests: req(1, 4), report: None, cluster_scoped: true, admin_details: false,
     },
     mailed(MAILED_VOLUME, "Mailed volume report", ReportKind::Volume),
