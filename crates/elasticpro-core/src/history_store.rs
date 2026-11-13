@@ -1534,7 +1534,9 @@ impl Core {
             }
         }
         let _done = Done(&self.history_store.ticking);
-        let (out, spooled) = self.history_tick_inner(trigger).await;
+        // A job of the core: what it sends goes in a lane fixed at its maximum (docs/JOBS.md
+        // "Governor"); its allocation is shown only while a run of it is open.
+        let (out, spooled) = self.governed(crate::jobs::HISTORY_MIRROR, crate::jobs::HISTORY_MIRROR, self.history_tick_inner(trigger)).await;
         // The spool's files go only once the queue that took their records is on disk: a
         // crash between the two loses nothing, the record is queued again next tick (same key).
         if self.history_store.flush_queue().await {

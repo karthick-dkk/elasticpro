@@ -203,6 +203,10 @@ async fn run() {
     if starts.worker_loops {
         core.start_worker_loops();
     }
+    // The governor (docs/JOBS.md "Governor"): the worker's jobs sized every 10 s (role worker or
+    // all); in role core, people waiting at its gate published for the worker every 5 s, and the
+    // core's gate limits from the job settings.
+    core.start_governor();
     if starts.worker_http {
         let port: u16 = std::env::var("ELASTICPRO_WORKER_PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(elasticpro_core::worker::PORT);
         let app = Router::new()

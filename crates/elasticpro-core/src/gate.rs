@@ -871,6 +871,15 @@ impl Gate {
         out
     }
 
+    /// People's requests (interactive and prompted) granted within the last `window_ms` after
+    /// waiting `min_ms` or more: what the governor reads as people waiting (jobs::governor).
+    pub fn people_waited(&self, window_ms: u64, min_ms: u64) -> usize {
+        let now = self.now_ms();
+        let s = self.stats.lock();
+        s.waits.iter().rev().take_while(|w| now.saturating_sub(w.0) <= window_ms)
+            .filter(|w| w.1 != Class::Background && w.2 >= min_ms).count()
+    }
+
     /// Running and queued now, plus the last five minutes: waits (p50/p95 per class),
     /// refusals by kind, requests shared and answered from the cache.
     pub fn report(&self, visible: Option<&std::collections::HashSet<String>>) -> Value {

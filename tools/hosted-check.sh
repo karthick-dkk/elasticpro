@@ -506,13 +506,16 @@ check "the worker answers /health in role worker" "$(curl -s "http://127.0.0.1:$
 check "the worker serves no UI and no message API" "$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:$WP/bridge" -d '{}')" "404"
 check "an action without the shared token is refused" "$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:$WP/queue" -d '{}')" "401"
 check "one token for both, 0600" "$(stat -c '%a' "$DW/worker/token" 2>/dev/null || stat -f '%Lp' "$DW/worker/token")" "600"
-check "the core forwards an action to the worker" "$(post "http://127.0.0.1:$CP/bridge" -d '{"type":"REPORT_CONCURRENCY_SET","n":4}' | field ok)" "True"
-got=; for _ in $(seq 1 25); do got=$(post "http://127.0.0.1:$CP/bridge" -d '{"type":"REPORT_JOBS"}' | field concurrency); [ "$got" = 4 ] && break; sleep 0.2; done
-check "and reads the worker's jobs.json back" "$got" "4"
+check "the core forwards an action to the worker" "$(post "http://127.0.0.1:$CP/bridge" -d '{"type":"REPORT_CLEAR"}' | field ok)" "True"
+# REPORT_CONCURRENCY_SET writes overall.mostAtOnce, the core's own controls.json (docs/JOBS.md
+# "Governor"): handled by the core, never forwarded, and read back at once.
+check "the report concurrency is the core's setting" "$(post "http://127.0.0.1:$CP/bridge" -d '{"type":"REPORT_CONCURRENCY_SET","n":4}' | field ok)" "True"
+check "and REPORT_JOBS reads it back" "$(post "http://127.0.0.1:$CP/bridge" -d '{"type":"REPORT_JOBS"}' | field concurrency)" "4"
 check "the core does not start the report timer" "$(grep -c 'volume report: timer started' "$OUTC" || true)" "0"
 check "the core says its role" "$(grep -c '"role":"core"' "$OUTC" | tr -d ' ' | sed 's/^[1-9][0-9]*$/yes/')" "yes"
 kill $PIDW; wait $PIDW 2>/dev/null || true
-check "worker down: an action is worker_unavailable" "$(post "http://127.0.0.1:$CP/bridge" -d '{"type":"REPORT_CONCURRENCY_SET","n":3}' | field kind)" "worker_unavailable"
+check "worker down: an action is worker_unavailable" "$(post "http://127.0.0.1:$CP/bridge" -d '{"type":"REPORT_CLEAR"}' | field kind)" "worker_unavailable"
+check "and the core's own settings still answer" "$(post "http://127.0.0.1:$CP/bridge" -d '{"type":"REPORT_CONCURRENCY_SET","n":3}' | field ok)" "True"
 check "and PING still answers" "$(post "http://127.0.0.1:$CP/bridge" -d '{"type":"PING"}' | field ok)" "True"
 check "and the jobs are still read" "$(post "http://127.0.0.1:$CP/bridge" -d '{"type":"REPORT_JOBS"}' | field ok)" "True"
 # docs/JOBS.md: the core lists every job, the worker's from the files the worker writes; it writes

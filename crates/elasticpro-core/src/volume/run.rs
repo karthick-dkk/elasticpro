@@ -837,7 +837,9 @@ impl Core {
             let result = if core.volume_stopped() {
                 Ok(Collected { error: Some(STOP_BEFORE.into()), interrupted: Some(STOP_BEFORE.into()), ..Collected::default() })
             } else {
-                core.volume_run_cluster(&id, &s, prune).await
+                // The run's lane (docs/JOBS.md "Governor"): its clusters share one allocation.
+                let key = logged.as_ref().map(|r| r.id().to_string()).unwrap_or_else(|| crate::jobs::VOLUME_DAILY.to_string());
+                core.governed(&key, crate::jobs::VOLUME_DAILY, core.volume_run_cluster(&id, &s, prune)).await
             };
             drop(permit);
             // Asked to stop by a person (JOB_CANCEL): stopped at a safe point, and the day stays
@@ -1272,6 +1274,11 @@ impl Core {
         // Stopped: nothing is marked, so the run happens on the first tick after the stop ends.
         // Paused (docs/JOBS.md): likewise — the day's run happens on the first tick after resume.
         if self.volume_stopped() || self.jobs.held(crate::jobs::VOLUME_DAILY).is_some() {
+            return vec![];
+        }
+        // Most jobs at once (docs/JOBS.md "Governor"): no new run while the worker already runs
+        // as many as `mostAtOnce` allows. Nothing is marked: the next tick runs what is due.
+        if !self.governor_room(crate::jobs::VOLUME_DAILY) {
             return vec![];
         }
         let mut specs = self.all_specs();

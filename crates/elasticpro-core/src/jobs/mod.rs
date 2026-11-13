@@ -18,6 +18,7 @@
 //! Nothing here sends a cluster anything.
 
 pub mod controls;
+pub mod governor;
 pub mod load;
 
 use crate::delay_sink::SinkView;
@@ -237,7 +238,7 @@ pub static REGISTRY: [Descriptor; 13] = [
     },
     Descriptor {
         id: REPORT_RUN, name: "Report runs", kind: JobKind::Manual, owner: Owner::Worker,
-        schedule: "when a person asks (Reports, REPORT_RUN); queued, 3 to 5 at once (REPORT_CONCURRENCY_SET)",
+        schedule: "when a person asks (Reports, REPORT_RUN); queued; as many at once as mostAtOnce leaves (default 4, less the collections running, at least one)",
         next_run: NextRun::OnRequest, priority: Priority::Medium, pausable: false, requests: req(1, 4), report: None, cluster_scoped: true, admin_details: false,
     },
     mailed(MAILED_VOLUME, "Mailed volume report", ReportKind::Volume),
@@ -1066,14 +1067,20 @@ pub fn retry_refusal(attempt: u32, ended_at: Option<u64>, policy: &controls::Ove
 
 /* ------------------------------------------ report jobs ------------------------------------------ */
 
-/// A report job of `jobs.json` as a run: the queue is its record, so it is mapped, not copied.
-/// Its id is `report-<job id>`. A queued job's progress is not known yet.
-pub fn from_report_job(j: &Job) -> RunRecord {
-    let job_id = match (&j.schedule_id, j.kind) {
+/// The job a report job of `jobs.json` is a run of: a created schedule's, the mailed schedule's,
+/// else `report.run`. One definition, for the run list and the governor's lanes.
+pub fn report_job_id(j: &Job) -> String {
+    match (&j.schedule_id, j.kind) {
         (Some(sid), _) => format!("{CREATED_PREFIX}{sid}"),
         (None, ReportJobKind::Mailed) => mailed_id(j.report).to_string(),
         _ => REPORT_RUN.to_string(),
-    };
+    }
+}
+
+/// A report job of `jobs.json` as a run: the queue is its record, so it is mapped, not copied.
+/// Its id is `report-<job id>`. A queued job's progress is not known yet.
+pub fn from_report_job(j: &Job) -> RunRecord {
+    let job_id = report_job_id(j);
     let trigger = if j.retry_of.is_some() {
         Trigger::Retry
     } else if j.by == crate::report::SCHEDULE_BY {

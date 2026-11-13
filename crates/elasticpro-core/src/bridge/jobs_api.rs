@@ -43,6 +43,8 @@ impl Core {
         let stale = self.role == Role::Core && self.worker_heartbeat_late();
         let mut states = jobs::job_states(&runs, who);
         let controls = self.jobs.controls();
+        // The governor (docs/JOBS.md "Governor"): its figures, and each running job's allocation.
+        let (governor, mut allocations) = self.governor_for_list();
         let mut list = vec![];
         let created = self.created_job_entries(view.visible.as_ref(), who.admin);
         let entries = jobs::REGISTRY.iter().map(|d| (d.id.to_string(), d.to_json(), Some(d)))
@@ -66,6 +68,7 @@ impl Core {
                 "enabled": set.enabled.unwrap_or(true), "paused": set.paused, "pausedBy": set.paused_by, "pausedAt": set.paused_at,
                 "current": current, "activeRuns": active, "lastRun": last,
                 "nextRunAt": next, "nextRunNote": why,
+                "allocation": allocations.remove(&id),
             });
             list.push(v);
         }
@@ -80,7 +83,7 @@ impl Core {
         // is on disk is an administrator's.
         let problems: Vec<String> = if who.admin { problems } else { problems.iter().map(|_| "a run log could not be read".to_string()).collect() };
         json!({ "ok": true, "role": self.role.as_str(), "jobs": list, "runs": page, "next": next, "busy": busy,
-                "process": self.jobs_process(), "problems": problems })
+                "governor": governor, "process": self.jobs_process(), "problems": problems })
     }
 
     /// Role core: the worker's heartbeat is late, down, or never came (its runs may be stale).

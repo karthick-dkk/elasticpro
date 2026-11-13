@@ -5,9 +5,9 @@
 //!
 //! Per job: paused (by whom, since when), automatic on/off, the adaptive concurrency switch
 //! (`auto`), the request limits and the priority. Overall: most jobs at once, the worker's total
-//! requests, the CPU and memory thresholds, and the retry policy. The limits, priority, `auto`
-//! and the thresholds are stored and validated here; the adaptive governor (PR 4) is what reads
-//! them to act. Pause, automatic on/off and the retry policy act now.
+//! requests, the CPU and memory thresholds, the governor's own switch, the retry policy, and the
+//! core's gate limits (`ES_CONCURRENCY` and its three siblings) where config.txt does not set
+//! them. The governor (`jobs::governor`) reads the limits, priority, `auto` and the thresholds.
 //!
 //! Pure apart from `load` / `save`. Nothing here sends a cluster anything.
 
@@ -68,11 +68,68 @@ pub struct Overall {
     pub retry_limit: u32,
     /// Minutes between two tries [5].
     pub retry_wait_minutes: u64,
+    /// The governor moves the worker's total [on]; off, the total is `worker_total`.
+    pub auto: bool,
+    /// The core's gate (`gate::Limits`), changed without a restart: `None` keeps what
+    /// config.txt or the built-in default says. A field config.txt sets cannot be set here.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub es_concurrency: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub es_per_cluster: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub es_per_jump_host: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub es_background_reserve: Option<u32>,
 }
 
 impl Default for Overall {
     fn default() -> Overall {
-        Overall { most_at_once: 4, worker_total: 16, cpu_pct: 85, memory_pct: 85, retry_limit: RETRY_LIMIT, retry_wait_minutes: RETRY_WAIT_MINUTES }
+        Overall { most_at_once: 4, worker_total: 16, cpu_pct: 85, memory_pct: 85, retry_limit: RETRY_LIMIT, retry_wait_minutes: RETRY_WAIT_MINUTES,
+                  auto: true, es_concurrency: None, es_per_cluster: None, es_per_jump_host: None, es_background_reserve: None }
+    }
+}
+
+/// The most jobs at once a person may set (`overall.mostAtOnce`).
+pub const MOST_AT_ONCE_MAX: u32 = 32;
+
+/// The core's gate fields of `overall`: the message's name, the config.txt key that locks it,
+/// and its range — `ES_*` in settings.rs.
+pub const GATE_FIELDS: [(&str, &str, u32, u32); 4] = [
+    ("esConcurrency", "ES_CONCURRENCY", 1, 1024),
+    ("esPerCluster", "ES_PER_CLUSTER", 1, 1024),
+    ("esPerJumpHost", "ES_PER_JUMP_HOST", 1, 1024),
+    ("esBackgroundReserve", "ES_BACKGROUND_RESERVE", 0, 1023),
+];
+
+impl Overall {
+    fn gate_field(&mut self, name: &str) -> Option<&mut Option<u32>> {
+        match name {
+            "esConcurrency" => Some(&mut self.es_concurrency),
+            "esPerCluster" => Some(&mut self.es_per_cluster),
+            "esPerJumpHost" => Some(&mut self.es_per_jump_host),
+            "esBackgroundReserve" => Some(&mut self.es_background_reserve),
+            _ => None,
+        }
+    }
+
+    /// The core's gate limits with these settings over `base` (config.txt's, or the defaults),
+    /// each only where `locked` says config.txt does not set it.
+    pub fn gate_limits(&self, base: &crate::gate::Limits, locked: impl Fn(&str) -> bool) -> crate::gate::Limits {
+        let mut l = base.clone();
+        let pick = |v: Option<u32>, key: &str| v.filter(|_| !locked(key)).map(|n| n as usize);
+        if let Some(n) = pick(self.es_concurrency, "ES_CONCURRENCY") {
+            l.global = n;
+        }
+        if let Some(n) = pick(self.es_per_cluster, "ES_PER_CLUSTER") {
+            l.per_cluster = n;
+        }
+        if let Some(n) = pick(self.es_per_jump_host, "ES_PER_JUMP_HOST") {
+            l.per_jump = n;
+        }
+        if let Some(n) = pick(self.es_background_reserve, "ES_BACKGROUND_RESERVE") {
+            l.background_reserve = n;
+        }
+        l.normalised()
     }
 }
 
@@ -160,10 +217,16 @@ impl Controls {
         })
     }
 
+    /// `JOB_SETTINGS_SET` with nothing locked by config.txt (the tests of the pure rules).
+    pub fn apply(&mut self, msg: &Value, job_known: impl Fn(&str) -> bool) -> Result<(), String> {
+        self.apply_with(msg, job_known, |_| false)
+    }
+
     /// `JOB_SETTINGS_SET`: `{jobId, enabled?, auto?, requests?: {min?, max?}, priority?}` for
     /// one job, `{overall: {…}}` for the rest; either or both. Every field is checked before any
-    /// is applied: a refusal changes nothing.
-    pub fn apply(&mut self, msg: &Value, job_known: impl Fn(&str) -> bool) -> Result<(), String> {
+    /// is applied: a refusal changes nothing. `locked(key)`: config.txt sets that key, so the
+    /// gate field it backs is refused (`null` puts a field back to config.txt's or the default).
+    pub fn apply_with(&mut self, msg: &Value, job_known: impl Fn(&str) -> bool, locked: impl Fn(&str) -> bool) -> Result<(), String> {
         let mut next = self.clone();
         if let Some(id) = msg.get("jobId").filter(|v| !v.is_null()) {
             let id = id.as_str().filter(|i| job_known(i)).ok_or("jobId is not a job (see JOBS_LIST jobs[].id)")?;
@@ -219,7 +282,7 @@ impl Controls {
                 }
             };
             let ov = &mut next.overall;
-            ov.most_at_once = count("mostAtOnce", ov.most_at_once, 32)?;
+            ov.most_at_once = count("mostAtOnce", ov.most_at_once, MOST_AT_ONCE_MAX)?;
             ov.worker_total = count("workerTotal", ov.worker_total, 256)?;
             ov.cpu_pct = pct("cpuPct", ov.cpu_pct)?;
             ov.memory_pct = pct("memoryPct", ov.memory_pct)?;
@@ -231,8 +294,26 @@ impl Controls {
                 None => ov.retry_wait_minutes,
                 Some(v) => v.as_u64().filter(|n| *n <= 24 * 60).ok_or("overall.retryWaitMinutes must be 0 to 1440")?,
             };
+            if let Some(v) = o.get("auto") {
+                ov.auto = v.as_bool().ok_or("overall.auto must be true or false")?;
+            }
+            for (name, key, lo, hi) in GATE_FIELDS {
+                let Some(v) = o.get(name) else { continue };
+                if locked(key) {
+                    return Err(format!("overall.{name} is managed by config.txt ({key}): change it there"));
+                }
+                let n = match v {
+                    Value::Null => None,
+                    v => Some(v.as_u64().filter(|n| (lo as u64..=hi as u64).contains(n)).map(|n| n as u32)
+                        .ok_or_else(|| format!("overall.{name} must be {lo} to {hi}, or null for config.txt's"))?),
+                };
+                if let Some(f) = ov.gate_field(name) {
+                    *f = n;
+                }
+            }
             for k in o.keys() {
-                if !["mostAtOnce", "workerTotal", "cpuPct", "memoryPct", "retryLimit", "retryWaitMinutes"].contains(&k.as_str()) {
+                let gate = GATE_FIELDS.iter().any(|(n, ..)| n == k);
+                if !gate && !["mostAtOnce", "workerTotal", "cpuPct", "memoryPct", "retryLimit", "retryWaitMinutes", "auto"].contains(&k.as_str()) {
                     return Err(format!("overall.{k} is not a setting"));
                 }
             }
@@ -269,6 +350,32 @@ mod tests {
         // Back to the defaults is no entry at all.
         c.apply(&json!({ "jobId": "housekeeping", "requests": { "max": 1 }, "priority": "low", "enabled": true }), known).unwrap();
         assert!(!c.jobs.contains_key("housekeeping"), "{:?}", c.jobs);
+    }
+
+    #[test]
+    fn the_core_gate_fields_set_what_config_txt_does_not_and_a_locked_one_is_refused() {
+        let known = |id: &str| descriptor(id).is_some();
+        let locked = |k: &str| k == "ES_PER_CLUSTER";
+        let mut c = Controls::default();
+        c.apply_with(&json!({ "overall": { "esConcurrency": 40, "esBackgroundReserve": 3, "auto": false } }), known, locked).unwrap();
+        assert_eq!((c.overall.es_concurrency, c.overall.es_background_reserve, c.overall.auto), (Some(40), Some(3), false));
+        let before = c.clone();
+        let e = c.apply_with(&json!({ "overall": { "esConcurrency": 30, "esPerCluster": 6 } }), known, locked).unwrap_err();
+        assert!(e.contains("config.txt") && e.contains("ES_PER_CLUSTER"), "{e}");
+        assert_eq!(c, before, "a refusal changes nothing, the unlocked field included");
+        assert!(c.apply_with(&json!({ "overall": { "esConcurrency": 0 } }), known, locked).is_err());
+        assert!(c.apply_with(&json!({ "overall": { "esConcurrency": "many" } }), known, locked).is_err());
+        // The limits in force: the setting over config.txt's, a locked one never.
+        let base = crate::gate::Limits::default();
+        let l = c.overall.gate_limits(&base, locked);
+        assert_eq!((l.global, l.per_cluster, l.background_reserve), (40, base.per_cluster, 3));
+        c.overall.es_per_cluster = Some(9);
+        assert_eq!(c.overall.gate_limits(&base, locked).per_cluster, base.per_cluster, "config.txt wins");
+        assert_eq!(c.overall.gate_limits(&base, |_| true).global, base.global, "every field locked: config.txt's limits");
+        // null puts it back.
+        c.apply_with(&json!({ "overall": { "esConcurrency": null } }), known, locked).unwrap();
+        assert_eq!(c.overall.es_concurrency, None);
+        assert!(c.apply_with(&json!({ "overall": { "mostAtOnce": 33 } }), known, locked).is_err(), "mostAtOnce is 1 to 32");
     }
 
     #[test]
