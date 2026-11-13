@@ -4,9 +4,12 @@
  *
  *   #/reports            → Overview
  *   #/reports/<section>  → that section
- *   #/reports/log-delay/… → Log delay, one of its views (core/logdelay-report.js ldRoute)
  *   #/volume, #/volume/… → the same (the page was "Volume report" until 0.3.53; the Zabbix
  *                          menu entry elasticpro.volume and saved links still open #/volume)
+ *
+ * Two addresses moved to the Log Delay page (#/log-delay/…, core/logdelay-report.js ldRoute)
+ * and still open there: #/reports/log-delay/… (Reports › Log delay until 0.3.60, and the link
+ * in the log delay mail) and #/logs (the page was "Logs & Delay", opened on its live tail).
  */
 
 /** The sections, in the order the section nav shows them. */
@@ -17,14 +20,25 @@ export const REPORT_SECTIONS = Object.freeze([
   { id: 'capacity', label: 'Capacity & retention' },
   { id: 'measure', label: 'Measure size' },
   { id: 'planning', label: 'Planning' },
-  // 0.3.57: the log delay report (docs/LOGDELAY.md) — its own views under #/reports/log-delay/….
-  { id: 'log-delay', label: 'Log delay' },
+  // The log delay report (docs/LOGDELAY.md) moved to the Log Delay page: the entry is a link there.
+  { id: 'log-delay', label: 'Log delay', moved: '#/log-delay' },
   { id: 'exports', label: 'Exports & schedules' },
 ]);
 export const DEFAULT_SECTION = 'overview';
 
 /** Old page ids that open a page under its new id. */
-export const PAGE_ALIAS = Object.freeze({ volume: 'reports' });
+export const PAGE_ALIAS = Object.freeze({ volume: 'reports', logs: 'log-delay' });
+
+/**
+ * An old address that now belongs to another page, as `[page, rest]`; null for any other.
+ * `#/reports/log-delay/<view>` is the Log Delay page's `<view>`; `#/logs` opened the live tail,
+ * which is the Log Delay page's Live logs.
+ */
+export function movedPath(first, more) {
+  if (first === 'reports' && more[0] === 'log-delay') return ['log-delay', more.slice(1)];
+  if (first === 'logs') return ['log-delay', more.length ? more : ['live']];
+  return null;
+}
 
 /** A page id with its alias resolved. */
 export const pageAlias = (id) => (id && Object.prototype.hasOwnProperty.call(PAGE_ALIAS, id) ? PAGE_ALIAS[id] : id);
@@ -35,8 +49,11 @@ export const pageAlias = (id) => (id && Object.prototype.hasOwnProperty.call(PAG
  */
 export function parseHash(hash) {
   const path = String(hash || '').replace(/^#\/?/, '').split('?')[0];
-  const [first, ...more] = path.split('/');
-  return { page: pageAlias(first || ''), rest: more.filter(Boolean).join('/') };
+  const [first, ...parts] = path.split('/');
+  const more = parts.filter(Boolean);
+  const moved = movedPath(first, more);
+  if (moved) return { page: moved[0], rest: moved[1].join('/') };
+  return { page: pageAlias(first || ''), rest: more.join('/') };
 }
 
 /** The Reports section a hash names; Overview when it names none or one that does not exist. */

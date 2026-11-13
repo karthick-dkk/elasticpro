@@ -13,13 +13,76 @@ const R = await import(pathToFileURL(path.join(ROOT, 'ui/js/core/logdelay-report
 const ST = await import(pathToFileURL(path.join(ROOT, 'ui/js/core/logdelay-settings.js')).href);
 
 test('routes: each view round-trips, names with slashes and spaces included', () => {
-  assert.deepEqual(R.ldRoute('#/reports/log-delay'), { view: 'fleet', clusterId: null, device: null });
+  assert.deepEqual(R.ldRoute('#/log-delay'), { view: 'fleet', clusterId: null, device: null });
+  assert.deepEqual(R.ldRoute(R.ldHash('watch')), { view: 'watch', clusterId: null, device: null });
+  assert.deepEqual(R.ldRoute(R.ldHash('live')), { view: 'live', clusterId: null, device: null });
+  assert.deepEqual(R.ldRoute(R.ldHash('live', 'c 1', 'fw/dc1 07')), { view: 'live', clusterId: 'c 1', device: 'fw/dc1 07' });
+  assert.deepEqual(R.ldRoute(R.ldHash('live', 'c1')), { view: 'live', clusterId: 'c1', device: null });
   assert.deepEqual(R.ldRoute(R.ldHash('cluster', 'client a/prod')), { view: 'cluster', clusterId: 'client a/prod', device: null });
   assert.deepEqual(R.ldRoute(R.ldHash('device', 'c1', 'fw/dc1 07')), { view: 'device', clusterId: 'c1', device: 'fw/dc1 07' });
   assert.deepEqual(R.ldRoute(R.ldHash('fixes')), { view: 'fixes', clusterId: null, device: null });
   assert.deepEqual(R.ldRoute(R.ldHash('fixes', 'c1')), { view: 'fixes', clusterId: 'c1', device: null });
-  assert.equal(R.ldRoute('#/reports/capacity').view, 'fleet', 'another section is not a log delay view');
-  assert.equal(R.ldHash('fleet'), '#/reports/log-delay', 'the mail links here (docs/LOGDELAY.md)');
+  assert.equal(R.ldRoute('#/reports/capacity').view, 'fleet', 'another page is not a log delay view');
+  assert.equal(R.ldHash('fleet'), '#/log-delay');
+  assert.deepEqual(['fleet', 'cluster', 'device', 'fixes', 'watch', 'live'].map(R.ldTab), ['fleet', 'fleet', 'fleet', 'fixes', 'watch', 'live']);
+});
+
+test('the old addresses open the matching view of the Log Delay page', () => {
+  // The mail's "Open the full report" link and saved Reports › Log delay links.
+  assert.deepEqual(R.ldRoute('#/reports/log-delay'), { view: 'fleet', clusterId: null, device: null });
+  assert.deepEqual(R.ldRoute('#/reports/log-delay/cluster/c%201'), { view: 'cluster', clusterId: 'c 1', device: null });
+  assert.deepEqual(R.ldRoute('#/reports/log-delay/device/c1/fw%2Fdc1'), { view: 'device', clusterId: 'c1', device: 'fw/dc1' });
+  assert.deepEqual(R.ldRoute('#/reports/log-delay/fixes/c1'), { view: 'fixes', clusterId: 'c1', device: null });
+  // #/logs was the live tail.
+  assert.deepEqual(R.ldRoute('#/logs'), { view: 'live', clusterId: null, device: null });
+});
+
+test('Fetch Now: the scoped JOB_RUN, the run found in JOBS_LIST, and its words', () => {
+  assert.deepEqual(R.fetchNowMessage({}), { type: 'JOB_RUN', jobId: 'logdelay.measure' });
+  assert.deepEqual(R.fetchNowMessage({ clusterIds: ['c1'], device: 'fw-07' }), { type: 'JOB_RUN', jobId: 'logdelay.measure', clusterIds: ['c1'], device: 'fw-07' });
+  assert.deepEqual(R.fetchNowMessage({ clusterIds: [] }), { type: 'JOB_RUN', jobId: 'logdelay.measure' }, 'no clusters named is every cluster');
+  const list = { ok: true, jobs: [{ id: 'logdelay.measure', state: { current: { id: 'r2', status: 'running' }, lastRun: { id: 'r1', status: 'completed' } } }],
+    runs: [{ id: 'r3', jobId: 'logdelay.measure', status: 'queued' }] };
+  assert.equal(R.runOf(list, 'r3').status, 'queued');
+  assert.equal(R.runOf(list, 'r2').status, 'running', 'the job\'s current run');
+  assert.equal(R.runOf(list, 'r1').status, 'completed', 'its last run');
+  assert.equal(R.runOf(list, 'nope'), null);
+  assert.equal(R.runText({ status: 'running', done: 3, total: 8, progress: 37.5, records: 1240 }), 'running · 3 of 8 (38 %) · 1,240 devices measured');
+  assert.equal(R.runText({ status: 'running', done: null, total: null, progress: null, records: null }), 'running · progress not known yet', 'unknown progress is said, never 0');
+  assert.equal(R.runText({ status: 'completed', done: 8, total: 8, progress: 100, records: 1 }), 'done · 8 of 8 (100 %) · 1 device measured');
+  assert.equal(R.runText({ status: 'skipped', error: 'not armed' }), 'skipped · not armed');
+  assert.equal(R.fetchRefusalText({ ok: true }), null);
+  assert.match(R.fetchRefusalText({ ok: false, kind: 'already_running', runId: 'abc' }), /already running \(run abc\)/);
+  assert.match(R.fetchRefusalText({ ok: false, kind: 'blocked_readonly' }), /read-only/);
+  assert.match(R.fetchRefusalText({ ok: false, kind: 'forbidden' }), /administrator/);
+  assert.match(R.fetchRefusalText(null), /did not answer/);
+});
+
+test('zone and tag1 of a row: any case, the pipeline\'s other names, unknown is null', () => {
+  assert.equal(R.extraOf({ extras: { Zone: 'dc1', tag1: 'fw' } }, 'zone'), 'dc1');
+  assert.equal(R.extraOf({ meta: { zone: 'z2' } }, 'zone'), 'z2');
+  assert.equal(R.extraOf({ extras: { fwdtag: 'syslog-1' } }, 'fwd_tag'), 'syslog-1');
+  assert.equal(R.extraOf({ extras: { tag1: '' } }, 'tag1'), null, 'an empty value is unknown');
+  assert.equal(R.extraOf({}, 'tag1'), null);
+  assert.equal(R.valuesText([{ extras: { Zone: 'b' } }, { extras: { Zone: 'a' } }, { extras: { Zone: 'b' } }, {}], 'zone'), 'a, b');
+  assert.equal(R.valuesText([{ extras: { tag1: 'a' } }, { extras: { tag1: 'b' } }, { extras: { tag1: 'c' } }, { extras: { tag1: 'd' } }], 'tag1'), 'a, b, c +1');
+  assert.equal(R.valuesText([], 'zone'), '—');
+});
+
+test('a device Live Watch measured is a board row: the contract\'s state, unknown never 0', () => {
+  const L = { noDelayUnder: 15, delayFrom: 30, criticalOver: 60 };
+  const rec = { device: 'fw-07', docs: 120, arrival: 1000, event: 500, delayMinutes: 41, pattern: '-', patternNote: '', meta: { zone: 'dc1', tag1: 'fw' } };
+  const r = R.liveDeviceRow(rec, { id: 'c1', name: 'prod' }, L);
+  assert.equal(r.state, 'delay');
+  assert.equal(r.nowMinutes, 41);
+  assert.equal(r.cluster, 'c1');
+  assert.equal(R.extraOf(r, 'zone'), 'dc1');
+  assert.equal(r.maxMinutes, null, 'one measurement does not know the worst');
+  assert.equal(r.pattern, null);
+  assert.equal(R.liveDeviceRow({ ...rec, delayMinutes: 95 }, { id: 'c1' }, L).state, 'critical');
+  assert.equal(R.liveDeviceRow({ ...rec, delayMinutes: null }, { id: 'c1' }, L).state, 'unmeasured');
+  assert.equal(R.liveDeviceRow(rec, { id: 'c1' }, null).state, 'unknown', 'levels the core has not said: unknown, never on time');
+  assert.equal(R.stateText('unknown'), 'levels unknown');
 });
 
 test('words: minutes, durations, docs — unknown says so', () => {

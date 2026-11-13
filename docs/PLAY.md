@@ -153,7 +153,7 @@ the slide already colours by, so a blink never disagrees with the colour under i
 | days of disk left | `volumeReport()` (`liveSufficientDays`), as the Volume page shows it |
 | ILM / SLM Running | `policies` dataset (as the Overview pills) |
 
-**The one new cluster load:** device-delay measurement (the Logs page's query, 24 h window,
+**The one new cluster load:** device-delay measurement (Log Delay › Live Watch's query, 24 h window,
 terms on the device field) runs per cluster **only while a Play display is open**, in two
 tiers, and at most once per tier per cluster across all displays (shared cache). Everything
 else is what the fleet poller already fetches, at Play's own pace (next section).

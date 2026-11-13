@@ -1,20 +1,27 @@
 /**
- * Reports › Log delay (0.3.57): the messages, the routes, and the arithmetic the pages draw
- * with. docs/LOGDELAY.md is the contract; this file is the one place the UI reads its field
- * names, and it touches no DOM, so tools/unit tests every figure here.
+ * The Log Delay page's boards (0.3.57, on their own page since 0.3.60): the messages, the
+ * routes, and the arithmetic the pages draw with. docs/LOGDELAY.md is the contract; this file is
+ * the one place the UI reads its field names, and it touches no DOM, so tools/unit tests every
+ * figure here.
  *
- *   #/reports/log-delay                          the fleet (Main board)
- *   #/reports/log-delay/cluster/<id>             one cluster (Cluster board)
- *   #/reports/log-delay/device/<cluster>/<dev>   one device (Device board)
- *   #/reports/log-delay/fixes                    recommended fixes (Fix board)
+ *   #/log-delay                           the fleet (Main board)
+ *   #/log-delay/cluster/<id>              one cluster (Cluster board)
+ *   #/log-delay/device/<cluster>/<dev>    one device (Device board)
+ *   #/log-delay/fixes[/<cluster>]         recommended fixes (Fix board)
+ *   #/log-delay/watch                     Live Watch: every cluster measured now, from the browser
+ *   #/log-delay/live[/<cluster>[/<dev>]]  Live logs, optionally narrowed to one device
  *
- * The mail's "Open the full report" link is <url>/#/reports/log-delay, so the section id is
- * `log-delay`.
+ * The old addresses still open the same views (reports/route.js movedPath): the mail's "Open the
+ * full report" link, <url>/#/reports/log-delay[/…], and #/logs (Live logs).
  */
 
 import { bridge } from './transport.js';
-import { STATE_LABEL, isLate } from './delay-levels.js';
+import { STATE_LABEL, isLate, levelState } from './delay-levels.js';
+import { parseHash } from '../reports/route.js';
+import { zonedParts } from './log-range.js';
 
+/** The page's id, and the Reports section id the mail's link still names. */
+export const LD_PAGE = 'log-delay';
 export const LD_SECTION = 'log-delay';
 
 /** Chart colours (owner's rule): light green, blue, pink, orange — never red with yellow. */
@@ -27,9 +34,13 @@ export function ldUnsupported(res) {
   return !!res && res.ok === false && (res.kind === 'bad_message' || /unknown message type/i.test(String(res.message || '')));
 }
 
-async function send(msg) {
+/**
+ * One message to the core. `signal` lets a view that is left go of what it asked (the answer is
+ * then `{ok: false, kind: 'aborted'}`, which no page draws).
+ */
+async function send(msg, signal) {
   let res;
-  try { res = await bridge(msg); } catch (e) { return { ok: false, message: e.message || String(e) }; }
+  try { res = await bridge(msg, signal ? { signal } : undefined); } catch (e) { return { ok: false, message: e.message || String(e) }; }
   if (!res) return { ok: false, kind: 'worker_error', message: 'the core did not answer' };
   if (ldUnsupported(res)) return { ...res, unsupported: true, message: 'This server has no log delay report yet (needs ElasticPro 0.3.57).' };
   return res;
@@ -39,11 +50,11 @@ async function send(msg) {
 const pick = (o, keys) => Object.fromEntries(keys.filter((k) => o[k] !== undefined && o[k] !== null && o[k] !== '').map((k) => [k, o[k]]));
 const ids = (o) => (Array.isArray(o.clusterIds) && o.clusterIds.length ? { clusterIds: o.clusterIds } : {});
 
-export const ldSummary = (o = {}) => send({ type: 'LOGDELAY_SUMMARY', ...pick(o, ['from', 'to', 'days', 'maxDevices']), ...ids(o) });
-export const ldCluster = (o) => send({ type: 'LOGDELAY_CLUSTER', clusterId: o.clusterId, ...pick(o, ['from', 'to', 'days']) });
-export const ldDevice = (o) => send({ type: 'LOGDELAY_DEVICE', clusterId: o.clusterId, device: o.device, ...pick(o, ['from', 'to', 'days']) });
-export const ldSearch = (o = {}) => send({ type: 'LOGDELAY_SEARCH', ...pick(o, ['name', 'field', 'value', 'from', 'to', 'max']), ...ids(o) });
-export const ldFixes = (o = {}) => send({ type: 'LOGDELAY_FIXES', ...pick(o, ['from', 'to']), ...ids(o) });
+export const ldSummary = (o = {}) => send({ type: 'LOGDELAY_SUMMARY', ...pick(o, ['from', 'to', 'days', 'maxDevices']), ...ids(o) }, o.signal);
+export const ldCluster = (o) => send({ type: 'LOGDELAY_CLUSTER', clusterId: o.clusterId, ...pick(o, ['from', 'to', 'days']) }, o.signal);
+export const ldDevice = (o) => send({ type: 'LOGDELAY_DEVICE', clusterId: o.clusterId, device: o.device, ...pick(o, ['from', 'to', 'days']) }, o.signal);
+export const ldSearch = (o = {}) => send({ type: 'LOGDELAY_SEARCH', ...pick(o, ['name', 'field', 'value', 'from', 'to', 'max']), ...ids(o) }, o.signal);
+export const ldFixes = (o = {}) => send({ type: 'LOGDELAY_FIXES', ...pick(o, ['from', 'to']), ...ids(o) }, o.signal);
 export const ldSettingsGet = () => send({ type: 'LOGDELAY_SETTINGS_GET' });
 export const ldSettingsSet = (settings) => send({ type: 'LOGDELAY_SETTINGS_SET', settings });
 
@@ -57,30 +68,151 @@ export const ldSendNow = () => send({ type: 'REPORT_SEND_NOW', kind: LD_KIND });
 
 /* ---------------------------------- the routes ---------------------------------- */
 
+/** The page's views, in the order its tabs show them; the boards' views are below. */
+export const LD_VIEWS = Object.freeze(['fleet', 'cluster', 'device', 'fixes', 'watch', 'live']);
+
 /**
- * Which log delay view a hash names: `{view, clusterId, device}`. Anything else under the
- * section is the fleet.
+ * Which view of the Log Delay page a hash names: `{view, clusterId, device}`. Anything else
+ * (another page, an unknown view) is the fleet. The old addresses are read through
+ * reports/route.js parseHash, the one definition of where they moved.
  */
 export function ldRoute(hash) {
-  const path = String(hash || '').replace(/^#\/?/, '').split('?')[0];
-  const parts = path.split('/');
-  if (parts[0] !== 'reports' || parts[1] !== LD_SECTION) return { view: 'fleet', clusterId: null, device: null };
+  const fleet = { view: 'fleet', clusterId: null, device: null };
+  const { page, rest } = parseHash(hash);
+  if (page !== LD_PAGE) return fleet;
   const dec = (s) => { try { return decodeURIComponent(s || ''); } catch (_) { return s || ''; } };
-  const [, , kind, a, ...rest] = parts;
+  const [kind, a, ...more] = rest ? rest.split('/') : [];
   if (kind === 'cluster' && a) return { view: 'cluster', clusterId: dec(a), device: null };
-  if (kind === 'device' && a && rest.length) return { view: 'device', clusterId: dec(a), device: dec(rest.join('/')) };
+  if (kind === 'device' && a && more.length) return { view: 'device', clusterId: dec(a), device: dec(more.join('/')) };
   if (kind === 'fixes') return { view: 'fixes', clusterId: a ? dec(a) : null, device: null };
-  return { view: 'fleet', clusterId: null, device: null };
+  if (kind === 'watch') return { view: 'watch', clusterId: null, device: null };
+  if (kind === 'live') return { view: 'live', clusterId: a ? dec(a) : null, device: a && more.length ? dec(more.join('/')) : null };
+  return fleet;
 }
 
 const enc = encodeURIComponent;
 /** The hash for a view. */
 export function ldHash(view, clusterId, device) {
-  const base = `#/reports/${LD_SECTION}`;
+  const base = `#/${LD_PAGE}`;
   if (view === 'cluster' && clusterId) return `${base}/cluster/${enc(clusterId)}`;
   if (view === 'device' && clusterId && device) return `${base}/device/${enc(clusterId)}/${enc(device)}`;
   if (view === 'fixes') return clusterId ? `${base}/fixes/${enc(clusterId)}` : `${base}/fixes`;
+  if (view === 'watch') return `${base}/watch`;
+  if (view === 'live') return clusterId ? `${base}/live/${enc(clusterId)}${device ? `/${enc(device)}` : ''}` : `${base}/live`;
   return base;
+}
+
+/** The tab a view is shown under: the boards are one tab, Fixes, Live Watch and Live logs their own. */
+export function ldTab(view) {
+  if (view === 'fixes' || view === 'watch' || view === 'live') return view;
+  return 'fleet';
+}
+
+/* ----------------------------------- Fetch Now ----------------------------------- */
+
+/** The scheduled measurement's job (docs/JOBS.md): what Fetch Now asks to run. */
+export const LD_JOB = 'logdelay.measure';
+/** How often Fetch Now asks how its run is going. */
+export const FETCH_POLL_MS = 2000;
+/** The statuses a run ends in (docs/JOBS.md "Statuses"). */
+export const RUN_ENDED = Object.freeze(new Set(['completed', 'failed', 'cancelled', 'deferred', 'skipped']));
+
+/**
+ * `JOB_RUN` for the measurement, scoped to what is on screen: the clusters, and one device when
+ * a device is open. A core that does not take the scope yet runs what it runs; the scope is sent
+ * anyway, so the page needs no change when it does.
+ */
+export function fetchNowMessage({ clusterIds, device } = {}) {
+  return {
+    type: 'JOB_RUN', jobId: LD_JOB,
+    ...(Array.isArray(clusterIds) && clusterIds.length ? { clusterIds: clusterIds.map(String) } : {}),
+    ...(device ? { device: String(device) } : {}),
+  };
+}
+export const ldFetchNow = (scope, signal) => send(fetchNowMessage(scope), signal);
+export const ldJobRuns = (signal) => send({ type: 'JOBS_LIST', jobId: LD_JOB, limit: 50 }, signal);
+
+/** The run `runId` in a JOBS_LIST answer: from its runs, or the job's current or last run. Null when absent. */
+export function runOf(list, runId) {
+  if (!list || !runId) return null;
+  const hit = (list.runs || []).find((r) => r && r.id === runId);
+  if (hit) return hit;
+  const job = (list.jobs || []).find((j) => j && j.id === LD_JOB);
+  const st = (job && job.state) || {};
+  for (const r of [st.current, st.lastRun]) if (r && r.id === runId) return r;
+  return null;
+}
+
+/**
+ * A run in words: "running · 3 of 8 clusters (37 %) · 1,240 devices measured". A count the run
+ * does not keep is left out, never 0; progress the job cannot count says so.
+ */
+export function runText(run) {
+  if (!run) return 'waiting for the run to be listed';
+  const parts = [];
+  const status = String(run.status || 'unknown');
+  parts.push(status === 'running' ? 'running' : status === 'queued' ? 'queued' : status === 'completed' ? 'done' : status);
+  if (finite(run.done) && finite(run.total)) parts.push(`${countText(run.done)} of ${countText(run.total)}${finite(run.progress) ? ` (${Math.round(run.progress)} %)` : ''}`);
+  else if (!RUN_ENDED.has(status)) parts.push('progress not known yet');
+  if (finite(run.records)) parts.push(`${countText(run.records)} device${run.records === 1 ? '' : 's'} measured`);
+  if (run.error && status !== 'completed') parts.push(String(run.error));
+  return parts.join(' · ');
+}
+
+/** A refused or failed Fetch Now in plain words; null when it started. */
+export function fetchRefusalText(res) {
+  if (!res) return 'The server did not answer.';
+  if (res.ok) return null;
+  if (res.kind === 'already_running') return `A measurement is already running${res.runId ? ` (run ${res.runId})` : ''}. Following it instead of starting another.`;
+  if (res.kind === 'blocked_readonly') return 'Not started: the measurement writes to its sink cluster and the configuration is read-only. Set readOnly to false in the config to let it write.';
+  if (res.kind === 'forbidden') return 'Not started: only an administrator can start the measurement.';
+  if (res.unsupported || res.kind === 'bad_message' || res.kind === 'not_found') return 'Not started: this server cannot run the measurement on demand (needs the hosted edition with the scheduled log delay measurement).';
+  return `Not started: ${res.message || res.kind || 'no reason given'}`;
+}
+
+/* ------------------------------- zone, tag1 and the rest ------------------------------- */
+
+/**
+ * The value of a context field on a row: its `extras` (the boards) or `meta` (Live Watch),
+ * matched without regard to case, and the names the pipelines use for the same thing
+ * (`fwdtag` for `fwd_tag`). Null when the row does not carry it — unknown, never ''.
+ */
+const SAME = { fwd_tag: ['fwd_tag', 'fwdtag'], zone: ['zone', 'Zone'] };
+export function extraOf(row, name) {
+  const bag = (row && (row.extras || row.meta)) || null;
+  if (!bag) return null;
+  const want = (SAME[name] || [name]).map((n) => n.toLowerCase());
+  for (const [k, v] of Object.entries(bag)) {
+    if (want.includes(String(k).replace(/\.keyword$/, '').toLowerCase()) && v !== null && v !== undefined && v !== '') return v;
+  }
+  return null;
+}
+
+/**
+ * A device Live Watch measured (core/log-delay.js recordFrom), as a board's device row
+ * (docs/LOGDELAY.md DeviceRow), so both are drawn by the same row (ui/js/logdelay/rows.js).
+ * The state is the contract's (delay-levels.js levelState on the cluster's levels); levels the
+ * core has not said are `unknown`, never on time. What one measurement cannot know — the delays
+ * before it, time spent late, logs a day — is null: drawn as unknown, not 0.
+ */
+export function liveDeviceRow(rec, cluster, levels) {
+  const st = levelState(rec ? rec.delayMinutes : null, levels);
+  return {
+    device: rec.device, cluster: cluster.id, clusterName: cluster.name,
+    state: st || 'unknown', nowMinutes: finite(rec.delayMinutes) ? rec.delayMinutes : null,
+    medianMinutes: null, maxMinutes: null, episodes: null, lateMs: null, lastStarted: null, lastSolved: null, lateSince: null,
+    docsPerDay: null, docs: finite(rec.docs) ? rec.docs : null,
+    lastArrival: rec.arrival ?? null, lastEvent: rec.event ?? null, silentSince: null,
+    pattern: rec.pattern && rec.pattern !== '-' ? rec.pattern : null, patternNote: rec.patternNote || '',
+    extras: rec.meta || {}, live: true,
+  };
+}
+
+/** The distinct values of `name` over rows, for a cluster line ("dc1, dc2 +1"); '—' when none is known. */
+export function valuesText(rows, name, max = 3) {
+  const seen = [...new Set((rows || []).map((r) => extraOf(r, name)).filter((v) => v !== null).map(String))].sort();
+  if (!seen.length) return '—';
+  return seen.length > max ? `${seen.slice(0, max).join(', ')} +${seen.length - max}` : seen.join(', ');
 }
 
 /* ---------------------------------- the periods ---------------------------------- */
@@ -126,15 +258,28 @@ export function durationText(ms, unknown = '—') {
 }
 
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-const hhmm = (d) => `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
-const sameDay = (a, b) => a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
+/**
+ * The zone the page writes times in: the server's, once the page has said it (setDisplayZone);
+ * until then the browser's own. One setting, so every board and table agree.
+ */
+let displayZone = null;
+export function setDisplayZone(tz) { displayZone = tz || null; }
+export const displayZoneName = () => displayZone;
 
-/** "today 11:15" or "3 Nov 22:00"; `seconds` adds :ss. Unknown → '—'. */
+/** Wall-clock parts of `ms` in the display zone. */
+const wall = (ms) => {
+  if (displayZone) { const p = zonedParts(ms, displayZone); return { y: p.year, mo: p.month - 1, d: p.day, h: p.hour, mi: p.minute, s: p.second }; }
+  const d = new Date(ms);
+  return { y: d.getFullYear(), mo: d.getMonth(), d: d.getDate(), h: d.getHours(), mi: d.getMinutes(), s: d.getSeconds() };
+};
+const two = (n) => String(n).padStart(2, '0');
+
+/** "today 11:15" or "3 Nov 22:00"; `seconds` adds :ss. Unknown → '—'. In the display zone. */
 export function whenText(ms, now = Date.now(), { seconds = false } = {}) {
   if (!finite(ms) || ms <= 0) return '—';
-  const d = new Date(ms); const n = new Date(now);
-  const t = seconds ? `${hhmm(d)}:${String(d.getSeconds()).padStart(2, '0')}` : hhmm(d);
-  return sameDay(d, n) ? `today ${t}` : `${d.getDate()} ${MONTHS[d.getMonth()]} ${t}`;
+  const d = wall(ms); const n = wall(now);
+  const t = `${two(d.h)}:${two(d.mi)}${seconds ? `:${two(d.s)}` : ''}`;
+  return d.y === n.y && d.mo === n.mo && d.d === n.d ? `today ${t}` : `${d.d} ${MONTHS[d.mo]} ${t}`;
 }
 
 /** "6 Oct" from a YYYY-MM-DD day. */
@@ -155,7 +300,7 @@ export const pctText = (p, digits = 1) => (finite(p) ? `${p.toFixed(digits)} %` 
 export const countText = (n) => (finite(n) ? n.toLocaleString('en') : '—');
 
 /** A device's state in words: "can't measure" and "silent" as such, never "on time". */
-export const stateText = (s) => STATE_LABEL[s] || (s ? String(s) : 'unknown');
+export const stateText = (s) => STATE_LABEL[s] || (s === 'unknown' ? 'levels unknown' : s ? String(s) : 'unknown');
 
 /** The pill tone per state: pink critical, blue delayed, green on time, orange clock ahead, grey unknown. */
 export const STATE_TONE = Object.freeze({

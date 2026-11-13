@@ -143,7 +143,7 @@ async function backToFleet() {
 
 // The strip (config, clusters, health, request rate, mode, tunnels, credits) was removed;
 // its signals live in the top bar and in Config-Management. It must not come back.
-for (const id of ['overview', 'indices', 'console', 'logs', 'snapshots', 'shards', 'reports', 'alerts', 'automation', 'requests', 'accounts', 'settings']) {
+for (const id of ['overview', 'indices', 'console', 'log-delay', 'snapshots', 'shards', 'reports', 'alerts', 'automation', 'requests', 'accounts', 'settings']) {
   await go(id);
   await settleFor(60);
   ok(!doc.querySelector('#side-foot, .status-strip'), `${id}: a bottom status strip is on the page`);
@@ -1105,6 +1105,9 @@ await go('reports');
   // The Columns menu: hide, move, reset, and Save for everyone (VOLUME_LAYOUT_SET table overview).
   const realFetch = globalThis.fetch;
   const lsent = [];
+  let fetchAnswer = 'ok';
+  let jobPolls = 0;
+  const esSent = [];
   globalThis.fetch = async (input, init) => {
     const body = init && init.body ? JSON.parse(init.body) : {};
     if (body.type === 'VOLUME_LAYOUT_SET' || body.type === 'VOLUME_RUN') lsent.push(body);
@@ -2428,7 +2431,7 @@ await go('console');
 
 /* ------------------- log delay: can this cluster be analysed? ------------------- */
 
-await go('logs');
+await go('log-delay');
 {
   const ld = await load('core/log-delay.js');
 
@@ -2485,212 +2488,184 @@ await go('logs');
   const dead = await ld.preflight(null, target);
   ok(dead.unknown === true && dead.ok === false, 'no client should be unknown, not a refusal');
 
-  // End to end: switch to the delay view, check the fleet, fetch, read the table.
+  // End to end: Live Watch checks the fleet, measures it, and lists the delayed devices with the
+  // boards' own row; Live logs tails one cluster without narrowing the fleet.
   {
-    // The page must arrive on the fleet selection rather than collapsing it. It used to
-    // be marked single-cluster, which silently reduced "all" to the first cluster on the
-    // way in — and would have made the fan-out below fan out to exactly one.
+    // The page must arrive on the fleet selection rather than collapsing it.
     const stateMod = await load('core/state.js');
     ok(stateMod.state.selected === 'all',
-      `logs: opening the page left the selection on "${stateMod.state.selected}", not the fleet`);
+      `log delay: opening the page left the selection on "${stateMod.state.selected}", not the fleet`);
     const fleet = stateMod.activeClusters().length;
-    ok(fleet === config.clusters.length,
-      `logs: ${fleet} active clusters, expected ${config.clusters.length}`);
-
+    ok(fleet === config.clusters.length, `log delay: ${fleet} active clusters, expected ${config.clusters.length}`);
     const pane = doc.getElementById('view');
+    const tabOf = (id) => pane.querySelector(`.ld-tabs a[data-tab="${id}"]`);
+    ok(['fleet', 'fixes', 'watch', 'live'].every(tabOf), 'log delay: the page does not have its four tabs (Dashboard, Recommended fixes, Live Watch, Live logs)');
 
-    // The other half of making the page fleet-wide: a tail is one cluster's stream, so
-    // with several selected it must say which one it is following and let that be
-    // changed — without narrowing the fleet the delay view measures.
-    const tailPick = [...pane.querySelectorAll('label.field')]
-      .find((l) => /Tailing/.test(l.textContent));
-    ok(!!tailPick, 'logs: no tail cluster picker with several clusters selected');
+    // Live logs: a tail is one cluster's stream, so with several selected it says which one it
+    // follows and lets that be changed — without narrowing the fleet Live Watch measures.
+    press(tabOf('live'));
+    await settleFor(900);
+    ok(location.hash === '#/log-delay/live', `live logs: the address reads ${location.hash}`);
+    ok(tabOf('live').getAttribute('aria-current') === 'page', 'live logs: the Live logs tab is not marked');
+    const range = doc.getElementById('ld-range');
+    ok(range && [...range.options].map((o) => o.value).join(',') === '1m,5m,30m,1h,2h,3h,6h,8h,12h,custom', `live logs: the time range offers ${range && [...range.options].map((o) => o.value).join(',')}`);
+    const heads = [...pane.querySelectorAll('#ld-live-logs thead th')].map((t) => t.textContent.replace(/[↑↓]/g, '').trim());
+    ok(/^@timestamp \(UTC [+−]\d\d:\d\d\)$/.test(heads[0] || ''), `live logs: the time column does not name its offset: "${heads[0]}"`);
+    ok(heads.slice(1).join('|') === 'device / src_hostname|ClientID|zone|tag1|parser_tag|fwd_tag|log_type|delay (min)|message', `live logs: the columns read ${heads.join(' · ')}`);
+    ok(pane.querySelectorAll('#ld-live-logs thead th.sortable').length === 10, 'live logs: not every column sorts with the shared sort');
+    const liveRows = () => [...pane.querySelectorAll('#ld-live-logs tbody tr.ld-log')];
+    ok(liveRows().length > 0, 'live logs: no document listed');
+    const tailPick = doc.getElementById('ld-live-cluster');
+    ok(!!tailPick, 'live logs: no cluster picker with several clusters selected');
     if (tailPick) {
-      const opts = [...tailPick.querySelectorAll('option')].map((o) => o.value);
-      ok(opts.length === config.clusters.length,
-        `tail picker: ${opts.length} options for ${config.clusters.length} clusters`);
-      ok(!opts.includes('all'), 'a tail cannot follow every cluster at once');
-      const sel2 = tailPick.querySelector('select');
-      const other = opts.find((o) => o !== sel2.value);
-      sel2.value = other;
-      sel2.dispatchEvent(new window.Event('change', { bubbles: true }));
-      await settleFor(400);
-      ok(stateMod.state.selected === 'all',
-        'changing which cluster is tailed must not narrow the fleet selection');
-      // The picker is redrawn from whichever cluster the tail actually resolved to, so
-      // a tail that ignored the choice snaps the control back to the first cluster.
-      // Both fixture clusters share a URL, so the documents cannot tell them apart —
-      // this is the only observable proof the choice was honoured.
-      const after = [...pane.querySelectorAll('label.field')]
-        .find((l) => /Tailing/.test(l.textContent));
-      const now = after && after.querySelector('select').value;
-      ok(now === other, `the tail did not follow the picked cluster: shows "${now}", picked "${other}"`);
+      const opts = [...tailPick.options].map((o) => o.value);
+      ok(opts.length === config.clusters.length, `live logs picker: ${opts.length} options for ${config.clusters.length} clusters`);
+      const other = opts.find((o) => o !== tailPick.value);
+      tailPick.value = other;
+      tailPick.dispatchEvent(new window.Event('change', { bubbles: true }));
+      await settleFor(500);
+      ok(stateMod.state.selected === 'all', 'changing which cluster is tailed must not narrow the fleet selection');
+      const now = doc.getElementById('ld-live-cluster') && doc.getElementById('ld-live-cluster').value;
+      ok(now === other, `live logs did not follow the picked cluster: shows "${now}", picked "${other}"`);
     }
+    // A newer range asks again, over that range.
+    range.value = '5m'; range.dispatchEvent(new window.Event('change', { bubbles: true }));
+    await settleFor(500);
+    ok(doc.getElementById('ld-range').value === '5m', 'live logs: the range did not stay on Last 5 minutes');
+    ok(/Last 5 minutes/.test(pane.textContent), 'live logs: the chart does not say the range it covers');
+    range.value = '1h'; doc.getElementById('ld-range').value = '1h'; doc.getElementById('ld-range').dispatchEvent(new window.Event('change', { bubbles: true }));
+    await settleFor(300);
 
-    const toDelay = [...pane.querySelectorAll('button')].find((b) => b.textContent === 'Log delay');
-    ok(!!toDelay, 'logs: no "Log delay" view button');
-    toDelay.click();
+    // Live Watch: coverage is per cluster, and every configured cluster is accounted for.
+    press(tabOf('watch'));
+    await settleFor(400);
+    ok(location.hash === '#/log-delay/watch', `live watch: the address reads ${location.hash}`);
+    doc.getElementById('delay-check').click();
     await settleFor(1200);
-
-    // Coverage is per cluster, and every configured cluster is accounted for — a cluster
-    // that is simply missing from this table is the failure the fan-out must not have.
     const coverage = [...pane.querySelectorAll('section.card')]
       .find((sec) => (sec.querySelector('header h2') || {}).textContent === 'Log delay coverage');
-    ok(!!coverage, `logs: no coverage card — the view said: ${pane.textContent.slice(0, 160)}`);
+    ok(!!coverage, `live watch: no coverage card — the view said: ${pane.textContent.slice(0, 160)}`);
     if (coverage) {
       const covRows = [...coverage.querySelectorAll('table.tbl tbody tr')];
-      ok(covRows.length === config.clusters.length,
-        `coverage: ${covRows.length} rows for ${config.clusters.length} clusters`);
-      for (const c of config.clusters) {
-        ok(coverage.textContent.includes(c.name), `coverage: ${c.name} is not listed`);
-      }
+      ok(covRows.length === config.clusters.length, `coverage: ${covRows.length} rows for ${config.clusters.length} clusters`);
+      for (const c of config.clusters) ok(coverage.textContent.includes(c.name), `coverage: ${c.name} is not listed`);
     }
 
-    // The report sits in the toolbar, not inside the results card: a fleet where nothing
-    // can be analysed is exactly the case somebody needs to hand to someone else, and it
-    // was unreachable until a fetch had succeeded.
+    // The report sits in the toolbar: a fleet where nothing can be analysed is still a finding.
     {
       const reportBtn = doc.getElementById('delay-report');
-      ok(!!reportBtn, 'delay view: no Report button in the toolbar');
-      ok(!!doc.getElementById('delay-schedule'), 'delay view: no way to schedule the report');
-      ok(reportBtn && !reportBtn.disabled,
-        'delay view: the report should be available once the fleet has been checked, before any fetch');
+      ok(!!reportBtn, 'live watch: no Report button in the toolbar');
+      ok(!!doc.getElementById('delay-schedule'), 'live watch: no way to schedule the report');
+      ok(reportBtn && !reportBtn.disabled, 'live watch: the report should be available once the fleet has been checked, before any fetch');
       files.length = 0;
       reportBtn.click();
       await settleFor(500);
-      ok(files.some((f) => /^log-delay-.*\.xlsx$/.test(f.name)),
-        `delay view: Report produced ${files.map((f) => f.name).join(', ') || 'no download'}`);
+      ok(files.some((f) => /^log-delay-.*\.xlsx$/.test(f.name)), `live watch: Report produced ${files.map((f) => f.name).join(', ') || 'no download'}`);
     }
 
-    const fetchBtn = [...pane.querySelectorAll('button')].find((b) => /^Fetch details \(/.test(b.textContent));
-    ok(!!fetchBtn, `logs: no Fetch button — the view said: ${pane.textContent.slice(0, 160)}`);
+    const fetchBtn = doc.getElementById('delay-fetch');
+    ok(fetchBtn && /^Fetch details \(/.test(fetchBtn.textContent), `live watch: no Fetch button — the view said: ${pane.textContent.slice(0, 160)}`);
     if (fetchBtn) {
       fetchBtn.click();
       await settleFor(2000);
-      const devices = [...pane.querySelectorAll('section.card')]
-        .find((sec) => (sec.querySelector('header h2') || {}).textContent === 'Devices across the fleet');
-      ok(!!devices, 'logs: no fleet devices card after fetching');
-      const trs = devices ? [...devices.querySelectorAll('table.tbl tbody tr')] : [];
-      // Six devices in the fixture, once per cluster that could be analysed.
+      const table = () => doc.getElementById('ld-watch-devices');
+      ok(!!table(), 'live watch: no device table after measuring');
       const measurable = config.clusters.length;
-      ok(trs.length === 6 * measurable,
-        `delay table: ${trs.length} rows, expected 6 devices x ${measurable} cluster(s)`);
-      ok(trs.every((tr) => tr.children[0].textContent.trim()),
-        'every device row must name the cluster it came from');
-
-      // Keyed by device only, so the two clusters' copies collapse — what is asserted
-      // below is the classification, which must not depend on which cluster it came from.
+      const rowsNow = () => [...table().querySelectorAll('tbody tr')].filter((tr) => tr.dataset.device);
+      // The boards' own row: device, cluster, zone, tag1, Now, Delay now, Looks like, logs, arrival, event, actions.
+      const th = [...table().querySelectorAll('thead th')].map((t) => t.textContent.replace(/[↑↓]/g, '').trim());
+      ok(th.slice(0, 6).join('|') === 'Device|Cluster|zone|tag1|Now|Delay now', `live watch: the columns read ${th.join(' · ')}`);
+      // Delayed devices only, by default: fw-core-02 (41), proxy-03 (95), switch-05 (330), router-06 (300).
+      const late = rowsNow();
+      ok(late.length === 4 * measurable, `live watch: ${late.length} delayed rows, expected 4 devices x ${measurable} cluster(s)`);
+      ok(late.every((tr) => tr.children[1].textContent.trim()), 'every device row must name the cluster it came from');
+      ok(late.every((tr) => /^dc[12]$/.test(tr.children[2].textContent.trim())), 'live watch: the zone column is not the device\'s zone');
+      ok(late.some((tr) => /acme|beta/.test(tr.children[3].textContent)), 'live watch: the tag1 column is empty');
+      const show = doc.getElementById('delay-show');
+      show.value = 'all'; show.dispatchEvent(new window.Event('change', { bubbles: true }));
+      await settleFor(250);
+      const trs = rowsNow();
+      ok(trs.length === 6 * measurable, `live watch: every device shows ${trs.length} rows, expected 6 x ${measurable}`);
       const byDevice = Object.fromEntries(trs.map((tr) => {
         const c = [...tr.children].map((td) => td.textContent.trim());
-        return [c[1], { status: c[2], delay: c[3], pattern: c[4], means: c[7] }];
+        return [c[0], { status: c[4], delay: c[5], pattern: c[6] }];
       }));
-      ok(byDevice['fw-edge-01'] && byDevice['fw-edge-01'].status === 'ok', `2 min should be ok: ${JSON.stringify(byDevice['fw-edge-01'])}`);
+      ok(byDevice['fw-edge-01'] && byDevice['fw-edge-01'].status === 'on time', `2 min should be on time: ${JSON.stringify(byDevice['fw-edge-01'])}`);
       ok(byDevice['fw-core-02'] && byDevice['fw-core-02'].status === 'delayed', '41 min should be delayed');
       ok(byDevice['proxy-03'] && byDevice['proxy-03'].status === 'critical', '95 min should be critical');
-      ok(byDevice['vpn-04'] && byDevice['vpn-04'].status === 'clock ahead',
-        `-37 min must be clock ahead, not critical: ${JSON.stringify(byDevice['vpn-04'])}`);
+      ok(byDevice['vpn-04'] && byDevice['vpn-04'].status === 'clock ahead', `-37 min must be clock ahead, not critical: ${JSON.stringify(byDevice['vpn-04'])}`);
       ok(byDevice['vpn-04'] && byDevice['vpn-04'].delay.startsWith('-'), 'a negative delay must render negative');
-
-      // The discrimination that justifies the pattern code at all.
-      ok(byDevice['router-06'] && byDevice['router-06'].pattern === 'timezone',
-        `exactly 5h should read as a timezone offset: ${JSON.stringify(byDevice['router-06'])}`);
-      ok(byDevice['switch-05'] && byDevice['switch-05'].pattern !== 'timezone',
-        `5h30 is a queue, not an offset: ${JSON.stringify(byDevice['switch-05'])}`);
-
-      // The measurement is published as each cluster's log-delay alert — the one the Alerts
-      // page lists and the scraper sends to Zabbix. proxy-03 is past the red line (over 60 min)
-      // in the fixture, which is a High alert since 2026-11-01, not a critical one.
-      const stNow = await load('core/state.js');
-      const late = stNow.alerts().filter((a) => /:log-delay$/.test(a.key));
-      ok(late.length === measurable && late.every((a) => a.level === 'high'),
-        `log delay should raise one High alert per measured cluster: ${JSON.stringify(late.map((a) => [a.key, a.level]))}`);
-
-      // Worst first — a critical device at the bottom of the list is a device nobody sees.
-      const first = [...trs[0].children][2].textContent.trim();
-      ok(first === 'critical', `the first row should be the worst, was "${first}"`);
-
-      // Filtering to unhealthy drops the healthy one and keeps the clock-ahead one.
-      const showSel = [...pane.querySelectorAll('select')].find((x) => [...x.options].some((o) => o.value === 'unhealthy'));
-      ok(!!showSel, 'delay view: no unhealthy filter');
-      if (showSel) {
-        showSel.value = 'unhealthy';
-        showSel.dispatchEvent(new window.Event('change', { bubbles: true }));
-        await settleFor(250);
-        const card2 = [...pane.querySelectorAll('section.card')]
-          .find((sec) => (sec.querySelector('header h2') || {}).textContent === 'Devices across the fleet');
-        const after = [...card2.querySelectorAll('table.tbl tbody tr')].map((tr) => tr.children[1].textContent.trim());
-        ok(!after.includes('fw-edge-01'), `the healthy device should be filtered out: ${after.join(', ')}`);
-        ok(after.includes('vpn-04'), 'a clock-ahead device counts as unhealthy');
-        showSel.value = 'all';
-        showSel.dispatchEvent(new window.Event('change', { bubbles: true }));
-        await settleFor(200);
-      }
+      ok(byDevice['router-06'] && byDevice['router-06'].pattern === 'timezone', `exactly 5h should read as a timezone offset: ${JSON.stringify(byDevice['router-06'])}`);
+      ok(byDevice['switch-05'] && byDevice['switch-05'].pattern !== 'timezone', `5h30 is a queue, not an offset: ${JSON.stringify(byDevice['switch-05'])}`);
+      // Worst first.
+      ok(trs[0].children[4].textContent.trim() === 'critical', `the first row should be the worst, was "${trs[0].children[4].textContent.trim()}"`);
+      // The measurement is each cluster's log-delay alert (High: proxy-03 is past 60 min).
+      const lateAlerts = stateMod.alerts().filter((a) => /:log-delay$/.test(a.key));
+      ok(lateAlerts.length === measurable && lateAlerts.every((a) => a.level === 'high'),
+        `log delay should raise one High alert per measured cluster: ${JSON.stringify(lateAlerts.map((a) => [a.key, a.level]))}`);
+      // Every row opens its logs: Live logs narrowed to the device.
+      const open = trs.find((tr) => tr.dataset.device === 'fw-core-02').querySelector('a.ld-open-logs');
+      ok(open && /^#\/log-delay\/live\/[^/]+\/fw-core-02$/.test(open.getAttribute('href')), `live watch: Open in logs goes to ${open && open.getAttribute('href')}`);
+      show.value = 'late'; show.dispatchEvent(new window.Event('change', { bubbles: true }));
+      await settleFor(200);
 
       /* ------------------- one device, watched live ------------------- */
-
-      const watchRow = [...pane.querySelectorAll('table.tbl tbody tr')]
-        .find((tr) => tr.children[1] && tr.children[1].textContent.trim() === 'fw-core-02');
+      const watchRow = rowsNow().find((tr) => tr.dataset.device === 'fw-core-02');
       const watchBtn = watchRow && [...watchRow.querySelectorAll('button')].find((b) => b.textContent === 'Watch');
-      ok(!!watchBtn, 'delay table: no Watch button on a device row');
+      ok(!!watchBtn, 'live watch: no Watch button on a device row');
       if (watchBtn) {
         watchBtn.click();
         await settleFor(900);
-        const live = [...pane.querySelectorAll('section.card')]
-          .find((sec) => /fw-core-02/.test((sec.querySelector('header h2') || {}).textContent || ''));
-        ok(!!live, `logs: no close-up card after pressing Watch — saw ${pane.textContent.slice(0, 160)}`);
+        const live = [...pane.querySelectorAll('section.card')].find((sec) => /fw-core-02/.test((sec.querySelector('header h2') || {}).textContent || ''));
+        ok(!!live, `live watch: no close-up card after pressing Watch — saw ${pane.textContent.slice(0, 160)}`);
+        // One device selected: only that device. The other delayed devices and the coverage are gone.
+        ok(!doc.getElementById('ld-watch-devices'), 'live watch: the other delayed devices are still shown beside the one being watched');
+        ok(![...pane.querySelectorAll('section.card header h2')].some((x) => x.textContent === 'Log delay coverage'), 'live watch: the per-cluster coverage is still shown beside the one device');
         if (live) {
-          ok(/matched as a hostname/.test(live.textContent),
-            'the close-up should say how the device was looked up');
-          const docRows = [...live.querySelectorAll('table.tbl tbody tr')]
-            .filter((tr) => tr.children.length === 5);
+          ok(/matched as a hostname/.test(live.textContent), 'the close-up should say how the device was looked up');
+          const docRows = [...live.querySelectorAll('table.tbl tbody tr')].filter((tr) => tr.children.length === 7);
           ok(docRows.length === 15, `close-up: ${docRows.length} document rows, expected 15`);
-          // The newest document carries the exact delay the fleet table reported, so the
-          // two views cannot disagree about what this device is doing.
           const newest = docRows.length ? docRows[0].children[2].textContent.trim() : '(no rows)';
           ok(newest === '41 min', `close-up: newest delay reads "${newest}", expected 41 min`);
           ok(/delayed/.test(live.textContent), 'the close-up should carry the status');
-
-          // Pausing must stop it repeating; the button says which state it is in.
+          ok(docRows.length && docRows[0].children[5].textContent.trim() === 'acme', `close-up: the tag1 column reads "${docRows.length && docRows[0].children[5].textContent}"`);
           const pause = [...live.querySelectorAll('button')].find((b) => /Pause/.test(b.textContent));
           ok(!!pause, 'close-up: no pause control on a view that polls');
           if (pause) {
             pause.click();
             await settleFor(150);
-            const resumed = [...pane.querySelectorAll('button')].find((b) => /Resume/.test(b.textContent));
-            ok(!!resumed, 'close-up: pausing did not offer to resume');
+            ok(!![...pane.querySelectorAll('button')].find((b) => /Resume/.test(b.textContent)), 'close-up: pausing did not offer to resume');
           }
         }
-
-        // A device with a parser miss: the unreadable document is listed as evidence and
-        // must not be counted as a delay of zero.
-        const proxyRow = [...pane.querySelectorAll('table.tbl tbody tr')]
-          .find((tr) => tr.children[1] && tr.children[1].textContent.trim() === 'proxy-03');
+        // A re-check of the fleet does not take the watched device away (it used to answer
+        // "This cluster is no longer available" on its next poll).
+        doc.getElementById('delay-check').click();
+        await settleFor(200);
+        doc.getElementById('watch-now').click();
+        await settleFor(600);
+        ok(!/no longer available/.test(pane.textContent), 'close-up: a re-check of the fleet broke the watch');
+        doc.getElementById('watch-close').click();
+        await settleFor(400);
+        if (!doc.getElementById('ld-watch-devices') && doc.getElementById('delay-fetch')) { doc.getElementById('delay-fetch').click(); await settleFor(2000); }
+        // A device with a parser miss: the unreadable document is listed and never a 0 delay.
+        const proxyRow = doc.getElementById('ld-watch-devices') && [...doc.getElementById('ld-watch-devices').querySelectorAll('tbody tr')].find((tr) => tr.dataset.device === 'proxy-03');
         const proxyBtn = proxyRow && [...proxyRow.querySelectorAll('button')].find((b) => b.textContent === 'Watch');
+        ok(!!proxyBtn, 'live watch: no Watch on proxy-03 after closing the close-up');
         if (proxyBtn) {
           proxyBtn.click();
           await settleFor(900);
-          const live2 = [...pane.querySelectorAll('section.card')]
-            .find((sec) => /proxy-03/.test((sec.querySelector('header h2') || {}).textContent || ''));
-          ok(!!live2, 'logs: no close-up for proxy-03');
+          const live2 = [...pane.querySelectorAll('section.card')].find((sec) => /proxy-03/.test((sec.querySelector('header h2') || {}).textContent || ''));
+          ok(!!live2, 'live watch: no close-up for proxy-03');
           if (live2) {
-            ok(/unreadable/.test(live2.textContent),
-              'the close-up should say a document could not be read, not hide it');
-            const rows2 = [...live2.querySelectorAll('table.tbl tbody tr')].filter((tr) => tr.children.length === 5);
+            ok(/unreadable/.test(live2.textContent), 'the close-up should say a document could not be read, not hide it');
+            const rows2 = [...live2.querySelectorAll('table.tbl tbody tr')].filter((tr) => tr.children.length === 7);
             ok(rows2.length === 15, `close-up: ${rows2.length} rows — the unreadable document was dropped`);
-            // Guarded: a regression that empties the table should be reported as a
-            // problem, not thrown as a stack trace that stops every later case running.
             const last = rows2.length ? rows2[rows2.length - 1].children[2].textContent.trim() : '(no rows)';
             ok(last === 'unknown', `an unreadable document must read "unknown", read "${last}"`);
           }
-          const close = [...pane.querySelectorAll('button')].find((b) => b.textContent === 'Close');
-          ok(!!close, 'close-up: no way to close it');
-          if (close) {
-            close.click();
-            await settleFor(200);
-            ok(![...pane.querySelectorAll('section.card')]
-              .some((sec) => /proxy-03 —/.test((sec.querySelector('header h2') || {}).textContent || '')),
-              'close-up: closing left the card on screen');
-          }
+          doc.getElementById('watch-close').click();
+          await settleFor(200);
+          ok(![...pane.querySelectorAll('section.card')].some((sec) => /proxy-03 —/.test((sec.querySelector('header h2') || {}).textContent || '')), 'close-up: closing left the card on screen');
         }
       }
     }
@@ -6882,7 +6857,7 @@ await settleFor(300);
   await go('overview');
 }
 
-/* ---------- Reports › Log delay (0.3.57): the four views, their links and filters, and its settings ---------- */
+/* ---------- Log Delay page (0.3.60; Reports › Log delay until then): the boards, their links and filters, Fetch Now, and the settings ---------- */
 {
   // A fresh data directory has an empty store (only the hosted timer fills it), so the filled
   // pages are answered from tools/lib/logdelay-fixture.mjs, shaped as docs/LOGDELAY.md says.
@@ -6893,23 +6868,41 @@ await settleFor(300);
   const lsent = [];
   globalThis.fetch = async (input, init) => {
     const body = init && init.body ? JSON.parse(init.body) : {};
+    // Fetch Now: JOB_RUN for the measurement, then its run in JOBS_LIST — running once, then done.
+    if (body.type === 'JOB_RUN') {
+      lsent.push(body);
+      if (fetchAnswer === 'readonly') return stubReply({ ok: false, kind: 'blocked_readonly', errorCode: 'EP-209', message: 'read-only' });
+      if (fetchAnswer === 'busy') return stubReply({ ok: false, kind: 'already_running', runId: 'run-old', message: 'already running' });
+      return stubReply({ ok: true, jobId: 'logdelay.measure', runId: 'run-1', started: true });
+    }
+    if (body.type === 'JOBS_LIST') {
+      lsent.push(body);
+      jobPolls += 1;
+      const id = fetchAnswer === 'busy' ? 'run-old' : 'run-1';
+      const run = jobPolls < 2 ? { id, jobId: 'logdelay.measure', status: 'running', done: 1, total: 4, progress: 25, records: null }
+        : { id, jobId: 'logdelay.measure', status: 'completed', done: 4, total: 4, progress: 100, records: 56 };
+      return stubReply({ ok: true, jobs: [{ id: 'logdelay.measure', state: { current: null, lastRun: null } }], runs: [run], next: null });
+    }
     if (body.type === 'DELAY_SINK_GET') {
       return stubReply({ ok: true, supported: true, config: { enabled: true, everyHours: 2, destination: 'builtin', clusters: [], maxDevices: 2000 }, state: { runs: 1, lastOk: true } });
     }
     const a = logDelayAnswer(body, list);
     if (a) { lsent.push(body); return stubReply(a); }
+    if (body.type === 'ES') esSent.push(body);
     return realFetch(input, init);
   };
   const view = () => doc.getElementById('view');
   const ldView = () => { const s = view().querySelector('.ld[data-ld]'); return s ? s.dataset.ld : ''; };
   const g = (id) => doc.getElementById(id);
   try {
+    // Reports › Log delay is a link to the Log Delay page now.
     await go('reports');
     const nav = [...doc.querySelectorAll('.rp-nav a')].find((a) => a.dataset.section === 'log-delay');
-    ok(!!nav, 'log delay: no Log delay in the Reports section nav');
+    ok(!!nav && nav.getAttribute('href') === '#/log-delay', `log delay: the Reports entry is not a link to the Log Delay page (${nav && nav.getAttribute('href')})`);
     press(nav);
     await waitFor(() => ldView() === 'fleet' && g('ld-by-cluster'), 'log delay: the fleet page did not draw');
-    ok(location.hash === '#/reports/log-delay', `log delay: the address reads ${location.hash}`);
+    ok(location.hash === '#/log-delay', `log delay: the address reads ${location.hash}`);
+    ok([...doc.querySelectorAll('.nav a, nav a, .tabs a, .tab')].some((x) => /Log Delay/.test(x.textContent)) || /Log Delay/.test(doc.querySelector('#view h1').textContent), 'log delay: the page is not called Log Delay');
     const fleet = view();
     ok(lsent.some((m) => m.type === 'LOGDELAY_SUMMARY' && m.days === 30), 'log delay: the fleet did not ask LOGDELAY_SUMMARY for 30 days');
     for (const k of ['devices', 'late', 'onTime', 'pct', 'reduced']) ok(!!fleet.querySelector(`[data-kpi="${k}"]`), `log delay: no ${k} tile`);
@@ -6919,15 +6912,20 @@ await settleFor(300);
     ok(fleet.querySelectorAll('.ld-ring').length === list.length + 1, 'log delay: not one ring per cluster plus All clusters');
     if (!g('ld-by-cluster')) throw new Error(`log delay: no fleet page — ${problems.slice(-3).join(' | ')}`);
     const heads = [...g('ld-by-cluster').querySelectorAll('thead th')].map((t) => t.textContent);
-    ok(heads.join('|') === 'Cluster|Devices|Late now|Today|Below 30 min|30–60 min|Above 60 min|Below 30 min, previous 30 days|Last 30 days|Worst device',
+    ok(heads.map((x) => x.replace(/[↑↓]/g, '').trim()).join('|') === 'Cluster|Devices|zone|tag1|Late now|Today|Below 30 min|30–60 min|Above 60 min|Below 30 min, previous 30 days|Last 30 days|Worst device',
       `log delay: the By cluster columns read ${heads.join(' · ')}`);
     ok(g('ld-by-cluster').classList.contains('ld-ctr'), 'log delay: the By cluster table is not centred');
     ok(/never measured/.test(g('ld-by-cluster').textContent), 'log delay: a cluster never measured does not say so');
     // Unknown is not zero: the silent and the unmeasurable device.
     const rowOf = (re) => [...g('ld-devices').querySelectorAll('tbody tr')].find((tr) => re.test(tr.textContent));
     const silent = rowOf(/silent/); const cant = rowOf(/can.t measure/);
-    ok(silent && !/\b0 min\b/.test(silent.cells[3].textContent) && /—/.test(silent.cells[3].textContent), 'log delay: a silent device shows a delay figure');
-    ok(cant && /can.t measure/.test(cant.cells[3].textContent) && /unknown/.test(cant.cells[8].textContent), 'log delay: a device that cannot be measured reads as measured');
+    // Columns: Device, Cluster, zone, tag1, Now, Delay now, Max, Delays, Time late, Last delay, Logs a day, actions.
+    ok(silent && !/\b0 min\b/.test(silent.cells[5].textContent) && /—/.test(silent.cells[5].textContent), 'log delay: a silent device shows a delay figure');
+    ok(cant && /can.t measure/.test(cant.cells[5].textContent) && /unknown/.test(cant.cells[10].textContent), 'log delay: a device that cannot be measured reads as measured');
+    ok(/^dc[12]$/.test(silent ? silent.cells[2].textContent : '') && /^(firewall|proxy|switch|app|loadbalancer|dns)$/.test(silent ? silent.cells[3].textContent : ''), 'log delay: the fleet\'s Devices have no zone or tag1');
+    // Every row opens its logs: Live logs narrowed to that device.
+    const openLogs = silent && silent.querySelector('a.ld-open-logs');
+    ok(openLogs && openLogs.getAttribute('href') === `#/log-delay/live/${encodeURIComponent(silent.dataset.cluster)}/${encodeURIComponent(silent.dataset.device)}`, `log delay: Open in logs goes to ${openLogs && openLogs.getAttribute('href')}`);
     ok(/no logs since/.test(silent ? silent.textContent : ''), 'log delay: a silent device does not say since when');
     // The Devices filter.
     const before = g('ld-devices').querySelectorAll('tbody tr').length;
@@ -6942,15 +6940,30 @@ await settleFor(300);
     await waitFor(() => g('ld-by-cluster'), 'log delay: the fleet did not draw again after the period');
     // Export .xlsx is the log_delay report job.
     g('ld-export').click(); await settleFor(150);
-    ok(lsent.some((m) => m.type === 'REPORT_RUN' && m.kind === 'log_delay' && m.mail === false), 'log delay: Export .xlsx did not queue a log_delay report');
+    ok(lsent.some((m) => m.type === 'REPORT_RUN' && m.kind === 'log_delay' && m.mail === false), 'log delay: Build report did not queue a log_delay report');
+    // Fetch Now on the fleet: JOB_RUN for every cluster, the run followed to its end, the boards asked again.
+    const sumsBefore = lsent.filter((m) => m.type === 'LOGDELAY_SUMMARY').length;
+    g('ld-fetch-now').click();
+    await waitFor(() => /Measured every cluster/.test((g('ld-fetch-now') || {}).parentElement ? g('ld-fetch-now').parentElement.textContent : ''), 'log delay: Fetch Now did not follow its run to the end', 9000);
+    const run = lsent.filter((m) => m.type === 'JOB_RUN').at(-1);
+    ok(run && run.jobId === 'logdelay.measure' && !run.clusterIds && !run.device, `log delay: Fetch Now on the fleet sent ${JSON.stringify(run)}`);
+    ok(lsent.some((m) => m.type === 'JOBS_LIST' && m.jobId === 'logdelay.measure'), 'log delay: Fetch Now did not poll JOBS_LIST for the measurement');
+    ok(/4 of 4/.test(g('ld-fetch-now').parentElement.textContent) && /56 devices measured/.test(g('ld-fetch-now').parentElement.textContent), `log delay: Fetch Now reads "${g('ld-fetch-now').parentElement.textContent}"`);
+    await waitFor(() => lsent.filter((m) => m.type === 'LOGDELAY_SUMMARY').length > sumsBefore, 'log delay: the boards did not read the store again after Fetch Now');
     // A cluster name opens the cluster.
     const c0 = list[0].id;
     press(g('ld-by-cluster').querySelector(`tr[data-cluster="${c0}"] td a`));
     await waitFor(() => ldView() === 'cluster' && g('ld-cluster-devices'), 'log delay: the cluster link did not open the cluster');
-    ok(location.hash === `#/reports/log-delay/cluster/${encodeURIComponent(c0)}`, `log delay: the cluster address reads ${location.hash}`);
-    const ch = [...g('ld-cluster-devices').querySelectorAll('thead th')].map((t) => t.textContent);
-    for (const col of ['Zone', 'tag1', '@timestamp', 'event_created']) ok(ch.includes(col), `log delay: the cluster devices have no ${col} column (${ch.join(' · ')})`);
-    ok([...doc.querySelectorAll('.rp-nav a')].find((a) => a.dataset.section === 'log-delay').getAttribute('aria-current') === 'page', 'log delay: the section nav does not mark Log delay on the cluster page');
+    ok(location.hash === `#/log-delay/cluster/${encodeURIComponent(c0)}`, `log delay: the cluster address reads ${location.hash}`);
+    const ch = [...g('ld-cluster-devices').querySelectorAll('thead th')].map((t) => t.textContent.replace(/[↑↓]/g, '').trim());
+    for (const col of ['zone', 'tag1', 'fwd_tag', 'parser_tag', '@timestamp', 'event_created']) ok(ch.includes(col), `log delay: the cluster devices have no ${col} column (${ch.join(' · ')})`);
+    ok(doc.querySelector('.ld-tabs a[data-tab="fleet"]').getAttribute('aria-current') === 'page', 'log delay: the tabs do not mark Dashboard on the cluster page');
+    // Fetch Now here is that cluster; a read-only config says so in plain words.
+    fetchAnswer = 'readonly';
+    g('ld-fetch-now').click();
+    await waitFor(() => /read-only/.test(g('ld-fetch-now').parentElement.textContent), 'log delay: a read-only refusal of Fetch Now is not said');
+    ok(lsent.filter((m) => m.type === 'JOB_RUN').at(-1).clusterIds[0] === c0, 'log delay: Fetch Now on a cluster did not name that cluster');
+    fetchAnswer = 'ok'; jobPolls = 0;
     // A device opens the device page.
     const devLink = g('ld-cluster-devices').querySelector('tbody tr td a');
     const devName = devLink ? devLink.textContent : '';
@@ -6962,8 +6975,21 @@ await settleFor(300);
     ok(dv.querySelectorAll('.ld-band').length >= 1, 'log delay: no shaded delay band on the graph (the open delay, last 7 days)');
     ok(/▲/.test(dv.querySelector('.ld-marks').textContent) && /●/.test(dv.querySelector('.ld-marks').textContent), 'log delay: no start/solve markers');
     ok(dv.querySelectorAll('.ld-ins').length === 5, 'log delay: the insights strip is not five cells');
-    ok(dv.querySelectorAll('.ld-mini').length >= 1, 'log delay: no per-cluster mini charts');
+    // One device selected: only that device. No other late devices, no per-cluster panel.
+    ok(dv.querySelectorAll('.ld-mini').length === 0, 'log delay: the device page still shows the per-cluster panel');
+    ok(!g('ld-devices') && !g('ld-cluster-devices'), 'log delay: the device page still lists other devices');
+    // Fetch Now here names the device too; a run already going is followed, not refused.
+    fetchAnswer = 'busy'; jobPolls = 0;
+    g('ld-fetch-now').click();
+    await waitFor(() => /already running/.test(g('ld-fetch-now').parentElement.textContent) || /Measured/.test(g('ld-fetch-now').parentElement.textContent), 'log delay: an already running measurement is not followed');
+    const devRun = lsent.filter((m) => m.type === 'JOB_RUN').at(-1);
+    ok(devRun.clusterIds[0] === c0 && devRun.device === devName, `log delay: Fetch Now on a device sent ${JSON.stringify(devRun)}`);
+    await waitFor(() => /Measured/.test(g('ld-fetch-now').parentElement.textContent), 'log delay: the run already going was not followed to its end', 9000);
+    fetchAnswer = 'ok'; jobPolls = 0;
+    await waitFor(() => ldView() === 'device' && g('ld-graph'), 'log delay: the device did not draw again after Fetch Now');
     ok(g('ld-periods') && /still late/.test(g('ld-periods').textContent), 'log delay: Every delay does not show the open delay as still late');
+    const ph = [...g('ld-periods').querySelectorAll('thead th')].map((t) => t.textContent.replace(/[↑↓]/g, '').trim());
+    ok(ph.includes('zone') && ph.includes('tag1'), `log delay: Every delay has no zone or tag1 (${ph.join(' · ')})`);
     // The filter bar: src_device / wildcards, cluster, dates.
     const opts = [...g('ld-q-field').options].map((o) => o.value);
     ok(opts.includes('src_hostname') && opts.includes('src_device'), `log delay: Search by offers ${opts.join(', ')}`);
@@ -6988,12 +7014,29 @@ await settleFor(300);
     press(fd);
     await waitFor(() => ldView() === 'device', 'log delay: a device in Each device did not open its page');
     // The crumb goes back to the fleet.
-    press([...view().querySelectorAll('.ld-crumbs a')].find((a) => /Log delay/.test(a.textContent)));
+    press([...view().querySelectorAll('.ld-crumbs a')].find((a) => /Log Delay/.test(a.textContent)));
     await waitFor(() => ldView() === 'fleet', 'log delay: the crumb did not go back to the fleet');
     // The worst-device link on the By cluster table.
     const worst = g('ld-by-cluster') && g('ld-by-cluster').querySelector('td.mono a');
     press(worst);
     await waitFor(() => ldView() === 'device', 'log delay: the worst device link did not open the device');
+
+    // The old addresses open the matching view of the Log Delay page.
+    location.hash = `#/reports/log-delay/cluster/${encodeURIComponent(c0)}`;
+    await waitFor(() => ldView() === 'cluster' && location.hash === `#/log-delay/cluster/${encodeURIComponent(c0)}`, `log delay: #/reports/log-delay/cluster/… did not open the cluster here (${location.hash})`);
+    location.hash = '#/reports/log-delay/fixes';
+    await waitFor(() => ldView() === 'fixes' && location.hash === '#/log-delay/fixes', `log delay: #/reports/log-delay/fixes did not open the fixes here (${location.hash})`);
+    location.hash = '#/logs';
+    await waitFor(() => ldView() === 'live' && location.hash === '#/log-delay/live', `log delay: #/logs did not open Live logs (${location.hash})`);
+    // Open in logs: Live logs narrowed to that device, over the time range.
+    const esBefore = esSent.length;
+    location.hash = `#/log-delay/live/${encodeURIComponent(c0)}/fw-core-02`;
+    await waitFor(() => ldView() === 'live' && g('ld-live-value') && g('ld-live-value').value === 'fw-core-02', 'log delay: Open in logs did not narrow Live logs to the device');
+    await waitFor(() => esSent.slice(esBefore).some((m) => /_search/.test(m.path || '') && /fw-core-02/.test(m.body || '')), 'log delay: Live logs did not search for the device');
+    const q2 = JSON.parse(esSent.slice(esBefore).filter((m) => /_search/.test(m.path || '') && /fw-core-02/.test(m.body || '')).at(-1).body);
+    const clause = q2.query.bool.must.find((x) => x.query_string && x.query_string.fields);
+    ok(clause && clause.query_string.fields[0] === 'src_hostname' && clause.query_string.query === '"fw-core-02"', `log delay: the device clause reads ${JSON.stringify(clause)}`);
+    ok(q2.query.bool.filter[0].range['@timestamp'] && q2.query.bool.filter[0].range['@timestamp'].gte, 'log delay: Live logs searched without the time range');
 
     /* Config-Management › Data › Scheduled log delay: levels, fields, the report generator. */
     await go('settings');

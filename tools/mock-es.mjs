@@ -416,7 +416,7 @@ const routes = [
           src_hostname: device,
           src_ip: `10.0.0.${idx + 1}`,
           tag1: tag, fwdtag: `fwd-${tag}`, ClientID: tag.toUpperCase(),
-          branch: tag === 'acme' ? 'HQ' : 'DR', log_type: logType,
+          branch: tag === 'acme' ? 'HQ' : 'DR', log_type: logType, zone: tag === 'acme' ? 'dc1' : 'dc2',
         };
         // One parser miss, on the oldest document of one device: the UI must list it
         // rather than drop it, and must not count it as a zero delay.
@@ -465,6 +465,7 @@ const routes = [
               ClientID: tag.toUpperCase(),
               branch: tag === 'acme' ? 'HQ' : 'DR',
               log_type: logType,
+              zone: tag === 'acme' ? 'dc1' : 'dc2',
             },
           }] } },
         };
@@ -500,13 +501,21 @@ const routes = [
       return { took: 5, timed_out: false, hits: { total: { value: 0 }, hits: [] },
                aggregations: { terms: { buckets }, per_day_total: { buckets: totalPerDay } } };
     }
-    return { took: 3, hits: { total: { value: 2 }, hits: [
-    { _index: 'logstash-acme-2026.09.09', _id: '1', _source: { '@timestamp': new Date().toISOString(), message: 'hello' } },
-    { _index: 'logstash-acme-2026.09.09', _id: '2', _source: { '@timestamp': new Date().toISOString(), message: 'world' } },
-  ] }, aggregations: { over_time: { buckets: [
+    // Live logs: the newest documents, one per device, with the fields a delay is read from (the
+    // Log Delay page's columns) — and one plain document that carries none of them.
+    const now = Math.floor(Date.now() / 1000) * 1000;
+    const docs = DEVICES.map(([device, mins, logType, tag], i) => ({
+      _index: `logstash-${tag}-2026.09.09`, _id: `live-${i}`,
+      _source: { '@timestamp': new Date(now - i * 1000).toISOString(), ingested_time: new Date(now - i * 1000 - mins * 60000).toISOString(),
+        src_hostname: device, src_ip: `10.0.0.${i + 1}`, ClientID: tag.toUpperCase(), zone: tag === 'acme' ? 'dc1' : 'dc2', tag1: tag,
+        parser_tag: `${logType}-grok`, fwd_tag: `fwd-${tag}`, log_type: logType, message: `${device}: ${logType} event ${i + 1}` },
+    }));
+    docs.push({ _index: 'logstash-acme-2026.09.09', _id: 'plain', _source: { '@timestamp': new Date(now - 9000).toISOString(), message: 'hello' } });
+    const size = Math.min(Number(body.size) || 10, docs.length);
+    return { took: 3, hits: { total: { value: docs.length }, hits: docs.slice(0, size) }, aggregations: { over_time: { buckets: [
       // Real Elasticsearch always buckets the range (min_doc_count 0 + extended_bounds); the
-      // two hits above are "now", so one bucket at the current minute holds them both.
-      { key: Math.floor(Date.now() / 60000) * 60000, doc_count: 2 },
+      // hits above are within the last few seconds, so one bucket at the current minute holds them.
+      { key: Math.floor(Date.now() / 60000) * 60000, doc_count: docs.length },
     ] } } };
   }],
 ];

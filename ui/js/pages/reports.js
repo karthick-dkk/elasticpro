@@ -26,7 +26,6 @@ import { planningSection } from '../reports/planning.js';
 import { volumeSummary, resetVolumeSummary, setSummaryMode } from '../reports/daily.js';
 import { volumeAnalysisCard, setVolumeAnalysisField } from '../ui/index-metrics.js';
 import { setReportPanelOpen } from '../ui/report-jobs.js';
-import { logDelaySection, logDelayReset } from '../reports/logdelay.js';
 
 let host = null;
 let visiting = false;
@@ -58,7 +57,6 @@ export function render(el) {
     capacityReset();
     exportsReset();
     hostsReset();
-    logDelayReset();
     planningNode = null;
     focusField = null;
   }
@@ -90,8 +88,7 @@ export function onLeave() { visiting = false; stopFollowing(); }
 /** The shell saw the hash change to another section of this page. */
 export function onRoute() {
   const s = sectionOfHash(location.hash);
-  // Log delay has views under its section (#/reports/log-delay/cluster/<id>, …): a move between them redraws too.
-  const moved = s !== ui.section || (s === 'log-delay' && location.hash !== lastHash);
+  const moved = s !== ui.section;
   if (s === 'overview' && ui.section !== 'overview') bus.emit('fleet-view');
   ui.section = s;
   syncHash();                   // #/volume/… reads as #/reports/… from here on
@@ -102,8 +99,8 @@ let lastHash = '';
 
 function syncHash() {
   const want = sectionHash(ui.section);
-  // A Log delay view keeps its own address under the section's.
-  if (ui.section === 'log-delay' && location.hash.startsWith(`${want}/`)) return;
+  // A section that moved to its own page has no address here (#/reports/log-delay opens that page).
+  if (REPORT_SECTIONS.some((s) => s.id === ui.section && s.moved)) return;
   if (location.hash !== want) {
     try { history.replaceState(null, '', want); } catch (_) { location.hash = want; }
   }
@@ -123,6 +120,14 @@ function openDaily(id) {
   goSection('daily');
 }
 
+/** A section that moved to a page of its own (Log delay → the Log Delay page): one line and the link. */
+function movedSection() {
+  return h('div.rp-section', h('div.banner', h('div',
+    h('div.ttl', 'Log delay has moved to its own page'),
+    h('div', 'The fleet, cluster and device boards, the recommended fixes, Build report and Send are on ',
+      h('a#rp-ld-moved', { href: '#/log-delay' }, 'Log Delay ›'), ', with Live Watch and Live logs beside them.'))));
+}
+
 function header() {
   return h('div.rp-head',
     h('div', h('h1', 'Reports'), h('p.sub', SUBTITLE)));
@@ -130,11 +135,14 @@ function header() {
 
 function sectionNav() {
   return h('nav.rp-nav', { 'aria-label': 'Report sections' },
-    ...REPORT_SECTIONS.map((s) => h('a', {
-      href: sectionHash(s.id), dataset: { section: s.id },
-      'aria-current': ui.section === s.id ? 'page' : null,
-      onclick: (e) => { e.preventDefault(); goSection(s.id); },
-    }, s.label)));
+    ...REPORT_SECTIONS.map((s) => (s.moved
+      // Log delay lives on its own page now: the entry is a plain link there.
+      ? h('a.rp-moved', { href: s.moved, dataset: { section: s.id }, title: `${s.label} moved to the Log Delay page` }, `${s.label} \u203A`)
+      : h('a', {
+        href: sectionHash(s.id), dataset: { section: s.id },
+        'aria-current': ui.section === s.id ? 'page' : null,
+        onclick: (e) => { e.preventDefault(); goSection(s.id); },
+      }, s.label))));
 }
 
 /** Daily & monthly is one cluster: the one selected, or — on "All clusters" — one picked here. */
@@ -167,7 +175,7 @@ function body(list) {
     case 'measure': return measureSection(ctx);
     case 'planning': return planningNode || (planningNode = planningSection({ clusters: list }));
     case 'exports': return exportsSection(ctx);
-    case 'log-delay': return logDelaySection(ctx);
+    case 'log-delay': return movedSection();
     default: return overviewSection(ctx);
   }
 }

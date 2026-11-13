@@ -1,5 +1,5 @@
 /** Cross-page hand-off (e.g. "open this index in the REST console"). */
-export const intent = { console: null, snapshots: null, settings: null, reports: null };
+export const intent = { console: null, snapshots: null, settings: null, reports: null, logDelay: null };
 
 /**
  * Whether this session may open a page. The shell (app.js) owns the answer — it knows the
@@ -28,6 +28,8 @@ export function navigateTo(page, payload, opts = {}) {
   if (page === 'snapshots') intent.snapshots = payload || null;
   if (page === 'settings') intent.settings = payload || null;
   if (page === 'reports' || page === 'volume') intent.reports = payload || null;
+  // The Log Delay page (was `logs`): `{view, cluster, device}` names one of its views.
+  if (page === 'log-delay' || page === 'logs') intent.logDelay = payload || null;
   window.dispatchEvent(new CustomEvent('ep:navigate', {
     detail: { page, cluster: opts.cluster || null },
   }));

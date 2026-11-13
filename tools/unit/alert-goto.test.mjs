@@ -50,7 +50,7 @@ test('where each rule lands on its page', () => {
   assert.deepEqual([at('ilm').page, at('ilm').focus.ilm], ['indices', true]);
   for (const id of ['slm-mode', 'slm-fail', 'slm-stale']) assert.deepEqual([at(id).page, at(id).focus.view, at(id).focus.section], ['snapshots', 'summary', 'policies']);
   assert.deepEqual([at('repo').page, at('repo').focus.section], ['snapshots', 'repos']);
-  assert.deepEqual([at('log-delay').page, at('log-delay').focus.view], ['logs', 'delay']);
+  assert.deepEqual([at('log-delay').page, at('log-delay').focus.view], ['log-delay', 'delay']);
   assert.equal(at('unreachable').page, 'overview');
   assert.deepEqual(at('unreachable').focus, { section: 'unreachable', cluster: 'c1' }, 'Clusters page: that cluster\'s card');
   // The volume rule leads to Reports (the Volume report until 0.3.53), not the Clusters page.

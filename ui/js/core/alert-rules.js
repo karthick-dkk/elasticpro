@@ -76,7 +76,7 @@ export const ALERT_RULES = [
     thresholds: [{ key: 'snapshotStaleHours', label: 'Stale after', unit: 'h', min: 1, max: 720 }] },
   { id: 'repo', page: 'snapshots', label: 'Snapshot repository problems', level: 'critical',
     why: 'A repository is unreadable, empty, or its recent snapshots failed.' },
-  { id: 'log-delay', page: 'logs', label: 'Devices shipping logs late', level: 'high',
+  { id: 'log-delay', page: 'log-delay', label: 'Devices shipping logs late', level: 'high',
     why: 'Logs are arriving behind real time — searches and detections see the past, not now. '
        + 'High when a device is past its critical delay (over 60 min), warning when only delayed.',
     // The words the Zabbix template carries (tools/zabbix-alert-template.mjs), unchanged: a
@@ -156,7 +156,7 @@ export function pageForProblem(ruleId, text) {
   const rule = ruleById(ruleId) || ALERT_RULES.find((r) => t.startsWith(r.label.toLowerCase()));
   if (rule && rule.page) return rule.page;
   if (/snapshot|slm|backup|repositor/.test(t)) return 'snapshots';
-  if (/log delay|delayed device|ingest delay/.test(t)) return 'logs';
+  if (/log delay|delayed device|ingest delay/.test(t)) return 'log-delay';
   if (/indices size|volume|client plan|storage plan/.test(t)) return 'reports';
   if (/ilm/.test(t)) return 'indices';
   // A disk alert is a placement problem: the page that can act on it is the one that

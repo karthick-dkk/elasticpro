@@ -244,7 +244,7 @@ export const PLAYBOOKS = {
   'log-delay': () => ({
     cause: 'Logs arrive behind real time: the device is shipping late, its clock is wrong, or the cluster is ingesting slower than they come in.',
     steps: [
-      { text: 'See the late devices, worst first.', links: [{ label: 'Late devices', page: 'logs', focus: { view: 'delay' } }] },
+      { text: 'See the late devices, worst first.', links: [{ label: 'Late devices', page: 'log-delay', focus: { view: 'delay' } }] },
       { text: 'On the worst device, check the shipper (Filebeat, Logstash, a syslog relay): a growing queue or a stopped service.' },
       { text: 'A negative delay means the device clock is ahead; fix its time source.' },
       { text: 'If many devices are late at once, check whether the cluster is rejecting writes.',

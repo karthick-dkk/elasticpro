@@ -5,7 +5,7 @@ import { bridge } from './transport.js';
 import { setManaged } from './managed.js';
 import { NOT_THE_CLUSTER } from './error-codes.js';
 
-const send = (msg) => bridge(msg);
+const send = (msg, o) => bridge(msg, o);
 
 /**
  * Who is asking, for the core's request log and the X-Opaque-Id it sends the cluster:
@@ -176,8 +176,16 @@ export async function workerStatus() {
   const st = await send({ type: 'PING' });
   // Every PING is also where the server says what config.txt manages; see managed.js.
   setManaged(st);
+  // …and, when the core says it, the server's time zone (an IANA name): times on the Log Delay
+  // page are shown in it. Not said: null, and the page uses the browser's zone and says which.
+  const tz = st && (st.tz || st.timeZone);
+  if (typeof tz === 'string' && tz) serverTz = tz;
   return st;
 }
+
+let serverTz = null;
+/** The server's time zone as the core said it (PING `tz`), or null when it has not. */
+export const serverZoneName = () => serverTz;
 
 /**
  * Turn on exact net:: error reporting. Needs the optional "webRequest" permission, which
@@ -251,10 +259,12 @@ export class EsClient {
       ...(opts.purpose ? { purpose: opts.purpose } : {}),
       ...(opts.maxAgeMs !== undefined ? { maxAgeMs: opts.maxAgeMs } : freshDepth > 0 ? { maxAgeMs: 0 } : {}),
     };
-    let res = await send(msg);
+    // A view's own AbortController (opts.signal) lets go of this request when the view is left.
+    const o = opts.signal ? { signal: opts.signal } : undefined;
+    let res = await send(msg, o);
     if (res.kind === 'no_creds' && this.onPrimeNeeded) {
       await this.onPrimeNeeded();
-      res = await send(msg);
+      res = await send(msg, o);
     }
     const age = res && res.cached && Number(res.ageMs) > 0 ? Number(res.ageMs) : 0;
     const at = Date.now() - age;

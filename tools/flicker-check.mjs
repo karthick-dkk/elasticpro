@@ -8,6 +8,8 @@
  *     --bin elasticpro-bridge -- ui 8765 &
  *   node tools/flicker-check.mjs --config $PWD/tools/fit-fixture.json
  *   node tools/flicker-check.mjs --browsers webkit --pages requests/health,reports/exports
+ *   node tools/flicker-check.mjs --pages log-delay,log-delay/watch --ld-delay 15000   # slow answers
+ *   node tools/flicker-check.mjs --pages log-delay --ld-delay fail                    # failing answers
  *
  * Why it exists: the pages redraw on every push from the core and on their own timers (the
  * request log every 2 s, ElasticPro health every 5 s, the report jobs every 2 s while one
@@ -33,6 +35,12 @@
  *             layout-shift score.
  *   errors    uncaught errors, console errors and failed requests while on the page.
  *
+ * The Log Delay page's boards read the core's store (LOGDELAY_*), which a fresh data directory has
+ * empty: their answers come from tools/lib/logdelay-fixture.mjs, as in fit-check. `--ld-delay <ms>`
+ * holds each of those answers that long before it arrives (4000 and 15000: the owner's "it
+ * flickers while it fetches"), and `--ld-delay fail` answers each with a timeout after 4 s — the
+ * pointer is parked while they are still out, so an answer arriving must not replace what is under it.
+ *
  * Exit 1 when a search box loses focus, a character or its element, or when the element under
  * a parked pointer is replaced more than --max-replaced times (default 0) on a page listed in
  * STRICT (the ones fixed in 0.3.54); the rest is reported. --json writes every figure.
@@ -45,6 +53,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadPlaywright } from './lib/playwright.mjs';
+import { logDelayAnswer, logDelayData } from './lib/logdelay-fixture.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const arg = (name, fallback) => {
@@ -63,6 +72,7 @@ const JSON_OUT = arg('--json', '');
 const SHOTS = arg('--shots', '');
 const PAGE_FILTER = arg('--pages', '');
 const ROLE = arg('--role', 'admin');
+const LD_DELAY = arg('--ld-delay', '0');
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 /**
@@ -75,7 +85,15 @@ const PAGES = [
     hover: ['#view tbody tr', '#view .pill', '#view .btn'] },
   { id: 'indices', search: '#idx-search, #idx-search2', hover: ['#view tbody tr', '#view .pill', '#view .btn'] },
   { id: 'shards', search: '#view input[type=search]', hover: ['#view tbody tr', '#view .pill', '#view .btn'] },
-  { id: 'logs', search: '#view input[type=search]', hover: ['#view .btn', '#view .seg button'] },
+  // The Log Delay page (was Logs & Delay, 0.3.60): every view. @c / @d are the fixture's first
+  // cluster and its worst device. The pointer goes on a device row once one is drawn, else on a tab.
+  { id: 'log-delay', search: '#ld-dev-filter', hover: ['#ld-devices tbody tr', '#view .ld-tabs a', '#view .btn'] },
+  { id: 'log-delay/cluster/@c', search: '#ld-cd-filter', hover: ['#ld-cluster-devices tbody tr', '#view .ld-tabs a', '#view .btn'] },
+  { id: 'log-delay/device/@c/@d', search: '#ld-q-name', hover: ['#ld-periods tbody tr', '#view .ld-kpi', '#view .ld-tabs a'] },
+  { id: 'log-delay/fixes', search: '#ld-fix-filter', hover: ['#ld-fix-devices tbody tr', '#view .ld-fix', '#view .ld-tabs a'] },
+  { id: 'log-delay/watch', search: null, setup: async (F) => { await F.evaluate(() => document.querySelector('#delay-fetch')?.click()); await sleep(4000); },
+    hover: ['#ld-watch-devices tbody tr', '#view .ld-tabs a', '#view .btn'] },
+  { id: 'log-delay/live', search: '#ld-live-value', hover: ['#ld-live-logs tbody tr', '#view .ld-tabs a', '#view .btn'] },
   { id: 'console', search: '#c-histfilter, #c-saved-filter', hover: ['#view .btn', '#view .tab'] },
   { id: 'snapshots', search: '#view input[aria-label="Search snapshots"]',
     setup: async (F) => { await F.evaluate(() => [...document.querySelectorAll('#view [title^="Open "]')][0]?.click()); }, hover: ['#view tbody tr', '#view .pill', '#view .btn'] },
@@ -95,7 +113,8 @@ const PAGES = [
 ].filter((p) => !PAGE_FILTER || PAGE_FILTER.split(',').includes(p.id));
 
 /** Pages whose pointer figures must be zero (the redraws fixed in 0.3.54); others are reported. */
-const STRICT = new Set(['requests', 'requests/health', 'reports/exports', 'reports/hosts']);
+const STRICT = new Set(['requests', 'requests/health', 'reports/exports', 'reports/hosts',
+  'log-delay', 'log-delay/cluster/@c', 'log-delay/device/@c/@d', 'log-delay/fixes', 'log-delay/watch', 'log-delay/live']);
 
 const pw = await loadPlaywright(ROOT, 'flicker-check');
 if (!pw) process.exit(0);
@@ -217,9 +236,21 @@ async function run(browserName) {
   await ctx.addInitScript(INSTRUMENTS);
   // A signed-in administrator on the hosted build, so the Accounts page is there (as fit-check).
   const WHOAMI = { ok: true, authRequired: true, needsBootstrap: false, apiTokens: true, edition: 'hosted', caller: { name: 'qa', role: ROLE } };
-  await ctx.route(`${BASE}/bridge`, (route) => {
+  let ldList = [];
+  await ctx.route(`${BASE}/bridge`, async (route) => {
     const t = ((route.request().postData() || '').match(/"type"\s*:\s*"([A-Z_]+)"/) || [])[1];
-    return t === 'WHOAMI' ? route.fulfill({ json: WHOAMI }) : route.continue();
+    if (t === 'WHOAMI') return route.fulfill({ json: WHOAMI });
+    // The log delay store's answers (see the header): from the fixture, held --ld-delay ms, or failing.
+    if (t && t.startsWith('LOGDELAY_') && ldList.length) {
+      let body = {}; try { body = JSON.parse(route.request().postData() || '{}'); } catch { /* not ours */ }
+      const fail = LD_DELAY === 'fail';
+      const wait = fail ? 4000 : Number(LD_DELAY) || 0;
+      if (wait) await sleep(wait);
+      if (fail) return route.fulfill({ json: { ok: false, kind: 'timeout', message: 'the store did not answer in time' } }).catch(() => {});
+      const a = logDelayAnswer(body, ldList);
+      if (a) return route.fulfill({ json: a }).catch(() => {});
+    }
+    return route.continue().catch(() => {});
   });
   const p = await ctx.newPage();
   let errs = [];
@@ -242,8 +273,14 @@ async function run(browserName) {
 
   for (const pg of PAGES) {
     errs = [];
-    const row = { browser: browserName, page: pg.id, size: SIZE.join('x'), scheme: SCHEME };
-    await p.evaluate((id) => { location.hash = `#/${id}`; }, pg.id);
+    const row = { browser: browserName, page: pg.id, size: SIZE.join('x'), scheme: SCHEME, ldDelay: pg.id.startsWith('log-delay') ? LD_DELAY : null };
+    let to = pg.id;
+    if (to.startsWith('log-delay') && !ldList.length) ldList = await p.evaluate(async () => (await import('/js/core/state.js')).clusters().map((c) => ({ id: c.id, name: c.name })));
+    if (to.includes('@c')) {
+      const first = logDelayData(ldList).per[0];
+      to = to.replace('@c', encodeURIComponent(first ? first.c.id : '')).replace('@d', encodeURIComponent(first ? first.rows[0].device : ''));
+    }
+    await p.evaluate((id) => { location.hash = `#/${id}`; }, to);
     await sleep(2500);
     if (pg.setup) { await pg.setup(p); await sleep(600); }
     await p.evaluate(INSTRUMENTS);

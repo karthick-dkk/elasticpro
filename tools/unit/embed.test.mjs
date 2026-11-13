@@ -154,7 +154,7 @@ test('an ElasticPro problem is placed by its rule even when Zabbix leaves the ru
   // What Zabbix 7.0 actually sends: {EVENT.TAGS.rule} stays as its own text.
   const at = (name) => e.troubleshootTarget(
     launch(`zbx_host=es-acme-prod&rule=%7BEVENT.TAGS.rule%7D&problem=${encodeURIComponent(name)}`), fleet, pageForProblem).page;
-  assert.equal(at('Devices shipping logs late — critical: vm-1: 2 device(s) critically late'), 'logs');
+  assert.equal(at('Devices shipping logs late — critical: vm-1: 2 device(s) critically late'), 'log-delay');
   assert.equal(at('Automation rule has work waiting — warning: vm-1: rule found 3 indices'), 'automation');
   assert.equal(at('Master moved — critical: vm-1: master moved from a to b'), 'shards');
   assert.equal(at('Indices in an ILM error step — warning: vm-1: 2 index(es)'), 'indices');

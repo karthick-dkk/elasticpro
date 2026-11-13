@@ -249,7 +249,13 @@ test('the Reports CSVs carry event_logsize and leave unmeasured cells empty', ()
 
 test('the route: #/reports/<section>, Overview by default, #/volume is an alias', () => {
   assert.deepEqual(R.REPORT_SECTIONS.map((s) => s.label), ['Overview', 'Daily & monthly', 'Volume by host', 'Capacity & retention', 'Measure size', 'Planning', 'Log delay', 'Exports & schedules']);
-  assert.equal(R.sectionOfHash('#/reports/log-delay/device/a/b'), 'log-delay', 'a Log delay view is the Log delay section');
+  // Log delay moved to the Log Delay page: its old addresses open that page, on the matching view.
+  assert.equal(R.REPORT_SECTIONS.find((s) => s.id === 'log-delay').moved, '#/log-delay');
+  assert.deepEqual(R.parseHash('#/reports/log-delay/device/a/b'), { page: 'log-delay', rest: 'device/a/b' });
+  assert.deepEqual(R.parseHash('#/reports/log-delay'), { page: 'log-delay', rest: '' });
+  assert.deepEqual(R.parseHash('#/logs'), { page: 'log-delay', rest: 'live' }, '#/logs opened the live tail');
+  assert.equal(R.pageAlias('logs'), 'log-delay');
+  assert.equal(R.sectionOfHash('#/reports/log-delay/device/a/b'), 'overview', 'not a Reports section any more');
   assert.equal(R.sectionOfHash('#/reports'), 'overview');
   assert.equal(R.sectionOfHash('#/reports/capacity'), 'capacity');
   assert.equal(R.sectionOfHash('#/volume'), 'overview');

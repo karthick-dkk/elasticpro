@@ -21,6 +21,8 @@ import { STATUS } from './log-delay.js';
 export const DEVICE_COLUMNS = [
   { key: 'cluster', label: 'Cluster' },
   { key: 'device', label: 'Device' },
+  { key: 'zone', label: 'zone' },
+  { key: 'tag1', label: 'tag1' },
   { key: 'status', label: 'Status' },
   { key: 'delayMinutes', label: 'Delay (minutes)', number: true },
   { key: 'docs', label: 'Documents', number: true },
@@ -37,6 +39,14 @@ function delayCell(v) {
   return v === null || v === undefined || !isFinite(v) ? null : Math.round(v * 100) / 100;
 }
 
+/** A context field of a measured device (its `meta`, any case); null when the device has none. */
+function contextOf(r, name) {
+  for (const [k, v] of Object.entries((r && r.meta) || {})) {
+    if (String(k).toLowerCase() === name && v !== null && v !== undefined && v !== '') return String(v);
+  }
+  return null;
+}
+
 function deviceRows(records) {
   const rank = { CRITICAL: 0, DELAYED: 1, CLOCK_AHEAD: 2, ERROR: 3, NO_DATA: 4, OK: 5 };
   const sorted = [...(records || [])].sort((a, b) =>
@@ -44,6 +54,8 @@ function deviceRows(records) {
   return sorted.map((r) => [
     r.cluster || '',
     r.device || '',
+    contextOf(r, 'zone'),
+    contextOf(r, 'tag1'),
     (STATUS[r.status] || {}).label || r.status || '',
     delayCell(r.delayMinutes),
     Number(r.docs) || 0,
@@ -59,7 +71,7 @@ function summaryRows(records, summary, meta) {
   const by = s.by || {};
   const rows = [
     ['Generated (UTC)', iso(meta.generatedAt || Date.now())],
-    ['Window', meta.windowHours ? `last ${meta.windowHours} hour(s)` : ''],
+    ['Window', meta.windowText || (meta.windowHours ? `last ${meta.windowHours} hour(s)` : '')],
     ['Clusters measured', Number(meta.measured) || 0],
     ['Clusters not measured', Number(meta.notMeasured) || 0],
     ['Devices', Number(s.devices) || 0],

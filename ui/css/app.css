@@ -2700,3 +2700,42 @@ select.zr-hand { height: 26px; max-width: 150px; font-size: 12px; }
 .ldc-chip { display: inline-flex; align-items: center; gap: 4px; padding: 0 4px 0 8px; height: 22px; border-radius: 999px; font-family: var(--mono); font-size: 11.5px; background: color-mix(in srgb, #a9c8f0 30%, var(--surface-1)); border: 1px solid #a9c8f0; }
 .ldc-chip button { border: 0; background: none; cursor: pointer; color: inherit; font-size: 13px; line-height: 1; padding: 0 3px; }
 .ldc-hint { font-size: 11.5px; color: var(--text-muted); }
+
+/* ---------------- Log Delay page (0.3.60): tabs, range bar, Fetch Now, Live Watch, Live logs ----------------
+   Theme tokens only (the .ld chart inks are the page's own variables above). */
+.ld-page .rp-head { align-items: center; }
+.ld-busy { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; min-height: 18px; }
+.ld-range-bar, .ld-live-bar, .ld-watch-bar { display: flex; flex-wrap: wrap; gap: 8px 10px; align-items: flex-end; margin-bottom: 8px; }
+.ld-range-bar select, .ld-range-bar input { height: 30px; }
+.ld-zone { font-size: 12px; align-self: center; }
+.ld-bar-right { margin-left: auto; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.ld-hint { font-size: 11.5px; flex: 1 1 260px; min-width: 0; align-self: center; }
+.ld-progress { display: inline-flex; align-items: center; gap: 5px; font-size: 11.5px; }
+.ld-fetch { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; margin-bottom: 8px; min-height: 30px; }
+.ld-fetch-status { font-size: 12px; color: var(--text-secondary); min-width: 0; overflow-wrap: anywhere; }
+.ld-fetch-status.ld-fetch-ok { color: var(--good-ink, var(--text-primary)); }
+.ld-fetch-status.ld-fetch-bad { color: var(--critical); }
+.ld-stack { display: grid; gap: 10px; min-width: 0; }
+.ld-flat { margin: 0; font-size: 12px; }
+.ld-strong { font-weight: 620; }
+.ld .ld-acts { white-space: nowrap; font-size: 12px; }
+.ld .ld-acts a { text-decoration: none; }
+.ld .ld-acts .btn.sm { height: 24px; padding: 0 8px; }
+.ld-watch-head { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.ld-big { font-size: 15px; }
+.ld-tally { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 12px; color: var(--text-secondary); }
+.ld-tally b { color: var(--text-primary); }
+.ld-live-status { display: flex; flex-wrap: wrap; gap: 6px 12px; align-items: center; font-size: 11.5px; min-height: 18px; margin-bottom: 8px; }
+.ld table.tbl.ld-logs td.ld-msg { max-width: 560px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11.5px; }
+.ld table.tbl.ld-logs td.ld-msg.ld-open-msg { white-space: pre-wrap; overflow-wrap: anywhere; }
+.ld table.tbl.ld-logs tr.ld-log { cursor: pointer; }
+.ld table.tbl.ld-logs td.ld-json { background: var(--surface-2); white-space: normal; height: auto; }
+.ld .ld-band { background: color-mix(in srgb, var(--ld-blue-ink) 22%, transparent); }
+.ld .ld-band.ld-band-crit { background: color-mix(in srgb, var(--ld-pink-ink) 22%, transparent); }
+.ld .ld-mark-start { color: var(--ld-blue-ink); }
+.ld .ld-mark-solved { color: var(--ld-green-ink); }
+.ld .ld-mark-open { color: var(--ld-pink-ink); }
+.ld-loading { display: flex; align-items: center; gap: 6px; }
+.rp-nav a.rp-moved { color: var(--accent); }
+.ld .ld-watch-head { margin-bottom: 8px; }
+.ld .tbl-wrap + .tbl-wrap, .ld .banner + .tbl-wrap { margin-top: 8px; }

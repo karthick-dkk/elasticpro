@@ -15,7 +15,7 @@ const ROOT = path.resolve(import.meta.dirname, '../..');
 const ev = await import(pathToFileURL(path.join(ROOT, 'ui/js/core/evidence.js')).href);
 const { EVIDENCE_PAGES, evidenceLayout, evidenceSelection, hideAddress, scrubFresh, createHeldNotices } = ev;
 
-const PAGES = ['alerts', 'overview', 'indices', 'shards', 'logs', 'console', 'snapshots', 'reports', 'automation',
+const PAGES = ['alerts', 'overview', 'indices', 'shards', 'log-delay', 'console', 'snapshots', 'reports', 'automation',
   'requests', 'accounts', 'settings'];
 
 test('exactly Snapshots, the REST console and Indices are evidence pages', () => {
