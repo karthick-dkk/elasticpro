@@ -206,10 +206,11 @@ pub fn device_rows(i: &Inputs<'_>) -> Vec<DeviceRow> {
 /// after the cluster when the options leave them out (every log delay table shows them).
 pub fn columns(o: &Options) -> Vec<String> {
     let mut cols = o.columns.clone();
-    for must in super::ALWAYS_EXTRAS.iter().rev() {
+    let mut at = cols.iter().position(|c| c == "cluster").or_else(|| cols.iter().position(|c| c == "device")).map(|p| p + 1).unwrap_or(cols.len());
+    for must in ["Zone", "tag1"] {
         if !cols.iter().any(|c| c.eq_ignore_ascii_case(must)) {
-            let at = cols.iter().position(|c| c == "cluster").or_else(|| cols.iter().position(|c| c == "device")).map(|p| p + 1).unwrap_or(cols.len());
             cols.insert(at, must.to_string());
+            at += 1;
         }
     }
     cols
