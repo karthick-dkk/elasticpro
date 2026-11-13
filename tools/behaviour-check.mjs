@@ -1066,8 +1066,10 @@ await go('reports');
   // The page: title, subtitle, the six sections in order, Overview first; the tab reads Reports.
   ok(/^Reports$/.test((doc.querySelector('.rp-head h1') || {}).textContent || ''), 'reports: no "Reports" title');
   ok(/What each cluster takes in, what it keeps, and whether its storage holds it\./.test(doc.body.textContent), 'reports: the subtitle is missing');
-  ok(navLinks().map((a) => a.textContent).join(' · ') === 'Overview · Daily & monthly · Volume by host · Capacity & retention · Measure size · Planning · Log delay · Exports & schedules',
+  // Log delay moved to the Log Delay page (0.3.60): its entry is a link there, marked with ›.
+  ok(navLinks().map((a) => a.textContent).join(' · ') === 'Overview · Daily & monthly · Volume by host · Capacity & retention · Measure size · Planning · Log delay › · Exports & schedules',
     `reports: the section nav reads ${navLinks().map((a) => a.textContent).join(' · ')}`);
+  ok((doc.querySelector('.rp-nav a[data-section="log-delay"]') || { getAttribute: () => null }).getAttribute('href') === '#/log-delay', 'reports: the Log delay entry does not link to the Log Delay page');
   ok(current() === 'overview', `reports: opens on ${current()}, want Overview`);
   ok([...doc.querySelectorAll('#nav a, #nav button')].some((x) => x.dataset.page === "reports" && /Reports$/.test(x.textContent.trim())), 'reports: the tab is not labelled Reports');
   ok(![...doc.querySelectorAll('#nav a, #nav button')].some((x) => /Volume report/.test(x.textContent)), 'reports: a "Volume report" tab is still there');
@@ -1576,7 +1578,7 @@ await go('settings');
       `settings: ${options} sink options for ${config.clusters.length} clusters (plus the empty one)`);
     ok(card.querySelectorAll('input[id^="sink-pick-"]').length === config.clusters.length,
       'settings: the clusters to measure are not one box per cluster');
-    ok(/Log delay/.test(card.textContent),
+    ok(/the Log Delay page applies the thresholds/.test(card.textContent.replace(/\s+/g, ' ')),
       'settings: the card should say where the thresholds are applied');
 
     // Arming it without naming a destination must not reach the core at all.
@@ -2110,7 +2112,7 @@ await go('overview');
     ok(!!menu, 'overview: clicking a cluster name opened no menu');
     if (menu) {
       const labels = [...menu.querySelectorAll('button[role=menuitem]')].map((b) => b.children[1].textContent);
-      for (const l of ['Edit', 'Nodes', 'Repo', 'Live log']) ok(labels.includes(l), `overview: the name menu has no "${l}" (has ${labels.join(', ')})`);
+      for (const l of ['Edit', 'Nodes', 'Repo', 'Live logs']) ok(labels.includes(l), `overview: the name menu has no "${l}" (has ${labels.join(', ')})`);
       ok(trigger().getAttribute('aria-expanded') === 'true', 'overview: the name does not say its menu is open');
       ok(doc.activeElement && menu.contains(doc.activeElement), 'overview: the menu did not take the keyboard');
       key('ArrowDown'); ok(doc.activeElement !== menu.querySelector('button'), 'overview: ArrowDown did not move in the menu');
@@ -2130,8 +2132,9 @@ await go('overview');
     await go2('Repo');
     ok(/#\/snapshots$/.test(window.location.hash) && st.state.selected === target.id, `name menu → Repo: at ${window.location.hash}, selected ${st.state.selected}`);
     ok(!!panel('Repositories') && !doc.querySelector('input[aria-label="Search snapshots"]'), 'name menu → Repo: the repositories view is not the one open');
-    await go2('Live log');
-    ok(/#\/logs$/.test(window.location.hash) && st.state.selected === target.id, `name menu → Live log: at ${window.location.hash}, selected ${st.state.selected}`);
+    // Log Delay › Live logs, for that cluster (the page was Logs & Delay, #/logs, until 0.3.60).
+    await go2('Live logs');
+    ok(window.location.hash === `#/log-delay/live/${encodeURIComponent(target.id)}` && st.state.selected === target.id, `name menu → Live logs: at ${window.location.hash}, selected ${st.state.selected}`);
     await go2('Edit');
     const dlg = doc.querySelector('.modal-overlay .modal');
     ok(dlg && /Edit cluster/.test(dlg.textContent), 'name menu → Edit: the cluster editor did not open');
