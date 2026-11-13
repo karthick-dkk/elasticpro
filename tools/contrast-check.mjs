@@ -318,10 +318,12 @@ async function runTheme(theme) {
     return route.continue();
   });
 
-  const p = await ctx.newPage();
+  let p = null;
   let where = 'load';
+  const listen = (p) => {
   p.on('pageerror', (e) => errors.push({ theme, page: where, msg: `uncaught ${[e.name, e.message].filter(Boolean).join(': ')}` }));
   p.on('console', (m) => { if (m.type() === 'error') errors.push({ theme, page: where, msg: m.text().slice(0, 300) }); });
+  };
 
   const quiet = (ms = 500, max = 4000) => p.evaluate(({ ms, max }) => new Promise((res) => {
     let t = setTimeout(done, ms); const cap = setTimeout(done, max);
@@ -330,6 +332,12 @@ async function runTheme(theme) {
     function done() { mo.disconnect(); clearTimeout(cap); clearTimeout(t); res(); }
   }), { ms, max });
 
+  /** A fresh tab on the app, warmed until the reachable clusters have answered. */
+  const open = async () => {
+  if (p) await p.close().catch(() => {});
+  p = await ctx.newPage();
+  listen(p);
+  where = 'load';
   await p.goto(`${BASE}/#/alerts`);
   try { await p.waitForSelector('.head-fix', { timeout: 20000 }); } catch { /* reported below */ }
   const t0 = Date.now();
@@ -342,10 +350,13 @@ async function runTheme(theme) {
   }
   await sleep(2000);
   const shell = await p.evaluate(() => !!document.querySelector('.head-fix') && !!document.querySelector('#view'));
-  if (!shell) { errors.push({ theme, page: 'load', msg: 'the app did not load — start the bridge with the fixture (see --config)' }); await browser.close(); return; }
+  if (!shell) return false;
+  await p.evaluate(async () => { try { await (await import('/js/core/acks.js')).setCurrentUser('qa'); } catch { /* optional */ } });
+  return true;
+  };
+  if (!(await open())) { errors.push({ theme, page: 'load', msg: 'the app did not load — start the bridge with the fixture (see --config)' }); await browser.close(); return; }
   const applied = await p.evaluate(() => document.documentElement.getAttribute('data-theme') || '(none)');
   notes.push(`${theme}: data-theme=${applied}, scheme=${themeContextOptions(theme).colorScheme}`);
-  await p.evaluate(async () => { try { await (await import('/js/core/acks.js')).setCurrentUser('qa'); } catch { /* optional */ } });
 
   const goPage = async (id) => {
     if (id.startsWith('reports/log-delay') && !ldList.length) {
@@ -360,12 +371,11 @@ async function runTheme(theme) {
   };
   const keep = (page, list) => { for (const s of list) all.push({ theme, page, ...s }); };
 
-  const pages = [...pick(CONTRAST_PAGES), ...pick(ERROR_ONLY_PAGES)];
-  for (const id of pages) {
+  const measure = async (id) => {
     where = id;
     await goPage(id);
-    if (ERRORS_ONLY || ERROR_ONLY_PAGES.includes(id)) continue;
-    if (!(await p.evaluate(() => document.querySelector('#view')?.children.length || 0))) { notes.push(`${theme} ${id}: nothing drawn, skipped`); continue; }
+    if (ERRORS_ONLY || ERROR_ONLY_PAGES.includes(id)) return;
+    if (!(await p.evaluate(() => document.querySelector('#view')?.children.length || 0))) { notes.push(`${theme} ${id}: nothing drawn, skipped`); return; }
     await p.mouse.move(0, 0);
     await p.evaluate(() => { document.querySelectorAll('#view details').forEach((d) => { d.open = true; }); });
     await sleep(200);
@@ -440,6 +450,24 @@ async function runTheme(theme) {
       if (s) keep(id, [s]);
     }
     await p.evaluate(() => { if (document.activeElement) document.activeElement.blur(); window.scrollTo(0, 0); });
+  };
+
+  // A renderer that runs out of memory (the container's limit, shared with the bridge and the
+  // mocks) takes the tab with it: that page is measured again in a fresh tab, once. A crash
+  // again is reported as an error, and samples taken before it stay.
+  const pages = [...pick(CONTRAST_PAGES), ...pick(ERROR_ONLY_PAGES)];
+  for (const id of pages) {
+    for (let attempt = 1; ; attempt++) {
+      const before = all.length;
+      try { await measure(id); break; } catch (e) {
+        all.length = before;
+        const crashed = /crash|closed|detached/i.test(String(e && e.message));
+        if (!crashed || attempt >= 2) { errors.push({ theme, page: id, msg: `check failed: ${String(e && e.message).split('\n')[0]}` }); break; }
+        notes.push(`${theme} ${id}: the tab crashed (${String(e.message).split('\n')[0]}); measured again in a fresh tab`);
+        if (!(await open().catch(() => false))) { errors.push({ theme, page: id, msg: 'the app did not load again after a crash' }); break; }
+      }
+    }
+    if (p.isClosed()) break;
   }
   await browser.close();
 }
@@ -447,7 +475,7 @@ async function runTheme(theme) {
 for (const theme of THEMES) {
   if (!themeContextOptions(theme)) continue;
   const t = Date.now();
-  await runTheme(theme);
+  try { await runTheme(theme); } catch (e) { errors.push({ theme, page: 'run', msg: `check failed: ${String(e && e.message).split('\n')[0]}` }); }
   console.log(`contrast-check: ${theme} done in ${Math.round((Date.now() - t) / 1000)}s`);
 }
 
