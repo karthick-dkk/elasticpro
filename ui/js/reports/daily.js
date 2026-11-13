@@ -30,14 +30,13 @@ import { configErrorOf,
   lastMonths, breakdownPeriods, breakdownLabel, breakdownCsvRows, BREAKDOWN_CSV, shortDay,
   addDays, eventBytesOf, perDayEventBytes, eventVsAvgPct, eventYesterday, eventMonthSoFar, eventPeak,
   monthEventPeak, monthVsPrevious, daysInMonth, dayStatus, breakdownEventShares,
-  reportDailyCsvRows, reportMonthlyCsvRows, REPORT_DAILY_CSV, REPORT_MONTHLY_CSV,
+  reportDailyCsvRows, reportMonthlyCsvRows, REPORT_DAILY_CSV, REPORT_MONTHLY_CSV, recordEmptyWhy,
 } from '../core/volume-daily.js';
 import { forgetRecords } from './record.js';
-import { isWorkerDown } from '../core/reports.js';
+import { collectNow, collecting, collectOf, adopt, reportStatus, endText, dismiss, onCollect, FOLLOW_LIMIT_MS } from './collect.js';
 
-/** While a collection runs the record is asked for again this often, for at most this long. */
+/** While a collection runs the record is asked for again this often (reports/collect.js follows the run itself). */
 const POLL_MS = 3000;
-const POLL_LIMIT_MS = 5 * 60 * 1000;
 
 /** The days the chart and the table show. */
 const SHOWN_DAYS = 30;
@@ -71,6 +70,19 @@ let unsupported = false;
 let noStore = false;
 let redrawPage = () => {};
 let built = { sig: null, node: null };
+/** A source chosen earlier that the shown cluster has no index of: `{cluster, source}`. */
+let sourceGone = null;
+/** The cluster on screen, and what its last Collect now said when the section was last drawn. */
+let shownId = null;
+let collectSig = '';
+/** The note above the days, without the counts that change every poll: it redraws when that changes, not per poll. */
+const collectSigOf = (id) => JSON.stringify(collectOf(id), (k, v) => (['done', 'total', 'records'].includes(k) ? undefined : v));
+onCollect(() => {
+  const sig = collectSigOf(shownId);
+  if (sig === collectSig) return;
+  collectSig = sig;
+  if (alive()) bump();
+});
 
 /**
  * Forget every answer, but keep the choices. Called when the Reports page opens, so each
@@ -108,6 +120,8 @@ export function volumeSummary(c, { redraw, picker = null }) {
   if (layouts.state === 'unknown') loadLayouts();
   const sig = `${c.id}|${vs.rev}`;
   if (built.sig === sig && built.node) return built.node;
+  shownId = c.id;
+  collectSig = collectSigOf(c.id);
   const node = h('div.vs', vs.mode === 'daily' ? dailyView(c, picker) : monthlyView(c, picker));
   built = { sig, node };
   return node;
@@ -217,12 +231,27 @@ async function loadDaily(c, force) {
   // shows the loading state. The answer redraws.
   const ent = { loading: true, reply: had && had.reply, error: null };
   daily.set(key, ent);
-  const res = await volumeDaily(c.id, { days: recordDays(), avgDays: Math.min(180, Math.max(3, vs.avgDays)), source: vs.source });
+  const asked = vs.source;
+  const res = await volumeDaily(c.id, { days: recordDays(), avgDays: Math.min(180, Math.max(3, vs.avgDays)), source: asked });
   ent.loading = false;
   if (res.unsupported) { unsupported = true; bump(); return ent; }
   if (res.kind === 'no_store') { noStore = true; bump(); return ent; }
   if (!res.ok) ent.error = res.message || res.kind || 'no answer';
-  else { ent.reply = res; lastDaily.set(c.id, res); }
+  else {
+    reportStatus(c.id, res.status);
+    // A source chosen on another cluster (or another visit) that this cluster has no index of in
+    // these days: every row would be filtered away and the page read "nothing recorded" under a
+    // Source list that shows "All sources". Shown for all sources instead, saying so.
+    if (asked && asked === vs.source && !(res.sources || []).includes(asked)) {
+      sourceGone = { cluster: c.id, source: asked };
+      vs.source = '';
+      daily.delete(key);
+      bump();
+      return ent;
+    }
+    ent.reply = res;
+    lastDaily.set(c.id, res);
+  }
   bump();
   if (res.ok) afterDaily(c, res);
   return ent;
@@ -231,37 +260,36 @@ async function loadDaily(c, force) {
 /** A run already going is followed; desktop asks for one when the last is older than collectAt. */
 async function afterDaily(c, res) {
   const st = res.status || {};
-  if (st.running) { poll(c); return; }
+  if (st.running) { if (!collecting(c.id)) adopt([c.id]); poll(c); return; }
+  if (collecting(c.id)) { poll(c); return; }
   if (autoAsked.has(c.id)) return;
   autoAsked.add(c.id);
   if (!(await isHosted()) && collectDue(st)) refreshNow(c, { auto: true });
 }
 
 async function refreshNow(c, { auto = false } = {}) {
-  if (polls.has(c.id)) return;
-  const res = await volumeRun([c.id]);
+  if (collecting(c.id)) return;
+  const res = await collectNow([c.id]);
   if (res.unsupported) { unsupported = true; bump(); return; }
-  if (res.kind === 'no_store') { noStore = true; bump(); return; }
+  if (res.noStore) { noStore = true; bump(); return; }
   if (!res.ok) {
-    // config_unreadable: the core's message is the whole answer.
-    // The report worker not running is amber, in the core's words: collection resumes when it is back.
-    if (!auto) {
-      toast(res.kind === 'config_unreadable' || isWorkerDown(res) ? (res.message || res.kind) : `Could not start a collection: ${res.message || res.kind}`,
-        isWorkerDown(res) ? 'warn' : 'err', 6000);
-    }
+    // config_unreadable: the core's message is the whole answer. The report worker not
+    // running is amber, in the core's words: collection resumes when it is back.
+    if (!auto) toast(res.message, res.level === 'warn' ? 'warn' : 'err', 6000);
     return;
   }
-  if ((res.tooSoon || []).includes(c.id)) {
-    if (!auto) toast('This cluster was collected less than a minute ago. Try again in a minute.', 'warn', 5000, { key: 'vol-too-soon' });
-    return;
-  }
-  poll(c);
+  if (collecting(c.id)) poll(c);
+  else bump();
 }
 
-/** Follow a run until it ends, or five minutes pass, or the page is left. */
+/**
+ * While this cluster collects (reports/collect.js follows its run), its record is read again
+ * every POLL_MS: the days fill in as they are collected and the status says how far it is. The
+ * run is followed for as long as it runs; leaving the page stops only this re-reading.
+ */
 function poll(c) {
   if (polls.has(c.id)) return;
-  const p = { until: Date.now() + POLL_LIMIT_MS, timer: null };
+  const p = { until: Date.now() + FOLLOW_LIMIT_MS, timer: null };
   polls.set(c.id, p);
   bump();
   const stop = () => {
@@ -279,46 +307,91 @@ function poll(c) {
     if (!alive()) { stop(); return; }
     const ent = await loadDaily(c, true);
     const st = ent && ent.reply && ent.reply.status;
-    if (st && st.running && Date.now() < p.until && alive()) { p.timer = setTimeout(tick, POLL_MS); return; }
+    if ((collecting(c.id) || (st && st.running)) && Date.now() < p.until && alive()) { p.timer = setTimeout(tick, POLL_MS); return; }
+    // One last read once the run ended, so the days it wrote last are on screen.
+    if (st && !st.running) await loadDaily(c, true);
     stop();
   };
   p.timer = setTimeout(tick, 1000);
 }
 
-function progressText(st, polling) {
-  if (!st || !(st.running || polling)) return null;
-  const pr = st.progress;
+function progressText(st, c) {
+  const run = collectOf(c.id);
+  if (!(st && st.running) && !(run && run.phase === 'running')) return null;
+  const pr = st && st.progress;
   return pr && pr.total ? `Collecting ${num(pr.done)}/${num(pr.total)} days` : 'Collecting…';
 }
 
-function collectButton(c, reply) {
-  const polling = polls.has(c.id);
+function collectButton(c) {
+  const running = collecting(c.id);
   return h('button#vs-collect.btn.sm', {
-    type: 'button', disabled: polling || unsupported,
-    title: 'Collect this cluster\'s daily record now',
+    type: 'button', disabled: running || unsupported,
+    title: running ? 'A collection of this cluster is running on the server' : 'Collect this cluster\'s daily record now. It runs on the server: you can leave the page.',
     onclick: () => refreshNow(c),
-  }, '↻ Collect now');
+  }, running ? 'Collecting…' : '↻ Collect now');
+}
+
+/**
+ * The last Collect now of this cluster, in words: a refusal (too soon, unreachable, the stop),
+ * the run being followed, or how it ended — with Try again when it did not finish.
+ */
+function collectNote(c) {
+  const e = collectOf(c.id);
+  if (!e) return null;
+  const close = h('button.linkish', { type: 'button', 'aria-label': 'Close', title: 'Close', onclick: () => dismiss(c.id) }, '×');
+  if (e.phase === 'running') {
+    const line = (e.lines || []).find((l) => l.level === 'info');
+    return h('div.banner.info.vs-run', { role: 'status' }, h('div', line ? line.text : `Collecting (run ${String(e.runId || '').slice(0, 8)}).`));
+  }
+  const end = endText(e);
+  if (end) {
+    const again = end.level !== 'ok'
+      ? h('button.btn.sm', { type: 'button', onclick: () => refreshNow(c) }, 'Try again') : null;
+    return h(`div.banner.${end.level === 'ok' ? 'info' : end.level}.vs-run`, { role: 'status' },
+      h('div', h('div.ttl', end.title), end.text ? h('div.mono', end.text) : null), h('div.acts', again, close));
+  }
+  if (e.refused) return h(`div.banner.${e.refused.level}.vs-run`, { role: 'status' }, h('div', e.refused.text), h('div.acts', close));
+  return null;
 }
 
 function dailyToolbar(c, reply, picker) {
   const st = reply && reply.status;
   const sources = (reply && reply.sources) || [];
-  const prog = progressText(st, polls.has(c.id));
+  const prog = progressText(st, c);
   return h('div.toolbar.vs-bar',
     modeSeg(),
     picker,
     h('label.field', 'Source', select('vs-source', vs.source,
-      [['', 'All sources'], ...sources.map((s) => [s, s])], (v) => { vs.source = v; bump(); })),
+      [['', 'All sources'], ...sources.map((s) => [s, s])], (v) => { vs.source = v; sourceGone = null; bump(); })),
     h('label.field', 'Average over', select('vs-avg-days', vs.avgDays, AVG_CHOICES.map((d) => [d, `${d} days`]),
       (v) => { vs.avgDays = Number(v); bump(); })),
     h('div.vs-right',
       prog ? h('span.vs-progress', { role: 'status' }, prog) : null,
-      collectButton(c, reply),
+      collectButton(c),
       h('button.btn.sm.primary', {
         type: 'button', disabled: !reply,
         title: 'The days as CSV, one row per index day; every size is event_logsize',
         onclick: () => exportDaily(c, reply),
       }, 'Export CSV')));
+}
+
+/** The source chosen before had no index on this cluster in these days: said, once, above the days. */
+function sourceNote(c) {
+  if (!sourceGone || sourceGone.cluster !== c.id) return null;
+  return h('div.banner.info.vs-run', { role: 'status' },
+    h('div', `Source ${sourceGone.source} has no index on ${c.name} in these days: showing all sources.`),
+    h('div.acts', h('button.linkish', { type: 'button', 'aria-label': 'Close', title: 'Close', onclick: () => { sourceGone = null; bump(); } }, '×')));
+}
+
+/** An empty record, saying why (core/volume-daily.js recordEmptyWhy) and what would fill it. */
+function emptyWhy(c, why) {
+  const actions = [];
+  if (why.fix === 'collect' && !collecting(c.id)) actions.push(h('button.btn.sm', { type: 'button', onclick: () => refreshNow(c) }, '↻ Collect now'));
+  if (why.fix === 'source') actions.push(h('button.btn.sm', { type: 'button', onclick: () => { vs.source = ''; bump(); } }, 'All sources'));
+  if (why.fix === 'pattern' || why.fix === 'eventSize' || why.fix === 'collect') {
+    actions.push(h('button.btn.sm', { type: 'button', onclick: () => openVolumeFields(why.fix === 'eventSize' ? 'eventSize' : 'indexFormat') }, 'Config-Management › Reports'));
+  }
+  return empty(why.reason, { detail: why.detail, actions });
 }
 
 function dailyView(c, picker) {
@@ -327,23 +400,21 @@ function dailyView(c, picker) {
   const ent = daily.get(dkey(c));
   if (!ent) loadDaily(c);
   const reply = (ent && ent.reply) || lastDaily.get(c.id) || null;
-  const out = [dailyToolbar(c, reply, picker)];
+  const out = [dailyToolbar(c, reply, picker), collectNote(c), sourceNote(c)];
+  // A run followed while the page was away: read the record along with it again (after this draw).
+  if (collecting(c.id) && !polls.has(c.id)) setTimeout(() => poll(c), 0);
   if (reply) out.push(configErrorBanner(configErrorOf(reply)));
   if (ent && ent.error && !reply) return [...out, unreadable('The daily volume record', ent.error)];
   if (!reply) return [...out, h('div.tbl-empty', 'Reading the daily record…')];
   const st = reply.status || {};
-  out.push(historyBanner(reply));
-  if (st.lastError) out.push(h('div.banner.warn', h('div', h('div.ttl', 'The last collection did not finish'), h('div.mono', String(st.lastError)))));
-  if (ent && ent.error) out.push(h('div.banner.err', h('div', h('div.ttl', 'Could not read the daily record'), h('div.mono', ent.error))));
   const rows = reply.days || [];
-  if (!rows.length) {
-    return [...out, empty('Nothing recorded yet for this cluster.', {
-      detail: Math.max(Number(reply.skippedCount) || 0, (reply.skipped || []).length)
-        ? `No index name fits the index pattern; ${num(Math.max(Number(reply.skippedCount) || 0, reply.skipped.length))} were skipped (for example ${(reply.skipped || []).slice(0, 3).join(', ')}).`
-        : 'A collection fills this in: press Collect now.',
-      actions: [h('button.btn.sm', { type: 'button', onclick: () => openVolumeFields('indexFormat') }, 'Config-Management › Reports')],
-    })];
+  const why = rows.length ? null : recordEmptyWhy(reply, { source: vs.source });
+  out.push(historyBanner(reply));
+  if (st.lastError && !(why && why.detail && why.detail.startsWith(String(st.lastError)))) {
+    out.push(h('div.banner.warn', h('div', h('div.ttl', 'The last collection did not finish'), h('div.mono', String(st.lastError)))));
   }
+  if (ent && ent.error) out.push(h('div.banner.err', h('div', h('div.ttl', 'Could not read the daily record'), h('div.mono', ent.error))));
+  if (why) return [...out, emptyWhy(c, why)];
   out.push(dailyCards(reply), dailyChart(reply), dailyTable(c, reply));
   return out;
 }
@@ -546,11 +617,14 @@ function monthRows(reply) {
 }
 
 function monthlyToolbar(c, ent, picker) {
+  const last = lastDaily.get(c.id);
+  const prog = progressText(last && last.status, c);
   return h('div.toolbar.vs-bar',
     modeSeg(),
     picker,
     h('div.vs-right',
-      collectButton(c, null),
+      prog ? h('span.vs-progress', { role: 'status' }, prog) : null,
+      collectButton(c),
       h('button.btn.sm.primary', {
         type: 'button', disabled: !(ent && ent.reply),
         title: 'The months as CSV, one row per month; every size is event_logsize',
@@ -564,7 +638,9 @@ function monthlyView(c, picker) {
   const ent = monthly.get(mkey(c));
   if (!ent) loadMonthly(c);
   const reply = ent && ent.reply;
-  const out = [monthlyToolbar(c, ent, picker)];
+  const out = [monthlyToolbar(c, ent, picker), collectNote(c)];
+  // A run followed while the page was away: read the record along with it again (after this draw).
+  if (collecting(c.id) && !polls.has(c.id)) setTimeout(() => poll(c), 0);
   if (reply) out.push(configErrorBanner(configErrorOf(reply)));
   if (ent && ent.error) return [...out, unreadable('The monthly volume record', ent.error)];
   if (!reply) return [...out, h('div.tbl-empty', 'Reading the monthly record…')];

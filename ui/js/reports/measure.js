@@ -10,7 +10,7 @@
  */
 
 import { h } from '../lib/dom.js';
-import { bytes, num, ago, plural, toCsv, download } from '../lib/fmt.js';
+import { bytes, num, ago, toCsv, download } from '../lib/fmt.js';
 import { card } from '../pages/common.js';
 import { sortTh, tableSort } from '../lib/table-sort.js';
 import { toast } from '../ui/menu.js';
@@ -131,7 +131,9 @@ export function measureSection(ctx) {
     onclick: async () => {
       const res = await runCollection(ids);
       if (!res.ok) { toast(res.message, res.level || 'err', 6000); return; }
-      if (res.tooSoon && res.tooSoon.length) toast(`${plural(res.tooSoon.length, 'cluster')} collected less than a minute ago: asked again in a minute.`, 'warn', 5000, { key: 'rp-too-soon' });
+      // Too soon, unreachable, the stop, already collecting: said plainly (reports/collect.js runAnswer).
+      const said = (res.lines || []).filter((l) => l.level === 'warn');
+      if (said.length) toast(said.map((l) => l.text).join(' '), 'warn', 6000, { key: 'rp-collect' });
     },
   }, running ? 'Measuring…' : '↻ Measure size');
 

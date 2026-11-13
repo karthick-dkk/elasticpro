@@ -145,9 +145,21 @@ defaults:
   back (`lastScheduledDay` is restored), so the first tick after the stop runs that cluster
   again; a scheduled run that completed, or failed for any other reason, counts as today's.
   The day is marked before the run so a crash is not repeated by every restart.
-  At most 2 clusters at once, one request at a time per cluster, 60 s per request,
+  At most 2 clusters at once, one request at a time per cluster, 60 s for the listing and
+  `_field_caps`, 110 s for each day's search and the time split's histogram (`SEARCH_TIMEOUT_MS`;
+  a big day behind a jump host takes a minute and more, under the gate's 115 s ceiling),
   `gate::Class::Background`, origin `volume-daily` in the request log (a report job's
   collection: `volume-report`). Searches only: works under read-only.
+- **Tried again in the run**: a request that timed out or that a proxy or jump host turned
+  away (502, 503, 504) is asked again after 3 s and after 10 s — three tries in all, the stop
+  and a person's cancel asked before each (`collect::retryable`, `RETRY_WAITS_MS`). A failure
+  after more than one try says how many ("… (3 tries)"). A 429 or a full search queue is not
+  pressed again: that cluster is busy, and its run is deferred until it eases (docs/JOBS.md).
+- **Never holds a request open**: `VOLUME_RUN` starts the clusters in the background (the
+  report worker, on hosted) and answers at once — `{started, already, tooSoon, skipped,
+  stopped, runId}` — so no proxy timeout (nginx's 120 s) applies to a collection, however long
+  it runs. The page follows the run in the run log (`JOBS_LIST {jobId: "volume.daily"}`) and the
+  cluster's `status.progress` (docs/REPORTS.md "Collect now").
 - **Requests per run, per cluster**: one `_cat/indices`; when some index is split by time,
   one `_field_caps` and one `date_histogram` search; else one `_field_caps` when any day is
   to be searched; then one search per unfinished day (dated and time-split parts in the same
@@ -346,7 +358,7 @@ config file cannot be read, the read-only replies (`VOLUME_SETTINGS`, `VOLUME_DA
 | `VOLUME_SETTINGS` | User | `{clusterId?}` | `{settings, patternSource:"format"\|"pattern"\|"default", managed:[names], source:"file"\|"message"\|"builtin", overrides:[clusterIds]}` |
 | `VOLUME_FIELDS_CHECK` | User | `{clusterId}` | `{glob, patternSource, dayFrom, indices:{match, days, skipped:[names], skippedCount, dated, timeSplit}, timeField:{field, used, resolved, type\|null, note}, rows:[{key, tried:[..], resolved\|null, type\|null, note}]}` |
 | `VOLUME_PATTERN_CHECK` | Admin (a limited admin: only clusters they see) | `{clusterId, indexPattern, dayFrom?:"name"\|"time"}` | `{matched, dated, undated, datedExample\|null, undatedExample\|null, clusterId, indexPattern, dayFrom}`; one `_cat/indices/<pattern>?format=json&h=index`, class `interactive`, origin `volume-pattern-check`, as the caller; matching nothing is `ok: true, matched: 0`; an unknown cluster or an Elasticsearch error is `ok: false` with `message` |
-| `VOLUME_DAILY` | User | `{clusterId, days?:14..400, avgDays?:3..180, source?}` | `{settings, status, cards, days:[DailyRow], totals, sources:[names], skipped:[names], matched, timeSplit}` |
+| `VOLUME_DAILY` | User | `{clusterId, days?:14..400, avgDays?:3..180, source?}` | `{settings, status, cards, days:[DailyRow], totals, sources:[names], skipped:[names], matched, timeSplit, newestDay}`; `newestDay` is the local record's newest day (`YYYY-MM-DD`, null when it has none), so a window with no row can say where the record ends |
 | `VOLUME_MONTHLY` | User | `{clusterId, months?:1..36}` | `{settings, status, avgPerMonth, months:[MonthRow]}` |
 | `VOLUME_BREAKDOWN` | User | `{clusterId, field, from, to, top?}` | `{field, resolved, rows:[..], totals}` |
 | `VOLUME_MONTHLY_ALL` | User | `{months?}` | `{clusters:[{clusterId, name, months:[MonthRow]}]}` |

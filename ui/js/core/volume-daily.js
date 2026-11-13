@@ -364,6 +364,58 @@ export const eventBytesOf = (d) => (d && typeof d.eventBytes === 'number' && Num
 const rowsOf = (record) => ((record && Array.isArray(record.days)) ? record.days : []).filter((d) => d && typeof d.day === 'string');
 
 /**
+ * Why a cluster's record shows no figure, from the VOLUME_DAILY answer itself: `{reason,
+ * detail, fix}` (`fix`: 'pattern' | 'eventSize' | 'collect' | 'source' | null), or null when it
+ * has something to show. Unknown is not zero — every empty Daily and Overview says which of
+ * these it is, never just "nothing". One definition for both (and their exports' notes).
+ *
+ *   rows:   the reply has no day in its window
+ *   event:  (opts.event) it has days, but none measured event_logsize
+ */
+export function recordEmptyWhy(reply, { source = '', event = false } = {}) {
+  if (!reply) return null;
+  const st = reply.status || {};
+  const rows = rowsOf(reply);
+  const days = (reply.window && reply.window.days) || null;
+  const span = days ? `the last ${days} days` : 'these days';
+  const field = (reply.settings && Array.isArray(reply.settings.eventSize) && reply.settings.eventSize[0]) || 'event_logsize';
+  if (rows.length) {
+    if (!event || rows.some((d) => eventBytesOf(d) !== null)) return null;
+    return { reason: `${field} is not measured on this cluster.`, fix: 'eventSize',
+      detail: `The record has ${rows.length} ${rows.length === 1 ? 'day' : 'days'} in ${span}, but no ${field} in any of them: the field is not a number in the mapping. Set the Event size field in Config-Management › Reports.` };
+  }
+  if (st.running) {
+    const p = st.progress;
+    return { reason: 'A collection is running for this cluster.', fix: null,
+      detail: p && p.total ? `${p.done} of ${p.total} days searched so far; the days appear as they are collected.` : 'The days appear as they are collected.' };
+  }
+  if (source) {
+    return { reason: `No index of source ${source} in ${span}.`, fix: 'source',
+      detail: 'Choose All sources, or another source: the Source list names the ones this cluster has in these days.' };
+  }
+  if (st.lastRunAt === null || st.lastRunAt === undefined) {
+    return { reason: 'This cluster has never been collected.', fix: 'collect',
+      detail: st.collectAt ? `The daily collection runs at ${st.collectAt}; Collect now asks for it at once.` : 'Collect now asks for it at once.' };
+  }
+  const skipped = Math.max(Number(reply.skippedCount) || 0, (reply.skipped || []).length);
+  if (st.lastError) {
+    return { reason: 'The last collection did not finish.', fix: 'collect',
+      detail: `${st.lastError}${reply.newestDay ? ` · the record ends on ${reply.newestDay}` : ''}` };
+  }
+  if (Number(reply.matched) === 0) {
+    return { reason: 'No index matches the index pattern.', fix: 'pattern',
+      detail: skipped
+        ? `${skipped} ${skipped === 1 ? 'index was' : 'indices were'} skipped because the name does not fit (for example ${(reply.skipped || []).slice(0, 3).join(', ')}). Set the index pattern in Config-Management › Reports.`
+        : 'The cluster has no index the pattern names. Set the index pattern in Config-Management › Reports.' };
+  }
+  if (reply.newestDay) {
+    return { reason: `No index day in ${span}: the record ends on ${reply.newestDay}.`, fix: 'pattern',
+      detail: `Every index the pattern matches is dated ${reply.newestDay} or earlier. Newer indices under another name need the index pattern changed in Config-Management › Reports.` };
+  }
+  return { reason: 'Nothing recorded yet for this cluster.', fix: 'collect', detail: 'A collection fills this in: press Collect now.' };
+}
+
+/**
  * The `days` calendar days before `before` (default: today, UTC), and the mean event_logsize
  * of those that measured it. `{value|null, measured, of, from, to}`: `measured` of `of` days
  * carried a figure. Today is never counted (it is still filling up).

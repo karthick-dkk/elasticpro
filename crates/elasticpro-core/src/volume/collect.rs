@@ -243,6 +243,32 @@ impl Indices {
 
 /* ------------------------------------ requests ------------------------------------ */
 
+/// How long one aggregation over a day's documents (the per-day search, the time split's
+/// histogram) may take. A big day behind a jump host takes a minute and more; at the 60 s the
+/// listing has, such a day failed on every run ("asked again on the next run") and Collect now
+/// never got past it. Under the gate's ceiling (`ELASTICPRO_ES_MAX_TIMEOUT_MS`, 115 s), which
+/// still clamps it.
+pub const SEARCH_TIMEOUT_MS: u64 = 110_000;
+
+/// The waits before the second and the third try of a request that timed out or that a
+/// proxy turned away (`retryable`). Three tries in all; the stop and a person's cancel are
+/// asked before each.
+pub const RETRY_WAITS_MS: [u64; 2] = [3_000, 10_000];
+
+/// Whether a failed answer may come out differently if asked again shortly: no answer in
+/// time, or a proxy or jump host between us and the cluster turning it away (502, 503, 504).
+/// Not a 429 or a full search queue: that is the cluster saying it is busy, and a busy
+/// cluster's run is deferred until it eases (docs/JOBS.md "Busy clusters"), not pressed
+/// again. Nor anything else — a bad request, a refusal, an unknown index will not pass.
+pub fn retryable(res: &Value) -> bool {
+    if res.get("ok").and_then(Value::as_bool) == Some(true) {
+        return false;
+    }
+    let kind = res.get("kind").and_then(Value::as_str).unwrap_or("");
+    let status = res.get("status").and_then(Value::as_u64).unwrap_or(0);
+    kind == "timeout" || matches!(status, 502..=504)
+}
+
 fn req(cluster: &str, method: &str, path: String, body: Option<String>) -> EsRequest {
     EsRequest {
         cluster_id: cluster.to_string(),
@@ -326,7 +352,9 @@ pub fn histogram_request(cluster: &str, ind: &Indices, split: &[String], from: N
         "aggs": { "days": { "date_histogram": { "field": ind.time_field, "calendar_interval": "1d", "time_zone": "UTC",
                                                 "min_doc_count": 1, "format": "yyyy-MM-dd" } } },
     });
-    req(cluster, "POST", format!("/{}/{SEARCH_QS}", ind.expr()), Some(body.to_string()))
+    let mut r = req(cluster, "POST", format!("/{}/{SEARCH_QS}", ind.expr()), Some(body.to_string()));
+    r.timeout_ms = Some(SEARCH_TIMEOUT_MS);
+    r
 }
 
 /// The days a histogram answer has documents on.
@@ -356,14 +384,17 @@ pub fn day_query(dated: &[&str], split: &[&str], time_field: &str, d: NaiveDate)
 /// indices in the path (`logstash-*-2026.10.20`), as it always has; otherwise it names the
 /// pattern and says in the query which indices, and for the time-split ones which day.
 pub fn search_request(cluster: &str, ind: &Indices, d: NaiveDate, group: &DayGroup, body: &Value) -> EsRequest {
-    if let (Some(f), true) = (ind.legacy_format(), group.time_split.is_empty()) {
-        return req(cluster, "POST", format!("/{}/{SEARCH_QS}", f.for_day(d)), Some(body.to_string()));
-    }
-    let dated: Vec<&str> = group.index_source.keys().map(String::as_str).collect();
-    let split: Vec<&str> = group.time_split.keys().map(String::as_str).collect();
-    let mut b = body.clone();
-    b["query"] = day_query(&dated, &split, &ind.time_field, d);
-    req(cluster, "POST", format!("/{}/{SEARCH_QS}", ind.expr()), Some(b.to_string()))
+    let mut r = if let (Some(f), true) = (ind.legacy_format(), group.time_split.is_empty()) {
+        req(cluster, "POST", format!("/{}/{SEARCH_QS}", f.for_day(d)), Some(body.to_string()))
+    } else {
+        let dated: Vec<&str> = group.index_source.keys().map(String::as_str).collect();
+        let split: Vec<&str> = group.time_split.keys().map(String::as_str).collect();
+        let mut b = body.clone();
+        b["query"] = day_query(&dated, &split, &ind.time_field, d);
+        req(cluster, "POST", format!("/{}/{SEARCH_QS}", ind.expr()), Some(b.to_string()))
+    };
+    r.timeout_ms = Some(SEARCH_TIMEOUT_MS);
+    r
 }
 
 /* ------------------------------------ _cat/indices ------------------------------------ */
@@ -1271,6 +1302,24 @@ mod pattern_tests {
         assert_eq!(r.path, "/logstash-*-2026.10.20/_search?ignore_unavailable=true&allow_no_indices=true");
         assert_eq!(r.body.as_deref(), Some(r#"{"size":0}"#), "no query added");
         assert_eq!((r.origin.as_deref(), r.class), (Some("volume-daily"), crate::gate::Class::Background));
+        // A day's aggregation may take longer than the listing: under the gate's 115 s ceiling.
+        assert_eq!(r.timeout_ms, Some(SEARCH_TIMEOUT_MS));
+        assert_eq!(cat_request("c", &f).timeout_ms, Some(60_000));
+        assert!(SEARCH_TIMEOUT_MS > 60_000 && SEARCH_TIMEOUT_MS < 115_000);
+    }
+
+    #[test]
+    fn only_a_failure_that_may_pass_is_tried_again() {
+        for v in [json!({ "ok": false, "status": 0, "kind": "timeout" }), json!({ "ok": false, "status": 502 }),
+                  json!({ "ok": false, "status": 503 }), json!({ "ok": false, "status": 504 })] {
+            assert!(retryable(&v), "{v}");
+        }
+        // A busy cluster is deferred, not pressed again (docs/JOBS.md "Busy clusters").
+        for v in [json!({ "ok": false, "status": 429 }), json!({ "ok": false, "kind": "overloaded" }),
+                  json!({ "ok": true, "status": 200 }), json!({ "ok": false, "status": 400 }), json!({ "ok": false, "status": 404 }),
+                  json!({ "ok": false, "status": 0, "kind": "refused" }), json!({ "ok": false, "kind": "blocked_stopped" }), json!({})] {
+            assert!(!retryable(&v), "{v}");
+        }
     }
 
     #[test]

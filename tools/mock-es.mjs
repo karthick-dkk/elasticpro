@@ -14,6 +14,11 @@
  *   MOCK_JITTER_MS    …plus up to this much more, at random (default 0)
  *   MOCK_INDEX_COUNT  _cat/indices lists this many more indices (a big cluster's answer)
  *   MOCK_429_RATE     this fraction of requests (0..1) is answered 429 Too Many Requests
+ *   MOCK_SEARCH_DELAY_MS  every _search waits this long: `45000`, or a range `30000-90000`
+ *                     (each search a random time in it) — a slow cluster behind a jump host,
+ *                     one daily-volume day per search. Nothing else is slowed.
+ *   MOCK_VOLUME_DAYS  days of logstash-<source>-<day> indices (default 45), so a slow
+ *                     collection has an end a test can wait for
  *   MOCK_ILM_UNMANAGED  comma-separated index names left without an ILM policy, so the
  *                       ILM pill's red "N of M open log indices have no policy" shows
  * Each instance counts the requests it is holding at once; GET /_mock/stats answers
@@ -60,6 +65,12 @@ const LATENCY_MS = Math.max(0, Number(process.env.MOCK_LATENCY_MS) || 0);
 const JITTER_MS = Math.max(0, Number(process.env.MOCK_JITTER_MS) || 0);
 const INDEX_COUNT = Math.max(0, Number(process.env.MOCK_INDEX_COUNT) || 0);
 const RATE_429 = Math.min(1, Math.max(0, Number(process.env.MOCK_429_RATE) || 0));
+const SEARCH_DELAY = (() => {
+  const m = /^\s*(\d+)(?:\s*-\s*(\d+))?\s*$/.exec(String(process.env.MOCK_SEARCH_DELAY_MS || ''));
+  if (!m) return null;
+  const lo = Number(m[1]);
+  return { lo, hi: Math.max(lo, Number(m[2] ?? m[1])) };
+})();
 // Identity, so several instances can stand in for a fleet rather than for one cluster.
 // Without this every instance calls itself "mock" with uuid "mock-uuid", and anything
 // that keys clusters by uuid — which the fleet cache does — treats ten of them as one.
@@ -99,7 +110,7 @@ const INDICES = SCALE ? Array.from({ length: SCALE }, (_, i) => index(scaledName
  * Listed by _cat/indices and searched by the per-day `_search` only — the five-index
  * fixture above is what shards, ILM and snapshots keep reading.
  */
-const VOLUME_DAYS = 45;
+const VOLUME_DAYS = Math.max(1, Number(process.env.MOCK_VOLUME_DAYS) || 45);
 const VOLUME_SOURCES = { acme: { bytes: 6e9, docs: 4.2e6 }, beta: { bytes: 2.1e9, docs: 1.6e6 } };
 const ymdUtc = (n) => new Date(Date.now() - n * DAY).toISOString().slice(0, 10);
 /** 0.8 .. 1.2, the same every time for the same day and salt. */
@@ -826,7 +837,8 @@ http.createServer((req, res) => {
     const release = () => { if (held) { held = false; gauge.now--; all.now--; } };
     res.on('finish', release);
     res.on('close', release);
-    const delay = LATENCY_MS + (JITTER_MS ? Math.random() * JITTER_MS : 0);
+    const slowSearch = SEARCH_DELAY && /\/_search(\?|$)/.test(url) ? SEARCH_DELAY.lo + Math.random() * (SEARCH_DELAY.hi - SEARCH_DELAY.lo) : 0;
+    const delay = LATENCY_MS + (JITTER_MS ? Math.random() * JITTER_MS : 0) + slowSearch;
     const answer = () => handle(req, res, url, body, port);
     if (RATE_429 && Math.random() < RATE_429) {
       gauge.rejected429++;

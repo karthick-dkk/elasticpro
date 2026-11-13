@@ -459,6 +459,10 @@ impl Core {
             o.insert("skippedCount".into(), json!(st.skipped_count));
             o.insert("matched".into(), json!(st.matched));
             o.insert("timeSplit".into(), json!(st.time_split));
+            // The local record's newest day: a window with no row can then say the record ends
+            // before it, rather than that nothing was ever recorded (unknown is not zero).
+            let newest = store.months(id).iter().rev().find_map(|m| store.read_month(id, m).days.keys().next_back().cloned());
+            o.insert("newestDay".into(), json!(newest));
         }
         out
     }
@@ -936,6 +940,31 @@ impl Core {
     ///
     /// Ending at the stop is `Ok` with `interrupted` set, whether before anything was sent
     /// or with days left; so is a request that failed while the stop came on.
+    /// One request of a collection, tried again while its failure may pass
+    /// (`collect::retryable`: no answer in time, 429/502/503/504): three tries in all,
+    /// `RETRY_WAITS_MS` apart, the stop (and a person's cancel) asked before each. The last
+    /// try's answer; a failure after more than one try says how many in its message.
+    async fn volume_req(self: &Arc<Self>, r: crate::http::EsRequest, stop: &(dyn Fn() -> Option<String> + Send + Sync)) -> Value {
+        let mut res = self.es_req(r.clone()).await;
+        let mut tries = 1;
+        for wait in collect::RETRY_WAITS_MS {
+            if !collect::retryable(&res) || stop().is_some() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(wait)).await;
+            if stop().is_some() {
+                break;
+            }
+            res = self.es_req(r.clone()).await;
+            tries += 1;
+        }
+        if tries > 1 && res.get("ok").and_then(Value::as_bool) != Some(true) {
+            let m = res.get("message").and_then(Value::as_str).unwrap_or("request failed").to_string();
+            res["message"] = json!(format!("{m} ({tries} tries)"));
+        }
+        res
+    }
+
     pub(crate) async fn volume_collect(self: &Arc<Self>, id: &str, s: &VolumeSettings, opts: &CollectOpts<'_>) -> Result<Collected, String> {
         let out = self.volume_collect_days(id, s, opts).await?;
         // The days it changed, to the history store's queue — only while its gates are open;
@@ -963,7 +992,7 @@ impl Core {
         let mut out = Collected::default();
 
         // 1. Sizes per day, from the names; the indices split by time apart.
-        let cat = self.es_req(tag(collect::cat_request(id, &ind))).await;
+        let cat = self.volume_req(tag(collect::cat_request(id, &ind)), opts.stop).await;
         let Some(cat_json) = collect::cat_rows(&cat) else {
             let (e, interrupted) = match (opts.stop)() {
                 Some(reason) => (format!("{reason} before _cat/indices answered"), Some(reason)),
@@ -993,7 +1022,7 @@ impl Core {
             if open.is_empty() {
                 Split::Known { days: Default::default(), complete: false }
             } else {
-                let fc = self.es_req(tag(collect::field_caps_request(id, &ind, s, true))).await;
+                let fc = self.volume_req(tag(collect::field_caps_request(id, &ind, s, true)), opts.stop).await;
                 if ok(&fc) {
                     let fcj = fc.get("json").unwrap_or(&Value::Null);
                     rows = Some(collect::resolve_rows(fcj, s));
@@ -1003,7 +1032,7 @@ impl Core {
                             let (from, to) = opts.period.unwrap_or_else(|| {
                                 (NaiveDate::parse_from_str(&format!("{oldest}-01"), "%Y-%m-%d").unwrap_or(today), today)
                             });
-                            let h = self.es_req(tag(collect::histogram_request(id, &ind, &open, from, to.min(today)))).await;
+                            let h = self.volume_req(tag(collect::histogram_request(id, &ind, &open, from, to.min(today))), opts.stop).await;
                             if ok(&h) {
                                 let res = h.get("json").unwrap_or(&Value::Null);
                                 match collect::partial_answer(res) {
@@ -1086,7 +1115,7 @@ impl Core {
         } else {
             let fc = match &fc_failed {
                 Some(_) => Value::Null,
-                None => self.es_req(tag(collect::field_caps_request(id, &ind, s, time))).await,
+                None => self.volume_req(tag(collect::field_caps_request(id, &ind, s, time)), opts.stop).await,
             };
             if ok(&fc) {
                 Some(collect::resolve_rows(fc.get("json").unwrap_or(&Value::Null), s))
@@ -1140,7 +1169,7 @@ impl Core {
                         break 'months;
                     }
                     let group = listing.group_for(date, &split);
-                    let res = self.es_req(tag(collect::search_request(id, &ind, date, &group, &body))).await;
+                    let res = self.volume_req(tag(collect::search_request(id, &ind, date, &group, &body)), opts.stop).await;
                     if !ok(&res) {
                         // Refused or cut off because the stop came on: not this day's fault.
                         if let Some(reason) = (opts.stop)() {

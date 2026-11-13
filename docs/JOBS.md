@@ -241,7 +241,10 @@ their clusters and dates (`JOB_CREATE {once: true}`), nor the Zabbix push, which
 anyway (`bad_request`).
 
 The run is begun before the answer (`runId`) and the job's own code adopts it; a timer's tick
-never does, so the timer and a person do not share a run. Code that found nothing to do ends the
+never does, so the timer and a person do not share a run. Nothing waits for the work: the
+answer comes back at once and the run is followed in `JOBS_LIST` — what Reports' *Collect now*
+does with the `runId` `VOLUME_RUN` answers (docs/REPORTS.md), polling `JOBS_LIST {jobId:
+"volume.daily"}` every 3 s until the run ends. Code that found nothing to do ends the
 run `skipped`. The old buttons — `DELAY_SINK_RUN`, `HOUSEKEEPING_RUN`, `BACKUP_CREATE`,
 `VOLUME_RUN`, `REPORT_SEND_NOW`, a hosts *Collect again* — keep working and are recorded the same
 way, `manual:<user>`, through the same one-run-per-job guard.
