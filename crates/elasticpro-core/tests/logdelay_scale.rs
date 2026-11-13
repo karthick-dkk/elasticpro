@@ -25,7 +25,7 @@ const DEVICES: usize = 25_000;
 /// Device `i` (1-based), as tools/mock-es.mjs MOCK_LD_DEVICES makes it: minutes late, or
 /// `None` for no event time.
 fn minutes(i: usize) -> Option<f64> {
-    if i % 97 == 0 { Some(-37.0) } else if i % 50 == 0 { Some(95.0) } else if i % 20 == 0 { Some(41.0) } else if i % 33 == 0 { None } else { Some((i % 7) as f64) }
+    if i.is_multiple_of(97) { Some(-37.0) } else if i.is_multiple_of(50) { Some(95.0) } else if i.is_multiple_of(20) { Some(41.0) } else if i.is_multiple_of(33) { None } else { Some((i % 7) as f64) }
 }
 
 fn name(i: usize) -> String {
