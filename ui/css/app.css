@@ -1600,7 +1600,7 @@ table.cl-tbl > tbody > tr.cl-detail-row > td { text-align: left; }
 .cl-mini i { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 3px; background: var(--chart-good); }
 .cl-mini i.low { background: var(--chart-warn); }
 .cl-mini i.high { background: var(--chart-bad); }
-.cl-mini i.over { background: var(--chart-warn); }   /* heap past the High alert's line (overview.js heapLevel) */
+.cl-mini i.over { background: var(--high); }   /* heap past the High alert's line (overview.js heapLevel): orange, a chart colour already */
 .cl-star { color: var(--warning-ink); }
 .cl-roles { display: inline-flex; gap: 3px; flex-wrap: wrap; justify-content: center; }
 .cl-role {
