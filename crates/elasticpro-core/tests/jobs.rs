@@ -123,7 +123,10 @@ async fn a_manual_delay_run_while_one_runs_is_already_running_with_its_id() {
     let current = &job(&open, "logdelay.measure")["state"]["current"];
     assert_eq!(busy["runId"], current["id"], "the answer names the run that is going: {open}");
     assert_eq!(current["status"], json!("running"));
-    assert_eq!(current["progress"], Value::Null, "a plain run counts nothing: progress is not known, not 0");
+    // The measurement counts its clusters (docs/LOGDELAY.md "Fetch now"): 0 of 1 read while the
+    // first page is at the cluster, and no device read yet.
+    assert_eq!((current["done"].clone(), current["total"].clone(), current["progress"].clone()), (json!(0), json!(1), json!(0)), "{current}");
+    assert_eq!(current["records"], Value::Null, "nothing read yet: not known, not 0");
 
     let done = first.await.unwrap();
     assert_eq!(done["ok"], json!(true), "{done}");
