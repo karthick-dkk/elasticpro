@@ -1094,14 +1094,19 @@ comparison ignored default ports, `https://es` and `https://es:443` were two clu
 client's own parser (`reqwest::Url`): `scheme://host:port[/path]`, scheme and host lower-case, the
 scheme's default port written out (http 80, https 443), the path as written without a trailing slash.
 `https://ES.example/` = `https://es.example:443`; `http://es:9200` ≠ `https://es:9200`; `/ES1` ≠ `/es1`.
-**An address that is not plain has no identity and matches nothing**: one with `user:password@`, a
+**A Zabbix address that is not plain has no identity and matches nothing**: one with `user:password@`, a
 backslash, whitespace or a control character, a query or a fragment — texts a hand-written splitter
 and the HTTP client could read as different hosts. A Zabbix host whose macros make one is not a
 cluster (listed under *Hosts not counted as clusters* with why). The pages keep no copy: every Zabbix
 row and every held entry carries `identity`, and the pages decide nothing by address. **The identity
-decides conflicts only, never where a credential goes**: *Use ElasticPro credentials* still lends a
-config cluster's credential only to a Zabbix host at exactly the same address text, and a cluster's own
-kept credential stays bound to its destination string (`destination_of`), both unchanged.
+is also the one key for *Use ElasticPro credentials***, which lends a config cluster's credential to a
+Zabbix host **only when an administrator let that host take the cluster over (Update)** and both are at
+one identity (`zbx_conflicts::lent_credential`) — never because two addresses compare equal, never to a
+host held, skipped or kept beside the cluster (*Keep both*: the Zabbix one signs in with its own or the
+shared credential), never to an address with no identity. A config cluster's address is read the same
+way without the `user:password@`, query or fragment it may carry (`trusted_identity`), so a credential
+in the file's URL never hides a conflict from the review. A cluster's own kept credential stays bound
+to its destination string (`destination_of`), unchanged.
 
 **When a host is held.** Its identity is that of a cluster that exists already:
 

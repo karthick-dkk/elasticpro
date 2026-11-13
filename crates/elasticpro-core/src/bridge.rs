@@ -4995,7 +4995,7 @@ impl Core {
     /// config file's (the ids its pages give them), then any primed cluster the file does not
     /// name. Zabbix's own (`zbx-…`) are not among them.
     async fn config_known(&self) -> Vec<crate::zbx_conflicts::Known> {
-        use crate::zbx_conflicts::{legacy_key, match_key, without_credential, Known};
+        use crate::zbx_conflicts::{config_key, legacy_key, without_credential, Known};
         let mut out: Vec<Known> = vec![];
         if let Ok(raw) = self.read_config_file().await {
             let list = raw.get("clusters").or_else(|| raw.get("hosts")).and_then(Value::as_array).cloned().unwrap_or_default();
@@ -5007,7 +5007,7 @@ impl Core {
                 }
                 let via = crate::cluster_save::route_of(c);
                 out.push(Known {
-                    kind: "config", id: id.clone(), host_id: String::new(), identity: match_key(url, &format!("config:{id}")), legacy: legacy_key(url),
+                    kind: "config", id: id.clone(), host_id: String::new(), identity: config_key(url, &format!("config:{id}")), legacy: legacy_key(url),
                     values: json!({ "name": c.get("name").and_then(Value::as_str).unwrap_or(&id), "url": without_credential(url),
                                     "via": if via.is_empty() { Value::Null } else { json!(via) },
                                     "tls": c.get("tls").cloned().unwrap_or(Value::Null), "tags": c.get("tags").cloned().unwrap_or(json!([])),
@@ -5023,7 +5023,7 @@ impl Core {
                 continue;
             }
             out.push(Known {
-                kind: "config", id: s.id.clone(), host_id: String::new(), identity: match_key(&s.url, &format!("config:{}", s.id)), legacy: legacy_key(&s.url),
+                kind: "config", id: s.id.clone(), host_id: String::new(), identity: config_key(&s.url, &format!("config:{}", s.id)), legacy: legacy_key(&s.url),
                 values: json!({ "name": s.name.clone().unwrap_or_else(|| s.id.clone()), "url": without_credential(&s.url),
                                 "via": s.via, "tls": s.tls, "tags": [], "enabled": true, "username": Value::Null }),
             });
@@ -5069,14 +5069,16 @@ impl Core {
             .map(|(id, r)| (id.clone(), r.tunnel.spec.host.clone(), r.tunnel.spec.port)).collect();
         let jump_ids: std::collections::HashSet<String> = jumps.iter().map(|j| j.0.clone()).collect();
         let previous = self.zbx_sync.read().specs.clone();
-        // ElasticPro's own credential for an address: the one held for a config cluster
-        // at the same address (the text, exactly: never the review's identity, which decides
-        // conflicts and nothing about where a credential goes), else the config's shared one. Both arrived from a browser
-        // that built them with authHeaderFor, so nothing here re-derives a header.
-        let (held_by_url, shared): (HashMap<String, String>, Option<String>) = {
+        // ElasticPro's own credential for a Zabbix cluster: the one held for the config cluster an
+        // administrator let it take over (`zbx_conflicts::lent_credential`: an Update, at the same
+        // identity), else the config's shared one. Never because two addresses compare equal.
+        // Both arrived from a browser that built them with authHeaderFor, so nothing here
+        // re-derives a header.
+        let (held_by_id, shared): (HashMap<String, (Option<String>, String)>, Option<String>) = {
             let p = self.primed.read();
             (p.clusters.values().filter_map(|s| {
-                s.auth_header.as_ref().filter(|a| !a.is_empty()).map(|a| (s.url.trim_end_matches('/').to_ascii_lowercase(), a.clone()))
+                s.auth_header.as_ref().filter(|a| !a.is_empty())
+                    .map(|a| (s.id.clone(), (zc::trusted_identity(&s.url), a.clone())))
             }).collect(), p.shared_auth.clone())
         };
         let primed_ids: std::collections::HashSet<String> = self.primed.read().clusters.keys().cloned().collect();
@@ -5154,18 +5156,19 @@ impl Core {
             }
             let mut user_override: Option<String> = None;
             // With ElasticPro's credentials: a config cluster's own header at this address, not the shared one.
-            let per_address = opts.use_elasticpro_credentials && held_by_url.contains_key(&c.url.trim_end_matches('/').to_ascii_lowercase());
+            let lent = zc::lent_credential(replaces.as_ref(), &c.url, &held_by_id).map(String::from);
+            let per_address = opts.use_elasticpro_credentials && lent.is_some();
             let (credential, auth) = if let Some(h) = own {
                 user_override = Some(kept_users.get(&own_key).cloned().flatten().unwrap_or_else(|| "(api key or token)".into()));
                 ("elasticpro-own", Some(h))
             } else {
-                let own_url = held_by_url.get(&c.url.trim_end_matches('/').to_ascii_lowercase()).cloned().or_else(|| shared.clone());
+                let own_url = lent.clone().or_else(|| shared.clone());
                 let (credential, secret) = if opts.use_elasticpro_credentials {
                     // The config says so: ElasticPro's credential, not Vault's. The header is
                     // taken as it is; there is no password to combine with a username.
                     if own_url.is_none() {
-                        notes.push("ElasticPro has no credential for this address — add `credentials:` to the config, \
-                                    or add it as a cluster and sign in once".into());
+                        notes.push("ElasticPro has no credential for this cluster — add `credentials:` to the config, \
+                                    or, for a config cluster at this address, choose Update for this host under Held for review".into());
                     }
                     ("elasticpro", None)
                 } else { match &c.password {

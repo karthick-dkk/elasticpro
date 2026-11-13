@@ -480,7 +480,8 @@ Or switch on **Use ElasticPro credentials** (Config → Zabbix, stored in the co
 ```yaml
 zabbix:
   useElasticProCredentials: true   # connect Zabbix clusters with ElasticPro's credential:
-                                   # the one held for a config cluster at the same address,
+                                   # the one held for the config cluster an admin let
+                                   # the host take over (Update, under Held for review),
                                    # else the config's shared `credentials:`
   createHosts: false               # see below
   hostGroup: Elasticsearch clusters

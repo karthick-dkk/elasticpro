@@ -82,11 +82,37 @@ fn plain(url: &str) -> Option<reqwest::Url> {
 /// (http 80, https 443), the path as written but without a trailing slash. `None` for an address
 /// that is not plain (`plain`): it matches nothing.
 pub fn url_identity(url: &str) -> Option<String> {
-    let u = plain(url)?;
-    let host = u.host_str()?;
+    identity_of(&plain(url)?)
+}
+
+/// The identity of a cluster ElasticPro was given (the config file, a PRIME): the address as the HTTP
+/// client reads it, without the credential, query or fragment it may carry. A config cluster at
+/// `https://user:pw@es:9200` is at `https://es:9200`, so a Zabbix host there is held for review like
+/// any other. `None` only for something that is not an http(s) address at all.
+pub fn trusted_identity(url: &str) -> Option<String> {
+    identity_of(&reqwest::Url::parse(url.trim()).ok()?)
+}
+
+fn identity_of(u: &reqwest::Url) -> Option<String> {
+    if !matches!(u.scheme(), "http" | "https") || u.cannot_be_a_base() {
+        return None;
+    }
+    let host = u.host_str().filter(|h| !h.is_empty())?;
     let port = u.port_or_known_default()?;
     let path = u.path().trim_end_matches('/');
     Some(format!("{}://{host}:{port}{path}", u.scheme()))
+}
+
+/// The credential of a config-file cluster a Zabbix host may sign in with (*Use ElasticPro
+/// credentials*): only that of the cluster an administrator let the host take over (**update**,
+/// `replaces`), and only while both are at one identity. Never because two addresses compare
+/// equal, never to a host held, skipped or kept beside the cluster, and never to an address with
+/// no identity. `config` maps a config cluster's id to its identity and header.
+pub fn lent_credential<'a>(replaces: Option<&Against>, zabbix_url: &str, config: &'a HashMap<String, (Option<String>, String)>) -> Option<&'a str> {
+    let a = replaces.filter(|a| a.kind == "config")?;
+    let here = url_identity(zabbix_url)?;
+    let (there, header) = config.get(&a.id)?;
+    (there.as_deref() == Some(here.as_str())).then_some(header.as_str())
 }
 
 /// The address as written, with any `user:password@` taken out (by the same parser): what the
@@ -108,10 +134,17 @@ pub fn without_credential(url: &str) -> String {
     }
 }
 
-/// What a cluster is compared by: its identity, or — for an address that has none — a key no other
-/// cluster can have (`unmatched:<own>`), so it is never taken for another.
+/// What a Zabbix host is compared by: its identity, or — for an address that has none — a key no other
+/// cluster can have (`unmatched:<own>`). (`zabbix_api::cluster_from` already refuses such a host.)
 pub fn match_key(url: &str, own: &str) -> String {
     url_identity(url).unwrap_or_else(|| format!("unmatched:{own}"))
+}
+
+/// What a cluster ElasticPro was given is compared by: `trusted_identity`, so a credential or a query
+/// in its address never hides it from the review. Only an address that does not parse at all gets a
+/// key of its own.
+pub fn config_key(url: &str, own: &str) -> String {
+    trusted_identity(url).unwrap_or_else(|| format!("unmatched:{own}"))
 }
 
 /// How the pages compared addresses before review existed (ui/js/core/config.js `urlKey` up to
@@ -549,7 +582,7 @@ mod tests {
                 values: values.clone(), effective: values }
     }
     fn config(id: &str, url: &str) -> Known {
-        Known { kind: "config", id: id.into(), host_id: String::new(), identity: match_key(url, &format!("config:{id}")), legacy: legacy_key(url),
+        Known { kind: "config", id: id.into(), host_id: String::new(), identity: config_key(url, &format!("config:{id}")), legacy: legacy_key(url),
                 values: json!({ "name": id, "url": url }) }
     }
 
@@ -755,5 +788,32 @@ mod tests {
         assert_eq!((r.entries["10"].decision, err), (Some(Decision::Update), None));
         assert!(p.exists());
         let _ = std::fs::remove_dir_all(p.parent().unwrap());
+    }
+
+    #[test]
+    fn a_config_cluster_with_a_credential_in_its_address_is_still_reviewed() {
+        assert_eq!(trusted_identity("https://user:pw@Host.example:9200/?pretty#x").as_deref(), Some("https://host.example:9200"));
+        assert_eq!(trusted_identity("https://user:pw@host.example:9200"), url_identity("https://host.example:9200"));
+        assert_eq!(trusted_identity("https://host.example/Data/").as_deref(), Some("https://host.example:443/Data"), "path case kept");
+        let cfg = [config("lab", "https://svc:secret@lab.example:9200")];
+        let r = resolve(&cfg, &[found("10", "lab-zbx", "https://lab.example:9200")], &HashSet::new(), &BTreeMap::new(), false, 1);
+        assert_eq!(r.fate["10"], Fate::Held, "the credential in the config's address does not hide it");
+        assert_eq!(r.review[0]["existing"]["id"], json!("lab"));
+    }
+
+    #[test]
+    fn a_config_credential_is_lent_only_to_the_host_that_took_its_cluster_over() {
+        let config: HashMap<String, (Option<String>, String)> = [
+            ("lab".to_string(), (trusted_identity("http://u:p@LAB:9200/"), "Basic lab".to_string())),
+            ("other".to_string(), (trusted_identity("http://other:9200"), "Basic other".to_string())),
+        ].into();
+        let update = |id: &str| Against { kind: "config".into(), id: id.into(), host_id: String::new() };
+        assert_eq!(lent_credential(Some(&update("lab")), "http://lab:9200", &config), Some("Basic lab"));
+        assert_eq!(lent_credential(None, "http://lab:9200", &config), None, "same address, no decision (or keep both): nothing");
+        assert_eq!(lent_credential(Some(&update("other")), "http://lab:9200", &config), None, "another address: nothing");
+        assert_eq!(lent_credential(Some(&update("lab")), "http://lab:9200@evil:9200", &config), None, "no identity: nothing");
+        assert_eq!(lent_credential(Some(&update("lab")), "http://lab:9200/sub", &config), None, "another path: nothing");
+        let z = Against { kind: "zabbix".into(), id: "zbx-a".into(), host_id: "1".into() };
+        assert_eq!(lent_credential(Some(&z), "http://lab:9200", &config), None);
     }
 }

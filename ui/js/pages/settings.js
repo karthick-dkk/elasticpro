@@ -2212,7 +2212,7 @@ function zabbixOptionsCard() {
   return trackedCard('zabbix-opts', 'Zabbix sync options', 'Sync options', 'apply on the next sync',
     h('div', { style: { display: 'grid', gap: '10px' } },
       opt('useElasticProCredentials', 'Use ElasticPro credentials for Zabbix clusters',
-        'Connect with the credential ElasticPro already has for the same address, or the config’s shared one — instead of the password in Vault. Off: Vault.'),
+        'Connect with the credential of the config-file cluster the host took over (Update, under Held for review), or the config’s shared one — instead of the password in Vault. Off: Vault.'),
       opt('createHosts', 'Create Zabbix hosts from this config',
         'Each cluster here that Zabbix does not have yet becomes a Zabbix host with the cluster template; its password goes to Vault. The new host takes that cluster over (recorded as Update under Held for review).',
         zbx.canCreateHosts ? '' : 'Needs the Zabbix write token and Vault writer on the server (see deploy/zabbix/README.md).'),
