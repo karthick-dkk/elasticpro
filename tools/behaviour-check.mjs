@@ -1105,9 +1105,6 @@ await go('reports');
   // The Columns menu: hide, move, reset, and Save for everyone (VOLUME_LAYOUT_SET table overview).
   const realFetch = globalThis.fetch;
   const lsent = [];
-  let fetchAnswer = 'ok';
-  let jobPolls = 0;
-  const esSent = [];
   globalThis.fetch = async (input, init) => {
     const body = init && init.body ? JSON.parse(init.body) : {};
     if (body.type === 'VOLUME_LAYOUT_SET' || body.type === 'VOLUME_RUN') lsent.push(body);
@@ -6866,6 +6863,9 @@ await settleFor(300);
   const list = S.clusters().map((c) => ({ id: c.id, name: c.name }));
   const realFetch = globalThis.fetch;
   const lsent = [];
+  let fetchAnswer = 'ok';
+  let jobPolls = 0;
+  const esSent = [];
   globalThis.fetch = async (input, init) => {
     const body = init && init.body ? JSON.parse(init.body) : {};
     // Fetch Now: JOB_RUN for the measurement, then its run in JOBS_LIST — running once, then done.
