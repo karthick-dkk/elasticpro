@@ -266,6 +266,23 @@ test('the device query matches both the raw field and its keyword twin', () => {
   assert.equal(q.track_total_hits, true);
 });
 
+test('the close-up is bounded by the time range: a range filter on arrival, and a capped count', () => {
+  // Without a bound the search read every index of the pattern and counted every hit, which on a
+  // real cluster ran past the request timeout and came back as an error (Live Watch, 0.3.59).
+  const resolved = { device: 'src_hostname.keyword', arrival: '@timestamp', eventTime: 'ingested_time', metadata: [] };
+  const q = ld.buildDeviceQuery(resolved, { device: 'fw-core-02', from: 'now-5m', to: 'now' });
+  assert.deepEqual(q.query.bool.filter, [{ range: { '@timestamp': { gte: 'now-5m', lte: 'now', format: 'strict_date_optional_time' } } }]);
+  assert.equal(q.track_total_hits, 10000);
+  assert.equal(q.query.bool.must[0].bool.minimum_should_match, 1, 'the device clause is unchanged');
+});
+
+test('one definition of a document\'s delay: the first event field it carries, unknown is null', () => {
+  assert.equal(ld.docDelay({ '@timestamp': '2026-09-19T12:41:00Z', event_created: '2026-09-19T12:00:00Z' }, '@timestamp', ['ingested_time', 'event_created']).delayMinutes, 41);
+  assert.equal(ld.docDelay({ '@timestamp': '2026-09-19T12:41:00Z' }, '@timestamp', ['ingested_time']).delayMinutes, null);
+  assert.equal(ld.docDelay({ '@timestamp': 'nope', ingested_time: '2026-09-19T12:00:00Z' }, '@timestamp', 'ingested_time').arrival, null);
+  assert.equal(ld.docDelay({ a: { t: '2026-09-19T12:10:00Z' }, e: '2026-09-19T12:00:00Z' }, 'a.t', 'e').delayMinutes, 10, 'dotted names');
+});
+
 test('an address query does not ask for a keyword twin it would never have', () => {
   const resolved = { device: 'src_hostname.keyword', arrival: '@timestamp', eventTime: 'ingested_time',
                      metadata: ['src_ip'] };

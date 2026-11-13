@@ -74,12 +74,19 @@ if (configPath) {
 
 // play: the wall display (docs/PLAY.md). Drawn against whatever core this is — an older one
 // has no PLAY_* messages, and Play must still draw, saying what is missing.
-// reports: one page of eight sections (docs/REPORTS.md, docs/LOGDELAY.md), each drawn from its own route.
-const REPORT_SECTIONS = ['overview', 'daily', 'hosts', 'capacity', 'measure', 'planning', 'log-delay', 'exports'];
-// Reports › Log delay (0.3.57) has views under its section: the fixes, one cluster, and a device the
-// store does not hold (a fresh data directory has none), which must say so rather than draw blank.
+// reports: one page of seven sections (docs/REPORTS.md), each drawn from its own route. Log delay
+// moved to the Log Delay page (0.3.60): its Reports entry is a link there, not a section.
+const REPORT_SECTIONS = ['overview', 'daily', 'hosts', 'capacity', 'measure', 'planning', 'exports'];
+// The Log Delay page (docs/LOGDELAY.md): every view — the fleet, the fixes, one cluster, a device the
+// store does not hold (a fresh data directory has none, which must say so rather than draw blank),
+// Live Watch and Live logs (one device too).
 const LD_FIRST = configured ? ((await load('core/state.js')).clusters()[0] || null) : null;
-const LD_VIEWS = ['log-delay/fixes', ...(LD_FIRST ? [`log-delay/cluster/${encodeURIComponent(LD_FIRST.id)}`, `log-delay/device/${encodeURIComponent(LD_FIRST.id)}/no-such-device`] : [])];
+const LD_VIEWS = ['log-delay', 'log-delay/fixes', 'log-delay/watch', 'log-delay/live',
+  ...(LD_FIRST ? [`log-delay/cluster/${encodeURIComponent(LD_FIRST.id)}`, `log-delay/device/${encodeURIComponent(LD_FIRST.id)}/no-such-device`,
+    `log-delay/live/${encodeURIComponent(LD_FIRST.id)}/fw-core-02`] : [])];
+// The old addresses still open the Log Delay page, on the matching view: `#/<old>` → the view it names.
+const LD_MOVED = [['reports/log-delay', 'fleet'], ['reports/log-delay/fixes', 'fixes'], ['logs', 'live'],
+  ...(LD_FIRST ? [[`reports/log-delay/cluster/${encodeURIComponent(LD_FIRST.id)}`, 'cluster']] : [])];
 // Config-Management (pages/settings.js): every tab it draws itself, each from its own route; and
 // the three app pages it hosts as tabs (Automation, Request Centre, Accounts), drawn inside its frame
 // the way the shell draws them (hostedPage). A tab the bridge does not support (Data, Backup) is
@@ -87,21 +94,28 @@ const LD_VIEWS = ['log-delay/fixes', ...(LD_FIRST ? [`log-delay/cluster/${encode
 const CONFIG_TABS = ['clusters/clusters', 'clusters/creds', 'clusters/trust', 'zabbix/zabbix', 'alerts/triggers',
   'requests/policy', 'reports/fields', 'reports/mail', 'reports/templates', 'play/play', 'system/defaults', 'system/file', 'system/backup'];
 const HOSTED = new Set(['automation', 'requests', 'accounts']);
-const PAGES = ['alerts', 'overview', 'indices', 'shards', 'logs', 'console', 'snapshots',
-  ...REPORT_SECTIONS.map((s) => `reports/${s}`), ...LD_VIEWS.map((s) => `reports/${s}`), 'automation', 'requests', 'requests/health', 'accounts', 'settings',
+const PAGES = ['alerts', 'overview', 'indices', 'shards', ...LD_VIEWS, ...LD_MOVED.map(([old]) => `moved:${old}`), 'console', 'snapshots',
+  ...REPORT_SECTIONS.map((s) => `reports/${s}`), 'reports/log-delay-link', 'automation', 'requests', 'requests/health', 'accounts', 'settings',
   ...CONFIG_TABS.map((t) => `settings/${t}`), 'play'];
+const { ldRoute, ldTab } = await load('core/logdelay-report.js');
 const view = window.document.createElement('div');
 window.document.body.append(view);
 
 for (const name of PAGES) {
   const before = errors.length;
   try {
-    const [page, section, tab] = name.split('/');
+    // `moved:<old>`: an old address, drawn by the page it now opens (the shell resolves it the same way).
+    const moved = name.startsWith('moved:') ? name.slice(6) : null;
+    // `reports/log-delay-link`: the Reports page asked for its Log delay section, which is a link now.
+    const linkOnly = name === 'reports/log-delay-link';
+    const path = moved ? 'log-delay' : linkOnly ? 'reports/log-delay' : name;
+    const [page, section, tab] = path.split('/');
     const own = await load(`pages/${page}.js`);
     // A page that lives in Config-Management is drawn inside its frame, as the shell does.
     const mod = HOSTED.has(page) ? (await load('pages/settings.js')).hostedPage(page, own) : own;
     while (view.firstChild) view.removeChild(view.firstChild);
-    window.history.replaceState(null, '', `#/${name}`);
+    window.history.replaceState(null, '', `#/${moved || name}`);
+    if (linkOnly) (await load('core/intent.js')).intent.reports = { section: 'log-delay' };
     mod.render(view);
     await new Promise((r) => setTimeout(r, section ? 900 : 350));
     if (mod.onData) mod.onData();
@@ -122,6 +136,25 @@ for (const name of PAGES) {
       const cur = row && row.querySelector('button[aria-current="page"]');
       if (row && (!cur || cur.dataset.cmTab !== tab)) errors.push(`${name}: the tab row does not mark ${tab}`);
       if (!view.querySelector('.cm-about #cm-version')) errors.push(`${name}: no About card with the version`);
+    } else if (page === 'log-delay') {
+      // The Log Delay page: the tab of the view the address names is marked, and that view is drawn.
+      const r = ldRoute(window.location.hash);
+      const want = moved ? LD_MOVED.find(([o]) => o === moved)[1] : r.view;
+      if (r.view !== want) errors.push(`${name}: the address opened the ${r.view} view, not ${want}`);
+      const on = view.querySelector('.ld-tabs a[aria-current="page"]');
+      if (!on || on.dataset.tab !== ldTab(want)) errors.push(`${name}: the tabs do not mark ${ldTab(want)}`);
+      const drawn = view.querySelector('.ld[data-ld]');
+      if (!drawn || drawn.dataset.ld !== want) errors.push(`${name}: drew ${drawn ? drawn.dataset.ld : 'no view'}, not ${want}`);
+      // zone and tag1 are columns of every device and log table the view drew.
+      for (const t of view.querySelectorAll('table.tbl')) {
+        const heads = [...t.querySelectorAll('thead th')].map((th) => th.textContent.toLowerCase());
+        const devices = t.id === 'ld-devices' || t.id === 'ld-cluster-devices' || t.id === 'ld-fix-devices' || t.id === 'ld-watch-devices' || t.id === 'ld-live-logs';
+        if (devices && !(heads.some((x) => x.startsWith('zone')) && heads.some((x) => x.startsWith('tag1')))) errors.push(`${name}: table ${t.id} has no zone or tag1 column`);
+      }
+    } else if (linkOnly) {
+      const a = view.querySelector('.rp-nav a[data-section="log-delay"]');
+      if (!a || a.getAttribute('href') !== '#/log-delay') errors.push(`${name}: the Reports entry for Log delay is not a link to #/log-delay`);
+      if (!view.querySelector('#rp-ld-moved[href="#/log-delay"]')) errors.push(`${name}: the Log delay section does not link to the Log Delay page`);
     } else if (section) {
       const on = view.querySelector('.rp-nav a[aria-current="page"]');
       if (!on || on.dataset.section !== section) errors.push(`${name}: the section nav does not mark ${section} as the one shown`);

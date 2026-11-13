@@ -1046,7 +1046,7 @@ function delaySinkCard() {
         + 'figures to the cluster you name below. Only the hosted edition does this \u2014 a '
         + 'desktop app is not running when nobody is looking at it. Nothing is classified '
         + 'on the way in: the ',
-        h('button.btn.sm.ghost', { onclick: () => navigateTo('logs') }, 'Log delay'),
+        h('button.btn.sm.ghost', { onclick: () => navigateTo('log-delay') }, 'Log Delay'),
         ' page applies the thresholds when the data is read back.'),
       sink.blocked
         ? h('div.banner.warn', { style: { margin: 0, fontSize: '12px' } }, 'Cannot run right now: ', sink.blocked)

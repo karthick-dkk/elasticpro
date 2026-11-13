@@ -292,7 +292,7 @@ The schedule itself (every N hours, destination, clusters) stays `DELAY_SINK_SET
   Mail board: Summary tiles, *Late devices every N hours* (bar per window: pink late, green
   under), *Every N hours* table, *Day by day · last 7 days*, *Top delayed*, *Recommended fixes*
   (top 3 that are not "unknown"), *Open the full report* when `UI_PUBLIC_URL` is set in
-  config.txt (`<url>/#/reports/log-delay`). Tables and inline styles only; colours light
+  config.txt (`<url>/#/reports/log-delay`, which opens the Log Delay page since 0.3.60). Tables and inline styles only; colours light
   green `#DDF3E4`, blue `#DCEBFA`, pink `#FBDCE6`, orange `#FDE4CC`.
 * Period days are local days; `yesterday`/`last7`/`previousWeek`/`previousMonth`/`{from,to}`
   as every report.
@@ -312,3 +312,41 @@ The schedule itself (every N hours, destination, clusters) stays `DELAY_SINK_SET
 * One run at a time (docs/JOBS.md): `DELAY_SINK_RUN` while a run goes — the timer's or another
   person's — answers `{ok: false, kind: "already_running", runId}` and measures nothing. Every
   run, the timer's and the pressed ones, is in the run log (`JOBS_LIST`, job `logdelay.measure`).
+
+## The Log Delay page (UI, 0.3.60)
+
+The boards moved from Reports › Log delay to a top-level page of their own, **Log Delay** (it was
+*Logs & Delay*, the live tail and the in-browser delay view). Reports › Log delay is a link there.
+
+| route | view | |
+|---|---|---|
+| `#/log-delay` | Dashboard: the fleet (Main board) | `ui/js/logdelay/boards.js` |
+| `#/log-delay/cluster/<id>` | one cluster (Cluster board) | |
+| `#/log-delay/device/<cluster>/<device>` | one device (Device board): only that device — no other late devices, no per-cluster panel | |
+| `#/log-delay/fixes[/<cluster>]` | Recommended fixes (Fix board) | |
+| `#/log-delay/watch` | Live Watch: every cluster measured now from the browser over the time range; the delayed devices; one device live (every 15 s) | `ui/js/logdelay/watch.js` |
+| `#/log-delay/live[/<cluster>[/<device>]]` | Live logs: the documents over the time range, narrowed to one device by *Open in logs* | `ui/js/logdelay/live-logs.js` |
+
+The old addresses open the matching view (`ui/js/reports/route.js` `movedPath`):
+`#/reports/log-delay[/…]` (the mail's link) and `#/logs` (Live logs).
+
+* **One device row** (`ui/js/logdelay/rows.js`) for every device table — the fleet's Devices, a
+  cluster's devices, Each device on Recommended fixes, Live Watch's delayed devices. A device
+  Live Watch measured is turned into a board row (`liveDeviceRow`); what one measurement cannot
+  know (the worst, the delays before it, time late) reads unknown. Every row has *Open in logs*.
+* **zone and tag1** are columns of every device and log table (`extraOf`: the row's extras or
+  meta, any case). Live Watch asks for them in the measurement's `_source`.
+* **Time range** for Live Watch and Live logs: Last 1, 5, 30 min, 1, 2, 3, 6, 8, 12 h, or a
+  custom from/to (`ui/js/core/log-range.js`). The close-up of one device is bounded by it: before
+  0.3.60 it searched every index of the pattern with `track_total_hits: true`.
+* **Times** are written in the server's zone — PING's `tz` when the core says it, the browser's
+  zone until then — and the Live logs time column names the offset (`@timestamp (UTC +05:30)`).
+* **Fetch Now** (*Log Delay – Fetch Now*, on the Dashboard and Fixes tabs): `JOB_RUN {jobId:
+  "logdelay.measure", clusterIds?, device?}` for the board on screen, then `JOBS_LIST` every 2 s
+  until that run ends (progress, done of total, devices measured); `already_running` follows the
+  run already going, `blocked_readonly` and `forbidden` are said as such. When it completes the
+  boards read the store again.
+* **Drawing**: each card is kept until what it shows changed (`lib/keyed.js`); each view's
+  requests carry an AbortController that leaving the view aborts; an answer for a view no longer
+  shown redraws nothing. `tools/flicker-check.mjs` holds every view to zero replacements under a
+  parked pointer, with the LOGDELAY_* answers slowed or failing (`--ld-delay`).

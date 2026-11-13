@@ -419,10 +419,19 @@ export function delayItemValues(summary) {
  * `pre` is what `preflight` resolved for this cluster.
  */
 export async function measureDelay(esClient, cluster, pre, hours = 24, levels = levelsOf(cluster.id)) {
+  return measureDelayIn(esClient, cluster, pre, { from: `now-${hours}h`, to: 'now' }, levels);
+}
+
+/**
+ * measureDelay over any window: `{from, to}` as Elasticsearch date strings (`now-5m`, an ISO
+ * time). The Log Delay page's Live Watch asks its own range with it; `opts.signal` lets go of
+ * the request when the view is left.
+ */
+export async function measureDelayIn(esClient, cluster, pre, { from, to }, levels = levelsOf(cluster.id), opts = {}) {
   const t = levels;
-  const body = buildSearchBody(pre.resolved, { from: `now-${hours}h`, to: 'now', size: 500 });
+  const body = buildSearchBody(pre.resolved, { from, to, size: 500 });
   const res = await esClient.search(cluster.logIndexPattern || 'logstash-*', body,
-    { qs: 'ignore_unavailable=true&allow_no_indices=true', timeoutMs: 60000 });
+    { qs: 'ignore_unavailable=true&allow_no_indices=true', timeoutMs: 60000, ...(opts.signal ? { signal: opts.signal } : {}) });
   const agg = (res.aggregations || {}).devices || {};
   return {
     records: (agg.buckets || []).map((b) => recordFrom(b, pre.resolved, t)),
@@ -546,7 +555,7 @@ export function deviceFieldsFor(value, resolved, fields) {
  * Both the raw field and its `.keyword` twin are matched, because which one is the
  * searchable one depends on a mapping this code does not get to see.
  */
-export function buildDeviceQuery(resolved, { device, size = 15, fields = null } = {}) {
+export function buildDeviceQuery(resolved, { device, size = 15, fields = null, from = null, to = null } = {}) {
   const names = deviceFieldsFor(device, resolved, fields);
   const should = [];
   for (const n of names) {
@@ -554,11 +563,17 @@ export function buildDeviceQuery(resolved, { device, size = 15, fields = null } 
     const kw = aggregatableName(n);
     if (kw !== n) should.push({ term: { [kw]: device } });
   }
+  // Bounded by the arrival time (Live Watch's range). Without it the search read every index of
+  // the pattern — every day the cluster keeps — and counted every hit, which on a real cluster
+  // runs past the request timeout and comes back as an error instead of the device's newest logs.
+  const filter = from || to
+    ? [{ range: { [resolved.arrival]: { ...(from ? { gte: from } : {}), ...(to ? { lte: to } : {}), format: 'strict_date_optional_time' } } }]
+    : [];
   return {
     size,
-    track_total_hits: true,
+    track_total_hits: from || to ? 10000 : true,
     sort: [{ [resolved.arrival]: { order: 'desc', unmapped_type: 'date' } }],
-    query: { bool: { must: [{ bool: { should, minimum_should_match: 1 } }] } },
+    query: { bool: { must: [{ bool: { should, minimum_should_match: 1 } }], ...(filter.length ? { filter } : {}) } },
     _source: [resolved.arrival, resolved.eventTime,
               ...(resolved.metadata || []).map((m) => String(m).replace(/\.keyword$/, ''))],
   };
@@ -571,18 +586,35 @@ export function buildDeviceQuery(resolved, { device, size = 15, fields = null } 
  * still listed — it is evidence, and dropping it would make the list look cleaner than
  * the data is. It is the aggregate figures that exclude it, never the row.
  */
+/**
+ * One document's delay: arrival minus event time, in minutes — the one definition every list
+ * of documents uses (the Live Watch close-up, Live logs). `eventFields` is one name or a list
+ * tried in order (the first the document carries). Either time unreadable: null, never 0.
+ */
+export function docDelay(src, arrivalField, eventFields) {
+  const arrival = Date.parse(dotted(src || {}, arrivalField));
+  let event = NaN;
+  for (const f of Array.isArray(eventFields) ? eventFields : [eventFields]) {
+    const v = dotted(src || {}, f);
+    if (v !== undefined && v !== null && v !== '') { event = Date.parse(v); break; }
+  }
+  const ok = isFinite(arrival) && isFinite(event);
+  return {
+    arrival: isFinite(arrival) ? arrival : null,
+    event: isFinite(event) ? event : null,
+    delayMinutes: ok ? (arrival - event) / 60000 : null,
+  };
+}
+
 export function documentDelays(hits, resolved, levels = null) {
   return (hits || []).map((hit) => {
     const src = (hit && hit._source) || {};
-    const arrival = Date.parse(dotted(src, resolved.arrival));
-    const event = Date.parse(dotted(src, resolved.eventTime));
-    const ok = isFinite(arrival) && isFinite(event);
-    const delayMinutes = ok ? (arrival - event) / 60000 : null;
+    const { arrival, event, delayMinutes } = docDelay(src, resolved.arrival, resolved.eventTime);
     return {
       id: (hit && hit._id) || '',
       index: (hit && hit._index) || '',
-      arrival: isFinite(arrival) ? arrival : null,
-      event: isFinite(event) ? event : null,
+      arrival,
+      event,
       delayMinutes,
       status: statusFor(delayMinutes, levels),
       meta: Object.fromEntries((resolved.metadata || []).map((m) => {

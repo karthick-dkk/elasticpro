@@ -83,11 +83,17 @@ async function callOnce(out, signal) {
   return isTauri ? T.core.invoke('bridge', { msg: out }) : httpBridge(out, signal);
 }
 
-export async function bridge(msg) {
+/**
+ * One message to the core. `opts.signal` is the caller's own AbortController signal (a view
+ * of a page that lets go of what it asked when it is left); without one, a page's ES request
+ * is tied to its page origin as above.
+ */
+export async function bridge(msg, opts = undefined) {
   try {
     // LOGIN carries no session, and LOGOUT carries the one it is ending.
     const out = session && msg.session === undefined ? { ...msg, session } : msg;
-    const signal = signalFor(msg);
+    const signal = (opts && opts.signal) || signalFor(msg);
+    if (signal && signal.aborted) return stampReply({ ...ABORTED, errorCode: CORE_CODES.aborted });
     let res = await callOnce(out, signal);
     const wait = overloadRetryMs(res, msg);
     if (wait) {

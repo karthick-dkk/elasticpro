@@ -73,10 +73,13 @@ const FRAME_W = 1180;
 /** The buttons that change what a page shows without doing anything: segments, tabs, Config-Management's pages and tabs. */
 const VIEW_SEL = '#view .seg button, #view .seg-btn, #view [role=tab], #view .tabs button, #view .subnav button, #view .cm-seg button';
 // Reports is one page of six sections (docs/REPORTS.md); each section is its own route and is measured as a page.
-const PAGES = ['alerts', 'overview', 'indices', 'shards', 'logs', 'console', 'snapshots',
+const PAGES = ['alerts', 'overview', 'indices', 'shards',
+  // The Log Delay page (0.3.60): its boards, filled from tools/lib/logdelay-fixture.mjs (@c / @d: the
+  // first cluster and its worst device), Live Watch (measured, then one device watched: see LD_SETUP)
+  // and Live logs (one device, from a row's Open in logs).
+  'log-delay', 'log-delay/cluster/@c', 'log-delay/device/@c/@d', 'log-delay/fixes', 'log-delay/watch', 'log-delay/watch/device', 'log-delay/live', 'log-delay/live/@c/fw-core-02',
+  'console', 'snapshots',
   'reports/overview', 'reports/daily', 'reports/capacity', 'reports/measure', 'reports/planning', 'reports/exports',
-  // Reports › Log delay (0.3.57): its four views, filled from tools/lib/logdelay-fixture.mjs (@c / @d: the first cluster and its worst device).
-  'reports/log-delay', 'reports/log-delay/cluster/@c', 'reports/log-delay/device/@c/@d', 'reports/log-delay/fixes',
   'automation', 'requests', 'accounts', 'settings',
   // Config-Management: each page and tab is its own route (pages/settings.js), measured as a page.
   'settings/clusters/creds', 'settings/clusters/trust', 'settings/zabbix/zabbix', 'settings/alerts/triggers', 'settings/requests/policy',
@@ -277,7 +280,7 @@ async function run(browserName, [vw, vh, framed]) {
     function done() { mo.disconnect(); clearTimeout(cap); clearTimeout(t); res(); }
   }), { ms, max });
   const goPage = async (id) => {
-    if (id.startsWith('reports/log-delay') && !ldList.length) {
+    if (id.startsWith('log-delay') && !ldList.length) {
       ldList = await F.evaluate(async () => (await import('/js/core/state.js')).clusters().map((c) => ({ id: c.id, name: c.name })));
     }
     if (id.includes('@c')) {
@@ -286,6 +289,15 @@ async function run(browserName, [vw, vh, framed]) {
     }
     await F.evaluate((id) => { location.hash = `#/${id}`; }, id);
     await sleep(900); await quiet(700, 5000);
+    // Live Watch is measured on a press: measured here, and `…/watch/device` opens one device's close-up.
+    if (id.startsWith('log-delay/watch')) {
+      await F.evaluate(() => { if (!document.querySelector('#ld-watch-devices')) document.querySelector('#delay-fetch')?.click(); });
+      await sleep(2500); await quiet(700, 6000);
+      if (id === 'log-delay/watch/device') {
+        await F.evaluate(() => { [...document.querySelectorAll('#ld-watch-devices button')].find((b) => b.textContent === 'Watch')?.click(); });
+        await sleep(1500); await quiet(700, 5000);
+      }
+    }
     await readWrite();
   };
   /** The dialogs ask to unlock writes before they open when the config is read-only; turn that
@@ -700,7 +712,7 @@ async function run(browserName, [vw, vh, framed]) {
     return 'nothing';
   };
   if (ONLY.includes('dialogs') || ONLY.includes('panels')) {
-    const SAFE_BUTTON = /^(?!.*(sign ?out|log ?out|forget|clear|reset|wipe|purge|unpair|delete|remove|revoke|apply|save|restore|upload|browse|download|export|import|\bstop\b|kill|lock|block|refresh|reload|sync|test connection|connect\b|start|run|send|execute|cancel task|pause|resume|retry|expand|collapse)).+$/i;
+    const SAFE_BUTTON = /^(?!.*(fetch now|sign ?out|log ?out|forget|clear|reset|wipe|purge|unpair|delete|remove|revoke|apply|save|restore|upload|browse|download|export|import|\bstop\b|kill|lock|block|refresh|reload|sync|test connection|connect\b|start|run|send|execute|cancel task|pause|resume|retry|expand|collapse)).+$/i;
     const SAFE_ITEM = /^(?!.*(refresh|flush|clear cache|verify|acknowledge|ack\b|copy|export|csv|download|force|retry|pause|resume|enable|disable|run|re-?open|unsilence|sync)).+$/i;
     const dbg = (...a) => { if (process.env.FIT_DEBUG) console.log(`[${col}]`, ...a); };
     const openDetails = () => F.evaluate(() => { document.querySelectorAll('#view details').forEach((d) => { d.open = true; }); });

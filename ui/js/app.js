@@ -65,7 +65,7 @@ import * as pReports from './pages/reports.js';
 import { parseHash, pageAlias } from './reports/route.js';
 import { navDot } from './core/system-health.js';
 import * as pIndices from './pages/indices.js';
-import * as pLogs from './pages/logs.js';
+import * as pLogDelay from './pages/log-delay.js';
 import * as pSnapshots from './pages/snapshots.js';
 import * as pShards from './pages/shards.js';
 import * as pConsole from './pages/console.js';
@@ -94,18 +94,18 @@ import { refreshAge } from './core/cluster-detail.js';
 const PAGES = [
   // Order is the order of a shift: what is wrong, then what it is wrong on, then the
   // things you reach for to fix it, then the things you only change deliberately.
-  // The page menu (board of 2026-11-05): Alerts · Clusters · Indices · Nodes & shards · Logs &
+  // The page menu (board of 2026-11-05): Alerts · Clusters · Indices · Nodes & shards · Log
   // Delay · REST · Snapshots · Reports · Config-Management.
   { id: 'alerts',    label: 'Alerts',         icon: '⚠', mod: pAlerts,    multi: true,  minRole: 'user' },
   { id: 'overview',  label: 'Clusters',       icon: '▦', mod: pOverview,  multi: true,  minRole: 'guest' },
   { id: 'indices',   label: 'Indices',        icon: '≡', mod: pIndices,   multi: false, minRole: 'user' },
   { id: 'shards',    label: 'Nodes & shards', icon: '☷', mod: pShards,    multi: true,  minRole: 'user', defaultSingle: true },
-  // multi: the Log delay view asks every selected cluster at once. The live tail is
-  // still one cluster — it picks which, and says so, rather than the page silently
-  // collapsing the fleet selection on the way in.
+  // Log Delay (was "Logs & Delay", id `logs`, until 0.3.60; #/logs still opens it — reports/route.js):
+  // the delay boards, Live Watch and Live logs. multi: Live Watch asks every selected cluster at
+  // once; Live logs is one cluster's stream and picks which, without narrowing the selection.
   // live: the page is the stream — a tail, a console, the request log. Data events reach
   // it whatever the redraw policy says; the pending gate is for pages people read.
-  { id: 'logs',      label: 'Logs & Delay',   icon: '▶', mod: pLogs,      multi: true,  minRole: 'user', live: true },
+  { id: 'log-delay', label: 'Log Delay',     icon: '▶', mod: pLogDelay,  multi: true,  minRole: 'user', live: true },
   { id: 'console',   label: 'REST',           icon: '⌫', mod: pConsole,   multi: false, minRole: 'user', live: true },
   { id: 'snapshots', label: 'Snapshots',      icon: '↻', mod: pSnapshots, multi: true,  minRole: 'user' },
   // Was 'volume' / Volume report until 0.3.53; #/volume still opens it (reports/route.js PAGE_ALIAS).
@@ -166,7 +166,7 @@ function visiblePages() {
   return PAGES.filter((p) => may(p.minRole) && (!p.accountsOnly || !!me));
 }
 // The same answer for a page that links to another (core/intent.js canOpenPage).
-setPageGate((id) => visiblePages().some((p) => p.id === id));
+setPageGate((id) => visiblePages().some((p) => p.id === pageAlias(id)));
 
 const root = document.getElementById('root');
 let currentPage = null;

@@ -20,7 +20,7 @@ const G = await import(url('ui/js/core/alert-groups.js'));
 /** The page ids app.js really has — its PAGES list is the one definition. */
 const appSrc = fs.readFileSync(path.join(ROOT, 'ui/js/app.js'), 'utf8');
 const PAGE_IDS = [...appSrc.slice(appSrc.indexOf('const PAGES = ['), appSrc.indexOf('];', appSrc.indexOf('const PAGES = [')))
-  .matchAll(/\{ id: '([a-z]+)'/g)].map((m) => m[1]);
+  .matchAll(/\{ id: '([a-z-]+)'/g)].map((m) => m[1]);
 
 const cluster = { id: 'c1', name: 'prod', url: 'http://c1' };
 const fake = (rule, extra = {}) => G.mergeAlerts([{ key: `c1:${rule.id}`, level: rule.level, cluster, title: `prod ${rule.id}`, detail: 'd', ...extra }],
@@ -50,7 +50,7 @@ test('where each rule lands on its page', () => {
   assert.deepEqual([at('ilm').page, at('ilm').focus.ilm], ['indices', true]);
   for (const id of ['slm-mode', 'slm-fail', 'slm-stale']) assert.deepEqual([at(id).page, at(id).focus.view, at(id).focus.section], ['snapshots', 'summary', 'policies']);
   assert.deepEqual([at('repo').page, at('repo').focus.section], ['snapshots', 'repos']);
-  assert.deepEqual([at('log-delay').page, at('log-delay').focus.view], ['logs', 'delay']);
+  assert.deepEqual([at('log-delay').page, at('log-delay').focus.view], ['log-delay', 'delay']);
   assert.equal(at('unreachable').page, 'overview');
   assert.deepEqual(at('unreachable').focus, { section: 'unreachable', cluster: 'c1' }, 'Clusters page: that cluster\'s card');
   // The volume rule leads to Reports (the Volume report until 0.3.53), not the Clusters page.
