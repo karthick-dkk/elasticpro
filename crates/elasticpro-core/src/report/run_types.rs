@@ -911,8 +911,10 @@ impl Core {
             return bad("too_many_clusters", format!("volume by host runs for at most {} clusters at a time; {} were asked for", hosts::MAX_RUN_CLUSTERS, unique.len()));
         }
         let today = vsched::utc_day(now_ms());
+        // The log delay report also takes "lastHour" (its hourly schedule's period).
+        let parse = if kind == ReportKind::LogDelay { period::parse_log_delay } else { period::parse };
         let period = match msg.get("period").filter(|v| !v.is_null()) {
-            Some(v) => match period::parse(v, today) {
+            Some(v) => match parse(v, today) {
                 Ok(p) => p,
                 Err(e) => return bad("bad_request", e),
             },

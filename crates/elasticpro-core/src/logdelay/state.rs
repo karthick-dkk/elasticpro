@@ -179,6 +179,9 @@ pub struct Tracker {
     pub silences: Vec<Silence>,
     #[serde(default)]
     pub last_run_ms: Option<i64>,
+    /// How the last run read this cluster's devices (pages, complete, cut at the cap).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_read: Option<super::collect::RunInfo>,
 }
 
 /// How long the built-in store keeps a solved period, a silence, a day file (Storage board:
@@ -244,6 +247,14 @@ impl Tracker {
     /// One run: the readings against the memory, under `levels`. `silent_after_ms` is how
     /// long without a document makes a device silent.
     pub fn apply(&mut self, run_ms: i64, readings: Vec<Reading>, levels: &Levels, silent_after_ms: i64) -> Applied {
+        self.apply_run(run_ms, readings, levels, silent_after_ms, true)
+    }
+
+    /// `apply`, saying whether the readings are every device of the window (`complete`). A run
+    /// that read only part of the list — scoped to one device, stopped at *Max devices per
+    /// run*, or cut short by a page that failed — says nothing about the devices it did not
+    /// read: they are neither silent nor forgotten by it (unknown is not "no logs").
+    pub fn apply_run(&mut self, run_ms: i64, readings: Vec<Reading>, levels: &Levels, silent_after_ms: i64, complete: bool) -> Applied {
         let mut out = Applied::default();
         let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
         for r in readings {
@@ -327,7 +338,7 @@ impl Tracker {
         // Devices the run did not see: silent after the limit, forgotten after a week.
         let mut forget = vec![];
         for (name, d) in self.devices.iter_mut() {
-            if seen.contains(name) {
+            if !complete || seen.contains(name) {
                 continue;
             }
             let quiet_since = d.last_arrival_ms.unwrap_or(d.last_run_ms);
@@ -499,6 +510,23 @@ mod tests {
         assert!(t.devices["fw"].open.is_none());
         assert_eq!(t.episodes.len(), 1);
         assert_eq!(t.devices["fw"].recent.len(), 4);
+    }
+
+    #[test]
+    fn a_partial_run_turns_nobody_it_did_not_read_silent_or_forgotten() {
+        let l = Levels::default();
+        let mut t = Tracker::default();
+        t.apply(0, vec![r("a", Some(1.0), 0), r("b", Some(45.0), 0)], &l, 2 * H);
+        // Scoped to "a" (Fetch now for one device), hours later: b is not silent by it.
+        let x = t.apply_run(5 * H, vec![r("a", Some(2.0), 5 * H)], &l, 2 * H, false);
+        assert!(x.silences_begun.is_empty() && x.rows.len() == 1, "{:?}", x.rows);
+        assert_eq!(t.devices["b"].state, State::Delay);
+        assert!(t.devices["b"].open.is_some());
+        // A week on, still not forgotten by a partial run; a complete one does it.
+        t.apply_run(8 * 24 * H, vec![r("a", Some(2.0), 8 * 24 * H)], &l, 2 * H, false);
+        assert!(t.devices.contains_key("b"));
+        let x = t.apply(8 * 24 * H + H, vec![r("a", Some(2.0), 8 * 24 * H + H)], &l, 2 * H);
+        assert_eq!(x.forgotten, 1);
     }
 
     #[test]

@@ -168,6 +168,21 @@ test('buildSearchBody: aggregates on the resolved names', () => {
   assert.equal(b.size, 0, 'no documents, only aggregations');
 });
 
+test('recordFrom: a document is read by the first event-time candidate it carries, epoch numbers too', () => {
+  const resolved = { device: 'src_hostname.keyword', arrival: '@timestamp', eventTime: 'ingested_time', eventTimes: ['ingested_time', 'event_created'], metadata: [] };
+  const b = ld.buildSearchBody(resolved, { from: 'now-24h', to: 'now', size: 10 });
+  assert.deepEqual(b.aggs.devices.aggs.latest.top_hits._source, ['@timestamp', 'ingested_time', 'event_created'], 'every candidate is asked for');
+  const bucket = (src) => ({ key: 'd', doc_count: 1, latest: { hits: { hits: [{ _source: src }] } } });
+  // The mapping has ingested_time (another log type carries it), this device's logs only event_created:
+  // it used to read "error" — the 258 of the owner's 500.
+  const r = ld.recordFrom(bucket({ '@timestamp': '2026-11-04T12:41:00Z', event_created: '2026-11-04T12:00:00Z' }), resolved, T);
+  assert.equal(r.delayMinutes, 41);
+  assert.notEqual(r.status, 'ERROR');
+  const n = ld.recordFrom(bucket({ '@timestamp': 1762250400000, ingested_time: 1762248600000 }), resolved, T);
+  assert.equal(n.delayMinutes, 30, 'epoch milliseconds are a date, not unreadable');
+  assert.equal(ld.recordFrom(bucket({ '@timestamp': '2026-11-04T12:41:00Z' }), resolved, T).status, 'ERROR', 'no candidate at all: still error, never 0');
+});
+
 test('summarise: counts, and unknown when nothing is measurable', () => {
   const mk = (status, delayMinutes) => ({ status, delayMinutes });
   const s = ld.summarise([mk('OK', 1), mk('DELAYED', 40), mk('CRITICAL', 90), mk('CLOCK_AHEAD', -60), mk('ERROR', null)]);

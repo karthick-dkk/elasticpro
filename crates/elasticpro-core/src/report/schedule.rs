@@ -71,6 +71,9 @@ pub enum Cadence {
     Monthly,
     Weekly,
     Daily,
+    /// Every hour, over the whole local hour before (the log delay report only): sent at the
+    /// minute of `at` past each hour (`00:10` = ten past).
+    Hourly,
     #[default]
     Manual,
 }
@@ -81,6 +84,7 @@ impl Cadence {
             "monthly" => Some(Cadence::Monthly),
             "weekly" => Some(Cadence::Weekly),
             "daily" => Some(Cadence::Daily),
+            "hourly" => Some(Cadence::Hourly),
             "manual" => Some(Cadence::Manual),
             _ => None,
         }
@@ -498,7 +502,8 @@ impl ReportSchedule {
             let Some(v) = s.text(key) else { continue };
             match *field {
                 "to" => e.to = comma_list(v),
-                "schedule" => e.schedule = Cadence::parse(v).unwrap_or(e.schedule),
+                // Hourly is the log delay report's alone; another kind keeps its own cadence.
+                "schedule" => e.schedule = Cadence::parse(v).filter(|c| *c != Cadence::Hourly || self.kind == ReportKind::LogDelay).unwrap_or(e.schedule),
                 "at" => e.at = v.to_string(),
                 _ => e.sheets = check_sheets(&comma_list(v)).unwrap_or_else(|_| e.sheets.clone()),
             }
@@ -522,9 +527,12 @@ impl ReportSchedule {
     }
 }
 
-/// The key a sent period is remembered by.
+/// The key a sent period is remembered by: its days, and its hour for an hourly one.
 pub fn period_key(p: &Period) -> String {
-    format!("{}..{}", p.from, p.to)
+    match p.hour {
+        Some(h) => format!("{}..{}@{h}", p.from, p.to),
+        None => format!("{}..{}", p.from, p.to),
+    }
 }
 
 /// The two readings of now a schedule decision needs: server local time (`at` is in it)
@@ -557,6 +565,17 @@ impl Clock {
         self.utc.date()
     }
 
+    /// Local − UTC, ms.
+    fn offset_ms(&self) -> i64 {
+        (self.local - self.utc).num_milliseconds()
+    }
+
+    /// The start of the local hour `local` is in.
+    fn hour_start(local: NaiveDateTime) -> NaiveDateTime {
+        use chrono::Timelike;
+        local.date().and_hms_opt(local.hour(), 0, 0).unwrap_or(local)
+    }
+
     /// Local time of the start of a UTC date.
     fn local_start_of(&self, utc_date: NaiveDate) -> NaiveDateTime {
         utc_date.and_time(NaiveTime::MIN) + (self.local - self.utc)
@@ -573,7 +592,7 @@ impl Clock {
 /// The UTC date a cadence's current period gave way on (the 1st, Monday, today).
 fn boundary(cadence: Cadence, utc_today: NaiveDate) -> Option<NaiveDate> {
     match cadence {
-        Cadence::Manual => None,
+        Cadence::Manual | Cadence::Hourly => None,
         Cadence::Monthly => utc_today.with_day(1),
         Cadence::Weekly => Some(utc_today - Duration::days(utc_today.weekday().num_days_from_monday() as i64)),
         Cadence::Daily => Some(utc_today),
@@ -584,6 +603,12 @@ fn boundary(cadence: Cadence, utc_today: NaiveDate) -> Option<NaiveDate> {
 /// `None` for manual.
 pub fn current(s: &ReportSchedule, clock: Clock) -> Option<(Period, NaiveDateTime)> {
     let at = parse_hhmm(&s.at)?;
+    if s.schedule == Cadence::Hourly {
+        // The hour before this one, sent at `at`'s minute past this one.
+        use chrono::Timelike;
+        let moment = Clock::hour_start(clock.local) + Duration::minutes(at.minute() as i64);
+        return Some((period::last_hour(clock.local, clock.offset_ms()), moment));
+    }
     let today = clock.utc_today();
     Some((period_on(s.schedule, s.period, today)?, clock.moment_from(boundary(s.schedule, today)?, at)))
 }
@@ -632,6 +657,13 @@ pub fn send_now_period(s: &ReportSchedule, clock: Clock) -> Period {
 /// after it — the next month, week or day, whole, as it will be sent. For manual, what
 /// `REPORT_SEND_NOW` sends by default. Whether the schedule is on does not change it.
 pub fn next_period(s: &ReportSchedule, clock: Clock) -> Period {
+    if s.schedule == Cadence::Hourly {
+        let p = period::last_hour(clock.local, clock.offset_ms());
+        if s.last_period.as_deref() != Some(period_key(&p).as_str()) {
+            return p;
+        }
+        return period::last_hour(clock.local + Duration::hours(1), clock.offset_ms());
+    }
     let today = clock.utc_today();
     let Some(p) = period_on(s.schedule, s.period, today) else { return manual_period_for(s, today) };
     if s.last_period.as_deref() != Some(period_key(&p).as_str()) {
@@ -674,6 +706,9 @@ pub fn next_send(s: &ReportSchedule, clock: Clock) -> Option<NaiveDateTime> {
     let (p, moment) = current(s, clock)?;
     if s.last_period.as_deref() != Some(period_key(&p).as_str()) {
         return Some(moment.max(clock.local));
+    }
+    if s.schedule == Cadence::Hourly {
+        return Some(moment + Duration::hours(1));
     }
     let today = clock.utc_today();
     let next = match s.schedule {
@@ -797,6 +832,37 @@ mod tests {
         assert_eq!(due(&s, at("2026-10-29 07:05"), false), None, "collection not finished");
         assert_eq!(due(&s, at("2026-10-29 07:05"), true).map(|p| p.from), Some("2026-10-28".into()));
         assert_eq!(due(&s, at("2026-10-29 06:59"), true), None);
+    }
+
+    #[test]
+    fn hourly_sends_the_hour_before_at_the_minute_past_once() {
+        let mut s = sched(Cadence::Hourly);
+        s.at = "00:10".into();
+        assert_eq!(due(&s, at("2026-11-13 10:09"), true), None, "before ten past");
+        let p = due(&s, at("2026-11-13 10:10"), true).unwrap();
+        assert_eq!((p.from.as_str(), p.label.as_str()), ("2026-11-13", "2026-11-13 09:00–10:00"));
+        assert_eq!(p.hour, Some(local("2026-11-13 09:00").and_utc().timestamp_millis()));
+        s.last_period = Some(period_key(&p));
+        assert_eq!(due(&s, at("2026-11-13 10:50"), true), None, "sent: not again this hour");
+        assert_eq!(next_send(&s, at("2026-11-13 10:50")), Some(local("2026-11-13 11:10")));
+        assert_eq!(next_period(&s, at("2026-11-13 10:50")).label, "2026-11-13 10:00–11:00");
+        let q = due(&s, at("2026-11-13 11:10"), true).unwrap();
+        assert_eq!(q.label, "2026-11-13 10:00–11:00", "the next hour, a key of its own");
+        assert_ne!(period_key(&p), period_key(&q));
+        // India: the hour is local, its instant UTC.
+        let p = due(&sched(Cadence::Hourly), east("2026-11-13 10:05", 330), true).unwrap();
+        assert_eq!(p.hour, Some(local("2026-11-13 03:30").and_utc().timestamp_millis()));
+        // The day's collection does not hold an hourly send back.
+        assert!(due(&sched(Cadence::Hourly), at("2026-11-13 10:30"), false).is_some());
+        // Saved at 10:30: the 09:00 hour counts as handled; 10:00 goes at 11:00.
+        let mut m = sched(Cadence::Hourly);
+        mark_passed(&mut m, at("2026-11-13 10:30"));
+        assert_eq!(due(&m, at("2026-11-13 10:31"), true), None);
+        assert!(due(&m, at("2026-11-13 11:00"), true).is_some());
+        // config.txt can make only the log delay report hourly.
+        let hourly = crate::settings::Settings::parse("UI_REPORT_SCHEDULE=hourly\nUI_REPORT_LOGDELAY_SCHEDULE=hourly\n");
+        assert_eq!(ReportSchedule::default().effective(&hourly).0.schedule, Cadence::Manual);
+        assert_eq!(ReportSchedule::default_for(ReportKind::LogDelay).effective(&hourly).0.schedule, Cadence::Hourly);
     }
 
     #[test]

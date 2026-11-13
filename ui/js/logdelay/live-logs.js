@@ -21,7 +21,7 @@ import { sortTh, tableSort } from '../lib/table-sort.js';
 import { state, client, activeClusters, fetchIndices } from '../core/state.js';
 import { timeHistogram, histogramEmptyText } from '../lib/charts.js';
 import { card, empty } from '../pages/common.js';
-import { resolveFields, deviceFieldsFor, docDelay } from '../core/log-delay.js';
+import { resolveFields, deviceFieldsFor, docDelay, eventSource } from '../core/log-delay.js';
 import { minutesText } from '../core/logdelay-report.js';
 import { rangeBounds, rangeText, zonedText, zoneOffsetMinutes, offsetText } from '../core/log-range.js';
 import { jsonView } from '../lib/jsonview.js';
@@ -201,7 +201,7 @@ const pick = (src, keys) => {
 function docOf(hit, c) {
   const s = hit._source || {};
   const f = resolveFields(c);
-  const d = docDelay(s, c.timeField || f.arrival, f.eventTime);
+  const d = docDelay(s, c.timeField || f.arrival, eventSource(f));
   const msg = pick(s, ['message', 'log.message', 'msg', 'event.original', 'full_message']);
   return {
     hit,

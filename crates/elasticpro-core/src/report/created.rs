@@ -88,7 +88,8 @@ pub fn parse(msg: &Value, known: impl Fn(&str) -> bool) -> Result<(String, Repor
     let mut s = ReportSchedule::default_for(kind);
     s.enabled = msg.get("enabled").map(|v| v.as_bool().ok_or("enabled must be true or false")).transpose()?.unwrap_or(true);
     s.schedule = match msg.get("schedule").and_then(Value::as_str).and_then(Cadence::parse) {
-        Some(Cadence::Manual) | None => return Err("schedule must be daily, weekly or monthly".into()),
+        Some(Cadence::Manual) | None => return Err("schedule must be daily, weekly or monthly (or hourly, for log_delay)".into()),
+        Some(Cadence::Hourly) if kind != ReportKind::LogDelay => return Err("schedule hourly is the log delay report's alone: daily, weekly or monthly".into()),
         Some(c) => c,
     };
     s.at = msg.get("at").and_then(Value::as_str).filter(|a| crate::volume::schedule::parse_hhmm(a).is_some())
@@ -159,6 +160,7 @@ pub fn describe(s: &ReportSchedule) -> String {
         Cadence::Monthly => "monthly",
         Cadence::Weekly => "weekly",
         Cadence::Daily => "daily",
+        Cadence::Hourly => "hourly",
         Cadence::Manual => "manual",
     };
     format!("{c} at {}, server local time (created with JOB_CREATE)", s.at)

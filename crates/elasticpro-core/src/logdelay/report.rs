@@ -22,6 +22,8 @@ pub const ORANGE: &str = "#FDE4CC";
 const INK: &str = "#1b1f24";
 const MUTED: &str = "#5b6470";
 const LINE: &str = "#e3e6ea";
+/// Zone · tag1 pairs the mail lists; the rest are in the Summary sheet.
+const ZONE_ROWS: usize = 12;
 
 /// Which devices the device list carries.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -176,8 +178,20 @@ fn int(v: &Value) -> Cell {
 fn opt_min(m: Option<f64>) -> Cell {
     m.map(Cell::Dec).unwrap_or_else(|| Cell::text("can't measure"))
 }
+fn opt_text(v: &Option<String>) -> Cell {
+    v.as_ref().map(Cell::text).unwrap_or_else(|| Cell::text("—"))
+}
 fn pct(v: &Value) -> String {
     v.as_f64().map(|p| format!("{p:.1} %")).unwrap_or_else(|| "—".into())
+}
+
+/// The range as the report names it: an hour (`13 Nov 09:00–10:00`), a day, or days.
+pub fn range_label(r: &Range) -> String {
+    if r.to_ms - r.from_ms <= 3_600_000 {
+        let a = time::local_datetime(r.from_ms);
+        return format!("{} {}–{}", time::short_date(a.date()), a.format("%H:%M"), time::local_datetime(r.to_ms).format("%H:%M"));
+    }
+    if r.from == r.to { time::long_date(r.to) } else { r.label() }
 }
 
 /// The device rows the options keep, grouped and sorted.
@@ -186,6 +200,46 @@ pub fn device_rows(i: &Inputs<'_>) -> Vec<DeviceRow> {
     let key = |r: &DeviceRow| if i.options.group_by == "cluster" { r.cluster_name.clone() } else { r.extras.get(&i.options.group_by).cloned().unwrap_or_else(|| "—".into()) };
     rows.sort_by(|a, b| key(a).cmp(&key(b)).then(b.late_ms.cmp(&a.late_ms)));
     rows
+}
+
+/// The Devices sheet's and the CSV's columns: the options' own, with `Zone` and `tag1` added
+/// after the cluster when the options leave them out (every log delay table shows them).
+pub fn columns(o: &Options) -> Vec<String> {
+    let mut cols = o.columns.clone();
+    for must in super::ALWAYS_EXTRAS.iter().rev() {
+        if !cols.iter().any(|c| c.eq_ignore_ascii_case(must)) {
+            let at = cols.iter().position(|c| c == "cluster").or_else(|| cols.iter().position(|c| c == "device")).map(|p| p + 1).unwrap_or(cols.len());
+            cols.insert(at, must.to_string());
+        }
+    }
+    cols
+}
+
+/// Zone and tag1 by device, from every cluster's tracker (the Fixes sheet names a finding's).
+fn zone_tag(i: &Inputs<'_>, cluster: &str, device: &str) -> (Option<String>, Option<String>) {
+    i.clusters.iter().find(|c| c.id == cluster).and_then(|c| c.tracker.devices.get(device))
+        .map(|d| (super::extra_ci(&d.extras, "Zone").cloned(), super::extra_ci(&d.extras, "tag1").cloned()))
+        .unwrap_or((None, None))
+}
+
+/// Devices now by Zone and tag1, over every cluster: devices, late (delay + critical),
+/// critical, silent — the most late first. A device whose logs carry no Zone or tag1 is under
+/// "—" (not known), never left out.
+pub fn by_zone_tag(i: &Inputs<'_>) -> Vec<(String, String, [u64; 4])> {
+    let mut m: std::collections::BTreeMap<(String, String), [u64; 4]> = std::collections::BTreeMap::new();
+    for c in i.clusters {
+        for d in c.tracker.devices.values() {
+            let k = (super::extra_ci(&d.extras, "Zone").cloned().unwrap_or_else(|| "—".into()), super::extra_ci(&d.extras, "tag1").cloned().unwrap_or_else(|| "—".into()));
+            let e = m.entry(k).or_default();
+            e[0] += 1;
+            e[1] += d.state.late() as u64;
+            e[2] += (d.state == State::Critical) as u64;
+            e[3] += (d.state == State::Silent) as u64;
+        }
+    }
+    let mut v: Vec<(String, String, [u64; 4])> = m.into_iter().map(|((z, t), n)| (z, t, n)).collect();
+    v.sort_by(|a, b| b.2[1].cmp(&a.2[1]).then(b.2[0].cmp(&a.2[0])).then(a.0.cmp(&b.0)).then(a.1.cmp(&b.1)));
+    v
 }
 
 fn column_label(c: &str) -> String {
@@ -211,7 +265,7 @@ fn column_cell(c: &str, r: &DeviceRow, now: i64) -> Cell {
         "arrival" => r.last_arrival.map(|t| Cell::text(time::when(t, now))).unwrap_or(Cell::Empty),
         "eventTime" => r.last_event.map(|t| Cell::text(time::when(t, now))).unwrap_or(Cell::Empty),
         "lateSince" => r.late_since.map(|t| Cell::text(time::when(t, now))).unwrap_or(Cell::Empty),
-        other => r.extras.get(other).map(Cell::text).unwrap_or(Cell::Empty),
+        other => super::extra_ci(&r.extras, other).map(Cell::text).unwrap_or(Cell::Empty),
     }
 }
 
@@ -265,7 +319,7 @@ fn sheets(i: &Inputs<'_>, fleet: &Value, rows: &[DeviceRow], windows: &[Value], 
     let now = i.now;
     if i.options.has("summary") {
         let mut r = vec![
-            vec![Cell::head("ElasticPro log delay report"), Cell::text(i.range.label())],
+            vec![Cell::head("ElasticPro log delay report"), Cell::text(range_label(i.range))],
             vec![Cell::text("Clusters"), Cell::Int(i.clusters.len() as f64)],
             vec![Cell::text("Measured every"), Cell::text(format!("{} h", i.every_hours))],
             vec![Cell::text("Devices measured"), int(&t["devices"])],
@@ -295,6 +349,11 @@ fn sheets(i: &Inputs<'_>, fleet: &Value, rows: &[DeviceRow], windows: &[Value], 
                         Cell::text(pct(&c["belowPctPrevious"])), int(&c["silent"]),
                         Cell::text(c["worst"]["device"].as_str().unwrap_or("—")), c["worst"]["minutes"].as_f64().map(Cell::Dec).unwrap_or(Cell::Empty)]);
         }
+        r.push(vec![Cell::Empty]);
+        r.push(vec![Cell::head("Zone"), Cell::head("tag1"), Cell::head("Devices"), Cell::head("Late now"), Cell::head("Above 60 min"), Cell::head("Silent")]);
+        for (z, t1, n) in by_zone_tag(i) {
+            r.push(vec![Cell::text(z), Cell::text(t1), Cell::Int(n[0] as f64), Cell::Int(n[1] as f64), Cell::Int(n[2] as f64), Cell::Int(n[3] as f64)]);
+        }
         out.push(Sheet { name: "Summary".into(), rows: r });
     }
     // Devices: always, with the chosen columns (the group first when it is not the cluster).
@@ -303,7 +362,8 @@ fn sheets(i: &Inputs<'_>, fleet: &Value, rows: &[DeviceRow], windows: &[Value], 
         if i.options.group_by != "cluster" {
             head.push(Cell::head(&i.options.group_by));
         }
-        head.extend(i.options.columns.iter().map(|c| Cell::head(column_label(c))));
+        let cols = columns(i.options);
+        head.extend(cols.iter().map(|c| Cell::head(column_label(c))));
         head.push(Cell::head("Step"));
         head.push(Cell::head("Likely why"));
         head.push(Cell::head("Fix"));
@@ -314,7 +374,7 @@ fn sheets(i: &Inputs<'_>, fleet: &Value, rows: &[DeviceRow], windows: &[Value], 
             if i.options.group_by != "cluster" {
                 line.push(Cell::text(row.extras.get(&i.options.group_by).cloned().unwrap_or_else(|| "—".into())));
             }
-            line.extend(i.options.columns.iter().map(|c| column_cell(c, row, now)));
+            line.extend(cols.iter().map(|c| column_cell(c, row, now)));
             match each.get(&(row.cluster.clone(), row.device.clone())) {
                 Some(f) => { line.push(Cell::text(f.step.label())); line.push(Cell::text(&f.why)); line.push(Cell::text(&f.fix)); }
                 None => { line.push(Cell::Empty); line.push(Cell::Empty); line.push(Cell::Empty); }
@@ -346,19 +406,26 @@ fn sheets(i: &Inputs<'_>, fleet: &Value, rows: &[DeviceRow], windows: &[Value], 
         out.push(Sheet { name: "Day by day".into(), rows: r });
     }
     if i.options.has("topDelayed") {
-        let mut r = vec![vec![Cell::head("Device"), Cell::head("Cluster"), Cell::head("Delay now (min)"), Cell::head("Level"), Cell::head("Late since")]];
+        let mut r = vec![vec![Cell::head("Device"), Cell::head("Cluster"), Cell::head("Zone"), Cell::head("tag1"), Cell::head("Delay now (min)"), Cell::head("Level"), Cell::head("Late since")]];
         for d in top {
-            r.push(vec![Cell::text(&d.device), Cell::text(&d.cluster_name), opt_min(d.now_minutes), Cell::text(d.state.label()),
+            r.push(vec![Cell::text(&d.device), Cell::text(&d.cluster_name), opt_text(&d.zone), opt_text(&d.tag1), opt_min(d.now_minutes), Cell::text(d.state.label()),
                         d.late_since.map(|t| Cell::text(time::when(t, now))).unwrap_or(Cell::Empty)]);
         }
         out.push(Sheet { name: "Top delayed".into(), rows: r });
     }
     if i.options.has("fixes") {
-        let mut r = vec![vec![Cell::head("Step"), Cell::head("Cluster"), Cell::head("Devices"), Cell::head("Group"), Cell::head("Likely why"), Cell::head("Fix"),
+        let mut r = vec![vec![Cell::head("Step"), Cell::head("Cluster"), Cell::head("Devices"), Cell::head("Zone"), Cell::head("tag1"), Cell::head("Group"), Cell::head("Likely why"), Cell::head("Fix"),
                               Cell::head("Evidence"), Cell::head("Not read")]];
         for f in i.findings {
             let name = i.clusters.iter().find(|c| c.id == f.cluster).map(|c| c.name.clone()).unwrap_or_else(|| f.cluster.clone());
+            let (mut zones, mut tags) = (std::collections::BTreeSet::new(), std::collections::BTreeSet::new());
+            for d in &f.devices {
+                let (z, t1) = zone_tag(i, &f.cluster, d);
+                zones.insert(z.unwrap_or_else(|| "—".into()));
+                tags.insert(t1.unwrap_or_else(|| "—".into()));
+            }
             r.push(vec![Cell::text(f.step.label()), Cell::text(name), Cell::text(format!("{} · {}", f.devices.len(), f.devices.iter().take(8).cloned().collect::<Vec<_>>().join(", "))),
+                        Cell::text(zones.into_iter().collect::<Vec<_>>().join(", ")), Cell::text(tags.into_iter().collect::<Vec<_>>().join(", ")),
                         Cell::text(f.group.as_ref().map(|(k, v)| format!("{k} {v}")).unwrap_or_default()), Cell::text(&f.why), Cell::text(&f.fix),
                         Cell::text(evidence_line(&f.evidence)), Cell::text(f.missing.join("; "))]);
         }
@@ -386,7 +453,8 @@ fn csv(i: &Inputs<'_>, rows: &[DeviceRow]) -> String {
     if i.options.group_by != "cluster" {
         cols.push(i.options.group_by.clone());
     }
-    cols.extend(i.options.columns.iter().cloned());
+    let chosen = columns(i.options);
+    cols.extend(chosen.iter().cloned());
     s.push_str(&cols.iter().map(|c| csv_escape(&column_label(c))).collect::<Vec<_>>().join(","));
     s.push_str(",step,why,fix\n");
     let each = super::fixes::per_device(i.findings);
@@ -395,7 +463,7 @@ fn csv(i: &Inputs<'_>, rows: &[DeviceRow]) -> String {
         if i.options.group_by != "cluster" {
             line.push(csv_escape(r.extras.get(&i.options.group_by).map(String::as_str).unwrap_or("")));
         }
-        line.extend(i.options.columns.iter().map(|c| csv_escape(&cell_text(&column_cell(c, r, i.now)))));
+        line.extend(chosen.iter().map(|c| csv_escape(&cell_text(&column_cell(c, r, i.now)))));
         let f = each.get(&(r.cluster.clone(), r.device.clone()));
         line.push(csv_escape(f.map(|f| f.step.label()).unwrap_or("")));
         line.push(csv_escape(f.map(|f| f.why.as_str()).unwrap_or("")));
@@ -434,8 +502,11 @@ pub fn html(i: &Inputs<'_>, fleet: &Value, windows: &[Value], top: &[&DeviceRow]
     h.push_str(LINE);
     h.push_str(";border-radius:8px\"><tr><td style=\"padding:20px 24px\">");
     h.push_str(&format!("<div style=\"font-size:20px;font-weight:700\">Log delay report</div><div style=\"font-size:13px;color:{MUTED};margin-bottom:16px\">{} · {} cluster{} · {} devices · measured every {} hours</div>",
-        esc(&if i.range.from == i.range.to { time::long_date(i.range.to) } else { i.range.label() }), i.clusters.len(), if i.clusters.len() == 1 { "" } else { "s" },
+        esc(&range_label(i.range)), i.clusters.len(), if i.clusters.len() == 1 { "" } else { "s" },
         n(&t["devices"]) as i64, i.every_hours));
+    if fleet["devicesInRange"].as_u64() == Some(0) {
+        h.push_str(&format!("<div style=\"font-size:13px;padding:8px;background:{ORANGE};margin-bottom:8px\">No measurement in this period: nothing was measured between its start and end (the measurement runs every {} hours). The figures below are the devices' states now.</div>", i.every_hours));
+    }
     if i.options.has("summary") {
         h.push_str(&format!("<div style=\"font-size:14px;font-weight:600;margin:12px 0 6px\">Summary · {}</div>", esc(&format!("{} cluster{}", i.clusters.len(), if i.clusters.len() == 1 { "" } else { "s" }))));
         h.push_str("<table role=\"presentation\" width=\"100%\" cellpadding=\"0\" cellspacing=\"6\"><tr>");
@@ -451,6 +522,17 @@ pub fn html(i: &Inputs<'_>, fleet: &Value, windows: &[Value], top: &[&DeviceRow]
         if n(&t["unmeasured"]) > 0.0 {
             h.push_str(&format!("<div style=\"font-size:12px;color:{MUTED}\">{} device(s) could not be measured: no readable event time in their latest log.</div>", n(&t["unmeasured"]) as i64));
         }
+        let zt = by_zone_tag(i);
+        h.push_str("<div style=\"font-size:14px;font-weight:600;margin:18px 0 6px\">By zone and tag1 · now</div>");
+        h.push_str(&format!("<table width=\"100%\" cellpadding=\"0\" cellspacing=\"0\"><tr><th style=\"{th}\">Zone</th><th style=\"{th}\">tag1</th><th style=\"{th}\">Devices</th><th style=\"{th}\">Late now</th><th style=\"{th}\">Above 60 min</th><th style=\"{th}\">Silent</th></tr>"));
+        for (z, t1, c) in zt.iter().take(ZONE_ROWS) {
+            h.push_str(&format!("<tr><td style=\"{td}\">{}</td><td style=\"{td}\">{}</td><td style=\"{td}\">{}</td><td style=\"{td};background:{}\">{}</td><td style=\"{td}\">{}</td><td style=\"{td}\">{}</td></tr>",
+                esc(z), esc(t1), c[0], if c[1] > 0 { PINK } else { GREEN }, c[1], c[2], c[3]));
+        }
+        if zt.len() > ZONE_ROWS {
+            h.push_str(&format!("<tr><td colspan=\"6\" style=\"{td};color:{MUTED}\">{} more zone · tag1 pairs in the attachment (Summary sheet)</td></tr>", zt.len() - ZONE_ROWS));
+        }
+        h.push_str("</table>");
     }
     if i.options.has("lateEvery2h") && !windows.is_empty() {
         let devices = n(&t["devices"]).max(1.0);
@@ -495,14 +577,14 @@ pub fn html(i: &Inputs<'_>, fleet: &Value, windows: &[Value], top: &[&DeviceRow]
     }
     if i.options.has("topDelayed") {
         h.push_str("<div style=\"font-size:14px;font-weight:600;margin:18px 0 6px\">Top delayed</div>");
-        h.push_str(&format!("<table width=\"100%\" cellpadding=\"0\" cellspacing=\"0\"><tr><th style=\"{th}\">Device</th><th style=\"{th}\">Cluster</th><th style=\"{th}\">Delay</th><th style=\"{th}\">Late since</th></tr>"));
+        h.push_str(&format!("<table width=\"100%\" cellpadding=\"0\" cellspacing=\"0\"><tr><th style=\"{th}\">Device</th><th style=\"{th}\">Cluster</th><th style=\"{th}\">Zone</th><th style=\"{th}\">tag1</th><th style=\"{th}\">Delay</th><th style=\"{th}\">Late since</th></tr>"));
         for d in top {
-            h.push_str(&format!("<tr><td style=\"{td}\">{}</td><td style=\"{td}\">{}</td><td style=\"{td};background:{}\">{}</td><td style=\"{td}\">{}</td></tr>",
-                esc(&d.device), esc(&d.cluster_name), if d.state == State::Critical { PINK } else { ORANGE },
+            h.push_str(&format!("<tr><td style=\"{td}\">{}</td><td style=\"{td}\">{}</td><td style=\"{td}\">{}</td><td style=\"{td}\">{}</td><td style=\"{td};background:{}\">{}</td><td style=\"{td}\">{}</td></tr>",
+                esc(&d.device), esc(&d.cluster_name), esc(d.zone.as_deref().unwrap_or("—")), esc(d.tag1.as_deref().unwrap_or("—")), if d.state == State::Critical { PINK } else { ORANGE },
                 d.now_minutes.map(time::minutes).unwrap_or_else(|| "can't measure".into()), d.late_since.map(|t| esc(&time::when(t, i.now))).unwrap_or_default()));
         }
         if top.is_empty() {
-            h.push_str(&format!("<tr><td colspan=\"4\" style=\"{td}\">No device is late now.</td></tr>"));
+            h.push_str(&format!("<tr><td colspan=\"6\" style=\"{td}\">No device is late now.</td></tr>"));
         }
         h.push_str("</table>");
     }
@@ -539,11 +621,14 @@ fn cap(s: &str) -> String {
 /// The plain-text copy of the mail.
 pub fn text(i: &Inputs<'_>, fleet: &Value, windows: &[Value], top: &[&DeviceRow], headline: &str) -> String {
     let t = &fleet["totals"];
-    let mut s = format!("ElasticPro log delay report · {}\n{} cluster(s) · {} devices · measured every {} hours\n\n", i.range.label(), i.clusters.len(), n(&t["devices"]) as i64, i.every_hours);
+    let mut s = format!("ElasticPro log delay report · {}\n{} cluster(s) · {} devices · measured every {} hours\n\n", range_label(i.range), i.clusters.len(), n(&t["devices"]) as i64, i.every_hours);
     s.push_str(&format!("Summary: {} · on time {} ({}) · late now {} ({}) · 30–60 min {} · above 60 min {} · silent {} · can't measure {}\n",
         headline, n(&t["onTime"]) as i64, pct(&t["pctOnTime"]), n(&t["late"]) as i64, pct(&t["pctLate"]), n(&t["delay"]) as i64, n(&t["critical"]) as i64,
         n(&t["silent"]) as i64, n(&t["unmeasured"]) as i64));
     let y = &fleet["yesterday"];
+    if fleet["devicesInRange"].as_u64() == Some(0) {
+        s.push_str(&format!("No measurement in this period (the measurement runs every {} hours): the figures are the devices' states now.\n", i.every_hours));
+    }
     s.push_str(&format!("Yesterday: {} became late, {} solved{}\n\n", n(&y["newlyLate"]) as i64, n(&y["solved"]) as i64,
         y["averageLastedMs"].as_i64().map(|ms| format!(" ({} late on average)", time::duration(ms))).unwrap_or_default()));
     if i.options.has("windows") && !windows.is_empty() {
@@ -564,7 +649,8 @@ pub fn text(i: &Inputs<'_>, fleet: &Value, windows: &[Value], top: &[&DeviceRow]
     if i.options.has("topDelayed") {
         s.push_str("Top delayed\n");
         for d in top {
-            s.push_str(&format!("  {} · {} · {} · late since {}\n", d.device, d.cluster_name, d.now_minutes.map(time::minutes).unwrap_or_else(|| "can't measure".into()),
+            s.push_str(&format!("  {} · {} · zone {} · tag1 {} · {} · late since {}\n", d.device, d.cluster_name, d.zone.as_deref().unwrap_or("—"), d.tag1.as_deref().unwrap_or("—"),
+                d.now_minutes.map(time::minutes).unwrap_or_else(|| "can't measure".into()),
                 d.late_since.map(|x| time::when(x, i.now)).unwrap_or_else(|| "—".into())));
         }
         if top.is_empty() {
@@ -710,6 +796,20 @@ mod tests {
         let csv2 = String::from_utf8(b2.csv.unwrap()).unwrap();
         assert!(csv2.starts_with("Zone,Device,"), "{csv2}");
         assert_eq!(csv2.lines().count(), 4);
+        // Columns chosen without Zone and tag1: both are still there, after the cluster.
+        let bare = Options::default().apply(&json!({ "devices": "all", "columns": ["device", "cluster", "nowMinutes"] }), &extras).unwrap();
+        let i3 = Inputs { options: &bare, ..i };
+        let b3 = build(&i3).unwrap();
+        let csv3 = String::from_utf8(b3.csv.unwrap()).unwrap();
+        assert!(csv3.starts_with("Device,Cluster,Zone,tag1,Delay now (min),"), "{csv3}");
+        assert!(csv3.contains("fw-1,Production,dc1,,94.00"), "tag1 not in these logs: empty, not invented: {csv3}");
+        assert!(b3.html.contains("By zone and tag1") && b3.html.contains(">dc1<"), "{}", b3.html);
+        assert!(b3.text.contains("zone dc1"), "{}", b3.text);
+        let parts = crate::report::zip::read(b3.xlsx.as_ref().unwrap()).unwrap();
+        let shared: String = parts.iter().filter(|(n, _)| n.starts_with("xl/")).map(|(_, b)| String::from_utf8_lossy(b).to_string()).collect();
+        for want in ["Zone", "tag1"] {
+            assert!(shared.matches(want).count() >= 4, "{want} in the Summary, Devices, Top delayed and Fixes sheets");
+        }
     }
 
     #[test]
@@ -717,7 +817,7 @@ mod tests {
         let now = chrono::Utc::now().timestamp_millis();
         let mut r = DeviceRow { device: "d".into(), cluster: "c".into(), cluster_name: "C".into(), state: State::Critical, now_minutes: Some(94.0), median_minutes: None,
             max_minutes: None, episodes: 1, solved: 0, late_ms: 0, last_started: Some(now - H), last_solved: None, late_since: Some(now - H), docs_per_day: None,
-            last_arrival: None, last_event: None, silent_since: None, extras: BTreeMap::new() };
+            last_arrival: None, last_event: None, silent_since: None, zone: None, tag1: None, in_last_run: true, extras: BTreeMap::new() };
         assert!(started_solved(&r, now).ends_with("→ still late"));
         r.late_since = None;
         r.last_solved = Some(now);

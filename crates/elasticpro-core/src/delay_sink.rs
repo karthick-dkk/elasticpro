@@ -32,12 +32,12 @@
 //!          │yes
 //!          ├── armed? primed? writes allowed? ──no──▶ record why, try again next tick
 //!          │
-//!          ├── for each target cluster
-//!          │     ├── terms(device) + top_hits(1)        one search
+//!          ├── for each target cluster (logdelay::collect)
+//!          │     ├── composite(device) + top_hits(1)    page by page, after_key, nothing cut
 //!          │     ├── delay = arrival − event            per device
-//!          │     └── either timestamp unreadable ──▶ skip the device
+//!          │     └── either timestamp unreadable ──▶ "can't measure", never 0
 //!          │
-//!          └── bulk index into the sink cluster, _id = cluster|device|hour
+//!          └── built-in store; bulk into the destination, _id = cluster|device|hour
 //! ```
 //!
 //! The `_id` is deterministic on purpose. A run that repeats — a short interval, a
@@ -80,8 +80,9 @@ pub struct SinkConfig {
     pub event_time_fields: Vec<String>,
     #[serde(default = "default_arrival_field")]
     pub arrival_field: String,
-    /// A bound on devices per cluster per run, so one misconfigured cluster cannot make
-    /// an unbounded request.
+    /// A bound on devices per cluster per run (*Max devices per run*, 1–100 000). The devices
+    /// are read in composite pages of at most 1000, so the bound is on the run's length and
+    /// what it keeps, not on one request; reaching it is said in the run log and on the page.
     #[serde(default = "default_max_devices")]
     pub max_devices: u64,
     /// Where the measurements go: a monitored cluster (`sink_cluster_id`, as before 0.3.53)
@@ -118,7 +119,7 @@ fn default_arrival_field() -> String { "@timestamp".into() }
 fn default_event_fields() -> Vec<String> {
     vec!["ingested_time".into(), "event_created".into(), "event.created".into()]
 }
-fn default_max_devices() -> u64 { 2000 }
+fn default_max_devices() -> u64 { 20_000 }
 
 impl Default for SinkConfig {
     fn default() -> SinkConfig {
@@ -144,7 +145,7 @@ impl SinkConfig {
     /// is the ceiling because beyond that the tail window stops overlapping.
     pub fn normalised(mut self) -> SinkConfig {
         self.every_hours = self.every_hours.clamp(1, 24);
-        self.max_devices = self.max_devices.clamp(1, 10_000);
+        self.max_devices = self.max_devices.clamp(1, crate::logdelay::measure::MAX_DEVICES_PER_RUN);
         if self.index_prefix.trim().is_empty() {
             self.index_prefix = default_prefix();
         }
@@ -182,6 +183,49 @@ impl SinkConfig {
             return Some("the only cluster to measure is the sink itself".into());
         }
         None
+    }
+}
+
+/// What a run measures: every target (the timer, `DELAY_SINK_RUN`), or what a person narrowed
+/// *Fetch now* to (`JOB_RUN {jobId: "logdelay.measure", clusterIds?, device?}`). The query is
+/// the same either way; a scoped run leaves the schedule's own state (last run, next due,
+/// back-off) as it was.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct MeasureScope {
+    pub clusters: Option<Vec<String>>,
+    pub device: Option<String>,
+}
+
+impl MeasureScope {
+    pub fn is_full(&self) -> bool {
+        self.clusters.is_none() && self.device.is_none()
+    }
+
+    /// From a `JOB_RUN` message: `clusterIds` (a list of ids, at most 200) and `device` (a
+    /// device name as the aggregation returns it). Refused by name when odd.
+    pub fn from_msg(msg: &Value) -> Result<MeasureScope, String> {
+        let clusters = match msg.get("clusterIds") {
+            None | Some(Value::Null) => None,
+            Some(Value::Array(a)) => {
+                let ids: Vec<String> = a.iter().map(|v| v.as_str().map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+                    .ok_or_else(|| "clusterIds: cluster ids (text) only".to_string())).collect::<Result<_, _>>()?;
+                if ids.is_empty() || ids.len() > 200 {
+                    return Err("clusterIds: between 1 and 200 cluster ids".into());
+                }
+                Some(ids)
+            }
+            Some(_) => return Err("clusterIds must be a list of cluster ids".into()),
+        };
+        let device = match msg.get("device") {
+            None | Some(Value::Null) => None,
+            Some(Value::String(s)) if crate::auth::device_name(s) => Some(s.clone()),
+            Some(_) => return Err("device: one device name, as the measurement lists it (no wildcard, at most 256 characters)".into()),
+        };
+        Ok(MeasureScope { clusters, device })
+    }
+
+    pub fn to_json(&self) -> Value {
+        json!({ "clusterIds": self.clusters, "device": self.device })
     }
 }
 
@@ -308,71 +352,6 @@ pub fn next_due(now_ms: i64, every_hours: u64, consecutive_failures: u32) -> i64
     now_ms + (base * factor).min(24 * 3_600_000)
 }
 
-/// The search body. Mirrors `buildSearchBody` in `ui/js/core/log-delay.js`.
-pub fn search_body(cfg: &SinkConfig) -> Value {
-    let arrival = cfg.arrival_field.clone();
-    let mut source: Vec<String> = vec![arrival.clone()];
-    source.extend(cfg.event_time_fields.iter().cloned());
-    json!({
-        "size": 0,
-        "query": { "bool": { "filter": [
-            { "range": { arrival.clone(): {
-                "gte": format!("now-{}h", cfg.every_hours.clamp(1, 24)),
-                "lte": "now",
-            } } },
-        ] } },
-        "aggs": { "devices": {
-            "terms": { "field": cfg.device_field, "size": cfg.max_devices, "order": { "_count": "desc" } },
-            "aggs": { "latest": { "top_hits": {
-                "size": 1,
-                "sort": [{ arrival: { "order": "desc" } }],
-                "_source": source,
-            } } },
-        } },
-    })
-}
-
-/// One device's measurement. No status, no reason, no fix — see the module note.
-#[derive(Clone, Debug, PartialEq)]
-pub struct Measurement {
-    pub device: String,
-    pub docs: u64,
-    pub arrival_ms: i64,
-    pub event_ms: i64,
-    pub delay_minutes: f64,
-}
-
-/// Turn one aggregation response into measurements.
-///
-/// A device whose latest document is missing either timestamp is skipped rather than
-/// recorded as zero: a zero delay is a measurement, and "the clock could not be read" is
-/// not one.
-pub fn measurements(res: &Value, cfg: &SinkConfig) -> Vec<Measurement> {
-    let buckets = res
-        .pointer("/aggregations/devices/buckets")
-        .and_then(|b| b.as_array())
-        .cloned()
-        .unwrap_or_default();
-
-    let mut out = Vec::new();
-    for b in buckets {
-        let Some(device) = bucket_key(&b) else { continue };
-        let Some(src) = b.pointer("/latest/hits/hits/0/_source") else { continue };
-        let Some(arrival) = to_ms(dotted(src, &cfg.arrival_field)) else { continue };
-        let Some(event) = cfg.event_time_fields.iter().find_map(|f| to_ms(dotted(src, f))) else {
-            continue;
-        };
-        out.push(Measurement {
-            device,
-            docs: b.get("doc_count").and_then(|d| d.as_u64()).unwrap_or(0),
-            arrival_ms: arrival,
-            event_ms: event,
-            delay_minutes: (arrival - event) as f64 / 60000.0,
-        });
-    }
-    out
-}
-
 pub(crate) fn bucket_key(b: &Value) -> Option<String> {
     match b.get("key") {
         Some(Value::String(s)) if !s.is_empty() => Some(s.clone()),
@@ -404,51 +383,9 @@ pub(crate) fn to_ms(v: Option<&Value>) -> Option<i64> {
     }
 }
 
-/// The NDJSON body for one cluster's measurements.
-pub fn bulk_body(cluster_id: &str, ms: &[Measurement], index: &str, bucket: &str) -> String {
-    let mut s = String::new();
-    for m in ms {
-        let id = format!("{cluster_id}|{}|{bucket}", m.device);
-        s.push_str(&json!({ "index": { "_index": index, "_id": id } }).to_string());
-        s.push('\n');
-        s.push_str(
-            &json!({
-                "@timestamp": bucket,
-                "cluster": cluster_id,
-                "device": m.device,
-                "docs": m.docs,
-                "arrival_time": m.arrival_ms,
-                "event_time": m.event_ms,
-                // Two decimals. The source figure is a subtraction of two clocks; more
-                // precision than that would be decoration.
-                "delay_minutes": (m.delay_minutes * 100.0).round() / 100.0,
-            })
-            .to_string(),
-        );
-        s.push('\n');
-    }
-    s
-}
-
-/// The one search this job sends to a measured cluster.
-pub fn search_request(cluster_id: &str, cfg: &SinkConfig) -> EsRequest {
-    EsRequest {
-        cluster_id: cluster_id.to_string(),
-        url: None,
-        method: "POST".into(),
-        path: format!("/{}/_search?ignore_unavailable=true&allow_no_indices=true", cfg.index_pattern),
-        body: Some(search_body(cfg).to_string()),
-        auth_header: None,
-        timeout_ms: Some(60_000),
-        allow_writes: false,
-        origin: Some("delay-sink".into()),
-        class: crate::gate::Class::Background,
-        ..Default::default()
-    }
-}
-
-/// The same search with the cluster's own pattern and a body built elsewhere (the log delay
-/// report's `logdelay::measure::search_body`, with the extra columns).
+/// The one search a run sends, page by page: the cluster's own pattern, a body from
+/// `logdelay::measure::page_body` (the device composite, the newest document of each with the
+/// extra columns). Never a write.
 pub fn search_request_for(cluster_id: &str, pattern: &str, body: Value) -> EsRequest {
     EsRequest {
         cluster_id: cluster_id.to_string(),
@@ -659,70 +596,8 @@ mod tests {
     }
 
     #[test]
-    fn a_device_missing_a_timestamp_is_skipped_not_zeroed() {
-        let res = json!({ "aggregations": { "devices": { "buckets": [
-            { "key": "good", "doc_count": 10, "latest": { "hits": { "hits": [
-                { "_source": { "@timestamp": "2026-09-19T12:41:00Z", "ingested_time": "2026-09-19T12:00:00Z" } },
-            ] } } },
-            { "key": "no-event-time", "doc_count": 7, "latest": { "hits": { "hits": [
-                { "_source": { "@timestamp": "2026-09-19T12:41:00Z" } },
-            ] } } },
-            { "key": "unparseable", "doc_count": 3, "latest": { "hits": { "hits": [
-                { "_source": { "@timestamp": "yesterday", "ingested_time": "2026-09-19T12:00:00Z" } },
-            ] } } },
-            { "key": "no-hits", "doc_count": 1, "latest": { "hits": { "hits": [] } } },
-        ] } } });
-        let ms = measurements(&res, &cfg());
-        assert_eq!(ms.len(), 1, "only the measurable device is recorded");
-        assert_eq!(ms[0].device, "good");
-        assert_eq!(ms[0].delay_minutes, 41.0);
-        assert_eq!(ms[0].docs, 10);
-    }
-
-    #[test]
-    fn a_nested_event_field_is_found_either_way() {
-        let nested = json!({ "aggregations": { "devices": { "buckets": [
-            { "key": "n", "doc_count": 1, "latest": { "hits": { "hits": [
-                { "_source": { "@timestamp": "2026-09-19T12:30:00Z", "event": { "created": "2026-09-19T12:00:00Z" } } },
-            ] } } },
-        ] } } });
-        let flat = json!({ "aggregations": { "devices": { "buckets": [
-            { "key": "f", "doc_count": 1, "latest": { "hits": { "hits": [
-                { "_source": { "@timestamp": "2026-09-19T12:30:00Z", "event.created": "2026-09-19T12:00:00Z" } },
-            ] } } },
-        ] } } });
-        assert_eq!(measurements(&nested, &cfg())[0].delay_minutes, 30.0);
-        assert_eq!(measurements(&flat, &cfg())[0].delay_minutes, 30.0);
-    }
-
-    #[test]
-    fn a_clock_ahead_stays_negative() {
-        // The engine classifies this as CLOCK_AHEAD. The measurement must carry the sign
-        // through rather than clamping it, or the classifier never sees it.
-        let res = json!({ "aggregations": { "devices": { "buckets": [
-            { "key": "ahead", "doc_count": 2, "latest": { "hits": { "hits": [
-                { "_source": { "@timestamp": "2026-09-19T12:00:00Z", "ingested_time": "2026-09-19T12:37:00Z" } },
-            ] } } },
-        ] } } });
-        assert_eq!(measurements(&res, &cfg())[0].delay_minutes, -37.0);
-    }
-
-    #[test]
-    fn ids_repeat_within_an_hour_so_a_rerun_overwrites() {
-        let m = vec![Measurement {
-            device: "dev-1".into(), docs: 5,
-            arrival_ms: 1, event_ms: 0, delay_minutes: 1.0 / 60000.0,
-        }];
-        let a = bulk_body("prod", &m, "elasticpro-log-delay-2026.09", "2026-09-19T14:00:00Z");
-        let b = bulk_body("prod", &m, "elasticpro-log-delay-2026.09", "2026-09-19T14:00:00Z");
-        assert_eq!(a, b);
-        assert!(a.contains(r#""_id":"prod|dev-1|2026-09-19T14:00:00Z""#), "{a}");
-        assert_eq!(a.lines().count(), 2, "one action line, one document line");
-    }
-
-    #[test]
     fn the_search_never_asks_to_write() {
-        let r = search_request("prod", &cfg());
+        let r = search_request_for("prod", "logstash-*", json!({ "size": 0 }));
         assert!(!r.allow_writes);
         assert!(r.path.starts_with("/logstash-*/_search"));
         assert!(bulk_request(&cfg(), String::new()).allow_writes);
@@ -767,6 +642,10 @@ mod tests {
         assert_eq!(c.max_devices, 1);
         let c = SinkConfig { every_hours: 999, ..SinkConfig::default() }.normalised();
         assert_eq!(c.every_hours, 24);
+        // Above 20 000 devices is a setting, not an error: kept up to the run's own bound.
+        assert_eq!(SinkConfig { max_devices: 25_000, ..SinkConfig::default() }.normalised().max_devices, 25_000);
+        assert_eq!(SinkConfig { max_devices: 10_000_000, ..SinkConfig::default() }.normalised().max_devices, 100_000);
+        assert_eq!(SinkConfig::default().max_devices, 20_000);
     }
 
     #[test]

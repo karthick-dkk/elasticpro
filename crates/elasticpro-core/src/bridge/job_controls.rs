@@ -142,8 +142,19 @@ impl Core {
                 if !self.edition.schedules() {
                     return bad("unsupported", "the scheduled log delay measurement runs only in the hosted edition");
                 }
+                // Fetch now: `clusterIds` and/or `device` narrow the run; the query is the
+                // scheduled run's own (docs/LOGDELAY.md "Fetch now").
+                let scope = match crate::delay_sink::MeasureScope::from_msg(msg) {
+                    Ok(s) => s,
+                    Err(e) => return bad("bad_request", e),
+                };
+                if let Some(ids) = &scope.clusters {
+                    if let Some(unknown) = ids.iter().find(|id| self.spec_for(id).is_none()) {
+                        return bad("not_found", format!("no cluster {unknown:?}"));
+                    }
+                }
                 self.job_spawn(job, "the scheduled log delay measurement", trigger, meta, "nothing to do", |core, t| async move {
-                    core.run_delay_sink(t).await;
+                    core.run_delay_sink(t, scope).await;
                 })
             }
             jobs::HOUSEKEEPING => {
@@ -309,7 +320,14 @@ impl Core {
             return refused;
         }
         let meta = RunMeta { retry_of: Some(r.id.clone()), attempt: r.attempt + 1 };
-        let m = if matches!(r.job_id.as_str(), jobs::VOLUME_DAILY | jobs::HOSTS_COLLECT) { json!({ "clusterIds": r.clusters }) } else { json!({}) };
+        let m = if matches!(r.job_id.as_str(), jobs::VOLUME_DAILY | jobs::HOSTS_COLLECT) {
+            json!({ "clusterIds": r.clusters })
+        } else if let Some(scope) = r.scope.clone().filter(|_| r.job_id == jobs::LOGDELAY_MEASURE) {
+            // A Fetch now that was narrowed is tried again as narrowed.
+            scope
+        } else {
+            json!({})
+        };
         let mut out = self.job_run_local(&r.job_id, &m, caller, Trigger::Retry, meta).await;
         if out["ok"] == json!(true) {
             out["retryOf"] = json!(id);

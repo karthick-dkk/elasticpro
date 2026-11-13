@@ -431,6 +431,9 @@ UI_REPORT_INDICES_AT text
 UI_REPORT_HOSTS_TO text
 UI_REPORT_HOSTS_SCHEDULE enum monthly,weekly,daily,manual
 UI_REPORT_HOSTS_AT text
+UI_REPORT_LOGDELAY_TO text
+UI_REPORT_LOGDELAY_SCHEDULE enum monthly,weekly,daily,hourly,manual
+UI_REPORT_LOGDELAY_AT text
 UI_REPORT_HOSTS_FIELDS text
 UI_REPORT_HOSTS_MAX_PAGES int 1 100000
 UI_REPORT_HOSTS_KEEP_MONTHS int 1 13
@@ -507,7 +510,7 @@ cfg_check() {
       case ",$item," in *,,*) echo "has an empty pattern between commas"; return 1 ;; *,_*|*,+*|,-*) echo "a pattern cannot start with _ or +, and the first cannot be an exclusion (-)"; return 1 ;; esac ;;
     UI_VOLUME_TIME_FIELD)
       case $v in *[[:space:],\"*]*) echo "must be one field name, e.g. @timestamp"; return 1 ;; esac ;;
-    UI_VOLUME_COLLECT_AT|UI_REPORT_AT|UI_REPORT_INDICES_AT|UI_REPORT_HOSTS_AT)
+    UI_VOLUME_COLLECT_AT|UI_REPORT_AT|UI_REPORT_INDICES_AT|UI_REPORT_HOSTS_AT|UI_REPORT_LOGDELAY_AT)
       [[ $v =~ ^([01][0-9]|2[0-3]):[0-5][0-9]$ ]] || { echo "must be a time of day HH:MM, 00:00 to 23:59"; return 1; } ;;
     # The same rule as the core (settings.rs check_text, play::settings::spotlight_when_problem).
     UI_PLAY_SPOTLIGHT_WHEN)

@@ -38,7 +38,12 @@ impl Core {
         let (Some(from), Some(to)) = (time::parse_day(&job.period.from), time::parse_day(&job.period.to)) else {
             return JobEnd::failed("the period is not two YYYY-MM-DD days");
         };
-        let range = Range::days(from, to);
+        // An hourly report (its schedule's period, or "lastHour") covers that hour alone: the
+        // device rows, periods and late time are measured over it; the day's figures are its day's.
+        let range = match job.period.hour {
+            Some(h) => Range { from, to, from_ms: h, to_ms: h + crate::report::period::HOUR_MS },
+            None => Range::days(from, to),
+        };
         let every = self.delay_sink_config().every_hours.clamp(1, 24);
         self.report_progress(&job.id, 0, 2);
         let inputs = self.logdelay_inputs_for(&job.cluster_ids).await;
@@ -52,7 +57,10 @@ impl Core {
             Err(e) => return JobEnd::failed(format!("the file could not be built: {e}")),
         };
         self.report_progress(&job.id, 1, 2);
-        let stem = format!("elasticpro-log-delay-{}_{}", job.period.from, job.period.to);
+        let stem = match job.period.hour {
+            Some(h) => format!("elasticpro-log-delay-{}", time::local_datetime(h).format("%Y-%m-%dT%H00")),
+            None => format!("elasticpro-log-delay-{}_{}", job.period.from, job.period.to),
+        };
         let mut files: Vec<(String, String, Vec<u8>)> = vec![];
         let mut kept: Option<FileRef> = None;
         if let Some(x) = built.xlsx {

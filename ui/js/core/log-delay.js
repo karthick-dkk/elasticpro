@@ -114,6 +114,10 @@ export function decide(fields, caps) {
     resolved: {
       device: deviceOk ? deviceName : null,
       eventTime: eventOk[0] || null,
+      // Every candidate the mapping has, in the configured order: a document is read by the
+      // first of them it carries (the core's rule, logdelay/measure.rs). Reading only the
+      // first one the mapping has made every device whose logs carry another one "error".
+      eventTimes: eventOk,
       arrival: arrivalOk ? fields.arrival : null,
       metadata: fields.metadata.map(aggregatableName).filter((m) => have.has(m)),
     },
@@ -264,19 +268,15 @@ export function analysePattern(delayMinutes, t = PATTERN) {
 export function recordFrom(bucket, resolved, levels = null) {
   const hit = ((((bucket || {}).latest || {}).hits || {}).hits || [])[0];
   const src = (hit && hit._source) || {};
-  const arrival = Date.parse(dotted(src, resolved.arrival));
-  const event = Date.parse(dotted(src, resolved.eventTime));
-
-  const ok = isFinite(arrival) && isFinite(event);
-  const delayMinutes = ok ? (arrival - event) / 60000 : null;
+  const { arrival, event, delayMinutes } = docDelay(src, resolved.arrival, eventSource(resolved));
   const status = statusFor(delayMinutes, levels);
   const { pattern, note } = analysePattern(delayMinutes);
 
   return {
     device: bucket.key,
     docs: bucket.doc_count || 0,
-    arrival: isFinite(arrival) ? arrival : null,
-    event: isFinite(event) ? event : null,
+    arrival,
+    event,
     delayMinutes,
     status,
     pattern,
@@ -291,7 +291,41 @@ export function recordFrom(bucket, resolved, levels = null) {
   };
 }
 
-const dotted = (o, path) => String(path || '').split('.').reduce((v, k) => (v == null ? v : v[k]), o);
+const dotted = (o, path) => {
+  if (o && path && Object.prototype.hasOwnProperty.call(o, path)) return o[path];
+  return String(path || '').split('.').reduce((v, k) => (v == null ? v : v[k]), o);
+};
+
+/**
+ * A date as Elasticsearch hands it back: RFC 3339 text, or epoch milliseconds as a number
+ * (a `date` mapped `epoch_millis`). Anything else is NaN — unreadable, never 0.
+ */
+export function toMs(v) {
+  if (typeof v === 'number') return Number.isFinite(v) ? v : NaN;
+  if (typeof v === 'string' && /^\d{12,14}$/.test(v.trim())) return Number(v.trim());
+  return typeof v === 'string' ? Date.parse(v) : NaN;
+}
+
+/** The first of `names` the document carries that reads as a date (`toMs`), else NaN. */
+function firstMs(src, names) {
+  for (const n of names) {
+    const t = toMs(dotted(src, n));
+    if (Number.isFinite(t)) return t;
+  }
+  return NaN;
+}
+
+/** The event time of one document: the first candidate it carries that reads as a date. */
+export function eventMs(src, resolved) {
+  return firstMs(src, eventSource(resolved));
+}
+
+/**
+ * Every event-time candidate: the fields a search brings back in `_source` and the order a
+ * document is read by (`resolveFields` lists them as `eventTimes`; a caller with one name
+ * only, `eventTime`, is read by that one).
+ */
+export const eventSource = (resolved) => ((resolved.eventTimes && resolved.eventTimes.length) ? resolved.eventTimes : [resolved.eventTime]);
 
 /**
  * The search the analysis runs.
@@ -312,8 +346,8 @@ export function buildSearchBody(resolved, { from, to, size = 500 } = {}) {
             top_hits: {
               size: 1,
               sort: [{ [resolved.arrival]: { order: 'desc' } }],
-              _source: [resolved.arrival, resolved.eventTime,
-                        ...(resolved.metadata || []).map((m) => String(m).replace(/\.keyword$/, ''))],
+              _source: [...new Set([resolved.arrival, ...eventSource(resolved),
+                        ...(resolved.metadata || []).map((m) => String(m).replace(/\.keyword$/, ''))])],
             },
           },
         },
@@ -574,8 +608,8 @@ export function buildDeviceQuery(resolved, { device, size = 15, fields = null, f
     track_total_hits: from || to ? 10000 : true,
     sort: [{ [resolved.arrival]: { order: 'desc', unmapped_type: 'date' } }],
     query: { bool: { must: [{ bool: { should, minimum_should_match: 1 } }], ...(filter.length ? { filter } : {}) } },
-    _source: [resolved.arrival, resolved.eventTime,
-              ...(resolved.metadata || []).map((m) => String(m).replace(/\.keyword$/, ''))],
+    _source: [...new Set([resolved.arrival, ...eventSource(resolved),
+              ...(resolved.metadata || []).map((m) => String(m).replace(/\.keyword$/, ''))])],
   };
 }
 
@@ -588,16 +622,13 @@ export function buildDeviceQuery(resolved, { device, size = 15, fields = null, f
  */
 /**
  * One document's delay: arrival minus event time, in minutes — the one definition every list
- * of documents uses (the Live Watch close-up, Live logs). `eventFields` is one name or a list
- * tried in order (the first the document carries). Either time unreadable: null, never 0.
+ * of documents uses (the device record, the Live Watch close-up, Live logs). `eventFields` is
+ * one name or a list tried in order (the first the document carries that reads as a date,
+ * as RFC 3339 text or epoch milliseconds — `toMs`). Either time unreadable: null, never 0.
  */
 export function docDelay(src, arrivalField, eventFields) {
-  const arrival = Date.parse(dotted(src || {}, arrivalField));
-  let event = NaN;
-  for (const f of Array.isArray(eventFields) ? eventFields : [eventFields]) {
-    const v = dotted(src || {}, f);
-    if (v !== undefined && v !== null && v !== '') { event = Date.parse(v); break; }
-  }
+  const arrival = toMs(dotted(src || {}, arrivalField));
+  const event = firstMs(src || {}, Array.isArray(eventFields) ? eventFields : [eventFields]);
   const ok = isFinite(arrival) && isFinite(event);
   return {
     arrival: isFinite(arrival) ? arrival : null,
@@ -609,7 +640,7 @@ export function docDelay(src, arrivalField, eventFields) {
 export function documentDelays(hits, resolved, levels = null) {
   return (hits || []).map((hit) => {
     const src = (hit && hit._source) || {};
-    const { arrival, event, delayMinutes } = docDelay(src, resolved.arrival, resolved.eventTime);
+    const { arrival, event, delayMinutes } = docDelay(src, resolved.arrival, eventSource(resolved));
     return {
       id: (hit && hit._id) || '',
       index: (hit && hit._index) || '',

@@ -186,6 +186,10 @@ const SPECS: &[Spec] = &[
     spec("UI_REPORT_HOSTS_TO", Kind::Text, To::Direct),
     spec("UI_REPORT_HOSTS_SCHEDULE", Kind::Enum(&["monthly", "weekly", "daily", "manual"]), To::Direct),
     spec("UI_REPORT_HOSTS_AT", Kind::Text, To::Direct),
+    // The log delay report's schedule (docs/LOGDELAY.md): hourly is its cadence alone.
+    spec("UI_REPORT_LOGDELAY_TO", Kind::Text, To::Direct),
+    spec("UI_REPORT_LOGDELAY_SCHEDULE", Kind::Enum(&["monthly", "weekly", "daily", "hourly", "manual"]), To::Direct),
+    spec("UI_REPORT_LOGDELAY_AT", Kind::Text, To::Direct),
     spec("UI_REPORT_HOSTS_FIELDS", Kind::Text, To::Direct),
     spec("UI_REPORT_HOSTS_MAX_PAGES", Kind::Int(1, 100_000), To::Direct),
     spec("UI_REPORT_HOSTS_KEEP_MONTHS", Kind::Int(1, 13), To::Direct),
@@ -492,7 +496,7 @@ fn check_text(key: &str, v: String) -> Result<String, String> {
             None => Ok(v),
             Some(why) => Err(format!("{v:?} {why}, e.g. @timestamp")),
         },
-        "UI_VOLUME_COLLECT_AT" | "UI_REPORT_AT" | "UI_REPORT_INDICES_AT" | "UI_REPORT_HOSTS_AT" => match crate::volume::schedule::parse_hhmm(&v) {
+        "UI_VOLUME_COLLECT_AT" | "UI_REPORT_AT" | "UI_REPORT_INDICES_AT" | "UI_REPORT_HOSTS_AT" | "UI_REPORT_LOGDELAY_AT" => match crate::volume::schedule::parse_hhmm(&v) {
             Some(_) => Ok(v),
             None => Err(format!("{v:?} is not a time of day HH:MM, 00:00 to 23:59")),
         },
