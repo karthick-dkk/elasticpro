@@ -98,6 +98,9 @@ pub struct ZbxCluster {
     /// The cluster type the host tag `elasticpro:type` names (ci | di | onprem), when it
     /// names one ElasticPro knows. Seeds `cluster_meta` for a cluster with no entry there.
     pub kind: Option<String>,
+    /// `{$ELASTICSEARCH.SCHEME}`, `HOST` and `PORT` as Zabbix holds them, before they are made into
+    /// `url`: what the review of a held host shows an administrator.
+    pub address_macros: String,
 }
 
 impl ZbxCluster {
@@ -154,6 +157,14 @@ pub fn cluster_from(host: &Value, macros: &HashMap<String, (i64, String)>, reade
     }
     // A host macro holding a whole URL is taken as one rather than doubled up.
     let url = if es_host.contains("://") { es_host.trim_end_matches('/').to_string() } else { format!("{scheme}://{es_host}:{port}") };
+    // Only a plain address is a cluster: one with a credential, a backslash, a query or a fragment
+    // could be read as one host here and reached as another by the HTTP client.
+    if crate::zbx_conflicts::url_identity(&url).is_none() {
+        return Err(format!("{hostname}: {{$ELASTICSEARCH.HOST}}, SCHEME and PORT do not make a plain http(s) address \
+                            (no user:password@, backslash, query or fragment): {:?}", crate::zbx_conflicts::without_credential(&url)));
+    }
+    let raw = |k: &str| macros.get(k).map(|(_, v)| v.clone()).unwrap_or_else(|| "(not set)".into());
+    let address_macros = format!("HOST={} SCHEME={} PORT={}", raw("{$ELASTICSEARCH.HOST}"), raw("{$ELASTICSEARCH.SCHEME}"), raw("{$ELASTICSEARCH.PORT}"));
     let password = match macros.get("{$ELASTICSEARCH.PASSWORD}") {
         None => PasswordRef::Missing,
         Some((2, v)) if !v.trim().is_empty() => PasswordRef::Vault(v.trim().to_string()),
@@ -177,6 +188,7 @@ pub fn cluster_from(host: &Value, macros: &HashMap<String, (i64, String)>, reade
             .find(|t| t["tag"].as_str() == Some(crate::cluster_meta::TYPE_TAG))
             .and_then(|t| t["value"].as_str().and_then(crate::cluster_meta::normalize_type))
             .map(String::from),
+        address_macros,
     })
 }
 
@@ -816,7 +828,7 @@ mod tests {
         assert_eq!(slug("  ACME Prod / DR  "), "acme-prod-dr");
         let c = ZbxCluster { hostid: "1".into(), host: "Prod ES".into(), name: "x".into(), url: String::new(),
                              username: String::new(), password: PasswordRef::Missing, jump: None, jump_addr: None, client: None, readers: vec![],
-                             password_on_host: false, kind: None };
+                             password_on_host: false, kind: None, address_macros: String::new() };
         assert_eq!(c.id(), "zbx-prod-es");
     }
 }

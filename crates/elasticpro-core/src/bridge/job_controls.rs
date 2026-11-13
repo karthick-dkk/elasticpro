@@ -445,8 +445,9 @@ impl Core {
         let mut ids: Vec<String> = jobs::REGISTRY.iter().map(|d| d.id.to_string()).collect();
         ids.extend(self.reports.created_settings().schedules.iter().map(|x| x.job_id()));
         json!({ "ok": true, "overall": c.overall, "jobs": ids.iter().map(|id| c.job_view(id)).collect::<Vec<_>>(),
+                "coreGate": self.gate_settings_view(),
                 "setBy": c.set_by, "setAt": c.set_at,
-                "note": "requests, priority, auto and the CPU / memory thresholds are kept for the adaptive concurrency governor; pause, enabled and the retry policy act now" })
+                "note": "the governor reads requests, priority, auto, mostAtOnce, workerTotal and the CPU / memory thresholds every 10 s; the core's gate fields act at once" })
     }
 
     /// `JOB_SETTINGS_GET`: every job's settings (the registry's defaults filled in) and the overall ones.
@@ -457,10 +458,12 @@ impl Core {
     /// `JOB_SETTINGS_SET {jobId?, enabled?, auto?, requests?: {min?, max?}, priority?, overall?: {…}}`.
     fn job_settings_set(&self, msg: &Value, caller: Option<&Caller>) -> Value {
         let by = who(caller);
-        match self.jobs.update_controls(&by, |c| c.apply(msg, |id| self.job_known(id))) {
+        match self.jobs.update_controls(&by, |c| c.apply_with(msg, |id| self.job_known(id), super::governor_api::gate_locked)) {
             Ok(((), c)) => {
                 let job = msg.get("jobId").and_then(Value::as_str).unwrap_or("(overall)");
                 tracing::info!(target: "audit", user = %by, job = %job, "job settings saved");
+                // The core's gate limits act at once; the governor reads the rest at its tick.
+                self.apply_gate_settings();
                 self.job_settings_view(&c)
             }
             Err(e) => bad("bad_request", e),

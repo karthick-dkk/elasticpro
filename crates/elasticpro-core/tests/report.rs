@@ -345,7 +345,7 @@ async fn on_hosted_roles_ownership_the_stored_password_and_the_schedule() {
     assert_eq!(ended(&c, Some(&uma), &idb).await["status"], "done");
     let jobs = c.handle(json!({ "type": "REPORT_JOBS", "session": uma })).await;
     assert_eq!(jobs["jobs"].as_array().unwrap().len(), 2, "everyone sees the queue of the clusters they see: {jobs}");
-    assert_eq!((jobs["concurrency"].as_u64(), jobs["running"].as_u64()), (Some(3), Some(0)));
+    assert_eq!((jobs["concurrency"].as_u64(), jobs["running"].as_u64()), (Some(4), Some(0)), "overall.mostAtOnce, 4 by default");
     assert!(jobs["jobs"][0].get("volume").is_none());
 
     // Download: the starter's, or an admin's.
@@ -527,10 +527,10 @@ async fn a_scheduled_report_the_emergency_stop_cuts_short_is_recorded_and_tried_
     let g = c.handle(json!({ "type": "REPORT_SCHEDULE_GET", "session": admin })).await;
     assert_eq!((g["lastSent"]["ok"].as_bool(), g["lastSent"]["to"].as_u64()), (Some(true), Some(1)), "{g}");
 
-    // A mailed report somebody stops while it waits is recorded too. Three jobs hold the
-    // three slots (each period runs to today, so each asks the cluster, one at a time; three
-    // different periods, since the same report asked again joins the one queued).
-    for n in 1..=3 {
+    // A mailed report somebody stops while it waits is recorded too. Four jobs hold the
+    // four slots (overall.mostAtOnce; each period runs to today, so each asks the cluster, one
+    // at a time; different periods, since the same report asked again joins the one queued).
+    for n in 1..=4 {
         let from = (t - Duration::days(n)).format("%Y-%m-%d").to_string();
         let to = t.format("%Y-%m-%d").to_string();
         let r = c.handle(json!({ "type": "REPORT_RUN", "session": admin, "clusterIds": ["prod"], "period": { "from": from, "to": to }, "format": "csvzip" })).await;

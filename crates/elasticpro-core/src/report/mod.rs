@@ -2,7 +2,7 @@
 //!
 //! ```text
 //!   REPORT_RUN ──▶ one job per cluster ─┐                      ┌─▶ <data>/reports/<id>-volume-….xlsx
-//!   schedule tick / REPORT_SEND_NOW ────┴▶ queue (3..5 at once) ┤      (REPORT_DOWNLOAD, 7 days)
+//!   schedule tick / REPORT_SEND_NOW ────┴▶ queue (mostAtOnce)   ┤      (REPORT_DOWNLOAD, 7 days)
 //!                                          FIFO, jobs.json      └─▶ SMTP (mail.json + config.txt)
 //!   a job:  collect the period's missing days (volume's collector, stoppable between days)
 //!           → build the file (every figure from volume::derive) → mail it when asked

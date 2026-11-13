@@ -269,7 +269,9 @@ pub fn endpoint(t: &str) -> Option<&'static str> {
         "REPORT_RUN" | "VOLUME_RUN" => Some("/run"),
         "REPORT_SEND_NOW" => Some("/send-now"),
         "REPORT_STOP" => Some("/stop"),
-        "REPORT_CLEAR" | "REPORT_CONCURRENCY_SET" => Some("/queue"),
+        "REPORT_CLEAR" => Some("/queue"),
+        // REPORT_CONCURRENCY_SET writes `overall.mostAtOnce` in the core's controls.json (docs/JOBS.md
+        // "Governor"), which the worker reads: the core's file, never forwarded.
         // The job controls of the worker's jobs (docs/JOBS.md): run now, cancel, retry.
         "JOB_RUN" | "JOB_CANCEL" | "JOB_RETRY" => Some("/job"),
         _ => None,
@@ -563,6 +565,7 @@ mod tests {
         assert_eq!(endpoint("REPORT_SEND_NOW"), Some("/send-now"));
         assert_eq!(endpoint("REPORT_STOP"), Some("/stop"));
         assert_eq!(endpoint("REPORT_CLEAR"), Some("/queue"));
+        assert_eq!(endpoint("REPORT_CONCURRENCY_SET"), None, "it writes overall.mostAtOnce, the core's file");
         assert_eq!(endpoint("REPORT_JOBS"), None, "reads never go to the worker");
         assert_eq!(endpoint("JOB_CANCEL"), Some("/job"));
         assert_eq!(endpoint("JOB_SETTINGS_SET"), None, "settings are the core's file");

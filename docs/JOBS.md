@@ -7,8 +7,8 @@ request handling are monitoring, not jobs: they are not in the table and cannot 
 
 Built in stages: the registry, the run log and `JOBS_LIST`; the controls (run now, pause,
 resume, cancel, retry, create, several schedules per report kind, joining a duplicate,
-deferring for a busy cluster — "Controls" below); the adaptive concurrency governor (it reads
-the settings the controls already keep: `requests`, `priority`, `auto`, the thresholds); the
+deferring for a busy cluster — "Controls" below); the governor, which sizes the worker's jobs
+every 10 s from what it measures within the settings the controls keep ("Governor" below); the
 Jobs page.
 
 ## The jobs
@@ -161,9 +161,15 @@ name clusters and carry their errors). Read-only; not in the activity log (a pol
                 "memoryBytes": 512000000, "memoryLimitBytes": 2147483648, "memoryPct": 23.8,
                 "gate": { "running": 6, "queued": 3 } }
   },
+  "governor": { "auto": true, "inUse": 5, "total": 8, "mostAtOnce": 4, "jobsRunning": 2,
+                "lastChange": { "at": 1793944800000, "from": 16, "to": 8, "reason": "people_waiting" },
+                "signals": { "cpuPct": 41.2, "memoryPct": 23.8, "peopleWaiting": 2, "queue": 1, "avgPageMs": 840 } },
   "problems": []
 }
 ```
+
+A running job's `state` also has `allocation` (`null` while it does not run):
+`{ "requests": 4, "min": 1, "max": 4, "auto": true, "reason": "share" }` — "Governor" below.
 
 - `state.enabled` (automatic runs on, `JOB_SETTINGS_SET`), `state.paused`, `state.pausedBy`,
   `state.pausedAt` (`JOB_PAUSE`), from `controls.json`. A paused job, or one whose automatic runs
@@ -178,6 +184,8 @@ name clusters and carry their errors). Read-only; not in the activity log (a pol
   the worker's last heartbeat (`state` `up`, `late`, `down`, `missing`, `version`, `unreadable`).
 - `problems`: a run file that could not be read (its runs are missing from the list, not none).
 - `busy`: the busy clusters the caller sees (below), `[{cluster, signal, reason, since}]`.
+- `governor` and each job's `state.allocation`: "Governor" below. `governor` is `null` in role
+  core while the worker's heartbeat is missing or late — never a stale figure shown as now.
 - The Zabbix sync's `nextRunAt` is the timer's own: it says when it wakes next each time it goes
   to sleep, from the start of the process — so a restart has a time at once.
 
@@ -356,7 +364,173 @@ sees the cluster.
 - overall: `mostAtOnce` — most jobs at once [4]; `workerTotal` — the worker's total requests [16];
   `cpuPct` / `memoryPct` — hold new runs above them [85 / 85]; `retryLimit` [3]; `retryWaitMinutes` [5].
 
+- overall, the governor: `auto` — the governor moves the worker's total [on; off, the total is
+  `workerTotal`];
+- overall, the core's gate (`gate::Limits`), changed without a restart: `esConcurrency`
+  (`ES_CONCURRENCY`, 1–1024), `esPerCluster` (`ES_PER_CLUSTER`), `esPerJumpHost`
+  (`ES_PER_JUMP_HOST`), `esBackgroundReserve` (`ES_BACKGROUND_RESERVE`, 0–1023); `null` puts one
+  back to config.txt's value or the default. **A key set in config.txt (or its
+  `ELASTICPRO_ES_*` variable) locks the field**: setting it is refused, naming the key.
+
+`JOB_SETTINGS_GET` answers every job's settings with the defaults filled in, and `coreGate`:
+each gate field in force, `{value, lockedBy, min, max}` (`lockedBy` names the config.txt key, or
+null). `JOB_SETTINGS_SET` checks every field before applying any (a refusal changes nothing).
+Pause, `enabled`, the retry policy and the core's gate fields act at once; the governor reads the
+rest at its next tick (10 s).
+
+`REPORT_CONCURRENCY_SET {n}` (3..5, as before) is the older name of `overall.mostAtOnce`: it
+writes it — one setting, kept in the core's `controls.json`, so the message is handled by the core
+and no longer forwarded to the worker. `REPORT_JOBS.concurrency` reads `mostAtOnce`.
+
+## Governor
+
+The worker sizes its own parallelism every 10 s from what it measures, never above the limits an
+administrator sets, and people's requests come first. In ElasticPro **threads** are the requests
+a job has in flight at Elasticsearch at once, and **processes** are the jobs running at once. The
+rule, the sharing and the lanes are `jobs/governor.rs` (pure, tested); the tick, the signals and
+the publication are `bridge/governor_api.rs`.
+
+### The rule (AIMD)
+
+One total, decided every `TICK_SECS` (10 s) by role `worker` (and role `all`):
+
+| when | the total |
+|---|---|
+| calm: CPU < 60 % of what the process may use, memory < 70 % of its limit, **nobody waiting at the core's gate (known)**, CPU not throttled, no fleet-wide pushback | one more |
+| any signal over its threshold, first of: people waiting → `people_waiting`; ≥ 10 % of the tick's CPU periods throttled → `cpu_throttled`; CPU over `cpuPct` → `cpu`; memory over `memoryPct` → `memory`; more than half of the clusters the jobs sent to this tick rejecting (`pool` or `429`) → `cluster_rejecting` | half |
+| between the two | unchanged |
+| outside its bounds (an administrator changed them, a job's minimum came in), or `overall.auto` off | put back → `limit` |
+
+**Bounds**: never below the sum of the running jobs' minimums, never above `workerTotal` (when
+the minimums add up to more, `workerTotal` wins). It starts at half of `workerTotal`.
+
+**Not known is not zero.** CPU and memory that cannot be read (no cgroup, no memory limit) are
+shown `null` and move the rule neither way. People waiting that is not known (role worker, the
+core's publication missing or older than 30 s) is shown `null` and **holds** the total: the
+worker never pushes harder on a guess.
+
+### The signals
+
+| signal | from | |
+|---|---|---|
+| `cpuPct` | the process's cgroup `cpu.stat`, read at each tick (`health::Sampler`) | percent of its CPU limit (`cpu.max`), else of every CPU of the host; over the last tick |
+| throttling | `cpu.stat` `nr_throttled` / `nr_periods`, over the last tick | not shown; `cpu_throttled` |
+| `memoryPct` | `memory.current` less `inactive_file`, against the cgroup limit | `null` without a limit |
+| `peopleWaiting` | the core's gate: people's requests (interactive, prompted) waiting now, plus those granted within 10 s after waiting ≥ 250 ms | role all: this process's gate; role worker: `<data>/job-runs/core-load.json` |
+| `queue` | report jobs waiting in the queue | |
+| `avgPageMs` | the jobs' requests answered over the last tick, mean | `null` when none |
+| rejecting | the busy clusters (`jobs::load::busy`) among the clusters the jobs sent to this tick | `cluster_rejecting` |
+
+**`core-load.json`** (`<data>/job-runs/`): `{at, waiting, waited}`, written by the core alone
+(role core) every 5 s and read by the worker at its tick — what the worker reads is at most 5 s
+old, and its next tick (at most 10 s on) halves. The worker's own gate is never where
+people wait: it carries only background work.
+
+### Sharing
+
+Among the running jobs of the worker, in this order:
+
+1. every running job keeps its `requests.min` — slowed, never starved;
+2. a job whose `auto` is off gets its `requests.max`, by priority, within `workerTotal`;
+3. what is left of the total goes by priority — High, then Medium, then Low — one request at a
+   time round the jobs of a tier, oldest first; no job above its `requests.max`.
+
+A run's allocation is its **lane**: every request the run sends (any cluster, any partition)
+waits in the lane for room before it asks the gate for a slot, and holds its place until the
+cluster has answered. The lane is the run's: the clusters of a collection run share one, a report
+job has one. `allocation.reason`: `share`, `min` (held at its minimum), `max`, `auto_off`,
+`limit` (auto off, short of its maximum: `workerTotal` is spent), `fixed` (a job of the core).
+Per job id the allocations of its running runs are added up (`requests`); `min` and `max` are each
+run's.
+
+**A busy cluster shrinks only its own work**: the per-cluster controller
+(`report::control::Controller`, docs/REPORT-TYPES.md "Concurrency") halves on that cluster's
+pushback, and its ceiling is the smaller of its own and the job's allocation. One cluster of two
+answering 429 halves that cluster's controller and leaves the total alone; most clusters in work
+rejecting halve the total.
+
+**Applied to**: report runs (every kind, their collections included), the daily volume
+collection, the hosts collection, and the worker's gate: in role `worker` the gate's overall slots
+are the total (or the minimums, never above `workerTotal`, nor `ELASTICPRO_WORKER_GATE_CONCURRENCY`
+when that is set), changed live. In role `all` the gate is the one people use, so it is left alone
+and the lanes hold the jobs back. CPU-heavy work — building the .xlsx, the day files — stays on the
+report's blocking slots (`REPORT_CPU_SLOTS`, at most 2).
+
+**The core's jobs** — the log delay measurement and the history store mirror — run in lanes fixed
+at their `requests.max`: no AIMD in the core, where people's requests already come first at the
+gate. The Zabbix sync and push send nothing to Elasticsearch (their calls go to Zabbix, bounded by
+`ZABBIX_CONCURRENCY`), so they have no lane. Housekeeping and the settings backup send nothing to
+a cluster.
+
+### Jobs at once
+
+`mostAtOnce` [4] counts the worker's jobs: report jobs running and the two collections' open runs
+(`jobsRunning`). The report queue runs `mostAtOnce` less the collections open, **at least one** —
+a person's report always has a slot. A collection's timer does not begin a new run while
+`jobsRunning` is at `mostAtOnce` (nothing is marked: the next minute's tick tries again); a run
+already open takes more clusters in, and a person's `JOB_RUN` / *Refresh now* is never held.
+
+### `JOBS_LIST.governor`
+
+| field | |
+|---|---|
+| `auto` | `overall.auto` |
+| `inUse` | requests the worker's jobs have in flight now |
+| `total` | the rule's total |
+| `mostAtOnce`, `jobsRunning` | above |
+| `lastChange` | `{at, from, to, reason}` of the last change, reason one of `calm`, `cpu`, `cpu_throttled`, `memory`, `people_waiting`, `cluster_rejecting`, `limit`; null before the first |
+| `signals` | `{cpuPct, memoryPct, peopleWaiting, queue, avgPageMs}`, null where not known |
+
+Role core reads it from the worker's heartbeat (`worker/status.json` `governor`, every 10 s);
+`null` while there is no heartbeat or it is late. Role all reads its own.
+
 `JOB_SETTINGS_GET` answers every job's settings with the defaults filled in. `JOB_SETTINGS_SET`
 checks every field before applying any (a refusal changes nothing). Pause, `enabled` and the retry
 policy act now; `requests`, `priority`, `auto` and the thresholds are kept for the adaptive
 governor, which reads them.
+
+## Jobs page
+
+`#/jobs` (`ui/js/pages/jobs.js`; words and arithmetic in `ui/js/core/jobs.js`, tested in
+`tools/unit/jobs.test.mjs`). In the page menu after Reports, for **user** and up (a guest has no
+tab: runs name clusters and carry their errors). Everybody reads; only an administrator presses,
+and every press goes through the write unlock the other admin pages use (`ensureWrites`, read-only
+by default) before its `JOB_*` message.
+
+- **The strip**: worker and core CPU and memory (`process`; a worker not deployed says it runs in
+  the core), requests per second to the clusters (`REQUEST_STATS`, as the Clusters page), jobs
+  running and queued, busy clusters with their reason and since when (`busy`), and the governor's
+  "in use of total" when `governor` is present — nothing for it when it is not (`null`: before the
+  governor, or the worker's heartbeat late). Its hover has jobs at once, the last change with its
+  reason in words (`people_waiting` is "people waiting") and the signals, each "not known" when
+  `null`, never 0. A job's `state.allocation` reason is put in words the same way.
+- **Jobs** (`#/jobs`): *Running now* — every open run (the page's open runs and each job's
+  `state.current`), the clusters it is on, a bar and percent from `progress` ("counting…" and no
+  bar when it is null), records, start, live duration, the job's requests (`state.allocation` once
+  the governor reports it, else the registry's range) and Stop (`JOB_CANCEL`, asked first); a
+  `stale` run is marked. *Up next* — the automatic jobs by `nextRunAt`, then the paused or off
+  ones with their note; Run now and Pause / Resume. *All jobs* — one table, every column sorted by
+  core/sort.js (unknown last both ways), the error cut short and whole when the row is opened, a
+  row menu of Run now, Pause / Resume, Stop, Retry (the last run, when failed, deferred or
+  cancelled), Settings and, for a created schedule, Delete (`JOB_DELETE`, asked first). *Created
+  schedules* lists those alone.
+- **History** (`#/jobs/history`): `JOBS_LIST {limit: 50, before, jobId}` a page at a time (Older /
+  Newer walk `next`), by job; the result filter applies to the page on screen. Retry on a failed,
+  deferred or cancelled run.
+- **Settings** (`#/jobs/settings`): `JOB_SETTINGS_GET` / `JOB_SETTINGS_SET` — the overall limits
+  and, per job, automatic runs, auto, requests at least / at most and priority; checked as the core
+  checks them before anything is sent, only what changed is sent. A field `managed` in the answer
+  is locked with "managed by config.txt" (the core sends none today). Below admin: what
+  `JOBS_LIST` says, read-only.
+- **Create job**: a report once now (`JOB_CREATE {once: true}`; the report run's periods, format,
+  mail and the hosts cap of 5) or a recurring mailed schedule (name, report, clusters or all,
+  daily / weekly / monthly at HH:MM server time, period, To / Cc / Bcc, subject).
+- **Refusals** are sentences: `already_running` (with the run), `joined`, `blocked_readonly`,
+  `retry_limit` (tries and the limit), `retry_wait` (when it may be tried again), `forbidden`,
+  `name_taken`, the worker's own; anything else is the core's message.
+- **Times**: absolute in the server's zone when `JOBS_LIST` names one (`tz`), else said to be the
+  reader's own; relative beside it.
+- **Reads**: every 2 s while a run is open or queued, every 15 s otherwise; none while the browser
+  tab is hidden; none once the page is left. Rows, cells, bars and buttons are kept between reads
+  (lib/keyed.js): the Stop under a pointer is the same button while its run moves
+  (`tools/flicker-check.mjs`, strict).

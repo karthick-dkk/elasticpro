@@ -14,7 +14,10 @@
 //!   * one cluster that cannot be read does not cost the others their file;
 //!   * the watchdog stops a job between pages, keeps the checkpoint, and the next run resumes;
 //!   * the indices report lists dated, undated and closed indices from a fresh listing;
-//!   * schedules are per kind, and the daily collection runs from the hosts schedule's time.
+//!   * schedules are per kind, and the daily collection runs from the hosts schedule's time;
+//!   * a cluster answering 429 shrinks only its own work (its controller halves, the other
+//!     cluster's does not, the governor does not call it the fleet), and when most clusters in
+//!     work reject the governor halves the jobs' total (docs/JOBS.md "Governor").
 
 mod support;
 
@@ -57,6 +60,8 @@ struct Plan {
     no_undated: bool,
     /// Composite pages answer 200 with no aggregation in the body (the old fixture mock).
     no_composite: bool,
+    /// Composite pages answer 429 Too Many Requests this many times.
+    throttle_pages: u32,
 }
 
 type Fixture = Arc<Mutex<Vec<(String, Vec<Row>)>>>;
@@ -138,6 +143,10 @@ async fn cluster(fx: Fixture, plan: Arc<Mutex<Plan>>) -> GaugedServer {
             let delay = plan.page_delay_ms;
             if plan.no_composite {
                 return (200, r#"{"took":1,"timed_out":false,"_shards":{"total":1,"successful":1,"failed":0},"hits":{"total":{"value":0,"relation":"eq"},"hits":[]}}"#.into(), delay);
+            }
+            if plan.throttle_pages > 0 {
+                plan.throttle_pages -= 1;
+                return (429, r#"{"error":{"type":"es_rejected_execution_exception"},"status":429}"#.into(), delay);
             }
             if hit.body.contains("\"after\"") && plan.fail_after_pages > 0 {
                 plan.fail_after_pages -= 1;
@@ -522,4 +531,50 @@ async fn schedules_are_per_kind_and_the_daily_collection_runs_from_the_hosts_tim
     assert!(q["days"].as_array().unwrap().iter().all(|x| x["held"] == true), "{q}");
     assert_eq!(q["total"], (ms.days().len() * 2) as u64);
     assert!(c.hosts_tick_at(local("06:30")).await.is_empty(), "nothing missing: nothing asked");
+}
+
+/// One cluster answering 429 among two: its own controller halves, the other's does not, and the
+/// governor's tick does not take one cluster for the fleet. Both answering 429: it does.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_cluster_answering_429_shrinks_only_its_own_work_and_most_clusters_rejecting_halve_the_total() {
+    let d1 = today() - Duration::days(1);
+    let fx = || -> Fixture { Arc::new(Mutex::new(vec![(format!("logstash-linux-{}", dot(d1)), rows(2500, Some("C1"), Some("B1")))])) };
+    for both in [false, true] {
+        let busy = cluster(fx(), Arc::new(Mutex::new(Plan { throttle_pages: 3, page_delay_ms: 300, no_undated: true, ..Plan::default() }))).await;
+        let other = Plan { throttle_pages: if both { 3 } else { 0 }, page_delay_ms: 300, no_undated: true, ..Plan::default() };
+        let calm = cluster(fx(), Arc::new(Mutex::new(other))).await;
+        let dir = TempDir::new("report-hosts-429");
+        let c = Core::new_with_rounds(Some(dir.0.clone()), Edition::Portable, 1);
+        c.set_report_backoff_for_tests([0, 0, 0]);
+        let p = c.handle(json!({ "type": "PRIME", "readOnly": true, "clusters": [{ "id": "busy", "url": busy.url() }, { "id": "calm", "url": calm.url() }] })).await;
+        assert_eq!(p["ok"], true, "{p}");
+        let r = c.handle(json!({ "type": "REPORT_RUN", "kind": "hosts", "clusterIds": ["busy", "calm"], "period": period(d1, d1) })).await;
+        assert_eq!(r["ok"], true, "{r}");
+        let id = r["jobs"][0]["id"].as_str().unwrap().to_string();
+        // While it runs: after the 429s and a page of the other cluster, one governor tick.
+        let throttled = |es: &GaugedServer| composites(es).len() >= 2;
+        for _ in 0..400 {
+            if throttled(&busy) && !composites(&calm).is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        let l = c.handle(json!({ "type": "JOBS_LIST" })).await;
+        let alloc = &l["jobs"].as_array().unwrap().iter().find(|j| j["id"] == "report.run").unwrap()["state"]["allocation"];
+        assert!(alloc["requests"].as_u64().is_some_and(|n| n >= 1), "a running job has its allocation: {alloc}");
+        let v = c.governor_tick_at(elasticpro_core::fleet::now_ms());
+        if both {
+            assert_eq!((v["lastChange"]["reason"].clone(), v["lastChange"]["from"].clone(), v["total"].clone()),
+                       (json!("cluster_rejecting"), json!(8), json!(4)), "every cluster in work rejecting: the fleet pushes back: {v}");
+        } else {
+            assert_ne!(v["lastChange"]["reason"], json!("cluster_rejecting"), "one cluster of two is that cluster's own: {v}");
+        }
+        let job = ended(&c, &id).await;
+        assert_eq!(job["status"], "done", "{job}");
+        let cl = &job["progress"]["clusters"];
+        assert!(cl["busy"]["halvings"].as_u64().unwrap() >= 1, "the 429 cluster's controller halved: {cl}");
+        if !both {
+            assert_eq!(cl["calm"]["halvings"], json!(0), "the other cluster's did not: {cl}");
+        }
+    }
 }

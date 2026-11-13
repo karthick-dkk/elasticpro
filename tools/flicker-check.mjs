@@ -54,6 +54,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadPlaywright } from './lib/playwright.mjs';
 import { logDelayAnswer, logDelayData } from './lib/logdelay-fixture.mjs';
+import { jobsListAnswer } from './lib/jobs-fixture.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const arg = (name, fallback) => {
@@ -105,6 +106,9 @@ const PAGES = [
   { id: 'reports/planning', search: null, hover: ['#view tbody tr', '#view .btn'] },
   { id: 'reports/exports', search: '#rt-volume-subject', hover: ['#view .rj-job .btn', '#view .rj-job', '#view .rp-dlc .btn'] },
   { id: 'automation', search: null, hover: ['#view tbody tr', '#view .btn'] },
+  // Jobs: JOBS_LIST is stubbed with a run that moves 5 % a read (every 2 s): the Stop button under a
+  // parked pointer, its row and the bar must stay the same elements while it does.
+  { id: 'jobs', search: null, hover: ['#view tr[data-run="4b0e1c2d3e4f5a6b"] .jb-stop', '#view tr[data-run] .jb-stop', '#view .jb-chip'] },
   { id: 'requests', search: null, hover: ['#view .rq-tbl tbody tr', '#view select', '#view .btn'] },
   { id: 'requests/health', search: null, hover: ['#view .hl-chip', '#view [data-check] td', '#view .hl-page details summary'] },
   { id: 'accounts', search: '#view input[aria-label="Filter by user"]', hover: ['#view tbody tr', '#view .btn'] },
@@ -114,7 +118,7 @@ const PAGES = [
 
 /** Pages whose pointer figures must be zero (the redraws fixed in 0.3.54); others are reported. */
 const STRICT = new Set(['requests', 'requests/health', 'reports/exports', 'reports/hosts',
-  'log-delay', 'log-delay/cluster/@c', 'log-delay/device/@c/@d', 'log-delay/fixes', 'log-delay/watch', 'log-delay/live']);
+  'log-delay', 'log-delay/cluster/@c', 'log-delay/device/@c/@d', 'log-delay/fixes', 'log-delay/watch', 'log-delay/live', 'jobs']);
 
 const pw = await loadPlaywright(ROOT, 'flicker-check');
 if (!pw) process.exit(0);
@@ -237,9 +241,11 @@ async function run(browserName) {
   // A signed-in administrator on the hosted build, so the Accounts page is there (as fit-check).
   const WHOAMI = { ok: true, authRequired: true, needsBootstrap: false, apiTokens: true, edition: 'hosted', caller: { name: 'qa', role: ROLE } };
   let ldList = [];
+  let jobReads = 0;
   await ctx.route(`${BASE}/bridge`, async (route) => {
     const t = ((route.request().postData() || '').match(/"type"\s*:\s*"([A-Z_]+)"/) || [])[1];
     if (t === 'WHOAMI') return route.fulfill({ json: WHOAMI });
+    if (t === 'JOBS_LIST') return route.fulfill({ json: jobsListAnswer({ step: jobReads++ }) });
     // The log delay store's answers (see the header): from the fixture, held --ld-delay ms, or failing.
     if (t && t.startsWith('LOGDELAY_') && ldList.length) {
       let body = {}; try { body = JSON.parse(route.request().postData() || '{}'); } catch { /* not ours */ }

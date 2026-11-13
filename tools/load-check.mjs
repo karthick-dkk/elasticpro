@@ -5,6 +5,7 @@
  *   cargo build --release -p elasticpro-core --features bridge --bin elasticpro-bridge
  *   node tools/load-check.mjs [--minutes 10] [--clusters 36] [--browsers 20]
  *                             [--bin target/release/elasticpro-bridge] [--report-only]
+ *                             [--jobs N] [--mock-base 19300] [--core-port 18765]
  *
  * What it stands up, all on this machine:
  *   - tools/mock-es.mjs --ports: one mock cluster per port, answering after 150–450 ms
@@ -40,6 +41,16 @@
  *
  * --report-only prints the same numbers without failing: for measuring a core built before
  * the gate existed, against the same load.
+ *
+ * --jobs N (docs/JOBS.md "Governor"): the run is split in two halves on the same core and
+ * fleet. The first is the browsers alone (idle); in the second an administrator also keeps N
+ * report jobs going the whole time — volume by host (collect again), the indices report and the
+ * volume report, each over 1–3 clusters and the last 7 days, a new one as soon as one ends. Then
+ * it also asserts:
+ *   7. people's answer time with the jobs running stays within 10 % of the idle half — p50 and
+ *      p95 of every person's request (`--jobs-margin`, 0.10);
+ *   8. the jobs did work (at least one ended done), and the governor was reported in JOBS_LIST.
+ * The governor's last view and each half's figures are in the report.
  */
 
 import { spawn, execFileSync } from 'node:child_process';
@@ -59,6 +70,8 @@ const BASE_PORT = Number(arg('mock-base', 19300));
 const CORE_PORT = Number(arg('core-port', 18765));
 const MEMORY_LIMIT_MB = Number(arg('memory-mb', 1024));
 const P95_TARGET_MS = 3000;
+const JOBS = Number(arg('jobs', 0));
+const JOBS_MARGIN = Number(arg('jobs-margin', 0.10));
 // The gate's numbers this run uses: the shipped defaults, said out loud so the asserts
 // read against them.
 const LIMITS = { perCluster: 4, global: 24, queueMax: 256, queuePerUser: 64 };
@@ -156,11 +169,18 @@ console.log(`load-check: core ${ping.version} at :${CORE_PORT}, ${CLUSTERS} mock
 /* --------------------------------------- measure --------------------------------------- */
 
 const stats = { lat: [], kinds: {}, sent: 0, refusedWithoutRetryAfter: 0, aborted: 0, tailSkipped: 0 };
-const note = (r, ms) => {
+// --jobs: each person's answer time by half — `idle` before the jobs start, `jobs` after.
+const phases = { idle: [], jobs: [] };
+let phase = 'idle';
+const note = (r, ms, startedIn) => {
   stats.sent++;
   const k = r && r.ok ? 'ok' : (r && r.kind) || 'error';
   stats.kinds[k] = (stats.kinds[k] || 0) + 1;
-  if (r && r.ok) stats.lat.push(ms);
+  if (r && r.ok) {
+    stats.lat.push(ms);
+    // Only a request that began and ended in the same half counts for it.
+    if (startedIn === phase) phases[phase].push(ms);
+  }
   if (k === 'overloaded' && !(r.retryAfterMs > 0)) stats.refusedWithoutRetryAfter++;
 };
 const pct = (a, p) => { if (!a.length) return null; const s = [...a].sort((x, y) => x - y); return s[Math.min(s.length - 1, Math.round((s.length - 1) * p))]; };
@@ -199,14 +219,60 @@ const end = now() + MINUTES * 60_000;
 
 async function timed(user, msg, opts) {
   const t0 = now();
+  const startedIn = phase;
   try {
     const r = await bridge(user, msg, opts);
-    note(r, now() - t0);
+    note(r, now() - t0, startedIn);
     return r;
   } catch (e) {
     if (e && e.name === 'AbortError') { stats.aborted++; return null; }
-    note({ ok: false, kind: 'transport' }, now() - t0);
+    note({ ok: false, kind: 'transport' }, now() - t0, startedIn);
     return null;
+  }
+}
+
+/* ----------------------------------------- jobs ----------------------------------------- */
+
+const jobs = { asked: 0, done: 0, failed: 0, other: 0, refused: {}, governor: [], allocations: 0 };
+const dayKey = (d) => d.toISOString().slice(0, 10);
+/** One report job, as an administrator asks for it from Reports, run to its end. */
+async function oneJob(n) {
+  const kinds = ['hosts', 'indices', 'volume'];
+  const kind = kinds[n % kinds.length];
+  const ids = Array.from({ length: 1 + (n % 3) }, () => pick(clusters).id).filter((v, i, a) => a.indexOf(v) === i);
+  const to = new Date(Date.now() - 86_400_000);
+  const from = new Date(to.getTime() - 6 * 86_400_000);
+  const msg = { type: 'REPORT_RUN', clusterIds: kind === 'volume' ? ids.slice(0, 1) : ids, period: { from: dayKey(from), to: dayKey(to) }, format: 'csvzip' };
+  if (kind !== 'volume') msg.kind = kind;
+  if (kind === 'hosts') msg.collectAgain = true;
+  const r = await bridge(ADMIN, msg).catch(() => null);
+  jobs.asked++;
+  const id = r && r.ok && r.jobs && r.jobs[0] && r.jobs[0].id;
+  if (!id) { const k = (r && r.kind) || 'error'; jobs.refused[k] = (jobs.refused[k] || 0) + 1; await sleep(2000); return; }
+  for (;;) {
+    await sleep(1000);
+    const q = await bridge(ADMIN, { type: 'REPORT_JOBS' }).catch(() => null);
+    const j = q && (q.jobs || []).find((x) => x.id === id);
+    if (!j) continue;
+    if (j.status === 'done') { jobs.done++; return; }
+    if (['failed', 'stopped'].includes(j.status)) { jobs.failed++; return; }
+  }
+}
+async function jobRunner(slot, until) {
+  let n = slot;
+  while (now() < until) {
+    await oneJob(n);
+    n += JOBS;
+  }
+}
+async function watchGovernor(until) {
+  while (now() < until) {
+    const l = await bridge(ADMIN, { type: 'JOBS_LIST', limit: 1 }).catch(() => null);
+    if (l && l.governor) {
+      jobs.governor.push({ t: now(), total: l.governor.total, inUse: l.governor.inUse, jobsRunning: l.governor.jobsRunning, reason: l.governor.lastChange && l.governor.lastChange.reason });
+      if ((l.jobs || []).some((j) => j.state && j.state.allocation)) jobs.allocations++;
+    }
+    await sleep(5000);
   }
 }
 
@@ -258,7 +324,16 @@ const progress = setInterval(() => {
 
 // Warm-up: let the poller fill the cache before measuring freshness.
 await sleep(5000);
+// --jobs: the second half also runs the jobs (the first half is the idle baseline).
+const mid = now() + (end - now()) / 2;
+const jobWork = JOBS > 0 ? (async () => {
+  await sleep(Math.max(0, mid - now()));
+  phase = 'jobs';
+  console.log(`  jobs: ${JOBS} report job(s) kept going from now on`);
+  await Promise.all([...Array.from({ length: JOBS }, (_, i) => jobRunner(i, end)), watchGovernor(end)]);
+})() : Promise.resolve();
 await Promise.all(users.map((u, i) => browser(u, i)));
+await jobWork;
 clearInterval(progress);
 
 /* ------------------------------- one person past their share ------------------------------- */
@@ -296,6 +371,17 @@ const report = {
   inflightAfter: (finalLog.inflight || []).length, ghostsAfter: ghosts.length, staleAfter: stale.length,
   longestSilenceSec: Math.round(longestSilenceMs / 1000),
 };
+if (JOBS > 0) {
+  const half = (a) => ({ n: a.length, p50Ms: pct(a, 0.5), p95Ms: pct(a, 0.95), p99Ms: pct(a, 0.99) });
+  const g = jobs.governor;
+  report.jobs = {
+    concurrent: JOBS, asked: jobs.asked, done: jobs.done, failed: jobs.failed, refused: jobs.refused,
+    people: { idle: half(phases.idle), withJobs: half(phases.jobs) },
+    governor: g.length ? { samples: g.length, totalMin: Math.min(...g.map((x) => x.total)), totalMax: Math.max(...g.map((x) => x.total)),
+      inUseMax: Math.max(...g.map((x) => x.inUse)), jobsRunningMax: Math.max(...g.map((x) => x.jobsRunning)),
+      reasons: g.reduce((m, x) => { if (x.reason) m[x.reason] = (m[x.reason] || 0) + 1; return m; }, {}), withAllocation: jobs.allocations, last: g[g.length - 1] } : null,
+  };
+}
 console.log(JSON.stringify(report, null, 2));
 
 const failures = [];
@@ -314,6 +400,14 @@ must(!stats.refusedWithoutRetryAfter, 'an overloaded reply without retryAfterMs'
 must(ghosts.length === 0, `${ghosts.length} request(s) from browsers still in flight after everyone left`);
 must(stale.length === 0, `${stale.length} in-flight record(s) older than their own timeout`);
 must(freshness.samples > 0 && freshness.worstMs < (2 * HEALTH_SECS + 60) * 1000, `health went ${Math.round(freshness.worstMs / 1000)} s without a refresh on ${freshness.worstCluster}`);
+if (JOBS > 0) {
+  const [i50, i95, j50, j95] = [pct(phases.idle, 0.5), pct(phases.idle, 0.95), pct(phases.jobs, 0.5), pct(phases.jobs, 0.95)];
+  must(i95 != null && j95 != null, 'no answers in one of the halves');
+  must(j50 <= i50 * (1 + JOBS_MARGIN), `people's p50 with jobs ${j50} ms vs idle ${i50} ms: over ${Math.round(JOBS_MARGIN * 100)} %`);
+  must(j95 <= i95 * (1 + JOBS_MARGIN), `people's p95 with jobs ${j95} ms vs idle ${i95} ms: over ${Math.round(JOBS_MARGIN * 100)} %`);
+  must(jobs.done > 0, `no report job ended done (${jobs.asked} asked, ${jobs.failed} failed, refused ${JSON.stringify(jobs.refused)})`);
+  must(jobs.governor.length > 0, 'JOBS_LIST never reported the governor');
+}
 
 stopAll();
 if (failures.length) {

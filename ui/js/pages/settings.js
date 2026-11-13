@@ -57,6 +57,7 @@ import { dataRoutingCard, builtinCard, loadDataRouting, saveDataRouting, discard
 import { isSupported as routingSupportedBy, storeStreamRows } from '../core/data-routing.js';
 import { createTracker } from '../ui/change-tracker.js';
 import { zabbixRolesCards, zabbixRolesSupported as rolesSupported, loadZabbixRoles, saveZabbixRoles, discardZabbixRoles, zabbixRolesChanges } from '../ui/zabbix-roles.js';
+import { zabbixReviewCard, previewSync } from '../ui/zabbix-review.js';
 import { parseHash } from '../reports/route.js';
 import { backupBody, backupHeaderActions, leaveBackup, loadBackup, saveBackupSchedule, discardBackupSchedule } from '../ui/backup-panel.js';
 import { logDelayCards, loadLogDelaySettings, saveLevels as saveLdLevels, saveFields as saveLdFields, saveReport as saveLdReport, discardLogDelay } from '../ui/logdelay-settings.js';
@@ -1764,6 +1765,8 @@ async function loadZabbix() {
 function zabbixSection() {
   return h('div.cm-stack',
     h('div.cm-grid2', zabbixLinkCard(), zabbixOptionsCard()),
+    // Hosts at the address of a cluster that exists already, held until an administrator decides.
+    isAdminCaller() ? zabbixReviewCard(zbx, { onDecided: afterZabbixDecision }) : null,
     isAdminCaller() ? zabbixRolesCards(() => draw()) : null,
     zabbixCard());
 }
@@ -1784,6 +1787,8 @@ function zabbixActions() {
   const summary = admin && linkView(link) === 'summary' && !linkEditing;
   return [
     admin ? h('button.btn', { type: 'button', onclick: testLink, disabled: linkBusy }, 'Test connection') : null,
+    zbx && zbx.configured && isAdminCaller() ? h('button.btn', { type: 'button', onclick: previewZabbix, disabled: zbxBusy || linkBusy,
+      title: 'What a sync would add, change or hold for review — nothing is applied' }, 'Preview sync') : null,
     zbx && zbx.configured ? h('button.btn', { type: 'button', onclick: syncZabbix, disabled: zbxBusy || linkBusy }, zbxBusy ? 'Syncing…' : '↻ Sync now') : null,
     summary ? h('button.btn.primary', { type: 'button', onclick: () => { linkEditing = true; draw(); }, disabled: linkBusy }, 'Edit connection') : null,
   ];
@@ -2146,6 +2151,19 @@ function templatesRead(templates) {
   return `Read: ${t.map((x) => `${x.name} (${x.hosts} host${x.hosts === 1 ? '' : 's'})`).join(', ')}`;
 }
 
+async function previewZabbix() {
+  zbxBusy = true; draw();
+  try { await previewSync(); } finally { zbxBusy = false; draw(); }
+}
+
+/** A decision on a held host was kept: the cluster list every page uses follows at once. */
+async function afterZabbixDecision() {
+  await setConfig(state.config, state.handle);
+  await refreshAll({ force: true });
+  await loadZabbix();
+  draw();
+}
+
 async function syncZabbix() {
   zbxBusy = true; draw();
   try {
@@ -2194,16 +2212,16 @@ function zabbixOptionsCard() {
   return trackedCard('zabbix-opts', 'Zabbix sync options', 'Sync options', 'apply on the next sync',
     h('div', { style: { display: 'grid', gap: '10px' } },
       opt('useElasticProCredentials', 'Use ElasticPro credentials for Zabbix clusters',
-        'Connect with the credential ElasticPro already has for the same address, or the config’s shared one — instead of the password in Vault. Off: Vault.'),
+        'Connect with the credential of the config-file cluster the host took over (Update, under Held for review), or the config’s shared one — instead of the password in Vault. Off: Vault.'),
       opt('createHosts', 'Create Zabbix hosts from this config',
-        'Each cluster here that Zabbix does not have yet becomes a Zabbix host with the cluster template; its password goes to Vault. Zabbix wins from then on.',
+        'Each cluster here that Zabbix does not have yet becomes a Zabbix host with the cluster template; its password goes to Vault. The new host takes that cluster over (recorded as Update under Held for review).',
         zbx.canCreateHosts ? '' : 'Needs the Zabbix write token and Vault writer on the server (see deploy/zabbix/README.md).'),
       h('div.cm-folds',
         events.length ? h('details.cm-fold', h('summary', h('b', 'Recent changes'), h('span.muted', ` · ${events.length}`)),
           h('ul', ...events.map((e) => h('li', { style: { color: e.ok ? '' : 'var(--critical-ink)' } }, `${dt(e.at * 1000)} · ${eventLine(e)}`)))) : null,
         fold('Host creation', (zbx.provisioned || []).length, zbx.provisioned || []),
         fold('Hosts not counted as clusters, and why', (zbx.skipped || []).length, zbx.skipped || []),
-        fold('Config-file clusters set aside — Zabbix has them', shadowed.length,
+        fold('Config-file clusters set aside — an administrator chose Update', shadowed.length,
           shadowed.map((s) => `${s.name} (${s.url}) — now the Zabbix host ${s.by}`)))));
 }
 
@@ -2214,9 +2232,10 @@ let zhFilter = '';
  * Where Zabbix clusters come from and whether each can be used.
  *
  * A cluster is a Zabbix host carrying the cluster template; its macros say where it is and
- * how to sign in, and its password is a Vault macro read here and by Zabbix alike. A
- * cluster listed in the config file at the same address is set aside — Zabbix wins — and
- * named in Sync options so nobody edits the copy that is no longer used.
+ * how to sign in, and its password is a Vault macro read here and by Zabbix alike. A host
+ * at the address of a cluster that exists already is not listed here: it is held for review
+ * (the card above) until an administrator decides; a config-file cluster one took over by
+ * Update is named in Sync options so nobody edits the copy that is no longer used.
  */
 function zabbixCard() {
   if (!zbx) return card('Cluster hosts', 'Loading…', h('div.muted', 'Loading…'));

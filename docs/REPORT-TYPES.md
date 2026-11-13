@@ -235,7 +235,9 @@ A report may push more than one request per cluster at a time, under control:
   5000). Halved on HTTP 429/503, `es_rejected_execution_exception`,
   `circuit_breaking_exception` (which also halves that partition's page size), a time-out,
   or a page slower than 3× baseline; `Retry-After` holds every request until it has passed;
-  no increase for 60 s after a halve.
+  no increase for 60 s after a halve. Its ceiling is also never above the job's allocation from
+  the governor (docs/JOBS.md "Governor"): the smaller of the two is in force, checked before
+  every page, and a halve stays this cluster's.
 - **Cluster pressure.** Before a cluster starts and every 50 pages, one
   `_cat/thread_pool/search?format=json&h=node_name,active,queue,queue_size,rejected`
   (Background): any node's queue over half its size, or `rejected` grown since the last

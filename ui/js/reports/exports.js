@@ -156,7 +156,11 @@ function generated(ctx) {
   // The cluster shown first is ticked; More clients… lists the rest (ui/report-jobs.js).
   const panel = reportPanel(ctx.clusters[0] || null);
   const button = reportJobsMount();
-  if (!generatedCard) generatedCard = card('Generated reports', 'larger reports built on the server; kept 7 days', panel, [button]);
+  // Every job and run (report jobs among them) is on the Jobs page; this card keeps the files.
+  if (!generatedCard) {
+    const all = h('button#rp-all-jobs.btn.sm.ghost', { type: 'button', title: 'Every background job and run, with its progress and history', onclick: () => navigateTo('jobs') }, 'All jobs →');
+    generatedCard = card('Generated reports', 'larger reports built on the server; kept 7 days', panel, [all, button]);
+  }
   return generatedCard;
 }
 

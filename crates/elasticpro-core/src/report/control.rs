@@ -35,6 +35,8 @@ pub struct Controller {
     cooldown_until: i64,
     /// `Retry-After`: nothing new is sent before this.
     hold_until: i64,
+    /// The job's allocation (`jobs::governor`): the ceiling is the smaller of this and `max`.
+    cap: u32,
     pub halvings: u32,
     pub last_reason: Option<String>,
 }
@@ -45,12 +47,25 @@ impl Controller {
         let max = max.clamp(1, MAX_ALLOWED);
         Controller {
             current: start.clamp(1, max), max, target_ms, good: 0, first: vec![], baseline_ms: None, cooldown_until: 0,
-            hold_until: 0, halvings: 0, last_reason: None,
+            hold_until: 0, cap: MAX_ALLOWED, halvings: 0, last_reason: None,
         }
     }
 
+    /// The job's allocation from the governor: the ceiling becomes the smaller of it and the
+    /// controller's own. Requests over it are not sent; the controller's own count is kept, so
+    /// a larger allocation later gives back what it had earned.
+    pub fn set_cap(&mut self, n: u32) {
+        self.cap = n.clamp(1, MAX_ALLOWED);
+    }
+
+    /// The ceiling in force: the smaller of the controller's own and the job's allocation.
+    pub fn ceiling(&self) -> u32 {
+        self.max.min(self.cap)
+    }
+
+    /// Requests allowed now, under both ceilings.
     pub fn current(&self) -> u32 {
-        self.current
+        self.current.min(self.cap)
     }
 
     pub fn baseline_ms(&self) -> Option<u64> {
@@ -59,7 +74,7 @@ impl Controller {
 
     /// Requests that may be in flight now: 0 while a `Retry-After` holds.
     pub fn limit(&self, now: i64) -> u32 {
-        if now < self.hold_until { 0 } else { self.current }
+        if now < self.hold_until { 0 } else { self.current() }
     }
 
     /// When the hold of a `Retry-After` ends (0: none).
@@ -87,7 +102,7 @@ impl Controller {
         }
         if latency_ms * 2 <= base * 3 && latency_ms <= self.target_ms {
             self.good += 1;
-            if self.good >= GOOD_PAGES_TO_GROW && now >= self.cooldown_until && self.current < self.max {
+            if self.good >= GOOD_PAGES_TO_GROW && now >= self.cooldown_until && self.current < self.ceiling() {
                 self.current += 1;
                 self.good = 0;
             }
@@ -99,7 +114,7 @@ impl Controller {
     /// The cluster pushed back (`reason`): half as many requests, at least one; nothing more
     /// for `COOLDOWN_MS`, and nothing at all until `retry_after_ms` has passed.
     pub fn halve(&mut self, reason: &str, retry_after_ms: Option<u64>, now: i64) {
-        self.current = (self.current / 2).max(1);
+        self.current = (self.current() / 2).max(1);
         self.good = 0;
         self.cooldown_until = now + COOLDOWN_MS;
         if let Some(ms) = retry_after_ms {
@@ -278,6 +293,29 @@ mod tests {
         assert_eq!(c.limit(39_999), 0);
         assert_eq!(c.limit(40_000), 1);
         assert_eq!(retry_after_ms(&json!({ "status": 429, "retryAfterS": 30 })), Some(30_000));
+    }
+
+    #[test]
+    fn the_jobs_allocation_caps_the_ceiling_and_a_halve_stays_this_clusters() {
+        let mut c = Controller::new(4, 8, 5000);
+        warm(&mut c, 100, 0);
+        c.set_cap(2);
+        assert_eq!((c.current(), c.limit(0), c.ceiling()), (2, 2, 2), "min(the job's allocation, its own ceiling)");
+        for _ in 0..40 {
+            c.page_ok(100, 0);
+        }
+        assert_eq!(c.current(), 2, "no growth over the allocation");
+        c.set_cap(6);
+        assert_eq!(c.current(), 4, "a larger allocation gives back what it had");
+        for _ in 0..40 {
+            c.page_ok(100, 0);
+        }
+        assert_eq!(c.current(), 6, "and grows to the new ceiling");
+        // A busy cluster halves its own controller; another cluster's is untouched.
+        let mut other = Controller::new(4, 8, 5000);
+        other.set_cap(6);
+        c.halve("HTTP 429", None, 1_000);
+        assert_eq!((c.current(), other.current()), (3, 4));
     }
 
     #[test]

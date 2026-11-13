@@ -245,9 +245,10 @@ print(((j.get('progress') or {}).get('pages')) or 0)")
   else bad "ES read with the worker down: ${t_es}s (before: ${t_es0}s), $(head -c 200 /tmp/trial-es.$$)"; fi
   rm -f /tmp/trial-es.$$
   # Refused, and quickly: the worker's name is not waited on for more than the connect timeout
-  # (1 s), and once its heartbeat is late it is not asked at all.
+  # (1 s), and once its heartbeat is late it is not asked at all. REPORT_CLEAR is forwarded to the
+  # worker (REPORT_CONCURRENCY_SET no longer is: it writes the core's overall.mostAtOnce).
   t_down=$(curl -sk -o /tmp/trial-down.$$ -w '%{time_total}' -b "$JU" -X POST "https://127.0.0.1:$LISTEN/bridge" -H 'content-type: application/json' \
-             -d '{"type":"REPORT_CONCURRENCY_SET","n":3}')
+             -d '{"type":"REPORT_CLEAR"}')
   down=$(python3 -c 'import json,sys;print(json.load(sys.stdin).get("kind"))' < /tmp/trial-down.$$ 2>/dev/null)
   rm -f /tmp/trial-down.$$
   [ "$down" = worker_unavailable ] && ok "an action is refused as worker_unavailable (${t_down}s)" || bad "with the worker down an action answered '$down'"

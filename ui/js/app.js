@@ -73,6 +73,7 @@ import * as pSettings from './pages/settings.js';
 import * as pAutomation from './pages/automation.js';
 import * as pAccounts from './pages/accounts.js';
 import * as pRequests from './pages/requests.js';
+import * as pJobs from './pages/jobs.js';
 import * as pPlay from './pages/play.js';
 import { fullscreen } from './core/fullscreen.js';
 import { displaySecretOf, playExchange } from './play/api.js';
@@ -95,7 +96,7 @@ const PAGES = [
   // Order is the order of a shift: what is wrong, then what it is wrong on, then the
   // things you reach for to fix it, then the things you only change deliberately.
   // The page menu (board of 2026-11-05): Alerts · Clusters · Indices · Nodes & shards · Log
-  // Delay · REST · Snapshots · Reports · Config-Management.
+  // Delay · REST · Snapshots · Reports · Jobs (Jobs plan, 2026-11) · Config-Management.
   { id: 'alerts',    label: 'Alerts',         icon: '⚠', mod: pAlerts,    multi: true,  minRole: 'user' },
   { id: 'overview',  label: 'Clusters',       icon: '▦', mod: pOverview,  multi: true,  minRole: 'guest' },
   { id: 'indices',   label: 'Indices',        icon: '≡', mod: pIndices,   multi: false, minRole: 'user' },
@@ -110,6 +111,10 @@ const PAGES = [
   { id: 'snapshots', label: 'Snapshots',      icon: '↻', mod: pSnapshots, multi: true,  minRole: 'user' },
   // Was 'volume' / Volume report until 0.3.53; #/volume still opens it (reports/route.js PAGE_ALIAS).
   { id: 'reports',   label: 'Reports',        icon: '▤', mod: pReports,   multi: true,  minRole: 'user' },
+  // Everything ElasticPro runs by itself or when asked (docs/JOBS.md "Jobs page"): user and up read
+  // it (runs name clusters and carry their errors, so not a guest); an admin presses things. It reads
+  // JOBS_LIST on its own timer and draws its own answers; the fleet's pushes only rename clusters.
+  { id: 'jobs',      label: 'Jobs',           icon: '◷', mod: pJobs,      multi: true,  minRole: 'user' },
   // Config-Management: an admin's, and an operator's for Clusters, Alerts › Automation and
   // Requests › Request Centre only (core/config-nav.js decides which tabs inside).
   { id: 'settings',  label: 'Config-Management', icon: '⚙', mod: pSettings, multi: true, minRole: 'operator' },

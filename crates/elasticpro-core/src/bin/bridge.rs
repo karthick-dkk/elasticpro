@@ -56,7 +56,7 @@ fn set_cookie(token: &str, max_age: u64) -> String {
 
 /// Message types that change something and are therefore audited by user.
 const AUDITED: &[&str] = &["ES", "WRITE_UNLOCK", "TRUST_CERT", "UNTRUST_CERT", "TRUST_HOSTKEY",
-                           "UNTRUST_HOSTKEY", "CONFIG_WRITE", "FILE_WRITE", "CLUSTER_SAVE", "ZABBIX_CLUSTER_SAVE", "AUTOMATIONS_SAVE", "FORGET",
+                           "UNTRUST_HOSTKEY", "CONFIG_WRITE", "FILE_WRITE", "CLUSTER_SAVE", "ZABBIX_CLUSTER_SAVE", "ZABBIX_CONFLICT_DECIDE", "AUTOMATIONS_SAVE", "FORGET",
                            "ZABBIX_ROLEMAP_SET", "CREDENTIAL_SET", "CREDENTIAL_CLEAR", "CREDENTIAL_PROMOTE",
                            "ZABBIX_LINK_SET", "ZABBIX_PAIR_BEGIN", "ZABBIX_UNPAIR",
                            "HOUSEKEEPING_RUN"];
@@ -203,6 +203,10 @@ async fn run() {
     if starts.worker_loops {
         core.start_worker_loops();
     }
+    // The governor (docs/JOBS.md "Governor"): the worker's jobs sized every 10 s (role worker or
+    // all); in role core, people waiting at its gate published for the worker every 5 s, and the
+    // core's gate limits from the job settings.
+    core.start_governor();
     if starts.worker_http {
         let port: u16 = std::env::var("ELASTICPRO_WORKER_PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(elasticpro_core::worker::PORT);
         let app = Router::new()

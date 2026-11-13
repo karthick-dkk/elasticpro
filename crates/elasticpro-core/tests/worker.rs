@@ -95,7 +95,8 @@ async fn the_core_forwards_actions_and_reads_what_the_worker_wrote() {
     let url = serve_worker(worker.clone()).await;
     core.set_worker_url_for_tests(&url);
 
-    // An action: queued by the worker, read back by the core from jobs.json.
+    // The report concurrency is overall.mostAtOnce, the core's own setting (docs/JOBS.md
+    // "Governor"): set in the core, not forwarded, and read back at once.
     let r = core.handle_as(json!({ "type": "REPORT_CONCURRENCY_SET", "n": 4 }), admin()).await;
     assert_eq!(r["ok"], json!(true), "{r}");
     let r = jobs_concurrency(&core, 4).await;
@@ -124,17 +125,17 @@ async fn the_core_forwards_actions_and_reads_what_the_worker_wrote() {
 
     // The worker refuses a wrong token and another version.
     let token = std::fs::read_to_string(dir.join("worker").join("token")).unwrap();
-    let body = json!({ "type": "REPORT_CONCURRENCY_SET", "msg": { "n": 3 }, "caller": { "name": "admin", "role": "admin" } }).to_string();
+    let body = json!({ "type": "REPORT_CLEAR", "msg": {}, "caller": { "name": "admin", "role": "admin" } }).to_string();
     let (code, _) = worker.worker_http("/queue", Some("wrong"), Some(elasticpro_core::VERSION), body.as_bytes()).await;
     assert_eq!(code, 401);
     let (code, v) = worker.worker_http("/queue", Some(token.trim()), Some("0.0.1"), body.as_bytes()).await;
     assert_eq!((code, v["kind"].clone()), (409, json!("worker_version")), "{v}");
     let (code, v) = worker.worker_http("/run", Some(token.trim()), Some(elasticpro_core::VERSION), body.as_bytes()).await;
-    assert_eq!(code, 400, "REPORT_CONCURRENCY_SET is not taken at /run: {v}");
+    assert_eq!(code, 400, "REPORT_CLEAR is not taken at /run: {v}");
 
     // Worker down: the action is refused as worker_unavailable; monitoring still answers.
     core.set_worker_url_for_tests("http://127.0.0.1:1");
-    let r = core.handle_as(json!({ "type": "REPORT_CONCURRENCY_SET", "n": 5 }), admin()).await;
+    let r = core.handle_as(json!({ "type": "REPORT_CLEAR" }), admin()).await;
     assert_eq!(r["kind"], json!("worker_unavailable"), "{r}");
     assert_eq!(r["errorCode"], json!("EP-218"));
     assert!(r["lastHeartbeatAt"].as_u64().is_some(), "the last heartbeat is said: {r}");
@@ -173,7 +174,7 @@ async fn a_worker_whose_heartbeat_is_late_is_not_asked_and_a_dead_address_costs_
     worker.worker_heartbeat(late, true);
 
     // Late heartbeat (the health check's amber line): answered at once, nothing sent.
-    for t in [json!({ "type": "REPORT_CONCURRENCY_SET", "n": 4 }), json!({ "type": "VOLUME_RUN", "clusterIds": [] }),
+    for t in [json!({ "type": "REPORT_STOP", "all": true }), json!({ "type": "VOLUME_RUN", "clusterIds": [] }),
               json!({ "type": "REPORT_CLEAR" })] {
         let started = std::time::Instant::now();
         let r = core.handle_as(t.clone(), admin()).await;
@@ -187,7 +188,7 @@ async fn a_worker_whose_heartbeat_is_late_is_not_asked_and_a_dead_address_costs_
 
     // A fresh heartbeat: the worker is asked again.
     worker.worker_heartbeat(elasticpro_core::fleet::now_ms(), false);
-    let ask = { let c = core.clone(); tokio::spawn(async move { c.handle_as(json!({ "type": "REPORT_CONCURRENCY_SET", "n": 4 }), admin()).await }) };
+    let ask = { let c = core.clone(); tokio::spawn(async move { c.handle_as(json!({ "type": "REPORT_CLEAR" }), admin()).await }) };
     for _ in 0..100 {
         if taken.load(std::sync::atomic::Ordering::SeqCst) > 0 {
             break;
@@ -200,7 +201,7 @@ async fn a_worker_whose_heartbeat_is_late_is_not_asked_and_a_dead_address_costs_
     // An address nothing answers on (no route): the connect gives up within its second.
     core.set_worker_url_for_tests("http://10.255.255.1:8766");
     let started = std::time::Instant::now();
-    let r = core.handle_as(json!({ "type": "REPORT_CONCURRENCY_SET", "n": 4 }), admin()).await;
+    let r = core.handle_as(json!({ "type": "REPORT_CLEAR" }), admin()).await;
     let took = started.elapsed();
     assert_eq!(r["kind"], json!("worker_unavailable"), "{r}");
     assert!(took < std::time::Duration::from_millis(elasticpro_core::worker::CONNECT_TIMEOUT_MS + 1_500), "took {took:?}");

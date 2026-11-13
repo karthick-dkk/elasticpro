@@ -55,7 +55,11 @@ file that is mid-rename by retrying once.
 ## Requests to Elasticsearch from the worker
 
 - Its own gate instance, every request `Background`, caps: overall 16, per cluster 4, per
-  jump host 4 (`ELASTICPRO_WORKER_GATE_*`). How many of a cluster's 4 slots a report really
+  jump host 4 (`ELASTICPRO_WORKER_GATE_*`). The overall slots are then sized every 10 s by the
+  governor (docs/JOBS.md "Governor"): its total, never above `JOB_SETTINGS_SET
+  overall.workerTotal` (nor `ELASTICPRO_WORKER_GATE_CONCURRENCY` when set), halved within a tick
+  of people waiting at the core's gate (`job-runs/core-load.json`, which the core writes every
+  5 s), and each running job held to its share. How many of a cluster's 4 slots a report really
   uses is decided by the adaptive controller (docs/REPORT-TYPES.md, "Concurrency"): it starts
   at 2, grows while the cluster answers quickly and halves the moment it pushes back. The
   core's own gate, and so every person's click and the health poll, is not shared with it.
@@ -107,8 +111,9 @@ Decisions made while building, within the contract:
 - **The worker keeps no accounts**: no `users.json`, sessions or tokens, no activity log, and it
   never seeds the first account; its own instance file is `instance-worker.json`.
 - **Endpoints**: `POST /run` (`REPORT_RUN`, `VOLUME_RUN`), `/send-now` (`REPORT_SEND_NOW`),
-  `/stop` (`REPORT_STOP`) and, beyond the contract, `/queue` (`REPORT_CLEAR`,
-  `REPORT_CONCURRENCY_SET` — they write `jobs.json`, which is the worker's alone), `/job`
+  `/stop` (`REPORT_STOP`) and, beyond the contract, `/queue` (`REPORT_CLEAR` — it writes
+  `jobs.json`, which is the worker's alone; `REPORT_CONCURRENCY_SET` now writes
+  `overall.mostAtOnce` in the core's `controls.json` and is handled by the core), `/job`
   (`JOB_RUN`, `JOB_CANCEL`, `JOB_RETRY` of the worker's jobs and runs — docs/JOBS.md
   "Controls"; the settings, `job-runs/controls.json`, are the core's file, which the worker's
   timers read); `GET /health`
@@ -119,7 +124,7 @@ Decisions made while building, within the contract:
   vouched for (its name on the job, its clusters).
 - **The core's own checks before forwarding** (`report_precheck`): `REPORT_RUN` — kind, cluster
   list, the 5-cluster limit, the per-person and mail limits against the `jobs.json` snapshot;
-  `REPORT_STOP` — the job exists; `REPORT_CONCURRENCY_SET` — 3..5; `REPORT_SEND_NOW` —
+  `REPORT_STOP` — the job exists; `REPORT_SEND_NOW` —
   recipients and mail configured. The gate's role and cluster checks run first, as always. The
   worker checks all of it again against the live queue.
 - **Unreachable** (connection refused, timeout of 15 s, a 401 because the two do not share the
@@ -159,13 +164,16 @@ Decisions made while building, within the contract:
   the progress Exports reads from it is at most 2 s old — found on the first local Docker trial,
   where the core showed a running job with no pages until it ended.
 - **Gate**: the worker's `Gate` is built from `worker::worker_limits` (16 / 4 / 4, reserve 0) over
-  the core's other limits. The report controller's ceiling is `concurrency_for(per_cluster,
-  role)`: the whole per-cluster cap in role `worker`, one under in role `all`.
+  the core's other limits; its overall slots follow the governor's total (`Gate::set_limits`,
+  every tick). The report controller's ceiling is `concurrency_for(per_cluster, role)` — the whole
+  per-cluster cap in role `worker`, one under in role `all` — and never above the job's
+  allocation (docs/JOBS.md "Governor").
 - **Heartbeat** (every 10 s, `worker_heartbeat`): `WorkerStatus` with memory/CPU from the
   worker's `SelfMonitor` (read once a minute, ring `health/worker.json` every 10 samples), the
   worker's `gate_figures("worker", …)`, `job_line` of each running job, the queued count and the
   collections (daily volume runs with their progress; hosts collections by cluster — their
-  concurrency is in the job lines). `worker/requests.jsonl` is rewritten (temp + rename) when it
+  concurrency is in the job lines), and the governor as its last tick left it (`governor`: the
+  total, the signals, the last change, each running job's allocation — `JOBS_LIST.governor`). `worker/requests.jsonl` is rewritten (temp + rename) when it
   changed: the newest 5000 finished requests, each with `process: "worker"`; the core merges
   them into `REQUEST_LOG`'s `recent` by start time, held to the caller's clusters.
 - **What the worker does not know**: it runs no poller, so it does not see a cluster as down or
