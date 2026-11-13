@@ -1,5 +1,7 @@
 /**
- * Folding Zabbix clusters into a config — "Zabbix wins", as code.
+ * Folding Zabbix clusters into a config. A Zabbix host sets a config-file cluster aside only
+ * when an administrator let it take that cluster over (the core's `replaces`, zbx_conflicts.rs);
+ * an address alone decides nothing here.
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -19,13 +21,35 @@ const fileConfig = () => cfg.normalize({
   ],
 });
 const zbx = [{ _id: 'zbx-vm-1-cluster', name: 'vm-1 cluster', url: 'http://203.0.113.12:9200', zabbixHost: 'vm-1 cluster',
-               client: 'vm-1', credential: 'vault', credentialOk: true, zabbixGroups: ['ES vm-1'] }];
+               client: 'vm-1', credential: 'vault', credentialOk: true, zabbixGroups: ['ES vm-1'],
+               identity: 'http://203.0.113.12:9200', review: 'update', replaces: { kind: 'config', id: 'vm-1', name: 'vm-1' } }];
 
-test('a Zabbix host replaces the config cluster at the same address', () => {
+test('a Zabbix host an administrator let take a config cluster over (Update) sets it aside', () => {
   const c = cfg.mergeZabbixClusters(fileConfig(), zbx);
   assert.deepEqual(c.clusters.map((x) => x.id), ['lab', 'zbx-vm-1-cluster']);
   assert.deepEqual(c.shadowed, [{ name: 'vm-1', url: 'http://203.0.113.12:9200', by: 'vm-1 cluster' }],
     'the one set aside is named, so nobody edits the copy that is no longer used');
+  assert.deepEqual(c.clusters.find((x) => x.id === 'zbx-vm-1-cluster').zabbix.replaces, zbx[0].replaces);
+});
+
+test('the same address alone sets nothing aside: Keep both lists both', () => {
+  // The core sends a row at a config cluster's address only once an administrator decided;
+  // Keep both carries no `replaces`. Before review existed the page compared the addresses
+  // itself and set the config cluster aside without asking anyone.
+  const both = [{ ...zbx[0], review: 'keepBoth', replaces: undefined }];
+  const c = cfg.mergeZabbixClusters(fileConfig(), both);
+  assert.deepEqual(c.clusters.map((x) => x.id), ['vm-1', 'lab', 'zbx-vm-1-cluster']);
+  assert.deepEqual(c.shadowed, []);
+});
+
+test('only the cluster the core names is set aside, whatever the addresses', () => {
+  const other = [{ ...zbx[0], replaces: { kind: 'config', id: 'lab' } }];
+  const c = cfg.mergeZabbixClusters(fileConfig(), other);
+  assert.deepEqual(c.clusters.map((x) => x.id), ['vm-1', 'zbx-vm-1-cluster']);
+  assert.deepEqual(c.shadowed.map((x) => x.name), ['lab']);
+  // A Zabbix host the core let take another Zabbix host over sets no config cluster aside.
+  const zz = cfg.mergeZabbixClusters(fileConfig(), [{ ...zbx[0], replaces: { kind: 'zabbix', id: 'zbx-old', hostId: '9' } }]);
+  assert.deepEqual(zz.shadowed, []);
 });
 
 test('a Zabbix cluster keeps the id the core uses and never asks for a password', () => {
