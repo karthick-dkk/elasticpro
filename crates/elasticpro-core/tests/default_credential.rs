@@ -222,8 +222,10 @@ async fn a_kept_credential_becomes_the_default_and_a_new_cluster_asks_for_nothin
     assert_eq!(health(&c, &op, "delta").await["ok"], json!(true));
     assert_eq!(delta.last_hit().unwrap().header("authorization"), Some(want.as_str()));
 
-    // A Zabbix cluster with no password of its own takes the default on the next sync.
-    let sync = c.zabbix_sync().await;
+    // A Zabbix cluster with no password of its own takes the default on the next sync. The promote
+    // above started a sync of its own (sync_soon); the timer's entry answers `already_running`
+    // while that one goes, so this asks the way a person does: wait for it, then sync.
+    let sync = c.handle(json!({ "type": "ZABBIX_SYNC", "session": a })).await;
     assert_eq!(sync["inUse"], json!(2), "{sync}");
     let list = c.handle(json!({ "type": "ZABBIX_CLUSTERS", "session": a })).await;
     let row = list["clusters"].as_array().unwrap().iter().find(|v| v["zabbixHost"] == json!("new-from-zabbix")).cloned().unwrap();
