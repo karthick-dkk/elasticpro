@@ -89,11 +89,63 @@ pub fn local_now() -> NaiveDateTime {
     chrono::Local::now().naive_local()
 }
 
+/// The server's zone, the one every schedule and local day uses (`chrono::Local`, the
+/// process's `TZ`): its IANA name when it can be told, and the offset now in minutes. `PING`
+/// carries both (`tz`, `tzOffsetMinutes`) so the pages show times in the server's zone.
+pub fn server_zone() -> (Option<String>, i32) {
+    let link = std::fs::read_link("/etc/localtime").ok();
+    let file = std::fs::read_to_string("/etc/timezone").ok();
+    let name = zone_name(std::env::var("TZ").ok().as_deref(), file.as_deref(), link.as_deref());
+    (name, chrono::Local::now().offset().local_minus_utc() / 60)
+}
+
+/// The zone's IANA name from, in order: `TZ` (`Asia/Kolkata`, `:Asia/Kolkata`, `UTC`), the
+/// `/etc/timezone` text, the `/etc/localtime` link (`…/zoneinfo/Asia/Kolkata`). `None` when
+/// none says one — unknown, never a guess (a `TZ` rule like `IST-5:30` names no zone).
+pub fn zone_name(tz: Option<&str>, etc_timezone: Option<&str>, localtime: Option<&std::path::Path>) -> Option<String> {
+    let iana = |s: &str| {
+        let s = s.trim().trim_start_matches(':');
+        let s = s.strip_prefix("/usr/share/zoneinfo/").unwrap_or(s);
+        let ok = !s.is_empty() && s.len() <= 64 && (s.contains('/') || matches!(s, "UTC" | "GMT" | "Etc/UTC"))
+            && s.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '_' | '-' | '+'))
+            && !s.starts_with('/') && !s.contains("..");
+        ok.then(|| s.to_string())
+    };
+    if let Some(t) = tz.filter(|t| !t.trim().is_empty()) {
+        return iana(t);
+    }
+    etc_timezone.and_then(iana).or_else(|| {
+        let l = localtime?.to_string_lossy().to_string();
+        l.split_once("zoneinfo/").and_then(|(_, z)| iana(z))
+    })
+}
+
 /// A local time as epoch ms. In a DST gap the earlier reading is taken; a time that does
 /// not exist at all is `None`, which the status shows as "not known".
 pub fn local_to_ms(t: NaiveDateTime) -> Option<i64> {
     use chrono::TimeZone;
     chrono::Local.from_local_datetime(&t).earliest().map(|d| d.timestamp_millis())
+}
+
+#[cfg(test)]
+mod zone_tests {
+    use super::*;
+    use std::path::Path;
+
+    #[test]
+    fn the_zone_is_named_from_tz_then_the_system_files_and_unknown_otherwise() {
+        assert_eq!(zone_name(Some("Asia/Kolkata"), None, None).as_deref(), Some("Asia/Kolkata"));
+        assert_eq!(zone_name(Some(":Asia/Kolkata"), Some("Europe/Berlin"), None).as_deref(), Some("Asia/Kolkata"), "TZ first");
+        assert_eq!(zone_name(Some("UTC"), None, None).as_deref(), Some("UTC"));
+        assert_eq!(zone_name(Some("IST-5:30"), Some("Asia/Kolkata"), None), None, "a TZ rule names no zone: unknown, not the file's");
+        assert_eq!(zone_name(None, Some("Asia/Kolkata\n"), None).as_deref(), Some("Asia/Kolkata"));
+        assert_eq!(zone_name(None, None, Some(Path::new("/usr/share/zoneinfo/America/New_York"))).as_deref(), Some("America/New_York"));
+        assert_eq!(zone_name(None, None, Some(Path::new("../zoneinfo/Etc/UTC"))).as_deref(), Some("Etc/UTC"));
+        assert_eq!(zone_name(None, None, None), None);
+        assert_eq!(zone_name(Some("../../etc/passwd"), None, None), None);
+        let (_, off) = server_zone();
+        assert!((-14 * 60..=14 * 60).contains(&off));
+    }
 }
 
 #[cfg(test)]

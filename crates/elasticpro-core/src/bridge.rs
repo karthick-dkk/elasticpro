@@ -2408,9 +2408,13 @@ impl Core {
     }
 
     async fn ping(self: &Arc<Self>, caller: Option<&Caller>) -> Value {
+        // The server's zone, the schedules' and the local days' (volume::schedule::server_zone).
+        let (tz, tz_offset) = crate::volume::schedule::server_zone();
         let mut out = json!({
             "ok": true,
             "version": crate::VERSION,
+            "tz": tz,
+            "tzOffsetMinutes": tz_offset,
             "desktop": true,
             "netErrors": true,
             "vault": cfg!(feature = "vault"),

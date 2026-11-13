@@ -182,6 +182,12 @@ jump hosts, pins, credentials and read-only guard as a page, and shows up in
 `PING` says `fleetCache: true` when it is running — a UI that sees `false` (an older core)
 asks the clusters directly, as before.
 
+`PING` also says the server's zone — the one every schedule, local day and hourly window uses
+(`volume::schedule::server_zone`, the process's `TZ`): `tz`, its IANA name (`"Asia/Kolkata"`;
+from `TZ`, else `/etc/timezone`, else the `/etc/localtime` link; `null` when none names one, e.g.
+a `TZ` rule like `IST-5:30`), and `tzOffsetMinutes`, its offset now (`330`). Pages show times in
+that zone, the browser's only when `tz` is absent (an older core).
+
 **Datasets** (`FLEET_STATE.catalogue` lists them with interval, class and the guest flag):
 `health` (`/`, `/_cluster/health`, 180 s), `nodes` (300 s), `ilm_errors` (900 s), `policies`
 (snapshot repos, SLM, ILM status and policies, `path.repo`, watermarks — 3600 s),
