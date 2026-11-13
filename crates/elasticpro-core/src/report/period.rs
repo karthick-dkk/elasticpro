@@ -19,11 +19,24 @@ pub struct Period {
     pub from: String,
     pub to: String,
     pub label: String,
+    /// One hour instead of whole days (the log delay report's hourly schedule, `lastHour`):
+    /// the hour's start, epoch ms, server local; `from` = `to` = its local day.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hour: Option<i64>,
 }
+
+pub const HOUR_MS: i64 = 3_600_000;
 
 impl Period {
     fn new(from: NaiveDate, to: NaiveDate, label: String) -> Period {
-        Period { from: day_key(from), to: day_key(to), label }
+        Period { from: day_key(from), to: day_key(to), label, hour: None }
+    }
+
+    /// The hour that starts at `start` (epoch ms), named by its server-local day and time.
+    pub fn hour_at(start: i64, local_start: chrono::NaiveDateTime) -> Period {
+        let d = local_start.date();
+        Period { from: day_key(d), to: day_key(d), hour: Some(start),
+                 label: format!("{} {}–{}", day_key(d), local_start.format("%H:00"), (local_start + Duration::hours(1)).format("%H:00")) }
     }
     pub fn from_date(&self) -> NaiveDate {
         parse_day(&self.from).unwrap_or_default()
@@ -96,6 +109,25 @@ pub fn previous_week(today: NaiveDate) -> Period {
     let (f, t) = (this_monday - Duration::days(7), this_monday - Duration::days(1));
     debug_assert_eq!(f.weekday(), Weekday::Mon);
     Period::new(f, t, format!("{} – {}", day_key(f), day_key(t)))
+}
+
+/// The whole server-local hour before the one `local_now` is in, as a period: what the
+/// hourly log delay report covers. `offset_ms` = local − UTC at that moment.
+pub fn last_hour(local_now: chrono::NaiveDateTime, offset_ms: i64) -> Period {
+    use chrono::Timelike;
+    let this_hour = local_now.date().and_hms_opt(local_now.hour(), 0, 0).unwrap_or(local_now);
+    let start_local = this_hour - Duration::hours(1);
+    Period::hour_at(start_local.and_utc().timestamp_millis() - offset_ms, start_local)
+}
+
+/// `period` as the log delay report takes it: what `parse` takes, and `"lastHour"` (the
+/// whole local hour before now).
+pub fn parse_log_delay(v: &Value, today: NaiveDate) -> Result<Period, String> {
+    if v.as_str().map(str::trim) == Some("lastHour") {
+        let n = chrono::Local::now();
+        return Ok(last_hour(n.naive_local(), n.offset().local_minus_utc() as i64 * 1000));
+    }
+    parse(v, today)
 }
 
 /// `period` as `REPORT_RUN` takes it: `{from, to}` or a preset (`"month:2026-10"`,
@@ -176,6 +208,22 @@ mod tests {
         // The 1st of a month: yesterday and last7 reach into the previous one.
         assert_eq!(span(&parse(&json!("yesterday"), d("2026-11-01")).unwrap()), ("2026-10-31", "2026-10-31"));
         assert_eq!(span(&parse(&json!("month:2026-11"), d("2026-11-01")).unwrap()), ("2026-11-01", "2026-11-01"));
+    }
+
+    #[test]
+    fn the_last_hour_is_the_whole_local_hour_before_now() {
+        let local = chrono::NaiveDateTime::parse_from_str("2026-11-13 10:17", "%Y-%m-%d %H:%M").unwrap();
+        // India: local = UTC + 5:30.
+        let p = last_hour(local, 330 * 60_000);
+        assert_eq!((p.from.as_str(), p.to.as_str(), p.label.as_str()), ("2026-11-13", "2026-11-13", "2026-11-13 09:00–10:00"));
+        assert_eq!(p.hour, Some(chrono::NaiveDateTime::parse_from_str("2026-11-13 03:30", "%Y-%m-%d %H:%M").unwrap().and_utc().timestamp_millis()));
+        let midnight = last_hour(chrono::NaiveDateTime::parse_from_str("2026-11-13 00:05", "%Y-%m-%d %H:%M").unwrap(), 0);
+        assert_eq!((midnight.from.as_str(), midnight.label.as_str()), ("2026-11-12", "2026-11-12 23:00–00:00"), "the hour before midnight is yesterday's");
+        assert!(parse_log_delay(&json!("lastHour"), d("2026-11-13")).unwrap().hour.is_some());
+        assert!(parse(&json!("lastHour"), d("2026-11-13")).is_err(), "the other reports have no hours");
+        let v = serde_json::to_value(&p).unwrap();
+        assert_eq!(serde_json::from_value::<Period>(v).unwrap(), p, "kept with the job and read back");
+        assert!(serde_json::to_value(yesterday(d("2026-11-13"))).unwrap().get("hour").is_none(), "a day period writes as before");
     }
 
     #[test]

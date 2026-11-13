@@ -940,6 +940,9 @@ async function loadSink() {
   if (!answered('sink') && host && host.isConnected) draw();
 }
 
+/** The most devices one cluster's run reads (logdelay/measure.rs MAX_DEVICES_PER_RUN). */
+const MAX_DEVICES_PER_RUN = 100000;
+
 function sinkField(label, key, opts = {}) {
   const c = (sink && sink.config) || {};
   return h('label', { id: opts.id || null, style: { display: opts.hidden ? 'none' : 'grid', gap: '3px', fontSize: '11.5px' } },
@@ -970,7 +973,9 @@ function readSink() {
     deviceField: v('deviceField'),
     arrivalField: v('arrivalField'),
     eventTimeFields: v('eventTimeFields').split(',').map((f) => f.trim()).filter(Boolean),
-    maxDevices: Number(v('maxDevices')) || 2000,
+    // 1 to 100 000 (the core's MAX_DEVICES_PER_RUN): read in pages of 1000, so a large fleet is
+    // not a large request. Empty or not a number: the core's default (20 000).
+    maxDevices: Number(v('maxDevices')) >= 1 ? Math.min(MAX_DEVICES_PER_RUN, Math.round(Number(v('maxDevices')))) : 20000,
   };
 }
 
@@ -1068,7 +1073,8 @@ function delaySinkCard() {
             ...list.map((x) => h('option', { value: x.id, selected: x.id === c.sinkClusterId }, x.name)))),
         sinkField('Every (hours)', 'everyHours', { type: 'number', min: 1, max: 24, width: '80px' }),
         sinkField('Index prefix', 'indexPrefix', { title: 'Indices are <prefix>-YYYY.MM', id: 'sink-indexPrefix-field', hidden: dest !== 'cluster' }),
-        sinkField('Max devices per run', 'maxDevices', { type: 'number', min: 1, max: 10000, width: '110px' })),
+        sinkField('Max devices per run', 'maxDevices', { type: 'number', min: 1, max: MAX_DEVICES_PER_RUN, width: '110px',
+          title: 'Devices measured per cluster per run, 1 to 100 000, read 1000 at a time. A cluster with more is measured up to this many and the run says so.' })),
       h('div.muted#sink-history-note', { style: { fontSize: '11.5px', display: dest === 'history' ? '' : 'none' } },
         'Measurements go to <history prefix>-delay-YYYY.MM on the history store, under its own two gates '
         + '(HISTORY_STORE_WRITES and Write history) \u2014 see Data \u203a Backend.'),

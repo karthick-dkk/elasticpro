@@ -36,6 +36,15 @@
  * generated indices everywhere. Both may be set. A fleet is always --ports: each port is
  * its own cluster, named MOCK_CLUSTER_NAME-<port> with its own uuid.
  *
+ * Log delay at scale (docs/LOGDELAY.md "Measurement"): MOCK_LD_DEVICES=25000 makes the
+ * device aggregation answer that many devices — the composite pages the core reads
+ * (`after_key`, `size`, a `term` on one device) and the terms answer the browser's live check
+ * reads (cut at its `size`, the rest in `sum_other_doc_count`) — from one generator, so both
+ * paths are asked about the same devices. Every 20th is delayed (41 min), every 50th
+ * critical (95), every 97th has its clock ahead (-37), every 33rd carries no event time
+ * (can't measure); odd devices carry `event_created`, even ones `ingested_time` (a mapping
+ * with both, a device with one); Zone dc1–dc4 and tag1 firewall/proxy/switch on each.
+ *
  * Read-only fixture: any write returns {"acknowledged": true} without changing anything —
  * except snapshot deletes and index-template PUT/DELETE, which are honoured in memory.
  */
@@ -89,6 +98,7 @@ const index = (name, size, status = 'open', health = 'green') => ({
 });
 
 const SCALE = Math.max(0, Number(process.env.MOCK_INDICES) || 0);
+const LD_DEVICES = Math.max(0, Math.min(1_000_000, Number(process.env.MOCK_LD_DEVICES) || 0));
 const TENANTS = ['acme', 'beta', 'gamma', 'delta', 'omega', 'sigma', 'kappa', 'zeta'];
 const scaledName = (i) => `logstash-${TENANTS[i % TENANTS.length]}-${new Date(Date.now() - Math.floor(i / TENANTS.length) * DAY).toISOString().slice(0, 10).replace(/-/g, '.')}-${String(i).padStart(6, '0')}`;
 
@@ -399,6 +409,10 @@ const routes = [
     if (body.aggs && body.aggs.by_index) return volumeSearch(hit.url, body);
     // Volume by host: one composite page (docs/REPORT-TYPES.md "Collection").
     if (body.aggs && body.aggs.h && body.aggs.h.composite) return hostsComposite(body);
+    // Log delay, the core's measurement: one composite page of devices.
+    if (body.aggs && body.aggs.devices && body.aggs.devices.composite) return delayComposite(body);
+    // Log delay, the browser's live check, against a large generated fleet.
+    if (LD_DEVICES && body.aggs && body.aggs.devices && body.aggs.devices.terms) return delayTerms(body);
 
     // The close-up: the newest documents for one device, looked up by hostname or by
     // address. Answered from the same DEVICES table the aggregation uses, so the fixture
@@ -566,6 +580,70 @@ const FIELD_TYPES = {
   ClientName: 'keyword',
   fwd_log_size: 'long',
 };
+
+/** The log delay fleet, sorted by name: the generated one (MOCK_LD_DEVICES) or the six DEVICES. */
+let ldFleet = null;
+function delayFleet() {
+  if (ldFleet) return ldFleet;
+  if (!LD_DEVICES) {
+    ldFleet = DEVICES.map(([device, mins, logType, tag], i) => ({ device, mins, eventField: 'ingested_time', zone: tag === 'acme' ? 'dc1' : 'dc2', tag1: logType, docs: 100 + Math.round(Math.abs(mins)), i }));
+  } else {
+    const tags = ['firewall', 'proxy', 'switch'];
+    ldFleet = Array.from({ length: LD_DEVICES }, (_, k) => {
+      const i = k + 1;
+      const mins = i % 97 === 0 ? -37 : i % 50 === 0 ? 95 : i % 20 === 0 ? 41 : i % 33 === 0 ? null : (i % 7);
+      return { device: `dev-${String(i).padStart(6, '0')}`, mins, eventField: i % 2 ? 'event_created' : 'ingested_time',
+               zone: `dc${(i % 4) + 1}`, tag1: tags[i % 3], docs: 10 + (i % 90), i };
+    });
+  }
+  ldFleet.sort((a, b) => (a.device < b.device ? -1 : a.device > b.device ? 1 : 0));
+  return ldFleet;
+}
+
+/** The newest document of one device, as top_hits returns it. */
+function delayHit(d, now) {
+  const arrival = now - 60000;
+  const src = { '@timestamp': new Date(arrival).toISOString(), src_hostname: d.device, src_ip: `10.0.${Math.floor(d.i / 250)}.${d.i % 250}`,
+                tag1: d.tag1, Zone: d.zone, fwd_tag: `fwd-${d.zone}`, parser_tag: `parser-${d.tag1}`, fwdtag: `fwd-${d.zone}`, ClientID: 'ACME', branch: 'HQ', log_type: d.tag1 };
+  if (d.mins !== null) src[d.eventField] = new Date(arrival - d.mins * 60000).toISOString();
+  return { hits: { total: { value: 1 }, hits: [{ _index: 'logstash-acme-2026.09.09', _source: src }] } };
+}
+
+/** A `term` on the device field in the query's filters (a run scoped to one device). */
+function deviceTerm(body) {
+  for (const f of (((body.query || {}).bool || {}).filter) || []) {
+    if (f.term) return String(Object.values(f.term)[0]);
+  }
+  return null;
+}
+
+/** The core's page: `size` devices after `after.d`, `after_key` the last one's. */
+function delayComposite(body) {
+  const comp = body.aggs.devices.composite;
+  const size = Math.max(1, Math.min(10000, Number(comp.size) || 10));
+  const after = comp.after && comp.after.d;
+  const only = deviceTerm(body);
+  const now = Date.now();
+  const fleet = delayFleet().filter((d) => (only === null || d.device === only) && (after == null || d.device > after));
+  const page = fleet.slice(0, size);
+  const buckets = page.map((d) => ({ key: { d: d.device }, doc_count: d.docs, latest: delayHit(d, now) }));
+  const devices = { buckets };
+  if (page.length) devices.after_key = { d: page[page.length - 1].device };
+  const aggregations = { devices };
+  if (body.aggs.no_device) aggregations.no_device = { doc_count: LD_DEVICES ? 3 : 0 };
+  return { took: 9, timed_out: false, _shards: { total: 1, successful: 1, failed: 0 }, hits: { total: { value: 0 }, hits: [] }, aggregations };
+}
+
+/** The browser's live check: the most documents first, cut at `size` (its 500). */
+function delayTerms(body) {
+  const size = Math.max(1, Math.min(10000, Number(body.aggs.devices.terms.size) || 10));
+  const now = Date.now();
+  const all = [...delayFleet()].sort((a, b) => b.docs - a.docs || (a.device < b.device ? -1 : 1));
+  const top = all.slice(0, size);
+  return { took: 12, timed_out: false, hits: { total: { value: 0 }, hits: [] },
+           aggregations: { devices: { buckets: top.map((d) => ({ key: d.device, doc_count: d.docs, latest: delayHit(d, now) })),
+                                      sum_other_doc_count: all.slice(size).reduce((n, d) => n + d.docs, 0) } } };
+}
 
 /**
  * Volume by host (docs/REPORT-TYPES.md "Collection"): the composite aggregation over

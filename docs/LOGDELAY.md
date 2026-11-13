@@ -1,4 +1,4 @@
-# Log delay report (0.3.57)
+# Log delay report (0.3.57; composite pages, Fetch now, hourly report: next release)
 
 Developer contract for the log delay report: the one definition of "late", the scheduled
 measurement with silent devices and delay periods, the stored records, the recommended fixes,
@@ -7,14 +7,14 @@ from this file alone; where it and the code disagree, one of them has a bug. Dec
 the owner's (canvas boards Main, Cluster, Device, Mail, Storage, Plan, Fix; 2026-11-05/07).
 The figures on the boards are example data; the behaviour is the spec.
 
-Code: `crates/elasticpro-core/src/logdelay/` (`levels`, `measure`, `state`, `store`, `docs`,
-`fixes`, `summary`, `report`, `time`, `mod`), `report/logdelay_job.rs`, and the run in
+Code: `crates/elasticpro-core/src/logdelay/` (`levels`, `measure`, `collect`, `state`, `store`,
+`docs`, `fixes`, `summary`, `report`, `time`, `mod`), `report/logdelay_job.rs`, and the run in
 `bridge.rs` `run_delay_sink`. Tests: each module's own, `tests/logdelay.rs`,
-`tests/delay_sink.rs`.
+`tests/logdelay_scale.rs` (25 000 devices), `tests/delay_sink.rs`.
 
 ```text
-  delay sink tick (every_hours, hosted, armed)
-    └── per cluster: one search ──▶ readings (device, docs, arrival, event, extras)
+  delay sink tick (every_hours, hosted, armed) · DELAY_SINK_RUN · Fetch now (JOB_RUN)
+    └── per cluster: composite pages of ≤ 1000 devices (after_key) ──▶ readings (device, docs, arrival, event, extras)
           └── tracker.apply: states, periods open/solve, silences
                 ├── built-in store  <data>/logdelay/…          always (the pages read it)
                 └── documents ──▶ history store | sink cluster   by destination, gated as before
@@ -69,13 +69,93 @@ Code: `crates/elasticpro-core/src/logdelay/` (`levels`, `measure`, `state`, `sto
   (`src_hostname.keyword`); arrival `@timestamp`; event-time fields tried in order
   (`event_created`, `ingested_time`, `event.created` by default); extras default
   `tag1, fwd_tag, parser_tag, Zone` (≤ 12 names).
-* One search per cluster per run: `size 0`, last `everyHours`, `terms` on the device field
-  (≤ `maxDevices`, default 2000), `top_hits 1` with arrival + event-time + extras in
-  `_source`. Every bucket is a reading; unreadable times give `delay_minutes: null`.
+* **Pages, nothing cut** (`measure::page_body`, `collect.rs`): per cluster, a composite
+  aggregation on the device field, read `after_key` by `after_key`, at most 1000 devices a page
+  (halved, down to 100, when a page's answer is over `memory::report_page_bytes`, or when it is
+  over the response cap — `response_too_large` is asked again smaller, not a failure). Each
+  bucket's `top_hits 1` (newest by arrival) brings the arrival, **every** event-time candidate
+  and the extras in `_source`; a document is read by the first candidate it carries, as text or
+  epoch milliseconds. Every bucket is a reading; unreadable times give `delay_minutes: null`.
+  One page's answer is held at a time and dropped once read; the run keeps the readings
+  (a few hundred bytes a device: 25 000 devices ≈ 10 MB), never the answers.
+* **The window** is absolute: `[now − everyHours, now]` in epoch ms, fixed when the run starts,
+  so every page reads the same documents however long the run takes.
+* **Max devices per run** (`DELAY_SINK_SET config.maxDevices`, *Max devices per run*): 1–100 000,
+  default 20 000 for a new config (a saved one keeps its value). It bounds a run's length and
+  what it keeps, not a request. Reaching it is said: the run's note names the clusters, the
+  cluster's `lastRead.truncated` is true with `maxDevices`, and the devices after the cap (by
+  name) are **not** turned silent — the list was not complete, so nobody it did not read is.
+* **A page that fails** (shards failed or timed out in a 200: asked again twice; an HTTP error,
+  refusal or unreachable cluster: not asked again) ends the cluster's read: what was read is
+  kept and applied as an incomplete list (nobody else turned silent), the run is `failed` and
+  says how many devices were read.
+* **No device name**: the first page also counts the window's documents without one
+  (`lastRead.noDevice`) — they are in no bucket, so they are said, not dropped. A device name
+  longer than the keyword's `ignore_above` (256 by default) is not indexed as a keyword and
+  cannot be in any aggregation: those documents count here too.
+* Per cluster, how the last run read it is kept with the tracker as `lastRead`:
+  `{at, from, to, devices, pages, complete, truncated, maxDevices?, noDevice?, error?}`.
 * **Silent**: a device in the tracker not in this run's buckets, whose last arrival is
   ≥ `silentAfterHours` ago → `silent`; a silence record opens (`from` = last arrival). The
   first arrival after ends it with what came back (`burstDocs`, `burstMinutes`). A device not
   seen for 7 days is forgotten (its open period is kept unsolved).
+
+## Which devices — live, now, in the range (one definition)
+
+The one query above is every measurement's: the timer's, `DELAY_SINK_RUN` and *Fetch now*. The
+pages count devices three ways, side by side, from the store (`summary::device_counts`,
+`byCluster[].counts`, `LOGDELAY_CLUSTER.counts`):
+
+| count | which devices | what shows it |
+|---|---|---|
+| `inLastRun` | sent at least one document in the last run's window (`everyHours`) — what a live check sees | "live", after *Fetch now*; `DeviceRow.inLastRun` |
+| `now` | every device the tracker holds: those plus the silent ones (seen in the last 7 days) | `totals.devices`, the tiles |
+| `inRange` | measured at any time in the range (a measurement in it, silent included, or a delay period overlapping it) | the device list, the report |
+
+So for one cluster a live check over the last 2 hours and the 30-day report can name different
+numbers of devices, and both are right: a device that was late on Tuesday and has sent nothing
+since is in the report's range and not in the live window. The device list (`device_rows`) is
+filtered to the range: a report for yesterday lists yesterday's devices, not every device the
+tracker remembers (it used to list all of them — devices silent or last seen before the
+range were in it). `devicesInRange` and `devicesInLastRun` sit beside `devicesTotal` in
+`LOGDELAY_SUMMARY`.
+
+**The browser's live check** (`ui/js/core/log-delay.js` `measureDelay`: the Logs & Delay page's
+*Fetch*, Play's wall, the headless scrape) is a different query: one `terms` aggregation of at most
+500 devices (the display link's gate, `auth.rs` `delay_search_body`, allows no more), over 24 h by
+default. Its "Devices across the fleet: 500 device(s)" was that cap; the devices past it are in
+`sum_other_doc_count`, not in the list. It also read each cluster's devices by **one** event-time
+field — the first candidate the index pattern's mapping has anywhere — so every device whose
+logs carry another candidate (or epoch-millisecond numbers) was "error": in a fleet where some
+log types carry `ingested_time` and others `event_created`, about half the devices. It now reads
+every candidate per document, as the core does. The cap stays the browser's; the Log Delay page
+reads the store (*Fetch now* below), which has none.
+
+## Fetch now — `JOB_RUN {jobId: "logdelay.measure", clusterIds?, device?}`
+
+The page's *Fetch now* button: the scheduled measurement, now, by the same code and query
+(`run_delay_sink` → `logdelay_collect`), into the same store and destination.
+
+* `clusterIds` (1–200 ids; an unknown id is `not_found`) narrows it to those clusters, measured
+  when primed; `device` (one device name as the measurement lists it: no `*`/`?`, ≤ 256
+  characters, `bad_request` otherwise) to that device, by a `term` filter on the device field.
+  Neither: every target, exactly like `DELAY_SINK_RUN`.
+* A narrowed run reads only part of a cluster's list, so it turns nobody silent and leaves the
+  schedule's own state (`lastRunAt`, `nextDueAt`, back-off) alone; a one-device run also leaves
+  the cluster's `lastRunAt`/`lastRead` alone. Its periods, points and daily totals are written as
+  any run's; the destination gets the same mirror, under the same gates (a sink cluster while the
+  config is read-only: `blocked_readonly`).
+* Administrator who sees every cluster (docs/JOBS.md "Controls"); hosted only (`unsupported`).
+* One run at a time with the timer and `DELAY_SINK_RUN`: a second press answers
+  `already_running` with the open run's id.
+* Answer `{ok, jobId, runId, started}` at once; the run goes on in the background. In
+  `JOBS_LIST` (`jobId: "logdelay.measure"`) it is `manual:<user>`, `done`/`total` = clusters
+  read of the run's clusters, `progress` the percent, `records` = devices read so far (the
+  count updates after every page) and, once ended, the rows written; `note` says
+  `fetch now: N cluster(s), device X` and any cluster cut at *Max devices per run*; `scope`
+  keeps `{clusterIds, device}` so `JOB_RETRY` runs the same scope again.
+* Refused before it starts (nothing primed, no destination, the history store closed): the run
+  is `skipped` with the reason, as the timer's.
 
 ## Where it is kept
 
@@ -152,6 +232,11 @@ the clusters the caller sees (`visible_ids`); `LOGDELAY_SETTINGS_GET|SET` → **
 Common inputs: `from`/`to` `YYYY-MM-DD` local days (default: last `days`, 30; ≤ 1200),
 `clusterIds[]` (optional narrowing). Every answer carries `from`, `to`, `now` (ms).
 
+Every row of every `LOGDELAY_*` answer that names a device — `DeviceRow`, `LOGDELAY_FIXES`
+`devices[]`, `LOGDELAY_DEVICE` — carries `zone` and `tag1` (the extra columns `Zone` and `tag1`,
+read whatever their case; `null` = the device's logs do not say). Both are always among the
+extras measured (`Settings::extras_for` adds them to a list that leaves them out).
+
 ### `LOGDELAY_SUMMARY {from?, to?, days?, clusterIds?, maxDevices?}` — Main board
 
 ```json
@@ -169,8 +254,9 @@ Common inputs: `from`/`to` `YYYY-MM-DD` local days (default: last `days`, 30; �
   "byCluster": [ { "id": "client-a-prod", "name": "client-a-prod", "devices": 412, "measured": 410, "lateNow": 14, "delay": 9, "critical": 5, "silent": 1,
                    "unmeasured": 1, "below": 396, "belowPct": 96.1, "latePct": 3.4, "belowPctPrevious": 95.2, "newToday": 3,
                    "sparkline": [12, 9, null, 14], "sparklineDays": ["2026-10-06", "…"], "worst": { "device": "fw-dc1-07", "minutes": 94.0, "state": "critical" },
-                   "levels": { "noDelayUnder": 15.0, "delayFrom": 30.0, "criticalOver": 60.0 }, "lastRunAt": 1762249000000 } ],
-  "devices": [ "<DeviceRow>" ], "devicesTotal": 1284, "devicesTruncated": false,
+                   "levels": { "noDelayUnder": 15.0, "delayFrom": 30.0, "criticalOver": 60.0 }, "lastRunAt": 1762249000000,
+                   "counts": { "inLastRun": 401, "now": 412, "inRange": 418, "lastRead": { "…": "as lastRead" } }, "lastRead": { "at": 0, "devices": 401, "pages": 1, "complete": true, "truncated": false } } ],
+  "devices": [ "<DeviceRow>" ], "devicesTotal": 1284, "devicesInRange": 1290, "devicesInLastRun": 1270, "devicesTruncated": false,
   "schedule": { "supported": true, "enabled": true, "everyHours": 2, "destination": "builtin", "lastRunAt": 1762249000000, "state": { "…DELAY_SINK state" } } }
 ```
 
@@ -191,6 +277,7 @@ never measured — say so.
 { "device": "fw-dc1-07", "cluster": "client-a-prod", "clusterName": "client-a-prod", "state": "critical", "nowMinutes": 94.0,
   "medianMinutes": 6.0, "maxMinutes": 212.0, "episodes": 5, "solved": 4, "lateMs": 67200000, "lastStarted": 1762240500000, "lastSolved": null,
   "lateSince": 1762240500000, "docsPerDay": 41000, "lastArrival": 1762250400000, "lastEvent": 1762244760000, "silentSince": null,
+  "zone": "dc1", "tag1": "firewall", "inLastRun": true,
   "extras": { "Zone": "dc1", "tag1": "firewall", "fwd_tag": "syslog-dc1-02", "parser_tag": "fortigate-grok" } }
 ```
 
@@ -201,7 +288,7 @@ started → solved* = `lastStarted` → `lastSolved` (`lateSince` set = "still l
 ### `LOGDELAY_CLUSTER {clusterId, from?, to?}` — Cluster board
 
 `{ ok, cluster, name, from, to, label, now, everyHours, levels, fields {pattern, device, arrival, eventTime[], extras[]},
-lastRunAt, totals{…as above}, started, solved, medianNow, medianPrevious, windows[], days[], devices[DeviceRow] }`.
+lastRunAt, counts {inLastRun, now, inRange, lastRead}, lastRead, totals{…as above}, started, solved, medianNow, medianPrevious, windows[], days[], devices[DeviceRow] }`.
 Tiles: `totals.devices`, `totals.late` (`delay`/`critical`), `pctOnTime`, `started`/`solved`,
 `medianNow` vs `medianPrevious` (null = not measured). Footer: `fields` names.
 
@@ -211,7 +298,7 @@ Tiles: `totals.devices`, `totals.late` (`delay`/`critical`), `pctOnTime`, `start
 { "ok": true, "device": "fw-dc1-07", "cluster": "client-a-prod", "clusterName": "…", "from": "…", "to": "…", "label": "…", "now": 0, "everyHours": 2, "levels": {…},
   "state": "critical", "nowMinutes": 94.0, "lateSince": 1762240500000, "silentSince": null, "medianMinutes": 6.0,
   "worst": { "minutes": 212.0, "at": 1760891400000 }, "episodes": 5, "solved": 4, "lateMs": 67200000, "latePct": 2.6, "docsPerDay": 41000,
-  "lastSilence": 1761720000000, "extras": {…}, "lastArrival": 0, "lastEvent": 0, "firstSeen": 0,
+  "lastSilence": 1761720000000, "extras": {…}, "zone": "dc1", "tag1": "firewall", "inLastRun": true, "lastArrival": 0, "lastEvent": 0, "firstSeen": 0,
   "points": [ { "t": 1762250400000, "m": 94.0, "s": "critical" }, { "t": 0, "m": null, "s": "silent" } ],
   "periods": [ { "started": 0, "solved": null, "ended": null, "lastedMs": 9900000, "worstMinutes": 94.0, "worstState": "critical", "lastMinutes": 94.0, "lastState": "critical",
                  "measurements": 11, "pattern": null, "extras": {…} } ],
@@ -245,7 +332,7 @@ Without `from`/`to`/`days`, served from `findings.json` (what the last run match
 last 7 days, narrowed to the caller's clusters); with them, matched now. `matchedAt` = when.
 
 `{ ok, from, to, now, matchedAt, findings[Finding + stepLabel + clusterName] (most devices first),
-devices: [ { device, cluster, clusterName, state, nowMinutes, step, stepLabel, why, fix, group } ] (worst first),
+devices: [ { device, cluster, clusterName, state, nowMinutes, zone, tag1, step, stepLabel, why, fix, group } ] (worst first),
 rules: [ { pattern, step, readFrom, recommendation } ×6 ] }`.
 
 ### `LOGDELAY_SETTINGS_GET` / `LOGDELAY_SETTINGS_SET {settings}` — Storage board (Admin)
@@ -256,7 +343,7 @@ rules: [ { pattern, step, readFrom, recommendation } ×6 ] }`.
                 "fields": { "device": "src_hostname", "arrival": "@timestamp", "eventTime": ["event_created"], "extras": ["tag1", "fwd_tag", "parser_tag", "Zone"] },
                 "clusters": { "client-a-prod": { "levels": {…}, "fields": {…} } }, "setBy": "Admin", "setAt": 0 },
   "resolved": [ { "id": "…", "name": "…", "levels": {…}, "levelsFrom": "settings|configFile|default", "fields": { "pattern": "logstash-*", "device": "src_hostname.keyword", "arrival": "@timestamp", "eventTime": [..], "extras": [..] } } ],
-  "schedule": { "enabled": true, "everyHours": 2, "destination": "builtin|history|cluster", "clusters": [], "maxDevices": 2000, "state": {…}, "blocked": null },
+  "schedule": { "enabled": true, "everyHours": 2, "destination": "builtin|history|cluster", "clusters": [], "maxDevices": 20000, "state": {…}, "blocked": null },
   "builtinStore": { "keepDays": 90, "bytes": 123456, "recentDays": 31, "dir": "logdelay",
                     "sizes": { "bytes": 123456, "trackersBytes": 0, "dailyBytes": 0, "dayFilesBytes": 0, "dayFiles": 0, "clusters": 0 } },
   "extrasDefault": [..], "uiCopy": "…" }
@@ -282,9 +369,19 @@ The schedule itself (every N hours, destination, clusters) stays `DELAY_SINK_SET
   `device, cluster, nowMinutes, level, startedSolved, median, max, episodes, lateTime, docsPerDay,
   arrival, eventTime, lateSince` and any extra column. Sections: `summary, lateEvery2h,
   windows, dayByDay, topDelayed, fixes`. Unknown names are refused by name.
-* **Attachments**: `elasticpro-log-delay-<from>_<to>.xlsx` — sheets *Summary*, *Devices*
-  (chosen columns, group column first when not cluster, + Step/Likely why/Fix), *Every N
-  hours*, *Day by day*, *Top delayed*, *Fixes* — and `…-devices.csv` (the Devices sheet).
+* **Attachments**: `elasticpro-log-delay-<from>_<to>.xlsx` (`elasticpro-log-delay-<YYYY-MM-DDTHH00>.xlsx`
+  for an hour) — sheets *Summary* (with a *Zone · tag1* table: devices, late now, above 60 min,
+  silent per pair, the most late first; "—" where the logs do not say), *Devices* (chosen
+  columns, group column first when not cluster, + Step/Likely why/Fix), *Every N hours*, *Day by
+  day*, *Top delayed*, *Fixes* — and `…-devices.csv` (the Devices sheet).
+* **Zone and tag1 everywhere**: the Devices sheet and the CSV always carry `Zone` and `tag1`
+  (added after the cluster when the chosen columns leave them out); *Top delayed* has both
+  columns; *Fixes* names the zones and tag1s of each finding's devices; the mail's *Top delayed*
+  has both and its Summary a *By zone and tag1* table (12 pairs, the rest named as in the
+  attachment). *Every N hours* and *Day by day* are counts per time window over all devices
+  (no device rows): they are not split by zone.
+* **No measurement in the period** (an hour between two-hourly runs, a range before the first
+  run): the mail and the text say so at the top; the figures shown are the devices' states now.
   **PDF: not built** — there is no PDF writer in the tree; `pdf: true` round-trips and the
   job's `warning` says so.
 * **Mail**: `multipart/alternative` text + HTML inside `multipart/mixed` with the files
@@ -295,7 +392,18 @@ The schedule itself (every N hours, destination, clusters) stays `DELAY_SINK_SET
   config.txt (`<url>/#/reports/log-delay`, which opens the Log Delay page since 0.3.60). Tables and inline styles only; colours light
   green `#DDF3E4`, blue `#DCEBFA`, pink `#FBDCE6`, orange `#FDE4CC`.
 * Period days are local days; `yesterday`/`last7`/`previousWeek`/`previousMonth`/`{from,to}`
-  as every report.
+  as every report, and **`lastHour`** (this kind only): the whole server-local hour before now.
+* **Hourly** (this kind only; `REPORT_SCHEDULE_SET {kind: "log_delay", schedule: "hourly", at}`,
+  `JOB_CREATE {report: "log_delay", schedule: "hourly", …}`, `UI_REPORT_LOGDELAY_SCHEDULE=hourly`):
+  every hour, at `at`'s minute past it (`00:10` = ten past), over the whole local hour before —
+  next to the daily and monthly schedules (a created schedule each). The period carries `hour`
+  (its start, epoch ms) beside `from` = `to` = its local day; its key `<from>..<to>@<hour>` is
+  remembered so an hour is sent once, restart or not. *Collect now* for it is *Fetch now* (the
+  measurement), then *Send now* (`REPORT_SEND_NOW {kind: "log_delay"}` sends the hour before
+  now). The device rows, periods and time late are measured over the hour; with the
+  measurement every 2 hours (the default) every other hour has no measurement and says so — set
+  *Every (hours)* to 1 for an hourly report with a measurement in every hour. The other report
+  kinds refuse `hourly` and `lastHour` (`bad_request`).
 
 ## Not built / notes for the UI agent
 
@@ -309,6 +417,16 @@ The schedule itself (every N hours, destination, clusters) stays `DELAY_SINK_SET
   answers `opened`, `solved`, `destination` as well.
 * The measurement now writes **every** device of a run (silent and can't-measure included);
   `measured` in `DELAY_SINK_RUN` counts rows written.
+* `DELAY_SINK_RUN` answers `read` (devices read), `pages`, `window {from, to}`, `maxDevices`,
+  `truncated` (cluster ids cut at the cap), `scope` and `note` beside `measured`.
+* **Hard limits** (Elasticsearch's, not ours): `search.max_buckets` (65 536 by default) is per
+  answer, and a page is at most 1000 device buckets with one `top_hits` each — far under it;
+  `index.max_result_window` and `max_inner_result_window` do not apply (`size 0`, `top_hits 1`);
+  a device name longer than the keyword's `ignore_above` is in no aggregation (counted in
+  `noDevice`, never listed); a page is asked within 120 s (`collect::PAGE_TIMEOUT_MS`). The
+  ceiling is ours: 100 000 devices per cluster per run, said when reached. The tracker keeps 31
+  days of points per device in memory: 25 000 devices at a 2-hour interval is about 9 million
+  points (some 300 MB) — the next thing to make smaller if fleets that size are measured.
 * One run at a time (docs/JOBS.md): `DELAY_SINK_RUN` while a run goes — the timer's or another
   person's — answers `{ok: false, kind: "already_running", runId}` and measures nothing. Every
   run, the timer's and the pressed ones, is in the run log (`JOBS_LIST`, job `logdelay.measure`).

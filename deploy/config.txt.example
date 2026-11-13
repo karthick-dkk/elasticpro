@@ -296,6 +296,12 @@ UI_REPORT_HOSTS_TO=
 UI_REPORT_HOSTS_SCHEDULE=
 # Also when volume by host is collected, every day for every cluster (default 06:00).
 UI_REPORT_HOSTS_AT=
+# The log delay report (docs/LOGDELAY.md): recipients, cadence (monthly, weekly, daily,
+# hourly, manual) and time (HH:MM, server local; hourly sends at that minute past every
+# hour, over the whole hour before). Default: daily at 07:00 over yesterday, off.
+UI_REPORT_LOGDELAY_TO=
+UI_REPORT_LOGDELAY_SCHEDULE=
+UI_REPORT_LOGDELAY_AT=
 # Volume by host's metadata columns, comma-separated, in order. Default: parser_tag,
 # fwdtag, fwd_tag, src_ip, tag1, zone, ClientID, ClientName, branch, logtag, log_type,
 # observer_hostname. A field the mapping does not have is a column of "not in the mapping".

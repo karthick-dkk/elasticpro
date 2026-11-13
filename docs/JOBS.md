@@ -108,6 +108,7 @@ if any was, else `cancelled`, else `completed`; its `note` counts each.
 | `cancelAsked` | `JOB_CANCEL` asked it to stop (it stops at its next safe point) |
 | `retryOf`, `attempt` | the run this one tries again, and which try (1 = the first retry); null / 0 otherwise |
 | `deferred` | a busy cluster's wait: `{cluster, signal, reason, since}`; null otherwise |
+| `scope` | what a person narrowed the run to (the log delay measurement's *Fetch now*: `{clusterIds, device}`); absent otherwise. `JOB_RETRY` runs the same scope again |
 | `stale` | role core: a worker run still open while the worker's heartbeat is late or never came — it may have ended with the worker. Never ended by the core, only marked |
 
 **Kept:** the last 50 finished runs per job, 2000 per file; an open run is never dropped. A run
@@ -227,7 +228,7 @@ settings (`controls.json`) and the created schedules are the core's files, read 
 
 | message | does |
 |---|---|
-| `JOB_RUN {jobId, clusterIds?}` | run now, `manual:<user>` → `{ok, jobId, runId}`; a run already open answers `already_running` with its id (two presses are one run) |
+| `JOB_RUN {jobId, clusterIds?, device?}` | run now, `manual:<user>` → `{ok, jobId, runId}`; a run already open answers `already_running` with its id (two presses are one run). `device` is the log delay measurement's alone (*Fetch now*, below) |
 | `JOB_PAUSE {jobId}` / `JOB_RESUME {jobId}` | hold / release a pausable job's timer → `{ok, jobId, paused, settings}` |
 | `JOB_CANCEL {runId}` | stop an open run → `{ok, runId, status: "cancelled"}` (it was queued) or `{ok, runId, cancelAsked: true}` |
 | `JOB_RETRY {runId}` | a failed, deferred or cancelled run again, same parameters, `trigger: retry` → `{ok, runId, retryOf}` |
@@ -238,7 +239,8 @@ settings (`controls.json`) and the created schedules are the core's files, read 
 
 ### Run now
 
-`JOB_RUN` runs every job that can run on demand: the log delay measurement (hosted), the daily
+`JOB_RUN` runs every job that can run on demand: the log delay measurement (hosted; `clusterIds`
+and/or `device` narrow it — *Fetch now*, docs/LOGDELAY.md "Fetch now"), the daily
 volume collection (`clusterIds`, default every cluster the caller sees — what *Refresh now* does,
 once a minute per cluster), the hosts collection (the month's missing days of each cluster,
 without spending the timer's three tries a day), a mailed report (what `REPORT_SEND_NOW` does; a
@@ -256,6 +258,31 @@ does with the `runId` `VOLUME_RUN` answers (docs/REPORTS.md), polling `JOBS_LIST
 run `skipped`. The old buttons — `DELAY_SINK_RUN`, `HOUSEKEEPING_RUN`, `BACKUP_CREATE`,
 `VOLUME_RUN`, `REPORT_SEND_NOW`, a hosts *Collect again* — keep working and are recorded the same
 way, `manual:<user>`, through the same one-run-per-job guard.
+
+### Fetch now (the log delay measurement)
+
+`JOB_RUN {jobId: "logdelay.measure", clusterIds?: [ids], device?: "<device>"}` is the Log Delay
+page's *Fetch now*: the scheduled measurement's own code and query (composite pages,
+docs/LOGDELAY.md "Measurement"), narrowed to those clusters (1–200, `not_found` for an unknown
+id) or that one device (`bad_request` for a name with `*`/`?`, a control character or over 256
+characters). Without either it is the whole measurement, as `DELAY_SINK_RUN`.
+
+- Single flight with the timer and `DELAY_SINK_RUN`: `already_running` with the open run's id.
+- While it goes, its run in `JOBS_LIST` shows `done`/`total` (clusters read of the run's
+  clusters, `progress` in percent) and `records` (devices read so far, after every page of 1000);
+  ended, `records` is the rows written, `note` says the scope and any cluster cut at *Max devices
+  per run*, `scope` is kept for `JOB_RETRY`.
+- A narrowed run turns nobody silent (it did not read the whole list) and leaves the schedule's
+  last run, next due and back-off as they were.
+- `JOB_CANCEL` stops it between pages and between clusters; what was read is kept.
+
+```json
+{ "type": "JOB_RUN", "jobId": "logdelay.measure", "clusterIds": ["client-a-prod"] }
+→ { "ok": true, "jobId": "logdelay.measure", "runId": "4f1c2a9b0e7d6c53", "started": true }
+JOBS_LIST {jobId: "logdelay.measure"} → runs[0]:
+{ "id": "4f1c2a9b0e7d6c53", "trigger": "manual:Admin", "status": "running", "done": 0, "total": 1, "progress": 0,
+  "records": 12000, "clusters": ["client-a-prod"], "scope": { "clusterIds": ["client-a-prod"], "device": null } }
+```
 
 ### Pause and resume
 

@@ -1,8 +1,9 @@
 //! One cluster's measurement: the search the run sends and the readings it takes from the
 //! answer (docs/LOGDELAY.md "Measurement").
 //!
-//! The search is `delay_sink::search_body` with the cluster's own fields — device, arrival,
-//! event time — and the extra columns (`tag1`, `fwd_tag`, `parser_tag`, `Zone`, …) asked for
+//! The search is a composite aggregation over the cluster's device field, read page by page
+//! (`page_body`, `logdelay::collect`), with the arrival, every event-time candidate and the
+//! extra columns (`tag1`, `fwd_tag`, `parser_tag`, `Zone`, …) asked for
 //! in the newest document's `_source`, so every measurement carries them. A device whose
 //! newest document has no readable arrival or event time is still a reading, with no delay:
 //! "can't measure" is a fact about the device, and dropping it would make it vanish from the
@@ -39,35 +40,110 @@ pub struct Reading {
     pub extras: BTreeMap<String, String>,
 }
 
-/// The search body: `size 0`, the last `window_hours`, one terms aggregation on the device
-/// field with the newest document of each.
-pub fn search_body(f: &Fields, window_hours: u64, max_devices: u64) -> Value {
+/// Devices one composite page asks for at first, and the least a page halves to when its
+/// answer is larger than the memory budget lets one page be (`memory::report_page_bytes`).
+pub const PAGE_SIZE: usize = 1000;
+pub const PAGE_SIZE_MIN: usize = 100;
+/// The most devices one cluster's run reads (`SinkConfig::max_devices`, *Max devices per run*).
+/// The pages are read one at a time and each is dropped once its readings are taken, so the
+/// run holds the readings (a few hundred bytes a device), never the answers.
+pub const MAX_DEVICES_PER_RUN: u64 = 100_000;
+
+fn source_fields(f: &Fields) -> Vec<String> {
     let mut source: Vec<String> = vec![f.arrival.clone()];
     source.extend(f.event_time.iter().cloned());
     source.extend(f.extras.iter().map(|e| e.trim_end_matches(".keyword").to_string()));
-    source.dedup();
-    json!({
-        "size": 0,
-        "query": { "bool": { "filter": [
-            { "range": { f.arrival.clone(): { "gte": format!("now-{}h", window_hours.clamp(1, 24)), "lte": "now" } } },
-        ] } },
-        "aggs": { "devices": {
-            "terms": { "field": f.device, "size": max_devices.clamp(1, 10_000), "order": { "_count": "desc" } },
-            "aggs": { "latest": { "top_hits": {
-                "size": 1,
-                "sort": [{ f.arrival.clone(): { "order": "desc" } }],
-                "_source": source,
-            } } },
-        } },
+    let mut seen = std::collections::HashSet::new();
+    source.retain(|s| seen.insert(s.clone()));
+    source
+}
+
+/// The time window and, for a run scoped to one device, that device: the filter every page
+/// of a run shares. The window is absolute (epoch ms, fixed when the run starts), so the
+/// pages of one run read the same documents however long the run takes.
+fn window_query(f: &Fields, from_ms: i64, to_ms: i64, device: Option<&str>) -> Value {
+    let mut filter = vec![json!({ "range": { f.arrival.clone(): { "gte": from_ms, "lte": to_ms, "format": "epoch_millis" } } })];
+    if let Some(d) = device {
+        filter.push(json!({ "term": { f.device.clone(): d } }));
+    }
+    json!({ "bool": { "filter": filter } })
+}
+
+/// One page of a run: a composite aggregation over the device field (`after` = the previous
+/// page's `after_key`), the newest document of each device with the arrival, every event-time
+/// candidate and the extra columns. The first page also counts the documents in the window
+/// that carry no device name at all (`no_device`): they are in no bucket, so they are said,
+/// not dropped silently.
+pub fn page_body(f: &Fields, from_ms: i64, to_ms: i64, size: usize, after: Option<&Value>, device: Option<&str>) -> Value {
+    let mut comp = json!({ "size": size.clamp(1, PAGE_SIZE), "sources": [ { "d": { "terms": { "field": f.device } } } ] });
+    if let Some(a) = after {
+        comp["after"] = a.clone();
+    }
+    let mut aggs = json!({ "devices": {
+        "composite": comp,
+        "aggs": { "latest": { "top_hits": {
+            "size": 1,
+            "sort": [{ f.arrival.clone(): { "order": "desc" } }],
+            "_source": source_fields(f),
+        } } },
+    } });
+    if after.is_none() {
+        aggs["no_device"] = json!({ "missing": { "field": f.device } });
+    }
+    json!({ "size": 0, "track_total_hits": false, "query": window_query(f, from_ms, to_ms, device), "aggs": aggs })
+}
+
+/// One page as read.
+#[derive(Debug, Default)]
+pub struct Page {
+    pub readings: Vec<Reading>,
+    pub after: Option<Value>,
+    /// The last page: fewer buckets than asked for, or no `after_key`.
+    pub done: bool,
+    /// Documents in the window without a device name (first page only).
+    pub no_device: Option<u64>,
+}
+
+/// Why a page could not be read: worth asking again (shards failed, timed out), or an
+/// answer that is not a device aggregation at all (asking again gets the same).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PageError {
+    Retry(String),
+    Shape(String),
+}
+
+/// Read one page's answer. Shards that failed or a time-out are an error, not a short page:
+/// a short page would be taken for the end, and the devices after it would turn silent.
+pub fn read_page(res: &Value, f: &Fields, size: usize) -> Result<Page, PageError> {
+    if let Some(p) = crate::volume::collect::partial_answer(res) {
+        return Err(PageError::Retry(p.split(':').next().unwrap_or("a partial answer").to_string()));
+    }
+    let agg = res.pointer("/aggregations/devices").filter(|v| v.is_object())
+        .ok_or_else(|| PageError::Shape("the answer has no device aggregation".into()))?;
+    let n = agg.get("buckets").and_then(Value::as_array).map(Vec::len)
+        .ok_or_else(|| PageError::Shape("the device aggregation has no buckets".into()))?;
+    let after = agg.get("after_key").filter(|v| v.is_object()).cloned();
+    Ok(Page {
+        readings: readings(res, f),
+        done: n < size || after.is_none(),
+        after,
+        no_device: res.pointer("/aggregations/no_device/doc_count").and_then(Value::as_u64),
     })
 }
 
-/// Every device the answer names, measured where it can be.
+/// The next page's size: halved (down to `PAGE_SIZE_MIN`) when this page's answer was larger
+/// than one page may be.
+pub fn next_page_size(current: usize, body_bytes: u64, allowance: usize) -> usize {
+    if body_bytes > allowance as u64 { (current / 2).max(PAGE_SIZE_MIN) } else { current }
+}
+
+/// Every device the answer names, measured where it can be. Reads a composite page (`key`
+/// `{d: …}`) and a terms answer (`key` a string) alike.
 pub fn readings(res: &Value, f: &Fields) -> Vec<Reading> {
-    let buckets = res.pointer("/aggregations/devices/buckets").and_then(Value::as_array).cloned().unwrap_or_default();
+    let Some(buckets) = res.pointer("/aggregations/devices/buckets").and_then(Value::as_array) else { return vec![] };
     let mut out = Vec::with_capacity(buckets.len());
     for b in buckets {
-        let Some(device) = bucket_key(&b) else { continue };
+        let Some(device) = bucket_key(b).or_else(|| b.get("key").and_then(|k| k.get("d")).and_then(|k| bucket_key(&json!({ "key": k })))) else { continue };
         let docs = b.get("doc_count").and_then(Value::as_u64).unwrap_or(0);
         let src = b.pointer("/latest/hits/hits/0/_source");
         let arrival = src.and_then(|s| to_ms(dotted(s, &f.arrival)));
@@ -121,12 +197,49 @@ mod tests {
 
     #[test]
     fn the_search_asks_for_the_extras_without_keyword() {
-        let b = search_body(&fields(), 2, 2000);
+        let b = page_body(&fields(), 1_000, 2_000, 1000, None, None);
         let src: Vec<&str> = b.pointer("/aggs/devices/aggs/latest/top_hits/_source").unwrap().as_array().unwrap()
             .iter().map(|v| v.as_str().unwrap()).collect();
         assert_eq!(src, ["@timestamp", "event_created", "ingested_time", "tag1", "fwd_tag", "parser_tag", "Zone"]);
-        assert_eq!(b.pointer("/query/bool/filter/0/range/@timestamp/gte").unwrap(), "now-2h");
-        assert_eq!(b.pointer("/aggs/devices/terms/field").unwrap(), "src_hostname.keyword");
+        assert_eq!(b.pointer("/query/bool/filter/0/range/@timestamp/gte").unwrap(), 1_000);
+        assert_eq!(b.pointer("/query/bool/filter/0/range/@timestamp/format").unwrap(), "epoch_millis");
+        assert_eq!(b.pointer("/aggs/devices/composite/sources/0/d/terms/field").unwrap(), "src_hostname.keyword");
+        assert_eq!(b.pointer("/aggs/devices/composite/size").unwrap(), 1000);
+        assert!(b.pointer("/aggs/no_device/missing").is_some(), "the first page counts documents without a device");
+        assert!(b.pointer("/aggs/devices/terms").is_none(), "no terms size cap: composite pages");
+    }
+
+    #[test]
+    fn pages_follow_the_after_key_and_end_on_a_short_page() {
+        let after = json!({ "d": "fw-1000" });
+        let b = page_body(&fields(), 1, 2, 500, Some(&after), Some("fw-7"));
+        assert_eq!(b.pointer("/aggs/devices/composite/after").unwrap(), &after);
+        assert!(b.pointer("/aggs/no_device").is_none(), "counted once, on the first page");
+        assert_eq!(b.pointer("/query/bool/filter/1/term/src_hostname.keyword").unwrap(), "fw-7", "a run scoped to one device");
+        let full = json!({ "aggregations": { "devices": { "after_key": { "d": "b" }, "buckets": [
+            { "key": { "d": "a" }, "doc_count": 3, "latest": { "hits": { "hits": [ { "_source": { "@timestamp": "2026-11-04T12:41:00Z", "ingested_time": "2026-11-04T12:40:00Z" } } ] } } },
+            { "key": { "d": "b" }, "doc_count": 1, "latest": { "hits": { "hits": [] } } },
+        ] }, "no_device": { "doc_count": 7 } } });
+        let p = read_page(&full, &fields(), 2).unwrap();
+        assert_eq!((p.readings.len(), p.done, p.no_device), (2, false, Some(7)), "a full page with an after_key: more to come");
+        assert_eq!(p.readings[0].device, "a");
+        assert_eq!(p.readings[0].delay_minutes, Some(1.0));
+        assert_eq!(p.after, Some(json!({ "d": "b" })));
+        assert!(read_page(&full, &fields(), 3).unwrap().done, "fewer buckets than asked: the last page");
+        let partial = json!({ "_shards": { "total": 3, "failed": 1 }, "aggregations": { "devices": { "buckets": [] } } });
+        assert!(matches!(read_page(&partial, &fields(), 10), Err(PageError::Retry(_))), "a failed shard is not the end of the list");
+        assert!(matches!(read_page(&json!({ "hits": {} }), &fields(), 10), Err(PageError::Shape(_))));
+        assert_eq!(next_page_size(1000, 10, 100), 1000);
+        assert_eq!(next_page_size(1000, 101, 100), 500);
+        assert_eq!(next_page_size(PAGE_SIZE_MIN, 101, 100), PAGE_SIZE_MIN);
+    }
+
+    #[test]
+    fn an_epoch_number_and_a_later_candidate_are_both_read() {
+        let res = json!({ "aggregations": { "devices": { "buckets": [
+            { "key": { "d": "n" }, "doc_count": 1, "latest": { "hits": { "hits": [ { "_source": { "@timestamp": 1_762_250_400_000i64, "ingested_time": 1_762_248_600_000i64 } } ] } } },
+        ] } } });
+        assert_eq!(readings(&res, &fields())[0].delay_minutes, Some(30.0), "the second candidate when the first is absent; epoch ms read as ms");
     }
 
     #[test]
@@ -148,6 +261,17 @@ mod tests {
         assert!(r[1].arrival_ms.is_some());
         assert_eq!(r[2].delay_minutes, None);
         assert_eq!(r[2].docs, 1);
+    }
+
+    #[test]
+    fn a_nested_event_field_is_found_either_way() {
+        let f = Fields { event_time: vec!["event.created".into()], ..fields() };
+        let nested = json!({ "aggregations": { "devices": { "buckets": [ { "key": { "d": "n" }, "doc_count": 1, "latest": { "hits": { "hits": [
+            { "_source": { "@timestamp": "2026-09-19T12:30:00Z", "event": { "created": "2026-09-19T12:00:00Z" } } } ] } } } ] } } });
+        let flat = json!({ "aggregations": { "devices": { "buckets": [ { "key": { "d": "f" }, "doc_count": 1, "latest": { "hits": { "hits": [
+            { "_source": { "@timestamp": "2026-09-19T12:30:00Z", "event.created": "2026-09-19T12:00:00Z" } } ] } } } ] } } });
+        assert_eq!(readings(&nested, &f)[0].delay_minutes, Some(30.0));
+        assert_eq!(readings(&flat, &f)[0].delay_minutes, Some(30.0));
     }
 
     #[test]

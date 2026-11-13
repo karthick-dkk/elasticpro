@@ -1147,7 +1147,9 @@ The files {} ({}) are larger than the {cap_mb} MB a mail may carry (UI_REPORT_MA
                 }
             }
             if let Some(v) = m.get("schedule") {
-                let Some(c) = v.as_str().and_then(Cadence::parse) else { return bad("bad_request", "schedule must be monthly, weekly, daily or manual") };
+                let Some(c) = v.as_str().and_then(Cadence::parse).filter(|c| *c != Cadence::Hourly || kind == ReportKind::LogDelay) else {
+                    return bad("bad_request", if kind == ReportKind::LogDelay { "schedule must be monthly, weekly, daily, hourly or manual" } else { "schedule must be monthly, weekly, daily or manual" })
+                };
                 if let Some(r) = locked("schedule", c == before.schedule) {
                     return r;
                 }
@@ -1362,12 +1364,13 @@ The files {} ({}) are larger than the {cap_mb} MB a mail may carry (UI_REPORT_MA
             return bad("not_configured", p);
         }
         let today = vsched::utc_day(now_ms());
+        let parse = if kind == ReportKind::LogDelay { period::parse_log_delay } else { period::parse };
         let p = match msg.get("period").filter(|v| !v.is_null()) {
-            Some(v) => match period::parse(v, today) {
+            Some(v) => match parse(v, today) {
                 Ok(p) => p,
                 Err(err) => return bad("bad_request", err),
             },
-            // The schedule's period, from the UTC date like every period.
+            // The schedule's period, from the UTC date like every period (the hour before, hourly).
             None => rsched::send_now_period(&e, Clock::now()),
         };
         let ids = self.report_schedule_clusters(&e);

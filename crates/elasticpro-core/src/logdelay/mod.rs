@@ -21,6 +21,7 @@
 //!   `readOnly` for a sink cluster; the history store's permit and arming for the store).
 //!   The built-in store is the server's own files.
 
+pub mod collect;
 pub mod docs;
 pub mod fixes;
 pub mod levels;
@@ -39,7 +40,7 @@ use levels::Levels;
 use measure::{Fields, Reading};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use state::{Applied, Daily, Tracker};
+use state::{Applied, Daily};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use summary::{ClusterInput, Range};
@@ -63,6 +64,13 @@ pub struct FieldDefaults {
 
 /// The shipped extra columns (the boards' `tag1`, `fwd_tag`, `parser_tag`, `Zone`).
 pub const EXTRAS_DEFAULT: &[&str] = &["tag1", "fwd_tag", "parser_tag", "Zone"];
+/// The columns every log delay row, sheet and mail carries, whatever the extras say.
+pub const ALWAYS_EXTRAS: &[&str] = &["tag1", "Zone"];
+
+/// An extra column's value by name, whatever its case (`Zone`, `zone`).
+pub fn extra_ci<'a>(extras: &'a BTreeMap<String, String>, name: &str) -> Option<&'a String> {
+    extras.get(name).or_else(|| extras.iter().find(|(k, _)| k.eq_ignore_ascii_case(name)).map(|(_, v)| v))
+}
 
 /// One cluster's overrides in `logdelay.json`.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -133,11 +141,19 @@ impl Settings {
         check(&self.fields, "fields").or_else(|| self.clusters.iter().find_map(|(id, c)| c.fields.as_ref().and_then(|f| check(f, &format!("clusters.{id}.fields")))))
     }
 
-    /// The extras in force for a cluster.
+    /// The extras in force for a cluster. `tag1` and `Zone` are always read (the owner's rule:
+    /// every log delay table and report shows them); a list without them gets them added, a
+    /// list that names them in another case (`zone`) keeps its own spelling.
     pub fn extras_for(&self, id: &str) -> Vec<String> {
-        self.clusters.get(id).and_then(|c| c.fields.as_ref()).and_then(|f| f.extras.clone())
+        let mut out = self.clusters.get(id).and_then(|c| c.fields.as_ref()).and_then(|f| f.extras.clone())
             .or_else(|| self.fields.extras.clone())
-            .unwrap_or_else(|| EXTRAS_DEFAULT.iter().map(|s| s.to_string()).collect())
+            .unwrap_or_else(|| EXTRAS_DEFAULT.iter().map(|s| s.to_string()).collect());
+        for must in ALWAYS_EXTRAS {
+            if !out.iter().any(|e| e.trim_end_matches(".keyword").eq_ignore_ascii_case(must)) {
+                out.push(must.to_string());
+            }
+        }
+        out
     }
 }
 
@@ -164,6 +180,8 @@ pub fn thresholds_in_config(raw: &Value) -> BTreeMap<String, Value> {
 
 /// The largest device list one answer carries.
 pub const MAX_DEVICES: usize = 5_000;
+/// Documents in one bulk request of a run's mirror.
+pub const BULK_DOCS: usize = 5_000;
 
 fn bad(kind: &str, message: impl Into<String>) -> Value {
     json!({ "ok": false, "kind": kind, "message": message.into() })
@@ -217,11 +235,22 @@ impl Core {
 
     /// One cluster's run, after the search: the readings against the memory, the built-in
     /// store written, the documents for the destination handed back.
-    pub(crate) fn logdelay_apply(&self, cluster: &str, readings: Vec<Reading>, run_ms: i64, levels: &Levels, s: &Settings)
-        -> Result<(Applied, Daily, Tracker), String> {
+    /// `read` is how the run read the cluster: a list that is not complete turns nobody it did
+    /// not read silent (`Tracker::apply_run`).
+    pub(crate) fn logdelay_apply(&self, cluster: &str, readings: Vec<Reading>, run_ms: i64, levels: &Levels, s: &Settings, read: collect::RunInfo)
+        -> Result<(Applied, Daily), String> {
         let st = self.logdelay_store().ok_or("no data directory")?;
         let mut t = (*st.read_tracker(cluster)).clone();
-        let applied = t.apply(run_ms, readings, levels, (s.silent_after_hours as i64) * 3_600_000);
+        let complete = read.complete && read.device.is_none();
+        let before = t.last_run_ms;
+        let applied = t.apply_run(run_ms, readings, levels, (s.silent_after_hours as i64) * 3_600_000, complete);
+        if read.device.is_some() {
+            // One device measured again is not the cluster's run: "in the last run" and how the
+            // last run read the list stay the cluster's.
+            t.last_run_ms = before.or(Some(run_ms));
+        } else {
+            t.last_read = Some(read);
+        }
         st.write_tracker(cluster, &t)?;
         let day = time::local_date(run_ms);
         let key = time::local_day_key(run_ms);
@@ -241,11 +270,13 @@ impl Core {
         let lines: Vec<Value> = applied.rows.iter().map(|r| docs::measurement_doc(cluster, r, &bucket, run_ms)).collect();
         st.append_measurements(cluster, &key, &lines)?;
         st.prune(run_ms);
-        Ok((applied, daily, t))
+        Ok((applied, daily))
     }
 
-    /// The bulk of one run's documents for a destination under `prefix`.
-    pub(crate) fn logdelay_bulk(&self, cluster: &str, applied: &Applied, daily: &Daily, prefix: &str, run_ms: i64) -> String {
+    /// The bulk of one run's documents for a destination under `prefix`, in requests of at
+    /// most `BULK_DOCS` documents each: 25 000 devices are five requests of a few MB, not one
+    /// of tens.
+    pub(crate) fn logdelay_bulk(&self, cluster: &str, applied: &Applied, daily: &Daily, prefix: &str, run_ms: i64) -> Vec<String> {
         let (y, m, bucket) = crate::delay_sink::month_and_hour_bucket(run_ms);
         let mut items: Vec<(String, String, Value)> = applied.rows.iter()
             .map(|r| (docs::measurement_index(prefix, y, m), docs::measurement_id(cluster, &r.device, &bucket), docs::measurement_doc(cluster, r, &bucket, run_ms)))
@@ -255,7 +286,7 @@ impl Core {
             items.push((docs::episodes_index(prefix, ey), docs::episode_id(cluster, e), docs::episode_doc(cluster, e, run_ms)));
         }
         items.push((docs::daily_index(prefix, y), docs::daily_id(cluster, &daily.day), docs::daily_doc(cluster, &self.cluster_name(cluster), daily, run_ms)));
-        docs::bulk(&items)
+        items.chunks(BULK_DOCS).map(docs::bulk).collect()
     }
 
     /// What the fleet cache holds about a cluster, for the fixes. Unknown stays unknown.
@@ -493,6 +524,7 @@ impl Core {
                     for row in summary::device_rows(c, &r, now) {
                         if let Some(f) = each.get(&(c.id.clone(), row.device.clone())) {
                             rows.push(json!({ "device": row.device, "cluster": c.id, "clusterName": c.name, "state": row.state, "nowMinutes": row.now_minutes,
+                                              "zone": row.zone, "tag1": row.tag1,
                                               "step": f.step, "stepLabel": f.step.label(), "why": f.why, "fix": f.fix, "group": f.group }));
                         }
                     }
@@ -577,6 +609,10 @@ mod tests {
         let odd: Settings = serde_json::from_value(json!({ "fields": { "device": "src host" } })).unwrap();
         assert!(odd.refusal().unwrap().contains("src host"));
         assert_eq!(Settings::default().extras_for("x"), EXTRAS_DEFAULT.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+        let only: Settings = serde_json::from_value(json!({ "fields": { "extras": ["fwd_tag", "zone"] } })).unwrap();
+        assert_eq!(only.extras_for("x"), ["fwd_tag", "zone", "tag1"], "tag1 and Zone are always read; zone keeps its spelling");
+        let m: BTreeMap<String, String> = [("zone".to_string(), "dc1".to_string())].into();
+        assert_eq!(extra_ci(&m, "Zone").map(String::as_str), Some("dc1"));
     }
 
     #[test]

@@ -2408,9 +2408,13 @@ impl Core {
     }
 
     async fn ping(self: &Arc<Self>, caller: Option<&Caller>) -> Value {
+        // The server's zone, the schedules' and the local days' (volume::schedule::server_zone).
+        let (tz, tz_offset) = crate::volume::schedule::server_zone();
         let mut out = json!({
             "ok": true,
             "version": crate::VERSION,
+            "tz": tz,
+            "tzOffsetMinutes": tz_offset,
             "desktop": true,
             "netErrors": true,
             "vault": cfg!(feature = "vault"),
@@ -5818,7 +5822,7 @@ impl Core {
             return;
         }
         // A run somebody started by hand is still going: this tick leaves it be.
-        self.run_delay_sink(crate::jobs::Trigger::Timer).await;
+        self.run_delay_sink(crate::jobs::Trigger::Timer, delay_sink::MeasureScope::default()).await;
     }
 
     /// What to show an admin as standing in the way, if anything.
@@ -5889,16 +5893,22 @@ impl Core {
 
     /// One run of the scheduled measurement, recorded in the run log (docs/JOBS.md): one at a
     /// time, so a "Run now" pressed while the timer's run goes answers `already_running` with
-    /// that run's id instead of measuring (and writing) the same hour twice at once.
-    async fn run_delay_sink(self: &Arc<Self>, trigger: crate::jobs::Trigger) -> SinkRun {
+    /// that run's id instead of measuring (and writing) the same hour twice at once. `scope`
+    /// narrows it to some clusters or one device (*Fetch now*); the query is the same.
+    pub(crate) async fn run_delay_sink(self: &Arc<Self>, trigger: crate::jobs::Trigger, scope: delay_sink::MeasureScope) -> SinkRun {
         let run = match self.jobs.begin(crate::jobs::LOGDELAY_MEASURE, trigger, vec![], crate::fleet::now_ms()) {
             Ok(r) => r,
             Err(busy) => return SinkRun { body: busy.answer("the scheduled log delay measurement"), skipped: None, error: None },
         };
+        if !scope.is_full() {
+            run.scope(scope.to_json());
+        }
         // A job of the core: its requests in a lane fixed at its maximum (docs/JOBS.md "Governor").
-        let (out, clusters) = self.governed(run.id(), crate::jobs::LOGDELAY_MEASURE, self.measure_delay_sink()).await;
+        let (out, clusters) =
+            self.governed(run.id(), crate::jobs::LOGDELAY_MEASURE, self.measure_delay_sink(&scope, Some(&run))).await;
         run.clusters(&clusters);
         let note_ids = |n: &SinkNote| n.cluster_id.iter().chain(n.sink_id.iter()).cloned().collect::<Vec<String>>();
+        let note = out.body.get("note").and_then(Value::as_str).map(String::from);
         let outcome = if let Some(by) = run.cancel_asked() {
             crate::jobs::Outcome::cancelled(&by, out.body["measured"].as_u64())
         } else if let Some(n) = &out.skipped {
@@ -5913,25 +5923,30 @@ impl Core {
             crate::jobs::Outcome::failed(out.error.as_ref().map(SinkNote::text).unwrap_or_else(|| "the run failed".into()),
                                          out.body["measured"].as_u64())
         };
-        run.end(outcome);
+        run.end(outcome.with_note(note));
         out
     }
 
     /// Measure every target once and ship the result. Also the body of the admin's
     /// "run it now" button, which is why it does not look at the schedule itself. Returns the
-    /// clusters it measured and wrote to, for the run log.
-    async fn measure_delay_sink(self: &Arc<Self>) -> (SinkRun, Vec<String>) {
+    /// clusters it measured and wrote to, for the run log. A scoped run (*Fetch now*) measures
+    /// the clusters it names (primed ones) or one device, by the same query, and leaves the
+    /// schedule's state alone.
+    async fn measure_delay_sink(self: &Arc<Self>, scope: &delay_sink::MeasureScope, run: Option<&crate::jobs::Run>) -> (SinkRun, Vec<String>) {
         let cfg = self.delay_sink.read().config.clone();
         let now = delay_sink::now_ms();
+        let full = scope.is_full();
 
         if let Some(why) = self.delay_sink_refusal(&cfg) {
-            let mut s = self.delay_sink.write();
-            s.state.last_skipped = Some(why.clone());
-            s.state.last_run_at = Some(now);
-            // A refusal is not a failure: nothing was attempted, so nothing backs off.
-            // It is retried at the normal interval, by which time somebody may have
-            // primed the app or turned off read-only.
-            s.state.next_due_at = Some(delay_sink::next_due(now, cfg.every_hours, 0));
+            if full {
+                let mut s = self.delay_sink.write();
+                s.state.last_skipped = Some(why.clone());
+                s.state.last_run_at = Some(now);
+                // A refusal is not a failure: nothing was attempted, so nothing backs off.
+                // It is retried at the normal interval, by which time somebody may have
+                // primed the app or turned off read-only.
+                s.state.next_due_at = Some(delay_sink::next_due(now, cfg.every_hours, 0));
+            }
             tracing::info!(target: "audit", message = "delay sink skipped", reason = %why.text());
             return (SinkRun { body: json!({ "ok": false }), skipped: Some(why), error: None }, vec![]);
         }
@@ -5951,36 +5966,69 @@ impl Core {
             cfg.index_prefix.clone()
         };
         let index = delay_sink::index_name(&prefix, year, month);
-        let targets = self.delay_sink_targets(&cfg);
+        let targets = match &scope.clusters {
+            None => self.delay_sink_targets(&cfg),
+            Some(ids) => {
+                let p = self.primed.read();
+                ids.iter().filter(|id| p.clusters.contains_key(*id)).cloned().collect()
+            }
+        };
+        if targets.is_empty() && !full {
+            let why = SinkNote::general("none of the clusters named is primed: open the app (or prime the core) so it holds their credentials");
+            return (SinkRun { body: json!({ "ok": false }), skipped: Some(why), error: None }, vec![]);
+        }
         let settings = self.logdelay_settings();
         let in_file = self.read_config_file().await.map(|raw| crate::logdelay::thresholds_in_config(&raw)).unwrap_or_default();
+        // The window every page of this run reads: the last `everyHours`, fixed now.
+        let (from_ms, to_ms) = (now - (cfg.every_hours.clamp(1, 24) as i64) * 3_600_000, now);
+        let max_devices = cfg.max_devices.clamp(1, crate::logdelay::measure::MAX_DEVICES_PER_RUN);
         let mut measured = 0usize;
+        let mut read_total = 0u64;
         let mut failed = 0usize;
         let mut first_error: Option<SinkNote> = None;
         let mut opened = 0usize;
         let mut solved = 0usize;
+        let mut truncated: Vec<String> = vec![];
+        let mut pages = 0u64;
+        if let Some(r) = run {
+            r.progress(0, targets.len() as u64);
+        }
 
-        for id in &targets {
-            // A person's JOB_CANCEL: stop between clusters (the run's safe point).
+        for (done, id) in targets.iter().enumerate() {
+            // A person's JOB_CANCEL: stop between clusters (and between pages, in the read).
             if self.jobs.cancel_asked(crate::jobs::LOGDELAY_MEASURE).is_some() {
                 break;
             }
             let fields = self.logdelay_fields(id, &settings).await;
-            let body = crate::logdelay::measure::search_body(&fields, cfg.every_hours, cfg.max_devices);
-            let res = self.es_req(delay_sink::search_request_for(id, &fields.pattern, body)).await;
-            if res.get("ok").and_then(|v| v.as_bool()) != Some(true) {
+            let before = read_total;
+            let got = self.logdelay_collect(id, &fields, from_ms, to_ms, max_devices, scope.device.as_deref(), |n| {
+                if let Some(r) = run {
+                    r.records(before + n as u64);
+                }
+            }).await;
+            pages += got.pages;
+            read_total += got.readings.len() as u64;
+            if let Some(r) = run {
+                r.progress(done as u64 + 1, targets.len() as u64);
+            }
+            if got.readings.is_empty() && got.error.is_some() {
                 failed += 1;
-                first_error.get_or_insert_with(|| {
-                    SinkNote::read(id, res.get("message").and_then(|v| v.as_str()).unwrap_or("search failed"))
-                });
+                first_error.get_or_insert_with(|| SinkNote::read(id, got.error.clone().unwrap_or_default()));
                 continue;
             }
-            let payload = res.get("json").cloned().unwrap_or(Value::Null);
-            let readings = crate::logdelay::measure::readings(&payload, &fields);
+            if got.truncated {
+                truncated.push(id.clone());
+            }
+            let read = got.info(now, from_ms, to_ms, max_devices, scope.device.as_deref());
+            if let Some(e) = &got.error {
+                // Part of the list read: kept, nobody it did not read turned silent; the run says so.
+                failed += 1;
+                first_error.get_or_insert_with(|| SinkNote::read(id, e.clone()));
+            }
             let (levels, _) = crate::logdelay::levels_for(&settings, id, in_file.get(id));
             // The memory between runs: periods opened and solved, silent devices, the day's
             // totals — kept on the server whatever the destination (the pages read it).
-            let (applied, daily, _) = match self.logdelay_apply(id, readings, now, &levels, &settings) {
+            let (applied, daily) = match self.logdelay_apply(id, got.readings, now, &levels, &settings, read) {
                 Ok(x) => x,
                 Err(e) => {
                     failed += 1;
@@ -5999,27 +6047,31 @@ impl Core {
                 measured += applied.rows.len();
                 continue;
             }
-            let body = self.logdelay_bulk(id, &applied, &daily, &prefix, now);
-            let wrote = if to_history {
-                self.history_delay_bulk(body).await
-            } else {
-                self.es_req(delay_sink::bulk_request(&cfg, body)).await
-            };
-            match delay_sink::bulk_failure(&wrote) {
-                None => measured += applied.rows.len(),
-                Some(e) => {
+            let mut wrote_all = true;
+            for body in self.logdelay_bulk(id, &applied, &daily, &prefix, now) {
+                let wrote = if to_history {
+                    self.history_delay_bulk(body).await
+                } else {
+                    self.es_req(delay_sink::bulk_request(&cfg, body)).await
+                };
+                if let Some(e) = delay_sink::bulk_failure(&wrote) {
                     failed += 1;
+                    wrote_all = false;
                     // Into the sink cluster (as named for this run), or the history store.
                     let sink = (!to_history).then_some(cfg.sink_cluster_id.as_str());
                     first_error.get_or_insert(SinkNote::write(Some(id), sink, e));
+                    break;
                 }
+            }
+            if wrote_all {
+                measured += applied.rows.len();
             }
         }
         // The recommended fixes, from what is now stored and what the poller last read.
         self.logdelay_refresh_fixes(now, cfg.every_hours);
 
         let ok = failed == 0;
-        {
+        if full {
             let mut s = self.delay_sink.write();
             s.state.runs += 1;
             s.state.last_run_at = Some(now);
@@ -6035,17 +6087,29 @@ impl Core {
         tracing::info!(
             target: "audit",
             message = "delay sink run",
-            clusters = targets.len(), measured, failed, opened, solved, index = %index, destination = ?cfg.destination,
+            clusters = targets.len(), measured, read = read_total, pages, failed, opened, solved, index = %index, destination = ?cfg.destination,
+            scoped = !full, truncated = truncated.len(),
             error = first_error.as_ref().map(SinkNote::text).unwrap_or_default(),
         );
+        let mut notes: Vec<String> = vec![];
+        if !full {
+            notes.push(format!("fetch now: {}{}", if scope.clusters.is_some() { format!("{} cluster(s)", targets.len()) } else { "every cluster".into() },
+                               scope.device.as_ref().map(|d| format!(", device {d}")).unwrap_or_default()));
+        }
+        if !truncated.is_empty() {
+            notes.push(format!("{} cluster(s) have more than {max_devices} devices in the window: the first {max_devices} by name were measured, \
+                                the rest not (raise Max devices per run): {}", truncated.len(), truncated.join(", ")));
+        }
         // The clusters the run read, and the one it wrote to when that is a cluster.
         let mut touched = targets.clone();
         if cfg.destination == delay_sink::Destination::Cluster {
             touched.push(cfg.sink_cluster_id.clone());
         }
         (SinkRun {
-            body: json!({ "ok": ok, "measured": measured, "failed": failed, "clusters": targets.len(), "opened": opened, "solved": solved,
-                          "index": index, "destination": cfg.destination }),
+            body: json!({ "ok": ok, "measured": measured, "read": read_total, "pages": pages, "failed": failed, "clusters": targets.len(),
+                          "opened": opened, "solved": solved, "index": index, "destination": cfg.destination,
+                          "window": { "from": from_ms, "to": to_ms }, "maxDevices": max_devices, "truncated": truncated,
+                          "scope": (!full).then(|| scope.to_json()), "note": (!notes.is_empty()).then(|| notes.join("; ")) }),
             skipped: None, error: first_error,
         }, touched)
     }
@@ -6110,7 +6174,7 @@ impl Core {
                 // DELAY_SINK_RUN: the operator pressing it is what makes this one legible
                 // — it is the same work the timer does, at a moment somebody chose.
                 let who = caller.map(|c| c.name.as_str()).unwrap_or("local");
-                let run = self.run_delay_sink(crate::jobs::Trigger::manual(who)).await;
+                let run = self.run_delay_sink(crate::jobs::Trigger::manual(who), delay_sink::MeasureScope::default()).await;
                 let view = self.sink_view(caller);
                 let mut out = run.body;
                 if let Some(n) = &run.skipped {

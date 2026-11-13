@@ -435,7 +435,7 @@ pub const DELAY_LATE_MAX: usize = 500;
 /// A device name as the late list's re-check may name it: what a terms aggregation returned
 /// as a bucket key — any printable text up to 256 characters, but no wildcard (`*`, `?`) and
 /// no control character, so it can only ever match that one device.
-fn device_name(s: &str) -> bool {
+pub(crate) fn device_name(s: &str) -> bool {
     !s.trim().is_empty() && s.chars().count() <= 256 && !s.chars().any(|c| c.is_control() || c == '*' || c == '?')
 }
 

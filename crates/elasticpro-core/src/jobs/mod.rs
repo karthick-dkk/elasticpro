@@ -413,6 +413,10 @@ pub struct RunRecord {
     /// A run held back for a busy cluster (`deferred`): which, why, since when.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deferred: Option<load::Busy>,
+    /// What a person narrowed the run to, when they did (`JOB_RUN {jobId: "logdelay.measure",
+    /// clusterIds, device}`): kept so `JOB_RETRY` runs the same scope again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<Value>,
 }
 
 fn is_zero(n: &u32) -> bool {
@@ -741,7 +745,7 @@ impl Jobs {
             id: id.clone(), job_id: job.to_string(), trigger, status: RunStatus::Deferred, created_at: now, started_at: None,
             ended_at: Some(now), done: None, total: None, records: None,
             error: Some(format!("{} is busy: {}; tried again when it eases", b.cluster, b.reason)),
-            clusters: vec![b.cluster.clone()], note: None, cancel_asked: None, retry_of: None, attempt: 0, deferred: Some(b.clone()),
+            clusters: vec![b.cluster.clone()], note: None, cancel_asked: None, retry_of: None, attempt: 0, deferred: Some(b.clone()), scope: None,
         };
         if let Some(f) = inner.logs.get_mut(&owner) {
             f.push(rec);
@@ -865,7 +869,7 @@ impl Jobs {
             let rec = RunRecord {
                 id: id.clone(), job_id: job.to_string(), trigger, status: RunStatus::Running, created_at: now, started_at: Some(now),
                 ended_at: None, done: counted.then_some(0), total: counted.then_some(1), records: None, error: None, clusters, note: None,
-                cancel_asked: None, retry_of: meta.retry_of, attempt: meta.attempt, deferred: None,
+                cancel_asked: None, retry_of: meta.retry_of, attempt: meta.attempt, deferred: None, scope: None,
             };
             if let Some(f) = inner.logs.get_mut(&owner) {
                 f.push(rec);
@@ -1023,6 +1027,17 @@ impl Run {
         });
     }
 
+    /// What the run has processed so far (devices measured), before it ends: JOBS_LIST shows
+    /// it while the run goes.
+    pub fn records(&self, n: u64) {
+        self.jobs.update(&self.job, &self.id, |r| r.records = Some(n));
+    }
+
+    /// What a person narrowed the run to (kept for `JOB_RETRY`).
+    pub fn scope(&self, v: Value) {
+        self.jobs.update(&self.job, &self.id, |r| r.scope = Some(v));
+    }
+
     /// The clusters the run touches, once it knows them.
     pub fn clusters(&self, ids: &[String]) {
         self.jobs.update(&self.job, &self.id, |r| {
@@ -1110,7 +1125,7 @@ pub fn from_report_job(j: &Job) -> RunRecord {
         // Exactly what REPORT_JOBS decides visibility on (`Job::covered`); not known is `*`.
         clusters: j.covered().unwrap_or_else(|| vec![crate::report::jobs::ALL_CLUSTERS.to_string()]), note,
         cancel_asked: j.stop_asked.clone(), retry_of: j.retry_of.as_ref().map(|r| format!("report-{r}")), attempt: j.attempt,
-        deferred: None,
+        deferred: None, scope: None,
     }
 }
 
@@ -1152,7 +1167,7 @@ pub fn run_view(owner: Owner, r: &RunRecord, who: Reader<'_>) -> Option<Value> {
         "note": if hidden { Value::Null } else { json!(r.note) },
         "clusters": r.clusters,
         "cancelAsked": r.cancel_asked.is_some(), "retryOf": r.retry_of, "attempt": r.attempt,
-        "deferred": r.deferred,
+        "deferred": r.deferred, "scope": r.scope,
     }))
 }
 
@@ -1284,7 +1299,7 @@ mod tests {
             id: id.into(), job_id: job.into(), trigger: Trigger::Timer, status, created_at: at, started_at: Some(at),
             ended_at: status.finished().then_some(at + 1), done: None, total: None, records: Some(7),
             error: Some("prod-b: search failed".into()), clusters: clusters.iter().map(|s| s.to_string()).collect(), note: Some("n".into()),
-            cancel_asked: None, retry_of: None, attempt: 0, deferred: None,
+            cancel_asked: None, retry_of: None, attempt: 0, deferred: None, scope: None,
         }
     }
 

@@ -139,36 +139,88 @@ pub struct DeviceRow {
     pub last_arrival: Option<i64>,
     pub last_event: Option<i64>,
     pub silent_since: Option<i64>,
+    /// `Zone` and `tag1` of the device (an extra column, read whatever its case): every row of
+    /// every log delay table carries them; `None` = the device's logs do not say.
+    pub zone: Option<String>,
+    pub tag1: Option<String>,
+    /// The device sent logs in its cluster's last run (what a live check or *Fetch now* sees);
+    /// `false` for one only remembered from earlier in the range (silent, or seen before).
+    pub in_last_run: bool,
     pub extras: BTreeMap<String, String>,
 }
 
-/// Every device of one cluster, over the range.
+/// Every device of one cluster measured in the range: a measurement (any state, silent
+/// included) inside it, or a delay period overlapping it. A device the tracker remembers only
+/// from before the range is not in it — the report for yesterday lists yesterday's devices.
 pub fn device_rows(c: &ClusterInput, r: &Range, now: i64) -> Vec<DeviceRow> {
     let eps = c.tracker.all_episodes();
+    let by_device = episodes_by_device(&eps, r, now);
     let mut out = vec![];
     for (name, d) in &c.tracker.devices {
-        let mine: Vec<&Episode> = eps.iter().filter(|e| &e.device == name && e.started_ms < r.to_ms && e.end_ms(now) >= r.from_ms).collect();
-        let mut in_range: Vec<f64> = d.recent.iter().filter(|p| p.t >= r.from_ms && p.t < r.to_ms).filter_map(|p| p.m).collect();
-        let max = in_range.iter().cloned().fold(None, |m: Option<f64>, x| Some(m.map_or(x, |m| m.max(x))));
-        let last = mine.last();
-        let docs: u64 = d.day_docs.iter().map(|(_, n)| n).sum();
-        out.push(DeviceRow {
-            device: name.clone(), cluster: c.id.clone(), cluster_name: c.name.clone(), state: d.state,
-            now_minutes: if d.state == State::Silent || d.state == State::Unmeasured { None } else { d.last_minutes },
-            median_minutes: percentile(&mut in_range, 0.5), max_minutes: max,
-            episodes: mine.len() as u64, solved: mine.iter().filter(|e| e.solved_ms.is_some()).count() as u64,
-            late_ms: mine.iter().map(|e| e.overlap_ms(r.from_ms, r.to_ms, now)).sum(),
-            last_started: last.map(|e| e.started_ms), last_solved: last.and_then(|e| e.solved_ms),
-            late_since: d.open.as_ref().map(|e| e.started_ms),
-            docs_per_day: (!d.day_docs.is_empty()).then_some(docs),
-            last_arrival: d.last_arrival_ms, last_event: d.last_event_ms,
-            silent_since: d.silence.as_ref().map(|s| s.from_ms),
-            extras: d.extras.clone(),
-        });
+        let mine = by_device.get(name.as_str()).map(Vec::as_slice).unwrap_or(&[]);
+        if mine.is_empty() && !measured_in(d, r) {
+            continue;
+        }
+        out.push(row_of(c, name, d, mine, r, now));
     }
     // Sorted by time spent late, the worst first; ties by the delay now.
     out.sort_by(|a, b| b.late_ms.cmp(&a.late_ms).then(b.now_minutes.unwrap_or(0.0).partial_cmp(&a.now_minutes.unwrap_or(0.0)).unwrap_or(std::cmp::Ordering::Equal)));
     out
+}
+
+/// The periods overlapping the range, by device (one pass, not one per device: 25 000 devices).
+fn episodes_by_device<'a>(eps: &'a [Episode], r: &Range, now: i64) -> std::collections::HashMap<&'a str, Vec<&'a Episode>> {
+    let mut m: std::collections::HashMap<&str, Vec<&Episode>> = std::collections::HashMap::new();
+    for e in eps.iter().filter(|e| e.started_ms < r.to_ms && e.end_ms(now) >= r.from_ms) {
+        m.entry(e.device.as_str()).or_default().push(e);
+    }
+    m
+}
+
+fn measured_in(d: &super::state::DeviceState, r: &Range) -> bool {
+    d.recent.iter().any(|p| p.t >= r.from_ms && p.t < r.to_ms)
+}
+
+/// One device's row over the range; `mine` are its periods overlapping the range.
+fn row_of(c: &ClusterInput, name: &str, d: &super::state::DeviceState, mine: &[&Episode], r: &Range, now: i64) -> DeviceRow {
+    let mut in_range: Vec<f64> = d.recent.iter().filter(|p| p.t >= r.from_ms && p.t < r.to_ms).filter_map(|p| p.m).collect();
+    let max = in_range.iter().cloned().fold(None, |m: Option<f64>, x| Some(m.map_or(x, |m| m.max(x))));
+    let last = mine.last();
+    let docs: u64 = d.day_docs.iter().map(|(_, n)| n).sum();
+    DeviceRow {
+        device: name.to_string(), cluster: c.id.clone(), cluster_name: c.name.clone(), state: d.state,
+        now_minutes: if d.state == State::Silent || d.state == State::Unmeasured { None } else { d.last_minutes },
+        median_minutes: percentile(&mut in_range, 0.5), max_minutes: max,
+        episodes: mine.len() as u64, solved: mine.iter().filter(|e| e.solved_ms.is_some()).count() as u64,
+        late_ms: mine.iter().map(|e| e.overlap_ms(r.from_ms, r.to_ms, now)).sum(),
+        last_started: last.map(|e| e.started_ms), last_solved: last.and_then(|e| e.solved_ms),
+        late_since: d.open.as_ref().map(|e| e.started_ms),
+        docs_per_day: (!d.day_docs.is_empty()).then_some(docs),
+        last_arrival: d.last_arrival_ms, last_event: d.last_event_ms,
+        silent_since: d.silence.as_ref().map(|s| s.from_ms),
+        zone: super::extra_ci(&d.extras, "Zone").cloned(), tag1: super::extra_ci(&d.extras, "tag1").cloned(),
+        in_last_run: in_last_run(d, c.tracker.last_run_ms),
+        extras: d.extras.clone(),
+    }
+}
+
+/// Whether a device sent logs in its cluster's last run: read by it (not silent), at its time.
+pub fn in_last_run(d: &super::state::DeviceState, last_run: Option<i64>) -> bool {
+    last_run == Some(d.last_run_ms) && d.state != State::Silent
+}
+
+/// How a cluster's devices are counted, side by side (docs/LOGDELAY.md "Which devices"):
+/// `inLastRun` — sent logs in the last run's window (what a live check sees); `now` — every
+/// device the tracker holds, silent ones included (the totals); `inRange` — measured at any
+/// time in the range (the report's device list).
+pub fn device_counts(c: &ClusterInput, r: &Range, now: i64) -> Value {
+    let last = c.tracker.last_run_ms;
+    let in_last = c.tracker.devices.values().filter(|d| in_last_run(d, last)).count();
+    let eps = c.tracker.all_episodes();
+    let by_device = episodes_by_device(&eps, r, now);
+    let in_range = c.tracker.devices.iter().filter(|(n, d)| by_device.contains_key(n.as_str()) || measured_in(d, r)).count();
+    json!({ "inLastRun": in_last, "now": c.tracker.devices.len(), "inRange": in_range,
+            "lastRead": c.tracker.last_read })
 }
 
 /// The devices' states now.
@@ -298,11 +350,13 @@ pub fn fleet(clusters: &[ClusterInput], r: &Range, now: i64, every_hours: u64, m
             "sparkline": sparkline(c, r), "sparklineDays": r.day_keys(),
             "worst": worst.map(|w| json!({ "device": w.device, "minutes": w.now_minutes, "state": w.state })),
             "levels": c.levels, "lastRunAt": c.tracker.last_run_ms,
+            "counts": device_counts(c, r, now), "lastRead": c.tracker.last_read,
         }));
         rows.extend(crows);
     }
     per_cluster.sort_by(|a, b| b["latePct"].as_f64().unwrap_or(0.0).partial_cmp(&a["latePct"].as_f64().unwrap_or(0.0)).unwrap_or(std::cmp::Ordering::Equal));
     rows.sort_by_key(|r| std::cmp::Reverse(r.late_ms));
+    let in_range = rows.len();
     let truncated = rows.len() > max_devices;
     rows.truncate(max_devices);
     let eps: Vec<Episode> = trackers.iter().flat_map(|t| t.all_episodes()).collect();
@@ -321,7 +375,8 @@ pub fn fleet(clusters: &[ClusterInput], r: &Range, now: i64, every_hours: u64, m
         "windows": windows(&trackers, today, every_hours, now),
         "days": days(&refs, r),
         "byCluster": per_cluster,
-        "devices": rows, "devicesTotal": all.devices, "devicesTruncated": truncated,
+        "devices": rows, "devicesTotal": all.devices, "devicesInRange": in_range, "devicesTruncated": truncated,
+        "devicesInLastRun": clusters.iter().map(|c| c.tracker.devices.values().filter(|d| in_last_run(d, c.tracker.last_run_ms)).count()).sum::<usize>(),
     })
 }
 
@@ -337,6 +392,7 @@ pub fn cluster(c: &ClusterInput, r: &Range, now: i64, every_hours: u64, fields: 
     json!({
         "cluster": c.id, "name": c.name, "from": r.from.format("%Y-%m-%d").to_string(), "to": r.to.format("%Y-%m-%d").to_string(), "label": r.label(),
         "now": now, "everyHours": every_hours, "levels": c.levels, "fields": fields, "lastRunAt": c.tracker.last_run_ms,
+        "counts": device_counts(c, r, now), "lastRead": c.tracker.last_read,
         "totals": t.json(),
         "started": eps.iter().filter(|e| e.started_ms >= r.from_ms && e.started_ms < r.to_ms).count(),
         "solved": eps.iter().filter(|e| e.solved_ms.is_some_and(|s| s >= r.from_ms && s < r.to_ms)).count(),
@@ -350,8 +406,8 @@ pub fn cluster(c: &ClusterInput, r: &Range, now: i64, every_hours: u64, fields: 
 /// One device (Device board), with its finding when there is one.
 pub fn device(c: &ClusterInput, name: &str, r: &Range, now: i64, every_hours: u64, finding: Option<&Finding>) -> Option<Value> {
     let d = c.tracker.devices.get(name)?;
-    let row = device_rows(c, r, now).into_iter().find(|x| x.device == name)?;
     let eps: Vec<Episode> = c.tracker.all_episodes().into_iter().filter(|e| e.device == name && e.started_ms < r.to_ms && e.end_ms(now) >= r.from_ms).collect();
+    let row = row_of(c, name, d, &eps.iter().collect::<Vec<_>>(), r, now);
     let points: Vec<Value> = d.recent.iter().filter(|p| p.t >= r.from_ms && p.t < r.to_ms).map(|p| json!({ "t": p.t, "m": p.m, "s": p.s })).collect();
     let measured: Vec<(i64, f64)> = d.recent.iter().filter(|p| p.t >= r.from_ms && p.t < r.to_ms).filter_map(|p| p.m.map(|m| (p.t, m))).collect();
     let peak = measured.iter().cloned().fold(None, |best: Option<(i64, f64)>, (t, m)| match best { Some((_, b)) if b >= m => best, _ => Some((t, m)) });
@@ -372,7 +428,7 @@ pub fn device(c: &ClusterInput, name: &str, r: &Range, now: i64, every_hours: u6
     let silences: Vec<Value> = c.tracker.silences.iter().chain(c.tracker.open_silences()).filter(|s| s.device == name && s.from_ms < r.to_ms && s.to_ms.unwrap_or(now) >= r.from_ms)
         .map(|s| json!({ "from": s.from_ms, "to": s.to_ms, "burstDocs": s.burst_docs, "burstMinutes": s.burst_minutes })).collect();
     let range_ms = (r.to_ms.min(now) - r.from_ms).max(1);
-    Some(json!({
+    let mut v = json!({
         "device": name, "cluster": c.id, "clusterName": c.name, "from": r.from.format("%Y-%m-%d").to_string(), "to": r.to.format("%Y-%m-%d").to_string(),
         "label": r.label(), "now": now, "everyHours": every_hours, "levels": c.levels,
         "state": d.state, "nowMinutes": row.now_minutes, "lateSince": row.late_since, "silentSince": row.silent_since,
@@ -395,7 +451,12 @@ pub fn device(c: &ClusterInput, name: &str, r: &Range, now: i64, every_hours: u6
             "lateMostOften": most,
         },
         "finding": finding,
-    }))
+    });
+    // Beside the rest (one json! of this size is at the macro's recursion limit).
+    v["zone"] = json!(row.zone);
+    v["tag1"] = json!(row.tag1);
+    v["inLastRun"] = json!(row.in_last_run);
+    Some(v)
 }
 
 /// `*` and `?` wildcards, case-insensitive, whole value.
