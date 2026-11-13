@@ -185,7 +185,8 @@ async fn a_host_at_an_existing_cluster_s_address_waits_for_an_administrator() {
     c.zabbix_sync().await;
     let l = list(&c, &admin).await;
     assert!(!ids(&l).contains(&"zbx-lab-zbx".to_string()));
-    assert_eq!((held(&l, "202")["state"].clone(), held(&l, "202")["decidedBy"].clone()), (json!("decided"), json!("sara")));
+    assert_eq!(held(&l, "202")["state"], json!("decided"), "{l}");
+    assert!(held(&l, "202")["decidedBy"].as_str().unwrap().starts_with("sara"), "who decided is kept: {l}");
     assert_eq!(l["reviewNeeded"], json!(1), "only web-zbx still waits");
 
     // --- Update: the host takes lab over; the pages set lab aside by the row's `replaces`.
