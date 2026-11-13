@@ -45,6 +45,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadPlaywright } from './lib/playwright.mjs';
+import { jobsListAnswer } from './lib/jobs-fixture.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const arg = (name, fallback) => {
@@ -87,6 +88,9 @@ const PAGES = [
   { id: 'reports/planning', search: null, hover: ['#view tbody tr', '#view .btn'] },
   { id: 'reports/exports', search: '#rt-volume-subject', hover: ['#view .rj-job .btn', '#view .rj-job', '#view .rp-dlc .btn'] },
   { id: 'automation', search: null, hover: ['#view tbody tr', '#view .btn'] },
+  // Jobs: JOBS_LIST is stubbed with a run that moves 5 % a read (every 2 s): the Stop button under a
+  // parked pointer, its row and the bar must stay the same elements while it does.
+  { id: 'jobs', search: null, hover: ['#view tr[data-run="4b0e1c2d3e4f5a6b"] .jb-stop', '#view tr[data-run] .jb-stop', '#view .jb-chip'] },
   { id: 'requests', search: null, hover: ['#view .rq-tbl tbody tr', '#view select', '#view .btn'] },
   { id: 'requests/health', search: null, hover: ['#view .hl-chip', '#view [data-check] td', '#view .hl-page details summary'] },
   { id: 'accounts', search: '#view input[aria-label="Filter by user"]', hover: ['#view tbody tr', '#view .btn'] },
@@ -95,7 +99,7 @@ const PAGES = [
 ].filter((p) => !PAGE_FILTER || PAGE_FILTER.split(',').includes(p.id));
 
 /** Pages whose pointer figures must be zero (the redraws fixed in 0.3.54); others are reported. */
-const STRICT = new Set(['requests', 'requests/health', 'reports/exports', 'reports/hosts']);
+const STRICT = new Set(['requests', 'requests/health', 'reports/exports', 'reports/hosts', 'jobs']);
 
 const pw = await loadPlaywright(ROOT, 'flicker-check');
 if (!pw) process.exit(0);
@@ -217,8 +221,10 @@ async function run(browserName) {
   await ctx.addInitScript(INSTRUMENTS);
   // A signed-in administrator on the hosted build, so the Accounts page is there (as fit-check).
   const WHOAMI = { ok: true, authRequired: true, needsBootstrap: false, apiTokens: true, edition: 'hosted', caller: { name: 'qa', role: ROLE } };
+  let jobReads = 0;
   await ctx.route(`${BASE}/bridge`, (route) => {
     const t = ((route.request().postData() || '').match(/"type"\s*:\s*"([A-Z_]+)"/) || [])[1];
+    if (t === 'JOBS_LIST') return route.fulfill({ json: jobsListAnswer({ step: jobReads++ }) });
     return t === 'WHOAMI' ? route.fulfill({ json: WHOAMI }) : route.continue();
   });
   const p = await ctx.newPage();

@@ -88,7 +88,10 @@ const CONFIG_TABS = ['clusters/clusters', 'clusters/creds', 'clusters/trust', 'z
   'requests/policy', 'reports/fields', 'reports/mail', 'reports/templates', 'play/play', 'system/defaults', 'system/file', 'system/backup'];
 const HOSTED = new Set(['automation', 'requests', 'accounts']);
 const PAGES = ['alerts', 'overview', 'indices', 'shards', 'logs', 'console', 'snapshots',
-  ...REPORT_SECTIONS.map((s) => `reports/${s}`), ...LD_VIEWS.map((s) => `reports/${s}`), 'automation', 'requests', 'requests/health', 'accounts', 'settings',
+  ...REPORT_SECTIONS.map((s) => `reports/${s}`), ...LD_VIEWS.map((s) => `reports/${s}`),
+  // Jobs (docs/JOBS.md "Jobs page"): three tabs, each its own route, drawn from the bridge's own JOBS_LIST.
+  'jobs', 'jobs/history', 'jobs/settings',
+  'automation', 'requests', 'requests/health', 'accounts', 'settings',
   ...CONFIG_TABS.map((t) => `settings/${t}`), 'play'];
 const view = window.document.createElement('div');
 window.document.body.append(view);
@@ -114,6 +117,12 @@ for (const name of PAGES) {
       if (!tab || tab.dataset.tab !== 'health') errors.push('requests/health: the tab bar does not mark ElasticPro health as the one shown');
       if (!view.querySelector('.hl-strip .hl-chip[data-part="core"]')) errors.push('requests/health: no status strip with the core');
       if (!view.querySelector('tr[data-check="core.memory"]')) errors.push('requests/health: no memory check');
+    } else if (page === 'jobs') {
+      // Jobs: the tab bar marks the tab shown, the strip is there, and the Jobs tab lists every job.
+      const cur = view.querySelector('nav.jb-tabs button[aria-current="page"]');
+      if (!cur || cur.dataset.tab !== (section || 'jobs')) errors.push(`${name}: the tab bar does not mark ${section || 'jobs'}`);
+      if (!view.querySelector('.jb-strip .jb-chip[data-chip="runs"]')) errors.push(`${name}: no load strip`);
+      if (!section && view.querySelectorAll('tr[data-job]').length < 10) errors.push(`${name}: All jobs lists ${view.querySelectorAll('tr[data-job]').length} rows (the registry has 13 jobs)`);
     } else if (page === 'settings' && section) {
       // Config-Management: the menu marks the page, the tab row (when there is one) the tab.
       const item = view.querySelector('.cm-nav .cm-item[aria-current="page"]');

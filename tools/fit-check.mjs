@@ -50,6 +50,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadPlaywright } from './lib/playwright.mjs';
 import { logDelayAnswer, logDelayData } from './lib/logdelay-fixture.mjs';
+import { jobsListAnswer } from './lib/jobs-fixture.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const arg = (name, fallback) => {
@@ -77,6 +78,8 @@ const PAGES = ['alerts', 'overview', 'indices', 'shards', 'logs', 'console', 'sn
   'reports/overview', 'reports/daily', 'reports/capacity', 'reports/measure', 'reports/planning', 'reports/exports',
   // Reports › Log delay (0.3.57): its four views, filled from tools/lib/logdelay-fixture.mjs (@c / @d: the first cluster and its worst device).
   'reports/log-delay', 'reports/log-delay/cluster/@c', 'reports/log-delay/device/@c/@d', 'reports/log-delay/fixes',
+  // Jobs (docs/JOBS.md "Jobs page"): its three tabs, with runs from tools/lib/jobs-fixture.mjs.
+  'jobs', 'jobs/history', 'jobs/settings',
   'automation', 'requests', 'accounts', 'settings',
   // Config-Management: each page and tab is its own route (pages/settings.js), measured as a page.
   'settings/clusters/creds', 'settings/clusters/trust', 'settings/zabbix/zabbix', 'settings/alerts/triggers', 'settings/requests/policy',
@@ -245,6 +248,11 @@ async function run(browserName, [vw, vh, framed]) {
     if (req.method() === 'POST' && req.url() === `${BASE}/bridge`) {
       const t = ((req.postData() || '').match(/"type"\s*:\s*"([A-Z_]+)"/) || [])[1];
       if (t && stub[t]) return route.fulfill({ json: stub[t] });
+      // The Jobs page: a fresh data directory has no runs to lay out.
+      if (t === 'JOBS_LIST') {
+        let body = {}; try { body = JSON.parse(req.postData() || '{}'); } catch { /* not ours */ }
+        return route.fulfill({ json: jobsListAnswer({ before: body.before || null }) });
+      }
       // The log delay report's store is empty on a fresh data directory: its answers come from the fixture.
       if (t && ldList.length && (t.startsWith('LOGDELAY_') || t.startsWith('REPORT_'))) {
         let body = {}; try { body = JSON.parse(req.postData() || '{}'); } catch { /* not ours */ }
@@ -633,12 +641,19 @@ async function run(browserName, [vw, vh, framed]) {
       confirmDialog('Unpair from Zabbix?', 'The API token and the sign-in secret stored here are deleted. Signing in from Zabbix stops at once, and the clusters that come from Zabbix disappear from ElasticPro until you pair again.\n\nSettings made in the server’s own configuration are not touched.', { yes: 'unpair', danger: true });
     });
 
+    /* job-create.js: Create job, each way (the page's button opens it on the way it was left) */
+    dlg('Jobs · Create job (run once)', 'jobs', null, { ui: async (F) => { await F.evaluate(() => { document.getElementById('jb-create')?.click(); }); await sleep(200);
+      await F.evaluate(() => document.getElementById('jc-mode-once')?.click()); } });
+    dlg('Jobs · Create job (schedule)', 'jobs', null, { ui: async (F) => { await F.evaluate(() => { document.getElementById('jb-create')?.click(); }); await sleep(200);
+      await F.evaluate(() => document.getElementById('jc-mode-schedule')?.click()); } });
+
     /* accounts.js: its dialogs are the page's own functions, so its buttons open them */
     dlg('Accounts · New user', 'accounts', null, { ui: async (F) => { await F.evaluate(() => { [...document.querySelectorAll('#view button')].find((b) => /New ElasticPro user/.test(b.textContent))?.click(); }); } });
     dlg('Accounts · New API token', 'accounts', null, { ui: async (F) => { await F.evaluate(() => { [...document.querySelectorAll('#view button')].find((b) => /New token/.test(b.textContent))?.click(); }); } });
 
     let at = '';
-    for (const o of D) {
+    // --pages narrows the named dialogs to those pages too.
+    for (const o of D.filter((d) => !PAGE_FILTER || PAGE_FILTER.split(',').includes(d.page))) {
       const area = 'dialog';
       if (o.page !== at) { await goPage(o.page); at = o.page; }
       await readWrite();
