@@ -5074,7 +5074,7 @@ impl Core {
         // identity), else the config's shared one. Never because two addresses compare equal.
         // Both arrived from a browser that built them with authHeaderFor, so nothing here
         // re-derives a header.
-        let (held_by_id, shared): (HashMap<String, (Option<String>, String)>, Option<String>) = {
+        let (held_by_id, shared): (zc::HeldCredentials, Option<String>) = {
             let p = self.primed.read();
             (p.clusters.values().filter_map(|s| {
                 s.auth_header.as_ref().filter(|a| !a.is_empty())

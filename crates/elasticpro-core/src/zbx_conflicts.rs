@@ -103,12 +103,15 @@ fn identity_of(u: &reqwest::Url) -> Option<String> {
     Some(format!("{}://{host}:{port}{path}", u.scheme()))
 }
 
+/// Each primed config cluster's credential by cluster id: its identity (`trusted_identity`) and header.
+pub type HeldCredentials = HashMap<String, (Option<String>, String)>;
+
 /// The credential of a config-file cluster a Zabbix host may sign in with (*Use ElasticPro
 /// credentials*): only that of the cluster an administrator let the host take over (**update**,
 /// `replaces`), and only while both are at one identity. Never because two addresses compare
 /// equal, never to a host held, skipped or kept beside the cluster, and never to an address with
 /// no identity. `config` maps a config cluster's id to its identity and header.
-pub fn lent_credential<'a>(replaces: Option<&Against>, zabbix_url: &str, config: &'a HashMap<String, (Option<String>, String)>) -> Option<&'a str> {
+pub fn lent_credential<'a>(replaces: Option<&Against>, zabbix_url: &str, config: &'a HeldCredentials) -> Option<&'a str> {
     let a = replaces.filter(|a| a.kind == "config")?;
     let here = url_identity(zabbix_url)?;
     let (there, header) = config.get(&a.id)?;
@@ -806,7 +809,7 @@ mod tests {
 
     #[test]
     fn a_config_credential_is_lent_only_to_the_host_that_took_its_cluster_over() {
-        let config: HashMap<String, (Option<String>, String)> = [
+        let config: HeldCredentials = [
             ("lab".to_string(), (trusted_identity("http://u:p@LAB:9200/"), "Basic lab".to_string())),
             ("other".to_string(), (trusted_identity("http://other:9200"), "Basic other".to_string())),
         ].into();
