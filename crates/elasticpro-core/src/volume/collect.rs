@@ -249,6 +249,7 @@ impl Indices {
 /// never got past it. Under the gate's ceiling (`ELASTICPRO_ES_MAX_TIMEOUT_MS`, 115 s), which
 /// still clamps it.
 pub const SEARCH_TIMEOUT_MS: u64 = 110_000;
+const _: () = assert!(SEARCH_TIMEOUT_MS > 60_000 && SEARCH_TIMEOUT_MS < 115_000, "longer than the listing, under the gate's ceiling");
 
 /// The waits before the second and the third try of a request that timed out or that a
 /// proxy turned away (`retryable`). Three tries in all; the stop and a person's cancel are
@@ -1305,7 +1306,6 @@ mod pattern_tests {
         // A day's aggregation may take longer than the listing: under the gate's 115 s ceiling.
         assert_eq!(r.timeout_ms, Some(SEARCH_TIMEOUT_MS));
         assert_eq!(cat_request("c", &f).timeout_ms, Some(60_000));
-        assert!(SEARCH_TIMEOUT_MS > 60_000 && SEARCH_TIMEOUT_MS < 115_000);
     }
 
     #[test]
