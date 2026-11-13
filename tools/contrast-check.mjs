@@ -8,7 +8,7 @@
  *   ELASTICPRO_DATA_DIR=$(mktemp -d) cargo run -p elasticpro-core --features bridge \
  *     --bin elasticpro-bridge -- ui 8765 &
  *   node tools/contrast-check.mjs --config $PWD/tools/fit-fixture.json
- *   node tools/contrast-check.mjs --themes dark-blue --pages reports/log-delay --list 80
+ *   node tools/contrast-check.mjs --themes dark-blue --pages log-delay --list 80
  *
  * Why it exists: Dark blue shipped with the log delay pills drawn in the light theme's inks —
  * dark pink on a pink-tinted navy, dark green on a green-tinted navy — because the .ld inks were
@@ -65,9 +65,9 @@ const SIZE = arg('--size', '1440x900').split('x').map(Number);
 const ERRORS_ONLY = process.argv.includes('--errors-only');
 
 /** Measured for contrast: between them every pill tone, table, button, link, field and muted line. */
-const CONTRAST_PAGES = ['alerts', 'overview', 'indices', 'shards', 'logs', 'console', 'snapshots',
+const CONTRAST_PAGES = ['alerts', 'overview', 'indices', 'shards', 'console', 'snapshots',
   'reports/overview', 'reports/daily', 'reports/capacity', 'reports/measure', 'reports/planning', 'reports/exports',
-  'reports/log-delay', 'reports/log-delay/cluster/@c', 'reports/log-delay/device/@c/@d', 'reports/log-delay/fixes',
+  'log-delay', 'log-delay/cluster/@c', 'log-delay/device/@c/@d', 'log-delay/fixes', 'log-delay/watch', 'log-delay/live',
   'automation', 'requests', 'accounts', 'settings',
   'settings/clusters/creds', 'settings/zabbix/zabbix', 'settings/alerts/triggers', 'settings/reports/mail',
   'settings/data/schedule', 'settings/system/defaults'];
@@ -359,7 +359,7 @@ async function runTheme(theme) {
   notes.push(`${theme}: data-theme=${applied}, scheme=${themeContextOptions(theme).colorScheme}`);
 
   const goPage = async (id) => {
-    if (id.startsWith('reports/log-delay') && !ldList.length) {
+    if (id.startsWith('log-delay') && !ldList.length) {
       ldList = await p.evaluate(async () => (await import('/js/core/state.js')).clusters().map((c) => ({ id: c.id, name: c.name })));
     }
     if (id.includes('@c')) {
@@ -419,7 +419,7 @@ async function runTheme(theme) {
       await p.evaluate(() => { const tr = document.querySelector('#view .rp-measure-tbl tbody tr:not(.on)'); if (tr) tr.click(); });
       await sleep(500); await quiet(400, 3000);
     }
-    if (id.startsWith('reports/log-delay/cluster')) {
+    if (id.startsWith('log-delay/cluster')) {
       await p.evaluate(() => { const tr = document.querySelector('#view .ld table.tbl tbody tr'); if (tr) tr.click(); });
       await sleep(500); await quiet(400, 3000);
     }
