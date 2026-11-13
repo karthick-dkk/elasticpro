@@ -455,8 +455,13 @@ five minutes (Config → Zabbix → **Sync now** for immediately):
 
 - **Who sees it** is Zabbix's answer: a user group that can read the host (and is denied none
   of its groups) sees the cluster in ElasticPro too. Set it once, in Zabbix.
-- **Zabbix wins**: a config-file cluster at the same address is set aside — but only once
-  the Zabbix one can actually sign in, so a working cluster is never swapped for a broken one.
+- **Never a silent takeover**: a host at the address of a cluster ElasticPro already has (a
+  config-file cluster, or another Zabbix host in use) is held for an administrator's review in
+  Config-Management › Zabbix › *Held for review* — Skip, Update or Keep both — and nothing about
+  that cluster changes until then. *Preview sync* shows what a sync would add, change or hold,
+  and applies nothing. An Update sets a config-file cluster aside only once the Zabbix host can
+  sign in, so a working cluster is never swapped for a broken one (docs/HANDBOOK.md, "Zabbix
+  sync — hosts held for review").
 - A **Secret** macro is reported as unreadable: Zabbix never returns those through its API.
 
 ### Passwords: Vault, or ElasticPro's own
@@ -489,7 +494,8 @@ ElasticPro connects.
 With `createHosts: true`, every config cluster Zabbix does not have becomes a host: the
 cluster template (and the client-plan template), `{$ELASTICSEARCH.*}` macros, its password
 stored in Vault and referenced — never written into Zabbix — and read access for the
-cluster's `zabbixGroups` on its client group. From the next sync, Zabbix wins. This uses
+cluster's `zabbixGroups` on its client group. From the next sync the new host takes that
+cluster over (recorded as an Update decision, since that is what the option asks for). This uses
 separate, write-only credentials (`zabbix_api_write_token`, the `elasticpro-provision`
 AppRole); the five-minute sync can only read.
 
