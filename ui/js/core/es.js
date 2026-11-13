@@ -40,6 +40,11 @@ export const requestLog = (params = {}) => send({ type: 'REQUEST_LOG', ...params
 /** ElasticPro's own health (docs/HEALTH.md): the core's and the worker's, never a cluster's. Admins only. */
 export const systemHealth = () => send({ type: 'SYSTEM_HEALTH' });
 
+/** Every job, its state and a page of runs (docs/JOBS.md `JOBS_LIST {before?, limit?, jobId?}`). User and up. */
+export const jobsList = (params = {}) => send({ type: 'JOBS_LIST', ...params });
+/** A job control (docs/JOBS.md "Controls": JOB_RUN, JOB_PAUSE, … JOB_SETTINGS_SET). Administrators only. */
+export const jobControl = (type, params = {}) => send({ type, ...params });
+
 export async function primeWorker(clusters, readOnly = true, jumpHosts = [], { persist = true, sharedAuthHeader = undefined, acceptAllCertificates = false, dropAnonymous = [] } = {}) {
   return send({
     type: 'PRIME',
