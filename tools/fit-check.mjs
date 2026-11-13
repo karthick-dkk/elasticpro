@@ -36,8 +36,9 @@
  * Nothing here writes. The page is told it may write (the in-memory read-only default is
  * turned off so the dialogs open instead of asking to unlock first), but no primary button is
  * pressed, and the core refuses a write without its own unlock and a request a person made.
- * Zabbix pairing and certificate answers, and WHOAMI (so the Accounts page is on), are
- * stubbed at the network edge, because the fixture has no Zabbix to ask.
+ * Zabbix pairing and certificate answers, the Zabbix cluster list with hosts held for review
+ * (and the sync preview), and WHOAMI (so the Accounts page is on), are stubbed at the network
+ * edge, because the fixture has no Zabbix to ask.
  *
  * --config is a path the BRIDGE can read (same machine). tools/fit-fixture.json has long,
  * realistic names, tags and notes on purpose: a short name fits anything.
@@ -204,6 +205,39 @@ const panelFit = (sel) => {
   return { seen, issues };
 };
 
+/* ------------------------- Zabbix hosts held for review ------------------------- */
+
+/** One held host, with long names on both sides: a config-file cluster, and the Zabbix host at its address. */
+const HELD_ENTRY = {
+  hostId: '10442', host: 'es-logging-frankfurt-01.corp.internal.example.com', clusterId: 'zbx-es-logging-frankfurt-01-corp-internal-example-com',
+  identity: 'https://es-logging-frankfurt-01.corp.internal.example.com:9200', state: 'changed', decision: 'keepBoth',
+  decidedBy: 'platform-administrator', decidedAt: Math.floor(Date.now() / 1000) - 86400, firstSeen: Math.floor(Date.now() / 1000) - 2 * 86400,
+  fingerprint: '0123456789abcdef01234567',
+  existing: { kind: 'config', id: 'frankfurt-logging-production-cluster-for-the-noc-wall', hostId: '',
+    values: { name: 'Frankfurt logging production cluster (for the NOC wall)', url: 'https://ES-LOGGING-FRANKFURT-01.corp.internal.example.com:9200/',
+      via: 'jump-windows-datacenter-frankfurt-1', tls: 'system', tags: ['production', 'eu-central-1', 'pci-scope', 'customer-facing'], enabled: true,
+      username: 'svc-elasticpro-readonly-frankfurt' } },
+  zabbix: { name: 'es-logging-frankfurt-01.corp.internal.example.com (Zabbix visible name, renamed)', url: 'https://es-logging-frankfurt-01.corp.internal.example.com:9200',
+    host: 'es-logging-frankfurt-01.corp.internal.example.com', via: '10.20.30.40:22', username: 'svc-zabbix-elasticsearch-monitoring',
+    client: 'acme-corporation-international', tags: ['acme-corporation-international'], tls: null, enabled: true,
+    macros: 'HOST=es-logging-frankfurt-01.corp.internal.example.com SCHEME=https PORT=9200' },
+  decidedValues: { name: 'es-logging-frankfurt-01.corp.internal.example.com', url: 'https://es-logging-frankfurt-01.corp.internal.example.com:9200',
+    host: 'es-logging-frankfurt-01.corp.internal.example.com', via: null, username: 'svc-zabbix-elasticsearch-monitoring',
+    client: 'acme-corporation-international', tags: ['acme-corporation-international'], tls: null, enabled: true },
+};
+const HELD = [HELD_ENTRY, { ...HELD_ENTRY, hostId: '10443', host: 'es-logging-frankfurt-02.corp.internal.example.com', state: 'pending', decision: null, decidedBy: '', decidedAt: 0,
+  existing: { kind: 'zabbix', id: 'zbx-es-logging-frankfurt-02-old', hostId: '10101', values: { ...HELD_ENTRY.existing.values, name: 'es-logging-frankfurt-02 (the host in use now)' } } }];
+const PREVIEW = {
+  ok: true, dryRun: true, at: Math.floor(Date.now() / 1000), lastSync: Math.floor(Date.now() / 1000) - 120, unchanged: 27, clusters: 31, inUse: 29,
+  add: [{ hostId: '10450', id: 'zbx-es-metrics-singapore-03', name: 'es-metrics-singapore-03.corp.internal.example.com (Asia Pacific metrics)', url: 'https://es-metrics-singapore-03.corp.internal.example.com:9200', host: 'es-metrics-singapore-03.corp.internal.example.com' }],
+  change: [{ hostId: '10101', id: 'zbx-es-logging-frankfurt-02', name: 'es-logging-frankfurt-02.corp.internal.example.com',
+    fields: [{ field: 'name', from: 'es-logging-frankfurt-02', to: 'es-logging-frankfurt-02.corp.internal.example.com (renamed in Zabbix)' },
+      { field: 'zabbixGroups', from: ['ES Frankfurt operators'], to: ['ES Frankfurt operators', 'ES Platform administrators and on-call engineers'] }] }],
+  remove: [{ hostId: '10099', id: 'zbx-es-decommissioned-dublin-01', name: 'es-decommissioned-dublin-01.corp.internal.example.com', url: 'https://es-decommissioned-dublin-01.corp.internal.example.com:9200' }],
+  hold: HELD, wouldCreate: [{ id: 'lab-cluster-for-the-integration-tests', name: 'lab cluster for the integration tests', url: 'http://lab-elasticsearch-integration.corp.internal.example.com:9200' }],
+  skipped: ['es-template-only-host.corp.internal.example.com: {$ELASTICSEARCH.HOST} is not set'],
+};
+
 /* --------------------------------- one run ---------------------------------- */
 
 async function run(browserName, [vw, vh, framed]) {
@@ -221,6 +255,11 @@ async function run(browserName, [vw, vh, framed]) {
   // answers: a certificate to decide about and a pairing code, which a real core would mint.
   let ldList = [];
   const stub = {
+    // Hosts held for review (zbx_conflicts.rs): the Zabbix tab's card, its dialog, and the preview.
+    ZABBIX_CLUSTERS: { ok: true, configured: true, vault: true, useElasticProCredentials: false, createHosts: false, canCreateHosts: false,
+      provisioned: [], roleChanges: [], userListComplete: true, unverifiable: [], clusters: [], lastSync: Math.floor(Date.now() / 1000) - 120,
+      error: null, skipped: [], templates: [{ name: 'Elasticsearch Cluster by HTTP EP', hosts: 3 }], held: HELD, reviewNeeded: 1 },
+    ZABBIX_SYNC_PREVIEW: PREVIEW,
     DELAY_SINK_GET: { ok: true, supported: true, config: { enabled: true, everyHours: 2, destination: 'builtin', clusters: [], maxDevices: 2000 }, state: { runs: 1, lastOk: true } },
     WHOAMI: { ok: true, authRequired: true, needsBootstrap: false, apiTokens: true, edition: 'hosted', caller: { name: 'qa', role: 'admin' } },
     ZABBIX_LINK_GET: {
@@ -658,6 +697,17 @@ async function run(browserName, [vw, vh, framed]) {
       await F.evaluate(() => document.getElementById('jc-mode-once')?.click()); } });
     dlg('Jobs · Create job (schedule)', 'jobs', null, { ui: async (F) => { await F.evaluate(() => { document.getElementById('jb-create')?.click(); }); await sleep(200);
       await F.evaluate(() => document.getElementById('jc-mode-schedule')?.click()); } });
+    /* zabbix-review.js: a host held because it is at the address of a cluster that exists already */
+    dlg('Zabbix · review a held host (changed since decided)', 'settings', async (e) => {
+      (await import('/js/ui/zabbix-review.js')).reviewConflict(e);
+    }, { arg: HELD[0] });
+    dlg('Zabbix · review a held host (against a Zabbix host)', 'settings', async (e) => {
+      (await import('/js/ui/zabbix-review.js')).reviewConflict(e);
+    }, { arg: HELD[1] });
+    dlg('Zabbix · preview sync', 'settings', null, { ui: async (F) => {
+      await section('Zabbix');
+      await F.evaluate(() => { [...document.querySelectorAll('#view button')].find((b) => /^Preview sync$/.test(b.textContent.trim()))?.click(); });
+    } });
 
     /* accounts.js: its dialogs are the page's own functions, so its buttons open them */
     dlg('Accounts · New user', 'accounts', null, { ui: async (F) => { await F.evaluate(() => { [...document.querySelectorAll('#view button')].find((b) => /New ElasticPro user/.test(b.textContent))?.click(); }); } });

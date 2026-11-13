@@ -409,8 +409,6 @@ export async function loadZabbixClusters() {
   }
 }
 
-const urlKey = (u) => String(u || '').replace(/\/+$/, '').toLowerCase();
-
 /**
  * A ZABBIX_CLUSTERS row as a config-file entry, for normalize(): the effective values the core
  * built (Zabbix's, with what was set in ElasticPro laid over). A core without overlays sends
@@ -428,9 +426,13 @@ export function zabbixEntry(z) {
 /**
  * Fold Zabbix clusters into a loaded config.
  *
- * Zabbix wins. A config-file cluster at the same address as a Zabbix host is set aside —
- * listed in `config.shadowed` so the Config page can say so, but no longer used — because
- * two definitions of one cluster disagreeing is exactly what "Zabbix wins" rules out.
+ * A Zabbix host never takes a config-file cluster over on its own. One at the address of a
+ * cluster that exists already is held by the core for an administrator's review
+ * (zbx_conflicts.rs) and is not in `list` at all; what "the same address" means is the core's
+ * (`identity` on each row), not a comparison made here. Only a host an administrator let take
+ * a config-file cluster over (**Update**) carries `replaces: {kind: "config", id}`: that config
+ * cluster is set aside — listed in `config.shadowed` so the Config page can say so, but no
+ * longer used. **Keep both** leaves both in the list.
  *
  * Zabbix clusters are the core's: it holds their credentials, read from Vault, so they
  * carry none here, never ask for one, and are never primed from the browser. Running it
@@ -472,13 +474,19 @@ export function mergeZabbixClusters(config, list) {
                   overriddenBy: rows[i].overriddenBy || '', overriddenAt: rows[i].overriddenAt || 0,
                   ownCredential: !!rows[i].ownCredential, ownCredentialMoved: !!rows[i].ownCredentialMoved,
                   // Unknown (an older core) counts as its own: the route is then left to an admin.
-                  credentialIsOwn: rows[i].credentialIsOwn !== false },
+                  credentialIsOwn: rows[i].credentialIsOwn !== false,
+                  // The address as the core compares it, and the cluster an administrator let it take over.
+                  identity: rows[i].identity || '', replaces: rows[i].replaces || null, review: rows[i].review || '' },
       }));
   }
-  const byUrl = new Map(zbx.map((c) => [urlKey(c.url), c]));
-  config.shadowedClusters = own.filter((c) => byUrl.has(urlKey(c.url)));
-  config.shadowed = config.shadowedClusters.map((c) => ({ name: c.name, url: c.url, by: byUrl.get(urlKey(c.url)).name }));
-  config.clusters = [...own.filter((c) => !byUrl.has(urlKey(c.url))), ...zbx];
+  const takenBy = new Map();
+  for (const z of zbx) {
+    const r = z.zabbix.replaces;
+    if (r && r.kind === 'config' && r.id) takenBy.set(String(r.id), z);
+  }
+  config.shadowedClusters = own.filter((c) => takenBy.has(String(c.id)));
+  config.shadowed = config.shadowedClusters.map((c) => ({ name: c.name, url: c.url, by: takenBy.get(String(c.id)).name }));
+  config.clusters = [...own.filter((c) => !takenBy.has(String(c.id))), ...zbx];
   config.fromZabbix = zbx.length;
   return config;
 }

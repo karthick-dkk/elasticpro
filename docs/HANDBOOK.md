@@ -1080,14 +1080,99 @@ alone. ULM and SLM follow the type until an admin changes them.
 | `CLUSTER_META_GET` | user | `{ok, clusters: {<id>: {type, ulm: {enabled?, bucket}, slm?, source: "set"\|"zabbix-tag", setBy?, setAt?}}}` — the clusters the caller sees that have an entry or a tag; `enabled` / `slm` absent = follow the type. Desktop: `{ok: false, kind: "not_available"}`. |
 | `CLUSTER_META_SET {clusterId, meta: {type, ulm: {enabled: bool\|null, bucket}, slm: "expected"\|"none"\|null} \| null}` | admin | The same answer, after the change. `type` is required (`ci`, `di`, `onprem`; `CI`, `On-Prem` accepted); `bucket` empty or an S3 name (3–63 of `a-z 0-9 . -`, letter or digit at both ends, no `..`, not an IP). `meta: null` forgets the entry (back to the tag or the defaults). `forbidden` for a cluster the caller does not see, `bad_request` for a bad value. Audit line `cluster type set` (or `cleared`) with `cluster`, `kind`, `ulm`, `bucket`, `slm`. |
 
+## Zabbix sync — hosts held for review (the message contract)
+
+Hosted only. Code: `crates/elasticpro-core/src/zbx_conflicts.rs`, the build in `bridge.rs`
+(`zabbix_assemble`). A sync (timer, *Sync now*, a link change) reads the hosts on the cluster template
+and builds a cluster from each. **A Zabbix host never takes over a cluster ElasticPro already has on
+its own.** Until 0.3.59 the pages did exactly that: `mergeZabbixClusters` (ui/js/core/config.js)
+compared each Zabbix host's address with every config-file cluster's (`urlKey`: trailing slash and
+case only) and set the config cluster aside — its name, route, tags, retention and credential no
+longer used — with nobody asked and only a fold on the Zabbix tab saying so. And because the
+comparison ignored default ports, `https://es` and `https://es:443` were two clusters, polled twice.
+
+**Identity is the address**, defined once (`zbx_conflicts::url_identity`) and parsed by the HTTP
+client's own parser (`reqwest::Url`): `scheme://host:port[/path]`, scheme and host lower-case, the
+scheme's default port written out (http 80, https 443), the path as written without a trailing slash.
+`https://ES.example/` = `https://es.example:443`; `http://es:9200` ≠ `https://es:9200`; `/ES1` ≠ `/es1`.
+**A Zabbix address that is not plain has no identity and matches nothing**: one with `user:password@`, a
+backslash, whitespace or a control character, a query or a fragment — texts a hand-written splitter
+and the HTTP client could read as different hosts. A Zabbix host whose macros make one is not a
+cluster (listed under *Hosts not counted as clusters* with why). The pages keep no copy: every Zabbix
+row and every held entry carries `identity`, and the pages decide nothing by address. **The identity
+is also the one key for *Use ElasticPro credentials***, which lends a config cluster's credential to a
+Zabbix host **only when an administrator let that host take the cluster over (Update)** and both are at
+one identity (`zbx_conflicts::lent_credential`) — never because two addresses compare equal, never to a
+host held, skipped or kept beside the cluster (*Keep both*: the Zabbix one signs in with its own or the
+shared credential), never to an address with no identity. A config cluster's address is read the same
+way without the `user:password@`, query or fragment it may carry (`trusted_identity`), so a credential
+in the file's URL never hides a conflict from the review. A cluster's own kept credential stays bound
+to its destination string (`destination_of`), unchanged.
+
+**When a host is held.** Its identity is that of a cluster that exists already:
+
+- a **config-file cluster** — the server's config file, and any primed cluster it does not name; or
+- **another Zabbix host already in use** — the one a kept entry names, else the one the last build
+  used, else the oldest (lowest host id). A host that gains the template later never pushes the one
+  in use out.
+
+Then **nothing about that cluster changes**: the host is not built, not polled, not in
+`ZABBIX_CLUSTERS.clusters`, and is recorded as **pending** with both sides' values. Every host that
+does not conflict keeps syncing as before. The audit line `zabbix sync: a host at an existing
+cluster's address is held for review` names the host, the cluster and the address once.
+
+**The review** — Config-Management › Zabbix › *Held for review* (administrators of every cluster):
+each held host, waiting ones first, with *Review…*. The dialog shows the existing cluster and the
+Zabbix host side by side (name, address, route, tags, user, certificates, polled, and the address
+macros as Zabbix holds them; what differs in bold) and three answers; **nothing is sent until Confirm**:
+
+| Decision | What happens |
+|---|---|
+| **Skip** | The host stays out. The existing cluster stays exactly as it is. |
+| **Update** | The host takes the cluster over. A config-file cluster is set aside — kept in the file, no longer used by the pages (*Config-file clusters set aside* in Sync options); the core still holds it primed, so with *Use ElasticPro credentials* its credential is the one the Zabbix host uses. A Zabbix host in use is no longer built. Neither Zabbix nor the file is changed. One Update per cluster (`already_updated`). As before, a host that cannot sign in yet does not set a working config cluster aside until it can. |
+| **Keep both** | Both are clusters, each with its own id (the same Elasticsearch, polled twice). |
+
+**A decision persists** in `<data>/zabbix-conflicts.json` (0600, tmp + rename; the report worker
+reads it again when it changes and never writes it), keyed by Zabbix host id, with the Zabbix values
+it was made on (`fingerprint`: name, address, technical name, route, user, client — Zabbix's own,
+not what ElasticPro laid over them). A later sync with the same values applies it without asking.
+When Zabbix's values change the decision **keeps applying** and the entry is asked again
+(`state: "changed"`, with `decidedValues` beside the new ones) until an administrator confirms. A
+conflict that goes away (the host moved, the cluster was removed) forgets an undecided entry and
+keeps a decided one, which applies again if the same conflict returns. An edit in ElasticPro
+(`ZABBIX_CLUSTER_SAVE`, the overlay) is not Zabbix changing: it does not ask again.
+
+**Upgrading.** The first build with no `zabbix-conflicts.json` records what the pages did until
+then, so the upgrade changes nothing: a config-file cluster the earlier rule set aside (same address
+but for a trailing slash and case) is recorded as **Update**; any other conflict — a default port
+only, or two Zabbix hosts at one address, all of which were in use — as **Keep both**. Each is listed
+as decided by `as before review existed` and can be changed. This **fails closed**: a build is the
+first only while no record was ever kept and none was tried in this process; when its record cannot be
+written, nothing it would have recorded applies and every conflicting host is held — and the next
+build is no first run either. An unreadable file is never a first run. The report worker never runs
+one: with no record it holds every conflict until the core has written it. A host `createHosts` makes from a config-file cluster is
+recorded as **Update** by `createHosts` when it is made — that is what the option asks for.
+
+**Preview sync** (button on the Zabbix tab, administrators): what a sync would do now — clusters it
+would add, change (field by field) and remove, hosts it would hold, and the hosts `createHosts`
+would make — read from Zabbix (and Vault) now. **A dry run writes nothing**: not the cluster list,
+not `zabbix-conflicts.json`, not an overlay, not Zabbix, and no run is recorded in the jobs log.
+
+| Message | Role | Answer |
+|---|---|---|
+| `ZABBIX_CLUSTERS` (fields) | guest | Each row: `identity`, and for a host let in by a decision `review` (`update` \| `keepBoth`) and, for an Update, `replaces: {kind: "config"\|"zabbix", id, hostId, name, url}` — the pages set a config-file cluster aside by this id and nothing else. An administrator of every cluster also gets `held: [entry]` and `reviewNeeded` (pending + changed); anyone else `held: []`, `reviewNeeded: 0`. An entry: `{hostId, host, clusterId, identity, state: "pending"\|"decided"\|"changed", decision, decidedBy, decidedAt, firstSeen, fingerprint, existing: {kind, id, hostId, values}, zabbix: <values>, decidedValues}`; `values`: `{name, url, via, tags, username, tls, enabled}` (Zabbix's also `host`, `client`); not set is `null`. |
+| `ZABBIX_CONFLICT_DECIDE {hostId, decision: "skip"\|"update"\|"keepBoth", fingerprint}` | admin | `{ok, hostId, decision, entry}` — kept, then applied at once from the last sync's reading without asking Zabbix. `fingerprint` is the entry's as the review showed it. Refusals: `forbidden` (below admin; an admin limited to some clusters), `bad_message`, `not_found` (the last sync holds no such host), `changed_since_review` (Zabbix's values moved since the review was opened), `already_updated` (another host already took that cluster over), `io_error`, `not_available` (not hosted). Audit line `zabbix conflict decided` with `user`, `host_id`, `host`, `decision`, `previous`, `against`, `address`; a refusal `zabbix conflict decision refused`. |
+| `ZABBIX_SYNC_PREVIEW` | admin | `{ok, dryRun: true, at, lastSync, add: [{hostId, id, name, url, host}], change: [{hostId, id, name, fields: [{field, from, to}]}], remove: [...], hold: [entry], wouldCreate: [{id, name, url}], skipped: [text], unchanged, clusters, inUse}` — `change` compares `name`, `url`, `via`, `tls`, `enabled`, `client`, `credential`, `credentialOk`, `zabbixGroups`, `replaces` with the last sync's rows; `hold` is every entry pending, skipped or changed. `forbidden` below admin or for an admin limited to some clusters; `not_configured`; `zabbix_error`. |
+
 ## Zabbix clusters edited in ElasticPro — the message contract
 
 Hosted only. A cluster that comes from Zabbix (a host on the cluster template) is built
 from the host at every sync. Config-Management › Clusters › **Edit** (and the Clusters page's name
 menu) now opens the same dialog a config-file cluster has, for a Zabbix cluster too — with the
 **URL read-only, "From Zabbix"**: the address is never set in ElasticPro. It always comes from the
-host's `{$ELASTICSEARCH.HOST}`, `PORT`, `SCHEME`, so a config-file cluster at that address stays
-shadowed (*Zabbix wins*), and a credential bound to the old address is not sent to a new one.
+host's `{$ELASTICSEARCH.HOST}`, `PORT`, `SCHEME`, so whether it is at the address of another cluster
+is decided once, by the review (*Zabbix sync — hosts held for review*, above), and a credential bound
+to the old address is not sent to a new one.
 
 **Zabbix is never written to.** What is changed is kept by the core as an **overlay**, keyed by
 the Zabbix **host id** (stable when the host's name or technical name changes), in
