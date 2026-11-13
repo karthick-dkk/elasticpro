@@ -121,6 +121,10 @@ async fn a_host_at_an_existing_cluster_s_address_waits_for_an_administrator() {
     hosts.lock().unwrap().extend([host("202", "lab-zbx", "10.0.0.5"), host("203", "es-new", "10.0.0.7"),
                                   host("205", "web-zbx", "http://10.0.0.9:80/")]);
 
+    // A host whose macros make an address with a credential in it is no cluster at all: never
+    // compared with lab's, never sent lab's credential.
+    hosts.lock().unwrap().push(host("207", "lab-crafted", "http://lab.example:9200@10.0.0.5:9200"));
+
     // --- the preview says so, and writes nothing.
     let before = std::fs::read(&record).unwrap();
     let r = c.handle(json!({ "type": "ZABBIX_SYNC_PREVIEW", "session": user })).await;
@@ -134,12 +138,14 @@ async fn a_host_at_an_existing_cluster_s_address_waits_for_an_administrator() {
     hold.sort();
     assert_eq!(hold, vec!["202", "205"], "{p}");
     assert_eq!(std::fs::read(&record).unwrap(), before, "a dry run writes nothing");
+    assert!(p["skipped"].to_string().contains("lab-crafted"), "{p}");
     assert_eq!(ids(&list(&c, &admin).await), vec!["zbx-es-a"], "nor changes the list");
     assert!(list(&c, &admin).await["held"].as_array().unwrap().is_empty());
 
     // --- the sync: es-new is added; the other two are held and the config clusters untouched.
     let s = c.zabbix_sync().await;
     assert_eq!(s["clusters"], json!(2), "{s}");
+    assert!(s["skipped"].to_string().contains("lab-crafted"), "{s}");
     let l = list(&c, &admin).await;
     assert_eq!(ids(&l), vec!["zbx-es-a", "zbx-es-new"], "{l}");
     assert_eq!(l["reviewNeeded"], json!(2), "{l}");
@@ -152,6 +158,7 @@ async fn a_host_at_an_existing_cluster_s_address_waits_for_an_administrator() {
     assert!(lab["existing"]["values"]["url"].as_str().unwrap().eq_ignore_ascii_case("http://10.0.0.5:9200/")
             || lab["existing"]["values"]["url"].as_str().unwrap().eq_ignore_ascii_case("http://10.0.0.5:9200"), "{lab}");
     assert_eq!(held(&l, "205")["existing"]["id"], json!("web"), "a default port is the same address");
+    assert!(lab["zabbix"]["macros"].as_str().unwrap().contains("HOST=10.0.0.5"), "the macros as Zabbix holds them: {lab}");
     let fleet = fleet_ids(&c, &admin).await;
     assert!(fleet.contains("\"lab\"") && fleet.contains("\"web\"") && !fleet.contains("zbx-lab-zbx") && !fleet.contains("zbx-web-zbx"),
             "held hosts are not polled; the existing clusters are: {fleet}");

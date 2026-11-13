@@ -27,6 +27,8 @@ export function updateMeans(entry) {
 export const FIELDS = [
   ['name', 'Name'], ['url', 'Address'], ['via', 'Route'], ['tags', 'Tags'],
   ['username', 'User'], ['tls', 'Certificates'], ['enabled', 'Polled'],
+  // The address macros as Zabbix holds them, before they were made into the address above.
+  ['macros', 'Zabbix macros'],
 ];
 
 /** A value as a person reads it. Not set is a dash, never a guess. */

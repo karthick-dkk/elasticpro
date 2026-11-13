@@ -394,6 +394,7 @@ fn review_values(c: &crate::zabbix_api::ZbxCluster, ov: Option<&crate::zbx_overl
     let via = c.jump.clone().or_else(|| c.jump_addr.as_ref().map(|(h, p)| format!("{h}:{p}")));
     let tags = ov.and_then(|o| o.get("tags").cloned()).unwrap_or_else(|| json!(overlay::zabbix_tags(c.client.as_deref())));
     json!({ "name": overlay::name(ov, &c.name), "url": crate::zbx_conflicts::without_credential(&c.url), "host": c.host,
+            "macros": c.address_macros,
             "via": via, "username": c.username, "client": c.client, "tags": tags,
             "tls": overlay::tls(ov), "enabled": overlay::enabled(ov) })
 }
@@ -4994,7 +4995,7 @@ impl Core {
     /// config file's (the ids its pages give them), then any primed cluster the file does not
     /// name. Zabbix's own (`zbx-…`) are not among them.
     async fn config_known(&self) -> Vec<crate::zbx_conflicts::Known> {
-        use crate::zbx_conflicts::{legacy_key, url_key, without_credential, Known};
+        use crate::zbx_conflicts::{legacy_key, match_key, without_credential, Known};
         let mut out: Vec<Known> = vec![];
         if let Ok(raw) = self.read_config_file().await {
             let list = raw.get("clusters").or_else(|| raw.get("hosts")).and_then(Value::as_array).cloned().unwrap_or_default();
@@ -5006,7 +5007,7 @@ impl Core {
                 }
                 let via = crate::cluster_save::route_of(c);
                 out.push(Known {
-                    kind: "config", id: id.clone(), host_id: String::new(), identity: url_key(url), legacy: legacy_key(url),
+                    kind: "config", id: id.clone(), host_id: String::new(), identity: match_key(url, &format!("config:{id}")), legacy: legacy_key(url),
                     values: json!({ "name": c.get("name").and_then(Value::as_str).unwrap_or(&id), "url": without_credential(url),
                                     "via": if via.is_empty() { Value::Null } else { json!(via) },
                                     "tls": c.get("tls").cloned().unwrap_or(Value::Null), "tags": c.get("tags").cloned().unwrap_or(json!([])),
@@ -5022,7 +5023,7 @@ impl Core {
                 continue;
             }
             out.push(Known {
-                kind: "config", id: s.id.clone(), host_id: String::new(), identity: url_key(&s.url), legacy: legacy_key(&s.url),
+                kind: "config", id: s.id.clone(), host_id: String::new(), identity: match_key(&s.url, &format!("config:{}", s.id)), legacy: legacy_key(&s.url),
                 values: json!({ "name": s.name.clone().unwrap_or_else(|| s.id.clone()), "url": without_credential(&s.url),
                                 "via": s.via, "tls": s.tls, "tags": [], "enabled": true, "username": Value::Null }),
             });
@@ -5044,17 +5045,15 @@ impl Core {
             .filter_map(|v| v["zabbixHostId"].as_str().map(String::from)).collect();
         let candidates: Vec<zc::Found> = found.iter().map(|c| {
             let ov = self.zbx_overlay.get(&c.hostid);
-            zc::Found { host_id: c.hostid.clone(), host: c.host.clone(), id: c.id(), identity: zc::url_key(&c.url),
+            zc::Found { host_id: c.hostid.clone(), host: c.host.clone(), id: c.id(), identity: zc::match_key(&c.url, &format!("zabbix:{}", c.hostid)),
                         legacy: zc::legacy_key(&c.url), values: review_values(c, None), effective: review_values(c, ov.as_ref()) }
         }).collect();
-        let first_run = self.zbx_conflicts.first_run();
-        let resolved = zc::resolve(&known, &candidates, &prev_used, &self.zbx_conflicts.all(), first_run, auth::now());
-        if !dry && self.role != crate::worker::Role::Worker {
-            if resolved.changed || first_run {
-                if let Err(e) = self.zbx_conflicts.commit(resolved.entries.clone()) {
-                    tracing::warn!(error = %e, "zabbix sync: the review record was not written; conflicts stay held");
-                }
-            }
+        let mode = if dry { zc::Mode::Dry } else if self.role == crate::worker::Role::Worker { zc::Mode::Read } else { zc::Mode::Keep };
+        let (resolved, unwritten) = self.zbx_conflicts.settle(&known, &candidates, &prev_used, mode, auth::now());
+        if let Some(e) = unwritten {
+            tracing::warn!(target: "audit", error = %e, "zabbix sync: the review record was not written; every conflicting host is held");
+        }
+        if mode == zc::Mode::Keep {
             for h in &resolved.newly_held {
                 let e = resolved.entries.get(h);
                 tracing::warn!(target: "audit", host_id = %h, host = %e.map(|e| e.host.as_str()).unwrap_or(""),
@@ -5071,12 +5070,13 @@ impl Core {
         let jump_ids: std::collections::HashSet<String> = jumps.iter().map(|j| j.0.clone()).collect();
         let previous = self.zbx_sync.read().specs.clone();
         // ElasticPro's own credential for an address: the one held for a config cluster
-        // at the same address, else the config's shared one. Both arrived from a browser
+        // at the same address (the text, exactly: never the review's identity, which decides
+        // conflicts and nothing about where a credential goes), else the config's shared one. Both arrived from a browser
         // that built them with authHeaderFor, so nothing here re-derives a header.
         let (held_by_url, shared): (HashMap<String, String>, Option<String>) = {
             let p = self.primed.read();
             (p.clusters.values().filter_map(|s| {
-                s.auth_header.as_ref().filter(|a| !a.is_empty()).map(|a| (zc::url_key(&s.url), a.clone()))
+                s.auth_header.as_ref().filter(|a| !a.is_empty()).map(|a| (s.url.trim_end_matches('/').to_ascii_lowercase(), a.clone()))
             }).collect(), p.shared_auth.clone())
         };
         let primed_ids: std::collections::HashSet<String> = self.primed.read().clusters.keys().cloned().collect();
@@ -5154,12 +5154,12 @@ impl Core {
             }
             let mut user_override: Option<String> = None;
             // With ElasticPro's credentials: a config cluster's own header at this address, not the shared one.
-            let per_address = opts.use_elasticpro_credentials && held_by_url.contains_key(&zc::url_key(&c.url));
+            let per_address = opts.use_elasticpro_credentials && held_by_url.contains_key(&c.url.trim_end_matches('/').to_ascii_lowercase());
             let (credential, auth) = if let Some(h) = own {
                 user_override = Some(kept_users.get(&own_key).cloned().flatten().unwrap_or_else(|| "(api key or token)".into()));
                 ("elasticpro-own", Some(h))
             } else {
-                let own_url = held_by_url.get(&zc::url_key(&c.url)).cloned().or_else(|| shared.clone());
+                let own_url = held_by_url.get(&c.url.trim_end_matches('/').to_ascii_lowercase()).cloned().or_else(|| shared.clone());
                 let (credential, secret) = if opts.use_elasticpro_credentials {
                     // The config says so: ElasticPro's credential, not Vault's. The header is
                     // taken as it is; there is no password to combine with a username.
@@ -5234,7 +5234,7 @@ impl Core {
                 "credentialIsOwn": signs_in_own || own_elsewhere,
                 // The address as the review compares it (zbx_conflicts::url_identity): the pages read it
                 // from here rather than keep a definition of their own.
-                "identity": zc::url_key(&c.url),
+                "identity": zc::url_identity(&c.url),
             });
             if let Some(m) = row.as_object_mut() {
                 m.extend(overlay::row_fields(ov, &c.name, zabbix_via.as_deref(), c.client.as_deref()));
@@ -5451,10 +5451,11 @@ impl Core {
     /// The primed config clusters Zabbix has no host at the address of — what `createHosts` makes
     /// hosts for, and what a dry run says it would.
     fn provision_candidates(&self, in_zabbix: &[crate::zabbix_api::ZbxCluster]) -> Vec<ClusterSpec> {
-        use crate::zbx_conflicts::url_key;
-        let have: std::collections::HashSet<String> = in_zabbix.iter().map(|c| url_key(&c.url)).collect();
+        // Which addresses Zabbix has: the identity, else the text as the earlier rule compared it.
+        let key = |u: &str| crate::zbx_conflicts::url_identity(u).unwrap_or_else(|| crate::zbx_conflicts::legacy_key(u));
+        let have: std::collections::HashSet<String> = in_zabbix.iter().map(|c| key(&c.url)).collect();
         let mut out: Vec<ClusterSpec> = self.primed.read().clusters.values()
-            .filter(|s| !s.id.starts_with("zbx-") && !have.contains(&url_key(&s.url))).cloned().collect();
+            .filter(|s| !s.id.starts_with("zbx-") && !have.contains(&key(&s.url))).cloned().collect();
         out.sort_by(|a, b| a.id.cmp(&b.id));
         out
     }
@@ -5538,7 +5539,7 @@ impl Core {
                     tracing::info!(target: "audit", cluster = %name, hostid = %id, "zabbix host created from the config");
                     // The host is at this cluster's address on purpose: it takes the cluster over, as
                     // createHosts asks — recorded as that decision, not held for review.
-                    if let Err(e) = self.zbx_conflicts.preapprove(&id, &host, &crate::zbx_conflicts::url_key(&s.url), &s.id, auth::now()) {
+                    if let Err(e) = self.zbx_conflicts.preapprove(&id, &host, &crate::zbx_conflicts::url_identity(&s.url).unwrap_or_default(), &s.id, auth::now()) {
                         tracing::warn!(cluster = %name, error = %e, "createHosts: the decision for the new host was not recorded; it is held for review");
                     }
                     out.push(format!("created {host:?} for {name}{note}"));

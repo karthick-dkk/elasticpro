@@ -1090,12 +1090,18 @@ case only) and set the config cluster aside — its name, route, tags, retention
 longer used — with nobody asked and only a fold on the Zabbix tab saying so. And because the
 comparison ignored default ports, `https://es` and `https://es:443` were two clusters, polled twice.
 
-**Identity is the address**, defined once (`zbx_conflicts::url_identity`): `scheme://host:port[/path]`,
-lower-case, the scheme's default port written out (http 80, https 443), with no `user:password@`,
-query, fragment or trailing slash. `https://ES.example/` = `https://es.example:443`; `http://es:9200`
-≠ `https://es:9200`. The pages keep no copy: every Zabbix row and every held entry carries
-`identity`, and the pages decide nothing by address. (A cluster's own kept credential stays bound to
-its destination string, `destination_of`, unchanged: a credential follows the stricter key.)
+**Identity is the address**, defined once (`zbx_conflicts::url_identity`) and parsed by the HTTP
+client's own parser (`reqwest::Url`): `scheme://host:port[/path]`, scheme and host lower-case, the
+scheme's default port written out (http 80, https 443), the path as written without a trailing slash.
+`https://ES.example/` = `https://es.example:443`; `http://es:9200` ≠ `https://es:9200`; `/ES1` ≠ `/es1`.
+**An address that is not plain has no identity and matches nothing**: one with `user:password@`, a
+backslash, whitespace or a control character, a query or a fragment — texts a hand-written splitter
+and the HTTP client could read as different hosts. A Zabbix host whose macros make one is not a
+cluster (listed under *Hosts not counted as clusters* with why). The pages keep no copy: every Zabbix
+row and every held entry carries `identity`, and the pages decide nothing by address. **The identity
+decides conflicts only, never where a credential goes**: *Use ElasticPro credentials* still lends a
+config cluster's credential only to a Zabbix host at exactly the same address text, and a cluster's own
+kept credential stays bound to its destination string (`destination_of`), both unchanged.
 
 **When a host is held.** Its identity is that of a cluster that exists already:
 
@@ -1111,8 +1117,8 @@ cluster's address is held for review` names the host, the cluster and the addres
 
 **The review** — Config-Management › Zabbix › *Held for review* (administrators of every cluster):
 each held host, waiting ones first, with *Review…*. The dialog shows the existing cluster and the
-Zabbix host side by side (name, address, route, tags, user, certificates, polled; what differs in
-bold) and three answers; **nothing is sent until Confirm**:
+Zabbix host side by side (name, address, route, tags, user, certificates, polled, and the address
+macros as Zabbix holds them; what differs in bold) and three answers; **nothing is sent until Confirm**:
 
 | Decision | What happens |
 |---|---|
@@ -1134,8 +1140,11 @@ keeps a decided one, which applies again if the same conflict returns. An edit i
 then, so the upgrade changes nothing: a config-file cluster the earlier rule set aside (same address
 but for a trailing slash and case) is recorded as **Update**; any other conflict — a default port
 only, or two Zabbix hosts at one address, all of which were in use — as **Keep both**. Each is listed
-as decided by `as before review existed` and can be changed. An unreadable file is never taken for a
-first run: every conflict is then held. A host `createHosts` makes from a config-file cluster is
+as decided by `as before review existed` and can be changed. This **fails closed**: a build is the
+first only while no record was ever kept and none was tried in this process; when its record cannot be
+written, nothing it would have recorded applies and every conflicting host is held — and the next
+build is no first run either. An unreadable file is never a first run. The report worker never runs
+one: with no record it holds every conflict until the core has written it. A host `createHosts` makes from a config-file cluster is
 recorded as **Update** by `createHosts` when it is made — that is what the option asks for.
 
 **Preview sync** (button on the Zabbix tab, administrators): what a sync would do now — clusters it

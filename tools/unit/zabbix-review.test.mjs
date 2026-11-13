@@ -35,7 +35,8 @@ const ENTRY = {
   hostId: '202', host: 'lab-zbx', clusterId: 'zbx-lab-zbx', identity: 'http://10.0.0.5:9200', state: 'pending', decision: null,
   decidedBy: '', decidedAt: 0, firstSeen: 1, fingerprint: 'abc123',
   existing: { kind: 'config', id: 'lab', hostId: '', values: { name: 'lab', url: 'HTTP://10.0.0.5:9200/', via: 'jumpa', tls: 'system', tags: ['eu'], enabled: true, username: null } },
-  zabbix: { name: 'lab-zbx', url: 'http://10.0.0.5:9200', host: 'lab-zbx', via: null, username: 'svc', client: 'acme', tags: ['acme'], tls: null, enabled: true },
+  zabbix: { name: 'lab-zbx', url: 'http://10.0.0.5:9200', host: 'lab-zbx', via: null, username: 'svc', client: 'acme', tags: ['acme'], tls: null, enabled: true,
+    macros: 'HOST=10.0.0.5 SCHEME=http PORT=(not set)' },
   decidedValues: null,
 };
 
@@ -71,7 +72,8 @@ test('the dialog sends nothing until Confirm, then one decision naming the value
   await tick();
   assert.ok(dialog(), 'the dialog opened');
   assert.match(dialog().textContent, /Nothing about that cluster has changed/);
-  assert.equal(dialog().querySelectorAll('tr.zr-differs').length, 6, 'name, address, route, tags, user, certificates differ; polled does not');
+  assert.equal(dialog().querySelectorAll('tr.zr-differs').length, 7, 'name, address, route, tags, user, certificates and the raw macros differ; polled does not');
+  assert.match(dialog().textContent, /HOST=10\.0\.0\.5 SCHEME=http PORT=\(not set\)/, 'the macros as Zabbix holds them');
   assert.equal(button('Confirm').disabled, true, 'pending: no answer is chosen for the administrator');
   dialog().querySelector('input[value="update"]').click();
   assert.equal(button('Confirm').disabled, false);

@@ -1,10 +1,12 @@
 //! A Zabbix host at the address of a cluster ElasticPro already has: held for an administrator's
 //! review, never taken over silently.
 //!
-//! **Identity is the address** (`url_identity`): scheme, host and port, with any path, without a
-//! trailing slash, case or credential, and with the scheme's default port written out
-//! (`https://es` is `https://es:443`). It is the one definition: the sync compares with it, and the
-//! pages get it from the core (`identity` on every held entry) instead of keeping a copy.
+//! **Identity is the address** (`url_identity`), parsed by the HTTP client's own parser: scheme,
+//! host and port, with any path, without a trailing slash, and with the scheme's default port
+//! written out (`https://es` is `https://es:443`). An address with a credential, a backslash, a query
+//! or a fragment has none and matches nothing. It is the one definition of "the same cluster": the
+//! sync compares with it, and the pages get it from the core (`identity` on every held entry)
+//! instead of keeping a copy. It decides conflicts only — never where a credential is sent.
 //!
 //! When a sync finds a Zabbix host whose identity is an existing cluster's — a config-file cluster,
 //! or another Zabbix host already in use — nothing about that cluster changes. The host is **held**:
@@ -56,63 +58,65 @@ pub const CREATE_HOSTS: &str = "createHosts";
 
 /* ------------------------------------------ identity ------------------------------------------ */
 
-/// The identity of an Elasticsearch address: `scheme://host:port[/path]`, lower-case, the
-/// scheme's default port written out (http 80, https 443), no credential, query or fragment, no
-/// trailing slash. `None` for something that is not an http(s) address.
-pub fn url_identity(url: &str) -> Option<String> {
-    let (scheme, rest) = url.trim().split_once("://")?;
-    let scheme = scheme.to_ascii_lowercase();
-    let default: u16 = match scheme.as_str() {
-        "https" => 443,
-        "http" => 80,
-        _ => return None,
-    };
-    let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
-    let (authority, tail) = rest.split_at(end);
-    let authority = authority.rsplit('@').next().unwrap_or("");
-    let port_of = |p: &str| -> Option<u16> { if p.is_empty() { Some(default) } else { p.parse::<u16>().ok() } };
-    let (host, port) = if let Some(v6) = authority.strip_prefix('[') {
-        let (h, after) = v6.split_once(']')?;
-        let port = match after {
-            "" => default,
-            p => port_of(p.strip_prefix(':')?)?,
-        };
-        (format!("[{}]", h.to_ascii_lowercase()), port)
-    } else {
-        match authority.rsplit_once(':') {
-            Some((h, p)) => (h.to_ascii_lowercase(), port_of(p)?),
-            None => (authority.to_ascii_lowercase(), default),
-        }
-    };
-    let host = host.trim_end_matches('.').to_string();
-    if host.is_empty() || host.contains(char::is_whitespace) {
+/// The address parsed the way the HTTP client parses it (`reqwest::Url`, the `url` crate), or
+/// `None` for one that is not a plain http(s) address: a credential in it (`user:password@`), a
+/// backslash, whitespace, a query or a fragment. Such an address is never compared with another —
+/// two texts a hand-written splitter would call equal could reach different hosts — and a Zabbix
+/// host carrying one is not a cluster (`zabbix_api::cluster_from`).
+fn plain(url: &str) -> Option<reqwest::Url> {
+    let t = url.trim();
+    if t.is_empty() || t.contains('\\') || t.chars().any(|c| c.is_whitespace() || c.is_control()) {
         return None;
     }
-    let path = tail.split(['?', '#']).next().unwrap_or("").trim_end_matches('/').to_ascii_lowercase();
-    Some(format!("{scheme}://{host}:{port}{path}"))
-}
-
-/// The key two addresses are compared by: the identity, or — for something that is not an
-/// http(s) address, which cannot be normalised — the text itself without case or a trailing slash,
-/// so an exact duplicate still matches.
-pub fn url_key(url: &str) -> String {
-    url_identity(url).unwrap_or_else(|| legacy_key(url))
-}
-
-/// The address as written, with any `user:password@` taken out: what the review shows.
-pub fn without_credential(url: &str) -> String {
-    let t = url.trim();
-    let Some((scheme, rest)) = t.split_once("://") else { return t.to_string() };
-    let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
-    match rest[..end].rsplit_once('@') {
-        Some((_, host)) => format!("{scheme}://{host}{}", &rest[end..]),
-        None => t.to_string(),
+    let u = reqwest::Url::parse(t).ok()?;
+    if !matches!(u.scheme(), "http" | "https") || !u.username().is_empty() || u.password().is_some()
+        || u.query().is_some() || u.fragment().is_some() || u.cannot_be_a_base() {
+        return None;
     }
+    u.host_str().filter(|h| !h.is_empty())?;
+    Some(u)
+}
+
+/// The identity of an Elasticsearch address: `scheme://host:port[/path]` as the HTTP client
+/// resolves it — scheme and host lower-case (the parser's), the scheme's default port written out
+/// (http 80, https 443), the path as written but without a trailing slash. `None` for an address
+/// that is not plain (`plain`): it matches nothing.
+pub fn url_identity(url: &str) -> Option<String> {
+    let u = plain(url)?;
+    let host = u.host_str()?;
+    let port = u.port_or_known_default()?;
+    let path = u.path().trim_end_matches('/');
+    Some(format!("{}://{host}:{port}{path}", u.scheme()))
+}
+
+/// The address as written, with any `user:password@` taken out (by the same parser): what the
+/// review shows. One that does not parse is not shown.
+pub fn without_credential(url: &str) -> String {
+    match reqwest::Url::parse(url.trim()) {
+        Ok(mut u) => {
+            let _ = u.set_username("");
+            let _ = u.set_password(None);
+            let s = u.to_string();
+            // The parser adds a "/" to a bare host; the address as written had none.
+            if !url.trim().ends_with('/') && u.path() == "/" && u.query().is_none() && u.fragment().is_none() {
+                s.trim_end_matches('/').to_string()
+            } else {
+                s
+            }
+        }
+        Err(_) => "(not an http(s) address)".into(),
+    }
+}
+
+/// What a cluster is compared by: its identity, or — for an address that has none — a key no other
+/// cluster can have (`unmatched:<own>`), so it is never taken for another.
+pub fn match_key(url: &str, own: &str) -> String {
+    url_identity(url).unwrap_or_else(|| format!("unmatched:{own}"))
 }
 
 /// How the pages compared addresses before review existed (ui/js/core/config.js `urlKey` up to
 /// 0.3.59): only the trailing slash and case. Read once, by the first build's record of what was
-/// in place ([`BEFORE_REVIEW`]).
+/// in place ([`BEFORE_REVIEW`]) — never to decide where anything is sent.
 pub fn legacy_key(url: &str) -> String {
     url.trim().trim_end_matches('/').to_ascii_lowercase()
 }
@@ -380,12 +384,27 @@ pub struct Conflicts {
     path: Option<PathBuf>,
     /// The entries, and whether a record was ever kept (a file, even an empty or unreadable one).
     state: RwLock<(BTreeMap<String, Entry>, bool)>,
+    /// A first build was attempted in this process. First-run mode ends there, whether its record
+    /// was written or not: a failed write never leaves a second chance to decide without review.
+    attempted: std::sync::atomic::AtomicBool,
+}
+
+/// How a build uses the record (`Conflicts::settle`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Mode {
+    /// The core's build: resolves, and keeps what it resolved.
+    Keep,
+    /// The report worker's: reads what the core kept and writes nothing. No record yet means
+    /// every conflict is held — never a first run.
+    Read,
+    /// A dry run (`ZABBIX_SYNC_PREVIEW`): says what a build would do, writes and ends nothing.
+    Dry,
 }
 
 impl Conflicts {
     pub fn open(path: Option<PathBuf>) -> Conflicts {
         let state = Self::read(path.as_ref());
-        Conflicts { path, state: RwLock::new(state) }
+        Conflicts { path, state: RwLock::new(state), attempted: std::sync::atomic::AtomicBool::new(false) }
     }
 
     fn read(path: Option<&PathBuf>) -> (BTreeMap<String, Entry>, bool) {
@@ -420,9 +439,33 @@ impl Conflicts {
         self.state.read().0.get(host_id).cloned()
     }
 
-    /// No record was ever kept: the first build records what was in place ([`BEFORE_REVIEW`]).
+    /// No record was ever kept and no first build was attempted in this process: the first build
+    /// records what was in place ([`BEFORE_REVIEW`]).
     pub fn first_run(&self) -> bool {
-        !self.state.read().1
+        !self.state.read().1 && !self.attempted.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Resolve one build against the record and, for the core's (`Mode::Keep`), keep it. Fails
+    /// closed: the first build counts as one only while nothing was ever kept and none was tried,
+    /// and when its record cannot be written, nothing it would have recorded as decided applies —
+    /// every conflict is held. Returns the resolution and, when the record was not written, why.
+    pub fn settle(&self, config: &[Known], hosts: &[Found], prev_used: &HashSet<String>, mode: Mode, now: u64)
+        -> (Resolved, Option<String>) {
+        let kept = self.all();
+        let first = match mode {
+            Mode::Keep => !self.state.read().1 && !self.attempted.swap(true, std::sync::atomic::Ordering::SeqCst),
+            Mode::Dry => self.first_run(),
+            Mode::Read => false,
+        };
+        let r = resolve(config, hosts, prev_used, &kept, first, now);
+        if mode != Mode::Keep || !(r.changed || first) {
+            return (r, None);
+        }
+        match self.commit(r.entries.clone()) {
+            Ok(()) => (r, None),
+            Err(e) if first => (resolve(config, hosts, prev_used, &kept, false, now), Some(e)),
+            Err(e) => (r, Some(e)),
+        }
     }
 
     fn save(&self, entries: &BTreeMap<String, Entry>) -> Result<(), String> {
@@ -502,11 +545,11 @@ mod tests {
 
     fn found(host_id: &str, host: &str, url: &str) -> Found {
         let values = json!({ "name": host, "url": url });
-        Found { host_id: host_id.into(), host: host.into(), id: format!("zbx-{host}"), identity: url_key(url), legacy: legacy_key(url),
+        Found { host_id: host_id.into(), host: host.into(), id: format!("zbx-{host}"), identity: match_key(url, &format!("zabbix:{host_id}")), legacy: legacy_key(url),
                 values: values.clone(), effective: values }
     }
     fn config(id: &str, url: &str) -> Known {
-        Known { kind: "config", id: id.into(), host_id: String::new(), identity: url_key(url), legacy: legacy_key(url),
+        Known { kind: "config", id: id.into(), host_id: String::new(), identity: match_key(url, &format!("config:{id}")), legacy: legacy_key(url),
                 values: json!({ "name": id, "url": url }) }
     }
 
@@ -517,11 +560,8 @@ mod tests {
             ("https://es.example", "https://es.example:443"),
             ("https://es.example:443/", "HTTPS://es.example"),
             ("http://es.example", "http://es.example:80/"),
-            ("http://user:pw@es.example:9200", "http://es.example:9200"),
-            ("http://es.example:9200?pretty", "http://es.example:9200/"),
             ("http://[FE80::1]:9200", "http://[fe80::1]:9200/"),
-            ("http://es.example.:9200", "http://es.example:9200"),
-            ("https://proxy.example/es1/", "https://PROXY.example:443/ES1"),
+            ("https://proxy.example/es1/", "https://PROXY.example:443/es1"),
         ] {
             assert_eq!(url_identity(a), url_identity(b), "{a} = {b}");
             assert!(url_identity(a).is_some(), "{a}");
@@ -532,17 +572,43 @@ mod tests {
             ("https://es.example", "https://es.example:9200"),
             ("http://es.example", "http://es.example:443"),
             ("https://proxy.example/es1", "https://proxy.example/es2"),
+            ("https://proxy.example/ES1", "https://proxy.example/es1"),
             ("http://a.example:9200", "http://b.example:9200"),
         ] {
-            assert_ne!(url_key(a), url_key(b), "{a} != {b}");
+            assert_ne!(url_identity(a), url_identity(b), "{a} != {b}");
         }
         assert_eq!(url_identity("https://ES.example").as_deref(), Some("https://es.example:443"));
         assert_eq!(url_identity("http://10.0.0.1:9200/").as_deref(), Some("http://10.0.0.1:9200"));
         assert_eq!(url_identity("http://[::1]").as_deref(), Some("http://[::1]:80"));
+        assert_eq!(url_identity("https://proxy.example/Es1/").as_deref(), Some("https://proxy.example:443/Es1"), "the path keeps its case");
         for bad in ["es.example:9200", "ftp://es.example", "http://", "http://es.example:99999", "http://es:abc", "http://a b:9200"] {
             assert_eq!(url_identity(bad), None, "{bad}");
         }
-        assert_eq!(url_key("es.example:9200/"), url_key("ES.example:9200"), "not an address: the text, without case or slash");
+    }
+
+    /// Addresses a hand-written splitter and the HTTP client read differently: none has an identity,
+    /// so none is ever taken for another cluster (and a Zabbix host with one is not a cluster).
+    #[test]
+    fn a_crafted_address_matches_nothing() {
+        for crafted in [
+            "http://good.example:9200@evil.example:9200",      // userinfo: the client goes to evil
+            "http://user:pw@good.example:9200",
+            "http://user@good.example:9200",
+            "http://evil.example\\@good.example:9200",         // backslash: the parser makes it a path
+            "http://good.example:9200\\evil",
+            "http://good.example:9200?x=@evil.example",
+            "http://good.example:9200#@evil.example",
+            "http://good.example%2f@evil.example:9200",
+            "http://good.example:9200 @evil.example",
+            "http://good.example:9200/\nHost: evil",
+        ] {
+            assert_eq!(url_identity(crafted), None, "{crafted}");
+            assert!(match_key(crafted, "x").starts_with("unmatched:"), "{crafted}");
+        }
+        assert_ne!(match_key("http://a@good.example:9200", "config:a"), match_key("http://b@good.example:9200", "zabbix:7"));
+        assert_eq!(without_credential("https://svc:secret@es.example:9200"), "https://es.example:9200");
+        assert_eq!(without_credential("https://es.example:9200/"), "https://es.example:9200/");
+        assert_eq!(without_credential("http://a:b@x.example/p"), "http://x.example/p");
     }
 
     #[test]
@@ -648,6 +714,46 @@ mod tests {
         // An unreadable file is never a first run.
         std::fs::write(&p, "{not json").unwrap();
         assert!(!Conflicts::open(Some(p.clone())).first_run());
+        let _ = std::fs::remove_dir_all(p.parent().unwrap());
+    }
+
+    fn settle_case() -> (Vec<Known>, Vec<Found>) {
+        (vec![config("lab", "http://lab:9200/")], vec![found("10", "lab", "http://lab:9200"), found("11", "other", "http://other:9200")])
+    }
+
+    #[test]
+    fn a_first_build_whose_record_cannot_be_written_holds_every_conflict() {
+        // The record's directory is a file: nothing can be written there.
+        let base = std::env::temp_dir().join(format!("ep-conflicts-ro-{}", crate::auth::random_hex(6)));
+        std::fs::write(&base, "not a directory").unwrap();
+        let s = Conflicts::open(Some(base.join(FILE)));
+        assert!(s.first_run());
+        let (config, hosts) = settle_case();
+        let (r, err) = s.settle(&config, &hosts, &HashSet::new(), Mode::Keep, 1);
+        assert!(err.is_some());
+        assert_eq!(r.fate["10"], Fate::Held, "not decided as before review: the decision could not be kept");
+        assert_eq!(r.fate["11"], Fate::Build { replaces: None, decision: None }, "the rest syncs");
+        assert!(!s.first_run(), "first-run mode ended with the attempt");
+        let (r, _) = s.settle(&config, &hosts, &HashSet::new(), Mode::Keep, 2);
+        assert_eq!(r.fate["10"], Fate::Held, "and the next build is no first run either");
+        let _ = std::fs::remove_file(&base);
+    }
+
+    #[test]
+    fn the_worker_with_no_record_holds_every_conflict_and_a_dry_run_writes_nothing() {
+        let p = std::env::temp_dir().join(format!("ep-conflicts-w-{}", crate::auth::random_hex(6))).join(FILE);
+        let (config, hosts) = settle_case();
+        let w = Conflicts::open(Some(p.clone()));
+        let (r, err) = w.settle(&config, &hosts, &HashSet::new(), Mode::Read, 1);
+        assert_eq!((r.fate["10"].clone(), err), (Fate::Held, None));
+        let (r, _) = w.settle(&config, &hosts, &HashSet::new(), Mode::Dry, 1);
+        assert!(matches!(r.fate["10"], Fate::Build { .. }), "the preview shows what the first build would record");
+        assert!(!p.exists(), "neither wrote anything");
+        assert!(w.first_run(), "nor ended first-run mode");
+        // The core's first build records it, once.
+        let (r, err) = w.settle(&config, &hosts, &HashSet::new(), Mode::Keep, 1);
+        assert_eq!((r.entries["10"].decision, err), (Some(Decision::Update), None));
+        assert!(p.exists());
         let _ = std::fs::remove_dir_all(p.parent().unwrap());
     }
 }
