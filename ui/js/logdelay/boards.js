@@ -519,8 +519,9 @@ function searchBar(clusterId, device, devField, extras, res) {
     S.search = null;
   }
   if (!S.q.from && res) { S.q.from = res.from; S.q.to = res.to; }
-  const searchSig = S.search ? `${S.search.state}:${objId(S.search.res)}` : '-';
-  return B.get('dev:search', `${S.qFor}|${devField}|${(extras || []).join(',')}|${S.q.from}|${S.q.to}|${searchSig}`, () => {
+  // Built once per device and kept: the answer arriving (which fills From and To) or a search
+  // finishing changes the fields' values and the matches line in place, never the box being typed in.
+  const form = B.get('dev:search', `${S.qFor}|${devField}|${(extras || []).join(',')}|${clusters().length}`, () => {
     const set = (k) => (e) => { S.q[k] = e.target.value; };
     const inp = (id, k, o = {}) => h(`input#${id}`, { type: o.type || 'search', value: S.q[k] || '', placeholder: o.ph || null, oninput: set(k), onchange: set(k), dataset: { untracked: '' } });
     const fields = [...new Set([devField, 'src_hostname', 'src_device', ...extras].filter(Boolean))];
@@ -543,15 +544,6 @@ function searchBar(clusterId, device, devField, extras, res) {
       if (m.length === 1 && (m[0].device !== device || m[0].cluster !== clusterId)) location.hash = ldHash('device', m[0].cluster, m[0].device);
       repaint();
     };
-    let found = null;
-    if (S.search) {
-      const r = S.search.res;
-      found = S.search.state === 'loading' ? h('span.muted', 'Searching…')
-        : S.search.state === 'error' ? h('span.ld-pink', `Search failed: ${(r && (r.message || r.kind)) || 'no answer'}`)
-          : h('span.muted#ld-matches', `Matches ${countText(r.matches ?? (r.devices || []).length)} device${(r.matches ?? (r.devices || []).length) === 1 ? '' : 's'}`,
-            ...(r.devices || []).slice(0, 12).flatMap((d) => [' · ', link(ldHash('device', d.cluster, d.device), d.device, { title: `${d.device} on ${d.clusterName || d.cluster}` })]),
-            r.truncated ? ' · more not shown: narrow the search' : '');
-    }
     const lab = (text, node) => h('label.ld-q', text, node);
     return h('section.card.ld-search', { 'aria-label': 'Find a device', dataset: { untracked: '' } },
       h('form.ld-q-row', { onsubmit: (e) => { e.preventDefault(); show(); } },
@@ -562,8 +554,25 @@ function searchBar(clusterId, device, devField, extras, res) {
         lab('From', inp('ld-q-from', 'from', { type: 'date' })),
         lab('To', inp('ld-q-to', 'to', { type: 'date' })),
         h('button.btn.primary#ld-q-show', { type: 'submit' }, 'Show'),
-        found));
+        h('span.ld-q-found')));
   });
+  for (const [sel, k] of [['#ld-q-from', 'from'], ['#ld-q-to', 'to']]) {
+    const el = form.querySelector(sel);
+    if (el && el !== document.activeElement && el.value !== (S.q[k] || '')) el.value = S.q[k] || '';
+  }
+  const found = form.querySelector('.ld-q-found');
+  const searchSig = S.search ? `${S.search.state}:${objId(S.search.res)}` : '-';
+  if (found && found.dataset.sig !== searchSig) {
+    found.dataset.sig = searchSig;
+    const r = S.search && S.search.res;
+    mount(found, !S.search ? null
+      : S.search.state === 'loading' ? h('span.muted', 'Searching…')
+        : S.search.state === 'error' ? h('span.ld-pink', `Search failed: ${(r && (r.message || r.kind)) || 'no answer'}`)
+          : h('span.muted#ld-matches', `Matches ${countText(r.matches ?? (r.devices || []).length)} device${(r.matches ?? (r.devices || []).length) === 1 ? '' : 's'}`,
+            ...(r.devices || []).slice(0, 12).flatMap((d) => [' · ', link(ldHash('device', d.cluster, d.device), d.device, { title: `${d.device} on ${d.clusterName || d.cluster}` })]),
+            r.truncated ? ' · more not shown: narrow the search' : ''));
+  }
+  return form;
 }
 
 function graphCard(res, lv, every) {

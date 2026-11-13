@@ -20,7 +20,7 @@ const G = await import(url('ui/js/core/alert-groups.js'));
 /** The page ids app.js really has — its PAGES list is the one definition. */
 const appSrc = fs.readFileSync(path.join(ROOT, 'ui/js/app.js'), 'utf8');
 const PAGE_IDS = [...appSrc.slice(appSrc.indexOf('const PAGES = ['), appSrc.indexOf('];', appSrc.indexOf('const PAGES = [')))
-  .matchAll(/\{ id: '([a-z]+)'/g)].map((m) => m[1]);
+  .matchAll(/\{ id: '([a-z-]+)'/g)].map((m) => m[1]);
 
 const cluster = { id: 'c1', name: 'prod', url: 'http://c1' };
 const fake = (rule, extra = {}) => G.mergeAlerts([{ key: `c1:${rule.id}`, level: rule.level, cluster, title: `prod ${rule.id}`, detail: 'd', ...extra }],
