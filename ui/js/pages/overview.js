@@ -1315,7 +1315,8 @@ function bucketBox(c) {
 
 /* -- the four cards -- */
 
-const SEG_COLOR = { active: 'var(--good)', init: 'var(--warning)', unas: 'var(--critical)', reloc: 'var(--accent)', ok: 'var(--good)', err: 'var(--critical)', none: 'var(--surface-3)' };
+// Chart colours (owner rule: never red with yellow): light green, orange, pink, blue.
+const SEG_COLOR = { active: 'var(--chart-good)', init: 'var(--chart-warn)', unas: 'var(--chart-bad)', reloc: 'var(--chart-info)', ok: 'var(--chart-good)', err: 'var(--chart-bad)', none: 'var(--surface-3)' };
 
 /** A 64 px donut: the share of each part, an empty ring when there is nothing to share. */
 function donut(parts, label) {

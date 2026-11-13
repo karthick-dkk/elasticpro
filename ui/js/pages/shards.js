@@ -274,7 +274,7 @@ function loadBody(c) {
       h('td.num', num(Number(p.active) || 0)),
       h('td.num', num(Number(p.queue) || 0)),
       h('td.num', Number(p.rejected)
-        ? h('b', { style: { color: 'var(--critical)' } }, num(Number(p.rejected)))
+        ? h('b', { style: { color: 'var(--critical-ink)' } }, num(Number(p.rejected)))
         : '0'),
       h('td.num.muted', num(Number(p.completed) || 0))));
 
@@ -310,7 +310,7 @@ function loadBody(c) {
               slow.slice(0, 10).map((t) => h('tr',
                 h('td.mono', { style: { fontSize: '11px' } }, t.action),
                 h('td', t.node),
-                h('td.num', h('b', { style: { color: t.ms > 300000 ? 'var(--critical)' : 'var(--warning)' } },
+                h('td.num', h('b', { style: { color: t.ms > 300000 ? 'var(--critical-ink)' : 'var(--warning-ink)' } },
                   t.running_time)),
                 h('td.muted', { style: { fontSize: '11px', maxWidth: '340px', wordBreak: 'break-word' } },
                   t.description || ''))),
@@ -402,9 +402,9 @@ function shardMixBody(c, all, d) {
   }
 
   const segments = [
-    { key: 'started', label: 'assigned', value: started, color: 'var(--good)' },
-    { key: 'moving', label: 'moving', value: moving, color: 'var(--warning)' },
-    { key: 'unassigned', label: 'unassigned', value: unassigned, color: 'var(--critical)' },
+    { key: 'started', label: 'assigned', value: started, color: STATUS.good },
+    { key: 'moving', label: 'moving', value: moving, color: 'var(--chart-info)' },
+    { key: 'unassigned', label: 'unassigned', value: unassigned, color: STATUS.critical },
   ];
   const sub = unassigned
     ? `${num(unassigned)} of ${num(total)} not placed`
@@ -487,7 +487,7 @@ function nodesAndLoadCard(c, d) {
 }
 
 function heapCell(p, n) {
-  const colour = p >= 85 ? 'var(--critical)' : p >= 75 ? 'var(--warning)' : 'inherit';
+  const colour = p >= 85 ? 'var(--critical-ink)' : p >= 75 ? 'var(--warning-ink)' : 'inherit';
   const cur = Number(n['heap.current']), max = Number(n['heap.max']);
   return h('span', { style: { color: colour, fontWeight: p >= 75 ? 640 : 400 },
     title: isFinite(cur) && isFinite(max) ? `${bytes(cur)} of ${bytes(max)}` : '' }, `${p}%`);
@@ -495,7 +495,7 @@ function heapCell(p, n) {
 
 function diskBar(used, total, p, shardCount) {
   if (!total) return h('span.muted', '–');
-  const colour = p >= 90 ? 'var(--critical)' : p >= 80 ? 'var(--warning)' : 'var(--good)';
+  const colour = p >= 90 ? STATUS.critical : p >= 80 ? STATUS.warning : STATUS.good;
   return h('div', { style: { display: 'grid', gap: '3px', minWidth: '170px' } },
     h('div', { style: { display: 'flex', justifyContent: 'space-between', fontSize: '11px' } },
       h('span', `${p.toFixed(1)}%`),
@@ -640,7 +640,7 @@ function nodeStrip(c, d, all) {
     const used = Number(n['disk.used']) || 0;
     const total = Number(n['disk.total']) || 0;
     const p = total ? (used / total) * 100 : 0;
-    const colour = p >= 90 ? 'var(--critical)' : p >= 80 ? 'var(--warning)' : 'var(--good)';
+    const colour = p >= 90 ? STATUS.critical : p >= 80 ? STATUS.warning : STATUS.good;
     return h('div', { style: { display: 'grid', gap: '3px', minWidth: '160px', flex: '1 1 160px' } },
       h('div', { style: { display: 'flex', justifyContent: 'space-between', fontSize: '11.5px' } },
         h('b', n.node),

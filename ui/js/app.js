@@ -582,7 +582,8 @@ function healthPill(list) {
   const worst = order.find((k) => n[k]) || 'loading';
   const parts = ['green', 'yellow', 'red', 'unreachable', 'loading'].filter((k) => n[k]).map((k) => `${n[k]} ${k}`);
   return h(`button.pill.${HEALTH_COLOUR[worst]}`, {
-    type: 'button', style: { cursor: 'pointer', border: 0 }, onclick: () => go('overview'),
+    // the edge every toned pill has (app.css), drawn as an inset ring: the button has no border to give it
+    type: 'button', style: { cursor: 'pointer', border: 0, boxShadow: 'inset 0 0 0 1px color-mix(in srgb, currentColor 75%, transparent)' }, onclick: () => go('overview'),
     title: 'Health of every cluster in the picker — open Clusters for the list',
   }, h('i.dot'), parts.join(' · '));
 }

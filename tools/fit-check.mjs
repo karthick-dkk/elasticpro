@@ -9,6 +9,7 @@
  *     --bin elasticpro-bridge -- ui 8765 &
  *   node tools/fit-check.mjs --base http://127.0.0.1:8765 --config $PWD/tools/fit-fixture.json
  *   node tools/fit-check.mjs --browsers webkit --only dialogs --skips
+ *   node tools/fit-check.mjs --theme dark-blue --config $PWD/tools/fit-fixture.json
  *
  * Why it exists: the Config -> Defaults dialog shipped with a scrollbar along its bottom edge.
  * Its grids were `1fr 1fr 1fr`, and a 1fr column cannot shrink below its content, so one long
@@ -52,6 +53,7 @@ import { fileURLToPath } from 'node:url';
 import { loadPlaywright } from './lib/playwright.mjs';
 import { logDelayAnswer, logDelayData } from './lib/logdelay-fixture.mjs';
 import { jobsListAnswer } from './lib/jobs-fixture.mjs';
+import { pinTheme, themeContextOptions } from './lib/theme.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const arg = (name, fallback) => {
@@ -63,6 +65,9 @@ const CONFIG = arg('--config', '');
 const BROWSERS = arg('--browsers', 'chromium,webkit').split(',');
 const WARM = Number(arg('--warm', '25000'));
 const ONLY = arg('--only', 'pages,dialogs,panels').split(',');
+// --theme: one of tools/lib/theme.mjs THEME_RUNS (light, dark, dark-blue, warm, system-light,
+// system-dark). Without it the app paints whatever it would on a fresh browser.
+const THEME = arg('--theme', '');
 const PAGE_FILTER = arg('--pages', '');
 // Play is a wall display: 1080p is its baseline and 4K must look the same. `--pages play` alone
 // measures it at those two; `--sizes 1920,3840` names them for any run.
@@ -247,7 +252,8 @@ async function run(browserName, [vw, vh, framed]) {
   const check = (area, name, ok, detail = '') => rec(area, name, ok ? 'PASS' : 'FAIL', ok ? '' : detail);
 
   const browser = await pw[browserName].launch();
-  const ctx = await browser.newContext({ viewport: { width: vw, height: vh }, deviceScaleFactor: 2 });
+  const ctx = await browser.newContext({ viewport: { width: vw, height: vh }, deviceScaleFactor: 2, ...(THEME ? themeContextOptions(THEME) : {}) });
+  if (THEME) await pinTheme(ctx, THEME);
   if (CONFIG) await ctx.addInitScript((p) => { try { localStorage.setItem('elasticpro.configPath', p); } catch { /* none */ } }, path.resolve(CONFIG));
 
   // Answers the fixture cannot give. WHOAMI: a signed-in administrator on the hosted build, so

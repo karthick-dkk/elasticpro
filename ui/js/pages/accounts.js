@@ -165,7 +165,7 @@ function roleMapCard() {
     ? ZABBIX_TYPES.map(([t, l]) => `${l} → ${ui.roleDefaults.types[String(t)]}`).join(', ') : '';
   return card('Zabbix role map', 'what a Zabbix sign-in becomes here — applied at the next sign-in; an account pinned above keeps its pin',
     h('div',
-      ui.roleMapErr ? h('div', { style: { color: 'var(--critical)', fontSize: '12px', marginBottom: '6px' } }, ui.roleMapErr) : null,
+      ui.roleMapErr ? h('div', { style: { color: 'var(--critical-ink)', fontSize: '12px', marginBottom: '6px' } }, ui.roleMapErr) : null,
       table(['Zabbix role', 'Becomes', ''], [...typeRows, ...nameRows, addRow]),
       h('div.muted', { style: { fontSize: '11.5px', marginTop: '6px' } },
         defaults ? `Shipped: ${defaults}. ` : '',
@@ -253,7 +253,7 @@ function statusCell(u) {
 function signInCell(u) {
   return h('div', { style: { fontSize: '11.5px' } },
     h('div', u.lastLogin ? when(u.lastLogin) : h('span.muted', 'never')),
-    u.failedLogins ? h('div', { style: { color: 'var(--critical)' } },
+    u.failedLogins ? h('div', { style: { color: 'var(--critical-ink)' } },
       `${u.failedLogins} failed${u.lastFailed ? ` · last ${when(u.lastFailed)}` : ''}`) : null);
 }
 
@@ -326,7 +326,7 @@ function clusterUserDetail(c) {
     body = empty(cu.loading.has(c.id) ? 'Reading accounts…' : 'Not read yet.');
   } else if (got.error) {
     body = h('div',
-      h('div', { style: { fontSize: '12px', color: 'var(--warning)' } }, got.error),
+      h('div', { style: { fontSize: '12px', color: 'var(--warning-ink)' } }, got.error),
       got.fix ? h('div.muted', { style: { fontSize: '11.5px', marginTop: '4px' } }, got.fix) : null);
   } else {
     const trs = SORTS.clusterUsers.apply(got.users, {
@@ -406,8 +406,8 @@ function clusterUserMatrix(all) {
       set === null
         ? h('span.muted', { title: 'This cluster could not be read — not the same as absent' }, '—')
         : set.has(name)
-          ? h('span', { style: { color: 'var(--ok, #2e7d32)', fontWeight: '600' }, title: 'Present on this cluster' }, 'YES')
-          : h('span', { style: { color: 'var(--warning)', fontWeight: '600' }, title: 'Not present on this cluster' }, 'NO')))));
+          ? h('span', { style: { color: 'var(--good-ink)', fontWeight: '600' }, title: 'Present on this cluster' }, 'YES')
+          : h('span', { style: { color: 'var(--warning-ink)', fontWeight: '600' }, title: 'Not present on this cluster' }, 'NO')))));
 
   return card('Cluster users',
     `all clusters · ${sorted.length} account${sorted.length === 1 ? '' : 's'} across ${all.length} clusters`,
@@ -564,7 +564,7 @@ function activityCard() {
     : h('span', 'Not written to a file here (ELASTICPRO_ACTIVITY_LOG is off or there is no data directory).');
   return card('User activity', `${ui.activity.length} shown, newest first · kept in memory since the core started`,
     h('div',
-      ui.activityErr ? h('div.muted', { style: { color: 'var(--red, #c0392b)' } }, ui.activityErr) : null,
+      ui.activityErr ? h('div.muted', { style: { color: 'var(--critical-ink)' } }, ui.activityErr) : null,
       h('div', { style: { maxHeight: '360px', overflowY: 'auto' } },
         table([{ label: 'When', sort: 'at' }, { label: 'User', sort: 'user' }, { label: 'Action', sort: 'action' }, { label: 'Cluster', sort: 'cluster' },
           { label: 'Request', sort: 'request' }, { label: 'Result', sort: 'result' }, { label: 'Source IP', sort: 'ip' }], SORTS.activity.apply(ui.activity, {
