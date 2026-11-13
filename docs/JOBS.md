@@ -483,3 +483,54 @@ already open takes more clusters in, and a person's `JOB_RUN` / *Refresh now* is
 
 Role core reads it from the worker's heartbeat (`worker/status.json` `governor`, every 10 s);
 `null` while there is no heartbeat or it is late. Role all reads its own.
+
+`JOB_SETTINGS_GET` answers every job's settings with the defaults filled in. `JOB_SETTINGS_SET`
+checks every field before applying any (a refusal changes nothing). Pause, `enabled` and the retry
+policy act now; `requests`, `priority`, `auto` and the thresholds are kept for the adaptive
+governor, which reads them.
+
+## Jobs page
+
+`#/jobs` (`ui/js/pages/jobs.js`; words and arithmetic in `ui/js/core/jobs.js`, tested in
+`tools/unit/jobs.test.mjs`). In the page menu after Reports, for **user** and up (a guest has no
+tab: runs name clusters and carry their errors). Everybody reads; only an administrator presses,
+and every press goes through the write unlock the other admin pages use (`ensureWrites`, read-only
+by default) before its `JOB_*` message.
+
+- **The strip**: worker and core CPU and memory (`process`; a worker not deployed says it runs in
+  the core), requests per second to the clusters (`REQUEST_STATS`, as the Clusters page), jobs
+  running and queued, busy clusters with their reason and since when (`busy`), and the governor's
+  "in use of total" when `governor` is present — nothing for it when it is not (`null`: before the
+  governor, or the worker's heartbeat late). Its hover has jobs at once, the last change with its
+  reason in words (`people_waiting` is "people waiting") and the signals, each "not known" when
+  `null`, never 0. A job's `state.allocation` reason is put in words the same way.
+- **Jobs** (`#/jobs`): *Running now* — every open run (the page's open runs and each job's
+  `state.current`), the clusters it is on, a bar and percent from `progress` ("counting…" and no
+  bar when it is null), records, start, live duration, the job's requests (`state.allocation` once
+  the governor reports it, else the registry's range) and Stop (`JOB_CANCEL`, asked first); a
+  `stale` run is marked. *Up next* — the automatic jobs by `nextRunAt`, then the paused or off
+  ones with their note; Run now and Pause / Resume. *All jobs* — one table, every column sorted by
+  core/sort.js (unknown last both ways), the error cut short and whole when the row is opened, a
+  row menu of Run now, Pause / Resume, Stop, Retry (the last run, when failed, deferred or
+  cancelled), Settings and, for a created schedule, Delete (`JOB_DELETE`, asked first). *Created
+  schedules* lists those alone.
+- **History** (`#/jobs/history`): `JOBS_LIST {limit: 50, before, jobId}` a page at a time (Older /
+  Newer walk `next`), by job; the result filter applies to the page on screen. Retry on a failed,
+  deferred or cancelled run.
+- **Settings** (`#/jobs/settings`): `JOB_SETTINGS_GET` / `JOB_SETTINGS_SET` — the overall limits
+  and, per job, automatic runs, auto, requests at least / at most and priority; checked as the core
+  checks them before anything is sent, only what changed is sent. A field `managed` in the answer
+  is locked with "managed by config.txt" (the core sends none today). Below admin: what
+  `JOBS_LIST` says, read-only.
+- **Create job**: a report once now (`JOB_CREATE {once: true}`; the report run's periods, format,
+  mail and the hosts cap of 5) or a recurring mailed schedule (name, report, clusters or all,
+  daily / weekly / monthly at HH:MM server time, period, To / Cc / Bcc, subject).
+- **Refusals** are sentences: `already_running` (with the run), `joined`, `blocked_readonly`,
+  `retry_limit` (tries and the limit), `retry_wait` (when it may be tried again), `forbidden`,
+  `name_taken`, the worker's own; anything else is the core's message.
+- **Times**: absolute in the server's zone when `JOBS_LIST` names one (`tz`), else said to be the
+  reader's own; relative beside it.
+- **Reads**: every 2 s while a run is open or queued, every 15 s otherwise; none while the browser
+  tab is hidden; none once the page is left. Rows, cells, bars and buttons are kept between reads
+  (lib/keyed.js): the Stop under a pointer is the same button while its run moves
+  (`tools/flicker-check.mjs`, strict).

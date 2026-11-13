@@ -7093,11 +7093,227 @@ await settleFor(300);
   await go('overview');
 }
 
+/* ------------- Jobs (docs/JOBS.md "Jobs page"): contract-shaped answers at the network edge ------------- */
+// The page reads JOBS_LIST on entry and every 2 s while a run is open, keeps each row and its Stop
+// button while progress moves, draws unknown progress as "counting…" (no bar), marks a stale run,
+// sorts with unknowns last both ways, pages the history from the server, keeps Settings an
+// administrator's, validates Create job before anything is sent, says a refusal as a sentence, and
+// stops reading when it is left.
+{
+  const realFetch = globalThis.fetch;
+  const jsent = [];
+  const now = Date.now();
+  let progress = 20;
+  let withGov = false;   // the core reports no governor at first (before PR 4, or a worker's heartbeat late)
+  const st = await load('core/state.js');
+  const cl = st.clusters();
+  const cid = (i) => (cl[i] || cl[0] || { id: 'c1' }).id;
+  const mkJob = (id, name, o = {}, s = {}) => ({ id, name, kind: 'automatic', owner: 'worker', schedule: `${name}: its schedule`, nextRun: 'x', priority: 'medium',
+    pausable: true, requests: { min: 1, max: 4 }, report: null, detailsFor: 'user', clusterScoped: true, ...o,
+    state: { enabled: true, paused: false, pausedBy: null, pausedAt: null, current: null, activeRuns: 0, lastRun: null, nextRunAt: null, nextRunNote: null, ...s } });
+  const running = () => ({ id: 'run-vol', jobId: 'volume.daily', owner: 'worker', trigger: 'timer', status: 'running', createdAt: now - 90_000, startedAt: now - 90_000,
+    endedAt: null, progress, done: progress / 20, total: 5, records: 12, error: null, clusters: [cid(0), cid(1)] });
+  const counting = { id: 'run-hk', jobId: 'housekeeping', owner: 'core', trigger: 'manual:ann', status: 'running', createdAt: now - 5000, startedAt: now - 5000,
+    endedAt: null, progress: null, done: null, total: null, records: null, error: null, clusters: [] };
+  const stale = { id: 'run-stale', jobId: 'hosts.collect', owner: 'worker', trigger: 'timer', status: 'running', createdAt: now - 3600e3, startedAt: now - 3600e3,
+    endedAt: null, progress: 50, done: 1, total: 2, records: null, error: null, clusters: [cid(0)], stale: true };
+  const longError = `the data directory is full: ${'no space left on device; '.repeat(6)}free some space`;
+  const failed = { id: 'run-fail', jobId: 'settings.backup', owner: 'core', trigger: 'timer', status: 'failed', createdAt: now - 7200e3, startedAt: now - 7200e3,
+    endedAt: now - 7100e3, progress: null, done: null, total: null, records: null, error: longError, clusters: [] };
+  const jobs = () => [
+    mkJob('logdelay.measure', 'Log delay measurement', { priority: 'high', owner: 'core', clusterScoped: false }, { nextRunAt: now + 30 * 60e3 }),
+    mkJob('volume.daily', 'Daily volume collection', {}, { current: running(), activeRuns: 1, nextRunAt: now + 5 * 3600e3,
+      allocation: withGov ? { requests: 2, min: 1, max: 4, auto: true, reason: 'share' } : null }),
+    mkJob('hosts.collect', 'Hosts collection', { requests: { min: 1, max: 2 } }, { current: stale, activeRuns: 1, nextRunNote: 'not known: a clock change' }),
+    mkJob('report.run', 'Report runs', { kind: 'manual', pausable: false }, { nextRunNote: 'runs when a person asks' }),
+    mkJob('housekeeping', 'Housekeeping', { priority: 'low', requests: { min: 1, max: 1 }, owner: 'core', clusterScoped: false }, { current: counting, activeRuns: 1, nextRunAt: now + 40 * 60e3 }),
+    mkJob('settings.backup', 'Settings backup', { owner: 'core', clusterScoped: false }, { lastRun: failed, nextRunAt: now + 26 * 3600e3 }),
+    mkJob('zabbix.sync', 'Zabbix sync', { priority: 'low' }, { paused: true, pausedBy: 'ann', pausedAt: now - 600e3, nextRunNote: 'paused by ann (JOB_RESUME starts the timer again)' }),
+  ];
+  const hrun = (i) => ({ id: `h${i}`, jobId: i % 3 ? 'volume.daily' : 'settings.backup', owner: 'core', trigger: 'timer', status: i % 4 === 0 ? 'failed' : 'completed',
+    createdAt: now - i * 60e3, startedAt: now - i * 60e3, endedAt: now - i * 60e3 + 5000, progress: 100, done: 1, total: 1, records: i, error: i % 4 === 0 ? 'boom' : null, clusters: [] });
+  const listAnswer = (body) => {
+    const runs = body.before === 'p2' ? Array.from({ length: 5 }, (_, i) => hrun(60 + i)) : [running(), counting, stale, failed, ...Array.from({ length: 10 }, (_, i) => hrun(i + 1))];
+    return { ok: true, role: 'core', jobs: jobs(), runs: body.jobId ? runs.filter((r) => r.jobId === body.jobId) : runs, next: body.before === 'p2' ? null : 'p2',
+      busy: [{ cluster: cid(0), signal: '429', reason: 'the cluster answered 429 Too Many Requests', since: now - 300e3 }],
+      governor: withGov ? { auto: true, inUse: 3, total: 8, mostAtOnce: 4, jobsRunning: 2, lastChange: { at: now - 20e3, from: 16, to: 8, reason: 'people_waiting' },
+        signals: { cpuPct: 41.2, memoryPct: null, peopleWaiting: 2, queue: 0, avgPageMs: 840 } } : null,
+      process: { core: { role: 'core', cpuPct: 3.1, memoryPct: 19.7, gate: { running: 2, queued: 0 } }, worker: { state: 'up', cpuPct: 41, memoryPct: 23.8 } }, problems: [] };
+  };
+  const settings = { ok: true, overall: { mostAtOnce: 4, workerTotal: 16, cpuPct: 85, memoryPct: 85, retryLimit: 3, retryWaitMinutes: 5 },
+    jobs: jobs().map((j) => ({ jobId: j.id, enabled: true, paused: !!j.state.paused, pausedBy: j.state.pausedBy, auto: true, requests: { ...j.requests }, priority: j.priority,
+      defaults: { requests: { ...j.requests }, priority: j.priority } })) };
+  globalThis.fetch = async (input, init) => {
+    const body = init && init.body ? JSON.parse(init.body) : {};
+    if (body.type === 'JOBS_LIST' || /^JOB_/.test(body.type || '')) jsent.push(body);
+    if (body.type === 'JOBS_LIST') return stubReply(listAnswer(body));
+    if (body.type === 'JOB_SETTINGS_GET') return stubReply(settings);
+    if (body.type === 'JOB_RETRY') return stubReply({ ok: false, kind: 'retry_wait', retryAt: Date.now() + 4 * 60e3, message: 'tries are 5 minute(s) apart' });
+    if (body.type === 'JOB_CREATE') return stubReply({ ok: true, jobId: 'report.schedule.0a1b2c3d4e5f', job: null });
+    if (/^JOB_/.test(body.type || '')) return stubReply({ ok: false, kind: 'forbidden', message: 'not in this case' });
+    return realFetch(input, init);
+  };
+  const count = (t, f = () => true) => jsent.filter((m) => m.type === t && f(m)).length;
+  const chip = (k) => doc.querySelector(`.jb-chip[data-chip="${k}"]`);
+  const runRow = (id) => doc.querySelector(`tr[data-run="${id}"]`);
+  const rowsOf = (title) => { const p = panel(title); return p ? [...p.querySelectorAll('tbody tr[data-job]')].map((tr) => tr.dataset.job) : []; };
+  const was = st.state.caller;
+  const ro = st.state.defaults.readOnly;
+  try {
+    st.state.caller = null;                       // the portable build: its own administrator
+    st.state.defaults.readOnly = false;           // the unlock question is the write flow's own case
+    await go('jobs'); await settleFor(400);
+    ok(window.location.hash === '#/jobs', `jobs: the page is at ${window.location.hash}`);
+    ok(!!doc.querySelector('#nav button[data-page="jobs"]'), 'jobs: no Jobs tab in the page menu');
+    ok(count('JOBS_LIST') >= 1, 'jobs: opening the page did not read JOBS_LIST');
+    // The strip: the core's figures, the busy cluster, and no governor when the core reports none.
+    ok(chip('worker-cpu') && /41 %/.test(chip('worker-cpu').textContent), `jobs: worker CPU reads "${chip('worker-cpu') && chip('worker-cpu').textContent}"`);
+    ok(chip('runs') && /3 running · 0 queued/.test(chip('runs').textContent), `jobs: the strip counts "${chip('runs') && chip('runs').textContent}"`);
+    ok(chip('busy') && /^1$/.test(chip('busy').querySelector('.v').textContent) && /429/.test(chip('busy').title), 'jobs: the busy cluster is not shown with its reason');
+    ok(!chip('governor'), 'jobs: a governor is drawn though the core reports none');
+    // Running now: a known progress has a bar, an unknown one says counting… and has none; stale is marked.
+    const vol = runRow('run-vol');
+    ok(vol && vol.querySelector('.jb-bar') && /20 %/.test(vol.textContent) && /1 of 5/.test(vol.textContent), `jobs: the running collection reads "${vol && vol.textContent}"`);
+    const hk = runRow('run-hk');
+    ok(hk && !hk.querySelector('.jb-bar') && /counting…/.test(hk.textContent), 'jobs: a run whose progress is not known has a bar or no "counting…"');
+    ok(runRow('run-stale') && runRow('run-stale').classList.contains('jb-stale') && /stale/.test(runRow('run-stale').textContent), 'jobs: a stale run is not marked');
+    // Read again within 2 s while runs are open: the row, its Stop and its bar are the same elements.
+    const stopBtn = vol && vol.querySelector('.jb-stop');
+    const barEl = vol && vol.querySelector('.jb-bar');
+    const reads = count('JOBS_LIST');
+    progress = 60;
+    await settleFor(2600);
+    ok(count('JOBS_LIST') > reads, 'jobs: not read again within 2.5 s while a run is open');
+    ok(runRow('run-vol') === vol && vol.isConnected && vol.querySelector('.jb-stop') === stopBtn && vol.querySelector('.jb-bar') === barEl,
+      'jobs: a re-read replaced the running row, its Stop button or its bar');
+    ok(vol && /60 %/.test(vol.textContent) && barEl && barEl.firstChild.style.width === '60%', `jobs: the bar did not move to 60 % (${barEl && barEl.firstChild.style.width})`);
+    // The governor once the core reports it (JOBS_LIST.governor, state.allocation): drawn, its codes in words, nothing replaced.
+    withGov = true;
+    await settleFor(2600);
+    const gchip = chip('governor');
+    ok(gchip && /3 of 8 in use/.test(gchip.textContent) && /16 → 8: people waiting/.test(gchip.title) && /memory not known/.test(gchip.title) && !/people_waiting/.test(gchip.title),
+      `jobs: the governor chip reads "${gchip && gchip.textContent}" / "${gchip && gchip.title}"`);
+    const volJob = panel('All jobs') && panel('All jobs').querySelector('tbody tr[data-job="volume.daily"]');
+    ok(volJob && /2 of 1–4 · auto/.test(volJob.textContent), `jobs: All jobs does not show the allocation: "${volJob && volJob.textContent}"`);
+    ok(runRow('run-vol') === vol && vol.querySelector('.jb-stop') === stopBtn, 'jobs: the governor\'s arrival replaced the running row or its Stop');
+    // Up next: soonest first, the paused job last; the manual one not at all.
+    const next = rowsOf('Up next');
+    ok(next[0] === 'logdelay.measure' && next.at(-1) === 'zabbix.sync' && !next.includes('report.run'), `jobs: Up next is ${next.join(', ')}`);
+    // All jobs sorts; an unknown next run is last whichever way.
+    const th = (key) => panel('All jobs').querySelector(`th[data-sort="${key}"]`);
+    th('name').click(); await settleFor(150);
+    ok(rowsOf('All jobs')[0] === 'volume.daily', `jobs: sorted by name the first is ${rowsOf('All jobs')[0]}`);
+    th('next').click(); await settleFor(150);
+    const asc = rowsOf('All jobs');
+    th('next').click(); await settleFor(150);
+    const desc = rowsOf('All jobs');
+    const unknown = ['hosts.collect', 'report.run', 'zabbix.sync'];
+    ok(asc[0] === 'logdelay.measure' && unknown.every((id) => asc.indexOf(id) >= asc.length - 3), `jobs: next run ascending is ${asc.join(', ')}`);
+    ok(desc[0] === 'settings.backup' && unknown.every((id) => desc.indexOf(id) >= desc.length - 3), `jobs: next run descending is ${desc.join(', ')} — unknown must stay last`);
+    th('next').click(); await settleFor(150);   // back to the registry's order (the table has no default column)
+    // An error is cut short in the row and read in full when the row is opened.
+    const backup = panel('All jobs').querySelector('tbody tr[data-job="settings.backup"]');
+    const errCell = backup && backup.querySelector('td.jb-err');
+    ok(errCell && errCell.textContent.length < 40 && errCell.title === longError, 'jobs: the error is not cut short with the whole of it on hover');
+    backup.querySelector('.jb-x').click(); await settleFor(150);
+    const detail = panel('All jobs').querySelector('tr[data-detail="settings.backup"]');
+    ok(detail && detail.textContent.includes(longError), 'jobs: opening the row does not show the whole error');
+    // Retry from the row menu: the core's retry_wait refusal said as a sentence.
+    const trigger = panel('All jobs').querySelector('tbody tr[data-job="settings.backup"] .menu-trigger');
+    if (trigger) {
+      trigger.click(); await settleFor(100);
+      const item = [...doc.querySelectorAll('.menu-pop button')].find((b) => /Retry the last run/.test(b.textContent));
+      ok(item && !item.disabled, 'jobs: the failed run offers no Retry');
+      if (item) { item.click(); await settleFor(300); }
+      ok(count('JOB_RETRY', (m) => m.runId === 'run-fail') === 1, 'jobs: Retry did not send JOB_RETRY for the failed run');
+      const note = doc.querySelector('.jb-notice');
+      ok(note && /may be tried again in 4 min/.test(note.textContent) && !/retry_wait/.test(note.textContent), `jobs: the retry refusal reads "${note && note.textContent}"`);
+    } else ok(false, 'jobs: an administrator has no row menu in All jobs');
+    // History: its own address, pages from the server, a result filter, Retry on failed runs.
+    doc.querySelector('nav.jb-tabs button[data-tab="history"]').click(); await settleFor(500);
+    ok(window.location.hash === '#/jobs/history', `jobs: History is at ${window.location.hash}`);
+    const hp = panel('History');
+    ok(hp && hp.querySelectorAll('tbody tr[data-run]').length === 14, `jobs: History lists ${hp && hp.querySelectorAll('tbody tr[data-run]').length} runs on page 1`);
+    ok(hp && [...hp.querySelectorAll('tbody tr[data-status="failed"]')].every((tr) => /Retry/.test(tr.textContent)), 'jobs: a failed run in History has no Retry');
+    doc.getElementById('jb-h-older').click(); await settleFor(400);
+    ok(count('JOBS_LIST', (m) => m.before === 'p2') >= 1, 'jobs: Older did not ask JOBS_LIST for the next page');
+    ok(panel('History').querySelectorAll('tbody tr[data-run]').length === 5, 'jobs: page 2 is not what the core answered');
+    ok(doc.getElementById('jb-h-older').disabled, 'jobs: Older is offered on the last page');
+    doc.getElementById('jb-h-newer').click(); await settleFor(400);
+    ok(panel('History').querySelectorAll('tbody tr[data-run]').length === 14, 'jobs: Newer did not go back to page 1');
+    const res = doc.getElementById('jb-h-result');
+    res.value = 'failed'; res.dispatchEvent(new window.Event('change', { bubbles: true })); await settleFor(150);
+    const shownRuns = [...panel('History').querySelectorAll('tbody tr[data-run]')];
+    ok(shownRuns.length > 0 && shownRuns.every((tr) => tr.dataset.status === 'failed'), 'jobs: the result filter shows other results');
+    res.value = ''; res.dispatchEvent(new window.Event('change', { bubbles: true }));
+    const jsel = doc.getElementById('jb-h-job');
+    jsel.value = 'settings.backup'; jsel.dispatchEvent(new window.Event('change', { bubbles: true })); await settleFor(400);
+    ok(count('JOBS_LIST', (m) => m.jobId === 'settings.backup') >= 1, 'jobs: the job filter does not ask JOBS_LIST for that job');
+    jsel.value = ''; jsel.dispatchEvent(new window.Event('change', { bubbles: true })); await settleFor(300);
+    // Settings, an administrator's: read, a wrong value refused before anything is sent.
+    doc.querySelector('nav.jb-tabs button[data-tab="settings"]').click(); await settleFor(500);
+    ok(count('JOB_SETTINGS_GET') >= 1, 'jobs: Settings did not read JOB_SETTINGS_GET');
+    const most = doc.getElementById('jb-s-mostAtOnce');
+    ok(most && most.value === '4', `jobs: Most jobs at once reads ${most && most.value}`);
+    if (most) {
+      most.value = '99'; most.dispatchEvent(new window.Event('input', { bubbles: true })); await settleFor(50);
+      ok(!doc.getElementById('jb-s-save').disabled, 'jobs: a change does not enable Save');
+      doc.getElementById('jb-s-save').click(); await settleFor(200);
+      ok(count('JOB_SETTINGS_SET') === 0, 'jobs: an out-of-range setting was sent');
+      ok(/Most jobs at once must be a whole number from 1 to 32/.test((doc.querySelector('.jb-notice') || {}).textContent || ''), 'jobs: the out-of-range setting is not said');
+      doc.getElementById('jb-s-discard').click(); await settleFor(150);
+      ok(doc.getElementById('jb-s-mostAtOnce').value === '4', 'jobs: Discard did not put the setting back');
+    }
+    // Create job: opens, and checks the form before anything is sent.
+    doc.getElementById('jb-create').click(); await settleFor(200);
+    const dlg = doc.querySelector('.modal.jc-dialog');
+    ok(!!dlg, 'jobs: Create job did not open a dialog');
+    if (dlg) {
+      doc.getElementById('jc-mode-schedule').click(); await settleFor(50);
+      doc.getElementById('jc-create').click(); await settleFor(150);
+      ok(/Give the schedule a name/.test(dlg.querySelector('.modal-msg').textContent), `jobs: an unnamed schedule reads "${dlg.querySelector('.modal-msg').textContent}"`);
+      const type = (id, v) => { const e = doc.getElementById(id); e.value = v; e.dispatchEvent(new window.Event('input', { bubbles: true })); };
+      type('jc-name', 'Monthly volume, Frankfurt'); type('jc-to', 'ops@example.com, nobody');
+      doc.getElementById('jc-create').click(); await settleFor(150);
+      ok(/"nobody" is not an e-mail address/.test(dlg.querySelector('.modal-msg').textContent), 'jobs: a wrong address is not caught');
+      ok(count('JOB_CREATE') === 0, 'jobs: JOB_CREATE was sent for a form that does not pass');
+      type('jc-to', 'ops@example.com');
+      doc.getElementById('jc-create').click(); await settleFor(300);
+      const made = jsent.filter((m) => m.type === 'JOB_CREATE').at(-1);
+      ok(made && made.name === 'Monthly volume, Frankfurt' && made.clusters === 'all' && made.to[0] === 'ops@example.com' && made.at === '07:00', `jobs: JOB_CREATE carried ${JSON.stringify(made)}`);
+      ok(!doc.querySelector('.modal.jc-dialog'), 'jobs: the dialog stayed open after the schedule was made');
+    }
+    // Everybody else reads Settings, and is asked for nothing an administrator's.
+    st.state.caller = { name: 'uma', role: 'user' };
+    const gets = count('JOB_SETTINGS_GET');
+    await go('jobs'); window.location.hash = '#/jobs/settings'; await settleFor(500);
+    ok(count('JOB_SETTINGS_GET') === gets, 'jobs: a user\'s page asked for JOB_SETTINGS_GET');
+    ok(!doc.querySelector('.jb-page input, .jb-page select:not(#jb-h-job):not(#jb-h-result)'), 'jobs: a user is offered fields to change');
+    ok(!doc.getElementById('jb-create') && /administrator/.test(doc.querySelector('.jb-page').textContent), 'jobs: a user is offered Create job, or not told the settings are an administrator\'s');
+    ok(panel('Per job') && panel('Per job').querySelectorAll('tbody tr[data-job]').length === 7, 'jobs: a user does not see the per-job settings read-only');
+    // A guest has no Jobs tab: the page is offered from user up (the shell's own role check, app.js may()).
+    const entry = app.PAGES.find((p) => p.id === 'jobs');
+    ok(entry && entry.minRole === 'user' && !entry.noTab, `jobs: the page is offered to ${entry && entry.minRole}, not from user up`);
+    st.state.caller = null;
+    // Leaving stops the reads.
+    await go('jobs'); await settleFor(300);
+    await go('overview');
+    const left = count('JOBS_LIST');
+    await settleFor(2600);
+    ok(count('JOBS_LIST') === left, 'jobs: JOBS_LIST is still read after leaving the page');
+  } finally {
+    st.state.caller = was;
+    st.state.defaults.readOnly = ro;
+    globalThis.fetch = realFetch;
+  }
+  await go('overview');
+}
+
 if (problems.length) {
   console.error(`\n${problems.length} problem(s):`);
   for (const p of problems) console.error('  ✗ ' + p);
   process.exit(1);
 }
-console.log('ok: strip, console, shards, the Clusters page (columns, name menu, unreachable rows, expand chevron, alerts link), Reports (sections, Columns menu, Storage plan, Measure size, exports), Indices without Summary, hand-off, refresh, snapshots, tasks, toasts, accounts split and pinned Zabbix roles, the log-delay preflight, a quiet Config page, Config › Volume fields, report jobs and the Reports pill, the mailed report and the mail server, the Request Centre and the redraw gate, the request policy, the coverage bar, the Tasks panel and the console tabs, template management, the Alerts page grouped by cluster with merged repeats, cluster type (badge, Type filter, edit dialog to file keys and CLUSTER_META_SET), Go to, playbooks and the bell, and the default credential (no password asked for a new cluster, promote, never replaced unticked), and Config › Play (links, revoke, exclusion, locked fields, watch rules), and Config › History store (gated switch, test, arm, delay destination), and Play (slides, keys, zoom, takeover, exclusion, display link, an older core), and Reports (Planning recalculates, the backup target, Based on a cluster, CSV; plan templates save and delete; which indices count), and Reports › Log delay (fleet, cluster, device, fixes: links, filters, unknown not zero) with its settings (levels, fields, the report generator)');
+console.log('ok: strip, console, shards, the Clusters page (columns, name menu, unreachable rows, expand chevron, alerts link), Reports (sections, Columns menu, Storage plan, Measure size, exports), Indices without Summary, hand-off, refresh, snapshots, tasks, toasts, accounts split and pinned Zabbix roles, the log-delay preflight, a quiet Config page, Config › Volume fields, report jobs and the Reports pill, the mailed report and the mail server, the Request Centre and the redraw gate, the request policy, the coverage bar, the Tasks panel and the console tabs, template management, the Alerts page grouped by cluster with merged repeats, cluster type (badge, Type filter, edit dialog to file keys and CLUSTER_META_SET), Go to, playbooks and the bell, and the default credential (no password asked for a new cluster, promote, never replaced unticked), and Config › Play (links, revoke, exclusion, locked fields, watch rules), and Config › History store (gated switch, test, arm, delay destination), and Play (slides, keys, zoom, takeover, exclusion, display link, an older core), and Reports (Planning recalculates, the backup target, Based on a cluster, CSV; plan templates save and delete; which indices count), and Reports › Log delay (fleet, cluster, device, fixes: links, filters, unknown not zero) with its settings (levels, fields, the report generator), and Jobs (strip, running now kept while it moves, the governor and allocations when reported, up next, sorting with unknowns last, history pages, settings an administrator\'s, Create job checks, refusals in words)');
 // The pages leave auto-refresh timers and a live tail running; nothing here waits on them.
 process.exit(0);
