@@ -59,7 +59,8 @@ fn page(body: &Value, seen: &Seen) -> String {
     };
     let buckets: Vec<Value> = ids.iter().map(|&i| {
         let arrival = now - 60_000;
-        let mut src = json!({ "@timestamp": iso(arrival), "Zone": format!("dc{}", i % 4 + 1), "tag1": ["firewall", "proxy", "switch"][i % 3] });
+        let tag1 = ["firewall", "proxy", "switch"][i % 3];
+        let mut src = json!({ "@timestamp": iso(arrival), "Zone": format!("dc{}", i % 4 + 1), "tag1": tag1 });
         if let Some(m) = minutes(i) {
             // Half the fleet carries one event-time field, half the other: both are read.
             src[if i % 2 == 1 { "event_created" } else { "ingested_time" }] = json!(iso(arrival - (m * 60_000.0) as i64));
