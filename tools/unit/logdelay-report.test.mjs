@@ -47,9 +47,9 @@ test('Fetch Now: the scoped JOB_RUN, the run found in JOBS_LIST, and its words',
   assert.equal(R.runOf(list, 'r2').status, 'running', 'the job\'s current run');
   assert.equal(R.runOf(list, 'r1').status, 'completed', 'its last run');
   assert.equal(R.runOf(list, 'nope'), null);
-  assert.equal(R.runText({ status: 'running', done: 3, total: 8, progress: 37.5, records: 1240 }), 'running · 3 of 8 (38 %) · 1,240 devices measured');
+  assert.equal(R.runText({ status: 'running', done: 3, total: 8, progress: 37.5, records: 1240 }), 'running · 3 of 8 clusters (38 %) · 1,240 devices read so far');
   assert.equal(R.runText({ status: 'running', done: null, total: null, progress: null, records: null }), 'running · progress not known yet', 'unknown progress is said, never 0');
-  assert.equal(R.runText({ status: 'completed', done: 8, total: 8, progress: 100, records: 1 }), 'done · 8 of 8 (100 %) · 1 device measured');
+  assert.equal(R.runText({ status: 'completed', done: 8, total: 8, progress: 100, records: 1 }), 'done · 8 of 8 clusters (100 %) · 1 device measured');
   assert.equal(R.runText({ status: 'skipped', error: 'not armed' }), 'skipped · not armed');
   assert.equal(R.fetchRefusalText({ ok: true }), null);
   assert.match(R.fetchRefusalText({ ok: false, kind: 'already_running', runId: 'abc' }), /already running \(run abc\)/);
@@ -222,6 +222,7 @@ test('settings: the report draft, its problems and managed keys', () => {
 test('settings: Download now covers what the schedule would', () => {
   const now = new Date(2026, 10, 7, 12).getTime();
   assert.equal(ST.runPeriodFor('daily', 'yesterday', now), 'yesterday');
+  assert.equal(ST.runPeriodFor('hourly', 'yesterday', now), 'lastHour');
   assert.equal(ST.runPeriodFor('weekly', 'cadence', now), 'previousWeek');
   assert.equal(ST.runPeriodFor('monthly', 'cadence', now), 'previousMonth');
   assert.deepEqual(ST.runPeriodFor('daily', 'monthSoFar', now), { from: '2026-11-01', to: '2026-11-06' });

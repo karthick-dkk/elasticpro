@@ -37,6 +37,7 @@ const PAGE_ROWS = 50;
 /** What the boards keep between draws: the choices made and the answers read. */
 const S = {
   period: 'last30',
+  reportPeriod: 'shown',
   clusterPick: 'all',
   devFilter: '', devAll: false,
   cdFilter: '', cdAll: false,
@@ -188,9 +189,18 @@ function periodSelect(id) {
   return h('label.ld-inline', 'Period', s);
 }
 
+/** "Build report" and "Send now" cover the period shown, or the whole hour before now (docs/LOGDELAY.md `lastHour`). */
+function reportPeriodSelect() {
+  const s = h('select#ld-report-period', { 'aria-label': 'Report covers', onchange: (e) => { S.reportPeriod = e.target.value; } },
+    h('option', { value: 'shown' }, 'Period shown'), h('option', { value: 'lastHour' }, 'Last hour'));
+  s.value = S.reportPeriod;
+  return h('label.ld-inline', { title: 'What Build report and Send now cover: the period shown above, or the whole hour before now' }, 'Report covers', s);
+}
+const reportPeriod = (res, fallback) => (S.reportPeriod === 'lastHour' ? 'lastHour' : res && res.from ? { from: res.from, to: res.to } : fallback);
+
 async function exportXlsx(btn, clusterIds, res) {
   btn.disabled = true;
-  const r = await ldReportRun({ clusterIds, period: res && res.from ? { from: res.from, to: res.to } : 'last7', mail: false });
+  const r = await ldReportRun({ clusterIds, period: reportPeriod(res, 'last7'), mail: false });
   btn.disabled = false;
   if (r && r.ok) { toast('The log delay report is building: Reports › Exports & schedules has it when it is done.', 'ok', 6000); refreshReports(); }
   else toast(`Not started: ${(r && (r.message || r.kind)) || 'no answer'}`, 'err', 6000);
@@ -198,13 +208,49 @@ async function exportXlsx(btn, clusterIds, res) {
 
 async function mailNow(btn, clusterIds, res) {
   const yes = await confirmDialog('Mail the log delay report now?',
-    `It goes to the log delay schedule’s recipients, covering ${(res && res.label) || 'the period shown'}, with its .xlsx and .csv.`, { yes: 'Mail now' });
+    `It goes to the log delay schedule’s recipients, covering ${S.reportPeriod === 'lastHour' ? 'the whole hour before now' : (res && res.label) || 'the period shown'}, with its .xlsx and .csv.`, { yes: 'Mail now' });
   if (!yes) return;
   btn.disabled = true;
-  const r = await ldReportRun({ clusterIds, period: res && res.from ? { from: res.from, to: res.to } : 'yesterday', mail: true });
+  const r = await ldReportRun({ clusterIds, period: reportPeriod(res, 'yesterday'), mail: true });
   btn.disabled = false;
   if (r && r.ok) { toast('The log delay report is being built and mailed.', 'ok', 6000); refreshReports(); }
   else toast(`Not sent: ${(r && (r.message || r.kind)) || 'no answer'}`, 'err', 6000);
+}
+
+/* --------------------------- which devices, and how the run read them --------------------------- */
+
+const COUNT_HINT = 'last run = devices that sent a document in the last run’s window (what a live check sees) · '
+  + 'now = every device the tracker holds, silent ones included · in range = devices measured at any time in the period shown';
+const capSetting = 'Config-Management › Scheduled log delay › Max devices per run';
+
+/** How the last run read one cluster, in words; unknown is said, not 0. */
+function lastReadText(lr) {
+  if (!lr) return 'not read yet';
+  const parts = [`${countText(lr.pages)} page${lr.pages === 1 ? '' : 's'}`, lr.complete ? 'complete' : 'incomplete'];
+  if (lr.truncated) parts.push(`stopped at the device cap${finite(lr.maxDevices) ? ` (${countText(lr.maxDevices)})` : ''}`);
+  if (lr.error) parts.push(String(lr.error));
+  return parts.join(' · ');
+}
+const noDeviceText = (lr) => (!lr ? '—' : finite(lr.noDevice) ? countText(lr.noDevice) : 'not reported');
+
+/** A cluster whose last run was cut or failed, or whose documents had no device name: said above the figures. */
+function readNotes(items) {
+  const bad = items.filter((x) => x.lastRead && (x.lastRead.truncated || x.lastRead.complete === false || x.lastRead.error));
+  const lost = items.filter((x) => x.lastRead && finite(x.lastRead.noDevice) && x.lastRead.noDevice > 0);
+  if (!bad.length && !lost.length) return null;
+  return h('div.banner.warn.ld-flat',
+    bad.map((x) => h('div', `${x.name}: the last run ${x.lastRead.truncated ? 'stopped at the device cap, so the devices after it are not in the figures; raise ' : 'did not read every device'}`,
+      x.lastRead.truncated ? [h('b', capSetting), '.'] : '.')),
+    lost.map((x) => h('div', `${x.name}: ${countText(x.lastRead.noDevice)} document${x.lastRead.noDevice === 1 ? ' has' : 's have'} no device name and ${x.lastRead.noDevice === 1 ? 'is' : 'are'} in no device’s figures.`)));
+}
+
+/** One cluster's three counts, one line, with what each means. */
+function countsLine(counts) {
+  if (!counts) return null;
+  return h('div.muted.ld-note#ld-counts', { title: COUNT_HINT },
+    h('span', h('b', countText(counts.inLastRun)), ' in the last run'), ' · ',
+    h('span', h('b', countText(counts.now)), ' now'), ' · ',
+    h('span', h('b', countText(counts.inRange)), ' in range'), ` — ${COUNT_HINT}`);
 }
 
 /* ------------------------------------ charts ------------------------------------ */
@@ -270,7 +316,7 @@ function fleetView() {
         h('p.sub', 'Every device that sends logs: how late it is, when each delay started and when it was solved. ',
           every ? `Measured on the server every ${every} hour${every === 1 ? '' : 's'}; ` : 'Measured on the server on a timer; ',
           lv ? `late means ${b.late}.` : 'late means each cluster’s own delay level.')),
-      h('div.ld-actions', periodSelect('ld-period'), h('label.ld-inline', 'Clusters', pick), exportBtn, mailBtn));
+      h('div.ld-actions', periodSelect('ld-period'), h('label.ld-inline', 'Clusters', pick), reportPeriodSelect(), exportBtn, mailBtn));
   });
   if (!res) return [head, B.get('fleet:problem', entSig(ent), () => problem(ent, 'The log delay summary'))];
 
@@ -328,6 +374,8 @@ function fleetView() {
     const cl = sorts.clusters.apply(res.byCluster || [], {
       name: { type: 'text', value: (c) => c.name || nameOf(c.id) },
       devices: { type: 'number', value: (c) => c.devices },
+      lastRun: { type: 'number', value: seen((c) => (c.counts ? c.counts.inLastRun : null)) },
+      inRange: { type: 'number', value: seen((c) => (c.counts ? c.counts.inRange : null)) },
       zone: { type: 'text', value: (c) => valuesText(devsOf(c.id), 'zone') },
       tag1: { type: 'text', value: (c) => valuesText(devsOf(c.id), 'tag1') },
       lateNow: { type: 'number', value: seen((c) => c.lateNow) },
@@ -344,6 +392,8 @@ function fleetView() {
       return h('tr', { dataset: { cluster: c.id } },
         h('td', link(clusterHref(c.id), c.name || nameOf(c.id), { title: `${c.name} · log delay details` })),
         h('td.num', countText(c.devices)),
+        h('td.num', { title: COUNT_HINT }, neverRun ? '—' : countText(c.counts && c.counts.inLastRun)),
+        h('td.num', { title: COUNT_HINT }, neverRun ? '—' : countText(c.counts && c.counts.inRange)),
         h('td', { title: 'zones of the devices listed below' }, valuesText(devs, 'zone')),
         h('td', { title: 'tag1 of the devices listed below' }, valuesText(devs, 'tag1')),
         neverRun ? h('td', { colspan: 8 }, h('span.muted', 'never measured: not in the scheduled measurement yet'))
@@ -358,18 +408,30 @@ function fleetView() {
               ? [link(ldHash('device', c.id, c.worst.device), c.worst.device, { title: `${c.worst.device} · delay details` }), h('span.muted', ` ${minutesText(c.worst.minutes)}`)]
               : h('span.muted', '—'))]);
     });
-    return card('By cluster', `${b.below.toLowerCase()} = devices under ${b.late} of delay now, and their share in the ${n} days before · a cluster name or its line opens the cluster`,
+    return card('By cluster', `${b.below.toLowerCase()} = devices under ${b.late} of delay now, and their share in the ${n} days before · ${COUNT_HINT} · a cluster name or its line opens the cluster`,
       h('div.tbl-wrap', h('table.tbl.ld-ctr#ld-by-cluster',
-        sortHead(sorts.clusters, [['name', 'Cluster'], ['devices', 'Devices', 1], ['zone', 'zone'], ['tag1', 'tag1'], ['lateNow', 'Late now', 1], ['newToday', 'Today', 1], ['below', b.below, 1],
+        sortHead(sorts.clusters, [['name', 'Cluster'], ['devices', 'Devices now', 1], ['lastRun', 'In last run', 1], ['inRange', 'In range', 1], ['zone', 'zone'], ['tag1', 'tag1'], ['lateNow', 'Late now', 1], ['newToday', 'Today', 1], ['below', b.below, 1],
           ['delay', b.mid, 1], ['critical', b.high, 1], ['previous', `${b.below}, previous ${n} days`, 1], [null, `Last ${n} days`], ['worst', 'Worst device']]),
-        h('tbody', ...(cl.length ? cl : [h('tr', h('td', { colspan: 12 }, empty('No cluster you can see is measured.')))])))));
+        h('tbody', ...(cl.length ? cl : [h('tr', h('td', { colspan: 14 }, empty('No cluster you can see is measured.')))])))));
   });
 
+  const readCard = B.get('fleet:read', rid, () => card('How the last run read each cluster', 'pages asked, whether the list is complete, and documents with no device name',
+    h('div.tbl-wrap', h('table.tbl.ld-ctr#ld-last-read',
+      h('thead', h('tr', h('th', 'Cluster'), h('th', 'Read'), h('th.num', 'Devices read'), h('th.num', 'Without a device name'))),
+      h('tbody', ...(res.byCluster || []).filter((c) => c.lastRunAt !== null && c.lastRunAt !== undefined).map((c) => h('tr', { dataset: { cluster: c.id } },
+        h('td', link(clusterHref(c.id), c.name || nameOf(c.id))),
+        h('td', { class: c.lastRead && (c.lastRead.truncated || !c.lastRead.complete) ? 'ld-pink' : null }, lastReadText(c.lastRead)),
+        h('td.num', c.lastRead ? countText(c.lastRead.devices) : '—'),
+        h('td.num', { title: 'documents in the last run’s window with no device name: in no device’s figures' }, noDeviceText(c.lastRead)))))))));
+  const readNote = B.get('fleet:readnote', rid, () => readNotes((res.byCluster || []).map((c) => ({ name: c.name || nameOf(c.id), lastRead: c.lastRead }))));
+  const totalsLine = B.get('fleet:counts', rid, () => h('div.muted.ld-note#ld-fleet-counts', { title: COUNT_HINT },
+    h('b', countText(res.devicesInLastRun)), ' devices in the last run · ', h('b', countText(res.devicesTotal)), ' now · ',
+    h('b', countText(res.devicesInRange)), ` in the period shown — ${COUNT_HINT}`));
   const devCard = devicesCard(res);
   const never = (res.byCluster || []).filter((c) => c.lastRunAt === null || c.lastRunAt === undefined);
   const neverNote = B.get('fleet:never', rid, () => (never.length && never.length < (res.byCluster || []).length
     ? h('div.muted.ld-note', `${never.length} cluster${never.length === 1 ? ' is' : 's are'} not measured yet: ${never.map((c) => c.name).join(', ')}.`) : null));
-  return [head, notice, tiles, dayCard, ringCard, clusterCard, devCard, neverNote];
+  return [head, notice, readNote, totalsLine, tiles, dayCard, ringCard, clusterCard, readCard, devCard, neverNote];
 }
 
 function devicesCard(res) {
@@ -406,7 +468,7 @@ function clusterView(id) {
         crumbs(link(ldHash('fleet'), 'Log Delay'), 'cluster'),
         h('h2', name, h('span.ld-h-sub', ` · ${(res && res.label) || PERIODS.find((p) => p[0] === S.period)[1].toLowerCase()}`)),
         h('p.sub', `Every device in this cluster that sends logs, day by day. Late means ${b.late}.`)),
-      h('div.ld-actions', periodSelect('ld-period'), link(ldHash('fixes', id), 'Recommended fixes ›', { cls: 'btn' }), exportBtn));
+      h('div.ld-actions', periodSelect('ld-period'), link(ldHash('fixes', id), 'Recommended fixes ›', { cls: 'btn' }), reportPeriodSelect(), exportBtn));
   });
   if (!res) return [head, B.get('cl:problem', entSig(ent), () => problem(ent, `${name}’s log delay`))];
   const rid = objId(res);
@@ -419,6 +481,10 @@ function clusterView(id) {
     kpi(countText(res.started), `delays started · ${countText(res.solved)} solved`, { key: 'started' }),
     kpi(minutesText(res.medianNow, 'not measured'), `median delay · ${minutesText(res.medianPrevious, 'not measured')} in the previous ${n} days`, { key: 'median' })));
   const never = res.lastRunAt === null || res.lastRunAt === undefined;
+  const lr = res.lastRead || (res.counts && res.counts.lastRead);
+  const readNote = B.get('cl:readnote', rid, () => readNotes([{ name, lastRead: lr }]));
+  const countsNote = B.get('cl:counts', rid, () => h('div.ld-note', countsLine(res.counts),
+    h('div.muted#ld-last-read-line', `Last run read: ${lastReadText(lr)} · documents with no device name: ${noDeviceText(lr)}`)));
   const neverNote = B.get('cl:never', rid, () => (never ? h('div.banner.warn', `${name} has never been measured: it is not in the scheduled measurement yet.`) : null));
   const dayCard = B.get('cl:days', rid, () => card('Day by day', 'late devices at the end of each day', dayChart(res.days, { height: 150, withOk: false, label: `Late devices per day in ${name}` }),
     [legend(key(C.blue, b.mid), key(C.pink, b.high))]));
@@ -441,7 +507,7 @@ function clusterView(id) {
   const devCard = keptCard(B, 'cl:dev', 'Devices in this cluster',
     `${countText((res.devices || []).length)} · ${sorts.clusterDevices.sort ? 'sorted by the marked column' : 'sorted by time spent late'} · a device opens its delay details`,
     body, [filterBox('ld-cd-filter', () => S.cdFilter, (v) => { S.cdFilter = v; S.cdAll = false; })]);
-  return [head, neverNote, tiles, dayCard, devCard];
+  return [head, neverNote, readNote, tiles, countsNote, dayCard, devCard];
 }
 
 /* ------------------------------------ one device ------------------------------------ */

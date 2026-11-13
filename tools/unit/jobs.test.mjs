@@ -191,6 +191,9 @@ test('create: the checks, and the message sent', () => {
   assert.match(J.createProblem({ ...sched, allClusters: false }), /at least one cluster/);
   assert.match(J.createProblem({ ...sched, schedule: 'manual' }), /daily, weekly or monthly/);
   assert.equal(J.createProblem({ ...sched, report: 'nope' }), 'Pick a report.');
+  assert.match(J.createProblem({ ...sched, schedule: 'hourly' }), /daily, weekly or monthly/, 'hourly is the log delay report\'s alone');
+  assert.equal(J.createProblem({ ...sched, report: 'log_delay', schedule: 'hourly' }), '');
+  assert.equal(J.createMessage({ ...sched, report: 'log_delay', schedule: 'hourly', period: 'yesterday' }).period, undefined, 'an hourly schedule sends no period');
   assert.deepEqual(J.createMessage({ ...sched, to: 'a@x.io; b@x.io', subject: ' Volume {period} ' }), {
     type: 'JOB_CREATE', report: 'volume', name: 'Monthly volume', clusters: 'all', schedule: 'monthly', at: '07:00',
     to: ['a@x.io', 'b@x.io'], cc: [], bcc: [], period: 'cadence', subject: 'Volume {period}',

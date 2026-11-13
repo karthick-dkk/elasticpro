@@ -152,9 +152,9 @@ export function runText(run) {
   const parts = [];
   const status = String(run.status || 'unknown');
   parts.push(status === 'running' ? 'running' : status === 'queued' ? 'queued' : status === 'completed' ? 'done' : status);
-  if (finite(run.done) && finite(run.total)) parts.push(`${countText(run.done)} of ${countText(run.total)}${finite(run.progress) ? ` (${Math.round(run.progress)} %)` : ''}`);
+  if (finite(run.done) && finite(run.total)) parts.push(`${countText(run.done)} of ${countText(run.total)} cluster${run.total === 1 ? '' : 's'}${finite(run.progress) ? ` (${Math.round(run.progress)} %)` : ''}`);
   else if (!RUN_ENDED.has(status)) parts.push('progress not known yet');
-  if (finite(run.records)) parts.push(`${countText(run.records)} device${run.records === 1 ? '' : 's'} measured`);
+  if (finite(run.records)) parts.push(`${countText(run.records)} device${run.records === 1 ? '' : 's'} ${status === 'running' ? 'read so far' : 'measured'}`);
   if (run.error && status !== 'completed') parts.push(String(run.error));
   return parts.join(' · ');
 }
