@@ -756,11 +756,14 @@ mod tests {
 
     #[test]
     fn a_first_build_whose_record_cannot_be_written_holds_every_conflict() {
-        // The record's directory is a file: nothing can be written there.
+        // No record yet; then something that is not a file takes its place, so the write (tmp +
+        // rename) fails — whoever the tests run as.
         let base = std::env::temp_dir().join(format!("ep-conflicts-ro-{}", crate::auth::random_hex(6)));
-        std::fs::write(&base, "not a directory").unwrap();
-        let s = Conflicts::open(Some(base.join(FILE)));
+        let p = base.join(FILE);
+        let s = Conflicts::open(Some(p.clone()));
         assert!(s.first_run());
+        std::fs::create_dir_all(&p).unwrap();
+        std::fs::write(p.join("occupied"), "x").unwrap();
         let (config, hosts) = settle_case();
         let (r, err) = s.settle(&config, &hosts, &HashSet::new(), Mode::Keep, 1);
         assert!(err.is_some());
@@ -769,7 +772,7 @@ mod tests {
         assert!(!s.first_run(), "first-run mode ended with the attempt");
         let (r, _) = s.settle(&config, &hosts, &HashSet::new(), Mode::Keep, 2);
         assert_eq!(r.fate["10"], Fate::Held, "and the next build is no first run either");
-        let _ = std::fs::remove_file(&base);
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
