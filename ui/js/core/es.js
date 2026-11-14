@@ -340,7 +340,35 @@ export class EsClient {
    * thread pools by): the scale a load average is read against. _cat/nodes has no such
    * column, so it is one more call, made by the page that draws the load.
    */
-  nodesOs() { return this.json('GET', '/_nodes/_all/os?filter_path=nodes.*.name,nodes.*.os.allocated_processors'); }
+  nodesOs() {
+    // The search and write pools' queue sizes ride along (core/nodes-shards.js queueSizes): the
+    // scale a queue is read against, as static as the processor count.
+    return this.json('GET', '/_nodes/_all/os,thread_pool?filter_path=nodes.*.name,nodes.*.os.allocated_processors,nodes.*.thread_pool.search.queue_size,nodes.*.thread_pool.write.queue_size');
+  }
+  /**
+   * `cluster.routing.allocation.enable` as the cluster has it — transient, persistent and the
+   * default, so the page can say which one is in force (core/nodes-shards.js allocationSetting).
+   */
+  allocationEnable() {
+    return this.json('GET', '/_cluster/settings?include_defaults=true&filter_path=*.cluster.routing.allocation.enable');
+  }
+  /**
+   * Switch shard allocation: `all`, `primaries`, `new_primaries` or `none`, as a persistent
+   * setting. A write — the flag alone grants nothing; the core refuses it unless the session is
+   * unlocked (core/writes.js).
+   */
+  setAllocationEnable(value) {
+    return this.json('PUT', '/_cluster/settings', { persistent: { 'cluster.routing.allocation.enable': value } },
+      { allowWrites: true, timeoutMs: 30000 });
+  }
+  /**
+   * Why ONE shard is unassigned: the explain API with the shard named in the body. A POST,
+   * because the core sends no body with a GET; the read-only guard knows this one POST changes
+   * nothing (guard.rs is_read_post), so it goes through like any read.
+   */
+  allocationExplainFor(index, shard, primary) {
+    return this.json('POST', '/_cluster/allocation/explain', { index, shard: Number(shard), primary: !!primary }, { timeoutMs: 30000 });
+  }
   /**
    * The counters behind the Query pressure card (core/node-rates.js): searches and their time,
    * documents indexed and deleted, the search and write pools' rejections and queues, and the

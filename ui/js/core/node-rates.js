@@ -47,19 +47,26 @@ const COUNTERS = {
   deletes: (n) => n.indices && n.indices.indexing && n.indices.indexing.delete_total,
   searchRejected: (n) => n.thread_pool && n.thread_pool.search && n.thread_pool.search.rejected,
   writeRejected: (n) => n.thread_pool && n.thread_pool.write && n.thread_pool.write.rejected,
+  // The bulk pool exists on clusters older than 6.3 only; newer ones fold it into write.
+  bulkRejected: (n) => n.thread_pool && n.thread_pool.bulk && n.thread_pool.bulk.rejected,
   searchQueue: (n) => n.thread_pool && n.thread_pool.search && n.thread_pool.search.queue,
   writeQueue: (n) => n.thread_pool && n.thread_pool.write && n.thread_pool.write.queue,
-  trips: (n) => {
-    const b = n.breakers;
-    if (!b || typeof b !== 'object') return undefined;
-    let sum = 0, any = false;
-    for (const x of Object.values(b)) {
-      const t = x && Number(x.tripped);
-      if (Number.isFinite(t)) { sum += t; any = true; }
-    }
-    return any ? sum : undefined;
-  },
+  trips: (n) => sumTrips(n.breakers),
+  parentTrips: (n) => n.breakers && n.breakers.parent && n.breakers.parent.tripped,
+  requestTrips: (n) => n.breakers && n.breakers.request && n.breakers.request.tripped,
+  fielddataTrips: (n) => n.breakers && n.breakers.fielddata && n.breakers.fielddata.tripped,
 };
+
+/** Every breaker's trips added up, or undefined when the node reports no breakers. */
+function sumTrips(b) {
+  if (!b || typeof b !== 'object') return undefined;
+  let sum = 0, any = false;
+  for (const x of Object.values(b)) {
+    const t = x && Number(x.tripped);
+    if (Number.isFinite(t)) { sum += t; any = true; }
+  }
+  return any ? sum : undefined;
+}
 
 /**
  * One `_nodes/stats` answer as a reading: every counter summed over the nodes, `at` when it
@@ -86,9 +93,11 @@ function unmeasured(latest) {
   return {
     measured: false, sinceMs: null,
     searchPerSec: null, searchLatencyMs: null, indexPerSec: null, deletesPerSec: null,
-    rejected: null, breakerTrips: null,
+    rejected: null, rejectedBy: { search: null, write: null, bulk: null },
+    breakerTrips: null, tripsBy: { parent: null, request: null, fielddata: null },
     searchQueue: latest ? latest.searchQueue : null,
     writeQueue: latest ? latest.writeQueue : null,
+    queueSustained: false,
   };
 }
 
@@ -112,8 +121,10 @@ export function ratesBetween(a, b) {
   if (!(sec >= 1)) return unmeasured(b);
   const dq = delta(a, b, 'query'), dqMs = delta(a, b, 'queryMs');
   const di = delta(a, b, 'index'), dd = delta(a, b, 'deletes');
-  const rs = delta(a, b, 'searchRejected'), rw = delta(a, b, 'writeRejected');
+  const rs = delta(a, b, 'searchRejected'), rw = delta(a, b, 'writeRejected'), rb = delta(a, b, 'bulkRejected');
   const trips = delta(a, b, 'trips');
+  const sum = (...xs) => (xs.every((x) => x === null) ? null : xs.reduce((n, x) => n + (x || 0), 0));
+  const above = (x) => Number.isFinite(x) && x > 0;
   return {
     measured: true,
     sinceMs: b.at - a.at,
@@ -121,11 +132,30 @@ export function ratesBetween(a, b) {
     searchLatencyMs: dq === null || dqMs === null ? null : dq > 0 ? dqMs / dq : null,
     indexPerSec: di === null ? null : di / sec,
     deletesPerSec: dd === null ? null : dd / sec,
-    rejected: rs === null && rw === null ? null : (rs || 0) + (rw || 0),
+    rejected: sum(rs, rw, rb),
+    rejectedBy: { search: rs, write: rw, bulk: rb },
     breakerTrips: trips,
+    tripsBy: { parent: delta(a, b, 'parentTrips'), request: delta(a, b, 'requestTrips'), fielddata: delta(a, b, 'fielddataTrips') },
     searchQueue: b.searchQueue,
     writeQueue: b.writeQueue,
+    // A queue above zero in both readings is work waiting, not a moment caught mid-burst.
+    queueSustained: (above(a.searchQueue) && above(b.searchQueue)) || (above(a.writeQueue) && above(b.writeQueue)),
   };
+}
+
+/**
+ * Whether the cluster is under query pressure — the one rule the Query pressure card's pill
+ * follows. 'pressure' when, between the last two polls, any work was rejected or any breaker
+ * tripped, or a search or write queue stood above zero in both; 'none' when measured and none of
+ * that; 'unknown' before two readings exist. `why` names what tripped it, in words.
+ */
+export function pressureState(rates) {
+  if (!rates || !rates.measured) return { state: 'unknown', why: [] };
+  const why = [];
+  if (rates.rejected > 0) why.push(`${rates.rejected} rejected`);
+  if (rates.breakerTrips > 0) why.push(`${rates.breakerTrips} breaker trip${rates.breakerTrips === 1 ? '' : 's'}`);
+  if (rates.queueSustained) why.push('a queue above zero for two polls');
+  return { state: why.length ? 'pressure' : 'none', why };
 }
 
 /* --------------------------------- the data layer --------------------------------- */

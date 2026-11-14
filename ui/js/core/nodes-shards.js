@@ -31,6 +31,91 @@ export function shardSplit(rows) {
   return out;
 }
 
+/**
+ * How many shards each node holds, by node name, from the shard rows (the listing is the truth;
+ * `_cat/allocation`'s count is the fallback when the listing was refused). Unassigned shards
+ * have no node and are not counted here.
+ */
+export function shardsPerNode(rows) {
+  const out = new Map();
+  for (const x of rows || []) if (x && x.node) out.set(x.node, (out.get(x.node) || 0) + 1);
+  return out;
+}
+
+/**
+ * The unassigned shards by the reason Elasticsearch recorded (`unassigned.reason`), most
+ * frequent first; a shard with no reason is counted under "not recorded".
+ */
+export function unassignedByReason(rows) {
+  const out = new Map();
+  for (const x of rows || []) {
+    if (String((x && x.state) || '').toUpperCase() !== 'UNASSIGNED') continue;
+    const r = (x.reason || '').trim() || 'not recorded';
+    out.set(r, (out.get(r) || 0) + 1);
+  }
+  return [...out.entries()].sort((a, b) => b[1] - a[1]).map(([reason, count]) => ({ reason, count }));
+}
+
+/** The values `cluster.routing.allocation.enable` takes, in the order the menu offers them. */
+export const ALLOCATION_VALUES = Object.freeze(['all', 'primaries', 'new_primaries', 'none']);
+
+/** What each value means, in the words the confirm dialog uses — the consequence, not the name. */
+export const ALLOCATION_MEANING = Object.freeze({
+  all: 'every shard may be placed and moved — the normal state',
+  primaries: 'only primary shards are placed; replicas stay where they are or unassigned',
+  new_primaries: 'only the primaries of newly created indices are placed; nothing else moves',
+  none: 'no shard will be placed or moved until it is switched back',
+});
+
+/**
+ * `cluster.routing.allocation.enable` out of `GET _cluster/settings?include_defaults=true`:
+ * a transient setting over a persistent one over the default. `{value, source}` with source
+ * 'transient' | 'persistent' | 'default', or null when the answer carries none of the three —
+ * "not known", never a guess.
+ */
+export function allocationSetting(answer) {
+  if (!answer || typeof answer !== 'object') return null;
+  const KEY = 'cluster.routing.allocation.enable';
+  const pick = (block) => {
+    if (!block || typeof block !== 'object') return undefined;
+    if (typeof block[KEY] === 'string') return block[KEY];                     // flat_settings
+    const v = block.cluster && block.cluster.routing && block.cluster.routing.allocation && block.cluster.routing.allocation.enable;
+    return typeof v === 'string' ? v : undefined;
+  };
+  for (const source of ['transient', 'persistent', 'defaults']) {
+    const v = pick(answer[source]);
+    if (v !== undefined) return { value: v.toLowerCase(), source: source === 'defaults' ? 'default' : source };
+  }
+  return null;
+}
+
+/**
+ * The search and write pools' queue sizes out of `GET _nodes/_all/os,thread_pool` (the same call
+ * that brings the processor counts): `{search: {size, nodes}, write: {size, nodes}}` where `size`
+ * is the one size every node reported, or null when they differ or none did, and `nodes` how
+ * many reported one. -1 (unbounded) is kept as -1.
+ */
+export function queueSizes(answer) {
+  const out = {};
+  const nodes = answer && answer.nodes && typeof answer.nodes === 'object' ? Object.values(answer.nodes) : [];
+  for (const pool of ['search', 'write']) {
+    const seen = new Set(); let n = 0;
+    for (const node of nodes) {
+      const v = node && node.thread_pool && node.thread_pool[pool] ? node.thread_pool[pool].queue_size : undefined;
+      const num = typeof v === 'string' ? Number(v.replace(/k$/i, '000')) : Number(v);
+      if (v !== undefined && v !== null && Number.isFinite(num)) { seen.add(num); n++; }
+    }
+    out[pool] = { size: seen.size === 1 ? [...seen][0] : null, nodes: n };
+  }
+  return out;
+}
+
+/** A node id as the table shows it: the first eight characters; the whole id is the tooltip. */
+export function shortNodeId(id) {
+  const s = String(id || '');
+  return s.length > 8 ? s.slice(0, 8) : s;
+}
+
 /** Elasticsearch's own convention: an index whose name starts with "." is hidden/system. */
 export function isHiddenIndex(name) {
   return String(name || '').startsWith('.');

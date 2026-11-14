@@ -24,8 +24,8 @@ function answer({ q = 0, qMs = 0, ix = 0, del = 0, rej = 0, sq = 0, wq = 0, trip
 
 test('readingOf sums every counter over the nodes and stamps when it was read', () => {
   const r = R.readingOf(answer({ q: 10, qMs: 400, ix: 100, del: 5, rej: 1, sq: 2, wq: 3, trips: 1 }), 5000);
-  assert.deepEqual(r, { at: 5000, query: 30, queryMs: 1200, index: 300, deletes: 15, searchRejected: 3, writeRejected: 0,
-    searchQueue: 6, writeQueue: 9, trips: 3 });
+  assert.deepEqual(r, { at: 5000, query: 30, queryMs: 1200, index: 300, deletes: 15, searchRejected: 3, writeRejected: 0, bulkRejected: null,
+    searchQueue: 6, writeQueue: 9, trips: 3, parentTrips: null, requestTrips: 3, fielddataTrips: 0 });
   assert.equal(R.readingOf(null), null);
   assert.equal(R.readingOf({ acknowledged: true }), null, 'not a nodes answer');
 });
@@ -124,4 +124,31 @@ test('activeTaskCount leaves out the perpetual tasks and is null without a listi
     { action: 'geoip-downloader', type: 'persistent' },
     { action: 'indices:data/write/bulk', type: 'transport' },
   ]), 2);
+});
+
+test('rejections and trips are also broken down by pool and breaker, and bulk is unknown where there is no bulk pool', () => {
+  const mk = (rej, trips) => ({ nodes: { a: {
+    thread_pool: { search: { rejected: rej[0], queue: 0 }, write: { rejected: rej[1], queue: 0 } },
+    breakers: { parent: { tripped: trips[0] }, request: { tripped: trips[1] }, fielddata: { tripped: trips[2] }, inflight_requests: { tripped: trips[3] } } } } });
+  const r = R.ratesBetween(R.readingOf(mk([1, 2], [0, 1, 0, 0]), 0), R.readingOf(mk([4, 2], [1, 3, 0, 5]), 10000));
+  assert.deepEqual(r.rejectedBy, { search: 3, write: 0, bulk: null });
+  assert.equal(r.rejected, 3);
+  assert.deepEqual(r.tripsBy, { parent: 1, request: 2, fielddata: 0 });
+  assert.equal(r.breakerTrips, 8, 'every breaker counts in the total, the ones not broken out too');
+});
+
+test('pressureState: rejected work, a breaker trip or a queue standing for two polls is pressure; otherwise none; unmeasured is unknown', () => {
+  const q = (sq, wq) => ({ nodes: { a: { thread_pool: { search: { rejected: 0, queue: sq }, write: { rejected: 0, queue: wq } }, breakers: { parent: { tripped: 0 } } } } });
+  const calm = R.ratesBetween(R.readingOf(q(0, 0), 0), R.readingOf(q(0, 0), 10000));
+  assert.deepEqual(R.pressureState(calm), { state: 'none', why: [] });
+  const burst = R.ratesBetween(R.readingOf(q(0, 0), 0), R.readingOf(q(3, 0), 10000));
+  assert.equal(burst.queueSustained, false);
+  assert.equal(R.pressureState(burst).state, 'none', 'one reading with a queue is a moment, not pressure');
+  const standing = R.ratesBetween(R.readingOf(q(0, 2), 0), R.readingOf(q(0, 1), 10000));
+  assert.equal(standing.queueSustained, true);
+  assert.deepEqual(R.pressureState(standing), { state: 'pressure', why: ['a queue above zero for two polls'] });
+  assert.equal(R.pressureState({ ...calm, rejected: 2 }).state, 'pressure');
+  assert.deepEqual(R.pressureState({ ...calm, breakerTrips: 1 }).why, ['1 breaker trip']);
+  assert.deepEqual(R.pressureState(R.ratesBetween(null, R.readingOf(q(5, 5), 0))), { state: 'unknown', why: [] });
+  assert.equal(R.pressureState(null).state, 'unknown');
 });

@@ -109,3 +109,50 @@ test('coresByNode reads allocated_processors by node name and skips nodes withou
   assert.equal(coresByNode(null).size, 0);
   assert.equal(coresByNode({ acknowledged: true }).size, 0, 'a fixture answering nothing useful is nobody’s core count');
 });
+
+const { shardsPerNode, unassignedByReason, allocationSetting, queueSizes, shortNodeId, ALLOCATION_VALUES, ALLOCATION_MEANING } =
+  await import(pathToFileURL(path.join(ROOT, 'ui/js/core/nodes-shards.js')).href);
+
+test('shardsPerNode counts the listing by node and leaves unassigned shards out', () => {
+  const m = shardsPerNode([{ node: 'n1' }, { node: 'n1' }, { node: 'n2' }, { node: '', state: 'UNASSIGNED' }, null]);
+  assert.deepEqual([...m.entries()], [['n1', 2], ['n2', 1]]);
+  assert.equal(shardsPerNode(null).size, 0);
+});
+
+test('unassignedByReason counts the unassigned shards per recorded reason, most frequent first', () => {
+  assert.deepEqual(unassignedByReason([
+    { state: 'UNASSIGNED', reason: 'NODE_LEFT' }, { state: 'UNASSIGNED', reason: 'ALLOCATION_FAILED' },
+    { state: 'UNASSIGNED', reason: 'NODE_LEFT' }, { state: 'STARTED', reason: '' }, { state: 'unassigned', reason: '' }]),
+    [{ reason: 'NODE_LEFT', count: 2 }, { reason: 'ALLOCATION_FAILED', count: 1 }, { reason: 'not recorded', count: 1 }]);
+  assert.deepEqual(unassignedByReason([]), []);
+});
+
+test('allocationSetting reads transient over persistent over default, and is null when none says', () => {
+  const nested = (v) => ({ cluster: { routing: { allocation: { enable: v } } } });
+  assert.deepEqual(allocationSetting({ defaults: nested('all') }), { value: 'all', source: 'default' });
+  assert.deepEqual(allocationSetting({ persistent: nested('none'), defaults: nested('all') }), { value: 'none', source: 'persistent' });
+  assert.deepEqual(allocationSetting({ transient: nested('PRIMARIES'), persistent: nested('none'), defaults: nested('all') }), { value: 'primaries', source: 'transient' });
+  assert.deepEqual(allocationSetting({ persistent: { 'cluster.routing.allocation.enable': 'new_primaries' } }), { value: 'new_primaries', source: 'persistent' }, 'flat settings');
+  assert.equal(allocationSetting({ persistent: {}, transient: {}, defaults: {} }), null, 'nobody said: not known');
+  assert.equal(allocationSetting({ acknowledged: true }), null);
+  assert.equal(allocationSetting(null), null);
+  assert.deepEqual(ALLOCATION_VALUES, ['all', 'primaries', 'new_primaries', 'none']);
+  for (const v of ALLOCATION_VALUES) assert.ok(ALLOCATION_MEANING[v].length > 20, v);
+});
+
+test('queueSizes is the one size every node reported, or null when they differ or none did', () => {
+  const a = { nodes: {
+    x: { thread_pool: { search: { queue_size: 1000 }, write: { queue_size: '10k' } } },
+    y: { thread_pool: { search: { queue_size: 1000 }, write: { queue_size: 200 } } },
+    z: { thread_pool: { search: { queue_size: 1000 } } } } };
+  assert.deepEqual(queueSizes(a), { search: { size: 1000, nodes: 3 }, write: { size: null, nodes: 2 } });
+  assert.deepEqual(queueSizes({ nodes: {} }), { search: { size: null, nodes: 0 }, write: { size: null, nodes: 0 } });
+  assert.deepEqual(queueSizes(null).search, { size: null, nodes: 0 });
+  assert.equal(queueSizes({ nodes: { x: { thread_pool: { search: { queue_size: -1 } } } } }).search.size, -1, 'unbounded is kept');
+});
+
+test('shortNodeId is the first eight characters', () => {
+  assert.equal(shortNodeId('Xk3pQ9aTn1'), 'Xk3pQ9aT');
+  assert.equal(shortNodeId('abc'), 'abc');
+  assert.equal(shortNodeId(null), '');
+});

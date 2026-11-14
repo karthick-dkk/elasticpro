@@ -1,31 +1,33 @@
 /**
  * Page — nodes and shards: what the cluster is made of, and moving pieces of it.
  *
- * Shards lead because they are the unit of work: an index is only as available as its
- * shards, a full disk is a placement problem, and a yellow cluster is a shard with
- * nowhere to go. The nodes are here in full underneath — roles, heap, load, disk — both
- * because choosing where to move a shard needs them and because "which node is master,
- * and is it struggling" is asked at the same moment as "where is this shard".
+ * Four things and nothing else (the owner's cut of 0.3.62): the nodes and their resource
+ * usage, where the shards stand (and the allocation switch), whether the cluster is under
+ * query pressure, and the shard table with its management. Storage accounting, dangling
+ * indices and the rest of the old "Cluster at a glance" live on the Clusters overview.
  */
 
 import { h, mount, reconcile } from '../lib/dom.js';
 import { tableSort } from '../lib/table-sort.js';
 import { nodeCache } from '../lib/keyed.js';
-import { bytes, num, pct, compact } from '../lib/fmt.js';
-import { state, clusters, activeClusters, client, refreshAll, fetchIndices, fetchShards,
-         datasetFreshness, diskAccounting, setDangling, danglingFor, demandDataset, fleetMode, askForPage, fleetPolicy } from '../core/state.js';
+import { bytes, num, compact } from '../lib/fmt.js';
+import { state, activeClusters, client, refreshAll, fetchIndices, fetchShards,
+         datasetFreshness, demandDataset, fleetMode, askForPage, fleetPolicy } from '../core/state.js';
 import { pauseFor } from '../core/policy.js';
 import { freshnessBar } from '../lib/freshness.js';
-import { card, table, empty, pill, figure, connectionBanner, keptCard } from './common.js';
+import { card, table, empty, pill, edgeTile, connectionBanner, keptCard } from './common.js';
 import { navigateTo } from '../core/intent.js';
 import { modal, field, select, val, confirmDialog } from '../ui/modal.js';
-import { toast } from '../ui/menu.js';
+import { toast, rowMenu } from '../ui/menu.js';
+import { infoButton } from '../ui/fix-popover.js';
 import { trackTask, shardMovePoll, allocationPoll } from '../ui/tasks.js';
-import { ensureWrites, writeToggle, writesAllowed } from '../core/writes.js';
+import { ensureWrites, writeToggle, writesAllowed, roleMayWrite } from '../core/writes.js';
 import { splitDonut, STATUS } from '../lib/charts.js';
-import { parseRetention } from '../core/volume.js';
 import { takeFocus, revealFocus } from '../core/focus.js';
-import { shardSplit, visibleShards, usageLevel, loadPercent, coresByNode } from '../core/nodes-shards.js';
+import { shardSplit, visibleShards, usageLevel, loadPercent, coresByNode, queueSizes, shortNodeId,
+         shardsPerNode, unassignedByReason, allocationSetting, ALLOCATION_VALUES, ALLOCATION_MEANING } from '../core/nodes-shards.js';
+import { nodeRates, pressureState, recordReading, readingCount, latestReadingAt, PERPETUAL } from '../core/node-rates.js';
+import { explainInWords, explainBody } from '../core/shard-fixes.js';
 
 let host = null;
 /**
@@ -56,6 +58,7 @@ const SHARD_COLS = {
 };
 /** Shards ticked for a bulk move, keyed `index/shard/p|r`. */
 const picked = new Map();
+const keyOf = (x) => `${x.index}/${x.shard}/${x.primary ? 'p' : 'r'}`;
 /**
  * Shard listings, tasks, thread pools and pending cluster tasks, per cluster — read from
  * state.shards (core/state.js fetchShards), where the fleet cache's pushed updates land
@@ -76,11 +79,13 @@ function applyFocus() {
   const f = takeFocus('shards');
   SHARD_SORT.forVisit(null);      // an order a link asked for lasts one visit
   if (!f) return;
-  if (f.section === 'unassigned') { ui.state = 'UNASSIGNED'; ui.node = 'all'; reveal = '[data-focus="shards"]'; }
+  if (f.section === 'unassigned') showUnassigned();
   else if (f.section === 'disk' || f.section === 'nodes') reveal = '[data-focus="nodes"]';
   // Largest first for this visit only: the remembered Shards order is left as it is.
   if (f.node) { ui.node = f.node; ui.state = 'all'; SHARD_SORT.forVisit({ key: 'store', dir: -1 }); }
 }
+/** The shard table narrowed to the unassigned shards and brought into view (the tile's "show", a link's focus). */
+function showUnassigned() { ui.state = 'UNASSIGNED'; ui.node = 'all'; reveal = '[data-focus="shards"]'; }
 const focusable = (el, name) => { if (el.dataset.focus !== name) el.dataset.focus = name; return el; };
 
 export function render(el) {
@@ -108,6 +113,8 @@ export function onData() {
 /** What the nodes and shards view is drawn from besides its own listing (state.js FLEET_KEYS). */
 const PAGE_DATASETS = ['health', 'nodes'];
 let askedOpenAt = 0;
+/** Whether the page is showing the whole fleet (more than two clusters): no call per cluster then. */
+let fleetView = false;
 function refresh() {
   const list = activeClusters();
   // Under a policy that fetches nothing on its own, whether the cluster is up and what its
@@ -116,7 +123,8 @@ function refresh() {
     askedOpenAt = Date.now();
     askForPage(list.map((c) => c.id), PAGE_DATASETS).catch(() => {});
   }
-  if (list.length > 2 && fleetMode()) { refreshMany(list); return; }
+  fleetView = list.length > 2 && fleetMode();
+  if (fleetView) { refreshMany(list); return; }
   for (const c of list) {
     const got = shards.get(c.id);
     // `pending`: the core is still fetching it and will push it when it lands — asking
@@ -127,7 +135,7 @@ function refresh() {
     // The index list is what the disk accounting is compared against; only the Indices
     // page fetches it otherwise.
     if (!state.indices.get(c.id)) fetchIndices(c.id, '*').catch(() => {});
-    if (isReachable(c.id)) loadCores(c);
+    if (isReachable(c.id)) { loadCores(c); loadRates(c); loadAllocation(c); }
   }
 }
 
@@ -135,22 +143,78 @@ const isReachable = (id) => !!(state.data.get(id) || {}).reachable;
 
 /**
  * Each node's processor count, per cluster — the scale the Load column's bar is drawn on
- * (core/nodes-shards.js loadPercent). Read once per cluster per visit and kept for ten
- * minutes: it changes only when a node is resized. Not read in the fleet view, where a call
- * per cluster is the queue of requests refreshMany exists to avoid — the load shows as text
- * there. `byName` null means not known: no bar, the text alone (unknown is not zero).
+ * (core/nodes-shards.js loadPercent) — and the search and write pools' queue sizes (the scale
+ * of the Query pressure queues), from one `_nodes/_all/os,thread_pool` call. Read once per
+ * cluster per visit and kept for ten minutes: they change only when a node is resized. Not
+ * read in the fleet view, where a call per cluster is the queue of requests refreshMany
+ * exists to avoid — the load shows as text there. `byName` null means not known: no bar,
+ * the text alone (unknown is not zero).
  */
 const CORES_MAX_AGE_MS = 10 * 60 * 1000;
-const cores = new Map();      // cluster id → { byName: Map|null, at, inflight }
+const cores = new Map();      // cluster id → { byName: Map|null, sizes, at, inflight }
 const coresFor = (id) => { const e = cores.get(id); return e && e.byName ? e.byName : null; };
+const sizesFor = (id) => { const e = cores.get(id); return e && e.sizes ? e.sizes : null; };
 async function loadCores(c) {
   const cl = client(c.id);
   const e = cores.get(c.id);
   if (!cl || (e && (e.inflight || Date.now() - e.at < CORES_MAX_AGE_MS))) return;
-  cores.set(c.id, { byName: e ? e.byName : null, at: e ? e.at : 0, inflight: true });
-  let byName = null;
-  try { byName = coresByNode(await cl.nodesOs()); } catch (_) { /* not reported: the load stays text */ }
-  cores.set(c.id, { byName, at: Date.now(), inflight: false });
+  cores.set(c.id, { byName: e ? e.byName : null, sizes: e ? e.sizes : null, at: e ? e.at : 0, inflight: true });
+  let byName = null, sizes = null;
+  try { const ans = await cl.nodesOs(); byName = coresByNode(ans); sizes = queueSizes(ans); } catch (_) { /* not reported: the load stays text */ }
+  cores.set(c.id, { byName, sizes, at: Date.now(), inflight: false });
+  draw();
+}
+
+/**
+ * The Query pressure readings (core/node-rates.js): one `_nodes/stats` reading per cluster per
+ * poll, the second one ten seconds after the first so the card measures soon after the page
+ * opens, then every thirty seconds while the page is open. The timer is the page's own: a
+ * policy that pushes nothing on its own would otherwise leave the card at "measuring" for
+ * ever. It fires only while this page is on screen.
+ */
+const RATES_EVERY_MS = 30000, RATES_SECOND_MS = 10000;
+const ratesIo = new Map();    // cluster id → { inflight, timer, error }
+async function loadRates(c) {
+  const cl = client(c.id);
+  const e = ratesIo.get(c.id) || { inflight: false, timer: null, error: null };
+  ratesIo.set(c.id, e);
+  if (!cl || e.inflight) return;
+  const every = readingCount(c.id) < 2 ? RATES_SECOND_MS : RATES_EVERY_MS;
+  const age = Date.now() - latestReadingAt(c.id);
+  if (age < every) { scheduleRates(c, every - age); return; }
+  e.inflight = true;
+  try { recordReading(c.id, await cl.nodesRates(), Date.now()); e.error = null; }
+  catch (err) { e.error = err.message || String(err); }
+  e.inflight = false;
+  draw();
+  scheduleRates(c, readingCount(c.id) < 2 ? RATES_SECOND_MS : RATES_EVERY_MS);
+}
+function scheduleRates(c, ms) {
+  const e = ratesIo.get(c.id);
+  if (!e || e.timer) return;
+  e.timer = setTimeout(() => {
+    e.timer = null;
+    if (host && host.isConnected && !fleetView && isReachable(c.id) && activeClusters().some((x) => x.id === c.id)) loadRates(c);
+  }, ms);
+}
+
+/**
+ * `cluster.routing.allocation.enable`, per cluster, read with its source (core/nodes-shards.js
+ * allocationSetting) and kept a minute; re-read at once after this page changes it. `setting`
+ * null with no error means not read yet; with an error, not known — the control says so and
+ * never guesses.
+ */
+const ALLOC_MAX_AGE_MS = 60 * 1000;
+const alloc = new Map();      // cluster id → { setting, at, inflight, error }
+async function loadAllocation(c, force = false) {
+  const cl = client(c.id);
+  const e = alloc.get(c.id);
+  if (!cl || (e && (e.inflight || (!force && Date.now() - e.at < ALLOC_MAX_AGE_MS)))) return;
+  alloc.set(c.id, { setting: e ? e.setting : null, at: e ? e.at : 0, inflight: true, error: e ? e.error : null });
+  let setting = null, error = null;
+  try { setting = allocationSetting(await cl.allocationEnable()); if (!setting) error = 'the answer carries no cluster.routing.allocation.enable'; }
+  catch (err) { error = err.message || String(err); }
+  alloc.set(c.id, { setting, at: Date.now(), inflight: false, error });
   draw();
 }
 
@@ -184,17 +248,6 @@ async function load(c, force = true) {
   } finally {
     loading.delete(c.id); draw();
   }
-  const cl = client(c.id);
-
-  // Only worth asking when the figures disagree; the answer decides what the gap is.
-  try {
-    const acct = diskAccounting(state.data.get(c.id) || {}, state.indices.get(c.id));
-    if (acct.material) {
-      const res = await cl.danglingIndices();
-      setDangling(c.id, { indices: (res && res.dangling_indices) || [], at: Date.now() });
-      draw();
-    }
-  } catch (_) { /* the alert says to look here; it does not depend on this succeeding */ }
 }
 
 /**
@@ -240,12 +293,9 @@ function block(c) {
   const raw = shards.get(c.id);
   const all = Array.isArray(raw) ? raw.map(normalise) : [];
 
-  // No stat tiles. They said Nodes / Shards / Unassigned / Moving, which is precisely
-  // what the split donut and its legend say in the glance band — the same duplication that
-  // cost the honeycomb its place. The figures that were only on the tiles are the band's.
   return keptBox(`grid:${c.id}`, 'div', { style: { display: 'grid', gap: '10px' } }, [
-    glanceCard(c, all, d),
-    nodesAndLoadCard(c, d),
+    nodesCard(c, d),
+    h('div.ns-row', allocationCard(c, all, d), pressureCard(c)),
     shardsCard(c, d, all, raw)]);
 }
 
@@ -261,16 +311,8 @@ const SLOW_TASK_MS = 30000;
  * work. Pending cluster tasks say the master is behind, which looks like everything
  * being slow for reasons nothing else explains.
  *
- * The long-running list excludes the perpetual ones. `geoip-downloader` and the monitor
- * tasks run for the life of the node; showing them as "slow queries" would bury the one
- * search that actually is.
- */
-const PERPETUAL = /geoip-downloader|cluster:monitor\/tasks\/lists|health-node|persistent/i;
-
-/**
- * What the cluster is busy doing, as a body rather than a card — it shares a pane with
- * the node table, because "which nodes are there" and "what are they doing" are one
- * question asked twice and they were being answered a screen apart.
+ * The long-running list excludes the perpetual ones (core/node-rates.js PERPETUAL — the
+ * same rule the Query pressure card's task count follows).
  */
 function loadBody(c) {
   const got = load2.get(c.id);
@@ -360,7 +402,11 @@ function loadBody(c) {
   };
 }
 
-/** Everything _cat/nodes knows, which is what "is this node healthy" is answered from. */
+/**
+ * Everything _cat/nodes knows, which is what "is this node healthy" is answered from: one
+ * 32 px line per node — name, the short node id (the whole id is its tooltip), IP, roles,
+ * version, then the usage bars, the disk and the uptime. Nothing stacked.
+ */
 function nodesBody(c, d) {
   const nodes = d.nodes || [];
   const alloc = (d.disk && d.disk.nodes) || [];
@@ -377,9 +423,10 @@ function nodesBody(c, d) {
     const heapCur = Number(n['heap.current']), heapMax = Number(n['heap.max']);
     const isMaster = String(n.master || '').trim() === '*';
     return h('tr',
-      h('td', h('div', { style: { fontWeight: 620 } }, n.name,
+      h('td', h('span', { style: { fontWeight: 620 } }, n.name),
         isMaster ? h('span', { style: { marginLeft: '6px' } }, pill('master', 'blue')) : null),
-        h('div.mono.muted', { style: { fontSize: '10.5px' } }, n.ip || '')),
+      h('td', n.id ? h('span.mono.muted.id', { title: n.id }, shortNodeId(n.id)) : h('span.muted', '–')),
+      h('td.mono', { style: { fontSize: '11px' } }, n.ip || h('span.muted', '–')),
       h('td', h('span.mono', { style: { fontSize: '11px' }, title: roleTitle(n['node.role']) },
         n['node.role'] || '–')),
       h('td.muted', { style: { fontSize: '11.5px' } }, n.version || ''),
@@ -392,7 +439,7 @@ function nodesBody(c, d) {
       h('td.muted', { style: { fontSize: '11.5px' } }, n.uptime || ''));
   });
 
-  return table(['Node', 'Roles', 'Version', { label: 'Heap', num: true }, { label: 'RAM', num: true },
+  return h('div.ns-nodes', table(['Node', 'Node ID', 'IP', 'Roles', 'Version', { label: 'Heap', num: true }, { label: 'RAM', num: true },
                 { label: 'CPU', num: true }, { label: 'Load 1m/5m', num: true }, 'Disk', 'Uptime'],
     trs, {
       // A cluster with no nodes is not a thing. An empty list here means the call did
@@ -402,94 +449,20 @@ function nodesBody(c, d) {
         actions: [h('button.btn.sm.primary', { onclick: () => refreshAll({ force: true, selected: true }) }, 'Retry'),
                   h('button.btn.sm', { onclick: () => navigateTo('settings') }, 'Check credentials')],
       }),
-    });
+    }));
 }
 
 /**
- * Where the shards stand: one small donut, split.
- *
- * Assigned and unassigned are not two readings to compare — they are one population
- * divided, and the division is the whole question. Two separate gauges would show two
- * percentages of a denominator the reader cannot see; one ring shows the split and the
- * counts beside it say how many, which is what somebody acts on. "0 unassigned" is
- * listed rather than dropped: it is the reassurance the page is opened for.
- *
- * Relocating and initialising are drawn separately from settled shards. They are
- * assigned — a cluster mid-rebalance is not broken — but lumping them in would hide the
- * one thing that tells you to wait a minute before worrying.
+ * The node table and the cluster's workload, in one pane at the top of the page: you read
+ * them together — a node at 96% RAM means one thing when the cluster is idle and another
+ * when it is rejecting work.
  */
-function shardMixBody(c, all, d) {
-  const h2 = d.health || {};
-  const split = shardSplit(all);
-  // _cat/shards is the detail; _cluster/health is the cluster's own count. Prefer the
-  // rows we actually have, and fall back to health when the listing was refused.
-  const total = split.total || (Number(h2.active_shards) || 0) + (Number(h2.unassigned_shards) || 0);
-
-  if (!total) {
-    return { sub: 'nothing reported', split,
-             node: h('span.muted', { style: { fontSize: '11.5px' } }, 'No shard listing and no health count — unknown, not zero.') };
-  }
-
-  const segments = [
-    { key: 'started', label: 'assigned', value: split.started, color: STATUS.good },
-    { key: 'moving', label: 'moving', value: split.moving, color: 'var(--chart-info)' },
-    { key: 'unassigned', label: 'unassigned', value: split.unassigned, color: STATUS.critical },
-  ];
-  const sub = split.unassigned
-    ? `${num(split.unassigned)} of ${num(total)} not placed`
-    : split.moving ? `all placed · ${num(split.moving)} in flight` : 'every shard is placed';
-
-  return { sub, split, node: splitDonut(segments, { total, totalLabel: 'shards total', format: (v) => num(v) }) };
-}
-
-/**
- * What this cluster is, in one band one line tall: the shard split as a small donut with
- * its counts, then the figures, each a caption and a value with at most a short grey
- * suffix (the rest in its tooltip).
- *
- * It was a 140 px arc beside a grid of stacked figures — 250 px for six numbers and a
- * three-way split, on a page whose working surface is the two tables under it. The band
- * wraps when the window is narrow rather than squeezing; nothing is dropped.
- *
- * Anything that needs a paragraph — a dangling index, indices past retention — runs full
- * width underneath, because a paragraph in a 240px column is a column of syllables.
- */
-function glanceCard(c, all, d) {
-  const mix = shardMixBody(c, all, d);
-  const acct = accountingBody(c, d);
-  const indices = state.indices.get(c.id) || [];
-  const nodes = d.nodes || [];
-
-  return card('Cluster at a glance', `${c.name} · ${mix.sub} · ${acct.sub}`,
-    h('div', { style: { display: 'grid', gap: '8px' } },
-      h('div.glance-band',
-        mix.node,
-        h('div.glance-figs',
-          figure('Nodes', num(nodes.length), d.master ? `master ${d.master}` : 'no master elected'),
-          figure('Indices', num(indices.length), null, { title: `${num(indices.length)} indices · ${num(all.length)} shards in total` }),
-          ...acct.figures)),
-      mix.split.unassigned
-        ? h('div.muted', { style: { fontSize: '11.5px' } },
-            'An unassigned shard holds no data that can be read. The table below says why each one is unplaced.')
-        : null,
-      ...acct.notes));
-}
-
-/**
- * The node table and the cluster's workload, in one pane at the top of the page.
- *
- * They were two cards, and briefly two of three columns, which cut a nine-column table
- * down to a third of the window — the widest table on the page in the narrowest space it
- * has ever had. It gets the full width back, and the load summary sits with it because
- * you read them together: a node at 96% RAM means one thing when the cluster is idle and
- * another when it is rejecting work.
- */
-function nodesAndLoadCard(c, d) {
+function nodesCard(c, d) {
   const nodes = d.nodes || [];
   const load = loadBody(c);
   const sub = `${nodes.length} node(s)${d.master ? ` · master ${d.master}` : ' · no master'}`
     + (load ? ` · ${load.sub}` : '');
-  return focusable(card('Nodes & cluster load', sub,
+  return focusable(card('Nodes & resource usage', sub,
     h('div', { style: { display: 'grid', gap: '12px' } },
       nodes.length ? nodesBody(c, d) : empty('The cluster did not return a node list.'),
       load
@@ -506,12 +479,13 @@ const LEVEL_INK = { warn: 'var(--warning-ink)', crit: 'var(--critical-ink)' };
  * coloured by `kind`'s thresholds, and the number beside it — in the level's ink from
  * amber up, so colour is never the only signal. A figure the node did not report is a dash.
  */
-function usageBar(p, kind, title) {
+function usageBar(p, kind, title, suffix = null) {
   if (!isFinite(p)) return h('span.muted', '–');
   const level = usageLevel(p, kind);
   return h('div.use-bar', { title },
     h('div.bar-mini', h('i', { style: { width: `${Math.min(100, Math.max(1.5, p))}%`, background: LEVEL_FILL[level] } })),
-    h('span.use-num', { style: LEVEL_INK[level] ? { color: LEVEL_INK[level], fontWeight: 640 } : null }, `${p}%`));
+    h('span.use-num', { style: LEVEL_INK[level] ? { color: LEVEL_INK[level], fontWeight: 640 } : null }, `${Number.isInteger(p) ? p : p.toFixed(1)}%`),
+    suffix ? h('span.muted', { style: { fontSize: '11px', whiteSpace: 'nowrap' } }, suffix) : null);
 }
 
 /**
@@ -532,14 +506,11 @@ function loadCell(n, coreCount) {
     h('span.use-num', { style: LEVEL_INK[level] ? { color: LEVEL_INK[level], fontWeight: 640 } : null }, text));
 }
 
+/** Disk as the same bar, the free space and the shard count beside the number — one line. */
 function diskBar(used, total, p, shardCount) {
   if (!total) return h('span.muted', '–');
-  const colour = p >= 90 ? STATUS.critical : p >= 80 ? STATUS.warning : STATUS.good;
-  return h('div', { style: { display: 'grid', gap: '3px', minWidth: '170px' } },
-    h('div', { style: { display: 'flex', justifyContent: 'space-between', fontSize: '11px' } },
-      h('span', `${p.toFixed(1)}%`),
-      h('span.muted', `${bytes(total - used)} free${shardCount !== null ? ` · ${num(shardCount)} shards` : ''}`)),
-    h('div.bar-mini', h('i', { style: { width: `${Math.min(100, Math.max(1.5, p))}%`, background: colour } })));
+  return usageBar(p, 'disk', `disk ${p.toFixed(1)} % — ${bytes(used)} of ${bytes(total)} used`,
+    `${bytes(total - used)} free${shardCount !== null ? ` · ${num(shardCount)} shards` : ''}`);
 }
 
 /**
@@ -557,102 +528,166 @@ function roleTitle(letters) {
   return [...String(letters || '')].map((x) => ROLE_LETTERS[x] || x).join(', ');
 }
 
-/**
- * Disk Elasticsearch holds against disk any index accounts for.
- *
- * Shown only when they disagree materially. Agreeing is the normal case and a card saying
- * "these two numbers match" every time is a card nobody reads.
- */
-function accountingBody(c, d) {
-  const acct = diskAccounting(d, state.indices.get(c.id));
-  const dang = danglingFor(c.id);
-  const stale = staleIndices(c, state.indices.get(c.id));
+/* ------------------------------- shard allocation ------------------------------- */
 
-  // The two figures are always worth showing — "how much do the indices hold against how
-  // much is on disk" is asked whether or not they disagree. The explanation below only
-  // appears when they do.
-  // Handed back one by one rather than pre-wrapped, so the caller lays them out in the
-  // glance band with its own figures. Only what changes the reading is a visible suffix
-  // (an unread index list, a gap worth a look); the rest is the figure's tooltip.
-  const nIdx = num((state.indices.get(c.id) || []).length);
-  const figures = [
-    figure('Indices hold', acct.known ? bytes(acct.accounted) : '–', acct.known ? null : 'index list not read yet',
-      { title: acct.known ? `Indices hold ${bytes(acct.accounted)}: the store size of the ${nIdx} indices listed` : 'Indices hold: not known until the index list is read' }),
-    figure('Elasticsearch holds', d.disk ? bytes(d.disk.indicesBytes || 0) : '–', null,
-      { title: d.disk ? `Elasticsearch holds ${bytes(d.disk.indicesBytes || 0)} of index data on the data path (_cat/allocation)` : 'Elasticsearch holds: _cat/allocation not read' }),
-    figure('Disk used', d.disk ? bytes(d.disk.used || 0) : '–',
-      d.disk && isFinite(d.disk.percent) ? `${d.disk.percent.toFixed(1)} %` : null,
-      { title: d.disk && isFinite(d.disk.percent) ? `Disk used ${bytes(d.disk.used || 0)} of ${bytes(d.disk.total)} across the data nodes` : 'Disk used: _cat/allocation not read' }),
-    figure('Unaccounted', acct.known ? bytes(Math.max(0, acct.gap)) : 'unknown',
-      acct.known ? (acct.material ? 'worth a look' : null) : 'needs the index list',
-      { alert: acct.known && acct.material,
-        title: acct.known
-          ? (acct.material ? `${bytes(acct.gap)} on disk that no index accounts for — explained below` : `Unaccounted ${bytes(Math.max(0, acct.gap))}: within rounding of the index list`)
-          : 'Unaccounted: needs the index list to compare against' }),
+/**
+ * Where the shards stand: one population divided (core/nodes-shards.js shardSplit).
+ * `_cat/shards` is the detail; `_cluster/health` is the cluster's own count. The rows we
+ * have come first, the health count when the listing was refused. Hidden indices count:
+ * this is the cluster's truth, not the table's filter.
+ */
+function shardMix(all, d) {
+  const h2 = d.health || {};
+  const split = shardSplit(all);
+  const total = split.total || (Number(h2.active_shards) || 0) + (Number(h2.unassigned_shards) || 0);
+  const sub = !total ? 'nothing reported'
+    : split.unassigned ? `${num(split.unassigned)} of ${num(total)} not placed`
+    : split.moving ? `all placed · ${num(split.moving)} in flight` : 'every shard is placed';
+  return { split, total, sub };
+}
+
+/** How the allocation switch's values read on the control. */
+const ALLOC_LABEL = { all: 'on', primaries: 'primaries only', new_primaries: 'new primaries only', none: 'off' };
+
+/**
+ * Shard allocation: the 96 px ring with the total inside, three tiles (assigned · moving ·
+ * unassigned — the unassigned one carries the reasons and a "show" that narrows the table),
+ * the shards per node as short bars, and in the header the allocation switch.
+ */
+function allocationCard(c, all, d) {
+  const mix = shardMix(all, d);
+  const split = mix.split;
+  const segments = [
+    { key: 'started', label: 'assigned', value: split.started, color: STATUS.good },
+    { key: 'moving', label: 'moving', value: split.moving, color: 'var(--chart-info)' },
+    { key: 'unassigned', label: 'unassigned', value: split.unassigned, color: STATUS.critical },
   ];
+  const reasons = unassignedByReason(all);
+  const reasonWords = reasons.map((r) => `${r.reason.replace(/_/g, ' ').toLowerCase()} ${num(r.count)}`).join(' · ');
 
-  // Everything below is a paragraph or a table, and runs full width under both columns.
-  const body = [];
+  // The listing is the truth about who holds what; `_cat/allocation` stands in when it was refused.
+  let per = [...shardsPerNode(all).entries()];
+  if (!per.length) per = ((d.disk && d.disk.nodes) || []).filter((n) => n.node && n.node !== 'UNASSIGNED').map((n) => [n.node, Number(n.shards) || 0]);
+  per.sort((a, b) => b[1] - a[1] || String(a[0]).localeCompare(String(b[0])));
+  const busiest = per.reduce((m, [, n]) => Math.max(m, n), 0);
 
-  if (acct.material) {
-    body.push(h('div.banner.warn', { style: { margin: 0 } },
-      h('div',
-        h('div.ttl', `${bytes(acct.gap)} on disk that no index accounts for`),
-        h('div', { style: { fontSize: '12px' } },
-          'Data the cluster state does not know about — a dangling index left by a removed '
-          + 'node, or shard directories orphaned by a failed relocation. Deleting an index '
-          + 'will not reclaim it, because there is no index to delete.'))));
-    body.push(dang === null
-      ? h('div.muted', { style: { fontSize: '12px' } }, 'Checking for dangling indices…')
-      : (dang.indices || []).length
-        ? h('div',
-            h('div.muted', { style: { fontSize: '11px', marginBottom: '3px' } }, 'dangling'),
-            table(['Index', 'UUID', 'Created'], dang.indices.map((r) => h('tr',
-              h('td.mono', r.index_name),
-              h('td.mono.muted', { style: { fontSize: '10.5px' } }, r.index_uuid),
-              h('td.muted', { style: { fontSize: '11.5px' } }, r.creation_date_millis
-                ? new Date(r.creation_date_millis).toISOString().slice(0, 10) : '')))))
-        : h('div.muted', { style: { fontSize: '12px' } },
-            'No dangling indices, so the gap is orphaned shard data rather than a lost index. '
-            + 'A rolling restart of the affected node clears directories it no longer owns.'));
-  }
+  const body = !mix.total
+    ? h('div.muted', { style: { fontSize: '11.5px' } }, 'No shard listing and no health count — unknown, not zero.')
+    : h('div',
+        h('div.ns-alloc',
+          splitDonut(segments, { total: mix.total, totalLabel: 'shards', format: (v) => num(v), size: 96, inside: true, legend: false }),
+          h('div.ns-alloc-tiles',
+            edgeTile(num(split.started), 'assigned', { edge: STATUS.good, title: `${num(split.started)} shards started` }),
+            edgeTile(num(split.moving), 'moving', { edge: 'var(--chart-info)', title: split.moving ? `${num(split.moving)} relocating or initialising` : 'no shard is relocating or initialising',
+              extra: split.moving ? null : h('span', 'none') }),
+            edgeTile(num(split.unassigned), 'unassigned', { edge: STATUS.critical, alert: split.unassigned > 0,
+              title: split.unassigned ? `unassigned, by reason: ${reasonWords}` : 'every shard is placed',
+              extra: split.unassigned ? [h('span', reasonWords),
+                h('button.btn.sm.ghost', { title: 'Show only the unassigned shards in the table below', onclick: () => { showUnassigned(); draw(); } }, 'show')] : null }))),
+        per.length
+          ? h('div.ns-pernode', { title: 'Shards per node, from the shard listing' },
+              ...per.flatMap(([name, n]) => [
+                h('span', name),
+                h('div.bar-mini', h('i', { style: { width: `${busiest ? Math.max(1.5, (n / busiest) * 100) : 0}%`, background: 'var(--chart-info)' } })),
+                h('span.n', num(n))]))
+          : null);
 
-  if (stale.list.length) {
-    body.push(h('div',
-      h('div.muted', { style: { fontSize: '11px', marginBottom: '3px' } },
-        `past the ${stale.policy} retention policy — ${bytes(stale.bytes)} across ${num(stale.list.length)} indices`),
-      table([{ label: 'Index', sort: null }, 'Day', { label: 'Size', num: true }],
-        stale.list.slice(0, 12).map((i) => h('tr',
-          h('td.mono', i.index), h('td.muted', i.day), h('td.num', bytes(i.size || 0)))),
-        { emptyText: '' }),
-      stale.list.length > 12
-        ? h('div.muted', { style: { fontSize: '11px' } }, `…and ${num(stale.list.length - 12)} more`)
-        : null));
-  }
-
-  const sub = acct.material ? `${bytes(acct.gap)} unexplained`
-    : stale.list.length ? `${num(stale.list.length)} indices past retention`
-    : 'indices and disk agree';
-  return { sub, figures, notes: body };
+  return card('Shard allocation', `${c.name} · ${mix.sub}`, body, [allocationControl(c)]);
 }
-
-
 
 /**
- * Indices whose data is older than the retention this cluster promises.
- *
- * "Stale" in the sense that matters when disk is short: still on disk, still costing,
- * and past the point the policy said they would be kept. Read from the date in the index
- * name, so a cluster whose indices are not dated reports none rather than guessing.
+ * The allocation switch: `cluster.routing.allocation.enable` as read (transient over persistent
+ * over default), and a menu of the four values. Choosing one is a write through the same gate
+ * as Move… and Retry failed allocations; while writes are locked the control is disabled and
+ * its title says why. "Not known" when the setting could not be read — never a guess.
  */
-function staleIndices(c, indices) {
-  const ret = parseRetention(c.liveRetention);
-  if (!ret || !Array.isArray(indices)) return { list: [], bytes: 0, policy: '' };
-  const cutoff = new Date(Date.now() - ret.days * 86400000).toISOString().slice(0, 10);
-  const list = indices.filter((i) => i.day && i.day < cutoff)
-    .sort((a, b) => String(a.day).localeCompare(String(b.day)));
-  return { list, bytes: list.reduce((n, i) => n + (i.size || 0), 0), policy: ret.label };
+function allocationControl(c) {
+  const e = alloc.get(c.id);
+  const s = e && e.setting;
+  const text = s ? `Allocation: ${ALLOC_LABEL[s.value] || s.value}`
+    : e && e.inflight ? 'Allocation: reading…'
+    : fleetView ? 'Allocation: not read' : 'Allocation: not known';
+  const read = s ? `cluster.routing.allocation.enable = ${s.value} (${s.source} setting)`
+    : e && e.error ? `cluster.routing.allocation.enable could not be read: ${e.error}`
+    : fleetView ? 'cluster.routing.allocation.enable is not read with All clusters — pick one cluster' : 'cluster.routing.allocation.enable — not read yet';
+  const locked = !roleMayWrite() ? `Your role (${state.caller.role}) reads clusters only — an ElasticPro admin changes allocation (EP-110)`
+    : !writesAllowed() ? 'Writes are locked: tick ✎ writes in the Shards card first' : null;
+  const btn = rowMenu(() => [
+    { hint: 'cluster.routing.allocation.enable — which shards Elasticsearch may place or move. Written as a persistent setting.' },
+    ...ALLOCATION_VALUES.map((v) => ({
+      label: `${ALLOC_LABEL[v]} (${v})`, disabled: !!(s && s.value === v), note: s && s.value === v ? 'current' : null,
+      title: ALLOCATION_MEANING[v], onClick: () => setAllocation(c, v),
+    })),
+  ], { label: `${text} ▾`, title: locked ? `${read} · ${locked}` : read, trigger: 'button.btn.sm.menu-trigger.ns-alloc-btn', menuLabel: 'Shard allocation' });
+  if (locked) { btn.disabled = true; btn.setAttribute('aria-disabled', 'true'); }
+  btn.dataset.allocation = s ? s.value : 'unknown';
+  return btn;
 }
+
+/** Switch `cluster.routing.allocation.enable`: the gate, the consequence in words, then the write. */
+async function setAllocation(c, v) {
+  if (!(await ensureWrites())) return;
+  const ok = await confirmDialog(`Switch shard allocation to ${ALLOC_LABEL[v]}?`,
+    `cluster.routing.allocation.enable: ${v}\n\n${ALLOCATION_MEANING[v][0].toUpperCase()}${ALLOCATION_MEANING[v].slice(1)}.\n\n`
+    + `Written to ${c.name} as a persistent cluster setting; it stays until it is changed again.`,
+    { yes: `set ${v}`, danger: v !== 'all' });
+  if (!ok) return;
+  try {
+    const r = await client(c.id).setAllocationEnable(v);
+    if (r && r.acknowledged === false) throw new Error('Elasticsearch did not acknowledge it');
+    toast(`Shard allocation: ${ALLOC_LABEL[v]}`, 'ok', 5000, { meta: c.name, detail: [`cluster.routing.allocation.enable = ${v}`] });
+    await loadAllocation(c, true);
+    if (v === 'all') await load(c);
+  } catch (e) {
+    toast('Could not change shard allocation', 'err', 12000, { meta: c.name, detail: [e.message] });
+  }
+}
+
+/* -------------------------------- query pressure -------------------------------- */
+
+/**
+ * Query pressure: a pill in the header — No pressure / Under pressure, by the one rule in
+ * core/node-rates.js pressureState — and four tiles: rejected, breaker trips, search queue,
+ * write queue, each with its breakdown in the tooltip. Before two readings exist the card
+ * says it is measuring; nothing is shown as zero that was not measured.
+ */
+function pressureCard(c) {
+  const r = nodeRates(c.id);
+  const ps = pressureState(r);
+  const io = ratesIo.get(c.id);
+  const sizes = sizesFor(c.id);
+  const nodeCount = ((state.data.get(c.id) || {}).nodes || []).length;
+  const fmt = (v) => (v === null || v === undefined ? '–' : num(v));
+  const poolText = (pool) => {
+    const z = sizes && sizes[pool];
+    if (!z || !z.nodes) return 'pool size not read';
+    if (z.size === null) return `pool sizes differ across the ${num(z.nodes)} nodes`;
+    return `of ${z.size === -1 ? 'an unbounded queue' : num(z.size)} per node · ${num(z.nodes)} node${z.nodes === 1 ? '' : 's'}`;
+  };
+  const headPill = ps.state === 'unknown' ? pill('measuring', 'grey')
+    : ps.state === 'pressure' ? pill('Under pressure', 'red') : pill('No pressure', 'green');
+  const note = r.measured
+    ? `between the last two polls, ${Math.round(r.sinceMs / 1000)} s apart${ps.why.length ? ` · ${ps.why.join(' · ')}` : ''}`
+    : fleetView ? 'not measured with All clusters — pick one cluster'
+    : io && io.error ? `could not read _nodes/stats: ${io.error}`
+    : 'measuring · next poll';
+  const by = r.rejectedBy || {}, tb = r.tripsBy || {};
+  return card('Query pressure', `${c.name} · between the last two polls`,
+    h('div',
+      h('div.ns-pressure',
+        edgeTile(fmt(r.rejected), 'rejected', { alert: r.rejected > 0,
+          title: `rejected between the last two polls — search ${fmt(by.search)} · write ${fmt(by.write)} · bulk ${fmt(by.bulk)}${r.measured ? '' : ' · not measured yet'}` }),
+        edgeTile(fmt(r.breakerTrips), 'breaker trips', { alert: r.breakerTrips > 0,
+          title: `breaker trips between the last two polls — parent ${fmt(tb.parent)} · request ${fmt(tb.request)} · fielddata ${fmt(tb.fielddata)}${r.measured ? '' : ' · not measured yet'}` }),
+        edgeTile(fmt(r.searchQueue), 'search queue', { alert: r.queueSustained && r.searchQueue > 0,
+          title: `search requests queued now across the nodes · ${poolText('search')}${nodeCount ? ` · ${num(nodeCount)} nodes in the cluster` : ''}` }),
+        edgeTile(fmt(r.writeQueue), 'write queue', { alert: r.queueSustained && r.writeQueue > 0,
+          title: `write requests queued now across the nodes · ${poolText('write')}` })),
+      h('div.ns-note', note)),
+    [headPill]);
+}
+
+/* ---------------------------------- the table ---------------------------------- */
 
 /** _cat gives strings; everything downstream wants the numbers as numbers. */
 function normalise(r) {
@@ -666,36 +701,6 @@ function normalise(r) {
     docs: Number(r.docs) || 0,
     reason: r['unassigned.reason'] || '',
   };
-}
-
-/**
- * The nodes, as somewhere to put a shard.
- *
- * Shard count and free disk together, because choosing a target needs both: the emptiest
- * node is the wrong answer if it is also the fullest, and Elasticsearch will refuse the
- * move at the high watermark anyway.
- */
-function nodeStrip(c, d, all) {
-  const rows = (d.disk && d.disk.nodes) || [];
-  if (!rows.length) return null;
-  const counted = new Map();
-  all.forEach((s) => { if (s.node) counted.set(s.node, (counted.get(s.node) || 0) + 1); });
-
-  const tiles = rows.map((n) => {
-    const used = Number(n['disk.used']) || 0;
-    const total = Number(n['disk.total']) || 0;
-    const p = total ? (used / total) * 100 : 0;
-    const colour = p >= 90 ? STATUS.critical : p >= 80 ? STATUS.warning : STATUS.good;
-    return h('div', { style: { display: 'grid', gap: '3px', minWidth: '160px', flex: '1 1 160px' } },
-      h('div', { style: { display: 'flex', justifyContent: 'space-between', fontSize: '11.5px' } },
-        h('b', n.node),
-        h('span.muted', `${num(counted.get(n.node) || Number(n.shards) || 0)} shards`)),
-      h('div.bar-mini', h('i', { style: { width: `${Math.min(100, Math.max(1.5, p))}%`, background: colour } })),
-      h('div.muted', { style: { fontSize: '10.5px' } },
-        `${bytes(Number(n['disk.avail']) || 0)} free of ${bytes(total)}`));
-  });
-  return card('Nodes', 'where a shard can go, and the disk left to put it on',
-    h('div', { style: { display: 'flex', gap: '14px', flexWrap: 'wrap' } }, ...tiles));
 }
 
 function shardsCard(c, d, all, raw) {
@@ -736,13 +741,12 @@ function shardsCard(c, d, all, raw) {
   const sorted = SHARD_SORT.apply(filtered, SHARD_COLS);
   const shown = sorted.slice(0, ui.limit);
 
-  const key = (x) => `${x.index}/${x.shard}/${x.primary ? 'p' : 'r'}`;
   const trs = shown.map((s) => h('tr',
     h('td', { style: { width: '26px' } }, s.state === 'STARTED'
-      ? h('input', { type: 'checkbox', checked: picked.has(key(s)),
+      ? h('input', { type: 'checkbox', checked: picked.has(keyOf(s)),
           title: 'Include this shard in a bulk move',
           onchange: (e) => {
-            if (e.target.checked) picked.set(key(s), { ...s, clusterId: c.id }); else picked.delete(key(s));
+            if (e.target.checked) picked.set(keyOf(s), { ...s, clusterId: c.id }); else picked.delete(keyOf(s));
             draw();
           } })
       : null),
@@ -755,13 +759,13 @@ function shardsCard(c, d, all, raw) {
     h('td.num', s.docs ? compact(s.docs) : '–'),
     h('td.muted', { style: { fontSize: '11px', maxWidth: '200px', wordBreak: 'break-word' } },
       s.reason ? s.reason.replace(/_/g, ' ').toLowerCase() : ''),
-    h('td', h('div', { style: { display: 'flex', gap: '4px', justifyContent: 'flex-end' } },
+    h('td', h('div', { style: { display: 'flex', gap: '4px', justifyContent: 'flex-end', alignItems: 'center' } },
       s.state === 'STARTED'
         ? h('button.btn.sm', {
             title: writesAllowed() ? 'Move this shard to another node' : 'Allow writes first',
             onclick: () => moveOne(c, d, s),
           }, 'Move…')
-        : null))));
+        : s.state === 'UNASSIGNED' ? explainButton(c, s) : null))));
 
   const controls = keptBox(`controls:${c.id}`, 'div.toolbar', null, [
     h('label.field', 'Index',
@@ -788,18 +792,18 @@ function shardsCard(c, d, all, raw) {
         onclick: () => retry(c),
       }, 'Retry failed allocations'),
       freshnessBar(datasetFreshness(c.id, 'shards'), () => load(c), { label: 'shards', busy: loading.has(c.id), dense: true }),
-      h('button.btn.sm', { onclick: () => load(c) }, '↻ Reload shards'))]);
+      h('button.btn.sm.icon', { 'aria-label': 'Reload shards', title: 'Reload shards', onclick: () => load(c) }, '↻'))]);
 
   const mine = [...picked.values()].filter((x) => x.clusterId === c.id);
   const bulkBar = mine.length
     ? h('div', { style: { display: 'flex', gap: '8px', alignItems: 'center', padding: '8px 10px',
                           background: 'var(--accent-soft)', borderRadius: '4px', marginBottom: '6px' } },
-        h('b', { style: { fontSize: '12px' } }, `${num(mine.length)} shard(s) ticked`),
+        h('b', { style: { fontSize: '12px' } }, `${num(mine.length)} selected`),
         h('span.muted', { style: { fontSize: '11px' } },
           `${bytes(mine.reduce((n, x) => n + (x.store || 0), 0))} in total`),
         h('div', { style: { marginLeft: 'auto', display: 'flex', gap: '6px' } },
           h('button.btn.sm.primary', { onclick: () => moveMany(c, d, mine) }, 'Move them…'),
-          h('button.btn.sm.ghost', { onclick: () => { mine.forEach((x) => picked.delete(`${x.index}/${x.shard}/${x.primary ? 'p' : 'r'}`)); draw(); } }, 'Clear')))
+          h('button.btn.sm.ghost', { onclick: () => { mine.forEach((x) => picked.delete(keyOf(x))); draw(); } }, 'Clear')))
     : null;
 
   const sub = `${num(filtered.length)} of ${num(visible.rows.length)} shard(s)`
@@ -809,7 +813,9 @@ function shardsCard(c, d, all, raw) {
   return focusable(keptCard(built, `shards:${c.id}`, `Shards — ${c.name}`, why || sub,
     [controls, bulkBar,
       why ? h('div', { style: { padding: '14px' } }, empty(why)) : null,
-      table([tickAll(shown.filter((x) => x.state === 'STARTED'), c),
+      // The head tick works on every started shard the filters match — on every page, not
+      // only the rows on screen — and says how many are ticked.
+      table([tickAll(sorted.filter((x) => x.state === 'STARTED'), c, mine.length),
            { label: 'Index', sort: 'index' }, { label: 'Shard', num: true, sort: 'shard' },
            { label: 'Type', sort: 'type' }, { label: 'State', sort: 'state' },
            { label: 'Node', sort: 'node' }, { label: 'Store', num: true, sort: 'store' },
@@ -826,20 +832,57 @@ function shardsCard(c, d, all, raw) {
         : null]), 'shards');
 }
 
-/** The header tick: select every movable shard currently shown, or none of them. */
-function tickAll(movable, c) {
-  const allOn = movable.length > 0 && movable.every((x) => picked.has(`${x.index}/${x.shard}/${x.primary ? 'p' : 'r'}`));
-  return {
-    label: h('input', { type: 'checkbox', checked: allOn,
-      title: allOn ? 'Clear the selection' : 'Tick every started shard shown',
-      onchange: () => {
-        movable.forEach((x) => {
-          const k = `${x.index}/${x.shard}/${x.primary ? 'p' : 'r'}`;
-          if (allOn) picked.delete(k); else picked.set(k, { ...x, clusterId: c.id });
-        });
-        draw();
-      } }),
-  };
+/**
+ * The header tick: select every movable shard the current filters match — all pages, not the
+ * one on screen — or clear them; "N selected" beside it while any are. Half-ticked when some are.
+ */
+function tickAll(movable, c, selectedCount) {
+  const allOn = movable.length > 0 && movable.every((x) => picked.has(keyOf(x)));
+  const box = h('input', { type: 'checkbox', checked: allOn,
+    'aria-label': 'Select every started shard the filters match',
+    title: allOn ? 'Clear the selection' : `Tick every started shard the filters match (${num(movable.length)}, on every page)`,
+    onchange: () => {
+      movable.forEach((x) => { if (allOn) picked.delete(keyOf(x)); else picked.set(keyOf(x), { ...x, clusterId: c.id }); });
+      draw();
+    } });
+  box.indeterminate = selectedCount > 0 && !allOn;
+  return { label: h('span.tick-all', { style: { display: 'inline-flex', alignItems: 'center', gap: '5px', whiteSpace: 'nowrap' } }, box,
+    selectedCount ? h('span.muted', { style: { fontWeight: 400, textTransform: 'none' } }, `${num(selectedCount)} selected`) : null) };
+}
+
+/**
+ * The "i" at the end of an unassigned shard row: why this shard is unassigned, from
+ * `GET _cluster/allocation/explain` for that very shard (asked when pressed, through the core
+ * like any read), in words (core/shard-fixes.js), with the recommended fix and two buttons —
+ * Retry failed allocations (the gated action) and the explain request in the REST console.
+ * A failed explain says so; nothing is guessed.
+ */
+function explainButton(c, s) {
+  const id = `${s.index} · shard ${s.shard} · ${s.primary ? 'primary' : 'replica'}`;
+  return infoButton({
+    id, head: 'why unassigned · recommended fix',
+    label: `Why ${s.index}[${s.shard}] is unassigned`, title: 'Why this shard is unassigned, and the recommended fix',
+    failed: 'The cluster could not explain it:',
+    items: async () => {
+      const w = explainInWords(await client(c.id).allocationExplainFor(s.index, s.shard, s.primary));
+      if (!w) throw new Error('the answer was not an explain answer');
+      return [{
+        title: `Reason: ${w.title}${w.reason ? ` (${w.reason})` : ''}`,
+        cause: h('div', { style: { display: 'grid', gap: '3px' } },
+          h('div', w.cause),
+          w.explanation ? h('div.muted', `Elasticsearch: “${w.explanation}”`) : null,
+          w.details ? h('div.muted.mono', { style: { fontSize: '11px' } }, w.details) : null,
+          ...w.deciders.map((dc) => h('div.ld-fixdec', h('b', `${dc.node} · ${dc.decider}: `), dc.explanation))),
+        fix: w.fix ? h('span', h('b', `${w.fix.title}. `), w.fix.fix) : 'No fix is known for this reason — read the node decisions above.',
+        actions: [
+          h('button.btn.sm', { title: 'Ask Elasticsearch to try the allocations it gave up on. Safe: it retries, it does not force.', onclick: () => retry(c) }, 'Retry failed allocations'),
+          h('button.btn.sm', { title: 'Open GET _cluster/allocation/explain for this shard in the REST console',
+            onclick: () => navigateTo('console', { method: 'GET', path: '/_cluster/allocation/explain', body: JSON.stringify(explainBody(s.index, s.shard, s.primary), null, 2) }) },
+            'Open the explain answer in REST'),
+        ],
+      }];
+    },
+  });
 }
 
 /**
@@ -890,7 +933,7 @@ async function moveMany(c, d, list) {
   ], { width: '600px' });
 
   if (res) {
-    list.forEach((x) => picked.delete(`${x.index}/${x.shard}/${x.primary ? 'p' : 'r'}`));
+    list.forEach((x) => picked.delete(keyOf(x)));
     trackTask({ title: `Moving ${res.n} shard${res.n === 1 ? '' : 's'}`, cluster: c,
       detail: [`→ ${res.to}`, res.list.slice(0, 3).map((x) => `${x.index}[${x.shard}]`).join(', ') + (res.list.length > 3 ? ` +${res.list.length - 3} more` : '')],
       poll: shardMovePoll(c, res.list.map((x) => ({ index: x.index, shard: x.shard, to: res.to }))), timeoutMs: 6 * 3600e3 });

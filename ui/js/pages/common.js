@@ -192,6 +192,18 @@ export function unreadable(what, reasonText, actions = null) {
  * Here rather than on a page so a second row of figures elsewhere cannot drift in size,
  * weight or casing — which is exactly how a row of figures stops reading as one row.
  */
+/**
+ * A tile: one big number (22 px) over a small upper-case label, with a 3 px colour edge on the
+ * left — the Shard allocation and Query pressure cards of Nodes & shards are built from it.
+ * `edge` is the colour (none for a plain tile); `title` carries the breakdown that is not on
+ * screen; `extra` nodes go on the label line (a "show" link, a note).
+ */
+export function edgeTile(value, label, { edge = null, title = null, extra = null, alert = false } = {}) {
+  return h(`div.edge-tile${alert ? '.alert' : ''}`, { title, style: edge ? { borderLeftColor: edge } : null },
+    h('b.v', value),
+    h('div.k', h('span', label), ...(Array.isArray(extra) ? extra : extra ? [extra] : [])));
+}
+
 export function figure(label, value, sub, { alert = false, title = null } = {}) {
   // `alert`: a figure that needs attention is red, so it is seen before it is read.
   return h(`div.fig-inline${alert ? '.alert' : ''}`, { title: title || `${label}: ${value}${sub ? ` · ${sub}` : ''}` },

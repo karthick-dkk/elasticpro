@@ -445,13 +445,17 @@ export function splitGauge(segments, opts = {}) {
  * of one circumference (stroke dashes on one circle each), so a slice is hoverable and
  * titled like an arc segment.
  *
+ * `size` makes it bigger (the Shard allocation card's 96 px); `inside` puts the total in the
+ * ring instead of beside it; `legend: false` leaves the counts to the caller (tiles beside it).
+ * One definition whatever the size.
+ *
  * @param segments [{ key, label, value, color }]
- * @param opts { total, totalLabel, format, size, stroke }
+ * @param opts { total, totalLabel, format, size, stroke, inside, legend }
  */
 export function splitDonut(segments, opts = {}) {
   const { parts, total } = divide(segments, opts.total);
   const fmt = opts.format || ((v) => String(v));
-  const size = opts.size || 44, sw = opts.stroke || 10;
+  const size = opts.size || 44, sw = opts.stroke || (size >= 80 ? 12 : 10);
   const r = (size - sw) / 2, c = size / 2;
   const C = 2 * Math.PI * r;
   const label = opts.totalLabel || 'total';
@@ -471,13 +475,15 @@ export function splitDonut(segments, opts = {}) {
     s.append(seg);
     at += len;
   }
-  return h('div.split-donut',
-    s,
-    h('div.split-total', h('b', fmt(total)), h('span.muted', label)),
-    h('div.split-legend', ...parts.map((part) => h('div', { title: `${part.label}: ${fmt(part.value)}` },
-      h('span.dot', { style: { background: part.color } }),
-      h('b', fmt(part.value)),
-      h('span.muted', part.label)))));
+  const totalEl = h('div.split-total', h('b', fmt(total)), h('span.muted', label));
+  return h(`div.split-donut${opts.inside ? '.inside' : ''}`,
+    opts.inside ? h('div.split-ring', s, totalEl) : s,
+    opts.inside ? null : totalEl,
+    opts.legend === false ? null
+      : h('div.split-legend', ...parts.map((part) => h('div', { title: `${part.label}: ${fmt(part.value)}` },
+          h('span.dot', { style: { background: part.color } }),
+          h('b', fmt(part.value)),
+          h('span.muted', part.label)))));
 }
 
 /* --------------------------------- honeycomb ---------------------------------- */

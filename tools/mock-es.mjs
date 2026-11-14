@@ -284,10 +284,11 @@ const routes = [
       'disk.used_percent': '21', uptime: '10d' }])],
   // The processor count behind the Load column's bar (Nodes & shards). node-3 reports none,
   // so its load is shown as text alone — the "unknown is not zero" path is on screen too.
+  // The same call brings the search and write pools' queue sizes (the Query pressure card's scale).
   [(u) => u.startsWith('/_nodes/_all/os'), () => ({ nodes: {
-    Xk3pQ9aTn1: { name: 'node-1', os: { allocated_processors: 4 } },
-    b7Lm2RfEn2: { name: 'node-2', os: { allocated_processors: 4 } },
-    Qw8nZc4Hn3: { name: 'node-3' } } })],
+    Xk3pQ9aTn1: { name: 'node-1', os: { allocated_processors: 4 }, thread_pool: { search: { queue_size: 1000 }, write: { queue_size: 10000 } } },
+    b7Lm2RfEn2: { name: 'node-2', os: { allocated_processors: 4 }, thread_pool: { search: { queue_size: 1000 }, write: { queue_size: 10000 } } },
+    Qw8nZc4Hn3: { name: 'node-3', thread_pool: { search: { queue_size: 1000 }, write: { queue_size: 10000 } } } } })],
   // _field_caps: the log-delay preflight asks this before it aggregates. Only the names
   // it was asked about AND that this fixture "has" come back — real _field_caps omits
   // what it cannot find rather than returning it empty, and the preflight reads absence
@@ -397,8 +398,13 @@ const routes = [
       os: { cpu: { percent: cpu } }, fs: { total: { total_in_bytes: 1e12, available_in_bytes: 4e11 } },
       // Counters that climb with the clock (42 searches and 300 documents a second across the
       // three nodes), so two readings make the rate the Clusters page's open row shows.
-      indices: { search: { query_total: 1e6 + Math.floor(Date.now() / 1000) * 14 }, indexing: { index_total: 5e7 + Math.floor(Date.now() / 1000) * 100 } },
-      thread_pool: { search: { queue: 0, rejected: 2 }, write: { queue: id === 'n3' ? 5 : 0, rejected: 7 }, get: { queue: 0, rejected: 0 } } }])) })],
+      // Searches take 40 ms each and 2 documents a second are deleted; the request breaker
+      // trips once an hour on node-3 — so the Query pressure card has non-zero deltas too.
+      indices: { search: { query_total: 1e6 + Math.floor(Date.now() / 1000) * 14, query_time_in_millis: 4e7 + Math.floor(Date.now() / 1000) * 14 * 40 },
+                 indexing: { index_total: 5e7 + Math.floor(Date.now() / 1000) * 100, delete_total: 1e4 + Math.floor(Date.now() / 1000) * 2 } },
+      // node-3's write queue stands at 5 on every reading: the "under pressure" rule has a case.
+      thread_pool: { search: { queue: 0, rejected: 2 }, write: { queue: id === 'n3' ? 5 : 0, rejected: 7 }, get: { queue: 0, rejected: 0 } },
+      breakers: { parent: { tripped: 0 }, request: { tripped: id === 'n3' ? Math.floor(Date.now() / 3600e3) : 0 }, fielddata: { tripped: 0 }, inflight_requests: { tripped: 0 } } }])) })],
   [(u) => u.startsWith('/_cluster/stats'), () => ({ indices: { count: INDICES.length, docs: { count: 5000 }, store: { size_in_bytes: 16e9 } },
     nodes: { count: { total: 3 }, versions: ['8.13.4'], jvm: { versions: [{ version: '21.0.2' }], max_uptime_in_millis: 864e6 },
       fs: { total_in_bytes: 3e12, available_in_bytes: 1.2e12 } } })],
@@ -955,7 +961,8 @@ function handle(req, res, url, body, port) {
       cancelledTasks.add(id);
       return res.end(JSON.stringify({ node_failures: [], nodes: { 'node-1': { name: 'node-1', tasks: { [id]: { cancelled: true } } } } }));
     }
-    if (req.method !== 'GET' && req.method !== 'HEAD' && !url.includes('_search') && !url.includes('_bulk')) {
+    // POST _cluster/allocation/explain names the shard in its body and changes nothing: routed like a read.
+    if (req.method !== 'GET' && req.method !== 'HEAD' && !url.includes('_search') && !url.includes('_bulk') && !url.startsWith('/_cluster/allocation/explain')) {
       // DELETE /_snapshot/<repo>/<name>[,<name>...] really removes them from the listing, so
       // "deleted it and it is still there" means the app, not the fixture. Everything else
       // stays a no-op.

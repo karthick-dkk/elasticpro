@@ -1000,9 +1000,43 @@ a.arow-cluster:hover { text-decoration: underline; }
 .split-legend > div { display: inline-flex; align-items: center; gap: 4px; font-size: 11.5px; white-space: nowrap; }
 .split-legend .dot { width: 8px; height: 8px; border-radius: 2px; flex: none; }
 .split-legend b { font-variant-numeric: tabular-nums; }
+/* The bigger ring (96 px, Shard allocation) with the total inside it. */
+.split-donut.inside { gap: 14px; }
+.split-ring { position: relative; display: inline-grid; place-items: center; flex: none; }
+.split-ring > svg { display: block; }
+.split-ring > .split-total { position: absolute; inset: 0; display: grid; place-content: center; text-align: center; gap: 0; line-height: 1.1; }
+.split-ring > .split-total > b { font-size: 20px; font-weight: 680; }
+.split-ring > .split-total > .muted { font-size: 10px; }
 
-/* Cluster at a glance (Nodes & shards): the split and the figures in one band, wrapping when
-   the window is narrow. Six figures and a 44 px donut in one row instead of a 250 px card. */
+/* Nodes & shards: the Shard allocation / Query pressure row, and the tiles both are built from
+   (pages/common.js edgeTile): one 22 px number over a small upper-case label, a 3 px colour edge. */
+.ns-row { display: grid; grid-template-columns: 1.4fr 1fr; gap: 10px; align-items: stretch; }
+@media (max-width: 980px) { .ns-row { grid-template-columns: 1fr; } }
+.ns-row > .card { margin: 0; }
+.edge-tile { border-left: 3px solid var(--border-strong); padding: 2px 0 2px 10px; display: grid; gap: 1px; min-width: 0; }
+.edge-tile > .v { font-size: 22px; font-weight: 680; line-height: 1.1; font-variant-numeric: tabular-nums; }
+.edge-tile > .k { font-size: 10px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--text-muted); display: flex; gap: 6px; align-items: baseline; flex-wrap: wrap; }
+.edge-tile > .k .link { text-transform: none; letter-spacing: 0; font-size: 11px; }
+.edge-tile.alert > .v { color: var(--critical-ink); }
+.ns-alloc { display: flex; gap: 18px; align-items: center; flex-wrap: wrap; }
+.ns-alloc-tiles { display: grid; grid-template-columns: repeat(3, minmax(96px, 1fr)); gap: 8px 14px; flex: 1 1 300px; min-width: 0; }
+.ns-pernode { display: grid; grid-template-columns: auto 1fr auto; gap: 2px 8px; align-items: center; font-size: 11.5px; margin-top: 10px; }
+.ns-pernode .bar-mini { height: 6px; }
+.ns-pernode .n { font-variant-numeric: tabular-nums; text-align: right; }
+.ns-pressure { display: grid; grid-template-columns: repeat(2, minmax(96px, 1fr)); gap: 10px 14px; }
+.ns-pressure .edge-tile { border-left-color: var(--border); }
+.ns-note { font-size: 11.5px; color: var(--text-muted); margin-top: 8px; }
+/* The node table: one 32 px line per node, no stacked cells. */
+.ns-nodes table.tbl td { padding: 0 10px; height: 32px; white-space: nowrap; }
+.ns-nodes table.tbl th { padding: 4px 10px; }
+.ns-nodes .mono.id { font-size: 11px; }
+/* The icon-only buttons of the Shards toolbar. */
+.btn.icon { padding: 3px 7px; font-size: 13px; line-height: 1.1; min-width: 28px; }
+.ld-fixacts { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 4px; }
+.ld-fixdec { font-size: 11.5px; color: var(--text-secondary); }
+
+/* Cluster figures in one band (pages/common.js figure; the Clusters overview), wrapping when
+   the window is narrow. */
 .glance-band { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 22px; min-height: 22px; }
 .glance-figs { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 16px; flex: 1 1 auto; min-width: 0; }
 .fig-inline { display: inline-flex; align-items: baseline; gap: 5px; font-size: 11.5px; white-space: nowrap; }
@@ -3053,9 +3087,9 @@ tr.jb-focus td { background: var(--accent-soft); }
 .ld-fetch-sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
 /* ld-fetch: end */
 /* ld-rows: start */
-.ld .ld-ibtn { width: 20px; height: 20px; border-radius: 50%; border: 1px solid var(--border-strong); background: var(--surface-1); color: var(--accent); font: italic 700 12px/1 Georgia, 'Times New Roman', serif; padding: 0; cursor: pointer; display: inline-grid; place-items: center; vertical-align: middle; }
-.ld .ld-ibtn:hover, .ld .ld-ibtn[aria-expanded="true"] { border-color: var(--accent); background: var(--surface-2); }
-.ld .ld-ibtn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.ld-ibtn { width: 20px; height: 20px; border-radius: 50%; border: 1px solid var(--border-strong); background: var(--surface-1); color: var(--accent); font: italic 700 12px/1 Georgia, 'Times New Roman', serif; padding: 0; cursor: pointer; display: inline-grid; place-items: center; vertical-align: middle; }
+.ld-ibtn:hover, .ld-ibtn[aria-expanded="true"] { border-color: var(--accent); background: var(--surface-2); }
+.ld-ibtn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .ld table.tbl td.ld-acts { white-space: nowrap; text-align: right; width: 1%; }
 .ld table.tbl td.ld-acts > * + * { margin-left: 6px; }
 .ld table.tbl td.ld-acts .btn.sm { height: 24px; padding: 0 9px; font-size: 12px; font-weight: 600; }

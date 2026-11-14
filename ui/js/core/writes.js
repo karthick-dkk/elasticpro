@@ -95,10 +95,10 @@ export async function ensureWrites() {
  * the controls (disabled buttons, hints) follow the new state.
  */
 export function writeToggle(onchange) {
-  if (!roleMayWrite()) {
-    return h('span.pill.grey', { title: 'Your role reads clusters: GET and searches. Only an ElasticPro admin changes them.' },
-      h('i.dot'), `read-only (${state.caller.role})`);
-  }
+  // A role that cannot write gets no pill (the owner's rule: no "read-only (operator)" anywhere).
+  // The gate is unchanged: each action is disabled with the reason in its title, and the core
+  // refuses the request regardless.
+  if (!roleMayWrite()) return null;
   if (!isReadOnly()) {
     return h('span.pill.yellow', { title: 'readOnly: false in the config — every page may write.' },
       h('i.dot'), 'writes enabled (config)');
