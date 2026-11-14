@@ -3,8 +3,9 @@
  * redesigned in 0.3.62, docs/LOGDELAY.md "The Log Delay page"):
  *
  *   Dashboard  five count tiles (the three configured levels, another time zone, silent), the
- *              "Devices behind" chart over the period, the cluster × time heat map, By cluster
- *              with an "i" per cluster; the same for one cluster
+ *              state bar, three chart panels over the period (the delay band, above the critical
+ *              line, resolved delays — one y scale), By cluster with an "i" per cluster, the
+ *              cluster × time heat map (Hourly Delay Status); the same for one cluster
  *   Devices    every device, searched and filtered by level, zone and tag1, each row with its
  *              fix ("i") and its logs; one device's board beside the list
  *
@@ -378,67 +379,56 @@ function tiles(t, b, scopeId, keyPrefix) {
 /* ------------------------------------ charts ------------------------------------ */
 
 /**
- * "Devices behind" over the period: slim stacked bars (the delay band in light blue, then above
- * the critical line in blue) with a thin green line for the delays solved — back below the line.
- * Today's buckets are the measurement windows, which the core counts as one "still late" figure,
- * so Today draws one series and the legend says so. A day without totals is a hatched gap. Each
- * bucket carries its words as a title; the chart has no number of its own.
+ * The three chart panels (the owner's rule, prototype v25): devices in the delay band, devices
+ * above the critical line, and the delays solved (devices back below the line), one bucket per
+ * day of the period or per measurement window for Today, on one shared y scale. No stacking, no
+ * overlay line. Each bar carries its words as a title; a click opens Devices on that level. A
+ * bucket the core has no figure for is a hatched gap, never 0.
  */
-function behindChart(res, period, b, id) {
+function chartPanels(res, period, b, scopeId) {
   const data = behindSeries(res, period);
   const n = data.length;
-  const W = 1100, H = 230, L = 36, R = 8, T = 10, Bm = 24;
-  const split = period !== 'today';
-  const max = Math.max(1, ...data.map((d) => Math.max(d.behind || 0, d.back || 0)));
+  const series = [
+    ['delay', `${b.mid} behind`, C.delay, 'delay', (d) => d.delay],
+    ['critical', `${b.high} behind`, C.crit, 'critical', (d) => d.critical],
+    ['back', 'Resolved log delays', C.ok, 'ok', (d) => d.back],
+  ];
+  const max = Math.max(1, ...data.flatMap((d) => series.map(([, , , , v]) => v(d) || 0)));
   const step = niceStep(max); const top = Math.ceil(max / step) * step;
+  const W = 420, H = 190, L = 34, R = 6, T = 10, Bm = 24;
   const y = (v) => T + (H - T - Bm) * (1 - v / top);
   const slot = n ? (W - L - R) / n : W - L - R;
-  const bw = Math.max(3, Math.min(14, slot * 0.58));
-  const cx = (i) => L + i * slot + slot / 2;
-  const kids = [];
-  for (let v = 0; v <= top; v += step) {
-    kids.push(svg('line', { x1: L, x2: W - R, y1: y(v), y2: y(v), class: v ? 'ld-grid' : 'ld-axis' }));
-    kids.push(svg('text', { x: L - 8, y: y(v) + 3.5, 'text-anchor': 'end' }, String(v)));
-  }
+  const bw = Math.max(2, Math.min(14, slot * 0.58));
   const every = labelEvery(n);
-  data.forEach((d, i) => {
-    const x = L + i * slot + (slot - bw) / 2;
-    const words = d.gap ? `${d.label} · no measurement`
-      : split ? `${d.label} · ${countText(d.delay)} at ${b.mid}, ${countText(d.critical)} ${b.high.toLowerCase()}, ${countText(d.back)} back below the line${d.complete ? '' : ' · not over'}`
-        : `${d.label} · ${countText(d.behind)} ${b.late} when the window ended, ${countText(d.back)} back below the line${d.complete ? '' : ' · window not over'}`;
-    const g = svg('g', { class: `ld-bar${d.gap ? ' ld-bar-gap' : ''}`, dataset: null });
-    g.append(svg('title', {}, words));
-    if (d.gap) {
-      g.append(svg('rect', { x, y: T, width: bw, height: H - T - Bm, class: 'ld-gap-fill' }));
-    } else {
-      const parts = split ? [[d.delay, C.delay], [d.critical, C.crit]] : [[d.behind, C.delay]];
-      let base = 0;
-      parts.filter(([v]) => v > 0).forEach(([v, fill], j, arr) => {
-        const y0 = y(base), y1 = y(base + v); const hgt = Math.max(0.5, y0 - y1 - (j ? 1 : 0));
-        const lastSeg = j === arr.length - 1; const r = lastSeg ? Math.min(3, hgt, bw / 2) : 0;
-        g.append(lastSeg
-          ? svg('path', { d: `M${x},${y1 + hgt} V${y1 + r} Q${x},${y1} ${x + r},${y1} H${x + bw - r} Q${x + bw},${y1} ${x + bw},${y1 + r} V${y1 + hgt} Z`, fill })
-          : svg('rect', { x, y: y1, width: bw, height: hgt, fill }));
-        base += v;
-      });
+  const sub = `devices · ${period === 'today' ? 'by measurement window' : 'by day'} · ${(res && res.label) || (PERIODS.find((p) => p[0] === period) || ['', ''])[1].toLowerCase()}`;
+  const panel = ([key, title, colour, filter, value]) => {
+    const kids = [];
+    for (let v = 0; v <= top; v += step) {
+      kids.push(svg('line', { x1: L, x2: W - R, y1: y(v), y2: y(v), class: v ? 'ld-grid' : 'ld-axis' }));
+      kids.push(svg('text', { x: L - 6, y: y(v) + 3.5, 'text-anchor': 'end' }, String(v)));
     }
-    g.append(svg('rect', { x: L + i * slot, y: T, width: slot, height: H - T - Bm, fill: 'transparent' }));
-    kids.push(g);
-    if (i % every === 0) kids.push(svg('text', { x: cx(i), y: H - 6, 'text-anchor': 'middle' }, d.label));
-  });
-  const known = data.map((d, i) => ({ i, v: d.back })).filter((p) => finite(p.v));
-  if (known.length) {
-    const segs = []; let cur = [];
-    data.forEach((d, i) => { if (finite(d.back)) cur.push(`${cx(i).toFixed(1)},${y(d.back).toFixed(1)}`); else if (cur.length) { segs.push(cur); cur = []; } });
-    if (cur.length) segs.push(cur);
-    for (const s of segs) kids.push(svg('polyline', { points: s.join(' '), fill: 'none', stroke: C.ok, 'stroke-width': 2, 'stroke-linejoin': 'round', 'stroke-linecap': 'round', 'pointer-events': 'none' }));
-    const last = known[known.length - 1];
-    kids.push(svg('circle', { cx: cx(last.i), cy: y(last.v), r: 3.5, fill: C.ok, class: 'ld-line-end', 'pointer-events': 'none' }));
-  }
-  const aria = n ? `Devices behind per ${period === 'today' ? 'window' : 'day'}: at most ${max}` : 'Devices behind: nothing measured in this period';
-  return h('div.ld-chartbox',
-    n ? svg('svg', { class: 'ld-chart', viewBox: `0 0 ${W} ${H}`, role: 'img', 'aria-label': aria, id }, ...kids)
-      : h('div.tbl-empty', 'Nothing measured in this period.'));
+    data.forEach((d, i) => {
+      const x = L + i * slot + (slot - bw) / 2;
+      const val = d.gap ? null : value(d);
+      const unknown = val === null || val === undefined;
+      const g = svg('g', { class: `ld-bar${unknown ? ' ld-bar-gap' : ''}`, role: unknown ? null : 'link', onclick: unknown ? null : () => { S.devState = filter; S.devAll = false; location.hash = ldHash('devices', scopeId, null, { tz: S.tz }); } });
+      g.append(svg('title', {}, unknown ? `${d.label} · ${d.gap ? 'no measurement' : 'not counted by this core'}` : `${d.label} · ${countText(val)} device${val === 1 ? '' : 's'}${d.complete ? '' : ' · not over'} · opens Devices`));
+      if (unknown) g.append(svg('rect', { x, y: T, width: bw, height: H - T - Bm, class: 'ld-gap-fill' }));
+      else if (val > 0) {
+        const y1 = y(val); const hgt = Math.max(0.5, y(0) - y1); const r = Math.min(3, hgt, bw / 2);
+        g.append(svg('path', { d: `M${x},${y1 + hgt} V${y1 + r} Q${x},${y1} ${x + r},${y1} H${x + bw - r} Q${x + bw},${y1} ${x + bw},${y1 + r} V${y1 + hgt} Z`, fill: colour }));
+      }
+      g.append(svg('rect', { x: L + i * slot, y: T, width: slot, height: H - T - Bm, fill: 'transparent' }));
+      kids.push(g);
+      if (i % every === 0) kids.push(svg('text', { x: L + i * slot + slot / 2, y: H - 6, 'text-anchor': 'middle' }, d.label));
+    });
+    return h('section.card.ld-chart-card', { dataset: { chart: key } },
+      h('header', h('h2', sw(colour), ' ', title), h('span.sub', sub)),
+      h('div.body', h('div.ld-chartbox', n
+        ? svg('svg', { class: 'ld-chart', viewBox: `0 0 ${W} ${H}`, role: 'img', id: `ld-chart-${key}`, 'aria-label': `${title}: at most ${max} ${period === 'today' ? 'per window' : 'per day'}` }, ...kids)
+        : h('div.tbl-empty', 'Nothing measured in this period.'))));
+  };
+  return h('div.ld-charts3#ld-charts', ...series.map(panel));
 }
 
 /**
@@ -503,11 +493,6 @@ function stateBar(c, b) {
 
 /* ------------------------------------ the dashboard ------------------------------------ */
 
-function chartLegend(period, b) {
-  return period === 'today'
-    ? legend(key(C.delay, `${b.late} when the window ended`), key(C.ok, 'Back below the line (solved in the window)', { line: true }))
-    : legend(key(C.delay, b.mid), key(C.crit, b.high), key(C.ok, b.backShort, { line: true }));
-}
 const periodWords = (period, res) => `${period === 'today' ? 'by measurement window' : 'by day'} · ${(res && res.label) || (PERIODS.find((p) => p[0] === period) || ['', ''])[1].toLowerCase()}`;
 
 function fleetView() {
@@ -549,13 +534,12 @@ function fleetView() {
   const readNote = B.get('fleet:readnote', rid, () => readNotes((res.byCluster || []).map((c) => ({ name: c.name || nameOf(c.id), lastRead: c.lastRead }))));
   const tileRow = B.get('fleet:tiles', `${rid}|${scopeId}|${S.tz}`, () => tiles(inView ? tileCounts(inView) : t, b, scopeId, 'ld-fleet'));
   const tzFilterNote = B.get('fleet:tzfilter', `${rid}|${S.tz}`, () => (inView
-    ? h('div.muted.ld-note#ld-tz-filter-note', `Time zone filter: ${tzWords()} — ${countText(inView.length)} of ${countText((res.devices || []).length)} devices in the answer${res.devicesTruncated ? ' (the server sent the first ' + countText((res.devices || []).length) + ')' : ''}. The tiles and By cluster count these devices; Devices behind and the heat map are the core’s day totals for every zone.`)
+    ? h('div.muted.ld-note#ld-tz-filter-note', `Time zone filter: ${tzWords()} — ${countText(inView.length)} of ${countText((res.devices || []).length)} devices in the answer${res.devicesTruncated ? ' (the server sent the first ' + countText((res.devices || []).length) + ')' : ''}. The tiles and By cluster count these devices; the charts and the heat map are the core’s day totals for every zone.`)
     : null));
   const totalsLine = B.get('fleet:counts', rid, () => h('div.muted.ld-note#ld-fleet-counts', { title: COUNT_HINT },
     h('b', countText(res.devicesInLastRun)), ' devices in the last run · ', h('b', countText(res.devicesTotal)), ' now · ',
     h('b', countText(res.devicesInRange)), ` in the period shown — ${COUNT_HINT}`));
-  const behind = B.get('fleet:behind', `${rid}|${S.period}`, () => card('Devices behind', periodWords(S.period, res),
-    behindChart(res, S.period, b, 'ld-behind'), [chartLegend(S.period, b)]));
+  const charts = B.get('fleet:charts', `${rid}|${S.period}|${scopeId}|${S.tz}`, () => chartPanels(res, S.period, b, scopeId));
   const heat = B.get('fleet:heat', `${rid}|${S.period}`, () => card('Hourly Delay Status', `devices behind per cluster, ${periodWords(S.period, res)} · a cell opens the cluster`,
     heatMap(res, S.period, b, 'ld-heat'),
     [legend(...HEAT_LEGEND.map((tx, i) => h('span.ld-key', h(`i.ld-heat-key.ld-heat-${i}`), tx)), h('span.ld-key', h('i.ld-heat-key.ld-heat-unknown'), 'not measured'))]));
@@ -649,7 +633,8 @@ function fleetView() {
     ? h('div.muted.ld-note', `${never.length} cluster${never.length === 1 ? ' is' : 's are'} not measured yet: ${never.map((c) => c.name).join(', ')}.`) : null));
   // The owner's order (prototype v22): tiles, the state bar with its legend, By cluster, Devices behind, the heat map.
   const stateRow = B.get('fleet:statebar', `${rid}|${S.tz}`, () => fleetStateBar(inView ? tileCounts(inView) : t, b));
-  return [head, notice, readNote, tileRow, stateRow, tzFilterNote, totalsLine, clusterCard, behind, heat, tzNote, readCard, neverNote];
+  // The owner's order (prototype v25): tiles, the state bar, the three charts, By cluster, Hourly Delay Status.
+  return [head, notice, readNote, tileRow, stateRow, tzFilterNote, totalsLine, charts, clusterCard, heat, tzNote, readCard, neverNote];
 }
 
 /* ------------------------------------ one cluster ------------------------------------ */
@@ -680,7 +665,7 @@ function clusterView(id) {
   const inView = S.tz === null ? null : (res.devices || []).filter((r) => matchesZone(r, S.tz));
   const tileRow = B.get('cl:tiles', `${rid}|${S.tz}`, () => tiles(inView ? tileCounts(inView) : t, b, id, 'ld-cl'));
   const tzFilterNote = B.get('cl:tzfilter', `${rid}|${S.tz}`, () => (inView
-    ? h('div.muted.ld-note#ld-tz-filter-note', `Time zone filter: ${tzWords()} — ${countText(inView.length)} of ${countText((res.devices || []).length)} devices. The tiles and the table count these devices; Devices behind is the core’s day totals for every zone.`)
+    ? h('div.muted.ld-note#ld-tz-filter-note', `Time zone filter: ${tzWords()} — ${countText(inView.length)} of ${countText((res.devices || []).length)} devices. The tiles and the table count these devices; the charts are the core’s day totals for every zone.`)
     : null));
   const never = res.lastRunAt === null || res.lastRunAt === undefined;
   const lr = res.lastRead || (res.counts && res.counts.lastRead);
@@ -688,8 +673,7 @@ function clusterView(id) {
   const countsNote = B.get('cl:counts', rid, () => h('div.ld-note', countsLine(res.counts),
     h('div.muted#ld-last-read-line', `Last run read: ${lastReadText(lr)} · documents with no device name: ${noDeviceText(lr)} · ${countText(res.started)} delays started, ${countText(res.solved)} solved in the period`)));
   const neverNote = B.get('cl:never', rid, () => (never ? h('div.banner.warn', `${name} has never been measured: it is not in the scheduled measurement yet.`) : null));
-  const behind = B.get('cl:behind', `${rid}|${S.period}`, () => card('Devices behind', `${name} · ${periodWords(S.period, res)}`,
-    behindChart(res, S.period, b, 'ld-behind'), [chartLegend(S.period, b)]));
+  const charts = B.get('cl:charts', `${rid}|${S.period}|${S.tz}`, () => chartPanels(res, S.period, b, id));
 
   const f = res.fields || {};
   const extras = Array.isArray(f.extras) ? f.extras : [];
@@ -711,7 +695,7 @@ function clusterView(id) {
     `${countText((res.devices || []).length)} · ${sorts.clusterDevices.sort ? 'sorted by the marked column' : 'sorted by time spent late'} · a device name opens its details`,
     body, [filterBox('ld-cd-filter', () => S.cdFilter, (v) => { S.cdFilter = v; S.cdAll = false; })]);
   const tzNote = B.get('cl:tznote', rid, () => tzSinceNote([{ name, tz: res.timeZone }]));
-  return [head, neverNote, readNote, tileRow, tzFilterNote, countsNote, behind, devCard, tzNote];
+  return [head, neverNote, readNote, tileRow, tzFilterNote, countsNote, charts, devCard, tzNote];
 }
 
 /* ------------------------------------ the devices ------------------------------------ */

@@ -375,7 +375,7 @@ extras measured (`Settings::extras_for` adds them to a list that leaves them out
   "reduced": [ { "hours": 2, "n": 4 }, { "hours": 4, "n": 7 }, { "hours": 6, "n": 9 }, { "hours": 12, "n": 15 }, { "hours": 24, "n": 23 } ],
   "newlyLateToday": 6, "solvedToday": 4,
   "yesterday": { "newlyLate": 19, "solved": 23, "averageLastedMs": 6600000 },
-  "windows": [ { "from": 0, "to": 0, "label": "00:00–02:00", "newlyLate": 2, "solved": 1, "stillLate": 30, "complete": true } ],
+  "windows": [ { "from": 0, "to": 0, "label": "00:00–02:00", "newlyLate": 2, "solved": 1, "stillLate": 30, "delay": 21, "critical": 9, "complete": true } ],
   "days": [ { "day": "2026-11-04", "devices": 1284, "onTime": 1200, "little": 38, "delayed": 25, "critical": 12, "clockAhead": 0, "silent": 9,
               "unmeasured": 5, "started": 19, "solved": 23, "lateHours": 41.5, "medianMinutes": 4.1, "measured": 1270, "complete": true,
               "onTimeAll": 1238, "late": 37 } ],
@@ -620,13 +620,17 @@ The old addresses open the matching view (`ui/js/reports/route.js` `movedPath`):
 * **Levels from the config, never a figure of the page's own**: the tile names, the chips, the
   chart legend and the Fetch now menu read `levels` (`delayFrom`, `criticalOver`) from the
   answers; levels the core has not said read as words ("Below the delay line").
-* **Devices behind** (`behindSeries`): one bucket per day of the period — the devices in the delay
-  band and above the critical line at the end of the day (stacked, light blue then blue) and
-  the delays solved that day as a thin green "back below the line" — or, for Today, one per
-  measurement window (`windows[]`: the core counts one *still late* figure per window, so Today
-  draws one series and says so). A day without totals is a hatched gap, never zero. The heat map
-  (`heatRows`) is one row per cluster from `byCluster[].sparkline` (days) or `byCluster[].windows`
-  (Today); a cell the core has no total for is hatched, a cluster never measured says so.
+* **Three chart panels** (`behindSeries`; the owner's rule, prototype v25), one row, one shared y
+  scale: *30–60 min behind* (light blue), *Above 60 min behind* (blue) and *Resolved log delays*
+  (green: devices that came back below the delay line in the bucket) — one bucket per day of the
+  period (`days[]` `delayed`, `critical`, `solved`) or per measurement window for Today
+  (`windows[]` `delay`, `critical`, `solved`; the split is each device's last stored state at the
+  window's end, added in 0.3.62, `summary::windows`). No stacking, no overlay line; a bar's title is
+  the bucket and its one value, a click opens Devices on that level. A bucket without a figure is
+  a hatched gap, never zero. Order: tiles, the state bar, the charts, By cluster, then the heat map
+  **Hourly Delay Status** (`heatRows`: one row per cluster from `byCluster[].sparkline` (days) or
+  `byCluster[].windows` (Today); a cell the core has no total for is hatched, a cluster never
+  measured says so).
 * **The "i"** (`ui/js/logdelay/fix-popover.js` `fixButton`, `fixesFor`): one popover for every
   button, the core's own words (`DeviceRow.fix`, `byCluster[].fixes`, a device board's `finding`,
   Live Watch's `LOGDELAY_FIXES` `devices[]` joined by cluster and device): title = `stepLabel`,

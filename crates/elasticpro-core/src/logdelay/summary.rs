@@ -269,7 +269,10 @@ pub fn totals(c: &ClusterInput) -> Totals {
     t
 }
 
-/// One day's windows of `every` hours: newly late, solved and still late in each.
+/// One day's windows of `every` hours: newly late, solved and still late in each, and — by each
+/// device's last stored measurement at the window's end (`State`, the one definition) — how many
+/// sat in the delay band (`delay`) and above the critical line (`critical`). The Dashboard's
+/// Today draws its three panels from these; `solved` is the devices that came back below the line.
 pub fn windows(trackers: &[&Tracker], day: NaiveDate, every_hours: u64, now: i64) -> Vec<Value> {
     let eps: Vec<Episode> = trackers.iter().flat_map(|t| t.all_episodes()).collect();
     time::windows(day, every_hours).into_iter().filter(|(from, _)| *from <= now).map(|(from, to)| {
@@ -277,8 +280,19 @@ pub fn windows(trackers: &[&Tracker], day: NaiveDate, every_hours: u64, now: i64
         let solved = eps.iter().filter(|e| e.solved_ms.is_some_and(|s| s >= from && s < to)).count();
         let end = to.min(now);
         let still = eps.iter().filter(|e| e.late_at(end)).count();
+        let (mut delay, mut critical) = (0usize, 0usize);
+        for t in trackers {
+            for d in t.devices.values() {
+                // Points are chronological; today's windows sit at the tail, so the reverse scan is short.
+                match d.recent.iter().rev().find(|p| p.t <= end).map(|p| p.s) {
+                    Some(State::Delay) => delay += 1,
+                    Some(State::Critical) => critical += 1,
+                    _ => {}
+                }
+            }
+        }
         json!({ "from": from, "to": to, "label": time::window_label(from, to), "newlyLate": newly, "solved": solved, "stillLate": still,
-                "complete": now >= to })
+                "delay": delay, "critical": critical, "complete": now >= to })
     }).collect()
 }
 
@@ -590,9 +604,12 @@ mod tests {
         t.apply(t0 + 5 * H, vec![reading("ok", Some(1.0), t0 + 5 * H, "dc1")], &l, 2 * H);
         assert!(!t.devices.contains_key("gone") && t.episodes[0].ended_ms == Some(t0 + 5 * H));
         let c = ClusterInput { id: "p".into(), name: "P".into(), tracker: Arc::new(t), daily: BTreeMap::new(), levels: l, zone: LogTimeZone::Detect, tz_hints: vec![] };
-        let late_now = windows(&[c.tracker.as_ref()], time::local_date(now), 2, (t0 + 7 * H).max(now)).iter()
-            .filter(|w| w["from"].as_i64().unwrap() >= t0 + 6 * H).map(|w| w["stillLate"].as_u64().unwrap()).sum::<u64>();
+        let ws = windows(&[c.tracker.as_ref()], time::local_date(now), 2, (t0 + 7 * H).max(now));
+        let late_now = ws.iter().filter(|w| w["from"].as_i64().unwrap() >= t0 + 6 * H).map(|w| w["stillLate"].as_u64().unwrap()).sum::<u64>();
         assert_eq!(late_now, 0, "after it ended, no window counts it as still late");
+        // Each window splits the devices by their last stored state at its end: the forgotten device is in none.
+        assert!(ws.iter().all(|w| w["delay"].is_u64() && w["critical"].is_u64()), "{ws:?}");
+        assert_eq!(ws.iter().filter(|w| w["from"].as_i64().unwrap() >= t0 + 6 * H).map(|w| w["delay"].as_u64().unwrap() + w["critical"].as_u64().unwrap()).sum::<u64>(), 0);
         let d = crate::logdelay::state::daily(&c.tracker, "today", t0, t0 + 86_400_000, t0 + 20 * H);
         assert_eq!(d.late_hours, 5.0, "it was late from midnight until it was forgotten at 05:00, not until now");
         assert_eq!(device_rows(&c, &Range::last_days(now, 30), now).iter().filter(|r| r.device == "gone").count(), 0);

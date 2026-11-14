@@ -411,19 +411,20 @@ export function filterCounts(rows) {
 /* ------------------------------------ the dashboard's charts ------------------------------------ */
 
 /**
- * "Devices behind" over the period, one bucket per day (`days[]`: the devices in the delay band
- * and above the critical line at the end of the day, and the delays solved — back below the
- * line — that day) or, for Today, one per measurement window (`windows[]`: devices still late
- * when the window ended, and solved in it; the core does not split a window by level, so the
- * bucket carries `behind` and the chart draws one series). A day without totals is a gap
- * (`gap: true`), not zero; a window not yet over says `complete: false`.
+ * The Dashboard's three panels over the period — devices in the delay band, devices above the
+ * critical line, and the delays solved (devices back below the line) — one bucket per day
+ * (`days[]`: `delayed`, `critical`, `solved`) or, for Today, one per measurement window
+ * (`windows[]`: `delay`, `critical` by each device's last state at the window's end, `solved`;
+ * a core before 0.3.62 sends no split, then `delay`/`critical` are null — unknown, not 0). A day
+ * without totals is a gap (`gap: true`), not zero; a window not yet over says `complete: false`.
  */
 export function behindSeries(res, period) {
   if (!res) return [];
   if (period === 'today') {
     return (res.windows || []).map((w) => ({
-      t: w.from, label: String(w.label || '').split(/[–-]/)[0].trim(), gap: false, split: false,
-      behind: finite(w.stillLate) ? w.stillLate : null, delay: null, critical: null,
+      t: w.from, label: String(w.label || '').split(/[–-]/)[0].trim(), gap: false, split: finite(w.delay) && finite(w.critical),
+      behind: finite(w.stillLate) ? w.stillLate : finite(w.delay) && finite(w.critical) ? w.delay + w.critical : null,
+      delay: finite(w.delay) ? w.delay : null, critical: finite(w.critical) ? w.critical : null,
       back: finite(w.solved) ? w.solved : null, complete: w.complete !== false,
     }));
   }

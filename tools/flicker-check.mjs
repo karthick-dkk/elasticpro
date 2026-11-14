@@ -88,7 +88,7 @@ const PAGES = [
   { id: 'shards', search: '#view input[type=search]', hover: ['#view tbody tr', '#view .pill', '#view .btn'] },
   // The Log Delay page (was Logs & Delay, 0.3.60): every view. @c / @d are the fixture's first
   // cluster and its worst device. The pointer goes on a device row once one is drawn, else on a tab.
-  { id: 'log-delay', search: null, hover: ['#ld-by-cluster tbody tr', '#view .ld-kpi', '#view .ld-tabs a', '#view .btn'] },
+  { id: 'log-delay', search: null, hover: ['#ld-by-cluster tbody tr', '#view .ld-kpi', '#ld-chart-delay g.ld-bar', '#view .ld-tabs a', '#view .btn'] },
   { id: 'log-delay/devices', search: '#ld-dev-filter', hover: ['#ld-devices tbody tr', '#view .ld-chip-btn', '#view .ld-tabs a', '#view .btn'] },
   { id: 'log-delay/cluster/@c', search: '#ld-cd-filter', hover: ['#ld-cluster-devices tbody tr', '#view .ld-tabs a', '#view .btn'] },
   { id: 'log-delay/device/@c/@d', search: '#ld-q-name', hover: ['#ld-periods tbody tr', '#view .ld-kpi', '#view .ld-tabs a'] },

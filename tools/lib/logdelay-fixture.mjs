@@ -116,7 +116,8 @@ function windowsOf(now, ci, late) {
     const to = from + 2 * 3600000;
     const k = Math.round((from - d.getTime()) / 7200000);
     const hh = (ms) => `${String(new Date(ms).getHours()).padStart(2, '0')}:${String(new Date(ms).getMinutes()).padStart(2, '0')}`;
-    out.push({ from, to, label: `${hh(from)}–${hh(to)}`, newlyLate: (k + ci) % 3 === 0 ? 1 : 0, solved: (k + ci) % 4 === 0 ? 1 : 0, stillLate: Math.max(0, late - ((k + ci) % 3)), complete: now >= to });
+    const still = Math.max(0, late - ((k + ci) % 3)); const critical = Math.min(still, (k + ci) % 2);
+    out.push({ from, to, label: `${hh(from)}–${hh(to)}`, newlyLate: (k + ci) % 3 === 0 ? 1 : 0, solved: (k + ci) % 4 === 0 ? 1 : 0, stillLate: still, delay: still - critical, critical, complete: now >= to });
   }
   return out;
 }

@@ -133,7 +133,7 @@ test('started → solved: still late, solved, silent, never late', () => {
 test('devices behind: a day without totals is a gap, not zero; today is one series per window', () => {
   const res = {
     days: [{ day: '2026-11-01', devices: 10, delayed: 2, critical: 1, solved: 3, complete: true }, { day: '2026-11-02', devices: 0 }],
-    windows: [{ from: 0, to: 7200000, label: '00:00–02:00', stillLate: 4, solved: 1, complete: true }, { from: 7200000, to: 14400000, label: '02:00–04:00', stillLate: 2, solved: null, complete: false }],
+    windows: [{ from: 0, to: 7200000, label: '00:00–02:00', stillLate: 4, delay: 3, critical: 1, solved: 1, complete: true }, { from: 7200000, to: 14400000, label: '02:00–04:00', stillLate: 2, solved: null, complete: false }],
   };
   const days = R.behindSeries(res, 'last7');
   assert.equal(days.length, 2);
@@ -141,7 +141,8 @@ test('devices behind: a day without totals is a gap, not zero; today is one seri
   assert.equal(days[1].gap, true, 'no totals is a gap');
   assert.equal(days[1].behind, null, 'a gap has no figure');
   const win = R.behindSeries(res, 'today');
-  assert.deepEqual([win[0].label, win[0].behind, win[0].back, win[0].split], ['00:00', 4, 1, false]);
+  assert.deepEqual([win[0].label, win[0].behind, win[0].delay, win[0].critical, win[0].back, win[0].split], ['00:00', 4, 3, 1, 1, true], 'the core splits a window by level');
+  assert.deepEqual([win[1].delay, win[1].critical, win[1].split], [null, null, false], 'a core that sends no split: unknown, not 0');
   assert.equal(win[1].back, null, 'a window the core gave no solved count for is unknown');
   assert.equal(win[1].complete, false);
   assert.deepEqual(R.behindSeries(null, 'last7'), []);

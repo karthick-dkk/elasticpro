@@ -6881,12 +6881,16 @@ await settleFor(300);
     ok(!/median|p95|percentile|average/i.test(fleet.textContent), 'log delay: the Dashboard shows a median, percentile or average');
     const tileLabels = [...fleet.querySelectorAll('.ld-kpi .ld-kpi-l')].map((x) => x.textContent.trim());
     ok(tileLabels.join('|') === 'Below 30 min|30–60 min|Above 60 min|Other time zone|Silent', `log delay: the tiles read ${tileLabels.join(' · ')} (levels from the config)`);
-    // Devices behind: one slim bar per day of the period, a day without totals a gap, a green back-below line.
-    const behind = g('ld-behind');
-    ok(behind && behind.querySelectorAll('g.ld-bar').length === 30, `log delay: Devices behind has ${behind && behind.querySelectorAll('g.ld-bar').length} bars, not 30 days`);
-    ok(behind && behind.querySelector('g.ld-bar.ld-bar-gap'), 'log delay: a day without totals is not drawn as a gap');
-    ok(behind && behind.querySelectorAll('polyline').length >= 1, 'log delay: no back-below line');
-    ok(!fleet.querySelector('.ld-ring') && !fleet.querySelector('.ld-red') && !fleet.querySelector('.ld-day'), 'log delay: the old rings, delay-reduced or day-by-day graphs are still drawn');
+    // Three panels on one y scale: the delay band, above the critical line, resolved delays — one bar per day, a day without totals a gap.
+    const panels = [...view().querySelectorAll('#ld-charts .ld-chart-card h2')].map((x) => x.textContent.trim());
+    ok(panels.join('|') === '30–60 min behind|Above 60 min behind|Resolved log delays', `log delay: the chart panels read ${panels.join(' · ')}`);
+    for (const k of ['delay', 'critical', 'back']) {
+      const c = g(`ld-chart-${k}`);
+      ok(c && c.querySelectorAll('g.ld-bar').length === 30, `log delay: chart ${k} has ${c && c.querySelectorAll('g.ld-bar').length} bars, not 30 days`);
+      ok(c && c.querySelector('g.ld-bar.ld-bar-gap'), `log delay: chart ${k} does not draw a day without totals as a gap`);
+    }
+    ok(!fleet.querySelector('polyline') && !fleet.querySelector('.ld-ring') && !fleet.querySelector('.ld-red') && !fleet.querySelector('.ld-day'), 'log delay: an overlay line or the old graphs are still drawn');
+    ok([...g('ld-chart-delay').querySelectorAll('text')].every((t) => !/median|average/i.test(t.textContent)), 'log delay: a chart writes a statistic');
     // The cluster × time heat map: one row per cluster, a cell per day, a never-measured cluster says so.
     const heat = g('ld-heat');
     ok(heat && heat.querySelectorAll('rect.ld-heat').length === 30 * (list.length - 1), `log delay: the heat map has ${heat && heat.querySelectorAll('rect.ld-heat').length} cells`);
@@ -6928,8 +6932,8 @@ await settleFor(300);
     ok(!g('ld-zones') && !g('ld-tz-expand'), 'log delay: a Devices by time zone panel or a separate Expand button is drawn (the chip itself opens the counts)');
     ok(g('ld-tz-panel') && g('ld-tz-panel').hidden, 'log delay: the time-zone panel does not start hidden');
     // The owner's order: tiles, the state bar, By cluster, then the charts; the heat map is Hourly Delay Status.
-    const order = [...view().querySelectorAll('#ld-fleet-tiles, #ld-statebar, #ld-by-cluster, #ld-behind, #ld-heat')].map((x) => x.id);
-    ok(order.join('|') === 'ld-fleet-tiles|ld-statebar|ld-by-cluster|ld-behind|ld-heat', `log delay: the Dashboard order is ${order.join(' › ')}`);
+    const order = [...view().querySelectorAll('#ld-fleet-tiles, #ld-statebar, #ld-charts, #ld-by-cluster, #ld-heat')].map((x) => x.id);
+    ok(order.join('|') === 'ld-fleet-tiles|ld-statebar|ld-charts|ld-by-cluster|ld-heat', `log delay: the Dashboard order is ${order.join(' › ')}`);
     ok(g('ld-statebar') && g('ld-statebar').querySelectorAll('.ld-stack i').length >= 3 && /Silent \d/.test(g('ld-statebar').textContent), 'log delay: no state bar with a counted legend under the tiles');
     ok([...view().querySelectorAll('section.card header h2')].some((x) => x.textContent === 'Hourly Delay Status'), 'log delay: the heat map is not titled Hourly Delay Status');
     g('ld-tz-chip').click(); await settleFor(120);
@@ -6960,10 +6964,16 @@ await settleFor(300);
     ok(/\+05:30 · 12 of 13 devices/.test(g('ld-by-cluster').textContent) && /not detected · 42 % agree/.test(g('ld-by-cluster').textContent), 'log delay: the By cluster Time zone column does not carry the device counts');
     const per = g('ld-period'); per.value = 'last7'; per.dispatchEvent(new window.Event('change', { bubbles: true })); await settleFor(200);
     ok(lsent.some((m) => m.type === 'LOGDELAY_SUMMARY' && m.days === 7), 'log delay: Last 7 days did not ask for 7 days');
-    await waitFor(() => g('ld-behind') && g('ld-behind').querySelectorAll('g.ld-bar').length === 7, 'log delay: Devices behind did not follow the period to 7 days');
+    await waitFor(() => g('ld-chart-delay') && g('ld-chart-delay').querySelectorAll('g.ld-bar').length === 7, 'log delay: the charts did not follow the period to 7 days');
     g('ld-period').value = 'today'; g('ld-period').dispatchEvent(new window.Event('change', { bubbles: true })); await settleFor(200);
     ok(lsent.some((m) => m.type === 'LOGDELAY_SUMMARY' && m.days === 1), 'log delay: Today did not ask for 1 day');
-    await waitFor(() => g('ld-behind') && g('ld-behind').querySelectorAll('g.ld-bar').length >= 1 && g('ld-behind').querySelectorAll('g.ld-bar').length <= 12, 'log delay: Today is not drawn by measurement window');
+    await waitFor(() => g('ld-chart-critical') && g('ld-chart-critical').querySelectorAll('g.ld-bar').length >= 1 && g('ld-chart-critical').querySelectorAll('g.ld-bar').length <= 12, 'log delay: Today is not drawn by measurement window');
+    ok(g('ld-chart-critical').querySelectorAll('g.ld-bar.ld-bar-gap').length === 0, 'log delay: Today has no delay/critical split (the core sends one per window)');
+    // A bar opens Devices on its level.
+    press([...g('ld-chart-critical').querySelectorAll('g.ld-bar:not(.ld-bar-gap)')].at(-1));
+    await waitFor(() => ldView() === 'devices' && view().querySelector('#ld-dev-chips [aria-pressed="true"]') && view().querySelector('#ld-dev-chips [aria-pressed="true"]').dataset.filter === 'critical', 'log delay: a bar of the Above-60 chart did not open Devices on critical');
+    press(doc.querySelector('.ld-tabs a[data-tab="fleet"]'));
+    await waitFor(() => ldView() === 'fleet' && g('ld-charts'), 'log delay: the Dashboard did not draw again after the chart click');
     ok(/by measurement window/.test(view().textContent), 'log delay: Today does not say it is by window');
     g('ld-period').value = 'last30'; g('ld-period').dispatchEvent(new window.Event('change', { bubbles: true })); await settleFor(200);
     await waitFor(() => g('ld-by-cluster'), 'log delay: the fleet did not draw again after the period');

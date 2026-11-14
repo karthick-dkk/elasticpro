@@ -2965,6 +2965,11 @@ tr.jb-focus td { background: var(--accent-soft); }
 .ld-chartbox .ld-gap-fill { fill: var(--surface-2); stroke: var(--border); stroke-dasharray: 2 2; opacity: .8; }
 .ld-tools-range { display: contents; }
 .ld-chartbox .ld-line-end { stroke: var(--surface-1); stroke-width: 2; }
+.ld-charts3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+.ld-charts3 .ld-chart-card { min-width: 0; margin: 0; }
+.ld-charts3 .ld-chart-card header h2 { display: inline-flex; align-items: center; gap: 6px; }
+.ld-charts3 g.ld-bar[role="link"] { cursor: pointer; }
+@media (max-width: 980px) { .ld-charts3 { grid-template-columns: minmax(0, 1fr); } }
 .ld-key i.ld-ln { width: 14px; height: 2px; border-radius: 1px; }
 .ld-key i.ld-dash { width: 14px; height: 0; background: none !important; border-top: 2px dashed; }
 /* The cluster × time heat map. */
