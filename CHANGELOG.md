@@ -2,11 +2,9 @@
 
 ## 0.3.61
 
-(write this release's entry before tagging)
+- **Log Delay page shows what the core now counts:** per cluster, devices in the last run, now and in range (with a one-line hint what each means), how the last run read it (pages, complete, stopped at the device cap with the setting named, documents with no device name), Fetch Now progress as clusters done of total and devices read so far, *Hourly* in the log delay schedule pickers, and *Last hour* for Build report and Send now. Live Watch is labelled as the live check with its 500-device limit.
 
 ## 0.3.60
-
-- **Log Delay page shows what the core now counts:** per cluster, devices in the last run, now and in range (with a one-line hint what each means), how the last run read it (pages, complete, stopped at the device cap with the setting named, documents with no device name), Fetch Now progress as clusters done of total and devices read so far, *Hourly* in the log delay schedule pickers, and *Last hour* for Build report and Send now. Live Watch is labelled as the live check with its 500-device limit.
 
 - **Security updates:** `russh` 0.63.2 → 0.65.1 (RUSTSEC-2026-0495, the SSH agent server's confirm constraint — ElasticPro only runs the SSH client, so the path was never reachable here; the upgrade also brings the client-side host-key and EXT_INFO fixes of 0.65.x), `quinn-udp` 0.5.15 → 0.5.16 (RUSTSEC-2026-0538), `tokio` 1.53.1 → 1.53.3 (RUSTSEC-2026-0386) and `crypto-bigint` 0.7.6 → 0.7.11 (0.7.6 was yanked). `cargo audit` is clean apart from the unmaintained `unsafe-libyaml` under `serde_yaml`, which has no drop-in replacement. No jump-host behaviour changes; russh 0.64 dropped the `legacy-ed25519-pkcs8-parser` feature, which only read Ed25519 PKCS#8 keys written in a non-compliant form by russh itself before 0.43 — ElasticPro never writes keys, and OpenSSH `id_ed25519` files were never that.
 
