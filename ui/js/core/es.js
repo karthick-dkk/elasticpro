@@ -335,6 +335,19 @@ export class EsClient {
     const h = 'id,name,ip,version,jdk,node.role,master,heap.percent,heap.current,heap.max,ram.percent,cpu,load_1m,load_5m,disk.used,disk.avail,disk.total,disk.used_percent,uptime';
     return this.json('GET', `/_cat/nodes?format=json&bytes=b&h=${encodeURIComponent(h)}`);
   }
+  /**
+   * The counters behind the Query pressure card (core/node-rates.js): searches and their time,
+   * documents indexed and deleted, the search and write pools' rejections and queues, and the
+   * breaker trips — per node, filtered to those fields so the answer does not grow with what
+   * else a node reports. Two readings make the rates; one is only a baseline.
+   */
+  nodesRates() {
+    const want = ['name', 'indices.search.query_total', 'indices.search.query_time_in_millis',
+      'indices.indexing.index_total', 'indices.indexing.delete_total',
+      'thread_pool.search.rejected', 'thread_pool.search.queue', 'thread_pool.write.rejected', 'thread_pool.write.queue',
+      'breakers.*.tripped'].map((f) => `nodes.*.${f}`).join(',');
+    return this.json('GET', `/_nodes/stats/indices,thread_pool,breaker?filter_path=${want}`);
+  }
   indices(pattern = '*') {
     const h = 'health,status,index,uuid,pri,rep,docs.count,docs.deleted,store.size,pri.store.size,creation.date';
     return this.json('GET', `/_cat/indices/${encodeURIComponent(pattern)}?format=json&bytes=b&expand_wildcards=open,closed&h=${encodeURIComponent(h)}`);
