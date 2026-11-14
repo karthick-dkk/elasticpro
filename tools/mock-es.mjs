@@ -271,17 +271,23 @@ const routes = [
   // app, was wrong.
   [(u) => u.startsWith('/_cat/nodes'), (hit) => catProject(hit.url, [
     { id: 'Xk3pQ9aTn1', name: 'node-1', ip: '10.0.0.1', version: '8.13.4', jdk: '17.0.9', 'node.role': 'dim', master: '*',
-      'heap.percent': '61', 'ram.percent': '70', cpu: '12', load_1m: '1.2',
+      'heap.percent': '61', 'ram.percent': '70', cpu: '12', load_1m: '3.55', load_5m: '2.10',
       'disk.used': '91000000000', 'disk.avail': '9000000000', 'disk.total': '100000000000',
       'disk.used_percent': '91', uptime: '10d' },
     { id: 'b7Lm2RfEn2', name: 'node-2', ip: '10.0.0.2', version: '8.13.4', jdk: '17.0.9', 'node.role': 'dim', master: '-',
-      'heap.percent': '55', 'ram.percent': '66', cpu: '9', load_1m: '0.8',
+      'heap.percent': '55', 'ram.percent': '66', cpu: '9', load_1m: '0.80', load_5m: '0.70',
       'disk.used': '55000000000', 'disk.avail': '45000000000', 'disk.total': '100000000000',
       'disk.used_percent': '55', uptime: '10d' },
     { id: 'Qw8nZc4Hn3', name: 'node-3', ip: '10.0.0.3', version: '8.13.4', jdk: '21.0.2', 'node.role': 'dim', master: '-',
-      'heap.percent': '38', 'ram.percent': '52', cpu: '4', load_1m: '0.3',
+      'heap.percent': '38', 'ram.percent': '52', cpu: '4', load_1m: '0.30', load_5m: '0.40',
       'disk.used': '21000000000', 'disk.avail': '79000000000', 'disk.total': '100000000000',
       'disk.used_percent': '21', uptime: '10d' }])],
+  // The processor count behind the Load column's bar (Nodes & shards). node-3 reports none,
+  // so its load is shown as text alone — the "unknown is not zero" path is on screen too.
+  [(u) => u.startsWith('/_nodes/_all/os'), () => ({ nodes: {
+    Xk3pQ9aTn1: { name: 'node-1', os: { allocated_processors: 4 } },
+    b7Lm2RfEn2: { name: 'node-2', os: { allocated_processors: 4 } },
+    Qw8nZc4Hn3: { name: 'node-3' } } })],
   // _field_caps: the log-delay preflight asks this before it aggregates. Only the names
   // it was asked about AND that this fixture "has" come back — real _field_caps omits
   // what it cannot find rather than returning it empty, and the preflight reads absence
@@ -329,7 +335,9 @@ const routes = [
     { index: 'logstash-acme-2026.09.09', shard: '0', prirep: 'p', state: 'STARTED', node: 'node-1', store: '2500000000' },
     { index: 'logstash-acme-2026.09.09', shard: '0', prirep: 'r', state: 'STARTED', node: 'node-2', store: '2500000000' },
     { index: 'logstash-beta-2026.09.09', shard: '0', prirep: 'r', state: 'UNASSIGNED',
-      'unassigned.reason': 'NODE_LEFT', node: null, store: '0' }])],
+      'unassigned.reason': 'NODE_LEFT', node: null, store: '0' },
+    // A hidden (".") index: left out of the shard table until asked for, and counted as hidden.
+    { index: '.kibana_1', shard: '0', prirep: 'p', state: 'STARTED', node: 'node-3', store: '120000', docs: '41' }])],
   [(u) => u.startsWith('/_cat/snapshots'), () => SNAPSHOTS],
   [(u) => u.startsWith('/_cat/aliases'), () => ([{ alias: 'logstash', index: 'logstash-acme-2026.09.09', is_write_index: 'true' }])],
   [(u) => /^\/_snapshot\/[^/]+\//.test(u), () => ({ snapshots: snapshotsLeft([

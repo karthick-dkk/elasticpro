@@ -370,14 +370,24 @@ export function gauge(value, max, opts = {}) {
  * @param segments [{ key, label, value, color }]
  * @param opts { size, total, centreLabel, format }
  */
+/**
+ * How one population is divided: the parts (never negative) and the total they are drawn
+ * against — the parts' sum, or the caller's own total when it knows one (then a shortfall is a
+ * grey gap, not shared out). One definition for the arc and the bar below.
+ */
+function divide(segments, totalOpt) {
+  const parts = (segments || []).map((x) => ({ ...x, value: Math.max(0, Number(x.value) || 0) }));
+  const sum = parts.reduce((n, x) => n + x.value, 0);
+  const total = totalOpt == null ? sum : Math.max(0, Number(totalOpt) || 0);
+  return { parts, total };
+}
+
 export function splitGauge(segments, opts = {}) {
   const size = opts.size || 150;
   const r = size / 2 - 13;
   const cx = size / 2, cy = size / 2 + 7;
   const START = 150, SWEEP = 240;
-  const parts = (segments || []).map((x) => ({ ...x, value: Math.max(0, Number(x.value) || 0) }));
-  const sum = parts.reduce((n, x) => n + x.value, 0);
-  const total = opts.total == null ? sum : Math.max(0, Number(opts.total) || 0);
+  const { parts, total } = divide(segments, opts.total);
   const fmt = opts.format || ((v) => String(v));
 
   const pt = (deg) => {
@@ -426,6 +436,48 @@ export function splitGauge(segments, opts = {}) {
                              background: part.color, flex: 'none' } }),
         h('b', { style: { fontVariantNumeric: 'tabular-nums' } }, fmt(part.value)),
         h('span.muted', part.label)))));
+}
+
+/**
+ * The same split as splitGauge, small enough for a band one line tall: a donut of about
+ * 44 px, the total named beside it, and every part's count to the right — the zeroes
+ * included, because "0 unassigned" is what the reader came for. The slices are the parts
+ * of one circumference (stroke dashes on one circle each), so a slice is hoverable and
+ * titled like an arc segment.
+ *
+ * @param segments [{ key, label, value, color }]
+ * @param opts { total, totalLabel, format, size, stroke }
+ */
+export function splitDonut(segments, opts = {}) {
+  const { parts, total } = divide(segments, opts.total);
+  const fmt = opts.format || ((v) => String(v));
+  const size = opts.size || 44, sw = opts.stroke || 10;
+  const r = (size - sw) / 2, c = size / 2;
+  const C = 2 * Math.PI * r;
+  const label = opts.totalLabel || 'total';
+  const ring = (stroke, more = {}) => svg('circle', { cx: c, cy: c, r, transform: `rotate(-90 ${c} ${c})`,
+    style: { fill: 'none', stroke, strokeWidth: sw, ...more } });
+  const s = svg('svg', { viewBox: `0 0 ${size} ${size}`, role: 'img',
+    'aria-label': `${fmt(total)} ${label}: ${parts.map((p) => `${fmt(p.value)} ${p.label}`).join(', ')}`,
+    style: { width: `${size}px`, height: `${size}px` } });
+  // The track is the total; a part the cluster did not break down stays grey.
+  s.append(ring('var(--surface-3)'));
+  let at = 0;
+  for (const part of parts) {
+    if (!total || part.value <= 0) continue;
+    const len = Math.min(C - at, C * (part.value / total));
+    const seg = ring(part.color, { strokeDasharray: `${len.toFixed(3)} ${(C - len).toFixed(3)}`, strokeDashoffset: (-at).toFixed(3) });
+    seg.append(svg('title', {}, `${part.label}: ${fmt(part.value)}`));
+    s.append(seg);
+    at += len;
+  }
+  return h('div.split-donut',
+    s,
+    h('div.split-total', h('b', fmt(total)), h('span.muted', label)),
+    h('div.split-legend', ...parts.map((part) => h('div', { title: `${part.label}: ${fmt(part.value)}` },
+      h('span.dot', { style: { background: part.color } }),
+      h('b', fmt(part.value)),
+      h('span.muted', part.label)))));
 }
 
 /* --------------------------------- honeycomb ---------------------------------- */
