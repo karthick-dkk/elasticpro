@@ -113,15 +113,15 @@ const lastRead = (rows, now) => ({ at: now - 4 * 60000, from: now - 2 * 3600000 
   devices: rows.filter((r) => r.inLastRun).length, pages: 1, complete: true, truncated: false });
 
 const FINDINGS = (c, rows) => [
-  ...(rows.some((r) => r.state === 'other_tz') ? [{ cluster: c.id, clusterName: c.name, step: 'device_time_zone', stepLabel: 'Device clock / parser', devices: rows.filter((r) => r.state === 'other_tz').map((r) => r.device),
-    group: ['deviceTimeZone', '+08:00'], why: 'the device’s logs are stamped in another time zone (+08:00) than the cluster’s (+05:30): the gap sits at that offset run after run, so no log is actually late',
-    fix: 'set the device’s clock to the cluster’s zone, or give the parser the device’s zone — for example Logstash date { timezone => "Asia/Singapore" } (a zone at +08:00)',
-    evidence: { devices: 1, deviceOffsetMinutes: 480, clusterOffsetMinutes: 330, steadyRuns: 2 }, missing: [] }] : []),
   { cluster: c.id, clusterName: c.name, step: 'forwarder', stepLabel: 'Forwarder', devices: rows.slice(0, 2).map((r) => r.device), group: ['fwd_tag', rows[0].extras.fwd_tag],
     why: `its forwarder ${rows[0].extras.fwd_tag} is holding logs back; devices on the other forwarders were on time at the same moments.`,
     fix: `check ${rows[0].extras.fwd_tag}: its queue or disk buffer, and the link to Logstash.`, evidence: { devices: 2, ofTag: 3, otherTagsLatePct: 0 }, missing: [] },
   { cluster: c.id, clusterName: c.name, step: 'unknown', stepLabel: 'Not enough evidence', devices: [rows[5].device], group: null,
     why: 'late, but no pattern matches. Shown as is; nothing is guessed.', fix: '', evidence: {}, missing: ['parser_tag on these devices', 'more measurements'] },
+  ...(rows.some((r) => r.state === 'other_tz') ? [{ cluster: c.id, clusterName: c.name, step: 'device_time_zone', stepLabel: 'Device clock / parser', devices: rows.filter((r) => r.state === 'other_tz').map((r) => r.device),
+    group: ['deviceTimeZone', '+08:00'], why: 'the device’s logs are stamped in another time zone (+08:00) than the cluster’s (+05:30): the gap sits at that offset run after run, so no log is actually late',
+    fix: 'set the device’s clock to the cluster’s zone, or give the parser the device’s zone — for example Logstash date { timezone => "Asia/Singapore" } (a zone at +08:00)',
+    evidence: { devices: 1, deviceOffsetMinutes: 480, clusterOffsetMinutes: 330, steadyRuns: 2 }, missing: [] }] : []),
 ];
 
 const RULES = [

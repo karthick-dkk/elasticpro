@@ -251,7 +251,7 @@ function hitsCard(c) {
   const lOff = clusterOffsetAt(ltz, Date.now());
   const showZone = ltz && lOff !== null ? (ltz.zone && ltz.zone !== 'UTC' ? ltz.zone : null) : null;
   const inZone = (ms) => (showZone ? zonedText(ms, showZone) : lOff !== null ? zonedText(ms + lOff * 60000, 'UTC') : zonedText(ms, tz));
-  const zoneWord = lOff !== null ? `cluster zone, ${offsetLabel(lOff)}` : `${tz || 'the browser’s zone'}, ${off}`;
+  const zoneWord = lOff !== null ? `cluster zone, ${offsetLabel(lOff)}` : off;
   const docs = ui.hits.map((hit) => docOf(hit, c));
   const ordered = sortLogs.apply(docs, Object.fromEntries(COLS.map(([k, , type, value]) => [k, { type, value }])));
   const sig = `${objId(ui.hits)}|${ui.expanded.size}|${[...ui.expanded].join(',')}|${sortLogs.sort ? `${sortLogs.sort.key}${sortLogs.sort.dir}` : '-'}|${tz}|${ltz ? `${ltz.mode}${lOff}` : '-'}|${ui.running && !ui.hits.length}|${ui.tail}`;
@@ -275,7 +275,7 @@ function hitsCard(c) {
         open ? h('tr', h('td.ld-json', { colspan: COLS.length }, jsonView(d.hit._source))) : null,
       ];
     }).filter(Boolean);
-    const evName = eventSource(resolveFields(c))[0] || 'event time';
+    const evName = (resolveFields(c).eventTime || [])[0] || 'event time';
     const label = (k) => (k === 'ts' ? `${c.timeField || '@timestamp'} (${zoneWord})` : k === 'event' ? `${evName} (UTC → ${lOff !== null ? offsetLabel(lOff) : off})` : null);
     const head = h('thead', h('tr', ...COLS.map(([k, lbl, type]) => sortTh(sortLogs, k, lbl || label(k), { num: type === 'number',
       title: k === 'ts' ? `Arrival time (${c.timeField}) in ${lOff !== null ? 'the cluster’s log time zone' : `the server's zone, ${tz || 'the browser’s zone'}`}`

@@ -294,7 +294,7 @@ function ring(late, devices, { title, href, name, all = false }) {
 /* ------------------------------------ the fleet ------------------------------------ */
 
 /** The device columns of the fleet's Devices table. */
-const FLEET_COLS = ['device', 'cluster', 'zone', 'tag1', 'state', 'now', 'rawGap', 'deviceTz', 'max', 'episodes', 'lateMs', 'last', 'docs'];
+const FLEET_COLS = ['device', 'cluster', 'zone', 'tag1', 'state', 'now', 'max', 'episodes', 'lateMs', 'last', 'docs', 'rawGap', 'deviceTz'];
 
 /**
  * The chip above a board: "Time zone Asia/Kolkata +05:30 · detected · 1 112 of 1 240 devices (90 %)",

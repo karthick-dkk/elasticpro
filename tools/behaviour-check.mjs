@@ -2511,8 +2511,10 @@ await go('log-delay');
     ok(range && [...range.options].map((o) => o.value).join(',') === '1m,5m,30m,1h,2h,3h,6h,8h,12h,custom', `live logs: the time range offers ${range && [...range.options].map((o) => o.value).join(',')}`);
     const heads = [...pane.querySelectorAll('#ld-live-logs thead th')].map((t) => t.textContent.replace(/[↑↓]/g, '').trim());
     ok(/^@timestamp \(UTC [+−]\d\d:\d\d\)$/.test(heads[0] || ''), `live logs: the time column does not name its offset: "${heads[0]}"`);
-    ok(heads.slice(1).join('|') === 'device / src_hostname|ClientID|zone|tag1|parser_tag|fwd_tag|log_type|delay (min)|message', `live logs: the columns read ${heads.join(' · ')}`);
-    ok(pane.querySelectorAll('#ld-live-logs thead th.sortable').length === 10, 'live logs: not every column sorts with the shared sort');
+    // The event time beside it, written in the same zone (docs/LOGDELAY.md "Time zones"), its head saying so.
+    ok(/^ingested_time \(UTC → UTC [+−]\d\d:\d\d\)$/.test(heads[1] || ''), `live logs: the event-time column does not name its zone: "${heads[1]}"`);
+    ok(heads.slice(2).join('|') === 'device / src_hostname|ClientID|zone|tag1|parser_tag|fwd_tag|log_type|delay (min)|message', `live logs: the columns read ${heads.join(' · ')}`);
+    ok(pane.querySelectorAll('#ld-live-logs thead th.sortable').length === 11, 'live logs: not every column sorts with the shared sort');
     const liveRows = () => [...pane.querySelectorAll('#ld-live-logs tbody tr.ld-log')];
     ok(liveRows().length > 0, 'live logs: no document listed');
     const tailPick = doc.getElementById('ld-live-cluster');
@@ -2596,7 +2598,7 @@ await go('log-delay');
       ok(byDevice['vpn-04'] && byDevice['vpn-04'].status === 'clock ahead', `-37 min must be clock ahead, not critical: ${JSON.stringify(byDevice['vpn-04'])}`);
       ok(byDevice['vpn-04'] && byDevice['vpn-04'].delay.startsWith('-'), 'a negative delay must render negative');
       ok(byDevice['router-06'] && byDevice['router-06'].pattern === 'timezone', `exactly 5h should read as a timezone offset: ${JSON.stringify(byDevice['router-06'])}`);
-      ok(byDevice['switch-05'] && byDevice['switch-05'].pattern !== 'timezone', `5h30 is a queue, not an offset: ${JSON.stringify(byDevice['switch-05'])}`);
+      ok(byDevice['switch-05'] && byDevice['switch-05'].pattern === 'timezone', `5h30 is India, a real offset (whole hours alone missed it): ${JSON.stringify(byDevice['switch-05'])}`);
       // Worst first.
       ok(trs[0].children[4].textContent.trim() === 'critical', `the first row should be the worst, was "${trs[0].children[4].textContent.trim()}"`);
       // The measurement is each cluster's log-delay alert (High: proxy-03 is past 60 min).
@@ -2623,12 +2625,13 @@ await go('log-delay');
         ok(![...pane.querySelectorAll('section.card header h2')].some((x) => x.textContent === 'Log delay coverage'), 'live watch: the per-cluster coverage is still shown beside the one device');
         if (live) {
           ok(/matched as a hostname/.test(live.textContent), 'the close-up should say how the device was looked up');
-          const docRows = [...live.querySelectorAll('table.tbl tbody tr')].filter((tr) => tr.children.length === 7);
+          // Event time, Arrival, Delay, Raw gap, Status, zone, tag1, Index.
+          const docRows = [...live.querySelectorAll('table.tbl tbody tr')].filter((tr) => tr.children.length === 8);
           ok(docRows.length === 15, `close-up: ${docRows.length} document rows, expected 15`);
           const newest = docRows.length ? docRows[0].children[2].textContent.trim() : '(no rows)';
           ok(newest === '41 min', `close-up: newest delay reads "${newest}", expected 41 min`);
           ok(/delayed/.test(live.textContent), 'the close-up should carry the status');
-          ok(docRows.length && docRows[0].children[5].textContent.trim() === 'acme', `close-up: the tag1 column reads "${docRows.length && docRows[0].children[5].textContent}"`);
+          ok(docRows.length && docRows[0].children[6].textContent.trim() === 'acme', `close-up: the tag1 column reads "${docRows.length && docRows[0].children[6].textContent}"`);
           const pause = [...live.querySelectorAll('button')].find((b) => /Pause/.test(b.textContent));
           ok(!!pause, 'close-up: no pause control on a view that polls');
           if (pause) {
@@ -2658,7 +2661,7 @@ await go('log-delay');
           ok(!!live2, 'live watch: no close-up for proxy-03');
           if (live2) {
             ok(/unreadable/.test(live2.textContent), 'the close-up should say a document could not be read, not hide it');
-            const rows2 = [...live2.querySelectorAll('table.tbl tbody tr')].filter((tr) => tr.children.length === 7);
+            const rows2 = [...live2.querySelectorAll('table.tbl tbody tr')].filter((tr) => tr.children.length === 8);
             ok(rows2.length === 15, `close-up: ${rows2.length} rows — the unreadable document was dropped`);
             const last = rows2.length ? rows2[rows2.length - 1].children[2].textContent.trim() : '(no rows)';
             ok(last === 'unknown', `an unreadable document must read "unknown", read "${last}"`);
@@ -6916,7 +6919,7 @@ await settleFor(300);
     ok(fleet.querySelectorAll('.ld-ring').length === list.length + 1, 'log delay: not one ring per cluster plus All clusters');
     if (!g('ld-by-cluster')) throw new Error(`log delay: no fleet page — ${problems.slice(-3).join(' | ')}`);
     const heads = [...g('ld-by-cluster').querySelectorAll('thead th')].map((t) => t.textContent);
-    ok(heads.map((x) => x.replace(/[↑↓]/g, '').trim()).join('|') === 'Cluster|Devices now|In last run|In range|zone|tag1|Late now|Today|Below 30 min|30–60 min|Above 60 min|Below 30 min, previous 30 days|Last 30 days|Worst device',
+    ok(heads.map((x) => x.replace(/[↑↓]/g, '').trim()).join('|') === 'Cluster|Time zone|Devices now|In last run|In range|zone|tag1|Late now|Today|Below 30 min|30–60 min|Above 60 min|Other time zone|Below 30 min, previous 30 days|Last 30 days|Worst device',
       `log delay: the By cluster columns read ${heads.join(' · ')}`);
     ok(g('ld-by-cluster').classList.contains('ld-ctr'), 'log delay: the By cluster table is not centred');
     ok(/never measured/.test(g('ld-by-cluster').textContent), 'log delay: a cluster never measured does not say so');
@@ -7019,7 +7022,7 @@ await settleFor(300);
     await waitFor(() => ldView() === 'fixes' && g('ld-rules'), 'log delay: All recommendations did not open the fixes');
     ok(lsent.some((m) => m.type === 'LOGDELAY_FIXES' && Array.isArray(m.clusterIds) && m.clusterIds[0] === c0), 'log delay: the fixes were not asked for the cluster');
     ok(view().querySelectorAll('.ld-fix').length >= 2, 'log delay: no group findings');
-    ok(g('ld-rules').querySelectorAll('tbody tr').length === 6, 'log delay: the rules table is not the six rules');
+    ok(g('ld-rules').querySelectorAll('tbody tr').length === 8, 'log delay: the rules table is not the eight rules');
     ok(/Not enough evidence|Not known yet/.test(view().textContent), 'log delay: an unknown finding is not said as such');
     const fd = g('ld-fix-devices').querySelector('tbody tr td a');
     press(fd);

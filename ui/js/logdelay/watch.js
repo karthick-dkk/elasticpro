@@ -286,7 +286,7 @@ function coverageCard() {
 
 /* --------------------------------- the devices --------------------------------- */
 
-const LIVE_COLS = ['device', 'cluster', 'zone', 'tag1', 'state', 'now', 'rawGap', 'deviceTz', 'pattern', 'docsIn', 'arrival', 'event'];
+const LIVE_COLS = ['device', 'cluster', 'zone', 'tag1', 'state', 'now', 'pattern', 'rawGap', 'deviceTz', 'docsIn', 'arrival', 'event'];
 
 /** Every device measured, as board rows; the delayed ones only unless "Every device" is chosen. */
 function liveRows() {
