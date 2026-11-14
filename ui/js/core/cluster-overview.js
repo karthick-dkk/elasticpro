@@ -1,0 +1,198 @@
+/**
+ * Clusters › Overview — one cluster on one screen (pages/cluster-overview.js draws it). What the
+ * board is drawn from, as plain data: the route (`#/clusters/overview[/<cluster>]`), which node
+ * is highest on each gauge, the shard figures, the order of the two tables, this cluster's open
+ * alerts. Pure — no DOM, no state — so tools/unit/cluster-overview.test.mjs holds the rules and
+ * the page, the shell and the tests read ONE definition of each.
+ *
+ * Unknown is not zero: a node that did not report a figure is left out of "highest", a cluster
+ * whose node list was never read has no highest node at all (null, and the card says so), and a
+ * figure `_cat` left blank is NaN, never 0.
+ *
+ * Thresholds are core/nodes-shards.js USAGE_THRESHOLDS (heap 75/85, disk and CPU 80/90) — the
+ * same lines the Nodes & shards page colours its bars by.
+ */
+
+import { parseHash } from '../reports/route.js';
+import { shardAllocation, nodeRoles } from './cluster-detail.js';
+import { isDataNode } from './cluster-boxes.js';
+import { usageLevel } from './nodes-shards.js';
+import { byLevel, worstOf } from './alert-levels.js';
+
+/* ------------------------------------ the route ------------------------------------ */
+
+/** The Clusters page's path in the address (`#/clusters`; `#/overview` still opens it — reports/route.js PAGE_ALIAS). */
+export const CLUSTERS_PATH = 'clusters';
+/** The Overview section's id: `#/clusters/overview`, and the tab's and the menu sub-item's data-section. */
+export const OVERVIEW = 'overview';
+export const LIST = 'list';
+
+/** 'overview' or 'list' from a hash of the Clusters page (`#/clusters/overview`, `#/overview/overview`, `#/clusters`, `#/overview`). */
+export function clustersSection(hash) {
+  const { page, rest } = parseHash(hash);
+  if (page !== 'overview') return LIST;
+  return rest.split('/')[0] === OVERVIEW ? OVERVIEW : LIST;
+}
+
+/** The cluster an Overview address names (`#/clusters/overview/<id>`), or null. */
+export function overviewClusterOf(hash) {
+  const { page, rest } = parseHash(hash);
+  if (page !== 'overview') return null;
+  const [section, id] = rest.split('/');
+  if (section !== OVERVIEW || !id) return null;
+  try { return decodeURIComponent(id); } catch (_) { return id; }
+}
+
+/** The Overview's address, for a cluster when one is named. */
+export const overviewHash = (clusterId) => `#/${CLUSTERS_PATH}/${OVERVIEW}${clusterId ? `/${encodeURIComponent(clusterId)}` : ''}`;
+/** The List's address. */
+export const listHash = () => `#/${CLUSTERS_PATH}`;
+
+/* ------------------------------------ figures ------------------------------------ */
+
+/** A _cat figure as a number: blank, missing or non-numeric is NaN (never 0). */
+export const fig = (v) => (v === '' || v === null || v === undefined ? NaN : Number(v));
+
+/**
+ * The node with the highest `field` (a `_cat/nodes` percentage column: `cpu`, `heap.percent`,
+ * `disk.used_percent`): { name, value, node }. Nodes that did not report the figure are left out;
+ * null when none did, or when there is no node list.
+ */
+export function highestNode(nodes, field) {
+  let best = null;
+  for (const n of Array.isArray(nodes) ? nodes : []) {
+    const v = fig(n && n[field]);
+    if (!Number.isFinite(v)) continue;
+    if (!best || v > best.value) best = { name: n.name || '', value: v, node: n };
+  }
+  return best;
+}
+
+/** A node's heap: { percent, current, max } in bytes; a figure not reported is null. */
+export function heapFigures(node) {
+  const n = node || {};
+  const p = fig(n['heap.percent']), cur = fig(n['heap.current']), max = fig(n['heap.max']);
+  return { percent: Number.isFinite(p) ? p : null, current: Number.isFinite(cur) ? cur : null, max: Number.isFinite(max) ? max : null };
+}
+
+/** 'ok' | 'warn' | 'crit' for a gauge reading, or null when it is not a number. `kind` is 'heap' or 'disk' (CPU reads as disk: 80/90). */
+export const gaugeLevel = (p, kind) => usageLevel(p, kind === 'heap' ? 'heap' : 'disk');
+
+/**
+ * The nodes, busiest first: by CPU (highest first, nodes that did not report it last), then by
+ * heap, then A–Z. A copy; the list given is not reordered.
+ */
+export function busiestFirst(nodes) {
+  const key = (n, f) => { const v = fig(n && n[f]); return Number.isFinite(v) ? v : -1; };
+  return [...(Array.isArray(nodes) ? nodes : [])].sort((a, b) => key(b, 'cpu') - key(a, 'cpu')
+    || key(b, 'heap.percent') - key(a, 'heap.percent') || String(a.name || '').localeCompare(String(b.name || '')));
+}
+
+/**
+ * The Nodes card: how many, how many hold data, how many are master-eligible, which is the
+ * elected master and how long it has been up (its `_cat/nodes` uptime, as the cluster said it).
+ * null when the node list has not been read.
+ */
+export function nodeCounts(nodes) {
+  if (!Array.isArray(nodes) || !nodes.length) return null;
+  const lists = nodes.map((n) => nodeRoles(n['node.role']));
+  const master = nodes.find((n) => String(n.master || '').trim() === '*') || null;
+  return {
+    total: nodes.length,
+    data: lists.filter(isDataNode).length,
+    masterEligible: lists.filter((r) => r.includes('master')).length,
+    masterName: master ? master.name || null : null,
+    uptime: master && master.uptime ? String(master.uptime) : null,
+  };
+}
+
+/**
+ * The Shards card from `_cluster/health` (cluster-detail.js shardAllocation is the one reading of
+ * it): primaries, the total, and the split into assigned / moving (relocating + initializing) /
+ * unassigned, with the assigned share in per cent. null when health was not read.
+ */
+export function shardFigures(health) {
+  const a = shardAllocation(health);
+  if (!a) return null;
+  const primary = fig(health.active_primary_shards);
+  return {
+    primary: Number.isFinite(primary) ? primary : null,
+    total: a.total,
+    assigned: a.active,
+    moving: (a.relocating || 0) + (a.initializing || 0),
+    unassigned: a.unassigned,
+    pct: a.total > 0 ? (a.active / a.total) * 100 : null,
+  };
+}
+
+/** "68 of 69 shards placed"; '' when the figures are not known. */
+export function placedText(f) {
+  if (!f || f.total === null || f.total === undefined) return '';
+  return `${f.assigned} of ${f.total} shard${f.total === 1 ? '' : 's'} placed`;
+}
+
+/* ------------------------------------ indices ------------------------------------ */
+
+const HEALTH_ORDER = { red: 0, yellow: 1, green: 2 };
+
+/**
+ * The indices, unhealthy first (red, then yellow, then green and unknown), then by size (largest
+ * first), then A–Z. `rows` are state.indices entries (parseIndexName's shape). A copy.
+ */
+export function unhealthyFirst(rows) {
+  const rank = (r) => HEALTH_ORDER[String(r.health || '').toLowerCase()] ?? 3;
+  return [...(Array.isArray(rows) ? rows : [])].sort((a, b) => rank(a) - rank(b) || (b.size || 0) - (a.size || 0)
+    || String(a.index || '').localeCompare(String(b.index || '')));
+}
+
+/** How many indices are red, yellow and green, and how many in all. */
+export function indexHealthCounts(rows) {
+  const out = { red: 0, yellow: 0, green: 0, total: 0 };
+  for (const r of Array.isArray(rows) ? rows : []) {
+    out.total++;
+    const k = String(r.health || '').toLowerCase();
+    if (k in out) out[k]++;
+  }
+  return out;
+}
+
+/** Documents and store size over the indices: { docs, size }. */
+export function indexTotals(rows) {
+  let docs = 0, size = 0;
+  for (const r of Array.isArray(rows) ? rows : []) { docs += r.docs || 0; size += r.size || 0; }
+  return { docs, size };
+}
+
+/** An index's shard count: primaries × (1 + replicas); null when the row has no primary count. */
+export function indexShards(r) {
+  const pri = fig(r && r.pri), rep = fig(r && r.rep);
+  if (!Number.isFinite(pri) || pri <= 0) return null;
+  return pri * (1 + (Number.isFinite(rep) ? rep : 0));
+}
+
+/* ------------------------------------ alerts ------------------------------------ */
+
+/**
+ * The open alerts for one cluster: how many, the worst level, and the titles of the two worst
+ * (critical before high before warning). `alerts` is openAlertsNow()'s list.
+ */
+export function clusterAlerts(alerts, clusterId) {
+  const mine = (Array.isArray(alerts) ? alerts : []).filter((a) => a && a.cluster && a.cluster.id === clusterId).sort(byLevel);
+  return { count: mine.length, worst: mine.length ? worstOf(mine) : null, titles: mine.slice(0, 2).map((a) => a.title || '') };
+}
+
+/* ------------------------------------ rates ------------------------------------ */
+
+/**
+ * A rate for a card: `null` (not measured) is '–'; small rates keep one decimal, large ones are
+ * whole with grouping — "0.3", "14.2", "1,840".
+ */
+export function rateText(v) {
+  if (v === null || v === undefined || !Number.isFinite(Number(v))) return '–';
+  const n = Number(v);
+  if (n < 100) return n.toFixed(1).replace(/\.0$/, n < 10 ? '.0' : '');
+  return Math.round(n).toLocaleString();
+}
+
+/** Whether a nodeRates() answer has a rate yet (two polls exist). */
+export const measured = (r) => !!(r && r.measured);
