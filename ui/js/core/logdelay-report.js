@@ -124,7 +124,8 @@ export const RUN_ENDED = Object.freeze(new Set(['completed', 'failed', 'cancelle
  */
 export function fetchNowMessage({ clusterIds, device, devices } = {}) {
   // One cluster at a time (docs/LOGDELAY.md "Fetch now"): `devices` is `late` (the core's default:
-  // the devices 15 min or more behind at the start) or `all`; a named device needs neither.
+  // the devices delayed or critical at the start, by the cluster's levels) or `all`; a named
+  // device needs neither.
   return {
     type: 'JOB_RUN', jobId: LD_JOB,
     ...(Array.isArray(clusterIds) && clusterIds.length ? { clusterIds: clusterIds.slice(0, 1).map(String) } : {}),

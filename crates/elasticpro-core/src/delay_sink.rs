@@ -192,8 +192,34 @@ impl SinkConfig {
 /// back-off) as it was.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct MeasureScope {
+    /// The one cluster a person's *Fetch now* measures; `None` = every target (the timer's run,
+    /// `DELAY_SINK_RUN`).
     pub clusters: Option<Vec<String>>,
     pub device: Option<String>,
+    /// Which of the cluster's devices: its late ones (the default for a person's run) or all.
+    pub devices: Devices,
+}
+
+/// Which devices a person's *Fetch now* measures again (docs/LOGDELAY.md "Fetch now").
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Devices {
+    /// Those whose stored state at the run's start is late — delay or critical, by the cluster's
+    /// own levels (`levels.rs`, the one definition) on the time-zone-corrected delay. Silent
+    /// devices are not among them: only a whole-cluster run can hear from them.
+    Late,
+    /// Every device of the cluster, as the automatic run reads it.
+    #[default]
+    All,
+}
+
+impl Devices {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Devices::Late => "late",
+            Devices::All => "all",
+        }
+    }
 }
 
 impl MeasureScope {
@@ -201,31 +227,40 @@ impl MeasureScope {
         self.clusters.is_none() && self.device.is_none()
     }
 
-    /// From a `JOB_RUN` message: `clusterIds` (a list of ids, at most 200) and `device` (a
-    /// device name as the aggregation returns it). Refused by name when odd.
+    /// From a `JOB_RUN` message — a person's *Fetch now*: `clusterIds` names exactly one cluster
+    /// (a person never runs every cluster by hand; that is the timer's every-2-hours run),
+    /// `devices` is `late` (the default) or `all`, and `device` one device name as the
+    /// aggregation returns it. Refused by name when odd.
     pub fn from_msg(msg: &Value) -> Result<MeasureScope, String> {
         let clusters = match msg.get("clusterIds") {
-            None | Some(Value::Null) => None,
             Some(Value::Array(a)) => {
                 let ids: Vec<String> = a.iter().map(|v| v.as_str().map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
                     .ok_or_else(|| "clusterIds: cluster ids (text) only".to_string())).collect::<Result<_, _>>()?;
-                if ids.is_empty() || ids.len() > 200 {
-                    return Err("clusterIds: between 1 and 200 cluster ids".into());
+                match ids.len() {
+                    1 => Some(ids),
+                    0 => return Err("clusterIds: name the one cluster to measure — Fetch now measures one cluster at a time; the scheduled run measures every cluster".into()),
+                    _ => return Err("clusterIds: exactly one cluster — Fetch now measures one cluster at a time; the scheduled run measures every cluster".into()),
                 }
-                Some(ids)
             }
-            Some(_) => return Err("clusterIds must be a list of cluster ids".into()),
+            None | Some(Value::Null) => return Err("clusterIds: name the one cluster to measure — Fetch now measures one cluster at a time; the scheduled run measures every cluster".into()),
+            Some(_) => return Err("clusterIds must be a list with one cluster id".into()),
         };
         let device = match msg.get("device") {
             None | Some(Value::Null) => None,
             Some(Value::String(s)) if crate::auth::device_name(s) => Some(s.clone()),
             Some(_) => return Err("device: one device name, as the measurement lists it (no wildcard, at most 256 characters)".into()),
         };
-        Ok(MeasureScope { clusters, device })
+        let devices = match msg.get("devices") {
+            None | Some(Value::Null) => Devices::Late,
+            Some(Value::String(s)) if s.eq_ignore_ascii_case("late") => Devices::Late,
+            Some(Value::String(s)) if s.eq_ignore_ascii_case("all") => Devices::All,
+            Some(_) => return Err("devices: late (the devices delayed or critical at the run's start — the default) or all (the whole cluster)".into()),
+        };
+        Ok(MeasureScope { clusters, device, devices })
     }
 
     pub fn to_json(&self) -> Value {
-        json!({ "clusterIds": self.clusters, "device": self.device })
+        json!({ "clusterIds": self.clusters, "device": self.device, "devices": self.devices.as_str() })
     }
 }
 
@@ -593,6 +628,27 @@ mod tests {
         assert_eq!(index_name("elasticpro-log-delay", y, m), "elasticpro-log-delay-2026.09");
         // The hour, not the minute: every run inside one hour writes the same ids.
         assert_eq!(bucket, "2026-09-19T14:00:00Z");
+    }
+
+    #[test]
+    fn a_persons_scope_names_one_cluster_and_late_or_all_devices() {
+        let one = MeasureScope::from_msg(&json!({ "clusterIds": ["prod"] })).unwrap();
+        assert_eq!((one.clusters.as_deref(), one.device.as_deref(), one.devices), (Some(&["prod".to_string()][..]), None, Devices::Late), "late is the default");
+        assert!(!one.is_full());
+        let all = MeasureScope::from_msg(&json!({ "clusterIds": ["prod"], "devices": "ALL" })).unwrap();
+        assert_eq!(all.devices, Devices::All);
+        assert_eq!(all.to_json(), json!({ "clusterIds": ["prod"], "device": null, "devices": "all" }));
+        assert_eq!(MeasureScope::from_msg(&all.to_json()).unwrap(), all, "a retry is the same scope");
+        let dev = MeasureScope::from_msg(&json!({ "clusterIds": ["prod"], "device": "fw-7" })).unwrap();
+        assert_eq!(dev.device.as_deref(), Some("fw-7"));
+        for (bad, why) in [(json!({}), "one cluster"), (json!({ "clusterIds": [] }), "one cluster"), (json!({ "clusterIds": ["a", "b"] }), "exactly one"),
+                           (json!({ "clusterIds": "prod" }), "list"), (json!({ "clusterIds": ["prod"], "devices": "some" }), "late"),
+                           (json!({ "clusterIds": ["prod"], "device": "fw-*" }), "device")] {
+            let e = MeasureScope::from_msg(&bad).unwrap_err();
+            assert!(e.contains(why), "{bad}: {e}");
+        }
+        assert!(MeasureScope::default().is_full(), "the timer's and DELAY_SINK_RUN's: every cluster, every device");
+        assert_eq!(MeasureScope::default().devices, Devices::All);
     }
 
     #[test]

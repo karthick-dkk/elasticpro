@@ -58,13 +58,39 @@ fn source_fields(f: &Fields) -> Vec<String> {
     source
 }
 
-/// The time window and, for a run scoped to one device, that device: the filter every page
-/// of a run shares. The window is absolute (epoch ms, fixed when the run starts), so the
-/// pages of one run read the same documents however long the run takes.
-fn window_query(f: &Fields, from_ms: i64, to_ms: i64, device: Option<&str>) -> Value {
+/// Which devices a run reads: every device of the window (the schedule's run, *Fetch now* on
+/// the whole cluster), one device, or a named list (*Fetch now* on a cluster's late devices).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum DeviceFilter {
+    #[default]
+    All,
+    One(String),
+    Some(Vec<String>),
+}
+
+impl DeviceFilter {
+    /// Part of the cluster's list: a run with this says nothing about the devices it did not read.
+    pub fn is_partial(&self) -> bool {
+        !matches!(self, DeviceFilter::All)
+    }
+
+    pub fn one(&self) -> Option<&str> {
+        match self {
+            DeviceFilter::One(d) => Some(d),
+            _ => None,
+        }
+    }
+}
+
+/// The time window and, for a narrowed run, its devices (a `term` for one, `terms` for a list):
+/// the filter every page of a run shares. The window is absolute (epoch ms, fixed when the run
+/// starts), so the pages of one run read the same documents however long the run takes.
+fn window_query(f: &Fields, from_ms: i64, to_ms: i64, devices: &DeviceFilter) -> Value {
     let mut filter = vec![json!({ "range": { f.arrival.clone(): { "gte": from_ms, "lte": to_ms, "format": "epoch_millis" } } })];
-    if let Some(d) = device {
-        filter.push(json!({ "term": { f.device.clone(): d } }));
+    match devices {
+        DeviceFilter::All => {}
+        DeviceFilter::One(d) => filter.push(json!({ "term": { f.device.clone(): d } })),
+        DeviceFilter::Some(list) => filter.push(json!({ "terms": { f.device.clone(): list } })),
     }
     json!({ "bool": { "filter": filter } })
 }
@@ -74,7 +100,7 @@ fn window_query(f: &Fields, from_ms: i64, to_ms: i64, device: Option<&str>) -> V
 /// candidate and the extra columns. The first page also counts the documents in the window
 /// that carry no device name at all (`no_device`): they are in no bucket, so they are said,
 /// not dropped silently.
-pub fn page_body(f: &Fields, from_ms: i64, to_ms: i64, size: usize, after: Option<&Value>, device: Option<&str>) -> Value {
+pub fn page_body(f: &Fields, from_ms: i64, to_ms: i64, size: usize, after: Option<&Value>, devices: &DeviceFilter) -> Value {
     let mut comp = json!({ "size": size.clamp(1, PAGE_SIZE), "sources": [ { "d": { "terms": { "field": f.device } } } ] });
     if let Some(a) = after {
         comp["after"] = a.clone();
@@ -90,7 +116,7 @@ pub fn page_body(f: &Fields, from_ms: i64, to_ms: i64, size: usize, after: Optio
     if after.is_none() {
         aggs["no_device"] = json!({ "missing": { "field": f.device } });
     }
-    json!({ "size": 0, "track_total_hits": false, "query": window_query(f, from_ms, to_ms, device), "aggs": aggs })
+    json!({ "size": 0, "track_total_hits": false, "query": window_query(f, from_ms, to_ms, devices), "aggs": aggs })
 }
 
 /// One page as read.
@@ -197,7 +223,7 @@ mod tests {
 
     #[test]
     fn the_search_asks_for_the_extras_without_keyword() {
-        let b = page_body(&fields(), 1_000, 2_000, 1000, None, None);
+        let b = page_body(&fields(), 1_000, 2_000, 1000, None, &DeviceFilter::All);
         let src: Vec<&str> = b.pointer("/aggs/devices/aggs/latest/top_hits/_source").unwrap().as_array().unwrap()
             .iter().map(|v| v.as_str().unwrap()).collect();
         assert_eq!(src, ["@timestamp", "event_created", "ingested_time", "tag1", "fwd_tag", "parser_tag", "Zone"]);
@@ -212,10 +238,13 @@ mod tests {
     #[test]
     fn pages_follow_the_after_key_and_end_on_a_short_page() {
         let after = json!({ "d": "fw-1000" });
-        let b = page_body(&fields(), 1, 2, 500, Some(&after), Some("fw-7"));
+        let b = page_body(&fields(), 1, 2, 500, Some(&after), &DeviceFilter::One("fw-7".into()));
         assert_eq!(b.pointer("/aggs/devices/composite/after").unwrap(), &after);
         assert!(b.pointer("/aggs/no_device").is_none(), "counted once, on the first page");
         assert_eq!(b.pointer("/query/bool/filter/1/term/src_hostname.keyword").unwrap(), "fw-7", "a run scoped to one device");
+        let late = page_body(&fields(), 1, 2, 500, None, &DeviceFilter::Some(vec!["fw-7".into(), "fw-9".into()]));
+        assert_eq!(late.pointer("/query/bool/filter/1/terms/src_hostname.keyword").unwrap(), &json!(["fw-7", "fw-9"]), "a run scoped to the late devices");
+        assert!(DeviceFilter::Some(vec![]).is_partial() && DeviceFilter::One("x".into()).is_partial() && !DeviceFilter::All.is_partial());
         let full = json!({ "aggregations": { "devices": { "after_key": { "d": "b" }, "buckets": [
             { "key": { "d": "a" }, "doc_count": 3, "latest": { "hits": { "hits": [ { "_source": { "@timestamp": "2026-11-04T12:41:00Z", "ingested_time": "2026-11-04T12:40:00Z" } } ] } } },
             { "key": { "d": "b" }, "doc_count": 1, "latest": { "hits": { "hits": [] } } },

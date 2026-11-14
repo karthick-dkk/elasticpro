@@ -39,20 +39,15 @@ pub const STEADY_RUNS: usize = 3;
 pub const DEVICE_STEADY_RUNS: u32 = 2;
 
 /// A cluster's `logTimeZone` setting.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum LogTimeZone {
     /// The default: the zone most of its devices fall in.
+    #[default]
     Detect,
     /// Arrival times are UTC: no correction, a device at an offset is in another zone.
     Utc,
     /// A named IANA zone: the offset at each event's own time.
     Named(Tz),
-}
-
-impl Default for LogTimeZone {
-    fn default() -> LogTimeZone {
-        LogTimeZone::Detect
-    }
 }
 
 impl LogTimeZone {

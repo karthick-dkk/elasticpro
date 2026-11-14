@@ -278,12 +278,12 @@ impl Core {
         -> Result<(Applied, Daily), String> {
         let st = self.logdelay_store().ok_or("no data directory")?;
         let mut t = (*st.read_tracker(cluster)).clone();
-        let complete = read.complete && read.device.is_none();
+        let complete = read.complete && !read.is_partial();
         let before = t.last_run_ms;
         let applied = t.apply_run(run_ms, readings, levels, (s.silent_after_hours as i64) * 3_600_000, complete, zone);
-        if read.device.is_some() {
-            // One device measured again is not the cluster's run: "in the last run" and how the
-            // last run read the list stay the cluster's.
+        if read.is_partial() {
+            // One device, or the late devices, measured again is not the cluster's run: "in the
+            // last run" and how the last run read the list stay the cluster's.
             t.last_run_ms = before.or(Some(run_ms));
         } else {
             t.last_read = Some(read);

@@ -121,7 +121,7 @@ export function fetchNowControl(scope, h2) {
       h('button.btn.sm.primary#ld-fetch-now', {
         type: 'button', disabled: busy || !allowed,
         title: allowed
-          ? `Run the log delay measurement now for ${scope.label}${scope.device ? ' (its cluster is measured; the device is named so a core that can narrows to it)' : scope.devices === 'all' ? ' (every device of the cluster)' : ' (the devices 15 min or more behind at the start)'}`
+          ? `Run the log delay measurement now for ${scope.label}${scope.device ? ' (its cluster is measured; the device is named so a core that can narrows to it)' : scope.devices === 'all' ? ' (every device of the cluster)' : ' (the devices delayed or critical at the start)'}`
           : 'Fetch now measures one cluster at a time: open a cluster (or pick one above). The scheduled measurement reads every cluster every 2 hours.',
         onclick: () => { if (allowed) press(scope); },
       }, busy ? h('span', h('span.spin'), ' Fetching…') : 'Log Delay – Fetch Now'),

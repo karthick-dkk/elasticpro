@@ -20,7 +20,7 @@
 //!   again (twice); after that the run keeps what it read and says the list is incomplete, so
 //!   nobody it did not read is turned silent (`Tracker::apply_run`, `complete: false`).
 
-use super::measure::{self, Fields, PageError, Reading};
+use super::measure::{self, DeviceFilter, Fields, PageError, Reading};
 use crate::bridge::Core;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -69,26 +69,41 @@ pub struct RunInfo {
     pub no_device: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub device: Option<String>,
+    /// `late` when the run read only the cluster's late devices (*Fetch now*, docs/LOGDELAY.md
+    /// "Fetch now"); absent for every device or one device.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub only: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
 
+impl RunInfo {
+    /// The run read part of the list only (one device, the late devices): it says nothing about
+    /// the devices it did not read, and is not the cluster's run.
+    pub fn is_partial(&self) -> bool {
+        self.device.is_some() || self.only.is_some()
+    }
+}
+
 impl Collected {
-    pub fn info(&self, at: i64, from: i64, to: i64, max_devices: u64, device: Option<&str>) -> RunInfo {
+    /// How the run read the cluster. A narrowed read (`filter` not `All`) is never `complete`:
+    /// the whole list was not read, whatever its last page said.
+    pub fn info(&self, at: i64, from: i64, to: i64, max_devices: u64, filter: &DeviceFilter) -> RunInfo {
         RunInfo {
-            at, from, to, devices: self.readings.len() as u64, pages: self.pages, complete: self.complete, truncated: self.truncated,
-            max_devices: self.truncated.then_some(max_devices), no_device: self.no_device, device: device.map(String::from), error: self.error.clone(),
+            at, from, to, devices: self.readings.len() as u64, pages: self.pages, complete: self.complete && !filter.is_partial(), truncated: self.truncated,
+            max_devices: self.truncated.then_some(max_devices), no_device: self.no_device, device: filter.one().map(String::from),
+            only: matches!(filter, DeviceFilter::Some(_)).then(|| "late".to_string()), error: self.error.clone(),
         }
     }
 }
 
 impl Core {
-    /// Every device of cluster `id` with a document in `[from_ms, to_ms]` (or the one
-    /// `device`), at most `max_devices`, page by page. `on_page` is told how many devices are
-    /// read so far after every page (the run's progress). Stops between pages when somebody
-    /// asked the measurement to stop (`JOB_CANCEL`).
+    /// Every device of cluster `id` with a document in `[from_ms, to_ms]` (or the one device,
+    /// or the named devices, of `devices`), at most `max_devices`, page by page. `on_page` is
+    /// told how many devices are read so far after every page (the run's progress). Stops
+    /// between pages when somebody asked the measurement to stop (`JOB_CANCEL`).
     #[allow(clippy::too_many_arguments)]
-    pub(crate) async fn logdelay_collect(self: &Arc<Self>, id: &str, f: &Fields, from_ms: i64, to_ms: i64, max_devices: u64, device: Option<&str>,
+    pub(crate) async fn logdelay_collect(self: &Arc<Self>, id: &str, f: &Fields, from_ms: i64, to_ms: i64, max_devices: u64, devices: &DeviceFilter,
                                          mut on_page: impl FnMut(usize)) -> Collected {
         let max = max_devices.clamp(1, measure::MAX_DEVICES_PER_RUN) as usize;
         let allowance = crate::memory::budget().report_page_bytes();
@@ -103,7 +118,7 @@ impl Core {
             }
             // One more than the cap leaves room for: a device beyond it says the list was cut.
             let ask = size.min(max - out.readings.len() + 1).max(1);
-            let body = measure::page_body(f, from_ms, to_ms, ask, after.as_ref(), device);
+            let body = measure::page_body(f, from_ms, to_ms, ask, after.as_ref(), devices);
             let mut req = crate::delay_sink::search_request_for(id, &f.pattern, body);
             req.timeout_ms = Some(PAGE_TIMEOUT_MS);
             let res = self.es_req(req).await;

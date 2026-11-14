@@ -105,6 +105,13 @@ clusters:
 `tls:` per cluster (or under `defaults:`): `auto` (default — OS store, else ask once and pin),
 `system` (OS store only, strict), `insecure` (lab only).
 
+`logTimeZone:` per cluster (Edit cluster › **Log time zone**; docs/LOGDELAY.md "Time zones"): the
+zone the cluster's arrival time (`@timestamp`) is stamped in — `UTC` (no correction) or an IANA
+name such as `Asia/Kolkata`; left out = *Detect from devices* (the offset most of its devices'
+logs sit at, at least 60 % agreeing and steady over 3 runs). The log delay is measured after that
+offset is taken out, so an IST cluster whose logs are on time no longer shows 330 minutes. An
+unknown zone is refused when saved.
+
 `defaults: { tls: insecure }` (Config → Defaults → Certificates) is one switch for everything:
 every cluster whatever its own `tls:`, every jump host's SSH key, and the Zabbix API certificate
 are accepted without checking. Nothing is pinned by it, so setting it back to `auto` brings the
@@ -1193,6 +1200,7 @@ value is used. The dialog marks each such field **Set in ElasticPro**, with Zabb
 | `name`, `via` (a jump host id, `""` = direct), `tls` (`auto`, `system`, `insecure`), `enabled` | the core: what is polled, and how (`enabled: false` — listed, not polled) |
 | `liveRetention`, `snapshotRetention`, `backupCapacity` | the core's capacity document (history store) and the pages' volume report |
 | `tags` (the client tag is Zabbix's value; `zabbix` is always added), `note`, `volumeWindowDays` (1–90), `volumeTopDays` (1–90), `volumeHeadroomPercent` (0–200) | the pages, from the `ZABBIX_CLUSTERS` row |
+| `logTimeZone` (`UTC` or an IANA name, kept canonical; reset = detect from the devices) | the log delay measurement (docs/LOGDELAY.md "Time zones"), through the cluster's spec |
 
 The cluster type, ULM and SLM stay `CLUSTER_META_SET` (an admin's, part of the same dialog).
 
@@ -1225,7 +1233,7 @@ the *Clusters* section removes overlays the backup does not hold, like everythin
 | Message | Role | Answer |
 |---|---|---|
 | `ZABBIX_CLUSTER_SAVE {hostId, set?: {field: value}, reset?: [field]}` | operator | `{ok, clusterId, hostId, overridden: [field], cluster: <the ZABBIX_CLUSTERS row after the change>}` — applied at once from the last sync's reading, without asking Zabbix. Refusals: `url_from_zabbix` (`url`, `host`, `port`, `scheme`…), `credential` (`username`, `password`, `apiKey`, `bearer`…: `CREDENTIAL_SET`), `cluster_type` (`type`, `ulm`, `slm`: `CLUSTER_META_SET`), `unknown_field`, `bad_request` (a value out of range; an empty value — reset instead), `unknown_jump`, `name_taken`, `credential_destination` and `tls_insecure` (below admin), `forbidden`, `not_found` (no such host in the last sync), `bad_message`. Audit line `zabbix cluster edited in ElasticPro` with `user`, `cluster`, `host`, `set` (field names), `reset`. |
-| `ZABBIX_CLUSTERS` (row fields) | guest | Effective `name`, `via`, `tls`, `enabled`, `tags`, `note`, `liveRetention`, `snapshotRetention`, `backupCapacity`, `volume*` (null when not set — never a guess); `overridden: [field]`, `zabbixValues: {name, via, tags}`, `overriddenBy`, `overriddenAt`, `ownCredential`, `ownCredentialMoved`, `credentialIsOwn` (its credential is its own — Zabbix's per-cluster or ElasticPro's — so its route is an admin's). |
+| `ZABBIX_CLUSTERS` (row fields) | guest | Effective `name`, `via`, `tls`, `enabled`, `tags`, `note`, `liveRetention`, `snapshotRetention`, `backupCapacity`, `volume*`, `logTimeZone` (null when not set — never a guess); `overridden: [field]`, `zabbixValues: {name, via, tags}`, `overriddenBy`, `overriddenAt`, `ownCredential`, `ownCredentialMoved`, `credentialIsOwn` (its credential is its own — Zabbix's per-cluster or ElasticPro's — so its route is an admin's). |
 
 ## Plan templates — the message contract
 

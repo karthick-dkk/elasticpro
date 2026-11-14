@@ -1,6 +1,7 @@
 //! The log delay measurement at scale (docs/LOGDELAY.md "Measurement", "Fetch now"): a
 //! cluster of 25 000 devices, read in composite pages through *Fetch now*
-//! (`JOB_RUN {jobId: "logdelay.measure", clusterIds?, device?}`), with nothing cut.
+//! (`JOB_RUN {jobId: "logdelay.measure", clusterIds: [one], devices: late|all, device?}`), with
+//! nothing cut.
 //!
 //!   * every device is read: 25 000 in, 25 000 in the store, the states counted as generated;
 //!   * no page asks for more than 1000 devices and no answer is larger than a page of them —
@@ -50,12 +51,17 @@ fn page(body: &Value, seen: &Seen) -> String {
     let size = comp["size"].as_u64().unwrap() as usize;
     seen.largest_ask.fetch_max(size, Ordering::SeqCst);
     let after = comp["after"]["d"].as_str().map(String::from);
-    let only = body["query"]["bool"]["filter"].as_array().unwrap().iter().find_map(|f| f["term"].as_object().and_then(|m| m.values().next()).and_then(Value::as_str).map(String::from));
+    let filters = body["query"]["bool"]["filter"].as_array().unwrap();
+    let only = filters.iter().find_map(|f| f["term"].as_object().and_then(|m| m.values().next()).and_then(Value::as_str).map(String::from));
+    // A `terms` filter (the late devices): those names, in name order, paged like the rest.
+    let named: Option<Vec<usize>> = filters.iter().find_map(|f| f["terms"].as_object().and_then(|m| m.values().next()).and_then(Value::as_array))
+        .map(|a| { let mut v: Vec<usize> = a.iter().filter_map(Value::as_str).map(|d| d.trim_start_matches("dev-").parse().unwrap()).collect(); v.sort(); v });
     let start = after.as_deref().map(|a| a.trim_start_matches("dev-").parse::<usize>().unwrap() + 1).unwrap_or(1);
     let now = chrono::Utc::now().timestamp_millis();
-    let ids: Vec<usize> = match &only {
-        Some(d) => vec![d.trim_start_matches("dev-").parse().unwrap()],
-        None => (start..=DEVICES).take(size).collect(),
+    let ids: Vec<usize> = match (&only, &named) {
+        (Some(d), _) => vec![d.trim_start_matches("dev-").parse().unwrap()],
+        (None, Some(list)) => list.iter().copied().filter(|i| *i >= start).take(size).collect(),
+        (None, None) => (start..=DEVICES).take(size).collect(),
     };
     let buckets: Vec<Value> = ids.iter().map(|&i| {
         let arrival = now - 60_000;
@@ -134,10 +140,19 @@ async fn twenty_five_thousand_devices_are_read_in_pages_and_nothing_is_cut() {
     let set = c.handle(json!({ "type": "DELAY_SINK_SET", "session": &s, "config": { "enabled": false, "destination": "builtin", "everyHours": 2, "maxDevices": 30000 } })).await;
     assert_eq!(set["config"]["maxDevices"], json!(30000), "{set}");
 
-    let run = fetch_now(&c, &s, json!({})).await;
+    // Fetch now is one cluster: without it, or with two, it is refused before anything runs.
+    for bad in [json!({}), json!({ "clusterIds": [] }), json!({ "clusterIds": ["prod", "prod"] }), json!({ "clusterIds": ["prod"], "devices": "some" })] {
+        let mut m = json!({ "type": "JOB_RUN", "session": &s, "jobId": "logdelay.measure" });
+        for (k, v) in bad.as_object().unwrap() { m[k] = v.clone(); }
+        let r = c.handle(m).await;
+        assert_eq!(r["kind"], json!("bad_request"), "{bad}: {r}");
+    }
+    let run = fetch_now(&c, &s, json!({ "clusterIds": ["prod"], "devices": "all" })).await;
     assert_eq!(run["status"], json!("completed"), "{run}");
     assert_eq!(run["records"], json!(DEVICES), "every device measured: {run}");
-    assert_eq!((run["done"].clone(), run["total"].clone(), run["progress"].clone()), (json!(1), json!(1), json!(100)), "{run}");
+    assert_eq!((run["done"].clone(), run["total"].clone(), run["progress"].clone()), (json!(DEVICES), json!(DEVICES), json!(100)), "a one-cluster run counts devices: {run}");
+    assert!(run["note"].as_str().unwrap().contains("whole cluster"), "{run}");
+    assert_eq!(run["scope"]["devices"], json!("all"));
     let pages = seen.pages.load(Ordering::SeqCst);
     assert_eq!(pages, 26, "25 full pages of 1000 and the empty one that ends the list");
     assert!(seen.largest_ask.load(Ordering::SeqCst) <= 1000, "no page asks for more than 1000 devices");
@@ -169,6 +184,26 @@ async fn twenty_five_thousand_devices_are_read_in_pages_and_nothing_is_cut() {
     let row = &one["devices"][0];
     assert_eq!((row["zone"].clone(), row["tag1"].clone(), row["state"].clone()), (json!("dc1"), json!("switch"), json!("delay")), "{row}");
 
+    // The late devices alone (the default): those delayed or critical at the start by the levels —
+    // the 41- and 95-minute ones (30 and over) — in one terms filter; nobody else is read, nobody
+    // is turned silent, and the cluster's own last run stays the whole run's.
+    let late_n = want(&|m| m.is_some_and(|x| x >= 30.0));
+    let before = seen.pages.load(Ordering::SeqCst);
+    let cl_before = c.handle(json!({ "type": "LOGDELAY_CLUSTER", "session": &s, "clusterId": "prod" })).await;
+    let run = fetch_now(&c, &s, json!({ "clusterIds": ["prod"] })).await;
+    assert_eq!((run["status"].clone(), run["records"].clone()), (json!("completed"), json!(late_n)), "{run}");
+    assert_eq!((run["done"].clone(), run["total"].clone()), (json!(late_n), json!(late_n)), "{run}");
+    assert!(run["note"].as_str().unwrap().contains(&format!("late devices ({late_n} of {DEVICES}")), "{run}");
+    assert_eq!(run["scope"]["devices"], json!("late"));
+    let last = bodies.lock().unwrap().last().cloned().unwrap();
+    assert_eq!(last["query"]["bool"]["filter"][1]["terms"]["src_hostname.keyword"].as_array().unwrap().len(), late_n, "{last}");
+    assert!(seen.pages.load(Ordering::SeqCst) - before <= 3, "a terms filter, pages of 1000");
+    let sum = c.handle(json!({ "type": "LOGDELAY_SUMMARY", "session": &s, "maxDevices": 1 })).await;
+    assert_eq!((sum["totals"]["devices"].clone(), sum["totals"]["silent"].clone()), (json!(DEVICES), json!(0)), "nobody turned silent by a late-devices run");
+    let cl = c.handle(json!({ "type": "LOGDELAY_CLUSTER", "session": &s, "clusterId": "prod" })).await;
+    assert_eq!(cl["lastRunAt"], cl_before["lastRunAt"], "the cluster's last run is still the whole run");
+    assert_eq!(cl["lastRead"]["devices"], json!(DEVICES), "{}", cl["lastRead"]);
+
     // A device scoped run: that device alone, nobody else touched.
     let before = seen.pages.load(Ordering::SeqCst);
     let run = fetch_now(&c, &s, json!({ "clusterIds": ["prod"], "device": "dev-000020" })).await;
@@ -189,7 +224,7 @@ async fn twenty_five_thousand_devices_are_read_in_pages_and_nothing_is_cut() {
     // and the 4500 it did not read are not turned silent (unknown is not "no logs").
     let set = c.handle(json!({ "type": "DELAY_SINK_SET", "session": &s, "config": { "enabled": false, "destination": "builtin", "everyHours": 2, "maxDevices": 20500 } })).await;
     assert_eq!(set["ok"], json!(true), "{set}");
-    let run = fetch_now(&c, &s, json!({ "clusterIds": ["prod"] })).await;
+    let run = fetch_now(&c, &s, json!({ "clusterIds": ["prod"], "devices": "all" })).await;
     assert_eq!((run["status"].clone(), run["records"].clone()), (json!("completed"), json!(20_500)), "{run}");
     assert!(run["note"].as_str().unwrap().contains("Max devices per run"), "{run}");
     let cl = c.handle(json!({ "type": "LOGDELAY_CLUSTER", "session": &s, "clusterId": "prod" })).await;
