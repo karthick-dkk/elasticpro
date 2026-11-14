@@ -1406,6 +1406,17 @@ bus.on('pause-changed', () => { topbarKey = ''; renderTopbar(); bus.emit('data')
 // would otherwise narrow it to one. Only the selection moves: the cluster last chosen is still what
 // an evidence page picks, and a cluster picked here afterwards is kept.
 bus.on('fleet-view', () => { if (state.selected === 'all') return; state.selected = 'all'; topbarKey = ''; renderTopbar(); });
+// A page whose address names a cluster (Log Delay: #/log-delay/cluster/X, reached by a link, Back
+// or a bookmark) moves the chooser with it, so the top bar is the one cluster choice; 'all' when
+// the address names none. Only the chooser moves: the page is already showing it.
+bus.on('select-cluster', (id) => {
+  const v = id && id !== 'all' && clusters().some((c) => c.id === id) ? id : 'all';
+  if (state.selected === v) return;
+  state.selected = v;
+  fleetView = v === 'all';
+  if (v !== 'all') { lastCluster = v; idb.setKV('lastCluster', v); }
+  topbarKey = ''; renderTopbar();
+});
 bus.on('data', () => {
   scheduleNavRedraw();
   const p = PAGES.find((x) => x.id === currentPage);
