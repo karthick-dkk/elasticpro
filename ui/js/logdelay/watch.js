@@ -20,7 +20,7 @@ import { num, ago, download, downloadBytes, toCsv } from '../lib/fmt.js';
 import { tableSort } from '../lib/table-sort.js';
 import { activeClusters, client, setDelaySummary } from '../core/state.js';
 import { card, keptCard, empty, pill, table } from '../pages/common.js';
-import { preflight, measureDelayIn, summarise, delayCoverage, buildDeviceQuery, documentDelays, deviceSnapshot, looksLikeIp } from '../core/log-delay.js';
+import { preflight, measureDelayIn, summarise, delayCoverage, buildDeviceQuery, documentDelays, deviceSnapshot, looksLikeIp, LATE_MAX } from '../core/log-delay.js';
 import { levelsOf, zoneOf, loadLevels, levelState, isLate } from '../core/delay-levels.js';
 import { offsetLabel, timeZoneShort } from '../core/log-tz.js';
 import { runBounded, cancellation, partialNote } from '../core/fleet.js';
@@ -31,6 +31,9 @@ import { workbook, XLSX_MIME } from '../lib/xlsx.js';
 import { toast } from '../ui/menu.js';
 import { confirmDialog } from '../ui/modal.js';
 import { deviceTable, sortCols, statePill } from './rows.js';
+import { fixButton } from './fix-popover.js';
+import { fleetLevels } from '../core/delay-levels.js';
+import { ldFixes } from '../core/logdelay-report.js';
 
 /**
  * How many clusters are asked at once. Three, not "all of them": the clusters people point this
@@ -52,6 +55,7 @@ const delay = {
   cancelled: false,
   progress: { done: 0, total: 0 },
   byCluster: new Map(),    // cluster id -> { state, pre, records, truncated, error, fetchError }
+  fixes: new Map(),        // "cluster|device" -> the core's finding (LOGDELAY_FIXES), after a measurement
   records: null,           // every cluster's devices, merged
   summary: null,
   at: 0,
@@ -190,10 +194,25 @@ async function fetchDelay() {
   delay.fetching = false; delay.cancelled = out.cancelled; delay.token = null; delay.at = Date.now();
   mergeDelay();
   bump();
+  loadFixes(targets.map(({ c }) => c.id));
   maybeScheduledReport();
 }
 
-/** One fleet-wide list of devices; `summarise` is the one definition of what it adds up to. */
+/**
+ * The core's recommended fixes for the clusters just measured, asked once (LOGDELAY_FIXES) and
+ * joined to the browser-measured rows by (cluster, device). The text is the core's; a device it
+ * names no finding for is shown as exactly that.
+ */
+async function loadFixes(ids) {
+  try {
+    const res = await ldFixes({ clusterIds: ids, signal: signal() });
+    if (!res || res.ok === false) return;
+    delay.fixes = new Map((res.devices || []).map((d) => [`${d.cluster}|${d.device}`, d]));
+    bump();
+  } catch (_) { /* no fixes: the rows say none was sent */ }
+}
+
+/** One fleet-wide list of devices;`summarise` is the one definition of what it adds up to. */
 function mergeDelay() {
   const done = delayRows().filter(({ d }) => d.records);
   if (!done.length) { delay.records = null; delay.summary = null; return; }
@@ -221,7 +240,6 @@ function toolbar() {
       h('option', { value: 'late' }, 'Delayed devices'), h('option', { value: 'all' }, 'Every device'));
     show.value = delay.show;
     return h('div.toolbar.ld-watch-bar',
-      h('span.muted.ld-hint', 'Delay is arrival time minus the time the event happened, per device, over the time range above, measured now from every cluster.'),
       h('label.field', 'Show', show),
       h('div.ld-bar-right',
         busy ? h('span.muted.ld-progress', h('span.spin'), ` ${delay.progress.done} of ${delay.progress.total}…`) : null,
@@ -275,7 +293,6 @@ function coverageCard() {
       h('td', stateCell(r)), h('td.num', fetchCell(r)), h('td.ld-wrap', why(r))));
     return card('Log delay coverage', `${yes} of ${rows.length} cluster(s) can be analysed`,
       h('div.ld-stack',
-        h('div.muted.ld-note#ld-live-label', 'Live check from this browser, seconds fresh: it reads at most 500 devices per cluster (the display link’s limit). The Dashboard shows every device from the core’s store.'),
       note ? h('div.banner.warn.ld-flat', note) : null,
         rows.some(({ d }) => d.pre && !d.pre.ok && !d.pre.unknown)
           ? h('div.muted.ld-note', 'Set ', h('code.inline', 'delayFields'), ' on a cluster to the names its parser produces. Nothing is reported as zero — the analysis simply cannot run there.')
@@ -286,12 +303,29 @@ function coverageCard() {
 
 /* --------------------------------- the devices --------------------------------- */
 
-const LIVE_COLS = ['device', 'cluster', 'zone', 'tag1', 'state', 'now', 'pattern', 'rawGap', 'deviceTz', 'docsIn', 'arrival', 'event'];
+const LIVE_COLS = ['device', 'cluster', 'zone', 'tag1', 'state', 'now', 'pattern', 'rawGap', 'deviceTz', 'docsIn', 'arrival', 'event', 'checked'];
+
+/** What the "i" beside the line says. LATE_MAX is the real per-cluster limit (core/log-delay.js). */
+const ABOUT = [
+  { title: 'Live, seconds fresh', cause: 'This browser reads Elasticsearch directly; Checked shows how old each row is.' },
+  { title: `Up to ${LATE_MAX} devices per cluster`, cause: 'On a larger cluster a late device can be missing here; the Dashboard counts every device from the core’s store, as of the last 2-hour run or Fetch now.' },
+];
+
+/** The delay (minutes) a device counts as late from: the fleet's level, else the first measured cluster's; null when no one has said. */
+function lateFrom() {
+  const f = fleetLevels();
+  if (f && Number.isFinite(f.delayFrom)) return f.delayFrom;
+  for (const { c, d } of delayRows()) { const l = d.records && levelsOf(c.id); if (l && Number.isFinite(l.delayFrom)) return l.delayFrom; }
+  return null;
+}
 
 /** Every device measured, as board rows; the delayed ones only unless "Every device" is chosen. */
 function liveRows() {
   const byId = new Map(activeClusters().map((c) => [c.id, c]));
-  const rows = (delay.records || []).map((r) => liveDeviceRow(r, byId.get(r.clusterId) || { id: r.clusterId, name: r.cluster }, levelsOf(r.clusterId)));
+  const rows = (delay.records || []).map((r) => ({
+    ...liveDeviceRow(r, byId.get(r.clusterId) || { id: r.clusterId, name: r.cluster }, levelsOf(r.clusterId)),
+    fix: delay.fixes.get(`${r.clusterId}|${r.device}`) || null,
+  }));
   return delay.show === 'all' ? rows : rows.filter((r) => isLate(r.state));
 }
 
@@ -305,12 +339,13 @@ function devicesCard() {
   const late = (delay.records || []).filter((r) => isLate(levelState(r.delayMinutes, levelsOf(r.clusterId)))).length;
   const body = W.get('w:dev:body', `${delay.ver}|${delay.show}|${sortLate.sort ? `${sortLate.sort.key}${sortLate.sort.dir}` : '-'}`, () => {
     const note = coverageNote('fetch');
-    const by = s ? Object.entries(s.by).filter(([, n]) => n > 0) : [];
+    const from = lateFrom();
     return [
       note ? h('div.banner.warn.ld-flat', note) : null,
-      s && s.truncated ? h('div.muted.ld-note', `${num(s.truncated)} document(s) fall outside the top 500 devices per cluster — this list is not every device.`) : null,
-      by.length ? h('div.ld-tally', ...by.map(([k, n]) => h('span', h('b', num(n)), ` ${k.toLowerCase().replace('_', ' ')}`))) : null,
-      deviceTable({ id: 'ld-watch-devices', sort: sortLate, rows: ordered, keys: LIVE_COLS, ctx: { now: delay.at || Date.now(), watch: (r) => watchDevice(r.cluster, r.device) },
+      h('div.ld-vhead#ld-watch-line', h('b', `${num(late)} device${late === 1 ? '' : 's'}`), ` ${from === null ? 'late' : `${from} min or more behind`} · live, seconds fresh `,
+        fixButton({ kind: 'about', id: 'Live Watch', items: () => ABOUT })),
+      deviceTable({ id: 'ld-watch-devices', sort: sortLate, rows: ordered, keys: LIVE_COLS, ctx: { now: delay.at || Date.now(), mode: 'watch' },
+        extra: { checked: ['Checked', false, () => h('td.muted', delay.at ? ago(delay.at) : '—'), { type: 'number', value: () => delay.at }] },
         labels: { arrival: 'Last arrival', event: 'Event time' },
         emptyText: delay.fetching ? 'Measuring…' : delay.show === 'late' ? 'No device is delayed in this range.' : 'No device sent logs in this range.' }),
       h('div.ld-foot', h('button.btn.sm#delay-csv', { type: 'button', onclick: exportDelayCsv }, 'Export CSV')),
@@ -318,7 +353,6 @@ function devicesCard() {
   });
   const measured = delayRows().filter(({ d }) => d.records).length;
   const sub = `${delay.show === 'late' ? `${countText(late)} delayed of ${countText(s ? s.devices : 0)}` : `${countText(s ? s.devices : 0)} device(s)`} in ${measured} cluster(s)`
-    + ` · ${s && s.median !== null ? `median ${minutesText(s.median)}` : 'no measurable delay'}`
     + ` · ${delay.window ? delay.window.text : ''}`
     + (delay.at ? ` · measured ${ago(delay.at)}` : ' · still measuring');
   return keptCard(W, 'w:dev', delay.show === 'late' ? 'Delayed devices' : 'Every device', sub, body);
@@ -421,7 +455,6 @@ function watchCard() {
     w.docs ? h('div.muted', 'The documents below are from the last poll that worked, not from now.') : null)) : null));
   const figures = W.get('w:watch:fig', `${docsId}|${w.window}`, () => (s ? table([], [
     h('tr', h('td.muted', 'Newest document'), h('td.mono', s.latest === null ? 'unknown' : minutesText(s.latest))),
-    h('tr', h('td.muted', `Median of the last ${s.measurable}`), h('td.mono', s.median === null ? 'unknown' : minutesText(s.median))),
     h('tr', h('td.muted', 'Range'), h('td.mono', s.min === null ? 'unknown' : `${minutesText(s.min)} \u2026 ${minutesText(s.max)}`)),
     h('tr', h('td.muted', 'Documents matched'), h('td.mono', !w.total ? 'unknown' : `${num(w.total.value)}${w.total.more ? '+' : ''} in ${w.window || 'the range'}`)),
   ]) : null));
@@ -591,6 +624,6 @@ function exportDelayCsv() {
 /** For a test or a new config: forget everything measured. */
 export function watchReset() {
   watchLeave();
-  delay.byCluster = new Map(); delay.records = null; delay.summary = null; delay.at = 0; delay.watch = null; delay.window = null; delay.ver += 1;
+  delay.byCluster = new Map(); delay.records = null; delay.summary = null; delay.at = 0; delay.watch = null; delay.window = null; delay.fixes = new Map(); delay.ver += 1;
   W.clear();
 }

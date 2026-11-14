@@ -2998,3 +2998,22 @@ tr.jb-focus td { background: var(--accent-soft); }
 .ld-fetch-note { border-top: 1px solid var(--border); margin-top: 4px; padding: 7px 10px 3px; font-size: 11.5px; line-height: 1.45; color: var(--text-muted); }
 .ld-fetch-sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
 /* ld-fetch: end */
+/* ld-rows: start */
+.ld .ld-ibtn { width: 20px; height: 20px; border-radius: 50%; border: 1px solid var(--border-strong); background: var(--surface-1); color: var(--accent); font: italic 700 12px/1 Georgia, 'Times New Roman', serif; padding: 0; cursor: pointer; display: inline-grid; place-items: center; vertical-align: middle; }
+.ld .ld-ibtn:hover, .ld .ld-ibtn[aria-expanded="true"] { border-color: var(--accent); background: var(--surface-2); }
+.ld .ld-ibtn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.ld table.tbl td.ld-acts { white-space: nowrap; text-align: right; width: 1%; }
+.ld table.tbl td.ld-acts > * + * { margin-left: 6px; }
+.ld table.tbl td.ld-acts .btn.sm { height: 24px; padding: 0 9px; font-size: 12px; font-weight: 600; }
+.ld table.tbl tr.ld-rowlink { cursor: pointer; }
+.ld .ld-vhead { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--text-muted); margin: 0 0 6px; }
+.ld .ld-vhead b { color: var(--text-primary); }
+.ld-fixpop { position: fixed; z-index: 60; width: 340px; max-width: calc(100vw - 16px); max-height: calc(100vh - 16px); overflow: auto; background: var(--surface-1); color: var(--text-primary); border: 1px solid var(--border-strong); border-radius: var(--radius-sm); box-shadow: var(--shadow); padding: 10px 12px; display: grid; gap: 8px; font-size: 12.5px; }
+.ld-fixpop[hidden] { display: none; }
+.ld-fixpop-h { display: flex; gap: 8px; align-items: baseline; }
+.ld-fixpop-h b { font-size: 13px; }
+.ld-fixpop-x { margin-left: auto; border: 0; background: none; font-size: 17px; line-height: 1; color: var(--text-muted); padding: 0 2px; cursor: pointer; }
+.ld-fixpop-x:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.ld-fixbox { border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface-2); padding: 7px 9px; display: grid; gap: 3px; }
+.ld-fixwhere { font-size: 11.5px; color: var(--text-muted); }
+/* ld-rows: end */
