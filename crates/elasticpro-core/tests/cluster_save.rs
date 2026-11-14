@@ -140,7 +140,22 @@ async fn an_operator_adds_changes_and_switches_off_a_cluster_and_the_fleet_follo
     }
     let r = save(&c, &op, json!({ "name": "Delta", "url": "https://delta:9200", "via": "nowhere" }), None).await;
     assert_eq!(r["kind"], json!("bad_message"), "{r}");
+    // The log time zone: an unknown zone is refused by name; a known one is kept canonical and
+    // reaches the cluster the core polls (logdelay::tz, LOGDELAY_SETTINGS_GET).
+    let r = save(&c, &op, json!({ "name": "Delta", "url": "https://delta:9200", "logTimeZone": "Mars/Olympus" }), None).await;
+    assert_eq!(r["kind"], json!("bad_message"), "{r}");
+    assert!(r["message"].as_str().unwrap().contains("Mars/Olympus"), "{r}");
     assert_eq!(file(&path).1["clusters"].as_array().unwrap().len(), 2);
+    let r = save(&c, &op, json!({ "name": "Gamma", "url": gamma.url(), "note": "new", "logTimeZone": "asia/kolkata" }), Some("Gamma")).await;
+    assert_eq!(r["ok"], json!(true), "{r}");
+    assert_eq!(file(&path).1["clusters"][1]["logTimeZone"], json!("Asia/Kolkata"));
+    let g = c.handle(json!({ "type": "LOGDELAY_SETTINGS_GET", "session": a })).await;
+    let gamma_row = g["resolved"].as_array().unwrap().iter().find(|x| x["id"] == "gamma").cloned().unwrap_or(Value::Null);
+    assert_eq!(gamma_row["logTimeZone"], json!("Asia/Kolkata"), "{g}");
+    assert_eq!((gamma_row["timeZone"]["mode"].clone(), gamma_row["timeZone"]["offsetMinutes"].clone()), (json!("set"), json!(330)), "{g}");
+    let r = save(&c, &op, json!({ "name": "Gamma", "url": gamma.url(), "note": "new" }), Some("Gamma")).await;
+    assert_eq!(r["ok"], json!(true), "{r}");
+    assert!(file(&path).1["clusters"][1].get("logTimeZone").is_none(), "left out of the save: back to detect");
 
     // A user may not; a guest may not.
     let (_, _, user) = zabbix_session(&c, "uma", 1, None).await;

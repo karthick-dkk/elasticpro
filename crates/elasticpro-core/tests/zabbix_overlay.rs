@@ -103,7 +103,7 @@ async fn zabbix_clusters_are_edited_in_elasticpro_and_the_edit_survives_every_sy
     // --- what: never the address, never a credential, only a jump host ElasticPro has.
     for (set, kind) in [(json!({ "url": "http://10.9.9.9:9200" }), "url_from_zabbix"), (json!({ "password": "x" }), "credential"),
                         (json!({ "via": "nope" }), "unknown_jump"), (json!({ "volumeWindowDays": 0 }), "bad_request"),
-                        (json!({ "name": "es-prod" }), "name_taken")] {
+                        (json!({ "logTimeZone": "Mars/Olympus" }), "bad_request"), (json!({ "name": "es-prod" }), "name_taken")] {
         let r = save(&c, &oper, "102", set.clone(), json!([])).await;
         assert_eq!(r["kind"], json!(kind), "{set}: {r}");
     }
@@ -112,7 +112,7 @@ async fn zabbix_clusters_are_edited_in_elasticpro_and_the_edit_survives_every_sy
 
     // --- an edit applies at once, without asking Zabbix.
     let calls = methods.lock().unwrap().len();
-    let r = save(&c, &oper, "102", json!({ "name": "Dev EU", "tags": ["eu", "dev"], "note": "team A", "liveRetention": "30d" }), json!([])).await;
+    let r = save(&c, &oper, "102", json!({ "name": "Dev EU", "tags": ["eu", "dev"], "note": "team A", "liveRetention": "30d", "logTimeZone": "europe/berlin" }), json!([])).await;
     assert_eq!(r["ok"], json!(true), "{r}");
     // es-dev signs in with its own password macro: where it is sent is an admin's to change.
     for set in [json!({ "tls": "system" }), json!({ "via": "" })] {
@@ -133,7 +133,13 @@ async fn zabbix_clusters_are_edited_in_elasticpro_and_the_edit_survives_every_sy
                (json!("Dev EU"), json!(["eu", "dev"]), json!("team A"), json!("30d"), json!("system")), "{d}");
     assert_eq!(d["url"], json!("http://10.0.0.2:9200"), "the address is Zabbix's");
     assert_eq!(d["zabbixValues"]["name"], json!("es-dev"), "{d}");
-    assert_eq!(d["overridden"], json!(["liveRetention", "name", "note", "tags", "tls"]), "{d}");
+    assert_eq!(d["logTimeZone"], json!("Europe/Berlin"), "kept canonical: {d}");
+    assert_eq!(d["overridden"], json!(["liveRetention", "logTimeZone", "name", "note", "tags", "tls"]), "{d}");
+    // The log delay measurement reads it from the cluster the sync built (logdelay::tz).
+    let g = c.handle(json!({ "type": "LOGDELAY_SETTINGS_GET", "session": &admin })).await;
+    let dev = g["resolved"].as_array().unwrap().iter().find(|x| x["id"] == d["_id"]).cloned().unwrap_or(Value::Null);
+    assert_eq!(dev["logTimeZone"], json!("Europe/Berlin"), "{g}");
+    assert_eq!(dev["timeZone"]["mode"], json!("set"), "{g}");
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
