@@ -2,18 +2,25 @@
  * Page — Log Delay (was "Logs & Delay" until 0.3.60, and its boards were Reports › Log delay):
  * how late each device's logs arrive, and the logs themselves. docs/LOGDELAY.md is the contract.
  *
- *   Dashboard          the core's store: the fleet, a cluster, a device (logdelay/boards.js)
- *   Recommended fixes  why it was late and what to do (logdelay/boards.js)
- *   Live Watch         every cluster measured now, the delayed devices, one device live (logdelay/watch.js)
- *   Live logs          the documents over the time range, one device at a time if asked (logdelay/live-logs.js)
+ *   Dashboard   the core's store: the fleet's count tiles, Devices behind, the cluster × time
+ *               heat map, By cluster; one cluster (logdelay/boards.js)
+ *   Devices     every device, searched and filtered by level, each with its fix ("i") and its
+ *               logs; one device beside the list (logdelay/boards.js)
+ *   Live Watch  every cluster measured now from this browser, the delayed devices, one device
+ *               live (logdelay/watch.js)
+ *   Live logs   the documents over the time range, one device at a time if asked (logdelay/live-logs.js)
  *
- * The routes are core/logdelay-report.js (ldRoute, ldHash); #/logs and #/reports/log-delay/… still
- * open here (reports/route.js movedPath). The time range above Live Watch and Live logs is one
- * setting for both (core/log-range.js), and every time on the page is in the server's zone.
+ * The title bar carries the tabs and, at the right end, Fetch now (logdelay/fetch-now.js): one
+ * cluster at a time, its late devices by default, the whole cluster from its ▾ menu. Under it
+ * one tools row: the cluster, the period (the boards) or the time range (Live Watch, Live logs),
+ * and the cluster's log time zone as a chip. Every time on the page is in the server's zone.
  *
- * The page is drawn piece by piece (lib/keyed.js): the header, the tabs, the bar and each card
- * are kept until what they show changed, so an answer arriving or a push from the core never
- * rebuilds what is under the mouse, and the tabs and links work while anything is still loading.
+ * The routes are core/logdelay-report.js (ldRoute, ldHash); #/logs, #/reports/log-delay/… and
+ * #/log-delay/fixes still open here (reports/route.js movedPath; fixes went to Devices in 0.3.62).
+ *
+ * The page is drawn piece by piece (lib/keyed.js): the bar, the tools and each card are kept
+ * until what they show changed, so an answer arriving or a push from the core never rebuilds
+ * what is under the mouse, and the tabs and links work while anything is still loading.
  * Leaving a view lets go of what it asked (each view's AbortController).
  */
 
@@ -23,9 +30,14 @@ import { isSnapshotMode } from '../core/snapshot.js';
 import { takeFocus } from '../core/focus.js';
 import { intent } from '../core/intent.js';
 import { serverZoneName } from '../core/es.js';
-import { ldRoute, ldHash, ldTab, setDisplayZone, LD_PAGE } from '../core/logdelay-report.js';
+import { clusters } from '../core/state.js';
+import { ldRoute, ldHash, ldTab, setDisplayZone, LD_PAGE, PERIODS } from '../core/logdelay-report.js';
 import { RANGES, normaliseRange, browserZone, zonedInputValue, fromZonedInput, offsetText, zoneOffsetMinutes } from '../core/log-range.js';
-import { boardsNode, boardsReset, boardsLeave, boardsForget, boardsLoading, boardsScope } from '../logdelay/boards.js';
+import { timeZoneText } from '../core/log-tz.js';
+import {
+  boardsNode, boardsReset, boardsLeave, boardsForget, boardsLoading, boardsScope, boardsScopeId,
+  boardsPick, boardsSetPick, boardsPeriod, boardsSetPeriod, boardsInfo, boardsTimeZone,
+} from '../logdelay/boards.js';
 import { watchNodes, watchEnter, watchLeave, watchBusy, watchStart } from '../logdelay/watch.js';
 import { liveNodes, liveEnter, liveLeave, liveBusy, liveRangeChanged } from '../logdelay/live-logs.js';
 import { fetchNowControl, fetchNowLeave, fetchNowBusy } from '../logdelay/fetch-now.js';
@@ -38,8 +50,8 @@ let entered = '';
 const P = nodeCache();
 
 const TABS = [
-  ['fleet', 'Dashboard', 'The core’s measurements: every cluster, one cluster, one device'],
-  ['fixes', 'Recommended fixes', 'Why devices were late, and what to do about it'],
+  ['fleet', 'Dashboard', 'The core’s measurements: every cluster, or one cluster'],
+  ['devices', 'Devices', 'Every device, by level, with its fix and its logs; one device in detail'],
   ['watch', 'Live Watch', 'Live check from this browser (500 devices per cluster at most): the delayed devices, and one device live'],
   ['live', 'Live logs', 'The log documents over the time range, with each one’s delay'],
 ];
@@ -88,13 +100,13 @@ export function render(el) {
 }
 
 /**
- * An old address (#/reports/log-delay/…, #/logs) that reached this page reads as the view's own
- * from here on, without a history entry of its own: Back goes where it went before.
+ * An old address (#/reports/log-delay/…, #/logs, #/log-delay/fixes) that reached this page reads
+ * as the view's own from here on, without a history entry of its own: Back goes where it went before.
  */
 function canonical() {
   const first = String(location.hash || '').replace(/^#\/?/, '').split(/[/?]/)[0];
-  if (first === LD_PAGE) return;
   const want = ldHash(route.view, route.clusterId, route.device);
+  if (first === LD_PAGE && location.hash === want) return;
   try { history.replaceState(null, '', want); } catch (_) { location.hash = want; }
 }
 
@@ -117,7 +129,7 @@ export function onLeave() {
 }
 
 function leave(tab) {
-  if (tab === 'fleet' || tab === 'fixes') boardsLeave();
+  if (tab === 'fleet' || tab === 'devices') boardsLeave();
   if (tab === 'watch') watchLeave();
   if (tab === 'live') liveLeave();
 }
@@ -135,13 +147,7 @@ function busy() {
   return fetchNowBusy() || (tab === 'watch' ? watchBusy() : tab === 'live' ? liveBusy() : boardsLoading());
 }
 
-function header() {
-  const b = busy();
-  return P.get('head', `${b}`, () => h('div.rp-head',
-    h('div', h('h1', 'Log Delay'),
-      h('p.sub', 'How late each device’s logs arrive, why, and the logs themselves.')),
-    b ? h('span.muted.ld-busy', { role: 'status' }, h('span.spin'), ' Loading…') : h('span.ld-busy', { role: 'status' })));
-}
+/* ------------------------------------ the bar ------------------------------------ */
 
 function tabs() {
   const cur = ldTab(route.view);
@@ -149,8 +155,72 @@ function tabs() {
     ...TABS.map(([id, label, title]) => h('a', { href: ldHash(id), title, dataset: { tab: id }, 'aria-current': cur === id ? 'page' : null }, label))));
 }
 
-/** Above Live Watch and Live logs: the range both read, and the zone every time is written in. */
-function rangeBar() {
+/** Fetch now, at the right end of the title bar: the cluster on screen, its late devices; ▾ for the whole cluster. */
+function fetchControl() {
+  const info = boardsInfo();
+  const fc = fetchNowControl(boardsScope(route), { repaint: draw, done: () => { boardsForget(); draw(); } }, info);
+  return P.get('fetch', `${fc.sig}|${info.sig || ''}`, fc.build);
+}
+
+/**
+ * The title bar: the name, the tabs, the loading line and Fetch now. One row that wraps on a
+ * narrow window; the shell is kept for the visit and its two slots are filled in place.
+ */
+function bar() {
+  const b = busy();
+  const status = P.get('busy', `${b}`, () => (b ? h('span.muted.ld-busy', { role: 'status' }, h('span.spin'), ' Loading…') : h('span.ld-busy', { role: 'status' })));
+  const top = P.get('bar', '', () => h('div.rp-head.ld-bar', h('h1', 'Log Delay'), h('div.ld-bar-tabs'), h('div.ld-bar-right')));
+  mount(top.children[1], tabs());
+  mount(top.children[2], status, fetchControl());
+  return top;
+}
+
+/* ------------------------------------ the tools row ------------------------------------ */
+
+/** The cluster the boards show: all, or one; a cluster or device address names its own. */
+function clusterPick() {
+  const all = clusters();
+  const tab = ldTab(route.view);
+  const fixed = route.view === 'cluster' || route.view === 'device' ? route.clusterId : null;
+  const cur = fixed || boardsPick();
+  return P.get('pick', `${tab}|${cur}|${all.map((c) => c.id).join(',')}`, () => {
+    const sel = h('select#ld-clusters', { 'aria-label': 'Cluster', onchange: (e) => {
+      const id = e.target.value;
+      boardsSetPick(id);
+      // The tab's own list for that cluster: the fleet or the cluster board, the devices of all or of one.
+      location.hash = tab === 'devices' ? ldHash('devices', id === 'all' ? null : id) : id === 'all' ? ldHash('fleet') : ldHash('cluster', id);
+    } }, h('option', { value: 'all' }, `All clusters (${all.length})`), ...all.map((c) => h('option', { value: c.id }, c.name)));
+    sel.value = all.some((c) => c.id === cur) ? cur : 'all';
+    return h('label.field.ld-tool', 'Cluster', sel);
+  });
+}
+
+/** The boards' period (the store's days; Today is its measurement windows). */
+function periodPick() {
+  const cur = boardsPeriod();
+  return P.get('period', cur, () => {
+    const s = h('select#ld-period', { 'aria-label': 'Period', onchange: (e) => { boardsSetPeriod(e.target.value); draw(); } },
+      ...PERIODS.map(([v, label]) => h('option', { value: v }, label)));
+    s.value = cur;
+    return h('label.field.ld-tool', 'Period', s);
+  });
+}
+
+/** The cluster's log time zone (docs/LOGDELAY.md "Time zones"), when one cluster is on screen. */
+function tzChip() {
+  const id = boardsScopeId(route);
+  const tz = id ? boardsTimeZone(id) : null;
+  return P.get('tz', `${id}|${tz ? `${tz.mode}|${tz.offset}|${tz.pct}` : '-'}`, () => {
+    if (!tz) return null;
+    const title = tz.mode === 'set' ? `Set in the cluster's config (Edit cluster › Log time zone: ${tz.setting}). Delays are shown after this offset is taken out.`
+      : tz.mode === 'detected' ? `Detected: the offset most measured devices fall in, at least ${tz.majorityPercent} % agreeing and steady over ${tz.runsNeeded} runs. Delays are shown after it is taken out. Confirm it in Edit cluster › Log time zone.`
+        : `No zone set, and fewer than ${tz.majorityPercent ?? 60} % of the devices agree on one offset (steady over ${tz.runsNeeded ?? 3} runs): nothing is corrected, delays are as measured. Set it in Edit cluster › Log time zone.`;
+    return h('span.ld-chip.ld-tz-chip#ld-tz-chip', { title, dataset: { mode: tz.mode } }, h('b', 'Time zone'), ' ', timeZoneText(tz));
+  });
+}
+
+/** Live Watch and Live logs: the range both read, and the zone every time is written in. */
+function rangePick() {
   const tz = zone();
   const off = offsetText(zoneOffsetMinutes(tz));
   return P.get('range', `${JSON.stringify(range)}|${tz}|${off}`, () => {
@@ -171,20 +241,24 @@ function rangeBar() {
       if (a > b) { to.setCustomValidity('To must be after From'); to.reportValidity && to.reportValidity(); to.setCustomValidity(''); return; }
       setRange({ id: 'custom', from: a, to: b });
     } }, 'Apply') : null;
-    return h('div.toolbar.ld-range-bar',
-      h('label.field', 'Time range', sel),
-      custom ? h('label.field', 'From', from) : null,
-      custom ? h('label.field', 'To', to) : null,
+    return [
+      h('label.field.ld-tool', 'Time range', sel),
+      custom ? h('label.field.ld-tool', 'From', from) : null,
+      custom ? h('label.field.ld-tool', 'To', to) : null,
       apply,
       h('span.muted.ld-zone', { title: serverZoneName() ? 'The server’s time zone' : 'The server has not said its time zone: this browser’s is used' },
-        `Times in ${tz} (${off})`));
+        `Times in ${tz} (${off})`),
+    ];
   });
 }
 
-/** Above the boards: Fetch Now for what is on screen. */
-function fetchBar() {
-  const fc = fetchNowControl(boardsScope(route), { repaint: draw, done: () => { boardsForget(); draw(); } });
-  return P.get('fetch', fc.sig, fc.build);
+/** One tools row for every tab: the cluster and period above the boards, the range above Live Watch and Live logs. */
+function tools() {
+  const tab = ldTab(route.view);
+  const row = P.get('tools', '', () => h('div.toolbar.ld-tools'));
+  if (tab === 'watch' || tab === 'live') mount(row, ...rangePick());
+  else mount(row, clusterPick(), periodPick(), tzChip());
+  return row;
 }
 
 function body() {
@@ -196,10 +270,9 @@ function body() {
 
 function draw() {
   if (!host || !host.isConnected || isSnapshotMode()) return;
-  const tab = ldTab(route.view);
   P.begin();
   try {
-    mount(host, header(), tabs(), tab === 'watch' || tab === 'live' ? rangeBar() : fetchBar(), body());
+    mount(host, bar(), tools(), body());
   } finally { P.end(); }
 }
 

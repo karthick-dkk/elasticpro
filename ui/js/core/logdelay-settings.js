@@ -6,19 +6,21 @@
 
 const finite = (v) => typeof v === 'number' && Number.isFinite(v);
 
-/** Why a set of levels cannot be saved, or ''. They must climb: no delay < delay < critical. */
+/** Why a set of levels cannot be saved, or ''. The two lines must climb: delay < critical. */
 export function validLevels(l) {
-  if (!l || ![l.noDelayUnder, l.delayFrom, l.criticalOver].every(finite)) return 'Every delay level must be a number of minutes.';
-  if (l.noDelayUnder <= 0) return 'No delay must be above 0 minutes.';
-  if (!(l.noDelayUnder <= l.delayFrom)) return 'Little delay must end where Delay begins: No delay under ≤ Delay from.';
+  if (!l || ![l.delayFrom, l.criticalOver].every(finite)) return 'Every delay level must be a number of minutes.';
+  if (l.delayFrom <= 0) return 'Delay from must be above 0 minutes.';
   if (!(l.delayFrom < l.criticalOver)) return 'Critical must be above Delay: Delay from < Critical over.';
   if (l.criticalOver > 7 * 24 * 60) return 'Critical over must be at most a week (10080 min).';
   return '';
 }
 
-/** The partial settings for the levels card: levels, and silentAfterHours when it is 1–168. */
+/**
+ * The partial settings for the levels card: levels, and silentAfterHours when it is 1–168.
+ * `noDelayUnder` travels equal to `delayFrom` (the contract keeps the field; the band is gone).
+ */
 export function levelsDraft(levels, silentAfterHours) {
-  const out = { levels: { noDelayUnder: levels.noDelayUnder, delayFrom: levels.delayFrom, criticalOver: levels.criticalOver } };
+  const out = { levels: { noDelayUnder: levels.delayFrom, delayFrom: levels.delayFrom, criticalOver: levels.criticalOver } };
   if (finite(silentAfterHours) && silentAfterHours >= 1 && silentAfterHours <= 168) out.silentAfterHours = Math.round(silentAfterHours);
   return out;
 }
@@ -54,7 +56,7 @@ export const SECTION_LABEL = Object.freeze({
 });
 
 export const DEVICE_CHOICES = Object.freeze([
-  ['delayed', 'Only delayed (at the delay level or more)'], ['little', 'Delayed and little delay'], ['all', 'All devices'],
+  ['delayed', 'Only delayed (at the delay level or more)'], ['all', 'All devices'],
 ]);
 export const WHEN_CHOICES = Object.freeze([
   ['hourly', 'Hourly · the hour before'], ['daily', 'Daily'], ['weekly', 'Weekly · Monday'], ['monthly', 'Monthly · 1st'], ['manual', 'Only when sent by hand'],

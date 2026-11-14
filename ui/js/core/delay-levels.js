@@ -12,8 +12,9 @@
  *   clock_ahead  m ≤ −delayFrom            (tested first)
  *   critical     m > criticalOver
  *   delay        delayFrom ≤ m ≤ criticalOver
- *   little       noDelayUnder ≤ m < delayFrom
- *   no_delay     m < noDelayUnder
+ *   no_delay     m < delayFrom             (no little-delay band since 0.3.62; `noDelayUnder` is
+ *                                          still in the levels, equal to delayFrom)
+ *   little       what a core before 0.3.62 stored for 15–30 min: read as below the line
  *   unmeasured   m unreadable              (never 0 min)
  *   silent       no document for silentAfterHours (only the core knows; never on time)
  *   other_tz     the gap sits steadily at another real UTC offset than the cluster's (only the
@@ -30,7 +31,7 @@ export const LEVEL_STATES = Object.freeze(['critical', 'delay', 'little', 'no_de
 
 /** A level state in words, as the pages and the mail say it. */
 export const STATE_LABEL = Object.freeze({
-  no_delay: 'on time', little: 'little delay', delay: 'delayed', critical: 'critical',
+  no_delay: 'on time', little: 'on time', delay: 'delayed', critical: 'critical',
   clock_ahead: 'clock ahead', other_tz: 'other time zone', silent: 'silent', unmeasured: "can't measure",
 });
 
@@ -45,9 +46,10 @@ const finite = (v) => typeof v === 'number' && Number.isFinite(v);
 /** Levels as the core sends them, or null when they are not a usable set. */
 export function levelsFrom(l) {
   if (!l || typeof l !== 'object') return null;
-  const { noDelayUnder, delayFrom, criticalOver } = l;
-  if (![noDelayUnder, delayFrom, criticalOver].every(finite)) return null;
-  return { noDelayUnder, delayFrom, criticalOver };
+  const { delayFrom, criticalOver } = l;
+  if (![delayFrom, criticalOver].every(finite)) return null;
+  // `noDelayUnder` is kept in the shape for the settings messages; it is the delay line.
+  return { noDelayUnder: finite(l.noDelayUnder) ? l.noDelayUnder : delayFrom, delayFrom, criticalOver };
 }
 
 /**
@@ -61,7 +63,6 @@ export function levelState(minutes, levels) {
   if (minutes <= -l.delayFrom) return 'clock_ahead';
   if (minutes > l.criticalOver) return 'critical';
   if (minutes >= l.delayFrom) return 'delay';
-  if (minutes >= l.noDelayUnder) return 'little';
   return 'no_delay';
 }
 

@@ -2779,9 +2779,6 @@ select.zr-hand { height: 26px; max-width: 150px; font-size: 12px; }
 .ld-hint { font-size: 11.5px; flex: 1 1 260px; min-width: 0; align-self: center; }
 .ld-progress { display: inline-flex; align-items: center; gap: 5px; font-size: 11.5px; }
 .ld-fetch { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; margin-bottom: 8px; min-height: 30px; }
-.ld-fetch-status { font-size: 12px; color: var(--text-secondary); min-width: 0; overflow-wrap: anywhere; }
-.ld-fetch-status.ld-fetch-ok { color: var(--good-ink, var(--text-primary)); }
-.ld-fetch-status.ld-fetch-bad { color: var(--critical); }
 .ld-stack { display: grid; gap: 10px; min-width: 0; }
 .ld-flat { margin: 0; font-size: 12px; }
 .ld-strong { font-weight: 620; }
@@ -2877,3 +2874,111 @@ tr.jb-focus td { background: var(--accent-soft); }
 .jc-wide { grid-column: 1 / -1; }
 .jc-note { font-size: 11.5px; }
 .jc-mode { align-self: start; }
+
+/* ---------------- Log Delay redesign (0.3.62, lead): tokens, title bar, tiles, charts, heat map, chips, split ----------------
+   The owner's palette: light green below the delay line, yellow in the delay band, light orange above the
+   critical line, lavender for another time zone, grey for silent — never red with yellow. Light values on
+   :root; the dark themes re-declare them below so the in-app toggle and the OS setting both win. */
+:root {
+  --ld-ok: #8fd19e; --ld-delay: #f5d76e; --ld-crit: #f2a65a; --ld-tz: #7f7fcf; --ld-silent: #9aa1ab;
+  --ld-ok-bg: #e3f2e7; --ld-delay-bg: #fdf6d8; --ld-crit-bg: #fdebd6; --ld-tz-bg: #ececf9; --ld-silent-bg: #eceef1;
+  --ld-ok-ink: #1f5e31; --ld-delay-ink: #6b5500; --ld-crit-ink: #7a4508; --ld-tz-ink: #45458f; --ld-silent-ink: #4c5360;
+  --ld-heat-0: #fbf5e3; --ld-heat-1: #f8e3a8; --ld-heat-2: #f5c879; --ld-heat-3: #ee9f4e; --ld-heat-4: #d9782f;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --ld-ok: #9fdcae; --ld-delay: #f2dc85; --ld-crit: #f2ad6e; --ld-tz: #8484ec; --ld-silent: #7a828d;
+    --ld-ok-bg: #1c3324; --ld-delay-bg: #3a3314; --ld-crit-bg: #3d2a15; --ld-tz-bg: #25254a; --ld-silent-bg: #2a2e34;
+    --ld-ok-ink: #9ee0b2; --ld-delay-ink: #f2df95; --ld-crit-ink: #f6c993; --ld-tz-ink: #c3c3f8; --ld-silent-ink: #c0c6ce;
+    --ld-heat-0: #24201a; --ld-heat-1: #4a3a1e; --ld-heat-2: #7a5620; --ld-heat-3: #b8742a; --ld-heat-4: #e9a45e;
+  }
+}
+:root[data-theme="dark"], :root[data-theme="dark-blue"], :root[data-theme="warm"] {
+  --ld-ok: #9fdcae; --ld-delay: #f2dc85; --ld-crit: #f2ad6e; --ld-tz: #8484ec; --ld-silent: #7a828d;
+  --ld-ok-bg: #1c3324; --ld-delay-bg: #3a3314; --ld-crit-bg: #3d2a15; --ld-tz-bg: #25254a; --ld-silent-bg: #2a2e34;
+  --ld-ok-ink: #9ee0b2; --ld-delay-ink: #f2df95; --ld-crit-ink: #f6c993; --ld-tz-ink: #c3c3f8; --ld-silent-ink: #c0c6ce;
+  --ld-heat-0: #24201a; --ld-heat-1: #4a3a1e; --ld-heat-2: #7a5620; --ld-heat-3: #b8742a; --ld-heat-4: #e9a45e;
+}
+/* Pills and figures by level (core/logdelay-report.js STATE_TONE). */
+.ld .pill.ld-ok { color: var(--ld-ok-ink); background: var(--ld-ok-bg); }
+.ld .pill.ld-delay { color: var(--ld-delay-ink); background: var(--ld-delay-bg); }
+.ld .pill.ld-crit { color: var(--ld-crit-ink); background: var(--ld-crit-bg); }
+.ld .pill.ld-tz { color: var(--ld-tz-ink); background: var(--ld-tz-bg); }
+.ld .ld-ok { color: var(--ld-ok-ink); }
+.ld .ld-delay { color: var(--ld-delay-ink); font-weight: 600; }
+.ld .ld-crit { color: var(--ld-crit-ink); font-weight: 600; }
+.ld .ld-tz { color: var(--ld-tz-ink); }
+.ld .ld-kpi > b.ld-delay { color: var(--ld-delay-ink); }
+.ld .ld-kpi > b.ld-crit { color: var(--ld-crit-ink); }
+.ld .ld-band { background: color-mix(in srgb, var(--ld-delay) 35%, transparent); }
+.ld .ld-band.ld-band-crit { background: color-mix(in srgb, var(--ld-crit) 35%, transparent); }
+.ld .ld-mark-start { color: var(--ld-delay-ink); }
+.ld .ld-mark-solved { color: var(--ld-ok-ink); }
+.ld .ld-mark-open { color: var(--ld-crit-ink); }
+.ld table.tbl tr.ld-open td { background: color-mix(in srgb, var(--ld-crit) 14%, transparent); }
+.ld .ld-rec { border-color: color-mix(in srgb, var(--ld-delay) 60%, var(--border)); }
+.ld .ld-tz-chip[data-mode="none"] { color: var(--ld-crit-ink); }
+.ld .ld-tz-chip[data-mode="detected"], .ld .ld-tz-chip[data-mode="set"] { color: var(--ld-tz-ink); }
+/* The title bar: the name, the tabs beside it, Fetch now at the right end; one row that wraps. */
+.ld-page .rp-head.ld-bar { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-start; gap: 6px 14px; margin-bottom: 4px; }
+.ld-bar .ld-bar-tabs { flex: 1 1 auto; min-width: 0; }
+.ld-bar .ld-bar-tabs .rp-nav { border-bottom: 0; margin-bottom: 0; }
+.ld-bar .ld-bar-tabs .rp-nav a { padding: 5px 10px; border-radius: 6px; border-bottom: 0; }
+.ld-bar .ld-bar-tabs .rp-nav a[aria-current="page"] { background: var(--surface-2); }
+.ld-bar .ld-bar-right { margin-left: auto; display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.ld-page .ld-tools { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 8px 10px; padding: 6px 0 8px; border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); margin-bottom: 8px; }
+.ld-page .ld-tools:empty { display: none; }
+.ld-tool select, .ld-tool input { height: 28px; }
+.ld-tools .ld-tz-chip { align-self: center; }
+.ld-h-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+/* The five count tiles: buttons, each opening Devices on its level. */
+.ld .ld-kpi-btn { font: inherit; text-align: left; cursor: pointer; color: var(--text-primary); }
+.ld .ld-kpi-btn:hover { border-color: var(--accent); }
+.ld .ld-kpi-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.ld .ld-kpi-l { font-size: 11px; color: var(--text-muted); text-transform: uppercase; letter-spacing: .03em; display: inline-flex; align-items: center; gap: 5px; }
+.ld .ld-sw { display: inline-block; width: 8px; height: 8px; border-radius: 2px; }
+/* The charts: slim bars, a quiet grid, labels in the muted ink; hovering a bar dims the rest (CSS only). */
+.ld-chartbox { min-width: 0; }
+.ld-chartbox svg.ld-chart { display: block; width: 100%; height: auto; overflow: visible; }
+.ld-chartbox svg.ld-chart text { fill: var(--text-muted); font-family: inherit; font-size: 10.5px; }
+.ld-chartbox .ld-grid { stroke: var(--grid); stroke-width: 1; }
+.ld-chartbox .ld-axis { stroke: var(--border); stroke-width: 1; }
+.ld-chartbox g.ld-bar { transition: opacity .12s; cursor: default; }
+.ld-chartbox svg.ld-chart:hover g.ld-bar:not(:hover) { opacity: .55; }
+.ld-chartbox .ld-gap-fill { fill: url(#ld-hatch), var(--surface-2); opacity: .6; }
+.ld-chartbox .ld-line-end { stroke: var(--surface-1); stroke-width: 2; }
+.ld-key i.ld-ln { width: 14px; height: 2px; border-radius: 1px; }
+.ld-key i.ld-dash { width: 14px; height: 0; background: none !important; border-top: 2px dashed; }
+/* The cluster × time heat map. */
+.ld-heatmap .ld-heat { cursor: pointer; }
+.ld-heatmap .ld-heat:hover { stroke: var(--accent); stroke-width: 1.5; }
+.ld-heat-0, .ld-heat-key.ld-heat-0 { fill: var(--ld-heat-0); background: var(--ld-heat-0); }
+.ld-heat-1, .ld-heat-key.ld-heat-1 { fill: var(--ld-heat-1); background: var(--ld-heat-1); }
+.ld-heat-2, .ld-heat-key.ld-heat-2 { fill: var(--ld-heat-2); background: var(--ld-heat-2); }
+.ld-heat-3, .ld-heat-key.ld-heat-3 { fill: var(--ld-heat-3); background: var(--ld-heat-3); }
+.ld-heat-4, .ld-heat-key.ld-heat-4 { fill: var(--ld-heat-4); background: var(--ld-heat-4); }
+.ld-heat-unknown, .ld-heat-key.ld-heat-unknown { fill: var(--surface-2); background: repeating-linear-gradient(135deg, transparent 0 3px, var(--border) 3px 4px); opacity: .9; }
+.ld-key i.ld-heat-key { border: 1px solid var(--border); }
+.ld-heatmap .ld-heat-name { fill: var(--text-secondary); }
+.ld-heatmap .ld-heat-never { fill: var(--text-muted); font-style: italic; }
+/* The mini stacked bar of a cluster's states, in By cluster. */
+.ld .ld-mini { display: flex; gap: 1px; height: 10px; width: 120px; border-radius: 3px; overflow: hidden; margin: 0 auto; }
+.ld .ld-mini i { display: block; min-width: 2px; height: 100%; }
+/* Devices: the search, the level chips with counts, zone and tag1. */
+.ld .ld-dev-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; margin-bottom: 8px; }
+.ld .ld-dev-bar input[type="search"] { min-width: 230px; height: 28px; }
+.ld .ld-chip-btn { cursor: pointer; font: inherit; border-radius: 999px; height: 24px; }
+.ld .ld-chip-btn b { font-weight: 650; color: var(--text-primary); }
+.ld .ld-chip-btn[aria-pressed="true"] { background: var(--surface-3); color: var(--text-primary); border-color: var(--text-secondary); font-weight: 600; }
+.ld .ld-chip-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.ld .ld-chips#ld-dev-chips { margin-top: 0; }
+/* One device beside the short list. */
+.ld-split { display: grid; grid-template-columns: minmax(260px, 320px) minmax(0, 1fr); gap: 14px; align-items: start; }
+.ld-split-list, .ld-split-board { min-width: 0; display: grid; gap: 10px; }
+.ld-split-list .ld-dev-bar input[type="search"] { min-width: 0; width: 100%; }
+.ld table.tbl tr.ld-sel td { background: color-mix(in srgb, var(--accent) 12%, var(--surface-1)); }
+@media (max-width: 980px) { .ld-split { grid-template-columns: minmax(0, 1fr); } .ld-kpis.ld-5 { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+@media (max-width: 520px) { .ld-kpis.ld-5 { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+.ld-insights.ld-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+/* Config-Management › Scheduled log delay: three bands from two lines. */
+.ldc-levels.ldc-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }

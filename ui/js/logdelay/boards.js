@@ -1,8 +1,17 @@
 /**
- * The Log Delay page's boards (0.3.57 as Reports › Log delay; on the Log Delay page since 0.3.60,
- * docs/LOGDELAY.md): the fleet, one cluster, one device and the recommended fixes — boards Main,
- * Cluster, Device and Fix. Everything shown is the core's built-in store, read with LOGDELAY_*;
- * the arithmetic and the routes are core/logdelay-report.js, the device row logdelay/rows.js.
+ * The Log Delay page's boards (0.3.57 as Reports › Log delay; on the Log Delay page since 0.3.60;
+ * redesigned in 0.3.62, docs/LOGDELAY.md "The Log Delay page"):
+ *
+ *   Dashboard  five count tiles (the three configured levels, another time zone, silent), the
+ *              "Devices behind" chart over the period, the cluster × time heat map, By cluster
+ *              with an "i" per cluster; the same for one cluster
+ *   Devices    every device, searched and filtered by level, zone and tag1, each row with its
+ *              fix ("i") and its logs; one device's board beside the list
+ *
+ * Everything shown is the core's built-in store, read with LOGDELAY_*; the arithmetic and the
+ * routes are core/logdelay-report.js, the device row logdelay/rows.js, the "i" popover
+ * logdelay/fix-popover.js. The level names ("Below 30 min", "30–60 min", "Above 60 min") are the
+ * cluster's own levels as the core says them: nothing here knows a figure.
  *
  * Drawn card by card (lib/keyed.js): each card is kept until what it shows changed, so an answer
  * arriving, a push from the core or a press elsewhere never rebuilds the card under the mouse.
@@ -10,8 +19,8 @@
  * answer for a view no longer shown redraws nothing.
  *
  * Unknown is not zero: a device that is silent or whose delay cannot be read says so, a day
- * without totals is a gap in a chart, and a cluster never measured says "never measured".
- * Charts use light green, blue, pink and orange only.
+ * without totals is a gap in a chart, a cluster never measured says "never measured", and no
+ * median, percentile or average is drawn anywhere.
  */
 
 import { h, svg, mount } from '../lib/dom.js';
@@ -24,13 +33,16 @@ import { clusters } from '../core/state.js';
 import { navigateTo } from '../core/intent.js';
 import { refreshReports } from '../core/reports.js';
 import { rememberLevels } from '../core/delay-levels.js';
+import { download, toCsv } from '../lib/fmt.js';
 import {
-  LD_COLOURS as C, ldSummary, ldCluster, ldDevice, ldSearch, ldFixes, ldReportRun, ldHash,
-  PERIODS, periodQuery, periodDays, minutesText, durationText, whenText, dayText, docsText, pctText, countText,
-  stateText, nowText, byTimeLate, filterRows, ringsOrder, ringDash, dayBars, dayTitle,
-  sparkSegments, reducedBars, deviceGraph, periodBand, lateSplitText, STEP_TONE, stepLabel, evidenceText, extraOf, valuesText,
+  LD_COLOURS as C, ldSummary, ldCluster, ldDevice, ldSearch, ldReportRun, ldHash,
+  PERIODS, periodQuery, periodDays, minutesText, durationText, whenText, docsText, pctText, countText,
+  stateText, byTimeLate, filterRows, deviceGraph, periodBand, STEP_TONE, stepLabel, evidenceText, extraOf, valuesText,
+  DEVICE_FILTERS, matchesFilter, filterCounts, behindSeries, niceStep, labelEvery, heatRows, heatStep, HEAT_LEGEND,
+  fixItem, NO_FIX_TEXT, NO_CLUSTER_FIX_TEXT,
 } from '../core/logdelay-report.js';
 import { deviceTable, sortCols, extraCols, statePill, stateRank } from './rows.js';
+import { fixButton } from './fix-popover.js';
 import { timeZoneText, timeZoneShort, offsetLabel } from '../core/log-tz.js';
 
 const PAGE_ROWS = 50;
@@ -40,9 +52,8 @@ const S = {
   period: 'last30',
   reportPeriod: 'shown',
   clusterPick: 'all',
-  devFilter: '', devAll: false,
+  devFilter: '', devAll: false, devState: 'all', devZone: '', devTag: '',
   cdFilter: '', cdAll: false,
-  fixFilter: '', fixAll: false,
   q: { name: '', field: '', value: '', cluster: '', from: '', to: '' },
   qFor: '',
   range: null,           // {from, to} the device page was narrowed to by Show
@@ -62,8 +73,8 @@ const B = nodeCache();
 /** A new visit: everything read before is read again. */
 export function boardsReset() {
   boardsLeave();
-  S.cache.clear(); S.search = null; S.range = null; S.devFilter = ''; S.cdFilter = ''; S.fixFilter = '';
-  S.devAll = false; S.cdAll = false; S.fixAll = false;
+  S.cache.clear(); S.search = null; S.range = null; S.devFilter = ''; S.cdFilter = '';
+  S.devAll = false; S.cdAll = false; S.devState = 'all'; S.devZone = ''; S.devTag = '';
   for (const el of inputs.values()) el.value = '';
   B.clear();
 }
@@ -89,6 +100,55 @@ export function boardsLoading() {
   return false;
 }
 
+/* ------------------------------ what the page's tools row reads and sets ------------------------------ */
+
+export const boardsPick = () => S.clusterPick;
+export function boardsSetPick(id) { S.clusterPick = id || 'all'; S.devAll = false; }
+export const boardsPeriod = () => S.period;
+export function boardsSetPeriod(v) { if (PERIODS.some(([id]) => id === v)) { S.period = v; S.range = null; } }
+
+/** The one cluster a route or the pick names; null for every cluster. */
+export function boardsScopeId(r) {
+  if (r && (r.view === 'cluster' || r.view === 'device') && r.clusterId) return r.clusterId;
+  if (r && r.view === 'devices' && r.clusterId) return r.clusterId;
+  return S.clusterPick !== 'all' ? S.clusterPick : null;
+}
+
+/**
+ * What Fetch now measures: the one cluster on screen, its late devices by default (docs/LOGDELAY.md
+ * "Fetch now" `devices: late`; the whole cluster is the ▾ menu's choice). No cluster: no run.
+ */
+export function boardsScope(r) {
+  const id = boardsScopeId(r);
+  if (id) return { clusterIds: [id], devices: 'late', label: nameOf(id) };
+  return { clusterIds: [], label: 'every cluster' };
+}
+
+/** The last summary read, whatever its period: the schedule and the shared levels for the Fetch now menu's note. */
+export function boardsInfo() {
+  let res = null;
+  for (const [k, e] of S.cache) if (k.startsWith('sum|') && e.state === 'ok' && e.res) res = e.res;
+  const lv = res ? sharedLevels(res.byCluster) : null;
+  const sch = (res && res.schedule) || null;
+  const st = (sch && sch.state) || {};
+  return {
+    schedule: sch, levels: lv, delayFrom: lv ? lv.delayFrom : null,
+    everyHours: sch && finite(sch.everyHours) ? sch.everyHours : res && finite(res.everyHours) ? res.everyHours : null,
+    lastRunAt: sch && finite(sch.lastRunAt) ? sch.lastRunAt : null, nextDueAt: finite(st.nextDueAt) ? st.nextDueAt : null,
+    sig: res ? `${objId(res)}` : '-',
+  };
+}
+
+/** A cluster's log time zone as the core last said it (its board, or the summary's By cluster), or null. */
+export function boardsTimeZone(id) {
+  for (const [k, e] of S.cache) {
+    if (e.state !== 'ok' || !e.res) continue;
+    if (k.startsWith('cl|') && e.res.cluster === id && e.res.timeZone) return e.res.timeZone;
+    if (k.startsWith('sum|')) { const c = (e.res.byCluster || []).find((x) => x.id === id); if (c && c.timeZone) return c.timeZone; }
+  }
+  return null;
+}
+
 /* ------------------------------ the tables' column sort ------------------------------ */
 
 /** A head row from `[key | null, label, num]`: a key sorts with `sort` (lib/table-sort.js). */
@@ -100,8 +160,6 @@ const sorts = {
   devices: tableSort('logdelay.devices', { onChange: sorted }),
   clusterDevices: tableSort('logdelay.cluster-devices', { onChange: sorted }),
   periods: tableSort('logdelay.periods', { onChange: sorted }),
-  fixDevices: tableSort('logdelay.fix-devices', { onChange: sorted }),
-  rules: tableSort('logdelay.rules', { onChange: sorted }),
 };
 const sortSig = (s) => (s.sort ? `${s.sort.key}:${s.sort.dir}` : '-');
 
@@ -135,18 +193,17 @@ const nameOf = (id) => { const c = clusters().find((x) => x.id === id); return c
 const link = (href, text, o = {}) => h('a', { href, title: o.title || null, class: o.cls || null }, text);
 const clusterHref = (id) => ldHash('cluster', id);
 const crumbs = (...parts) => h('div.ld-crumbs', ...parts.filter(Boolean).flatMap((p, i) => (i ? [' › ', p] : [p])));
-const kpi = (value, label, o = {}) => h(`div.ld-kpi${o.wide ? '.ld-wide' : ''}`, { dataset: o.key ? { kpi: o.key } : null },
-  h(`b${o.tone ? `.ld-${o.tone}` : ''}`, value), ...(Array.isArray(label) ? label : [h('span', label)]));
-const key = (colour, text) => h('span.ld-key', h('i', { style: { background: colour } }), text);
+const key = (colour, text, o = {}) => h('span.ld-key', h(`i${o.line ? '.ld-ln' : ''}${o.dash ? '.ld-dash' : ''}`, { style: o.dash ? { borderTopColor: colour } : { background: colour } }), text);
 const legend = (...k) => h('span.ld-legend', ...k);
 const footer = (...kids) => h('div.ld-foot', ...kids);
+const sw = (colour) => h('i.ld-sw', { style: { background: colour } });
 
 /** The filter boxes: one element each for the whole visit, so typing never loses its box. */
 const inputs = new Map();
-function filterBox(id, get, set) {
+function filterBox(id, get, set, placeholder = 'Filter devices') {
   let el = inputs.get(id);
   if (!el) {
-    el = h(`input#${id}`, { type: 'search', placeholder: 'Filter devices', 'aria-label': 'Filter devices',
+    el = h(`input#${id}`, { type: 'search', placeholder, 'aria-label': placeholder,
       oninput: (e) => { set(e.target.value); repaint(); } });
     inputs.set(id, el);
   }
@@ -163,15 +220,20 @@ function problem(ent, what) {
   return h('div.banner.err', `${what} could not be read: ${r.message || r.kind || 'no answer'}`);
 }
 
-/** The band names on the cluster's levels: "Below 30 min", "30–60 min", "Above 60 min". */
+/**
+ * The band names on the cluster's levels: "Below 30 min", "30–60 min", "Above 60 min" — the
+ * three configured levels, and nothing else. Levels the core has not said read as words.
+ */
 function bands(levels) {
   const l = levels || {};
   const a = finite(l.delayFrom) ? l.delayFrom : null; const b = finite(l.criticalOver) ? l.criticalOver : null;
   return {
-    below: a === null ? 'On time' : `Below ${a} min`,
-    mid: a === null || b === null ? 'Delayed' : `${a}–${b} min`,
+    below: a === null ? 'Below the delay line' : `Below ${a} min`,
+    mid: a === null || b === null ? 'Delay' : `${a}–${b} min`,
     high: b === null ? 'Critical' : `Above ${b} min`,
-    late: a === null ? 'late' : `${a} minutes or more`,
+    late: a === null ? 'at the delay level or more' : `${a} min or more`,
+    lateShort: a === null ? 'late' : `${a}+ min`,
+    backShort: a === null ? 'Back below the line' : `Back below ${a}`,
   };
 }
 
@@ -179,15 +241,8 @@ function bands(levels) {
 function sharedLevels(byCluster) {
   const ls = (byCluster || []).map((c) => c.levels).filter(Boolean);
   if (!ls.length) return null;
-  const k = (l) => `${l.noDelayUnder}|${l.delayFrom}|${l.criticalOver}`;
+  const k = (l) => `${l.delayFrom}|${l.criticalOver}`;
   return ls.every((l) => k(l) === k(ls[0])) ? ls[0] : null;
-}
-
-function periodSelect(id) {
-  const s = h(`select#${id}`, { 'aria-label': 'Period', onchange: (e) => { S.period = e.target.value; S.range = null; repaint(); } },
-    ...PERIODS.map(([v, label]) => h('option', { value: v }, label)));
-  s.value = S.period;
-  return h('label.ld-inline', 'Period', s);
 }
 
 /** "Build report" and "Send now" cover the period shown, or the whole hour before now (docs/LOGDELAY.md `lastHour`). */
@@ -254,60 +309,6 @@ function countsLine(counts) {
     h('span', h('b', countText(counts.inRange)), ' in range'), ` — ${COUNT_HINT}`);
 }
 
-/* ------------------------------------ charts ------------------------------------ */
-
-/** Day-by-day stacked bars with five date labels. `withOk` adds on time and silent/can't measure. */
-function dayChart(days, { height = 160, withOk = true, label = 'Devices per day' } = {}) {
-  const list = days || [];
-  const bars = dayBars(list, height, { withOk });
-  const seg = (px, colour, kind) => (px ? h('i', { dataset: { seg: kind }, style: { height: `${px}px`, background: colour } }) : null);
-  const late = list.filter((d) => d && finite(d.devices) && d.devices > 0).map((d) => (d.delayed || 0) + (d.critical || 0));
-  const aria = late.length ? `${label}: between ${Math.min(...late)} and ${Math.max(...late)} late` : `${label}: no day measured`;
-  const ticks = list.length ? [0, 0.25, 0.5, 0.75, 1].map((f) => list[Math.round(f * (list.length - 1))]).map((d) => dayText(d && d.day)) : [];
-  return h('div.ld-chart',
-    h('div.ld-days', { role: 'img', 'aria-label': aria, style: { height: `${height}px` } },
-      ...bars.map((b, i) => h(`span.ld-day${b.gap ? '.ld-gap' : ''}`, { title: dayTitle(list[i]) },
-        seg(b.ok, C.green, 'ok'), seg(b.unk, C.orange, 'unknown'), seg(b.del, C.blue, 'delayed'), seg(b.crit, C.pink, 'critical')))),
-    h('div.ld-ticks', ...ticks.map((t) => h('span', t))));
-}
-
-function sparkline(values, title, href) {
-  const segs = sparkSegments(values, 120, 24);
-  const pic = svg('svg', { width: 120, height: 24, viewBox: '0 0 120 24', role: 'img', 'aria-label': title },
-    ...segs.map((p) => svg('polyline', { points: p, fill: 'none', stroke: C.line, 'stroke-width': 1.6 })));
-  return segs.length ? h('a.ld-spark', { href, title }, pic) : h('span.muted', { title: 'no day measured' }, 'not measured');
-}
-
-function ring(late, devices, { title, href, name, all = false }) {
-  const { dash, share } = ringDash(late, devices);
-  const circle = (stroke, extra = {}) => svg('circle', { cx: 21, cy: 21, r: 15.915, fill: 'none', stroke, 'stroke-width': 5, ...extra });
-  return h(`a.ld-ring${all ? '.ld-all' : ''}`, { href, title },
-    h('span.ld-ring-pic',
-      svg('svg', { width: 104, height: 104, viewBox: '0 0 42 42', role: 'img', 'aria-label': title },
-        circle(share === null ? 'var(--surface-3)' : C.green),
-        share ? circle(C.pink, { 'stroke-dasharray': dash, 'stroke-linecap': 'round' }) : null),
-      h('span.ld-ring-mid', h('b', share === null ? '—' : pctText(share * 100)), h('span', share === null ? 'not measured' : 'delayed'))),
-    h('span.ld-ring-name', name),
-    h('span.ld-ring-sub', finite(late) && finite(devices) ? [h('b', countText(late)), ` of ${countText(devices)} devices`] : 'never measured'));
-}
-
-/* ------------------------------------ the fleet ------------------------------------ */
-
-/** The device columns of the fleet's Devices table. */
-const FLEET_COLS = ['device', 'cluster', 'zone', 'tag1', 'state', 'now', 'max', 'episodes', 'lateMs', 'last', 'docs', 'rawGap', 'deviceTz'];
-
-/**
- * The chip above a board: "Time zone Asia/Kolkata +05:30 · detected · 1 112 of 1 240 devices (90 %)",
- * or "Time zone not detected (41 % agree)". `tz` as the core said it (docs/LOGDELAY.md "Time zones").
- */
-function tzChip(tz, id) {
-  if (!tz) return null;
-  const title = tz.mode === 'set' ? `Set in the cluster's config (Edit cluster › Log time zone: ${tz.setting}). Delays are shown after this offset is taken out.`
-    : tz.mode === 'detected' ? `Detected: the offset most measured devices fall in, at least ${tz.majorityPercent} % agreeing and steady over ${tz.runsNeeded} runs. Delays are shown after it is taken out. Confirm it in Edit cluster › Log time zone.`
-      : `No zone set, and fewer than ${tz.majorityPercent ?? 60} % of the devices agree on one offset (steady over ${tz.runsNeeded ?? 3} runs): nothing is corrected, delays are as measured.`;
-  return h('span.ld-chip.ld-tz-chip', { id: id || null, title, dataset: { mode: tz.mode } }, h('b', 'Time zone'), ' ', timeZoneText(tz));
-}
-
 /** The note on a board for the period before the zone was known: history is not rewritten. */
 function tzSinceNote(items) {
   const since = (items || []).filter((x) => x.tz && (x.tz.mode === 'detected' || x.tz.mode === 'set'));
@@ -318,16 +319,167 @@ function tzSinceNote(items) {
     parts.length ? `: ${parts.join(', ')}.` : '.');
 }
 
+/* ------------------------------------ the fixes ("i") ------------------------------------ */
+
+/** A device row's "i": its own finding from the core, or that there is none. */
+export function deviceFixItems(row) {
+  const f = row && fixItem(row.fix);
+  return f ? [f] : [{ title: 'No recommendation', cause: NO_FIX_TEXT, fix: '', where: 'unknown' }];
+}
+
+/** A cluster's "i": its findings grouped by cause with counts (the cluster's time-zone finding among them). */
+export function clusterFixItems(c) {
+  const items = (c && Array.isArray(c.fixes) ? c.fixes : []).map(fixItem).filter(Boolean);
+  return items.length ? items : [{ title: 'Nothing to fix', cause: NO_CLUSTER_FIX_TEXT, fix: '', where: 'cluster' }];
+}
+
+/* ------------------------------------ the tiles ------------------------------------ */
+
+/**
+ * The five count tiles: the three configured levels, another time zone, silent. Each opens the
+ * Devices tab on that filter. A figure the core did not give reads "—", never 0; can't-measure
+ * devices are said under Silent (they have no figure either).
+ */
+function tiles(t, b, scopeId, keyPrefix) {
+  const tile = (k, filter, label, value, colour, detail) => h('button.ld-kpi.ld-kpi-btn', {
+    type: 'button', dataset: { kpi: k }, title: `Open Devices: ${label.toLowerCase()}`,
+    onclick: () => { S.devState = filter; S.devAll = false; location.hash = ldHash('devices', scopeId); },
+  }, h('span.ld-kpi-l', colour ? sw(colour) : null, label), h('b', value), h('span', detail));
+  return h(`div.ld-kpis.ld-5#${keyPrefix}-tiles`,
+    tile('below', 'ok', b.below, countText(t.onTime), C.ok, 'devices under the delay line'),
+    tile('delay', 'delay', b.mid, countText(t.delay), C.delay, 'delay'),
+    tile('critical', 'critical', b.high, countText(t.critical), C.crit, 'critical'),
+    tile('tz', 'tz', 'Other time zone', countText(t.otherTz), C.tz, 'not counted as late'),
+    tile('silent', 'silent', 'Silent', countText(t.silent), C.silent, finite(t.unmeasured) && t.unmeasured ? `no logs · ${countText(t.unmeasured)} can’t measure` : 'no logs for the silence limit'));
+}
+
+/* ------------------------------------ charts ------------------------------------ */
+
+/**
+ * "Devices behind" over the period: slim stacked bars (the delay band, then above the critical
+ * line) with a thin green line for the delays solved — back below the line — in each bucket.
+ * Today's buckets are the measurement windows, which the core counts as one "still late" figure,
+ * so Today draws one series and the legend says so. A day without totals is a hatched gap. Each
+ * bucket carries its words as a title; the chart has no number of its own.
+ */
+function behindChart(res, period, b, id) {
+  const data = behindSeries(res, period);
+  const n = data.length;
+  const W = 1100, H = 230, L = 36, R = 8, T = 10, Bm = 24;
+  const split = period !== 'today';
+  const max = Math.max(1, ...data.map((d) => Math.max(d.behind || 0, d.back || 0)));
+  const step = niceStep(max); const top = Math.ceil(max / step) * step;
+  const y = (v) => T + (H - T - Bm) * (1 - v / top);
+  const slot = n ? (W - L - R) / n : W - L - R;
+  const bw = Math.max(3, Math.min(14, slot * 0.58));
+  const cx = (i) => L + i * slot + slot / 2;
+  const kids = [];
+  for (let v = 0; v <= top; v += step) {
+    kids.push(svg('line', { x1: L, x2: W - R, y1: y(v), y2: y(v), class: v ? 'ld-grid' : 'ld-axis' }));
+    kids.push(svg('text', { x: L - 8, y: y(v) + 3.5, 'text-anchor': 'end' }, String(v)));
+  }
+  const every = labelEvery(n);
+  data.forEach((d, i) => {
+    const x = L + i * slot + (slot - bw) / 2;
+    const words = d.gap ? `${d.label} · no measurement`
+      : split ? `${d.label} · ${countText(d.delay)} at ${b.mid}, ${countText(d.critical)} ${b.high.toLowerCase()}, ${countText(d.back)} back below the line${d.complete ? '' : ' · not over'}`
+        : `${d.label} · ${countText(d.behind)} ${b.late} when the window ended, ${countText(d.back)} back below the line${d.complete ? '' : ' · window not over'}`;
+    const g = svg('g', { class: `ld-bar${d.gap ? ' ld-bar-gap' : ''}`, dataset: null });
+    g.append(svg('title', {}, words));
+    if (d.gap) {
+      g.append(svg('rect', { x, y: T, width: bw, height: H - T - Bm, class: 'ld-gap-fill' }));
+    } else {
+      const parts = split ? [[d.delay, C.delay], [d.critical, C.crit]] : [[d.behind, C.delay]];
+      let base = 0;
+      parts.filter(([v]) => v > 0).forEach(([v, fill], j, arr) => {
+        const y0 = y(base), y1 = y(base + v); const hgt = Math.max(0.5, y0 - y1 - (j ? 1 : 0));
+        const lastSeg = j === arr.length - 1; const r = lastSeg ? Math.min(3, hgt, bw / 2) : 0;
+        g.append(lastSeg
+          ? svg('path', { d: `M${x},${y1 + hgt} V${y1 + r} Q${x},${y1} ${x + r},${y1} H${x + bw - r} Q${x + bw},${y1} ${x + bw},${y1 + r} V${y1 + hgt} Z`, fill })
+          : svg('rect', { x, y: y1, width: bw, height: hgt, fill }));
+        base += v;
+      });
+    }
+    g.append(svg('rect', { x: L + i * slot, y: T, width: slot, height: H - T - Bm, fill: 'transparent' }));
+    kids.push(g);
+    if (i % every === 0) kids.push(svg('text', { x: cx(i), y: H - 6, 'text-anchor': 'middle' }, d.label));
+  });
+  const known = data.map((d, i) => ({ i, v: d.back })).filter((p) => finite(p.v));
+  if (known.length) {
+    const segs = []; let cur = [];
+    data.forEach((d, i) => { if (finite(d.back)) cur.push(`${cx(i).toFixed(1)},${y(d.back).toFixed(1)}`); else if (cur.length) { segs.push(cur); cur = []; } });
+    if (cur.length) segs.push(cur);
+    for (const s of segs) kids.push(svg('polyline', { points: s.join(' '), fill: 'none', stroke: C.ok, 'stroke-width': 2, 'stroke-linejoin': 'round', 'stroke-linecap': 'round', 'pointer-events': 'none' }));
+    const last = known[known.length - 1];
+    kids.push(svg('circle', { cx: cx(last.i), cy: y(last.v), r: 3.5, fill: C.ok, class: 'ld-line-end', 'pointer-events': 'none' }));
+  }
+  const aria = n ? `Devices behind per ${period === 'today' ? 'window' : 'day'}: at most ${max}` : 'Devices behind: nothing measured in this period';
+  return h('div.ld-chartbox',
+    n ? svg('svg', { class: 'ld-chart', viewBox: `0 0 ${W} ${H}`, role: 'img', 'aria-label': aria, id }, ...kids)
+      : h('div.tbl-empty', 'Nothing measured in this period.'));
+}
+
+/**
+ * The cluster × time heat map: one row per cluster, one cell per bucket, the ramp by devices
+ * behind; a cell the core has no total for is hatched (unknown), a cluster never measured says
+ * so. A cell opens its cluster.
+ */
+function heatMap(res, period, b, id) {
+  const rows = heatRows(res.byCluster, period);
+  const series = behindSeries(res, period);
+  const n = Math.max(series.length, ...rows.map((r) => r.cells.length));
+  if (!rows.length || !n) return h('div.tbl-empty', 'No cluster measured in this period.');
+  const W = 1100, hL = 150, hT = 4, ch = 28, cw = (W - hL - 6) / n;
+  const every = labelEvery(n);
+  const kids = [];
+  rows.forEach((r, ri) => {
+    const yy = hT + ri * ch;
+    const lab = svg('text', { x: hL - 8, y: yy + ch / 2 + 3.5, 'text-anchor': 'end', class: 'ld-heat-name' }, r.name.length > 22 ? `${r.name.slice(0, 21)}…` : r.name);
+    lab.append(svg('title', {}, r.name));
+    kids.push(lab);
+    if (r.never) {
+      kids.push(svg('text', { x: hL + 6, y: yy + ch / 2 + 3.5, class: 'ld-heat-never' }, 'never measured: not in the scheduled measurement yet'));
+      return;
+    }
+    for (let i = 0; i < n; i++) {
+      const v = r.cells[i]; const s = heatStep(v);
+      const label = series[i] ? series[i].label : `#${i + 1}`;
+      const cell = svg('rect', { x: hL + i * cw + 1, y: yy + 1, width: Math.max(1, cw - 2), height: ch - 2, rx: 3,
+        class: `ld-heat ld-heat-${s < 0 ? 'unknown' : s}`, dataset: null, role: 'link', tabindex: -1,
+        onclick: () => { location.hash = clusterHref(r.id); } });
+      cell.append(svg('title', {}, `${r.name} · ${label} · ${s < 0 ? 'not measured' : `${countText(v)} ${b.late} (devices behind)`} · opens the cluster`));
+      kids.push(cell);
+    }
+  });
+  for (let i = 0; i < n; i += every) kids.push(svg('text', { x: hL + i * cw + cw / 2, y: hT + rows.length * ch + 14, 'text-anchor': 'middle' }, series[i] ? series[i].label : ''));
+  return h('div.ld-chartbox', svg('svg', { class: 'ld-chart ld-heatmap', viewBox: `0 0 ${W} ${hT + rows.length * ch + 22}`, role: 'img', id,
+    'aria-label': `Devices behind per cluster and ${period === 'today' ? 'window' : 'day'}` }, ...kids));
+}
+
+/** The mini stacked bar of a cluster's states, in the By cluster table. */
+function stateBar(c, b) {
+  const parts = [[c.below, C.ok, b.below], [c.delay, C.delay, b.mid], [c.critical, C.crit, b.high], [c.otherTz, C.tz, 'Other time zone'], [c.silent, C.silent, 'Silent'], [c.unmeasured, 'var(--surface-3)', 'Can’t measure']]
+    .filter(([v]) => finite(v) && v > 0);
+  if (!parts.length) return h('span.muted', '—');
+  return h('div.ld-mini', { role: 'img', 'aria-label': parts.map(([v, , t]) => `${t} ${v}`).join(', ') },
+    ...parts.map(([v, colour, t]) => h('i', { style: { flex: `${v} 0 0`, background: colour }, title: `${t}: ${countText(v)}` })));
+}
+
+/* ------------------------------------ the dashboard ------------------------------------ */
+
+function chartLegend(period, b) {
+  return period === 'today'
+    ? legend(key(C.delay, `${b.late} when the window ended`), key(C.ok, 'Back below the line (solved in the window)', { line: true }))
+    : legend(key(C.delay, b.mid), key(C.crit, b.high), key(C.ok, b.backShort, { line: true }));
+}
+const periodWords = (period, res) => `${period === 'today' ? 'by measurement window' : 'by day'} · ${(res && res.label) || (PERIODS.find((p) => p[0] === period) || ['', ''])[1].toLowerCase()}`;
+
 function fleetView() {
   const ids = S.clusterPick === 'all' ? [] : [S.clusterPick];
   const q = periodQuery(S.period);
   const ent = need(`sum|${S.period}|${ids.join(',')}`, (signal) => ldSummary({ ...q, clusterIds: ids, maxDevices: 2000, signal }));
   const res = ent.state === 'ok' ? ent.res : null;
-  const all = clusters();
-  const head = B.get('fleet:head', `${S.period}|${S.clusterPick}|${all.length}|${entSig(ent)}`, () => {
-    const pick = h('select#ld-clusters', { 'aria-label': 'Clusters', onchange: (e) => { S.clusterPick = e.target.value; S.devAll = false; repaint(); } },
-      h('option', { value: 'all' }, `All ${all.length}`), ...all.map((c) => h('option', { value: c.id }, c.name)));
-    pick.value = S.clusterPick;
+  const head = B.get('fleet:head', `${S.period}|${S.clusterPick}|${entSig(ent)}`, () => {
     const lv = res ? sharedLevels(res.byCluster) : null;
     const b = bands(lv);
     const every = res && finite(res.everyHours) ? res.everyHours : null;
@@ -335,11 +487,11 @@ function fleetView() {
     const mailBtn = h('button.btn.primary#ld-mail', { type: 'button', disabled: !res, onclick: (e) => mailNow(e.currentTarget, ids, res) }, 'Send now…');
     return h('div.ld-head',
       h('div.ld-title',
-        h('h2', 'Every cluster'),
-        h('p.sub', 'Every device that sends logs: how late it is, when each delay started and when it was solved. ',
+        h('h2', S.clusterPick === 'all' ? 'Every cluster' : nameOf(S.clusterPick)),
+        h('p.sub', 'Every device that sends logs, by the configured levels. ',
           every ? `Measured on the server every ${every} hour${every === 1 ? '' : 's'}; ` : 'Measured on the server on a timer; ',
           lv ? `late means ${b.late}.` : 'late means each cluster’s own delay level.')),
-      h('div.ld-actions', periodSelect('ld-period'), h('label.ld-inline', 'Clusters', pick), reportPeriodSelect(), exportBtn, mailBtn));
+      h('div.ld-actions', reportPeriodSelect(), exportBtn, mailBtn));
   });
   if (!res) return [head, B.get('fleet:problem', entSig(ent), () => problem(ent, 'The log delay summary'))];
 
@@ -347,7 +499,7 @@ function fleetView() {
   const b = bands(lv);
   const rid = objId(res);
   const t = res.totals || {};
-  const n = periodDays(res.from, res.to) || 30;
+  const scopeId = S.clusterPick === 'all' ? null : S.clusterPick;
 
   const notice = B.get('fleet:notice', rid, () => (!res.schedule || res.schedule.supported === false
     ? h('div.banner.warn', 'This server does not run the scheduled measurement (hosted edition only): nothing new is measured.')
@@ -355,40 +507,16 @@ function fleetView() {
       ? h('div.banner.warn', 'The scheduled measurement is switched off; the figures stop at its last run. ',
         h('button.linkish', { type: 'button', onclick: () => navigateTo('settings', { section: 'schedule' }) }, 'Config-Management › Data › Scheduled log delay'))
       : null));
-
-  const tiles = B.get('fleet:tiles', rid, () => {
-    const red = reducedBars(res.reduced, 44);
-    const reducedTitle = red.map((r) => `${r.n === null ? 'unknown' : r.n} in the last ${r.label}`).join(', ');
-    return h('div.ld-kpis.ld-6',
-      kpi(countText(t.devices), 'total devices', { key: 'devices' }),
-      kpi(countText(t.late), `devices with delay now · ${lateSplitText(t)}`, { tone: t.late ? 'pink' : null, key: 'late' }),
-      kpi(countText(t.onTime), `devices with no delay · ${pctText(t.pctOnTime)} on time`, { tone: 'green', key: 'onTime' }),
-      kpi(pctText(t.pctOnTime), [h('span', 'without delay'),
-        h('span.ld-small', h('span.ld-pink', `${pctText(t.pctLate)} delayed`), ` · ${pctText(t.pctSilent)} silent`,
-          finite(t.unmeasured) && t.unmeasured ? ` · ${pctText(t.pctUnmeasured)} can’t measure` : '')], { tone: 'green', key: 'pct' }),
-      h('div.ld-kpi.ld-wide', { dataset: { kpi: 'reduced' } },
-        h('span', `Delay reduced · devices back under ${lv ? `${lv.delayFrom} min` : 'their delay level'} in the last`),
-        h('div.ld-reduced', { role: 'img', 'aria-label': `Devices back on time: ${reducedTitle}` },
-          ...red.map((r) => h('span.ld-red', { title: `${r.n === null ? 'not known' : r.n} devices back under the delay level in the last ${r.label}` },
-            h('b', r.n === null ? '—' : String(r.n)), h('i', { style: { height: `${r.px}px`, background: C.green } })))),
-        h('div.ld-red-labels', ...red.map((r) => h('span', r.label)))));
-  });
-
-  const dayCard = B.get('fleet:days', rid, () => card('Day by day', null, dayChart(res.days, { height: 160, label: 'Devices per day' }),
-    [legend(key(C.green, 'On time'), key(C.blue, b.mid), key(C.pink, b.high), key(C.orange, 'Silent or can’t measure'))]));
-
-  const ringCard = B.get('fleet:rings', rid, () => {
-    const rings = ringsOrder(res.byCluster);
-    return card('Delayed devices by cluster', `share of each cluster’s devices delayed ${b.late}, now · worst first · a cluster opens its details`,
-      h('div.ld-rings',
-        ring(t.late, t.devices, { all: true, name: 'All clusters', href: ldHash('fleet'),
-          title: `All clusters: ${t.late ?? '?'} of ${t.devices ?? '?'} devices delayed` }),
-        ...rings.map((c) => ring(c.lateNow, c.lastRunAt === null ? null : c.devices, {
-          name: c.name || nameOf(c.id), href: clusterHref(c.id),
-          title: c.lastRunAt === null ? `${c.name}: never measured` : `${c.name}: ${c.lateNow} of ${c.devices} devices delayed (${pctText(c.latePct)})`,
-        }))),
-      [legend(key(C.pink, `Delayed (${b.late})`), key(C.green, b.below))]);
-  });
+  const readNote = B.get('fleet:readnote', rid, () => readNotes((res.byCluster || []).map((c) => ({ name: c.name || nameOf(c.id), lastRead: c.lastRead }))));
+  const tileRow = B.get('fleet:tiles', `${rid}|${scopeId}`, () => tiles(t, b, scopeId, 'ld-fleet'));
+  const totalsLine = B.get('fleet:counts', rid, () => h('div.muted.ld-note#ld-fleet-counts', { title: COUNT_HINT },
+    h('b', countText(res.devicesInLastRun)), ' devices in the last run · ', h('b', countText(res.devicesTotal)), ' now · ',
+    h('b', countText(res.devicesInRange)), ` in the period shown — ${COUNT_HINT}`));
+  const behind = B.get('fleet:behind', `${rid}|${S.period}`, () => card('Devices behind', periodWords(S.period, res),
+    behindChart(res, S.period, b, 'ld-behind'), [chartLegend(S.period, b)]));
+  const heat = B.get('fleet:heat', `${rid}|${S.period}`, () => card('When and where devices run late', `devices behind per cluster, ${periodWords(S.period, res)} · a cell opens the cluster`,
+    heatMap(res, S.period, b, 'ld-heat'),
+    [legend(...HEAT_LEGEND.map((tx, i) => h('span.ld-key', h(`i.ld-heat-key.ld-heat-${i}`), tx)), h('span.ld-key', h('i.ld-heat-key.ld-heat-unknown'), 'not measured'))]));
 
   const clusterCard = B.get('fleet:clusters', `${rid}|${sortSig(sorts.clusters)}`, () => {
     // A cluster never measured has no figures: unknown, so it sorts last either way.
@@ -396,19 +524,16 @@ function fleetView() {
     const devsOf = (id) => (res.devices || []).filter((d) => d.cluster === id);
     const cl = sorts.clusters.apply(res.byCluster || [], {
       name: { type: 'text', value: (c) => c.name || nameOf(c.id) },
-      devices: { type: 'number', value: (c) => c.devices },
-      lastRun: { type: 'number', value: seen((c) => (c.counts ? c.counts.inLastRun : null)) },
-      inRange: { type: 'number', value: seen((c) => (c.counts ? c.counts.inRange : null)) },
+      timeZone: { type: 'text', value: seen((c) => timeZoneShort(c.timeZone)) },
       zone: { type: 'text', value: (c) => valuesText(devsOf(c.id), 'zone') },
       tag1: { type: 'text', value: (c) => valuesText(devsOf(c.id), 'tag1') },
-      timeZone: { type: 'text', value: seen((c) => timeZoneShort(c.timeZone)) },
-      otherTz: { type: 'number', value: seen((c) => (c.timeZone && c.timeZone.mode !== 'none' ? c.otherTz : null)) },
-      lateNow: { type: 'number', value: seen((c) => c.lateNow) },
-      newToday: { type: 'number', value: seen((c) => c.newToday) },
+      devices: { type: 'number', value: (c) => c.devices },
+      lastRun: { type: 'number', value: seen((c) => (c.counts ? c.counts.inLastRun : null)) },
       below: { type: 'number', value: seen((c) => c.below) },
       delay: { type: 'number', value: seen((c) => c.delay) },
       critical: { type: 'number', value: seen((c) => c.critical) },
-      previous: { type: 'percent', value: seen((c) => c.belowPctPrevious) },
+      otherTz: { type: 'number', value: seen((c) => (c.timeZone && c.timeZone.mode !== 'none' ? c.otherTz : null)) },
+      silent: { type: 'number', value: seen((c) => c.silent) },
       worst: { type: 'number', value: seen((c) => (c.worst && c.worst.device ? c.worst.minutes : null)) },
     }).map((c) => {
       const cb = bands(c.levels);
@@ -418,67 +543,41 @@ function fleetView() {
         h('td', link(clusterHref(c.id), c.name || nameOf(c.id), { title: `${c.name} · log delay details` })),
         h('td.ld-tz-cell', { title: c.timeZone ? timeZoneText(c.timeZone) : 'not measured' }, neverRun ? h('span.muted', '—')
           : c.timeZone && c.timeZone.mode === 'none' ? h('span.muted', timeZoneShort(c.timeZone)) : timeZoneShort(c.timeZone)),
-        h('td.num', countText(c.devices)),
-        h('td.num', { title: COUNT_HINT }, neverRun ? '—' : countText(c.counts && c.counts.inLastRun)),
-        h('td.num', { title: COUNT_HINT }, neverRun ? '—' : countText(c.counts && c.counts.inRange)),
-        h('td', { title: 'zones of the devices listed below' }, valuesText(devs, 'zone')),
-        h('td', { title: 'tag1 of the devices listed below' }, valuesText(devs, 'tag1')),
-        neverRun ? h('td', { colspan: 8 }, h('span.muted', 'never measured: not in the scheduled measurement yet'))
-          : [h(`td.num${c.lateNow ? '.ld-pink' : ''}`, countText(c.lateNow)),
-            h(`td.num${c.newToday ? '.ld-pink' : ''}`, { title: `devices that reached ${cb.late} today and were not late before` }, countText(c.newToday)),
-            h('td.num', { title: `devices under ${cb.late} now` }, `${countText(c.below)} · ${pctText(c.belowPct)}`),
-            h(`td.num${c.delay ? '.ld-blue' : ''}`, countText(c.delay)),
-            h(`td.num${c.critical ? '.ld-pink' : ''}`, countText(c.critical)),
+        h('td', { title: 'zones of the devices listed on Devices' }, valuesText(devs, 'zone')),
+        h('td', { title: 'tag1 of the devices listed on Devices' }, valuesText(devs, 'tag1')),
+        neverRun ? h('td', { colspan: 9 }, h('span.muted', 'never measured: not in the scheduled measurement yet'))
+          : [h('td', stateBar(c, cb)),
+            h('td.num', countText(c.devices)),
+            h('td.num', { title: COUNT_HINT }, countText(c.counts && c.counts.inLastRun)),
+            h('td.num', { title: `devices under ${cb.late} now` }, countText(c.below)),
+            h(`td.num${c.delay ? '.ld-delay' : ''}`, countText(c.delay)),
+            h(`td.num${c.critical ? '.ld-crit' : ''}`, countText(c.critical)),
             h('td.num', { title: 'devices whose logs are stamped in another time zone than the cluster’s: not late, counted apart (— when the cluster has no zone)' },
               c.timeZone && c.timeZone.mode !== 'none' ? countText(c.otherTz) : h('span.muted', '—')),
-            h('td.num', pctText(c.belowPctPrevious)),
-            h('td', sparkline(c.sparkline, `${c.name}: late devices per day over ${n} days`, clusterHref(c.id))),
             h('td.mono', c.worst && c.worst.device
               ? [link(ldHash('device', c.id, c.worst.device), c.worst.device, { title: `${c.worst.device} · delay details` }), h('span.muted', ` ${minutesText(c.worst.minutes)}`)]
-              : h('span.muted', '—'))]);
+              : h('span.muted', '—')),
+            h('td.ld-acts', fixButton({ kind: 'cluster', id: c.name || c.id, items: () => clusterFixItems(c) }))]);
     });
-    return card('By cluster', `${b.below.toLowerCase()} = devices under ${b.late} of delay now, and their share in the ${n} days before · ${COUNT_HINT} · a cluster name or its line opens the cluster`,
+    return card('By cluster', `${b.below.toLowerCase()} = devices under ${b.late} of delay now · ${COUNT_HINT} · a cluster name opens the cluster, its “i” the recommended fixes`,
       h('div.tbl-wrap', h('table.tbl.ld-ctr#ld-by-cluster',
-        sortHead(sorts.clusters, [['name', 'Cluster'], ['timeZone', 'Time zone'], ['devices', 'Devices now', 1], ['lastRun', 'In last run', 1], ['inRange', 'In range', 1], ['zone', 'zone'], ['tag1', 'tag1'], ['lateNow', 'Late now', 1], ['newToday', 'Today', 1], ['below', b.below, 1],
-          ['delay', b.mid, 1], ['critical', b.high, 1], ['otherTz', 'Other time zone', 1], ['previous', `${b.below}, previous ${n} days`, 1], [null, `Last ${n} days`], ['worst', 'Worst device']]),
-        h('tbody', ...(cl.length ? cl : [h('tr', h('td', { colspan: 16 }, empty('No cluster you can see is measured.')))])))));
+        sortHead(sorts.clusters, [['name', 'Cluster'], ['timeZone', 'Time zone'], ['zone', 'zone'], ['tag1', 'tag1'], [null, 'States'], ['devices', 'Devices', 1], ['lastRun', 'In last run', 1],
+          ['below', b.below, 1], ['delay', b.mid, 1], ['critical', b.high, 1], ['otherTz', 'Other time zone', 1], ['worst', 'Worst device'], [null, '']]),
+        h('tbody', ...(cl.length ? cl : [h('tr', h('td', { colspan: 13 }, empty('No cluster you can see is measured.')))])))));
   });
   const tzNote = B.get('fleet:tznote', rid, () => tzSinceNote((res.byCluster || []).map((c) => ({ name: c.name || nameOf(c.id), tz: c.timeZone }))));
-
   const readCard = B.get('fleet:read', rid, () => card('How the last run read each cluster', 'pages asked, whether the list is complete, and documents with no device name',
     h('div.tbl-wrap', h('table.tbl.ld-ctr#ld-last-read',
       h('thead', h('tr', h('th', 'Cluster'), h('th', 'Read'), h('th.num', 'Devices read'), h('th.num', 'Without a device name'))),
       h('tbody', ...(res.byCluster || []).filter((c) => c.lastRunAt !== null && c.lastRunAt !== undefined).map((c) => h('tr', { dataset: { cluster: c.id } },
         h('td', link(clusterHref(c.id), c.name || nameOf(c.id))),
-        h('td', { class: c.lastRead && (c.lastRead.truncated || !c.lastRead.complete) ? 'ld-pink' : null }, lastReadText(c.lastRead)),
+        h('td', { class: c.lastRead && (c.lastRead.truncated || !c.lastRead.complete) ? 'ld-crit' : null }, lastReadText(c.lastRead)),
         h('td.num', c.lastRead ? countText(c.lastRead.devices) : '—'),
         h('td.num', { title: 'documents in the last run’s window with no device name: in no device’s figures' }, noDeviceText(c.lastRead)))))))));
-  const readNote = B.get('fleet:readnote', rid, () => readNotes((res.byCluster || []).map((c) => ({ name: c.name || nameOf(c.id), lastRead: c.lastRead }))));
-  const totalsLine = B.get('fleet:counts', rid, () => h('div.muted.ld-note#ld-fleet-counts', { title: COUNT_HINT },
-    h('b', countText(res.devicesInLastRun)), ' devices in the last run · ', h('b', countText(res.devicesTotal)), ' now · ',
-    h('b', countText(res.devicesInRange)), ` in the period shown — ${COUNT_HINT}`));
-  const devCard = devicesCard(res);
   const never = (res.byCluster || []).filter((c) => c.lastRunAt === null || c.lastRunAt === undefined);
   const neverNote = B.get('fleet:never', rid, () => (never.length && never.length < (res.byCluster || []).length
     ? h('div.muted.ld-note', `${never.length} cluster${never.length === 1 ? ' is' : 's are'} not measured yet: ${never.map((c) => c.name).join(', ')}.`) : null));
-  return [head, notice, readNote, totalsLine, tiles, dayCard, ringCard, clusterCard, tzNote, readCard, devCard, neverNote];
-}
-
-function devicesCard(res) {
-  const rows = res.devices;
-  const total = res.devicesTotal; const truncated = res.devicesTruncated;
-  // Filter, then the header's order (time spent late until one is chosen), then the page.
-  const ordered = sorts.devices.apply(byTimeLate(filterRows(rows, S.devFilter)), sortCols(FLEET_COLS));
-  const shown = S.devAll ? ordered : ordered.slice(0, PAGE_ROWS);
-  const body = B.get('fleet:dev:body', `${objId(res)}|${S.devFilter}|${S.devAll}|${sortSig(sorts.devices)}`, () => [
-    deviceTable({ id: 'ld-devices', sort: sorts.devices, rows: shown, keys: FLEET_COLS, ctx: { now: res.now },
-      emptyText: S.devFilter ? 'No device matches the filter.' : 'No device measured in this period.' }),
-    footer(`Showing ${countText(shown.length)} of ${countText(ordered.length)}`,
-      ordered.length > shown.length ? [' · ', h('button.linkish#ld-dev-all', { type: 'button', onclick: () => { S.devAll = true; repaint(); } }, 'Show all')] : null,
-      truncated ? ` · the server sent the first ${countText((rows || []).length)} of ${countText(total)}` : null)]);
-  return keptCard(B, 'fleet:dev', 'Devices',
-    `${countText(total ?? (rows || []).length)} · ${sorts.devices.sort ? 'sorted by the marked column' : 'sorted by time spent late'}`,
-    body, [filterBox('ld-dev-filter', () => S.devFilter, (v) => { S.devFilter = v; S.devAll = false; })]);
+  return [head, notice, readNote, tileRow, totalsLine, behind, heat, clusterCard, tzNote, readCard, neverNote];
 }
 
 /* ------------------------------------ one cluster ------------------------------------ */
@@ -497,37 +596,31 @@ function clusterView(id) {
     return h('div.ld-head',
       h('div.ld-title',
         crumbs(link(ldHash('fleet'), 'Log Delay'), 'cluster'),
-        h('h2', name, h('span.ld-h-sub', ` · ${(res && res.label) || PERIODS.find((p) => p[0] === S.period)[1].toLowerCase()}`)),
-        h('p.sub', `Every device in this cluster that sends logs, day by day. Late means ${b.late}.`),
-        tz ? h('div.ld-chips', tzChip(tz, 'ld-tz-chip'),
-          tz.mode === 'none' ? h('span.ld-chip', 'Delay shown as measured: no time zone to take out') : h('span.ld-chip', 'Delay shown after the time zone is taken out')) : null),
-      h('div.ld-actions', periodSelect('ld-period'), link(ldHash('fixes', id), 'Recommended fixes ›', { cls: 'btn' }), reportPeriodSelect(), exportBtn));
+        h('h2.ld-h-row', name, h('span.ld-h-sub', ` · ${(res && res.label) || (PERIODS.find((p) => p[0] === S.period) || ['', ''])[1].toLowerCase()}`),
+          res ? fixButton({ kind: 'cluster', id: name, items: () => clusterFixItems(res) }) : null),
+        h('p.sub', `Every device in this cluster that sends logs. Late means ${b.late}.`),
+        tz ? h('div.ld-chips', tz.mode === 'none' ? h('span.ld-chip', 'Delay shown as measured: no time zone to take out') : h('span.ld-chip', `Delay shown after the time zone (${timeZoneShort(tz)}) is taken out`)) : null),
+      h('div.ld-actions', link(ldHash('devices', id), 'Devices ›', { cls: 'btn' }), reportPeriodSelect(), exportBtn));
   });
   if (!res) return [head, B.get('cl:problem', entSig(ent), () => problem(ent, `${name}’s log delay`))];
   const rid = objId(res);
   const t = res.totals || {};
-  const n = periodDays(res.from, res.to) || 30;
-  const tiles = B.get('cl:tiles', rid, () => h('div.ld-kpis.ld-5',
-    kpi(countText(t.devices), 'devices measured', { key: 'devices' }),
-    kpi(countText(t.late), `late now · ${countText(t.delay)} delayed, ${countText(t.critical)} critical${finite(t.otherTz) && t.otherTz ? ` · ${countText(t.otherTz)} in another time zone` : ''}`, { tone: t.late ? 'pink' : null, key: 'late' }),
-    kpi(pctText(t.pctOnTime), 'on time now', { tone: 'green', key: 'pct' }),
-    kpi(countText(res.started), `delays started · ${countText(res.solved)} solved`, { key: 'started' }),
-    kpi(minutesText(res.medianNow, 'not measured'), `median delay · ${minutesText(res.medianPrevious, 'not measured')} in the previous ${n} days`, { key: 'median' })));
+  const tileRow = B.get('cl:tiles', rid, () => tiles(t, b, id, 'ld-cl'));
   const never = res.lastRunAt === null || res.lastRunAt === undefined;
   const lr = res.lastRead || (res.counts && res.counts.lastRead);
   const readNote = B.get('cl:readnote', rid, () => readNotes([{ name, lastRead: lr }]));
   const countsNote = B.get('cl:counts', rid, () => h('div.ld-note', countsLine(res.counts),
-    h('div.muted#ld-last-read-line', `Last run read: ${lastReadText(lr)} · documents with no device name: ${noDeviceText(lr)}`)));
+    h('div.muted#ld-last-read-line', `Last run read: ${lastReadText(lr)} · documents with no device name: ${noDeviceText(lr)} · ${countText(res.started)} delays started, ${countText(res.solved)} solved in the period`)));
   const neverNote = B.get('cl:never', rid, () => (never ? h('div.banner.warn', `${name} has never been measured: it is not in the scheduled measurement yet.`) : null));
-  const dayCard = B.get('cl:days', rid, () => card('Day by day', 'late devices at the end of each day', dayChart(res.days, { height: 150, withOk: false, label: `Late devices per day in ${name}` }),
-    [legend(key(C.blue, b.mid), key(C.pink, b.high))]));
+  const behind = B.get('cl:behind', `${rid}|${S.period}`, () => card('Devices behind', `${name} · ${periodWords(S.period, res)}`,
+    behindChart(res, S.period, b, 'ld-behind'), [chartLegend(S.period, b)]));
 
   const f = res.fields || {};
   const extras = Array.isArray(f.extras) ? f.extras : [];
   const arrival = f.arrival || 'arrival';
   const event = (Array.isArray(f.eventTime) && f.eventTime[0]) || 'event time';
   const xc = extraCols(extras);
-  const keys = ['device', 'zone', 'tag1', 'state', 'now', 'rawGap', 'deviceTz', 'median', 'max', 'episodes', 'lateMs', 'last', ...Object.keys(xc), 'arrival', 'event'];
+  const keys = ['device', 'zone', 'tag1', 'state', 'now', 'rawGap', 'deviceTz', 'max', 'episodes', 'lateMs', 'last', ...Object.keys(xc), 'arrival', 'event'];
   const ordered = sorts.clusterDevices.apply(byTimeLate(filterRows(res.devices, S.cdFilter)), sortCols(keys, xc));
   const shown = S.cdAll ? ordered : ordered.slice(0, PAGE_ROWS);
   const body = B.get('cl:dev:body', `${rid}|${S.cdFilter}|${S.cdAll}|${sortSig(sorts.clusterDevices)}`, () => [
@@ -539,10 +632,91 @@ function clusterView(id) {
       ` · Showing ${countText(shown.length)} of ${countText(ordered.length)}`,
       ordered.length > shown.length ? [' · ', h('button.linkish#ld-cd-all', { type: 'button', onclick: () => { S.cdAll = true; repaint(); } }, 'Show all')] : null)]);
   const devCard = keptCard(B, 'cl:dev', 'Devices in this cluster',
-    `${countText((res.devices || []).length)} · ${sorts.clusterDevices.sort ? 'sorted by the marked column' : 'sorted by time spent late'} · a device opens its delay details`,
+    `${countText((res.devices || []).length)} · ${sorts.clusterDevices.sort ? 'sorted by the marked column' : 'sorted by time spent late'} · a device name opens its details`,
     body, [filterBox('ld-cd-filter', () => S.cdFilter, (v) => { S.cdFilter = v; S.cdAll = false; })]);
   const tzNote = B.get('cl:tznote', rid, () => tzSinceNote([{ name, tz: res.timeZone }]));
-  return [head, neverNote, readNote, tiles, countsNote, dayCard, devCard, tzNote];
+  return [head, neverNote, readNote, tileRow, countsNote, behind, devCard, tzNote];
+}
+
+/* ------------------------------------ the devices ------------------------------------ */
+
+/** The device columns of the Devices tab (no median: nothing averaged is shown). */
+const FLEET_COLS = ['device', 'cluster', 'zone', 'tag1', 'state', 'now', 'rawGap', 'deviceTz', 'max', 'episodes', 'lateMs', 'last', 'docs'];
+
+/** The distinct values of a context field over the rows, for the Zone and tag1 selects. */
+const valuesOf = (rows, name) => [...new Set((rows || []).map((r) => extraOf(r, name)).filter((v) => v !== null).map(String))].sort();
+
+/** Every filter the Devices tab applies: the search box, the level chip, zone and tag1. */
+function devicesFiltered(rows) {
+  return filterRows(rows, S.devFilter).filter((r) => matchesFilter(r, S.devState)
+    && (!S.devZone || String(extraOf(r, 'zone')) === S.devZone) && (!S.devTag || String(extraOf(r, 'tag1')) === S.devTag));
+}
+
+/** The rows as a file, as filtered, with zone and tag1 and the time zone step; unknown stays blank, never 0. */
+function exportDevicesCsv(rows) {
+  const out = rows.map((r) => ({
+    device: r.device, cluster: r.clusterName || r.cluster, zone: extraOf(r, 'zone') ?? '', tag1: extraOf(r, 'tag1') ?? '',
+    state: stateText(r.state), delay_minutes: finite(r.nowMinutes) ? r.nowMinutes.toFixed(2) : '',
+    raw_gap_minutes: finite(r.rawGapMinutes) ? r.rawGapMinutes.toFixed(2) : '', time_zone_offset: finite(r.tzOffsetMinutes) ? offsetLabel(r.tzOffsetMinutes) : '',
+    max_minutes: finite(r.maxMinutes) ? r.maxMinutes.toFixed(2) : '', delays: finite(r.episodes) ? r.episodes : '', late_ms: finite(r.lateMs) ? r.lateMs : '',
+    late_since: finite(r.lateSince) ? new Date(r.lateSince).toISOString() : '', docs_per_day: finite(r.docsPerDay) ? r.docsPerDay : '',
+    fix: r.fix ? `${stepLabel(r.fix)}: ${r.fix.fix || r.fix.why || ''}` : '',
+  }));
+  download(`log-delay-devices-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')}.csv`, toCsv(out));
+}
+
+/**
+ * The Devices tab: the fleet's (or one cluster's) devices from the summary, searched, filtered by
+ * level (the chips carry counts), zone and tag1; each row with its "i" and its logs (rows.js).
+ * `narrow` draws the short list beside an open device board.
+ */
+function devicesView(clusterId, narrow = false) {
+  const ids = clusterId ? [clusterId] : [];
+  const q = periodQuery(S.period);
+  const ent = need(`sum|${S.period}|${ids.join(',')}`, (signal) => ldSummary({ ...q, clusterIds: ids, maxDevices: 2000, signal }));
+  const res = ent.state === 'ok' ? ent.res : null;
+  const lv = res ? sharedLevels(res.byCluster) : null; const b = bands(lv);
+  const head = narrow ? null : B.get('dev:head', `${clusterId}|${S.period}|${entSig(ent)}`, () => h('div.ld-head',
+    h('div.ld-title',
+      h('h2', clusterId ? `Devices · ${nameOf(clusterId)}` : 'Devices'),
+      h('p.sub', `Every device measured in the period, worst first. Late means ${b.late}; a device name opens its details, “i” its recommended fix, Open in logs its documents.`)),
+    h('div.ld-actions',
+      h('button.btn#ld-dev-csv', { type: 'button', disabled: !res, title: 'The rows as filtered, with zone and tag1', onclick: () => exportDevicesCsv(devicesFiltered(res.devices)) }, 'Export CSV'),
+      h('button.btn#ld-export', { type: 'button', disabled: !res, onclick: (e) => exportXlsx(e.currentTarget, ids, res) }, 'Build report (.xlsx)'))));
+  if (!res) return [head, B.get('dev:problem', entSig(ent), () => problem(ent, 'The devices'))].filter(Boolean);
+  const rid = objId(res);
+  const rows = res.devices || [];
+  const counts = filterCounts(filterRows(rows, S.devFilter));
+  const chipLabel = { all: 'All', late: b.lateShort, critical: b.high, delay: b.mid, ok: b.below, tz: 'Other time zone', silent: 'Silent' };
+  const zones = valuesOf(rows, 'zone'); const tags = valuesOf(rows, 'tag1');
+  const bar = B.get('dev:bar', `${rid}|${S.devState}|${S.devZone}|${S.devTag}|${S.devFilter}|${narrow}`, () => {
+    const sel = (id, label, cur, vals, set) => {
+      const s = h(`select#${id}`, { 'aria-label': label, onchange: (e) => { set(e.target.value); S.devAll = false; repaint(); } },
+        h('option', { value: '' }, `All ${label.toLowerCase()}s`), ...vals.map((v) => h('option', { value: v }, v)));
+      s.value = vals.includes(cur) ? cur : '';
+      return h('label.field.ld-tool', label, s);
+    };
+    return h('div.toolbar.ld-dev-bar',
+      filterBox('ld-dev-filter', () => S.devFilter, (v) => { S.devFilter = v; S.devAll = false; }, 'Search device, cluster, zone or tag1'),
+      h('div.ld-chips#ld-dev-chips', ...DEVICE_FILTERS.map((f) => h('button.ld-chip.ld-chip-btn', {
+        type: 'button', dataset: { filter: f }, 'aria-pressed': String(S.devState === f),
+        onclick: () => { S.devState = f; S.devAll = false; repaint(); },
+      }, chipLabel[f], ' ', h('b', countText(counts[f]))))),
+      narrow ? null : sel('ld-dev-zone', 'Zone', S.devZone, zones, (v) => { S.devZone = v; }),
+      narrow ? null : sel('ld-dev-tag', 'tag1', S.devTag, tags, (v) => { S.devTag = v; }));
+  });
+  const ordered = sorts.devices.apply(byTimeLate(devicesFiltered(rows)), sortCols(FLEET_COLS));
+  const shown = S.devAll ? ordered : ordered.slice(0, PAGE_ROWS);
+  const keys = narrow ? ['device', 'zone', 'tag1', 'state', 'now'] : FLEET_COLS;
+  const body = B.get('dev:body', `${rid}|${S.devFilter}|${S.devState}|${S.devZone}|${S.devTag}|${S.devAll}|${sortSig(sorts.devices)}|${narrow}`, () => [
+    deviceTable({ id: 'ld-devices', sort: sorts.devices, rows: shown, keys, ctx: { now: res.now },
+      emptyText: S.devFilter || S.devState !== 'all' || S.devZone || S.devTag ? 'No device matches. Clear the search or pick another level.' : 'No device measured in this period.' }),
+    footer(`Showing ${countText(shown.length)} of ${countText(ordered.length)}`,
+      ordered.length > shown.length ? [' · ', h('button.linkish#ld-dev-all', { type: 'button', onclick: () => { S.devAll = true; repaint(); } }, 'Show all')] : null,
+      res.devicesTruncated ? ` · the server sent the first ${countText(rows.length)} of ${countText(res.devicesTotal)}` : null)]);
+  const list = keptCard(B, 'dev:list', narrow ? 'Devices' : `${countText(res.devicesTotal ?? rows.length)} devices`,
+    sorts.devices.sort ? 'sorted by the marked column' : 'sorted by time spent late', [bar, body]);
+  return [head, list].filter(Boolean);
 }
 
 /* ------------------------------------ one device ------------------------------------ */
@@ -552,9 +726,8 @@ function deviceQuery() {
 }
 
 /**
- * One device, and only that device: its figures, its recommendation, its graph and its delays.
- * The other late devices and the per-cluster summary are not on this page — a device board is
- * read about the one device it is about.
+ * One device, and only that device: its figures, its recommendation (the core's finding, the
+ * same words as its row's "i"), its graph and its delays, beside the short device list.
  */
 function deviceView(clusterId, device) {
   const q = deviceQuery();
@@ -567,12 +740,13 @@ function deviceView(clusterId, device) {
   const every = res && finite(res.everyHours) ? res.everyHours : null;
   const cname = (res && res.clusterName) || nameOf(clusterId);
   const late = res && (res.state === 'delay' || res.state === 'critical');
-  const head = B.get('dev:head', `${clusterId}|${device}|${S.period}|${JSON.stringify(S.range)}|${entSig(ent)}|${entSig(cent)}`, () => h('div.ld-head',
+  const head = B.get('dev1:head', `${clusterId}|${device}|${S.period}|${JSON.stringify(S.range)}|${entSig(ent)}|${entSig(cent)}`, () => h('div.ld-head',
     h('div.ld-title',
-      crumbs(link(ldHash('fleet'), 'Log Delay'), link(clusterHref(clusterId), cname)),
+      crumbs(link(ldHash('devices'), 'Devices'), link(clusterHref(clusterId), cname)),
       h('h2.ld-dev-h', h('span.mono', device),
         res ? statePill(res.state, late && finite(res.lateSince) ? `${stateText(res.state)} · late since ${whenText(res.lateSince, res.now).replace(/^today /, '')}`
-          : res.state === 'silent' && finite(res.silentSince) ? `silent · no logs since ${whenText(res.silentSince, res.now)}` : stateText(res.state)) : null),
+          : res.state === 'silent' && finite(res.silentSince) ? `silent · no logs since ${whenText(res.silentSince, res.now)}` : stateText(res.state)) : null,
+        res ? fixButton({ kind: 'device', id: device, items: () => deviceFixItems({ fix: res.finding }) }) : null),
       h('p.sub', [`Device field ${devField}`, `arrival ${f.arrival || '@timestamp'}`,
         `event time ${Array.isArray(f.eventTime) && f.eventTime.length ? f.eventTime.join(' / ') : 'not known'}`,
         res && extraOf(res, 'zone') !== null ? `zone ${extraOf(res, 'zone')}` : 'zone not known',
@@ -581,38 +755,37 @@ function deviceView(clusterId, device) {
         res && res.state === 'other_tz' ? `this device ${offsetLabel(res.tzOffsetMinutes)} (other time zone)` : null,
         res && finite(res.rawGapMinutes) && finite(res.tzOffsetMinutes) ? `raw gap ${minutesText(res.rawGapMinutes)} − ${offsetLabel(res.tzOffsetMinutes)}` : null,
         every ? `measured every ${every} hour${every === 1 ? '' : 's'}` : null].filter(Boolean).join(' · '))),
-    h('div.ld-actions', S.range ? h('span.muted.ld-range', `${S.range.from} → ${S.range.to}`) : periodSelect('ld-period'),
+    h('div.ld-actions', S.range ? h('span.muted.ld-range', `${S.range.from} → ${S.range.to}`) : null,
       h('a.btn#ld-open-logs', { href: ldHash('live', clusterId, device), title: `${device}: its logs over the page's time range` }, 'Open in logs ›'))));
 
   const bar = searchBar(clusterId, device, devField, f.extras || [], res);
-  if (!res) return [head, bar, B.get('dev:problem', entSig(ent), () => problem(ent, device))];
+  if (!res) return [head, bar, B.get('dev1:problem', entSig(ent), () => problem(ent, device))];
   const rid = objId(res);
   const lv = res.levels || {};
-  const tiles = B.get('dev:tiles', rid, () => h('div.ld-kpis.ld-6',
-    h('div.ld-kpi', { dataset: { kpi: 'now' } }, h(`b${late ? '.ld-pink' : ''}`, res.state === 'unmeasured' ? 'can’t measure' : res.state === 'silent' ? 'silent' : minutesText(res.nowMinutes)), h('span', 'delay now')),
-    kpi(minutesText(res.medianMinutes), 'median', { key: 'median' }),
-    kpi(minutesText(res.worst && res.worst.minutes), `worst · ${res.worst && finite(res.worst.at) ? whenText(res.worst.at, res.now) : 'not known'}`, { key: 'worst' }),
-    kpi(countText(res.episodes), `delays · ${countText(res.solved)} solved`, { key: 'episodes' }),
-    kpi(durationText(res.lateMs), `time late · ${pctText(res.latePct)} of the period`, { key: 'lateMs' }),
-    kpi(docsText(res.docsPerDay), `logs a day · ${finite(res.lastSilence) ? `${whenText(res.lastSilence, res.now)} last silence` : 'no silence'}`, { key: 'docs' })));
+  // Facts, not statistics: no median, no average (the owner's rule).
+  const tiles5 = B.get('dev1:tiles', rid, () => h('div.ld-kpis.ld-5',
+    h('div.ld-kpi', { dataset: { kpi: 'now' } }, h(`b${late ? (res.state === 'critical' ? '.ld-crit' : '.ld-delay') : ''}`, res.state === 'unmeasured' ? 'can’t measure' : res.state === 'silent' ? 'silent' : minutesText(res.nowMinutes)), h('span', 'delay now')),
+    h('div.ld-kpi', { dataset: { kpi: 'worst' } }, h('b', minutesText(res.worst && res.worst.minutes)), h('span', `worst · ${res.worst && finite(res.worst.at) ? whenText(res.worst.at, res.now) : 'not known'}`)),
+    h('div.ld-kpi', { dataset: { kpi: 'episodes' } }, h('b', countText(res.episodes)), h('span', `delays · ${countText(res.solved)} solved`)),
+    h('div.ld-kpi', { dataset: { kpi: 'lateMs' } }, h('b', durationText(res.lateMs)), h('span', `time late · ${pctText(res.latePct)} of the period`)),
+    h('div.ld-kpi', { dataset: { kpi: 'docs' } }, h('b', docsText(res.docsPerDay)), h('span', `logs a day · ${finite(res.lastSilence) ? `${whenText(res.lastSilence, res.now)} last silence` : 'no silence'}`))));
 
-  const rec = B.get('dev:rec', rid, () => {
-    const fnd = res.finding;
+  const rec = B.get('dev1:rec', rid, () => {
+    const fnd = res.finding; const it = fixItem(fnd);
     return h('section.card.ld-rec#ld-recommendation',
       h('header', h('h2', 'Recommendation'),
-        fnd ? h(`span.pill.ld-pill.${STEP_TONE[fnd.step] || 'grey'}`, h('i.dot'), stepLabel(fnd)) : null,
-        h('span.sub', fnd ? 'likely · from the delay pattern' : 'nothing matched'),
-        h('div', { style: { marginLeft: 'auto' } }, link(ldHash('fixes', clusterId), 'All recommendations ›'))),
-      h('div.body.ld-rec-body', fnd
-        ? [h('div', h('b', fnd.step === 'unknown' ? 'Not known yet: ' : 'Why: '), fnd.why || '—'),
-          fnd.fix ? h('div', h('b', 'Fix: '), fnd.fix) : null,
-          fnd.group ? h('div.muted', `Group: ${fnd.group[0]} ${fnd.group[1]}`) : null,
+        it ? h(`span.pill.ld-pill.${STEP_TONE[fnd.step] || 'grey'}`, h('i.dot'), it.title) : null,
+        h('span.sub', it ? 'likely · from the delay pattern · the same words as the row’s “i”' : 'nothing matched')),
+      h('div.body.ld-rec-body', it
+        ? [h('div', h('b', fnd.step === 'unknown' ? 'Not known yet: ' : 'Why: '), it.cause),
+          it.fix ? h('div', h('b', 'Fix: '), it.fix) : null,
+          it.group ? h('div.muted', `Group: ${it.group}`) : null,
           evidenceText(fnd.evidence) ? h('div.muted', `Evidence: ${evidenceText(fnd.evidence)}`) : null,
-          Array.isArray(fnd.missing) && fnd.missing.length ? h('div.muted', `Would decide it: ${fnd.missing.join(', ')}`) : null]
-        : h('div.muted', 'No recommendation: this device was not late in the stored delay periods of the last 7 days, or no rule matched yet.')));
+          it.missing.length ? h('div.muted', `Would decide it: ${it.missing.join(', ')}`) : null]
+        : h('div.muted', NO_FIX_TEXT)));
   });
 
-  return [head, bar, tiles, rec, B.get('dev:graph', rid, () => graphCard(res, lv, every)), periodsCard(res, every)];
+  return [head, bar, tiles5, rec, B.get('dev1:graph', rid, () => graphCard(res, lv, every)), periodsCard(res, every)];
 }
 
 function searchBar(clusterId, device, devField, extras, res) {
@@ -625,7 +798,7 @@ function searchBar(clusterId, device, devField, extras, res) {
   if (!S.q.from && res) { S.q.from = res.from; S.q.to = res.to; }
   // Built once per device and kept: the answer arriving (which fills From and To) or a search
   // finishing changes the fields' values and the matches line in place, never the box being typed in.
-  const form = B.get('dev:search', `${S.qFor}|${devField}|${(extras || []).join(',')}|${clusters().length}`, () => {
+  const form = B.get('dev1:search', `${S.qFor}|${devField}|${(extras || []).join(',')}|${clusters().length}`, () => {
     const set = (k) => (e) => { S.q[k] = e.target.value; };
     const inp = (id, k, o = {}) => h(`input#${id}`, { type: o.type || 'search', value: S.q[k] || '', placeholder: o.ph || null, oninput: set(k), onchange: set(k), dataset: { untracked: '' } });
     const fields = [...new Set([devField, 'src_hostname', 'src_device', ...extras].filter(Boolean))];
@@ -671,7 +844,7 @@ function searchBar(clusterId, device, devField, extras, res) {
     const r = S.search && S.search.res;
     mount(found, !S.search ? null
       : S.search.state === 'loading' ? h('span.muted', 'Searching…')
-        : S.search.state === 'error' ? h('span.ld-pink', `Search failed: ${(r && (r.message || r.kind)) || 'no answer'}`)
+        : S.search.state === 'error' ? h('span.ld-crit', `Search failed: ${(r && (r.message || r.kind)) || 'no answer'}`)
           : h('span.muted#ld-matches', `Matches ${countText(r.matches ?? (r.devices || []).length)} device${(r.matches ?? (r.devices || []).length) === 1 ? '' : 's'}`,
             ...(r.devices || []).slice(0, 12).flatMap((d) => [' · ', link(ldHash('device', d.cluster, d.device), d.device, { title: `${d.device} on ${d.clusterName || d.cluster}` })]),
             r.truncated ? ' · more not shown: narrow the search' : ''));
@@ -695,7 +868,7 @@ function graphCard(res, lv, every) {
   const pic = svg('svg', { viewBox: `0 0 1000 ${H}`, preserveAspectRatio: 'none', role: 'img', class: 'ld-graph-svg',
     'aria-label': `Delay of ${res.device} over the period: ${(res.points || []).length} measurements, ${(res.periods || []).length} delays, worst ${minutesText(res.worst && res.worst.minutes)}` },
   ...g.segments.map((p) => svg('polyline', { points: p, fill: 'none', stroke: C.line, 'stroke-width': 1.6, 'vector-effect': 'non-scaling-stroke' })),
-  ...unknown.map((p) => svg('rect', { x: g.X(p.t) - 2, y: H - 6, width: 4, height: 6, fill: C.orange })));
+  ...unknown.map((p) => svg('rect', { x: g.X(p.t) - 2, y: H - 6, width: 4, height: 6, fill: C.silent })));
   const marks = [];
   for (const p of res.periods || []) {
     if (finite(p.started) && p.started >= g.lo) marks.push(h('span.ld-mark.ld-mark-start', { title: `delay started ${whenText(p.started, res.now)}`, style: { left: `calc(${((p.started - g.lo) / (g.hi - g.lo || 1)) * 100}% - 5px)` } }, '▲'));
@@ -710,21 +883,20 @@ function graphCard(res, lv, every) {
   return card('Delay over time', `each point is one ${every ? `${every}-hour ` : ''}measurement · shaded bands are delays, from start to solve`,
     [h('div.ld-graph',
       h('div.ld-yaxis', { style: { height: `${H}px` } }, ...scale.map(([m, t]) => h('span', { style: { top: `${y(m) - 7}px` } }, t))),
-      h('div.ld-plot#ld-graph', { style: { height: `${H}px` } }, ...bandsEls, line(lv.criticalOver, C.pink), line(lv.delayFrom, C.blue), pic)),
+      h('div.ld-plot#ld-graph', { style: { height: `${H}px` } }, ...bandsEls, line(lv.criticalOver, C.crit), line(lv.delayFrom, C.delay), pic)),
     h('div.ld-marks', { 'aria-label': 'Delay starts and solves' }, ...marks),
     h('div.ld-ticks.ld-indent', ...ticks.map((t) => h('span', t))),
-    h('div.muted.ld-indent.ld-tiny', '▲ delay started · ● solved · ◆ still late · ', h('i.ld-sq', { style: { background: C.orange } }), ' silent or can’t measure (no dot, never 0 min)'),
-    h('div.ld-insights',
+    h('div.muted.ld-indent.ld-tiny', '▲ delay started · ● solved · ◆ still late · ', h('i.ld-sq', { style: { background: C.silent } }), ' silent or can’t measure (no dot, never 0 min)'),
+    // Facts about the period: the peak, the longest delay, when delays begin. No average.
+    h('div.ld-insights.ld-3',
       cell('Peak', minutesText(ins.peak && ins.peak.minutes, 'not known'), ins.peak && finite(ins.peak.at) ? whenText(ins.peak.at, res.now) : null),
-      cell('Average delay', minutesText(ins.average && ins.average.minutes, 'not known'), ins.average ? `over ${countText(ins.average.measurements)} measurements` : null),
       cell('Longest delay', ins.longest ? durationText(ins.longest.lastedMs) : 'not known', ins.longest && finite(ins.longest.started) ? `${whenText(ins.longest.started, res.now)} → ${finite(ins.longest.solved) ? whenText(ins.longest.solved, res.now) : 'still late'}` : null),
-      cell('Solved in, on average', ins.solvedIn ? durationText(ins.solvedIn.averageMs) : 'not known', ins.solvedIn ? `${countText(ins.solvedIn.solved)} delays solved` : 'no delay solved yet'),
       cell('Late most often', ins.lateMostOften ? ins.lateMostOften.label : 'not known', ins.lateMostOften ? `${ins.lateMostOften.count} of ${ins.lateMostOften.of} delays began then` : null))],
-    [legend(key(C.line, 'Delay'), key(C.blue, `${lv.delayFrom ?? '?'} min`), key(C.pink, `${lv.criticalOver ?? '?'} min`))]);
+    [legend(key(C.line, 'Delay', { line: true }), key(C.delay, `${lv.delayFrom ?? '?'} min`, { dash: true }), key(C.crit, `${lv.criticalOver ?? '?'} min`, { dash: true }))]);
 }
 
 function periodsCard(res, every) {
-  return B.get('dev:periods', `${objId(res)}|${sortSig(sorts.periods)}`, () => {
+  return B.get('dev1:periods', `${objId(res)}|${sortSig(sorts.periods)}`, () => {
     const rows = sorts.periods.apply((res.periods || []).slice().sort((a, b) => (b.started || 0) - (a.started || 0)), {
       started: { type: 'date', value: (p) => p.started },
       solved: { type: 'date', value: (p) => p.solved },
@@ -758,89 +930,12 @@ function periodsCard(res, every) {
   });
 }
 
-/* ------------------------------------ the fixes ------------------------------------ */
-
-function fixesView(clusterId) {
-  const ids = clusterId ? [clusterId] : [];
-  const ent = need(`fix|${ids.join(',')}`, (signal) => ldFixes({ clusterIds: ids, signal }));
-  const res = ent.state === 'ok' ? ent.res : null;
-  const head = B.get('fix:head', `${clusterId}|${clusters().length}`, () => {
-    const all = clusters();
-    const pick = h('select#ld-fix-cluster', { 'aria-label': 'Cluster', onchange: (e) => { location.hash = ldHash('fixes', e.target.value || null); } },
-      h('option', { value: '' }, 'All clusters'), ...all.map((c) => h('option', { value: c.id }, c.name)));
-    pick.value = clusterId || '';
-    return h('div.ld-head',
-      h('div.ld-title',
-        crumbs(link(ldHash('fleet'), 'Log Delay'), clusterId ? link(clusterHref(clusterId), nameOf(clusterId)) : null, 'Recommended fixes'),
-        h('h2', 'Why it was late, and how to fix it'),
-        h('p.sub.ld-wide-p', 'After each measurement the core looks at the delay periods it stored and matches them against the patterns below. '
-          + 'Each match becomes one short recommendation: why, where on the path, what to do, and the evidence. It says “likely” because it is read '
-          + 'from timings, not seen; when the evidence is not enough it says so instead of guessing.')),
-      h('div.ld-actions', h('label.ld-inline', 'Cluster', pick)));
-  });
-  const step = (n, title, sub) => h('span.ld-step', h('b', `${n} · ${title}`), h('span', sub));
-  const path = B.get('fix:path', '', () => card('Where a log can be delayed', 'the path every log takes; each fix names the step',
-    h('div.ld-path', step(1, 'Device', 'clock, buffering, export settings'), h('span.ld-arrow', '→'),
-      step(2, 'Forwarder', 'syslog / collector, queue, link (fwd_tag, Zone)'), h('span.ld-arrow', '→'),
-      step(3, 'Parser', 'Logstash pipeline and filters (parser_tag)'), h('span.ld-arrow', '→'),
-      step(4, 'Elasticsearch', 'indexing, write queue, disk, read-only index'))));
-  if (!res) return [head, path, B.get('fix:problem', entSig(ent), () => problem(ent, 'The recommended fixes'))];
-  const rid = objId(res);
-
-  const fixCard = B.get('fix:findings', rid, () => {
-    const findings = (res.findings || []).map((f) => {
-      const n = Array.isArray(f.devices) ? f.devices.length : 0;
-      const what = f.group ? h('span.muted', h('span.mono', f.group[0]), ` ${f.group[1]}`)
-        : h('span.muted', (f.devices || []).slice(0, 3).join(', ') + (n > 3 ? ` +${n - 3}` : ''));
-      return h('div.ld-fix', { dataset: { step: f.step } },
-        h('div.ld-fix-l', h(`span.pill.ld-pill.${STEP_TONE[f.step] || 'grey'}`, h('i.dot'), stepLabel(f)),
-          h('b', `${n} device${n === 1 ? '' : 's'}`), what, f.clusterName && !clusterId ? h('span.muted', f.clusterName) : null),
-        h('div.ld-fix-r',
-          h('div', h('b', f.step === 'unknown' ? 'Not known yet: ' : 'Likely why: '), f.why || '—'),
-          f.fix ? h('div', h('b', 'Fix: '), f.fix) : null,
-          evidenceText(f.evidence) ? h('div.muted', `Evidence: ${evidenceText(f.evidence)}`) : null,
-          Array.isArray(f.missing) && f.missing.length ? h('div.muted', `Would let the next run decide: ${f.missing.join(', ')}`) : null));
-    });
-    const scope = clusterId ? nameOf(clusterId) : 'all clusters';
-    return card(`Recommended fixes · ${scope} · ${res.from} → ${res.to}`, 'most devices affected first',
-      findings.length ? h('div.ld-fixes', ...findings) : empty('No recommendation: nothing was late in the stored delay periods of this range.'));
-  });
-
-  const fixKeys = ['device', 'cluster', 'zone', 'tag1', 'now'];
-  const stepCols = {
-    step: ['Step', false, (d) => h('td', h(`span.pill.ld-pill.${STEP_TONE[d.step] || 'grey'}`, h('i.dot'), stepLabel(d))), { type: 'text', value: (d) => stepLabel(d) }],
-    why: ['Likely why', false, (d) => h('td.ld-wrap', d.why || '—'), { type: 'text', value: (d) => d.why }],
-    fix: ['Fix', false, (d) => h('td.ld-wrap', d.fix || h('span.muted', '—')), { type: 'text', value: (d) => d.fix }],
-  };
-  const keys = [...fixKeys, 'step', 'why', 'fix'];
-  const devs = sorts.fixDevices.apply(filterRows(res.devices, S.fixFilter), sortCols(keys, stepCols));
-  const shown = S.fixAll ? devs : devs.slice(0, PAGE_ROWS);
-  const body = B.get('fix:dev:body', `${rid}|${S.fixFilter}|${S.fixAll}|${sortSig(sorts.fixDevices)}`, () => [
-    deviceTable({ id: 'ld-fix-devices', sort: sorts.fixDevices, rows: shown, keys, extra: stepCols, ctx: { now: res.now },
-      emptyText: S.fixFilter ? 'No device matches the filter.' : 'No late device in this range.' }),
-    footer(`Showing ${countText(shown.length)} of ${countText(devs.length)} late devices`,
-      devs.length > shown.length ? [' · ', h('button.linkish#ld-fix-all', { type: 'button', onclick: () => { S.fixAll = true; repaint(); } }, 'Show all')] : null,
-      ' · the same column is in the .xlsx (Devices sheet: Step, Likely why, Fix)')]);
-  const devCard = keptCard(B, 'fix:dev', 'Each device', 'every late device with its own recommendation · worst first · a device opens its page',
-    body, [filterBox('ld-fix-filter', () => S.fixFilter, (v) => { S.fixFilter = v; S.fixAll = false; })]);
-
-  const rules = B.get('fix:rules', `${rid}|${sortSig(sorts.rules)}`, () => card('How a pattern is matched', 'plain rules on stored data; each one names its step on the path',
-    h('div.tbl-wrap', h('table.tbl#ld-rules',
-      sortHead(sorts.rules, [['pattern', 'Pattern in the delays'], ['step', 'Step'], ['readFrom', 'Read from'], ['recommendation', 'Recommendation']]),
-      h('tbody', ...sorts.rules.apply(res.rules || [], {
-        pattern: { type: 'text', value: (r) => r.pattern },
-        step: { type: 'text', value: (r) => stepLabel(r) },
-        readFrom: { type: 'text', value: (r) => r.readFrom },
-        recommendation: { type: 'text', value: (r) => r.recommendation },
-      }).map((r) => h('tr', h('td.ld-wrap', r.pattern), h('td', stepLabel(r)), h('td.ld-wrap', r.readFrom), h('td.ld-wrap', r.recommendation))))))));
-  return [head, path, fixCard, devCard, rules];
-}
-
 /* ------------------------------------ the boards ------------------------------------ */
 
 /**
  * The board a route names, as the nodes of its section: kept between draws, rebuilt card by
  * card. `ctx.repaint` redraws the page. Leaving a view (another route) lets go of its questions.
+ * A device board sits beside the short device list of its cluster (the Devices tab's split).
  */
 export function boardsNode(r, ctx) {
   repaint = ctx.repaint || repaint;
@@ -853,22 +948,18 @@ export function boardsNode(r, ctx) {
   B.begin();
   try {
     const wrap = B.get(`wrap:${r.view}`, r.view, () => h('div.rp-section.ld', { dataset: { ld: r.view } }));
+    if (r.view === 'device') {
+      const split = B.get('split', '', () => h('div.ld-split', h('div.ld-split-list'), h('div.ld-split-board')));
+      mount(split.firstChild, ...devicesView(r.clusterId, true).flat().filter(Boolean));
+      mount(split.lastChild, ...deviceView(r.clusterId, r.device).flat().filter(Boolean));
+      for (const tr of split.firstChild.querySelectorAll('tr[data-device]')) tr.classList.toggle('ld-sel', tr.dataset.device === r.device && tr.dataset.cluster === r.clusterId);
+      mount(wrap, split);
+      return wrap;
+    }
     const kids = r.view === 'cluster' ? clusterView(r.clusterId)
-      : r.view === 'device' ? deviceView(r.clusterId, r.device)
-        : r.view === 'fixes' ? fixesView(r.clusterId)
-          : fleetView();
+      : r.view === 'devices' ? devicesView(r.clusterId)
+        : fleetView();
     mount(wrap, ...kids.flat().filter(Boolean));
     return wrap;
   } finally { B.end(); }
-}
-
-/** What Fetch Now measures for the board on screen: the clusters, and one device on a device board. */
-export function boardsScope(r) {
-  if (r.view === 'device') return { clusterIds: [r.clusterId], device: r.device, label: r.device };
-  // A cluster board: the whole cluster (docs/LOGDELAY.md "Fetch now" `devices: all`); the fleet
-  // has no Fetch now of its own — one cluster at a time — unless one is picked above it.
-  if (r.view === 'cluster') return { clusterIds: [r.clusterId], devices: 'all', label: nameOf(r.clusterId) };
-  const id = r.view === 'fixes' ? r.clusterId : r.view === 'fleet' && S.clusterPick !== 'all' ? S.clusterPick : null;
-  if (id) return { clusterIds: [id], devices: 'all', label: nameOf(id) };
-  return { clusterIds: [], label: 'every cluster' };
 }

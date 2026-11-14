@@ -57,14 +57,13 @@ function levelsCard(cardFn) {
   const fromWords = { settings: 'these settings', configFile: 'the cluster’s own delayThresholds', default: 'shipped default' };
   return cardFn('ld-levels', 'Delay levels', 'Delay levels', 'the default for every cluster, used by the report, the mail and the stored delays',
     h('div', { style: { display: 'grid', gap: '10px' } },
-      h('div.ldc-levels#ldc-levels',
-        h('div.ldc-level', { style: { background: 'var(--ld-green-bg)' } }, h('b', 'No delay'),
-          h('span', 'under ', inp('ldc-noDelayUnder', l.noDelayUnder, 'No delay under (min)'), ' min')),
-        h('div.ldc-level', { style: { background: 'var(--ld-orange-bg)' } }, h('b', 'Little delay'),
-          h('span', h('span#ldc-little-from', String(l.noDelayUnder ?? '?')), ' to under ', inp('ldc-delayFrom', l.delayFrom, 'Delay from (min)'), ' min')),
-        h('div.ldc-level', { style: { background: 'var(--ld-blue-bg)' } }, h('b', 'Delay'),
+      // Three bands from two lines (no little-delay band since 0.3.62): below, the delay band, above.
+      h('div.ldc-levels.ldc-3#ldc-levels',
+        h('div.ldc-level', { style: { background: 'var(--ld-ok-bg)' } }, h('b', 'Below the delay line'),
+          h('span', 'under ', inp('ldc-delayFrom', l.delayFrom, 'Delay from (min)'), ' min')),
+        h('div.ldc-level', { style: { background: 'var(--ld-delay-bg)' } }, h('b', 'Delay'),
           h('span', h('span#ldc-delay-from', String(l.delayFrom ?? '?')), ' to ', inp('ldc-criticalOver', l.criticalOver, 'Critical over (min)'), ' min')),
-        h('div.ldc-level', { style: { background: 'var(--ld-pink-bg)' } }, h('b', 'Critical'),
+        h('div.ldc-level', { style: { background: 'var(--ld-crit-bg)' } }, h('b', 'Critical'),
           h('span', 'over ', h('span#ldc-critical-over', String(l.criticalOver ?? '?')), ' min'))),
       h('div.ldc-hint', 'A cluster can still override these in its own settings (delayThresholds), as today. A delay starts when a device reaches “Delay” and is solved when it is back under it. Exactly the critical figure is still “Delay”.'),
       h('label.field', { style: { maxWidth: '260px' } }, 'Silent after', silentSel),
@@ -72,23 +71,22 @@ function levelsCard(cardFn) {
       resolved.length ? h('details.ldc-resolved',
         h('summary', { style: { fontSize: '12px', cursor: 'pointer' } }, `Levels in force on each cluster (${resolved.length})`),
         h('div.tbl-wrap', h('table.tbl',
-          h('thead', h('tr', h('th', 'Cluster'), h('th.num', 'No delay under'), h('th.num', 'Delay from'), h('th.num', 'Critical over'), h('th', 'From'))),
+          h('thead', h('tr', h('th', 'Cluster'), h('th.num', 'Delay from'), h('th.num', 'Critical over'), h('th', 'From'))),
           h('tbody', ...resolved.map((r) => h('tr', { dataset: { cluster: r.id } }, h('td', r.name || r.id),
-            h('td.num', `${r.levels ? r.levels.noDelayUnder : '?'} min`), h('td.num', `${r.levels ? r.levels.delayFrom : '?'} min`),
+            h('td.num', `${r.levels ? r.levels.delayFrom : '?'} min`),
             h('td.num', `${r.levels ? r.levels.criticalOver : '?'} min`), h('td', fromWords[r.levelsFrom] || r.levelsFrom || 'not said')))))))
         : null));
 }
 
-/** The band texts follow what is typed, so the four boxes always read as one ladder. */
+/** The band texts follow what is typed, so the three boxes always read as one ladder. */
 function syncCritical() {
   const put = (id, v) => { const el = $(`#${id}`); if (el) el.textContent = v || '?'; };
-  put('ldc-little-from', val('ldc-noDelayUnder'));
   put('ldc-delay-from', val('ldc-delayFrom'));
   put('ldc-critical-over', val('ldc-criticalOver'));
 }
 
 export async function saveLevels() {
-  const levels = { noDelayUnder: num('ldc-noDelayUnder'), delayFrom: num('ldc-delayFrom'), criticalOver: num('ldc-criticalOver') };
+  const levels = { delayFrom: num('ldc-delayFrom'), criticalOver: num('ldc-criticalOver') };
   const why = validLevels(levels);
   if (why) { toast(why, 'warn', 6000); return false; }
   const silentAfterHours = num('ldc-silent');
