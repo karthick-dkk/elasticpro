@@ -22,7 +22,7 @@ import { modal, field, select, val, confirmDialog } from '../ui/modal.js';
 import { toast } from '../ui/menu.js';
 import { trackTask, shardMovePoll, allocationPoll } from '../ui/tasks.js';
 import { ensureWrites, writeToggle, writesAllowed } from '../core/writes.js';
-import { splitBar, STATUS } from '../lib/charts.js';
+import { splitDonut, STATUS } from '../lib/charts.js';
 import { parseRetention } from '../core/volume.js';
 import { takeFocus, revealFocus } from '../core/focus.js';
 import { shardSplit, visibleShards, usageLevel, loadPercent, coresByNode } from '../core/nodes-shards.js';
@@ -241,7 +241,7 @@ function block(c) {
   const all = Array.isArray(raw) ? raw.map(normalise) : [];
 
   // No stat tiles. They said Nodes / Shards / Unassigned / Moving, which is precisely
-  // what the split bar and its legend say in the glance band — the same duplication that
+  // what the split donut and its legend say in the glance band — the same duplication that
   // cost the honeycomb its place. The figures that were only on the tiles are the band's.
   return keptBox(`grid:${c.id}`, 'div', { style: { display: 'grid', gap: '10px' } }, [
     glanceCard(c, all, d),
@@ -406,11 +406,11 @@ function nodesBody(c, d) {
 }
 
 /**
- * Where the shards stand: one bar, split.
+ * Where the shards stand: one small donut, split.
  *
  * Assigned and unassigned are not two readings to compare — they are one population
  * divided, and the division is the whole question. Two separate gauges would show two
- * percentages of a denominator the reader cannot see; one bar shows the split and the
+ * percentages of a denominator the reader cannot see; one ring shows the split and the
  * counts beside it say how many, which is what somebody acts on. "0 unassigned" is
  * listed rather than dropped: it is the reassurance the page is opened for.
  *
@@ -439,12 +439,13 @@ function shardMixBody(c, all, d) {
     ? `${num(split.unassigned)} of ${num(total)} not placed`
     : split.moving ? `all placed · ${num(split.moving)} in flight` : 'every shard is placed';
 
-  return { sub, split, node: splitBar(segments, { total, totalLabel: 'shards total', format: (v) => num(v) }) };
+  return { sub, split, node: splitDonut(segments, { total, totalLabel: 'shards total', format: (v) => num(v) }) };
 }
 
 /**
- * What this cluster is, in one band one line tall: the shard split, then the figures,
- * each a caption and a value with at most a short grey suffix (the rest in its tooltip).
+ * What this cluster is, in one band one line tall: the shard split as a small donut with
+ * its counts, then the figures, each a caption and a value with at most a short grey
+ * suffix (the rest in its tooltip).
  *
  * It was a 140 px arc beside a grid of stacked figures — 250 px for six numbers and a
  * three-way split, on a page whose working surface is the two tables under it. The band

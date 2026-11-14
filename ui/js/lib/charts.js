@@ -439,35 +439,41 @@ export function splitGauge(segments, opts = {}) {
 }
 
 /**
- * The same split as splitGauge, one line tall: the total named, a thin segmented bar, and
- * every part's count beside it — the zeroes included, because "0 unassigned" is what the
- * reader came for. For a band where an arc would cost a card its compactness.
+ * The same split as splitGauge, small enough for a band one line tall: a donut of about
+ * 44 px, the total named beside it, and every part's count to the right — the zeroes
+ * included, because "0 unassigned" is what the reader came for. The slices are the parts
+ * of one circumference (stroke dashes on one circle each), so a slice is hoverable and
+ * titled like an arc segment.
  *
  * @param segments [{ key, label, value, color }]
- * @param opts { total, totalLabel, format, width }
+ * @param opts { total, totalLabel, format, size, stroke }
  */
-export function splitBar(segments, opts = {}) {
+export function splitDonut(segments, opts = {}) {
   const { parts, total } = divide(segments, opts.total);
   const fmt = opts.format || ((v) => String(v));
-  const W = 100, H = 8;
+  const size = opts.size || 44, sw = opts.stroke || 10;
+  const r = (size - sw) / 2, c = size / 2;
+  const C = 2 * Math.PI * r;
   const label = opts.totalLabel || 'total';
-  const s = svg('svg', { viewBox: `0 0 ${W} ${H}`, preserveAspectRatio: 'none', role: 'img',
+  const ring = (stroke, more = {}) => svg('circle', { cx: c, cy: c, r, transform: `rotate(-90 ${c} ${c})`,
+    style: { fill: 'none', stroke, strokeWidth: sw, ...more } });
+  const s = svg('svg', { viewBox: `0 0 ${size} ${size}`, role: 'img',
     'aria-label': `${fmt(total)} ${label}: ${parts.map((p) => `${fmt(p.value)} ${p.label}`).join(', ')}`,
-    style: { width: `${opts.width || 140}px`, height: `${H}px` } });
+    style: { width: `${size}px`, height: `${size}px` } });
   // The track is the total; a part the cluster did not break down stays grey.
-  s.append(svg('rect', { x: 0, y: 0, width: W, height: H, rx: 2, style: { fill: 'var(--surface-3)' } }));
+  s.append(ring('var(--surface-3)'));
   let at = 0;
   for (const part of parts) {
     if (!total || part.value <= 0) continue;
-    const w = W * (part.value / total);
-    const seg = svg('rect', { x: at.toFixed(2), y: 0, width: Math.min(W - at, w).toFixed(2), height: H, style: { fill: part.color } });
+    const len = Math.min(C - at, C * (part.value / total));
+    const seg = ring(part.color, { strokeDasharray: `${len.toFixed(3)} ${(C - len).toFixed(3)}`, strokeDashoffset: (-at).toFixed(3) });
     seg.append(svg('title', {}, `${part.label}: ${fmt(part.value)}`));
     s.append(seg);
-    at += w;
+    at += len;
   }
-  return h('div.split-bar',
-    h('div.split-total', h('b', fmt(total)), h('span.muted', label)),
+  return h('div.split-donut',
     s,
+    h('div.split-total', h('b', fmt(total)), h('span.muted', label)),
     h('div.split-legend', ...parts.map((part) => h('div', { title: `${part.label}: ${fmt(part.value)}` },
       h('span.dot', { style: { background: part.color } }),
       h('b', fmt(part.value)),

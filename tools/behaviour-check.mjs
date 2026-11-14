@@ -348,7 +348,7 @@ await go('shards');
     if (clear) { clear.click(); await settleFor(200); }
   }
 
-  // The glance card is one band: the split as a one-line bar with its legend and six inline
+  // The glance card is one band: the split as a small donut with its legend and six inline
   // figures (caption, value, at most a short suffix; the rest in the tooltip) — not the stacked
   // caption / big number / note that made the card 250 px tall.
   {
@@ -356,7 +356,11 @@ await go('shards');
       .find((sec) => (sec.querySelector('header h2') || {}).textContent === 'Cluster at a glance');
     const figs = glance ? [...glance.querySelectorAll('.glance-band .fig-inline')] : [];
     ok(figs.length === 6, `glance band: expected 6 inline figures, found ${figs.length}`);
-    ok(!!(glance && glance.querySelector('.glance-band .split-bar svg')), 'glance band: the shard split is not the one-line bar');
+    const donut = glance && glance.querySelector('.glance-band .split-donut svg');
+    ok(!!donut, 'glance band: the shard split is not the small donut');
+    // One ring per non-zero part on top of the track: the fixture has 3 assigned and 1 unassigned, 0 moving.
+    ok(!!donut && donut.querySelectorAll('circle').length === 3 && [...donut.querySelectorAll('circle title')].map((t) => t.textContent).join('|') === 'assigned: 3|unassigned: 1',
+      `glance band: the donut's slices are ${donut ? [...donut.querySelectorAll('circle title')].map((t) => t.textContent).join('|') : 'absent'}`);
     ok(figs.length > 0 && figs.every((f) => f.getAttribute('title')), 'glance band: a figure has no tooltip carrying what its sub-line said');
   }
   // Heap, RAM and CPU are bars with the number beside them; load is a bar over the node's cores
