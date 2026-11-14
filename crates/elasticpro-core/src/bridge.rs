@@ -2899,6 +2899,7 @@ impl Core {
         let time_field = get("timeField").or_else(|| defaults.and_then(|d| d.get("timeField")).and_then(|v| v.as_str()).map(String::from));
         let delay_fields = entry.get("delayFields").or_else(|| defaults.and_then(|d| d.get("delayFields")))
             .and_then(|v| serde_json::from_value::<crate::auth::DelayFields>(v.clone()).ok());
+        let log_time_zone = get("logTimeZone").or_else(|| get("log_time_zone"));
         let changed_address;
         let credential;
         {
@@ -2941,6 +2942,7 @@ impl Core {
                 log_index_pattern: pattern,
                 time_field,
                 delay_fields,
+                log_time_zone,
             });
         }
         self.read_cache.clear();
@@ -5246,6 +5248,7 @@ impl Core {
                 specs.insert(id.clone(), ClusterSpec {
                     id: id.clone(), name: Some(name.clone()), url: c.url.clone(), auth_header: auth, via: via.clone(), tls: tls.clone(),
                     zabbix_groups: c.readers.clone(), log_index_pattern: None, time_field: None, delay_fields: None,
+                    log_time_zone: overlay::log_time_zone(ov),
                 });
             }
             let mut row = json!({
@@ -6026,9 +6029,11 @@ impl Core {
                 first_error.get_or_insert_with(|| SinkNote::read(id, e.clone()));
             }
             let (levels, _) = crate::logdelay::levels_for(&settings, id, in_file.get(id));
-            // The memory between runs: periods opened and solved, silent devices, the day's
-            // totals — kept on the server whatever the destination (the pages read it).
-            let (applied, daily) = match self.logdelay_apply(id, got.readings, now, &levels, &settings, read) {
+            let zone = self.log_time_zone_for(id);
+            // The memory between runs: the log time zone detected and taken out, periods opened
+            // and solved, silent devices, the day's totals — kept on the server whatever the
+            // destination (the pages read it).
+            let (applied, daily) = match self.logdelay_apply(id, got.readings, now, &levels, &settings, read, &zone) {
                 Ok(x) => x,
                 Err(e) => {
                     failed += 1;

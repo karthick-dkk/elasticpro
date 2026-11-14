@@ -9,7 +9,9 @@ use super::fixes::Finding;
 use super::levels::{Levels, State};
 use super::state::{percentile, Daily, Episode, Tracker};
 use super::time;
+use super::tz::{self, LogTimeZone};
 use chrono::NaiveDate;
+use chrono_tz::Tz;
 use serde::Serialize;
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
@@ -22,6 +24,25 @@ pub struct ClusterInput {
     pub tracker: Arc<Tracker>,
     pub daily: BTreeMap<String, Daily>,
     pub levels: Levels,
+    /// The cluster's `logTimeZone` setting (tz.rs); what was detected is in the tracker.
+    pub zone: LogTimeZone,
+    /// Zones a detected offset may be named after (the server's, those set on other clusters).
+    pub tz_hints: Vec<Tz>,
+}
+
+impl ClusterInput {
+    /// The cluster's time zone as every message says it (`timeZone`).
+    pub fn time_zone(&self, now: i64) -> Value {
+        tz::view(&self.zone, &self.tracker.tz, now, &self.tz_hints)
+    }
+
+    /// The offset the cluster's delays are measured against now, when it has one.
+    pub fn cluster_offset(&self, now: i64) -> Option<i32> {
+        match self.zone {
+            LogTimeZone::Detect => self.tracker.tz.detected.map(|d| d.offset_minutes),
+            set => set.offset_at(now),
+        }
+    }
 }
 
 /// Local days `from..=to`, and the instants they span.
@@ -80,6 +101,8 @@ pub struct Totals {
     pub delay: u64,
     pub critical: u64,
     pub clock_ahead: u64,
+    /// In another time zone than the cluster: measured, neither late nor on time.
+    pub other_tz: u64,
     pub silent: u64,
     pub unmeasured: u64,
 }
@@ -93,6 +116,7 @@ impl Totals {
             State::Delay => { self.delay += 1; self.measured += 1 }
             State::Critical => { self.critical += 1; self.measured += 1 }
             State::ClockAhead => { self.clock_ahead += 1; self.on_time += 1; self.measured += 1 }
+            State::OtherTz => { self.other_tz += 1; self.measured += 1 }
             State::Silent => self.silent += 1,
             State::Unmeasured => self.unmeasured += 1,
         }
@@ -123,7 +147,16 @@ pub struct DeviceRow {
     pub cluster: String,
     pub cluster_name: String,
     pub state: State,
+    /// The corrected delay now (the raw gap with the zone taken out).
     pub now_minutes: Option<f64>,
+    /// Arrival − event as measured, and what was taken out of it: the cluster's offset, or the
+    /// device's own for one in another time zone. `None` = nothing taken out (no zone).
+    pub raw_gap_minutes: Option<f64>,
+    pub tz_offset_minutes: Option<i32>,
+    /// The real UTC offset the device's gap sits at, if it sits at one.
+    pub device_tz_offset: Option<i32>,
+    /// The cluster's offset now (set or detected); `None` = the cluster has no zone.
+    pub cluster_tz_offset: Option<i32>,
     pub median_minutes: Option<f64>,
     pub max_minutes: Option<f64>,
     /// Periods in the range, and how many of them solved.
@@ -187,9 +220,13 @@ fn row_of(c: &ClusterInput, name: &str, d: &super::state::DeviceState, mine: &[&
     let max = in_range.iter().cloned().fold(None, |m: Option<f64>, x| Some(m.map_or(x, |m| m.max(x))));
     let last = mine.last();
     let docs: u64 = d.day_docs.iter().map(|(_, n)| n).sum();
+    let measured = d.state.measured();
     DeviceRow {
         device: name.to_string(), cluster: c.id.clone(), cluster_name: c.name.clone(), state: d.state,
-        now_minutes: if d.state == State::Silent || d.state == State::Unmeasured { None } else { d.last_minutes },
+        now_minutes: if measured { d.last_minutes } else { None },
+        raw_gap_minutes: if measured { d.last_raw_minutes } else { None },
+        tz_offset_minutes: if measured { d.applied_offset } else { None },
+        device_tz_offset: d.tz_offset, cluster_tz_offset: c.cluster_offset(now),
         median_minutes: percentile(&mut in_range, 0.5), max_minutes: max,
         episodes: mine.len() as u64, solved: mine.iter().filter(|e| e.solved_ms.is_some()).count() as u64,
         late_ms: mine.iter().map(|e| e.overlap_ms(r.from_ms, r.to_ms, now)).sum(),
@@ -262,6 +299,7 @@ pub fn days(clusters: &[&ClusterInput], r: &Range) -> Vec<Value> {
             sum.delayed += d.delayed;
             sum.critical += d.critical;
             sum.clock_ahead += d.clock_ahead;
+            sum.other_tz += d.other_tz;
             sum.silent += d.silent;
             sum.unmeasured += d.unmeasured;
             sum.started += d.started;
@@ -343,7 +381,7 @@ pub fn fleet(clusters: &[ClusterInput], r: &Range, now: i64, every_hours: u64, m
         let new_today = c.tracker.all_episodes().iter().filter(|e| e.started_ms >= t0 && e.started_ms < t1).count();
         per_cluster.push(json!({
             "id": c.id, "name": c.name, "devices": t.devices, "measured": t.measured, "lateNow": t.late(), "delay": t.delay, "critical": t.critical,
-            "silent": t.silent, "unmeasured": t.unmeasured,
+            "silent": t.silent, "unmeasured": t.unmeasured, "otherTz": t.other_tz, "timeZone": c.time_zone(now),
             "below": t.on_time, "belowPct": (t.devices > 0).then(|| ((t.on_time as f64 / t.devices as f64) * 1000.0).round() / 10.0),
             "latePct": (t.devices > 0).then(|| ((t.late() as f64 / t.devices as f64) * 1000.0).round() / 10.0),
             "belowPctPrevious": below_share(c, &prev), "newToday": new_today,
@@ -392,6 +430,7 @@ pub fn cluster(c: &ClusterInput, r: &Range, now: i64, every_hours: u64, fields: 
     json!({
         "cluster": c.id, "name": c.name, "from": r.from.format("%Y-%m-%d").to_string(), "to": r.to.format("%Y-%m-%d").to_string(), "label": r.label(),
         "now": now, "everyHours": every_hours, "levels": c.levels, "fields": fields, "lastRunAt": c.tracker.last_run_ms,
+        "timeZone": c.time_zone(now),
         "counts": device_counts(c, r, now), "lastRead": c.tracker.last_read,
         "totals": t.json(),
         "started": eps.iter().filter(|e| e.started_ms >= r.from_ms && e.started_ms < r.to_ms).count(),
@@ -456,6 +495,11 @@ pub fn device(c: &ClusterInput, name: &str, r: &Range, now: i64, every_hours: u6
     v["zone"] = json!(row.zone);
     v["tag1"] = json!(row.tag1);
     v["inLastRun"] = json!(row.in_last_run);
+    v["timeZone"] = c.time_zone(now);
+    v["rawGapMinutes"] = json!(row.raw_gap_minutes);
+    v["tzOffsetMinutes"] = json!(row.tz_offset_minutes);
+    v["deviceTzOffset"] = json!(row.device_tz_offset);
+    v["clusterTzOffset"] = json!(row.cluster_tz_offset);
     Some(v)
 }
 
@@ -529,7 +573,7 @@ mod tests {
         let mut daily = BTreeMap::new();
         let today = time::local_day_key(now);
         daily.insert(today.clone(), super::super::state::daily(&t, &today, time::day_bounds(time::local_date(now)).0, time::day_bounds(time::local_date(now)).1, now));
-        ClusterInput { id: "prod".into(), name: "Production".into(), tracker: Arc::new(t), daily, levels: l }
+        ClusterInput { id: "prod".into(), name: "Production".into(), tracker: Arc::new(t), daily, levels: l, zone: LogTimeZone::Detect, tz_hints: vec![] }
     }
 
     #[test]
@@ -543,7 +587,7 @@ mod tests {
         t.apply(a_week_ago, vec![reading("gone", Some(50.0), a_week_ago, "dc1")], &l, 2 * H);
         t.apply(t0 + 5 * H, vec![reading("ok", Some(1.0), t0 + 5 * H, "dc1")], &l, 2 * H);
         assert!(!t.devices.contains_key("gone") && t.episodes[0].ended_ms == Some(t0 + 5 * H));
-        let c = ClusterInput { id: "p".into(), name: "P".into(), tracker: Arc::new(t), daily: BTreeMap::new(), levels: l };
+        let c = ClusterInput { id: "p".into(), name: "P".into(), tracker: Arc::new(t), daily: BTreeMap::new(), levels: l, zone: LogTimeZone::Detect, tz_hints: vec![] };
         let late_now = windows(&[c.tracker.as_ref()], time::local_date(now), 2, (t0 + 7 * H).max(now)).iter()
             .filter(|w| w["from"].as_i64().unwrap() >= t0 + 6 * H).map(|w| w["stillLate"].as_u64().unwrap()).sum::<u64>();
         assert_eq!(late_now, 0, "after it ended, no window counts it as still late");
@@ -568,6 +612,10 @@ mod tests {
         assert_eq!(f["devices"][0]["lateMs"], 4 * H);
         assert_eq!(f["devices"][0]["episodes"], 1);
         assert_eq!(f["reduced"][0]["hours"], 2);
+        assert_eq!(f["byCluster"][0]["timeZone"]["mode"], "none", "two devices, one at UTC: 50 % is not a majority");
+        assert_eq!(f["byCluster"][0]["otherTz"], 0);
+        assert_eq!(f["devices"][0]["rawGapMinutes"], 94.0, "nothing taken out: raw gap = delay");
+        assert_eq!(f["devices"][0]["tzOffsetMinutes"], Value::Null);
         assert!(!f["days"].as_array().unwrap().is_empty(), "{}", f["days"]);
         assert_eq!(f["windows"].as_array().unwrap().iter().map(|w| w["stillLate"].as_u64().unwrap()).max(), Some(1));
     }

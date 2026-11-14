@@ -246,6 +246,16 @@ fn validate(incoming: &Value, raw: &Value) -> Result<Map<String, Value>, Refusal
         }
         if t.is_empty() { c.remove("tls"); } else { c.insert("tls".into(), json!(t)); }
     }
+    // The log time zone (logdelay::tz): UTC or an IANA name, kept in its canonical spelling;
+    // "detect" or empty is the default and is not written. An unknown zone is refused by name.
+    for k in ["logTimeZone", "log_time_zone"] {
+        let Some(v) = c.get(k).cloned() else { continue };
+        match crate::logdelay::tz::LogTimeZone::from_value(Some(&v)) {
+            Ok(crate::logdelay::tz::LogTimeZone::Detect) => { c.remove(k); }
+            Ok(z) => { c.remove(k); c.insert("logTimeZone".into(), json!(z.setting())); }
+            Err(why) => return Err(Refusal::new("bad_message", why)),
+        }
+    }
     if c.get("tags").is_some_and(|v| !v.as_array().is_some_and(|a| a.iter().all(Value::is_string))) {
         return Err(Refusal::new("bad_message", "tags must be a list of words"));
     }
@@ -541,6 +551,22 @@ mod tests {
         let mut raw = cfg();
         apply(&mut raw, &json!({ "name": "Beta", "url": "https://beta:9200", "enabled": true }), Some("Beta"), ALL, NONE_KEPT, OPERATOR).unwrap();
         assert!(raw["clusters"][1].get("enabled").is_none(), "enabled: true is the default and is not written");
+    }
+
+    #[test]
+    fn the_log_time_zone_is_kept_canonical_and_an_unknown_zone_is_refused() {
+        let mut raw = cfg();
+        apply(&mut raw, &json!({ "name": "Beta", "url": "https://beta:9200", "logTimeZone": "asia/kolkata" }), Some("Beta"), ALL, NONE_KEPT, OPERATOR).unwrap();
+        assert_eq!(raw["clusters"][1]["logTimeZone"], json!("Asia/Kolkata"), "the canonical spelling");
+        apply(&mut raw, &json!({ "name": "Beta", "url": "https://beta:9200", "log_time_zone": "utc" }), Some("Beta"), ALL, NONE_KEPT, OPERATOR).unwrap();
+        assert_eq!(raw["clusters"][1]["logTimeZone"], json!("UTC"));
+        assert!(raw["clusters"][1].get("log_time_zone").is_none(), "one spelling in the file");
+        apply(&mut raw, &json!({ "name": "Beta", "url": "https://beta:9200", "logTimeZone": "detect" }), Some("Beta"), ALL, NONE_KEPT, OPERATOR).unwrap();
+        assert!(raw["clusters"][1].get("logTimeZone").is_none(), "detect is the default and is not written");
+        let r = apply(&mut raw, &json!({ "name": "Beta", "url": "https://beta:9200", "logTimeZone": "Mars/Olympus" }), Some("Beta"), ALL, NONE_KEPT, OPERATOR).unwrap_err();
+        assert!(r.kind == "bad_message" && r.message.contains("Mars/Olympus"), "{}", r.message);
+        let r = apply(&mut raw, &json!({ "name": "Beta", "url": "https://beta:9200", "logTimeZone": 330 }), Some("Beta"), ALL, NONE_KEPT, OPERATOR).unwrap_err();
+        assert_eq!(r.kind, "bad_message");
     }
 
     #[test]

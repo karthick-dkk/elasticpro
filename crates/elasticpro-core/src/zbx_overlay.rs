@@ -40,11 +40,12 @@ pub const MAX_ENTRIES: usize = 5000;
 
 /// Every field an overlay may set: the Edit dialog's for a config-file cluster, but the address
 /// (and the credential, which has its own store, and the type, which is `cluster_meta`'s).
-pub const FIELDS: [&str; 12] = [
+pub const FIELDS: [&str; 13] = [
     "name", "via", "tls", "enabled", "tags", "note", "liveRetention", "snapshotRetention", "backupCapacity",
-    "volumeWindowDays", "volumeTopDays", "volumeHeadroomPercent",
+    "volumeWindowDays", "volumeTopDays", "volumeHeadroomPercent", "logTimeZone",
 ];
-/// The fields the core applies to what it polls. The rest are the pages' and the reports'.
+/// The fields the core applies to what it polls. The rest are the pages' and the reports'
+/// (`logTimeZone` the log delay measurement's: `logdelay::tz`).
 pub const POLLED: [&str; 4] = ["name", "via", "tls", "enabled"];
 /// With the address, where the cluster's requests go: what a cluster's own credential is bound to.
 pub const DESTINATION: [&str; 2] = ["via", "tls"];
@@ -160,6 +161,12 @@ pub fn check_field(field: &str, v: &Value) -> Result<Value, String> {
         "liveRetention" | "snapshotRetention" | "backupCapacity" => measure(),
         "volumeWindowDays" | "volumeTopDays" => whole(1, 90),
         "volumeHeadroomPercent" => whole(0, 200),
+        // `UTC` or an IANA name, kept in its canonical spelling; "detect" is the absence of an
+        // override (reset it), so it is refused here rather than kept as a value.
+        "logTimeZone" => match crate::logdelay::tz::LogTimeZone::parse(&text(64)?)? {
+            crate::logdelay::tz::LogTimeZone::Detect => Err("logTimeZone: detect is the default — use \"Use Zabbix's value\" (reset) for it".into()),
+            z => Ok(json!(z.setting())),
+        },
         _ => Err(format!("{field}: not a field ElasticPro keeps for a Zabbix cluster")),
     }
 }
@@ -281,6 +288,11 @@ pub fn route(ov: Option<&Overlay>, zabbix: Option<String>, jump_ids: &HashSet<St
     }
 }
 
+/// The log time zone set in ElasticPro for a Zabbix cluster (`logTimeZone`), for its spec.
+pub fn log_time_zone(ov: Option<&Overlay>) -> Option<String> {
+    ov.and_then(|o| o.text("logTimeZone")).map(String::from)
+}
+
 /// The tags a Zabbix cluster has without an overlay: its client.
 pub fn zabbix_tags(client: Option<&str>) -> Vec<String> {
     client.filter(|c| !c.trim().is_empty()).map(|c| vec![c.to_string()]).unwrap_or_default()
@@ -295,7 +307,7 @@ pub fn row_fields(ov: Option<&Overlay>, zabbix_name: &str, zabbix_via: Option<&s
     let mut m = Map::new();
     let pick = |k: &str| ov.and_then(|o| o.get(k)).cloned();
     m.insert("tags".into(), pick("tags").unwrap_or_else(|| json!(zabbix_tags(client))));
-    for k in ["note", "liveRetention", "snapshotRetention", "backupCapacity", "volumeWindowDays", "volumeTopDays", "volumeHeadroomPercent", "tls"] {
+    for k in ["note", "liveRetention", "snapshotRetention", "backupCapacity", "volumeWindowDays", "volumeTopDays", "volumeHeadroomPercent", "tls", "logTimeZone"] {
         m.insert(k.into(), pick(k).unwrap_or(Value::Null));
     }
     m.insert("enabled".into(), json!(enabled(ov)));
@@ -507,6 +519,13 @@ mod tests {
         }
         assert_eq!(parse_change(Some(&json!({ "type": "ci" })), None).unwrap_err().kind, "cluster_type");
         assert_eq!(parse_change(Some(&json!({ "colour": "red" })), None).unwrap_err().kind, "unknown_field");
+        assert_eq!(check_field("logTimeZone", &json!("europe/berlin")).unwrap(), json!("Europe/Berlin"), "kept canonical");
+        assert_eq!(check_field("logTimeZone", &json!("utc")).unwrap(), json!("UTC"));
+        assert!(check_field("logTimeZone", &json!("Mars/Olympus")).unwrap_err().contains("Mars/Olympus"));
+        assert!(check_field("logTimeZone", &json!("detect")).unwrap_err().contains("reset"), "detect is the default: reset, not a value");
+        assert_eq!(log_time_zone(Some(&Overlay { fields: [("logTimeZone".to_string(), json!("Asia/Kolkata"))].into(), ..Default::default() })), Some("Asia/Kolkata".into()));
+        assert_eq!(log_time_zone(None), None);
+        assert!(row_fields(None, "h", None, None).contains_key("logTimeZone"), "the row says it (null = not set)");
         assert_eq!(parse_change(None, None).unwrap_err().kind, "bad_message", "nothing to change");
         assert_eq!(parse_change(Some(&json!({ "name": "a" })), Some(&json!(["name"]))).unwrap_err().kind, "bad_message");
         for (k, v) in [("name", json!("")), ("name", json!("x".repeat(129))), ("tls", json!("maybe")), ("enabled", json!("yes")),

@@ -8,6 +8,8 @@
 //!
 //! | pattern | step |
 //! |---|---|
+//! | a device's gap is a steady time-zone offset other than its cluster's | Device clock / parser |
+//! | most devices share one offset and the cluster has no zone set | Cluster |
 //! | many devices late in the same windows, across forwarders | Elasticsearch |
 //! | late devices share one `fwd_tag` (or `Zone`), others there on time | Forwarder |
 //! | late devices share one `parser_tag`, across forwarders | Parser |
@@ -18,6 +20,7 @@
 use super::levels::State;
 use super::state::{Episode, Silence, Tracker};
 use super::time;
+use super::tz::{self, LogTimeZone};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
@@ -30,7 +33,12 @@ pub enum Step {
     Forwarder,
     Parser,
     DeviceClock,
+    /// The device's logs are stamped in another time zone than its cluster's: its clock's
+    /// zone, or the parser's date filter for it.
+    DeviceTimeZone,
     DeviceLink,
+    /// The cluster itself: its log time zone is not set, and most devices agree on one.
+    Cluster,
     Unknown,
 }
 
@@ -41,7 +49,9 @@ impl Step {
             Step::Forwarder => "Forwarder",
             Step::Parser => "Parser",
             Step::DeviceClock => "Device clock",
+            Step::DeviceTimeZone => "Device clock / parser",
             Step::DeviceLink => "Device link",
+            Step::Cluster => "Cluster",
             Step::Unknown => "Not enough evidence",
         }
     }
@@ -86,16 +96,81 @@ pub fn many(measured: usize) -> usize {
     (measured / 5).max(5)
 }
 
-/// The findings for one cluster over `[from, to)`. `every_ms` is the measurement interval.
-pub fn findings(cluster: &str, t: &Tracker, from: i64, to: i64, now: i64, every_ms: i64, facts: &ClusterFacts) -> Vec<Finding> {
+/// The time-zone findings (docs/LOGDELAY.md "Time zones"), read from the devices' states now and
+/// the tracker's detection — not from delay periods, since a device in another zone is not late:
+///
+/// * **Device clock / parser**: devices in another time zone than the cluster's, one finding per
+///   offset, with an example zone at that offset for the parser's `date { timezone => … }`;
+/// * **Cluster**: the cluster's zone is left to detection and most of its devices (over half) sit
+///   at one offset — confirm it in Edit cluster › Log time zone when it is detected, set it when
+///   it is not (then the devices at that offset are the ones showing as late, and are named).
+pub fn tz_findings(cluster: &str, t: &Tracker, now: i64, zone: &LogTimeZone) -> Vec<Finding> {
+    let mut out = vec![];
+    let cluster_offset = match zone {
+        LogTimeZone::Detect => t.tz.detected.map(|d| d.offset_minutes),
+        set => set.offset_at(now),
+    };
+    let mut by_offset: BTreeMap<i32, Vec<String>> = BTreeMap::new();
+    for (name, d) in &t.devices {
+        if d.state == State::OtherTz {
+            if let Some(o) = d.applied_offset {
+                by_offset.entry(o).or_default().push(name.clone());
+            }
+        }
+    }
+    for (offset, devices) in by_offset {
+        let own = tz::offset_text(offset);
+        let theirs = cluster_offset.map(tz::offset_text).unwrap_or_else(|| "none".into());
+        let example = tz::example_zone(offset, now).unwrap_or_else(|| own.clone());
+        out.push(Finding {
+            cluster: cluster.into(), step: Step::DeviceTimeZone, devices: devices.clone(), group: Some(("deviceTimeZone".into(), own.clone())),
+            why: format!("the device's logs are stamped in another time zone ({own}) than the cluster's ({theirs}): the gap sits at that offset run after run, so no log is actually late"),
+            fix: format!("set the device's clock to the cluster's zone, or give the parser the device's zone — for example Logstash date {{ timezone => \"{example}\" }} (a zone at {own})"),
+            evidence: json!({ "devices": devices.len(), "deviceOffsetMinutes": offset, "clusterOffsetMinutes": cluster_offset, "steadyRuns": tz::DEVICE_STEADY_RUNS }),
+            missing: vec![],
+        });
+    }
+    // UTC is what every delay was always measured against: devices agreeing on it change nothing,
+    // so there is nothing to confirm or set.
+    if matches!(zone, LogTimeZone::Detect) {
+        if let Some(last) = t.tz.last().copied() {
+            if let Some(o) = last.offset.filter(|o| *o != 0 && last.of > 0 && last.agree * 2 > last.of) {
+                let text = tz::offset_text(o);
+                let detected = t.tz.detected.is_some_and(|d| d.offset_minutes == o);
+                let devices: Vec<String> = if detected { vec![] } else { t.devices.iter().filter(|(_, d)| d.tz_offset == Some(o)).map(|(n, _)| n.clone()).collect() };
+                let (why, fix) = if detected {
+                    (format!("{} of {} measured devices ({} %) sit at {text}, steady over {} runs: the cluster's arrival time is stamped in that zone, and the delays shown have it taken out",
+                             last.agree, last.of, last.pct().unwrap_or(0.0), tz::STEADY_RUNS),
+                     format!("confirm it: Config-Management › Clusters › Edit cluster › Log time zone — pick the zone at {text} (now detected from the devices)"))
+                } else {
+                    (format!("{} of {} measured devices ({} %) sit at {text}, which is a time-zone offset, not a queue; the cluster's log time zone is not set and is not detected yet ({}% of devices steady over {} runs needed)",
+                             last.agree, last.of, last.pct().unwrap_or(0.0), tz::MAJORITY_PERCENT, tz::STEADY_RUNS),
+                     format!("set it: Config-Management › Clusters › Edit cluster › Log time zone — the zone the arrival time is stamped in (at {text}); until then these devices show the offset as delay"))
+                };
+                out.push(Finding {
+                    cluster: cluster.into(), step: Step::Cluster, devices, group: Some(("timeZone".into(), text)), why, fix,
+                    evidence: json!({ "agree": last.agree, "of": last.of, "pct": last.pct(), "offsetMinutes": o, "detected": detected, "steadyRuns": t.tz.steady_runs() }),
+                    missing: vec![],
+                });
+            }
+        }
+    }
+    out
+}
+
+/// The findings for one cluster over `[from, to)`. `every_ms` is the measurement interval;
+/// `zone` the cluster's log time zone setting.
+#[allow(clippy::too_many_arguments)]
+pub fn findings(cluster: &str, t: &Tracker, from: i64, to: i64, now: i64, every_ms: i64, facts: &ClusterFacts, zone: &LogTimeZone) -> Vec<Finding> {
+    let mut out = tz_findings(cluster, t, now, zone);
     let episodes: Vec<Episode> = t.all_episodes().into_iter()
         .filter(|e| e.started_ms < to && e.end_ms(now) >= from).collect();
     if episodes.is_empty() {
-        return vec![];
+        return out;
     }
     let late_devices: BTreeSet<String> = episodes.iter().map(|e| e.device.clone()).collect();
-    let mut out = vec![];
-    let mut claimed: BTreeSet<String> = BTreeSet::new();
+    // A device named by a time-zone finding has its answer: the rules below do not claim it.
+    let mut claimed: BTreeSet<String> = out.iter().flat_map(|f| f.devices.iter().cloned()).collect();
     let measured = t.devices.len().max(late_devices.len());
     let extras_of = |d: &str| t.devices.get(d).map(|x| x.extras.clone()).unwrap_or_default();
     let have = |col: &str| t.devices.values().any(|d| d.extras.contains_key(col));
@@ -246,7 +321,7 @@ pub fn findings(cluster: &str, t: &Tracker, from: i64, to: i64, now: i64, every_
         }
     }
 
-    // 4. Device clock: a steady whole-hour offset, or a clock ahead.
+    // 4. Device clock: a steady time-zone offset after the cluster's is taken out, or a clock ahead.
     {
         let mut tz: Vec<(String, u32, u32)> = vec![];
         for d in &late_devices {
@@ -268,7 +343,7 @@ pub fn findings(cluster: &str, t: &Tracker, from: i64, to: i64, now: i64, every_
             let (w, n) = tz.iter().fold((0, 0), |(a, b), (_, w, n)| (a + w, b + n));
             out.push(Finding {
                 cluster: cluster.into(), step: Step::DeviceClock, devices: devices.clone(), group: None,
-                why: "the device's clock or time zone is wrong: the delay sits at a whole hour (or runs ahead) every time, which a real backlog never does".into(),
+                why: "the device's clock or time zone is wrong: the delay sits at a time-zone offset (or runs ahead) every time, which a real backlog never does".into(),
                 fix: "set the device to the right time zone and to NTP; no log is actually late".into(),
                 evidence: json!({ "wholeHourMeasurements": w, "measurements": n,
                                   "share": if n > 0 { Some(((w as f64 / n as f64) * 100.0).round()) } else { None } }),
@@ -401,6 +476,44 @@ mod tests {
     }
 
     #[test]
+    fn a_device_in_another_zone_and_an_unset_cluster_zone_each_get_their_own_finding() {
+        let l = Levels::default();
+        let mut t = Tracker::default();
+        // 2025-11-14: measured in the present, so today's offsets apply.
+        let now = 1_763_100_000_000;
+        let ist = |at: i64, extra: &[(&str, f64)]| {
+            let mut v: Vec<Reading> = (0..9).map(|n| reading(&format!("in-{n}"), Some(330.0), at, "", "")).collect();
+            v.extend(extra.iter().map(|(d, m)| reading(d, Some(*m), at, "", "")));
+            v
+        };
+        t.apply(now, ist(now, &[("sg", 480.0)]), &l, 2 * H);
+        // One run: the cluster's zone is the devices' plurality but not detected yet — "set it",
+        // naming the devices that show the offset as delay.
+        let f = findings("prod", &t, now - H, now + 10 * H, now + H, 2 * H, &ClusterFacts::default(), &LogTimeZone::Detect);
+        let cl = f.iter().find(|x| x.step == Step::Cluster).expect("a Cluster finding");
+        assert_eq!(cl.devices.len(), 9, "the IST devices, late only by the zone");
+        assert!(cl.fix.starts_with("set it") && cl.why.contains("90 %"), "{cl:?}");
+        assert_eq!(cl.group, Some(("timeZone".into(), "+05:30".into())));
+        assert!(f.iter().all(|x| x.step != Step::DeviceTimeZone), "nothing is in another zone while the cluster has none");
+        // Three runs: detected; sg steady at +08:00 is in another zone.
+        t.apply(now + 2 * H, ist(now + 2 * H, &[("sg", 481.0)]), &l, 2 * H);
+        t.apply(now + 4 * H, ist(now + 4 * H, &[("sg", 480.0)]), &l, 2 * H);
+        let f = findings("prod", &t, now - H, now + 10 * H, now + 5 * H, 2 * H, &ClusterFacts::default(), &LogTimeZone::Detect);
+        let cl = f.iter().find(|x| x.step == Step::Cluster).unwrap();
+        assert!(cl.devices.is_empty() && cl.fix.starts_with("confirm it"), "{cl:?}");
+        let dz = f.iter().find(|x| x.step == Step::DeviceTimeZone).expect("a device time zone finding");
+        assert_eq!(dz.devices, vec!["sg".to_string()]);
+        assert_eq!(dz.group, Some(("deviceTimeZone".into(), "+08:00".into())));
+        assert!(dz.why.contains("+08:00") && dz.why.contains("+05:30") && dz.fix.contains("timezone =>"), "{dz:?}");
+        assert!(f.iter().filter(|x| x.step == Step::DeviceClock || x.step == Step::Unknown).all(|x| !x.devices.contains(&"sg".to_string())),
+                "a device with its zone finding is not claimed again: {f:?}");
+        // The same cluster with its zone set: no Cluster finding, the device finding stays.
+        let g = findings("prod", &t, now - H, now + 10 * H, now + 5 * H, 2 * H, &ClusterFacts::default(), &LogTimeZone::parse("Asia/Kolkata").unwrap());
+        assert!(g.iter().all(|x| x.step != Step::Cluster));
+        assert!(g.iter().any(|x| x.step == Step::DeviceTimeZone));
+    }
+
+    #[test]
     fn one_forwarder_late_while_the_others_are_fine_is_the_forwarder() {
         let mut t = Tracker::default();
         for i in 0..3 {
@@ -414,7 +527,7 @@ mod tests {
             }
             run(&mut t, at, rs);
         }
-        let f = findings("prod", &t, 0, 10 * H, 5 * H, 2 * H, &ClusterFacts::default());
+        let f = findings("prod", &t, 0, 10 * H, 5 * H, 2 * H, &ClusterFacts::default(), &LogTimeZone::Detect);
         assert_eq!(f.len(), 1, "{f:?}");
         assert_eq!(f[0].step, Step::Forwarder);
         assert_eq!(f[0].group, Some(("fwd_tag".into(), "syslog-1".into())));
@@ -440,14 +553,14 @@ mod tests {
             run(&mut t, at, rs);
         }
         let facts = ClusterFacts { write_rejected: Some(1240), nodes_over_watermark: Some(0), snapshots: vec![(H, 3 * H, "nightly".into())], snapshots_known: true };
-        let f = findings("prod", &t, 0, 10 * H, 3 * H, 2 * H, &facts);
+        let f = findings("prod", &t, 0, 10 * H, 3 * H, 2 * H, &facts, &LogTimeZone::Detect);
         assert_eq!(f[0].step, Step::Elasticsearch, "{f:?}");
         assert_eq!(f[0].devices.len(), 10);
         assert!(f[0].fix.contains("nightly"), "{}", f[0].fix);
         assert_eq!(f[0].evidence["writeRejected"], 1240);
         assert!(f[0].missing.is_empty());
         // Without the cache the same pattern still matches, and says what it could not read.
-        let g = findings("prod", &t, 0, 10 * H, 3 * H, 2 * H, &ClusterFacts::default());
+        let g = findings("prod", &t, 0, 10 * H, 3 * H, 2 * H, &ClusterFacts::default(), &LogTimeZone::Detect);
         assert_eq!(g[0].step, Step::Elasticsearch);
         assert!(g[0].missing.iter().any(|m| m.contains("rejections")), "{:?}", g[0].missing);
     }
@@ -459,7 +572,7 @@ mod tests {
             let at = i * 2 * H;
             run(&mut t, at, vec![reading("tz", Some(60.0), at, "", ""), reading("odd", Some(45.0 + i as f64), at, "", ""), reading("ok", Some(1.0), at, "", "")]);
         }
-        let f = findings("prod", &t, 0, 10 * H, 7 * H, 2 * H, &ClusterFacts::default());
+        let f = findings("prod", &t, 0, 10 * H, 7 * H, 2 * H, &ClusterFacts::default(), &LogTimeZone::Detect);
         let clock = f.iter().find(|x| x.step == Step::DeviceClock).expect("a clock finding");
         assert_eq!(clock.devices, vec!["tz".to_string()]);
         let unknown = f.iter().find(|x| x.step == Step::Unknown).expect("not enough evidence");
@@ -473,7 +586,7 @@ mod tests {
         run(&mut t, 0, vec![reading("app", Some(1.0), 0, "", ""), reading("ok", Some(1.0), 0, "", "")]);
         run(&mut t, 2 * H, vec![reading("ok", Some(1.0), 2 * H, "", "")]);
         run(&mut t, 4 * H, vec![reading("app", Some(90.0), 4 * H, "", ""), reading("ok", Some(1.0), 4 * H, "", "")]);
-        let f = findings("prod", &t, 0, 10 * H, 5 * H, 2 * H, &ClusterFacts::default());
+        let f = findings("prod", &t, 0, 10 * H, 5 * H, 2 * H, &ClusterFacts::default(), &LogTimeZone::Detect);
         assert_eq!(f.len(), 1, "{f:?}");
         assert_eq!(f[0].step, Step::DeviceLink);
         assert_eq!(f[0].evidence["burstMinutes"], 90.0);
@@ -487,7 +600,7 @@ mod tests {
             let at = i * 2 * H;
             run(&mut t, at, (0..3).map(|n| reading(&format!("a-{n}"), Some(50.0), at, "syslog-1", "")).collect());
         }
-        let f = findings("prod", &t, 0, 10 * H, 3 * H, 2 * H, &ClusterFacts::default());
+        let f = findings("prod", &t, 0, 10 * H, 3 * H, 2 * H, &ClusterFacts::default(), &LogTimeZone::Detect);
         assert!(f.iter().all(|x| x.step != Step::Forwarder), "{f:?}");
         assert_eq!(f.iter().find(|x| x.step == Step::Unknown).map(|x| x.devices.len()), Some(3));
         // One parser late, another on time, no fwd_tag anywhere: a parser finding, with the gap named.
@@ -498,7 +611,7 @@ mod tests {
             rs.extend((0..4).map(|n| reading(&format!("q-{n}"), Some(1.0), at, "", "cisco")));
             run(&mut t, at, rs);
         }
-        let f = findings("prod", &t, 0, 10 * H, 3 * H, 2 * H, &ClusterFacts::default());
+        let f = findings("prod", &t, 0, 10 * H, 3 * H, 2 * H, &ClusterFacts::default(), &LogTimeZone::Detect);
         let p = f.iter().find(|x| x.step == Step::Parser).expect("a parser finding");
         assert!(p.missing.iter().any(|m| m.contains("fwd_tag")), "{:?}", p.missing);
     }
@@ -520,7 +633,7 @@ mod tests {
             t.apply(at, rs, &Levels::default(), silent_after);
         }
         assert!(t.devices.iter().filter(|(n, _)| n.starts_with("b-")).all(|(_, d)| d.state == State::Silent), "the other forwarder is silent");
-        let f = findings("prod", &t, 0, 10 * H, 7 * H, 2 * H, &ClusterFacts::default());
+        let f = findings("prod", &t, 0, 10 * H, 7 * H, 2 * H, &ClusterFacts::default(), &LogTimeZone::Detect);
         assert!(f.iter().all(|x| x.step != Step::Forwarder && x.step != Step::Parser), "{f:?}");
         assert_eq!(f.iter().find(|x| x.step == Step::Unknown).map(|x| x.devices.len()), Some(3), "{f:?}");
         // One measured device on time on the other forwarder at those moments: now it can be said.
@@ -531,7 +644,7 @@ mod tests {
             rs.push(reading("b-0", Some(1.0), at, "syslog-2", "grok"));
             t2.apply(at, rs, &Levels::default(), silent_after);
         }
-        let g = findings("prod", &t2, 0, 12 * H, 11 * H, 2 * H, &ClusterFacts::default());
+        let g = findings("prod", &t2, 0, 12 * H, 11 * H, 2 * H, &ClusterFacts::default(), &LogTimeZone::Detect);
         let fwd = g.iter().find(|x| x.step == Step::Forwarder).expect("a forwarder finding");
         assert_eq!((fwd.evidence["othersAll"].as_u64(), fwd.evidence["othersOnTime"].as_u64()), (Some(1), Some(1)), "{fwd:?}");
     }
