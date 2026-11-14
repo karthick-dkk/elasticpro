@@ -309,7 +309,6 @@ function buildTable(c, rows, allRows = rows) {
   // the bulk bar speak about the filtered set, the tbody only about the page.
   const shown = rows;
   const refresh = { onChanged: () => afterChange(c) };
-  const allShownTicked = shown.length > 0 && shown.every((r) => selected.has(r.index));
 
   const tick = (r) => h('input', {
     type: 'checkbox', checked: selected.has(r.index), style: { cursor: 'pointer' },
@@ -352,18 +351,24 @@ function buildTable(c, rows, allRows = rows) {
           onClick: () => deleteIndices(c, [r.index], refresh) },
       ], { title: `Actions for ${r.index}` })))));
 
+  // The head tick works on every index the filters match — on every page, not only the rows
+  // on screen — and says how many are ticked; half-ticked while only some are.
+  const allMatchedTicked = allRows.length > 0 && allRows.every((r) => selected.has(r.index));
   const selectAll = h('input', {
-    type: 'checkbox', checked: allShownTicked, style: { cursor: 'pointer' },
-    title: 'Select every index shown',
+    type: 'checkbox', checked: allMatchedTicked, style: { cursor: 'pointer' },
+    'aria-label': 'Select every index the filters match',
+    title: allMatchedTicked ? 'Clear the selection' : `Select every index the filters match (${num(allRows.length)}, on every page)`,
     onchange: (e) => {
-      shown.forEach((r) => { if (e.target.checked) selected.add(r.index); else selected.delete(r.index); });
+      allRows.forEach((r) => { if (e.target.checked) selected.add(r.index); else selected.delete(r.index); });
       redrawTable();
     },
   });
+  selectAll.indeterminate = selected.size > 0 && !allMatchedTicked;
 
   const t = h('div.tbl-wrap', h('table.tbl',
     h('thead', h('tr',
-      h('th', { style: { width: '28px' } }, selectAll),
+      h('th', { style: { whiteSpace: 'nowrap' } }, h('span', { style: { display: 'inline-flex', alignItems: 'center', gap: '5px' } }, selectAll,
+        selected.size ? h('span.muted', { style: { fontWeight: 400, textTransform: 'none' } }, `${num(selected.size)} selected`) : null)),
       th('H', 'health'), th('Index', 'index'), th('Source', 'source'), th('Day', 'day'), th('State', 'status'),
       th('P/R', 'pri', true), th('Docs', 'docs', true), th('Deleted', 'deleted', true),
       th('Size', 'size', true), th('Primary', 'priSize', true), th('Created', 'created'), h('th', ''))),
