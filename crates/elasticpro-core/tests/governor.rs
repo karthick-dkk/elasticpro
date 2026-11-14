@@ -35,11 +35,22 @@ async fn wait_for(what: &str, mut f: impl FnMut() -> bool) {
     panic!("timed out waiting for {what}");
 }
 
+/// Point a process's self monitor at an empty directory: the governor then has no CPU or memory
+/// figure of its own, and only the signals the test sets (people waiting, the queue) decide.
+fn quiet_machine(c: &Core, dir: &TempDir) {
+    c.set_sampler_for_tests(elasticpro_core::health::Sampler { cgroup: dir.0.join("no-cgroup"), proc_status: dir.0.join("no-proc-status") });
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn people_waiting_at_the_core_halve_the_worker_at_its_next_tick() {
     let dir = TempDir::new("gov-people");
     let core = Core::new_for_role(Some(dir.0.clone()), Edition::Hosted, 1, ProcessRole::Core);
     let worker = Core::new_for_role(Some(dir.0.clone()), Edition::Hosted, 1, ProcessRole::Worker);
+    // The governor reads this process's own CPU from the cgroup: on a busy test runner that
+    // read 75 % and "calm" never came (CI, 2026-11-14). This test is about people waiting, not
+    // the machine's load, so both processes read from an empty place: no CPU, no memory figure.
+    quiet_machine(&core, &dir);
+    quiet_machine(&worker, &dir);
     // No heartbeat yet: the core knows nothing of the worker's governor.
     let l = core.handle_as(json!({ "type": "JOBS_LIST" }), admin()).await;
     assert_eq!(l["governor"], Value::Null, "no worker heartbeat: not known, never a made-up figure: {l}");
