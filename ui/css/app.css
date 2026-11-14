@@ -1507,7 +1507,13 @@ html:has(.modal-overlay) { overflow: hidden; scrollbar-gutter: stable; }
   border: 0; background: transparent; cursor: pointer; color: var(--text-primary); font: inherit; font-size: 12px; }
 .console-tab-label .m { font-family: var(--mono); font-size: 10.5px; color: var(--text-muted); }
 .console-tab.on .console-tab-label .m { color: var(--accent); }
-.console-tab-label .t { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--mono); font-size: 11.5px; }
+/* "Page 1", "Page 2" …: a label, not a request, so the UI face; the request is the tooltip. */
+.console-tab-label .t { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
+/* The Saved queries and History panels: a table each, so wider than a notes popover; never
+   wider than the window, and the table scrolls inside its own .tbl-wrap on a phone. */
+.pop.console-pop { width: min(940px, calc(100vw - 16px)); max-width: none; }
+.pop.console-pop > .body { padding: 9px 10px; }
+.pop.console-pop table.tbl td { padding: 5px 8px; }
 .console-tab-x { border: 0; background: transparent; cursor: pointer; color: var(--text-muted); padding: 0 8px; font-size: 14px; line-height: 1; }
 .console-tab-x:hover { color: var(--critical-ink); }
 .console-tab-add { min-width: 30px; }

@@ -25,6 +25,15 @@ test('closing moves to the neighbour; the last tab is emptied, never removed', (
   assert.equal(st.tabs.length, 1); assert.equal(T.activeTab(st).path, '/_cluster/health');
 });
 
+test('the strip shows Page N by position; closing renumbers', () => {
+  let st = T.initialState({ path: '/a' });
+  st = T.addTab(st, { path: '/b' }).st; st = T.addTab(st, { path: '/c' }).st;
+  assert.deepEqual(st.tabs.map((_, i) => T.tabLabel(i)), ['Page 1', 'Page 2', 'Page 3']);
+  st = T.closeTab(st, st.tabs[1].id);
+  assert.deepEqual(st.tabs.map((_, i) => T.tabLabel(i)), ['Page 1', 'Page 2']);
+  assert.equal(st.tabs[1].path, '/c', 'the third request is now Page 2');
+});
+
 test('titles follow the request unless named', () => {
   assert.equal(T.tabTitle({ method: 'POST', path: '/logs-*/_search?size=0', name: '' }), 'POST logs-*/_search');
   assert.equal(T.tabTitle({ method: 'GET', path: '/', name: '' }), 'GET /');

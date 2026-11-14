@@ -6,9 +6,11 @@ import { state, client, activeClusters } from '../core/state.js';
 import { REQUEST_PURPOSE } from '../core/es.js';
 import { hideAddress } from '../core/evidence.js';
 import { idb } from '../lib/idb.js';
-import { MAX_TABS, initialState, addTab, closeTab, updateTab, activeTab, tabTitle, toStored, fromStored } from '../core/console-tabs.js';
+import { MAX_TABS, initialState, addTab, closeTab, updateTab, activeTab, tabTitle, tabLabel, toStored, fromStored } from '../core/console-tabs.js';
 import { savedQueries, loadSavedQueries, saveQuery, deleteSavedQuery, ownQuery, filterQueries } from '../core/saved-queries.js';
+import { parseRequestText, recognisedLabel } from '../core/console-paste.js';
 import { modal, field, text as textField, checkbox, val, checked } from '../ui/modal.js';
+import { popover, closePopover } from '../ui/menu.js';
 
 /**
  * Write to the query history, and carry on if it cannot be written.
@@ -28,7 +30,7 @@ function remember(fn) {
   } catch (_) { /* storage unavailable */ }
 }
 import { jsonView } from '../lib/jsonview.js';
-import { card, empty, pill, table } from './common.js';
+import { empty, pill, table } from './common.js';
 import { isSnapshotMode } from '../core/snapshot.js';
 import { intent, navigateTo } from '../core/intent.js';
 import { writesUnlocked, writesAllowed, syncWrites, setWritesUnlocked, writeToggle } from '../core/writes.js';
@@ -225,21 +227,25 @@ function newTabQuiet(from) {
   return true;
 }
 
-/** The active tab's title follows the path as it is typed, without redrawing the page. */
+/** The tab's tooltip: the request it holds, the name it was given, how to rename it. */
+function tabTip(t) { return `${t.method} ${t.path || '/'}${t.name ? `\n${t.name}` : ''}\nDouble-click to rename`; }
+
+/** The active tab's tooltip follows the request as it is typed, without redrawing the page. */
 function refreshTabTitle() {
-  const el = document.querySelector('.console-tab.on .t');
-  const t = activeTab(tabs);
-  if (el && !t.name) el.textContent = tabTitle({ ...t, path: ui.path }).replace(/^[A-Z]+\s/, '') || '/';
+  const el = document.querySelector('.console-tab.on');
+  if (el) el.title = tabTip({ ...activeTab(tabs), method: ui.method, path: ui.path });
 }
 
 function tabStrip() {
   const full = tabs.tabs.length >= MAX_TABS;
   return h('div.console-tabs', { role: 'tablist', 'aria-label': 'Query tabs' },
-    ...tabs.tabs.map((t) => {
+    ...tabs.tabs.map((t, i) => {
       const on = t.id === tabs.active;
-      return h(`div.console-tab${on ? '.on' : ''}`, { role: 'tab', 'aria-selected': on ? 'true' : 'false', title: `${t.method} ${t.path}${t.name ? `\n${t.name}` : ''}\nDouble-click to rename` },
+      // "Page 1", "Page 2" … by position (the owner's wording); the request is the tooltip and
+      // the echo line in the request card, so the strip stays the same width whatever is typed.
+      return h(`div.console-tab${on ? '.on' : ''}`, { role: 'tab', 'aria-selected': on ? 'true' : 'false', title: tabTip(t) },
         h('button.console-tab-label', { onclick: () => switchTab(t.id), ondblclick: () => renameTab(t) },
-          h('span.m', t.method), h('span.t', (t.name ? tabTitle(t) : tabTitle(t).replace(/^[A-Z]+\s/, '')) || '/')),
+          h('span.t', tabLabel(i))),
         h('button.console-tab-x', { title: tabs.tabs.length === 1 ? 'Clear this tab' : 'Close this tab', 'aria-label': 'Close tab',
           onclick: (e) => { e.stopPropagation(); closeTabById(t.id); } }, '×'));
     }),
@@ -329,9 +335,17 @@ function draw() {
     ...methods.map((m) => h('option', m)));
   methodSel.value = ui.method;
 
+  // The path box reads a whole request too: "post _snapshot/es_9/execute" typed or pasted
+  // here sets the method and keeps the path; a pasted Kibana-style request carries its body
+  // into the Query editor (core/console-paste.js). A text input drops the newlines of a
+  // paste, so the paste itself is read from the clipboard before the box gets it.
   const pathInput = h('input#c-path', { type: 'text', value: ui.path, list: 'ep-list', spellcheck: false,
-    placeholder: '/_cluster/health', style: { flex: '1', fontFamily: 'var(--mono)' },
-    oninput: (e) => { ui.path = e.target.value; syncTarget(); scheduleSave(); refreshTabTitle(); },
+    placeholder: '/_cluster/health', style: { flex: '1 1 240px', minWidth: '0', fontFamily: 'var(--mono)' },
+    onpaste: (e) => { if (recognise(pasted(e), { fromBody: false })) e.preventDefault(); },
+    oninput: (e) => {
+      ui.path = e.target.value;
+      if (!recognise(ui.path, { fromBody: false })) { syncTarget(); scheduleSave(); refreshTabTitle(); }
+    },
     onkeydown: (e) => { if (e.key === 'Enter') run(); } });
 
   // Grouped, so the list stays usable now that it covers ILM, watermarks and shards.
@@ -365,25 +379,36 @@ function draw() {
   const target = h('span.mono#c-target', { style: { fontSize: '12px', wordBreak: 'break-all' } }, targetUrl());
   const syncTarget = () => { target.textContent = targetUrl(); };
 
+  // ---- Saved queries and History open from here (owner's wording: "choose and run from here");
+  // neither has a card of its own on the page any more. The counts on the buttons are the
+  // panels' own figures (savedCount / historyCount), so the two can never disagree.
+  const panelBtn = (id, label, count, open, title) => h(`button.btn.sm#${id}`, { 'aria-haspopup': 'dialog', 'aria-expanded': 'false', title,
+    onclick: (e) => open(e.currentTarget) }, label, h('span.muted.c-count', { style: { marginLeft: '5px', fontSize: '11px' } }, String(count)));
+
   // ---- request line: target · method · path · run
   const requestBar = h('section.card',
     h('div.body', { style: { display: 'grid', gap: '8px', padding: '10px 14px' } },
       h('div', { style: { display: 'flex', gap: '8px', alignItems: 'baseline', flexWrap: 'wrap' } },
         h('b', { style: { fontSize: '12px' } }, c.name),
-        h('span.muted', { style: { fontSize: '12px' } }, ui.method),
+        h('span.muted#c-echo-method', { style: { fontSize: '12px' } }, ui.method),
         target,
         null),
-      h('div', { style: { display: 'flex', gap: '8px', alignItems: 'center' } },
+      h('div', { style: { display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap' } },
         methodSel, pathInput,
         h('button.btn.primary#c-run', { onclick: run, style: { minWidth: '96px' } }, 'Run ▸'),
-        snippetSel),
+        snippetSel,
+        panelBtn('c-saved-btn', 'Saved queries', savedCount(), openSavedPanel, 'Named queries kept on the server — open one, or run it from here'),
+        panelBtn('c-history-btn', 'History', historyCount(), openHistoryPanel, 'What this browser has sent to this cluster — load one, or run it again')),
       h('div', { style: { display: 'flex', gap: '12px', alignItems: 'center', fontSize: '11px', flexWrap: 'wrap' } },
         h('span.muted', { style: { marginLeft: 'auto' } }, 'Ctrl/⌘+Enter runs · Enter in the path runs'),
         writeToggle(draw))));
 
   // ---- Query | Results
+  // A whole request pasted here ("POST _x\n{…}", or a curl line) is split the same way: the
+  // method and path go up to the request line, the body stays here. A body alone is a body.
   const bodyArea = h('textarea#c-body', { spellcheck: false,
     style: { width: '100%', height: '100%', minHeight: '340px', fontFamily: 'var(--mono)', fontSize: '12px', resize: 'vertical', boxSizing: 'border-box' },
+    onpaste: (e) => { if (recognise(pasted(e), { fromBody: true })) e.preventDefault(); },
     oninput: (e) => { ui.body = e.target.value; scheduleSave(); },
     onkeydown: (e) => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); run(); } } }, ui.body);
 
@@ -396,7 +421,8 @@ function draw() {
         h('button.btn.sm.ghost', { onclick: () => saveFav(), title: 'Mark this request as a favourite in this browser\'s history' }, '★ Favourite'))),
     h('div.body', { style: { padding: '10px', flex: '1', display: 'flex' } }, bodyArea));
 
-  const results = h('div#c-response', { style: { minWidth: 0, display: 'flex' } }, responseCard());
+  // A column, so a flash() line sits above the results card rather than beside it.
+  const results = h('div#c-response', { style: { minWidth: 0, display: 'flex', flexDirection: 'column' } }, responseCard());
 
   // 35/65. A request body is usually a few lines and a response is usually hundreds, so
   // an even split gave half the window to whitespace and made the half that matters
@@ -412,10 +438,6 @@ function draw() {
              gap: '8px', alignItems: 'stretch' },
   }, query, split, results);
 
-  // ---- Saved queries, then History (full width)
-  const saved = h('div#c-saved', savedCard());
-  const hist = h('div#c-history', historyCard());
-
   if (ui.full) {
     // Everything else is hidden rather than scrolled past: a full-screen response that
     // still has the request bar above it is not full screen, it is a taller column.
@@ -424,7 +446,37 @@ function draw() {
     }, responseCard()));
     return;
   }
-  mount(host, dl, h('div', { style: { display: 'grid', gap: '14px' } }, h('div', { style: { display: 'grid', gap: '6px' } }, tabStrip(), requestBar), columns, saved, hist));
+  mount(host, dl, h('div', { style: { display: 'grid', gap: '14px' } }, h('div', { style: { display: 'grid', gap: '6px' } }, tabStrip(), requestBar), columns));
+}
+
+/* ------------------------- a request pasted or typed whole ------------------------- */
+
+/** The plain text of a paste event, or '' when the browser gives none. */
+function pasted(e) {
+  const cd = e.clipboardData || window.clipboardData;
+  try { return cd ? String(cd.getData('text/plain') || cd.getData('text') || '') : ''; } catch (_) { return ''; }
+}
+
+/**
+ * Recognise `text` as a request and apply it in place — the method select, the path box,
+ * the body editor, the echo line and the tab's tooltip are updated where they stand, so
+ * the box being typed in is never rebuilt under the cursor. True when something was applied.
+ * From the path box, a single line leaves the body as it is; from the body editor the body
+ * becomes whatever followed the request line (nothing, when nothing did).
+ */
+function recognise(text, { fromBody }) {
+  const r = parseRequestText(text);
+  if (!r) return false;
+  ui.method = r.method; ui.path = r.path;
+  if (r.body || fromBody) ui.body = r.body;
+  const sel = $('#c-method'); if (sel) sel.value = ui.method;
+  const path = $('#c-path'); if (path) { path.value = ui.path; try { path.setSelectionRange(ui.path.length, ui.path.length); } catch (_) { /* not focused */ } }
+  const body = $('#c-body'); if (body && (r.body || fromBody)) body.value = ui.body;
+  const echo = $('#c-echo-method'); if (echo) echo.textContent = ui.method;
+  const target = $('#c-target'); if (target) target.textContent = ui.path;
+  refreshTabTitle(); scheduleSave();
+  flash(recognisedLabel(r), { kind: 'ok', ms: 4000 });
+  return true;
 }
 
 /**
@@ -457,9 +509,18 @@ function format() {
   catch (e) { flash(`Not valid JSON: ${e.message}`); }
 }
 
-function flash(msg) {
+/**
+ * A line above the results. A warning stays until the next response replaces it; a brief
+ * notice (`ms`) — "Recognised POST …" — takes itself away, and a repeat replaces the one
+ * showing rather than stacking under it.
+ */
+function flash(msg, { kind = 'warn', ms = 0 } = {}) {
   const el = $('#c-response');
-  if (el) el.prepend(h('div.banner.warn', h('div', msg)));
+  if (!el) return;
+  el.querySelectorAll('.banner.c-flash').forEach((b) => b.remove());
+  const b = h(`div.banner.c-flash.${kind}`, { role: 'status' }, h('div', msg));
+  el.prepend(b);
+  if (ms) setTimeout(() => b.remove(), ms);
 }
 
 async function run() {
@@ -726,7 +787,29 @@ function responseCard() {
 // shared ones. A tab remembers which saved query it came from, so Save updates it.
 const savedUi = { text: '', mine: false };
 
-function drawSaved() { const el = $('#c-saved'); if (el) mount(el, savedCard()); }
+/* --------------------------- the two panels, one pattern --------------------------- */
+//
+// Saved queries and History each open from a button on the request line (ui/menu.js popover:
+// Escape, the ×, a click outside, or choosing a request closes them). Each panel is a toolbar
+// and a list; typing in the toolbar remounts the list alone, so the box being typed in stays
+// the same element. `pops` holds the open one's context, so a change made elsewhere (a run
+// landing in the history, a query saved) redraws the list in place.
+const pops = { saved: null, history: null };
+
+function panelOpen(which) { return !!pops[which]; }
+/** Redraw the open panel's list (if open) and the count on its button. */
+function refreshPanel(which, listId, listNode, count) {
+  const el = $(`#${listId}`); if (el && panelOpen(which)) mount(el, listNode());
+  const btn = $(which === 'saved' ? '#c-saved-btn .c-count' : '#c-history-btn .c-count'); if (btn) btn.textContent = String(count());
+}
+function openPanel(which, trigger, build, opts) {
+  const ctx = popover(trigger, build, { ...opts, cls: 'console-pop', onClose: () => { pops[which] = null; } });
+  pops[which] = ctx;   // null when the same button closed it
+}
+
+const savedCount = () => savedQueries().length;
+function drawSaved() { refreshPanel('saved', 'c-saved-list', () => savedTable(savedList()), savedCount); }
+function savedList() { return filterQueries(savedUi.mine ? savedQueries().filter(ownQuery) : savedQueries(), savedUi.text); }
 
 async function askSave() {
   const t = activeTab(tabs);
@@ -758,10 +841,29 @@ async function doSave(ctx, id) {
 }
 
 function openSaved(q) {
+  closePopover();
   // In a tab of its own, so it never overwrites what is being typed; the active tab when all ten are open.
   if (!newTabQuiet({ method: q.method, path: q.path, body: q.body })) { ui.method = q.method; ui.path = q.path; ui.body = q.body || ''; ui.res = null; }
   tabs = updateTab(tabs, tabs.active, { name: q.name, savedId: q.id }); scheduleSave(); draw();
   window.scrollTo({ top: 0 });
+}
+
+/** Open, then send — a write still asks first (run() → confirmWrite), like every other Run. */
+async function runSaved(q) { openSaved(q); await run(); }
+
+function openSavedPanel(trigger) {
+  openPanel('saved', trigger, () => {
+    const all = savedQueries();
+    const shared = all.filter((q) => q.shared).length;
+    return h('div', { style: { display: 'grid', gap: '8px' } },
+      h('div', { style: { display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap' } },
+        h('input#c-saved-filter', { type: 'search', placeholder: 'find by name, path, body or note…', value: savedUi.text, style: { minWidth: '200px', flex: '1' },
+          oninput: (e) => { savedUi.text = e.target.value; drawSaved(); } }),
+        h('label', { style: { fontSize: '12px', display: 'inline-flex', gap: '5px', alignItems: 'center' } },
+          h('input', { type: 'checkbox', checked: savedUi.mine, onchange: (e) => { savedUi.mine = e.target.checked; drawSaved(); } }), 'only mine'),
+        h('span.muted', { style: { fontSize: '11px', marginLeft: 'auto' } }, `${all.length} · ${shared} shared · kept on the server`)),
+      h('div#c-saved-list', savedTable(savedList())));
+  }, { title: 'Saved queries', sub: 'Open puts one in a tab of its own · Run sends it' });
 }
 
 async function removeSaved(q) {
@@ -777,20 +879,6 @@ async function toggleShare(q) {
   else toast((res && res.message) || 'Could not change it', 'err', 5000);
 }
 
-function savedCard() {
-  const all = savedQueries();
-  const list = filterQueries(savedUi.mine ? all.filter(ownQuery) : all, savedUi.text);
-  const shared = all.filter((q) => q.shared).length;
-  return card('Saved queries', `${all.length} · ${shared} shared · kept on the server`,
-    h('div', { style: { display: 'grid', gap: '8px' } },
-      h('div', { style: { display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap' } },
-        h('input#c-saved-filter', { type: 'search', placeholder: 'find by name, path, body or note…', value: savedUi.text, style: { minWidth: '260px', flex: '1' },
-          oninput: (e) => { savedUi.text = e.target.value; const el = $('#c-saved-list'); if (el) mount(el, savedTable(filterQueries(savedUi.mine ? savedQueries().filter(ownQuery) : savedQueries(), savedUi.text))); } }),
-        h('label', { style: { fontSize: '12px', display: 'inline-flex', gap: '5px', alignItems: 'center' } },
-          h('input', { type: 'checkbox', checked: savedUi.mine, onchange: (e) => { savedUi.mine = e.target.checked; drawSaved(); } }), 'only mine')),
-      h('div#c-saved-list', savedTable(list))));
-}
-
 function savedTable(list) {
   if (!list.length) return empty(savedQueries().length ? 'No saved query matches' : 'Nothing saved yet — write a query and press 💾 Save query.');
   return table(['Name', 'Request', 'Owner', '', ''], list.slice(0, 300).map((q) => h('tr',
@@ -799,12 +887,16 @@ function savedTable(list) {
     h('td', { style: { fontSize: '12px' } }, q.owner, q.shared ? h('span.pill.grey', { style: { marginLeft: '6px' } }, 'shared') : null),
     h('td.muted', { style: { fontSize: '11px', whiteSpace: 'nowrap' } }, ago(q.updated)),
     h('td', { style: { textAlign: 'right', whiteSpace: 'nowrap' } },
-      h('button.btn.sm.primary', { onclick: () => openSaved(q), title: 'Open in a tab of its own' }, 'Open'),
+      h('button.btn.sm', { onclick: () => openSaved(q), title: 'Open in a tab of its own' }, 'Open'),
+      h('button.btn.sm.primary', { style: { marginLeft: '4px' }, onclick: () => runSaved(q), title: 'Open in a tab of its own and send it' }, 'Run'),
       ownQuery(q) ? h('button.btn.sm', { style: { marginLeft: '4px' }, onclick: () => toggleShare(q) }, q.shared ? 'Make private' : 'Share') : null,
       ownQuery(q) ? h('button.btn.sm.ghost', { style: { marginLeft: '4px' }, title: 'Delete', onclick: () => removeSaved(q) }, '🗑') : null))), {});
 }
 
-function drawHistory() { const el = $('#c-history'); if (el) mount(el, historyCard()); }
+/* ---------------------------------- history ---------------------------------- */
+
+const historyCount = () => mineHistory().length;
+function drawHistory() { refreshPanel('history', 'c-history-list', historyTable, historyCount); }
 
 /**
  * The console is an evidence page (core/evidence.js): its history is this cluster's alone.
@@ -817,7 +909,42 @@ function mineHistory() {
   return history.filter((x) => (x.clusterId ? x.clusterId === c.id : x.cluster === c.name));
 }
 
-function historyCard() {
+/** Load a history row into the active tab; the panel closes, the request line has it. */
+function loadHistory(x) {
+  closePopover();
+  ui.method = x.method; ui.path = x.path; ui.body = x.body || ''; ui.res = null; scheduleSave(); draw(); window.scrollTo({ top: 0 });
+}
+
+function openHistoryPanel(trigger) {
+  openPanel('history', trigger, () => h('div#c-history', { style: { display: 'grid', gap: '8px' } },
+    h('div', { style: { display: 'flex', gap: '6px', alignItems: 'center', flexWrap: 'wrap' } },
+      h('input#c-histfilter', { type: 'search', placeholder: 'filter by path, method or body…', value: ui.filter, style: { flex: '1', minWidth: '180px', maxWidth: '420px' },
+        oninput: (e) => { ui.filter = e.target.value; drawHistory(); } }),
+      favToggle(),
+      h('span', { style: { marginLeft: 'auto', display: 'inline-flex', gap: '6px' } },
+        h('button.btn.sm', { onclick: () => download('rest-history.json', JSON.stringify(mineHistory(), null, 2), 'application/json') }, 'Export'),
+        h('button.btn.sm.danger', { onclick: async () => {
+          const own = mineHistory();
+          if (!(await confirmDialog('Clear the request history?',
+            'This cluster’s requests, except starred favourites, are removed from this machine. ' +
+            'Other clusters’ history and every cluster itself are untouched.', { yes: 'clear it', danger: true }))) return;
+          const gone = new Set(own.filter((x) => !x.fav).map((x) => x.id));
+          for (const id of gone) remember(() => idb.delQuery(id));
+          history = history.filter((x) => !gone.has(x.id)); drawHistory();
+        } }, 'Clear'))),
+    h('div#c-history-list', historyTable())),
+  { title: 'History', sub: 'this cluster, this browser · a row loads it · Run sends it again' });
+}
+
+/** The favourites filter: its own look follows ui.showFav, since the toolbar is not redrawn. */
+function favToggle() {
+  const paint = (b) => { b.style.color = ui.showFav ? 'var(--warning-ink)' : ''; b.style.borderColor = ui.showFav ? 'var(--warning-ink)' : ''; b.setAttribute('aria-pressed', ui.showFav ? 'true' : 'false'); };
+  const b = h('button.btn.sm#c-hist-fav', { onclick: (e) => { ui.showFav = !ui.showFav; paint(e.currentTarget); drawHistory(); } }, '★ favourites only');
+  paint(b);
+  return b;
+}
+
+function historyTable() {
   const own = mineHistory();
   let items = own;
   if (ui.showFav) items = items.filter((x) => x.fav);
@@ -825,7 +952,7 @@ function historyCard() {
     const t = ui.filter.toLowerCase();
     items = items.filter((x) => (x.path + ' ' + x.method + ' ' + (x.body || '')).toLowerCase().includes(t));
   }
-  const load = (x) => { ui.method = x.method; ui.path = x.path; ui.body = x.body || ''; ui.res = null; scheduleSave(); draw(); window.scrollTo({ top: 0 }); };
+  const load = loadHistory;
   const rows = items.slice(0, 300).map((x) => h('tr', {
     style: { cursor: 'pointer' },
     title: 'Load this request into the editor',
@@ -845,28 +972,14 @@ function historyCard() {
       h('button.btn.sm', { title: 'Load and run', onclick: async () => { load(x); await run(); } }, 'Run'),
       h('button.btn.sm.ghost', { title: 'Delete', onclick: async () => { remember(() => idb.delQuery(x.id)); history = history.filter((y) => y.id !== x.id); drawHistory(); } }, '×')))));
 
-  return card('History', `${own.length} saved · ${own.filter((x) => x.fav).length} favourites`,
-    h('div', { style: { display: 'grid', gap: '8px' } },
-      h('div', { style: { display: 'flex', gap: '6px', alignItems: 'center' } },
-        h('input#c-histfilter', { type: 'search', placeholder: 'filter by path, method or body…', value: ui.filter, style: { flex: '1', maxWidth: '420px' },
-          oninput: (e) => { ui.filter = e.target.value; drawHistory(); } }),
-        h('button.btn.sm', { onclick: () => { ui.showFav = !ui.showFav; drawHistory(); },
-          style: ui.showFav ? { color: 'var(--warning-ink)', borderColor: 'var(--warning-ink)' } : null }, '★ favourites only'),
-        h('span.muted', { style: { fontSize: '11px', marginLeft: 'auto' } }, 'click a row to load it into the query')),
-      rows.length
-        ? h('div', { style: { maxHeight: '40vh', overflow: 'auto' } },
-            h('table.tbl', h('thead', h('tr', h('th', ''), h('th', 'When'), h('th', 'Method'), h('th', 'Path'), h('th', 'Status'), h('th', 'Took'), h('th', ''))),
-              h('tbody', ...rows)))
-        : empty('No saved requests yet')),
-    [h('button.btn.sm', { onclick: () => download('rest-history.json', JSON.stringify(own, null, 2), 'application/json') }, 'Export'),
-     h('button.btn.sm.danger', { onclick: async () => {
-        if (!(await confirmDialog('Clear the request history?',
-          'This cluster\u2019s requests, except starred favourites, are removed from this machine. ' +
-          'Other clusters\u2019 history and every cluster itself are untouched.', { yes: 'clear it', danger: true }))) return;
-        const gone = new Set(own.filter((x) => !x.fav).map((x) => x.id));
-        for (const id of gone) remember(() => idb.delQuery(id));
-        history = history.filter((x) => !gone.has(x.id)); drawHistory();
-      } }, 'Clear')]);
+  // No Cluster column, by design: the console is an evidence page and its history is this
+  // cluster's alone (mineHistory), so naming the cluster on every row would say nothing.
+  return h('div', { style: { display: 'grid', gap: '6px' } },
+    h('div.muted', { style: { fontSize: '11px' } }, `${own.length} saved · ${own.filter((x) => x.fav).length} favourites${items.length !== own.length ? ` · ${items.length} shown` : ''}`),
+    rows.length
+      ? h('div.tbl-wrap', h('table.tbl', h('thead', h('tr', h('th', ''), h('th', 'When'), h('th', 'Method'), h('th', 'Path'), h('th', 'Status'), h('th', 'Took'), h('th', ''))),
+          h('tbody', ...rows)))
+      : empty(own.length ? 'No request matches' : 'No saved requests yet'));
 }
 
 function snapshotNotice(what) {
