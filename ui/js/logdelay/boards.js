@@ -30,7 +30,7 @@ import { card, keptCard, empty } from '../pages/common.js';
 import { sortTh, tableSort } from '../lib/table-sort.js';
 import { toast } from '../ui/menu.js';
 import { confirmDialog } from '../ui/modal.js';
-import { clusters } from '../core/state.js';
+import { state, clusters } from '../core/state.js';
 import { navigateTo } from '../core/intent.js';
 import { refreshReports } from '../core/reports.js';
 import { rememberLevels } from '../core/delay-levels.js';
@@ -56,8 +56,7 @@ const CLUSTER_PAGE = 30;
 const S = {
   period: 'last30',
   reportPeriod: 'shown',
-  clusterPick: 'all',
-  tz: null,              // the time-zone filter of the address (`?tz=`): an offset, 'none', or null
+  tz: null,             // the time-zone filter of the address (`?tz=`): an offset, 'none', or null
   clAll: false, clPage: 0,   // By cluster: every cluster (30 a page) instead of the 5 most delayed
   devFilter: '', devAll: false, devState: 'all', devZone: '', devTag: '',
   cdFilter: '', cdAll: false,
@@ -109,8 +108,12 @@ export function boardsLoading() {
 
 /* ------------------------------ what the page's tools row reads and sets ------------------------------ */
 
-export const boardsPick = () => S.clusterPick;
-export function boardsSetPick(id) { S.clusterPick = id || 'all'; S.devAll = false; }
+/**
+ * The cluster the app's chooser (the top bar's `#cluster-select`, state.selected) names; null for
+ * every cluster. The page has no cluster select of its own since 0.3.63: one choice for the whole
+ * app, and the Log Delay address follows it (pages/log-delay.js reconcile).
+ */
+export const pickId = () => (state.selected && state.selected !== 'all' && clusters().some((c) => c.id === state.selected) ? state.selected : null);
 export const boardsPeriod = () => S.period;
 export function boardsSetPeriod(v) { if (PERIODS.some(([id]) => id === v)) { S.period = v; S.range = null; } }
 
@@ -118,7 +121,7 @@ export function boardsSetPeriod(v) { if (PERIODS.some(([id]) => id === v)) { S.p
 export function boardsScopeId(r) {
   if (r && (r.view === 'cluster' || r.view === 'device') && r.clusterId) return r.clusterId;
   if (r && r.view === 'devices' && r.clusterId) return r.clusterId;
-  return S.clusterPick !== 'all' ? S.clusterPick : null;
+  return pickId();
 }
 
 /**
@@ -156,7 +159,7 @@ export function boardsZoneRows(r) {
     for (const [k, e] of S.cache) if (k.startsWith(`cl|${id}|`) && e.state === 'ok' && e.res) return e.res.devices || [];
     return [];
   }
-  const ids = r && r.view === 'devices' && r.clusterId ? [r.clusterId] : S.clusterPick === 'all' ? [] : [S.clusterPick];
+  const ids = r && r.view === 'devices' && r.clusterId ? [r.clusterId] : pickId() ? [pickId()] : [];
   const e = S.cache.get(`sum|${S.period}|${ids.join(',')}`);
   return e && e.state === 'ok' && e.res ? e.res.devices || [] : [];
 }
@@ -496,11 +499,11 @@ function stateBar(c, b) {
 const periodWords = (period, res) => `${period === 'today' ? 'by measurement window' : 'by day'} · ${(res && res.label) || (PERIODS.find((p) => p[0] === period) || ['', ''])[1].toLowerCase()}`;
 
 function fleetView() {
-  const ids = S.clusterPick === 'all' ? [] : [S.clusterPick];
+  const ids = pickId() ? [pickId()] : [];
   const q = periodQuery(S.period);
   const ent = need(`sum|${S.period}|${ids.join(',')}`, (signal) => ldSummary({ ...q, clusterIds: ids, maxDevices: 2000, signal }));
   const res = ent.state === 'ok' ? ent.res : null;
-  const head = B.get('fleet:head', `${S.period}|${S.clusterPick}|${entSig(ent)}`, () => {
+  const head = B.get('fleet:head', `${S.period}|${ids.join(',')}|${entSig(ent)}`, () => {
     const lv = res ? sharedLevels(res.byCluster) : null;
     const b = bands(lv);
     const every = res && finite(res.everyHours) ? res.everyHours : null;

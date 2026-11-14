@@ -12,8 +12,14 @@
  *
  * The title bar carries the tabs and, at the right end, Fetch now (logdelay/fetch-now.js): one
  * cluster at a time, its late devices by default, the whole cluster from its ▾ menu. Under it
- * one tools row: the cluster, the period (the boards) or the time range (Live Watch, Live logs),
- * and the cluster's log time zone as a chip. Every time on the page is in the server's zone.
+ * one tools row: the period (the boards) or the time range (Live Watch, Live logs), and the
+ * cluster's log time zone as a chip. Every time on the page is in the server's zone.
+ *
+ * The cluster is the app's one chooser, in the top bar (the owner, 2026-11-14: the page had a
+ * second one of its own, and two controls for one choice is one too many). `reconcile()` keeps
+ * the two in step: the chooser moves the address (All clusters → the fleet / every device, one
+ * cluster → that cluster's board / its devices), and an address that names a cluster — a link
+ * in the By cluster table, an alert, a bookmark — moves the chooser (the shell's 'select-cluster').
  *
  * The routes are core/logdelay-report.js (ldRoute, ldHash); #/logs, #/reports/log-delay/… and
  * #/log-delay/fixes still open here (reports/route.js movedPath; fixes went to Devices in 0.3.62).
@@ -30,13 +36,13 @@ import { isSnapshotMode } from '../core/snapshot.js';
 import { takeFocus } from '../core/focus.js';
 import { intent } from '../core/intent.js';
 import { serverZoneName } from '../core/es.js';
-import { clusters } from '../core/state.js';
+import { bus, clusters } from '../core/state.js';
 import { ldRoute, ldHash, ldTab, setDisplayZone, LD_PAGE, PERIODS, timeZoneChipText, devicesByZone, countText } from '../core/logdelay-report.js';
 import { RANGES, normaliseRange, browserZone, zonedInputValue, fromZonedInput, offsetText, zoneOffsetMinutes } from '../core/log-range.js';
 import { offsetLabel } from '../core/log-tz.js';
 import {
-  boardsNode, boardsReset, boardsLeave, boardsForget, boardsLoading, boardsScope, boardsScopeId,
-  boardsPick, boardsSetPick, boardsPeriod, boardsSetPeriod, boardsInfo, boardsZoneRows, boardsMajorityPercent,
+  boardsNode, boardsReset, boardsLeave, boardsForget, boardsLoading, boardsScope,
+  pickId, boardsPeriod, boardsSetPeriod, boardsInfo, boardsZoneRows, boardsMajorityPercent,
 } from '../logdelay/boards.js';
 import { watchNodes, watchEnter, watchLeave, watchBusy, watchStart } from '../logdelay/watch.js';
 import { liveNodes, liveEnter, liveLeave, liveBusy, liveRangeChanged } from '../logdelay/live-logs.js';
@@ -82,7 +88,8 @@ export function render(el) {
   host = el;
   el.classList.add('dense', 'rp-page', 'ld-page');
   if (isSnapshotMode()) { mount(host, snapshotNotice()); return; }
-  if (!visiting) { visiting = true; boardsReset(); P.clear(); }
+  const arriving = !visiting;
+  if (arriving) { visiting = true; boardsReset(); P.clear(); }
   setDisplayZone(zone());
   // From a "logs arriving late" alert or its playbook (core/focus.js): Live Watch, checking the
   // fleet. From a link that named a view (navigateTo('log-delay', {view, cluster, device})): that view.
@@ -95,9 +102,31 @@ export function render(el) {
   if (want && location.hash !== want) { try { history.replaceState(null, '', want); } catch (_) { location.hash = want; } }
   route = ldRoute(location.hash);
   canonical();
+  // Arriving, an address that names a cluster is the explicit choice; otherwise, and whenever
+  // the shell draws the page again because the chooser moved, the chooser is.
+  reconcile(arriving && route.clusterId ? 'address' : 'chooser');
   enter(route);
   if (f && f.view === 'delay') watchStart();
   draw();
+}
+
+/**
+ * One cluster choice (the top bar's chooser) and one address, kept in step. `lead` says which
+ * one just moved: 'address' (a link, a tab, Back, a bookmark) moves the chooser to the cluster
+ * it names, or to All clusters when it names none; 'chooser' moves the address to the same tab
+ * for the cluster chosen — the cluster board or its devices, the fleet or every device for All.
+ * Live Watch and Live logs read the chooser themselves (activeClusters), so they are left alone.
+ */
+function reconcile(lead) {
+  const tab = ldTab(route.view);
+  if (tab === 'watch' || tab === 'live') return;
+  const named = route.clusterId && clusters().some((c) => c.id === route.clusterId) ? route.clusterId : null;
+  const sel = pickId();
+  if (named === sel) return;
+  if (lead === 'address') { bus.emit('select-cluster', named || 'all'); return; }
+  const want = tab === 'devices' ? ldHash('devices', sel, null, route) : sel ? ldHash('cluster', sel, null, route) : ldHash('fleet', null, null, route);
+  if (location.hash !== want) { try { history.replaceState(null, '', want); } catch (_) { location.hash = want; } }
+  route = ldRoute(location.hash);
 }
 
 /**
@@ -115,6 +144,7 @@ function canonical() {
 export function onRoute() {
   route = ldRoute(location.hash);
   canonical();
+  reconcile('address');
   enter(route);
   draw();
 }
@@ -150,10 +180,13 @@ function busy() {
 
 /* ------------------------------------ the bar ------------------------------------ */
 
+/** The tabs, each for the cluster chosen: Dashboard is the cluster's board (the fleet for All), Devices its devices. */
 function tabs() {
   const cur = ldTab(route.view);
-  return P.get('tabs', `${cur}|${route.tz}`, () => h('nav.rp-nav.ld-tabs', { 'aria-label': 'Log Delay views' },
-    ...TABS.map(([id, label, title]) => h('a', { href: ldHash(id, null, null, route), title, dataset: { tab: id }, 'aria-current': cur === id ? 'page' : null }, label))));
+  const sel = pickId();
+  const hrefOf = (id) => (id === 'fleet' && sel ? ldHash('cluster', sel, null, route) : id === 'devices' ? ldHash('devices', sel, null, route) : ldHash(id, null, null, route));
+  return P.get('tabs', `${cur}|${route.tz}|${sel}`, () => h('nav.rp-nav.ld-tabs', { 'aria-label': 'Log Delay views' },
+    ...TABS.map(([id, label, title]) => h('a', { href: hrefOf(id), title, dataset: { tab: id }, 'aria-current': cur === id ? 'page' : null }, label))));
 }
 
 /** Fetch now, at the right end of the title bar: the cluster on screen, its late devices; ▾ for the whole cluster. */
@@ -177,24 +210,6 @@ function bar() {
 }
 
 /* ------------------------------------ the tools row ------------------------------------ */
-
-/** The cluster the boards show: all, or one; a cluster or device address names its own. */
-function clusterPick() {
-  const all = clusters();
-  const tab = ldTab(route.view);
-  const fixed = route.view === 'cluster' || route.view === 'device' ? route.clusterId : null;
-  const cur = fixed || boardsPick();
-  return P.get('pick', `${tab}|${cur}|${route.tz}|${all.map((c) => c.id).join(',')}`, () => {
-    const sel = h('select#ld-clusters', { 'aria-label': 'Cluster', onchange: (e) => {
-      const id = e.target.value;
-      boardsSetPick(id);
-      // The tab's own list for that cluster: the fleet or the cluster board, the devices of all or of one.
-      location.hash = tab === 'devices' ? ldHash('devices', id === 'all' ? null : id, null, route) : id === 'all' ? ldHash('fleet', null, null, route) : ldHash('cluster', id, null, route);
-    } }, h('option', { value: 'all' }, `All clusters (${all.length})`), ...all.map((c) => h('option', { value: c.id }, c.name)));
-    sel.value = all.some((c) => c.id === cur) ? cur : 'all';
-    return h('label.field.ld-tool', 'Cluster', sel);
-  });
-}
 
 /** The boards' period (the store's days; Today is its measurement windows). */
 function periodPick() {
@@ -307,12 +322,12 @@ function rangePick() {
   });
 }
 
-/** One tools row for every tab: the cluster and period above the boards, the range above Live Watch and Live logs. */
+/** One tools row for every tab: the period and time zone above the boards, the range above Live Watch and Live logs. The cluster is the top bar's chooser. */
 function tools() {
   const tab = ldTab(route.view);
   const row = P.get('tools', '', () => h('div.toolbar.ld-tools'));
   if (tab === 'watch' || tab === 'live') mount(row, rangePick());
-  else mount(row, clusterPick(), periodPick(), tzTools());
+  else mount(row, periodPick(), tzTools());
   return row;
 }
 

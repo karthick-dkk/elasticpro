@@ -6925,8 +6925,8 @@ await settleFor(300);
     ok(ldView() === 'fleet', 'log delay: the cluster i opened the cluster');
     doc.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })); await settleFor(80);
     ok(cPop.hidden, 'log delay: Escape did not close the cluster popover');
-    // The tools row: cluster, period, time zone chip (none for all clusters). The period asks again; Today draws the windows.
-    ok(g('ld-clusters') && g('ld-period'), 'log delay: the tools row is not cluster + period');
+    // The tools row: period and time zone chip; the cluster is the top bar's one chooser, never a second select on the page.
+    ok(!g('ld-clusters') && g('ld-period') && g('cluster-select'), 'log delay: the tools row is not period + time zone with the top bar as the one cluster chooser');
     // The time zone: the chip is the majority zone of the devices in view, no counts; Expand lists every zone with its devices.
     const tzChipText = () => (g('ld-tz-chip') ? g('ld-tz-chip').textContent.replace(/\s*▾\s*$/, '').trim() : '');
     // Only measured devices are in view (two of the fixture's clusters were never measured), so the majority is the IST cluster's.
@@ -7056,7 +7056,15 @@ await settleFor(300);
     ok([...doc.querySelectorAll('#ld-tz-panel .ld-tz-entry')].map((b) => b.textContent.trim()).join('|') === '+05:30 · 13 devices · majority|+08:00 · 1 device', `log delay: the cluster's zones read ${[...doc.querySelectorAll('#ld-tz-panel .ld-tz-entry')].map((b) => b.textContent.trim()).join(' | ')}`);
     press(doc.querySelector('h1')); await settleFor(120);
     ok(g('ld-tz-panel').hidden, 'log delay: a click outside did not close the time-zone panel');
-    ok(g('ld-clusters').value === c0, 'log delay: the cluster select does not show the cluster on screen');
+    // The top bar's chooser followed the link; and it is the control: All clusters → the fleet, a cluster → its board.
+    ok(g('cluster-select').value === c0, `log delay: the top-bar chooser does not show the cluster on screen (${g('cluster-select').value})`);
+    const pickTop = (v) => { const s = g('cluster-select'); s.value = v; s.dispatchEvent(new window.Event('change', { bubbles: true })); };
+    pickTop('all');
+    await waitFor(() => ldView() === 'fleet' && location.hash === '#/log-delay' && g('ld-by-cluster'), `log delay: All clusters in the top bar did not open the fleet (${location.hash})`);
+    ok(doc.querySelector('.ld-tabs a[data-tab="devices"]').getAttribute('href') === '#/log-delay/devices', 'log delay: the Devices tab does not follow All clusters');
+    pickTop(c0);
+    await waitFor(() => ldView() === 'cluster' && location.hash === `#/log-delay/cluster/${encodeURIComponent(c0)}` && g('ld-cluster-devices'), `log delay: a cluster in the top bar did not open its board (${location.hash})`);
+    ok(doc.querySelector('.ld-tabs a[data-tab="devices"]').getAttribute('href') === `#/log-delay/devices/${encodeURIComponent(c0)}`, 'log delay: the Devices tab does not follow the cluster chosen');
     ok(view().querySelectorAll('.ld-kpi').length === 5 && !/median/i.test(view().textContent), 'log delay: the cluster board is not five count tiles without a median');
     /* ---- Fetch now on one cluster: the menu, its schedule note, Escape, Whole cluster → JOB_RUN devices: all ---- */
     ok(fetchWrap().dataset.phase === 'idle' && g('ld-fetch-menu').hidden, 'log delay: Fetch now on a cluster does not start idle with its menu hidden');
@@ -7123,7 +7131,9 @@ await settleFor(300);
     // The crumb goes back to Devices.
     press([...view().querySelectorAll('.ld-crumbs a')].find((a) => /Devices/.test(a.textContent)));
     await waitFor(() => ldView() === 'devices', 'log delay: the crumb did not go back to Devices');
-    // The worst-device link on the By cluster table.
+    // The worst-device link on the By cluster table (the fleet: All clusters in the top bar first — the Dashboard tab is the chosen cluster's board).
+    pickTop('all');
+    await waitFor(() => g('cluster-select').value === 'all', 'log delay: the top bar did not take All clusters');
     press(doc.querySelector('.ld-tabs a[data-tab="fleet"]'));
     await waitFor(() => ldView() === 'fleet' && g('ld-by-cluster'), 'log delay: the Dashboard tab did not draw the fleet again');
     const worst = g('ld-by-cluster') && g('ld-by-cluster').querySelector('td.mono a');

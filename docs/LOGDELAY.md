@@ -599,7 +599,13 @@ The old addresses open the matching view (`ui/js/reports/route.js` `movedPath`):
   the button ("3 of 8…" and a thin fill); what finished or was refused is a toast — nothing sits
   beside the button. With All clusters it asks to pick one (`fetchNowAllowed`). The device board's
   *Fetch this device* uses the same path (`fetchNowPress`).
-* **One tools row** under the bar: the cluster, the period (*Today* = the measurement windows,
+* **The cluster is the app's one chooser**, in the top bar (`#cluster-select`): the page has no
+  cluster select of its own (the owner, 2026-11-14: two controls for one choice). The chooser moves
+  the address — All clusters → the fleet / every device, one cluster → its board / its devices, on
+  the tab open — and an address that names a cluster (a By cluster link, an alert, a bookmark, Back)
+  moves the chooser (`pages/log-delay.js reconcile`, the shell's `select-cluster`). The tabs link
+  to the chosen cluster's views. Live Watch and Live logs read the chooser as they always did.
+* **One tools row** under the bar: the period (*Today* = the measurement windows,
   then Last 7 / 30 days, This / Last month) and the **time zone** — plain text, never a chooser
   (the owner's rule; Edit cluster › Log time zone stays an admin override in the config), and no
   counts in the chip: "Time zone +05:30" is the majority zone of the devices in view
