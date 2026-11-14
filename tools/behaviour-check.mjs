@@ -386,6 +386,77 @@ await go('shards');
     const clear = [...doc.querySelectorAll('button')].find((b) => b.textContent === 'Clear');
     if (clear) { clear.click(); await settleFor(200); }
   }
+
+  // The glance card is one band: the split as a small donut with its legend and six inline
+  // figures (caption, value, at most a short suffix; the rest in the tooltip) — not the stacked
+  // caption / big number / note that made the card 250 px tall.
+  {
+    const glance = [...doc.querySelectorAll('section.card')]
+      .find((sec) => (sec.querySelector('header h2') || {}).textContent === 'Cluster at a glance');
+    const figs = glance ? [...glance.querySelectorAll('.glance-band .fig-inline')] : [];
+    ok(figs.length === 6, `glance band: expected 6 inline figures, found ${figs.length}`);
+    const donut = glance && glance.querySelector('.glance-band .split-donut svg');
+    ok(!!donut, 'glance band: the shard split is not the small donut');
+    // One ring per non-zero part on top of the track: the fixture has 3 assigned and 1 unassigned, 0 moving.
+    ok(!!donut && donut.querySelectorAll('circle').length === 3 && [...donut.querySelectorAll('circle title')].map((t) => t.textContent).join('|') === 'assigned: 3|unassigned: 1',
+      `glance band: the donut's slices are ${donut ? [...donut.querySelectorAll('circle title')].map((t) => t.textContent).join('|') : 'absent'}`);
+    ok(figs.length > 0 && figs.every((f) => f.getAttribute('title')), 'glance band: a figure has no tooltip carrying what its sub-line said');
+  }
+  // Heap, RAM and CPU are bars with the number beside them; load is a bar over the node's cores
+  // where the count is known (node-1, node-2: 4) and the figures alone where it is not (node-3).
+  {
+    const pane = [...doc.querySelectorAll('section.card')]
+      .find((sec) => (sec.querySelector('header h2') || {}).textContent === 'Nodes & cluster load');
+    const rows = pane ? [...pane.querySelectorAll('table.tbl tbody tr')] : [];
+    const row = (name) => rows.find((tr) => tr.children[0].textContent.includes(name));
+    const n1 = row('node-1'), n3 = row('node-3');
+    ok(!!n1 && !!n3, `nodes: the fixture's node-1 and node-3 are not both in the table (${rows.length} rows)`);
+    if (n1 && n3) {
+      for (const [i, col] of [[3, 'Heap'], [4, 'RAM'], [5, 'CPU']]) {
+        ok(!!n1.children[i].querySelector('.use-bar .bar-mini > i') && /\d+%/.test(n1.children[i].textContent),
+          `nodes: the ${col} cell is not a bar with its number (${n1.children[i].textContent.trim()})`);
+      }
+      const load1 = n1.children[6];
+      const title1 = (load1.querySelector('.use-bar') || { getAttribute: () => '' }).getAttribute('title') || '';
+      ok(!!load1.querySelector('.bar-mini') && /3\.55 \/ 2\.10/.test(load1.textContent) && /load 1 m over 4 cores/.test(title1),
+        `nodes: node-1's load is not a bar over its 4 cores with the raw figures (${load1.textContent.trim()} · ${title1})`);
+      const load3 = n3.children[6];
+      ok(!load3.querySelector('.bar-mini') && /0\.30 \/ 0\.40/.test(load3.textContent),
+        `nodes: node-3 reports no processor count, so its load must be the figures alone (${load3.textContent.trim()})`);
+    }
+  }
+  // Hidden (".") indices are left out until asked for, the head says how many, a name filter
+  // that starts with "." is asking for them, and the choice is remembered per browser.
+  {
+    const HK = 'elasticpro.shards.showHidden';
+    const shardsSec = () => [...doc.querySelectorAll('section.card')].find((sec) => ((sec.querySelector('header h2') || {}).textContent || '').startsWith('Shards —'));
+    const rowsOf = () => [...shardsSec().querySelectorAll('table.tbl tbody tr')].map((tr) => (tr.children[1] || {}).textContent?.trim());
+    const subOf = () => shardsSec().querySelector('header .sub').textContent;
+    ok(!rowsOf().includes('.kibana_1'), 'shards: a hidden (.) index is listed by default');
+    ok(/3 of 3 shard\(s\) · 1 hidden/.test(subOf()), `shards: the head does not count the hidden shard (${subOf()})`);
+    const box = shardsSec().querySelector('label.field.check input[type=checkbox]');
+    ok(!!box && !box.checked, 'shards: no "Show hidden (.) indices" box, or it is on by default');
+    if (box) {
+      box.checked = true; box.dispatchEvent(new window.Event('change', { bubbles: true })); await settleFor(200);
+      ok(rowsOf().includes('.kibana_1'), 'shards: ticking the box did not list the hidden index');
+      ok(/4 of 4 shard\(s\)/.test(subOf()) && !/hidden/.test(subOf()), `shards: with hidden shown the head still says hidden (${subOf()})`);
+      ok(window.localStorage.getItem(HK) === '1', `shards: the choice was not remembered (${window.localStorage.getItem(HK)})`);
+      ok(shardsSec().querySelector('label.field.check input[type=checkbox]') === box, 'shards: ticking the box rebuilt it under the pointer');
+      ok([...doc.querySelectorAll('button')].filter((b) => b.textContent === 'Move…').length >= 3,
+        'shards: the hidden index’s started shard has no Move button once shown');
+      box.checked = false; box.dispatchEvent(new window.Event('change', { bubbles: true })); await settleFor(200);
+      ok(!rowsOf().includes('.kibana_1'), 'shards: unticking did not hide it again');
+    }
+    const f = [...doc.querySelectorAll('input[type=search]')].find((x) => x.placeholder === 'filter by name');
+    if (f) {
+      f.value = '.kib'; f.dispatchEvent(new window.Event('input', { bubbles: true })); await settleFor(200);
+      ok(rowsOf().length === 1 && rowsOf()[0] === '.kibana_1', `shards: a "." filter does not find the hidden index (${rowsOf().join(', ')})`);
+      f.value = ''; f.dispatchEvent(new window.Event('input', { bubbles: true })); await settleFor(200);
+    }
+    window.localStorage.removeItem(HK);
+    // Every column sorts, the unassigned reason too.
+    ok(!!doc.querySelector('th.sortable[data-sort="reason"]'), 'shards: the Unassigned reason column does not sort');
+  }
 }
 
 /* ------------------- the overview sorts by any column that means something ------------------- */

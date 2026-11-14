@@ -336,6 +336,12 @@ export class EsClient {
     return this.json('GET', `/_cat/nodes?format=json&bytes=b&h=${encodeURIComponent(h)}`);
   }
   /**
+   * Each node's processor count (`os.allocated_processors`, what Elasticsearch sizes its
+   * thread pools by): the scale a load average is read against. _cat/nodes has no such
+   * column, so it is one more call, made by the page that draws the load.
+   */
+  nodesOs() { return this.json('GET', '/_nodes/_all/os?filter_path=nodes.*.name,nodes.*.os.allocated_processors'); }
+  /**
    * The counters behind the Query pressure card (core/node-rates.js): searches and their time,
    * documents indexed and deleted, the search and write pools' rejections and queues, and the
    * breaker trips — per node, filtered to those fields so the answer does not grow with what
