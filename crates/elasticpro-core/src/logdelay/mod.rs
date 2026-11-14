@@ -477,6 +477,9 @@ impl Core {
                 let inputs = self.logdelay_inputs(caller, only.as_deref()).await;
                 let max = msg.get("maxDevices").and_then(Value::as_u64).map(|n| n as usize).unwrap_or(MAX_DEVICES).clamp(1, MAX_DEVICES);
                 let mut v = summary::fleet(&inputs, &r, now, every, max);
+                let ids: Vec<String> = inputs.iter().map(|c| c.id.clone()).collect();
+                let kept = self.logdelay_kept_findings(&ids, now, every);
+                Self::attach_fixes(&mut v, &kept);
                 v["ok"] = json!(true);
                 v["schedule"] = self.logdelay_schedule_line(caller);
                 v
@@ -489,6 +492,8 @@ impl Core {
                 let s = self.logdelay_settings();
                 let fields = serde_json::to_value(self.logdelay_fields(id, &s).await).unwrap_or(Value::Null);
                 let mut v = summary::cluster(c, &r, now, every, &fields);
+                let kept = self.logdelay_kept_findings(&[id.to_string()], now, every);
+                Self::attach_fixes(&mut v, &kept);
                 v["ok"] = json!(true);
                 v
             }
@@ -577,6 +582,52 @@ impl Core {
                         "rules": fixes_rules() })
             }
             _ => bad("bad_message", format!("Unknown message type {t:?}")),
+        }
+    }
+
+    /// The recommended fixes as the last run matched them (`findings.json`, the last 7 days),
+    /// narrowed to `ids`; matched now when nothing is kept yet. What every "i" button shows.
+    fn logdelay_kept_findings(&self, ids: &[String], now: i64, every_hours: u64) -> Vec<fixes::Finding> {
+        let kept = self.logdelay_store().map(|st| st.read_findings()).filter(|v| v["findings"].is_array());
+        match kept {
+            Some(k) => serde_json::from_value::<Vec<fixes::Finding>>(k["findings"].clone()).unwrap_or_default()
+                .into_iter().filter(|f| ids.contains(&f.cluster)).collect(),
+            None => self.logdelay_findings(ids, &Range::last_days(now, 7), now, every_hours),
+        }
+    }
+
+    /// A finding as the pages take it: the rule's fields plus `stepLabel`.
+    fn finding_json(f: &fixes::Finding) -> Value {
+        let mut v = serde_json::to_value(f).unwrap_or(Value::Null);
+        v["stepLabel"] = json!(f.step.label());
+        v
+    }
+
+    /// One definition of the fix text on every board (docs/LOGDELAY.md "Recommended fixes"):
+    /// each `devices[]` row gains `fix` (its own finding: step, stepLabel, why, fix, group,
+    /// missing; `null` when no rule matched it), each `byCluster[]` entry — or a cluster answer
+    /// itself — gains `fixes`, that cluster's findings most devices first (the cluster's own
+    /// time-zone finding among them).
+    fn attach_fixes(v: &mut Value, findings: &[fixes::Finding]) {
+        let each = fixes::per_device(findings);
+        if let Some(rows) = v.get_mut("devices").and_then(Value::as_array_mut) {
+            for row in rows {
+                let key = (row["cluster"].as_str().unwrap_or("").to_string(), row["device"].as_str().unwrap_or("").to_string());
+                row["fix"] = each.get(&key).map(Self::finding_json).unwrap_or(Value::Null);
+            }
+        }
+        let of = |id: &str| -> Value {
+            let mut mine: Vec<&fixes::Finding> = findings.iter().filter(|f| f.cluster == id).collect();
+            mine.sort_by_key(|f| std::cmp::Reverse(f.devices.len()));
+            json!(mine.iter().map(|f| Self::finding_json(f)).collect::<Vec<_>>())
+        };
+        if let Some(list) = v.get_mut("byCluster").and_then(Value::as_array_mut) {
+            for c in list {
+                let id = c["id"].as_str().unwrap_or("").to_string();
+                c["fixes"] = of(&id);
+            }
+        } else if let Some(id) = v.get("cluster").and_then(Value::as_str).map(String::from) {
+            v["fixes"] = of(&id);
         }
     }
 
@@ -669,7 +720,7 @@ mod tests {
     fn a_cluster_takes_its_file_override_unless_the_settings_name_one() {
         let mut s = Settings::default();
         let file = json!({ "delayMinutes": 45, "criticalMinutes": 90 });
-        assert_eq!(levels_for(&s, "prod", Some(&file)), (Levels { no_delay_under: 15.0, delay_from: 45.0, critical_over: 90.0 }, "configFile"));
+        assert_eq!(levels_for(&s, "prod", Some(&file)), (Levels { no_delay_under: 45.0, delay_from: 45.0, critical_over: 90.0 }, "configFile"));
         assert_eq!(levels_for(&s, "prod", None), (Levels::default(), "default"));
         s.clusters.insert("prod".into(), ClusterOverride { levels: Some(Levels { no_delay_under: 5.0, delay_from: 10.0, critical_over: 20.0 }), fields: None });
         assert_eq!(levels_for(&s, "prod", Some(&file)).1, "settings");

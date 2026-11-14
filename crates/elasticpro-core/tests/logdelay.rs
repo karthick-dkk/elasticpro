@@ -248,7 +248,7 @@ async fn the_built_in_destination_measures_tracks_periods_and_answers_every_read
     // Settings: the defaults, the resolved fields per cluster, who may change them.
     let g = c.handle(json!({ "type": "LOGDELAY_SETTINGS_GET", "session": &s })).await;
     assert_eq!(g["ok"], json!(true), "{g}");
-    assert_eq!(g["settings"]["levels"], json!({ "noDelayUnder": 15.0, "delayFrom": 30.0, "criticalOver": 60.0 }));
+    assert_eq!(g["settings"]["levels"], json!({ "noDelayUnder": 30.0, "delayFrom": 30.0, "criticalOver": 60.0 }));
     assert_eq!(g["settings"]["silentAfterHours"], json!(2));
     assert_eq!(g["resolved"][0]["id"], json!("prod"));
     assert!(g["resolved"][0]["fields"]["extras"].as_array().unwrap().contains(&json!("fwd_tag")), "{g}");

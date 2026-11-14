@@ -389,6 +389,8 @@ pub fn fleet(clusters: &[ClusterInput], r: &Range, now: i64, every_hours: u64, m
             "worst": worst.map(|w| json!({ "device": w.device, "minutes": w.now_minutes, "state": w.state })),
             "levels": c.levels, "lastRunAt": c.tracker.last_run_ms,
             "counts": device_counts(c, r, now), "lastRead": c.tracker.last_read,
+            // Today's windows per cluster: the Dashboard's cluster × time heat map for "Today".
+            "windows": windows(&[c.tracker.as_ref()], today, every_hours, now),
         }));
         rows.extend(crows);
     }
