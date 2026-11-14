@@ -20,11 +20,15 @@ test('routes: each view round-trips, names with slashes and spaces included', ()
   assert.deepEqual(R.ldRoute(R.ldHash('live', 'c1')), { view: 'live', clusterId: 'c1', device: null });
   assert.deepEqual(R.ldRoute(R.ldHash('cluster', 'client a/prod')), { view: 'cluster', clusterId: 'client a/prod', device: null });
   assert.deepEqual(R.ldRoute(R.ldHash('device', 'c1', 'fw/dc1 07')), { view: 'device', clusterId: 'c1', device: 'fw/dc1 07' });
-  assert.deepEqual(R.ldRoute(R.ldHash('fixes')), { view: 'fixes', clusterId: null, device: null });
-  assert.deepEqual(R.ldRoute(R.ldHash('fixes', 'c1')), { view: 'fixes', clusterId: 'c1', device: null });
+  assert.deepEqual(R.ldRoute(R.ldHash('devices')), { view: 'devices', clusterId: null, device: null });
+  assert.deepEqual(R.ldRoute(R.ldHash('devices', 'c1')), { view: 'devices', clusterId: 'c1', device: null });
+  assert.equal(R.ldHash('devices', 'c 1'), '#/log-delay/devices/c%201');
+  // The Recommended fixes tab went in 0.3.62: its address opens Devices (every row has its "i").
+  assert.deepEqual(R.ldRoute(R.ldHash('fixes', 'c1')), { view: 'devices', clusterId: 'c1', device: null });
+  assert.deepEqual(R.ldRoute('#/log-delay/fixes'), { view: 'devices', clusterId: null, device: null });
   assert.equal(R.ldRoute('#/reports/capacity').view, 'fleet', 'another page is not a log delay view');
   assert.equal(R.ldHash('fleet'), '#/log-delay');
-  assert.deepEqual(['fleet', 'cluster', 'device', 'fixes', 'watch', 'live'].map(R.ldTab), ['fleet', 'fleet', 'fleet', 'fixes', 'watch', 'live']);
+  assert.deepEqual(['fleet', 'cluster', 'devices', 'device', 'fixes', 'watch', 'live'].map(R.ldTab), ['fleet', 'fleet', 'devices', 'devices', 'devices', 'watch', 'live']);
 });
 
 test('the old addresses open the matching view of the Log Delay page', () => {
@@ -32,7 +36,7 @@ test('the old addresses open the matching view of the Log Delay page', () => {
   assert.deepEqual(R.ldRoute('#/reports/log-delay'), { view: 'fleet', clusterId: null, device: null });
   assert.deepEqual(R.ldRoute('#/reports/log-delay/cluster/c%201'), { view: 'cluster', clusterId: 'c 1', device: null });
   assert.deepEqual(R.ldRoute('#/reports/log-delay/device/c1/fw%2Fdc1'), { view: 'device', clusterId: 'c1', device: 'fw/dc1' });
-  assert.deepEqual(R.ldRoute('#/reports/log-delay/fixes/c1'), { view: 'fixes', clusterId: 'c1', device: null });
+  assert.deepEqual(R.ldRoute('#/reports/log-delay/fixes/c1'), { view: 'devices', clusterId: 'c1', device: null });
   // #/logs was the live tail.
   assert.deepEqual(R.ldRoute('#/logs'), { view: 'live', clusterId: null, device: null });
 });
@@ -119,42 +123,79 @@ test('started → solved: still late, solved, silent, never late', () => {
   assert.equal(R.startedSolvedText({ state: 'no_delay' }, now), 'never late in this period');
 });
 
-test('sparkline: a day without totals is a gap, not a drop to zero', () => {
-  const segs = R.sparkSegments([3, 4, null, 5, 6], 120, 24);
-  assert.equal(segs.length, 2, 'two runs of known values');
-  assert.equal(segs[0].split(' ').length, 2);
-  assert.equal(R.sparkSegments([null, null]).length, 0, 'nothing known draws nothing');
+test('devices behind: a day without totals is a gap, not zero; today is one series per window', () => {
+  const res = {
+    days: [{ day: '2026-11-01', devices: 10, delayed: 2, critical: 1, solved: 3, complete: true }, { day: '2026-11-02', devices: 0 }],
+    windows: [{ from: 0, to: 7200000, label: '00:00–02:00', stillLate: 4, solved: 1, complete: true }, { from: 7200000, to: 14400000, label: '02:00–04:00', stillLate: 2, solved: null, complete: false }],
+  };
+  const days = R.behindSeries(res, 'last7');
+  assert.equal(days.length, 2);
+  assert.deepEqual([days[0].delay, days[0].critical, days[0].behind, days[0].back, days[0].split], [2, 1, 3, 3, true]);
+  assert.equal(days[1].gap, true, 'no totals is a gap');
+  assert.equal(days[1].behind, null, 'a gap has no figure');
+  const win = R.behindSeries(res, 'today');
+  assert.deepEqual([win[0].label, win[0].behind, win[0].back, win[0].split], ['00:00', 4, 1, false]);
+  assert.equal(win[1].back, null, 'a window the core gave no solved count for is unknown');
+  assert.equal(win[1].complete, false);
+  assert.deepEqual(R.behindSeries(null, 'last7'), []);
+  assert.equal(R.niceStep(7), 2.5, 'about three steps: 1, 2, 2.5, 5 or 10 × a power of ten');
+  assert.equal(R.niceStep(100), 50);
+  assert.deepEqual([R.labelEvery(24), R.labelEvery(30), R.labelEvery(12), R.labelEvery(7)], [4, 5, 2, 1]);
 });
 
-test('day bars: no totals is a gap; on time, delayed, critical, silent stack', () => {
-  const bars = R.dayBars([
-    { day: '2026-11-01', devices: 10, onTimeAll: 6, delayed: 2, critical: 1, silent: 1, unmeasured: 0 },
-    { day: '2026-11-02', devices: 0 },
-  ], 100);
-  assert.equal(bars[1].gap, true);
-  assert.equal(bars[0].gap, false);
-  assert.equal(bars[0].ok + bars[0].del + bars[0].crit + bars[0].unk, 100);
-  const late = R.dayBars([{ day: 'x', devices: 10, onTimeAll: 9, delayed: 1, critical: 0 }], 50, { withOk: false });
-  assert.equal(late[0].ok, 0);
-  assert.equal(late[0].del, 50);
-  assert.match(R.dayTitle({ day: '2026-11-02', devices: 0 }), /no measurement/);
+test('heat map: a cell the core has no total for is unknown, never 0; a cluster never measured says so', () => {
+  const rows = R.heatRows([
+    { id: 'a', name: 'A', lastRunAt: 1, sparkline: [3, null, 0], windows: [{ stillLate: 2 }, { stillLate: null }] },
+    { id: 'b', name: 'B', lastRunAt: null, sparkline: [] },
+  ], 'last7');
+  assert.deepEqual(rows[0].cells, [3, null, 0]);
+  assert.equal(rows[1].never, true);
+  assert.deepEqual(R.heatRows([{ id: 'a', lastRunAt: 1, windows: [{ stillLate: 2 }, { stillLate: null }] }], 'today')[0].cells, [2, null]);
+  assert.deepEqual([R.heatStep(null), R.heatStep(0), R.heatStep(1), R.heatStep(3), R.heatStep(6), R.heatStep(40)], [-1, 0, 1, 2, 3, 4]);
+  assert.equal(R.HEAT_LEGEND.length, 5);
 });
 
-test('rings: a cluster with no devices has no share (—), a small share still shows', () => {
-  assert.deepEqual(R.ringDash(0, 0), { dash: '0 100', share: null });
-  assert.equal(R.ringDash(null, 10).share, null);
-  assert.equal(R.ringDash(0, 10).share, 0);
-  assert.equal(R.ringDash(1, 1000).dash.split(' ')[0], '2.00', 'a tiny share is drawn at 2 %');
-  const order = R.ringsOrder([{ id: 'a', latePct: 1 }, { id: 'b', latePct: null }, { id: 'c', latePct: 5 }]).map((c) => c.id);
-  assert.deepEqual(order, ['c', 'a', 'b'], 'worst first, never measured last');
+test('device filters: the three levels, late, another time zone, silent (can\'t measure too); counts per chip', () => {
+  const rows = ['no_delay', 'little', 'clock_ahead', 'delay', 'critical', 'other_tz', 'silent', 'unmeasured'].map((state) => ({ state }));
+  assert.deepEqual(R.filterCounts(rows), { all: 8, late: 2, critical: 1, delay: 1, ok: 3, tz: 1, silent: 2 });
+  assert.ok(R.matchesFilter({ state: 'little' }, 'ok'), 'an old little row is under the line');
+  assert.ok(!R.matchesFilter({ state: 'silent' }, 'late'), 'silent is not late: it has no figure');
+  assert.ok(R.matchesFilter({ state: 'silent' }, 'all'));
+  assert.deepEqual(R.DEVICE_FILTERS, ['all', 'late', 'critical', 'delay', 'ok', 'tz', 'silent']);
 });
 
-test('delay reduced: the five windows, an absent one unknown', () => {
-  const b = R.reducedBars([{ hours: 2, n: 4 }, { hours: 24, n: 23 }]);
-  assert.deepEqual(b.map((x) => x.hours), [2, 4, 6, 12, 24]);
-  assert.equal(b[1].n, null);
-  assert.equal(b[1].px, 0);
-  assert.equal(b[4].px, 44);
+test('time zones: devices by zone follow the rows; the line and the cell are plain text with the device counts', () => {
+  const rows = [
+    { state: 'no_delay', clusterTzOffset: 330, deviceTzOffset: 330 }, { state: 'delay', clusterTzOffset: 330, deviceTzOffset: 330 },
+    { state: 'other_tz', clusterTzOffset: 330, deviceTzOffset: 480 }, { state: 'no_delay', clusterTzOffset: 0, deviceTzOffset: 0 },
+    { state: 'silent', clusterTzOffset: null, deviceTzOffset: null },
+  ];
+  const z = R.devicesByZone(rows);
+  assert.deepEqual(z.map((x) => [x.key, x.devices]), [['330', 2], ['0', 1], ['480', 1], ['none', 1]], 'most devices first, not detected last');
+  const off = (m) => (m === 330 ? '+05:30' : m === 0 ? '+00:00' : `${m}`);
+  const by = [
+    { id: 'a', name: 'A', lastRunAt: 1, timeZone: { mode: 'detected', offset: '+05:30', offsetMinutes: 330, agree: 12, of: 13, pct: 92.3 } },
+    { id: 'b', name: 'B', lastRunAt: 1, timeZone: { mode: 'set', offset: '+00:00', offsetMinutes: 0, agree: 10, of: 13 } },
+    { id: 'c', name: 'C', lastRunAt: 1, timeZone: { mode: 'none', pct: 41.7 } },
+    { id: 'd', name: 'D', lastRunAt: null, timeZone: { mode: 'none' } },
+  ];
+  assert.equal(R.timeZoneLine(by, 'a', off), 'A +05:30 · 12 of 13 devices');
+  assert.equal(R.timeZoneLine(by, 'b', off), 'B +00:00 · set · 10 of 13 devices agree');
+  assert.equal(R.timeZoneLine(by, 'c', off), 'C not detected · 42 % agree');
+  assert.equal(R.timeZoneLine(by, null, off), 'by majority of devices · 2 of 3 clusters detected', 'a cluster never measured is not counted');
+  assert.equal(R.timeZoneLine([], null, off), null);
+  assert.equal(R.timeZoneCell(by[0].timeZone, off), '+05:30 · 12 of 13 devices');
+  assert.equal(R.timeZoneCell(by[2].timeZone, off), 'not detected · 42 % agree');
+  assert.equal(R.timeZoneCell(null, off), '—');
+});
+
+test('fix item: the core\'s finding as the popover takes it; no finding is null, never a guess', () => {
+  const it = R.fixItem({ step: 'forwarder', stepLabel: 'Forwarder', why: 'its forwarder holds logs', fix: 'check the queue', devices: ['a', 'b'], group: ['fwd_tag', 'syslog-1'], missing: [] });
+  assert.deepEqual(it, { title: 'Forwarder', cause: 'its forwarder holds logs', fix: 'check the queue', where: 'forwarder', count: 2, group: 'fwd_tag syslog-1', missing: [] });
+  assert.equal(R.fixItem({ step: 'unknown', why: 'late, no pattern', fix: '', devices: ['x'], missing: ['parser_tag'] }).title, 'Not enough evidence');
+  assert.equal(R.fixItem(null), null);
+  assert.equal(R.STATE_TONE.little, 'ld-ok', 'an old little row draws as under the line');
+  assert.deepEqual([R.STATE_TONE.delay, R.STATE_TONE.critical, R.STATE_TONE.other_tz, R.STATE_TONE.silent], ['ld-delay', 'ld-crit', 'ld-tz', 'grey']);
 });
 
 test('device graph: unknown points break the line; the scale holds the critical line', () => {
@@ -177,8 +218,10 @@ test('tables: filter by name, cluster or extra; order by time late with unknowns
   assert.deepEqual(R.byTimeLate(rows).map((r) => r.device), ['fw-3', 'fw-1', 'sw-2']);
 });
 
-test('periods: last N days, this month, last month', () => {
+test('periods: today, last N days, this month, last month', () => {
   const now = new Date(2026, 10, 7, 12).getTime();
+  assert.deepEqual(R.periodQuery('today', now), { days: 1 });
+  assert.equal(R.PERIODS[0][0], 'today');
   assert.deepEqual(R.periodQuery('last30', now), { days: 30 });
   assert.deepEqual(R.periodQuery('last7', now), { days: 7 });
   assert.deepEqual(R.periodQuery('thisMonth', now), { from: '2026-11-01', to: '2026-11-07' });
@@ -186,17 +229,19 @@ test('periods: last N days, this month, last month', () => {
   assert.equal(R.periodDays('2026-10-06', '2026-11-04'), 30);
 });
 
-test('chart colours: light green, blue, pink and orange only', () => {
+test('chart colours: the theme tokens for the three levels, another time zone and silent — never a hex of its own', () => {
   const fills = Object.entries(R.LD_COLOURS).filter(([k]) => k !== 'line').map(([, v]) => v);
-  assert.deepEqual(fills, ['#bfe6bf', '#a9c8f0', '#f2a7c3', '#f5b77a']);
+  assert.deepEqual(fills, ['var(--ld-ok)', 'var(--ld-delay)', 'var(--ld-crit)', 'var(--ld-tz)', 'var(--ld-silent)']);
+  assert.ok(fills.every((v) => !/#/.test(v)), 'a theme draws its own tones');
 });
 
-test('settings: levels must climb', () => {
-  assert.equal(ST.validLevels({ noDelayUnder: 15, delayFrom: 30, criticalOver: 60 }), '');
-  assert.match(ST.validLevels({ noDelayUnder: 15, delayFrom: 30, criticalOver: 20 }), /Critical/);
-  assert.match(ST.validLevels({ noDelayUnder: 40, delayFrom: 30, criticalOver: 60 }), /Little delay/);
-  assert.match(ST.validLevels({ noDelayUnder: NaN, delayFrom: 30, criticalOver: 60 }), /number/);
-  assert.deepEqual(ST.levelsDraft({ noDelayUnder: 15, delayFrom: 25, criticalOver: 90 }, 2), { levels: { noDelayUnder: 15, delayFrom: 25, criticalOver: 90 }, silentAfterHours: 2 });
+test('settings: the two lines must climb; noDelayUnder travels equal to delayFrom (no little band)', () => {
+  assert.equal(ST.validLevels({ delayFrom: 30, criticalOver: 60 }), '');
+  assert.match(ST.validLevels({ delayFrom: 30, criticalOver: 20 }), /Critical/);
+  assert.match(ST.validLevels({ delayFrom: 0, criticalOver: 60 }), /above 0/);
+  assert.match(ST.validLevels({ delayFrom: NaN, criticalOver: 60 }), /number/);
+  assert.deepEqual(ST.levelsDraft({ delayFrom: 25, criticalOver: 90 }, 2), { levels: { noDelayUnder: 25, delayFrom: 25, criticalOver: 90 }, silentAfterHours: 2 });
+  assert.deepEqual(ST.DEVICE_CHOICES.map(([v]) => v), ['delayed', 'all']);
   assert.equal(ST.levelsDraft({ noDelayUnder: 1, delayFrom: 2, criticalOver: 3 }, 500).silentAfterHours, undefined, 'out of 1–168 is left out');
 });
 

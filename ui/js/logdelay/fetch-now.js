@@ -167,7 +167,7 @@ function sync() {
     else if (run && Number.isFinite(run.done) && Number.isFinite(run.total) && run.total > 0) {
       text = `${run.done.toLocaleString()} of ${run.total.toLocaleString()}…`;
       pct = Math.min(100, Math.round((100 * run.done) / run.total));
-    } else text = 'Fetching…';
+    } else text = 'Loading…';   // the one word for a bare wait (tools/unit/wording.test.mjs)
   }
   if (label.textContent !== text) label.textContent = text;
   fill.style.width = `${pct}%`;

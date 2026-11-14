@@ -27,9 +27,9 @@ export const LD_PAGE = 'log-delay';
 export const LD_SECTION = 'log-delay';
 
 /**
- * Chart colours (owner's rule, 0.3.62): light green below the delay line, yellow for the delay
- * band, light orange above the critical line, lavender for another time zone, grey for silent —
- * never red with yellow. Theme tokens (ui/css/app.css), so the dark themes draw their own tones.
+ * Chart colours (owner's rule, 0.3.62, "cool blue"): green below the delay line, light blue for
+ * the delay band, blue above the critical line, violet for another time zone, grey for silent —
+ * never red with yellow. Theme tokens (ui/css/app.css), so each theme mixes its own inks.
  */
 export const LD_COLOURS = Object.freeze({ ok: 'var(--ld-ok)', delay: 'var(--ld-delay)', crit: 'var(--ld-crit)', tz: 'var(--ld-tz)', silent: 'var(--ld-silent)', line: 'var(--accent)' });
 
@@ -327,9 +327,9 @@ export const stateText = (s) => STATE_LABEL[s] || (s === 'unknown' ? 'levels unk
 
 /**
  * The pill tone per state (the three configured levels and the two states apart): green below
- * the delay line (clock ahead too: measured, under the line), yellow in the delay band, light
- * orange above the critical line, lavender for another time zone, grey for silent and can't
- * measure. `little` is what a core before 0.3.62 stored: below the line, so green.
+ * the delay line (clock ahead too: measured, under the line), light blue in the delay band, blue
+ * above the critical line, violet for another time zone, grey for silent and can't measure.
+ * `little` is what a core before 0.3.62 stored: below the line, so green.
  */
 export const STATE_TONE = Object.freeze({
   critical: 'ld-crit', delay: 'ld-delay', little: 'ld-ok', no_delay: 'ld-ok', clock_ahead: 'ld-ok', other_tz: 'ld-tz', silent: 'grey', unmeasured: 'grey',
@@ -441,6 +441,57 @@ export function heatRows(byCluster, period) {
     cells: period === 'today' ? (c.windows || []).map((w) => (finite(w.stillLate) ? w.stillLate : null)) : (c.sparkline || []).map((v) => (finite(v) ? v : null)),
   }));
 }
+/**
+ * Devices by time zone (the Dashboard's chips): a device's zone is its own offset when it sits in
+ * another zone (`deviceTzOffset` of an `other_tz` row), else its cluster's detected or set
+ * offset (`clusterTzOffset`); a device of a cluster without a majority is "not detected". One
+ * entry per zone, `{key, label, offsetMinutes|null, devices}`, most devices first, "not
+ * detected" last. The rows are the answer's `devices[]`, so the chips follow the filters.
+ */
+export function devicesByZone(rows) {
+  const by = new Map();
+  for (const r of rows || []) {
+    const own = r.state === 'other_tz' && finite(r.deviceTzOffset) ? r.deviceTzOffset : finite(r.clusterTzOffset) ? r.clusterTzOffset : null;
+    const key = own === null ? 'none' : String(own);
+    const e = by.get(key) || { key, offsetMinutes: own, devices: 0 };
+    e.devices += 1;
+    by.set(key, e);
+  }
+  return [...by.values()].sort((a, b) => (a.offsetMinutes === null) - (b.offsetMinutes === null) || b.devices - a.devices || a.offsetMinutes - b.offsetMinutes);
+}
+
+/**
+ * The time-zone line above a board, plain text (the owner's rule: no chooser on the page; the
+ * config's Edit cluster › Log time zone stays an admin override). One cluster: "<cluster> +05:30 ·
+ * 12 of 13 devices" (set: "… · set"), or "not detected · 41 % agree". Every cluster: "by majority
+ * of devices · 2 of 3 clusters detected".
+ */
+export function timeZoneLine(byCluster, clusterId, offsetText) {
+  const list = byCluster || [];
+  if (clusterId) {
+    const c = list.find((x) => x.id === clusterId);
+    const tz = c && c.timeZone;
+    if (!tz) return null;
+    const name = c.name || c.id;
+    if (tz.mode === 'set') return `${name} ${tz.offset || offsetText(tz.offsetMinutes)} · set${finite(tz.agree) && finite(tz.of) ? ` · ${countText(tz.agree)} of ${countText(tz.of)} devices agree` : ''}`;
+    if (tz.mode === 'detected') return `${name} ${tz.offset || offsetText(tz.offsetMinutes)}${finite(tz.agree) && finite(tz.of) ? ` · ${countText(tz.agree)} of ${countText(tz.of)} devices` : ''}`;
+    return `${name} not detected${finite(tz.pct) ? ` · ${Math.round(tz.pct)} % agree` : ''}`;
+  }
+  const measured = list.filter((c) => c.timeZone && c.lastRunAt !== null && c.lastRunAt !== undefined);
+  if (!measured.length) return null;
+  const known = measured.filter((c) => c.timeZone.mode === 'detected' || c.timeZone.mode === 'set').length;
+  return `by majority of devices · ${countText(known)} of ${countText(measured.length)} clusters detected`;
+}
+
+/** The By cluster column: "+05:30 · 12 of 13 devices", "+00:00 · set", or "not detected · 41 % agree". Unknown says so. */
+export function timeZoneCell(tz, offsetText) {
+  if (!tz || typeof tz !== 'object') return '—';
+  if (tz.mode === 'set') return `${tz.offset || offsetText(tz.offsetMinutes)} · set`;
+  if (tz.mode === 'detected') return `${tz.offset || offsetText(tz.offsetMinutes)}${finite(tz.agree) && finite(tz.of) ? ` · ${countText(tz.agree)} of ${countText(tz.of)} devices` : ''}`;
+  if (tz.mode === 'none') return `not detected${finite(tz.pct) ? ` · ${Math.round(tz.pct)} % agree` : ''}`;
+  return '—';
+}
+
 /** The heat ramp step of a count: 0 none, 1 one, 2 two–three, 3 four–six, 4 seven or more; −1 unknown. */
 export const HEAT_LEGEND = Object.freeze(['0', '1', '2–3', '4–6', '7+']);
 export const heatStep = (v) => (!finite(v) ? -1 : v === 0 ? 0 : v < 2 ? 1 : v < 4 ? 2 : v < 7 ? 3 : 4);
@@ -485,7 +536,7 @@ export function periodBand(p, lo, hi, now = Date.now()) {
 /** Is this row late now (for colouring)? */
 export const rowLate = (r) => !!r && isLate(r.state);
 
-/** The finding step's pill tone: a time-zone step lavender, a fix on the path yellow, unknown grey. */
+/** The finding step's pill tone: a time-zone step violet, a fix on the path the delay band's blue, unknown grey. */
 export const STEP_TONE = Object.freeze({ elasticsearch: 'ld-delay', forwarder: 'ld-delay', parser: 'ld-delay', device_clock: 'ld-delay', device_time_zone: 'ld-tz', device_link: 'ld-delay', cluster: 'ld-tz', unknown: 'grey' });
 export const STEP_LABEL = Object.freeze({ elasticsearch: 'Elasticsearch', forwarder: 'Forwarder', parser: 'Parser', device_clock: 'Device clock', device_time_zone: 'Device clock / parser', device_link: 'Device', cluster: 'Cluster', unknown: 'Not enough evidence' });
 export const stepLabel = (f) => (f && (f.stepLabel || STEP_LABEL[f.step])) || 'Not known yet';
@@ -504,8 +555,7 @@ export function fixItem(f) {
     missing: Array.isArray(f.missing) ? f.missing : [],
   };
 }
-/** What an "i" says when the core has no finding for the device. */
-export const NO_FIX_TEXT = 'No recommendation from the core: this device was not late in the stored delay periods of the last 7 days, or no rule matched yet.';
+/** What a cluster's "i" says when the core has no finding for it (a device's is fix-popover.js NO_FINDING). */
 export const NO_CLUSTER_FIX_TEXT = 'Nothing to fix: no finding for this cluster in the stored delay periods of the last 7 days.';
 
 /** A finding's evidence object in words ("devices 41 · windows 5 · forwarders 3"). Unknown values say so. */

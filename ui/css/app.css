@@ -2876,29 +2876,25 @@ tr.jb-focus td { background: var(--accent-soft); }
 .jc-mode { align-self: start; }
 
 /* ---------------- Log Delay redesign (0.3.62, lead): tokens, title bar, tiles, charts, heat map, chips, split ----------------
-   The owner's palette: light green below the delay line, yellow in the delay band, light orange above the
-   critical line, lavender for another time zone, grey for silent — never red with yellow. Light values on
-   :root; the dark themes re-declare them below so the in-app toggle and the OS setting both win. */
+   The owner's palette ("cool blue", prototype v17): green below the delay line, light blue for the delay band, blue
+   above the critical line, violet for another time zone, grey for silent — never red with yellow. The fills are the
+   same in every theme; each theme mixes its own pill fill (-bg: 28 % of the fill with the surface) and ink (-ink:
+   35 % of the fill with the text colour), so the pill text keeps AA on dark, dark-blue and warm too. The heat ramp
+   is one blue (--ld-hx) mixed with the surface at 7 / 24 / 45 / 70 / 100 %. */
 :root {
-  --ld-ok: #8fd19e; --ld-delay: #f5d76e; --ld-crit: #f2a65a; --ld-tz: #7f7fcf; --ld-silent: #9aa1ab;
-  --ld-ok-bg: #e3f2e7; --ld-delay-bg: #fdf6d8; --ld-crit-bg: #fdebd6; --ld-tz-bg: #ececf9; --ld-silent-bg: #eceef1;
-  --ld-ok-ink: #1f5e31; --ld-delay-ink: #6b5500; --ld-crit-ink: #7a4508; --ld-tz-ink: #45458f; --ld-silent-ink: #4c5360;
-  --ld-heat-0: #fbf5e3; --ld-heat-1: #f8e3a8; --ld-heat-2: #f5c879; --ld-heat-3: #ee9f4e; --ld-heat-4: #d9782f;
+  --ld-ok: #8fd19e; --ld-delay: #a9cbee; --ld-crit: #5b8fd1; --ld-tz: #a77fd6; --ld-silent: #9aa1ab; --ld-hx: #3f78c0;
+  --ld-ok-bg: color-mix(in srgb, var(--ld-ok) 28%, var(--surface-1)); --ld-delay-bg: color-mix(in srgb, var(--ld-delay) 28%, var(--surface-1));
+  --ld-crit-bg: color-mix(in srgb, var(--ld-crit) 28%, var(--surface-1)); --ld-tz-bg: color-mix(in srgb, var(--ld-tz) 28%, var(--surface-1));
+  --ld-silent-bg: color-mix(in srgb, var(--ld-silent) 28%, var(--surface-1));
+  --ld-ok-ink: color-mix(in srgb, var(--ld-ok) 35%, var(--text-primary)); --ld-delay-ink: color-mix(in srgb, var(--ld-delay) 35%, var(--text-primary));
+  --ld-crit-ink: color-mix(in srgb, var(--ld-crit) 35%, var(--text-primary)); --ld-tz-ink: color-mix(in srgb, var(--ld-tz) 35%, var(--text-primary));
+  --ld-silent-ink: color-mix(in srgb, var(--ld-silent) 35%, var(--text-primary));
+  --ld-heat-0: color-mix(in srgb, var(--ld-hx) 7%, var(--surface-1)); --ld-heat-1: color-mix(in srgb, var(--ld-hx) 24%, var(--surface-1));
+  --ld-heat-2: color-mix(in srgb, var(--ld-hx) 45%, var(--surface-1)); --ld-heat-3: color-mix(in srgb, var(--ld-hx) 70%, var(--surface-1)); --ld-heat-4: var(--ld-hx);
 }
-@media (prefers-color-scheme: dark) {
-  :root:not([data-theme="light"]) {
-    --ld-ok: #9fdcae; --ld-delay: #f2dc85; --ld-crit: #f2ad6e; --ld-tz: #8484ec; --ld-silent: #7a828d;
-    --ld-ok-bg: #1c3324; --ld-delay-bg: #3a3314; --ld-crit-bg: #3d2a15; --ld-tz-bg: #25254a; --ld-silent-bg: #2a2e34;
-    --ld-ok-ink: #9ee0b2; --ld-delay-ink: #f2df95; --ld-crit-ink: #f6c993; --ld-tz-ink: #c3c3f8; --ld-silent-ink: #c0c6ce;
-    --ld-heat-0: #24201a; --ld-heat-1: #4a3a1e; --ld-heat-2: #7a5620; --ld-heat-3: #b8742a; --ld-heat-4: #e9a45e;
-  }
-}
-:root[data-theme="dark"], :root[data-theme="dark-blue"], :root[data-theme="warm"] {
-  --ld-ok: #9fdcae; --ld-delay: #f2dc85; --ld-crit: #f2ad6e; --ld-tz: #8484ec; --ld-silent: #7a828d;
-  --ld-ok-bg: #1c3324; --ld-delay-bg: #3a3314; --ld-crit-bg: #3d2a15; --ld-tz-bg: #25254a; --ld-silent-bg: #2a2e34;
-  --ld-ok-ink: #9ee0b2; --ld-delay-ink: #f2df95; --ld-crit-ink: #f6c993; --ld-tz-ink: #c3c3f8; --ld-silent-ink: #c0c6ce;
-  --ld-heat-0: #24201a; --ld-heat-1: #4a3a1e; --ld-heat-2: #7a5620; --ld-heat-3: #b8742a; --ld-heat-4: #e9a45e;
-}
+/* Dark themes: the same fills (the violet a shade lighter so it stands off a dark surface); -bg and -ink follow from them. */
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --ld-tz: #b994ec; --ld-silent: #7a828d; } }
+:root[data-theme="dark"], :root[data-theme="dark-blue"], :root[data-theme="warm"] { --ld-tz: #b994ec; --ld-silent: #7a828d; }
 /* Pills and figures by level (core/logdelay-report.js STATE_TONE). */
 .ld .pill.ld-ok { color: var(--ld-ok-ink); background: var(--ld-ok-bg); }
 .ld .pill.ld-delay { color: var(--ld-delay-ink); background: var(--ld-delay-bg); }
@@ -2917,8 +2913,14 @@ tr.jb-focus td { background: var(--accent-soft); }
 .ld .ld-mark-open { color: var(--ld-crit-ink); }
 .ld table.tbl tr.ld-open td { background: color-mix(in srgb, var(--ld-crit) 14%, transparent); }
 .ld .ld-rec { border-color: color-mix(in srgb, var(--ld-delay) 60%, var(--border)); }
-.ld .ld-tz-chip[data-mode="none"] { color: var(--ld-crit-ink); }
-.ld .ld-tz-chip[data-mode="detected"], .ld .ld-tz-chip[data-mode="set"] { color: var(--ld-tz-ink); }
+.ld-page .ld-tz-chip { cursor: default; }
+.ld-page .ld-tz-chip[data-mode="none"] { color: var(--ld-silent-ink); }
+.ld-page .ld-tz-chip[data-mode="detected"], .ld-page .ld-tz-chip[data-mode="set"] { color: var(--ld-tz-ink); }
+.ld .ld-zones { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; }
+.ld .ld-zones-l { font-size: 12px; }
+.ld .ld-zone-chip { color: var(--ld-tz-ink); background: var(--ld-tz-bg); border-color: color-mix(in srgb, var(--ld-tz-ink) 40%, transparent); }
+.ld .ld-zone-chip[data-zone="none"] { color: var(--ld-silent-ink); background: var(--ld-silent-bg); }
+.ld .ld-zone-chip b { color: inherit; }
 /* The title bar: the name, the tabs beside it, Fetch now at the right end; one row that wraps. */
 .ld-page .rp-head.ld-bar { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-start; gap: 6px 14px; margin-bottom: 4px; }
 .ld-bar .ld-bar-tabs { flex: 1 1 auto; min-width: 0; }
@@ -2945,7 +2947,8 @@ tr.jb-focus td { background: var(--accent-soft); }
 .ld-chartbox .ld-axis { stroke: var(--border); stroke-width: 1; }
 .ld-chartbox g.ld-bar { transition: opacity .12s; cursor: default; }
 .ld-chartbox svg.ld-chart:hover g.ld-bar:not(:hover) { opacity: .55; }
-.ld-chartbox .ld-gap-fill { fill: url(#ld-hatch), var(--surface-2); opacity: .6; }
+.ld-chartbox .ld-gap-fill { fill: var(--surface-2); stroke: var(--border); stroke-dasharray: 2 2; opacity: .8; }
+.ld-tools-range { display: contents; }
 .ld-chartbox .ld-line-end { stroke: var(--surface-1); stroke-width: 2; }
 .ld-key i.ld-ln { width: 14px; height: 2px; border-radius: 1px; }
 .ld-key i.ld-dash { width: 14px; height: 0; background: none !important; border-top: 2px dashed; }

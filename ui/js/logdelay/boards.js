@@ -36,13 +36,14 @@ import { rememberLevels } from '../core/delay-levels.js';
 import { download, toCsv } from '../lib/fmt.js';
 import {
   LD_COLOURS as C, ldSummary, ldCluster, ldDevice, ldSearch, ldReportRun, ldHash,
-  PERIODS, periodQuery, periodDays, minutesText, durationText, whenText, docsText, pctText, countText,
+  PERIODS, periodQuery, minutesText, durationText, whenText, docsText, pctText, countText,
   stateText, byTimeLate, filterRows, deviceGraph, periodBand, STEP_TONE, stepLabel, evidenceText, extraOf, valuesText,
   DEVICE_FILTERS, matchesFilter, filterCounts, behindSeries, niceStep, labelEvery, heatRows, heatStep, HEAT_LEGEND,
-  fixItem, NO_FIX_TEXT, NO_CLUSTER_FIX_TEXT,
+  fixItem, NO_CLUSTER_FIX_TEXT, devicesByZone, timeZoneCell,
 } from '../core/logdelay-report.js';
 import { deviceTable, sortCols, extraCols, statePill, stateRank } from './rows.js';
-import { fixButton } from './fix-popover.js';
+import { fixButton, fixesFor, NO_FINDING } from './fix-popover.js';
+import { fetchNowPress } from './fetch-now.js';
 import { timeZoneText, timeZoneShort, offsetLabel } from '../core/log-tz.js';
 
 const PAGE_ROWS = 50;
@@ -139,14 +140,20 @@ export function boardsInfo() {
   };
 }
 
-/** A cluster's log time zone as the core last said it (its board, or the summary's By cluster), or null. */
-export function boardsTimeZone(id) {
+/**
+ * Every cluster the boards have read, with its time zone (`byCluster` of the last summary, a
+ * cluster's own answer over it): what the tools row's time-zone line is written from.
+ */
+export function boardsByCluster() {
+  let list = [];
+  for (const [k, e] of S.cache) if (k.startsWith('sum|') && e.state === 'ok' && e.res) list = (e.res.byCluster || []).slice();
   for (const [k, e] of S.cache) {
-    if (e.state !== 'ok' || !e.res) continue;
-    if (k.startsWith('cl|') && e.res.cluster === id && e.res.timeZone) return e.res.timeZone;
-    if (k.startsWith('sum|')) { const c = (e.res.byCluster || []).find((x) => x.id === id); if (c && c.timeZone) return c.timeZone; }
+    if (!k.startsWith('cl|') || e.state !== 'ok' || !e.res || !e.res.timeZone) continue;
+    const own = { id: e.res.cluster, name: e.res.name, timeZone: e.res.timeZone, lastRunAt: e.res.lastRunAt };
+    const i = list.findIndex((c) => c.id === own.id);
+    if (i >= 0) list[i] = { ...list[i], ...own }; else list.push(own);
   }
-  return null;
+  return list;
 }
 
 /* ------------------------------ the tables' column sort ------------------------------ */
@@ -321,19 +328,30 @@ function tzSinceNote(items) {
 
 /* ------------------------------------ the fixes ("i") ------------------------------------ */
 
-/** A device row's "i": its own finding from the core, or that there is none. */
-export function deviceFixItems(row) {
-  const f = row && fixItem(row.fix);
-  return f ? [f] : [{ title: 'No recommendation', cause: NO_FIX_TEXT, fix: '', where: 'unknown' }];
-}
-
-/** A cluster's "i": its findings grouped by cause with counts (the cluster's time-zone finding among them). */
-export function clusterFixItems(c) {
-  const items = (c && Array.isArray(c.fixes) ? c.fixes : []).map(fixItem).filter(Boolean);
-  return items.length ? items : [{ title: 'Nothing to fix', cause: NO_CLUSTER_FIX_TEXT, fix: '', where: 'cluster' }];
+/**
+ * A cluster's "i": its findings grouped by cause with counts (fix-popover.js fixesFor; the
+ * cluster's time-zone finding among them), or that there is nothing to fix.
+ */
+function clusterFixItems(c) {
+  const items = fixesFor(c, 'cluster');
+  return items.length ? items : [{ title: 'Nothing to fix', cause: NO_CLUSTER_FIX_TEXT, fix: '', where: '', count: null }];
 }
 
 /* ------------------------------------ the tiles ------------------------------------ */
+
+/**
+ * Devices by time zone, under the tiles: one chip per zone with its device count (a device's own
+ * offset when it sits in another zone, else its cluster's; "not detected" for a cluster without
+ * a majority). From the answer's rows, so it follows the cluster picked; a cut list says so.
+ */
+function zoneChips(res) {
+  const zones = devicesByZone(res.devices);
+  if (!zones.length) return null;
+  return h('div.ld-zones#ld-zones', h('span.muted.ld-zones-l', 'Devices by time zone'),
+    ...zones.map((z) => h('span.ld-chip.ld-zone-chip', { dataset: { zone: z.key }, title: z.offsetMinutes === null ? 'devices of a cluster whose zone is not detected: nothing is corrected' : `devices whose logs are stamped at ${offsetLabel(z.offsetMinutes)}` },
+      z.offsetMinutes === null ? 'not detected' : offsetLabel(z.offsetMinutes), ' ', h('b', countText(z.devices)))),
+    res.devicesTruncated ? h('span.muted.ld-tiny', `the first ${countText((res.devices || []).length)} of ${countText(res.devicesTotal)} devices`) : null);
+}
 
 /**
  * The five count tiles: the three configured levels, another time zone, silent. Each opens the
@@ -356,8 +374,8 @@ function tiles(t, b, scopeId, keyPrefix) {
 /* ------------------------------------ charts ------------------------------------ */
 
 /**
- * "Devices behind" over the period: slim stacked bars (the delay band, then above the critical
- * line) with a thin green line for the delays solved — back below the line — in each bucket.
+ * "Devices behind" over the period: slim stacked bars (the delay band in light blue, then above
+ * the critical line in blue) with a thin green line for the delays solved — back below the line.
  * Today's buckets are the measurement windows, which the core counts as one "still late" figure,
  * so Today draws one series and the legend says so. A day without totals is a hatched gap. Each
  * bucket carries its words as a title; the chart has no number of its own.
@@ -509,6 +527,7 @@ function fleetView() {
       : null));
   const readNote = B.get('fleet:readnote', rid, () => readNotes((res.byCluster || []).map((c) => ({ name: c.name || nameOf(c.id), lastRead: c.lastRead }))));
   const tileRow = B.get('fleet:tiles', `${rid}|${scopeId}`, () => tiles(t, b, scopeId, 'ld-fleet'));
+  const zones = B.get('fleet:zones', rid, () => zoneChips(res));
   const totalsLine = B.get('fleet:counts', rid, () => h('div.muted.ld-note#ld-fleet-counts', { title: COUNT_HINT },
     h('b', countText(res.devicesInLastRun)), ' devices in the last run · ', h('b', countText(res.devicesTotal)), ' now · ',
     h('b', countText(res.devicesInRange)), ` in the period shown — ${COUNT_HINT}`));
@@ -542,7 +561,7 @@ function fleetView() {
       return h('tr', { dataset: { cluster: c.id } },
         h('td', link(clusterHref(c.id), c.name || nameOf(c.id), { title: `${c.name} · log delay details` })),
         h('td.ld-tz-cell', { title: c.timeZone ? timeZoneText(c.timeZone) : 'not measured' }, neverRun ? h('span.muted', '—')
-          : c.timeZone && c.timeZone.mode === 'none' ? h('span.muted', timeZoneShort(c.timeZone)) : timeZoneShort(c.timeZone)),
+          : c.timeZone && c.timeZone.mode === 'none' ? h('span.muted', timeZoneCell(c.timeZone, offsetLabel)) : timeZoneCell(c.timeZone, offsetLabel)),
         h('td', { title: 'zones of the devices listed on Devices' }, valuesText(devs, 'zone')),
         h('td', { title: 'tag1 of the devices listed on Devices' }, valuesText(devs, 'tag1')),
         neverRun ? h('td', { colspan: 9 }, h('span.muted', 'never measured: not in the scheduled measurement yet'))
@@ -577,7 +596,7 @@ function fleetView() {
   const never = (res.byCluster || []).filter((c) => c.lastRunAt === null || c.lastRunAt === undefined);
   const neverNote = B.get('fleet:never', rid, () => (never.length && never.length < (res.byCluster || []).length
     ? h('div.muted.ld-note', `${never.length} cluster${never.length === 1 ? ' is' : 's are'} not measured yet: ${never.map((c) => c.name).join(', ')}.`) : null));
-  return [head, notice, readNote, tileRow, totalsLine, behind, heat, clusterCard, tzNote, readCard, neverNote];
+  return [head, notice, readNote, tileRow, zones, totalsLine, behind, heat, clusterCard, tzNote, readCard, neverNote];
 }
 
 /* ------------------------------------ one cluster ------------------------------------ */
@@ -606,6 +625,7 @@ function clusterView(id) {
   const rid = objId(res);
   const t = res.totals || {};
   const tileRow = B.get('cl:tiles', rid, () => tiles(t, b, id, 'ld-cl'));
+  const zones = B.get('cl:zones', rid, () => zoneChips(res));
   const never = res.lastRunAt === null || res.lastRunAt === undefined;
   const lr = res.lastRead || (res.counts && res.counts.lastRead);
   const readNote = B.get('cl:readnote', rid, () => readNotes([{ name, lastRead: lr }]));
@@ -635,7 +655,7 @@ function clusterView(id) {
     `${countText((res.devices || []).length)} · ${sorts.clusterDevices.sort ? 'sorted by the marked column' : 'sorted by time spent late'} · a device name opens its details`,
     body, [filterBox('ld-cd-filter', () => S.cdFilter, (v) => { S.cdFilter = v; S.cdAll = false; })]);
   const tzNote = B.get('cl:tznote', rid, () => tzSinceNote([{ name, tz: res.timeZone }]));
-  return [head, neverNote, readNote, tileRow, countsNote, behind, devCard, tzNote];
+  return [head, neverNote, readNote, tileRow, zones, countsNote, behind, devCard, tzNote];
 }
 
 /* ------------------------------------ the devices ------------------------------------ */
@@ -689,22 +709,32 @@ function devicesView(clusterId, narrow = false) {
   const counts = filterCounts(filterRows(rows, S.devFilter));
   const chipLabel = { all: 'All', late: b.lateShort, critical: b.high, delay: b.mid, ok: b.below, tz: 'Other time zone', silent: 'Silent' };
   const zones = valuesOf(rows, 'zone'); const tags = valuesOf(rows, 'tag1');
-  const bar = B.get('dev:bar', `${rid}|${S.devState}|${S.devZone}|${S.devTag}|${S.devFilter}|${narrow}`, () => {
-    const sel = (id, label, cur, vals, set) => {
+  // The bar is one element for the visit (its counts, the pressed chip and the selects change in
+  // place): the search box inside it is never moved, so typing never loses the focus or the caret.
+  const bar = B.get('dev:bar', `${rid}|${narrow}|${b.mid}|${zones.join(',')}|${tags.join(',')}`, () => {
+    const sel = (id, label, vals, set) => {
       const s = h(`select#${id}`, { 'aria-label': label, onchange: (e) => { set(e.target.value); S.devAll = false; repaint(); } },
         h('option', { value: '' }, `All ${label.toLowerCase()}s`), ...vals.map((v) => h('option', { value: v }, v)));
-      s.value = vals.includes(cur) ? cur : '';
       return h('label.field.ld-tool', label, s);
     };
     return h('div.toolbar.ld-dev-bar',
       filterBox('ld-dev-filter', () => S.devFilter, (v) => { S.devFilter = v; S.devAll = false; }, 'Search device, cluster, zone or tag1'),
       h('div.ld-chips#ld-dev-chips', ...DEVICE_FILTERS.map((f) => h('button.ld-chip.ld-chip-btn', {
-        type: 'button', dataset: { filter: f }, 'aria-pressed': String(S.devState === f),
+        type: 'button', dataset: { filter: f }, 'aria-pressed': 'false',
         onclick: () => { S.devState = f; S.devAll = false; repaint(); },
-      }, chipLabel[f], ' ', h('b', countText(counts[f]))))),
-      narrow ? null : sel('ld-dev-zone', 'Zone', S.devZone, zones, (v) => { S.devZone = v; }),
-      narrow ? null : sel('ld-dev-tag', 'tag1', S.devTag, tags, (v) => { S.devTag = v; }));
+      }, chipLabel[f], ' ', h('b')))),
+      narrow ? null : sel('ld-dev-zone', 'Zone', zones, (v) => { S.devZone = v; }),
+      narrow ? null : sel('ld-dev-tag', 'tag1', tags, (v) => { S.devTag = v; }));
   });
+  for (const btn of bar.querySelectorAll('.ld-chip-btn')) {
+    const f = btn.dataset.filter; const n = btn.querySelector('b'); const txt = countText(counts[f]); const on = String(S.devState === f);
+    if (n.textContent !== txt) n.textContent = txt;
+    if (btn.getAttribute('aria-pressed') !== on) btn.setAttribute('aria-pressed', on);
+  }
+  for (const [id, cur, vals] of [['#ld-dev-zone', S.devZone, zones], ['#ld-dev-tag', S.devTag, tags]]) {
+    const el = bar.querySelector(id); const want = vals.includes(cur) ? cur : '';
+    if (el && el.value !== want) el.value = want;
+  }
   const ordered = sorts.devices.apply(byTimeLate(devicesFiltered(rows)), sortCols(FLEET_COLS));
   const shown = S.devAll ? ordered : ordered.slice(0, PAGE_ROWS);
   const keys = narrow ? ['device', 'zone', 'tag1', 'state', 'now'] : FLEET_COLS;
@@ -746,7 +776,7 @@ function deviceView(clusterId, device) {
       h('h2.ld-dev-h', h('span.mono', device),
         res ? statePill(res.state, late && finite(res.lateSince) ? `${stateText(res.state)} · late since ${whenText(res.lateSince, res.now).replace(/^today /, '')}`
           : res.state === 'silent' && finite(res.silentSince) ? `silent · no logs since ${whenText(res.silentSince, res.now)}` : stateText(res.state)) : null,
-        res ? fixButton({ kind: 'device', id: device, items: () => deviceFixItems({ fix: res.finding }) }) : null),
+        res ? fixButton({ kind: 'device', id: device, items: () => fixesFor(res, 'device') }) : null),
       h('p.sub', [`Device field ${devField}`, `arrival ${f.arrival || '@timestamp'}`,
         `event time ${Array.isArray(f.eventTime) && f.eventTime.length ? f.eventTime.join(' / ') : 'not known'}`,
         res && extraOf(res, 'zone') !== null ? `zone ${extraOf(res, 'zone')}` : 'zone not known',
@@ -756,6 +786,9 @@ function deviceView(clusterId, device) {
         res && finite(res.rawGapMinutes) && finite(res.tzOffsetMinutes) ? `raw gap ${minutesText(res.rawGapMinutes)} − ${offsetLabel(res.tzOffsetMinutes)}` : null,
         every ? `measured every ${every} hour${every === 1 ? '' : 's'}` : null].filter(Boolean).join(' · '))),
     h('div.ld-actions', S.range ? h('span.muted.ld-range', `${S.range.from} → ${S.range.to}`) : null,
+      // The same run as Fetch now, narrowed to this device (docs/LOGDELAY.md "Fetch now" `device`).
+      h('button.btn#ld-fetch-device', { type: 'button', title: `Re-measure ${device} now, by the scheduled measurement's own query`,
+        onclick: () => fetchNowPress({ clusterIds: [clusterId], device, label: device }) }, 'Fetch this device'),
       h('a.btn#ld-open-logs', { href: ldHash('live', clusterId, device), title: `${device}: its logs over the page's time range` }, 'Open in logs ›'))));
 
   const bar = searchBar(clusterId, device, devField, f.extras || [], res);
@@ -782,7 +815,7 @@ function deviceView(clusterId, device) {
           it.group ? h('div.muted', `Group: ${it.group}`) : null,
           evidenceText(fnd.evidence) ? h('div.muted', `Evidence: ${evidenceText(fnd.evidence)}`) : null,
           it.missing.length ? h('div.muted', `Would decide it: ${it.missing.join(', ')}`) : null]
-        : h('div.muted', NO_FIX_TEXT)));
+        : h('div.muted', NO_FINDING)));
   });
 
   return [head, bar, tiles5, rec, B.get('dev1:graph', rid, () => graphCard(res, lv, every)), periodsCard(res, every)];

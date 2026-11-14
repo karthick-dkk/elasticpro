@@ -81,11 +81,11 @@ const REPORT_SECTIONS = ['overview', 'daily', 'hosts', 'capacity', 'measure', 'p
 // store does not hold (a fresh data directory has none, which must say so rather than draw blank),
 // Live Watch and Live logs (one device too).
 const LD_FIRST = configured ? ((await load('core/state.js')).clusters()[0] || null) : null;
-const LD_VIEWS = ['log-delay', 'log-delay/fixes', 'log-delay/watch', 'log-delay/live',
+const LD_VIEWS = ['log-delay', 'log-delay/devices', 'log-delay/fixes', 'log-delay/watch', 'log-delay/live',
   ...(LD_FIRST ? [`log-delay/cluster/${encodeURIComponent(LD_FIRST.id)}`, `log-delay/device/${encodeURIComponent(LD_FIRST.id)}/no-such-device`,
     `log-delay/live/${encodeURIComponent(LD_FIRST.id)}/fw-core-02`] : [])];
 // The old addresses still open the Log Delay page, on the matching view: `#/<old>` → the view it names.
-const LD_MOVED = [['reports/log-delay', 'fleet'], ['reports/log-delay/fixes', 'fixes'], ['logs', 'live'],
+const LD_MOVED = [['reports/log-delay', 'fleet'], ['reports/log-delay/fixes', 'devices'], ['logs', 'live'],
   ...(LD_FIRST ? [[`reports/log-delay/cluster/${encodeURIComponent(LD_FIRST.id)}`, 'cluster']] : [])];
 // Config-Management (pages/settings.js): every tab it draws itself, each from its own route; and
 // the three app pages it hosts as tabs (Automation, Request Centre, Accounts), drawn inside its frame

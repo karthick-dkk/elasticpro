@@ -31,12 +31,12 @@ import { takeFocus } from '../core/focus.js';
 import { intent } from '../core/intent.js';
 import { serverZoneName } from '../core/es.js';
 import { clusters } from '../core/state.js';
-import { ldRoute, ldHash, ldTab, setDisplayZone, LD_PAGE, PERIODS } from '../core/logdelay-report.js';
+import { ldRoute, ldHash, ldTab, setDisplayZone, LD_PAGE, PERIODS, timeZoneLine } from '../core/logdelay-report.js';
 import { RANGES, normaliseRange, browserZone, zonedInputValue, fromZonedInput, offsetText, zoneOffsetMinutes } from '../core/log-range.js';
-import { timeZoneText } from '../core/log-tz.js';
+import { offsetLabel } from '../core/log-tz.js';
 import {
   boardsNode, boardsReset, boardsLeave, boardsForget, boardsLoading, boardsScope, boardsScopeId,
-  boardsPick, boardsSetPick, boardsPeriod, boardsSetPeriod, boardsInfo, boardsTimeZone,
+  boardsPick, boardsSetPick, boardsPeriod, boardsSetPeriod, boardsInfo, boardsByCluster,
 } from '../logdelay/boards.js';
 import { watchNodes, watchEnter, watchLeave, watchBusy, watchStart } from '../logdelay/watch.js';
 import { liveNodes, liveEnter, liveLeave, liveBusy, liveRangeChanged } from '../logdelay/live-logs.js';
@@ -206,16 +206,23 @@ function periodPick() {
   });
 }
 
-/** The cluster's log time zone (docs/LOGDELAY.md "Time zones"), when one cluster is on screen. */
+/**
+ * The log time zone, as plain text (docs/LOGDELAY.md "Time zones"; the owner's rule: no chooser
+ * here): one cluster's offset with how many of its devices agree, or how many clusters have one.
+ */
 function tzChip() {
   const id = boardsScopeId(route);
-  const tz = id ? boardsTimeZone(id) : null;
-  return P.get('tz', `${id}|${tz ? `${tz.mode}|${tz.offset}|${tz.pct}` : '-'}`, () => {
-    if (!tz) return null;
-    const title = tz.mode === 'set' ? `Set in the cluster's config (Edit cluster › Log time zone: ${tz.setting}). Delays are shown after this offset is taken out.`
-      : tz.mode === 'detected' ? `Detected: the offset most measured devices fall in, at least ${tz.majorityPercent} % agreeing and steady over ${tz.runsNeeded} runs. Delays are shown after it is taken out. Confirm it in Edit cluster › Log time zone.`
-        : `No zone set, and fewer than ${tz.majorityPercent ?? 60} % of the devices agree on one offset (steady over ${tz.runsNeeded ?? 3} runs): nothing is corrected, delays are as measured. Set it in Edit cluster › Log time zone.`;
-    return h('span.ld-chip.ld-tz-chip#ld-tz-chip', { title, dataset: { mode: tz.mode } }, h('b', 'Time zone'), ' ', timeZoneText(tz));
+  const list = boardsByCluster();
+  const text = timeZoneLine(list, id, offsetLabel);
+  const c = id ? list.find((x) => x.id === id) : null;
+  const mode = c && c.timeZone ? c.timeZone.mode : 'fleet';
+  return P.get('tz', `${id}|${text}|${mode}`, () => {
+    if (!text) return null;
+    const title = mode === 'set' ? 'Set in the cluster’s config; delays are shown after this offset is taken out.'
+      : mode === 'detected' ? 'The offset most measured devices fall in, steady over the last runs; delays are shown after it is taken out.'
+        : mode === 'none' ? 'Fewer than the needed share of devices agree on one offset: nothing is corrected, delays are as measured.'
+          : 'Each cluster’s zone is the offset the majority of its devices fall in.';
+    return h('span.ld-chip.ld-tz-chip#ld-tz-chip', { title, dataset: { mode } }, h('b', 'Time zone'), ' · ', text);
   });
 }
 
@@ -241,14 +248,14 @@ function rangePick() {
       if (a > b) { to.setCustomValidity('To must be after From'); to.reportValidity && to.reportValidity(); to.setCustomValidity(''); return; }
       setRange({ id: 'custom', from: a, to: b });
     } }, 'Apply') : null;
-    return [
+    // One element (display: contents), so the cache keeps one node per draw.
+    return h('div.ld-tools-range',
       h('label.field.ld-tool', 'Time range', sel),
       custom ? h('label.field.ld-tool', 'From', from) : null,
       custom ? h('label.field.ld-tool', 'To', to) : null,
       apply,
       h('span.muted.ld-zone', { title: serverZoneName() ? 'The server’s time zone' : 'The server has not said its time zone: this browser’s is used' },
-        `Times in ${tz} (${off})`),
-    ];
+        `Times in ${tz} (${off})`));
   });
 }
 
@@ -256,7 +263,7 @@ function rangePick() {
 function tools() {
   const tab = ldTab(route.view);
   const row = P.get('tools', '', () => h('div.toolbar.ld-tools'));
-  if (tab === 'watch' || tab === 'live') mount(row, ...rangePick());
+  if (tab === 'watch' || tab === 'live') mount(row, rangePick());
   else mount(row, clusterPick(), periodPick(), tzChip());
   return row;
 }
