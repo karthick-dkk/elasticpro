@@ -4781,6 +4781,14 @@ impl Core {
         *self.req_cfg.write() = cfg;
     }
 
+    /// Where the self monitor and the governor read this process's CPU and memory. Tests only:
+    /// the real place is the cgroup, and a test that is not about the machine's load points it
+    /// at an empty directory, so a busy test runner cannot make the governor read "not calm".
+    #[doc(hidden)]
+    pub fn set_sampler_for_tests(&self, sampler: crate::health::Sampler) {
+        self.health.monitor.lock().sampler = sampler;
+    }
+
     /// The configuration in force.
     pub fn request_config(&self) -> crate::gate::RequestConfig {
         self.req_cfg.read().clone()
