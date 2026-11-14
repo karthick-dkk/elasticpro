@@ -95,7 +95,9 @@ const PAGES = [
   { id: 'log-delay/watch', search: null, setup: async (F) => { await F.evaluate(() => document.querySelector('#delay-fetch')?.click()); await sleep(4000); },
     hover: ['#ld-watch-devices tbody tr', '#view .ld-tabs a', '#view .btn'] },
   { id: 'log-delay/live', search: '#ld-live-value', hover: ['#ld-live-logs tbody tr', '#view .ld-tabs a', '#view .btn'] },
-  { id: 'console', search: '#c-histfilter, #c-saved-filter', hover: ['#view .btn', '#view .tab'] },
+  // The history is a panel behind the History button; its filter is the search box typed into.
+  { id: 'console', search: '#c-histfilter', setup: async (F) => { await F.evaluate(() => document.querySelector('#c-history-btn')?.click()); await sleep(300); },
+    hover: ['#view .btn', '#view .tab'] },
   { id: 'snapshots', search: '#view input[aria-label="Search snapshots"]',
     setup: async (F) => { await F.evaluate(() => [...document.querySelectorAll('#view [title^="Open "]')][0]?.click()); }, hover: ['#view tbody tr', '#view .pill', '#view .btn'] },
   { id: 'reports/overview', search: null, hover: ['#view tbody tr', '#view .btn', '#view .pill'] },
