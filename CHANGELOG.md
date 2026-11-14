@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.61
+
+(write this release's entry before tagging)
+
 ## 0.3.60
 
 - **Log Delay page shows what the core now counts:** per cluster, devices in the last run, now and in range (with a one-line hint what each means), how the last run read it (pages, complete, stopped at the device cap with the setting named, documents with no device name), Fetch Now progress as clusters done of total and devices read so far, *Hourly* in the log delay schedule pickers, and *Last hour* for Build report and Send now. Live Watch is labelled as the live check with its 500-device limit.
