@@ -6923,8 +6923,8 @@ await settleFor(300);
     // The tools row: cluster, period, time zone chip (none for all clusters). The period asks again; Today draws the windows.
     ok(g('ld-clusters') && g('ld-period'), 'log delay: the tools row is not cluster + period');
     // The time zone: the chip is the majority zone of the devices in view, no counts; Expand lists every zone with its devices.
-    const chipText = () => (g('ld-tz-chip') ? g('ld-tz-chip').textContent.replace(/\s*▾\s*$/, '').trim() : '');
-    ok(g('ld-tz-chip') && chipText() === 'Time zone +00:00' && g('ld-tz-chip').tagName === 'BUTTON' && g('ld-tz-chip').getAttribute('aria-expanded') === 'false', `log delay: the fleet's time-zone chip reads "${chipText()}" (${g('ld-tz-chip') && g('ld-tz-chip').tagName})`);
+    const tzChipText = () => (g('ld-tz-chip') ? g('ld-tz-chip').textContent.replace(/\s*▾\s*$/, '').trim() : '');
+    ok(g('ld-tz-chip') && tzChipText() === 'Time zone +00:00' && g('ld-tz-chip').tagName === 'BUTTON' && g('ld-tz-chip').getAttribute('aria-expanded') === 'false', `log delay: the fleet's time-zone chip reads "${tzChipText()}" (${g('ld-tz-chip') && g('ld-tz-chip').tagName})`);
     ok(!g('ld-zones') && !g('ld-tz-expand'), 'log delay: a Devices by time zone panel or a separate Expand button is drawn (the chip itself opens the counts)');
     ok(g('ld-tz-panel') && g('ld-tz-panel').hidden, 'log delay: the time-zone panel does not start hidden');
     // The owner's order: tiles, the state bar, By cluster, then the charts; the heat map is Hourly Delay Status.
@@ -6944,7 +6944,7 @@ await settleFor(300);
     g('ld-tz-chip').click(); await settleFor(120);
     press(doc.querySelector('#ld-tz-panel .ld-tz-entry[data-zone="480"]'));
     await waitFor(() => location.hash === '#/log-delay?tz=480' && g('ld-tz-filter-note'), `log delay: picking a zone did not filter the address (${location.hash})`);
-    ok(chipText() === 'Time zone +08:00 · only these devices', `log delay: the filtered chip reads "${chipText()}"`);
+    ok(tzChipText() === 'Time zone +08:00 · only these devices', `log delay: the filtered chip reads "${tzChipText()}"`);
     ok(view().querySelector('[data-kpi="tz"] b').textContent === '1' && view().querySelector('[data-kpi="critical"] b').textContent === '0', 'log delay: the tiles do not count the devices in the zone');
     ok(g('ld-by-cluster') && [...g('ld-by-cluster').querySelectorAll('tbody tr')].filter((tr) => tr.cells.length > 9 && tr.cells[9].textContent.trim() === '1').length >= 1, 'log delay: By cluster does not count the devices in the zone');
     ok(doc.querySelector('.ld-tabs a[data-tab="devices"]').getAttribute('href') === '#/log-delay/devices?tz=480', 'log delay: the tabs drop the time-zone filter');
