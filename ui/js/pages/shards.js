@@ -22,16 +22,26 @@ import { modal, field, select, val, confirmDialog } from '../ui/modal.js';
 import { toast } from '../ui/menu.js';
 import { trackTask, shardMovePoll, allocationPoll } from '../ui/tasks.js';
 import { ensureWrites, writeToggle, writesAllowed } from '../core/writes.js';
-import { splitGauge, STATUS } from '../lib/charts.js';
+import { splitBar, STATUS } from '../lib/charts.js';
 import { parseRetention } from '../core/volume.js';
 import { takeFocus, revealFocus } from '../core/focus.js';
+import { shardSplit, visibleShards, usageLevel, loadPercent, coresByNode } from '../core/nodes-shards.js';
 
 let host = null;
-const ui = { index: '', node: 'all', state: 'all', limit: 300 };
+/**
+ * Whether shards of hidden indices (names starting with ".") are listed. Off until asked:
+ * `.kibana`, `.security` and the like are system furniture, and a table opened to find a
+ * log index should not begin with them. Remembered per browser; every access is in
+ * try/catch, so a blocked storage just means the default.
+ */
+const HIDDEN_KEY = 'elasticpro.shards.showHidden';
+const readShowHidden = () => { try { return window.localStorage.getItem(HIDDEN_KEY) === '1'; } catch (_) { return false; } };
+const writeShowHidden = (v) => { try { window.localStorage.setItem(HIDDEN_KEY, v ? '1' : '0'); } catch (_) { /* not kept; still applied for now */ } };
+const ui = { index: '', node: 'all', state: 'all', limit: 300, showHidden: readShowHidden() };
 /**
  * The shard table's column sort (lib/table-sort.js): by index until a header says otherwise,
  * remembered per browser. A link to one node's shards asks for the largest first. Applied
- * after the filters and before "Show more".
+ * after the filters and before "Show more". Every column sorts, the unassigned reason too.
  */
 const SHARD_SORT = tableSort('shards', { initial: { key: 'index', dir: 1 }, onChange: () => draw() });
 const SHARD_COLS = {
@@ -42,6 +52,7 @@ const SHARD_COLS = {
   node: { type: 'text', value: (x) => x.node || null },
   store: { type: 'bytes', value: (x) => x.store },
   docs: { type: 'number', value: (x) => x.docs },
+  reason: { type: 'text', value: (x) => x.reason || null },
 };
 /** Shards ticked for a bulk move, keyed `index/shard/p|r`. */
 const picked = new Map();
@@ -116,10 +127,32 @@ function refresh() {
     // The index list is what the disk accounting is compared against; only the Indices
     // page fetches it otherwise.
     if (!state.indices.get(c.id)) fetchIndices(c.id, '*').catch(() => {});
+    if (isReachable(c.id)) loadCores(c);
   }
 }
 
 const isReachable = (id) => !!(state.data.get(id) || {}).reachable;
+
+/**
+ * Each node's processor count, per cluster — the scale the Load column's bar is drawn on
+ * (core/nodes-shards.js loadPercent). Read once per cluster per visit and kept for ten
+ * minutes: it changes only when a node is resized. Not read in the fleet view, where a call
+ * per cluster is the queue of requests refreshMany exists to avoid — the load shows as text
+ * there. `byName` null means not known: no bar, the text alone (unknown is not zero).
+ */
+const CORES_MAX_AGE_MS = 10 * 60 * 1000;
+const cores = new Map();      // cluster id → { byName: Map|null, at, inflight }
+const coresFor = (id) => { const e = cores.get(id); return e && e.byName ? e.byName : null; };
+async function loadCores(c) {
+  const cl = client(c.id);
+  const e = cores.get(c.id);
+  if (!cl || (e && (e.inflight || Date.now() - e.at < CORES_MAX_AGE_MS))) return;
+  cores.set(c.id, { byName: e ? e.byName : null, at: e ? e.at : 0, inflight: true });
+  let byName = null;
+  try { byName = coresByNode(await cl.nodesOs()); } catch (_) { /* not reported: the load stays text */ }
+  cores.set(c.id, { byName, at: Date.now(), inflight: false });
+  draw();
+}
 
 /**
  * "All clusters": one message to the core per dataset for the whole fleet, the tables
@@ -207,19 +240,13 @@ function block(c) {
   const raw = shards.get(c.id);
   const all = Array.isArray(raw) ? raw.map(normalise) : [];
 
-  const started = all.filter((s) => s.state === 'STARTED');
-  const moving = all.filter((s) => s.state === 'RELOCATING' || s.state === 'INITIALIZING');
-  const unassigned = all.filter((s) => s.state === 'UNASSIGNED');
-  const nodes = d.nodes || [];
-
   // No stat tiles. They said Nodes / Shards / Unassigned / Moving, which is precisely
-  // what the gauge and its legend say one card below — the same duplication that cost
-  // the honeycomb its place. The figures that were only on the tiles moved into the
-  // summary card instead.
+  // what the split bar and its legend say in the glance band — the same duplication that
+  // cost the honeycomb its place. The figures that were only on the tiles are the band's.
   return keptBox(`grid:${c.id}`, 'div', { style: { display: 'grid', gap: '10px' } }, [
-    glanceCard(c, all, d, { nodes, moving, unassigned }),
+    glanceCard(c, all, d),
     nodesAndLoadCard(c, d),
-    shardsCard(c, d, all, raw, started)]);
+    shardsCard(c, d, all, raw)]);
 }
 
 /** A task running longer than this is worth looking at rather than scrolling past. */
@@ -337,13 +364,17 @@ function loadBody(c) {
 function nodesBody(c, d) {
   const nodes = d.nodes || [];
   const alloc = (d.disk && d.disk.nodes) || [];
+  const coreMap = coresFor(c.id);
+  // _cat gives strings; an empty one is "not reported", which is not 0 %.
+  const pctOf = (v) => (v === '' || v === null || v === undefined ? NaN : Number(v));
 
   const trs = nodes.map((n) => {
     const a = alloc.find((x) => x.node === n.name) || {};
     const used = Number(n['disk.used']) || Number(a['disk.used']) || 0;
     const total = Number(n['disk.total']) || Number(a['disk.total']) || 0;
     const p = total ? (used / total) * 100 : NaN;
-    const heap = Number(n['heap.percent']);
+    const heap = pctOf(n['heap.percent']);
+    const heapCur = Number(n['heap.current']), heapMax = Number(n['heap.max']);
     const isMaster = String(n.master || '').trim() === '*';
     return h('tr',
       h('td', h('div', { style: { fontWeight: 620 } }, n.name,
@@ -352,10 +383,11 @@ function nodesBody(c, d) {
       h('td', h('span.mono', { style: { fontSize: '11px' }, title: roleTitle(n['node.role']) },
         n['node.role'] || '–')),
       h('td.muted', { style: { fontSize: '11.5px' } }, n.version || ''),
-      h('td.num', isFinite(heap) ? heapCell(heap, n) : '–'),
-      h('td.num', n['ram.percent'] ? `${n['ram.percent']}%` : '–'),
-      h('td.num', n.cpu ? `${n.cpu}%` : '–'),
-      h('td.num.muted', `${n.load_1m || '–'} / ${n.load_5m || '–'}`),
+      h('td.num', usageBar(heap, 'heap', isFinite(heapCur) && isFinite(heapMax)
+        ? `heap ${heap}% — ${bytes(heapCur)} of ${bytes(heapMax)}` : `heap ${heap}%`)),
+      h('td.num', usageBar(pctOf(n['ram.percent']), 'disk', `RAM ${n['ram.percent']}% in use on the host`)),
+      h('td.num', usageBar(pctOf(n.cpu), 'disk', `CPU ${n.cpu}% (the process, over the last sample)`)),
+      h('td.num', loadCell(n, coreMap ? coreMap.get(n.name) : undefined)),
       h('td', diskBar(used, total, p, Number(a.shards) || null)),
       h('td.muted', { style: { fontSize: '11.5px' } }, n.uptime || ''));
   });
@@ -374,12 +406,12 @@ function nodesBody(c, d) {
 }
 
 /**
- * Where the shards stand: one arc, split.
+ * Where the shards stand: one bar, split.
  *
  * Assigned and unassigned are not two readings to compare — they are one population
  * divided, and the division is the whole question. Two separate gauges would show two
- * percentages of a denominator the reader cannot see; one arc shows the split and the
- * counts underneath say how many, which is what somebody acts on. "0 unassigned" is
+ * percentages of a denominator the reader cannot see; one bar shows the split and the
+ * counts beside it say how many, which is what somebody acts on. "0 unassigned" is
  * listed rather than dropped: it is the reassurance the page is opened for.
  *
  * Relocating and initialising are drawn separately from settled shards. They are
@@ -388,80 +420,58 @@ function nodesBody(c, d) {
  */
 function shardMixBody(c, all, d) {
   const h2 = d.health || {};
-  const state = (x) => String(x.state || '').toUpperCase();
-  const started = all.filter((x) => state(x) === 'STARTED').length;
-  const moving = all.filter((x) => ['RELOCATING', 'INITIALIZING'].includes(state(x))).length;
-  const unassigned = all.filter((x) => state(x) === 'UNASSIGNED').length;
+  const split = shardSplit(all);
   // _cat/shards is the detail; _cluster/health is the cluster's own count. Prefer the
   // rows we actually have, and fall back to health when the listing was refused.
-  const total = all.length || (Number(h2.active_shards) || 0) + (Number(h2.unassigned_shards) || 0);
+  const total = split.total || (Number(h2.active_shards) || 0) + (Number(h2.unassigned_shards) || 0);
 
   if (!total) {
-    return { sub: 'nothing reported',
-             node: empty('No shard listing and no health count — unknown, not zero.') };
+    return { sub: 'nothing reported', split,
+             node: h('span.muted', { style: { fontSize: '11.5px' } }, 'No shard listing and no health count — unknown, not zero.') };
   }
 
   const segments = [
-    { key: 'started', label: 'assigned', value: started, color: STATUS.good },
-    { key: 'moving', label: 'moving', value: moving, color: 'var(--chart-info)' },
-    { key: 'unassigned', label: 'unassigned', value: unassigned, color: STATUS.critical },
+    { key: 'started', label: 'assigned', value: split.started, color: STATUS.good },
+    { key: 'moving', label: 'moving', value: split.moving, color: 'var(--chart-info)' },
+    { key: 'unassigned', label: 'unassigned', value: split.unassigned, color: STATUS.critical },
   ];
-  const sub = unassigned
-    ? `${num(unassigned)} of ${num(total)} not placed`
-    : moving ? `all placed · ${num(moving)} in flight` : 'every shard is placed';
+  const sub = split.unassigned
+    ? `${num(split.unassigned)} of ${num(total)} not placed`
+    : split.moving ? `all placed · ${num(split.moving)} in flight` : 'every shard is placed';
 
-  return {
-    sub,
-    node: h('div', { style: { display: 'grid', gap: '9px', justifyItems: 'center' } },
-      splitGauge(segments, {
-        total, size: 140, centreLabel: 'shards total', format: (v) => num(v),
-        // Stacked: three items wrapping two-then-one in a narrow column reads as a
-        // grouping that is not there.
-        legendColumn: true,
-      })),
-  };
+  return { sub, split, node: splitBar(segments, { total, totalLabel: 'shards total', format: (v) => num(v) }) };
 }
 
 /**
- * What this cluster is, in one band: the shard split on the left, the figures on the
- * right.
+ * What this cluster is, in one band one line tall: the shard split, then the figures,
+ * each a caption and a value with at most a short grey suffix (the rest in its tooltip).
  *
- * This replaced two cards side by side, then one card with two columns, and both had the
- * same fault — the gauge half is tall and the figures half was short, so whichever ran
- * out first left a slab of empty page. The fix was not a better column ratio, it was
- * putting enough in the right half to match: everything the stat tiles used to carry is
- * there now, in a grid that fills the height rather than a row that stops after four.
+ * It was a 140 px arc beside a grid of stacked figures — 250 px for six numbers and a
+ * three-way split, on a page whose working surface is the two tables under it. The band
+ * wraps when the window is narrow rather than squeezing; nothing is dropped.
  *
  * Anything that needs a paragraph — a dangling index, indices past retention — runs full
- * width underneath both, because a paragraph in a 240px column is a column of syllables.
+ * width underneath, because a paragraph in a 240px column is a column of syllables.
  */
-function glanceCard(c, all, d, counts) {
+function glanceCard(c, all, d) {
   const mix = shardMixBody(c, all, d);
   const acct = accountingBody(c, d);
   const indices = state.indices.get(c.id) || [];
-
-  const figures = h('div', {
-    style: { display: 'grid', gap: '14px 18px', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))' },
-  },
-    figure('Nodes', num(counts.nodes.length), d.master ? `master ${d.master}` : 'no master elected'),
-    figure('Indices', num(indices.length), `${num(all.length)} shards in total`),
-    ...acct.figures);
+  const nodes = d.nodes || [];
 
   return card('Cluster at a glance', `${c.name} · ${mix.sub} · ${acct.sub}`,
-    h('div', { style: { display: 'grid', gap: '12px' } },
-      h('div', { style: { display: 'grid', gap: '18px', gridTemplateColumns: 'minmax(190px, 220px) 1fr', alignItems: 'start' } },
+    h('div', { style: { display: 'grid', gap: '8px' } },
+      h('div.glance-band',
         mix.node,
-        h('div', { style: { borderLeft: '1px solid var(--border)', paddingLeft: '18px' } }, figures)),
-      unassigned(all)
+        h('div.glance-figs',
+          figure('Nodes', num(nodes.length), d.master ? `master ${d.master}` : 'no master elected'),
+          figure('Indices', num(indices.length), null, { title: `${num(indices.length)} indices · ${num(all.length)} shards in total` }),
+          ...acct.figures)),
+      mix.split.unassigned
         ? h('div.muted', { style: { fontSize: '11.5px' } },
             'An unassigned shard holds no data that can be read. The table below says why each one is unplaced.')
         : null,
       ...acct.notes));
-}
-
-/** How many shards are not placed — asked by the glance card for its footnote. */
-function unassigned(all) {
-  return all.filter((x) => String(x.state || '').toUpperCase() === 'UNASSIGNED').length;
 }
 
 /**
@@ -486,11 +496,39 @@ function nodesAndLoadCard(c, d) {
         : null)), 'nodes');
 }
 
-function heapCell(p, n) {
-  const colour = p >= 85 ? 'var(--critical-ink)' : p >= 75 ? 'var(--warning-ink)' : 'inherit';
-  const cur = Number(n['heap.current']), max = Number(n['heap.max']);
-  return h('span', { style: { color: colour, fontWeight: p >= 75 ? 640 : 400 },
-    title: isFinite(cur) && isFinite(max) ? `${bytes(cur)} of ${bytes(max)}` : '' }, `${p}%`);
+/** The fill and the ink for a usage level (core/nodes-shards.js usageLevel). */
+const LEVEL_FILL = { ok: STATUS.good, warn: STATUS.warning, crit: STATUS.critical };
+const LEVEL_INK = { warn: 'var(--warning-ink)', crit: 'var(--critical-ink)' };
+
+/**
+ * A percentage as the bar the Disk column has always drawn: a thin track, the filled part
+ * coloured by `kind`'s thresholds, and the number beside it — in the level's ink from
+ * amber up, so colour is never the only signal. A figure the node did not report is a dash.
+ */
+function usageBar(p, kind, title) {
+  if (!isFinite(p)) return h('span.muted', '–');
+  const level = usageLevel(p, kind);
+  return h('div.use-bar', { title },
+    h('div.bar-mini', h('i', { style: { width: `${Math.min(100, Math.max(1.5, p))}%`, background: LEVEL_FILL[level] } })),
+    h('span.use-num', { style: LEVEL_INK[level] ? { color: LEVEL_INK[level], fontWeight: 640 } : null }, `${p}%`));
+}
+
+/**
+ * Load 1m / 5m. A load average is not a percentage; what makes it one is the node's
+ * processor count — 3.5 is idle on 32 cores and saturated on 2 — so the bar is load 1 m over
+ * the cores `_nodes/os` reported, capped at 100 %. Without that count there is no bar, only
+ * the figures: a scale guessed is a measurement nobody took (unknown is not zero).
+ */
+function loadCell(n, coreCount) {
+  const text = `${n.load_1m || '–'} / ${n.load_5m || '–'}`;
+  const p = loadPercent(n.load_1m, coreCount);
+  if (p === null) {
+    return h('span.muted.use-num', { title: `load 1 m / 5 m${n.load_1m ? ' — the node did not report its processor count, so there is no scale to draw it on' : ''}` }, text);
+  }
+  const level = usageLevel(p, 'disk');
+  return h('div.use-bar', { title: `load 1 m over ${num(coreCount)} cores: ${p.toFixed(0)} % · 5 m ${n.load_5m || '–'}` },
+    h('div.bar-mini', h('i', { style: { width: `${Math.min(100, Math.max(1.5, p))}%`, background: LEVEL_FILL[level] } })),
+    h('span.use-num', { style: LEVEL_INK[level] ? { color: LEVEL_INK[level], fontWeight: 640 } : null }, text));
 }
 
 function diskBar(used, total, p, shardCount) {
@@ -532,18 +570,24 @@ function accountingBody(c, d) {
   // The two figures are always worth showing — "how much do the indices hold against how
   // much is on disk" is asked whether or not they disagree. The explanation below only
   // appears when they do.
-  // Handed back one by one rather than pre-wrapped, so the caller can lay them out with
-  // its own figures in a single grid. A pre-built row of four could only ever be a row
-  // of four, which is what left the right half of the card short.
+  // Handed back one by one rather than pre-wrapped, so the caller lays them out in the
+  // glance band with its own figures. Only what changes the reading is a visible suffix
+  // (an unread index list, a gap worth a look); the rest is the figure's tooltip.
+  const nIdx = num((state.indices.get(c.id) || []).length);
   const figures = [
-    figure('Indices hold', acct.known ? bytes(acct.accounted) : '–',
-      acct.known ? `${num((state.indices.get(c.id) || []).length)} indices` : 'index list not read yet'),
-    figure('Elasticsearch holds', d.disk ? bytes(d.disk.indicesBytes || 0) : '–', 'on the data path'),
+    figure('Indices hold', acct.known ? bytes(acct.accounted) : '–', acct.known ? null : 'index list not read yet',
+      { title: acct.known ? `Indices hold ${bytes(acct.accounted)}: the store size of the ${nIdx} indices listed` : 'Indices hold: not known until the index list is read' }),
+    figure('Elasticsearch holds', d.disk ? bytes(d.disk.indicesBytes || 0) : '–', null,
+      { title: d.disk ? `Elasticsearch holds ${bytes(d.disk.indicesBytes || 0)} of index data on the data path (_cat/allocation)` : 'Elasticsearch holds: _cat/allocation not read' }),
     figure('Disk used', d.disk ? bytes(d.disk.used || 0) : '–',
-      d.disk && isFinite(d.disk.percent) ? `${d.disk.percent.toFixed(1)}% of ${bytes(d.disk.total)}` : ''),
+      d.disk && isFinite(d.disk.percent) ? `${d.disk.percent.toFixed(1)} %` : null,
+      { title: d.disk && isFinite(d.disk.percent) ? `Disk used ${bytes(d.disk.used || 0)} of ${bytes(d.disk.total)} across the data nodes` : 'Disk used: _cat/allocation not read' }),
     figure('Unaccounted', acct.known ? bytes(Math.max(0, acct.gap)) : 'unknown',
-      acct.known ? (acct.material ? 'worth a look' : 'within rounding') : 'needs the index list',
-      { alert: acct.known && acct.material }),
+      acct.known ? (acct.material ? 'worth a look' : null) : 'needs the index list',
+      { alert: acct.known && acct.material,
+        title: acct.known
+          ? (acct.material ? `${bytes(acct.gap)} on disk that no index accounts for — explained below` : `Unaccounted ${bytes(Math.max(0, acct.gap))}: within rounding of the index list`)
+          : 'Unaccounted: needs the index list to compare against' }),
   ];
 
   // Everything below is a paragraph or a table, and runs full width under both columns.
@@ -653,7 +697,7 @@ function nodeStrip(c, d, all) {
     h('div', { style: { display: 'flex', gap: '14px', flexWrap: 'wrap' } }, ...tiles));
 }
 
-function shardsCard(c, d, all, raw, started) {
+function shardsCard(c, d, all, raw) {
   // Every reason the table can be empty, said out loud. "Nothing here" was indisputably
   // the worst of the states this page could be in: it looks the same whether the listing
   // failed, has not been asked for yet, or genuinely came back with no shards.
@@ -679,7 +723,10 @@ function shardsCard(c, d, all, raw, started) {
   // A filter carried in by a link (core/focus.js) for a state nothing is in: show everything.
   if (all.length && ui.state !== 'all' && !states.includes(ui.state)) ui.state = 'all';
 
-  const filtered = all.filter((s) => {
+  // Hidden (".") indices are kept out unless asked for — by the box, or by a filter that
+  // starts with "." (core/nodes-shards.js). The head counts what was kept out.
+  const visible = visibleShards(all, ui.showHidden, ui.index);
+  const filtered = visible.rows.filter((s) => {
     if (ui.index && !s.index.toLowerCase().includes(ui.index.toLowerCase())) return false;
     if (ui.node !== 'all' && s.node !== ui.node) return false;
     if (ui.state !== 'all' && s.state !== ui.state) return false;
@@ -729,6 +776,10 @@ function shardsCard(c, d, all, raw, started) {
         h('option', { value: 'all' }, 'any state'), ...states.map((n) => h('option', { value: n }, n)));
       sel.value = ui.state; return sel;
     })()),
+    h('label.field.check', { title: 'Indices whose name starts with "." (.kibana, .security, …) are left out of the table until this is ticked. A name filter that starts with "." shows them too.' },
+      h('input', { id: `shards-hidden-${c.id}`, type: 'checkbox', checked: ui.showHidden,
+        onchange: (e) => { ui.showHidden = e.target.checked; writeShowHidden(ui.showHidden); draw(); } }),
+      'Show hidden (.) indices'),
     h('div', { style: { marginLeft: 'auto', display: 'flex', gap: '6px', alignItems: 'center' } },
       writeToggle(draw),
       h('button.btn.sm', {
@@ -750,7 +801,8 @@ function shardsCard(c, d, all, raw, started) {
           h('button.btn.sm.ghost', { onclick: () => { mine.forEach((x) => picked.delete(`${x.index}/${x.shard}/${x.primary ? 'p' : 'r'}`)); draw(); } }, 'Clear')))
     : null;
 
-  const sub = `${num(filtered.length)} of ${num(all.length)} shard(s)`
+  const sub = `${num(filtered.length)} of ${num(visible.rows.length)} shard(s)`
+    + (visible.hidden ? ` · ${num(visible.hidden)} hidden` : '')
     + (shown.length < filtered.length ? ` · showing the first ${num(shown.length)}` : '');
 
   return focusable(keptCard(built, `shards:${c.id}`, `Shards — ${c.name}`, why || sub,
@@ -760,9 +812,11 @@ function shardsCard(c, d, all, raw, started) {
            { label: 'Index', sort: 'index' }, { label: 'Shard', num: true, sort: 'shard' },
            { label: 'Type', sort: 'type' }, { label: 'State', sort: 'state' },
            { label: 'Node', sort: 'node' }, { label: 'Store', num: true, sort: 'store' },
-           { label: 'Docs', num: true, sort: 'docs' }, 'Unassigned reason', ''],
+           { label: 'Docs', num: true, sort: 'docs' }, { label: 'Unassigned reason', sort: 'reason' }, ''],
         // One order for every cluster's table, but each head its own id (focus comes back to the right one).
-        trs, { emptyText: all.length ? 'No shard matches the filter' : 'No shards reported',
+        trs, { emptyText: all.length
+            ? (visible.hidden && visible.hidden === all.length ? 'Every shard here belongs to a hidden (.) index — tick "Show hidden (.) indices"' : 'No shard matches the filter')
+            : 'No shards reported',
           sort: { id: `shards-${c.id}`, get key() { return SHARD_SORT.key; }, get dir() { return SHARD_SORT.dir; }, on: SHARD_SORT.on } }),
       shown.length < filtered.length
         ? h('div', { style: { padding: '10px', textAlign: 'center' } },

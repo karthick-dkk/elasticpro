@@ -335,6 +335,12 @@ export class EsClient {
     const h = 'id,name,ip,version,jdk,node.role,master,heap.percent,heap.current,heap.max,ram.percent,cpu,load_1m,load_5m,disk.used,disk.avail,disk.total,disk.used_percent,uptime';
     return this.json('GET', `/_cat/nodes?format=json&bytes=b&h=${encodeURIComponent(h)}`);
   }
+  /**
+   * Each node's processor count (`os.allocated_processors`, what Elasticsearch sizes its
+   * thread pools by): the scale a load average is read against. _cat/nodes has no such
+   * column, so it is one more call, made by the page that draws the load.
+   */
+  nodesOs() { return this.json('GET', '/_nodes/_all/os?filter_path=nodes.*.name,nodes.*.os.allocated_processors'); }
   indices(pattern = '*') {
     const h = 'health,status,index,uuid,pri,rep,docs.count,docs.deleted,store.size,pri.store.size,creation.date';
     return this.json('GET', `/_cat/indices/${encodeURIComponent(pattern)}?format=json&bytes=b&expand_wildcards=open,closed&h=${encodeURIComponent(h)}`);

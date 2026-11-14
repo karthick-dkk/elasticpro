@@ -511,6 +511,9 @@ th.sortable:hover { color: var(--text-primary); }
 th.sortable:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 th.sortable .sort-arrow { margin-left: 3px; font-size: .9em; }
 th.sortable .sort-arrow:empty { display: none; }
+/* A head that sorts says so under the pointer: a faint ↕ in the arrow's slot until a press gives it a direction. */
+th.sortable:hover .sort-arrow:empty { display: inline; }
+th.sortable:hover .sort-arrow:empty::after { content: '↕'; opacity: .5; }
 table.tbl td { padding: 7px 10px; border-bottom: 1px solid var(--grid); vertical-align: middle; }
 table.tbl tbody tr:hover td { background: var(--surface-2); }
 /* A number and its unit are one token. Left to wrap, a narrow column breaks "143 GB"
@@ -827,12 +830,6 @@ table.cl-tbl > tbody > tr.cl-detail-row > td { white-space: normal; }
 .muted { color: var(--text-muted); }
 .sec { color: var(--text-secondary); }
 .nowrap { white-space: nowrap; }
-/* A figure that needs attention (common.js figure, e.g. Unaccounted disk): red and boxed. */
-.figure-alert { padding: 6px 10px; margin: -6px 0; border-radius: var(--radius-sm);
-  background: color-mix(in srgb, var(--critical) 14%, transparent);
-  border: 1px solid color-mix(in srgb, var(--critical) 45%, transparent); }
-.figure-alert > div:nth-child(2) { color: var(--critical-ink); }
-.figure-alert > .muted { color: color-mix(in srgb, var(--critical) 70%, var(--text-secondary)); }
 /* Alerts page: an alert's detail in two lines; a click opens it (alerts.js alertRow). */
 .alert-detail { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2;
   overflow: hidden; overflow-wrap: anywhere; cursor: pointer; }
@@ -842,8 +839,9 @@ table.cl-tbl > tbody > tr.cl-detail-row > td { white-space: normal; }
 /* Tokens only (light and dark come from :root); nothing here is a fixed colour. */
 .alerts-bar { align-items: flex-end; }
 .alerts-bar .field { display: flex; flex-direction: column; gap: 3px; font-size: 11px; color: var(--text-muted); }
-.alerts-bar .field.check { flex-direction: row; align-items: center; gap: 6px; height: 30px; color: var(--text-secondary); font-size: 12.5px; white-space: nowrap; }
-.toolbar.alerts-bar label.field.check > input[type="checkbox"] { width: 16px; height: 16px; flex: none; margin: 0; }
+/* A tick box in a filters row (Alerts, Nodes & shards): on one line with its words, as tall as the fields beside it. */
+.toolbar label.field.check, .alerts-bar .field.check { flex-direction: row; align-items: center; gap: 6px; height: 30px; color: var(--text-secondary); font-size: 12.5px; white-space: nowrap; }
+.toolbar label.field.check > input[type="checkbox"] { width: 16px; height: 16px; flex: none; margin: 0; }
 .alerts-bar-end { margin-left: auto; display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
 .seg-group { display: inline-flex; border: 1px solid var(--border-strong); border-radius: var(--radius-sm); overflow: hidden; height: 30px; }
 .seg-btn { font: inherit; font-size: 12.5px; padding: 0 12px; border: 0; border-left: 1px solid var(--border-strong);
@@ -985,6 +983,33 @@ a.arow-cluster:hover { text-decoration: underline; }
 .trunc { max-width: 340px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .bar-mini { height: 6px; border-radius: 3px; background: var(--surface-3); overflow: hidden; min-width: 60px; }
 .bar-mini > i { display: block; height: 100%; border-radius: 3px; }
+
+/* A usage figure as a bar with its number beside it (Nodes & shards: heap, RAM, CPU, load). The
+   number keeps a fixed slot so the bars of a column line up, and the cell stays one 32 px row. */
+.use-bar { display: inline-flex; align-items: center; gap: 6px; width: 100%; min-width: 92px; }
+.use-bar > .bar-mini { flex: 1 1 56px; min-width: 40px; }
+.use-num { font-variant-numeric: tabular-nums; font-size: 11.5px; min-width: 34px; text-align: right; white-space: nowrap; flex: none; }
+
+/* One population divided, one line tall (lib/charts.js splitBar): the total, the bar, the parts. */
+.split-bar { display: inline-flex; align-items: center; gap: 10px; flex-wrap: wrap; row-gap: 3px; }
+.split-bar > svg { display: block; border-radius: 2px; flex: none; }
+.split-total { display: inline-flex; align-items: baseline; gap: 4px; white-space: nowrap; }
+.split-total > b { font-size: 13px; font-variant-numeric: tabular-nums; }
+.split-total > .muted { font-size: 11px; }
+.split-legend { display: inline-flex; gap: 10px; flex-wrap: wrap; }
+.split-legend > div { display: inline-flex; align-items: center; gap: 4px; font-size: 11.5px; white-space: nowrap; }
+.split-legend .dot { width: 8px; height: 8px; border-radius: 2px; flex: none; }
+.split-legend b { font-variant-numeric: tabular-nums; }
+
+/* Cluster at a glance (Nodes & shards): the split and the figures in one band, wrapping when
+   the window is narrow. Six figures and a split in ~22 px instead of a 250 px card. */
+.glance-band { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 22px; min-height: 22px; }
+.glance-figs { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 16px; flex: 1 1 auto; min-width: 0; }
+.fig-inline { display: inline-flex; align-items: baseline; gap: 5px; font-size: 11.5px; white-space: nowrap; }
+.fig-inline > .k { color: var(--text-muted); }
+.fig-inline > .v { font-size: 13px; font-weight: 650; font-variant-numeric: tabular-nums; }
+.fig-inline > .d { color: var(--text-muted); font-size: 11px; }
+.fig-inline.alert > .v, .fig-inline.alert > .d { color: var(--critical-ink); }
 .banner {
   display: flex; gap: 10px; align-items: flex-start; padding: 11px 13px; border-radius: var(--radius);
   border: 1px solid var(--border); background: var(--surface-2); margin-bottom: 14px; font-size: 12.5px;

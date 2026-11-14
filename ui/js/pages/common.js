@@ -184,18 +184,20 @@ export function unreadable(what, reasonText, actions = null) {
 }
 
 /**
- * A labelled figure: a small caption, a large number, a quiet note under it.
+ * A labelled figure on one line: a small caption, the value, and at most a short grey
+ * suffix (`sub`) — anything longer goes in the tooltip (`title`, which defaults to the
+ * figure spelled out). Several of these make a band one line tall; the stacked
+ * caption / big number / note shape they replaced made the glance card 250 px.
  *
- * Here rather than on a page because two pages show these side by side and a second copy
- * would drift in size, weight and casing — which is exactly how a row of figures stops
- * reading as one row.
+ * Here rather than on a page so a second row of figures elsewhere cannot drift in size,
+ * weight or casing — which is exactly how a row of figures stops reading as one row.
  */
-export function figure(label, value, sub, { alert = false } = {}) {
-  // `alert`: a figure that needs attention is red and boxed, so it is seen before it is read.
-  return h(`div${alert ? '.figure-alert' : ''}`, { style: { minWidth: '140px' } },
-    h('div.muted', { style: { fontSize: '10.5px', textTransform: 'uppercase', letterSpacing: '.03em' } }, label),
-    h('div', { style: { fontSize: '17px', fontWeight: 660 } }, value),
-    sub ? h('div.muted', { style: { fontSize: '11px' } }, sub) : null);
+export function figure(label, value, sub, { alert = false, title = null } = {}) {
+  // `alert`: a figure that needs attention is red, so it is seen before it is read.
+  return h(`div.fig-inline${alert ? '.alert' : ''}`, { title: title || `${label}: ${value}${sub ? ` · ${sub}` : ''}` },
+    h('span.k', label),
+    h('b.v', value),
+    sub ? h('span.d', sub) : null);
 }
 
 /**
