@@ -16,6 +16,7 @@ import {
   ldHash, stateText, stateTone, nowText, minutesText, durationText, countText, docsText, startedSolvedText, whenText, extraOf,
 } from '../core/logdelay-report.js';
 import { deviceZoneText, delaySumText } from '../core/log-tz.js';
+import { fixButton, fixesFor } from './fix-popover.js';
 
 const finite = (v) => typeof v === 'number' && Number.isFinite(v);
 const nameOf = (id) => { const c = clusters().find((x) => x.id === id); return c ? c.name : id; };
@@ -23,7 +24,7 @@ const link = (href, text, title) => h('a', { href, title: title || null }, text)
 const muted = (t = '—') => h('span.muted', t);
 
 /** How bad a state is, for sorting "Now": worst highest; can't measure and unknown are unknown. */
-const STATE_RANK = { critical: 5, delay: 4, clock_ahead: 3, other_tz: 2.5, silent: 2, little: 1, no_delay: 0 };
+const STATE_RANK = { critical: 5, delay: 4, clock_ahead: 3, other_tz: 2.5, silent: 2, little: 0, no_delay: 0 };
 export const stateRank = (s) => (s in STATE_RANK ? STATE_RANK[s] : null);
 /** When the last delay (or silence) began: what "Last delay: started → solved" sorts on. */
 export const lastDelayAt = (r) => (r.state === 'silent' && finite(r.silentSince) ? r.silentSince : finite(r.lateSince) ? r.lateSince : finite(r.lastStarted) ? r.lastStarted : null);
@@ -54,7 +55,6 @@ const COLS = {
   deviceTz: ['Device time zone', false, (r) => h('td', { title: 'the real UTC offset the device’s gap sits at, against the cluster’s zone' },
     r.state === 'other_tz' ? statePill('other_tz', deviceZoneText(r)) : deviceZoneText(r) === '—' ? muted() : deviceZoneText(r)),
     { type: 'text', value: (r) => deviceZoneText(r) }],
-  median: ['Median', true, (r) => h('td.num', minutesText(r.medianMinutes)), { type: 'number', value: (r) => r.medianMinutes }],
   max: ['Max', true, (r) => h('td.num', minutesText(r.maxMinutes)), { type: 'number', value: (r) => r.maxMinutes }],
   episodes: ['Delays', true, (r) => h('td.num', countText(r.episodes)), { type: 'number', value: (r) => r.episodes }],
   lateMs: ['Time late', true, (r) => h('td.num', durationText(r.lateMs)), { type: 'duration', value: (r) => r.lateMs }],
@@ -93,19 +93,29 @@ export function deviceHead(sort, keys, extra = {}, { labels = {}, actions = 'Ope
 }
 
 /**
- * One device. `ctx`: `now` (the answer's), `watch(row)` when the row can be watched live, and
- * `graph` false to leave out the device board link (the device board itself).
+ * One device. `ctx`: `now` (the answer's), `mode: 'watch'` for Live Watch (the row is not
+ * clickable; actions are "i", Details, Open in logs) and `graph` false to leave out the device
+ * board link (the device board itself). Otherwise a click on the row opens the device, except on
+ * a button or a link inside it; the last column is "i" and Open in logs.
  */
 export function deviceRow(r, keys, ctx = {}, extra = {}) {
   const all = { ...COLS, ...extra };
+  const watch = ctx.mode === 'watch';
+  const device = ldHash('device', r.cluster, r.device);
+  const logs = ldHash('live', r.cluster, r.device);
   const acts = [
-    ctx.graph === false ? null : link(ldHash('device', r.cluster, r.device), 'Graph ›', `${r.device}: delay over time`),
-    h('a.ld-open-logs', { href: ldHash('live', r.cluster, r.device), title: `${r.device}: its logs over the page's time range (Live logs)` }, 'Open in logs ›'),
-    ctx.watch ? h('button.btn.sm', { type: 'button', title: `Watch ${r.device} live`, onclick: () => ctx.watch(r) }, 'Watch') : null,
+    fixButton({ kind: 'device', id: r.device, items: () => fixesFor(r, 'device') }),
+    watch ? h('button.btn.sm.ld-details', { type: 'button', dataset: { href: ldHash('devices', r.cluster) }, title: `${r.device}: delay over time and every delay`, onclick: () => { location.hash = ldHash('devices', r.cluster); } }, 'Details') : null,
+    h('button.btn.sm.ld-open-logs', { type: 'button', dataset: { href: logs }, title: `${r.device}: its logs over the page's time range (Live logs)`, onclick: () => { location.hash = logs; } }, 'Open in logs'),
   ].filter(Boolean);
-  return h(`tr${r.state === 'critical' || r.state === 'delay' ? '.ld-late' : ''}`, { dataset: { device: r.device, cluster: r.cluster } },
-    ...keys.filter((k) => all[k]).map((k) => all[k][2](r, ctx)),
-    h('td.ld-acts', ...acts.flatMap((a, i) => (i ? [' ', a] : [a]))));
+  const open = !watch && ctx.graph !== false;
+  const cls = `${r.state === 'critical' || r.state === 'delay' ? '.ld-late' : ''}${open ? '.ld-rowlink' : ''}`;
+  return h(`tr${cls}`, {
+    dataset: { device: r.device, cluster: r.cluster },
+    onclick: open ? (e) => { if (!e.target.closest('a, button')) location.hash = device; } : null,
+  },
+  ...keys.filter((k) => all[k]).map((k) => all[k][2](r, ctx)),
+  h('td.ld-acts', ...acts));
 }
 
 /** A device table: `id`, its sort, the rows in order, the columns, and what an empty one says. */

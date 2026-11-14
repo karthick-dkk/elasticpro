@@ -88,10 +88,10 @@ const PAGES = [
   { id: 'shards', search: '#view input[type=search]', hover: ['#view tbody tr', '#view .pill', '#view .btn'] },
   // The Log Delay page (was Logs & Delay, 0.3.60): every view. @c / @d are the fixture's first
   // cluster and its worst device. The pointer goes on a device row once one is drawn, else on a tab.
-  { id: 'log-delay', search: '#ld-dev-filter', hover: ['#ld-devices tbody tr', '#view .ld-tabs a', '#view .btn'] },
+  { id: 'log-delay', search: null, hover: ['#ld-by-cluster tbody tr', '#view .ld-kpi', '#ld-chart-delay g.ld-bar', '#view .ld-tabs a', '#view .btn'] },
+  { id: 'log-delay/devices', search: '#ld-dev-filter', hover: ['#ld-devices tbody tr', '#view .ld-chip-btn', '#view .ld-tabs a', '#view .btn'] },
   { id: 'log-delay/cluster/@c', search: '#ld-cd-filter', hover: ['#ld-cluster-devices tbody tr', '#view .ld-tabs a', '#view .btn'] },
   { id: 'log-delay/device/@c/@d', search: '#ld-q-name', hover: ['#ld-periods tbody tr', '#view .ld-kpi', '#view .ld-tabs a'] },
-  { id: 'log-delay/fixes', search: '#ld-fix-filter', hover: ['#ld-fix-devices tbody tr', '#view .ld-fix', '#view .ld-tabs a'] },
   { id: 'log-delay/watch', search: null, setup: async (F) => { await F.evaluate(() => document.querySelector('#delay-fetch')?.click()); await sleep(4000); },
     hover: ['#ld-watch-devices tbody tr', '#view .ld-tabs a', '#view .btn'] },
   { id: 'log-delay/live', search: '#ld-live-value', hover: ['#ld-live-logs tbody tr', '#view .ld-tabs a', '#view .btn'] },
@@ -118,7 +118,7 @@ const PAGES = [
 
 /** Pages whose pointer figures must be zero (the redraws fixed in 0.3.54); others are reported. */
 const STRICT = new Set(['requests', 'requests/health', 'reports/exports', 'reports/hosts',
-  'log-delay', 'log-delay/cluster/@c', 'log-delay/device/@c/@d', 'log-delay/fixes', 'log-delay/watch', 'log-delay/live', 'jobs']);
+  'log-delay', 'log-delay/devices', 'log-delay/cluster/@c', 'log-delay/device/@c/@d', 'log-delay/watch', 'log-delay/live', 'jobs']);
 
 const pw = await loadPlaywright(ROOT, 'flicker-check');
 if (!pw) process.exit(0);

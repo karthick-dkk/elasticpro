@@ -102,8 +102,10 @@ pub fn many(measured: usize) -> usize {
 /// * **Device clock / parser**: devices in another time zone than the cluster's, one finding per
 ///   offset, with an example zone at that offset for the parser's `date { timezone => … }`;
 /// * **Cluster**: the cluster's zone is left to detection and most of its devices (over half) sit
-///   at one offset — confirm it in Edit cluster › Log time zone when it is detected, set it when
-///   it is not (then the devices at that offset are the ones showing as late, and are named).
+///   at one offset — once 60 % agree the zone is taken from the majority and the finding says so;
+///   under it nothing is corrected, and the fix points at the devices' clocks and the parser's
+///   date filter (the owner's rule: no chooser from the Log Delay page; the config's
+///   `logTimeZone` stays an admin override).
 pub fn tz_findings(cluster: &str, t: &Tracker, now: i64, zone: &LogTimeZone) -> Vec<Finding> {
     let mut out = vec![];
     let cluster_offset = match zone {
@@ -141,11 +143,11 @@ pub fn tz_findings(cluster: &str, t: &Tracker, now: i64, zone: &LogTimeZone) -> 
                 let (why, fix) = if detected {
                     (format!("{} of {} measured devices ({} %) sit at {text}, steady over {} runs: the cluster's arrival time is stamped in that zone, and the delays shown have it taken out",
                              last.agree, last.of, last.pct().unwrap_or(0.0), tz::STEADY_RUNS),
-                     format!("confirm it: Config-Management › Clusters › Edit cluster › Log time zone — pick the zone at {text} (now detected from the devices)"))
+                     format!("nothing to set: the zone is taken from the majority of the devices ({text}); a device that shows as late at a steady offset is in another zone — check its clock and the parser's date filter"))
                 } else {
-                    (format!("{} of {} measured devices ({} %) sit at {text}, which is a time-zone offset, not a queue; the cluster's log time zone is not set and is not detected yet ({}% of devices steady over {} runs needed)",
-                             last.agree, last.of, last.pct().unwrap_or(0.0), tz::MAJORITY_PERCENT, tz::STEADY_RUNS),
-                     format!("set it: Config-Management › Clusters › Edit cluster › Log time zone — the zone the arrival time is stamped in (at {text}); until then these devices show the offset as delay"))
+                    (format!("only {} % of its devices agree on one offset ({text}: {} of {} measured; {} % needed, steady over {} runs), so no correction is applied",
+                             last.pct().unwrap_or(0.0), last.agree, last.of, tz::MAJORITY_PERCENT, tz::STEADY_RUNS),
+                     format!("check the devices' clocks and the parser's date filter; the zone is taken from the majority once {} % agree (until then the devices at {text} show the offset as delay)", tz::MAJORITY_PERCENT))
                 };
                 out.push(Finding {
                     cluster: cluster.into(), step: Step::Cluster, devices, group: Some(("timeZone".into(), text)), why, fix,
@@ -492,7 +494,7 @@ mod tests {
         let f = findings("prod", &t, now - H, now + 10 * H, now + H, 2 * H, &ClusterFacts::default(), &LogTimeZone::Detect);
         let cl = f.iter().find(|x| x.step == Step::Cluster).expect("a Cluster finding");
         assert_eq!(cl.devices.len(), 9, "the IST devices, late only by the zone");
-        assert!(cl.fix.starts_with("set it") && cl.why.contains("90 %"), "{cl:?}");
+        assert!(cl.fix.starts_with("check the devices' clocks") && cl.why.contains("90 %") && !cl.fix.contains("Edit cluster"), "{cl:?}");
         assert_eq!(cl.group, Some(("timeZone".into(), "+05:30".into())));
         assert!(f.iter().all(|x| x.step != Step::DeviceTimeZone), "nothing is in another zone while the cluster has none");
         // Three runs: detected; sg steady at +08:00 is in another zone.
@@ -500,7 +502,7 @@ mod tests {
         t.apply(now + 4 * H, ist(now + 4 * H, &[("sg", 480.0)]), &l, 2 * H);
         let f = findings("prod", &t, now - H, now + 10 * H, now + 5 * H, 2 * H, &ClusterFacts::default(), &LogTimeZone::Detect);
         let cl = f.iter().find(|x| x.step == Step::Cluster).unwrap();
-        assert!(cl.devices.is_empty() && cl.fix.starts_with("confirm it"), "{cl:?}");
+        assert!(cl.devices.is_empty() && cl.fix.starts_with("nothing to set") && !cl.fix.contains("Edit cluster"), "{cl:?}");
         let dz = f.iter().find(|x| x.step == Step::DeviceTimeZone).expect("a device time zone finding");
         assert_eq!(dz.devices, vec!["sg".to_string()]);
         assert_eq!(dz.group, Some(("deviceTimeZone".into(), "+08:00".into())));

@@ -473,6 +473,8 @@ pub struct Daily {
     pub devices: u64,
     /// Each device counted once, by its last state of the day.
     pub on_time: u64,
+    /// Always 0 since 0.3.62 (no little-delay band); kept so stored days and the history
+    /// store's mapping still read.
     pub little: u64,
     pub delayed: u64,
     pub critical: u64,
@@ -572,7 +574,7 @@ mod tests {
         assert_eq!(a.continued.len(), 1, "measured again while open");
         assert_eq!(t.devices["fw"].open.as_ref().unwrap().worst_minutes, 94.0);
         assert_eq!(t.devices["fw"].open.as_ref().unwrap().worst_state, State::Critical);
-        // Little delay is under the line: solved, with how long and how bad it was.
+        // 20 min is under the line: solved, with how long and how bad it was.
         let a = t.apply(6 * H, vec![r("fw", Some(20.0), 6 * H)], &l, 2 * H);
         assert_eq!(a.solved.len(), 1);
         let e = &a.solved[0];
@@ -799,7 +801,7 @@ mod tests {
         t.apply(0, vec![r("a", Some(5.0), 0), r("b", Some(45.0), 0), r("c", Some(70.0), 0)], &l, 2 * H);
         t.apply(2 * H, vec![r("a", Some(20.0), 2 * H), r("b", Some(10.0), 2 * H), r("c", Some(90.0), 2 * H)], &l, 2 * H);
         let d = daily(&t, "1970-01-01", 0, day, 3 * H);
-        assert_eq!((d.devices, d.on_time, d.little, d.delayed, d.critical), (3, 1, 1, 0, 1), "b at 10 min is on time, a at 20 little, c critical");
+        assert_eq!((d.devices, d.on_time, d.little, d.delayed, d.critical), (3, 2, 0, 0, 1), "a at 20 and b at 10 min are on time (no little band), c critical");
         assert_eq!((d.started, d.solved), (2, 1));
         assert_eq!(d.late_hours, 2.0 + 3.0, "b: 2 h; c: 3 h so far (until now)");
         assert_eq!(d.median_minutes, Some(20.0));

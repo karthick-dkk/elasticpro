@@ -4,15 +4,17 @@
  * the one place the UI reads its field names, and it touches no DOM, so tools/unit tests every
  * figure here.
  *
- *   #/log-delay                           the fleet (Main board)
- *   #/log-delay/cluster/<id>              one cluster (Cluster board)
- *   #/log-delay/device/<cluster>/<dev>    one device (Device board)
- *   #/log-delay/fixes[/<cluster>]         recommended fixes (Fix board)
+ *   #/log-delay                           Dashboard: the fleet (Main board)
+ *   #/log-delay/cluster/<id>              one cluster (Cluster board), under the Dashboard tab
+ *   #/log-delay/devices[/<cluster>]       Devices: every device, searched and filtered by state
+ *   #/log-delay/device/<cluster>/<dev>    one device (Device board), under the Devices tab
  *   #/log-delay/watch                     Live Watch: every cluster measured now, from the browser
  *   #/log-delay/live[/<cluster>[/<dev>]]  Live logs, optionally narrowed to one device
  *
  * The old addresses still open the same views (reports/route.js movedPath): the mail's "Open the
- * full report" link, <url>/#/reports/log-delay[/…], and #/logs (Live logs).
+ * full report" link, <url>/#/reports/log-delay[/…], and #/logs (Live logs). The Recommended
+ * fixes tab went in 0.3.62 (every row has an "i" with its fix instead): #/log-delay/fixes[/<c>]
+ * opens Devices.
  */
 
 import { bridge } from './transport.js';
@@ -24,8 +26,12 @@ import { zonedParts } from './log-range.js';
 export const LD_PAGE = 'log-delay';
 export const LD_SECTION = 'log-delay';
 
-/** Chart colours (owner's rule): light green, blue, pink, orange — never red with yellow. */
-export const LD_COLOURS = Object.freeze({ green: '#bfe6bf', blue: '#a9c8f0', pink: '#f2a7c3', orange: '#f5b77a', line: '#f07c1b' });
+/**
+ * Chart colours (owner's rule, 0.3.62, "cool blue"): green below the delay line, light blue for
+ * the delay band, blue above the critical line, violet for another time zone, grey for silent —
+ * never red with yellow. Theme tokens (ui/css/app.css), so each theme mixes its own inks.
+ */
+export const LD_COLOURS = Object.freeze({ ok: 'var(--ld-ok)', delay: 'var(--ld-delay)', crit: 'var(--ld-crit)', tz: 'var(--ld-tz)', silent: 'var(--ld-silent)', line: 'var(--accent)' });
 
 /* --------------------------------- the messages --------------------------------- */
 
@@ -69,7 +75,7 @@ export const ldSendNow = () => send({ type: 'REPORT_SEND_NOW', kind: LD_KIND });
 /* ---------------------------------- the routes ---------------------------------- */
 
 /** The page's views, in the order its tabs show them; the boards' views are below. */
-export const LD_VIEWS = Object.freeze(['fleet', 'cluster', 'device', 'fixes', 'watch', 'live']);
+export const LD_VIEWS = Object.freeze(['fleet', 'cluster', 'devices', 'device', 'watch', 'live']);
 
 /**
  * Which view of the Log Delay page a hash names: `{view, clusterId, device}`. Anything else
@@ -77,34 +83,53 @@ export const LD_VIEWS = Object.freeze(['fleet', 'cluster', 'device', 'fixes', 'w
  * reports/route.js parseHash, the one definition of where they moved.
  */
 export function ldRoute(hash) {
-  const fleet = { view: 'fleet', clusterId: null, device: null };
+  const tz = tzOfHash(hash);
+  const fleet = { view: 'fleet', clusterId: null, device: null, tz };
   const { page, rest } = parseHash(hash);
   if (page !== LD_PAGE) return fleet;
   const dec = (s) => { try { return decodeURIComponent(s || ''); } catch (_) { return s || ''; } };
   const [kind, a, ...more] = rest ? rest.split('/') : [];
-  if (kind === 'cluster' && a) return { view: 'cluster', clusterId: dec(a), device: null };
-  if (kind === 'device' && a && more.length) return { view: 'device', clusterId: dec(a), device: dec(more.join('/')) };
-  if (kind === 'fixes') return { view: 'fixes', clusterId: a ? dec(a) : null, device: null };
-  if (kind === 'watch') return { view: 'watch', clusterId: null, device: null };
-  if (kind === 'live') return { view: 'live', clusterId: a ? dec(a) : null, device: a && more.length ? dec(more.join('/')) : null };
+  if (kind === 'cluster' && a) return { view: 'cluster', clusterId: dec(a), device: null, tz };
+  if (kind === 'device' && a && more.length) return { view: 'device', clusterId: dec(a), device: dec(more.join('/')), tz };
+  // `fixes` is the old Recommended fixes address: its devices, with their fixes, are on Devices.
+  if (kind === 'devices' || kind === 'fixes') return { view: 'devices', clusterId: a ? dec(a) : null, device: null, tz };
+  if (kind === 'watch') return { view: 'watch', clusterId: null, device: null, tz };
+  if (kind === 'live') return { view: 'live', clusterId: a ? dec(a) : null, device: a && more.length ? dec(more.join('/')) : null, tz };
   return fleet;
 }
 
-const enc = encodeURIComponent;
-/** The hash for a view. */
-export function ldHash(view, clusterId, device) {
-  const base = `#/${LD_PAGE}`;
-  if (view === 'cluster' && clusterId) return `${base}/cluster/${enc(clusterId)}`;
-  if (view === 'device' && clusterId && device) return `${base}/device/${enc(clusterId)}/${enc(device)}`;
-  if (view === 'fixes') return clusterId ? `${base}/fixes/${enc(clusterId)}` : `${base}/fixes`;
-  if (view === 'watch') return `${base}/watch`;
-  if (view === 'live') return clusterId ? `${base}/live/${enc(clusterId)}${device ? `/${enc(device)}` : ''}` : `${base}/live`;
-  return base;
+/**
+ * The time-zone filter a hash carries (`?tz=480`, `?tz=none`): the UTC offset in minutes the
+ * devices in view sit at, `'none'` for the devices of a cluster whose zone is not detected, or
+ * null (every zone). It is a filter like the others, so it lives in the address.
+ */
+export function tzOfHash(hash) {
+  const q = String(hash || '').split('?')[1];
+  if (!q) return null;
+  const v = new URLSearchParams(q).get('tz');
+  if (v === null || v === '') return null;
+  if (v === 'none') return 'none';
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
 }
 
-/** The tab a view is shown under: the boards are one tab, Fixes, Live Watch and Live logs their own. */
+const enc = encodeURIComponent;
+/** The hash for a view; `o.tz` (an offset in minutes, 'none') keeps the time-zone filter in it. */
+export function ldHash(view, clusterId, device, o) {
+  const base = `#/${LD_PAGE}`;
+  const q = o && o.tz !== null && o.tz !== undefined ? `?tz=${enc(String(o.tz))}` : '';
+  if (view === 'cluster' && clusterId) return `${base}/cluster/${enc(clusterId)}${q}`;
+  if (view === 'device' && clusterId && device) return `${base}/device/${enc(clusterId)}/${enc(device)}${q}`;
+  if (view === 'devices' || view === 'fixes') return `${clusterId ? `${base}/devices/${enc(clusterId)}` : `${base}/devices`}${q}`;
+  if (view === 'watch') return `${base}/watch${q}`;
+  if (view === 'live') return `${clusterId ? `${base}/live/${enc(clusterId)}${device ? `/${enc(device)}` : ''}` : `${base}/live`}${q}`;
+  return `${base}${q}`;
+}
+
+/** The tab a view is shown under: Dashboard (the fleet, a cluster), Devices (the list, one device), Live Watch, Live logs. */
 export function ldTab(view) {
-  if (view === 'fixes' || view === 'watch' || view === 'live') return view;
+  if (view === 'watch' || view === 'live') return view;
+  if (view === 'devices' || view === 'device' || view === 'fixes') return 'devices';
   return 'fleet';
 }
 
@@ -232,7 +257,7 @@ export function valuesText(rows, name, max = 3) {
 /* ---------------------------------- the periods ---------------------------------- */
 
 export const PERIODS = Object.freeze([
-  ['last30', 'Last 30 days'], ['last7', 'Last 7 days'], ['thisMonth', 'This month'], ['lastMonth', 'Last month'],
+  ['today', 'Today'], ['last7', 'Last 7 days'], ['last30', 'Last 30 days'], ['thisMonth', 'This month'], ['lastMonth', 'Last month'],
 ]);
 
 const ymd = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
@@ -240,6 +265,7 @@ const ymd = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0
 /** A period id as the messages take it: `{days}` or `{from, to}` in local days. */
 export function periodQuery(id, now = Date.now()) {
   const t = new Date(now);
+  if (id === 'today') return { days: 1 };
   if (id === 'last7') return { days: 7 };
   if (id === 'thisMonth') return { from: ymd(new Date(t.getFullYear(), t.getMonth(), 1)), to: ymd(t) };
   if (id === 'lastMonth') return { from: ymd(new Date(t.getFullYear(), t.getMonth() - 1, 1)), to: ymd(new Date(t.getFullYear(), t.getMonth(), 0)) };
@@ -316,9 +342,14 @@ export const countText = (n) => (finite(n) ? n.toLocaleString('en') : '—');
 /** A device's state in words: "can't measure" and "silent" as such, never "on time". */
 export const stateText = (s) => STATE_LABEL[s] || (s === 'unknown' ? 'levels unknown' : s ? String(s) : 'unknown');
 
-/** The pill tone per state: pink critical, blue delayed and other time zone, green on time, orange clock ahead, grey unknown. */
+/**
+ * The pill tone per state (the three configured levels and the two states apart): green below
+ * the delay line (clock ahead too: measured, under the line), light blue in the delay band, blue
+ * above the critical line, violet for another time zone, grey for silent and can't measure.
+ * `little` is what a core before 0.3.62 stored: below the line, so green.
+ */
 export const STATE_TONE = Object.freeze({
-  critical: 'ld-pink', delay: 'ld-blue', little: 'ld-green', no_delay: 'ld-green', clock_ahead: 'ld-orange', other_tz: 'ld-blue', silent: 'grey', unmeasured: 'grey',
+  critical: 'ld-crit', delay: 'ld-delay', little: 'ld-ok', no_delay: 'ld-ok', clock_ahead: 'ld-ok', other_tz: 'ld-tz', silent: 'grey', unmeasured: 'grey',
 });
 export const stateTone = (s) => STATE_TONE[s] || 'grey';
 
@@ -357,83 +388,154 @@ export function filterRows(rows, q) {
     .some((v) => v !== null && v !== undefined && String(v).toLowerCase().includes(s)));
 }
 
-/** Worst first for the Delayed-devices rings: highest late share, then most late. */
-export function ringsOrder(byCluster) {
-  return [...(byCluster || [])].sort((a, b) => (finite(b.latePct) ? b.latePct : -1) - (finite(a.latePct) ? a.latePct : -1) || (b.lateNow || 0) - (a.lateNow || 0));
+/**
+ * The Devices tab's state filters (the KPI tiles open the list on one of them): `all`, `late`
+ * (the delay band and above), the three configured levels (`ok` below the delay line, clock
+ * ahead too; `delay`; `critical`), `tz` (another time zone) and `silent` (silent or can't
+ * measure — neither has a figure). `little` is a core-before-0.3.62 state: below the line.
+ */
+export const DEVICE_FILTERS = Object.freeze(['all', 'late', 'critical', 'delay', 'ok', 'tz', 'silent']);
+const FILTER_STATES = Object.freeze({
+  late: ['delay', 'critical'], critical: ['critical'], delay: ['delay'], ok: ['no_delay', 'little', 'clock_ahead'], tz: ['other_tz'], silent: ['silent', 'unmeasured'],
+});
+export function matchesFilter(row, filter) {
+  if (!filter || filter === 'all') return true;
+  const states = FILTER_STATES[filter];
+  return !!states && !!row && states.includes(row.state);
+}
+/** How many rows each filter would keep: the chips' counts. */
+export function filterCounts(rows) {
+  return Object.fromEntries(DEVICE_FILTERS.map((f) => [f, (rows || []).filter((r) => matchesFilter(r, f)).length]));
 }
 
-/* ------------------------------------ geometry ------------------------------------ */
+/* ------------------------------------ the dashboard's charts ------------------------------------ */
 
 /**
- * A ring's arc for `late` of `devices` (circumference 100): `{dash, share}`. A cluster with no
- * device measured has no share (null) — drawn as an empty ring with "—", never 0 %.
+ * The Dashboard's three panels over the period — devices in the delay band, devices above the
+ * critical line, and the delays solved (devices back below the line) — one bucket per day
+ * (`days[]`: `delayed`, `critical`, `solved`) or, for Today, one per measurement window
+ * (`windows[]`: `delay`, `critical` by each device's last state at the window's end, `solved`;
+ * a core before 0.3.62 sends no split, then `delay`/`critical` are null — unknown, not 0). A day
+ * without totals is a gap (`gap: true`), not zero; a window not yet over says `complete: false`.
  */
-export function ringDash(late, devices) {
-  if (!finite(devices) || devices <= 0 || !finite(late)) return { dash: '0 100', share: null };
-  const share = late / devices;
-  const arc = late > 0 ? Math.max(share * 100, 2) : 0;
-  return { dash: `${arc.toFixed(2)} ${(100 - arc).toFixed(2)}`, share };
-}
-
-/**
- * Day-by-day stacked bars, scaled to the tallest day: each `{day, gap, ok, del, crit, unk}` in
- * pixels. A day without totals is a gap (drawn as nothing, labelled "no measurement"), not 0.
- * `ok` is on time (onTimeAll), `unk` is silent + can't measure. `withOk:false` draws late only.
- */
-export function dayBars(days, height, { withOk = true } = {}) {
-  const list = days || [];
-  const total = (d) => (withOk ? (d.onTimeAll || 0) : 0) + (d.delayed || 0) + (d.critical || 0) + (withOk ? (d.silent || 0) + (d.unmeasured || 0) : 0);
-  const max = Math.max(1, ...list.filter((d) => d && finite(d.devices) && d.devices > 0).map(total));
-  const px = (v) => (finite(v) && v > 0 ? Math.max(1, Math.round((v / max) * height)) : 0);
-  return list.map((d) => {
-    if (!d || !finite(d.devices) || d.devices <= 0) return { day: d && d.day, gap: true, ok: 0, del: 0, crit: 0, unk: 0 };
+export function behindSeries(res, period) {
+  if (!res) return [];
+  if (period === 'today') {
+    return (res.windows || []).map((w) => ({
+      t: w.from, label: String(w.label || '').split(/[–-]/)[0].trim(), gap: false, split: finite(w.delay) && finite(w.critical),
+      behind: finite(w.stillLate) ? w.stillLate : finite(w.delay) && finite(w.critical) ? w.delay + w.critical : null,
+      delay: finite(w.delay) ? w.delay : null, critical: finite(w.critical) ? w.critical : null,
+      back: finite(w.solved) ? w.solved : null, complete: w.complete !== false,
+    }));
+  }
+  return (res.days || []).map((d) => {
+    const gap = !d || !finite(d.devices) || d.devices <= 0;
     return {
-      day: d.day, gap: false,
-      ok: withOk ? px(d.onTimeAll) : 0, del: px(d.delayed), crit: px(d.critical),
-      unk: withOk ? px((d.silent || 0) + (d.unmeasured || 0)) : 0,
+      t: d ? Date.parse(`${d.day}T00:00:00`) : NaN, label: dayText(d && d.day), gap, split: true,
+      behind: gap ? null : (d.delayed || 0) + (d.critical || 0), delay: gap ? null : d.delayed || 0, critical: gap ? null : d.critical || 0,
+      back: gap ? null : (finite(d.solved) ? d.solved : null), complete: !d || d.complete !== false,
     };
   });
 }
 
-/** One day's bar in words, for its title. */
-export function dayTitle(d) {
-  if (!d || !finite(d.devices) || d.devices <= 0) return `${dayText(d && d.day)} · no measurement`;
-  const unk = (d.silent || 0) + (d.unmeasured || 0);
-  return `${dayText(d.day)} · ${d.delayed || 0} at 30–60 min, ${d.critical || 0} above 60 min, ${d.onTimeAll ?? '?'} on time`
-    + (unk ? `, ${unk} silent or can't measure` : '') + (d.complete === false ? ' · day not over' : '');
+/** A quiet y axis: about three steps, at 1 / 2 / 2.5 / 5 × a power of ten. */
+export function niceStep(max) {
+  const raw = Math.max(1, max) / 3;
+  const p = 10 ** Math.floor(Math.log10(raw));
+  return [1, 2, 2.5, 5, 10].map((m) => m * p).find((s) => s >= raw);
+}
+
+/** Which x labels to write so they never crowd: every 4th of 24+ buckets, every 2nd past 10, else all. */
+export const labelEvery = (n) => (n >= 24 ? Math.ceil(n / 6) : n > 10 ? 2 : 1);
+
+/**
+ * The cluster × time heat map: one row per cluster with a "devices behind" count per bucket —
+ * `sparkline` over the period's days, or today's per-cluster `windows` — `null` where the
+ * cluster has no total (not measured: drawn as unknown, never 0).
+ */
+export function heatRows(byCluster, period) {
+  return (byCluster || []).map((c) => ({
+    id: c.id, name: c.name || c.id, never: c.lastRunAt === null || c.lastRunAt === undefined,
+    cells: period === 'today' ? (c.windows || []).map((w) => (finite(w.stillLate) ? w.stillLate : null)) : (c.sparkline || []).map((v) => (finite(v) ? v : null)),
+  }));
+}
+/**
+ * A device's time zone: its own steady offset when it sits in another zone (`deviceTzOffset` of
+ * an `other_tz` row), else its cluster's detected or set offset (`clusterTzOffset`); null for a
+ * device of a cluster whose zone is not detected (no 60 % majority: nothing is corrected).
+ */
+export function zoneOfRow(r) {
+  if (!r) return null;
+  if (r.state === 'other_tz' && finite(r.deviceTzOffset)) return r.deviceTzOffset;
+  return finite(r.clusterTzOffset) ? r.clusterTzOffset : null;
+}
+/** Whether a row is in the time-zone filter `tz` (an offset, 'none', or null for every zone). */
+export function matchesZone(r, tz) {
+  if (tz === null || tz === undefined) return true;
+  const z = zoneOfRow(r);
+  return tz === 'none' ? z === null : z === tz;
 }
 
 /**
- * A sparkline's polylines in a `w`×`h` box: one points string per run of known values, so a
- * day without totals (null) is a gap in the line, never a drop to zero.
+ * Devices by time zone (the Expand panel beside the chip): one entry per zone,
+ * `{key, offsetMinutes|null, devices}`, most devices first, "not detected" (key 'none') last.
+ * The rows are the answer's `devices[]` in view, so the counts follow the filters.
  */
-export function sparkSegments(values, w = 120, h = 24, pad = 2) {
-  const v = values || [];
-  const known = v.filter(finite);
-  if (!known.length) return [];
-  const max = Math.max(...known); const min = Math.min(0, ...known);
-  const span = max - min || 1;
-  const x = (i) => (v.length > 1 ? (i * w) / (v.length - 1) : w / 2);
-  const y = (n) => h - pad - ((n - min) / span) * (h - 2 * pad);
-  const out = []; let cur = [];
-  v.forEach((n, i) => {
-    if (finite(n)) cur.push(`${x(i).toFixed(1)},${y(n).toFixed(1)}`);
-    else if (cur.length) { out.push(cur.join(' ')); cur = []; }
-  });
-  if (cur.length) out.push(cur.join(' '));
-  return out;
+export function devicesByZone(rows) {
+  const by = new Map();
+  for (const r of rows || []) {
+    const own = zoneOfRow(r);
+    const key = own === null ? 'none' : String(own);
+    const e = by.get(key) || { key, offsetMinutes: own, devices: 0 };
+    e.devices += 1;
+    by.set(key, e);
+  }
+  return [...by.values()].sort((a, b) => (a.offsetMinutes === null) - (b.offsetMinutes === null) || b.devices - a.devices || a.offsetMinutes - b.offsetMinutes);
 }
 
-/** The "Delay reduced" bars: `{hours, n, label, px}`; an absent entry is unknown, not 0. */
-export function reducedBars(reduced, height = 44) {
-  const list = Array.isArray(reduced) ? reduced : [];
-  const max = Math.max(1, ...list.map((r) => (finite(r.n) ? r.n : 0)));
-  return [2, 4, 6, 12, 24].map((hours) => {
-    const r = list.find((x) => x && x.hours === hours);
-    const n = r && finite(r.n) ? r.n : null;
-    return { hours, n, label: `${hours} h`, px: n === null ? 0 : Math.max(3, Math.round((n / max) * height)) };
-  });
+/**
+ * The chip's text: the zone alone (the owner's rule: no counts in the chip, no chooser) —
+ * "+05:30", the majority zone of the devices in view, or "not detected"; with a filter on,
+ * "+08:00 · only these devices".
+ */
+export function timeZoneChipText(zones, tz, offsetText) {
+  if (tz !== null && tz !== undefined) return `${tz === 'none' ? 'not detected' : offsetText(tz)} · only these devices`;
+  const top = (zones || []).find((z) => z.offsetMinutes !== null);
+  return top ? offsetText(top.offsetMinutes) : 'not detected';
 }
+
+/**
+ * The counts the tiles show for a list of rows (the time-zone filter on): the same figures as
+ * the core's `totals` — on time = under the delay line (an old `little` and clock ahead too),
+ * the delay band, above the critical line, another time zone, silent, can't measure.
+ */
+export function tileCounts(rows) {
+  const t = { devices: 0, onTime: 0, delay: 0, critical: 0, otherTz: 0, silent: 0, unmeasured: 0 };
+  for (const r of rows || []) {
+    t.devices += 1;
+    const s = r && r.state;
+    if (s === 'no_delay' || s === 'little' || s === 'clock_ahead') t.onTime += 1;
+    else if (s === 'delay') t.delay += 1;
+    else if (s === 'critical') t.critical += 1;
+    else if (s === 'other_tz') t.otherTz += 1;
+    else if (s === 'silent') t.silent += 1;
+    else if (s === 'unmeasured') t.unmeasured += 1;
+  }
+  return t;
+}
+
+/** The By cluster column: "+05:30 · 12 of 13 devices", "+00:00 · set", or "not detected · 41 % agree". Unknown says so. */
+export function timeZoneCell(tz, offsetText) {
+  if (!tz || typeof tz !== 'object') return '—';
+  if (tz.mode === 'set') return `${tz.offset || offsetText(tz.offsetMinutes)} · set`;
+  if (tz.mode === 'detected') return `${tz.offset || offsetText(tz.offsetMinutes)}${finite(tz.agree) && finite(tz.of) ? ` · ${countText(tz.agree)} of ${countText(tz.of)} devices` : ''}`;
+  if (tz.mode === 'none') return `not detected${finite(tz.pct) ? ` · ${Math.round(tz.pct)} % agree` : ''}`;
+  return '—';
+}
+
+/** The heat ramp step of a count: 0 none, 1 one, 2 two–three, 3 four–six, 4 seven or more; −1 unknown. */
+export const HEAT_LEGEND = Object.freeze(['0', '1', '2–3', '4–6', '7+']);
+export const heatStep = (v) => (!finite(v) ? -1 : v === 0 ? 0 : v < 2 ? 1 : v < 4 ? 2 : v < 7 ? 3 : 4);
 
 /**
  * The device graph: points → x in [0,1000] over [from,to], y in [0,height] with a scale that
@@ -472,19 +574,30 @@ export function periodBand(p, lo, hi, now = Date.now()) {
   return { left: ((a - lo) / span) * 100, width: Math.max(((b - a) / span) * 100, 0.6), critical: p.worstState === 'critical' };
 }
 
-/** Late now of a list, for a sub line ("25 at 30–60 min, 12 above 60 min"). */
-export function lateSplitText(t) {
-  if (!t) return '';
-  return `${countText(t.delay)} at 30–60 min, ${countText(t.critical)} above 60 min`;
-}
-
 /** Is this row late now (for colouring)? */
 export const rowLate = (r) => !!r && isLate(r.state);
 
-/** The finding step's pill tone (Fix board): Elasticsearch pink, forwarder blue, parser orange, clock green, link blue, unknown grey. */
-export const STEP_TONE = Object.freeze({ elasticsearch: 'ld-pink', forwarder: 'ld-blue', parser: 'ld-orange', device_clock: 'ld-green', device_time_zone: 'ld-blue', device_link: 'ld-blue', cluster: 'ld-blue', unknown: 'grey' });
+/** The finding step's pill tone: a time-zone step violet, a fix on the path the delay band's blue, unknown grey. */
+export const STEP_TONE = Object.freeze({ elasticsearch: 'ld-delay', forwarder: 'ld-delay', parser: 'ld-delay', device_clock: 'ld-delay', device_time_zone: 'ld-tz', device_link: 'ld-delay', cluster: 'ld-tz', unknown: 'grey' });
 export const STEP_LABEL = Object.freeze({ elasticsearch: 'Elasticsearch', forwarder: 'Forwarder', parser: 'Parser', device_clock: 'Device clock', device_time_zone: 'Device clock / parser', device_link: 'Device', cluster: 'Cluster', unknown: 'Not enough evidence' });
 export const stepLabel = (f) => (f && (f.stepLabel || STEP_LABEL[f.step])) || 'Not known yet';
+
+/**
+ * A finding as the "i" popover takes it (ui/js/logdelay/fix-popover.js items): `{title, cause,
+ * fix, where, count}`. One definition for a device's `fix`, a cluster's `fixes[]` and the device
+ * board's `finding`. Null in, null out: no finding is "no recommendation", never a guess.
+ */
+export function fixItem(f) {
+  if (!f || typeof f !== 'object') return null;
+  return {
+    title: stepLabel(f), cause: f.why || '—', fix: f.fix || '', where: f.step || 'unknown',
+    count: Array.isArray(f.devices) ? f.devices.length : undefined,
+    group: Array.isArray(f.group) && f.group.length === 2 ? `${f.group[0]} ${f.group[1]}` : null,
+    missing: Array.isArray(f.missing) ? f.missing : [],
+  };
+}
+/** What a cluster's "i" says when the core has no finding for it (a device's is fix-popover.js NO_FINDING). */
+export const NO_CLUSTER_FIX_TEXT = 'Nothing to fix: no finding for this cluster in the stored delay periods of the last 7 days.';
 
 /** A finding's evidence object in words ("devices 41 · windows 5 · forwarders 3"). Unknown values say so. */
 export function evidenceText(ev) {

@@ -30,19 +30,18 @@ const ZONE_ROWS: usize = 12;
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum DevicesFilter {
-    /// 30 min or more now (delay and critical).
+    /// At the delay level or more now (delay and critical).
     #[default]
     Delayed,
-    /// 15 min or more now (little delay too).
-    Little,
     All,
 }
 
 impl DevicesFilter {
+    /// `little` (a schedule saved before 0.3.62, when there was a little-delay band) reads as
+    /// `delayed`: the band is gone, so the two lists are the same list.
     pub fn parse(s: &str) -> Option<DevicesFilter> {
         match s {
-            "delayed" => Some(DevicesFilter::Delayed),
-            "little" => Some(DevicesFilter::Little),
+            "delayed" | "little" => Some(DevicesFilter::Delayed),
             "all" => Some(DevicesFilter::All),
             _ => None,
         }
@@ -50,14 +49,12 @@ impl DevicesFilter {
     pub fn keeps(self, s: State) -> bool {
         match self {
             DevicesFilter::Delayed => s.late(),
-            DevicesFilter::Little => s.late() || s == State::Little,
             DevicesFilter::All => true,
         }
     }
     pub fn label(self) -> &'static str {
         match self {
-            DevicesFilter::Delayed => "devices delayed 30 min or more",
-            DevicesFilter::Little => "devices delayed 15 min or more",
+            DevicesFilter::Delayed => "devices at the delay level or more",
             DevicesFilter::All => "all devices",
         }
     }
@@ -101,7 +98,7 @@ impl Options {
     pub fn apply(mut self, v: &Value, extras: &[String]) -> Result<Options, String> {
         let Some(o) = v.as_object() else { return Err("options must be an object".into()) };
         if let Some(d) = o.get("devices") {
-            self.devices = d.as_str().and_then(DevicesFilter::parse).ok_or("options.devices must be delayed, little or all")?;
+            self.devices = d.as_str().and_then(DevicesFilter::parse).ok_or("options.devices must be delayed or all")?;
         }
         if let Some(g) = o.get("groupBy") {
             let g = g.as_str().ok_or("options.groupBy must be text")?.trim().to_string();
@@ -428,11 +425,12 @@ fn sheets(i: &Inputs<'_>, fleet: &Value, rows: &[DeviceRow], windows: &[Value], 
         out.push(Sheet { name: format!("Every {} hours", i.every_hours), rows: r });
     }
     if i.options.has("dayByDay") {
-        let mut r = vec![vec![Cell::head("Day"), Cell::head("Devices"), Cell::head("On time"), Cell::head("Little delay"), Cell::head("Delayed"), Cell::head("Critical"),
+        let mut r = vec![vec![Cell::head("Day"), Cell::head("Devices"), Cell::head("On time"), Cell::head("Delayed"), Cell::head("Critical"),
                               Cell::head("Clock ahead"), Cell::head("Silent"), Cell::head("Can't measure"), Cell::head("Started"), Cell::head("Solved"),
                               Cell::head("Late hours"), Cell::head("Median (min)"), Cell::head("Complete")]];
         for d in fleet["days"].as_array().into_iter().flatten() {
-            r.push(vec![Cell::text(d["day"].as_str().unwrap_or("")), int(&d["devices"]), int(&d["onTime"]), int(&d["little"]), int(&d["delayed"]), int(&d["critical"]),
+            // On time = every device under the delay line (`onTimeAll`: clock-ahead and any old little-band count included).
+            r.push(vec![Cell::text(d["day"].as_str().unwrap_or("")), int(&d["devices"]), int(&d["onTimeAll"]), int(&d["delayed"]), int(&d["critical"]),
                         int(&d["clockAhead"]), int(&d["silent"]), int(&d["unmeasured"]), int(&d["started"]), int(&d["solved"]),
                         d["lateHours"].as_f64().map(Cell::Dec).unwrap_or(Cell::Empty), d["medianMinutes"].as_f64().map(Cell::Dec).unwrap_or_else(|| Cell::text("not measured")),
                         Cell::text(if d["complete"] == true { "yes" } else { "so far" })]);

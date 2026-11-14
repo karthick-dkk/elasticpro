@@ -84,7 +84,7 @@ const PAGES = ['alerts', 'overview', 'indices', 'shards',
   // The Log Delay page (0.3.60): its boards, filled from tools/lib/logdelay-fixture.mjs (@c / @d: the
   // first cluster and its worst device), Live Watch (measured, then one device watched: see LD_SETUP)
   // and Live logs (one device, from a row's Open in logs).
-  'log-delay', 'log-delay/cluster/@c', 'log-delay/device/@c/@d', 'log-delay/fixes', 'log-delay/watch', 'log-delay/watch/device', 'log-delay/live', 'log-delay/live/@c/fw-core-02',
+  'log-delay', 'log-delay/devices', 'log-delay/devices/popover', 'log-delay/cluster/@c', 'log-delay/device/@c/@d', 'log-delay/watch', 'log-delay/live', 'log-delay/live/@c/fw-core-02',
   'console', 'snapshots',
   'reports/overview', 'reports/daily', 'reports/capacity', 'reports/measure', 'reports/planning', 'reports/exports',
   // Jobs (docs/JOBS.md "Jobs page"): its three tabs, with runs from tools/lib/jobs-fixture.mjs.
@@ -340,16 +340,17 @@ async function run(browserName, [vw, vh, framed]) {
       const first = logDelayData(ldList).per[0];
       id = id.replace('@c', encodeURIComponent(first ? first.c.id : '')).replace('@d', encodeURIComponent(first ? first.rows[0].device : ''));
     }
-    await F.evaluate((id) => { location.hash = `#/${id}`; }, id);
+    await F.evaluate((id) => { location.hash = `#/${id.replace(/\/popover$/, '')}`; }, id);
     await sleep(900); await quiet(700, 5000);
-    // Live Watch is measured on a press: measured here, and `…/watch/device` opens one device's close-up.
+    // Live Watch is measured on a press: measured here.
     if (id.startsWith('log-delay/watch')) {
       await F.evaluate(() => { if (!document.querySelector('#ld-watch-devices')) document.querySelector('#delay-fetch')?.click(); });
       await sleep(2500); await quiet(700, 6000);
-      if (id === 'log-delay/watch/device') {
-        await F.evaluate(() => { [...document.querySelectorAll('#ld-watch-devices button')].find((b) => b.textContent === 'Watch')?.click(); });
-        await sleep(1500); await quiet(700, 5000);
-      }
+    }
+    // `…/devices/popover`: the Devices tab with the first row's "i" popover open (it must stay inside the window too).
+    if (id === 'log-delay/devices/popover') {
+      await F.evaluate(() => { document.querySelector('#ld-devices tbody tr button.ld-ibtn')?.click(); });
+      await sleep(600); await quiet(500, 3000);
     }
     await readWrite();
   };

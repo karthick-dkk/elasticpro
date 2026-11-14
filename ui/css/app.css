@@ -2779,9 +2779,6 @@ select.zr-hand { height: 26px; max-width: 150px; font-size: 12px; }
 .ld-hint { font-size: 11.5px; flex: 1 1 260px; min-width: 0; align-self: center; }
 .ld-progress { display: inline-flex; align-items: center; gap: 5px; font-size: 11.5px; }
 .ld-fetch { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; margin-bottom: 8px; min-height: 30px; }
-.ld-fetch-status { font-size: 12px; color: var(--text-secondary); min-width: 0; overflow-wrap: anywhere; }
-.ld-fetch-status.ld-fetch-ok { color: var(--good-ink, var(--text-primary)); }
-.ld-fetch-status.ld-fetch-bad { color: var(--critical); }
 .ld-stack { display: grid; gap: 10px; min-width: 0; }
 .ld-flat { margin: 0; font-size: 12px; }
 .ld-strong { font-weight: 620; }
@@ -2877,3 +2874,169 @@ tr.jb-focus td { background: var(--accent-soft); }
 .jc-wide { grid-column: 1 / -1; }
 .jc-note { font-size: 11.5px; }
 .jc-mode { align-self: start; }
+
+/* ---------------- Log Delay redesign (0.3.62, lead): tokens, title bar, tiles, charts, heat map, chips, split ----------------
+   The owner's palette ("cool blue", prototype v17): green below the delay line, light blue for the delay band, blue
+   above the critical line, violet for another time zone, grey for silent — never red with yellow. The fills are the
+   same in every theme; each theme mixes its own pill fill (-bg: 28 % of the fill with the surface) and ink (-ink:
+   35 % of the fill with the text colour), so the pill text keeps AA on dark, dark-blue and warm too. The heat ramp
+   is one blue (--ld-hx) mixed with the surface at 7 / 24 / 45 / 70 / 100 %. */
+:root {
+  --ld-ok: #8fd19e; --ld-delay: #a9cbee; --ld-crit: #5b8fd1; --ld-tz: #a77fd6; --ld-silent: #9aa1ab; --ld-hx: #3f78c0;
+  --ld-ok-bg: color-mix(in srgb, var(--ld-ok) 28%, var(--surface-1)); --ld-delay-bg: color-mix(in srgb, var(--ld-delay) 28%, var(--surface-1));
+  --ld-crit-bg: color-mix(in srgb, var(--ld-crit) 28%, var(--surface-1)); --ld-tz-bg: color-mix(in srgb, var(--ld-tz) 28%, var(--surface-1));
+  --ld-silent-bg: color-mix(in srgb, var(--ld-silent) 28%, var(--surface-1));
+  --ld-ok-ink: color-mix(in srgb, var(--ld-ok) 35%, var(--text-primary)); --ld-delay-ink: color-mix(in srgb, var(--ld-delay) 35%, var(--text-primary));
+  --ld-crit-ink: color-mix(in srgb, var(--ld-crit) 35%, var(--text-primary)); --ld-tz-ink: color-mix(in srgb, var(--ld-tz) 35%, var(--text-primary));
+  --ld-silent-ink: color-mix(in srgb, var(--ld-silent) 35%, var(--text-primary));
+  --ld-heat-0: color-mix(in srgb, var(--ld-hx) 7%, var(--surface-1)); --ld-heat-1: color-mix(in srgb, var(--ld-hx) 24%, var(--surface-1));
+  --ld-heat-2: color-mix(in srgb, var(--ld-hx) 45%, var(--surface-1)); --ld-heat-3: color-mix(in srgb, var(--ld-hx) 70%, var(--surface-1)); --ld-heat-4: var(--ld-hx);
+}
+/* Dark themes: the same fills (the violet a shade lighter so it stands off a dark surface); -bg and -ink follow from them. */
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --ld-tz: #b994ec; --ld-silent: #7a828d; } }
+:root[data-theme="dark"], :root[data-theme="dark-blue"], :root[data-theme="warm"] { --ld-tz: #b994ec; --ld-silent: #7a828d; }
+/* Pills and figures by level (core/logdelay-report.js STATE_TONE). */
+.ld .pill.ld-ok { color: var(--ld-ok-ink); background: var(--ld-ok-bg); }
+.ld .pill.ld-delay { color: var(--ld-delay-ink); background: var(--ld-delay-bg); }
+.ld .pill.ld-crit { color: var(--ld-crit-ink); background: var(--ld-crit-bg); }
+.ld .pill.ld-tz { color: var(--ld-tz-ink); background: var(--ld-tz-bg); }
+.ld .ld-ok { color: var(--ld-ok-ink); }
+.ld .ld-delay { color: var(--ld-delay-ink); font-weight: 600; }
+.ld .ld-crit { color: var(--ld-crit-ink); font-weight: 600; }
+.ld .ld-tz { color: var(--ld-tz-ink); }
+.ld .ld-kpi > b.ld-delay { color: var(--ld-delay-ink); }
+.ld .ld-kpi > b.ld-crit { color: var(--ld-crit-ink); }
+.ld .ld-band { background: color-mix(in srgb, var(--ld-delay) 35%, transparent); }
+.ld .ld-band.ld-band-crit { background: color-mix(in srgb, var(--ld-crit) 35%, transparent); }
+.ld .ld-mark-start { color: var(--ld-delay-ink); }
+.ld .ld-mark-solved { color: var(--ld-ok-ink); }
+.ld .ld-mark-open { color: var(--ld-crit-ink); }
+.ld table.tbl tr.ld-open td { background: color-mix(in srgb, var(--ld-crit) 14%, transparent); }
+.ld .ld-rec { border-color: color-mix(in srgb, var(--ld-delay) 60%, var(--border)); }
+.ld-page .ld-tz-chip { cursor: default; }
+.ld-page .ld-tz-chip[data-mode="none"] { color: var(--ld-silent-ink); }
+.ld-page .ld-tz-chip[data-mode="detected"], .ld-page .ld-tz-chip[data-mode="set"] { color: var(--ld-tz-ink); }
+.ld-page .ld-tz-chip[data-mode="filter"] { color: var(--ld-tz-ink); background: var(--ld-tz-bg); border-color: color-mix(in srgb, var(--ld-tz-ink) 40%, transparent); }
+/* The time zone's Expand panel: every zone with its devices; a zone is a filter, kept in the address. */
+.ld-tz-tools { position: relative; display: inline-flex; align-items: center; gap: 6px; align-self: center; }
+.ld-page button.ld-tz-chip { cursor: pointer; font: inherit; }
+.ld-page button.ld-tz-chip:disabled { cursor: default; opacity: .8; }
+.ld-page button.ld-tz-chip:hover:not(:disabled), .ld-page button.ld-tz-chip[aria-expanded="true"] { border-color: var(--accent); }
+.ld-page button.ld-tz-chip:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.ld-tz-caret { color: var(--text-muted); }
+/* The fleet's state bar under the tiles. */
+.ld .ld-statebar { display: grid; gap: 6px; }
+.ld .ld-stack { display: flex; height: 18px; gap: 2px; border-radius: 5px; overflow: hidden; }
+.ld .ld-stack i { display: block; min-width: 3px; height: 100%; }
+.ld .ld-statebar .ld-key b { color: var(--text-primary); font-variant-numeric: tabular-nums; }
+.ld-tz-panel { position: absolute; left: 0; top: calc(100% + 4px); z-index: 35; min-width: 280px; max-width: min(420px, calc(100vw - 32px)); background: var(--surface-1); border: 1px solid var(--border); border-radius: 8px; box-shadow: var(--shadow); padding: 4px; display: grid; }
+.ld-tz-panel[hidden] { display: none; }
+.ld-tz-panel-h { font-size: 11px; text-transform: uppercase; letter-spacing: .03em; color: var(--text-muted); padding: 5px 10px 3px; }
+.ld-tz-entry { border: 0; background: none; text-align: left; padding: 6px 10px; border-radius: 6px; font: inherit; font-size: 12.5px; color: var(--text-primary); cursor: pointer; white-space: nowrap; }
+.ld-tz-entry:hover, .ld-tz-entry:focus-visible { background: var(--surface-2); outline: none; }
+.ld-tz-entry[aria-checked="true"] { font-weight: 650; color: var(--ld-tz-ink); }
+.ld-tz-entry.ld-tz-all { border-top: 1px solid var(--border); border-radius: 0 0 6px 6px; margin-top: 3px; color: var(--accent); }
+/* The title bar: the name, the tabs beside it, Fetch now at the right end; one row that wraps. */
+.ld-page .rp-head.ld-bar { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-start; gap: 6px 14px; margin-bottom: 4px; }
+.ld-bar .ld-bar-tabs { flex: 1 1 auto; min-width: 0; }
+.ld-bar .ld-bar-tabs .rp-nav { border-bottom: 0; margin-bottom: 0; }
+.ld-bar .ld-bar-tabs .rp-nav a { padding: 5px 10px; border-radius: 6px; border-bottom: 0; }
+.ld-bar .ld-bar-tabs .rp-nav a[aria-current="page"] { background: var(--surface-2); }
+.ld-bar .ld-bar-right { margin-left: auto; display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.ld-page .ld-tools { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 8px 10px; padding: 6px 0 8px; border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); margin-bottom: 8px; }
+.ld-page .ld-tools:empty { display: none; }
+.ld-tool select, .ld-tool input { height: 28px; }
+.ld-tools .ld-tz-chip { align-self: center; }
+.ld-h-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+/* The five count tiles: buttons, each opening Devices on its level. */
+.ld .ld-kpi-btn { font: inherit; text-align: left; cursor: pointer; color: var(--text-primary); }
+.ld .ld-kpi-btn:hover { border-color: var(--accent); }
+.ld .ld-kpi-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.ld .ld-kpi-l { font-size: 11px; color: var(--text-muted); text-transform: uppercase; letter-spacing: .03em; display: inline-flex; align-items: center; gap: 5px; }
+.ld .ld-sw { display: inline-block; width: 8px; height: 8px; border-radius: 2px; }
+/* The charts: slim bars, a quiet grid, labels in the muted ink; hovering a bar dims the rest (CSS only). */
+.ld-chartbox { min-width: 0; }
+.ld-chartbox svg.ld-chart { display: block; width: 100%; height: auto; overflow: visible; }
+.ld-chartbox svg.ld-chart text { fill: var(--text-muted); font-family: inherit; font-size: 10.5px; }
+.ld-chartbox .ld-grid { stroke: var(--grid); stroke-width: 1; }
+.ld-chartbox .ld-axis { stroke: var(--border); stroke-width: 1; }
+.ld-chartbox g.ld-bar { transition: opacity .12s; cursor: default; }
+.ld-chartbox svg.ld-chart:hover g.ld-bar:not(:hover) { opacity: .55; }
+.ld-chartbox .ld-gap-fill { fill: var(--surface-2); stroke: var(--border); stroke-dasharray: 2 2; opacity: .8; }
+.ld-tools-range { display: contents; }
+.ld-chartbox .ld-line-end { stroke: var(--surface-1); stroke-width: 2; }
+.ld-charts3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+.ld-charts3 .ld-chart-card { min-width: 0; margin: 0; }
+.ld-charts3 .ld-chart-card header h2 { display: inline-flex; align-items: center; gap: 6px; }
+.ld-charts3 g.ld-bar[role="link"] { cursor: pointer; }
+@media (max-width: 980px) { .ld-charts3 { grid-template-columns: minmax(0, 1fr); } }
+.ld-key i.ld-ln { width: 14px; height: 2px; border-radius: 1px; }
+.ld-key i.ld-dash { width: 14px; height: 0; background: none !important; border-top: 2px dashed; }
+/* The cluster × time heat map. */
+.ld-heatmap .ld-heat { cursor: pointer; }
+.ld-heatmap .ld-heat:hover { stroke: var(--accent); stroke-width: 1.5; }
+.ld-heat-0, .ld-heat-key.ld-heat-0 { fill: var(--ld-heat-0); background: var(--ld-heat-0); }
+.ld-heat-1, .ld-heat-key.ld-heat-1 { fill: var(--ld-heat-1); background: var(--ld-heat-1); }
+.ld-heat-2, .ld-heat-key.ld-heat-2 { fill: var(--ld-heat-2); background: var(--ld-heat-2); }
+.ld-heat-3, .ld-heat-key.ld-heat-3 { fill: var(--ld-heat-3); background: var(--ld-heat-3); }
+.ld-heat-4, .ld-heat-key.ld-heat-4 { fill: var(--ld-heat-4); background: var(--ld-heat-4); }
+.ld-heat-unknown, .ld-heat-key.ld-heat-unknown { fill: var(--surface-2); background: repeating-linear-gradient(135deg, transparent 0 3px, var(--border) 3px 4px); opacity: .9; }
+.ld-key i.ld-heat-key { border: 1px solid var(--border); }
+.ld-heatmap .ld-heat-name { fill: var(--text-secondary); }
+.ld-heatmap .ld-heat-never { fill: var(--text-muted); font-style: italic; }
+/* The mini stacked bar of a cluster's states, in By cluster. */
+.ld .ld-mini { display: flex; gap: 1px; height: 10px; width: 120px; border-radius: 3px; overflow: hidden; margin: 0 auto; }
+.ld .ld-mini i { display: block; min-width: 2px; height: 100%; }
+/* Devices: the search, the level chips with counts, zone and tag1. */
+.ld .ld-dev-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; margin-bottom: 8px; }
+.ld .ld-dev-bar input[type="search"] { min-width: 230px; height: 28px; }
+.ld .ld-chip-btn { cursor: pointer; font: inherit; border-radius: 999px; height: 24px; }
+.ld .ld-chip-btn b { font-weight: 650; color: var(--text-primary); }
+.ld .ld-chip-btn[aria-pressed="true"] { background: var(--surface-3); color: var(--text-primary); border-color: var(--text-secondary); font-weight: 600; }
+.ld .ld-chip-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.ld .ld-chips#ld-dev-chips { margin-top: 0; }
+/* One device beside the short list. */
+.ld-split { display: grid; grid-template-columns: minmax(260px, 320px) minmax(0, 1fr); gap: 14px; align-items: start; }
+.ld-split-list, .ld-split-board { min-width: 0; display: grid; gap: 10px; }
+.ld-split-list .ld-dev-bar input[type="search"] { min-width: 0; width: 100%; }
+.ld table.tbl tr.ld-sel td { background: color-mix(in srgb, var(--accent) 12%, var(--surface-1)); }
+@media (max-width: 980px) { .ld-split { grid-template-columns: minmax(0, 1fr); } .ld-kpis.ld-5 { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+@media (max-width: 520px) { .ld-kpis.ld-5 { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+.ld-insights.ld-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+/* Config-Management › Scheduled log delay: three bands from two lines. */
+.ldc-levels.ldc-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+/* ld-fetch: start */
+.ld-fetch { display: inline-flex; margin: 0; min-height: 0; gap: 0; }
+.ld-fetch-split { position: relative; display: inline-flex; }
+.ld-fetch-split .ld-fetch-main { position: relative; overflow: hidden; height: 32px; min-width: 132px; border-top-right-radius: 0; border-bottom-right-radius: 0; font-variant-numeric: tabular-nums; }
+.ld-fetch-split .ld-fetch-main.busy:disabled { opacity: 1; cursor: progress; }
+.ld-fetch-split .ld-fetch-caret { height: 32px; padding: 0 8px; border-top-left-radius: 0; border-bottom-left-radius: 0; border-left: 1px solid color-mix(in srgb, var(--on-accent) 35%, var(--accent)); }
+.ld-fetch-fill { position: absolute; left: 0; bottom: 0; height: 3px; width: 0; background: var(--on-accent); opacity: .55; transition: width .3s; pointer-events: none; }
+.ld-fetch-menu { position: absolute; right: 0; top: calc(100% + 4px); z-index: 35; min-width: 250px; background: var(--surface-1); border: 1px solid var(--border); border-radius: 8px; box-shadow: var(--shadow); padding: 4px; display: grid; }
+.ld-fetch-menu[hidden] { display: none; }
+.ld-fetch-item { border: 0; background: none; color: var(--text-primary); text-align: left; padding: 7px 10px; border-radius: 6px; display: grid; gap: 1px; font-size: 13px; cursor: pointer; }
+.ld-fetch-item:hover, .ld-fetch-item:focus-visible { background: var(--surface-2); }
+.ld-fetch-item b { font-weight: 600; }
+.ld-fetch-item span { font-size: 11.5px; color: var(--text-muted); }
+.ld-fetch-note { border-top: 1px solid var(--border); margin-top: 4px; padding: 7px 10px 3px; font-size: 11.5px; line-height: 1.45; color: var(--text-muted); }
+.ld-fetch-sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+/* ld-fetch: end */
+/* ld-rows: start */
+.ld .ld-ibtn { width: 20px; height: 20px; border-radius: 50%; border: 1px solid var(--border-strong); background: var(--surface-1); color: var(--accent); font: italic 700 12px/1 Georgia, 'Times New Roman', serif; padding: 0; cursor: pointer; display: inline-grid; place-items: center; vertical-align: middle; }
+.ld .ld-ibtn:hover, .ld .ld-ibtn[aria-expanded="true"] { border-color: var(--accent); background: var(--surface-2); }
+.ld .ld-ibtn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.ld table.tbl td.ld-acts { white-space: nowrap; text-align: right; width: 1%; }
+.ld table.tbl td.ld-acts > * + * { margin-left: 6px; }
+.ld table.tbl td.ld-acts .btn.sm { height: 24px; padding: 0 9px; font-size: 12px; font-weight: 600; }
+.ld table.tbl tr.ld-rowlink { cursor: pointer; }
+.ld .ld-vhead { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--text-muted); margin: 0 0 6px; }
+.ld .ld-vhead b { color: var(--text-primary); }
+.ld-fixpop { position: fixed; z-index: 60; width: 340px; max-width: calc(100vw - 16px); max-height: calc(100vh - 16px); overflow: auto; background: var(--surface-1); color: var(--text-primary); border: 1px solid var(--border-strong); border-radius: var(--radius-sm); box-shadow: var(--shadow); padding: 10px 12px; display: grid; gap: 8px; font-size: 12.5px; }
+.ld-fixpop[hidden] { display: none; }
+.ld-fixpop-h { display: flex; gap: 8px; align-items: baseline; }
+.ld-fixpop-h b { font-size: 13px; }
+.ld-fixpop-x { margin-left: auto; border: 0; background: none; font-size: 17px; line-height: 1; color: var(--text-muted); padding: 0 2px; cursor: pointer; }
+.ld-fixpop-x:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.ld-fixbox { border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface-2); padding: 7px 9px; display: grid; gap: 3px; }
+.ld-fixwhere { font-size: 11.5px; color: var(--text-muted); }
+/* ld-rows: end */

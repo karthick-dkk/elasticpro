@@ -12,7 +12,7 @@
  */
 
 const DAY = 86400000;
-const LEVELS = { noDelayUnder: 15, delayFrom: 30, criticalOver: 60 };
+const LEVELS = { noDelayUnder: 30, delayFrom: 30, criticalOver: 60 };
 const EXTRAS = ['tag1', 'fwd_tag', 'parser_tag', 'Zone'];
 
 /**
@@ -41,7 +41,7 @@ function devicesOf(c, ci, now) {
     else if (i === 1) { state = 'delay'; nowMinutes = 44 - ci * 3; }
     else if (i === 2 && ci === 0) { state = 'silent'; nowMinutes = null; }
     else if (i === 3 && ci === 0) { state = 'unmeasured'; nowMinutes = null; }
-    else if (i === 4) { state = 'little'; nowMinutes = 18.5; }
+    else if (i === 4) { nowMinutes = 18.5; }   // under the delay line: no little-delay band since 0.3.62
     // The zone step: the cluster's offset taken out of the raw gap; one device on the IST cluster
     // sits at +08:00 (other time zone, not late); nothing is taken out where no zone is known.
     const tz = timeZoneOf(ci, now);
@@ -78,7 +78,7 @@ function daysOf(n, now, ci, devices) {
     const delayed = 1 + ((k * 7 + ci * 3) % 4); const critical = (k * 5 + ci) % 3;
     const silent = k % 4 === 0 ? 1 : 0;
     const onTimeAll = devices - delayed - critical - silent;
-    out.push({ day, devices, onTime: onTimeAll - 1, little: 1, delayed, critical, clockAhead: 0, otherTz: ci === 0 ? 1 : 0, silent, unmeasured: 0, started: (k % 3), solved: (k % 2),
+    out.push({ day, devices, onTime: onTimeAll, little: 0, delayed, critical, clockAhead: 0, otherTz: ci === 0 ? 1 : 0, silent, unmeasured: 0, started: (k % 3), solved: (k % 2),
       lateHours: delayed * 1.5, medianMinutes: 4.1, measured: devices - silent, complete: k > 0, onTimeAll, late: delayed + critical });
   }
   return out;
@@ -106,6 +106,20 @@ function sumDays(lists) {
     by.set(d.day, a);
   }
   return [...by.values()];
+}
+
+/** Today's measurement windows of 2 hours up to now (docs/LOGDELAY.md "windows"): newly late, solved, still late. */
+function windowsOf(now, ci, late) {
+  const d = new Date(now); d.setHours(0, 0, 0, 0);
+  const out = [];
+  for (let from = d.getTime(); from <= now; from += 2 * 3600000) {
+    const to = from + 2 * 3600000;
+    const k = Math.round((from - d.getTime()) / 7200000);
+    const hh = (ms) => `${String(new Date(ms).getHours()).padStart(2, '0')}:${String(new Date(ms).getMinutes()).padStart(2, '0')}`;
+    const still = Math.max(0, late - ((k + ci) % 3)); const critical = Math.min(still, (k + ci) % 2);
+    out.push({ from, to, label: `${hh(from)}–${hh(to)}`, newlyLate: (k + ci) % 3 === 0 ? 1 : 0, solved: (k + ci) % 4 === 0 ? 1 : 0, stillLate: still, delay: still - critical, critical, complete: now >= to });
+  }
+  return out;
 }
 
 /** How the last run read a cluster (docs/LOGDELAY.md "Measurement" lastRead). */
@@ -152,12 +166,16 @@ export function logDelayAnswer(body, clusters, now = Date.now()) {
   const from = body.from || ymd(now - (n - 1) * DAY); const to = body.to || ymd(now);
   const common = { ok: true, from, to, now, label: `${from} – ${to}`, everyHours: 2 };
   const fields = { pattern: 'logstash-*', device: 'src_hostname.keyword', arrival: '@timestamp', eventTime: ['event_created', 'ingested_time'], extras: EXTRAS };
+  // Each device row's own finding (LOGDELAY_SUMMARY/CLUSTER `fix`, docs/LOGDELAY.md "Recommended fixes"): the late ones share a forwarder finding.
+  const fixOf = (p, r) => (r.state === 'critical' || r.state === 'delay' ? { ...FINDINGS(p.c, p.rows)[0], devices: [r.device] } : r.state === 'other_tz' ? { ...FINDINGS(p.c, p.rows).find((f) => f.step === 'device_time_zone'), devices: [r.device] } : null);
+  const withFix = (p) => p.rows.map((r) => ({ ...r, fix: fixOf(p, r) }));
   if (t === 'LOGDELAY_SUMMARY') {
-    const rows = sel.flatMap((p) => p.rows);
+    const rows = sel.flatMap(withFix);
     const daysPer = sel.map((p) => daysOf(n, now, p.ci, p.rows.length));
     const byCluster = sel.map((p, i) => {
       const tt = totalsOf(p.rows);
       return { id: p.c.id, name: p.c.name, devices: tt.devices, measured: tt.measured, lateNow: tt.late, delay: tt.delay, critical: tt.critical, silent: tt.silent, unmeasured: tt.unmeasured,
+        windows: windowsOf(now, p.ci, tt.late), fixes: FINDINGS(p.c, p.rows),
         otherTz: tt.otherTz, timeZone: timeZoneOf(p.ci, now),
         below: tt.devices - tt.late, belowPct: Math.round(((tt.devices - tt.late) / tt.devices) * 1000) / 10, latePct: Math.round((tt.late / tt.devices) * 1000) / 10,
         belowPctPrevious: 95.2 - p.ci, newToday: p.ci === 0 ? 2 : 0, sparkline: daysPer[i].map((d) => (d.devices ? d.late : null)), sparklineDays: daysPer[i].map((d) => d.day),
@@ -168,12 +186,12 @@ export function logDelayAnswer(body, clusters, now = Date.now()) {
     for (const c of never.filter((x) => !only || only.has(x.id))) {
       byCluster.push({ id: c.id, name: c.name, devices: 0, measured: 0, lateNow: 0, delay: 0, critical: 0, silent: 0, unmeasured: 0, otherTz: 0, below: 0, belowPct: null, latePct: null,
         timeZone: { setting: 'detect', mode: 'none', zone: null, offsetMinutes: null, offset: null, agree: null, of: null, pct: null, since: null, steadyRuns: 0, runsNeeded: 3, majorityPercent: 60, toleranceMinutes: 3 },
-        belowPctPrevious: null, newToday: 0, sparkline: [], sparklineDays: [], worst: null, levels: LEVELS, lastRunAt: null,
+        belowPctPrevious: null, newToday: 0, sparkline: [], sparklineDays: [], worst: null, levels: LEVELS, lastRunAt: null, windows: [], fixes: [],
         counts: { inLastRun: 0, now: 0, inRange: 0, lastRead: null }, lastRead: null });
     }
     return { ...common, clusters: clusters.length, measuredClusters: sel.length, totals: totalsOf(rows),
       reduced: [{ hours: 2, n: 1 }, { hours: 4, n: 2 }, { hours: 6, n: 3 }, { hours: 12, n: 4 }, { hours: 24, n: 6 }],
-      newlyLateToday: 2, solvedToday: 1, yesterday: { newlyLate: 3, solved: 4, averageLastedMs: 6600000 }, windows: [],
+      newlyLateToday: 2, solvedToday: 1, yesterday: { newlyLate: 3, solved: 4, averageLastedMs: 6600000 }, windows: windowsOf(now, 0, totalsOf(rows).late),
       days: sumDays(daysPer), byCluster, devices: rows, devicesTotal: rows.length, devicesInRange: rows.length,
       devicesInLastRun: rows.filter((r) => r.inLastRun).length, devicesTruncated: false,
       schedule: { supported: true, enabled: true, everyHours: 2, destination: 'builtin', lastRunAt: now - 4 * 60000, state: {} } };
@@ -188,8 +206,8 @@ export function logDelayAnswer(body, clusters, now = Date.now()) {
     }
     return { ...common, cluster: p.c.id, name: p.c.name, levels: LEVELS, fields, lastRunAt: now - 4 * 60000, lastRead: lastRead(p.rows, now), timeZone: timeZoneOf(p.ci, now),
       counts: { inLastRun: p.rows.filter((r) => r.inLastRun).length, now: p.rows.length, inRange: p.rows.length, lastRead: lastRead(p.rows, now) },
-      totals: totalsOf(p.rows), started: 7, solved: 5,
-      medianNow: 5.1, medianPrevious: 4.2, windows: [], days: daysOf(n, now, p.ci, p.rows.length), devices: p.rows };
+      totals: totalsOf(p.rows), started: 7, solved: 5, fixes: FINDINGS(p.c, p.rows),
+      medianNow: 5.1, medianPrevious: 4.2, windows: windowsOf(now, p.ci, totalsOf(p.rows).late), days: daysOf(n, now, p.ci, p.rows.length), devices: withFix(p) };
   }
   if (t === 'LOGDELAY_DEVICE') {
     const p = per.find((x) => x.c.id === body.clusterId);
@@ -251,7 +269,7 @@ export function logDelayAnswer(body, clusters, now = Date.now()) {
       lastSent: null, managed: [], timer: true, nextSendAt: null, mailConfigured: true, nextPeriod: null,
       options: { devices: 'delayed', groupBy: 'cluster', columns: ['device', 'cluster', 'nowMinutes', 'level', 'startedSolved', 'Zone', 'tag1', 'fwd_tag', 'parser_tag', 'arrival', 'eventTime'],
         sections: ['summary', 'lateEvery2h', 'windows', 'dayByDay', 'topDelayed', 'fixes'], xlsx: true, csv: true, pdf: false, top: 10 },
-      optionsChoices: { devices: ['delayed', 'little', 'all'], groupBy: ['cluster', ...EXTRAS],
+      optionsChoices: { devices: ['delayed', 'all'], groupBy: ['cluster', ...EXTRAS],
         columns: ['device', 'cluster', 'nowMinutes', 'level', 'startedSolved', 'median', 'max', 'episodes', 'lateTime', 'docsPerDay', 'arrival', 'eventTime', 'lateSince', 'rawGap', 'deviceTimeZone', ...EXTRAS],
         sections: ['summary', 'lateEvery2h', 'windows', 'dayByDay', 'topDelayed', 'fixes'], pdf: 'not built: no PDF writer in this build' } };
   }

@@ -1,4 +1,4 @@
-# Log delay report (0.3.57; composite pages, Fetch now, hourly report: next release)
+# Log delay report (0.3.57; composite pages, Fetch now, hourly report: 0.3.61; three levels, fixes on every row: 0.3.62)
 
 Developer contract for the log delay report: the one definition of "late", the scheduled
 measurement with silent devices and delay periods, the stored records, the recommended fixes,
@@ -27,10 +27,10 @@ Code: `crates/elasticpro-core/src/logdelay/` (`levels`, `tz`, `measure`, `collec
 
 | state | rule (minutes `m` = arrival − event) | label |
 |---|---|---|
-| `no_delay` | `m < noDelayUnder` (15) | on time |
-| `little` | `noDelayUnder ≤ m < delayFrom` (15–<30) | little delay |
-| `delay` | `delayFrom ≤ m ≤ criticalOver` (30–60, 60 inclusive) | delayed |
-| `critical` | `m > criticalOver` (>60) | critical |
+| `no_delay` | `m < delayFrom` (30) | on time ("Below 30 min") |
+| `delay` | `delayFrom ≤ m ≤ criticalOver` (30–60, 60 inclusive) | delayed ("30–60 min") |
+| `critical` | `m > criticalOver` (>60) | critical ("Above 60 min") |
+| `little` | **not produced since 0.3.62** (there is no little-delay band — the owner's rule); kept so points and daily totals stored before it still read; everywhere counted and shown as `no_delay` | on time |
 | `clock_ahead` | `m ≤ −delayFrom` (tested first) | clock ahead |
 | `other_tz` | the raw gap sits at a real UTC offset other than the cluster's, two runs in a row ("Time zones" below) | other time zone — not late, counted apart |
 | `silent` | seen recently, no document for `silentAfterHours` (2) | silent — never on time, never 0 min |
@@ -39,7 +39,13 @@ Code: `crates/elasticpro-core/src/logdelay/` (`levels`, `tz`, `measure`, `collec
 * `m` is the **corrected** delay: the raw gap (arrival − event) with the cluster's log time zone
   taken out ("Time zones" below). Without a zone the raw gap is the delay, as before 0.3.62.
 * **Late** = `delay` or `critical`. **On time** (in totals and percentages) = `no_delay`,
-  `little`, `clock_ahead`. Silent, unmeasured and other-time-zone are neither.
+  `clock_ahead` (and an old `little`). Silent, unmeasured and other-time-zone are neither.
+* **`noDelayUnder` stays in the `levels` JSON for compatibility** (the settings file, the Zabbix
+  modules and older clients send it) and is always equal to `delayFrom`: whatever is sent is
+  ignored, the two lines `delayFrom` / `criticalOver` are the levels. The `little` counts in
+  `totals`, `days[]` and the history store's daily mapping stay (always 0 now); the report's
+  *Day by day* sheet has no Little delay column; a schedule's `devices: "little"` reads as
+  `delayed`.
 * **A delay period** starts at the first measurement ≥ `delayFrom` and is solved at the first
   measurement back under it. Silent or unmeasured measurements change nothing about an open
   period (unknown solves nothing). Start/solve times are the run's time: as exact as the
@@ -47,7 +53,7 @@ Code: `crates/elasticpro-core/src/logdelay/` (`levels`, `tz`, `measure`, `collec
 * **Resolution per cluster** (`logdelay::levels_for`): `logdelay.json` `clusters.<id>.levels`
   → the clusters file's `delayThresholds` on that cluster (`delayMinutes` → `delayFrom`,
   `criticalMinutes` → `criticalOver`; today's override, kept) → `logdelay.json` `levels` →
-  shipped 15/30/60. `LOGDELAY_SETTINGS_GET` says which (`levelsFrom`).
+  shipped 30/60. `LOGDELAY_SETTINGS_GET` says which (`levelsFrom`).
 * **UI copy to remove**: `ui/js/core/log-delay.js` `DEFAULT_THRESHOLDS`, `thresholds(cluster)`
   and `classify()`; the per-cluster `delayThresholds` reading in `ui/js/core/config.js`
   normalisation stays only as the config field. Read `levels` from `LOGDELAY_SETTINGS_GET`
@@ -324,7 +330,7 @@ Deterministic rules over the stored periods of a range (default last 7 days) and
 | step | rule |
 |---|---|
 | `device_time_zone` | devices in `other_tz` now, one finding per offset (*Device clock / parser*): the gap sits at a real offset other than the cluster's two runs running; fix names the parser's `date { timezone => "…" }` with an example zone ("Time zones") |
-| `cluster` | the setting is `detect`, over half the measured devices sit at one non-UTC offset (*Cluster*): "set it" (devices named) until detected, "confirm it" once it is |
+| `cluster` | the setting is `detect`, over half the measured devices sit at one non-UTC offset (*Cluster*): under the majority, "only x % of its devices agree on one offset … so no correction is applied — check the devices' clocks and the parser's date filter; the zone is taken from the majority once 60 % agree" (devices named); once detected, "nothing to set" (0.3.62: the page offers no chooser; the config's `logTimeZone` stays an admin override) |
 | `elasticsearch` | ≥ `max(5, 20 % of devices)` late in the same `everyHours` window(s), spanning ≥ 2 `fwd_tag`s (or no `fwd_tag` at all — then named as missing); evidence: devices, windows, days, forwarders, `writeRejected`, `nodesOverWatermark`, snapshots overlapping the windows (named in the fix) |
 | `forwarder` | late devices share one `fwd_tag` (else `Zone` when no `fwd_tag` exists): ≥ 2 late, ≥ half of that tag's devices, other tags ≤ 20 % late |
 | `parser` | same by `parser_tag`, and the late devices span ≥ 2 forwarders |
@@ -336,6 +342,13 @@ Each finding: `{cluster, step, stepLabel, devices[], group: [field, value] | nul
 evidence{…numbers}, missing[]}`. Group findings claim their devices in the order above (a device
 with a time-zone finding is claimed first); the per-device view (`fixes::per_device`) is each
 device's first group. No model, no guess. `LOGDELAY_FIXES` `rules` lists eight rows.
+
+**On every board (0.3.62, `mod.rs` `attach_fixes`)**: `LOGDELAY_SUMMARY` and `LOGDELAY_CLUSTER`
+carry the kept findings (`findings.json`, the last 7 days as the last run matched them; matched
+now when nothing is kept): every `devices[]` row has `fix` — its own finding (`devices: [itself]`),
+`null` when no rule matched it — and every `byCluster[]` entry (a cluster answer: top level) has
+`fixes`, that cluster's findings most devices first, the cluster's own time-zone finding among
+them. This is the one source of every "i" on the page; the UI writes no cause or fix of its own.
 
 ## Messages (`logdelay/mod.rs`)
 
@@ -362,12 +375,13 @@ extras measured (`Settings::extras_for` adds them to a list that leaves them out
   "reduced": [ { "hours": 2, "n": 4 }, { "hours": 4, "n": 7 }, { "hours": 6, "n": 9 }, { "hours": 12, "n": 15 }, { "hours": 24, "n": 23 } ],
   "newlyLateToday": 6, "solvedToday": 4,
   "yesterday": { "newlyLate": 19, "solved": 23, "averageLastedMs": 6600000 },
-  "windows": [ { "from": 0, "to": 0, "label": "00:00–02:00", "newlyLate": 2, "solved": 1, "stillLate": 30, "complete": true } ],
+  "windows": [ { "from": 0, "to": 0, "label": "00:00–02:00", "newlyLate": 2, "solved": 1, "stillLate": 30, "delay": 21, "critical": 9, "complete": true } ],
   "days": [ { "day": "2026-11-04", "devices": 1284, "onTime": 1200, "little": 38, "delayed": 25, "critical": 12, "clockAhead": 0, "silent": 9,
               "unmeasured": 5, "started": 19, "solved": 23, "lateHours": 41.5, "medianMinutes": 4.1, "measured": 1270, "complete": true,
               "onTimeAll": 1238, "late": 37 } ],
   "byCluster": [ { "id": "client-a-prod", "name": "client-a-prod", "devices": 412, "measured": 410, "lateNow": 14, "delay": 9, "critical": 5, "silent": 1,
                    "unmeasured": 1, "otherTz": 2, "timeZone": { "…": "Time zones" }, "below": 396, "belowPct": 96.1, "latePct": 3.4, "belowPctPrevious": 95.2, "newToday": 3,
+                   "windows": [ { "…": "today's windows, this cluster alone (the heat map's Today)" } ], "fixes": [ { "…": "Finding + stepLabel, most devices first" } ],
                    "sparkline": [12, 9, null, 14], "sparklineDays": ["2026-10-06", "…"], "worst": { "device": "fw-dc1-07", "minutes": 94.0, "state": "critical" },
                    "levels": { "noDelayUnder": 15.0, "delayFrom": 30.0, "criticalOver": 60.0 }, "lastRunAt": 1762249000000,
                    "counts": { "inLastRun": 401, "now": 412, "inRange": 418, "lastRead": { "…": "as lastRead" } }, "lastRead": { "at": 0, "devices": 401, "pages": 1, "complete": true, "truncated": false } } ],
@@ -375,16 +389,19 @@ extras measured (`Settings::extras_for` adds them to a list that leaves them out
   "schedule": { "supported": true, "enabled": true, "everyHours": 2, "destination": "builtin", "lastRunAt": 1762249000000, "state": { "…DELAY_SINK state" } } }
 ```
 
-Board figures: tiles = `totals` (`devices`, `late`/`delay`/`critical`, `onTime`,
-`pctOnTime`/`pctLate`/`pctSilent`); *Delay reduced* = `reduced`; *Day by day* = `days`
-(`onTimeAll`, `delayed`, `critical`); *Delayed devices by cluster* = `byCluster` sorted by
-`latePct` (`latePct`, `lateNow` of `devices`); *By cluster* table = `byCluster` (`below` +
-`belowPct`, `delay`, `critical`, `belowPctPrevious` = previous equal-length range, `sparkline`
-over `sparklineDays`, `worst`); *Devices* = `devices` sorted by time late until a column heading
+Board figures (0.3.62): the five tiles = `totals` (`onTime` = below the delay line, `delay`,
+`critical`, `otherTz`, `silent` with `unmeasured` named under it); *Devices behind* = `days[]`
+(`delayed`, `critical`, `solved`) or, for Today, `windows[]` (`stillLate`, `solved`); the heat map
+= `byCluster[].sparkline` over `sparklineDays` (days) or `byCluster[].windows` (Today); *By
+cluster* = `byCluster` (`timeZone`, a states bar from `below`/`delay`/`critical`/`otherTz`/`silent`/
+`unmeasured`, `lateNow` ("30+ min"), `latePct` ("Late share"), `critical`, `otherTz`, `devices`,
+`counts.inLastRun`, `worst`, the "i" from `fixes`; every column sorts, most delayed first by default,
+the 5 most delayed shown until *Show all N* — then 30 a page with Previous / Next); *Devices* (its own tab) = `devices` sorted by time late until a column heading
 is pressed (every Log delay table sorts by any column, remembered in the browser; a state sorts
-worst first, "can't measure" last). `sparkline` entries
-are `null` for a day without totals — draw a gap, not zero. `byCluster[].lastRunAt: null` =
-never measured — say so.
+worst first, "can't measure" last). `sparkline` entries are `null` for a day without totals —
+draw a gap, not zero. `byCluster[].lastRunAt: null` = never measured — say so. `reduced`,
+`yesterday`, `medianMinutes` and the percentages are still answered; the page draws no median,
+percentile or average.
 
 `DeviceRow` (every device table, every message):
 
@@ -394,6 +411,7 @@ never measured — say so.
   "lateSince": 1762240500000, "docsPerDay": 41000, "lastArrival": 1762250400000, "lastEvent": 1762244760000, "silentSince": null,
   "zone": "dc1", "tag1": "firewall", "inLastRun": true,
   "rawGapMinutes": 424.0, "tzOffsetMinutes": 330, "deviceTzOffset": null, "clusterTzOffset": 330,
+  "fix": { "step": "forwarder", "stepLabel": "Forwarder", "why": "…", "fix": "…", "group": ["fwd_tag", "syslog-dc1-02"], "devices": ["fw-dc1-07"], "missing": [] },
   "extras": { "Zone": "dc1", "tag1": "firewall", "fwd_tag": "syslog-dc1-02", "parser_tag": "fortigate-grok" } }
 ```
 
@@ -408,8 +426,9 @@ started → solved* = `lastStarted` → `lastSolved` (`lateSince` set = "still l
 
 `{ ok, cluster, name, from, to, label, now, everyHours, levels, fields {pattern, device, arrival, eventTime[], extras[]}, timeZone,
 lastRunAt, counts {inLastRun, now, inRange, lastRead}, lastRead, totals{…as above}, started, solved, medianNow, medianPrevious, windows[], days[], devices[DeviceRow] }`.
-Tiles: `totals.devices`, `totals.late` (`delay`/`critical`), `pctOnTime`, `started`/`solved`,
-`medianNow` vs `medianPrevious` (null = not measured). Footer: `fields` names.
+Tiles (0.3.62): the same five counts as the fleet's; `started`/`solved` in the counts line;
+`medianNow`/`medianPrevious` are still answered and not drawn. `fixes` = the cluster's findings
+(the head's "i"). Footer: `fields` names.
 
 ### `LOGDELAY_DEVICE {clusterId, device, from?, to?}` — Device board
 
@@ -552,40 +571,87 @@ The schedule itself (every N hours, destination, clusters) stays `DELAY_SINK_SET
   person's — answers `{ok: false, kind: "already_running", runId}` and measures nothing. Every
   run, the timer's and the pressed ones, is in the run log (`JOBS_LIST`, job `logdelay.measure`).
 
-## The Log Delay page (UI, 0.3.60)
+## The Log Delay page (UI, 0.3.60; redesigned 0.3.62)
 
 The boards moved from Reports › Log delay to a top-level page of their own, **Log Delay** (it was
 *Logs & Delay*, the live tail and the in-browser delay view). Reports › Log delay is a link there.
+In 0.3.62 the page took the approved redesign: four tabs, the three configured levels and nothing
+else (no little-delay band, no median, percentile or average anywhere), an "i" on every row.
 
 | route | view | |
 |---|---|---|
-| `#/log-delay` | Dashboard: the fleet (Main board) | `ui/js/logdelay/boards.js` |
-| `#/log-delay/cluster/<id>` | one cluster (Cluster board) | |
-| `#/log-delay/device/<cluster>/<device>` | one device (Device board): only that device — no other late devices, no per-cluster panel | |
-| `#/log-delay/fixes[/<cluster>]` | Recommended fixes (Fix board) | |
-| `#/log-delay/watch` | Live Watch: every cluster measured now from the browser over the time range; the delayed devices; one device live (every 15 s) | `ui/js/logdelay/watch.js` |
-| `#/log-delay/live[/<cluster>[/<device>]]` | Live logs: the documents over the time range, narrowed to one device by *Open in logs* | `ui/js/logdelay/live-logs.js` |
+| `#/log-delay` | **Dashboard**: the fleet (Main board) — five count tiles (Below N, N–M, Above M, Other time zone, Silent; each opens Devices on that level), *Devices behind* over the period, the cluster × time heat map, *By cluster* with a states bar and an "i" per cluster, how the last run read each cluster | `ui/js/logdelay/boards.js` |
+| `#/log-delay/cluster/<id>` | one cluster (Cluster board), under the Dashboard tab: the same tiles and chart, its devices | |
+| `#/log-delay/devices[/<cluster>]` | **Devices**: every device of the period, a search box, level chips with counts, zone and tag1 selects, CSV; each row ends in "i" and *Open in logs* | |
+| `#/log-delay/device/<cluster>/<device>` | one device (Device board) beside the short list of its cluster's devices: facts (no median), the Recommendation (the core's finding — the same words as the row's "i"), the graph, every delay | |
+| `#/log-delay/watch` | **Live Watch**: every cluster measured now from the browser over the time range; one plain line ("N devices 30 min or more behind · live, seconds fresh") with an "i" about the view (the 500-devices-per-cluster limit); rows end in "i", *Details* (the device on Devices) and *Open in logs*; a row click does nothing | `ui/js/logdelay/watch.js` |
+| `#/log-delay/live[/<cluster>[/<device>]]` | **Live logs**: the documents over the time range, narrowed to one device by *Open in logs* | `ui/js/logdelay/live-logs.js` |
 
 The old addresses open the matching view (`ui/js/reports/route.js` `movedPath`):
-`#/reports/log-delay[/…]` (the mail's link) and `#/logs` (Live logs).
+`#/reports/log-delay[/…]` (the mail's link), `#/logs` (Live logs) and `#/log-delay/fixes[/<cluster>]`
+(the Recommended fixes tab, gone in 0.3.62: Devices).
 
-* **One device row** (`ui/js/logdelay/rows.js`) for every device table — the fleet's Devices, a
-  cluster's devices, Each device on Recommended fixes, Live Watch's delayed devices. A device
-  Live Watch measured is turned into a board row (`liveDeviceRow`); what one measurement cannot
-  know (the worst, the delays before it, time late) reads unknown. Every row has *Open in logs*.
+* **The title bar** carries the name, the tabs and, at the right end, **Fetch now**
+  (`ui/js/logdelay/fetch-now.js`): a split button. The main click re-measures the late devices
+  (`devices: "late"`, named with the configured level: "30 min or more behind") of the cluster on
+  screen; ▾ offers *Late devices* / *Whole cluster* (`devices: "all"`, silent devices too) and ends
+  in a non-clickable note "Automatic · every 2 h, all devices / last … · next …". Progress shows on
+  the button ("3 of 8…" and a thin fill); what finished or was refused is a toast — nothing sits
+  beside the button. With All clusters it asks to pick one (`fetchNowAllowed`). The device board's
+  *Fetch this device* uses the same path (`fetchNowPress`).
+* **One tools row** under the bar: the cluster, the period (*Today* = the measurement windows,
+  then Last 7 / 30 days, This / Last month) and the **time zone** — plain text, never a chooser
+  (the owner's rule; Edit cluster › Log time zone stays an admin override in the config), and no
+  counts in the chip: "Time zone +05:30" is the majority zone of the devices in view
+  (`timeZoneChipText`), "Time zone not detected" when no zone has a majority. **The chip is the
+  button** ("Time zone +05:30 ▾", `aria-expanded`): it opens the zones with their device counts, majority first — "+05:30 · 24 devices · majority",
+  "+08:00 · 16 devices", "not detected · 6 devices · under 60 % agree, no correction"
+  (`devicesByZone`; a device's zone is its own steady offset when it sits in another zone, else
+  its cluster's detected offset, `zoneOfRow`). Esc and a click outside close it. **A zone is a
+  filter**, kept in the address like the other filters (`?tz=480`, `?tz=none`; `tzOfHash`,
+  `ldHash(view, cluster, device, {tz})`): every view follows it — the tiles and By cluster are
+  counted from the devices in that zone (`tileCounts`, `matchesZone`), Devices and Live Watch list
+  them, the chip reads "Time zone +08:00 · only these devices" and the panel gains "Show all time
+  zones". Devices behind and the heat map are the core's day totals for every zone; a note says
+  so while the filter is on. By cluster's *Time zone* column reads "+05:30 · 12 of 13 devices" or
+  "not detected · 41 % agree" (`timeZoneCell`). Live Watch and Live logs show the time range (Last
+  1 min … 12 h, or a custom from/to) and the zone every time is written in — the server's (PING
+  `tz`), else the browser's.
+* **Levels from the config, never a figure of the page's own**: the tile names, the chips, the
+  chart legend and the Fetch now menu read `levels` (`delayFrom`, `criticalOver`) from the
+  answers; levels the core has not said read as words ("Below the delay line").
+* **Three chart panels** (`behindSeries`; the owner's rule, prototype v25), one row, one shared y
+  scale: *30–60 min behind* (light blue), *Above 60 min behind* (blue) and *Resolved log delays*
+  (green: devices that came back below the delay line in the bucket) — one bucket per day of the
+  period (`days[]` `delayed`, `critical`, `solved`) or per measurement window for Today
+  (`windows[]` `delay`, `critical`, `solved`; the split is each device's last stored state at the
+  window's end, added in 0.3.62, `summary::windows`). No stacking, no overlay line; a bar's title is
+  the bucket and its one value, a click opens Devices on that level. A bucket without a figure is
+  a hatched gap, never zero. Order: tiles, the state bar, the charts, By cluster, then the heat map
+  **Hourly Delay Status** (`heatRows`: one row per cluster from `byCluster[].sparkline` (days) or
+  `byCluster[].windows` (Today); a cell the core has no total for is hatched, a cluster never
+  measured says so).
+* **The "i"** (`ui/js/logdelay/fix-popover.js` `fixButton`, `fixesFor`): one popover for every
+  button, the core's own words (`DeviceRow.fix`, `byCluster[].fixes`, a device board's `finding`,
+  Live Watch's `LOGDELAY_FIXES` `devices[]` joined by cluster and device): title = `stepLabel`,
+  cause = `why`, fix, where = the step, a cluster's grouped by finding with the device count. A
+  device the core has no finding for says exactly that. Clicking "i" never triggers the row; Esc,
+  × or a click outside closes it and Esc gives the focus back.
+* **Colours** (the owner's "cool blue", prototype v17; theme tokens `--ld-ok --ld-delay --ld-crit
+  --ld-tz --ld-silent`, with `-ink` and `-bg`): green #8fd19e below the line, light blue #a9cbee
+  for the delay band, blue #5b8fd1 above the critical line, violet #a77fd6 (dark #b994ec) for
+  another time zone, grey for silent; the same fills in every theme, each theme mixing its pill
+  fill (28 % of the fill with the surface) and ink (35 % with the text colour) so the pill text
+  keeps AA. Never red with yellow. The heat ramp is one blue (#3f78c0) at 7 / 24 / 45 / 70 /
+  100 % over the surface. The "back below the line" line stays green.
+* **One device row** (`ui/js/logdelay/rows.js`) for every device table — Devices, a cluster's
+  devices, Live Watch. A device Live Watch measured is turned into a board row (`liveDeviceRow`);
+  what one measurement cannot know reads unknown. The row's actions are buttons at its right end.
 * **zone and tag1** are columns of every device and log table (`extraOf`: the row's extras or
   meta, any case). Live Watch asks for them in the measurement's `_source`.
-* **Time range** for Live Watch and Live logs: Last 1, 5, 30 min, 1, 2, 3, 6, 8, 12 h, or a
-  custom from/to (`ui/js/core/log-range.js`). The close-up of one device is bounded by it: before
-  0.3.60 it searched every index of the pattern with `track_total_hits: true`.
-* **Times** are written in the server's zone — PING's `tz` when the core says it, the browser's
-  zone until then — and the Live logs time column names the offset (`@timestamp (UTC +05:30)`).
-* **Fetch Now** (*Log Delay – Fetch Now*, on the Dashboard and Fixes tabs): `JOB_RUN {jobId:
-  "logdelay.measure", clusterIds?, device?}` for the board on screen, then `JOBS_LIST` every 2 s
-  until that run ends (progress, done of total, devices measured); `already_running` follows the
-  run already going, `blocked_readonly` and `forbidden` are said as such. When it completes the
-  boards read the store again.
 * **Drawing**: each card is kept until what it shows changed (`lib/keyed.js`); each view's
   requests carry an AbortController that leaving the view aborts; an answer for a view no longer
-  shown redraws nothing. `tools/flicker-check.mjs` holds every view to zero replacements under a
-  parked pointer, with the LOGDELAY_* answers slowed or failing (`--ld-delay`).
+  shown redraws nothing. The chart's hover is CSS only (`<title>` per bar), so a parked pointer
+  replaces nothing. `tools/flicker-check.mjs` holds every view to zero replacements under a parked
+  pointer, with the LOGDELAY_* answers slowed or failing (`--ld-delay`); `tools/fit-check.mjs`
+  measures the Devices tab with an "i" popover open (`log-delay/devices/popover`).

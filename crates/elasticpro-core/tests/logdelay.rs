@@ -98,7 +98,7 @@ async fn an_ist_cluster_is_detected_after_three_runs_and_a_set_zone_is_corrected
     assert_eq!((set["critical"].clone(), set["delay"].clone(), set["timeZone"]["mode"].clone(), set["timeZone"]["zone"].clone()), (json!(1), json!(1), json!("set"), json!("Asia/Kolkata")), "{set}");
     let fixes = c.handle(json!({ "type": "LOGDELAY_FIXES", "session": &s, "clusterIds": ["ist"] })).await;
     let cl = fixes["findings"].as_array().unwrap().iter().find(|f| f["step"] == "cluster").cloned().expect("a Cluster finding: set the zone");
-    assert!(cl["fix"].as_str().unwrap().starts_with("set it"), "{cl}");
+    assert!(cl["fix"].as_str().unwrap().starts_with("check the devices' clocks"), "{cl}");
     assert_eq!(cl["devices"].as_array().unwrap().len(), 8, "{cl}");
 
     // Runs 2 and 3: detected (the set cluster's zone names it), every IST device on time, slow 40 min late,
@@ -130,7 +130,7 @@ async fn an_ist_cluster_is_detected_after_three_runs_and_a_set_zone_is_corrected
     assert_eq!(dz["stepLabel"], json!("Device clock / parser"));
     assert!(dz["fix"].as_str().unwrap().contains("timezone =>"), "{dz}");
     let cl = fs.iter().find(|f| f["step"] == "cluster").cloned().expect("a Cluster finding: confirm the zone");
-    assert!(cl["fix"].as_str().unwrap().starts_with("confirm it"), "{cl}");
+    assert!(cl["fix"].as_str().unwrap().starts_with("nothing to set"), "{cl}");
     // The measurement documents carry the raw gap and what was taken out.
     let day = std::fs::read_dir(dir.join("logdelay").join("ist").join("m")).unwrap().filter_map(|e| e.ok()).map(|e| e.path())
         .find(|p| p.extension().is_some_and(|x| x == "ndjson")).map(|p| std::fs::read_to_string(p).unwrap_or_default()).unwrap_or_default();
@@ -248,7 +248,7 @@ async fn the_built_in_destination_measures_tracks_periods_and_answers_every_read
     // Settings: the defaults, the resolved fields per cluster, who may change them.
     let g = c.handle(json!({ "type": "LOGDELAY_SETTINGS_GET", "session": &s })).await;
     assert_eq!(g["ok"], json!(true), "{g}");
-    assert_eq!(g["settings"]["levels"], json!({ "noDelayUnder": 15.0, "delayFrom": 30.0, "criticalOver": 60.0 }));
+    assert_eq!(g["settings"]["levels"], json!({ "noDelayUnder": 30.0, "delayFrom": 30.0, "criticalOver": 60.0 }));
     assert_eq!(g["settings"]["silentAfterHours"], json!(2));
     assert_eq!(g["resolved"][0]["id"], json!("prod"));
     assert!(g["resolved"][0]["fields"]["extras"].as_array().unwrap().contains(&json!("fwd_tag")), "{g}");

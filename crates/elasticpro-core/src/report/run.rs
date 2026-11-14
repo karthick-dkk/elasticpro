@@ -1082,7 +1082,7 @@ The files {} ({}) are larger than the {cap_mb} MB a mail may carry (UI_REPORT_MA
             let extras = self.logdelay_extras_union(&s);
             let opts = crate::logdelay::report::Options::default().apply(&e.options, &extras).unwrap_or_default();
             v["options"] = serde_json::to_value(&opts).unwrap_or(Value::Null);
-            v["optionsChoices"] = json!({ "devices": ["delayed", "little", "all"], "groupBy": std::iter::once("cluster".to_string()).chain(extras.iter().cloned()).collect::<Vec<_>>(),
+            v["optionsChoices"] = json!({ "devices": ["delayed", "all"], "groupBy": std::iter::once("cluster".to_string()).chain(extras.iter().cloned()).collect::<Vec<_>>(),
                                           "columns": crate::logdelay::report::BASE_COLUMNS.iter().map(|c| c.to_string()).chain(extras.iter().cloned()).collect::<Vec<_>>(),
                                           "sections": crate::logdelay::report::SECTIONS, "pdf": "not built: no PDF writer in this build" });
         }

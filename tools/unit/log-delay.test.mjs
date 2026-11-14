@@ -45,14 +45,15 @@ test('classify: levels the core has not said are unknown, never on time', () => 
 
 test('classify: the core states, and the Logs page names for them', () => {
   assert.equal(lv.levelState(10, T), 'no_delay');
-  assert.equal(lv.levelState(15, T), 'little', 'noDelayUnder itself is a little delay');
-  assert.equal(lv.levelState(29.9, T), 'little');
+  assert.equal(lv.levelState(15, T), 'no_delay', 'no little-delay band: under the delay line is one band');
+  assert.equal(lv.levelState(29.9, T), 'no_delay');
   assert.equal(lv.levelState(30, T), 'delay');
   assert.equal(lv.levelState(60, T), 'delay');
   assert.equal(lv.levelState(60.1, T), 'critical');
   assert.equal(lv.levelState(-30, T), 'clock_ahead');
   assert.equal(lv.levelState(null, T), 'unmeasured');
-  assert.equal(classify(20, T), 'OK', 'little delay is on time on the Logs page');
+  assert.equal(classify(20, T), 'OK', '20 min is under the line: on time on the Logs page');
+  assert.equal(lv.STATE_LABEL.little, 'on time', 'a core before 0.3.62 stored "little": read as under the line');
 });
 
 test('levels: remembered from what the core says, per cluster', () => {
