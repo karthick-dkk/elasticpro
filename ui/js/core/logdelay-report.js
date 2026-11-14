@@ -83,30 +83,47 @@ export const LD_VIEWS = Object.freeze(['fleet', 'cluster', 'devices', 'device', 
  * reports/route.js parseHash, the one definition of where they moved.
  */
 export function ldRoute(hash) {
-  const fleet = { view: 'fleet', clusterId: null, device: null };
+  const tz = tzOfHash(hash);
+  const fleet = { view: 'fleet', clusterId: null, device: null, tz };
   const { page, rest } = parseHash(hash);
   if (page !== LD_PAGE) return fleet;
   const dec = (s) => { try { return decodeURIComponent(s || ''); } catch (_) { return s || ''; } };
   const [kind, a, ...more] = rest ? rest.split('/') : [];
-  if (kind === 'cluster' && a) return { view: 'cluster', clusterId: dec(a), device: null };
-  if (kind === 'device' && a && more.length) return { view: 'device', clusterId: dec(a), device: dec(more.join('/')) };
+  if (kind === 'cluster' && a) return { view: 'cluster', clusterId: dec(a), device: null, tz };
+  if (kind === 'device' && a && more.length) return { view: 'device', clusterId: dec(a), device: dec(more.join('/')), tz };
   // `fixes` is the old Recommended fixes address: its devices, with their fixes, are on Devices.
-  if (kind === 'devices' || kind === 'fixes') return { view: 'devices', clusterId: a ? dec(a) : null, device: null };
-  if (kind === 'watch') return { view: 'watch', clusterId: null, device: null };
-  if (kind === 'live') return { view: 'live', clusterId: a ? dec(a) : null, device: a && more.length ? dec(more.join('/')) : null };
+  if (kind === 'devices' || kind === 'fixes') return { view: 'devices', clusterId: a ? dec(a) : null, device: null, tz };
+  if (kind === 'watch') return { view: 'watch', clusterId: null, device: null, tz };
+  if (kind === 'live') return { view: 'live', clusterId: a ? dec(a) : null, device: a && more.length ? dec(more.join('/')) : null, tz };
   return fleet;
 }
 
+/**
+ * The time-zone filter a hash carries (`?tz=480`, `?tz=none`): the UTC offset in minutes the
+ * devices in view sit at, `'none'` for the devices of a cluster whose zone is not detected, or
+ * null (every zone). It is a filter like the others, so it lives in the address.
+ */
+export function tzOfHash(hash) {
+  const q = String(hash || '').split('?')[1];
+  if (!q) return null;
+  const v = new URLSearchParams(q).get('tz');
+  if (v === null || v === '') return null;
+  if (v === 'none') return 'none';
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+
 const enc = encodeURIComponent;
-/** The hash for a view. */
-export function ldHash(view, clusterId, device) {
+/** The hash for a view; `o.tz` (an offset in minutes, 'none') keeps the time-zone filter in it. */
+export function ldHash(view, clusterId, device, o) {
   const base = `#/${LD_PAGE}`;
-  if (view === 'cluster' && clusterId) return `${base}/cluster/${enc(clusterId)}`;
-  if (view === 'device' && clusterId && device) return `${base}/device/${enc(clusterId)}/${enc(device)}`;
-  if (view === 'devices' || view === 'fixes') return clusterId ? `${base}/devices/${enc(clusterId)}` : `${base}/devices`;
-  if (view === 'watch') return `${base}/watch`;
-  if (view === 'live') return clusterId ? `${base}/live/${enc(clusterId)}${device ? `/${enc(device)}` : ''}` : `${base}/live`;
-  return base;
+  const q = o && o.tz !== null && o.tz !== undefined ? `?tz=${enc(String(o.tz))}` : '';
+  if (view === 'cluster' && clusterId) return `${base}/cluster/${enc(clusterId)}${q}`;
+  if (view === 'device' && clusterId && device) return `${base}/device/${enc(clusterId)}/${enc(device)}${q}`;
+  if (view === 'devices' || view === 'fixes') return `${clusterId ? `${base}/devices/${enc(clusterId)}` : `${base}/devices`}${q}`;
+  if (view === 'watch') return `${base}/watch${q}`;
+  if (view === 'live') return `${clusterId ? `${base}/live/${enc(clusterId)}${device ? `/${enc(device)}` : ''}` : `${base}/live`}${q}`;
+  return `${base}${q}`;
 }
 
 /** The tab a view is shown under: Dashboard (the fleet, a cluster), Devices (the list, one device), Live Watch, Live logs. */
@@ -442,16 +459,31 @@ export function heatRows(byCluster, period) {
   }));
 }
 /**
- * Devices by time zone (the Dashboard's chips): a device's zone is its own offset when it sits in
- * another zone (`deviceTzOffset` of an `other_tz` row), else its cluster's detected or set
- * offset (`clusterTzOffset`); a device of a cluster without a majority is "not detected". One
- * entry per zone, `{key, label, offsetMinutes|null, devices}`, most devices first, "not
- * detected" last. The rows are the answer's `devices[]`, so the chips follow the filters.
+ * A device's time zone: its own steady offset when it sits in another zone (`deviceTzOffset` of
+ * an `other_tz` row), else its cluster's detected or set offset (`clusterTzOffset`); null for a
+ * device of a cluster whose zone is not detected (no 60 % majority: nothing is corrected).
+ */
+export function zoneOfRow(r) {
+  if (!r) return null;
+  if (r.state === 'other_tz' && finite(r.deviceTzOffset)) return r.deviceTzOffset;
+  return finite(r.clusterTzOffset) ? r.clusterTzOffset : null;
+}
+/** Whether a row is in the time-zone filter `tz` (an offset, 'none', or null for every zone). */
+export function matchesZone(r, tz) {
+  if (tz === null || tz === undefined) return true;
+  const z = zoneOfRow(r);
+  return tz === 'none' ? z === null : z === tz;
+}
+
+/**
+ * Devices by time zone (the Expand panel beside the chip): one entry per zone,
+ * `{key, offsetMinutes|null, devices}`, most devices first, "not detected" (key 'none') last.
+ * The rows are the answer's `devices[]` in view, so the counts follow the filters.
  */
 export function devicesByZone(rows) {
   const by = new Map();
   for (const r of rows || []) {
-    const own = r.state === 'other_tz' && finite(r.deviceTzOffset) ? r.deviceTzOffset : finite(r.clusterTzOffset) ? r.clusterTzOffset : null;
+    const own = zoneOfRow(r);
     const key = own === null ? 'none' : String(own);
     const e = by.get(key) || { key, offsetMinutes: own, devices: 0 };
     e.devices += 1;
@@ -461,26 +493,34 @@ export function devicesByZone(rows) {
 }
 
 /**
- * The time-zone line above a board, plain text (the owner's rule: no chooser on the page; the
- * config's Edit cluster › Log time zone stays an admin override). One cluster: "<cluster> +05:30 ·
- * 12 of 13 devices" (set: "… · set"), or "not detected · 41 % agree". Every cluster: "by majority
- * of devices · 2 of 3 clusters detected".
+ * The chip's text: the zone alone (the owner's rule: no counts in the chip, no chooser) —
+ * "+05:30", the majority zone of the devices in view, or "not detected"; with a filter on,
+ * "+08:00 · only these devices".
  */
-export function timeZoneLine(byCluster, clusterId, offsetText) {
-  const list = byCluster || [];
-  if (clusterId) {
-    const c = list.find((x) => x.id === clusterId);
-    const tz = c && c.timeZone;
-    if (!tz) return null;
-    const name = c.name || c.id;
-    if (tz.mode === 'set') return `${name} ${tz.offset || offsetText(tz.offsetMinutes)} · set${finite(tz.agree) && finite(tz.of) ? ` · ${countText(tz.agree)} of ${countText(tz.of)} devices agree` : ''}`;
-    if (tz.mode === 'detected') return `${name} ${tz.offset || offsetText(tz.offsetMinutes)}${finite(tz.agree) && finite(tz.of) ? ` · ${countText(tz.agree)} of ${countText(tz.of)} devices` : ''}`;
-    return `${name} not detected${finite(tz.pct) ? ` · ${Math.round(tz.pct)} % agree` : ''}`;
+export function timeZoneChipText(zones, tz, offsetText) {
+  if (tz !== null && tz !== undefined) return `${tz === 'none' ? 'not detected' : offsetText(tz)} · only these devices`;
+  const top = (zones || []).find((z) => z.offsetMinutes !== null);
+  return top ? offsetText(top.offsetMinutes) : 'not detected';
+}
+
+/**
+ * The counts the tiles show for a list of rows (the time-zone filter on): the same figures as
+ * the core's `totals` — on time = under the delay line (an old `little` and clock ahead too),
+ * the delay band, above the critical line, another time zone, silent, can't measure.
+ */
+export function tileCounts(rows) {
+  const t = { devices: 0, onTime: 0, delay: 0, critical: 0, otherTz: 0, silent: 0, unmeasured: 0 };
+  for (const r of rows || []) {
+    t.devices += 1;
+    const s = r && r.state;
+    if (s === 'no_delay' || s === 'little' || s === 'clock_ahead') t.onTime += 1;
+    else if (s === 'delay') t.delay += 1;
+    else if (s === 'critical') t.critical += 1;
+    else if (s === 'other_tz') t.otherTz += 1;
+    else if (s === 'silent') t.silent += 1;
+    else if (s === 'unmeasured') t.unmeasured += 1;
   }
-  const measured = list.filter((c) => c.timeZone && c.lastRunAt !== null && c.lastRunAt !== undefined);
-  if (!measured.length) return null;
-  const known = measured.filter((c) => c.timeZone.mode === 'detected' || c.timeZone.mode === 'set').length;
-  return `by majority of devices · ${countText(known)} of ${countText(measured.length)} clusters detected`;
+  return t;
 }
 
 /** The By cluster column: "+05:30 · 12 of 13 devices", "+00:00 · set", or "not detected · 41 % agree". Unknown says so. */

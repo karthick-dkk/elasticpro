@@ -24,7 +24,7 @@ import { levelsOf, zoneOf, loadLevels, levelState, isLate } from '../core/delay-
 import { offsetLabel } from '../core/log-tz.js';
 import { runBounded, cancellation, partialNote } from '../core/fleet.js';
 import { reportSheets, reportFilename } from '../core/delay-report.js';
-import { liveDeviceRow, stateText, extraOf, countText } from '../core/logdelay-report.js';
+import { liveDeviceRow, stateText, extraOf, countText, matchesZone } from '../core/logdelay-report.js';
 import { rangeBounds, rangeMinutes, rangeText } from '../core/log-range.js';
 import { workbook, XLSX_MIME } from '../lib/xlsx.js';
 import { toast } from '../ui/menu.js';
@@ -59,7 +59,7 @@ const delay = {
 
 /** Lets go of the requests the view still has out (the fan-out). */
 let ctl = null;
-let ctx = { repaint: () => {}, range: () => ({ id: '1h' }), zone: () => null };
+let ctx = { repaint: () => {}, range: () => ({ id: '1h' }), zone: () => null, tz: () => null };
 const W = nodeCache();
 const bump = () => { delay.ver += 1; ctx.repaint(); };
 const sortLate = tableSort('logdelay.watch', { onChange: () => bump() });
@@ -308,13 +308,15 @@ function lateFrom() {
 }
 
 /** Every device measured, as board rows; the delayed ones only unless "Every device" is chosen. */
-function liveRows() {
+function liveRows(all = false) {
   const byId = new Map(activeClusters().map((c) => [c.id, c]));
+  // The page's time-zone filter (`?tz=`) reaches here too: a device's zone is its own steady offset, else its cluster's.
+  const tz = ctx.tz ? ctx.tz() : null;
   const rows = (delay.records || []).map((r) => ({
     ...liveDeviceRow(r, byId.get(r.clusterId) || { id: r.clusterId, name: r.cluster }, levelsOf(r.clusterId)),
     fix: delay.fixes.get(`${r.clusterId}|${r.device}`) || null,
-  }));
-  return delay.show === 'all' ? rows : rows.filter((r) => isLate(r.state));
+  })).filter((r) => matchesZone(r, tz));
+  return all || delay.show === 'all' ? rows : rows.filter((r) => isLate(r.state));
 }
 
 function devicesCard() {
@@ -324,8 +326,8 @@ function devicesCard() {
   const rank = (st) => ({ critical: 0, delay: 1, clock_ahead: 2, unmeasured: 3, unknown: 4, little: 5, no_delay: 6 }[st] ?? 7);
   const base = [...rows].sort((a, b) => rank(a.state) - rank(b.state) || ((b.nowMinutes ?? -1e9) - (a.nowMinutes ?? -1e9)));
   const ordered = sortLate.apply(base, sortCols(LIVE_COLS));
-  const late = (delay.records || []).filter((r) => isLate(levelState(r.delayMinutes, levelsOf(r.clusterId)))).length;
-  const body = W.get('w:dev:body', `${delay.ver}|${delay.show}|${sortLate.sort ? `${sortLate.sort.key}${sortLate.sort.dir}` : '-'}`, () => {
+  const late = liveRows(true).filter((r) => isLate(r.state)).length;
+  const body = W.get('w:dev:body', `${delay.ver}|${delay.show}|${ctx.tz ? ctx.tz() : ''}|${sortLate.sort ? `${sortLate.sort.key}${sortLate.sort.dir}` : '-'}`, () => {
     const note = coverageNote('fetch');
     const from = lateFrom();
     return [

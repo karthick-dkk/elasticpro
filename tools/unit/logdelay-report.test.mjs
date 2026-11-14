@@ -13,32 +13,39 @@ const R = await import(pathToFileURL(path.join(ROOT, 'ui/js/core/logdelay-report
 const ST = await import(pathToFileURL(path.join(ROOT, 'ui/js/core/logdelay-settings.js')).href);
 
 test('routes: each view round-trips, names with slashes and spaces included', () => {
-  assert.deepEqual(R.ldRoute('#/log-delay'), { view: 'fleet', clusterId: null, device: null });
-  assert.deepEqual(R.ldRoute(R.ldHash('watch')), { view: 'watch', clusterId: null, device: null });
-  assert.deepEqual(R.ldRoute(R.ldHash('live')), { view: 'live', clusterId: null, device: null });
-  assert.deepEqual(R.ldRoute(R.ldHash('live', 'c 1', 'fw/dc1 07')), { view: 'live', clusterId: 'c 1', device: 'fw/dc1 07' });
-  assert.deepEqual(R.ldRoute(R.ldHash('live', 'c1')), { view: 'live', clusterId: 'c1', device: null });
-  assert.deepEqual(R.ldRoute(R.ldHash('cluster', 'client a/prod')), { view: 'cluster', clusterId: 'client a/prod', device: null });
-  assert.deepEqual(R.ldRoute(R.ldHash('device', 'c1', 'fw/dc1 07')), { view: 'device', clusterId: 'c1', device: 'fw/dc1 07' });
-  assert.deepEqual(R.ldRoute(R.ldHash('devices')), { view: 'devices', clusterId: null, device: null });
-  assert.deepEqual(R.ldRoute(R.ldHash('devices', 'c1')), { view: 'devices', clusterId: 'c1', device: null });
+  assert.deepEqual(R.ldRoute('#/log-delay'), { view: 'fleet', clusterId: null, device: null, tz: null });
+  assert.deepEqual(R.ldRoute(R.ldHash('watch')), { view: 'watch', clusterId: null, device: null, tz: null });
+  assert.deepEqual(R.ldRoute(R.ldHash('live')), { view: 'live', clusterId: null, device: null, tz: null });
+  assert.deepEqual(R.ldRoute(R.ldHash('live', 'c 1', 'fw/dc1 07')), { view: 'live', clusterId: 'c 1', device: 'fw/dc1 07', tz: null });
+  assert.deepEqual(R.ldRoute(R.ldHash('live', 'c1')), { view: 'live', clusterId: 'c1', device: null, tz: null });
+  assert.deepEqual(R.ldRoute(R.ldHash('cluster', 'client a/prod')), { view: 'cluster', clusterId: 'client a/prod', device: null, tz: null });
+  assert.deepEqual(R.ldRoute(R.ldHash('device', 'c1', 'fw/dc1 07')), { view: 'device', clusterId: 'c1', device: 'fw/dc1 07', tz: null });
+  assert.deepEqual(R.ldRoute(R.ldHash('devices')), { view: 'devices', clusterId: null, device: null, tz: null });
+  assert.deepEqual(R.ldRoute(R.ldHash('devices', 'c1')), { view: 'devices', clusterId: 'c1', device: null, tz: null });
   assert.equal(R.ldHash('devices', 'c 1'), '#/log-delay/devices/c%201');
   // The Recommended fixes tab went in 0.3.62: its address opens Devices (every row has its "i").
-  assert.deepEqual(R.ldRoute(R.ldHash('fixes', 'c1')), { view: 'devices', clusterId: 'c1', device: null });
-  assert.deepEqual(R.ldRoute('#/log-delay/fixes'), { view: 'devices', clusterId: null, device: null });
+  assert.deepEqual(R.ldRoute(R.ldHash('fixes', 'c1')), { view: 'devices', clusterId: 'c1', device: null, tz: null });
+  assert.deepEqual(R.ldRoute('#/log-delay/fixes'), { view: 'devices', clusterId: null, device: null, tz: null });
   assert.equal(R.ldRoute('#/reports/capacity').view, 'fleet', 'another page is not a log delay view');
   assert.equal(R.ldHash('fleet'), '#/log-delay');
+  // The time-zone filter lives in the address like the other filters: an offset, or 'none'.
+  assert.deepEqual(R.ldRoute('#/log-delay/devices?tz=480'), { view: 'devices', clusterId: null, device: null, tz: 480 });
+  assert.deepEqual(R.ldRoute('#/log-delay?tz=none'), { view: 'fleet', clusterId: null, device: null, tz: 'none' });
+  assert.equal(R.ldRoute('#/log-delay/watch?tz=abc').tz, null, 'nonsense is no filter');
+  assert.equal(R.ldHash('devices', 'c 1', null, { tz: 'none' }), '#/log-delay/devices/c%201?tz=none');
+  assert.equal(R.ldHash('cluster', 'c1', null, { tz: 330 }), '#/log-delay/cluster/c1?tz=330');
+  assert.equal(R.ldHash('fleet', null, null, { tz: null }), '#/log-delay', 'no filter, no query');
   assert.deepEqual(['fleet', 'cluster', 'devices', 'device', 'fixes', 'watch', 'live'].map(R.ldTab), ['fleet', 'fleet', 'devices', 'devices', 'devices', 'watch', 'live']);
 });
 
 test('the old addresses open the matching view of the Log Delay page', () => {
   // The mail's "Open the full report" link and saved Reports › Log delay links.
-  assert.deepEqual(R.ldRoute('#/reports/log-delay'), { view: 'fleet', clusterId: null, device: null });
-  assert.deepEqual(R.ldRoute('#/reports/log-delay/cluster/c%201'), { view: 'cluster', clusterId: 'c 1', device: null });
-  assert.deepEqual(R.ldRoute('#/reports/log-delay/device/c1/fw%2Fdc1'), { view: 'device', clusterId: 'c1', device: 'fw/dc1' });
-  assert.deepEqual(R.ldRoute('#/reports/log-delay/fixes/c1'), { view: 'devices', clusterId: 'c1', device: null });
+  assert.deepEqual(R.ldRoute('#/reports/log-delay'), { view: 'fleet', clusterId: null, device: null, tz: null });
+  assert.deepEqual(R.ldRoute('#/reports/log-delay/cluster/c%201'), { view: 'cluster', clusterId: 'c 1', device: null, tz: null });
+  assert.deepEqual(R.ldRoute('#/reports/log-delay/device/c1/fw%2Fdc1'), { view: 'device', clusterId: 'c1', device: 'fw/dc1', tz: null });
+  assert.deepEqual(R.ldRoute('#/reports/log-delay/fixes/c1'), { view: 'devices', clusterId: 'c1', device: null, tz: null });
   // #/logs was the live tail.
-  assert.deepEqual(R.ldRoute('#/logs'), { view: 'live', clusterId: null, device: null });
+  assert.deepEqual(R.ldRoute('#/logs'), { view: 'live', clusterId: null, device: null, tz: null });
 });
 
 test('Fetch Now: the scoped JOB_RUN, the run found in JOBS_LIST, and its words', () => {
@@ -164,28 +171,30 @@ test('device filters: the three levels, late, another time zone, silent (can\'t 
   assert.deepEqual(R.DEVICE_FILTERS, ['all', 'late', 'critical', 'delay', 'ok', 'tz', 'silent']);
 });
 
-test('time zones: devices by zone follow the rows; the line and the cell are plain text with the device counts', () => {
+test('time zones: a device\'s zone, the filter, the counts behind Expand, the chip\'s words, the By cluster cell', () => {
   const rows = [
     { state: 'no_delay', clusterTzOffset: 330, deviceTzOffset: 330 }, { state: 'delay', clusterTzOffset: 330, deviceTzOffset: 330 },
     { state: 'other_tz', clusterTzOffset: 330, deviceTzOffset: 480 }, { state: 'no_delay', clusterTzOffset: 0, deviceTzOffset: 0 },
-    { state: 'silent', clusterTzOffset: null, deviceTzOffset: null },
+    { state: 'silent', clusterTzOffset: null, deviceTzOffset: null }, { state: 'critical', clusterTzOffset: null, deviceTzOffset: null },
   ];
+  assert.deepEqual(rows.map(R.zoneOfRow), [330, 330, 480, 0, null, null], 'own steady offset first, else the cluster\'s, else not detected');
+  assert.deepEqual(rows.filter((r) => R.matchesZone(r, 330)).length, 2);
+  assert.deepEqual(rows.filter((r) => R.matchesZone(r, 'none')).length, 2, 'none = a cluster without a majority');
+  assert.deepEqual(rows.filter((r) => R.matchesZone(r, null)).length, 6, 'no filter keeps every row');
   const z = R.devicesByZone(rows);
-  assert.deepEqual(z.map((x) => [x.key, x.devices]), [['330', 2], ['0', 1], ['480', 1], ['none', 1]], 'most devices first, not detected last');
-  const off = (m) => (m === 330 ? '+05:30' : m === 0 ? '+00:00' : `${m}`);
+  assert.deepEqual(z.map((x) => [x.key, x.devices]), [['330', 2], ['0', 1], ['480', 1], ['none', 2]], 'most devices first, not detected last');
+  const off = (m) => (m === 330 ? '+05:30' : m === 0 ? '+00:00' : m === 480 ? '+08:00' : `${m}`);
+  assert.equal(R.timeZoneChipText(z, null, off), '+05:30', 'the majority zone, no counts in the chip');
+  assert.equal(R.timeZoneChipText(z, 480, off), '+08:00 · only these devices');
+  assert.equal(R.timeZoneChipText(z, 'none', off), 'not detected · only these devices');
+  assert.equal(R.timeZoneChipText([{ key: 'none', offsetMinutes: null, devices: 3 }], null, off), 'not detected');
+  assert.deepEqual(R.tileCounts(rows), { devices: 6, onTime: 2, delay: 1, critical: 1, otherTz: 1, silent: 1, unmeasured: 0 });
   const by = [
     { id: 'a', name: 'A', lastRunAt: 1, timeZone: { mode: 'detected', offset: '+05:30', offsetMinutes: 330, agree: 12, of: 13, pct: 92.3 } },
-    { id: 'b', name: 'B', lastRunAt: 1, timeZone: { mode: 'set', offset: '+00:00', offsetMinutes: 0, agree: 10, of: 13 } },
     { id: 'c', name: 'C', lastRunAt: 1, timeZone: { mode: 'none', pct: 41.7 } },
-    { id: 'd', name: 'D', lastRunAt: null, timeZone: { mode: 'none' } },
   ];
-  assert.equal(R.timeZoneLine(by, 'a', off), 'A +05:30 · 12 of 13 devices');
-  assert.equal(R.timeZoneLine(by, 'b', off), 'B +00:00 · set · 10 of 13 devices agree');
-  assert.equal(R.timeZoneLine(by, 'c', off), 'C not detected · 42 % agree');
-  assert.equal(R.timeZoneLine(by, null, off), 'by majority of devices · 2 of 3 clusters detected', 'a cluster never measured is not counted');
-  assert.equal(R.timeZoneLine([], null, off), null);
   assert.equal(R.timeZoneCell(by[0].timeZone, off), '+05:30 · 12 of 13 devices');
-  assert.equal(R.timeZoneCell(by[2].timeZone, off), 'not detected · 42 % agree');
+  assert.equal(R.timeZoneCell(by[1].timeZone, off), 'not detected · 42 % agree');
   assert.equal(R.timeZoneCell(null, off), '—');
 });
 

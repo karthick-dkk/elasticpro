@@ -31,12 +31,12 @@ import { takeFocus } from '../core/focus.js';
 import { intent } from '../core/intent.js';
 import { serverZoneName } from '../core/es.js';
 import { clusters } from '../core/state.js';
-import { ldRoute, ldHash, ldTab, setDisplayZone, LD_PAGE, PERIODS, timeZoneLine } from '../core/logdelay-report.js';
+import { ldRoute, ldHash, ldTab, setDisplayZone, LD_PAGE, PERIODS, timeZoneChipText, devicesByZone, countText } from '../core/logdelay-report.js';
 import { RANGES, normaliseRange, browserZone, zonedInputValue, fromZonedInput, offsetText, zoneOffsetMinutes } from '../core/log-range.js';
 import { offsetLabel } from '../core/log-tz.js';
 import {
   boardsNode, boardsReset, boardsLeave, boardsForget, boardsLoading, boardsScope, boardsScopeId,
-  boardsPick, boardsSetPick, boardsPeriod, boardsSetPeriod, boardsInfo, boardsByCluster,
+  boardsPick, boardsSetPick, boardsPeriod, boardsSetPeriod, boardsInfo, boardsZoneRows, boardsMajorityPercent,
 } from '../logdelay/boards.js';
 import { watchNodes, watchEnter, watchLeave, watchBusy, watchStart } from '../logdelay/watch.js';
 import { liveNodes, liveEnter, liveLeave, liveBusy, liveRangeChanged } from '../logdelay/live-logs.js';
@@ -73,7 +73,8 @@ function setRange(r) {
 /** The zone every time on the page is written in: the server's when it said it, else this browser's. */
 const zone = () => serverZoneName() || browserZone();
 
-const viewCtx = () => ({ repaint: draw, range: () => range, zone });
+/** What the views read from the page: the redraw, the time range, the zone times are written in, the time-zone filter. */
+const viewCtx = () => ({ repaint: draw, range: () => range, zone, tz: () => route.tz });
 
 /* ------------------------------------ the page ------------------------------------ */
 
@@ -105,7 +106,7 @@ export function render(el) {
  */
 function canonical() {
   const first = String(location.hash || '').replace(/^#\/?/, '').split(/[/?]/)[0];
-  const want = ldHash(route.view, route.clusterId, route.device);
+  const want = ldHash(route.view, route.clusterId, route.device, route);
   if (first === LD_PAGE && location.hash === want) return;
   try { history.replaceState(null, '', want); } catch (_) { location.hash = want; }
 }
@@ -151,8 +152,8 @@ function busy() {
 
 function tabs() {
   const cur = ldTab(route.view);
-  return P.get('tabs', cur, () => h('nav.rp-nav.ld-tabs', { 'aria-label': 'Log Delay views' },
-    ...TABS.map(([id, label, title]) => h('a', { href: ldHash(id), title, dataset: { tab: id }, 'aria-current': cur === id ? 'page' : null }, label))));
+  return P.get('tabs', `${cur}|${route.tz}`, () => h('nav.rp-nav.ld-tabs', { 'aria-label': 'Log Delay views' },
+    ...TABS.map(([id, label, title]) => h('a', { href: ldHash(id, null, null, route), title, dataset: { tab: id }, 'aria-current': cur === id ? 'page' : null }, label))));
 }
 
 /** Fetch now, at the right end of the title bar: the cluster on screen, its late devices; ▾ for the whole cluster. */
@@ -183,12 +184,12 @@ function clusterPick() {
   const tab = ldTab(route.view);
   const fixed = route.view === 'cluster' || route.view === 'device' ? route.clusterId : null;
   const cur = fixed || boardsPick();
-  return P.get('pick', `${tab}|${cur}|${all.map((c) => c.id).join(',')}`, () => {
+  return P.get('pick', `${tab}|${cur}|${route.tz}|${all.map((c) => c.id).join(',')}`, () => {
     const sel = h('select#ld-clusters', { 'aria-label': 'Cluster', onchange: (e) => {
       const id = e.target.value;
       boardsSetPick(id);
       // The tab's own list for that cluster: the fleet or the cluster board, the devices of all or of one.
-      location.hash = tab === 'devices' ? ldHash('devices', id === 'all' ? null : id) : id === 'all' ? ldHash('fleet') : ldHash('cluster', id);
+      location.hash = tab === 'devices' ? ldHash('devices', id === 'all' ? null : id, null, route) : id === 'all' ? ldHash('fleet', null, null, route) : ldHash('cluster', id, null, route);
     } }, h('option', { value: 'all' }, `All clusters (${all.length})`), ...all.map((c) => h('option', { value: c.id }, c.name)));
     sel.value = all.some((c) => c.id === cur) ? cur : 'all';
     return h('label.field.ld-tool', 'Cluster', sel);
@@ -206,23 +207,70 @@ function periodPick() {
   });
 }
 
+/* ------------------------------------ the time zone ------------------------------------ */
+
+/** Whether the Expand panel is open; Esc and a click outside close it (wired once). */
+let tzOpen = false;
+let tzWired = false;
+function wireTz() {
+  if (tzWired) return;
+  tzWired = true;
+  document.addEventListener('click', (e) => {
+    if (!tzOpen) return;
+    if (e.target.closest && e.target.closest('.ld-tz-tools')) return;
+    tzOpen = false; draw();
+  }, true);
+  document.addEventListener('keydown', (e) => {
+    if (e.key !== 'Escape' || !tzOpen) return;
+    e.stopPropagation(); tzOpen = false; draw();
+    const b = document.getElementById('ld-tz-chip'); if (b) b.focus();
+  }, true);
+}
+
+/** Go to the same view with the time-zone filter `tz` (an offset, 'none', or null for every zone). */
+function setTz(tz) {
+  tzOpen = false;
+  location.hash = ldHash(route.view, route.clusterId, route.device, { tz });
+}
+
 /**
- * The log time zone, as plain text (docs/LOGDELAY.md "Time zones"; the owner's rule: no chooser
- * here): one cluster's offset with how many of its devices agree, or how many clusters have one.
+ * The time zone (docs/LOGDELAY.md "Time zones"; the owner's rule: no chooser, no counts in the
+ * chip): "Time zone +05:30" — the majority zone of the devices in view — or "not detected"; with
+ * the filter on, "+08:00 · only these devices". The chip is the button: it opens the zones with
+ * their device counts, majority first; a zone filters every view (the filter lives in the
+ * address, `?tz=`), and "Show all time zones" lets go of it.
  */
-function tzChip() {
-  const id = boardsScopeId(route);
-  const list = boardsByCluster();
-  const text = timeZoneLine(list, id, offsetLabel);
-  const c = id ? list.find((x) => x.id === id) : null;
-  const mode = c && c.timeZone ? c.timeZone.mode : 'fleet';
-  return P.get('tz', `${id}|${text}|${mode}`, () => {
-    if (!text) return null;
-    const title = mode === 'set' ? 'Set in the cluster’s config; delays are shown after this offset is taken out.'
-      : mode === 'detected' ? 'The offset most measured devices fall in, steady over the last runs; delays are shown after it is taken out.'
-        : mode === 'none' ? 'Fewer than the needed share of devices agree on one offset: nothing is corrected, delays are as measured.'
-          : 'Each cluster’s zone is the offset the majority of its devices fall in.';
-    return h('span.ld-chip.ld-tz-chip#ld-tz-chip', { title, dataset: { mode } }, h('b', 'Time zone'), ' · ', text);
+function tzTools() {
+  wireTz();
+  const rows = boardsZoneRows(route);
+  const zones = devicesByZone(rows);
+  const tz = route.tz;
+  const pct = boardsMajorityPercent();
+  const text = timeZoneChipText(zones, tz, offsetLabel);
+  const sig = `${tz}|${tzOpen}|${zones.map((z) => `${z.key}:${z.devices}`).join(',')}|${pct}`;
+  return P.get('tz', sig, () => {
+    // The chip is the button (prototype v23): "Time zone +05:30 ▾" opens the per-zone counts.
+    const mode = tz !== null ? 'filter' : zones.some((z) => z.offsetMinutes !== null) ? 'detected' : 'none';
+    const canOpen = rows.length > 0 || tz !== null;
+    const chip = h('button.ld-chip.ld-tz-chip#ld-tz-chip', { type: 'button', disabled: !canOpen,
+      title: tz === null ? 'The zone the majority of the devices in view fall in. Opens every zone with its devices; a zone filters every view.' : 'Only the devices in this time zone are shown, on every view. Show all time zones lets go of the filter.',
+      'aria-haspopup': 'menu', 'aria-expanded': String(tzOpen && canOpen), 'aria-controls': 'ld-tz-panel', dataset: { mode },
+      onclick: () => { if (!canOpen) return; tzOpen = !tzOpen; draw(); if (tzOpen) { const first = document.querySelector('#ld-tz-panel .ld-tz-entry'); if (first) first.focus(); } },
+    }, h('b', 'Time zone'), ' ', text, h('span.ld-tz-caret', { 'aria-hidden': 'true' }, ' ▾'));
+    if (!canOpen) return h('div.ld-tz-tools', chip);
+    const entries = zones.map((z, i) => {
+      const key = z.offsetMinutes === null ? 'none' : z.offsetMinutes;
+      const on = tz !== null && String(tz) === String(key);
+      const words = z.offsetMinutes === null
+        ? `not detected · ${countText(z.devices)} device${z.devices === 1 ? '' : 's'} · under ${pct} % agree, no correction`
+        : `${offsetLabel(z.offsetMinutes)} · ${countText(z.devices)} device${z.devices === 1 ? '' : 's'}${i === 0 ? ' · majority' : ''}`;
+      return h('button.ld-tz-entry', { type: 'button', role: 'menuitemradio', 'aria-checked': String(on), dataset: { zone: String(key) }, onclick: () => setTz(key) }, words);
+    });
+    const panel = h('div.ld-tz-panel#ld-tz-panel', { role: 'menu', 'aria-label': 'Devices by time zone', hidden: !tzOpen },
+      h('div.ld-tz-panel-h', 'Devices by time zone', h('span.muted', ' · in view')),
+      ...entries,
+      tz !== null ? h('button.ld-tz-entry.ld-tz-all', { type: 'button', role: 'menuitem', onclick: () => setTz(null) }, 'Show all time zones') : null);
+    return h('div.ld-tz-tools', chip, panel);
   });
 }
 
@@ -264,7 +312,7 @@ function tools() {
   const tab = ldTab(route.view);
   const row = P.get('tools', '', () => h('div.toolbar.ld-tools'));
   if (tab === 'watch' || tab === 'live') mount(row, rangePick());
-  else mount(row, clusterPick(), periodPick(), tzChip());
+  else mount(row, clusterPick(), periodPick(), tzTools());
   return row;
 }
 

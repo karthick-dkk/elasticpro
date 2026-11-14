@@ -394,8 +394,9 @@ Board figures (0.3.62): the five tiles = `totals` (`onTime` = below the delay li
 (`delayed`, `critical`, `solved`) or, for Today, `windows[]` (`stillLate`, `solved`); the heat map
 = `byCluster[].sparkline` over `sparklineDays` (days) or `byCluster[].windows` (Today); *By
 cluster* = `byCluster` (`timeZone`, a states bar from `below`/`delay`/`critical`/`otherTz`/`silent`/
-`unmeasured`, `devices`, `counts.inLastRun`, `below`, `delay`, `critical`, `otherTz`, `worst`, the
-"i" from `fixes`); *Devices* (its own tab) = `devices` sorted by time late until a column heading
+`unmeasured`, `lateNow` ("30+ min"), `latePct` ("Late share"), `critical`, `otherTz`, `devices`,
+`counts.inLastRun`, `worst`, the "i" from `fixes`; every column sorts, most delayed first by default,
+the 5 most delayed shown until *Show all N* — then 30 a page with Previous / Next); *Devices* (its own tab) = `devices` sorted by time late until a column heading
 is pressed (every Log delay table sorts by any column, remembered in the browser; a state sorts
 worst first, "can't measure" last). `sparkline` entries are `null` for a day without totals —
 draw a gap, not zero. `byCluster[].lastRunAt: null` = never measured — say so. `reduced`,
@@ -599,17 +600,23 @@ The old addresses open the matching view (`ui/js/reports/route.js` `movedPath`):
   beside the button. With All clusters it asks to pick one (`fetchNowAllowed`). The device board's
   *Fetch this device* uses the same path (`fetchNowPress`).
 * **One tools row** under the bar: the cluster, the period (*Today* = the measurement windows,
-  then Last 7 / 30 days, This / Last month) and the **time-zone line** — plain text, never a
-  chooser (the owner's rule; Edit cluster › Log time zone stays an admin override in the config):
-  one cluster reads "Time zone · <cluster> +05:30 · 12 of 13 devices" (set: "… · set"), or "not
-  detected · 42 % agree"; every cluster reads "Time zone · by majority of devices · 2 of 3 clusters
-  detected" (`timeZoneLine`). Live Watch and Live logs show the time range (Last 1 min … 12 h, or a
-  custom from/to) and the zone every time is written in — the server's (PING `tz`), else the browser's.
-* **Devices by time zone** (`devicesByZone`), under the tiles on the Dashboard and the cluster
-  board: one chip per zone with its device count — a device's own offset when it sits in another
-  zone (`deviceTzOffset` of an `other_tz` row), else its cluster's offset (`clusterTzOffset`),
-  "not detected" for a cluster without a majority. From the answer's `devices[]`, so it follows
-  the cluster picked. By cluster's *Time zone* column reads "+05:30 · 12 of 13 devices" (`timeZoneCell`).
+  then Last 7 / 30 days, This / Last month) and the **time zone** — plain text, never a chooser
+  (the owner's rule; Edit cluster › Log time zone stays an admin override in the config), and no
+  counts in the chip: "Time zone +05:30" is the majority zone of the devices in view
+  (`timeZoneChipText`), "Time zone not detected" when no zone has a majority. **The chip is the
+  button** ("Time zone +05:30 ▾", `aria-expanded`): it opens the zones with their device counts, majority first — "+05:30 · 24 devices · majority",
+  "+08:00 · 16 devices", "not detected · 6 devices · under 60 % agree, no correction"
+  (`devicesByZone`; a device's zone is its own steady offset when it sits in another zone, else
+  its cluster's detected offset, `zoneOfRow`). Esc and a click outside close it. **A zone is a
+  filter**, kept in the address like the other filters (`?tz=480`, `?tz=none`; `tzOfHash`,
+  `ldHash(view, cluster, device, {tz})`): every view follows it — the tiles and By cluster are
+  counted from the devices in that zone (`tileCounts`, `matchesZone`), Devices and Live Watch list
+  them, the chip reads "Time zone +08:00 · only these devices" and the panel gains "Show all time
+  zones". Devices behind and the heat map are the core's day totals for every zone; a note says
+  so while the filter is on. By cluster's *Time zone* column reads "+05:30 · 12 of 13 devices" or
+  "not detected · 41 % agree" (`timeZoneCell`). Live Watch and Live logs show the time range (Last
+  1 min … 12 h, or a custom from/to) and the zone every time is written in — the server's (PING
+  `tz`), else the browser's.
 * **Levels from the config, never a figure of the page's own**: the tile names, the chips, the
   chart legend and the Fetch now menu read `levels` (`delayFrom`, `criticalOver`) from the
   answers; levels the core has not said read as words ("Below the delay line").

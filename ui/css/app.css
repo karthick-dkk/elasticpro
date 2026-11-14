@@ -2916,11 +2916,26 @@ tr.jb-focus td { background: var(--accent-soft); }
 .ld-page .ld-tz-chip { cursor: default; }
 .ld-page .ld-tz-chip[data-mode="none"] { color: var(--ld-silent-ink); }
 .ld-page .ld-tz-chip[data-mode="detected"], .ld-page .ld-tz-chip[data-mode="set"] { color: var(--ld-tz-ink); }
-.ld .ld-zones { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; }
-.ld .ld-zones-l { font-size: 12px; }
-.ld .ld-zone-chip { color: var(--ld-tz-ink); background: var(--ld-tz-bg); border-color: color-mix(in srgb, var(--ld-tz-ink) 40%, transparent); }
-.ld .ld-zone-chip[data-zone="none"] { color: var(--ld-silent-ink); background: var(--ld-silent-bg); }
-.ld .ld-zone-chip b { color: inherit; }
+.ld-page .ld-tz-chip[data-mode="filter"] { color: var(--ld-tz-ink); background: var(--ld-tz-bg); border-color: color-mix(in srgb, var(--ld-tz-ink) 40%, transparent); }
+/* The time zone's Expand panel: every zone with its devices; a zone is a filter, kept in the address. */
+.ld-tz-tools { position: relative; display: inline-flex; align-items: center; gap: 6px; align-self: center; }
+.ld-page button.ld-tz-chip { cursor: pointer; font: inherit; }
+.ld-page button.ld-tz-chip:disabled { cursor: default; opacity: .8; }
+.ld-page button.ld-tz-chip:hover:not(:disabled), .ld-page button.ld-tz-chip[aria-expanded="true"] { border-color: var(--accent); }
+.ld-page button.ld-tz-chip:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.ld-tz-caret { color: var(--text-muted); }
+/* The fleet's state bar under the tiles. */
+.ld .ld-statebar { display: grid; gap: 6px; }
+.ld .ld-stack { display: flex; height: 18px; gap: 2px; border-radius: 5px; overflow: hidden; }
+.ld .ld-stack i { display: block; min-width: 3px; height: 100%; }
+.ld .ld-statebar .ld-key b { color: var(--text-primary); font-variant-numeric: tabular-nums; }
+.ld-tz-panel { position: absolute; left: 0; top: calc(100% + 4px); z-index: 35; min-width: 280px; max-width: min(420px, calc(100vw - 32px)); background: var(--surface-1); border: 1px solid var(--border); border-radius: 8px; box-shadow: var(--shadow); padding: 4px; display: grid; }
+.ld-tz-panel[hidden] { display: none; }
+.ld-tz-panel-h { font-size: 11px; text-transform: uppercase; letter-spacing: .03em; color: var(--text-muted); padding: 5px 10px 3px; }
+.ld-tz-entry { border: 0; background: none; text-align: left; padding: 6px 10px; border-radius: 6px; font: inherit; font-size: 12.5px; color: var(--text-primary); cursor: pointer; white-space: nowrap; }
+.ld-tz-entry:hover, .ld-tz-entry:focus-visible { background: var(--surface-2); outline: none; }
+.ld-tz-entry[aria-checked="true"] { font-weight: 650; color: var(--ld-tz-ink); }
+.ld-tz-entry.ld-tz-all { border-top: 1px solid var(--border); border-radius: 0 0 6px 6px; margin-top: 3px; color: var(--accent); }
 /* The title bar: the name, the tabs beside it, Fetch now at the right end; one row that wraps. */
 .ld-page .rp-head.ld-bar { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-start; gap: 6px 14px; margin-bottom: 4px; }
 .ld-bar .ld-bar-tabs { flex: 1 1 auto; min-width: 0; }
