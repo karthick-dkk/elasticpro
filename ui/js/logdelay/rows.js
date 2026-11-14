@@ -15,6 +15,7 @@ import { clusters } from '../core/state.js';
 import {
   ldHash, stateText, stateTone, nowText, minutesText, durationText, countText, docsText, startedSolvedText, whenText, extraOf,
 } from '../core/logdelay-report.js';
+import { deviceZoneText, delaySumText } from '../core/log-tz.js';
 
 const finite = (v) => typeof v === 'number' && Number.isFinite(v);
 const nameOf = (id) => { const c = clusters().find((x) => x.id === id); return c ? c.name : id; };
@@ -22,7 +23,7 @@ const link = (href, text, title) => h('a', { href, title: title || null }, text)
 const muted = (t = '—') => h('span.muted', t);
 
 /** How bad a state is, for sorting "Now": worst highest; can't measure and unknown are unknown. */
-const STATE_RANK = { critical: 5, delay: 4, clock_ahead: 3, silent: 2, little: 1, no_delay: 0 };
+const STATE_RANK = { critical: 5, delay: 4, clock_ahead: 3, other_tz: 2.5, silent: 2, little: 1, no_delay: 0 };
 export const stateRank = (s) => (s in STATE_RANK ? STATE_RANK[s] : null);
 /** When the last delay (or silence) began: what "Last delay: started → solved" sorts on. */
 export const lastDelayAt = (r) => (r.state === 'silent' && finite(r.silentSince) ? r.silentSince : finite(r.lateSince) ? r.lateSince : finite(r.lastStarted) ? r.lastStarted : null);
@@ -42,8 +43,17 @@ const COLS = {
     { type: 'text', value: (r) => extraOf(r, 'zone') }],
   tag1: ['tag1', false, (r) => { const v = extraOf(r, 'tag1'); return h('td', v === null ? muted() : String(v)); },
     { type: 'text', value: (r) => extraOf(r, 'tag1') }],
-  state: ['Now', false, (r) => h('td', statePill(r.state)), { type: 'number', value: (r) => stateRank(r.state), start: -1 }],
-  now: ['Delay now', true, (r) => h('td.num', nowText(r)), { type: 'number', value: (r) => r.nowMinutes }],
+  state: ['Now', false, (r) => h('td', r.state === 'other_tz'
+    ? h('span', { title: `Its logs are stamped in another time zone (${deviceZoneText(r)}) than the cluster’s: the gap sits at that offset run after run. Not late.` }, statePill(r.state))
+    : statePill(r.state)), { type: 'number', value: (r) => stateRank(r.state), start: -1 }],
+  // The figure after the zone step; its title spells the sum out (docs/LOGDELAY.md "Time zones").
+  now: ['Delay now', true, (r, ctx) => h('td.num', { title: delaySumText(r, (ms) => whenText(ms, ctx.now || Date.now(), { seconds: true })) || null }, nowText(r)),
+    { type: 'number', value: (r) => r.nowMinutes }],
+  rawGap: ['Raw gap', true, (r) => h('td.num.muted', { title: 'arrival − event as measured, before the time zone is taken out' },
+    finite(r.rawGapMinutes) ? minutesText(r.rawGapMinutes) : '—'), { type: 'number', value: (r) => r.rawGapMinutes }],
+  deviceTz: ['Device time zone', false, (r) => h('td', { title: 'the real UTC offset the device’s gap sits at, against the cluster’s zone' },
+    r.state === 'other_tz' ? statePill('other_tz', deviceZoneText(r)) : deviceZoneText(r) === '—' ? muted() : deviceZoneText(r)),
+    { type: 'text', value: (r) => deviceZoneText(r) }],
   median: ['Median', true, (r) => h('td.num', minutesText(r.medianMinutes)), { type: 'number', value: (r) => r.medianMinutes }],
   max: ['Max', true, (r) => h('td.num', minutesText(r.maxMinutes)), { type: 'number', value: (r) => r.maxMinutes }],
   episodes: ['Delays', true, (r) => h('td.num', countText(r.episodes)), { type: 'number', value: (r) => r.episodes }],

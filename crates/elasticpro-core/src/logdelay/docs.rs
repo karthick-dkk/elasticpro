@@ -48,6 +48,9 @@ pub fn measurement_doc(cluster: &str, r: &Row, bucket: &str, run_ms: i64) -> Val
         "arrival_time": r.arrival_ms,
         "event_time": r.event_ms,
         "delay_minutes": r.delay_minutes,
+        "raw_gap_minutes": r.raw_gap_minutes,
+        "tz_offset_minutes": r.tz_offset_minutes,
+        "device_tz_offset": r.device_tz_offset,
         "state": r.state.as_str(),
         "extras": extras(&r.extras),
     })
@@ -127,11 +130,12 @@ pub fn template_body(prefix: &str) -> Value {
     let ms = json!({ "type": "date", "format": "epoch_millis" });
     let fields: &[(&str, &Value)] = &[
         ("record", &kw), ("@timestamp", &json!({ "type": "date" })), ("cluster", &kw), ("clusterName", &kw), ("device", &kw),
-        ("docs", &long), ("arrival_time", &ms), ("event_time", &ms), ("delay_minutes", &float), ("state", &kw), ("measured_at", &ms),
+        ("docs", &long), ("arrival_time", &ms), ("event_time", &ms), ("delay_minutes", &float), ("raw_gap_minutes", &float),
+        ("tz_offset_minutes", &long), ("device_tz_offset", &long), ("state", &kw), ("measured_at", &ms),
         ("started", &ms), ("solved", &ms), ("lasted_minutes", &float), ("open", &json!({ "type": "boolean" })),
         ("worst_minutes", &float), ("worst_state", &kw), ("last_minutes", &float), ("last_state", &kw), ("measurements", &long), ("pattern", &kw),
         ("day", &json!({ "type": "date", "format": "yyyy-MM-dd" })), ("devices", &long), ("onTime", &long), ("little", &long), ("delayed", &long),
-        ("critical", &long), ("clockAhead", &long), ("silent", &long), ("unmeasured", &long), ("startedCount", &long), ("solvedCount", &long),
+        ("critical", &long), ("clockAhead", &long), ("otherTz", &long), ("silent", &long), ("unmeasured", &long), ("startedCount", &long), ("solvedCount", &long),
         ("lateHours", &float), ("medianMinutes", &float), ("p95Minutes", &float), ("measured", &long), ("complete", &json!({ "type": "boolean" })),
         ("writtenAt", &ms),
     ];
@@ -174,7 +178,8 @@ mod tests {
 
     #[test]
     fn a_silent_row_carries_no_delay_and_its_state() {
-        let r = Row { device: "fw".into(), docs: 0, arrival_ms: Some(5), event_ms: None, delay_minutes: None, state: State::Silent, extras: BTreeMap::new() };
+        let r = Row { device: "fw".into(), docs: 0, arrival_ms: Some(5), event_ms: None, delay_minutes: None, raw_gap_minutes: None, device_tz_offset: None,
+                      tz_offset_minutes: None, state: State::Silent, extras: BTreeMap::new() };
         let d = measurement_doc("prod", &r, "2026-11-04T14:00:00Z", 1);
         assert_eq!(d["delay_minutes"], Value::Null);
         assert_eq!(d["state"], "silent");

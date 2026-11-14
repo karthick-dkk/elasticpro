@@ -2,8 +2,9 @@
 //!
 //! ```text
 //!   delay sink tick (every_hours, hosted, armed)
-//!     └── per cluster: one search (measure.rs) ──▶ readings
-//!           └── tracker.apply (state.rs): periods open/solve, silences, states
+//!     └── per cluster: one search (measure.rs) ──▶ readings (raw gap = arrival − event)
+//!           └── tracker.apply (state.rs): the log time zone detected and taken out (tz.rs),
+//!                 periods open/solve, silences, states
 //!                 ├── built-in store (store.rs): tracker, day file, daily totals   always
 //!                 └── documents (docs.rs) ──▶ history store | sink cluster          by destination, gated as before
 //!     └── fixes.rs over every cluster's stored periods + fleet-cache facts ──▶ findings.json
@@ -31,6 +32,7 @@ pub mod state;
 pub mod store;
 pub mod summary;
 pub mod time;
+pub mod tz;
 
 use crate::auth::{Caller, Role};
 use crate::bridge::Core;
@@ -44,6 +46,7 @@ use state::{Applied, Daily};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use summary::{ClusterInput, Range};
+use tz::LogTimeZone;
 
 /// The fields an admin sets as the default for every cluster (`logdelay.json` `fields`), each
 /// optional: unset, the cluster's own `delayFields`, the clusters file's `defaults:` and the
@@ -233,20 +236,54 @@ impl Core {
         Fields { pattern: shape.pattern.unwrap_or_else(|| "logstash-*".into()), device, arrival, event_time, extras: s.extras_for(id) }
     }
 
-    /// One cluster's run, after the search: the readings against the memory, the built-in
-    /// store written, the documents for the destination handed back.
-    /// `read` is how the run read the cluster: a list that is not complete turns nobody it did
-    /// not read silent (`Tracker::apply_run`).
-    pub(crate) fn logdelay_apply(&self, cluster: &str, readings: Vec<Reading>, run_ms: i64, levels: &Levels, s: &Settings, read: collect::RunInfo)
+    /// The cluster's `logTimeZone` setting: the config entry's (a config-file cluster) or the
+    /// overlay's (a Zabbix cluster), both carried on the spec; unset or unreadable = detect.
+    pub(crate) fn log_time_zone_for(&self, id: &str) -> LogTimeZone {
+        let Some(spec) = self.spec_for(id) else { return LogTimeZone::Detect };
+        match spec.log_time_zone.as_deref().map(LogTimeZone::parse) {
+            None => LogTimeZone::Detect,
+            Some(Ok(z)) => z,
+            Some(Err(e)) => {
+                tracing::warn!(cluster = %id, error = %e, "log delay: the cluster's log time zone is not a zone; detecting instead");
+                LogTimeZone::Detect
+            }
+        }
+    }
+
+    /// Zones a detected offset may be named after: the server's own, and every zone set by name
+    /// on a cluster. A name is given only when one of these sits at the offset (tz.rs).
+    pub(crate) fn tz_hints(&self) -> Vec<chrono_tz::Tz> {
+        let mut out: Vec<chrono_tz::Tz> = vec![];
+        if let (Some(name), _) = crate::volume::schedule::server_zone() {
+            if let Ok(LogTimeZone::Named(z)) = LogTimeZone::parse(&name) {
+                out.push(z);
+            }
+        }
+        for spec in self.all_specs() {
+            if let Some(Ok(LogTimeZone::Named(z))) = spec.log_time_zone.as_deref().map(LogTimeZone::parse) {
+                if !out.contains(&z) {
+                    out.push(z);
+                }
+            }
+        }
+        out
+    }
+
+    /// One cluster's run, after the search: the readings against the memory (the zone taken
+    /// out, `Tracker::apply_run`), the built-in store written, the documents for the
+    /// destination handed back. `read` is how the run read the cluster: a list that is not
+    /// complete turns nobody it did not read silent and is not one the zone is detected from.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn logdelay_apply(&self, cluster: &str, readings: Vec<Reading>, run_ms: i64, levels: &Levels, s: &Settings, read: collect::RunInfo, zone: &LogTimeZone)
         -> Result<(Applied, Daily), String> {
         let st = self.logdelay_store().ok_or("no data directory")?;
         let mut t = (*st.read_tracker(cluster)).clone();
-        let complete = read.complete && read.device.is_none();
+        let complete = read.complete && !read.is_partial();
         let before = t.last_run_ms;
-        let applied = t.apply_run(run_ms, readings, levels, (s.silent_after_hours as i64) * 3_600_000, complete);
-        if read.device.is_some() {
-            // One device measured again is not the cluster's run: "in the last run" and how the
-            // last run read the list stay the cluster's.
+        let applied = t.apply_run(run_ms, readings, levels, (s.silent_after_hours as i64) * 3_600_000, complete, zone);
+        if read.is_partial() {
+            // One device, or the late devices, measured again is not the cluster's run: "in the
+            // last run" and how the last run read the list stay the cluster's.
             t.last_run_ms = before.or(Some(run_ms));
         } else {
             t.last_read = Some(read);
@@ -308,7 +345,8 @@ impl Core {
                 continue;
             }
             let facts = self.logdelay_facts(id, r.from_ms, r.to_ms);
-            out.extend(fixes::findings(id, &t, r.from_ms, r.to_ms.min(now), now, (every_hours.clamp(1, 24) as i64) * 3_600_000, &facts));
+            let zone = self.log_time_zone_for(id);
+            out.extend(fixes::findings(id, &t, r.from_ms, r.to_ms.min(now), now, (every_hours.clamp(1, 24) as i64) * 3_600_000, &facts, &zone));
         }
         out
     }
@@ -342,9 +380,11 @@ impl Core {
         let Some(st) = self.logdelay_store() else { return vec![] };
         let s = self.logdelay_settings();
         let in_file = self.read_config_file().await.map(|raw| thresholds_in_config(&raw)).unwrap_or_default();
+        let hints = self.tz_hints();
         self.logdelay_visible(caller, only).into_iter()
             .map(|(id, name)| ClusterInput {
                 levels: levels_for(&s, &id, in_file.get(&id)).0,
+                zone: self.log_time_zone_for(&id), tz_hints: hints.clone(),
                 tracker: st.read_tracker(&id), daily: st.read_daily(&id), name, id,
             })
             .collect()
@@ -555,10 +595,16 @@ impl Core {
         let mut specs = self.all_specs();
         specs.sort_by(|a, b| a.id.cmp(&b.id));
         let mut resolved = vec![];
+        let hints = self.tz_hints();
+        let now = crate::delay_sink::now_ms();
+        let st = self.logdelay_store();
         for c in specs.into_iter().filter(|c| visible.as_ref().is_none_or(|v| v.contains(&c.id))) {
             let (levels, from) = levels_for(&s, &c.id, in_file.get(&c.id));
             let fields = self.logdelay_fields(&c.id, &s).await;
-            resolved.push(json!({ "id": c.id, "name": c.name.clone().unwrap_or_else(|| c.id.clone()), "levels": levels, "levelsFrom": from, "fields": fields }));
+            let zone = self.log_time_zone_for(&c.id);
+            let detection = st.as_ref().map(|st| st.read_tracker(&c.id).tz.clone()).unwrap_or_default();
+            resolved.push(json!({ "id": c.id, "name": c.name.clone().unwrap_or_else(|| c.id.clone()), "levels": levels, "levelsFrom": from, "fields": fields,
+                                  "logTimeZone": zone.setting(), "timeZone": tz::view(&zone, &detection, now, &hints) }));
         }
         let sizes = self.logdelay_store().map(|st| st.sizes()).unwrap_or_default();
         let cfg: SinkConfig = self.delay_sink_config();
@@ -575,6 +621,8 @@ impl Core {
                           "maxDevices": cfg.max_devices, "state": self.delay_sink_state_for(caller), "blocked": self.delay_sink_blocked_for(caller) },
             "builtinStore": { "keepDays": 90, "bytes": sizes.bytes, "sizes": sizes, "recentDays": state::RECENT_MS / 86_400_000, "dir": store::DIR },
             "extrasDefault": EXTRAS_DEFAULT,
+            "timeZones": { "toleranceMinutes": tz::TOLERANCE_MINUTES, "majorityPercent": tz::MAJORITY_PERCENT, "steadyRuns": tz::STEADY_RUNS,
+                           "server": crate::volume::schedule::server_zone().0 },
             "uiCopy": "ui/js/core/log-delay.js DEFAULT_THRESHOLDS/thresholds()/classify(): to be removed, read `levels` here instead",
         })
     }
@@ -586,7 +634,9 @@ pub fn fixes_rules() -> Value {
         { "pattern": "Many devices late in the same windows, across forwarders", "step": "elasticsearch", "readFrom": "delay periods + the cluster's write rejections, disk watermark, snapshot times", "recommendation": "Move the snapshot or batch job; add indexing capacity; free disk" },
         { "pattern": "Late devices share one fwd_tag or Zone; others there on time", "step": "forwarder", "readFrom": "delay periods grouped by fwd_tag and Zone", "recommendation": "Check that forwarder's queue, buffer and link" },
         { "pattern": "Late devices share one parser_tag", "step": "parser", "readFrom": "delay periods grouped by parser_tag", "recommendation": "Tune that pipeline's filters; give it its own workers" },
-        { "pattern": "Delay steady at a whole hour (60, 120, 330 min…) or negative", "step": "device_clock", "readFrom": "the spread of one device's delays", "recommendation": "Fix the device's time zone and NTP" },
+        { "pattern": "Device's gap is a steady time-zone offset different from its cluster's (+08:00 on an IST cluster)", "step": "device_time_zone", "readFrom": "the raw gap against every real UTC offset, run after run", "recommendation": "Set the device's time zone, or the parser's date filter time zone (Logstash date { timezone => \"…\" })" },
+        { "pattern": "Most devices share one offset and the cluster has no zone set", "step": "cluster", "readFrom": "the offsets of all measured devices over the last 3 runs", "recommendation": "Confirm the detected zone in Edit cluster › Log time zone, or set it" },
+        { "pattern": "Delay steady at a time-zone offset (60, 120, 330 min…) or negative, after the cluster's zone is taken out", "step": "device_clock", "readFrom": "the spread of one device's delays", "recommendation": "Fix the device's time zone and NTP" },
         { "pattern": "Silent, then a burst of old logs", "step": "device_link", "readFrom": "silences + delay at the first logs after them", "recommendation": "Check the device's connection" },
         { "pattern": "Nothing above", "step": "unknown", "readFrom": "—", "recommendation": "\"Not enough evidence\", never a guess" },
     ])

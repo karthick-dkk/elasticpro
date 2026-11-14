@@ -424,6 +424,9 @@ pub const REQUEST_WINDOW: std::time::Duration = std::time::Duration::from_secs(5
 pub const REQUEST_LOG_KEEP: usize = 2000;
 /// The most of a request path a record keeps, in characters.
 pub const REQUEST_PATH_KEEP: usize = 600;
+/// The most late devices *Fetch now* names in one `terms` filter; above it the whole cluster is
+/// read instead (docs/LOGDELAY.md "Fetch now").
+pub const LATE_FILTER_MAX: usize = 10_000;
 /// The most in-flight records kept; beyond it the oldest is dropped.
 pub const REQUEST_INFLIGHT_KEEP: usize = 1000;
 
@@ -2899,6 +2902,7 @@ impl Core {
         let time_field = get("timeField").or_else(|| defaults.and_then(|d| d.get("timeField")).and_then(|v| v.as_str()).map(String::from));
         let delay_fields = entry.get("delayFields").or_else(|| defaults.and_then(|d| d.get("delayFields")))
             .and_then(|v| serde_json::from_value::<crate::auth::DelayFields>(v.clone()).ok());
+        let log_time_zone = get("logTimeZone").or_else(|| get("log_time_zone"));
         let changed_address;
         let credential;
         {
@@ -2941,6 +2945,7 @@ impl Core {
                 log_index_pattern: pattern,
                 time_field,
                 delay_fields,
+                log_time_zone,
             });
         }
         self.read_cache.clear();
@@ -5246,6 +5251,7 @@ impl Core {
                 specs.insert(id.clone(), ClusterSpec {
                     id: id.clone(), name: Some(name.clone()), url: c.url.clone(), auth_header: auth, via: via.clone(), tls: tls.clone(),
                     zabbix_groups: c.readers.clone(), log_index_pattern: None, time_field: None, delay_fields: None,
+                    log_time_zone: overlay::log_time_zone(ov),
                 });
             }
             let mut row = json!({
@@ -5990,9 +5996,16 @@ impl Core {
         let mut solved = 0usize;
         let mut truncated: Vec<String> = vec![];
         let mut pages = 0u64;
+        // A person's run is one cluster: its progress is counted in devices (done of total, the
+        // total the devices it set out to read: the late list, or the cluster's devices as last
+        // known). The timer's run counts clusters.
+        let one_cluster = scope.clusters.as_ref().is_some_and(|c| c.len() == 1);
         if let Some(r) = run {
-            r.progress(0, targets.len() as u64);
+            if !one_cluster {
+                r.progress(0, targets.len() as u64);
+            }
         }
+        let mut scope_note: Option<String> = None;
 
         for (done, id) in targets.iter().enumerate() {
             // A person's JOB_CANCEL: stop between clusters (and between pages, in the read).
@@ -6001,15 +6014,63 @@ impl Core {
             }
             let fields = self.logdelay_fields(id, &settings).await;
             let before = read_total;
-            let got = self.logdelay_collect(id, &fields, from_ms, to_ms, max_devices, scope.device.as_deref(), |n| {
+            // Which devices (docs/LOGDELAY.md "Fetch now"): one named, the cluster's late ones as
+            // stored at this moment (late = delay or critical by the cluster's own levels, on the
+            // corrected delay — levels.rs is the one definition), or every one.
+            let (filter, expected) = match (&scope.device, scope.devices) {
+                (Some(d), _) => (crate::logdelay::measure::DeviceFilter::One(d.clone()), Some(1u64)),
+                (None, delay_sink::Devices::Late) if !full => {
+                    let t = self.logdelay_store().map(|st| st.read_tracker(id));
+                    let known = t.as_ref().map(|t| t.devices.len()).unwrap_or(0);
+                    let late: Vec<String> = t.as_ref().map(|t| t.devices.iter()
+                        .filter(|(_, d)| d.state.late())
+                        .map(|(n, _)| n.clone()).collect()).unwrap_or_default();
+                    if late.is_empty() {
+                        scope_note = Some(format!("fetch now: {}, late devices — none of its {known} known devices was late (delayed or critical) at the start, so nothing was read; \
+                                                   Fetch now on the whole cluster (devices: all) or the scheduled run reads every device", self.cluster_name(id)));
+                        if let Some(r) = run { r.progress(0, 0); }
+                        continue;
+                    }
+                    if late.len() > LATE_FILTER_MAX {
+                        // More late devices than one query's terms filter should carry: the whole cluster.
+                        scope_note = Some(format!("fetch now: {}, late devices ({} of {known}) — more than {LATE_FILTER_MAX}, so the whole cluster was read", self.cluster_name(id), late.len()));
+                        (crate::logdelay::measure::DeviceFilter::All, Some(known as u64))
+                    } else {
+                        scope_note = Some(format!("fetch now: {}, late devices ({} of {known} at the start)", self.cluster_name(id), late.len()));
+                        let n = late.len() as u64;
+                        (crate::logdelay::measure::DeviceFilter::Some(late), Some(n))
+                    }
+                }
+                (None, _) => {
+                    if !full {
+                        scope_note = Some(format!("fetch now: {}, whole cluster", self.cluster_name(id)));
+                    }
+                    (crate::logdelay::measure::DeviceFilter::All, (!full).then(|| self.logdelay_store().map(|st| st.read_tracker(id).devices.len() as u64).unwrap_or(0)))
+                }
+            };
+            if let (Some(r), Some(total), true) = (run, expected, one_cluster) {
+                r.progress(0, total);
+            }
+            let got = self.logdelay_collect(id, &fields, from_ms, to_ms, max_devices, &filter, |n| {
                 if let Some(r) = run {
                     r.records(before + n as u64);
+                    if one_cluster {
+                        // Devices read so far, of the number set out for (or of themselves, past it).
+                        r.progress(n as u64, expected.unwrap_or(0).max(n as u64));
+                    }
                 }
             }).await;
             pages += got.pages;
             read_total += got.readings.len() as u64;
             if let Some(r) = run {
-                r.progress(done as u64 + 1, targets.len() as u64);
+                if one_cluster {
+                    // Ended: every device that answered is done; one set out for that sent nothing
+                    // in the window is not "to do", it is silent or gone.
+                    let n = got.readings.len() as u64;
+                    r.progress(n, n);
+                } else {
+                    r.progress(done as u64 + 1, targets.len() as u64);
+                }
             }
             if got.readings.is_empty() && got.error.is_some() {
                 failed += 1;
@@ -6019,16 +6080,18 @@ impl Core {
             if got.truncated {
                 truncated.push(id.clone());
             }
-            let read = got.info(now, from_ms, to_ms, max_devices, scope.device.as_deref());
+            let read = got.info(now, from_ms, to_ms, max_devices, &filter);
             if let Some(e) = &got.error {
                 // Part of the list read: kept, nobody it did not read turned silent; the run says so.
                 failed += 1;
                 first_error.get_or_insert_with(|| SinkNote::read(id, e.clone()));
             }
             let (levels, _) = crate::logdelay::levels_for(&settings, id, in_file.get(id));
-            // The memory between runs: periods opened and solved, silent devices, the day's
-            // totals — kept on the server whatever the destination (the pages read it).
-            let (applied, daily) = match self.logdelay_apply(id, got.readings, now, &levels, &settings, read) {
+            let zone = self.log_time_zone_for(id);
+            // The memory between runs: the log time zone detected and taken out, periods opened
+            // and solved, silent devices, the day's totals — kept on the server whatever the
+            // destination (the pages read it).
+            let (applied, daily) = match self.logdelay_apply(id, got.readings, now, &levels, &settings, read, &zone) {
                 Ok(x) => x,
                 Err(e) => {
                     failed += 1;
@@ -6093,8 +6156,11 @@ impl Core {
         );
         let mut notes: Vec<String> = vec![];
         if !full {
-            notes.push(format!("fetch now: {}{}", if scope.clusters.is_some() { format!("{} cluster(s)", targets.len()) } else { "every cluster".into() },
-                               scope.device.as_ref().map(|d| format!(", device {d}")).unwrap_or_default()));
+            notes.push(match scope_note {
+                Some(n) if scope.device.is_none() => n,
+                _ => format!("fetch now: {}{}", targets.first().map(|id| self.cluster_name(id)).unwrap_or_else(|| format!("{} cluster(s)", targets.len())),
+                             scope.device.as_ref().map(|d| format!(", device {d}")).unwrap_or_default()),
+            });
         }
         if !truncated.is_empty() {
             notes.push(format!("{} cluster(s) have more than {max_devices} devices in the window: the first {max_devices} by name were measured, \

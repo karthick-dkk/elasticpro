@@ -10,11 +10,15 @@
 //! * delay: from `delayFrom` to `criticalOver` inclusive (30–60 min);
 //! * critical: over `criticalOver` (60 min — exactly 60 is still "delay", the owner's rule);
 //! * clock ahead: at or below `-delayFrom` — a device whose clock is ahead of real time,
-//!   a different fault with a different fix, tested before the "how big" questions.
+//!   a different fault with a different fix, tested before the "how big" questions;
+//! * other time zone: not a level of the delay at all — a device whose gap sits, steadily, at
+//!   a real UTC offset other than its cluster's (`tz.rs`; decided in `state.rs`). Not late.
 //!
-//! A delay period starts at the first measurement at or over `delayFrom` and is solved at
-//! the first one back under it (`State::late`). A measurement that could not be taken is
-//! `None`, never zero, and classifies as nothing.
+//! The minutes classified here are the **corrected** delay: the raw gap (arrival − event) with
+//! the cluster's log time zone taken out (docs/LOGDELAY.md "Time zones"). A delay period starts
+//! at the first measurement at or over `delayFrom` and is solved at the first one back under it
+//! (`State::late`). A measurement that could not be taken is `None`, never zero, and classifies
+//! as nothing.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -73,6 +77,10 @@ pub enum State {
     Delay,
     Critical,
     ClockAhead,
+    /// Its gap sits at a real UTC offset other than its cluster's, run after run: its logs are
+    /// stamped in another zone (the device's clock or the parser's date filter). Not late,
+    /// counted apart; shown with its own offset.
+    OtherTz,
     /// Seen recently, sending nothing for longer than the silence limit. Not on time, not 0 min.
     Silent,
     /// Its latest document has no readable event time or arrival. "Can't measure", not 0 min.
@@ -108,10 +116,15 @@ impl State {
         matches!(self, State::Delay | State::Critical)
     }
 
-    /// Counted as "on time" in the totals: measured and under the delay line. Silent and
-    /// unmeasured are neither on time nor late.
+    /// Counted as "on time" in the totals: measured and under the delay line. Silent,
+    /// unmeasured and other-time-zone are neither on time nor late.
     pub fn on_time(self) -> bool {
         matches!(self, State::NoDelay | State::Little | State::ClockAhead)
+    }
+
+    /// A delay figure was taken (corrected or, for another zone, by the device's own offset).
+    pub fn measured(self) -> bool {
+        !matches!(self, State::Silent | State::Unmeasured)
     }
 
     pub fn as_str(self) -> &'static str {
@@ -121,6 +134,7 @@ impl State {
             State::Delay => "delay",
             State::Critical => "critical",
             State::ClockAhead => "clock_ahead",
+            State::OtherTz => "other_tz",
             State::Silent => "silent",
             State::Unmeasured => "unmeasured",
         }
@@ -134,11 +148,16 @@ impl State {
             State::Delay => "delayed",
             State::Critical => "critical",
             State::ClockAhead => "clock ahead",
+            State::OtherTz => "other time zone",
             State::Silent => "silent",
             State::Unmeasured => "can't measure",
         }
     }
 }
+
+/// The one tolerance, as the clusters file's `delayThresholds.tzToleranceMinutes` has always
+/// named it: a gap within this many minutes of a real offset is that zone (`tz.rs`).
+pub const TZ_TOLERANCE_MINUTES: f64 = super::tz::TOLERANCE_MINUTES;
 
 #[cfg(test)]
 mod tests {
@@ -170,11 +189,15 @@ mod tests {
 
     #[test]
     fn late_is_delay_or_critical_and_nothing_else() {
-        for s in [State::NoDelay, State::Little, State::ClockAhead, State::Silent, State::Unmeasured] {
+        for s in [State::NoDelay, State::Little, State::ClockAhead, State::OtherTz, State::Silent, State::Unmeasured] {
             assert!(!s.late(), "{s:?}");
         }
         assert!(State::Delay.late() && State::Critical.late());
         assert!(!State::Silent.on_time() && !State::Unmeasured.on_time(), "silent is never on time");
+        assert!(!State::OtherTz.on_time() && State::OtherTz.measured(), "another zone is counted apart: measured, not on time, not late");
+        assert_eq!(serde_json::to_value(State::OtherTz).unwrap(), json!("other_tz"));
+        assert_eq!(State::OtherTz.label(), "other time zone");
+        assert_eq!(TZ_TOLERANCE_MINUTES, 3.0);
     }
 
     #[test]

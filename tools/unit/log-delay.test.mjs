@@ -95,7 +95,7 @@ test('trend: a flat near-zero series is not a 400% rise', () => {
 test('pattern: a whole-hour offset is a timezone, not a queue', () => {
   const p = ld.analysePattern(60);
   assert.equal(p.pattern, 'timezone');
-  assert.match(p.note, /1h behind/);
+  assert.match(p.note, /1 h behind/);
   assert.equal(ld.analysePattern(300).pattern, 'timezone', '5h exactly');
   assert.equal(ld.analysePattern(-120).pattern, 'timezone', 'ahead counts too');
   assert.match(ld.analysePattern(-120).note, /ahead/);
@@ -104,7 +104,8 @@ test('pattern: a whole-hour offset is a timezone, not a queue', () => {
 test('pattern: near a whole hour counts, away from it does not', () => {
   assert.equal(ld.analysePattern(62).pattern, 'timezone', 'within tolerance');
   assert.equal(ld.analysePattern(75).pattern, '-', '15 min off the hour is a queue');
-  assert.equal(ld.analysePattern(330).pattern, '-', '5h30 is not an offset');
+  assert.equal(ld.analysePattern(330).pattern, 'timezone', '5h30 is India: a real offset (whole hours alone missed it until 0.3.62)');
+  assert.equal(ld.analysePattern(100).pattern, '-', '1h40 is no zone');
 });
 
 test('pattern: under an hour is never a timezone', () => {

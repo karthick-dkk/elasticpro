@@ -69,7 +69,8 @@ export async function primeWorker(clusters, readOnly = true, jumpHosts = [], { p
                                      // The log-delay fields: a display link may measure this
                                      // cluster with these and no others (auth.rs DelayShape).
                                      ...(c.timeField ? { timeField: c.timeField } : {}),
-                                     ...(c.delayFields ? { delayFields: c.delayFields } : {}) })),
+                                     ...(c.delayFields ? { delayFields: c.delayFields } : {}),
+                                     ...(c.logTimeZone ? { logTimeZone: c.logTimeZone } : {}) })),
     jumpHosts: jumpHosts.map((j) => ({ id: j.id, host: j.host, port: j.port, user: j.user, keyFile: j.keyFile || null })),
   });
 }

@@ -26,6 +26,25 @@ import { credentialsKeptOnServer, keptCredentials, keptFor, keepCredential, forg
 import { toast } from './menu.js';
 import { CLUSTER_TYPES, clusterKind, typeDefaults, bucketProblem, saveClusterMeta } from '../core/cluster-kind.js';
 import { overlayChange, movesDestination, changesSomething, zabbixCredentialLabel, DESTINATION_FIELDS } from '../core/zabbix-overlay.js';
+import { zoneOptions, timeZoneText, knownZone, ZONE_HINT } from '../core/log-tz.js';
+import { zoneOf, loadLevels } from '../core/delay-levels.js';
+
+/**
+ * The "Log time zone" select (docs/LOGDELAY.md "Time zones"): Detect from devices (what detection
+ * says now, when the core has said), UTC, then every zone Intl knows with its offset now. A value
+ * the config holds that the list lacks is kept as its own option, never silently changed.
+ */
+function logTimeZoneSelect(id, value, clusterId) {
+  const z = clusterId ? zoneOf(clusterId) : null;
+  const detected = z && z.mode === 'detected' ? timeZoneText(z, { devices: false }).replace(/ · detected.*$/, '')
+    : z && z.mode === 'none' ? timeZoneText(z) : '';
+  const opts = zoneOptions(Date.now(), { detectedText: detected });
+  const cur = String(value || '').trim() || 'detect';
+  if (!opts.some(([v]) => v === cur)) opts.push([cur, cur]);
+  const sel = select(id, cur, opts);
+  sel.title = ZONE_HINT;
+  return sel;
+}
 
 let masterInMemory = null;      // master password for this session only (needed to seal new secrets)
 
@@ -351,6 +370,7 @@ export async function editCluster(existing = null) {
   const keptId = existing ? (clusters().find((x) => x.name === existing.name) || {}).id : null;
   const keptOwn = kept && keptId ? keptFor(kept, keptId) : null;
   const keptDefault = kept ? keptFor(kept, DEFAULT_CREDENTIAL) : null;
+  if (keptId) await loadLevels().catch(() => false);
   // With no default yet, what the server keeps that could become it without being typed again.
   const promotable = (kept && kept.promotable) || [];
   const fileOwn = cred === 'own';
@@ -463,7 +483,8 @@ export async function editCluster(existing = null) {
       field('Backup capacity', text('ce-backupcap', c.backupCapacity || '', { placeholder: '2TB' }),
         'Total size of the snapshot repository. Elasticsearch cannot report it, so the volume report ' +
         'says "not set" until you do. 2TB, 500GB, or a bare number of GB.'),
-      field('Note', text('ce-note', c.note || ''))),
+      field('Note', text('ce-note', c.note || '')),
+      field('Log time zone', logTimeZoneSelect('ce-ltz', c.logTimeZone || c.log_time_zone || '', keptId), ZONE_HINT)),
     kind.node,
     // How this cluster's daily-ingest figure is derived, and the headroom every "needed"
     // number on the volume report is sized with. They were in the config schema with no
@@ -512,6 +533,14 @@ export async function editCluster(existing = null) {
           if (val('ce-enabled') === 'no') next.enabled = false; else delete next.enabled;
           const tags = val('ce-tags').split(',').map((t) => t.trim()).filter(Boolean); if (tags.length) next.tags = tags; else delete next.tags;
           const note = val('ce-note').trim(); if (note) next.note = note; else delete next.note;
+          // The log time zone: UTC or an IANA name written as such; Detect is the default and
+          // is not written (one spelling in the file). The core checks the name again.
+          const ltz = val('ce-ltz');
+          delete next.log_time_zone;
+          if (ltz && ltz !== 'detect') {
+            if (!knownZone(ltz)) return ctx.msg(`Log time zone: ${ltz} is not a time zone this browser knows (UTC, or an IANA name such as Asia/Kolkata).`);
+            next.logTimeZone = ltz;
+          } else delete next.logTimeZone;
           // Type, ULM and SLM: the server's store (hosted, an admin's) or the entry's own keys.
           const kindRead = kind.read();
           if (kindRead.error) return ctx.msg(kindRead.error);
@@ -748,6 +777,8 @@ export async function editZabbixCluster(c) {
   if (routeLocked) { viaSel.disabled = true; tlsSel.disabled = true; }
   const enabledSel = select('ce-enabled', c.enabled === false ? 'no' : 'yes', [['yes', 'yes'], ['no', 'no (listed, not polled)']]);
   const tagsInput = text('ce-tags', listText(c.tags), { placeholder: 'prod, onprem' });
+  await loadLevels().catch(() => false);
+  const ltzSel = logTimeZoneSelect('ce-ltz', overridden.has('logTimeZone') ? c.logTimeZone : '', c.id);
   const kindEditable = admin;
   const kind = kindSection(c, { editable: kindEditable });
 
@@ -793,7 +824,9 @@ export async function editZabbixCluster(c) {
       textField('snapshotRetention', 'Snapshot retention', 'ce-snapret', overridden.has('snapshotRetention') ? c.snapshotRetention : '', { placeholder: '6M', hint: 'How long snapshots are kept.' }),
       textField('backupCapacity', 'Backup capacity', 'ce-backupcap', overridden.has('backupCapacity') ? c.backupCapacity : '', { placeholder: '2TB',
         hint: 'Total size of the snapshot repository; Elasticsearch cannot report it.' }),
-      textField('note', 'Note', 'ce-note', c.note)),
+      textField('note', 'Note', 'ce-note', c.note),
+      def('logTimeZone', 'Log time zone', ltzSel, { read: () => (ltzSel.value && ltzSel.value !== 'detect' ? ltzSel.value : null),
+        put: () => { ltzSel.value = 'detect'; }, zabbixText: '', hint: ZONE_HINT })),
     kind.node,
     h('div', { style: { display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1fr)', gap: '10px' } },
       numField('volumeWindowDays', 'Volume window (days)', 'ce-volwin', overridden.has('volumeWindowDays') ? c.volumeWindowDays : null, String(d.volumeWindowDays),
@@ -816,6 +849,7 @@ export async function editZabbixCluster(c) {
           if (now[k] && !parseRetention(now[k])) return ctx.msg(`${k}: use a form like 30d, 90 days, 3M, 6 months or 1y.`);
         }
         if (now.backupCapacity && !parseSize(now.backupCapacity)) return ctx.msg('backupCapacity: use a form like 2TB, 500GB or a bare number of GB.');
+        if (now.logTimeZone && !knownZone(now.logTimeZone)) return ctx.msg(`Log time zone: ${now.logTimeZone} is not a time zone this browser knows.`);
         for (const f of VOLUME_FIELDS) {
           const n = now[f.key];
           if (n !== null && n !== undefined && (!Number.isInteger(n) || n < f.min || n > f.max)) return ctx.msg(`${f.label}: a whole number from ${f.min} to ${f.max}.`);

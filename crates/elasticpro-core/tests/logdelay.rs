@@ -41,6 +41,102 @@ fn devices(fw1_minutes: f64) -> Value {
     ] } } })
 }
 
+/// An IST cluster: every device's event time is 330 min before its arrival (its logs are on
+/// time, stamped in local time); `sg` sits at +08:00; `slow` is 330 + 40 min behind.
+fn devices_ist() -> Value {
+    let arrival = "2026-11-04T14:00:00Z";
+    let event = |m: f64| {
+        let ms = elasticpro_core::delay_sink::parse_rfc3339_ms(arrival).unwrap() - (m * 60_000.0) as i64;
+        let (y, mo, d) = elasticpro_core::delay_sink::civil_from_days(ms.div_euclid(86_400_000));
+        let rest = ms.rem_euclid(86_400_000);
+        format!("{y:04}-{mo:02}-{d:02}T{:02}:{:02}:{:02}Z", rest / 3_600_000, (rest % 3_600_000) / 60_000, (rest % 60_000) / 1000)
+    };
+    let mut buckets: Vec<Value> = (1..=8).map(|i| json!({ "key": format!("fw-{i}"), "doc_count": 100, "latest": { "hits": { "hits": [ { "_source": {
+        "@timestamp": arrival, "event_created": event(330.0 + (i % 2) as f64), "Zone": "DC1", "tag1": "firewall" } } ] } } })).collect();
+    buckets.push(json!({ "key": "sg", "doc_count": 50, "latest": { "hits": { "hits": [ { "_source": { "@timestamp": arrival, "event_created": event(480.0), "Zone": "SG", "tag1": "switch" } } ] } } }));
+    buckets.push(json!({ "key": "slow", "doc_count": 50, "latest": { "hits": { "hits": [ { "_source": { "@timestamp": arrival, "event_created": event(370.0), "Zone": "DC1", "tag1": "proxy" } } ] } } }));
+    json!({ "took": 5, "aggregations": { "devices": { "buckets": buckets } } })
+}
+
+async fn ist_cluster() -> TestServer {
+    TestServer::with(move |hit| {
+        if hit.path.contains("/_search") {
+            return (200, devices_ist().to_string());
+        }
+        (200, r#"{"cluster_name":"ist","status":"green"}"#.into())
+    })
+    .await
+}
+
+#[tokio::test]
+async fn an_ist_cluster_is_detected_after_three_runs_and_a_set_zone_is_corrected_from_the_first() {
+    let dir = TempDir::new("logdelay-tz");
+    let srv = ist_cluster().await;
+    let c = Core::new_with_rounds(Some(dir.0.clone()), Edition::Hosted, 1);
+    let s = admin(&c).await;
+    // Two clusters at the same fake: one left to detection, one set to Asia/Kolkata in its config.
+    let p = c.handle(json!({ "type": "PRIME", "session": &s, "readOnly": true, "clusters": [
+        { "id": "ist", "name": "IST detect", "url": srv.url() },
+        { "id": "ist-set", "name": "IST set", "url": srv.url(), "logTimeZone": "Asia/Kolkata" } ] })).await;
+    assert_eq!(p["ok"], json!(true), "{p}");
+    let g = c.handle(json!({ "type": "LOGDELAY_SETTINGS_GET", "session": &s })).await;
+    let res = g["resolved"].as_array().unwrap();
+    assert_eq!((res[0]["id"].clone(), res[0]["logTimeZone"].clone(), res[0]["timeZone"]["mode"].clone()), (json!("ist"), json!("detect"), json!("none")), "{g}");
+    assert_eq!((res[1]["logTimeZone"].clone(), res[1]["timeZone"]["mode"].clone(), res[1]["timeZone"]["offsetMinutes"].clone()), (json!("Asia/Kolkata"), json!("set"), json!(330)), "{g}");
+    assert_eq!(g["timeZones"]["toleranceMinutes"], json!(3.0));
+    let armed = c.handle(json!({ "type": "DELAY_SINK_SET", "session": &s, "config": { "enabled": true, "destination": "builtin", "everyHours": 2 } })).await;
+    assert_eq!(armed["ok"], json!(true), "{armed}");
+
+    // Run 1: the detected cluster shows the offset as delay (nothing corrected yet); the set one is right at once.
+    let run = c.handle(json!({ "type": "DELAY_SINK_RUN", "session": &s })).await;
+    assert_eq!(run["ok"], json!(true), "{run}");
+    let sum = c.handle(json!({ "type": "LOGDELAY_SUMMARY", "session": &s })).await;
+    let by = |sum: &Value, id: &str| sum["byCluster"].as_array().unwrap().iter().find(|x| x["id"] == id).cloned().unwrap();
+    let det = by(&sum, "ist");
+    assert_eq!((det["critical"].clone(), det["timeZone"]["mode"].clone(), det["timeZone"]["pct"].clone()), (json!(10), json!("none"), json!(80.0)), "{det}");
+    let set = by(&sum, "ist-set");
+    assert_eq!((set["critical"].clone(), set["delay"].clone(), set["timeZone"]["mode"].clone(), set["timeZone"]["zone"].clone()), (json!(1), json!(1), json!("set"), json!("Asia/Kolkata")), "{set}");
+    let fixes = c.handle(json!({ "type": "LOGDELAY_FIXES", "session": &s, "clusterIds": ["ist"] })).await;
+    let cl = fixes["findings"].as_array().unwrap().iter().find(|f| f["step"] == "cluster").cloned().expect("a Cluster finding: set the zone");
+    assert!(cl["fix"].as_str().unwrap().starts_with("set it"), "{cl}");
+    assert_eq!(cl["devices"].as_array().unwrap().len(), 8, "{cl}");
+
+    // Runs 2 and 3: detected (the set cluster's zone names it), every IST device on time, slow 40 min late,
+    // sg in another time zone — not late.
+    c.handle(json!({ "type": "DELAY_SINK_RUN", "session": &s })).await;
+    c.handle(json!({ "type": "DELAY_SINK_RUN", "session": &s })).await;
+    let sum = c.handle(json!({ "type": "LOGDELAY_SUMMARY", "session": &s })).await;
+    let det = by(&sum, "ist");
+    assert_eq!(det["timeZone"]["mode"], json!("detected"), "{det}");
+    assert_eq!((det["timeZone"]["offsetMinutes"].clone(), det["timeZone"]["offset"].clone(), det["timeZone"]["zone"].clone()), (json!(330), json!("+05:30"), json!("Asia/Kolkata")), "{det}");
+    assert_eq!((det["critical"].clone(), det["delay"].clone(), det["otherTz"].clone(), det["lateNow"].clone()), (json!(0), json!(1), json!(1), json!(1)), "{det}");
+    assert_eq!(sum["totals"]["otherTz"], json!(2), "both clusters' sg");
+    let cl = c.handle(json!({ "type": "LOGDELAY_CLUSTER", "session": &s, "clusterId": "ist" })).await;
+    assert_eq!(cl["timeZone"]["mode"], json!("detected"), "{cl}");
+    let row = |name: &str| cl["devices"].as_array().unwrap().iter().find(|d| d["device"] == name).cloned().unwrap();
+    let fw = row("fw-2");
+    assert_eq!((fw["state"].clone(), fw["nowMinutes"].clone(), fw["rawGapMinutes"].clone(), fw["tzOffsetMinutes"].clone(), fw["clusterTzOffset"].clone()),
+               (json!("no_delay"), json!(0.0), json!(330.0), json!(330), json!(330)), "{fw}");
+    let slow = row("slow");
+    assert_eq!((slow["state"].clone(), slow["nowMinutes"].clone(), slow["rawGapMinutes"].clone()), (json!("delay"), json!(40.0), json!(370.0)), "{slow}");
+    let sg = row("sg");
+    assert_eq!((sg["state"].clone(), sg["nowMinutes"].clone(), sg["deviceTzOffset"].clone(), sg["tzOffsetMinutes"].clone()), (json!("other_tz"), json!(0.0), json!(480), json!(480)), "{sg}");
+    let dev = c.handle(json!({ "type": "LOGDELAY_DEVICE", "session": &s, "clusterId": "ist", "device": "sg" })).await;
+    assert_eq!((dev["state"].clone(), dev["rawGapMinutes"].clone(), dev["timeZone"]["mode"].clone()), (json!("other_tz"), json!(480.0), json!("detected")), "{dev}");
+    let fixes = c.handle(json!({ "type": "LOGDELAY_FIXES", "session": &s, "clusterIds": ["ist"] })).await;
+    let fs = fixes["findings"].as_array().unwrap();
+    let dz = fs.iter().find(|f| f["step"] == "device_time_zone").cloned().expect("a device time zone finding");
+    assert_eq!(dz["devices"], json!(["sg"]));
+    assert_eq!(dz["stepLabel"], json!("Device clock / parser"));
+    assert!(dz["fix"].as_str().unwrap().contains("timezone =>"), "{dz}");
+    let cl = fs.iter().find(|f| f["step"] == "cluster").cloned().expect("a Cluster finding: confirm the zone");
+    assert!(cl["fix"].as_str().unwrap().starts_with("confirm it"), "{cl}");
+    // The measurement documents carry the raw gap and what was taken out.
+    let day = std::fs::read_dir(dir.join("logdelay").join("ist").join("m")).unwrap().filter_map(|e| e.ok()).map(|e| e.path())
+        .find(|p| p.extension().is_some_and(|x| x == "ndjson")).map(|p| std::fs::read_to_string(p).unwrap_or_default()).unwrap_or_default();
+    assert!(day.contains("\"raw_gap_minutes\"") && day.contains("\"tz_offset_minutes\""), "{}", &day[..day.len().min(400)]);
+}
+
 async fn cluster(knob: Knob) -> TestServer {
     TestServer::with(move |hit| {
         if hit.path.starts_with("/_bulk") {
@@ -244,7 +340,7 @@ async fn the_built_in_destination_measures_tracks_periods_and_answers_every_read
     assert_eq!(empty["kind"], json!("bad_request"));
     let fixes = c.handle(json!({ "type": "LOGDELAY_FIXES", "session": &user })).await;
     assert_eq!(fixes["ok"], json!(true), "{fixes}");
-    assert_eq!(fixes["rules"].as_array().unwrap().len(), 6);
+    assert_eq!(fixes["rules"].as_array().unwrap().len(), 8);
     let findings = fixes["findings"].as_array().unwrap();
     assert!(!findings.is_empty(), "one late device: a finding, if only not enough evidence: {fixes}");
     assert!(findings.iter().all(|f| f["devices"].as_array().unwrap().contains(&json!("fw-1"))), "{fixes}");

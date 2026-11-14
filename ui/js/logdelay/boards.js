@@ -31,6 +31,7 @@ import {
   sparkSegments, reducedBars, deviceGraph, periodBand, lateSplitText, STEP_TONE, stepLabel, evidenceText, extraOf, valuesText,
 } from '../core/logdelay-report.js';
 import { deviceTable, sortCols, extraCols, statePill, stateRank } from './rows.js';
+import { timeZoneText, timeZoneShort, offsetLabel } from '../core/log-tz.js';
 
 const PAGE_ROWS = 50;
 
@@ -293,7 +294,29 @@ function ring(late, devices, { title, href, name, all = false }) {
 /* ------------------------------------ the fleet ------------------------------------ */
 
 /** The device columns of the fleet's Devices table. */
-const FLEET_COLS = ['device', 'cluster', 'zone', 'tag1', 'state', 'now', 'max', 'episodes', 'lateMs', 'last', 'docs'];
+const FLEET_COLS = ['device', 'cluster', 'zone', 'tag1', 'state', 'now', 'max', 'episodes', 'lateMs', 'last', 'docs', 'rawGap', 'deviceTz'];
+
+/**
+ * The chip above a board: "Time zone Asia/Kolkata +05:30 · detected · 1 112 of 1 240 devices (90 %)",
+ * or "Time zone not detected (41 % agree)". `tz` as the core said it (docs/LOGDELAY.md "Time zones").
+ */
+function tzChip(tz, id) {
+  if (!tz) return null;
+  const title = tz.mode === 'set' ? `Set in the cluster's config (Edit cluster › Log time zone: ${tz.setting}). Delays are shown after this offset is taken out.`
+    : tz.mode === 'detected' ? `Detected: the offset most measured devices fall in, at least ${tz.majorityPercent} % agreeing and steady over ${tz.runsNeeded} runs. Delays are shown after it is taken out. Confirm it in Edit cluster › Log time zone.`
+      : `No zone set, and fewer than ${tz.majorityPercent ?? 60} % of the devices agree on one offset (steady over ${tz.runsNeeded ?? 3} runs): nothing is corrected, delays are as measured.`;
+  return h('span.ld-chip.ld-tz-chip', { id: id || null, title, dataset: { mode: tz.mode } }, h('b', 'Time zone'), ' ', timeZoneText(tz));
+}
+
+/** The note on a board for the period before the zone was known: history is not rewritten. */
+function tzSinceNote(items) {
+  const since = (items || []).filter((x) => x.tz && (x.tz.mode === 'detected' || x.tz.mode === 'set'));
+  if (!since.length) return null;
+  const parts = since.filter((x) => x.tz.mode === 'detected' && finite(x.tz.since)).map((x) => `${x.name} before ${whenText(x.tz.since, Date.now())}`);
+  return h('div.muted.ld-note.ld-tz-note', 'Delays are shown after each cluster’s log time zone is taken out (arrival − event − time zone). ',
+    'Measurements from before a zone was set or detected stay as they were measured',
+    parts.length ? `: ${parts.join(', ')}.` : '.');
+}
 
 function fleetView() {
   const ids = S.clusterPick === 'all' ? [] : [S.clusterPick];
@@ -378,6 +401,8 @@ function fleetView() {
       inRange: { type: 'number', value: seen((c) => (c.counts ? c.counts.inRange : null)) },
       zone: { type: 'text', value: (c) => valuesText(devsOf(c.id), 'zone') },
       tag1: { type: 'text', value: (c) => valuesText(devsOf(c.id), 'tag1') },
+      timeZone: { type: 'text', value: seen((c) => timeZoneShort(c.timeZone)) },
+      otherTz: { type: 'number', value: seen((c) => (c.timeZone && c.timeZone.mode !== 'none' ? c.otherTz : null)) },
       lateNow: { type: 'number', value: seen((c) => c.lateNow) },
       newToday: { type: 'number', value: seen((c) => c.newToday) },
       below: { type: 'number', value: seen((c) => c.below) },
@@ -391,6 +416,8 @@ function fleetView() {
       const devs = devsOf(c.id);
       return h('tr', { dataset: { cluster: c.id } },
         h('td', link(clusterHref(c.id), c.name || nameOf(c.id), { title: `${c.name} · log delay details` })),
+        h('td.ld-tz-cell', { title: c.timeZone ? timeZoneText(c.timeZone) : 'not measured' }, neverRun ? h('span.muted', '—')
+          : c.timeZone && c.timeZone.mode === 'none' ? h('span.muted', timeZoneShort(c.timeZone)) : timeZoneShort(c.timeZone)),
         h('td.num', countText(c.devices)),
         h('td.num', { title: COUNT_HINT }, neverRun ? '—' : countText(c.counts && c.counts.inLastRun)),
         h('td.num', { title: COUNT_HINT }, neverRun ? '—' : countText(c.counts && c.counts.inRange)),
@@ -402,6 +429,8 @@ function fleetView() {
             h('td.num', { title: `devices under ${cb.late} now` }, `${countText(c.below)} · ${pctText(c.belowPct)}`),
             h(`td.num${c.delay ? '.ld-blue' : ''}`, countText(c.delay)),
             h(`td.num${c.critical ? '.ld-pink' : ''}`, countText(c.critical)),
+            h('td.num', { title: 'devices whose logs are stamped in another time zone than the cluster’s: not late, counted apart (— when the cluster has no zone)' },
+              c.timeZone && c.timeZone.mode !== 'none' ? countText(c.otherTz) : h('span.muted', '—')),
             h('td.num', pctText(c.belowPctPrevious)),
             h('td', sparkline(c.sparkline, `${c.name}: late devices per day over ${n} days`, clusterHref(c.id))),
             h('td.mono', c.worst && c.worst.device
@@ -410,10 +439,11 @@ function fleetView() {
     });
     return card('By cluster', `${b.below.toLowerCase()} = devices under ${b.late} of delay now, and their share in the ${n} days before · ${COUNT_HINT} · a cluster name or its line opens the cluster`,
       h('div.tbl-wrap', h('table.tbl.ld-ctr#ld-by-cluster',
-        sortHead(sorts.clusters, [['name', 'Cluster'], ['devices', 'Devices now', 1], ['lastRun', 'In last run', 1], ['inRange', 'In range', 1], ['zone', 'zone'], ['tag1', 'tag1'], ['lateNow', 'Late now', 1], ['newToday', 'Today', 1], ['below', b.below, 1],
-          ['delay', b.mid, 1], ['critical', b.high, 1], ['previous', `${b.below}, previous ${n} days`, 1], [null, `Last ${n} days`], ['worst', 'Worst device']]),
-        h('tbody', ...(cl.length ? cl : [h('tr', h('td', { colspan: 14 }, empty('No cluster you can see is measured.')))])))));
+        sortHead(sorts.clusters, [['name', 'Cluster'], ['timeZone', 'Time zone'], ['devices', 'Devices now', 1], ['lastRun', 'In last run', 1], ['inRange', 'In range', 1], ['zone', 'zone'], ['tag1', 'tag1'], ['lateNow', 'Late now', 1], ['newToday', 'Today', 1], ['below', b.below, 1],
+          ['delay', b.mid, 1], ['critical', b.high, 1], ['otherTz', 'Other time zone', 1], ['previous', `${b.below}, previous ${n} days`, 1], [null, `Last ${n} days`], ['worst', 'Worst device']]),
+        h('tbody', ...(cl.length ? cl : [h('tr', h('td', { colspan: 16 }, empty('No cluster you can see is measured.')))])))));
   });
+  const tzNote = B.get('fleet:tznote', rid, () => tzSinceNote((res.byCluster || []).map((c) => ({ name: c.name || nameOf(c.id), tz: c.timeZone }))));
 
   const readCard = B.get('fleet:read', rid, () => card('How the last run read each cluster', 'pages asked, whether the list is complete, and documents with no device name',
     h('div.tbl-wrap', h('table.tbl.ld-ctr#ld-last-read',
@@ -431,7 +461,7 @@ function fleetView() {
   const never = (res.byCluster || []).filter((c) => c.lastRunAt === null || c.lastRunAt === undefined);
   const neverNote = B.get('fleet:never', rid, () => (never.length && never.length < (res.byCluster || []).length
     ? h('div.muted.ld-note', `${never.length} cluster${never.length === 1 ? ' is' : 's are'} not measured yet: ${never.map((c) => c.name).join(', ')}.`) : null));
-  return [head, notice, readNote, totalsLine, tiles, dayCard, ringCard, clusterCard, readCard, devCard, neverNote];
+  return [head, notice, readNote, totalsLine, tiles, dayCard, ringCard, clusterCard, tzNote, readCard, devCard, neverNote];
 }
 
 function devicesCard(res) {
@@ -463,11 +493,14 @@ function clusterView(id) {
   const lv = res && res.levels; const b = bands(lv);
   const head = B.get('cl:head', `${id}|${S.period}|${entSig(ent)}`, () => {
     const exportBtn = h('button.btn#ld-export', { type: 'button', disabled: !res, onclick: (e) => exportXlsx(e.currentTarget, [id], res) }, 'Build report (.xlsx)');
+    const tz = res && res.timeZone;
     return h('div.ld-head',
       h('div.ld-title',
         crumbs(link(ldHash('fleet'), 'Log Delay'), 'cluster'),
         h('h2', name, h('span.ld-h-sub', ` · ${(res && res.label) || PERIODS.find((p) => p[0] === S.period)[1].toLowerCase()}`)),
-        h('p.sub', `Every device in this cluster that sends logs, day by day. Late means ${b.late}.`)),
+        h('p.sub', `Every device in this cluster that sends logs, day by day. Late means ${b.late}.`),
+        tz ? h('div.ld-chips', tzChip(tz, 'ld-tz-chip'),
+          tz.mode === 'none' ? h('span.ld-chip', 'Delay shown as measured: no time zone to take out') : h('span.ld-chip', 'Delay shown after the time zone is taken out')) : null),
       h('div.ld-actions', periodSelect('ld-period'), link(ldHash('fixes', id), 'Recommended fixes ›', { cls: 'btn' }), reportPeriodSelect(), exportBtn));
   });
   if (!res) return [head, B.get('cl:problem', entSig(ent), () => problem(ent, `${name}’s log delay`))];
@@ -476,7 +509,7 @@ function clusterView(id) {
   const n = periodDays(res.from, res.to) || 30;
   const tiles = B.get('cl:tiles', rid, () => h('div.ld-kpis.ld-5',
     kpi(countText(t.devices), 'devices measured', { key: 'devices' }),
-    kpi(countText(t.late), `late now · ${countText(t.delay)} delayed, ${countText(t.critical)} critical`, { tone: t.late ? 'pink' : null, key: 'late' }),
+    kpi(countText(t.late), `late now · ${countText(t.delay)} delayed, ${countText(t.critical)} critical${finite(t.otherTz) && t.otherTz ? ` · ${countText(t.otherTz)} in another time zone` : ''}`, { tone: t.late ? 'pink' : null, key: 'late' }),
     kpi(pctText(t.pctOnTime), 'on time now', { tone: 'green', key: 'pct' }),
     kpi(countText(res.started), `delays started · ${countText(res.solved)} solved`, { key: 'started' }),
     kpi(minutesText(res.medianNow, 'not measured'), `median delay · ${minutesText(res.medianPrevious, 'not measured')} in the previous ${n} days`, { key: 'median' })));
@@ -494,20 +527,22 @@ function clusterView(id) {
   const arrival = f.arrival || 'arrival';
   const event = (Array.isArray(f.eventTime) && f.eventTime[0]) || 'event time';
   const xc = extraCols(extras);
-  const keys = ['device', 'zone', 'tag1', 'state', 'now', 'median', 'max', 'episodes', 'lateMs', 'last', ...Object.keys(xc), 'arrival', 'event'];
+  const keys = ['device', 'zone', 'tag1', 'state', 'now', 'rawGap', 'deviceTz', 'median', 'max', 'episodes', 'lateMs', 'last', ...Object.keys(xc), 'arrival', 'event'];
   const ordered = sorts.clusterDevices.apply(byTimeLate(filterRows(res.devices, S.cdFilter)), sortCols(keys, xc));
   const shown = S.cdAll ? ordered : ordered.slice(0, PAGE_ROWS);
   const body = B.get('cl:dev:body', `${rid}|${S.cdFilter}|${S.cdAll}|${sortSig(sorts.clusterDevices)}`, () => [
     deviceTable({ id: 'ld-cluster-devices', sort: sorts.clusterDevices, rows: shown.map((r) => ({ ...r, cluster: r.cluster || id })), keys, extra: xc,
       labels: { arrival, event }, ctx: { now: res.now }, emptyText: S.cdFilter ? 'No device matches the filter.' : 'No device measured in this period.' }),
     footer(`ECS fields from the device’s latest log: ${[...extras, `${arrival} (arrival)`, `${event} (event time)`].join(', ')} · delay = ${arrival} − ${event}`
+      + (res.timeZone && res.timeZone.mode !== 'none' ? ` − time zone (${res.timeZone.offset || offsetLabel(res.timeZone.offsetMinutes)})` : '')
       + (f.device ? ` · device field ${f.device}` : '') + (f.pattern ? ` · indices ${f.pattern}` : ''),
       ` · Showing ${countText(shown.length)} of ${countText(ordered.length)}`,
       ordered.length > shown.length ? [' · ', h('button.linkish#ld-cd-all', { type: 'button', onclick: () => { S.cdAll = true; repaint(); } }, 'Show all')] : null)]);
   const devCard = keptCard(B, 'cl:dev', 'Devices in this cluster',
     `${countText((res.devices || []).length)} · ${sorts.clusterDevices.sort ? 'sorted by the marked column' : 'sorted by time spent late'} · a device opens its delay details`,
     body, [filterBox('ld-cd-filter', () => S.cdFilter, (v) => { S.cdFilter = v; S.cdAll = false; })]);
-  return [head, neverNote, readNote, tiles, countsNote, dayCard, devCard];
+  const tzNote = B.get('cl:tznote', rid, () => tzSinceNote([{ name, tz: res.timeZone }]));
+  return [head, neverNote, readNote, tiles, countsNote, dayCard, devCard, tzNote];
 }
 
 /* ------------------------------------ one device ------------------------------------ */
@@ -542,6 +577,9 @@ function deviceView(clusterId, device) {
         `event time ${Array.isArray(f.eventTime) && f.eventTime.length ? f.eventTime.join(' / ') : 'not known'}`,
         res && extraOf(res, 'zone') !== null ? `zone ${extraOf(res, 'zone')}` : 'zone not known',
         res && extraOf(res, 'tag1') !== null ? `tag1 ${extraOf(res, 'tag1')}` : 'tag1 not known',
+        res && res.timeZone ? `cluster time zone ${timeZoneShort(res.timeZone)}` : null,
+        res && res.state === 'other_tz' ? `this device ${offsetLabel(res.tzOffsetMinutes)} (other time zone)` : null,
+        res && finite(res.rawGapMinutes) && finite(res.tzOffsetMinutes) ? `raw gap ${minutesText(res.rawGapMinutes)} − ${offsetLabel(res.tzOffsetMinutes)}` : null,
         every ? `measured every ${every} hour${every === 1 ? '' : 's'}` : null].filter(Boolean).join(' · '))),
     h('div.ld-actions', S.range ? h('span.muted.ld-range', `${S.range.from} → ${S.range.to}`) : periodSelect('ld-period'),
       h('a.btn#ld-open-logs', { href: ldHash('live', clusterId, device), title: `${device}: its logs over the page's time range` }, 'Open in logs ›'))));
@@ -827,8 +865,10 @@ export function boardsNode(r, ctx) {
 /** What Fetch Now measures for the board on screen: the clusters, and one device on a device board. */
 export function boardsScope(r) {
   if (r.view === 'device') return { clusterIds: [r.clusterId], device: r.device, label: r.device };
-  if (r.view === 'cluster') return { clusterIds: [r.clusterId], label: nameOf(r.clusterId) };
+  // A cluster board: the whole cluster (docs/LOGDELAY.md "Fetch now" `devices: all`); the fleet
+  // has no Fetch now of its own — one cluster at a time — unless one is picked above it.
+  if (r.view === 'cluster') return { clusterIds: [r.clusterId], devices: 'all', label: nameOf(r.clusterId) };
   const id = r.view === 'fixes' ? r.clusterId : r.view === 'fleet' && S.clusterPick !== 'all' ? S.clusterPick : null;
-  if (id) return { clusterIds: [id], label: nameOf(id) };
+  if (id) return { clusterIds: [id], devices: 'all', label: nameOf(id) };
   return { clusterIds: [], label: 'every cluster' };
 }

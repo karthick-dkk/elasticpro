@@ -33,7 +33,8 @@
  * Checking the base name instead of this one is the mistake that makes a preflight pass
  * and the query that follows return nothing.
  */
-import { statusFor, levelsOf } from './delay-levels.js';
+import { statusFor, levelsOf, zoneOf } from './delay-levels.js';
+import { correct as correctByZone, matchOffset as matchOffsetFor, offsetLabel as offsetLabelOf } from './log-tz.js';
 
 const IP_LIKE = /(^|[._])(ip|addr|address)([._]|$)/i;
 const ALREADY_KEYWORD = /\.keyword$/;
@@ -165,12 +166,16 @@ export const STATUS = {
   DELAYED: { label: 'delayed', cls: 'yellow' },
   CRITICAL: { label: 'critical', cls: 'red' },
   CLOCK_AHEAD: { label: 'clock ahead', cls: 'orange' },
+  OTHER_TZ: { label: 'other time zone', cls: 'blue' },
   ERROR: { label: 'error', cls: 'grey' },
   NO_DATA: { label: 'no data', cls: 'grey' },
   UNKNOWN: { label: 'levels unknown', cls: 'grey' },
 };
 
-/** The shape of a delay, not its size: how close to a whole hour, and what counts as very long. */
+/**
+ * The shape of a delay, not its size: how close to a real time-zone offset (the core's
+ * tz.rs TOLERANCE_MINUTES — one figure; tools/unit holds them equal), and what counts as very long.
+ */
 export const PATTERN = Object.freeze({ tzToleranceMinutes: 3, veryLongMinutes: 24 * 60 });
 
 /** Why it is in that state, in the words an operator would use. */
@@ -180,6 +185,7 @@ export function reasonFor(status, trend = 'NO_TREND') {
     DELAYED: 'Pipeline lag: forwarder batching or network latency',
     CRITICAL: 'Severe lag: forwarder backlog, pipeline backpressure, or device clock behind',
     CLOCK_AHEAD: 'Device clock is ahead of real time (NTP)',
+    OTHER_TZ: 'Logs stamped in another time zone than the cluster’s (device clock or parser date filter)',
     ERROR: 'Timestamp missing or unparseable (parser)',
     NO_DATA: 'No logs received in the window',
   }[status] || status;
@@ -199,6 +205,7 @@ export function fixFor(status) {
     DELAYED: 'Reduce the forwarder flush interval; check the site link; tune Logstash batch and workers',
     CRITICAL: 'Check the forwarder queue and service; Logstash backpressure; Elasticsearch write rejections; NTP on the device',
     CLOCK_AHEAD: 'Fix NTP and timezone on the source device, and the parser date filter',
+    OTHER_TZ: 'Set the device’s time zone, or the parser’s date filter time zone (Logstash date { timezone => "…" })',
     ERROR: 'Fix the parser, or point eventTime at the field your pipeline actually writes',
     NO_DATA: 'Verify the device and its forwarder are alive and shipping',
   }[status] || '';
@@ -229,31 +236,38 @@ export function trend(series, minChangePct = 20) {
 /**
  * What the shape of the delay suggests, beyond how big it is.
  *
- * The one worth having: a delay within a few minutes of a whole number of hours is almost
- * never a queue. Queues drift; timezone offsets do not. A device an exact hour behind has
- * its clock or its parser in the wrong zone, and telling someone to tune their forwarder
- * would send them to fix the wrong thing.
+ * The one worth having: a delay within a few minutes of a real time-zone offset is almost never
+ * a queue. Queues drift; offsets do not. A device an exact 5 h 30 behind has its clock or its
+ * parser in the wrong zone, and telling someone to tune their forwarder would send them to fix
+ * the wrong thing. Every real offset counts, half- and quarter-hours included (core/log-tz.js
+ * `matchOffset`, the same list as the core's tz.rs) — until 0.3.62 only whole hours did, so
+ * +05:30 and +05:45 were never recognised. `deviceOffset` (from `correctByZone`) is the offset the
+ * raw gap sits at; given, it is used instead of matching again.
  */
-export function analysePattern(delayMinutes, t = PATTERN) {
+export function analysePattern(delayMinutes, t = PATTERN, deviceOffset = undefined) {
   if (delayMinutes === null || delayMinutes === undefined || !isFinite(delayMinutes)) {
     return { pattern: '-', note: '' };
   }
   const abs = Math.abs(delayMinutes);
-  const hours = abs / 60;
-  const nearestHour = Math.round(hours);
-  const offBy = Math.abs(hours - nearestHour) * 60;
-
-  if (nearestHour >= 1 && offBy <= t.tzToleranceMinutes) {
+  const off = deviceOffset === undefined ? matchOffsetFor(delayMinutes, t.tzToleranceMinutes) : deviceOffset;
+  if (off !== null && off !== 0) {
+    const offBy = Math.abs(delayMinutes - off);
     const dir = delayMinutes > 0 ? 'behind' : 'ahead';
     return {
       pattern: 'timezone',
-      note: `within ${Math.round(offBy)} min of exactly ${nearestHour}h ${dir} — a timezone or NTP offset, not a queue`,
+      note: `within ${Math.round(offBy)} min of exactly ${offsetWords(off)} ${dir} — a time-zone offset (${offsetLabelOf(off)}), not a queue`,
     };
   }
   if (abs >= t.veryLongMinutes) {
     return { pattern: 'very-long', note: `more than ${Math.round(t.veryLongMinutes / 60)}h — likely a replay or a stalled forwarder` };
   }
   return { pattern: '-', note: '' };
+}
+
+/** "5 h 30", "1 h", "3 h 45": an offset's size in words. */
+function offsetWords(minutes) {
+  const a = Math.abs(Math.round(minutes));
+  return a % 60 ? `${Math.floor(a / 60)} h ${a % 60}` : `${a / 60} h`;
 }
 
 /* --------------------------------- the record --------------------------------- */
@@ -263,14 +277,16 @@ export function analysePattern(delayMinutes, t = PATTERN) {
  *
  * Every figure the rest of the app shows comes from here, so the arithmetic exists once.
  * A document missing either timestamp yields a null delay and ERROR — never a zero, which
- * would sort as healthy and read as measured.
+ * would sort as healthy and read as measured. `tz` is the cluster's time zone as the core said
+ * it (delay-levels.js `zoneOf`): `delayMinutes` is the corrected delay, `rawGapMinutes` the
+ * gap as measured, `tzOffsetMinutes` what was taken out (null = no zone, nothing taken out).
  */
-export function recordFrom(bucket, resolved, levels = null) {
+export function recordFrom(bucket, resolved, levels = null, tz = null) {
   const hit = ((((bucket || {}).latest || {}).hits || {}).hits || [])[0];
   const src = (hit && hit._source) || {};
-  const { arrival, event, delayMinutes } = docDelay(src, resolved.arrival, eventSource(resolved));
+  const { arrival, event, delayMinutes, rawGapMinutes, tzOffsetMinutes, deviceTzOffset } = docDelay(src, resolved.arrival, eventSource(resolved), tz);
   const status = statusFor(delayMinutes, levels);
-  const { pattern, note } = analysePattern(delayMinutes);
+  const { pattern, note } = analysePattern(rawGapMinutes, PATTERN, deviceTzOffset);
 
   return {
     device: bucket.key,
@@ -278,6 +294,10 @@ export function recordFrom(bucket, resolved, levels = null) {
     arrival,
     event,
     delayMinutes,
+    rawGapMinutes,
+    tzOffsetMinutes,
+    deviceTzOffset,
+    clusterTzOffset: tzOffsetMinutes,
     status,
     pattern,
     patternNote: note,
@@ -403,7 +423,7 @@ export function buildLateSearchBody(resolved, devices, opts = {}) {
  * The late devices of one cluster, measured again in one request. Returns the fresh records
  * of the devices that answered; one that sent nothing in the window is not in it.
  */
-export async function measureLate(esClient, cluster, pre, devices, hours = 24, levels = levelsOf(cluster.id)) {
+export async function measureLate(esClient, cluster, pre, devices, hours = 24, levels = levelsOf(cluster.id), tz = zoneOf(cluster.id)) {
   const names = (devices || []).filter(recheckable).slice(0, LATE_MAX);
   if (!names.length) return { records: [] };
   const t = levels;
@@ -411,7 +431,7 @@ export async function measureLate(esClient, cluster, pre, devices, hours = 24, l
   const res = await esClient.search(cluster.logIndexPattern || 'logstash-*', body,
     { qs: 'ignore_unavailable=true&allow_no_indices=true', timeoutMs: 60000 });
   const agg = (res.aggregations || {}).devices || {};
-  return { records: (agg.buckets || []).map((b) => recordFrom(b, pre.resolved, t)) };
+  return { records: (agg.buckets || []).map((b) => recordFrom(b, pre.resolved, t, tz)) };
 }
 
 /** Roll a set of records into the counts the summary shows. */
@@ -452,8 +472,8 @@ export function delayItemValues(summary) {
  * so the page and the headless scraper (tools/elasticpro-scrape.mjs) ask the same question.
  * `pre` is what `preflight` resolved for this cluster.
  */
-export async function measureDelay(esClient, cluster, pre, hours = 24, levels = levelsOf(cluster.id)) {
-  return measureDelayIn(esClient, cluster, pre, { from: `now-${hours}h`, to: 'now' }, levels);
+export async function measureDelay(esClient, cluster, pre, hours = 24, levels = levelsOf(cluster.id), tz = zoneOf(cluster.id)) {
+  return measureDelayIn(esClient, cluster, pre, { from: `now-${hours}h`, to: 'now' }, levels, {}, tz);
 }
 
 /**
@@ -461,14 +481,15 @@ export async function measureDelay(esClient, cluster, pre, hours = 24, levels = 
  * time). The Log Delay page's Live Watch asks its own range with it; `opts.signal` lets go of
  * the request when the view is left.
  */
-export async function measureDelayIn(esClient, cluster, pre, { from, to }, levels = levelsOf(cluster.id), opts = {}) {
+export async function measureDelayIn(esClient, cluster, pre, { from, to }, levels = levelsOf(cluster.id), opts = {}, tz = zoneOf(cluster.id)) {
   const t = levels;
   const body = buildSearchBody(pre.resolved, { from, to, size: 500 });
   const res = await esClient.search(cluster.logIndexPattern || 'logstash-*', body,
     { qs: 'ignore_unavailable=true&allow_no_indices=true', timeoutMs: 60000, ...(opts.signal ? { signal: opts.signal } : {}) });
   const agg = (res.aggregations || {}).devices || {};
   return {
-    records: (agg.buckets || []).map((b) => recordFrom(b, pre.resolved, t)),
+    records: (agg.buckets || []).map((b) => recordFrom(b, pre.resolved, t, tz)),
+    timeZone: tz,
     // Devices beyond the terms size are not in the answer. Saying so beats implying
     // the list is everything.
     truncated: agg.sum_other_doc_count || 0,
@@ -476,7 +497,7 @@ export async function measureDelayIn(esClient, cluster, pre, { from, to }, level
 }
 
 export function summarise(records) {
-  const by = { OK: 0, DELAYED: 0, CRITICAL: 0, CLOCK_AHEAD: 0, ERROR: 0, NO_DATA: 0, UNKNOWN: 0 };
+  const by = { OK: 0, DELAYED: 0, CRITICAL: 0, CLOCK_AHEAD: 0, OTHER_TZ: 0, ERROR: 0, NO_DATA: 0, UNKNOWN: 0 };
   let worst = null;
   for (const r of records) {
     by[r.status] = (by[r.status] || 0) + 1;
@@ -621,32 +642,42 @@ export function buildDeviceQuery(resolved, { device, size = 15, fields = null, f
  * the data is. It is the aggregate figures that exclude it, never the row.
  */
 /**
- * One document's delay: arrival minus event time, in minutes — the one definition every list
- * of documents uses (the device record, the Live Watch close-up, Live logs). `eventFields` is
- * one name or a list tried in order (the first the document carries that reads as a date,
- * as RFC 3339 text or epoch milliseconds — `toMs`). Either time unreadable: null, never 0.
+ * One document's delay — the one definition every list of documents uses (the device record,
+ * the Live Watch close-up, Live logs): the raw gap, arrival minus event time in minutes, with the
+ * cluster's log time zone taken out (core/log-tz.js `correct`; `tz` as the core said it, null =
+ * no zone, nothing taken out). `eventFields` is one name or a list tried in order (the first the
+ * document carries that reads as a date, as RFC 3339 text or epoch milliseconds — `toMs`). Either
+ * time unreadable: null, never 0. Returns `{arrival, event, delayMinutes, rawGapMinutes,
+ * tzOffsetMinutes, deviceTzOffset}`.
  */
-export function docDelay(src, arrivalField, eventFields) {
+export function docDelay(src, arrivalField, eventFields, tz = null) {
   const arrival = toMs(dotted(src || {}, arrivalField));
   const event = firstMs(src || {}, Array.isArray(eventFields) ? eventFields : [eventFields]);
   const ok = isFinite(arrival) && isFinite(event);
+  const c = correctByZone(ok ? (arrival - event) / 60000 : null, tz, ok ? event : null, PATTERN.tzToleranceMinutes);
   return {
     arrival: isFinite(arrival) ? arrival : null,
     event: isFinite(event) ? event : null,
-    delayMinutes: ok ? (arrival - event) / 60000 : null,
+    delayMinutes: c.delayMinutes,
+    rawGapMinutes: c.rawGapMinutes,
+    tzOffsetMinutes: c.offsetMinutes,
+    deviceTzOffset: c.deviceOffset,
   };
 }
 
-export function documentDelays(hits, resolved, levels = null) {
+export function documentDelays(hits, resolved, levels = null, tz = null) {
   return (hits || []).map((hit) => {
     const src = (hit && hit._source) || {};
-    const { arrival, event, delayMinutes } = docDelay(src, resolved.arrival, eventSource(resolved));
+    const { arrival, event, delayMinutes, rawGapMinutes, tzOffsetMinutes, deviceTzOffset } = docDelay(src, resolved.arrival, eventSource(resolved), tz);
     return {
       id: (hit && hit._id) || '',
       index: (hit && hit._index) || '',
       arrival,
       event,
       delayMinutes,
+      rawGapMinutes,
+      tzOffsetMinutes,
+      deviceTzOffset,
       status: statusFor(delayMinutes, levels),
       meta: Object.fromEntries((resolved.metadata || []).map((m) => {
         const plain = String(m).replace(/\.keyword$/, '');

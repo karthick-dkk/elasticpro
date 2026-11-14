@@ -10,6 +10,7 @@ use super::fixes::{Finding, Step};
 use super::levels::State;
 use super::summary::{self, ClusterInput, DeviceRow, Range};
 use super::time;
+use super::tz;
 use crate::report::build::csv_escape;
 use crate::report::xlsx::{self, Cell, Sheet};
 use serde::{Deserialize, Serialize};
@@ -63,8 +64,8 @@ impl DevicesFilter {
 }
 
 pub const SECTIONS: [&str; 6] = ["summary", "lateEvery2h", "windows", "dayByDay", "topDelayed", "fixes"];
-pub const BASE_COLUMNS: [&str; 13] = ["device", "cluster", "nowMinutes", "level", "startedSolved", "median", "max", "episodes", "lateTime", "docsPerDay",
-                                      "arrival", "eventTime", "lateSince"];
+pub const BASE_COLUMNS: [&str; 15] = ["device", "cluster", "nowMinutes", "level", "startedSolved", "median", "max", "episodes", "lateTime", "docsPerDay",
+                                      "arrival", "eventTime", "lateSince", "rawGap", "deviceTimeZone"];
 
 /// The schedule's (or a run's) options for this kind.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -185,6 +186,22 @@ fn pct(v: &Value) -> String {
     v.as_f64().map(|p| format!("{p:.1} %")).unwrap_or_else(|| "—".into())
 }
 
+/// The line every report carries about the zone step (docs/LOGDELAY.md "Time zones").
+pub const TZ_NOTE: &str = "Delays are shown after each cluster's log time zone is taken out (raw gap − zone offset). Measurements from before a zone was set or detected stay as they were measured.";
+
+/// A cluster's time zone in words: `Asia/Kolkata +05:30 · detected (90 %)`, `UTC · set`,
+/// `not detected (41 % agree)`, `not measured`.
+pub fn time_zone_text(z: &Value) -> String {
+    let pct = z["pct"].as_f64().map(|p| format!("{p:.0} %"));
+    match z["mode"].as_str() {
+        Some("set") => format!("{} {} · set", z["zone"].as_str().unwrap_or(""), z["offset"].as_str().unwrap_or("")).trim().to_string(),
+        Some("detected") => format!("{}{} · detected{}", z["zone"].as_str().map(|n| format!("{n} ")).unwrap_or_default(), z["offset"].as_str().unwrap_or(""),
+                                    pct.map(|p| format!(" ({p} agree)")).unwrap_or_default()),
+        Some("none") => match pct { Some(p) => format!("not detected ({p} agree)"), None => "not detected".into() },
+        _ => "—".into(),
+    }
+}
+
 /// The range as the report names it: an hour (`13 Nov 09:00–10:00`), a day, or days.
 pub fn range_label(r: &Range) -> String {
     if r.to_ms - r.from_ms <= 3_600_000 {
@@ -247,8 +264,19 @@ fn column_label(c: &str) -> String {
     match c {
         "device" => "Device", "cluster" => "Cluster", "nowMinutes" => "Delay now (min)", "level" => "Level", "startedSolved" => "Last delay: started → solved",
         "median" => "Median (min)", "max" => "Max (min)", "episodes" => "Delays", "lateTime" => "Time late", "docsPerDay" => "Logs a day",
-        "arrival" => "Arrival", "eventTime" => "Event time", "lateSince" => "Late since", other => other,
+        "arrival" => "Arrival", "eventTime" => "Event time", "lateSince" => "Late since", "rawGap" => "Raw gap (min)", "deviceTimeZone" => "Device time zone",
+        other => other,
     }.to_string()
+}
+
+/// "Device time zone" for a row: `same as cluster`, the device's own offset for one in another
+/// zone, or `—` when the cluster has no zone (nothing to compare against).
+pub fn device_time_zone(r: &DeviceRow) -> String {
+    match (r.cluster_tz_offset, r.state) {
+        (_, State::OtherTz) => r.tz_offset_minutes.map(tz::offset_text).unwrap_or_else(|| "other".into()),
+        (Some(_), s) if s.measured() => "same as cluster".into(),
+        _ => "—".into(),
+    }
 }
 
 fn column_cell(c: &str, r: &DeviceRow, now: i64) -> Cell {
@@ -266,6 +294,8 @@ fn column_cell(c: &str, r: &DeviceRow, now: i64) -> Cell {
         "arrival" => r.last_arrival.map(|t| Cell::text(time::when(t, now))).unwrap_or(Cell::Empty),
         "eventTime" => r.last_event.map(|t| Cell::text(time::when(t, now))).unwrap_or(Cell::Empty),
         "lateSince" => r.late_since.map(|t| Cell::text(time::when(t, now))).unwrap_or(Cell::Empty),
+        "rawGap" => opt_min(r.raw_gap_minutes),
+        "deviceTimeZone" => Cell::text(device_time_zone(r)),
         other => super::extra_ci(&r.extras, other).map(Cell::text).unwrap_or(Cell::Empty),
     }
 }
@@ -342,14 +372,17 @@ fn sheets(i: &Inputs<'_>, fleet: &Value, rows: &[DeviceRow], windows: &[Value], 
             r.push(vec![Cell::text(format!("{} h", n(&x["hours"]) as i64)), int(&x["n"])]);
         }
         r.push(vec![Cell::Empty]);
-        r.push(vec![Cell::head("Cluster"), Cell::head("Devices"), Cell::head("Late now"), Cell::head("Today"), Cell::head("Below 30 min"), Cell::head("30–60 min"),
-                    Cell::head("Above 60 min"), Cell::head("Below 30 min, previous period"), Cell::head("Silent"), Cell::head("Worst device"), Cell::head("Worst (min)")]);
+        r.push(vec![Cell::head("Cluster"), Cell::head("Time zone"), Cell::head("Devices"), Cell::head("Late now"), Cell::head("Today"), Cell::head("Below 30 min"), Cell::head("30–60 min"),
+                    Cell::head("Above 60 min"), Cell::head("Other time zone"), Cell::head("Below 30 min, previous period"), Cell::head("Silent"), Cell::head("Worst device"), Cell::head("Worst (min)")]);
         for c in fleet["byCluster"].as_array().into_iter().flatten() {
-            r.push(vec![Cell::text(c["name"].as_str().unwrap_or("")), int(&c["devices"]), int(&c["lateNow"]), int(&c["newToday"]),
+            r.push(vec![Cell::text(c["name"].as_str().unwrap_or("")), Cell::text(time_zone_text(&c["timeZone"])), int(&c["devices"]), int(&c["lateNow"]), int(&c["newToday"]),
                         Cell::text(format!("{} ({})", n(&c["below"]) as i64, pct(&c["belowPct"]))), int(&c["delay"]), int(&c["critical"]),
+                        if c["timeZone"]["offsetMinutes"].is_null() { Cell::text("—") } else { int(&c["otherTz"]) },
                         Cell::text(pct(&c["belowPctPrevious"])), int(&c["silent"]),
                         Cell::text(c["worst"]["device"].as_str().unwrap_or("—")), c["worst"]["minutes"].as_f64().map(Cell::Dec).unwrap_or(Cell::Empty)]);
         }
+        r.push(vec![Cell::Empty]);
+        r.push(vec![Cell::text(TZ_NOTE)]);
         r.push(vec![Cell::Empty]);
         r.push(vec![Cell::head("Zone"), Cell::head("tag1"), Cell::head("Devices"), Cell::head("Late now"), Cell::head("Above 60 min"), Cell::head("Silent")]);
         for (z, t1, n) in by_zone_tag(i) {
@@ -484,7 +517,8 @@ fn step_colour(s: Step) -> &'static str {
         Step::Elasticsearch => BLUE,
         Step::Forwarder => ORANGE,
         Step::Parser => PINK,
-        Step::DeviceClock | Step::DeviceLink => GREEN,
+        Step::DeviceClock | Step::DeviceLink | Step::DeviceTimeZone => GREEN,
+        Step::Cluster => BLUE,
         Step::Unknown => LINE,
     }
 }
@@ -522,6 +556,11 @@ pub fn html(i: &Inputs<'_>, fleet: &Value, windows: &[Value], top: &[&DeviceRow]
             y["averageLastedMs"].as_i64().map(|ms| format!(" ({} late on average)", time::duration(ms))).unwrap_or_default()));
         if n(&t["unmeasured"]) > 0.0 {
             h.push_str(&format!("<div style=\"font-size:12px;color:{MUTED}\">{} device(s) could not be measured: no readable event time in their latest log.</div>", n(&t["unmeasured"]) as i64));
+        }
+        let zones: Vec<String> = fleet["byCluster"].as_array().into_iter().flatten()
+            .map(|c| format!("{}: {}", esc(c["name"].as_str().unwrap_or("")), esc(&time_zone_text(&c["timeZone"])))).collect();
+        if !zones.is_empty() {
+            h.push_str(&format!("<div style=\"font-size:12px;color:{MUTED};margin:8px 0 0\">Log time zone — {}. {}</div>", zones.join("; "), esc(TZ_NOTE)));
         }
         let zt = by_zone_tag(i);
         h.push_str("<div style=\"font-size:14px;font-weight:600;margin:18px 0 6px\">By zone and tag1 · now</div>");
@@ -630,8 +669,14 @@ pub fn text(i: &Inputs<'_>, fleet: &Value, windows: &[Value], top: &[&DeviceRow]
     if fleet["devicesInRange"].as_u64() == Some(0) {
         s.push_str(&format!("No measurement in this period (the measurement runs every {} hours): the figures are the devices' states now.\n", i.every_hours));
     }
-    s.push_str(&format!("Yesterday: {} became late, {} solved{}\n\n", n(&y["newlyLate"]) as i64, n(&y["solved"]) as i64,
+    s.push_str(&format!("Yesterday: {} became late, {} solved{}\n", n(&y["newlyLate"]) as i64, n(&y["solved"]) as i64,
         y["averageLastedMs"].as_i64().map(|ms| format!(" ({} late on average)", time::duration(ms))).unwrap_or_default()));
+    let zones: Vec<String> = fleet["byCluster"].as_array().into_iter().flatten()
+        .map(|c| format!("{}: {}", c["name"].as_str().unwrap_or(""), time_zone_text(&c["timeZone"]))).collect();
+    if !zones.is_empty() {
+        s.push_str(&format!("Log time zone — {}. {TZ_NOTE}\n", zones.join("; ")));
+    }
+    s.push('\n');
     if i.options.has("windows") && !windows.is_empty() {
         s.push_str(&format!("Every {} hours · window: newly late / solved / still late\n", i.every_hours));
         for w in windows {
@@ -701,7 +746,7 @@ mod tests {
         let (f, to) = time::day_bounds(time::local_date(now));
         let mut daily = BTreeMap::new();
         daily.insert(key.clone(), crate::logdelay::state::daily(&t, &key, f, to, now));
-        ClusterInput { id: "prod".into(), name: "Production".into(), tracker: std::sync::Arc::new(t), daily, levels: l }
+        ClusterInput { id: "prod".into(), name: "Production".into(), tracker: std::sync::Arc::new(t), daily, levels: l, zone: crate::logdelay::tz::LogTimeZone::Detect, tz_hints: vec![] }
     }
 
     #[test]
@@ -712,7 +757,7 @@ mod tests {
         let evil = "=HYPERLINK(\"http://x\")<script>alert('1')</script>, \"q\"";
         let rd = Reading { device: evil.into(), docs: 5, arrival_ms: Some(now), event_ms: Some(now - 90 * 60_000), delay_minutes: Some(90.0), extras: BTreeMap::new() };
         t.apply(now, vec![rd], &l, 2 * H);
-        let clusters = vec![ClusterInput { id: "prod".into(), name: "<b>Prod</b>".into(), tracker: std::sync::Arc::new(t), daily: BTreeMap::new(), levels: l }];
+        let clusters = vec![ClusterInput { id: "prod".into(), name: "<b>Prod</b>".into(), tracker: std::sync::Arc::new(t), daily: BTreeMap::new(), levels: l, zone: crate::logdelay::tz::LogTimeZone::Detect, tz_hints: vec![] }];
         let r = Range::last_days(now, 7);
         let opts = Options::default();
         let i = Inputs { clusters: &clusters, range: &r, now, every_hours: 2, findings: &[], options: &opts, extras: &[], app_url: None };
@@ -734,7 +779,7 @@ mod tests {
         let plus = "+cmd|' /C calc'!A0";
         let rd = Reading { device: plus.into(), docs: 5, arrival_ms: Some(now), event_ms: Some(now - 90 * 60_000), delay_minutes: Some(90.0), extras: BTreeMap::new() };
         t.apply(now, vec![rd], &l, 2 * H);
-        let clusters = vec![ClusterInput { id: "prod".into(), name: "Prod".into(), tracker: std::sync::Arc::new(t), daily: BTreeMap::new(), levels: l }];
+        let clusters = vec![ClusterInput { id: "prod".into(), name: "Prod".into(), tracker: std::sync::Arc::new(t), daily: BTreeMap::new(), levels: l, zone: crate::logdelay::tz::LogTimeZone::Detect, tz_hints: vec![] }];
         let r = Range::last_days(now, 7);
         let opts = Options::default();
         let i = Inputs { clusters: &clusters, range: &r, now, every_hours: 2, findings: &[], options: &opts, extras: &[], app_url: None };
@@ -764,7 +809,7 @@ mod tests {
         let c = input(now);
         let r = Range::last_days(now, 7);
         let extras = vec!["Zone".to_string(), "tag1".to_string(), "fwd_tag".to_string(), "parser_tag".to_string()];
-        let findings = crate::logdelay::fixes::findings("prod", &c.tracker, r.from_ms, r.to_ms, now, 2 * H, &Default::default());
+        let findings = crate::logdelay::fixes::findings("prod", &c.tracker, r.from_ms, r.to_ms, now, 2 * H, &Default::default(), &crate::logdelay::tz::LogTimeZone::Detect);
         let clusters = vec![c];
         let opts = Options::default();
         let i = Inputs { clusters: &clusters, range: &r, now, every_hours: 2, findings: &findings, options: &opts, extras: &extras, app_url: Some("https://ep.example/reports/logdelay") };
@@ -814,9 +859,35 @@ mod tests {
     }
 
     #[test]
+    fn the_time_zone_is_said_in_words_and_as_a_column() {
+        use serde_json::json;
+        assert_eq!(time_zone_text(&json!({ "mode": "detected", "zone": "Asia/Kolkata", "offset": "+05:30", "pct": 89.7 })), "Asia/Kolkata +05:30 · detected (90 % agree)");
+        assert_eq!(time_zone_text(&json!({ "mode": "detected", "zone": null, "offset": "+08:00", "pct": 100.0 })), "+08:00 · detected (100 % agree)", "no name invented");
+        assert_eq!(time_zone_text(&json!({ "mode": "set", "zone": "UTC", "offset": "+00:00" })), "UTC +00:00 · set");
+        assert_eq!(time_zone_text(&json!({ "mode": "none", "pct": 41.2 })), "not detected (41 % agree)");
+        assert_eq!(time_zone_text(&json!({ "mode": "none" })), "not detected");
+        assert_eq!(time_zone_text(&Value::Null), "—");
+        let now = chrono::Utc::now().timestamp_millis();
+        let mut r = DeviceRow { device: "d".into(), cluster: "c".into(), cluster_name: "C".into(), state: State::OtherTz, now_minutes: Some(1.0),
+            raw_gap_minutes: Some(481.0), tz_offset_minutes: Some(480), device_tz_offset: Some(480), cluster_tz_offset: Some(330), median_minutes: None,
+            max_minutes: None, episodes: 0, solved: 0, late_ms: 0, last_started: None, last_solved: None, late_since: None, docs_per_day: None,
+            last_arrival: None, last_event: None, silent_since: None, zone: None, tag1: None, in_last_run: true, extras: BTreeMap::new() };
+        assert_eq!(device_time_zone(&r), "+08:00");
+        assert_eq!(cell_text(&column_cell("rawGap", &r, now)), "481.00");
+        r.state = State::Delay; r.tz_offset_minutes = Some(330); r.now_minutes = Some(40.0); r.raw_gap_minutes = Some(370.0);
+        assert_eq!(device_time_zone(&r), "same as cluster");
+        r.cluster_tz_offset = None; r.tz_offset_minutes = None;
+        assert_eq!(device_time_zone(&r), "—", "no cluster zone: nothing to compare against");
+        r.cluster_tz_offset = Some(330); r.state = State::Silent;
+        assert_eq!(device_time_zone(&r), "—");
+        assert!(BASE_COLUMNS.contains(&"rawGap") && BASE_COLUMNS.contains(&"deviceTimeZone"));
+    }
+
+    #[test]
     fn started_solved_reads_as_the_board_shows_it() {
         let now = chrono::Utc::now().timestamp_millis();
-        let mut r = DeviceRow { device: "d".into(), cluster: "c".into(), cluster_name: "C".into(), state: State::Critical, now_minutes: Some(94.0), median_minutes: None,
+        let mut r = DeviceRow { device: "d".into(), cluster: "c".into(), cluster_name: "C".into(), state: State::Critical, now_minutes: Some(94.0),
+            raw_gap_minutes: Some(94.0), tz_offset_minutes: None, device_tz_offset: None, cluster_tz_offset: None, median_minutes: None,
             max_minutes: None, episodes: 1, solved: 0, late_ms: 0, last_started: Some(now - H), last_solved: None, late_since: Some(now - H), docs_per_day: None,
             last_arrival: None, last_event: None, silent_since: None, zone: None, tag1: None, in_last_run: true, extras: BTreeMap::new() };
         assert!(started_solved(&r, now).ends_with("→ still late"));

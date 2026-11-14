@@ -2,8 +2,10 @@
 //! (docs/LOGDELAY.md "Delay periods", "Silences", "Daily totals").
 //!
 //! ```text
-//!   previous state ──▶ apply(run, readings) ──▶ new state
+//!   previous state ──▶ apply(run, readings, zone) ──▶ new state
 //!                        │
+//!                        ├── the cluster's log time zone detected from the readings (tz.rs),
+//!                        │   each raw gap corrected by it; a device steady at another offset ─▶ other time zone
 //!                        ├── a device measured late with no open period      ─▶ period opened
 //!                        ├── a device measured under the line with one open  ─▶ period solved
 //!                        ├── a device missing for longer than the silence limit ─▶ silent
@@ -17,6 +19,7 @@
 
 use super::levels::{Levels, State};
 use super::measure::{round2, Reading};
+use super::tz::{self, Detection, LogTimeZone, Offsets, RunTally};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -73,8 +76,9 @@ pub struct Episode {
     pub last_state: State,
     /// Measurements taken while it was open, the solving one included.
     pub measurements: u32,
-    /// Late measurements that sat within three minutes of a whole hour (60, 120, …): the
-    /// "a whole hour off" pattern is read from this against `measurements`.
+    /// Late measurements that sat within the tolerance of a real time-zone offset (60, 120,
+    /// 330, 345, …; `tz.rs`), and every one taken in another zone: the "a whole hour off"
+    /// pattern is read from this against `measurements`.
     #[serde(default)]
     pub whole_hour: u32,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -143,8 +147,20 @@ pub struct DeviceState {
     pub last_arrival_ms: Option<i64>,
     #[serde(default)]
     pub last_event_ms: Option<i64>,
+    /// The corrected delay (the raw gap with the zone taken out; the device's own for another zone).
     #[serde(default)]
     pub last_minutes: Option<f64>,
+    /// The raw gap, arrival − event, as measured.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_raw_minutes: Option<f64>,
+    /// The real UTC offset the raw gap sits at, when it sits at one, and for how many runs in a row.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tz_offset: Option<i32>,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub tz_streak: u32,
+    /// The offset taken out of `last_minutes`: the cluster's, or the device's own for another zone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub applied_offset: Option<i32>,
     #[serde(default = "unmeasured")]
     pub state: State,
     pub docs: u64,
@@ -165,6 +181,10 @@ fn unmeasured() -> State {
     State::Unmeasured
 }
 
+fn is_zero(n: &u32) -> bool {
+    *n == 0
+}
+
 /// One cluster's memory.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -182,6 +202,9 @@ pub struct Tracker {
     /// How the last run read this cluster's devices (pages, complete, cut at the cap).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_read: Option<super::collect::RunInfo>,
+    /// The log time zone detected from the devices (tz.rs): the last runs' tallies, the result.
+    #[serde(default)]
+    pub tz: Detection,
 }
 
 /// How long the built-in store keeps a solved period, a silence, a day file (Storage board:
@@ -214,16 +237,23 @@ pub struct Row {
     pub docs: u64,
     pub arrival_ms: Option<i64>,
     pub event_ms: Option<i64>,
+    /// The corrected delay: `raw_gap_minutes − tz_offset_minutes`.
     pub delay_minutes: Option<f64>,
+    /// Arrival − event, as measured.
+    pub raw_gap_minutes: Option<f64>,
+    /// The real UTC offset the raw gap sits at, if any (the device's apparent zone).
+    pub device_tz_offset: Option<i32>,
+    /// What was taken out: the cluster's offset, or the device's own for another zone. `None`:
+    /// the cluster has no zone (nothing corrected).
+    pub tz_offset_minutes: Option<i32>,
     pub state: State,
     pub extras: BTreeMap<String, String>,
 }
 
-/// A time-zone-shaped offset: within three minutes of a multiple of 30 minutes (60, 120,
-/// 330 — a half-hour zone — …), and at least an hour. A real backlog never sits there.
-pub fn whole_hour(m: f64) -> bool {
-    let a = m.abs();
-    a >= 57.0 && (a / 30.0 - (a / 30.0).round()).abs() * 30.0 <= 3.0
+/// A time-zone-shaped delay: within the tolerance of a real UTC offset other than UTC (60,
+/// 120, 330, 345, …; tz.rs), among the offsets in use at the run. A real backlog never sits there.
+pub fn whole_hour(m: f64, offsets: &Offsets) -> bool {
+    offsets.matching(m, tz::TOLERANCE_MINUTES).is_some_and(|o| o != 0)
 }
 
 impl Tracker {
@@ -244,20 +274,42 @@ impl Tracker {
         self.devices.values().filter_map(|d| d.silence.as_ref())
     }
 
-    /// One run: the readings against the memory, under `levels`. `silent_after_ms` is how
-    /// long without a document makes a device silent.
+    /// One run: the readings against the memory, under `levels`, the cluster's log time zone
+    /// left to detection (the default). `silent_after_ms` is how long without a document makes
+    /// a device silent.
     pub fn apply(&mut self, run_ms: i64, readings: Vec<Reading>, levels: &Levels, silent_after_ms: i64) -> Applied {
-        self.apply_run(run_ms, readings, levels, silent_after_ms, true)
+        self.apply_run(run_ms, readings, levels, silent_after_ms, true, &LogTimeZone::Detect)
     }
 
-    /// `apply`, saying whether the readings are every device of the window (`complete`). A run
-    /// that read only part of the list — scoped to one device, stopped at *Max devices per
-    /// run*, or cut short by a page that failed — says nothing about the devices it did not
-    /// read: they are neither silent nor forgotten by it (unknown is not "no logs").
-    pub fn apply_run(&mut self, run_ms: i64, readings: Vec<Reading>, levels: &Levels, silent_after_ms: i64, complete: bool) -> Applied {
+    /// `apply`, saying whether the readings are every device of the window (`complete`) and
+    /// the cluster's log time zone setting. A run that read only part of the list — scoped to
+    /// one device, stopped at *Max devices per run*, or cut short by a page that failed — says
+    /// nothing about the devices it did not read: they are neither silent nor forgotten by it
+    /// (unknown is not "no logs"), and it is not a run the zone is detected from.
+    ///
+    /// The zone step (docs/LOGDELAY.md "Time zones"): each reading's raw gap is matched against
+    /// the real offsets in use (`tz::Offsets`); a complete run's matches are tallied into the
+    /// detection; the cluster's offset — set, or detected — is taken out of every gap before it
+    /// is levelled. A device whose gap sits at another real offset `DEVICE_STEADY_RUNS` runs in
+    /// a row is in another time zone: not late, its delay shown against its own offset. With
+    /// no zone (nothing set, nothing detected) the raw gap is the delay, as before.
+    pub fn apply_run(&mut self, run_ms: i64, readings: Vec<Reading>, levels: &Levels, silent_after_ms: i64, complete: bool, zone: &LogTimeZone) -> Applied {
         let mut out = Applied::default();
         let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-        for r in readings {
+        let offsets = Offsets::at_run(run_ms);
+        let raw_of = |r: &Reading| r.delay_minutes.filter(|m| m.is_finite());
+        let matched: Vec<Option<i32>> = readings.iter().map(|r| raw_of(r).and_then(|m| offsets.matching(m, tz::TOLERANCE_MINUTES))).collect();
+        if complete {
+            self.tz.record(RunTally::count(run_ms, readings.iter().zip(&matched).filter(|(r, _)| raw_of(r).is_some()).map(|(_, m)| *m)));
+        }
+        let detected = self.tz.detected.map(|d| d.offset_minutes);
+        let cluster_offset = |event_ms: Option<i64>| -> Option<i32> {
+            match zone {
+                LogTimeZone::Detect => detected,
+                set => set.offset_at(event_ms.unwrap_or(run_ms)),
+            }
+        };
+        for (r, dev_off) in readings.into_iter().zip(matched) {
             seen.insert(r.device.clone());
             let d = self.devices.entry(r.device.clone()).or_insert_with(|| DeviceState { first_seen_ms: run_ms, ..DeviceState::default() });
             d.last_run_ms = run_ms;
@@ -288,11 +340,26 @@ impl Tracker {
             if let Some(e) = r.event_ms {
                 d.last_event_ms = Some(e);
             }
-            let state = match State::of(r.delay_minutes, levels) {
-                Some(s) => s,
-                None => State::Unmeasured,
+            // The zone step: the device's apparent offset and how long it has sat there, the
+            // cluster's offset at this event's time, and the corrected delay that is levelled.
+            let raw = raw_of(&r);
+            match dev_off {
+                Some(o) if d.tz_offset == Some(o) => d.tz_streak = d.tz_streak.saturating_add(1),
+                Some(o) => { d.tz_offset = Some(o); d.tz_streak = 1; }
+                None => { d.tz_offset = None; d.tz_streak = 0; }
+            }
+            let (corrected, applied, other) = match (raw, cluster_offset(r.event_ms)) {
+                (None, _) => (None, None, false),
+                (Some(raw), None) => (Some(raw), None, false),
+                (Some(raw), Some(co)) => match dev_off.filter(|o| *o != co && d.tz_streak >= tz::DEVICE_STEADY_RUNS) {
+                    Some(own) => (Some(raw - own as f64), Some(own), true),
+                    None => (Some(raw - co as f64), Some(co), false),
+                },
             };
-            let m = r.delay_minutes.filter(|_| state != State::Unmeasured).map(round2);
+            let state = if other { State::OtherTz } else { State::of(corrected, levels).unwrap_or(State::Unmeasured) };
+            let m = corrected.filter(|_| state != State::Unmeasured).map(round2);
+            d.last_raw_minutes = raw.map(round2);
+            d.applied_offset = applied;
             if let Some(m) = m {
                 d.last_minutes = Some(m);
                 match d.open.as_mut() {
@@ -304,7 +371,7 @@ impl Tracker {
                             ep.worst_minutes = m;
                             ep.worst_state = state;
                         }
-                        if state.late() && whole_hour(m) {
+                        if state == State::OtherTz || (state.late() && whole_hour(m, &offsets)) {
                             ep.whole_hour += 1;
                         }
                         if !d.extras.is_empty() {
@@ -322,7 +389,7 @@ impl Tracker {
                     None if state.late() => {
                         let ep = Episode {
                             device: r.device.clone(), started_ms: run_ms, solved_ms: None, ended_ms: None, worst_minutes: m, worst_state: state,
-                            last_minutes: m, last_state: state, measurements: 1, whole_hour: whole_hour(m) as u32, extras: d.extras.clone(),
+                            last_minutes: m, last_state: state, measurements: 1, whole_hour: whole_hour(m, &offsets) as u32, extras: d.extras.clone(),
                         };
                         out.opened.push(ep.clone());
                         d.open = Some(ep);
@@ -333,7 +400,8 @@ impl Tracker {
             d.state = state;
             d.recent.push(Point { t: run_ms, m, s: state });
             out.rows.push(Row { device: r.device, docs: r.docs, arrival_ms: d.last_arrival_ms, event_ms: d.last_event_ms,
-                                delay_minutes: m, state, extras: d.extras.clone() });
+                                delay_minutes: m, raw_gap_minutes: d.last_raw_minutes, device_tz_offset: dev_off, tz_offset_minutes: applied,
+                                state, extras: d.extras.clone() });
         }
         // Devices the run did not see: silent after the limit, forgotten after a week.
         let mut forget = vec![];
@@ -360,7 +428,8 @@ impl Tracker {
             }
             d.recent.push(Point { t: run_ms, m: None, s: State::Silent });
             out.rows.push(Row { device: name.clone(), docs: 0, arrival_ms: d.last_arrival_ms, event_ms: d.last_event_ms,
-                                delay_minutes: None, state: State::Silent, extras: d.extras.clone() });
+                                delay_minutes: None, raw_gap_minutes: None, device_tz_offset: d.tz_offset, tz_offset_minutes: None,
+                                state: State::Silent, extras: d.extras.clone() });
         }
         for name in forget {
             if let Some(d) = self.devices.remove(&name) {
@@ -408,6 +477,9 @@ pub struct Daily {
     pub delayed: u64,
     pub critical: u64,
     pub clock_ahead: u64,
+    /// Devices whose gap sat at another real offset than the cluster's (not late).
+    #[serde(default)]
+    pub other_tz: u64,
     pub silent: u64,
     pub unmeasured: u64,
     /// Periods that started / were solved that day.
@@ -441,6 +513,7 @@ pub fn daily(t: &Tracker, day: &str, from: i64, to: i64, now: i64) -> Daily {
             State::Delay => d.delayed += 1,
             State::Critical => d.critical += 1,
             State::ClockAhead => d.clock_ahead += 1,
+            State::OtherTz => d.other_tz += 1,
             State::Silent => d.silent += 1,
             State::Unmeasured => d.unmeasured += 1,
         }
@@ -518,12 +591,12 @@ mod tests {
         let mut t = Tracker::default();
         t.apply(0, vec![r("a", Some(1.0), 0), r("b", Some(45.0), 0)], &l, 2 * H);
         // Scoped to "a" (Fetch now for one device), hours later: b is not silent by it.
-        let x = t.apply_run(5 * H, vec![r("a", Some(2.0), 5 * H)], &l, 2 * H, false);
+        let x = t.apply_run(5 * H, vec![r("a", Some(2.0), 5 * H)], &l, 2 * H, false, &LogTimeZone::Detect);
         assert!(x.silences_begun.is_empty() && x.rows.len() == 1, "{:?}", x.rows);
         assert_eq!(t.devices["b"].state, State::Delay);
         assert!(t.devices["b"].open.is_some());
         // A week on, still not forgotten by a partial run; a complete one does it.
-        t.apply_run(8 * 24 * H, vec![r("a", Some(2.0), 8 * 24 * H)], &l, 2 * H, false);
+        t.apply_run(8 * 24 * H, vec![r("a", Some(2.0), 8 * 24 * H)], &l, 2 * H, false, &LogTimeZone::Detect);
         assert!(t.devices.contains_key("b"));
         let x = t.apply(8 * 24 * H + H, vec![r("a", Some(2.0), 8 * 24 * H + H)], &l, 2 * H);
         assert_eq!(x.forgotten, 1);
@@ -585,19 +658,137 @@ mod tests {
         assert!(!t.episodes[0].late_at(FORGET_MS + 2 * H) && t.episodes[0].late_at(H));
     }
 
+    /// 2025-11-14: the runs below are measured in the present, so the offsets in use are today's.
+    const NOW: i64 = 1_763_100_000_000;
+
     #[test]
-    fn whole_hour_offsets_are_read_from_the_period() {
-        assert!(whole_hour(60.0) && whole_hour(62.5) && whole_hour(119.0) && whole_hour(330.0) && whole_hour(-60.0));
-        assert!(!whole_hour(45.0) && !whole_hour(75.0) && !whole_hour(5.0) && !whole_hour(100.0));
+    fn time_zone_shaped_offsets_are_read_from_the_period() {
+        let o = Offsets::at_run(NOW);
+        assert!(whole_hour(60.0, &o) && whole_hour(62.5, &o) && whole_hour(119.0, &o) && whole_hour(330.0, &o) && whole_hour(345.0, &o) && whole_hour(-60.0, &o));
+        assert!(!whole_hour(45.0, &o) && !whole_hour(75.0, &o) && !whole_hour(5.0, &o) && !whole_hour(100.0, &o) && !whole_hour(1.0, &o));
+        // A cluster set to UTC: a device steady at +01:00 is in another time zone from the second
+        // run on. The period its first run opened is solved by that, and the shape is read from it.
         let l = Levels::default();
         let mut t = Tracker::default();
-        for i in 0..5 {
-            t.apply(i * 2 * H, vec![r("tz", Some(60.0 + (i % 2) as f64), i * 2 * H)], &l, 2 * H);
+        for i in 0..3 {
+            let at = NOW + i * 2 * H;
+            t.apply_run(at, vec![r("tz", Some(60.0 + (i % 2) as f64), at)], &l, 2 * H, true, &LogTimeZone::Utc);
         }
-        assert_eq!(t.devices["tz"].open.as_ref().unwrap().pattern(), Some("a whole hour off: time zone"));
+        let d = &t.devices["tz"];
+        assert_eq!(d.state, State::OtherTz);
+        assert_eq!((d.last_raw_minutes, d.last_minutes, d.tz_offset, d.tz_streak, d.applied_offset), (Some(60.0), Some(0.0), Some(60), 3, Some(60)));
+        assert!(d.open.is_none(), "another time zone is not late");
+        assert_eq!(t.episodes.len(), 1);
+        assert_eq!(t.episodes[0].pattern(), Some("a whole hour off: time zone"));
         let mut t2 = Tracker::default();
-        t2.apply(0, vec![r("ahead", Some(-40.0), 0)], &l, 2 * H);
+        t2.apply(NOW, vec![r("ahead", Some(-40.0), NOW)], &l, 2 * H);
         assert!(t2.devices["ahead"].open.is_none(), "clock ahead is not late");
+    }
+
+    /// An IST cluster: every device's raw gap is 330 min (its logs are on time).
+    fn ist(run: i64, late_by: &[(&str, f64)]) -> Vec<Reading> {
+        let mut v: Vec<Reading> = (1..=10).map(|i| r(&format!("fw-{i}"), Some(330.0 + (i % 3) as f64 * 0.5), run)).collect();
+        for (name, m) in late_by {
+            v.push(r(name, Some(330.0 + m), run));
+        }
+        v
+    }
+
+    #[test]
+    fn an_ist_cluster_is_detected_after_three_steady_runs_and_its_delays_corrected_from_then_on() {
+        let l = Levels::default();
+        let mut t = Tracker::default();
+        let a1 = t.apply(NOW, ist(NOW, &[]), &l, 2 * H);
+        assert!(a1.rows.iter().all(|x| x.state == State::Critical && x.tz_offset_minutes.is_none() && x.raw_gap_minutes.is_some()), "first run: as measured, nothing corrected yet");
+        assert_eq!(t.tz.detected, None);
+        assert_eq!(t.tz.last().map(|x| (x.offset, x.agree, x.of)), Some((Some(330), 10, 10)));
+        t.apply(NOW + 2 * H, ist(NOW + 2 * H, &[]), &l, 2 * H);
+        assert_eq!(t.tz.detected, None, "two runs are not steady");
+        let a3 = t.apply(NOW + 4 * H, ist(NOW + 4 * H, &[]), &l, 2 * H);
+        assert_eq!(t.tz.detected.map(|d| d.offset_minutes), Some(330));
+        assert!(a3.rows.iter().all(|x| x.state == State::NoDelay && x.tz_offset_minutes == Some(330) && x.delay_minutes.unwrap() < 1.5), "{:?}", a3.rows);
+        assert_eq!(a3.rows[0].raw_gap_minutes, Some(330.5));
+        assert_eq!(a3.solved.len(), 10, "the 330-minute 'delays' the first two runs opened are solved");
+        assert!(a3.rows.iter().all(|x| x.device_tz_offset == Some(330)));
+        // A device genuinely 40 min late on top of the zone: corrected 40, delayed.
+        let a4 = t.apply(NOW + 6 * H, ist(NOW + 6 * H, &[("slow", 40.0)]), &l, 2 * H);
+        let slow = a4.rows.iter().find(|x| x.device == "slow").unwrap();
+        assert_eq!((slow.state, slow.delay_minutes, slow.raw_gap_minutes, slow.tz_offset_minutes), (State::Delay, Some(40.0), Some(370.0), Some(330)));
+        assert_eq!(a4.opened.len(), 1);
+        // A device in Singapore (+08:00) on an IST cluster: critical once (its gap is 480), then
+        // "other time zone" and not late, its delay against its own offset.
+        let a5 = t.apply(NOW + 8 * H, ist(NOW + 8 * H, &[("sg", 150.0)]), &l, 2 * H);
+        let sg = a5.rows.iter().find(|x| x.device == "sg").unwrap();
+        assert_eq!((sg.state, sg.delay_minutes, sg.device_tz_offset), (State::Critical, Some(150.0), Some(480)), "one run at +08:00 could still be a backlog");
+        let a6 = t.apply(NOW + 10 * H, ist(NOW + 10 * H, &[("sg", 151.0)]), &l, 2 * H);
+        let sg = a6.rows.iter().find(|x| x.device == "sg").unwrap();
+        assert_eq!((sg.state, sg.delay_minutes, sg.device_tz_offset, sg.tz_offset_minutes), (State::OtherTz, Some(1.0), Some(480), Some(480)));
+        assert!(!sg.state.late());
+        assert_eq!(a6.solved.iter().filter(|e| e.device == "sg").count(), 1, "its period is solved by the finding");
+        assert_eq!(t.devices["sg"].tz_streak, 2);
+        assert_eq!(t.tz.detected.map(|d| d.offset_minutes), Some(330), "one device elsewhere does not move the cluster");
+        let day = daily(&t, "d", NOW, NOW + 24 * H, NOW + 11 * H);
+        assert_eq!((day.other_tz, day.on_time, day.critical), (1, 10, 0));
+    }
+
+    #[test]
+    fn a_set_zone_corrects_from_the_first_run_and_wins_over_detection() {
+        let l = Levels::default();
+        let mut t = Tracker::default();
+        let kolkata = LogTimeZone::parse("Asia/Kolkata").unwrap();
+        let a = t.apply_run(NOW, ist(NOW, &[("slow", 40.0)]), &l, 2 * H, true, &kolkata);
+        assert_eq!(a.rows.iter().filter(|x| x.state == State::NoDelay).count(), 10);
+        let slow = a.rows.iter().find(|x| x.device == "slow").unwrap();
+        assert_eq!((slow.state, slow.delay_minutes), (State::Delay, Some(40.0)));
+        // Set to UTC: nothing is corrected, every IST device is late — and, steady, in another zone.
+        let mut u = Tracker::default();
+        u.apply_run(NOW, ist(NOW, &[]), &l, 2 * H, true, &LogTimeZone::Utc);
+        assert!(u.devices.values().all(|d| d.state == State::Critical));
+        u.apply_run(NOW + 2 * H, ist(NOW + 2 * H, &[]), &l, 2 * H, true, &LogTimeZone::Utc);
+        assert!(u.devices.values().all(|d| d.state == State::OtherTz && d.applied_offset == Some(330)), "{:?}", u.devices.values().map(|d| d.state).collect::<Vec<_>>());
+        // 55 % agreement under detection: nothing detected, nothing corrected.
+        let mut m = Tracker::default();
+        for i in 0..4 {
+            let at = NOW + i * 2 * H;
+            let mut v: Vec<Reading> = (0..11).map(|k| r(&format!("ist-{k}"), Some(330.0), at)).collect();
+            v.extend((0..9).map(|k| r(&format!("utc-{k}"), Some(0.5), at)));
+            m.apply(at, v, &l, 2 * H);
+        }
+        assert_eq!(m.tz.detected, None);
+        assert_eq!(m.tz.last().map(|x| x.pct()), Some(Some(55.0)));
+        assert!(m.devices["ist-1"].state == State::Critical && m.devices["ist-1"].applied_offset.is_none(), "unknown is not zero: as measured");
+        // A partial run (one device measured again) is not a run the zone is detected from.
+        let mut p = Tracker::default();
+        for i in 0..3 {
+            p.apply_run(NOW + i * H, vec![r("fw-1", Some(330.0), NOW + i * H)], &l, 2 * H, false, &LogTimeZone::Detect);
+        }
+        assert!(p.tz.runs.is_empty() && p.tz.detected.is_none());
+    }
+
+    #[test]
+    fn quarter_hour_zones_and_daylight_saving_are_corrected_at_each_events_time() {
+        let l = Levels::default();
+        // Nepal: +05:45 on every device.
+        let mut n = Tracker::default();
+        for i in 0..3 {
+            let at = NOW + i * 2 * H;
+            n.apply(at, (0..5).map(|k| r(&format!("np-{k}"), Some(345.0), at)).collect(), &l, 2 * H);
+        }
+        assert_eq!(n.tz.detected.map(|d| d.offset_minutes), Some(345));
+        assert!(n.devices.values().all(|d| d.state == State::NoDelay && d.last_minutes == Some(0.0)));
+        // Berlin, set by name: the run straddles the end of summer time (2026-10-25 01:00Z). An
+        // event before it is 120 min off, one after it 60 — both are on time once corrected.
+        let berlin = LogTimeZone::parse("Europe/Berlin").unwrap();
+        let change = 1_792_890_000_000;
+        let mut b = Tracker::default();
+        let before = Reading { device: "cest".into(), docs: 1, arrival_ms: Some(change - 30 * 60_000 + 120 * 60_000), event_ms: Some(change - 30 * 60_000),
+                               delay_minutes: Some(120.0), extras: BTreeMap::new() };
+        let after = Reading { device: "cet".into(), docs: 1, arrival_ms: Some(change + 30 * 60_000 + 60 * 60_000), event_ms: Some(change + 30 * 60_000),
+                              delay_minutes: Some(60.0), extras: BTreeMap::new() };
+        let a = b.apply_run(change + H, vec![before, after], &l, 2 * H, true, &berlin);
+        let by = |name: &str| a.rows.iter().find(|x| x.device == name).unwrap();
+        assert_eq!((by("cest").tz_offset_minutes, by("cest").delay_minutes, by("cest").state), (Some(120), Some(0.0), State::NoDelay));
+        assert_eq!((by("cet").tz_offset_minutes, by("cet").delay_minutes, by("cet").state), (Some(60), Some(0.0), State::NoDelay));
     }
 
     #[test]

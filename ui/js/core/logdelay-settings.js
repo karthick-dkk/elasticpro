@@ -45,7 +45,7 @@ export function fieldsDraft({ device, arrival, eventTime, extras }) {
 export const COLUMN_LABEL = Object.freeze({
   device: 'Device', cluster: 'Cluster', nowMinutes: 'Delay now', level: 'Level', startedSolved: 'Started → solved',
   median: 'Median', max: 'Max', episodes: 'Delays', lateTime: 'Time late', docsPerDay: 'Logs a day',
-  arrival: 'Arrival time', eventTime: 'Event time', lateSince: 'Late since',
+  arrival: 'Arrival time', eventTime: 'Event time', lateSince: 'Late since', rawGap: 'Raw gap', deviceTimeZone: 'Device time zone',
 });
 
 export const SECTION_LABEL = Object.freeze({

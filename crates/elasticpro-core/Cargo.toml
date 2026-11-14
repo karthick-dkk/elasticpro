@@ -52,6 +52,11 @@ flate2 = "1"
 # Server-local time of day, for the daily volume run's `collectAt` (TZ of the process).
 # The record's own days are UTC dates from index names and never go through a zone.
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+# The IANA time-zone database, compiled in (docs/LOGDELAY.md "Time zones"): every real UTC offset
+# a device's logs can be stamped in, a zone's offset at an event's own time (DST), and the names
+# the Edit cluster dialog's "Log time zone" is checked against. Compiled in, so the hosted image
+# does not depend on the host's tzdata package.
+chrono-tz = { version = "0.10", default-features = false, features = ["std"] }
 # The volume report by mail (docs/VOLUME.md "Reports and mail"). rustls on ring with the
 # system trust store, as everywhere else in this crate: no OpenSSL, no aws-lc. The SMTP
 # connection is driven step by step (connect, TLS, auth, send) so MAIL_TEST can say which

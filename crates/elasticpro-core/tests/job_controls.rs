@@ -163,10 +163,10 @@ async fn two_job_runs_start_one_run_and_the_old_button_is_the_same_run() {
     let s = admin(&c).await;
     arm(&c, &s, &srv.url(), false).await;
 
-    let first = c.handle(json!({ "type": "JOB_RUN", "session": &s, "jobId": "logdelay.measure" })).await;
+    let first = c.handle(json!({ "type": "JOB_RUN", "session": &s, "jobId": "logdelay.measure", "clusterIds": ["prod"], "devices": "all" })).await;
     assert_eq!(first["ok"], json!(true), "{first}");
     let id = first["runId"].as_str().unwrap().to_string();
-    let second = c.handle(json!({ "type": "JOB_RUN", "session": &s, "jobId": "logdelay.measure" })).await;
+    let second = c.handle(json!({ "type": "JOB_RUN", "session": &s, "jobId": "logdelay.measure", "clusterIds": ["prod"], "devices": "all" })).await;
     assert_eq!((second["kind"].clone(), second["runId"].clone()), (json!("already_running"), json!(id)), "{second}");
     // The page's own button (DELAY_SINK_RUN) meets the same run, once it is measuring.
     wait_for("the measurement at the cluster", || srv.holding() > 0).await;
@@ -308,7 +308,7 @@ async fn retry_keeps_to_its_limit_and_its_wait() {
     let c = hosted(&dir);
     let s = admin(&c).await;
     arm(&c, &s, &srv.url(), false).await;
-    let first = c.handle(json!({ "type": "JOB_RUN", "session": &s, "jobId": "logdelay.measure" })).await;
+    let first = c.handle(json!({ "type": "JOB_RUN", "session": &s, "jobId": "logdelay.measure", "clusterIds": ["prod"], "devices": "all" })).await;
     let id = first["runId"].as_str().unwrap().to_string();
     let r = ended_run(&c, Some(&s), &id).await;
     assert_eq!(r["status"], json!("failed"), "{r}");
@@ -329,7 +329,7 @@ async fn retry_keeps_to_its_limit_and_its_wait() {
     // Only a failed, deferred or cancelled run.
     let ok_srv = delay_cluster(0, 200).await;
     arm(&c, &s, &ok_srv.url(), false).await;
-    let good = c.handle(json!({ "type": "JOB_RUN", "session": &s, "jobId": "logdelay.measure" })).await;
+    let good = c.handle(json!({ "type": "JOB_RUN", "session": &s, "jobId": "logdelay.measure", "clusterIds": ["prod"], "devices": "all" })).await;
     let gid = good["runId"].as_str().unwrap().to_string();
     assert_eq!(ended_run(&c, Some(&s), &gid).await["status"], json!("completed"));
     assert_eq!(c.handle(json!({ "type": "JOB_RETRY", "session": &s, "runId": &gid })).await["kind"], json!("bad_request"));
@@ -587,12 +587,12 @@ async fn only_an_administrator_of_every_cluster_controls_jobs_and_writes_go_thro
     arm(&c, &s, &srv.url(), true).await;
     let u = c.handle(json!({ "type": "WRITE_UNLOCK", "session": &s, "on": true })).await;
     assert_eq!(u["ok"], json!(true), "{u}");
-    let r = c.handle(json!({ "type": "JOB_RUN", "session": &s, "jobId": "logdelay.measure" })).await;
+    let r = c.handle(json!({ "type": "JOB_RUN", "session": &s, "jobId": "logdelay.measure", "clusterIds": ["prod"], "devices": "all" })).await;
     assert_eq!(r["kind"], json!("blocked_readonly"), "{r}");
     assert!(!srv.hits().iter().any(|h| h.path.contains("_search") || h.path.contains("_bulk")), "nothing was measured or written");
     // Writable: it runs.
     arm(&c, &s, &srv.url(), false).await;
-    let r = c.handle(json!({ "type": "JOB_RUN", "session": &s, "jobId": "logdelay.measure" })).await;
+    let r = c.handle(json!({ "type": "JOB_RUN", "session": &s, "jobId": "logdelay.measure", "clusterIds": ["prod"], "devices": "all" })).await;
     assert_eq!(r["ok"], json!(true), "{r}");
     ended_run(&c, Some(&s), r["runId"].as_str().unwrap()).await;
 }

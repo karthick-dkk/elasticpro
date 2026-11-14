@@ -16,23 +16,28 @@
  *   no_delay     m < noDelayUnder
  *   unmeasured   m unreadable              (never 0 min)
  *   silent       no document for silentAfterHours (only the core knows; never on time)
+ *   other_tz     the gap sits steadily at another real UTC offset than the cluster's (only the
+ *                core knows the steadiness; not late, counted apart)
+ *
+ * `m` is the corrected delay: the raw gap with the cluster's log time zone taken out
+ * (core/log-tz.js, the core's tz.rs). The zone comes from the core too (`zoneOf`).
  */
 
 import { bridge } from './transport.js';
 
 /** The states, worst first where it matters for sorting. */
-export const LEVEL_STATES = Object.freeze(['critical', 'delay', 'little', 'no_delay', 'clock_ahead', 'silent', 'unmeasured']);
+export const LEVEL_STATES = Object.freeze(['critical', 'delay', 'little', 'no_delay', 'clock_ahead', 'other_tz', 'silent', 'unmeasured']);
 
 /** A level state in words, as the pages and the mail say it. */
 export const STATE_LABEL = Object.freeze({
   no_delay: 'on time', little: 'little delay', delay: 'delayed', critical: 'critical',
-  clock_ahead: 'clock ahead', silent: 'silent', unmeasured: "can't measure",
+  clock_ahead: 'clock ahead', other_tz: 'other time zone', silent: 'silent', unmeasured: "can't measure",
 });
 
 /** The Logs page's STATUS names for the core's states (docs/LOGDELAY.md "UI copy to remove"). */
 export const STATUS_OF_STATE = Object.freeze({
   no_delay: 'OK', little: 'OK', delay: 'DELAYED', critical: 'CRITICAL',
-  clock_ahead: 'CLOCK_AHEAD', silent: 'NO_DATA', unmeasured: 'ERROR',
+  clock_ahead: 'CLOCK_AHEAD', other_tz: 'OTHER_TZ', silent: 'NO_DATA', unmeasured: 'ERROR',
 });
 
 const finite = (v) => typeof v === 'number' && Number.isFinite(v);
@@ -73,20 +78,33 @@ export const isOnTime = (state) => state === 'no_delay' || state === 'little' ||
 
 /* ------------------------------- what the core said ------------------------------- */
 
-const known = { byCluster: new Map(), fleet: null, at: 0, from: '' };
+const known = { byCluster: new Map(), zones: new Map(), fleet: null, at: 0, from: '' };
 let asking = null;
 
-/** Keep what a reply said: SETTINGS_GET's `resolved` and `settings.levels`, or SUMMARY's `byCluster`. */
+/** A cluster's `timeZone` as the core says it (docs/LOGDELAY.md "Time zones"), or null. */
+export function zoneFrom(z) {
+  if (!z || typeof z !== 'object' || !['set', 'detected', 'none'].includes(z.mode)) return null;
+  return z;
+}
+
+/**
+ * Keep what a reply said: SETTINGS_GET's `resolved` (levels, timeZone) and `settings.levels`, or
+ * SUMMARY's `byCluster` (levels, timeZone), or one cluster's / device's answer (`cluster`, `timeZone`).
+ */
 export function rememberLevels(res) {
   if (!res || res.ok === false) return false;
   let any = false;
-  for (const r of Array.isArray(res.resolved) ? res.resolved : []) {
+  for (const r of [...(Array.isArray(res.resolved) ? res.resolved : []), ...(Array.isArray(res.byCluster) ? res.byCluster : [])]) {
     const l = levelsFrom(r && r.levels);
     if (l && r.id) { known.byCluster.set(String(r.id), l); any = true; }
+    const z = zoneFrom(r && r.timeZone);
+    if (z && r.id) { known.zones.set(String(r.id), z); any = true; }
   }
-  for (const r of Array.isArray(res.byCluster) ? res.byCluster : []) {
-    const l = levelsFrom(r && r.levels);
-    if (l && r.id) { known.byCluster.set(String(r.id), l); any = true; }
+  if (typeof res.cluster === 'string' && res.cluster) {
+    const l = levelsFrom(res.levels);
+    if (l) { known.byCluster.set(res.cluster, l); any = true; }
+    const z = zoneFrom(res.timeZone);
+    if (z) { known.zones.set(res.cluster, z); any = true; }
   }
   const fleet = levelsFrom(res.settings && res.settings.levels);
   if (fleet) { known.fleet = fleet; any = true; }
@@ -99,11 +117,19 @@ export function levelsOf(clusterId) {
   return known.byCluster.get(String(clusterId)) || null;
 }
 
+/**
+ * A cluster's log time zone as the core said it (`timeZone`: mode set | detected | none, zone,
+ * offsetMinutes, …); null when it has not said — nothing is corrected then (core/log-tz.js).
+ */
+export function zoneOf(clusterId) {
+  return known.zones.get(String(clusterId)) || null;
+}
+
 /** The fleet's default levels (logdelay.json `levels`), when an admin's read said them. */
 export const fleetLevels = () => known.fleet;
 
 /** Forget what was read (a test, a sign-out). */
-export function forgetLevels() { known.byCluster.clear(); known.fleet = null; known.at = 0; asking = null; }
+export function forgetLevels() { known.byCluster.clear(); known.zones.clear(); known.fleet = null; known.at = 0; asking = null; }
 
 /**
  * Ask the core for every visible cluster's levels: LOGDELAY_SETTINGS_GET where the caller is an

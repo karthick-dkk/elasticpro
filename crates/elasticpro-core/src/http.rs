@@ -45,6 +45,10 @@ pub struct ClusterSpec {
     pub time_field: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delay_fields: Option<crate::auth::DelayFields>,
+    /// The config's `logTimeZone` (a Zabbix cluster's: its overlay's): `UTC`, an IANA name, or
+    /// absent = detect from the devices (`logdelay::tz::LogTimeZone`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub log_time_zone: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]

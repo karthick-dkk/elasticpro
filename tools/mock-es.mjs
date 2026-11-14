@@ -15,6 +15,7 @@
  *   MOCK_INDEX_COUNT  _cat/indices lists this many more indices (a big cluster's answer)
  *   MOCK_429_RATE     this fraction of requests (0..1) is answered 429 Too Many Requests
  *   MOCK_SEARCH_DELAY_MS  every _search waits this long: `45000`, or a range `30000-90000`
+ *   MOCK_LD_TZ_OFFSET_MIN an IST-skewed log delay cluster: `330` adds 5 h 30 to every raw gap (@timestamp stamped in local time)
  *                     (each search a random time in it) — a slow cluster behind a jump host,
  *                     one daily-volume day per search. Nothing else is slowed.
  *   MOCK_VOLUME_DAYS  days of logstash-<source>-<day> indices (default 45), so a slow
@@ -84,6 +85,10 @@ const SEARCH_DELAY = (() => {
 // Without this every instance calls itself "mock" with uuid "mock-uuid", and anything
 // that keys clusters by uuid — which the fleet cache does — treats ten of them as one.
 const clusterName = process.env.MOCK_CLUSTER_NAME || 'mock';
+// MOCK_LD_TZ_OFFSET_MIN=330: an IST-skewed cluster (docs/LOGDELAY.md "Time zones") — every log
+// delay document's event time is this many minutes further back than its real delay, as a cluster
+// whose @timestamp is stamped in local time and stored as UTC shows it. Default 0: UTC, as before.
+const LD_TZ_OFFSET_MIN = Number(process.env.MOCK_LD_TZ_OFFSET_MIN) || 0;
 const clusterUuid = process.env.MOCK_CLUSTER_UUID || `${clusterName}-uuid`;
 // In fleet mode each port is its own cluster, by name and by uuid.
 const nameFor = (port) => (fleet ? `${clusterName}-${port}` : clusterName);
@@ -605,7 +610,7 @@ function delayHit(d, now) {
   const arrival = now - 60000;
   const src = { '@timestamp': new Date(arrival).toISOString(), src_hostname: d.device, src_ip: `10.0.${Math.floor(d.i / 250)}.${d.i % 250}`,
                 tag1: d.tag1, Zone: d.zone, fwd_tag: `fwd-${d.zone}`, parser_tag: `parser-${d.tag1}`, fwdtag: `fwd-${d.zone}`, ClientID: 'ACME', branch: 'HQ', log_type: d.tag1 };
-  if (d.mins !== null) src[d.eventField] = new Date(arrival - d.mins * 60000).toISOString();
+  if (d.mins !== null) src[d.eventField] = new Date(arrival - (d.mins + LD_TZ_OFFSET_MIN) * 60000).toISOString();
   return { hits: { total: { value: 1 }, hits: [{ _index: 'logstash-acme-2026.09.09', _source: src }] } };
 }
 

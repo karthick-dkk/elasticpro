@@ -21,7 +21,8 @@ import { tableSort } from '../lib/table-sort.js';
 import { activeClusters, client, setDelaySummary } from '../core/state.js';
 import { card, keptCard, empty, pill, table } from '../pages/common.js';
 import { preflight, measureDelayIn, summarise, delayCoverage, buildDeviceQuery, documentDelays, deviceSnapshot, looksLikeIp } from '../core/log-delay.js';
-import { levelsOf, loadLevels, levelState, isLate } from '../core/delay-levels.js';
+import { levelsOf, zoneOf, loadLevels, levelState, isLate } from '../core/delay-levels.js';
+import { offsetLabel, timeZoneShort } from '../core/log-tz.js';
 import { runBounded, cancellation, partialNote } from '../core/fleet.js';
 import { reportSheets, reportFilename } from '../core/delay-report.js';
 import { liveDeviceRow, minutesText, stateText, extraOf, whenText, countText } from '../core/logdelay-report.js';
@@ -167,7 +168,7 @@ async function fetchDelay() {
   delay.window = win;
   for (const { c } of targets) setEntry(c.id, { state: 'fetching', records: null, fetchError: null });
   bump();
-  const out = await runBounded(targets, ({ c, pre }) => measureDelayIn(client(c.id), c, withContext(pre), win, levelsOf(c.id), { signal: signal() }), {
+  const out = await runBounded(targets, ({ c, pre }) => measureDelayIn(client(c.id), c, withContext(pre), win, levelsOf(c.id), { signal: signal() }, zoneOf(c.id)), {
     limit: FAN_OUT, token,
     onSettled: (s, p) => {
       const id = s.item.c.id;
@@ -285,7 +286,7 @@ function coverageCard() {
 
 /* --------------------------------- the devices --------------------------------- */
 
-const LIVE_COLS = ['device', 'cluster', 'zone', 'tag1', 'state', 'now', 'pattern', 'docsIn', 'arrival', 'event'];
+const LIVE_COLS = ['device', 'cluster', 'zone', 'tag1', 'state', 'now', 'pattern', 'rawGap', 'deviceTz', 'docsIn', 'arrival', 'event'];
 
 /** Every device measured, as board rows; the delayed ones only unless "Every device" is chosen. */
 function liveRows() {
@@ -373,7 +374,7 @@ async function pollWatch() {
     const res = await cl.search(w.cluster.logIndexPattern || 'logstash-*', body,
       { qs: 'ignore_unavailable=true&allow_no_indices=true', timeoutMs: 30000, signal: signal() });
     if (delay.watch !== w) return;
-    const docs = documentDelays(((res.hits || {}).hits) || [], w.pre.resolved, levelsOf(w.clusterId));
+    const docs = documentDelays(((res.hits || {}).hits) || [], w.pre.resolved, levelsOf(w.clusterId), zoneOf(w.clusterId));
     w.docs = docs;
     w.snap = deviceSnapshot(docs, levelsOf(w.clusterId));
     const t = (res.hits || {}).total;
@@ -431,14 +432,18 @@ function watchCard() {
       return h('tr',
         h('td.mono', d.event ? whenText(d.event, Date.now(), { seconds: true }) : h('span.muted', 'unreadable')),
         h('td.mono', d.arrival ? whenText(d.arrival, Date.now(), { seconds: true }) : h('span.muted', 'unreadable')),
-        h('td.num', d.delayMinutes === null ? h('span.muted', 'unknown') : h('b', minutesText(d.delayMinutes))),
+        h('td.num', { title: d.delayMinutes === null ? null : d.tzOffsetMinutes === null ? 'arrival − event' : `arrival − event − time zone ${offsetLabel(d.tzOffsetMinutes)} (raw gap ${minutesText(d.rawGapMinutes)})` },
+          d.delayMinutes === null ? h('span.muted', 'unknown') : h('b', minutesText(d.delayMinutes))),
+        h('td.num.muted', d.rawGapMinutes === null || d.rawGapMinutes === undefined ? '\u2014' : minutesText(d.rawGapMinutes)),
         h('td', statePill(ds)),
         h('td', zone === null ? h('span.muted', '\u2014') : String(zone)),
         h('td', tag1 === null ? h('span.muted', '\u2014') : String(tag1)),
         h('td.mono.muted.ld-tiny', d.index));
     });
-    return table(['Event time', 'Arrival', { label: 'Delay', num: true }, 'Status', 'zone', 'tag1', 'Index'], rows,
-      { emptyText: w.running ? 'Loading\u2026' : 'No document matched this device in the time range.' });
+    const ltz = zoneOf(w.clusterId);
+    return h('div', table(['Event time', 'Arrival', { label: 'Delay', num: true }, { label: 'Raw gap', num: true }, 'Status', 'zone', 'tag1', 'Index'], rows,
+      { emptyText: w.running ? 'Loading\u2026' : 'No document matched this device in the time range.' }),
+    ltz ? h('div.muted.ld-note.ld-tz-note', `Cluster time zone ${timeZoneShort(ltz)}${ltz.mode === 'none' ? ': delay as measured, nothing taken out' : ': delay = raw gap − its offset'}.`) : null);
   });
   return keptCard(W, 'w:watch', `${w.device} \u2014 live`,
     `${w.cluster.name} \u00B7 ${looksLikeIp(w.device) ? 'matched as an address' : 'matched as a hostname'}`
@@ -572,12 +577,14 @@ function exportDelayCsv() {
       cluster: x.cluster, device: x.device, zone: extraOf(x, 'zone') ?? '', tag1: extraOf(x, 'tag1') ?? '',
       state: st ? stateText(st) : 'levels unknown',
       delay_minutes: x.delayMinutes === null ? '' : x.delayMinutes.toFixed(2),
+      raw_gap_minutes: x.rawGapMinutes === null || x.rawGapMinutes === undefined ? '' : x.rawGapMinutes.toFixed(2),
+      time_zone_offset: x.tzOffsetMinutes === null || x.tzOffsetMinutes === undefined ? '' : offsetLabel(x.tzOffsetMinutes),
       pattern: x.pattern === '-' ? '' : x.pattern, docs: x.docs,
       last_seen: x.arrival ? new Date(x.arrival).toISOString() : '', detail: x.patternNote || x.reason || '',
     };
   });
   const missed = delayRows().filter(({ d }) => !d.records).map(({ c, d }) => `${c.name} (${d.state})`);
-  if (missed.length) rows.push({ cluster: '', device: '', zone: '', tag1: '', state: '', delay_minutes: '', pattern: '', docs: '', last_seen: '', detail: `not measured: ${missed.join('; ')}` });
+  if (missed.length) rows.push({ cluster: '', device: '', zone: '', tag1: '', state: '', delay_minutes: '', raw_gap_minutes: '', time_zone_offset: '', pattern: '', docs: '', last_seen: '', detail: `not measured: ${missed.join('; ')}` });
   download(`log-delay-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')}.csv`, toCsv(rows));
 }
 

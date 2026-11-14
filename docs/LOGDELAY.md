@@ -7,7 +7,7 @@ from this file alone; where it and the code disagree, one of them has a bug. Dec
 the owner's (canvas boards Main, Cluster, Device, Mail, Storage, Plan, Fix; 2026-11-05/07).
 The figures on the boards are example data; the behaviour is the spec.
 
-Code: `crates/elasticpro-core/src/logdelay/` (`levels`, `measure`, `collect`, `state`, `store`,
+Code: `crates/elasticpro-core/src/logdelay/` (`levels`, `tz`, `measure`, `collect`, `state`, `store`,
 `docs`, `fixes`, `summary`, `report`, `time`, `mod`), `report/logdelay_job.rs`, and the run in
 `bridge.rs` `run_delay_sink`. Tests: each module's own, `tests/logdelay.rs`,
 `tests/logdelay_scale.rs` (25 000 devices), `tests/delay_sink.rs`.
@@ -15,7 +15,7 @@ Code: `crates/elasticpro-core/src/logdelay/` (`levels`, `measure`, `collect`, `s
 ```text
   delay sink tick (every_hours, hosted, armed) · DELAY_SINK_RUN · Fetch now (JOB_RUN)
     └── per cluster: composite pages of ≤ 1000 devices (after_key) ──▶ readings (device, docs, arrival, event, extras)
-          └── tracker.apply: states, periods open/solve, silences
+          └── tracker.apply: the cluster's log time zone detected and taken out (tz), states, periods open/solve, silences
                 ├── built-in store  <data>/logdelay/…          always (the pages read it)
                 └── documents ──▶ history store | sink cluster   by destination, gated as before
     └── fixes over every cluster's stored periods + fleet-cache facts ──▶ findings.json
@@ -32,11 +32,14 @@ Code: `crates/elasticpro-core/src/logdelay/` (`levels`, `measure`, `collect`, `s
 | `delay` | `delayFrom ≤ m ≤ criticalOver` (30–60, 60 inclusive) | delayed |
 | `critical` | `m > criticalOver` (>60) | critical |
 | `clock_ahead` | `m ≤ −delayFrom` (tested first) | clock ahead |
+| `other_tz` | the raw gap sits at a real UTC offset other than the cluster's, two runs in a row ("Time zones" below) | other time zone — not late, counted apart |
 | `silent` | seen recently, no document for `silentAfterHours` (2) | silent — never on time, never 0 min |
 | `unmeasured` | arrival or event time unreadable | can't measure — never 0 min |
 
+* `m` is the **corrected** delay: the raw gap (arrival − event) with the cluster's log time zone
+  taken out ("Time zones" below). Without a zone the raw gap is the delay, as before 0.3.62.
 * **Late** = `delay` or `critical`. **On time** (in totals and percentages) = `no_delay`,
-  `little`, `clock_ahead`. Silent and unmeasured are neither.
+  `little`, `clock_ahead`. Silent, unmeasured and other-time-zone are neither.
 * **A delay period** starts at the first measurement ≥ `delayFrom` and is solved at the first
   measurement back under it. Silent or unmeasured measurements change nothing about an open
   period (unknown solves nothing). Start/solve times are the run's time: as exact as the
@@ -51,6 +54,103 @@ Code: `crates/elasticpro-core/src/logdelay/` (`levels`, `measure`, `collect`, `s
   (`resolved[].levels`) and classify with the table above. `STATUS` names map: OK→`no_delay`
   (+`little`), DELAYED→`delay`, CRITICAL→`critical`, CLOCK_AHEAD→`clock_ahead`,
   NO_DATA→`silent`, ERROR→`unmeasured`.
+
+## Time zones (`logdelay/tz.rs`; applied in `state.rs` `Tracker::apply_run`)
+
+**The problem (owner, 2026-11-14).** A device's raw message carries local time; the parser turns
+it into `event_created` in UTC correctly; but `@timestamp` is stamped in the cluster's local time
+and stored as if it were UTC. Arrival − event is then the zone's offset: 330 minutes, "critical",
+on every device of an IST cluster whose logs are on time. Root cause in ElasticPro: delay was
+arrival − event with no zone step, and the one check that called a steady delay "a time-zone
+offset, not a queue" matched whole hours alone, so +05:30 and +05:45 never matched.
+
+**The rule.**
+
+1. **The cluster's log time zone** is, in this order: the zone set in its config (`logTimeZone`:
+   `UTC`, or an IANA name such as `Asia/Kolkata`; a Zabbix cluster's in its overlay); otherwise
+   the zone **detected** from its devices; otherwise none (no correction).
+2. **Detection** (every complete run of a cluster): each device's raw gap is matched against every
+   real UTC offset in use (the IANA database compiled in — `chrono-tz` — so half- and quarter-hour
+   zones are in it: +05:30, +05:45, −03:30), within `TOLERANCE_MINUTES` = **3** (the figure the
+   clusters file's `delayThresholds.tzToleranceMinutes` and the browser's `PATTERN.tzToleranceMinutes`
+   have always named; one definition, tools/unit holds them equal). The cluster's zone is the offset
+   most measured devices fall in when at least **60 %** agree (`MAJORITY_PERCENT`) **and** the same
+   offset wins the last **3** complete runs (`STEADY_RUNS`). A queue drifts from run to run; an
+   offset does not. It is let go the same way: three runs in a row without that majority — one odd
+   run neither sets nor unsets a zone. UTC itself can be detected (most devices within 3 min of
+   their arrival); nothing is corrected by it, but devices at another offset are then named.
+3. **Corrected delay** = raw gap − the cluster's offset **at the event's own time**: DST-aware
+   through the zone's rules when a name is known (set, or detected and named), the fixed offset
+   when only an offset was detected. Every board, report, mail, Zabbix value and `LOGDELAY_*`
+   answer uses the corrected figure; the raw gap is kept beside it (`rawGapMinutes`) and so is
+   what was taken out (`tzOffsetMinutes`).
+4. **Another time zone** (`other_tz`): a device whose raw gap sits at a real offset other than the
+   cluster's, `DEVICE_STEADY_RUNS` = **2** runs in a row, is in another zone — its clock, or the
+   parser's date filter for it. Not late, counted apart (`totals.otherTz`), its delay shown against
+   its own offset, with its own offset (`+08:00`) in the *Device time zone* column. One run at
+   another offset could still be a backlog, so the first one is levelled as measured. A device in
+   another zone solves any open delay period of its own (it is not late).
+5. **Unknown is not zero.** Under the majority, or not yet steady, the cluster says
+   `timeZone.mode: "none"` — "not detected (41 % agree)" — nothing is corrected, delays are as
+   measured, and no device is called "other time zone" (there is nothing to compare against). A
+   named zone that is not in the database is refused at save time (`bad_request`, by name), never
+   kept as "no correction".
+6. **History is not rewritten.** Corrected figures apply from the next measurement; stored points,
+   periods and day files stay as they were measured. The boards and the mail carry the note, with
+   the instant detection began (`timeZone.since`).
+
+**Naming a detected offset.** A detected zone is an offset. It is given a name only when one is
+unambiguous — the server's own zone (`volume::schedule::server_zone`) or a zone set by name on
+another cluster sits at that offset now; otherwise the pages show the offset (`+05:30`) and never
+invent a name. The fix texts quote an *example* zone at an offset (`tz::example_zone`), as such.
+
+**Partial runs** (one device, the late devices — "Fetch now") are not runs the zone is detected
+from; they are corrected by the zone in force.
+
+**`timeZone`** — on every `byCluster[]` row, `LOGDELAY_CLUSTER`, `LOGDELAY_DEVICE` and
+`LOGDELAY_SETTINGS_GET` `resolved[]` (with `logTimeZone`, the setting: `detect` | `UTC` | name):
+
+```json
+{ "setting": "detect", "mode": "detected", "zone": "Asia/Kolkata", "offsetMinutes": 330, "offset": "+05:30",
+  "agree": 1112, "of": 1240, "pct": 89.7, "pluralityOffset": 330, "pluralityOffsetText": "+05:30",
+  "since": 1763000000000, "steadyRuns": 3, "runsNeeded": 3, "majorityPercent": 60, "toleranceMinutes": 3.0 }
+```
+
+`mode` is `set` (offset now, `zone` the setting), `detected` (`zone` null when no name is
+unambiguous) or `none` (`offsetMinutes` null; `pct` says how many agree on `pluralityOffset`).
+`agree`/`of`/`pct` are the last complete run's; null before any. `since` is the first of the runs
+that agreed (detected only).
+
+**Rows.** `DeviceRow` carries `rawGapMinutes`, `tzOffsetMinutes` (what was taken out: the
+cluster's offset, or the device's own for `other_tz`; null = nothing, the cluster has no zone),
+`deviceTzOffset` (the real offset the gap sits at, if any) and `clusterTzOffset` (the cluster's
+offset now, null = none). The Delay cell's title spells the sum out: *arrival 10:42 − event 04:30
+− time zone 5 h 30 = 42 min*. *Device time zone* reads `same as cluster`, the device's offset for
+`other_tz`, `—` when the cluster has no zone. The measurement documents carry `raw_gap_minutes`,
+`tz_offset_minutes`, `device_tz_offset`; the day's totals `otherTz`.
+
+**Setting it.** Config-Management › Clusters › Edit cluster › **Log time zone**: *Detect from
+devices (now: Asia/Kolkata, +05:30)* (default), *UTC (no correction)*, then every IANA zone with
+its offset now. A config-file cluster writes `logTimeZone` on its entry (`CLUSTER_SAVE` checks the
+name and keeps the canonical spelling; `detect` is not written); a Zabbix cluster keeps it in
+ElasticPro's overlay (`ZABBIX_CLUSTER_SAVE {set: {logTimeZone}}`, reset = detect). Write-gated as
+every cluster edit. The core reads it off the cluster's spec (`ClusterSpec.logTimeZone`, carried
+on `PRIME` by the UI).
+
+**Recommended fixes.** Two rules read from this (table under "Recommended fixes"): `device_time_zone`
+(*Device clock / parser*: devices in another zone, one finding per offset, the Logstash
+`date { timezone => "…" }` hint with an example zone) and `cluster` (*Cluster*: the setting is
+`detect` and over half the measured devices sit at one offset — "set it" while it is not detected,
+naming the devices that show the offset as delay; "confirm it" once it is). UTC as the plurality
+raises no Cluster finding: nothing would change.
+
+**Browser.** `ui/js/core/log-tz.js` is the same rule for what the browser measures itself (Live
+Watch, Live logs, Play, the Zabbix scraper): the cluster's `timeZone` as the core said it
+(`delay-levels.js zoneOf`, remembered from `byCluster`/`resolved`/a cluster answer), a named zone
+applied at the event's time through Intl, a detected offset fixed, `none` corrects nothing. A live
+row cannot know steadiness, so it says *looks like +08:00* for a gap at another offset and levels
+the corrected delay. Live logs write `@timestamp` and the event time in the same (cluster) zone,
+the offset in each head, so the difference seen is the delay.
 
 ## Measurement (`logdelay/measure.rs`, `bridge.rs` `run_delay_sink`)
 
@@ -131,29 +231,41 @@ log types carry `ingested_time` and others `event_created`, about half the devic
 every candidate per document, as the core does. The cap stays the browser's; the Log Delay page
 reads the store (*Fetch now* below), which has none.
 
-## Fetch now — `JOB_RUN {jobId: "logdelay.measure", clusterIds?, device?}`
+## Fetch now — `JOB_RUN {jobId: "logdelay.measure", clusterIds: [one], devices?: "late"|"all", device?}`
 
-The page's *Fetch now* button: the scheduled measurement, now, by the same code and query
-(`run_delay_sink` → `logdelay_collect`), into the same store and destination.
+The page's *Fetch now*: the scheduled measurement, now, by the same code and query
+(`run_delay_sink` → `logdelay_collect`), into the same store and destination — for **one cluster**.
 
-* `clusterIds` (1–200 ids; an unknown id is `not_found`) narrows it to those clusters, measured
-  when primed; `device` (one device name as the measurement lists it: no `*`/`?`, ≤ 256
-  characters, `bad_request` otherwise) to that device, by a `term` filter on the device field.
-  Neither: every target, exactly like `DELAY_SINK_RUN`.
-* A narrowed run reads only part of a cluster's list, so it turns nobody silent and leaves the
-  schedule's own state (`lastRunAt`, `nextDueAt`, back-off) alone; a one-device run also leaves
-  the cluster's `lastRunAt`/`lastRead` alone. Its periods, points and daily totals are written as
-  any run's; the destination gets the same mirror, under the same gates (a sink cluster while the
-  config is read-only: `blocked_readonly`).
+* `clusterIds` names **exactly one** cluster (owner's rule: a person never runs every cluster by
+  hand; the automatic run reads every device of every cluster every 2 hours). Missing, empty or
+  more than one: `bad_request` with the reason in plain words; an unknown id `not_found`.
+* `devices: "late"` (the default) re-measures only that cluster's devices whose stored state at
+  the run's start is **late** — `delay` (30–60) or `critical` (above 60), by the cluster's own
+  levels (the one definition, "Levels") on the time-zone-corrected delay; never a figure of its
+  own — in one `terms` filter on the device field (above `LATE_FILTER_MAX` = 10 000
+  late devices the whole cluster is read instead, and the note says so). None late at the start:
+  nothing is read, the run completes with 0 and the note says why. **Silent devices are covered
+  only by `all` and by the automatic run**: a late-devices run cannot hear from them.
+* `devices: "all"` re-measures every device of the cluster, as the automatic run does (it is a
+  complete run of that cluster: silences, forgetting and the zone's detection apply).
+* `device` (one device name as the measurement lists it: no `*`/`?`, ≤ 256 characters,
+  `bad_request` otherwise) re-measures that device alone, by a `term` filter; `devices` is then moot.
+* A narrowed run (late devices, one device) reads part of the list, so it turns nobody silent and
+  leaves the cluster's `lastRunAt`/`lastRead` as the whole run's. Every person's run leaves the
+  schedule's own state (`lastRunAt`, `nextDueAt`, back-off) alone. Its periods, points and daily
+  totals are written as any run's; the destination gets the same mirror, under the same gates (a
+  sink cluster while the config is read-only: `blocked_readonly`).
 * Administrator who sees every cluster (docs/JOBS.md "Controls"); hosted only (`unsupported`).
 * One run at a time with the timer and `DELAY_SINK_RUN`: a second press answers
   `already_running` with the open run's id.
 * Answer `{ok, jobId, runId, started}` at once; the run goes on in the background. In
-  `JOBS_LIST` (`jobId: "logdelay.measure"`) it is `manual:<user>`, `done`/`total` = clusters
-  read of the run's clusters, `progress` the percent, `records` = devices read so far (the
-  count updates after every page) and, once ended, the rows written; `note` says
-  `fetch now: N cluster(s), device X` and any cluster cut at *Max devices per run*; `scope`
-  keeps `{clusterIds, device}` so `JOB_RETRY` runs the same scope again.
+  `JOBS_LIST` (`jobId: "logdelay.measure"`) it is `manual:<user>`, `done`/`total` = **devices**
+  read of the devices set out for (the late list, or the cluster's devices as last known; ended,
+  both are the devices that answered), `progress` the percent, `records` = devices read so far
+  (updated after every page) and, once ended, the rows written; `note` names the cluster and the
+  scope — `fetch now: prod-logs-eu, late devices (18 of 1 240 at the start)`, `…, whole cluster`,
+  `…, device fw-7` — and any cut at *Max devices per run*; `scope` keeps
+  `{clusterIds, device, devices}` so `JOB_RETRY` runs the same scope again.
 * Refused before it starts (nothing primed, no destination, the history store closed): the run
   is `skipped` with the reason, as the timer's.
 
@@ -211,16 +323,19 @@ Deterministic rules over the stored periods of a range (default last 7 days) and
 
 | step | rule |
 |---|---|
+| `device_time_zone` | devices in `other_tz` now, one finding per offset (*Device clock / parser*): the gap sits at a real offset other than the cluster's two runs running; fix names the parser's `date { timezone => "…" }` with an example zone ("Time zones") |
+| `cluster` | the setting is `detect`, over half the measured devices sit at one non-UTC offset (*Cluster*): "set it" (devices named) until detected, "confirm it" once it is |
 | `elasticsearch` | ≥ `max(5, 20 % of devices)` late in the same `everyHours` window(s), spanning ≥ 2 `fwd_tag`s (or no `fwd_tag` at all — then named as missing); evidence: devices, windows, days, forwarders, `writeRejected`, `nodesOverWatermark`, snapshots overlapping the windows (named in the fix) |
 | `forwarder` | late devices share one `fwd_tag` (else `Zone` when no `fwd_tag` exists): ≥ 2 late, ≥ half of that tag's devices, other tags ≤ 20 % late |
 | `parser` | same by `parser_tag`, and the late devices span ≥ 2 forwarders |
-| `device_clock` | ≥ 80 % of a device's late measurements within 3 min of a multiple of 30 min (60, 120, 330 …), or clock-ahead readings |
+| `device_clock` | ≥ 80 % of a device's late measurements (after the cluster's zone is taken out) within 3 min of a real UTC offset (60, 120, 330, 345 …), or clock-ahead readings |
 | `device_link` | a silence followed by a first reading ≥ 30 min late |
 | `unknown` | the rest: "not enough evidence", with `missing` (`fwd_tag`/`parser_tag` on these devices, more measurements) |
 
 Each finding: `{cluster, step, stepLabel, devices[], group: [field, value] | null, why, fix,
-evidence{…numbers}, missing[]}`. Group findings claim their devices in the order above; the
-per-device view (`fixes::per_device`) is each device's first group. No model, no guess.
+evidence{…numbers}, missing[]}`. Group findings claim their devices in the order above (a device
+with a time-zone finding is claimed first); the per-device view (`fixes::per_device`) is each
+device's first group. No model, no guess. `LOGDELAY_FIXES` `rules` lists eight rows.
 
 ## Messages (`logdelay/mod.rs`)
 
@@ -243,7 +358,7 @@ extras measured (`Settings::extras_for` adds them to a list that leaves them out
 { "ok": true, "from": "2026-10-06", "to": "2026-11-04", "label": "6 Oct – 4 Nov", "now": 1762250000000, "everyHours": 2,
   "clusters": 32, "measuredClusters": 32,
   "totals": { "devices": 1284, "measured": 1270, "onTime": 1238, "noDelay": 1200, "little": 38, "delay": 25, "critical": 12,
-              "clockAhead": 0, "silent": 9, "unmeasured": 5, "late": 37, "pctOnTime": 96.4, "pctLate": 2.9, "pctSilent": 0.7, "pctUnmeasured": 0.4 },
+              "clockAhead": 0, "otherTz": 2, "silent": 9, "unmeasured": 5, "late": 37, "pctOnTime": 96.4, "pctLate": 2.9, "pctSilent": 0.7, "pctUnmeasured": 0.4 },
   "reduced": [ { "hours": 2, "n": 4 }, { "hours": 4, "n": 7 }, { "hours": 6, "n": 9 }, { "hours": 12, "n": 15 }, { "hours": 24, "n": 23 } ],
   "newlyLateToday": 6, "solvedToday": 4,
   "yesterday": { "newlyLate": 19, "solved": 23, "averageLastedMs": 6600000 },
@@ -252,7 +367,7 @@ extras measured (`Settings::extras_for` adds them to a list that leaves them out
               "unmeasured": 5, "started": 19, "solved": 23, "lateHours": 41.5, "medianMinutes": 4.1, "measured": 1270, "complete": true,
               "onTimeAll": 1238, "late": 37 } ],
   "byCluster": [ { "id": "client-a-prod", "name": "client-a-prod", "devices": 412, "measured": 410, "lateNow": 14, "delay": 9, "critical": 5, "silent": 1,
-                   "unmeasured": 1, "below": 396, "belowPct": 96.1, "latePct": 3.4, "belowPctPrevious": 95.2, "newToday": 3,
+                   "unmeasured": 1, "otherTz": 2, "timeZone": { "…": "Time zones" }, "below": 396, "belowPct": 96.1, "latePct": 3.4, "belowPctPrevious": 95.2, "newToday": 3,
                    "sparkline": [12, 9, null, 14], "sparklineDays": ["2026-10-06", "…"], "worst": { "device": "fw-dc1-07", "minutes": 94.0, "state": "critical" },
                    "levels": { "noDelayUnder": 15.0, "delayFrom": 30.0, "criticalOver": 60.0 }, "lastRunAt": 1762249000000,
                    "counts": { "inLastRun": 401, "now": 412, "inRange": 418, "lastRead": { "…": "as lastRead" } }, "lastRead": { "at": 0, "devices": 401, "pages": 1, "complete": true, "truncated": false } } ],
@@ -278,8 +393,12 @@ never measured — say so.
   "medianMinutes": 6.0, "maxMinutes": 212.0, "episodes": 5, "solved": 4, "lateMs": 67200000, "lastStarted": 1762240500000, "lastSolved": null,
   "lateSince": 1762240500000, "docsPerDay": 41000, "lastArrival": 1762250400000, "lastEvent": 1762244760000, "silentSince": null,
   "zone": "dc1", "tag1": "firewall", "inLastRun": true,
+  "rawGapMinutes": 424.0, "tzOffsetMinutes": 330, "deviceTzOffset": null, "clusterTzOffset": 330,
   "extras": { "Zone": "dc1", "tag1": "firewall", "fwd_tag": "syslog-dc1-02", "parser_tag": "fortigate-grok" } }
 ```
+
+`nowMinutes` is the corrected delay; `rawGapMinutes` − `tzOffsetMinutes` = `nowMinutes`
+("Time zones"). A `by cluster` row's `otherTz` and `timeZone` are the cluster's.
 
 `nowMinutes: null` with `state: silent|unmeasured` — show "—" / "can't measure". *Last delay:
 started → solved* = `lastStarted` → `lastSolved` (`lateSince` set = "still late"; `silentSince`
@@ -287,7 +406,7 @@ started → solved* = `lastStarted` → `lastSolved` (`lateSince` set = "still l
 
 ### `LOGDELAY_CLUSTER {clusterId, from?, to?}` — Cluster board
 
-`{ ok, cluster, name, from, to, label, now, everyHours, levels, fields {pattern, device, arrival, eventTime[], extras[]},
+`{ ok, cluster, name, from, to, label, now, everyHours, levels, fields {pattern, device, arrival, eventTime[], extras[]}, timeZone,
 lastRunAt, counts {inLastRun, now, inRange, lastRead}, lastRead, totals{…as above}, started, solved, medianNow, medianPrevious, windows[], days[], devices[DeviceRow] }`.
 Tiles: `totals.devices`, `totals.late` (`delay`/`critical`), `pctOnTime`, `started`/`solved`,
 `medianNow` vs `medianPrevious` (null = not measured). Footer: `fields` names.
@@ -342,7 +461,9 @@ rules: [ { pattern, step, readFrom, recommendation } ×6 ] }`.
   "settings": { "levels": { "noDelayUnder": 15.0, "delayFrom": 30.0, "criticalOver": 60.0 }, "silentAfterHours": 2,
                 "fields": { "device": "src_hostname", "arrival": "@timestamp", "eventTime": ["event_created"], "extras": ["tag1", "fwd_tag", "parser_tag", "Zone"] },
                 "clusters": { "client-a-prod": { "levels": {…}, "fields": {…} } }, "setBy": "Admin", "setAt": 0 },
-  "resolved": [ { "id": "…", "name": "…", "levels": {…}, "levelsFrom": "settings|configFile|default", "fields": { "pattern": "logstash-*", "device": "src_hostname.keyword", "arrival": "@timestamp", "eventTime": [..], "extras": [..] } } ],
+  "resolved": [ { "id": "…", "name": "…", "levels": {…}, "levelsFrom": "settings|configFile|default", "fields": { "pattern": "logstash-*", "device": "src_hostname.keyword", "arrival": "@timestamp", "eventTime": [..], "extras": [..] },
+                  "logTimeZone": "detect|UTC|Asia/Kolkata", "timeZone": { "…": "Time zones" } } ],
+  "timeZones": { "toleranceMinutes": 3.0, "majorityPercent": 60, "steadyRuns": 3, "server": "Asia/Kolkata" },
   "schedule": { "enabled": true, "everyHours": 2, "destination": "builtin|history|cluster", "clusters": [], "maxDevices": 20000, "state": {…}, "blocked": null },
   "builtinStore": { "keepDays": 90, "bytes": 123456, "recentDays": 31, "dir": "logdelay",
                     "sizes": { "bytes": 123456, "trackersBytes": 0, "dailyBytes": 0, "dayFilesBytes": 0, "dayFiles": 0, "clusters": 0 } },

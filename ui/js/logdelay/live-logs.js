@@ -23,6 +23,8 @@ import { timeHistogram, histogramEmptyText } from '../lib/charts.js';
 import { card, empty } from '../pages/common.js';
 import { resolveFields, deviceFieldsFor, docDelay, eventSource } from '../core/log-delay.js';
 import { minutesText } from '../core/logdelay-report.js';
+import { zoneOf, loadLevels } from '../core/delay-levels.js';
+import { clusterOffsetAt, offsetLabel, timeZoneShort } from '../core/log-tz.js';
 import { rangeBounds, rangeText, zonedText, zoneOffsetMinutes, offsetText } from '../core/log-range.js';
 import { jsonView } from '../lib/jsonview.js';
 
@@ -75,6 +77,8 @@ function deviceField(c, device) {
  */
 export function liveEnter(c, route) {
   ctx = { ...ctx, ...c };
+  // The clusters' log time zones (core/delay-levels.js zoneOf): asked once, drawn when they land.
+  loadLevels().then((got) => { if (got) bump(); }).catch(() => {});
   const want = route && route.clusterId ? `${route.clusterId}|${route.device || ''}` : '';
   if (want && want !== ui.narrowedTo) {
     ui.narrowedTo = want;
@@ -197,11 +201,14 @@ const pick = (src, keys) => {
   return undefined;
 };
 
-/** A document as the row shows it: the values each column reads, the delay from docDelay. */
+/**
+ * A document as the row shows it: the values each column reads, the delay from docDelay with the
+ * cluster's log time zone taken out (core/log-tz.js; the zone as the core said it, `zoneOf`).
+ */
 function docOf(hit, c) {
   const s = hit._source || {};
   const f = resolveFields(c);
-  const d = docDelay(s, c.timeField || f.arrival, eventSource(f));
+  const d = docDelay(s, c.timeField || f.arrival, eventSource(f), zoneOf(c.id));
   const msg = pick(s, ['message', 'log.message', 'msg', 'event.original', 'full_message']);
   return {
     hit,
@@ -213,13 +220,17 @@ function docOf(hit, c) {
     parser: pick(s, ['parser_tag', 'parsertag']) ?? null,
     fwd: pick(s, ['fwd_tag', 'fwdtag']) ?? null,
     logType: pick(s, ['log_type', 'logtype', 'event.dataset']) ?? null,
+    event: d.event,
     delay: d.delayMinutes,
+    rawGap: d.rawGapMinutes,
+    tzOffset: d.tzOffsetMinutes,
     message: typeof msg === 'string' ? msg : JSON.stringify(s).slice(0, 400),
   };
 }
 
 const COLS = [
   ['ts', null, 'date', (d) => d.ts],
+  ['event', null, 'date', (d) => d.event],
   ['device', 'device / src_hostname', 'text', (d) => d.device],
   ['clientId', 'ClientID', 'text', (d) => d.clientId],
   ['zone', 'zone', 'text', (d) => d.zone],
@@ -234,9 +245,16 @@ const COLS = [
 function hitsCard(c) {
   const tz = ctx.zone();
   const off = offsetText(zoneOffsetMinutes(tz));
+  // The cluster's log time zone (core/log-tz.js): both times are written in it, so the difference
+  // seen is the delay. Without one, both are in the page's zone and nothing is taken out.
+  const ltz = zoneOf(c.id);
+  const lOff = clusterOffsetAt(ltz, Date.now());
+  const showZone = ltz && lOff !== null ? (ltz.zone && ltz.zone !== 'UTC' ? ltz.zone : null) : null;
+  const inZone = (ms) => (showZone ? zonedText(ms, showZone) : lOff !== null ? zonedText(ms + lOff * 60000, 'UTC') : zonedText(ms, tz));
+  const zoneWord = lOff !== null ? `cluster zone, ${offsetLabel(lOff)}` : off;
   const docs = ui.hits.map((hit) => docOf(hit, c));
   const ordered = sortLogs.apply(docs, Object.fromEntries(COLS.map(([k, , type, value]) => [k, { type, value }])));
-  const sig = `${objId(ui.hits)}|${ui.expanded.size}|${[...ui.expanded].join(',')}|${sortLogs.sort ? `${sortLogs.sort.key}${sortLogs.sort.dir}` : '-'}|${tz}|${ui.running && !ui.hits.length}|${ui.tail}`;
+  const sig = `${objId(ui.hits)}|${ui.expanded.size}|${[...ui.expanded].join(',')}|${sortLogs.sort ? `${sortLogs.sort.key}${sortLogs.sort.dir}` : '-'}|${tz}|${ltz ? `${ltz.mode}${lOff}` : '-'}|${ui.running && !ui.hits.length}|${ui.tail}`;
   return L.get('live:hits', sig, () => {
     const cell = (v, cls = '') => h(`td${cls}`, v === null || v === undefined ? h('span.muted', '—') : String(v));
     const rows = ordered.flatMap((d, i) => {
@@ -247,15 +265,23 @@ function hitsCard(c) {
           id: `log-row-${i}`, 'aria-expanded': String(open), title: 'Show the whole document',
           ...activatable(() => { if (ui.expanded.has(k)) ui.expanded.delete(k); else ui.expanded.add(k); bump(); }),
         },
-        h('td.mono.nowrap', d.ts === null ? h('span.muted', 'unreadable') : zonedText(d.ts, tz)),
+        h('td.mono.nowrap', d.ts === null ? h('span.muted', 'unreadable') : inZone(d.ts)),
+        h('td.mono.nowrap', d.event === null ? h('span.muted', 'unreadable') : inZone(d.event)),
         cell(d.device, '.mono'), cell(d.clientId), cell(d.zone), cell(d.tag1), cell(d.parser), cell(d.fwd), cell(d.logType),
-        h('td.num', d.delay === null ? h('span.muted', 'unknown') : minutesText(d.delay)),
+        h('td.num', { title: d.delay === null ? null : d.tzOffset === null ? `arrival − event = ${minutesText(d.delay)}`
+          : `arrival − event − time zone ${offsetLabel(d.tzOffset)} = ${minutesText(d.delay)} (raw gap ${minutesText(d.rawGap)})` },
+        d.delay === null ? h('span.muted', 'unknown') : minutesText(d.delay)),
         h(`td.mono.ld-msg${open ? '.ld-open-msg' : ''}`, d.message)),
         open ? h('tr', h('td.ld-json', { colspan: COLS.length }, jsonView(d.hit._source))) : null,
       ];
     }).filter(Boolean);
-    const head = h('thead', h('tr', ...COLS.map(([k, label, type]) => sortTh(sortLogs, k, label || `@timestamp (${off})`, { num: type === 'number', title: k === 'ts' ? `Arrival time (${c.timeField}) in the server's zone, ${tz || 'the browser’s zone'}` : null }))));
-    return card('Log events', `${num(ui.hits.length)} shown${ui.tail ? ' · live tail on' : ''} · times in ${tz || 'the browser’s zone'} (${off}) · a row opens the whole document`,
+    const evName = (resolveFields(c).eventTime || [])[0] || 'event time';
+    const label = (k) => (k === 'ts' ? `${c.timeField || '@timestamp'} (${zoneWord})` : k === 'event' ? `${evName} (UTC → ${lOff !== null ? offsetLabel(lOff) : off})` : null);
+    const head = h('thead', h('tr', ...COLS.map(([k, lbl, type]) => sortTh(sortLogs, k, lbl || label(k), { num: type === 'number',
+      title: k === 'ts' ? `Arrival time (${c.timeField}) in ${lOff !== null ? 'the cluster’s log time zone' : `the server's zone, ${tz || 'the browser’s zone'}`}`
+        : k === 'event' ? `Event time (${evName}), stored in UTC, written in the same zone as the arrival so the difference is the delay` : null }))));
+    return card('Log events', `${num(ui.hits.length)} shown${ui.tail ? ' · live tail on' : ''} · times in ${lOff !== null ? `the cluster’s log time zone (${ltz.zone ? `${ltz.zone}, ` : ''}${offsetLabel(lOff)}, ${ltz.mode})` : `${tz || 'the browser’s zone'} (${off})`}`
+      + (ltz && ltz.mode === 'none' ? ` · cluster time zone ${timeZoneShort(ltz)}: delay as measured` : '') + ' · a row opens the whole document',
       h('div.tbl-wrap', h('table.tbl.ld-logs#ld-live-logs', head,
         h('tbody', ...(rows.length ? rows : [h('tr', h('td', { colspan: COLS.length }, empty(ui.running ? 'Searching…' : 'No documents in this range')))])))),
       [h('button.btn.sm#ld-live-csv', { type: 'button', disabled: !ui.hits.length, onclick: () => exportHits(c) }, 'Export CSV')]);
