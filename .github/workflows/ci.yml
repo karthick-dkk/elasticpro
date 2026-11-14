@@ -47,8 +47,12 @@ jobs:
   # (The Windows clippy job is gone: it existed only for the Tauri shell, which left the
   # workspace in 0.3.52.)
 
-  ui:
-    name: ui — syntax & render
+  # The UI checks are two jobs, not one. Run in a row they were the longest job in CI
+  # (11-13 min, every other job finishing first); split, the render job and the contract
+  # job run side by side and CI ends with the slower of core and render. Each builds the
+  # dev bridge from the same cache (about 40 s), which is cheaper than waiting.
+  ui-contract:
+    name: ui — syntax, unit & hosted contract
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -95,6 +99,23 @@ jobs:
       # as some release shipped it. Dry runs against a release mirror on disk: nothing pulled.
       - name: deploy.sh compose upgrade
         run: tools/compose-upgrade-check.sh
+
+  ui:
+    name: ui — render & behaviour
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: bridge
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: install jsdom
+        run: npm install --no-save --no-fund --no-audit jsdom
+      - name: build the dev bridge
+        run: cargo build -p elasticpro-core --features bridge --bin elasticpro-bridge
 
       - name: render every page, then drive the ones with behaviour
         run: |
