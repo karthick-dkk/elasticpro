@@ -24,6 +24,12 @@ export function blankTab(from = {}) {
   };
 }
 
+/**
+ * What the tab strip shows: "Page 1", "Page 2" … by position (owner's wording), renumbered
+ * when one closes. The request itself is the tab's tooltip (tabTitle) and the echo line.
+ */
+export function tabLabel(index) { return `Page ${index + 1}`; }
+
 /** "GET _cat/indices" — or the name the person gave it. */
 export function tabTitle(t) {
   if (t.name && t.name.trim()) return t.name.trim().slice(0, 40);

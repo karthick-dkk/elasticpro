@@ -184,6 +184,45 @@ await go('console');
   ok(!!body, 'console: no query textarea');
   ok(body && !body.getAttribute('placeholder'),
     `console: the query box still carries a placeholder — "${body && body.getAttribute('placeholder')}"`);
+
+  /* ---- a request typed or pasted whole is recognised: method, path, body (core/console-paste.js) ---- */
+  if (pathInput && body && target) {
+    const method = () => doc.getElementById('c-method').value;
+    const paste = (el, text) => {
+      const e = new window.Event('paste', { bubbles: true, cancelable: true });
+      Object.defineProperty(e, 'clipboardData', { value: { getData: () => text } });
+      el.dispatchEvent(e);
+      return e;
+    };
+    // Typed into the path box, the owner's example: the method is taken, the path stays.
+    pathInput.value = 'post _snapshot/es_9/execute';
+    pathInput.dispatchEvent(new window.Event('input', { bubbles: true })); await settleFor(50);
+    ok(method() === 'POST', `console paste: typing "post _snapshot/es_9/execute" left the method ${method()}`);
+    ok(pathInput.value === '/_snapshot/es_9/execute', `console paste: the path box reads "${pathInput.value}", expected the path alone`);
+    ok(target.textContent === '/_snapshot/es_9/execute', `console paste: the target line reads "${target.textContent}"`);
+    ok(/Recognised POST \/_snapshot\/es_9\/execute/.test(doc.getElementById('c-response').textContent), 'console paste: nothing said what was recognised');
+    ok(doc.querySelector('#c-echo-method').textContent === 'POST', 'console paste: the echo line still shows the old method');
+    ok(/POST \/_snapshot\/es_9\/execute/.test(doc.querySelector('.console-tab.on').title), `console paste: the tab tooltip reads "${doc.querySelector('.console-tab.on').title}"`);
+    // Pasted into the path box with a body (Kibana Dev Tools style): the body goes to the editor, formatted.
+    const e1 = paste(pathInput, 'PUT /_cluster/settings\n{"persistent":{"cluster.max_shards_per_node":2000}}');
+    await settleFor(50);
+    ok(e1.defaultPrevented, 'console paste: a recognised paste was also let into the path box as text');
+    ok(method() === 'PUT' && pathInput.value === '/_cluster/settings', `console paste: multi-line paste gave ${method()} ${pathInput.value}`);
+    ok(body.value === '{\n  "persistent": {\n    "cluster.max_shards_per_node": 2000\n  }\n}', `console paste: the body editor reads ${JSON.stringify(body.value)}`);
+    // Pasted into the body editor: the same split; a request without a body empties the editor.
+    paste(body, 'GET _cat/indices?v\n'); await settleFor(50);
+    ok(method() === 'GET' && pathInput.value === '/_cat/indices?v' && body.value === '', `console paste: body-editor paste gave ${method()} ${pathInput.value} body=${JSON.stringify(body.value)}`);
+    // A curl line.
+    paste(body, "curl -XPOST 'http://es-01:9200/logs-*/_count' -d '{\"query\":{\"match_all\":{}}}'"); await settleFor(50);
+    ok(method() === 'POST' && pathInput.value === '/logs-*/_count' && /"match_all"/.test(body.value), `console paste: curl gave ${method()} ${pathInput.value}`);
+    ok(!doc.getElementById('view').textContent.includes('es-01:9200'), 'console paste: the pasted host reached the page');
+    // A body alone is a body: left to the browser, nothing else changes.
+    const e2 = paste(body, '{ "size": 0 }'); await settleFor(50);
+    ok(!e2.defaultPrevented && method() === 'POST' && pathInput.value === '/logs-*/_count', 'console paste: a plain JSON body was taken for a request');
+    pathInput.value = '/_cluster/health'; pathInput.dispatchEvent(new window.Event('input', { bubbles: true }));
+    doc.getElementById('c-method').value = 'GET'; doc.getElementById('c-method').dispatchEvent(new window.Event('change', { bubbles: true }));
+    await settleFor(100);
+  }
 }
 
 /* ---------------------------- charts start unfolded ---------------------------- */
@@ -4799,6 +4838,12 @@ consoleTabs: {
   add().click(); await settleFor(200);
   ok(strip().length === before + 1, `console tabs: + did not add a tab (${strip().length})`);
   ok(doc.querySelector('#c-path').value !== '/_cat/health', 'console tabs: a new tab should not carry the previous path');
+  // The strip reads Page 1, Page 2 … by position (owner's wording); the request is the tooltip.
+  {
+    const labels = [...strip()].map((t) => t.querySelector('.console-tab-label').textContent.trim());
+    ok(labels.join('|') === 'Page 1|Page 2', `console tabs: the strip reads "${labels.join(' | ')}", expected Page 1 | Page 2`);
+    ok(/^GET \/_cat\/health/.test(strip()[0].title), `console tabs: the first tab's tooltip reads "${strip()[0].title}", expected the request`);
+  }
   doc.querySelectorAll('.console-tab')[before - 1].querySelector('.console-tab-label').click(); await settleFor(200);
   ok(doc.querySelector('#c-path').value === '/_cat/health', `console tabs: switching back lost the path (${doc.querySelector('#c-path').value})`);
   for (let i = 0; i < 12; i++) { if (!add().disabled) { add().click(); await settleFor(50); } }
@@ -4806,6 +4851,104 @@ consoleTabs: {
   ok(add().disabled, 'console tabs: + should be disabled at ten');
   while (strip().length > 1) { strip()[strip().length - 1].querySelector('.console-tab-x').click(); await settleFor(30); }
   ok(strip().length === 1, 'console tabs: closing should leave one tab');
+  // Closing renumbers: three tabs, the middle one closed, the strip reads Page 1, Page 2 again.
+  add().click(); await settleFor(100); add().click(); await settleFor(100);
+  strip()[1].querySelector('.console-tab-x').click(); await settleFor(100);
+  ok([...strip()].map((t) => t.textContent.replace(/×/g, '').trim()).join('|') === 'Page 1|Page 2', `console tabs: after closing the middle tab the strip reads "${[...strip()].map((t) => t.textContent.trim()).join(' | ')}"`);
+  while (strip().length > 1) { strip()[strip().length - 1].querySelector('.console-tab-x').click(); await settleFor(30); }
+}
+
+// REST console: Saved queries and History are panels behind two buttons on the request line
+// (the cards they replaced are gone). Each lists, filters without losing the box being typed
+// in, loads into the console, runs from there, and closes on Escape, the × and a click outside.
+consolePanels: {
+  const realFetch = globalThis.fetch;
+  const saved = [
+    { id: 'sq-1', name: 'Cluster health, pretty', method: 'GET', path: '/_cluster/health?pretty', body: '', shared: true, owner: 'qa', note: 'the first look', updated: Date.now() - 3600000 },
+    { id: 'sq-2', name: 'Count all logs', method: 'POST', path: '/logstash-*/_count', body: '{"query":{"match_all":{}}}', shared: false, owner: 'qa', note: '', updated: Date.now() - 60000 },
+  ];
+  globalThis.fetch = async (input, init) => {
+    let b = {}; try { b = init && init.body ? JSON.parse(init.body) : {}; } catch { /* not ours */ }
+    if (b.type === 'QUERY_LIST') return stubReply({ ok: true, user: 'qa', queries: saved });
+    return realFetch(input, init);
+  };
+  try {
+    await go('console'); await settleFor(400);
+    const pop = () => doc.querySelector('.pop.console-pop');
+    ok(!panel('Saved queries') && !panel('History'), 'console panels: the Saved queries or History card is still on the page');
+    // Re-queried on every use: Open and Load redraw the page, and a button held from before is detached.
+    const sbtn = () => doc.getElementById('c-saved-btn'), hbtn = () => doc.getElementById('c-history-btn');
+    ok(!!sbtn() && !!hbtn(), 'console panels: no Saved queries / History buttons on the request line');
+    if (!sbtn() || !hbtn()) break consolePanels;
+    ok(sbtn().compareDocumentPosition(doc.getElementById('c-run')) & window.Node.DOCUMENT_POSITION_PRECEDING, 'console panels: the buttons are not on the request line after Run');
+    ok(/2$/.test(sbtn().textContent.trim()), `console panels: the Saved queries button reads "${sbtn().textContent.trim()}", expected the count 2`);
+
+    // Saved queries: opens, lists, filters in place, Open loads, Run sends.
+    sbtn().click(); await settleFor(150);
+    ok(!!pop() && /Cluster health, pretty/.test(pop().textContent) && /Count all logs/.test(pop().textContent), 'console panels: the Saved queries panel did not open with the list');
+    ok(sbtn().getAttribute('aria-expanded') === 'true', 'console panels: the button does not say it is open');
+    const sfilter = doc.getElementById('c-saved-filter');
+    ok(!!sfilter, 'console panels: no find box in the Saved queries panel');
+    if (sfilter) {
+      sfilter.focus(); sfilter.value = 'count'; sfilter.dispatchEvent(new window.Event('input', { bubbles: true })); await settleFor(100);
+      ok(doc.getElementById('c-saved-filter') === sfilter, 'console panels: typing in the find box rebuilt the find box');
+      ok(!/Cluster health, pretty/.test(pop().textContent) && /Count all logs/.test(pop().textContent), 'console panels: the find box did not filter the list');
+      sfilter.value = ''; sfilter.dispatchEvent(new window.Event('input', { bubbles: true })); await settleFor(100);
+    }
+    const rows = () => [...pop().querySelectorAll('#c-saved-list tbody tr')];
+    ok(rows().length === 2 && rows().every((r) => [...r.querySelectorAll('button')].some((b) => b.textContent === 'Open') && [...r.querySelectorAll('button')].some((b) => b.textContent === 'Run')),
+      'console panels: every saved query does not offer both Open and Run');
+    const tabsBefore = doc.querySelectorAll('.console-tab').length;
+    [...rows()[0].querySelectorAll('button')].find((b) => b.textContent === 'Open').click(); await settleFor(300);
+    ok(!pop(), 'console panels: Open left the panel open');
+    ok(doc.getElementById('c-path').value === '/_cluster/health?pretty' && doc.getElementById('c-method').value === 'GET', `console panels: Open loaded ${doc.getElementById('c-method').value} ${doc.getElementById('c-path').value}`);
+    ok(doc.querySelectorAll('.console-tab').length === tabsBefore + 1, 'console panels: Open did not put the query in a tab of its own');
+    sbtn().click(); await settleFor(150);
+    [...rows()[0].querySelectorAll('button')].find((b) => b.textContent === 'Run').click(); await settleFor(1200);
+    ok(!pop(), 'console panels: Run left the panel open');
+    ok(/HTTP 200/.test(doc.getElementById('c-response').textContent), `console panels: Run did not run — results read "${doc.getElementById('c-response').textContent.slice(0, 80)}"`);
+    // Closing: Escape, the ×, a click outside.
+    sbtn().click(); await settleFor(150); ok(!!pop(), 'console panels: the panel did not reopen');
+    doc.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })); await settleFor(100);
+    ok(!pop(), 'console panels: Escape did not close the panel');
+    sbtn().click(); await settleFor(150);
+    if (pop()) { pop().querySelector('header button').click(); await settleFor(100); }
+    ok(!pop(), 'console panels: × did not close the panel');
+    sbtn().click(); await settleFor(150);
+    doc.body.dispatchEvent(new window.MouseEvent('mousedown', { bubbles: true })); await settleFor(100);
+    ok(!pop(), 'console panels: a click outside did not close the panel');
+
+    // History: the run above is in it; Load loads; the filter keeps its box; no Cluster column.
+    ok(/[1-9]\d*$/.test(hbtn().textContent.trim()), `console panels: the History button reads "${hbtn().textContent.trim()}", expected a count`);
+    hbtn().click(); await settleFor(150);
+    ok(!!pop() && !!pop().querySelector('#c-history'), 'console panels: the History panel did not open');
+    const hrows = () => [...pop().querySelectorAll('#c-history-list tbody tr')];
+    ok(hrows().length >= 1 && /_cluster\/health\?pretty/.test(pop().textContent), 'console panels: the request just run is not in the history');
+    ok(![...pop().querySelectorAll('#c-history th')].some((th) => th.textContent === 'Cluster'), 'console panels: the history has a Cluster column');
+    for (const label of ['Export', 'Clear', '★ favourites only']) ok([...pop().querySelectorAll('button')].some((b) => b.textContent.trim() === label), `console panels: the History panel has no ${label}`);
+    ok(hrows().every((r) => ['Load', 'Run', '×'].every((l) => [...r.querySelectorAll('button')].some((b) => b.textContent === l))), 'console panels: a history row lacks Load / Run / ×');
+    const hfilter = doc.getElementById('c-histfilter');
+    if (hfilter) {
+      hfilter.value = 'no-such-path-zz'; hfilter.dispatchEvent(new window.Event('input', { bubbles: true })); await settleFor(100);
+      ok(doc.getElementById('c-histfilter') === hfilter, 'console panels: typing in the history filter rebuilt the box');
+      ok(hrows().length === 0 && /No request matches/.test(pop().textContent), 'console panels: the history filter did not filter');
+      hfilter.value = ''; hfilter.dispatchEvent(new window.Event('input', { bubbles: true })); await settleFor(100);
+    }
+    // Star in place: the panel stays, the row changes.
+    const star = hrows()[0].querySelector('td button');
+    star.click(); await settleFor(100);
+    ok(!!pop() && hrows()[0].querySelector('td button').textContent === '★', 'console panels: starring a row did not keep the panel open with the star lit');
+    hrows()[0].querySelector('td button').click(); await settleFor(100);
+    doc.getElementById('c-path').value = '/_cat/nodes'; doc.getElementById('c-path').dispatchEvent(new window.Event('input', { bubbles: true })); await settleFor(50);
+    [...hrows()[0].querySelectorAll('button')].find((b) => b.textContent === 'Load').click(); await settleFor(300);
+    ok(!pop(), 'console panels: Load left the History panel open');
+    ok(doc.getElementById('c-path').value === '/_cluster/health?pretty', `console panels: Load put "${doc.getElementById('c-path').value}" in the path box`);
+    hbtn().click(); await settleFor(150);
+    doc.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })); await settleFor(100);
+    ok(!pop(), 'console panels: Escape did not close the History panel');
+  } finally {
+    globalThis.fetch = realFetch;
+  }
 }
 
 // Templates: a third view on the Indices page. Built-in templates are hidden until asked
@@ -5532,10 +5675,17 @@ if (viaFleet) {
       }
     }
     if (id === 'console') {
+      // The history is a panel behind the History button; open it, read it, close it.
+      const hbtn = doc.getElementById('c-history-btn');
+      ok(!!hbtn, 'evidence console: no History button');
+      if (hbtn) { hbtn.click(); await settleFor(200); }
       const t = text();
       ok(!t.includes('evd-foreign-path'), 'evidence console: the history lists a request recorded on another cluster');
       ok(t.includes('evd-own-path'), 'evidence console: this cluster\'s own history is missing');
       ok(![...doc.querySelectorAll('#c-history th')].some((th) => th.textContent === 'Cluster'), 'evidence console: the history still has a Cluster column');
+      ok(hbtn && hbtn.querySelector('.c-count') && hbtn.querySelector('.c-count').textContent === '1', `evidence console: the History button counts "${hbtn && hbtn.textContent.trim()}", expected this cluster's one request`);
+      doc.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })); await settleFor(100);
+      ok(!doc.querySelector('.pop.console-pop'), 'evidence console: the History panel did not close');
       doc.getElementById('c-path').value = '/_cluster/health';
       doc.getElementById('c-path').dispatchEvent(new window.Event('input', { bubbles: true }));
       doc.getElementById('c-run').click();

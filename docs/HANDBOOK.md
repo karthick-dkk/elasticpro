@@ -547,10 +547,23 @@ until removed, with a reason. They are the team's, kept on the server in
 Up to ten tabs, each with its own request and its last response; the tabs are remembered in
 this browser (IndexedDB) with secrets redacted (`ui/js/lib/redact.js`: passwords, tokens,
 keys, cloud credentials and pasted Authorization values, in the body — parsed as JSON, line by
-line for `_bulk`/`_msearch` — and in the path). Responses are never stored.
+line for `_bulk`/`_msearch` — and in the path). Responses are never stored. The strip reads
+**Page 1, Page 2 …** by position (`tabLabel`); the request a tab holds is its tooltip and the
+echo line in the request card.
+
+**A request pasted or typed whole is recognised** (`ui/js/core/console-paste.js`,
+`parseRequestText`): `METHOD path` on one line (any case; a whole URL loses its scheme and
+host — the console sends to the cluster chosen in the top bar), optionally followed by a
+newline and a body (Kibana Dev Tools style; formatted when it is JSON, kept as pasted
+otherwise), or a `curl` line (`-X`/`--request`, the URL, `-d`/`--data*`; POST when only `-d`
+is given; an `@file` body is left out). The path box reads it as typed or pasted; the Query
+editor on paste. A plain JSON body is a body. The page says what it recognised in a brief
+line above the results.
 
 **Saved queries** are kept on the server (`<data dir>/saved-queries.json`, 0600), private or
-shared with everyone signed in; the page redacts secrets before saving.
+shared with everyone signed in; the page redacts secrets before saving. On the page, Saved
+queries and History are panels behind two buttons on the request line (each row: Open/Load,
+Run — a write still asks first); the history lists this cluster's requests alone.
 
 | Message | Role | Answer |
 |---|---|---|
