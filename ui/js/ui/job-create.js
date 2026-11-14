@@ -16,7 +16,7 @@ import { jobControl } from '../core/es.js';
 import { ensureWrites } from '../core/writes.js';
 import { periodPresets } from '../core/reports.js';
 import { runPeriods, SCHEDULE_PERIODS } from '../core/report-types.js';
-import { CREATE_KINDS, CREATE_CADENCES, HOSTS_MAX, createProblem, createMessage, refusalText } from '../core/jobs.js';
+import { CREATE_KINDS, cadencesFor, HOSTS_MAX, createProblem, createMessage, refusalText } from '../core/jobs.js';
 import { modal } from './modal.js';
 
 /** What was typed, kept for the session: a dialog closed by mistake opens as it was left. */
@@ -126,12 +126,14 @@ function fields(f, redraw) {
     id, type: o.type || 'text', value: f[key] ?? '', placeholder: o.placeholder || null, autocomplete: 'off', spellcheck: false,
     oninput: (e) => { f[key] = e.target.value; },
   });
-  const cadence = h('select#jc-schedule', { onchange: (e) => { f.schedule = e.target.value; } }, ...CREATE_CADENCES.map(([v, l]) => h('option', { value: v }, l)));
+  const cadence = h('select#jc-schedule', { onchange: (e) => { f.schedule = e.target.value; redraw(); } }, ...cadencesFor(f.report).map(([v, l]) => h('option', { value: v }, l)));
+  if (!cadencesFor(f.report).some(([v]) => v === f.schedule)) f.schedule = 'daily';
   cadence.value = f.schedule;
   const periods = f.report === 'volume' ? SCHEDULE_PERIODS : SCHEDULE_PERIODS.slice(0, 2);
   if (!periods.some(([v]) => v === f.schedPeriod)) f.schedPeriod = periods[0][0];
   const period = h('select#jc-speriod', { onchange: (e) => { f.schedPeriod = e.target.value; } }, ...periods.map(([v, l]) => h('option', { value: v }, l)));
   period.value = f.schedPeriod;
+  if (f.schedule === 'hourly') period.disabled = true;
   return [seg,
     h('div.jc-grid',
       h('label.field.jc-wide', 'Name', text('jc-name', 'name', { placeholder: 'Monthly volume for the Frankfurt team' })),

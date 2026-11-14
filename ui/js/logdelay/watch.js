@@ -274,7 +274,8 @@ function coverageCard() {
       h('td', stateCell(r)), h('td.num', fetchCell(r)), h('td.ld-wrap', why(r))));
     return card('Log delay coverage', `${yes} of ${rows.length} cluster(s) can be analysed`,
       h('div.ld-stack',
-        note ? h('div.banner.warn.ld-flat', note) : null,
+        h('div.muted.ld-note#ld-live-label', 'Live check from this browser, seconds fresh: it reads at most 500 devices per cluster (the display link’s limit). The Dashboard shows every device from the core’s store.'),
+      note ? h('div.banner.warn.ld-flat', note) : null,
         rows.some(({ d }) => d.pre && !d.pre.ok && !d.pre.unknown)
           ? h('div.muted.ld-note', 'Set ', h('code.inline', 'delayFields'), ' on a cluster to the names its parser produces. Nothing is reported as zero — the analysis simply cannot run there.')
           : null,

@@ -57,11 +57,11 @@ export const DEVICE_CHOICES = Object.freeze([
   ['delayed', 'Only delayed (at the delay level or more)'], ['little', 'Delayed and little delay'], ['all', 'All devices'],
 ]);
 export const WHEN_CHOICES = Object.freeze([
-  ['daily', 'Daily'], ['weekly', 'Weekly · Monday'], ['monthly', 'Monthly · 1st'], ['manual', 'Only when sent by hand'],
+  ['hourly', 'Hourly · the hour before'], ['daily', 'Daily'], ['weekly', 'Weekly · Monday'], ['monthly', 'Monthly · 1st'], ['manual', 'Only when sent by hand'],
 ]);
 /** What the scheduled mail covers (report/schedule.rs PeriodChoice). */
 export const PERIOD_CHOICES = Object.freeze([
-  ['yesterday', 'Yesterday'], ['cadence', 'The cadence’s own period (day, week, month)'], ['monthSoFar', 'Month so far'],
+  ['yesterday', 'Yesterday'], ['lastHour', 'The hour before (hourly)'], ['cadence', 'The cadence’s own period (day, week, month)'], ['monthSoFar', 'Month so far'],
 ]);
 
 const ymd = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
@@ -74,6 +74,7 @@ export function runPeriodFor(schedule, period, now = Date.now()) {
     if (t.getDate() === 1) return 'previousMonth';
     return { from: ymd(new Date(t.getFullYear(), t.getMonth(), 1)), to: ymd(y) };
   }
+  if (schedule === 'hourly') return 'lastHour';
   if (period === 'cadence') return schedule === 'weekly' ? 'previousWeek' : schedule === 'monthly' ? 'previousMonth' : schedule === 'manual' ? 'last7' : 'yesterday';
   return 'yesterday';
 }

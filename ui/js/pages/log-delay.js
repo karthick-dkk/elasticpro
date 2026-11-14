@@ -40,7 +40,7 @@ const P = nodeCache();
 const TABS = [
   ['fleet', 'Dashboard', 'The core’s measurements: every cluster, one cluster, one device'],
   ['fixes', 'Recommended fixes', 'Why devices were late, and what to do about it'],
-  ['watch', 'Live Watch', 'Every cluster measured now from here: the delayed devices, and one device live'],
+  ['watch', 'Live Watch', 'Live check from this browser (500 devices per cluster at most): the delayed devices, and one device live'],
   ['live', 'Live logs', 'The log documents over the time range, with each one’s delay'],
 ];
 

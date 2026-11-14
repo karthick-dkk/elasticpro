@@ -402,6 +402,8 @@ export const CREATE_KINDS = Object.freeze([
 ]);
 /** Cadences a created schedule may have: no "only by hand" (that is Run once). */
 export const CREATE_CADENCES = Object.freeze([['daily', 'Daily'], ['weekly', 'Weekly · Monday'], ['monthly', 'Monthly · 1st of the month']]);
+/** The log delay report alone may also run hourly (docs/LOGDELAY.md "Hourly"). */
+export const cadencesFor = (report) => (report === 'log_delay' ? [['hourly', 'Hourly · the hour before'], ...CREATE_CADENCES] : CREATE_CADENCES);
 /** The most clusters one Volume by host run takes (core/report-types.js HOSTS_MAX_CLUSTERS). */
 export const HOSTS_MAX = 5;
 
@@ -431,7 +433,7 @@ export function createProblem(form) {
   if (!name) return 'Give the schedule a name.';
   if (name.length > 80) return 'The name is at most 80 characters.';
   if (!f.allClusters && !ids.length) return 'Pick at least one cluster, or All clusters.';
-  if (!CREATE_CADENCES.some(([c]) => c === f.schedule)) return 'Pick when it runs: daily, weekly or monthly.';
+  if (!cadencesFor(f.report).some(([c]) => c === f.schedule)) return f.report === 'log_delay' ? 'Pick when it runs: hourly, daily, weekly or monthly.' : 'Pick when it runs: daily, weekly or monthly.';
   if (!HHMM.test(String(f.at || ''))) return 'At must be a time like 07:00 (server time).';
   const to = listOf(f.to);
   if (!to.length) return 'Add at least one address to Send to.';
@@ -456,7 +458,7 @@ export function createMessage(form) {
     type: 'JOB_CREATE', report: f.report, name: String(f.name).trim(),
     clusters: f.allClusters ? 'all' : [...f.clusters],
     schedule: f.schedule, at: f.at, to: listOf(f.to), cc: listOf(f.cc), bcc: listOf(f.bcc),
-    ...(f.period ? { period: f.period } : {}), ...(subject ? { subject } : {}),
+    ...(f.period && f.schedule !== 'hourly' ? { period: f.period } : {}), ...(subject ? { subject } : {}),
   };
 }
 

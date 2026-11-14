@@ -6915,7 +6915,7 @@ await settleFor(300);
     ok(fleet.querySelectorAll('.ld-ring').length === list.length + 1, 'log delay: not one ring per cluster plus All clusters');
     if (!g('ld-by-cluster')) throw new Error(`log delay: no fleet page — ${problems.slice(-3).join(' | ')}`);
     const heads = [...g('ld-by-cluster').querySelectorAll('thead th')].map((t) => t.textContent);
-    ok(heads.map((x) => x.replace(/[↑↓]/g, '').trim()).join('|') === 'Cluster|Devices|zone|tag1|Late now|Today|Below 30 min|30–60 min|Above 60 min|Below 30 min, previous 30 days|Last 30 days|Worst device',
+    ok(heads.map((x) => x.replace(/[↑↓]/g, '').trim()).join('|') === 'Cluster|Devices now|In last run|In range|zone|tag1|Late now|Today|Below 30 min|30–60 min|Above 60 min|Below 30 min, previous 30 days|Last 30 days|Worst device',
       `log delay: the By cluster columns read ${heads.join(' · ')}`);
     ok(g('ld-by-cluster').classList.contains('ld-ctr'), 'log delay: the By cluster table is not centred');
     ok(/never measured/.test(g('ld-by-cluster').textContent), 'log delay: a cluster never measured does not say so');
