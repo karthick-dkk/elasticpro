@@ -227,6 +227,9 @@ export function normalize(raw, sourceName = 'clusters.yaml') {
       logIndexPattern: c.logIndexPattern || defaults.logIndexPattern,
       indexNameRegex: c.indexNameRegex || defaults.indexNameRegex,
       timeField: c.timeField || defaults.timeField,
+      // The zone the arrival time is stamped in (docs/LOGDELAY.md "Time zones"): UTC, an IANA
+      // name, or '' = detect from the devices. The core reads it off PRIME (es.js).
+      logTimeZone: c.logTimeZone || c.log_time_zone || '',
       snapshotRepos: c.snapshotRepos || null,
       // Capacity planning: how long logs are meant to stay on the cluster and in the
       // repository. "30d", "90 days", "3M", "6 months", "1y" or a bare number of days.
@@ -418,7 +421,7 @@ export function zabbixEntry(z) {
   const tags = Array.isArray(z.tags) ? z.tags : (z.client ? [z.client] : []);
   const e = { _id: z._id, name: z.name, url: z.url, zabbixGroups: z.zabbixGroups || [],
     tags: ['zabbix', ...tags.filter((t) => String(t).toLowerCase() !== 'zabbix')], enabled: z.enabled !== false };
-  for (const k of ['note', 'liveRetention', 'snapshotRetention', 'backupCapacity', 'tls']) if (z[k]) e[k] = z[k];
+  for (const k of ['note', 'liveRetention', 'snapshotRetention', 'backupCapacity', 'tls', 'logTimeZone']) if (z[k]) e[k] = z[k];
   for (const k of ['volumeWindowDays', 'volumeTopDays', 'volumeHeadroomPercent']) if (Number.isFinite(z[k])) e[k] = z[k];
   return e;
 }

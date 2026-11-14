@@ -122,13 +122,18 @@ export const RUN_ENDED = Object.freeze(new Set(['completed', 'failed', 'cancelle
  * a device is open. A core that does not take the scope yet runs what it runs; the scope is sent
  * anyway, so the page needs no change when it does.
  */
-export function fetchNowMessage({ clusterIds, device } = {}) {
+export function fetchNowMessage({ clusterIds, device, devices } = {}) {
+  // One cluster at a time (docs/LOGDELAY.md "Fetch now"): `devices` is `late` (the core's default:
+  // the devices 15 min or more behind at the start) or `all`; a named device needs neither.
   return {
     type: 'JOB_RUN', jobId: LD_JOB,
-    ...(Array.isArray(clusterIds) && clusterIds.length ? { clusterIds: clusterIds.map(String) } : {}),
-    ...(device ? { device: String(device) } : {}),
+    ...(Array.isArray(clusterIds) && clusterIds.length ? { clusterIds: clusterIds.slice(0, 1).map(String) } : {}),
+    ...(device ? { device: String(device) } : devices ? { devices: devices === 'all' ? 'all' : 'late' } : {}),
   };
 }
+
+/** Whether a Fetch now scope can run at all: exactly one cluster (the fleet has no Fetch now). */
+export const fetchNowAllowed = (scope) => !!(scope && Array.isArray(scope.clusterIds) && scope.clusterIds.length === 1);
 export const ldFetchNow = (scope, signal) => send(fetchNowMessage(scope), signal);
 export const ldJobRuns = (signal) => send({ type: 'JOBS_LIST', jobId: LD_JOB, limit: 50 }, signal);
 
@@ -152,7 +157,9 @@ export function runText(run) {
   const parts = [];
   const status = String(run.status || 'unknown');
   parts.push(status === 'running' ? 'running' : status === 'queued' ? 'queued' : status === 'completed' ? 'done' : status);
-  if (finite(run.done) && finite(run.total)) parts.push(`${countText(run.done)} of ${countText(run.total)} cluster${run.total === 1 ? '' : 's'}${finite(run.progress) ? ` (${Math.round(run.progress)} %)` : ''}`);
+  // A person's run is one cluster and counts devices (docs/LOGDELAY.md "Fetch now"); the timer's counts clusters.
+  const unit = run.scope && Array.isArray(run.scope.clusterIds) && run.scope.clusterIds.length === 1 ? 'device' : 'cluster';
+  if (finite(run.done) && finite(run.total)) parts.push(`${countText(run.done)} of ${countText(run.total)} ${unit}${run.total === 1 ? '' : 's'}${finite(run.progress) ? ` (${Math.round(run.progress)} %)` : ''}`);
   else if (!RUN_ENDED.has(status)) parts.push('progress not known yet');
   if (finite(run.records)) parts.push(`${countText(run.records)} device${run.records === 1 ? '' : 's'} ${status === 'running' ? 'read so far' : 'measured'}`);
   if (run.error && status !== 'completed') parts.push(String(run.error));
@@ -200,6 +207,12 @@ export function liveDeviceRow(rec, cluster, levels) {
   return {
     device: rec.device, cluster: cluster.id, clusterName: cluster.name,
     state: st || 'unknown', nowMinutes: finite(rec.delayMinutes) ? rec.delayMinutes : null,
+    // The zone step as the browser applied it (core/log-tz.js): the gap as measured, what was
+    // taken out (the cluster's offset; null = no zone), the offset the gap itself sits at.
+    rawGapMinutes: finite(rec.rawGapMinutes) ? rec.rawGapMinutes : null,
+    tzOffsetMinutes: finite(rec.tzOffsetMinutes) ? rec.tzOffsetMinutes : null,
+    clusterTzOffset: finite(rec.clusterTzOffset) ? rec.clusterTzOffset : (finite(rec.tzOffsetMinutes) ? rec.tzOffsetMinutes : null),
+    deviceTzOffset: finite(rec.deviceTzOffset) ? rec.deviceTzOffset : null,
     medianMinutes: null, maxMinutes: null, episodes: null, lateMs: null, lastStarted: null, lastSolved: null, lateSince: null,
     docsPerDay: null, docs: finite(rec.docs) ? rec.docs : null,
     lastArrival: rec.arrival ?? null, lastEvent: rec.event ?? null, silentSince: null,
@@ -302,9 +315,9 @@ export const countText = (n) => (finite(n) ? n.toLocaleString('en') : '—');
 /** A device's state in words: "can't measure" and "silent" as such, never "on time". */
 export const stateText = (s) => STATE_LABEL[s] || (s === 'unknown' ? 'levels unknown' : s ? String(s) : 'unknown');
 
-/** The pill tone per state: pink critical, blue delayed, green on time, orange clock ahead, grey unknown. */
+/** The pill tone per state: pink critical, blue delayed and other time zone, green on time, orange clock ahead, grey unknown. */
 export const STATE_TONE = Object.freeze({
-  critical: 'ld-pink', delay: 'ld-blue', little: 'ld-green', no_delay: 'ld-green', clock_ahead: 'ld-orange', silent: 'grey', unmeasured: 'grey',
+  critical: 'ld-pink', delay: 'ld-blue', little: 'ld-green', no_delay: 'ld-green', clock_ahead: 'ld-orange', other_tz: 'ld-blue', silent: 'grey', unmeasured: 'grey',
 });
 export const stateTone = (s) => STATE_TONE[s] || 'grey';
 
@@ -468,8 +481,8 @@ export function lateSplitText(t) {
 export const rowLate = (r) => !!r && isLate(r.state);
 
 /** The finding step's pill tone (Fix board): Elasticsearch pink, forwarder blue, parser orange, clock green, link blue, unknown grey. */
-export const STEP_TONE = Object.freeze({ elasticsearch: 'ld-pink', forwarder: 'ld-blue', parser: 'ld-orange', device_clock: 'ld-green', device_link: 'ld-blue', unknown: 'grey' });
-export const STEP_LABEL = Object.freeze({ elasticsearch: 'Elasticsearch', forwarder: 'Forwarder', parser: 'Parser', device_clock: 'Device clock', device_link: 'Device', unknown: 'Not enough evidence' });
+export const STEP_TONE = Object.freeze({ elasticsearch: 'ld-pink', forwarder: 'ld-blue', parser: 'ld-orange', device_clock: 'ld-green', device_time_zone: 'ld-blue', device_link: 'ld-blue', cluster: 'ld-blue', unknown: 'grey' });
+export const STEP_LABEL = Object.freeze({ elasticsearch: 'Elasticsearch', forwarder: 'Forwarder', parser: 'Parser', device_clock: 'Device clock', device_time_zone: 'Device clock / parser', device_link: 'Device', cluster: 'Cluster', unknown: 'Not enough evidence' });
 export const stepLabel = (f) => (f && (f.stepLabel || STEP_LABEL[f.step])) || 'Not known yet';
 
 /** A finding's evidence object in words ("devices 41 · windows 5 · forwarders 3"). Unknown values say so. */

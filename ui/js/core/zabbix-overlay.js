@@ -10,7 +10,7 @@
 /** Every field an edit may set — the core's `zbx_overlay::FIELDS`. */
 export const OVERLAY_FIELDS = Object.freeze([
   'name', 'via', 'tls', 'enabled', 'tags', 'note', 'liveRetention', 'snapshotRetention', 'backupCapacity',
-  'volumeWindowDays', 'volumeTopDays', 'volumeHeadroomPercent',
+  'volumeWindowDays', 'volumeTopDays', 'volumeHeadroomPercent', 'logTimeZone',
 ]);
 
 /** With the address, where the requests go: what a cluster's own credential is bound to. */

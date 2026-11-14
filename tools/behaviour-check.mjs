@@ -6882,8 +6882,9 @@ await settleFor(300);
       lsent.push(body);
       jobPolls += 1;
       const id = fetchAnswer === 'busy' ? 'run-old' : 'run-1';
-      const run = jobPolls < 2 ? { id, jobId: 'logdelay.measure', status: 'running', done: 1, total: 4, progress: 25, records: null }
-        : { id, jobId: 'logdelay.measure', status: 'completed', done: 4, total: 4, progress: 100, records: 56 };
+      const scope = { clusterIds: [list[0].id], devices: 'all' };
+      const run = jobPolls < 2 ? { id, jobId: 'logdelay.measure', status: 'running', done: 1, total: 4, progress: 25, records: null, scope }
+        : { id, jobId: 'logdelay.measure', status: 'completed', done: 4, total: 4, progress: 100, records: 56, scope };
       return stubReply({ ok: true, jobs: [{ id: 'logdelay.measure', state: { current: null, lastRun: null } }], runs: [run], next: null });
     }
     if (body.type === 'DELAY_SINK_GET') {
@@ -6944,15 +6945,11 @@ await settleFor(300);
     // Export .xlsx is the log_delay report job.
     g('ld-export').click(); await settleFor(150);
     ok(lsent.some((m) => m.type === 'REPORT_RUN' && m.kind === 'log_delay' && m.mail === false), 'log delay: Build report did not queue a log_delay report');
-    // Fetch Now on the fleet: JOB_RUN for every cluster, the run followed to its end, the boards asked again.
-    const sumsBefore = lsent.filter((m) => m.type === 'LOGDELAY_SUMMARY').length;
-    g('ld-fetch-now').click();
-    await waitFor(() => /Measured every cluster/.test((g('ld-fetch-now') || {}).parentElement ? g('ld-fetch-now').parentElement.textContent : ''), 'log delay: Fetch Now did not follow its run to the end', 9000);
-    const fleetRun = lsent.filter((m) => m.type === 'JOB_RUN').at(-1);
-    ok(fleetRun && fleetRun.jobId === 'logdelay.measure' && !fleetRun.clusterIds && !fleetRun.device, `log delay: Fetch Now on the fleet sent ${JSON.stringify(fleetRun)}`);
-    ok(lsent.some((m) => m.type === 'JOBS_LIST' && m.jobId === 'logdelay.measure'), 'log delay: Fetch Now did not poll JOBS_LIST for the measurement');
-    ok(/4 of 4/.test(g('ld-fetch-now').parentElement.textContent) && /56 devices measured/.test(g('ld-fetch-now').parentElement.textContent), `log delay: Fetch Now reads "${g('ld-fetch-now').parentElement.textContent}"`);
-    await waitFor(() => lsent.filter((m) => m.type === 'LOGDELAY_SUMMARY').length > sumsBefore, 'log delay: the boards did not read the store again after Fetch Now');
+    // Fetch Now on the fleet: none — one cluster at a time (docs/LOGDELAY.md "Fetch now"); the button says so.
+    ok(g('ld-fetch-now').disabled && /Pick a cluster/.test(g('ld-fetch-now').parentElement.textContent), 'log delay: the fleet offers a Fetch Now of every cluster');
+    const jobRunsBefore = lsent.filter((m) => m.type === 'JOB_RUN').length;
+    g('ld-fetch-now').click(); await settleFor(100);
+    ok(lsent.filter((m) => m.type === 'JOB_RUN').length === jobRunsBefore, 'log delay: the disabled fleet Fetch Now still sent JOB_RUN');
     // A cluster name opens the cluster.
     const c0 = list[0].id;
     press(g('ld-by-cluster').querySelector(`tr[data-cluster="${c0}"] td a`));
@@ -6961,11 +6958,22 @@ await settleFor(300);
     const ch = [...g('ld-cluster-devices').querySelectorAll('thead th')].map((t) => t.textContent.replace(/[↑↓]/g, '').trim());
     for (const col of ['zone', 'tag1', 'fwd_tag', 'parser_tag', '@timestamp', 'event_created']) ok(ch.includes(col), `log delay: the cluster devices have no ${col} column (${ch.join(' · ')})`);
     ok(doc.querySelector('.ld-tabs a[data-tab="fleet"]').getAttribute('aria-current') === 'page', 'log delay: the tabs do not mark Dashboard on the cluster page');
-    // Fetch Now here is that cluster; a read-only config says so in plain words.
+    // Fetch Now here is that whole cluster: JOB_RUN for it, the run followed to its end (devices of
+    // devices), the boards asked again.
+    const sumsBefore = lsent.filter((m) => m.type === 'LOGDELAY_CLUSTER').length;
+    jobPolls = 0;
+    g('ld-fetch-now').click();
+    await waitFor(() => /Measured /.test((g('ld-fetch-now') || {}).parentElement ? g('ld-fetch-now').parentElement.textContent : ''), 'log delay: Fetch Now did not follow its run to the end', 9000);
+    const clRun = lsent.filter((m) => m.type === 'JOB_RUN').at(-1);
+    ok(clRun && clRun.jobId === 'logdelay.measure' && clRun.clusterIds && clRun.clusterIds.length === 1 && clRun.clusterIds[0] === c0 && clRun.devices === 'all' && !clRun.device,
+      `log delay: Fetch Now on a cluster sent ${JSON.stringify(clRun)}`);
+    ok(lsent.some((m) => m.type === 'JOBS_LIST' && m.jobId === 'logdelay.measure'), 'log delay: Fetch Now did not poll JOBS_LIST for the measurement');
+    ok(/4 of 4 devices/.test(g('ld-fetch-now').parentElement.textContent) && /56 devices measured/.test(g('ld-fetch-now').parentElement.textContent), `log delay: Fetch Now reads "${g('ld-fetch-now').parentElement.textContent}"`);
+    await waitFor(() => lsent.filter((m) => m.type === 'LOGDELAY_CLUSTER').length > sumsBefore, 'log delay: the boards did not read the store again after Fetch Now');
+    // A read-only config says so in plain words.
     fetchAnswer = 'readonly';
     g('ld-fetch-now').click();
     await waitFor(() => /read-only/.test(g('ld-fetch-now').parentElement.textContent), 'log delay: a read-only refusal of Fetch Now is not said');
-    ok(lsent.filter((m) => m.type === 'JOB_RUN').at(-1).clusterIds[0] === c0, 'log delay: Fetch Now on a cluster did not name that cluster');
     fetchAnswer = 'ok'; jobPolls = 0;
     // A device opens the device page.
     const devLink = g('ld-cluster-devices').querySelector('tbody tr td a');

@@ -14,7 +14,8 @@ const cfg = await import(pathToFileURL(path.join(ROOT, 'ui/js/core/config.js')).
 const ov = await import(pathToFileURL(path.join(ROOT, 'ui/js/core/zabbix-overlay.js')).href);
 
 test('the fields are the core\'s, and the address is not one of them', () => {
-  assert.equal(ov.OVERLAY_FIELDS.length, 12);
+  assert.equal(ov.OVERLAY_FIELDS.length, 13);
+  assert.ok(ov.OVERLAY_FIELDS.includes('logTimeZone'), 'the log time zone is kept in ElasticPro for a Zabbix cluster');
   for (const k of ['url', 'username', 'password', 'type']) assert.ok(!ov.OVERLAY_FIELDS.includes(k), k);
 });
 

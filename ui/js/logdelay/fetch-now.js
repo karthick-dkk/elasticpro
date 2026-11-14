@@ -11,7 +11,7 @@
  */
 
 import { h } from '../lib/dom.js';
-import { ldFetchNow, ldJobRuns, runOf, runText, fetchRefusalText, RUN_ENDED, FETCH_POLL_MS } from '../core/logdelay-report.js';
+import { ldFetchNow, ldJobRuns, runOf, runText, fetchRefusalText, fetchNowAllowed, RUN_ENDED, FETCH_POLL_MS } from '../core/logdelay-report.js';
 
 /** Give up following a run after this long: the run carries on, the page stops asking. */
 const FOLLOW_MAX_MS = 20 * 60 * 1000;
@@ -111,15 +111,20 @@ function statusText() {
 export function fetchNowControl(scope, h2) {
   hooks = { ...hooks, ...h2 };
   const busy = fetchNowBusy();
+  // One cluster at a time (docs/LOGDELAY.md "Fetch now"): the fleet board offers no run — the
+  // scheduled measurement reads every cluster; a person re-measures the one on screen.
+  const allowed = fetchNowAllowed(scope);
   const tone = F.phase === 'refused' || (F.phase === 'ended' && F.run && F.run.status === 'failed') ? '.ld-fetch-bad' : F.phase === 'done' ? '.ld-fetch-ok' : '';
   return {
-    sig: `${F.ver}|${scope.label}|${(scope.clusterIds || []).join(',')}|${scope.device || ''}`,
+    sig: `${F.ver}|${scope.label}|${(scope.clusterIds || []).join(',')}|${scope.device || ''}|${scope.devices || ''}`,
     build: () => h('div.ld-fetch',
       h('button.btn.sm.primary#ld-fetch-now', {
-        type: 'button', disabled: busy,
-        title: `Run the log delay measurement now for ${scope.label}${scope.device ? ' (its cluster is measured; the device is named so a core that can narrows to it)' : ''}`,
-        onclick: () => press(scope),
+        type: 'button', disabled: busy || !allowed,
+        title: allowed
+          ? `Run the log delay measurement now for ${scope.label}${scope.device ? ' (its cluster is measured; the device is named so a core that can narrows to it)' : scope.devices === 'all' ? ' (every device of the cluster)' : ' (the devices 15 min or more behind at the start)'}`
+          : 'Fetch now measures one cluster at a time: open a cluster (or pick one above). The scheduled measurement reads every cluster every 2 hours.',
+        onclick: () => { if (allowed) press(scope); },
       }, busy ? h('span', h('span.spin'), ' Fetching…') : 'Log Delay – Fetch Now'),
-      h(`span.ld-fetch-status${tone}`, { role: 'status', 'aria-live': 'polite' }, statusText())),
+      h(`span.ld-fetch-status${tone}`, { role: 'status', 'aria-live': 'polite' }, allowed ? statusText() : 'Pick a cluster to fetch now.')),
   };
 }

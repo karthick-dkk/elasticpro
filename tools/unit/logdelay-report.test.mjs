@@ -38,9 +38,13 @@ test('the old addresses open the matching view of the Log Delay page', () => {
 });
 
 test('Fetch Now: the scoped JOB_RUN, the run found in JOBS_LIST, and its words', () => {
-  assert.deepEqual(R.fetchNowMessage({}), { type: 'JOB_RUN', jobId: 'logdelay.measure' });
+  assert.deepEqual(R.fetchNowMessage({}), { type: 'JOB_RUN', jobId: 'logdelay.measure' }, 'no cluster: the core refuses it (one cluster at a time)');
   assert.deepEqual(R.fetchNowMessage({ clusterIds: ['c1'], device: 'fw-07' }), { type: 'JOB_RUN', jobId: 'logdelay.measure', clusterIds: ['c1'], device: 'fw-07' });
-  assert.deepEqual(R.fetchNowMessage({ clusterIds: [] }), { type: 'JOB_RUN', jobId: 'logdelay.measure' }, 'no clusters named is every cluster');
+  assert.deepEqual(R.fetchNowMessage({ clusterIds: ['c1'], devices: 'all' }), { type: 'JOB_RUN', jobId: 'logdelay.measure', clusterIds: ['c1'], devices: 'all' });
+  assert.deepEqual(R.fetchNowMessage({ clusterIds: ['c1'], devices: 'late' }), { type: 'JOB_RUN', jobId: 'logdelay.measure', clusterIds: ['c1'], devices: 'late' });
+  assert.deepEqual(R.fetchNowMessage({ clusterIds: ['c1', 'c2'] }), { type: 'JOB_RUN', jobId: 'logdelay.measure', clusterIds: ['c1'] }, 'one cluster at a time');
+  assert.ok(R.fetchNowAllowed({ clusterIds: ['c1'] }) && !R.fetchNowAllowed({ clusterIds: [] }) && !R.fetchNowAllowed({ clusterIds: ['a', 'b'] }));
+  assert.equal(R.runText({ status: 'running', done: 12, total: 40, progress: 30, records: 12, scope: { clusterIds: ['c1'], devices: 'late' } }), 'running · 12 of 40 devices (30 %) · 12 devices read so far', 'a one-cluster run counts devices');
   const list = { ok: true, jobs: [{ id: 'logdelay.measure', state: { current: { id: 'r2', status: 'running' }, lastRun: { id: 'r1', status: 'completed' } } }],
     runs: [{ id: 'r3', jobId: 'logdelay.measure', status: 'queued' }] };
   assert.equal(R.runOf(list, 'r3').status, 'queued');
