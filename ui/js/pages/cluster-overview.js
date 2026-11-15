@@ -39,10 +39,11 @@ import { LEVEL_TONE } from '../core/alert-levels.js';
 import { nodeRates, recordReading } from '../core/node-rates.js';
 import { ldSummary, periodQuery, whenText, countText, LD_COLOURS } from '../core/logdelay-report.js';
 import { empty, usageBar } from './common.js';
+import { usageLevel } from '../core/nodes-shards.js';
 import {
-  OVERVIEW, LIST, overviewClusterOf, overviewHash, listHash, highestNode, heapFigures, gaugeLevel,
+  OVERVIEW, LIST, overviewClusterOf, overviewHash, listHash, highestNode, heapFigures,
   busiestFirst, nodeCounts, shardFigures, placedText, unhealthyFirst, indexHealthCounts, indexTotals,
-  indexShards, clusterAlerts, rateText, measured, longRunningSearches, slmSummary, ilmSummary, devicesDelay,
+  indexShards, clusterAlerts, rateText, fig, longRunningSearches, slmSummary, ilmSummary, devicesDelay,
 } from '../core/cluster-overview.js';
 
 let host = null;
@@ -217,12 +218,12 @@ function tasksFor(c) {
 }
 /** cluster id → the last LOGDELAY_SUMMARY answer for it (the Devices & log delay card), or null before one. */
 const ldRead = new Map();
-let reading = false;
+const reading = new Set();
 async function readOwn(c) {
-  if (reading || state.mode === 'snapshot') return;
+  if (reading.has(c.id) || state.mode === 'snapshot') return;
   const cl = client(c.id);
   if (!cl) return;
-  reading = true;
+  reading.add(c.id);
   try {
     const wantTasks = tasksFor(c).source !== 'panel' && typeof cl.tasks === 'function';
     const at = fetchedAt(c.id, 'indices') || 0;
@@ -236,7 +237,7 @@ async function readOwn(c) {
     if (rates.status === 'fulfilled') recordReading(c.id, rates.value, Date.now());
     if (wantTasks) tasksRead.set(c.id, { rows: tasks.status === 'fulfilled' && Array.isArray(tasks.value) ? tasks.value : null, at: Date.now() });
     ldRead.set(c.id, ld.status === 'fulfilled' ? ld.value : { ok: false, message: (ld.reason && ld.reason.message) || 'not read' });
-  } finally { reading = false; }
+  } finally { reading.delete(c.id); }
 }
 
 /** The address names the cluster on screen, so a bookmark or a shared link opens on it. */
@@ -291,7 +292,7 @@ function draw() {
   } finally { P.end(); }
 }
 
-const rateSig = (r, ...keys) => (!r ? 'none' : `${measured(r)}|${keys.map((k) => r[k]).join('|')}`);
+const rateSig = (r, ...keys) => (!r ? 'none' : `${!!r.measured}|${keys.map((k) => r[k]).join('|')}`);
 
 /* ------------------------------------ row 1 ------------------------------------ */
 
@@ -385,7 +386,7 @@ function gaugeCard(id, title, best, caption, ring) {
 }
 
 const pctRing = (value, kind, label) => ringGauge(
-  value === null ? [] : [{ value, color: LEVEL_COLOUR[gaugeLevel(value, kind)] || LEVEL_COLOUR.ok, label }],
+  value === null ? [] : [{ value, color: LEVEL_COLOUR[usageLevel(value, kind)] || LEVEL_COLOUR.ok, label }],
   { total: 100, size: 82, stroke: 10, centre: value === null ? '–' : `${Math.round(value)}%`, label: value === null ? `${label}: not known` : `${label} ${Math.round(value)} percent` });
 
 function cpuGauge(d) {
@@ -464,7 +465,7 @@ function longRunning(c, tasks) {
 
 function searchCard(c, r, tasks) {
   const lr = longRunning(c, tasks);
-  if (!measured(r)) return rateCard('search', 'Search', '–', 'req/s', MEASURING, lr);
+  if (!r.measured) return rateCard('search', 'Search', '–', 'req/s', MEASURING, lr);
   return rateCard('search', 'Search', rateText(r.searchPerSec), 'req/s', `average between the last two polls${sinceText(r)}`, lr);
 }
 /**
@@ -495,7 +496,7 @@ function devicesCard(c, res) {
     h('span.muted.ov-fact-s', { title: d.message || null }, d.state === 'off' ? d.message : `last measured ${whenText(d.lastRunAt)} · next ${whenText(d.nextDueAt)}`));
 }
 function pressureCard(r) {
-  if (!measured(r)) return rateCard('pressure', 'Latency and pressure', '–', 'per search', MEASURING);
+  if (!r.measured) return rateCard('pressure', 'Latency and pressure', '–', 'per search', MEASURING);
   const ms = r.searchLatencyMs === null || r.searchLatencyMs === undefined ? '–' : `${Math.round(r.searchLatencyMs)} ms`;
   const n = (v) => (v === null || v === undefined ? '–' : num(v));
   return rateCard('pressure', 'Latency and pressure', ms, 'per search', `${n(r.rejected)} rejected, ${n(r.breakerTrips)} breaker trips${r.writeQueue ? ` · write queue ${num(r.writeQueue)}` : ''}`);
@@ -567,25 +568,24 @@ const pageLink = (text, page, c) => (canOpenPage(page)
 function nodesPanel(c, d) {
   const shell = panelShell('nodes-table', pageLink('All nodes', 'shards', c));
   const nodes = busiestFirst(d.nodes);
-  const sig = `${objId(d.nodes)}|${objId(d.clusterSettings)}`;
+  const sig = objId(d.nodes);
   const table = P.get('nodes-table:tbl', `${sig}|${nodes.length}`, () => (!nodes.length
     ? empty('No node list yet')
     : h('table.tbl.ov-tbl',
       h('thead', h('tr', h('th', 'Name'), h('th', 'IP'), h('th.ov-bar-th', 'CPU'), h('th.ov-bar-th', 'Heap'), h('th.ov-bar-th', 'Disk'))),
-      h('tbody', ...nodes.map((n) => P.get(`node:${n.name}`, `${sig}|${n.ip}|${n.cpu}|${n['heap.percent']}|${n['disk.used_percent']}|${n.master}`, () => nodeRow(n)))))));
+      h('tbody', ...nodes.map((n) => P.get(`node:${n.name}`, ['ip', 'cpu', 'load_1m', 'heap.percent', 'heap.current', 'heap.max', 'disk.used_percent', 'disk.used', 'disk.total', 'master'].map((k) => n[k]).join('|'), () => nodeRow(n)))))));
   fillPanel(shell, `Nodes (${nodes.length})`, 'Busiest first: by CPU, then heap', table);
   return shell;
 }
 function nodeRow(n) {
   const isMaster = String(n.master || '').trim() === '*';
-  const p = (v) => { const x = Number(v); return v === '' || v === null || v === undefined || !Number.isFinite(x) ? NaN : x; };
   const hf = heapFigures(n);
   return h('tr', { dataset: { node: n.name } },
     h('td.ov-node-name', h('span.mono', n.name), isMaster ? h('span.ov-master', { title: 'Elected master' }, 'master') : null),
     h('td.mono.ov-ip', n.ip || h('span.muted', '–')),
-    h('td', usageBar(p(n.cpu), 'disk', `CPU ${n.cpu}%${n.load_1m ? ` · load ${n.load_1m} (1 m)` : ''}`)),
-    h('td', usageBar(p(n['heap.percent']), 'heap', hf.current !== null && hf.max !== null ? `heap ${bytes(hf.current)} of ${bytes(hf.max)}` : `heap ${n['heap.percent']}%`)),
-    h('td', usageBar(p(n['disk.used_percent']), 'disk', n['disk.used'] && n['disk.total'] ? `disk ${bytes(Number(n['disk.used']))} of ${bytes(Number(n['disk.total']))}` : `disk ${n['disk.used_percent']}%`)));
+    h('td', usageBar(fig(n.cpu), 'disk', `CPU ${n.cpu}%${n.load_1m ? ` · load ${n.load_1m} (1 m)` : ''}`)),
+    h('td', usageBar(fig(n['heap.percent']), 'heap', hf.current !== null && hf.max !== null ? `heap ${bytes(hf.current)} of ${bytes(hf.max)}` : `heap ${n['heap.percent']}%`)),
+    h('td', usageBar(fig(n['disk.used_percent']), 'disk', n['disk.used'] && n['disk.total'] ? `disk ${bytes(Number(n['disk.used']))} of ${bytes(Number(n['disk.total']))}` : `disk ${n['disk.used_percent']}%`)));
 }
 
 /** More rows than this are counted, not drawn: the panel is a glance, All indices is the list. */
@@ -600,7 +600,7 @@ function indicesPanel(c, idx) {
     : !rows.length ? empty('No indices')
     : h('table.tbl.ov-tbl',
       h('thead', h('tr', h('th', 'Index'), h('th', 'Health'), h('th.num', 'Docs'), h('th.num', 'Size'), h('th.num', 'Shards'))),
-      h('tbody', ...rows.slice(0, INDEX_ROWS).map((r) => P.get(`idx:${r.index}`, `${sig}|${r.health}|${r.docs}|${r.size}|${r.pri}|${r.rep}`, () => indexRow(r))),
+      h('tbody', ...rows.slice(0, INDEX_ROWS).map((r) => P.get(`idx:${r.index}`, `${r.health}|${r.docs}|${r.size}|${r.pri}|${r.rep}`, () => indexRow(r))),
         rows.length > INDEX_ROWS ? h('tr.ov-more', h('td', { colspan: 5 }, h('span.muted', `…and ${num(rows.length - INDEX_ROWS)} more — All indices lists them`))) : null))));
   fillPanel(shell, `Indices (${idx ? num(idx.length) : '–'})`, 'Unhealthy first (red, then yellow), then by size', table);
   return shell;

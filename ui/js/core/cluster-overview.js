@@ -16,7 +16,7 @@
 import { parseHash } from '../reports/route.js';
 import { shardAllocation, nodeRoles } from './cluster-detail.js';
 import { isDataNode, slmCard, ilmCard } from './cluster-boxes.js';
-import { usageLevel, staleIndices } from './nodes-shards.js';
+import { staleIndices } from './nodes-shards.js';
 import { byLevel, worstOf } from './alert-levels.js';
 import { lifecycleView, ilmErrorsOf, logPatternOf } from './lifecycle-errors.js';
 import { clusterKind } from './cluster-kind.js';
@@ -78,9 +78,6 @@ export function heapFigures(node) {
   const p = fig(n['heap.percent']), cur = fig(n['heap.current']), max = fig(n['heap.max']);
   return { percent: Number.isFinite(p) ? p : null, current: Number.isFinite(cur) ? cur : null, max: Number.isFinite(max) ? max : null };
 }
-
-/** 'ok' | 'warn' | 'crit' for a gauge reading, or null when it is not a number. `kind` is 'heap' or 'disk' (CPU reads as disk: 80/90). */
-export const gaugeLevel = (p, kind) => usageLevel(p, kind === 'heap' ? 'heap' : 'disk');
 
 /**
  * The nodes, busiest first: by CPU (highest first, nodes that did not report it last), then by
@@ -197,9 +194,6 @@ export function rateText(v) {
   if (n < 100) return n.toFixed(1).replace(/\.0$/, n < 10 ? '.0' : '');
   return Math.round(n).toLocaleString();
 }
-
-/** Whether a nodeRates() answer has a rate yet (two polls exist). */
-export const measured = (r) => !!(r && r.measured);
 
 /* ------------------------------- devices and log delay ------------------------------- */
 

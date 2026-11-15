@@ -46,9 +46,6 @@ test('heap figures and gauge levels', () => {
   assert.deepEqual(O.heapFigures(NODES[0]), { percent: 61, current: 10522669875, max: 17179869184 });
   assert.deepEqual(O.heapFigures(NODES[1]), { percent: 55, current: null, max: null });
   assert.deepEqual(O.heapFigures(null), { percent: null, current: null, max: null });
-  assert.deepEqual([74, 75, 85].map((p) => O.gaugeLevel(p, 'heap')), ['ok', 'warn', 'crit'], 'heap 75/85');
-  assert.deepEqual([79, 80, 90].map((p) => O.gaugeLevel(p, 'disk')), ['ok', 'warn', 'crit'], 'disk and CPU 80/90');
-  assert.equal(O.gaugeLevel(null, 'disk'), null);
 });
 
 test('busiest first: CPU, then heap, unknown CPU last; the given list is not reordered', () => {
@@ -189,7 +186,4 @@ test('rate text: null is a dash, small rates keep a decimal, large ones are whol
   assert.equal(O.rateText(14.2), '14.2');
   assert.equal(O.rateText(38), '38');
   assert.equal(O.rateText(1840), (1840).toLocaleString());
-  assert.equal(O.measured(null), false);
-  assert.equal(O.measured({ measured: false }), false);
-  assert.equal(O.measured({ measured: true }), true);
 });

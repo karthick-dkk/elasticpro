@@ -935,60 +935,6 @@ export function parseIndexName(name, reSrc, row = {}) {
  * the failure being watched for is usually on the cluster nobody is looking at.
  */
 /**
- * The parts of a cluster that can be refreshed on their own.
- *
- * A full refresh is thirteen calls per cluster. Most of the time the thing you are
- * watching is one of them — a snapshot you just started, an index you just deleted — and
- * waiting for the other twelve is the difference between a control that feels instant
- * and one you press twice because nothing appeared to happen.
- *
- * Exported as data so the menu is built from it: a module that exists here and not in
- * the menu is unreachable, and one in the menu but not here is a button that does
- * nothing, and both have happened in this codebase to other lists.
- */
-export const REFRESH_MODULES = [
-  { id: 'all', label: 'Everything', hint: 'health, nodes, indices, snapshots — the full refresh' },
-  { id: 'health', label: 'Health only', hint: 'the fastest: two calls per cluster' },
-  { id: 'indices', label: 'Indices', hint: 'the index list and its sizes' },
-  { id: 'snapshots', label: 'Snapshots', hint: 'the repositories and what is in them' },
-];
-
-/**
- * Refresh one part, for the selected clusters.
- *
- * Returns the number of clusters it actually reached, so a caller can say "2 clusters"
- * rather than assuming it worked.
- */
-export async function refreshModule(module, { selected = true } = {}) {
-  if (module === 'all') { await refreshAll({ force: true, selected }); return (selected ? activeClusters() : clusters()).length; }
-  if (state.refreshing || !state.config) return 0;
-  state.refreshing = true;
-  bus.emit('refreshing', true);
-  const targets = selected ? activeClusters() : clusters();
-  try {
-    const viaFleet = (await detectFleet()) === 'fleet' && await refreshModuleFleet(module, targets);
-    if (!viaFleet) {
-      // Bounded rather than all-at-once: runBounded already swallows a worker's error into
-      // an {error} entry per item, which is the same "one cluster failing must not stop the
-      // rest" guarantee the old per-item try/catch gave, without asking every cluster at once.
-      await runBounded(targets, async (c) => {
-        if (module === 'snapshots') await fetchSnapshotsDirect(c.id);
-        else if (module === 'indices') await fetchIndices(c.id, '*');
-        // `health` re-reads the cluster's own state without the eleven calls that hang
-        // off it — withSnapshots:false is what makes it the quick one.
-        else if (module === 'health') await fetchOverviewDirect(c.id, { withSnapshots: false });
-      }, { limit: 6 });
-    }
-    state.lastRefresh = Date.now();
-  } finally {
-    state.refreshing = false;
-    bus.emit('refreshing', false);
-    bus.emit('refreshed');
-  }
-  return targets.length;
-}
-
-/**
  * The datasets each refresh-menu entry asks the core for. The snapshot entry includes the
  * verbose listing only once something in this tab has needed it — asking for it marks it
  * watched, and the core then keeps polling it for every cluster named.
@@ -1001,31 +947,6 @@ function moduleDatasets(module) {
   // (core/snapshot-running.js) under a policy that fetches nothing on its own.
   if (module === 'snapshots') return ['policies', 'snapshots', 'snapshot_status', ...(fleet.onDemand.has('snapshots_full') ? ['snapshots_full'] : [])];
   return backgroundNames();
-}
-
-/**
- * A refresh through the core: REFRESH queues the fetches (at once, ahead of the schedule)
- * and the answers arrive the way every other change does. With one cluster on screen the
- * first dataset is also waited for, so the button's spinner means something.
- */
-async function refreshModuleFleet(module, targets) {
-  const ids = targets.filter((c) => fleetKnows(c.id)).map((c) => c.id);
-  const datasets = moduleDatasets(module);
-  const r = await refreshFleet({ clusterIds: ids, datasets });
-  if (!r || !r.ok) return false;
-  for (const d of datasets) if (isOnDemand(d)) fleet.onDemand.add(d);
-  if (ids.length === 1) await fetchFleetDataset(ids[0], datasets[datasets.length - 1], {});
-  await syncFleet();
-  // Anything the core does not hold (a cluster it was never given) is still asked directly.
-  const rest = targets.filter((c) => !fleetKnows(c.id));
-  if (rest.length) {
-    await runBounded(rest, async (c) => {
-      if (module === 'snapshots') await fetchSnapshotsDirect(c.id);
-      else if (module === 'indices') await fetchIndices(c.id, '*');
-      else await fetchOverviewDirect(c.id, { withSnapshots: false });
-    }, { limit: 6 });
-  }
-  return true;
 }
 
 /**

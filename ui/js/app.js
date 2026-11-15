@@ -6,7 +6,7 @@ import { coalesce } from './lib/coalesce.js';
 import { createRedrawGate, onRefreshed, normalisePolicy, normaliseScope, openingSelection } from './lib/quiet-ui.js';
 import * as cfg from './core/config.js';
 import { state, bus, setConfig, refreshAll, startAutoRefresh, clusters, fleetMode,
-         alerts, cachedAlerts, worstHealth, requestLoad, fleetPolicy, fetchesOnlyOnAsk,
+         alerts, cachedAlerts, worstHealth, requestLoad, fleetPolicy,
          clustersNeedingCredential, clustersWithAuthError, hasSessionCredential, isReadOnly, healthState, activeClusters, openAlertsNow, mergedAlerts, openAlertCounts, syncFleet } from './core/state.js';
 import { toast, notificationBell, setNotificationSink, dropNotification, closePopover, dismissToasts } from './ui/menu.js';
 import { showCredentialDialog, serverHoldsCredentials, serverCredentialMessage } from './ui/credential-dialog.js';
@@ -716,13 +716,6 @@ function markUnreachable(sel) {
   }
 }
 
-/** Who goes to the clusters, as the top bar's live/quiet pill says it. */
-function serverLead() {
-  return fetchesOnlyOnAsk()
-    ? 'The server goes to a cluster only when a page asks for it (Config-Management › Requests, Client basis) and pushes what arrives here'
-    : 'The server polls every cluster itself and pushes what changes here';
-}
-
 function renderTopbar() {
   const bar = $('#topbar');
   if (!bar) return;
@@ -748,7 +741,7 @@ function renderTopbar() {
     a.length, crit, needCreds.length, badCreds.length, serverHoldsCredentials(),
     theme, isSnapshotMode(), fleetMode(), state.autoRefresh, state.defaults.refreshIntervalSec, redrawPolicy(),
     me && me.name, embedded, state.snapshot && state.snapshot.host, ev, single, L.needsCluster, pausedKey(state.selected), menuPosition]);
-  if (key === topbarKey && bar.firstChild) { tickStatus(); markUnreachable($('#cluster-select')); return; }
+  if (key === topbarKey && bar.firstChild) { markUnreachable($('#cluster-select')); return; }
   topbarKey = key;
 
   const sel = h('select#cluster-select', { onchange: (e) => {
@@ -852,15 +845,7 @@ function renderTopbar() {
     // menu on the left the name sits at the foot of the menu instead. Not on an evidence page
     // where accounts exist: the name is not part of a client's screenshot.
     (me && ev) || menuPosition === 'left' ? null : meButton());
-  tickStatus();
 }
-
-/**
- * The bar used to carry a Refresh button whose badge counted the minutes since the last refresh;
- * the button is gone (the owner, 2026-11-14) and the bar has nothing that moves with the clock.
- * Kept as the hook the refresh and tick events call, so a control that comes back has its place.
- */
-function tickStatus() {}
 
 /* ------------------------------ evidence layout ------------------------------ */
 
@@ -1371,7 +1356,6 @@ function reportAlertEvents() {
   } catch (_) { /* reporting is a convenience; never stop a refresh */ }
 }
 
-bus.on('refreshing', () => { tickStatus(); });
 bus.on('refreshed', (ev) => {
   maybeOfferAuthRecovery(); renderTopbar(); renderNav();
   // After the nav, so the tab badge and the toast agree about what is open.
@@ -1396,7 +1380,6 @@ bus.on('refreshed', (ev) => {
   // see onRefreshed in lib/quiet-ui.js.
   onRefreshed(redrawGate, ev);
 });
-bus.on('tick', tickStatus);
 
 let offeredAuthRecovery = false;
 function maybeOfferAuthRecovery() {

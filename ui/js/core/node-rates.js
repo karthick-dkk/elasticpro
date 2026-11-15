@@ -147,18 +147,6 @@ export function recordReading(clusterId, answer, at = Date.now()) {
   return r;
 }
 
-/** Drop what is held for a cluster (it was removed, or its counters are known to have reset). */
-export function forgetReadings(clusterId) { readings.delete(clusterId); }
-
-/** When the latest reading of a cluster was taken (ms), or 0 when there is none. */
-export function latestReadingAt(clusterId) {
-  const kept = readings.get(clusterId);
-  return kept && kept.length ? kept[kept.length - 1].at : 0;
-}
-
-/** How many readings are held for a cluster (0, 1 or 2) — two make a measurement. */
-export function readingCount(clusterId) { return (readings.get(clusterId) || []).length; }
-
 /**
  * The query pressure of one cluster, from its two most recent readings, plus the tasks in
  * flight from the shard dataset the page already holds (state.shards `tasks`; null when not
