@@ -164,7 +164,7 @@ const METHODS = ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE'];
 /** The response gets the larger share — see the comment where the columns are built. */
 const DEFAULT_SPLIT = 35;
 
-const ui = { method: 'GET', path: '/_cluster/health', body: '', running: false, res: null, raw: false,
+const ui = { method: 'GET', path: '/_cluster/health', body: '', res: null, raw: false,
              filter: '', showFav: false,
              split: DEFAULT_SPLIT,   // percent of the row given to the query pane
              find: '',               // search within the response
@@ -544,11 +544,18 @@ async function run() {
   // allowWrites is set here and nowhere else in the app; the core still refuses it
   // unless the session has been unlocked above.
   // A person typed it: sent at once, never held by the duplicate-request gap (REQUEST_PURPOSE).
-  const res = await cl.request(sent.method, sent.path.trim() || '/', sent.body.trim() || null,
-                               { allowWrites: writesUnlocked(), purpose: REQUEST_PURPOSE.console });
-  stopRunning();
+  // finally: a request that throws must not leave Run disabled and the ticker running.
+  let res;
+  try {
+    res = await cl.request(sent.method, sent.path.trim() || '/', sent.body.trim() || null,
+                           { allowWrites: writesUnlocked(), purpose: REQUEST_PURPOSE.console });
+  } catch (e) {
+    res = { ok: false, status: 0, kind: 'error', message: String((e && e.message) || e), tookMs: Date.now() - started };
+  } finally {
+    stopRunning();
+    const b = $('#c-run'); if (b) b.disabled = false;
+  }
   tabRes.set(sentFrom, res);
-  { const b = $('#c-run'); if (b) b.disabled = false; }
   if (tabs.active !== sentFrom) {
     // Switched tabs while it ran: the answer waits in its own tab.
     refreshStatus();
@@ -739,7 +746,7 @@ function statusLine() {
   // While this tab's request is in flight: a spinner and the elapsed time, ticking (owner's
   // request: "show the running status while running"). The text node is updated in place
   // every 100 ms; the pill itself is built once per state, never per tick.
-  if (ui.running && inFlight.tab === tabs.active) {
+  if (inFlight.tab !== null && inFlight.tab === tabs.active) {
     return h('span#c-status.c-running', { role: 'status', 'aria-live': 'polite', style: { display: 'inline-flex', gap: '7px', alignItems: 'center' }, title: 'Waiting for the cluster to answer' },
       h('span.spin', { 'aria-hidden': 'true' }),
       h('span.muted#c-status-elapsed', { style: { fontSize: '11.5px', whiteSpace: 'nowrap', fontVariantNumeric: 'tabular-nums' } }, elapsedText()));
@@ -747,7 +754,7 @@ function statusLine() {
   const r = ui.res;
   const { label, tone } = responseStatus(r);
   return h('span#c-status', { role: 'status', 'aria-live': 'polite', style: { display: 'inline-flex', gap: '8px', alignItems: 'center' },
-    title: r ? `${label} · ${dur(r.tookMs)} · ${bytes(responseSize(r))}` : 'Nothing run yet in this tab' },
+    title: r ? null : 'Nothing run yet in this tab' },
     pill(label, tone),
     r ? h('span.muted', { style: { fontSize: '11.5px', whiteSpace: 'nowrap' } }, `${dur(r.tookMs)} · ${bytes(responseSize(r))}`) : null);
 }
@@ -759,7 +766,6 @@ const elapsedText = () => `Running… ${((Date.now() - inFlight.since) / 1000).t
 function startRunning(tab) {
   stopRunning();
   inFlight.tab = tab; inFlight.since = Date.now();
-  ui.running = true;
   refreshStatus();
   // Bounded: cleared the moment the answer (or the failure) lands in stopRunning().
   inFlight.timer = setInterval(() => { const el = $('#c-status-elapsed'); if (el) el.textContent = elapsedText(); }, 100);
@@ -767,7 +773,6 @@ function startRunning(tab) {
 function stopRunning() {
   if (inFlight.timer) clearInterval(inFlight.timer);
   inFlight.timer = null; inFlight.tab = null;
-  ui.running = false;
 }
 
 function responseCard() {
